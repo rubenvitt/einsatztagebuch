@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://einsatzarchiv.invalid/schemas/reports/v1/key-inventory.schema.json",
+  "title": "ea.key-inventory/v1",
+  "description": "Pseudonymous recovery-test key inventory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "inventoryId", "media"],
+  "properties": {
+    "schemaId": { "const": "ea.key-inventory/v1" },
+    "inventoryId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "media": {
+      "description": "Duplicate-free media sorted by mediumId UTF-8 bytes ascending.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mediumId",
+          "keyRole",
+          "expectedKeyThumbprint",
+          "certificateObjectHash",
+          "protectionProfile",
+          "testKind"
+        ],
+        "properties": {
+          "mediumId": { "type": "string", "minLength": 1 },
+          "keyRole": {
+            "enum": [
+              "root",
+              "organizationAdmin",
+              "writer",
+              "reader",
+              "recoveryRecipient",
+              "serverReceipt",
+              "keyApprover",
+              "historicalGrantAuthority",
+              "deletionAttest"
+            ]
+          },
+          "expectedKeyThumbprint": { "$ref": "#/$defs/hash" },
+          "certificateObjectHash": { "$ref": "#/$defs/hash" },
+          "protectionProfile": {
+            "enum": [
+              "osWrapped",
+              "hardwareNonExportable",
+              "offlineEncryptedContainer",
+              "pkcs11",
+              "serverSecretStoreOrHsm"
+            ]
+          },
+          "testKind": {
+            "enum": ["signatureChallenge", "recoveryDecrypt", "providerPresence"]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

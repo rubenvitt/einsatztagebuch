@@ -247,6 +247,139 @@ fn run_workspace_tests(root: &Path) -> io::Result<()> {
     )
 }
 
+fn validate_cddl_document(name: &str, input: &str) -> Result<(), String> {
+    cddl::parser::cddl_from_str(input, false)
+        .map(|_| ())
+        .map_err(|error| format!("invalid CDDL {name}: {error}"))
+}
+
+fn compile_json_schema(name: &str, input: &str) -> Result<jsonschema::Validator, String> {
+    let schema: serde_json::Value = serde_json::from_str(input)
+        .map_err(|error| format!("invalid JSON schema {name}: {error}"))?;
+    jsonschema::meta::validate(&schema)
+        .map_err(|error| format!("invalid JSON schema {name}: {error}"))?;
+    require_closed_object_schemas(name, &schema, "#")?;
+    jsonschema::validator_for(&schema)
+        .map_err(|error| format!("failed to compile JSON schema {name}: {error}"))
+}
+
+fn validate_json_schema_document(name: &str, input: &str) -> Result<(), String> {
+    compile_json_schema(name, input).map(|_| ())
+}
+
+fn validate_addendum_review(input: &str) -> Result<(), String> {
+    let normalized = input
+        .replace('*', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for requirement in [
+        "normativ für v0.1",
+        "darf kein dort bereits festgelegtes Feld",
+        "vor Task 3 akzeptiert",
+    ] {
+        if !normalized.contains(requirement) {
+            return Err(format!("wire-format addendum is missing: {requirement}"));
+        }
+    }
+    let table = input
+        .split_once("## Feld-zu-Design-Review")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("**Review-Ergebnis:**"))
+        .map(|(table, _)| table)
+        .ok_or_else(|| "wire-format addendum review table is missing".to_owned())?;
+    let mut reviewed_rows = 0;
+    for line in table.lines().filter(|line| line.trim().starts_with('|')) {
+        let cells = line
+            .split('|')
+            .map(str::trim)
+            .filter(|cell| !cell.is_empty())
+            .collect::<Vec<_>>();
+        if cells.len() != 3 || cells[0] == "Artefakt / Felder" || cells[0].starts_with("---") {
+            continue;
+        }
+        reviewed_rows += 1;
+        if cells[2] != "bestätigt" {
+            return Err(format!("unresolved review row: {line}"));
+        }
+    }
+    if reviewed_rows == 0 {
+        return Err("wire-format addendum review table has no field mappings".to_owned());
+    }
+    if !normalized.contains("Review-Ergebnis: keine ungelöste Zeile und kein Widerspruch") {
+        return Err("wire-format addendum lacks a resolved review result".to_owned());
+    }
+    Ok(())
+}
+
+fn require_closed_object_schemas(
+    name: &str,
+    value: &serde_json::Value,
+    location: &str,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("object")
+                && object.get("additionalProperties") != Some(&serde_json::Value::Bool(false))
+            {
+                return Err(format!(
+                    "JSON schema {name} object at {location} must set additionalProperties to false"
+                ));
+            }
+            for (key, child) in object {
+                require_closed_object_schemas(name, child, &format!("{location}/{key}"))?;
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for (index, child) in array.iter().enumerate() {
+                require_closed_object_schemas(name, child, &format!("{location}/{index}"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_schemas(root: &Path) -> Result<(), String> {
+    let archive_paths = [
+        "schemas/archive/v1/archive.cddl",
+        "schemas/archive/v1/trust.cddl",
+        "schemas/archive/v1/evidence.cddl",
+    ];
+    let mut archive_bundle = String::new();
+    for relative in archive_paths {
+        let path = root.join(relative);
+        let input = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        validate_cddl_document(relative, &input)?;
+        archive_bundle.push_str(&input);
+        archive_bundle.push('\n');
+    }
+    validate_cddl_document("combined archive CDDL", &archive_bundle)?;
+
+    let audit_path = "schemas/reports/v1/local-audit.cddl";
+    let audit = fs::read_to_string(root.join(audit_path))
+        .map_err(|error| format!("failed to read {audit_path}: {error}"))?;
+    validate_cddl_document(audit_path, &audit)?;
+
+    for relative in [
+        "schemas/reports/v1/verification-report.schema.json",
+        "schemas/reports/v1/key-inventory.schema.json",
+    ] {
+        let path = root.join(relative);
+        let input = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        validate_json_schema_document(relative, &input)?;
+    }
+    let addendum_path =
+        root.join("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md");
+    let addendum = fs::read_to_string(&addendum_path)
+        .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
+    validate_addendum_review(&addendum)?;
+    println!("validated 4 CDDL and 2 JSON schemas");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let root = workspace_root();
     let mut args = env::args().skip(1);
@@ -269,6 +402,12 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("failed to invoke workspace tests: {error}"))
         }
         "test-fuzz" => run_fuzz(&root, args),
+        "validate-schemas" => {
+            if args.next().is_some() {
+                return Err("validate-schemas does not accept arguments".to_owned());
+            }
+            validate_schemas(&root)
+        }
         _ => Err(format!("unknown gate: {gate}")),
     }
 }
@@ -282,6 +421,54 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn schema_validation_rejects_malformed_cddl() {
+        let error = super::validate_cddl_document("broken.cddl", "root = [")
+            .expect_err("malformed CDDL must fail closed");
+
+        assert!(error.contains("broken.cddl"));
+    }
+
+    #[test]
+    fn schema_validation_rejects_malformed_json_schema() {
+        let error = super::validate_json_schema_document("broken.schema.json", "{")
+            .expect_err("malformed JSON Schema must fail closed");
+
+        assert!(error.contains("broken.schema.json"));
+    }
+
+    #[test]
+    fn report_schema_rejects_an_unknown_property() {
+        let schema = r#"{
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"schemaId": {"const": "example/v1"}},
+            "required": ["schemaId"],
+            "additionalProperties": false
+        }"#;
+        let instance = serde_json::json!({"schemaId": "example/v1", "unknown": true});
+
+        let validator = super::compile_json_schema("example.schema.json", schema).unwrap();
+        assert!(!validator.is_valid(&instance));
+    }
+
+    #[test]
+    fn addendum_review_rejects_an_unresolved_mapping_row() {
+        let addendum = r#"normativ für v0.1
+darf kein dort bereits festgelegtes Feld überschreiben
+vor Task 3 akzeptiert
+## Feld-zu-Design-Review
+| Artefakt / Felder | Designquelle | Status |
+|---|---|---|
+| checkpoint | §15.2 | ungelöst |
+**Review-Ergebnis:** keine ungelöste Zeile
+"#;
+
+        let error = super::validate_addendum_review(addendum)
+            .expect_err("unresolved review rows must fail closed");
+        assert!(error.contains("unresolved review row"));
+    }
+
     #[test]
     fn verify_quick_uses_the_required_locked_commands() {
         assert_eq!(

@@ -1,0 +1,153 @@
+trust-subtype-v1 = "rootCertificate" / "deviceCertificate" / "operatorBinding" /
+  "organizationAdminAuthorization" / "registryEvent" / "policy" /
+  "writerTransition" / "grantAuthorization" / "destructionAuthorization" /
+  "destructionTransition" / "deletionAttestation"
+
+trust-payload-v1 =
+  root-certificate-core-v1 / authorized-trust-payload-v1<root-certificate-core-v1> /
+  device-certificate-core-v1 / authorized-trust-payload-v1<device-certificate-core-v1> /
+  operator-binding-core-v1 / authorized-trust-payload-v1<operator-binding-core-v1> /
+  organization-admin-authorization-v1 /
+  authorized-trust-payload-v1<registry-event-core-v1> /
+  authorized-trust-payload-v1<policy-core-v1> /
+  authorized-trust-payload-v1<writer-transition-core-v1> /
+  grant-authorization-core-v1 / destruction-authorization-core-v1 /
+  destruction-transition-core-v1 / deletion-attestation-core-v1
+
+; 0 writer, 1 reader, 2 organizationAdmin, 3 keyApprover,
+; 4 recoveryRecipient, 5 historicalGrantAuthority, 6 serverReceipt,
+; 7 deletionAttest
+certificate-kind-v1 = 0..7
+; 0 osWrapped, 1 hardwareNonExportable, 2 offlineEncryptedContainer,
+; 3 pkcs11, 4 serverSecretStoreOrHsm
+key-protection-profile-v1 = 0..4
+
+root-certificate-core-v1 = [
+  1, organization-id: bstr .size 16,
+  root-public-cose-key: bstr, root-key-thumbprint: bstr .size 32,
+  previous-root-certificate-object-hash: (bstr .size 32) / null,
+  effective-from-registry-version: uint, []
+]
+
+device-certificate-core-v1 = [
+  1, organization-id: bstr .size 16, device-id: bstr .size 16,
+  certificate-kind: certificate-kind-v1,
+  signing-public-cose-key: bstr / null, kem-public-cose-key: bstr / null,
+  signing-key-thumbprint: (bstr .size 32) / null,
+  kem-key-thumbprint: (bstr .size 32) / null,
+  capabilities: [* tstr], key-protection-profile: key-protection-profile-v1,
+  effective-from-sequence: uint, revoked-from-sequence: uint / null, []
+]
+
+operator-binding-core-v1 = [
+  1, organization-id: bstr .size 16, operator-subject-id: bstr .size 16,
+  operator-profile-commitment: bstr .size 32,
+  device-certificate-hash: bstr .size 32,
+  operator-role: 0..2,
+  os-account-binding-hash: bstr .size 32,
+  operator-instance-key-thumbprint: bstr .size 32,
+  effective-from-sequence: uint, revoked-from-sequence: uint / null, []
+]
+
+organization-admin-authorization-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  admin-key-thumbprint: bstr .size 32, admin-certificate-hash: bstr .size 32,
+  admin-operator-binding-object-hash: bstr .size 32,
+  action-code: 0..6,
+  target-trust-subtype: "deviceCertificate" / "operatorBinding" /
+    "registryEvent" / "policy" / "writerTransition" / "rootCertificate",
+  authorized-trust-core-hash: bstr .size 32,
+  issued-at: int, expires-at: int, nonce: bstr .size 32, []
+]
+
+registry-change-v1 =
+  [0, certificate-object-hash: bstr .size 32] /
+  [1, target-kind: 0..2, target-object-hash: bstr .size 32] /
+  [2, policy-object-hash: bstr .size 32] /
+  [3, writer-transition-object-hash: bstr .size 32] /
+  [4, operator-binding-object-hash: bstr .size 32] /
+  [5, admin-certificate-object-hash: bstr .size 32, effect: 0..1] /
+  [6, root-certificate-object-hash: bstr .size 32]
+
+registry-event-core-v1 = [
+  1, organization-id: bstr .size 16, registry-version: uint,
+  previous-registry-hash: (bstr .size 32) / null,
+  effective-from-sequence: uint, valid-through-sequence: uint,
+  issued-at: int, not-before: int, not-after: int,
+  policy-object-hash: bstr .size 32, change: registry-change-v1,
+  root-key-thumbprint: bstr .size 32, []
+]
+
+retention-policy-v1 = [
+  minimum-retention-ms: uint / null, destruction-enabled: bool,
+  eds-privacy-decision-document-hash: (bstr .size 32) / null
+]
+free-text-policy-v1 = [
+  free-text-allowed: bool, rule-set-version: tstr,
+  local-pattern-warning-enabled: bool
+]
+policy-core-v1 = [
+  1, organization-id: bstr .size 16, policy-version: uint,
+  previous-policy-object-hash: (bstr .size 32) / null,
+  operating-profile: 0..1,
+  max-registry-age-ms: uint, max-future-clock-skew-ms: uint,
+  registry-expiry-behavior: 0..1,
+  evidence-max-delay-ms: uint, reader-inactivity-ms: uint,
+  reader-history-access-allowed: bool,
+  allowed-archive-profile-hashes: [+ bstr .size 32],
+  network-outage-behavior: 0,
+  backup-frequency-ms: uint, restore-test-interval-ms: uint,
+  retention-policy: retention-policy-v1, free-text-policy: free-text-policy-v1,
+  allowed-crypto-suite-ids: [+ tstr], allowed-format-versions: [+ uint],
+  effective-from-sequence: uint, []
+]
+
+writer-transition-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  old-writer-certificate-hash: bstr .size 32,
+  new-writer-certificate-hash: bstr .size 32,
+  effective-from-sequence: uint, previous-entry-hash: bstr .size 32,
+  reason-code: uint, []
+]
+
+grant-authorization-core-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  authorization-sequence: uint, sorted-entry-hashes: [+ bstr .size 32],
+  recipient-key-thumbprint: bstr .size 32,
+  recipient-certificate-hash: bstr .size 32,
+  purpose: 1, expires-at: int, []
+]
+
+destruction-authorization-core-v1 = [
+  1, destruction-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  authorization-sequence: uint,
+  sorted-targets: [+ [entry-hash: bstr .size 32, chain-sequence: uint]],
+  scope-code: uint, legal-reason-code: uint, []
+]
+
+destruction-state-v1 = 0..4
+destruction-transition-core-v1 = [
+  1, destruction-id: bstr .size 16,
+  destruction-authorization-object-hash: bstr .size 32,
+  event-id: bstr .size 16,
+  previous-event-object-hash: (bstr .size 32) / null,
+  from-state: destruction-state-v1 / null,
+  to-state: destruction-state-v1, trigger-code: uint,
+  executed-at: int, []
+]
+
+deletion-attestation-core-v1 = [
+  1, destruction-id: bstr .size 16,
+  destruction-authorization-object-hash: bstr .size 32,
+  replica-id: bstr .size 16, replica-kind: uint,
+  sorted-removed-object-hashes: [* bstr .size 32],
+  result: 0..2, backup-expiry-at: int / null, executed-at: int, []
+]
+
+authorized-trust-payload-v1<T> = [
+  authorized-trust-core: T,
+  organization-admin-authorization-object-hash: bstr .size 32
+]

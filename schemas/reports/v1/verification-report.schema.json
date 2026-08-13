@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://einsatzarchiv.invalid/schemas/reports/v1/verification-report.schema.json",
+  "title": "ea.verification-report/v1",
+  "description": "Deterministic verification report. Arrays are sorted by the keys declared in their descriptions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "archiveObjectCount",
+    "entryPackageCount",
+    "destroyedEntryCount",
+    "chainHead",
+    "registryVersions",
+    "objectResults",
+    "authorizedDestructions",
+    "gaps",
+    "signatureErrors",
+    "evidenceErrors",
+    "decryptionErrors",
+    "publicKeyThumbprints",
+    "reportHash"
+  ],
+  "properties": {
+    "schemaId": { "const": "ea.verification-report/v1" },
+    "archiveObjectCount": { "type": "integer", "minimum": 0 },
+    "entryPackageCount": { "type": "integer", "minimum": 0 },
+    "destroyedEntryCount": { "type": "integer", "minimum": 0 },
+    "chainHead": { "$ref": "#/$defs/chainHead" },
+    "registryVersions": {
+      "description": "Unique registry versions sorted numerically ascending.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 0 }
+    },
+    "objectResults": {
+      "description": "Unique results sorted by objectHash bytewise ascending.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/objectResult" }
+    },
+    "authorizedDestructions": {
+      "description": "Unique destructions sorted by destructionId bytewise ascending.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/authorizedDestruction" }
+    },
+    "gaps": {
+      "description": "Unique gaps sorted by chainId bytewise, then fromSequence numerically.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/gap" }
+    },
+    "signatureErrors": { "$ref": "#/$defs/sortedErrors" },
+    "evidenceErrors": { "$ref": "#/$defs/sortedErrors" },
+    "decryptionErrors": { "$ref": "#/$defs/sortedErrors" },
+    "publicKeyThumbprints": {
+      "description": "Unique lowercase hexadecimal SHA-256 thumbprints sorted bytewise ascending.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/hash" }
+    },
+    "reportHash": { "$ref": "#/$defs/hash" },
+    "reportSignature": { "type": "string", "minLength": 1 },
+    "runtimeMetadata": { "$ref": "#/$defs/runtimeMetadata" }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "chainHead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chainId", "sequence", "entryHash"],
+      "properties": {
+        "chainId": { "$ref": "#/$defs/uuid" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "entryHash": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "objectResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objectHash", "objectType", "result"],
+      "properties": {
+        "objectHash": { "$ref": "#/$defs/hash" },
+        "objectType": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "result": { "enum": ["valid", "authorizedDestroyed"] }
+      }
+    },
+    "authorizedDestruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["destructionId", "authorizationObjectHash", "state"],
+      "properties": {
+        "destructionId": { "$ref": "#/$defs/uuid" },
+        "authorizationObjectHash": { "$ref": "#/$defs/hash" },
+        "state": {
+          "enum": [
+            "requested",
+            "inProgress",
+            "pendingBackupExpiry",
+            "completeManagedScope",
+            "incompleteUnreachableReplica"
+          ]
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chainId", "fromSequence", "throughSequence"],
+      "properties": {
+        "chainId": { "$ref": "#/$defs/uuid" },
+        "fromSequence": { "type": "integer", "minimum": 0 },
+        "throughSequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objectHash", "code"],
+      "properties": {
+        "objectHash": { "$ref": "#/$defs/hash" },
+        "code": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sortedErrors": {
+      "description": "Unique errors sorted by objectHash bytewise, then code by UTF-8 bytes.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/error" }
+    },
+    "runtimeMetadata": {
+      "description": "Optional nondeterministic runtime data; time, host, and path fields are permitted only here.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generatedAt": { "type": "integer" },
+        "hostName": { "type": "string" },
+        "inputPath": { "type": "string" },
+        "runtimeMs": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

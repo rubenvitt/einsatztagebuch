@@ -1,0 +1,28 @@
+checkpoint-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  covered-from-sequence: uint, covered-through-sequence: uint,
+  head-entry-hash: bstr .size 32, registry-head-hash: bstr .size 32,
+  issued-at-server: int, previous-evidence-hash: (bstr .size 32) / null, []
+]
+
+standard-checkpoint-v1 = [checkpoint-core-v1, #6.18(COSE-Sign1)]
+timestamp-evidence-v1 = [
+  checkpoint-core-v1, #6.18(COSE-Sign1),
+  rfc3161-response-der: bstr, hash-algorithm: 0,
+  request-nonce: bstr, policy-oid-der: bstr,
+  tsa-certificate-chain-der: [+ bstr], revocation-data-der: [* bstr],
+  validation-data-der: [* bstr]
+]
+
+renewal-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  current-entry-hash: bstr .size 32,
+  previous-renewal-hash: (bstr .size 32) / null,
+  sorted-renewal-input-hashes: [+ bstr .size 32], []
+]
+renewal-evidence-v1 = [
+  renewal-core-v1, #6.18(COSE-Sign1), rfc3161-response-der: bstr,
+  hash-algorithm: 0, request-nonce: bstr, policy-oid-der: bstr,
+  tsa-certificate-chain-der: [+ bstr], revocation-data-der: [* bstr],
+  validation-data-der: [* bstr]
+]

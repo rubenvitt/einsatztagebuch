@@ -1,0 +1,65 @@
+; Einsatzarchiv v0.1 deterministic-CBOR archive objects.
+COSE-Sign1 = any
+archive-object-v1 = [h'45413100', 1..6, 1, [], any]
+
+manifest-core-v1 = [
+  1, 1, 1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  chain-sequence: uint, previous-entry-hash: (bstr .size 32) / null,
+  writer-certificate-hash: bstr .size 32,
+  writer-transition-event-hash: (bstr .size 32) / null,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  initial-grant-plan-hash: bstr .size 32,
+  "EINSATZARCHIV-SUITE-1", nonce: bstr .size 12,
+  ciphertext-length: uint, []
+]
+
+eip-v1 = [h'45413100', 1, 1, [], [
+  signed-manifest: [manifest-core-v1, bstr .size 32],
+  ciphertext: bstr, writer-signature: #6.18(COSE-Sign1)
+]]
+
+grant-context-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  entry-hash: bstr .size 32, grant-kind: 0..1, grant-purpose: 0..1,
+  recipient-key-thumbprint: bstr .size 32,
+  recipient-certificate-hash: bstr .size 32,
+  issuer-key-thumbprint: bstr .size 32,
+  issuer-certificate-hash: bstr .size 32, issuer-capability: tstr,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  "EINSATZARCHIV-HPKE-1", created-at-device: int,
+  original-recovery-grant-object-hash: (bstr .size 32) / null,
+  grant-authorization-object-hash: (bstr .size 32) / null
+]
+grant-body-v1 = [grant-context-v1, bstr .size 32, bstr .size 48]
+eag-v1 = [h'45413100', 2, 1, [], [grant-body-v1, #6.18(COSE-Sign1)]]
+
+receipt-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  chain-sequence: uint, entry-hash: bstr .size 32,
+  entry-object-hash: bstr .size 32,
+  previous-entry-hash: (bstr .size 32) / null,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  policy-object-hash: bstr .size 32,
+  initial-grant-plan-hash: bstr .size 32,
+  initial-grant-object-hashes: [+ bstr .size 32],
+  accepted-at-server: int, evidence-due-at: int / null,
+  server-key-thumbprint: bstr .size 32,
+  server-certificate-hash: bstr .size 32, []
+]
+esr-v1 = [h'45413100', 3, 1, [], [receipt-core-v1, #6.18(COSE-Sign1)]]
+
+ecp-v1 = [h'45413100', 4, 1, [],
+  ([0, standard-checkpoint-v1] /
+   [1, timestamp-evidence-v1] /
+   [2, renewal-evidence-v1])
+]
+
+etb-v1 = [h'45413100', 5, 1, [], [trust-subtype-v1, trust-payload-v1, [+ #6.18(COSE-Sign1)]]]
+
+eds-v1 = [h'45413100', 6, 1, [], [
+  1, signed-manifest: [manifest-core-v1, bstr .size 32],
+  writer-signature: #6.18(COSE-Sign1), entry-hash: bstr .size 32,
+  ciphertext-hash: bstr .size 32, original-eip-object-hash: bstr .size 32,
+  destruction-id: bstr .size 16,
+  destruction-authorization-object-hash: bstr .size 32, []
+]]

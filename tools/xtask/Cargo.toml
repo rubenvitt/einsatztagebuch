@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+cddl.workspace = true
+jsonschema.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

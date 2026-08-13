@@ -1,0 +1,60 @@
+; Signed cleartext-free local audit contract. There is no free-text field.
+COSE-Sign1 = any
+local-audit-action-v1 = 0..11
+local-audit-outcome-v1 = 0..2
+
+stale-registry-context-v1 = [
+  registry-head-hash: bstr .size 32, policy-object-hash: bstr .size 32,
+  proposed-sequence: uint, registry-not-after: int, acknowledged-at: int,
+  preview-hash: bstr .size 32
+]
+clock-release-context-v1 = [
+  trusted-time-floor: int, observed-os-wall-clock: int,
+  max-future-clock-skew-ms: uint, justification-code: uint,
+  issued-at: int, expires-at: int
+]
+export-context-v1 = [entry-hash: bstr .size 32, target-kind: uint]
+binding-lifecycle-context-v1 = [
+  old-binding-object-hash: (bstr .size 32) / null,
+  new-binding-object-hash: (bstr .size 32) / null,
+  effective-from-sequence: uint
+]
+admin-root-context-v1 = [
+  authorization-object-hash: bstr .size 32,
+  target-object-hash: bstr .size 32, action-code: uint
+]
+historical-regrant-context-v1 = [
+  authorization-object-hash: bstr .size 32, entry-hash: bstr .size 32,
+  original-recovery-grant-object-hash: bstr .size 32,
+  recipient-certificate-object-hash: bstr .size 32,
+  new-grant-object-hash: bstr .size 32
+]
+destruction-context-v1 = [
+  destruction-authorization-object-hash: bstr .size 32,
+  state-event-object-hash: bstr .size 32
+]
+archive-profile-migration-context-v1 = [
+  source-profile-hash: bstr .size 32, target-profile-hash: bstr .size 32,
+  inventory-hash: bstr .size 32, active-pointer-hash: bstr .size 32
+]
+local-audit-context-v1 =
+  [0, subject-object-hash: (bstr .size 32) / null] /
+  [1, stale-registry-context-v1] /
+  [2, clock-release-context-v1] /
+  [3, export-context-v1] /
+  [4, binding-lifecycle-context-v1] /
+  [5, admin-root-context-v1] /
+  [6, historical-regrant-context-v1] /
+  [7, destruction-context-v1] /
+  [8, archive-profile-migration-context-v1]
+
+local-audit-event-core-v1 = [
+  1, event-id: bstr .size 16, organization-id: bstr .size 16,
+  device-id: bstr .size 16,
+  operator-binding-object-hash: (bstr .size 32) / null,
+  signer-certificate-object-hash: bstr .size 32,
+  action: local-audit-action-v1, outcome: local-audit-outcome-v1,
+  effective-now: int, context: local-audit-context-v1,
+  nonce: bstr .size 32, []
+]
+local-audit-event-v1 = [local-audit-event-core-v1, #6.18(COSE-Sign1)]
