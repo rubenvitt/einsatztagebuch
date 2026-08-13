@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types"]
 resolver = "2"
 
 [workspace.package]

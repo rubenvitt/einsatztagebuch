@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fs, process::Command};
 use toml::Value;
 
 #[test]
-fn workspace_declares_exact_initial_members_and_shared_dependencies() {
+fn workspace_declares_exact_planned_members_and_shared_dependencies() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     assert!(root.join("Cargo.lock").is_file());
     assert!(root.join("pnpm-lock.yaml").is_file());
@@ -13,7 +13,7 @@ fn workspace_declares_exact_initial_members_and_shared_dependencies() {
     let member_array = root_manifest["workspace"]["members"].as_array().unwrap();
     assert_eq!(
         member_array.len(),
-        2,
+        3,
         "workspace members must not be duplicated or omitted"
     );
     let members = member_array
@@ -22,7 +22,7 @@ fn workspace_declares_exact_initial_members_and_shared_dependencies() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         members,
-        BTreeSet::from(["tools/xtask", "tests/ea-system-tests"])
+        BTreeSet::from(["tools/xtask", "tests/ea-system-tests", "crates/ea-types"])
     );
     let workspace_dependencies = root_manifest["workspace"]["dependencies"]
         .as_table()
@@ -31,14 +31,14 @@ fn workspace_declares_exact_initial_members_and_shared_dependencies() {
         !workspace_dependencies.is_empty(),
         "workspace.dependencies must contain shared dependencies"
     );
-    for member in ["tools/xtask", "tests/ea-system-tests"] {
+    for member in ["tools/xtask", "tests/ea-system-tests", "crates/ea-types"] {
         let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
             .unwrap()
             .parse()
             .unwrap();
         let mut member_dependency_references = 0;
         for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
-            if let Some(dependencies) = manifest[table_name].as_table() {
+            if let Some(dependencies) = manifest.get(table_name).and_then(Value::as_table) {
                 for (name, dependency) in dependencies {
                     member_dependency_references += 1;
                     assert!(
@@ -56,10 +56,12 @@ fn workspace_declares_exact_initial_members_and_shared_dependencies() {
                 }
             }
         }
-        assert!(
-            member_dependency_references > 0,
-            "{member} must reference at least one shared workspace dependency"
-        );
+        if member != "crates/ea-types" {
+            assert!(
+                member_dependency_references > 0,
+                "{member} must reference at least one shared workspace dependency"
+            );
+        }
     }
     assert!(
         Command::new("cargo")
