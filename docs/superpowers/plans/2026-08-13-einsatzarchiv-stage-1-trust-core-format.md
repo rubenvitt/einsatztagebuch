@@ -842,10 +842,42 @@ unknown unprotected headers, non-empty `external_aad`, detached payloads, missin
 Tag 18, wrong signature length, and mixed certificate/key resolution. Verify the
 only allowed unprotected exception is RFC-9921 `3161-ctt` label 270 with a DER-TST
 bstr as the sole entry for Checkpoint/Renewal Evidence.
+Use one fixed RFC-3161 fixture to pin the complete DER `TimeStampResp` stored in
+the `.ecp` separately from the extracted complete DER `TimeStampToken`
+(`ContentInfo`) stored as the sole `{270: bstr}` unprotected entry. Assert the
+two byte strings are not interchangeable and explicitly reject a COSE object
+whose label-270 value is the complete `TimeStampResp`, even when its type is bstr
+and it is the sole unprotected entry.
 For all `+cbor` protocol signatures, pin and sign only the deterministic unsigned
 core bytes. Challenge Response, Device Registration Request, and Reader Ack are
 each `[...-core-v1, COSE_Sign1]`; reject signing/verifying a final signaturized
 wrapper, a core containing its own signature, or any self-referential form.
+Derive their hard-coded Golden Core and wrapper bytes exclusively from the
+normative `schemas/protocol/v1/signed-protocol.cddl`; the test must fail if a
+plan-local or ad-hoc layout is used.
+
+For the OS-account construction, implement and pin the exact
+`os-account-context-v1` / `canonical-os-account-id-v1` union from the separate
+normative `schemas/identity/v1/os-account.cddl`.
+Hard-code at least these independently derived deterministic-CBOR answers for
+the canonical account identifier itself:
+
+```text
+Windows S-1-5-21-1-2-3-1000:
+830100581c010500000000000515000000010000000200000003000000e8030000
+macOS GUID f81d4fae-7dec-11d0-a765-00a0c91e6bf6, UID 501:
+84010150f81d4fae7dec11d0a76500a0c91e6bf61901f5
+Linux machine-id 0123456789abcdef0123456789abcdef, UID 1000:
+840102500123456789abcdef0123456789abcdef1903e8
+```
+
+Pin the complete context bytes after prepending fixed 16-byte organization and
+device IDs, their domain-concatenated preimage, and final SHA-256. Negative KATs
+must reject Windows SID text, wrong revision/count/length/endianness or trailing
+bytes; macOS malformed/multiple/null GUIDs, COM-GUID byte swapping, text UID and
+`0xffffffff`; and Linux uppercase/empty/all-zero/`uninitialized`/wrong-newline
+machine-id, text UID and `0xffffffff`. No test helper may normalize a free string
+into the wire value.
 
 Use published upstream KATs where available: RFC 8032 Ed25519, RFC 8439
 ChaCha20-Poly1305, RFC 9679 thumbprints, and RFC 9180 Appendix A.2 HPKE Base Mode.
@@ -885,6 +917,17 @@ pub struct ProtectedSigner {
 ```
 
 Implement all design domain strings literally, including ciphertext, package, grant plan, grant, receipt, trust object, admin-authorized trust, OS account, operator profile, anchor pre/final, recovery test, checkpoint, and renewal input. Keep the symbolic `keyThumbprint` API, but serialize it exactly as protected COSE `kid` label 4. Implement normal protected headers exactly as `{1:-19, 2:[3,4,"certificateHash"], 3:<closed Einsatzarchiv tstr>, 4:bstr32, "certificateHash":bstr32}`, initial Root-PoP exactly as `{1:-19,2:[3,4],3:"application/vnd.einsatzarchiv.trust-digest",4:bstr32}`, and pre-authorization Enrollment-PoP exactly as `{1:-19,2:[3,4],3:"application/vnd.einsatzarchiv.device-registration-request+cbor",4:bstr32}`. RFC 9864 fully specifies Ed25519 as `-19`; reject the deprecated polymorphic RFC-9053 EdDSA value `-8`. Encode the map using RFC-8949 Core Deterministic Encoding and embed those bytes as a bstr. Use exactly RFC-9052 `Sig_structure = ["Signature1", protected, h'', payload]`, Tag 18, embedded payload, and 64-byte Ed25519 signatures.
+
+Validate every OS-account source before CBOR encoding: Windows revision `1`,
+count `1..15`, exact `8 + 4 * count` bytes and little-endian u32
+SubAuthorities; macOS exactly one nonzero RFC-9562 GUID decoded without
+COM-GUID swapping and a matching UID in `0..4294967294`; Linux exactly one
+nonzero 16-byte machine ID from `sd_id128_get_machine()` or the strict file
+fallback and UID in `0..4294967294`. Fail closed before hashing on any mismatch.
+Raw account identifiers and source strings must never be persisted, logged, or
+exported; retain only the domain-separated hash. Do not replace the specified
+literal Linux machine ID with an app-specific derivation without a reviewed
+normative design revision.
 
 Reject every content type outside the closed registry and every payload/content-type mismatch. Enforce empty unprotected COSE headers except RFC-9921 `3161-ctt` label 270 as the sole unprotected DER-TST bstr for Checkpoint/Renewal Evidence in Stage 6. Initial Root-PoP is the sole `certificateHash` exception among authorized operational/archive signatures. Enrollment-PoP is a separate pre-authorization variant: its payload is exactly deterministic CBOR of unsigned `device-registration-request-core-v1`, and the final request is `[core, COSE_Sign1]`; reject the final request, a core containing `self-signature`, or any self-referential bytes as a signature payload. Validate it only against the core-embedded signing key, never route it through `SignerCertificateResolver`, and never infer role, Trust, archive, or device authority. Task 5 may expose and validate this closed profile variant for Stage 3 without implementing the Stage-3 enrollment workflow. Reject Enrollment-PoP in ordinary and Trust-signature resolver paths. Challenge Response and Reader Ack similarly sign only their unsigned core bytes. Initial Root and Root rotation each have exactly one outer signature; the rotation signer is the previous accepted Root line, while Admin authorization is hash-bound in the authorized payload and is not an outer signature.
 

@@ -1,0 +1,12 @@
+; Einsatzarchiv v0.1 OS-account hash context.
+; The first item versions the union; the second is the closed platform tag.
+canonical-os-account-id-v1 =
+  [1, 0, windows-sid-binary: bstr .size (12..68)] /
+  [1, 1, macos-directory-guid: bstr .size 16, uid: 0..4294967294] /
+  [1, 2, linux-machine-id: bstr .size 16, uid: 0..4294967294]
+
+os-account-context-v1 = [
+  organization-id: bstr .size 16,
+  device-id: bstr .size 16,
+  canonical-os-account-id: canonical-os-account-id-v1
+]

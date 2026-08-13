@@ -143,6 +143,14 @@ fn removed_replaced_or_relocated_ctt_header_fails() {
         assert!(verify_ctt(object, fixtures::tsa_policy(), fixtures::trust()).is_err());
     }
 }
+
+#[test]
+fn complete_timestamp_response_is_never_accepted_as_the_3161_ctt_value() {
+    assert_eq!(fixtures::archived_response_der(), fixtures::fixed_timestamp_response_der());
+    assert_eq!(fixtures::ctt_header_token_der(), fixtures::extracted_timestamp_token_der());
+    assert_ne!(fixtures::archived_response_der(), fixtures::ctt_header_token_der());
+    assert!(verify_ctt(fixtures::response_der_used_as_header(), fixtures::tsa_policy(), fixtures::trust()).is_err());
+}
 ```
 
 - [ ] **Step 2: Run checkpoint tests and verify builder is absent**
@@ -153,7 +161,7 @@ Expected: FAIL because timestamped checkpoint builder/verifier do not exist.
 
 - [ ] **Step 3: Implement COSE-then-timestamp and complete `.ecp` persistence**
 
-Deterministically encode checkpoint payload with domain, organization, chain, covered range, head Entry, Registry head, server time, and previous Evidence hash. COSE-sign it with server checkpoint capability. Extract exact signature byte string, CBOR-encode that byte string, compute imprint, request TSA, verify the response, then insert full RFC-9921 `3161-ctt` DER as the sole allowed unprotected header. Archive exact checkpoint payload, complete COSE object, full response DER, SHA-256 identifier, request nonce, policy OID, certificate chain, revocation, validation data, and predecessor in the Stage 1 `.ecp` shape. Reparse and fully verify exact bytes before publication.
+Deterministically encode checkpoint payload with domain, organization, chain, covered range, head Entry, Registry head, server time, and previous Evidence hash. COSE-sign it with server checkpoint capability. Extract exact signature byte string, CBOR-encode that byte string, compute imprint, request TSA, and verify the complete DER `TimeStampResp`. Archive that complete response unchanged in `rfc3161-response-der`, but extract its complete DER `TimeStampToken` (`ContentInfo`) and insert only those token bytes as the bstr value of the sole RFC-9921 `3161-ctt` unprotected header. A complete `TimeStampResp` in label 270 is invalid even when it is a bstr and the sole map entry. Archive exact checkpoint payload, complete COSE object, SHA-256 identifier, request nonce, policy OID, certificate chain, revocation, validation data, and predecessor in the Stage 1 `.ecp` shape. Reparse and fully verify exact bytes before publication.
 
 - [ ] **Step 4: Run golden, one-byte mutation, wrong signer, and offline verification tests**
 

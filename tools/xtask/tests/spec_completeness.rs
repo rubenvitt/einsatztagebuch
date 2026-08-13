@@ -36,6 +36,21 @@ fn cddl_registers_every_v1_wire_type() {
     ] {
         assert!(audit.contains(name), "missing {name}");
     }
+    let protocol = protocol_cddl();
+    for name in [
+        "challenge-response-core-v1",
+        "challenge-response-v1",
+        "device-registration-request-core-v1",
+        "device-registration-request-v1",
+        "reader-ack-core-v1",
+        "reader-ack-v1",
+    ] {
+        assert!(protocol.contains(name), "missing {name}");
+    }
+    let identity = identity_cddl();
+    for name in ["canonical-os-account-id-v1", "os-account-context-v1"] {
+        assert!(identity.contains(name), "missing {name}");
+    }
 }
 
 #[test]
@@ -71,6 +86,154 @@ fn archive_cddl() -> String {
         include_str!("../../../schemas/archive/v1/evidence.cddl"),
     ]
     .join("\n")
+}
+
+fn protocol_cddl() -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schemas/protocol/v1/signed-protocol.cddl"),
+    )
+    .expect("normative signed-protocol CDDL must exist")
+}
+
+fn identity_cddl() -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schemas/identity/v1/os-account.cddl"),
+    )
+    .expect("normative OS-account CDDL must exist")
+}
+
+fn signed_protocol_fixture(kind: &str, wrap: bool) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    if wrap {
+        encoder.array(2).unwrap();
+    }
+    match kind {
+        "challenge" => {
+            encoder.array(7).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[0; 16]).unwrap();
+            encoder.bytes(&[1; 32]).unwrap();
+            encoder.i64(2).unwrap();
+            encoder.i64(3).unwrap();
+            encoder.bytes(&[4; 32]).unwrap();
+            encoder.array(0).unwrap();
+        }
+        "enrollment" => {
+            encoder.array(9).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[0; 16]).unwrap();
+            encoder.bytes(&[1; 16]).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.bytes(&[2]).unwrap();
+            encoder.null().unwrap();
+            encoder.array(1).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.array(1).unwrap();
+            encoder.str("EINSATZARCHIV-SUITE-1").unwrap();
+            encoder.array(0).unwrap();
+        }
+        "reader-ack" => {
+            encoder.array(8).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[0; 16]).unwrap();
+            encoder.bytes(&[1; 16]).unwrap();
+            encoder.bytes(&[2; 32]).unwrap();
+            encoder.u8(3).unwrap();
+            encoder.bytes(&[4; 32]).unwrap();
+            encoder.i64(5).unwrap();
+            encoder.array(0).unwrap();
+        }
+        _ => unreachable!(),
+    }
+    if wrap {
+        encoder.null().unwrap();
+    }
+    encoder.into_writer()
+}
+
+#[test]
+fn signed_protocol_cddl_validates_unsigned_cores_and_non_recursive_wrappers() {
+    let cddl = protocol_cddl();
+    cddl::pest_bridge::cddl_from_pest_str_checked(&cddl)
+        .expect("signed protocol CDDL must parse with all references resolved");
+
+    for (core_root, wrapper_root, kind) in [
+        (
+            "challenge-response-core-v1",
+            "challenge-response-v1",
+            "challenge",
+        ),
+        (
+            "device-registration-request-core-v1",
+            "device-registration-request-v1",
+            "enrollment",
+        ),
+        ("reader-ack-core-v1", "reader-ack-v1", "reader-ack"),
+    ] {
+        let core = signed_protocol_fixture(kind, false);
+        let wrapper = signed_protocol_fixture(kind, true);
+        assert!(validate_cbor(core_root, &cddl, &core));
+        assert!(!validate_cbor(core_root, &cddl, &wrapper));
+        assert!(validate_cbor(wrapper_root, &cddl, &wrapper));
+        assert!(!validate_cbor(wrapper_root, &cddl, &core));
+    }
+}
+
+fn os_account_context_fixture(platform: u8, text_identifier: bool) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(3).unwrap();
+    encoder.bytes(&[0; 16]).unwrap();
+    encoder.bytes(&[1; 16]).unwrap();
+    match platform {
+        0 => {
+            encoder.array(3).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.u8(0).unwrap();
+            encoder
+                .bytes(&[
+                    1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 232,
+                    3, 0, 0,
+                ])
+                .unwrap();
+        }
+        1 | 2 => {
+            encoder.array(4).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.u8(platform).unwrap();
+            if text_identifier {
+                encoder.str("00000000-0000-0000-0000-000000000000").unwrap();
+            } else {
+                encoder.bytes(&[platform; 16]).unwrap();
+            }
+            encoder.u16(if platform == 1 { 501 } else { 1000 }).unwrap();
+        }
+        _ => unreachable!(),
+    }
+    encoder.into_writer()
+}
+
+#[test]
+fn os_account_context_cddl_accepts_only_closed_binary_platform_forms() {
+    let cddl = identity_cddl();
+    for platform in 0..=2 {
+        assert!(validate_cbor(
+            "os-account-context-v1",
+            &cddl,
+            &os_account_context_fixture(platform, false)
+        ));
+    }
+    assert!(!validate_cbor(
+        "os-account-context-v1",
+        &cddl,
+        &os_account_context_fixture(1, true)
+    ));
+    assert!(!validate_cbor(
+        "os-account-context-v1",
+        &cddl,
+        &os_account_context_fixture(2, true)
+    ));
 }
 
 fn checkpoint_core(include_domain: bool) -> Vec<u8> {

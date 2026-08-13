@@ -1,0 +1,34 @@
+; Einsatzarchiv v0.1 signed protocol cores.
+; COSE-Sign1 is defined by RFC 9052 and constrained by the Suite-v1 profile.
+COSE-Sign1 = any
+
+challenge-response-core-v1 = [
+  1, organization-id: bstr .size 16, nonce: bstr .size 32,
+  issued-at-server: int, expires-at: int,
+  server-certificate-hash: bstr .size 32, []
+]
+challenge-response-v1 = [
+  core: challenge-response-core-v1,
+  server-signature: #6.18(COSE-Sign1)
+]
+
+device-registration-request-core-v1 = [
+  1, organization-id: bstr .size 16, device-id: bstr .size 16,
+  requested-role: 0..2, signing-public-cose-key: bstr,
+  kem-public-cose-key: bstr / null,
+  supported-format-versions: [+ uint], supported-suite-ids: [+ tstr], []
+]
+device-registration-request-v1 = [
+  core: device-registration-request-core-v1,
+  self-signature: #6.18(COSE-Sign1)
+]
+
+reader-ack-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  reader-certificate-hash: bstr .size 32, through-sequence: uint,
+  head-entry-hash: bstr .size 32, acknowledged-at-device: int, []
+]
+reader-ack-v1 = [
+  core: reader-ack-core-v1,
+  signature: #6.18(COSE-Sign1)
+]

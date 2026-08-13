@@ -12,6 +12,9 @@ Die folgenden versionierten Dateien sind Bestandteil dieses Addendums und normat
 - `schemas/archive/v1/archive.cddl`: gemeinsame Hülle und alle sechs Archivobjekte,
 - `schemas/archive/v1/trust.cddl`: Trust-Subtypen und deren feste Core-Arrays,
 - `schemas/archive/v1/evidence.cddl`: Checkpoint-, Timestamp- und Renewal-Arrays,
+- `schemas/protocol/v1/signed-protocol.cddl`: Challenge-, Enrollment- und
+  Reader-Ack-Cores samt nichtzirkulären Signaturhüllen,
+- `schemas/identity/v1/os-account.cddl`: der geschlossene OS-Kontokontext,
 - `schemas/reports/v1/local-audit.cddl`: signiertes, klartextfreies lokales Audit,
 - `schemas/reports/v1/verification-report.schema.json` und
   `key-inventory.schema.json`: geschlossene JSON-Schemata.
@@ -95,7 +98,11 @@ Protected-Map-Bytes sind ungültig.
 
 Die normale Unprotected-Map ist exakt leer. Einzige spätere Suite-v1-Ausnahme ist
 bei Checkpoint- und Renewal-Evidence der RFC-9921-Header `3161-ctt` mit Label 270
-und DER-kodiertem TST als bstr; er ist dann der einzige Unprotected-Eintrag. Alle
+und ausschließlich dem aus der RFC-3161-`TimeStampResp` extrahierten vollständigen
+DER-`TimeStampToken` (`ContentInfo`) als bstr; er ist dann der einzige
+Unprotected-Eintrag. Die vollständige `TimeStampResp` wird separat im
+`rfc3161-response-der`-Feld der `.ecp` archiviert und ist als Headerwert
+ungültig. Alle
 anderen Labels und Unprotected-Kombinationen werden fail-closed abgelehnt.
 
 Label 3 ist ein tstr aus dieser geschlossenen einsatzarchiv-internen
@@ -123,6 +130,52 @@ Registration Request und Reader Acknowledgement sind jeweils exakt
 `reader-ack-core-v1`, niemals die signaturhaltige Hülle. Unregistrierte oder frei gebildete
 Laufzeitwerte sind unzulässig. Eine Implementierung prüft zusätzlich die exakte
 Zuordnung von Content Type, Payloadart, Signerrolle und Zertifikat-Capability.
+
+Die bytegenauen Arraypositionen der drei Protokoll-Cores und ihrer Hüllen stehen
+ausschließlich in `schemas/protocol/v1/signed-protocol.cddl`. Dieses versionierte
+CDDL ist die normative Quelle für Golden Bytes; Implementierungspläne dürfen
+diese Layouts nicht neu definieren.
+
+## Kanonischer OS-Kontokontext
+
+Der CBOR-Input von `EINSATZARCHIV-OS-ACCOUNT-v1` ist exakt das in
+`schemas/identity/v1/os-account.cddl` definierte `os-account-context-v1`.
+`canonical-os-account-id-v1` ist eine geschlossene, selbstversionierende Union;
+tstr, CBOR-Tags, Trennzeichen und plattformspezifische Anzeigeschreibweisen sind
+im Hashinput unzulässig:
+
+- Windows ist `[1, 0, sid-bstr]`. `sid-bstr` ist die exakte binäre SID aus
+  `TokenUser`, nach `IsValidSid` und `GetLengthSid`: `revision = 0x01`,
+  `subAuthorityCount = 1..15`, sechs Identifier-Authority-Oktette in
+  Netzwerkreihenfolge und anschließend genau `count` SubAuthorities als je vier
+  Little-Endian-Oktette. Die Gesamtlänge ist exakt `8 + 4 * count` und damit
+  `12..68`; zusätzliche Oktette, SDDL-Text oder eine SID aus einem anderen Token
+  werden abgelehnt.
+- macOS ist `[1, 1, directory-guid-bstr16, uid]`. Es wird genau ein
+  `kODAttributeTypeGUID` (`GeneratedUID`) des aktuellen Nutzerrecords akzeptiert.
+  Die 36 Zeichen `8-4-4-4-12` werden nach RFC 9562 case-insensitiv validiert und
+  ohne COM-GUID-Feldumsortierung in die 16 Oktette der Netzwerkreihenfolge
+  dekodiert; die Null-GUID ist unzulässig. `uid` ist der zum selben Record
+  gehörende `UniqueID`/`getuid()` als
+  CBOR-uint `0..4294967294`; Mehrfachwerte, `0xffffffff` und Text-UIDs scheitern.
+- Linux ist `[1, 2, machine-id-bstr16, uid]`. Bevorzugte Quelle ist
+  `sd_id128_get_machine()`. Ein Dateifallback akzeptiert ausschließlich 32
+  kleingeschriebene Hexzeichen und genau ein abschließendes LF aus
+  `/etc/machine-id`, dekodiert zu 16 Oktetten. Leer-, `uninitialized`-, Null-,
+  Großbuchstaben- oder abweichende Formen scheitern. `uid` ist `getuid()` als
+  CBOR-uint `0..4294967294`; `0xffffffff` und Text-UIDs scheitern.
+
+Alle Arrays werden RFC-8949-core-deterministisch kodiert. Es gibt keine Unicode-
+Normalisierung und keine Groß-/Kleinschreibungsentscheidung im resultierenden
+CBOR, weil alle stabilen Plattformkennungen als bstr und alle UIDs als uint
+vorliegen.
+Das rohe `canonical-os-account-id-v1` und seine Plattformquellen dürfen weder
+persistiert noch geloggt oder exportiert werden; dauerhaft gespeichert wird nur
+der domain-separierte 32-Byte-Hash. Die in §6.8 festgelegte Linux-Machine-ID
+bleibt für v0.1 literal; ein Wechsel auf eine systemd-app-spezifische Ableitung
+wäre eine eigene normative Designänderung und darf nicht still erfolgen. Der
+separate, installationsgebundene Operator-Instanzschlüssel bleibt zwingend, weil
+Machine-ID plus UID allein eine Linux-UID-Löschung und -Neuanlage nicht erkennt.
 
 ## Suite-v1-AEAD- und HPKE-Größen
 
@@ -360,6 +413,8 @@ Die Gruppen führen jedes hinzugefügte Feld mindestens einmal auf. Status
 
 | Artefakt / Felder | Designquelle | Status |
 |---|---|---|
+| signed protocol: Challenge-, Enrollment- und Reader-Ack-Core sowie jeweils getrennte `[core, COSE-Sign1]`-Hülle | §§10.1, 10.5, 12.7 | bestätigt |
+| OS account: organization-id, device-id, geschlossene selbstversionierende Windows-SID-/macOS-GUID+UID-/Linux-Machine-ID+UID-Union | §§6.8, 10.1, 12.2 | bestätigt |
 | `.ecp`: magic, object-type, format-version, critical-extensions, variant tag | §11.1 Typ-Tags und Hülle | bestätigt |
 | checkpoint: object-version, domain `EINSATZARCHIV-CHECKPOINT-v1`, organization-id, chain-id, covered-from-sequence, covered-through-sequence, head-entry-hash, registry-head-hash, issued-at-server, previous-evidence-hash, critical-extensions | §§15.2–15.3 | bestätigt |
 | timestamp: checkpoint-core, COSE-Sign1, rfc3161-response-der, hash-algorithm, request-nonce, policy-oid-der, tsa-certificate-chain-der, revocation-data-der, validation-data-der | §15.3 | bestätigt |

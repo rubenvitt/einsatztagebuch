@@ -526,6 +526,16 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     }
     validate_cddl_document("combined archive CDDL", &archive_bundle)?;
 
+    let protocol_path = "schemas/protocol/v1/signed-protocol.cddl";
+    let protocol = fs::read_to_string(root.join(protocol_path))
+        .map_err(|error| format!("failed to read {protocol_path}: {error}"))?;
+    validate_cddl_document(protocol_path, &protocol)?;
+
+    let identity_path = "schemas/identity/v1/os-account.cddl";
+    let identity = fs::read_to_string(root.join(identity_path))
+        .map_err(|error| format!("failed to read {identity_path}: {error}"))?;
+    validate_cddl_document(identity_path, &identity)?;
+
     let audit_path = "schemas/reports/v1/local-audit.cddl";
     let audit = fs::read_to_string(root.join(audit_path))
         .map_err(|error| format!("failed to read {audit_path}: {error}"))?;
@@ -545,7 +555,7 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     let addendum = fs::read_to_string(&addendum_path)
         .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
     validate_addendum_review(&addendum)?;
-    println!("validated 4 CDDL and 2 JSON schemas");
+    println!("validated 6 CDDL and 2 JSON schemas");
     Ok(())
 }
 
