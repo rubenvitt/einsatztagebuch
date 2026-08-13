@@ -76,9 +76,9 @@ fn workspace_declares_exact_initial_members_and_shared_dependencies() {
     assert_eq!(members, BTreeSet::from(["tools/xtask", "tests/ea-system-tests"]));
     let workspace_dependencies = root_manifest["workspace"]["dependencies"].as_table().unwrap();
     assert!(!workspace_dependencies.is_empty(), "workspace.dependencies must contain shared dependencies");
-    let mut member_dependency_references = 0;
     for member in ["tools/xtask", "tests/ea-system-tests"] {
         let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml")).unwrap().parse().unwrap();
+        let mut member_dependency_references = 0;
         for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
             if let Some(dependencies) = manifest[table_name].as_table() {
                 for (name, dependency) in dependencies {
@@ -88,8 +88,8 @@ fn workspace_declares_exact_initial_members_and_shared_dependencies() {
                 }
             }
         }
+        assert!(member_dependency_references > 0, "{member} must reference at least one shared workspace dependency");
     }
-    assert!(member_dependency_references > 0, "created members must reference at least one shared workspace dependency");
     assert!(Command::new("cargo").args(["metadata", "--locked", "--no-deps"])
         .current_dir(root).status().unwrap().success());
 }
@@ -130,7 +130,7 @@ packages:
   - apps/desktop
 ```
 
-Create a virtual root `package.json` with `packageManager: "pnpm@11.20.0"`; implement each root script as `cargo run --locked -p xtask -- <gate>`. Create a Cargo workspace with resolver `2`, edition `2024`, and `rust-version = "1.95"`. Initially list only the packages this task actually creates: `tools/xtask` and a non-production `ea-system-tests` package at `tests/ea-system-tests`. Every later crate task adds its own concrete path to `workspace.members` in the same commit as its real manifest and source; never list a package whose manifest does not yet exist and never create empty scaffold crates. Later cross-crate Rust integration tests go directly in `tests/ea-system-tests/tests/` so every documented `cargo test -p ea-system-tests --test <name>` command is executable. Add dependencies only at workspace scope: root `workspace.dependencies` holds each shared dependency and every created member manifest declares it with `workspace = true`, rather than an independent version. Declare the `toml` parser required by this smoke test at workspace scope and consume it from `xtask` with `workspace = true`. Resolve the latest compatible crate releases once, commit `Cargo.lock`, and document for each crypto/format dependency its upstream, maintained status, audit/security rationale, enabled features, and rejected alternatives in ADR 0001. The initial lockfile-generation commands below are the sole bootstrap resolution exception; every later dependency-resolving Cargo/pnpm command uses `--locked` or `--frozen-lockfile`.
+Create a virtual root `package.json` with `packageManager: "pnpm@11.20.0"`; implement each root script as `cargo run --locked -p xtask -- <gate>`. Create a Cargo workspace with resolver `2`, edition `2024`, and `rust-version = "1.95"`. Initially list only the packages this task actually creates: `tools/xtask` and a non-production `ea-system-tests` package at `tests/ea-system-tests`. Every later crate task adds its own concrete path to `workspace.members` in the same commit as its real manifest and source; never list a package whose manifest does not yet exist and never create empty scaffold crates. Later cross-crate Rust integration tests go directly in `tests/ea-system-tests/tests/` so every documented `cargo test -p ea-system-tests --test <name>` command is executable. Add dependencies only at workspace scope: root `workspace.dependencies` holds each shared dependency and every created member manifest declares it with `workspace = true`, rather than an independent version. Each initial member MUST contain at least one justified workspace-scoped dependency reference in `dependencies`, `dev-dependencies`, or `build-dependencies`; do not add an unused dependency merely to satisfy this gate—each reference must support that package's Task 1 implementation or tests. Declare the `toml` parser required by this smoke test at workspace scope and consume it from `xtask` with `workspace = true`. Resolve the latest compatible crate releases once, commit `Cargo.lock`, and document for each crypto/format dependency its upstream, maintained status, audit/security rationale, enabled features, and rejected alternatives in ADR 0001. The initial lockfile-generation commands below are the sole bootstrap resolution exception; every later dependency-resolving Cargo/pnpm command uses `--locked` or `--frozen-lockfile`.
 
 Select from current evidence and commit one exact dated Nightly Rust toolchain and one exact `cargo-fuzz` version independently of the production/MSRV Rust `1.95.0` pin. Record the two resolved values and their evidence in ADR 0001 and in `.cargo/fuzz-toolchain.toml`; the descriptive fields in this plan MUST be replaced by those exact committed values during implementation, not guessed here. Install the selected external tool exactly and with its own locked resolution:
 
