@@ -1,12 +1,21 @@
 use core::fmt;
 
+use cms::{content_info::ContentInfo, signed_data::SignedData};
+use der::{Decode, asn1::ObjectIdentifier};
 use ea_cbor::{ParserLimits, validate};
-use ea_types::{CertificateHash, ChainSequence, KeyThumbprint, OrganizationId, RegistryVersion};
+use ea_types::{
+    CertificateHash, ChainSequence, DeviceId, Hash32, KeyThumbprint, OrganizationId,
+    RegistryVersion,
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use minicbor::{Decoder, Encoder, data::Type};
+use x509_tsp::TstInfo;
 
 use crate::digest::sha256_parts;
-use crate::{CanonicalPublicCoseKey, CryptoError, SecretBytes, object_hash, recovery_test_digest};
+use crate::{
+    CanonicalPublicCoseKey, CryptoError, SecretBytes, grant_digest, object_hash, receipt_digest,
+    record_digest, recovery_test_digest,
+};
 
 const COSE_SIGN1_TAG: u64 = 18;
 const ED25519_ALGORITHM: i64 = -19;
@@ -312,7 +321,7 @@ impl CoseSigner {
         Self(SigningKey::from_bytes(secret.expose()))
     }
 
-    pub fn sign_normal(
+    fn sign_normal(
         &self,
         content_type: ContentType,
         certificate_hash: CertificateHash,
@@ -330,6 +339,139 @@ impl CoseSigner {
             ProtectedHeader::normal(content_type, public.thumbprint(), certificate_hash),
             payload,
         )
+    }
+
+    pub fn sign_record(&self, exact_signed_manifest: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let bindings = record_bindings(exact_signed_manifest)?;
+        self.sign_normal(
+            ContentType::RecordDigest,
+            bindings.certificate_hash,
+            bindings.digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_initial_grant(&self, exact_grant_body: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let bindings = grant_bindings(exact_grant_body, GrantKind::Initial)?;
+        self.sign_normal(
+            ContentType::GrantDigest,
+            bindings.certificate_hash,
+            bindings.digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_historical_grant(&self, exact_grant_body: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let bindings = grant_bindings(exact_grant_body, GrantKind::Historical)?;
+        self.sign_normal(
+            ContentType::GrantDigest,
+            bindings.certificate_hash,
+            bindings.digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_receipt(&self, exact_receipt_core: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let bindings = receipt_bindings(exact_receipt_core)?;
+        self.sign_normal(
+            ContentType::ReceiptDigest,
+            bindings.certificate_hash,
+            bindings.digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_root_trust_digest(
+        &self,
+        certificate_hash: CertificateHash,
+        digest: Hash32,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(
+            ContentType::TrustDigest,
+            certificate_hash,
+            digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_organization_admin_trust_digest(
+        &self,
+        certificate_hash: CertificateHash,
+        digest: Hash32,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(
+            ContentType::TrustDigest,
+            certificate_hash,
+            digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_historical_grant_approval_digest(
+        &self,
+        certificate_hash: CertificateHash,
+        digest: Hash32,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(
+            ContentType::TrustDigest,
+            certificate_hash,
+            digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_destruction_approval_digest(
+        &self,
+        certificate_hash: CertificateHash,
+        digest: Hash32,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(
+            ContentType::TrustDigest,
+            certificate_hash,
+            digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_deletion_attestation_digest(
+        &self,
+        certificate_hash: CertificateHash,
+        digest: Hash32,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(
+            ContentType::TrustDigest,
+            certificate_hash,
+            digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_checkpoint(
+        &self,
+        certificate_hash: CertificateHash,
+        core: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(ContentType::CheckpointCbor, certificate_hash, core)
+    }
+
+    pub fn sign_evidence_renewal(
+        &self,
+        certificate_hash: CertificateHash,
+        core: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(ContentType::EvidenceRenewalCbor, certificate_hash, core)
+    }
+
+    pub fn sign_local_audit(&self, core: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let certificate_hash = core_bindings(ContentType::LocalAuditCbor, core)?
+            .certificate_hash
+            .ok_or(CryptoError::InvalidProtocolCore)?;
+        self.sign_normal(ContentType::LocalAuditCbor, certificate_hash, core)
+    }
+
+    pub fn sign_challenge_response(&self, core: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let certificate_hash = core_bindings(ContentType::ChallengeResponseCbor, core)?
+            .certificate_hash
+            .ok_or(CryptoError::InvalidProtocolCore)?;
+        self.sign_normal(ContentType::ChallengeResponseCbor, certificate_hash, core)
+    }
+
+    pub fn sign_reader_ack(&self, core: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let certificate_hash = core_bindings(ContentType::ReaderAckCbor, core)?
+            .certificate_hash
+            .ok_or(CryptoError::InvalidProtocolCore)?;
+        self.sign_normal(ContentType::ReaderAckCbor, certificate_hash, core)
     }
 
     pub fn sign_recovery_test(
@@ -382,9 +524,9 @@ pub struct ParsedCoseSign1 {
     timestamp_token: Option<Vec<u8>>,
 }
 
-pub struct Rfc3161TimeStampToken(Vec<u8>);
+pub struct UnverifiedRfc3161TimeStampToken(Vec<u8>);
 
-impl Rfc3161TimeStampToken {
+impl UnverifiedRfc3161TimeStampToken {
     pub fn from_der(der: &[u8]) -> Result<Self, CryptoError> {
         validate_timestamp_token_der(der)?;
         Ok(Self(der.to_vec()))
@@ -403,7 +545,7 @@ pub fn cose_sign1_ctt_imprint(signature: &[u8; 64]) -> ea_types::Hash32 {
 
 pub fn attach_rfc3161_ctt(
     cose_sign1: &[u8],
-    token: &Rfc3161TimeStampToken,
+    token: &UnverifiedRfc3161TimeStampToken,
 ) -> Result<Vec<u8>, CryptoError> {
     let parsed = parse_cose_sign1(cose_sign1, &[])?;
     if !parsed.protected.content_type.permits_ctt() || parsed.timestamp_token.is_some() {
@@ -526,76 +668,32 @@ fn parse_unprotected(
 }
 
 fn validate_timestamp_token_der(der: &[u8]) -> Result<(), CryptoError> {
-    const SIGNED_DATA_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+    const ID_SIGNED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2");
+    const ID_CT_TST_INFO: ObjectIdentifier =
+        ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
 
-    let (outer_content, outer_end) = exact_der_tlv(der, 0, 0x30)?;
-    if outer_end != der.len() {
+    let content_info = ContentInfo::from_der(der).map_err(|_| CryptoError::InvalidCose)?;
+    if content_info.content_type != ID_SIGNED_DATA {
         return Err(CryptoError::InvalidCose);
     }
-    let (oid_content, oid_end) = exact_der_tlv(der, outer_content, 0x06)?;
-    if &der[oid_content..oid_end] != SIGNED_DATA_OID {
+    let signed_data = content_info
+        .content
+        .decode_as::<SignedData>()
+        .map_err(|_| CryptoError::InvalidCose)?;
+    if signed_data.digest_algorithms.as_slice().is_empty()
+        || signed_data.signer_infos.0.as_slice().len() != 1
+        || signed_data.encap_content_info.econtent_type != ID_CT_TST_INFO
+    {
         return Err(CryptoError::InvalidCose);
     }
-    let (explicit_content, explicit_end) = exact_der_tlv(der, oid_end, 0xa0)?;
-    if explicit_end != outer_end || explicit_content == explicit_end {
-        return Err(CryptoError::InvalidCose);
-    }
-    let (_, signed_data_end) = exact_der_tlv(der, explicit_content, 0x30)?;
-    if signed_data_end != explicit_end {
-        return Err(CryptoError::InvalidCose);
-    }
+    let tst_info_der = signed_data
+        .encap_content_info
+        .econtent
+        .as_ref()
+        .ok_or(CryptoError::InvalidCose)?
+        .value();
+    TstInfo::from_der(tst_info_der).map_err(|_| CryptoError::InvalidCose)?;
     Ok(())
-}
-
-fn exact_der_tlv(
-    der: &[u8],
-    offset: usize,
-    expected_tag: u8,
-) -> Result<(usize, usize), CryptoError> {
-    if der.get(offset).copied() != Some(expected_tag) {
-        return Err(CryptoError::InvalidCose);
-    }
-    let length_offset = offset.checked_add(1).ok_or(CryptoError::SizeLimit)?;
-    let first = *der.get(length_offset).ok_or(CryptoError::InvalidCose)?;
-    let (content_offset, content_length) = if first < 0x80 {
-        (
-            length_offset.checked_add(1).ok_or(CryptoError::SizeLimit)?,
-            usize::from(first),
-        )
-    } else {
-        let length_bytes = usize::from(first & 0x7f);
-        if length_bytes == 0 || length_bytes > core::mem::size_of::<usize>() {
-            return Err(CryptoError::InvalidCose);
-        }
-        let bytes_start = length_offset.checked_add(1).ok_or(CryptoError::SizeLimit)?;
-        let content_offset = bytes_start
-            .checked_add(length_bytes)
-            .ok_or(CryptoError::SizeLimit)?;
-        let encoded_length = der
-            .get(bytes_start..content_offset)
-            .ok_or(CryptoError::InvalidCose)?;
-        if encoded_length.first() == Some(&0) {
-            return Err(CryptoError::InvalidCose);
-        }
-        let mut value = 0_usize;
-        for byte in encoded_length {
-            value = value
-                .checked_mul(256)
-                .and_then(|current| current.checked_add(usize::from(*byte)))
-                .ok_or(CryptoError::SizeLimit)?;
-        }
-        if value < 0x80 {
-            return Err(CryptoError::InvalidCose);
-        }
-        (content_offset, value)
-    };
-    let end = content_offset
-        .checked_add(content_length)
-        .ok_or(CryptoError::SizeLimit)?;
-    if end > der.len() {
-        return Err(CryptoError::InvalidCose);
-    }
-    Ok((content_offset, end))
 }
 
 fn encode_sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -646,34 +744,17 @@ pub enum SignerRole {
     OrganizationAdmin,
     Root,
     KeyApprover,
-    Server,
-    Component,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SignerCapability {
-    EntryWrite,
-    GrantIssue,
-    ReceiptSign,
-    TrustSign,
-    OrganizationAdminApprove,
-    CheckpointSign,
-    AuditSign,
-    ChallengeSign,
-    ReaderAck,
+    HistoricalGrantAuthority,
+    ServerReceipt,
     DeletionAttest,
 }
 
 pub struct ResolvedSigner<'a> {
     pub exact_certificate_bytes: &'a [u8],
-    pub certificate_hash: CertificateHash,
-    pub public_key: &'a CanonicalPublicCoseKey,
-    pub role: SignerRole,
-    pub organization_id: OrganizationId,
-    pub effective_from_sequence: ChainSequence,
-    pub revoked_from_sequence: Option<ChainSequence>,
-    pub capabilities: &'a [SignerCapability],
-    pub revoked: bool,
+    pub registry_effective_from_sequence: ChainSequence,
+    pub registry_revoked_from_sequence: Option<ChainSequence>,
+    pub registry_revoked: bool,
+    pub root_line_accepted: bool,
 }
 
 pub trait SignerCertificateResolver {
@@ -684,32 +765,360 @@ pub trait SignerCertificateResolver {
     ) -> Result<ResolvedSigner<'_>, CryptoError>;
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub struct ExpectedSigner {
-    pub organization_id: OrganizationId,
-    pub sequence: ChainSequence,
-    pub role: SignerRole,
-    pub capability: SignerCapability,
-}
-
 pub struct VerificationContext {
     content_type: ContentType,
-    expected: ExpectedSigner,
+    exact_payload: Vec<u8>,
+    expected_certificate_hash: CertificateHash,
+    expected_key_thumbprint: Option<KeyThumbprint>,
+    expected_organization_id: OrganizationId,
+    expected_device_id: Option<DeviceId>,
+    expected_sequence: ChainSequence,
+    expected_role: SignerRole,
+    expected_capability: Option<CertificateCapability>,
+    require_accepted_root_line: bool,
     registry: RegistryVersion,
 }
 
 impl VerificationContext {
+    pub fn record(exact_signed_manifest: &[u8]) -> Result<Self, CryptoError> {
+        let bindings = record_bindings(exact_signed_manifest)?;
+        Ok(Self::digest(
+            ContentType::RecordDigest,
+            bindings.digest,
+            bindings.certificate_hash,
+            None,
+            bindings.organization_id,
+            bindings.sequence,
+            SignerRole::Writer,
+            None,
+            false,
+            bindings.registry,
+        ))
+    }
+
+    pub fn initial_grant(
+        exact_grant_body: &[u8],
+        sequence: ChainSequence,
+    ) -> Result<Self, CryptoError> {
+        let bindings = grant_bindings(exact_grant_body, GrantKind::Initial)?;
+        Ok(Self::digest(
+            ContentType::GrantDigest,
+            bindings.digest,
+            bindings.certificate_hash,
+            Some(bindings.key_thumbprint),
+            bindings.organization_id,
+            sequence,
+            SignerRole::Writer,
+            Some(CertificateCapability::InitialGrant),
+            false,
+            bindings.registry,
+        ))
+    }
+
+    pub fn historical_grant(
+        exact_grant_body: &[u8],
+        sequence: ChainSequence,
+    ) -> Result<Self, CryptoError> {
+        let bindings = grant_bindings(exact_grant_body, GrantKind::Historical)?;
+        Ok(Self::digest(
+            ContentType::GrantDigest,
+            bindings.digest,
+            bindings.certificate_hash,
+            Some(bindings.key_thumbprint),
+            bindings.organization_id,
+            sequence,
+            SignerRole::HistoricalGrantAuthority,
+            Some(CertificateCapability::HistoricalGrant),
+            false,
+            bindings.registry,
+        ))
+    }
+
+    pub fn receipt(exact_receipt_core: &[u8]) -> Result<Self, CryptoError> {
+        let bindings = receipt_bindings(exact_receipt_core)?;
+        Ok(Self::digest(
+            ContentType::ReceiptDigest,
+            bindings.digest,
+            bindings.certificate_hash,
+            Some(bindings.key_thumbprint),
+            bindings.organization_id,
+            bindings.sequence,
+            SignerRole::ServerReceipt,
+            Some(CertificateCapability::ServerReceipt),
+            false,
+            bindings.registry,
+        ))
+    }
+
     #[must_use]
-    pub const fn digest(
+    pub fn root_trust_digest(
+        expected_digest: Hash32,
+        root_certificate_hash: CertificateHash,
+        organization_id: OrganizationId,
+        sequence: ChainSequence,
+        registry: RegistryVersion,
+    ) -> Self {
+        Self::digest(
+            ContentType::TrustDigest,
+            expected_digest,
+            root_certificate_hash,
+            None,
+            organization_id,
+            sequence,
+            SignerRole::Root,
+            None,
+            true,
+            registry,
+        )
+    }
+
+    #[must_use]
+    pub fn organization_admin_trust_digest(
+        expected_digest: Hash32,
+        certificate_hash: CertificateHash,
+        organization_id: OrganizationId,
+        sequence: ChainSequence,
+        registry: RegistryVersion,
+    ) -> Self {
+        Self::digest(
+            ContentType::TrustDigest,
+            expected_digest,
+            certificate_hash,
+            None,
+            organization_id,
+            sequence,
+            SignerRole::OrganizationAdmin,
+            Some(CertificateCapability::OrganizationAdminApprove),
+            false,
+            registry,
+        )
+    }
+
+    #[must_use]
+    pub fn historical_grant_approval_trust_digest(
+        expected_digest: Hash32,
+        certificate_hash: CertificateHash,
+        organization_id: OrganizationId,
+        sequence: ChainSequence,
+        registry: RegistryVersion,
+    ) -> Self {
+        Self::digest(
+            ContentType::TrustDigest,
+            expected_digest,
+            certificate_hash,
+            None,
+            organization_id,
+            sequence,
+            SignerRole::KeyApprover,
+            Some(CertificateCapability::HistoricalGrantApprove),
+            false,
+            registry,
+        )
+    }
+
+    #[must_use]
+    pub fn destruction_approval_trust_digest(
+        expected_digest: Hash32,
+        certificate_hash: CertificateHash,
+        organization_id: OrganizationId,
+        sequence: ChainSequence,
+        registry: RegistryVersion,
+    ) -> Self {
+        Self::digest(
+            ContentType::TrustDigest,
+            expected_digest,
+            certificate_hash,
+            None,
+            organization_id,
+            sequence,
+            SignerRole::KeyApprover,
+            Some(CertificateCapability::DestructionApprove),
+            false,
+            registry,
+        )
+    }
+
+    #[must_use]
+    pub fn deletion_attestation_trust_digest(
+        expected_digest: Hash32,
+        certificate_hash: CertificateHash,
+        organization_id: OrganizationId,
+        sequence: ChainSequence,
+        registry: RegistryVersion,
+    ) -> Self {
+        Self::digest(
+            ContentType::TrustDigest,
+            expected_digest,
+            certificate_hash,
+            None,
+            organization_id,
+            sequence,
+            SignerRole::DeletionAttest,
+            Some(CertificateCapability::DeletionAttest),
+            false,
+            registry,
+        )
+    }
+
+    pub fn checkpoint(
+        exact_core: &[u8],
+        server_certificate_hash: CertificateHash,
+        registry: RegistryVersion,
+    ) -> Result<Self, CryptoError> {
+        let bindings = core_bindings(ContentType::CheckpointCbor, exact_core)?;
+        Self::core(
+            ContentType::CheckpointCbor,
+            exact_core,
+            server_certificate_hash,
+            bindings.organization_id,
+            None,
+            bindings.sequence.ok_or(CryptoError::InvalidProtocolCore)?,
+            SignerRole::ServerReceipt,
+            Some(CertificateCapability::ServerReceipt),
+            registry,
+        )
+    }
+
+    pub fn evidence_renewal(
+        exact_core: &[u8],
+        server_certificate_hash: CertificateHash,
+        effective_sequence: ChainSequence,
+        registry: RegistryVersion,
+    ) -> Result<Self, CryptoError> {
+        let bindings = core_bindings(ContentType::EvidenceRenewalCbor, exact_core)?;
+        Self::core(
+            ContentType::EvidenceRenewalCbor,
+            exact_core,
+            server_certificate_hash,
+            bindings.organization_id,
+            None,
+            effective_sequence,
+            SignerRole::ServerReceipt,
+            Some(CertificateCapability::ServerReceipt),
+            registry,
+        )
+    }
+
+    pub fn local_audit(
+        exact_core: &[u8],
+        effective_sequence: ChainSequence,
+        signer_role: SignerRole,
+        registry: RegistryVersion,
+    ) -> Result<Self, CryptoError> {
+        if !matches!(
+            signer_role,
+            SignerRole::Writer | SignerRole::Reader | SignerRole::OrganizationAdmin
+        ) {
+            return Err(CryptoError::SignerUnauthorized);
+        }
+        let bindings = core_bindings(ContentType::LocalAuditCbor, exact_core)?;
+        Self::core(
+            ContentType::LocalAuditCbor,
+            exact_core,
+            bindings
+                .certificate_hash
+                .ok_or(CryptoError::InvalidProtocolCore)?,
+            bindings.organization_id,
+            bindings.device_id,
+            effective_sequence,
+            signer_role,
+            None,
+            registry,
+        )
+    }
+
+    pub fn challenge_response(
+        exact_core: &[u8],
+        effective_sequence: ChainSequence,
+        registry: RegistryVersion,
+    ) -> Result<Self, CryptoError> {
+        let bindings = core_bindings(ContentType::ChallengeResponseCbor, exact_core)?;
+        Self::core(
+            ContentType::ChallengeResponseCbor,
+            exact_core,
+            bindings
+                .certificate_hash
+                .ok_or(CryptoError::InvalidProtocolCore)?,
+            bindings.organization_id,
+            None,
+            effective_sequence,
+            SignerRole::ServerReceipt,
+            None,
+            registry,
+        )
+    }
+
+    pub fn reader_ack(exact_core: &[u8], registry: RegistryVersion) -> Result<Self, CryptoError> {
+        let bindings = core_bindings(ContentType::ReaderAckCbor, exact_core)?;
+        Self::core(
+            ContentType::ReaderAckCbor,
+            exact_core,
+            bindings
+                .certificate_hash
+                .ok_or(CryptoError::InvalidProtocolCore)?,
+            bindings.organization_id,
+            None,
+            bindings.sequence.ok_or(CryptoError::InvalidProtocolCore)?,
+            SignerRole::Reader,
+            None,
+            registry,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn digest(
         content_type: ContentType,
-        expected: ExpectedSigner,
+        exact_digest: Hash32,
+        expected_certificate_hash: CertificateHash,
+        expected_key_thumbprint: Option<KeyThumbprint>,
+        expected_organization_id: OrganizationId,
+        expected_sequence: ChainSequence,
+        expected_role: SignerRole,
+        expected_capability: Option<CertificateCapability>,
+        require_accepted_root_line: bool,
         registry: RegistryVersion,
     ) -> Self {
         Self {
             content_type,
-            expected,
+            exact_payload: exact_digest.as_bytes().to_vec(),
+            expected_certificate_hash,
+            expected_key_thumbprint,
+            expected_organization_id,
+            expected_device_id: None,
+            expected_sequence,
+            expected_role,
+            expected_capability,
+            require_accepted_root_line,
             registry,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn core(
+        content_type: ContentType,
+        exact_core: &[u8],
+        expected_certificate_hash: CertificateHash,
+        expected_organization_id: OrganizationId,
+        expected_device_id: Option<DeviceId>,
+        expected_sequence: ChainSequence,
+        expected_role: SignerRole,
+        expected_capability: Option<CertificateCapability>,
+        registry: RegistryVersion,
+    ) -> Result<Self, CryptoError> {
+        validate_unsigned_protocol_core(content_type, exact_core)?;
+        Ok(Self {
+            content_type,
+            exact_payload: exact_core.to_vec(),
+            expected_certificate_hash,
+            expected_key_thumbprint: None,
+            expected_organization_id,
+            expected_device_id,
+            expected_sequence,
+            expected_role,
+            expected_capability,
+            require_accepted_root_line: false,
+            registry,
+        })
     }
 }
 
@@ -768,37 +1177,337 @@ pub fn verify_cose_sign1(
     {
         return Err(CryptoError::InvalidCose);
     }
+    if parsed.payload != context.exact_payload {
+        return Err(CryptoError::SignerMismatch);
+    }
     let certificate_hash = parsed
         .protected
         .certificate_hash
         .ok_or(CryptoError::InvalidCose)?;
-    let resolved = resolver.resolve(certificate_hash, context.registry)?;
-    if resolved.certificate_hash != certificate_hash
-        || CertificateHash::from(object_hash(resolved.exact_certificate_bytes)) != certificate_hash
-        || resolved.public_key.thumbprint() != parsed.protected.key_thumbprint
+    if certificate_hash != context.expected_certificate_hash
+        || context
+            .expected_key_thumbprint
+            .is_some_and(|thumbprint| thumbprint != parsed.protected.key_thumbprint)
     {
         return Err(CryptoError::SignerMismatch);
     }
-    let expected = context.expected;
-    let inactive = expected.sequence < resolved.effective_from_sequence
-        || resolved
+    let resolved = resolver.resolve(certificate_hash, context.registry)?;
+    if CertificateHash::from(object_hash(resolved.exact_certificate_bytes)) != certificate_hash {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let certificate = parse_signer_certificate(resolved.exact_certificate_bytes)?;
+    if certificate.public_key.thumbprint() != parsed.protected.key_thumbprint {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let inactive = context.expected_sequence < certificate.effective_from_sequence
+        || context.expected_sequence < resolved.registry_effective_from_sequence
+        || certificate
             .revoked_from_sequence
-            .is_some_and(|sequence| expected.sequence >= sequence);
-    if resolved.organization_id != expected.organization_id
-        || resolved.role != expected.role
-        || resolved.revoked
+            .is_some_and(|sequence| context.expected_sequence >= sequence)
+        || resolved
+            .registry_revoked_from_sequence
+            .is_some_and(|sequence| context.expected_sequence >= sequence);
+    if certificate.organization_id != context.expected_organization_id
+        || context
+            .expected_device_id
+            .is_some_and(|device_id| certificate.device_id != Some(device_id))
+        || certificate.role != context.expected_role
+        || resolved.registry_revoked
         || inactive
-        || !resolved.capabilities.contains(&expected.capability)
+        || context
+            .expected_capability
+            .is_some_and(|capability| !certificate.capabilities.contains(&capability))
+        || (context.require_accepted_root_line && !resolved.root_line_accepted)
     {
         return Err(CryptoError::SignerUnauthorized);
     }
-    parsed.verify_with_key(resolved.public_key)?;
+    parsed.verify_with_key(&certificate.public_key)?;
     Ok(VerifiedSigner {
         certificate_hash,
         key_thumbprint: parsed.protected.key_thumbprint,
-        role: resolved.role,
-        organization_id: resolved.organization_id,
+        role: certificate.role,
+        organization_id: certificate.organization_id,
     })
+}
+
+struct ParsedSignerCertificate {
+    public_key: CanonicalPublicCoseKey,
+    organization_id: OrganizationId,
+    device_id: Option<DeviceId>,
+    role: SignerRole,
+    capabilities: Vec<CertificateCapability>,
+    effective_from_sequence: ChainSequence,
+    revoked_from_sequence: Option<ChainSequence>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CertificateCapability {
+    InitialGrant,
+    HistoricalGrant,
+    OrganizationAdminApprove,
+    HistoricalGrantApprove,
+    DestructionApprove,
+    ServerReceipt,
+    DeletionAttest,
+}
+
+fn parse_signer_certificate(bytes: &[u8]) -> Result<ParsedSignerCertificate, CryptoError> {
+    validate(bytes, ParserLimits::V1).map_err(|_| CryptoError::SignerMismatch)?;
+    let mut decoder = Decoder::new(bytes);
+    if signer_array_length(&mut decoder)? != 5
+        || decoder.bytes().map_err(|_| CryptoError::SignerMismatch)? != b"EA1\0"
+        || decoder.u64().map_err(|_| CryptoError::SignerMismatch)? != 5
+        || decoder.u64().map_err(|_| CryptoError::SignerMismatch)? != 1
+        || signer_array_length(&mut decoder)? != 0
+        || signer_array_length(&mut decoder)? != 3
+    {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let subtype = decoder.str().map_err(|_| CryptoError::SignerMismatch)?;
+    let certificate = match subtype {
+        "deviceCertificate" => parse_device_certificate_payload(&mut decoder)?,
+        "rootCertificate" => parse_root_certificate_payload(&mut decoder)?,
+        _ => return Err(CryptoError::SignerMismatch),
+    };
+    let signatures = signer_array_length(&mut decoder)?;
+    if signatures == 0 || (subtype == "rootCertificate" && signatures != 1) {
+        return Err(CryptoError::SignerMismatch);
+    }
+    for _ in 0..signatures {
+        decoder.skip().map_err(|_| CryptoError::SignerMismatch)?;
+    }
+    if decoder.position() != bytes.len() {
+        return Err(CryptoError::SignerMismatch);
+    }
+    Ok(certificate)
+}
+
+fn parse_device_certificate_payload(
+    decoder: &mut Decoder<'_>,
+) -> Result<ParsedSignerCertificate, CryptoError> {
+    let payload_length = signer_array_length(decoder)?;
+    let (certificate, directly_root_signed) = if payload_length == 2 {
+        let core_length = signer_array_length(decoder)?;
+        let certificate = parse_device_certificate_core(decoder, core_length)?;
+        signer_bstr(decoder, 32)?;
+        (certificate, false)
+    } else {
+        (
+            parse_device_certificate_core(decoder, payload_length)?,
+            true,
+        )
+    };
+    if directly_root_signed && certificate.role != SignerRole::OrganizationAdmin {
+        return Err(CryptoError::SignerMismatch);
+    }
+    Ok(certificate)
+}
+
+fn parse_device_certificate_core(
+    decoder: &mut Decoder<'_>,
+    length: u64,
+) -> Result<ParsedSignerCertificate, CryptoError> {
+    if length != 13 || decoder.u64().map_err(|_| CryptoError::SignerMismatch)? != 1 {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let organization_id = OrganizationId::try_from(signer_bstr(decoder, 16)?)
+        .map_err(|_| CryptoError::SignerMismatch)?;
+    let device_id =
+        DeviceId::try_from(signer_bstr(decoder, 16)?).map_err(|_| CryptoError::SignerMismatch)?;
+    let role = match decoder.u64().map_err(|_| CryptoError::SignerMismatch)? {
+        0 => SignerRole::Writer,
+        1 => SignerRole::Reader,
+        2 => SignerRole::OrganizationAdmin,
+        3 => SignerRole::KeyApprover,
+        5 => SignerRole::HistoricalGrantAuthority,
+        6 => SignerRole::ServerReceipt,
+        7 => SignerRole::DeletionAttest,
+        4 | 8.. => return Err(CryptoError::SignerMismatch),
+    };
+    let public_key = signer_optional_public_key(decoder)?.ok_or(CryptoError::SignerMismatch)?;
+    if !matches!(public_key, CanonicalPublicCoseKey::Ed25519(_)) {
+        return Err(CryptoError::SignerMismatch);
+    }
+    signer_optional_public_key(decoder)?;
+    let stored_thumbprint =
+        signer_optional_thumbprint(decoder)?.ok_or(CryptoError::SignerMismatch)?;
+    if stored_thumbprint != public_key.thumbprint() {
+        return Err(CryptoError::SignerMismatch);
+    }
+    signer_optional_thumbprint(decoder)?;
+
+    let capability_count = signer_array_length(decoder)?;
+    let mut capabilities = Vec::with_capacity(capability_count as usize);
+    let mut previous: Option<&[u8]> = None;
+    for _ in 0..capability_count {
+        let literal = decoder.str().map_err(|_| CryptoError::SignerMismatch)?;
+        if previous.is_some_and(|value| value >= literal.as_bytes()) {
+            return Err(CryptoError::SignerMismatch);
+        }
+        let capability = match literal {
+            "initialGrant" => CertificateCapability::InitialGrant,
+            "historicalGrant" => CertificateCapability::HistoricalGrant,
+            "organizationAdminApprove" => CertificateCapability::OrganizationAdminApprove,
+            "historicalGrantApprove" => CertificateCapability::HistoricalGrantApprove,
+            "destructionApprove" => CertificateCapability::DestructionApprove,
+            "serverReceipt" => CertificateCapability::ServerReceipt,
+            "deletionAttest" => CertificateCapability::DeletionAttest,
+            _ => return Err(CryptoError::SignerMismatch),
+        };
+        capabilities.push(capability);
+        previous = Some(literal.as_bytes());
+    }
+    if decoder.u64().map_err(|_| CryptoError::SignerMismatch)? > 4 {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let effective_from_sequence =
+        ChainSequence::new(decoder.u64().map_err(|_| CryptoError::SignerMismatch)?);
+    let revoked_from_sequence = signer_optional_sequence(decoder)?;
+    if signer_array_length(decoder)? != 0 {
+        return Err(CryptoError::SignerMismatch);
+    }
+    Ok(ParsedSignerCertificate {
+        public_key,
+        organization_id,
+        device_id: Some(device_id),
+        role,
+        capabilities,
+        effective_from_sequence,
+        revoked_from_sequence,
+    })
+}
+
+fn parse_root_certificate_payload(
+    decoder: &mut Decoder<'_>,
+) -> Result<ParsedSignerCertificate, CryptoError> {
+    let payload_length = signer_array_length(decoder)?;
+    let core_length = if payload_length == 2 {
+        let length = signer_array_length(decoder)?;
+        if length != 7 {
+            return Err(CryptoError::SignerMismatch);
+        }
+        length
+    } else {
+        payload_length
+    };
+    if core_length != 7 || decoder.u64().map_err(|_| CryptoError::SignerMismatch)? != 1 {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let organization_id = OrganizationId::try_from(signer_bstr(decoder, 16)?)
+        .map_err(|_| CryptoError::SignerMismatch)?;
+    let public_key_bytes = decoder.bytes().map_err(|_| CryptoError::SignerMismatch)?;
+    let public_key = CanonicalPublicCoseKey::from_deterministic_cbor(public_key_bytes)
+        .map_err(|_| CryptoError::SignerMismatch)?;
+    if !matches!(public_key, CanonicalPublicCoseKey::Ed25519(_)) {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let stored_thumbprint = KeyThumbprint::try_from(signer_bstr(decoder, 32)?)
+        .map_err(|_| CryptoError::SignerMismatch)?;
+    if stored_thumbprint != public_key.thumbprint() {
+        return Err(CryptoError::SignerMismatch);
+    }
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::SignerMismatch)?
+    {
+        Type::Null => decoder.null().map_err(|_| CryptoError::SignerMismatch)?,
+        Type::Bytes => {
+            signer_bstr(decoder, 32)?;
+        }
+        _ => return Err(CryptoError::SignerMismatch),
+    }
+    decoder.u64().map_err(|_| CryptoError::SignerMismatch)?;
+    if signer_array_length(decoder)? != 0 {
+        return Err(CryptoError::SignerMismatch);
+    }
+    if payload_length == 2 {
+        signer_bstr(decoder, 32)?;
+    }
+    Ok(ParsedSignerCertificate {
+        public_key,
+        organization_id,
+        device_id: None,
+        role: SignerRole::Root,
+        capabilities: Vec::new(),
+        effective_from_sequence: ChainSequence::new(0),
+        revoked_from_sequence: None,
+    })
+}
+
+fn signer_array_length(decoder: &mut Decoder<'_>) -> Result<u64, CryptoError> {
+    decoder
+        .array()
+        .map_err(|_| CryptoError::SignerMismatch)?
+        .ok_or(CryptoError::SignerMismatch)
+}
+
+fn signer_bstr<'a>(
+    decoder: &mut Decoder<'a>,
+    expected_length: usize,
+) -> Result<&'a [u8], CryptoError> {
+    let bytes = decoder.bytes().map_err(|_| CryptoError::SignerMismatch)?;
+    if bytes.len() != expected_length {
+        return Err(CryptoError::SignerMismatch);
+    }
+    Ok(bytes)
+}
+
+fn signer_optional_public_key(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<CanonicalPublicCoseKey>, CryptoError> {
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::SignerMismatch)?
+    {
+        Type::Null => {
+            decoder.null().map_err(|_| CryptoError::SignerMismatch)?;
+            Ok(None)
+        }
+        Type::Bytes => CanonicalPublicCoseKey::from_deterministic_cbor(
+            decoder.bytes().map_err(|_| CryptoError::SignerMismatch)?,
+        )
+        .map(Some)
+        .map_err(|_| CryptoError::SignerMismatch),
+        _ => Err(CryptoError::SignerMismatch),
+    }
+}
+
+fn signer_optional_thumbprint(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<KeyThumbprint>, CryptoError> {
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::SignerMismatch)?
+    {
+        Type::Null => {
+            decoder.null().map_err(|_| CryptoError::SignerMismatch)?;
+            Ok(None)
+        }
+        Type::Bytes => KeyThumbprint::try_from(signer_bstr(decoder, 32)?)
+            .map(Some)
+            .map_err(|_| CryptoError::SignerMismatch),
+        _ => Err(CryptoError::SignerMismatch),
+    }
+}
+
+fn signer_optional_sequence(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<ChainSequence>, CryptoError> {
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::SignerMismatch)?
+    {
+        Type::Null => {
+            decoder.null().map_err(|_| CryptoError::SignerMismatch)?;
+            Ok(None)
+        }
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 => decoder
+            .u64()
+            .map(ChainSequence::new)
+            .map(Some)
+            .map_err(|_| CryptoError::SignerMismatch),
+        _ => Err(CryptoError::SignerMismatch),
+    }
 }
 
 pub struct CoseVerifier;
@@ -863,6 +1572,416 @@ pub fn verify_enrollment_pop(
         return Err(CryptoError::SignerMismatch);
     }
     parsed.verify_with_key(&embedded_key)
+}
+
+struct CoreBindings {
+    organization_id: OrganizationId,
+    device_id: Option<DeviceId>,
+    certificate_hash: Option<CertificateHash>,
+    sequence: Option<ChainSequence>,
+}
+
+struct RecordBindings {
+    digest: Hash32,
+    certificate_hash: CertificateHash,
+    organization_id: OrganizationId,
+    sequence: ChainSequence,
+    registry: RegistryVersion,
+}
+
+fn record_bindings(exact_signed_manifest: &[u8]) -> Result<RecordBindings, CryptoError> {
+    validate(exact_signed_manifest, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_signed_manifest);
+    if protocol_array_length(&mut decoder)? != 2
+        || protocol_array_length(&mut decoder)? != 16
+        || decoder.u64().ok() != Some(1)
+        || decoder.u64().ok() != Some(1)
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(&mut decoder)?;
+    protocol_bstr(&mut decoder, 16)?;
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_optional_bstr(&mut decoder, 32)?;
+    let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_optional_bstr(&mut decoder, 32)?;
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    if decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        != crate::SUITE_ID
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 12)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if protocol_array_length(&mut decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    if decoder.position() != exact_signed_manifest.len() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(RecordBindings {
+        digest: record_digest(exact_signed_manifest),
+        certificate_hash,
+        organization_id,
+        sequence,
+        registry,
+    })
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum GrantKind {
+    Initial,
+    Historical,
+}
+
+struct GrantBindings {
+    digest: Hash32,
+    certificate_hash: CertificateHash,
+    key_thumbprint: KeyThumbprint,
+    organization_id: OrganizationId,
+    registry: RegistryVersion,
+}
+
+fn grant_bindings(
+    exact_grant_body: &[u8],
+    expected_kind: GrantKind,
+) -> Result<GrantBindings, CryptoError> {
+    validate(exact_grant_body, ParserLimits::V1).map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_grant_body);
+    if protocol_array_length(&mut decoder)? != 3
+        || protocol_array_length(&mut decoder)? != 17
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(&mut decoder)?;
+    protocol_bstr(&mut decoder, 16)?;
+    protocol_bstr(&mut decoder, 32)?;
+    let kind = match decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+    {
+        0 => GrantKind::Initial,
+        1 => GrantKind::Historical,
+        _ => return Err(CryptoError::InvalidProtocolCore),
+    };
+    let purpose = decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if purpose > 1 || kind != expected_kind || (kind == GrantKind::Historical && purpose != 1) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    let key_thumbprint = KeyThumbprint::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let required_capability = match kind {
+        GrantKind::Initial => "initialGrant",
+        GrantKind::Historical => "historicalGrant",
+    };
+    if decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        != required_capability
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    if decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        != crate::GRANT_SUITE_ID
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    decoder
+        .i64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let original = protocol_optional_bstr(&mut decoder, 32)?;
+    let authorization = protocol_optional_bstr(&mut decoder, 32)?;
+    match kind {
+        GrantKind::Initial if original || authorization => {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        GrantKind::Historical if !original || !authorization => {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        _ => {}
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 48)?;
+    if decoder.position() != exact_grant_body.len() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(GrantBindings {
+        digest: grant_digest(exact_grant_body),
+        certificate_hash,
+        key_thumbprint,
+        organization_id,
+        registry,
+    })
+}
+
+struct ReceiptBindings {
+    digest: Hash32,
+    certificate_hash: CertificateHash,
+    key_thumbprint: KeyThumbprint,
+    organization_id: OrganizationId,
+    sequence: ChainSequence,
+    registry: RegistryVersion,
+}
+
+fn receipt_bindings(exact_receipt_core: &[u8]) -> Result<ReceiptBindings, CryptoError> {
+    validate(exact_receipt_core, ParserLimits::V1).map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_receipt_core);
+    if protocol_array_length(&mut decoder)? != 17 || decoder.u64().ok() != Some(1) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(&mut decoder)?;
+    protocol_bstr(&mut decoder, 16)?;
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_optional_bstr(&mut decoder, 32)?;
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    let grant_hashes = protocol_array_length(&mut decoder)?;
+    if grant_hashes == 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let mut previous: Option<&[u8]> = None;
+    for _ in 0..grant_hashes {
+        let current = protocol_bstr(&mut decoder, 32)?;
+        if previous.is_some_and(|value| value >= current) {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        previous = Some(current);
+    }
+    decoder
+        .i64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+    {
+        Type::Null => decoder
+            .null()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+        Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
+        | Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64 => {
+            decoder
+                .i64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+        }
+        _ => return Err(CryptoError::InvalidProtocolCore),
+    }
+    let key_thumbprint = KeyThumbprint::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if protocol_array_length(&mut decoder)? != 0 || decoder.position() != exact_receipt_core.len() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(ReceiptBindings {
+        digest: receipt_digest(exact_receipt_core),
+        certificate_hash,
+        key_thumbprint,
+        organization_id,
+        sequence,
+        registry,
+    })
+}
+
+fn protocol_array_length(decoder: &mut Decoder<'_>) -> Result<u64, CryptoError> {
+    decoder
+        .array()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        .ok_or(CryptoError::InvalidProtocolCore)
+}
+
+fn protocol_optional_bstr(
+    decoder: &mut Decoder<'_>,
+    expected_length: usize,
+) -> Result<bool, CryptoError> {
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+    {
+        Type::Null => {
+            decoder
+                .null()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            Ok(false)
+        }
+        Type::Bytes => {
+            protocol_bstr(decoder, expected_length)?;
+            Ok(true)
+        }
+        _ => Err(CryptoError::InvalidProtocolCore),
+    }
+}
+
+fn core_bindings(content_type: ContentType, bytes: &[u8]) -> Result<CoreBindings, CryptoError> {
+    validate_unsigned_protocol_core(content_type, bytes)?;
+    let mut decoder = Decoder::new(bytes);
+    exact_array_length(&mut decoder).map_err(|_| CryptoError::InvalidProtocolCore)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    match content_type {
+        ContentType::CheckpointCbor => {
+            decoder
+                .str()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            let organization_id = protocol_organization(&mut decoder)?;
+            decoder
+                .skip()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            decoder
+                .u64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            let sequence = ChainSequence::new(
+                decoder
+                    .u64()
+                    .map_err(|_| CryptoError::InvalidProtocolCore)?,
+            );
+            Ok(CoreBindings {
+                organization_id,
+                device_id: None,
+                certificate_hash: None,
+                sequence: Some(sequence),
+            })
+        }
+        ContentType::EvidenceRenewalCbor => {
+            decoder
+                .str()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            Ok(CoreBindings {
+                organization_id: protocol_organization(&mut decoder)?,
+                device_id: None,
+                certificate_hash: None,
+                sequence: None,
+            })
+        }
+        ContentType::LocalAuditCbor => {
+            decoder
+                .skip()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            let organization_id = protocol_organization(&mut decoder)?;
+            let device_id = DeviceId::try_from(protocol_bstr(&mut decoder, 16)?)
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            decoder
+                .skip()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            Ok(CoreBindings {
+                organization_id,
+                device_id: Some(device_id),
+                certificate_hash: Some(certificate_hash),
+                sequence: None,
+            })
+        }
+        ContentType::ChallengeResponseCbor => {
+            let organization_id = protocol_organization(&mut decoder)?;
+            decoder
+                .skip()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            decoder
+                .i64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            decoder
+                .i64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            Ok(CoreBindings {
+                organization_id,
+                device_id: None,
+                certificate_hash: Some(certificate_hash),
+                sequence: None,
+            })
+        }
+        ContentType::ReaderAckCbor => {
+            let organization_id = protocol_organization(&mut decoder)?;
+            decoder
+                .skip()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            let sequence = ChainSequence::new(
+                decoder
+                    .u64()
+                    .map_err(|_| CryptoError::InvalidProtocolCore)?,
+            );
+            Ok(CoreBindings {
+                organization_id,
+                device_id: None,
+                certificate_hash: Some(certificate_hash),
+                sequence: Some(sequence),
+            })
+        }
+        _ => Err(CryptoError::InvalidProtocolCore),
+    }
+}
+
+fn protocol_organization(decoder: &mut Decoder<'_>) -> Result<OrganizationId, CryptoError> {
+    OrganizationId::try_from(protocol_bstr(decoder, 16)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)
+}
+
+fn protocol_bstr<'a>(
+    decoder: &mut Decoder<'a>,
+    expected_length: usize,
+) -> Result<&'a [u8], CryptoError> {
+    let value = decoder
+        .bytes()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if value.len() != expected_length {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(value)
 }
 
 fn validate_payload(content_type: ContentType, payload: &[u8]) -> Result<(), CryptoError> {

@@ -1,8 +1,8 @@
 use ea_crypto::{
-    AEAD_NONCE_SIZE, AEAD_OVERHEAD, CEK_SIZE, CryptoRandomSource, HPKE_AEAD_ID,
-    HPKE_ENCAPSULATED_KEY_SIZE, HPKE_KDF_ID, HPKE_KEM_ID, HPKE_MODE, HPKE_WRAPPED_CEK_SIZE,
-    HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, SecretVec, aead_open, aead_seal,
-    checked_ciphertext_length, hpke_open, hpke_seal, hpke_seal_with_random_source,
+    AEAD_NONCE_SIZE, AEAD_OVERHEAD, CEK_SIZE, HPKE_AEAD_ID, HPKE_ENCAPSULATED_KEY_SIZE,
+    HPKE_KDF_ID, HPKE_KEM_ID, HPKE_MODE, HPKE_WRAPPED_CEK_SIZE, HpkeRecipientPrivateKey,
+    HpkeSealed, SecretBytes, SecretVec, aead_open, aead_seal, checked_ciphertext_length, hpke_open,
+    hpke_seal,
 };
 use hpke::rand_core::{Infallible, TryCryptoRng, TryRng};
 use hpke::{
@@ -10,6 +10,13 @@ use hpke::{
     kdf::HkdfSha256, kem::X25519HkdfSha256, single_shot_open, single_shot_seal_with_rng,
 };
 use zeroize::Zeroizing;
+
+#[test]
+fn upstream_x25519_static_secret_is_zeroized_on_drop() {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    assert_zeroize_on_drop::<x25519_dalek::StaticSecret>();
+}
 
 struct FixedSecretRng {
     bytes: Zeroizing<Vec<u8>>,
@@ -52,30 +59,6 @@ impl TryRng for FixedSecretRng {
 }
 
 impl TryCryptoRng for FixedSecretRng {}
-
-impl CryptoRandomSource for FixedSecretRng {
-    fn fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), ea_crypto::CryptoError> {
-        let end = self
-            .offset
-            .checked_add(destination.len())
-            .ok_or(ea_crypto::CryptoError::SizeLimit)?;
-        destination.copy_from_slice(
-            self.bytes
-                .get(self.offset..end)
-                .ok_or(ea_crypto::CryptoError::SizeLimit)?,
-        );
-        self.offset = end;
-        Ok(())
-    }
-}
-
-struct FailingRandomSource;
-
-impl CryptoRandomSource for FailingRandomSource {
-    fn fill_bytes(&mut self, _destination: &mut [u8]) -> Result<(), ea_crypto::CryptoError> {
-        Err(ea_crypto::CryptoError::LocalRng)
-    }
-}
 
 #[test]
 fn suite_sizes_and_checked_overflow_are_fixed() {
@@ -138,6 +121,70 @@ fn rfc8439_chacha20_poly1305_vector_and_misuse_rejection() {
         .code(),
         "EA-CRYPTO-AEAD-OPEN"
     );
+
+    let original_ciphertext = aead_seal(
+        &SecretBytes::new(key),
+        &SecretBytes::new(nonce),
+        SecretVec::new(plaintext.clone()),
+        &aad,
+    )
+    .unwrap();
+    for index in 0..key.len() {
+        let mut mutation = key;
+        mutation[index] ^= 1;
+        assert_ne!(
+            aead_seal(
+                &SecretBytes::new(mutation),
+                &SecretBytes::new(nonce),
+                SecretVec::new(plaintext.clone()),
+                &aad,
+            )
+            .unwrap(),
+            original_ciphertext
+        );
+    }
+    for index in 0..nonce.len() {
+        let mut mutation = nonce;
+        mutation[index] ^= 1;
+        assert_ne!(
+            aead_seal(
+                &SecretBytes::new(key),
+                &SecretBytes::new(mutation),
+                SecretVec::new(plaintext.clone()),
+                &aad,
+            )
+            .unwrap(),
+            original_ciphertext
+        );
+    }
+    for index in 0..plaintext.len() {
+        let mut mutation = plaintext.clone();
+        mutation[index] ^= 1;
+        assert_ne!(
+            aead_seal(
+                &SecretBytes::new(key),
+                &SecretBytes::new(nonce),
+                SecretVec::new(mutation),
+                &aad,
+            )
+            .unwrap(),
+            original_ciphertext
+        );
+    }
+    for index in 0..aad.len() {
+        let mut mutation = aad.clone();
+        mutation[index] ^= 1;
+        assert_ne!(
+            aead_seal(
+                &SecretBytes::new(key),
+                &SecretBytes::new(nonce),
+                SecretVec::new(plaintext.clone()),
+                &mutation,
+            )
+            .unwrap(),
+            original_ciphertext
+        );
+    }
 }
 
 #[test]
@@ -219,36 +266,6 @@ fn rfc9180_appendix_a2_base_x25519_sha256_chacha_vector_is_exact() {
 }
 
 #[test]
-fn application_hpke_wrapper_matches_independently_calculated_exact_wire() {
-    let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x42; 32])).unwrap();
-    let info = hex::decode("45494e5341545a4152434849562d48504b452d494e464f2d76318101").unwrap();
-    let aad = hex::decode("45494e5341545a4152434849562d48504b452d4141442d76318101").unwrap();
-    let mut random = FixedSecretRng::new(vec![0x24; 32]);
-    let sealed = hpke_seal_with_random_source(
-        &recipient.public_key(),
-        &SecretBytes::new([0x60; 32]),
-        &info,
-        &aad,
-        &mut random,
-    )
-    .unwrap();
-
-    assert_eq!(
-        hex::encode(sealed.encapsulated_key()),
-        "083f7859feb58bd62e43682c35a9936668e96c103e74e25530134e2dc6419758"
-    );
-    assert_eq!(
-        hex::encode(sealed.wrapped_cek()),
-        "4e62b6d7e5687cb98df9bd00ab0a1523b7b08b4135726cf24343d29c646ede252078a7a40a8c79d065ea59beb8a9353a"
-    );
-    assert!(
-        hpke_open(&recipient, &sealed, &info, &aad)
-            .unwrap()
-            .matches(&[0x60; 32])
-    );
-}
-
-#[test]
 fn every_hpke_wire_or_context_mutation_fails_without_returning_a_cek() {
     let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x42; 32])).unwrap();
     let sealed = hpke_seal(
@@ -284,35 +301,26 @@ fn every_hpke_wire_or_context_mutation_fails_without_returning_a_cek() {
             "EA-CRYPTO-HPKE-OPEN"
         );
     }
-    for (info, aad) in [
-        (b"Bound info".as_slice(), b"bound aad".as_slice()),
-        (b"bound info".as_slice(), b"Bound aad".as_slice()),
-    ] {
+    for index in 0..b"bound info".len() {
+        let mut info = b"bound info".to_vec();
+        info[index] ^= 1;
         assert_eq!(
-            hpke_open(&recipient, &sealed, info, aad)
+            hpke_open(&recipient, &sealed, &info, b"bound aad")
                 .err()
                 .unwrap()
                 .code(),
             "EA-CRYPTO-HPKE-OPEN"
         );
     }
-}
-
-#[test]
-fn hpke_rng_failure_is_a_stable_error_and_never_panics_or_returns_wire_bytes() {
-    let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x42; 32])).unwrap();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        hpke_seal_with_random_source(
-            &recipient.public_key(),
-            &SecretBytes::new([0x60; 32]),
-            b"info",
-            b"aad",
-            &mut FailingRandomSource,
-        )
-    }));
-    let error = match result.expect("fallible RNG errors must not panic") {
-        Ok(_) => panic!("a failed RNG must not return HPKE wire bytes"),
-        Err(error) => error,
-    };
-    assert_eq!(error.code(), "EA-LOCAL-CRYPTO-RNG");
+    for index in 0..b"bound aad".len() {
+        let mut aad = b"bound aad".to_vec();
+        aad[index] ^= 1;
+        assert_eq!(
+            hpke_open(&recipient, &sealed, b"bound info", &aad)
+                .err()
+                .unwrap()
+                .code(),
+            "EA-CRYPTO-HPKE-OPEN"
+        );
+    }
 }

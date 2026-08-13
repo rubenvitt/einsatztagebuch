@@ -1,9 +1,24 @@
 use ea_crypto::{
-    ContentType, CoseSigner, CryptoError, HpkeRecipientPrivateKey, SecretBytes, SecretVec,
-    aead_open, aead_seal, hpke_open, hpke_seal, trust_digest,
+    CoseSigner, CryptoError, HpkeRecipientPrivateKey, SecretBytes, SecretVec, aead_open, aead_seal,
+    hpke_open, hpke_seal, trust_digest,
 };
-use ea_types::CertificateHash;
 use zeroize::Zeroize;
+
+fn panic_payload_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(text) => *text,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(text) => (*text).to_owned(),
+            Err(_) => "non-text panic payload".to_owned(),
+        },
+    }
+}
+
+fn captured_error_panic(error: CryptoError) -> String {
+    let panic = std::panic::catch_unwind(move || panic!("{error:?}"))
+        .expect_err("the real error must reach the panic payload capture");
+    panic_payload_text(panic)
+}
 
 #[test]
 fn secrets_do_not_implement_formatting_or_leak_through_errors() {
@@ -42,7 +57,7 @@ fn owned_secret_backing_is_observably_zeroized_where_safe_access_permits() {
 
     let mut variable = SecretVec::new(b"PLAINTEXT-ZEROIZE-CANARY".to_vec());
     variable.zeroize();
-    assert!(variable.is_empty());
+    assert!(variable.matches(&[0; 24]));
 }
 
 #[test]
@@ -80,19 +95,12 @@ fn cryptographic_failure_paths_return_only_stable_codes_and_no_secret_buffers() 
 
     let signer = CoseSigner::from_secret(SecretBytes::new([0x53; 32]));
     let productive = trust_digest(b"PRODUCTIVE-TRUST-CANARY");
-    let recovery_error = signer
-        .sign_normal(
-            ContentType::RecoveryTestDigest,
-            CertificateHash::try_from([0x44; 32].as_slice()).unwrap(),
-            productive.as_bytes(),
-        )
-        .err()
-        .unwrap();
+    let recovery_error = signer.sign_enrollment(productive.as_bytes()).unwrap_err();
 
     let rendered = format!("{aead_error:?}|{hpke_error}|{recovery_error:?}");
     assert_eq!(
         rendered,
-        "EA-CRYPTO-AEAD-OPEN|EA-CRYPTO-HPKE-OPEN|EA-CRYPTO-INVALID-COSE"
+        "EA-CRYPTO-AEAD-OPEN|EA-CRYPTO-HPKE-OPEN|EA-CRYPTO-INVALID-PROTOCOL-CORE"
     );
     for canary in [
         "PLAINTEXT-FAILURE-CANARY",
@@ -102,5 +110,84 @@ fn cryptographic_failure_paths_return_only_stable_codes_and_no_secret_buffers() 
         "SSSSSSSS",
     ] {
         assert!(!rendered.contains(canary));
+    }
+}
+
+#[test]
+fn real_failure_snapshots_and_panic_payloads_never_contain_secret_canaries() {
+    let key = SecretBytes::new([b'K'; 32]);
+    let nonce = SecretBytes::new([b'N'; 12]);
+    let ciphertext = aead_seal(
+        &key,
+        &nonce,
+        SecretVec::new(b"PLAINTEXT-FAILURE-CANARY".to_vec()),
+        b"bound aad",
+    )
+    .unwrap();
+    let aead_error = aead_open(&key, &nonce, &ciphertext, b"wrong aad")
+        .err()
+        .unwrap();
+
+    let hpke_private = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([b'H'; 32])).unwrap();
+    let hpke_wire = hpke_seal(
+        &hpke_private.public_key(),
+        &SecretBytes::new([b'C'; 32]),
+        b"bound info",
+        b"bound aad",
+    )
+    .unwrap();
+    let hpke_error = hpke_open(&hpke_private, &hpke_wire, b"wrong info", b"bound aad")
+        .err()
+        .unwrap();
+
+    let recovery_signer = CoseSigner::from_secret(SecretBytes::new([b'S'; 32]));
+    let certificate = ea_types::CertificateHash::try_from([0x51; 32].as_slice()).unwrap();
+    let recovery = recovery_signer
+        .sign_recovery_test(certificate, SecretBytes::new([b'R'; 32]))
+        .unwrap();
+    let recovery_error = recovery_signer.sign_enrollment(&recovery).err().unwrap();
+
+    let snapshot = format!("{aead_error:?}|{hpke_error:?}|{recovery_error:?}");
+    assert_eq!(
+        snapshot,
+        "EA-CRYPTO-AEAD-OPEN|EA-CRYPTO-HPKE-OPEN|EA-CRYPTO-INVALID-COSE"
+    );
+    let panic_snapshot = [aead_error, hpke_error, recovery_error]
+        .map(captured_error_panic)
+        .join("|");
+    assert_eq!(panic_snapshot, snapshot);
+
+    for canary in [
+        "KKKKKKKK",
+        "NNNNNNNN",
+        "PLAINTEXT-FAILURE-CANARY",
+        "HHHHHHHH",
+        "CCCCCCCC",
+        "SSSSSSSS",
+        "RRRRRRRR",
+    ] {
+        assert!(!snapshot.contains(canary));
+        assert!(!panic_snapshot.contains(canary));
+    }
+}
+
+#[test]
+fn production_crypto_sources_have_no_logging_or_console_emitters() {
+    let sources = [
+        include_str!("../src/aead.rs"),
+        include_str!("../src/cose.rs"),
+        include_str!("../src/digest.rs"),
+        include_str!("../src/hpke.rs"),
+        include_str!("../src/os_account.rs"),
+        include_str!("../src/secret.rs"),
+        include_str!("../src/thumbprint.rs"),
+    ];
+    for source in sources {
+        for emitter in ["println!(", "eprintln!(", "dbg!(", "log::", "tracing::"] {
+            assert!(
+                !source.contains(emitter),
+                "production crypto source contains forbidden emitter {emitter}"
+            );
+        }
     }
 }

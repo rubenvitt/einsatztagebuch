@@ -1,29 +1,24 @@
 use ea_crypto::{
-    CanonicalOsAccountId, CanonicalPublicCoseKey, ContentType, CoseSigner, CoseVerifier,
-    CryptoError, ExpectedSigner, ResolvedSigner, SecretBytes, SignerCapability,
-    SignerCertificateResolver, SignerRole, VerificationContext, object_hash,
-    os_account_binding_hash, verify_cose_sign1,
+    CanonicalPublicCoseKey, ContentType, CoseSigner, CoseVerifier, CryptoError, ResolvedSigner,
+    SecretBytes, SignerCertificateResolver, SignerRole, VerificationContext,
+    linux_os_account_binding_hash, macos_os_account_binding_hash, object_hash, verify_cose_sign1,
+    windows_os_account_binding_hash,
 };
 use ea_types::{CertificateHash, ChainSequence, OrganizationId, RegistryVersion};
 use ed25519_dalek::{Signer as _, SigningKey};
+use minicbor::Encoder;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use zeroize::Zeroizing;
 
-const CERTIFICATE_BYTES: &[u8] = b"EA-LOCAL-KAT-v1 writer certificate exact bytes";
 const REGISTRATION_CORE_HEX: &str = "890150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f005828a30101200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8f68101817545494e5341545a4152434849562d53554954452d3180";
 
 struct FixtureResolver {
     requested_hash: CertificateHash,
     exact_certificate_bytes: Vec<u8>,
-    resolved_hash: CertificateHash,
-    public_key: CanonicalPublicCoseKey,
-    role: SignerRole,
-    organization_id: OrganizationId,
-    effective_from_sequence: ChainSequence,
-    revoked_from_sequence: Option<ChainSequence>,
-    capabilities: Vec<SignerCapability>,
-    revoked: bool,
+    registry_effective_from_sequence: ChainSequence,
+    registry_revoked_from_sequence: Option<ChainSequence>,
+    registry_revoked: bool,
     result_error: Option<CryptoError>,
     calls: Cell<usize>,
 }
@@ -43,14 +38,10 @@ impl SignerCertificateResolver for FixtureResolver {
         }
         Ok(ResolvedSigner {
             exact_certificate_bytes: &self.exact_certificate_bytes,
-            certificate_hash: self.resolved_hash,
-            public_key: &self.public_key,
-            role: self.role,
-            organization_id: self.organization_id,
-            effective_from_sequence: self.effective_from_sequence,
-            revoked_from_sequence: self.revoked_from_sequence,
-            capabilities: &self.capabilities,
-            revoked: self.revoked,
+            registry_effective_from_sequence: self.registry_effective_from_sequence,
+            registry_revoked_from_sequence: self.registry_revoked_from_sequence,
+            registry_revoked: self.registry_revoked,
+            root_line_accepted: true,
         })
     }
 }
@@ -69,75 +60,148 @@ fn fixture_public_key() -> CanonicalPublicCoseKey {
     .unwrap()
 }
 
-fn other_public_key() -> CanonicalPublicCoseKey {
-    CanonicalPublicCoseKey::ed25519(
-        hex::decode("2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12")
-            .unwrap()
-            .try_into()
-            .unwrap(),
-    )
-    .unwrap()
+fn fixture_certificate_hash() -> CertificateHash {
+    CertificateHash::from(object_hash(
+        &device_certificate_bytes(&fixture_public_key()),
+    ))
 }
 
-fn fixture_certificate_hash() -> CertificateHash {
-    CertificateHash::from(object_hash(CERTIFICATE_BYTES))
+fn device_certificate_bytes(public_key: &CanonicalPublicCoseKey) -> Vec<u8> {
+    let root_signature = CoseSigner::from_secret(SecretBytes::new([0x55; 32]))
+        .sign_initial_root(&[0x77; 32])
+        .unwrap();
+    let public_key_bytes = public_key.to_deterministic_cbor();
+    let thumbprint = public_key.thumbprint();
+    let mut certificate = Vec::new();
+    let mut encoder = Encoder::new(&mut certificate);
+    encoder
+        .array(5)
+        .and_then(|encoder| encoder.bytes(b"EA1\0"))
+        .and_then(|encoder| encoder.u8(5))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.array(3))
+        .and_then(|encoder| encoder.str("deviceCertificate"))
+        .and_then(|encoder| encoder.array(2))
+        .and_then(|encoder| encoder.array(13))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x22; 16]))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.bytes(&public_key_bytes))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.bytes(thumbprint.as_bytes()))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.bytes(&[0x33; 32]))
+        .and_then(|encoder| encoder.array(1))
+        .unwrap();
+    certificate.extend_from_slice(&root_signature);
+    certificate
 }
 
 fn base_resolver() -> FixtureResolver {
+    let exact_certificate_bytes = device_certificate_bytes(&fixture_public_key());
+    let requested_hash = CertificateHash::from(object_hash(&exact_certificate_bytes));
     FixtureResolver {
-        requested_hash: fixture_certificate_hash(),
-        exact_certificate_bytes: CERTIFICATE_BYTES.to_vec(),
-        resolved_hash: fixture_certificate_hash(),
-        public_key: fixture_public_key(),
-        role: SignerRole::Writer,
-        organization_id: fixture_organization(),
-        effective_from_sequence: ChainSequence::new(1),
-        revoked_from_sequence: None,
-        capabilities: vec![SignerCapability::EntryWrite],
-        revoked: false,
+        requested_hash,
+        exact_certificate_bytes,
+        registry_effective_from_sequence: ChainSequence::new(1),
+        registry_revoked_from_sequence: None,
+        registry_revoked: false,
         result_error: None,
         calls: Cell::new(0),
     }
 }
 
-fn verification_context(content_type: ContentType) -> VerificationContext {
-    VerificationContext::digest(
-        content_type,
-        ExpectedSigner {
-            organization_id: fixture_organization(),
-            sequence: ChainSequence::new(7),
-            role: SignerRole::Writer,
-            capability: SignerCapability::EntryWrite,
-        },
+fn signed_manifest(
+    certificate_hash: CertificateHash,
+    organization_id: OrganizationId,
+    registry: RegistryVersion,
+    ciphertext_hash_byte: u8,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(2)
+        .and_then(|encoder| encoder.array(16))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(organization_id.as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x31; 16]))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.bytes(certificate_hash.as_bytes()))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.u64(registry.get()))
+        .and_then(|encoder| encoder.bytes(&[0x32; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x33; 32]))
+        .and_then(|encoder| encoder.str("EINSATZARCHIV-SUITE-1"))
+        .and_then(|encoder| encoder.bytes(&[0x34; 12]))
+        .and_then(|encoder| encoder.u8(48))
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.bytes(&[ciphertext_hash_byte; 32]))
+        .unwrap();
+    bytes
+}
+
+fn verification_context() -> VerificationContext {
+    VerificationContext::record(&signed_manifest(
+        fixture_certificate_hash(),
+        fixture_organization(),
         RegistryVersion::new(3),
-    )
+        0x41,
+    ))
+    .unwrap()
+}
+
+fn initial_grant_body() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(3)
+        .and_then(|encoder| encoder.array(17))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x31; 16]))
+        .and_then(|encoder| encoder.bytes(&[0x32; 32]))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x33; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x34; 32]))
+        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.bytes(fixture_certificate_hash().as_bytes()))
+        .and_then(|encoder| encoder.str("initialGrant"))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.bytes(&[0x35; 32]))
+        .and_then(|encoder| encoder.str("EINSATZARCHIV-HPKE-1"))
+        .and_then(|encoder| encoder.i8(0))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.bytes(&[0x36; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x37; 48]))
+        .unwrap();
+    bytes
 }
 
 #[test]
 fn normal_verification_returns_the_one_atomically_bound_identity() {
     let signer =
         CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
-    let signed = signer
-        .sign_normal(
-            ContentType::RecordDigest,
-            fixture_certificate_hash(),
-            &[0x41; 32],
-        )
-        .unwrap();
+    let signed_manifest = signed_manifest(
+        fixture_certificate_hash(),
+        fixture_organization(),
+        RegistryVersion::new(3),
+        0x41,
+    );
+    let signed = signer.sign_record(&signed_manifest).unwrap();
     let resolver = base_resolver();
-    let verified = verify_cose_sign1(
-        &signed,
-        &resolver,
-        &verification_context(ContentType::RecordDigest),
-    )
-    .unwrap();
+    let verified = verify_cose_sign1(&signed, &resolver, &verification_context()).unwrap();
     let verifier_resolver = base_resolver();
-    CoseVerifier::verify_normal(
-        &signed,
-        &verifier_resolver,
-        &verification_context(ContentType::RecordDigest),
-    )
-    .unwrap();
+    CoseVerifier::verify_normal(&signed, &verifier_resolver, &verification_context()).unwrap();
     assert_eq!(resolver.calls.get(), 1);
     assert!(verified.certificate_hash() == fixture_certificate_hash());
     assert!(verified.key_thumbprint() == fixture_public_key().thumbprint());
@@ -149,21 +213,16 @@ fn normal_verification_returns_the_one_atomically_bound_identity() {
 fn every_certificate_identity_and_authority_mix_fails_closed() {
     let signer =
         CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
-    let signed = signer
-        .sign_normal(
-            ContentType::RecordDigest,
-            fixture_certificate_hash(),
-            &[0x41; 32],
-        )
-        .unwrap();
+    let signed_manifest = signed_manifest(
+        fixture_certificate_hash(),
+        fixture_organization(),
+        RegistryVersion::new(3),
+        0x41,
+    );
+    let signed = signer.sign_record(&signed_manifest).unwrap();
 
     for (case, expected_code) in [
         ("certificate-bytes", "EA-TRUST-SIGNER-MISMATCH"),
-        ("certificate-hash", "EA-TRUST-SIGNER-MISMATCH"),
-        ("key-thumbprint", "EA-TRUST-SIGNER-MISMATCH"),
-        ("organization", "EA-TRUST-SIGNER-UNAUTHORIZED"),
-        ("role", "EA-TRUST-SIGNER-UNAUTHORIZED"),
-        ("capability", "EA-TRUST-SIGNER-UNAUTHORIZED"),
         ("not-effective", "EA-TRUST-SIGNER-UNAUTHORIZED"),
         ("revoked-at-sequence", "EA-TRUST-SIGNER-UNAUTHORIZED"),
         ("revoked", "EA-TRUST-SIGNER-UNAUTHORIZED"),
@@ -172,32 +231,90 @@ fn every_certificate_identity_and_authority_mix_fails_closed() {
         let mut resolver = base_resolver();
         match case {
             "certificate-bytes" => resolver.exact_certificate_bytes.push(0),
-            "certificate-hash" => {
-                resolver.resolved_hash = CertificateHash::from(object_hash(b"another certificate"));
-            }
-            "key-thumbprint" => resolver.public_key = other_public_key(),
-            "organization" => {
-                resolver.organization_id = OrganizationId::try_from([0x22; 16].as_slice()).unwrap();
-            }
-            "role" => resolver.role = SignerRole::Reader,
-            "capability" => resolver.capabilities.clear(),
-            "not-effective" => resolver.effective_from_sequence = ChainSequence::new(8),
+            "not-effective" => resolver.registry_effective_from_sequence = ChainSequence::new(8),
             "revoked-at-sequence" => {
-                resolver.revoked_from_sequence = Some(ChainSequence::new(7));
+                resolver.registry_revoked_from_sequence = Some(ChainSequence::new(7));
             }
-            "revoked" => resolver.revoked = true,
+            "revoked" => resolver.registry_revoked = true,
             "ambiguous" => resolver.result_error = Some(CryptoError::SignerUnresolved),
             _ => unreachable!(),
         }
-        let error = verify_cose_sign1(
-            &signed,
-            &resolver,
-            &verification_context(ContentType::RecordDigest),
-        )
-        .unwrap_err();
+        let context = verification_context();
+        let error = verify_cose_sign1(&signed, &resolver, &context).unwrap_err();
         assert_eq!(error.code(), expected_code, "case {case}");
         assert_eq!(resolver.calls.get(), 1, "case {case}");
     }
+}
+
+#[test]
+fn coordinated_key_substitution_cannot_mix_certificate_a_with_signer_b() {
+    let certificate_a = device_certificate_bytes(&fixture_public_key());
+    let certificate_a_hash = CertificateHash::from(object_hash(&certificate_a));
+    let signer_b = CoseSigner::from_secret(SecretBytes::new([0x42; 32]));
+    let manifest = signed_manifest(
+        certificate_a_hash,
+        fixture_organization(),
+        RegistryVersion::new(3),
+        0x41,
+    );
+    let signed_by_b = signer_b.sign_record(&manifest).unwrap();
+    let mut mixed_resolver = base_resolver();
+    mixed_resolver.requested_hash = certificate_a_hash;
+    mixed_resolver.exact_certificate_bytes = certificate_a;
+
+    assert_eq!(
+        verify_cose_sign1(
+            &signed_by_b,
+            &mixed_resolver,
+            &VerificationContext::record(&manifest).unwrap(),
+        )
+        .unwrap_err()
+        .code(),
+        "EA-TRUST-SIGNER-MISMATCH"
+    );
+}
+
+#[test]
+fn normal_verification_rejects_a_valid_signature_over_the_wrong_expected_digest() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let wrong_manifest = signed_manifest(
+        fixture_certificate_hash(),
+        fixture_organization(),
+        RegistryVersion::new(3),
+        0x42,
+    );
+    let signed_wrong_digest = signer.sign_record(&wrong_manifest).unwrap();
+
+    assert_eq!(
+        verify_cose_sign1(
+            &signed_wrong_digest,
+            &base_resolver(),
+            &verification_context(),
+        )
+        .unwrap_err()
+        .code(),
+        "EA-TRUST-SIGNER-MISMATCH"
+    );
+}
+
+#[test]
+fn grant_content_cannot_reuse_writer_record_authority() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let grant_body = initial_grant_body();
+    let signed_grant = signer.sign_initial_grant(&grant_body).unwrap();
+
+    assert_eq!(
+        verify_cose_sign1(
+            &signed_grant,
+            &base_resolver(),
+            &VerificationContext::initial_grant(&grant_body, ChainSequence::new(7)).unwrap(),
+        )
+        .unwrap_err()
+        .code(),
+        "EA-TRUST-SIGNER-UNAUTHORIZED"
+    );
 }
 
 #[test]
@@ -209,15 +326,14 @@ fn initial_root_and_enrollment_pop_never_enter_the_certificate_resolver() {
         .sign_enrollment(&hex::decode(REGISTRATION_CORE_HEX).unwrap())
         .unwrap();
     let resolver = base_resolver();
-    for (bytes, content_type) in [
+    for (bytes, _content_type) in [
         (root.as_slice(), ContentType::TrustDigest),
         (
             enrollment.as_slice(),
             ContentType::DeviceRegistrationRequestCbor,
         ),
     ] {
-        let error =
-            verify_cose_sign1(bytes, &resolver, &verification_context(content_type)).unwrap_err();
+        let error = verify_cose_sign1(bytes, &resolver, &verification_context()).unwrap_err();
         assert_eq!(error.code(), "EA-CRYPTO-INVALID-COSE");
     }
     assert_eq!(resolver.calls.get(), 0);
@@ -225,23 +341,16 @@ fn initial_root_and_enrollment_pop_never_enter_the_certificate_resolver() {
 
 #[test]
 fn wrong_bound_registry_is_unresolved_not_silently_substituted() {
-    let expected = ExpectedSigner {
-        organization_id: fixture_organization(),
-        sequence: ChainSequence::new(7),
-        role: SignerRole::Writer,
-        capability: SignerCapability::EntryWrite,
-    };
-    let context =
-        VerificationContext::digest(ContentType::RecordDigest, expected, RegistryVersion::new(4));
+    let manifest = signed_manifest(
+        fixture_certificate_hash(),
+        fixture_organization(),
+        RegistryVersion::new(4),
+        0x41,
+    );
+    let context = VerificationContext::record(&manifest).unwrap();
     let signer =
         CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
-    let signed = signer
-        .sign_normal(
-            ContentType::RecordDigest,
-            fixture_certificate_hash(),
-            &[0x41; 32],
-        )
-        .unwrap();
+    let signed = signer.sign_record(&manifest).unwrap();
     assert_eq!(
         verify_cose_sign1(&signed, &base_resolver(), &context)
             .unwrap_err()
@@ -254,96 +363,92 @@ fn wrong_bound_registry_is_unresolved_not_silently_substituted() {
 fn exact_os_account_kats_and_context_hashes_are_pinned() {
     let windows_sid =
         hex::decode("010500000000000515000000010000000200000003000000e8030000").unwrap();
-    let windows = CanonicalOsAccountId::windows_sid_source(
-        &windows_sid,
-        [0, 0, 0, 0, 0, 5],
-        &[21, 1, 2, 3, 1000],
-    )
-    .unwrap();
-    let macos = CanonicalOsAccountId::macos_open_directory(
-        &["f81d4fae-7dec-11d0-a765-00a0c91e6bf6"],
-        &["501"],
-        501,
-    )
-    .unwrap();
-    let linux =
-        CanonicalOsAccountId::linux_machine_id_file(b"0123456789abcdef0123456789abcdef\n", 1000)
-            .unwrap();
-
     let organization =
         OrganizationId::try_from(&hex::decode("000102030405060708090a0b0c0d0e0f").unwrap()[..])
             .unwrap();
     let device =
         ea_types::DeviceId::try_from(&hex::decode("202122232425262728292a2b2c2d2e2f").unwrap()[..])
             .unwrap();
-    let cases = [
-        (
-            windows,
-            "830100581c010500000000000515000000010000000200000003000000e8030000",
-            "8350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f830100581c010500000000000515000000010000000200000003000000e8030000",
-            "45494e5341545a4152434849562d4f532d4143434f554e542d76318350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f830100581c010500000000000515000000010000000200000003000000e8030000",
-            "fcbb2ccb141966c57146aa6e578f56550bf86670ee9b31dea90f5a99b9f26220",
+    assert_eq!(
+        hex::encode(
+            windows_os_account_binding_hash(
+                organization,
+                device,
+                &windows_sid,
+                [0, 0, 0, 0, 0, 5],
+                &[21, 1, 2, 3, 1000],
+            )
+            .unwrap()
+            .as_bytes()
         ),
-        (
-            macos,
-            "84010150f81d4fae7dec11d0a76500a0c91e6bf61901f5",
-            "8350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f84010150f81d4fae7dec11d0a76500a0c91e6bf61901f5",
-            "45494e5341545a4152434849562d4f532d4143434f554e542d76318350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f84010150f81d4fae7dec11d0a76500a0c91e6bf61901f5",
-            "0f4ed54a0330ed2bdbb5228d192d4dfa3a0853dae98aba3091f0c7c5f29fde7a",
+        "fcbb2ccb141966c57146aa6e578f56550bf86670ee9b31dea90f5a99b9f26220"
+    );
+    assert_eq!(
+        hex::encode(
+            macos_os_account_binding_hash(
+                organization,
+                device,
+                &["f81d4fae-7dec-11d0-a765-00a0c91e6bf6"],
+                &["501"],
+                501,
+            )
+            .unwrap()
+            .as_bytes()
         ),
-        (
-            linux,
-            "840102500123456789abcdef0123456789abcdef1903e8",
-            "8350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f840102500123456789abcdef0123456789abcdef1903e8",
-            "45494e5341545a4152434849562d4f532d4143434f554e542d76318350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f840102500123456789abcdef0123456789abcdef1903e8",
-            "bbca2d7b508415aed456efd6fc5499ddda65759250f6c8b5a1c2edd23a7883e4",
+        "0f4ed54a0330ed2bdbb5228d192d4dfa3a0853dae98aba3091f0c7c5f29fde7a"
+    );
+    assert_eq!(
+        hex::encode(
+            linux_os_account_binding_hash(
+                organization,
+                device,
+                b"0123456789abcdef0123456789abcdef\n",
+                1000,
+            )
+            .unwrap()
+            .as_bytes()
         ),
-    ];
-    for (account, account_hex, context_hex, preimage_hex, digest_hex) in cases {
-        let account_bytes = account.to_deterministic_cbor();
-        assert_eq!(hex::encode(&account_bytes), account_hex);
-        let decoded = CanonicalOsAccountId::from_deterministic_cbor(&account_bytes).unwrap();
-        assert_eq!(decoded.to_deterministic_cbor(), account_bytes);
+        "bbca2d7b508415aed456efd6fc5499ddda65759250f6c8b5a1c2edd23a7883e4"
+    );
 
-        let context = hex::decode(context_hex).unwrap();
-        assert_eq!(
-            context,
-            [
-                &[0x83, 0x50][..],
-                organization.as_bytes(),
-                &[0x50][..],
-                device.as_bytes(),
-                account_bytes.as_slice(),
-            ]
-            .concat()
-        );
-        assert_eq!(
-            hex::decode(preimage_hex).unwrap(),
-            [
-                b"EINSATZARCHIV-OS-ACCOUNT-v1".as_slice(),
-                context.as_slice()
-            ]
-            .concat()
-        );
-        assert_eq!(
-            hex::encode(os_account_binding_hash(organization, device, &account).as_bytes()),
-            digest_hex
-        );
-
-        let mut changed_identifier = account_bytes;
-        changed_identifier[8] ^= 1;
-        if let Ok(changed) = CanonicalOsAccountId::from_deterministic_cbor(&changed_identifier) {
-            assert_ne!(
-                os_account_binding_hash(organization, device, &changed).as_bytes(),
-                os_account_binding_hash(organization, device, &account).as_bytes()
-            );
-        }
-    }
+    let mut changed_sid = windows_sid;
+    changed_sid[8] ^= 1;
+    assert_ne!(
+        windows_os_account_binding_hash(
+            organization,
+            device,
+            &changed_sid,
+            [0, 0, 0, 0, 0, 5],
+            &[20, 1, 2, 3, 1000],
+        )
+        .unwrap()
+        .as_bytes(),
+        windows_os_account_binding_hash(
+            organization,
+            device,
+            &hex::decode("010500000000000515000000010000000200000003000000e8030000").unwrap(),
+            [0, 0, 0, 0, 0, 5],
+            &[21, 1, 2, 3, 1000],
+        )
+        .unwrap()
+        .as_bytes()
+    );
 }
 
 #[test]
 fn os_account_sources_fail_closed_before_hashing() {
-    assert!(CanonicalOsAccountId::windows_sid(b"S-1-5-21-1-2-3-1000").is_err());
+    let organization = fixture_organization();
+    let device = ea_types::DeviceId::try_from([0x22; 16].as_slice()).unwrap();
+    assert!(
+        windows_os_account_binding_hash(
+            organization,
+            device,
+            b"S-1-5-21-1-2-3-1000",
+            [0, 0, 0, 0, 0, 5],
+            &[21, 1, 2, 3, 1000],
+        )
+        .is_err()
+    );
     let valid_sid =
         hex::decode("010500000000000515000000010000000200000003000000e8030000").unwrap();
     for invalid in [
@@ -354,12 +459,23 @@ fn os_account_sources_fail_closed_before_hashing() {
         valid_sid[..valid_sid.len() - 1].to_vec(),
         [valid_sid.as_slice(), &[0][..]].concat(),
     ] {
-        assert!(CanonicalOsAccountId::windows_sid(&invalid).is_err());
+        assert!(
+            windows_os_account_binding_hash(
+                organization,
+                device,
+                &invalid,
+                [0, 0, 0, 0, 0, 5],
+                &[21, 1, 2, 3, 1000],
+            )
+            .is_err()
+        );
     }
     let mut big_endian_sid =
         hex::decode("010500000000000500000015000000010000000200000003000003e8").unwrap();
     assert!(
-        CanonicalOsAccountId::windows_sid_source(
+        windows_os_account_binding_hash(
+            organization,
+            device,
             &big_endian_sid,
             [0, 0, 0, 0, 0, 5],
             &[21, 1, 2, 3, 1000],
@@ -367,7 +483,16 @@ fn os_account_sources_fail_closed_before_hashing() {
         .is_err()
     );
     big_endian_sid.push(0);
-    assert!(CanonicalOsAccountId::windows_sid(&big_endian_sid).is_err());
+    assert!(
+        windows_os_account_binding_hash(
+            organization,
+            device,
+            &big_endian_sid,
+            [0, 0, 0, 0, 0, 5],
+            &[21, 1, 2, 3, 1000],
+        )
+        .is_err()
+    );
 
     for guid in [
         "",
@@ -377,7 +502,9 @@ fn os_account_sources_fail_closed_before_hashing() {
         "f81d4fae7dec11d0a76500a0c91e6bf6",
         "f81d4fag-7dec-11d0-a765-00a0c91e6bf6",
     ] {
-        assert!(CanonicalOsAccountId::macos_guid(guid, 501).is_err());
+        assert!(
+            macos_os_account_binding_hash(organization, device, &[guid], &["501"], 501).is_err()
+        );
     }
     for (guids, unique_ids, actual_uid) in [
         (vec![], vec!["501"], 501),
@@ -402,11 +529,19 @@ fn os_account_sources_fail_closed_before_hashing() {
         ),
     ] {
         assert!(
-            CanonicalOsAccountId::macos_open_directory(&guids, &unique_ids, actual_uid).is_err()
+            macos_os_account_binding_hash(organization, device, &guids, &unique_ids, actual_uid,)
+                .is_err()
         );
     }
     assert!(
-        CanonicalOsAccountId::macos_guid("f81d4fae-7dec-11d0-a765-00a0c91e6bf6", u32::MAX).is_err()
+        macos_os_account_binding_hash(
+            organization,
+            device,
+            &["f81d4fae-7dec-11d0-a765-00a0c91e6bf6"],
+            &["4294967295"],
+            u32::MAX,
+        )
+        .is_err()
     );
 
     for source in [
@@ -417,49 +552,17 @@ fn os_account_sources_fail_closed_before_hashing() {
         b"0123456789abcdef0123456789abcdef".as_slice(),
         b"0123456789abcdef0123456789abcdef\r\n".as_slice(),
     ] {
-        assert!(CanonicalOsAccountId::linux_machine_id_file(source, 1000).is_err());
+        assert!(linux_os_account_binding_hash(organization, device, source, 1000).is_err());
     }
     assert!(
-        CanonicalOsAccountId::linux_machine_id_file(
+        linux_os_account_binding_hash(
+            organization,
+            device,
             b"0123456789abcdef0123456789abcdef\n",
             u32::MAX
         )
         .is_err()
     );
-}
-
-#[test]
-fn os_account_wire_decoder_is_exact_closed_and_uid_bounded() {
-    for uid in [0, 23, 24, 255, 256, u32::MAX - 1] {
-        let account = CanonicalOsAccountId::linux_machine_id([0x42; 16], uid).unwrap();
-        let bytes = account.to_deterministic_cbor();
-        assert_eq!(
-            CanonicalOsAccountId::from_deterministic_cbor(&bytes)
-                .unwrap()
-                .to_deterministic_cbor(),
-            bytes
-        );
-    }
-
-    let invalid_hex = [
-        "840102500123456789abcdef0123456789abcdef1affffffff",
-        "840102500123456789abcdef0123456789abcdef6431303030",
-        "840102500123456789abcdef0123456789abcdeff903e8",
-        "840102500123456789abcdef0123456789abcdefc24903e8",
-        "840102700123456789abcdef0123456789abcdef1903e8",
-        "840102d8500123456789abcdef0123456789abcdef1903e8",
-        "840102500123456789abcdef0123456789abcdef1903e800",
-        "840002500123456789abcdef0123456789abcdef1903e8",
-        "840103500123456789abcdef0123456789abcdef1903e8",
-        "830102500123456789abcdef0123456789abcdef",
-        "9f0102500123456789abcdef0123456789abcdef1903e8ff",
-    ];
-    for encoded in invalid_hex {
-        assert!(
-            CanonicalOsAccountId::from_deterministic_cbor(&hex::decode(encoded).unwrap()).is_err(),
-            "invalid fixture {encoded}"
-        );
-    }
 }
 
 #[test]

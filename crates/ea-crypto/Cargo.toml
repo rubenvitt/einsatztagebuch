@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 chacha20poly1305.workspace = true
+cms.workspace = true
+der.workspace = true
 ed25519-dalek.workspace = true
 ea-cbor.workspace = true
 ea-types.workspace = true
@@ -14,6 +16,8 @@ getrandom.workspace = true
 hpke.workspace = true
 minicbor.workspace = true
 sha2.workspace = true
+x25519-dalek.workspace = true
+x509-tsp.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

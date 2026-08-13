@@ -1,5 +1,15 @@
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+#[cfg(test)]
+std::thread_local! {
+    static FIXED_DROP_OBSERVATION: std::cell::RefCell<Option<Vec<u8>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static VARIABLE_DROP_OBSERVATION: std::cell::RefCell<Option<Vec<u8>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// Fixed-size secret ownership.
 ///
 /// It deliberately has no formatting, cloning, comparison, serialization,
@@ -8,7 +18,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// ```compile_fail
 /// use ea_crypto::SecretBytes;
 /// let secret = SecretBytes::<32>::new([7; 32]);
-/// println!("{secret:?}");
+/// let _rendered = format!("{secret:?}");
 /// ```
 ///
 /// ```compile_fail
@@ -16,8 +26,40 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// let secret = SecretBytes::<32>::new([7; 32]);
 /// let _copy = secret.clone();
 /// ```
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(Zeroize)]
 pub struct SecretBytes<const N: usize>([u8; N]);
+
+impl<const N: usize> Drop for SecretBytes<N> {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        #[cfg(test)]
+        FIXED_DROP_OBSERVATION.with(|observation| {
+            *observation.borrow_mut() = Some(self.0.to_vec());
+        });
+    }
+}
+
+impl<const N: usize> ZeroizeOnDrop for SecretBytes<N> {}
+
+#[cfg(test)]
+fn clear_fixed_drop_observation() {
+    FIXED_DROP_OBSERVATION.with(|observation| *observation.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn take_fixed_drop_observation() -> Option<Vec<u8>> {
+    FIXED_DROP_OBSERVATION.with(|observation| observation.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn clear_variable_drop_observation() {
+    VARIABLE_DROP_OBSERVATION.with(|observation| *observation.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn take_variable_drop_observation() -> Option<Vec<u8>> {
+    VARIABLE_DROP_OBSERVATION.with(|observation| observation.borrow_mut().take())
+}
 
 impl<const N: usize> SecretBytes<N> {
     #[must_use]
@@ -45,13 +87,25 @@ impl<const N: usize> SecretBytes<N> {
     }
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct SecretVec(Vec<u8>);
+#[derive(Zeroize)]
+pub struct SecretVec(Box<[u8]>);
+
+impl Drop for SecretVec {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        #[cfg(test)]
+        VARIABLE_DROP_OBSERVATION.with(|observation| {
+            *observation.borrow_mut() = Some(self.0.to_vec());
+        });
+    }
+}
+
+impl ZeroizeOnDrop for SecretVec {}
 
 impl SecretVec {
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(bytes.into_boxed_slice())
     }
 
     #[must_use]
@@ -66,11 +120,11 @@ impl SecretVec {
 
     #[must_use]
     pub fn matches(&self, expected: &[u8]) -> bool {
-        self.0.as_slice() == expected
+        self.0.as_ref() == expected
     }
 
     pub(crate) fn expose(&self) -> &[u8] {
-        &self.0
+        self.0.as_ref()
     }
 }
 
@@ -86,6 +140,24 @@ mod tests {
 
         let mut variable = SecretVec::new(vec![0xa5; 64]);
         variable.zeroize();
-        assert!(variable.0.is_empty());
+        assert_eq!(variable.0.as_ref(), &[0; 64]);
+    }
+
+    #[test]
+    fn fixed_secret_drop_observer_sees_only_zeroes() {
+        clear_fixed_drop_observation();
+        {
+            let _secret = SecretBytes::new([0xa5; 32]);
+        }
+        assert_eq!(take_fixed_drop_observation(), Some(vec![0; 32]));
+    }
+
+    #[test]
+    fn variable_secret_drop_observer_sees_only_zeroes() {
+        clear_variable_drop_observation();
+        {
+            let _secret = SecretVec::new(b"VARIABLE-SECRET-DROP-CANARY".to_vec());
+        }
+        assert_eq!(take_variable_drop_observation(), Some(vec![0; 27]));
     }
 }

@@ -1,6 +1,8 @@
 use ea_cbor::{ParserLimits, validate};
 use ea_types::{DeviceId, Hash32, OrganizationId};
-use minicbor::{Decoder, Encoder};
+#[cfg(test)]
+use minicbor::Decoder;
+use minicbor::Encoder;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{CryptoError, digest::sha256_parts};
@@ -9,7 +11,7 @@ const OS_ACCOUNT_DOMAIN: &[u8] = b"EINSATZARCHIV-OS-ACCOUNT-v1";
 const MAX_UID: u32 = u32::MAX - 1;
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct CanonicalOsAccountId(OsAccountKind);
+struct CanonicalOsAccountId(OsAccountKind);
 
 #[derive(Zeroize)]
 enum OsAccountKind {
@@ -19,12 +21,13 @@ enum OsAccountKind {
 }
 
 impl CanonicalOsAccountId {
-    pub fn windows_sid(sid: &[u8]) -> Result<Self, CryptoError> {
+    #[cfg(test)]
+    fn windows_sid(sid: &[u8]) -> Result<Self, CryptoError> {
         validate_sid(sid)?;
         Ok(Self(OsAccountKind::Windows(sid.to_vec())))
     }
 
-    pub fn windows_components(
+    fn windows_components(
         identifier_authority: [u8; 6],
         subauthorities: &[u32],
     ) -> Result<Self, CryptoError> {
@@ -45,10 +48,10 @@ impl CanonicalOsAccountId {
         for subauthority in subauthorities {
             sid.extend_from_slice(&subauthority.to_le_bytes());
         }
-        Self::windows_sid(&sid)
+        Ok(Self(OsAccountKind::Windows(sid)))
     }
 
-    pub fn windows_sid_source(
+    fn windows_sid_source(
         sid: &[u8],
         identifier_authority: [u8; 6],
         subauthorities: &[u32],
@@ -63,13 +66,13 @@ impl CanonicalOsAccountId {
         Ok(canonical)
     }
 
-    pub fn macos_guid(guid: &str, uid: u32) -> Result<Self, CryptoError> {
+    fn macos_guid(guid: &str, uid: u32) -> Result<Self, CryptoError> {
         validate_uid(uid)?;
         let guid = parse_guid(guid)?;
         Ok(Self(OsAccountKind::MacOs { guid, uid }))
     }
 
-    pub fn macos_open_directory(
+    fn macos_open_directory(
         guid_values: &[&str],
         unique_id_values: &[&str],
         actual_uid: u32,
@@ -87,7 +90,7 @@ impl CanonicalOsAccountId {
         Self::macos_guid(guid, actual_uid)
     }
 
-    pub fn linux_machine_id(machine_id: [u8; 16], uid: u32) -> Result<Self, CryptoError> {
+    fn linux_machine_id(machine_id: [u8; 16], uid: u32) -> Result<Self, CryptoError> {
         validate_uid(uid)?;
         if machine_id == [0; 16] {
             return Err(CryptoError::InvalidOsAccount);
@@ -95,7 +98,7 @@ impl CanonicalOsAccountId {
         Ok(Self(OsAccountKind::Linux { machine_id, uid }))
     }
 
-    pub fn linux_machine_id_file(file: &[u8], uid: u32) -> Result<Self, CryptoError> {
+    fn linux_machine_id_file(file: &[u8], uid: u32) -> Result<Self, CryptoError> {
         if file.len() != 33 || file[32] != b'\n' {
             return Err(CryptoError::InvalidOsAccount);
         }
@@ -106,7 +109,8 @@ impl CanonicalOsAccountId {
         Self::linux_machine_id(machine_id, uid)
     }
 
-    pub fn from_deterministic_cbor(bytes: &[u8]) -> Result<Self, CryptoError> {
+    #[cfg(test)]
+    fn from_deterministic_cbor(bytes: &[u8]) -> Result<Self, CryptoError> {
         validate(bytes, ParserLimits::V1).map_err(|_| CryptoError::InvalidOsAccount)?;
         let mut decoder = Decoder::new(bytes);
         let length = decoder
@@ -152,7 +156,7 @@ impl CanonicalOsAccountId {
     }
 
     #[must_use]
-    pub fn to_deterministic_cbor(&self) -> Vec<u8> {
+    fn to_deterministic_cbor(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(72);
         let mut encoder = Encoder::new(&mut bytes);
         match &self.0 {
@@ -188,8 +192,65 @@ impl CanonicalOsAccountId {
     }
 }
 
-#[must_use]
-pub fn os_account_binding_hash(
+/// Raw operating-system account identifiers are internal to this binding boundary.
+///
+/// ```compile_fail
+/// use ea_crypto::CanonicalOsAccountId;
+///
+/// let account = CanonicalOsAccountId::linux_machine_id_file(
+///     b"0123456789abcdef0123456789abcdef\n",
+///     1000,
+/// )?;
+/// let raw_identifier = account.to_deterministic_cbor();
+/// # Ok::<(), ea_crypto::CryptoError>(())
+/// ```
+pub fn windows_os_account_binding_hash(
+    organization_id: OrganizationId,
+    device_id: DeviceId,
+    sid: &[u8],
+    identifier_authority: [u8; 6],
+    subauthorities: &[u32],
+) -> Result<Hash32, CryptoError> {
+    let account =
+        CanonicalOsAccountId::windows_sid_source(sid, identifier_authority, subauthorities)?;
+    Ok(os_account_binding_hash(
+        organization_id,
+        device_id,
+        &account,
+    ))
+}
+
+pub fn macos_os_account_binding_hash(
+    organization_id: OrganizationId,
+    device_id: DeviceId,
+    guid_values: &[&str],
+    unique_id_values: &[&str],
+    actual_uid: u32,
+) -> Result<Hash32, CryptoError> {
+    let account =
+        CanonicalOsAccountId::macos_open_directory(guid_values, unique_id_values, actual_uid)?;
+    Ok(os_account_binding_hash(
+        organization_id,
+        device_id,
+        &account,
+    ))
+}
+
+pub fn linux_os_account_binding_hash(
+    organization_id: OrganizationId,
+    device_id: DeviceId,
+    machine_id_file: &[u8],
+    uid: u32,
+) -> Result<Hash32, CryptoError> {
+    let account = CanonicalOsAccountId::linux_machine_id_file(machine_id_file, uid)?;
+    Ok(os_account_binding_hash(
+        organization_id,
+        device_id,
+        &account,
+    ))
+}
+
+fn os_account_binding_hash(
     organization_id: OrganizationId,
     device_id: DeviceId,
     account: &CanonicalOsAccountId,
@@ -206,6 +267,7 @@ pub fn os_account_binding_hash(
     sha256_parts(&[OS_ACCOUNT_DOMAIN, context.as_slice()])
 }
 
+#[cfg(test)]
 fn validate_sid(sid: &[u8]) -> Result<(), CryptoError> {
     if !(12..=68).contains(&sid.len()) || sid[0] != 1 || !(1..=15).contains(&sid[1]) {
         return Err(CryptoError::InvalidOsAccount);
@@ -286,5 +348,134 @@ fn any_hex(byte: u8) -> Result<u8, CryptoError> {
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(CryptoError::InvalidOsAccount),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn organization() -> OrganizationId {
+        OrganizationId::try_from(
+            hex::decode("000102030405060708090a0b0c0d0e0f")
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap()
+    }
+
+    fn device() -> DeviceId {
+        DeviceId::try_from(
+            hex::decode("202122232425262728292a2b2c2d2e2f")
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn exact_wire_context_preimage_and_digest_kats_are_pinned() {
+        let windows_sid =
+            hex::decode("010500000000000515000000010000000200000003000000e8030000").unwrap();
+        let cases = [
+            (
+                CanonicalOsAccountId::windows_sid_source(
+                    &windows_sid,
+                    [0, 0, 0, 0, 0, 5],
+                    &[21, 1, 2, 3, 1000],
+                )
+                .unwrap(),
+                "830100581c010500000000000515000000010000000200000003000000e8030000",
+                "8350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f830100581c010500000000000515000000010000000200000003000000e8030000",
+                "45494e5341545a4152434849562d4f532d4143434f554e542d76318350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f830100581c010500000000000515000000010000000200000003000000e8030000",
+                "fcbb2ccb141966c57146aa6e578f56550bf86670ee9b31dea90f5a99b9f26220",
+            ),
+            (
+                CanonicalOsAccountId::macos_open_directory(
+                    &["f81d4fae-7dec-11d0-a765-00a0c91e6bf6"],
+                    &["501"],
+                    501,
+                )
+                .unwrap(),
+                "84010150f81d4fae7dec11d0a76500a0c91e6bf61901f5",
+                "8350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f84010150f81d4fae7dec11d0a76500a0c91e6bf61901f5",
+                "45494e5341545a4152434849562d4f532d4143434f554e542d76318350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f84010150f81d4fae7dec11d0a76500a0c91e6bf61901f5",
+                "0f4ed54a0330ed2bdbb5228d192d4dfa3a0853dae98aba3091f0c7c5f29fde7a",
+            ),
+            (
+                CanonicalOsAccountId::linux_machine_id_file(
+                    b"0123456789abcdef0123456789abcdef\n",
+                    1000,
+                )
+                .unwrap(),
+                "840102500123456789abcdef0123456789abcdef1903e8",
+                "8350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f840102500123456789abcdef0123456789abcdef1903e8",
+                "45494e5341545a4152434849562d4f532d4143434f554e542d76318350000102030405060708090a0b0c0d0e0f50202122232425262728292a2b2c2d2e2f840102500123456789abcdef0123456789abcdef1903e8",
+                "bbca2d7b508415aed456efd6fc5499ddda65759250f6c8b5a1c2edd23a7883e4",
+            ),
+        ];
+
+        for (account, account_hex, context_hex, preimage_hex, digest_hex) in cases {
+            let account_bytes = account.to_deterministic_cbor();
+            assert_eq!(hex::encode(&account_bytes), account_hex);
+            let decoded = CanonicalOsAccountId::from_deterministic_cbor(&account_bytes).unwrap();
+            assert_eq!(decoded.to_deterministic_cbor(), account_bytes);
+
+            let context = hex::decode(context_hex).unwrap();
+            assert_eq!(
+                context,
+                [
+                    &[0x83, 0x50][..],
+                    organization().as_bytes(),
+                    &[0x50][..],
+                    device().as_bytes(),
+                    account_bytes.as_slice(),
+                ]
+                .concat()
+            );
+            assert_eq!(
+                hex::decode(preimage_hex).unwrap(),
+                [OS_ACCOUNT_DOMAIN, context.as_slice()].concat()
+            );
+            assert_eq!(
+                hex::encode(os_account_binding_hash(organization(), device(), &account).as_bytes()),
+                digest_hex
+            );
+        }
+    }
+
+    #[test]
+    fn wire_decoder_is_exact_closed_and_uid_bounded() {
+        for uid in [0, 23, 24, 255, 256, u32::MAX - 1] {
+            let account = CanonicalOsAccountId::linux_machine_id([0x42; 16], uid).unwrap();
+            let bytes = account.to_deterministic_cbor();
+            assert_eq!(
+                CanonicalOsAccountId::from_deterministic_cbor(&bytes)
+                    .unwrap()
+                    .to_deterministic_cbor(),
+                bytes
+            );
+        }
+
+        let invalid_hex = [
+            "840102500123456789abcdef0123456789abcdef1affffffff",
+            "840102500123456789abcdef0123456789abcdef6431303030",
+            "840102500123456789abcdef0123456789abcdeff903e8",
+            "840102500123456789abcdef0123456789abcdefc24903e8",
+            "840102700123456789abcdef0123456789abcdef1903e8",
+            "840102d8500123456789abcdef0123456789abcdef1903e8",
+            "840102500123456789abcdef0123456789abcdef1903e800",
+            "840002500123456789abcdef0123456789abcdef1903e8",
+            "840103500123456789abcdef0123456789abcdef1903e8",
+            "830102500123456789abcdef0123456789abcdef",
+            "9f0102500123456789abcdef0123456789abcdef1903e8ff",
+        ];
+        for encoded in invalid_hex {
+            assert!(
+                CanonicalOsAccountId::from_deterministic_cbor(&hex::decode(encoded).unwrap())
+                    .is_err(),
+                "invalid fixture {encoded}"
+            );
+        }
     }
 }

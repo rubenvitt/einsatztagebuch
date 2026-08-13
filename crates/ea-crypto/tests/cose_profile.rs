@@ -1,20 +1,23 @@
 use ea_crypto::{
-    CanonicalPublicCoseKey, ContentType, CoseSigner, ProtectedHeader, Rfc3161TimeStampToken,
-    SecretBytes, attach_rfc3161_ctt, cose_sign1_ctt_imprint, encode_signed_protocol_wrapper,
-    parse_cose_sign1, validate_unsigned_protocol_core, verify_enrollment_pop,
-    verify_initial_root_pop,
+    CanonicalPublicCoseKey, ContentType, CoseSigner, ProtectedHeader, SecretBytes,
+    UnverifiedRfc3161TimeStampToken, attach_rfc3161_ctt, cose_sign1_ctt_imprint,
+    encode_signed_protocol_wrapper, parse_cose_sign1, validate_unsigned_protocol_core,
+    verify_enrollment_pop, verify_initial_root_pop,
 };
-use ea_types::CertificateHash;
+use ea_types::{CertificateHash, Hash32};
 
 const NORMAL_PROTECTED_HEX: &str = "a50132028303046f63657274696669636174654861736803782b6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e7265636f72642d646967657374045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f6365727469666963617465486173685820d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 const INITIAL_ROOT_PROTECTED_HEX: &str = "a401320282030403782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f49";
 const ENROLLMENT_PROTECTED_HEX: &str = "a401320282030403783e6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e6465766963652d726567697374726174696f6e2d726571756573742b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f49";
 const CHALLENGE_CORE_HEX: &str = "870150000102030405060708090a0b0c0d0e0f5820202020202020202020202020202020202020202020202020202020202020202018183903e75820303030303030303030303030303030303030303030303030303030303030303080";
-const CHALLENGE_COSE_HEX: &str = "d28458a4a50132028303046f6365727469666963617465486173680378356170706c69636174696f6e2f766e642e65696e7361747a6172636869762e6368616c6c656e67652d726573706f6e73652b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f6365727469666963617465486173685820d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeefa0585d870150000102030405060708090a0b0c0d0e0f5820202020202020202020202020202020202020202020202020202020202020202018183903e7582030303030303030303030303030303030303030303030303030303030303030308058401deb6637f8db548088e2e5e2ef492e92afd5821a82c54dd2de7f84a256189c4aabeb035033141367b9d7d2049822b7b5981d2541577ec4d1dc4be63d846d8700";
+const CHALLENGE_COSE_HEX: &str = "d28458a4a50132028303046f6365727469666963617465486173680378356170706c69636174696f6e2f766e642e65696e7361747a6172636869762e6368616c6c656e67652d726573706f6e73652b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f63657274696669636174654861736858203030303030303030303030303030303030303030303030303030303030303030a0585d870150000102030405060708090a0b0c0d0e0f5820202020202020202020202020202020202020202020202020202020202020202018183903e7582030303030303030303030303030303030303030303030303030303030303030308058404d7fe09caac8745e1a8873c1a84b9285e88352aa9adb08e64ff8cb640113f2092286b46c8a4c23b5d8b3d03723bb2c7902b38ca038386abf3602c1d185e26f01";
+const CHALLENGE_WRAPPER_HEX: &str = "82870150000102030405060708090a0b0c0d0e0f5820202020202020202020202020202020202020202020202020202020202020202018183903e75820303030303030303030303030303030303030303030303030303030303030303080d28458a4a50132028303046f6365727469666963617465486173680378356170706c69636174696f6e2f766e642e65696e7361747a6172636869762e6368616c6c656e67652d726573706f6e73652b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f63657274696669636174654861736858203030303030303030303030303030303030303030303030303030303030303030a0585d870150000102030405060708090a0b0c0d0e0f5820202020202020202020202020202020202020202020202020202020202020202018183903e7582030303030303030303030303030303030303030303030303030303030303030308058404d7fe09caac8745e1a8873c1a84b9285e88352aa9adb08e64ff8cb640113f2092286b46c8a4c23b5d8b3d03723bb2c7902b38ca038386abf3602c1d185e26f01";
 const REGISTRATION_CORE_HEX: &str = "890150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f005828a30101200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8f68101817545494e5341545a4152434849562d53554954452d3180";
 const REGISTRATION_COSE_HEX: &str = "d284586ba401320282030403783e6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e6465766963652d726567697374726174696f6e2d726571756573742b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f49a0586a890150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f005828a30101200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8f68101817545494e5341545a4152434849562d53554954452d318058403662bd657ced23c55282bcae6640b6cbff85640831ca36795d170a859fbc97c1bb77832f882f4ec0b314f2c3e1a2b87d3dc3cfe0bd2addd1ffea8fa559c8b403";
+const REGISTRATION_WRAPPER_HEX: &str = "82890150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f005828a30101200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8f68101817545494e5341545a4152434849562d53554954452d3180d284586ba401320282030403783e6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e6465766963652d726567697374726174696f6e2d726571756573742b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f49a0586a890150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f005828a30101200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8f68101817545494e5341545a4152434849562d53554954452d318058403662bd657ced23c55282bcae6640b6cbff85640831ca36795d170a859fbc97c1bb77832f882f4ec0b314f2c3e1a2b87d3dc3cfe0bd2addd1ffea8fa559c8b403";
 const READER_ACK_CORE_HEX: &str = "880150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f582040404040404040404040404040404040404040404040404040404040404040401818582050505050505050505050505050505050505050505050505050505050505050503903e780";
-const READER_ACK_COSE_HEX: &str = "d284589ca50132028303046f63657274696669636174654861736803782d6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e7265616465722d61636b2b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f6365727469666963617465486173685820d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeefa0586e880150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f582040404040404040404040404040404040404040404040404040404040404040401818582050505050505050505050505050505050505050505050505050505050505050503903e78058407d3cff5e2c0e39bd5bef87dc7bdeae91c35c5126a01ce858aa640815e9d01063e9e68229b33f5e6f2212655353fda1f5d139abef8c7839a7c5fa08c0422e2a05";
+const READER_ACK_COSE_HEX: &str = "d284589ca50132028303046f63657274696669636174654861736803782d6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e7265616465722d61636b2b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f63657274696669636174654861736858204040404040404040404040404040404040404040404040404040404040404040a0586e880150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f582040404040404040404040404040404040404040404040404040404040404040401818582050505050505050505050505050505050505050505050505050505050505050503903e78058403cfaa58bd399a5ec852f2cf12d9dfd369e7dfd410437db43028b96aa035d615211047437c1a847e0c09b5b0ceb76646aa2573ce9924f06e7f01dce609e3a0b0f";
+const READER_ACK_WRAPPER_HEX: &str = "82880150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f582040404040404040404040404040404040404040404040404040404040404040401818582050505050505050505050505050505050505050505050505050505050505050503903e780d284589ca50132028303046f63657274696669636174654861736803782d6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e7265616465722d61636b2b63626f72045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f63657274696669636174654861736858204040404040404040404040404040404040404040404040404040404040404040a0586e880150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f582040404040404040404040404040404040404040404040404040404040404040401818582050505050505050505050505050505050505050505050505050505050505050503903e78058403cfaa58bd399a5ec852f2cf12d9dfd369e7dfd410437db43028b96aa035d615211047437c1a847e0c09b5b0ceb76646aa2573ce9924f06e7f01dce609e3a0b0f";
 const CHECKPOINT_CORE_HEX: &str = "8b01781b45494e5341545a4152434849562d434845434b504f494e542d763150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f1718185820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f5820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f1903e7f680";
 const RENEWAL_CORE_HEX: &str = "8801782145494e5341545a4152434849562d45564944454e43452d52454e4557414c2d763150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f5820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3ff6825820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f5820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80";
 const LOCAL_AUDIT_CORE_HEX: &str = "8c0150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f50202122232425262728292a2b2c2d2e2ff65820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f00011903e78200f65820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80";
@@ -130,6 +133,22 @@ fn fixture_key() -> CanonicalPublicCoseKey {
     .unwrap()
 }
 
+fn sign_core(
+    signer: &CoseSigner,
+    content_type: ContentType,
+    certificate: CertificateHash,
+    core: &[u8],
+) -> Result<Vec<u8>, ea_crypto::CryptoError> {
+    match content_type {
+        ContentType::ChallengeResponseCbor => signer.sign_challenge_response(core),
+        ContentType::ReaderAckCbor => signer.sign_reader_ack(core),
+        ContentType::CheckpointCbor => signer.sign_checkpoint(certificate, core),
+        ContentType::EvidenceRenewalCbor => signer.sign_evidence_renewal(certificate, core),
+        ContentType::LocalAuditCbor => signer.sign_local_audit(core),
+        _ => Err(ea_crypto::CryptoError::InvalidCose),
+    }
+}
+
 fn cbor_bstr(bytes: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(bytes.len() + 3);
     match bytes.len() {
@@ -225,7 +244,7 @@ fn tag_18_attached_cose_round_trips_exactly_and_mutations_fail() {
         .unwrap();
     let payload: [u8; 32] = std::array::from_fn(|index| 0x40 + index as u8);
     let encoded = signer
-        .sign_normal(ContentType::RecordDigest, certificate, &payload)
+        .sign_root_trust_digest(certificate, Hash32::try_from(payload.as_slice()).unwrap())
         .unwrap();
     let parsed = parse_cose_sign1(&encoded, &[]).unwrap();
     assert_eq!(parsed.exact_bytes(), encoded);
@@ -326,35 +345,36 @@ fn protocol_cores_and_signed_wrappers_match_normative_golden_bytes() {
             ContentType::ChallengeResponseCbor,
             CHALLENGE_CORE_HEX,
             CHALLENGE_COSE_HEX,
+            CHALLENGE_WRAPPER_HEX,
             false,
         ),
         (
             ContentType::DeviceRegistrationRequestCbor,
             REGISTRATION_CORE_HEX,
             REGISTRATION_COSE_HEX,
+            REGISTRATION_WRAPPER_HEX,
             true,
         ),
         (
             ContentType::ReaderAckCbor,
             READER_ACK_CORE_HEX,
             READER_ACK_COSE_HEX,
+            READER_ACK_WRAPPER_HEX,
             false,
         ),
     ];
 
-    for (content_type, core_hex, cose_hex, enrollment) in cases {
+    for (content_type, core_hex, cose_hex, wrapper_hex, enrollment) in cases {
         let core = hex::decode(core_hex).unwrap();
         validate_unsigned_protocol_core(content_type, &core).unwrap();
         let cose = if enrollment {
             signer.sign_enrollment(&core).unwrap()
         } else {
-            signer
-                .sign_normal(content_type, certificate, &core)
-                .unwrap()
+            sign_core(&signer, content_type, certificate, &core).unwrap()
         };
         assert_eq!(hex::encode(&cose), cose_hex);
 
-        let expected_wrapper = hex::decode(format!("82{core_hex}{cose_hex}")).unwrap();
+        let expected_wrapper = hex::decode(wrapper_hex).unwrap();
         let wrapper = encode_signed_protocol_wrapper(content_type, &core, &cose).unwrap();
         assert_eq!(wrapper, expected_wrapper);
         assert!(validate_unsigned_protocol_core(content_type, &wrapper).is_err());
@@ -373,11 +393,7 @@ fn protocol_cores_and_signed_wrappers_match_normative_golden_bytes() {
         if enrollment {
             assert!(signer.sign_enrollment(&wrapper).is_err());
         } else {
-            assert!(
-                signer
-                    .sign_normal(content_type, certificate, &wrapper)
-                    .is_err()
-            );
+            assert!(sign_core(&signer, content_type, certificate, &wrapper).is_err());
         }
     }
 }
@@ -386,12 +402,9 @@ fn protocol_cores_and_signed_wrappers_match_normative_golden_bytes() {
 fn protocol_wrapper_rejects_signature_for_a_different_core_or_content_type() {
     let signer =
         CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
-    let certificate = CertificateHash::try_from([0xd0; 32].as_slice()).unwrap();
     let challenge = hex::decode(CHALLENGE_CORE_HEX).unwrap();
     let reader_ack = hex::decode(READER_ACK_CORE_HEX).unwrap();
-    let challenge_signature = signer
-        .sign_normal(ContentType::ChallengeResponseCbor, certificate, &challenge)
-        .unwrap();
+    let challenge_signature = signer.sign_challenge_response(&challenge).unwrap();
 
     assert!(
         encode_signed_protocol_wrapper(
@@ -426,7 +439,7 @@ fn rfc9921_ctt_imprint_and_exact_token_header_match_published_bytes() {
 
     let token_der = hex::decode(RFC9921_TOKEN_HEX).unwrap();
     assert_eq!(token_der.len(), 0x154d);
-    let token = Rfc3161TimeStampToken::from_der(&token_der).unwrap();
+    let token = UnverifiedRfc3161TimeStampToken::from_der(&token_der).unwrap();
     assert_eq!(token.as_der(), token_der);
 
     let signer =
@@ -437,9 +450,7 @@ fn rfc9921_ctt_imprint_and_exact_token_header_match_published_bytes() {
         (ContentType::EvidenceRenewalCbor, RENEWAL_CORE_HEX),
     ] {
         let core = hex::decode(core_hex).unwrap();
-        let base = signer
-            .sign_normal(content_type, certificate, &core)
-            .unwrap();
+        let base = sign_core(&signer, content_type, certificate, &core).unwrap();
         let timestamped = attach_rfc3161_ctt(&base, &token).unwrap();
         let parsed = parse_cose_sign1(&timestamped, &[]).unwrap();
         assert_eq!(parsed.timestamp_token(), Some(token_der.as_slice()));
@@ -456,7 +467,10 @@ fn rfc9921_ctt_imprint_and_exact_token_header_match_published_bytes() {
     }
 
     let record = signer
-        .sign_normal(ContentType::RecordDigest, certificate, &[0x40; 32])
+        .sign_root_trust_digest(
+            certificate,
+            Hash32::try_from([0x40; 32].as_slice()).unwrap(),
+        )
         .unwrap();
     assert!(attach_rfc3161_ctt(&record, &token).is_err());
 }
@@ -468,15 +482,13 @@ fn complete_timestamp_response_is_never_accepted_as_label_270_token() {
         hex::decode(format!("308215523003020100{RFC9921_TOKEN_HEX}")).unwrap();
     assert_eq!(complete_response_der.len(), 0x1556);
     assert_ne!(complete_response_der, token_der);
-    assert!(Rfc3161TimeStampToken::from_der(&complete_response_der).is_err());
+    assert!(UnverifiedRfc3161TimeStampToken::from_der(&complete_response_der).is_err());
 
     let signer =
         CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
     let certificate = CertificateHash::try_from([0xd0; 32].as_slice()).unwrap();
     let checkpoint = hex::decode(CHECKPOINT_CORE_HEX).unwrap();
-    let base = signer
-        .sign_normal(ContentType::CheckpointCbor, certificate, &checkpoint)
-        .unwrap();
+    let base = signer.sign_checkpoint(certificate, &checkpoint).unwrap();
     let mut decoder = minicbor::Decoder::new(&base);
     decoder.tag().unwrap();
     decoder.array().unwrap();
@@ -496,6 +508,17 @@ fn complete_timestamp_response_is_never_accepted_as_label_270_token() {
         parse_cose_sign1(&invalid, &[]).is_err(),
         "a complete TimeStampResp must not be confused with its embedded ContentInfo"
     );
+}
+
+#[test]
+fn empty_cms_signed_data_shell_is_not_a_timestamp_token() {
+    let empty_signed_data_shell = hex::decode("300f06092a864886f70d010702a0023000").unwrap();
+
+    let error = match UnverifiedRfc3161TimeStampToken::from_der(&empty_signed_data_shell) {
+        Ok(_) => panic!("an empty SignedData shell is not a timestamp token"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "EA-CRYPTO-INVALID-COSE");
 }
 
 #[test]
@@ -558,13 +581,13 @@ fn enrollment_pop_is_bound_only_to_its_embedded_ed25519_signing_key() {
     let core = hex::decode(REGISTRATION_CORE_HEX).unwrap();
 
     assert!(
-        signer
-            .sign_normal(
-                ContentType::DeviceRegistrationRequestCbor,
-                certificate,
-                &core
-            )
-            .is_err()
+        sign_core(
+            &signer,
+            ContentType::DeviceRegistrationRequestCbor,
+            certificate,
+            &core
+        )
+        .is_err()
     );
 
     let mut mismatched_core = core.clone();

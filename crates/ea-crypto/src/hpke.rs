@@ -21,7 +21,7 @@ pub const HPKE_AEAD_ID: u16 = 0x0003;
 pub const HPKE_ENCAPSULATED_KEY_SIZE: usize = 32;
 pub const HPKE_WRAPPED_CEK_SIZE: usize = 48;
 
-pub trait CryptoRandomSource {
+trait CryptoRandomSource {
     fn fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), CryptoError>;
 }
 
@@ -131,6 +131,11 @@ impl HpkeSealed {
     }
 }
 
+/// Seals with fresh operating-system entropy. Entropy injection is not a public API.
+///
+/// ```compile_fail
+/// use ea_crypto::hpke_seal_with_random_source;
+/// ```
 pub fn hpke_seal(
     recipient: &HpkeRecipientPublicKey,
     cek: &SecretBytes<32>,
@@ -140,7 +145,7 @@ pub fn hpke_seal(
     hpke_seal_with_random_source(recipient, cek, info, aad, &mut SystemRandomSource)
 }
 
-pub fn hpke_seal_with_random_source(
+fn hpke_seal_with_random_source(
     recipient: &HpkeRecipientPublicKey,
     cek: &SecretBytes<32>,
     info: &[u8],
@@ -165,7 +170,8 @@ pub fn hpke_seal_with_random_source(
         if let Ok((_, ciphertext)) = &mut result {
             ciphertext.zeroize();
         }
-        return Err(error);
+        let _ = error;
+        return Err(CryptoError::LocalRng);
     }
     let (encapsulated, ciphertext) = result.map_err(|_| CryptoError::HpkeKey)?;
     let serialized_encapsulated = encapsulated.to_bytes();
@@ -204,4 +210,84 @@ pub fn hpke_open(
     cek.copy_from_slice(&plaintext);
     plaintext.zeroize();
     Ok(SecretBytes::new(cek))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroize::Zeroizing;
+
+    struct FixedSecretSource {
+        bytes: Zeroizing<Vec<u8>>,
+        offset: usize,
+    }
+
+    impl CryptoRandomSource for FixedSecretSource {
+        fn fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), CryptoError> {
+            let end = self
+                .offset
+                .checked_add(destination.len())
+                .ok_or(CryptoError::SizeLimit)?;
+            destination.copy_from_slice(
+                self.bytes
+                    .get(self.offset..end)
+                    .ok_or(CryptoError::SizeLimit)?,
+            );
+            self.offset = end;
+            Ok(())
+        }
+    }
+
+    struct FailingSource;
+
+    impl CryptoRandomSource for FailingSource {
+        fn fill_bytes(&mut self, _destination: &mut [u8]) -> Result<(), CryptoError> {
+            Err(CryptoError::SizeLimit)
+        }
+    }
+
+    #[test]
+    fn application_wrapper_matches_independently_calculated_exact_wire() {
+        let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x42; 32])).unwrap();
+        let info = hex::decode("45494e5341545a4152434849562d48504b452d494e464f2d76318101").unwrap();
+        let aad = hex::decode("45494e5341545a4152434849562d48504b452d4141442d76318101").unwrap();
+        let mut random = FixedSecretSource {
+            bytes: Zeroizing::new(vec![0x24; 32]),
+            offset: 0,
+        };
+        let sealed = hpke_seal_with_random_source(
+            &recipient.public_key(),
+            &SecretBytes::new([0x60; 32]),
+            &info,
+            &aad,
+            &mut random,
+        )
+        .unwrap();
+
+        assert_eq!(
+            hex::encode(sealed.encapsulated_key()),
+            "083f7859feb58bd62e43682c35a9936668e96c103e74e25530134e2dc6419758"
+        );
+        assert_eq!(
+            hex::encode(sealed.wrapped_cek()),
+            "4e62b6d7e5687cb98df9bd00ab0a1523b7b08b4135726cf24343d29c646ede252078a7a40a8c79d065ea59beb8a9353a"
+        );
+    }
+
+    #[test]
+    fn every_source_error_is_normalized_without_returning_wire_bytes() {
+        let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x42; 32])).unwrap();
+        let result = hpke_seal_with_random_source(
+            &recipient.public_key(),
+            &SecretBytes::new([0x60; 32]),
+            b"info",
+            b"aad",
+            &mut FailingSource,
+        );
+        let error = match result {
+            Ok(_) => panic!("failed entropy must not return HPKE wire bytes"),
+            Err(error) => error,
+        };
+        assert_eq!(error, CryptoError::LocalRng);
+    }
 }
