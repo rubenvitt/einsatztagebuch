@@ -259,5 +259,5 @@ impl<'a> Scanner<'a> {
 }
 
 pub(crate) fn deterministic_key_cmp(left: &[u8], right: &[u8]) -> Ordering {
-    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+    left.cmp(right)
 }

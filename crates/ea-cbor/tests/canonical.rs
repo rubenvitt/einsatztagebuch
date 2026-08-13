@@ -8,13 +8,13 @@ fn maps_encode_in_rfc_8949_deterministic_order() {
 }
 
 #[test]
-fn complex_map_keys_use_encoded_length_then_bytewise_order() {
+fn complex_map_keys_use_complete_encoding_bytewise_order() {
     let map = BTreeMap::from([(("aa", 0_u8), 1_u8), (("b", 0_u8), 2_u8)]);
     let bytes = ea_cbor::to_deterministic_vec(&map).unwrap();
     assert_eq!(
         hex::encode(bytes),
         "a28261620002826261610001",
-        "the shorter fully encoded array key must sort first"
+        "the first differing byte in the complete encoded array key decides"
     );
 }
 
@@ -118,5 +118,44 @@ fn canonical_reencode_normalizes_map_order_and_is_idempotent() {
     assert_eq!(
         ea_cbor::canonical_reencode(&canonical, ea_cbor::ParserLimits::V1).unwrap(),
         canonical
+    );
+}
+
+#[test]
+fn rfc_8949_core_accepts_integer_24_before_empty_text_key() {
+    let core_order = [0xa2, 0x18, 0x18, 0x01, 0x60, 0x02];
+    ea_cbor::validate(&core_order, ea_cbor::ParserLimits::V1).unwrap();
+}
+
+#[test]
+fn rfc_8949_core_rejects_length_first_heterogeneous_key_order() {
+    let length_first_order = [0xa2, 0x60, 0x02, 0x18, 0x18, 0x01];
+    assert_eq!(
+        ea_cbor::validate(&length_first_order, ea_cbor::ParserLimits::V1)
+            .unwrap_err()
+            .code(),
+        "EA-CBOR-MAP-ORDER"
+    );
+    assert_eq!(
+        ea_cbor::canonical_reencode(&length_first_order, ea_cbor::ParserLimits::V1).unwrap(),
+        [0xa2, 0x18, 0x18, 0x01, 0x60, 0x02]
+    );
+}
+
+#[test]
+fn rfc_8949_core_orders_complex_keys_by_complete_encoding_bytes() {
+    let core_order = [
+        0xa4, 0x18, 0x18, 0x01, 0x60, 0x02, 0x81, 0x00, 0x03, 0xc0, 0x80, 0x04,
+    ];
+    ea_cbor::validate(&core_order, ea_cbor::ParserLimits::V1).unwrap();
+
+    let length_first_order = [
+        0xa4, 0x60, 0x02, 0x18, 0x18, 0x01, 0x81, 0x00, 0x03, 0xc0, 0x80, 0x04,
+    ];
+    assert_eq!(
+        ea_cbor::validate(&length_first_order, ea_cbor::ParserLimits::V1)
+            .unwrap_err()
+            .code(),
+        "EA-CBOR-MAP-ORDER"
     );
 }

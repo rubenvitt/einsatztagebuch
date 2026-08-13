@@ -402,7 +402,7 @@ Die Anwendung darf den fachlichen Abschluss erst nach Schritt 11 als `lokal gesi
 
 `EINSATZARCHIV-SUITE-1` besteht aus:
 
-- Deterministic CBOR gemäß RFC 8949
+- Deterministic CBOR gemäß RFC 8949 Core Deterministic Encoding Requirements (§4.2.1)
 - COSE Sign1 gemäß RFC 9052/9053
 - SHA-256 mit expliziter Domain Separation
 - Ed25519 für Signaturen
