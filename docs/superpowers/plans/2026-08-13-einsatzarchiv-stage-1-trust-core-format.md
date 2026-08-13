@@ -1,0 +1,1256 @@
+# Einsatzarchiv Stage 1 Trust Core and Format Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Establish the shared Rust trust boundary, exact archive formats, permanent vectors, archive verification, and recovery CLI baseline on which every later stage depends.
+
+**Architecture:** Split primitive types, bounded deterministic CBOR, cryptographic suite orchestration, wire formats, schemas, time/registry evaluation, trust, chain, archive inventory, and verification into one-way-dependent crates. Verified-state constructors remain private so adapters cannot decrypt or advance state from unverified bytes. Resolve every remaining wire-format ambiguity in a reviewed normative addendum before writing an encoder.
+
+**Tech Stack:** Rust workspace, RFC 8949 deterministic CBOR, RFC 9052/9053 COSE Sign1, SHA-256, Ed25519, ChaCha20-Poly1305, RFC 9180 HPKE Base Mode with X25519/HKDF-SHA-256/ChaCha20-Poly1305, RFC 9562 UUIDv7, RFC 9679 key thumbprints, property testing, coverage-guided fuzzing, snapshot/golden tests.
+
+## Global Constraints
+
+- Die Schlüsselwörter **MUSS**, **DARF NICHT**, **SOLL**, **SOLL NICHT** und **DARF** sind normativ zu verstehen. Ein Release darf von einer MUSS-Anforderung nicht abweichen. Eine Abweichung von SOLL erfordert eine dokumentierte Sicherheits- oder Betriebsbegründung.
+- Microsoft Access ist vollständig außerhalb des Scopes. **Access Grant/Zugriffsfreigabe** bezeichnet ausschließlich einen signierten Schlüsselumschlag; `legacyImport` und `legacy-access-import` are invalid.
+- Non-goals are fixed: no live incident log, dispatch/alarm/control-center integration, patient record or identifying patient data, concurrent offline Writers, normal-app mutation/deletion of finalized content, AI summarization/OCR, public links, server-side content search, unprofiled network paths, qualified personal electronic signature, TR-ESOR certification claim, screenshot/transcription prevention, or cryptographic recall of already decrypted data.
+- Product invariants apply verbatim: exactly one active Writer; never-reused predecessor-bound sequences; immutable `.eip` bytes except whole-object authorized replacement by `.eds`; amendment-only corrections; one fresh CEK/ciphertext; one signed grant per recipient; exactly one active Recovery grant before commit; no Reader/Recovery/HGA/Approver private key on Writer; no retained CEK/decryptable draft key; no server decrypt/grant key; server-independent archive verification; independent schema/format/suite versions with old bytes unchanged; separate Sync/verification/Evidence/Entry/destruction statuses; no legal overclaim from a hash chain; every active Reader initially granted; external-anchor recovery; and only Root-signed OS/device-bound operator snapshots.
+- Exactly one active Writer exists; every committed sequence is unique and binds its direct predecessor.
+- Final `.eip` bytes are immutable. Corrections are new amendments; destruction replaces a whole `.eip` only with a separately verified `.eds`.
+- Each payload has one fresh CEK and one ciphertext; each recipient has a separate signed grant; exactly one active Recovery recipient and every active Reader are in the initial grant plan.
+- Writer devices contain no private Reader, Recovery, Historical Grant Authority, or Key Approver keys and retain neither CEK nor decryptable draft key after finalization. The server has no content-decryption or grant-signing key.
+- The archive is verifiable without server or mutable status database. Schema, format, and suite versions evolve independently and old bytes remain unchanged.
+- Authentic recovery starts from an independently held Trust Anchor; archive-contained trust is never TOFU. Operator snapshots come only from valid Root-signed OS-account/device-bound bindings.
+- Writer, Reader, Administration, and CLI target supported Windows 11 `x86_64`, current/previous macOS on `arm64` and supported Intel `x86_64`, and Ubuntu 24.04 LTS `x86_64`; server target is Linux OCI `amd64`. Release proof is deferred to Stage 7 but Stage 1 code must remain portable.
+- Desktop UI uses Ant Design 6 with German `ConfigProvider`, exact lockfile pin, `zeroRuntime: true`, statically extracted local hashed CSS from the specified shared tokens, CSP without runtime/external styles, Ant `App` overlay context, and direct CSR `@phosphor-icons/react` imports only; accessibility/status constraints from §5.4 apply to every later UI task.
+- Security- or format-critical logic is Rust-only and shared by Desktop, Server, and CLI. TypeScript may consume generated view DTOs only.
+- Never log or persist private keys, payloads, decrypted content, nonces, clear incident numbers, locations, names, or free text. No plaintext temporary files. Local databases are encrypted in later stages.
+- Preserve exact status vocabularies defined in §17.4 and never claim general court admissibility, TR-ESOR certification, or complete metadata blindness.
+- v0.1 is complete only after Stage 7 and every acceptance criterion and unnumbered gate passes.
+
+Suite v1 is fixed to `formatVersion = 1`, `objectVersion = 1`, `cryptoSuiteId = "EINSATZARCHIV-SUITE-1"`, grant suite `EINSATZARCHIV-HPKE-1`, magic `h'45413100'`, and object type tags `.eip=1`, `.eag=2`, `.esr=3`, `.ecp=4`, `.etb=5`, `.eds=6`. Parser limits are `.eip` 2 MiB, `.eag`/`.esr` 64 KiB, `.eds` 256 KiB, `.ecp`/`.etb` 4 MiB, nesting 16, 10,000 items per container, and 1 MiB per text/byte string.
+
+---
+
+### Task 1: Reproducible Monorepo and Dependency Decision Record
+
+**Files:**
+- Create: `Cargo.toml`
+- Create: `Cargo.lock`
+- Create: `rust-toolchain.toml`
+- Create: `.cargo/config.toml`
+- Create: `.node-version`
+- Create: `.npmrc`
+- Create: `package.json`
+- Create: `pnpm-workspace.yaml`
+- Create: `pnpm-lock.yaml`
+- Create: `deny.toml`
+- Create: `tools/xtask/Cargo.toml`
+- Create: `tools/xtask/src/main.rs`
+- Create: `tests/ea-system-tests/Cargo.toml`
+- Create: `tests/ea-system-tests/src/lib.rs`
+- Create: `docs/adr/0001-toolchain-and-cryptography-dependencies.md`
+- Test: `tools/xtask/tests/workspace.rs`
+
+**Interfaces:**
+- Consumes: approved design specification only.
+- Produces: exact committed toolchain/lockfile pins and stable root commands `verify:quick`, `test:core`, `test:golden`, `test:property`, `test:fuzz`, and `test:recovery`.
+
+- [ ] **Step 1: Write the workspace smoke test**
+
+```rust
+// tools/xtask/tests/workspace.rs
+use std::{fs, process::Command};
+
+#[test]
+fn workspace_is_locked_and_security_crates_are_shared() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    assert!(root.join("Cargo.lock").is_file());
+    assert!(root.join("pnpm-lock.yaml").is_file());
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    for member in ["tools/xtask", "tests/ea-system-tests"] {
+        assert!(manifest.contains(member), "missing {member}");
+    }
+    assert!(Command::new("cargo").args(["metadata", "--locked", "--no-deps"])
+        .current_dir(root).status().unwrap().success());
+}
+```
+
+- [ ] **Step 2: Run the smoke test and confirm the empty repository fails**
+
+Run: `cargo test --manifest-path tools/xtask/Cargo.toml --test workspace`
+
+Expected: FAIL because the workspace manifests and lockfiles do not exist.
+
+- [ ] **Step 3: Create the pinned workspace and record dependency evidence**
+
+Use the currently installed, verified toolchain as the initial exact pin:
+
+```toml
+# rust-toolchain.toml
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+```
+
+```text
+# .node-version
+26.7.0
+```
+
+```ini
+# .npmrc
+save-exact=true
+engine-strict=true
+```
+
+```yaml
+# pnpm-workspace.yaml
+packages:
+  - apps/desktop
+```
+
+Create a virtual root `package.json` with `packageManager: "pnpm@11.20.0"`; implement each root script as `cargo run --locked -p xtask -- <gate>`. Create a Cargo workspace with resolver `2`, edition `2024`, and `rust-version = "1.95"`. Initially list only the packages this task actually creates: `tools/xtask` and a non-production `ea-system-tests` package at `tests/ea-system-tests`. Every later crate task adds its own concrete path to `workspace.members` in the same commit as its real manifest and source; never list a package whose manifest does not yet exist and never create empty scaffold crates. Later cross-crate Rust integration tests go directly in `tests/ea-system-tests/tests/` so every documented `cargo test -p ea-system-tests --test <name>` command is executable. Add dependencies only at workspace scope. Resolve the latest compatible crate releases once, commit `Cargo.lock`, and document for each crypto/format dependency its upstream, maintained status, audit/security rationale, enabled features, and rejected alternatives in ADR 0001. All commands after this task use `--locked` or `--frozen-lockfile`.
+
+Implement `xtask` so `verify-quick` executes these processes without a shell:
+
+```rust
+for (program, args) in [
+    ("cargo", vec!["fmt", "--all", "--check"]),
+    ("cargo", vec!["clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"]),
+    ("cargo", vec!["test", "--workspace", "--all-targets", "--locked"]),
+] {
+    let status = std::process::Command::new(program).args(args).status()?;
+    if !status.success() { std::process::exit(status.code().unwrap_or(1)); }
+}
+```
+
+- [ ] **Step 4: Generate lockfiles and verify the workspace**
+
+Run:
+
+```bash
+cargo generate-lockfile
+corepack pnpm install --frozen-lockfile=false
+cargo test --locked -p xtask --test workspace
+cargo run --locked -p xtask -- verify-quick
+```
+
+Expected: PASS; the ADR contains actual resolved versions and sources, and both lockfiles are tracked.
+
+- [ ] **Step 5: Commit the reproducible scaffold**
+
+```bash
+git add Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .node-version .npmrc package.json pnpm-workspace.yaml pnpm-lock.yaml deny.toml tools/xtask tests/ea-system-tests docs/adr/0001-toolchain-and-cryptography-dependencies.md
+git commit -m "build: establish pinned Einsatzarchiv workspace"
+```
+
+### Task 2: Close Normative Wire-Format Gaps Before Encoding
+
+**Files:**
+- Create: `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md`
+- Create: `schemas/archive/v1/archive.cddl`
+- Create: `schemas/archive/v1/trust.cddl`
+- Create: `schemas/archive/v1/evidence.cddl`
+- Create: `schemas/reports/v1/verification-report.schema.json`
+- Create: `schemas/reports/v1/key-inventory.schema.json`
+- Create: `schemas/reports/v1/local-audit.cddl`
+- Test: `tools/xtask/tests/spec_completeness.rs`
+
+**Interfaces:**
+- Consumes: fixed structures and semantics from design §§10–16.
+- Produces: exact array positions and tags for every `.ecp`, `.eds`, and `.etb` subtype, stable `ea.verification-report/v1` and `ea.key-inventory/v1` JSON schemas, and the signed cleartext-free `local-audit-event-v1` contract.
+
+- [ ] **Step 1: Write a completeness test that enumerates every required object and trust subtype**
+
+```rust
+#[test]
+fn cddl_registers_every_v1_wire_type() {
+    let archive = include_str!("../../../schemas/archive/v1/archive.cddl");
+    let trust = include_str!("../../../schemas/archive/v1/trust.cddl");
+    let evidence = include_str!("../../../schemas/archive/v1/evidence.cddl");
+    for name in ["eip-v1", "eag-v1", "esr-v1", "ecp-v1", "etb-v1", "eds-v1"] {
+        assert!(archive.contains(name), "missing {name}");
+    }
+    for subtype in [
+        "root-certificate-core-v1", "device-certificate-core-v1", "operator-binding-core-v1",
+        "organization-admin-authorization-v1", "registry-event-core-v1", "policy-core-v1",
+        "writer-transition-core-v1", "grant-authorization-core-v1",
+        "destruction-authorization-core-v1", "destruction-transition-core-v1",
+        "deletion-attestation-core-v1",
+    ] { assert!(trust.contains(subtype), "missing {subtype}"); }
+    for name in ["checkpoint-core-v1", "timestamp-evidence-v1", "renewal-core-v1"] {
+        assert!(evidence.contains(name), "missing {name}");
+    }
+    let audit = include_str!("../../../schemas/reports/v1/local-audit.cddl");
+    for name in ["local-audit-event-v1", "stale-registry-context-v1", "clock-release-context-v1"] {
+        assert!(audit.contains(name), "missing {name}");
+    }
+}
+```
+
+- [ ] **Step 2: Run the completeness test and verify missing schemas fail**
+
+Run: `cargo test --locked -p xtask --test spec_completeness`
+
+Expected: FAIL because the CDDL and report schemas do not exist.
+
+- [ ] **Step 3: Write and review the exact addendum**
+
+The addendum must state that it is normative for v0.1, cannot override an already fixed design field, and is accepted before Task 3. Use these exact new discriminators and outer shapes:
+
+```cddl
+ecp-v1 = [h'45413100', 4, 1, [],
+  ([0, standard-checkpoint-v1] /
+   [1, timestamp-evidence-v1] /
+   [2, renewal-evidence-v1])
+]
+
+checkpoint-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  covered-from-sequence: uint, covered-through-sequence: uint,
+  head-entry-hash: bstr .size 32, registry-head-hash: bstr .size 32,
+  issued-at-server: int, previous-evidence-hash: (bstr .size 32) / null, []
+]
+
+standard-checkpoint-v1 = [checkpoint-core-v1, #6.18(COSE-Sign1)]
+timestamp-evidence-v1 = [
+  checkpoint-core-v1, #6.18(COSE-Sign1),
+  rfc3161-response-der: bstr, hash-algorithm: 0, ; 0 SHA-256
+  request-nonce: bstr, policy-oid-der: bstr,
+  tsa-certificate-chain-der: [+ bstr], revocation-data-der: [* bstr],
+  validation-data-der: [* bstr]
+]
+
+renewal-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  current-entry-hash: bstr .size 32,
+  previous-renewal-hash: (bstr .size 32) / null,
+  sorted-renewal-input-hashes: [+ bstr .size 32], []
+]
+renewal-evidence-v1 = [
+  renewal-core-v1, #6.18(COSE-Sign1), rfc3161-response-der: bstr,
+  hash-algorithm: 0, request-nonce: bstr, policy-oid-der: bstr,
+  tsa-certificate-chain-der: [+ bstr], revocation-data-der: [* bstr],
+  validation-data-der: [* bstr]
+]
+
+eds-v1 = [h'45413100', 6, 1, [], [
+  1, signed-manifest: [manifest-core-v1, bstr .size 32],
+  writer-signature: #6.18(COSE-Sign1), entry-hash: bstr .size 32,
+  ciphertext-hash: bstr .size 32, original-eip-object-hash: bstr .size 32,
+  destruction-id: bstr .size 16,
+  destruction-authorization-object-hash: bstr .size 32, []
+]]
+```
+
+Use these exact Trust core arrays; a nullable key is allowed only when the certificate kind does not use that algorithm. Capability strings and hash lists are UTF-8/bytewise sorted and duplicate-free.
+
+```cddl
+etb-v1 = [h'45413100', 5, 1, [], [trust-subtype-v1, trust-payload-v1, [+ #6.18(COSE-Sign1)]]]
+trust-subtype-v1 = "rootCertificate" / "deviceCertificate" / "operatorBinding" /
+  "organizationAdminAuthorization" / "registryEvent" / "policy" /
+  "writerTransition" / "grantAuthorization" / "destructionAuthorization" /
+  "destructionTransition" / "deletionAttestation"
+
+trust-payload-v1 =
+  root-certificate-core-v1 / authorized-trust-payload-v1<root-certificate-core-v1> /
+  device-certificate-core-v1 / authorized-trust-payload-v1<device-certificate-core-v1> /
+  operator-binding-core-v1 / authorized-trust-payload-v1<operator-binding-core-v1> /
+  organization-admin-authorization-v1 /
+  authorized-trust-payload-v1<registry-event-core-v1> /
+  authorized-trust-payload-v1<policy-core-v1> /
+  authorized-trust-payload-v1<writer-transition-core-v1> /
+  grant-authorization-core-v1 / destruction-authorization-core-v1 /
+  destruction-transition-core-v1 / deletion-attestation-core-v1
+
+; 0 writer, 1 reader, 2 organizationAdmin, 3 keyApprover,
+; 4 recoveryRecipient, 5 historicalGrantAuthority, 6 serverReceipt,
+; 7 deletionAttest
+certificate-kind-v1 = 0..7
+; 0 osWrapped, 1 hardwareNonExportable, 2 offlineEncryptedContainer,
+; 3 pkcs11, 4 serverSecretStoreOrHsm
+key-protection-profile-v1 = 0..4
+
+root-certificate-core-v1 = [
+  1, organization-id: bstr .size 16,
+  root-public-cose-key: bstr, root-key-thumbprint: bstr .size 32,
+  previous-root-certificate-object-hash: (bstr .size 32) / null,
+  effective-from-registry-version: uint, []
+]
+
+device-certificate-core-v1 = [
+  1, organization-id: bstr .size 16, device-id: bstr .size 16,
+  certificate-kind: certificate-kind-v1,
+  signing-public-cose-key: bstr / null, kem-public-cose-key: bstr / null,
+  signing-key-thumbprint: (bstr .size 32) / null,
+  kem-key-thumbprint: (bstr .size 32) / null,
+  capabilities: [* tstr], key-protection-profile: key-protection-profile-v1,
+  effective-from-sequence: uint, revoked-from-sequence: uint / null, []
+]
+
+operator-binding-core-v1 = [
+  1, organization-id: bstr .size 16, operator-subject-id: bstr .size 16,
+  operator-profile-commitment: bstr .size 32,
+  device-certificate-hash: bstr .size 32,
+  operator-role: 0..2, ; writer, reader, organization admin
+  os-account-binding-hash: bstr .size 32,
+  operator-instance-key-thumbprint: bstr .size 32,
+  effective-from-sequence: uint, revoked-from-sequence: uint / null, []
+]
+
+organization-admin-authorization-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  admin-key-thumbprint: bstr .size 32, admin-certificate-hash: bstr .size 32,
+  admin-operator-binding-object-hash: bstr .size 32,
+  action-code: 0..6,
+  target-trust-subtype: "deviceCertificate" / "operatorBinding" /
+    "registryEvent" / "policy" / "writerTransition" / "rootCertificate",
+  authorized-trust-core-hash: bstr .size 32,
+  issued-at: int, expires-at: int, nonce: bstr .size 32, []
+]
+
+; Every event changes exactly one action class.
+registry-change-v1 =
+  [0, certificate-object-hash: bstr .size 32] /                 ; deviceApprove
+  [1, target-kind: 0..2, target-object-hash: bstr .size 32] / ; device/operator/component revoke
+  [2, policy-object-hash: bstr .size 32] /                    ; policyChange
+  [3, writer-transition-object-hash: bstr .size 32] /         ; writerTransition
+  [4, operator-binding-object-hash: bstr .size 32] /          ; operatorBinding
+  [5, admin-certificate-object-hash: bstr .size 32, effect: 0..1] / ; activate/revoke
+  [6, root-certificate-object-hash: bstr .size 32]             ; rootRotation
+
+registry-event-core-v1 = [
+  1, organization-id: bstr .size 16, registry-version: uint,
+  previous-registry-hash: (bstr .size 32) / null,
+  effective-from-sequence: uint, valid-through-sequence: uint,
+  issued-at: int, not-before: int, not-after: int,
+  policy-object-hash: bstr .size 32, change: registry-change-v1,
+  root-key-thumbprint: bstr .size 32, []
+]
+
+retention-policy-v1 = [
+  minimum-retention-ms: uint / null,
+  destruction-enabled: bool,
+  eds-privacy-decision-document-hash: (bstr .size 32) / null
+]
+free-text-policy-v1 = [
+  free-text-allowed: bool, rule-set-version: tstr,
+  local-pattern-warning-enabled: bool
+]
+policy-core-v1 = [
+  1, organization-id: bstr .size 16, policy-version: uint,
+  previous-policy-object-hash: (bstr .size 32) / null,
+  operating-profile: 0..1, ; standard, evidence-grade
+  max-registry-age-ms: uint, max-future-clock-skew-ms: uint,
+  registry-expiry-behavior: 0..1, ; warn, block
+  evidence-max-delay-ms: uint, reader-inactivity-ms: uint,
+  reader-history-access-allowed: bool,
+  allowed-archive-profile-hashes: [+ bstr .size 32],
+  network-outage-behavior: 0, ; local commit then byte-identical publication
+  backup-frequency-ms: uint, restore-test-interval-ms: uint,
+  retention-policy: retention-policy-v1, free-text-policy: free-text-policy-v1,
+  allowed-crypto-suite-ids: [+ tstr], allowed-format-versions: [+ uint],
+  effective-from-sequence: uint, []
+]
+
+writer-transition-core-v1 = [
+  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  old-writer-certificate-hash: bstr .size 32,
+  new-writer-certificate-hash: bstr .size 32,
+  effective-from-sequence: uint, previous-entry-hash: bstr .size 32,
+  reason-code: uint, []
+]
+
+grant-authorization-core-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  authorization-sequence: uint,
+  sorted-entry-hashes: [+ bstr .size 32],
+  recipient-key-thumbprint: bstr .size 32,
+  recipient-certificate-hash: bstr .size 32,
+  purpose: 1, expires-at: int, []
+]
+
+destruction-authorization-core-v1 = [
+  1, destruction-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  authorization-sequence: uint,
+  sorted-targets: [+ [entry-hash: bstr .size 32, chain-sequence: uint]],
+  scope-code: uint, legal-reason-code: uint, []
+]
+
+; 0 requested, 1 inProgress, 2 pendingBackupExpiry,
+; 3 completeManagedScope, 4 incompleteUnreachableReplica
+destruction-state-v1 = 0..4
+destruction-transition-core-v1 = [
+  1, destruction-id: bstr .size 16,
+  destruction-authorization-object-hash: bstr .size 32,
+  event-id: bstr .size 16,
+  previous-event-object-hash: (bstr .size 32) / null,
+  from-state: destruction-state-v1 / null,
+  to-state: destruction-state-v1, trigger-code: uint,
+  executed-at: int, []
+]
+
+deletion-attestation-core-v1 = [
+  1, destruction-id: bstr .size 16,
+  destruction-authorization-object-hash: bstr .size 32,
+  replica-id: bstr .size 16, replica-kind: uint,
+  sorted-removed-object-hashes: [* bstr .size 32],
+  result: 0..2, ; removed, pending immutable expiry, unreachable/failed
+  backup-expiry-at: int / null, executed-at: int, []
+]
+
+; Initial Root/Admin exceptions carry the core directly. Every other authorized
+; target carries the exact Admin authorization object hash as its second item.
+authorized-trust-payload-v1<T> = [authorized-trust-core: T,
+                                  organization-admin-authorization-object-hash: bstr .size 32]
+```
+
+Define the local, encrypted-database audit record as deterministic CBOR plus identity-bearing COSE. Action and context discriminators are stable and all detail is allowlisted; there is no free-text detail field.
+
+```cddl
+; 0 login, 1 reauthFailure, 2 bindingChange, 3 revocation,
+; 4 registryStaleWarnAcceptance, 5 plaintextExport, 6 clockSkewRelease,
+; 7 adminRootCeremony, 8 recoveryTest, 9 historicalRegrant, 10 destruction,
+; 11 archiveProfileMigration
+local-audit-action-v1 = 0..11
+; 0 failed, 1 accepted, 2 completed
+local-audit-outcome-v1 = 0..2
+
+stale-registry-context-v1 = [
+  registry-head-hash: bstr .size 32, policy-object-hash: bstr .size 32,
+  proposed-sequence: uint, registry-not-after: int, acknowledged-at: int,
+  preview-hash: bstr .size 32
+]
+clock-release-context-v1 = [
+  trusted-time-floor: int, observed-os-wall-clock: int,
+  max-future-clock-skew-ms: uint, justification-code: uint,
+  issued-at: int, expires-at: int
+]
+export-context-v1 = [entry-hash: bstr .size 32, target-kind: uint]
+binding-lifecycle-context-v1 = [
+  old-binding-object-hash: (bstr .size 32) / null,
+  new-binding-object-hash: (bstr .size 32) / null,
+  effective-from-sequence: uint
+]
+admin-root-context-v1 = [
+  authorization-object-hash: bstr .size 32,
+  target-object-hash: bstr .size 32, action-code: uint
+]
+historical-regrant-context-v1 = [
+  authorization-object-hash: bstr .size 32, entry-hash: bstr .size 32,
+  original-recovery-grant-object-hash: bstr .size 32,
+  recipient-certificate-object-hash: bstr .size 32,
+  new-grant-object-hash: bstr .size 32
+]
+destruction-context-v1 = [
+  destruction-authorization-object-hash: bstr .size 32,
+  state-event-object-hash: bstr .size 32
+]
+archive-profile-migration-context-v1 = [
+  source-profile-hash: bstr .size 32, target-profile-hash: bstr .size 32,
+  inventory-hash: bstr .size 32, active-pointer-hash: bstr .size 32
+]
+local-audit-context-v1 =
+  [0, subject-object-hash: (bstr .size 32) / null] /
+  [1, stale-registry-context-v1] /
+  [2, clock-release-context-v1] /
+  [3, export-context-v1] /
+  [4, binding-lifecycle-context-v1] /
+  [5, admin-root-context-v1] /
+  [6, historical-regrant-context-v1] /
+  [7, destruction-context-v1] /
+  [8, archive-profile-migration-context-v1]
+
+local-audit-event-core-v1 = [
+  1, event-id: bstr .size 16, organization-id: bstr .size 16,
+  device-id: bstr .size 16,
+  operator-binding-object-hash: (bstr .size 32) / null,
+  signer-certificate-object-hash: bstr .size 32,
+  action: local-audit-action-v1, outcome: local-audit-outcome-v1,
+  effective-now: int, context: local-audit-context-v1,
+  nonce: bstr .size 32, []
+]
+local-audit-event-v1 = [local-audit-event-core-v1, #6.18(COSE-Sign1)]
+```
+
+The COSE payload is exactly the deterministic encoding of `local-audit-event-core-v1`; protected headers resolve the signer to the named active device or Admin certificate. Generic context contains only an object hash or null. Enforce the fixed action-to-context table: login/reauth failure/recovery test use generic; binding change/revocation use binding lifecycle; stale acceptance, export, clock release, Admin/Root ceremony, historical re-grant, destruction, and profile migration each use only their same-named typed context. Export stores only target kind, never a path. The stale-warning context is the one-use finalization acknowledgement. The clock-release context is an expiring administrative proof and can authorize only the exact observed skew it records; no context can lower `trustedTimeFloor`.
+
+For `grantAuthorization` and `destructionAuthorization`, the outer `.etb` signature list must contain at least two signatures, sorted by signer certificate hash, from distinct active subject IDs with the matching Approver capability. Root rotation additionally has a signature from the previous accepted Root line; the initial Root proof-of-possession is the only COSE identity-header exception already defined in the design.
+
+Define the two JSON schemas with `additionalProperties: false` at every object level. `ea.verification-report/v1` requires exactly `schemaId`, `archiveObjectCount`, `entryPackageCount`, `destroyedEntryCount`, `chainHead`, `registryVersions`, `objectResults`, `authorizedDestructions`, `gaps`, `signatureErrors`, `evidenceErrors`, `decryptionErrors`, `publicKeyThumbprints`, and `reportHash`; it permits only optional `reportSignature` and `runtimeMetadata`, and runtime time/host/path fields are valid only inside that metadata object. `ea.key-inventory/v1` requires exactly `schemaId`, `inventoryId`, and duplicate-free `media`, where each medium contains `mediumId`, `keyRole`, `expectedKeyThumbprint`, `certificateObjectHash`, `protectionProfile`, and `testKind` (`signatureChallenge`, `recoveryDecrypt`, or `providerPresence`). All arrays have a declared stable sort key in the schema description and serializer tests.
+
+Add a review table mapping every added field back to a design paragraph. Any design contradiction blocks implementation and is fixed in the design plus addendum in the same review commit; production code never chooses between them.
+
+- [ ] **Step 4: Validate syntax, names, and report schemas**
+
+Run:
+
+```bash
+cargo test --locked -p xtask --test spec_completeness
+cargo run --locked -p xtask -- validate-schemas
+```
+
+Expected: PASS; no required subtype is absent, every JSON schema rejects unknown properties, and the addendum review table has no unresolved row.
+
+- [ ] **Step 5: Commit the normative addendum separately**
+
+```bash
+git add docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md schemas/archive/v1 schemas/reports/v1 tools/xtask/tests/spec_completeness.rs
+git commit -m "docs: close v0.1 wire format definitions"
+```
+
+### Task 3: Primitive Types, Status Boundaries, and Cleartext-Free Errors
+
+**Files:**
+- Create: `crates/ea-types/Cargo.toml`
+- Create: `crates/ea-types/src/lib.rs`
+- Create: `crates/ea-types/src/ids.rs`
+- Create: `crates/ea-types/src/status.rs`
+- Create: `crates/ea-types/src/error.rs`
+- Create: `crates/ea-types/src/redaction.rs`
+- Test: `crates/ea-types/tests/contracts.rs`
+
+**Interfaces:**
+- Consumes: no prior application crate.
+- Produces: IDs/hashes/versions, normative status enums, `TechnicalErrorCode`, and `Redacted<T>` used by every later crate.
+
+- [ ] **Step 1: Write contract and redaction tests**
+
+```rust
+use ea_types::{
+    EntryHash, ErrorClass, Hash32, RetryDisposition, SyncStatus,
+    TechnicalError, TechnicalErrorCode,
+};
+
+#[test]
+fn hashes_require_exact_length_and_errors_do_not_echo_input() {
+    assert!(Hash32::try_from(&[0_u8; 31][..]).is_err());
+    let err = TechnicalError::new(TechnicalErrorCode::InvalidObject).with_secret("CANARY-NAME");
+    assert_eq!(format!("{err}"), "EA-FORMAT-INVALID-OBJECT");
+    assert!(!format!("{err:?}").contains("CANARY-NAME"));
+}
+
+#[test]
+fn status_is_machine_stable() {
+    assert_eq!(SyncStatus::UploadPending.code(), "uploadPending");
+    assert_eq!(EntryHash::from(Hash32::ZERO).as_bytes(), &[0_u8; 32]);
+}
+
+#[test]
+fn every_error_class_has_one_fail_closed_retry_contract() {
+    assert_eq!(ErrorClass::Domain.disposition(), RetryDisposition::CorrectInput);
+    assert_eq!(ErrorClass::LocalResource.disposition(), RetryDisposition::RetainDraftAndBlock);
+    assert_eq!(ErrorClass::TemporaryTransport.disposition(), RetryDisposition::BoundedRetry);
+    assert_eq!(ErrorClass::TrustSecurity.disposition(), RetryDisposition::FailClosed);
+    assert_eq!(ErrorClass::Format.disposition(), RetryDisposition::IsolateObject);
+    assert_eq!(ErrorClass::Evidence.disposition(), RetryDisposition::PreserveEntryAndReport);
+    assert_eq!(ErrorClass::RecoveryDestruction.disposition(), RetryDisposition::ReportExactPartialState);
+}
+```
+
+- [ ] **Step 2: Run tests and verify the crate is absent**
+
+Run: `cargo test --locked -p ea-types --test contracts`
+
+Expected: FAIL because `ea-types` and its public types do not exist.
+
+- [ ] **Step 3: Implement closed newtypes, statuses, and redacted errors**
+
+```rust
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Hash32([u8; 32]);
+impl Hash32 {
+    pub const ZERO: Self = Self([0; 32]);
+    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+}
+impl TryFrom<&[u8]> for Hash32 {
+    type Error = LengthError;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        value.try_into().map(Self).map_err(|_| LengthError::new(32, value.len()))
+    }
+}
+
+pub enum SyncStatus { LocallySecured, UploadPending, Synchronized, Error }
+pub enum VerificationStatus { Verified, Gap, MissingGrant, UnknownKey, UnsupportedSchema, Invalid }
+pub enum EvidenceStatus { Complete, Pending, Overdue, Invalid }
+pub enum EntryStatus { Present, AuthorizedDestroyed, UnexplainedGap }
+pub enum ErrorClass {
+    Domain, LocalResource, TemporaryTransport, TrustSecurity,
+    Format, Evidence, RecoveryDestruction,
+}
+pub enum RetryDisposition {
+    CorrectInput, RetainDraftAndBlock, BoundedRetry, FailClosed,
+    IsolateObject, PreserveEntryAndReport, ReportExactPartialState,
+}
+```
+
+Implement the exact §19.1 class-to-disposition mapping shown in the test. `TechnicalError` carries exactly one class and stable code; only `TemporaryTransport` permits automatic bounded retry, with jittered capped backoff and an explicit exhausted state. Implement `Display` and `Debug` using only stable technical codes and non-sensitive numeric metadata. Keep raw secret context inside a non-formatting `Redacted<T>` wrapper solely for immediate control flow; do not implement serialization for it.
+
+- [ ] **Step 4: Run focused tests and lint**
+
+Run: `cargo test --locked -p ea-types && cargo clippy --locked -p ea-types --all-targets -- -D warnings`
+
+Expected: PASS; `CANARY-NAME` never appears in formatted output.
+
+- [ ] **Step 5: Commit the shared type boundary**
+
+```bash
+git add crates/ea-types Cargo.toml Cargo.lock
+git commit -m "feat(core): add stable identifiers and status types"
+```
+
+### Task 4: Bounded Deterministic CBOR
+
+**Files:**
+- Create: `crates/ea-cbor/Cargo.toml`
+- Create: `crates/ea-cbor/src/lib.rs`
+- Create: `crates/ea-cbor/src/encode.rs`
+- Create: `crates/ea-cbor/src/decode.rs`
+- Create: `crates/ea-cbor/src/limits.rs`
+- Test: `crates/ea-cbor/tests/canonical.rs`
+- Test: `crates/ea-cbor/tests/limits.rs`
+- Create: `fuzz/Cargo.toml`
+- Create: `fuzz/fuzz_targets/cbor_object.rs`
+
+**Interfaces:**
+- Consumes: `ea_types::TechnicalErrorCode`.
+- Produces: `to_deterministic_vec<T>(&T)`, `BoundedDecoder`, `ParserLimits::V1`, and a parser that rejects floats, indefinite lengths, duplicate map keys, non-minimal integers, invalid UTF-8/NFC fields, and non-canonical order before large allocation.
+
+- [ ] **Step 1: Write canonical and boundary tests**
+
+```rust
+#[test]
+fn maps_encode_in_rfc_8949_deterministic_order() {
+    let bytes = ea_cbor::to_deterministic_vec(&vec![("aa", 1_u64), ("b", 2)]).unwrap();
+    assert_eq!(hex::encode(bytes), "82".to_owned() + "8262616101" + "82616202");
+}
+
+#[test]
+fn oversized_and_indefinite_values_fail_before_allocation() {
+    let limits = ea_cbor::ParserLimits::V1;
+    assert_eq!(ea_cbor::validate(&[0x5f, 0xff], limits).unwrap_err().code(), "EA-CBOR-INDEFINITE");
+    let header_for_2_mib = [0x5a, 0x00, 0x20, 0x00, 0x01];
+    assert_eq!(ea_cbor::validate(&header_for_2_mib, limits).unwrap_err().code(), "EA-CBOR-ITEM-LIMIT");
+}
+```
+
+- [ ] **Step 2: Run tests and verify missing deterministic behavior**
+
+Run: `cargo test --locked -p ea-cbor`
+
+Expected: FAIL because the encoder, streaming validator, and limits do not exist.
+
+- [ ] **Step 3: Implement deterministic serialization and a token-budgeted decoder**
+
+```rust
+pub const V1: ParserLimits = ParserLimits {
+    max_depth: 16,
+    max_container_items: 10_000,
+    max_text_or_bytes: 1_048_576,
+};
+
+pub fn validate(input: &[u8], limits: ParserLimits) -> Result<(), CborError> {
+    let mut decoder = BoundedDecoder::new(input, limits);
+    decoder.validate_one()?;
+    if !decoder.is_eof() { return Err(CborError::TrailingBytes); }
+    Ok(())
+}
+```
+
+Wrap the selected upstream CBOR library rather than implementing cryptographic primitives. The wrapper must inspect headers before allocating, enforce minimal integer representation, track depth/item counts, compare canonical map-key encodings, reject floats/indefinite items/duplicate keys, and re-encode accepted input to prove byte-for-byte determinism.
+
+- [ ] **Step 4: Run unit, property, and short fuzz smoke tests**
+
+Run:
+
+```bash
+cargo test --locked -p ea-cbor
+cargo test --locked -p ea-cbor --test canonical --test limits
+cargo fuzz run cbor_object -- -max_total_time=30
+```
+
+Expected: PASS; fuzzing exits without panic, uncontrolled allocation, or accepted non-canonical input.
+
+- [ ] **Step 5: Commit deterministic CBOR**
+
+```bash
+git add crates/ea-cbor fuzz Cargo.toml Cargo.lock
+git commit -m "feat(core): add bounded deterministic CBOR"
+```
+
+### Task 5: Cryptographic Suite 1 and Signer Identity Resolution
+
+**Files:**
+- Create: `crates/ea-crypto/Cargo.toml`
+- Create: `crates/ea-crypto/src/lib.rs`
+- Create: `crates/ea-crypto/src/digest.rs`
+- Create: `crates/ea-crypto/src/cose.rs`
+- Create: `crates/ea-crypto/src/aead.rs`
+- Create: `crates/ea-crypto/src/hpke.rs`
+- Create: `crates/ea-crypto/src/thumbprint.rs`
+- Create: `crates/ea-crypto/src/secret.rs`
+- Test: `crates/ea-crypto/tests/suite_v1.rs`
+- Test: `crates/ea-crypto/tests/identity.rs`
+
+**Interfaces:**
+- Consumes: exact deterministic bytes from `ea-cbor`, identifiers from `ea-types`.
+- Produces: `SuiteV1`, domain-separated digest functions, `CoseSigner`, `CoseVerifier`, AEAD seal/open, HPKE seal/open, RFC-9679 thumbprints, and zeroizing `SecretBytes`.
+
+- [ ] **Step 1: Write known-answer and identity-coherence tests**
+
+```rust
+#[test]
+fn suite_v1_domains_do_not_alias() {
+    let input = b"same bytes";
+    assert_ne!(record_digest(input), object_hash(input).into_hash32());
+    assert_ne!(grant_digest(input), receipt_digest(input));
+}
+
+#[test]
+fn certificate_hash_and_thumbprint_must_resolve_to_one_certificate() {
+    let signature = fixtures::signature_with_mixed_certificate_and_key();
+    let err = verify_cose_sign1(&signature, fixtures::trust_set()).unwrap_err();
+    assert_eq!(err.code(), "EA-TRUST-SIGNER-MISMATCH");
+}
+```
+
+- [ ] **Step 2: Run the suite tests and verify failure**
+
+Run: `cargo test --locked -p ea-crypto --test suite_v1 --test identity`
+
+Expected: FAIL because Suite 1 and protected-header resolution do not exist.
+
+- [ ] **Step 3: Implement Suite 1 exclusively through reviewed upstream primitives**
+
+```rust
+pub const SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+pub const GRANT_SUITE_ID: &str = "EINSATZARCHIV-HPKE-1";
+
+pub fn record_digest(bytes: &[u8]) -> Hash32 {
+    sha256_parts(&[b"EINSATZARCHIV-RECORD-v1", bytes])
+}
+pub fn object_hash(bytes: &[u8]) -> ObjectHash {
+    ObjectHash(sha256_parts(&[b"EINSATZARCHIV-OBJECT-v1", bytes]))
+}
+
+pub struct ProtectedSigner {
+    pub algorithm: Algorithm,
+    pub key_thumbprint: KeyThumbprint,
+    pub certificate_hash: CertificateHash,
+    pub content_type: ContentType,
+    pub critical: Vec<HeaderLabel>,
+}
+```
+
+Implement all design domain strings literally, including ciphertext, package, grant plan, grant, receipt, trust object, admin-authorized trust, OS account, operator profile, anchor pre/final, recovery test, checkpoint, and renewal input. Enforce empty unprotected COSE headers except RFC-9921 `3161-ctt` in Stage 6. Root proof-of-possession is the sole signature header without `certificateHash`. Zeroize CEKs, nonces held as secret state, plaintext serialization buffers, and HPKE shared secrets on drop.
+
+- [ ] **Step 4: Run KAT, one-byte mutation, and misuse tests**
+
+Run: `cargo test --locked -p ea-crypto`
+
+Expected: PASS; every protected-header mutation and certificate/thumbprint mismatch is rejected.
+
+- [ ] **Step 5: Commit Suite 1**
+
+```bash
+git add crates/ea-crypto Cargo.toml Cargo.lock
+git commit -m "feat(core): implement cryptographic suite one"
+```
+
+### Task 6: Exact Archive Objects, Grants, Receipts, and Parser Limits
+
+**Files:**
+- Create: `crates/ea-format/Cargo.toml`
+- Create: `crates/ea-format/src/lib.rs`
+- Create: `crates/ea-format/src/object.rs`
+- Create: `crates/ea-format/src/eip.rs`
+- Create: `crates/ea-format/src/eag.rs`
+- Create: `crates/ea-format/src/esr.rs`
+- Create: `crates/ea-format/src/ecp.rs`
+- Create: `crates/ea-format/src/etb.rs`
+- Create: `crates/ea-format/src/eds.rs`
+- Create: `crates/ea-format/src/parser.rs`
+- Test: `crates/ea-format/tests/object_roundtrip.rs`
+- Test: `crates/ea-format/tests/grant_plan.rs`
+- Test: `crates/ea-format/tests/negative.rs`
+
+**Interfaces:**
+- Consumes: `ea-cbor`, `ea-crypto`, `ea-types`, reviewed CDDL from Task 2.
+- Produces: `decode_exact_object`, exact encoders for all six types, `ManifestCoreV1`, `GrantPlanV1`, `GrantV1`, `ReceiptCoreV1`, `DestroyedEntryStubV1`, and opaque `ExactObjectBytes`.
+
+- [ ] **Step 1: Write fixed-position, grant-plan, and negative tests**
+
+```rust
+#[test]
+fn grant_plan_is_total_sorted_unique_and_has_one_recovery() {
+    let plan = GrantPlanV1::new(vec![fixtures::reader_b(), fixtures::recovery(), fixtures::reader_a()]).unwrap();
+    assert_eq!(plan.items(), &[fixtures::recovery(), fixtures::reader_a(), fixtures::reader_b()]);
+    assert_eq!(plan.hash(), fixtures::expected_grant_plan_hash());
+    assert_eq!(GrantPlanV1::new(vec![fixtures::recovery(), fixtures::recovery()]).unwrap_err().code(),
+               "EA-GRANT-DUPLICATE-RECOVERY");
+}
+
+#[test]
+fn top_level_and_manifest_tags_must_match() {
+    let bytes = fixtures::eip_with_manifest_object_type(2);
+    assert_eq!(decode_exact_object(&bytes, ParserLimits::V1).unwrap_err().code(),
+               "EA-FORMAT-TAG-MISMATCH");
+}
+```
+
+- [ ] **Step 2: Run focused tests and confirm format constructors are absent**
+
+Run: `cargo test --locked -p ea-format --test object_roundtrip --test grant_plan --test negative`
+
+Expected: FAIL because exact format models and parsers are not implemented.
+
+- [ ] **Step 3: Implement typed positional models and exact-byte preservation**
+
+```rust
+pub enum ParsedArchiveObject {
+    Entry(Parsed<EntryPackageV1>),
+    Grant(Parsed<GrantV1>),
+    Receipt(Parsed<ReceiptV1>),
+    Evidence(Parsed<EvidenceObjectV1>),
+    Trust(Parsed<TrustObjectV1>),
+    Destroyed(Parsed<DestroyedEntryStubV1>),
+}
+
+pub struct Parsed<T> {
+    value: T,
+    exact_bytes: ExactObjectBytes,
+    object_hash: ObjectHash,
+}
+
+pub fn decode_exact_object(bytes: &[u8], limits: ParserLimits)
+    -> Result<ParsedArchiveObject, FormatError>;
+```
+
+Decode arrays positionally, verify magic/type/version/critical extensions twice where required, enforce object-specific byte limits before CBOR parsing, preserve exact input bytes, and never serialize a parsed object merely to compute its object hash. Derive `entryHash` only from `recordDigest` and exact COSE signature bytes. Initial grant creation signs `grantBody`, including encapsulated key and wrapped CEK. Receipt hash lists are bytewise sorted and duplicate-free.
+
+- [ ] **Step 4: Run all format and mutation tests**
+
+Run: `cargo test --locked -p ea-format`
+
+Expected: PASS for every object family; one-byte changes, duplicate keys/hashes, overflow, non-empty v1 critical extensions, and unknown object versions fail closed.
+
+- [ ] **Step 5: Commit exact object formats**
+
+```bash
+git add crates/ea-format Cargo.toml Cargo.lock
+git commit -m "feat(core): implement exact archive object formats"
+```
+
+### Task 7: Versioned Payload Schemas and Compatibility Registry
+
+**Files:**
+- Create: `crates/ea-schema/Cargo.toml`
+- Create: `crates/ea-schema/src/lib.rs`
+- Create: `crates/ea-schema/src/v1.rs`
+- Create: `crates/ea-schema/src/registry.rs`
+- Create: `crates/ea-schema/src/transform.rs`
+- Create: `schemas/payload/v1/incident.schema.json`
+- Create: `schemas/payload/v1/amendment.schema.json`
+- Create: `schemas/payload/v1/genesis.schema.json`
+- Create: `schemas/payload/v1/key-transition.schema.json`
+- Create: `schemas/payload/v1/destruction-evidence.schema.json`
+- Create: `schemas/compatibility-matrix.json`
+- Test: `crates/ea-schema/tests/v1_validation.rs`
+- Test: `crates/ea-schema/tests/compatibility.rs`
+
+**Interfaces:**
+- Consumes: primitive IDs/time types and deterministic CBOR.
+- Produces: `SchemaRegistry::validate`, `SchemaRegistry::derive_view`, `PayloadV1`, and `UnsupportedSchema`; no historical byte mutation.
+
+- [ ] **Step 1: Write payload boundary and unsupported-schema tests**
+
+```rust
+#[test]
+fn patient_count_zero_unknown_and_positive_are_distinct() {
+    assert!(incident(patient_status("known", Some(0))).validate().is_ok());
+    assert!(incident(patient_status("known", Some(3))).validate().is_ok());
+    assert!(incident(patient_status("unknown", None)).validate().is_ok());
+    assert_eq!(incident(patient_status("unknown", Some(0))).validate().unwrap_err().field(), "patientCount");
+}
+
+#[test]
+fn unknown_schema_is_not_an_empty_incident() {
+    let result = SchemaRegistry::v1().derive_view("ea.incident", 99, b"bytes");
+    assert!(matches!(result, Err(SchemaError::Unsupported { .. })));
+}
+```
+
+- [ ] **Step 2: Run schema tests and verify failure**
+
+Run: `cargo test --locked -p ea-schema`
+
+Expected: FAIL because the registry and v1 validators are missing.
+
+- [ ] **Step 3: Implement v1 typed variants and their own historical rules**
+
+```rust
+pub enum PayloadV1 {
+    Genesis(GenesisV1),
+    Incident(IncidentV1),
+    Amendment(AmendmentV1),
+    KeyTransition(KeyTransitionV1),
+    DestructionEvidence(DestructionEvidenceV1),
+}
+
+pub enum PatientCount {
+    Known(u32),
+    Unknown,
+}
+```
+
+Enforce UUIDv7 record IDs; integer epoch milliseconds plus IANA timezone; Unicode NFC; no floats; only `source.kind = native`; and only registered versioned `extensionData` namespaces. `IncidentV1` requires a 1–64-character `humanIncidentNumber` unique within organization/calendar year, required interval start with optional end not before start, 1–128-character keyword/reference, free-text or structured location with optional coordinates, at most 200 personnel and 100 vehicles with a required reason for either empty list, `PatientCount::Known(nonnegative)` or `Unknown`, optional notes of at most 20,000 characters with no identifying-patient fields, and at most 100 external organizations. Its deterministic plaintext is at most 1 MiB. `GenesisV1` binds organization, chain, initial Writer certificate, format, suite, and initial policy; `AmendmentV1` binds original incident number/record ID/Entry hash/sequence plus reason, structured change text, and creator snapshot; `KeyTransitionV1` binds the public Writer-transition event hash plus encrypted organizational reason; `DestructionEvidenceV1` binds targets, authorization, scope, execution results, Stub hashes, attestations, and explicit successful/pending/unreachable replicas without asserting unconfirmed deletion. Generate and validate `schemas/compatibility-matrix.json` from the same Rust registry. A derived old view names source and target schema and never replaces verified source bytes.
+
+- [ ] **Step 4: Run validation and cross-version fixture tests**
+
+Run: `cargo test --locked -p ea-schema && cargo run --locked -p xtask -- validate-schemas`
+
+Expected: PASS; `legacyImport`, `legacy-access-import`, floats, non-NFC strings, unknown critical namespaces, and unsupported suites/schemas fail with distinct errors.
+
+- [ ] **Step 5: Commit payload schemas**
+
+```bash
+git add crates/ea-schema schemas/payload schemas/compatibility-matrix.json Cargo.toml Cargo.lock
+git commit -m "feat(core): add versioned payload schemas"
+```
+
+### Task 8: Trust Anchors, Admin Authorization, Registry Selection, and Monotonic Time
+
+**Files:**
+- Create: `crates/ea-time/Cargo.toml`
+- Create: `crates/ea-time/src/lib.rs`
+- Create: `crates/ea-trust/Cargo.toml`
+- Create: `crates/ea-trust/src/lib.rs`
+- Create: `crates/ea-trust/src/anchor.rs`
+- Create: `crates/ea-trust/src/certificate.rs`
+- Create: `crates/ea-trust/src/admin_authorization.rs`
+- Create: `crates/ea-trust/src/registry.rs`
+- Create: `crates/ea-trust/src/policy.rs`
+- Create: `crates/ea-trust/src/operator_binding.rs`
+- Create: `crates/ea-trust/src/clock_release.rs`
+- Test: `crates/ea-time/tests/effective_now.rs`
+- Test: `crates/ea-trust/tests/bootstrap.rs`
+- Test: `crates/ea-trust/tests/registry_attacks.rs`
+- Test: `crates/ea-trust/tests/clock_release.rs`
+
+**Interfaces:**
+- Consumes: exact `.etb` bytes, crypto identity resolution, IDs/time types.
+- Produces: `EffectiveNow`, `VerifiedTrust`, `VerifiedAdminAuthorization`, `SelectedRegistryHead`, and capability checks used by all clients/server.
+
+- [ ] **Step 1: Write clock, bootstrap, and head-selection attack tests**
+
+```rust
+#[test]
+fn wall_clock_rollback_never_reduces_effective_now() {
+    let state = TrustedTimeState::new(UnixMillis(2_000));
+    let now = effective_now(UnixMillis(1_000), state, &[]).unwrap();
+    assert_eq!(now.millis(), UnixMillis(2_000));
+    assert_eq!(now.warning(), Some(TimeWarning::ClockRollback));
+}
+
+#[test]
+fn null_context_accepts_only_anchor_pinned_admin_pair_once() {
+    assert!(verify_bootstrap(fixtures::pinned_pair(), fixtures::pre_anchor()).is_ok());
+    assert_eq!(verify_bootstrap(fixtures::unpinned_root_signed_pair(), fixtures::pre_anchor()).unwrap_err().code(),
+               "EA-TRUST-BOOTSTRAP-UNPINNED");
+    assert_eq!(verify_bootstrap_after_first_head(fixtures::pinned_pair()).unwrap_err().code(),
+               "EA-TRUST-BOOTSTRAP-CLOSED");
+}
+```
+
+- [ ] **Step 2: Run trust tests and verify failure**
+
+Run: `cargo test --locked -p ea-time -p ea-trust`
+
+Expected: FAIL because no anchor, admin authorization, Registry, or effective-time evaluator exists.
+
+- [ ] **Step 3: Implement one shared trust evaluator**
+
+```rust
+pub fn effective_now(
+    os_wall_clock: UnixMillis,
+    persisted: TrustedTimeState,
+    verified_sources: &[VerifiedSignedTime],
+) -> Result<EffectiveNow, TimeError>;
+
+pub fn effective_now_with_clock_release(
+    os_wall_clock: UnixMillis,
+    persisted: TrustedTimeState,
+    verified_sources: &[VerifiedSignedTime],
+    clock_release: &VerifiedClockRelease,
+) -> Result<EffectiveNow, TimeError>;
+
+pub fn select_registry_head(
+    trust: &VerifiedTrust,
+    sequence: ChainSequence,
+    now: EffectiveNow,
+) -> Result<SelectedRegistryHead, RegistryError>;
+```
+
+Set `trustedTimeFloor` to the maximum persisted floor plus verified Receipt, Checkpoint, TSA, Registry `issuedAt`, and `notBefore` sources. Use `effectiveNow = max(OS wall clock, trustedTimeFloor)`. Select the highest Registry version satisfying sequence lease and `notBefore`; retain future heads; reject gaps, same-version different hash, rollback, stale strict/evidence, consumed lease, and excessive future clock skew. `VerifiedClockRelease` is an opaque proof produced only after verifying a signed `clockSkewRelease` local-audit record from an active Admin identity; it must match organization/device, exact floor/wall-clock/skew limit, a one-use nonce, and a still-valid `expiresAt`, and it never lowers the floor. Only `effective_now_with_clock_release` can embed that exact verified waiver into the private `EffectiveNow` state; all downstream Registry evaluation keeps the unchanged three-argument seam and cannot manufacture a waiver. Validate Admin authorization ID/nonce uniqueness, action code/target subtype, authorized core hash, expiration, same-certificate signer resolution, active Admin certificate plus binding, Root signature, two distinct Admin bootstrap pairs, and permanent closure of pre-Registry context.
+
+- [ ] **Step 4: Run the full positive/negative trust vector matrix**
+
+Run: `cargo test --locked -p ea-time -p ea-trust`
+
+Expected: PASS; Root-only, Admin-only, wrong core/action, self-admin rotation, mismatched OS/instance binding, replayed nonce/ID, future-only head, stale strict Registry, clock rollback, mismatched/expired clock release, and replayed release all fail exactly as designed.
+
+- [ ] **Step 5: Commit trust and time evaluation**
+
+```bash
+git add crates/ea-time crates/ea-trust Cargo.toml Cargo.lock
+git commit -m "feat(core): verify anchors registry and trusted time"
+```
+
+### Task 9: Chain, Archive Inventory, and Verification Pipeline
+
+**Files:**
+- Create: `crates/ea-chain/Cargo.toml`
+- Create: `crates/ea-chain/src/lib.rs`
+- Create: `crates/ea-archive/Cargo.toml`
+- Create: `crates/ea-archive/src/lib.rs`
+- Create: `crates/ea-archive/src/layout.rs`
+- Create: `crates/ea-archive/src/inventory.rs`
+- Create: `crates/ea-verify/Cargo.toml`
+- Create: `crates/ea-verify/src/lib.rs`
+- Create: `crates/ea-verify/src/entry.rs`
+- Create: `crates/ea-verify/src/archive.rs`
+- Create: `crates/ea-verify/src/report.rs`
+- Test: `crates/ea-chain/tests/gaps_forks.rs`
+- Test: `crates/ea-verify/tests/order.rs`
+- Test: `crates/ea-verify/tests/filename_independence.rs`
+
+**Interfaces:**
+- Consumes: parsed exact objects, verified trust, schema registry.
+- Produces: `ArchiveInventory`, `VerifiedEncryptedEntry`, `VerifiedChain`, `VerificationReportV1`, and `verify_archive`; filenames are hints only.
+
+- [ ] **Step 1: Write verification-order and filename-independence tests**
+
+```rust
+#[test]
+fn verification_stops_before_grant_or_decryption_on_bad_signature() {
+    let events = RecordingVerifier::run(fixtures::bad_writer_signature()).unwrap_err().events;
+    assert_eq!(events, ["format", "trust", "registry", "manifest-signature"]);
+    assert!(!events.contains(&"hpke-open"));
+}
+
+#[test]
+fn renamed_objects_rebuild_the_same_chain() {
+    let a = verify_archive(&fixtures::canonical_paths(), fixtures::anchor(), VerifyOptions::default()).unwrap();
+    let b = verify_archive(&fixtures::randomized_paths(), fixtures::anchor(), VerifyOptions::default()).unwrap();
+    assert_eq!(a.chain_head(), b.chain_head());
+}
+```
+
+- [ ] **Step 2: Run focused tests and verify failure**
+
+Run: `cargo test --locked -p ea-chain -p ea-verify`
+
+Expected: FAIL because inventory and proof-state verification do not exist.
+
+- [ ] **Step 3: Implement reconstruction from bytes and ordered proof states**
+
+```rust
+pub fn verify_archive(
+    source: &dyn ArchiveSource,
+    anchor: &TrustAnchorV1,
+    options: VerifyOptions,
+) -> Result<VerificationReportV1, VerifyError>;
+
+pub fn verify_entry(
+    object: &Parsed<EntryPackageV1>,
+    trust: &VerifiedTrust,
+    predecessor: Option<&VerifiedEncryptedEntry>,
+) -> Result<VerifiedEncryptedEntry, VerifyError>;
+```
+
+Implement the exact archive layout `trust/{organization.etb,registry-events/,operator-bindings/,authorizations/}`, `entries/`, `destroyed-entries/`, `grants/`, `receipts/`, `checkpoints/`, `destructions/<destruction-id>/{events,attestations}/`, `format/{schemas,transformations,compatibility-matrix.json}`, `recovery-reports/`, and `README-FORMAT.txt`. Inventory all bytes by parsed type and object hash, treating every filename only as a hint; quarantine malformed/duplicate/conflicting objects, reconstruct Trust and chain from content, and enforce Genesis sequence 0 followed by exact increments and predecessor hashes. Verify format, Trust/Registry/Writer, signed manifest and hashes, transition, grant plan/Recovery grant, Receipt/checkpoint/evidence when present, and recipient grant in that order. A valid `.eds` preserves chain identity and becomes `AuthorizedDestroyed`; missing `.eip` without a complete Stub/authorization/evidence chain remains `UnexplainedGap`.
+
+- [ ] **Step 4: Run chain, archive, and mutation tests**
+
+Run: `cargo test --locked -p ea-chain -p ea-archive -p ea-verify`
+
+Expected: PASS; gap, swap, fork, rollback, orphan grant, unknown Writer, invalid Stub, and filename manipulation have distinct deterministic outcomes.
+
+- [ ] **Step 5: Commit verification pipeline**
+
+```bash
+git add crates/ea-chain crates/ea-archive crates/ea-verify Cargo.toml Cargo.lock
+git commit -m "feat(core): verify archive trust and chain"
+```
+
+### Task 10: Recovery CLI Baseline and Deterministic Reports
+
+**Files:**
+- Create: `crates/ea-recovery/Cargo.toml`
+- Create: `crates/ea-recovery/src/lib.rs`
+- Create: `crates/ea-recovery/src/verify.rs`
+- Create: `crates/ea-recovery/src/decrypt.rs`
+- Create: `crates/ea-recovery/src/export.rs`
+- Create: `crates/ea-recovery/src/report.rs`
+- Create: `apps/cli/Cargo.toml`
+- Create: `apps/cli/src/main.rs`
+- Create: `apps/cli/src/args.rs`
+- Create: `apps/cli/src/output.rs`
+- Create: `apps/cli/src/commands/{verify,list,decrypt,report,export}.rs`
+- Test: `apps/cli/tests/commands.rs`
+- Test: `apps/cli/tests/exit_codes.rs`
+- Test: `apps/cli/tests/determinism.rs`
+
+**Interfaces:**
+- Consumes: `verify_archive`, a separate `KemDecapsulator`, schema registry, archive source/sink.
+- Produces: required CLI grammar, `ea.verification-report/v1` JSON, exit codes `0,2,10,11,12,13,14,15,20,21`, and full encrypted export.
+
+- [ ] **Step 1: Write CLI anchor, ordering, and report determinism tests**
+
+```rust
+#[test]
+fn trust_commands_require_external_anchor() {
+    cli().args(["verify", fixture_path("archive")]).assert()
+        .failure().code(2).stderr(predicate::str::contains("--trust-anchor"));
+}
+
+#[test]
+fn report_is_byte_identical_without_runtime_metadata() {
+    let first = run_report(fixtures::archive(), fixtures::anchor(), false);
+    let second = run_report(fixtures::archive(), fixtures::anchor(), false);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn report_is_hashed_and_only_signed_by_an_explicit_authorized_role() {
+    let unsigned = run_report_with_signer(fixtures::archive(), None);
+    assert_eq!(unsigned.report_hash, sha256(&unsigned.canonical_report_bytes));
+    assert!(unsigned.signature.is_none());
+    let signed = run_report_with_signer(fixtures::archive(), Some(fixtures::authorized_report_signer()));
+    assert!(verify_report_signature(&signed).is_ok());
+    assert!(run_report_with_signer(fixtures::archive(), Some(fixtures::unauthorized_writer_signer())).is_err());
+}
+```
+
+- [ ] **Step 2: Run CLI tests and verify failure**
+
+Run: `cargo test --locked -p einsatzarchiv-cli`
+
+Expected: FAIL because the binary and command handlers do not exist.
+
+- [ ] **Step 3: Implement the baseline commands with verify-before-use**
+
+```rust
+#[repr(i32)]
+pub enum ExitCode {
+    Success = 0, Usage = 2, Integrity = 10, Chain = 11, Trust = 12,
+    Evidence = 13, Key = 14, Incomplete = 15, Io = 20, Unsupported = 21,
+}
+```
+
+Implement exactly:
+
+```text
+einsatzarchiv --trust-anchor <file> verify <archive-path>
+einsatzarchiv --trust-anchor <file> list <archive-path>
+einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>
+einsatzarchiv --trust-anchor <file> report <archive-path> --output <report-file>
+einsatzarchiv --trust-anchor <file> export <archive-or-server> --output <new-target>
+```
+
+Every command supports `--format text|json`. `decrypt` and `export` call full verification first and write only to a newly created or empty target with restrictive permissions. `report` sorts all arrays and maps canonically and excludes host path, current time, and runtime metadata unless `--include-runtime-metadata` is supplied. It always emits `reportHash = SHA-256(canonical report bytes without reportHash/signature)` and, only when the caller explicitly supplies a currently authorized report-signing key source, a detached COSE Sign1 over that hash with the signer certificate/capability recorded in the envelope. No available authorized signer means a valid hashed unsigned report, not an implicit use of any other key. If multiple errors exist, return the smallest applicable specific exit code while retaining all details in the report.
+
+- [ ] **Step 4: Run CLI, fresh-anchor attack, and export tests**
+
+Run: `cargo test --locked -p ea-recovery -p einsatzarchiv-cli`
+
+Expected: PASS; a self-consistent foreign Root/Genesis fails with code 12, export preserves every original byte, and identical input produces identical report bytes.
+
+- [ ] **Step 5: Commit the recovery baseline**
+
+```bash
+git add crates/ea-recovery apps/cli Cargo.toml Cargo.lock
+git commit -m "feat(cli): add offline verification and recovery baseline"
+```
+
+### Task 11: Permanent Vectors, Property/Fuzz Gates, Format Package, and Traceability
+
+**Files:**
+- Create: `crates/ea-testkit/Cargo.toml`
+- Create: `crates/ea-testkit/src/lib.rs`
+- Create: `vectors/crypto/suite-1/manifest.json`
+- Create: `vectors/format/v1/{valid,invalid}/manifest.json`
+- Create: `vectors/trust/v1/manifest.json`
+- Create: `vectors/grants/v1/manifest.json`
+- Create: `vectors/receipts/v1/manifest.json`
+- Create: `vectors/evidence/v1/manifest.json`
+- Create: `tests/ea-system-tests/tests/conformance_golden_vectors.rs`
+- Create: `tests/ea-system-tests/tests/conformance_properties.rs`
+- Create: `docs/format/README-FORMAT.txt`
+- Create: `docs/traceability/v0.1-requirements.csv`
+- Create: `docs/traceability/stage-1-gate.md`
+- Modify: `tools/xtask/src/main.rs`
+- Test: `tools/xtask/tests/stage_gate.rs`
+
+**Interfaces:**
+- Consumes: every Stage 1 crate and schema.
+- Produces: immutable versioned test vectors, public format package, requirement ledger, and `xtask stage-gate 1`.
+
+- [ ] **Step 1: Write a gate test that rejects absent vectors and incomplete ledger rows**
+
+```rust
+#[test]
+fn stage_one_gate_requires_every_vector_family_and_primary_ak() {
+    let result = xtask_test::stage_gate(1);
+    assert!(result.vector_families.contains_all(["crypto", "format", "trust", "grants", "receipts", "evidence"]));
+    assert_eq!(result.primary_acceptance_criteria, [4, 5, 6, 9, 14, 16, 17, 20, 38, 51]);
+    assert!(result.rows.iter().all(|row| matches!(row.status, Status::Implemented | Status::Integrated)));
+}
+```
+
+- [ ] **Step 2: Run the Stage 1 gate and confirm missing evidence fails**
+
+Run: `cargo test --locked -p xtask --test stage_gate`
+
+Expected: FAIL listing each absent vector family and ledger entry.
+
+- [ ] **Step 3: Generate deterministic vectors and populate exact traceability**
+
+Use fixed published/KAT keys and explicit deterministic test entropy only inside `ea-testkit`. Each vector manifest records schema ID, suite ID, source standard or fixture generator commit, exact input bytes, expected intermediate digests, exact object bytes, expected acceptance/error code, and SHA-256 file hash. Include:
+
+- every Suite 1 primitive and domain string;
+- valid and one-byte-mutated `.eip/.eag/.esr/.ecp/.etb/.eds`;
+- grant total sorting, duplicate rejection, HPKE info/AAD, encapsulated key, wrapped CEK, and signature digest;
+- receipt field positions, sorted grant hashes, digest, signature, and replay bytes;
+- Root/Admin/bootstrap positives and every negative listed in §22.1;
+- schema/format/suite compatibility and safe unsupported behavior;
+- deterministic encoding, chain, and parser properties.
+
+Populate the requirement ledger for every normative paragraph, AK 1–54, and unnumbered §§21/22/25 gate. Stage 1 rows may be `implemented` or `integrated`; cross-stage rows remain `planned`. `README-FORMAT.txt` documents object tags, directory layout, independent-anchor rule, hash/domain formulas, parser limits, and compatibility files without promising legal evidentiary status.
+
+- [ ] **Step 4: Run the complete Stage 1 gate**
+
+Run:
+
+```bash
+pnpm test:core
+pnpm test:golden
+pnpm test:property
+pnpm test:fuzz -- --smoke-seconds 60
+pnpm test:recovery
+cargo run --locked -p xtask -- stage-gate 1
+pnpm verify:quick
+```
+
+Expected: PASS. The gate report maps primary AK 4, 5, 6, 9, 14, 16, 17, 20, 38, and 51 to concrete evidence and explicitly leaves their later-stage contributions open.
+
+- [ ] **Step 5: Commit the Stage 1 gate**
+
+```bash
+git add crates/ea-testkit vectors tests/conformance docs/format docs/traceability tools/xtask package.json Cargo.toml Cargo.lock
+git commit -m "test(core): close trust core and format stage"
+```
