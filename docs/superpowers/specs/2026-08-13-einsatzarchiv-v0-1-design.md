@@ -410,9 +410,108 @@ Die Anwendung darf den fachlichen Abschluss erst nach Schritt 11 als `lokal gesi
 - HPKE Base Mode mit X25519, HKDF-SHA-256 und ChaCha20-Poly1305
 - TLS 1.3 für den Transport
 
+Für jede Suite-v1-`COSE_Sign1`-Signatur gilt folgendes geschlossene Wire-Profil.
+Die standardisierten COSE-Header-Labels sind `alg = 1`, `crit = 2`,
+`content type = 3` und `kid = 4`. `alg` hat ausschließlich den durch RFC 9864
+vollständig spezifizierten COSE-Ed25519-Wert `-19`. Der ältere polymorphe
+RFC-9053-EdDSA-Wert `-8` ist deprecated und wird fail-closed abgelehnt. Der Wert
+von `kid` ist exakt der 32-Byte-RFC-9679-SHA-256-Thumbprint des
+tatsächlich verwendeten kanonischen COSE-Public-Key. Der symbolische Vertrag
+`keyThumbprint` in dieser Spezifikation bezeichnet semantisch genau diesen
+geschützten `kid`-Wert; es wird kein zusätzlicher Header mit dem Textlabel
+`keyThumbprint` serialisiert.
+
+`certificateHash` ist ein anwendungseigenes geschütztes tstr-Label mit exakt
+32-Byte-bstr-Wert. Es bezeichnet den unten definierten `.etb`-`objectHash` und ist
+ausdrücklich **nicht** der RFC-9360-Header `x5t`: Einsatzarchiv-Zertifikate sind
+versionierte `.etb`-Objekte und keine DER-kodierten X.509-Zertifikate.
+
+Der normale geschützte Header ist exakt:
+
+```cbor-diag
+{
+  1: -19,
+  2: [3, 4, "certificateHash"],
+  3: <exakter intern registrierter content-type-tstr>,
+  4: h'<32-byte-rfc-9679-sha-256-key-thumbprint>',
+  "certificateHash": h'<32-byte-etb-object-hash>'
+}
+```
+
+Die initiale Root-Proof-of-Possession verwendet stattdessen exakt:
+
+```cbor-diag
+{
+  1: -19,
+  2: [3, 4],
+  3: "application/vnd.einsatzarchiv.trust-digest",
+  4: h'<32-byte-rfc-9679-sha-256-key-thumbprint>'
+}
+```
+
+Die eng getrennte Enrollment-Proof-of-Possession eines noch nicht ausgestellten
+Geräteantrags verwendet exakt:
+
+```cbor-diag
+{
+  1: -19,
+  2: [3, 4],
+  3: "application/vnd.einsatzarchiv.device-registration-request+cbor",
+  4: h'<32-byte-rfc-9679-sha-256-request-key-thumbprint>'
+}
+```
+
+Diese Enrollment-PoP beweist ausschließlich den Besitz des im
+`device-registration-request-v1` enthaltenen Signing-Key. Sie verleiht keine
+Geräte-, Rollen-, Trust- oder Archivautorität, ist keine Trust-Signatur und darf
+nicht durch den normalen `SignerCertificateResolver` aufgelöst werden. Erst eine
+getrennte Admin-Autorisierung und Root-signierte Zertifikats-/Registry-Aktivierung
+erzeugt Autorität. Unter autorisierten operativen und archivierten Signaturen
+bleibt die initiale Root-PoP die einzige `certificateHash`-Ausnahme.
+
+Die geschützte Map wird gemäß RFC 8949 Core Deterministic Encoding Requirements
+kodiert und als bstr in `COSE_Sign1` eingebettet. `external_aad` ist exakt die
+leere bstr `h''`. Der RFC-9052-Signaturinput ist damit exakt
+`["Signature1", protected, h'', payload]`, wobei `protected` dieselben
+eingebetteten Map-Bytes und `payload` die im `COSE_Sign1` enthaltenen Payloadbytes
+sind. `COSE_Sign1` MUSS mit CBOR-Tag 18 kodiert sein; seine Ed25519-Signatur ist
+exakt 64 Byte lang. Detached Payloads, ein anderes `external_aad`, andere
+Protected-Map-Bytes oder ungetaggte Signaturstrukturen sind in Suite v1 ungültig.
+
+Die normale Unprotected-Map ist exakt leer. Die einzige spätere Suite-v1-Ausnahme
+ist bei Checkpoint- und Renewal-Evidence der RFC-9921-Header `3161-ctt` mit Label
+`270` und einem DER-kodierten TST als bstr; er ist dann der einzige Eintrag der
+Unprotected-Map. Alle anderen Labels und alle anderen Unprotected-Kombinationen
+werden fail-closed abgelehnt.
+
+Suite v1 besitzt eine geschlossene, einsatzarchiv-interne Content-Type-Registry.
+Damit wird keine IANA-Registrierung dieser Werte behauptet. Label 3 enthält
+abhängig vom signierten Payload exakt einen der folgenden tstr-Werte; freie oder
+unregistrierte Laufzeitwerte sind unzulässig:
+
+- `application/vnd.einsatzarchiv.record-digest`
+- `application/vnd.einsatzarchiv.grant-digest`
+- `application/vnd.einsatzarchiv.receipt-digest`
+- `application/vnd.einsatzarchiv.trust-digest`
+- `application/vnd.einsatzarchiv.checkpoint+cbor`
+- `application/vnd.einsatzarchiv.evidence-renewal+cbor`
+- `application/vnd.einsatzarchiv.local-audit+cbor`
+- `application/vnd.einsatzarchiv.challenge-response+cbor`
+- `application/vnd.einsatzarchiv.device-registration-request+cbor`
+- `application/vnd.einsatzarchiv.reader-ack+cbor`
+- `application/vnd.einsatzarchiv.recovery-test-digest`
+
+Die ersten vier Werte bezeichnen jeweils den zugehörigen 32-Byte-Digest als
+COSE-Payload. Die `+cbor`-Werte bezeichnen die exakten deterministischen CBOR-Bytes
+des jeweiligen versionierten Core-/Request-Payloads. `recovery-test-digest`
+bezeichnet ausschließlich den in Abschnitt 16.4 definierten 32-Byte-Testdigest.
+Content Type, Payloadart, Signerrolle und Zertifikat-Capability müssen gemeinsam
+zur aufrufenden Protokolloperation passen; bloße Zugehörigkeit zur Registry reicht
+nicht aus.
+
 Es werden keine eigenen kryptografischen Primitive implementiert. Vor jedem Produktivrelease MUSS die Suite gegen die dann aktuelle BSI TR-02102-1 und durch ein unabhängiges Security Review geprüft werden. Falls die Freigabe scheitert, wird eine neue Suite-ID definiert; vorhandene Objekte und Testvektoren werden nicht umgeschrieben.
 
-Für alle operativen Signaturen ist die Signeridentität eindeutig. `certificateHash` bedeutet stets den `objectHash` der exakten, Root-zertifizierten `.etb`-Zertifikatsbytes; `keyThumbprint` ist der RFC-9679-SHA-256-Thumbprint des tatsächlich zur Signaturprüfung verwendeten kanonischen COSE-Public-Key aus genau diesem Zertifikat. Ein Validator löst beide Werte auf **dasselbe** Zertifikat auf, berechnet den Thumbprint selbst neu und prüft Rolle, Capability, Organisation, Wirksamkeitssequenz und Widerruf ausschließlich gegen dieses Zertifikat. Mehrdeutige Auflösung oder jede Abweichung ist ein Trust-Fehler.
+Für alle autorisierten operativen und archivierten Signaturen ist die Signeridentität eindeutig. `certificateHash` bedeutet stets den `objectHash` der exakten, Root-zertifizierten `.etb`-Zertifikatsbytes; `keyThumbprint` ist der RFC-9679-SHA-256-Thumbprint des tatsächlich zur Signaturprüfung verwendeten kanonischen COSE-Public-Key aus genau diesem Zertifikat. Ein Validator löst beide Werte auf **dasselbe** Zertifikat auf, berechnet den Thumbprint selbst neu und prüft Rolle, Capability, Organisation, Wirksamkeitssequenz und Widerruf ausschließlich gegen dieses Zertifikat. Mehrdeutige Auflösung oder jede Abweichung ist ein Trust-Fehler. Die pre-authorization Enrollment-PoP wird stattdessen ausschließlich gegen den im Antrag enthaltenen Signing-Key geprüft.
 
 Zusätzlich gelten zwingend:
 
@@ -421,11 +520,26 @@ Zusätzlich gelten zwingend:
 - Receipt-COSE-`keyThumbprint = receiptCore.serverKeyThumbprint` und `certificateHash = receiptCore.serverCertificateHash`.
 - Jede `.etb`-Signatur nennt entsprechend das Zertifikat des tatsächlich prüfenden Root-, Admin-, Approver-, Komponenten- oder Geräteschlüssels; Capability-Prüfung und Signaturprüfung dürfen nie gegen verschiedene Zertifikate erfolgen.
 
-Das initiale Root-Public-Key-Material wird nicht zirkulär durch einen Hash seines eigenen Containers vertrauenswürdig, sondern ausschließlich durch den unabhängigen Trust Anchor aus Abschnitt 16.1. Seine Proof-of-Possession-Signatur enthält im geschützten Header `alg`, den aus dem eingebetteten Public Key berechneten `keyThumbprint`, `contentType` und `critical`, aber kein `certificateHash`; der Anchor pinnt stattdessen Public Key und exakten `rootCertificate`-`objectHash`. Dies ist die einzige Header-Ausnahme. Spätere Root-Rotationen werden von der vorherigen Root-Linie signiert, referenzieren deren Zertifikat gemäß den normalen Regeln und sind admin-autorisiert.
+Das initiale Root-Public-Key-Material wird nicht zirkulär durch einen Hash seines eigenen Containers vertrauenswürdig, sondern ausschließlich durch den unabhängigen Trust Anchor aus Abschnitt 16.1. Seine Proof-of-Possession-Signatur enthält im geschützten Header `alg`, den aus dem eingebetteten Public Key berechneten `keyThumbprint`, `contentType` und `critical`, aber kein `certificateHash`; der Anchor pinnt stattdessen Public Key und exakten `rootCertificate`-`objectHash`. Dies ist die einzige `certificateHash`-Ausnahme unter autorisierten operativen oder archivierten Signaturen. Die getrennte Enrollment-PoP ist pre-authorization und keine Trust-Signatur. Spätere Root-Rotationen werden von der vorherigen Root-Linie signiert, referenzieren deren Zertifikat gemäß den normalen Regeln und sind admin-autorisiert.
+
+Das initiale `rootCertificate` trägt exakt eine äußere COSE-Signatur: die
+Proof-of-Possession des eingebetteten initialen Root-Schlüssels. Eine Root-Rotation
+trägt ebenfalls exakt eine äußere COSE-Signatur, erzeugt durch die unmittelbar
+vorherige akzeptierte Root-Linie gemäß dem normalen Headerprofil. Die erforderliche
+Admin-Autorisierung wird ausschließlich durch den
+`organizationAdminAuthorizationObjectHash` im autorisierten Trust-Payload gebunden;
+sie wird weder beim initialen Root noch bei der Rotation als zweite äußere
+Signatur angefügt.
 
 ### 10.2 Payload-Verschlüsselung
 
-Für jeden Eintrag werden ein neuer 32-Byte-CEK und eine neue 12-Byte-Nonce erzeugt. Vor der Verschlüsselung wird folgender deterministisch kodierter Kern gebildet:
+Für jeden Eintrag werden ein neuer 32-Byte-CEK und eine neue 12-Byte-Nonce erzeugt.
+ChaCha20-Poly1305 erzeugt einen 16-Byte-Authentifizierungstag; der Ciphertext trägt
+diesen Tag als festen Overhead. `ciphertextLength` MUSS daher vor jeder
+Verschlüsselung overflow-sicher als `plaintextLength + 16` berechnet werden. Ist
+die Addition im verwendeten Längentyp nicht darstellbar oder überschreitet sie ein
+Format-/Implementierungslimit, wird vor Allokation und Verschlüsselung abgebrochen.
+Vor der Verschlüsselung wird folgender deterministisch kodierter Kern gebildet:
 
 ```text
 manifestCore = {
@@ -457,7 +571,9 @@ ciphertext = AEAD_Encrypt(
 
 Für Suite v1 sind `formatVersion = 1`, `objectVersion = 1`, `cryptoSuiteId = "EINSATZARCHIV-SUITE-1"` und `criticalExtensions = []`. `writerTransitionEventHash` ist exakt dann 32 Byte lang, wenn sich das Writer-Zertifikat gegenüber dem direkten Vorgänger ändert; es enthält dann den `objectHash` des wirksamen Root-signierten `writerTransition`-Ereignisses. Bei Genesis und unverändertem Writer ist es `null`. Ein fehlender, zusätzlicher oder unpassender Transition-Hash ist ein Format-/Trust-Fehler.
 
-`ciphertextLength` ist vorab aus der bekannten Klartextlänge und dem festen AEAD-Overhead ableitbar. `entryHash`, `ciphertextHash` und `objectHash` stehen nicht in `manifestCore` und können daher keinen Zirkel erzeugen.
+`ciphertextLength` ist der so vorab berechnete Wert. `entryHash`, `ciphertextHash`
+und `objectHash` stehen nicht in `manifestCore` und können daher keinen Zirkel
+erzeugen.
 
 Der Writer DARF keinen Grant für einen auf dem Writer vorhandenen privaten Schlüssel erzeugen.
 
@@ -596,6 +712,12 @@ issuerSignature = COSE_Sign1(
   payload = grantDigest
 )
 ```
+
+Für `EINSATZARCHIV-HPKE-1` sind die RFC-9180-Parameter fest: Base Mode `0`,
+`DHKEM(X25519, HKDF-SHA256) = 0x0020`, `HKDF-SHA256 = 0x0001` und
+`ChaCha20Poly1305 = 0x0003`. Der serialisierte Kapselungswert `encapsulatedKey`
+ist exakt 32 Byte lang. Da der Klartext-CEK 32 Byte und der AEAD-Tag 16 Byte lang
+sind, ist `wrappedCek` exakt 48 Byte lang.
 
 Damit sind Kontext, Kapselungswert und CEK-Ciphertext signiert. Der Recovery-KEM-Schlüssel signiert nichts; der Server besitzt keine Grant-Signaturrolle. Die exakten `eag-v1`-Bytes sind maßgeblich.
 
@@ -1385,10 +1507,32 @@ Der Test:
 
 1. verifiziert Trust Anchor, vollständiges Archiv, aktuellen Kettenkopf, Trust-/Registry-Linie und ein deterministisches Sample aus jeder vorhandenen Schema-/Suite-/Writer-Epoche,
 2. leitet von jedem Root-, Admin-, Writer-, Reader-, Recovery-, Server-, Approver-, Historical-Grant-Authority- und `deletionAttest`-Backup den Public Key ab und vergleicht Thumbprint sowie Zertifikat,
-3. signiert mit jedem Signaturschlüssel eine zufällige, domain-separierte `EINSATZARCHIV-RECOVERY-TEST-v1`-Challenge und prüft sie, ohne ein produktives Trust-Objekt zu erzeugen,
+3. signiert mit jedem Signaturschlüssel ausschließlich den nachfolgend definierten
+   zufälligen Recovery-Test-Digest und prüft ihn, ohne ein produktives Trust-Objekt
+   zu erzeugen; der Recovery-Test-Keypfad DARF insbesondere weder rohe produktive
+   Payloadbytes noch einen produktiven Trust-Digest signieren,
 4. entkapselt mit jeder Recovery-Sicherung den CEK eines beim Setup erzeugten und danach unveränderten Testeintrags, entschlüsselt und validiert ihn ausschließlich im geschützten Speicher und zeigt keinen Fachklartext an,
 5. prüft bei nicht exportierbaren Geräte-/Hardwarekeys Providerzugriff, Benutzerpräsenz und Zertifikatsbindung statt eines Schlüsselexports,
 6. leert Test-CEKs, Klartext und Challenges bestmöglich und erzeugt einen signierten oder mindestens gehashten Bericht.
+
+Der zu signierende Testdigest ist exakt:
+
+```text
+recoveryTestDigest = SHA-256(
+  "EINSATZARCHIV-RECOVERY-TEST-v1" ||
+  deterministicCbor([
+    1,
+    randomChallenge,   // bstr .size 32
+    keyThumbprint      // bstr .size 32
+  ])
+)
+```
+
+Die 32-Byte-`randomChallenge` wird für jeden Test frisch und kryptografisch zufällig
+erzeugt. `keyThumbprint` ist der erwartete RFC-9679-SHA-256-Thumbprint des konkret
+geprüften Signaturschlüssels. Der COSE-Payload ist exakt dieser 32-Byte-Digest und
+verwendet den intern registrierten Content Type
+`application/vnd.einsatzarchiv.recovery-test-digest`.
 
 Der Bericht bindet Test-ID, Trust-Anchor-Hash, Archivkopf, Testzeit gemäß `effectiveNow`, Release-/Schema-/Suite-Versionen, jede pseudonyme Medien-ID, erwarteten und beobachteten Thumbprint, Testart und Ergebnis. Er enthält weder private Schlüssel noch entschlüsselte Payloads. Ein fehlendes Medium, falscher Key, abweichender Anchor, nicht lesbarer Testeintrag oder unvollständiges Sample macht den Gesamttest fehlgeschlagen; Teilerfolg darf nicht als erfolgreicher Recovery-Test erscheinen. Die Admin-Ansicht zeigt letzten vollständigen Test, nächste Fälligkeit und offene Fehler. Der Ablauf ändert weder Archiv, Registry, Grants noch Schlüsselstatus.
 
@@ -1703,6 +1847,7 @@ v0.1 gilt erst nach Stufe 7 und Erfüllung aller Abnahmekriterien als fertig.
 - [DSGVO](https://eur-lex.europa.eu/eli/reg/2016/679/oj)
 - [RFC 8949 – CBOR](https://www.rfc-editor.org/rfc/rfc8949.html)
 - [RFC 9052](https://www.rfc-editor.org/rfc/rfc9052.html) und [RFC 9053](https://www.rfc-editor.org/rfc/rfc9053.html) – COSE
+- [RFC 9864 – Fully-Specified COSE Algorithms](https://www.rfc-editor.org/rfc/rfc9864.html), insbesondere Ed25519 `alg = -19` und die Deprecation von EdDSA `-8`
 - [RFC 9180 – HPKE](https://www.rfc-editor.org/rfc/rfc9180.html)
 - [RFC 8032 – Ed25519](https://www.rfc-editor.org/rfc/rfc8032.html)
 - [RFC 8439 – ChaCha20-Poly1305](https://www.rfc-editor.org/rfc/rfc8439.html)

@@ -21,6 +21,133 @@ Keys serialisiert. Alle CBOR-Objekte werden deterministisch gemäß Design §10.
 kodiert. `COSE-Sign1 = any` ist nur der CDDL-Anker für das extern durch RFC 9052/9053
 definierte, zusätzlich semantisch geprüfte COSE-Objekt.
 
+## Suite-v1-COSE-Wire-Profil
+
+Die geschützten Standardheader verwenden ausschließlich die RFC-9052-Labels
+`alg = 1`, `crit = 2`, `content type = 3` und `kid = 4`. `alg` ist der durch
+RFC 9864 vollständig spezifizierte COSE-Ed25519-Wert `-19`. Der ältere
+polymorphe RFC-9053-EdDSA-Wert `-8` ist deprecated und wird fail-closed
+abgelehnt. `kid` ist eine bstr von exakt 32 Byte und enthält exakt
+den RFC-9679-SHA-256-Thumbprint des tatsächlich verwendeten kanonischen
+COSE-Public-Key. Das in Design und Implementierungsinterfaces verwendete
+`keyThumbprint` bezeichnet semantisch diesen `kid`-Wert und ist kein zusätzliches
+Wire-Label.
+
+Das einzige anwendungseigene geschützte Label ist der tstr
+`"certificateHash"`; sein Wert ist eine bstr von exakt 32 Byte mit dem
+`objectHash` der exakten `.etb`-Zertifikatsbytes. Es ist ausdrücklich nicht der
+RFC-9360-Header `x5t`, weil `.etb`-Zertifikate keine DER-X.509-Zertifikate sind.
+
+Jede normale Suite-v1-Signatur verwendet exakt diese Protected-Map:
+
+```cbor-diag
+{
+  1: -19,
+  2: [3, 4, "certificateHash"],
+  3: <exakter intern registrierter content-type-tstr>,
+  4: h'<32-byte-rfc-9679-sha-256-key-thumbprint>',
+  "certificateHash": h'<32-byte-etb-object-hash>'
+}
+```
+
+Die initiale Root-Proof-of-Possession verwendet exakt:
+
+```cbor-diag
+{
+  1: -19,
+  2: [3, 4],
+  3: "application/vnd.einsatzarchiv.trust-digest",
+  4: h'<32-byte-rfc-9679-sha-256-key-thumbprint>'
+}
+```
+
+Die getrennte Enrollment-Proof-of-Possession für einen noch nicht ausgestellten
+`device-registration-request-v1` verwendet exakt:
+
+```cbor-diag
+{
+  1: -19,
+  2: [3, 4],
+  3: "application/vnd.einsatzarchiv.device-registration-request+cbor",
+  4: h'<32-byte-rfc-9679-sha-256-request-key-thumbprint>'
+}
+```
+
+Sie beweist nur den Besitz des im Request enthaltenen Signing-Key, verleiht keine
+Autorität, ist keine Trust-Signatur und wird nicht durch den normalen
+`SignerCertificateResolver` verarbeitet. Autorität entsteht erst durch die
+getrennte Admin-Autorisierung und Root-signierte Zertifikats-/Registry-Aktivierung.
+Unter autorisierten operativen und archivierten Signaturen bleibt die initiale
+Root-PoP die einzige `certificateHash`-Ausnahme.
+
+Die Protected-Map wird gemäß RFC 8949 Core Deterministic Encoding Requirements
+kodiert und als bstr eingebettet. `external_aad` ist exakt die leere bstr `h''`;
+die RFC-9052-`Sig_structure` ist exakt
+`["Signature1", protected, h'', payload]`. `COSE_Sign1` ist mit CBOR-Tag 18
+kodiert, enthält den Payload und trägt eine Ed25519-Signatur von exakt 64 Byte.
+Detached Payloads, ein anderes `external_aad`, ungetaggte Strukturen oder andere
+Protected-Map-Bytes sind ungültig.
+
+Die normale Unprotected-Map ist exakt leer. Einzige spätere Suite-v1-Ausnahme ist
+bei Checkpoint- und Renewal-Evidence der RFC-9921-Header `3161-ctt` mit Label 270
+und DER-kodiertem TST als bstr; er ist dann der einzige Unprotected-Eintrag. Alle
+anderen Labels und Unprotected-Kombinationen werden fail-closed abgelehnt.
+
+Label 3 ist ein tstr aus dieser geschlossenen einsatzarchiv-internen
+Suite-v1-Registry; damit wird keine IANA-Registrierung der folgenden Werte
+behauptet:
+
+- `application/vnd.einsatzarchiv.record-digest`
+- `application/vnd.einsatzarchiv.grant-digest`
+- `application/vnd.einsatzarchiv.receipt-digest`
+- `application/vnd.einsatzarchiv.trust-digest`
+- `application/vnd.einsatzarchiv.checkpoint+cbor`
+- `application/vnd.einsatzarchiv.evidence-renewal+cbor`
+- `application/vnd.einsatzarchiv.local-audit+cbor`
+- `application/vnd.einsatzarchiv.challenge-response+cbor`
+- `application/vnd.einsatzarchiv.device-registration-request+cbor`
+- `application/vnd.einsatzarchiv.reader-ack+cbor`
+- `application/vnd.einsatzarchiv.recovery-test-digest`
+
+Die Digest-Werte bezeichnen jeweils exakt den zugehörigen 32-Byte-Digest. Die
+`+cbor`-Werte bezeichnen die exakten RFC-8949-core-deterministischen Bytes des
+jeweiligen versionierten Core-/Request-Payloads. Unregistrierte oder frei gebildete
+Laufzeitwerte sind unzulässig. Eine Implementierung prüft zusätzlich die exakte
+Zuordnung von Content Type, Payloadart, Signerrolle und Zertifikat-Capability.
+
+## Suite-v1-AEAD- und HPKE-Größen
+
+Die Payload-AEAD verwendet einen 32-Byte-CEK, eine 12-Byte-Nonce und einen
+16-Byte-ChaCha20-Poly1305-Tag. Daher gilt exakt
+`ciphertextLength = plaintextLength + 16`; die Addition wird vor Allokation und
+Verschlüsselung overflow-sicher geprüft. Ein nicht darstellbarer oder ein
+Formatlimit überschreitender Wert wird fail-closed abgelehnt.
+
+`EINSATZARCHIV-HPKE-1` ist RFC 9180 Base Mode `0` mit
+`DHKEM(X25519, HKDF-SHA256) = 0x0020`, `HKDF-SHA256 = 0x0001` und
+`ChaCha20Poly1305 = 0x0003`. `encapsulated-key` (`enc`) ist exakt 32 Byte lang;
+der Ciphertext des 32-Byte-CEK ist einschließlich 16-Byte-Tag exakt 48 Byte lang.
+
+## Recovery-Test-Signaturinput
+
+Ein Signaturschlüssel im geführten Recovery-Test signiert als COSE-Payload
+ausschließlich folgenden 32-Byte-Digest:
+
+```text
+SHA-256(
+  "EINSATZARCHIV-RECOVERY-TEST-v1" ||
+  deterministicCbor([
+    1,
+    random-challenge: bstr .size 32,
+    key-thumbprint: bstr .size 32
+  ])
+)
+```
+
+Der Keypfad für Recovery-Tests darf weder rohe produktive Payloadbytes noch einen
+produktiven Trust-Digest signieren. Der Content Type ist exakt
+`application/vnd.einsatzarchiv.recovery-test-digest`.
+
 ## Archiv-, Evidence- und Stub-Discriminators
 
 Die Design-Typ-Tags 1 bis 6 bleiben unverändert. Für die bisher offenen Typen gelten
@@ -97,8 +224,9 @@ authorized-trust-payload-v1<T> = [
 
 cose-sign1-v1 = #6.18(COSE-Sign1)
 etb-body-v1 =
-  ["rootCertificate", (root-certificate-core-v1 /
-    authorized-trust-payload-v1<root-certificate-core-v1>), [+ cose-sign1-v1]] /
+  ["rootCertificate", (initial-root-certificate-core-v1 /
+    authorized-trust-payload-v1<root-rotation-certificate-core-v1>),
+    [cose-sign1-v1]] /
   ["deviceCertificate", (initial-admin-device-certificate-core-v1 /
     authorized-trust-payload-v1<device-certificate-core-v1>), [+ cose-sign1-v1]] /
   ["operatorBinding", (initial-admin-operator-binding-core-v1 /
@@ -138,10 +266,17 @@ prüft die Trust-Verifikation. Jedes andere admin-
 autorisierte Ziel trägt exakt den Hash des Admin-Authorization-Objekts als zweites
 Element. Für `grantAuthorization` und `destructionAuthorization` enthält die äußere
 Signaturliste mindestens zwei Signaturen, nach Signer-Zertifikat-Hash sortiert, von
-unterschiedlichen aktiven Subject-IDs mit passender Approver-Capability. Eine Root-
-Rotation trägt zusätzlich eine Signatur der vorherigen akzeptierten Root-Linie. Die
-initiale Root-Proof-of-Possession ist die einzige in Design §10.1 definierte
-COSE-Identity-Header-Ausnahme. CDDL erzwingt Payload-Korrelation und Mindestanzahl;
+unterschiedlichen aktiven Subject-IDs mit passender Approver-Capability. Das
+initiale Root-Zertifikat trägt exakt eine äußere Signatur: die Proof-of-Possession
+seines eingebetteten Root-Schlüssels. Eine Root-Rotation trägt ebenfalls exakt eine
+äußere Signatur, und zwar von der vorherigen akzeptierten Root-Linie. Ihre
+Admin-Autorisierung ist durch den
+`organization-admin-authorization-object-hash` im autorisierten Payload gebunden
+und ist keine zweite äußere Signatur. Die initiale Root-Proof-of-Possession ist die
+einzige `certificateHash`-Ausnahme unter autorisierten operativen und archivierten
+Signaturen. Die getrennte Enrollment-PoP aus Design §10.1 ist pre-authorization
+und keine Trust-Signatur. CDDL erzwingt
+Payload-Korrelation und Signaturanzahl;
 Signeridentität, Capability, unterschiedliche Subject-IDs, Sortierung und die
 vorherige Root-Autorität werden in den Trust-/COSE-Gates der Tasks 5 und 8 geprüft.
 

@@ -6,7 +6,7 @@
 
 **Architecture:** Split primitive types, bounded deterministic CBOR, cryptographic suite orchestration, wire formats, schemas, time/registry evaluation, trust, chain, archive inventory, and verification into one-way-dependent crates. Verified-state constructors remain private so adapters cannot decrypt or advance state from unverified bytes. Resolve every remaining wire-format ambiguity in a reviewed normative addendum before writing an encoder.
 
-**Tech Stack:** Rust workspace, RFC 8949 deterministic CBOR, RFC 9052/9053 COSE Sign1, SHA-256, Ed25519, ChaCha20-Poly1305, RFC 9180 HPKE Base Mode with X25519/HKDF-SHA-256/ChaCha20-Poly1305, RFC 9562 UUIDv7, RFC 9679 key thumbprints, property testing, coverage-guided fuzzing, snapshot/golden tests.
+**Tech Stack:** Rust workspace, RFC 8949 deterministic CBOR, RFC 9052 COSE Sign1 with RFC 9864 fully specified Ed25519, SHA-256, ChaCha20-Poly1305, RFC 9180 HPKE Base Mode with X25519/HKDF-SHA-256/ChaCha20-Poly1305, RFC 9562 UUIDv7, RFC 9679 key thumbprints, property testing, coverage-guided fuzzing, snapshot/golden tests.
 
 ## Global Constraints
 
@@ -540,7 +540,7 @@ local-audit-event-v1 = [local-audit-event-core-v1, #6.18(COSE-Sign1)]
 
 The COSE payload is exactly the deterministic encoding of `local-audit-event-core-v1`; protected headers resolve the signer to the named active device or Admin certificate. Generic context contains only an object hash or null. Enforce the fixed action-to-context table: login/reauth failure/recovery test use generic; binding change/revocation use binding lifecycle; stale acceptance, export, clock release, Admin/Root ceremony, historical re-grant, destruction, and profile migration each use only their same-named typed context. Export stores only target kind, never a path. The stale-warning context is the one-use finalization acknowledgement. The clock-release context is an expiring administrative proof and can authorize only the exact observed skew it records; no context can lower `trustedTimeFloor`.
 
-For `grantAuthorization` and `destructionAuthorization`, the outer `.etb` signature list must contain at least two signatures, sorted by signer certificate hash, from distinct active subject IDs with the matching Approver capability. Root rotation additionally has a signature from the previous accepted Root line; the initial Root proof-of-possession is the only COSE identity-header exception already defined in the design.
+For `grantAuthorization` and `destructionAuthorization`, the outer `.etb` signature list must contain at least two signatures, sorted by signer certificate hash, from distinct active subject IDs with the matching Approver capability. Root rotation has exactly one outer signature from the previous accepted Root line; its Admin authorization is hash-bound in the authorized payload. The initial Root proof-of-possession is the only `certificateHash` exception among authorized operational/archive signatures; the separate Enrollment-PoP is pre-authorization and not a Trust signature.
 
 Define the two JSON schemas with `additionalProperties: false` at every object level. `ea.verification-report/v1` requires exactly `schemaId`, `archiveObjectCount`, `entryPackageCount`, `destroyedEntryCount`, `chainHead`, `registryVersions`, `objectResults`, `authorizedDestructions`, `gaps`, `signatureErrors`, `evidenceErrors`, `decryptionErrors`, `publicKeyThumbprints`, and `reportHash`; it permits only optional `reportSignature` and `runtimeMetadata`, and runtime time/host/path fields are valid only inside that metadata object. `ea.key-inventory/v1` requires exactly `schemaId`, `inventoryId`, and duplicate-free `media`, where each medium contains `mediumId`, `keyRole`, `expectedKeyThumbprint`, `certificateObjectHash`, `protectionProfile`, and `testKind` (`signatureChallenge`, `recoveryDecrypt`, or `providerPresence`). Every array declares its stable complete sort key and duplicate key as machine-readable `x-ea-sort-key` and `x-ea-unique-key`; the schema gate rejects missing contracts, unsorted instances, and equal complete keys even when non-key fields differ. Productive serializers in Tasks 9/10 and Stage 5 MUST implement the same annotations.
 
@@ -758,12 +758,15 @@ git commit -m "feat(core): add bounded deterministic CBOR"
 - Create: `crates/ea-crypto/src/secret.rs`
 - Test: `crates/ea-crypto/tests/suite_v1.rs`
 - Test: `crates/ea-crypto/tests/identity.rs`
+- Test: `crates/ea-crypto/tests/cose_profile.rs`
+- Test: `crates/ea-crypto/tests/aead_hpke.rs`
+- Test: `crates/ea-crypto/tests/secret_hygiene.rs`
 
 **Interfaces:**
 - Consumes: exact deterministic bytes from `ea-cbor`, identifiers from `ea-types`.
 - Produces: `SuiteV1`, domain-separated digest functions, `CoseSigner`, `CoseVerifier`, AEAD seal/open, HPKE seal/open, RFC-9679 thumbprints, and zeroizing `SecretBytes`.
 
-- [ ] **Step 1: Write known-answer and identity-coherence tests**
+- [ ] **Step 1: Write exhaustive hard-coded known-answer, wire-profile, and identity-coherence tests**
 
 ```rust
 #[test]
@@ -781,6 +784,19 @@ fn suite_v1_domain_digests_match_known_answers() {
 }
 
 #[test]
+fn normal_and_initial_root_protected_bytes_match_hard_coded_answers() {
+    assert_eq!(hex::encode(fixtures::normal_protected_bytes()), fixtures::NORMAL_PROTECTED_HEX);
+    assert_eq!(hex::encode(fixtures::initial_root_protected_bytes()), fixtures::INITIAL_ROOT_PROTECTED_HEX);
+}
+
+#[test]
+fn recovery_test_digest_matches_hard_coded_answer_and_rejects_productive_inputs() {
+    let digest = recovery_test_digest(fixtures::challenge32(), fixtures::thumbprint32());
+    assert_eq!(hex::encode(digest), fixtures::RECOVERY_TEST_DIGEST_HEX);
+    assert!(fixtures::recovery_test_signer().sign(fixtures::production_trust_digest()).is_err());
+}
+
+#[test]
 fn certificate_hash_and_thumbprint_must_resolve_to_one_certificate() {
     let signature = fixtures::signature_with_mixed_certificate_and_key();
     let err = verify_cose_sign1(&signature, fixtures::trust_set()).unwrap_err();
@@ -788,9 +804,57 @@ fn certificate_hash_and_thumbprint_must_resolve_to_one_certificate() {
 }
 ```
 
+Do not generate expected values through the production implementation under
+test. Commit literal expected bytes/digests calculated independently. Preserve
+the existing Record/Object constants above. Add a hard-coded KAT for **every**
+implemented design domain and construction, including ciphertext, package, grant
+plan, grant, receipt, trust object, admin-authorized trust, OS account, operator
+profile, anchor pre/final, recovery test, checkpoint, renewal input, payload AAD,
+HPKE info, and HPKE AAD. Each KAT must pin the exact domain bytes, deterministic
+CBOR bytes, concatenated preimage, and final digest/output where applicable.
+
+Pin the complete protected-map bstr bytes for a normal signature, the initial
+Root-PoP exception, and the pre-authorization Enrollment-PoP, the exact
+`Sig_structure` bytes with empty `external_aad`,
+Tag 18, embedded payload, and a 64-byte Ed25519 signature. Test the closed content
+type registry and exact payload-to-content-type mapping:
+
+```text
+application/vnd.einsatzarchiv.record-digest
+application/vnd.einsatzarchiv.grant-digest
+application/vnd.einsatzarchiv.receipt-digest
+application/vnd.einsatzarchiv.trust-digest
+application/vnd.einsatzarchiv.checkpoint+cbor
+application/vnd.einsatzarchiv.evidence-renewal+cbor
+application/vnd.einsatzarchiv.local-audit+cbor
+application/vnd.einsatzarchiv.challenge-response+cbor
+application/vnd.einsatzarchiv.device-registration-request+cbor
+application/vnd.einsatzarchiv.reader-ack+cbor
+application/vnd.einsatzarchiv.recovery-test-digest
+```
+
+Add table-driven one-byte mutations over every domain separator, deterministic
+CBOR context/AAD/info byte sequence, protected-map byte sequence, payload, and
+signature. Add negative fixtures for the deprecated `alg = -8`, unknown or
+mismatched content types, unknown,
+missing, duplicate, reordered, or wrongly typed `crit` entries, non-empty or
+unknown unprotected headers, non-empty `external_aad`, detached payloads, missing
+Tag 18, wrong signature length, and mixed certificate/key resolution. Verify the
+only allowed unprotected exception is RFC-9921 `3161-ctt` label 270 with a DER-TST
+bstr as the sole entry for Checkpoint/Renewal Evidence.
+
+Use published upstream KATs where available: RFC 8032 Ed25519, RFC 8439
+ChaCha20-Poly1305, RFC 9679 thumbprints, and RFC 9180 Appendix A.2 HPKE Base Mode.
+Where an application-composed vector has no published upstream result, use a
+committed deterministic fixed-seed fixture and hard-code every input and output.
+Test AEAD sizes and overflow (`CEK = 32`, nonce `= 12`, tag/overhead `= 16`,
+checked `ciphertextLength = plaintextLength + 16`) and HPKE identifiers/sizes
+(`mode = 0`, KEM `0x0020`, KDF `0x0001`, AEAD `0x0003`, `enc = 32`, CEK
+ciphertext `= 48`).
+
 - [ ] **Step 2: Run the suite tests and verify failure**
 
-Run: `cargo test --locked -p ea-crypto --test suite_v1 --test identity`
+Run: `cargo test --locked -p ea-crypto --test suite_v1 --test identity --test cose_profile --test aead_hpke --test secret_hygiene`
 
 Expected: FAIL because Suite 1 and protected-header resolution do not exist.
 
@@ -816,13 +880,23 @@ pub struct ProtectedSigner {
 }
 ```
 
-Implement all design domain strings literally, including ciphertext, package, grant plan, grant, receipt, trust object, admin-authorized trust, OS account, operator profile, anchor pre/final, recovery test, checkpoint, and renewal input. Enforce empty unprotected COSE headers except RFC-9921 `3161-ctt` in Stage 6. Root proof-of-possession is the sole signature header without `certificateHash`. Zeroize CEKs, nonces held as secret state, plaintext serialization buffers, and HPKE shared secrets on drop.
+Implement all design domain strings literally, including ciphertext, package, grant plan, grant, receipt, trust object, admin-authorized trust, OS account, operator profile, anchor pre/final, recovery test, checkpoint, and renewal input. Keep the symbolic `keyThumbprint` API, but serialize it exactly as protected COSE `kid` label 4. Implement normal protected headers exactly as `{1:-19, 2:[3,4,"certificateHash"], 3:<closed Einsatzarchiv tstr>, 4:bstr32, "certificateHash":bstr32}`, initial Root-PoP exactly as `{1:-19,2:[3,4],3:"application/vnd.einsatzarchiv.trust-digest",4:bstr32}`, and pre-authorization Enrollment-PoP exactly as `{1:-19,2:[3,4],3:"application/vnd.einsatzarchiv.device-registration-request+cbor",4:bstr32}`. RFC 9864 fully specifies Ed25519 as `-19`; reject the deprecated polymorphic RFC-9053 EdDSA value `-8`. Encode the map using RFC-8949 Core Deterministic Encoding and embed those bytes as a bstr. Use exactly RFC-9052 `Sig_structure = ["Signature1", protected, h'', payload]`, Tag 18, embedded payload, and 64-byte Ed25519 signatures.
+
+Reject every content type outside the closed registry and every payload/content-type mismatch. Enforce empty unprotected COSE headers except RFC-9921 `3161-ctt` label 270 as the sole unprotected DER-TST bstr for Checkpoint/Renewal Evidence in Stage 6. Initial Root-PoP is the sole `certificateHash` exception among authorized operational/archive signatures. Enrollment-PoP is a separate pre-authorization variant: validate it only against the request-embedded signing key, never route it through `SignerCertificateResolver`, and never infer role, Trust, archive, or device authority. Task 5 may expose and validate this closed profile variant for Stage 3 without implementing the Stage-3 enrollment workflow. Reject Enrollment-PoP in ordinary and Trust-signature resolver paths. Initial Root and Root rotation each have exactly one outer signature; the rotation signer is the previous accepted Root line, while Admin authorization is hash-bound in the authorized payload and is not an outer signature.
+
+Implement Recovery-Test-Digest exactly as `SHA-256("EINSATZARCHIV-RECOVERY-TEST-v1" || deterministicCbor([1, random-challenge: bstr .size 32, key-thumbprint: bstr .size 32]))`; its signing path must reject raw productive payloads and productive Trust digests. Use a 32-byte CEK, 12-byte nonce, 16-byte tag, and checked length addition. Fix HPKE to Base `0`, KEM `0x0020`, KDF `0x0001`, AEAD `0x0003`, `enc = 32`, and wrapped CEK `= 48`.
+
+Zeroize CEKs, nonces held as secret state, plaintext serialization buffers, HPKE shared secrets, deterministic fixture secrets, and recovery challenges on drop. Add instrumentation-backed zeroize tests that observe the owned backing storage after drop where the abstraction permits it, plus error/debug/display/log-capture tests proving private keys, CEKs, shared secrets, plaintext fixture canaries, and recovery challenges never appear in formatted errors, tracing, panic payloads, or snapshots.
 
 - [ ] **Step 4: Run KAT, one-byte mutation, and misuse tests**
 
 Run: `cargo test --locked -p ea-crypto`
 
-Expected: PASS; every protected-header mutation and certificate/thumbprint mismatch is rejected.
+Expected: PASS; hard-coded domain/AAD/info, COSE protected-byte, Ed25519,
+RFC-9679, AEAD, and HPKE vectors match; every one-byte mutation,
+certificate/thumbprint mismatch, unknown content type/`crit`/unprotected value,
+non-empty `external_aad`, Root-/Enrollment-exception misuse, overflow, secret-retention, and
+secret-leakage fixture is rejected.
 
 - [ ] **Step 5: Commit Suite 1**
 
