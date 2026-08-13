@@ -34,7 +34,8 @@ ecp-v1 = [h'45413100', 4, 1, [],
 ]
 
 checkpoint-core-v1 = [
-  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  1, domain: "EINSATZARCHIV-CHECKPOINT-v1",
+  organization-id: bstr .size 16, chain-id: bstr .size 16,
   covered-from-sequence: uint, covered-through-sequence: uint,
   head-entry-hash: bstr .size 32, registry-head-hash: bstr .size 32,
   issued-at-server: int, previous-evidence-hash: (bstr .size 32) / null, []
@@ -49,7 +50,8 @@ timestamp-evidence-v1 = [
 ]
 
 renewal-core-v1 = [
-  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  1, domain: "EINSATZARCHIV-EVIDENCE-RENEWAL-v1",
+  organization-id: bstr .size 16, chain-id: bstr .size 16,
   current-entry-hash: bstr .size 32,
   previous-renewal-hash: (bstr .size 32) / null,
   sorted-renewal-input-hashes: [+ bstr .size 32], []
@@ -70,7 +72,8 @@ eds-v1 = [h'45413100', 6, 1, [], [
 ]]
 ```
 
-`hash-algorithm = 0` bedeutet ausschließlich SHA-256. Die TSA-Zertifikatskette ist
+In beiden Core-Arrays steht die feste Domain unmittelbar nach `object-version` an
+Arrayposition 1. `hash-algorithm = 0` bedeutet ausschließlich SHA-256. Die TSA-Zertifikatskette ist
 nicht leer. `sorted-renewal-input-hashes` ist byteweise aufsteigend und
 duplikatfrei. Evidence folgt der CTT-Imprint-, Frist- und Vorgängerkettendefinition
 aus Design §§15.2–15.4. Der Stub enthält exakt die in Design §§11.4 und 16.3
@@ -81,7 +84,7 @@ erlaubten öffentlichen Bindungen und keinen Ciphertext, CEK oder Grant.
 Die `.etb`-Hülle und ihre stabilen Textdiscriminators lauten:
 
 ```cddl
-etb-v1 = [h'45413100', 5, 1, [], [trust-subtype-v1, trust-payload-v1, [+ #6.18(COSE-Sign1)]]]
+etb-v1 = [h'45413100', 5, 1, [], etb-body-v1]
 trust-subtype-v1 = "rootCertificate" / "deviceCertificate" / "operatorBinding" /
   "organizationAdminAuthorization" / "registryEvent" / "policy" /
   "writerTransition" / "grantAuthorization" / "destructionAuthorization" /
@@ -91,6 +94,24 @@ authorized-trust-payload-v1<T> = [
   authorized-trust-core: T,
   organization-admin-authorization-object-hash: bstr .size 32
 ]
+
+cose-sign1-v1 = #6.18(COSE-Sign1)
+etb-body-v1 =
+  ["rootCertificate", (root-certificate-core-v1 /
+    authorized-trust-payload-v1<root-certificate-core-v1>), [+ cose-sign1-v1]] /
+  ["deviceCertificate", (initial-admin-device-certificate-core-v1 /
+    authorized-trust-payload-v1<device-certificate-core-v1>), [+ cose-sign1-v1]] /
+  ["operatorBinding", (initial-admin-operator-binding-core-v1 /
+    authorized-trust-payload-v1<operator-binding-core-v1>), [+ cose-sign1-v1]] /
+  ["organizationAdminAuthorization", organization-admin-authorization-v1,
+    [cose-sign1-v1]] /
+  ["registryEvent", authorized-trust-payload-v1<registry-event-core-v1>, [+ cose-sign1-v1]] /
+  ["policy", authorized-trust-payload-v1<policy-core-v1>, [+ cose-sign1-v1]] /
+  ["writerTransition", authorized-trust-payload-v1<writer-transition-core-v1>, [+ cose-sign1-v1]] /
+  ["grantAuthorization", grant-authorization-core-v1, [2* cose-sign1-v1]] /
+  ["destructionAuthorization", destruction-authorization-core-v1, [2* cose-sign1-v1]] /
+  ["destructionTransition", destruction-transition-core-v1, [+ cose-sign1-v1]] /
+  ["deletionAttestation", deletion-attestation-core-v1, [+ cose-sign1-v1]]
 ```
 
 `schemas/archive/v1/trust.cddl` fixiert die Arraypositionen aller elf Core-Typen
@@ -109,14 +130,20 @@ Ein Public Key oder Thumbprint darf nur dann `null` sein, wenn der jeweilige
 nach ihren UTF-8-Bytes, Hashlisten byteweise sortiert; beide sind duplikatfrei.
 Jede `registry-change-v1`-Variante ändert genau eine Action-Klasse.
 
-Initiale Root-/Admin-Ausnahmen tragen den Core direkt. Jedes andere admin-
+`etb-body-v1` koppelt jeden Subtype-Literal strukturell an genau seinen zulässigen
+Payload. Initiale Root-/Admin-Ausnahmen tragen den Core direkt; direkte
+Admin-Gerätezertifikate verlangen `certificate-kind = 2`, direkte Admin-Bindings
+`operator-role = 2`. Ob sie tatsächlich zum extern gepinnten initialen Set gehören,
+prüft die Trust-Verifikation. Jedes andere admin-
 autorisierte Ziel trägt exakt den Hash des Admin-Authorization-Objekts als zweites
 Element. Für `grantAuthorization` und `destructionAuthorization` enthält die äußere
 Signaturliste mindestens zwei Signaturen, nach Signer-Zertifikat-Hash sortiert, von
 unterschiedlichen aktiven Subject-IDs mit passender Approver-Capability. Eine Root-
 Rotation trägt zusätzlich eine Signatur der vorherigen akzeptierten Root-Linie. Die
 initiale Root-Proof-of-Possession ist die einzige in Design §10.1 definierte
-COSE-Identity-Header-Ausnahme.
+COSE-Identity-Header-Ausnahme. CDDL erzwingt Payload-Korrelation und Mindestanzahl;
+Signeridentität, Capability, unterschiedliche Subject-IDs, Sortierung und die
+vorherige Root-Autorität werden in den Trust-/COSE-Gates der Tasks 5 und 8 geprüft.
 
 ## Lokales Audit
 
@@ -142,6 +169,24 @@ Finalisierungsbestätigung. Der Clock-Release-Kontext ist ein ablaufender Admin-
 Nachweis und autorisiert nur den exakt aufgezeichneten Skew. Kein Kontext darf
 `trustedTimeFloor` absenken.
 
+Die Korrelation ist Teil der CDDL-Struktur, nicht nur eine semantische Tabelle:
+
+```cddl
+local-audit-event-core-v1 =
+  local-audit-event-core-for-v1<0, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<1, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<2, binding-audit-context-v1> /
+  local-audit-event-core-for-v1<3, binding-audit-context-v1> /
+  local-audit-event-core-for-v1<4, stale-audit-context-v1> /
+  local-audit-event-core-for-v1<5, export-audit-context-v1> /
+  local-audit-event-core-for-v1<6, clock-release-audit-context-v1> /
+  local-audit-event-core-for-v1<7, admin-root-audit-context-v1> /
+  local-audit-event-core-for-v1<8, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<9, historical-regrant-audit-context-v1> /
+  local-audit-event-core-for-v1<10, destruction-audit-context-v1> /
+  local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1>
+```
+
 ## JSON-Berichte
 
 `ea.verification-report/v1` verlangt exakt `schemaId`, `archiveObjectCount`,
@@ -156,7 +201,12 @@ duplikatfreie Liste `media`. Jedes Medium verlangt exakt `mediumId`, `keyRole`,
 `expectedKeyThumbprint`, `certificateObjectHash`, `protectionProfile` und
 `testKind`; letzteres ist `signatureChallenge`, `recoveryDecrypt` oder
 `providerPresence`. Jede Arraybeschreibung im Schema nennt ihren stabilen
-Sortierschlüssel. Jedes JSON-Objekt, auch jedes geschachtelte, setzt
+Sortierschlüssel. Zusätzlich tragen alle Arrays die maschinenlesbaren Annotationen
+`x-ea-sort-key` (geordnetes Array aus Feldpfad und Kodierung) und
+`x-ea-unique-key` (der vollständige Duplicate-Key). Der `xtask`-Schema-Gate weist
+unsortierte Instanzen und gleiche vollständige Keys auch bei abweichenden
+Nicht-Key-Feldern ab. Die produktiven Serializer in Tasks 9/10 und Stage 5 müssen
+denselben Vertrag implementieren. Jedes JSON-Objekt, auch jedes geschachtelte, setzt
 `additionalProperties: false`.
 
 ## Feld-zu-Design-Review
@@ -167,11 +217,11 @@ Die Gruppen führen jedes hinzugefügte Feld mindestens einmal auf. Status
 | Artefakt / Felder | Designquelle | Status |
 |---|---|---|
 | `.ecp`: magic, object-type, format-version, critical-extensions, variant tag | §11.1 Typ-Tags und Hülle | bestätigt |
-| checkpoint: object-version, organization-id, chain-id, covered-from-sequence, covered-through-sequence, head-entry-hash, registry-head-hash, issued-at-server, previous-evidence-hash, critical-extensions | §§15.2–15.3 | bestätigt |
+| checkpoint: object-version, domain `EINSATZARCHIV-CHECKPOINT-v1`, organization-id, chain-id, covered-from-sequence, covered-through-sequence, head-entry-hash, registry-head-hash, issued-at-server, previous-evidence-hash, critical-extensions | §§15.2–15.3 | bestätigt |
 | timestamp: checkpoint-core, COSE-Sign1, rfc3161-response-der, hash-algorithm, request-nonce, policy-oid-der, tsa-certificate-chain-der, revocation-data-der, validation-data-der | §15.3 | bestätigt |
-| renewal: object-version, organization-id, chain-id, current-entry-hash, previous-renewal-hash, sorted-renewal-input-hashes, critical-extensions, COSE-Sign1 und alle Timestamp-Felder | §15.4 mit §15.3 | bestätigt |
+| renewal: object-version, domain `EINSATZARCHIV-EVIDENCE-RENEWAL-v1`, organization-id, chain-id, current-entry-hash, previous-renewal-hash, sorted-renewal-input-hashes, critical-extensions, COSE-Sign1 und alle Timestamp-Felder | §15.4 mit §15.3 | bestätigt |
 | `.eds`: magic, object-type, format-version, outer/body critical-extensions, object-version, signed-manifest, writer-signature, entry-hash, ciphertext-hash, original-eip-object-hash, destruction-id, destruction-authorization-object-hash | §§11.1, 11.4, 16.3 | bestätigt |
-| `.etb`: magic, object-type, format-version, critical-extensions, trust-subtype, trust-payload, signatures | §11.1 | bestätigt |
+| `.etb`: magic, object-type, format-version, critical-extensions, strukturell korrelierter trust-subtype/trust-payload, subtype-spezifische Signatur-Mindestanzahl | §11.1 | bestätigt |
 | Root: object-version, organization-id, root-public-cose-key, root-key-thumbprint, previous-root-certificate-object-hash, effective-from-registry-version, critical-extensions | §§10.1, 12.1–12.3, 16.1 | bestätigt |
 | Device certificate: object-version, organization-id, device-id, certificate-kind, signing-public-cose-key, kem-public-cose-key, signing-key-thumbprint, kem-key-thumbprint, capabilities, key-protection-profile, effective-from-sequence, revoked-from-sequence, critical-extensions | §§10.1, 12.2–12.4, 12.7, 16.4 | bestätigt |
 | Operator binding: object-version, organization-id, operator-subject-id, operator-profile-commitment, device-certificate-hash, operator-role, os-account-binding-hash, operator-instance-key-thumbprint, effective-from-sequence, revoked-from-sequence, critical-extensions | §§11.1–11.2, 12.2–12.4 | bestätigt |
@@ -184,9 +234,9 @@ Die Gruppen führen jedes hinzugefügte Feld mindestens einmal auf. Status
 | Destruction transition: object-version, destruction-id, destruction-authorization-object-hash, event-id, previous-event-object-hash, from-state, to-state, trigger-code, executed-at, critical-extensions | §§11.1, 16.3 | bestätigt |
 | Deletion attestation: object-version, destruction-id, destruction-authorization-object-hash, replica-id, replica-kind, sorted-removed-object-hashes, result, backup-expiry-at, executed-at, critical-extensions | §§11.1, 16.3 | bestätigt |
 | Authorized trust wrapper: authorized-trust-core, organization-admin-authorization-object-hash | §11.1 Admin-Autorisierung | bestätigt |
-| Audit core: object-version, event-id, organization-id, device-id, operator-binding-object-hash, signer-certificate-object-hash, action, outcome, effective-now, context, nonce, critical-extensions, COSE-Sign1 | §§12.2–12.3, 14.4, 16.2–16.4 | bestätigt |
+| Audit core: object-version, event-id, organization-id, device-id, operator-binding-object-hash, signer-certificate-object-hash, strukturell gekoppeltes action/context-Paar, outcome, effective-now, nonce, critical-extensions, COSE-Sign1 | §§12.2–12.3, 14.4, 16.2–16.4 | bestätigt |
 | Audit contexts: subject-object-hash; registry-head-hash, policy-object-hash, proposed-sequence, registry-not-after, acknowledged-at, preview-hash; trusted-time-floor, observed-os-wall-clock, max-future-clock-skew-ms, justification-code, issued-at, expires-at; entry-hash, target-kind; old/new-binding-object-hash, effective-from-sequence; authorization-object-hash, target-object-hash, action-code; original-recovery-grant-object-hash, recipient-certificate-object-hash, new-grant-object-hash; destruction-authorization-object-hash, state-event-object-hash; source/target-profile-hash, inventory-hash, active-pointer-hash | §§11.5, 12.2–12.3, 12.6, 14.4, 16.2–16.4 | bestätigt |
-| Verification report required fields plus reportSignature/runtimeMetadata; nested chain/result/destruction/gap/error/runtime fields | §16.1 Bericht und deterministische JSON-Ausgabe; §16.3 Vernichtungszustände | bestätigt |
-| Key inventory: schemaId, inventoryId, media; mediumId, keyRole, expectedKeyThumbprint, certificateObjectHash, protectionProfile, testKind | §16.4 | bestätigt |
+| Verification report required fields plus reportSignature/runtimeMetadata; nested chain/result/destruction/gap/error/runtime fields; maschinenlesbare Sort-/Unique-Keys für registryVersions, objectResults, authorizedDestructions, gaps, alle drei Fehlerarrays und publicKeyThumbprints | §16.1 Bericht und deterministische JSON-Ausgabe; §16.3 Vernichtungszustände | bestätigt |
+| Key inventory: schemaId, inventoryId, media; mediumId, keyRole, expectedKeyThumbprint, certificateObjectHash, protectionProfile, testKind; maschinenlesbarer Sort-/Unique-Key mediumId | §16.4 | bestätigt |
 
 **Review-Ergebnis:** keine ungelöste Zeile und kein Widerspruch zu Design §§10–16.

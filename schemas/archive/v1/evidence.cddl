@@ -1,5 +1,6 @@
 checkpoint-core-v1 = [
-  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  1, domain: "EINSATZARCHIV-CHECKPOINT-v1",
+  organization-id: bstr .size 16, chain-id: bstr .size 16,
   covered-from-sequence: uint, covered-through-sequence: uint,
   head-entry-hash: bstr .size 32, registry-head-hash: bstr .size 32,
   issued-at-server: int, previous-evidence-hash: (bstr .size 32) / null, []
@@ -15,7 +16,8 @@ timestamp-evidence-v1 = [
 ]
 
 renewal-core-v1 = [
-  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  1, domain: "EINSATZARCHIV-EVIDENCE-RENEWAL-v1",
+  organization-id: bstr .size 16, chain-id: bstr .size 16,
   current-entry-hash: bstr .size 32,
   previous-renewal-hash: (bstr .size 32) / null,
   sorted-renewal-input-hashes: [+ bstr .size 32], []

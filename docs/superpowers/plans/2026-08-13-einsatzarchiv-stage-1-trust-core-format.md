@@ -235,7 +235,8 @@ ecp-v1 = [h'45413100', 4, 1, [],
 ]
 
 checkpoint-core-v1 = [
-  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  1, domain: "EINSATZARCHIV-CHECKPOINT-v1",
+  organization-id: bstr .size 16, chain-id: bstr .size 16,
   covered-from-sequence: uint, covered-through-sequence: uint,
   head-entry-hash: bstr .size 32, registry-head-hash: bstr .size 32,
   issued-at-server: int, previous-evidence-hash: (bstr .size 32) / null, []
@@ -251,7 +252,8 @@ timestamp-evidence-v1 = [
 ]
 
 renewal-core-v1 = [
-  1, organization-id: bstr .size 16, chain-id: bstr .size 16,
+  1, domain: "EINSATZARCHIV-EVIDENCE-RENEWAL-v1",
+  organization-id: bstr .size 16, chain-id: bstr .size 16,
   current-entry-hash: bstr .size 32,
   previous-renewal-hash: (bstr .size 32) / null,
   sorted-renewal-input-hashes: [+ bstr .size 32], []
@@ -275,22 +277,29 @@ eds-v1 = [h'45413100', 6, 1, [], [
 Use these exact Trust core arrays; a nullable key is allowed only when the certificate kind does not use that algorithm. Capability strings and hash lists are UTF-8/bytewise sorted and duplicate-free.
 
 ```cddl
-etb-v1 = [h'45413100', 5, 1, [], [trust-subtype-v1, trust-payload-v1, [+ #6.18(COSE-Sign1)]]]
+etb-v1 = [h'45413100', 5, 1, [], etb-body-v1]
 trust-subtype-v1 = "rootCertificate" / "deviceCertificate" / "operatorBinding" /
   "organizationAdminAuthorization" / "registryEvent" / "policy" /
   "writerTransition" / "grantAuthorization" / "destructionAuthorization" /
   "destructionTransition" / "deletionAttestation"
 
-trust-payload-v1 =
-  root-certificate-core-v1 / authorized-trust-payload-v1<root-certificate-core-v1> /
-  device-certificate-core-v1 / authorized-trust-payload-v1<device-certificate-core-v1> /
-  operator-binding-core-v1 / authorized-trust-payload-v1<operator-binding-core-v1> /
-  organization-admin-authorization-v1 /
-  authorized-trust-payload-v1<registry-event-core-v1> /
-  authorized-trust-payload-v1<policy-core-v1> /
-  authorized-trust-payload-v1<writer-transition-core-v1> /
-  grant-authorization-core-v1 / destruction-authorization-core-v1 /
-  destruction-transition-core-v1 / deletion-attestation-core-v1
+cose-sign1-v1 = #6.18(COSE-Sign1)
+etb-body-v1 =
+  ["rootCertificate", (root-certificate-core-v1 /
+    authorized-trust-payload-v1<root-certificate-core-v1>), [+ cose-sign1-v1]] /
+  ["deviceCertificate", (initial-admin-device-certificate-core-v1 /
+    authorized-trust-payload-v1<device-certificate-core-v1>), [+ cose-sign1-v1]] /
+  ["operatorBinding", (initial-admin-operator-binding-core-v1 /
+    authorized-trust-payload-v1<operator-binding-core-v1>), [+ cose-sign1-v1]] /
+  ["organizationAdminAuthorization", organization-admin-authorization-v1,
+    [cose-sign1-v1]] /
+  ["registryEvent", authorized-trust-payload-v1<registry-event-core-v1>, [+ cose-sign1-v1]] /
+  ["policy", authorized-trust-payload-v1<policy-core-v1>, [+ cose-sign1-v1]] /
+  ["writerTransition", authorized-trust-payload-v1<writer-transition-core-v1>, [+ cose-sign1-v1]] /
+  ["grantAuthorization", grant-authorization-core-v1, [2* cose-sign1-v1]] /
+  ["destructionAuthorization", destruction-authorization-core-v1, [2* cose-sign1-v1]] /
+  ["destructionTransition", destruction-transition-core-v1, [+ cose-sign1-v1]] /
+  ["deletionAttestation", deletion-attestation-core-v1, [+ cose-sign1-v1]]
 
 ; 0 writer, 1 reader, 2 organizationAdmin, 3 keyApprover,
 ; 4 recoveryRecipient, 5 historicalGrantAuthority, 6 serverReceipt,
@@ -307,9 +316,11 @@ root-certificate-core-v1 = [
   effective-from-registry-version: uint, []
 ]
 
-device-certificate-core-v1 = [
+device-certificate-core-v1 = device-certificate-core-for-v1<certificate-kind-v1>
+initial-admin-device-certificate-core-v1 = device-certificate-core-for-v1<2>
+device-certificate-core-for-v1<KIND> = [
   1, organization-id: bstr .size 16, device-id: bstr .size 16,
-  certificate-kind: certificate-kind-v1,
+  certificate-kind: KIND,
   signing-public-cose-key: bstr / null, kem-public-cose-key: bstr / null,
   signing-key-thumbprint: (bstr .size 32) / null,
   kem-key-thumbprint: (bstr .size 32) / null,
@@ -317,11 +328,13 @@ device-certificate-core-v1 = [
   effective-from-sequence: uint, revoked-from-sequence: uint / null, []
 ]
 
-operator-binding-core-v1 = [
+operator-binding-core-v1 = operator-binding-core-for-v1<0..2>
+initial-admin-operator-binding-core-v1 = operator-binding-core-for-v1<2>
+operator-binding-core-for-v1<ROLE> = [
   1, organization-id: bstr .size 16, operator-subject-id: bstr .size 16,
   operator-profile-commitment: bstr .size 32,
   device-certificate-hash: bstr .size 32,
-  operator-role: 0..2, ; writer, reader, organization admin
+  operator-role: ROLE, ; writer, reader, organization admin
   os-account-binding-hash: bstr .size 32,
   operator-instance-key-thumbprint: bstr .size 32,
   effective-from-sequence: uint, revoked-from-sequence: uint / null, []
@@ -483,23 +496,43 @@ archive-profile-migration-context-v1 = [
   inventory-hash: bstr .size 32, active-pointer-hash: bstr .size 32
 ]
 local-audit-context-v1 =
-  [0, subject-object-hash: (bstr .size 32) / null] /
-  [1, stale-registry-context-v1] /
-  [2, clock-release-context-v1] /
-  [3, export-context-v1] /
-  [4, binding-lifecycle-context-v1] /
-  [5, admin-root-context-v1] /
-  [6, historical-regrant-context-v1] /
-  [7, destruction-context-v1] /
-  [8, archive-profile-migration-context-v1]
+  generic-audit-context-v1 / stale-audit-context-v1 /
+  clock-release-audit-context-v1 / export-audit-context-v1 /
+  binding-audit-context-v1 / admin-root-audit-context-v1 /
+  historical-regrant-audit-context-v1 / destruction-audit-context-v1 /
+  archive-profile-migration-audit-context-v1
 
-local-audit-event-core-v1 = [
+generic-audit-context-v1 = [0, subject-object-hash: (bstr .size 32) / null]
+stale-audit-context-v1 = [1, stale-registry-context-v1]
+clock-release-audit-context-v1 = [2, clock-release-context-v1]
+export-audit-context-v1 = [3, export-context-v1]
+binding-audit-context-v1 = [4, binding-lifecycle-context-v1]
+admin-root-audit-context-v1 = [5, admin-root-context-v1]
+historical-regrant-audit-context-v1 = [6, historical-regrant-context-v1]
+destruction-audit-context-v1 = [7, destruction-context-v1]
+archive-profile-migration-audit-context-v1 = [8, archive-profile-migration-context-v1]
+
+local-audit-event-core-v1 =
+  local-audit-event-core-for-v1<0, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<1, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<2, binding-audit-context-v1> /
+  local-audit-event-core-for-v1<3, binding-audit-context-v1> /
+  local-audit-event-core-for-v1<4, stale-audit-context-v1> /
+  local-audit-event-core-for-v1<5, export-audit-context-v1> /
+  local-audit-event-core-for-v1<6, clock-release-audit-context-v1> /
+  local-audit-event-core-for-v1<7, admin-root-audit-context-v1> /
+  local-audit-event-core-for-v1<8, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<9, historical-regrant-audit-context-v1> /
+  local-audit-event-core-for-v1<10, destruction-audit-context-v1> /
+  local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1>
+
+local-audit-event-core-for-v1<ACTION, CONTEXT> = [
   1, event-id: bstr .size 16, organization-id: bstr .size 16,
   device-id: bstr .size 16,
   operator-binding-object-hash: (bstr .size 32) / null,
   signer-certificate-object-hash: bstr .size 32,
-  action: local-audit-action-v1, outcome: local-audit-outcome-v1,
-  effective-now: int, context: local-audit-context-v1,
+  action: ACTION, outcome: local-audit-outcome-v1,
+  effective-now: int, context: CONTEXT,
   nonce: bstr .size 32, []
 ]
 local-audit-event-v1 = [local-audit-event-core-v1, #6.18(COSE-Sign1)]
@@ -509,7 +542,7 @@ The COSE payload is exactly the deterministic encoding of `local-audit-event-cor
 
 For `grantAuthorization` and `destructionAuthorization`, the outer `.etb` signature list must contain at least two signatures, sorted by signer certificate hash, from distinct active subject IDs with the matching Approver capability. Root rotation additionally has a signature from the previous accepted Root line; the initial Root proof-of-possession is the only COSE identity-header exception already defined in the design.
 
-Define the two JSON schemas with `additionalProperties: false` at every object level. `ea.verification-report/v1` requires exactly `schemaId`, `archiveObjectCount`, `entryPackageCount`, `destroyedEntryCount`, `chainHead`, `registryVersions`, `objectResults`, `authorizedDestructions`, `gaps`, `signatureErrors`, `evidenceErrors`, `decryptionErrors`, `publicKeyThumbprints`, and `reportHash`; it permits only optional `reportSignature` and `runtimeMetadata`, and runtime time/host/path fields are valid only inside that metadata object. `ea.key-inventory/v1` requires exactly `schemaId`, `inventoryId`, and duplicate-free `media`, where each medium contains `mediumId`, `keyRole`, `expectedKeyThumbprint`, `certificateObjectHash`, `protectionProfile`, and `testKind` (`signatureChallenge`, `recoveryDecrypt`, or `providerPresence`). All arrays have a declared stable sort key in the schema description and serializer tests.
+Define the two JSON schemas with `additionalProperties: false` at every object level. `ea.verification-report/v1` requires exactly `schemaId`, `archiveObjectCount`, `entryPackageCount`, `destroyedEntryCount`, `chainHead`, `registryVersions`, `objectResults`, `authorizedDestructions`, `gaps`, `signatureErrors`, `evidenceErrors`, `decryptionErrors`, `publicKeyThumbprints`, and `reportHash`; it permits only optional `reportSignature` and `runtimeMetadata`, and runtime time/host/path fields are valid only inside that metadata object. `ea.key-inventory/v1` requires exactly `schemaId`, `inventoryId`, and duplicate-free `media`, where each medium contains `mediumId`, `keyRole`, `expectedKeyThumbprint`, `certificateObjectHash`, `protectionProfile`, and `testKind` (`signatureChallenge`, `recoveryDecrypt`, or `providerPresence`). Every array declares its stable complete sort key and duplicate key as machine-readable `x-ea-sort-key` and `x-ea-unique-key`; the schema gate rejects missing contracts, unsorted instances, and equal complete keys even when non-key fields differ. Productive serializers in Tasks 9/10 and Stage 5 MUST implement the same annotations.
 
 Add a review table mapping every added field back to a design paragraph. Any design contradiction blocks implementation and is fixed in the design plus addendum in the same review commit; production code never chooses between them.
 

@@ -8,7 +8,8 @@ rust-version = "1.95"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
-cddl = { version = "=0.10.7", default-features = false, features = ["_build-parser"] }
+cddl = { version = "=0.10.7", default-features = false, features = ["additional-controls", "ast-span", "cbor", "json"] }
+cddl-cat = { version = "=0.7.1", default-features = false, features = ["ciborium"] }
 chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
 coset = { version = "=0.4.2", features = ["std"] }
 ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }

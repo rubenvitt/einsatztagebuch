@@ -3,16 +3,32 @@ trust-subtype-v1 = "rootCertificate" / "deviceCertificate" / "operatorBinding" /
   "writerTransition" / "grantAuthorization" / "destructionAuthorization" /
   "destructionTransition" / "deletionAttestation"
 
-trust-payload-v1 =
-  root-certificate-core-v1 / authorized-trust-payload-v1<root-certificate-core-v1> /
-  device-certificate-core-v1 / authorized-trust-payload-v1<device-certificate-core-v1> /
-  operator-binding-core-v1 / authorized-trust-payload-v1<operator-binding-core-v1> /
-  organization-admin-authorization-v1 /
-  authorized-trust-payload-v1<registry-event-core-v1> /
-  authorized-trust-payload-v1<policy-core-v1> /
-  authorized-trust-payload-v1<writer-transition-core-v1> /
-  grant-authorization-core-v1 / destruction-authorization-core-v1 /
-  destruction-transition-core-v1 / deletion-attestation-core-v1
+cose-sign1-v1 = #6.18(COSE-Sign1)
+
+etb-body-v1 =
+  ["rootCertificate",
+   (root-certificate-core-v1 / authorized-trust-payload-v1<root-certificate-core-v1>),
+   [+ cose-sign1-v1]] /
+  ["deviceCertificate",
+   (initial-admin-device-certificate-core-v1 /
+    authorized-trust-payload-v1<device-certificate-core-v1>),
+   [+ cose-sign1-v1]] /
+  ["operatorBinding",
+   (initial-admin-operator-binding-core-v1 /
+    authorized-trust-payload-v1<operator-binding-core-v1>),
+   [+ cose-sign1-v1]] /
+  ["organizationAdminAuthorization", organization-admin-authorization-v1,
+   [cose-sign1-v1]] /
+  ["registryEvent", authorized-trust-payload-v1<registry-event-core-v1>,
+   [+ cose-sign1-v1]] /
+  ["policy", authorized-trust-payload-v1<policy-core-v1>, [+ cose-sign1-v1]] /
+  ["writerTransition", authorized-trust-payload-v1<writer-transition-core-v1>,
+   [+ cose-sign1-v1]] /
+  ["grantAuthorization", grant-authorization-core-v1, [2* cose-sign1-v1]] /
+  ["destructionAuthorization", destruction-authorization-core-v1,
+   [2* cose-sign1-v1]] /
+  ["destructionTransition", destruction-transition-core-v1, [+ cose-sign1-v1]] /
+  ["deletionAttestation", deletion-attestation-core-v1, [+ cose-sign1-v1]]
 
 ; 0 writer, 1 reader, 2 organizationAdmin, 3 keyApprover,
 ; 4 recoveryRecipient, 5 historicalGrantAuthority, 6 serverReceipt,
@@ -29,9 +45,11 @@ root-certificate-core-v1 = [
   effective-from-registry-version: uint, []
 ]
 
-device-certificate-core-v1 = [
+device-certificate-core-v1 = device-certificate-core-for-v1<certificate-kind-v1>
+initial-admin-device-certificate-core-v1 = device-certificate-core-for-v1<2>
+device-certificate-core-for-v1<KIND> = [
   1, organization-id: bstr .size 16, device-id: bstr .size 16,
-  certificate-kind: certificate-kind-v1,
+  certificate-kind: KIND,
   signing-public-cose-key: bstr / null, kem-public-cose-key: bstr / null,
   signing-key-thumbprint: (bstr .size 32) / null,
   kem-key-thumbprint: (bstr .size 32) / null,
@@ -39,11 +57,13 @@ device-certificate-core-v1 = [
   effective-from-sequence: uint, revoked-from-sequence: uint / null, []
 ]
 
-operator-binding-core-v1 = [
+operator-binding-core-v1 = operator-binding-core-for-v1<0..2>
+initial-admin-operator-binding-core-v1 = operator-binding-core-for-v1<2>
+operator-binding-core-for-v1<ROLE> = [
   1, organization-id: bstr .size 16, operator-subject-id: bstr .size 16,
   operator-profile-commitment: bstr .size 32,
   device-certificate-hash: bstr .size 32,
-  operator-role: 0..2,
+  operator-role: ROLE,
   os-account-binding-hash: bstr .size 32,
   operator-instance-key-thumbprint: bstr .size 32,
   effective-from-sequence: uint, revoked-from-sequence: uint / null, []

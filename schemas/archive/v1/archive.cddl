@@ -54,7 +54,7 @@ ecp-v1 = [h'45413100', 4, 1, [],
    [2, renewal-evidence-v1])
 ]
 
-etb-v1 = [h'45413100', 5, 1, [], [trust-subtype-v1, trust-payload-v1, [+ #6.18(COSE-Sign1)]]]
+etb-v1 = [h'45413100', 5, 1, [], etb-body-v1]
 
 eds-v1 = [h'45413100', 6, 1, [], [
   1, signed-manifest: [manifest-core-v1, bstr .size 32],

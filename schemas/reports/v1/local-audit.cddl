@@ -37,24 +37,43 @@ archive-profile-migration-context-v1 = [
   source-profile-hash: bstr .size 32, target-profile-hash: bstr .size 32,
   inventory-hash: bstr .size 32, active-pointer-hash: bstr .size 32
 ]
-local-audit-context-v1 =
-  [0, subject-object-hash: (bstr .size 32) / null] /
-  [1, stale-registry-context-v1] /
-  [2, clock-release-context-v1] /
-  [3, export-context-v1] /
-  [4, binding-lifecycle-context-v1] /
-  [5, admin-root-context-v1] /
-  [6, historical-regrant-context-v1] /
-  [7, destruction-context-v1] /
-  [8, archive-profile-migration-context-v1]
+generic-audit-context-v1 = [0, subject-object-hash: (bstr .size 32) / null]
+stale-audit-context-v1 = [1, stale-registry-context-v1]
+clock-release-audit-context-v1 = [2, clock-release-context-v1]
+export-audit-context-v1 = [3, export-context-v1]
+binding-audit-context-v1 = [4, binding-lifecycle-context-v1]
+admin-root-audit-context-v1 = [5, admin-root-context-v1]
+historical-regrant-audit-context-v1 = [6, historical-regrant-context-v1]
+destruction-audit-context-v1 = [7, destruction-context-v1]
+archive-profile-migration-audit-context-v1 = [8, archive-profile-migration-context-v1]
 
-local-audit-event-core-v1 = [
+local-audit-context-v1 = generic-audit-context-v1 / stale-audit-context-v1 /
+  clock-release-audit-context-v1 / export-audit-context-v1 /
+  binding-audit-context-v1 / admin-root-audit-context-v1 /
+  historical-regrant-audit-context-v1 / destruction-audit-context-v1 /
+  archive-profile-migration-audit-context-v1
+
+local-audit-event-core-v1 =
+  local-audit-event-core-for-v1<0, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<1, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<2, binding-audit-context-v1> /
+  local-audit-event-core-for-v1<3, binding-audit-context-v1> /
+  local-audit-event-core-for-v1<4, stale-audit-context-v1> /
+  local-audit-event-core-for-v1<5, export-audit-context-v1> /
+  local-audit-event-core-for-v1<6, clock-release-audit-context-v1> /
+  local-audit-event-core-for-v1<7, admin-root-audit-context-v1> /
+  local-audit-event-core-for-v1<8, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<9, historical-regrant-audit-context-v1> /
+  local-audit-event-core-for-v1<10, destruction-audit-context-v1> /
+  local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1>
+
+local-audit-event-core-for-v1<ACTION, CONTEXT> = [
   1, event-id: bstr .size 16, organization-id: bstr .size 16,
   device-id: bstr .size 16,
   operator-binding-object-hash: (bstr .size 32) / null,
   signer-certificate-object-hash: bstr .size 32,
-  action: local-audit-action-v1, outcome: local-audit-outcome-v1,
-  effective-now: int, context: local-audit-context-v1,
+  action: ACTION, outcome: local-audit-outcome-v1,
+  effective-now: int, context: CONTEXT,
   nonce: bstr .size 32, []
 ]
 local-audit-event-v1 = [local-audit-event-core-v1, #6.18(COSE-Sign1)]

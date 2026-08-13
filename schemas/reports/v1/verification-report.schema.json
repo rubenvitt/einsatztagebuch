@@ -31,24 +31,35 @@
       "description": "Unique registry versions sorted numerically ascending.",
       "type": "array",
       "uniqueItems": true,
+      "x-ea-sort-key": [{ "path": "$", "encoding": "uint" }],
+      "x-ea-unique-key": ["$"],
       "items": { "type": "integer", "minimum": 0 }
     },
     "objectResults": {
       "description": "Unique results sorted by objectHash bytewise ascending.",
       "type": "array",
       "uniqueItems": true,
+      "x-ea-sort-key": [{ "path": "objectHash", "encoding": "hex-bytes" }],
+      "x-ea-unique-key": ["objectHash"],
       "items": { "$ref": "#/$defs/objectResult" }
     },
     "authorizedDestructions": {
       "description": "Unique destructions sorted by destructionId bytewise ascending.",
       "type": "array",
       "uniqueItems": true,
+      "x-ea-sort-key": [{ "path": "destructionId", "encoding": "hex-bytes" }],
+      "x-ea-unique-key": ["destructionId"],
       "items": { "$ref": "#/$defs/authorizedDestruction" }
     },
     "gaps": {
       "description": "Unique gaps sorted by chainId bytewise, then fromSequence numerically.",
       "type": "array",
       "uniqueItems": true,
+      "x-ea-sort-key": [
+        { "path": "chainId", "encoding": "hex-bytes" },
+        { "path": "fromSequence", "encoding": "uint" }
+      ],
+      "x-ea-unique-key": ["chainId", "fromSequence"],
       "items": { "$ref": "#/$defs/gap" }
     },
     "signatureErrors": { "$ref": "#/$defs/sortedErrors" },
@@ -58,6 +69,8 @@
       "description": "Unique lowercase hexadecimal SHA-256 thumbprints sorted bytewise ascending.",
       "type": "array",
       "uniqueItems": true,
+      "x-ea-sort-key": [{ "path": "$", "encoding": "hex-bytes" }],
+      "x-ea-unique-key": ["$"],
       "items": { "$ref": "#/$defs/hash" }
     },
     "reportHash": { "$ref": "#/$defs/hash" },
@@ -128,6 +141,11 @@
       "description": "Unique errors sorted by objectHash bytewise, then code by UTF-8 bytes.",
       "type": "array",
       "uniqueItems": true,
+      "x-ea-sort-key": [
+        { "path": "objectHash", "encoding": "hex-bytes" },
+        { "path": "code", "encoding": "utf8" }
+      ],
+      "x-ea-unique-key": ["objectHash", "code"],
       "items": { "$ref": "#/$defs/error" }
     },
     "runtimeMetadata": {

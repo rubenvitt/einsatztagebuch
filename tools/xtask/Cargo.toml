@@ -13,6 +13,8 @@ serde_json.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+cddl-cat.workspace = true
+minicbor.workspace = true
 toml.workspace = true
 
 [build-dependencies]

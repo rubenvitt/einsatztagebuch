@@ -46,12 +46,325 @@ fn cddl_parser_accepts_the_complete_archive_and_audit_grammars() {
         include_str!("../../../schemas/archive/v1/evidence.cddl"),
     ]
     .join("\n");
-    cddl::parser::cddl_from_str(&archive_bundle, false).expect("archive CDDL must parse");
-    cddl::parser::cddl_from_str(
-        include_str!("../../../schemas/reports/v1/local-audit.cddl"),
-        false,
-    )
-    .expect("local audit CDDL must parse");
+    cddl::pest_bridge::cddl_from_pest_str_checked(&archive_bundle)
+        .expect("archive CDDL must parse with all references resolved");
+    cddl::pest_bridge::cddl_from_pest_str_checked(include_str!(
+        "../../../schemas/reports/v1/local-audit.cddl"
+    ))
+    .expect("local audit CDDL must parse with all references resolved");
+}
+
+fn validate_cbor(root: &str, cddl: &str, cbor: &[u8]) -> bool {
+    let normalized = cddl.replace("#6.18(COSE-Sign1)", "COSE-Sign1");
+    let fixture_grammar = if normalized.contains("COSE-Sign1 =") {
+        normalized
+    } else {
+        format!("COSE-Sign1 = any\n{normalized}")
+    };
+    cddl_cat::validate_cbor_bytes(root, &fixture_grammar, cbor).is_ok()
+}
+
+fn archive_cddl() -> String {
+    [
+        include_str!("../../../schemas/archive/v1/archive.cddl"),
+        include_str!("../../../schemas/archive/v1/trust.cddl"),
+        include_str!("../../../schemas/archive/v1/evidence.cddl"),
+    ]
+    .join("\n")
+}
+
+fn checkpoint_core(include_domain: bool) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(if include_domain { 11 } else { 10 }).unwrap();
+    encoder.u8(1).unwrap();
+    if include_domain {
+        encoder.str("EINSATZARCHIV-CHECKPOINT-v1").unwrap();
+    }
+    encoder.bytes(&[0; 16]).unwrap();
+    encoder.bytes(&[1; 16]).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.u8(2).unwrap();
+    encoder.bytes(&[2; 32]).unwrap();
+    encoder.bytes(&[3; 32]).unwrap();
+    encoder.i64(4).unwrap();
+    encoder.null().unwrap();
+    encoder.array(0).unwrap();
+    encoder.into_writer()
+}
+
+fn renewal_core(include_domain: bool) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(if include_domain { 8 } else { 7 }).unwrap();
+    encoder.u8(1).unwrap();
+    if include_domain {
+        encoder.str("EINSATZARCHIV-EVIDENCE-RENEWAL-v1").unwrap();
+    }
+    encoder.bytes(&[0; 16]).unwrap();
+    encoder.bytes(&[1; 16]).unwrap();
+    encoder.bytes(&[2; 32]).unwrap();
+    encoder.null().unwrap();
+    encoder.array(1).unwrap();
+    encoder.bytes(&[3; 32]).unwrap();
+    encoder.array(0).unwrap();
+    encoder.into_writer()
+}
+
+#[test]
+fn evidence_cores_require_the_fixed_domain_at_position_one() {
+    let evidence = include_str!("../../../schemas/archive/v1/evidence.cddl");
+
+    assert!(validate_cbor(
+        "checkpoint-core-v1",
+        evidence,
+        &checkpoint_core(true)
+    ));
+    assert!(!validate_cbor(
+        "checkpoint-core-v1",
+        evidence,
+        &checkpoint_core(false)
+    ));
+    assert!(validate_cbor(
+        "renewal-core-v1",
+        evidence,
+        &renewal_core(true)
+    ));
+    assert!(!validate_cbor(
+        "renewal-core-v1",
+        evidence,
+        &renewal_core(false)
+    ));
+}
+
+#[derive(Clone, Copy)]
+enum TrustPayload {
+    Root,
+    Device { certificate_kind: u8 },
+    GrantAuthorization,
+    DestructionAuthorization,
+}
+
+fn encode_trust_payload(encoder: &mut minicbor::Encoder<Vec<u8>>, payload: TrustPayload) {
+    match payload {
+        TrustPayload::Root => {
+            encoder.array(7).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[0; 16]).unwrap();
+            encoder.bytes(&[1]).unwrap();
+            encoder.bytes(&[2; 32]).unwrap();
+            encoder.null().unwrap();
+            encoder.u8(0).unwrap();
+            encoder.array(0).unwrap();
+        }
+        TrustPayload::Device { certificate_kind } => {
+            encoder.array(13).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[0; 16]).unwrap();
+            encoder.bytes(&[1; 16]).unwrap();
+            encoder.u8(certificate_kind).unwrap();
+            encoder.bytes(&[2]).unwrap();
+            encoder.null().unwrap();
+            encoder.bytes(&[3; 32]).unwrap();
+            encoder.null().unwrap();
+            encoder.array(1).unwrap();
+            encoder.str("organizationAdminApprove").unwrap();
+            encoder.u8(0).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.null().unwrap();
+            encoder.array(0).unwrap();
+        }
+        TrustPayload::GrantAuthorization => {
+            encoder.array(12).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[0; 16]).unwrap();
+            encoder.bytes(&[1; 16]).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[2; 32]).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.array(1).unwrap();
+            encoder.bytes(&[3; 32]).unwrap();
+            encoder.bytes(&[4; 32]).unwrap();
+            encoder.bytes(&[5; 32]).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.i64(10).unwrap();
+            encoder.array(0).unwrap();
+        }
+        TrustPayload::DestructionAuthorization => {
+            encoder.array(10).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[0; 16]).unwrap();
+            encoder.bytes(&[1; 16]).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.bytes(&[2; 32]).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.array(1).unwrap();
+            encoder.array(2).unwrap();
+            encoder.bytes(&[3; 32]).unwrap();
+            encoder.u8(1).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.array(0).unwrap();
+        }
+    }
+}
+
+fn etb_fixture(subtype: &str, payload: TrustPayload, signature_count: u64) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(5).unwrap();
+    encoder.bytes(b"EA1\0").unwrap();
+    encoder.u8(5).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.array(0).unwrap();
+    encoder.array(3).unwrap();
+    encoder.str(subtype).unwrap();
+    encode_trust_payload(&mut encoder, payload);
+    encoder.array(signature_count).unwrap();
+    for _ in 0..signature_count {
+        encoder.null().unwrap();
+    }
+    encoder.into_writer()
+}
+
+#[test]
+fn etb_cddl_correlates_subtype_payload_and_signature_cardinality() {
+    let cddl = archive_cddl();
+
+    assert!(validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture("rootCertificate", TrustPayload::Root, 1)
+    ));
+    assert!(validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "deviceCertificate",
+            TrustPayload::Device {
+                certificate_kind: 2
+            },
+            1
+        )
+    ));
+    assert!(!validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "deviceCertificate",
+            TrustPayload::Device {
+                certificate_kind: 0
+            },
+            1
+        )
+    ));
+    assert!(validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture("grantAuthorization", TrustPayload::GrantAuthorization, 2)
+    ));
+    assert!(!validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture("grantAuthorization", TrustPayload::GrantAuthorization, 1)
+    ));
+    assert!(validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "destructionAuthorization",
+            TrustPayload::DestructionAuthorization,
+            2
+        )
+    ));
+    assert!(!validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "destructionAuthorization",
+            TrustPayload::DestructionAuthorization,
+            1
+        )
+    ));
+    assert!(!validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "grantAuthorization",
+            TrustPayload::DestructionAuthorization,
+            2
+        )
+    ));
+}
+
+#[derive(Clone, Copy)]
+enum AuditContext {
+    Generic,
+    Export,
+    Destruction,
+}
+
+fn audit_fixture(action: u8, context: AuditContext) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(2).unwrap();
+    encoder.array(12).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.bytes(&[0; 16]).unwrap();
+    encoder.bytes(&[1; 16]).unwrap();
+    encoder.bytes(&[2; 16]).unwrap();
+    encoder.null().unwrap();
+    encoder.bytes(&[3; 32]).unwrap();
+    encoder.u8(action).unwrap();
+    encoder.u8(2).unwrap();
+    encoder.i64(4).unwrap();
+    match context {
+        AuditContext::Generic => {
+            encoder.array(2).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.null().unwrap();
+        }
+        AuditContext::Export => {
+            encoder.array(2).unwrap();
+            encoder.u8(3).unwrap();
+            encoder.array(2).unwrap();
+            encoder.bytes(&[4; 32]).unwrap();
+            encoder.u8(1).unwrap();
+        }
+        AuditContext::Destruction => {
+            encoder.array(2).unwrap();
+            encoder.u8(7).unwrap();
+            encoder.array(2).unwrap();
+            encoder.bytes(&[4; 32]).unwrap();
+            encoder.bytes(&[5; 32]).unwrap();
+        }
+    }
+    encoder.bytes(&[6; 32]).unwrap();
+    encoder.array(0).unwrap();
+    encoder.null().unwrap();
+    encoder.into_writer()
+}
+
+#[test]
+fn local_audit_cddl_correlates_action_and_context_tag() {
+    let cddl = include_str!("../../../schemas/reports/v1/local-audit.cddl");
+
+    assert!(validate_cbor(
+        "local-audit-event-v1",
+        cddl,
+        &audit_fixture(0, AuditContext::Generic)
+    ));
+    assert!(!validate_cbor(
+        "local-audit-event-v1",
+        cddl,
+        &audit_fixture(0, AuditContext::Destruction)
+    ));
+    assert!(validate_cbor(
+        "local-audit-event-v1",
+        cddl,
+        &audit_fixture(5, AuditContext::Export)
+    ));
+    assert!(!validate_cbor(
+        "local-audit-event-v1",
+        cddl,
+        &audit_fixture(5, AuditContext::Generic)
+    ));
 }
 
 #[test]

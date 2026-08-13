@@ -1196,6 +1196,11 @@ checkpointPayload = deterministicCbor({
 })
 ```
 
+In der normativen Arraydarstellung `checkpoint-core-v1` steht
+`object-version = 1` an Position 0 und die feste Domain
+`"EINSATZARCHIV-CHECKPOINT-v1"` unmittelbar danach an Position 1; die übrigen
+oben genannten Felder folgen in der dort gezeigten Reihenfolge.
+
 Er signiert diesen Payload als `COSE_Sign1` und lässt die Signatur gemäß RFC 9921 im Modus **COSE, Then Timestamp (`3161-ctt`)** durch eine RFC-3161-TSA zeitstempeln. Für Suite v1 gilt exakt:
 
 ```text
@@ -1240,6 +1245,11 @@ renewalPayload = deterministicCbor({
   sortedRenewalInputHashes
 })
 ```
+
+In der normativen Arraydarstellung `renewal-core-v1` steht
+`object-version = 1` an Position 0 und die feste Domain
+`"EINSATZARCHIV-EVIDENCE-RENEWAL-v1"` unmittelbar danach an Position 1; die
+übrigen oben genannten Felder folgen in der dort gezeigten Reihenfolge.
 
 Der Payload wird serverseitig COSE-signiert und nach derselben Signaturfeld-Regel im `3161-ctt`-Modus zeitgestempelt. Renewals werden als neue `.ecp`-Objekte angefügt und verändern keine älteren Dateien.
 

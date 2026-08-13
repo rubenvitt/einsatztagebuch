@@ -248,6 +248,12 @@ fn run_workspace_tests(root: &Path) -> io::Result<()> {
 }
 
 fn validate_cddl_document(name: &str, input: &str) -> Result<(), String> {
+    cddl::pest_bridge::cddl_from_pest_str_checked(input)
+        .map(|_| ())
+        .map_err(|error| format!("invalid CDDL {name}: {error}"))
+}
+
+fn validate_cddl_syntax(name: &str, input: &str) -> Result<(), String> {
     cddl::parser::cddl_from_str(input, false)
         .map(|_| ())
         .map_err(|error| format!("invalid CDDL {name}: {error}"))
@@ -259,8 +265,171 @@ fn compile_json_schema(name: &str, input: &str) -> Result<jsonschema::Validator,
     jsonschema::meta::validate(&schema)
         .map_err(|error| format!("invalid JSON schema {name}: {error}"))?;
     require_closed_object_schemas(name, &schema, "#")?;
+    require_canonical_array_contracts(name, &schema, "#")?;
     jsonschema::validator_for(&schema)
         .map_err(|error| format!("failed to compile JSON schema {name}: {error}"))
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CanonicalValue {
+    Bytes(Vec<u8>),
+    Uint(u64),
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalKeyPart<'a> {
+    path: &'a str,
+    encoding: &'a str,
+}
+
+fn canonical_key_parts<'a>(
+    name: &str,
+    schema: &'a serde_json::Value,
+) -> Result<Vec<CanonicalKeyPart<'a>>, String> {
+    let parts = schema
+        .get("x-ea-sort-key")
+        .and_then(serde_json::Value::as_array)
+        .filter(|parts| !parts.is_empty())
+        .ok_or_else(|| format!("array schema {name} lacks x-ea-sort-key"))?;
+    parts
+        .iter()
+        .map(|part| {
+            let path = part
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("array schema {name} has an invalid sort-key path"))?;
+            let encoding = part
+                .get("encoding")
+                .and_then(serde_json::Value::as_str)
+                .filter(|encoding| matches!(*encoding, "hex-bytes" | "utf8" | "uint"))
+                .ok_or_else(|| format!("array schema {name} has an invalid sort-key encoding"))?;
+            Ok(CanonicalKeyPart { path, encoding })
+        })
+        .collect()
+}
+
+fn decode_lower_hex(name: &str, value: &str) -> Result<Vec<u8>, String> {
+    if !value.len().is_multiple_of(2)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "{name} canonical hex key must be lowercase and even-length"
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => unreachable!(),
+            };
+            Ok((digit(pair[0]) << 4) | digit(pair[1]))
+        })
+        .collect()
+}
+
+fn canonical_value(
+    name: &str,
+    item: &serde_json::Value,
+    part: &CanonicalKeyPart<'_>,
+) -> Result<CanonicalValue, String> {
+    let value = if part.path == "$" {
+        item
+    } else {
+        item.get(part.path)
+            .ok_or_else(|| format!("{name} item lacks canonical key {}", part.path))?
+    };
+    match part.encoding {
+        "hex-bytes" => value
+            .as_str()
+            .ok_or_else(|| format!("{name} key {} must be a string", part.path))
+            .and_then(|value| decode_lower_hex(name, value))
+            .map(CanonicalValue::Bytes),
+        "utf8" => value
+            .as_str()
+            .ok_or_else(|| format!("{name} key {} must be a string", part.path))
+            .map(|value| CanonicalValue::Bytes(value.as_bytes().to_vec())),
+        "uint" => value
+            .as_u64()
+            .ok_or_else(|| format!("{name} key {} must be an unsigned integer", part.path))
+            .map(CanonicalValue::Uint),
+        _ => unreachable!(),
+    }
+}
+
+fn validate_canonical_array(
+    name: &str,
+    schema: &serde_json::Value,
+    values: &[serde_json::Value],
+) -> Result<(), String> {
+    let parts = canonical_key_parts(name, schema)?;
+    let unique_paths = schema
+        .get("x-ea-unique-key")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("array schema {name} lacks x-ea-unique-key"))?
+        .iter()
+        .map(|path| {
+            path.as_str()
+                .ok_or_else(|| format!("array schema {name} has an invalid unique-key path"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let sort_paths = parts.iter().map(|part| part.path).collect::<Vec<_>>();
+    if unique_paths != sort_paths {
+        return Err(format!(
+            "array schema {name} unique key must equal its complete stable sort key"
+        ));
+    }
+    if schema.get("uniqueItems") != Some(&serde_json::Value::Bool(true)) {
+        return Err(format!("array schema {name} must set uniqueItems to true"));
+    }
+
+    let keys = values
+        .iter()
+        .map(|item| {
+            parts
+                .iter()
+                .map(|part| canonical_value(name, item, part))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for pair in keys.windows(2) {
+        if pair[0] == pair[1] {
+            return Err(format!("{name} contains a duplicate key"));
+        }
+        if pair[0] > pair[1] {
+            return Err(format!("{name} is not sorted by its stable key"));
+        }
+    }
+    Ok(())
+}
+
+fn require_canonical_array_contracts(
+    name: &str,
+    value: &serde_json::Value,
+    location: &str,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("array") {
+                canonical_key_parts(&format!("{name} {location}"), value)?;
+                validate_canonical_array(&format!("{name} {location}"), value, &[])?;
+            }
+            for (key, child) in object {
+                require_canonical_array_contracts(name, child, &format!("{location}/{key}"))?;
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for (index, child) in array.iter().enumerate() {
+                require_canonical_array_contracts(name, child, &format!("{location}/{index}"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn validate_json_schema_document(name: &str, input: &str) -> Result<(), String> {
@@ -351,7 +520,7 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
         let path = root.join(relative);
         let input = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        validate_cddl_document(relative, &input)?;
+        validate_cddl_syntax(relative, &input)?;
         archive_bundle.push_str(&input);
         archive_bundle.push('\n');
     }
@@ -430,6 +599,14 @@ mod tests {
     }
 
     #[test]
+    fn schema_validation_rejects_an_undefined_cddl_reference() {
+        let error = super::validate_cddl_document("undefined.cddl", "root = missing-rule")
+            .expect_err("undefined CDDL references must fail closed");
+
+        assert!(error.contains("missing-rule"));
+    }
+
+    #[test]
     fn schema_validation_rejects_malformed_json_schema() {
         let error = super::validate_json_schema_document("broken.schema.json", "{")
             .expect_err("malformed JSON Schema must fail closed");
@@ -450,6 +627,114 @@ mod tests {
 
         let validator = super::compile_json_schema("example.schema.json", schema).unwrap();
         assert!(!validator.is_valid(&instance));
+    }
+
+    #[test]
+    fn schema_array_contracts_reject_unsorted_and_duplicate_keys() {
+        let verification: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/reports/v1/verification-report.schema.json"
+        ))
+        .unwrap();
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/reports/v1/key-inventory.schema.json"
+        ))
+        .unwrap();
+        let families = [
+            (
+                "registryVersions",
+                &verification["properties"]["registryVersions"],
+                serde_json::json!([1, 2]),
+                serde_json::json!([2, 1]),
+                serde_json::json!([1, 1]),
+            ),
+            (
+                "objectResults",
+                &verification["properties"]["objectResults"],
+                serde_json::json!([{"objectHash": "00"}, {"objectHash": "01"}]),
+                serde_json::json!([{"objectHash": "01"}, {"objectHash": "00"}]),
+                serde_json::json!([
+                    {"objectHash": "00", "result": "valid"},
+                    {"objectHash": "00", "result": "authorizedDestroyed"}
+                ]),
+            ),
+            (
+                "authorizedDestructions",
+                &verification["properties"]["authorizedDestructions"],
+                serde_json::json!([{"destructionId": "00"}, {"destructionId": "01"}]),
+                serde_json::json!([{"destructionId": "01"}, {"destructionId": "00"}]),
+                serde_json::json!([
+                    {"destructionId": "00", "state": "requested"},
+                    {"destructionId": "00", "state": "completeManagedScope"}
+                ]),
+            ),
+            (
+                "gaps",
+                &verification["properties"]["gaps"],
+                serde_json::json!([
+                    {"chainId": "00", "fromSequence": 1},
+                    {"chainId": "00", "fromSequence": 2}
+                ]),
+                serde_json::json!([
+                    {"chainId": "00", "fromSequence": 2},
+                    {"chainId": "00", "fromSequence": 1}
+                ]),
+                serde_json::json!([
+                    {"chainId": "00", "fromSequence": 1, "throughSequence": 2},
+                    {"chainId": "00", "fromSequence": 1, "throughSequence": 3}
+                ]),
+            ),
+            (
+                "errors",
+                &verification["$defs"]["sortedErrors"],
+                serde_json::json!([
+                    {"objectHash": "00", "code": "a"},
+                    {"objectHash": "00", "code": "b"}
+                ]),
+                serde_json::json!([
+                    {"objectHash": "00", "code": "b"},
+                    {"objectHash": "00", "code": "a"}
+                ]),
+                serde_json::json!([
+                    {"objectHash": "00", "code": "a", "detail": 1},
+                    {"objectHash": "00", "code": "a", "detail": 2}
+                ]),
+            ),
+            (
+                "publicKeyThumbprints",
+                &verification["properties"]["publicKeyThumbprints"],
+                serde_json::json!(["00", "01"]),
+                serde_json::json!(["01", "00"]),
+                serde_json::json!(["00", "00"]),
+            ),
+            (
+                "media",
+                &inventory["properties"]["media"],
+                serde_json::json!([{"mediumId": "a"}, {"mediumId": "b"}]),
+                serde_json::json!([{"mediumId": "b"}, {"mediumId": "a"}]),
+                serde_json::json!([
+                    {"mediumId": "a", "keyRole": "root"},
+                    {"mediumId": "a", "keyRole": "writer"}
+                ]),
+            ),
+        ];
+
+        for (name, schema, sorted, unsorted, duplicate) in families {
+            super::validate_canonical_array(name, schema, sorted.as_array().unwrap()).unwrap();
+            let unsorted_error =
+                super::validate_canonical_array(name, schema, unsorted.as_array().unwrap())
+                    .expect_err("unsorted input must fail closed");
+            assert!(
+                unsorted_error.contains("not sorted"),
+                "{name}: {unsorted_error}"
+            );
+            let duplicate_error =
+                super::validate_canonical_array(name, schema, duplicate.as_array().unwrap())
+                    .expect_err("duplicate sort keys must fail closed");
+            assert!(
+                duplicate_error.contains("duplicate key"),
+                "{name}: {duplicate_error}"
+            );
+        }
     }
 
     #[test]

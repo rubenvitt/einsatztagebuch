@@ -13,6 +13,8 @@
       "description": "Duplicate-free media sorted by mediumId UTF-8 bytes ascending.",
       "type": "array",
       "uniqueItems": true,
+      "x-ea-sort-key": [{ "path": "mediumId", "encoding": "utf8" }],
+      "x-ea-unique-key": ["mediumId"],
       "items": {
         "type": "object",
         "additionalProperties": false,
