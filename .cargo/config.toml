@@ -1,0 +1,5 @@
+[alias]
+xtask = "run --locked -p xtask --"
+
+[env]
+CARGO_TERM_QUIET = "true"

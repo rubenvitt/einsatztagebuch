@@ -1,0 +1,18 @@
+[workspace]
+members = ["tools/xtask", "tests/ea-system-tests"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0 OR MIT"
+
+[workspace.dependencies]
+chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
+coset = { version = "=0.4.2", features = ["std"] }
+ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }
+hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
+minicbor = { version = "=2.3.0", features = ["derive", "std"] }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+toml = "=0.8.23"
+zeroize = { version = "=1.9.0", features = ["derive"] }

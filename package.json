@@ -1,0 +1,18 @@
+{
+  "name": "einsatzarchiv",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": "26.7.0",
+    "pnpm": "11.20.0"
+  },
+  "scripts": {
+    "verify:quick": "cargo run --locked -p xtask -- verify-quick",
+    "test:core": "cargo run --locked -p xtask -- test-core",
+    "test:golden": "cargo run --locked -p xtask -- test-golden",
+    "test:property": "cargo run --locked -p xtask -- test-property",
+    "test:fuzz": "cargo run --locked -p xtask -- test-fuzz",
+    "test:recovery": "cargo run --locked -p xtask -- test-recovery"
+  }
+}
+
