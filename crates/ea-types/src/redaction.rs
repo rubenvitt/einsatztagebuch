@@ -5,8 +5,14 @@ impl<T> Redacted<T> {
     pub const fn new(value: T) -> Self {
         Self(value)
     }
+}
 
-    pub fn inspect<R>(&self, inspect: impl FnOnce(&T) -> R) -> R {
-        inspect(&self.0)
+impl<T> Redacted<T> {
+    #[must_use]
+    pub fn matches<U: ?Sized>(&self, candidate: &U) -> bool
+    where
+        T: PartialEq<U>,
+    {
+        self.0.eq(candidate)
     }
 }

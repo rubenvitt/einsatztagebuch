@@ -114,6 +114,31 @@ macro_rules! hash_newtype {
 
 hash_newtype!(EntryHash);
 hash_newtype!(ObjectHash);
+hash_newtype!(KeyThumbprint);
+
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct CertificateHash(ObjectHash);
+
+impl CertificateHash {
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
+
+impl From<ObjectHash> for CertificateHash {
+    fn from(value: ObjectHash) -> Self {
+        Self(value)
+    }
+}
+
+impl TryFrom<&[u8]> for CertificateHash {
+    type Error = LengthError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        ObjectHash::try_from(value).map(Self)
+    }
+}
 
 macro_rules! integer_newtype {
     ($name:ident, $inner:ty) => {
@@ -138,6 +163,8 @@ integer_newtype!(FormatVersion, u16);
 integer_newtype!(ObjectVersion, u16);
 integer_newtype!(SchemaVersion, u16);
 integer_newtype!(ChainSequence, u64);
+integer_newtype!(RegistryVersion, u64);
+integer_newtype!(UnixMillis, i64);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct LengthError {

@@ -10,9 +10,10 @@ pub use error::{
     TechnicalError, TechnicalErrorCode,
 };
 pub use ids::{
-    AuthorizationId, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash, EventId,
-    FormatVersion, Hash32, Id16, LengthError, ObjectHash, ObjectVersion, OperatorSubjectId,
-    OrganizationId, RecordId, SchemaVersion, SubjectId,
+    AuthorizationId, CertificateHash, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash,
+    EventId, FormatVersion, Hash32, Id16, KeyThumbprint, LengthError, ObjectHash, ObjectVersion,
+    OperatorSubjectId, OrganizationId, RecordId, RegistryVersion, SchemaVersion, SubjectId,
+    UnixMillis,
 };
 pub use redaction::Redacted;
 pub use status::{EntryStatus, EvidenceStatus, SyncStatus, VerificationStatus};

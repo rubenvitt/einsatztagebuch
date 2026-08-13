@@ -1,5 +1,5 @@
 use crate::Redacted;
-use core::{fmt, num::NonZeroU16};
+use core::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorClass {
@@ -23,19 +23,6 @@ impl ErrorClass {
             Self::Format => RetryDisposition::IsolateObject,
             Self::Evidence => RetryDisposition::PreserveEntryAndReport,
             Self::RecoveryDestruction => RetryDisposition::ReportExactPartialState,
-        }
-    }
-
-    #[must_use]
-    pub const fn retry_policy(self, config: RetryConfig) -> Option<RetryPolicy> {
-        match self {
-            Self::TemporaryTransport => Some(RetryPolicy { config }),
-            Self::Domain
-            | Self::LocalResource
-            | Self::TrustSecurity
-            | Self::Format
-            | Self::Evidence
-            | Self::RecoveryDestruction => None,
         }
     }
 }
@@ -128,15 +115,22 @@ impl TechnicalError {
         self.code.class()
     }
 
-    pub fn inspect_secret<R>(&self, inspect: impl FnOnce(&str) -> R) -> Option<R> {
+    #[must_use]
+    pub fn secret_matches(&self, candidate: &str) -> bool {
         self.secret
             .as_ref()
-            .map(|secret| secret.inspect(|value| inspect(value)))
+            .is_some_and(|secret| secret.matches(candidate))
     }
 
-    #[must_use]
-    pub const fn retry_policy(&self, config: RetryConfig) -> Option<RetryPolicy> {
-        self.class().retry_policy(config)
+    pub fn into_retry_policy(self, config: RetryConfig) -> Result<RetryPolicy, Self> {
+        if self.class() != ErrorClass::TemporaryTransport {
+            return Err(self);
+        }
+
+        Ok(RetryPolicy {
+            config,
+            state: RetryState::Active { failed_attempts: 0 },
+        })
     }
 }
 
@@ -179,22 +173,30 @@ impl RetryConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct RetryPolicy {
     config: RetryConfig,
+    state: RetryState,
 }
 
 impl RetryPolicy {
     #[must_use]
-    pub fn decide(
-        self,
-        failed_attempts: NonZeroU16,
-        jitter: &mut impl JitterSource,
-    ) -> RetryDecision {
-        let failed_attempts = failed_attempts.get();
+    pub fn next(&mut self, jitter: &mut impl JitterSource) -> RetryDecision {
+        let failed_attempts = match self.state {
+            RetryState::Active { failed_attempts } => failed_attempts
+                .checked_add(1)
+                .expect("retry state cannot exceed the u8 retry limit"),
+            RetryState::Exhausted { failed_attempts } => {
+                return RetryDecision::Exhausted { failed_attempts };
+            }
+        };
+
         if failed_attempts > u16::from(self.config.max_retries) {
+            self.state = RetryState::Exhausted { failed_attempts };
             return RetryDecision::Exhausted { failed_attempts };
         }
+
+        self.state = RetryState::Active { failed_attempts };
 
         let exponent = u32::from(failed_attempts - 1);
         let multiplier = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX);
@@ -206,6 +208,12 @@ impl RetryPolicy {
         let delay_ms = jitter.jitter_ms(ceiling_ms).min(ceiling_ms);
         RetryDecision::RetryAfter { delay_ms }
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RetryState {
+    Active { failed_attempts: u16 },
+    Exhausted { failed_attempts: u16 },
 }
 
 pub trait JitterSource {

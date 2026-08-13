@@ -1,11 +1,10 @@
 use ea_types::{
-    AuthorizationId, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash, EntryStatus,
-    ErrorClass, EventId, EvidenceStatus, FormatVersion, Hash32, Id16, JitterSource, ObjectHash,
-    ObjectVersion, OperatorSubjectId, OrganizationId, RecordId, RetryConfig, RetryDecision,
-    RetryDisposition, SchemaVersion, SubjectId, SyncStatus, TechnicalError, TechnicalErrorCode,
-    VerificationStatus,
+    AuthorizationId, CertificateHash, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash,
+    EntryStatus, ErrorClass, EventId, EvidenceStatus, FormatVersion, Hash32, Id16, JitterSource,
+    KeyThumbprint, ObjectHash, ObjectVersion, OperatorSubjectId, OrganizationId, RecordId,
+    Redacted, RegistryVersion, RetryConfig, RetryDecision, RetryDisposition, SchemaVersion,
+    SubjectId, SyncStatus, TechnicalError, TechnicalErrorCode, UnixMillis, VerificationStatus,
 };
-use std::num::NonZeroU16;
 
 #[test]
 fn hashes_require_exact_length_and_errors_do_not_echo_input() {
@@ -195,19 +194,24 @@ fn error_formatting_allows_only_code_and_numeric_metadata() {
     assert_eq!(format!("{error:?}"), "EA-TRANSPORT-TEMPORARY attempt=7");
     assert!(!format!("{error}").contains("SECRET-LOCATION"));
     assert!(!format!("{error:?}").contains("SECRET-LOCATION"));
-    assert_eq!(
-        error.inspect_secret(|secret| secret == "SECRET-LOCATION"),
-        Some(true)
-    );
+    assert!(error.secret_matches("SECRET-LOCATION"));
+    assert!(!error.secret_matches("OTHER-LOCATION"));
+    assert!(!TechnicalError::new(TechnicalErrorCode::InvalidObject).secret_matches(""));
+
+    let redacted = Redacted::new(String::from("CANARY-NAME"));
+    assert!(redacted.matches("CANARY-NAME"));
+    assert!(!redacted.matches("OTHER-NAME"));
 }
 
 struct FixedJitter {
     value: u64,
     observed_ceiling: u64,
+    calls: u16,
 }
 
 impl JitterSource for FixedJitter {
     fn jitter_ms(&mut self, ceiling_ms: u64) -> u64 {
+        self.calls += 1;
         self.observed_ceiling = ceiling_ms;
         self.value
     }
@@ -216,55 +220,93 @@ impl JitterSource for FixedJitter {
 #[test]
 fn only_temporary_transport_exposes_bounded_automatic_retry() {
     let config = RetryConfig::new(3, 100, 250).unwrap();
-    for class in [
-        ErrorClass::Domain,
-        ErrorClass::LocalResource,
-        ErrorClass::TrustSecurity,
-        ErrorClass::Format,
-        ErrorClass::Evidence,
-        ErrorClass::RecoveryDestruction,
+    for code in [
+        TechnicalErrorCode::InvalidInput,
+        TechnicalErrorCode::LocalResourceUnavailable,
+        TechnicalErrorCode::TrustViolation,
+        TechnicalErrorCode::InvalidObject,
+        TechnicalErrorCode::EvidenceUnavailable,
+        TechnicalErrorCode::RecoveryPartialState,
     ] {
-        assert!(class.retry_policy(config).is_none());
+        let error = TechnicalError::new(code);
+        let returned = error
+            .into_retry_policy(config)
+            .expect_err("non-transport errors must not create retry state");
+        assert_eq!(returned.code(), code);
     }
 
-    let policy = ErrorClass::TemporaryTransport.retry_policy(config).unwrap();
+    let mut policy = TechnicalError::new(TechnicalErrorCode::TemporaryTransport)
+        .into_retry_policy(config)
+        .unwrap();
     let mut jitter = FixedJitter {
         value: u64::MAX,
         observed_ceiling: 0,
+        calls: 0,
     };
     assert_eq!(
-        policy.decide(NonZeroU16::new(3).unwrap(), &mut jitter),
+        policy.next(&mut jitter),
+        RetryDecision::RetryAfter { delay_ms: 100 }
+    );
+    assert_eq!(
+        policy.next(&mut jitter),
+        RetryDecision::RetryAfter { delay_ms: 200 }
+    );
+    assert_eq!(
+        policy.next(&mut jitter),
         RetryDecision::RetryAfter { delay_ms: 250 }
     );
     assert_eq!(jitter.observed_ceiling, 250);
+    assert_eq!(jitter.calls, 3);
     assert_eq!(
-        policy.decide(NonZeroU16::new(4).unwrap(), &mut jitter),
+        policy.next(&mut jitter),
         RetryDecision::Exhausted { failed_attempts: 4 }
     );
+    assert_eq!(jitter.calls, 3, "exhaustion must not call jitter");
+    assert_eq!(
+        policy.next(&mut jitter),
+        RetryDecision::Exhausted { failed_attempts: 4 }
+    );
+    assert_eq!(jitter.calls, 3, "terminal exhaustion must not call jitter");
 }
 
 #[test]
 fn retry_backoff_is_overflow_safe_and_jitter_is_controllable() {
     let config = RetryConfig::new(u8::MAX, u64::MAX, 900).unwrap();
-    let policy = TechnicalError::new(TechnicalErrorCode::TemporaryTransport)
-        .retry_policy(config)
+    let mut policy = TechnicalError::new(TechnicalErrorCode::TemporaryTransport)
+        .into_retry_policy(config)
         .unwrap();
     let mut jitter = FixedJitter {
         value: 123,
         observed_ceiling: 0,
+        calls: 0,
     };
 
+    for _ in 0..254 {
+        assert_eq!(
+            policy.next(&mut jitter),
+            RetryDecision::RetryAfter { delay_ms: 123 }
+        );
+    }
     assert_eq!(
-        policy.decide(NonZeroU16::new(255).unwrap(), &mut jitter),
+        policy.next(&mut jitter),
         RetryDecision::RetryAfter { delay_ms: 123 }
     );
     assert_eq!(jitter.observed_ceiling, 900);
+    assert_eq!(jitter.calls, 255);
     assert_eq!(
-        policy.decide(NonZeroU16::new(256).unwrap(), &mut jitter),
+        policy.next(&mut jitter),
         RetryDecision::Exhausted {
             failed_attempts: 256
         }
     );
+    assert_eq!(jitter.calls, 255);
+    assert_eq!(
+        policy.next(&mut jitter),
+        RetryDecision::Exhausted {
+            failed_attempts: 256
+        }
+    );
+    assert_eq!(jitter.calls, 255);
 }
 
 #[test]
@@ -272,4 +314,30 @@ fn retry_config_rejects_unbounded_or_zero_delay_contracts() {
     assert!(RetryConfig::new(0, 100, 200).is_none());
     assert!(RetryConfig::new(1, 0, 200).is_none());
     assert!(RetryConfig::new(1, 100, 0).is_none());
+}
+
+#[test]
+fn cross_stage_hash_and_time_primitives_are_closed_and_typed() {
+    let object_hash = ObjectHash::try_from(&[11_u8; 32][..]).unwrap();
+    assert_eq!(CertificateHash::from(object_hash).as_bytes(), &[11_u8; 32]);
+    assert_eq!(
+        CertificateHash::try_from(&[12_u8; 32][..])
+            .unwrap()
+            .as_bytes(),
+        &[12_u8; 32]
+    );
+    assert!(CertificateHash::try_from(&[0_u8; 31][..]).is_err());
+
+    let hash = Hash32::try_from(&[13_u8; 32][..]).unwrap();
+    assert_eq!(KeyThumbprint::from(hash).as_bytes(), &[13_u8; 32]);
+    assert_eq!(
+        KeyThumbprint::try_from(&[14_u8; 32][..])
+            .unwrap()
+            .as_bytes(),
+        &[14_u8; 32]
+    );
+    assert!(KeyThumbprint::try_from(&[0_u8; 33][..]).is_err());
+
+    assert_eq!(RegistryVersion::new(u64::MAX).get(), u64::MAX);
+    assert_eq!(UnixMillis::new(i64::MIN).get(), i64::MIN);
 }
