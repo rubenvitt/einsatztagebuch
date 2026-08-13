@@ -13,7 +13,7 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
     let member_array = root_manifest["workspace"]["members"].as_array().unwrap();
     assert_eq!(
         member_array.len(),
-        3,
+        4,
         "workspace members must not be duplicated or omitted"
     );
     let members = member_array
@@ -22,7 +22,12 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         members,
-        BTreeSet::from(["tools/xtask", "tests/ea-system-tests", "crates/ea-types"])
+        BTreeSet::from([
+            "tools/xtask",
+            "tests/ea-system-tests",
+            "crates/ea-types",
+            "crates/ea-cbor",
+        ])
     );
     let workspace_dependencies = root_manifest["workspace"]["dependencies"]
         .as_table()
@@ -31,7 +36,12 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
         !workspace_dependencies.is_empty(),
         "workspace.dependencies must contain shared dependencies"
     );
-    for member in ["tools/xtask", "tests/ea-system-tests", "crates/ea-types"] {
+    for member in [
+        "tools/xtask",
+        "tests/ea-system-tests",
+        "crates/ea-types",
+        "crates/ea-cbor",
+    ] {
         let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
             .unwrap()
             .parse()
