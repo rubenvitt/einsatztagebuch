@@ -23,7 +23,7 @@
 - Writer, Reader, Administration, and CLI target supported Windows 11 `x86_64`, current/previous macOS on `arm64` and supported Intel `x86_64`, and Ubuntu 24.04 LTS `x86_64`; server target is Linux OCI `amd64`. Release proof is deferred to Stage 7 but Stage 1 code must remain portable.
 - Desktop UI uses Ant Design 6 with German `ConfigProvider`, exact lockfile pin, `zeroRuntime: true`, statically extracted local hashed CSS from the specified shared tokens, CSP without runtime/external styles, Ant `App` overlay context, and direct CSR `@phosphor-icons/react` imports only; accessibility/status constraints from §5.4 apply to every later UI task.
 - Security- or format-critical logic is Rust-only and shared by Desktop, Server, and CLI. TypeScript may consume generated view DTOs only.
-- Never log or persist private keys, payloads, decrypted content, nonces, clear incident numbers, locations, names, or free text. No plaintext temporary files. Local databases are encrypted in later stages.
+- Private keys, payload/plaintext, decrypted content, nonces, clear incident numbers, locations, names, and free text MUST NOT appear in logs, dumps, crash output, server metadata, or unencrypted configuration. Persistence is permitted only where a normative signed/encrypted wire object requires it or where the user explicitly requests decrypted CLI output. Protocol nonces may exist only in their specified signed or encrypted objects. Explicit decrypted CLI output MUST use a user-selected newly created or empty target with restrictive permissions. Plaintext temporary files remain forbidden. Local databases are fully encrypted in later stages.
 - Preserve exact status vocabularies defined in §17.4 and never claim general court admissibility, TR-ESOR certification, or complete metadata blindness.
 - v0.1 is complete only after Stage 7 and every acceptance criterion and unnumbered gate passes.
 
@@ -38,6 +38,7 @@ Suite v1 is fixed to `formatVersion = 1`, `objectVersion = 1`, `cryptoSuiteId = 
 - Create: `Cargo.lock`
 - Create: `rust-toolchain.toml`
 - Create: `.cargo/config.toml`
+- Create: `.cargo/fuzz-toolchain.toml`
 - Create: `.node-version`
 - Create: `.npmrc`
 - Create: `package.json`
@@ -59,16 +60,24 @@ Suite v1 is fixed to `formatVersion = 1`, `objectVersion = 1`, `cryptoSuiteId = 
 
 ```rust
 // tools/xtask/tests/workspace.rs
-use std::{fs, process::Command};
+use std::{collections::BTreeSet, fs, process::Command};
+use toml::Value;
 
 #[test]
-fn workspace_is_locked_and_security_crates_are_shared() {
+fn workspace_declares_exact_initial_members_and_shared_dependencies() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     assert!(root.join("Cargo.lock").is_file());
     assert!(root.join("pnpm-lock.yaml").is_file());
-    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let root_manifest: Value = fs::read_to_string(root.join("Cargo.toml")).unwrap().parse().unwrap();
+    let members = root_manifest["workspace"]["members"].as_array().unwrap()
+        .iter().map(|member| member.as_str().unwrap()).collect::<BTreeSet<_>>();
+    assert_eq!(members, BTreeSet::from(["tools/xtask", "tests/ea-system-tests"]));
+    assert!(root_manifest["workspace"]["dependencies"].as_table().is_some());
     for member in ["tools/xtask", "tests/ea-system-tests"] {
-        assert!(manifest.contains(member), "missing {member}");
+        let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml")).unwrap().parse().unwrap();
+        for dependency in manifest["dependencies"].as_table().unwrap().values() {
+            assert_eq!(dependency.as_table().and_then(|spec| spec.get("workspace")).and_then(Value::as_bool), Some(true));
+        }
     }
     assert!(Command::new("cargo").args(["metadata", "--locked", "--no-deps"])
         .current_dir(root).status().unwrap().success());
@@ -77,7 +86,7 @@ fn workspace_is_locked_and_security_crates_are_shared() {
 
 - [ ] **Step 2: Run the smoke test and confirm the empty repository fails**
 
-Run: `cargo test --manifest-path tools/xtask/Cargo.toml --test workspace`
+Run: `cargo test --manifest-path tools/xtask/Cargo.toml --test workspace --locked`
 
 Expected: FAIL because the workspace manifests and lockfiles do not exist.
 
@@ -110,7 +119,15 @@ packages:
   - apps/desktop
 ```
 
-Create a virtual root `package.json` with `packageManager: "pnpm@11.20.0"`; implement each root script as `cargo run --locked -p xtask -- <gate>`. Create a Cargo workspace with resolver `2`, edition `2024`, and `rust-version = "1.95"`. Initially list only the packages this task actually creates: `tools/xtask` and a non-production `ea-system-tests` package at `tests/ea-system-tests`. Every later crate task adds its own concrete path to `workspace.members` in the same commit as its real manifest and source; never list a package whose manifest does not yet exist and never create empty scaffold crates. Later cross-crate Rust integration tests go directly in `tests/ea-system-tests/tests/` so every documented `cargo test -p ea-system-tests --test <name>` command is executable. Add dependencies only at workspace scope. Resolve the latest compatible crate releases once, commit `Cargo.lock`, and document for each crypto/format dependency its upstream, maintained status, audit/security rationale, enabled features, and rejected alternatives in ADR 0001. All commands after this task use `--locked` or `--frozen-lockfile`.
+Create a virtual root `package.json` with `packageManager: "pnpm@11.20.0"`; implement each root script as `cargo run --locked -p xtask -- <gate>`. Create a Cargo workspace with resolver `2`, edition `2024`, and `rust-version = "1.95"`. Initially list only the packages this task actually creates: `tools/xtask` and a non-production `ea-system-tests` package at `tests/ea-system-tests`. Every later crate task adds its own concrete path to `workspace.members` in the same commit as its real manifest and source; never list a package whose manifest does not yet exist and never create empty scaffold crates. Later cross-crate Rust integration tests go directly in `tests/ea-system-tests/tests/` so every documented `cargo test -p ea-system-tests --test <name>` command is executable. Add dependencies only at workspace scope: root `workspace.dependencies` holds each shared dependency and every created member manifest declares it with `workspace = true`, rather than an independent version. Declare the `toml` parser required by this smoke test at workspace scope and consume it from `xtask` with `workspace = true`. Resolve the latest compatible crate releases once, commit `Cargo.lock`, and document for each crypto/format dependency its upstream, maintained status, audit/security rationale, enabled features, and rejected alternatives in ADR 0001. The initial lockfile-generation commands below are the sole bootstrap resolution exception; every later dependency-resolving Cargo/pnpm command uses `--locked` or `--frozen-lockfile`.
+
+Select from current evidence and commit one exact dated Nightly Rust toolchain and one exact `cargo-fuzz` version independently of the production/MSRV Rust `1.95.0` pin. Record the two resolved values and their evidence in ADR 0001 and in `.cargo/fuzz-toolchain.toml`; the descriptive fields in this plan MUST be replaced by those exact committed values during implementation, not guessed here. Install the selected external tool exactly and with its own locked resolution:
+
+```bash
+cargo install cargo-fuzz --version <exact-version> --locked
+```
+
+Implement `xtask test-fuzz` as the stable root gate: it reads the committed values, invokes `cargo +<exact-dated-nightly> fuzz` (never ambient Nightly), and resolves the fuzz target against the committed `fuzz/Cargo.lock`. Its smoke duration is caller-configurable so Task 4 can request 30 seconds and the Stage 1 gate can request 60 seconds.
 
 Implement `xtask` so `verify-quick` executes these processes without a shell:
 
@@ -141,7 +158,7 @@ Expected: PASS; the ADR contains actual resolved versions and sources, and both 
 - [ ] **Step 5: Commit the reproducible scaffold**
 
 ```bash
-git add Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .node-version .npmrc package.json pnpm-workspace.yaml pnpm-lock.yaml deny.toml tools/xtask tests/ea-system-tests docs/adr/0001-toolchain-and-cryptography-dependencies.md
+git add Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .cargo/fuzz-toolchain.toml .node-version .npmrc package.json pnpm-workspace.yaml pnpm-lock.yaml deny.toml tools/xtask tests/ea-system-tests docs/adr/0001-toolchain-and-cryptography-dependencies.md
 git commit -m "build: establish pinned Einsatzarchiv workspace"
 ```
 
@@ -614,6 +631,7 @@ git commit -m "feat(core): add stable identifiers and status types"
 - Test: `crates/ea-cbor/tests/canonical.rs`
 - Test: `crates/ea-cbor/tests/limits.rs`
 - Create: `fuzz/Cargo.toml`
+- Create: `fuzz/Cargo.lock`
 - Create: `fuzz/fuzz_targets/cbor_object.rs`
 
 **Interfaces:**
@@ -625,8 +643,9 @@ git commit -m "feat(core): add stable identifiers and status types"
 ```rust
 #[test]
 fn maps_encode_in_rfc_8949_deterministic_order() {
-    let bytes = ea_cbor::to_deterministic_vec(&vec![("aa", 1_u64), ("b", 2)]).unwrap();
-    assert_eq!(hex::encode(bytes), "82".to_owned() + "8262616101" + "82616202");
+    let map = std::collections::BTreeMap::from([("aa", 1_u64), ("b", 2_u64)]);
+    let bytes = ea_cbor::to_deterministic_vec(&map).unwrap();
+    assert_eq!(hex::encode(bytes), "a261620262616101");
 }
 
 #[test]
@@ -670,15 +689,15 @@ Run:
 ```bash
 cargo test --locked -p ea-cbor
 cargo test --locked -p ea-cbor --test canonical --test limits
-cargo fuzz run cbor_object -- -max_total_time=30
+cargo run --locked -p xtask -- test-fuzz --smoke-seconds 30 --target cbor_object
 ```
 
-Expected: PASS; fuzzing exits without panic, uncontrolled allocation, or accepted non-canonical input.
+Expected: PASS; the locked root/xtask gate invokes the Task 1-pinned dated Nightly and committed fuzz lockfile, and fuzzing exits without panic, uncontrolled allocation, or accepted non-canonical input.
 
 - [ ] **Step 5: Commit deterministic CBOR**
 
 ```bash
-git add crates/ea-cbor fuzz Cargo.toml Cargo.lock
+git add crates/ea-cbor fuzz/Cargo.toml fuzz/Cargo.lock fuzz/fuzz_targets Cargo.toml Cargo.lock
 git commit -m "feat(core): add bounded deterministic CBOR"
 ```
 
@@ -708,6 +727,13 @@ fn suite_v1_domains_do_not_alias() {
     let input = b"same bytes";
     assert_ne!(record_digest(input), object_hash(input).into_hash32());
     assert_ne!(grant_digest(input), receipt_digest(input));
+}
+
+#[test]
+fn suite_v1_domain_digests_match_known_answers() {
+    let input = b"known answer input";
+    assert_eq!(hex::encode(record_digest(input)), "bd22d085eac876e0ff43481f554a754010e1543accc876f0b33bc66e8acdb94d");
+    assert_eq!(hex::encode(object_hash(input).into_hash32()), "b4d5d9a05190e4b9914c0587995e8d7c50b0a0b91c029631b18bf01a57315609");
 }
 
 #[test]
@@ -1207,8 +1233,19 @@ git commit -m "feat(cli): add offline verification and recovery baseline"
 fn stage_one_gate_requires_every_vector_family_and_primary_ak() {
     let result = xtask_test::stage_gate(1);
     assert!(result.vector_families.contains_all(["crypto", "format", "trust", "grants", "receipts", "evidence"]));
-    assert_eq!(result.primary_acceptance_criteria, [4, 5, 6, 9, 14, 16, 17, 20, 38, 51]);
-    assert!(result.rows.iter().all(|row| matches!(row.status, Status::Implemented | Status::Integrated)));
+    let required_primary_ak = [4, 5, 6, 9, 14, 16, 17, 20, 38, 51];
+    assert_eq!(result.primary_acceptance_criteria, required_primary_ak);
+    let represented_rows = result.rows.iter()
+        .filter(|row| required_primary_ak.contains(&row.primary_acceptance_criterion))
+        .collect::<Vec<_>>();
+    assert_eq!(represented_rows.iter().map(|row| row.primary_acceptance_criterion)
+        .collect::<std::collections::BTreeSet<_>>(), required_primary_ak.into_iter().collect());
+    for ak in required_primary_ak {
+        let rows = represented_rows.iter().filter(|row| row.primary_acceptance_criterion == ak).collect::<Vec<_>>();
+        assert!(!rows.is_empty(), "missing concrete ledger row for primary AK {ak}");
+        assert!(rows.iter().all(|row| row.is_complete()), "incomplete ledger row for primary AK {ak}");
+    }
+    assert!(represented_rows.iter().all(|row| matches!(row.status, Status::Implemented | Status::Integrated)));
 }
 ```
 
@@ -1251,6 +1288,6 @@ Expected: PASS. The gate report maps primary AK 4, 5, 6, 9, 14, 16, 17, 20, 38, 
 - [ ] **Step 5: Commit the Stage 1 gate**
 
 ```bash
-git add crates/ea-testkit vectors tests/conformance docs/format docs/traceability tools/xtask package.json Cargo.toml Cargo.lock
+git add crates/ea-testkit vectors tests/ea-system-tests/tests docs/format docs/traceability tools/xtask package.json Cargo.toml Cargo.lock
 git commit -m "test(core): close trust core and format stage"
 ```
