@@ -7,8 +7,9 @@ cose-sign1-v1 = #6.18(COSE-Sign1)
 
 etb-body-v1 =
   ["rootCertificate",
-   (root-certificate-core-v1 / authorized-trust-payload-v1<root-certificate-core-v1>),
-   [+ cose-sign1-v1]] /
+   (initial-root-certificate-core-v1 /
+    authorized-trust-payload-v1<root-rotation-certificate-core-v1>),
+   [cose-sign1-v1]] /
   ["deviceCertificate",
    (initial-admin-device-certificate-core-v1 /
     authorized-trust-payload-v1<device-certificate-core-v1>),
@@ -38,10 +39,18 @@ certificate-kind-v1 = 0..7
 ; 3 pkcs11, 4 serverSecretStoreOrHsm
 key-protection-profile-v1 = 0..4
 
-root-certificate-core-v1 = [
+root-certificate-core-v1 =
+  initial-root-certificate-core-v1 / root-rotation-certificate-core-v1
+initial-root-certificate-core-v1 = [
   1, organization-id: bstr .size 16,
   root-public-cose-key: bstr, root-key-thumbprint: bstr .size 32,
-  previous-root-certificate-object-hash: (bstr .size 32) / null,
+  previous-root-certificate-object-hash: null,
+  effective-from-registry-version: uint, []
+]
+root-rotation-certificate-core-v1 = [
+  1, organization-id: bstr .size 16,
+  root-public-cose-key: bstr, root-key-thumbprint: bstr .size 32,
+  previous-root-certificate-object-hash: bstr .size 32,
   effective-from-registry-version: uint, []
 ]
 

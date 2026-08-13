@@ -137,7 +137,8 @@ fn evidence_cores_require_the_fixed_domain_at_position_one() {
 
 #[derive(Clone, Copy)]
 enum TrustPayload {
-    Root,
+    DirectRoot { has_previous: bool },
+    AuthorizedRoot { has_previous: bool },
     Device { certificate_kind: u8 },
     GrantAuthorization,
     DestructionAuthorization,
@@ -145,15 +146,13 @@ enum TrustPayload {
 
 fn encode_trust_payload(encoder: &mut minicbor::Encoder<Vec<u8>>, payload: TrustPayload) {
     match payload {
-        TrustPayload::Root => {
-            encoder.array(7).unwrap();
-            encoder.u8(1).unwrap();
-            encoder.bytes(&[0; 16]).unwrap();
-            encoder.bytes(&[1]).unwrap();
-            encoder.bytes(&[2; 32]).unwrap();
-            encoder.null().unwrap();
-            encoder.u8(0).unwrap();
-            encoder.array(0).unwrap();
+        TrustPayload::DirectRoot { has_previous } => {
+            encode_root_certificate_core(encoder, has_previous);
+        }
+        TrustPayload::AuthorizedRoot { has_previous } => {
+            encoder.array(2).unwrap();
+            encode_root_certificate_core(encoder, has_previous);
+            encoder.bytes(&[9; 32]).unwrap();
         }
         TrustPayload::Device { certificate_kind } => {
             encoder.array(13).unwrap();
@@ -207,6 +206,21 @@ fn encode_trust_payload(encoder: &mut minicbor::Encoder<Vec<u8>>, payload: Trust
     }
 }
 
+fn encode_root_certificate_core(encoder: &mut minicbor::Encoder<Vec<u8>>, has_previous: bool) {
+    encoder.array(7).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.bytes(&[0; 16]).unwrap();
+    encoder.bytes(&[1]).unwrap();
+    encoder.bytes(&[2; 32]).unwrap();
+    if has_previous {
+        encoder.bytes(&[3; 32]).unwrap();
+    } else {
+        encoder.null().unwrap();
+    }
+    encoder.u8(0).unwrap();
+    encoder.array(0).unwrap();
+}
+
 fn etb_fixture(subtype: &str, payload: TrustPayload, signature_count: u64) -> Vec<u8> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder.array(5).unwrap();
@@ -231,7 +245,13 @@ fn etb_cddl_correlates_subtype_payload_and_signature_cardinality() {
     assert!(validate_cbor(
         "etb-v1",
         &cddl,
-        &etb_fixture("rootCertificate", TrustPayload::Root, 1)
+        &etb_fixture(
+            "rootCertificate",
+            TrustPayload::DirectRoot {
+                has_previous: false
+            },
+            1
+        )
     ));
     assert!(validate_cbor(
         "etb-v1",
@@ -289,6 +309,63 @@ fn etb_cddl_correlates_subtype_payload_and_signature_cardinality() {
         &etb_fixture(
             "grantAuthorization",
             TrustPayload::DestructionAuthorization,
+            2
+        )
+    ));
+}
+
+#[test]
+fn root_certificate_cddl_separates_bootstrap_from_authorized_rotation() {
+    let cddl = archive_cddl();
+
+    assert!(validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "rootCertificate",
+            TrustPayload::DirectRoot {
+                has_previous: false
+            },
+            1
+        )
+    ));
+    assert!(!validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "rootCertificate",
+            TrustPayload::DirectRoot { has_previous: true },
+            1
+        )
+    ));
+    assert!(validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "rootCertificate",
+            TrustPayload::AuthorizedRoot { has_previous: true },
+            1
+        )
+    ));
+    assert!(!validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "rootCertificate",
+            TrustPayload::AuthorizedRoot {
+                has_previous: false
+            },
+            1
+        )
+    ));
+    assert!(!validate_cbor(
+        "etb-v1",
+        &cddl,
+        &etb_fixture(
+            "rootCertificate",
+            TrustPayload::DirectRoot {
+                has_previous: false
+            },
             2
         )
     ));
