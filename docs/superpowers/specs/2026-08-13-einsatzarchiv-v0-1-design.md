@@ -462,7 +462,11 @@ Geräteantrags verwendet exakt:
 ```
 
 Diese Enrollment-PoP beweist ausschließlich den Besitz des im
-`device-registration-request-v1` enthaltenen Signing-Key. Sie verleiht keine
+`device-registration-request-core-v1` enthaltenen Signing-Key. Ihr COSE-Payload
+sind exakt die deterministischen CBOR-Bytes dieses unsigned Core mit allen
+Requestfeldern außer `self-signature`; sie darf nie die finale Request-Hülle oder
+eine bereits enthaltene Signatur umfassen. Der finale Request ist exakt
+`[device-registration-request-core-v1, #6.18(COSE-Sign1)]`. Sie verleiht keine
 Geräte-, Rollen-, Trust- oder Archivautorität, ist keine Trust-Signatur und darf
 nicht durch den normalen `SignerCertificateResolver` aufgelöst werden. Erst eine
 getrennte Admin-Autorisierung und Root-signierte Zertifikats-/Registry-Aktivierung
@@ -502,8 +506,12 @@ unregistrierte Laufzeitwerte sind unzulässig:
 - `application/vnd.einsatzarchiv.recovery-test-digest`
 
 Die ersten vier Werte bezeichnen jeweils den zugehörigen 32-Byte-Digest als
-COSE-Payload. Die `+cbor`-Werte bezeichnen die exakten deterministischen CBOR-Bytes
-des jeweiligen versionierten Core-/Request-Payloads. `recovery-test-digest`
+COSE-Payload. Die `+cbor`-Werte bezeichnen ausschließlich die exakten
+deterministischen CBOR-Bytes des jeweiligen versionierten unsigned Core.
+Challenge Response, Device Registration Request und Reader Acknowledgement sind
+jeweils `[...-core-v1, #6.18(COSE-Sign1)]`; ihre COSE-Payloads sind nur
+`challenge-response-core-v1`, `device-registration-request-core-v1` beziehungsweise
+`reader-ack-core-v1`, niemals die signaturhaltige Hülle. `recovery-test-digest`
 bezeichnet ausschließlich den in Abschnitt 16.4 definierten 32-Byte-Testdigest.
 Content Type, Payloadart, Signerrolle und Zertifikat-Capability müssen gemeinsam
 zur aufrufenden Protokolloperation passen; bloße Zugehörigkeit zur Registry reicht

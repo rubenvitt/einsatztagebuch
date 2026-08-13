@@ -73,7 +73,12 @@ Die getrennte Enrollment-Proof-of-Possession für einen noch nicht ausgestellten
 }
 ```
 
-Sie beweist nur den Besitz des im Request enthaltenen Signing-Key, verleiht keine
+Der COSE-Payload sind exakt die deterministischen CBOR-Bytes eines unsigned
+`device-registration-request-core-v1`, der alle Requestfelder außer
+`self-signature` enthält. Die finale, nichtzirkuläre Request-Hülle ist exakt
+`[device-registration-request-core-v1, #6.18(COSE-Sign1)]`; weder Hülle noch
+Signatur dürfen Teil des signierten Payloads sein. Die PoP beweist nur den Besitz
+des im Core enthaltenen Signing-Key, verleiht keine
 Autorität, ist keine Trust-Signatur und wird nicht durch den normalen
 `SignerCertificateResolver` verarbeitet. Autorität entsteht erst durch die
 getrennte Admin-Autorisierung und Root-signierte Zertifikats-/Registry-Aktivierung.
@@ -110,8 +115,12 @@ behauptet:
 - `application/vnd.einsatzarchiv.recovery-test-digest`
 
 Die Digest-Werte bezeichnen jeweils exakt den zugehörigen 32-Byte-Digest. Die
-`+cbor`-Werte bezeichnen die exakten RFC-8949-core-deterministischen Bytes des
-jeweiligen versionierten Core-/Request-Payloads. Unregistrierte oder frei gebildete
+`+cbor`-Werte bezeichnen ausschließlich die exakten RFC-8949-core-deterministischen
+Bytes des jeweiligen versionierten unsigned Core. Challenge Response, Device
+Registration Request und Reader Acknowledgement sind jeweils exakt
+`[...-core-v1, #6.18(COSE-Sign1)]`; ihre COSE-Payloads sind nur
+`challenge-response-core-v1`, `device-registration-request-core-v1` beziehungsweise
+`reader-ack-core-v1`, niemals die signaturhaltige Hülle. Unregistrierte oder frei gebildete
 Laufzeitwerte sind unzulässig. Eine Implementierung prüft zusätzlich die exakte
 Zuordnung von Content Type, Payloadart, Signerrolle und Zertifikat-Capability.
 

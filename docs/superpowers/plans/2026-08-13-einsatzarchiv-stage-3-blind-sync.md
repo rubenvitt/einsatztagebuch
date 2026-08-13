@@ -119,19 +119,25 @@ reader-batch-v1 = [
   next-cursor: bstr / null, covered-through-sequence: uint, []
 ]
 
-challenge-response-v1 = [
+challenge-response-core-v1 = [
   1, organization-id: bstr .size 16, nonce: bstr .size 32,
   issued-at-server: int, expires-at: int,
-  server-certificate-hash: bstr .size 32,
-  server-signature: #6.18(COSE-Sign1), []
+  server-certificate-hash: bstr .size 32, []
+]
+challenge-response-v1 = [
+  core: challenge-response-core-v1,
+  server-signature: #6.18(COSE-Sign1)
 ]
 
-device-registration-request-v1 = [
+device-registration-request-core-v1 = [
   1, organization-id: bstr .size 16, device-id: bstr .size 16,
   requested-role: 0..2, signing-public-cose-key: bstr,
   kem-public-cose-key: bstr / null,
-  supported-format-versions: [+ uint], supported-suite-ids: [+ tstr],
-  self-signature: #6.18(COSE-Sign1), []
+  supported-format-versions: [+ uint], supported-suite-ids: [+ tstr], []
+]
+device-registration-request-v1 = [
+  core: device-registration-request-core-v1,
+  self-signature: #6.18(COSE-Sign1)
 ]
 
 trust-event-upload-v1 = [1, exact-etb-bytes: bstr, []]
@@ -148,11 +154,14 @@ grant-list-response-v1 = [
   grants: [* [object-hash: bstr .size 32, exact-eag-bytes: bstr]], []
 ]
 
-reader-ack-v1 = [
+reader-ack-core-v1 = [
   1, organization-id: bstr .size 16, chain-id: bstr .size 16,
   reader-certificate-hash: bstr .size 32, through-sequence: uint,
-  head-entry-hash: bstr .size 32, acknowledged-at-device: int,
-  signature: #6.18(COSE-Sign1), []
+  head-entry-hash: bstr .size 32, acknowledged-at-device: int, []
+]
+reader-ack-v1 = [
+  core: reader-ack-core-v1,
+  signature: #6.18(COSE-Sign1)
 ]
 
 checkpoint-list-response-v1 = [
