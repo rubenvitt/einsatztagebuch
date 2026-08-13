@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto"]
 resolver = "2"
 
 [workspace.package]
@@ -13,8 +13,10 @@ cddl-cat = { version = "=0.7.1", default-features = false, features = ["ciborium
 chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
 coset = { version = "=0.4.2", features = ["std"] }
 ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }
+ea-cbor = { path = "crates/ea-cbor" }
 ea-types = { path = "crates/ea-types" }
 hex = "=0.4.3"
+getrandom = "=0.4.3"
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 jsonschema = { version = "=0.49.9", default-features = false }
 libfuzzer-sys = "=0.4.13"
