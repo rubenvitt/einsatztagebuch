@@ -153,6 +153,10 @@ destruction-authorization-core-v1 = [
   1, destruction-id: bstr .size 16, organization-id: bstr .size 16,
   registry-version: uint, registry-head-hash: bstr .size 32,
   authorization-sequence: uint,
+  ; Nonempty and ascending by (entryHash bytes, chainSequence numeric).
+  ; Target identity is entryHash; any repeated entryHash is invalid, even with a
+  ; different sequence. chainSequence is a signed-manifest cross-check.
+  ; Equal chainSequence values with different entryHash values are not duplicates.
   sorted-targets: [+ [entry-hash: bstr .size 32, chain-sequence: uint]],
   scope-code: uint, legal-reason-code: uint, []
 ]

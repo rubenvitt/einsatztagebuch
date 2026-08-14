@@ -185,7 +185,7 @@ pub enum DestructionState {
 The stable service seams are:
 
 ```rust
-pub fn decode_exact_object(bytes: &[u8], limits: ParserLimits)
+pub fn decode_exact_object(bytes: &[u8])
     -> Result<ParsedArchiveObject, FormatError>;
 pub fn object_hash(bytes: &ExactObjectBytes) -> ObjectHash;
 pub fn verify_trust(anchor: &TrustAnchorV1, objects: &ArchiveInventory, now: EffectiveNow)
@@ -230,6 +230,28 @@ pub trait LocalAuditService: Send + Sync {
 ```
 
 No later stage may bypass these proof-state types by accepting raw bytes where a verified type is required.
+
+The public v1 archive seam is deliberately non-relaxable. It applies this exact
+two-phase preflight before any full decode or input-sized allocation; file names
+never select the family:
+
+```text
+MAX_ARCHIVE_OBJECT_BYTES_V1 = 4_194_304
+FIXED_PREFIX_V1 = 85 44 45 41 31 00 TT 01 80
+TT = 01..06
+EIP_MAX_RAW_BYTES_V1 = 2_097_152
+EAG_MAX_RAW_BYTES_V1 = 65_536
+ESR_MAX_RAW_BYTES_V1 = 65_536
+ECP_MAX_RAW_BYTES_V1 = 4_194_304
+ETB_MAX_RAW_BYTES_V1 = 4_194_304
+EDS_MAX_RAW_BYTES_V1 = 262_144
+```
+
+First require `bytes.len() <= MAX_ARCHIVE_OBJECT_BYTES_V1` without inspecting
+CBOR. Then inspect only `FIXED_PREFIX_V1`, immediately enforce the selected
+family raw-byte cap, and only then run full deterministic-CBOR validation plus
+outer/body type correlation. `ea-cbor::ParserLimits::V1` owns structural CBOR
+budgets; `ea-format` owns family raw-byte and semantic limits.
 
 ## Specification Closure Before Wire Implementation
 

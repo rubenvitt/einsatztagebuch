@@ -72,6 +72,7 @@ fn suite_sizes_and_checked_overflow_are_fixed() {
         (32, 48)
     );
     assert_eq!(checked_ciphertext_length(0).unwrap(), 16);
+    assert_eq!(checked_ciphertext_length(1_048_576).unwrap(), 1_048_592);
     assert!(checked_ciphertext_length(usize::MAX).is_err());
 }
 

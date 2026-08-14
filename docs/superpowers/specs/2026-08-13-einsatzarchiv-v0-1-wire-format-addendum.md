@@ -185,6 +185,26 @@ Die Payload-AEAD verwendet einen 32-Byte-CEK, eine 12-Byte-Nonce und einen
 Verschlüsselung overflow-sicher geprüft. Ein nicht darstellbarer oder ein
 Formatlimit überschreitender Wert wird fail-closed abgelehnt.
 
+```text
+MAX_PLAINTEXT_BYTES_V1 = 1_048_576
+AEAD_TAG_BYTES_V1 = 16
+MAX_CIPHERTEXT_BYTES_V1 = 1_048_592
+MAX_CBOR_TEXT_OR_BYTES_V1 = 1_048_592
+```
+
+Der deterministische Payload-Plaintext bleibt auf 1.048.576 Byte begrenzt. Der
+`.eip`-Ciphertext ist exakt 16 Byte länger und deshalb 16 bis einschließlich
+1.048.592 Byte lang. `manifestCore.ciphertext-length` entspricht exakt der
+tatsächlichen Länge des Ciphertext-`bstr`. Für v1 ist jede einzelne CBOR-Text-
+oder Bytefolge (`tstr`/`bstr`) auf 1.048.592 Byte begrenzt.
+
+Das v1-CPU-/Arbeitsbudget lautet `MAX_TOTAL_ITEMS_V1 = 10_000` und gilt pro
+top-level item zusätzlich zur Grenze von 10.000 Elementen je Container. Gezählt
+werden das top-level item, jeder Array-/Map-Container, every map key and value
+separately, every tag and tagged value und jeder skalare `tstr`, `bstr`, Integer,
+Boolean- oder Nullwert. tstr/bstr payload byte length does not add tokens.
+container and total budgets are cumulative.
+
 `EINSATZARCHIV-HPKE-1` ist RFC 9180 Base Mode `0` mit
 `DHKEM(X25519, HKDF-SHA256) = 0x0020`, `HKDF-SHA256 = 0x0001` und
 `ChaCha20Poly1305 = 0x0003`. `encapsulated-key` (`enc`) ist exakt 32 Byte lang;
@@ -314,6 +334,14 @@ und wird hier vollständig normativ einbezogen. Die Integerregister sind:
   2 offlineEncryptedContainer, 3 pkcs11, 4 serverSecretStoreOrHsm.
 - `destruction-state-v1`: 0 requested, 1 inProgress, 2 pendingBackupExpiry,
   3 completeManagedScope, 4 incompleteUnreachableReplica.
+
+In `destruction-authorization-core-v1` ist `sorted-targets` nicht leer und
+aufsteigend nach `(entryHash bytes, chainSequence numeric)` geordnet: zuerst
+unsigned byteweise nach `entryHash`, dann unsigned numerisch nach
+`chainSequence`. Target identity is entryHash; jeder repeated entryHash ist
+ungültig, auch wenn die Sequenz abweicht. `chainSequence` ist ausschließlich ein
+Cross-Check gegen das signierte Manifest. Equal chainSequence values with
+different entryHash values are not duplicates.
 
 Ein Public Key oder Thumbprint darf nur dann `null` sein, wenn der jeweilige
 `certificate-kind` den Algorithmus nicht verwendet. Capability-Strings werden

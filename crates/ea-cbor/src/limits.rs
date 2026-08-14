@@ -11,7 +11,7 @@ impl ParserLimits {
         max_depth: 16,
         max_container_items: 10_000,
         max_total_items: 10_000,
-        max_text_or_bytes: 1_048_576,
+        max_text_or_bytes: 1_048_592,
     };
 
     pub(crate) const fn has_nonzero_security_budgets(self) -> bool {

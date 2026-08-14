@@ -88,6 +88,187 @@ fn archive_cddl() -> String {
     .join("\n")
 }
 
+fn assert_contains_all(name: &str, source: &str, required: &[&str]) {
+    for marker in required {
+        assert!(source.contains(marker), "{name} is missing `{marker}`");
+    }
+}
+
+fn normalized_prose(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn encode_manifest_core(encoder: &mut minicbor::Encoder<Vec<u8>>, ciphertext_length: u64) {
+    encoder.array(16).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.bytes(&[0; 16]).unwrap();
+    encoder.bytes(&[1; 16]).unwrap();
+    encoder.u8(0).unwrap();
+    encoder.null().unwrap();
+    encoder.bytes(&[2; 32]).unwrap();
+    encoder.null().unwrap();
+    encoder.u8(0).unwrap();
+    encoder.bytes(&[3; 32]).unwrap();
+    encoder.bytes(&[4; 32]).unwrap();
+    encoder.str("EINSATZARCHIV-SUITE-1").unwrap();
+    encoder.bytes(&[5; 12]).unwrap();
+    encoder.u64(ciphertext_length).unwrap();
+    encoder.array(0).unwrap();
+}
+
+fn eip_fixture(ciphertext_length: usize, declared_length: u64) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(5).unwrap();
+    encoder.bytes(b"EA1\0").unwrap();
+    encoder.u8(1).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.array(0).unwrap();
+    encoder.array(3).unwrap();
+    encoder.array(2).unwrap();
+    encode_manifest_core(&mut encoder, declared_length);
+    encoder.bytes(&[6; 32]).unwrap();
+    encoder.bytes(&vec![0; ciphertext_length]).unwrap();
+    encoder.null().unwrap();
+    encoder.into_writer()
+}
+
+#[test]
+fn eip_cddl_enforces_the_exact_suite_v1_ciphertext_boundaries() {
+    let cddl = archive_cddl();
+
+    assert!(validate_cbor("eip-v1", &cddl, &eip_fixture(16, 16)));
+    assert!(validate_cbor(
+        "eip-v1",
+        &cddl,
+        &eip_fixture(1_048_592, 1_048_592)
+    ));
+    assert!(!validate_cbor("eip-v1", &cddl, &eip_fixture(15, 15)));
+    assert!(!validate_cbor(
+        "eip-v1",
+        &cddl,
+        &eip_fixture(1_048_593, 1_048_593)
+    ));
+}
+
+#[test]
+fn normative_sources_keep_plaintext_ciphertext_and_cbor_limits_distinct() {
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let addendum = include_str!(
+        "../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md"
+    );
+    let required = [
+        "MAX_PLAINTEXT_BYTES_V1 = 1_048_576",
+        "AEAD_TAG_BYTES_V1 = 16",
+        "MAX_CIPHERTEXT_BYTES_V1 = 1_048_592",
+        "MAX_CBOR_TEXT_OR_BYTES_V1 = 1_048_592",
+    ];
+    assert_contains_all("design", design, &required);
+    assert_contains_all("wire-format addendum", addendum, &required);
+
+    let archive = include_str!("../../../schemas/archive/v1/archive.cddl");
+    assert_contains_all(
+        "archive CDDL",
+        archive,
+        &[
+            "ciphertext-length-v1 = 16..1048592",
+            "ciphertext-v1 = bstr .size (16..1048592)",
+        ],
+    );
+}
+
+#[test]
+fn v1_archive_preflight_and_family_limits_are_non_relaxable() {
+    let umbrella = include_str!("../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-v0-1.md");
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let preflight = [
+        "MAX_ARCHIVE_OBJECT_BYTES_V1 = 4_194_304",
+        "FIXED_PREFIX_V1 = 85 44 45 41 31 00 TT 01 80",
+        "TT = 01..06",
+        "EIP_MAX_RAW_BYTES_V1 = 2_097_152",
+        "EAG_MAX_RAW_BYTES_V1 = 65_536",
+        "ESR_MAX_RAW_BYTES_V1 = 65_536",
+        "ECP_MAX_RAW_BYTES_V1 = 4_194_304",
+        "ETB_MAX_RAW_BYTES_V1 = 4_194_304",
+        "EDS_MAX_RAW_BYTES_V1 = 262_144",
+    ];
+    assert_contains_all("umbrella plan", umbrella, &preflight);
+    assert_contains_all("Stage-1 plan", stage_one, &preflight);
+    assert_contains_all("design", design, &preflight);
+
+    let public_seam = "pub fn decode_exact_object(bytes: &[u8])";
+    assert_contains_all("umbrella plan", umbrella, &[public_seam]);
+    assert_contains_all("Stage-1 plan", stage_one, &[public_seam]);
+    assert!(!umbrella.contains("decode_exact_object(bytes: &[u8], limits:"));
+    assert!(!stage_one.contains("decode_exact_object(bytes: &[u8], limits:"));
+}
+
+#[test]
+fn destruction_target_order_and_entry_hash_identity_are_normative_everywhere() {
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let addendum = include_str!(
+        "../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md"
+    );
+    let trust = include_str!("../../../schemas/archive/v1/trust.cddl");
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+    let stage_five = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-5-administration-recovery.md"
+    );
+    let required = [
+        "(entryHash bytes, chainSequence numeric)",
+        "Target identity is entryHash",
+        "repeated entryHash",
+        "Equal chainSequence values with different entryHash values are not duplicates",
+    ];
+    for (name, source) in [
+        ("design", design),
+        ("wire-format addendum", addendum),
+        ("Trust CDDL", trust),
+        ("Stage-1 plan", stage_one),
+        ("Stage-5 plan", stage_five),
+    ] {
+        let normalized = normalized_prose(source);
+        assert_contains_all(name, &normalized, &required);
+    }
+}
+
+#[test]
+fn normative_sources_define_the_total_token_budget_and_counting_rule() {
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let addendum = include_str!(
+        "../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md"
+    );
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+    let required = [
+        "MAX_TOTAL_ITEMS_V1 = 10_000",
+        "top-level item",
+        "every map key and value separately",
+        "every tag and tagged value",
+        "tstr/bstr payload byte length does not add tokens",
+        "container and total budgets are cumulative",
+    ];
+    assert_contains_all("design", &normalized_prose(design), &required);
+    assert_contains_all(
+        "wire-format addendum",
+        &normalized_prose(addendum),
+        &required,
+    );
+    assert_contains_all("Stage-1 plan", &normalized_prose(stage_one), &required);
+    assert!(stage_one.contains("max_total_items: 10_000"));
+}
+
 fn protocol_cddl() -> String {
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

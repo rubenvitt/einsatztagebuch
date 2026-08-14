@@ -687,7 +687,19 @@ Expected: FAIL because destruction authorization/state machine do not exist.
 
 - [ ] **Step 3: Implement closed states and event validation**
 
-Authorization binds destruction ID, organization, Registry head/sequence, sorted target Entry hashes plus sequences, scope, nonfachlicher legal-reason code, and two valid current distinct-subject Approver signatures. Policy must contain a recorded privacy decision enabling `.eds`; otherwise block. Events bind authorization hash, unique event ID, predecessor event hash, from/to state, trigger code, execution time, and a Root-certified `deletionAttest` signer.
+Authorization binds destruction ID, organization, Registry head/sequence, sorted
+target Entry hashes plus sequences, scope, nonfachlicher legal-reason code, and
+two valid current distinct-subject Approver signatures. `sorted-targets` is
+nonempty and ascending by `(entryHash bytes, chainSequence numeric)`: unsigned
+bytewise hash first, then unsigned numeric sequence. Target identity is entryHash;
+any repeated entryHash is invalid even with a different sequence.
+`chainSequence` is a signed-manifest cross-check. Equal chainSequence values with
+different entryHash values are not duplicates. Authorization tests reject
+unsorted tuples, exact duplicate tuples, and repeated hashes with conflicting
+sequences. Policy must contain a recorded privacy decision enabling `.eds`;
+otherwise block. Events bind authorization hash, unique event ID, predecessor
+event hash, from/to state, trigger code, execution time, and a Root-certified
+`deletionAttest` signer.
 
 Creating `requested` additionally requires a fresh native operator proof for `Destruction`. Before returning or allowing the executor to enter `inProgress`, record and flush a signed `destruction` local audit event binding only the authorization hash, state-event hash, and outcome. A wrong-purpose/stale proof or audit write/signature failure leaves the state machine unadvanced.
 

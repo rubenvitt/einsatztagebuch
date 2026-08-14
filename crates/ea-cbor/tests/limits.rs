@@ -143,13 +143,13 @@ fn tag_nesting_is_included_in_the_depth_limit() {
 }
 
 #[test]
-fn text_and_byte_limit_checks_declared_length_before_payload_access() {
-    let mut exact = vec![0x5a, 0x00, 0x10, 0x00, 0x00];
-    exact.resize(5 + 1_048_576, 0);
+fn v1_text_and_byte_limit_preserves_the_full_aead_ciphertext_boundary() {
+    let mut exact = vec![0x5a, 0x00, 0x10, 0x00, 0x10];
+    exact.resize(5 + 1_048_592, 0);
     validate(&exact, ParserLimits::V1).unwrap();
 
     for major_header in [0x5a, 0x7a] {
-        let over = [major_header, 0x00, 0x10, 0x00, 0x01];
+        let over = [major_header, 0x00, 0x10, 0x00, 0x11];
         assert_eq!(code(&over), "EA-CBOR-ITEM-LIMIT");
     }
 }
@@ -176,6 +176,30 @@ fn per_container_and_total_item_budgets_enforce_exact_boundaries() {
     let mut over_total = vec![0x99, 0x27, 0x10];
     over_total.resize(3 + 10_000, 0xf6);
     assert_eq!(code(&over_total), "EA-CBOR-TOKEN-LIMIT");
+}
+
+#[test]
+fn nested_arrays_maps_tags_and_scalars_each_consume_one_total_token() {
+    // [{ 0: 0(null) }, h'01020304'] consumes six tokens: the root array,
+    // map, key, tag, tagged null, and bstr. The four bstr payload bytes consume
+    // no additional tokens.
+    let nested = [0x82, 0xa1, 0x00, 0xc0, 0xf6, 0x44, 1, 2, 3, 4];
+    let exact = ParserLimits {
+        max_container_items: 2,
+        max_total_items: 6,
+        max_text_or_bytes: 4,
+        ..ParserLimits::V1
+    };
+    validate(&nested, exact).unwrap();
+
+    let over = ParserLimits {
+        max_total_items: 5,
+        ..exact
+    };
+    assert_eq!(
+        validate(&nested, over).unwrap_err().code(),
+        "EA-CBOR-TOKEN-LIMIT"
+    );
 }
 
 #[test]

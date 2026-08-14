@@ -418,6 +418,10 @@ destruction-authorization-core-v1 = [
   1, destruction-id: bstr .size 16, organization-id: bstr .size 16,
   registry-version: uint, registry-head-hash: bstr .size 32,
   authorization-sequence: uint,
+  ; Nonempty and ascending by (entryHash bytes, chainSequence numeric).
+  ; Target identity is entryHash; any repeated entryHash is invalid, even with a
+  ; different sequence. chainSequence is a signed-manifest cross-check. Equal
+  ; chainSequence values with different entryHash values are not duplicates.
   sorted-targets: [+ [entry-hash: bstr .size 32, chain-sequence: uint]],
   scope-code: uint, legal-reason-code: uint, []
 ]
@@ -713,7 +717,8 @@ Expected: FAIL because the encoder, streaming validator, and limits do not exist
 pub const V1: ParserLimits = ParserLimits {
     max_depth: 16,
     max_container_items: 10_000,
-    max_text_or_bytes: 1_048_576,
+    max_total_items: 10_000,
+    max_text_or_bytes: 1_048_592,
 };
 
 pub fn validate(input: &[u8], limits: ParserLimits) -> Result<(), CborError> {
@@ -725,6 +730,13 @@ pub fn validate(input: &[u8], limits: ParserLimits) -> Result<(), CborError> {
 ```
 
 Wrap the selected upstream CBOR library rather than implementing cryptographic primitives. The wrapper must inspect headers before allocating, enforce minimal integer representation, track depth/item counts, compare canonical map-key encodings, reject floats/indefinite items/duplicate keys, and re-encode accepted input to prove byte-for-byte determinism.
+
+`MAX_TOTAL_ITEMS_V1 = 10_000` is an intentional CPU/work bound per top-level
+item in addition to the 10,000-element limit per container. Count the top-level
+item itself, every array/map container, every map key and value separately, every
+tag and tagged value, and every scalar `tstr`, `bstr`, integer, boolean, or null.
+tstr/bstr payload byte length does not add tokens. container and total budgets
+are cumulative.
 
 - [ ] **Step 4: Run unit, property, and short fuzz smoke tests**
 
@@ -971,7 +983,7 @@ git commit -m "feat(core): implement cryptographic suite one"
 
 **Interfaces:**
 - Consumes: `ea-cbor`, `ea-crypto`, `ea-types`, reviewed CDDL from Task 2.
-- Produces: `decode_exact_object`, exact encoders for all six types, `ManifestCoreV1`, `GrantPlanV1`, `GrantV1`, `ReceiptCoreV1`, `DestroyedEntryStubV1`, and opaque `ExactObjectBytes`.
+- Produces: non-relaxable `decode_exact_object(bytes)`, exact encoders for all six types, `ManifestCoreV1`, `GrantPlanV1`, `GrantV1`, `ReceiptCoreV1`, `DestroyedEntryStubV1`, and opaque `ExactObjectBytes`.
 
 - [ ] **Step 1: Write fixed-position, grant-plan, and negative tests**
 
@@ -988,7 +1000,7 @@ fn grant_plan_is_total_sorted_unique_and_has_one_recovery() {
 #[test]
 fn top_level_and_manifest_tags_must_match() {
     let bytes = fixtures::eip_with_manifest_object_type(2);
-    assert_eq!(decode_exact_object(&bytes, ParserLimits::V1).unwrap_err().code(),
+    assert_eq!(decode_exact_object(&bytes).unwrap_err().code(),
                "EA-FORMAT-TAG-MISMATCH");
 }
 ```
@@ -1017,11 +1029,41 @@ pub struct Parsed<T> {
     object_hash: ObjectHash,
 }
 
-pub fn decode_exact_object(bytes: &[u8], limits: ParserLimits)
+pub fn decode_exact_object(bytes: &[u8])
     -> Result<ParsedArchiveObject, FormatError>;
 ```
 
-Decode arrays positionally, verify magic/type/version/critical extensions twice where required, enforce object-specific byte limits before CBOR parsing, preserve exact input bytes, and never serialize a parsed object merely to compute its object hash. Derive `entryHash` only from `recordDigest` and exact COSE signature bytes. Initial grant creation signs `grantBody`, including encapsulated key and wrapped CEK. Receipt hash lists are bytewise sorted and duplicate-free.
+The public v1 seam is non-relaxable and uses this exact preflight contract:
+
+```text
+MAX_ARCHIVE_OBJECT_BYTES_V1 = 4_194_304
+FIXED_PREFIX_V1 = 85 44 45 41 31 00 TT 01 80
+TT = 01..06
+EIP_MAX_RAW_BYTES_V1 = 2_097_152
+EAG_MAX_RAW_BYTES_V1 = 65_536
+ESR_MAX_RAW_BYTES_V1 = 65_536
+ECP_MAX_RAW_BYTES_V1 = 4_194_304
+ETB_MAX_RAW_BYTES_V1 = 4_194_304
+EDS_MAX_RAW_BYTES_V1 = 262_144
+```
+
+First require `bytes.len() <= MAX_ARCHIVE_OBJECT_BYTES_V1` before any CBOR
+inspection. Inspect only `FIXED_PREFIX_V1`, where `TT` selects the family, and
+immediately enforce that family raw-byte cap before full validation, body
+decoding, or input-sized allocation. Then run full deterministic-CBOR validation
+and enforce outer/body type correlation. File names are untrusted.
+`ea-cbor::ParserLimits::V1` owns structural CBOR budgets; `ea-format` owns family
+raw-byte and semantic limits.
+
+For destruction authorizations, `sorted-targets` is nonempty and ascending by
+`(entryHash bytes, chainSequence numeric)`: unsigned bytewise `entryHash`, then
+unsigned numeric `chainSequence`. Target identity is entryHash; any repeated
+entryHash is invalid even with a different sequence, while `chainSequence` is a
+signed-manifest cross-check. Equal chainSequence values with different entryHash
+values are not duplicates. Future Task-6 negative tests reject unsorted tuples,
+exact duplicate tuples, and repeated hashes with conflicting sequences.
+
+Decode arrays positionally, verify magic/type/version/critical extensions twice where required, preserve exact input bytes, and never serialize a parsed object merely to compute its object hash. Derive `entryHash` only from `recordDigest` and exact COSE signature bytes. Initial grant creation signs `grantBody`, including encapsulated key and wrapped CEK. Receipt hash lists are bytewise sorted and duplicate-free.
 
 - [ ] **Step 4: Run all format and mutation tests**
 

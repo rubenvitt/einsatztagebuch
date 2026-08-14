@@ -10,12 +10,15 @@ manifest-core-v1 = [
   registry-version: uint, registry-head-hash: bstr .size 32,
   initial-grant-plan-hash: bstr .size 32,
   "EINSATZARCHIV-SUITE-1", nonce: bstr .size 12,
-  ciphertext-length: uint, []
+  ciphertext-length: ciphertext-length-v1, []
 ]
+
+ciphertext-length-v1 = 16..1048592
+ciphertext-v1 = bstr .size (16..1048592)
 
 eip-v1 = [h'45413100', 1, 1, [], [
   signed-manifest: [manifest-core-v1, bstr .size 32],
-  ciphertext: bstr, writer-signature: #6.18(COSE-Sign1)
+  ciphertext: ciphertext-v1, writer-signature: #6.18(COSE-Sign1)
 ]]
 
 grant-context-v1 = [

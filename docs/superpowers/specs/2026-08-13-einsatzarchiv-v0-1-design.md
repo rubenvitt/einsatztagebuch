@@ -547,6 +547,21 @@ diesen Tag als festen Overhead. `ciphertextLength` MUSS daher vor jeder
 Verschlüsselung overflow-sicher als `plaintextLength + 16` berechnet werden. Ist
 die Addition im verwendeten Längentyp nicht darstellbar oder überschreitet sie ein
 Format-/Implementierungslimit, wird vor Allokation und Verschlüsselung abgebrochen.
+Für das öffentliche Format v1 gelten exakt:
+
+```text
+MAX_PLAINTEXT_BYTES_V1 = 1_048_576
+AEAD_TAG_BYTES_V1 = 16
+MAX_CIPHERTEXT_BYTES_V1 = 1_048_592
+MAX_CBOR_TEXT_OR_BYTES_V1 = 1_048_592
+```
+
+Der deterministisch kodierte Payload-Plaintext ist höchstens
+`MAX_PLAINTEXT_BYTES_V1` Byte lang. Der `.eip`-Ciphertext ist exakt
+`plaintextLength + AEAD_TAG_BYTES_V1` und damit 16 bis einschließlich 1.048.592
+Byte lang. `manifestCore.ciphertext-length` MUSS der tatsächlichen Länge des
+Ciphertext-`bstr` entsprechen. Eine einzelne CBOR-Text- oder Bytefolge (`tstr`/
+`bstr`) ist in v1 auf `MAX_CBOR_TEXT_OR_BYTES_V1` Byte begrenzt.
 Vor der Verschlüsselung wird folgender deterministisch kodierter Kern gebildet:
 
 ```text
@@ -775,7 +790,7 @@ eip-v1 = [
   h'45413100', 1, 1, critical-extensions: [],
   [
     signed-manifest: [manifest-core-v1, ciphertext-hash: bstr .size 32],
-    ciphertext: bstr,
+    ciphertext: bstr .size (16..1048592),
     writer-signature: #6.18(COSE-Sign1)
   ]
 ]
@@ -795,7 +810,7 @@ manifest-core-v1 = [
   initial-grant-plan-hash: bstr .size 32,
   crypto-suite-id: "EINSATZARCHIV-SUITE-1",
   nonce: bstr .size 12,
-  ciphertext-length: uint,
+  ciphertext-length: 16..1048592,
   critical-extensions: []
 ]
 
@@ -955,7 +970,16 @@ Ein autorisiertes Zielobjekt darf nur eine Action-Klasse verändern. Insbesonder
 
 `grantAuthorization` bindet Autorisierungs-ID, Organisation, Registry-Head und Autorisierungssequenz, sortierte Ziel-Entry-Hashes, Empfänger-Key-Thumbprint und -Zertifikat-Hash, Zweck und `expiresAt`. `expiresAt` ist die verbindliche **Nutzungsgrenze** jedes daraus erzeugten historischen Grants, nicht nur eine Ausstellungsfrist: Historical Grant Authority bei Erzeugung, Server bei Annahme und Auslieferung sowie Reader vor jeder Entkapselung verlangen `effectiveNow <= expiresAt`. `created-at-device` darf für diese Entscheidung niemals verwendet werden. Nach Ablauf bleibt das Objekt archiviert, ist aber nicht mehr nutzbar; der Reader zeigt Verifikationsstatus `ungültig` mit Detail `historische Freigabe abgelaufen`. Ein erneutes Einreichen oder eine zurückgestellte Uhr verlängert die Frist nicht.
 
-`destructionAuthorization` bindet `destructionId`, Organisation, Registry-Head und Autorisierungssequenz, Ziel-Entry-Hashes samt Sequenzen, Umfang und einen nichtfachlichen Rechtsgrund-Code. Grant- und Destruction-Authorization erfordern zwei gültige Approver-Signaturen gemäß Abschnitt 6.3.
+`destructionAuthorization` bindet `destructionId`, Organisation, Registry-Head und
+Autorisierungssequenz, Ziel-Entry-Hashes samt Sequenzen, Umfang und einen
+nichtfachlichen Rechtsgrund-Code. `sorted-targets` ist nicht leer und aufsteigend
+nach `(entryHash bytes, chainSequence numeric)` sortiert: zuerst unsigned
+byteweise nach `entryHash`, dann unsigned numerisch nach `chainSequence`. Target
+identity is entryHash; jeder repeated entryHash ist ungültig, auch bei anderer
+Sequenz. `chainSequence` ist ein Cross-Check gegen das signierte Manifest. Equal
+chainSequence values with different entryHash values are not duplicates. Grant-
+und Destruction-Authorization erfordern zwei gültige Approver-Signaturen gemäß
+Abschnitt 6.3.
 
 `destructionTransition` bindet `destructionId`, Authorization-Hash, eindeutige Ereignis-ID, Vorgänger-Ereignis-Hash, Von-/Nach-Zustand, Auslöser-Code und Ausführungszeit. `deletionAttestation` bindet Destruction-Authorization-Hash, pseudonyme Replik-ID und -Art, entfernte Objekt-Hashes, Ergebnis, etwaige Backup-Ablauffrist und Ausführungszeit. Transition und Attestierung werden von einem Root-zertifizierten Komponenten- oder Geräteschlüssel mit Capability `deletionAttest` signiert.
 
@@ -988,15 +1012,47 @@ Der Server sieht unvermeidbar Uploadzeit, Quell-IP, Objektanzahl, Größen und A
 
 Für Formatversion 1 gelten folgende harte Limits:
 
-- `.eip`: 2 MiB
-- `.eag` und `.esr`: je 64 KiB
-- `.eds`: 256 KiB
-- `.ecp` und `.etb`: je 4 MiB
+```text
+MAX_ARCHIVE_OBJECT_BYTES_V1 = 4_194_304
+FIXED_PREFIX_V1 = 85 44 45 41 31 00 TT 01 80
+TT = 01..06
+EIP_MAX_RAW_BYTES_V1 = 2_097_152
+EAG_MAX_RAW_BYTES_V1 = 65_536
+ESR_MAX_RAW_BYTES_V1 = 65_536
+ECP_MAX_RAW_BYTES_V1 = 4_194_304
+ETB_MAX_RAW_BYTES_V1 = 4_194_304
+EDS_MAX_RAW_BYTES_V1 = 262_144
+```
+
 - maximale CBOR-Verschachtelung: 16
 - maximale Zahl von Array- oder Map-Elementen je Container: 10.000
-- maximale einzelne Text- oder Bytefolge: 1 MiB
+- maximale einzelne Text- oder Bytefolge: 1.048.592 Byte
 
-Die Prüfung erfolgt beim Streamen vor jeder großen Allokation. Überschreitung, Integer-Overflow, unbekannte kritische Erweiterungen oder nichtdeterministische Kodierung führen zu einem fail-closed Formatfehler.
+`MAX_TOTAL_ITEMS_V1 = 10_000` ist zusätzlich zur Grenze von 10.000 Elementen je
+Container ein absichtliches CPU-/Arbeitsbudget pro top-level item. Gezählt werden
+das top-level item selbst, jeder Array-/Map-Container, every map key and value
+separately, every tag and tagged value sowie jeder skalare `tstr`, `bstr`, Integer,
+Boolean- oder Nullwert. tstr/bstr payload byte length does not add tokens.
+container and total budgets are cumulative.
+
+Dateinamen sind keine Vertrauensquelle. Die Prüfung erfolgt zweiphasig und in
+dieser Reihenfolge:
+
+1. Vor jeder CBOR-Inspektion MUSS `bytes.len() <= MAX_ARCHIVE_OBJECT_BYTES_V1`
+   gelten.
+2. Danach darf ausschließlich das feste neun Byte lange Deterministic-v1-Präfix
+   `FIXED_PREFIX_V1` inspiziert werden. `TT` ist der Typdiscriminator 01 bis 06.
+3. Unmittelbar nach dieser Inspektion MUSS die zum Typ gehörende rohe
+   Familiengrenze durchgesetzt werden, noch vor vollständiger Validierung,
+   Body-Decodierung oder eingabegrößenabhängiger Allokation.
+4. Erst danach folgen vollständige Deterministic-CBOR-Validierung und die
+   Korrelation von äußerem Typ und Body-Typ.
+
+`ea-cbor::ParserLimits::V1` besitzt die strukturellen CBOR-Budgets.
+`ea-format` besitzt die rohen Familien- und semantischen Limits.
+
+Überschreitung, Integer-Overflow, unbekannte kritische Erweiterungen oder
+nichtdeterministische Kodierung führen zu einem fail-closed Formatfehler.
 
 ### 11.4 Verzeichnisstruktur
 
@@ -1480,6 +1536,14 @@ Die normale Oberfläche bietet keine Löschung finalisierter Objekte. Vor Aktivi
 
 Eine rechtlich erforderliche Vernichtung ist eine ausdrücklich modellierte Ausnahme und erfolgt ausschließlich über einen separaten Administratorprozess:
 
+Die Zielmenge folgt dabei derselben verbindlichen Identität und Ordnung wie die
+Authorization: `sorted-targets` ist nicht leer und aufsteigend nach
+`(entryHash bytes, chainSequence numeric)` (unsigned byteweise Hashsortierung,
+danach unsigned numerische Sequenz). Target identity is entryHash; jeder repeated
+entryHash ist ungültig, selbst mit abweichender Sequenz. `chainSequence` dient nur
+als Cross-Check gegen das signierte Manifest. Equal chainSequence values with
+different entryHash values are not duplicates.
+
 1. Ziel-`entryHash`, Sequenz, Rechtsgrund, Umfang und bekannte Speicherorte in einer `DestructionAuthorization` erfassen und durch zwei unterschiedliche, aktuell berechtigte Approver signieren lassen.
 2. Neue Auslieferungen und historische Re-Grants für die Ziele serverseitig blockieren.
 3. Vorzustand vollständig verifizieren und signierten Bericht erstellen.
@@ -1660,6 +1724,9 @@ Lokaler Kettenkopf, Sync-Queue, Reader-Index und technische Statusdatenbanken si
 ### 20.3 Performance
 
 - Finalisierung eines 1-MiB-Payloads dauert auf einem Arbeitsplatzgerät mit mindestens vier CPU-Kernen, 8 GiB RAM und SSD höchstens drei Sekunden.
+- Der Streaming-Parser begrenzt seine CPU-Arbeit pro Top-Level-CBOR-Item durch
+  `MAX_TOTAL_ITEMS_V1 = 10_000`; dieses Gesamtbudget gilt kumulativ neben dem
+  Containerbudget aus Abschnitt 11.3.
 - Eingabe und Autosave bleiben unabhängig vom Sync flüssig.
 - Ein Reader verifiziert und indiziert mindestens 50.000 Pakete.
 - Serverannahme streamt Objekte und benötigt keine vollständige Payload-Kopie im Arbeitsspeicher.
