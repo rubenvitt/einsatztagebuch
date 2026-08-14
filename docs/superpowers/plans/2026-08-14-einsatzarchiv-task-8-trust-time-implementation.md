@@ -1369,12 +1369,15 @@ rtk git commit -m "feat(trust): verify one-use clock releases"
 ### Task 11: Select and pin a Registry Head atomically
 
 **Files:**
+- Modify: `crates/ea-trust/src/error.rs`
+- Modify: `crates/ea-trust/src/clock_release.rs`
 - Modify: `crates/ea-trust/src/registry.rs`
+- Create: `crates/ea-trust/src/registry/tests.rs`
 - Modify: `crates/ea-trust/src/state.rs`
 - Modify: `crates/ea-trust/src/lib.rs`
-- Modify: `crates/ea-trust/tests/registry_attacks.rs`
-- Modify: `crates/ea-trust/tests/state_atomicity.rs`
+- Modify: `crates/ea-trust/tests/support/mod.rs`
 - Create: `crates/ea-trust/tests/head_selection.rs`
+- Modify: `docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md`
 
 - [ ] **Step 1: Add phased-time/self-activation REDs**
 
@@ -1404,12 +1407,15 @@ Inject failures before replay insert, after tentative replay insert, and before 
 
 - [ ] **Step 3: Prove waiver scope is narrow**
 
-With a valid Release, independently retain failures for a stale/expired Head
-that would otherwise return `Selected`, exhausted operation sequence lease,
-authorization expiry, signature failure, fork, rollback, and candidate
-`notBefore`. Only `FutureSkew::Blocked` may change to allowed. Separately prove
-that an expired intermediate catch-up can return only `Advanced`, never
-`Selected`, with or without a Release.
+At the selection boundary, use a valid Release and independently retain
+failures for a stale/expired Head, an exhausted operation sequence lease, and a
+future candidate `issuedAt`/`notBefore`. Only `FutureSkew::Blocked` may change
+to allowed. Separately prove that an expired intermediate catch-up can return
+only `Advanced`, never `Selected`, with or without a Release. Authorization
+expiry, signature failure, fork, rollback, and Policy mismatch are rejected
+upstream while constructing the Task 7 candidate, before any Task 10 Release
+can be minted; retain those existing `registry_attacks` phase-order tests as
+regression gates rather than inventing an unreachable Task 11 Release fixture.
 
 - [ ] **Step 4: Run RED**
 
@@ -1473,9 +1479,12 @@ remains only `Advanced` and cannot be used for an operation.
 When and only when the exact direct successor fails solely because `issuedAt`
 or `notBefore` is future, return `PendingFuture(PendingFutureSuccessor)` without
 committing candidate time, Head, or replay. Do not return this proof for skew,
-stale, lease-gap, signature, policy, authorization, fork, or rollback errors.
-The proof is available only if the previous pinned Head still covers the
-proposed sequence. Its successors are never inspected.
+stale, signature, policy, authorization, fork, or rollback errors. The proof
+is available only if the previous pinned Head still covers the proposed
+sequence; otherwise return `PendingFuture` as an error. A future direct
+candidate whose own Lease will not cover the proposed sequence remains
+`PendingFuture` while temporal applicability is its first defect, then becomes
+`Advanced` once reached. Its successors are never inspected.
 
 To continue on that still-valid predecessor, reload state, rebuild
 `VerifiedTrust`, consume the pending proof through
@@ -1499,18 +1508,24 @@ current fallback use the same transaction as compare-and-affirm: Head and floor
 remain identical, the revision advances, and an optional separately verified
 current-Head Release replay key is inserted atomically. Thus another process
 cannot select the successor between fallback recheck and returning an old-Head
-proof. Consume candidate, local block, and Release by value. Return getters for
-Head/version/Policy/effective range/warnings/resolver only on the `Selected`
-variant and only after the required transaction succeeds. `Advanced` has only
-the narrow non-authoritative getters above.
+proof. Consume candidate, local block, and Release by value. Return
+`registry_version`, `registry_head_hash`, `policy_object_hash`, `policy_fields`,
+`effective_from_sequence`, `valid_through_sequence`,
+`preexisting_effective_now`, and `warnings` getters only on the `Selected`
+variant and only after the required transaction succeeds. Resolver and
+capability views remain Task 12-only. `Advanced` has only the narrow
+non-authoritative getters above.
 
 - [ ] **Step 6: Run GREEN and commit**
 
 ```bash
 rtk cargo test --locked -p ea-trust --test head_selection --test state_atomicity --test registry_attacks
-rtk git add -- crates/ea-trust/src/registry.rs crates/ea-trust/src/state.rs \
-  crates/ea-trust/src/lib.rs crates/ea-trust/tests/registry_attacks.rs \
-  crates/ea-trust/tests/state_atomicity.rs crates/ea-trust/tests/head_selection.rs
+rtk git add -- crates/ea-trust/src/error.rs crates/ea-trust/src/clock_release.rs \
+  crates/ea-trust/src/registry.rs crates/ea-trust/src/registry/tests.rs \
+  crates/ea-trust/src/state.rs crates/ea-trust/src/lib.rs \
+  crates/ea-trust/tests/support/mod.rs \
+  crates/ea-trust/tests/head_selection.rs \
+  docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md
 rtk git diff --cached --check
 rtk git commit -m "feat(trust): select and pin registry heads atomically"
 ```

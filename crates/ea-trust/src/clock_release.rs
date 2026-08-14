@@ -127,6 +127,41 @@ pub fn verify_clock_release(
     })
 }
 
+pub(crate) fn into_selection_replay_key(
+    release: VerifiedClockRelease,
+    candidate: &RegistryCandidate,
+    local_time: &LocalTimeBlock<'_>,
+) -> Result<ClockReleaseReplayKey, ()> {
+    let proof = release.inner;
+    let context = proof.audit.context();
+    if !Arc::ptr_eq(&proof.candidate_state, &candidate.candidate_state)
+        || !Arc::ptr_eq(&proof.candidate_state, &local_time.candidate_state)
+        || proof.state_key != candidate.state_key
+        || proof.state_key != local_time.state_key
+        || proof.expected_revision != local_time.expected_revision
+        || proof.trusted_time != local_time.trusted_time
+        || proof.pinned_head != local_time.pinned_head
+        || proof.observed_os_wall_clock != local_time.observed_os_wall_clock
+        || proof.proposed_sequence != local_time.proposed_sequence
+        || proof.pre_transition_sequence != local_time.pre_transition_sequence
+        || proof.raw_now != local_time.evaluation.raw_now()
+        || proof.warnings != *local_time.evaluation.warnings()
+        || proof.future_skew != local_time.evaluation.future_skew()
+        || proof.future_skew != FutureSkew::Blocked
+        || proof.audit.organization_id() != candidate.state_key.organization_id
+        || proof.audit.target_device_id() != candidate.state_key.device_id
+        || proof.audit.effective_now() != local_time.evaluation.raw_now()
+        || context.registry_version() != local_time.candidate_registry_version
+        || context.registry_head_hash() != local_time.candidate_registry_head_hash
+        || context.guard_policy_object_hash() != local_time.guard_policy_object_hash
+        || context.trusted_time_floor() != local_time.trusted_time.floor()
+        || context.observed_os_wall_clock() != local_time.observed_os_wall_clock
+    {
+        return Err(());
+    }
+    Ok(proof.replay_key)
+}
+
 fn require_candidate_block_preflight(
     candidate: &RegistryCandidate,
     local_time: &LocalTimeBlock<'_>,

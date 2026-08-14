@@ -154,6 +154,30 @@ pub struct RegistrySelectionCommit {
 }
 
 impl RegistrySelectionCommit {
+    pub(crate) const fn advance_head(
+        next_trusted_time: TrustedTimeState,
+        next_head: RegistryHeadPin,
+        replay_key: Option<ClockReleaseReplayKey>,
+    ) -> Self {
+        Self {
+            next_trusted_time,
+            next_head,
+            replay_key,
+        }
+    }
+
+    pub(crate) const fn compare_and_affirm(
+        trusted_time: TrustedTimeState,
+        current_head: RegistryHeadPin,
+        replay_key: Option<ClockReleaseReplayKey>,
+    ) -> Self {
+        Self {
+            next_trusted_time: trusted_time,
+            next_head: current_head,
+            replay_key,
+        }
+    }
+
     #[must_use]
     pub const fn next_trusted_time(&self) -> &TrustedTimeState {
         &self.next_trusted_time

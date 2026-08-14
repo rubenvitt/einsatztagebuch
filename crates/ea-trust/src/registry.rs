@@ -6,23 +6,201 @@ use ea_format::{
     OperatorRoleV1, PolicyFieldsV1, RegistryChangeV1, RegistryEventFieldsV1,
     RootCertificateFieldsV1, TrustSubtypeV1, WriterTransitionFieldsV1,
 };
+use ea_time::{FutureSkew, TimeWarnings, TrustedTimeState, advance_registry_floor};
 use ea_types::{
     CertificateHash, ChainId, ChainSequence, Hash32, ObjectHash, RegistryVersion, UnixMillis,
 };
 
 use crate::{
-    RegistryError, RegistryHeadPin, TrustError, VerifiedTrust,
+    ClockReleaseReplayKey, LocalTimeBlock, RegistryError, RegistryHeadPin, RegistrySelectionCommit,
+    TrustError, VerifiedClockRelease, VerifiedTrust,
     admin_authorization::{AdminAuthorizationReplay, verify_admin_authorization},
     catalog::TrustCatalog,
     certificate::{ActiveCertificate, RootAuthority},
+    clock_release::into_selection_replay_key,
     operator_binding::ActiveOperatorBinding,
     policy::ResolvedPolicy,
     resolver::PreviousHeadState,
+    state::map_store_error,
 };
 
 pub struct PreexistingRegistryAuthority {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) inner: Arc<PreviousHeadState>,
+}
+
+pub struct PreexistingEffectiveNow {
+    value: UnixMillis,
+}
+
+impl PreexistingEffectiveNow {
+    #[must_use]
+    pub const fn value(&self) -> UnixMillis {
+        self.value
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+struct SelectedHeadInner {
+    candidate_state: Arc<PreviousHeadState>,
+    registry_version: RegistryVersion,
+    registry_head_hash: ObjectHash,
+    policy: ResolvedPolicy,
+    effective_from_sequence: ChainSequence,
+    valid_through_sequence: ChainSequence,
+    preexisting_effective_now: PreexistingEffectiveNow,
+    warnings: TimeWarnings,
+    committed_revision: u64,
+}
+
+/// A committed, operation-authoritative Registry Head selection.
+///
+/// Callers cannot construct the proof state directly:
+///
+/// ```compile_fail
+/// use ea_trust::SelectedRegistryHead;
+/// let _ = SelectedRegistryHead { inner: panic!() };
+/// ```
+pub struct SelectedRegistryHead {
+    inner: Arc<SelectedHeadInner>,
+}
+
+impl SelectedRegistryHead {
+    #[must_use]
+    pub fn registry_version(&self) -> RegistryVersion {
+        self.inner.registry_version
+    }
+
+    #[must_use]
+    pub fn registry_head_hash(&self) -> ObjectHash {
+        self.inner.registry_head_hash
+    }
+
+    #[must_use]
+    pub fn policy_object_hash(&self) -> ObjectHash {
+        self.inner.policy.object_hash
+    }
+
+    #[must_use]
+    pub fn policy_fields(&self) -> &PolicyFieldsV1 {
+        &self.inner.policy.fields
+    }
+
+    #[must_use]
+    pub fn effective_from_sequence(&self) -> ChainSequence {
+        self.inner.effective_from_sequence
+    }
+
+    #[must_use]
+    pub fn valid_through_sequence(&self) -> ChainSequence {
+        self.inner.valid_through_sequence
+    }
+
+    #[must_use]
+    pub fn preexisting_effective_now(&self) -> &PreexistingEffectiveNow {
+        &self.inner.preexisting_effective_now
+    }
+
+    #[must_use]
+    pub fn warnings(&self) -> &TimeWarnings {
+        &self.inner.warnings
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+struct PendingSuccessorProof {
+    candidate_state: Arc<PreviousHeadState>,
+    preexisting_state: Arc<PreviousHeadState>,
+    state_key: crate::TrustStateKey,
+    expected_revision: u64,
+    trusted_time: TrustedTimeState,
+    pinned_head: Option<RegistryHeadPin>,
+    observed_os_wall_clock: UnixMillis,
+    candidate_registry_version: RegistryVersion,
+    candidate_registry_head_hash: ObjectHash,
+    guard_policy_object_hash: ObjectHash,
+    proposed_sequence: ChainSequence,
+    pre_transition_sequence: ChainSequence,
+    raw_now: UnixMillis,
+    warnings: TimeWarnings,
+    future_skew: FutureSkew,
+    successor_event: RegistryEventFieldsV1,
+}
+
+/// Opaque, single-use proof that one direct successor is only temporally future.
+///
+/// Its private state cannot be constructed by callers:
+///
+/// ```compile_fail
+/// use ea_trust::PendingFutureSuccessor;
+/// let _ = PendingFutureSuccessor { inner: panic!() };
+/// ```
+///
+/// It cannot be duplicated:
+///
+/// ```compile_fail
+/// use ea_trust::PendingFutureSuccessor;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<PendingFutureSuccessor>();
+/// ```
+pub struct PendingFutureSuccessor {
+    inner: Box<PendingSuccessorProof>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+struct CommittedCatchUpProof {
+    registry_version: RegistryVersion,
+    registry_head_hash: ObjectHash,
+    committed_revision: u64,
+}
+
+/// Non-authoritative diagnostics for one atomically pinned catch-up Head.
+///
+/// Its private state cannot be constructed by callers:
+///
+/// ```compile_fail
+/// use ea_trust::AdvancedRegistryHead;
+/// let _ = AdvancedRegistryHead { inner: panic!() };
+/// ```
+///
+/// It cannot be duplicated:
+///
+/// ```compile_fail
+/// use ea_trust::AdvancedRegistryHead;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<AdvancedRegistryHead>();
+/// ```
+pub struct AdvancedRegistryHead {
+    inner: CommittedCatchUpProof,
+}
+
+impl AdvancedRegistryHead {
+    #[must_use]
+    pub const fn registry_version(&self) -> RegistryVersion {
+        self.inner.registry_version
+    }
+
+    #[must_use]
+    pub const fn registry_head_hash(&self) -> ObjectHash {
+        self.inner.registry_head_hash
+    }
+
+    #[must_use]
+    pub const fn committed_revision(&self) -> u64 {
+        self.inner.committed_revision
+    }
+}
+
+pub enum RegistrySelectionOutcome {
+    Selected(SelectedRegistryHead),
+    Advanced(AdvancedRegistryHead),
+    PendingFuture(PendingFutureSuccessor),
+}
+
+struct FallbackSuccessorBarrier {
+    registry_version: RegistryVersion,
+    registry_head_hash: ObjectHash,
+    event: RegistryEventFieldsV1,
 }
 
 pub struct RegistryCandidate {
@@ -49,6 +227,7 @@ pub struct RegistryCandidate {
     pub(crate) proposed_sequence: ChainSequence,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) pre_transition_sequence: ChainSequence,
+    fallback_barrier: Option<FallbackSuccessorBarrier>,
 }
 
 impl RegistryCandidate {
@@ -268,6 +447,7 @@ pub fn verify_registry_candidate(
         original_pin: pinned,
         proposed_sequence,
         pre_transition_sequence,
+        fallback_barrier: None,
     })
 }
 
@@ -301,7 +481,266 @@ fn current_candidate(
         original_pin: Some(pin),
         proposed_sequence,
         pre_transition_sequence: proposed_sequence,
+        fallback_barrier: None,
     })
+}
+
+pub fn select_registry_head(
+    candidate: RegistryCandidate,
+    mut local_time: LocalTimeBlock<'_>,
+    release: Option<VerifiedClockRelease>,
+) -> Result<RegistrySelectionOutcome, RegistryError> {
+    require_candidate_local_time(&candidate, &local_time)?;
+    let replay_key = require_release_pairing(&candidate, &local_time, release)?;
+    let raw_now = local_time.evaluation.raw_now();
+    let warnings = *local_time.evaluation.warnings();
+    let is_current = candidate_is_current(&candidate);
+
+    if !is_current
+        && (raw_now < candidate.head_event.issued_at || raw_now < candidate.head_event.not_before)
+    {
+        let previous = candidate
+            .preexisting_authority
+            .as_ref()
+            .ok_or(RegistryError::PendingFuture)?;
+        if candidate.proposed_sequence < previous.inner.effective_from_sequence
+            || candidate.proposed_sequence > previous.inner.valid_through_sequence
+        {
+            return Err(RegistryError::PendingFuture);
+        }
+        let preexisting_state = Arc::clone(&previous.inner);
+        return Ok(RegistrySelectionOutcome::PendingFuture(
+            PendingFutureSuccessor {
+                inner: Box::new(PendingSuccessorProof {
+                    candidate_state: candidate.candidate_state,
+                    preexisting_state,
+                    state_key: local_time.state_key,
+                    expected_revision: local_time.expected_revision,
+                    trusted_time: local_time.trusted_time,
+                    pinned_head: local_time.pinned_head,
+                    observed_os_wall_clock: local_time.observed_os_wall_clock,
+                    candidate_registry_version: local_time.candidate_registry_version,
+                    candidate_registry_head_hash: local_time.candidate_registry_head_hash,
+                    guard_policy_object_hash: local_time.guard_policy_object_hash,
+                    proposed_sequence: local_time.proposed_sequence,
+                    pre_transition_sequence: local_time.pre_transition_sequence,
+                    raw_now,
+                    warnings,
+                    future_skew: local_time.evaluation.future_skew(),
+                    successor_event: candidate.head_event,
+                }),
+            },
+        ));
+    }
+
+    let stale = raw_now > candidate.head_event.not_after;
+    let lease_miss = candidate.proposed_sequence < candidate.head_event.effective_from_sequence
+        || candidate.proposed_sequence > candidate.head_event.valid_through_sequence;
+
+    if is_current {
+        if let Some(barrier) = candidate.fallback_barrier.as_ref() {
+            if barrier.registry_version <= candidate.registry_version
+                || barrier.registry_head_hash == candidate.registry_head_hash
+                || barrier.event.registry_version != barrier.registry_version
+            {
+                return Err(TrustError::StateConflict.into());
+            }
+            if raw_now >= barrier.event.issued_at && raw_now >= barrier.event.not_before {
+                return Err(RegistryError::SuccessorReady);
+            }
+        }
+        if stale {
+            return Err(RegistryError::Stale);
+        }
+        if lease_miss {
+            return Err(RegistryError::SequenceLease);
+        }
+        let current_head = candidate.original_pin.ok_or(TrustError::StateConflict)?;
+        let commit = RegistrySelectionCommit::compare_and_affirm(
+            local_time.trusted_time.clone(),
+            current_head,
+            replay_key,
+        );
+        let committed_revision = commit_selection(&mut local_time, &commit)?;
+        return Ok(RegistrySelectionOutcome::Selected(selected_head(
+            candidate,
+            raw_now,
+            warnings,
+            committed_revision,
+        )));
+    }
+
+    let next_head = RegistryHeadPin::new(candidate.registry_version, candidate.registry_head_hash);
+    let next_trusted_time = advance_registry_floor(
+        &local_time.trusted_time,
+        candidate.head_event.issued_at,
+        candidate.head_event.not_before,
+    );
+    let commit = RegistrySelectionCommit::advance_head(next_trusted_time, next_head, replay_key);
+    let committed_revision = commit_selection(&mut local_time, &commit)?;
+    if stale || lease_miss {
+        return Ok(RegistrySelectionOutcome::Advanced(AdvancedRegistryHead {
+            inner: CommittedCatchUpProof {
+                registry_version: candidate.registry_version,
+                registry_head_hash: candidate.registry_head_hash,
+                committed_revision,
+            },
+        }));
+    }
+
+    Ok(RegistrySelectionOutcome::Selected(selected_head(
+        candidate,
+        raw_now,
+        warnings,
+        committed_revision,
+    )))
+}
+
+pub fn verify_current_head_fallback(
+    trust: &VerifiedTrust,
+    pending: PendingFutureSuccessor,
+) -> Result<RegistryCandidate, RegistryError> {
+    let proof = *pending.inner;
+    if trust.state_key() != proof.state_key
+        || trust.state_revision() != proof.expected_revision
+        || trust.trusted_time() != &proof.trusted_time
+        || trust.pinned_head().copied() != proof.pinned_head
+    {
+        return Err(TrustError::StateConflict.into());
+    }
+
+    let direct = verify_registry_candidate(trust, proof.proposed_sequence)?;
+    if direct.registry_version != proof.candidate_registry_version {
+        return Err(TrustError::StateConflict.into());
+    }
+    if direct.registry_head_hash != proof.candidate_registry_head_hash {
+        return Err(RegistryError::Fork);
+    }
+    if direct.head_event != proof.successor_event
+        || direct.pre_transition_sequence != proof.pre_transition_sequence
+        || direct.guard_policy.object_hash != proof.guard_policy_object_hash
+    {
+        return Err(RegistryError::Fork);
+    }
+    let expected_candidate_hash = object_hash_as_hash32(proof.candidate_registry_head_hash)?;
+    if proof.candidate_state.registry_version != proof.candidate_registry_version
+        || proof.candidate_state.registry_head_hash != expected_candidate_hash
+    {
+        return Err(TrustError::StateConflict.into());
+    }
+    let pinned_head = proof.pinned_head.ok_or(TrustError::StateConflict)?;
+    let expected_previous_hash = object_hash_as_hash32(pinned_head.registry_head_hash())?;
+    if proof.preexisting_state.registry_version != pinned_head.registry_version()
+        || proof.preexisting_state.registry_head_hash != expected_previous_hash
+        || proof.successor_event.previous_registry_hash != Some(expected_previous_hash)
+    {
+        return Err(TrustError::StateConflict.into());
+    }
+    let previous = direct
+        .preexisting_authority
+        .as_ref()
+        .ok_or(TrustError::StateConflict)?;
+    let mut current = current_candidate(
+        trust,
+        (*previous.inner).clone(),
+        pinned_head,
+        proof.proposed_sequence,
+    )?;
+    current.fallback_barrier = Some(FallbackSuccessorBarrier {
+        registry_version: proof.candidate_registry_version,
+        registry_head_hash: proof.candidate_registry_head_hash,
+        event: proof.successor_event,
+    });
+    Ok(current)
+}
+
+fn require_candidate_local_time(
+    candidate: &RegistryCandidate,
+    local_time: &LocalTimeBlock<'_>,
+) -> Result<(), RegistryError> {
+    if !Arc::ptr_eq(&candidate.candidate_state, &local_time.candidate_state)
+        || candidate.state_key != local_time.state_key
+        || local_time.expected_revision < candidate.state_revision
+        || candidate.original_pin != local_time.pinned_head
+        || candidate.registry_version != local_time.candidate_registry_version
+        || candidate.registry_head_hash != local_time.candidate_registry_head_hash
+        || candidate.guard_policy.object_hash != local_time.guard_policy_object_hash
+        || candidate.proposed_sequence != local_time.proposed_sequence
+        || candidate.pre_transition_sequence != local_time.pre_transition_sequence
+    {
+        return Err(TrustError::StateConflict.into());
+    }
+    Ok(())
+}
+
+fn require_release_pairing(
+    candidate: &RegistryCandidate,
+    local_time: &LocalTimeBlock<'_>,
+    release: Option<VerifiedClockRelease>,
+) -> Result<Option<ClockReleaseReplayKey>, RegistryError> {
+    match (local_time.evaluation.future_skew(), release) {
+        (FutureSkew::Blocked, Some(release)) => {
+            into_selection_replay_key(release, candidate, local_time)
+                .map(Some)
+                .map_err(|()| RegistryError::FutureSkew)
+        }
+        (FutureSkew::Blocked, None)
+        | (FutureSkew::WithinLimit, Some(_))
+        | (FutureSkew::UnprovableWithoutIndependentReference, Some(_)) => {
+            Err(RegistryError::FutureSkew)
+        }
+        (FutureSkew::WithinLimit, None)
+        | (FutureSkew::UnprovableWithoutIndependentReference, None) => Ok(None),
+    }
+}
+
+fn candidate_is_current(candidate: &RegistryCandidate) -> bool {
+    candidate.original_pin.is_some_and(|pin| {
+        pin.registry_version() == candidate.registry_version
+            && pin.registry_head_hash() == candidate.registry_head_hash
+            && candidate
+                .preexisting_authority
+                .as_ref()
+                .is_some_and(|authority| Arc::ptr_eq(&authority.inner, &candidate.candidate_state))
+    })
+}
+
+fn commit_selection(
+    local_time: &mut LocalTimeBlock<'_>,
+    commit: &RegistrySelectionCommit,
+) -> Result<u64, RegistryError> {
+    let committed = local_time
+        .store
+        .commit_registry_selection(local_time.state_key, local_time.expected_revision, commit)
+        .map_err(map_store_error)?;
+    if committed.revision() <= local_time.expected_revision
+        || committed.trusted_time() != commit.next_trusted_time()
+        || committed.pinned_head() != Some(commit.next_head())
+    {
+        return Err(TrustError::StateConflict.into());
+    }
+    Ok(committed.revision())
+}
+
+fn selected_head(
+    candidate: RegistryCandidate,
+    raw_now: UnixMillis,
+    warnings: TimeWarnings,
+    committed_revision: u64,
+) -> SelectedRegistryHead {
+    SelectedRegistryHead {
+        inner: Arc::new(SelectedHeadInner {
+            candidate_state: candidate.candidate_state,
+            registry_version: candidate.registry_version,
+            registry_head_hash: candidate.registry_head_hash,
+            policy: candidate.target_policy,
+            effective_from_sequence: candidate.head_event.effective_from_sequence,
+            valid_through_sequence: candidate.head_event.valid_through_sequence,
+            preexisting_effective_now: PreexistingEffectiveNow { value: raw_now },
+            warnings,
+            committed_revision,
+        }),
+    }
 }
 
 fn replay_to_pin(
@@ -1175,6 +1614,10 @@ fn object_hash_from_certificate(
 ) -> Result<ObjectHash, RegistryError> {
     ObjectHash::try_from(&certificate_hash.as_bytes()[..]).map_err(|_| TrustError::Source.into())
 }
+
+#[cfg(test)]
+#[path = "registry/tests.rs"]
+mod selection_tests;
 
 #[cfg(test)]
 mod tests {

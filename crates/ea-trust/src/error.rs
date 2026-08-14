@@ -109,6 +109,10 @@ impl From<TrustError> for ClockReleaseError {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum RegistryError {
     Trust(TrustError),
+    PendingFuture,
+    SuccessorReady,
+    Stale,
+    FutureSkew,
     Gap,
     Fork,
     Rollback,
@@ -125,6 +129,10 @@ impl RegistryError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Trust(error) => error.code(),
+            Self::PendingFuture => "EA-TRUST-PENDING-FUTURE",
+            Self::SuccessorReady => "EA-TRUST-SUCCESSOR-READY",
+            Self::Stale => "EA-TRUST-STALE",
+            Self::FutureSkew => "EA-TRUST-FUTURE-SKEW",
             Self::Gap => "EA-TRUST-REGISTRY-GAP",
             Self::Fork => "EA-TRUST-REGISTRY-FORK",
             Self::Rollback => "EA-TRUST-REGISTRY-ROLLBACK",

@@ -616,6 +616,19 @@ impl RegistryLineBuilder {
         self.objects.retain(|bytes| object_hash(bytes) != target);
     }
 
+    pub fn merge_catalog_from(&mut self, other: &Self) {
+        for bytes in &other.objects {
+            let hash = object_hash(bytes);
+            if !self
+                .objects
+                .iter()
+                .any(|existing| object_hash(existing) == hash)
+            {
+                self.objects.push(bytes.clone());
+            }
+        }
+    }
+
     pub fn verified(&self, pin: Pin) -> VerifiedTrust {
         self.verified_with_floor(pin, UnixMillis::new(1_700_000_000_000))
     }
@@ -634,6 +647,16 @@ impl RegistryLineBuilder {
         trusted_time: TrustedTimeState,
         key: TrustStateKey,
     ) -> VerifiedTrust {
+        self.verified_with_record(pin, 17, trusted_time, key)
+    }
+
+    pub fn verified_with_record(
+        &self,
+        pin: Pin,
+        revision: u64,
+        trusted_time: TrustedTimeState,
+        key: TrustStateKey,
+    ) -> VerifiedTrust {
         let anchor = decode_trust_anchor(&self.anchor_bytes).unwrap();
         let source = CatalogSource::new(self.objects.iter().cloned());
         let pin = match pin {
@@ -646,7 +669,7 @@ impl RegistryLineBuilder {
         };
         let mut store = SnapshotStore {
             key,
-            record: Some(PersistedTrustRecord::new(17, trusted_time, pin)),
+            record: Some(PersistedTrustRecord::new(revision, trusted_time, pin)),
         };
         let snapshot = load_trust_state(&mut store, key).unwrap();
         verify_trust(&anchor, &source, snapshot).unwrap()
