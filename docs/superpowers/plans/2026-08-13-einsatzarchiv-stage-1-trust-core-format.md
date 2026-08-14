@@ -357,6 +357,10 @@ organization-admin-authorization-v1 = [
 ]
 
 ; Every event changes exactly one action class.
+; target-kind 0 = deviceCertificate with CertificateKind Writer, Reader, KeyApprover, RecoveryRecipient, or HistoricalGrantAuthority
+; target-kind 1 = operatorBinding
+; target-kind 2 = deviceCertificate with CertificateKind ServerReceipt or DeletionAttest
+; OrganizationAdmin is invalid under Change 1
 registry-change-v1 =
   [0, certificate-object-hash: bstr .size 32] /                 ; deviceApprove
   [1, target-kind: 0..2, target-object-hash: bstr .size 32] / ; device/operator/component revoke
@@ -497,7 +501,9 @@ Policy/hash/effective-sequence correlations and
 `root.effectiveFromRegistryVersion = event.registryVersion` are exact. Active
 signers are resolved against the unchanged previous-head state at
 `preTransitionSequence`: the event sequence inside the previous lease, or the
-previous lease end for its checked immediate successor. Both direct-target and
+previous lease end for its checked immediate successor.
+Head 1 is the explicit lease-free exception with
+`preTransitionSequence = head1.effectiveFromSequence`. Both direct-target and
 event authorizations are historically valid at the signed activation
 `event.issuedAt`, inclusive at both bounds; current wall time is irrelevant.
 

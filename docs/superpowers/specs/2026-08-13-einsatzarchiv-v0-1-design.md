@@ -1035,6 +1035,21 @@ Jede Signatur ist ein `COSE_Sign1` über `trustDigest`; Signerauflösung folgt A
 | 5 | neues `deviceCertificate` mit Kind `organizationAdmin` nur für Effect 0 | `registryEvent` mit Change 5; Effect 0 aktiviert, Effect 1 widerruft ein bereits aktives Admin-Zertifikat |
 | 6 | `rootCertificate` | `registryEvent` mit Change 6 und demselben Root-Zertifikat-Hash |
 
+Die numerische Change-1-Zielklasse und ihre v1-Zertifikatspartition sind
+normativ geschlossen:
+
+```text
+target-kind 0 = deviceCertificate with CertificateKind Writer, Reader, KeyApprover, RecoveryRecipient, or HistoricalGrantAuthority
+target-kind 1 = operatorBinding
+target-kind 2 = deviceCertificate with CertificateKind ServerReceipt or DeletionAttest
+OrganizationAdmin is invalid under Change 1
+```
+
+Der referenzierte Hash muss am unveränderten Previous Head genau in der durch
+den Tag bezeichneten Klasse aktiv sein. Ein vorbereitetes, aber noch nicht
+aktiviertes Objekt, ein gekreuzter Tag oder ein unbekannter Hash ist ungültig.
+`rootCertificate` bleibt Change 6 vorbehalten.
+
 Jede andere Kombination oder zusätzliche Wirkung ist ungültig. Direktes Objekt
 und Aktivierungsereignis sind getrennte Ziele mit getrennten einmaligen
 Autorisierungs-IDs und Nonces, binden aber denselben Previous Head. Change 5
@@ -1084,6 +1099,9 @@ preTransitionSequence = transitionSequence
 preTransitionSequence = previous.validThroughSequence
   when transitionSequence == checked_add(previous.validThroughSequence, 1)
 ```
+
+Für Head 1, dessen externe Registry-0-Basis keine signierte Lease besitzt, gilt
+stattdessen exakt `preTransitionSequence = head1.effectiveFromSequence`.
 
 Jeder andere Sprung oder Überlauf ist ungültig. Direkte Zielautorisierung und
 Aktivierungsautorisierung werden beide am signierten `event.issuedAt` inklusiv

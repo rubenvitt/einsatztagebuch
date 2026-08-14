@@ -399,6 +399,20 @@ ein am Previous Head aktives; Change 1 darf kein Admin-Zertifikat widerrufen.
 Root-Rotation verlangt
 `root.effectiveFromRegistryVersion = event.registryVersion`.
 
+Die drei Change-1-Werte sind keine frei interpretierbaren Anwendungstags,
+sondern diese geschlossene Wire-Semantik:
+
+```text
+target-kind 0 = deviceCertificate with CertificateKind Writer, Reader, KeyApprover, RecoveryRecipient, or HistoricalGrantAuthority
+target-kind 1 = operatorBinding
+target-kind 2 = deviceCertificate with CertificateKind ServerReceipt or DeletionAttest
+OrganizationAdmin is invalid under Change 1
+```
+
+Tag und am Previous Head aktive Objektklasse müssen zusammenpassen; unbekannte,
+nur vorbereitete oder gekreuzte Ziele sind ungültig. `rootCertificate` wird
+ausschließlich durch Change 6 rotiert.
+
 Die initiale Policy ist geschlossen gebunden:
 
 ```text
@@ -414,6 +428,8 @@ Bindings werden am unveränderten `preTransitionSequence` geprüft. Dieser ist
 `event.effectiveFromSequence`, wenn er innerhalb der Previous-Head-Lease liegt,
 sonst exakt `previousHead.validThroughSequence`, wenn der Event-Sequenzwert der
 geprüfte direkte `+1`-Nachfolger der Lease ist; andere Sprünge sind ungültig.
+Für Head 1 ist die leasefreie Registry-0-Basis gesondert geschlossen durch
+`preTransitionSequence = head1.effectiveFromSequence`.
 Change 2 bindet neuen Policy-Hash, geprüfte Policy-Version, Vorgänger-Policy und
 identische Effective-Sequenz; andere Changes behalten die Previous-Head-Policy.
 

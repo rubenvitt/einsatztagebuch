@@ -1185,6 +1185,78 @@ fn task8_runtime_seams_are_authoritative_and_not_duplicated() {
 }
 
 #[test]
+fn task8_registry_candidate_contract_closes_target_kinds_errors_and_phase_boundary() {
+    let main =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let wire = include_str!(
+        "../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md"
+    );
+    let closure = include_str!(
+        "../../../docs/superpowers/specs/2026-08-14-einsatzarchiv-task-8-trust-time-closure-design.md"
+    );
+    let stage_one = stage_one_plan();
+    let trust_cddl = include_str!("../../../schemas/archive/v1/trust.cddl");
+    let target_kind_markers = [
+        "target-kind 0 = deviceCertificate with CertificateKind Writer, Reader, KeyApprover, RecoveryRecipient, or HistoricalGrantAuthority",
+        "target-kind 1 = operatorBinding",
+        "target-kind 2 = deviceCertificate with CertificateKind ServerReceipt or DeletionAttest",
+        "OrganizationAdmin is invalid under Change 1",
+    ];
+
+    for (name, source) in [
+        ("main design", main),
+        ("wire-format addendum", wire),
+        ("Task-8 closure", closure),
+        ("Stage-1 plan", stage_one),
+        ("Trust CDDL", trust_cddl),
+    ] {
+        assert_contains_all(name, source, &target_kind_markers);
+    }
+
+    for (name, source) in [
+        ("main design", main),
+        ("wire-format addendum", wire),
+        ("Task-8 closure", closure),
+        ("Stage-1 plan", stage_one),
+    ] {
+        assert_contains_all(
+            name,
+            source,
+            &["preTransitionSequence = head1.effectiveFromSequence"],
+        );
+    }
+
+    let runtime = include_str!(
+        "../../../docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"
+    );
+    let task_seven = runtime
+        .split_once(
+            "### Task 7: Build the complete historical Registry candidate without candidate time",
+        )
+        .expect("runtime plan must contain Task 7")
+        .1
+        .split_once("### Task 8: Add candidate-independent verified Receipt/Checkpoint time")
+        .expect("runtime plan must contain Task 8 after Task 7")
+        .0;
+    assert_contains_all(
+        "Task-7 runtime slice",
+        task_seven,
+        &[
+            "Modify: `crates/ea-trust/src/error.rs`",
+            "RegistryError preserves every lower-layer TrustError code losslessly",
+            "Advanced, PendingFuture, and Selected outcomes remain Task 11-only",
+            "intermediate successor is returned only as a non-operation RegistryCandidate",
+            "preTransitionSequence = head1.effectiveFromSequence",
+            "topology-only lookahead may read only organization, registryVersion, previousRegistryHash, and objectHash",
+        ],
+    );
+    assert!(
+        !task_seven.contains("expired intermediate H2 -> Advanced only -> reload -> fresh lease-covering H3 -> Selected"),
+        "Task 7 must not require Task-11 selection outcome types"
+    );
+}
+
+#[test]
 fn task8_trust_source_limits_are_normative_and_bounded_before_retention() {
     let closure = include_str!(
         "../../../docs/superpowers/specs/2026-08-14-einsatzarchiv-task-8-trust-time-closure-design.md"

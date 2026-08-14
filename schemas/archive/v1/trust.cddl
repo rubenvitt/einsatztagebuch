@@ -94,6 +94,10 @@ organization-admin-authorization-v1 = [
   issued-at: int, expires-at: int, nonce: bstr .size 32, []
 ]
 
+; target-kind 0 = deviceCertificate with CertificateKind Writer, Reader, KeyApprover, RecoveryRecipient, or HistoricalGrantAuthority
+; target-kind 1 = operatorBinding
+; target-kind 2 = deviceCertificate with CertificateKind ServerReceipt or DeletionAttest
+; OrganizationAdmin is invalid under Change 1
 registry-change-v1 =
   [0, certificate-object-hash: bstr .size 32] /
   [1, target-kind: 0..2, target-object-hash: bstr .size 32] /

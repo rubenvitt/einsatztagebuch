@@ -147,6 +147,20 @@ Change 5 ist zusätzlich geschlossen:
 - Change 1 darf niemals ein Admin-Zertifikat widerrufen; der gesamte
   Admin-Zertifikatslebenszyklus verwendet Change 5.
 
+Change 1 besitzt folgende geschlossene numerische Zielklassifikation:
+
+```text
+target-kind 0 = deviceCertificate with CertificateKind Writer, Reader, KeyApprover, RecoveryRecipient, or HistoricalGrantAuthority
+target-kind 1 = operatorBinding
+target-kind 2 = deviceCertificate with CertificateKind ServerReceipt or DeletionAttest
+OrganizationAdmin is invalid under Change 1
+```
+
+Das referenzierte Objekt muss im unveränderten Previous-Head-State aktiv sein
+und exakt der bezeichneten Klasse entsprechen. Ein nur vorbereitetes Objekt,
+ein unbekannter Hash oder ein Cross-Kind-Verweis ist ungültig. Root-Zertifikate
+bleiben ausschließlich Change 6 vorbehalten.
+
 Ausstellung und Widerruf eines Admin-Zertifikats werden von einer anderen, im
 Previous-Head aktiven Admin-Person autorisiert. Der
 `authoritySubjectId` des Signer-Zertifikats beziehungsweise dessen exakt
@@ -203,6 +217,10 @@ preTransitionSequence =
   ungültig,
     sonst
 ```
+
+Für Head 1 gilt als separate Bootstrap-Regel
+`preTransitionSequence = head1.effectiveFromSequence`, weil die externe
+Registry-0-Basis selbst keine signierte Sequenz-Lease besitzt.
 
 Damit darf der Previous-Head sowohl einen innerhalb seiner Lease wirksamen
 Nachfolger als auch den lückenlosen unmittelbaren Lease-Nachfolger autorisieren.

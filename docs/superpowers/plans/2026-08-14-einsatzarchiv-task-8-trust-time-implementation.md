@@ -949,9 +949,11 @@ rtk git commit -m "feat(trust): verify historical admin authorization"
 **Files:**
 - Create: `crates/ea-trust/src/policy.rs`
 - Create: `crates/ea-trust/src/registry.rs`
+- Modify: `crates/ea-trust/src/error.rs`
 - Modify: `crates/ea-trust/src/operator_binding.rs`
 - Modify: `crates/ea-trust/src/resolver.rs`
 - Modify: `crates/ea-trust/src/lib.rs`
+- Create: `crates/ea-trust/tests/support/mod.rs`
 - Create: `crates/ea-trust/tests/registry_transitions.rs`
 - Create: `crates/ea-trust/tests/registry_attacks.rs`
 
@@ -969,12 +971,18 @@ transition inside prior lease
 transition exactly previous.validThrough+1
 larger sequence gap
 transition before previous.effectiveFrom
-sequence overflow
+previous.validThrough == u64::MAX does not trigger an overflowing eager +1
 current Lease overlaps direct successor and successor.effectiveFrom <= proposed sequence -> singular successor candidate
 direct successor.effectiveFrom > proposed sequence -> current-Head operation candidate if covered
 intermediate successor.validThrough < proposed sequence -> catch-up candidate that cannot mint operation authority
-expired intermediate H2 -> Advanced only -> reload -> fresh lease-covering H3 -> Selected
+intermediate successor is returned only as a non-operation RegistryCandidate
 ```
+
+Advanced, PendingFuture, and Selected outcomes remain Task 11-only. The
+expired-intermediate `Advanced -> reload -> Selected` evidence is therefore
+tested in Task 11, after those consuming selection types and the atomic commit
+path exist. Task 7 proves only the singular structurally verified catch-up
+candidate and that it exposes no operation-authorizing candidate-state proof.
 
 Assert Immediate Successor signer state is evaluated at `previous.validThroughSequence`, not the future transition sequence.
 
@@ -986,6 +994,18 @@ or time authority until H2 has been selected and persisted.
 - [ ] **Step 2: Add the complete action/activation RED matrix**
 
 Test every action 0–6 direct target and exact Registry change. Include actions 4/6, Change 5 Effect 0/1, Change 1 non-Admin-only, direct target without activation, activation under another previous head, wrong target hash, reused authorization, and more than one action class per event.
+
+Pin the Change-1 mapping and cross every tag with every wrong object class:
+
+```text
+target-kind 0 = deviceCertificate with CertificateKind Writer, Reader, KeyApprover, RecoveryRecipient, or HistoricalGrantAuthority
+target-kind 1 = operatorBinding
+target-kind 2 = deviceCertificate with CertificateKind ServerReceipt or DeletionAttest
+OrganizationAdmin is invalid under Change 1
+```
+
+The referenced object must be active in the unchanged Previous-Head state;
+unknown and merely prepared catalog objects are not revocation targets.
 
 - [ ] **Step 3: Add Policy/Root/sequence REDs**
 
@@ -1010,6 +1030,8 @@ pub fn verify_registry_candidate(
     proposed_sequence: ChainSequence,
 ) -> Result<RegistryCandidate, RegistryError>;
 ```
+
+`RegistryError` is a distinct public, code-only error type. RegistryError preserves every lower-layer TrustError code losslessly and adds stable Task-7 classes for gap, fork, rollback, version overflow, wrong predecessor, activation, Policy, and sequence-Lease failures. `Display` and `Debug` emit only `code()`; no error contains object bytes, identifiers, keys, nonces, or caller text. Task-11-only PendingFuture/Stale/skew classes are not added here.
 
 Return one singular candidate, never a set. First inspect only the exact direct
 Registry successor: Bootstrap Head 1, otherwise version `pinned + 1` with the
@@ -1040,11 +1062,21 @@ fully resolved exact `(version, head_hash, target_policy, guard_policy)` in the
 opaque candidate: previous policy for a transition, initial candidate policy for
 Bootstrap, current policy for a current-Head operation.
 
-Do not parse/apply a later successor until this candidate has itself been
-selected and persisted. Future objects remain in the catalog only; they provide
-neither Resolver authority nor signed time. This makes the Registry line
-temporally prefix-closed and prevents a pending Root/Policy/certificate change
-from authorizing a later Head.
+For Head 1, derive `preTransitionSequence = head1.effectiveFromSequence`; the
+external Registry-0 basis has no signed Lease. For later Heads use the closed
+within-Lease or exact `previous.validThroughSequence + 1` rule.
+
+`TrustCatalog` has already format-decoded every admitted ETB before Registry
+verification. To distinguish a missing direct successor from a later-version
+gap or a same-version fork, topology-only lookahead may read only organization, registryVersion, previousRegistryHash, and objectHash. It must not verify a
+later signature or Authorization, resolve a later direct target, Policy, or
+certificate, apply later state, or inspect later time semantics. Once an exact
+direct successor exists, defects in any later topology or semantics cannot
+alter that singular candidate. Do not semantically apply a later successor
+until this candidate has itself been selected and persisted. Future objects
+remain in the catalog only; they provide neither Resolver authority nor signed
+time. This makes the Registry line temporally prefix-closed and prevents a
+pending Root/Policy/certificate change from authorizing a later Head.
 
 If a direct successor is later proven solely `PendingFuture`, Task 11 may emit
 an opaque `PendingFutureSuccessor` bound to that exact successor, previous Head,
@@ -1069,8 +1101,9 @@ Do not compare `issuedAt`/`notBefore` to wall clock here and do not update any t
 ```bash
 rtk cargo test --locked -p ea-trust --test registry_transitions --test registry_attacks
 rtk git add -- crates/ea-trust/src/policy.rs crates/ea-trust/src/registry.rs \
-  crates/ea-trust/src/operator_binding.rs crates/ea-trust/src/resolver.rs \
-  crates/ea-trust/src/lib.rs crates/ea-trust/tests/registry_transitions.rs \
+  crates/ea-trust/src/error.rs crates/ea-trust/src/operator_binding.rs \
+  crates/ea-trust/src/resolver.rs crates/ea-trust/src/lib.rs \
+  crates/ea-trust/tests/support/mod.rs crates/ea-trust/tests/registry_transitions.rs \
   crates/ea-trust/tests/registry_attacks.rs
 rtk git diff --cached --check
 rtk git commit -m "feat(trust): verify registry transitions"
