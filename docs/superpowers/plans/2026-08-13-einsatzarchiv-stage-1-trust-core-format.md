@@ -27,7 +27,7 @@
 - Preserve exact status vocabularies defined in §17.4 and never claim general court admissibility, TR-ESOR certification, or complete metadata blindness.
 - v0.1 is complete only after Stage 7 and every acceptance criterion and unnumbered gate passes.
 
-Suite v1 is fixed to `formatVersion = 1`, `objectVersion = 1`, `cryptoSuiteId = "EINSATZARCHIV-SUITE-1"`, grant suite `EINSATZARCHIV-HPKE-1`, magic `h'45413100'`, and object type tags `.eip=1`, `.eag=2`, `.esr=3`, `.ecp=4`, `.etb=5`, `.eds=6`. Parser limits are `.eip` 2 MiB, `.eag`/`.esr` 64 KiB, `.eds` 256 KiB, `.ecp`/`.etb` 4 MiB, nesting 16, 10,000 items per container, and 1 MiB per text/byte string.
+Suite v1 is fixed to `formatVersion = 1`, `objectVersion = 1`, `cryptoSuiteId = "EINSATZARCHIV-SUITE-1"`, grant suite `EINSATZARCHIV-HPKE-1`, magic `h'45413100'`, and object type tags `.eip=1`, `.eag=2`, `.esr=3`, `.ecp=4`, `.etb=5`, `.eds=6`. Raw family limits are `.eip=2_097_152`, `.eag=65_536`, `.esr=65_536`, `.ecp=4_194_304`, `.etb=4_194_304`, and `.eds=262_144` bytes. Value and work limits are exactly `MAX_PLAINTEXT_BYTES_V1 = 1_048_576`, `MAX_CBOR_TEXT_OR_BYTES_V1 = 1_048_592`, `MAX_CIPHERTEXT_BYTES_V1 = 1_048_592`, nesting 16, `MAX_CONTAINER_ITEMS_V1 = 10_000` elements per container, and `MAX_TOTAL_ITEMS_V1 = 10_000` tokens per top-level item.
 
 ---
 
@@ -1003,7 +1003,49 @@ fn top_level_and_manifest_tags_must_match() {
     assert_eq!(decode_exact_object(&bytes).unwrap_err().code(),
                "EA-FORMAT-TAG-MISMATCH");
 }
+
+#[test]
+fn manifest_ciphertext_length_matches_the_exact_ciphertext_bstr() {
+    let encoded = fixtures::encode_eip_from_ciphertext(vec![0; 17]);
+    assert_eq!(fixtures::manifest_ciphertext_length(&encoded), 17);
+    assert_eq!(fixtures::exact_ciphertext_bstr(&encoded).len(), 17);
+
+    for mismatch in [
+        fixtures::eip_with_declared_and_actual_ciphertext_lengths(16, 17),
+        fixtures::eip_with_declared_and_actual_ciphertext_lengths(18, 17),
+    ] {
+        assert_eq!(decode_exact_object(&mismatch).unwrap_err().code(),
+                   "EA-FORMAT-CIPHERTEXT-LENGTH");
+    }
+}
 ```
+
+The first mismatch is declared shorter than actual; the second is declared
+longer than actual, and both lengths remain within 16..1_048_592. These are
+semantic negative tests, not CDDL range tests.
+
+The prefix/limit negative suite MUST cover this exact table, where each tuple is
+`(family, exact accepted preflight boundary, first rejected raw length)`:
+
+```text
+(.eip, 2_097_152, 2_097_153)
+(.eag, 65_536, 65_537)
+(.esr, 65_536, 65_537)
+(.ecp, 4_194_304, 4_194_305)
+(.etb, 4_194_304, 4_194_305)
+(.eds, 262_144, 262_145)
+```
+
+For every row, encode and assert the exact nine prefix bytes listed in Step 3.
+At the exact boundary, a fixture with that exact prefix and a deliberately
+malformed body MUST pass the applicable raw-size preflight and reach the expected
+full-CBOR/body error. At the first rejected length, the same malformed body MUST
+fail at the applicable earlier raw-size stage. For families below the global cap,
+the malformed oversized body MUST return the family raw-limit error before any
+full-CBOR/body error and before any input-sized allocation. Because `.ecp` and
+`.etb` equal the global cap, their `4_194_305` fixtures MUST return the global
+raw-limit error in Stage 1 before prefix inspection. Use an allocation probe in
+these negatives and assert zero allocations proportional to the supplied input.
 
 - [ ] **Step 2: Run focused tests and confirm format constructors are absent**
 
@@ -1039,6 +1081,12 @@ The public v1 seam is non-relaxable and uses this exact preflight contract:
 MAX_ARCHIVE_OBJECT_BYTES_V1 = 4_194_304
 FIXED_PREFIX_V1 = 85 44 45 41 31 00 TT 01 80
 TT = 01..06
+EIP_PREFIX_V1 = 85 44 45 41 31 00 01 01 80
+EAG_PREFIX_V1 = 85 44 45 41 31 00 02 01 80
+ESR_PREFIX_V1 = 85 44 45 41 31 00 03 01 80
+ECP_PREFIX_V1 = 85 44 45 41 31 00 04 01 80
+ETB_PREFIX_V1 = 85 44 45 41 31 00 05 01 80
+EDS_PREFIX_V1 = 85 44 45 41 31 00 06 01 80
 EIP_MAX_RAW_BYTES_V1 = 2_097_152
 EAG_MAX_RAW_BYTES_V1 = 65_536
 ESR_MAX_RAW_BYTES_V1 = 65_536
@@ -1047,13 +1095,34 @@ ETB_MAX_RAW_BYTES_V1 = 4_194_304
 EDS_MAX_RAW_BYTES_V1 = 262_144
 ```
 
-First require `bytes.len() <= MAX_ARCHIVE_OBJECT_BYTES_V1` before any CBOR
-inspection. Inspect only `FIXED_PREFIX_V1`, where `TT` selects the family, and
-immediately enforce that family raw-byte cap before full validation, body
-decoding, or input-sized allocation. Then run full deterministic-CBOR validation
-and enforce outer/body type correlation. File names are untrusted.
+`PREFLIGHT_STAGE_1_GLOBAL_RAW_CAP`: first require
+`bytes.len() <= MAX_ARCHIVE_OBJECT_BYTES_V1` before any CBOR inspection.
+
+`PREFLIGHT_STAGE_2_EXACT_PREFIX`: inspect only the first nine bytes and accept
+exactly one of `EIP_PREFIX_V1` through `EDS_PREFIX_V1`; no other encoding of magic,
+type, version, or the empty extension array selects a family. File names are
+untrusted.
+
+`PREFLIGHT_STAGE_3_FAMILY_RAW_CAP`: immediately enforce the selected family raw
+cap before full validation, body decoding, or input-sized allocation. An input at
+the cap proceeds; its first byte over the cap fails here. (`.ecp`/`.etb` first
+fail at Stage 1 because their cap equals the global cap.)
+
+`PREFLIGHT_STAGE_4_FULL_CBOR_AND_BODY`: only after the preceding stages succeed,
+run full deterministic-CBOR validation, decode the body, and enforce outer/body
+type correlation. A malformed oversized body cannot replace the earlier raw-limit
+error with a CBOR/body error.
+
 `ea-cbor::ParserLimits::V1` owns structural CBOR budgets; `ea-format` owns family
 raw-byte and semantic limits.
+
+`MANIFEST_CIPHERTEXT_LENGTH_RULE_V1 = ACTUAL_EXACT_CIPHERTEXT_BSTR_LENGTH` is a
+semantic v1 invariant: `manifestCore.ciphertext-length` MUST equal the actual
+exact ciphertext `bstr` length; encoders MUST derive
+`manifestCore.ciphertext-length` from the exact ciphertext `bstr` bytes; callers
+cannot supply an independent declared value. Decoders reject either mismatch
+direction before returning a parsed object. CDDL range checks do not establish
+this cross-field equality; they only constrain each value independently.
 
 For destruction authorizations, `sorted-targets` is nonempty and ascending by
 `(entryHash bytes, chainSequence numeric)`: unsigned bytewise `entryHash`, then

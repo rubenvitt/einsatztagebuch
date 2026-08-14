@@ -98,6 +98,132 @@ fn normalized_prose(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn stage_one_plan() -> &'static str {
+    include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    )
+}
+
+fn stage_one_task_six() -> &'static str {
+    let (_, after_heading) = stage_one_plan()
+        .split_once("### Task 6: Exact Archive Objects, Grants, Receipts, and Parser Limits")
+        .expect("Stage-1 plan must retain Task 6");
+    after_heading
+        .split_once("### Task 7: Versioned Payload Schemas and Compatibility Registry")
+        .expect("Stage-1 plan must retain Task 7 after Task 6")
+        .0
+}
+
+fn assert_markers_in_order(name: &str, source: &str, markers: &[&str]) {
+    let mut after = 0;
+    for marker in markers {
+        let relative = source[after..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("{name} is missing ordered marker `{marker}`"));
+        after += relative + marker.len();
+    }
+}
+
+fn encoded_archive_prefix(object_type: u8) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(5).unwrap();
+    encoder.bytes(b"EA1\0").unwrap();
+    encoder.u8(object_type).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.array(0).unwrap();
+    encoder.into_writer()
+}
+
+#[test]
+fn stage_one_overview_rejects_the_stale_one_mib_cbor_limit() {
+    let overview = stage_one_plan()
+        .split_once("### Task 1: Reproducible Monorepo and Dependency Decision Record")
+        .expect("Stage-1 plan must retain Task 1")
+        .0;
+
+    assert!(
+        !overview.contains("1 MiB per text/byte string"),
+        "Stage-1 overview retained the stale CBOR item limit"
+    );
+    assert_contains_all(
+        "Stage-1 overview",
+        overview,
+        &[
+            "MAX_PLAINTEXT_BYTES_V1 = 1_048_576",
+            "MAX_CBOR_TEXT_OR_BYTES_V1 = 1_048_592",
+            "MAX_CIPHERTEXT_BYTES_V1 = 1_048_592",
+            "MAX_CONTAINER_ITEMS_V1 = 10_000",
+            "MAX_TOTAL_ITEMS_V1 = 10_000",
+            "per top-level item",
+        ],
+    );
+}
+
+#[test]
+fn task_six_requires_semantic_ciphertext_length_equality() {
+    let task = &normalized_prose(stage_one_task_six());
+    assert_contains_all(
+        "Stage-1 Task 6",
+        task,
+        &[
+            "MANIFEST_CIPHERTEXT_LENGTH_RULE_V1 = ACTUAL_EXACT_CIPHERTEXT_BSTR_LENGTH",
+            "encoders MUST derive `manifestCore.ciphertext-length` from the exact ciphertext `bstr` bytes",
+            "declared shorter than actual",
+            "declared longer than actual",
+            "both lengths remain within 16..1_048_592",
+            "CDDL range checks do not establish this cross-field equality",
+        ],
+    );
+}
+
+#[test]
+fn task_six_pins_exact_prefixes_caps_and_preflight_order() {
+    let expected_prefixes = [
+        [0x85, 0x44, 0x45, 0x41, 0x31, 0x00, 0x01, 0x01, 0x80],
+        [0x85, 0x44, 0x45, 0x41, 0x31, 0x00, 0x02, 0x01, 0x80],
+        [0x85, 0x44, 0x45, 0x41, 0x31, 0x00, 0x03, 0x01, 0x80],
+        [0x85, 0x44, 0x45, 0x41, 0x31, 0x00, 0x04, 0x01, 0x80],
+        [0x85, 0x44, 0x45, 0x41, 0x31, 0x00, 0x05, 0x01, 0x80],
+        [0x85, 0x44, 0x45, 0x41, 0x31, 0x00, 0x06, 0x01, 0x80],
+    ];
+    for (object_type, expected) in (1_u8..=6).zip(expected_prefixes) {
+        assert_eq!(encoded_archive_prefix(object_type), expected);
+    }
+
+    let task = stage_one_task_six();
+    assert_markers_in_order(
+        "Stage-1 Task-6 preflight",
+        task,
+        &[
+            "PREFLIGHT_STAGE_1_GLOBAL_RAW_CAP",
+            "PREFLIGHT_STAGE_2_EXACT_PREFIX",
+            "PREFLIGHT_STAGE_3_FAMILY_RAW_CAP",
+            "PREFLIGHT_STAGE_4_FULL_CBOR_AND_BODY",
+        ],
+    );
+    let normalized_task = normalized_prose(task);
+    assert_contains_all(
+        "Stage-1 Task 6",
+        &normalized_task,
+        &[
+            "EIP_PREFIX_V1 = 85 44 45 41 31 00 01 01 80",
+            "EAG_PREFIX_V1 = 85 44 45 41 31 00 02 01 80",
+            "ESR_PREFIX_V1 = 85 44 45 41 31 00 03 01 80",
+            "ECP_PREFIX_V1 = 85 44 45 41 31 00 04 01 80",
+            "ETB_PREFIX_V1 = 85 44 45 41 31 00 05 01 80",
+            "EDS_PREFIX_V1 = 85 44 45 41 31 00 06 01 80",
+            "(.eip, 2_097_152, 2_097_153)",
+            "(.eag, 65_536, 65_537)",
+            "(.esr, 65_536, 65_537)",
+            "(.ecp, 4_194_304, 4_194_305)",
+            "(.etb, 4_194_304, 4_194_305)",
+            "(.eds, 262_144, 262_145)",
+            "malformed oversized body MUST return the family raw-limit error before any full-CBOR/body error",
+            "before any input-sized allocation",
+        ],
+    );
+}
+
 fn encode_manifest_core(encoder: &mut minicbor::Encoder<Vec<u8>>, ciphertext_length: u64) {
     encoder.array(16).unwrap();
     encoder.u8(1).unwrap();
