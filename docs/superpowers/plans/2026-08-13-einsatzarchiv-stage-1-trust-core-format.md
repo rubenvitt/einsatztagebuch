@@ -316,16 +316,20 @@ root-certificate-core-v1 = [
   effective-from-registry-version: uint, []
 ]
 
-device-certificate-core-v1 = device-certificate-core-for-v1<certificate-kind-v1>
-initial-admin-device-certificate-core-v1 = device-certificate-core-for-v1<2>
-device-certificate-core-for-v1<KIND> = [
+device-certificate-core-v1 =
+  device-certificate-core-for-v1<(0 / 1 / 4..7), null> /
+  device-certificate-core-for-v1<(2 / 3), bstr .size 16>
+initial-admin-device-certificate-core-v1 =
+  device-certificate-core-for-v1<2, bstr .size 16>
+device-certificate-core-for-v1<KIND, AUTHORITY_SUBJECT_ID> = [
   1, organization-id: bstr .size 16, device-id: bstr .size 16,
   certificate-kind: KIND,
   signing-public-cose-key: bstr / null, kem-public-cose-key: bstr / null,
   signing-key-thumbprint: (bstr .size 32) / null,
   kem-key-thumbprint: (bstr .size 32) / null,
   capabilities: [* tstr], key-protection-profile: key-protection-profile-v1,
-  effective-from-sequence: uint, revoked-from-sequence: uint / null, []
+  effective-from-sequence: uint, revoked-from-sequence: uint / null,
+  authority-subject-id: AUTHORITY_SUBJECT_ID, []
 ]
 
 operator-binding-core-v1 = operator-binding-core-for-v1<0..2>
@@ -454,6 +458,49 @@ authorized-trust-payload-v1<T> = [authorized-trust-core: T,
                                   organization-admin-authorization-object-hash: bstr .size 32]
 ```
 
+Compatibility is fail-closed: `device-certificate-core-v1 length 13 is invalid`
+and `clock-release-context-v1 length 6 is invalid`. There is no v2 or legacy
+decoder.
+
+The Stage-1 trust contract follows the approved Task-8 closure exactly. Every
+authorization binds the already selected previous head and every Registry event
+is its checked direct successor:
+
+```text
+authorization.registryVersion = previousHead.registryVersion
+authorization.registryHeadHash = previousHead.objectHash
+event.registryVersion = checked_add(authorization.registryVersion, 1)
+```
+
+Version 1 requires authorization version 0/zero32 and a null previous hash;
+later versions require the authorization head hash. Direct target and activation
+event use separate one-time authorization IDs/nonces but the same previous head.
+Head 1 uses only Change 2 for the initial Policy; anchor-pinned Admin pairs are
+external basis state, not another change. The closed action matrix includes
+Action 4 `operatorBinding` with Registry Change 4 and Action 6 `rootRotation`
+with Registry Change 6. Change 5 Effect 0 activates a newly authorized Admin
+certificate, Effect 1 revokes an active one, and Change 1 never revokes Admins.
+
+Bootstrap Policy correlation is exact:
+
+```text
+initialPolicy.policyVersion = 1
+initialPolicy.previousPolicyObjectHash = null
+initialPolicy.effectiveFromSequence = head1.effectiveFromSequence
+```
+
+Admin and Key-Approver certificates require `authoritySubjectId`; every other
+kind requires null. Admin IDs equal their correlated Binding
+`operatorSubjectId`, remain stable across externally verified same-person
+rotation, drive distinct-person checks, and prevent self-authorization.
+Policy/hash/effective-sequence correlations and
+`root.effectiveFromRegistryVersion = event.registryVersion` are exact. Active
+signers are resolved against the unchanged previous-head state at
+`preTransitionSequence`: the event sequence inside the previous lease, or the
+previous lease end for its checked immediate successor. Both direct-target and
+event authorizations are historically valid at the signed activation
+`event.issuedAt`, inclusive at both bounds; current wall time is irrelevant.
+
 Define the local, encrypted-database audit record as deterministic CBOR plus identity-bearing COSE. Action and context discriminators are stable and all detail is allowlisted; there is no free-text detail field.
 
 ```cddl
@@ -472,9 +519,16 @@ stale-registry-context-v1 = [
 ]
 clock-release-context-v1 = [
   trusted-time-floor: int, observed-os-wall-clock: int,
-  max-future-clock-skew-ms: uint, justification-code: uint,
-  issued-at: int, expires-at: int
+  max-future-clock-skew-ms: uint, registry-version: uint,
+  registry-head-hash: bstr .size 32,
+  guard-policy-object-hash: bstr .size 32,
+  independent-time-reference: independent-time-reference-v1,
+  justification-code: 0..2, issued-at: int, expires-at: int
 ]
+independent-time-reference-v1 =
+  [0, receipt-object-hash: bstr .size 32, verified-time: int] /
+  [1, checkpoint-object-hash: bstr .size 32, verified-time: int] /
+  [2, tsa-evidence-object-hash: bstr .size 32, verified-time: int]
 export-context-v1 = [entry-hash: bstr .size 32, target-kind: uint]
 binding-lifecycle-context-v1 = [
   old-binding-object-hash: (bstr .size 32) / null,
@@ -542,7 +596,7 @@ local-audit-event-core-for-v1<ACTION, CONTEXT> = [
 local-audit-event-v1 = [local-audit-event-core-v1, #6.18(COSE-Sign1)]
 ```
 
-The COSE payload is exactly the deterministic encoding of `local-audit-event-core-v1`; protected headers resolve the signer to the named active device or Admin certificate. Generic context contains only an object hash or null. Enforce the fixed action-to-context table: login/reauth failure/recovery test use generic; binding change/revocation use binding lifecycle; stale acceptance, export, clock release, Admin/Root ceremony, historical re-grant, destruction, and profile migration each use only their same-named typed context. Export stores only target kind, never a path. The stale-warning context is the one-use finalization acknowledgement. The clock-release context is an expiring administrative proof and can authorize only the exact observed skew it records; no context can lower `trustedTimeFloor`.
+The COSE payload is exactly the deterministic encoding of `local-audit-event-core-v1`; protected headers resolve the signer to the named active device or Admin certificate. Generic context contains only an object hash or null. Enforce the fixed action-to-context table: login/reauth failure/recovery test use generic; binding change/revocation use binding lifecycle; stale acceptance, export, clock release, Admin/Root ceremony, historical re-grant, destruction, and profile migration each use only their same-named typed context. Export stores only target kind, never a path. The stale-warning context is the one-use finalization acknowledgement. The exact ten-field Clock Release binds `registry-head-hash`, `guard-policy-object-hash`, and a deterministically selected `independent-time-reference-v1`; its reference tag and justification are both closed to 0..2, hashes are exactly 32 bytes, `issuedAt < expiresAt`, `clockRelease.issuedAt <= EffectiveNow <= clockRelease.expiresAt`, and the outer effective time equals the maximum of observed wall clock and trusted floor. All wire outcomes 0..2 remain valid; only full Runtime Phase B verification of Action 6/Outcome 1 can create an opaque, by-value `VerifiedClockRelease`. It never lowers `trustedTimeFloor` or waives `notBefore`, Registry expiry, lease, authorization expiry, or signature checks.
 
 For `grantAuthorization` and `destructionAuthorization`, the outer `.etb` signature list must contain at least two signatures, sorted by signer certificate hash, from distinct active subject IDs with the matching Approver capability. Root rotation has exactly one outer signature from the previous accepted Root line; its Admin authorization is hash-bound in the authorized payload. The initial Root proof-of-possession is the only `certificateHash` exception among authorized operational/archive signatures; the separate Enrollment-PoP is pre-authorization and not a Trust signature.
 
@@ -1300,7 +1354,17 @@ git add crates/ea-schema schemas/payload schemas/compatibility-matrix.json Cargo
 git commit -m "feat(core): add versioned payload schemas"
 ```
 
-### Task 8: Trust Anchors, Admin Authorization, Registry Selection, and Monotonic Time
+### Task 8: Trust/Time v1 Closure, then Runtime Verification
+
+Task 8 is split into two atomic phases. The prerequisite normative/wire
+correction is
+[`2026-08-14-einsatzarchiv-task-8-trust-time-normative-correction.md`](2026-08-14-einsatzarchiv-task-8-trust-time-normative-correction.md).
+Only after that phase is atomically integrated may Runtime Phase B execute the
+authoritative plan
+[`2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md`](2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md).
+The latter owns all `ea-time`/`ea-trust` files, proof states, historical state
+traversal, replay persistence, and activation semantics; Phase A creates none of
+them.
 
 **Files:**
 - Create: `crates/ea-time/Cargo.toml`
@@ -1321,7 +1385,11 @@ git commit -m "feat(core): add versioned payload schemas"
 
 **Interfaces:**
 - Consumes: exact `.etb` bytes, crypto identity resolution, IDs/time types.
-- Produces: `EffectiveNow`, `VerifiedTrust`, `VerifiedAdminAuthorization`, `SelectedRegistryHead`, and capability checks used by all clients/server.
+- Produces: `EffectiveNow`, `VerifiedTrust`, `VerifiedAdminAuthorization`, and
+  `RegistrySelectionOutcome` with `Selected(SelectedRegistryHead)`,
+  `Advanced(AdvancedRegistryHead)`, and
+  `PendingFuture(PendingFutureSuccessor)`, plus capability checks used by all
+  clients/server.
 
 - [ ] **Step 1: Write clock, bootstrap, and head-selection attack tests**
 
@@ -1350,30 +1418,25 @@ Run: `cargo test --locked -p ea-time -p ea-trust`
 
 Expected: FAIL because no anchor, admin authorization, Registry, or effective-time evaluator exists.
 
-- [ ] **Step 3: Implement one shared trust evaluator**
+- [ ] **Step 3: Execute the authoritative Runtime Phase-B plan**
 
-```rust
-pub fn effective_now(
-    os_wall_clock: UnixMillis,
-    persisted: TrustedTimeState,
-    verified_sources: &[VerifiedSignedTime],
-) -> Result<EffectiveNow, TimeError>;
+The sole source for `TrustObjectSource`, validated `TrustStateSnapshot`,
+`verify_trust`, mutable `LocalTimeBlock` preparation/release verification, and
+the complete `RegistrySelectionOutcome` is
+[`2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md`](2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md).
+This Stage-1 overview deliberately does not duplicate those public signatures or
+collapse Pending/Advanced outcomes into a selected-only return.
 
-pub fn effective_now_with_clock_release(
-    os_wall_clock: UnixMillis,
-    persisted: TrustedTimeState,
-    verified_sources: &[VerifiedSignedTime],
-    clock_release: &VerifiedClockRelease,
-) -> Result<EffectiveNow, TimeError>;
-
-pub fn select_registry_head(
-    trust: &VerifiedTrust,
-    sequence: ChainSequence,
-    now: EffectiveNow,
-) -> Result<SelectedRegistryHead, RegistryError>;
-```
-
-Set `trustedTimeFloor` to the maximum persisted floor plus verified Receipt, Checkpoint, TSA, Registry `issuedAt`, and `notBefore` sources. Use `effectiveNow = max(OS wall clock, trustedTimeFloor)`. Select the highest Registry version satisfying sequence lease and `notBefore`; retain future heads; reject gaps, same-version different hash, rollback, stale strict/evidence, consumed lease, and excessive future clock skew. `VerifiedClockRelease` is an opaque proof produced only after verifying a signed `clockSkewRelease` local-audit record from an active Admin identity; it must match organization/device, exact floor/wall-clock/skew limit, a one-use nonce, and a still-valid `expiresAt`, and it never lowers the floor. Only `effective_now_with_clock_release` can embed that exact verified waiver into the private `EffectiveNow` state; all downstream Registry evaluation keeps the unchanged three-argument seam and cannot manufacture a waiver. Validate Admin authorization ID/nonce uniqueness, action code/target subtype, authorized core hash, expiration, same-certificate signer resolution, active Admin certificate plus binding, Root signature, two distinct Admin bootstrap pairs, and permanent closure of pre-Registry context.
+Build the preexisting floor only from persisted state, previously activated
+Registry times, and fully verified Receipt/Checkpoint/TSA references; the current
+candidate cannot self-activate. Verify historical chain, previous-head/+1,
+Action/Change, activation, Policy and authorization-time correlations into an
+opaque `RegistryCandidate`. Decide future skew against its guard Policy and the
+deterministic independent reference. A Clock Release can only discharge that
+specific skew block. Then apply `issuedAt`/`notBefore`, select the head, and only
+after selection atomically persist candidate floor, head pin, and any by-value
+release replay consumption. Future heads remain pending. No public proof
+constructor or raw-CBOR escape hatch exists.
 
 - [ ] **Step 4: Run the full positive/negative trust vector matrix**
 

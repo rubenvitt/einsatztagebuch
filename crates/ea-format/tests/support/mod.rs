@@ -19,7 +19,7 @@ use ea_format::{
 use ea_types::{
     AuthorizationId, CertificateHash, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash,
     EventId, Hash32, KeyThumbprint, ObjectHash, OperatorSubjectId, OrganizationId, RegistryVersion,
-    UnixMillis,
+    SubjectId, UnixMillis,
 };
 use minicbor::{Decoder, Encoder};
 
@@ -82,7 +82,7 @@ pub fn typed_object_hash(value: u8) -> ObjectHash {
     ObjectHash::try_from(hash32(value).as_slice()).unwrap()
 }
 
-fn device_id(value: u8) -> DeviceId {
+pub fn device_id(value: u8) -> DeviceId {
     DeviceId::try_from(id16(value).as_slice()).unwrap()
 }
 
@@ -92,6 +92,10 @@ fn event_id(value: u8) -> EventId {
 
 fn operator_subject_id(value: u8) -> OperatorSubjectId {
     OperatorSubjectId::try_from(id16(value).as_slice()).unwrap()
+}
+
+pub fn subject_id(value: u8) -> SubjectId {
+    SubjectId::try_from(id16(value).as_slice()).unwrap()
 }
 
 pub fn grant_plan_item(key: u8, certificate_hash: u8, purpose: GrantPurposeV1) -> GrantPlanItemV1 {
@@ -135,6 +139,20 @@ pub fn top_level_type(bytes: &[u8]) -> u8 {
     assert_eq!(decoder.array().unwrap(), Some(5));
     assert_eq!(decoder.bytes().unwrap(), b"EA1\0");
     decoder.u8().unwrap()
+}
+
+pub fn exact_device_certificate_payload(bytes: &[u8]) -> &[u8] {
+    let mut decoder = Decoder::new(bytes);
+    assert_eq!(decoder.array().unwrap(), Some(5));
+    assert_eq!(decoder.bytes().unwrap(), b"EA1\0");
+    assert_eq!(decoder.u8().unwrap(), 5);
+    assert_eq!(decoder.u8().unwrap(), 1);
+    assert_eq!(decoder.array().unwrap(), Some(0));
+    assert_eq!(decoder.array().unwrap(), Some(3));
+    assert_eq!(decoder.str().unwrap(), "deviceCertificate");
+    let start = decoder.position();
+    decoder.skip().unwrap();
+    &bytes[start..decoder.position()]
 }
 
 pub fn manifest_ciphertext_length(bytes: &[u8]) -> u64 {
@@ -1398,7 +1416,11 @@ pub fn valid_etb_objects() -> Vec<(TrustSubtypeV1, Vec<u8>)> {
         ),
         (
             TrustSubtypeV1::DeviceCertificate,
-            trust_object("deviceCertificate", device_core(2, &["decrypt", "sign"]), 1),
+            trust_object(
+                "deviceCertificate",
+                device_core(2, &["decrypt", "sign"], Some(id16(2))),
+                1,
+            ),
         ),
         (
             TrustSubtypeV1::OperatorBinding,
@@ -1488,7 +1510,7 @@ pub fn valid_authorized_root_device_and_operator_objects() -> Vec<(TrustSubtypeV
             TrustSubtypeV1::DeviceCertificate,
             trust_object(
                 "deviceCertificate",
-                authorized_payload(device_core(0, &["sign"])),
+                authorized_payload(device_core(0, &["sign"], None)),
                 2,
             ),
         ),
@@ -1532,6 +1554,7 @@ pub fn constructed_trust_objects() -> Vec<(TrustSubtypeV1, TrustObjectV1)> {
             key_protection_profile: KeyProtectionProfileV1::OsWrapped,
             effective_from_sequence: ChainSequence::new(0),
             revoked_from_sequence: None,
+            authority_subject_id: Some(subject_id(2)),
         })
         .unwrap();
     let authorized_device = TrustPayloadV1::authorized_device_certificate(
@@ -1547,6 +1570,7 @@ pub fn constructed_trust_objects() -> Vec<(TrustSubtypeV1, TrustObjectV1)> {
             key_protection_profile: KeyProtectionProfileV1::OsWrapped,
             effective_from_sequence: ChainSequence::new(0),
             revoked_from_sequence: None,
+            authority_subject_id: None,
         },
         typed_object_hash(0xf0),
     )
@@ -1787,6 +1811,10 @@ fn constructed_trust(
     (subtype, TrustObjectV1::new(payload, signatures).unwrap())
 }
 
+pub fn constructed_normal_trust(payload: TrustPayloadV1, signature_count: usize) -> TrustObjectV1 {
+    constructed_trust(payload, signature_count, false).1
+}
+
 fn structural_initial_root_cose(payload: &[u8], signature_byte: u8) -> Vec<u8> {
     let protected = ProtectedHeader::initial_root(signer_thumbprint()).to_deterministic_cbor();
     let mut bytes = Vec::new();
@@ -1810,12 +1838,16 @@ pub fn invalid_trust_wrapper_and_cardinality_cases() -> Vec<Vec<u8>> {
     vec![
         trust_object("rootCertificate", root_core(Some(hash32(9))), 1),
         trust_object("rootCertificate", authorized_payload(root_core(None)), 1),
-        trust_object("deviceCertificate", device_core(1, &["sign"]), 1),
+        trust_object("deviceCertificate", device_core(1, &["sign"], None), 1),
         trust_object("operatorBinding", operator_core(1), 1),
         trust_object("registryEvent", registry_event_core(), 1),
         trust_object("rootCertificate", root_core(None), 0),
         trust_object("rootCertificate", root_core(None), 2),
-        trust_object("deviceCertificate", device_core(2, &["sign"]), 2),
+        trust_object(
+            "deviceCertificate",
+            device_core(2, &["sign"], Some(id16(2))),
+            2,
+        ),
         trust_object("operatorBinding", operator_core(2), 0),
         trust_object(
             "organizationAdminAuthorization",
@@ -1843,11 +1875,19 @@ pub fn invalid_trust_wrapper_and_cardinality_cases() -> Vec<Vec<u8>> {
 pub fn invalid_trust_sorted_and_target_cases() -> Vec<(Vec<u8>, &'static str)> {
     vec![
         (
-            trust_object("deviceCertificate", device_core(2, &["sign", "decrypt"]), 1),
+            trust_object(
+                "deviceCertificate",
+                device_core(2, &["sign", "decrypt"], Some(id16(2))),
+                1,
+            ),
             "EA-FORMAT-UNSORTED",
         ),
         (
-            trust_object("deviceCertificate", device_core(2, &["sign", "sign"]), 1),
+            trust_object(
+                "deviceCertificate",
+                device_core(2, &["sign", "sign"], Some(id16(2))),
+                1,
+            ),
             "EA-FORMAT-DUPLICATE",
         ),
         (
@@ -2057,11 +2097,24 @@ fn root_core(previous: Option<[u8; 32]>) -> Vec<u8> {
     core
 }
 
-fn device_core(kind: u8, capabilities: &[&str]) -> Vec<u8> {
+fn device_core(kind: u8, capabilities: &[&str], authority_subject_id: Option<[u8; 16]>) -> Vec<u8> {
+    device_core_with_authority_field(kind, capabilities, authority_subject_id, true)
+}
+
+fn legacy_device_core(kind: u8, capabilities: &[&str]) -> Vec<u8> {
+    device_core_with_authority_field(kind, capabilities, None, false)
+}
+
+fn device_core_with_authority_field(
+    kind: u8,
+    capabilities: &[&str],
+    authority_subject_id: Option<[u8; 16]>,
+    include_authority_subject_id: bool,
+) -> Vec<u8> {
     let mut core = Vec::new();
     let mut encoder = Encoder::new(&mut core);
     encoder
-        .array(13)
+        .array(if include_authority_subject_id { 14 } else { 13 })
         .unwrap()
         .u8(1)
         .unwrap()
@@ -2084,16 +2137,35 @@ fn device_core(kind: u8, capabilities: &[&str]) -> Vec<u8> {
     for capability in capabilities {
         encoder.str(capability).unwrap();
     }
-    encoder
-        .u8(0)
-        .unwrap()
-        .u8(0)
-        .unwrap()
-        .null()
-        .unwrap()
-        .array(0)
-        .unwrap();
+    encoder.u8(0).unwrap().u8(0).unwrap().null().unwrap();
+    if include_authority_subject_id {
+        if let Some(authority_subject_id) = authority_subject_id {
+            encoder.bytes(&authority_subject_id).unwrap();
+        } else {
+            encoder.null().unwrap();
+        }
+    }
+    encoder.array(0).unwrap();
     core
+}
+
+pub fn device_certificate_for_authority_matrix(
+    kind: u8,
+    authority_subject_id: Option<[u8; 16]>,
+) -> Vec<u8> {
+    trust_object(
+        "deviceCertificate",
+        authorized_payload(device_core(kind, &["sign"], authority_subject_id)),
+        1,
+    )
+}
+
+pub fn legacy_device_certificate_for_authority_matrix() -> Vec<u8> {
+    trust_object(
+        "deviceCertificate",
+        authorized_payload(legacy_device_core(0, &["sign"])),
+        1,
+    )
 }
 
 fn operator_core(role: u8) -> Vec<u8> {

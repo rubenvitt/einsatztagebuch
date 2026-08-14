@@ -54,16 +54,20 @@ root-rotation-certificate-core-v1 = [
   effective-from-registry-version: uint, []
 ]
 
-device-certificate-core-v1 = device-certificate-core-for-v1<certificate-kind-v1>
-initial-admin-device-certificate-core-v1 = device-certificate-core-for-v1<2>
-device-certificate-core-for-v1<KIND> = [
+device-certificate-core-v1 =
+  device-certificate-core-for-v1<(0 / 1 / 4..7), null> /
+  device-certificate-core-for-v1<(2 / 3), bstr .size 16>
+initial-admin-device-certificate-core-v1 =
+  device-certificate-core-for-v1<2, bstr .size 16>
+device-certificate-core-for-v1<KIND, AUTHORITY_SUBJECT_ID> = [
   1, organization-id: bstr .size 16, device-id: bstr .size 16,
   certificate-kind: KIND,
   signing-public-cose-key: bstr / null, kem-public-cose-key: bstr / null,
   signing-key-thumbprint: (bstr .size 32) / null,
   kem-key-thumbprint: (bstr .size 32) / null,
   capabilities: [* tstr], key-protection-profile: key-protection-profile-v1,
-  effective-from-sequence: uint, revoked-from-sequence: uint / null, []
+  effective-from-sequence: uint, revoked-from-sequence: uint / null,
+  authority-subject-id: AUTHORITY_SUBJECT_ID, []
 ]
 
 operator-binding-core-v1 = operator-binding-core-for-v1<0..2>

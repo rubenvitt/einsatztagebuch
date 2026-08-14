@@ -984,7 +984,35 @@ operator-binding-core-v1 = [
   revoked-from-sequence: uint / null,
   critical-extensions: []
 ]
+
+device-certificate-core-for-v1<KIND, AUTHORITY_SUBJECT_ID> = [
+  object-version: 1,
+  organization-id: bstr .size 16,
+  device-id: bstr .size 16,
+  certificate-kind: KIND,
+  signing-public-cose-key: bstr / null,
+  kem-public-cose-key: bstr / null,
+  signing-key-thumbprint: (bstr .size 32) / null,
+  kem-key-thumbprint: (bstr .size 32) / null,
+  capabilities: [* tstr],
+  key-protection-profile: 0..4,
+  effective-from-sequence: uint,
+  revoked-from-sequence: uint / null,
+  authority-subject-id: AUTHORITY_SUBJECT_ID,
+  critical-extensions: []
+]
 ```
+
+`device-certificate-core-v1` ist die geschlossene Vereinigung
+`device-certificate-core-for-v1<0 / 1 / 4..7, null>` und
+`device-certificate-core-for-v1<2 / 3, bstr .size 16>`. Der Core hat damit
+exakt 14 Elemente. `authoritySubjectId` ist für `organizationAdmin` und
+`keyApprover` zwingend und für alle anderen Certificate-Kinds zwingend `null`.
+Bei Admins gilt bytegenau
+`certificate.authoritySubjectId = operatorBinding.operatorSubjectId`; Hash,
+Thumbprint und `deviceId` sind keine Personenidentität. Selbstautorisierung ist
+verboten, Mehr-Augen-Prüfungen zählen verschiedene `authoritySubjectId`-Werte,
+und eine Rotation derselben extern verifizierten Person übernimmt dieselbe ID.
 
 ```text
 trustDigest = SHA-256(
@@ -999,15 +1027,70 @@ Jede Signatur ist ein `COSE_Sign1` über `trustDigest`; Signerauflösung folgt A
 
 | Code | Zielsubtyp | Einzige zulässige Wirkung |
 |---:|---|---|
-| 0 | `deviceCertificate` oder `registryEvent` | ein Nicht-Admin-Gerätezertifikat ausstellen beziehungsweise aktivieren |
-| 1 | `registryEvent` | genau ein Gerät, Operator-Binding oder Komponenten-Zertifikat widerrufen |
-| 2 | `policy` oder `registryEvent` | genau eine Policy ausstellen beziehungsweise als einzige Policy aktivieren |
-| 3 | `writerTransition` oder `registryEvent` | genau den gebundenen Writer-Wechsel ausstellen beziehungsweise aktivieren |
-| 4 | `operatorBinding` | genau ein Operator-Binding ausstellen oder ersetzen |
-| 5 | `deviceCertificate` oder `registryEvent` | einen Adminschlüssel ausstellen, aktivieren oder widerrufen; im Pre-Registry-Kontext exakt das gepinnte initiale Admin-Set aktivieren |
-| 6 | `rootCertificate` | genau die gebundene Root-Rotation ausstellen |
+| 0 | `deviceCertificate` mit Nicht-Admin-Kind | `registryEvent` mit Change 0 und demselben Zertifikat-Hash |
+| 1 | kein direktes Ziel | `registryEvent` mit Change 1 für Nicht-Admin-Gerät, Operator-Binding oder Komponenten-Zertifikat |
+| 2 | `policy` | `registryEvent` mit Change 2 und demselben Policy-Hash |
+| 3 | `writerTransition` | `registryEvent` mit Change 3 und demselben Transition-Hash |
+| 4 | `operatorBinding` | `registryEvent` mit Change 4 und demselben Binding-Hash |
+| 5 | neues `deviceCertificate` mit Kind `organizationAdmin` nur für Effect 0 | `registryEvent` mit Change 5; Effect 0 aktiviert, Effect 1 widerruft ein bereits aktives Admin-Zertifikat |
+| 6 | `rootCertificate` | `registryEvent` mit Change 6 und demselben Root-Zertifikat-Hash |
 
-Jede andere Kombination oder zusätzliche Wirkung ist ungültig. Es gilt `issued-at < expires-at`, die Autorisierungs-ID und Nonce dürfen organisationsweit nur einmal verwendet werden. `admin-operator-binding-object-hash` bezeichnet exakt die bei Ausstellung verwendete menschliche Admin-Bindung. Nach Existenz des initialen Registry-Heads müssen Signer-Zertifikat und Binding zur gebundenen Registry aktiv sein, Binding/Gerät/Rolle/OS-Konto/Instanzschlüssel nach Abschnitt 6.8 übereinstimmen und das Zertifikat die Capability `organizationAdminApprove` besitzen. `effectiveNow` aus Abschnitt 12.3 muss bei Root-Signatur innerhalb des Intervalls liegen.
+Jede andere Kombination oder zusätzliche Wirkung ist ungültig. Direktes Objekt
+und Aktivierungsereignis sind getrennte Ziele mit getrennten einmaligen
+Autorisierungs-IDs und Nonces, binden aber denselben Previous Head. Change 5
+Effect 0 verlangt das neue direkt autorisierte Admin-Zertifikat; Effect 1 darf
+nur ein am Previous Head aktives Admin-Zertifikat referenzieren. Change 1 darf
+niemals ein Admin-Zertifikat widerrufen. Es gilt strikt `issued-at < expires-at`.
+`admin-operator-binding-object-hash` bezeichnet exakt die menschliche
+Admin-Bindung. Signer-Zertifikat, Binding, Rolle, Capability und Wirksamkeit
+werden am unveränderten Pre-Transition-State geprüft.
+
+Jede `organizationAdminAuthorization` bindet den vorher ausgewählten Head und
+jedes autorisierte Registry-Ereignis ist dessen direkter Nachfolger:
+
+```text
+authorization.registryVersion = previousHead.registryVersion
+authorization.registryHeadHash = previousHead.objectHash
+event.registryVersion = checked_add(authorization.registryVersion, 1)
+event.previousRegistryHash = null iff event.registryVersion == 1
+event.previousRegistryHash = authorization.registryHeadHash otherwise
+```
+
+Für das erste Ereignis gilt ausschließlich Authorization-Version 0 mit
+`zero32`; gleiche Version, Sprung, Überlauf und falscher Vorgänger sind
+ungültig. Der bisher aktive Root signiert den Nachfolger. Eine Root-Rotation
+wird erst durch Change 6 aktiv und verlangt
+`root.effectiveFromRegistryVersion = event.registryVersion`.
+
+Für die Bootstrap-Policy gilt zusätzlich exakt:
+
+```text
+initialPolicy.policyVersion = 1
+initialPolicy.previousPolicyObjectHash = null
+initialPolicy.effectiveFromSequence = head1.effectiveFromSequence
+```
+
+Policy und Sequenz sind ebenfalls geschlossen. Bei Change 2 sind
+`event.policyObjectHash`, Change-Hash und neuer Policy-Hash identisch; die neue
+Policy erhöht die Version geprüft um eins, referenziert die vorige Policy und
+übernimmt `event.effectiveFromSequence`. Andere Changes behalten den
+Previous-Head-Policy-Hash. Change 0, 2, 3, 4 und 5/Effect 0 korrelieren das
+jeweilige `effectiveFromSequence` mit dem Ereignis. Es gilt:
+
+```text
+transitionSequence = event.effectiveFromSequence
+preTransitionSequence = transitionSequence
+  when previous.effectiveFromSequence <= transitionSequence <= previous.validThroughSequence
+preTransitionSequence = previous.validThroughSequence
+  when transitionSequence == checked_add(previous.validThroughSequence, 1)
+```
+
+Jeder andere Sprung oder Überlauf ist ungültig. Direkte Zielautorisierung und
+Aktivierungsautorisierung werden beide am signierten `event.issuedAt` inklusiv
+gegen ihre Grenzen geprüft:
+`authorization.issuedAt <= event.issuedAt <= authorization.expiresAt`. Weder
+heutiges `effectiveNow` noch ein erfundener Root-Signaturzeitpunkt dürfen eine
+historisch gültige Transition nachträglich entwerten.
 
 Nur vor Erzeugung des initialen Registry-Heads gelten `registry-version = 0` und `registry-head-hash = h'0000000000000000000000000000000000000000000000000000000000000000'` als eindeutiger **Pre-Registry-Kontext**. Während der Einrichtung ist dessen unabhängige Vertrauensquelle die bereits bestätigte `organization-trust-anchor-pre-v1`; bei jeder späteren Archivprüfung ist es der finale Anchor, der deren Hash und unveränderte Felder bindet. Darin ist ein Admin-Signer genau dann aktiv und berechtigt, wenn:
 
@@ -1019,7 +1102,18 @@ Nur vor Erzeugung des initialen Registry-Heads gelten `registry-version = 0` und
 6. OS-Konto, native Re-Authentisierung und frische Challenge des im Binding gepinnten Operator-Instanzschlüssels bei Ausstellung erfolgreich geprüft wurden und
 7. die Authorization ausschließlich ein Objekt des definierten Bootstrap-Sets autorisiert.
 
-Nur diese im Anchor gepinnten Zertifikat-/Binding-Paare sind im Nullkontext aktiv; ein anderes, lediglich Root-signiertes Admin-Zertifikat oder Binding ist dort unzulässig. Das Bootstrap-Set besteht aus initialer Policy, erstem Registry-Head, Genesis-vorbereitenden Geräte-/Komponentenzertifikaten und deren `operatorBinding`-Objekten. Der erste Registry-Head nimmt neben den technischen Basisfeldern und dem Hash der bereits autorisierten initialen Policy exakt alle und nur die gepinnten initialen Admin-Zertifikat-/Binding-Paare als aktiv mit `organizationAdminApprove` auf; andere Geräte oder Rollen aktiviert er nicht. Nach seinem Commit ist der Nullkontext dauerhaft geschlossen. Alle vorbereiteten Nicht-Admin-Zertifikate und Bindings werden danach durch getrennte, normal an diesen Head gebundene Registry-Ereignisse einzeln aktiviert; jede weitere Authorization muss den gemäß Abschnitt 12.3 höchsten anwendbaren Registry-Head binden. Genesis bindet den so entstandenen letzten Head.
+Nur diese im Anchor gepinnten Zertifikat-/Binding-Paare sind im Nullkontext
+aktiv; ein anderes, lediglich Root-signiertes Admin-Zertifikat oder Binding ist
+dort unzulässig. Der erste Registry-Head ist Version 1, hat
+`previousRegistryHash = null` und verwendet ausschließlich Change 2 für die
+bereits autorisierte initiale Policy; `policyObjectHash` und Change-Hash sind
+identisch. Die im Anchor gepinnten Admin-Zertifikat-/Binding-Paare sind externer
+Registry-Basiszustand und kein zusätzlicher Registry-Change. Sie werden nur mit
+vollständiger Annahme von Head 1 übernommen und müssen mindestens zwei
+verschiedene `authoritySubjectId`-Werte besitzen. Danach ist der Nullkontext
+dauerhaft geschlossen. Vorbereitete Nicht-Admin-Zertifikate und Bindings werden
+durch je ein eigenes, an Head 1 oder seinen direkten Nachfolger gebundenes
+Aktivierungsereignis aktiv. Genesis bindet den so entstandenen letzten Head.
 
 Mit Ausnahme des initialen Root-Zertifikats, der mindestens zwei initialen Admin-Zertifikate und deren genau zugeordneten initialen Admin-`operatorBinding`-Objekte hat für jedes `deviceCertificate`, `operatorBinding`, `registryEvent`, `policy`, `writerTransition` und jede Root-Rotation der Root-signierte `trust-payload` exakt die Form `[authorizedTrustCore, organizationAdminAuthorizationObjectHash]`. Das gilt ausdrücklich auch für initiale Policy, initialen Registry-Head und alle übrigen Genesis-vorbereitenden Bootstrap-Ziele. Dabei gilt:
 
@@ -1250,7 +1344,66 @@ trustedTimeFloor = max(
 effectiveNow = max(OS-Wanduhr, trustedTimeFloor)
 ```
 
-Nur bereits vollständig gegen Root, Signatur, Kette und Richtlinie geprüfte Zeitquellen dürfen den Floor anheben. Writer, Reader, Admin-/Recovery-CLI und Server verwenden denselben Algorithmus. Der jeweilige Floor wird monoton und transaktional im Plattform-Key-Provider-geschützten lokalen Zustand beziehungsweise in der transaktionalen Serverdatenbank gespeichert und zusätzlich aus Archivobjekten rekonstruierbar gemacht. Liegt die OS-Wanduhr unter dem Floor, wird `clockRollback` gemeldet; sie kann dadurch weder `notBefore` zurücknehmen noch einen abgelaufenen Head oder eine Autorisierung verjüngen. Ein Sprung der OS-Wanduhr weiter als `policy.maxFutureClockSkewMs` über die jüngste unabhängig signierte Server-/TSA-Zeit blockiert, bis eine neue signierte Zeitquelle oder eine dokumentierte administrative Uhrenfreigabe vorliegt.
+Nur vollständig verifizierte Zeitquellen dürfen den Floor anheben. Registry-Zeit
+des gerade geprüften Kandidaten gehört ausdrücklich noch nicht dazu. Der
+geschützte Zustand führt zusätzlich die deterministisch jüngste unabhängige
+Receipt-/Checkpoint-/TSA-Referenz. Größter `verifiedTime` gewinnt, bei Gleichstand
+der kleinste numerische Tag und anschließend der byteweise kleinste Objekt-Hash.
+Fehlt eine solche Referenz, wird `IndependentTimeUnavailable` sichtbar gemeldet;
+es gibt dann weder beweisbaren Future-Skew noch eine Clock-Release, während
+Stale- und Lease-Regeln unverändert gelten.
+
+Eine messbare Future-Skew-Freigabe verwendet exakt:
+
+```cddl
+independent-time-reference-v1 =
+  [0, receipt-object-hash: bstr .size 32, verified-time: int] /
+  [1, checkpoint-object-hash: bstr .size 32, verified-time: int] /
+  [2, tsa-evidence-object-hash: bstr .size 32, verified-time: int]
+
+clock-release-context-v1 = [
+  trusted-time-floor: int, observed-os-wall-clock: int,
+  max-future-clock-skew-ms: uint, registry-version: uint,
+  registry-head-hash: bstr .size 32,
+  guard-policy-object-hash: bstr .size 32,
+  independent-time-reference: independent-time-reference-v1,
+  justification-code: 0..2, issued-at: int, expires-at: int
+]
+```
+
+Der äußere Audit-Core trägt Action 6, Organisation, Zielgerät,
+Signer-Zertifikat, nicht-null Admin-Binding, Outcome und Nonce. Nur Outcome 1
+erzeugt nach vollständiger Runtime-Prüfung einen opaken
+`VerifiedClockRelease`; die lokalen Wire-Outcomes 0 bis 2 bleiben zulässig.
+Release und Kandidat müssen exakt denselben Registry-Head, dieselbe Guard-Policy,
+dieselbe unabhängige Referenz sowie Floor/Wanduhr/Skew-Limit binden. Es gilt
+`issuedAt < expiresAt` und
+`clockRelease.issuedAt <= EffectiveNow <= clockRelease.expiresAt`,
+`localAuditCore.effectiveNow = max(observedOsWallClock, trustedTimeFloor)` und
+die Nonce wird atomar einmalig unter Organisation/Zielgerät verbraucht. Die
+Release senkt nie den Floor und hebt weder `notAfter`, Lease, `notBefore`,
+Admin-Ablauf noch Signaturfehler auf. Für eine Transition ist die Previous-Head-
+Policy die Guard-Policy; nur im Bootstrap ist es die vollständig geprüfte
+initiale Policy.
+
+Die Auswertung ist strikt phasig: Anchor/Form/Hash/Signatur, dann historische
+Registry-/Authorization-/Action-/Policy-Korrelation zum opaken
+`RegistryCandidate`, dann unabhängige Referenz und Future-Skew, danach
+gegebenenfalls `verify_clock_release(candidate, localTimeBlock,
+exactAuditBytes)`, dann `PreexistingEffectiveNow`, `issuedAt`/`notBefore` und
+erst zuletzt `SelectedRegistryHead`. Die Schnittstelle ist:
+
+```text
+verify_registry_candidate(...) -> RegistryCandidate
+verify_clock_release(candidate, localTimeBlock, exactAuditBytes) -> VerifiedClockRelease
+select_registry_head(candidate, localTimeBlock, Option<VerifiedClockRelease>) -> SelectedRegistryHead
+```
+
+`select_registry_head` konsumiert die Release by value. Erst ein vollständig
+ausgewählter Head darf seine `issuedAt`-/`notBefore`-Werte zusammen mit Head-Pin,
+Floor und gegebenenfalls Replay-Verbrauch atomar persistieren. Ein vorheriger
+Kandidatenfehler verändert diesen Zustand nicht; eine bereits vollständig
+verifizierte unabhängige Referenz bleibt dagegen monoton persistiert.
 
 Ein Registry-Head ist `stale`, sobald `effectiveNow > notAfter`. Evidence Grade oder `policy.registryExpiryBehavior = block` blockieren dann die Finalisierung. Nur im Standardprofil mit dem explizit signierten Wert `warn` bleibt sie nach nicht übergehbarer sichtbarer Warnung, erneuter Benutzerbestätigung und signiertem lokalem Audit-Ereignis erlaubt. `s > validThroughSequence` blockiert in beiden Profilen immer. Ein Angreifer, der sowohl Registry-Updates als auch neue unabhängige Zeitquellen von einem dauerhaft offline gehaltenen Writer fernhält, kann den realen Zeitablauf vor Fortschritt des `trustedTimeFloor` nicht allein durch die Software beweisbar machen; die harte Sequenz-Lease begrenzt dieses unvermeidbare Offline-Fenster.
 

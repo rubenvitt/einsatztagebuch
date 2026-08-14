@@ -4,7 +4,7 @@ use ea_crypto::{ContentType, parse_cose_sign1, trust_digest};
 use ea_types::{
     AuthorizationId, CertificateHash, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash,
     EventId, Hash32, KeyThumbprint, ObjectHash, OperatorSubjectId, OrganizationId, RegistryVersion,
-    UnixMillis,
+    SubjectId, UnixMillis,
 };
 use minicbor::{Decoder, Encoder, data::Type};
 
@@ -117,6 +117,7 @@ pub struct DeviceCertificateFieldsV1 {
     pub key_protection_profile: KeyProtectionProfileV1,
     pub effective_from_sequence: ChainSequence,
     pub revoked_from_sequence: Option<ChainSequence>,
+    pub authority_subject_id: Option<SubjectId>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -699,7 +700,7 @@ fn encode_device_certificate(fields: &DeviceCertificateFieldsV1) -> Result<Vec<u
     let mut exact = Vec::with_capacity(512);
     let mut encoder = Encoder::new(&mut exact);
     encoder
-        .array(13)
+        .array(14)
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fields.organization_id.as_bytes()))
         .and_then(|encoder| encoder.bytes(fields.device_id.as_bytes()))
@@ -734,6 +735,13 @@ fn encode_device_certificate(fields: &DeviceCertificateFieldsV1) -> Result<Vec<u
     encode_optional_u64(
         &mut encoder,
         fields.revoked_from_sequence.map(ChainSequence::get),
+    )?;
+    encode_optional_bytes(
+        &mut encoder,
+        fields
+            .authority_subject_id
+            .as_ref()
+            .map(|value| value.as_bytes().as_slice()),
     )?;
     encoder.array(0).map_err(|_| FormatError::Shape)?;
     Ok(exact)
@@ -1304,7 +1312,7 @@ fn validate_root_core(input: &[u8], initial: bool) -> Result<(), FormatError> {
 
 fn validate_device_core(input: &[u8], required_kind: Option<u64>) -> Result<(), FormatError> {
     let mut decoder = Decoder::new(input);
-    expect_array_length(&mut decoder, 13)?;
+    expect_array_length(&mut decoder, 14)?;
     expect_version(&mut decoder)?;
     bytes_exact(&mut decoder, 16)?;
     bytes_exact(&mut decoder, 16)?;
@@ -1323,6 +1331,10 @@ fn validate_device_core(input: &[u8], required_kind: Option<u64>) -> Result<(), 
     let effective = decoder.u64().map_err(|_| FormatError::Shape)?;
     let revoked = optional_uint(&mut decoder)?;
     if revoked.is_some_and(|value| value <= effective) {
+        return Err(FormatError::Shape);
+    }
+    let authority_subject_id = optional_bytes_exact(&mut decoder, 16)?;
+    if matches!(kind, 2 | 3) != authority_subject_id.is_some() {
         return Err(FormatError::Shape);
     }
     expect_empty_array(&mut decoder)?;

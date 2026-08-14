@@ -244,3 +244,44 @@ fn trust_payload_mutation_with_stale_cose_digest_fails_at_the_exact_binding_gate
         "EA-FORMAT-COSE"
     );
 }
+
+#[test]
+fn device_certificate_authority_subject_id_matrix_is_closed() {
+    let accepted = [
+        (0, None),
+        (1, None),
+        (2, Some(support::id16(2))),
+        (3, Some(support::id16(3))),
+        (4, None),
+        (5, None),
+        (6, None),
+        (7, None),
+    ];
+
+    for (kind, authority_subject_id) in accepted {
+        let valid = support::device_certificate_for_authority_matrix(kind, authority_subject_id);
+        assert!(
+            decode_exact_object(&valid).is_ok(),
+            "closed certificate kind {kind} must accept its required authoritySubjectId shape"
+        );
+
+        let crossed = if authority_subject_id.is_some() {
+            None
+        } else {
+            Some([0xa0_u8.wrapping_add(kind); 16])
+        };
+        let invalid = support::device_certificate_for_authority_matrix(kind, crossed);
+        assert_eq!(
+            decode_exact_object(&invalid).unwrap_err().code(),
+            "EA-FORMAT-SHAPE",
+            "closed certificate kind {kind} must reject the crossed authoritySubjectId shape"
+        );
+    }
+
+    assert_eq!(
+        decode_exact_object(&support::legacy_device_certificate_for_authority_matrix())
+            .unwrap_err()
+            .code(),
+        "EA-FORMAT-SHAPE"
+    );
+}

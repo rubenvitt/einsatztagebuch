@@ -709,7 +709,7 @@ fn xtask_declares_distinct_report_and_payload_projection_profiles() {
         .split_once("### Task 7: Versioned Payload Schemas and Compatibility Registry")
         .unwrap()
         .1
-        .split_once("### Task 8: Trust Anchors, Admin Authorization, Registry Selection, and Monotonic Time")
+        .split_once("### Task 8: Trust/Time v1 Closure, then Runtime Verification")
         .unwrap()
         .0;
     assert_contains_all(
@@ -1015,6 +1015,175 @@ fn normative_sources_define_the_total_token_budget_and_counting_rule() {
     assert!(stage_one.contains("max_total_items: 10_000"));
 }
 
+#[test]
+fn task8_trust_time_closure_is_consistent_across_normative_sources() {
+    let closure = include_str!(
+        "../../../docs/superpowers/specs/2026-08-14-einsatzarchiv-task-8-trust-time-closure-design.md"
+    );
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let addendum = include_str!(
+        "../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md"
+    );
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+    let trust = include_str!("../../../schemas/archive/v1/trust.cddl");
+    let audit = include_str!("../../../schemas/reports/v1/local-audit.cddl");
+
+    assert_contains_all(
+        "approved Task-8 closure",
+        &normalized_prose(closure),
+        &[
+            "authorization.registryVersion = previousHead.registryVersion",
+            "event.registryVersion = checked_add(authorization.registryVersion, 1)",
+            "| 4 `operatorBinding`",
+            "Change 4",
+            "| 6 `rootRotation`",
+            "Change 6",
+            "authoritySubjectId",
+            "independent-time-reference-v1",
+            "registry-head-hash",
+            "guard-policy-object-hash",
+        ],
+    );
+
+    for (name, source) in [
+        ("main design", design),
+        ("wire-format addendum", addendum),
+        ("Stage-1 plan", stage_one),
+    ] {
+        assert_contains_all(
+            name,
+            &normalized_prose(source),
+            &[
+                "authorization.registryVersion = previousHead.registryVersion",
+                "event.registryVersion = checked_add(authorization.registryVersion, 1)",
+                "authoritySubjectId",
+                "independent-time-reference-v1",
+                "registry-head-hash",
+                "guard-policy-object-hash",
+            ],
+        );
+    }
+
+    assert_contains_all(
+        "Trust CDDL",
+        trust,
+        &[
+            "device-certificate-core-for-v1<KIND, AUTHORITY_SUBJECT_ID>",
+            "authority-subject-id",
+        ],
+    );
+    assert_contains_all(
+        "local-audit CDDL",
+        audit,
+        &[
+            "independent-time-reference-v1",
+            "registry-head-hash",
+            "guard-policy-object-hash",
+        ],
+    );
+    assert_contains_all(
+        "Stage-1 old-shape rejection",
+        stage_one,
+        &[
+            "device-certificate-core-v1 length 13 is invalid",
+            "clock-release-context-v1 length 6 is invalid",
+        ],
+    );
+}
+
+#[test]
+fn task8_bootstrap_policy_is_closed_across_normative_sources() {
+    for (name, source) in [
+        (
+            "main design",
+            include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md"),
+        ),
+        (
+            "wire-format addendum",
+            include_str!(
+                "../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md"
+            ),
+        ),
+        ("Stage-1 plan", stage_one_plan()),
+    ] {
+        assert_contains_all(
+            name,
+            &normalized_prose(source),
+            &[
+                "initialPolicy.policyVersion = 1",
+                "initialPolicy.previousPolicyObjectHash = null",
+                "initialPolicy.effectiveFromSequence = head1.effectiveFromSequence",
+            ],
+        );
+    }
+}
+
+#[test]
+fn task8_clock_release_interval_is_closed_across_normative_sources() {
+    for (name, source) in [
+        (
+            "main design",
+            include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md"),
+        ),
+        (
+            "wire-format addendum",
+            include_str!(
+                "../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md"
+            ),
+        ),
+        ("Stage-1 plan", stage_one_plan()),
+    ] {
+        assert_contains_all(
+            name,
+            &normalized_prose(source),
+            &["clockRelease.issuedAt <= EffectiveNow <= clockRelease.expiresAt"],
+        );
+    }
+}
+
+#[test]
+fn task8_runtime_seams_are_authoritative_and_not_duplicated() {
+    let runtime = include_str!(
+        "../../../docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"
+    );
+    let umbrella = include_str!("../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-v0-1.md");
+    let stage_one = stage_one_plan();
+    let required = [
+        "source: &dyn TrustObjectSource",
+        "snapshot: TrustStateSnapshot",
+        "local_time: &mut LocalTimeBlock<'_>",
+        "RegistrySelectionOutcome",
+        "Advanced(AdvancedRegistryHead)",
+        "PendingFuture(PendingFutureSuccessor)",
+    ];
+
+    assert_contains_all("Task-8 Runtime Phase B plan", runtime, &required);
+    assert_contains_all("umbrella plan Task-8 seam", umbrella, &required);
+    assert!(
+        umbrella.contains("2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"),
+        "umbrella plan must link the authoritative Task-8 runtime plan"
+    );
+    assert!(
+        !umbrella.contains(
+            "verify_trust(anchor: &TrustAnchorV1, objects: &ArchiveInventory, now: EffectiveNow)"
+        ),
+        "umbrella plan retains the obsolete ArchiveInventory/EffectiveNow trust seam"
+    );
+    assert!(
+        stage_one.contains("2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"),
+        "Stage-1 plan must link the authoritative Task-8 runtime plan"
+    );
+    assert!(
+        !stage_one.contains("pub fn verify_registry_candidate(")
+            && !stage_one.contains("pub fn verify_clock_release(")
+            && !stage_one.contains("pub fn select_registry_head("),
+        "Stage-1 plan must not duplicate the authoritative runtime API seam"
+    );
+}
+
 fn protocol_cddl() -> String {
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1226,10 +1395,54 @@ fn evidence_cores_require_the_fixed_domain_at_position_one() {
 }
 
 #[derive(Clone, Copy)]
+struct DeviceCertificateFixture {
+    certificate_kind: u8,
+    authority_subject_id: Option<[u8; 16]>,
+}
+
+fn encode_device_certificate_core(
+    encoder: &mut minicbor::Encoder<Vec<u8>>,
+    fixture: DeviceCertificateFixture,
+    include_authority_subject_id: bool,
+) {
+    encoder
+        .array(if include_authority_subject_id { 14 } else { 13 })
+        .unwrap();
+    encoder.u8(1).unwrap();
+    encoder.bytes(&[0; 16]).unwrap();
+    encoder.bytes(&[1; 16]).unwrap();
+    encoder.u8(fixture.certificate_kind).unwrap();
+    encoder.bytes(&[2]).unwrap();
+    encoder.null().unwrap();
+    encoder.bytes(&[3; 32]).unwrap();
+    encoder.null().unwrap();
+    encoder.array(1).unwrap();
+    encoder.str("organizationAdminApprove").unwrap();
+    encoder.u8(0).unwrap();
+    encoder.u8(0).unwrap();
+    encoder.null().unwrap();
+    if include_authority_subject_id {
+        if let Some(authority_subject_id) = fixture.authority_subject_id {
+            encoder.bytes(&authority_subject_id).unwrap();
+        } else {
+            encoder.null().unwrap();
+        }
+    }
+    encoder.array(0).unwrap();
+}
+
+fn device_certificate_core_fixture(fixture: DeviceCertificateFixture) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encode_device_certificate_core(&mut encoder, fixture, true);
+    encoder.into_writer()
+}
+
+#[derive(Clone, Copy)]
 enum TrustPayload {
     DirectRoot { has_previous: bool },
     AuthorizedRoot { has_previous: bool },
-    Device { certificate_kind: u8 },
+    Device(DeviceCertificateFixture),
+    LegacyDevice { certificate_kind: u8 },
     GrantAuthorization,
     DestructionAuthorization,
 }
@@ -1244,22 +1457,16 @@ fn encode_trust_payload(encoder: &mut minicbor::Encoder<Vec<u8>>, payload: Trust
             encode_root_certificate_core(encoder, has_previous);
             encoder.bytes(&[9; 32]).unwrap();
         }
-        TrustPayload::Device { certificate_kind } => {
-            encoder.array(13).unwrap();
-            encoder.u8(1).unwrap();
-            encoder.bytes(&[0; 16]).unwrap();
-            encoder.bytes(&[1; 16]).unwrap();
-            encoder.u8(certificate_kind).unwrap();
-            encoder.bytes(&[2]).unwrap();
-            encoder.null().unwrap();
-            encoder.bytes(&[3; 32]).unwrap();
-            encoder.null().unwrap();
-            encoder.array(1).unwrap();
-            encoder.str("organizationAdminApprove").unwrap();
-            encoder.u8(0).unwrap();
-            encoder.u8(0).unwrap();
-            encoder.null().unwrap();
-            encoder.array(0).unwrap();
+        TrustPayload::Device(fixture) => encode_device_certificate_core(encoder, fixture, true),
+        TrustPayload::LegacyDevice { certificate_kind } => {
+            encode_device_certificate_core(
+                encoder,
+                DeviceCertificateFixture {
+                    certificate_kind,
+                    authority_subject_id: None,
+                },
+                false,
+            );
         }
         TrustPayload::GrantAuthorization => {
             encoder.array(12).unwrap();
@@ -1348,9 +1555,10 @@ fn etb_cddl_correlates_subtype_payload_and_signature_cardinality() {
         &cddl,
         &etb_fixture(
             "deviceCertificate",
-            TrustPayload::Device {
-                certificate_kind: 2
-            },
+            TrustPayload::Device(DeviceCertificateFixture {
+                certificate_kind: 2,
+                authority_subject_id: Some([7; 16]),
+            }),
             1
         )
     ));
@@ -1359,8 +1567,8 @@ fn etb_cddl_correlates_subtype_payload_and_signature_cardinality() {
         &cddl,
         &etb_fixture(
             "deviceCertificate",
-            TrustPayload::Device {
-                certificate_kind: 0
+            TrustPayload::LegacyDevice {
+                certificate_kind: 2,
             },
             1
         )
@@ -1402,6 +1610,54 @@ fn etb_cddl_correlates_subtype_payload_and_signature_cardinality() {
             2
         )
     ));
+}
+
+#[test]
+fn device_certificate_cddl_authority_subject_id_matrix_is_closed() {
+    let cddl = archive_cddl();
+
+    for certificate_kind in 0..=7 {
+        let authority_subject_id = matches!(certificate_kind, 2 | 3).then_some([7; 16]);
+        assert!(
+            validate_cbor(
+                "device-certificate-core-v1",
+                &cddl,
+                &device_certificate_core_fixture(DeviceCertificateFixture {
+                    certificate_kind,
+                    authority_subject_id,
+                }),
+            ),
+            "closed positive kind {certificate_kind}"
+        );
+    }
+
+    for certificate_kind in [2, 3] {
+        assert!(
+            !validate_cbor(
+                "device-certificate-core-v1",
+                &cddl,
+                &device_certificate_core_fixture(DeviceCertificateFixture {
+                    certificate_kind,
+                    authority_subject_id: None,
+                }),
+            ),
+            "kind {certificate_kind} must require authoritySubjectId"
+        );
+    }
+
+    for certificate_kind in [0, 1, 4, 5, 6, 7] {
+        assert!(
+            !validate_cbor(
+                "device-certificate-core-v1",
+                &cddl,
+                &device_certificate_core_fixture(DeviceCertificateFixture {
+                    certificate_kind,
+                    authority_subject_id: Some([7; 16]),
+                }),
+            ),
+            "kind {certificate_kind} must reject authoritySubjectId"
+        );
+    }
 }
 
 #[test]
@@ -1462,13 +1718,20 @@ fn root_certificate_cddl_separates_bootstrap_from_authorized_rotation() {
 }
 
 #[derive(Clone, Copy)]
-enum AuditContext {
+enum AuditContextFixture {
     Generic,
     Export,
     Destruction,
+    ClockRelease {
+        registry_version: u64,
+        registry_head_hash: [u8; 32],
+        guard_policy_object_hash: [u8; 32],
+        independent_reference: (u8, [u8; 32], i64),
+    },
+    LegacyClockRelease,
 }
 
-fn audit_fixture(action: u8, context: AuditContext) -> Vec<u8> {
+fn audit_fixture(action: u8, context: AuditContextFixture) -> Vec<u8> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder.array(2).unwrap();
     encoder.array(12).unwrap();
@@ -1476,30 +1739,93 @@ fn audit_fixture(action: u8, context: AuditContext) -> Vec<u8> {
     encoder.bytes(&[0; 16]).unwrap();
     encoder.bytes(&[1; 16]).unwrap();
     encoder.bytes(&[2; 16]).unwrap();
-    encoder.null().unwrap();
+    if matches!(
+        context,
+        AuditContextFixture::ClockRelease { .. } | AuditContextFixture::LegacyClockRelease
+    ) {
+        encoder.bytes(&[7; 32]).unwrap();
+    } else {
+        encoder.null().unwrap();
+    }
     encoder.bytes(&[3; 32]).unwrap();
     encoder.u8(action).unwrap();
-    encoder.u8(2).unwrap();
-    encoder.i64(4).unwrap();
+    encoder
+        .u8(
+            if matches!(
+                context,
+                AuditContextFixture::ClockRelease { .. } | AuditContextFixture::LegacyClockRelease
+            ) {
+                1
+            } else {
+                2
+            },
+        )
+        .unwrap();
+    encoder
+        .i64(
+            if matches!(
+                context,
+                AuditContextFixture::ClockRelease { .. } | AuditContextFixture::LegacyClockRelease
+            ) {
+                1_000
+            } else {
+                4
+            },
+        )
+        .unwrap();
     match context {
-        AuditContext::Generic => {
+        AuditContextFixture::Generic => {
             encoder.array(2).unwrap();
             encoder.u8(0).unwrap();
             encoder.null().unwrap();
         }
-        AuditContext::Export => {
+        AuditContextFixture::Export => {
             encoder.array(2).unwrap();
             encoder.u8(3).unwrap();
             encoder.array(2).unwrap();
             encoder.bytes(&[4; 32]).unwrap();
             encoder.u8(1).unwrap();
         }
-        AuditContext::Destruction => {
+        AuditContextFixture::Destruction => {
             encoder.array(2).unwrap();
             encoder.u8(7).unwrap();
             encoder.array(2).unwrap();
             encoder.bytes(&[4; 32]).unwrap();
             encoder.bytes(&[5; 32]).unwrap();
+        }
+        AuditContextFixture::ClockRelease {
+            registry_version,
+            registry_head_hash,
+            guard_policy_object_hash,
+            independent_reference,
+        } => {
+            encoder.array(2).unwrap();
+            encoder.u8(2).unwrap();
+            encoder.array(10).unwrap();
+            encoder.i64(900).unwrap();
+            encoder.i64(1_000).unwrap();
+            encoder.u64(100).unwrap();
+            encoder.u64(registry_version).unwrap();
+            encoder.bytes(&registry_head_hash).unwrap();
+            encoder.bytes(&guard_policy_object_hash).unwrap();
+            encoder.array(3).unwrap();
+            encoder.u8(independent_reference.0).unwrap();
+            encoder.bytes(&independent_reference.1).unwrap();
+            encoder.i64(independent_reference.2).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.i64(900).unwrap();
+            encoder.i64(1_200).unwrap();
+        }
+        AuditContextFixture::LegacyClockRelease => {
+            encoder.array(2).unwrap();
+            encoder.u8(2).unwrap();
+            encoder.array(6).unwrap();
+            encoder.i64(900).unwrap();
+            encoder.i64(1_000).unwrap();
+            encoder.u64(100).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.i64(900).unwrap();
+            encoder.i64(1_200).unwrap();
         }
     }
     encoder.bytes(&[6; 32]).unwrap();
@@ -1515,22 +1841,40 @@ fn local_audit_cddl_correlates_action_and_context_tag() {
     assert!(validate_cbor(
         "local-audit-event-v1",
         cddl,
-        &audit_fixture(0, AuditContext::Generic)
+        &audit_fixture(0, AuditContextFixture::Generic)
     ));
     assert!(!validate_cbor(
         "local-audit-event-v1",
         cddl,
-        &audit_fixture(0, AuditContext::Destruction)
+        &audit_fixture(0, AuditContextFixture::Destruction)
     ));
     assert!(validate_cbor(
         "local-audit-event-v1",
         cddl,
-        &audit_fixture(5, AuditContext::Export)
+        &audit_fixture(5, AuditContextFixture::Export)
     ));
     assert!(!validate_cbor(
         "local-audit-event-v1",
         cddl,
-        &audit_fixture(5, AuditContext::Generic)
+        &audit_fixture(5, AuditContextFixture::Generic)
+    ));
+    assert!(validate_cbor(
+        "local-audit-event-v1",
+        cddl,
+        &audit_fixture(
+            6,
+            AuditContextFixture::ClockRelease {
+                registry_version: 7,
+                registry_head_hash: [8; 32],
+                guard_policy_object_hash: [9; 32],
+                independent_reference: (0, [10; 32], 900),
+            },
+        )
+    ));
+    assert!(!validate_cbor(
+        "local-audit-event-v1",
+        cddl,
+        &audit_fixture(6, AuditContextFixture::LegacyClockRelease)
     ));
 }
 

@@ -17,6 +17,12 @@
 - Exactly one active Writer exists. Trust, Registry, policy, revocation, and Writer changes are append-only Root-signed objects; database/config flags cannot grant authority.
 - Every post-bootstrap Root ceremony binds a valid `organizationAdminAuthorization`; Root-only and Admin-only are invalid. Initial exception is limited to the independently pinned Root certificate and at least two exactly paired Admin certificate/operator-binding pairs.
 - At least two active Admin keys and two appropriate Key Approvers exist before production. An Admin cannot self-authorize its own rotation; losing every Admin has no Root-only bypass.
+- Admin and Key-Approver personhood is the stable 16-byte
+  `authoritySubjectId`, never certificate/device/thumbprint identity. Each Admin
+  certificate must equal its correlated Binding `operatorSubjectId`; rotations
+  of the same externally re-identified person preserve the ID. Distinct-person
+  and self-authorization checks use that ID against the unchanged Previous-Head
+  state at `preTransitionSequence`.
 - Operator identity is bound to device, actual OS account, non-roaming installation key, native presence, role, and Root-signed binding; identity text is never freely entered.
 - Writer stores no Reader, Recovery, HGA, or Approver private key. Server stores no content-decryption or grant-signing key. Admin alone gets no content access.
 - Historical re-grant requires the original Recovery grant, Recovery KEM, separate HGA signer, and an unexpired Authorization signed by two distinct active `historicalGrantApprove` subjects.
@@ -29,7 +35,17 @@
 - Native Admin/Reader/Writer/recovery behavior targets the global Windows/macOS/Ubuntu matrix; Stage 7 supplies complete min/max release evidence.
 - v0.1 is complete only after Stage 7 and every criterion/gate passes.
 
-Action codes are exact: `0 deviceApprove`, `1 deviceRevoke`, `2 policyChange`, `3 writerTransition`, `4 operatorBinding`, `5 adminKeyChange`, `6 rootRotation`. Destruction states are only `requested`, `inProgress`, `pendingBackupExpiry`, `completeManagedScope`, `incompleteUnreachableReplica`.
+Action codes and Registry effects are exact: `0 deviceApprove` pairs a direct
+non-Admin certificate with Change 0; `1 deviceRevoke` has no direct target and
+uses Change 1 only for non-Admin device/binding/component revocation; `2
+policyChange` pairs Policy with Change 2; `3 writerTransition` pairs the
+transition with Change 3; `4 operatorBinding` pairs the Binding with Change 4;
+`5 adminKeyChange` uses a direct new Admin certificate only for Change 5 Effect
+0 while Effect 1 revokes an already active Admin certificate; `6 rootRotation`
+pairs the Root certificate with Change 6. Change 1 never revokes Admins. Direct
+target and activation event have separate IDs/nonces but bind the same Previous
+Head. Destruction states are only `requested`, `inProgress`,
+`pendingBackupExpiry`, `completeManagedScope`, `incompleteUnreachableReplica`.
 
 ---
 
@@ -92,7 +108,7 @@ pub async fn sign_authorized_trust_target<T: AuthorizedTrustCore>(
 ) -> Result<ExactObjectBytes, AdminError>;
 ```
 
-Hash exactly `SHA-256("EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1" || deterministicCbor([targetTrustSubtype, authorizedTrustCore]))`. Enforce exact action/target table, `issuedAt < expiresAt`, `effectiveNow` within interval, organization/Registry/head, Admin certificate/thumbprint/binding/role/OS/instance challenge, capability `organizationAdminApprove`, and one-time UUID/nonce. Consume usage atomically with signed target publication. The target has exactly `[authorizedTrustCore, organizationAdminAuthorizationObjectHash]` except the fixed bootstrap exceptions.
+Hash exactly `SHA-256("EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1" || deterministicCbor([targetTrustSubtype, authorizedTrustCore]))`. Enforce the closed action/direct-target/change table, `issuedAt < expiresAt`, live creation-time `effectiveNow` within the interval, organization, Previous Registry Head, Admin certificate/thumbprint/binding/role/OS/instance challenge, capability `organizationAdminApprove`, and one-time UUID/nonce. Consume usage atomically with signed target publication. The target has exactly `[authorizedTrustCore, organizationAdminAuthorizationObjectHash]` except the fixed bootstrap exceptions. Runtime verification later checks both the target and activation-event authorizations historically and inclusively at the signed activation `event.issuedAt`; it never substitutes current wall time or an invented Root-signature time.
 
 After bootstrap, every Admin/Root ceremony records and flushes a signed `adminRootCeremony` audit event binding only the authorization and resulting target object hashes, action code, pseudonymous operator binding, and outcome. Do not release or publish the target bytes if audit verification or persistence fails. Initial Root and the two anchor-pinned Admin pairs are recorded in the signed bootstrap transcript instead of pretending a pre-bootstrap local audit identity already existed.
 
@@ -279,9 +295,9 @@ Expected: FAIL because device/policy/Registry and clock-release workflows do not
 
 - [ ] **Step 3: Implement one-action-per-event append-only administration**
 
-Require pending request plus external fingerprint confirmation. Admin authorization and Root signature create/activate exactly one certificate or Registry action. Initial policy explicitly fixes profile, Registry age/skew/stale behavior, sequence lease, Evidence window, Reader inactivity/history, archive profiles/network failure, backup/restore, retention/destruction, free text, suites/formats. Each Registry version rises exactly one, references predecessor, satisfies signed time/lease invariants, and changes only one action class. Revocation explains that past grants/plaintext cannot be recalled and stops new grants only from `effectiveFromSequence`. Writer, server, Reader, Admin, and CLI all call the Stage 1 evaluator; no duplicate grace period or clock calculation is allowed.
+Require pending request plus external fingerprint confirmation. Admin authorization and Root signature prepare exactly one direct target; a distinct activation authorization creates exactly one matching Registry change. Both bind the same Previous Head and the event is its checked version `+1`. Head 1 uses Change 2 for the initial Policy; anchor-pinned Admin pairs are external basis state, not a second change. Initial policy explicitly fixes profile, Registry age/skew/stale behavior, sequence lease, Evidence window, Reader inactivity/history, archive profiles/network failure, backup/restore, retention/destruction, free text, suites/formats. Policy version/hash/effective sequence, direct-core effective sequence, Root effective Registry version, and `preTransitionSequence` follow the Task-8 closure exactly. Revocation explains that past grants/plaintext cannot be recalled and stops new grants only from `effectiveFromSequence`. Writer, server, Reader, Admin, and CLI consume the shared opaque `RegistryCandidate`/selection proof states; no duplicate grace period or clock calculation is allowed.
 
-When future-clock skew exceeds policy, remain blocked until a newer independently signed Receipt/Checkpoint/TSA source validates or an Admin deliberately creates a documented clock release after fresh `ReauthPurpose::ClockSkewRelease`. The release is the signed `clockSkewRelease` audit event: bind organization/device, current trusted floor, exact observed wall clock, signed policy limit, allowlisted justification code, issued/expiry times, and random nonce. Verify active Admin certificate/binding/capability and consume the nonce once. A mismatch, expiration, Registry/policy change, clock movement, or attempted floor reduction rejects it; it never changes the stored floor and never waives Registry `notAfter` or sequence lease.
+When future-clock skew exceeds the bound Guard Policy relative to a deterministically selected, fully verified Receipt/Checkpoint/TSA reference, remain blocked until a newer independent reference validates or an Admin deliberately creates a documented clock release after fresh `ReauthPurpose::ClockSkewRelease`. The signed Action-6 audit context binds organization/target device, current trusted floor, exact observed wall clock, signed policy limit, Registry version and Head hash, Guard-Policy hash, the exact independent reference, closed justification code 0..2, issued/expiry times, and random nonce. Verify the active Admin certificate/binding/capability against the candidate's pre-transition state; only Outcome 1 yields an opaque `VerifiedClockRelease`. `select_registry_head` consumes it by value and commits nonce replay, Head, and floor atomically. A mismatch, expiration, Registry/policy/reference change, clock movement, or attempted floor reduction rejects it; it never waives Registry `notAfter`, `notBefore`, sequence lease, Authorization expiry, or signature errors. Without an independent reference, report `IndependentTimeUnavailable` and do not offer a release.
 
 - [ ] **Step 4: Run gaps/forks/future/stale/clock and server-known-newer-head E2E tests**
 

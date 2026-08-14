@@ -1,8 +1,9 @@
 use ea_crypto::{entry_hash, object_hash, record_digest};
 use ea_format::{
-    CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1, EAG_PREFIX_V1, ECP_PREFIX_V1,
-    EDS_PREFIX_V1, EIP_PREFIX_V1, ESR_MAX_RAW_BYTES_V1, ESR_PREFIX_V1, ETB_PREFIX_V1,
-    EvidenceObjectV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPurposeV1, GrantV1,
+    CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1,
+    DeviceCertificateFieldsV1, EAG_PREFIX_V1, ECP_PREFIX_V1, EDS_PREFIX_V1, EIP_PREFIX_V1,
+    ESR_MAX_RAW_BYTES_V1, ESR_PREFIX_V1, ETB_PREFIX_V1, EvidenceObjectV1, GrantBodyFieldsV1,
+    GrantBodyV1, GrantKindV1, GrantPurposeV1, GrantV1, KeyProtectionProfileV1,
     OrganizationAdminAuthorizationFieldsV1, Parsed, ParsedArchiveObject, ReceiptCoreFieldsV1,
     ReceiptCoreV1, ReceiptV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, decode_exact_object,
     encode_destroyed_entry_stub, encode_entry_package, encode_evidence, encode_grant,
@@ -523,6 +524,46 @@ fn every_trust_subtype_has_its_exact_local_positional_shape() {
         assert_eq!(parsed.value().subtype(), expected_subtype);
         assert_exact(&parsed, &bytes);
     }
+}
+
+#[test]
+fn device_certificate_v1_production_bytes_match_pinned_literal() {
+    let payload = TrustPayloadV1::initial_admin_device_certificate(DeviceCertificateFieldsV1 {
+        organization_id: support::organization(1),
+        device_id: support::device_id(2),
+        certificate_kind: CertificateKindV1::OrganizationAdmin,
+        signing_public_cose_key: Some(vec![0xa1, 0x01]),
+        kem_public_cose_key: None,
+        signing_key_thumbprint: Some(support::key_thumbprint(3)),
+        kem_key_thumbprint: None,
+        capabilities: vec!["decrypt".into(), "sign".into()],
+        key_protection_profile: KeyProtectionProfileV1::OsWrapped,
+        effective_from_sequence: ChainSequence::new(0),
+        revoked_from_sequence: None,
+        authority_subject_id: Some(support::subject_id(2)),
+    })
+    .unwrap();
+    let trust = support::constructed_normal_trust(payload, 1);
+    let encoded = encode_trust(&trust).unwrap();
+    let pinned_core = hex::decode(
+        "8e01500101010101010101010101010101010150020202020202020202020202020202020242a101f658200303030303030303030303030303030303030303030303030303030303030303f6826764656372797074647369676e0000f6500202020202020202020202020202020280",
+    )
+    .unwrap();
+
+    assert_eq!(
+        support::exact_device_certificate_payload(encoded.as_bytes()),
+        pinned_core.as_slice()
+    );
+
+    let decoded = match decode_exact_object(encoded.as_bytes()).unwrap() {
+        ParsedArchiveObject::Trust(value) => value,
+        _ => unreachable!(),
+    };
+    assert_eq!(decoded.value().subtype(), TrustSubtypeV1::DeviceCertificate);
+    assert_eq!(
+        encode_trust(decoded.value()).unwrap().as_bytes(),
+        encoded.as_bytes()
+    );
 }
 
 #[test]

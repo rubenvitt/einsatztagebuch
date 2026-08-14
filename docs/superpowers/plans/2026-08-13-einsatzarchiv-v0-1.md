@@ -190,19 +190,34 @@ pub enum DestructionState {
 The stable service seams are:
 
 ```rust
+pub enum RegistrySelectionOutcome {
+    Selected(SelectedRegistryHead),
+    Advanced(AdvancedRegistryHead),
+    PendingFuture(PendingFutureSuccessor),
+}
+
 pub fn decode_exact_object(bytes: &[u8])
     -> Result<ParsedArchiveObject, FormatError>;
 pub fn object_hash(bytes: &ExactObjectBytes) -> ObjectHash;
-pub fn verify_trust(anchor: &TrustAnchorV1, objects: &ArchiveInventory, now: EffectiveNow)
-    -> Result<VerifiedTrust, TrustError>;
-pub fn effective_now_with_clock_release(
-    os_wall_clock: UnixMillis,
-    persisted: TrustedTimeState,
-    verified_sources: &[VerifiedSignedTime],
-    clock_release: &VerifiedClockRelease,
-) -> Result<EffectiveNow, TimeError>;
-pub fn select_registry_head(trust: &VerifiedTrust, sequence: ChainSequence, now: EffectiveNow)
-    -> Result<SelectedRegistryHead, RegistryError>;
+pub fn verify_trust(
+    anchor: &TrustAnchorV1,
+    source: &dyn TrustObjectSource,
+    snapshot: TrustStateSnapshot,
+) -> Result<VerifiedTrust, TrustError>;
+pub fn verify_registry_candidate(
+    trust: &VerifiedTrust,
+    proposed_sequence: ChainSequence,
+) -> Result<RegistryCandidate, RegistryError>;
+pub fn verify_clock_release(
+    candidate: &RegistryCandidate,
+    local_time: &mut LocalTimeBlock<'_>,
+    exact_audit_bytes: &[u8],
+) -> Result<VerifiedClockRelease, ClockReleaseError>;
+pub fn select_registry_head(
+    candidate: RegistryCandidate,
+    local_time: LocalTimeBlock<'_>,
+    release: Option<VerifiedClockRelease>,
+) -> Result<RegistrySelectionOutcome, RegistryError>;
 pub fn verify_chain(objects: &ArchiveInventory, trust: &VerifiedTrust)
     -> Result<VerifiedChain, ChainError>;
 pub fn verify_archive(source: &dyn ArchiveSource, anchor: &TrustAnchorV1, options: VerifyOptions)
@@ -233,6 +248,16 @@ pub trait LocalAuditService: Send + Sync {
         -> Result<SignedLocalAuditEvent, AuditError>;
 }
 ```
+
+The opaque `RegistryCandidate`, `VerifiedClockRelease`,
+`VerifiedAdminAuthorization`, and selected-head outcomes are created only by
+their full verification paths. Selection consumes a Clock Release by value and
+atomically commits Head/floor/replay state; callers cannot manufacture a waiver
+or bypass candidate-bound selection through a separate clock-release shortcut. The
+Task-8 prerequisite and Runtime Phase B are the exact linked plans
+[`2026-08-14-einsatzarchiv-task-8-trust-time-normative-correction.md`](2026-08-14-einsatzarchiv-task-8-trust-time-normative-correction.md)
+and
+[`2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md`](2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md).
 
 No later stage may bypass these proof-state types by accepting raw bytes where a verified type is required.
 

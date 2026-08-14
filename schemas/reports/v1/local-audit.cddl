@@ -8,10 +8,17 @@ stale-registry-context-v1 = [
   proposed-sequence: uint, registry-not-after: int, acknowledged-at: int,
   preview-hash: bstr .size 32
 ]
+independent-time-reference-v1 =
+  [0, receipt-object-hash: bstr .size 32, verified-time: int] /
+  [1, checkpoint-object-hash: bstr .size 32, verified-time: int] /
+  [2, tsa-evidence-object-hash: bstr .size 32, verified-time: int]
 clock-release-context-v1 = [
   trusted-time-floor: int, observed-os-wall-clock: int,
-  max-future-clock-skew-ms: uint, justification-code: uint,
-  issued-at: int, expires-at: int
+  max-future-clock-skew-ms: uint, registry-version: uint,
+  registry-head-hash: bstr .size 32,
+  guard-policy-object-hash: bstr .size 32,
+  independent-time-reference: independent-time-reference-v1,
+  justification-code: 0..2, issued-at: int, expires-at: int
 ]
 export-context-v1 = [entry-hash: bstr .size 32, target-kind: uint]
 binding-lifecycle-context-v1 = [

@@ -1,11 +1,11 @@
 use ea_crypto::{
     CanonicalPublicCoseKey, ContentType, CoseSigner, CoseVerifier, CryptoError,
     RecoveryVerificationContext, ResolvedSigner, SecretBytes, SignerCertificateResolver,
-    SignerRole, VerificationContext, authorized_trust_digest, linux_os_account_binding_hash,
-    macos_os_account_binding_hash, object_hash, verify_cose_sign1, verify_recovery_test,
-    windows_os_account_binding_hash,
+    SignerRole, VerificationContext, VerifiedSigner, authorized_trust_digest,
+    linux_os_account_binding_hash, macos_os_account_binding_hash, object_hash, verify_cose_sign1,
+    verify_recovery_test, windows_os_account_binding_hash,
 };
-use ea_types::{CertificateHash, ChainSequence, OrganizationId, RegistryVersion};
+use ea_types::{CertificateHash, ChainSequence, OrganizationId, RegistryVersion, SubjectId};
 use ed25519_dalek::{Signer as _, SigningKey};
 use minicbor::Encoder;
 use sha2::{Digest, Sha256};
@@ -61,6 +61,14 @@ fn fixture_public_key() -> CanonicalPublicCoseKey {
     .unwrap()
 }
 
+fn fixture_authority_subject(byte: u8) -> SubjectId {
+    SubjectId::try_from([byte; 16].as_slice()).unwrap()
+}
+
+fn authority_subject_id_for_kind(kind: u8) -> Option<SubjectId> {
+    matches!(kind, 2 | 3).then(|| fixture_authority_subject(0x70 + kind))
+}
+
 fn fixture_certificate_hash() -> CertificateHash {
     CertificateHash::from(object_hash(
         &device_certificate_bytes(&fixture_public_key()),
@@ -75,6 +83,20 @@ fn device_certificate_bytes_with_profile(
     public_key: &CanonicalPublicCoseKey,
     kind: u8,
     capabilities: &[&str],
+) -> Vec<u8> {
+    device_certificate_bytes_with_profile_and_authority(
+        public_key,
+        kind,
+        capabilities,
+        authority_subject_id_for_kind(kind),
+    )
+}
+
+fn device_certificate_bytes_with_profile_and_authority(
+    public_key: &CanonicalPublicCoseKey,
+    kind: u8,
+    capabilities: &[&str],
+    authority_subject_id: Option<SubjectId>,
 ) -> Vec<u8> {
     let root_signature = CoseSigner::from_secret(SecretBytes::new([0x55; 32]))
         .sign_initial_root(&[0x77; 32])
@@ -92,7 +114,7 @@ fn device_certificate_bytes_with_profile(
         .and_then(|encoder| encoder.array(3))
         .and_then(|encoder| encoder.str("deviceCertificate"))
         .and_then(|encoder| encoder.array(2))
-        .and_then(|encoder| encoder.array(13))
+        .and_then(|encoder| encoder.array(14))
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x22; 16]))
@@ -110,7 +132,13 @@ fn device_certificate_bytes_with_profile(
         .u8(0)
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.null())
-        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    match authority_subject_id {
+        Some(subject_id) => encoder.bytes(subject_id.as_bytes()).unwrap(),
+        None => encoder.null().unwrap(),
+    };
+    encoder
+        .array(0)
         .and_then(|encoder| encoder.bytes(&[0x33; 32]))
         .and_then(|encoder| encoder.array(1))
         .unwrap();
@@ -124,12 +152,27 @@ enum OptionalKey<'a> {
     Value(&'a CanonicalPublicCoseKey),
 }
 
+#[derive(Clone, Copy)]
+enum AuthoritySubjectField {
+    Omitted,
+    Null,
+    Value(SubjectId),
+}
+
+fn valid_authority_subject_field(kind: u8) -> AuthoritySubjectField {
+    match authority_subject_id_for_kind(kind) {
+        Some(subject_id) => AuthoritySubjectField::Value(subject_id),
+        None => AuthoritySubjectField::Null,
+    }
+}
+
 fn device_certificate_bytes_with_keys(
     kind: u8,
     signing_key: OptionalKey<'_>,
     kem_key: OptionalKey<'_>,
     corrupt_signing_thumbprint: bool,
     corrupt_kem_thumbprint: bool,
+    authority_subject: AuthoritySubjectField,
 ) -> Vec<u8> {
     let root_signature = CoseSigner::from_secret(SecretBytes::new([0x55; 32]))
         .sign_initial_root(&[0x77; 32])
@@ -145,7 +188,12 @@ fn device_certificate_bytes_with_keys(
         .and_then(|encoder| encoder.array(3))
         .and_then(|encoder| encoder.str("deviceCertificate"))
         .and_then(|encoder| encoder.array(2))
-        .and_then(|encoder| encoder.array(13))
+        .and_then(|encoder| {
+            encoder.array(match authority_subject {
+                AuthoritySubjectField::Omitted => 13,
+                AuthoritySubjectField::Null | AuthoritySubjectField::Value(_) => 14,
+            })
+        })
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x22; 16]))
@@ -177,7 +225,18 @@ fn device_certificate_bytes_with_keys(
         .and_then(|encoder| encoder.u8(0))
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.null())
-        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    match authority_subject {
+        AuthoritySubjectField::Omitted => {}
+        AuthoritySubjectField::Null => {
+            encoder.null().unwrap();
+        }
+        AuthoritySubjectField::Value(subject_id) => {
+            encoder.bytes(subject_id.as_bytes()).unwrap();
+        }
+    }
+    encoder
+        .array(0)
         .and_then(|encoder| encoder.bytes(&[0x33; 32]))
         .and_then(|encoder| encoder.array(1))
         .unwrap();
@@ -263,8 +322,9 @@ fn device_certificate_core_with_kind(kind: u8) -> Vec<u8> {
     let key = fixture_public_key();
     let key_bytes = key.to_deterministic_cbor();
     let mut bytes = Vec::new();
-    Encoder::new(&mut bytes)
-        .array(13)
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(14)
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x22; 16]))
@@ -277,8 +337,12 @@ fn device_certificate_core_with_kind(kind: u8) -> Vec<u8> {
         .and_then(|encoder| encoder.u8(0))
         .and_then(|encoder| encoder.u8(7))
         .and_then(|encoder| encoder.null())
-        .and_then(|encoder| encoder.array(0))
         .unwrap();
+    match authority_subject_id_for_kind(kind) {
+        Some(subject_id) => encoder.bytes(subject_id.as_bytes()).unwrap(),
+        None => encoder.null().unwrap(),
+    };
+    encoder.array(0).unwrap();
     bytes
 }
 
@@ -324,6 +388,10 @@ fn grant_authorization_core() -> Vec<u8> {
 }
 
 fn organization_admin_authorization_core() -> Vec<u8> {
+    organization_admin_authorization_core_for(fixture_certificate_hash())
+}
+
+fn organization_admin_authorization_core_for(certificate_hash: CertificateHash) -> Vec<u8> {
     let mut bytes = Vec::new();
     Encoder::new(&mut bytes)
         .array(15)
@@ -333,7 +401,7 @@ fn organization_admin_authorization_core() -> Vec<u8> {
         .and_then(|encoder| encoder.u8(3))
         .and_then(|encoder| encoder.bytes(&[0x62; 32]))
         .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
-        .and_then(|encoder| encoder.bytes(fixture_certificate_hash().as_bytes()))
+        .and_then(|encoder| encoder.bytes(certificate_hash.as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x63; 32]))
         .and_then(|encoder| encoder.u8(0))
         .and_then(|encoder| encoder.str("deviceCertificate"))
@@ -371,14 +439,30 @@ fn organization_admin_authorization_object_with_action(
     target_subtype: &str,
     authorized_core_hash: &[u8; 32],
 ) -> Vec<u8> {
+    organization_admin_authorization_object_with_previous_head(
+        action,
+        target_subtype,
+        authorized_core_hash,
+        3,
+        [0x62; 32],
+    )
+}
+
+fn organization_admin_authorization_object_with_previous_head(
+    action: u8,
+    target_subtype: &str,
+    authorized_core_hash: &[u8; 32],
+    registry_version: u64,
+    registry_head_hash: [u8; 32],
+) -> Vec<u8> {
     let mut core = Vec::new();
     Encoder::new(&mut core)
         .array(15)
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(&[0x61; 16]))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
-        .and_then(|encoder| encoder.u8(3))
-        .and_then(|encoder| encoder.bytes(&[0x62; 32]))
+        .and_then(|encoder| encoder.u64(registry_version))
+        .and_then(|encoder| encoder.bytes(&registry_head_hash))
         .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
         .and_then(|encoder| encoder.bytes(fixture_certificate_hash().as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x63; 32]))
@@ -503,26 +587,90 @@ fn root_rotation_core(previous_root_certificate_hash: CertificateHash) -> Vec<u8
 }
 
 fn registry_event_core() -> Vec<u8> {
+    registry_event_core_with_transition(4, Some([0x62; 32]), 2, 0)
+}
+
+fn registry_event_core_with_transition(
+    registry_version: u64,
+    previous_registry_hash: Option<[u8; 32]>,
+    change_kind: u8,
+    change_effect: u8,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
-    Encoder::new(&mut bytes)
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
         .array(13)
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
-        .and_then(|encoder| encoder.u8(3))
-        .and_then(|encoder| encoder.null())
-        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.u64(registry_version))
+        .unwrap();
+    match previous_registry_hash {
+        Some(hash) => encoder.bytes(&hash).unwrap(),
+        None => encoder.null().unwrap(),
+    };
+    encoder
+        .u8(7)
         .and_then(|encoder| encoder.u8(9))
         .and_then(|encoder| encoder.i64(900))
         .and_then(|encoder| encoder.i64(950))
         .and_then(|encoder| encoder.i64(2_000))
         .and_then(|encoder| encoder.bytes(&[0x91; 32]))
-        .and_then(|encoder| encoder.array(2))
-        .and_then(|encoder| encoder.u8(2))
-        .and_then(|encoder| encoder.bytes(&[0x91; 32]))
-        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .unwrap();
+    match change_kind {
+        0 | 2 | 3 | 4 | 6 => {
+            encoder
+                .array(2)
+                .and_then(|encoder| encoder.u8(change_kind))
+                .and_then(|encoder| encoder.bytes(&[0x91; 32]))
+                .unwrap();
+        }
+        1 => {
+            encoder
+                .array(3)
+                .and_then(|encoder| encoder.u8(change_kind))
+                .and_then(|encoder| encoder.u8(change_effect))
+                .and_then(|encoder| encoder.bytes(&[0x91; 32]))
+                .unwrap();
+        }
+        5 => {
+            encoder
+                .array(3)
+                .and_then(|encoder| encoder.u8(change_kind))
+                .and_then(|encoder| encoder.bytes(&[0x91; 32]))
+                .and_then(|encoder| encoder.u8(change_effect))
+                .unwrap();
+        }
+        _ => panic!("unsupported Registry change fixture"),
+    }
+    encoder
+        .bytes(fixture_public_key().thumbprint().as_bytes())
         .and_then(|encoder| encoder.array(0))
         .unwrap();
     bytes
+}
+
+fn root_authorized_trust_input(
+    subtype: &str,
+    core: &[u8],
+    action: u8,
+    authorization_registry_version: u64,
+    authorization_registry_head_hash: [u8; 32],
+) -> (Vec<u8>, Vec<u8>) {
+    let authorized_input = trust_digest_input(subtype, core);
+    let authorization = organization_admin_authorization_object_with_previous_head(
+        action,
+        subtype,
+        authorized_trust_digest(&authorized_input).as_bytes(),
+        authorization_registry_version,
+        authorization_registry_head_hash,
+    );
+    let mut payload = Vec::new();
+    Encoder::new(&mut payload).array(2).unwrap();
+    payload.extend_from_slice(core);
+    Encoder::new(&mut payload)
+        .bytes(object_hash(&authorization).as_bytes())
+        .unwrap();
+    (trust_digest_input(subtype, &payload), authorization)
 }
 
 fn destruction_authorization_core() -> Vec<u8> {
@@ -611,8 +759,7 @@ fn destruction_transition_core(authorization_hash: &[u8; 32]) -> Vec<u8> {
     bytes
 }
 
-fn base_resolver() -> FixtureResolver {
-    let exact_certificate_bytes = device_certificate_bytes(&fixture_public_key());
+fn resolver_for_certificate(exact_certificate_bytes: Vec<u8>) -> FixtureResolver {
     let requested_hash = CertificateHash::from(object_hash(&exact_certificate_bytes));
     FixtureResolver {
         requested_hash,
@@ -623,6 +770,10 @@ fn base_resolver() -> FixtureResolver {
         result_error: None,
         calls: Cell::new(0),
     }
+}
+
+fn base_resolver() -> FixtureResolver {
+    resolver_for_certificate(device_certificate_bytes(&fixture_public_key()))
 }
 
 fn signed_manifest(
@@ -714,6 +865,81 @@ fn normal_verification_returns_the_one_atomically_bound_identity() {
     assert!(verified.key_thumbprint() == fixture_public_key().thumbprint());
     assert!(verified.organization_id() == fixture_organization());
     assert_eq!(verified.role(), SignerRole::Writer);
+}
+
+#[test]
+fn certificate_authority_subject_id_is_closed_and_propagated() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+
+    let writer_certificate =
+        device_certificate_bytes_with_profile_and_authority(&fixture_public_key(), 0, &[], None);
+    let writer_certificate_hash = CertificateHash::from(object_hash(&writer_certificate));
+    let writer_manifest = signed_manifest(
+        writer_certificate_hash,
+        fixture_organization(),
+        RegistryVersion::new(3),
+        0x41,
+    );
+    let writer_signature = signer.sign_record(&writer_manifest).unwrap();
+    let writer_resolver = resolver_for_certificate(writer_certificate);
+    let verified_writer: VerifiedSigner = verify_cose_sign1(
+        &writer_signature,
+        &writer_resolver,
+        &VerificationContext::record(&writer_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let admin_subject = fixture_authority_subject(0xa2);
+    let admin_certificate = device_certificate_bytes_with_profile_and_authority(
+        &fixture_public_key(),
+        2,
+        &["organizationAdminApprove"],
+        Some(admin_subject),
+    );
+    let admin_certificate_hash = CertificateHash::from(object_hash(&admin_certificate));
+    let admin_authorization = trust_digest_input(
+        "organizationAdminAuthorization",
+        &organization_admin_authorization_core_for(admin_certificate_hash),
+    );
+    let admin_signature = signer
+        .sign_organization_admin_trust_digest(&admin_authorization)
+        .unwrap();
+    let admin_resolver = resolver_for_certificate(admin_certificate);
+    let verified_admin: VerifiedSigner = verify_cose_sign1(
+        &admin_signature,
+        &admin_resolver,
+        &VerificationContext::organization_admin_trust_digest(&admin_authorization).unwrap(),
+    )
+    .unwrap();
+
+    let approver_subject = fixture_authority_subject(0xa3);
+    let approver_certificate = device_certificate_bytes_with_profile_and_authority(
+        &fixture_public_key(),
+        3,
+        &["historicalGrantApprove"],
+        Some(approver_subject),
+    );
+    let approver_certificate_hash = CertificateHash::from(object_hash(&approver_certificate));
+    let grant_authorization = trust_digest_input("grantAuthorization", &grant_authorization_core());
+    let approver_signature = signer
+        .sign_historical_grant_approval_digest(approver_certificate_hash, &grant_authorization)
+        .unwrap();
+    let approver_resolver = resolver_for_certificate(approver_certificate);
+    let verified_approver: VerifiedSigner = verify_cose_sign1(
+        &approver_signature,
+        &approver_resolver,
+        &VerificationContext::historical_grant_approval_trust_digest(
+            &grant_authorization,
+            approver_certificate_hash,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert!(verified_writer.authority_subject_id().is_none());
+    assert!(verified_admin.authority_subject_id() == Some(admin_subject));
+    assert!(verified_approver.authority_subject_id() == Some(approver_subject));
 }
 
 #[test]
@@ -1009,6 +1235,234 @@ fn destruction_transition_is_a_separate_correlated_deletion_attest_operation() {
                 &authorization_object,
             )
             .is_ok()
+    );
+}
+
+#[test]
+fn root_registry_authorization_binds_previous_head_and_successor() {
+    const ZERO_HEAD: [u8; 32] = [0; 32];
+    const HEAD_THREE: [u8; 32] = [0x73; 32];
+    const WRONG_HEAD: [u8; 32] = [0x74; 32];
+
+    struct RegistryCase {
+        name: &'static str,
+        authorization_version: u64,
+        authorization_head: [u8; 32],
+        event_version: u64,
+        event_previous: Option<[u8; 32]>,
+        action: u8,
+        change_kind: u8,
+        change_effect: u8,
+        accepted: bool,
+    }
+
+    let cases = [
+        RegistryCase {
+            name: "bootstrap-successor",
+            authorization_version: 0,
+            authorization_head: ZERO_HEAD,
+            event_version: 1,
+            event_previous: None,
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: true,
+        },
+        RegistryCase {
+            name: "ordinary-successor",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 4,
+            event_previous: Some(HEAD_THREE),
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: true,
+        },
+        RegistryCase {
+            name: "operator-binding-change",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 4,
+            event_previous: Some(HEAD_THREE),
+            action: 4,
+            change_kind: 4,
+            change_effect: 0,
+            accepted: true,
+        },
+        RegistryCase {
+            name: "root-rotation-change",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 4,
+            event_previous: Some(HEAD_THREE),
+            action: 6,
+            change_kind: 6,
+            change_effect: 0,
+            accepted: true,
+        },
+        RegistryCase {
+            name: "same-version",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 3,
+            event_previous: Some(HEAD_THREE),
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: false,
+        },
+        RegistryCase {
+            name: "version-jump",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 5,
+            event_previous: Some(HEAD_THREE),
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: false,
+        },
+        RegistryCase {
+            name: "authorization-version-overflow",
+            authorization_version: u64::MAX,
+            authorization_head: HEAD_THREE,
+            event_version: u64::MAX,
+            event_previous: Some(HEAD_THREE),
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: false,
+        },
+        RegistryCase {
+            name: "bootstrap-non-null-previous",
+            authorization_version: 0,
+            authorization_head: ZERO_HEAD,
+            event_version: 1,
+            event_previous: Some(ZERO_HEAD),
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: false,
+        },
+        RegistryCase {
+            name: "successor-null-previous",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 4,
+            event_previous: None,
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: false,
+        },
+        RegistryCase {
+            name: "successor-wrong-previous",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 4,
+            event_previous: Some(WRONG_HEAD),
+            action: 2,
+            change_kind: 2,
+            change_effect: 0,
+            accepted: false,
+        },
+        RegistryCase {
+            name: "operator-action-root-change",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 4,
+            event_previous: Some(HEAD_THREE),
+            action: 4,
+            change_kind: 6,
+            change_effect: 0,
+            accepted: false,
+        },
+        RegistryCase {
+            name: "root-action-operator-change",
+            authorization_version: 3,
+            authorization_head: HEAD_THREE,
+            event_version: 4,
+            event_previous: Some(HEAD_THREE),
+            action: 6,
+            change_kind: 4,
+            change_effect: 0,
+            accepted: false,
+        },
+    ];
+
+    for case in cases {
+        let core = registry_event_core_with_transition(
+            case.event_version,
+            case.event_previous,
+            case.change_kind,
+            case.change_effect,
+        );
+        let (input, authorization) = root_authorized_trust_input(
+            "registryEvent",
+            &core,
+            case.action,
+            case.authorization_version,
+            case.authorization_head,
+        );
+        let result = VerificationContext::root_trust_digest(
+            &input,
+            fixture_certificate_hash(),
+            Some(&authorization),
+        );
+        assert_eq!(result.is_ok(), case.accepted, "case {}", case.name);
+        if let Err(error) = result {
+            assert_eq!(
+                error.code(),
+                "EA-CRYPTO-INVALID-PROTOCOL-CORE",
+                "case {}",
+                case.name
+            );
+        }
+    }
+
+    for (subtype, core, action) in [
+        ("operatorBinding", operator_binding_core(), 4),
+        (
+            "rootCertificate",
+            root_rotation_core(fixture_certificate_hash()),
+            6,
+        ),
+    ] {
+        let (input, authorization) =
+            root_authorized_trust_input(subtype, &core, action, 3, HEAD_THREE);
+        assert!(
+            VerificationContext::root_trust_digest(
+                &input,
+                fixture_certificate_hash(),
+                Some(&authorization),
+            )
+            .is_ok(),
+            "direct target {subtype}"
+        );
+    }
+
+    let root_certificate = root_certificate_bytes(false, false);
+    let root_certificate_hash = CertificateHash::from(object_hash(&root_certificate));
+    let core = registry_event_core_with_transition(4, Some(HEAD_THREE), 2, 0);
+    let (input, authorization) =
+        root_authorized_trust_input("registryEvent", &core, 2, 3, HEAD_THREE);
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let signed = signer
+        .sign_root_trust_digest(root_certificate_hash, &input, Some(&authorization))
+        .unwrap();
+    let context =
+        VerificationContext::root_trust_digest(&input, root_certificate_hash, Some(&authorization))
+            .unwrap();
+    assert!(
+        verify_cose_sign1(
+            &signed,
+            &resolver_for_certificate(root_certificate),
+            &context,
+        )
+        .is_ok(),
+        "the Root signer must resolve against authorization Registry v3"
     );
 }
 
@@ -1377,6 +1831,7 @@ fn certificate_kind_key_and_thumbprint_matrix_is_enforced() {
             },
             false,
             false,
+            valid_authority_subject_field(kind),
         );
         assert!(
             ea_crypto::validate_signer_certificate(&valid).is_ok(),
@@ -1397,6 +1852,7 @@ fn certificate_kind_key_and_thumbprint_matrix_is_enforced() {
             },
             false,
             false,
+            valid_authority_subject_field(kind),
         );
         assert!(
             ea_crypto::validate_signer_certificate(&crossed).is_err(),
@@ -1411,8 +1867,48 @@ fn certificate_kind_key_and_thumbprint_matrix_is_enforced() {
             OptionalKey::Value(&kem),
             corrupt_signing,
             corrupt_kem,
+            AuthoritySubjectField::Null,
         );
         assert!(ea_crypto::validate_signer_certificate(&mismatch).is_err());
+    }
+
+    let legacy_length = device_certificate_bytes_with_keys(
+        0,
+        OptionalKey::Value(&signing),
+        OptionalKey::Null,
+        false,
+        false,
+        AuthoritySubjectField::Omitted,
+    );
+    assert_eq!(
+        ea_crypto::validate_signer_certificate(&legacy_length)
+            .unwrap_err()
+            .code(),
+        "EA-TRUST-SIGNER-MISMATCH"
+    );
+
+    for (kind, authority_subject) in [
+        (2, AuthoritySubjectField::Null),
+        (
+            0,
+            AuthoritySubjectField::Value(fixture_authority_subject(0x7f)),
+        ),
+    ] {
+        let invalid = device_certificate_bytes_with_keys(
+            kind,
+            OptionalKey::Value(&signing),
+            OptionalKey::Null,
+            false,
+            false,
+            authority_subject,
+        );
+        assert_eq!(
+            ea_crypto::validate_signer_certificate(&invalid)
+                .unwrap_err()
+                .code(),
+            "EA-TRUST-SIGNER-MISMATCH",
+            "authoritySubjectId nullability for kind {kind}"
+        );
     }
 }
 

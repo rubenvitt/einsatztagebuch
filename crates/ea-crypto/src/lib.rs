@@ -15,8 +15,8 @@ pub use aead::{
 pub use cose::{
     ContentType, CoseSigner, CoseVerifier, ParsedCoseSign1, ProtectedHeader,
     RecoveryVerificationContext, ResolvedSigner, SignerCertificateResolver, SignerRole,
-    UnverifiedRfc3161TimeStampToken, VerificationContext, VerifiedRecoveryTest, attach_rfc3161_ctt,
-    cose_sign1_ctt_imprint, encode_signed_protocol_wrapper, parse_cose_sign1,
+    UnverifiedRfc3161TimeStampToken, VerificationContext, VerifiedRecoveryTest, VerifiedSigner,
+    attach_rfc3161_ctt, cose_sign1_ctt_imprint, encode_signed_protocol_wrapper, parse_cose_sign1,
     validate_signer_certificate, validate_unsigned_protocol_core, verify_cose_sign1,
     verify_enrollment_pop, verify_initial_root_pop, verify_recovery_test,
 };

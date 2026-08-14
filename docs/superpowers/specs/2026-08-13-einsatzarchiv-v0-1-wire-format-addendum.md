@@ -335,6 +335,34 @@ und wird hier vollständig normativ einbezogen. Die Integerregister sind:
 - `destruction-state-v1`: 0 requested, 1 inProgress, 2 pendingBackupExpiry,
   3 completeManagedScope, 4 incompleteUnreachableReplica.
 
+Der Device-Certificate-Core ist ausschließlich die folgende 14-elementige,
+strukturell geschlossene Vereinigung; die frühere 13-elementige Form ist kein
+v1-Wert:
+
+```cddl
+device-certificate-core-v1 =
+  device-certificate-core-for-v1<(0 / 1 / 4..7), null> /
+  device-certificate-core-for-v1<(2 / 3), bstr .size 16>
+initial-admin-device-certificate-core-v1 =
+  device-certificate-core-for-v1<2, bstr .size 16>
+device-certificate-core-for-v1<KIND, AUTHORITY_SUBJECT_ID> = [
+  1, organization-id: bstr .size 16, device-id: bstr .size 16,
+  certificate-kind: KIND,
+  signing-public-cose-key: bstr / null, kem-public-cose-key: bstr / null,
+  signing-key-thumbprint: (bstr .size 32) / null,
+  kem-key-thumbprint: (bstr .size 32) / null,
+  capabilities: [* tstr], key-protection-profile: key-protection-profile-v1,
+  effective-from-sequence: uint, revoked-from-sequence: uint / null,
+  authority-subject-id: AUTHORITY_SUBJECT_ID, []
+]
+```
+
+`authoritySubjectId` ist für `organizationAdmin` und `keyApprover` zwingend,
+für alle anderen Kinds `null`; bei Admins stimmt es bytegenau mit dem
+`operatorSubjectId` des korrelierten Bindings überein. Identitäts- und
+Mehr-Augen-Prüfungen verwenden ausschließlich diese ID, nicht Geräte-,
+Zertifikat- oder Thumbprint-Hashes.
+
 In `destruction-authorization-core-v1` ist `sorted-targets` nicht leer und
 aufsteigend nach `(entryHash bytes, chainSequence numeric)` geordnet: zuerst
 unsigned byteweise nach `entryHash`, dann unsigned numerisch nach
@@ -347,6 +375,47 @@ Ein Public Key oder Thumbprint darf nur dann `null` sein, wenn der jeweilige
 `certificate-kind` den Algorithmus nicht verwendet. Capability-Strings werden
 nach ihren UTF-8-Bytes, Hashlisten byteweise sortiert; beide sind duplikatfrei.
 Jede `registry-change-v1`-Variante ändert genau eine Action-Klasse.
+
+Eine Admin-Autorisierung bindet den unveränderten Previous Head, das Event
+seinen direkten Nachfolger:
+
+```text
+authorization.registryVersion = previousHead.registryVersion
+authorization.registryHeadHash = previousHead.objectHash
+event.registryVersion = checked_add(authorization.registryVersion, 1)
+```
+
+Version 1 verlangt Authorization-Version 0/`zero32` und
+`previousRegistryHash = null`; ab Version 2 ist
+`event.previousRegistryHash = authorization.registryHeadHash`. Gleichstand,
+Sprung, Überlauf und falscher Vorgänger sind ungültig. Direktes Objekt und
+Aktivierungsereignis haben getrennte IDs/Nonces, binden aber denselben Previous
+Head. Die Matrix ist geschlossen: Action 0/Change 0 Nicht-Admin-Zertifikat,
+Action 1/Change 1 Nicht-Admin-Widerruf, Action 2/Change 2 Policy, Action 3/Change
+3 Writer-Transition, Action 4 `operatorBinding`/Change 4, Action 5
+Admin-Zertifikat/Change 5 und Action 6 `rootRotation`/Change 6. Change 5 Effect 0
+aktiviert ein neues direkt autorisiertes Admin-Zertifikat, Effect 1 widerruft
+ein am Previous Head aktives; Change 1 darf kein Admin-Zertifikat widerrufen.
+Root-Rotation verlangt
+`root.effectiveFromRegistryVersion = event.registryVersion`.
+
+Die initiale Policy ist geschlossen gebunden:
+
+```text
+initialPolicy.policyVersion = 1
+initialPolicy.previousPolicyObjectHash = null
+initialPolicy.effectiveFromSequence = head1.effectiveFromSequence
+```
+
+Die direkte Ziel- und die Event-Autorisierung werden historisch am gemeinsamen
+signierten `event.issuedAt` inklusiv gegen ihre Grenzen geprüft; es bleibt
+strikt `authorization.issuedAt < authorization.expiresAt`. Aktive Signer und
+Bindings werden am unveränderten `preTransitionSequence` geprüft. Dieser ist
+`event.effectiveFromSequence`, wenn er innerhalb der Previous-Head-Lease liegt,
+sonst exakt `previousHead.validThroughSequence`, wenn der Event-Sequenzwert der
+geprüfte direkte `+1`-Nachfolger der Lease ist; andere Sprünge sind ungültig.
+Change 2 bindet neuen Policy-Hash, geprüfte Policy-Version, Vorgänger-Policy und
+identische Effective-Sequenz; andere Changes behalten die Previous-Head-Policy.
 
 `etb-body-v1` koppelt jeden Subtype-Literal strukturell an genau seinen zulässigen
 Payload. Initiale Root-/Admin-Ausnahmen tragen den Core direkt; direkte
@@ -393,6 +462,33 @@ Entry Hash und Target Kind, nie einen Pfad. Der Stale-Kontext ist die einmalige
 Finalisierungsbestätigung. Der Clock-Release-Kontext ist ein ablaufender Admin-
 Nachweis und autorisiert nur den exakt aufgezeichneten Skew. Kein Kontext darf
 `trustedTimeFloor` absenken.
+
+```cddl
+independent-time-reference-v1 =
+  [0, receipt-object-hash: bstr .size 32, verified-time: int] /
+  [1, checkpoint-object-hash: bstr .size 32, verified-time: int] /
+  [2, tsa-evidence-object-hash: bstr .size 32, verified-time: int]
+clock-release-context-v1 = [
+  trusted-time-floor: int, observed-os-wall-clock: int,
+  max-future-clock-skew-ms: uint, registry-version: uint,
+  registry-head-hash: bstr .size 32,
+  guard-policy-object-hash: bstr .size 32,
+  independent-time-reference: independent-time-reference-v1,
+  justification-code: 0..2, issued-at: int, expires-at: int
+]
+```
+
+Die zehn Felder sind exakt; die frühere sechs-elementige Form ist ungültig.
+Referenz-Tags außerhalb 0..2, nicht 32 Byte lange Hashes, Justification außerhalb
+0..2, `issuedAt >= expiresAt` oder ein von
+`max(observedOsWallClock, trustedTimeFloor)` abweichendes äußeres `effectiveNow`
+sind ungültig. Runtime-seitig gilt zusätzlich
+`clockRelease.issuedAt <= EffectiveNow <= clockRelease.expiresAt`. Die Wire-Form
+akzeptiert Audit-Outcomes 0..2; nur die vollständige
+Runtime-Prüfung von Action 6 mit Outcome 1 erzeugt einen opaken, by value
+verbrauchten `VerifiedClockRelease`. Kandidat, Registry Head, Guard Policy,
+unabhängige Referenz, Zielgerät, Binding und Nonce werden dort exakt korreliert;
+Head/Floor/Replay werden atomar persistiert.
 
 Die Korrelation ist Teil der CDDL-Struktur, nicht nur eine semantische Tabelle:
 

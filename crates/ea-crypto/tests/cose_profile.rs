@@ -5,6 +5,7 @@ use ea_crypto::{
     verify_enrollment_pop, verify_initial_root_pop,
 };
 use ea_types::CertificateHash;
+use minicbor::Encoder;
 
 const NORMAL_PROTECTED_HEX: &str = "a50132028303046f63657274696669636174654861736803782b6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e7265636f72642d646967657374045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f6365727469666963617465486173685820d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 const INITIAL_ROOT_PROTECTED_HEX: &str = "a401320282030403782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f49";
@@ -21,6 +22,7 @@ const READER_ACK_WRAPPER_HEX: &str = "82880150000102030405060708090a0b0c0d0e0f50
 const CHECKPOINT_CORE_HEX: &str = "8b01781b45494e5341545a4152434849562d434845434b504f494e542d763150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f1718185820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f5820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f1903e7f680";
 const RENEWAL_CORE_HEX: &str = "8801782145494e5341545a4152434849562d45564944454e43452d52454e4557414c2d763150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f5820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3ff6825820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f5820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80";
 const LOCAL_AUDIT_CORE_HEX: &str = "8c0150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f50202122232425262728292a2b2c2d2e2ff65820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f00011903e78200f65820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80";
+const CLOCK_RELEASE_LOCAL_CORE_HEX: &str = "8c0150000102030405060708090a0b0c0d0e0f50101112131415161718191a1b1c1d1e1f50202122232425262728292a2b2c2d2e2f5820303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f060119044c82028a1903e819044c1864075820a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf5820b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf83005820c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf190384001903e81904b05820d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef80";
 const RFC9921_TOKEN_HEX: &str = concat!(
     "3082154906092a864886f70d010702a082153a30821536020103310f300d0609608648016503040203050030820184060b2a864886f70d01",
     "09100104a08201730482016f3082016b02010106042a0304013031300d060960864801650304020105000420dd9471efe743c4051335df8f",
@@ -197,6 +199,112 @@ fn replace_once(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
     output.extend_from_slice(replacement);
     output.extend_from_slice(&bytes[offset + needle.len()..]);
     output
+}
+
+#[derive(Clone, Copy)]
+enum ClockReleaseContextShape {
+    ExactV1,
+    LegacySixFields,
+}
+
+#[derive(Clone)]
+struct ClockReleaseFixture {
+    action: u8,
+    outcome: u8,
+    effective_now: i64,
+    trusted_time_floor: i64,
+    observed_os_wall_clock: i64,
+    max_future_clock_skew_ms: u64,
+    registry_version: u64,
+    registry_head_hash: Vec<u8>,
+    guard_policy_object_hash: Vec<u8>,
+    independent_reference_tag: u8,
+    independent_reference_hash: Vec<u8>,
+    independent_verified_time: i64,
+    justification_code: u8,
+    issued_at: i64,
+    expires_at: i64,
+    context_shape: ClockReleaseContextShape,
+}
+
+fn sequential_bytes<const LENGTH: usize>(start: u8) -> [u8; LENGTH] {
+    std::array::from_fn(|index| start + u8::try_from(index).unwrap())
+}
+
+fn valid_clock_release_fixture() -> ClockReleaseFixture {
+    ClockReleaseFixture {
+        action: 6,
+        outcome: 1,
+        effective_now: 1_100,
+        trusted_time_floor: 1_000,
+        observed_os_wall_clock: 1_100,
+        max_future_clock_skew_ms: 100,
+        registry_version: 7,
+        registry_head_hash: sequential_bytes::<32>(0xa0).to_vec(),
+        guard_policy_object_hash: sequential_bytes::<32>(0xb0).to_vec(),
+        independent_reference_tag: 0,
+        independent_reference_hash: sequential_bytes::<32>(0xc0).to_vec(),
+        independent_verified_time: 900,
+        justification_code: 0,
+        issued_at: 1_000,
+        expires_at: 1_200,
+        context_shape: ClockReleaseContextShape::ExactV1,
+    }
+}
+
+fn clock_release_local_core(fixture: &ClockReleaseFixture) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(12)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<16>(0x00)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<16>(0x10)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<16>(0x20)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<32>(0x30)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<32>(0x40)))
+        .and_then(|encoder| encoder.u8(fixture.action))
+        .and_then(|encoder| encoder.u8(fixture.outcome))
+        .and_then(|encoder| encoder.i64(fixture.effective_now))
+        .and_then(|encoder| encoder.array(2))
+        .and_then(|encoder| encoder.u8(2))
+        .unwrap();
+    match fixture.context_shape {
+        ClockReleaseContextShape::ExactV1 => {
+            encoder
+                .array(10)
+                .and_then(|encoder| encoder.i64(fixture.trusted_time_floor))
+                .and_then(|encoder| encoder.i64(fixture.observed_os_wall_clock))
+                .and_then(|encoder| encoder.u64(fixture.max_future_clock_skew_ms))
+                .and_then(|encoder| encoder.u64(fixture.registry_version))
+                .and_then(|encoder| encoder.bytes(&fixture.registry_head_hash))
+                .and_then(|encoder| encoder.bytes(&fixture.guard_policy_object_hash))
+                .and_then(|encoder| encoder.array(3))
+                .and_then(|encoder| encoder.u8(fixture.independent_reference_tag))
+                .and_then(|encoder| encoder.bytes(&fixture.independent_reference_hash))
+                .and_then(|encoder| encoder.i64(fixture.independent_verified_time))
+                .and_then(|encoder| encoder.u8(fixture.justification_code))
+                .and_then(|encoder| encoder.i64(fixture.issued_at))
+                .and_then(|encoder| encoder.i64(fixture.expires_at))
+                .unwrap();
+        }
+        ClockReleaseContextShape::LegacySixFields => {
+            encoder
+                .array(6)
+                .and_then(|encoder| encoder.i64(fixture.trusted_time_floor))
+                .and_then(|encoder| encoder.i64(fixture.observed_os_wall_clock))
+                .and_then(|encoder| encoder.u64(fixture.max_future_clock_skew_ms))
+                .and_then(|encoder| encoder.u8(fixture.justification_code))
+                .and_then(|encoder| encoder.i64(fixture.issued_at))
+                .and_then(|encoder| encoder.i64(fixture.expires_at))
+                .unwrap();
+        }
+    }
+    encoder
+        .bytes(&sequential_bytes::<32>(0xd0))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
 }
 
 #[test]
@@ -578,6 +686,105 @@ fn archive_evidence_and_local_audit_payloads_are_closed_cddl_shapes() {
         validate_unsigned_protocol_core(ContentType::LocalAuditCbor, &mismatched_audit_context)
             .is_err()
     );
+}
+
+#[test]
+fn clock_release_local_core_is_exact_and_closed() {
+    let pinned_positive = hex::decode(CLOCK_RELEASE_LOCAL_CORE_HEX).unwrap();
+    validate_unsigned_protocol_core(ContentType::LocalAuditCbor, &pinned_positive).unwrap();
+    assert_eq!(
+        clock_release_local_core(&valid_clock_release_fixture()),
+        pinned_positive,
+        "the encoder-backed mutation fixture must match the independent pinned literal"
+    );
+
+    for outcome in [0, 1, 2] {
+        let mut fixture = valid_clock_release_fixture();
+        fixture.outcome = outcome;
+        validate_unsigned_protocol_core(
+            ContentType::LocalAuditCbor,
+            &clock_release_local_core(&fixture),
+        )
+        .unwrap_or_else(|error| panic!("closed audit outcome {outcome}: {}", error.code()));
+    }
+
+    let mut invalid_cases = Vec::new();
+
+    let mut legacy = valid_clock_release_fixture();
+    legacy.context_shape = ClockReleaseContextShape::LegacySixFields;
+    invalid_cases.push((
+        "legacy six-field context",
+        clock_release_local_core(&legacy),
+    ));
+
+    let mut reference_tag = valid_clock_release_fixture();
+    reference_tag.independent_reference_tag = 3;
+    invalid_cases.push((
+        "independent reference tag 3",
+        clock_release_local_core(&reference_tag),
+    ));
+
+    let mut registry_head_length = valid_clock_release_fixture();
+    registry_head_length.registry_head_hash.pop();
+    invalid_cases.push((
+        "Registry Head hash length",
+        clock_release_local_core(&registry_head_length),
+    ));
+
+    let mut policy_hash_length = valid_clock_release_fixture();
+    policy_hash_length.guard_policy_object_hash.pop();
+    invalid_cases.push((
+        "guard policy hash length",
+        clock_release_local_core(&policy_hash_length),
+    ));
+
+    let mut reference_hash_length = valid_clock_release_fixture();
+    reference_hash_length.independent_reference_hash.pop();
+    invalid_cases.push((
+        "independent reference hash length",
+        clock_release_local_core(&reference_hash_length),
+    ));
+
+    let mut justification = valid_clock_release_fixture();
+    justification.justification_code = 3;
+    invalid_cases.push((
+        "justification code 3",
+        clock_release_local_core(&justification),
+    ));
+
+    let mut equal_expiry = valid_clock_release_fixture();
+    equal_expiry.expires_at = equal_expiry.issued_at;
+    invalid_cases.push((
+        "issuedAt equals expiresAt",
+        clock_release_local_core(&equal_expiry),
+    ));
+
+    let mut reverse_expiry = valid_clock_release_fixture();
+    reverse_expiry.issued_at = reverse_expiry.expires_at + 1;
+    invalid_cases.push((
+        "issuedAt exceeds expiresAt",
+        clock_release_local_core(&reverse_expiry),
+    ));
+
+    let mut effective_now = valid_clock_release_fixture();
+    effective_now.effective_now -= 1;
+    invalid_cases.push((
+        "outer effectiveNow mismatch",
+        clock_release_local_core(&effective_now),
+    ));
+
+    let mut wrong_action = valid_clock_release_fixture();
+    wrong_action.action = 5;
+    invalid_cases.push((
+        "non-Clock-Release action",
+        clock_release_local_core(&wrong_action),
+    ));
+
+    for (name, invalid) in invalid_cases {
+        let error =
+            validate_unsigned_protocol_core(ContentType::LocalAuditCbor, &invalid).expect_err(name);
+        assert_eq!(error.code(), "EA-CRYPTO-INVALID-PROTOCOL-CORE", "{name}");
+    }
 }
 
 #[test]
