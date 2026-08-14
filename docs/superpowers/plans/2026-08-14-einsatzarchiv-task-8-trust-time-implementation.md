@@ -882,7 +882,10 @@ rtk git commit -m "feat(trust): verify bootstrap admin authority"
 ### Task 6: Verify Admin authorizations historically and reject self-authorization
 
 **Files:**
+- Modify: `Cargo.lock`
+- Modify: `crates/ea-trust/Cargo.toml`
 - Create: `crates/ea-trust/src/admin_authorization.rs`
+- Modify: `crates/ea-trust/src/error.rs`
 - Modify: `crates/ea-trust/src/resolver.rs`
 - Modify: `crates/ea-trust/src/lib.rs`
 
@@ -893,6 +896,10 @@ Place one table-driven unit test named
 `src/admin_authorization.rs`. The proof constructor remains crate-private, so
 do not create an integration-test-only public entry point merely for this
 slice. Task 7 adds the public end-to-end Registry attack tests.
+
+The test fixture uses `ed25519-dalek` as a dev-only dependency to construct
+cryptographically coherent wrong-role and wrong-semantics signatures without
+adding a raw signing escape hatch to the production `ea-crypto` API.
 
 Test Root-only, Admin-only, wrong core hash, wrong action/subtype, mismatched certificate/key/Binding, inactive/revoked signer, repeated authorization ID, repeated nonce, different IDs with same nonce, self-admin issue/revoke, and two certificates for one authority subject.
 
@@ -928,7 +935,8 @@ For Admin certificate Effect 0/1, require target authority subject to differ fro
 
 ```bash
 rtk cargo test --locked -p ea-trust --lib admin_authorization::tests::admin_authorization_historical_matrix_is_closed -- --exact --nocapture
-rtk git add -- crates/ea-trust/src/admin_authorization.rs \
+rtk git add -- Cargo.lock crates/ea-trust/Cargo.toml \
+  crates/ea-trust/src/admin_authorization.rs crates/ea-trust/src/error.rs \
   crates/ea-trust/src/resolver.rs crates/ea-trust/src/lib.rs
 rtk git diff --cached --check
 rtk git commit -m "feat(trust): verify historical admin authorization"

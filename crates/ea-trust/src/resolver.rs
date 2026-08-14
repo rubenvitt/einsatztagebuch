@@ -1,8 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use ea_crypto::{CryptoError, ResolvedSigner, SignerCertificateResolver};
-use ea_format::{DeviceCertificateFieldsV1, OperatorBindingFieldsV1, RootCertificateFieldsV1};
-use ea_types::{CertificateHash, ChainSequence, ObjectHash, RegistryVersion};
+use ea_format::{
+    DeviceCertificateFieldsV1, OperatorBindingFieldsV1, Parsed, RootCertificateFieldsV1,
+    TrustObjectV1,
+};
+use ea_types::{CertificateHash, ChainSequence, Hash32, ObjectHash, RegistryVersion};
 
 use crate::{
     TrustError, TrustStateSnapshot,
@@ -13,6 +16,7 @@ use crate::{
 
 pub(crate) struct PreviousHeadState {
     pub(crate) registry_version: RegistryVersion,
+    pub(crate) registry_head_hash: Hash32,
     catalog: Arc<TrustCatalog>,
     pub(crate) root: RootAuthority,
     pub(crate) admin_certificates: BTreeMap<CertificateHash, ActiveCertificate>,
@@ -60,6 +64,7 @@ impl PreviousHeadState {
         }
         Ok(Self {
             registry_version: RegistryVersion::new(0),
+            registry_head_hash: Hash32::ZERO,
             catalog,
             root,
             admin_certificates: certificates,
@@ -70,6 +75,10 @@ impl PreviousHeadState {
     pub(crate) fn initial_admin_pair_count(&self) -> usize {
         debug_assert_eq!(self.admin_certificates.len(), self.admin_bindings.len());
         self.admin_bindings.len()
+    }
+
+    pub(crate) fn catalog_object(&self, object_hash: ObjectHash) -> Option<&Parsed<TrustObjectV1>> {
+        self.catalog.get(&object_hash)
     }
 }
 
@@ -176,7 +185,7 @@ impl SignerCertificateResolver for BootstrapRootResolver<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     use ea_crypto::{
@@ -203,22 +212,22 @@ mod tests {
         decode_trust_anchor, load_trust_state, verify_trust,
     };
 
-    const ROOT_SECRET: [u8; 32] = [
+    pub(crate) const ROOT_SECRET: [u8; 32] = [
         0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
         0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
         0x7f, 0x60,
     ];
-    const ROOT_PUBLIC: [u8; 32] = [
+    pub(crate) const ROOT_PUBLIC: [u8; 32] = [
         0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
         0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
         0x51, 0x1a,
     ];
-    const ADMIN_PUBLIC: [u8; 32] = [
+    pub(crate) const ADMIN_PUBLIC: [u8; 32] = [
         0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a, 0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b, 0x7e,
         0xbc, 0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c, 0xc0, 0xcd, 0x55, 0xf1, 0x2a, 0xf4,
         0x66, 0x0c,
     ];
-    const ADMIN_TWO_PUBLIC: [u8; 32] = [
+    pub(crate) const ADMIN_TWO_PUBLIC: [u8; 32] = [
         0xfc, 0x51, 0xcd, 0x8e, 0x62, 0x18, 0xa1, 0xa3, 0x8d, 0xa4, 0x7e, 0xd0, 0x02, 0x30, 0xf0,
         0x58, 0x08, 0x16, 0xed, 0x13, 0xba, 0x33, 0x03, 0xac, 0x5d, 0xeb, 0x91, 0x15, 0x48, 0x90,
         0x80, 0x25,
@@ -423,7 +432,7 @@ mod tests {
         ));
     }
 
-    fn exact_root_certificate() -> Vec<u8> {
+    pub(crate) fn exact_root_certificate() -> Vec<u8> {
         let key = CanonicalPublicCoseKey::ed25519(ROOT_PUBLIC).unwrap();
         let payload = TrustPayloadV1::initial_root_certificate(RootCertificateFieldsV1 {
             organization_id: organization(),
@@ -441,7 +450,7 @@ mod tests {
             .into_vec()
     }
 
-    fn exact_admin_certificate(
+    pub(crate) fn exact_admin_certificate(
         root_hash: CertificateHash,
         public_key: [u8; 32],
         device: u8,
@@ -472,7 +481,7 @@ mod tests {
             .into_vec()
     }
 
-    fn exact_admin_binding(
+    pub(crate) fn exact_admin_binding(
         root_hash: CertificateHash,
         admin_hash: CertificateHash,
         subject: u8,
@@ -542,7 +551,7 @@ mod tests {
             .into_vec()
     }
 
-    fn exact_anchor(
+    pub(crate) fn exact_anchor(
         root_hash: ObjectHash,
         admin_hashes: &[ObjectHash],
         binding_hashes: &[ObjectHash],
@@ -626,22 +635,22 @@ mod tests {
         CoseSigner::from_secret(SecretBytes::new(ROOT_SECRET))
     }
 
-    fn organization() -> OrganizationId {
+    pub(crate) fn organization() -> OrganizationId {
         OrganizationId::try_from(&[0x21; 16][..]).unwrap()
     }
 
-    fn hash32(byte: u8) -> Hash32 {
+    pub(crate) fn hash32(byte: u8) -> Hash32 {
         Hash32::try_from(&[byte; 32][..]).unwrap()
     }
 
-    fn key_thumbprint(byte: u8) -> KeyThumbprint {
+    pub(crate) fn key_thumbprint(byte: u8) -> KeyThumbprint {
         KeyThumbprint::try_from(&[byte; 32][..]).unwrap()
     }
 
-    struct CatalogSource(BTreeMap<ObjectHash, Arc<[u8]>>);
+    pub(crate) struct CatalogSource(BTreeMap<ObjectHash, Arc<[u8]>>);
 
     impl CatalogSource {
-        fn new(objects: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        pub(crate) fn new(objects: impl IntoIterator<Item = Vec<u8>>) -> Self {
             Self(
                 objects
                     .into_iter()
@@ -670,9 +679,9 @@ mod tests {
         }
     }
 
-    struct SnapshotStore {
-        key: TrustStateKey,
-        record: Option<PersistedTrustRecord>,
+    pub(crate) struct SnapshotStore {
+        pub(crate) key: TrustStateKey,
+        pub(crate) record: Option<PersistedTrustRecord>,
     }
 
     impl TrustStateStore for SnapshotStore {

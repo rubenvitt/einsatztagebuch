@@ -752,6 +752,7 @@ dependencies = [
  "ea-format",
  "ea-time",
  "ea-types",
+ "ed25519-dalek",
  "minicbor",
 ]
 

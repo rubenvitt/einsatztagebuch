@@ -12,3 +12,6 @@ ea-format.workspace = true
 ea-time.workspace = true
 ea-types.workspace = true
 minicbor.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
