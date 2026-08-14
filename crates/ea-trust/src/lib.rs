@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate self as ea_trust;
+
 #[cfg_attr(not(test), allow(dead_code))]
 mod admin_authorization;
 mod anchor;
@@ -17,6 +20,7 @@ mod registry;
 mod resolver;
 mod source;
 mod state;
+mod time;
 
 pub use admin_authorization::VerifiedAdminAuthorization;
 pub use anchor::{TrustAnchorV1, VerifiedTrust, decode_trust_anchor, verify_trust};
@@ -28,3 +32,4 @@ pub use state::{
     RegistrySelectionCommit, StateStoreError, TrustStateKey, TrustStateSnapshot, TrustStateStore,
     load_trust_state,
 };
+pub use time::{VerifiedSignedTime, verify_checkpoint_time, verify_receipt_time};

@@ -1117,6 +1117,7 @@ rtk git commit -m "feat(trust): verify registry transitions"
 
 **Files:**
 - Create: `crates/ea-trust/src/time.rs`
+- Modify: `crates/ea-trust/src/error.rs`
 - Modify: `crates/ea-trust/src/lib.rs`
 - Create: `crates/ea-trust/tests/time_sources.rs`
 
@@ -1182,7 +1183,8 @@ Only an `ea-trust` function consuming that lower proof may create a TSA
 
 ```bash
 rtk cargo test --locked -p ea-trust --test time_sources
-rtk git add -- crates/ea-trust/src/time.rs crates/ea-trust/src/lib.rs \
+rtk git add -- crates/ea-trust/src/time.rs crates/ea-trust/src/error.rs \
+  crates/ea-trust/src/lib.rs \
   crates/ea-trust/tests/time_sources.rs
 rtk git diff --cached --check
 rtk git commit -m "feat(trust): verify independent signed time sources"
