@@ -76,6 +76,13 @@ pub fn entry_hash(record_digest: Hash32, exact_writer_cose: &[u8]) -> EntryHash 
 
 #[must_use]
 pub fn recovery_test_digest(challenge: SecretBytes<32>, key_thumbprint: KeyThumbprint) -> Hash32 {
+    recovery_test_digest_ref(&challenge, key_thumbprint)
+}
+
+pub(crate) fn recovery_test_digest_ref(
+    challenge: &SecretBytes<32>,
+    key_thumbprint: KeyThumbprint,
+) -> Hash32 {
     let mut context = Vec::with_capacity(70);
     Encoder::new(&mut context)
         .array(3)

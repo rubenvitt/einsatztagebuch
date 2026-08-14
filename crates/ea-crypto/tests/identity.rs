@@ -1,7 +1,8 @@
 use ea_crypto::{
-    CanonicalPublicCoseKey, ContentType, CoseSigner, CoseVerifier, CryptoError, ResolvedSigner,
-    SecretBytes, SignerCertificateResolver, SignerRole, VerificationContext,
-    linux_os_account_binding_hash, macos_os_account_binding_hash, object_hash, verify_cose_sign1,
+    CanonicalPublicCoseKey, ContentType, CoseSigner, CoseVerifier, CryptoError,
+    RecoveryVerificationContext, ResolvedSigner, SecretBytes, SignerCertificateResolver,
+    SignerRole, VerificationContext, authorized_trust_digest, linux_os_account_binding_hash,
+    macos_os_account_binding_hash, object_hash, verify_cose_sign1, verify_recovery_test,
     windows_os_account_binding_hash,
 };
 use ea_types::{CertificateHash, ChainSequence, OrganizationId, RegistryVersion};
@@ -67,6 +68,14 @@ fn fixture_certificate_hash() -> CertificateHash {
 }
 
 fn device_certificate_bytes(public_key: &CanonicalPublicCoseKey) -> Vec<u8> {
+    device_certificate_bytes_with_profile(public_key, 0, &[])
+}
+
+fn device_certificate_bytes_with_profile(
+    public_key: &CanonicalPublicCoseKey,
+    kind: u8,
+    capabilities: &[&str],
+) -> Vec<u8> {
     let root_signature = CoseSigner::from_secret(SecretBytes::new([0x55; 32]))
         .sign_initial_root(&[0x77; 32])
         .unwrap();
@@ -87,12 +96,84 @@ fn device_certificate_bytes(public_key: &CanonicalPublicCoseKey) -> Vec<u8> {
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x22; 16]))
-        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u8(kind))
         .and_then(|encoder| encoder.bytes(&public_key_bytes))
         .and_then(|encoder| encoder.null())
         .and_then(|encoder| encoder.bytes(thumbprint.as_bytes()))
         .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.array(capabilities.len() as u64))
+        .unwrap();
+    for capability in capabilities {
+        encoder.str(capability).unwrap();
+    }
+    encoder
+        .u8(0)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.null())
         .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.bytes(&[0x33; 32]))
+        .and_then(|encoder| encoder.array(1))
+        .unwrap();
+    certificate.extend_from_slice(&root_signature);
+    certificate
+}
+
+#[derive(Clone, Copy)]
+enum OptionalKey<'a> {
+    Null,
+    Value(&'a CanonicalPublicCoseKey),
+}
+
+fn device_certificate_bytes_with_keys(
+    kind: u8,
+    signing_key: OptionalKey<'_>,
+    kem_key: OptionalKey<'_>,
+    corrupt_signing_thumbprint: bool,
+    corrupt_kem_thumbprint: bool,
+) -> Vec<u8> {
+    let root_signature = CoseSigner::from_secret(SecretBytes::new([0x55; 32]))
+        .sign_initial_root(&[0x77; 32])
+        .unwrap();
+    let mut certificate = Vec::new();
+    let mut encoder = Encoder::new(&mut certificate);
+    encoder
+        .array(5)
+        .and_then(|encoder| encoder.bytes(b"EA1\0"))
+        .and_then(|encoder| encoder.u8(5))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.array(3))
+        .and_then(|encoder| encoder.str("deviceCertificate"))
+        .and_then(|encoder| encoder.array(2))
+        .and_then(|encoder| encoder.array(13))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x22; 16]))
+        .and_then(|encoder| encoder.u8(kind))
+        .unwrap();
+    for key in [signing_key, kem_key] {
+        match key {
+            OptionalKey::Null => encoder.null().unwrap(),
+            OptionalKey::Value(key) => encoder.bytes(&key.to_deterministic_cbor()).unwrap(),
+        };
+    }
+    for (key, corrupt) in [
+        (signing_key, corrupt_signing_thumbprint),
+        (kem_key, corrupt_kem_thumbprint),
+    ] {
+        match key {
+            OptionalKey::Null => encoder.null().unwrap(),
+            OptionalKey::Value(key) => {
+                let mut thumbprint = *key.thumbprint().as_bytes();
+                if corrupt {
+                    thumbprint[0] ^= 1;
+                }
+                encoder.bytes(&thumbprint).unwrap()
+            }
+        };
+    }
+    encoder
+        .array(0)
         .and_then(|encoder| encoder.u8(0))
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.null())
@@ -102,6 +183,408 @@ fn device_certificate_bytes(public_key: &CanonicalPublicCoseKey) -> Vec<u8> {
         .unwrap();
     certificate.extend_from_slice(&root_signature);
     certificate
+}
+
+fn x25519_fixture_public_key() -> CanonicalPublicCoseKey {
+    CanonicalPublicCoseKey::x25519([0x99; 32]).unwrap()
+}
+
+fn root_certificate_bytes(authorized_rotation: bool, previous_is_hash: bool) -> Vec<u8> {
+    let key = fixture_public_key();
+    let key_bytes = key.to_deterministic_cbor();
+    let root_signature = CoseSigner::from_secret(SecretBytes::new([0x55; 32]))
+        .sign_initial_root(&[0x77; 32])
+        .unwrap();
+    let mut certificate = Vec::new();
+    let mut encoder = Encoder::new(&mut certificate);
+    encoder
+        .array(5)
+        .and_then(|encoder| encoder.bytes(b"EA1\0"))
+        .and_then(|encoder| encoder.u8(5))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.array(3))
+        .and_then(|encoder| encoder.str("rootCertificate"))
+        .unwrap();
+    if authorized_rotation {
+        encoder.array(2).unwrap();
+    }
+    encoder
+        .array(7)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&key_bytes))
+        .and_then(|encoder| encoder.bytes(key.thumbprint().as_bytes()))
+        .unwrap();
+    if previous_is_hash {
+        encoder.bytes(&[0xa1; 32]).unwrap();
+    } else {
+        encoder.null().unwrap();
+    }
+    encoder.u8(3).and_then(|encoder| encoder.array(0)).unwrap();
+    if authorized_rotation {
+        encoder.bytes(&[0xa2; 32]).unwrap();
+    }
+    encoder.array(1).unwrap();
+    certificate.extend_from_slice(&root_signature);
+    certificate
+}
+
+fn challenge_core(certificate_hash: CertificateHash) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(7)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x44; 32]))
+        .and_then(|encoder| encoder.i64(1_000))
+        .and_then(|encoder| encoder.i64(1_060))
+        .and_then(|encoder| encoder.bytes(certificate_hash.as_bytes()))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn trust_digest_input(subtype: &str, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(2)
+        .and_then(|encoder| encoder.str(subtype))
+        .unwrap();
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn device_certificate_core() -> Vec<u8> {
+    let key = fixture_public_key();
+    let key_bytes = key.to_deterministic_cbor();
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(13)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x22; 16]))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.bytes(&key_bytes))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.bytes(key.thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn grant_authorization_core() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(12)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x51; 16]))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.bytes(&[0x52; 32]))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.array(1))
+        .and_then(|encoder| encoder.bytes(&[0x53; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x54; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x55; 32]))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.i64(2_000))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn organization_admin_authorization_core() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(15)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x61; 16]))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.bytes(&[0x62; 32]))
+        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.bytes(fixture_certificate_hash().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x63; 32]))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.str("deviceCertificate"))
+        .and_then(|encoder| encoder.bytes(&[0x64; 32]))
+        .and_then(|encoder| encoder.i64(1_000))
+        .and_then(|encoder| encoder.i64(2_000))
+        .and_then(|encoder| encoder.bytes(&[0x65; 32]))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn organization_admin_authorization_object(
+    target_subtype: &str,
+    authorized_core_hash: &[u8; 32],
+) -> Vec<u8> {
+    let action = match target_subtype {
+        "deviceCertificate" => 0,
+        "registryEvent" => 2,
+        "policy" => 2,
+        "writerTransition" => 3,
+        "operatorBinding" => 4,
+        "rootCertificate" => 6,
+        _ => panic!("unsupported authorization target fixture"),
+    };
+    organization_admin_authorization_object_with_action(
+        action,
+        target_subtype,
+        authorized_core_hash,
+    )
+}
+
+fn organization_admin_authorization_object_with_action(
+    action: u8,
+    target_subtype: &str,
+    authorized_core_hash: &[u8; 32],
+) -> Vec<u8> {
+    let mut core = Vec::new();
+    Encoder::new(&mut core)
+        .array(15)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x61; 16]))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.bytes(&[0x62; 32]))
+        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.bytes(fixture_certificate_hash().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x63; 32]))
+        .and_then(|encoder| encoder.u8(action))
+        .and_then(|encoder| encoder.str(target_subtype))
+        .and_then(|encoder| encoder.bytes(authorized_core_hash))
+        .and_then(|encoder| encoder.i64(1_000))
+        .and_then(|encoder| encoder.i64(2_000))
+        .and_then(|encoder| encoder.bytes(&[0x65; 32]))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    let input = trust_digest_input("organizationAdminAuthorization", &core);
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let signature = signer
+        .sign_organization_admin_trust_digest(&input)
+        .unwrap_or_else(|_| signer.sign_initial_root(&[0x77; 32]).unwrap());
+    let mut object = Vec::new();
+    Encoder::new(&mut object)
+        .array(5)
+        .and_then(|encoder| encoder.bytes(b"EA1\0"))
+        .and_then(|encoder| encoder.u8(5))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.array(3))
+        .and_then(|encoder| encoder.str("organizationAdminAuthorization"))
+        .unwrap();
+    object.extend_from_slice(&core);
+    Encoder::new(&mut object).array(1).unwrap();
+    object.extend_from_slice(&signature);
+    object
+}
+
+fn operator_binding_core() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(11)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0xb1; 16]))
+        .and_then(|encoder| encoder.bytes(&[0xb2; 32]))
+        .and_then(|encoder| encoder.bytes(fixture_certificate_hash().as_bytes()))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.bytes(&[0xb3; 32]))
+        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn policy_core() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(21)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u16(100))
+        .and_then(|encoder| encoder.u8(10))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u16(100))
+        .and_then(|encoder| encoder.u16(100))
+        .and_then(|encoder| encoder.bool(true))
+        .and_then(|encoder| encoder.array(1))
+        .and_then(|encoder| encoder.bytes(&[0xb4; 32]))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u16(1_000))
+        .and_then(|encoder| encoder.u16(2_000))
+        .and_then(|encoder| encoder.array(3))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.bool(false))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.array(3))
+        .and_then(|encoder| encoder.bool(true))
+        .and_then(|encoder| encoder.str("v1"))
+        .and_then(|encoder| encoder.bool(true))
+        .and_then(|encoder| encoder.array(1))
+        .and_then(|encoder| encoder.str("EINSATZARCHIV-SUITE-1"))
+        .and_then(|encoder| encoder.array(1))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn writer_transition_core() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(9)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0xb5; 16]))
+        .and_then(|encoder| encoder.bytes(&[0xb6; 32]))
+        .and_then(|encoder| encoder.bytes(&[0xb7; 32]))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.bytes(&[0xb8; 32]))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn root_rotation_core() -> Vec<u8> {
+    let key = fixture_public_key();
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(7)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&key.to_deterministic_cbor()))
+        .and_then(|encoder| encoder.bytes(key.thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0xb9; 32]))
+        .and_then(|encoder| encoder.u8(4))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn registry_event_core() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(13)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.u8(9))
+        .and_then(|encoder| encoder.i64(900))
+        .and_then(|encoder| encoder.i64(950))
+        .and_then(|encoder| encoder.i64(2_000))
+        .and_then(|encoder| encoder.bytes(&[0x91; 32]))
+        .and_then(|encoder| encoder.array(2))
+        .and_then(|encoder| encoder.u8(2))
+        .and_then(|encoder| encoder.bytes(&[0x91; 32]))
+        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn destruction_authorization_core() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(10)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x71; 16]))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.bytes(&[0x72; 32]))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.array(1))
+        .and_then(|encoder| encoder.array(2))
+        .and_then(|encoder| encoder.bytes(&[0x73; 32]))
+        .and_then(|encoder| encoder.u8(7))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.u8(2))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn destruction_authorization_object() -> Vec<u8> {
+    let input = trust_digest_input(
+        "destructionAuthorization",
+        &destruction_authorization_core(),
+    );
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let signature = signer
+        .sign_destruction_approval_digest(fixture_certificate_hash(), &input)
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(5)
+        .and_then(|encoder| encoder.bytes(b"EA1\0"))
+        .and_then(|encoder| encoder.u8(5))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.array(3))
+        .and_then(|encoder| encoder.str("destructionAuthorization"))
+        .unwrap();
+    bytes.extend_from_slice(&destruction_authorization_core());
+    Encoder::new(&mut bytes).array(2).unwrap();
+    bytes.extend_from_slice(&signature);
+    bytes.extend_from_slice(&signature);
+    bytes
+}
+
+fn deletion_attestation_core(authorization_hash: &[u8; 32]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(10)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x71; 16]))
+        .and_then(|encoder| encoder.bytes(authorization_hash))
+        .and_then(|encoder| encoder.bytes(&[0x81; 16]))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(1))
+        .and_then(|encoder| encoder.bytes(&[0x82; 32]))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.i64(2_100))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+fn destruction_transition_core(authorization_hash: &[u8; 32]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(10)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x71; 16]))
+        .and_then(|encoder| encoder.bytes(authorization_hash))
+        .and_then(|encoder| encoder.bytes(&[0x83; 16]))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.i64(2_050))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
 }
 
 fn base_resolver() -> FixtureResolver {
@@ -315,6 +798,528 @@ fn grant_content_cannot_reuse_writer_record_authority() {
         .code(),
         "EA-TRUST-SIGNER-UNAUTHORIZED"
     );
+}
+
+#[test]
+fn challenge_response_requires_the_normative_server_receipt_capability() {
+    let exact_certificate_bytes =
+        device_certificate_bytes_with_profile(&fixture_public_key(), 6, &[]);
+    let requested_hash = CertificateHash::from(object_hash(&exact_certificate_bytes));
+    let resolver = FixtureResolver {
+        requested_hash,
+        exact_certificate_bytes,
+        registry_effective_from_sequence: ChainSequence::new(1),
+        registry_revoked_from_sequence: None,
+        registry_revoked: false,
+        result_error: None,
+        calls: Cell::new(0),
+    };
+    let core = challenge_core(requested_hash);
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let signed = signer.sign_challenge_response(&core).unwrap();
+    let context = VerificationContext::challenge_response(
+        &core,
+        ChainSequence::new(7),
+        RegistryVersion::new(3),
+    )
+    .unwrap();
+
+    assert_eq!(
+        verify_cose_sign1(&signed, &resolver, &context)
+            .unwrap_err()
+            .code(),
+        "EA-TRUST-SIGNER-UNAUTHORIZED"
+    );
+}
+
+#[test]
+fn recovery_verification_binds_the_expected_challenge_and_returns_a_nonproductive_proof() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let certificate_hash = fixture_certificate_hash();
+    let signed = signer
+        .sign_recovery_test(certificate_hash, SecretBytes::new([0xa5; 32]))
+        .unwrap();
+    let context = RecoveryVerificationContext::new(
+        certificate_hash,
+        fixture_organization(),
+        SignerRole::Writer,
+        ChainSequence::new(7),
+        RegistryVersion::new(3),
+        SecretBytes::new([0xa5; 32]),
+    );
+    let proof = verify_recovery_test(&signed, &base_resolver(), &context).unwrap();
+    assert!(proof.certificate_hash() == certificate_hash);
+    assert!(proof.key_thumbprint() == fixture_public_key().thumbprint());
+    assert_eq!(proof.certificate_kind(), SignerRole::Writer);
+
+    let wrong_challenge = RecoveryVerificationContext::new(
+        certificate_hash,
+        fixture_organization(),
+        SignerRole::Writer,
+        ChainSequence::new(7),
+        RegistryVersion::new(3),
+        SecretBytes::new([0xa4; 32]),
+    );
+    let error = match verify_recovery_test(&signed, &base_resolver(), &wrong_challenge) {
+        Ok(_) => panic!("a wrong recovery challenge must not verify"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "EA-TRUST-SIGNER-MISMATCH");
+}
+
+#[test]
+fn historical_grant_approval_context_derives_and_closes_its_trust_subtype() {
+    let certificate_hash = fixture_certificate_hash();
+    let grant = trust_digest_input("grantAuthorization", &grant_authorization_core());
+    assert!(
+        VerificationContext::historical_grant_approval_trust_digest(&grant, certificate_hash)
+            .is_ok()
+    );
+
+    let device = trust_digest_input("deviceCertificate", &device_certificate_core());
+    let error = match VerificationContext::historical_grant_approval_trust_digest(
+        &device,
+        certificate_hash,
+    ) {
+        Ok(_) => panic!("a device certificate must not enter grant approval"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "EA-CRYPTO-INVALID-PROTOCOL-CORE");
+}
+
+#[test]
+fn organization_admin_context_derives_its_embedded_signer_and_closes_its_subtype() {
+    let authorization = trust_digest_input(
+        "organizationAdminAuthorization",
+        &organization_admin_authorization_core(),
+    );
+    assert!(VerificationContext::organization_admin_trust_digest(&authorization).is_ok());
+
+    let grant = trust_digest_input("grantAuthorization", &grant_authorization_core());
+    assert!(VerificationContext::organization_admin_trust_digest(&grant).is_err());
+}
+
+#[test]
+fn destruction_approval_context_derives_and_closes_its_trust_subtype() {
+    let certificate_hash = fixture_certificate_hash();
+    let destruction = trust_digest_input(
+        "destructionAuthorization",
+        &destruction_authorization_core(),
+    );
+    assert!(
+        VerificationContext::destruction_approval_trust_digest(&destruction, certificate_hash,)
+            .is_ok()
+    );
+
+    let grant = trust_digest_input("grantAuthorization", &grant_authorization_core());
+    assert!(
+        VerificationContext::destruction_approval_trust_digest(&grant, certificate_hash).is_err()
+    );
+}
+
+#[test]
+fn deletion_attestation_context_binds_its_referenced_authorization_object() {
+    let authorization_object = destruction_authorization_object();
+    let authorization_hash = *object_hash(&authorization_object).as_bytes();
+    let attestation = trust_digest_input(
+        "deletionAttestation",
+        &deletion_attestation_core(&authorization_hash),
+    );
+    assert!(
+        VerificationContext::deletion_attestation_trust_digest(
+            &attestation,
+            &authorization_object,
+            fixture_certificate_hash(),
+        )
+        .is_ok()
+    );
+
+    let wrong_authorization = destruction_authorization_object()
+        .into_iter()
+        .enumerate()
+        .map(|(index, byte)| if index == 20 { byte ^ 1 } else { byte })
+        .collect::<Vec<_>>();
+    assert!(
+        VerificationContext::deletion_attestation_trust_digest(
+            &attestation,
+            &wrong_authorization,
+            fixture_certificate_hash(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn destruction_transition_is_a_separate_correlated_deletion_attest_operation() {
+    let authorization_object = destruction_authorization_object();
+    let authorization_hash = *object_hash(&authorization_object).as_bytes();
+    let transition = trust_digest_input(
+        "destructionTransition",
+        &destruction_transition_core(&authorization_hash),
+    );
+    assert!(
+        VerificationContext::destruction_transition_trust_digest(
+            &transition,
+            &authorization_object,
+            fixture_certificate_hash(),
+        )
+        .is_ok()
+    );
+    assert!(
+        VerificationContext::deletion_attestation_trust_digest(
+            &transition,
+            &authorization_object,
+            fixture_certificate_hash(),
+        )
+        .is_err()
+    );
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    assert!(
+        signer
+            .sign_destruction_transition_digest(
+                fixture_certificate_hash(),
+                &transition,
+                &authorization_object,
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn accepted_root_context_derives_registry_event_correlations_and_rejects_other_subtypes() {
+    let core = registry_event_core();
+    let authorized_input = trust_digest_input("registryEvent", &core);
+    let authorized_hash = *authorized_trust_digest(&authorized_input).as_bytes();
+    let authorization =
+        organization_admin_authorization_object_with_action(2, "registryEvent", &authorized_hash);
+    let mut payload = Vec::new();
+    Encoder::new(&mut payload).array(2).unwrap();
+    payload.extend_from_slice(&core);
+    Encoder::new(&mut payload)
+        .bytes(object_hash(&authorization).as_bytes())
+        .unwrap();
+    let root_input = trust_digest_input("registryEvent", &payload);
+    assert!(
+        VerificationContext::root_trust_digest(
+            &root_input,
+            fixture_certificate_hash(),
+            Some(&authorization),
+        )
+        .is_ok()
+    );
+
+    let wrong_effect_authorization =
+        organization_admin_authorization_object_with_action(1, "registryEvent", &authorized_hash);
+    let mut wrong_effect_payload = Vec::new();
+    Encoder::new(&mut wrong_effect_payload).array(2).unwrap();
+    wrong_effect_payload.extend_from_slice(&core);
+    Encoder::new(&mut wrong_effect_payload)
+        .bytes(object_hash(&wrong_effect_authorization).as_bytes())
+        .unwrap();
+    let wrong_effect_input = trust_digest_input("registryEvent", &wrong_effect_payload);
+    assert!(
+        VerificationContext::root_trust_digest(
+            &wrong_effect_input,
+            fixture_certificate_hash(),
+            Some(&wrong_effect_authorization),
+        )
+        .is_err(),
+        "deviceRevoke authorization must not approve a policy-activation registry change"
+    );
+
+    let grant = trust_digest_input("grantAuthorization", &grant_authorization_core());
+    assert!(
+        VerificationContext::root_trust_digest(
+            &grant,
+            fixture_certificate_hash(),
+            Some(&authorization),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn accepted_root_context_supports_only_hash_correlated_authorized_device_certificates() {
+    let core = device_certificate_core();
+    let authorized_input = trust_digest_input("deviceCertificate", &core);
+    let authorization = organization_admin_authorization_object(
+        "deviceCertificate",
+        authorized_trust_digest(&authorized_input).as_bytes(),
+    );
+    let mut payload = Vec::new();
+    Encoder::new(&mut payload).array(2).unwrap();
+    payload.extend_from_slice(&core);
+    Encoder::new(&mut payload)
+        .bytes(object_hash(&authorization).as_bytes())
+        .unwrap();
+    let input = trust_digest_input("deviceCertificate", &payload);
+    assert!(
+        VerificationContext::root_trust_digest(
+            &input,
+            fixture_certificate_hash(),
+            Some(&authorization),
+        )
+        .is_ok()
+    );
+
+    let wrong_authorization = organization_admin_authorization_object(
+        "registryEvent",
+        authorized_trust_digest(&trust_digest_input("registryEvent", &registry_event_core()))
+            .as_bytes(),
+    );
+    assert!(
+        VerificationContext::root_trust_digest(
+            &input,
+            fixture_certificate_hash(),
+            Some(&wrong_authorization),
+        )
+        .is_err()
+    );
+
+    let wrong_action = organization_admin_authorization_object_with_action(
+        4,
+        "deviceCertificate",
+        authorized_trust_digest(&authorized_input).as_bytes(),
+    );
+    let mut wrong_action_payload = Vec::new();
+    Encoder::new(&mut wrong_action_payload).array(2).unwrap();
+    wrong_action_payload.extend_from_slice(&core);
+    Encoder::new(&mut wrong_action_payload)
+        .bytes(object_hash(&wrong_action).as_bytes())
+        .unwrap();
+    let wrong_action_input = trust_digest_input("deviceCertificate", &wrong_action_payload);
+    assert!(
+        VerificationContext::root_trust_digest(
+            &wrong_action_input,
+            fixture_certificate_hash(),
+            Some(&wrong_action),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn accepted_root_context_parses_each_authorized_sequence_bearing_subtype() {
+    for (subtype, core) in [
+        ("operatorBinding", operator_binding_core()),
+        ("policy", policy_core()),
+        ("writerTransition", writer_transition_core()),
+    ] {
+        let authorized_input = trust_digest_input(subtype, &core);
+        let authorization = organization_admin_authorization_object(
+            subtype,
+            authorized_trust_digest(&authorized_input).as_bytes(),
+        );
+        let mut payload = Vec::new();
+        Encoder::new(&mut payload).array(2).unwrap();
+        payload.extend_from_slice(&core);
+        Encoder::new(&mut payload)
+            .bytes(object_hash(&authorization).as_bytes())
+            .unwrap();
+        let input = trust_digest_input(subtype, &payload);
+        assert!(
+            VerificationContext::root_trust_digest(
+                &input,
+                fixture_certificate_hash(),
+                Some(&authorization),
+            )
+            .is_ok(),
+            "valid root subtype {subtype}"
+        );
+    }
+}
+
+#[test]
+fn accepted_root_rotation_derives_registry_without_caller_supplied_sequence() {
+    let core = root_rotation_core();
+    let authorized_input = trust_digest_input("rootCertificate", &core);
+    let authorization = organization_admin_authorization_object(
+        "rootCertificate",
+        authorized_trust_digest(&authorized_input).as_bytes(),
+    );
+    let mut payload = Vec::new();
+    Encoder::new(&mut payload).array(2).unwrap();
+    payload.extend_from_slice(&core);
+    Encoder::new(&mut payload)
+        .bytes(object_hash(&authorization).as_bytes())
+        .unwrap();
+    let input = trust_digest_input("rootCertificate", &payload);
+    assert!(
+        VerificationContext::root_trust_digest(
+            &input,
+            fixture_certificate_hash(),
+            Some(&authorization),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn trust_signing_paths_derive_their_exact_subtype_payloads() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let certificate_hash = fixture_certificate_hash();
+    let grant = trust_digest_input("grantAuthorization", &grant_authorization_core());
+    let device = trust_digest_input("deviceCertificate", &device_certificate_core());
+    assert!(
+        signer
+            .sign_historical_grant_approval_digest(certificate_hash, &grant)
+            .is_ok()
+    );
+    assert!(
+        signer
+            .sign_historical_grant_approval_digest(certificate_hash, &device)
+            .is_err()
+    );
+
+    let destruction = trust_digest_input(
+        "destructionAuthorization",
+        &destruction_authorization_core(),
+    );
+    assert!(
+        signer
+            .sign_destruction_approval_digest(certificate_hash, &destruction)
+            .is_ok()
+    );
+    assert!(
+        signer
+            .sign_destruction_approval_digest(certificate_hash, &grant)
+            .is_err()
+    );
+}
+
+#[test]
+fn remaining_trust_signing_paths_bind_embedded_and_referenced_objects() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let certificate_hash = fixture_certificate_hash();
+    let admin = trust_digest_input(
+        "organizationAdminAuthorization",
+        &organization_admin_authorization_core(),
+    );
+    assert!(signer.sign_organization_admin_trust_digest(&admin).is_ok());
+    let grant = trust_digest_input("grantAuthorization", &grant_authorization_core());
+    assert!(signer.sign_organization_admin_trust_digest(&grant).is_err());
+
+    let authorization_object = destruction_authorization_object();
+    let authorization_hash = *object_hash(&authorization_object).as_bytes();
+    let deletion = trust_digest_input(
+        "deletionAttestation",
+        &deletion_attestation_core(&authorization_hash),
+    );
+    assert!(
+        signer
+            .sign_deletion_attestation_digest(certificate_hash, &deletion, &authorization_object,)
+            .is_ok()
+    );
+    assert!(
+        signer
+            .sign_deletion_attestation_digest(certificate_hash, &grant, &authorization_object)
+            .is_err()
+    );
+
+    let registry_core = registry_event_core();
+    let authorized_input = trust_digest_input("registryEvent", &registry_core);
+    let authorization = organization_admin_authorization_object(
+        "registryEvent",
+        authorized_trust_digest(&authorized_input).as_bytes(),
+    );
+    let mut payload = Vec::new();
+    Encoder::new(&mut payload).array(2).unwrap();
+    payload.extend_from_slice(&registry_core);
+    Encoder::new(&mut payload)
+        .bytes(object_hash(&authorization).as_bytes())
+        .unwrap();
+    let registry = trust_digest_input("registryEvent", &payload);
+    assert!(
+        signer
+            .sign_root_trust_digest(certificate_hash, &registry, Some(&authorization))
+            .is_ok()
+    );
+    assert!(
+        signer
+            .sign_root_trust_digest(certificate_hash, &grant, Some(&authorization))
+            .is_err()
+    );
+}
+
+#[test]
+fn certificate_kind_key_and_thumbprint_matrix_is_enforced() {
+    let signing = fixture_public_key();
+    let kem = x25519_fixture_public_key();
+    let matrix = [
+        (0_u8, true, false),
+        (1, true, true),
+        (2, true, false),
+        (3, true, false),
+        (4, false, true),
+        (5, true, false),
+        (6, true, false),
+        (7, true, false),
+    ];
+    for (kind, has_signing, has_kem) in matrix {
+        let valid = device_certificate_bytes_with_keys(
+            kind,
+            if has_signing {
+                OptionalKey::Value(&signing)
+            } else {
+                OptionalKey::Null
+            },
+            if has_kem {
+                OptionalKey::Value(&kem)
+            } else {
+                OptionalKey::Null
+            },
+            false,
+            false,
+        );
+        assert!(
+            ea_crypto::validate_signer_certificate(&valid).is_ok(),
+            "valid kind {kind}"
+        );
+
+        let crossed = device_certificate_bytes_with_keys(
+            kind,
+            if has_signing {
+                OptionalKey::Null
+            } else {
+                OptionalKey::Value(&signing)
+            },
+            if has_kem {
+                OptionalKey::Null
+            } else {
+                OptionalKey::Value(&kem)
+            },
+            false,
+            false,
+        );
+        assert!(
+            ea_crypto::validate_signer_certificate(&crossed).is_err(),
+            "crossed kind {kind}"
+        );
+    }
+
+    for (corrupt_signing, corrupt_kem) in [(true, false), (false, true)] {
+        let mismatch = device_certificate_bytes_with_keys(
+            1,
+            OptionalKey::Value(&signing),
+            OptionalKey::Value(&kem),
+            corrupt_signing,
+            corrupt_kem,
+        );
+        assert!(ea_crypto::validate_signer_certificate(&mismatch).is_err());
+    }
+}
+
+#[test]
+fn initial_and_rotated_root_previous_hash_forms_cannot_be_crossed() {
+    assert!(ea_crypto::validate_signer_certificate(&root_certificate_bytes(false, false)).is_ok());
+    assert!(ea_crypto::validate_signer_certificate(&root_certificate_bytes(true, true)).is_ok());
+    assert!(ea_crypto::validate_signer_certificate(&root_certificate_bytes(false, true)).is_err());
+    assert!(ea_crypto::validate_signer_certificate(&root_certificate_bytes(true, false)).is_err());
 }
 
 #[test]

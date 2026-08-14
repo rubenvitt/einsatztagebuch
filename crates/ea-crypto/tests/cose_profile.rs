@@ -4,7 +4,7 @@ use ea_crypto::{
     encode_signed_protocol_wrapper, parse_cose_sign1, validate_unsigned_protocol_core,
     verify_enrollment_pop, verify_initial_root_pop,
 };
-use ea_types::{CertificateHash, Hash32};
+use ea_types::CertificateHash;
 
 const NORMAL_PROTECTED_HEX: &str = "a50132028303046f63657274696669636174654861736803782b6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e7265636f72642d646967657374045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f6365727469666963617465486173685820d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 const INITIAL_ROOT_PROTECTED_HEX: &str = "a401320282030403782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f49";
@@ -236,16 +236,8 @@ fn three_protected_profiles_match_hard_coded_wire_answers() {
 fn tag_18_attached_cose_round_trips_exactly_and_mutations_fail() {
     let signer =
         CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
-    let certificate =
-        CertificateHash::try_from(
-            &hex::decode("d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef")
-                .unwrap()[..],
-        )
-        .unwrap();
     let payload: [u8; 32] = std::array::from_fn(|index| 0x40 + index as u8);
-    let encoded = signer
-        .sign_root_trust_digest(certificate, Hash32::try_from(payload.as_slice()).unwrap())
-        .unwrap();
+    let encoded = signer.sign_initial_root(&payload).unwrap();
     let parsed = parse_cose_sign1(&encoded, &[]).unwrap();
     assert_eq!(parsed.exact_bytes(), encoded);
     assert_eq!(parsed.payload(), payload);
@@ -466,12 +458,7 @@ fn rfc9921_ctt_imprint_and_exact_token_header_match_published_bytes() {
         assert!(attach_rfc3161_ctt(&timestamped, &token).is_err());
     }
 
-    let record = signer
-        .sign_root_trust_digest(
-            certificate,
-            Hash32::try_from([0x40; 32].as_slice()).unwrap(),
-        )
-        .unwrap();
+    let record = signer.sign_initial_root(&[0x40; 32]).unwrap();
     assert!(attach_rfc3161_ctt(&record, &token).is_err());
 }
 

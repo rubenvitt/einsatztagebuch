@@ -13,11 +13,12 @@ pub use aead::{
     AEAD_NONCE_SIZE, AEAD_OVERHEAD, CEK_SIZE, aead_open, aead_seal, checked_ciphertext_length,
 };
 pub use cose::{
-    ContentType, CoseSigner, CoseVerifier, ParsedCoseSign1, ProtectedHeader, ResolvedSigner,
-    SignerCertificateResolver, SignerRole, UnverifiedRfc3161TimeStampToken, VerificationContext,
-    attach_rfc3161_ctt, cose_sign1_ctt_imprint, encode_signed_protocol_wrapper, parse_cose_sign1,
-    validate_unsigned_protocol_core, verify_cose_sign1, verify_enrollment_pop,
-    verify_initial_root_pop,
+    ContentType, CoseSigner, CoseVerifier, ParsedCoseSign1, ProtectedHeader,
+    RecoveryVerificationContext, ResolvedSigner, SignerCertificateResolver, SignerRole,
+    UnverifiedRfc3161TimeStampToken, VerificationContext, VerifiedRecoveryTest, attach_rfc3161_ctt,
+    cose_sign1_ctt_imprint, encode_signed_protocol_wrapper, parse_cose_sign1,
+    validate_signer_certificate, validate_unsigned_protocol_core, verify_cose_sign1,
+    verify_enrollment_pop, verify_initial_root_pop, verify_recovery_test,
 };
 pub use digest::{
     GRANT_SUITE_ID, SUITE_ID, SuiteV1, authorized_trust_digest, bootstrap_anchor_hash,

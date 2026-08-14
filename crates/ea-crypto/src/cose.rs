@@ -11,10 +11,10 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use minicbor::{Decoder, Encoder, data::Type};
 use x509_tsp::TstInfo;
 
-use crate::digest::sha256_parts;
+use crate::digest::{recovery_test_digest_ref, sha256_parts};
 use crate::{
     CanonicalPublicCoseKey, CryptoError, SecretBytes, grant_digest, object_hash, receipt_digest,
-    record_digest, recovery_test_digest,
+    record_digest, recovery_test_digest, trust_digest,
 };
 
 const COSE_SIGN1_TAG: u64 = 18;
@@ -380,32 +380,36 @@ impl CoseSigner {
     pub fn sign_root_trust_digest(
         &self,
         certificate_hash: CertificateHash,
-        digest: Hash32,
+        exact_trust_digest_input: &[u8],
+        exact_admin_authorization_object: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
+        let bindings =
+            root_trust_bindings(exact_trust_digest_input, exact_admin_authorization_object)?;
         self.sign_normal(
             ContentType::TrustDigest,
             certificate_hash,
-            digest.as_bytes(),
+            bindings.digest.as_bytes(),
         )
     }
 
     pub fn sign_organization_admin_trust_digest(
         &self,
-        certificate_hash: CertificateHash,
-        digest: Hash32,
+        exact_trust_digest_input: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
+        let bindings = organization_admin_authorization_bindings(exact_trust_digest_input)?;
         self.sign_normal(
             ContentType::TrustDigest,
-            certificate_hash,
-            digest.as_bytes(),
+            bindings.certificate_hash,
+            bindings.digest.as_bytes(),
         )
     }
 
     pub fn sign_historical_grant_approval_digest(
         &self,
         certificate_hash: CertificateHash,
-        digest: Hash32,
+        exact_trust_digest_input: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
+        let digest = grant_authorization_bindings(exact_trust_digest_input)?.digest;
         self.sign_normal(
             ContentType::TrustDigest,
             certificate_hash,
@@ -416,8 +420,11 @@ impl CoseSigner {
     pub fn sign_destruction_approval_digest(
         &self,
         certificate_hash: CertificateHash,
-        digest: Hash32,
+        exact_trust_digest_input: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
+        let digest = destruction_authorization_bindings(exact_trust_digest_input)?
+            .operation
+            .digest;
         self.sign_normal(
             ContentType::TrustDigest,
             certificate_hash,
@@ -428,12 +435,44 @@ impl CoseSigner {
     pub fn sign_deletion_attestation_digest(
         &self,
         certificate_hash: CertificateHash,
-        digest: Hash32,
+        exact_trust_digest_input: &[u8],
+        exact_destruction_authorization_object: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
+        let attestation = deletion_attestation_bindings(exact_trust_digest_input)?;
+        let authorization =
+            destruction_authorization_object_bindings(exact_destruction_authorization_object)?;
+        if attestation.destruction_id != authorization.destruction_id
+            || attestation.authorization_object_hash
+                != *object_hash(exact_destruction_authorization_object).as_bytes()
+        {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
         self.sign_normal(
             ContentType::TrustDigest,
             certificate_hash,
-            digest.as_bytes(),
+            attestation.digest.as_bytes(),
+        )
+    }
+
+    pub fn sign_destruction_transition_digest(
+        &self,
+        certificate_hash: CertificateHash,
+        exact_trust_digest_input: &[u8],
+        exact_destruction_authorization_object: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let transition = destruction_transition_bindings(exact_trust_digest_input)?;
+        let authorization =
+            destruction_authorization_object_bindings(exact_destruction_authorization_object)?;
+        if transition.destruction_id != authorization.destruction_id
+            || transition.authorization_object_hash
+                != *object_hash(exact_destruction_authorization_object).as_bytes()
+        {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        self.sign_normal(
+            ContentType::TrustDigest,
+            certificate_hash,
+            transition.digest.as_bytes(),
         )
     }
 
@@ -747,6 +786,7 @@ pub enum SignerRole {
     HistoricalGrantAuthority,
     ServerReceipt,
     DeletionAttest,
+    RecoveryRecipient,
 }
 
 pub struct ResolvedSigner<'a> {
@@ -772,7 +812,7 @@ pub struct VerificationContext {
     expected_key_thumbprint: Option<KeyThumbprint>,
     expected_organization_id: OrganizationId,
     expected_device_id: Option<DeviceId>,
-    expected_sequence: ChainSequence,
+    expected_sequence: Option<ChainSequence>,
     expected_role: SignerRole,
     expected_capability: Option<CertificateCapability>,
     require_accepted_root_line: bool,
@@ -850,114 +890,149 @@ impl VerificationContext {
         ))
     }
 
-    #[must_use]
     pub fn root_trust_digest(
-        expected_digest: Hash32,
+        exact_trust_digest_input: &[u8],
         root_certificate_hash: CertificateHash,
-        organization_id: OrganizationId,
-        sequence: ChainSequence,
-        registry: RegistryVersion,
-    ) -> Self {
-        Self::digest(
-            ContentType::TrustDigest,
-            expected_digest,
-            root_certificate_hash,
-            None,
-            organization_id,
-            sequence,
-            SignerRole::Root,
-            None,
-            true,
-            registry,
-        )
+        exact_admin_authorization_object: Option<&[u8]>,
+    ) -> Result<Self, CryptoError> {
+        let bindings =
+            root_trust_bindings(exact_trust_digest_input, exact_admin_authorization_object)?;
+        Ok(match bindings.sequence {
+            Some(sequence) => Self::digest(
+                ContentType::TrustDigest,
+                bindings.digest,
+                root_certificate_hash,
+                None,
+                bindings.organization_id,
+                sequence,
+                SignerRole::Root,
+                None,
+                true,
+                bindings.registry,
+            ),
+            None => Self::digest_without_sequence(
+                ContentType::TrustDigest,
+                bindings.digest,
+                root_certificate_hash,
+                None,
+                bindings.organization_id,
+                SignerRole::Root,
+                None,
+                true,
+                bindings.registry,
+            ),
+        })
     }
 
-    #[must_use]
     pub fn organization_admin_trust_digest(
-        expected_digest: Hash32,
-        certificate_hash: CertificateHash,
-        organization_id: OrganizationId,
-        sequence: ChainSequence,
-        registry: RegistryVersion,
-    ) -> Self {
-        Self::digest(
+        exact_trust_digest_input: &[u8],
+    ) -> Result<Self, CryptoError> {
+        let bindings = organization_admin_authorization_bindings(exact_trust_digest_input)?;
+        Ok(Self::digest_without_sequence(
             ContentType::TrustDigest,
-            expected_digest,
-            certificate_hash,
-            None,
-            organization_id,
-            sequence,
+            bindings.digest,
+            bindings.certificate_hash,
+            Some(bindings.key_thumbprint),
+            bindings.organization_id,
             SignerRole::OrganizationAdmin,
             Some(CertificateCapability::OrganizationAdminApprove),
             false,
-            registry,
-        )
+            bindings.registry,
+        ))
     }
 
-    #[must_use]
     pub fn historical_grant_approval_trust_digest(
-        expected_digest: Hash32,
+        exact_trust_digest_input: &[u8],
         certificate_hash: CertificateHash,
-        organization_id: OrganizationId,
-        sequence: ChainSequence,
-        registry: RegistryVersion,
-    ) -> Self {
-        Self::digest(
+    ) -> Result<Self, CryptoError> {
+        let bindings = grant_authorization_bindings(exact_trust_digest_input)?;
+        Ok(Self::digest(
             ContentType::TrustDigest,
-            expected_digest,
+            bindings.digest,
             certificate_hash,
             None,
-            organization_id,
-            sequence,
+            bindings.organization_id,
+            bindings.sequence,
             SignerRole::KeyApprover,
             Some(CertificateCapability::HistoricalGrantApprove),
             false,
-            registry,
-        )
+            bindings.registry,
+        ))
     }
 
-    #[must_use]
     pub fn destruction_approval_trust_digest(
-        expected_digest: Hash32,
+        exact_trust_digest_input: &[u8],
         certificate_hash: CertificateHash,
-        organization_id: OrganizationId,
-        sequence: ChainSequence,
-        registry: RegistryVersion,
-    ) -> Self {
-        Self::digest(
+    ) -> Result<Self, CryptoError> {
+        let bindings = destruction_authorization_bindings(exact_trust_digest_input)?;
+        Ok(Self::digest(
             ContentType::TrustDigest,
-            expected_digest,
+            bindings.operation.digest,
             certificate_hash,
             None,
-            organization_id,
-            sequence,
+            bindings.operation.organization_id,
+            bindings.operation.sequence,
             SignerRole::KeyApprover,
             Some(CertificateCapability::DestructionApprove),
             false,
-            registry,
-        )
+            bindings.operation.registry,
+        ))
     }
 
-    #[must_use]
     pub fn deletion_attestation_trust_digest(
-        expected_digest: Hash32,
+        exact_trust_digest_input: &[u8],
+        exact_destruction_authorization_object: &[u8],
         certificate_hash: CertificateHash,
-        organization_id: OrganizationId,
-        sequence: ChainSequence,
-        registry: RegistryVersion,
-    ) -> Self {
-        Self::digest(
+    ) -> Result<Self, CryptoError> {
+        let attestation = deletion_attestation_bindings(exact_trust_digest_input)?;
+        let authorization =
+            destruction_authorization_object_bindings(exact_destruction_authorization_object)?;
+        if attestation.destruction_id != authorization.destruction_id
+            || attestation.authorization_object_hash
+                != *object_hash(exact_destruction_authorization_object).as_bytes()
+        {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        Ok(Self::digest(
             ContentType::TrustDigest,
-            expected_digest,
+            attestation.digest,
             certificate_hash,
             None,
-            organization_id,
-            sequence,
+            authorization.operation.organization_id,
+            authorization.operation.sequence,
             SignerRole::DeletionAttest,
             Some(CertificateCapability::DeletionAttest),
             false,
-            registry,
-        )
+            authorization.operation.registry,
+        ))
+    }
+
+    pub fn destruction_transition_trust_digest(
+        exact_trust_digest_input: &[u8],
+        exact_destruction_authorization_object: &[u8],
+        certificate_hash: CertificateHash,
+    ) -> Result<Self, CryptoError> {
+        let transition = destruction_transition_bindings(exact_trust_digest_input)?;
+        let authorization =
+            destruction_authorization_object_bindings(exact_destruction_authorization_object)?;
+        if transition.destruction_id != authorization.destruction_id
+            || transition.authorization_object_hash
+                != *object_hash(exact_destruction_authorization_object).as_bytes()
+        {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        Ok(Self::digest(
+            ContentType::TrustDigest,
+            transition.digest,
+            certificate_hash,
+            None,
+            authorization.operation.organization_id,
+            authorization.operation.sequence,
+            SignerRole::DeletionAttest,
+            Some(CertificateCapability::DeletionAttest),
+            false,
+            authorization.operation.registry,
+        ))
     }
 
     pub fn checkpoint(
@@ -1043,7 +1118,7 @@ impl VerificationContext {
             None,
             effective_sequence,
             SignerRole::ServerReceipt,
-            None,
+            Some(CertificateCapability::ServerReceipt),
             registry,
         )
     }
@@ -1085,7 +1160,34 @@ impl VerificationContext {
             expected_key_thumbprint,
             expected_organization_id,
             expected_device_id: None,
-            expected_sequence,
+            expected_sequence: Some(expected_sequence),
+            expected_role,
+            expected_capability,
+            require_accepted_root_line,
+            registry,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn digest_without_sequence(
+        content_type: ContentType,
+        exact_digest: Hash32,
+        expected_certificate_hash: CertificateHash,
+        expected_key_thumbprint: Option<KeyThumbprint>,
+        expected_organization_id: OrganizationId,
+        expected_role: SignerRole,
+        expected_capability: Option<CertificateCapability>,
+        require_accepted_root_line: bool,
+        registry: RegistryVersion,
+    ) -> Self {
+        Self {
+            content_type,
+            exact_payload: exact_digest.as_bytes().to_vec(),
+            expected_certificate_hash,
+            expected_key_thumbprint,
+            expected_organization_id,
+            expected_device_id: None,
+            expected_sequence: None,
             expected_role,
             expected_capability,
             require_accepted_root_line,
@@ -1113,7 +1215,7 @@ impl VerificationContext {
             expected_key_thumbprint: None,
             expected_organization_id,
             expected_device_id,
-            expected_sequence,
+            expected_sequence: Some(expected_sequence),
             expected_role,
             expected_capability,
             require_accepted_root_line: false,
@@ -1127,6 +1229,69 @@ pub struct VerifiedSigner {
     key_thumbprint: KeyThumbprint,
     role: SignerRole,
     organization_id: OrganizationId,
+}
+
+pub struct RecoveryVerificationContext {
+    expected_certificate_hash: CertificateHash,
+    expected_organization_id: OrganizationId,
+    expected_certificate_kind: SignerRole,
+    expected_sequence: ChainSequence,
+    registry: RegistryVersion,
+    expected_challenge: SecretBytes<32>,
+}
+
+impl RecoveryVerificationContext {
+    #[must_use]
+    pub const fn new(
+        expected_certificate_hash: CertificateHash,
+        expected_organization_id: OrganizationId,
+        expected_certificate_kind: SignerRole,
+        expected_sequence: ChainSequence,
+        registry: RegistryVersion,
+        expected_challenge: SecretBytes<32>,
+    ) -> Self {
+        Self {
+            expected_certificate_hash,
+            expected_organization_id,
+            expected_certificate_kind,
+            expected_sequence,
+            registry,
+            expected_challenge,
+        }
+    }
+}
+
+/// A successful, nonproductive recovery-inventory proof.
+///
+/// It is deliberately distinct from [`VerifiedSigner`] and cannot be used as
+/// productive signer authority.
+///
+/// ```compile_fail
+/// use ea_crypto::{VerifiedRecoveryTest, VerifiedSigner};
+/// fn productive_authority(_: VerifiedSigner) {}
+/// fn misuse(proof: VerifiedRecoveryTest) { productive_authority(proof); }
+/// ```
+pub struct VerifiedRecoveryTest {
+    certificate_hash: CertificateHash,
+    key_thumbprint: KeyThumbprint,
+    certificate_kind: SignerRole,
+}
+
+impl VerifiedRecoveryTest {
+    #[must_use]
+    pub const fn certificate_hash(&self) -> CertificateHash {
+        self.certificate_hash
+    }
+
+    #[must_use]
+    pub const fn key_thumbprint(&self) -> KeyThumbprint {
+        self.key_thumbprint
+    }
+
+    #[must_use]
+    pub const fn certificate_kind(&self) -> SignerRole {
+        self.certificate_kind
+    }
 }
 
 impl VerifiedSigner {
@@ -1196,17 +1361,23 @@ pub fn verify_cose_sign1(
         return Err(CryptoError::SignerMismatch);
     }
     let certificate = parse_signer_certificate(resolved.exact_certificate_bytes)?;
-    if certificate.public_key.thumbprint() != parsed.protected.key_thumbprint {
+    let public_key = certificate
+        .public_key
+        .as_ref()
+        .ok_or(CryptoError::SignerUnauthorized)?;
+    if public_key.thumbprint() != parsed.protected.key_thumbprint {
         return Err(CryptoError::SignerMismatch);
     }
-    let inactive = context.expected_sequence < certificate.effective_from_sequence
-        || context.expected_sequence < resolved.registry_effective_from_sequence
-        || certificate
-            .revoked_from_sequence
-            .is_some_and(|sequence| context.expected_sequence >= sequence)
-        || resolved
-            .registry_revoked_from_sequence
-            .is_some_and(|sequence| context.expected_sequence >= sequence);
+    let inactive = context.expected_sequence.is_some_and(|expected_sequence| {
+        expected_sequence < certificate.effective_from_sequence
+            || expected_sequence < resolved.registry_effective_from_sequence
+            || certificate
+                .revoked_from_sequence
+                .is_some_and(|sequence| expected_sequence >= sequence)
+            || resolved
+                .registry_revoked_from_sequence
+                .is_some_and(|sequence| expected_sequence >= sequence)
+    });
     if certificate.organization_id != context.expected_organization_id
         || context
             .expected_device_id
@@ -1221,7 +1392,7 @@ pub fn verify_cose_sign1(
     {
         return Err(CryptoError::SignerUnauthorized);
     }
-    parsed.verify_with_key(&certificate.public_key)?;
+    parsed.verify_with_key(public_key)?;
     Ok(VerifiedSigner {
         certificate_hash,
         key_thumbprint: parsed.protected.key_thumbprint,
@@ -1230,14 +1401,76 @@ pub fn verify_cose_sign1(
     })
 }
 
+pub fn verify_recovery_test(
+    bytes: &[u8],
+    resolver: &impl SignerCertificateResolver,
+    context: &RecoveryVerificationContext,
+) -> Result<VerifiedRecoveryTest, CryptoError> {
+    let parsed = parse_cose_sign1(bytes, &[])?;
+    if parsed.protected.profile != ProtectedProfile::Normal
+        || parsed.protected.content_type != ContentType::RecoveryTestDigest
+    {
+        return Err(CryptoError::InvalidCose);
+    }
+    let certificate_hash = parsed
+        .protected
+        .certificate_hash
+        .ok_or(CryptoError::InvalidCose)?;
+    if certificate_hash != context.expected_certificate_hash {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let resolved = resolver.resolve(certificate_hash, context.registry)?;
+    if CertificateHash::from(object_hash(resolved.exact_certificate_bytes)) != certificate_hash {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let certificate = parse_signer_certificate(resolved.exact_certificate_bytes)?;
+    let public_key = certificate
+        .public_key
+        .as_ref()
+        .ok_or(CryptoError::SignerUnauthorized)?;
+    let thumbprint = public_key.thumbprint();
+    if thumbprint != parsed.protected.key_thumbprint
+        || parsed.payload
+            != recovery_test_digest_ref(&context.expected_challenge, thumbprint).as_bytes()
+    {
+        return Err(CryptoError::SignerMismatch);
+    }
+    let inactive = context.expected_sequence < certificate.effective_from_sequence
+        || context.expected_sequence < resolved.registry_effective_from_sequence
+        || certificate
+            .revoked_from_sequence
+            .is_some_and(|sequence| context.expected_sequence >= sequence)
+        || resolved
+            .registry_revoked_from_sequence
+            .is_some_and(|sequence| context.expected_sequence >= sequence);
+    if certificate.organization_id != context.expected_organization_id
+        || certificate.role != context.expected_certificate_kind
+        || resolved.registry_revoked
+        || inactive
+        || (certificate.role == SignerRole::Root && !resolved.root_line_accepted)
+    {
+        return Err(CryptoError::SignerUnauthorized);
+    }
+    parsed.verify_with_key(public_key)?;
+    Ok(VerifiedRecoveryTest {
+        certificate_hash,
+        key_thumbprint: thumbprint,
+        certificate_kind: certificate.role,
+    })
+}
+
 struct ParsedSignerCertificate {
-    public_key: CanonicalPublicCoseKey,
+    public_key: Option<CanonicalPublicCoseKey>,
     organization_id: OrganizationId,
     device_id: Option<DeviceId>,
     role: SignerRole,
     capabilities: Vec<CertificateCapability>,
     effective_from_sequence: ChainSequence,
     revoked_from_sequence: Option<ChainSequence>,
+}
+
+pub fn validate_signer_certificate(exact_certificate_bytes: &[u8]) -> Result<(), CryptoError> {
+    parse_signer_certificate(exact_certificate_bytes).map(|_| ())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1314,27 +1547,46 @@ fn parse_device_certificate_core(
         .map_err(|_| CryptoError::SignerMismatch)?;
     let device_id =
         DeviceId::try_from(signer_bstr(decoder, 16)?).map_err(|_| CryptoError::SignerMismatch)?;
-    let role = match decoder.u64().map_err(|_| CryptoError::SignerMismatch)? {
+    let kind = decoder.u64().map_err(|_| CryptoError::SignerMismatch)?;
+    let role = match kind {
         0 => SignerRole::Writer,
         1 => SignerRole::Reader,
         2 => SignerRole::OrganizationAdmin,
         3 => SignerRole::KeyApprover,
+        4 => SignerRole::RecoveryRecipient,
         5 => SignerRole::HistoricalGrantAuthority,
         6 => SignerRole::ServerReceipt,
         7 => SignerRole::DeletionAttest,
-        4 | 8.. => return Err(CryptoError::SignerMismatch),
+        8.. => return Err(CryptoError::SignerMismatch),
     };
-    let public_key = signer_optional_public_key(decoder)?.ok_or(CryptoError::SignerMismatch)?;
-    if !matches!(public_key, CanonicalPublicCoseKey::Ed25519(_)) {
+    let signing_key = signer_optional_public_key(decoder)?;
+    let kem_key = signer_optional_public_key(decoder)?;
+    let signing_thumbprint = signer_optional_thumbprint(decoder)?;
+    let kem_thumbprint = signer_optional_thumbprint(decoder)?;
+    let signing_required = kind != 4;
+    let kem_required = matches!(kind, 1 | 4);
+    if signing_key.is_some() != signing_required
+        || signing_thumbprint.is_some() != signing_required
+        || kem_key.is_some() != kem_required
+        || kem_thumbprint.is_some() != kem_required
+        || signing_key
+            .as_ref()
+            .is_some_and(|key| !matches!(key, CanonicalPublicCoseKey::Ed25519(_)))
+        || kem_key
+            .as_ref()
+            .is_some_and(|key| !matches!(key, CanonicalPublicCoseKey::X25519(_)))
+        || signing_key
+            .as_ref()
+            .zip(signing_thumbprint)
+            .is_some_and(|(key, thumbprint)| key.thumbprint() != thumbprint)
+        || kem_key
+            .as_ref()
+            .zip(kem_thumbprint)
+            .is_some_and(|(key, thumbprint)| key.thumbprint() != thumbprint)
+    {
         return Err(CryptoError::SignerMismatch);
     }
-    signer_optional_public_key(decoder)?;
-    let stored_thumbprint =
-        signer_optional_thumbprint(decoder)?.ok_or(CryptoError::SignerMismatch)?;
-    if stored_thumbprint != public_key.thumbprint() {
-        return Err(CryptoError::SignerMismatch);
-    }
-    signer_optional_thumbprint(decoder)?;
+    let public_key = signing_key;
 
     let capability_count = signer_array_length(decoder)?;
     let mut capabilities = Vec::with_capacity(capability_count as usize);
@@ -1406,12 +1658,14 @@ fn parse_root_certificate_payload(
     if stored_thumbprint != public_key.thumbprint() {
         return Err(CryptoError::SignerMismatch);
     }
-    match decoder
-        .datatype()
-        .map_err(|_| CryptoError::SignerMismatch)?
-    {
-        Type::Null => decoder.null().map_err(|_| CryptoError::SignerMismatch)?,
-        Type::Bytes => {
+    match (
+        payload_length == 2,
+        decoder
+            .datatype()
+            .map_err(|_| CryptoError::SignerMismatch)?,
+    ) {
+        (false, Type::Null) => decoder.null().map_err(|_| CryptoError::SignerMismatch)?,
+        (true, Type::Bytes) => {
             signer_bstr(decoder, 32)?;
         }
         _ => return Err(CryptoError::SignerMismatch),
@@ -1424,7 +1678,7 @@ fn parse_root_certificate_payload(
         signer_bstr(decoder, 32)?;
     }
     Ok(ParsedSignerCertificate {
-        public_key,
+        public_key: Some(public_key),
         organization_id,
         device_id: None,
         role: SignerRole::Root,
@@ -1519,6 +1773,14 @@ impl CoseVerifier {
         context: &VerificationContext,
     ) -> Result<VerifiedSigner, CryptoError> {
         verify_cose_sign1(bytes, resolver, context)
+    }
+
+    pub fn verify_recovery_test(
+        bytes: &[u8],
+        resolver: &impl SignerCertificateResolver,
+        context: &RecoveryVerificationContext,
+    ) -> Result<VerifiedRecoveryTest, CryptoError> {
+        verify_recovery_test(bytes, resolver, context)
     }
 
     pub fn verify_initial_root_pop(
@@ -1756,6 +2018,850 @@ struct ReceiptBindings {
     registry: RegistryVersion,
 }
 
+struct TrustOperationBindings {
+    digest: Hash32,
+    organization_id: OrganizationId,
+    sequence: ChainSequence,
+    registry: RegistryVersion,
+}
+
+struct TrustAdminBindings {
+    digest: Hash32,
+    certificate_hash: CertificateHash,
+    key_thumbprint: KeyThumbprint,
+    organization_id: OrganizationId,
+    registry: RegistryVersion,
+}
+
+struct RootTrustBindings {
+    digest: Hash32,
+    organization_id: OrganizationId,
+    sequence: Option<ChainSequence>,
+    registry: RegistryVersion,
+}
+
+fn root_trust_bindings(
+    exact_trust_digest_input: &[u8],
+    exact_admin_authorization_object: Option<&[u8]>,
+) -> Result<RootTrustBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let subtype = decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if !matches!(
+        subtype,
+        "registryEvent"
+            | "deviceCertificate"
+            | "operatorBinding"
+            | "policy"
+            | "writerTransition"
+            | "rootCertificate"
+    ) || protocol_array_length(&mut decoder)? != 2
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let core_start = decoder.position();
+    let (organization_id, sequence, core_registry, registry_change_kind) = match subtype {
+        "registryEvent" => {
+            let (organization_id, sequence, registry, change_kind) =
+                parse_registry_event_core(&mut decoder)?;
+            (
+                organization_id,
+                Some(sequence),
+                Some(registry),
+                Some(change_kind),
+            )
+        }
+        "deviceCertificate" => {
+            let core_length = protocol_array_length(&mut decoder)?;
+            let certificate = parse_device_certificate_core(&mut decoder, core_length)?;
+            (
+                certificate.organization_id,
+                Some(certificate.effective_from_sequence),
+                None,
+                None,
+            )
+        }
+        "operatorBinding" => {
+            let (organization_id, sequence) = parse_operator_binding_core(&mut decoder)?;
+            (organization_id, Some(sequence), None, None)
+        }
+        "policy" => {
+            let (organization_id, sequence) = parse_policy_core(&mut decoder)?;
+            (organization_id, Some(sequence), None, None)
+        }
+        "writerTransition" => {
+            let (organization_id, sequence) = parse_writer_transition_core(&mut decoder)?;
+            (organization_id, Some(sequence), None, None)
+        }
+        "rootCertificate" => {
+            let organization_id = parse_root_rotation_core(&mut decoder)?;
+            (organization_id, None, None, None)
+        }
+        _ => return Err(CryptoError::InvalidProtocolCore),
+    };
+    let core_end = decoder.position();
+    let authorization_hash: [u8; 32] = protocol_bstr(&mut decoder, 32)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if decoder.position() != exact_trust_digest_input.len() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let authorization = exact_admin_authorization_object.ok_or(CryptoError::InvalidProtocolCore)?;
+    if authorization_hash != *object_hash(authorization).as_bytes() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let authorization_bindings = organization_admin_authorization_object_bindings(authorization)?;
+    let mut authorized_input = Vec::with_capacity(2 + subtype.len() + core_end - core_start);
+    Encoder::new(&mut authorized_input)
+        .array(2)
+        .and_then(|encoder| encoder.str(subtype))
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    authorized_input.extend_from_slice(&exact_trust_digest_input[core_start..core_end]);
+    if authorization_bindings.target_subtype != subtype
+        || authorization_bindings.authorized_core_hash
+            != *crate::authorized_trust_digest(&authorized_input).as_bytes()
+        || authorization_bindings.organization_id != organization_id
+        || core_registry.is_some_and(|registry| authorization_bindings.registry != registry)
+        || registry_change_kind.is_some_and(|change_kind| {
+            !admin_action_permits_registry_change(authorization_bindings.action, change_kind)
+        })
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(RootTrustBindings {
+        digest: trust_digest(exact_trust_digest_input),
+        organization_id,
+        sequence,
+        registry: authorization_bindings.registry,
+    })
+}
+
+struct AdminAuthorizationObjectBindings<'a> {
+    organization_id: OrganizationId,
+    registry: RegistryVersion,
+    target_subtype: &'a str,
+    authorized_core_hash: [u8; 32],
+    action: u64,
+}
+
+fn admin_action_permits_registry_change(action: u64, change_kind: u64) -> bool {
+    matches!(
+        (action, change_kind),
+        (0, 0) | (1, 1) | (2, 2) | (3, 3) | (5, 5)
+    )
+}
+
+fn admin_action_permits_target(action: u64, target_subtype: &str) -> bool {
+    matches!(
+        (action, target_subtype),
+        (0, "deviceCertificate" | "registryEvent")
+            | (1, "registryEvent")
+            | (2, "policy" | "registryEvent")
+            | (3, "writerTransition" | "registryEvent")
+            | (4, "operatorBinding")
+            | (5, "deviceCertificate" | "registryEvent")
+            | (6, "rootCertificate")
+    )
+}
+
+fn organization_admin_authorization_object_bindings(
+    exact_object: &[u8],
+) -> Result<AdminAuthorizationObjectBindings<'_>, CryptoError> {
+    validate(exact_object, ParserLimits::V1).map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_object);
+    if protocol_array_length(&mut decoder)? != 5
+        || decoder
+            .bytes()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != b"EA1\0"
+        || decoder.u64().ok() != Some(5)
+        || decoder.u64().ok() != Some(1)
+        || protocol_array_length(&mut decoder)? != 0
+        || protocol_array_length(&mut decoder)? != 3
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "organizationAdminAuthorization"
+        || protocol_array_length(&mut decoder)? != 15
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 16)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    let action = decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if action > 6 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let target_subtype = decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if !matches!(
+        target_subtype,
+        "deviceCertificate"
+            | "operatorBinding"
+            | "registryEvent"
+            | "policy"
+            | "writerTransition"
+            | "rootCertificate"
+    ) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    if !admin_action_permits_target(action, target_subtype) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let authorized_core_hash = protocol_bstr(&mut decoder, 32)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let issued_at = protocol_int(&mut decoder)?;
+    let expires_at = protocol_int(&mut decoder)?;
+    if issued_at >= expires_at {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    if protocol_array_length(&mut decoder)? != 0 || protocol_array_length(&mut decoder)? != 1 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    decoder
+        .skip()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if decoder.position() != exact_object.len() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(AdminAuthorizationObjectBindings {
+        organization_id,
+        registry,
+        target_subtype,
+        authorized_core_hash,
+        action,
+    })
+}
+
+fn parse_registry_event_core(
+    decoder: &mut Decoder<'_>,
+) -> Result<(OrganizationId, ChainSequence, RegistryVersion, u64), CryptoError> {
+    if protocol_array_length(decoder)? != 13 || decoder.u64().ok() != Some(1) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(decoder)?;
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_optional_bstr(decoder, 32)?;
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_int(decoder)?;
+    protocol_int(decoder)?;
+    protocol_int(decoder)?;
+    protocol_bstr(decoder, 32)?;
+    let change_length = protocol_array_length(decoder)?;
+    let change_kind = decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    match (change_kind, change_length) {
+        (0 | 2 | 3 | 4 | 6, 2) => {
+            protocol_bstr(decoder, 32)?;
+        }
+        (1, 3) => {
+            if decoder
+                .u64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?
+                > 2
+            {
+                return Err(CryptoError::InvalidProtocolCore);
+            }
+            protocol_bstr(decoder, 32)?;
+        }
+        (5, 3) => {
+            protocol_bstr(decoder, 32)?;
+            if decoder
+                .u64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?
+                > 1
+            {
+                return Err(CryptoError::InvalidProtocolCore);
+            }
+        }
+        _ => return Err(CryptoError::InvalidProtocolCore),
+    }
+    protocol_bstr(decoder, 32)?;
+    if protocol_array_length(decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok((organization_id, sequence, registry, change_kind))
+}
+
+fn parse_operator_binding_core(
+    decoder: &mut Decoder<'_>,
+) -> Result<(OrganizationId, ChainSequence), CryptoError> {
+    if protocol_array_length(decoder)? != 11 || decoder.u64().ok() != Some(1) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(decoder)?;
+    protocol_bstr(decoder, 16)?;
+    protocol_bstr(decoder, 32)?;
+    protocol_bstr(decoder, 32)?;
+    if decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        > 2
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(decoder, 32)?;
+    protocol_bstr(decoder, 32)?;
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_optional_uint(decoder)?;
+    if protocol_array_length(decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok((organization_id, sequence))
+}
+
+fn parse_root_rotation_core(decoder: &mut Decoder<'_>) -> Result<OrganizationId, CryptoError> {
+    if protocol_array_length(decoder)? != 7 || decoder.u64().ok() != Some(1) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(decoder)?;
+    let public_key = CanonicalPublicCoseKey::from_deterministic_cbor(
+        decoder
+            .bytes()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    )
+    .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if !matches!(public_key, CanonicalPublicCoseKey::Ed25519(_)) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let thumbprint = KeyThumbprint::try_from(protocol_bstr(decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if thumbprint != public_key.thumbprint() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(decoder, 32)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if protocol_array_length(decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(organization_id)
+}
+
+fn parse_writer_transition_core(
+    decoder: &mut Decoder<'_>,
+) -> Result<(OrganizationId, ChainSequence), CryptoError> {
+    if protocol_array_length(decoder)? != 9 || decoder.u64().ok() != Some(1) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(decoder)?;
+    protocol_bstr(decoder, 16)?;
+    protocol_bstr(decoder, 32)?;
+    protocol_bstr(decoder, 32)?;
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(decoder, 32)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if protocol_array_length(decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok((organization_id, sequence))
+}
+
+fn parse_policy_core(
+    decoder: &mut Decoder<'_>,
+) -> Result<(OrganizationId, ChainSequence), CryptoError> {
+    if protocol_array_length(decoder)? != 21 || decoder.u64().ok() != Some(1) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let organization_id = protocol_organization(decoder)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_optional_bstr(decoder, 32)?;
+    if decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        > 1
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    for _ in 0..2 {
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    }
+    if decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        > 1
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    for _ in 0..2 {
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    }
+    decoder
+        .bool()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_sorted_nonempty_bstr32(decoder)?;
+    if decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        != 0
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if protocol_array_length(decoder)? != 3 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_optional_uint(decoder)?;
+    decoder
+        .bool()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_optional_bstr(decoder, 32)?;
+    if protocol_array_length(decoder)? != 3 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    decoder
+        .bool()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    decoder
+        .bool()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let suites = protocol_array_length(decoder)?;
+    if suites == 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let mut previous_suite: Option<&[u8]> = None;
+    for _ in 0..suites {
+        let suite = decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+        if previous_suite.is_some_and(|previous| previous >= suite.as_bytes()) {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        previous_suite = Some(suite.as_bytes());
+    }
+    let formats = protocol_array_length(decoder)?;
+    if formats == 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let mut previous_format = None;
+    for _ in 0..formats {
+        let format = decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+        if previous_format.is_some_and(|previous| previous >= format) {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        previous_format = Some(format);
+    }
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    if protocol_array_length(decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok((organization_id, sequence))
+}
+
+fn organization_admin_authorization_bindings(
+    exact_trust_digest_input: &[u8],
+) -> Result<TrustAdminBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "organizationAdminAuthorization"
+        || protocol_array_length(&mut decoder)? != 15
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 16)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    let key_thumbprint = KeyThumbprint::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_bstr(&mut decoder, 32)?;
+    let action = decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if action > 6 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let target_subtype = decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if !matches!(
+        target_subtype,
+        "deviceCertificate"
+            | "operatorBinding"
+            | "registryEvent"
+            | "policy"
+            | "writerTransition"
+            | "rootCertificate"
+    ) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    if !admin_action_permits_target(action, target_subtype) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    let issued_at = protocol_int(&mut decoder)?;
+    let expires_at = protocol_int(&mut decoder)?;
+    if issued_at >= expires_at {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    if protocol_array_length(&mut decoder)? != 0
+        || decoder.position() != exact_trust_digest_input.len()
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(TrustAdminBindings {
+        digest: trust_digest(exact_trust_digest_input),
+        certificate_hash,
+        key_thumbprint,
+        organization_id,
+        registry,
+    })
+}
+
+fn grant_authorization_bindings(
+    exact_trust_digest_input: &[u8],
+) -> Result<TrustOperationBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "grantAuthorization"
+        || protocol_array_length(&mut decoder)? != 12
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 16)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_sorted_nonempty_bstr32(&mut decoder)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    if decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        != 1
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_int(&mut decoder)?;
+    if protocol_array_length(&mut decoder)? != 0
+        || decoder.position() != exact_trust_digest_input.len()
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(TrustOperationBindings {
+        digest: trust_digest(exact_trust_digest_input),
+        organization_id,
+        sequence,
+        registry,
+    })
+}
+
+struct DestructionAuthorizationBindings {
+    operation: TrustOperationBindings,
+    destruction_id: [u8; 16],
+}
+
+fn destruction_authorization_bindings(
+    exact_trust_digest_input: &[u8],
+) -> Result<DestructionAuthorizationBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "destructionAuthorization"
+        || protocol_array_length(&mut decoder)? != 10
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let destruction_id: [u8; 16] = protocol_bstr(&mut decoder, 16)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let registry = RegistryVersion::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    protocol_bstr(&mut decoder, 32)?;
+    let sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    let target_count = protocol_array_length(&mut decoder)?;
+    if target_count == 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let mut previous: Option<&[u8]> = None;
+    for _ in 0..target_count {
+        if protocol_array_length(&mut decoder)? != 2 {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        let entry_hash = protocol_bstr(&mut decoder, 32)?;
+        if previous.is_some_and(|value| value >= entry_hash) {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        previous = Some(entry_hash);
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    }
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if protocol_array_length(&mut decoder)? != 0
+        || decoder.position() != exact_trust_digest_input.len()
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(DestructionAuthorizationBindings {
+        operation: TrustOperationBindings {
+            digest: trust_digest(exact_trust_digest_input),
+            organization_id,
+            sequence,
+            registry,
+        },
+        destruction_id,
+    })
+}
+
+struct DeletionAttestationBindings {
+    digest: Hash32,
+    destruction_id: [u8; 16],
+    authorization_object_hash: [u8; 32],
+}
+
+fn destruction_transition_bindings(
+    exact_trust_digest_input: &[u8],
+) -> Result<DeletionAttestationBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "destructionTransition"
+        || protocol_array_length(&mut decoder)? != 10
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let destruction_id = protocol_bstr(&mut decoder, 16)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let authorization_object_hash = protocol_bstr(&mut decoder, 32)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_bstr(&mut decoder, 16)?;
+    protocol_optional_bstr(&mut decoder, 32)?;
+    protocol_optional_bounded_uint(&mut decoder, 4)?;
+    if decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        > 4
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_int(&mut decoder)?;
+    if protocol_array_length(&mut decoder)? != 0
+        || decoder.position() != exact_trust_digest_input.len()
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(DeletionAttestationBindings {
+        digest: trust_digest(exact_trust_digest_input),
+        destruction_id,
+        authorization_object_hash,
+    })
+}
+
+fn deletion_attestation_bindings(
+    exact_trust_digest_input: &[u8],
+) -> Result<DeletionAttestationBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "deletionAttestation"
+        || protocol_array_length(&mut decoder)? != 10
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let destruction_id = protocol_bstr(&mut decoder, 16)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let authorization_object_hash = protocol_bstr(&mut decoder, 32)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_bstr(&mut decoder, 16)?;
+    decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_sorted_bstr32(&mut decoder)?;
+    if decoder
+        .u64()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        > 2
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_optional_int(&mut decoder)?;
+    protocol_int(&mut decoder)?;
+    if protocol_array_length(&mut decoder)? != 0
+        || decoder.position() != exact_trust_digest_input.len()
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(DeletionAttestationBindings {
+        digest: trust_digest(exact_trust_digest_input),
+        destruction_id,
+        authorization_object_hash,
+    })
+}
+
+fn destruction_authorization_object_bindings(
+    exact_object: &[u8],
+) -> Result<DestructionAuthorizationBindings, CryptoError> {
+    validate(exact_object, ParserLimits::V1).map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_object);
+    if protocol_array_length(&mut decoder)? != 5
+        || decoder
+            .bytes()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != b"EA1\0"
+        || decoder.u64().ok() != Some(5)
+        || decoder.u64().ok() != Some(1)
+        || protocol_array_length(&mut decoder)? != 0
+        || protocol_array_length(&mut decoder)? != 3
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let input_start = decoder.position();
+    if decoder
+        .str()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+        != "destructionAuthorization"
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    decoder
+        .skip()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let input_end = decoder.position();
+    if protocol_array_length(&mut decoder)? != 2 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    for _ in 0..2 {
+        decoder
+            .skip()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    }
+    if decoder.position() != exact_object.len() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let mut exact_input = Vec::with_capacity(1 + input_end.saturating_sub(input_start));
+    exact_input.push(0x82);
+    exact_input.extend_from_slice(&exact_object[input_start..input_end]);
+    destruction_authorization_bindings(&exact_input)
+}
+
 fn receipt_bindings(exact_receipt_core: &[u8]) -> Result<ReceiptBindings, CryptoError> {
     validate(exact_receipt_core, ParserLimits::V1).map_err(|_| CryptoError::InvalidProtocolCore)?;
     let mut decoder = Decoder::new(exact_receipt_core);
@@ -1838,6 +2944,84 @@ fn protocol_array_length(decoder: &mut Decoder<'_>) -> Result<u64, CryptoError> 
         .array()
         .map_err(|_| CryptoError::InvalidProtocolCore)?
         .ok_or(CryptoError::InvalidProtocolCore)
+}
+
+fn protocol_sorted_nonempty_bstr32(decoder: &mut Decoder<'_>) -> Result<(), CryptoError> {
+    let count = protocol_array_length(decoder)?;
+    if count == 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let mut previous: Option<&[u8]> = None;
+    for _ in 0..count {
+        let current = protocol_bstr(decoder, 32)?;
+        if previous.is_some_and(|value| value >= current) {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        previous = Some(current);
+    }
+    Ok(())
+}
+
+fn protocol_sorted_bstr32(decoder: &mut Decoder<'_>) -> Result<(), CryptoError> {
+    let count = protocol_array_length(decoder)?;
+    let mut previous: Option<&[u8]> = None;
+    for _ in 0..count {
+        let current = protocol_bstr(decoder, 32)?;
+        if previous.is_some_and(|value| value >= current) {
+            return Err(CryptoError::InvalidProtocolCore);
+        }
+        previous = Some(current);
+    }
+    Ok(())
+}
+
+fn protocol_int(decoder: &mut Decoder<'_>) -> Result<i64, CryptoError> {
+    decoder.i64().map_err(|_| CryptoError::InvalidProtocolCore)
+}
+
+fn protocol_optional_int(decoder: &mut Decoder<'_>) -> Result<(), CryptoError> {
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+    {
+        Type::Null => decoder.null().map_err(|_| CryptoError::InvalidProtocolCore),
+        Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
+        | Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64 => protocol_int(decoder).map(|_| ()),
+        _ => Err(CryptoError::InvalidProtocolCore),
+    }
+}
+
+fn protocol_optional_bounded_uint(
+    decoder: &mut Decoder<'_>,
+    maximum: u64,
+) -> Result<(), CryptoError> {
+    match decoder
+        .datatype()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+    {
+        Type::Null => decoder.null().map_err(|_| CryptoError::InvalidProtocolCore),
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 => {
+            if decoder
+                .u64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?
+                > maximum
+            {
+                return Err(CryptoError::InvalidProtocolCore);
+            }
+            Ok(())
+        }
+        _ => Err(CryptoError::InvalidProtocolCore),
+    }
+}
+
+fn protocol_optional_uint(decoder: &mut Decoder<'_>) -> Result<(), CryptoError> {
+    protocol_optional_bounded_uint(decoder, u64::MAX)
 }
 
 fn protocol_optional_bstr(
