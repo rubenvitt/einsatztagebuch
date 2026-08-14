@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ea_crypto::{CryptoError, VerificationContext, parse_cose_sign1, verify_cose_sign1};
 use ea_format::{DecodedEvidencePayloadV1, EvidenceKindV1, EvidenceObjectV1, Parsed, ReceiptV1};
 use ea_time::{
@@ -63,6 +65,8 @@ pub struct VerifiedSignedTime {
 pub struct LocalTimeBlock<'store> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) store: &'store mut dyn TrustStateStore,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) candidate_state: Arc<PreviousHeadState>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) state_key: TrustStateKey,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -142,6 +146,7 @@ pub fn prepare_local_time<'store>(
 
     Ok(LocalTimeBlock {
         store,
+        candidate_state: Arc::clone(&candidate.candidate_state),
         state_key: candidate.state_key,
         expected_revision,
         trusted_time,
@@ -272,6 +277,8 @@ mod support;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use ea_crypto::{CanonicalPublicCoseKey, CoseSigner, SecretBytes, object_hash};
     use ea_format::{
         CheckpointCoreFieldsV1, CheckpointCoreV1, EvidenceObjectV1, Parsed, ParsedArchiveObject,
@@ -633,6 +640,10 @@ mod tests {
 
         let actual_store_address = core::ptr::from_mut(&mut *block.store).cast::<()>();
         assert!(actual_store_address == expected_store_address);
+        assert!(Arc::ptr_eq(
+            &block.candidate_state,
+            &fixture.candidate.candidate_state
+        ));
         assert!(block.state_key == key);
         assert_eq!(block.expected_revision, 24);
         assert!(block.pinned_head == Some(pin));

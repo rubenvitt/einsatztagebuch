@@ -255,6 +255,8 @@ pub struct RegistryLineBuilder {
     anchor_bytes: Vec<u8>,
     admin_hash: ObjectHash,
     admin_binding_hash: ObjectHash,
+    second_admin_hash: ObjectHash,
+    second_admin_binding_hash: ObjectHash,
     state: LineState,
     heads: Vec<BuiltHead>,
     transition_count: u8,
@@ -322,6 +324,8 @@ impl RegistryLineBuilder {
             anchor_bytes,
             admin_hash: admin_one_hash,
             admin_binding_hash: binding_one_hash,
+            second_admin_hash: admin_two_hash,
+            second_admin_binding_hash: binding_two_hash,
             state: LineState {
                 version: RegistryVersion::new(0),
                 head_hash: Hash32::ZERO,
@@ -350,6 +354,18 @@ impl RegistryLineBuilder {
 
     pub fn bootstrap_admin_hash(&self) -> ObjectHash {
         self.admin_hash
+    }
+
+    pub fn bootstrap_admin_binding_hash(&self) -> ObjectHash {
+        self.admin_binding_hash
+    }
+
+    pub fn second_bootstrap_admin_hash(&self) -> ObjectHash {
+        self.second_admin_hash
+    }
+
+    pub fn second_bootstrap_admin_binding_hash(&self) -> ObjectHash {
+        self.second_admin_binding_hash
     }
 
     pub fn current_root_hash(&self) -> ObjectHash {
@@ -609,6 +625,15 @@ impl RegistryLineBuilder {
     }
 
     pub fn verified_with_time(&self, pin: Pin, trusted_time: TrustedTimeState) -> VerifiedTrust {
+        self.verified_with_time_and_key(pin, trusted_time, state_key())
+    }
+
+    pub fn verified_with_time_and_key(
+        &self,
+        pin: Pin,
+        trusted_time: TrustedTimeState,
+        key: TrustStateKey,
+    ) -> VerifiedTrust {
         let anchor = decode_trust_anchor(&self.anchor_bytes).unwrap();
         let source = CatalogSource::new(self.objects.iter().cloned());
         let pin = match pin {
@@ -619,7 +644,6 @@ impl RegistryLineBuilder {
             }
             Pin::Exact(version, hash) => Some(RegistryHeadPin::new(version, hash)),
         };
-        let key = state_key();
         let mut store = SnapshotStore {
             key,
             record: Some(PersistedTrustRecord::new(17, trusted_time, pin)),

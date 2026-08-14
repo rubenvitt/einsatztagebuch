@@ -11,6 +11,7 @@ mod certificate;
 // Task 5 is the first production consumer of the private, validated index.
 #[cfg_attr(not(test), allow(dead_code))]
 mod catalog;
+mod clock_release;
 mod error;
 #[cfg_attr(not(test), allow(dead_code))]
 mod operator_binding;
@@ -24,7 +25,8 @@ mod time;
 
 pub use admin_authorization::VerifiedAdminAuthorization;
 pub use anchor::{TrustAnchorV1, VerifiedTrust, decode_trust_anchor, verify_trust};
-pub use error::{RegistryError, TrustError, TrustSourceError};
+pub use clock_release::{VerifiedClockRelease, verify_clock_release};
+pub use error::{ClockReleaseError, RegistryError, TrustError, TrustSourceError};
 pub use registry::{PreexistingRegistryAuthority, RegistryCandidate, verify_registry_candidate};
 pub use source::{MAX_TOTAL_TRUST_OBJECT_BYTES_V1, MAX_TRUST_OBJECTS_V1, TrustObjectSource};
 pub use state::{

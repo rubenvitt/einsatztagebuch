@@ -69,6 +69,44 @@ impl fmt::Debug for TrustError {
 impl std::error::Error for TrustError {}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ClockReleaseError {
+    Trust(TrustError),
+    Mismatch,
+    Expired,
+}
+
+impl ClockReleaseError {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Trust(error) => error.code(),
+            Self::Mismatch => "EA-TRUST-CLOCK-RELEASE-MISMATCH",
+            Self::Expired => "EA-TRUST-CLOCK-RELEASE-EXPIRED",
+        }
+    }
+}
+
+impl fmt::Display for ClockReleaseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl fmt::Debug for ClockReleaseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for ClockReleaseError {}
+
+impl From<TrustError> for ClockReleaseError {
+    fn from(error: TrustError) -> Self {
+        Self::Trust(error)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum RegistryError {
     Trust(TrustError),
     Gap,

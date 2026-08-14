@@ -1,5 +1,6 @@
 use core::fmt;
 
+use ea_format::ClockReleaseAuditV1;
 use ea_time::TrustedTimeState;
 use ea_types::{DeviceId, ObjectHash, OrganizationId, RegistryVersion};
 
@@ -107,6 +108,14 @@ pub struct ClockReleaseReplayKey {
 }
 
 impl ClockReleaseReplayKey {
+    pub(crate) fn from_verified_audit(audit: &ClockReleaseAuditV1) -> Self {
+        Self {
+            organization_id: audit.organization_id(),
+            target_device_id: audit.target_device_id(),
+            nonce: *audit.nonce(),
+        }
+    }
+
     #[must_use]
     pub const fn organization_id(&self) -> OrganizationId {
         self.organization_id

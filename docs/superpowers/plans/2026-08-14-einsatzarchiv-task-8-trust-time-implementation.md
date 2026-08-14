@@ -1275,7 +1275,12 @@ rtk git commit -m "feat(trust): bind verified time to persistent state"
 
 **Files:**
 - Create: `crates/ea-trust/src/clock_release.rs`
+- Create: `crates/ea-trust/src/clock_release/tests.rs`
+- Modify: `crates/ea-trust/src/error.rs`
 - Modify: `crates/ea-trust/src/lib.rs`
+- Modify: `crates/ea-trust/src/state.rs`
+- Modify: `crates/ea-trust/src/time.rs`
+- Modify: `crates/ea-trust/tests/support/mod.rs`
 - Create: `crates/ea-trust/tests/clock_release.rs`
 
 - [ ] **Step 1: Add the full Clock Release RED matrix**
@@ -1321,7 +1326,7 @@ pub fn verify_clock_release(
 ) -> Result<VerifiedClockRelease, ClockReleaseError>;
 ```
 
-Call `ea_format::decode_clock_release_audit`, build the exact `ea_crypto::VerificationContext::local_audit` for OrganizationAdmin at `preTransitionSequence`, and verify through the previous-state resolver. Require exact candidate/head/guard-policy/time/reference/device/Binding/outcome correlations and inclusive `issuedAt <= rawNow <= expiresAt` with strict interval shape. Check `clock_release_consumed` only as an early rejection; do not persist replay yet.
+Call `ea_format::decode_clock_release_audit`, build the exact `ea_crypto::VerificationContext::local_audit` for OrganizationAdmin at `preTransitionSequence`, and verify through the previous-state resolver. Require exact candidate/head/guard-policy/time/reference/device/Binding/outcome correlations and inclusive `issuedAt <= rawNow <= expiresAt` with strict interval shape. Query `clock_release_consumed` exactly once only after complete decode, COSE, previous-Admin, Binding, semantic, and time verification, immediately before proof construction. It is an early rejection of an already consumed nonce only; Task 10 never persists replay.
 
 Runtime proof creation requires `outcome == 1`; outcomes 0 and 2 remain valid
 decoded audit records but cannot mint a Release. Reference tag 0 must match an
@@ -1350,8 +1355,11 @@ raw audit bytes cannot be passed where VerifiedClockRelease is required
 ```bash
 rtk cargo test --locked -p ea-trust --test clock_release
 rtk cargo test --locked -p ea-trust --doc
-rtk git add -- crates/ea-trust/src/clock_release.rs crates/ea-trust/src/lib.rs \
-  crates/ea-trust/tests/clock_release.rs
+rtk git add -- crates/ea-trust/src/clock_release.rs crates/ea-trust/src/clock_release/tests.rs \
+  crates/ea-trust/src/error.rs crates/ea-trust/src/lib.rs crates/ea-trust/src/state.rs \
+  crates/ea-trust/src/time.rs \
+  crates/ea-trust/tests/support/mod.rs crates/ea-trust/tests/clock_release.rs \
+  docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md
 rtk git diff --cached --check
 rtk git commit -m "feat(trust): verify one-use clock releases"
 ```
