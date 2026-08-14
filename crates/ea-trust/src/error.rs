@@ -65,6 +65,58 @@ impl fmt::Debug for TrustError {
 impl std::error::Error for TrustError {}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
+pub enum RegistryError {
+    Trust(TrustError),
+    Gap,
+    Fork,
+    Rollback,
+    Overflow,
+    Previous,
+    ActivationHead,
+    ActivationMissing,
+    PolicyMismatch,
+    SequenceLease,
+}
+
+impl RegistryError {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Trust(error) => error.code(),
+            Self::Gap => "EA-TRUST-REGISTRY-GAP",
+            Self::Fork => "EA-TRUST-REGISTRY-FORK",
+            Self::Rollback => "EA-TRUST-REGISTRY-ROLLBACK",
+            Self::Overflow => "EA-TRUST-REGISTRY-OVERFLOW",
+            Self::Previous => "EA-TRUST-REGISTRY-PREVIOUS",
+            Self::ActivationHead => "EA-TRUST-ACTIVATION-HEAD",
+            Self::ActivationMissing => "EA-TRUST-ACTIVATION-MISSING",
+            Self::PolicyMismatch => "EA-TRUST-POLICY-MISMATCH",
+            Self::SequenceLease => "EA-TRUST-SEQUENCE-LEASE",
+        }
+    }
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl fmt::Debug for RegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+impl From<TrustError> for RegistryError {
+    fn from(error: TrustError) -> Self {
+        Self::Trust(error)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum TrustSourceError {
     Unavailable,
     CountLimit,

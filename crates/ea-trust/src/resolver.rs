@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use ea_crypto::{CryptoError, ResolvedSigner, SignerCertificateResolver};
 use ea_format::{
-    DeviceCertificateFieldsV1, OperatorBindingFieldsV1, Parsed, RootCertificateFieldsV1,
-    TrustObjectV1,
+    CertificateKindV1, DeviceCertificateFieldsV1, OperatorBindingFieldsV1, Parsed,
+    RegistryEventFieldsV1, RootCertificateFieldsV1, TrustObjectV1,
 };
 use ea_types::{CertificateHash, ChainSequence, Hash32, ObjectHash, RegistryVersion};
 
@@ -12,15 +12,24 @@ use crate::{
     catalog::TrustCatalog,
     certificate::{ActiveCertificate, RootAuthority},
     operator_binding::ActiveOperatorBinding,
+    policy::ResolvedPolicy,
 };
 
+#[derive(Clone)]
 pub(crate) struct PreviousHeadState {
     pub(crate) registry_version: RegistryVersion,
     pub(crate) registry_head_hash: Hash32,
     catalog: Arc<TrustCatalog>,
     pub(crate) root: RootAuthority,
+    pub(crate) certificates: BTreeMap<CertificateHash, ActiveCertificate>,
     pub(crate) admin_certificates: BTreeMap<CertificateHash, ActiveCertificate>,
     pub(crate) admin_bindings: BTreeMap<ObjectHash, ActiveOperatorBinding>,
+    pub(crate) policy: Option<ResolvedPolicy>,
+    pub(crate) effective_from_sequence: ChainSequence,
+    pub(crate) valid_through_sequence: ChainSequence,
+    pub(crate) head_event: Option<RegistryEventFieldsV1>,
+    pub(crate) current_writer_certificate_hash: Option<CertificateHash>,
+    pub(crate) writer_transition_object_hash: Option<ObjectHash>,
 }
 
 impl PreviousHeadState {
@@ -67,8 +76,15 @@ impl PreviousHeadState {
             registry_head_hash: Hash32::ZERO,
             catalog,
             root,
+            certificates: certificates.clone(),
             admin_certificates: certificates,
             admin_bindings: bindings,
+            policy: None,
+            effective_from_sequence: ChainSequence::new(0),
+            valid_through_sequence: ChainSequence::new(0),
+            head_event: None,
+            current_writer_certificate_hash: None,
+            writer_transition_object_hash: None,
         })
     }
 
@@ -79,6 +95,22 @@ impl PreviousHeadState {
 
     pub(crate) fn catalog_object(&self, object_hash: ObjectHash) -> Option<&Parsed<TrustObjectV1>> {
         self.catalog.get(&object_hash)
+    }
+
+    pub(crate) fn apply_writer_transition(
+        &mut self,
+        transition_object_hash: ObjectHash,
+        old_writer: CertificateHash,
+        new_writer: CertificateHash,
+        effective_from_sequence: ChainSequence,
+    ) -> bool {
+        let Some(old_certificate) = self.certificates.get_mut(&old_writer) else {
+            return false;
+        };
+        old_certificate.fields.revoked_from_sequence = Some(effective_from_sequence);
+        self.current_writer_certificate_hash = Some(new_writer);
+        self.writer_transition_object_hash = Some(transition_object_hash);
+        true
     }
 }
 
@@ -131,9 +163,14 @@ impl SignerCertificateResolver for PreviousHeadResolver<'_> {
         }
         let certificate = self
             .state
-            .admin_certificates
+            .certificates
             .get(&certificate_hash)
             .ok_or(CryptoError::SignerUnresolved)?;
+        if certificate.fields.certificate_kind == CertificateKindV1::Writer
+            && self.state.current_writer_certificate_hash != Some(certificate_hash)
+        {
+            return Err(CryptoError::SignerUnresolved);
+        }
         debug_assert!(CertificateHash::from(certificate.object_hash) == certificate_hash);
         Ok(ResolvedSigner {
             exact_certificate_bytes: self
@@ -209,7 +246,7 @@ pub(crate) mod tests {
     use crate::{
         IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit,
         StateStoreError, TrustObjectSource, TrustSourceError, TrustStateKey, TrustStateStore,
-        decode_trust_anchor, load_trust_state, verify_trust,
+        certificate::ActiveCertificate, decode_trust_anchor, load_trust_state, verify_trust,
     };
 
     pub(crate) const ROOT_SECRET: [u8; 32] = [
@@ -271,8 +308,10 @@ pub(crate) mod tests {
             None,
         );
         let second_binding_hash = object_hash(&second_binding_bytes);
-        let prepared_bytes = exact_prepared_certificate(CertificateHash::from(root_hash));
+        let prepared_bytes = exact_prepared_certificate(CertificateHash::from(root_hash), 0x61);
         let prepared_hash = object_hash(&prepared_bytes);
+        let next_writer_bytes = exact_prepared_certificate(CertificateHash::from(root_hash), 0x62);
+        let next_writer_hash = object_hash(&next_writer_bytes);
         let source = CatalogSource::new([
             root_bytes.clone(),
             admin_bytes.clone(),
@@ -280,16 +319,25 @@ pub(crate) mod tests {
             binding_bytes.clone(),
             second_binding_bytes.clone(),
             prepared_bytes.clone(),
+            next_writer_bytes.clone(),
         ]);
         assert!(validate_signer_certificate(&prepared_bytes).is_ok());
         let prepared = match ea_format::decode_exact_object(&prepared_bytes).unwrap() {
             ea_format::ParsedArchiveObject::Trust(parsed) => parsed,
             _ => panic!("prepared certificate must be a Trust object"),
         };
-        assert!(matches!(
-            prepared.value().decoded_payload().unwrap(),
-            DecodedTrustPayloadV1::AuthorizedDevice(_)
-        ));
+        let prepared_fields = match prepared.value().decoded_payload().unwrap() {
+            DecodedTrustPayloadV1::AuthorizedDevice(core) => core.fields().clone(),
+            _ => panic!("prepared certificate must use the authorized Device form"),
+        };
+        let next_writer = match ea_format::decode_exact_object(&next_writer_bytes).unwrap() {
+            ea_format::ParsedArchiveObject::Trust(parsed) => parsed,
+            _ => panic!("next Writer certificate must be a Trust object"),
+        };
+        let next_writer_fields = match next_writer.value().decoded_payload().unwrap() {
+            DecodedTrustPayloadV1::AuthorizedDevice(core) => core.fields().clone(),
+            _ => panic!("next Writer must use the authorized Device form"),
+        };
         let root = match ea_format::decode_exact_object(&root_bytes).unwrap() {
             ea_format::ParsedArchiveObject::Trust(parsed) => parsed,
             _ => panic!("Root must be a Trust object"),
@@ -430,6 +478,79 @@ pub(crate) mod tests {
             resolver.resolve(CertificateHash::from(admin_hash), RegistryVersion::new(1)),
             Err(CryptoError::SignerUnresolved)
         ));
+
+        let prepared_object_hash = prepared_hash;
+        let prepared_hash = CertificateHash::from(prepared_object_hash);
+        let next_writer_certificate_hash = CertificateHash::from(next_writer_hash);
+        let mut writer_state = verified.inner.previous_head.clone();
+        assert!(
+            writer_state
+                .certificates
+                .insert(
+                    prepared_hash,
+                    ActiveCertificate {
+                        object_hash: prepared_object_hash,
+                        fields: prepared_fields,
+                    },
+                )
+                .is_none()
+        );
+        assert!(
+            writer_state
+                .certificates
+                .insert(
+                    next_writer_certificate_hash,
+                    ActiveCertificate {
+                        object_hash: next_writer_hash,
+                        fields: next_writer_fields,
+                    },
+                )
+                .is_none()
+        );
+        writer_state.current_writer_certificate_hash = Some(CertificateHash::from(object_hash(
+            b"a different current Writer",
+        )));
+        assert!(matches!(
+            PreviousHeadResolver::new(&writer_state)
+                .resolve(prepared_hash, RegistryVersion::new(0)),
+            Err(CryptoError::SignerUnresolved)
+        ));
+
+        writer_state.current_writer_certificate_hash = Some(prepared_hash);
+        assert!(
+            PreviousHeadResolver::new(&writer_state)
+                .resolve(prepared_hash, RegistryVersion::new(0))
+                .is_ok()
+        );
+
+        let transition_hash = object_hash(b"verified Writer transition");
+        assert!(writer_state.apply_writer_transition(
+            transition_hash,
+            prepared_hash,
+            next_writer_certificate_hash,
+            ChainSequence::new(41),
+        ));
+        assert_eq!(
+            writer_state
+                .certificates
+                .get(&prepared_hash)
+                .unwrap()
+                .fields
+                .revoked_from_sequence,
+            Some(ChainSequence::new(41))
+        );
+        assert!(writer_state.current_writer_certificate_hash == Some(next_writer_certificate_hash));
+        assert!(writer_state.writer_transition_object_hash == Some(transition_hash));
+        assert!(matches!(
+            PreviousHeadResolver::new(&writer_state)
+                .resolve(prepared_hash, RegistryVersion::new(0)),
+            Err(CryptoError::SignerUnresolved)
+        ));
+        assert!(
+            PreviousHeadResolver::new(&writer_state)
+                .resolve(next_writer_certificate_hash, RegistryVersion::new(0))
+                .is_ok()
+        );
     }
 
     pub(crate) fn exact_root_certificate() -> Vec<u8> {
@@ -509,12 +630,12 @@ pub(crate) mod tests {
             .into_vec()
     }
 
-    fn exact_prepared_certificate(root_hash: CertificateHash) -> Vec<u8> {
+    fn exact_prepared_certificate(root_hash: CertificateHash, device_marker: u8) -> Vec<u8> {
         let key = CanonicalPublicCoseKey::ed25519(ADMIN_PUBLIC).unwrap();
         let payload = TrustPayloadV1::authorized_device_certificate(
             DeviceCertificateFieldsV1 {
                 organization_id: organization(),
-                device_id: DeviceId::try_from(&[0x61; 16][..]).unwrap(),
+                device_id: DeviceId::try_from(&[device_marker; 16][..]).unwrap(),
                 certificate_kind: CertificateKindV1::Writer,
                 signing_public_cose_key: Some(key.to_deterministic_cbor()),
                 kem_public_cose_key: None,

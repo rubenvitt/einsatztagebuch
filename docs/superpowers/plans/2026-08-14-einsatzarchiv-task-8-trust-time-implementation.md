@@ -949,6 +949,7 @@ rtk git commit -m "feat(trust): verify historical admin authorization"
 **Files:**
 - Create: `crates/ea-trust/src/policy.rs`
 - Create: `crates/ea-trust/src/registry.rs`
+- Modify: `crates/ea-trust/src/certificate.rs`
 - Modify: `crates/ea-trust/src/error.rs`
 - Modify: `crates/ea-trust/src/operator_binding.rs`
 - Modify: `crates/ea-trust/src/resolver.rs`
@@ -1101,7 +1102,8 @@ Do not compare `issuedAt`/`notBefore` to wall clock here and do not update any t
 ```bash
 rtk cargo test --locked -p ea-trust --test registry_transitions --test registry_attacks
 rtk git add -- crates/ea-trust/src/policy.rs crates/ea-trust/src/registry.rs \
-  crates/ea-trust/src/error.rs crates/ea-trust/src/operator_binding.rs \
+  crates/ea-trust/src/certificate.rs crates/ea-trust/src/error.rs \
+  crates/ea-trust/src/operator_binding.rs \
   crates/ea-trust/src/resolver.rs crates/ea-trust/src/lib.rs \
   crates/ea-trust/tests/support/mod.rs crates/ea-trust/tests/registry_transitions.rs \
   crates/ea-trust/tests/registry_attacks.rs
