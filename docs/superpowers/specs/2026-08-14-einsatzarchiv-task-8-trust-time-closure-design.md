@@ -444,6 +444,28 @@ Task 8 stellt eine schmale read-only `TrustObjectSource`-Abstraktion über exakt
 Trust-Bytes bereit. Task 9 implementiert sie später mit dem `ArchiveInventory`;
 dadurch entsteht keine Rückwärtsabhängigkeit `ea-trust -> ea-archive`.
 
+Die v1-Quelle und der Trust-Katalog sind zusätzlich durch zwei versionierte,
+aggregierte Arbeitsgrenzen geschlossen:
+
+```text
+MAX_TRUST_OBJECTS_V1 = 65_536
+MAX_TOTAL_TRUST_OBJECT_BYTES_V1 = 268_435_456
+```
+
+`TrustObjectSource::visit_trust_object_hashes` liefert Hashes besucherbasiert
+und darf keinen unbegrenzten Gesamt-`Vec` verlangen. Die offizielle
+`ArchiveInventory`-Implementierung stoppt vor dem Hinzufügen des 65.537.
+Trust-Objekts. `ea-trust` zählt unabhängig erneut, summiert die Länge jedes
+tatsächlich gelesenen, eindeutigen ETB mit `checked_add` und prüft die
+Bytegrenze vor Hashprüfung, Decoding und `before retention`. Die Quelle liest
+jedes einzelne ETB höchstens bis zum bestehenden
+`ETB_MAX_RAW_BYTES_V1 + 1`-Preflight und reicht keine unbeschränkt gelesenen
+Dateien durch. Überschreitungen sind getrennt und code-only
+`EA-TRUST-SOURCE-COUNT-LIMIT` beziehungsweise
+`EA-TRUST-SOURCE-BYTE-LIMIT`; sie dürfen nicht zum allgemeinen Quellfehler
+zusammenfallen. Größere legitime Trust-Linien benötigen eine explizite
+Format-/Migrationsentscheidung statt umgebungsabhängiger Caller-Limits.
+
 ## 8. Kompatibilität und Migration
 
 v0.1 ist noch nicht veröffentlicht. Deshalb wird v1 jetzt korrigiert; es gibt

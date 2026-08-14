@@ -56,6 +56,11 @@ ea-archive + ea-trust
 - A Clock Release lifts only `FutureSkew::Blocked`; it cannot lift stale Registry, sequence lease, `notBefore`, signature, authorization-time, fork, rollback, or policy failures.
 - Replay uniqueness is persistent under `(organizationId, targetDeviceId, nonce)`, not memory-only.
 - All arithmetic uses checked operations. No saturating time/version/sequence arithmetic.
+- Trust discovery is version-bounded by `MAX_TRUST_OBJECTS_V1 = 65_536` and
+  `MAX_TOTAL_TRUST_OBJECT_BYTES_V1 = 268_435_456`. Hash enumeration is
+  visitor-based; the official source and `ea-trust` enforce the count before
+  growth, and `ea-trust` uses `checked_add` on exact unique ETB lengths before
+  decoding or `before retention`.
 - All errors have stable static codes and optional static field labels only. Debug/Display must not expose exact bytes, hashes, IDs, nonces, certificate material, or audit justification data.
 - TSA tag 2 is public-runtime fail-closed in Task 8. Stage 6 must first add a lower-layer opaque `ea_crypto::VerifiedTsaEvidence` produced by full RFC-3161 validation; only then may a separately reviewed `ea-trust` adapter derive a TSA `VerifiedSignedTime`. No callback returning raw `UnixMillis` is allowed.
 - No new external dependency is needed. Every new Cargo dependency must use `workspace = true`.
@@ -115,6 +120,8 @@ At minimum expose separate code-only variants/codes for:
 ```text
 EA-TIME-OVERFLOW
 EA-TRUST-SOURCE
+EA-TRUST-SOURCE-COUNT-LIMIT
+EA-TRUST-SOURCE-BYTE-LIMIT
 EA-TRUST-ANCHOR-SHAPE
 EA-TRUST-ANCHOR-HASH
 EA-TRUST-ANCHOR-PIN
@@ -567,6 +574,12 @@ rtk git commit -m "feat(format): expose typed trust and clock-release views"
 
 Pin complete Pre-Anchor and final Anchor hex fixtures. Mutate every shared field, bootstrap hash, Root key/thumbprint/object hash, sorted Admin certificate list, sorted Binding list, list count, duplicate, critical extensions, trailing byte, and source lookup hash.
 
+Also pin `MAX_TRUST_OBJECTS_V1 = 65_536` and
+`MAX_TOTAL_TRUST_OBJECT_BYTES_V1 = 268_435_456`. The source table must prove
+the exact count and aggregate-byte boundaries, `checked_add` overflow, distinct
+`EA-TRUST-SOURCE-COUNT-LIMIT` / `EA-TRUST-SOURCE-BYTE-LIMIT` errors, no object
+read after a count failure, and byte failure before decode or retention.
+
 Inside `catalog.rs`, add a crate-private table-driven unit test named
 `trust_catalog_source_attacks_are_closed`. Its fake source returns duplicate
 hashes, unsorted hashes, missing bytes, non-ETB bytes, and bytes whose actual
@@ -586,7 +599,10 @@ Expected: missing APIs.
 
 ```rust
 pub trait TrustObjectSource {
-    fn trust_object_hashes(&self) -> Result<Vec<ObjectHash>, TrustSourceError>;
+    fn visit_trust_object_hashes(
+        &self,
+        visitor: &mut dyn FnMut(ObjectHash) -> Result<(), TrustSourceError>,
+    ) -> Result<(), TrustSourceError>;
 
     fn read_exact_trust_object(
         &self,
@@ -595,7 +611,16 @@ pub trait TrustObjectSource {
 }
 ```
 
-`TrustCatalog::load` sorts returned hashes, rejects duplicate/conflicting declarations rather than silently choosing, reads each exact object once, checks actual `object_hash` against the lookup key, calls `ea_format::decode_exact_object`, requires ETB, and indexes by subtype/hash. It never trusts filenames or source order.
+The official `ArchiveInventory` adapter invokes the visitor directly while it
+scans its bounded Trust index and stops before the next item when the visitor
+returns an error; it does not first assemble another unbounded hash `Vec`.
+`TrustCatalog::load` collects at most `MAX_TRUST_OBJECTS_V1`, sorts returned
+hashes, rejects duplicate/conflicting declarations rather than silently
+choosing, and reads each exact object once. It adds each unique exact byte
+length with `checked_add`, requires the sum to remain at most
+`MAX_TOTAL_TRUST_OBJECT_BYTES_V1` before retention, checks actual `object_hash`
+against the lookup key, calls `ea_format::decode_exact_object`, requires ETB,
+and indexes by subtype/hash. It never trusts filenames or source order.
 
 Define the complete storage port and validated snapshot needed by the stable
 public flow now, before `verify_trust` is introduced:

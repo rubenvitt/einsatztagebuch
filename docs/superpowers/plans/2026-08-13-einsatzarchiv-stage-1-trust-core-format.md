@@ -1427,6 +1427,17 @@ the complete `RegistrySelectionOutcome` is
 This Stage-1 overview deliberately does not duplicate those public signatures or
 collapse Pending/Advanced outcomes into a selected-only return.
 
+The archive adapter implements visitor-based
+`TrustObjectSource::visit_trust_object_hashes` without first cloning an
+unbounded hash list. It enforces and reports the versioned limits
+`MAX_TRUST_OBJECTS_V1 = 65_536` and
+`MAX_TOTAL_TRUST_OBJECT_BYTES_V1 = 268_435_456` while scanning, before adding
+the next inventory record. `ea-trust` independently rechecks the count and uses
+`checked_add` on the exact unique ETB lengths before decode and `before
+retention`; failures stay distinct as `EA-TRUST-SOURCE-COUNT-LIMIT` and
+`EA-TRUST-SOURCE-BYTE-LIMIT`. Each file read is independently bounded by the
+existing ETB raw limit before allocation.
+
 Build the preexisting floor only from persisted state, previously activated
 Registry times, and fully verified Receipt/Checkpoint/TSA references; the current
 candidate cannot self-activate. Verify historical chain, previous-head/+1,

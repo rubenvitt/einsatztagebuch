@@ -1184,6 +1184,42 @@ fn task8_runtime_seams_are_authoritative_and_not_duplicated() {
     );
 }
 
+#[test]
+fn task8_trust_source_limits_are_normative_and_bounded_before_retention() {
+    let closure = include_str!(
+        "../../../docs/superpowers/specs/2026-08-14-einsatzarchiv-task-8-trust-time-closure-design.md"
+    );
+    let runtime = include_str!(
+        "../../../docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"
+    );
+    let stage_one = stage_one_plan();
+    let required = [
+        "MAX_TRUST_OBJECTS_V1 = 65_536",
+        "MAX_TOTAL_TRUST_OBJECT_BYTES_V1 = 268_435_456",
+        "EA-TRUST-SOURCE-COUNT-LIMIT",
+        "EA-TRUST-SOURCE-BYTE-LIMIT",
+        "visit_trust_object_hashes",
+        "checked_add",
+        "before retention",
+    ];
+
+    assert_contains_all(
+        "Task-8 closure Trust-source limits",
+        &normalized_prose(closure),
+        &required,
+    );
+    assert_contains_all(
+        "Task-8 runtime Trust-source limits",
+        &normalized_prose(runtime),
+        &required,
+    );
+    assert_contains_all(
+        "Stage-1 inventory Trust-source limits",
+        &normalized_prose(stage_one),
+        &required,
+    );
+}
+
 fn protocol_cddl() -> String {
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
