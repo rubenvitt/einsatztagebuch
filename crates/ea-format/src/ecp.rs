@@ -1,8 +1,11 @@
 use ea_crypto::{ContentType, parse_cose_sign1, validate_unsigned_protocol_core};
 use ea_types::{ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, OrganizationId, UnixMillis};
-use minicbor::{Decoder, Encoder};
+use minicbor::{Decoder, Encoder, data::Type};
 
-use crate::object::{FormatError, exact_array_length, exact_item, expect_array_length, finish};
+use crate::object::{
+    FormatError, bytes_exact, exact_array_length, exact_item, expect_array_length,
+    expect_empty_array, finish, optional_bytes_exact,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EvidenceKindV1 {
@@ -98,6 +101,23 @@ pub struct EvidenceObjectV1 {
     exact_body: Vec<u8>,
 }
 
+pub enum DecodedEvidencePayloadV1 {
+    Standard {
+        core: CheckpointCoreV1,
+        exact_cose: Vec<u8>,
+    },
+    Timestamp {
+        core: CheckpointCoreV1,
+        exact_cose: Vec<u8>,
+        evidence: Rfc3161EvidenceFieldsV1,
+    },
+    Renewal {
+        core: RenewalCoreV1,
+        exact_cose: Vec<u8>,
+        evidence: Rfc3161EvidenceFieldsV1,
+    },
+}
+
 impl EvidenceObjectV1 {
     pub fn standard(
         core: CheckpointCoreV1,
@@ -145,6 +165,10 @@ impl EvidenceObjectV1 {
     #[must_use]
     pub const fn kind(&self) -> EvidenceKindV1 {
         self.kind
+    }
+
+    pub fn decoded_payload(&self) -> Result<DecodedEvidencePayloadV1, FormatError> {
+        decode_body(&self.exact_body)
     }
 
     pub(crate) fn body_bytes(&self) -> &[u8] {
@@ -293,25 +317,11 @@ fn encode_evidence_variant(variant: u8, evidence: &[u8]) -> Result<Vec<u8>, Form
 }
 
 pub(crate) fn parse_body(input: &[u8]) -> Result<EvidenceObjectV1, FormatError> {
-    let mut decoder = Decoder::new(input);
-    expect_array_length(&mut decoder, 2)?;
-    let variant = decoder.u64().map_err(|_| FormatError::Shape)?;
-    let evidence = exact_item(input, &mut decoder)?;
-    finish(&decoder, input)?;
-    let kind = match variant {
-        0 => {
-            validate_standard(evidence)?;
-            EvidenceKindV1::StandardCheckpoint
-        }
-        1 => {
-            validate_timestamp(evidence)?;
-            EvidenceKindV1::Timestamp
-        }
-        2 => {
-            validate_renewal(evidence)?;
-            EvidenceKindV1::Renewal
-        }
-        _ => return Err(FormatError::TagMismatch),
+    let decoded = decode_body(input)?;
+    let kind = match decoded {
+        DecodedEvidencePayloadV1::Standard { .. } => EvidenceKindV1::StandardCheckpoint,
+        DecodedEvidencePayloadV1::Timestamp { .. } => EvidenceKindV1::Timestamp,
+        DecodedEvidencePayloadV1::Renewal { .. } => EvidenceKindV1::Renewal,
     };
     Ok(EvidenceObjectV1 {
         kind,
@@ -319,86 +329,229 @@ pub(crate) fn parse_body(input: &[u8]) -> Result<EvidenceObjectV1, FormatError> 
     })
 }
 
-fn validate_standard(input: &[u8]) -> Result<(), FormatError> {
+fn decode_body(input: &[u8]) -> Result<DecodedEvidencePayloadV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 2)?;
-    let core = exact_item(input, &mut decoder)?;
-    validate_unsigned_protocol_core(ContentType::CheckpointCbor, core)
-        .map_err(|_| FormatError::Shape)?;
-    let signature = exact_item(input, &mut decoder)?;
+    let variant = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let evidence = exact_item(input, &mut decoder)?;
     finish(&decoder, input)?;
-    let parsed = parse_cose_sign1(signature, &[]).map_err(|_| FormatError::Cose)?;
+    match variant {
+        0 => decode_standard(evidence),
+        1 => decode_timestamp(evidence),
+        2 => decode_renewal(evidence),
+        _ => Err(FormatError::TagMismatch),
+    }
+}
+
+fn validate_standard(input: &[u8]) -> Result<(), FormatError> {
+    decode_standard(input).map(|_| ())
+}
+
+fn decode_standard(input: &[u8]) -> Result<DecodedEvidencePayloadV1, FormatError> {
+    let mut decoder = Decoder::new(input);
+    expect_array_length(&mut decoder, 2)?;
+    let exact_core = exact_item(input, &mut decoder)?;
+    let core = decode_checkpoint_core(exact_core)?;
+    let exact_cose = exact_item(input, &mut decoder)?;
+    finish(&decoder, input)?;
+    let parsed = parse_cose_sign1(exact_cose, &[]).map_err(|_| FormatError::Cose)?;
     if parsed.content_type() != ContentType::CheckpointCbor
-        || parsed.payload() != core
+        || parsed.payload() != exact_core
         || parsed.timestamp_token().is_some()
     {
         return Err(FormatError::Cose);
     }
-    Ok(())
+    Ok(DecodedEvidencePayloadV1::Standard {
+        core,
+        exact_cose: exact_cose.to_vec(),
+    })
 }
 
 fn validate_timestamp(input: &[u8]) -> Result<(), FormatError> {
+    decode_timestamp(input).map(|_| ())
+}
+
+fn decode_timestamp(input: &[u8]) -> Result<DecodedEvidencePayloadV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 9)?;
-    let core = exact_item(input, &mut decoder)?;
-    validate_unsigned_protocol_core(ContentType::CheckpointCbor, core)
-        .map_err(|_| FormatError::Shape)?;
-    let signature = exact_item(input, &mut decoder)?;
-    let parsed = parse_cose_sign1(signature, &[]).map_err(|_| FormatError::Cose)?;
+    let exact_core = exact_item(input, &mut decoder)?;
+    let core = decode_checkpoint_core(exact_core)?;
+    let exact_cose = exact_item(input, &mut decoder)?;
+    let parsed = parse_cose_sign1(exact_cose, &[]).map_err(|_| FormatError::Cose)?;
     if parsed.content_type() != ContentType::CheckpointCbor
-        || parsed.payload() != core
+        || parsed.payload() != exact_core
         || parsed.timestamp_token().is_none()
     {
         return Err(FormatError::Cose);
     }
-    decoder.bytes().map_err(|_| FormatError::Shape)?;
-    if decoder.u64().map_err(|_| FormatError::Shape)? != 0 {
-        return Err(FormatError::TagMismatch);
-    }
-    decoder.bytes().map_err(|_| FormatError::Shape)?;
-    decoder.bytes().map_err(|_| FormatError::Shape)?;
-    validate_bstr_array(&mut decoder, true)?;
-    validate_bstr_array(&mut decoder, false)?;
-    validate_bstr_array(&mut decoder, false)?;
-    finish(&decoder, input)
+    let evidence = decode_rfc3161_fields(&mut decoder)?;
+    finish(&decoder, input)?;
+    Ok(DecodedEvidencePayloadV1::Timestamp {
+        core,
+        exact_cose: exact_cose.to_vec(),
+        evidence,
+    })
 }
 
 fn validate_renewal(input: &[u8]) -> Result<(), FormatError> {
+    decode_renewal(input).map(|_| ())
+}
+
+fn decode_renewal(input: &[u8]) -> Result<DecodedEvidencePayloadV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 9)?;
-    let core = exact_item(input, &mut decoder)?;
-    validate_unsigned_protocol_core(ContentType::EvidenceRenewalCbor, core)
-        .map_err(|_| FormatError::Shape)?;
-    let signature = exact_item(input, &mut decoder)?;
-    let parsed = parse_cose_sign1(signature, &[]).map_err(|_| FormatError::Cose)?;
+    let exact_core = exact_item(input, &mut decoder)?;
+    let core = decode_renewal_core(exact_core)?;
+    let exact_cose = exact_item(input, &mut decoder)?;
+    let parsed = parse_cose_sign1(exact_cose, &[]).map_err(|_| FormatError::Cose)?;
     if parsed.content_type() != ContentType::EvidenceRenewalCbor
-        || parsed.payload() != core
+        || parsed.payload() != exact_core
         || parsed.timestamp_token().is_none()
     {
         return Err(FormatError::Cose);
     }
-    decoder.bytes().map_err(|_| FormatError::Shape)?;
+    let evidence = decode_rfc3161_fields(&mut decoder)?;
+    finish(&decoder, input)?;
+    Ok(DecodedEvidencePayloadV1::Renewal {
+        core,
+        exact_cose: exact_cose.to_vec(),
+        evidence,
+    })
+}
+
+fn decode_checkpoint_core(input: &[u8]) -> Result<CheckpointCoreV1, FormatError> {
+    validate_unsigned_protocol_core(ContentType::CheckpointCbor, input)
+        .map_err(|_| FormatError::Shape)?;
+    let mut decoder = Decoder::new(input);
+    expect_array_length(&mut decoder, 11)?;
+    decoder.u64().map_err(|_| FormatError::Shape)?;
+    decoder.str().map_err(|_| FormatError::Shape)?;
+    let fields = CheckpointCoreFieldsV1 {
+        organization_id: typed_bytes(&mut decoder, 16)?,
+        chain_id: typed_bytes(&mut decoder, 16)?,
+        covered_from_sequence: ChainSequence::new(decoder.u64().map_err(|_| FormatError::Shape)?),
+        covered_through_sequence: ChainSequence::new(
+            decoder.u64().map_err(|_| FormatError::Shape)?,
+        ),
+        head_entry_hash: typed_bytes(&mut decoder, 32)?,
+        registry_head_hash: typed_bytes(&mut decoder, 32)?,
+        issued_at_server: UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?),
+        previous_evidence_hash: optional_typed_bytes(&mut decoder, 32)?,
+    };
+    expect_empty_array(&mut decoder)?;
+    finish(&decoder, input)?;
+    Ok(CheckpointCoreV1 {
+        fields,
+        exact: input.to_vec(),
+    })
+}
+
+fn decode_renewal_core(input: &[u8]) -> Result<RenewalCoreV1, FormatError> {
+    validate_unsigned_protocol_core(ContentType::EvidenceRenewalCbor, input)
+        .map_err(|_| FormatError::Shape)?;
+    let mut decoder = Decoder::new(input);
+    expect_array_length(&mut decoder, 8)?;
+    decoder.u64().map_err(|_| FormatError::Shape)?;
+    decoder.str().map_err(|_| FormatError::Shape)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let chain_id = typed_bytes(&mut decoder, 16)?;
+    let current_entry_hash = typed_bytes(&mut decoder, 32)?;
+    let previous_renewal_hash = optional_typed_bytes(&mut decoder, 32)?;
+    let renewal_input_hashes = decode_hash_array(&mut decoder, true)?
+        .into_iter()
+        .map(|hash| Hash32::try_from(hash.as_slice()).map_err(|_| FormatError::Shape))
+        .collect::<Result<Vec<_>, _>>()?;
+    expect_empty_array(&mut decoder)?;
+    finish(&decoder, input)?;
+    Ok(RenewalCoreV1 {
+        fields: RenewalCoreFieldsV1 {
+            organization_id,
+            chain_id,
+            current_entry_hash,
+            previous_renewal_hash,
+            renewal_input_hashes,
+        },
+        exact: input.to_vec(),
+    })
+}
+
+fn decode_rfc3161_fields(
+    decoder: &mut Decoder<'_>,
+) -> Result<Rfc3161EvidenceFieldsV1, FormatError> {
+    let rfc3161_response_der = decoder.bytes().map_err(|_| FormatError::Shape)?.to_vec();
     if decoder.u64().map_err(|_| FormatError::Shape)? != 0 {
         return Err(FormatError::TagMismatch);
     }
-    decoder.bytes().map_err(|_| FormatError::Shape)?;
-    decoder.bytes().map_err(|_| FormatError::Shape)?;
-    validate_bstr_array(&mut decoder, true)?;
-    validate_bstr_array(&mut decoder, false)?;
-    validate_bstr_array(&mut decoder, false)?;
-    finish(&decoder, input)
+    let request_nonce = decoder.bytes().map_err(|_| FormatError::Shape)?.to_vec();
+    let policy_oid_der = decoder.bytes().map_err(|_| FormatError::Shape)?.to_vec();
+    Ok(Rfc3161EvidenceFieldsV1 {
+        rfc3161_response_der,
+        request_nonce,
+        policy_oid_der,
+        tsa_certificate_chain_der: decode_bstr_array(decoder, true)?,
+        revocation_data_der: decode_bstr_array(decoder, false)?,
+        validation_data_der: decode_bstr_array(decoder, false)?,
+    })
 }
 
-fn validate_bstr_array(
+fn decode_hash_array(
     decoder: &mut Decoder<'_>,
     require_nonempty: bool,
-) -> Result<(), FormatError> {
+) -> Result<Vec<[u8; 32]>, FormatError> {
     let length = exact_array_length(decoder)?;
     if require_nonempty && length == 0 {
         return Err(FormatError::Shape);
     }
+    let capacity = usize::try_from(length).map_err(|_| FormatError::Shape)?;
+    let mut values = Vec::with_capacity(capacity);
     for _ in 0..length {
-        decoder.bytes().map_err(|_| FormatError::Shape)?;
+        values.push(
+            bytes_exact(decoder, 32)?
+                .try_into()
+                .map_err(|_| FormatError::Shape)?,
+        );
     }
-    Ok(())
+    Ok(values)
+}
+
+fn decode_bstr_array(
+    decoder: &mut Decoder<'_>,
+    require_nonempty: bool,
+) -> Result<Vec<Vec<u8>>, FormatError> {
+    let length = exact_array_length(decoder)?;
+    if require_nonempty && length == 0 {
+        return Err(FormatError::Shape);
+    }
+    let capacity = usize::try_from(length).map_err(|_| FormatError::Shape)?;
+    let mut values = Vec::with_capacity(capacity);
+    for _ in 0..length {
+        values.push(decoder.bytes().map_err(|_| FormatError::Shape)?.to_vec());
+    }
+    Ok(values)
+}
+
+fn typed_bytes<'a, T>(decoder: &mut Decoder<'a>, length: usize) -> Result<T, FormatError>
+where
+    T: TryFrom<&'a [u8]>,
+{
+    T::try_from(bytes_exact(decoder, length)?).map_err(|_| FormatError::Shape)
+}
+
+fn optional_typed_bytes<'a, T>(
+    decoder: &mut Decoder<'a>,
+    length: usize,
+) -> Result<Option<T>, FormatError>
+where
+    T: TryFrom<&'a [u8]>,
+{
+    match decoder.datatype().map_err(|_| FormatError::Shape)? {
+        Type::Null => {
+            decoder.null().map_err(|_| FormatError::Shape)?;
+            Ok(None)
+        }
+        Type::Bytes => optional_bytes_exact(decoder, length)?
+            .map(|value| T::try_from(value).map_err(|_| FormatError::Shape))
+            .transpose(),
+        _ => Err(FormatError::Shape),
+    }
 }

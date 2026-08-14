@@ -502,6 +502,7 @@ impl TrustPayloadV1 {
 pub struct TrustObjectV1 {
     subtype: TrustSubtypeV1,
     exact_payload: Vec<u8>,
+    exact_digest_input: Vec<u8>,
     signatures: Vec<Vec<u8>>,
     exact_body: Vec<u8>,
 }
@@ -517,6 +518,7 @@ impl TrustObjectV1 {
         Ok(Self {
             subtype: payload.subtype,
             exact_payload: payload.exact_payload,
+            exact_digest_input: payload.exact_digest_input,
             signatures,
             exact_body,
         })
@@ -530,6 +532,11 @@ impl TrustObjectV1 {
     #[must_use]
     pub fn exact_payload(&self) -> &[u8] {
         &self.exact_payload
+    }
+
+    #[must_use]
+    pub fn exact_digest_input(&self) -> &[u8] {
+        &self.exact_digest_input
     }
 
     #[must_use]
@@ -603,6 +610,7 @@ pub(crate) fn parse_body(input: &[u8]) -> Result<TrustObjectV1, FormatError> {
     Ok(TrustObjectV1 {
         subtype,
         exact_payload: payload.to_vec(),
+        exact_digest_input: digest_input,
         signatures,
         exact_body: input.to_vec(),
     })
@@ -1246,7 +1254,7 @@ fn validate_signature_count(
     Ok(())
 }
 
-fn payload_wraps_core(input: &[u8]) -> Result<bool, FormatError> {
+pub(crate) fn payload_wraps_core(input: &[u8]) -> Result<bool, FormatError> {
     let mut decoder = Decoder::new(input);
     exact_array_length(&mut decoder)?;
     Ok(decoder.datatype().map_err(|_| FormatError::Shape)? == Type::Array)
@@ -1286,255 +1294,466 @@ fn validate_authorized(
     input: &[u8],
     validate_core: impl FnOnce(&[u8]) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
+    let parts = decode_authorized_parts(input)?;
+    validate_core(parts.exact_core)
+}
+
+pub(crate) struct AuthorizedPayloadParts<'a> {
+    pub exact_core: &'a [u8],
+    pub authorization_object_hash: ObjectHash,
+}
+
+pub(crate) fn decode_authorized_parts(
+    input: &[u8],
+) -> Result<AuthorizedPayloadParts<'_>, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 2)?;
     let core = exact_item(input, &mut decoder)?;
-    validate_core(core)?;
-    bytes_exact(&mut decoder, 32)?;
-    finish(&decoder, input)
+    let authorization_object_hash =
+        ObjectHash::try_from(bytes_exact(&mut decoder, 32)?).map_err(|_| FormatError::Shape)?;
+    finish(&decoder, input)?;
+    Ok(AuthorizedPayloadParts {
+        exact_core: core,
+        authorization_object_hash,
+    })
 }
 
 fn validate_root_core(input: &[u8], initial: bool) -> Result<(), FormatError> {
+    decode_root_core(input, initial).map(|_| ())
+}
+
+pub(crate) fn decode_root_core(
+    input: &[u8],
+    initial: bool,
+) -> Result<RootCertificateFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 7)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    decoder.bytes().map_err(|_| FormatError::Shape)?;
-    bytes_exact(&mut decoder, 32)?;
-    let previous = optional_bytes_exact(&mut decoder, 32)?.is_some();
-    if initial == previous {
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let root_public_cose_key = decoder.bytes().map_err(|_| FormatError::Shape)?.to_vec();
+    let root_key_thumbprint = typed_bytes(&mut decoder, 32)?;
+    let previous_root_certificate_object_hash = optional_typed_bytes(&mut decoder, 32)?;
+    if initial == previous_root_certificate_object_hash.is_some() {
         return Err(FormatError::Shape);
     }
-    decoder.u64().map_err(|_| FormatError::Shape)?;
+    let effective_from_registry_version =
+        RegistryVersion::new(decoder.u64().map_err(|_| FormatError::Shape)?);
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(RootCertificateFieldsV1 {
+        organization_id,
+        root_public_cose_key,
+        root_key_thumbprint,
+        previous_root_certificate_object_hash,
+        effective_from_registry_version,
+    })
 }
 
 fn validate_device_core(input: &[u8], required_kind: Option<u64>) -> Result<(), FormatError> {
+    decode_device_core(input, required_kind).map(|_| ())
+}
+
+pub(crate) fn decode_device_core(
+    input: &[u8],
+    required_kind: Option<u64>,
+) -> Result<DeviceCertificateFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 14)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 16)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let device_id = typed_bytes(&mut decoder, 16)?;
     let kind = decoder.u64().map_err(|_| FormatError::Shape)?;
     if kind > 7 || required_kind.is_some_and(|required| required != kind) {
         return Err(FormatError::Shape);
     }
-    optional_unbounded_bstr(&mut decoder)?;
-    optional_unbounded_bstr(&mut decoder)?;
-    optional_bytes_exact(&mut decoder, 32)?;
-    optional_bytes_exact(&mut decoder, 32)?;
-    validate_sorted_texts(&mut decoder, false)?;
-    if decoder.u64().map_err(|_| FormatError::Shape)? > 4 {
-        return Err(FormatError::Shape);
-    }
+    let certificate_kind = certificate_kind(kind)?;
+    let signing_public_cose_key = optional_bstr_vec(&mut decoder)?;
+    let kem_public_cose_key = optional_bstr_vec(&mut decoder)?;
+    let signing_key_thumbprint = optional_typed_bytes(&mut decoder, 32)?;
+    let kem_key_thumbprint = optional_typed_bytes(&mut decoder, 32)?;
+    let capabilities = decode_sorted_texts(&mut decoder, false)?;
+    let key_protection_profile =
+        key_protection_profile(decoder.u64().map_err(|_| FormatError::Shape)?)?;
     let effective = decoder.u64().map_err(|_| FormatError::Shape)?;
     let revoked = optional_uint(&mut decoder)?;
     if revoked.is_some_and(|value| value <= effective) {
         return Err(FormatError::Shape);
     }
-    let authority_subject_id = optional_bytes_exact(&mut decoder, 16)?;
+    let authority_subject_id = optional_typed_bytes(&mut decoder, 16)?;
     if matches!(kind, 2 | 3) != authority_subject_id.is_some() {
         return Err(FormatError::Shape);
     }
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(DeviceCertificateFieldsV1 {
+        organization_id,
+        device_id,
+        certificate_kind,
+        signing_public_cose_key,
+        kem_public_cose_key,
+        signing_key_thumbprint,
+        kem_key_thumbprint,
+        capabilities,
+        key_protection_profile,
+        effective_from_sequence: ChainSequence::new(effective),
+        revoked_from_sequence: revoked.map(ChainSequence::new),
+        authority_subject_id,
+    })
 }
 
 fn validate_operator_core(input: &[u8], required_role: Option<u64>) -> Result<(), FormatError> {
+    decode_operator_core(input, required_role).map(|_| ())
+}
+
+pub(crate) fn decode_operator_core(
+    input: &[u8],
+    required_role: Option<u64>,
+) -> Result<OperatorBindingFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 11)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 32)?;
-    bytes_exact(&mut decoder, 32)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let operator_subject_id = typed_bytes(&mut decoder, 16)?;
+    let operator_profile_commitment = typed_bytes(&mut decoder, 32)?;
+    let device_certificate_hash = typed_bytes(&mut decoder, 32)?;
     let role = decoder.u64().map_err(|_| FormatError::Shape)?;
     if role > 2 || required_role.is_some_and(|required| required != role) {
         return Err(FormatError::Shape);
     }
-    bytes_exact(&mut decoder, 32)?;
-    bytes_exact(&mut decoder, 32)?;
+    let operator_role = operator_role(role)?;
+    let os_account_binding_hash = typed_bytes(&mut decoder, 32)?;
+    let operator_instance_key_thumbprint = typed_bytes(&mut decoder, 32)?;
     let effective = decoder.u64().map_err(|_| FormatError::Shape)?;
     let revoked = optional_uint(&mut decoder)?;
     if revoked.is_some_and(|value| value <= effective) {
         return Err(FormatError::Shape);
     }
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(OperatorBindingFieldsV1 {
+        organization_id,
+        operator_subject_id,
+        operator_profile_commitment,
+        device_certificate_hash,
+        operator_role,
+        os_account_binding_hash,
+        operator_instance_key_thumbprint,
+        effective_from_sequence: ChainSequence::new(effective),
+        revoked_from_sequence: revoked.map(ChainSequence::new),
+    })
 }
 
 fn validate_admin_authorization(input: &[u8]) -> Result<(), FormatError> {
+    decode_admin_authorization(input).map(|_| ())
+}
+
+pub(crate) fn decode_admin_authorization(
+    input: &[u8],
+) -> Result<OrganizationAdminAuthorizationFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 15)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 16)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    for _ in 0..4 {
-        bytes_exact(&mut decoder, 32)?;
-    }
-    if decoder.u64().map_err(|_| FormatError::Shape)? > 6 {
+    let authorization_id = typed_bytes(&mut decoder, 16)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let registry_version = RegistryVersion::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let registry_head_hash = typed_bytes(&mut decoder, 32)?;
+    let admin_key_thumbprint = typed_bytes(&mut decoder, 32)?;
+    let admin_certificate_hash = typed_bytes(&mut decoder, 32)?;
+    let admin_operator_binding_object_hash = typed_bytes(&mut decoder, 32)?;
+    let action_code = decoder.u64().map_err(|_| FormatError::Shape)?;
+    if action_code > 6 {
         return Err(FormatError::Shape);
     }
+    let target_trust_subtype =
+        TrustSubtypeV1::from_str(decoder.str().map_err(|_| FormatError::Shape)?)?;
     if !matches!(
-        decoder.str().map_err(|_| FormatError::Shape)?,
-        "deviceCertificate"
-            | "operatorBinding"
-            | "registryEvent"
-            | "policy"
-            | "writerTransition"
-            | "rootCertificate"
+        target_trust_subtype,
+        TrustSubtypeV1::DeviceCertificate
+            | TrustSubtypeV1::OperatorBinding
+            | TrustSubtypeV1::RegistryEvent
+            | TrustSubtypeV1::Policy
+            | TrustSubtypeV1::WriterTransition
+            | TrustSubtypeV1::RootCertificate
     ) {
         return Err(FormatError::TagMismatch);
     }
-    bytes_exact(&mut decoder, 32)?;
+    let authorized_trust_core_hash = typed_bytes(&mut decoder, 32)?;
     let issued = decoder.i64().map_err(|_| FormatError::Shape)?;
     let expires = decoder.i64().map_err(|_| FormatError::Shape)?;
     if issued >= expires {
         return Err(FormatError::Shape);
     }
-    bytes_exact(&mut decoder, 32)?;
+    let nonce = bytes_exact(&mut decoder, 32)?
+        .try_into()
+        .map_err(|_| FormatError::Shape)?;
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(OrganizationAdminAuthorizationFieldsV1 {
+        authorization_id,
+        organization_id,
+        registry_version,
+        registry_head_hash,
+        admin_key_thumbprint,
+        admin_certificate_hash,
+        admin_operator_binding_object_hash,
+        action_code: u8::try_from(action_code).map_err(|_| FormatError::Shape)?,
+        target_trust_subtype,
+        authorized_trust_core_hash,
+        issued_at: UnixMillis::new(issued),
+        expires_at: UnixMillis::new(expires),
+        nonce,
+    })
 }
 
 fn validate_registry_event(input: &[u8]) -> Result<(), FormatError> {
+    decode_registry_event(input).map(|_| ())
+}
+
+pub(crate) fn decode_registry_event(input: &[u8]) -> Result<RegistryEventFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 13)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    optional_bytes_exact(&mut decoder, 32)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.i64().map_err(|_| FormatError::Shape)?;
-    decoder.i64().map_err(|_| FormatError::Shape)?;
-    decoder.i64().map_err(|_| FormatError::Shape)?;
-    bytes_exact(&mut decoder, 32)?;
-    validate_registry_change(&mut decoder)?;
-    bytes_exact(&mut decoder, 32)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let registry_version = RegistryVersion::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let previous_registry_hash = optional_typed_bytes(&mut decoder, 32)?;
+    let effective_from_sequence =
+        ChainSequence::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let valid_through_sequence = ChainSequence::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let issued_at = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
+    let not_before = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
+    let not_after = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
+    let policy_object_hash = typed_bytes(&mut decoder, 32)?;
+    let change = decode_registry_change(&mut decoder)?;
+    let root_key_thumbprint = typed_bytes(&mut decoder, 32)?;
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(RegistryEventFieldsV1 {
+        organization_id,
+        registry_version,
+        previous_registry_hash,
+        effective_from_sequence,
+        valid_through_sequence,
+        issued_at,
+        not_before,
+        not_after,
+        policy_object_hash,
+        change,
+        root_key_thumbprint,
+    })
 }
 
-fn validate_registry_change(decoder: &mut Decoder<'_>) -> Result<(), FormatError> {
+fn decode_registry_change(decoder: &mut Decoder<'_>) -> Result<RegistryChangeV1, FormatError> {
     let length = exact_array_length(decoder)?;
     let tag = decoder.u64().map_err(|_| FormatError::Shape)?;
     match (tag, length) {
-        (0 | 2 | 3 | 4 | 6, 2) => {
-            bytes_exact(decoder, 32)?;
-        }
+        (0, 2) => Ok(RegistryChangeV1::Certificate {
+            object_hash: typed_bytes(decoder, 32)?,
+        }),
         (1, 3) => {
-            if decoder.u64().map_err(|_| FormatError::Shape)? > 2 {
+            let target_kind = decoder.u64().map_err(|_| FormatError::Shape)?;
+            if target_kind > 2 {
                 return Err(FormatError::Shape);
             }
-            bytes_exact(decoder, 32)?;
+            Ok(RegistryChangeV1::Target {
+                target_kind: u8::try_from(target_kind).map_err(|_| FormatError::Shape)?,
+                object_hash: typed_bytes(decoder, 32)?,
+            })
         }
+        (2, 2) => Ok(RegistryChangeV1::Policy {
+            object_hash: typed_bytes(decoder, 32)?,
+        }),
+        (3, 2) => Ok(RegistryChangeV1::WriterTransition {
+            object_hash: typed_bytes(decoder, 32)?,
+        }),
+        (4, 2) => Ok(RegistryChangeV1::OperatorBinding {
+            object_hash: typed_bytes(decoder, 32)?,
+        }),
         (5, 3) => {
-            bytes_exact(decoder, 32)?;
-            if decoder.u64().map_err(|_| FormatError::Shape)? > 1 {
+            let object_hash = typed_bytes(decoder, 32)?;
+            let effect = decoder.u64().map_err(|_| FormatError::Shape)?;
+            if effect > 1 {
                 return Err(FormatError::Shape);
             }
+            Ok(RegistryChangeV1::AdminCertificate {
+                object_hash,
+                effect: u8::try_from(effect).map_err(|_| FormatError::Shape)?,
+            })
         }
-        _ => return Err(FormatError::TagMismatch),
+        (6, 2) => Ok(RegistryChangeV1::RootCertificate {
+            object_hash: typed_bytes(decoder, 32)?,
+        }),
+        _ => Err(FormatError::TagMismatch),
     }
-    Ok(())
 }
 
 fn validate_policy(input: &[u8]) -> Result<(), FormatError> {
+    decode_policy(input).map(|_| ())
+}
+
+pub(crate) fn decode_policy(input: &[u8]) -> Result<PolicyFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 21)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    optional_bytes_exact(&mut decoder, 32)?;
-    if decoder.u64().map_err(|_| FormatError::Shape)? > 1 {
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let policy_version = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let previous_policy_object_hash = optional_typed_bytes(&mut decoder, 32)?;
+    let operating_profile = decoder.u64().map_err(|_| FormatError::Shape)?;
+    if operating_profile > 1 {
         return Err(FormatError::Shape);
     }
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    if decoder.u64().map_err(|_| FormatError::Shape)? > 1 {
+    let max_registry_age_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let max_future_clock_skew_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let registry_expiry_behavior = decoder.u64().map_err(|_| FormatError::Shape)?;
+    if registry_expiry_behavior > 1 {
         return Err(FormatError::Shape);
     }
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.bool().map_err(|_| FormatError::Shape)?;
-    validate_sorted_hashes(&mut decoder, true)?;
+    let evidence_max_delay_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let reader_inactivity_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let reader_history_access_allowed = decoder.bool().map_err(|_| FormatError::Shape)?;
+    let allowed_archive_profile_hashes = decode_sorted_hash_bytes(&mut decoder, true)?
+        .into_iter()
+        .map(|hash| Hash32::try_from(hash.as_slice()).map_err(|_| FormatError::Shape))
+        .collect::<Result<Vec<_>, _>>()?;
     if decoder.u64().map_err(|_| FormatError::Shape)? != 0 {
         return Err(FormatError::TagMismatch);
     }
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    validate_retention(&mut decoder)?;
-    validate_free_text(&mut decoder)?;
-    validate_sorted_texts(&mut decoder, true)?;
-    validate_sorted_uints(&mut decoder, true)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
+    let backup_frequency_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let restore_test_interval_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let retention_policy = decode_retention(&mut decoder)?;
+    let free_text_policy = decode_free_text(&mut decoder)?;
+    let allowed_crypto_suite_ids = decode_sorted_texts(&mut decoder, true)?;
+    let allowed_format_versions = decode_sorted_uints(&mut decoder, true)?;
+    let effective_from_sequence =
+        ChainSequence::new(decoder.u64().map_err(|_| FormatError::Shape)?);
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(PolicyFieldsV1 {
+        organization_id,
+        policy_version,
+        previous_policy_object_hash,
+        operating_profile: u8::try_from(operating_profile).map_err(|_| FormatError::Shape)?,
+        max_registry_age_ms,
+        max_future_clock_skew_ms,
+        registry_expiry_behavior: u8::try_from(registry_expiry_behavior)
+            .map_err(|_| FormatError::Shape)?,
+        evidence_max_delay_ms,
+        reader_inactivity_ms,
+        reader_history_access_allowed,
+        allowed_archive_profile_hashes,
+        backup_frequency_ms,
+        restore_test_interval_ms,
+        retention_policy,
+        free_text_policy,
+        allowed_crypto_suite_ids,
+        allowed_format_versions,
+        effective_from_sequence,
+    })
 }
 
-fn validate_retention(decoder: &mut Decoder<'_>) -> Result<(), FormatError> {
+fn decode_retention(decoder: &mut Decoder<'_>) -> Result<RetentionPolicyFieldsV1, FormatError> {
     expect_array_length(decoder, 3)?;
-    optional_uint(decoder)?;
-    decoder.bool().map_err(|_| FormatError::Shape)?;
-    optional_bytes_exact(decoder, 32)?;
-    Ok(())
+    Ok(RetentionPolicyFieldsV1 {
+        minimum_retention_ms: optional_uint(decoder)?,
+        destruction_enabled: decoder.bool().map_err(|_| FormatError::Shape)?,
+        eds_privacy_decision_document_hash: optional_typed_bytes(decoder, 32)?,
+    })
 }
 
-fn validate_free_text(decoder: &mut Decoder<'_>) -> Result<(), FormatError> {
+fn decode_free_text(decoder: &mut Decoder<'_>) -> Result<FreeTextPolicyFieldsV1, FormatError> {
     expect_array_length(decoder, 3)?;
-    decoder.bool().map_err(|_| FormatError::Shape)?;
-    decoder.str().map_err(|_| FormatError::Shape)?;
-    decoder.bool().map_err(|_| FormatError::Shape)?;
-    Ok(())
+    Ok(FreeTextPolicyFieldsV1 {
+        free_text_allowed: decoder.bool().map_err(|_| FormatError::Shape)?,
+        rule_set_version: decoder.str().map_err(|_| FormatError::Shape)?.to_owned(),
+        local_pattern_warning_enabled: decoder.bool().map_err(|_| FormatError::Shape)?,
+    })
 }
 
 fn validate_writer_transition(input: &[u8]) -> Result<(), FormatError> {
+    decode_writer_transition(input).map(|_| ())
+}
+
+pub(crate) fn decode_writer_transition(
+    input: &[u8],
+) -> Result<WriterTransitionFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 9)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 32)?;
-    bytes_exact(&mut decoder, 32)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    bytes_exact(&mut decoder, 32)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let chain_id = typed_bytes(&mut decoder, 16)?;
+    let old_writer_certificate_hash = typed_bytes(&mut decoder, 32)?;
+    let new_writer_certificate_hash = typed_bytes(&mut decoder, 32)?;
+    let effective_from_sequence =
+        ChainSequence::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let previous_entry_hash = typed_bytes(&mut decoder, 32)?;
+    let reason_code = decoder.u64().map_err(|_| FormatError::Shape)?;
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(WriterTransitionFieldsV1 {
+        organization_id,
+        chain_id,
+        old_writer_certificate_hash,
+        new_writer_certificate_hash,
+        effective_from_sequence,
+        previous_entry_hash,
+        reason_code,
+    })
 }
 
 fn validate_grant_authorization(input: &[u8]) -> Result<(), FormatError> {
+    decode_grant_authorization(input).map(|_| ())
+}
+
+pub(crate) fn decode_grant_authorization(
+    input: &[u8],
+) -> Result<GrantAuthorizationFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 12)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 16)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    bytes_exact(&mut decoder, 32)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    validate_sorted_hashes(&mut decoder, true)?;
-    bytes_exact(&mut decoder, 32)?;
-    bytes_exact(&mut decoder, 32)?;
+    let authorization_id = typed_bytes(&mut decoder, 16)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let registry_version = RegistryVersion::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let registry_head_hash = typed_bytes(&mut decoder, 32)?;
+    let authorization_sequence = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let entry_hashes = decode_sorted_hash_bytes(&mut decoder, true)?
+        .into_iter()
+        .map(|hash| EntryHash::try_from(hash.as_slice()).map_err(|_| FormatError::Shape))
+        .collect::<Result<Vec<_>, _>>()?;
+    let recipient_key_thumbprint = typed_bytes(&mut decoder, 32)?;
+    let recipient_certificate_hash = typed_bytes(&mut decoder, 32)?;
     if decoder.u64().map_err(|_| FormatError::Shape)? != 1 {
         return Err(FormatError::TagMismatch);
     }
-    decoder.i64().map_err(|_| FormatError::Shape)?;
+    let expires_at = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(GrantAuthorizationFieldsV1 {
+        authorization_id,
+        organization_id,
+        registry_version,
+        registry_head_hash,
+        authorization_sequence,
+        entry_hashes,
+        recipient_key_thumbprint,
+        recipient_certificate_hash,
+        expires_at,
+    })
 }
 
 fn validate_destruction_authorization(input: &[u8]) -> Result<(), FormatError> {
+    decode_destruction_authorization(input).map(|_| ())
+}
+
+pub(crate) fn decode_destruction_authorization(
+    input: &[u8],
+) -> Result<DestructionAuthorizationFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 10)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 16)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    bytes_exact(&mut decoder, 32)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
+    let destruction_id = typed_bytes(&mut decoder, 16)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let registry_version = RegistryVersion::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let registry_head_hash = typed_bytes(&mut decoder, 32)?;
+    let authorization_sequence = decoder.u64().map_err(|_| FormatError::Shape)?;
     let length = exact_array_length(&mut decoder)?;
     if length == 0 {
         return Err(FormatError::Shape);
@@ -1550,64 +1769,112 @@ fn validate_destruction_authorization(input: &[u8]) -> Result<(), FormatError> {
         targets.push(DestructionTargetV1::new(entry_hash, sequence));
     }
     validate_destruction_targets(&targets)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
+    let scope_code = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let legal_reason_code = decoder.u64().map_err(|_| FormatError::Shape)?;
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(DestructionAuthorizationFieldsV1 {
+        destruction_id,
+        organization_id,
+        registry_version,
+        registry_head_hash,
+        authorization_sequence,
+        targets,
+        scope_code,
+        legal_reason_code,
+    })
 }
 
 fn validate_destruction_transition(input: &[u8]) -> Result<(), FormatError> {
+    decode_destruction_transition(input).map(|_| ())
+}
+
+pub(crate) fn decode_destruction_transition(
+    input: &[u8],
+) -> Result<DestructionTransitionFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 10)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 32)?;
-    bytes_exact(&mut decoder, 16)?;
-    optional_bytes_exact(&mut decoder, 32)?;
+    let destruction_id = typed_bytes(&mut decoder, 16)?;
+    let destruction_authorization_object_hash = typed_bytes(&mut decoder, 32)?;
+    let event_id = typed_bytes(&mut decoder, 16)?;
+    let previous_event_object_hash = optional_typed_bytes(&mut decoder, 32)?;
     let from = optional_uint(&mut decoder)?;
     if from.is_some_and(|value| value > 4) {
         return Err(FormatError::Shape);
     }
-    if decoder.u64().map_err(|_| FormatError::Shape)? > 4 {
+    let to = decoder.u64().map_err(|_| FormatError::Shape)?;
+    if to > 4 {
         return Err(FormatError::Shape);
     }
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    decoder.i64().map_err(|_| FormatError::Shape)?;
+    let trigger_code = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let executed_at = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(DestructionTransitionFieldsV1 {
+        destruction_id,
+        destruction_authorization_object_hash,
+        event_id,
+        previous_event_object_hash,
+        from_state: from
+            .map(|value| u8::try_from(value).map_err(|_| FormatError::Shape))
+            .transpose()?,
+        to_state: u8::try_from(to).map_err(|_| FormatError::Shape)?,
+        trigger_code,
+        executed_at,
+    })
 }
 
 fn validate_deletion_attestation(input: &[u8]) -> Result<(), FormatError> {
+    decode_deletion_attestation(input).map(|_| ())
+}
+
+pub(crate) fn decode_deletion_attestation(
+    input: &[u8],
+) -> Result<DeletionAttestationFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
     expect_array_length(&mut decoder, 10)?;
     expect_version(&mut decoder)?;
-    bytes_exact(&mut decoder, 16)?;
-    bytes_exact(&mut decoder, 32)?;
-    bytes_exact(&mut decoder, 16)?;
-    decoder.u64().map_err(|_| FormatError::Shape)?;
-    validate_sorted_hashes(&mut decoder, false)?;
-    if decoder.u64().map_err(|_| FormatError::Shape)? > 2 {
+    let destruction_id = typed_bytes(&mut decoder, 16)?;
+    let destruction_authorization_object_hash = typed_bytes(&mut decoder, 32)?;
+    let replica_id = bytes_exact(&mut decoder, 16)?
+        .try_into()
+        .map_err(|_| FormatError::Shape)?;
+    let replica_kind = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let removed_object_hashes = decode_sorted_hash_bytes(&mut decoder, false)?
+        .into_iter()
+        .map(|hash| ObjectHash::try_from(hash.as_slice()).map_err(|_| FormatError::Shape))
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = decoder.u64().map_err(|_| FormatError::Shape)?;
+    if result > 2 {
         return Err(FormatError::Shape);
     }
-    match decoder.datatype().map_err(|_| FormatError::Shape)? {
-        Type::Null => decoder.null().map_err(|_| FormatError::Shape)?,
-        _ => {
-            decoder.i64().map_err(|_| FormatError::Shape)?;
-        }
-    }
-    decoder.i64().map_err(|_| FormatError::Shape)?;
+    let backup_expiry_at = optional_int(&mut decoder)?.map(UnixMillis::new);
+    let executed_at = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
     expect_empty_array(&mut decoder)?;
-    finish(&decoder, input)
+    finish(&decoder, input)?;
+    Ok(DeletionAttestationFieldsV1 {
+        destruction_id,
+        destruction_authorization_object_hash,
+        replica_id,
+        replica_kind,
+        removed_object_hashes,
+        result: u8::try_from(result).map_err(|_| FormatError::Shape)?,
+        backup_expiry_at,
+        executed_at,
+    })
 }
 
-fn validate_sorted_hashes(
+fn decode_sorted_hash_bytes(
     decoder: &mut Decoder<'_>,
     require_nonempty: bool,
-) -> Result<(), FormatError> {
+) -> Result<Vec<[u8; 32]>, FormatError> {
     let length = exact_array_length(decoder)?;
     if require_nonempty && length == 0 {
         return Err(FormatError::Shape);
     }
+    let capacity = usize::try_from(length).map_err(|_| FormatError::Shape)?;
+    let mut values = Vec::with_capacity(capacity);
     let mut previous: Option<[u8; 32]> = None;
     for _ in 0..length {
         let current: [u8; 32] = bytes_exact(decoder, 32)?
@@ -1621,41 +1888,47 @@ fn validate_sorted_hashes(
             }
         }
         previous = Some(current);
+        values.push(current);
     }
-    Ok(())
+    Ok(values)
 }
 
-fn validate_sorted_texts(
+fn decode_sorted_texts(
     decoder: &mut Decoder<'_>,
     require_nonempty: bool,
-) -> Result<(), FormatError> {
+) -> Result<Vec<String>, FormatError> {
     let length = exact_array_length(decoder)?;
     if require_nonempty && length == 0 {
         return Err(FormatError::Shape);
     }
-    let mut previous: Option<&[u8]> = None;
+    let capacity = usize::try_from(length).map_err(|_| FormatError::Shape)?;
+    let mut values = Vec::with_capacity(capacity);
+    let mut previous: Option<String> = None;
     for _ in 0..length {
-        let current = decoder.str().map_err(|_| FormatError::Shape)?.as_bytes();
-        if let Some(previous) = previous {
-            match previous.cmp(current) {
+        let current = decoder.str().map_err(|_| FormatError::Shape)?.to_owned();
+        if let Some(previous) = &previous {
+            match previous.as_bytes().cmp(current.as_bytes()) {
                 Ordering::Equal => return Err(FormatError::Duplicate),
                 Ordering::Greater => return Err(FormatError::Unsorted),
                 Ordering::Less => {}
             }
         }
-        previous = Some(current);
+        previous = Some(current.clone());
+        values.push(current);
     }
-    Ok(())
+    Ok(values)
 }
 
-fn validate_sorted_uints(
+fn decode_sorted_uints(
     decoder: &mut Decoder<'_>,
     require_nonempty: bool,
-) -> Result<(), FormatError> {
+) -> Result<Vec<u64>, FormatError> {
     let length = exact_array_length(decoder)?;
     if require_nonempty && length == 0 {
         return Err(FormatError::Shape);
     }
+    let capacity = usize::try_from(length).map_err(|_| FormatError::Shape)?;
+    let mut values = Vec::with_capacity(capacity);
     let mut previous: Option<u64> = None;
     for _ in 0..length {
         let current = decoder.u64().map_err(|_| FormatError::Shape)?;
@@ -1667,8 +1940,9 @@ fn validate_sorted_uints(
             }
         }
         previous = Some(current);
+        values.push(current);
     }
-    Ok(())
+    Ok(values)
 }
 
 fn optional_uint(decoder: &mut Decoder<'_>) -> Result<Option<u64>, FormatError> {
@@ -1680,13 +1954,78 @@ fn optional_uint(decoder: &mut Decoder<'_>) -> Result<Option<u64>, FormatError> 
     }
 }
 
-fn optional_unbounded_bstr(decoder: &mut Decoder<'_>) -> Result<(), FormatError> {
+fn optional_int(decoder: &mut Decoder<'_>) -> Result<Option<i64>, FormatError> {
     if decoder.datatype().map_err(|_| FormatError::Shape)? == Type::Null {
         decoder.null().map_err(|_| FormatError::Shape)?;
+        Ok(None)
     } else {
-        decoder.bytes().map_err(|_| FormatError::Shape)?;
+        decoder.i64().map(Some).map_err(|_| FormatError::Shape)
     }
-    Ok(())
+}
+
+fn optional_bstr_vec(decoder: &mut Decoder<'_>) -> Result<Option<Vec<u8>>, FormatError> {
+    if decoder.datatype().map_err(|_| FormatError::Shape)? == Type::Null {
+        decoder.null().map_err(|_| FormatError::Shape)?;
+        Ok(None)
+    } else {
+        decoder
+            .bytes()
+            .map(|value| Some(value.to_vec()))
+            .map_err(|_| FormatError::Shape)
+    }
+}
+
+fn typed_bytes<'a, T>(decoder: &mut Decoder<'a>, length: usize) -> Result<T, FormatError>
+where
+    T: TryFrom<&'a [u8]>,
+{
+    T::try_from(bytes_exact(decoder, length)?).map_err(|_| FormatError::Shape)
+}
+
+fn optional_typed_bytes<'a, T>(
+    decoder: &mut Decoder<'a>,
+    length: usize,
+) -> Result<Option<T>, FormatError>
+where
+    T: TryFrom<&'a [u8]>,
+{
+    optional_bytes_exact(decoder, length)?
+        .map(|value| T::try_from(value).map_err(|_| FormatError::Shape))
+        .transpose()
+}
+
+fn certificate_kind(value: u64) -> Result<CertificateKindV1, FormatError> {
+    match value {
+        0 => Ok(CertificateKindV1::Writer),
+        1 => Ok(CertificateKindV1::Reader),
+        2 => Ok(CertificateKindV1::OrganizationAdmin),
+        3 => Ok(CertificateKindV1::KeyApprover),
+        4 => Ok(CertificateKindV1::RecoveryRecipient),
+        5 => Ok(CertificateKindV1::HistoricalGrantAuthority),
+        6 => Ok(CertificateKindV1::ServerReceipt),
+        7 => Ok(CertificateKindV1::DeletionAttest),
+        _ => Err(FormatError::Shape),
+    }
+}
+
+fn key_protection_profile(value: u64) -> Result<KeyProtectionProfileV1, FormatError> {
+    match value {
+        0 => Ok(KeyProtectionProfileV1::OsWrapped),
+        1 => Ok(KeyProtectionProfileV1::HardwareNonExportable),
+        2 => Ok(KeyProtectionProfileV1::OfflineEncryptedContainer),
+        3 => Ok(KeyProtectionProfileV1::Pkcs11),
+        4 => Ok(KeyProtectionProfileV1::ServerSecretStoreOrHsm),
+        _ => Err(FormatError::Shape),
+    }
+}
+
+fn operator_role(value: u64) -> Result<OperatorRoleV1, FormatError> {
+    match value {
+        0 => Ok(OperatorRoleV1::Writer),
+        1 => Ok(OperatorRoleV1::Reader),
+        2 => Ok(OperatorRoleV1::OrganizationAdmin),
+        _ => Err(FormatError::Shape),
+    }
 }
 
 fn expect_version(decoder: &mut Decoder<'_>) -> Result<(), FormatError> {
