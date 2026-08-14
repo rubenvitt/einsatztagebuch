@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust"]
 resolver = "2"
 
 [workspace.package]
@@ -17,7 +17,10 @@ der = { version = "=0.7.10", features = ["alloc", "oid"] }
 ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }
 ea-cbor = { path = "crates/ea-cbor" }
 ea-crypto = { path = "crates/ea-crypto" }
+ea-format = { path = "crates/ea-format" }
 ea-schema = { path = "crates/ea-schema" }
+ea-time = { path = "crates/ea-time" }
+ea-trust = { path = "crates/ea-trust" }
 ea-types = { path = "crates/ea-types" }
 hex = "=0.4.3"
 getrandom = "=0.4.3"

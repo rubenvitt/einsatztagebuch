@@ -13,7 +13,7 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
     let member_array = root_manifest["workspace"]["members"].as_array().unwrap();
     assert_eq!(
         member_array.len(),
-        7,
+        9,
         "workspace members must not be duplicated or omitted"
     );
     let members = member_array
@@ -30,6 +30,8 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
             "crates/ea-crypto",
             "crates/ea-format",
             "crates/ea-schema",
+            "crates/ea-time",
+            "crates/ea-trust",
         ])
     );
     let workspace_dependencies = root_manifest["workspace"]["dependencies"]
@@ -39,6 +41,20 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
         !workspace_dependencies.is_empty(),
         "workspace.dependencies must contain shared dependencies"
     );
+    for (dependency, path) in [
+        ("ea-time", "crates/ea-time"),
+        ("ea-trust", "crates/ea-trust"),
+    ] {
+        assert_eq!(
+            workspace_dependencies
+                .get(dependency)
+                .and_then(Value::as_table)
+                .and_then(|spec| spec.get("path"))
+                .and_then(Value::as_str),
+            Some(path),
+            "{dependency} must be a local workspace dependency"
+        );
+    }
     for member in [
         "tools/xtask",
         "tests/ea-system-tests",
@@ -47,6 +63,8 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
         "crates/ea-crypto",
         "crates/ea-format",
         "crates/ea-schema",
+        "crates/ea-time",
+        "crates/ea-trust",
     ] {
         let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
             .unwrap()

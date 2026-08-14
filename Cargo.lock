@@ -737,6 +737,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-time"
+version = "0.1.0"
+dependencies = [
+ "ea-types",
+]
+
+[[package]]
+name = "ea-trust"
+version = "0.1.0"
+dependencies = [
+ "ea-cbor",
+ "ea-crypto",
+ "ea-format",
+ "ea-time",
+ "ea-types",
+ "minicbor",
+]
+
+[[package]]
 name = "ea-types"
 version = "0.1.0"
 
