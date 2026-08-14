@@ -32,4 +32,7 @@ pub use state::{
     RegistrySelectionCommit, StateStoreError, TrustStateKey, TrustStateSnapshot, TrustStateStore,
     load_trust_state,
 };
-pub use time::{VerifiedSignedTime, verify_checkpoint_time, verify_receipt_time};
+pub use time::{
+    LocalTimeBlock, VerifiedSignedTime, prepare_local_time, verify_checkpoint_time,
+    verify_receipt_time,
+};

@@ -1197,7 +1197,9 @@ rtk git commit -m "feat(trust): verify independent signed time sources"
 **Files:**
 - Modify: `crates/ea-trust/src/state.rs`
 - Modify: `crates/ea-trust/src/time.rs`
+- Modify: `crates/ea-trust/src/error.rs`
 - Modify: `crates/ea-trust/src/lib.rs`
+- Modify: `crates/ea-trust/tests/support/mod.rs`
 - Create: `crates/ea-trust/tests/state_atomicity.rs`
 
 - [ ] **Step 1: Add independent-time transactional REDs with a deterministic model store**
@@ -1218,6 +1220,12 @@ Use the Task-4 port without widening it. Add the crate-private
 constructor. Verify exact mappings for
 `StateStoreError::{Conflict, ReplayAlreadyConsumed, MonotonicityViolation,
 Unavailable}`.
+
+Map `ea_time::TimeError::Overflow` losslessly to a narrow
+`TrustError::TimeOverflow` whose code remains exactly `EA-TIME-OVERFLOW`.
+If evaluation overflows after a successful independent-time CAS, the already
+committed reference/floor remains durable; it is not rolled back or collapsed
+into a state-error family.
 
 `commit_registry_selection` atomically checks revision, monotonic floor, no
 Head rollback/fork, inserts an optional replay key under a unique constraint,
@@ -1254,7 +1262,9 @@ do not select or persist candidate times.
 ```bash
 rtk cargo test --locked -p ea-trust --test state_atomicity
 rtk git add -- crates/ea-trust/src/state.rs crates/ea-trust/src/time.rs \
-  crates/ea-trust/src/lib.rs crates/ea-trust/tests/state_atomicity.rs
+  crates/ea-trust/src/error.rs crates/ea-trust/src/lib.rs \
+  crates/ea-trust/tests/support/mod.rs crates/ea-trust/tests/state_atomicity.rs \
+  docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md
 rtk git diff --cached --check
 rtk git commit -m "feat(trust): bind verified time to persistent state"
 ```

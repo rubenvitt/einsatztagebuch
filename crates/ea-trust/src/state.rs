@@ -128,6 +128,10 @@ pub struct IndependentTimeCommit {
 }
 
 impl IndependentTimeCommit {
+    pub(crate) const fn new(next_trusted_time: TrustedTimeState) -> Self {
+        Self { next_trusted_time }
+    }
+
     #[must_use]
     pub const fn next_trusted_time(&self) -> &TrustedTimeState {
         &self.next_trusted_time
@@ -229,7 +233,7 @@ pub fn load_trust_state(
     Ok(TrustStateSnapshot { key, record })
 }
 
-const fn map_store_error(error: StateStoreError) -> TrustError {
+pub(crate) const fn map_store_error(error: StateStoreError) -> TrustError {
     match error {
         StateStoreError::Conflict => TrustError::StateConflict,
         StateStoreError::ReplayAlreadyConsumed => TrustError::ClockReleaseReplay,

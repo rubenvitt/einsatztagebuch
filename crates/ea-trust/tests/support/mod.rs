@@ -96,6 +96,7 @@ pub struct HeadOptions {
     pub policy_hash_override: Option<ObjectHash>,
     pub root_key_thumbprint_override: Option<KeyThumbprint>,
     pub policy_max_registry_age_ms_override: Option<u64>,
+    pub policy_max_future_clock_skew_ms_override: Option<u64>,
     pub certificate_capabilities_override: Option<Vec<String>>,
     pub revoked_from_sequence: Option<ChainSequence>,
     pub binding_instance_key_thumbprint_override: Option<KeyThumbprint>,
@@ -131,6 +132,7 @@ impl Default for HeadOptions {
             policy_hash_override: None,
             root_key_thumbprint_override: None,
             policy_max_registry_age_ms_override: None,
+            policy_max_future_clock_skew_ms_override: None,
             certificate_capabilities_override: None,
             revoked_from_sequence: None,
             binding_instance_key_thumbprint_override: None,
@@ -603,6 +605,10 @@ impl RegistryLineBuilder {
     }
 
     pub fn verified_with_floor(&self, pin: Pin, floor: UnixMillis) -> VerifiedTrust {
+        self.verified_with_time(pin, TrustedTimeState::initial(floor))
+    }
+
+    pub fn verified_with_time(&self, pin: Pin, trusted_time: TrustedTimeState) -> VerifiedTrust {
         let anchor = decode_trust_anchor(&self.anchor_bytes).unwrap();
         let source = CatalogSource::new(self.objects.iter().cloned());
         let pin = match pin {
@@ -613,17 +619,10 @@ impl RegistryLineBuilder {
             }
             Pin::Exact(version, hash) => Some(RegistryHeadPin::new(version, hash)),
         };
-        let key = TrustStateKey {
-            organization_id: organization(),
-            device_id: DeviceId::try_from(&[0xf0; 16][..]).unwrap(),
-        };
+        let key = state_key();
         let mut store = SnapshotStore {
             key,
-            record: Some(PersistedTrustRecord::new(
-                17,
-                TrustedTimeState::initial(floor),
-                pin,
-            )),
+            record: Some(PersistedTrustRecord::new(17, trusted_time, pin)),
         };
         let snapshot = load_trust_state(&mut store, key).unwrap();
         verify_trust(&anchor, &source, snapshot).unwrap()
@@ -651,6 +650,9 @@ fn direct_payload(
                 options
                     .policy_max_registry_age_ms_override
                     .unwrap_or(86_400_000),
+                options
+                    .policy_max_future_clock_skew_ms_override
+                    .unwrap_or(300_000),
             ),
             authorization_hash,
         )
@@ -917,6 +919,7 @@ fn policy_fields(
     previous_policy_object_hash: Option<ObjectHash>,
     effective_from_sequence: ChainSequence,
     max_registry_age_ms: u64,
+    max_future_clock_skew_ms: u64,
 ) -> PolicyFieldsV1 {
     PolicyFieldsV1 {
         organization_id: organization(),
@@ -924,7 +927,7 @@ fn policy_fields(
         previous_policy_object_hash,
         operating_profile: 0,
         max_registry_age_ms,
-        max_future_clock_skew_ms: 300_000,
+        max_future_clock_skew_ms,
         registry_expiry_behavior: 0,
         evidence_max_delay_ms: 60_000,
         reader_inactivity_ms: 900_000,
@@ -1155,6 +1158,13 @@ fn key_from_secret(secret: [u8; 32]) -> CanonicalPublicCoseKey {
 
 pub fn organization() -> OrganizationId {
     OrganizationId::try_from(&[0x21; 16][..]).unwrap()
+}
+
+pub fn state_key() -> TrustStateKey {
+    TrustStateKey {
+        organization_id: organization(),
+        device_id: DeviceId::try_from(&[0xf0; 16][..]).unwrap(),
+    }
 }
 
 fn chain_id() -> ChainId {

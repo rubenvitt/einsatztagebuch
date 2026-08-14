@@ -1,11 +1,16 @@
 use ea_crypto::{CryptoError, VerificationContext, parse_cose_sign1, verify_cose_sign1};
 use ea_format::{DecodedEvidencePayloadV1, EvidenceKindV1, EvidenceObjectV1, Parsed, ReceiptV1};
-use ea_time::{IndependentTimeInput, IndependentTimeKind};
-use ea_types::{ChainSequence, ObjectHash};
+use ea_time::{
+    IndependentTimeInput, IndependentTimeKind, TimeError, TimeEvaluation, TrustedTimeState,
+    evaluate_preexisting_time, merge_independent_references,
+};
+use ea_types::{ChainSequence, ObjectHash, RegistryVersion, UnixMillis};
 
 use crate::{
-    PreexistingRegistryAuthority, RegistryHeadPin, TrustError,
+    PreexistingRegistryAuthority, RegistryCandidate, RegistryHeadPin, TrustError, TrustStateKey,
+    TrustStateStore,
     resolver::{PreviousHeadResolver, PreviousHeadState},
+    state::{IndependentTimeCommit, map_store_error},
 };
 
 /// A signed independent time source verified against one exact previous Head.
@@ -22,6 +27,141 @@ pub struct VerifiedSignedTime {
     input: IndependentTimeInput,
     #[cfg_attr(not(test), allow(dead_code))]
     authority_head: RegistryHeadPin,
+}
+
+/// A candidate-bound local-time evaluation that keeps exclusive access to the
+/// persistent store until Registry selection consumes it.
+///
+/// The block deliberately cannot be cloned:
+///
+/// ```compile_fail
+/// use ea_trust::LocalTimeBlock;
+/// fn duplicate(block: LocalTimeBlock<'_>) { let _ = block.clone(); }
+/// ```
+///
+/// Its physical store borrow also prevents a competing write through the same
+/// handle while the block is live:
+///
+/// ```compile_fail
+/// use ea_trust::{
+///     LocalTimeBlock, RegistryCandidate, TrustStateKey, TrustStateStore,
+///     VerifiedSignedTime, prepare_local_time,
+/// };
+/// use ea_types::UnixMillis;
+/// fn reborrow<'a>(
+///     store: &'a mut dyn TrustStateStore,
+///     key: TrustStateKey,
+///     candidate: &RegistryCandidate,
+///     sources: &[VerifiedSignedTime],
+/// ) {
+///     let block: LocalTimeBlock<'a> =
+///         prepare_local_time(store, candidate, UnixMillis::new(0), sources).unwrap();
+///     let _ = store.load(key);
+///     drop(block);
+/// }
+/// ```
+pub struct LocalTimeBlock<'store> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) store: &'store mut dyn TrustStateStore,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) state_key: TrustStateKey,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) expected_revision: u64,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) trusted_time: TrustedTimeState,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) pinned_head: Option<RegistryHeadPin>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) observed_os_wall_clock: UnixMillis,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) candidate_registry_version: RegistryVersion,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) candidate_registry_head_hash: ObjectHash,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) guard_policy_object_hash: ObjectHash,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) proposed_sequence: ChainSequence,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) pre_transition_sequence: ChainSequence,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) evaluation: TimeEvaluation,
+}
+
+pub fn prepare_local_time<'store>(
+    store: &'store mut dyn TrustStateStore,
+    candidate: &RegistryCandidate,
+    os_wall_clock: UnixMillis,
+    sources: &[VerifiedSignedTime],
+) -> Result<LocalTimeBlock<'store>, TrustError> {
+    let persisted = store.load(candidate.state_key).map_err(map_store_error)?;
+    if persisted.revision() != candidate.state_revision
+        || persisted.trusted_time() != &candidate.trusted_time
+        || persisted.pinned_head().copied() != candidate.original_pin
+    {
+        return Err(TrustError::StateConflict);
+    }
+
+    for source in sources {
+        if Some(source.authority_head) != candidate.original_pin {
+            return Err(TrustError::StateConflict);
+        }
+    }
+
+    let mut next_trusted_time = persisted.trusted_time().clone();
+    let mut changed = false;
+    for source in sources {
+        let advance =
+            merge_independent_references(&next_trusted_time, core::slice::from_ref(&source.input))
+                .map_err(map_time_error)?;
+        changed |= advance.changed();
+        next_trusted_time = advance.state().clone();
+    }
+
+    let (expected_revision, trusted_time) = if changed {
+        let commit = IndependentTimeCommit::new(next_trusted_time);
+        let committed = store
+            .commit_independent_time(candidate.state_key, candidate.state_revision, &commit)
+            .map_err(map_store_error)?;
+        if committed.revision() <= candidate.state_revision
+            || committed.trusted_time() != commit.next_trusted_time()
+            || committed.pinned_head().copied() != candidate.original_pin
+        {
+            return Err(TrustError::StateConflict);
+        }
+        (committed.revision(), committed.trusted_time().clone())
+    } else {
+        (persisted.revision(), persisted.trusted_time().clone())
+    };
+
+    let evaluation = evaluate_preexisting_time(
+        os_wall_clock,
+        &trusted_time,
+        candidate.guard_policy.fields.max_future_clock_skew_ms,
+    )
+    .map_err(map_time_error)?;
+
+    Ok(LocalTimeBlock {
+        store,
+        state_key: candidate.state_key,
+        expected_revision,
+        trusted_time,
+        pinned_head: candidate.original_pin,
+        observed_os_wall_clock: os_wall_clock,
+        candidate_registry_version: candidate.registry_version(),
+        candidate_registry_head_hash: candidate.registry_head_hash(),
+        guard_policy_object_hash: candidate.guard_policy.object_hash,
+        proposed_sequence: candidate.proposed_sequence,
+        pre_transition_sequence: candidate.pre_transition_sequence,
+        evaluation,
+    })
+}
+
+const fn map_time_error(error: TimeError) -> TrustError {
+    match error {
+        TimeError::Overflow => TrustError::TimeOverflow,
+        TimeError::StateMonotonicity => TrustError::StateMonotonicity,
+        _ => TrustError::StateMonotonicity,
+    }
 }
 
 pub fn verify_receipt_time(
@@ -140,12 +280,17 @@ mod tests {
     };
     use ea_time::{IndependentTimeKind, TrustedTimeState, merge_independent_references};
     use ea_types::{
-        CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, UnixMillis,
+        CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, RegistryVersion,
+        UnixMillis,
     };
 
     use super::support::{self, ActionSpec, BuiltHead, HeadOptions, Pin, RegistryLineBuilder};
     use super::{VerifiedSignedTime, verify_checkpoint_time, verify_receipt_time};
-    use crate::{RegistryCandidate, RegistryHeadPin, verify_registry_candidate};
+    use crate::{
+        ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistryCandidate,
+        RegistryHeadPin, RegistrySelectionCommit, StateStoreError, TrustStateKey, TrustStateStore,
+        prepare_local_time, verify_registry_candidate,
+    };
 
     const SERVER_SECRET: [u8; 32] = [
         0x83, 0x3f, 0xe6, 0x24, 0x09, 0x23, 0x7b, 0x9d, 0x62, 0xec, 0x77, 0x58, 0x75, 0x20, 0x91,
@@ -199,6 +344,55 @@ mod tests {
         );
         let trust = line.verified(Pin::Head(2));
         let candidate = verify_registry_candidate(&trust, ChainSequence::new(25)).unwrap();
+        Fixture {
+            candidate,
+            head,
+            certificate_hash: CertificateHash::from(certificate_head.direct_object_hash.unwrap()),
+        }
+    }
+
+    fn successor_policy_fixture(guard_skew: u64, target_skew: u64) -> Fixture {
+        let mut line = RegistryLineBuilder::new();
+        line.push(
+            policy(),
+            HeadOptions {
+                effective_from: Some(1),
+                valid_through: Some(9),
+                ..HeadOptions::default()
+            },
+        );
+        let certificate_head = line.push(
+            ActionSpec::Device {
+                kind: ea_format::CertificateKindV1::ServerReceipt,
+                marker: 0x69,
+                effective_from: None,
+            },
+            HeadOptions {
+                effective_from: Some(10),
+                valid_through: Some(19),
+                ..HeadOptions::default()
+            },
+        );
+        let head = line.push(
+            policy(),
+            HeadOptions {
+                effective_from: Some(20),
+                valid_through: Some(29),
+                policy_max_future_clock_skew_ms_override: Some(guard_skew),
+                ..HeadOptions::default()
+            },
+        );
+        line.push(
+            policy(),
+            HeadOptions {
+                effective_from: Some(30),
+                valid_through: Some(39),
+                policy_max_future_clock_skew_ms_override: Some(target_skew),
+                ..HeadOptions::default()
+            },
+        );
+        let trust = line.verified(Pin::Head(2));
+        let candidate = verify_registry_candidate(&trust, ChainSequence::new(30)).unwrap();
         Fixture {
             candidate,
             head,
@@ -339,5 +533,276 @@ mod tests {
             core.fields().issued_at_server,
             authority_head,
         );
+    }
+
+    struct ReturningStore {
+        key: TrustStateKey,
+        record: PersistedTrustRecord,
+        independent_commits: usize,
+    }
+
+    impl TrustStateStore for ReturningStore {
+        fn load(&mut self, key: TrustStateKey) -> Result<PersistedTrustRecord, StateStoreError> {
+            if key != self.key {
+                return Err(StateStoreError::Conflict);
+            }
+            Ok(PersistedTrustRecord::new(
+                self.record.revision(),
+                self.record.trusted_time().clone(),
+                self.record.pinned_head().copied(),
+            ))
+        }
+
+        fn commit_independent_time(
+            &mut self,
+            key: TrustStateKey,
+            expected_revision: u64,
+            commit: &IndependentTimeCommit,
+        ) -> Result<PersistedTrustRecord, StateStoreError> {
+            self.independent_commits += 1;
+            if key != self.key || expected_revision != self.record.revision() {
+                return Err(StateStoreError::Conflict);
+            }
+            self.record = PersistedTrustRecord::new(
+                expected_revision + 7,
+                commit.next_trusted_time().clone(),
+                self.record.pinned_head().copied(),
+            );
+            Ok(PersistedTrustRecord::new(
+                self.record.revision(),
+                self.record.trusted_time().clone(),
+                self.record.pinned_head().copied(),
+            ))
+        }
+
+        fn clock_release_consumed(
+            &mut self,
+            _key: &ClockReleaseReplayKey,
+        ) -> Result<bool, StateStoreError> {
+            Err(StateStoreError::Unavailable)
+        }
+
+        fn commit_registry_selection(
+            &mut self,
+            _key: TrustStateKey,
+            _expected_revision: u64,
+            _commit: &RegistrySelectionCommit,
+        ) -> Result<PersistedTrustRecord, StateStoreError> {
+            Err(StateStoreError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn local_time_block_privately_binds_returned_state_candidate_guard_and_evaluation() {
+        let fixture = fixture();
+        let receipt = receipt(&fixture);
+        let receipt_hash = receipt.object_hash();
+        let receipt_time = receipt.value().core().fields().accepted_at_server;
+        let proof =
+            verify_receipt_time(fixture.candidate.preexisting_authority().unwrap(), &receipt)
+                .unwrap();
+        let key = support::state_key();
+        let pin = RegistryHeadPin::new(fixture.head.version, fixture.head.object_hash);
+        let mut store = ReturningStore {
+            key,
+            record: PersistedTrustRecord::new(
+                17,
+                fixture.candidate.trusted_time.clone(),
+                Some(pin),
+            ),
+            independent_commits: 0,
+        };
+        let expected_store_address = core::ptr::from_mut(&mut store).cast::<()>();
+        let os_at_inclusive_limit = UnixMillis::new(receipt_time.get() + 300_000);
+        let expected_time = TrustedTimeState::from_persisted(
+            receipt_time,
+            Some(ea_time::IndependentTimeInput::new(
+                IndependentTimeKind::Receipt,
+                receipt_hash,
+                receipt_time,
+            )),
+        )
+        .unwrap();
+        let block = prepare_local_time(
+            &mut store,
+            &fixture.candidate,
+            os_at_inclusive_limit,
+            &[proof],
+        )
+        .unwrap();
+
+        let actual_store_address = core::ptr::from_mut(&mut *block.store).cast::<()>();
+        assert!(actual_store_address == expected_store_address);
+        assert!(block.state_key == key);
+        assert_eq!(block.expected_revision, 24);
+        assert!(block.pinned_head == Some(pin));
+        assert!(block.candidate_registry_version == fixture.candidate.registry_version());
+        assert!(block.candidate_registry_head_hash == fixture.candidate.registry_head_hash());
+        assert!(block.guard_policy_object_hash == fixture.candidate.guard_policy.object_hash);
+        assert!(block.proposed_sequence == fixture.candidate.proposed_sequence);
+        assert!(block.pre_transition_sequence == fixture.candidate.pre_transition_sequence);
+        assert!(block.trusted_time == expected_time);
+        assert_private_reference(&block, receipt_hash, receipt_time);
+        assert!(block.observed_os_wall_clock == os_at_inclusive_limit);
+        assert!(block.evaluation.raw_now() == os_at_inclusive_limit);
+        assert!(!block.evaluation.warnings().clock_rollback());
+        assert!(!block.evaluation.warnings().independent_time_unavailable());
+        assert_eq!(
+            block.evaluation.future_skew(),
+            ea_time::FutureSkew::WithinLimit
+        );
+    }
+
+    #[test]
+    fn local_time_block_excludes_candidate_time_and_preserves_rollback_unavailable_and_blocked() {
+        let mut line = RegistryLineBuilder::new();
+        let head = line.push(
+            policy(),
+            HeadOptions {
+                effective_from: Some(1),
+                valid_through: Some(9),
+                issued_at: UnixMillis::new(9_000_000_000_000),
+                not_before: UnixMillis::new(8_999_999_999_500),
+                not_after: UnixMillis::new(9_000_000_001_000),
+                ..HeadOptions::default()
+            },
+        );
+        let floor = UnixMillis::new(1_700_000_000_000);
+        let trust = line.verified_with_floor(Pin::Head(0), floor);
+        let candidate = verify_registry_candidate(&trust, ChainSequence::new(5)).unwrap();
+        let pin = RegistryHeadPin::new(head.version, head.object_hash);
+        let key = support::state_key();
+        let mut store = ReturningStore {
+            key,
+            record: PersistedTrustRecord::new(17, TrustedTimeState::initial(floor), Some(pin)),
+            independent_commits: 0,
+        };
+        let observed_os_wall_clock = UnixMillis::new(floor.get() - 1);
+        let block =
+            prepare_local_time(&mut store, &candidate, observed_os_wall_clock, &[]).unwrap();
+        assert_eq!(block.expected_revision, 17);
+        assert!(block.trusted_time.floor() == floor);
+        assert!(block.observed_os_wall_clock == observed_os_wall_clock);
+        assert!(block.evaluation.raw_now() == floor);
+        assert!(block.observed_os_wall_clock != block.evaluation.raw_now());
+        assert!(block.evaluation.raw_now() != candidate.head_event.issued_at);
+        assert!(block.evaluation.raw_now() != candidate.head_event.not_before);
+        assert!(block.evaluation.warnings().clock_rollback());
+        assert!(block.evaluation.warnings().independent_time_unavailable());
+        assert_eq!(
+            block.evaluation.future_skew(),
+            ea_time::FutureSkew::UnprovableWithoutIndependentReference,
+        );
+
+        let fixture = fixture();
+        let receipt = receipt(&fixture);
+        let receipt_time = receipt.value().core().fields().accepted_at_server;
+        let proof =
+            verify_receipt_time(fixture.candidate.preexisting_authority().unwrap(), &receipt)
+                .unwrap();
+        let pin = RegistryHeadPin::new(fixture.head.version, fixture.head.object_hash);
+        let mut store = ReturningStore {
+            key,
+            record: PersistedTrustRecord::new(
+                17,
+                fixture.candidate.trusted_time.clone(),
+                Some(pin),
+            ),
+            independent_commits: 0,
+        };
+        let blocked = prepare_local_time(
+            &mut store,
+            &fixture.candidate,
+            UnixMillis::new(receipt_time.get() + 300_001),
+            &[proof],
+        )
+        .unwrap();
+        assert_eq!(
+            blocked.evaluation.future_skew(),
+            ea_time::FutureSkew::Blocked
+        );
+    }
+
+    #[test]
+    fn local_time_block_binds_the_transition_guard_policy_not_the_target_policy() {
+        let fixture = successor_policy_fixture(0, 300);
+        assert!(
+            fixture.candidate.guard_policy.object_hash
+                != fixture.candidate.target_policy.object_hash
+        );
+        let receipt = receipt(&fixture);
+        let receipt_time = receipt.value().core().fields().accepted_at_server;
+        let proof =
+            verify_receipt_time(fixture.candidate.preexisting_authority().unwrap(), &receipt)
+                .unwrap();
+        let key = support::state_key();
+        let pin = RegistryHeadPin::new(fixture.head.version, fixture.head.object_hash);
+        let mut store = ReturningStore {
+            key,
+            record: PersistedTrustRecord::new(
+                17,
+                fixture.candidate.trusted_time.clone(),
+                Some(pin),
+            ),
+            independent_commits: 0,
+        };
+        let block = prepare_local_time(
+            &mut store,
+            &fixture.candidate,
+            UnixMillis::new(receipt_time.get() + 1),
+            &[proof],
+        )
+        .unwrap();
+        assert!(block.guard_policy_object_hash == fixture.candidate.guard_policy.object_hash);
+        assert!(block.guard_policy_object_hash != fixture.candidate.target_policy.object_hash);
+        assert_eq!(block.evaluation.future_skew(), ea_time::FutureSkew::Blocked);
+    }
+
+    #[test]
+    fn source_authority_pin_requires_the_exact_version_even_when_the_hash_matches() {
+        let fixture = fixture();
+        let receipt = receipt(&fixture);
+        let mut proof =
+            verify_receipt_time(fixture.candidate.preexisting_authority().unwrap(), &receipt)
+                .unwrap();
+        let exact = proof.authority_head;
+        proof.authority_head = RegistryHeadPin::new(
+            RegistryVersion::new(exact.registry_version().get() + 1),
+            exact.registry_head_hash(),
+        );
+        let key = support::state_key();
+        let mut store = ReturningStore {
+            key,
+            record: PersistedTrustRecord::new(
+                17,
+                fixture.candidate.trusted_time.clone(),
+                Some(exact),
+            ),
+            independent_commits: 0,
+        };
+        let error = prepare_local_time(
+            &mut store,
+            &fixture.candidate,
+            UnixMillis::new(1_800_000_000_000),
+            &[proof],
+        )
+        .err()
+        .expect("same hash with a different authority version must fail closed");
+        assert_eq!(error.code(), "EA-TRUST-STATE-CONFLICT");
+        assert_eq!(store.independent_commits, 0);
+    }
+
+    fn assert_private_reference(
+        block: &super::LocalTimeBlock<'_>,
+        object_hash: ObjectHash,
+        verified_time: UnixMillis,
+    ) {
+        let reference = block
+            .trusted_time
+            .independent_reference()
+            .expect("the block must bind the selected independent reference");
+        assert_eq!(reference.kind(), IndependentTimeKind::Receipt);
+        assert!(reference.object_hash() == object_hash);
+        assert!(reference.verified_time() == verified_time);
     }
 }
