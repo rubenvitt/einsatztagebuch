@@ -1,0 +1,17 @@
+[package]
+name = "ea-schema"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ea-cbor.workspace = true
+ea-types.workspace = true
+jiff.workspace = true
+jiff-tzdb.workspace = true
+minicbor.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

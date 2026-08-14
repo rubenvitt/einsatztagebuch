@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.einsatzarchiv.de/payload/v1/incident.schema.json",
+  "title": "Einsatzarchiv Incident Payload v1 Logical Projection",
+  "type": "object",
+  "properties": {
+    "recordType": { "const": "incident" },
+    "recordId": { "$ref": "#/$defs/id16" },
+    "schemaId": { "const": "ea.incident" },
+    "schemaVersion": { "const": 1 },
+    "finalizedAtDevice": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+    "timezone": { "type": "string", "minLength": 1 },
+    "operator": { "$ref": "#/$defs/operator" },
+    "source": { "$ref": "#/$defs/source" },
+    "registryVersion": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "extensionData": { "type": "array", "maxItems": 0 },
+    "body": { "$ref": "#/$defs/body" }
+  },
+  "required": [
+    "recordType", "recordId", "schemaId", "schemaVersion", "finalizedAtDevice",
+    "timezone", "operator", "source", "registryVersion", "extensionData", "body"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "id16": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "hash32": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "operator": {
+      "type": "object",
+      "properties": {
+        "organizationId": { "$ref": "#/$defs/id16" },
+        "operatorSubjectId": { "$ref": "#/$defs/id16" },
+        "displayName": { "type": "string" },
+        "functionLabel": { "type": "string" },
+        "salt": { "$ref": "#/$defs/hash32" },
+        "operatorBindingObjectHash": { "$ref": "#/$defs/hash32" }
+      },
+      "required": [
+        "organizationId", "operatorSubjectId", "displayName", "functionLabel", "salt",
+        "operatorBindingObjectHash"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "native" },
+        "sourceId": { "type": "string" },
+        "sourceFormatVersion": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      },
+      "required": ["kind", "sourceId", "sourceFormatVersion"],
+      "additionalProperties": false
+    },
+    "coordinates": {
+      "type": "object",
+      "properties": {
+        "latE7": { "type": "integer", "minimum": -900000000, "maximum": 900000000 },
+        "lonE7": { "type": "integer", "minimum": -1800000000, "maximum": 1800000000 }
+      },
+      "required": ["latE7", "lonE7"],
+      "additionalProperties": false
+    },
+    "structuredAddress": {
+      "type": "object",
+      "properties": {
+        "street": { "type": ["string", "null"] },
+        "houseNumber": { "type": ["string", "null"] },
+        "postalCode": { "type": ["string", "null"] },
+        "locality": { "type": ["string", "null"] },
+        "adminArea": { "type": ["string", "null"] },
+        "countryCode": { "type": ["string", "null"] }
+      },
+      "required": ["street", "houseNumber", "postalCode", "locality", "adminArea", "countryCode"],
+      "anyOf": [
+        { "properties": { "street": { "type": "string" } } },
+        { "properties": { "houseNumber": { "type": "string" } } },
+        { "properties": { "postalCode": { "type": "string" } } },
+        { "properties": { "locality": { "type": "string" } } },
+        { "properties": { "adminArea": { "type": "string" } } },
+        { "properties": { "countryCode": { "type": "string" } } }
+      ],
+      "additionalProperties": false
+    },
+    "keyword": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "freeText" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "required": ["kind", "text"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "reference" },
+            "referenceId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "displayText": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "required": ["kind", "referenceId", "displayText"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "location": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "freeText" },
+            "freeText": { "type": "string" },
+            "coordinates": { "oneOf": [{ "$ref": "#/$defs/coordinates" }, { "type": "null" }] }
+          },
+          "required": ["kind", "freeText", "coordinates"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "structured" },
+            "address": { "$ref": "#/$defs/structuredAddress" },
+            "coordinates": { "oneOf": [{ "$ref": "#/$defs/coordinates" }, { "type": "null" }] }
+          },
+          "required": ["kind", "address", "coordinates"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "revision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "revisionNumber" },
+            "revisionNumber": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+          },
+          "required": ["kind", "revisionNumber"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "changedAt" },
+            "changedAt": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 }
+          },
+          "required": ["kind", "changedAt"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "sourceId": { "type": "string" },
+        "sourceFormatVersion": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "importProtocolHash": { "$ref": "#/$defs/hash32" }
+      },
+      "required": ["sourceId", "sourceFormatVersion", "importProtocolHash"],
+      "additionalProperties": false
+    },
+    "personnel": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "master" },
+            "masterPersonnelId": { "type": "string" },
+            "displayName": { "type": "string" },
+            "roleOrFunction": { "type": ["string", "null"] },
+            "revision": { "$ref": "#/$defs/revision" },
+            "importedProvenance": { "oneOf": [{ "$ref": "#/$defs/provenance" }, { "type": "null" }] }
+          },
+          "required": ["kind", "masterPersonnelId", "displayName", "roleOrFunction", "revision", "importedProvenance"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "adHoc" },
+            "displayName": { "type": "string" },
+            "roleOrFunction": { "type": ["string", "null"] }
+          },
+          "required": ["kind", "displayName", "roleOrFunction"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "vehicle": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "master" },
+            "masterVehicleId": { "type": "string" },
+            "displayName": { "type": "string" },
+            "radioCallSign": { "type": ["string", "null"] },
+            "licensePlate": { "type": ["string", "null"] },
+            "revision": { "$ref": "#/$defs/revision" },
+            "importedProvenance": { "oneOf": [{ "$ref": "#/$defs/provenance" }, { "type": "null" }] }
+          },
+          "required": ["kind", "masterVehicleId", "displayName", "radioCallSign", "licensePlate", "revision", "importedProvenance"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "adHoc" },
+            "displayName": { "type": "string" },
+            "radioCallSign": { "type": ["string", "null"] },
+            "licensePlate": { "type": ["string", "null"] }
+          },
+          "required": ["kind", "displayName", "radioCallSign", "licensePlate"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "externalOrganization": {
+      "type": "object",
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "displayName": { "type": "string" }
+      },
+      "required": ["id", "displayName"],
+      "additionalProperties": false
+    },
+    "body": {
+      "type": "object",
+      "properties": {
+        "humanIncidentNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "occurredAt": {
+          "type": "object",
+          "properties": {
+            "start": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+            "end": { "type": ["integer", "null"], "minimum": -9223372036854775808, "maximum": 9223372036854775807 }
+          },
+          "required": ["start", "end"],
+          "additionalProperties": false
+        },
+        "keyword": { "$ref": "#/$defs/keyword" },
+        "location": { "$ref": "#/$defs/location" },
+        "personnel": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/personnel" } },
+        "personnelEmptyReason": { "type": ["string", "null"] },
+        "vehicles": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/vehicle" } },
+        "vehiclesEmptyReason": { "type": ["string", "null"] },
+        "patientCountStatus": { "enum": ["known", "unknown"] },
+        "patientCount": { "type": ["integer", "null"], "minimum": 0, "maximum": 4294967295 },
+        "notes": { "type": ["string", "null"], "maxLength": 20000 },
+        "externalOrganizations": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/externalOrganization" } }
+      },
+      "required": [
+        "humanIncidentNumber", "occurredAt", "keyword", "location", "personnel",
+        "personnelEmptyReason", "vehicles", "vehiclesEmptyReason", "patientCountStatus",
+        "patientCount", "notes", "externalOrganizations"
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "patientCountStatus": { "const": "known" } } },
+          "then": { "properties": { "patientCount": { "type": "integer", "minimum": 0, "maximum": 4294967295 } } },
+          "else": { "properties": { "patientCount": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "personnel": { "maxItems": 0 } } },
+          "then": { "properties": { "personnelEmptyReason": { "type": "string", "minLength": 1 } } },
+          "else": { "properties": { "personnelEmptyReason": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "vehicles": { "maxItems": 0 } } },
+          "then": { "properties": { "vehiclesEmptyReason": { "type": "string", "minLength": 1 } } },
+          "else": { "properties": { "vehiclesEmptyReason": { "type": "null" } } }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

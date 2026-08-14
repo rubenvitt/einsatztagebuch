@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
+ea-crypto.workspace = true
+ea-schema.workspace = true
+ea-types.workspace = true
 toml.workspace = true
 
 [build-dependencies]

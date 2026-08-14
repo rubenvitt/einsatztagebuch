@@ -273,6 +273,14 @@ Die Grenzbeispiele sind unveränderlich:
 1798759800000 in Europe/Berlin -> 2027
 ```
 
+Der Wire-Typ bleibt für `occurredAt.start` der vollständige signierte
+`i64`-Bereich. Lokal semantisch gültig ist ein Incident jedoch nur, wenn
+`jiff::Timestamp::from_millisecond(occurredAt.start)` den Wert darstellen kann;
+andernfalls wird er stabil als `EA-SCHEMA-TIMESTAMP-RANGE` abgelehnt. Damit ist
+die lokale Jahresableitung für jeden akzeptierten Incident total. Jiffs
+unterstützte lokale Jahre `-9999..=9999` passen vollständig in den von Task 7
+zurückgegebenen Rust-Typ `i16`.
+
 `finalizedAtDevice`, das UTC-Jahr und ein UI-artiges `YYYY-`-Präfix bestimmen
 die abgeleitete lokale Jahreskomponente nicht. Präfix-Stripping, Case-Folding
 und Locale-Folding finden nicht statt. Jede Änderung der NFC-UTF-8-Bytes von

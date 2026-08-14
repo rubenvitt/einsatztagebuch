@@ -20,4 +20,11 @@ mod tests {
 
         assert_eq!(manifest["workspace"]["resolver"].as_str(), Some("2"));
     }
+
+    #[test]
+    fn suite_one_literal_has_one_dag_neutral_owner() {
+        assert_eq!(ea_types::SUITE_ID_V1, "EINSATZARCHIV-SUITE-1");
+        assert_eq!(ea_crypto::SUITE_ID, ea_types::SUITE_ID_V1);
+        assert_eq!(ea_schema::SUITE_ID_V1, ea_types::SUITE_ID_V1);
+    }
 }

@@ -17,3 +17,5 @@ pub use ids::{
 };
 pub use redaction::Redacted;
 pub use status::{EntryStatus, EvidenceStatus, SyncStatus, VerificationStatus};
+
+pub const SUITE_ID_V1: &str = "EINSATZARCHIV-SUITE-1";

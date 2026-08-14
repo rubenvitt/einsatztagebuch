@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::SecretBytes;
 
-pub const SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+pub const SUITE_ID: &str = ea_types::SUITE_ID_V1;
 pub const GRANT_SUITE_ID: &str = "EINSATZARCHIV-HPKE-1";
 
 pub struct SuiteV1;

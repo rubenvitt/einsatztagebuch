@@ -660,6 +660,11 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     for relative in [
         "schemas/reports/v1/verification-report.schema.json",
         "schemas/reports/v1/key-inventory.schema.json",
+        "schemas/payload/v1/genesis.schema.json",
+        "schemas/payload/v1/incident.schema.json",
+        "schemas/payload/v1/amendment.schema.json",
+        "schemas/payload/v1/key-transition.schema.json",
+        "schemas/payload/v1/destruction-evidence.schema.json",
     ] {
         let path = root.join(relative);
         let input = fs::read_to_string(&path)
@@ -670,12 +675,21 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
             json_schema_profile(relative)?,
         )?;
     }
+    let compatibility_path = "schemas/compatibility-matrix.json";
+    let compatibility = fs::read_to_string(root.join(compatibility_path))
+        .map_err(|error| format!("failed to read {compatibility_path}: {error}"))?;
+    serde_json::from_str::<serde_json::Value>(&compatibility)
+        .map_err(|error| format!("invalid compatibility matrix: {error}"))?;
+    let expected_compatibility = ea_schema::SchemaRegistry::v1().compatibility_matrix_json();
+    if compatibility != expected_compatibility {
+        return Err("compatibility matrix differs from the ea-schema registry".to_owned());
+    }
     let addendum_path =
         root.join("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md");
     let addendum = fs::read_to_string(&addendum_path)
         .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
     validate_addendum_review(&addendum)?;
-    println!("validated 7 CDDL, 2 JSON schemas, and 5 payload vectors");
+    println!("validated 7 CDDL, 7 JSON schemas, 5 payload vectors, and compatibility matrix");
     Ok(())
 }
 
@@ -864,6 +878,266 @@ mod tests {
         )
         .expect_err("the same array must still fail the deterministic-report profile");
         assert!(report_error.contains("lacks x-ea-sort-key"));
+    }
+
+    #[test]
+    fn checked_in_incident_projection_is_closed_and_preserves_authoring_order() {
+        let schema = include_str!("../../../schemas/payload/v1/incident.schema.json");
+        let validator = super::compile_json_schema_for_profile(
+            "schemas/payload/v1/incident.schema.json",
+            schema,
+            super::JsonSchemaProfile::PayloadProjection,
+        )
+        .unwrap();
+        let valid = serde_json::json!({
+            "recordType": "incident",
+            "recordId": "0112131415167018801a1b1c1d1e1f20",
+            "schemaId": "ea.incident",
+            "schemaVersion": 1,
+            "finalizedAtDevice": 1798763400000_i64,
+            "timezone": "America/New_York",
+            "operator": {
+                "organizationId": "10101010101010101010101010101010",
+                "operatorSubjectId": "20202020202020202020202020202020",
+                "displayName": "Erika Beispiel",
+                "functionLabel": "Einsatzleitung",
+                "salt": "3030303030303030303030303030303030303030303030303030303030303030",
+                "operatorBindingObjectHash": "4040404040404040404040404040404040404040404040404040404040404040"
+            },
+            "source": {
+                "kind": "native",
+                "sourceId": "writer-native",
+                "sourceFormatVersion": 1
+            },
+            "registryVersion": 7,
+            "extensionData": [],
+            "body": {
+                "humanIncidentNumber": "2026-0001",
+                "occurredAt": {"start": 1798763400000_i64, "end": null},
+                "keyword": {"kind": "freeText", "text": "Brand"},
+                "location": {"kind": "freeText", "freeText": "Hauptstraße", "coordinates": null},
+                "personnel": [
+                    {"kind": "adHoc", "displayName": "Zulu", "roleOrFunction": null},
+                    {"kind": "adHoc", "displayName": "Alpha", "roleOrFunction": null}
+                ],
+                "personnelEmptyReason": null,
+                "vehicles": [],
+                "vehiclesEmptyReason": "Keine Fahrzeuge",
+                "patientCountStatus": "known",
+                "patientCount": 0,
+                "notes": null,
+                "externalOrganizations": []
+            }
+        });
+        assert!(validator.is_valid(&valid));
+
+        let mut unknown_nested = valid;
+        unknown_nested["operator"]["rawIdentifier"] = serde_json::json!("secret");
+        assert!(!validator.is_valid(&unknown_nested));
+    }
+
+    #[test]
+    fn payload_integer_schemas_declare_exact_wire_bounds() {
+        let schemas = [
+            (
+                "genesis",
+                include_str!("../../../schemas/payload/v1/genesis.schema.json"),
+            ),
+            (
+                "incident",
+                include_str!("../../../schemas/payload/v1/incident.schema.json"),
+            ),
+            (
+                "amendment",
+                include_str!("../../../schemas/payload/v1/amendment.schema.json"),
+            ),
+            (
+                "key-transition",
+                include_str!("../../../schemas/payload/v1/key-transition.schema.json"),
+            ),
+            (
+                "destruction-evidence",
+                include_str!("../../../schemas/payload/v1/destruction-evidence.schema.json"),
+            ),
+        ];
+        let mut issues = Vec::new();
+        for (name, source) in schemas {
+            let schema: serde_json::Value = serde_json::from_str(source).unwrap();
+            collect_integer_bound_issues(name, "#", &schema, &mut issues);
+        }
+        assert!(
+            issues.is_empty(),
+            "every payload integer must declare its exact wire bounds:\n{}",
+            issues.join("\n")
+        );
+    }
+
+    #[test]
+    fn checked_in_integer_bounds_accept_limits_and_reject_adjacent_values() {
+        let genesis: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/payload/v1/genesis.schema.json"
+        ))
+        .unwrap();
+        let incident: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/payload/v1/incident.schema.json"
+        ))
+        .unwrap();
+        let destruction: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/payload/v1/destruction-evidence.schema.json"
+        ))
+        .unwrap();
+
+        assert_integer_boundaries(
+            "common finalizedAtDevice",
+            &genesis["properties"]["finalizedAtDevice"],
+            &["-9223372036854775808", "9223372036854775807"],
+            &["-9223372036854775809", "9223372036854775808"],
+        );
+        assert_integer_boundaries(
+            "common registryVersion",
+            &genesis["properties"]["registryVersion"],
+            &["0", "18446744073709551615"],
+            &["-1", "18446744073709551616"],
+        );
+        assert_integer_boundaries(
+            "nested Incident occurredAt.start",
+            &incident["$defs"]["body"]["properties"]["occurredAt"]["properties"]["start"],
+            &["-9223372036854775808", "9223372036854775807"],
+            &["-9223372036854775809", "9223372036854775808"],
+        );
+        assert_integer_boundaries(
+            "nested Destruction resultCode",
+            &destruction["properties"]["body"]["properties"]["executionResults"]["items"]["properties"]
+                ["resultCode"],
+            &["0", "18446744073709551615"],
+            &["-1", "18446744073709551616"],
+        );
+    }
+
+    #[test]
+    fn payload_source_ids_allow_kind_spellings_and_empty_text() {
+        let schemas = [
+            include_str!("../../../schemas/payload/v1/genesis.schema.json"),
+            include_str!("../../../schemas/payload/v1/incident.schema.json"),
+            include_str!("../../../schemas/payload/v1/amendment.schema.json"),
+            include_str!("../../../schemas/payload/v1/key-transition.schema.json"),
+            include_str!("../../../schemas/payload/v1/destruction-evidence.schema.json"),
+        ];
+        for source in schemas {
+            let schema: serde_json::Value = serde_json::from_str(source).unwrap();
+            let validator =
+                jsonschema::validator_for(&schema["$defs"]["source"]["properties"]["sourceId"])
+                    .unwrap();
+            for allowed in ["writer-native", "legacyImport", "legacy-access-import"] {
+                assert!(
+                    validator.is_valid(&serde_json::Value::String(allowed.to_owned())),
+                    "sourceId must not reserve kind spelling {allowed}"
+                );
+            }
+            assert!(validator.is_valid(&serde_json::Value::String(String::new())));
+        }
+    }
+
+    fn collect_integer_bound_issues(
+        schema_name: &str,
+        path: &str,
+        value: &serde_json::Value,
+        issues: &mut Vec<String>,
+    ) {
+        let declares_integer = match value.get("type") {
+            Some(serde_json::Value::String(kind)) => kind == "integer",
+            Some(serde_json::Value::Array(kinds)) => {
+                kinds.iter().any(|kind| kind.as_str() == Some("integer"))
+            }
+            _ => false,
+        };
+        if declares_integer {
+            let minimum = value.get("minimum").and_then(serde_json::Value::as_number);
+            let maximum = value.get("maximum").and_then(serde_json::Value::as_number);
+            let expected = expected_integer_bounds(path);
+            match (minimum, maximum) {
+                (Some(minimum), Some(maximum))
+                    if !minimum.is_f64()
+                        && !maximum.is_f64()
+                        && (minimum.to_string(), maximum.to_string()) == expected => {}
+                _ => issues.push(format!(
+                    "{schema_name}{path}: expected {}..={}, got {}..={}",
+                    expected.0,
+                    expected.1,
+                    minimum.map_or_else(|| "missing".to_owned(), ToString::to_string),
+                    maximum.map_or_else(|| "missing".to_owned(), ToString::to_string),
+                )),
+            }
+        }
+        match value {
+            serde_json::Value::Object(entries) => {
+                for (key, child) in entries {
+                    collect_integer_bound_issues(
+                        schema_name,
+                        &format!("{path}/{key}"),
+                        child,
+                        issues,
+                    );
+                }
+            }
+            serde_json::Value::Array(entries) => {
+                for (index, child) in entries.iter().enumerate() {
+                    collect_integer_bound_issues(
+                        schema_name,
+                        &format!("{path}/{index}"),
+                        child,
+                        issues,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn expected_integer_bounds(path: &str) -> (String, String) {
+        let field = path.rsplit('/').next().unwrap();
+        match field {
+            "finalizedAtDevice" | "changedAt" | "start" | "end" => (
+                "-9223372036854775808".to_owned(),
+                "9223372036854775807".to_owned(),
+            ),
+            "latE7" => ("-900000000".to_owned(), "900000000".to_owned()),
+            "lonE7" => ("-1800000000".to_owned(), "1800000000".to_owned()),
+            "patientCount" => ("0".to_owned(), "4294967295".to_owned()),
+            _ => ("0".to_owned(), "18446744073709551615".to_owned()),
+        }
+    }
+
+    fn assert_integer_boundaries(
+        name: &str,
+        schema: &serde_json::Value,
+        accepted: &[&str],
+        rejected: &[&str],
+    ) {
+        let validator = jsonschema::validator_for(schema).unwrap();
+        for literal in accepted {
+            let value = exact_integer(literal);
+            assert!(validator.is_valid(&value), "{name} must accept {literal}");
+        }
+        for literal in rejected {
+            let value = exact_integer(literal);
+            assert!(
+                !validator.is_valid(&value),
+                "{name} must reject adjacent value {literal}"
+            );
+        }
+    }
+
+    fn exact_integer(literal: &str) -> serde_json::Value {
+        let value: serde_json::Value = serde_json::from_str(literal).unwrap();
+        let number = value.as_number().unwrap();
+        assert_eq!(
+            number.to_string(),
+            literal,
+            "integer literal must stay exact"
+        );
+        assert!(!number.is_f64(), "integer literal must not become a float");
+        value
     }
 
     #[test]

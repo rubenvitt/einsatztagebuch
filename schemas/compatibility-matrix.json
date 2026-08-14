@@ -1,0 +1,75 @@
+{
+  "formatVersion": 1,
+  "release": "0.1",
+  "suiteIds": [
+    "EINSATZARCHIV-SUITE-1"
+  ],
+  "tzdbVersion": "2026c",
+  "schemas": [
+    {
+      "recordType": "genesis",
+      "schemaId": "ea.genesis",
+      "schemaVersion": 1,
+      "readable": true,
+      "view": {
+        "kind": "identity",
+        "preservesSourceBytes": true,
+        "targetSchemaId": "ea.genesis",
+        "targetSchemaVersion": 1
+      }
+    },
+    {
+      "recordType": "incident",
+      "schemaId": "ea.incident",
+      "schemaVersion": 1,
+      "readable": true,
+      "view": {
+        "kind": "identity",
+        "preservesSourceBytes": true,
+        "targetSchemaId": "ea.incident",
+        "targetSchemaVersion": 1
+      }
+    },
+    {
+      "recordType": "amendment",
+      "schemaId": "ea.amendment",
+      "schemaVersion": 1,
+      "readable": true,
+      "view": {
+        "kind": "identity",
+        "preservesSourceBytes": true,
+        "targetSchemaId": "ea.amendment",
+        "targetSchemaVersion": 1
+      }
+    },
+    {
+      "recordType": "keyTransition",
+      "schemaId": "ea.key-transition",
+      "schemaVersion": 1,
+      "readable": true,
+      "view": {
+        "kind": "identity",
+        "preservesSourceBytes": true,
+        "targetSchemaId": "ea.key-transition",
+        "targetSchemaVersion": 1
+      }
+    },
+    {
+      "recordType": "destructionEvidence",
+      "schemaId": "ea.destruction-evidence",
+      "schemaVersion": 1,
+      "readable": true,
+      "view": {
+        "kind": "identity",
+        "preservesSourceBytes": true,
+        "targetSchemaId": "ea.destruction-evidence",
+        "targetSchemaVersion": 1
+      }
+    }
+  ],
+  "safeFailure": {
+    "unknownSchema": "unsupported",
+    "unknownVersion": "unsupported",
+    "unsupportedSuite": "unsupported-suite"
+  }
+}

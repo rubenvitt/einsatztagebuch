@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.einsatzarchiv.de/payload/v1/destruction-evidence.schema.json",
+  "title": "Einsatzarchiv Destruction Evidence Payload v1 Logical Projection",
+  "type": "object",
+  "properties": {
+    "recordType": { "const": "destructionEvidence" },
+    "recordId": { "$ref": "#/$defs/id16" },
+    "schemaId": { "const": "ea.destruction-evidence" },
+    "schemaVersion": { "const": 1 },
+    "finalizedAtDevice": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+    "timezone": { "type": "string", "minLength": 1 },
+    "operator": { "$ref": "#/$defs/operator" },
+    "source": { "$ref": "#/$defs/source" },
+    "registryVersion": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "extensionData": { "type": "array", "maxItems": 0 },
+    "body": {
+      "type": "object",
+      "properties": {
+        "destructionId": { "$ref": "#/$defs/id16" },
+        "authorizationObjectHash": { "$ref": "#/$defs/hash32" },
+        "scopeCode": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "entryHash": { "$ref": "#/$defs/hash32" },
+              "chainSequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+            },
+            "required": ["entryHash", "chainSequence"],
+            "additionalProperties": false
+          }
+        },
+        "executionResults": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "entryHash": { "$ref": "#/$defs/hash32" },
+              "confirmed": { "type": "boolean" },
+              "resultCode": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+            },
+            "required": ["entryHash", "confirmed", "resultCode"],
+            "additionalProperties": false
+          }
+        },
+        "stubBindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "entryHash": { "$ref": "#/$defs/hash32" },
+              "stubObjectHash": { "$ref": "#/$defs/hash32" }
+            },
+            "required": ["entryHash", "stubObjectHash"],
+            "additionalProperties": false
+          }
+        },
+        "replicaResults": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "replicaId": { "$ref": "#/$defs/id16" },
+                  "state": { "const": "successful" },
+                  "deletionAttestationObjectHash": { "$ref": "#/$defs/hash32" }
+                },
+                "required": ["replicaId", "state", "deletionAttestationObjectHash"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "replicaId": { "$ref": "#/$defs/id16" },
+                  "state": { "enum": ["pending", "unreachable"] },
+                  "deletionAttestationObjectHash": { "type": "null" }
+                },
+                "required": ["replicaId", "state", "deletionAttestationObjectHash"],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": ["destructionId", "authorizationObjectHash", "scopeCode", "targets", "executionResults", "stubBindings", "replicaResults"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["recordType", "recordId", "schemaId", "schemaVersion", "finalizedAtDevice", "timezone", "operator", "source", "registryVersion", "extensionData", "body"],
+  "additionalProperties": false,
+  "$defs": {
+    "id16": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "hash32": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "operator": {
+      "type": "object",
+      "properties": {
+        "organizationId": { "$ref": "#/$defs/id16" },
+        "operatorSubjectId": { "$ref": "#/$defs/id16" },
+        "displayName": { "type": "string" },
+        "functionLabel": { "type": "string" },
+        "salt": { "$ref": "#/$defs/hash32" },
+        "operatorBindingObjectHash": { "$ref": "#/$defs/hash32" }
+      },
+      "required": ["organizationId", "operatorSubjectId", "displayName", "functionLabel", "salt", "operatorBindingObjectHash"],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "native" },
+        "sourceId": { "type": "string" },
+        "sourceFormatVersion": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      },
+      "required": ["kind", "sourceId", "sourceFormatVersion"],
+      "additionalProperties": false
+    }
+  }
+}
