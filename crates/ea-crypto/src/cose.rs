@@ -613,6 +613,26 @@ impl ParsedCoseSign1 {
     }
 
     #[must_use]
+    pub const fn content_type(&self) -> ContentType {
+        self.protected.content_type
+    }
+
+    #[must_use]
+    pub const fn key_thumbprint(&self) -> KeyThumbprint {
+        self.protected.key_thumbprint
+    }
+
+    #[must_use]
+    pub const fn certificate_hash(&self) -> Option<CertificateHash> {
+        self.protected.certificate_hash
+    }
+
+    #[must_use]
+    pub const fn signature_bytes(&self) -> &[u8; 64] {
+        &self.signature
+    }
+
+    #[must_use]
     pub fn timestamp_token(&self) -> Option<&[u8]> {
         self.timestamp_token.as_deref()
     }

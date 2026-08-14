@@ -666,6 +666,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-format"
+version = "0.1.0"
+dependencies = [
+ "ea-cbor",
+ "ea-crypto",
+ "ea-types",
+ "hex",
+ "minicbor",
+]
+
+[[package]]
 name = "ea-system-tests"
 version = "0.1.0"
 dependencies = [

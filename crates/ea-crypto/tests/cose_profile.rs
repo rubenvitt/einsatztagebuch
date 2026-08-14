@@ -253,6 +253,26 @@ fn tag_18_attached_cose_round_trips_exactly_and_mutations_fail() {
 }
 
 #[test]
+fn strict_parser_exposes_only_validated_read_only_wire_bindings() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let certificate = CertificateHash::try_from(&[0x91; 32][..]).unwrap();
+    let encoded = signer
+        .sign_recovery_test(certificate, SecretBytes::new([0x55; 32]))
+        .unwrap();
+    let parsed = parse_cose_sign1(&encoded, &[]).unwrap();
+
+    assert_eq!(parsed.content_type(), ContentType::RecoveryTestDigest);
+    assert!(parsed.key_thumbprint() == fixture_key().thumbprint());
+    assert!(parsed.certificate_hash() == Some(certificate));
+    assert_eq!(
+        parsed.signature_bytes().as_slice(),
+        &encoded[encoded.len() - 64..]
+    );
+    assert_eq!(parsed.exact_bytes(), encoded);
+}
+
+#[test]
 fn root_and_enrollment_profiles_have_separate_verifiers() {
     let signer =
         CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
