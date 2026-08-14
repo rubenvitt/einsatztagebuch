@@ -1149,7 +1149,25 @@ git commit -m "feat(core): implement exact archive object formats"
 
 ### Task 7: Versioned Payload Schemas and Compatibility Registry
 
+**Closed normative prerequisite (2026-08-14):** Task 7 MUST consume, without
+reinterpreting, the exact 11-position deterministic-CBOR families in
+`schemas/payload/v1/payload.cddl`, the payload-wire addendum, and the five
+literal `vectors/format/payload-v1/*.hex` fixtures. The correction also pins
+`jiff = 0.2.35`, `jiff-tzdb = 0.1.8`, embedded IANA tzdb `2026c`, the
+canonical-name lookup route, and the local-calendar-year basis. It creates no
+`ea-schema`, JSON payload schema, or compatibility matrix itself.
+
+`xtask` uses `JsonSchemaProfile::DeterministicReport` for deterministic report
+schemas and `JsonSchemaProfile::PayloadProjection` for payload projections.
+Both recursively require closed objects. Only the report profile requires
+`x-ea-sort-key`, `x-ea-unique-key`, and `uniqueItems`; ordered authoring arrays
+for personnel, vehicles, and external organizations remain valid without a
+sort key under the payload profile.
+
 **Files:**
+- Consume: `schemas/payload/v1/payload.cddl`
+- Consume: `docs/superpowers/specs/2026-08-14-einsatzarchiv-v0-1-payload-wire-addendum.md`
+- Consume: `vectors/format/payload-v1/{genesis,incident,amendment,key-transition,destruction-evidence}.hex`
 - Create: `crates/ea-schema/Cargo.toml`
 - Create: `crates/ea-schema/src/lib.rs`
 - Create: `crates/ea-schema/src/v1.rs`
@@ -1165,8 +1183,13 @@ git commit -m "feat(core): implement exact archive object formats"
 - Test: `crates/ea-schema/tests/compatibility.rs`
 
 **Interfaces:**
-- Consumes: primitive IDs/time types and deterministic CBOR.
-- Produces: `SchemaRegistry::validate`, `SchemaRegistry::derive_view`, `PayloadV1`, and `UnsupportedSchema`; no historical byte mutation.
+- Consumes: primitive IDs/time types, deterministic CBOR, the exact payload
+  CDDL/vectors, and only the bundled tzdb `2026c` through the reviewed exact
+  workspace pins.
+- Produces: `SchemaRegistry::validate`, `SchemaRegistry::derive_view`,
+  `PayloadV1`, `UnsupportedSchema`, and the single-payload incident-number key
+  `(organizationId, localCivilYear, NFC UTF-8 number bytes)`; no historical
+  byte mutation and no cross-record uniqueness enforcement.
 
 - [ ] **Step 1: Write payload boundary and unsupported-schema tests**
 
@@ -1185,6 +1208,26 @@ fn unknown_schema_is_not_an_empty_incident() {
     assert!(matches!(result, Err(SchemaError::Unsupported { .. })));
 }
 ```
+
+Add literal-vector tests that decode exactly one 11-item array, pin full hex
+and exact `recordType`/`schemaId`/version pairs, enforce UUIDv7 bits, and prove
+append/truncate/family/schema/version mutations fail. The incident fixture MUST
+retain its ordinary Zulu-before-Alpha authoring list and reject a Float
+coordinate. Every fixture MUST validate against its CDDL family root and remain
+byte-identical under `ea-cbor` canonical re-encoding.
+
+Add timezone tests that construct only `TimeZoneDatabase::bundled()`, compare
+the input byte-for-byte with the canonical name returned by `jiff_tzdb::get`,
+and reject case variants plus `Etc/Unknown`. Pin the observed database version
+`2026c` and both year boundaries:
+
+```text
+1798763400000 in America/New_York -> 2026
+1798759800000 in Europe/Berlin -> 2027
+```
+
+Changing `finalizedAtDevice` or a UI-like `YYYY-` number prefix MUST NOT change
+the derived local year.
 
 - [ ] **Step 2: Run schema tests and verify failure**
 
@@ -1209,13 +1252,46 @@ pub enum PatientCount {
 }
 ```
 
-Enforce UUIDv7 record IDs; integer epoch milliseconds plus IANA timezone; Unicode NFC; no floats; only `source.kind = native`; and only registered versioned `extensionData` namespaces. `IncidentV1` requires a 1–64-character `humanIncidentNumber` unique within organization/calendar year, required interval start with optional end not before start, 1–128-character keyword/reference, free-text or structured location with optional coordinates, at most 200 personnel and 100 vehicles with a required reason for either empty list, `PatientCount::Known(nonnegative)` or `Unknown`, optional notes of at most 20,000 characters with no identifying-patient fields, and at most 100 external organizations. Its deterministic plaintext is at most 1 MiB. `GenesisV1` binds organization, chain, initial Writer certificate, format, suite, and initial policy; `AmendmentV1` binds original incident number/record ID/Entry hash/sequence plus reason, structured change text, and creator snapshot; `KeyTransitionV1` binds the public Writer-transition event hash plus encrypted organizational reason; `DestructionEvidenceV1` binds targets, authorization, scope, execution results, Stub hashes, attestations, and explicit successful/pending/unreachable replicas without asserting unconfirmed deletion. Generate and validate `schemas/compatibility-matrix.json` from the same Rust registry. A derived old view names source and target schema and never replaces verified source bytes.
+Map the Rust models and encoder/decoder exactly to the committed CDDL arrays;
+JSON Schemas are closed logical projections and never an alternate byte
+authority. Enforce UUIDv7 record IDs; signed-`i64` epoch milliseconds; Unicode
+NFC; no floats; only source tag `0` native; v1 `extensionData = []`; and exact
+family/schema/version pairs. Use the explicitly constructed bundled database,
+never `/usr/share/zoneinfo`, `TZ`, `TZDIR`, a system timezone, or Jiff's global
+database.
+
+`IncidentV1` requires a 1–64-character `humanIncidentNumber`, interval start
+with optional end not before start, 1–128-character keyword/reference,
+integer-E7 coordinates, at most 200 personnel and 100 vehicles with a required
+nonempty reason for either empty list, `PatientCount::Known(nonnegative)` or
+`Unknown`, optional notes of at most 20,000 characters with no registered
+patient-identifying fields, and at most 100 external organizations. Personnel,
+vehicle, and external-organization lists preserve authoring order. Derive the
+local-year key from `occurredAt.start` in the payload timezone using tzdb
+`2026c`; do not enforce repository-wide uniqueness in this crate.
+
+`GenesisV1` binds organization, chain, initial Writer certificate, format,
+suite, and initial policy. `AmendmentV1` binds original incident number/record
+ID/Entry hash/sequence, reason, and nonempty structured changes; the common
+operator snapshot is its creator and is not duplicated in the body.
+`KeyTransitionV1` binds the public Writer-transition event hash plus encrypted
+organizational reason. `DestructionEvidenceV1` binds targets, authorization,
+scope, execution results, Stub hashes, attestations, and explicit
+successful/pending/unreachable replicas without asserting unconfirmed
+deletion. Generate and validate `schemas/compatibility-matrix.json` from the
+same Rust registry. A derived old view names source and target schema and never
+replaces verified source bytes.
 
 - [ ] **Step 4: Run validation and cross-version fixture tests**
 
 Run: `cargo test --locked -p ea-schema && cargo run --locked -p xtask -- validate-schemas`
 
-Expected: PASS; `legacyImport`, `legacy-access-import`, floats, non-NFC strings, unknown critical namespaces, and unsupported suites/schemas fail with distinct errors.
+Expected: PASS; `legacyImport`, `legacy-access-import`, alternate source tags,
+floats, non-NFC strings, noncanonical/unknown timezone names, unknown critical
+namespaces, oversized plaintext, and unsupported suites/schemas fail with
+distinct errors. Existing deterministic-report sorted/duplicate-key tests
+remain green, while payload projection authoring arrays need no report sort
+extensions.
 
 - [ ] **Step 5: Commit payload schemas**
 

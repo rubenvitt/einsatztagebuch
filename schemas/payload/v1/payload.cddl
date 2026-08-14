@@ -1,0 +1,178 @@
+; Einsatzarchiv v0.1 deterministic-CBOR plaintext payloads.
+; CBOR arrays are the byte authority. All alternatives are closed fixed arrays.
+; MAX_PLAINTEXT_BYTES_V1 = 1_048_576 is enforced before input-proportional
+; allocation or full decode. Text is Unicode NFC; maps, floats, indefinite
+; items, trailing items, and unknown extension namespaces are invalid.
+
+payload-v1 = genesis-payload-v1 / incident-payload-v1 /
+  amendment-payload-v1 / key-transition-payload-v1 /
+  destruction-evidence-payload-v1
+
+; UUIDv7 semantics additionally require version nibble 7 and RFC variant 10.
+record-id-v7 = bstr .size 16
+bstr16 = bstr .size 16
+bstr32 = bstr .size 32
+; epoch-millis-i64-v1 supported bound = -9223372036854775808..9223372036854775807.
+; cddl-cat cannot represent the i64 minimum as a range endpoint, so Rust
+; semantic validation enforces the stated inclusive bound on this int rule.
+epoch-millis-i64-v1 = int
+
+operator-snapshot-v1 = [
+  organization-id: bstr16,
+  operator-subject-id: bstr16,
+  display-name: tstr,
+  function-label: tstr,
+  salt: bstr32,
+  operator-binding-object-hash: bstr32
+]
+
+; Tag 0 is native. No legacy source kind is registered in v1.
+source-v1 = [0, source-id: tstr, source-format-version: uint, null]
+
+genesis-payload-v1 = [
+  "genesis", record-id: record-id-v7, "ea.genesis", 1,
+  finalized-at-device: epoch-millis-i64-v1, timezone: tstr,
+  operator-snapshot-v1, source-v1, registry-version: uint,
+  extension-data: [], genesis-body-v1
+]
+
+incident-payload-v1 = [
+  "incident", record-id: record-id-v7, "ea.incident", 1,
+  finalized-at-device: epoch-millis-i64-v1, timezone: tstr,
+  operator-snapshot-v1, source-v1, registry-version: uint,
+  extension-data: [], incident-body-v1
+]
+
+amendment-payload-v1 = [
+  "amendment", record-id: record-id-v7, "ea.amendment", 1,
+  finalized-at-device: epoch-millis-i64-v1, timezone: tstr,
+  operator-snapshot-v1, source-v1, registry-version: uint,
+  extension-data: [], amendment-body-v1
+]
+
+key-transition-payload-v1 = [
+  "keyTransition", record-id: record-id-v7, "ea.key-transition", 1,
+  finalized-at-device: epoch-millis-i64-v1, timezone: tstr,
+  operator-snapshot-v1, source-v1, registry-version: uint,
+  extension-data: [], key-transition-body-v1
+]
+
+destruction-evidence-payload-v1 = [
+  "destructionEvidence", record-id: record-id-v7,
+  "ea.destruction-evidence", 1,
+  finalized-at-device: epoch-millis-i64-v1, timezone: tstr,
+  operator-snapshot-v1, source-v1, registry-version: uint,
+  extension-data: [], destruction-evidence-body-v1
+]
+
+genesis-body-v1 = [
+  organization-id: bstr16,
+  chain-id: bstr16,
+  initial-writer-certificate-object-hash: bstr32,
+  format-version: uint,
+  "EINSATZARCHIV-SUITE-1",
+  initial-policy-object-hash: bstr32
+]
+
+incident-body-v1 =
+  incident-body-with-patient-count-v1<0, null> /
+  incident-body-with-patient-count-v1<1, uint>
+
+; Patient-count status 0 means unknown; 1 means known, including known zero.
+incident-body-with-patient-count-v1<STATUS, COUNT> = [
+  human-incident-number: tstr,
+  occurred-at: [start: epoch-millis-i64-v1,
+                end: epoch-millis-i64-v1 / null],
+  keyword-v1,
+  location-v1,
+  personnel: [0*200 personnel-snapshot-v1],
+  personnel-empty-reason: tstr / null,
+  vehicles: [0*100 vehicle-snapshot-v1],
+  vehicles-empty-reason: tstr / null,
+  patient-count-status: STATUS,
+  patient-count: COUNT,
+  notes: tstr / null,
+  external-organizations: [0*100 external-organization-v1]
+]
+
+keyword-v1 =
+  [0, text: tstr] /
+  [1, reference-id: tstr, display-text: tstr]
+
+location-v1 =
+  [0, free-text: tstr, coordinates-v1 / null] /
+  [1, structured-address-v1, coordinates-v1 / null]
+
+coordinates-v1 = [
+  lat-e7: -900000000..900000000,
+  lon-e7: -1800000000..1800000000
+]
+
+; At least one structured-address value must be non-null semantically.
+structured-address-v1 = [
+  street: tstr / null,
+  house-number: tstr / null,
+  postal-code: tstr / null,
+  locality: tstr / null,
+  admin-area: tstr / null,
+  country-code: tstr / null
+]
+
+master-data-revision-v1 =
+  [0, revision-number: uint] /
+  [1, changed-at: epoch-millis-i64-v1]
+
+imported-provenance-v1 = [
+  source-id: tstr,
+  source-format-version: uint,
+  import-protocol-hash: bstr32
+]
+
+personnel-snapshot-v1 =
+  [0, master-personnel-id: tstr, display-name: tstr,
+      role-or-function: tstr / null, master-data-revision-v1,
+      imported-provenance-v1 / null] /
+  [1, ad-hoc-display-name: tstr, role-or-function: tstr / null]
+
+vehicle-snapshot-v1 =
+  [0, master-vehicle-id: tstr, display-name: tstr,
+      radio-call-sign: tstr / null, license-plate: tstr / null,
+      master-data-revision-v1, imported-provenance-v1 / null] /
+  [1, ad-hoc-display-name: tstr, radio-call-sign: tstr / null,
+      license-plate: tstr / null]
+
+external-organization-v1 = [id: tstr / null, display-name: tstr]
+
+amendment-body-v1 = [
+  original-incident-number: tstr,
+  original-record-id: bstr16,
+  original-entry-hash: bstr32,
+  original-sequence: uint,
+  reason: tstr,
+  changes: [+ [field-path: tstr, change-text: tstr]]
+]
+
+key-transition-body-v1 = [
+  writer-transition-event-object-hash: bstr32,
+  organizational-reason: tstr
+]
+
+destruction-evidence-body-v1 = [
+  destruction-id: bstr16,
+  authorization-object-hash: bstr32,
+  scope-code: uint,
+  ; Ascending by unsigned (entryHash bytes, chainSequence); entryHash unique.
+  targets: [+ [entry-hash: bstr32, chain-sequence: uint]],
+  ; Ascending and unique by entryHash.
+  execution-results: [+ [entry-hash: bstr32, confirmed: bool,
+                         result-code: uint]],
+  ; Ascending and unique by entryHash.
+  stub-bindings: [* [entry-hash: bstr32, stub-object-hash: bstr32]],
+  ; Ascending and unique by replicaId.
+  replica-results: [+ replica-result-v1]
+]
+
+replica-result-v1 =
+  [replica-id: bstr16, 0, deletion-attestation-object-hash: bstr32] /
+  [replica-id: bstr16, 1, null] /
+  [replica-id: bstr16, 2, null]

@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Decision date: 2026-08-13
-- Evidence retrieved: 2026-08-13
+- Evidence retrieved: 2026-08-13; timezone evidence refreshed 2026-08-14
 
 ## Context
 
@@ -56,6 +56,8 @@ independent formal audit.
 | [`hpke`](https://crates.io/crates/hpke/0.14.0) | `0.14.0`; defaults off, `alloc`, `getrandom`, `x25519`, `chacha` | The active [rust-hpke upstream](https://github.com/rozbb/rust-hpke) implements RFC 9180 and reports MSRV 1.85. `x25519` brings HKDF-SHA-256; only the exact Suite 1 KEM/KDF/AEAD is enabled. Default ML-KEM, SHAKE, NIST curves, and AES are intentionally excluded. |
 | [`zeroize`](https://crates.io/crates/zeroize/1.9.0) | `1.9.0`; default `alloc`, plus `derive` | The maintained [RustCrypto utilities project](https://github.com/RustCrypto/utils) guarantees compiler-resistant memory clearing and reports MSRV 1.85. Derive support makes secret-owning types fail visibly if their clearing contract is removed. Zeroization reduces residual-memory exposure but does not promise protection from swapping, crash dumps, or copied buffers. |
 | [`toml`](https://crates.io/crates/toml/0.8.23) | `0.8.23`; defaults `parse`, `display` | The [toml-rs upstream](https://github.com/toml-rs/toml) parser supports the brief's required `str.parse::<toml::Value>()` document API and reports MSRV 1.66. Releases 0.9.8 and 1.1.4 were rejected after the prescribed smoke API failed on a complete manifest; 0.8.23 is therefore the latest verified compatible line, not merely the numerically newest release. It is tooling-only and outside the wire-format trust boundary. |
+| [`jiff`](https://docs.rs/crate/jiff/0.2.35) | `0.2.35`; defaults off, `std`, `tzdb-bundle-always` | The [published 0.2.35 manifest](https://docs.rs/crate/jiff/0.2.35/source/Cargo.toml.orig) defines `tzdb-bundle-always` as the explicit embedded-database feature and depends on `jiff-tzdb` 0.1.8. Upstream documents MSRV 1.70, so the release is compatible with the workspace's Rust 1.95. Only an explicitly constructed `TimeZoneDatabase::bundled()` is permitted for payload validation; global/system lookup APIs are not. |
+| [`jiff-tzdb`](https://docs.rs/crate/jiff-tzdb/0.1.8) | `0.1.8` | This exact direct pin prevents the bundled IANA data from drifting under Jiff's compatible dependency range. Jiff's [upstream changelog](https://docs.rs/jiff/0.2.35/jiff/_documentation/changelog/index.html#0232-2026-07-08) records tzdb `2026c`; the crate embeds TZif data. Its [`get`](https://docs.rs/jiff-tzdb/0.1.8/jiff_tzdb/fn.get.html) API returns the stored canonical capitalization even though lookup is ASCII-case-insensitive, permitting fail-closed exact-name comparison before parsing. The crate reports MSRV 1.70 and is compatible with Rust 1.95. |
 
 ## Rejected alternatives
 
@@ -78,6 +80,10 @@ independent formal audit.
 - Ambient `nightly`, unpinned `cargo-fuzz`, and a fuzz build without
   `fuzz/Cargo.lock` were rejected because they cannot reproduce a historical
   fuzz result.
+- Host `/usr/share/zoneinfo`, `TZ`, `TZDIR`, Jiff's global database, and
+  case-insensitive acceptance were rejected for payload validation because
+  they make a stored incident's local-calendar interpretation depend on the
+  machine or execution date. `Etc/Unknown` is also rejected as a payload zone.
 
 ## Consequences
 
@@ -89,3 +95,6 @@ independent formal audit.
 - Format acceptance and cryptographic protocol correctness remain local
   responsibilities; upstream libraries provide primitives, not the complete
   Einsatzarchiv security claim.
+- A tzdb update is a reviewed format/compatibility decision: update both exact
+  crate pins, the documented database version, boundary fixtures, and the
+  compatibility registry together. Existing payload bytes are never rewritten.

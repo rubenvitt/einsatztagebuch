@@ -284,22 +284,47 @@ Der verschlüsselte Payload ist eine typisierte Variante. `recordType` darf in v
 
 `legacyImport` existiert nicht.
 
+Die exakte deterministische Klartextrepräsentation aller fünf Varianten ist im
+[normativen Payload-Wire-Nachtrag](2026-08-14-einsatzarchiv-v0-1-payload-wire-addendum.md)
+und in `schemas/payload/v1/payload.cddl` geschlossen. CBOR-Arrays sind die
+Byte-Autorität; spätere JSON-Schemas sind nur geschlossene logische
+Projektionen.
+
 ### 8.2 Gemeinsame Felder
 
-Jeder Ketteneintrag enthält:
+Jeder Ketteneintrag enthält als verschlüsselten Klartext exakt ein
+11-Positionen-Array in dieser Reihenfolge:
 
 - `recordType`
 - `recordId` als UUIDv7
 - `schemaId`
 - `schemaVersion`
-- `finalizedAtDevice` als UTC-Zeitwert
-- `timezone` als IANA-Zeitzone der Erfassung
-- `operator` als nicht frei editierbarer Snapshot `[organizationId, operatorSubjectId, displayName, functionLabel, profileCommitmentSalt, operatorBindingObjectHash]`; Binding, Gerät, OS-Konto, Rolle, Sequenz und Profil-Commitment werden gemäß Abschnitt 6.8 geprüft
-- `source` als typisiertes Herkunftsobjekt mit `kind`, Quellen-ID, Formatversion und optionalem Importprotokoll-Hash
+- `finalizedAtDevice` als ganzzahlige Epoch-Millisekunden im inklusiven
+  Rust-`i64`-Bereich
+- `timezone` als kanonisch geschriebene IANA-Zeitzone aus der fest eingebetteten
+  Datenbasis `2026c`
+- `operator` als nicht frei editierbarer Snapshot `[organizationId, operatorSubjectId, displayName, functionLabel, salt, operatorBindingObjectHash]`; `salt` ist das `profileCommitmentSalt` aus Abschnitt 6.8, und Binding, Gerät, OS-Konto, Rolle, Sequenz und Profil-Commitment werden dort geprüft
+- `source` als geschlossene native Quelle `[0, sourceId, sourceFormatVersion, null]`
 - `registryVersion`
-- versionierte `extensionData` nur in registrierten Namespaces
+- `extensionData`; v1 registriert keinen Namespace, daher ist diese Position
+  exakt `[]`
 
-Fließkommazahlen sind im normativen Payload nicht zulässig. Zeitwerte werden als ganzzahlige Millisekunden seit Unix Epoch plus IANA-Zeitzone serialisiert. Texte werden vor der Validierung in Unicode NFC normalisiert.
+Die v1-Paare sind ausschließlich `genesis`/`ea.genesis`,
+`incident`/`ea.incident`, `amendment`/`ea.amendment`,
+`keyTransition`/`ea.key-transition` und
+`destructionEvidence`/`ea.destruction-evidence`, jeweils mit
+`schemaVersion = 1`. `recordId` ist ein 16-Byte-UUIDv7 mit Versionsnibble `7`
+und RFC-Variantbits `10`. `operator` ist exakt ein Sechs-Item-Array; `source`
+ist exakt `[0, sourceId, sourceFormatVersion, null]`, wobei Tag `0` native
+bedeutet.
+
+Fließkommazahlen sind im normativen Payload nicht zulässig. Zeitwerte werden als ganzzahlige Millisekunden seit Unix Epoch plus IANA-Zeitzone serialisiert. Encoder normalisieren Text vor der Kodierung in Unicode NFC; Decoder verlangen bereits NFC-kodierte Bytes fail-closed und verändern den geprüften Payload nicht.
+
+Payload-Zeitzonen werden ausschließlich über die exakten Pins `jiff 0.2.35`
+und `jiff-tzdb 0.1.8` mit einer expliziten gebündelten Datenbank validiert. Der
+von `jiff_tzdb::get` zurückgegebene kanonische Name MUSS bytegleich zur Eingabe
+sein; Case-Varianten und `Etc/Unknown` sind ungültig. Host-Zoneinfo, `TZ` und
+`TZDIR` dürfen die Interpretation nicht beeinflussen.
 
 `source.kind` ist für alle in v0.1 erzeugten Ketteneinträge `native`. Die Provenienz importierter Stammdaten wird innerhalb des jeweiligen Snapshots über Quellen-ID, Importformatversion und Importprotokoll-Hash festgehalten; sie macht den Einsatz selbst nicht zu einem Import. `legacy-access-import` und andere historische Einsatzimportarten sind ungültig. Weitere kontrollierte Eintragsursprünge benötigen später eine neue dokumentierte Schemaversion.
 
@@ -309,7 +334,7 @@ Ein `incident` enthält mindestens:
 
 | Feld | Typ | Regel |
 |---|---|---|
-| `humanIncidentNumber` | String | 1–64 Zeichen, innerhalb Organisation und Kalenderjahr eindeutig |
+| `humanIncidentNumber` | String | 1–64 Zeichen; Eindeutigkeitsbasis ist Organisation, lokales Kalenderjahr des Starts in der Payload-Zeitzone und NFC-UTF-8-Bytes der Nummer |
 | `incidentOccurredAt` | Intervall | Start erforderlich, Ende optional und nicht vor Start |
 | `incidentKeyword` | String/Referenz | 1–128 Zeichen |
 | `location` | Objekt | Freitext oder strukturierte Anschrift; Koordinaten optional |
@@ -322,9 +347,34 @@ Ein `incident` enthält mindestens:
 
 Der deterministisch serialisierte Klartext-Payload darf 1 MiB nicht überschreiten.
 
+Das lokale Kalenderjahr wird aus `incidentOccurredAt.start` in `timezone` mit
+der fest gepinnten tzdb `2026c` abgeleitet. Der spätere Eindeutigkeitsschlüssel
+ist exakt `(operator.organizationId, localCivilYear,
+NFC-UTF8(humanIncidentNumber))`. `finalizedAtDevice`, das UTC-Jahr und ein
+UI-artiges `YYYY-`-Präfix bestimmen die abgeleitete lokale Jahreskomponente
+nicht. Präfix-Stripping, Case-Folding und Locale-Folding finden nicht statt.
+Jede Änderung der NFC-UTF-8-Bytes von `humanIncidentNumber` ändert
+Tupelkomponente 3; dies gilt auch für ein Präfix oder geänderte
+Groß-/Kleinschreibung. Die Grenzwerte
+`1798763400000`/`America/New_York` und
+`1798759800000`/`Europe/Berlin` ergeben 2026 beziehungsweise 2027. Task 7
+leitet den Schlüssel für einen Payload ab; erst Stage 2 erzwingt die
+recordübergreifende Eindeutigkeit unter dem Writer-/Repository-Lock.
+
+Koordinaten sind ausschließlich ganzzahlige E7-Paare. Patientenzählstatus `0`
+bedeutet unknown und verlangt `null`; Status `1` bedeutet known und verlangt
+einen nichtnegativen Integer einschließlich 0. Personen, Fahrzeuge und externe
+Organisationen bewahren die Autorenreihenfolge und werden nicht für die
+deterministische Kodierung sortiert.
+
 ### 8.4 Nachtrag
 
-Ein `amendment` enthält die Einsatznummer des Originals, `originalRecordId`, `originalEntryHash`, `originalSequence`, einen Grund, strukturierten Änderungstext und den Ersteller-Snapshot. Mehrere Nachträge zum selben Original sind erlaubt. Ein Nachtrag ersetzt oder verbirgt das Original nicht.
+Ein `amendment` enthält die Einsatznummer des Originals, `originalRecordId`,
+`originalEntryHash`, `originalSequence`, einen Grund und mindestens einen
+strukturierten Änderungstext. Der gemeinsame `operator`-Snapshot ist der
+Ersteller-Snapshot und wird im Body nicht dupliziert. Mehrere Nachträge zum
+selben Original sind erlaubt. Ein Nachtrag ersetzt oder verbirgt das Original
+nicht.
 
 ### 8.5 Genesis, Writer-Wechsel und Vernichtungsnachweis
 
@@ -332,11 +382,24 @@ Ein `amendment` enthält die Einsatznummer des Originals, `originalRecordId`, `o
 - `keyTransition` referenziert das Root-signierte Trust-Ereignis für den Writer-Wechsel und enthält die organisatorische Begründung verschlüsselt.
 - `destructionEvidence` referenziert Ziel-Hashes, Autorisierung, Umfang, Ausführungsergebnisse, Destroyed Entry Stubs und Löschattestierungen. Es behauptet keine Löschung, die nicht technisch oder organisatorisch bestätigt wurde.
 
+Die exakten festen Body-Positionen, Integer-Tags, Replikastatus-Korrelationen
+und Sortier-/Eindeutigkeitsschlüssel stehen im Payload-Wire-Nachtrag und CDDL.
+Die organisatorische Begründung eines `keyTransition` bleibt verschlüsselt und
+ist keine öffentliche Archivmetadatenposition. Trust, Autorisierungsabdeckung
+und Löschbestätigung werden nicht allein aus diesen Payloadfeldern abgeleitet.
+
 ### 8.6 Stammdaten und Snapshots
 
 Personen und Fahrzeuge werden lokal verwaltet. Jeder Einsatz kopiert die verwendeten Werte als Snapshot in den verschlüsselten Payload. Ein Personen-Snapshot enthält mindestens stabile interne ID, Anzeigename, optionale Rolle/Funktion und Stammdatenversion oder Änderungszeitpunkt. Ein Fahrzeug-Snapshot enthält mindestens stabile interne ID, Bezeichnung, optional Funkrufname/Kennzeichen und Stammdatenversion oder Änderungszeitpunkt. Bei importierten Stammdaten enthält der Snapshot zusätzlich Quellen-ID, Importformatversion und Importprotokoll-Hash. Spätere Stammdatenänderungen dürfen alte Einträge nicht beeinflussen.
 
 Ist ein benötigter Wert nicht in den Stammdaten vorhanden, darf er als eindeutig gekennzeichneter Ad-hoc-Freitext-Snapshot erfasst werden. Ein solcher Snapshot erzeugt keinen Stammdatensatz, wird in der Prüfansicht hervorgehoben und bleibt unverändert Teil dieses Einsatzes.
+
+Auf dem Wire verwenden Master-Snapshots Tag `0` mit stabiler ID,
+Anzeige-/Funktionswerten, Revision (`[0,uint]` oder `[1,int]`) und optionaler
+Importprovenienz `[sourceId, sourceFormatVersion, importProtocolHash]`.
+Ad-hoc-Snapshots verwenden Tag `1` und besitzen keine erfundene Master-ID oder
+Revision. Die genauen Personen-/Fahrzeugpositionen sind im Payload-Wire-Nachtrag
+geschlossen.
 
 Der CSV-Import akzeptiert ausschließlich UTF-8-Dateien mit dokumentiertem Header:
 
@@ -761,6 +824,13 @@ Es gelten folgende Regeln:
 - `extensionData` ist nur in registrierten, versionierten Namespaces zulässig; unbekannte kritische Namespaces blockieren die Darstellung.
 - Reader und Recovery-CLI unterstützen alle noch freigegebenen Schema- und Krypto-Suites parallel. Ist eine gebundene Suite nicht implementiert oder gesperrt, endet die Verarbeitung vor Entschlüsselung mit einem eindeutigen Unsupported-Fehler.
 - Eine versionierte Kompatibilitätsmatrix nennt für jedes Release lesbare Schemata, Suites, Transformationspfade und den sicheren Fehlerzustand. Entfernen alter Unterstützung ist eine explizite Format-/Betriebsentscheidung und kein stilles Update.
+
+Der Schema-Gate unterscheidet zwei Profile. Deterministische Report-Schemas
+müssen zusätzlich zu geschlossenen Objektdefinitionen maschinenlesbare
+Sortier-/Eindeutigkeitsverträge für jedes Array tragen. Payload-Projektionen
+bleiben ebenfalls rekursiv geschlossen, dürfen aber Autorenreihenfolge-Arrays
+ohne solchen Sortiervertrag enthalten. Diese Profiltrennung ändert weder die
+CBOR-Byte-Autorität noch historische Bytes.
 
 ## 11. Archivobjekte und Parser
 

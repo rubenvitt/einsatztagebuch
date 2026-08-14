@@ -2419,6 +2419,7 @@ version = "0.1.0"
 dependencies = [
  "cddl",
  "cddl-cat",
+ "ea-cbor",
  "jsonschema",
  "minicbor",
  "serde_json",

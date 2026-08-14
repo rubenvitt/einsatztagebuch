@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
-    env, fs, io,
+    env, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::{self, Command},
 };
@@ -259,15 +260,42 @@ fn validate_cddl_syntax(name: &str, input: &str) -> Result<(), String> {
         .map_err(|error| format!("invalid CDDL {name}: {error}"))
 }
 
-fn compile_json_schema(name: &str, input: &str) -> Result<jsonschema::Validator, String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JsonSchemaProfile {
+    DeterministicReport,
+    PayloadProjection,
+}
+
+fn json_schema_profile(relative: &str) -> Result<JsonSchemaProfile, String> {
+    if relative.starts_with("schemas/reports/") {
+        Ok(JsonSchemaProfile::DeterministicReport)
+    } else if relative.starts_with("schemas/payload/") {
+        Ok(JsonSchemaProfile::PayloadProjection)
+    } else {
+        Err(format!("JSON schema {relative} has no declared profile"))
+    }
+}
+
+fn compile_json_schema_for_profile(
+    name: &str,
+    input: &str,
+    profile: JsonSchemaProfile,
+) -> Result<jsonschema::Validator, String> {
     let schema: serde_json::Value = serde_json::from_str(input)
         .map_err(|error| format!("invalid JSON schema {name}: {error}"))?;
     jsonschema::meta::validate(&schema)
         .map_err(|error| format!("invalid JSON schema {name}: {error}"))?;
     require_closed_object_schemas(name, &schema, "#")?;
-    require_canonical_array_contracts(name, &schema, "#")?;
+    if profile == JsonSchemaProfile::DeterministicReport {
+        require_canonical_array_contracts(name, &schema, "#")?;
+    }
     jsonschema::validator_for(&schema)
         .map_err(|error| format!("failed to compile JSON schema {name}: {error}"))
+}
+
+#[cfg(test)]
+fn compile_json_schema(name: &str, input: &str) -> Result<jsonschema::Validator, String> {
+    compile_json_schema_for_profile(name, input, JsonSchemaProfile::DeterministicReport)
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -432,8 +460,17 @@ fn require_canonical_array_contracts(
     Ok(())
 }
 
+fn validate_json_schema_document_for_profile(
+    name: &str,
+    input: &str,
+    profile: JsonSchemaProfile,
+) -> Result<(), String> {
+    compile_json_schema_for_profile(name, input, profile).map(|_| ())
+}
+
+#[cfg(test)]
 fn validate_json_schema_document(name: &str, input: &str) -> Result<(), String> {
-    compile_json_schema(name, input).map(|_| ())
+    validate_json_schema_document_for_profile(name, input, JsonSchemaProfile::DeterministicReport)
 }
 
 fn validate_addendum_review(input: &str) -> Result<(), String> {
@@ -509,6 +546,67 @@ fn require_closed_object_schemas(
     Ok(())
 }
 
+fn decode_lower_hex_vector(relative: &str, input: &str) -> Result<Vec<u8>, String> {
+    let hex = input
+        .strip_suffix('\n')
+        .ok_or_else(|| format!("payload vector {relative} must end in exactly one newline"))?;
+    if hex.is_empty()
+        || !hex.len().is_multiple_of(2)
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "payload vector {relative} must contain nonempty lowercase hexadecimal octets"
+        ));
+    }
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Ok(byte - b'0'),
+                b'a'..=b'f' => Ok(byte - b'a' + 10),
+                _ => Err(format!("payload vector {relative} contains invalid hex")),
+            };
+            Ok((digit(pair[0])? << 4) | digit(pair[1])?)
+        })
+        .collect()
+}
+
+const MAX_PLAINTEXT_BYTES_V1: usize = 1_048_576;
+const MAX_PAYLOAD_VECTOR_TEXT_BYTES_V1: usize = 2 * MAX_PLAINTEXT_BYTES_V1 + 1;
+
+fn validate_payload_vector_file(
+    path: &Path,
+    relative: &str,
+    root: &str,
+    cddl: &str,
+) -> Result<(), String> {
+    let file =
+        fs::File::open(path).map_err(|error| format!("failed to read {relative}: {error}"))?;
+    let mut source = Vec::with_capacity(MAX_PAYLOAD_VECTOR_TEXT_BYTES_V1 + 1);
+    file.take((MAX_PAYLOAD_VECTOR_TEXT_BYTES_V1 + 1) as u64)
+        .read_to_end(&mut source)
+        .map_err(|error| format!("failed to read {relative}: {error}"))?;
+    if source.len() > MAX_PAYLOAD_VECTOR_TEXT_BYTES_V1 {
+        return Err(format!(
+            "payload vector {relative} exceeds MAX_PAYLOAD_VECTOR_TEXT_BYTES_V1 = {MAX_PAYLOAD_VECTOR_TEXT_BYTES_V1}"
+        ));
+    }
+    let input = std::str::from_utf8(&source)
+        .map_err(|error| format!("payload vector {relative} is not UTF-8: {error}"))?;
+    let bytes = decode_lower_hex_vector(relative, input)?;
+    if bytes.len() > MAX_PLAINTEXT_BYTES_V1 {
+        return Err(format!(
+            "payload vector {relative} exceeds MAX_PLAINTEXT_BYTES_V1"
+        ));
+    }
+    ea_cbor::validate(&bytes, ea_cbor::ParserLimits::V1)
+        .map_err(|error| format!("payload vector {relative} is not canonical: {error}"))?;
+    cddl_cat::validate_cbor_bytes(root, cddl, &bytes)
+        .map_err(|error| format!("payload vector {relative} violates {root}: {error:?}"))
+}
+
 fn validate_schemas(root: &Path) -> Result<(), String> {
     let archive_paths = [
         "schemas/archive/v1/archive.cddl",
@@ -541,6 +639,24 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to read {audit_path}: {error}"))?;
     validate_cddl_document(audit_path, &audit)?;
 
+    let payload_path = "schemas/payload/v1/payload.cddl";
+    let payload = fs::read_to_string(root.join(payload_path))
+        .map_err(|error| format!("failed to read {payload_path}: {error}"))?;
+    validate_cddl_document(payload_path, &payload)?;
+    for (file, cddl_root) in [
+        ("genesis.hex", "genesis-payload-v1"),
+        ("incident.hex", "incident-payload-v1"),
+        ("amendment.hex", "amendment-payload-v1"),
+        ("key-transition.hex", "key-transition-payload-v1"),
+        (
+            "destruction-evidence.hex",
+            "destruction-evidence-payload-v1",
+        ),
+    ] {
+        let relative = format!("vectors/format/payload-v1/{file}");
+        validate_payload_vector_file(&root.join(&relative), &relative, cddl_root, &payload)?;
+    }
+
     for relative in [
         "schemas/reports/v1/verification-report.schema.json",
         "schemas/reports/v1/key-inventory.schema.json",
@@ -548,14 +664,18 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
         let path = root.join(relative);
         let input = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        validate_json_schema_document(relative, &input)?;
+        validate_json_schema_document_for_profile(
+            relative,
+            &input,
+            json_schema_profile(relative)?,
+        )?;
     }
     let addendum_path =
         root.join("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md");
     let addendum = fs::read_to_string(&addendum_path)
         .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
     validate_addendum_review(&addendum)?;
-    println!("validated 6 CDDL and 2 JSON schemas");
+    println!("validated 7 CDDL, 2 JSON schemas, and 5 payload vectors");
     Ok(())
 }
 
@@ -617,6 +737,70 @@ mod tests {
     }
 
     #[test]
+    fn payload_vector_file_reader_caps_source_before_hex_decode() {
+        const MAX_PLAINTEXT_BYTES_V1: usize = 1_048_576;
+        const MAX_TEXT_BYTES_V1: usize = 2 * MAX_PLAINTEXT_BYTES_V1 + 1;
+
+        struct TempDir(std::path::PathBuf);
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = TempDir(std::env::temp_dir().join(format!(
+            "einsatzarchiv-payload-vector-cap-{}-{nonce}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+
+        // A canonical CBOR byte string with a five-byte header and 1,048,571
+        // content bytes occupies exactly MAX_PLAINTEXT_BYTES_V1 bytes.
+        let mut cbor = vec![0x5a, 0x00, 0x0f, 0xff, 0xfb];
+        cbor.resize(MAX_PLAINTEXT_BYTES_V1, 0);
+        let mut source = Vec::with_capacity(MAX_TEXT_BYTES_V1);
+        for byte in cbor {
+            source.push(b"0123456789abcdef"[(byte >> 4) as usize]);
+            source.push(b"0123456789abcdef"[(byte & 0x0f) as usize]);
+        }
+        source.push(b'\n');
+        assert_eq!(source.len(), MAX_TEXT_BYTES_V1);
+
+        let exact_path = directory.0.join("exact.hex");
+        std::fs::write(&exact_path, &source).unwrap();
+        super::validate_payload_vector_file(
+            &exact_path,
+            "exact.hex",
+            "payload-test-v1",
+            "payload-test-v1 = bstr",
+        )
+        .expect("the exact maximum lowercase-hex source plus one LF must validate");
+
+        source.pop();
+        source.push(b'0');
+        source.push(b'\n');
+        assert_eq!(source.len(), MAX_TEXT_BYTES_V1 + 1);
+        let over_path = directory.0.join("over.hex");
+        std::fs::write(&over_path, &source).unwrap();
+        let error = super::validate_payload_vector_file(
+            &over_path,
+            "over.hex",
+            "payload-test-v1",
+            "payload-test-v1 = bstr",
+        )
+        .expect_err("one extra source character must fail before hex decoding");
+        assert_eq!(
+            error,
+            "payload vector over.hex exceeds MAX_PAYLOAD_VECTOR_TEXT_BYTES_V1 = 2097153"
+        );
+    }
+
+    #[test]
     fn schema_validation_rejects_malformed_json_schema() {
         let error = super::validate_json_schema_document("broken.schema.json", "{")
             .expect_err("malformed JSON Schema must fail closed");
@@ -637,6 +821,49 @@ mod tests {
 
         let validator = super::compile_json_schema("example.schema.json", schema).unwrap();
         assert!(!validator.is_valid(&instance));
+    }
+
+    #[test]
+    fn payload_projection_accepts_an_ordered_array_without_report_sort_extensions() {
+        let schema = r#"{
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "personnel": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"displayName": {"type": "string"}},
+                        "required": ["displayName"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["personnel"],
+            "additionalProperties": false
+        }"#;
+        let instance = serde_json::json!({
+            "personnel": [
+                {"displayName": "Zulu"},
+                {"displayName": "Alpha"}
+            ]
+        });
+
+        let validator = super::compile_json_schema_for_profile(
+            "payload-projection.schema.json",
+            schema,
+            super::JsonSchemaProfile::PayloadProjection,
+        )
+        .expect("payload projection arrays preserve authoring order without report extensions");
+        assert!(validator.is_valid(&instance));
+
+        let report_error = super::compile_json_schema_for_profile(
+            "deterministic-report.schema.json",
+            schema,
+            super::JsonSchemaProfile::DeterministicReport,
+        )
+        .expect_err("the same array must still fail the deterministic-report profile");
+        assert!(report_error.contains("lacks x-ea-sort-key"));
     }
 
     #[test]

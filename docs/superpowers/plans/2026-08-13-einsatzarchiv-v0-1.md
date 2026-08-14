@@ -25,6 +25,11 @@
 - Der Sync-Server besitzt keine privaten Schlüssel zur Entschlüsselung von Einsätzen oder Erzeugung gültiger Grants.
 - Das lokale Archiv ist ohne Server und ohne mutable Statusdatenbank verifizierbar.
 - Schema-, Format- und Krypto-Version werden unabhängig geführt; alte Objekte bleiben byteidentisch.
+- Die fünf v1-Payloads verwenden ausschließlich die im Payload-Wire-Nachtrag
+  und `schemas/payload/v1/payload.cddl` geschlossenen 11-Positionen-CBOR-Arrays.
+  Zeitzonen werden mit `jiff 0.2.35`, `jiff-tzdb 0.1.8` und eingebetteter IANA
+  tzdb `2026c` reproduzierbar validiert; normale Autorenlisten bleiben geordnet
+  wie erfasst und werden nicht als Report-Sets behandelt.
 - Sync-, Verifikations-, Evidence-, Eintrags- und Vernichtungsprozessstatus werden getrennt dargestellt.
 - Eine Hash-Kette allein wird nicht als rechtliche oder organisatorische Revisionssicherheit beworben.
 - Jeder zur gebundenen Registry-Version aktive Reader erhält vor dem Commit genau einen initialen Grant.
@@ -256,6 +261,15 @@ budgets; `ea-format` owns family raw-byte and semantic limits.
 ## Specification Closure Before Wire Implementation
 
 The approved design fixes `.eip`, `.eag`, and `.esr` in sufficient positional detail, but leaves complete positional CDDL unspecified for several `.ecp`, `.eds`, `.etb`, sync cursor, destruction-report, key-inventory, and JSON-report payloads. Stage 1 Task 2 must add a normative design addendum and golden byte fixtures before implementing those encoders. The addendum must preserve the design's already fixed fields and supply exact array positions, integer tags, sorting, optionality, size limits, signature input, and unknown-field behavior. No implementer may infer a private wire representation inside production code.
+
+Before Stage 1 Task 7 implementation, the normative payload correction closes
+all five plaintext families in
+`docs/superpowers/specs/2026-08-14-einsatzarchiv-v0-1-payload-wire-addendum.md`,
+`schemas/payload/v1/payload.cddl`, and five literal hex fixtures. It also fixes
+the canonical bundled-timezone route and the later uniqueness-key year basis.
+Task 7 consumes those committed bytes and rules; it does not invent a JSON or
+Rust wire, and Stage 2 alone enforces cross-record incident-number uniqueness
+under the Writer/repository lock.
 
 Tool and dependency versions not fixed by the design are selected once in Stage 1 Task 1 using current compatibility and security evidence, then written as exact pins to `rust-toolchain.toml`, workspace manifests, `packageManager`, lockfiles, the OCI base digest, and an ADR. Later plans consume those committed pins and do not silently update them.
 
