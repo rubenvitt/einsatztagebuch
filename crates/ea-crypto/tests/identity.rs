@@ -256,6 +256,10 @@ fn trust_digest_input(subtype: &str, payload: &[u8]) -> Vec<u8> {
 }
 
 fn device_certificate_core() -> Vec<u8> {
+    device_certificate_core_with_kind(0)
+}
+
+fn device_certificate_core_with_kind(kind: u8) -> Vec<u8> {
     let key = fixture_public_key();
     let key_bytes = key.to_deterministic_cbor();
     let mut bytes = Vec::new();
@@ -264,7 +268,7 @@ fn device_certificate_core() -> Vec<u8> {
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x22; 16]))
-        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u8(kind))
         .and_then(|encoder| encoder.bytes(&key_bytes))
         .and_then(|encoder| encoder.null())
         .and_then(|encoder| encoder.bytes(key.thumbprint().as_bytes()))
@@ -276,6 +280,26 @@ fn device_certificate_core() -> Vec<u8> {
         .and_then(|encoder| encoder.array(0))
         .unwrap();
     bytes
+}
+
+fn root_authorized_device_certificate_input(kind: u8, action: u8) -> (Vec<u8>, Vec<u8>) {
+    let core = device_certificate_core_with_kind(kind);
+    let authorized_input = trust_digest_input("deviceCertificate", &core);
+    let authorization = organization_admin_authorization_object_with_action(
+        action,
+        "deviceCertificate",
+        authorized_trust_digest(&authorized_input).as_bytes(),
+    );
+    let mut payload = Vec::new();
+    Encoder::new(&mut payload).array(2).unwrap();
+    payload.extend_from_slice(&core);
+    Encoder::new(&mut payload)
+        .bytes(object_hash(&authorization).as_bytes())
+        .unwrap();
+    (
+        trust_digest_input("deviceCertificate", &payload),
+        authorization,
+    )
 }
 
 fn grant_authorization_core() -> Vec<u8> {
@@ -462,7 +486,7 @@ fn writer_transition_core() -> Vec<u8> {
     bytes
 }
 
-fn root_rotation_core() -> Vec<u8> {
+fn root_rotation_core(previous_root_certificate_hash: CertificateHash) -> Vec<u8> {
     let key = fixture_public_key();
     let mut bytes = Vec::new();
     Encoder::new(&mut bytes)
@@ -471,7 +495,7 @@ fn root_rotation_core() -> Vec<u8> {
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
         .and_then(|encoder| encoder.bytes(&key.to_deterministic_cbor()))
         .and_then(|encoder| encoder.bytes(key.thumbprint().as_bytes()))
-        .and_then(|encoder| encoder.bytes(&[0xb9; 32]))
+        .and_then(|encoder| encoder.bytes(previous_root_certificate_hash.as_bytes()))
         .and_then(|encoder| encoder.u8(4))
         .and_then(|encoder| encoder.array(0))
         .unwrap();
@@ -1102,6 +1126,62 @@ fn accepted_root_context_supports_only_hash_correlated_authorized_device_certifi
 }
 
 #[test]
+fn device_approve_accepts_writer_and_rejects_organization_admin_certificate() {
+    for (kind, accepted) in [(0, true), (2, false)] {
+        let (input, authorization) = root_authorized_device_certificate_input(kind, 0);
+        let result = VerificationContext::root_trust_digest(
+            &input,
+            fixture_certificate_hash(),
+            Some(&authorization),
+        );
+        if accepted {
+            assert!(
+                result.is_ok(),
+                "deviceApprove must accept a Writer certificate"
+            );
+        } else {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("deviceApprove accepted an OrganizationAdmin certificate"),
+            };
+            assert_eq!(
+                error.code(),
+                "EA-CRYPTO-INVALID-PROTOCOL-CORE",
+                "deviceApprove must reject an OrganizationAdmin certificate",
+            );
+        }
+    }
+}
+
+#[test]
+fn admin_key_change_accepts_organization_admin_and_rejects_writer_certificate() {
+    for (kind, accepted) in [(2, true), (0, false)] {
+        let (input, authorization) = root_authorized_device_certificate_input(kind, 5);
+        let result = VerificationContext::root_trust_digest(
+            &input,
+            fixture_certificate_hash(),
+            Some(&authorization),
+        );
+        if accepted {
+            assert!(
+                result.is_ok(),
+                "adminKeyChange must accept an OrganizationAdmin certificate"
+            );
+        } else {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("adminKeyChange accepted a Writer certificate"),
+            };
+            assert_eq!(
+                error.code(),
+                "EA-CRYPTO-INVALID-PROTOCOL-CORE",
+                "adminKeyChange must reject a Writer certificate",
+            );
+        }
+    }
+}
+
+#[test]
 fn accepted_root_context_parses_each_authorized_sequence_bearing_subtype() {
     for (subtype, core) in [
         ("operatorBinding", operator_binding_core()),
@@ -1133,28 +1213,50 @@ fn accepted_root_context_parses_each_authorized_sequence_bearing_subtype() {
 }
 
 #[test]
-fn accepted_root_rotation_derives_registry_without_caller_supplied_sequence() {
-    let core = root_rotation_core();
-    let authorized_input = trust_digest_input("rootCertificate", &core);
-    let authorization = organization_admin_authorization_object(
-        "rootCertificate",
-        authorized_trust_digest(&authorized_input).as_bytes(),
-    );
-    let mut payload = Vec::new();
-    Encoder::new(&mut payload).array(2).unwrap();
-    payload.extend_from_slice(&core);
-    Encoder::new(&mut payload)
-        .bytes(object_hash(&authorization).as_bytes())
-        .unwrap();
-    let input = trust_digest_input("rootCertificate", &payload);
-    assert!(
-        VerificationContext::root_trust_digest(
-            &input,
-            fixture_certificate_hash(),
-            Some(&authorization),
-        )
-        .is_ok()
-    );
+fn root_rotation_binds_declared_predecessor_to_signing_certificate_hash() {
+    let signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let signing_certificate_hash = fixture_certificate_hash();
+
+    for (previous_root_certificate_hash, accepted) in [
+        (signing_certificate_hash, true),
+        (
+            CertificateHash::from(object_hash(b"unrelated previous root certificate")),
+            false,
+        ),
+    ] {
+        let core = root_rotation_core(previous_root_certificate_hash);
+        let authorized_input = trust_digest_input("rootCertificate", &core);
+        let authorization = organization_admin_authorization_object(
+            "rootCertificate",
+            authorized_trust_digest(&authorized_input).as_bytes(),
+        );
+        let mut payload = Vec::new();
+        Encoder::new(&mut payload).array(2).unwrap();
+        payload.extend_from_slice(&core);
+        Encoder::new(&mut payload)
+            .bytes(object_hash(&authorization).as_bytes())
+            .unwrap();
+        let input = trust_digest_input("rootCertificate", &payload);
+
+        assert_eq!(
+            signer
+                .sign_root_trust_digest(signing_certificate_hash, &input, Some(&authorization),)
+                .is_ok(),
+            accepted,
+            "signing must bind the declared predecessor to the protected certificate hash",
+        );
+        assert_eq!(
+            VerificationContext::root_trust_digest(
+                &input,
+                signing_certificate_hash,
+                Some(&authorization),
+            )
+            .is_ok(),
+            accepted,
+            "verification must bind the declared predecessor to the protected certificate hash",
+        );
+    }
 }
 
 #[test]

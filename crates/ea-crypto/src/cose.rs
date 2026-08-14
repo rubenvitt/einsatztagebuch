@@ -383,8 +383,11 @@ impl CoseSigner {
         exact_trust_digest_input: &[u8],
         exact_admin_authorization_object: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
-        let bindings =
-            root_trust_bindings(exact_trust_digest_input, exact_admin_authorization_object)?;
+        let bindings = root_trust_bindings(
+            exact_trust_digest_input,
+            certificate_hash,
+            exact_admin_authorization_object,
+        )?;
         self.sign_normal(
             ContentType::TrustDigest,
             certificate_hash,
@@ -895,8 +898,11 @@ impl VerificationContext {
         root_certificate_hash: CertificateHash,
         exact_admin_authorization_object: Option<&[u8]>,
     ) -> Result<Self, CryptoError> {
-        let bindings =
-            root_trust_bindings(exact_trust_digest_input, exact_admin_authorization_object)?;
+        let bindings = root_trust_bindings(
+            exact_trust_digest_input,
+            root_certificate_hash,
+            exact_admin_authorization_object,
+        )?;
         Ok(match bindings.sequence {
             Some(sequence) => Self::digest(
                 ContentType::TrustDigest,
@@ -2042,6 +2048,7 @@ struct RootTrustBindings {
 
 fn root_trust_bindings(
     exact_trust_digest_input: &[u8],
+    root_certificate_hash: CertificateHash,
     exact_admin_authorization_object: Option<&[u8]>,
 ) -> Result<RootTrustBindings, CryptoError> {
     validate(exact_trust_digest_input, ParserLimits::V1)
@@ -2066,7 +2073,14 @@ fn root_trust_bindings(
         return Err(CryptoError::InvalidProtocolCore);
     }
     let core_start = decoder.position();
-    let (organization_id, sequence, core_registry, registry_change_kind) = match subtype {
+    let (
+        organization_id,
+        sequence,
+        core_registry,
+        registry_change_kind,
+        previous_root_certificate_hash,
+        device_certificate_role,
+    ) = match subtype {
         "registryEvent" => {
             let (organization_id, sequence, registry, change_kind) =
                 parse_registry_event_core(&mut decoder)?;
@@ -2075,6 +2089,8 @@ fn root_trust_bindings(
                 Some(sequence),
                 Some(registry),
                 Some(change_kind),
+                None,
+                None,
             )
         }
         "deviceCertificate" => {
@@ -2085,23 +2101,33 @@ fn root_trust_bindings(
                 Some(certificate.effective_from_sequence),
                 None,
                 None,
+                None,
+                Some(certificate.role),
             )
         }
         "operatorBinding" => {
             let (organization_id, sequence) = parse_operator_binding_core(&mut decoder)?;
-            (organization_id, Some(sequence), None, None)
+            (organization_id, Some(sequence), None, None, None, None)
         }
         "policy" => {
             let (organization_id, sequence) = parse_policy_core(&mut decoder)?;
-            (organization_id, Some(sequence), None, None)
+            (organization_id, Some(sequence), None, None, None, None)
         }
         "writerTransition" => {
             let (organization_id, sequence) = parse_writer_transition_core(&mut decoder)?;
-            (organization_id, Some(sequence), None, None)
+            (organization_id, Some(sequence), None, None, None, None)
         }
         "rootCertificate" => {
-            let organization_id = parse_root_rotation_core(&mut decoder)?;
-            (organization_id, None, None, None)
+            let (organization_id, previous_root_certificate_hash) =
+                parse_root_rotation_core(&mut decoder)?;
+            (
+                organization_id,
+                None,
+                None,
+                None,
+                Some(previous_root_certificate_hash),
+                None,
+            )
         }
         _ => return Err(CryptoError::InvalidProtocolCore),
     };
@@ -2128,6 +2154,10 @@ fn root_trust_bindings(
             != *crate::authorized_trust_digest(&authorized_input).as_bytes()
         || authorization_bindings.organization_id != organization_id
         || core_registry.is_some_and(|registry| authorization_bindings.registry != registry)
+        || previous_root_certificate_hash.is_some_and(|previous| previous != root_certificate_hash)
+        || device_certificate_role.is_some_and(|role| {
+            !admin_action_permits_device_certificate(authorization_bindings.action, role)
+        })
         || registry_change_kind.is_some_and(|change_kind| {
             !admin_action_permits_registry_change(authorization_bindings.action, change_kind)
         })
@@ -2155,6 +2185,14 @@ fn admin_action_permits_registry_change(action: u64, change_kind: u64) -> bool {
         (action, change_kind),
         (0, 0) | (1, 1) | (2, 2) | (3, 3) | (5, 5)
     )
+}
+
+fn admin_action_permits_device_certificate(action: u64, role: SignerRole) -> bool {
+    match action {
+        0 => role != SignerRole::OrganizationAdmin,
+        5 => role == SignerRole::OrganizationAdmin,
+        _ => false,
+    }
 }
 
 fn admin_action_permits_target(action: u64, target_subtype: &str) -> bool {
@@ -2347,7 +2385,9 @@ fn parse_operator_binding_core(
     Ok((organization_id, sequence))
 }
 
-fn parse_root_rotation_core(decoder: &mut Decoder<'_>) -> Result<OrganizationId, CryptoError> {
+fn parse_root_rotation_core(
+    decoder: &mut Decoder<'_>,
+) -> Result<(OrganizationId, CertificateHash), CryptoError> {
     if protocol_array_length(decoder)? != 7 || decoder.u64().ok() != Some(1) {
         return Err(CryptoError::InvalidProtocolCore);
     }
@@ -2366,14 +2406,15 @@ fn parse_root_rotation_core(decoder: &mut Decoder<'_>) -> Result<OrganizationId,
     if thumbprint != public_key.thumbprint() {
         return Err(CryptoError::InvalidProtocolCore);
     }
-    protocol_bstr(decoder, 32)?;
+    let previous_root_certificate_hash = CertificateHash::try_from(protocol_bstr(decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
     decoder
         .u64()
         .map_err(|_| CryptoError::InvalidProtocolCore)?;
     if protocol_array_length(decoder)? != 0 {
         return Err(CryptoError::InvalidProtocolCore);
     }
-    Ok(organization_id)
+    Ok((organization_id, previous_root_certificate_hash))
 }
 
 fn parse_writer_transition_core(
