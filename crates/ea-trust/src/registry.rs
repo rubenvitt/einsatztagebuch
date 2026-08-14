@@ -48,6 +48,7 @@ struct SelectedHeadInner {
     policy: ResolvedPolicy,
     effective_from_sequence: ChainSequence,
     valid_through_sequence: ChainSequence,
+    proposed_sequence: ChainSequence,
     preexisting_effective_now: PreexistingEffectiveNow,
     warnings: TimeWarnings,
     committed_revision: u64,
@@ -97,6 +98,39 @@ impl SelectedRegistryHead {
     }
 
     #[must_use]
+    pub fn proposed_sequence(&self) -> ChainSequence {
+        self.inner.proposed_sequence
+    }
+
+    #[must_use]
+    pub fn active_certificate_fields(
+        &self,
+        certificate_hash: CertificateHash,
+    ) -> Option<&DeviceCertificateFieldsV1> {
+        self.inner
+            .candidate_state
+            .active_certificate(certificate_hash, self.inner.proposed_sequence)
+            .map(|certificate| &certificate.fields)
+    }
+
+    #[must_use]
+    pub fn active_capabilities(&self, certificate_hash: CertificateHash) -> Option<&[String]> {
+        self.active_certificate_fields(certificate_hash)
+            .map(|certificate| certificate.capabilities.as_slice())
+    }
+
+    #[must_use]
+    pub fn active_operator_binding_fields(
+        &self,
+        object_hash: ObjectHash,
+    ) -> Option<&OperatorBindingFieldsV1> {
+        self.inner
+            .candidate_state
+            .active_operator_binding(object_hash, self.inner.proposed_sequence)
+            .map(|binding| &binding.fields)
+    }
+
+    #[must_use]
     pub fn preexisting_effective_now(&self) -> &PreexistingEffectiveNow {
         &self.inner.preexisting_effective_now
     }
@@ -104,6 +138,10 @@ impl SelectedRegistryHead {
     #[must_use]
     pub fn warnings(&self) -> &TimeWarnings {
         &self.inner.warnings
+    }
+
+    pub(crate) fn candidate_state(&self) -> &PreviousHeadState {
+        &self.inner.candidate_state
     }
 }
 
@@ -736,6 +774,7 @@ fn selected_head(
             policy: candidate.target_policy,
             effective_from_sequence: candidate.head_event.effective_from_sequence,
             valid_through_sequence: candidate.head_event.valid_through_sequence,
+            proposed_sequence: candidate.proposed_sequence,
             preexisting_effective_now: PreexistingEffectiveNow { value: raw_now },
             warnings,
             committed_revision,

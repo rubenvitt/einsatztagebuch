@@ -1535,15 +1535,37 @@ rtk git commit -m "feat(trust): select and pin registry heads atomically"
 ### Task 12: Close downstream resolver and proof-state boundaries
 
 **Files:**
+- Modify: `Cargo.lock`
 - Modify: `crates/ea-trust/src/resolver.rs`
+- Modify: `crates/ea-trust/src/registry.rs`
+- Modify: `crates/ea-trust/src/registry/tests.rs`
 - Modify: `crates/ea-trust/src/lib.rs`
 - Create: `crates/ea-trust/tests/public_api.rs`
+- Modify: `crates/ea-trust/tests/support/mod.rs`
 - Modify: `tests/ea-system-tests/Cargo.toml`
 - Create: `tests/ea-system-tests/tests/task8_trust_time.rs`
+- Modify: `docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md`
 
 - [ ] **Step 1: Add external public-API REDs**
 
 From integration crates, prove a `SelectedRegistryHead` can resolve active Writer/Reader/Admin/Server/Deletion certificates for `ea-crypto`, query active Policy/capability/Binding read-only, and cannot expose mutation APIs or raw authority construction. Prove an `AdvancedRegistryHead` exposes only committed version/hash/revision and cannot resolve any certificate, Policy, Binding, role, capability, or operation authority.
+
+`SelectedRegistryHead` retains the exact candidate `proposed_sequence` and
+exposes it through `proposed_sequence()`. It implements
+`ea_crypto::SignerCertificateResolver` directly. Resolution and the immutable
+`active_certificate_fields`, `active_capabilities`, and
+`active_operator_binding_fields` views are filtered at exactly that selected
+sequence with `effective <= proposed_sequence < revoked`. The Resolver may
+return every validated Device certificate kind plus the current Root, but only
+the singular current Writer. It clips every returned certificate's Registry
+lifetime to `[proposed_sequence, proposed_sequence + 1)`; at the maximum chain
+sequence the upper bound is `None` without overflow. A Binding is visible only
+when it and its linked certificate are active and its Writer, Reader, or
+OrganizationAdmin role correlates exactly with the certificate kind. Existing
+Policy getters continue to expose only the selected candidate's target Policy.
+No candidate, preexisting authority, pending outcome, or advanced outcome is a
+Resolver or exposes these authority views; `AdvancedRegistryHead` remains the
+three-scalar, non-authoritative diagnostic proof.
 
 - [ ] **Step 2: Add compile-fail proof barriers**
 
@@ -1551,7 +1573,8 @@ Cover every opaque type named in Global Constraints. Raw hashes/times/roles/capa
 
 - [ ] **Step 3: Add the end-to-end Task-8 system fixture**
 
-In `task8_trust_time.rs`, use exact Anchor + ETBs + Receipt/Checkpoint + model store to execute:
+In `task8_trust_time.rs`, use an exact Anchor + ETBs + real Receipt and
+Checkpoint proofs + model store to execute:
 
 ```text
 Bootstrap -> Head 1 Policy
@@ -1571,7 +1594,13 @@ only the direct singular successor, prepare time, select, and commit before
 attempting the next transition. The fixture must never batch later Heads behind
 an unselected predecessor.
 
-Add one-byte mutations to Anchor, Admin authorization, direct target, activation event, signed time, and Clock Release. Assert exact error families and unchanged persistent state at each failure boundary.
+Add one-byte mutations to Anchor, Admin authorization, direct target,
+activation event, signed time, and Clock Release. Recompute each downstream
+hash/reference around the mutated Admin authorization, direct target, and event
+so those cases reach their signature boundary rather than a missing-object
+lookup. Assert exact error families and unchanged persistent state at each
+failure boundary; a failed Release preserves the already committed signed-time
+reference and floor.
 
 - [ ] **Step 4: Run focused GREEN**
 
@@ -1584,9 +1613,13 @@ rtk cargo test --locked -p ea-system-tests --test task8_trust_time
 - [ ] **Step 5: Commit proof/API closure**
 
 ```bash
-rtk git add -- crates/ea-trust/src/resolver.rs crates/ea-trust/src/lib.rs \
-  crates/ea-trust/tests/public_api.rs tests/ea-system-tests/Cargo.toml \
-  tests/ea-system-tests/tests/task8_trust_time.rs
+rtk git add -- Cargo.lock crates/ea-trust/src/resolver.rs \
+  crates/ea-trust/src/registry.rs crates/ea-trust/src/registry/tests.rs \
+  crates/ea-trust/src/lib.rs \
+  crates/ea-trust/tests/public_api.rs crates/ea-trust/tests/support/mod.rs \
+  tests/ea-system-tests/Cargo.toml \
+  tests/ea-system-tests/tests/task8_trust_time.rs \
+  docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md
 rtk git diff --cached --check
 rtk git commit -m "test(core): close Task 8 trust time attacks"
 ```

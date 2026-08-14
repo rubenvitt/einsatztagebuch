@@ -112,6 +112,99 @@ impl PreviousHeadState {
         self.writer_transition_object_hash = Some(transition_object_hash);
         true
     }
+
+    pub(crate) fn active_certificate(
+        &self,
+        certificate_hash: CertificateHash,
+        at_sequence: ChainSequence,
+    ) -> Option<&ActiveCertificate> {
+        let certificate = self.certificates.get(&certificate_hash)?;
+        if certificate.fields.effective_from_sequence > at_sequence
+            || certificate
+                .fields
+                .revoked_from_sequence
+                .is_some_and(|revoked| at_sequence >= revoked)
+            || (certificate.fields.certificate_kind == CertificateKindV1::Writer
+                && self.current_writer_certificate_hash != Some(certificate_hash))
+        {
+            return None;
+        }
+        Some(certificate)
+    }
+
+    pub(crate) fn active_operator_binding(
+        &self,
+        object_hash: ObjectHash,
+        at_sequence: ChainSequence,
+    ) -> Option<&ActiveOperatorBinding> {
+        let binding = self.admin_bindings.get(&object_hash)?;
+        if binding.fields.effective_from_sequence > at_sequence
+            || binding
+                .fields
+                .revoked_from_sequence
+                .is_some_and(|revoked| at_sequence >= revoked)
+        {
+            return None;
+        }
+        let certificate =
+            self.active_certificate(binding.fields.device_certificate_hash, at_sequence)?;
+        if !role_matches(
+            certificate.fields.certificate_kind,
+            binding.fields.operator_role,
+        ) {
+            return None;
+        }
+        Some(binding)
+    }
+
+    fn resolve_selected(
+        &self,
+        certificate_hash: CertificateHash,
+        bound_registry: RegistryVersion,
+        selected_sequence: ChainSequence,
+    ) -> Result<ResolvedSigner<'_>, CryptoError> {
+        if bound_registry != self.registry_version {
+            return Err(CryptoError::SignerUnresolved);
+        }
+        let registry_revoked_from_sequence = selected_sequence
+            .get()
+            .checked_add(1)
+            .map(ChainSequence::new);
+        let root_hash = CertificateHash::from(self.root.object_hash);
+        let (object_hash, root_line_accepted) = if certificate_hash == root_hash {
+            (self.root.object_hash, true)
+        } else {
+            let certificate = self
+                .active_certificate(certificate_hash, selected_sequence)
+                .ok_or(CryptoError::SignerUnresolved)?;
+            debug_assert!(CertificateHash::from(certificate.object_hash) == certificate_hash);
+            (certificate.object_hash, true)
+        };
+        Ok(ResolvedSigner {
+            exact_certificate_bytes: self
+                .catalog
+                .get(&object_hash)
+                .ok_or(CryptoError::SignerUnresolved)?
+                .exact_bytes()
+                .as_bytes(),
+            registry_effective_from_sequence: selected_sequence,
+            registry_revoked_from_sequence,
+            registry_revoked: false,
+            root_line_accepted,
+        })
+    }
+}
+
+fn role_matches(kind: CertificateKindV1, role: ea_format::OperatorRoleV1) -> bool {
+    matches!(
+        (kind, role),
+        (CertificateKindV1::Writer, ea_format::OperatorRoleV1::Writer)
+            | (CertificateKindV1::Reader, ea_format::OperatorRoleV1::Reader)
+            | (
+                CertificateKindV1::OrganizationAdmin,
+                ea_format::OperatorRoleV1::OrganizationAdmin
+            )
+    )
 }
 
 fn require_catalog_object(
@@ -218,6 +311,20 @@ impl SignerCertificateResolver for BootstrapRootResolver<'_> {
             registry_revoked: false,
             root_line_accepted: true,
         })
+    }
+}
+
+impl SignerCertificateResolver for crate::SelectedRegistryHead {
+    fn resolve(
+        &self,
+        certificate_hash: CertificateHash,
+        bound_registry: RegistryVersion,
+    ) -> Result<ResolvedSigner<'_>, CryptoError> {
+        self.candidate_state().resolve_selected(
+            certificate_hash,
+            bound_registry,
+            self.proposed_sequence(),
+        )
     }
 }
 

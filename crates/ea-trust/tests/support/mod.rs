@@ -112,6 +112,9 @@ pub struct HeadOptions {
     pub event_authorization_id: Option<u8>,
     pub direct_nonce: Option<u8>,
     pub event_nonce: Option<u8>,
+    pub corrupt_direct_authorization_signature: bool,
+    pub corrupt_direct_signature: bool,
+    pub corrupt_event_authorization_signature: bool,
     pub omit_direct_object: bool,
     pub omit_direct_authorization: bool,
     pub omit_event_authorization: bool,
@@ -148,6 +151,9 @@ impl Default for HeadOptions {
             event_authorization_id: None,
             direct_nonce: None,
             event_nonce: None,
+            corrupt_direct_authorization_signature: false,
+            corrupt_direct_signature: false,
+            corrupt_event_authorization_signature: false,
             omit_direct_object: false,
             omit_direct_authorization: false,
             omit_event_authorization: false,
@@ -380,6 +386,14 @@ impl RegistryLineBuilder {
             .expect("fixture object must remain in the catalog")
     }
 
+    pub fn exact_anchor_bytes(&self) -> &[u8] {
+        &self.anchor_bytes
+    }
+
+    pub fn source(&self) -> impl TrustObjectSource {
+        CatalogSource::new(self.objects.iter().cloned())
+    }
+
     pub fn push(&mut self, action: ActionSpec, options: HeadOptions) -> BuiltHead {
         let previous = self.state.clone();
         let next_default = previous.version.get().saturating_add(1);
@@ -432,7 +446,7 @@ impl RegistryLineBuilder {
             let (basis_version, basis_hash) = options
                 .direct_authorization_basis
                 .unwrap_or((previous.version, previous.head_hash));
-            let authorization = exact_authorization(
+            let mut authorization = exact_authorization(
                 &provisional,
                 options
                     .direct_authorization_action
@@ -449,6 +463,10 @@ impl RegistryLineBuilder {
                 authorization_admin_hash,
                 authorization_binding_hash,
             );
+            if options.corrupt_direct_authorization_signature {
+                let last = authorization.len() - 1;
+                authorization[last] ^= 1;
+            }
             let authorization_hash = object_hash(&authorization);
             let payload = direct_payload(
                 &action,
@@ -458,12 +476,16 @@ impl RegistryLineBuilder {
                 &previous,
                 &options,
             );
-            let signature = signed_normal(
+            let mut signature = signed_normal(
                 previous.root.secret,
                 &previous.root.key,
                 CertificateHash::from(previous.root.object_hash),
                 trust_digest(payload.exact_digest_input()).as_bytes(),
             );
+            if options.corrupt_direct_signature {
+                let last = signature.len() - 1;
+                signature[last] ^= 1;
+            }
             let bytes = exact_object(payload, vec![signature]);
             direct_hash = Some(object_hash(&bytes));
             direct_bytes = Some(bytes);
@@ -508,7 +530,7 @@ impl RegistryLineBuilder {
         let (event_basis_version, event_basis_hash) = options
             .event_authorization_basis
             .unwrap_or((previous.version, previous.head_hash));
-        let event_authorization = exact_authorization(
+        let mut event_authorization = exact_authorization(
             &provisional_event,
             options
                 .event_authorization_action
@@ -525,6 +547,10 @@ impl RegistryLineBuilder {
             authorization_admin_hash,
             authorization_binding_hash,
         );
+        if options.corrupt_event_authorization_signature {
+            let last = event_authorization.len() - 1;
+            event_authorization[last] ^= 1;
+        }
         let event_authorization_hash = object_hash(&event_authorization);
         let event_payload =
             TrustPayloadV1::registry_event(fields, event_authorization_hash).unwrap();

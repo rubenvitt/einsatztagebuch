@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ea_crypto::{CanonicalPublicCoseKey, CoseSigner, SecretBytes};
 use ea_format::{
-    CertificateKindV1, Parsed, ParsedArchiveObject, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1,
-    decode_exact_object, encode_receipt,
+    CertificateKindV1, OperatorRoleV1, Parsed, ParsedArchiveObject, ReceiptCoreFieldsV1,
+    ReceiptCoreV1, ReceiptV1, decode_exact_object, encode_receipt,
 };
 use ea_time::{
     FutureSkew, IndependentTimeInput, IndependentTimeKind, TimeWarnings, TrustedTimeState,
@@ -322,6 +322,7 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
         policy,
         effective_from_sequence,
         valid_through_sequence,
+        proposed_sequence,
         preexisting_effective_now,
         warnings,
         committed_revision,
@@ -333,6 +334,7 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
     assert!(policy.fields == expected_policy.fields);
     assert!(*effective_from_sequence == expected_event.effective_from_sequence);
     assert!(*valid_through_sequence == expected_event.valid_through_sequence);
+    assert!(*proposed_sequence == ChainSequence::new(60));
     assert!(preexisting_effective_now.value() == expected_now);
     assert!(*warnings == expected_warnings);
     assert_eq!(*committed_revision, 41);
@@ -527,6 +529,85 @@ fn real_advanced_path_is_exhaustively_scalar_only_and_committed() {
     assert_eq!(store.commits.len(), 1);
     assert!(store.commits[0].next_head == pin(fixture.candidate_head));
     assert_eq!(store.record.revision(), 47);
+}
+
+#[test]
+fn selected_binding_view_rechecks_private_role_correlation() {
+    let mut line = RegistryLineBuilder::new();
+    line.push(
+        policy(),
+        HeadOptions {
+            effective_from: Some(1),
+            valid_through: Some(10),
+            ..HeadOptions::default()
+        },
+    );
+    let reader_head = line.push(
+        ActionSpec::Device {
+            kind: CertificateKindV1::Reader,
+            marker: 0x63,
+            effective_from: None,
+        },
+        HeadOptions {
+            effective_from: Some(11),
+            valid_through: Some(20),
+            ..HeadOptions::default()
+        },
+    );
+    let reader_hash = CertificateHash::from(
+        reader_head
+            .direct_object_hash
+            .expect("Reader certificate object"),
+    );
+    let binding_head = line.push(
+        ActionSpec::OperatorBinding {
+            certificate_hash: reader_head.direct_object_hash.unwrap(),
+            role: OperatorRoleV1::Reader,
+            marker: 0x71,
+            effective_from: None,
+        },
+        HeadOptions {
+            effective_from: Some(21),
+            valid_through: Some(100),
+            ..HeadOptions::default()
+        },
+    );
+    let binding_hash = binding_head
+        .direct_object_hash
+        .expect("Reader Binding object");
+    let key = support::state_key();
+    let trusted_time = persisted_time(900, 850, 0xa1);
+    let trust =
+        line.verified_with_record(Pin::Head(2), INITIAL_REVISION, trusted_time.clone(), key);
+    let mut candidate = verify_registry_candidate(&trust, ChainSequence::new(25)).unwrap();
+    let mut malformed = (*candidate.candidate_state).clone();
+    malformed
+        .admin_bindings
+        .get_mut(&binding_hash)
+        .expect("the selected state must retain the active Reader Binding")
+        .fields
+        .operator_role = OperatorRoleV1::Writer;
+    let malformed = Arc::new(malformed);
+    candidate.candidate_state = Arc::clone(&malformed);
+    candidate
+        .preexisting_authority
+        .as_mut()
+        .expect("a current Head must retain its exact authority")
+        .inner = Arc::clone(&malformed);
+    let mut store = TestStore::new(key, trusted_time, Some(pin(binding_head)), 53);
+    let local_time = prepare_local_time(&mut store, &candidate, UnixMillis::new(900), &[]).unwrap();
+    let RegistrySelectionOutcome::Selected(selected) =
+        select_registry_head(candidate, local_time, None).unwrap()
+    else {
+        panic!("the private role-correlation fixture must select its current Head");
+    };
+
+    assert!(selected.active_certificate_fields(reader_hash).is_some());
+    assert!(
+        selected
+            .active_operator_binding_fields(binding_hash)
+            .is_none()
+    );
 }
 
 #[test]

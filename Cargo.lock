@@ -731,8 +731,13 @@ name = "ea-system-tests"
 version = "0.1.0"
 dependencies = [
  "ea-crypto",
+ "ea-format",
  "ea-schema",
+ "ea-time",
+ "ea-trust",
  "ea-types",
+ "ed25519-dalek",
+ "minicbor",
  "toml",
 ]
 
