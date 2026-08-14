@@ -97,6 +97,28 @@ verschiedene `authoritySubjectId`-Werte. Mehrere Zertifikate oder Bindings mit
 derselben ID zählen als eine Admin-Person und erfüllen die Zwei-Admin-Bedingung
 nicht.
 
+Für die Bootstrap-Paare gelten zusätzlich byteweise die Regeln `pairwise
+distinct Admin certificate signing-key thumbprints`, `pairwise distinct
+OS-account binding hashes` und `pairwise distinct operator-instance-key
+thumbprints`. In jedem Paar gilt außerdem: `operator-instance-key thumbprint
+differs from its own Admin certificate signing-key thumbprint`. Dieselbe
+Hardware darf getrennte Personen tragen; deshalb gilt ausdrücklich `deviceId
+values need not be distinct`. Diese Regeln verhindern, dass zwei pseudonyme
+Personen denselben Admin-, OS-Konto- oder Operator-Instanzschlüssel doppelt als
+Zwei-Admin-Basis zählen lassen.
+
+Die beiden direkten Bootstrap-Ausnahmen erhalten einen eigenen schmalen
+Lower-Layer-Crypto-Seam; `ea-trust` implementiert dafür keinen zweiten
+COSE-Verifier. `CoseSigner::sign_initial_admin_trust_digest` und
+`VerificationContext::initial_admin_trust_digest` verwenden denselben privaten
+`initial_admin_trust_bindings`-Parser. Dieser akzeptiert ausschließlich ein
+`direct initial Admin Device Certificate or Operator Binding`, bindet den
+Root-Zertifikat-Hash, leitet Organisation und Wirksamkeitssequenz aus dem
+exakten Core ab und setzt den Pre-Registry-Kontext ausdrücklich auf
+`RegistryVersion::new(0)`. Er akzeptiert diese zwei Formen genau `without an
+organizationAdminAuthorization wrapper`; autorisierte Zweier-Wrapper und alle
+anderen direkten Trust-Formen bleiben in diesem Seam geschlossen.
+
 ### 2.3 Geschlossene Action-/Change-Matrix
 
 Die zulässigen Kombinationen lauten vollständig:

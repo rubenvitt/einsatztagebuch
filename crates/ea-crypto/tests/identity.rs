@@ -24,6 +24,32 @@ struct FixtureResolver {
     calls: Cell<usize>,
 }
 
+struct BootstrapRootResolver {
+    requested_hash: CertificateHash,
+    exact_certificate_bytes: Vec<u8>,
+    calls: Cell<usize>,
+}
+
+impl SignerCertificateResolver for BootstrapRootResolver {
+    fn resolve(
+        &self,
+        certificate_hash: CertificateHash,
+        registry: RegistryVersion,
+    ) -> Result<ResolvedSigner<'_>, CryptoError> {
+        self.calls.set(self.calls.get() + 1);
+        if registry != RegistryVersion::new(0) || certificate_hash != self.requested_hash {
+            return Err(CryptoError::SignerUnresolved);
+        }
+        Ok(ResolvedSigner {
+            exact_certificate_bytes: &self.exact_certificate_bytes,
+            registry_effective_from_sequence: ChainSequence::new(0),
+            registry_revoked_from_sequence: None,
+            registry_revoked: false,
+            root_line_accepted: true,
+        })
+    }
+}
+
 impl SignerCertificateResolver for FixtureResolver {
     fn resolve(
         &self,
@@ -319,6 +345,14 @@ fn device_certificate_core() -> Vec<u8> {
 }
 
 fn device_certificate_core_with_kind(kind: u8) -> Vec<u8> {
+    device_certificate_core_with_activation(kind, 7, None)
+}
+
+fn device_certificate_core_with_activation(
+    kind: u8,
+    effective_from_sequence: u64,
+    revoked_from_sequence: Option<u64>,
+) -> Vec<u8> {
     let key = fixture_public_key();
     let key_bytes = key.to_deterministic_cbor();
     let mut bytes = Vec::new();
@@ -335,9 +369,12 @@ fn device_certificate_core_with_kind(kind: u8) -> Vec<u8> {
         .and_then(|encoder| encoder.null())
         .and_then(|encoder| encoder.array(0))
         .and_then(|encoder| encoder.u8(0))
-        .and_then(|encoder| encoder.u8(7))
-        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.u64(effective_from_sequence))
         .unwrap();
+    match revoked_from_sequence {
+        Some(sequence) => encoder.u64(sequence).unwrap(),
+        None => encoder.null().unwrap(),
+    };
     match authority_subject_id_for_kind(kind) {
         Some(subject_id) => encoder.bytes(subject_id.as_bytes()).unwrap(),
         None => encoder.null().unwrap(),
@@ -512,6 +549,41 @@ fn operator_binding_core() -> Vec<u8> {
         .and_then(|encoder| encoder.null())
         .and_then(|encoder| encoder.array(0))
         .unwrap();
+    bytes
+}
+
+fn initial_admin_operator_binding_core(
+    role: u8,
+    effective_from_sequence: u64,
+    revoked_from_sequence: Option<u64>,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(11)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x72; 16]))
+        .and_then(|encoder| encoder.bytes(&[0x73; 32]))
+        .and_then(|encoder| encoder.bytes(fixture_certificate_hash().as_bytes()))
+        .and_then(|encoder| encoder.u8(role))
+        .and_then(|encoder| encoder.bytes(&[0x74; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x75; 32]))
+        .and_then(|encoder| encoder.u64(effective_from_sequence))
+        .unwrap();
+    match revoked_from_sequence {
+        Some(sequence) => encoder.u64(sequence).unwrap(),
+        None => encoder.null().unwrap(),
+    };
+    encoder.array(0).unwrap();
+    bytes
+}
+
+fn authorized_wrapper(core: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes).array(2).unwrap();
+    bytes.extend_from_slice(core);
+    Encoder::new(&mut bytes).bytes(&[0x76; 32]).unwrap();
     bytes
 }
 
@@ -1940,6 +2012,159 @@ fn initial_root_and_enrollment_pop_never_enter_the_certificate_resolver() {
         assert_eq!(error.code(), "EA-CRYPTO-INVALID-COSE");
     }
     assert_eq!(resolver.calls.get(), 0);
+}
+
+#[test]
+fn direct_initial_admin_trust_signatures_use_only_the_root_bootstrap_context() {
+    let exact_root_certificate = root_certificate_bytes(false, false);
+    let root_certificate_hash = CertificateHash::from(object_hash(&exact_root_certificate));
+    let resolver = BootstrapRootResolver {
+        requested_hash: root_certificate_hash,
+        exact_certificate_bytes: exact_root_certificate,
+        calls: Cell::new(0),
+    };
+    let root_signer =
+        CoseSigner::from_secret(SecretBytes::new(std::array::from_fn(|index| index as u8)));
+    let direct_device =
+        trust_digest_input("deviceCertificate", &device_certificate_core_with_kind(2));
+    let direct_binding = trust_digest_input(
+        "operatorBinding",
+        &initial_admin_operator_binding_core(2, 0, None),
+    );
+
+    for (label, input) in [
+        ("direct Admin certificate", direct_device.as_slice()),
+        ("direct Admin Binding", direct_binding.as_slice()),
+    ] {
+        let signed = root_signer
+            .sign_initial_admin_trust_digest(root_certificate_hash, input)
+            .unwrap_or_else(|error| panic!("{label} signing failed: {}", error.code()));
+        let parsed = ea_crypto::parse_cose_sign1(&signed, &[]).unwrap();
+        assert_eq!(parsed.content_type(), ContentType::TrustDigest, "{label}");
+        assert!(
+            parsed.certificate_hash() == Some(root_certificate_hash),
+            "{label}"
+        );
+        let context = VerificationContext::initial_admin_trust_digest(input, root_certificate_hash)
+            .unwrap_or_else(|error| panic!("{label} context failed: {}", error.code()));
+        let verified = CoseVerifier::verify_normal(&signed, &resolver, &context)
+            .unwrap_or_else(|error| panic!("{label} verification failed: {}", error.code()));
+        assert_eq!(verified.role(), SignerRole::Root, "{label}");
+    }
+    assert_eq!(resolver.calls.get(), 2);
+
+    let authorized_device = trust_digest_input(
+        "deviceCertificate",
+        &authorized_wrapper(&device_certificate_core_with_kind(2)),
+    );
+    let invalid_inputs = [
+        (
+            "non-Admin direct certificate",
+            trust_digest_input("deviceCertificate", &device_certificate_core_with_kind(0)),
+        ),
+        (
+            "non-Admin direct Binding",
+            trust_digest_input(
+                "operatorBinding",
+                &initial_admin_operator_binding_core(0, 0, None),
+            ),
+        ),
+        (
+            "Admin certificate revoked at its effective sequence",
+            trust_digest_input(
+                "deviceCertificate",
+                &device_certificate_core_with_activation(2, 0, Some(0)),
+            ),
+        ),
+        (
+            "Admin certificate revoked before its effective sequence",
+            trust_digest_input(
+                "deviceCertificate",
+                &device_certificate_core_with_activation(2, 1, Some(0)),
+            ),
+        ),
+        (
+            "Admin Binding revoked at its effective sequence",
+            trust_digest_input(
+                "operatorBinding",
+                &initial_admin_operator_binding_core(2, 0, Some(0)),
+            ),
+        ),
+        (
+            "Admin Binding revoked before its effective sequence",
+            trust_digest_input(
+                "operatorBinding",
+                &initial_admin_operator_binding_core(2, 1, Some(0)),
+            ),
+        ),
+        ("authorized wrapper", authorized_device),
+        (
+            "wrong subtype",
+            trust_digest_input("policy", &device_certificate_core_with_kind(2)),
+        ),
+    ];
+    for (label, input) in invalid_inputs {
+        let sign_error =
+            match root_signer.sign_initial_admin_trust_digest(root_certificate_hash, &input) {
+                Ok(_) => panic!("{label}"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            sign_error.code(),
+            "EA-CRYPTO-INVALID-PROTOCOL-CORE",
+            "{label}"
+        );
+        let context_error =
+            match VerificationContext::initial_admin_trust_digest(&input, root_certificate_hash) {
+                Ok(_) => panic!("{label}"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            context_error.code(),
+            "EA-CRYPTO-INVALID-PROTOCOL-CORE",
+            "{label}"
+        );
+    }
+
+    let device_signature = root_signer
+        .sign_initial_admin_trust_digest(root_certificate_hash, &direct_device)
+        .unwrap();
+    let binding_context =
+        VerificationContext::initial_admin_trust_digest(&direct_binding, root_certificate_hash)
+            .unwrap();
+    assert_eq!(
+        CoseVerifier::verify_normal(&device_signature, &resolver, &binding_context)
+            .unwrap_err()
+            .code(),
+        "EA-TRUST-SIGNER-MISMATCH"
+    );
+
+    let different_root_certificate_hash = CertificateHash::from(object_hash(b"another Root"));
+    let wrong_hash_context = VerificationContext::initial_admin_trust_digest(
+        &direct_device,
+        different_root_certificate_hash,
+    )
+    .unwrap();
+    assert_eq!(
+        CoseVerifier::verify_normal(&device_signature, &resolver, &wrong_hash_context)
+            .unwrap_err()
+            .code(),
+        "EA-TRUST-SIGNER-MISMATCH"
+    );
+
+    let mut mutated_signature = device_signature;
+    *mutated_signature
+        .last_mut()
+        .expect("COSE fixture contains a signature") ^= 1;
+    let correct_context =
+        VerificationContext::initial_admin_trust_digest(&direct_device, root_certificate_hash)
+            .unwrap();
+    assert_eq!(
+        CoseVerifier::verify_normal(&mutated_signature, &resolver, &correct_context)
+            .unwrap_err()
+            .code(),
+        "EA-TRUST-SIGNATURE-INVALID"
+    );
 }
 
 #[test]

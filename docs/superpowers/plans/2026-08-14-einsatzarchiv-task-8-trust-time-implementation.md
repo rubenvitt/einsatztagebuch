@@ -776,6 +776,8 @@ rtk git commit -m "feat(trust): verify external anchors and trust objects"
 ### Task 5: Verify Anchor bootstrap Admin pairs and establish Previous-Head state
 
 **Files:**
+- Modify: `crates/ea-crypto/src/cose.rs`
+- Modify: `crates/ea-crypto/tests/identity.rs`
 - Create: `crates/ea-trust/src/certificate.rs`
 - Create: `crates/ea-trust/src/operator_binding.rs`
 - Create: `crates/ea-trust/src/resolver.rs`
@@ -788,6 +790,26 @@ rtk git commit -m "feat(trust): verify external anchors and trust objects"
 
 Required positive: two Root-signed, Anchor-pinned Admin Device Certificate/Operator Binding pairs with distinct `authoritySubjectId` values and exact certificate-hash pairing.
 
+The complete bootstrap independence rule is: `pairwise distinct Admin
+certificate signing-key thumbprints`, `pairwise distinct OS-account binding
+hashes`, and `pairwise distinct operator-instance-key thumbprints`; within each
+pair the `operator-instance-key thumbprint differs from its own Admin
+certificate signing-key thumbprint`. Shared hardware is permitted, so
+`deviceId values need not be distinct`. Every negative must re-sign and re-pin
+the otherwise valid pair so the semantic independence check is reached.
+
+First add a lower-layer crypto RED proving that the existing authorized-wrapper
+path cannot sign or verify either direct Bootstrap exception. Require
+`CoseSigner::sign_initial_admin_trust_digest` and
+`VerificationContext::initial_admin_trust_digest` to share the private
+`initial_admin_trust_bindings` parser. It accepts only a
+`direct initial Admin Device Certificate or Operator Binding`, derives the
+exact Trust digest, organization and effective sequence, binds the supplied
+Root certificate hash, and uses `RegistryVersion::new(0)` exactly `without an
+organizationAdminAuthorization wrapper`. Crossed subtype/kind/role, an
+authorized wrapper, another direct Trust form, wrong certificate hash and
+signature mutation must fail independently.
+
 Required negatives:
 
 ```text
@@ -798,7 +820,8 @@ two certificates with the same authoritySubjectId
 null Admin authoritySubjectId
 Admin authoritySubjectId != Binding operatorSubjectId
 Binding points at another certificate
-wrong organization/device/role
+wrong organization/certificate kind/Binding role
+Admin certificate missing organizationAdminApprove capability
 wrong OS-account or operator-instance-key binding
 certificate/binding not effective at sequence 0
 non-Root initial signature profile
@@ -813,6 +836,11 @@ rtk cargo test --locked -p ea-trust --test bootstrap --test certificate_attacks
 - [ ] **Step 3: Implement verified bootstrap state**
 
 Create private typed `ActiveCertificate`, `ActiveOperatorBinding`, `RootAuthority`, and `PreviousHeadState`. Use `ea-crypto` for exact signatures/keys and `ea-format` typed fields for semantic correlation. Compare authority/operator IDs bytewise. Pair Anchor lists through `operatorBinding.device_certificate_hash`, not list position alone.
+
+The initial Admin signatures use the standard `CoseVerifier` with
+`VerificationContext::initial_admin_trust_digest` and a Root-only immutable
+resolver. The lower layer validates the direct exception and COSE signature;
+`ea-trust` must not parse or verify COSE a second time.
 
 Expose only:
 
@@ -839,7 +867,9 @@ verified Registry line before it can become signer/time authority.
 
 ```bash
 rtk cargo test --locked -p ea-trust --test bootstrap --test certificate_attacks
-rtk git add -- crates/ea-trust/src/certificate.rs \
+rtk cargo test --locked -p ea-crypto --test identity
+rtk git add -- crates/ea-crypto/src/cose.rs crates/ea-crypto/tests/identity.rs \
+  crates/ea-trust/src/certificate.rs \
   crates/ea-trust/src/operator_binding.rs crates/ea-trust/src/resolver.rs \
   crates/ea-trust/src/anchor.rs crates/ea-trust/src/lib.rs \
   crates/ea-trust/tests/bootstrap.rs crates/ea-trust/tests/certificate_attacks.rs

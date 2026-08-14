@@ -1,13 +1,18 @@
-use ea_crypto::{CanonicalPublicCoseKey, bootstrap_anchor_hash, trust_anchor_hash};
+use ea_crypto::{CanonicalPublicCoseKey, bootstrap_anchor_hash, object_hash, trust_anchor_hash};
 use ea_time::TrustedTimeState;
 use ea_trust::{
     ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin,
-    RegistrySelectionCommit, StateStoreError, TrustStateKey, TrustStateStore, decode_trust_anchor,
-    load_trust_state,
+    RegistrySelectionCommit, StateStoreError, TrustObjectSource, TrustSourceError, TrustStateKey,
+    TrustStateStore, decode_trust_anchor, load_trust_state, verify_trust,
 };
 use ea_types::{DeviceId, OrganizationId, RegistryVersion, UnixMillis};
 use minicbor::{Decoder, Encoder};
-use std::ops::Range;
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    ops::Range,
+    sync::Arc,
+};
 
 const PRE_ANCHOR_HEX: &str = concat!(
     "8a782145494e5341545a4152434849562d54525553542d414e43484f522d5052452d763101",
@@ -39,6 +44,80 @@ const BOOTSTRAP_ANCHOR_HASH_HEX: &str =
     "b9318bc313a46ea719405295fd28e9226523f02d4a26533e5a41df0b3bd40978";
 const TRUST_ANCHOR_HASH_HEX: &str =
     "d4341b705e5b4f3c88ce69f5508ec8675e7c95c69befdbbf2f1477764ba21216";
+
+const TASK5_ANCHOR_HEX: &str = concat!(
+    "8c781d45494e5341545a4152434849562d54525553542d414e43484f522d763101",
+    "582095c671496b9980738eaff4afb9a791ad39adfbedf53b97c599a2e4d6d22fd74b",
+    "50212121212121212121212121212121215031313131313131313131313131313131",
+    "5828a301012006215820d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "5820866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+    "58201ff2cb95ac5ab47d39ce2edfa8904d5fa4e871ab937608b653b176a7ee927ee3",
+    "8258205a445148a98491bebdb938edc5a1ce215099ad935160b4cf50d51881f195fb3e",
+    "5820e358370f85f5f097de41c5489b41fd24b2b374ac9756e717e494dd8498bb848a",
+    "8258202af868be8dea000e4fdf678b29d1dc50208410d40e783edbc8f3cdd2b4908c30",
+    "5820cbb83538597cf2984425cb7598629760a573891245ccba526a531223897f1425",
+    "5820444444444444444444444444444444444444444444444444444444444444444480",
+);
+
+const TASK5_OBJECT_HEX: [&str; 5] = [
+    concat!(
+        "854445413100050180836f726f6f74436572746966696361746587015021212121212121212121212121212121",
+        "5828a301012006215820d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "5820866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743f6008081",
+        "d2845857a401320282030403782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374",
+        "045820866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743a0",
+        "58202eeda82328661f8584b3767ba4708bdf1ca5d6a0062e74c876290f905f8bd7e1",
+        "5840fc071c8b6c28a9c0187f7887717ef247956a0149f3e17e20d5b149d38d85a820741a31335181f14a1d19f9a1a4bf074e0197a83d480d736525e2c7bf604ee406",
+    ),
+    concat!(
+        "854445413100050180836f6f70657261746f7242696e64696e678b015021212121212121212121212121212121",
+        "504141414141414141414141414141414158207171717171717171717171717171717171717171717171717171717171717171",
+        "58205a445148a98491bebdb938edc5a1ce215099ad935160b4cf50d51881f195fb3e02",
+        "58208181818181818181818181818181818181818181818181818181818181818181",
+        "5820919191919191919191919191919191919191919191919191919191919191919100f68081",
+        "d2845899a50132028303046f63657274696669636174654861736803782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374",
+        "045820866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+        "6f63657274696669636174654861736858201ff2cb95ac5ab47d39ce2edfa8904d5fa4e871ab937608b653b176a7ee927ee3a0",
+        "5820461e59f5a0f7062dc692ae7440112cb8d910cf359894b52fd9415b2d35f99fa9",
+        "58404bd1a39dd63af0fb44a5dcb11264205b5ae38726423914b897ae8db94dca2193d55bfe407ba4abf86e5bd6df73efce6b425f0bb6f725044dc4c2a982b8aac80e",
+    ),
+    concat!(
+        "854445413100050180837164657669636543657274696669636174658e015021212121212121212121212121212121",
+        "505151515151515151515151515151515102",
+        "5828a3010120062158203d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660cf6",
+        "58205c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59f681",
+        "78186f7267616e697a6174696f6e41646d696e417070726f76650000f650414141414141414141414141414141418081",
+        "d2845899a50132028303046f63657274696669636174654861736803782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374",
+        "045820866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+        "6f63657274696669636174654861736858201ff2cb95ac5ab47d39ce2edfa8904d5fa4e871ab937608b653b176a7ee927ee3a0",
+        "582037a5f61c0bc83008d7a3280dfa13da71fdc6105ad4b5abd9bff91dd41b478873",
+        "58403804d9cac2dbf35538b724f9dd2dcd264756fb388c8ffe88747a339d0ff3c812729633c16547b77da5580616ec05cd2b0e359c78eb441bd75b0425d0d657580e",
+    ),
+    concat!(
+        "854445413100050180836f6f70657261746f7242696e64696e678b015021212121212121212121212121212121",
+        "504242424242424242424242424242424258207171717171717171717171717171717171717171717171717171717171717171",
+        "5820e358370f85f5f097de41c5489b41fd24b2b374ac9756e717e494dd8498bb848a02",
+        "58208282828282828282828282828282828282828282828282828282828282828282",
+        "5820929292929292929292929292929292929292929292929292929292929292929200f68081",
+        "d2845899a50132028303046f63657274696669636174654861736803782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374",
+        "045820866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+        "6f63657274696669636174654861736858201ff2cb95ac5ab47d39ce2edfa8904d5fa4e871ab937608b653b176a7ee927ee3a0",
+        "58206d99471cce52d1fb0666dabd2914db62d3e9f130d63453fcfbc9dff60b176d00",
+        "58409ea265289c51d28133c1c66eee8678c0fc5640bff24954a28d0838a67e4fe0be84b8e238ed1fe373f5d0c7ea6a2062fcf60f0a3f4b82946f1199ca768e139000",
+    ),
+    concat!(
+        "854445413100050180837164657669636543657274696669636174658e015021212121212121212121212121212121",
+        "505252525252525252525252525252525202",
+        "5828a301012006215820fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025f6",
+        "582051d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6eef681",
+        "78186f7267616e697a6174696f6e41646d696e417070726f76650000f650424242424242424242424242424242428081",
+        "d2845899a50132028303046f63657274696669636174654861736803782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374",
+        "045820866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+        "6f63657274696669636174654861736858201ff2cb95ac5ab47d39ce2edfa8904d5fa4e871ab937608b653b176a7ee927ee3a0",
+        "58209f9ce7b6b0fee9bcf02b91a9d67f5fb3acf0b2e97146cd6a9254987c7ec59527",
+        "58402b6ecd5b8a7238c39b87da20087f92a6c65610629ed19b71e464571b882de34d6746ea40167c1b840e380ed196281ab7e9ec14d71c458e90c53916c7d67a3509",
+    ),
+];
 
 #[test]
 fn final_anchor_reconstructs_the_pinned_pre_anchor_and_all_exact_pins() {
@@ -92,6 +171,49 @@ fn final_anchor_reconstructs_the_pinned_pre_anchor_and_all_exact_pins() {
         anchor.genesis_entry_hash().as_bytes(),
         decode_hex("fb015b674e76a4b7924e0509dc91eda4a7e6c1f12fc4f997383059de425c1a6e").as_slice()
     );
+}
+
+#[test]
+fn verified_bootstrap_owns_the_exact_anchor_catalog_and_state_snapshot() {
+    let anchor_bytes = decode_hex(TASK5_ANCHOR_HEX);
+    let anchor = decode_trust_anchor(&anchor_bytes).expect("Task 5 Anchor must decode");
+    let source = PinnedTask5Source::new();
+    let key = TrustStateKey {
+        organization_id: anchor.organization_id(),
+        device_id: DeviceId::try_from([0xf0; 16].as_slice()).unwrap(),
+    };
+    let persisted_head = RegistryHeadPin::new(
+        RegistryVersion::new(9),
+        object_hash(b"not-yet-correlated Task 7 Registry pin"),
+    );
+    let mut store = MemoryStore {
+        key,
+        persisted: PersistedTrustRecord::new(
+            37,
+            TrustedTimeState::initial(UnixMillis::new(1_700_000_000_000)),
+            Some(persisted_head),
+        ),
+    };
+    let snapshot = load_trust_state(&mut store, key).unwrap();
+
+    let verified = verify_trust(&anchor, &source, snapshot)
+        .expect("two exact Root-signed and Anchor-pinned Admin pairs must verify");
+    assert!(verified.organization_id() == anchor.organization_id());
+    assert!(verified.chain_id() == anchor.chain_id());
+    assert!(verified.trust_anchor_hash() == anchor.trust_anchor_hash());
+    assert!(verified.state_key() == key);
+    assert_eq!(verified.state_revision(), 37);
+    assert_eq!(
+        verified.trusted_time().floor(),
+        UnixMillis::new(1_700_000_000_000)
+    );
+    assert!(verified.pinned_head() == Some(&persisted_head));
+    assert_eq!(source.visits.get(), 1);
+    assert!(source.reads.borrow().values().all(|count| *count == 1));
+
+    drop(source);
+    assert_eq!(verified.state_revision(), 37);
+    assert_eq!(verified.initial_admin_pair_count(), 2);
 }
 
 #[test]
@@ -414,6 +536,54 @@ fn state_store_errors_map_to_static_secret_free_trust_codes() {
 struct MemoryStore {
     key: TrustStateKey,
     persisted: PersistedTrustRecord,
+}
+
+struct PinnedTask5Source {
+    hashes: Vec<ea_types::ObjectHash>,
+    objects: BTreeMap<ea_types::ObjectHash, Arc<[u8]>>,
+    visits: Cell<usize>,
+    reads: RefCell<BTreeMap<ea_types::ObjectHash, usize>>,
+}
+
+impl PinnedTask5Source {
+    fn new() -> Self {
+        let mut objects = BTreeMap::new();
+        let mut hashes = Vec::new();
+        for literal in TASK5_OBJECT_HEX {
+            let exact: Arc<[u8]> = Arc::from(decode_hex(literal));
+            let hash = object_hash(&exact);
+            assert!(objects.insert(hash, exact).is_none());
+            hashes.push(hash);
+        }
+        hashes.reverse();
+        Self {
+            hashes,
+            objects,
+            visits: Cell::new(0),
+            reads: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl TrustObjectSource for PinnedTask5Source {
+    fn visit_trust_object_hashes(
+        &self,
+        visitor: &mut dyn FnMut(ea_types::ObjectHash) -> Result<(), TrustSourceError>,
+    ) -> Result<(), TrustSourceError> {
+        self.visits.set(self.visits.get() + 1);
+        for hash in &self.hashes {
+            visitor(*hash)?;
+        }
+        Ok(())
+    }
+
+    fn read_exact_trust_object(
+        &self,
+        object_hash: ea_types::ObjectHash,
+    ) -> Result<Option<Arc<[u8]>>, TrustSourceError> {
+        *self.reads.borrow_mut().entry(object_hash).or_default() += 1;
+        Ok(self.objects.get(&object_hash).cloned())
+    }
 }
 
 struct FailingStore {

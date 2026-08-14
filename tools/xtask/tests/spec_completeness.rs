@@ -1220,6 +1220,63 @@ fn task8_trust_source_limits_are_normative_and_bounded_before_retention() {
     );
 }
 
+#[test]
+fn task8_initial_admin_crypto_seam_is_explicit_and_wrapper_free() {
+    let closure = include_str!(
+        "../../../docs/superpowers/specs/2026-08-14-einsatzarchiv-task-8-trust-time-closure-design.md"
+    );
+    let runtime = include_str!(
+        "../../../docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"
+    );
+    let required = [
+        "CoseSigner::sign_initial_admin_trust_digest",
+        "VerificationContext::initial_admin_trust_digest",
+        "initial_admin_trust_bindings",
+        "direct initial Admin Device Certificate or Operator Binding",
+        "RegistryVersion::new(0)",
+        "without an organizationAdminAuthorization wrapper",
+    ];
+
+    assert_contains_all(
+        "Task-8 closure initial-Admin crypto seam",
+        &normalized_prose(closure),
+        &required,
+    );
+    assert_contains_all(
+        "Task-8 runtime initial-Admin crypto seam",
+        &normalized_prose(runtime),
+        &required,
+    );
+}
+
+#[test]
+fn task8_bootstrap_admin_pairs_require_independent_people_and_keys() {
+    let closure = include_str!(
+        "../../../docs/superpowers/specs/2026-08-14-einsatzarchiv-task-8-trust-time-closure-design.md"
+    );
+    let runtime = include_str!(
+        "../../../docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"
+    );
+    let required = [
+        "pairwise distinct Admin certificate signing-key thumbprints",
+        "pairwise distinct OS-account binding hashes",
+        "pairwise distinct operator-instance-key thumbprints",
+        "operator-instance-key thumbprint differs from its own Admin certificate signing-key thumbprint",
+        "deviceId values need not be distinct",
+    ];
+
+    assert_contains_all(
+        "Task-8 closure bootstrap Admin independence",
+        &normalized_prose(closure),
+        &required,
+    );
+    assert_contains_all(
+        "Task-8 runtime bootstrap Admin independence",
+        &normalized_prose(runtime),
+        &required,
+    );
+}
+
 fn protocol_cddl() -> String {
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
