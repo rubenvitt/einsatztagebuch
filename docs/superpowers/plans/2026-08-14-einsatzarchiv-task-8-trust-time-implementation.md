@@ -1646,7 +1646,7 @@ rtk cargo clippy --workspace --all-targets --all-features --locked -- -D warning
 rtk cargo test --workspace --all-targets --locked
 rtk pnpm test:golden
 rtk pnpm test:property
-rtk pnpm test:fuzz -- --smoke-seconds 60
+rtk pnpm test:fuzz --smoke-seconds 60
 rtk pnpm verify:quick
 rtk git diff --check
 ```
