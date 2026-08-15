@@ -205,6 +205,30 @@ Sync-Server. Der Server kennt weder Vault-Key noch PRF-Ausgaben. Ein geräumtes
 Browserprofil oder ein Gerätewechsel wird damit ohne Administrationsvorgang
 gelöst: Blob beziehen, Authenticator bestätigen, weiterarbeiten.
 
+### 6.4.1 Abruf des Blobs auf einem Gerät ohne Vault
+
+Der reguläre Serverzugriff wird nach RFC 9421 mit dem Ed25519-Schlüssel des
+Readers signiert. Dieser Schlüssel liegt jedoch im Vault, der ohne Blob nicht
+entsperrt werden kann. Der Blob-Abruf DARF deshalb nicht über den regulären
+signierten Pfad laufen.
+
+Festlegung: Beim Enrollment werden dieselben Authenticators zusätzlich als
+WebAuthn-Credentials beim Sync-Server registriert, mit der pseudonymen
+`subjectId` als `userHandle`. Der Abruf eines Wrapped-Blobs erfordert eine
+gültige WebAuthn-Assertion über ein auffindbares Credential dieses Readers. Der
+Server gibt daraufhin ausschließlich die zu dieser `subjectId` gehörenden opaken
+Chiffrate heraus. Danach entsperrt die PRF-Auswertung desselben Authenticators
+den Vault; ab diesem Punkt läuft jede weitere Anfrage RFC-9421-signiert.
+
+Damit werden beide Verwendungen desselben Authenticators sauber getrennt: die
+Assertion authentisiert den Transport, die PRF-Ausgabe entsperrt den Vault. Der
+Endpunkt ist nicht unauthentisiert und bietet keine Enumerationsfläche.
+
+Diese Registrierung verleiht dem Server KEINE Autorität: Rollen, Capabilities und
+Geräteautorität leiten sich unverändert ausschließlich aus Root-signierten
+Trust-Objekten ab. Der Server entscheidet allein, wem er ein Chiffrat aushändigt,
+das ohne Authenticator wertlos ist.
+
 Bei synchronisierten Passkeys ist die PRF-Ausgabe bei gleichem Salt über die
 Geräte des Nutzers stabil. Der Cross-Device-Flow per QR-Code liefert in Safari
 keine PRF-Ausgabe; dieser Weg wird nicht als Entsperrpfad angeboten.
@@ -287,14 +311,23 @@ Die Öffnung erfordert:
 
 - physischen Zugriff auf den Recovery-KEM-Schlüssel,
 - eine `organizationAdminAuthorization`, signiert von zwei verschiedenen
-  Approvern, über die konkrete Ziel-Identität und den Zweck,
+  Approvern, über die konkrete Ziel-Identität, den Zweck **und den Fingerprint
+  des Ziel-Transport-Public-Keys**,
 - ein lokales Audit-Ereignis.
+
+Die Bindung des Transport-Public-Keys ist verpflichtend und folgt derselben Logik
+wie die Bindung expliziter Ziel-Entry-Hashes beim Historical Re-grant. Ohne sie
+attestieren die Approver nur das Subjekt, nicht das Ziel; die ausführende Person
+könnte im Moment der Re-Encryption ihren eigenen Transport-Schlüssel einsetzen und
+den Reader-Schlüssel allein übernehmen. Das Werkzeug MUSS die Re-Encryption
+verweigern, wenn der vorgelegte Transport-Public-Key nicht dem in der
+Autorisierung gebundenen Fingerprint entspricht.
 
 Der wiederhergestellte Schlüssel wird niemandem angezeigt und nirgends
 persistiert. Der Reader erzeugt im Browser einen frischen Transport-Public-Key
-und zeigt dessen Fingerprint; das Recovery-Werkzeug verschlüsselt den
-KEM-Schlüssel unmittelbar an diesen neuen Vault. Der Klartext existiert nur im
-Arbeitsspeicher des Werkzeugs.
+und zeigt dessen Fingerprint; dieser wird den Approvern vor der Signatur
+vorgelegt. Das Recovery-Werkzeug verschlüsselt den KEM-Schlüssel unmittelbar an
+diesen neuen Vault. Der Klartext existiert nur im Arbeitsspeicher des Werkzeugs.
 
 Die Zeremonie greift ausschließlich, wenn alle Authenticators eines Readers
 verloren sind. Der häufige Fall aus Abschnitt 6.4 läuft ohne Administration.
@@ -304,9 +337,12 @@ verloren sind. Der häufige Fall aus Abschnitt 6.4 läuft ohne Administration.
 Während der Zeremonie liegt der Klartextschlüssel im Speicher des Werkzeugs. Ein
 böswilliger Custodian mit zwei kooperierenden Approvern könnte ihn kopieren und
 hätte danach stillen Dauerzugang zu allen Inhalten, für die dieser Reader Grants
-besitzt. Technisch ist das nicht ausschließbar. Es gelten die organisatorischen
-Maßnahmen, die das Design ohnehin fordert: getrennte Personen, physisch
-kontrollierte Schlüsselmedien, Audit, geführter Recovery-Test.
+besitzt. Technisch ist das nicht ausschließbar. Die Bindung des
+Transport-Public-Keys aus Abschnitt 7.5 stellt jedoch sicher, dass dafür
+tatsächlich alle Beteiligten kooperieren müssen und die ausführende Person allein
+nicht genügt. Darüber hinaus gelten die organisatorischen Maßnahmen, die das
+Design ohnehin fordert: getrennte Personen, physisch kontrollierte
+Schlüsselmedien, Audit, geführter Recovery-Test.
 
 ## 8. Lokaler Index, Suche und Export
 
@@ -352,11 +388,18 @@ Geprüft am 2026-08-15 mit `cargo check --target wasm32-unknown-unknown` gegen
 `ea-types`, `ea-cbor`, `ea-crypto`, `ea-format`, `ea-schema`, `ea-time` und
 `ea-trust`:
 
-- Der Build ist erfolgreich, einschließlich `ed25519-dalek 3.0`,
+- Der Check ist erfolgreich, einschließlich `ed25519-dalek 3.0`,
   `x25519-dalek 3.0`, `hpke 0.14`, `chacha20poly1305 0.11`, `sha2 0.11`,
   `minicbor 2.3` sowie `jiff 0.2.35` mit gebundelter tzdb.
 - Einzige erforderliche Anpassung: `getrandom 0.4.3` benötigt das Feature
   `wasm_js` und `--cfg getrandom_backend="wasm_js"`.
+
+**Reichweite dieses Nachweises:** Belegt ist ausschließlich, dass die Crates für
+`wasm32-unknown-unknown` übersetzen. Nicht belegt sind Ausführung, die
+`wasm-bindgen`-Schicht, das tatsächliche Verhalten des `wasm_js`-Backends in einer
+JS-Umgebung, die HPKE-Entkapselung zur Laufzeit sowie `ea-reader`, das noch nicht
+existiert. Der Laufzeitnachweis steht aus und ist als Voraussetzung in
+Abschnitt 14 geführt.
 
 `wasm32-unknown-unknown` wird verbindliches Ziel im Verifikations-Gate, damit
 spätere Crate-Änderungen die Browser-Fähigkeit nicht unbemerkt zerstören.
@@ -414,9 +457,16 @@ Index-Crate; `ea-reader` wird `wasm32`-fähig.
 
 ## 14. Offene Punkte für die Planüberarbeitung
 
-1. Verbindliche Größenschwelle des Index nach Abschnitt 8.1.
-2. Konkrete Browserliste und Mindestversionen für die Support-Matrix.
-3. Zielorigin und Betriebsverantwortung des getrennten Bundle-Hosts.
-4. Fallback, wenn ein unterstützter Browser keine WebAuthn-PRF liefert: entweder
-   Ausschluss aus der Matrix oder ein getrennt zu spezifizierender zweiter
-   Entsperrweg.
+1. **Laufzeitnachweis WASM.** Vor Beginn der Stage-4-Überarbeitung ist ein
+   ausführbarer Spike erforderlich: `wasm-bindgen`-Schicht, `getrandom` mit
+   `wasm_js` in einer echten JS-Umgebung, eine HPKE-Entkapselung und eine
+   Signaturprüfung gegen einen bestehenden Testvektor. Scheitert dieser Nachweis,
+   fällt die Entscheidung aus Abschnitt 2, Punkt 1 in sich zusammen.
+2. Verbindliche Größenschwelle des Index nach Abschnitt 8.1.
+3. **Browser-Mindestversionen.** Ausgangslage nach Recherche vom 2026-08-15:
+   Firefox unterstützt PRF ab 148 vollständig, Chrome ab 147 einschließlich
+   PRF-on-create, Safari ab 18 mit iCloud-Passkeys. Ein Ausschluss von Firefox ist
+   damit nicht erforderlich. Die exakten Mindestversionen je Plattform werden in
+   der Stage-7-Überarbeitung gepinnt und gegen die dann aktuelle Lage geprüft.
+4. Zielorigin und Betriebsverantwortung des getrennten Bundle-Hosts.
+5. Referenzquelle und Verteilweg der Fingerprint-Bekanntgabe aus Abschnitt 4.3.
