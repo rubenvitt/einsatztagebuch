@@ -2514,3 +2514,220 @@ fn gate_order_event_vocabulary_is_pinned_across_design_and_plan() {
         "design must name the decapsulation step that follows the nine gates"
     );
 }
+
+/// Die neunzehn Layoutpfade aus `design.md` §11.4 sind der einzige Bestand von
+/// `crates/ea-archive/src/layout.rs` — in beide Richtungen.
+///
+/// Analog zu `GATE_ORDER_V1` gegen §14.1 wird die Uebereinstimmung ausfuehrbar
+/// gepinnt statt kommentiert: jeder feste Pfad des Codeblocks in §11.4 muss als
+/// `pub const … : &str` in `layout.rs` stehen, und `layout.rs` darf keinen Pfad
+/// einfuehren, den §11.4 nicht nennt. Verglichen werden MENGEN, nicht
+/// Teilzeichenketten — sonst erfuellte `"trust/organization.etb"` die Forderung
+/// nach `"trust/"` stillschweigend mit.
+#[test]
+fn archive_layout_paths_match_design_section_11_4() {
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let layout = include_str!("../../../crates/ea-archive/src/layout.rs");
+
+    let expected = design_layout_paths(design);
+    assert_eq!(
+        expected.len(),
+        19,
+        "design §11.4 must name exactly the nineteen fixed layout paths"
+    );
+
+    let declared = layout_string_constants(layout);
+    let declared_paths = declared
+        .values()
+        .map(|path| (*path).to_owned())
+        .collect::<std::collections::BTreeSet<String>>();
+    assert_eq!(
+        declared_paths, expected,
+        "crates/ea-archive/src/layout.rs and design §11.4 must name the same paths"
+    );
+    assert_eq!(
+        declared.len(),
+        expected.len(),
+        "no two layout constants may carry the same path"
+    );
+
+    // Die Sammelkonstante nennt die Konstanten beim NAMEN; ein Literalvergleich
+    // wuerde eine zu kurze Liste nicht bemerken.
+    let collected = layout_paths_array_identifiers(layout);
+    assert_eq!(
+        collected,
+        declared
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        "LAYOUT_PATHS_V1 must collect exactly the declared &str layout constants"
+    );
+
+    // Pfade sind Hinweise, nie Klassifikationsgrundlage — §11.4 sagt das, und
+    // der Doc-Kommentar an LAYOUT_PATHS_V1 muss es woertlich wiederholen.
+    assert_contains_all(
+        "design §11.4",
+        &normalized_prose(design),
+        &[
+            "Dateinamen sind Hinweise, keine Vertrauensquelle.",
+            "Die Klassifikation entscheidet ausschließlich das Präfix, nie der Dateiname oder das Verzeichnis.",
+        ],
+    );
+    assert_contains_all(
+        "the LAYOUT_PATHS_V1 doc comment",
+        &normalized_prose(layout),
+        &["Diese Pfade sind Hinweise fuer Erzeuger, niemals Klassifikationsgrundlage."],
+    );
+
+    // Die Schranken des breiten Ports duerfen den Trust-Teilbestand nicht
+    // enger fassen als ea-trust ihn selbst zulaesst.
+    let blobs = layout_usize_constant(layout, "MAX_ARCHIVE_BLOBS_V1");
+    let bytes = layout_usize_constant(layout, "MAX_TOTAL_ARCHIVE_BYTES_V1");
+    assert!(
+        blobs >= 65_536,
+        "MAX_ARCHIVE_BLOBS_V1 must not undercut ea_trust::MAX_TRUST_OBJECTS_V1"
+    );
+    assert!(
+        bytes >= 268_435_456,
+        "MAX_TOTAL_ARCHIVE_BYTES_V1 must not undercut ea_trust::MAX_TOTAL_TRUST_OBJECT_BYTES_V1"
+    );
+
+    // Nach oben begrenzt der wasm32-Gate-Zielbau: dort ist `usize` 32 Bit
+    // breit. Ein groesserer Wert uebersetzt auf wasm32 gar nicht erst
+    // ("literal out of range for `usize`"), und zwar erst im Gate, lange nach
+    // dem gruenen Host-Testlauf. Die Haelfte des u32-Bereichs bleibt frei,
+    // damit das Aufsummieren nicht vor dem Erreichen der Schranke ueberlaeuft.
+    assert!(
+        bytes <= 2_147_483_648,
+        "MAX_TOTAL_ARCHIVE_BYTES_V1 must fit a 32-bit usize with headroom to spare, \
+         because wasm32-unknown-unknown is a gate target"
+    );
+    assert!(
+        blobs <= 2_147_483_648,
+        "MAX_ARCHIVE_BLOBS_V1 must fit a 32-bit usize with headroom to spare, \
+         because wasm32-unknown-unknown is a gate target"
+    );
+}
+
+/// Liest die festen Pfade aus dem `text`-Codeblock von `design.md` §11.4.
+///
+/// Die Einrueckung traegt die Verschachtelung (zwei Leerzeichen je Ebene). Ein
+/// Blatt, dessen eigenes Segment einen Platzhalter `<…>` enthaelt, ist ein
+/// Dateinamensmuster und kein fester Pfad. Liegt ein Platzhalter im Pfad eines
+/// festen Segments, ist nur der Teil ab dem letzten Platzhalter fest — daher
+/// `events/` und `attestations/` statt `destructions/<destruction-id>/events/`.
+fn design_layout_paths(design: &str) -> std::collections::BTreeSet<String> {
+    let section_at = design
+        .find("### 11.4 Verzeichnisstruktur")
+        .expect("design must carry section 11.4");
+    let tail = &design[section_at..];
+    let block_at = tail.find("```text").expect("§11.4 must carry a text block") + "```text".len();
+    let block_end = block_at
+        + tail[block_at..]
+            .find("```")
+            .expect("the §11.4 text block must be closed");
+    let block = &tail[block_at..block_end];
+
+    let mut stack: Vec<&str> = Vec::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for line in block.lines() {
+        let segment = line.trim_end();
+        if segment.trim().is_empty() {
+            continue;
+        }
+        let indent = segment.len() - segment.trim_start().len();
+        assert!(
+            indent.is_multiple_of(2),
+            "the §11.4 tree must indent by two spaces per level: {segment}"
+        );
+        let depth = indent / 2;
+        let segment = segment.trim_start();
+        stack.truncate(depth);
+        assert_eq!(stack.len(), depth, "the §11.4 tree must not skip a level");
+        stack.push(segment);
+        if depth == 0 {
+            // Die Archivwurzel selbst ist kein Layoutpfad.
+            continue;
+        }
+        if segment.contains('<') {
+            continue;
+        }
+        let components = &stack[1..];
+        let start = components
+            .iter()
+            .rposition(|component| component.contains('<'))
+            .map_or(0, |placeholder| placeholder + 1);
+        paths.insert(components[start..].concat());
+    }
+    paths
+}
+
+/// Sammelt `pub const NAME: &str = "VALUE";` aus `layout.rs`.
+///
+/// Der `&str`-Filter schliesst die beiden `usize`-Schranken zwingend aus.
+fn layout_string_constants(layout: &str) -> std::collections::BTreeMap<&str, &str> {
+    let mut declared = std::collections::BTreeMap::new();
+    for line in layout.lines() {
+        let Some(rest) = line.trim().strip_prefix("pub const ") else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once(':') else {
+            continue;
+        };
+        let Some(value) = tail.trim().strip_prefix("&str = ") else {
+            continue;
+        };
+        let value = value
+            .trim()
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix("\";"))
+            .unwrap_or_else(|| panic!("{name} must be a plain string literal"));
+        assert!(
+            declared.insert(name.trim(), value).is_none(),
+            "{name} is declared twice"
+        );
+    }
+    assert!(
+        !declared.is_empty(),
+        "layout.rs must declare the §11.4 paths as string constants"
+    );
+    declared
+}
+
+/// Liest die Bezeichner aus dem Arrayrumpf von `LAYOUT_PATHS_V1`.
+fn layout_paths_array_identifiers(layout: &str) -> std::collections::BTreeSet<&str> {
+    let at = layout
+        .find("pub const LAYOUT_PATHS_V1")
+        .expect("layout.rs must declare LAYOUT_PATHS_V1");
+    let tail = &layout[at..];
+    let body_at = tail
+        .find("= [")
+        .expect("LAYOUT_PATHS_V1 must be initialised with an array literal");
+    let body_end = body_at
+        + tail[body_at..]
+            .find("];")
+            .expect("LAYOUT_PATHS_V1 must be terminated with `];`");
+    tail[body_at..body_end]
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| token.ends_with("_V1") && *token != "LAYOUT_PATHS_V1")
+        .collect()
+}
+
+/// Liest den Zahlenwert einer `pub const NAME: usize = …;`-Schranke.
+fn layout_usize_constant(layout: &str, name: &str) -> usize {
+    let needle = format!("pub const {name}: usize = ");
+    let at = layout
+        .find(&needle)
+        .unwrap_or_else(|| panic!("layout.rs must declare {name}"));
+    let tail = &layout[at + needle.len()..];
+    let end = tail
+        .find(';')
+        .unwrap_or_else(|| panic!("{name} must be terminated with `;`"));
+    tail[..end]
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|error| panic!("{name} must be a decimal literal: {error}"))
+}

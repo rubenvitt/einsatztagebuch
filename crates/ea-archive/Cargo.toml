@@ -14,4 +14,7 @@ ea-types.workspace = true
 ea-crypto.workspace = true
 ea-time.workspace = true
 ed25519-dalek.workspace = true
+# Nur fuer das per #[path] eingebundene Fixture-Modul von ea-format, das
+# Testvektoren aus Hex liest. Dev-Dependency, also nie im wasm32-Lib-Graphen.
+hex.workspace = true
 minicbor.workspace = true

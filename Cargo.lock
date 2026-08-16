@@ -682,6 +682,7 @@ dependencies = [
  "ea-trust",
  "ea-types",
  "ed25519-dalek",
+ "hex",
  "minicbor",
 ]
 
