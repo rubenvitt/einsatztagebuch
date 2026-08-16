@@ -65,6 +65,28 @@ pub fn object_hash(exact_object_bytes: &[u8]) -> ObjectHash {
     ObjectHash::from(sha256_parts(&[OBJECT_DOMAIN, exact_object_bytes]))
 }
 
+/// SHA-256 ueber die kanonischen Bytes eines Verifikationsberichts.
+///
+/// BEWUSST OHNE Domain-Trennung — als einzige Hashfunktion dieses Moduls. Die
+/// Formel ist als `reportHash = SHA-256(canonical report bytes without
+/// reportHash/signature)` in
+/// `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md`
+/// (Task 10) gepinnt und wird von Werkzeugen ausserhalb dieses Workspaces
+/// nachgerechnet; ein Domainpraefix waere dort nicht reproduzierbar.
+///
+/// Die Trennung entsteht stattdessen aus dem Urbild selbst: es ist ein
+/// vollstaendiges JSON-Dokument, das mit `{"schemaId":"ea.verification-report/v1"`
+/// beginnt. Kein anderes Urbild dieses Workspaces hat diese Gestalt, denn alle
+/// uebrigen sind CBOR mit vorangestellter Domain. Diese Funktion darf deshalb
+/// AUSSCHLIESSLICH auf Berichtsbytes angewandt werden.
+///
+/// Sie lebt hier und nicht in `ea-verify`, damit `ea-verify` kein rohes `sha2`
+/// einbindet.
+#[must_use]
+pub fn verification_report_hash(canonical_bytes: &[u8]) -> Hash32 {
+    sha256_parts(&[canonical_bytes])
+}
+
 #[must_use]
 pub fn entry_hash(record_digest: Hash32, exact_writer_cose: &[u8]) -> EntryHash {
     EntryHash::from(sha256_parts(&[

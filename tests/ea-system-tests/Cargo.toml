@@ -8,15 +8,27 @@ publish = false
 
 [dependencies]
 
+# Die JSON-Schema-Validierung des Verifikationsberichts findet AUSSCHLIESSLICH
+# hier statt. `jsonschema` zieht `getrandom 0.3.4` in den Graphen, und
+# `ea-verify` steht auf der wasm32-Positivliste — die beiden duerfen deshalb
+# nie Dependency einer der Bibliotheks-Crates werden.
 [dev-dependencies]
+ea-archive.workspace = true
+ea-chain.workspace = true
 ea-crypto.workspace = true
 ea-format.workspace = true
 ea-schema.workspace = true
 ea-time.workspace = true
 ea-trust.workspace = true
 ea-types.workspace = true
+ea-verify.workspace = true
 ed25519-dalek.workspace = true
+# Fuer das per `#[path]` eingebundene Archiv-Support-Modul, das Objekthashes
+# hexadezimal in Pfadhinweise schreibt.
+hex.workspace = true
+jsonschema.workspace = true
 minicbor.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 
 [build-dependencies]

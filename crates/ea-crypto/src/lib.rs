@@ -25,6 +25,7 @@ pub use digest::{
     ciphertext_digest, entry_hash, grant_digest, grant_plan_digest, hpke_aad, hpke_info,
     object_hash, operator_profile_digest, payload_aad, receipt_digest, record_digest,
     recovery_test_digest, renewal_input_digest, trust_anchor_hash, trust_digest,
+    verification_report_hash,
 };
 pub use error::CryptoError;
 pub use hpke::{

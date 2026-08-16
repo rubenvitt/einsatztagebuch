@@ -751,14 +751,20 @@ dependencies = [
 name = "ea-system-tests"
 version = "0.1.0"
 dependencies = [
+ "ea-archive",
+ "ea-chain",
  "ea-crypto",
  "ea-format",
  "ea-schema",
  "ea-time",
  "ea-trust",
  "ea-types",
+ "ea-verify",
  "ed25519-dalek",
+ "hex",
+ "jsonschema",
  "minicbor",
+ "serde_json",
  "toml",
 ]
 
