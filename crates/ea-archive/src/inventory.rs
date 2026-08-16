@@ -16,13 +16,19 @@
 //! Umbenennen waehlbar.
 
 use core::fmt;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use ea_crypto::object_hash;
 use ea_format::{
     DestroyedEntryStubV1, EAG_PREFIX_V1, ECP_PREFIX_V1, EDS_PREFIX_V1, EIP_PREFIX_V1,
     ESR_PREFIX_V1, ETB_PREFIX_V1, EntryPackageV1, EvidenceObjectV1, GrantV1, Parsed,
     ParsedArchiveObject, ReceiptV1, TrustObjectV1, decode_exact_object,
+};
+use ea_trust::{
+    MAX_TOTAL_TRUST_OBJECT_BYTES_V1, MAX_TRUST_OBJECTS_V1, TrustObjectSource, TrustSourceError,
 };
 use ea_types::{ChainId, ChainSequence, ObjectHash};
 
@@ -252,6 +258,13 @@ impl ArchiveInventory {
         &self.evidence
     }
 
+    /// Die erfolgreich geparsten Trust-Objekte, aufsteigend nach `ObjectHash`.
+    ///
+    /// Zugleich der Index, den [`TrustObjectSource`] bedient. Die aufsteigende
+    /// Ordnung ist keine Bequemlichkeit, sondern die Invariante, auf der
+    /// [`ArchiveInventory::read_exact_trust_object`] binaer sucht; sie entsteht
+    /// daraus, dass die Familie aus einer `BTreeMap` ueber den Objekthash
+    /// gefuellt wird.
     #[must_use]
     pub fn trust(&self) -> &[Parsed<TrustObjectV1>] {
         &self.trust
@@ -287,6 +300,83 @@ impl ArchiveInventory {
     #[must_use]
     pub fn format_errors(&self) -> &[FormatErrorEntry] {
         &self.format_errors
+    }
+}
+
+/// Das Inventar IST der Trust-Port.
+///
+/// `ea_trust::TrustObjectSource` bleibt unveraendert der schmale,
+/// archiv-agnostische Port; [`ArchiveSource`] ist der breite ueber alle
+/// Archivbytes. Hier wird der eine auf den anderen abgebildet — nichts
+/// dupliziert, und `ea-trust` erfaehrt nichts ueber Archivlayout.
+///
+/// Der Port ist SCHMAL: er zeigt ausschliesslich die erfolgreich geparsten
+/// Objekte des Typs 5, nach Objekthash eindeutig. Unlesbare, doppelte,
+/// widerspruechliche und praefixlose Bytes bleiben aussen vor. Sonst koennte
+/// eine einzige kaputte Datei die Vertrauenspruefung kippen, statt isoliert
+/// als Befund im Bericht zu stehen.
+impl TrustObjectSource for ArchiveInventory {
+    /// Ruft `visitor` waehrend des Durchlaufs, ohne Zwischenspeicher.
+    ///
+    /// Es entsteht ausdruecklich KEIN zwischenzeitlicher unbeschraenkter
+    /// `Vec<ObjectHash>`: der Besucher sieht jeden Hash unmittelbar, und
+    /// liefert er einen Fehler, haelt der Durchlauf VOR dem naechsten Element
+    /// an und reicht den Fehler unveraendert durch.
+    ///
+    /// Die Schranken sind die von `ea-trust`, importiert und nicht neu
+    /// definiert. `MAX_TRUST_OBJECTS_V1` steht ohne Durchlauf fest und wird
+    /// deshalb vorab entschieden: ein zu grosser Index gibt keinen einzigen
+    /// Hash heraus. `MAX_TOTAL_TRUST_OBJECT_BYTES_V1` laesst sich nur
+    /// aufsummierend pruefen und wird deshalb je Element VOR dem Besuch
+    /// entschieden, genau wie in `ea_trust::catalog`.
+    ///
+    /// # Errors
+    ///
+    /// [`TrustSourceError::CountLimit`] oder [`TrustSourceError::ByteLimit`]
+    /// beim Ueberschreiten der Schranken, sonst der Fehler des Besuchers.
+    fn visit_trust_object_hashes(
+        &self,
+        visitor: &mut dyn FnMut(ObjectHash) -> Result<(), TrustSourceError>,
+    ) -> Result<(), TrustSourceError> {
+        if self.trust.len() > MAX_TRUST_OBJECTS_V1 {
+            return Err(TrustSourceError::CountLimit);
+        }
+        let mut total_exact_bytes = 0_usize;
+        for parsed in &self.trust {
+            total_exact_bytes = total_exact_bytes
+                .checked_add(parsed.exact_bytes().as_bytes().len())
+                .ok_or(TrustSourceError::ByteLimit)?;
+            if total_exact_bytes > MAX_TOTAL_TRUST_OBJECT_BYTES_V1 {
+                return Err(TrustSourceError::ByteLimit);
+            }
+            visitor(parsed.object_hash())?;
+        }
+        Ok(())
+    }
+
+    /// Die exakten Bytes, wie der Bestand sie geliefert hat.
+    ///
+    /// Nicht neu kodiert: `Parsed` traegt die Eingabebytes unveraendert mit,
+    /// und genau die werden herausgegeben. Ein Hash, der zu keinem geparsten
+    /// Trust-Objekt gehoert — ein `.eip`, ein unlesbares `.etb`, Beiwerk oder
+    /// Unbekanntes —, liefert `Ok(None)` und ist kein Fehler.
+    ///
+    /// Gesucht wird binaer ueber die nach Objekthash aufsteigende Familie
+    /// (siehe [`ArchiveInventory::trust`]); ein linearer Durchlauf je Lesung
+    /// waere bei bis zu `MAX_TRUST_OBJECTS_V1` Objekten quadratisch.
+    ///
+    /// # Errors
+    ///
+    /// Nie: das Inventar liegt vollstaendig im Speicher.
+    fn read_exact_trust_object(
+        &self,
+        object_hash: ObjectHash,
+    ) -> Result<Option<Arc<[u8]>>, TrustSourceError> {
+        Ok(self
+            .trust
+            .binary_search_by(|parsed| parsed.object_hash().cmp(&object_hash))
+            .ok()
+            .map(|index| Arc::from(self.trust[index].exact_bytes().as_bytes())))
     }
 }
 

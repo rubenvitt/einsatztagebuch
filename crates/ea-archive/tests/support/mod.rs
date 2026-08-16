@@ -31,7 +31,13 @@ use ea_format::{
     EAG_PREFIX_V1, ECP_PREFIX_V1, EDS_PREFIX_V1, EIP_PREFIX_V1, ESR_PREFIX_V1, ETB_PREFIX_V1,
     EntryPackageV1, ExactObjectBytes, SignedManifestV1, encode_entry_package,
 };
-use ea_trust::TrustObjectSource;
+use ea_time::TrustedTimeState;
+use ea_trust::{
+    ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistrySelectionCommit,
+    StateStoreError, TrustObjectSource, TrustStateKey, TrustStateSnapshot, TrustStateStore,
+    load_trust_state,
+};
+use ea_types::UnixMillis;
 
 /// Die sechs 9-Byte-Exact-Object-Praefixe aus `crates/ea-format/src/parser.rs`.
 pub const EXACT_OBJECT_PREFIXES_V1: [[u8; 9]; 6] = [
@@ -354,4 +360,197 @@ pub fn signed_entry_package() -> (EntryPackageV1, Vec<u8>) {
 
 fn signer() -> CoseSigner {
     format_support::signer()
+}
+
+/// Die Trust-Objektbytes eines Bestands, in der Reihenfolge des Bestands.
+///
+/// Klassifiziert wird auch hier am Praefix, nie am Pfad — die Fixtures legen
+/// Trust-Objekte bewusst unter wechselnden Hinweisen ab.
+#[must_use]
+pub fn trust_object_bytes(fixture: &ArchiveFixture) -> Vec<Vec<u8>> {
+    fixture
+        .blobs()
+        .iter()
+        .filter(|(_, bytes)| bytes.starts_with(&ETB_PREFIX_V1))
+        .map(|(_, bytes)| bytes.clone())
+        .collect()
+}
+
+/// Die Stelle im `.etb`, an der genau ein Byte verkippt wird, um einen
+/// Parse-Fehlschlag zu erzeugen.
+///
+/// Ein Exact-Objekt ist `[b"EA1\0", typ, version, [], rumpf]`: Byte 0 ist der
+/// Arraykopf, die Bytes 1..9 sind das Praefix, Byte 9 ist der Arraykopf des
+/// Rumpfes `[subtyp, nutzlast, [signaturen]]`, Byte 10 der Textkopf des
+/// Subtyps. Byte 11 ist damit dessen ERSTES Zeichen; `^ 0x01` macht daraus
+/// einen anderen Kleinbuchstaben und damit einen unbekannten Subtyp.
+///
+/// Bewusst eine feste Stelle und keine Suche, genau wie bei
+/// [`MUTATED_EIP_BODY_OFFSET_V1`]: eine Suche wuerde bei einer Layoutaenderung
+/// stillschweigend eine andere Fehlerklasse treffen.
+pub const MUTATED_ETB_SUBTYPE_OFFSET_V1: usize = 11;
+
+/// Der Fehlercode, den [`etb_with_one_mutated_subtype_byte`] erzeugt.
+///
+/// Ein unbekannter Subtyp ist ein Etikettenfehler, kein Formfehler: die Bytes
+/// sind wohlgeformtes CBOR, sie benennen nur eine Objektart, die es nicht gibt.
+pub const MUTATED_ETB_FORMAT_ERROR_CODE_V1: &str = "EA-FORMAT-TAG-MISMATCH";
+
+/// Ein `.etb` mit genau EINEM verkippten Byte im Subtyp.
+///
+/// Das Exact-Object-Praefix bleibt unangetastet: die Bytes sind weiterhin ein
+/// Archivobjekt nach `design.md` §11.4 und muessen als Quarantaenefall mit
+/// Grund `malformed` erscheinen — und gerade NICHT im Trust-Port.
+#[must_use]
+pub fn etb_with_one_mutated_subtype_byte(template: &[u8]) -> Vec<u8> {
+    assert!(
+        template.starts_with(&ETB_PREFIX_V1),
+        "the template must be an exact trust object"
+    );
+    let mut mutated = template.to_vec();
+    assert_eq!(
+        mutated[9], 0x83,
+        "the trust body must be a three-element array"
+    );
+    assert!(
+        (0x61..=0x77).contains(&mutated[10]),
+        "the subtype must be a short CBOR text string"
+    );
+    mutated[MUTATED_ETB_SUBTYPE_OFFSET_V1] ^= 0x01;
+
+    assert_eq!(
+        mutated.len(),
+        template.len(),
+        "the mutation must not change the byte length"
+    );
+    assert!(
+        mutated.starts_with(&ETB_PREFIX_V1),
+        "the mutation must leave the exact object prefix intact"
+    );
+    let error = ea_format::decode_exact_object(&mutated)
+        .expect_err("the mutated trust object must fail to parse");
+    assert_eq!(
+        error.code(),
+        MUTATED_ETB_FORMAT_ERROR_CODE_V1,
+        "the pinned mutation offset must keep producing the pinned format error"
+    );
+    mutated
+}
+
+/// Ein Bestand, der `count` Abwandlungen EINES Trust-Objekts liefert.
+///
+/// Erzeugt die Bytes waehrend des Durchlaufs, statt sie alle abzulegen — genau
+/// wie `RepeatingSource` in `tests/inventory.rs`. Verkippt werden die letzten
+/// drei Bytes, also die rohe Ed25519-Signatur am Ende der COSE-Struktur: das
+/// laesst die Bytes parsbar (die Signatur wird beim Parsen nicht kryptografisch
+/// geprueft), gibt aber jeder Abwandlung einen eigenen Objekthash.
+pub struct VariedTrustObjectSource {
+    template: Vec<u8>,
+    count: usize,
+}
+
+impl VariedTrustObjectSource {
+    /// # Panics
+    ///
+    /// Wenn `template` kein Exact-Trust-Objekt ist oder `count` mehr
+    /// Abwandlungen verlangt, als drei Bytes unterscheiden koennen.
+    #[must_use]
+    pub fn new(template: Vec<u8>, count: usize) -> Self {
+        assert!(
+            template.starts_with(&ETB_PREFIX_V1),
+            "the template must be an exact trust object"
+        );
+        assert!(
+            count <= 1 << 24,
+            "three counter bytes distinguish at most 2^24 variants"
+        );
+        Self { template, count }
+    }
+}
+
+impl ArchiveSource for VariedTrustObjectSource {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        let tail = self.template.len() - 3;
+        let mut bytes = self.template.clone();
+        for index in 0..self.count {
+            bytes[tail..].copy_from_slice(&[
+                self.template[tail] ^ u8::try_from((index >> 16) & 0xff).unwrap(),
+                self.template[tail + 1] ^ u8::try_from((index >> 8) & 0xff).unwrap(),
+                self.template[tail + 2] ^ u8::try_from(index & 0xff).unwrap(),
+            ]);
+            visitor(ArchiveBlob::new(ea_archive::REGISTRY_EVENTS_DIR_V1, &bytes))?;
+        }
+        Ok(())
+    }
+}
+
+/// Der Zustandsspeicher der Fixtures: laedt genau einen Stand und schreibt nie.
+///
+/// `verify_trust` verlangt einen [`TrustStateSnapshot`], und der entsteht
+/// ausschliesslich ueber [`load_trust_state`]. Der Trust-Support baut dafuer
+/// einen eigenen, privaten Speicher; hier steht der kleinste, der die
+/// Archivtests bedient. Alle Schreibwege sind bewusst unerreichbar: ein
+/// Archivtest darf keinen Zustand fortschreiben.
+struct FixtureStateStore {
+    key: TrustStateKey,
+    record: Option<PersistedTrustRecord>,
+}
+
+impl TrustStateStore for FixtureStateStore {
+    fn load(&mut self, key: TrustStateKey) -> Result<PersistedTrustRecord, StateStoreError> {
+        if key != self.key {
+            return Err(StateStoreError::Unavailable);
+        }
+        self.record.take().ok_or(StateStoreError::Unavailable)
+    }
+
+    fn commit_independent_time(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &IndependentTimeCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn clock_release_consumed(
+        &mut self,
+        _key: &ClockReleaseReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn commit_registry_selection(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &RegistrySelectionCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+}
+
+/// Der Zeitboden der Fixtures, gleich dem des Trust-Supports.
+pub const FIXTURE_TIME_FLOOR_V1: i64 = 1_700_000_000_000;
+
+/// Ein Zustandsstand OHNE gepinnten Registrierungskopf.
+///
+/// Der Schluessel stammt aus [`trust_support::state_key`], damit die
+/// Organisationskennung zum Anker der Fixtures passt — `verify_trust` weist
+/// jeden Stand ab, dessen Organisation nicht die des Ankers ist.
+#[must_use]
+pub fn unpinned_snapshot() -> TrustStateSnapshot {
+    let key = trust_support::state_key();
+    let mut store = FixtureStateStore {
+        key,
+        record: Some(PersistedTrustRecord::new(
+            17,
+            TrustedTimeState::initial(UnixMillis::new(FIXTURE_TIME_FLOOR_V1)),
+            None,
+        )),
+    };
+    load_trust_state(&mut store, key).expect("the fixture state store must load exactly once")
 }
