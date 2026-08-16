@@ -2417,6 +2417,47 @@ fn verification_report_expresses_quarantine_and_server_confirmation() {
         "serverConfirmation must be mandatory so it cannot be silently omitted"
     );
 
+    // Das code-Muster MUSS JEDEN real erzeugbaren Fehlercode akzeptieren. FormatError
+    // delegiert an CborError und traegt eigene EA-GRANT-Codes; ein auf EA-FORMAT-
+    // verengtes Muster machte diese Faelle unberichtbar. Die Codes werden aus den
+    // Quellen extrahiert, damit der Test auch kuenftige Codes erfasst.
+    let format_error = jsonschema::validator_for(&serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": schema["$defs"].clone(),
+        "$ref": "#/$defs/formatError"
+    }))
+    .unwrap();
+    let mut codes = Vec::new();
+    for source in [
+        include_str!("../../../crates/ea-format/src/object.rs"),
+        include_str!("../../../crates/ea-cbor/src/lib.rs"),
+    ] {
+        for line in source.lines() {
+            let Some((_, rest)) = line.split_once("=> \"EA-") else {
+                continue;
+            };
+            let Some((code, _)) = rest.split_once('"') else {
+                continue;
+            };
+            codes.push(format!("EA-{code}"));
+        }
+    }
+    assert!(
+        codes.len() >= 30,
+        "expected to extract every error code, found {}",
+        codes.len()
+    );
+    for code in codes {
+        let candidate = serde_json::json!({
+            "objectHash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "code": code
+        });
+        assert!(
+            format_error.is_valid(&candidate),
+            "formatError.code must accept the real error code {code}"
+        );
+    }
+
     // Quarantaene ist fail-closed: das Schema erzwingt einen Grund je Objekt.
     let quarantined = &schema["$defs"]["quarantinedObject"];
     for field in ["objectHash", "reason"] {

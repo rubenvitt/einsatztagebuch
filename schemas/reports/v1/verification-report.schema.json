@@ -125,7 +125,7 @@
       "required": ["objectHash", "code"],
       "properties": {
         "objectHash": { "$ref": "#/$defs/hash" },
-        "code": { "type": "string", "pattern": "^EA-FORMAT-[A-Z0-9-]+$" }
+        "code": { "type": "string", "pattern": "^EA-[A-Z0-9-]+$" }
       }
     },
     "quarantinedObject": {
