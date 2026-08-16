@@ -2513,6 +2513,55 @@ fn gate_order_event_vocabulary_is_pinned_across_design_and_plan() {
         design.contains("`hpke-open`"),
         "design must name the decapsulation step that follows the nine gates"
     );
+
+    // `GATE_ORDER_V1` ist die einzige Quelle der neun Bezeichner im Code. Der
+    // Vergleich ist GEORDNET, nicht mengenwertig: die Reihenfolge IST der
+    // Contract aus §14.1.
+    let gates = include_str!("../../../crates/ea-verify/src/gates.rs");
+    let pinned = const_array_string_literals(gates, "GATE_ORDER_V1");
+    assert_eq!(
+        pinned,
+        GATE_EVENTS.to_vec(),
+        "crates/ea-verify/src/gates.rs must carry the nine gate events of design §14.1 in order"
+    );
+
+    // Die Entkapselung steht ausserhalb des Arrays: sie ist kein Gate. Ein
+    // dateiweites `!gates.contains("hpke-open")` waere falsch — die Konstante
+    // DECAPSULATION_EVENT_V1 traegt genau dieses Literal.
+    assert!(
+        !pinned.contains(&"hpke-open"),
+        "hpke-open must not be part of GATE_ORDER_V1"
+    );
+    assert!(
+        gates.contains("pub const DECAPSULATION_EVENT_V1: &str = \"hpke-open\";"),
+        "gates.rs must name the decapsulation event outside the gate array"
+    );
+}
+
+/// Liest die Zeichenkettenliterale aus dem Arrayrumpf von `pub const NAME`.
+///
+/// Rustfmt bricht die neun Bezeichner auf je eine Zeile um, weshalb hier nicht
+/// zeilenweise, sondern ueber den ausgeschnittenen Rumpf gelesen wird. Der
+/// Rumpf enthaelt weder maskierte Anfuehrungszeichen noch Rohzeichenketten,
+/// das Alternieren an `"` ist daher exakt. Die Reihenfolge bleibt erhalten.
+fn const_array_string_literals<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+    let needle = format!("pub const {name}");
+    let at = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("gates.rs must declare {name}"));
+    let tail = &source[at..];
+    let body_at = tail
+        .find("= [")
+        .unwrap_or_else(|| panic!("{name} must be initialised with an array literal"));
+    let body_end = body_at
+        + tail[body_at..]
+            .find("];")
+            .unwrap_or_else(|| panic!("{name} must be terminated with `];`"));
+    tail[body_at..body_end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .collect()
 }
 
 /// Die neunzehn Layoutpfade aus `design.md` §11.4 sind der einzige Bestand von
