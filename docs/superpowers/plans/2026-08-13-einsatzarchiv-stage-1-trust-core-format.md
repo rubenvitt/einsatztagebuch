@@ -1497,7 +1497,9 @@ git commit -m "feat(core): verify anchors registry and trusted time"
 
 Drei konkrete Fallen: die dateisystemgestützte `ArchiveSource`-Implementierung gehört hinter ein Nicht-Default-Feature oder außerhalb der Crate; Zeit wird als Parameter übergeben statt über `SystemTime::now()` bezogen; JSON-Schema-Validierung des Reports gehört NICHT in `ea-verify`, weil `jsonschema` `getrandom 0.3.4` in den wasm-Graph zöge — und 0.3.4 benötigt auf `wasm32` zusätzlich das `--cfg getrandom_backend`, das in `docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md` bewusst nicht gesetzt wird.
 
-**Bekannter Defekt, in diesem Task zu lösen:** `schemas/reports/v1/verification-report.schema.json` kennt kein `formatErrors` und kein Quarantäne-Array, während Step 3 unten Quarantäne erzeugt. Der Zustand MUSS berichtbar werden, DARF aber niemals fail-open sein: unerkanntes Trust-Material führt nie zu einem Archivergebnis `valid`. Heute billig; nach dem Einfrieren der byteidentischen CLI-Baselines in Task 10 teuer.
+**Reportform, verbindlich** (geschlossen in `docs/superpowers/plans/2026-08-16-einsatzarchiv-task-9-phase-a-report-and-gate-order.md`). `VerificationReportV1` trägt `formatErrors` und `quarantinedObjects` — Grund aus dem geschlossenen Enum `malformed`/`duplicate`/`conflicting`/`unattributable` — sowie je Objektergebnis `serverConfirmation` mit den Werten `serverConfirmed`/`notServerConfirmed` als eigene Dimension **neben** `result`. Die Server-Bestätigung wird ausdrücklich NICHT in `result` hineingefaltet; `design.md` §17.4 verbietet die Vermischung. Fail-closed bleibt unangetastet: ein quarantänisiertes Objekt DARF NIEMALS dazu führen, dass der Bestand als vollständig verifiziert dargestellt wird, und `notServerConfirmed` ist kein Mangel. Die JSON-Schema-Validierung des Reports gehört NICHT in `ea-verify` — `jsonschema` zöge `getrandom 0.3.4` in den wasm-Graph — sondern in `xtask` und die Tests.
+
+**Adapterverhältnis, verbindlich.** `ArchiveSource` ist der neue, breitere Port über **alle** Archivbytes; `TrustObjectSource` (`crates/ea-trust/src/source.rs`) bleibt unverändert der schmale, archiv-agnostische Trust-Port. `ea-archive` liefert den offiziellen `ArchiveInventory`-Adapter, der `TrustObjectSource` **implementiert** — es wird nichts dupliziert, und `ea-trust` erfährt nichts über Archivlayout. Der Adapter ruft den Visitor direkt beim Durchlaufen seines beschränkten Trust-Index auf, hält vor dem nächsten Element an, sobald der Visitor einen Fehler liefert, und baut ausdrücklich **keinen** zwischenzeitlichen unbeschränkten `Vec` von Hashes (`2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md:614-617`). Die Schranken `MAX_TRUST_OBJECTS_V1` und `MAX_TOTAL_TRUST_OBJECT_BYTES_V1` gelten unverändert und werden nicht neu definiert.
 
 - [ ] **Step 1: Write verification-order and filename-independence tests**
 
@@ -1510,12 +1512,38 @@ fn verification_stops_before_grant_or_decryption_on_bad_signature() {
 }
 
 #[test]
+fn a_fully_valid_entry_records_every_gate_in_order_before_decryption() {
+    let events = RecordingVerifier::run(fixtures::complete_valid_entry()).unwrap().events;
+    assert_eq!(
+        events,
+        [
+            "format",
+            "trust",
+            "registry",
+            "manifest-signature",
+            "chain-position",
+            "grant-plan",
+            "receipt",
+            "evidence",
+            "recipient-grant",
+            "hpke-open",
+        ]
+    );
+}
+
+#[test]
 fn renamed_objects_rebuild_the_same_chain() {
-    let a = verify_archive(&fixtures::canonical_paths(), fixtures::anchor(), VerifyOptions::default()).unwrap();
-    let b = verify_archive(&fixtures::randomized_paths(), fixtures::anchor(), VerifyOptions::default()).unwrap();
+    let canonical = fixtures::canonical_paths();
+    let randomized = fixtures::randomized_paths();
+    let a = verify_archive(&canonical, fixtures::anchor(), VerifyOptions::default()).unwrap();
+    let b = verify_archive(&randomized, fixtures::anchor(), VerifyOptions::default()).unwrap();
     assert_eq!(a.chain_head(), b.chain_head());
 }
 ```
+
+Die neun Gate-Bezeichner sind normativ in `design.md` §14.1 festgelegt und gelten unverändert im Browser (`2026-08-15-einsatzarchiv-web-reader-design.md` §9). `hpke-open` ist kein Gate, sondern die auf das neunte folgende Entkapselung.
+
+**Signaturfestlegung:** `fixtures::canonical_paths()` und `fixtures::randomized_paths()` liefern je einen Typ, der `ArchiveSource` implementiert — keine `Vec<PathBuf>`. Der Aufruf `&canonical` ist damit die Unsize-Coercion auf `&dyn ArchiveSource`, kein Typwechsel gegenüber der Signatur in Step 3.
 
 - [ ] **Step 2: Run focused tests and verify failure**
 
@@ -1591,6 +1619,11 @@ fn report_is_byte_identical_without_runtime_metadata() {
     let second = run_report(fixtures::archive(), fixtures::anchor(), false);
     assert_eq!(first, second);
 }
+
+// Die eingefrorene Baseline enthaelt formatErrors, quarantinedObjects und je
+// Objektergebnis serverConfirmation. Sie wird erst eingefroren, nachdem Phase A
+// (2026-08-16-einsatzarchiv-task-9-phase-a-report-and-gate-order.md) diese
+// Felder geschlossen hat.
 
 #[test]
 fn report_is_hashed_and_only_signed_by_an_explicit_authorized_role() {

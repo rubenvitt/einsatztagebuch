@@ -2062,9 +2062,22 @@ fn report_schemas_compile_and_reject_unknown_properties() {
             "entryHash": "0000000000000000000000000000000000000000000000000000000000000000"
         },
         "registryVersions": [],
-        "objectResults": [],
+        "objectResults": [{
+            "objectHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "objectType": 1,
+            "result": "valid",
+            "serverConfirmation": "notServerConfirmed"
+        }],
         "authorizedDestructions": [],
         "gaps": [],
+        "formatErrors": [{
+            "objectHash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "code": "EA-FORMAT-UNKNOWN-VERSION"
+        }],
+        "quarantinedObjects": [{
+            "objectHash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "reason": "conflicting"
+        }],
         "signatureErrors": [],
         "evidenceErrors": [],
         "decryptionErrors": [],
@@ -2075,9 +2088,27 @@ fn report_schemas_compile_and_reject_unknown_properties() {
     let mut unknown_root = valid_report.clone();
     unknown_root["unknown"] = serde_json::json!(true);
     assert!(!verification.is_valid(&unknown_root));
-    let mut unknown_nested = valid_report;
+    let mut unknown_nested = valid_report.clone();
     unknown_nested["chainHead"]["hostPath"] = serde_json::json!("/tmp/archive");
     assert!(!verification.is_valid(&unknown_nested));
+
+    // Die Server-Bestaetigung ist Pflicht: sie darf nicht still entfallen.
+    let mut missing_confirmation = valid_report.clone();
+    missing_confirmation["objectResults"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("serverConfirmation");
+    assert!(!verification.is_valid(&missing_confirmation));
+
+    // Sie ist orthogonal: kein dritter result-Wert.
+    let mut folded_confirmation = valid_report.clone();
+    folded_confirmation["objectResults"][0]["result"] = serde_json::json!("notServerConfirmed");
+    assert!(!verification.is_valid(&folded_confirmation));
+
+    // Quarantaene traegt einen Grund aus der geschlossenen Menge, keinen Freitext.
+    let mut free_text_reason = valid_report;
+    free_text_reason["quarantinedObjects"][0]["reason"] = serde_json::json!("weird bytes");
+    assert!(!verification.is_valid(&free_text_reason));
 
     let inventory_schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../schemas/reports/v1/key-inventory.schema.json"
@@ -2336,4 +2367,101 @@ fn later_stage_plans_reference_the_web_reader_spec() {
             "{name} must mark its worktree line as a historical record"
         );
     }
+}
+
+#[test]
+fn verification_report_expresses_quarantine_and_server_confirmation() {
+    let raw = include_str!("../../../schemas/reports/v1/verification-report.schema.json");
+    let schema: serde_json::Value = serde_json::from_str(raw).unwrap();
+    jsonschema::meta::validate(&schema).unwrap();
+
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    for field in ["formatErrors", "quarantinedObjects"] {
+        assert!(
+            required.contains(&field),
+            "verification report must require {field}"
+        );
+    }
+
+    // Server-Bestaetigung ist eine eigene Dimension, KEIN dritter result-Wert.
+    let object_result = &schema["$defs"]["objectResult"];
+    let result_values: Vec<&str> = object_result["properties"]["result"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        result_values,
+        ["valid", "authorizedDestroyed"],
+        "server confirmation must not be folded into the verification result"
+    );
+    let confirmation: Vec<&str> = object_result["properties"]["serverConfirmation"]["enum"]
+        .as_array()
+        .expect("objectResult must carry the server confirmation dimension")
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(confirmation, ["serverConfirmed", "notServerConfirmed"]);
+    assert!(
+        object_result["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("serverConfirmation")),
+        "serverConfirmation must be mandatory so it cannot be silently omitted"
+    );
+
+    // Quarantaene ist fail-closed: das Schema erzwingt einen Grund je Objekt.
+    let quarantined = &schema["$defs"]["quarantinedObject"];
+    for field in ["objectHash", "reason"] {
+        assert!(
+            quarantined["required"]
+                .as_array()
+                .expect("quarantinedObject definition must exist")
+                .iter()
+                .any(|value| value.as_str() == Some(field)),
+            "quarantinedObject must require {field}"
+        );
+    }
+}
+
+#[test]
+fn gate_order_event_vocabulary_is_pinned_across_design_and_plan() {
+    const GATE_EVENTS: [&str; 9] = [
+        "format",
+        "trust",
+        "registry",
+        "manifest-signature",
+        "chain-position",
+        "grant-plan",
+        "receipt",
+        "evidence",
+        "recipient-grant",
+    ];
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+    for event in GATE_EVENTS {
+        assert!(
+            design.contains(&format!("`{event}`")),
+            "design §14.1 must name the gate event {event}"
+        );
+        assert!(
+            stage_one.contains(&format!("\"{event}\"")),
+            "stage 1 task 9 must pin the gate event {event}"
+        );
+    }
+    // Die Entkapselung liegt hinter dem letzten Gate und ist selbst kein Gate.
+    assert!(
+        design.contains("`hpke-open`"),
+        "design must name the decapsulation step that follows the nine gates"
+    );
 }

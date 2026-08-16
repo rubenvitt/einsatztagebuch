@@ -1562,17 +1562,25 @@ Der Writer zeigt ausschließlich folgende Sync-Zustände:
 
 Vor der Entschlüsselung prüft der Reader:
 
-1. Format und Parserlimits,
-2. Organisations-Root und Trust-Event-Kette,
-3. gebundenen Registry-Head, Sequenz-Lease und Writer-Zertifikat zur Eintragssequenz,
-4. `signedManifest`, COSE-Signatur, `entryHash`, `.eip`-`objectHash` und Ciphertext-Hash,
-5. Sequenz, Vorgänger-Hash und gegebenenfalls Writer-Transition-Ereignis,
-6. initialen Grant-Plan und verpflichtenden Recovery-Grant,
-7. Server-Receipt und Checkpoints, sofern vorhanden,
-8. Evidence-Objekte und Zeitstempel, sofern gefordert,
-9. eigenen Grant, dessen Aussteller-Capability, Authorization, Nutzungsfrist gemäß `effectiveNow` und `entryHash`.
+1. Format und Parserlimits — `format`,
+2. Organisations-Root und Trust-Event-Kette — `trust`,
+3. gebundenen Registry-Head, Sequenz-Lease und Writer-Zertifikat zur Eintragssequenz — `registry`,
+4. `signedManifest`, COSE-Signatur, `entryHash`, `.eip`-`objectHash` und Ciphertext-Hash — `manifest-signature`,
+5. Sequenz, Vorgänger-Hash und gegebenenfalls Writer-Transition-Ereignis — `chain-position`,
+6. initialen Grant-Plan und verpflichtenden Recovery-Grant — `grant-plan`,
+7. Server-Receipt und Checkpoints, sofern vorhanden — `receipt`,
+8. Evidence-Objekte und Zeitstempel, sofern gefordert — `evidence`,
+9. eigenen Grant, dessen Aussteller-Capability, Authorization, Nutzungsfrist gemäß `effectiveNow` und `entryHash` — `recipient-grant`.
 
 Erst danach entkapselt er den CEK und entschlüsselt lokal. Ein unbekanntes, ungültiges oder unvollständiges Objekt wird isoliert, nicht indiziert und nicht als normaler Einsatz geöffnet.
+
+Die Entkapselung wird als `hpke-open` protokolliert. Sie ist **kein** Gate: sie folgt auf das neunte, und keine Verifikationsentscheidung hängt an ihr. Ein Protokoll, in dem `hpke-open` vor einem der neun Bezeichner erscheint oder in dem ein Bezeichner fehlt, ist ein Implementierungsfehler und MUSS als Testfehlschlag sichtbar werden.
+
+Diese Bezeichner sind normativ und gelten unverändert im Browser (`2026-08-15-einsatzarchiv-web-reader-design.md` §9). Sie sind Protokollnamen für Tests und Fehlerberichte, nicht Teil der Statussprache aus §17.4 und nicht in der Oberfläche darzustellen.
+
+Findet Schritt 7 für ein ansonsten gültiges Objekt kein Receipt, ist das Objekt `verifiziert` und zugleich `nicht server-bestätigt` (§17.4). Der Verifikationsbericht führt beide Dimensionen getrennt: `result` bleibt das Verifikationsergebnis, `serverConfirmation` die Bestätigungsdimension. Im Datei-Modus des Web-Readers ist `notServerConfirmed` der Regelfall und DARF NICHT als Mangel dargestellt werden.
+
+Ein isoliertes Objekt verschwindet nicht aus dem Bericht: der Verifikationsbericht führt `formatErrors` und `quarantinedObjects` mit einem Grund aus der geschlossenen Menge `malformed`, `duplicate`, `conflicting`, `unattributable`. Fail-closed bleibt davon unberührt — ein isoliertes Objekt DARF NIEMALS dazu führen, dass der Bestand als vollständig verifiziert dargestellt wird.
 
 Fehlt der eigene Grant bei ansonsten gültigem Paket, lautet der sichtbare Verifikationszustand `fehlender Grant`. Der Eintrag bleibt in der technischen Kettenansicht sichtbar, wird nicht entschlüsselt oder fachlich indiziert und darf nicht mit `unbekannter Schlüssel` oder einer Kettenlücke zusammengefasst werden.
 
