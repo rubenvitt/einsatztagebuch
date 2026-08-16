@@ -113,6 +113,26 @@ impl SelectedRegistryHead {
             .map(|certificate| &certificate.fields)
     }
 
+    /// Every certificate active at the proposed sequence, ascending by
+    /// `CertificateHash`.
+    ///
+    /// Gate `grant-plan` (design.md §14.1 step 6) has to reconstruct the initial
+    /// grant plan, which needs the *set* of active recipients — the point
+    /// lookups above cannot answer that. The order is deterministic so a
+    /// reconstructed plan is byte-stable.
+    ///
+    /// Callers decide which of these certificates are grant recipients: a
+    /// certificate whose `kem_key_thumbprint` is `None` cannot receive a key
+    /// envelope and is not part of a grant plan.
+    pub fn active_certificates(
+        &self,
+    ) -> impl Iterator<Item = (CertificateHash, &DeviceCertificateFieldsV1)> {
+        self.inner
+            .candidate_state
+            .active_certificates(self.inner.proposed_sequence)
+            .map(|(hash, certificate)| (hash, &certificate.fields))
+    }
+
     #[must_use]
     pub fn active_capabilities(&self, certificate_hash: CertificateHash) -> Option<&[String]> {
         self.active_certificate_fields(certificate_hash)

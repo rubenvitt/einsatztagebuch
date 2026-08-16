@@ -17,6 +17,7 @@
     "gaps",
     "formatErrors",
     "quarantinedObjects",
+    "nonObjectFileCount",
     "signatureErrors",
     "evidenceErrors",
     "decryptionErrors",
@@ -71,6 +72,11 @@
       "x-ea-sort-key": [{ "path": "objectHash", "encoding": "hex-bytes" }],
       "x-ea-unique-key": ["objectHash"],
       "items": { "$ref": "#/$defs/formatError" }
+    },
+    "nonObjectFileCount": {
+      "description": "Byte blobs without the exact-object prefix. They are neither archive objects nor quarantined; the count keeps them visible.",
+      "type": "integer",
+      "minimum": 0
     },
     "quarantinedObjects": {
       "description": "Unique quarantined objects sorted by objectHash bytewise ascending.",

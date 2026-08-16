@@ -1003,3 +1003,76 @@ fn selected_sequence_max_clips_without_overflow() {
     )
     .unwrap();
 }
+
+/// Ohne Aufzaehlung ist der initiale Grant-Plan (design.md §14.1 Gate 6,
+/// `grant-plan`) nicht rekonstruierbar: er braucht die MENGE aller zur
+/// Eintragssequenz aktiven Empfaenger, waehrend `active_certificate_fields`
+/// und `active_capabilities` nur Punktabfragen sind.
+#[test]
+fn a_selected_head_enumerates_every_active_certificate_deterministically() {
+    let selected_sequence = ChainSequence::new(120);
+    let (selected, hashes) = selected_fixture(selected_sequence);
+
+    let enumerated: Vec<CertificateHash> = selected
+        .active_certificates()
+        .map(|(hash, _)| hash)
+        .collect();
+
+    // Deterministisch: streng aufsteigend nach CertificateHash, keine Duplikate.
+    let mut sorted = enumerated.clone();
+    sorted.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    sorted.dedup_by(|left, right| left.as_bytes() == right.as_bytes());
+    assert_eq!(
+        enumerated.len(),
+        sorted.len(),
+        "enumeration must be duplicate-free"
+    );
+    for (position, hash) in enumerated.iter().enumerate() {
+        assert_eq!(
+            hash.as_bytes(),
+            sorted[position].as_bytes(),
+            "enumeration must be sorted bytewise ascending"
+        );
+    }
+
+    // Die Aufzaehlung stimmt exakt mit der Punktabfrage ueberein — in beide
+    // Richtungen, sonst waere sie eine zweite, driftende Wahrheit.
+    for (hash, fields) in selected.active_certificates() {
+        let point = selected
+            .active_certificate_fields(hash)
+            .expect("every enumerated certificate must resolve pointwise");
+        assert_eq!(
+            point.certificate_kind, fields.certificate_kind,
+            "enumeration and point lookup must agree"
+        );
+    }
+    for candidate in [
+        hashes.reader,
+        hashes.key_approver,
+        hashes.recovery,
+        hashes.historical,
+        hashes.server,
+        hashes.writer,
+    ] {
+        assert!(
+            enumerated
+                .iter()
+                .any(|hash| hash.as_bytes() == candidate.as_bytes()),
+            "an active certificate must appear in the enumeration"
+        );
+    }
+
+    // Der abgeloeste Writer ist nicht aktiv und DARF nicht erscheinen.
+    assert!(
+        selected
+            .active_certificate_fields(hashes.old_writer)
+            .is_none(),
+        "fixture precondition: the superseded writer is inactive"
+    );
+    assert!(
+        !enumerated
+            .iter()
+            .any(|hash| hash.as_bytes() == hashes.old_writer.as_bytes()),
+        "an inactive certificate must never be enumerated"
+    );
+}

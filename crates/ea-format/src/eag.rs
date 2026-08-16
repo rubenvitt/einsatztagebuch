@@ -200,9 +200,7 @@ impl GrantBodyV1 {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct GrantV1 {
-    kind: GrantKindV1,
-    purpose: GrantPurposeV1,
-    exact_grant_body: Vec<u8>,
+    grant_body: GrantBodyV1,
     issuer_signature: Vec<u8>,
     exact_body: Vec<u8>,
 }
@@ -212,27 +210,36 @@ impl GrantV1 {
         validate_issuer_signature(&grant_body, &issuer_signature)?;
         let exact_body = encode_grant_wrapper(grant_body.exact_bytes(), &issuer_signature)?;
         Ok(Self {
-            kind: grant_body.fields.kind,
-            purpose: grant_body.fields.purpose,
-            exact_grant_body: grant_body.exact,
+            grant_body,
             issuer_signature,
             exact_body,
         })
     }
 
+    /// The verified grant body, including every field the verification gates
+    /// `grant-plan`, `recipient-grant` and the following `hpke-open` need.
+    ///
+    /// The body is only reachable through a parsed or constructed [`GrantV1`],
+    /// so its fields have always passed [`GrantBodyV1::new`]'s correlation
+    /// checks and the issuer-signature binding.
+    #[must_use]
+    pub const fn grant_body(&self) -> &GrantBodyV1 {
+        &self.grant_body
+    }
+
     #[must_use]
     pub const fn kind(&self) -> GrantKindV1 {
-        self.kind
+        self.grant_body.fields.kind
     }
 
     #[must_use]
     pub const fn purpose(&self) -> GrantPurposeV1 {
-        self.purpose
+        self.grant_body.fields.purpose
     }
 
     #[must_use]
     pub fn exact_grant_body(&self) -> &[u8] {
-        &self.exact_grant_body
+        self.grant_body.exact_bytes()
     }
 
     #[must_use]
@@ -254,9 +261,7 @@ pub(crate) fn parse_body(input: &[u8]) -> Result<GrantV1, FormatError> {
     finish(&decoder, input)?;
     validate_issuer_signature(&grant_body, issuer_signature)?;
     Ok(GrantV1 {
-        kind: grant_body.fields.kind,
-        purpose: grant_body.fields.purpose,
-        exact_grant_body: exact_grant_body.to_vec(),
+        grant_body,
         issuer_signature: issuer_signature.to_vec(),
         exact_body: input.to_vec(),
     })

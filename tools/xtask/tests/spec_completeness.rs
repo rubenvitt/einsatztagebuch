@@ -2078,6 +2078,7 @@ fn report_schemas_compile_and_reject_unknown_properties() {
             "objectHash": "3333333333333333333333333333333333333333333333333333333333333333",
             "reason": "conflicting"
         }],
+        "nonObjectFileCount": 3,
         "signatureErrors": [],
         "evidenceErrors": [],
         "decryptionErrors": [],
@@ -2381,12 +2382,19 @@ fn verification_report_expresses_quarantine_and_server_confirmation() {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect();
-    for field in ["formatErrors", "quarantinedObjects"] {
+    for field in ["formatErrors", "quarantinedObjects", "nonObjectFileCount"] {
         assert!(
             required.contains(&field),
             "verification report must require {field}"
         );
     }
+    // Nicht-Objekt-Bytes sind eine eigene Klasse: sie sind KEINE Quarantaene und
+    // sie sind KEINE Archivobjekte, aber sie bleiben sichtbar. Ohne diese Klasse
+    // quarantaenisiert jedes normkonforme Archiv sein eigenes README-FORMAT.txt.
+    assert_eq!(
+        schema["properties"]["nonObjectFileCount"]["type"].as_str(),
+        Some("integer")
+    );
 
     // Server-Bestaetigung ist eine eigene Dimension, KEIN dritter result-Wert.
     let object_result = &schema["$defs"]["objectResult"];

@@ -1284,6 +1284,16 @@ Einsatzarchiv/
 
 Dateinamen sind Hinweise, keine Vertrauensquelle. Verifikation und Wiederaufbau leiten Objektart, Identität und Beziehungen aus den Bytes, Hashes und Signaturen ab.
 
+**Was ein Archivobjekt ist.** Das Verzeichnis enthält neben den signierten Objekten auch Beiwerk: `README-FORMAT.txt`, `format/schemas/`, `format/transformations/`, `format/compatibility-matrix.json` und `recovery-reports/`. Diese Bytes tragen kein Exact-Object-Präfix. Die Inventarisierung klassifiziert deshalb in genau drei Klassen:
+
+1. **Archivobjekt** — die Bytes beginnen mit dem 9-Byte-Präfix eines Exact Object. Sie werden geparst; schlägt das fehl, sind sie *isoliert* mit einem Grund aus der geschlossenen Menge `malformed`, `duplicate`, `conflicting`, `unattributable`.
+2. **Kein Archivobjekt** — die Bytes tragen dieses Präfix nicht. Sie sind weder Archivobjekt noch isoliert, sondern werden gezählt und als `nonObjectFileCount` im Bericht ausgewiesen.
+3. Der **Trust Anchor** ist nie Teil dieser Klassifikation. Er wird unabhängig verwahrt und der Verifikation als Parameter übergeben; archiventhaltenes Vertrauen ist niemals TOFU.
+
+Die Klassifikation entscheidet ausschließlich das Präfix, nie der Dateiname oder das Verzeichnis. Ein gültiges Objekt, das unter `README-FORMAT.txt` abgelegt wird, ist damit ein Archivobjekt und wird vollständig verifiziert; eine Textdatei unter `entries/` ist keines. Das ist beabsichtigt: die Klasse ist nicht durch Umbenennen wählbar.
+
+Die Klasse *kein Archivobjekt* schwächt fail-closed nicht. Jede Vertrauens- und Kettenaussage stammt ausschließlich aus signierten Exact Objects; Beiwerk kann keine solche Aussage tragen und keine vortäuschen. Ohne diese Klasse würde dagegen jedes normkonforme Archiv sein eigenes `README-FORMAT.txt` isolieren und könnte nie als vollständig verifiziert gelten.
+
 Ein `.eds` enthält die exakten ursprünglichen `signedManifest`- und Writer-Signaturbytes, `entryHash`, `ciphertextHash`, ursprünglichen `.eip`-`objectHash`, `destructionId` und den Hash der `DestructionAuthorization`. Der Stub enthält weder Ciphertext noch CEK/Grants und verändert keine Kettenidentität. Das spätere `destructionEvidence` referenziert den `objectHash` des Stubs; der Stub referenziert dieses spätere Objekt bewusst nicht, damit kein Hash-Zirkel entsteht. Er macht den Zustand **autorisiert vernichtet** prüfbar; ein fehlendes `.eip` ohne gültigen Stub bleibt eine ungeklärte Kettenlücke.
 
 ### 11.5 Archivgesundheit

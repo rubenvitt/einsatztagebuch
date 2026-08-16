@@ -132,6 +132,22 @@ impl PreviousHeadState {
         Some(certificate)
     }
 
+    /// Every certificate active at `at_sequence`, ascending by `CertificateHash`.
+    ///
+    /// The order comes from the backing `BTreeMap`, so it is deterministic
+    /// without an extra sort. Each item is filtered through
+    /// [`Self::active_certificate`], which keeps the enumeration and the point
+    /// lookup from drifting into two different truths.
+    pub(crate) fn active_certificates(
+        &self,
+        at_sequence: ChainSequence,
+    ) -> impl Iterator<Item = (CertificateHash, &ActiveCertificate)> {
+        self.certificates.keys().filter_map(move |hash| {
+            self.active_certificate(*hash, at_sequence)
+                .map(|certificate| (*hash, certificate))
+        })
+    }
+
     pub(crate) fn active_operator_binding(
         &self,
         object_hash: ObjectHash,
