@@ -15,6 +15,9 @@ mod chain;
 mod error;
 mod node;
 
-pub use chain::{ChainBreak, ChainGap, ChainHead, MAX_CHAIN_NODES_V1, VerifiedChain, build_chain};
+pub use chain::{
+    ChainBreak, ChainFork, ChainForkForm, ChainGap, ChainHead, MAX_CHAIN_NODES_V1, VerifiedChain,
+    build_chain,
+};
 pub use error::ChainError;
 pub use node::{ChainNode, ChainNodeKind};

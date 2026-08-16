@@ -4,7 +4,7 @@
 //! ausschliesslich auf `ChainNode`-Werten. Fehler werden ueber
 //! `ChainError::code()` assertiert, nie ueber ihre Formatierung.
 
-use ea_chain::{ChainError, ChainNode, ChainNodeKind, build_chain};
+use ea_chain::{ChainError, ChainForkForm, ChainNode, ChainNodeKind, build_chain};
 use ea_types::{CertificateHash, ChainId, ChainSequence, EntryHash, ObjectHash};
 
 fn chain_id(seed: u8) -> ChainId {
@@ -340,4 +340,200 @@ fn missing_sequences_collapse_into_maximal_intervals_and_a_stub_fills_its_own() 
         ChainSequence::new(u64::MAX - 1),
         "{twins_at_ceiling:?}"
     );
+}
+
+#[test]
+fn both_collision_forms_yield_a_fork_and_stop_the_verified_head() {
+    let chain = chain_id(1);
+
+    // Eine lueckenlose Kette 0..4 als Boden beider Haelften.
+    let base = [
+        node(chain, 0, None, 10, 20, ChainNodeKind::EntryPackage),
+        node(chain, 1, Some(10), 11, 21, ChainNodeKind::EntryPackage),
+        node(chain, 2, Some(11), 12, 22, ChainNodeKind::EntryPackage),
+        node(chain, 3, Some(12), 13, 23, ChainNodeKind::EntryPackage),
+        node(chain, 4, Some(13), 14, 24, ChainNodeKind::EntryPackage),
+    ];
+
+    // 1. SequenceCollision: ein zweites Kind desselben Vorgaengers besetzt
+    //    Sequenz 2. Ein Fork ist ein BEFUND ueber den Bestand, kein Err — ein
+    //    Err koennte das unstrittige Praefix nicht mitfuehren.
+    let mut sequence_input = base.to_vec();
+    sequence_input.push(node(
+        chain,
+        2,
+        Some(11),
+        40,
+        40,
+        ChainNodeKind::EntryPackage,
+    ));
+    let forked = build_chain(chain, &sequence_input).expect("a fork is a finding, not Err");
+
+    assert_eq!(forked.forks().len(), 1, "{forked:?}");
+    let fork = &forked.forks()[0];
+    assert_eq!(fork.form(), ChainForkForm::SequenceCollision, "{forked:?}");
+    assert_eq!(fork.chain_id().as_bytes(), chain.as_bytes(), "{forked:?}");
+    assert_eq!(fork.sequence(), ChainSequence::new(2), "{forked:?}");
+    assert_eq!(
+        fork.competing_entry_hashes()[0].as_bytes(),
+        entry_hash(12).as_bytes(),
+        "{forked:?}"
+    );
+    assert_eq!(
+        fork.competing_entry_hashes()[1].as_bytes(),
+        entry_hash(40).as_bytes(),
+        "{forked:?}"
+    );
+    assert_eq!(
+        fork.competing_object_hashes()[0].as_bytes(),
+        object_hash(22).as_bytes(),
+        "{forked:?}"
+    );
+    assert_eq!(
+        fork.competing_object_hashes()[1].as_bytes(),
+        object_hash(40).as_bytes(),
+        "{forked:?}"
+    );
+
+    // Der Fork erzeugt KEINEN Bruch: Sequenz 3 bindet mit entry_hash(12) einen
+    // real vorhandenen Vorgaenger. Ein Phantombruch waere kein Schoenheitsfehler,
+    // sondern quarantaeniert in Task 16 das unschuldige Objekt der Sequenz 3.
+    assert!(forked.breaks().is_empty(), "{forked:?}");
+    assert!(forked.gaps().is_empty(), "{forked:?}");
+
+    // head() bleibt die hoechste gesehene Sequenz, verified_head() haelt vor
+    // der Forksequenz an.
+    assert_eq!(
+        forked.head().expect("head").chain_sequence(),
+        ChainSequence::new(4),
+        "{forked:?}"
+    );
+    let verified_head = forked
+        .verified_head()
+        .expect("verified head before the fork");
+    assert_eq!(
+        verified_head.chain_sequence(),
+        ChainSequence::new(1),
+        "{forked:?}"
+    );
+    assert_eq!(
+        verified_head.entry_hash().as_bytes(),
+        entry_hash(11).as_bytes(),
+        "{forked:?}"
+    );
+    assert!(!forked.is_fully_verified(), "{forked:?}");
+
+    // Die Eingabereihenfolge aendert den Befund nicht — in voller Wertgleichheit
+    // belegt, nicht nur in der Anzahl.
+    let mut reversed = sequence_input.clone();
+    reversed.reverse();
+    assert_eq!(
+        build_chain(chain, &reversed).expect("a fork is a finding, not Err"),
+        forked
+    );
+
+    // 2. PredecessorCollision: zwei Knoten VERSCHIEDENER Sequenz beanspruchen
+    //    denselben Vorgaenger. Die Erkennung haengt am Vorgaengerhash, nicht an
+    //    der Sequenz.
+    let mut predecessor_input = base.to_vec();
+    predecessor_input.push(node(
+        chain,
+        5,
+        Some(13),
+        15,
+        35,
+        ChainNodeKind::EntryPackage,
+    ));
+    let branched = build_chain(chain, &predecessor_input).expect("a fork is a finding, not Err");
+
+    assert_eq!(branched.forks().len(), 1, "{branched:?}");
+    let branch = &branched.forks()[0];
+    assert_eq!(
+        branch.form(),
+        ChainForkForm::PredecessorCollision,
+        "{branched:?}"
+    );
+    // Die Forksequenz ist die kleinere der beiden strittigen Sequenzen: dort
+    // wird die Kettenidentitaet zum ersten Mal mehrdeutig.
+    assert_eq!(branch.sequence(), ChainSequence::new(4), "{branched:?}");
+    assert_eq!(
+        branch.competing_entry_hashes()[0].as_bytes(),
+        entry_hash(14).as_bytes(),
+        "{branched:?}"
+    );
+    assert_eq!(
+        branch.competing_entry_hashes()[1].as_bytes(),
+        entry_hash(15).as_bytes(),
+        "{branched:?}"
+    );
+    assert_eq!(
+        branch.competing_object_hashes()[0].as_bytes(),
+        object_hash(24).as_bytes(),
+        "{branched:?}"
+    );
+    assert_eq!(
+        branch.competing_object_hashes()[1].as_bytes(),
+        object_hash(35).as_bytes(),
+        "{branched:?}"
+    );
+
+    // Der Knoten auf Sequenz 5 bindet entry_hash(13) statt des Kopfes von
+    // Sequenz 4 — das ist ein echter Bruch, kein Phantom.
+    assert_eq!(branched.breaks().len(), 1, "{branched:?}");
+    assert_eq!(
+        branched.breaks()[0].sequence(),
+        ChainSequence::new(5),
+        "{branched:?}"
+    );
+
+    assert_eq!(
+        branched.head().expect("head").chain_sequence(),
+        ChainSequence::new(5),
+        "{branched:?}"
+    );
+    assert_eq!(
+        branched
+            .verified_head()
+            .expect("verified head before the fork")
+            .chain_sequence(),
+        ChainSequence::new(3),
+        "{branched:?}"
+    );
+    assert!(!branched.is_fully_verified(), "{branched:?}");
+
+    let mut reversed_branch = predecessor_input.clone();
+    reversed_branch.reverse();
+    assert_eq!(
+        build_chain(chain, &reversed_branch).expect("a fork is a finding, not Err"),
+        branched
+    );
+
+    // 3. Ein Fork auf der niedrigsten Sequenz laesst gar kein unstrittiges
+    //    Praefix uebrig: verified_head() ist dann None, nicht der Forkknoten.
+    let split_genesis = build_chain(
+        chain,
+        &[
+            node(chain, 0, None, 10, 20, ChainNodeKind::EntryPackage),
+            node(chain, 0, None, 50, 50, ChainNodeKind::EntryPackage),
+        ],
+    )
+    .expect("a fork is a finding, not Err");
+    assert_eq!(split_genesis.forks().len(), 1, "{split_genesis:?}");
+    assert!(split_genesis.verified_head().is_none(), "{split_genesis:?}");
+    assert_eq!(
+        split_genesis.head().expect("head").chain_sequence(),
+        ChainSequence::new(0),
+        "{split_genesis:?}"
+    );
+
+    // 4. Bytegleiche Knoten sind eine Dublette, kein Fork: sie werden vor der
+    //    Analyse dedupliziert. Die Quarantaene dafuer entsteht in ea-archive.
+    let duplicated = build_chain(
+        chain,
+        &[base[0], base[1], base[2], base[1], base[0], base[2]],
+    )
+    .expect("a duplicate is not a fork");
+    assert!(duplicated.forks().is_empty(), "{duplicated:?}");
+    assert_eq!(duplicated.nodes().len(), 3, "{duplicated:?}");
+    assert!(duplicated.is_fully_verified(), "{duplicated:?}");
 }
