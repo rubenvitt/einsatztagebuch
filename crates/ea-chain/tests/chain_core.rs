@@ -150,3 +150,194 @@ fn genesis_is_sequence_zero_and_each_successor_binds_its_predecessor() {
     // Grenzgroesse.
     assert_eq!(ChainError::NodeLimit.code(), "EA-CHAIN-NODE-LIMIT");
 }
+
+#[test]
+fn missing_sequences_collapse_into_maximal_intervals_and_a_stub_fills_its_own() {
+    let chain = chain_id(1);
+
+    // 1. Fehlen 3, 4 und 5, ist das GENAU EIN Intervall 3..=5, nicht drei.
+    //    Oberhalb der hoechsten gesehenen Sequenz gibt es keine Luecke, weil
+    //    ueber nicht existierende Fortsetzungen keine Aussage moeglich ist.
+    let with_hole = build_chain(
+        chain,
+        &[
+            node(chain, 0, None, 10, 20, ChainNodeKind::EntryPackage),
+            node(chain, 1, Some(10), 11, 21, ChainNodeKind::EntryPackage),
+            node(chain, 2, Some(11), 12, 22, ChainNodeKind::EntryPackage),
+            node(chain, 6, Some(15), 16, 26, ChainNodeKind::EntryPackage),
+            node(chain, 7, Some(16), 17, 27, ChainNodeKind::EntryPackage),
+        ],
+    )
+    .expect("a gap is a finding, not Err");
+    assert!(with_hole.breaks().is_empty(), "{with_hole:?}");
+    assert_eq!(with_hole.gaps().len(), 1, "{with_hole:?}");
+    assert_eq!(
+        with_hole.gaps()[0].chain_id().as_bytes(),
+        chain.as_bytes(),
+        "{with_hole:?}"
+    );
+    assert_eq!(
+        with_hole.gaps()[0].from_sequence(),
+        ChainSequence::new(3),
+        "{with_hole:?}"
+    );
+    assert_eq!(
+        with_hole.gaps()[0].through_sequence(),
+        ChainSequence::new(5),
+        "{with_hole:?}"
+    );
+    assert!(!with_hole.is_fully_verified(), "{with_hole:?}");
+
+    // 2. Fehlt Genesis bei vorhandener Sequenz 1, ist das ein ChainGap 0..=0.
+    //    Ein Bruch ist das nicht — die Vorgaengerbindung aller vorhandenen
+    //    Knoten geht auf —, aber verifiziert ist die Kette dennoch nicht.
+    let without_genesis = build_chain(
+        chain,
+        &[
+            node(chain, 1, Some(10), 11, 21, ChainNodeKind::EntryPackage),
+            node(chain, 2, Some(11), 12, 22, ChainNodeKind::EntryPackage),
+        ],
+    )
+    .expect("a missing genesis is a finding, not Err");
+    assert!(without_genesis.breaks().is_empty(), "{without_genesis:?}");
+    assert_eq!(without_genesis.gaps().len(), 1, "{without_genesis:?}");
+    assert_eq!(
+        without_genesis.gaps()[0].from_sequence(),
+        ChainSequence::new(0),
+        "{without_genesis:?}"
+    );
+    assert_eq!(
+        without_genesis.gaps()[0].through_sequence(),
+        ChainSequence::new(0),
+        "{without_genesis:?}"
+    );
+    assert!(!without_genesis.is_fully_verified(), "{without_genesis:?}");
+
+    // 3. Ein DestroyedStub BESETZT seine Sequenz vollstaendig: er ist kein
+    //    Loch, sondern ein Kettenglied mit derselben Kettenidentitaet. Er
+    //    bindet seinen Vorgaenger wie ein Eintragspaket und wird vom
+    //    Nachfolger genauso gebunden.
+    let with_stub = build_chain(
+        chain,
+        &[
+            node(chain, 0, None, 10, 20, ChainNodeKind::EntryPackage),
+            node(chain, 1, Some(10), 11, 21, ChainNodeKind::EntryPackage),
+            node(chain, 2, Some(11), 12, 22, ChainNodeKind::DestroyedStub),
+            node(chain, 3, Some(12), 13, 23, ChainNodeKind::EntryPackage),
+        ],
+    )
+    .expect("a stub chain is a valid chain");
+    assert!(with_stub.gaps().is_empty(), "{with_stub:?}");
+    assert!(with_stub.breaks().is_empty(), "{with_stub:?}");
+    assert!(with_stub.is_fully_verified(), "{with_stub:?}");
+    assert_eq!(
+        with_stub
+            .verified_head()
+            .expect("verified head of an intact chain")
+            .chain_sequence(),
+        ChainSequence::new(3),
+        "{with_stub:?}"
+    );
+
+    // 4. Zwei Knoten auf derselben Sequenz sind kein Loch. Der zweite besetzt
+    //    dieselbe, bereits besetzte Sequenz — er darf keine Luecke erzeugen.
+    let twins = build_chain(
+        chain,
+        &[
+            node(chain, 0, None, 10, 20, ChainNodeKind::EntryPackage),
+            node(chain, 1, Some(10), 11, 21, ChainNodeKind::EntryPackage),
+            node(chain, 1, Some(10), 11, 22, ChainNodeKind::DestroyedStub),
+        ],
+    )
+    .expect("tied nodes");
+    assert!(twins.gaps().is_empty(), "{twins:?}");
+
+    // 5. ChainSequence ist u64. Ein Knoten bei u64::MAX darf weder panisch
+    //    werden noch ueberlaufen: unterhalb liegt genau ein Intervall, und
+    //    oberhalb gibt es keine Fortsetzung, ueber die etwas auszusagen waere.
+    let at_ceiling = build_chain(
+        chain,
+        &[node(
+            chain,
+            u64::MAX,
+            Some(30),
+            31,
+            32,
+            ChainNodeKind::EntryPackage,
+        )],
+    )
+    .expect("a node at u64::MAX is a finding, not a panic");
+    assert_eq!(at_ceiling.gaps().len(), 1, "{at_ceiling:?}");
+    assert_eq!(
+        at_ceiling.gaps()[0].from_sequence(),
+        ChainSequence::new(0),
+        "{at_ceiling:?}"
+    );
+    assert_eq!(
+        at_ceiling.gaps()[0].through_sequence(),
+        ChainSequence::new(u64::MAX - 1),
+        "{at_ceiling:?}"
+    );
+
+    // Und ein lueckenloses Paar direkt unter der Decke ebenso wenig.
+    let below_ceiling = build_chain(
+        chain,
+        &[
+            node(
+                chain,
+                u64::MAX - 1,
+                Some(30),
+                31,
+                32,
+                ChainNodeKind::EntryPackage,
+            ),
+            node(
+                chain,
+                u64::MAX,
+                Some(31),
+                33,
+                34,
+                ChainNodeKind::EntryPackage,
+            ),
+        ],
+    )
+    .expect("a pair at the ceiling is a finding, not a panic");
+    assert_eq!(below_ceiling.gaps().len(), 1, "{below_ceiling:?}");
+    assert_eq!(
+        below_ceiling.gaps()[0].through_sequence(),
+        ChainSequence::new(u64::MAX - 2),
+        "{below_ceiling:?}"
+    );
+    assert!(below_ceiling.breaks().is_empty(), "{below_ceiling:?}");
+
+    // Zwei Knoten auf u64::MAX: der Cursor kann nicht weiterzaehlen und darf
+    // deshalb weder ueberlaufen noch dieselbe Luecke ein zweites Mal melden.
+    let twins_at_ceiling = build_chain(
+        chain,
+        &[
+            node(
+                chain,
+                u64::MAX,
+                Some(30),
+                31,
+                32,
+                ChainNodeKind::EntryPackage,
+            ),
+            node(
+                chain,
+                u64::MAX,
+                Some(30),
+                31,
+                33,
+                ChainNodeKind::DestroyedStub,
+            ),
+        ],
+    )
+    .expect("tied nodes at the ceiling are a finding, not a panic");
+    assert_eq!(twins_at_ceiling.gaps().len(), 1, "{twins_at_ceiling:?}");
+    assert_eq!(
+        twins_at_ceiling.gaps()[0].through_sequence(),
+        ChainSequence::new(u64::MAX - 1),
+        "{twins_at_ceiling:?}"
+    );
+}

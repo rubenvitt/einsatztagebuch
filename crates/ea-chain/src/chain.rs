@@ -99,11 +99,85 @@ impl fmt::Debug for ChainBreak {
     }
 }
 
+/// Befund: Ein zusammenhaengendes Intervall fehlender Sequenzen.
+///
+/// Das Intervall ist MAXIMAL: fehlen die Sequenzen 3, 4 und 5, ist das genau
+/// ein `ChainGap` von 3 bis einschliesslich 5, nicht drei Befunde. Eine Luecke
+/// existiert nur UNTERHALB der hoechsten gesehenen Sequenz; ueber nicht
+/// existierende Fortsetzungen oberhalb von [`VerifiedChain::head`] ist keine
+/// Aussage moeglich.
+///
+/// Ein Knoten mit [`ChainNodeKind::DestroyedStub`](crate::ChainNodeKind)
+/// besetzt seine Sequenz vollstaendig und ist deshalb nie Teil einer Luecke:
+/// der Stub veraendert die Kettenidentitaet nicht (design.md 11.4). Eine
+/// ungeklaerte Luecke ist ein fehlender Eintrag OHNE gueltigen Stub.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ChainGap {
+    chain_id: ChainId,
+    from_sequence: ChainSequence,
+    through_sequence: ChainSequence,
+}
+
+impl ChainGap {
+    /// Kette, in der das Intervall fehlt.
+    #[must_use]
+    pub const fn chain_id(&self) -> ChainId {
+        self.chain_id
+    }
+
+    /// Erste fehlende Sequenz, einschliesslich.
+    #[must_use]
+    pub const fn from_sequence(&self) -> ChainSequence {
+        self.from_sequence
+    }
+
+    /// Letzte fehlende Sequenz, einschliesslich.
+    #[must_use]
+    pub const fn through_sequence(&self) -> ChainSequence {
+        self.through_sequence
+    }
+}
+
+/// Sortierordnung nach `(chain_id bytewise, from_sequence numerisch)` — exakt
+/// der `x-ea-sort-key`, den `schemas/reports/v1/verification-report.schema.json`
+/// fuer `gaps` vorschreibt.
+///
+/// Die Ordnung laesst `through_sequence` bewusst aus, obwohl `Eq` alle drei
+/// Felder vergleicht. Das ist widerspruchsfrei, weil Luecken maximal und damit
+/// disjunkt sind: `(chain_id, from_sequence)` ist eindeutig — genau der
+/// `x-ea-unique-key` desselben Schemas. Zwei Luecken mit gleichem Schluessel
+/// und verschiedener Obergrenze kann es nicht geben.
+impl Ord for ChainGap {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        (self.chain_id, self.from_sequence).cmp(&(other.chain_id, other.from_sequence))
+    }
+}
+
+impl PartialOrd for ChainGap {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Debug for ChainGap {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ChainGap { chain_id: ")?;
+        hex(self.chain_id.as_bytes(), formatter)?;
+        write!(
+            formatter,
+            ", from_sequence: {}, through_sequence: {} }}",
+            self.from_sequence.get(),
+            self.through_sequence.get()
+        )
+    }
+}
+
 /// Ergebnis einer Verkettungspruefung samt Befunden.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedChain {
     nodes: Vec<ChainNode>,
     breaks: Vec<ChainBreak>,
+    gaps: Vec<ChainGap>,
     head: Option<ChainHead>,
     verified_head: Option<ChainHead>,
 }
@@ -131,12 +205,31 @@ impl VerifiedChain {
         self.head
     }
 
+    /// Alle Lueckenintervalle, aufsteigend nach `(chain_id, from_sequence)`.
+    ///
+    /// Die Intervalle sind maximal und disjunkt; oberhalb von [`Self::head`]
+    /// gibt es keine.
+    #[must_use]
+    pub fn gaps(&self) -> &[ChainGap] {
+        &self.gaps
+    }
+
     /// Letzte unstrittige Sequenz: der letzte Knoten, der vom niedrigsten
     /// vorhandenen Knoten aus in lueckenloser Folge mit passender
     /// Vorgaengerbindung erreicht wird.
     #[must_use]
     pub const fn verified_head(&self) -> Option<ChainHead> {
         self.verified_head
+    }
+
+    /// Kettenaussage: kein Bruch und keine Luecke.
+    ///
+    /// Das ist die Aussage ueber die KETTE, nicht ueber den Pruefbericht. Der
+    /// Bericht leitet seine eigene, breitere Aussage ab (Formatfehler,
+    /// Quarantaene, Signatur- und Nachweisfehler).
+    #[must_use]
+    pub fn is_fully_verified(&self) -> bool {
+        self.breaks().is_empty() && self.gaps().is_empty()
     }
 }
 
@@ -152,6 +245,13 @@ impl fmt::Debug for VerifiedChain {
                 formatter.write_str(", ")?;
             }
             write!(formatter, "{entry:?}")?;
+        }
+        formatter.write_str("], gaps: [")?;
+        for (index, gap) in self.gaps.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(", ")?;
+            }
+            write!(formatter, "{gap:?}")?;
         }
         formatter.write_str("], nodes: [")?;
         for (index, node) in self.nodes.iter().enumerate() {
@@ -192,7 +292,12 @@ fn head_of(node: &ChainNode) -> ChainHead {
 /// Sequenz an, waehrend [`VerifiedChain::head`] die hoechste gesehene Sequenz
 /// bleibt. Enthaelt die Eingabe keinen Knoten mit Sequenz 0, beginnt die
 /// verifizierte Fortschreibung beim niedrigsten vorhandenen Knoten; das
-/// Fehlen des Genesis-Knotens ist kein Fehler dieser Funktion.
+/// Fehlen des Genesis-Knotens ist kein Fehler dieser Funktion, sondern
+/// ebenfalls ein BEFUND: ein [`ChainGap`] `0..=0` in
+/// [`VerifiedChain::gaps`]. Fehlende Sequenzen unterhalb der hoechsten
+/// gesehenen werden dort zu maximalen zusammenhaengenden Intervallen
+/// zusammengefasst; ein [`ChainNodeKind::DestroyedStub`](crate::ChainNodeKind)
+/// besetzt seine Sequenz und ist nie Teil einer Luecke.
 ///
 /// # Errors
 ///
@@ -258,11 +363,52 @@ pub fn build_chain(chain_id: ChainId, nodes: &[ChainNode]) -> Result<VerifiedCha
     }
 
     let head = sorted.last().map(head_of);
+    let gaps = collect_gaps(chain_id, &sorted);
 
     Ok(VerifiedChain {
         nodes: sorted,
         breaks,
+        gaps,
         head,
         verified_head,
     })
+}
+
+/// Fasst die fehlenden Sequenzen aufsteigend sortierter Knoten zu maximalen
+/// zusammenhaengenden Intervallen zusammen.
+///
+/// Ein Cursor laeuft ab Sequenz 0 mit; jede Sequenz oberhalb des Cursors
+/// eroeffnet und schliesst genau ein Intervall. Es zaehlt nur die BESETZUNG
+/// einer Sequenz, nicht die Art des Knotens: ein `DestroyedStub` fuellt seine
+/// Sequenz genauso wie ein Eintragspaket, und zwei Knoten auf derselben
+/// Sequenz lassen den Cursor unveraendert (Vergleich mit `>`, nicht mit `!=`).
+///
+/// `ChainSequence` ist `u64`. Ein Knoten bei `u64::MAX` darf weder ueberlaufen
+/// noch panisch werden, deshalb wird ausschliesslich mit `checked_add` und
+/// `checked_sub` gerechnet. Oberhalb des hoechsten Knotens entsteht nie ein
+/// Intervall, weil ueber nicht existierende Fortsetzungen keine Aussage
+/// moeglich ist.
+fn collect_gaps(chain_id: ChainId, sorted: &[ChainNode]) -> Vec<ChainGap> {
+    let mut gaps = Vec::new();
+    let mut expected: u64 = 0;
+
+    for node in sorted {
+        let sequence = node.chain_sequence.get();
+        if sequence > expected {
+            let Some(through) = sequence.checked_sub(1) else {
+                continue;
+            };
+            gaps.push(ChainGap {
+                chain_id,
+                from_sequence: ChainSequence::new(expected),
+                through_sequence: ChainSequence::new(through),
+            });
+        }
+        // Bei `u64::MAX` gibt es keine naechste erwartete Sequenz. Der Cursor
+        // bleibt dann auf `u64::MAX` stehen, sodass ein weiterer Knoten auf
+        // derselben Sequenz wegen `>` keine zweite Luecke erzeugt.
+        expected = sequence.checked_add(1).unwrap_or(sequence);
+    }
+
+    gaps
 }
