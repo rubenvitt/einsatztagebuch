@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-chain", "crates/ea-verify"]
 resolver = "2"
 
 [workspace.package]
@@ -15,13 +15,16 @@ cms = { version = "=0.2.3", features = ["std"] }
 coset = { version = "=0.4.2", features = ["std"] }
 der = { version = "=0.7.10", features = ["alloc", "oid"] }
 ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }
+ea-archive = { path = "crates/ea-archive" }
 ea-cbor = { path = "crates/ea-cbor" }
+ea-chain = { path = "crates/ea-chain" }
 ea-crypto = { path = "crates/ea-crypto" }
 ea-format = { path = "crates/ea-format" }
 ea-schema = { path = "crates/ea-schema" }
 ea-time = { path = "crates/ea-time" }
 ea-trust = { path = "crates/ea-trust" }
 ea-types = { path = "crates/ea-types" }
+ea-verify = { path = "crates/ea-verify" }
 hex = "=0.4.3"
 getrandom = { version = "=0.4.3", features = ["wasm_js"] }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }

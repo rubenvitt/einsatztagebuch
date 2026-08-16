@@ -1,0 +1,17 @@
+[package]
+name = "ea-archive"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ea-format.workspace = true
+ea-trust.workspace = true
+ea-types.workspace = true
+
+[dev-dependencies]
+ea-crypto.workspace = true
+ea-time.workspace = true
+ed25519-dalek.workspace = true
+minicbor.workspace = true

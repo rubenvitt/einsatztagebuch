@@ -1,0 +1,19 @@
+[package]
+name = "ea-verify"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ea-archive.workspace = true
+ea-chain.workspace = true
+ea-crypto.workspace = true
+ea-format.workspace = true
+ea-time.workspace = true
+ea-trust.workspace = true
+ea-types.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+minicbor.workspace = true
