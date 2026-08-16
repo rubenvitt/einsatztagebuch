@@ -20,8 +20,8 @@
 - Writer devices contain no private Reader, Recovery, Historical Grant Authority, or Key Approver keys and retain neither CEK nor decryptable draft key after finalization. The server has no content-decryption or grant-signing key.
 - The archive is verifiable without server or mutable status database. Schema, format, and suite versions evolve independently and old bytes remain unchanged.
 - Authentic recovery starts from an independently held Trust Anchor; archive-contained trust is never TOFU. Operator snapshots come only from valid Root-signed OS-account/device-bound bindings.
-- Writer, Reader, Administration, and CLI target supported Windows 11 `x86_64`, current/previous macOS on `arm64` and supported Intel `x86_64`, and Ubuntu 24.04 LTS `x86_64`; server target is Linux OCI `amd64`. Release proof is deferred to Stage 7 but Stage 1 code must remain portable.
-- Desktop UI uses Ant Design 6 with German `ConfigProvider`, exact lockfile pin, `zeroRuntime: true`, statically extracted local hashed CSS from the specified shared tokens, CSP without runtime/external styles, Ant `App` overlay context, and direct CSR `@phosphor-icons/react` imports only; accessibility/status constraints from §5.4 apply to every later UI task.
+- Writer, Administration, and CLI target supported Windows 11 `x86_64`, current/previous macOS on `arm64` and supported Intel `x86_64`, and Ubuntu 24.04 LTS `x86_64`; server target is Linux OCI `amd64`. Der **Reader läuft im Browser** als installierbare PWA (`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §3); seine Support-Achsen sind Engine, Version und Plattform (§11.4). Release proof is deferred to Stage 7 but Stage 1 code must remain portable and must compile for `wasm32-unknown-unknown`.
+- Die **Desktop-UI für Writer und Administration** uses Ant Design 6 with German `ConfigProvider`, exact lockfile pin, `zeroRuntime: true`, statically extracted local hashed CSS from the specified shared tokens, CSP without runtime/external styles, Ant `App` overlay context, and direct CSR `@phosphor-icons/react` imports only; accessibility/status constraints from §5.4 apply to every later UI task. Der Web-Reader ist von dieser Kette nicht erfasst; seine UI-Grundlage wird in der Stage-4-Überarbeitung festgelegt.
 - Security- or format-critical logic is Rust-only and shared by Desktop, Server, and CLI. TypeScript may consume generated view DTOs only.
 - Private keys, payload/plaintext, decrypted content, nonces, clear incident numbers, locations, names, and free text MUST NOT appear in logs, dumps, crash output, server metadata, or unencrypted configuration. Persistence is permitted only where a normative signed/encrypted wire object requires it or where the user explicitly requests decrypted CLI output. Protocol nonces may exist only in their specified signed or encrypted objects. Explicit decrypted CLI output MUST use a user-selected newly created or empty target with restrictive permissions. Plaintext temporary files remain forbidden. Local databases are fully encrypted in later stages.
 - Preserve exact status vocabularies defined in §17.4 and never claim general court admissibility, TR-ESOR certification, or complete metadata blindness.
@@ -147,11 +147,14 @@ for (program, args) in [
     ("cargo", vec!["fmt", "--all", "--check"]),
     ("cargo", vec!["clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"]),
     ("cargo", vec!["test", "--workspace", "--all-targets", "--locked"]),
+    ("cargo", vec!["check", "--target", "wasm32-unknown-unknown", "--locked", "-p", "ea-types", "-p", "ea-cbor", "-p", "ea-crypto", "-p", "ea-format", "-p", "ea-schema", "-p", "ea-time", "-p", "ea-trust"]),
 ] {
     let status = std::process::Command::new(program).args(args).status()?;
     if !status.success() { std::process::exit(status.code().unwrap_or(1)); }
 }
 ```
+
+Der vierte Eintrag stammt aus `docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md` und erfüllt `2026-08-15-einsatzarchiv-web-reader-design.md` §10. Er ist eine Positivliste über die Bibliotheks-Crates — nicht `--workspace` (`xtask` ist nicht wasm-tauglich) und nicht `--all-targets` (zöge Dev-Dependencies in den wasm-Graph). Er belegt Übersetzbarkeit, nicht Lauffähigkeit. Jede später entstehende Bibliotheks-Crate MUSS aufgenommen werden.
 
 - [ ] **Step 4: Generate lockfiles and verify the workspace**
 
@@ -1490,6 +1493,12 @@ git commit -m "feat(core): verify anchors registry and trusted time"
 - Consumes: parsed exact objects, verified trust, schema registry.
 - Produces: `ArchiveInventory`, `VerifiedEncryptedEntry`, `VerifiedChain`, `VerificationReportV1`, and `verify_archive`; filenames are hints only.
 
+**wasm32-Pflicht.** `ea-chain`, `ea-archive` und `ea-verify` MÜSSEN in die Positivliste des wasm32-Gates in `tools/xtask/src/main.rs` aufgenommen werden, und dieser Task MUSS `tools/xtask/tests/workspace.rs` um eine Klassifikationszusicherung erweitern: jedes Mitglied unter `crates/` steht entweder in der wasm32-Positivliste oder in einer ausdrücklich begründeten Ausnahmeliste; ein neues Mitglied ohne Zuordnung lässt den Test fehlschlagen. Grund: `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §9 macht die Verifikationspipeline zu geteiltem Rust-Code, der im Browser läuft, und §10 macht `wasm32-unknown-unknown` zum verbindlichen Gate-Ziel.
+
+Drei konkrete Fallen: die dateisystemgestützte `ArchiveSource`-Implementierung gehört hinter ein Nicht-Default-Feature oder außerhalb der Crate; Zeit wird als Parameter übergeben statt über `SystemTime::now()` bezogen; JSON-Schema-Validierung des Reports gehört NICHT in `ea-verify`, weil `jsonschema` `getrandom 0.3.4` in den wasm-Graph zöge — und 0.3.4 benötigt auf `wasm32` zusätzlich das `--cfg getrandom_backend`, das in `docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md` bewusst nicht gesetzt wird.
+
+**Bekannter Defekt, in diesem Task zu lösen:** `schemas/reports/v1/verification-report.schema.json` kennt kein `formatErrors` und kein Quarantäne-Array, während Step 3 unten Quarantäne erzeugt. Der Zustand MUSS berichtbar werden, DARF aber niemals fail-open sein: unerkanntes Trust-Material führt nie zu einem Archivergebnis `valid`. Heute billig; nach dem Einfrieren der byteidentischen CLI-Baselines in Task 10 teuer.
+
 - [ ] **Step 1: Write verification-order and filename-independence tests**
 
 ```rust
@@ -1658,6 +1667,20 @@ git commit -m "feat(cli): add offline verification and recovery baseline"
 - Consumes: every Stage 1 crate and schema.
 - Produces: immutable versioned test vectors, public format package, requirement ledger, and `xtask stage-gate 1`.
 
+<!-- vector-hygiene-rule -->
+**Vektor-Hygiene, verbindlich.** Negativvektoren, die einen unzulässigen `action_code` kodieren, MÜSSEN den Wert `200` verwenden. Erzeugt dieser Task zusätzlich einen Negativvektor für einen unbekannten Trust-Subtype, MUSS er das Literal `xxUnknownxx` verwenden. Nächstliegende Nachbarwerte des heutigen Bestands — insbesondere der `action_code` 7 und jeder Name, der später eine echte Trust-Objektfamilie werden könnte — sind verboten. Grund: ein dauerhaft eingefrorener Negativvektor, der einen nachbarschaftlichen Wert benutzt, dreht sich bei einer späteren v1.1-Erweiterung von `abgelehnt` nach `akzeptiert`. Das wäre der einzige echte Bruch des Permanenzversprechens dieses Tasks — die Byte-Unveränderlichkeit selbst ist davon nicht betroffen.
+<!-- /vector-hygiene-rule -->
+
+<!-- web-reader-blockers -->
+**BLOCKIERT — Formentscheidung nach `web-reader-design.md` §7.5.** Dieser Task friert `organizationAdminAuthorization` mit Positiv- UND Negativvektoren ein, während `crates/ea-trust/src/admin_authorization.rs:142-149` die Signatur-Kardinalität 1 samt hart indiziertem `signatures()[0]` und `schemas/archive/v1/trust.cddl:22` `[cose-sign1-v1]` pinnen. Spec §7.5 verlangt zwei verschiedene Approver plus die Bindung eines Ziel-Transport-Public-Key-Fingerprints, für den es im 15-Feld-Array kein Feld gibt (Position 15 ist ein an drei Stellen auf Länge 0 geprüftes leeres Extension-Array: `crates/ea-format/src/etb.rs:676`, `:1489`, `crates/ea-crypto/src/cose.rs:2781`). Solange nicht entschieden ist, ob die Kardinalität aufgeweitet oder eine eigene 2-of-N-Familie nach dem Vorbild von `grantAuthorization`/`destructionAuthorization` (`trust.cddl:28-30`, `[2* cose-sign1-v1]`) angelegt wird, DARF dieser Task keine Vektoren für `organizationAdminAuthorization` einfrieren.
+
+**BLOCKIERT — Zuordnung der Policy-Frist nach `web-reader-design.md` §4.2.** Spec §4.2 fordert, dass die Anwendung das Alter des zuletzt bezogenen Trust-Standes sichtbar ausweist und ab einer in der Policy konfigurierten Frist zur Aktualisierung auffordert. Weder `max_registry_age_ms` (Ausstellungsschranke am Registry-Ereignis, `design.md:1347`) noch `registry_expiry_behavior` (normativ an die Finalisierung gebunden, `design.md:1426`, eine Operation die der Reader nicht ausführt) deckt das ab. Ist eine eigene geräteseitige Frist erforderlich, ist `policy-core-v1` betroffen — ein geschlossenes Array fester Positionen (`schemas/archive/v1/trust.cddl:127-141`, `crates/ea-format/src/etb.rs:210-229`). Solange das offen ist, DARF dieser Task keine Positivvektoren für `policy-core-v1` einfrieren.
+
+**BLOCKIERT — Traceability der Web-Reader-Anforderungen.** Dieser Task füllt das Requirement-Ledger „for every normative paragraph". `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` ist eine freigegebene Normativquelle mit eigenen MUSS-Anforderungen (§4.1 getrennter Origin, §4.2 Aktivierung nur gegen eine gepinnte, Root-signierte `webBundleRelease`, §4.3 nicht überspringbarer Fingerprint-Vergleich, §5.2 universeller Datei-Weg immer angeboten, §6.3 zwei Pflicht-Authenticators, §7.5 Verweigerung der Re-Encryption bei abweichendem Transport-Fingerprint, §8.2 kein Klartext in Telemetrie). Zusätzlich sind `design.md` FR-100 („gemeinsame App, signierte Rollentrennung") und FR-103 („Reader-Cache und Index verschlüsselt") inhaltlich überholt. Vor dem Einfrieren ist zu entscheiden, ob diese Anforderungen als v1.1-Zeilen aufgenommen oder ausdrücklich zurückgestellt werden. Schweigen ist die einzige Variante, die nach dem Einfrieren teuer wird.
+
+**Reichweite des wasm32-Gates.** `docs/traceability/stage-1-gate.md` MUSS ausdrücklich festhalten: das `wasm32-unknown-unknown`-Kommando in `verify_quick_commands()` belegt Übersetzbarkeit, nicht Lauffähigkeit. Der Laufzeitnachweis nach `web-reader-design.md` §14.1 steht aus.
+<!-- /web-reader-blockers -->
+
 - [ ] **Step 1: Write a gate test that rejects absent vectors and incomplete ledger rows**
 
 ```rust
@@ -1712,6 +1735,7 @@ pnpm test:property
 pnpm test:fuzz -- --smoke-seconds 60
 pnpm test:recovery
 cargo run --locked -p xtask -- stage-gate 1
+cargo check --target wasm32-unknown-unknown --locked -p ea-types -p ea-cbor -p ea-crypto -p ea-format -p ea-schema -p ea-time -p ea-trust
 pnpm verify:quick
 ```
 

@@ -18,10 +18,13 @@ verwalteten Geräten.
 
 Diese Spezifikation legt fest, wie der Reader im Browser betrieben wird, ohne
 die kryptografischen Invarianten der v0.1 zu schwächen. Sie ändert keine
-Wireformate, keine Objektfamilien, keine Verifikationsreihenfolge und keine
-Signaturregeln. Sie ändert die Ausführungsumgebung des Readers, die Verwahrung
-der Reader-Schlüssel, die Auslieferung des Reader-Codes und die Wiederherstellung
-nach Schlüsselverlust.
+bestehenden Wireformate, keine Verifikationsreihenfolge und keine Signaturregeln
+bestehender Objekte. Sie führt zwei neue Trust-Objektfamilien ein —
+`webBundleRelease` (Abschnitt 4.2) und das Reader-Key-Escrow (Abschnitt 7);
+beide sind ausdrücklich eine **v1.1-Erweiterung außerhalb Stage 1** und werden
+nach Abschnitt 12 in Stage 3 beziehungsweise Stage 5 gebaut. Sie ändert die
+Ausführungsumgebung des Readers, die Verwahrung der Reader-Schlüssel, die
+Auslieferung des Reader-Codes und die Wiederherstellung nach Schlüsselverlust.
 
 Nicht Bestandteil: Writer-Verhalten, Administrationsworkflows, Serverprotokoll
 außer der unten benannten Ergänzungen, Evidence-Verfahren, Vernichtung.
@@ -392,7 +395,11 @@ Geprüft am 2026-08-15 mit `cargo check --target wasm32-unknown-unknown` gegen
   `x25519-dalek 3.0`, `hpke 0.14`, `chacha20poly1305 0.11`, `sha2 0.11`,
   `minicbor 2.3` sowie `jiff 0.2.35` mit gebundelter tzdb.
 - Einzige erforderliche Anpassung: `getrandom 0.4.3` benötigt das Feature
-  `wasm_js` und `--cfg getrandom_backend="wasm_js"`.
+  `wasm_js`. Das aus `getrandom 0.3` stammende `--cfg getrandom_backend`
+  ist für 0.4.3 **nicht** erforderlich; nachgemessen am 2026-08-16 genügt das
+  Feature allein. Ein target-scoped `rustflags`-Eintrag in `.cargo/config.toml`
+  entfällt damit ebenfalls — er wäre ohnehin still wirkungslos, sobald
+  `RUSTFLAGS` in der Umgebung gesetzt ist.
 
 **Reichweite dieses Nachweises:** Belegt ist ausschließlich, dass die Crates für
 `wasm32-unknown-unknown` übersetzen. Nicht belegt sind Ausführung, die
@@ -422,8 +429,15 @@ spätere Crate-Änderungen die Browser-Fähigkeit nicht unbemerkt zerstören.
 
 ## 12. Auswirkungen auf die Stufenpläne
 
-- **Stage 1:** `wasm32`-Ziel im Verifikations-Gate, `getrandom`-Feature. Sonst
-  unverändert.
+- **Stage 1:** `wasm32-unknown-unknown` als vierter Eintrag in
+  `verify_quick_commands()` (`tools/xtask/src/main.rs`), als Positivliste über
+  die sieben Bibliotheks-Crates — nicht `--workspace`, weil `xtask` nicht
+  wasm-tauglich ist, und nicht `--all-targets`, weil das Dev-Dependencies in den
+  wasm-Graph zöge. Dazu `targets` in `rust-toolchain.toml` und das
+  `getrandom`-Feature `wasm_js`. Das Gate belegt ausschließlich Übersetzbarkeit,
+  nicht Lauffähigkeit. Umgesetzt in
+  `docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md`.
+  Sonst unverändert.
 - **Stage 2:** Task 8 schaltet nur noch Writer und Administration frei. Neuer
   Task: Export eines Archiv-Bündels als Einzeldatei für den Datei-Modus.
 - **Stage 3:** Neue Fläche für Bundle-Auslieferung und -Pinning, Ablage der

@@ -45,7 +45,8 @@ ea-archive + ea-trust
 
 ## Global Constraints
 
-- Work only in `.worktrees/einsatzarchiv-v0-1`; follow `/Users/rubeen/.codex/RTK.md` and use `rtk`.
+- Work only in `.worktrees/einsatzarchiv-v0-1`; follow `/Users/rubeen/.claude/RTK.md` and use `rtk`.
+  > *Historisch: dieser abgeschlossene Plan wurde in `.worktrees/einsatzarchiv-v0-1` auf `codex/einsatzarchiv-v0-1` ausgeführt (Abschluss `cfd5a65`). Seit 2026-08-16 arbeitet das Repository ausschließlich auf `main`; weder der Worktree noch der Branch existieren noch. Die Zeile bleibt als Ausführungsaufzeichnung stehen und ist keine Anweisung für neue Arbeit.*
 - Use strict RED → minimal GREEN → refactor. Record every first failure and final exact count.
 - Use `apply_patch` for edits. Preserve unrelated changes.
 - No public proof-state constructors from raw time, role, capability, hash, or free-form metadata.

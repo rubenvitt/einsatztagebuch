@@ -42,7 +42,67 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
             "cargo",
             vec!["test", "--workspace", "--all-targets", "--locked"],
         ),
+        // Belegt ausschliesslich UEBERSETZBARKEIT fuer wasm32-unknown-unknown, nicht
+        // Lauffaehigkeit. Der Laufzeitnachweis nach
+        // docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md §14.1
+        // (wasm-bindgen-Schicht, getrandom/wasm_js in einer echten JS-Umgebung, eine
+        // HPKE-Entkapselung, eine Signaturpruefung gegen einen Testvektor) steht aus.
+        //
+        // Positivliste, nicht --workspace: xtask zieht jsonschema/cddl und
+        // std::process::Command und ist nicht wasm-tauglich. Nicht --all-targets:
+        // das zoege Dev-Dependencies und Integrationstests in den wasm-Graph.
+        // Jede neue Bibliotheks-Crate MUSS hier ergaenzt werden.
+        (
+            "cargo",
+            vec![
+                "check",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--locked",
+                "-p",
+                "ea-types",
+                "-p",
+                "ea-cbor",
+                "-p",
+                "ea-crypto",
+                "-p",
+                "ea-format",
+                "-p",
+                "ea-schema",
+                "-p",
+                "ea-time",
+                "-p",
+                "ea-trust",
+            ],
+        ),
     ]
+}
+
+/// Fails fast when the active toolchain cannot build the wasm32 gate command.
+///
+/// `targets` in `rust-toolchain.toml` is ignored entirely once `RUSTUP_TOOLCHAIN`
+/// is set in the environment, so the declaration alone does not guarantee the
+/// target is present. Without this check the user meets `can't find crate for
+/// 'core'` instead of an actionable message.
+fn ensure_wasm32_target_available() -> Result<(), String> {
+    let Ok(output) = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+    else {
+        return Ok(());
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    if String::from_utf8_lossy(&output.stdout).contains("wasm32-unknown-unknown") {
+        return Ok(());
+    }
+    Err(String::from(
+        "wasm32-unknown-unknown is not installed for the active toolchain. \
+         Run `rustup target add wasm32-unknown-unknown`. \
+         Note: RUSTUP_TOOLCHAIN in the environment overrides rust-toolchain.toml, \
+         including its targets declaration.",
+    ))
 }
 
 fn parse_fuzz_settings(input: &str) -> Result<FuzzSettings, String> {
@@ -701,6 +761,7 @@ fn run() -> Result<(), String> {
         .ok_or_else(|| "usage: xtask <gate> [gate options]".to_owned())?;
     match gate.as_str() {
         "verify-quick" => {
+            ensure_wasm32_target_available()?;
             for (program, command_args) in verify_quick_commands() {
                 run_process(&root, program, &command_args)
                     .map_err(|error| format!("failed to invoke {program}: {error}"))?;
@@ -1287,6 +1348,29 @@ vor Task 3 akzeptiert
                 (
                     "cargo",
                     vec!["test", "--workspace", "--all-targets", "--locked"],
+                ),
+                (
+                    "cargo",
+                    vec![
+                        "check",
+                        "--target",
+                        "wasm32-unknown-unknown",
+                        "--locked",
+                        "-p",
+                        "ea-types",
+                        "-p",
+                        "ea-cbor",
+                        "-p",
+                        "ea-crypto",
+                        "-p",
+                        "ea-format",
+                        "-p",
+                        "ea-schema",
+                        "-p",
+                        "ea-time",
+                        "-p",
+                        "ea-trust",
+                    ],
                 ),
             ]
         );

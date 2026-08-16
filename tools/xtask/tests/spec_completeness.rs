@@ -2102,3 +2102,238 @@ fn report_schemas_compile_and_reject_unknown_properties() {
     unknown_medium_property["media"][0]["path"] = serde_json::json!("/Volumes/key");
     assert!(!inventory.is_valid(&unknown_medium_property));
 }
+
+#[test]
+fn web_reader_stage_one_scope_is_closed_across_normative_sources() {
+    let web_reader = include_str!(
+        "../../../docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md"
+    );
+    let design =
+        include_str!("../../../docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+
+    // Der Selbstwiderspruch des Specs ist aufgeloest.
+    assert!(
+        !web_reader.contains("Sie ändert keine Wireformate, keine Objektfamilien"),
+        "spec §1 still denies the object-family change introduced in §11.5/11.6"
+    );
+    assert!(
+        web_reader.contains("v1.1-Erweiterung außerhalb Stage 1"),
+        "spec must classify webBundleRelease and readerKeyEscrow as v1.1 outside stage 1"
+    );
+
+    // getrandom 0.4.3 braucht kein --cfg getrandom_backend. Positiv geprueft, nicht
+    // per Abwesenheit: der korrigierte Text MUSS den entfallenen Mechanismus benennen
+    // und enthaelt das Literal daher zwangslaeufig.
+    assert!(
+        web_reader.contains("ist für 0.4.3 **nicht** erforderlich"),
+        "spec §10 must record that getrandom 0.4.3 needs no cfg flag"
+    );
+    assert!(
+        !web_reader.contains("und `--cfg getrandom_backend=\"wasm_js\"`"),
+        "spec §10 still demands the getrandom 0.3 cfg flag as a requirement"
+    );
+
+    // Design: Browser-Zone ergaenzt, Reader aus der Desktopzone entfernt.
+    assert!(
+        design.contains("Browser-Zone"),
+        "design §5.3 must carry the fifth trust zone from spec §3"
+    );
+    assert!(
+        !design.contains("**Desktop-/Archivzone:** Writer, Reader, Admin"),
+        "design §5.3 zone 2 must no longer list the Reader"
+    );
+
+    // Design: der neue Verifikationsstatus aus spec §5.4.
+    assert!(
+        design.contains("nicht server-bestätigt"),
+        "design §17.4 must carry the status term required by spec §5.4"
+    );
+
+    // Design: die weiteren durch den Spec widerlegten Fundstellen.
+    for marker in ["web-reader-design", "apps/web"] {
+        assert!(design.contains(marker), "design must reference {marker}");
+    }
+    assert!(
+        !design.contains("gemeinsame Binär- und UI-Basis für Writer, Reader und Administration"),
+        "design §5.1 must split desktop (Writer, Administration) from the web reader"
+    );
+
+    // Stage-1-Plan: die zwei kollidierenden Global-Constraint-Zeilen.
+    assert!(
+        stage_one.contains("Reader läuft im Browser"),
+        "stage 1 global constraints must exempt the Reader from the desktop platform list"
+    );
+    assert!(
+        stage_one.contains("Ant Design 6") && stage_one.contains("Writer und Administration"),
+        "stage 1 global constraints must scope the Ant Design chain to Writer and Administration"
+    );
+}
+
+#[test]
+fn verify_quick_block_in_stage_one_plan_matches_the_gate() {
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+    for command in [
+        r#"("cargo", vec!["fmt", "--all", "--check"])"#,
+        r#""clippy", "--workspace", "--all-targets", "--all-features", "--locked""#,
+        r#"("cargo", vec!["test", "--workspace", "--all-targets", "--locked"])"#,
+        r#""check", "--target", "wasm32-unknown-unknown", "--locked""#,
+    ] {
+        assert!(
+            stage_one.contains(command),
+            "stage 1 plan verify-quick block is missing {command}"
+        );
+    }
+    assert!(
+        stage_one.contains("cargo check --target wasm32-unknown-unknown --locked -p ea-types"),
+        "stage 1 gate command list must run the wasm32 check"
+    );
+}
+
+#[test]
+fn stage_one_vector_hygiene_reserves_out_of_band_negative_literals() {
+    let stage_one = include_str!(
+        "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md"
+    );
+
+    // Jeder Block, der einen kuenftigen Subtype-Namen nennen darf, ist markiert.
+    // Die Abwesenheitspruefung entfernt ALLE markierten Bloecke, sonst schluege sie
+    // an der eigenen Verbotsklausel bzw. an den Blockadetexten fehl.
+    fn extract<'a>(text: &'a str, open: &str, close: &str) -> (&'a str, usize, usize) {
+        let start = text.find(open).unwrap_or_else(|| panic!("missing {open}"));
+        let end = text
+            .find(close)
+            .unwrap_or_else(|| panic!("unterminated {open}"));
+        assert!(start < end, "markers out of order: {open}");
+        (&text[start..end], start, end + close.len())
+    }
+
+    let (rule, hygiene_start, hygiene_end) = extract(
+        stage_one,
+        "<!-- vector-hygiene-rule -->",
+        "<!-- /vector-hygiene-rule -->",
+    );
+    for literal in ["200", "xxUnknownxx"] {
+        assert!(rule.contains(literal), "hygiene rule must pin {literal}");
+    }
+
+    let (_, blockers_start, blockers_end) = extract(
+        stage_one,
+        "<!-- web-reader-blockers -->",
+        "<!-- /web-reader-blockers -->",
+    );
+
+    let mut regions = [(hygiene_start, hygiene_end), (blockers_start, blockers_end)];
+    regions.sort_unstable();
+    let mut stripped = String::with_capacity(stage_one.len());
+    let mut cursor = 0usize;
+    for (start, end) in regions {
+        assert!(cursor <= start, "marked regions must not overlap");
+        stripped.push_str(&stage_one[cursor..start]);
+        cursor = end;
+    }
+    stripped.push_str(&stage_one[cursor..]);
+
+    for candidate in ["webBundleRelease", "readerKeyEscrow"] {
+        assert!(
+            !stripped.contains(candidate),
+            "{candidate} must only appear inside a marked block"
+        );
+    }
+
+    for marker in [
+        "BLOCKIERT — Formentscheidung nach `web-reader-design.md` §7.5",
+        "BLOCKIERT — Zuordnung der Policy-Frist nach `web-reader-design.md` §4.2",
+        "BLOCKIERT — Traceability der Web-Reader-Anforderungen",
+        "**wasm32-Pflicht.**",
+    ] {
+        assert!(
+            stage_one.contains(marker),
+            "stage 1 plan is missing: {marker}"
+        );
+    }
+}
+
+#[test]
+fn later_stage_plans_reference_the_web_reader_spec() {
+    for (name, plan) in [
+        (
+            "stage-2",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-2-offline-writer.md"
+            ),
+        ),
+        (
+            "stage-3",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-3-blind-sync.md"
+            ),
+        ),
+        (
+            "stage-4",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md"
+            ),
+        ),
+        (
+            "stage-5",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-5-administration-recovery.md"
+            ),
+        ),
+        (
+            "stage-6",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-6-evidence-grade.md"
+            ),
+        ),
+        (
+            "stage-7",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md"
+            ),
+        ),
+    ] {
+        assert!(
+            plan.contains("2026-08-15-einsatzarchiv-web-reader-design.md"),
+            "{name} plan must carry a marker for the web reader spec"
+        );
+    }
+
+    let stage_four =
+        include_str!("../../../docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md");
+    assert!(
+        stage_four.contains("BLOCKIERT — Laufzeitnachweis nach `web-reader-design.md` §14.1"),
+        "stage 4 must be blocked on the runtime spike"
+    );
+
+    // Ausfuehrbare Anweisungen zeigen auf existierende Pfade. Historische
+    // Tatsachenbehauptungen ueber Worktrees bleiben unangetastet.
+    for (name, plan) in [
+        (
+            "task-8-normative-correction",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-normative-correction.md"
+            ),
+        ),
+        (
+            "task-8-implementation",
+            include_str!(
+                "../../../docs/superpowers/plans/2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md"
+            ),
+        ),
+    ] {
+        assert!(
+            !plan.contains("/Users/rubeen/.codex/"),
+            "{name} still points at the stale RTK path"
+        );
+        assert!(
+            plan.contains("Historisch:"),
+            "{name} must mark its worktree line as a historical record"
+        );
+    }
+}

@@ -23,7 +23,7 @@ ea-time = { path = "crates/ea-time" }
 ea-trust = { path = "crates/ea-trust" }
 ea-types = { path = "crates/ea-types" }
 hex = "=0.4.3"
-getrandom = "=0.4.3"
+getrandom = { version = "=0.4.3", features = ["wasm_js"] }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 jiff = { version = "=0.2.35", default-features = false, features = ["std", "tzdb-bundle-always"] }
 jiff-tzdb = "=0.1.8"

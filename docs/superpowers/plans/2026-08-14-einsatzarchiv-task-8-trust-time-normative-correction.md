@@ -11,7 +11,8 @@
 ## Global Constraints
 
 - Work only in `.worktrees/einsatzarchiv-v0-1` on `codex/einsatzarchiv-v0-1`.
-- Read and follow `/Users/rubeen/.codex/RTK.md`; run repository commands through `rtk`.
+  > *Historisch: dieser abgeschlossene Plan wurde in `.worktrees/einsatzarchiv-v0-1` auf `codex/einsatzarchiv-v0-1` ausgeführt (Abschluss `f50ec03`). Seit 2026-08-16 arbeitet das Repository ausschließlich auf `main`; weder der Worktree noch der Branch existieren noch. Die Zeile bleibt als Ausführungsaufzeichnung stehen und ist keine Anweisung für neue Arbeit.*
+- Read and follow `/Users/rubeen/.claude/RTK.md`; run repository commands through `rtk`.
 - Use `apply_patch` for tracked edits. Preserve unrelated user changes.
 - Start each behavior change with an executable RED and record the exact command, exit code, and focused failure.
 - Reuse the existing `ea_types::SubjectId` as the Rust representation of `authoritySubjectId`; do not introduce a second indistinguishable 16-byte authority-ID type.

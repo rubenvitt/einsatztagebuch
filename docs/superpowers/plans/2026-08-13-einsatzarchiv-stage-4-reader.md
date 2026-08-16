@@ -11,6 +11,18 @@
 ## Global Constraints
 
 - Die Schlüsselwörter **MUSS**, **DARF NICHT**, **SOLL**, **SOLL NICHT** und **DARF** sind normativ zu verstehen. Ein Release darf von einer MUSS-Anforderung nicht abweichen. Eine Abweichung von SOLL erfordert eine dokumentierte Sicherheits- oder Betriebsbegründung.
+- **Merker Web-Reader**, `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §12: Tasks 1, 2, 4 und 7 werden neu geschrieben. Task 3 behält seinen Rust-Kern und erhält neue Bindungen sowie den gepinnten Anchor im Datei-Modus. Task 5 bleibt unverändert. Task 6 wird angepasst. Task 8 wird um Browser-Matrix und Datei-Modus erweitert. **Achtung:** Dieser Plan schreibt an mehreren Stellen noch SQLCipher, Tauri 2 und den nativen Key-Provider fest — alles durch §8.1 (invertierter Rust-Index, ChaCha20-Poly1305, OPFS) und §11.3 (nativer Reader-Key-Provider entfällt) widerlegt. Die verbindliche Größenschwelle des Index nach §8.1 wird in dieser Überarbeitung festgelegt.
+
+<!-- web-reader-stage-4-block -->
+**BLOCKIERT — Laufzeitnachweis nach `web-reader-design.md` §14.1.** Die Überarbeitung dieses Plans darf erst beginnen, wenn ein ausführbarer Spike vorliegt: `wasm-bindgen`-Schicht, `getrandom` mit `wasm_js` in einer echten JS-Umgebung, eine HPKE-Entkapselung und eine Signaturprüfung gegen einen bestehenden Testvektor. Belegt ist bisher ausschließlich, dass die Bibliotheks-Crates für `wasm32-unknown-unknown` übersetzen. Scheitert der Spike, fällt die Browser-Entscheidung aus §2 Punkt 1 in sich zusammen.
+
+Rücknahmeliste für diesen Fall, erzeugt von `docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md`:
+1. `targets = ["wasm32-unknown-unknown"]` in `rust-toolchain.toml`;
+2. das Feature `wasm_js` in `Cargo.toml` samt dem 2-Zeilen-Delta in `Cargo.lock` und der `getrandom`-Zeile in `docs/adr/0001-toolchain-and-cryptography-dependencies.md`;
+3. der vierte Eintrag in `verify_quick_commands()` samt Pin-Test, `ensure_wasm32_target_available()`, dem normativen Codeblock und der Gate-Kommandoliste im Stage-1-Plan;
+4. die Merker-Zeilen in den Stage-Plänen 2 bis 7;
+5. die Normativkorrekturen an `design.md` (§5.1, §5.2, §5.3, §7, §14.2, §17.4, §18.3, Support-Matrix) und an den Global Constraints des Stage-1-Plans.
+<!-- /web-reader-stage-4-block -->
 - Microsoft Access is outside scope; **Access Grant** means only the signed key envelope.
 - Non-goals are fixed: no live incident log, dispatch/alarm/control-center integration, patient record or identifying patient data, concurrent offline Writers, normal-app mutation/deletion of finalized content, AI summarization/OCR, public links, server-side content search, unprofiled network paths, qualified personal electronic signature, TR-ESOR certification claim, screenshot/transcription prevention, or cryptographic recall of already decrypted data.
 - Product invariants apply verbatim: exactly one active Writer; never-reused predecessor-bound sequences; immutable `.eip` bytes except whole-object authorized replacement by `.eds`; amendment-only corrections; one fresh CEK/ciphertext; one signed grant per recipient; exactly one active Recovery grant before commit; no Reader/Recovery/HGA/Approver private key on Writer; no retained CEK/decryptable draft key; no server decrypt/grant key; server-independent archive verification; independent schema/format/suite versions with old bytes unchanged; separate Sync/verification/Evidence/Entry/destruction statuses; no legal overclaim from a hash chain; every active Reader initially granted; external-anchor recovery; and only Root-signed OS/device-bound operator snapshots.

@@ -103,6 +103,8 @@ Jedes Release enthält eine signierte, versionierte `support-matrix.json`. Sie f
 
 Eine Funktion gilt nicht als plattformübergreifend, nur weil sie durch Tauri oder Rust kompiliert. Atomare Dateisystemoperationen, Keystore-Verhalten, Sperren, Crash-Recovery, Paketsignierung, Installer und Ende-zu-Ende-Abläufe MÜSSEN gemäß der gepinnten Matrix geprüft werden. Weitere Architekturen, insbesondere Windows on Arm und Linux `arm64`, sind außerhalb v0.1 und dürfen später nur durch eine erweiterte Release-Matrix aufgenommen werden.
 
+**Reader-Vorbehalt.** Für den Reader treten nach `2026-08-15-einsatzarchiv-web-reader-design.md` §11.4 die Achsen Engine, Version und Plattform an die Stelle von Architektur, Installerformat und Key-Provider. Reader-Installer- und native Key-Provider-Smokes entfallen für den Reader; sie gelten weiterhin für Writer, Administration und CLI.
+
 ## 5. Systemarchitektur
 
 ### 5.1 Repository- und Komponentenmodell
@@ -110,7 +112,8 @@ Eine Funktion gilt nicht als plattformübergreifend, nur weil sie durch Tauri od
 Das Produkt wird als modulares Monorepo umgesetzt:
 
 - **Rust-Vertrauenskern:** Format, deterministisches CBOR, COSE, Kryptografie, Trust Registry, Hash-Kette, Archivtransaktionen, Verifikation und Recovery.
-- **Tauri-2-Desktopanwendung:** gemeinsame Binär- und UI-Basis für Writer, Reader und Administration.
+- **Tauri-2-Desktopanwendung (`apps/desktop/`):** gemeinsame Binär- und UI-Basis für Writer und Administration.
+- **Installierbare Web-Anwendung (`apps/web/`):** Reader als PWA mit `wasm32`-fähigem Rust-Kern; siehe `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §3.
 - **React-19-/TypeScript-Oberfläche:** rollenabhängige Ansichten, Eingabe, lokale Suche und technische Statusdarstellung auf Basis von Ant Design 6.
 - **Axum-Sync-Server:** Geräteanfragen, Trust-Verteilung, Objektannahme, Kettenprüfung, Receipts, Checkpoints und Evidence-Aufträge.
 - **Recovery-/Admin-CLI:** Initialisierung, Prüfung, Entschlüsselung, Re-Grant, Berichte, Schlüsselzeremonien und kontrollierte Vernichtung.
@@ -119,18 +122,23 @@ Das Produkt wird als modulares Monorepo umgesetzt:
 
 Kryptografische oder formatkritische Logik DARF NICHT in TypeScript oder separat im Server nachgebaut werden. Desktop, Server und CLI verwenden dieselben Rust-Crates und dieselben Testvektoren.
 
-### 5.2 Rollenzuordnung der Desktopanwendung
+### 5.2 Rollenzuordnung der Anwendungen
 
-Die gemeinsame Desktopanwendung schaltet Funktionen ausschließlich anhand gültiger signierter Gerätezertifikate frei. Ein lokaler Konfigurationswert oder UI-Schalter DARF keine Rolle hinzufügen oder erweitern.
+Ersetzt durch `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §3.
+
+Die **Desktopanwendung** schaltet Writer- und Administrationsfunktionen ausschließlich anhand gültiger signierter Gerätezertifikate frei. Ein lokaler Konfigurationswert oder UI-Schalter DARF keine Rolle hinzufügen oder erweitern.
+
+Die **Web-Anwendung** stellt ausschließlich Reader-Funktionen bereit. Sie enthält keinen Code für Writer-Finalisierung, Root-Zeremonien, Operator-Provisionierung, Historical Re-grant oder Vernichtungsausführung.
 
 Ein Writer-Gerät DARF niemals zugleich einen privaten Reader-, Recovery- oder Historical-Grant-Authority-Schlüssel besitzen. Admin und Reader dürfen auf demselben physischen Gerät nur als getrennt zertifizierte Rollen mit getrennten Schlüsseln existieren. Die Admin-Rolle allein verleiht keinen Inhaltszugriff.
 
 ### 5.3 Vertrauenszonen
 
 1. **Offline-Vertrauenszone:** Organisations-Root, Recovery- und Historical-Grant-Authority-Schlüssel samt Sicherungsmedien.
-2. **Desktop-/Archivzone:** Writer, Reader, Admin, verschlüsselte lokale Datenbanken und lokales Archiv.
+2. **Desktop-/Archivzone:** Writer, Admin, verschlüsselte lokale Datenbanken und lokales Archiv.
 3. **Serverzone:** Axum, PostgreSQL, Object Store und Server-Belegschlüssel.
 4. **Externe Evidence-Zone:** RFC-3161-Time-Stamp-Authority; sie erhält nur Hashwerte.
+5. **Browser-Zone:** installierte Web-Anwendung, Reader-Vault, verschlüsselter lokaler Index, gepinnter Root-Anchor. Sie ist gegenüber der Serverzone misstrauisch; sie akzeptiert weder Code noch Vertrauensmaterial allein auf Aussage des Servers. Siehe `2026-08-15-einsatzarchiv-web-reader-design.md` §3.
 
 Kein Vertrauensübergang darf allein durch einen Server-Datenbankeintrag erfolgen. Geräteautorität, Widerrufe, Writer-Wechsel und Richtlinien leiten sich aus Root-signierten append-only Trust-Objekten ab.
 
@@ -246,6 +254,8 @@ operatorProfileCommitment = SHA-256(
 Der `operator`-Snapshot besteht aus diesen fünf Commitment-Eingaben plus `operatorBindingObjectHash`. Writer und Reader berechnen das Commitment nach der Entschlüsselung neu; eine Abweichung ist ein Trust-/Payloadfehler. Dadurch enthält das öffentliche Trust Bundle weder Anzeigenamen noch Funktionsbezeichnungen.
 
 App-Entsperrung und Re-Authentisierung verwenden ausschließlich den nativen OS-Identitätsprovider: Windows Hello/Credential UI, macOS LocalAuthentication und Ubuntu PAM/Polkit für das gebundene Konto, jeweils kombiniert mit dem Operator-Instanzschlüssel. Das Produkt speichert keine OS-Passwörter. Re-Authentisierung ist mindestens vor Finalisierung, Klartextexport, Admin-/Root-Zeremonie, Recovery-Test, Re-Grant und Vernichtung erforderlich; nach fünf Minuten Inaktivität oder OS-Sperre endet die Sitzung. Kann der Provider Konto, erfolgreiche Benutzerpräsenz und Instanzschlüsselbesitz nicht gemeinsam bestätigen, bleibt die Aktion gesperrt.
+
+**Reader-Vorbehalt.** Der Absatz gilt für Writer, Administration und CLI. Für den Web-Reader entfällt der native OS-Identitätsprovider (`2026-08-15-einsatzarchiv-web-reader-design.md` §11.3); an seine Stelle treten WebAuthn-PRF-Envelopes über zwei Pflicht-Authenticators (§6). Die OS-Sperre hat im Browser keine Entsprechung — dokumentierte SOLL-Abweichung nach §11.2 mit Ersatz nach §6.5; der Inaktivitäts-Timeout bleibt.
 
 Provisionierung erfordert externen Identitätsabgleich durch einen Organisationsadministrator, Admin-Autorisierung und Root-signiertes Binding. Ein Root-signierter Widerruf beendet neue Sitzungen und Aktionen ab seiner Wirksamkeitssequenz; historische `operator`-Snapshots bleiben als damalige, nicht frei behauptete Zuordnung erhalten. Login, fehlgeschlagene Re-Authentisierung, Binding-Wechsel und Widerruf werden ohne fachliche Klartexte lokal auditiert. Der Go-live-Bericht listet jedes produktive Binding, das verantwortliche Konto und den Widerrufsprozess.
 
@@ -1572,6 +1582,8 @@ Liegt statt einer `.eip` ein `.eds` vor, prüft der Reader ursprüngliches signi
 
 Reader-Cache und Suchindex liegen in einer verschlüsselten SQLite-Datenbank. Der Datenbankschlüssel wird durch den Plattform-Key-Provider geschützt. Entschlüsselte Inhalte dürfen nicht in temporäre Betriebssystemdateien, Zwischenablagen oder Crash-Dumps geschrieben werden.
 
+**Reader-Vorbehalt.** Im Web-Reader entfällt SQLCipher (`2026-08-15-einsatzarchiv-web-reader-design.md` §8.1). Der lokale Index ist ein invertierter Index über entschlüsselte Feldwerte, in Rust implementiert, als Ganzes mit ChaCha20-Poly1305 verschlüsselt in OPFS abgelegt und beim Entsperren in den WASM-Speicher geladen. Der native Reader-Key-Provider entfällt (§11.3); die Anforderungen an Nicht-Roaming und Backup-Ausschluss gelten sinngemäß für den Vault. Das Verbot, entschlüsselte Inhalte in temporäre Dateien, Zwischenablagen oder Crash-Dumps zu schreiben, gilt unverändert.
+
 Filter nach Zeitraum, Stichwort, Fahrzeug und Person arbeiten ausschließlich lokal. Nach konfigurierbarer Inaktivität sperrt sich der Reader; der sichere Default beträgt fünf Minuten.
 
 ### 14.3 Nachträge
@@ -1887,9 +1899,12 @@ Verbindliche Begriffe sind:
 
 - Sync: `lokal gesichert`, `Upload ausstehend`, `synchronisiert`, `Fehler`
 - Verifikation: `verifiziert`, `Lücke`, `fehlender Grant`, `unbekannter Schlüssel`, `nicht darstellbares Schema`, `ungültig`
+- Server-Bestätigung (orthogonal zur Verifikation, kein Fehlerzustand): `server-bestätigt`, `nicht server-bestätigt`
 - Evidence: `vollständig`, `ausstehend`, `überfällig`, `ungültig`
 - Eintragszustand: `vorhanden`, `autorisiert vernichtet`, `ungeklärte Lücke`
 - Vernichtungsprozess: `beantragt`, `in Bearbeitung`, `wartet auf Backup-Frist`, `im verwalteten Umfang abgeschlossen`, `bekannte Replik nicht erreichbar`
+
+Die Server-Bestätigung ist eine eigene Dimension. Ein Objekt kann `verifiziert` und zugleich `nicht server-bestätigt` sein; im Datei-Modus des Web-Readers (`2026-08-15-einsatzarchiv-web-reader-design.md` §5.4) ist genau das der Regelfall. Die beiden Dimensionen DÜRFEN NICHT zusammengefasst und `nicht server-bestätigt` DARF NICHT als `Lücke` oder `ungültig` dargestellt werden.
 
 Die Anwendung darf keine pauschale gerichtliche Beweiskraft, TR-ESOR-Zertifizierung oder vollständige Metadatenblindheit behaupten.
 
@@ -1914,6 +1929,8 @@ Telemetrie und automatische Crash-Uploads sind standardmäßig deaktiviert. Wenn
 ### 18.3 Lokale Datenbanken und Schlüssel
 
 SQLite-Datenbanken für Entwürfe, Stammdaten, Reader-Cache, Suchindex und Audit werden mit SQLCipher oder einer gleichwertig geprüften vollständigen Datenbankverschlüsselung geschützt. Zusätzliche per-Draft-Schlüssel verhindern die Wiederlesbarkeit finalisierter Entwürfe aus freien Datenbankseiten.
+
+**Reader-Vorbehalt.** Reader-Cache und Suchindex des Web-Readers fallen nicht unter diesen Absatz; für sie gilt §14.2 in der Fassung des Reader-Vorbehalts (`2026-08-15-einsatzarchiv-web-reader-design.md` §8.1): ChaCha20-Poly1305-verschlüsselter Rust-Index in OPFS statt SQLCipher.
 
 Private Schlüssel dürfen nicht in unverschlüsselten Konfigurationsdateien, Environment Dumps oder Anwendungslogs erscheinen. Temporäre Klartextdateien sind verboten.
 

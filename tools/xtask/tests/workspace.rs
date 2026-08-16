@@ -106,3 +106,39 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
             .success()
     );
 }
+
+#[test]
+fn rust_toolchain_declares_the_wasm32_target() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let toolchain: Value = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let targets = toolchain["toolchain"]["targets"]
+        .as_array()
+        .expect("rust-toolchain.toml must declare targets so a fresh checkout provisions wasm32");
+    assert!(
+        targets
+            .iter()
+            .any(|target| target.as_str() == Some("wasm32-unknown-unknown")),
+        "wasm32-unknown-unknown must be provisioned by the pinned toolchain"
+    );
+}
+
+#[test]
+fn workspace_getrandom_enables_the_wasm_js_feature() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest: Value = fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let getrandom = &manifest["workspace"]["dependencies"]["getrandom"];
+    assert_eq!(getrandom["version"].as_str(), Some("=0.4.3"));
+    let features = getrandom["features"]
+        .as_array()
+        .expect("getrandom must declare features so wasm32 resolves a backend");
+    assert!(
+        features.iter().any(|f| f.as_str() == Some("wasm_js")),
+        "getrandom must enable wasm_js; getrandom 0.4.3 needs no --cfg getrandom_backend"
+    );
+}
