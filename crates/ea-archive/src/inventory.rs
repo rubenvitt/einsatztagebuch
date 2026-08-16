@@ -16,7 +16,7 @@
 //! Umbenennen waehlbar.
 
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ea_crypto::object_hash;
 use ea_format::{
@@ -24,7 +24,7 @@ use ea_format::{
     ESR_PREFIX_V1, ETB_PREFIX_V1, EntryPackageV1, EvidenceObjectV1, GrantV1, Parsed,
     ParsedArchiveObject, ReceiptV1, TrustObjectV1, decode_exact_object,
 };
-use ea_types::ObjectHash;
+use ea_types::{ChainId, ChainSequence, ObjectHash};
 
 use crate::{
     ArchiveBlob, ArchiveError, ArchiveSource, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
@@ -62,10 +62,9 @@ fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8; 32]) -> fmt::Resul
 /// Warum ein Objekt isoliert wurde.
 ///
 /// Die geschlossene Menge aus `schemas/reports/v1/verification-report.schema.json`
-/// (`quarantinedObject.reason`), vollstaendig hier definiert. `Duplicate` und
-/// `Conflicting` entstehen erst beim Kettenaufbau, `Unattributable` erst bei der
-/// Zuordnung zu einem Schreiberzertifikat; die Menge ist dennoch jetzt schon
-/// geschlossen, damit der Bericht keine Gruende nachtraegt.
+/// (`quarantinedObject.reason`), vollstaendig hier definiert. `Unattributable`
+/// entsteht erst bei der Zuordnung zu einem Schreiberzertifikat; die Menge ist
+/// dennoch jetzt schon geschlossen, damit der Bericht keine Gruende nachtraegt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum QuarantineReason {
     /// Praefix vorhanden, Parser gescheitert. Traegt PAARWEISE einen
@@ -89,6 +88,33 @@ impl QuarantineReason {
             Self::Duplicate => "duplicate",
             Self::Conflicting => "conflicting",
             Self::Unattributable => "unattributable",
+        }
+    }
+
+    /// Welcher Grund gewinnt, wenn auf denselben Objekthash mehrere zutreffen.
+    ///
+    /// `quarantinedObjects` ist im Berichtsschema nach `objectHash` eindeutig
+    /// (`x-ea-unique-key`); ein Objekt traegt deshalb genau EINEN Grund. Der
+    /// kleinere Rang gewinnt:
+    ///
+    /// 1. `Malformed` — muss gewinnen, sonst bricht die gepinnte eineindeutige
+    ///    Kopplung an `formatErrors`: ein Parse-Fehlschlag erzeugt PAARWEISE
+    ///    einen `formatError` und diesen Quarantaeneeintrag.
+    /// 2. `Conflicting` — ein inhaltlicher Widerspruch wiegt schwerer als die
+    ///    blosse Wiederholung derselben Bytes.
+    /// 3. `Unattributable` — Zuordnungsmangel, aber keine Aussage ueber den
+    ///    Bestand selbst.
+    /// 4. `Duplicate` — der schwaechste Befund: dieselben Bytes noch einmal.
+    ///
+    /// BEWUSST nicht die abgeleitete `Ord`-Reihenfolge der Varianten: die
+    /// Deklarationsreihenfolge folgt dem Schema, die Vorrangordnung folgt der
+    /// Aussagekraft. Beides zu koppeln waere ein stiller Fallstrick.
+    const fn precedence_rank(self) -> u8 {
+        match self {
+            Self::Malformed => 0,
+            Self::Conflicting => 1,
+            Self::Unattributable => 2,
+            Self::Duplicate => 3,
         }
     }
 }
@@ -237,6 +263,17 @@ impl ArchiveInventory {
     }
 
     /// Die isolierten Objekte, aufsteigend nach `ObjectHash`.
+    ///
+    /// Je Objekthash genau EIN Eintrag — `quarantinedObjects` ist im Bericht
+    /// nach `objectHash` eindeutig. Treffen mehrere Gruende zu, gewinnt der mit
+    /// dem kleineren [`QuarantineReason::precedence_rank`]; `n` bytegleiche
+    /// Kopien erzeugen deshalb einen einzigen `Duplicate`-Eintrag.
+    ///
+    /// Bei `Duplicate` bleibt die erste Kopie ausdruecklich das inventarisierte
+    /// Objekt: sie erscheint weiterhin in ihrer Objektfamilie, damit die
+    /// Zaehler und die Kette den Eintrag sehen. Ob der Bericht diesen Hash
+    /// dann in `objectResults` fuehrt oder allein in `quarantinedObjects`, ist
+    /// eine Entscheidung der Berichtsabbildung und faellt nicht hier.
     #[must_use]
     pub fn quarantined(&self) -> &[QuarantinedObject] {
         &self.quarantined
@@ -274,6 +311,43 @@ struct InventoryBuilder {
     /// Bestand sind EIN Befund: sonst traege ein Quarantaeneeintrag mehrere
     /// `formatError`s und die gepinnte Kopplung waere gebrochen.
     malformed: BTreeMap<ObjectHash, &'static str>,
+    /// Jeder Objekthash, der schon einmal MIT Praefix geliefert wurde.
+    ///
+    /// Nur Bytes mit Praefix: Beiwerk traegt keine Objektidentitaet und kann
+    /// deshalb nie ein Duplikat sein.
+    seen: BTreeSet<ObjectHash>,
+    /// Objekthash -> Grund, genau ein Grund je Hash
+    /// (siehe [`QuarantineReason::precedence_rank`]).
+    quarantine: BTreeMap<ObjectHash, QuarantineReason>,
+}
+
+/// Traegt `object_hash` den Grund `reason` ein, wenn dieser den bereits
+/// vermerkten uebertrifft.
+fn escalate(
+    quarantine: &mut BTreeMap<ObjectHash, QuarantineReason>,
+    object_hash: ObjectHash,
+    reason: QuarantineReason,
+) {
+    quarantine
+        .entry(object_hash)
+        .and_modify(|existing| {
+            if reason.precedence_rank() < existing.precedence_rank() {
+                *existing = reason;
+            }
+        })
+        .or_insert(reason);
+}
+
+/// Wer erhebt fuer eine Sequenz Verifikationsanspruch?
+///
+/// `identities` sind die BEANSPRUCHTEN urspruenglichen Eintraege, `members` die
+/// Objekte, die den Anspruch tragen. Beide Mengen fallen fuer ein `.eip`
+/// zusammen; fuer ein `.eds` ist die Identitaet der `original_eip_object_hash`,
+/// das Mitglied aber der Objekthash des Stubs selbst.
+#[derive(Default)]
+struct SequenceClaims {
+    identities: BTreeSet<ObjectHash>,
+    members: BTreeSet<ObjectHash>,
 }
 
 impl InventoryBuilder {
@@ -296,15 +370,80 @@ impl InventoryBuilder {
         }
         self.archive_object_count += 1;
 
+        // Der Objekthash steht schon vor dem Parsen fest und ist die einzige
+        // Identitaet, die diese Klasse kennt — der Pfadhinweis ist keine.
+        let hash = object_hash(blob.bytes());
+        if !self.seen.insert(hash) {
+            escalate(&mut self.quarantine, hash, QuarantineReason::Duplicate);
+        }
+
         match decode_exact_object(blob.bytes()) {
             Ok(parsed) => self.insert(parsed),
             Err(error) => {
-                self.malformed
-                    .entry(object_hash(blob.bytes()))
-                    .or_insert(error.code());
+                self.malformed.entry(hash).or_insert(error.code());
+                escalate(&mut self.quarantine, hash, QuarantineReason::Malformed);
             }
         }
         Ok(())
+    }
+
+    /// Die Objekte, die fuer dieselbe Sequenz rivalisierenden Anspruch erheben.
+    ///
+    /// Der Bezugspunkt sind ausschliesslich geparste Feldwerte, nie Pfade:
+    /// `ManifestCoreFieldsV1::chain_id`/`chain_sequence` fuer das Fach und
+    /// `DestroyedEntryStubV1::original_eip_object_hash` fuer den Anspruch des
+    /// Stubs.
+    ///
+    /// ABGRENZUNG: Ein `.eds` ist NICHT automatisch mit dem `.eip` in Konflikt,
+    /// das es ersetzt — es traegt dessen `original_eip_object_hash` bewusst und
+    /// beansprucht damit DIESELBE Identitaet. Liegt nur der Stub vor, ist das
+    /// der Normalfall autorisiert vernichtet. Konflikt ist erst, wenn ein Fach
+    /// mehr als eine urspruengliche Identitaet traegt.
+    fn sequence_conflicts(&self) -> Vec<ObjectHash> {
+        let mut slots: BTreeMap<(ChainId, ChainSequence), SequenceClaims> = BTreeMap::new();
+        for entry in self.entries.values() {
+            let fields = entry.value().manifest().fields();
+            let slot = slots
+                .entry((fields.chain_id, fields.chain_sequence))
+                .or_default();
+            slot.identities.insert(entry.object_hash());
+            slot.members.insert(entry.object_hash());
+        }
+        for stub in self.destroyed.values() {
+            let fields = stub.value().signed_manifest().manifest().fields();
+            let slot = slots
+                .entry((fields.chain_id, fields.chain_sequence))
+                .or_default();
+            slot.identities
+                .insert(stub.value().original_eip_object_hash());
+            slot.members.insert(stub.object_hash());
+        }
+        slots
+            .into_values()
+            .filter(|slot| slot.identities.len() > 1)
+            .flat_map(|slot| slot.members)
+            .collect()
+    }
+
+    /// Die Quittungen, die fuer denselben Eintrag verschiedene Bytes tragen.
+    ///
+    /// Gruppiert wird allein ueber `ReceiptCoreFieldsV1::entry_object_hash`;
+    /// Quittungen gehoeren BEWUSST nicht in die Sequenzfaecher, denn sie
+    /// erheben keinen Anspruch auf einen Kettenplatz, sondern bestaetigen einen
+    /// bestimmten Eintrag.
+    fn receipt_conflicts(&self) -> Vec<ObjectHash> {
+        let mut claims: BTreeMap<ObjectHash, BTreeSet<ObjectHash>> = BTreeMap::new();
+        for receipt in self.receipts.values() {
+            claims
+                .entry(receipt.value().core().fields().entry_object_hash)
+                .or_default()
+                .insert(receipt.object_hash());
+        }
+        claims
+            .into_values()
+            .filter(|members| members.len() > 1)
+            .flatten()
+            .collect()
     }
 
     fn insert(&mut self, parsed: ParsedArchiveObject) {
@@ -330,13 +469,30 @@ impl InventoryBuilder {
         }
     }
 
-    fn finish(self) -> ArchiveInventory {
+    fn finish(mut self) -> ArchiveInventory {
+        // Die Konflikte entstehen erst, wenn der ganze Bestand gelesen ist:
+        // ein Anspruch ist nur im Vergleich mit den uebrigen einer.
+        for object_hash in self.sequence_conflicts() {
+            escalate(
+                &mut self.quarantine,
+                object_hash,
+                QuarantineReason::Conflicting,
+            );
+        }
+        for object_hash in self.receipt_conflicts() {
+            escalate(
+                &mut self.quarantine,
+                object_hash,
+                QuarantineReason::Conflicting,
+            );
+        }
+
         let quarantined = self
-            .malformed
-            .keys()
-            .map(|object_hash| QuarantinedObject {
+            .quarantine
+            .iter()
+            .map(|(object_hash, reason)| QuarantinedObject {
                 object_hash: *object_hash,
-                reason: QuarantineReason::Malformed,
+                reason: *reason,
             })
             .collect();
         let format_errors = self
