@@ -23,6 +23,7 @@ mod error;
 mod gates;
 mod json;
 mod report;
+mod state;
 
 pub use archive::{VerifyOptions, verify_archive};
 pub use error::VerifyError;
@@ -35,3 +36,4 @@ pub use report::{
     ObjectResultKindV1, ObjectResultV1, ObjectTypeV1, QuarantinedObjectV1, ServerConfirmationV1,
     VerificationReportV1,
 };
+pub use state::{EphemeralTrustStateStore, verification_state_key};

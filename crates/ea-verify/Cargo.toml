@@ -16,4 +16,8 @@ ea-types.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+# Nur fuer die per #[path] eingebundenen Fixture-Module von ea-archive und
+# ea-format, die Objekthashes hexadezimal in Pfadhinweise schreiben und
+# Testvektoren aus Hex lesen. Dev-Dependency, also nie im wasm32-Lib-Graphen.
+hex.workspace = true
 minicbor.workspace = true

@@ -1,18 +1,25 @@
 //! Der Einstiegspunkt der Verifikation: [`verify_archive`].
 //!
-//! DIESE FASSUNG fuehrt ausschliesslich die Inventarisierung und damit Gate
-//! `format` aus. Alle uebrigen Berichtsfelder bleiben leer, und
-//! `pipeline_completed` bleibt falsch — der Bestand gilt also ausdruecklich
-//! NICHT als vollstaendig verifiziert. Die Gates `trust` bis `recipient-grant`
-//! folgen in den naechsten Tasks.
+//! DIESE FASSUNG fuehrt die Gates `format`, `trust` und `registry` aus. Die
+//! Gates `manifest-signature` bis `recipient-grant` folgen in den naechsten
+//! Tasks; solange bleibt `pipeline_completed` falsch, und der Bestand gilt
+//! ausdruecklich NICHT als vollstaendig verifiziert.
 
 use core::marker::PhantomData;
 
-use ea_archive::{ArchiveInventory, ArchiveSource};
-use ea_trust::TrustAnchorV1;
-use ea_types::UnixMillis;
+use ea_archive::{ArchiveInventory, ArchiveSource, QuarantineReason};
+use ea_format::{CertificateKindV1, EntryPackageV1, Parsed};
+use ea_trust::{
+    RegistrySelectionOutcome, SelectedRegistryHead, TrustAnchorV1, TrustStateKey, VerifiedTrust,
+    load_trust_state, prepare_local_time, select_registry_head, verify_registry_candidate,
+    verify_trust,
+};
+use ea_types::{CertificateHash, ChainSequence, ObjectHash, UnixMillis};
 
-use crate::{ChainHeadV1, ObjectErrorV1, QuarantinedObjectV1, VerificationReportV1, VerifyError};
+use crate::{
+    ChainHeadV1, EphemeralTrustStateStore, ObjectErrorV1, QuarantinedObjectV1,
+    VerificationReportV1, VerifyError, state::verification_state_key,
+};
 
 /// Die Stellschrauben eines Verifikationslaufs.
 ///
@@ -62,9 +69,20 @@ impl VerifyOptions<'_> {
 /// (`design.md` §11.4); daraus stammt insbesondere die Kettenkennung des
 /// Berichts, sodass kein untergeschobenes Objekt sie bestimmen kann.
 ///
-/// Ein Befund ueber ein einzelnes Objekt ist NIE ein `Err`: unlesbare, doppelte
-/// und widerspruechliche Objekte stehen als `formatErrors` und
+/// Ein Befund ueber ein einzelnes Objekt ist NIE ein `Err`: unlesbare, doppelte,
+/// widerspruechliche und unzuordenbare Objekte stehen als `formatErrors` und
 /// `quarantinedObjects` im Bericht, und der Lauf liefert `Ok`.
+///
+/// Auch ein Fehlschlag von Gate `trust` liefert `Ok`: er ist FAIL-CLOSED fuer
+/// den gesamten Bestand — ohne Vertrauenskette gibt es keine Objektaussage,
+/// `objectResults` und `registryVersions` bleiben leer —, aber der Bericht
+/// bleibt lesbar, damit die Diagnose sichtbar ist. Ein eigenes Fehlerfeld
+/// bekommt dieser Fall NICHT: das Berichtsschema ist geschlossen, und alle
+/// Fehlerarrays sind nach `objectHash` geschluesselt. Ein Vertrauensmangel ist
+/// aber kein Befund ueber ein einzelnes Objekt; ihm einen Objekthash zu
+/// erfinden hiesse, eine Objektidentitaet zu behaupten, die es nicht gibt.
+/// Sichtbar wird er stattdessen daran, dass ueber keinen Eintrag etwas
+/// ausgesagt wird und [`VerificationReportV1::is_fully_verified`] falsch ist.
 ///
 /// # Errors
 ///
@@ -76,10 +94,6 @@ pub fn verify_archive(
     anchor: &TrustAnchorV1,
     options: VerifyOptions<'_>,
 ) -> Result<VerificationReportV1, VerifyError> {
-    // Die Uhr traegt erst die Gates `trust` und `registry`. Sie wird hier
-    // bewusst schon verlangt, damit die Signatur nicht spaeter bricht.
-    let _ = options;
-
     // Gate `format`: das Inventar klassifiziert am 9-Byte-Exact-Object-Praefix
     // und parst jede Bytesequenz mit Praefix. Ein Fehlschlag erzeugt PAARWEISE
     // einen `formatError` und einen Quarantaeneeintrag `malformed`.
@@ -102,5 +116,164 @@ pub fn verify_archive(
             QuarantinedObjectV1::new(entry.object_hash(), entry.reason()),
         );
     }
+
+    let key = verification_state_key(anchor.organization_id());
+    let mut store = EphemeralTrustStateStore::new(key, options.os_wall_clock());
+
+    // Gate `trust`: einmal fuer den ganzen Bestand. Traegt es nicht, endet der
+    // Lauf hier — ohne Vertrauenskette laesst sich ueber kein Objekt etwas
+    // sagen.
+    if verified_trust(&mut store, key, anchor, &inventory).is_none() {
+        return report.seal();
+    }
+
+    // Gate `registry`: je Eintragssequenz einzeln. Ein Eintrag, dessen Sequenz
+    // keinen Kopf mit Operationsautoritaet findet, bekommt keine Aussage; ein
+    // Eintrag, dessen Schreiberzertifikat sich nicht aufloest, wird isoliert.
+    //
+    // BEHANDELT WIRD NACH AUFSTEIGENDER SEQUENZ, nicht in Inventarreihenfolge:
+    // die folgt dem Objekthash, und die Registrierungslinie laesst sich nur
+    // VORWAERTS nachziehen — ein einmal gepinnter Kopf geht nie zurueck. Liefe
+    // die Schleife nach Hash, entschiede der Zufall der Hashwerte darueber,
+    // welcher Eintrag noch in der Lease seines Kopfes liegt. Der Objekthash
+    // bleibt als zweites Ordnungsmerkmal, damit die Reihenfolge auch bei
+    // gleicher Sequenz total und damit reproduzierbar ist.
+    let mut ordered: Vec<&Parsed<EntryPackageV1>> = inventory.entries().iter().collect();
+    ordered.sort_by_key(|entry| {
+        (
+            entry.value().manifest().fields().chain_sequence,
+            entry.object_hash(),
+        )
+    });
+    for entry in ordered {
+        let object_hash = entry.object_hash();
+        // Ein bereits isoliertes Objekt geht nicht weiter durch die Gates: es
+        // erscheint ENTWEDER in `objectResults` ODER in genau einem
+        // Fehler-/Quarantaenearray, niemals in beidem.
+        if report.quarantined_objects.contains_key(&object_hash) {
+            continue;
+        }
+        let fields = entry.value().manifest().fields();
+        let Some(selected) = select_head_for_sequence(
+            &mut store,
+            key,
+            anchor,
+            &inventory,
+            options.os_wall_clock(),
+            fields.chain_sequence,
+        ) else {
+            continue;
+        };
+        if writer_is_active(&selected, fields.writer_certificate_hash) {
+            // ZWISCHENSTAND: `registryVersions` fuehrt endgueltig die Werte
+            // der Objekte, die Gate `manifest-signature` bestanden haben. Das
+            // Gate entsteht erst im naechsten Task; bis dahin ist der
+            // ausgewaehlte Kopf die schaerfste verfuegbare Aussage. Der Wert
+            // stammt in jedem Fall aus dem GEPRUEFTEN Kopf, nie aus dem
+            // Manifest — aus unauthentischen Bytes stammen nur Zaehler und
+            // Fehlereintraege, niemals Sachaussagen.
+            report.registry_versions.insert(selected.registry_version());
+        } else {
+            quarantine_unattributable(&mut report, object_hash);
+        }
+    }
+
     report.seal()
+}
+
+/// Gate `trust`: laedt den Stand und prueft die Vertrauenskette gegen den Anker.
+///
+/// `None` ist FAIL-CLOSED fuer den gesamten Bestand.
+fn verified_trust(
+    store: &mut EphemeralTrustStateStore,
+    key: TrustStateKey,
+    anchor: &TrustAnchorV1,
+    inventory: &ArchiveInventory,
+) -> Option<VerifiedTrust> {
+    let snapshot = load_trust_state(store, key).ok()?;
+    verify_trust(anchor, inventory, snapshot).ok()
+}
+
+/// Obergrenze der Aufholschritte je Eintragssequenz.
+///
+/// Jeder Aufholschritt pinnt eine STRIKT hoehere Registrierungsversion, und
+/// jede Version braucht mindestens ein eigenes Registrierungsereignis im
+/// Bestand. Mehr Schritte als zulaessige Trust-Objekte kann es deshalb nicht
+/// geben; die Schranke ist eine Abbruchgarantie, keine Fachregel.
+const MAX_REGISTRY_CATCH_UP_STEPS_V1: usize = ea_trust::MAX_TRUST_OBJECTS_V1;
+
+/// Gate `registry`: waehlt den Kopf mit Operationsautoritaet ueber
+/// `proposed_sequence`.
+///
+/// Die Reihenfolge ist bindend und darf nicht aufgebrochen werden:
+/// `load_trust_state` -> `verify_trust` -> `verify_registry_candidate` ->
+/// `prepare_local_time` -> `select_registry_head`. `prepare_local_time`
+/// verlangt, dass Revision, Zeitzustand und gepinnter Kopf des Speichers
+/// EXAKT zum Kandidaten passen; ein fremder Commit dazwischen liefert
+/// `TrustError::StateConflict`. Deshalb laeuft auch `verify_trust` je Runde
+/// erneut: jede erfolgreiche Auswahl schreibt eine neue Revision, und ein
+/// Kandidat aus der Vorrunde ist danach veraltet.
+///
+/// Nur [`RegistrySelectionOutcome::Selected`] traegt Autoritaet.
+/// `PendingFuture` bricht das Gate fuer diese Sequenz ab: ein noch nicht
+/// wirksamer Nachfolger ist keine Autoritaet, und Warten hilft nicht, weil die
+/// Uhr fest ist.
+///
+/// [`RegistrySelectionOutcome::Advanced`] wird ebenfalls NICHT als Autoritaet
+/// benutzt — der Kopf daraus fliesst in keine Aussage —, beendet aber die
+/// Runde nicht, sondern loest die naechste aus. `Advanced` heisst
+/// ausdruecklich: es wurde ein Kopf NACHGEZOGEN, der die Sequenz noch nicht
+/// abdeckt. Ein Verifizierer startet aus einem leeren Stand und muss die
+/// Registrierungslinie von Version eins an nachziehen; schon die kleinste
+/// echte Linie braucht dafuer zwei Koepfe (einen fuer die Policy, einen fuer
+/// das Schreiberzertifikat). Wer beim ersten `Advanced` abbraeche, koennte
+/// keinen einzigen Eintrag je zuordnen.
+fn select_head_for_sequence(
+    store: &mut EphemeralTrustStateStore,
+    key: TrustStateKey,
+    anchor: &TrustAnchorV1,
+    inventory: &ArchiveInventory,
+    os_wall_clock: UnixMillis,
+    proposed_sequence: ChainSequence,
+) -> Option<SelectedRegistryHead> {
+    for _ in 0..MAX_REGISTRY_CATCH_UP_STEPS_V1 {
+        let trust = verified_trust(store, key, anchor, inventory)?;
+        let candidate = verify_registry_candidate(&trust, proposed_sequence).ok()?;
+        // Zeitquellen bleiben leer, solange der Speicher keinen Kopf traegt:
+        // `prepare_local_time` verwirft jede Quelle, deren Autoritaetskopf
+        // nicht der gepinnte ist, und vor der ersten Auswahl ist keiner
+        // gepinnt.
+        let local_time = prepare_local_time(store, &candidate, os_wall_clock, &[]).ok()?;
+        match select_registry_head(candidate, local_time, None).ok()? {
+            RegistrySelectionOutcome::Selected(selected) => return Some(selected),
+            RegistrySelectionOutcome::Advanced(_) => {}
+            RegistrySelectionOutcome::PendingFuture(_) => return None,
+        }
+    }
+    None
+}
+
+/// Loest `writer_certificate_hash` in den zur Sequenz aktiven Zertifikaten auf.
+///
+/// Verlangt ausdruecklich ein Zertifikat der Art `Writer`: ein Server- oder
+/// Adminzertifikat schreibt keine Eintraege, und ein Manifest, das eines als
+/// Schreiber benennt, ist nicht zuordenbar.
+fn writer_is_active(selected: &SelectedRegistryHead, writer: CertificateHash) -> bool {
+    selected.active_certificates().any(|(hash, fields)| {
+        hash == writer && fields.certificate_kind == CertificateKindV1::Writer
+    })
+}
+
+/// Traegt `object_hash` als nicht zuordenbar ein.
+///
+/// Ein Eintrag ohne aufloesbaren Schreiber wird NICHT als Kettenknoten
+/// aufgenommen — er duerfte sonst als blosse Luecke erscheinen, und eine
+/// Luecke ist eine ganz andere Aussage als ein vorhandenes, aber niemandem
+/// zurechenbares Objekt. Genau dafuer gibt es `unattributable` im
+/// geschlossenen Grundmengen-Enum des Berichts.
+fn quarantine_unattributable(report: &mut VerificationReportV1, object_hash: ObjectHash) {
+    report.quarantined_objects.insert(
+        object_hash,
+        QuarantinedObjectV1::new(object_hash, QuarantineReason::Unattributable),
+    );
 }
