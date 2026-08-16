@@ -51,7 +51,9 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
         // Positivliste, nicht --workspace: xtask zieht jsonschema/cddl und
         // std::process::Command und ist nicht wasm-tauglich. Nicht --all-targets:
         // das zoege Dev-Dependencies und Integrationstests in den wasm-Graph.
-        // Jede neue Bibliotheks-Crate MUSS hier ergaenzt werden.
+        // Jede neue Bibliotheks-Crate MUSS hier oder in WASM32_EXEMPT_CRATES
+        // stehen; tools/xtask/tests/workspace.rs erzwingt genau eine Zuordnung
+        // je Mitglied unter crates/.
         (
             "cargo",
             vec![
@@ -73,10 +75,29 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
                 "ea-time",
                 "-p",
                 "ea-trust",
+                "-p",
+                "ea-archive",
+                "-p",
+                "ea-chain",
+                "-p",
+                "ea-verify",
             ],
         ),
     ]
 }
+
+/// Library crates deliberately kept off the wasm32 positive list.
+///
+/// Each entry carries the crate name and the reason it cannot or need not
+/// compile for `wasm32-unknown-unknown`. The list is empty: every crate under
+/// `crates/` is shared browser code per
+/// `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §9.
+///
+/// Read as TEXT by `tools/xtask/tests/workspace.rs`, which requires exactly one
+/// classification — positive list or justified exception — for every member
+/// under `crates/`. That test is the only consumer, hence `dead_code`.
+#[allow(dead_code)]
+const WASM32_EXEMPT_CRATES: [(&str, &str); 0] = [];
 
 /// Reports when the running compiler is not the one `rust-toolchain.toml` pins.
 ///
@@ -1434,6 +1455,12 @@ vor Task 3 akzeptiert
                         "ea-time",
                         "-p",
                         "ea-trust",
+                        "-p",
+                        "ea-archive",
+                        "-p",
+                        "ea-chain",
+                        "-p",
+                        "ea-verify",
                     ],
                 ),
             ]

@@ -147,7 +147,7 @@ for (program, args) in [
     ("cargo", vec!["fmt", "--all", "--check"]),
     ("cargo", vec!["clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"]),
     ("cargo", vec!["test", "--workspace", "--all-targets", "--locked"]),
-    ("cargo", vec!["check", "--target", "wasm32-unknown-unknown", "--locked", "-p", "ea-types", "-p", "ea-cbor", "-p", "ea-crypto", "-p", "ea-format", "-p", "ea-schema", "-p", "ea-time", "-p", "ea-trust"]),
+    ("cargo", vec!["check", "--target", "wasm32-unknown-unknown", "--locked", "-p", "ea-types", "-p", "ea-cbor", "-p", "ea-crypto", "-p", "ea-format", "-p", "ea-schema", "-p", "ea-time", "-p", "ea-trust", "-p", "ea-archive", "-p", "ea-chain", "-p", "ea-verify"]),
 ] {
     let status = std::process::Command::new(program).args(args).status()?;
     if !status.success() { std::process::exit(status.code().unwrap_or(1)); }
@@ -1774,7 +1774,7 @@ pnpm test:property
 pnpm test:fuzz -- --smoke-seconds 60
 pnpm test:recovery
 cargo run --locked -p xtask -- stage-gate 1
-cargo check --target wasm32-unknown-unknown --locked -p ea-types -p ea-cbor -p ea-crypto -p ea-format -p ea-schema -p ea-time -p ea-trust
+cargo check --target wasm32-unknown-unknown --locked -p ea-types -p ea-cbor -p ea-crypto -p ea-format -p ea-schema -p ea-time -p ea-trust -p ea-archive -p ea-chain -p ea-verify
 pnpm verify:quick
 ```
 
