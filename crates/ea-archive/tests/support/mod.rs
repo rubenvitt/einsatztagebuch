@@ -274,6 +274,62 @@ pub fn canonical_archive() -> BuiltArchive {
     }
 }
 
+/// Die Stelle im `.eip` aus [`signed_entry_package`], an der genau ein Byte
+/// verkippt wird, um einen Parse-Fehlschlag zu erzeugen.
+///
+/// Byte 50 ist das CBOR-`null` (`0xf6`) eines optionalen Feldes im
+/// Manifestkern. `0xf6 ^ 0x01` ergibt `0xf7` (`undefined`): ein wohlgeformtes
+/// CBOR-Element, das die aeussere Strukturpruefung passiert und erst an der
+/// Formpruefung des Manifestkerns scheitert. Genau deshalb ist der Fehler
+/// [`MUTATED_EIP_FORMAT_ERROR_CODE_V1`] und kein `EA-CBOR-*`.
+///
+/// Bewusst eine feste Stelle und keine Suche: eine Suche wuerde bei einer
+/// Layoutaenderung in `ea-format` stillschweigend eine andere Fehlerklasse
+/// treffen. Diese Konstante bricht stattdessen laut.
+pub const MUTATED_EIP_BODY_OFFSET_V1: usize = 50;
+
+/// Der Fehlercode, den [`eip_with_one_mutated_body_byte`] erzeugt.
+pub const MUTATED_EIP_FORMAT_ERROR_CODE_V1: &str = "EA-FORMAT-SHAPE";
+
+/// Das kanonische `.eip` mit genau EINEM verkippten Byte im CBOR-Rumpf.
+///
+/// Das Exact-Object-Praefix bleibt unangetastet: die Bytes sind damit
+/// weiterhin ein Archivobjekt im Sinne von `design.md` §11.4 und muessen als
+/// Quarantaenefall mit Grund `malformed` erscheinen, nicht als Beiwerk.
+#[must_use]
+pub fn eip_with_one_mutated_body_byte() -> Vec<u8> {
+    let (_, eip) = signed_entry_package();
+    let mut mutated = eip.clone();
+    mutated[MUTATED_EIP_BODY_OFFSET_V1] ^= 0x01;
+
+    assert_eq!(
+        mutated.len(),
+        eip.len(),
+        "the mutation must not change the byte length"
+    );
+    assert_eq!(
+        mutated
+            .iter()
+            .zip(eip.iter())
+            .filter(|(left, right)| left != right)
+            .count(),
+        1,
+        "exactly one byte must differ"
+    );
+    assert!(
+        mutated.starts_with(&EIP_PREFIX_V1),
+        "the mutation must leave the exact object prefix intact"
+    );
+    let error = ea_format::decode_exact_object(&mutated)
+        .expect_err("the mutated entry package must fail to parse");
+    assert_eq!(
+        error.code(),
+        MUTATED_EIP_FORMAT_ERROR_CODE_V1,
+        "the pinned mutation offset must keep producing the pinned format error"
+    );
+    mutated
+}
+
 /// Ein signiertes `.eip` mitsamt dem Wert, aus dem das `.eds` gebaut wird.
 ///
 /// Baut genau wie `format_support::valid_eip`, gibt aber zusaetzlich den

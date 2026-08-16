@@ -6,12 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Fuer ea_crypto::object_hash: der Objekthash ist auch fuer NICHT parsbare
+# Bytes berechenbar, und genau darauf stuetzt sich der Quarantaeneeintrag mit
+# Grund `malformed`. Intra-Workspace-Crate, bereits auf der wasm32-Positivliste.
+ea-crypto.workspace = true
 ea-format.workspace = true
 ea-trust.workspace = true
 ea-types.workspace = true
 
 [dev-dependencies]
-ea-crypto.workspace = true
 ea-time.workspace = true
 ed25519-dalek.workspace = true
 # Nur fuer das per #[path] eingebundene Fixture-Modul von ea-format, das

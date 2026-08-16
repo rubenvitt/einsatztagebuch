@@ -8,10 +8,12 @@
 //! nichts ueber das Archivlayout erfaehrt.
 
 mod error;
+mod inventory;
 mod layout;
 mod source;
 
 pub use error::ArchiveError;
+pub use inventory::{ArchiveInventory, FormatErrorEntry, QuarantineReason, QuarantinedObject};
 pub use layout::{
     AUTHORIZATIONS_DIR_V1, CHECKPOINTS_DIR_V1, COMPATIBILITY_MATRIX_FILE_V1,
     DESTROYED_ENTRIES_DIR_V1, DESTRUCTION_ATTESTATIONS_SUBDIR_V1, DESTRUCTION_EVENTS_SUBDIR_V1,
