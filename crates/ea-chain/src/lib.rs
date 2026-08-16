@@ -14,6 +14,7 @@
 mod chain;
 mod error;
 mod node;
+mod rollback;
 
 pub use chain::{
     ChainBreak, ChainFork, ChainForkForm, ChainGap, ChainHead, MAX_CHAIN_NODES_V1, VerifiedChain,
@@ -21,3 +22,4 @@ pub use chain::{
 };
 pub use error::ChainError;
 pub use node::{ChainNode, ChainNodeKind};
+pub use rollback::{CheckpointClaim, RollbackAssessment, RollbackFinding, assess_rollback};

@@ -319,6 +319,7 @@ impl fmt::Debug for ChainGap {
 /// Ergebnis einer Verkettungspruefung samt Befunden.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedChain {
+    chain_id: ChainId,
     nodes: Vec<ChainNode>,
     breaks: Vec<ChainBreak>,
     forks: Vec<ChainFork>,
@@ -328,6 +329,20 @@ pub struct VerifiedChain {
 }
 
 impl VerifiedChain {
+    /// Kette, gegen die geprueft wurde — der Parameter von [`build_chain`],
+    /// nicht ein aus dem Bestand gelesener Wert.
+    ///
+    /// Bewusst `pub(crate)`: der einzige Verbraucher ist
+    /// [`assess_rollback`](crate::assess_rollback), das Checkpoint-Aussagen
+    /// fremder Ketten aussortieren muss, und zwar AUCH dann, wenn der Bestand
+    /// leer ist und [`Self::head`] deshalb nichts hergibt — genau der Fall des
+    /// vollstaendig geloeschten Archivs. Nach aussen bleibt der Wert
+    /// verschlossen, weil der Pruefbericht seine `chainId` laut Schema immer
+    /// vom Trust Anchor nimmt, nie aus dem Bestand.
+    pub(crate) const fn chain_id(&self) -> ChainId {
+        self.chain_id
+    }
+
     /// Alle Knoten in der deterministischen Reihenfolge `(chain_sequence,
     /// entry_hash, object_hash)`. Die Reihenfolge ist Teil des Vertrags; der
     /// dritte Bestandteil macht den Schluessel total, damit zwei Knoten mit
@@ -399,7 +414,9 @@ impl VerifiedChain {
 
 impl fmt::Debug for VerifiedChain {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("VerifiedChain { head: ")?;
+        formatter.write_str("VerifiedChain { chain_id: ")?;
+        hex(self.chain_id.as_bytes(), formatter)?;
+        formatter.write_str(", head: ")?;
         debug_optional_head(self.head, formatter)?;
         formatter.write_str(", verified_head: ")?;
         debug_optional_head(self.verified_head, formatter)?;
@@ -519,6 +536,7 @@ pub fn build_chain(chain_id: ChainId, nodes: &[ChainNode]) -> Result<VerifiedCha
     let gaps = collect_gaps(chain_id, &sorted);
 
     Ok(VerifiedChain {
+        chain_id,
         nodes: sorted,
         breaks,
         forks,
