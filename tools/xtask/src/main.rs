@@ -78,12 +78,70 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
     ]
 }
 
+/// Reports when the running compiler is not the one `rust-toolchain.toml` pins.
+///
+/// `RUSTUP_TOOLCHAIN` takes precedence over `rust-toolchain.toml` in full,
+/// including its `targets` declaration, and rustup rewrites the variable to the
+/// resolved toolchain for every process it spawns — so the variable's mere
+/// presence proves nothing. Comparing the resolved toolchain against the pinned
+/// channel is the only check that survives that rewriting.
+///
+/// A run under a different compiler is not evidence about the pinned toolchain.
+/// The gate still runs: choosing another toolchain deliberately is legitimate.
+/// It must not do so silently.
+fn toolchain_mismatch_warning(pinned_channel: &str, active_toolchain: &str) -> Option<String> {
+    let pinned = pinned_channel.trim();
+    let active = active_toolchain.trim();
+    if pinned.is_empty() || active.is_empty() || active.starts_with(pinned) {
+        return None;
+    }
+    Some(format!(
+        "warning: active toolchain {active} is not the pinned channel {pinned} from \
+         rust-toolchain.toml, whose targets declaration is therefore ignored as well. \
+         This run is not a valid pinned-toolchain proof. Unset RUSTUP_TOOLCHAIN \
+         (`env -u RUSTUP_TOOLCHAIN ...`) to verify against the pin."
+    ))
+}
+
+/// Reads the pinned channel out of `rust-toolchain.toml`.
+fn pinned_toolchain_channel(root: &Path) -> Option<String> {
+    let document: toml::Value = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .ok()?
+        .parse()
+        .ok()?;
+    document
+        .get("toolchain")?
+        .get("channel")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Resolves the toolchain that actually runs, independent of who set the variable.
+fn active_toolchain() -> Option<String> {
+    let output = Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+}
+
 /// Fails fast when the active toolchain cannot build the wasm32 gate command.
 ///
 /// `targets` in `rust-toolchain.toml` is ignored entirely once `RUSTUP_TOOLCHAIN`
 /// is set in the environment, so the declaration alone does not guarantee the
 /// target is present. Without this check the user meets `can't find crate for
 /// 'core'` instead of an actionable message.
+///
+/// Note that `rustup target list --installed` reports the targets of whichever
+/// toolchain is active, so under an override it answers for the overriding
+/// toolchain. That is why [`toolchain_mismatch_warning`] runs alongside it: this
+/// check alone would pass while the pin is being ignored.
 fn ensure_wasm32_target_available() -> Result<(), String> {
     let Ok(output) = Command::new("rustup")
         .args(["target", "list", "--installed"])
@@ -761,6 +819,12 @@ fn run() -> Result<(), String> {
         .ok_or_else(|| "usage: xtask <gate> [gate options]".to_owned())?;
     match gate.as_str() {
         "verify-quick" => {
+            if let (Some(pinned), Some(active)) =
+                (pinned_toolchain_channel(&root), active_toolchain())
+                && let Some(warning) = toolchain_mismatch_warning(&pinned, &active)
+            {
+                eprintln!("{warning}");
+            }
             ensure_wasm32_target_available()?;
             for (program, command_args) in verify_quick_commands() {
                 run_process(&root, program, &command_args)
@@ -1373,6 +1437,36 @@ vor Task 3 akzeptiert
                     ],
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn toolchain_mismatch_voids_the_pinned_verification_run() {
+        // rustup rewrites RUSTUP_TOOLCHAIN to the resolved toolchain for every
+        // process it spawns, so the pinned run also carries the variable. Only the
+        // comparison against the pinned channel distinguishes the two cases.
+        assert_eq!(
+            super::toolchain_mismatch_warning("1.95.0", "1.95.0-aarch64-apple-darwin"),
+            None
+        );
+        assert_eq!(super::toolchain_mismatch_warning("1.95.0", "1.95.0"), None);
+        assert_eq!(super::toolchain_mismatch_warning("", "1.97.1"), None);
+        assert_eq!(super::toolchain_mismatch_warning("1.95.0", ""), None);
+
+        let warning = super::toolchain_mismatch_warning("1.95.0", "1.97.1-aarch64-apple-darwin")
+            .expect("a differing active toolchain must be reported");
+        assert!(warning.contains("1.97.1-aarch64-apple-darwin"));
+        assert!(warning.contains("1.95.0"));
+        assert!(warning.contains("rust-toolchain.toml"));
+        assert!(warning.contains("not a valid pinned-toolchain proof"));
+    }
+
+    #[test]
+    fn pinned_channel_is_read_from_the_committed_toolchain_file() {
+        let root = super::workspace_root();
+        assert_eq!(
+            super::pinned_toolchain_channel(&root).as_deref(),
+            Some("1.95.0")
         );
     }
 
