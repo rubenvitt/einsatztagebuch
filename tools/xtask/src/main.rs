@@ -1172,30 +1172,44 @@ fn stage_gate_root(root: &Path) -> PathBuf {
 ///
 /// Eine Familie darf ihre Vektoren versionieren: `vectors/crypto/suite-1/` ist
 /// die Suite-1-Fassung der Primitivvektoren, und eine spaetere Suite kaeme
-/// daneben zu liegen, nicht an ihre Stelle. Der Gate akzeptiert deshalb sowohl
-/// `vectors/<familie>/manifest.json` als auch
-/// `vectors/<familie>/<version>/manifest.json`.
+/// daneben zu liegen, nicht an ihre Stelle. Eine Version darf sich ausserdem in
+/// Teilmengen gliedern: `vectors/format/v1/` traegt `valid/` und `invalid/` mit
+/// je einem eigenen Manifest, weil die Positiv- und die Negativvektoren
+/// verschiedene Erzeuger haben. Der Gate sucht deshalb bis
+/// `vectors/<familie>/<version>/<teilmenge>/manifest.json`.
 ///
 /// Ein blosses Verzeichnis genuegt weiterhin nicht: `vectors/format/payload-v1/`
 /// existiert im Bestand OHNE Manifest und wird von `validate-schemas` getrieben.
 fn family_carries_a_manifest(vectors: &Path, family: &str) -> bool {
-    let directory = vectors.join(family);
+    /// Familienverzeichnis, Version, Teilmenge — tiefer sucht der Gate nicht.
+    const MAX_DEPTH: u32 = 3;
+
+    directory_carries_a_manifest(&vectors.join(family), MAX_DEPTH)
+}
+
+/// Wahr, wenn unter `directory` innerhalb von `depth` Ebenen ein lesbares
+/// `manifest.json` liegt.
+fn directory_carries_a_manifest(directory: &Path, depth: u32) -> bool {
+    if depth == 0 {
+        return false;
+    }
     if fs::read(directory.join("manifest.json")).is_ok() {
         return true;
     }
-    let Ok(versions) = fs::read_dir(&directory) else {
+    let Ok(children) = fs::read_dir(directory) else {
         return false;
     };
-    versions
+    children
         .filter_map(Result::ok)
-        .any(|version| fs::read(version.path().join("manifest.json")).is_ok())
+        .any(|child| directory_carries_a_manifest(&child.path(), depth - 1))
 }
 
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
 ///
-/// Eine Familie zaehlt erst als vorhanden, wenn `vectors/<familie>/manifest.json`
-/// lesbar ist. Ein blosses Verzeichnis genuegt nicht: `vectors/format/payload-v1/`
-/// existiert im Bestand ohne Manifest und wird von `validate-schemas` getrieben.
+/// Eine Familie zaehlt erst als vorhanden, wenn [`family_carries_a_manifest`]
+/// unter ihr ein lesbares `manifest.json` findet. Ein blosses Verzeichnis
+/// genuegt nicht: `vectors/format/payload-v1/` existiert im Bestand ohne
+/// Manifest und wird von `validate-schemas` getrieben.
 ///
 /// Danach prueft der Gate das Requirement-Ledger: formale Wohlgeformtheit,
 /// Zeilenvollstaendigkeit und Abdeckung der aus `design.md` abgeleiteten

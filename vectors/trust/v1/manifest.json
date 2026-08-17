@@ -655,6 +655,46 @@
     },
     {
       "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "object/accepted-policy-core-reader-trust-refresh-disabled/policy.bin",
+      "fileSha256": "ad87e40e8b0a58dee8021556040e6baf4d46a1598d0beedaa236bab601a7be66",
+      "inputBytes": "",
+      "intermediateDigests": {
+        "objectHash": "9faa63ff41194bb09c2570eb921d558953ce9f167d553f4cc874f93450217248"
+      },
+      "name": "object/accepted-policy-core-reader-trust-refresh-disabled/policy",
+      "objectBytes": "8544454131000501808366706f6c696379829601502121212121212121212121212121212101f6001a05265c001a000493e00019ea601a000dbba000f5815820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1001a05265c001a9a7ec800831a05265c00f55820a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a283f46874727573742d7631f5817545494e5341545a4152434849562d53554954452d31810101805820a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a581d2845899a50132028303046f63657274696669636174654861736803782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374045820e129e9c56e02f51fe107bdeb548dc5e53ddca152dd4515d0bdd0fb80c0cccd796f6365727469666963617465486173685820a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a058203dedcbf351232adc0464922539b2aa852a973129dcf2a4eb7c0630b4324a01675840724fb814c84fa272645ee68cc92c98aa1861063b7c5bf476f52cb10fd74159af47ea03902a5646867720a096c27c2b00125287601ddabe68e04a78f122a59b0c",
+      "schemaId": "etb-v1",
+      "scopeNote": "Dieser Vektor friert das geschlossene 22-Positionen-Array von policy-core-v1 ein, einschliesslich reader-trust-refresh-ms an Position 11 (schemas/archive/v1/trust.cddl). Die normative Semantik der Frist steht in design.md 12.3; dieser Vektor belegt sie NICHT, sondern nur die Feldposition und die Kodierung. Der Wert 0 heisst: keine geraeteseitige Frist.",
+      "source": {
+        "commit": "ea-testkit::trust_v1_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "object/accepted-policy-core-reader-trust-refresh-set/policy.bin",
+      "fileSha256": "534ee9c1481685a58482c951a435eeffe5c9d8e011d72da78a6cda7c0b700c32",
+      "inputBytes": "",
+      "intermediateDigests": {
+        "objectHash": "5ceae122536fe98421589d292f0851a191620dfb8578b93fb4d99feeca9a6f88"
+      },
+      "name": "object/accepted-policy-core-reader-trust-refresh-set/policy",
+      "objectBytes": "8544454131000501808366706f6c696379829601502121212121212121212121212121212101f6001a05265c001a000493e00019ea601a000dbba01a05265c00f5815820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1001a05265c001a9a7ec800831a05265c00f55820a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a283f46874727573742d7631f5817545494e5341545a4152434849562d53554954452d31810101805820a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a581d2845899a50132028303046f63657274696669636174654861736803782a6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e74727573742d646967657374045820e129e9c56e02f51fe107bdeb548dc5e53ddca152dd4515d0bdd0fb80c0cccd796f6365727469666963617465486173685820a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a05820cd254d586184a2c87540c8d0a68592ae16c41aabccbb3166841df29983508c52584003cebbc13c5a2d19968d61e117c115ed0b29bd83a3b30e20d88b72cf9c135c7832e618c20eb9088b74f78ebc4c7f40de1c43e256e4bcb14ef7eeb9b198732300",
+      "schemaId": "etb-v1",
+      "scopeNote": "Dieser Vektor friert das geschlossene 22-Positionen-Array von policy-core-v1 ein, einschliesslich reader-trust-refresh-ms an Position 11 (schemas/archive/v1/trust.cddl). Die normative Semantik der Frist steht in design.md 12.3; dieser Vektor belegt sie NICHT, sondern nur die Feldposition und die Kodierung. Der Wert 0 heisst: keine geraeteseitige Frist.",
+      "source": {
+        "commit": "ea-testkit::trust_v1_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
         "errorCode": "EA-FORMAT-SHAPE",
         "kind": "rejected"
       },

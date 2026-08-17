@@ -29,6 +29,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    path::Path,
     sync::Arc,
 };
 
@@ -37,17 +38,23 @@ use ea_crypto::{
     HPKE_ENCAPSULATED_KEY_SIZE, HPKE_KDF_ID, HPKE_KEM_ID, HPKE_MODE, HPKE_WRAPPED_CEK_SIZE,
     HpkeRecipientPrivateKey, HpkeSealed, ProtectedHeader, SUITE_ID, SecretBytes, SecretVec,
     aead_open, aead_seal, authorized_trust_digest, bootstrap_anchor_hash, ciphertext_digest,
-    entry_hash, grant_digest, grant_plan_digest, hpke_aad, hpke_info, hpke_open,
-    linux_os_account_binding_hash, object_hash, operator_profile_digest, payload_aad,
-    receipt_digest, record_digest, recovery_test_digest, renewal_input_digest, trust_anchor_hash,
-    trust_digest, validate_unsigned_protocol_core, verification_report_hash,
+    cose_sign1_ctt_imprint, entry_hash, grant_digest, grant_plan_digest, hpke_aad, hpke_info,
+    hpke_open, linux_os_account_binding_hash, object_hash, operator_profile_digest,
+    parse_cose_sign1, payload_aad, receipt_digest, record_digest, recovery_test_digest,
+    renewal_input_digest, trust_anchor_hash, trust_digest, validate_unsigned_protocol_core,
+    verification_report_hash,
 };
-use ea_format::{ParsedArchiveObject, decode_exact_object};
+use ea_format::{
+    DecodedEvidencePayloadV1, DecodedTrustPayloadV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1,
+    GrantPurposeV1, GrantV1, ParsedArchiveObject, ReceiptV1, Rfc3161EvidenceFieldsV1,
+    decode_exact_object,
+};
 use ea_schema::{CommonHeaderV1, NativeSourceV1, OperatorSnapshotV1, SchemaRegistry};
 use ea_system_tests::workspace_root;
 use ea_testkit::{
-    ED25519_RFC8032_TEST1_SEED, ED25519_RFC8032_TEST2_SEED, ExpectedOutcome,
-    TEST_ENTROPY_AEAD_NONCE, TEST_ENTROPY_CONTENT_ENCRYPTION_KEY,
+    ED25519_RFC8032_TEST1_SEED, ED25519_RFC8032_TEST2_SEED, EVIDENCE_TOKEN_MESSAGE_IMPRINT_OFFSET,
+    EVIDENCE_TOKEN_POLICY_OID_LENGTH, EVIDENCE_TOKEN_POLICY_OID_OFFSET, ExpectedOutcome,
+    GRANT_PLAN_ITEM_BYTES, TEST_ENTROPY_AEAD_NONCE, TEST_ENTROPY_CONTENT_ENCRYPTION_KEY,
     TEST_ENTROPY_RECIPIENT_X25519_SEED, VectorEntry, VectorManifest, VectorSource,
     X25519_RFC7748_BOB_PRIVATE_KEY, X25519_RFC7748_BOB_PUBLIC_KEY, sha256_hex, verify_manifest_at,
 };
@@ -62,6 +69,7 @@ use ea_types::{
     CertificateHash, ChainSequence, DeviceId, Hash32, Id16, KeyThumbprint, ObjectHash,
     OperatorSubjectId, OrganizationId, RecordId, RegistryVersion, UnixMillis,
 };
+use ea_verify::EvidenceGateErrorV1;
 use ed25519_dalek::{Signer, SigningKey};
 use minicbor::Decoder;
 
@@ -1423,7 +1431,21 @@ struct TrustCase {
 /// Die Zuordnung `design.md`-Bezeichnung zu Fall ist eine BIJEKTION: jeder in
 /// §22.1 genannte Fall hat genau einen Eintrag, und jeder Fall mit Bezeichnung
 /// nennt genau einen §22.1-Fall.
-const TRUST_CASES: [TrustCase; 17] = [
+const TRUST_CASES: [TrustCase; 19] = [
+    TrustCase {
+        path: "object/accepted-policy-core-reader-trust-refresh-disabled",
+        design_22_1: "",
+        pinned_head_slot: None,
+        proposed_sequence: 0,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "object/accepted-policy-core-reader-trust-refresh-set",
+        design_22_1: "",
+        pinned_head_slot: None,
+        proposed_sequence: 0,
+        differing_slots: &[],
+    },
     TrustCase {
         path: "registry/accepted-bootstrap-and-first-head",
         design_22_1: "positiver Pre-Registry-Signer",
@@ -2167,4 +2189,1196 @@ impl TrustStateStore for TrustSnapshotStore {
     ) -> Result<PersistedTrustRecord, StateStoreError> {
         Err(StateStoreError::Unavailable)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Die Vektorfamilien `grants/v1`, `receipts/v1` und `evidence/v1`
+// ---------------------------------------------------------------------------
+//
+// KEIN SNAPSHOT-ABGLEICH GEGEN SICH SELBST. Der Test liest die eingefrorenen
+// Bytes und fuehrt die echte Pipeline darueber:
+// `ea_format::decode_exact_object` fuer jedes Archivobjekt,
+// `ea_format::GrantPlanV1::new` fuer die Plan-Sortierung und das
+// Duplikatverbot, `ea_crypto::hpke_open` fuer Kapselungswert und umschlossenen
+// CEK, `ea_crypto::cose_sign1_ctt_imprint` fuer den RFC-9921-Hash des
+// CBOR-kodierten Signaturfelds.
+//
+// # Wo die Stufe-1-Grenze liegt, und warum sie im Manifest steht
+//
+// Gate `evidence` von `ea-verify` ist von aussen NICHT aufrufbar:
+// `run_evidence_gate` ist `pub(crate)` und braucht einen vollstaendigen
+// Bestand. Was von hier aus erreichbar ist, ist die Bindung, die
+// `token_is_bound` prueft — das im COSE eingebettete Token gegen das daneben
+// archivierte —, und genau die fuehrt dieser Test nach; der erwartete Code
+// stammt dabei aus `ea_verify::EvidenceGateErrorV1`, nicht aus einem Literal.
+//
+// Alles, was IM DER-Token steht, bleibt unerreichbar: `ea-crypto` haelt
+// `validate_timestamp_token_der` privat und gibt weder `messageImprint` noch
+// Policy heraus. Die betroffenen Vektoren sind deshalb `accepted` — und tragen
+// eine Reichweitennotiz, die das ausspricht. Ein `accepted` ohne Notiz waere
+// hier eine Falschaussage.
+
+/// Der Manifestpfad der Grant-Vektoren, relativ zur Arbeitsbaumwurzel.
+const GRANTS_MANIFEST_PATH: &str = "vectors/grants/v1/manifest.json";
+
+/// Die Wurzel der Grant-Vektoren.
+const GRANTS_VECTOR_ROOT: &str = "vectors/grants/v1";
+
+/// Der Manifestpfad der Receipt-Vektoren, relativ zur Arbeitsbaumwurzel.
+const RECEIPTS_MANIFEST_PATH: &str = "vectors/receipts/v1/manifest.json";
+
+/// Die Wurzel der Receipt-Vektoren.
+const RECEIPTS_VECTOR_ROOT: &str = "vectors/receipts/v1";
+
+/// Der Manifestpfad der Evidence-Vektoren, relativ zur Arbeitsbaumwurzel.
+const EVIDENCE_MANIFEST_PATH: &str = "vectors/evidence/v1/manifest.json";
+
+/// Die Wurzel der Evidence-Vektoren.
+const EVIDENCE_VECTOR_ROOT: &str = "vectors/evidence/v1";
+
+/// Die Zahl der Grant-Eintraege. Ohne diese Schranke liefe ein truncatiertes
+/// Manifest still durch.
+const GRANTS_EXPECTED_ENTRY_COUNT: usize = 14;
+
+/// Die Zahl der Receipt-Eintraege.
+const RECEIPTS_EXPECTED_ENTRY_COUNT: usize = 7;
+
+/// Die Zahl der Evidence-Eintraege.
+const EVIDENCE_EXPECTED_ENTRY_COUNT: usize = 8;
+
+/// Der Grant-Suite-Identifikator, EINGEFROREN.
+const GRANTS_FROZEN_SUITE_ID: &str = "EINSATZARCHIV-HPKE-1";
+
+/// Der Suite-Identifikator der Receipt- und Evidence-Vektoren, EINGEFROREN.
+const ARCHIVE_FROZEN_SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+
+#[test]
+fn grant_receipt_and_evidence_vectors_match_their_manifests() {
+    let root = workspace_root();
+    let grants = load_frozen_family(
+        &root,
+        GRANTS_MANIFEST_PATH,
+        GRANTS_VECTOR_ROOT,
+        "grants",
+        GRANTS_EXPECTED_ENTRY_COUNT,
+    );
+    let receipts = load_frozen_family(
+        &root,
+        RECEIPTS_MANIFEST_PATH,
+        RECEIPTS_VECTOR_ROOT,
+        "receipts",
+        RECEIPTS_EXPECTED_ENTRY_COUNT,
+    );
+    let evidence = load_frozen_family(
+        &root,
+        EVIDENCE_MANIFEST_PATH,
+        EVIDENCE_VECTOR_ROOT,
+        "evidence",
+        EVIDENCE_EXPECTED_ENTRY_COUNT,
+    );
+
+    for (family, entries, suite) in [
+        ("grants", &grants.entries, GRANTS_FROZEN_SUITE_ID),
+        ("receipts", &receipts.entries, ARCHIVE_FROZEN_SUITE_ID),
+        ("evidence", &evidence.entries, ARCHIVE_FROZEN_SUITE_ID),
+    ] {
+        for vector in entries.iter() {
+            assert_eq!(
+                vector.suite_id, suite,
+                "{family} entry {} must name its frozen suite",
+                vector.name
+            );
+        }
+    }
+
+    for (entries, executed) in [
+        (&grants.entries, check_grant_vectors(&grants.entries)),
+        (&receipts.entries, check_receipt_vectors(&receipts.entries)),
+        (&evidence.entries, check_evidence_vectors(&evidence.entries)),
+    ] {
+        let recorded = entries
+            .iter()
+            .map(|vector| vector.name.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(recorded.len(), entries.len(), "entry names must be unique");
+        assert_eq!(
+            recorded, executed,
+            "every manifest entry must be executed, and every execution must \
+             address a manifest entry"
+        );
+    }
+}
+
+/// Liest ein Manifest, prueft es gegen die Platte und gibt es zurueck.
+fn load_frozen_family(
+    root: &Path,
+    manifest_path: &str,
+    vector_root: &str,
+    family: &str,
+    expected_entries: usize,
+) -> VectorManifest {
+    let text = fs::read_to_string(root.join(manifest_path))
+        .unwrap_or_else(|error| panic!("failed to read {manifest_path}: {error}"));
+    let manifest = VectorManifest::from_json(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {manifest_path}: {error}"));
+    assert_eq!(manifest.family, family);
+    assert_eq!(manifest.version, "v1");
+    assert_eq!(
+        manifest.entries.len(),
+        expected_entries,
+        "{family} must freeze exactly {expected_entries} vectors"
+    );
+    let report = verify_manifest_at(&root.join(vector_root))
+        .unwrap_or_else(|error| panic!("failed to verify {vector_root}: {error}"));
+    assert_eq!(report.entries_checked, manifest.entries.len());
+    assert!(
+        report.is_clean(),
+        "the frozen files contradict their manifest: {:?}",
+        report.mismatches
+    );
+    manifest
+}
+
+// ---------------------------------------------------------------------------
+// grants/v1
+// ---------------------------------------------------------------------------
+
+/// Die vier Plaene, die `GrantPlanV1::new` ablehnen MUSS.
+const GRANT_REJECTED_PLANS: [&str; 4] = [
+    "plan/rejected-duplicate-recipient-certificate",
+    "plan/rejected-duplicate-recipient-key",
+    "plan/rejected-duplicate-recovery",
+    "plan/rejected-missing-recovery",
+];
+
+/// Die drei Ein-Byte-Abweichungen am initialen Grant, mit ihrem Defektort.
+///
+/// DER DEFEKTORT, ausgeschrieben. Alle drei messen `EA-FORMAT-COSE`; der
+/// gemessene Code allein belegt deshalb nicht, dass es drei verschiedene
+/// Defekte sind. Der Ort trennt sie, und er wird aus den Feldwerten des
+/// ANGENOMMENEN Grants gesucht, nicht aus einem gezaehlten Versatz.
+const GRANT_SINGLE_BYTE_DEFECTS: [(&str, GrantDefectSite); 3] = [
+    (
+        "grant/rejected-flipped-encapsulated-key",
+        GrantDefectSite::EncapsulatedKey,
+    ),
+    (
+        "grant/rejected-flipped-wrapped-cek",
+        GrantDefectSite::WrappedCek,
+    ),
+    (
+        "grant/rejected-flipped-signed-grant-digest",
+        GrantDefectSite::SignedGrantDigest,
+    ),
+];
+
+/// Der Ort, an dem ein Negativvektor sein Byte kippt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum GrantDefectSite {
+    EncapsulatedKey,
+    WrappedCek,
+    SignedGrantDigest,
+}
+
+/// Die Grant-Familie, vollstaendig ausgefuehrt.
+fn check_grant_vectors(entries: &[VectorEntry]) -> BTreeSet<String> {
+    let mut executed = BTreeSet::new();
+
+    let suite = entry(entries, "suite/grant-suite-id");
+    expect_accepted(suite);
+    assert_eq!(
+        suite.object_bytes,
+        GRANT_SUITE_ID.as_bytes(),
+        "the frozen grant suite identifier must equal the one ea-crypto uses"
+    );
+    executed.insert(suite.name.clone());
+
+    // Der angenommene initiale Grant traegt den Kontext, auf den sich beide
+    // Kontextvektoren beziehen.
+    let accepted = entry(entries, "grant/accepted-initial-reader");
+    let parsed =
+        decode_exact_object(&accepted.object_bytes).expect("the accepted initial grant must parse");
+    let grant = match &parsed {
+        ParsedArchiveObject::Grant(grant) => grant.value(),
+        _ => panic!("an .eag must parse as a grant"),
+    };
+    let context = grant_context_of(grant.exact_grant_body());
+
+    for (name, derive) in [
+        (
+            "context/initial-grant-hpke-info",
+            hpke_info as fn(&[u8]) -> Vec<u8>,
+        ),
+        ("context/initial-grant-hpke-aad", hpke_aad),
+    ] {
+        let vector = entry(entries, name);
+        expect_accepted(vector);
+        assert_eq!(
+            vector.input_bytes, context,
+            "{name} must carry the grant context of the accepted initial grant"
+        );
+        assert_eq!(
+            vector.object_bytes,
+            derive(&vector.input_bytes),
+            "{name} must be exactly what ea-crypto derives"
+        );
+        assert_eq!(
+            intermediate(vector, "grantContextDigest"),
+            sha256_hex(&vector.input_bytes)
+        );
+        executed.insert(vector.name.clone());
+    }
+
+    // Die totale Sortierung. Der Erzeuger reicht die Eintraege in UMGEKEHRTER
+    // Ordnung ein; `GrantPlanV1::new` muss dieselbe Folge liefern wie das
+    // eingefrorene Ergebnis.
+    let plan = entry(entries, "plan/accepted-total-order");
+    expect_accepted(plan);
+    assert_ne!(
+        plan.input_bytes, plan.object_bytes,
+        "an input that already is the enforced order would prove nothing"
+    );
+    let built = GrantPlanV1::new(grant_plan_items(&plan.input_bytes))
+        .expect("the frozen grant plan must be accepted");
+    assert_eq!(
+        grant_plan_flat(built.items()),
+        plan.object_bytes,
+        "GrantPlanV1 must enforce exactly the frozen total order"
+    );
+    assert_eq!(
+        intermediate(plan, "grantPlanHash"),
+        hex::encode(built.hash().as_bytes()),
+        "the frozen plan hash must be what grant_plan_digest computes"
+    );
+    executed.insert(plan.name.clone());
+
+    for name in GRANT_REJECTED_PLANS {
+        let vector = entry(entries, name);
+        let error = GrantPlanV1::new(grant_plan_items(&vector.object_bytes))
+            .err()
+            .unwrap_or_else(|| panic!("{name} must be rejected"));
+        assert_eq!(error.code(), rejection_code(vector));
+        executed.insert(vector.name.clone());
+    }
+
+    for name in [
+        "grant/accepted-initial-reader",
+        "grant/accepted-historical-reader",
+    ] {
+        executed.insert(check_accepted_grant(entry(entries, name)));
+    }
+
+    let fields = grant.grant_body().fields();
+    let digest = grant_digest(grant.exact_grant_body());
+    for (name, site) in GRANT_SINGLE_BYTE_DEFECTS {
+        let vector = entry(entries, name);
+        let error = decode_exact_object(&vector.object_bytes)
+            .err()
+            .unwrap_or_else(|| panic!("{name} must be rejected"));
+        assert_eq!(error.code(), rejection_code(vector));
+        let needle: &[u8] = match site {
+            GrantDefectSite::EncapsulatedKey => &fields.encapsulated_key,
+            GrantDefectSite::WrappedCek => &fields.wrapped_cek,
+            GrantDefectSite::SignedGrantDigest => digest.as_bytes(),
+        };
+        let start = unique_offset(&accepted.object_bytes, needle);
+        let offsets = differing_offsets(&accepted.object_bytes, &vector.object_bytes);
+        assert_eq!(offsets.len(), 1, "{name} must flip exactly one byte");
+        assert!(
+            (start..start + needle.len()).contains(&offsets[0]),
+            "{name} must flip its byte inside {site:?}"
+        );
+        executed.insert(vector.name.clone());
+    }
+
+    // Der wiedersignierte Vektor passiert die Formatebene und scheitert erst
+    // an `hpke_open` — die Reihenfolge, in der auch `ea-recovery` arbeitet.
+    let resigned = entry(entries, "grant/rejected-resigned-flipped-encapsulated-key");
+    let parsed = decode_exact_object(&resigned.object_bytes)
+        .expect("the resigned grant must pass the format layer");
+    let resigned_grant = match &parsed {
+        ParsedArchiveObject::Grant(grant) => grant.value(),
+        _ => panic!("an .eag must parse as a grant"),
+    };
+    let Err(error) = open_grant(resigned_grant) else {
+        panic!("the resigned grant must not open")
+    };
+    assert_eq!(error.code(), rejection_code(resigned));
+    let resigned_fields = resigned_grant.grant_body().fields();
+    assert_eq!(
+        differing_offsets(&fields.encapsulated_key, &resigned_fields.encapsulated_key).len(),
+        1,
+        "the resigned vector must flip exactly one byte of the encapsulated key"
+    );
+    assert_eq!(
+        resigned_fields.wrapped_cek, fields.wrapped_cek,
+        "the resigned vector must keep the wrapped content key"
+    );
+    assert_ne!(
+        resigned_grant.issuer_signature(),
+        grant.issuer_signature(),
+        "the resigned vector must carry a signature over its own body"
+    );
+    executed.insert(resigned.name.clone());
+
+    executed
+}
+
+/// Ein angenommener Grant, vollstaendig geprueft.
+fn check_accepted_grant(vector: &VectorEntry) -> String {
+    expect_accepted(vector);
+    assert_eq!(
+        vector.source,
+        VectorSource::FrozenOnce {
+            verified_via: "hpke_open".to_owned(),
+        },
+        "the sealing direction draws fresh entropy and is checked in reverse"
+    );
+    let parsed = decode_exact_object(&vector.object_bytes).expect("an accepted grant must parse");
+    let (exact, hash) = format_parsed_parts(&parsed);
+    assert_eq!(exact, vector.object_bytes, "the grant must round-trip");
+    assert_eq!(
+        intermediate(vector, "objectHash"),
+        hex::encode(hash.as_bytes())
+    );
+    let grant = match &parsed {
+        ParsedArchiveObject::Grant(grant) => grant.value(),
+        _ => panic!("an .eag must parse as a grant"),
+    };
+    assert_eq!(
+        intermediate(vector, "grantDigest"),
+        hex::encode(grant_digest(grant.exact_grant_body()).as_bytes()),
+        "{} must record the digest its issuer signature covers",
+        vector.name
+    );
+    assert_eq!(
+        intermediate(vector, "grantBodyDigest"),
+        sha256_hex(grant.exact_grant_body())
+    );
+    check_eag_field_positions(grant);
+    let opened = open_grant(grant).expect("an accepted grant must open for its recipient");
+    assert!(
+        opened.matches(&array32(&vector.input_bytes, "the wrapped content key")),
+        "{} must release exactly the frozen content encryption key",
+        vector.name
+    );
+    vector.name.clone()
+}
+
+/// Oeffnet den Grant mit dem deklarierten Empfaengerschluessel.
+fn open_grant(grant: &GrantV1) -> Result<SecretBytes<CEK_SIZE>, ea_crypto::CryptoError> {
+    let recipient =
+        HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(TEST_ENTROPY_RECIPIENT_X25519_SEED))
+            .expect("the declared recipient key must load");
+    let fields = grant.grant_body().fields();
+    let sealed = HpkeSealed::from_parts(fields.encapsulated_key, fields.wrapped_cek)?;
+    let context = grant_context_of(grant.exact_grant_body());
+    hpke_open(
+        &recipient,
+        &sealed,
+        &hpke_info(&context),
+        &hpke_aad(&context),
+    )
+}
+
+/// Der Grant-Kontext eines Rumpfes.
+///
+/// Derselbe Schnitt, den `ea-recovery` fuer `hpke_info`/`hpke_aad` nimmt:
+/// `grant-body-v1` ist ein Array fester Laenge drei, dessen zweites und drittes
+/// Glied Bytefolgen fester Groesse 32 und 48 sind.
+fn grant_context_of(exact_grant_body: &[u8]) -> Vec<u8> {
+    let tail = 4 + HPKE_ENCAPSULATED_KEY_SIZE + HPKE_WRAPPED_CEK_SIZE;
+    assert_eq!(exact_grant_body[0], 0x83);
+    let end = exact_grant_body.len() - tail;
+    assert_eq!(exact_grant_body[end], 0x58);
+    assert_eq!(
+        usize::from(exact_grant_body[end + 1]),
+        HPKE_ENCAPSULATED_KEY_SIZE
+    );
+    exact_grant_body[1..end].to_vec()
+}
+
+/// Die Eintraege eines Plans aus seiner Flachform.
+fn grant_plan_items(flat: &[u8]) -> Vec<GrantPlanItemV1> {
+    assert_eq!(
+        flat.len() % GRANT_PLAN_ITEM_BYTES,
+        0,
+        "a flat plan is a whole number of items"
+    );
+    flat.chunks_exact(GRANT_PLAN_ITEM_BYTES)
+        .map(|item| {
+            GrantPlanItemV1::new(
+                KeyThumbprint::try_from(&item[..32]).expect("32 bytes"),
+                CertificateHash::try_from(&item[32..64]).expect("32 bytes"),
+                match item[64] {
+                    0 => GrantPurposeV1::Recovery,
+                    1 => GrantPurposeV1::Reader,
+                    other => panic!("a plan purpose is 0 or 1, not {other}"),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Die Flachform einer Eintragsfolge.
+fn grant_plan_flat(items: &[GrantPlanItemV1]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(items.len() * GRANT_PLAN_ITEM_BYTES);
+    for item in items {
+        bytes.extend_from_slice(item.recipient_key_thumbprint().as_bytes());
+        bytes.extend_from_slice(item.recipient_certificate_hash().as_bytes());
+        bytes.push(item.purpose() as u8);
+    }
+    bytes
+}
+
+/// Jede Feldposition von `eag-v1`, positionsweise gegen den echten Parser.
+///
+/// Der Rumpf wird HIER eigenstaendig durchlaufen. Ein Vergleich der Felder
+/// gegen sich selbst wuerde nichts belegen; gepruefte Aussage ist, dass an
+/// Position `i` genau das Feld steht, das `ea-format` dort meldet.
+fn check_eag_field_positions(grant: &GrantV1) {
+    let body = grant.exact_grant_body();
+    let fields = grant.grant_body().fields();
+    let mut decoder = Decoder::new(body);
+    assert_eq!(decoder.array().expect("outer array"), Some(3));
+    assert_eq!(decoder.array().expect("core array"), Some(17));
+    assert_eq!(decoder.u64().expect("version"), 1);
+    assert_eq!(
+        decoder.bytes().expect("organizationId"),
+        fields.organization_id.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("chainId"),
+        fields.chain_id.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("entryHash"),
+        fields.entry_hash.as_bytes()
+    );
+    assert_eq!(
+        decoder.u64().expect("kind"),
+        match fields.kind {
+            GrantKindV1::Initial => 0,
+            GrantKindV1::Historical => 1,
+        }
+    );
+    assert_eq!(decoder.u64().expect("purpose"), fields.purpose as u64);
+    assert_eq!(
+        decoder.bytes().expect("recipientKeyThumbprint"),
+        fields.recipient_key_thumbprint.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("recipientCertificateHash"),
+        fields.recipient_certificate_hash.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("issuerKeyThumbprint"),
+        fields.issuer_key_thumbprint.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("issuerCertificateHash"),
+        fields.issuer_certificate_hash.as_bytes()
+    );
+    assert_eq!(
+        decoder.str().expect("capability"),
+        match fields.kind {
+            GrantKindV1::Initial => "initialGrant",
+            GrantKindV1::Historical => "historicalGrant",
+        }
+    );
+    assert_eq!(
+        decoder.u64().expect("registryVersion"),
+        fields.registry_version.get()
+    );
+    assert_eq!(
+        decoder.bytes().expect("registryHeadHash"),
+        fields.registry_head_hash.as_bytes()
+    );
+    assert_eq!(decoder.str().expect("grantSuiteId"), GRANT_SUITE_ID);
+    assert_eq!(
+        decoder.i64().expect("createdAtDevice"),
+        fields.created_at_device.get()
+    );
+    assert_eq!(
+        optional_hash(&mut decoder, "originalRecoveryGrantObjectHash"),
+        fields
+            .original_recovery_grant_object_hash
+            .map(|hash| hash.as_bytes().to_vec())
+    );
+    assert_eq!(
+        optional_hash(&mut decoder, "grantAuthorizationObjectHash"),
+        fields
+            .grant_authorization_object_hash
+            .map(|hash| hash.as_bytes().to_vec())
+    );
+    assert_eq!(
+        decoder.bytes().expect("encapsulatedKey"),
+        fields.encapsulated_key.as_slice()
+    );
+    assert_eq!(
+        decoder.bytes().expect("wrappedCek"),
+        fields.wrapped_cek.as_slice()
+    );
+    assert_eq!(decoder.position(), body.len(), "eag-v1 is a closed shape");
+}
+
+/// Ein optionaler 32-Byte-Hash an der aktuellen Position.
+fn optional_hash(decoder: &mut Decoder<'_>, label: &str) -> Option<Vec<u8>> {
+    if decoder.datatype().expect(label) == minicbor::data::Type::Null {
+        decoder.null().expect(label);
+        return None;
+    }
+    Some(decoder.bytes().expect(label).to_vec())
+}
+
+/// Der einzige Versatz, an dem `needle` in `haystack` steht.
+fn unique_offset(haystack: &[u8], needle: &[u8]) -> usize {
+    let mut found = None;
+    for start in 0..=haystack.len().saturating_sub(needle.len()) {
+        if &haystack[start..start + needle.len()] == needle {
+            assert!(found.is_none(), "the needle must occur exactly once");
+            found = Some(start);
+        }
+    }
+    found.expect("the needle must occur")
+}
+
+/// Die Versaetze, an denen sich zwei gleich lange Bytefolgen unterscheiden.
+fn differing_offsets(left: &[u8], right: &[u8]) -> Vec<usize> {
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "the two vectors must be equally long"
+    );
+    left.iter()
+        .zip(right)
+        .enumerate()
+        .filter(|(_, (left, right))| left != right)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// receipts/v1
+// ---------------------------------------------------------------------------
+
+/// Die Quittungen, die `decode_exact_object` ablehnen MUSS, mit ihrem
+/// Defektort.
+///
+/// DER DEFEKTORT, ausgeschrieben — dieselbe Regel wie bei den Grants und bei
+/// `check_trust_registry_defect_sites`. Zwei dieser Vektoren messen denselben
+/// Code `EA-FORMAT-COSE`; der gemessene Code allein waere auch dann gleich,
+/// wenn zweimal dieselben Bytes unter zwei Namen laegen. `to_json` verbietet
+/// doppelte Namen und doppelte Dateien, aber NICHT doppelte Objektbytes — die
+/// Replay-Zeile dieser Familie lebt genau davon. Der Ort trennt sie.
+const RECEIPT_REJECTED_VECTORS: [(&str, ReceiptDefectSite); 4] = [
+    (
+        "receipt/rejected-duplicate-grant-hashes",
+        ReceiptDefectSite::Elsewhere,
+    ),
+    (
+        "receipt/rejected-flipped-accepted-at-server",
+        ReceiptDefectSite::AcceptedAtServer,
+    ),
+    (
+        "receipt/rejected-flipped-signed-receipt-digest",
+        ReceiptDefectSite::SignedReceiptDigest,
+    ),
+    (
+        "receipt/rejected-unsorted-grant-hashes",
+        ReceiptDefectSite::Elsewhere,
+    ),
+];
+
+/// Der Ort, an dem ein Receipt-Negativvektor sein Byte kippt.
+///
+/// `Elsewhere` steht fuer die beiden Vektoren, deren Fehlercode sie bereits
+/// eindeutig macht: `EA-FORMAT-UNSORTED` und `EA-FORMAT-DUPLICATE` koennen
+/// nicht von demselben Objekt stammen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReceiptDefectSite {
+    AcceptedAtServer,
+    SignedReceiptDigest,
+    Elsewhere,
+}
+
+/// Die Receipt-Familie, vollstaendig ausgefuehrt.
+fn check_receipt_vectors(entries: &[VectorEntry]) -> BTreeSet<String> {
+    let mut executed = BTreeSet::new();
+
+    let accepted = entry(entries, "receipt/accepted-with-evidence-due");
+    let without_due = entry(entries, "receipt/accepted-without-evidence-due");
+    for vector in [accepted, without_due] {
+        executed.insert(check_accepted_receipt(vector));
+    }
+
+    // Der Replay. Die eingefrorene Aussage aus Abnahmekriterium 50 ist die
+    // BYTEGLEICHHEIT: ein Replay aendert weder Zeit noch Bytes.
+    let replay = entry(entries, "receipt/replay-of-accepted-with-evidence-due");
+    assert_eq!(
+        replay.object_bytes, accepted.object_bytes,
+        "a replay must not change a single byte"
+    );
+    assert_eq!(
+        replay.intermediate_digests, accepted.intermediate_digests,
+        "a replay must not change the receipt digest"
+    );
+    let note = replay
+        .scope_note
+        .as_deref()
+        .expect("the replay vector must say what it freezes");
+    assert!(
+        note.contains("Replay"),
+        "the replay vector must name the replay rule: {note}"
+    );
+    assert_eq!(
+        receipt_facts(&accepted.object_bytes),
+        receipt_facts(&replay.object_bytes),
+        "a replay must change neither the times nor the server signature"
+    );
+    executed.insert(replay.name.clone());
+
+    let accepted_receipt_digest = receipt_digest(
+        match &decode_exact_object(&accepted.object_bytes).expect("the accepted receipt must parse")
+        {
+            ParsedArchiveObject::Receipt(receipt) => receipt.value().core().exact_bytes(),
+            _ => panic!("an .esr must parse as a receipt"),
+        },
+    );
+    let accepted_at_server = accepted_at_server_needle(&accepted.object_bytes);
+    for (name, site) in RECEIPT_REJECTED_VECTORS {
+        let vector = entry(entries, name);
+        let error = decode_exact_object(&vector.object_bytes)
+            .err()
+            .unwrap_or_else(|| panic!("{name} must be rejected"));
+        assert_eq!(error.code(), rejection_code(vector));
+        let offsets = differing_offsets(&accepted.object_bytes, &vector.object_bytes);
+        assert!(
+            !offsets.is_empty(),
+            "{name} must differ from the accepted receipt"
+        );
+        let needle: Option<&[u8]> = match site {
+            ReceiptDefectSite::AcceptedAtServer => Some(&accepted_at_server),
+            ReceiptDefectSite::SignedReceiptDigest => Some(accepted_receipt_digest.as_bytes()),
+            ReceiptDefectSite::Elsewhere => None,
+        };
+        if let Some(needle) = needle {
+            assert_eq!(offsets.len(), 1, "{name} must flip exactly one byte");
+            let start = unique_offset(&accepted.object_bytes, needle);
+            assert!(
+                (start..start + needle.len()).contains(&offsets[0]),
+                "{name} must flip its byte inside {site:?}"
+            );
+        }
+        executed.insert(vector.name.clone());
+    }
+
+    executed
+}
+
+/// Eine angenommene Quittung, vollstaendig geprueft.
+fn check_accepted_receipt(vector: &VectorEntry) -> String {
+    expect_accepted(vector);
+    let parsed = decode_exact_object(&vector.object_bytes).expect("an accepted receipt must parse");
+    let (exact, hash) = format_parsed_parts(&parsed);
+    assert_eq!(exact, vector.object_bytes, "the receipt must round-trip");
+    assert_eq!(
+        intermediate(vector, "objectHash"),
+        hex::encode(hash.as_bytes())
+    );
+    let receipt = match &parsed {
+        ParsedArchiveObject::Receipt(receipt) => receipt.value(),
+        _ => panic!("an .esr must parse as a receipt"),
+    };
+    assert_eq!(
+        intermediate(vector, "receiptDigest"),
+        hex::encode(receipt_digest(receipt.core().exact_bytes()).as_bytes()),
+        "{} must record the digest its server signature covers",
+        vector.name
+    );
+    check_esr_field_positions(receipt);
+    vector.name.clone()
+}
+
+/// Die CBOR-Kodierung der Annahmezeit, aus dem Objekt selbst gelesen.
+///
+/// Nicht aus einer Konstante dieses Tests: der Wert kommt vom echten Parser,
+/// und die Kodierung wird daneben nachgebaut. Ein Objekt, das seine Zeit anders
+/// kodierte, faende `unique_offset` nicht wieder.
+fn accepted_at_server_needle(object_bytes: &[u8]) -> Vec<u8> {
+    let (accepted_at_server, _, _) = receipt_facts(object_bytes);
+    let mut needle = vec![0x1b];
+    needle.extend_from_slice(
+        &u64::try_from(accepted_at_server)
+            .expect("the frozen server time is positive")
+            .to_be_bytes(),
+    );
+    needle
+}
+
+/// Annahmezeit, Evidence-Frist und Serversignatur einer Quittung.
+fn receipt_facts(bytes: &[u8]) -> (i64, Option<i64>, Vec<u8>) {
+    let parsed = decode_exact_object(bytes).expect("an accepted receipt must parse");
+    match &parsed {
+        ParsedArchiveObject::Receipt(receipt) => {
+            let fields = receipt.value().core().fields();
+            (
+                fields.accepted_at_server.get(),
+                fields.evidence_due_at.map(UnixMillis::get),
+                receipt.value().server_signature().to_vec(),
+            )
+        }
+        _ => panic!("an .esr must parse as a receipt"),
+    }
+}
+
+/// Jede Feldposition von `esr-v1`, positionsweise gegen den echten Parser.
+fn check_esr_field_positions(receipt: &ReceiptV1) {
+    let core = receipt.core().exact_bytes();
+    let fields = receipt.core().fields();
+    let mut decoder = Decoder::new(core);
+    assert_eq!(decoder.array().expect("core array"), Some(17));
+    assert_eq!(decoder.u64().expect("version"), 1);
+    assert_eq!(
+        decoder.bytes().expect("organizationId"),
+        fields.organization_id.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("chainId"),
+        fields.chain_id.as_bytes()
+    );
+    assert_eq!(
+        decoder.u64().expect("chainSequence"),
+        fields.chain_sequence.get()
+    );
+    assert_eq!(
+        decoder.bytes().expect("entryHash"),
+        fields.entry_hash.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("entryObjectHash"),
+        fields.entry_object_hash.as_bytes()
+    );
+    assert_eq!(
+        optional_hash(&mut decoder, "previousEntryHash"),
+        fields
+            .previous_entry_hash
+            .map(|hash| hash.as_bytes().to_vec())
+    );
+    assert_eq!(
+        decoder.u64().expect("registryVersion"),
+        fields.registry_version.get()
+    );
+    assert_eq!(
+        decoder.bytes().expect("registryHeadHash"),
+        fields.registry_head_hash.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("policyObjectHash"),
+        fields.policy_object_hash.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("initialGrantPlanHash"),
+        fields.initial_grant_plan_hash.as_bytes()
+    );
+    let count = decoder
+        .array()
+        .expect("initialGrantObjectHashes")
+        .expect("a definite length array");
+    assert_eq!(
+        usize::try_from(count).expect("a small count"),
+        fields.initial_grant_object_hashes.len()
+    );
+    for expected in &fields.initial_grant_object_hashes {
+        assert_eq!(
+            decoder.bytes().expect("initialGrantObjectHash"),
+            expected.as_bytes()
+        );
+    }
+    assert_eq!(
+        decoder.i64().expect("acceptedAtServer"),
+        fields.accepted_at_server.get()
+    );
+    match fields.evidence_due_at {
+        None => {
+            assert_eq!(
+                decoder.datatype().expect("evidenceDueAt"),
+                minicbor::data::Type::Null
+            );
+            decoder.null().expect("evidenceDueAt");
+        }
+        Some(value) => assert_eq!(decoder.i64().expect("evidenceDueAt"), value.get()),
+    }
+    assert_eq!(
+        decoder.bytes().expect("serverKeyThumbprint"),
+        fields.server_key_thumbprint.as_bytes()
+    );
+    assert_eq!(
+        decoder.bytes().expect("serverCertificateHash"),
+        fields.server_certificate_hash.as_bytes()
+    );
+    assert_eq!(
+        decoder.array().expect("extensions"),
+        Some(0),
+        "esr-v1 reserves an empty extension array"
+    );
+    assert_eq!(decoder.position(), core.len(), "esr-v1 is a closed shape");
+}
+
+// ---------------------------------------------------------------------------
+// evidence/v1
+// ---------------------------------------------------------------------------
+
+/// Die Zeitstempelvektoren, die die Formatebene ANNIMMT.
+const EVIDENCE_ACCEPTED_TIMESTAMPS: [&str; 4] = [
+    "timestamp/accepted-bound-token",
+    "timestamp/accepted-mismatched-imprint",
+    "timestamp/accepted-wrong-request-nonce",
+    "timestamp/accepted-wrong-tsa-policy",
+];
+
+/// Die Evidence-Familie, vollstaendig ausgefuehrt.
+fn check_evidence_vectors(entries: &[VectorEntry]) -> BTreeSet<String> {
+    let mut executed = BTreeSet::new();
+
+    let imprint = entry(entries, "imprint/accepted-checkpoint-signature");
+    expect_accepted(imprint);
+    assert_eq!(
+        imprint.object_bytes,
+        cose_sign1_ctt_imprint(&array64(&imprint.input_bytes))
+            .as_bytes()
+            .to_vec(),
+        "the frozen imprint must be the RFC 9921 hash of the CBOR encoded signature field"
+    );
+    executed.insert(imprint.name.clone());
+
+    let bound = entry(entries, "timestamp/accepted-bound-token");
+    let bound_fields = evidence_timestamp_fields(&bound.object_bytes);
+    for name in EVIDENCE_ACCEPTED_TIMESTAMPS {
+        let vector = entry(entries, name);
+        expect_accepted(vector);
+        let parsed = decode_exact_object(&vector.object_bytes)
+            .unwrap_or_else(|_| panic!("{name} must pass the format layer"));
+        let (exact, hash) = format_parsed_parts(&parsed);
+        assert_eq!(exact, vector.object_bytes, "{name} must round-trip");
+        assert_eq!(
+            intermediate(vector, "objectHash"),
+            hex::encode(hash.as_bytes())
+        );
+        let (core, cose, fields) = evidence_timestamp_parts(&parsed);
+        assert_eq!(core, vector.input_bytes, "{name} must carry its own core");
+        let signature = *parse_cose_sign1(&cose, &[])
+            .expect("the frozen COSE object parses")
+            .signature_bytes();
+        let ctt = cose_sign1_ctt_imprint(&signature);
+        assert_eq!(
+            intermediate(vector, "cttImprint"),
+            hex::encode(ctt.as_bytes()),
+            "{name} must record the imprint of its own signature"
+        );
+        // Die ERREICHBARE Bindung: das eingebettete Token gegen das daneben
+        // archivierte. Dasselbe, was `ea_verify::evidence::token_is_bound`
+        // prueft; das Gate selbst ist von aussen nicht aufrufbar.
+        assert_eq!(
+            parse_cose_sign1(&cose, &[])
+                .expect("the frozen COSE object parses")
+                .timestamp_token(),
+            Some(fields.rfc3161_response_der.as_slice()),
+            "{name} must archive exactly the token it embeds"
+        );
+        let token_imprint = token_message_imprint(&fields.rfc3161_response_der);
+        let policy = token_policy_oid(&fields.rfc3161_response_der);
+        match name {
+            "timestamp/accepted-bound-token" => {
+                assert_eq!(token_imprint, ctt.as_bytes().as_slice());
+                assert_eq!(policy, fields.policy_oid_der.as_slice());
+                assert_eq!(fields.request_nonce, bound_fields.request_nonce);
+            }
+            "timestamp/accepted-mismatched-imprint" => {
+                assert_ne!(
+                    token_imprint,
+                    ctt.as_bytes().as_slice(),
+                    "the mismatched vector must carry an imprint that is not its signature's"
+                );
+                assert_eq!(
+                    differing_offsets(token_imprint, ctt.as_bytes()).len(),
+                    1,
+                    "the mismatch must be a single byte"
+                );
+            }
+            "timestamp/accepted-wrong-request-nonce" => {
+                assert_eq!(token_imprint, ctt.as_bytes().as_slice());
+                assert_ne!(
+                    fields.request_nonce, bound_fields.request_nonce,
+                    "the nonce vector must carry a different nonce"
+                );
+            }
+            "timestamp/accepted-wrong-tsa-policy" => {
+                assert_eq!(token_imprint, ctt.as_bytes().as_slice());
+                assert_ne!(
+                    policy,
+                    fields.policy_oid_der.as_slice(),
+                    "the policy vector must contradict its own archived policy"
+                );
+            }
+            other => panic!("{other} is not a declared timestamp vector"),
+        }
+        if name != "timestamp/accepted-bound-token" {
+            let note = vector
+                .scope_note
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name} must state why stage 1 accepts it"));
+            assert!(
+                note.contains("Stufe-6-Grenze"),
+                "{name} must name the stage 6 boundary: {note}"
+            );
+        }
+        executed.insert(vector.name.clone());
+    }
+
+    // Der entfernte CTT-Header faellt schon an der Formatebene: die
+    // Zeitstempelvariante VERLANGT den Header.
+    let removed = entry(entries, "timestamp/rejected-removed-ctt-header");
+    let error = decode_exact_object(&removed.object_bytes)
+        .expect_err("a timestamp variant without its CTT header must be rejected");
+    assert_eq!(error.code(), rejection_code(removed));
+    executed.insert(removed.name.clone());
+
+    // Der ersetzte CTT-Header passiert die Formatebene und faellt an der
+    // Bindung. Der erwartete Code stammt aus `ea-verify`, nicht aus einem
+    // Literal dieses Tests.
+    let replaced = entry(entries, "timestamp/rejected-replaced-ctt-header");
+    let parsed = decode_exact_object(&replaced.object_bytes)
+        .expect("a replaced CTT header still passes the format layer");
+    let (_, cose, fields) = evidence_timestamp_parts(&parsed);
+    assert_ne!(
+        parse_cose_sign1(&cose, &[])
+            .expect("the frozen COSE object parses")
+            .timestamp_token(),
+        Some(fields.rfc3161_response_der.as_slice()),
+        "the replaced vector must archive a token other than the one it embeds"
+    );
+    assert_eq!(
+        EvidenceGateErrorV1::TokenNotBound.code(),
+        rejection_code(replaced),
+        "the frozen code must be the one ea-verify raises"
+    );
+    executed.insert(replaced.name.clone());
+
+    // Das Renewal bindet die EXAKTEN Bytes des erneuerten Objekts.
+    let renewal = entry(entries, "renewal/accepted-bound-token");
+    expect_accepted(renewal);
+    let parsed =
+        decode_exact_object(&renewal.object_bytes).expect("an accepted renewal must parse");
+    let (_, hash) = format_parsed_parts(&parsed);
+    assert_eq!(
+        intermediate(renewal, "objectHash"),
+        hex::encode(hash.as_bytes())
+    );
+    let evidence = match &parsed {
+        ParsedArchiveObject::Evidence(evidence) => evidence.value(),
+        _ => panic!("an .ecp must parse as evidence"),
+    };
+    match evidence
+        .decoded_payload()
+        .expect("an accepted renewal decodes")
+    {
+        DecodedEvidencePayloadV1::Renewal {
+            core,
+            exact_cose,
+            evidence: fields,
+        } => {
+            assert_eq!(core.exact_bytes(), renewal.input_bytes.as_slice());
+            let input = renewal_input_digest(&bound.object_bytes);
+            assert_eq!(
+                intermediate(renewal, "renewalInputDigest"),
+                hex::encode(input.as_bytes())
+            );
+            assert_eq!(
+                core.fields()
+                    .renewal_input_hashes
+                    .iter()
+                    .map(|hash| hex::encode(hash.as_bytes()))
+                    .collect::<Vec<_>>(),
+                vec![hex::encode(input.as_bytes())],
+                "the renewal must bind the exact bytes of the object it renews"
+            );
+            let signature = *parse_cose_sign1(&exact_cose, &[])
+                .expect("the frozen COSE object parses")
+                .signature_bytes();
+            assert_eq!(
+                intermediate(renewal, "cttImprint"),
+                hex::encode(cose_sign1_ctt_imprint(&signature).as_bytes())
+            );
+            assert_eq!(
+                token_message_imprint(&fields.rfc3161_response_der),
+                cose_sign1_ctt_imprint(&signature).as_bytes().as_slice()
+            );
+        }
+        _ => panic!("the renewal vector must decode as a renewal"),
+    }
+    executed.insert(renewal.name.clone());
+
+    executed
+}
+
+/// Kern, COSE und Archivfelder eines Zeitstempelobjekts.
+fn evidence_timestamp_parts(
+    parsed: &ParsedArchiveObject,
+) -> (Vec<u8>, Vec<u8>, Rfc3161EvidenceFieldsV1) {
+    let evidence = match parsed {
+        ParsedArchiveObject::Evidence(evidence) => evidence.value(),
+        _ => panic!("an .ecp must parse as evidence"),
+    };
+    match evidence
+        .decoded_payload()
+        .expect("an accepted timestamp decodes")
+    {
+        DecodedEvidencePayloadV1::Timestamp {
+            core,
+            exact_cose,
+            evidence,
+        } => (core.exact_bytes().to_vec(), exact_cose, evidence),
+        _ => panic!("the vector must decode as a timestamp"),
+    }
+}
+
+/// Die Archivfelder eines Zeitstempelobjekts.
+fn evidence_timestamp_fields(bytes: &[u8]) -> Rfc3161EvidenceFieldsV1 {
+    let parsed = decode_exact_object(bytes).expect("an accepted timestamp must parse");
+    evidence_timestamp_parts(&parsed).2
+}
+
+/// Der `messageImprint`-Hashwert im Zeitstempeltoken.
+///
+/// Der Versatz kommt aus `ea-testkit` und wird HIER gegen die DER-Umgebung
+/// gestellt: ohne diese Pruefung koennte ein verschobener Versatz auf beliebige
+/// Bytes zeigen und trotzdem gruen bleiben.
+fn token_message_imprint(der: &[u8]) -> &[u8] {
+    const SHA256_IMPRINT_PREFIX: [u8; 15] = [
+        0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20,
+    ];
+    let start = EVIDENCE_TOKEN_MESSAGE_IMPRINT_OFFSET;
+    assert_eq!(
+        &der[start - SHA256_IMPRINT_PREFIX.len()..start],
+        SHA256_IMPRINT_PREFIX.as_slice(),
+        "the frozen offset must sit behind the SHA-256 message imprint header"
+    );
+    &der[start..start + 32]
+}
+
+/// Die TSA-Policy-OID im Zeitstempeltoken.
+fn token_policy_oid(der: &[u8]) -> &[u8] {
+    let start = EVIDENCE_TOKEN_POLICY_OID_OFFSET;
+    let slice = &der[start..start + EVIDENCE_TOKEN_POLICY_OID_LENGTH];
+    assert_eq!(slice[0], 0x06, "the frozen offset must sit on an OID");
+    assert_eq!(
+        usize::from(slice[1]),
+        EVIDENCE_TOKEN_POLICY_OID_LENGTH - 2,
+        "the policy OID keeps its length"
+    );
+    slice
+}
+
+// ---------------------------------------------------------------------------
+// Die `policy-core-v1`-Positivvektoren der Familie `trust/v1`
+// ---------------------------------------------------------------------------
+
+/// Die Position von `reader-trust-refresh-ms` im geschlossenen
+/// `policy-core-v1`-Array, nullbasiert.
+///
+/// `schemas/archive/v1/trust.cddl` setzt das Feld unmittelbar hinter
+/// `reader-inactivity-ms`. Der Wert steht hier als Zahl, damit ein
+/// eingeschobenes Feld auffaellt statt still durchzulaufen.
+const POLICY_READER_TRUST_REFRESH_POSITION: usize = 10;
+
+/// Die Zahl der Positionen im geschlossenen `policy-core-v1`-Array.
+const POLICY_CORE_POSITIONS: u64 = 22;
+
+/// Die beiden Positivvektoren und der Wert, den sie belegen.
+const POLICY_CORE_VECTORS: [(&str, u64); 2] = [
+    (
+        "object/accepted-policy-core-reader-trust-refresh-disabled/policy",
+        0,
+    ),
+    (
+        "object/accepted-policy-core-reader-trust-refresh-set/policy",
+        86_400_000,
+    ),
+];
+
+#[test]
+fn policy_core_v1_positive_vectors_pin_the_device_side_trust_refresh_deadline() {
+    let root = workspace_root();
+    let text = fs::read_to_string(root.join(TRUST_MANIFEST_PATH))
+        .unwrap_or_else(|error| panic!("failed to read {TRUST_MANIFEST_PATH}: {error}"));
+    let manifest = VectorManifest::from_json(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {TRUST_MANIFEST_PATH}: {error}"));
+
+    let mut measured = BTreeSet::new();
+    for (name, expected) in POLICY_CORE_VECTORS {
+        let vector = entry(&manifest.entries, name);
+        expect_accepted(vector);
+        assert_eq!(vector.schema_id, TRUST_OBJECT_SCHEMA_ID);
+        let note = vector
+            .scope_note
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} must name the normative source of its deadline"));
+        assert!(
+            note.contains("12.3"),
+            "{name} must point at design.md §12.3: {note}"
+        );
+
+        let parsed = decode_exact_object(&vector.object_bytes).expect("a policy vector must parse");
+        let (exact, hash) = format_parsed_parts(&parsed);
+        assert_eq!(exact, vector.object_bytes, "{name} must round-trip");
+        assert_eq!(
+            intermediate(vector, "objectHash"),
+            hex::encode(hash.as_bytes())
+        );
+        let trust = match &parsed {
+            ParsedArchiveObject::Trust(trust) => trust.value(),
+            _ => panic!("an .etb must parse as a trust object"),
+        };
+        let core = match trust
+            .decoded_payload()
+            .expect("a policy vector decodes as a policy")
+        {
+            DecodedTrustPayloadV1::Policy(core) => core,
+            _ => panic!("{name} must decode as a policy"),
+        };
+        assert_eq!(
+            core.fields().reader_trust_refresh_ms,
+            expected,
+            "{name} must carry the value its name announces"
+        );
+
+        // Die POSITION, unabhaengig vom Feldnamen nachgerechnet.
+        let mut decoder = Decoder::new(core.exact_core());
+        assert_eq!(
+            decoder.array().expect("policy core array"),
+            Some(POLICY_CORE_POSITIONS),
+            "policy-core-v1 is a closed array of {POLICY_CORE_POSITIONS} positions"
+        );
+        for _ in 0..POLICY_READER_TRUST_REFRESH_POSITION {
+            decoder.skip().expect("a policy core position");
+        }
+        assert_eq!(
+            decoder.u64().expect("readerTrustRefreshMs"),
+            expected,
+            "{name} must carry the deadline at position \
+             {POLICY_READER_TRUST_REFRESH_POSITION}"
+        );
+        assert_eq!(
+            decoder.bool().expect("readerHistoryAccessAllowed"),
+            core.fields().reader_history_access_allowed,
+            "the position after the deadline is readerHistoryAccessAllowed"
+        );
+        measured.insert(expected);
+    }
+    assert_eq!(
+        measured,
+        BTreeSet::from([0, 86_400_000]),
+        "the two positive vectors must cover a set and an unset deadline"
+    );
 }
