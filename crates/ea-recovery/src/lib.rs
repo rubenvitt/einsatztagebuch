@@ -21,7 +21,11 @@
 //! Prozessstart pruefbar bleiben.
 
 mod error;
+mod exit;
 mod source;
+mod verify;
 
 pub use error::RecoveryError;
+pub use exit::{ExitCode, exit_code_for, exit_code_for_error};
 pub use source::FsArchiveSource;
+pub use verify::{load_trust_anchor, verify_directory};

@@ -1,6 +1,7 @@
 use core::fmt;
 use std::io;
 
+use ea_trust::TrustError;
 use ea_verify::VerifyError;
 
 /// Fehler eines Wiederherstellungslaufs.
@@ -31,6 +32,17 @@ pub enum RecoveryError {
     /// BEVOR der Puffer entsteht. Es wird kein Urteil dupliziert, sondern ein
     /// Puffer begrenzt.
     ArchiveTooLarge,
+    /// Die gelesenen Ankerbytes sind kein gueltiger Trust Anchor.
+    ///
+    /// AUSDRUECKLICH KEIN Aufruffehler. `design.md`:1765 laesst dazu keinen
+    /// Spielraum: „Jede Abweichung endet mit Exitcode 12." Ein untergeschobener
+    /// oder verstuemmelter Anker ist ein VERTRAUENSBEFUND, und ihn als
+    /// Bedienfehler zu melden verwischte genau die Grenze, die der Anker zieht.
+    ///
+    /// Scharf getrennt von [`Self::Io`]: dort war die Datei nicht LESBAR, hier
+    /// war sie lesbar und PASST NICHT. Der Betreiber unterscheidet daran ein
+    /// vergessenes Recovery-Medium von einem manipulierten Anker.
+    TrustAnchor(TrustError),
     /// Die Verifikationspipeline konnte kein Urteil bilden.
     Verify(VerifyError),
 }
@@ -42,6 +54,7 @@ impl RecoveryError {
         match self {
             Self::Io(_) => "EA-RECOVERY-IO",
             Self::ArchiveTooLarge => "EA-RECOVERY-ARCHIVE-TOO-LARGE",
+            Self::TrustAnchor(error) => error.code(),
             Self::Verify(error) => error.code(),
         }
     }
