@@ -123,6 +123,27 @@ impl SecretVec {
         self.0.as_ref() == expected
     }
 
+    /// Runs `use_it` with the secret bytes, scoped to that call.
+    ///
+    /// This is the only way plaintext leaves the crate, and it exists because
+    /// `einsatzarchiv decrypt --output` has to write it (`design.md` §16;
+    /// Stage-1 plan task 10). The global constraint permits persistence exactly
+    /// where "the user explicitly requests decrypted CLI output" — so the
+    /// capability is required, and hiding it would only push callers into
+    /// reimplementing AEAD and HPKE outside the crypto boundary.
+    ///
+    /// The borrow cannot outlive the call, so the bytes never become a buffer
+    /// the caller owns by accident, and the zeroize-on-drop contract is
+    /// untouched. Deliberate copying inside the callback is possible and is the
+    /// point: the caller then owns that copy and its lifetime, which is a
+    /// decision the caller must make consciously rather than inherit.
+    ///
+    /// The type still has no formatting, cloning, comparison, serialization,
+    /// dereferencing, or generic byte-conversion implementations.
+    pub fn with_exposed<R>(&self, use_it: impl FnOnce(&[u8]) -> R) -> R {
+        use_it(self.0.as_ref())
+    }
+
     pub(crate) fn expose(&self) -> &[u8] {
         self.0.as_ref()
     }
