@@ -22,9 +22,10 @@ const STAGE_ONE_FUZZ_TARGETS: [&str; 4] =
 /// FEHLERzustand festhaelt, wuerde dort invertieren, sobald ein spaeterer Task
 /// die Vektorfamilien nachliefert. Gegen ein Fixture bleibt er stabil.
 ///
-/// Das Fixture bringt ein vollstaendiges Fuzz-Manifest mit, damit jeder Test,
-/// der einen ANDEREN Fehlerzustand festhaelt, nicht an der Fuzz-Pruefung
-/// haengt.
+/// Das Fixture bringt ein vollstaendiges Fuzz-Manifest sowie das eingecheckte
+/// Formatpaket und den eingecheckten Gate-Bericht mit, damit jeder Test, der
+/// einen ANDEREN Fehlerzustand festhaelt, nicht an der Fuzz- oder
+/// Dokumentpruefung haengt.
 fn fixture_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -37,7 +38,17 @@ fn fixture_root(label: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("vectors")).unwrap();
     write_fuzz_manifest(&root, &STAGE_ONE_FUZZ_TARGETS);
+    copy_from_the_workspace(&root, FORMAT_PACKAGE_PATH);
+    copy_from_the_workspace(&root, GATE_REPORT_PATH);
     root
+}
+
+/// Kopiert eine eingecheckte Datei an dieselbe relative Stelle im Fixture.
+fn copy_from_the_workspace(root: &Path, relative: &str) {
+    let target = root.join(relative);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::copy(workspace_root().join(relative), &target)
+        .unwrap_or_else(|error| panic!("{relative} must be readable: {error}"));
 }
 
 /// Schreibt ein Fuzz-Manifest, das genau die genannten Ziele deklariert.
@@ -842,5 +853,266 @@ fn stage_one_gate_requires_every_fuzz_surface_from_design_22_1() {
         );
     }
 
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// Die beiden Dokumente, die Stufe 1 als oeffentliches Formatpaket und als
+/// Gate-Bericht liefert — relativ zur Gate-Wurzel.
+const FORMAT_PACKAGE_PATH: &str = "docs/format/README-FORMAT.txt";
+const GATE_REPORT_PATH: &str = "docs/traceability/stage-1-gate.md";
+
+/// Die zehn primaeren Abnahmekriterien der Stufe 1, die der Gate-Bericht auf
+/// konkrete Belege abbilden MUSS.
+const PRIMARY_ACCEPTANCE_CRITERIA: [u32; 10] = [4, 5, 6, 9, 14, 16, 17, 20, 38, 51];
+
+/// Treibt den Gate gegen den ECHTEN Arbeitsbaum.
+///
+/// `env_remove` ist zwingend: eine geerbte `EA_STAGE_GATE_ROOT` wuerde den Lauf
+/// still auf ein fremdes Fixture umlenken.
+fn run_stage_gate_in_the_workspace(stage: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["stage-gate", stage])
+        .env_remove("EA_STAGE_GATE_ROOT")
+        .output()
+        .expect("xtask stage-gate must start")
+}
+
+/// Baut ein Fixture, das jede fruehere Gate-Bedingung erfuellt.
+///
+/// Formatpaket und Gate-Bericht bringt bereits [`fixture_root`] mit; die
+/// Mutationsphasen brauchen genau diesen Zustand: sie veraendern EIN Dokument
+/// und halten fest, dass der Gate genau daran haengt.
+fn fixture_with_the_checked_in_documents(label: &str) -> PathBuf {
+    let root = fixture_root(label);
+    for family in STAGE_ONE_FAMILIES {
+        write_family_manifest(&root, family);
+    }
+    for relative in [
+        "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md",
+        "docs/traceability/v0.1-requirements.csv",
+        "fuzz/Cargo.toml",
+    ] {
+        copy_from_the_workspace(&root, relative);
+    }
+    root
+}
+
+/// Liest die Reichweitenklausel dort, wo sie normativ steht: im Kommentar ueber
+/// dem `wasm32-unknown-unknown`-Kommando in `verify_quick_commands()`.
+///
+/// Der Bericht MUSS sie woertlich tragen. Die Klausel hier zu wiederholen
+/// hiesse, den Bericht gegen eine zweite Abschrift zu pruefen statt gegen die
+/// Quelle.
+fn wasm32_scope_clause_from_the_gate_source() -> String {
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("the xtask source must be readable");
+    let mut clause = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if clause.is_empty() {
+            if !trimmed.starts_with("// Belegt ausschliesslich") {
+                continue;
+            }
+        } else if !trimmed.starts_with("//") {
+            break;
+        }
+        if !clause.is_empty() {
+            clause.push(' ');
+        }
+        clause.push_str(trimmed.trim_start_matches('/').trim());
+        if clause.ends_with("steht aus.") {
+            break;
+        }
+    }
+    assert!(
+        clause.ends_with("steht aus."),
+        "verify_quick_commands() must carry the wasm32 scope comment; found: {clause}"
+    );
+    clause
+}
+
+/// Ersetzt ein Dokument im Fixture.
+fn write_document(root: &Path, relative: &str, text: &str) {
+    fs::write(root.join(relative), text).unwrap();
+}
+
+/// Haelt fest, dass `stage-gate 1` das Formatpaket und den Gate-Bericht prueft.
+///
+/// Phase 1 laeuft gegen den ECHTEN Arbeitsbaum und haelt den ZIELzustand fest —
+/// sie kann durch spaetere Tasks nicht invertieren. Jede Mutationsphase laeuft
+/// gegen ein Fixture und haelt einen FEHLERzustand an genau einer Stelle fest.
+#[test]
+fn stage_one_gate_requires_the_format_package_and_the_gate_report() {
+    // Phase 1: der echte Arbeitsbaum. Beide Dokumente liegen vor, der Gate
+    // beendet mit 0 und nennt die zehn primaeren Abnahmekriterien, die der
+    // Bericht auf Belege abbildet.
+    let output = run_stage_gate_in_the_workspace("1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "stage-gate 1 must accept the checked-in format package and gate report; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout must be JSON: {error}; stdout: {stdout}"));
+    assert_eq!(
+        report["format_package"],
+        serde_json::json!(FORMAT_PACKAGE_PATH)
+    );
+    assert_eq!(report["gate_report"], serde_json::json!(GATE_REPORT_PATH));
+    assert_eq!(
+        report["gate_report_acceptance_criteria"],
+        serde_json::json!(PRIMARY_ACCEPTANCE_CRITERIA),
+        "the gate report must map every primary acceptance criterion; stdout: {stdout}"
+    );
+
+    // Phase 2: die Reichweitenklausel steht woertlich so im Bericht, wie der
+    // Kommentar in `verify_quick_commands()` sie formuliert.
+    let workspace = workspace_root();
+    let clause = wasm32_scope_clause_from_the_gate_source();
+    let report_text = fs::read_to_string(workspace.join(GATE_REPORT_PATH))
+        .expect("the stage 1 gate report must be readable");
+    assert!(
+        report_text.contains(&clause),
+        "the gate report must carry the wasm32 scope clause verbatim: {clause}"
+    );
+
+    let root = fixture_with_the_checked_in_documents("documents");
+    let format_package = fs::read_to_string(workspace.join(FORMAT_PACKAGE_PATH)).unwrap();
+    let gate_report = fs::read_to_string(workspace.join(GATE_REPORT_PATH)).unwrap();
+
+    // Phase 3: kein Formatpaket.
+    fs::remove_file(root.join(FORMAT_PACKAGE_PATH)).unwrap();
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a missing format package must not satisfy the gate; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(FORMAT_PACKAGE_PATH),
+        "the gate must name the missing format package; stderr: {stderr}"
+    );
+
+    // Phase 4: kein Gate-Bericht.
+    write_document(&root, FORMAT_PACKAGE_PATH, &format_package);
+    fs::remove_file(root.join(GATE_REPORT_PATH)).unwrap();
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a missing gate report must not satisfy the gate; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(GATE_REPORT_PATH),
+        "the gate must name the missing gate report; stderr: {stderr}"
+    );
+
+    // Phase 5: das Formatpaket behauptet allgemeine Gerichtsverwertbarkeit.
+    // Verboten nach Global Constraint Zeile 27 des Stufe-1-Plans.
+    write_document(&root, GATE_REPORT_PATH, &gate_report);
+    write_document(
+        &root,
+        FORMAT_PACKAGE_PATH,
+        &format!("{format_package}\nDieses Archiv ist allgemein gerichtsverwertbar.\n"),
+    );
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a legal overclaim must not satisfy the gate; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("gerichtsverwert") && stderr.contains("NICHT BEHAUPTET:"),
+        "the gate must name the claimed term and the required disclaimer form; stderr: {stderr}"
+    );
+
+    // Phase 6: das Formatpaket nennt das Magic nicht mehr.
+    write_document(
+        &root,
+        FORMAT_PACKAGE_PATH,
+        &format_package.replace("h'45413100'", "h'00000000'"),
+    );
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a format package without the magic must not satisfy the gate; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("45413100"),
+        "the gate must name the missing literal; stderr: {stderr}"
+    );
+
+    // Phase 7: der Bericht traegt die Reichweitenklausel nicht mehr.
+    write_document(&root, FORMAT_PACKAGE_PATH, &format_package);
+    write_document(
+        &root,
+        GATE_REPORT_PATH,
+        &gate_report
+            .lines()
+            .filter(|line| !line.contains(&clause))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a gate report without the wasm32 scope clause must not satisfy the gate; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("wasm32 scope clause"),
+        "the gate must report the missing scope clause; stderr: {stderr}"
+    );
+
+    // Phase 8: dem Bericht fehlt die Belegzeile fuer AK 51.
+    write_document(
+        &root,
+        GATE_REPORT_PATH,
+        &gate_report
+            .lines()
+            .filter(|line| !line.starts_with("| AK 51 |"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a gate report without the AK 51 row must not satisfy the gate; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("51"),
+        "the gate must name the unmapped acceptance criterion; stderr: {stderr}"
+    );
+
+    // Phase 9: beide Dokumente unveraendert — deterministischer JSON-Bericht.
+    write_document(&root, GATE_REPORT_PATH, &gate_report);
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "the checked-in documents must satisfy the gate; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout must be JSON: {error}; stdout: {stdout}"));
+    assert_eq!(
+        report["gate_report_acceptance_criteria"],
+        serde_json::json!(PRIMARY_ACCEPTANCE_CRITERIA)
+    );
+    let repeated = run_stage_gate(&root, "1");
+    assert_eq!(
+        String::from_utf8(repeated.stdout).unwrap(),
+        stdout,
+        "the stage gate report must be byte-identical across runs"
+    );
     fs::remove_dir_all(&root).unwrap();
 }

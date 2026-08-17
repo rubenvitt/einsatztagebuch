@@ -894,6 +894,167 @@ const STAGE_ONE_FUZZ_SURFACES: [(&str, &str); 5] = [
     ("resource-limits", "object_bounds"),
 ];
 
+/// Das oeffentliche Formatpaket, relativ zur Gate-Wurzel.
+const FORMAT_PACKAGE_PATH: &str = "docs/format/README-FORMAT.txt";
+
+/// Der Stufe-1-Gate-Bericht, relativ zur Gate-Wurzel.
+const STAGE_ONE_GATE_REPORT_PATH: &str = "docs/traceability/stage-1-gate.md";
+
+/// Die Pflichtabschnitte des Formatpakets, in Dokumentreihenfolge.
+const FORMAT_PACKAGE_SECTIONS: [&str; 7] = [
+    "1. OBJEKTTYPEN, MAGIC UND EXACT-OBJECT-PRAEFIX",
+    "2. VERZEICHNISLAYOUT",
+    "3. UNABHAENGIGER TRUST ANCHOR",
+    "4. HASH- UND DOMAINTRENNUNG DER SUITE 1",
+    "5. PARSERGRENZEN",
+    "6. KOMPATIBILITAETSDATEIEN",
+    "7. NICHT BEHAUPTET",
+];
+
+/// Die Literale, die das Formatpaket nennen MUSS.
+///
+/// Der Gate prueft Literale, keine Prosa: eine Formatbeschreibung, die eine
+/// Domain-Trennung oder eine Parsergrenze verschweigt, ist als oeffentliches
+/// Paket wertlos. Die zwanzig Trennzeichenketten der Suite 1 stehen an drei
+/// Stellen des Bestands: `crates/ea-crypto/src/digest.rs` fuehrt vierzehn
+/// Hashdomaenen und drei Praefixfunktionen, `crates/ea-crypto/src/os_account.rs`
+/// die Bindungsdomaene und `crates/ea-format/src/ecp.rs` die beiden
+/// Typzeichenketten der signierten Protokollkerne —
+/// `crates/ea-testkit/src/lib.rs` haelt dieselbe Menge als Vektorquelle.
+/// Die Zahlen stehen im Bestand — `crates/ea-format/src/parser.rs`
+/// fuer die Rohgrenzen, `crates/ea-cbor/src/limits.rs` fuer die Wert- und
+/// Arbeitsgrenzen, `crates/ea-schema/src/v1.rs` und `crates/ea-format/src/eip.rs`
+/// fuer Klartext und Ciphertext — und in Global Constraint Zeile 30 des
+/// Stufe-1-Plans.
+const FORMAT_PACKAGE_LITERALS: [&str; 60] = [
+    // Objekttypen, Magic und Praefix.
+    "h'45413100'",
+    "0x85 0x44 0x45 0x41 0x31 0x00 <tag> 0x01 0x80",
+    ".eip=1",
+    ".eag=2",
+    ".esr=3",
+    ".ecp=4",
+    ".etb=5",
+    ".eds=6",
+    // Verzeichnislayout nach `design.md` 11.4.
+    "trust/organization.etb",
+    "trust/registry-events/",
+    "trust/operator-bindings/",
+    "trust/authorizations/",
+    "entries/",
+    "destroyed-entries/",
+    "grants/",
+    "receipts/",
+    "checkpoints/",
+    "destructions/",
+    "recovery-reports/",
+    "README-FORMAT.txt",
+    // Unabhaengiger Trust Anchor.
+    "Authentische Recovery beginnt an einem unabhaengig verwahrten Trust Anchor; \
+     archivinternes Vertrauen ist nie TOFU",
+    // Suite 1: Kennungen, Domains und die eine domainfreie Formel.
+    "EINSATZARCHIV-SUITE-1",
+    "EINSATZARCHIV-HPKE-1",
+    "EINSATZARCHIV-CIPHERTEXT-v1",
+    "EINSATZARCHIV-RECORD-v1",
+    "EINSATZARCHIV-PACKAGE-v1",
+    "EINSATZARCHIV-OBJECT-v1",
+    "EINSATZARCHIV-GRANT-PLAN-v1",
+    "EINSATZARCHIV-GRANT-v1",
+    "EINSATZARCHIV-RECEIPT-v1",
+    "EINSATZARCHIV-TRUST-OBJECT-v1",
+    "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
+    "EINSATZARCHIV-EVIDENCE-RENEWAL-INPUT-v1",
+    "EINSATZARCHIV-TRUST-ANCHOR-PRE-v1",
+    "EINSATZARCHIV-TRUST-ANCHOR-v1",
+    "EINSATZARCHIV-OPERATOR-PROFILE-v1",
+    "EINSATZARCHIV-RECOVERY-TEST-v1",
+    "EINSATZARCHIV-OS-ACCOUNT-v1",
+    "EINSATZARCHIV-CHECKPOINT-v1",
+    "EINSATZARCHIV-EVIDENCE-RENEWAL-v1",
+    "EINSATZARCHIV-AAD-v1",
+    "EINSATZARCHIV-HPKE-INFO-v1",
+    "EINSATZARCHIV-HPKE-AAD-v1",
+    "reportHash = SHA-256(canonical report bytes)",
+    // Parsergrenzen, numerisch.
+    "MAX_ARCHIVE_OBJECT_BYTES_V1 = 4_194_304",
+    "EIP_MAX_RAW_BYTES_V1 = 2_097_152",
+    "EAG_MAX_RAW_BYTES_V1 = 65_536",
+    "ESR_MAX_RAW_BYTES_V1 = 65_536",
+    "ECP_MAX_RAW_BYTES_V1 = 4_194_304",
+    "ETB_MAX_RAW_BYTES_V1 = 4_194_304",
+    "EDS_MAX_RAW_BYTES_V1 = 262_144",
+    "MAX_PLAINTEXT_BYTES_V1 = 1_048_576",
+    "MAX_CBOR_TEXT_OR_BYTES_V1 = 1_048_592",
+    "MAX_CIPHERTEXT_BYTES_V1 = 1_048_592",
+    "MAX_NESTING_DEPTH_V1 = 16",
+    "MAX_CONTAINER_ITEMS_V1 = 10_000",
+    "MAX_TOTAL_ITEMS_V1 = 10_000",
+    // Kompatibilitaetsdateien.
+    "format/schemas/",
+    "format/transformations/",
+    "format/compatibility-matrix.json",
+];
+
+/// Begriffe, die eine verbotene Zusicherung tragen wuerden.
+///
+/// Global Constraint Zeile 27 des Stufe-1-Plans verbietet den Anspruch auf
+/// allgemeine Gerichtsverwertbarkeit, rechtlichen Beweiswert, eine
+/// TR-ESOR-Zertifizierung und vollstaendige Metadatenblindheit. Kleingeschrieben,
+/// weil der Vergleich auf der kleingeschriebenen Zeile laeuft.
+const FORBIDDEN_CLAIM_TERMS: [&str; 4] =
+    ["beweiswert", "gerichtsverwert", "tr-esor", "metadatenblind"];
+
+/// Die einzige Zeilenform, in der ein verbotener Begriff auftreten darf.
+///
+/// Mechanisch statt sprachlich: eine Verneinungsheuristik („die Zeile enthaelt
+/// `kein`") liesse sich unabsichtlich umgehen. Ein fester Zeilenanfang ist
+/// eindeutig, und die Verbotsliste verlangt ohnehin, dass jeder der vier
+/// Begriffe genau einmal als ausdrueckliche Nichtzusicherung erscheint.
+const CLAIM_DISCLAIMER_PREFIX: &str = "NICHT BEHAUPTET:";
+
+/// Die Pflichtabschnitte des Gate-Berichts, in Dokumentreihenfolge.
+const GATE_REPORT_SECTIONS: [&str; 5] = [
+    "## 1. Primaere Abnahmekriterien und ihre Belege",
+    "## 2. Reichweite des wasm32-Gates",
+    "## 3. Entscheidung D1: organizationAdminAuthorization",
+    "## 4. Entscheidung D3: Web-Reader-Zeilen und FR-100/FR-103",
+    "## 5. Unveraenderlichkeit der Vektoren und Vektor-Hygiene",
+];
+
+/// Die Literale, die der Gate-Bericht nennen MUSS.
+const GATE_REPORT_LITERALS: [&str; 15] = [
+    "organizationAdminAuthorization",
+    "Kardinalitaet 1",
+    "2-of-N",
+    "web-reader-design.md` Abschnitt 7.5",
+    "WR-041",
+    "WR-042",
+    "WR-043",
+    "WR-052",
+    "WR-063",
+    "WR-075",
+    "WR-082",
+    "FR-100",
+    "FR-103",
+    "`action_code` `200`",
+    "xxUnknownxx",
+];
+
+/// Die Reichweitenklausel zum wasm32-Gate, deckungsgleich mit dem Kommentar
+/// ueber dem `wasm32-unknown-unknown`-Kommando in [`verify_quick_commands`].
+///
+/// Der Gate-Bericht MUSS sie woertlich tragen. Ohne sie liest sich ein gruener
+/// Gate-Lauf als Laufzeitnachweis fuer den Browser-Reader, den er nicht
+/// erbringt.
+const WASM32_SCOPE_CLAUSE: &str = concat!(
+    "Belegt ausschliesslich UEBERSETZBARKEIT fuer wasm32-unknown-unknown, nicht ",
+    "Lauffaehigkeit. Der Laufzeitnachweis nach ",
+    "docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md §14.1 ",
+    "(wasm-bindgen-Schicht, getrandom/wasm_js in einer echten JS-Umgebung, eine ",
+    "HPKE-Entkapselung, eine Signaturpruefung gegen einen Testvektor) steht aus."
+);
+
 /// Der Spaltenvertrag des Ledgers. Spaetere Stufen ergaenzen nur Zeilen.
 const LEDGER_COLUMNS: [&str; 9] = [
     "requirement_id",
@@ -1248,6 +1409,152 @@ fn stage_one_fuzz_targets(gate_root: &Path) -> Result<Vec<String>, String> {
     Ok(declared)
 }
 
+/// Prueft, dass ein Dokument jedes geforderte Literal traegt.
+///
+/// Meldet das ERSTE fehlende Literal in Listenreihenfolge, damit die
+/// Fehlerzeile byteidentisch reproduzierbar bleibt.
+fn require_document_literals(
+    path: &Path,
+    text: &str,
+    literals: &[&str],
+    kind: &str,
+) -> Result<(), String> {
+    for literal in literals {
+        if !text.contains(literal) {
+            return Err(format!(
+                "{} does not carry the required {kind}: {literal}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Weist jede verbotene Zusicherung des Formatpakets zurueck.
+///
+/// Zwei Richtungen, beide aus Global Constraint Zeile 27: ein verbotener
+/// Begriff DARF nur in einer Zeile stehen, die mit
+/// [`CLAIM_DISCLAIMER_PREFIX`] beginnt, und er MUSS dort mindestens einmal
+/// stehen. Die zweite Richtung verhindert, dass die Nichtzusicherung mit dem
+/// Begriff aus dem Dokument verschwindet.
+fn reject_legal_overclaim(path: &Path, text: &str) -> Result<(), String> {
+    for term in FORBIDDEN_CLAIM_TERMS {
+        let mut disclaimed = false;
+        for line in text.lines() {
+            if !line.to_lowercase().contains(term) {
+                continue;
+            }
+            if line.trim_start().starts_with(CLAIM_DISCLAIMER_PREFIX) {
+                disclaimed = true;
+                continue;
+            }
+            return Err(format!(
+                "{} carries {term} outside a line beginning with {CLAIM_DISCLAIMER_PREFIX}: {}",
+                path.display(),
+                line.trim()
+            ));
+        }
+        if !disclaimed {
+            return Err(format!(
+                "{} must disclaim {term} on a line beginning with {CLAIM_DISCLAIMER_PREFIX}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Liest die Belegtabelle des Gate-Berichts.
+///
+/// Jede Zeile hat die Form `| AK <nummer> | <titel> | <beleg> | <offen> |`.
+/// Beleg und offener Beitrag MUESSEN gefuellt sein: ein leerer Beleg waere
+/// genau die Scheinzusage, die dieser Bericht ausschliesst. Die gefundenen
+/// Nummern MUESSEN exakt die zehn primaeren Abnahmekriterien sein.
+fn gate_report_acceptance_criteria(path: &Path, text: &str) -> Result<Vec<u32>, String> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("| AK ") else {
+            continue;
+        };
+        let cells = rest.split('|').map(str::trim).collect::<Vec<_>>();
+        if cells.len() != 5 || !cells[4].is_empty() {
+            return Err(format!(
+                "{}: an acceptance criterion row carries exactly four columns: {line}",
+                path.display()
+            ));
+        }
+        let number = cells[0].parse::<u32>().map_err(|error| {
+            format!(
+                "{}: an acceptance criterion row must start with its number: {line}: {error}",
+                path.display()
+            )
+        })?;
+        for (column, value) in [("evidence", cells[2]), ("open contributions", cells[3])] {
+            if value.is_empty() {
+                return Err(format!(
+                    "{}: AK {number} carries an empty {column} column",
+                    path.display()
+                ));
+            }
+        }
+        found.push(number);
+    }
+    found.sort_unstable();
+    if found != STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA {
+        let missing = STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA
+            .iter()
+            .filter(|criterion| !found.contains(criterion))
+            .map(u32::to_string)
+            .collect::<Vec<_>>();
+        let unexpected = found
+            .iter()
+            .filter(|criterion| !STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA.contains(criterion))
+            .map(u32::to_string)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "{} must map exactly the primary acceptance criteria; missing: [{}]; unexpected: [{}]",
+            path.display(),
+            missing.join(", "),
+            unexpected.join(", ")
+        ));
+    }
+    Ok(found)
+}
+
+/// Prueft Formatpaket und Gate-Bericht und liefert die belegten
+/// Abnahmekriterien des Berichts.
+fn stage_one_documents(gate_root: &Path) -> Result<Vec<u32>, String> {
+    let format_path = gate_root.join(FORMAT_PACKAGE_PATH);
+    let format_package = fs::read_to_string(&format_path)
+        .map_err(|error| format!("failed to read {}: {error}", format_path.display()))?;
+    require_document_literals(
+        &format_path,
+        &format_package,
+        &FORMAT_PACKAGE_SECTIONS,
+        "section",
+    )?;
+    require_document_literals(
+        &format_path,
+        &format_package,
+        &FORMAT_PACKAGE_LITERALS,
+        "literal",
+    )?;
+    reject_legal_overclaim(&format_path, &format_package)?;
+
+    let report_path = gate_root.join(STAGE_ONE_GATE_REPORT_PATH);
+    let report = fs::read_to_string(&report_path)
+        .map_err(|error| format!("failed to read {}: {error}", report_path.display()))?;
+    require_document_literals(&report_path, &report, &GATE_REPORT_SECTIONS, "section")?;
+    require_document_literals(&report_path, &report, &GATE_REPORT_LITERALS, "literal")?;
+    if !report.contains(WASM32_SCOPE_CLAUSE) {
+        return Err(format!(
+            "{} does not carry the wasm32 scope clause verbatim: {WASM32_SCOPE_CLAUSE}",
+            report_path.display()
+        ));
+    }
+    gate_report_acceptance_criteria(&report_path, &report)
+}
+
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
 ///
 /// Eine Familie zaehlt erst als vorhanden, wenn [`family_carries_a_manifest`]
@@ -1314,6 +1621,7 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
         ));
     }
     let fuzz_targets = stage_one_fuzz_targets(&gate_root)?;
+    let report_acceptance_criteria = stage_one_documents(&gate_root)?;
     let fuzz_surfaces = STAGE_ONE_FUZZ_SURFACES
         .iter()
         .map(|(surface, target)| serde_json::json!({ "surface": surface, "target": target }))
@@ -1338,6 +1646,9 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
         "rows": row_identifiers,
         "fuzz_targets": fuzz_targets,
         "fuzz_surfaces": fuzz_surfaces,
+        "format_package": FORMAT_PACKAGE_PATH,
+        "gate_report": STAGE_ONE_GATE_REPORT_PATH,
+        "gate_report_acceptance_criteria": report_acceptance_criteria,
     });
     println!(
         "{}",
