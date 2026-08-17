@@ -26,7 +26,11 @@
 //! RFC-9180-Bindung entsteht stattdessen ueber die eingefrorenen
 //! Suite-Identifikatoren und die KEM-Schluesselableitung aus RFC 7748.
 
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    sync::Arc,
+};
 
 use ea_crypto::{
     AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, ContentType, GRANT_SUITE_ID, HPKE_AEAD_ID,
@@ -47,11 +51,19 @@ use ea_testkit::{
     TEST_ENTROPY_RECIPIENT_X25519_SEED, VectorEntry, VectorManifest, VectorSource,
     X25519_RFC7748_BOB_PRIVATE_KEY, X25519_RFC7748_BOB_PUBLIC_KEY, sha256_hex, verify_manifest_at,
 };
+use ea_time::TrustedTimeState;
+use ea_trust::{
+    ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin,
+    RegistrySelectionCommit, StateStoreError, TrustObjectSource, TrustSourceError, TrustStateKey,
+    TrustStateStore, decode_trust_anchor, load_trust_state, verify_registry_candidate,
+    verify_trust,
+};
 use ea_types::{
-    CertificateHash, DeviceId, Hash32, Id16, KeyThumbprint, ObjectHash, OperatorSubjectId,
-    OrganizationId, RecordId, RegistryVersion, UnixMillis,
+    CertificateHash, ChainSequence, DeviceId, Hash32, Id16, KeyThumbprint, ObjectHash,
+    OperatorSubjectId, OrganizationId, RecordId, RegistryVersion, UnixMillis,
 };
 use ed25519_dalek::{Signer, SigningKey};
+use minicbor::Decoder;
 
 /// Die Vektorwurzel, relativ zur Arbeitsbaumwurzel.
 const VECTOR_ROOT: &str = "vectors/crypto/suite-1";
@@ -1314,5 +1326,845 @@ fn format_parsed_parts(parsed: &ParsedArchiveObject) -> (Vec<u8>, ObjectHash) {
         ParsedArchiveObject::Destroyed(value) => {
             (value.exact_bytes().as_bytes().to_vec(), value.object_hash())
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Die Vektorfamilie `trust/v1`
+// ---------------------------------------------------------------------------
+//
+// Der Negativumfang ist woertlich durch `design.md` §22.1, letzter Punkt,
+// vorgegeben. Jeder dort genannte Fall hat genau einen Vektor, und KEIN Fall
+// wird gegen sich selbst geprueft: der Test fuehrt die echte Pipeline aus —
+// `ea_format::decode_exact_object`, `ea_trust::decode_trust_anchor`,
+// `ea_trust::verify_trust`, `ea_trust::verify_registry_candidate` — und stellt
+// den zurueckkommenden Fehlercode gegen den eingefrorenen.
+//
+// # Wie ein Fall aufgebaut ist
+//
+// Ein Fall ist ein Verzeichnis `<stufe>/<fall>/` mit einem Eintrag je Objekt.
+// Die Stufe im Namen sagt, WELCHE Pipeline ueber den Fall entscheidet, und sie
+// ist damit maschinell ableitbar statt Testwissen:
+//
+// * `object/`    — `decode_exact_object` auf genau einem Objekt,
+// * `anchor/`    — `decode_trust_anchor` auf den Anchor-Bytes,
+// * `bootstrap/` — zusaetzlich `verify_trust` gegen den Objektkatalog,
+// * `registry/`  — zusaetzlich `verify_registry_candidate`.
+//
+// Jeder Fall ist VOLLSTAENDIG: er traegt alle Objekte, die seine Stufe braucht.
+// Eine Vererbung zwischen Faellen gaebe es hier zwar kompakter, doch eine
+// fremde Implementierung muesste sie nachbauen, bevor sie einen einzigen Vektor
+// pruefen koennte. Die Wiederholung ist der Preis dafuer, dass jeder Fall fuer
+// sich lesbar bleibt.
+//
+// Das URTEIL eines Falls steht am Eintrag, der die Pipeline betritt: bei
+// `object/` am Objekt selbst, sonst am Eintrag `anchor`. Alle uebrigen
+// Eintraege eines Falls tragen ihr EIGENES Parseergebnis — ein wohlgeformtes
+// Wurzelzertifikat bleibt wohlgeformt, auch wenn der Fall als Ganzes scheitert.
+
+/// Der Manifestpfad der Trust-Vektoren, relativ zur Arbeitsbaumwurzel.
+const TRUST_MANIFEST_PATH: &str = "vectors/trust/v1/manifest.json";
+
+/// Die Wurzel der Trust-Vektoren.
+const TRUST_VECTOR_ROOT: &str = "vectors/trust/v1";
+
+/// Der Schema-Identifikator eines Vertrauensbausteins.
+const TRUST_OBJECT_SCHEMA_ID: &str = "etb-v1";
+
+/// Der Schema-Identifikator der finalen Anchor-Bytes.
+const TRUST_ANCHOR_SCHEMA_ID: &str = "trust-anchor-v1";
+
+/// Der Schema-Identifikator der bestaetigten Anchor-Vorstufe.
+const TRUST_PRE_ANCHOR_SCHEMA_ID: &str = "trust-anchor-pre-v1";
+
+/// Der Subtype, dessen Eintraege die Reichweitennotiz zu §7.5 tragen muessen.
+const TRUST_ADMIN_AUTHORIZATION_SUBTYPE: &str = "organizationAdminAuthorization";
+
+/// Der einzige zulaessige Wert eines Action-Code-Negativvektors.
+///
+/// LITERAL, und der Nachbarwert `7` ist verboten: `trust.cddl` deklariert
+/// `action-code: 0..6`, und eine v1.1-Erweiterung des Wertebereichs wuerde einen
+/// eingefrorenen `7`-Vektor von `abgelehnt` nach `akzeptiert` drehen.
+const TRUST_INVALID_ACTION_CODE: u64 = 200;
+
+/// Das einzige zulaessige Literal eines Subtype-Negativvektors.
+const TRUST_UNKNOWN_SUBTYPE: &str = "xxUnknownxx";
+
+/// Namen, die spaeter echte Trust-Objektfamilien werden koennten und deshalb in
+/// keinem eingefrorenen Negativvektor stehen duerfen.
+const TRUST_RESERVED_SUBTYPE_NAMES: [&str; 2] = ["webBundleRelease", "readerKeyEscrow"];
+
+/// Der Registry-Fall, gegen den sich jeder andere Registry-Fall abgrenzt.
+const TRUST_REGISTRY_BASELINE: &str = "registry/accepted-bootstrap-and-first-head";
+
+/// Ein Fall der Familie.
+struct TrustCase {
+    /// Verzeichnis des Falls, `<stufe>/<fall>`.
+    path: &'static str,
+    /// Die Bezeichnung aus `design.md` §22.1; leer, wenn der Fall aus der
+    /// Vektorhygiene stammt statt aus dem Text.
+    design_22_1: &'static str,
+    /// Der Eintrag, dessen Objekthash den gepinnten Registry-Kopf bildet.
+    pinned_head_slot: Option<&'static str>,
+    /// Die Kettensequenz, fuer die der Kandidat geprueft wird.
+    proposed_sequence: u64,
+    /// Die Slots eines Registry-Falls, deren Bytes von
+    /// [`TRUST_REGISTRY_BASELINE`] abweichen.
+    ///
+    /// DER DEFEKTORT, ausgeschrieben. Drei Faelle dieser Stufe messen denselben
+    /// Fehlercode `EA-TRUST-SIGNATURE`; ohne diese Angabe koennten sie
+    /// unbemerkt derselbe Vektor unter drei Namen sein. Fuer Faelle anderer
+    /// Stufen bleibt die Liste leer und ungeprueft.
+    differing_slots: &'static [&'static str],
+}
+
+/// Alle Faelle der Familie.
+///
+/// Die Zuordnung `design.md`-Bezeichnung zu Fall ist eine BIJEKTION: jeder in
+/// §22.1 genannte Fall hat genau einen Eintrag, und jeder Fall mit Bezeichnung
+/// nennt genau einen §22.1-Fall.
+const TRUST_CASES: [TrustCase; 17] = [
+    TrustCase {
+        path: "registry/accepted-bootstrap-and-first-head",
+        design_22_1: "positiver Pre-Registry-Signer",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "registry/accepted-admin-rotation",
+        design_22_1: "Adminrotation",
+        pinned_head_slot: Some("head-event"),
+        proposed_sequence: 101,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "registry/rejected-authorized-core-hash-mismatch",
+        design_22_1: "Admin-Authorization/Core-Hash",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[
+            "policy-authorization",
+            "policy",
+            "head-authorization",
+            "head-event",
+        ],
+    },
+    TrustCase {
+        path: "registry/rejected-root-only-signed-by-admin",
+        design_22_1: "Root-only",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &["head-event"],
+    },
+    TrustCase {
+        path: "registry/rejected-admin-only-signed-by-root",
+        design_22_1: "Admin-only",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &["head-authorization", "head-event"],
+    },
+    TrustCase {
+        path: "registry/rejected-reused-authorization-id-and-nonce",
+        design_22_1: "wiederverwendete ID/Nonce",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &["head-authorization", "head-event"],
+    },
+    TrustCase {
+        path: "registry/rejected-signer-context-deviation",
+        design_22_1: "Signer-Kontext-Abweichung",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[
+            "policy-authorization",
+            "policy",
+            "head-authorization",
+            "head-event",
+        ],
+    },
+    TrustCase {
+        path: "registry/rejected-null-context-after-first-head",
+        design_22_1: "erneute Nullkontext-Nutzung nach erstem Head",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &["head-authorization", "head-event"],
+    },
+    TrustCase {
+        path: "bootstrap/rejected-unpinned-admin-pair",
+        design_22_1: "unpinned Admin-Zertifikate/-Bindings",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "bootstrap/rejected-hash-divergent-admin-certificate",
+        design_22_1: "hashabweichende Admin-Zertifikate/-Bindings",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "bootstrap/rejected-mispaired-admin-binding",
+        design_22_1: "falsch gepaarte Admin-Zertifikate/-Bindings",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "bootstrap/rejected-shared-os-and-instance-key",
+        design_22_1: "fehlende OS-/Instanzschluessel-Pruefung",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "anchor/rejected-mutated-pre-anchor-field",
+        design_22_1: "veraenderte Vorstufenfelder",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "anchor/rejected-wrong-bootstrap-anchor-hash",
+        design_22_1: "falscher bootstrap-anchor-hash",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "object/rejected-action-code-200",
+        design_22_1: "falscher Action-Code",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "object/rejected-unknown-target-subtype",
+        design_22_1: "",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+    TrustCase {
+        path: "object/accepted-handmade-admin-authorization",
+        design_22_1: "",
+        pinned_head_slot: None,
+        proposed_sequence: 1,
+        differing_slots: &[],
+    },
+];
+
+/// Die in `design.md` §22.1 namentlich genannten Faelle, woertlich uebernommen.
+///
+/// Die Liste ist die zweite Haelfte der Bijektion: sie steht hier, damit ein
+/// verschwundener Fall auffaellt, statt still ungeprueft zu bleiben.
+const TRUST_DESIGN_22_1_CASES: [&str; 15] = [
+    "Admin-Authorization/Core-Hash",
+    "Adminrotation",
+    "Admin-only",
+    "Root-only",
+    "Signer-Kontext-Abweichung",
+    "erneute Nullkontext-Nutzung nach erstem Head",
+    "falsch gepaarte Admin-Zertifikate/-Bindings",
+    "falscher Action-Code",
+    "falscher bootstrap-anchor-hash",
+    "fehlende OS-/Instanzschluessel-Pruefung",
+    "hashabweichende Admin-Zertifikate/-Bindings",
+    "positiver Pre-Registry-Signer",
+    "unpinned Admin-Zertifikate/-Bindings",
+    "veraenderte Vorstufenfelder",
+    "wiederverwendete ID/Nonce",
+];
+
+#[test]
+fn trust_v1_vectors_cover_every_negative_named_in_design_22_1() {
+    let root = workspace_root();
+    let text = fs::read_to_string(root.join(TRUST_MANIFEST_PATH))
+        .unwrap_or_else(|error| panic!("failed to read {TRUST_MANIFEST_PATH}: {error}"));
+    let manifest = VectorManifest::from_json(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {TRUST_MANIFEST_PATH}: {error}"));
+    assert_eq!(manifest.family, "trust");
+    assert_eq!(manifest.version, "v1");
+
+    // Das Manifest darf seiner Platte nicht widersprechen.
+    let report = verify_manifest_at(&root.join(TRUST_VECTOR_ROOT))
+        .unwrap_or_else(|error| panic!("failed to verify {TRUST_VECTOR_ROOT}: {error}"));
+    assert_eq!(report.entries_checked, manifest.entries.len());
+    assert!(
+        report.is_clean(),
+        "the frozen files contradict their manifest: {:?}",
+        report.mismatches
+    );
+
+    let entries = &manifest.entries;
+    check_trust_case_paths(entries);
+    check_trust_design_bijection();
+    check_trust_hygiene(entries, &text);
+
+    let mut executed = BTreeSet::new();
+    for case in &TRUST_CASES {
+        for name in check_trust_case(case, entries) {
+            assert!(executed.insert(name.clone()), "{name} was executed twice");
+        }
+    }
+    check_trust_registry_defect_sites(entries);
+
+    let recorded = entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(recorded.len(), entries.len(), "entry names must be unique");
+    assert_eq!(
+        recorded, executed,
+        "every manifest entry must be executed, and every execution must address \
+         a manifest entry"
+    );
+}
+
+/// Der Fallname ohne seine Stufe.
+fn trust_case_basename(path: &str) -> &str {
+    path.rsplit_once('/')
+        .unwrap_or_else(|| panic!("{path} must be named <stufe>/<fall>"))
+        .1
+}
+
+/// Der Slotname eines Eintrags: alles nach dem letzten Schraegstrich.
+fn trust_slot_name(name: &str) -> &str {
+    name.rsplit_once('/')
+        .unwrap_or_else(|| panic!("{name} must be named <stufe>/<fall>/<slot>"))
+        .1
+}
+
+/// Der Eintrag, der die Pipeline eines Falls betritt und sein Urteil traegt.
+fn trust_verdict_entry<'a>(case: &TrustCase, members: &[&'a VectorEntry]) -> &'a VectorEntry {
+    if case.path.starts_with("object/") {
+        assert_eq!(members.len(), 1, "{} is a single object case", case.path);
+        return members[0];
+    }
+    single_by_schema(members, TRUST_ANCHOR_SCHEMA_ID, case.path)
+}
+
+/// Jeder Registry-Fall weicht genau dort vom Basisfall ab, wo sein Name es
+/// sagt.
+///
+/// Drei Faelle dieser Stufe messen denselben Code `EA-TRUST-SIGNATURE`. Der
+/// gemessene Fehlercode allein belegt deshalb NICHT, dass es drei verschiedene
+/// Defekte sind — er waere auch dann gleich, wenn dreimal dasselbe Objekt
+/// unter drei Namen laege. Die Menge der abweichenden Slots trennt sie.
+fn check_trust_registry_defect_sites(entries: &[VectorEntry]) {
+    let baseline = entries
+        .iter()
+        .filter(|vector| trust_case_path(&vector.name) == TRUST_REGISTRY_BASELINE)
+        .map(|vector| {
+            (
+                trust_slot_name(&vector.name),
+                vector.object_bytes.as_slice(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        !baseline.is_empty(),
+        "{TRUST_REGISTRY_BASELINE} must exist as the reference case"
+    );
+
+    let mut fingerprints = BTreeSet::new();
+    for case in &TRUST_CASES {
+        if !case.path.starts_with("registry/") {
+            assert!(
+                case.differing_slots.is_empty(),
+                "{} is not a registry case and declares no defect site",
+                case.path
+            );
+            continue;
+        }
+        let members = entries
+            .iter()
+            .filter(|vector| trust_case_path(&vector.name) == case.path)
+            .collect::<Vec<_>>();
+        let mut differing = BTreeSet::new();
+        let mut additional = BTreeSet::new();
+        for vector in &members {
+            let slot = trust_slot_name(&vector.name);
+            match baseline.get(slot) {
+                Some(reference) if *reference == vector.object_bytes.as_slice() => {}
+                Some(_) => {
+                    differing.insert(slot.to_owned());
+                }
+                // Ein Slot, den der Basisfall nicht kennt: der Fall setzt
+                // Objekte HINZU, statt welche zu ersetzen. `accepted-admin-rotation`
+                // ist genau das — sein erster Kopf ist byteidentisch, und der
+                // zweite kommt dazu.
+                None => {
+                    additional.insert(slot.to_owned());
+                }
+            }
+        }
+        let declared = case
+            .differing_slots
+            .iter()
+            .map(|slot| (*slot).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            differing, declared,
+            "{} must differ from the baseline exactly where it declares",
+            case.path
+        );
+
+        let verdict = match &trust_verdict_entry(case, &members).expected_outcome {
+            ExpectedOutcome::Accepted => "accepted".to_owned(),
+            ExpectedOutcome::Rejected { error_code } => {
+                assert!(
+                    !differing.is_empty() || !additional.is_empty(),
+                    "{} claims a rejection but carries the baseline bytes",
+                    case.path
+                );
+                error_code.clone()
+            }
+        };
+        assert!(
+            fingerprints.insert((differing, additional, verdict)),
+            "{} shares defect site and verdict with another case and is therefore \
+             the same vector under two names",
+            case.path
+        );
+    }
+}
+
+/// Der Fallpfad eines Eintrags: alles vor dem letzten Schraegstrich.
+fn trust_case_path(name: &str) -> &str {
+    name.rsplit_once('/')
+        .unwrap_or_else(|| panic!("{name} must be named <stufe>/<fall>/<slot>"))
+        .0
+}
+
+/// Das Manifest deckt genau die Faelle dieser Tabelle ab.
+fn check_trust_case_paths(entries: &[VectorEntry]) {
+    let recorded = entries
+        .iter()
+        .map(|entry| trust_case_path(&entry.name).to_owned())
+        .collect::<BTreeSet<_>>();
+    let expected = TRUST_CASES
+        .iter()
+        .map(|case| case.path.to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recorded, expected,
+        "the manifest must hold exactly the mandated cases"
+    );
+}
+
+/// Jeder in §22.1 genannte Fall hat genau einen Vektor, und umgekehrt.
+fn check_trust_design_bijection() {
+    let mut named = BTreeSet::new();
+    for case in &TRUST_CASES {
+        if case.design_22_1.is_empty() {
+            continue;
+        }
+        assert!(
+            named.insert(case.design_22_1.to_owned()),
+            "{} is claimed by more than one case",
+            case.design_22_1
+        );
+    }
+    let expected = TRUST_DESIGN_22_1_CASES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        expected.len(),
+        TRUST_DESIGN_22_1_CASES.len(),
+        "the design list must not repeat itself"
+    );
+    assert_eq!(
+        named, expected,
+        "every case named in design.md §22.1 must have exactly one vector"
+    );
+}
+
+/// Die Vektorhygiene, die nicht aus dem Bestand folgt, sondern gesetzt ist.
+fn check_trust_hygiene(entries: &[VectorEntry], manifest_text: &str) {
+    for reserved in TRUST_RESERVED_SUBTYPE_NAMES {
+        assert!(
+            !manifest_text.contains(reserved),
+            "{reserved} could become a real trust object family and must not appear \
+             in a frozen negative vector"
+        );
+    }
+
+    let action = entry(
+        entries,
+        "object/rejected-action-code-200/admin-authorization",
+    );
+    let (subtype, action_code, target) = trust_object_parts(&action.object_bytes);
+    assert_eq!(subtype, TRUST_ADMIN_AUTHORIZATION_SUBTYPE);
+    assert_eq!(
+        action_code,
+        Some(TRUST_INVALID_ACTION_CODE),
+        "the action code negative must carry 200; the neighbour value 7 would flip \
+         from rejected to accepted once v1.1 widens the range"
+    );
+    assert_eq!(target.as_deref(), Some("policy"));
+
+    let unknown = entry(
+        entries,
+        "object/rejected-unknown-target-subtype/admin-authorization",
+    );
+    let (subtype, action_code, target) = trust_object_parts(&unknown.object_bytes);
+    assert_eq!(subtype, TRUST_ADMIN_AUTHORIZATION_SUBTYPE);
+    assert_eq!(action_code, Some(2));
+    assert_eq!(
+        target.as_deref(),
+        Some(TRUST_UNKNOWN_SUBTYPE),
+        "the unknown subtype negative must carry the reserved-free literal"
+    );
+
+    let control = entry(
+        entries,
+        "object/accepted-handmade-admin-authorization/admin-authorization",
+    );
+    expect_accepted(control);
+    let (_, action_code, target) = trust_object_parts(&control.object_bytes);
+    assert_eq!(
+        (action_code, target.as_deref()),
+        (Some(2), Some("policy")),
+        "the control proves the hand written encoder is faithful, so each negative \
+         isolates exactly one defect"
+    );
+
+    let mut authorizations = 0_usize;
+    for vector in entries {
+        if vector.schema_id != TRUST_OBJECT_SCHEMA_ID {
+            continue;
+        }
+        let (subtype, _, _) = trust_object_parts(&vector.object_bytes);
+        if subtype != TRUST_ADMIN_AUTHORIZATION_SUBTYPE {
+            continue;
+        }
+        authorizations += 1;
+        let note = vector.scope_note.as_deref().unwrap_or_else(|| {
+            panic!(
+                "{} carries an organizationAdminAuthorization and must state what it \
+                 does NOT prove",
+                vector.name
+            )
+        });
+        assert!(
+            note.contains("7.5"),
+            "{} must name the web reader spec §7.5 gap: {note}",
+            vector.name
+        );
+    }
+    assert!(
+        authorizations > 0,
+        "the family must freeze organizationAdminAuthorization vectors"
+    );
+}
+
+/// Ein Fall, vollstaendig ausgefuehrt. Liefert die Namen der geprueften
+/// Eintraege.
+fn check_trust_case(case: &TrustCase, entries: &[VectorEntry]) -> Vec<String> {
+    let members = entries
+        .iter()
+        .filter(|vector| trust_case_path(&vector.name) == case.path)
+        .collect::<Vec<_>>();
+    assert!(!members.is_empty(), "{} has no vectors", case.path);
+
+    let tier = case
+        .path
+        .split_once('/')
+        .unwrap_or_else(|| panic!("{} must name its tier", case.path))
+        .0;
+
+    // Die Polaritaet steht im Namen und ist damit eine ZUSAGE, nicht nur eine
+    // Aufzeichnung. Ohne diese Pruefung koennte ein spaeterer Erzeugungslauf
+    // einen `rejected-`-Fall still auf `Accepted` umschreiben: beide Tests
+    // blieben gruen, und die MUSS-Zusage aus §22.1 waere lautlos verletzt.
+    let verdict_outcome = &trust_verdict_entry(case, &members).expected_outcome;
+    match trust_case_basename(case.path) {
+        name if name.starts_with("rejected-") => assert!(
+            matches!(verdict_outcome, ExpectedOutcome::Rejected { .. }),
+            "{} is named a rejection and must reject",
+            case.path
+        ),
+        name if name.starts_with("accepted-") => assert_eq!(
+            verdict_outcome,
+            &ExpectedOutcome::Accepted,
+            "{} is named an acceptance and must be accepted",
+            case.path
+        ),
+        name => panic!("{name} must name its polarity as accepted- or rejected-"),
+    }
+
+    // Jedes Vertrauensobjekt parst fuer sich, unabhaengig vom Urteil des Falls.
+    for vector in &members {
+        if vector.schema_id != TRUST_OBJECT_SCHEMA_ID {
+            continue;
+        }
+        let outcome = match decode_exact_object(&vector.object_bytes) {
+            Ok(parsed) => {
+                let (exact, hash) = format_parsed_parts(&parsed);
+                assert_eq!(
+                    exact, vector.object_bytes,
+                    "{} must round-trip byte for byte",
+                    vector.name
+                );
+                assert_eq!(
+                    intermediate(vector, "objectHash"),
+                    hex::encode(hash.as_bytes()),
+                    "{} must record its own object hash",
+                    vector.name
+                );
+                ExpectedOutcome::Accepted
+            }
+            Err(error) => ExpectedOutcome::Rejected {
+                error_code: error.code().to_owned(),
+            },
+        };
+        assert_eq!(
+            outcome, vector.expected_outcome,
+            "{} must parse exactly as its manifest records",
+            vector.name
+        );
+    }
+
+    if tier == "object" {
+        assert_eq!(members.len(), 1, "{} is a single object case", case.path);
+        return members.iter().map(|vector| vector.name.clone()).collect();
+    }
+
+    let anchor_vector = single_by_schema(&members, TRUST_ANCHOR_SCHEMA_ID, case.path);
+    let pre_anchor = members
+        .iter()
+        .find(|vector| vector.schema_id == TRUST_PRE_ANCHOR_SCHEMA_ID);
+    let catalog = members
+        .iter()
+        .filter(|vector| vector.schema_id == TRUST_OBJECT_SCHEMA_ID)
+        .map(|vector| vector.object_bytes.clone())
+        .collect::<Vec<_>>();
+
+    if let Some(pre_anchor) = pre_anchor {
+        let computed = bootstrap_anchor_hash(&pre_anchor.object_bytes);
+        assert_eq!(
+            intermediate(pre_anchor, "bootstrapAnchorHash"),
+            hex::encode(computed.as_bytes()),
+            "{} must record its own bootstrap anchor hash",
+            pre_anchor.name
+        );
+        assert_eq!(
+            hex::encode(computed.as_bytes()),
+            hex::encode(trust_anchor_embedded_hash(&anchor_vector.object_bytes)),
+            "{} must be the confirmed pre stage of its final anchor",
+            pre_anchor.name
+        );
+        expect_accepted(pre_anchor);
+    }
+
+    let pin = case.pinned_head_slot.map(|slot| {
+        let head = entry(entries, &format!("{}/{slot}", case.path));
+        // Der erste Kopf traegt Registry-Version 1; der Fall pinnt ihn, damit
+        // der zweite Kopf ueberhaupt Kandidat werden kann.
+        RegistryHeadPin::new(RegistryVersion::new(1), object_hash(&head.object_bytes))
+    });
+
+    let outcome = run_trust_case(
+        tier,
+        &anchor_vector.object_bytes,
+        &catalog,
+        pin,
+        case.proposed_sequence,
+    );
+    assert_eq!(
+        outcome, anchor_vector.expected_outcome,
+        "{} must reach exactly the verdict its manifest records",
+        anchor_vector.name
+    );
+    assert_eq!(
+        intermediate(anchor_vector, "trustAnchorHash"),
+        hex::encode(trust_anchor_hash(&anchor_vector.object_bytes).as_bytes()),
+        "{} must record its own trust anchor hash",
+        anchor_vector.name
+    );
+
+    members.iter().map(|vector| vector.name.clone()).collect()
+}
+
+/// Genau ein Eintrag eines Falls traegt dieses Schema.
+fn single_by_schema<'a>(
+    members: &[&'a VectorEntry],
+    schema_id: &str,
+    case: &str,
+) -> &'a VectorEntry {
+    let mut found = members
+        .iter()
+        .filter(|vector| vector.schema_id == schema_id);
+    let first = found
+        .next()
+        .unwrap_or_else(|| panic!("{case} misses its {schema_id} entry"));
+    assert!(
+        found.next().is_none(),
+        "{case} must hold exactly one {schema_id} entry"
+    );
+    first
+}
+
+/// Fuehrt die Pipeline der Stufe aus und liefert das gemessene Ergebnis.
+fn run_trust_case(
+    tier: &str,
+    anchor_bytes: &[u8],
+    catalog: &[Vec<u8>],
+    pin: Option<RegistryHeadPin>,
+    proposed_sequence: u64,
+) -> ExpectedOutcome {
+    let anchor = match decode_trust_anchor(anchor_bytes) {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            return ExpectedOutcome::Rejected {
+                error_code: error.code().to_owned(),
+            };
+        }
+    };
+    if tier == "anchor" {
+        return ExpectedOutcome::Accepted;
+    }
+
+    let source = TrustCatalogSource(
+        catalog
+            .iter()
+            .map(|bytes| (object_hash(bytes), Arc::<[u8]>::from(bytes.clone())))
+            .collect(),
+    );
+    let state_key = TrustStateKey {
+        organization_id: anchor.organization_id(),
+        device_id: DeviceId::try_from(&[0xf0; 16][..]).expect("16 bytes"),
+    };
+    let mut store = TrustSnapshotStore {
+        key: state_key,
+        record: Some(PersistedTrustRecord::new(
+            17,
+            TrustedTimeState::initial(UnixMillis::new(1_700_000_000_000)),
+            pin,
+        )),
+    };
+    let snapshot = load_trust_state(&mut store, state_key).expect("the fixture store answers");
+    let trust = match verify_trust(&anchor, &source, snapshot) {
+        Ok(trust) => trust,
+        Err(error) => {
+            return ExpectedOutcome::Rejected {
+                error_code: error.code().to_owned(),
+            };
+        }
+    };
+    if tier == "bootstrap" {
+        return ExpectedOutcome::Accepted;
+    }
+
+    match verify_registry_candidate(&trust, ChainSequence::new(proposed_sequence)) {
+        Ok(_) => ExpectedOutcome::Accepted,
+        Err(error) => ExpectedOutcome::Rejected {
+            error_code: error.code().to_owned(),
+        },
+    }
+}
+
+/// Der im Anchor eingebettete `bootstrap-anchor-hash`.
+fn trust_anchor_embedded_hash(anchor_bytes: &[u8]) -> Vec<u8> {
+    let mut decoder = Decoder::new(anchor_bytes);
+    assert_eq!(decoder.array().expect("anchor array"), Some(12));
+    assert_eq!(
+        decoder.str().expect("anchor domain"),
+        "EINSATZARCHIV-TRUST-ANCHOR-v1"
+    );
+    assert_eq!(decoder.u64().expect("anchor version"), 1);
+    decoder.bytes().expect("embedded hash").to_vec()
+}
+
+/// Subtype, Action-Code und Ziel-Subtype eines Vertrauensbausteins, roh
+/// gelesen.
+///
+/// Roh, weil die Negativvektoren gerade NICHT durch `ea-format` gehen: ein
+/// Action-Code von 200 wird dort abgelehnt, bevor irgendein Feld herauskaeme.
+fn trust_object_parts(object_bytes: &[u8]) -> (String, Option<u64>, Option<String>) {
+    let body = object_bytes
+        .get(9..)
+        .unwrap_or_else(|| panic!("a trust object carries the nine byte prefix"));
+    let mut decoder = Decoder::new(body);
+    assert_eq!(decoder.array().expect("trust body array"), Some(3));
+    let subtype = decoder.str().expect("trust subtype").to_owned();
+    if subtype != TRUST_ADMIN_AUTHORIZATION_SUBTYPE {
+        return (subtype, None, None);
+    }
+    assert_eq!(
+        decoder.array().expect("authorization array"),
+        Some(15),
+        "the organizationAdminAuthorization stays at fifteen fields"
+    );
+    for _ in 0..8 {
+        decoder.skip().expect("authorization prefix field");
+    }
+    let action_code = decoder.u64().expect("action code");
+    let target = decoder.str().expect("target subtype").to_owned();
+    (subtype, Some(action_code), Some(target))
+}
+
+/// Ein Objektkatalog aus eingefrorenen Bytes.
+struct TrustCatalogSource(BTreeMap<ObjectHash, Arc<[u8]>>);
+
+impl TrustObjectSource for TrustCatalogSource {
+    fn visit_trust_object_hashes(
+        &self,
+        visitor: &mut dyn FnMut(ObjectHash) -> Result<(), TrustSourceError>,
+    ) -> Result<(), TrustSourceError> {
+        for hash in self.0.keys().rev().copied() {
+            visitor(hash)?;
+        }
+        Ok(())
+    }
+
+    fn read_exact_trust_object(
+        &self,
+        object_hash: ObjectHash,
+    ) -> Result<Option<Arc<[u8]>>, TrustSourceError> {
+        Ok(self.0.get(&object_hash).map(Arc::clone))
+    }
+}
+
+/// Ein Zustandsspeicher, der genau einen Datensatz herausgibt.
+struct TrustSnapshotStore {
+    key: TrustStateKey,
+    record: Option<PersistedTrustRecord>,
+}
+
+impl TrustStateStore for TrustSnapshotStore {
+    fn load(&mut self, key: TrustStateKey) -> Result<PersistedTrustRecord, StateStoreError> {
+        if key != self.key {
+            return Err(StateStoreError::Unavailable);
+        }
+        self.record.take().ok_or(StateStoreError::Unavailable)
+    }
+
+    fn commit_independent_time(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &IndependentTimeCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn clock_release_consumed(
+        &mut self,
+        _key: &ClockReleaseReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn commit_registry_selection(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &RegistrySelectionCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
     }
 }

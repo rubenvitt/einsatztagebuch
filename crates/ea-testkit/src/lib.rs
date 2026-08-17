@@ -76,22 +76,27 @@ use std::{
 };
 
 use ea_crypto::{
-    CanonicalPublicCoseKey, CoseSigner, SecretBytes, SecretVec, aead_seal, grant_digest,
-    object_hash, payload_aad, receipt_digest, record_digest, trust_digest,
+    CanonicalPublicCoseKey, ContentType, CoseSigner, ProtectedHeader, SecretBytes, SecretVec,
+    aead_seal, authorized_trust_digest, bootstrap_anchor_hash, grant_digest, object_hash,
+    payload_aad, receipt_digest, record_digest, trust_anchor_hash, trust_digest,
 };
 use ea_format::{
-    CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1, EntryPackageV1,
-    EvidenceObjectV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPurposeV1, GrantV1,
-    ManifestCoreFieldsV1, ManifestCoreV1, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1,
-    RootCertificateFieldsV1, SignedManifestV1, TrustObjectV1, TrustPayloadV1,
+    CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1,
+    DeviceCertificateFieldsV1, EntryPackageV1, EvidenceObjectV1, FreeTextPolicyFieldsV1,
+    GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPurposeV1, GrantV1, KeyProtectionProfileV1,
+    ManifestCoreFieldsV1, ManifestCoreV1, OperatorBindingFieldsV1, OperatorRoleV1,
+    OrganizationAdminAuthorizationFieldsV1, PolicyFieldsV1, ReceiptCoreFieldsV1, ReceiptCoreV1,
+    ReceiptV1, RegistryChangeV1, RegistryEventFieldsV1, RetentionPolicyFieldsV1,
+    RootCertificateFieldsV1, SignedManifestV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1,
     encode_destroyed_entry_stub, encode_entry_package, encode_evidence, encode_grant,
     encode_receipt, encode_trust,
 };
 use ea_types::{
-    CertificateHash, ChainId, ChainSequence, DestructionId, Hash32, KeyThumbprint, ObjectHash,
-    OrganizationId, RegistryVersion, UnixMillis,
+    AuthorizationId, CertificateHash, ChainId, ChainSequence, DestructionId, DeviceId, Hash32,
+    KeyThumbprint, ObjectHash, OperatorSubjectId, OrganizationId, RegistryVersion, SubjectId,
+    UnixMillis,
 };
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -172,6 +177,19 @@ pub const TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED: [u8; 32] = [0xa1; 32];
 /// Ausdruecklich deklarierte Testentropie fuer einen Geraeteschluessel.
 pub const TEST_ENTROPY_DEVICE_ED25519_SEED: [u8; 32] = [0xa2; 32];
 
+/// Ausdruecklich deklarierte Testentropie fuer den ZWEITEN
+/// Organisationsadministrator.
+///
+/// Die Anchor-Vorstufe verlangt mindestens zwei Administratorpaare mit
+/// verschiedenen Signaturschluesseln und verschiedenen Subjekten
+/// (`crates/ea-trust/src/anchor.rs`), also braucht die Trust-Familie ein
+/// zweites Schluesselpaar.
+pub const TEST_ENTROPY_SECOND_ORGANIZATION_ADMIN_ED25519_SEED: [u8; 32] = [0xa3; 32];
+
+/// Ausdruecklich deklarierte Testentropie fuer einen nachtraeglich
+/// ausgestellten Organisationsadministrator.
+pub const TEST_ENTROPY_ROTATED_ORGANIZATION_ADMIN_ED25519_SEED: [u8; 32] = [0xa4; 32];
+
 /// Ausdruecklich deklarierte Testentropie fuer einen Empfaengerschluessel.
 pub const TEST_ENTROPY_RECIPIENT_X25519_SEED: [u8; 32] = [0xb0; 32];
 
@@ -185,11 +203,19 @@ pub const TEST_ENTROPY_AEAD_NONCE: [u8; 12] = [0xd0; 12];
 ///
 /// Der Selbsttest dieser Crate stellt darueber sicher, dass keine zwei Rollen
 /// dasselbe Material tragen.
-pub const DECLARED_TEST_ENTROPY: [(&str, &[u8]); 6] = [
+pub const DECLARED_TEST_ENTROPY: [(&str, &[u8]); 8] = [
     ("root-ed25519-seed", &TEST_ENTROPY_ROOT_ED25519_SEED),
     (
         "organization-admin-ed25519-seed",
         &TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED,
+    ),
+    (
+        "second-organization-admin-ed25519-seed",
+        &TEST_ENTROPY_SECOND_ORGANIZATION_ADMIN_ED25519_SEED,
+    ),
+    (
+        "rotated-organization-admin-ed25519-seed",
+        &TEST_ENTROPY_ROTATED_ORGANIZATION_ADMIN_ED25519_SEED,
     ),
     ("device-ed25519-seed", &TEST_ENTROPY_DEVICE_ED25519_SEED),
     ("recipient-x25519-seed", &TEST_ENTROPY_RECIPIENT_X25519_SEED),
@@ -320,6 +346,15 @@ pub struct VectorEntry {
     pub expected_outcome: ExpectedOutcome,
     /// Pfad der Datei, relativ zur Manifestwurzel.
     pub file: String,
+    /// Was dieser Vektor ausdruecklich NICHT belegt.
+    ///
+    /// Ein Vektor beweist genau das, was seine Pipeline rechnet. Wo ein Leser
+    /// naheliegend mehr hineinlesen wuerde, haelt diese Notiz die Grenze fest.
+    ///
+    /// FEHLT DER SCHLUESSEL IM MANIFEST, wenn kein Vermerk vorliegt. `null` zu
+    /// schreiben waere eine Aenderung an JEDEM bereits eingefrorenen Manifest,
+    /// und eingefrorene Bytes bleiben, was sie sind.
+    pub scope_note: Option<String>,
 }
 
 impl VectorEntry {
@@ -351,6 +386,9 @@ impl VectorEntry {
         map.insert("expectedOutcome".into(), self.expected_outcome.to_value());
         map.insert("file".into(), Value::String(self.file.clone()));
         map.insert("fileSha256".into(), Value::String(self.file_sha256()));
+        if let Some(scope_note) = &self.scope_note {
+            map.insert("scopeNote".into(), Value::String(scope_note.clone()));
+        }
         sorted_object(map)
     }
 
@@ -389,6 +427,16 @@ impl VectorEntry {
                 })?,
             )?,
             file: string_field(value, "file")?,
+            scope_note: match value.get("scopeNote") {
+                None => None,
+                Some(note) => Some(
+                    note.as_str()
+                        .ok_or_else(|| {
+                            TestkitError::Malformed("scopeNote must be a string".into())
+                        })?
+                        .to_owned(),
+                ),
+            },
         };
         let recorded = string_field(value, "fileSha256")?;
         if recorded != entry.file_sha256() {
@@ -1281,6 +1329,7 @@ fn crypto_entry(
         object_bytes,
         expected_outcome,
         file: format!("{name}.bin"),
+        scope_note: None,
     }
 }
 
@@ -2226,7 +2275,1211 @@ fn format_entry(
         object_bytes,
         expected_outcome,
         file: format!("{name}.bin"),
+        scope_note: None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Vektorfamilie trust/v1
+// ---------------------------------------------------------------------------
+//
+// Der Negativumfang steht woertlich in `design.md` §22.1, letzter Punkt. Jeder
+// dort genannte Fall bekommt genau ein Verzeichnis `<stufe>/<fall>/`, und die
+// Stufe im Namen sagt, welche Pipeline ueber den Fall entscheidet:
+//
+// * `object/`    — `ea_format::decode_exact_object` auf genau einem Objekt,
+// * `anchor/`    — `ea_trust::decode_trust_anchor` auf den Anchor-Bytes,
+// * `bootstrap/` — zusaetzlich `ea_trust::verify_trust`,
+// * `registry/`  — zusaetzlich `ea_trust::verify_registry_candidate`.
+//
+// DIESE CRATE FUEHRT KEINE DIESER PIPELINES AUS. Sie haengt bewusst nicht von
+// `ea-trust` ab: der Erzeuger erzeugt Bytes und BEHAUPTET ein Urteil,
+// `ea-system-tests` MISST es. Waeren Erzeugung und Messung dieselbe Crate, waere
+// jedes Urteil eine Tautologie.
+//
+// Jeder Fall ist vollstaendig: er traegt alle Objekte, die seine Stufe braucht.
+// Das wiederholt die Bootstrap-Objekte ueber die Faelle hinweg, und das ist der
+// Preis dafuer, dass eine fremde Implementierung einen Fall pruefen kann, ohne
+// ein Vererbungsschema nachzubauen.
+
+/// Der Familienname der Trust-Vektoren.
+pub const TRUST_FAMILY: &str = "trust";
+
+/// Der Versionsordner der Trust-Vektoren.
+pub const TRUST_V1_VERSION: &str = "v1";
+
+/// Die Wurzel der Trust-Vektoren, relativ zur Arbeitsbaumwurzel.
+pub const TRUST_V1_ROOT: &str = "vectors/trust/v1";
+
+/// Die Herkunftsangabe der Trust-Vektoren.
+const TRUST_GENERATOR: &str = "ea-testkit::trust_v1_manifest";
+
+/// Der Suite-Identifikator der Trust-Vektoren, EINGEFROREN.
+const TRUST_SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+
+/// Der Schema-Identifikator eines Vertrauensbausteins.
+const TRUST_OBJECT_SCHEMA_ID: &str = "etb-v1";
+
+/// Der Schema-Identifikator der finalen Anchor-Bytes.
+const TRUST_ANCHOR_SCHEMA_ID: &str = "trust-anchor-v1";
+
+/// Der Schema-Identifikator der bestaetigten Anchor-Vorstufe.
+const TRUST_PRE_ANCHOR_SCHEMA_ID: &str = "trust-anchor-pre-v1";
+
+/// Die Organisationskennung aller Trust-Vektoren.
+const TRUST_ORGANIZATION_ID: [u8; 16] = [0x21; 16];
+
+/// Die Kettenkennung aller Trust-Vektoren.
+const TRUST_CHAIN_ID: [u8; 16] = [0x31; 16];
+
+/// Der Genesis-Eintragshash im finalen Anchor.
+const TRUST_GENESIS_ENTRY_HASH: [u8; 32] = [0x44; 32];
+
+/// Die Reichweitennotiz, die JEDER `organizationAdminAuthorization`-Eintrag
+/// traegt.
+///
+/// Ohne sie liest sich der eingefrorene Vektor als Beleg fuer §7.5 des
+/// Web-Reader-Specs, und das ist er nicht: diese Familie bindet KEINEN
+/// Ziel-Transport-Public-Key-Fingerprint. Sie hat Signatur-Kardinalitaet 1
+/// (`schemas/archive/v1/trust.cddl`) und fuenfzehn Felder mit leerem
+/// Erweiterungsarray an Position 15. Die in §7.5 geforderte Bindung kommt als
+/// EIGENE 2-of-N-Familie nach dem Vorbild von
+/// `grantAuthorization`/`destructionAuthorization` (`[2* cose-sign1-v1]`) in
+/// Stufe 5 als v1.1.
+const TRUST_ADMIN_AUTHORIZATION_SCOPE_NOTE: &str = "Diese Familie belegt NICHT die Bindung eines Ziel-Transport-Public-Key-Fingerprints aus Web-Reader-Spec §7.5. organizationAdminAuthorization bleibt bei Signatur-Kardinalitaet 1 und fuenfzehn Feldern; die 2-of-N-Bindung entsteht als eigene Objektfamilie nach dem Vorbild von grantAuthorization/destructionAuthorization in Stufe 5 als v1.1.";
+
+/// Der unzulaessige Action-Code des Negativvektors.
+///
+/// LITERAL `200`, und der Nachbarwert `7` ist verboten: `trust.cddl` deklariert
+/// `action-code: 0..6`, und eine v1.1-Erweiterung des Wertebereichs wuerde einen
+/// eingefrorenen `7`-Vektor von `abgelehnt` nach `akzeptiert` drehen.
+const TRUST_INVALID_ACTION_CODE: u64 = 200;
+
+/// Das Literal des Subtype-Negativvektors.
+///
+/// Jeder Name, der spaeter eine echte Trust-Objektfamilie werden koennte, ist
+/// hier verboten; `xxUnknownxx` kann keine werden.
+const TRUST_UNKNOWN_SUBTYPE: &str = "xxUnknownxx";
+
+/// Die Zeichenkette des Admin-Authorization-Subtypes.
+const TRUST_ADMIN_AUTHORIZATION_SUBTYPE: &str = "organizationAdminAuthorization";
+
+/// Die Faelle mit Katalog: Bootstrap, Anchor und Registry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrustCaseV1 {
+    AcceptedBootstrapAndFirstHead,
+    AcceptedAdminRotation,
+    RejectedAuthorizedCoreHashMismatch,
+    RejectedRootOnlySignedByAdmin,
+    RejectedAdminOnlySignedByRoot,
+    RejectedReusedAuthorizationIdAndNonce,
+    RejectedSignerContextDeviation,
+    RejectedNullContextAfterFirstHead,
+    RejectedUnpinnedAdminPair,
+    RejectedHashDivergentAdminCertificate,
+    RejectedMispairedAdminBinding,
+    RejectedSharedOsAndInstanceKey,
+    RejectedMutatedPreAnchorField,
+    RejectedWrongBootstrapAnchorHash,
+}
+
+/// Alle Faelle mit Katalog, ihr Verzeichnis und ihr BEHAUPTETES Urteil.
+///
+/// Das Urteil steht hier als Zeichenkette, nicht als Aufzaehlung von `ea-trust`:
+/// wuerde der Erzeuger den Fehlercode importieren, zoege eine Umbenennung den
+/// Vektor stillschweigend mit. `ea-system-tests` fuehrt die Pipeline aus und
+/// stellt das gemessene Ergebnis gegen diese Zeichenkette.
+const TRUST_CASES_V1: [(TrustCaseV1, &str, Option<&str>); 14] = [
+    (
+        TrustCaseV1::AcceptedBootstrapAndFirstHead,
+        "registry/accepted-bootstrap-and-first-head",
+        None,
+    ),
+    (
+        TrustCaseV1::AcceptedAdminRotation,
+        "registry/accepted-admin-rotation",
+        None,
+    ),
+    (
+        TrustCaseV1::RejectedAuthorizedCoreHashMismatch,
+        "registry/rejected-authorized-core-hash-mismatch",
+        Some("EA-TRUST-ACTION-MISMATCH"),
+    ),
+    (
+        TrustCaseV1::RejectedRootOnlySignedByAdmin,
+        "registry/rejected-root-only-signed-by-admin",
+        Some("EA-TRUST-SIGNATURE"),
+    ),
+    (
+        TrustCaseV1::RejectedAdminOnlySignedByRoot,
+        "registry/rejected-admin-only-signed-by-root",
+        Some("EA-TRUST-SIGNATURE"),
+    ),
+    (
+        TrustCaseV1::RejectedReusedAuthorizationIdAndNonce,
+        "registry/rejected-reused-authorization-id-and-nonce",
+        Some("EA-TRUST-AUTH-REPLAY"),
+    ),
+    (
+        TrustCaseV1::RejectedSignerContextDeviation,
+        "registry/rejected-signer-context-deviation",
+        Some("EA-TRUST-SIGNATURE"),
+    ),
+    (
+        TrustCaseV1::RejectedNullContextAfterFirstHead,
+        "registry/rejected-null-context-after-first-head",
+        Some("EA-TRUST-ACTION-MISMATCH"),
+    ),
+    (
+        TrustCaseV1::RejectedUnpinnedAdminPair,
+        "bootstrap/rejected-unpinned-admin-pair",
+        Some("EA-TRUST-ANCHOR-PIN"),
+    ),
+    (
+        TrustCaseV1::RejectedHashDivergentAdminCertificate,
+        "bootstrap/rejected-hash-divergent-admin-certificate",
+        Some("EA-TRUST-ANCHOR-PIN"),
+    ),
+    (
+        TrustCaseV1::RejectedMispairedAdminBinding,
+        "bootstrap/rejected-mispaired-admin-binding",
+        Some("EA-TRUST-BOOTSTRAP-PAIR"),
+    ),
+    (
+        TrustCaseV1::RejectedSharedOsAndInstanceKey,
+        "bootstrap/rejected-shared-os-and-instance-key",
+        Some("EA-TRUST-BOOTSTRAP-PAIR"),
+    ),
+    (
+        TrustCaseV1::RejectedMutatedPreAnchorField,
+        "anchor/rejected-mutated-pre-anchor-field",
+        Some("EA-TRUST-ANCHOR-HASH"),
+    ),
+    (
+        TrustCaseV1::RejectedWrongBootstrapAnchorHash,
+        "anchor/rejected-wrong-bootstrap-anchor-hash",
+        Some("EA-TRUST-ANCHOR-HASH"),
+    ),
+];
+
+impl TrustCaseV1 {
+    /// Das Verzeichnis dieses Falls.
+    fn path(self) -> &'static str {
+        TRUST_CASES_V1
+            .iter()
+            .find(|(case, _, _)| *case == self)
+            .map(|(_, path, _)| *path)
+            .expect("every case is listed in TRUST_CASES_V1")
+    }
+
+    /// Das behauptete Urteil dieses Falls.
+    fn verdict(self) -> ExpectedOutcome {
+        TRUST_CASES_V1
+            .iter()
+            .find(|(case, _, _)| *case == self)
+            .map(|(_, _, code)| match code {
+                None => ExpectedOutcome::Accepted,
+                Some(code) => ExpectedOutcome::Rejected {
+                    error_code: (*code).to_owned(),
+                },
+            })
+            .expect("every case is listed in TRUST_CASES_V1")
+    }
+
+    /// Die Stufe dieses Falls.
+    fn tier(self) -> &'static str {
+        self.path()
+            .split_once('/')
+            .expect("every case path names its tier")
+            .0
+    }
+
+    /// Ein Fall, der nur die Anchor-Bytes entscheidet, braucht keinen Katalog.
+    fn is_anchor_tier(self) -> bool {
+        self.tier() == "anchor"
+    }
+
+    /// Ein Fall, der bei `verify_trust` endet, braucht keine Registry-Objekte.
+    fn is_registry_tier(self) -> bool {
+        self.tier() == "registry"
+    }
+}
+
+/// Ein benanntes Objekt eines Falls.
+struct TrustSlot {
+    name: &'static str,
+    schema_id: &'static str,
+    bytes: Vec<u8>,
+}
+
+/// Die Organisationskennung als getypter Wert.
+fn trust_organization_id() -> OrganizationId {
+    OrganizationId::try_from(TRUST_ORGANIZATION_ID.as_slice()).expect("16 bytes")
+}
+
+/// Ein Ed25519-Signierer aus deklarierter Testentropie.
+fn trust_signer(seed: [u8; 32]) -> CoseSigner {
+    CoseSigner::from_secret(SecretBytes::new(seed))
+}
+
+/// Der kanonische oeffentliche COSE-Key zu einem Ed25519-Seed.
+fn trust_public_key(seed: [u8; 32]) -> CanonicalPublicCoseKey {
+    let verifying = SigningKey::from_bytes(&seed).verifying_key();
+    CanonicalPublicCoseKey::ed25519(*verifying.as_bytes())
+        .expect("a declared Ed25519 seed yields a canonical public key")
+}
+
+/// Ein Hash32 aus einem Fuellbyte.
+fn trust_hash32(byte: u8) -> Hash32 {
+    Hash32::try_from([byte; 32].as_slice()).expect("32 bytes")
+}
+
+/// Das fertige Objekt zu Nutzinhalt und Signaturen.
+fn trust_exact_object(payload: TrustPayloadV1, signatures: Vec<Vec<u8>>) -> Vec<u8> {
+    encode_trust(
+        &TrustObjectV1::new(payload, signatures).expect("the frozen trust object is well formed"),
+    )
+    .expect("encoding a well formed trust object cannot fail")
+    .into_vec()
+}
+
+/// Eine COSE_Sign1 im Normalprofil, von Hand kodiert.
+///
+/// Von Hand, weil `CoseSigner::sign_organization_admin_trust_digest` den
+/// Zertifikatshash aus dem Nutzinhalt ABLEITET. Der Negativvektor
+/// `rejected-signer-context-deviation` braucht aber genau die Abweichung
+/// zwischen beidem, und die ist ueber den bequemen Weg nicht erreichbar.
+fn trust_signed_normal(
+    seed: [u8; 32],
+    certificate_hash: CertificateHash,
+    payload: &[u8],
+) -> Vec<u8> {
+    let public = trust_public_key(seed);
+    let protected = ProtectedHeader::normal(
+        ContentType::TrustDigest,
+        public.thumbprint(),
+        certificate_hash,
+    );
+    let signature = SigningKey::from_bytes(&seed)
+        .sign(&protected.sig_structure_bytes(payload))
+        .to_bytes();
+    let mut encoded = vec![0xd2, 0x84];
+    encoded.extend_from_slice(&cbor_bytes(&protected.to_deterministic_cbor()));
+    encoded.push(0xa0);
+    encoded.extend_from_slice(&cbor_bytes(payload));
+    encoded.extend_from_slice(&cbor_bytes(&signature));
+    encoded
+}
+
+/// Der Digest-Eingang, den eine Admin-Authorization ueber ihren Zielkern
+/// bindet.
+///
+/// Der autorisierte Nutzinhalt ist `[kern, autorisierungshash]`. Der Kern wird
+/// hier ohne CBOR-Bibliothek herausgeschnitten: das Array hat zwei Elemente,
+/// also ein Kopfbyte, und der Hash ist ein 32-Byte-Bytestring, also vierunddreissig
+/// Bytes am Ende.
+fn trust_authorized_core_input(payload: &TrustPayloadV1) -> Vec<u8> {
+    let exact = payload.exact_payload();
+    let tail = exact
+        .len()
+        .checked_sub(34)
+        .expect("an authorized payload carries at least its trailing hash");
+    assert_eq!(
+        exact[0], 0x82,
+        "an authorized payload is a two element array"
+    );
+    assert_eq!(
+        &exact[tail..tail + 2],
+        &[0x58, 0x20],
+        "an authorized payload ends on a 32 byte string"
+    );
+    let mut input = vec![0x82];
+    input.extend_from_slice(&trust_cbor_text(payload.subtype().as_str()));
+    input.extend_from_slice(&exact[1..tail]);
+    input
+}
+
+/// Eine deterministisch kodierte CBOR-Textzeichenkette beliebiger Laenge unter
+/// 256 Zeichen.
+///
+/// [`cbor_text`] verlangt mindestens vierundzwanzig Zeichen; die Trust-Vektoren
+/// tragen auch kurze Zeichenketten wie `policy` und `xxUnknownxx`.
+fn trust_cbor_text(value: &str) -> Vec<u8> {
+    let length = value.len();
+    let mut bytes = if length < 24 {
+        vec![0x60 | u8::try_from(length).expect("below 24")]
+    } else {
+        vec![
+            0x78,
+            u8::try_from(length).expect("every subtype is shorter than 256 bytes"),
+        ]
+    };
+    bytes.extend_from_slice(value.as_bytes());
+    bytes
+}
+
+/// Ein deterministisch kodierter CBOR-Arraykopf unter 24 Elementen.
+fn trust_cbor_array(length: u64) -> Vec<u8> {
+    assert!(length < 24, "no trust vector array holds 24 items or more");
+    vec![0x80 | u8::try_from(length).expect("below 24")]
+}
+
+/// Das initiale Wurzelzertifikat: der einzige Baustein ohne Vorgaenger.
+fn trust_root_certificate() -> Vec<u8> {
+    let root_key = trust_public_key(TEST_ENTROPY_ROOT_ED25519_SEED);
+    let payload = TrustPayloadV1::initial_root_certificate(RootCertificateFieldsV1 {
+        organization_id: trust_organization_id(),
+        root_public_cose_key: root_key.to_deterministic_cbor(),
+        root_key_thumbprint: root_key.thumbprint(),
+        previous_root_certificate_object_hash: None,
+        effective_from_registry_version: RegistryVersion::new(1),
+    })
+    .expect("the frozen root certificate payload is well formed");
+    let signature = trust_signer(TEST_ENTROPY_ROOT_ED25519_SEED)
+        .sign_initial_root(trust_digest(payload.exact_digest_input()).as_bytes())
+        .expect("signing the frozen root certificate cannot fail");
+    trust_exact_object(payload, vec![signature])
+}
+
+/// Ein Administratorzertifikat der Anchor-Vorstufe, direkt von der Wurzel
+/// signiert.
+fn trust_initial_admin_certificate(
+    root_certificate_hash: CertificateHash,
+    seed: [u8; 32],
+    device: u8,
+    subject: u8,
+) -> Vec<u8> {
+    let public = trust_public_key(seed);
+    let payload = TrustPayloadV1::initial_admin_device_certificate(DeviceCertificateFieldsV1 {
+        organization_id: trust_organization_id(),
+        device_id: DeviceId::try_from([device; 16].as_slice()).expect("16 bytes"),
+        certificate_kind: CertificateKindV1::OrganizationAdmin,
+        signing_public_cose_key: Some(public.to_deterministic_cbor()),
+        kem_public_cose_key: None,
+        signing_key_thumbprint: Some(public.thumbprint()),
+        kem_key_thumbprint: None,
+        capabilities: vec!["organizationAdminApprove".to_owned()],
+        key_protection_profile: KeyProtectionProfileV1::OsWrapped,
+        effective_from_sequence: ChainSequence::new(0),
+        revoked_from_sequence: None,
+        authority_subject_id: Some(
+            SubjectId::try_from([subject; 16].as_slice()).expect("16 bytes"),
+        ),
+    })
+    .expect("the frozen admin certificate payload is well formed");
+    let signature = trust_signer(TEST_ENTROPY_ROOT_ED25519_SEED)
+        .sign_initial_admin_trust_digest(root_certificate_hash, payload.exact_digest_input())
+        .expect("signing the frozen admin certificate cannot fail");
+    trust_exact_object(payload, vec![signature])
+}
+
+/// Ein Operator-Binding der Anchor-Vorstufe.
+fn trust_initial_admin_binding(
+    root_certificate_hash: CertificateHash,
+    admin_certificate_hash: CertificateHash,
+    subject: u8,
+    os_account: u8,
+    instance: u8,
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::initial_admin_operator_binding(OperatorBindingFieldsV1 {
+        organization_id: trust_organization_id(),
+        operator_subject_id: OperatorSubjectId::try_from([subject; 16].as_slice())
+            .expect("16 bytes"),
+        operator_profile_commitment: trust_hash32(subject.wrapping_add(0x30)),
+        device_certificate_hash: admin_certificate_hash,
+        operator_role: OperatorRoleV1::OrganizationAdmin,
+        os_account_binding_hash: trust_hash32(os_account),
+        operator_instance_key_thumbprint: KeyThumbprint::from(trust_hash32(instance)),
+        effective_from_sequence: ChainSequence::new(0),
+        revoked_from_sequence: None,
+    })
+    .expect("the frozen admin binding payload is well formed");
+    let signature = trust_signer(TEST_ENTROPY_ROOT_ED25519_SEED)
+        .sign_initial_admin_trust_digest(root_certificate_hash, payload.exact_digest_input())
+        .expect("signing the frozen admin binding cannot fail");
+    trust_exact_object(payload, vec![signature])
+}
+
+/// Die Anchor-Vorstufe nach `EINSATZARCHIV-TRUST-ANCHOR-PRE-v1`.
+fn trust_pre_anchor_bytes(
+    organization_id: &[u8; 16],
+    root_certificate_object_hash: ObjectHash,
+    admin_certificates: &[ObjectHash],
+    admin_bindings: &[ObjectHash],
+) -> Vec<u8> {
+    let root_key = trust_public_key(TEST_ENTROPY_ROOT_ED25519_SEED);
+    let mut bytes = trust_cbor_array(10);
+    bytes.extend_from_slice(&cbor_text("EINSATZARCHIV-TRUST-ANCHOR-PRE-v1"));
+    bytes.extend_from_slice(&cbor_unsigned(1));
+    bytes.extend_from_slice(&cbor_bytes(organization_id));
+    bytes.extend_from_slice(&cbor_bytes(&TRUST_CHAIN_ID));
+    bytes.extend_from_slice(&cbor_bytes(&root_key.to_deterministic_cbor()));
+    bytes.extend_from_slice(&cbor_bytes(root_key.thumbprint().as_bytes()));
+    bytes.extend_from_slice(&cbor_bytes(root_certificate_object_hash.as_bytes()));
+    bytes.extend_from_slice(&trust_hash_list(admin_certificates));
+    bytes.extend_from_slice(&trust_hash_list(admin_bindings));
+    bytes.extend_from_slice(&trust_cbor_array(0));
+    bytes
+}
+
+/// Der finale Anchor nach `EINSATZARCHIV-TRUST-ANCHOR-v1`.
+fn trust_anchor_bytes(
+    embedded_bootstrap_hash: &[u8; 32],
+    root_certificate_object_hash: ObjectHash,
+    admin_certificates: &[ObjectHash],
+    admin_bindings: &[ObjectHash],
+) -> Vec<u8> {
+    let root_key = trust_public_key(TEST_ENTROPY_ROOT_ED25519_SEED);
+    let mut bytes = trust_cbor_array(12);
+    bytes.extend_from_slice(&cbor_text("EINSATZARCHIV-TRUST-ANCHOR-v1"));
+    bytes.extend_from_slice(&cbor_unsigned(1));
+    bytes.extend_from_slice(&cbor_bytes(embedded_bootstrap_hash));
+    bytes.extend_from_slice(&cbor_bytes(&TRUST_ORGANIZATION_ID));
+    bytes.extend_from_slice(&cbor_bytes(&TRUST_CHAIN_ID));
+    bytes.extend_from_slice(&cbor_bytes(&root_key.to_deterministic_cbor()));
+    bytes.extend_from_slice(&cbor_bytes(root_key.thumbprint().as_bytes()));
+    bytes.extend_from_slice(&cbor_bytes(root_certificate_object_hash.as_bytes()));
+    bytes.extend_from_slice(&trust_hash_list(admin_certificates));
+    bytes.extend_from_slice(&trust_hash_list(admin_bindings));
+    bytes.extend_from_slice(&cbor_bytes(&TRUST_GENESIS_ENTRY_HASH));
+    bytes.extend_from_slice(&trust_cbor_array(0));
+    bytes
+}
+
+/// Eine Liste von Objekthashes als CBOR-Array.
+fn trust_hash_list(hashes: &[ObjectHash]) -> Vec<u8> {
+    let mut bytes = trust_cbor_array(u64::try_from(hashes.len()).expect("a short list"));
+    for hash in hashes {
+        bytes.extend_from_slice(&cbor_bytes(hash.as_bytes()));
+    }
+    bytes
+}
+
+/// Die Richtlinienfelder aller Trust-Vektoren.
+fn trust_policy_fields() -> PolicyFieldsV1 {
+    PolicyFieldsV1 {
+        organization_id: trust_organization_id(),
+        policy_version: 1,
+        previous_policy_object_hash: None,
+        operating_profile: 0,
+        max_registry_age_ms: 86_400_000,
+        max_future_clock_skew_ms: 300_000,
+        registry_expiry_behavior: 0,
+        evidence_max_delay_ms: 60_000,
+        reader_inactivity_ms: 900_000,
+        reader_trust_refresh_ms: 86_400_000,
+        reader_history_access_allowed: true,
+        allowed_archive_profile_hashes: vec![trust_hash32(0xa1)],
+        backup_frequency_ms: 86_400_000,
+        restore_test_interval_ms: 2_592_000_000,
+        retention_policy: RetentionPolicyFieldsV1 {
+            minimum_retention_ms: Some(86_400_000),
+            destruction_enabled: true,
+            eds_privacy_decision_document_hash: Some(trust_hash32(0xa2)),
+        },
+        free_text_policy: FreeTextPolicyFieldsV1 {
+            free_text_allowed: false,
+            rule_set_version: "trust-v1".to_owned(),
+            local_pattern_warning_enabled: true,
+        },
+        allowed_crypto_suite_ids: vec![TRUST_SUITE_ID.to_owned()],
+        allowed_format_versions: vec![1],
+        effective_from_sequence: ChainSequence::new(1),
+    }
+}
+
+/// Die Angaben einer Admin-Authorization, so weit die Vektoren sie variieren.
+struct TrustAuthorizationSpec {
+    action_code: u8,
+    target_trust_subtype: TrustSubtypeV1,
+    authorization_id: u8,
+    nonce: u8,
+    registry_version: u64,
+    registry_head_hash: Hash32,
+    admin_seed: [u8; 32],
+    admin_certificate_object_hash: ObjectHash,
+    admin_binding_object_hash: ObjectHash,
+    /// Der Zertifikatshash im COSE-Protected-Header, wenn er vom Feld
+    /// abweichen soll.
+    signing_certificate_object_hash: Option<ObjectHash>,
+    /// Ein Kernhash, der den autorisierten Kern NICHT bindet.
+    core_hash_override: Option<Hash32>,
+}
+
+/// Eine Admin-Authorization ueber diesen Zielkern.
+fn trust_authorization(target: &TrustPayloadV1, spec: &TrustAuthorizationSpec) -> Vec<u8> {
+    let payload =
+        TrustPayloadV1::organization_admin_authorization(OrganizationAdminAuthorizationFieldsV1 {
+            authorization_id: AuthorizationId::try_from([spec.authorization_id; 16].as_slice())
+                .expect("16 bytes"),
+            organization_id: trust_organization_id(),
+            registry_version: RegistryVersion::new(spec.registry_version),
+            registry_head_hash: spec.registry_head_hash,
+            admin_key_thumbprint: trust_public_key(spec.admin_seed).thumbprint(),
+            admin_certificate_hash: CertificateHash::from(spec.admin_certificate_object_hash),
+            admin_operator_binding_object_hash: spec.admin_binding_object_hash,
+            action_code: spec.action_code,
+            target_trust_subtype: spec.target_trust_subtype,
+            authorized_trust_core_hash: spec
+                .core_hash_override
+                .unwrap_or_else(|| authorized_trust_digest(&trust_authorized_core_input(target))),
+            issued_at: UnixMillis::new(100),
+            expires_at: UnixMillis::new(1_100),
+            nonce: [spec.nonce; 32],
+        })
+        .expect("the frozen authorization payload is well formed");
+    let signature = trust_signed_normal(
+        spec.admin_seed,
+        CertificateHash::from(
+            spec.signing_certificate_object_hash
+                .unwrap_or(spec.admin_certificate_object_hash),
+        ),
+        trust_digest(payload.exact_digest_input()).as_bytes(),
+    );
+    trust_exact_object(payload, vec![signature])
+}
+
+/// Alle Objekte eines Falls, benannt.
+#[allow(clippy::too_many_lines)]
+fn trust_case_slots(case: TrustCaseV1) -> Vec<TrustSlot> {
+    let root_bytes = trust_root_certificate();
+    let root_object_hash = object_hash(&root_bytes);
+    let root_certificate_hash = CertificateHash::from(root_object_hash);
+
+    let admin_a = trust_initial_admin_certificate(
+        root_certificate_hash,
+        TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED,
+        0x51,
+        0x41,
+    );
+    let admin_b = trust_initial_admin_certificate(
+        root_certificate_hash,
+        TEST_ENTROPY_SECOND_ORGANIZATION_ADMIN_ED25519_SEED,
+        0x52,
+        0x42,
+    );
+    let admin_a_hash = object_hash(&admin_a);
+    let admin_b_hash = object_hash(&admin_b);
+
+    let binding_a = trust_initial_admin_binding(
+        root_certificate_hash,
+        CertificateHash::from(admin_a_hash),
+        0x41,
+        0x81,
+        0x91,
+    );
+    let binding_b = match case {
+        // Beide Bindungen zeigen auf dasselbe Zertifikat.
+        TrustCaseV1::RejectedMispairedAdminBinding => trust_initial_admin_binding(
+            root_certificate_hash,
+            CertificateHash::from(admin_a_hash),
+            0x42,
+            0x82,
+            0x92,
+        ),
+        // Dieselbe OS-Kontobindung UND derselbe Instanzschluessel wie A.
+        TrustCaseV1::RejectedSharedOsAndInstanceKey => trust_initial_admin_binding(
+            root_certificate_hash,
+            CertificateHash::from(admin_b_hash),
+            0x42,
+            0x81,
+            0x91,
+        ),
+        _ => trust_initial_admin_binding(
+            root_certificate_hash,
+            CertificateHash::from(admin_b_hash),
+            0x42,
+            0x82,
+            0x92,
+        ),
+    };
+    let binding_a_hash = object_hash(&binding_a);
+    let binding_b_hash = object_hash(&binding_b);
+
+    let mut anchor_admins = vec![admin_a_hash, admin_b_hash];
+    if case == TrustCaseV1::RejectedHashDivergentAdminCertificate {
+        // Der Anchor nennt einen Zertifikatshash, zu dem es kein Objekt gibt.
+        anchor_admins[1] = ObjectHash::from(trust_hash32(0xcc));
+    }
+    let mut anchor_bindings = vec![binding_a_hash, binding_b_hash];
+    anchor_admins.sort_unstable();
+    anchor_bindings.sort_unstable();
+
+    // Die Vorstufe, deren Hash in den finalen Anchor wandert. Beim Fall
+    // `rejected-mutated-pre-anchor-field` traegt sie eine ANDERE
+    // Organisationskennung als der Anchor, der aus ihr gebildet wird.
+    let pre_anchor_organization = if case == TrustCaseV1::RejectedMutatedPreAnchorField {
+        [0x22; 16]
+    } else {
+        TRUST_ORGANIZATION_ID
+    };
+    let pre_anchor = trust_pre_anchor_bytes(
+        &pre_anchor_organization,
+        root_object_hash,
+        &anchor_admins,
+        &anchor_bindings,
+    );
+    let mut embedded = *bootstrap_anchor_hash(&pre_anchor).as_bytes();
+    if case == TrustCaseV1::RejectedWrongBootstrapAnchorHash {
+        embedded[31] ^= 1;
+    }
+    let anchor = trust_anchor_bytes(
+        &embedded,
+        root_object_hash,
+        &anchor_admins,
+        &anchor_bindings,
+    );
+
+    let mut slots = Vec::new();
+    if !case.is_anchor_tier() {
+        slots.push(TrustSlot {
+            name: "root-certificate",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: root_bytes,
+        });
+        slots.push(TrustSlot {
+            name: "admin-certificate-a",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: admin_a,
+        });
+        slots.push(TrustSlot {
+            name: "admin-certificate-b",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: admin_b,
+        });
+        slots.push(TrustSlot {
+            name: "admin-binding-a",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: binding_a,
+        });
+        slots.push(TrustSlot {
+            name: "admin-binding-b",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: binding_b,
+        });
+    }
+
+    if case == TrustCaseV1::RejectedUnpinnedAdminPair {
+        // Ein Paar im Katalog, das der Anchor nicht nennt.
+        let extra = trust_initial_admin_certificate(
+            root_certificate_hash,
+            TEST_ENTROPY_ROTATED_ORGANIZATION_ADMIN_ED25519_SEED,
+            0x53,
+            0x43,
+        );
+        let extra_binding = trust_initial_admin_binding(
+            root_certificate_hash,
+            CertificateHash::from(object_hash(&extra)),
+            0x43,
+            0x83,
+            0x93,
+        );
+        slots.push(TrustSlot {
+            name: "unpinned-admin-certificate",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: extra,
+        });
+        slots.push(TrustSlot {
+            name: "unpinned-admin-binding",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: extra_binding,
+        });
+    }
+
+    if case.is_registry_tier() {
+        slots.extend(trust_first_head_slots(
+            case,
+            root_certificate_hash,
+            admin_a_hash,
+            admin_b_hash,
+            binding_a_hash,
+        ));
+    }
+
+    // Die Vorstufe des Falls `rejected-wrong-bootstrap-anchor-hash` wuerde
+    // ihren Anchor NICHT binden — es gibt keine. Genau das ist der Defekt, und
+    // `decode_trust_anchor` weist ihn nach.
+    if case != TrustCaseV1::RejectedWrongBootstrapAnchorHash {
+        slots.push(TrustSlot {
+            name: "pre-anchor",
+            schema_id: TRUST_PRE_ANCHOR_SCHEMA_ID,
+            bytes: pre_anchor,
+        });
+    }
+    slots.push(TrustSlot {
+        name: "anchor",
+        schema_id: TRUST_ANCHOR_SCHEMA_ID,
+        bytes: anchor,
+    });
+    slots
+}
+
+/// Der erste Registry-Kopf und, wo der Fall ihn braucht, der zweite.
+#[allow(clippy::too_many_lines)]
+fn trust_first_head_slots(
+    case: TrustCaseV1,
+    root_certificate_hash: CertificateHash,
+    admin_a_hash: ObjectHash,
+    admin_b_hash: ObjectHash,
+    binding_a_hash: ObjectHash,
+) -> Vec<TrustSlot> {
+    let root_key = trust_public_key(TEST_ENTROPY_ROOT_ED25519_SEED);
+
+    // Die Richtlinie. Ihr Autorisierungshash steht IM Nutzinhalt, also entsteht
+    // sie zweimal: einmal mit Nullhash, um den Kern zu binden, und einmal mit
+    // dem Hash der fertigen Autorisierung.
+    let provisional_policy =
+        TrustPayloadV1::policy(trust_policy_fields(), ObjectHash::from(Hash32::ZERO))
+            .expect("the frozen policy payload is well formed");
+    let policy_authorization = trust_authorization(
+        &provisional_policy,
+        &TrustAuthorizationSpec {
+            action_code: 2,
+            target_trust_subtype: TrustSubtypeV1::Policy,
+            authorization_id: 0x20,
+            nonce: 0x60,
+            registry_version: 0,
+            registry_head_hash: Hash32::ZERO,
+            admin_seed: TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED,
+            admin_certificate_object_hash: admin_a_hash,
+            admin_binding_object_hash: binding_a_hash,
+            signing_certificate_object_hash: (case == TrustCaseV1::RejectedSignerContextDeviation)
+                .then_some(admin_b_hash),
+            core_hash_override: (case == TrustCaseV1::RejectedAuthorizedCoreHashMismatch)
+                .then(|| trust_hash32(0xde)),
+        },
+    );
+    let policy_payload =
+        TrustPayloadV1::policy(trust_policy_fields(), object_hash(&policy_authorization))
+            .expect("the frozen policy payload is well formed");
+    let policy_signature = trust_signed_normal(
+        TEST_ENTROPY_ROOT_ED25519_SEED,
+        root_certificate_hash,
+        trust_digest(policy_payload.exact_digest_input()).as_bytes(),
+    );
+    let policy_bytes = trust_exact_object(policy_payload, vec![policy_signature]);
+    let policy_hash = object_hash(&policy_bytes);
+
+    // Der Kopf. Beim Fall `rejected-null-context-after-first-head` autorisiert
+    // er ein Objekt der NULLKONTEXT-Vorstufe, das nur dort gueltig ist.
+    let change = if case == TrustCaseV1::RejectedNullContextAfterFirstHead {
+        RegistryChangeV1::AdminCertificate {
+            object_hash: admin_a_hash,
+            effect: 0,
+        }
+    } else {
+        RegistryChangeV1::Policy {
+            object_hash: policy_hash,
+        }
+    };
+    let head_fields = RegistryEventFieldsV1 {
+        organization_id: trust_organization_id(),
+        registry_version: RegistryVersion::new(1),
+        previous_registry_hash: None,
+        effective_from_sequence: ChainSequence::new(1),
+        valid_through_sequence: ChainSequence::new(100),
+        issued_at: UnixMillis::new(100),
+        not_before: UnixMillis::new(90),
+        not_after: UnixMillis::new(10_000),
+        policy_object_hash: policy_hash,
+        change,
+        root_key_thumbprint: root_key.thumbprint(),
+    };
+    let provisional_head =
+        TrustPayloadV1::registry_event(head_fields.clone(), ObjectHash::from(Hash32::ZERO))
+            .expect("the frozen registry event payload is well formed");
+    let head_authorization = trust_authorization(
+        &provisional_head,
+        &TrustAuthorizationSpec {
+            action_code: if case == TrustCaseV1::RejectedNullContextAfterFirstHead {
+                5
+            } else {
+                2
+            },
+            target_trust_subtype: TrustSubtypeV1::RegistryEvent,
+            // Derselbe Bezeichner und dieselbe Nonce wie die Autorisierung des
+            // direkten Ziels.
+            authorization_id: if case == TrustCaseV1::RejectedReusedAuthorizationIdAndNonce {
+                0x20
+            } else {
+                0x21
+            },
+            nonce: if case == TrustCaseV1::RejectedReusedAuthorizationIdAndNonce {
+                0x60
+            } else {
+                0x61
+            },
+            registry_version: 0,
+            registry_head_hash: Hash32::ZERO,
+            // Die Wurzel darf keine Admin-Authorization ausstellen.
+            admin_seed: if case == TrustCaseV1::RejectedAdminOnlySignedByRoot {
+                TEST_ENTROPY_ROOT_ED25519_SEED
+            } else {
+                TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED
+            },
+            admin_certificate_object_hash: if case == TrustCaseV1::RejectedAdminOnlySignedByRoot {
+                ObjectHash::from(
+                    Hash32::try_from(root_certificate_hash.as_bytes().as_slice())
+                        .expect("32 bytes"),
+                )
+            } else {
+                admin_a_hash
+            },
+            admin_binding_object_hash: binding_a_hash,
+            signing_certificate_object_hash: None,
+            core_hash_override: None,
+        },
+    );
+    let head_payload =
+        TrustPayloadV1::registry_event(head_fields, object_hash(&head_authorization))
+            .expect("the frozen registry event payload is well formed");
+    // Nur die Wurzel darf ein Registry-Ereignis signieren.
+    let head_signature = if case == TrustCaseV1::RejectedRootOnlySignedByAdmin {
+        trust_signed_normal(
+            TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED,
+            CertificateHash::from(admin_a_hash),
+            trust_digest(head_payload.exact_digest_input()).as_bytes(),
+        )
+    } else {
+        trust_signed_normal(
+            TEST_ENTROPY_ROOT_ED25519_SEED,
+            root_certificate_hash,
+            trust_digest(head_payload.exact_digest_input()).as_bytes(),
+        )
+    };
+    let head_bytes = trust_exact_object(head_payload, vec![head_signature]);
+    let head_hash = object_hash(&head_bytes);
+
+    let mut slots = vec![
+        TrustSlot {
+            name: "policy-authorization",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: policy_authorization,
+        },
+        TrustSlot {
+            name: "policy",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: policy_bytes,
+        },
+        TrustSlot {
+            name: "head-authorization",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: head_authorization,
+        },
+        TrustSlot {
+            name: "head-event",
+            schema_id: TRUST_OBJECT_SCHEMA_ID,
+            bytes: head_bytes,
+        },
+    ];
+    if case != TrustCaseV1::AcceptedAdminRotation {
+        return slots;
+    }
+
+    // Der zweite Kopf: ein neues Administratorzertifikat unter dem ersten Kopf.
+    let head_hash32 =
+        Hash32::try_from(head_hash.as_bytes().as_slice()).expect("an object hash is 32 bytes");
+    let rotated_key = trust_public_key(TEST_ENTROPY_ROTATED_ORGANIZATION_ADMIN_ED25519_SEED);
+    let rotation_fields = DeviceCertificateFieldsV1 {
+        organization_id: trust_organization_id(),
+        device_id: DeviceId::try_from([0x54; 16].as_slice()).expect("16 bytes"),
+        certificate_kind: CertificateKindV1::OrganizationAdmin,
+        signing_public_cose_key: Some(rotated_key.to_deterministic_cbor()),
+        kem_public_cose_key: None,
+        signing_key_thumbprint: Some(rotated_key.thumbprint()),
+        kem_key_thumbprint: None,
+        capabilities: vec!["organizationAdminApprove".to_owned()],
+        key_protection_profile: KeyProtectionProfileV1::OsWrapped,
+        effective_from_sequence: ChainSequence::new(101),
+        revoked_from_sequence: None,
+        authority_subject_id: Some(SubjectId::try_from([0x44; 16].as_slice()).expect("16 bytes")),
+    };
+    let provisional_rotation = TrustPayloadV1::authorized_device_certificate(
+        rotation_fields.clone(),
+        ObjectHash::from(Hash32::ZERO),
+    )
+    .expect("the frozen rotation payload is well formed");
+    let rotation_authorization = trust_authorization(
+        &provisional_rotation,
+        &TrustAuthorizationSpec {
+            action_code: 5,
+            target_trust_subtype: TrustSubtypeV1::DeviceCertificate,
+            authorization_id: 0x22,
+            nonce: 0x62,
+            registry_version: 1,
+            registry_head_hash: head_hash32,
+            admin_seed: TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED,
+            admin_certificate_object_hash: admin_a_hash,
+            admin_binding_object_hash: binding_a_hash,
+            signing_certificate_object_hash: None,
+            core_hash_override: None,
+        },
+    );
+    let rotation_payload = TrustPayloadV1::authorized_device_certificate(
+        rotation_fields,
+        object_hash(&rotation_authorization),
+    )
+    .expect("the frozen rotation payload is well formed");
+    let rotation_signature = trust_signed_normal(
+        TEST_ENTROPY_ROOT_ED25519_SEED,
+        root_certificate_hash,
+        trust_digest(rotation_payload.exact_digest_input()).as_bytes(),
+    );
+    let rotation_bytes = trust_exact_object(rotation_payload, vec![rotation_signature]);
+
+    let second_fields = RegistryEventFieldsV1 {
+        organization_id: trust_organization_id(),
+        registry_version: RegistryVersion::new(2),
+        previous_registry_hash: Some(head_hash32),
+        effective_from_sequence: ChainSequence::new(101),
+        valid_through_sequence: ChainSequence::new(200),
+        issued_at: UnixMillis::new(100),
+        not_before: UnixMillis::new(90),
+        not_after: UnixMillis::new(10_000),
+        policy_object_hash: policy_hash,
+        change: RegistryChangeV1::AdminCertificate {
+            object_hash: object_hash(&rotation_bytes),
+            effect: 0,
+        },
+        root_key_thumbprint: root_key.thumbprint(),
+    };
+    let provisional_second =
+        TrustPayloadV1::registry_event(second_fields.clone(), ObjectHash::from(Hash32::ZERO))
+            .expect("the frozen registry event payload is well formed");
+    let second_authorization = trust_authorization(
+        &provisional_second,
+        &TrustAuthorizationSpec {
+            action_code: 5,
+            target_trust_subtype: TrustSubtypeV1::RegistryEvent,
+            authorization_id: 0x23,
+            nonce: 0x63,
+            registry_version: 1,
+            registry_head_hash: head_hash32,
+            admin_seed: TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED,
+            admin_certificate_object_hash: admin_a_hash,
+            admin_binding_object_hash: binding_a_hash,
+            signing_certificate_object_hash: None,
+            core_hash_override: None,
+        },
+    );
+    let second_payload =
+        TrustPayloadV1::registry_event(second_fields, object_hash(&second_authorization))
+            .expect("the frozen registry event payload is well formed");
+    let second_signature = trust_signed_normal(
+        TEST_ENTROPY_ROOT_ED25519_SEED,
+        root_certificate_hash,
+        trust_digest(second_payload.exact_digest_input()).as_bytes(),
+    );
+    let second_bytes = trust_exact_object(second_payload, vec![second_signature]);
+
+    slots.push(TrustSlot {
+        name: "rotation-authorization",
+        schema_id: TRUST_OBJECT_SCHEMA_ID,
+        bytes: rotation_authorization,
+    });
+    slots.push(TrustSlot {
+        name: "admin-certificate-rotated",
+        schema_id: TRUST_OBJECT_SCHEMA_ID,
+        bytes: rotation_bytes,
+    });
+    slots.push(TrustSlot {
+        name: "second-head-authorization",
+        schema_id: TRUST_OBJECT_SCHEMA_ID,
+        bytes: second_authorization,
+    });
+    slots.push(TrustSlot {
+        name: "second-head-event",
+        schema_id: TRUST_OBJECT_SCHEMA_ID,
+        bytes: second_bytes,
+    });
+    slots
+}
+
+/// Eine von Hand kodierte Admin-Authorization.
+///
+/// Von Hand, weil beide Negativvektoren ueber die oeffentliche API
+/// UNERREICHBAR sind: `encode_organization_admin_authorization` lehnt einen
+/// Action-Code ueber 6 ab, und `TrustSubtypeV1` kennt keinen unbekannten
+/// Ziel-Subtype. Der Kontrollvektor mit gueltigen Werten belegt, dass dieser
+/// Kodierer den Bestand trifft — sonst wuerde ein Negativvektor womoeglich an
+/// einem ganz anderen Defekt scheitern als an dem, den er benennt.
+fn trust_handmade_authorization(action_code: u64, target_subtype: &str) -> Vec<u8> {
+    let admin_key = trust_public_key(TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED);
+    let mut payload = trust_cbor_array(15);
+    payload.extend_from_slice(&cbor_unsigned(1));
+    payload.extend_from_slice(&cbor_bytes(&[0x30; 16]));
+    payload.extend_from_slice(&cbor_bytes(&TRUST_ORGANIZATION_ID));
+    payload.extend_from_slice(&cbor_unsigned(1));
+    payload.extend_from_slice(&cbor_bytes(&[0x31; 32]));
+    payload.extend_from_slice(&cbor_bytes(admin_key.thumbprint().as_bytes()));
+    payload.extend_from_slice(&cbor_bytes(&[0x32; 32]));
+    payload.extend_from_slice(&cbor_bytes(&[0x33; 32]));
+    payload.extend_from_slice(&cbor_unsigned(action_code));
+    payload.extend_from_slice(&trust_cbor_text(target_subtype));
+    payload.extend_from_slice(&cbor_bytes(&[0x34; 32]));
+    payload.extend_from_slice(&cbor_unsigned(100));
+    payload.extend_from_slice(&cbor_unsigned(1_100));
+    payload.extend_from_slice(&cbor_bytes(&[0x35; 32]));
+    payload.extend_from_slice(&trust_cbor_array(0));
+
+    let mut digest_input = trust_cbor_array(2);
+    digest_input.extend_from_slice(&cbor_text(TRUST_ADMIN_AUTHORIZATION_SUBTYPE));
+    digest_input.extend_from_slice(&payload);
+
+    let signature = trust_signed_normal(
+        TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED,
+        CertificateHash::try_from([0x32; 32].as_slice()).expect("32 bytes"),
+        trust_digest(&digest_input).as_bytes(),
+    );
+
+    let mut body = trust_cbor_array(3);
+    body.extend_from_slice(&cbor_text(TRUST_ADMIN_AUTHORIZATION_SUBTYPE));
+    body.extend_from_slice(&payload);
+    body.extend_from_slice(&trust_cbor_array(1));
+    body.extend_from_slice(&signature);
+
+    let mut object = vec![0x85, 0x44, b'E', b'A', b'1', 0, 5, 1, 0x80];
+    object.extend_from_slice(&body);
+    object
+}
+
+/// Die drei handkodierten Objektfaelle: Verzeichnis, Action-Code, Ziel-Subtype
+/// und behauptetes Urteil.
+const TRUST_OBJECT_CASES_V1: [(&str, u64, &str, Option<&str>); 3] = [
+    (
+        "object/accepted-handmade-admin-authorization",
+        2,
+        "policy",
+        None,
+    ),
+    (
+        "object/rejected-action-code-200",
+        TRUST_INVALID_ACTION_CODE,
+        "policy",
+        Some("EA-FORMAT-SHAPE"),
+    ),
+    (
+        "object/rejected-unknown-target-subtype",
+        2,
+        TRUST_UNKNOWN_SUBTYPE,
+        Some("EA-FORMAT-TAG-MISMATCH"),
+    ),
+];
+
+/// Das Manifest der Vektorfamilie `trust/v1`.
+///
+/// Deterministisch: Ed25519 signiert deterministisch, alle Felder sind feste
+/// Konstanten, und keine Kapselung zieht Entropie. Zwei Laeufe liefern dieselben
+/// Bytes.
+///
+/// # Panics
+///
+/// Wenn eine der Konstruktionen fehlschlaegt. Das waere ein Programmierfehler
+/// dieser Crate, kein Laufzeitzustand.
+#[must_use]
+pub fn trust_v1_manifest() -> VectorManifest {
+    let mut entries = Vec::new();
+
+    for (case, path, _) in TRUST_CASES_V1 {
+        let slots = trust_case_slots(case);
+        for slot in slots {
+            let name = format!("{path}/{}", slot.name);
+            // Das Urteil des Falls steht am Eintrag, der die Pipeline betritt.
+            let expected_outcome = if slot.name == "anchor" {
+                case.verdict()
+            } else {
+                ExpectedOutcome::Accepted
+            };
+            let intermediate_digests = match slot.schema_id {
+                TRUST_PRE_ANCHOR_SCHEMA_ID => digest_map(&[(
+                    "bootstrapAnchorHash",
+                    *bootstrap_anchor_hash(&slot.bytes).as_bytes(),
+                )]),
+                TRUST_ANCHOR_SCHEMA_ID => digest_map(&[(
+                    "trustAnchorHash",
+                    *trust_anchor_hash(&slot.bytes).as_bytes(),
+                )]),
+                _ => digest_map(&[("objectHash", *object_hash(&slot.bytes).as_bytes())]),
+            };
+            entries.push(trust_entry(
+                &name,
+                slot.schema_id,
+                intermediate_digests,
+                slot.bytes,
+                expected_outcome,
+            ));
+        }
+    }
+
+    for (path, action_code, target_subtype, code) in TRUST_OBJECT_CASES_V1 {
+        let bytes = trust_handmade_authorization(action_code, target_subtype);
+        let expected_outcome = match code {
+            None => ExpectedOutcome::Accepted,
+            Some(code) => ExpectedOutcome::Rejected {
+                error_code: code.to_owned(),
+            },
+        };
+        entries.push(trust_entry(
+            &format!("{path}/admin-authorization"),
+            TRUST_OBJECT_SCHEMA_ID,
+            digest_map(&[("objectHash", *object_hash(&bytes).as_bytes())]),
+            bytes,
+            expected_outcome,
+        ));
+    }
+
+    VectorManifest {
+        family: TRUST_FAMILY.to_owned(),
+        version: TRUST_V1_VERSION.to_owned(),
+        entries,
+    }
+}
+
+/// Ein Eintrag der Trust-Familie.
+///
+/// Die Reichweitennotiz haengt am SUBTYPE, nicht am Namen: jeder
+/// `organizationAdminAuthorization`-Vektor bekommt sie, gleich in welchem Fall
+/// er steht.
+fn trust_entry(
+    name: &str,
+    schema_id: &str,
+    intermediate_digests: BTreeMap<String, [u8; 32]>,
+    object_bytes: Vec<u8>,
+    expected_outcome: ExpectedOutcome,
+) -> VectorEntry {
+    let scope_note = (schema_id == TRUST_OBJECT_SCHEMA_ID
+        && trust_body_subtype(&object_bytes) == TRUST_ADMIN_AUTHORIZATION_SUBTYPE)
+        .then(|| TRUST_ADMIN_AUTHORIZATION_SCOPE_NOTE.to_owned());
+    VectorEntry {
+        name: name.to_owned(),
+        schema_id: schema_id.to_owned(),
+        suite_id: TRUST_SUITE_ID.to_owned(),
+        source: VectorSource::GeneratorCommit(TRUST_GENERATOR.to_owned()),
+        input_bytes: Vec::new(),
+        intermediate_digests,
+        object_bytes,
+        expected_outcome,
+        file: format!("{name}.bin"),
+        scope_note,
+    }
+}
+
+/// Der Subtype eines Vertrauensbausteins, roh aus dem Rumpf gelesen.
+///
+/// Roh, weil die Negativvektoren gerade nicht durch `ea-format` gehen. Der
+/// Rumpf ist `[subtype, nutzinhalt, [signaturen]]` hinter dem neun Byte langen
+/// Objektpraefix, und die Zeichenkette steht laengenminimal kodiert an zweiter
+/// Stelle.
+fn trust_body_subtype(object_bytes: &[u8]) -> String {
+    let body = &object_bytes[9..];
+    assert_eq!(body[0], 0x83, "a trust body is a three element array");
+    let (length, start) = match body[1] {
+        header @ 0x60..=0x77 => (usize::from(header & 0x1f), 2),
+        0x78 => (usize::from(body[2]), 3),
+        header => panic!("a subtype string is shorter than 256 bytes, not {header:#x}"),
+    };
+    String::from_utf8(body[start..start + length].to_vec())
+        .expect("a subtype string is valid UTF-8")
 }
 
 // ---------------------------------------------------------------------------
@@ -2364,6 +3617,7 @@ mod tests {
             object_bytes: object.to_vec(),
             expected_outcome: ExpectedOutcome::Accepted,
             file: file.to_owned(),
+            scope_note: None,
         }
     }
 
@@ -2734,5 +3988,107 @@ mod tests {
             format_v1_invalid_manifest().to_json().unwrap(),
             format_v1_invalid_manifest().to_json().unwrap()
         );
+    }
+
+    /// Schreibt die Vektorfamilie `trust/v1` in den Arbeitsbaum.
+    ///
+    /// `#[ignore]`, weil dieser Test SCHREIBT. Er ist der dokumentierte
+    /// Erzeugungslauf und wird ausdruecklich angefordert:
+    /// `cargo test -p ea-testkit -- --ignored emit_trust_v1_vectors`.
+    #[test]
+    #[ignore = "writes into the working tree; run deliberately to regenerate"]
+    fn emit_trust_v1_vectors() {
+        let root = workspace_root().join(TRUST_V1_ROOT);
+        trust_v1_manifest().emit(&root).unwrap();
+        assert!(verify_manifest_at(&root).unwrap().is_clean());
+    }
+
+    /// Das eingecheckte Trust-Manifest ist genau die Ausgabe des Erzeugers.
+    #[test]
+    fn the_committed_trust_v1_family_is_exactly_what_the_generator_emits() {
+        let root = workspace_root().join(TRUST_V1_ROOT);
+        let text = fs::read_to_string(root.join(MANIFEST_FILE_NAME))
+            .unwrap_or_else(|error| panic!("failed to read the committed trust manifest: {error}"));
+        assert_eq!(
+            text,
+            trust_v1_manifest().to_json().unwrap(),
+            "the committed manifest must be byte-identical to the generator output"
+        );
+        let report = verify_manifest_at(&root).unwrap();
+        assert!(report.is_clean(), "{:?}", report.mismatches);
+    }
+
+    /// Der Trust-Erzeuger benennt jeden Eintrag und jede Datei genau einmal,
+    /// jeder Fall traegt genau einen Anchor, und die Emission ist
+    /// deterministisch.
+    #[test]
+    fn the_trust_generator_names_every_entry_and_file_exactly_once() {
+        let manifest = trust_v1_manifest();
+        let names = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), manifest.entries.len());
+        for entry in &manifest.entries {
+            assert_eq!(entry.file, format!("{}.bin", entry.name));
+            assert_eq!(entry.suite_id, TRUST_SUITE_ID);
+            assert!(matches!(
+                entry.schema_id.as_str(),
+                TRUST_OBJECT_SCHEMA_ID | TRUST_ANCHOR_SCHEMA_ID | TRUST_PRE_ANCHOR_SCHEMA_ID
+            ));
+        }
+        assert_eq!(manifest.family, TRUST_FAMILY);
+        assert_eq!(manifest.version, TRUST_V1_VERSION);
+
+        for (case, path, _) in TRUST_CASES_V1 {
+            let anchors = manifest
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.name.starts_with(&format!("{path}/"))
+                        && entry.schema_id == TRUST_ANCHOR_SCHEMA_ID
+                })
+                .count();
+            assert_eq!(anchors, 1, "{path} must hold exactly one anchor");
+            assert_eq!(case.path(), path);
+        }
+
+        assert_eq!(
+            manifest.to_json().unwrap(),
+            trust_v1_manifest().to_json().unwrap()
+        );
+    }
+
+    /// Jeder `organizationAdminAuthorization`-Vektor traegt die
+    /// Reichweitennotiz zu §7.5, und kein Vektor nennt einen reservierten
+    /// Namen.
+    #[test]
+    fn every_trust_admin_authorization_states_what_it_does_not_prove() {
+        let manifest = trust_v1_manifest();
+        let text = manifest.to_json().unwrap();
+        for reserved in ["webBundleRelease", "readerKeyEscrow"] {
+            assert!(
+                !text.contains(reserved),
+                "{reserved} could become a real trust object family"
+            );
+        }
+        let mut authorizations = 0_usize;
+        for entry in &manifest.entries {
+            if entry.schema_id != TRUST_OBJECT_SCHEMA_ID
+                || trust_body_subtype(&entry.object_bytes) != TRUST_ADMIN_AUTHORIZATION_SUBTYPE
+            {
+                assert!(entry.scope_note.is_none(), "{} needs no note", entry.name);
+                continue;
+            }
+            authorizations += 1;
+            assert_eq!(
+                entry.scope_note.as_deref(),
+                Some(TRUST_ADMIN_AUTHORIZATION_SCOPE_NOTE),
+                "{} must state what it does NOT prove",
+                entry.name
+            );
+        }
+        assert!(authorizations >= TRUST_OBJECT_CASES_V1.len());
     }
 }
