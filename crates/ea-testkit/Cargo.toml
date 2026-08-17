@@ -1,0 +1,23 @@
+[package]
+name = "ea-testkit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Hexdarstellung der eingefrorenen Bytes im Manifest. Das Manifest ist eine
+# Textdatei; Bytes stehen darin ausschliesslich als Kleinbuchstaben-Hex.
+hex.workspace = true
+# Manifestserialisierung. Kein `serde`-Derive: `serde` ist keine direkte
+# Workspace-Dependency, die Werte werden von Hand gebaut.
+serde_json.workspace = true
+# SHA-256 fuer die Zwischen-Digests und den Dateihash je Eintrag.
+sha2.workspace = true
+
+[dev-dependencies]
+# Nur zur Selbstpruefung der veroeffentlichten KAT-Schluesselpaare: der
+# oeffentliche Schluessel wird aus dem Seed neu abgeleitet und gegen die
+# Konstante gestellt. Die Konstanten sind damit gemessen, nicht behauptet.
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true

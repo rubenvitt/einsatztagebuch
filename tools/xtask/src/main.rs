@@ -99,15 +99,25 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
 /// classification — positive list or justified exception — for every member
 /// under `crates/`. That test is the only consumer, hence `dead_code`.
 #[allow(dead_code)]
-const WASM32_EXEMPT_CRATES: [(&str, &str); 1] = [(
-    "ea-recovery",
-    "carries the filesystem-backed archive source, plaintext handling and \
-     restrictive target permissions on top of `std::fs`, so it is not shared \
-     browser code: `web-reader-design.md` §9 makes only the verification \
-     pipeline shared Rust, and that pipeline ends at `ea-verify`, which stays \
-     on the positive list. `apps/cli` depends on this crate, never the other \
-     way round.",
-)];
+const WASM32_EXEMPT_CRATES: [(&str, &str); 2] = [
+    (
+        "ea-recovery",
+        "carries the filesystem-backed archive source, plaintext handling and \
+         restrictive target permissions on top of `std::fs`, so it is not shared \
+         browser code: `web-reader-design.md` §9 makes only the verification \
+         pipeline shared Rust, and that pipeline ends at `ea-verify`, which stays \
+         on the positive list. `apps/cli` depends on this crate, never the other \
+         way round.",
+    ),
+    (
+        "ea-testkit",
+        "owns the deterministic vector file and manifest emission over `std::fs` \
+         and is therefore host-side generator code, not shared browser code: \
+         `web-reader-design.md` §9 makes only the verification pipeline shared \
+         Rust, and that pipeline ends at `ea-verify`, which stays on the positive \
+         list. Test targets depend on this crate, never the other way round.",
+    ),
+];
 
 /// Reports when the running compiler is not the one `rust-toolchain.toml` pins.
 ///

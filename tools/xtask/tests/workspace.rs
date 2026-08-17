@@ -13,7 +13,7 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
     let member_array = root_manifest["workspace"]["members"].as_array().unwrap();
     assert_eq!(
         member_array.len(),
-        14,
+        15,
         "workspace members must not be duplicated or omitted"
     );
     let members = member_array
@@ -36,6 +36,7 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
             "crates/ea-chain",
             "crates/ea-verify",
             "crates/ea-recovery",
+            "crates/ea-testkit",
             "apps/cli",
         ])
     );
@@ -74,6 +75,7 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
         "crates/ea-chain",
         "crates/ea-verify",
         "crates/ea-recovery",
+        "crates/ea-testkit",
         "apps/cli",
     ] {
         let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
