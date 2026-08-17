@@ -1,85 +1,57 @@
 //! Testsupport der CLI.
 //!
-//! # Warum hier (noch) KEINE Fixture-Kette haengt
+//! # Die Fixture-Kette wird EINGEBUNDEN, nicht nachgebaut
 //!
-//! `crates/ea-recovery/tests/support/mod.rs` bindet ueber `#[path]` die
-//! Fixture-Kette aus `ea-verify`, `ea-archive`, `ea-trust` und `ea-format` ein
-//! und traegt zusaetzlich die `live_clock_*`-Familie. Dieses Modul bindet sie
-//! ABSICHTLICH NICHT ein: die Aufrufgrammatik entscheidet JEDEN ihrer Faelle,
-//! bevor ein einziges Byte gelesen wird. Ein echter Bestand fuegte dem Nachweis
-//! nichts hinzu und der Uebersetzung dieses Targets die gesamte Kette.
+//! Das Repo bindet Testsupport per relativem `#[path]` ein:
+//! `crates/ea-verify/tests/support/mod.rs` bindet so den Support von
+//! `ea-archive` ein, dieser wiederum den von `ea-trust` und `ea-format`, und
+//! `crates/ea-recovery/tests/support/mod.rs` setzt die Kette mit `materialize`,
+//! `temp_dir` und der `live_clock_*`-Familie fort. Hier wird genau dieses eine
+//! Glied weitergereicht — `TempDir`, `temp_dir` und `materialize` stehen
+//! deshalb an GENAU EINER Stelle im Workspace und nicht zweimal fast gleich.
 //!
-//! Ein Kommandopfad, der wirklich verifiziert, braucht sie — und bekommt sie
-//! dann hier, mit den Anforderungen in der Hand.
+//! Solange nur die Aufrufgrammatik gemessen wurde, war die Kette hier
+//! ueberfluessig: sie entscheidet jeden ihrer Faelle, bevor ein Byte gelesen
+//! wird. `verify` und `list` lesen wirklich, und damit zieht sie ein.
 //!
-//! # Die Uhrenregel bleibt trotzdem stehen
+//! # DIE UHRENREGEL — und ihre EINE begruendete Ausnahme
 //!
-//! Sobald hier Bestaende einziehen, duerfen es AUSSCHLIESSLICH die
-//! `live_clock_*`-Bestaende sein. Die geerbten Bestaende aus
-//! `crates/ea-verify/tests/support` tragen Registrierungskoepfe, die unter der
-//! echten Betriebssystemuhr saemtlich veraltet sind; die CLI kennt aber genau
-//! EINE Uhr, `SystemTime::now()`, und unter ihr degenerieren sie zu einer
-//! leeren Aussage, die faelschlich wie Erfolg aussieht. Gemessen in
+//! Die CLI kennt genau EINE Uhr, `SystemTime::now()`. Die geerbten Bestaende
+//! aus `crates/ea-verify/tests/support` tragen Registrierungskoepfe aus
+//! `trust_support::HeadOptions::default()` (`issued_at = 100`,
+//! `not_after = 10_000`); unter der echten Uhr sind sie samtlich veraltet, Gate
+//! `trust` traegt nicht mehr, und der Bericht degeneriert zu einer LEEREN
+//! Aussage, die faelschlich wie Erfolg aussieht. Gemessen in
 //! `crates/ea-recovery/tests/live_clock.rs`.
+//!
+//! Deshalb gilt: jeder Bestand, der hier einen BEFUND belegen soll, stammt aus
+//! der `live_clock_*`-Familie. `isolation_archive`,
+//! `archive_with_a_missing_middle_entry` und `destruction_archive` kommen in
+//! `apps/cli` NICHT vor; ihre Befunde sind unter der echten Uhr unerreichbar
+//! und werden dort gemessen, wo die Uhr ein Parameter ist —
+//! `crates/ea-recovery/tests/exit_codes.rs`.
+//!
+//! Die AUSNAHME ist `complete_valid_archive`, und sie ist keine Aufweichung,
+//! sondern der Gegenstand: dieser Bestand wird hier benutzt, WEIL er unter der
+//! echten Uhr degeneriert. Er ist der gepinnte Gegenfall zu Exitcode 15
+//! („vollstaendig geprueft, und ueber den einen geparsten Eintrag ist nichts
+//! ausgesagt") und ausdruecklich kein Erfolgspfad. Faellt diese Zusicherung
+//! weg, meldete die CLI genau hier Erfolg ueber einen Bestand, ueber den sie
+//! nichts gesagt hat.
 //!
 //! `#[path]`-Includes werden je Testtarget uebersetzt; ein Target, das nur
 //! einen Teil der Helfer nutzt, erzeugt sonst `dead_code`-Warnungen, die unter
 //! `-D warnings` brechen. Daher `allow(dead_code)` auf Modulebene.
 #![allow(dead_code)]
 
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    process,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+/// Die Fixture-Kette, wie `ea-recovery` sie bereits fuehrt.
+#[path = "../../../../crates/ea-recovery/tests/support/mod.rs"]
+mod recovery_support;
 
-/// Ein Verzeichnis, das beim Fallenlassen rekursiv verschwindet.
-///
-/// Von Hand und nicht ueber `tempfile`: dieser Task nimmt KEINE neue externe
-/// Dependency auf, und die Grammatik dieses Bedarfs ist klein genug, um sie
-/// hier zu tragen.
-pub struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    /// Das Wurzelverzeichnis. Existiert, solange dieser Wert lebt.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    /// Loescht rekursiv und schluckt dabei jeden Fehler.
-    ///
-    /// Ein `Drop`, das waehrend des Abwickelns eines fehlgeschlagenen Tests
-    /// panisch wird, bricht den Prozess ab und VERNICHTET die Fehlermeldung,
-    /// derentwegen der Test ueberhaupt lief. Aufraeumen ist Beiwerk; die
-    /// Diagnose ist es nicht.
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-/// Laufende Nummer, damit zwei Aufrufe im selben Prozess nie kollidieren.
-///
-/// `cargo test` faehrt die `#[test]`-Funktionen eines Binaries parallel in
-/// Threads; die Prozess-ID allein trennt sie deshalb nicht.
-static NEXT_TEMP_DIR_INDEX: AtomicUsize = AtomicUsize::new(0);
-
-/// Ein frisches, leeres Verzeichnis unter [`env::temp_dir`].
-///
-/// `tag` benennt den Zweck und taucht im Pfad auf, damit ein liegen
-/// gebliebenes Verzeichnis zuzuordnen ist.
-#[must_use]
-pub fn temp_dir(tag: &str) -> TempDir {
-    let index = NEXT_TEMP_DIR_INDEX.fetch_add(1, Ordering::Relaxed);
-    let path = env::temp_dir().join(format!("ea-{tag}-{}-{index}", process::id()));
-    // Prozess-IDs werden vom Betriebssystem wiederverwendet. Ein Rest aus einem
-    // abgebrochenen frueheren Lauf wuerde sonst als Bestandsinhalt gelesen.
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).expect("das Temporaerverzeichnis muss anlegbar sein");
-    TempDir { path }
-}
+// GLOBAL wiederausgefuehrt, damit `support::temp_dir`, `support::materialize`,
+// `support::live_clock_*` und `support::verify_support::*` unmittelbar
+// erreichbar sind. Das `allow` hat denselben Grund wie das `allow(dead_code)`
+// oben: dieses Modul wird je Testtarget EINZELN uebersetzt, und ein Target, das
+// nur die Grammatik misst, sieht ungenutzte Wiederausfuhren.
+#[allow(unused_imports)]
+pub use recovery_support::*;
