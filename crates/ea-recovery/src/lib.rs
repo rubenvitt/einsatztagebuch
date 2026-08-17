@@ -19,3 +19,9 @@
 //! Kein Kommandopfad ruft `verify_archive` direkt, damit verify-before-use,
 //! Zielpruefung und Rechtevergabe an genau einer Stelle stehen und ohne
 //! Prozessstart pruefbar bleiben.
+
+mod error;
+mod source;
+
+pub use error::RecoveryError;
+pub use source::FsArchiveSource;
