@@ -852,6 +852,70 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Die Vektorfamilien, die der Stufe-1-Gate verlangt — lexikografisch sortiert,
+/// damit Bericht und Fehlerzeile byteidentisch reproduzierbar sind.
+const STAGE_ONE_VECTOR_FAMILIES: [&str; 6] = [
+    "crypto", "evidence", "format", "grants", "receipts", "trust",
+];
+
+/// Wurzel des Stufengates: `EA_STAGE_GATE_ROOT`, sonst der Arbeitsbaum.
+///
+/// Der Override ist der Test-Seam. Ohne ihn liefe jeder Test gegen den echten
+/// Arbeitsbaum und wuerde invertieren, sobald ein spaeterer Task eine
+/// Vektorfamilie nachliefert. Die Kommandozeile bleibt `stage-gate <stage>`;
+/// die Wurzel ist kein Positionsargument, weil ueberzaehlige Argumente ein
+/// Fehler sind.
+fn stage_gate_root(root: &Path) -> PathBuf {
+    env::var_os("EA_STAGE_GATE_ROOT").map_or_else(|| root.to_path_buf(), PathBuf::from)
+}
+
+/// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
+///
+/// Eine Familie zaehlt erst als vorhanden, wenn `vectors/<familie>/manifest.json`
+/// lesbar ist. Ein blosses Verzeichnis genuegt nicht: `vectors/format/payload-v1/`
+/// existiert im Bestand ohne Manifest und wird von `validate-schemas` getrieben.
+///
+/// Das Berichtsschema ist stabil und wird von spaeteren Stufen erweitert, nie
+/// umbenannt. Ledger-Zeilen, primaere Abnahmekriterien und Fuzz-Flaechen folgen
+/// in spaeteren Tasks und bleiben bis dahin leer.
+fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
+    if stage != 1 {
+        return Err(format!(
+            "stage-gate is only defined for stage 1 so far, not {stage}"
+        ));
+    }
+    let vectors = stage_gate_root(root).join("vectors");
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
+    for family in STAGE_ONE_VECTOR_FAMILIES {
+        if fs::read(vectors.join(family).join("manifest.json")).is_ok() {
+            present.push(family);
+        } else {
+            missing.push(family);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "stage 1 vector families without a readable manifest under {}: {}",
+            vectors.display(),
+            missing.join(", ")
+        ));
+    }
+    let report = serde_json::json!({
+        "stage": stage,
+        "vector_families": present,
+        "primary_acceptance_criteria": Vec::<String>::new(),
+        "rows": Vec::<String>::new(),
+        "fuzz_targets": Vec::<String>::new(),
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&report)
+            .map_err(|error| format!("failed to render the stage gate report: {error}"))?
+    );
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let root = workspace_root();
     let mut args = env::args().skip(1);
@@ -881,6 +945,18 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("failed to invoke workspace tests: {error}"))
         }
         "test-fuzz" => run_fuzz(&root, args),
+        "stage-gate" => {
+            let stage = args
+                .next()
+                .ok_or_else(|| "usage: xtask stage-gate <stage>".to_owned())?;
+            if args.next().is_some() {
+                return Err("stage-gate accepts exactly one stage argument".to_owned());
+            }
+            let stage = stage
+                .parse::<u32>()
+                .map_err(|error| format!("stage-gate stage must be a number: {stage}: {error}"))?;
+            run_stage_gate(&root, stage)
+        }
         "validate-schemas" => {
             if args.next().is_some() {
                 return Err("validate-schemas does not accept arguments".to_owned());
