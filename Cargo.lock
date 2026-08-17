@@ -735,6 +735,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-recovery"
+version = "0.1.0"
+dependencies = [
+ "ea-archive",
+ "ea-crypto",
+ "ea-format",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ea-verify",
+ "ed25519-dalek",
+ "hex",
+ "minicbor",
+]
+
+[[package]]
 name = "ea-schema"
 version = "0.1.0"
 dependencies = [
@@ -830,6 +846,25 @@ dependencies = [
  "signature",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "einsatzarchiv-cli"
+version = "0.1.0"
+dependencies = [
+ "ea-archive",
+ "ea-crypto",
+ "ea-format",
+ "ea-recovery",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ea-verify",
+ "ed25519-dalek",
+ "hex",
+ "jsonschema",
+ "minicbor",
+ "serde_json",
 ]
 
 [[package]]

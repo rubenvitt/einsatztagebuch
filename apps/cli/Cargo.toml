@@ -1,0 +1,33 @@
+[package]
+name = "einsatzarchiv-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "einsatzarchiv"
+path = "src/main.rs"
+
+[dependencies]
+# Die gesamte Fachlogik. Dieses Paket traegt nur Argumentgrammatik,
+# Ausgabeform und process::exit.
+ea-recovery.workspace = true
+ea-types.workspace = true
+ea-verify.workspace = true
+
+[dev-dependencies]
+# Nur fuer die per #[path] eingebundene Fixture-Kette von ea-verify, ea-archive,
+# ea-trust und ea-format sowie fuer den Schemanachweis des Berichts.
+ea-archive.workspace = true
+ea-crypto.workspace = true
+ea-format.workspace = true
+ea-time.workspace = true
+ea-trust.workspace = true
+ea-types.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+jsonschema.workspace = true
+minicbor.workspace = true
+serde_json.workspace = true

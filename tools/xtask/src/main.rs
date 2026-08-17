@@ -89,15 +89,25 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
 /// Library crates deliberately kept off the wasm32 positive list.
 ///
 /// Each entry carries the crate name and the reason it cannot or need not
-/// compile for `wasm32-unknown-unknown`. The list is empty: every crate under
-/// `crates/` is shared browser code per
-/// `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §9.
+/// compile for `wasm32-unknown-unknown`.
+/// `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §9
+/// makes the verification pipeline shared browser code, and that pipeline ends
+/// at `ea-verify`. A crate that reaches past it into the host operating system
+/// is not shared browser code and belongs here instead.
 ///
 /// Read as TEXT by `tools/xtask/tests/workspace.rs`, which requires exactly one
 /// classification — positive list or justified exception — for every member
 /// under `crates/`. That test is the only consumer, hence `dead_code`.
 #[allow(dead_code)]
-const WASM32_EXEMPT_CRATES: [(&str, &str); 0] = [];
+const WASM32_EXEMPT_CRATES: [(&str, &str); 1] = [(
+    "ea-recovery",
+    "carries the filesystem-backed archive source, plaintext handling and \
+     restrictive target permissions on top of `std::fs`, so it is not shared \
+     browser code: `web-reader-design.md` §9 makes only the verification \
+     pipeline shared Rust, and that pipeline ends at `ea-verify`, which stays \
+     on the positive list. `apps/cli` depends on this crate, never the other \
+     way round.",
+)];
 
 /// Reports when the running compiler is not the one `rust-toolchain.toml` pins.
 ///

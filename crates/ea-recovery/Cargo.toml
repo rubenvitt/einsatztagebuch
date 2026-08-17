@@ -1,0 +1,27 @@
+[package]
+name = "ea-recovery"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Archivbestand und Layout: diese Crate legt die dateisystemgestuetzte
+# ArchiveSource ueber ein Verzeichnis und braucht dafuer die Pfadregeln.
+ea-archive.workspace = true
+# Entschluesselung: Empfaengerschluessel, Grants und CEK-Auspackung.
+ea-crypto.workspace = true
+ea-format.workspace = true
+ea-trust.workspace = true
+ea-types.workspace = true
+# Die Verifikationspipeline. verify-before-use laeuft ausschliesslich hier
+# hindurch; kein Kommandopfad ruft verify_archive direkt.
+ea-verify.workspace = true
+
+[dev-dependencies]
+# Nur fuer die per #[path] eingebundene Fixture-Kette von ea-verify, ea-archive,
+# ea-trust und ea-format. Dev-Dependencies, also nie im Lib-Graphen.
+ea-time.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+minicbor.workspace = true
