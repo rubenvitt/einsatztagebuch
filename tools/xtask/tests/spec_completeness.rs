@@ -2278,9 +2278,9 @@ fn stage_one_vector_hygiene_reserves_out_of_band_negative_literals() {
     }
 
     for marker in [
-        "BLOCKIERT — Formentscheidung nach `web-reader-design.md` §7.5",
+        "ENTSCHIEDEN — Formentscheidung nach `web-reader-design.md` §7.5",
         "ENTSCHIEDEN — Zuordnung der Policy-Frist nach `web-reader-design.md` §4.2",
-        "BLOCKIERT — Traceability der Web-Reader-Anforderungen",
+        "ENTSCHIEDEN — Traceability der Web-Reader-Anforderungen",
         "**wasm32-Pflicht.**",
     ] {
         assert!(
@@ -2288,6 +2288,24 @@ fn stage_one_vector_hygiene_reserves_out_of_band_negative_literals() {
             "stage 1 plan is missing: {marker}"
         );
     }
+
+    // `parse_fuzz_args` (tools/xtask/src/main.rs) kennt kein freistehendes `--`;
+    // die Restargumente gehen unveraendert an `run_fuzz`.
+    assert!(
+        stage_one.contains("pnpm test:fuzz --smoke-seconds 60"),
+        "stage 1 plan must invoke the fuzz smoke gate without a bare `--` separator"
+    );
+    assert!(
+        !stage_one.contains("pnpm test:fuzz -- --smoke-seconds"),
+        "stage 1 plan must not pass a bare `--` through pnpm to test:fuzz"
+    );
+
+    // Stufenuebergreifende Schnittstelle: stage-4/5/6 deklarieren
+    // `Produces: xtask stage-gate N`. Die Kommandozeile bleibt stehen.
+    assert!(
+        stage_one.contains("cargo run --locked -p xtask -- stage-gate 1"),
+        "stage 1 plan must keep the cross-stage stage-gate command line"
+    );
 }
 
 #[test]
