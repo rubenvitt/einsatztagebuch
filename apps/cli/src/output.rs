@@ -82,6 +82,32 @@ pub fn print_recovery_error(error: &RecoveryError) {
     eprintln!("einsatzarchiv: {error}");
 }
 
+/// Die Verweigerung der Berichtssignatur, Wort fuer Wort.
+///
+/// # Sie NENNT das fehlende Element und beruhigt nicht
+///
+/// Drei Dinge stehen darin, und alle drei sind pruefbar: dass es fuer
+/// `ea.verification-report/v1` keinen `contentType` gibt, dass es weder
+/// Signiererrolle noch Zertifikatsfaehigkeit fuer einen Bericht gibt, und dass
+/// ein unsignierter, GEHASHTER Bericht deshalb das normkonforme Ergebnis ist
+/// (`design.md`:1781: „sofern eine autorisierte Signaturrolle verfuegbar ist").
+/// Die fuenf Codestellen dazu stehen in
+/// `docs/adr/0001-toolchain-and-cryptography-dependencies.md`.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers; die
+/// Begruendungen bleiben in den Doc-Kommentaren.
+const REPORT_SIGNING_REFUSAL_V1: &str = "report signing is unavailable in suite v1: there is no \
+     contentType for ea.verification-report/v1, no signer role and no certificate capability for \
+     a verification report; without them an unsigned, hashed report is the conformant result";
+
+/// Druckt die Verweigerung der Berichtssignatur auf stderr.
+///
+/// stdout bleibt LEER: es ist kein Bericht entstanden, ueber den etwas zu sagen
+/// waere.
+pub fn print_report_signing_refusal() {
+    eprintln!("einsatzarchiv: {REPORT_SIGNING_REFUSAL_V1}");
+}
+
 /// Schreibt `bytes` als Kleinbuchstaben-Hex.
 ///
 /// Von Hand und nicht ueber `hex`: die Kiste ist eine DEV-Dependency dieses

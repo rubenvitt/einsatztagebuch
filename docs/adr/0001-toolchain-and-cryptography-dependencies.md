@@ -86,6 +86,36 @@ independent formal audit.
   they make a stored incident's local-calendar interpretation depend on the
   machine or execution date. `Etc/Unknown` is also rejected as a payload zone.
 
+## Blocked: detached signatures over a verification report
+
+`design.md`:1781 makes the report signature conditional: the report "is hashed
+and, *if an authorized signing role is available*, signed". Suite 1 defines no
+such role, so the recovery CLI accepts `--report-signing-key` and refuses the
+run with exit code `21` (`Unsupported`), naming the missing element. Without the
+switch the report is emitted hashed and unsigned, with `reportSignature` absent
+— which is the conformant result, not a degraded one. A hand-rolled COSE_Sign1
+built in `ea-recovery` from `ed25519-dalek` and the public
+`ProtectedHeader::sig_structure_bytes` is explicitly rejected: it would duplicate
+format-critical logic outside the cryptography boundary this ADR establishes.
+
+Five closed-crate facts block the feature, all in `crates/ea-crypto/src/cose.rs`:
+
+| Line | Fact |
+|---:|---|
+| `:25` | `ContentType` enumerates eleven signable payload kinds; none is a verification report. |
+| `:97` | `TryFrom<&str> for ContentType` rejects every other media type with `CryptoError::UnsupportedSuite`, so `ea.verification-report/v1` cannot be introduced by a caller. |
+| `:332` | `sign_normal` explicitly refuses `RecoveryTestDigest` and `DeviceRegistrationRequestCbor`, so repurposing an existing digest type is actively blocked, not merely inelegant. |
+| `:567` | `CoseSigner::sign` is private; every public entry point is bound to a `ContentType`. |
+| `:816`, `:1543` | `SignerRole` defines no report-signing role and the private `CertificateCapability` defines no report capability — so the *verification* side is missing too, and a `verify_report_signature` would have no implementable body. |
+
+Unblocking it is a specification decision, not an implementation task, and needs
+all three parts together before any code changes: a new `ContentType` for
+`ea.verification-report/v1` (with its media type registered in the wire-format
+addendum), a `SignerRole` authorized to sign reports, and a matching
+`CertificateCapability` so signatures can be verified as well as produced. Each
+extends the closed Suite 1 surface and therefore requires a new ADR, updated
+schemas, and test vectors covering both directions.
+
 ## Consequences
 
 - Dependency upgrades, enabled-feature changes, or Suite 1 algorithm changes

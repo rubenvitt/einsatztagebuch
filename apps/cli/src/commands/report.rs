@@ -18,6 +18,21 @@
 //! Zusammenfassung. Geschwiegen wird ausschliesslich dort, wo gar kein Urteil
 //! zustande kam.
 //!
+//! # `--report-signing-key` WIRD VERWEIGERT
+//!
+//! Eine abgesetzte COSE-Sign1-Signatur ueber `reportHash` ist mit dem heutigen
+//! `ea-crypto` nicht erzeugbar, und `ea-crypto` ist geschlossen: es gibt keinen
+//! `ContentType` fuer `ea.verification-report/v1`, keine Signiererrolle und
+//! keine Zertifikatsfaehigkeit fuer einen Bericht — die PRUEFSEITE fehlt damit
+//! ebenso wie die Erzeugung. `design.md`:1781 macht die Signatur ausdruecklich
+//! bedingt, und der gehashte UNSIGNIERTE Bericht ist deshalb das normkonforme
+//! Ergebnis und keine Notloesung. Die fuenf Codestellen stehen in
+//! `docs/adr/0001-toolchain-and-cryptography-dependencies.md`.
+//!
+//! Verweigert wird mit [`ExitCode::Unsupported`] (21) und OHNE Ziel: ein
+//! Bericht, der entstuende und dann keine Signatur truege, obwohl der Aufrufer
+//! eine verlangt hat, waere schlimmer als keiner.
+//!
 //! # Was dieser Handler NICHT tut
 //!
 //! Er kennt weder die Dokumentform noch die Zielregeln noch die Rechtevergabe.
@@ -55,6 +70,20 @@ pub fn run(
     output_path: &Path,
     now: UnixMillis,
 ) -> ExitCode {
+    // VOR allem anderen: kein Byte lesen, kein Byte schreiben. Ein Lauf, der
+    // erst verifizierte, dann die Zieldatei anlegte und danach an der Signatur
+    // scheiterte, hinterliesse ein Ziel, das keine Zusicherung mehr traegt.
+    //
+    // Der Code ist Unsupported (21) und nicht Usage (2): der Aufruf ist
+    // GRAMMATISCH in Ordnung — es fehlt die Faehigkeit. Und er entsteht VOR
+    // dem Bericht, weshalb die Regel des kleinsten zutreffenden Codes hier
+    // nichts zu ordnen hat: es gibt keinen Befund, ueber den sie urteilen
+    // koennte.
+    if invocation.report_signing_key.is_some() {
+        output::print_report_signing_refusal();
+        return ExitCode::Unsupported;
+    }
+
     // VOR der Verifikation, denn sie ist der Lauf, dessen Dauer gemessen wird.
     // `Instant` ist eine monotone Dauer und keine zweite Uhr: er nennt keinen
     // Zeitpunkt und kann keinen Bericht datieren.

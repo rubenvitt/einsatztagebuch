@@ -48,6 +48,23 @@ pub const OUTPUT_SWITCH: &str = "--output";
 pub const KEY_SWITCH: &str = "--key";
 /// `--include-runtime-metadata`, nur bei `report`.
 pub const INCLUDE_RUNTIME_METADATA_SWITCH: &str = "--include-runtime-metadata";
+/// `--report-signing-key <source>`, nur bei `report` — und IMMER verweigert.
+///
+/// # Warum ein Schalter, der nie etwas tut
+///
+/// Er wird ANGENOMMEN, damit der Lauf mit einer benannten Begruendung endet
+/// statt mit „unbekannter Schalter". Der Unterschied ist der ganze Zweck: ein
+/// Betreiber, der eine Berichtssignatur verlangt, soll erfahren, dass Suite v1
+/// keine autorisierte Signaturrolle kennt — und nicht glauben, er habe sich
+/// vertippt. Die fuenf Belege stehen in
+/// `docs/adr/0001-toolchain-and-cryptography-dependencies.md`.
+///
+/// # Warum er NICHT in [`crate::output`]s Grammatik steht
+///
+/// Die Grammatik nennt, was das Werkzeug KANN. Ein Schalter, der ausnahmslos
+/// mit [`ea_recovery::ExitCode::Unsupported`] endet, ist keine Faehigkeit; ihn
+/// dort aufzufuehren waere ein Versprechen, das der naechste Lauf bricht.
+pub const REPORT_SIGNING_KEY_SWITCH: &str = "--report-signing-key";
 
 /// Die Ausgabeform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +122,13 @@ pub struct Invocation {
     pub format: Format,
     /// Der EINZIGE Weg zu nichtdeterministischen Berichtsfeldern.
     pub include_runtime_metadata: bool,
+    /// Die verlangte Herkunft eines Berichtssignierschluessels.
+    ///
+    /// Steht neben `include_runtime_metadata` und nicht in
+    /// [`Command::Report`], weil beide dasselbe sind: ein Schalter, den genau
+    /// `report` annimmt. Der Wert wird NIE gelesen — er entscheidet allein, ob
+    /// der Lauf mit der begruendeten Verweigerung endet.
+    pub report_signing_key: Option<PathBuf>,
     /// Das gewaehlte Kommando.
     pub command: Command,
 }
@@ -299,6 +323,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut anchor: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut key: Option<PathBuf> = None;
+    let mut report_signing_key: Option<PathBuf> = None;
     let mut format: Option<Format> = None;
     let mut include_runtime_metadata: Option<bool> = None;
     let mut command_kind: Option<CommandKind> = None;
@@ -323,6 +348,11 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 }
                 OUTPUT_SWITCH => take_path_value(&mut output, OUTPUT_SWITCH, &mut arguments)?,
                 KEY_SWITCH => take_path_value(&mut key, KEY_SWITCH, &mut arguments)?,
+                REPORT_SIGNING_KEY_SWITCH => take_path_value(
+                    &mut report_signing_key,
+                    REPORT_SIGNING_KEY_SWITCH,
+                    &mut arguments,
+                )?,
                 FORMAT_SWITCH => {
                     if format.is_some() {
                         return Err(UsageError::DuplicateSwitch(FORMAT_SWITCH));
@@ -397,6 +427,15 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
+    // Der Berichtsschluessel gehoert dem Bericht. Dass `report` ihn danach
+    // VERWEIGERT, ist eine Aussage ueber die Suite und nicht ueber den Aufruf;
+    // hier steht nur, an welchem Kommando er ueberhaupt etwas bedeutet.
+    if report_signing_key.is_some() && command_kind != CommandKind::Report {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: REPORT_SIGNING_KEY_SWITCH,
+            command: command_name,
+        });
+    }
 
     // 5 — genau ein Positionsargument, bei allen fuenf Kommandos.
     let mut positionals = positionals.into_iter();
@@ -442,6 +481,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
         anchor,
         format: format.unwrap_or(Format::Text),
         include_runtime_metadata,
+        report_signing_key,
         command,
     })
 }
@@ -450,7 +490,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
 mod tests {
     use super::{
         Command, FORMAT_SWITCH, Format, INCLUDE_RUNTIME_METADATA_SWITCH, Invocation, KEY_SWITCH,
-        OUTPUT_SWITCH, TRUST_ANCHOR_SWITCH, UsageError, parse,
+        OUTPUT_SWITCH, REPORT_SIGNING_KEY_SWITCH, TRUST_ANCHOR_SWITCH, UsageError, parse,
     };
     use std::{ffi::OsString, path::PathBuf};
 
@@ -473,6 +513,7 @@ mod tests {
                 anchor: PathBuf::from("anchor.etb"),
                 format: Format::Text,
                 include_runtime_metadata: false,
+                report_signing_key: None,
                 command: Command::Verify {
                     archive: PathBuf::from("archive")
                 },
@@ -492,6 +533,7 @@ mod tests {
                 anchor: PathBuf::from("anchor.etb"),
                 format: Format::Json,
                 include_runtime_metadata: false,
+                report_signing_key: None,
                 command: Command::List {
                     archive: PathBuf::from("archive")
                 },
@@ -513,6 +555,7 @@ mod tests {
                 anchor: PathBuf::from("anchor.etb"),
                 format: Format::Text,
                 include_runtime_metadata: false,
+                report_signing_key: None,
                 command: Command::Decrypt {
                     archive: PathBuf::from("archive"),
                     key: PathBuf::from("recipient.key"),
@@ -535,6 +578,7 @@ mod tests {
                 anchor: PathBuf::from("anchor.etb"),
                 format: Format::Text,
                 include_runtime_metadata: true,
+                report_signing_key: None,
                 command: Command::Report {
                     archive: PathBuf::from("archive"),
                     output: PathBuf::from("report.json"),
@@ -555,6 +599,7 @@ mod tests {
                 anchor: PathBuf::from("anchor.etb"),
                 format: Format::Text,
                 include_runtime_metadata: false,
+                report_signing_key: None,
                 command: Command::Export {
                     source: PathBuf::from("archive"),
                     output: PathBuf::from("target"),
@@ -763,6 +808,69 @@ mod tests {
                     command,
                 },
                 "{command} darf {INCLUDE_RUNTIME_METADATA_SWITCH} nicht annehmen"
+            );
+        }
+    }
+
+    /// Der Berichtsschluessel PARST — abgewiesen wird er erst im Lauf.
+    ///
+    /// Die Trennung ist der Gegenstand: die GRAMMATIK kennt den Schalter (sonst
+    /// meldete sie „unbekannter Schalter" und verschwiege den wahren Grund),
+    /// und der Kommandopfad verweigert ihn mit
+    /// [`ea_recovery::ExitCode::Unsupported`] und einer benannten Begruendung.
+    /// Gemessen wird jene Haelfte in `apps/cli/tests/report_signature.rs`.
+    #[test]
+    fn a_report_signing_key_parses_and_is_refused_only_at_run_time() {
+        assert_eq!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "report",
+                "archive",
+                OUTPUT_SWITCH,
+                "report.json",
+                REPORT_SIGNING_KEY_SWITCH,
+                "signer.key"
+            ])
+            .expect("der Schalter muss PARSEN"),
+            Invocation {
+                anchor: PathBuf::from("anchor.etb"),
+                format: Format::Text,
+                include_runtime_metadata: false,
+                report_signing_key: Some(PathBuf::from("signer.key")),
+                command: Command::Report {
+                    archive: PathBuf::from("archive"),
+                    output: PathBuf::from("report.json"),
+                },
+            }
+        );
+    }
+
+    /// Er gehoert genau EINEM Kommando — wie `--include-runtime-metadata`.
+    #[test]
+    fn a_report_signing_key_is_rejected_outside_report() {
+        for command in ["verify", "list", "decrypt", "export"] {
+            let mut tokens = vec![
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                REPORT_SIGNING_KEY_SWITCH,
+                "signer.key",
+                command,
+                "archive",
+            ];
+            if command == "decrypt" {
+                tokens.extend([KEY_SWITCH, "recipient.key"]);
+            }
+            if command == "decrypt" || command == "export" {
+                tokens.extend([OUTPUT_SWITCH, "target"]);
+            }
+            assert_eq!(
+                rejected(&tokens),
+                UsageError::SwitchNotAllowed {
+                    switch: REPORT_SIGNING_KEY_SWITCH,
+                    command,
+                },
+                "{command} darf {REPORT_SIGNING_KEY_SWITCH} nicht annehmen"
             );
         }
     }
