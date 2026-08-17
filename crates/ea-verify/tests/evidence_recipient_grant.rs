@@ -34,7 +34,7 @@ use ea_verify::{
 use support::{
     CheckpointSpec, CompleteArchive, FIXTURE_OS_WALL_CLOCK_V1, ReceiptArchiveSpec,
     archive_without_the_own_grant, complete_recipient_private_key, complete_valid_archive,
-    other_recipient_private_key, receipt_archive,
+    complete_valid_archive_with_two_entries, other_recipient_private_key, receipt_archive,
 };
 
 fn clock() -> UnixMillis {
@@ -87,6 +87,45 @@ fn evidence_and_recipient_grant_run_before_a_decapsulation_that_is_no_gate() {
     );
 }
 
+/// Zwei Eintraege, zwei Grants, zwei Entkapselungen — und GENAU EIN
+/// `hpke-open`.
+///
+/// Das Ereignis benennt den Schritt der Pipeline, nicht die Zahl der
+/// geoeffneten Objekte. Der Test misst zugleich, was ein einzelner Eintrag
+/// nicht messen kann: dass Gate `recipient-grant` seinen Kopf je Eintrag
+/// erneut gewinnt und beide Grants unabhaengig traegt.
+#[test]
+fn two_chained_entries_are_both_opened_under_a_single_decapsulation_event() {
+    let archive = complete_valid_archive_with_two_entries();
+    let recipient = complete_recipient_private_key();
+    let mut observer = RecordingObserver::new();
+
+    let report = verify_archive_observed(
+        &archive.fixture,
+        &archive.anchor(),
+        VerifyOptions::new(clock())
+            .with_recipient(support::complete_recipient_key_thumbprint(), &recipient),
+        &mut observer,
+    )
+    .expect("der lueckenfreie Bestand traegt");
+
+    assert_eq!(
+        observer.events(),
+        expected_full_protocol().as_slice(),
+        "zwei Entkapselungen melden trotzdem genau ein hpke-open"
+    );
+    assert_eq!(report.object_results().len(), 2);
+    assert_eq!(report.gaps().len(), 0);
+    assert_eq!(report.decryption_errors().len(), 0);
+    assert_eq!(report.signature_errors().len(), 0);
+    assert_eq!(
+        report.chain_head().sequence().get(),
+        1,
+        "der verifizierte Kopf steht auf dem zweiten Eintrag"
+    );
+    assert!(report.is_fully_verified());
+}
+
 /// Geforderte, aber ueberfaellige Evidence: GENAU EIN `evidenceErrors`-Eintrag.
 ///
 /// Die Frist steht im SIGNIERTEN `evidence-due-at` der Quittung
@@ -95,18 +134,25 @@ fn evidence_and_recipient_grant_run_before_a_decapsulation_that_is_no_gate() {
 /// und der Eintrag selbst bleibt gueltig.
 #[test]
 fn required_evidence_that_is_overdue_yields_exactly_one_evidence_error() {
-    let overdue = FIXTURE_OS_WALL_CLOCK_V1 - 1;
+    // ECHTE FRISTLAGE, kein blosser Zahlenvergleich: `accepted-at-server` ist
+    // der verbindliche BEGINN der Frist und `evidence-due-at` ihr Ende
+    // (`design.md`:1677). Eine Quittung, deren Ende vor ihrem eigenen Beginn
+    // laege, koennte kein Server je signieren — der Test misst deshalb
+    // `accepted (800) < faellig (900) < effectiveNow (1800)`.
+    let due_at = FIXTURE_OS_WALL_CLOCK_V1 + 100;
+    let after_the_deadline = UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1 + 1000);
     let archive = receipt_archive(
         ReceiptArchiveSpec::bare()
             .with_receipts()
             .with_checkpoint(CheckpointSpec::None)
-            .with_evidence_due_at(overdue),
+            .with_evidence_due_at(due_at),
     );
 
     let report = verify_archive(
         &archive.fixture,
         &archive.anchor(),
-        VerifyOptions::new(clock()).with_evidence_requirement(EvidenceRequirementV1::Required),
+        VerifyOptions::new(after_the_deadline)
+            .with_evidence_requirement(EvidenceRequirementV1::Required),
     )
     .expect("ein Befund ueber ein Objekt ist nie ein Fehler des Laufs");
 
@@ -137,17 +183,17 @@ fn required_evidence_that_is_overdue_yields_exactly_one_evidence_error() {
 /// Dieselbe Frist OHNE Forderung ist kein Mangel.
 #[test]
 fn an_unrequested_evidence_deadline_is_no_finding() {
-    let overdue = FIXTURE_OS_WALL_CLOCK_V1 - 1;
+    let due_at = FIXTURE_OS_WALL_CLOCK_V1 + 100;
     let archive = receipt_archive(
         ReceiptArchiveSpec::bare()
             .with_receipts()
-            .with_evidence_due_at(overdue),
+            .with_evidence_due_at(due_at),
     );
 
     let report = verify_archive(
         &archive.fixture,
         &archive.anchor(),
-        VerifyOptions::new(clock()),
+        VerifyOptions::new(UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1 + 1000)),
     )
     .expect("ein Befund ueber ein Objekt ist nie ein Fehler des Laufs");
 
@@ -173,7 +219,7 @@ fn a_wrong_recipient_key_yields_exactly_one_decryption_error() {
             .next()
             .expect("ein Befund")
             .object_hash()
-            == archive.grant_object_hash,
+            == archive.grant_object_hash(),
         "der Befund traegt den Grant, an dem die Entkapselung scheiterte"
     );
     assert_eq!(
@@ -233,7 +279,7 @@ fn a_missing_own_grant_keeps_the_entry_valid_without_any_decryption_error() {
             .next()
             .expect("ein Ergebnis")
             .object_hash()
-            == archive.entry_object_hash,
+            == archive.entry_object_hash(),
         "das Ergebnis gehoert zu dem einen Eintrag des Bestands"
     );
     assert_eq!(

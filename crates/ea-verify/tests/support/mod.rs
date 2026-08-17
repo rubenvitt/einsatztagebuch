@@ -1787,11 +1787,24 @@ const OTHER_RECIPIENT_SECRET_V1: [u8; 32] = [
     0x05, 0x72, 0xab, 0x46, 0x1e, 0xf3, 0x88, 0x2a, 0x64, 0x9b, 0xd7, 0x50, 0x11, 0xcc, 0x27, 0x6f,
 ];
 
-/// Der Inhaltsschluessel, den der Grant umschliesst und der Ciphertext braucht.
-const COMPLETE_CEK_V1: [u8; 32] = [0x3c; 32];
+/// Der Inhaltsschluessel eines Eintrags, den sein Grant umschliesst.
+///
+/// JE SEQUENZ EIN EIGENER, und das ist keine Kosmetik: ein zweiter Eintrag
+/// unter demselben Paar aus Schluessel und `nonce` waere eine
+/// Nonce-Wiederverwendung und damit ein echter Bruch der AEAD-Annahme. Eine
+/// Fixture, die so etwas vormacht, lehrt das Falsche.
+fn complete_cek(chain_sequence: u64) -> [u8; 32] {
+    let mut cek = [0x3c_u8; 32];
+    cek[0] ^= u8::try_from(chain_sequence & 0xff).expect("ein Byte");
+    cek
+}
 
-/// Die `nonce` des Manifests und damit die des AEAD.
-const COMPLETE_NONCE_V1: [u8; 12] = [0x5e; 12];
+/// Die `nonce` des Manifests und damit die des AEAD, je Sequenz eine eigene.
+fn complete_nonce(chain_sequence: u64) -> [u8; 12] {
+    let mut nonce = [0x5e_u8; 12];
+    nonce[0] ^= u8::try_from(chain_sequence & 0xff).expect("ein Byte");
+    nonce
+}
 
 /// Der Klartext hinter dem Ciphertext des lueckenfreien Eintrags.
 ///
@@ -1883,20 +1896,32 @@ fn exact_grant_context(exact_grant_body: &[u8]) -> Vec<u8> {
     exact_grant_body[start..decoder.position()].to_vec()
 }
 
-/// Ein Bestand OHNE Luecke, mit echtem Ciphertext und echtem Grant.
+/// Ein Bestand OHNE Luecke, mit echtem Ciphertext und echten Grants.
 pub struct CompleteArchive {
     pub fixture: ArchiveFixture,
     pub anchor_bytes: Vec<u8>,
-    /// Objekthash des einzigen `.eip`.
-    pub entry_object_hash: ObjectHash,
-    /// Objekthash des einzigen `.eag`.
-    pub grant_object_hash: ObjectHash,
+    /// Objekthashes der abgelegten `.eip`, in Sequenzreihenfolge.
+    pub entry_object_hashes: Vec<ObjectHash>,
+    /// Objekthashes der abgelegten `.eag`, in derselben Reihenfolge.
+    pub grant_object_hashes: Vec<ObjectHash>,
 }
 
 impl CompleteArchive {
     #[must_use]
     pub fn anchor(&self) -> TrustAnchorV1 {
         decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+
+    /// Der Objekthash des Genesis-Eintrags.
+    #[must_use]
+    pub fn entry_object_hash(&self) -> ObjectHash {
+        self.entry_object_hashes[0]
+    }
+
+    /// Der Objekthash des Grants auf den Genesis-Eintrag.
+    #[must_use]
+    pub fn grant_object_hash(&self) -> ObjectHash {
+        self.grant_object_hashes[0]
     }
 }
 
@@ -1956,7 +1981,7 @@ fn complete_line() -> CompleteLine {
     }
 }
 
-/// Ein lueckenloser Bestand, dessen Recovery-Grant an
+/// Ein lueckenloser Bestand mit GENAU EINEM Eintrag, dessen Recovery-Grant an
 /// [`complete_recipient_key_thumbprint`] geht.
 #[must_use]
 pub fn complete_valid_archive() -> CompleteArchive {
@@ -1964,6 +1989,24 @@ pub fn complete_valid_archive() -> CompleteArchive {
         complete_recipient_key_thumbprint(),
         complete_recipient_certificate_hash(),
         &complete_recipient_private_key().public_key(),
+        1,
+    )
+}
+
+/// Derselbe Bestand mit ZWEI verketteten Eintraegen und je einem Grant.
+///
+/// Misst, was ein einzelner Eintrag nicht messen kann: dass Gate
+/// `recipient-grant` seinen Kopf je Eintrag erneut gewinnt, dass zwei Grants
+/// unabhaengig geprueft und geoeffnet werden, und dass zwei Entkapselungen
+/// trotzdem GENAU EIN `hpke-open` melden — das Ereignis benennt den Schritt der
+/// Pipeline, nicht die Zahl der geoeffneten Objekte.
+#[must_use]
+pub fn complete_valid_archive_with_two_entries() -> CompleteArchive {
+    complete_archive_for(
+        complete_recipient_key_thumbprint(),
+        complete_recipient_certificate_hash(),
+        &complete_recipient_private_key().public_key(),
+        2,
     )
 }
 
@@ -1977,6 +2020,7 @@ pub fn archive_without_the_own_grant() -> CompleteArchive {
         other_recipient_key_thumbprint(),
         other_recipient_certificate_hash(),
         &other_recipient_private_key().public_key(),
+        1,
     )
 }
 
@@ -1984,6 +2028,7 @@ fn complete_archive_for(
     recipient_key_thumbprint: KeyThumbprint,
     recipient_certificate_hash: CertificateHash,
     recipient_public_key: &HpkeRecipientPublicKey,
+    entry_count: u64,
 ) -> CompleteArchive {
     let line = complete_line();
     let anchor = line.anchor();
@@ -1991,39 +2036,49 @@ fn complete_archive_for(
     push_trust_objects(&mut fixture, &line.line);
 
     let plan_hash = complete_grant_plan_hash(recipient_key_thumbprint, recipient_certificate_hash);
-    let entry = build_complete_entry(&line, anchor.chain_id(), plan_hash);
-    let entry_bytes = encode_entry_package(&entry)
-        .expect("das Fixture-Eintragspaket muss kodieren")
-        .into_vec();
-    let grant_bytes = complete_grant_bytes(
-        &line,
-        anchor.chain_id(),
-        entry.entry_hash(),
-        recipient_key_thumbprint,
-        recipient_certificate_hash,
-        recipient_public_key,
-    );
-    let entry_object_hash = object_hash(&entry_bytes);
-    let grant_object_hash = object_hash(&grant_bytes);
+    let mut entry_object_hashes = Vec::new();
+    let mut grant_object_hashes = Vec::new();
+    let mut previous_entry_hash = None;
+    for sequence in COMPLETE_GENESIS_SEQUENCE_V1..COMPLETE_GENESIS_SEQUENCE_V1 + entry_count {
+        let entry = build_complete_entry(
+            &line,
+            anchor.chain_id(),
+            plan_hash,
+            sequence,
+            previous_entry_hash,
+        );
+        let entry_bytes = encode_entry_package(&entry)
+            .expect("das Fixture-Eintragspaket muss kodieren")
+            .into_vec();
+        let grant_bytes = complete_grant_bytes(
+            &line,
+            anchor.chain_id(),
+            entry.entry_hash(),
+            sequence,
+            recipient_key_thumbprint,
+            recipient_certificate_hash,
+            recipient_public_key,
+        );
+        entry_object_hashes.push(object_hash(&entry_bytes));
+        grant_object_hashes.push(object_hash(&grant_bytes));
+        previous_entry_hash = Some(entry.entry_hash());
 
-    fixture.push_exact_bytes(
-        &format!(
-            "{}{COMPLETE_GENESIS_SEQUENCE_V1:012}_entry.eip",
-            ea_archive::ENTRIES_DIR_V1
-        ),
-        entry_bytes,
-    );
-    push_grant(&mut fixture, COMPLETE_GENESIS_SEQUENCE_V1, grant_bytes);
+        fixture.push_exact_bytes(
+            &format!("{}{sequence:012}_entry.eip", ea_archive::ENTRIES_DIR_V1),
+            entry_bytes,
+        );
+        push_grant(&mut fixture, sequence, grant_bytes);
+    }
 
     CompleteArchive {
         fixture,
         anchor_bytes: line.anchor_bytes,
-        entry_object_hash,
-        grant_object_hash,
+        entry_object_hashes,
+        grant_object_hashes,
     }
 }
 
-/// Baut den Genesis-Eintrag mit ECHTEM Ciphertext.
+/// Baut einen Eintrag der lueckenfreien Kette mit ECHTEM Ciphertext.
 ///
 /// Zwei Durchgaenge, und das ist kein Umweg: `manifestCore` traegt die LAENGE
 /// des Ciphertexts, nicht dessen Hash (`design.md`:669-671 haelt ausdruecklich
@@ -2036,26 +2091,28 @@ fn build_complete_entry(
     line: &CompleteLine,
     chain_id: ChainId,
     plan_hash: Hash32,
+    chain_sequence: u64,
+    previous_entry_hash: Option<EntryHash>,
 ) -> EntryPackageV1 {
     let fields = || ManifestCoreFieldsV1 {
         organization_id: trust_support::organization(),
         chain_id,
-        chain_sequence: ChainSequence::new(COMPLETE_GENESIS_SEQUENCE_V1),
-        previous_entry_hash: None,
+        chain_sequence: ChainSequence::new(chain_sequence),
+        previous_entry_hash,
         writer_certificate_hash: line.writer_certificate_hash,
         writer_transition_event_hash: None,
         registry_version: line.head.version,
         registry_head_hash: *line.head_hash().as_bytes(),
         initial_grant_plan_hash: *plan_hash.as_bytes(),
-        nonce: COMPLETE_NONCE_V1,
+        nonce: complete_nonce(chain_sequence),
     };
     let placeholder = vec![0x00; COMPLETE_PLAINTEXT_V1.len() + ea_crypto::AEAD_OVERHEAD];
     let draft =
         ManifestCoreV1::new(fields(), &placeholder).expect("das Fixture-Manifest muss kodieren");
     let aad = ea_crypto::payload_aad(draft.exact_bytes());
     let ciphertext = ea_crypto::aead_seal(
-        &SecretBytes::new(COMPLETE_CEK_V1),
-        &SecretBytes::new(COMPLETE_NONCE_V1),
+        &SecretBytes::new(complete_cek(chain_sequence)),
+        &SecretBytes::new(complete_nonce(chain_sequence)),
         ea_crypto::SecretVec::new(COMPLETE_PLAINTEXT_V1.to_vec()),
         &aad,
     )
@@ -2086,6 +2143,7 @@ fn complete_grant_bytes(
     line: &CompleteLine,
     chain_id: ChainId,
     entry_hash: EntryHash,
+    chain_sequence: u64,
     recipient_key_thumbprint: KeyThumbprint,
     recipient_certificate_hash: CertificateHash,
     recipient_public_key: &HpkeRecipientPublicKey,
@@ -2116,7 +2174,7 @@ fn complete_grant_bytes(
     let context = exact_grant_context(draft.exact_bytes());
     let sealed = ea_crypto::hpke_seal(
         recipient_public_key,
-        &SecretBytes::new(COMPLETE_CEK_V1),
+        &SecretBytes::new(complete_cek(chain_sequence)),
         &ea_crypto::hpke_info(&context),
         &ea_crypto::hpke_aad(&context),
     )

@@ -11,9 +11,8 @@
 //! VERSCHIEBEN. Sie sind gemessen und nicht abgeleitet; wer sie „wegrepariert",
 //! macht den Test unwahr:
 //!
-//! 1. `is_fully_verified()` kann in diesem Stand fuer KEINEN Bestand wahr sein.
-//!    `pipeline_completed` bleibt bis Task 17 falsch, und jeder Bestand dieser
-//!    Fixtures traegt die Vorlauf-Luecke `0..=1`
+//! 1. `is_fully_verified()` kann fuer KEINEN Bestand dieses Targets wahr sein:
+//!    jeder von ihnen traegt die Vorlauf-Luecke `0..=1`
 //!    (`support::RECEIPT_PRE_ENTRY_GAP_THROUGH_V1`). Statt eines Bool, das
 //!    ohnehin nur `false == false` behauptete, prueft dieses Target die
 //!    STAERKERE Aussage: der Bestand ohne Quittung gibt in allen sechs

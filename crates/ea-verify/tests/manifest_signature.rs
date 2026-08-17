@@ -14,13 +14,15 @@
 //! `support::mutate_one_byte` belegt diesen Zuschnitt ausfuehrbar: jede
 //! Mutation dieser Datei MUSS parsbar bleiben, sonst traefe sie Gate 1.
 //!
-//! TEILDECKUNG BEIM PROTOKOLL, absichtlich. Dass das Protokoll nach
-//! `manifest-signature` endet und `hpke-open` nie fuehrt, haelt
-//! `tests/order.rs` gegen `run_gates` fest; die Fixture-Variante desselben
-//! Contracts aktiviert Task 17. Hier wird die Aussage stattdessen
-//! SACHLICH gefuehrt: ein gefallenes Gate 4 erzeugt kein `objectResults`, keine
-//! `registryVersions` und keine `publicKeyThumbprints` — ueber ein Objekt, das
-//! seine Signatur nicht traegt, wird nichts ausgesagt.
+//! KEINE PROTOKOLLAUSSAGE, und das ist gemessen, nicht ausgelassen. Ein
+//! gefallenes Gate 4 bricht den BESTANDSLAUF nicht ab — die archivweite
+//! Pipeline traegt den Befund ein und faehrt fort, damit ein Objekt die
+//! Aussage ueber die uebrigen nicht kippt. Die objektweise Abbruchstrecke
+//! haelt `tests/order.rs` gegen `run_gates` fest. Hier wird die Aussage
+//! stattdessen SACHLICH gefuehrt: ein gefallenes Gate 4 erzeugt kein
+//! `objectResults`, keine `registryVersions` und keine
+//! `publicKeyThumbprints` — ueber ein Objekt, das seine Signatur nicht traegt,
+//! wird nichts ausgesagt.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -104,8 +106,10 @@ fn each_reachable_manifest_signature_binding_fails_on_its_own_one_byte_mutation(
 
 /// Der unversehrte Bestand: das Gate traegt und speist beide Sachfelder.
 ///
-/// `is_fully_verified()` bleibt hier absichtlich unassertiert — `pipeline_completed`
-/// setzt erst Task 17.
+/// `is_fully_verified()` bleibt hier absichtlich unassertiert: dieser Bestand
+/// traegt die Genesis-Luecke `0..=0` (`support::GENESIS_GAP_SEQUENCE_V1`), ein
+/// `false` sagte also nichts ueber Gate 4 aus. Den lueckenfreien Fall misst
+/// `tests/evidence_recipient_grant.rs`.
 #[test]
 fn a_verified_manifest_signature_feeds_the_registry_version_and_the_thumbprint() {
     let built = archive_with_one_signed_entry();

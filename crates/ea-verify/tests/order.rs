@@ -245,9 +245,14 @@ fn every_archive_protocol_is_a_prefix_of_the_pinned_order() {
 /// Abbruch bei kaputter Writer-Signatur: das Protokoll endet nach dem vierten
 /// Gate und kennt `hpke-open` nicht.
 ///
-/// TEILDECKUNG wie oben — die kaputte Signatur ist hier als Abbruch des
-/// vierten Gates modelliert, nicht als Fixture. Task 17 setzt
-/// `fixtures::bad_writer_signature()` ein.
+/// AUSSCHLIESSLICH GEGEN DEN IN-TEST-VERIFIZIERER, und das bleibt so. Eine
+/// echte Fixture kann diesen Contract nicht zeigen: eine kaputte
+/// Writer-Signatur ist ein Befund ueber EIN Objekt und bricht den Bestandslauf
+/// nicht ab (`crates/ea-verify/tests/manifest_signature.rs` misst, dass der
+/// Bericht sie als `signatureErrors`-Eintrag traegt und ueber das Objekt sonst
+/// nichts aussagt). Was hier gemessen wird, ist die OBJEKTWEISE Strecke aus
+/// `run_gates`: bricht ein Gate ab, laeuft kein spaeteres und es wird nicht
+/// entkapselt.
 #[test]
 fn verification_stops_before_grant_or_decryption_on_bad_signature() {
     let mut observer = RecordingObserver::new();
