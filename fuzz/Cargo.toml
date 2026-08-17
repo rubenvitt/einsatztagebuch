@@ -9,11 +9,34 @@ cargo-fuzz = true
 
 [dependencies]
 ea-cbor = { path = "../crates/ea-cbor" }
+ea-crypto = { path = "../crates/ea-crypto" }
+ea-format = { path = "../crates/ea-format" }
 libfuzzer-sys = "=0.4.13"
 
 [[bin]]
 name = "cbor_object"
 path = "fuzz_targets/cbor_object.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cose_sign1"
+path = "fuzz_targets/cose_sign1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpke_grant"
+path = "fuzz_targets/hpke_grant.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "object_bounds"
+path = "fuzz_targets/object_bounds.rs"
 test = false
 doc = false
 bench = false

@@ -11,11 +11,20 @@ const STAGE_ONE_FAMILIES: [&str; 6] = [
     "crypto", "evidence", "format", "grants", "receipts", "trust",
 ];
 
+/// Die vier Fuzz-Ziele, die die fuenf Flaechen aus `design.md` §22.1 abdecken —
+/// lexikografisch, weil der Gate sie aus einem `BTreeSet` liefert.
+const STAGE_ONE_FUZZ_TARGETS: [&str; 4] =
+    ["cbor_object", "cose_sign1", "hpke_grant", "object_bounds"];
+
 /// Legt ein frisches Fixture-Wurzelverzeichnis unter `std::env::temp_dir()` an.
 ///
 /// Der Gate liest sonst den echten Arbeitsbaum. Ein Test, der einen
 /// FEHLERzustand festhaelt, wuerde dort invertieren, sobald ein spaeterer Task
 /// die Vektorfamilien nachliefert. Gegen ein Fixture bleibt er stabil.
+///
+/// Das Fixture bringt ein vollstaendiges Fuzz-Manifest mit, damit jeder Test,
+/// der einen ANDEREN Fehlerzustand festhaelt, nicht an der Fuzz-Pruefung
+/// haengt.
 fn fixture_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -27,7 +36,22 @@ fn fixture_root(label: &str) -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("vectors")).unwrap();
+    write_fuzz_manifest(&root, &STAGE_ONE_FUZZ_TARGETS);
     root
+}
+
+/// Schreibt ein Fuzz-Manifest, das genau die genannten Ziele deklariert.
+fn write_fuzz_manifest(root: &Path, targets: &[&str]) {
+    let path = root.join("fuzz/Cargo.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut text = String::from("[package]\nname = \"ea-fuzz\"\nversion = \"0.0.0\"\n");
+    for target in targets {
+        text.push_str(&format!(
+            "\n[[bin]]\nname = \"{target}\"\npath = \"fuzz_targets/{target}.rs\"\n\
+             test = false\ndoc = false\nbench = false\n"
+        ));
+    }
+    fs::write(&path, text).unwrap();
 }
 
 /// Kopfzeile des Requirement-Ledgers — jedes Feld ist gequotet, wie der
@@ -226,7 +250,10 @@ fn stage_one_gate_requires_every_vector_family() {
         report["evidenced_acceptance_criteria"],
         serde_json::json!([])
     );
-    assert_eq!(report["fuzz_targets"], serde_json::json!([]));
+    assert_eq!(
+        report["fuzz_targets"],
+        serde_json::json!(STAGE_ONE_FUZZ_TARGETS)
+    );
     let repeated = run_stage_gate(&root, "1");
     assert_eq!(
         String::from_utf8(repeated.stdout).unwrap(),
@@ -541,14 +568,16 @@ fn stage_one_gate_covers_every_functional_requirement_and_acceptance_criterion()
         .find(|row| row[0] == "GATE-22")
         .expect("the ledger must carry GATE-22");
     assert_eq!(
-        gate_twenty_two[8], "planned",
-        "GATE-22 must stay planned while only one fuzz target exists"
+        gate_twenty_two[8], "implemented",
+        "GATE-22 turns implemented once every fuzz surface from 22.1 carries a target"
     );
-    assert!(
-        gate_twenty_two[6].contains("Task 12"),
-        "GATE-22 must point at Task 12 for the missing fuzz surfaces; evidence: {}",
-        gate_twenty_two[6]
-    );
+    for target in STAGE_ONE_FUZZ_TARGETS {
+        assert!(
+            gate_twenty_two[6].contains(target),
+            "GATE-22 evidence must name the fuzz target {target}; evidence: {}",
+            gate_twenty_two[6]
+        );
+    }
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -693,4 +722,125 @@ fn web_reader_must_requirements_are_recorded_as_v1_1_rows() {
             "FR-103 must record the encrypted Rust index ({marker}); row: {hundred_three}"
         );
     }
+}
+
+/// Die fuenf Flaechen aus `design.md` §22.1 in Entwurfsreihenfolge, jeweils mit
+/// dem Wort, unter dem der Entwurfstext sie fuehrt, und dem Ziel, das sie
+/// abdeckt.
+///
+/// `object_bounds` traegt zwei Flaechen: Objektgrenzen und Ressourcenlimits
+/// werden am selben Objektrahmen gemessen.
+const STAGE_ONE_FUZZ_SURFACES: [(&str, &str, &str); 5] = [
+    ("cbor", "CBOR", "cbor_object"),
+    ("cose", "COSE", "cose_sign1"),
+    ("hpke", "HPKE", "hpke_grant"),
+    ("object-bounds", "Objektgrenzen", "object_bounds"),
+    ("resource-limits", "Ressourcenlimits", "object_bounds"),
+];
+
+/// Haelt fest, dass `fuzz/Cargo.toml` jede der fuenf Fuzz-Flaechen aus
+/// `design.md` §22.1 mit einem Ziel belegt.
+///
+/// Phase 1 laeuft gegen ein Fixture und haelt den FEHLERzustand fest — er
+/// bleibt ueber die Taskkette stabil. Phase 2 laeuft gegen das ECHTE
+/// Fuzz-Manifest und haelt den ZIELzustand fest; sie kann durch spaetere Tasks
+/// nicht invertieren, weil ein spaeterer Task Ziele nur ergaenzt.
+#[test]
+fn stage_one_gate_requires_every_fuzz_surface_from_design_22_1() {
+    let workspace = workspace_root();
+    let design_relative =
+        Path::new("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+    let ledger_relative = Path::new("docs/traceability/v0.1-requirements.csv");
+
+    // Der Entwurfstext ist die Quelle der Flaechenliste. Ohne diese Zusicherung
+    // pruefte der Test eine selbst erfundene Menge gegen sich selbst.
+    let design = fs::read_to_string(workspace.join(design_relative))
+        .expect("the design document must be readable");
+    let fuzzing_line = design
+        .lines()
+        .find(|line| line.starts_with("- Fuzzing "))
+        .expect("design.md 22.1 must carry the fuzzing line");
+    for (_, word, _) in STAGE_ONE_FUZZ_SURFACES {
+        assert!(
+            fuzzing_line.contains(word),
+            "design.md 22.1 must name the fuzz surface {word}; line: {fuzzing_line}"
+        );
+    }
+
+    let root = fixture_root("fuzz-surfaces");
+    for family in STAGE_ONE_FAMILIES {
+        write_family_manifest(&root, family);
+    }
+    for relative in [design_relative, ledger_relative] {
+        let target = root.join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(workspace.join(relative), &target)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", relative.display()));
+    }
+
+    // Phase 1: nur das CBOR-Ziel ist deklariert — der Gate nennt die erste
+    // unbelegte Flaeche und das Ziel, das sie tragen muss.
+    write_fuzz_manifest(&root, &["cbor_object"]);
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a fuzz manifest without the COSE surface must not satisfy the gate; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("missing fuzz target for surface cose"),
+        "the gate must name the uncovered surface and its target; stderr: {stderr}"
+    );
+
+    // Phase 2: das ECHTE Fuzz-Manifest. Jede Flaeche ist belegt, der Bericht
+    // nennt die Ziele und die Zuordnung.
+    let fuzz_relative = Path::new("fuzz/Cargo.toml");
+    fs::copy(workspace.join(fuzz_relative), root.join(fuzz_relative))
+        .expect("fuzz/Cargo.toml must be readable");
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "the checked-in fuzz manifest must cover every surface from 22.1; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout must be JSON: {error}; stdout: {stdout}"));
+    assert_eq!(
+        report["fuzz_targets"],
+        serde_json::json!(STAGE_ONE_FUZZ_TARGETS),
+        "the report must name exactly the four declared targets; stdout: {stdout}"
+    );
+    assert_eq!(
+        report["fuzz_surfaces"],
+        serde_json::json!(
+            STAGE_ONE_FUZZ_SURFACES
+                .iter()
+                .map(|(surface, _, target)| serde_json::json!({
+                    "surface": surface,
+                    "target": target
+                }))
+                .collect::<Vec<_>>()
+        ),
+        "the report must carry the surface-to-target table; stdout: {stdout}"
+    );
+    let repeated = run_stage_gate(&root, "1");
+    assert_eq!(
+        String::from_utf8(repeated.stdout).unwrap(),
+        stdout,
+        "the stage gate report must be byte-identical across runs"
+    );
+
+    // Ein deklariertes Ziel ohne Quelldatei waere eine leere Zusage.
+    for target in STAGE_ONE_FUZZ_TARGETS {
+        let source = workspace.join(format!("fuzz/fuzz_targets/{target}.rs"));
+        assert!(
+            source.is_file(),
+            "the declared fuzz target {target} must carry a source file at {}",
+            source.display()
+        );
+    }
+
+    fs::remove_dir_all(&root).unwrap();
 }

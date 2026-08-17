@@ -874,6 +874,26 @@ const REQUIREMENT_LEDGER_PATH: &str = "docs/traceability/v0.1-requirements.csv";
 /// Die aufzaehlbare Quelle der Pflichtzeilenmenge, relativ zur Gate-Wurzel.
 const DESIGN_DOCUMENT_PATH: &str = "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md";
 
+/// Das Fuzz-Manifest, relativ zur Gate-Wurzel.
+const FUZZ_MANIFEST_PATH: &str = "fuzz/Cargo.toml";
+
+/// Die fuenf Fuzz-Flaechen aus `design.md` §22.1 und das Ziel, das jede
+/// abdeckt — Flaechen in der Reihenfolge des Entwurfstexts, damit Bericht und
+/// Fehlerzeile byteidentisch reproduzierbar sind.
+///
+/// Vier Ziele decken fuenf Flaechen: `object_bounds` traegt Objektgrenzen und
+/// Ressourcenlimits gemeinsam, weil beide am selben Objektrahmen gemessen
+/// werden. Die sechs Familienrohgrenzen, die globale Objektgrenze sowie die
+/// Wert- und Arbeitsgrenzen aus Global Constraint Zeile 30 des Stufe-1-Plans
+/// stehen dort als Uebersetzungszeit-Assertions.
+const STAGE_ONE_FUZZ_SURFACES: [(&str, &str); 5] = [
+    ("cbor", "cbor_object"),
+    ("cose", "cose_sign1"),
+    ("hpke", "hpke_grant"),
+    ("object-bounds", "object_bounds"),
+    ("resource-limits", "object_bounds"),
+];
+
 /// Der Spaltenvertrag des Ledgers. Spaetere Stufen ergaenzen nur Zeilen.
 const LEDGER_COLUMNS: [&str; 9] = [
     "requirement_id",
@@ -1204,6 +1224,30 @@ fn directory_carries_a_manifest(directory: &Path, depth: u32) -> bool {
         .any(|child| directory_carries_a_manifest(&child.path(), depth - 1))
 }
 
+/// Liest die im Fuzz-Manifest deklarierten Ziele und prueft, dass sie jede der
+/// fuenf Flaechen aus `design.md` §22.1 abdecken.
+///
+/// Der Gate prueft die DEKLARATION, nicht den Lauf: ob ein Ziel Funde liefert,
+/// entscheidet `xtask test-fuzz`. Fehlt eine Flaeche, nennt die Fehlerzeile sie
+/// und das erwartete Ziel — die Flaechen laufen in Entwurfsreihenfolge, also
+/// meldet der Gate stets die erste Luecke.
+fn stage_one_fuzz_targets(gate_root: &Path) -> Result<Vec<String>, String> {
+    let manifest_path = gate_root.join(FUZZ_MANIFEST_PATH);
+    let declared = parse_fuzz_targets(
+        &fs::read_to_string(&manifest_path)
+            .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?,
+    )?;
+    for (surface, target) in STAGE_ONE_FUZZ_SURFACES {
+        if !declared.iter().any(|name| name == target) {
+            return Err(format!(
+                "missing fuzz target for surface {surface}: {target} is not declared in {}",
+                manifest_path.display()
+            ));
+        }
+    }
+    Ok(declared)
+}
+
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
 ///
 /// Eine Familie zaehlt erst als vorhanden, wenn [`family_carries_a_manifest`]
@@ -1217,10 +1261,13 @@ fn directory_carries_a_manifest(directory: &Path, depth: u32) -> bool {
 /// Abnahmekriterien bereits belegt sind; die Belegpflicht selbst wird erst
 /// scharf geschaltet, wenn Vektoren und Property-Tests existieren.
 ///
+/// Zuletzt prueft der Gate die Fuzz-Flaechen aus `design.md` §22.1 gegen die im
+/// Fuzz-Manifest deklarierten Ziele.
+///
 /// Das Berichtsschema ist stabil und wird von spaeteren Stufen erweitert, nie
 /// umbenannt. `rows` nennt die `requirement_id` jeder Ledger-Zeile in
-/// Dateireihenfolge; Fuzz-Flaechen folgen in einem spaeteren Task und bleiben
-/// bis dahin leer.
+/// Dateireihenfolge; `fuzz_targets` nennt die deklarierten Ziele lexikografisch
+/// und `fuzz_surfaces` die Zuordnung Flaeche zu Ziel in Entwurfsreihenfolge.
 fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
     if stage != 1 {
         return Err(format!(
@@ -1266,6 +1313,11 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
             uncovered.join(", ")
         ));
     }
+    let fuzz_targets = stage_one_fuzz_targets(&gate_root)?;
+    let fuzz_surfaces = STAGE_ONE_FUZZ_SURFACES
+        .iter()
+        .map(|(surface, target)| serde_json::json!({ "surface": surface, "target": target }))
+        .collect::<Vec<_>>();
     let row_identifiers = rows
         .iter()
         .map(|row| row.requirement_id.clone())
@@ -1284,7 +1336,8 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
         "primary_acceptance_criteria": STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA,
         "evidenced_acceptance_criteria": evidenced,
         "rows": row_identifiers,
-        "fuzz_targets": Vec::<String>::new(),
+        "fuzz_targets": fuzz_targets,
+        "fuzz_surfaces": fuzz_surfaces,
     });
     println!(
         "{}",
