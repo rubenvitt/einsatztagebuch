@@ -19,6 +19,7 @@
 //! `x-ea-unique-key` ihres Schemas.
 
 mod archive;
+mod entry;
 mod error;
 mod gates;
 mod json;
@@ -26,6 +27,7 @@ mod report;
 mod state;
 
 pub use archive::{VerifyOptions, verify_archive};
+pub use entry::GRANT_PLAN_MISMATCH_CODE_V1;
 pub use error::{ManifestSignatureErrorV1, VerifyError};
 pub use gates::{
     DECAPSULATION_EVENT_V1, Decapsulation, GATE_ORDER_V1, Gate, GateObserver, GateRunner,

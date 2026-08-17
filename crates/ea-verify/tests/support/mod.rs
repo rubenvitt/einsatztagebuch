@@ -1,5 +1,6 @@
 //! Archivfixtures mit einer ECHTEN Registrierungslinie, fuer die Gates
-//! `trust`, `registry` und `manifest-signature`.
+//! `trust`, `registry`, `manifest-signature`, `chain-position` und
+//! `grant-plan`.
 //!
 //! Wird per `#[path]` in Testtargets eingebunden, nie in das Lib-Target —
 //! genau wie das Archiv- und das Trust-Support-Modul, auf denen es aufsetzt.
@@ -18,14 +19,19 @@
 #[path = "../../../ea-archive/tests/support/mod.rs"]
 pub mod archive_support;
 
-use ea_crypto::{CanonicalPublicCoseKey, CoseSigner, SecretBytes, object_hash};
+use ea_crypto::{
+    CanonicalPublicCoseKey, CoseSigner, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_WRAPPED_CEK_SIZE,
+    SecretBytes, object_hash,
+};
 use ea_format::{
-    CertificateKindV1, EIP_PREFIX_V1, EntryPackageV1, ManifestCoreFieldsV1, ManifestCoreV1,
-    SignedManifestV1, encode_entry_package,
+    CertificateKindV1, EIP_PREFIX_V1, EntryPackageV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1,
+    GrantPlanItemV1, GrantPlanV1, GrantPurposeV1, GrantV1, ManifestCoreFieldsV1, ManifestCoreV1,
+    SignedManifestV1, encode_entry_package, encode_grant,
 };
 use ea_trust::{TrustAnchorV1, TrustObjectSource, decode_trust_anchor};
 use ea_types::{
     CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, KeyThumbprint, ObjectHash,
+    RegistryVersion, UnixMillis,
 };
 use ed25519_dalek::SigningKey;
 
@@ -46,8 +52,10 @@ pub const FIXTURE_OS_WALL_CLOCK_V1: i64 = 800;
 /// deshalb zwei Koepfe: einen, der die Policy setzt (ohne die liefert
 /// `verify_registry_candidate` `EA-TRUST-ACTION-MISMATCH`), und einen, der das
 /// Schreiberzertifikat aktiviert. Der erste bekommt das Genesisfach, damit die
-/// Lease des zweiten bei Sequenz eins beginnt und die Eintragskette luecken-
-/// und platzhalterfrei bleibt.
+/// Lease des zweiten bei Sequenz eins beginnt.
+///
+/// Die Kehrseite ist [`GENESIS_GAP_SEQUENCE_V1`]: das Genesisfach bleibt damit
+/// unbesetzt, und Gate `chain-position` meldet es — zu Recht — als Luecke.
 pub const POLICY_LEASE_FROM_V1: u64 = 0;
 /// Letzte Sequenz der Lease des Policy-Kopfes.
 pub const POLICY_LEASE_THROUGH_V1: u64 = 0;
@@ -128,6 +136,314 @@ pub fn writer_device_signer() -> CoseSigner {
     CoseSigner::from_secret(SecretBytes::new(WRITER_DEVICE_SECRET_V1))
 }
 
+/// Die Luecke, die JEDES Fixture dieses Moduls traegt: der Genesis-Eintrag.
+///
+/// GEMESSEN, nicht behauptet. `ea_chain::build_chain` zaehlt Sequenzen ab null;
+/// ein Bestand, dessen niedrigster Knoten auf Sequenz eins liegt, traegt
+/// deshalb die Luecke `0..=0` (`crates/ea-chain/src/chain.rs:769-792`, dort
+/// ausdruecklich gepinnt: „das Fehlen des Genesis-Knotens ist ein BEFUND").
+///
+/// Ein Eintrag auf Sequenz NULL ist mit `trust_support::RegistryLineBuilder`
+/// nicht herstellbar. Vier Linienformen wurden dafuer gemessen, jede mit einem
+/// `.eip` auf Sequenz null:
+///
+/// | Linie                                        | Ergebnis                    |
+/// |----------------------------------------------|-----------------------------|
+/// | nur `Device(Writer)`, Lease `0..=100`        | Gate `registry` faellt ganz |
+/// | `Device` `0..=0`, dann `Policy` `1..=100`    | Gate `registry` faellt ganz |
+/// | `Policy` `0..=0`, dann `Device` `1..=100`    | `unattributable`            |
+/// | `Policy` `0..=100`, dann `Device` `0..=100`  | `unattributable`            |
+///
+/// Der Grund ist strukturell: `verify_registry_candidate` verlangt eine
+/// wirksame Policy, ein Registrierungskopf traegt genau EINEN Uebergang, und
+/// die Leases muessen aufsteigen. Der erste Kopf muss deshalb der Policy-Kopf
+/// sein, und dessen Kandidatenstand kennt das Schreiberzertifikat des zweiten
+/// Kopfes noch nicht — auch dann nicht, wenn das Zertifikat selbst ab Sequenz
+/// null wirksam ist. Die Luecke ist damit die WAHRE Aussage ueber diese
+/// Bestaende: sie tragen keinen verifizierten Genesis-Eintrag. Genau deshalb
+/// setzt der Bericht dort auch nie `anchor.genesis_entry_hash()` ein
+/// (`crates/ea-verify/src/report.rs:159-170`).
+///
+/// Wer diese Luecke „wegrepariert", macht die Fixtures unwahr. Tests dieses
+/// Moduls rechnen sie deshalb ausdruecklich mit, statt sie zu verstecken.
+pub const GENESIS_GAP_SEQUENCE_V1: u64 = 0;
+
+/// Der Empfaenger des Recovery-Grants jedes Fixture-Eintrags.
+///
+/// Feste Bytes und kein echtes Schluesselmaterial: Gate `grant-plan` prueft den
+/// PLAN, nicht die Entkapselung. Wer den Empfaenger tatsaechlich benutzt, ist
+/// Sache von Gate `recipient-grant` und der Entkapselung dahinter.
+#[must_use]
+pub fn recovery_recipient_key_thumbprint() -> KeyThumbprint {
+    KeyThumbprint::try_from(&[0x21_u8; 32][..]).expect("32 Bytes sind ein Schluesselabdruck")
+}
+
+/// Das Zertifikat des Recovery-Empfaengers.
+#[must_use]
+pub fn recovery_recipient_certificate_hash() -> CertificateHash {
+    CertificateHash::try_from(&[0x22_u8; 32][..]).expect("32 Bytes sind ein Zertifikatshash")
+}
+
+/// Der Empfaenger des Reader-Grants.
+#[must_use]
+pub fn reader_recipient_key_thumbprint() -> KeyThumbprint {
+    KeyThumbprint::try_from(&[0x23_u8; 32][..]).expect("32 Bytes sind ein Schluesselabdruck")
+}
+
+/// Das Zertifikat des Reader-Empfaengers.
+#[must_use]
+pub fn reader_recipient_certificate_hash() -> CertificateHash {
+    CertificateHash::try_from(&[0x24_u8; 32][..]).expect("32 Bytes sind ein Zertifikatshash")
+}
+
+/// Der Planhash eines Eintrags mit GENAU EINEM Recovery-Grant.
+///
+/// Wird ueber `ea_format::GrantPlanV1` gebildet und nicht nachgebaut: die
+/// Sortierung und die Kodierung des Plans sind dort bereits total definiert,
+/// und Gate `grant-plan` rechnet gegen genau diese Bytes.
+#[must_use]
+pub fn recovery_grant_plan_hash() -> Hash32 {
+    GrantPlanV1::new(vec![GrantPlanItemV1::new(
+        recovery_recipient_key_thumbprint(),
+        recovery_recipient_certificate_hash(),
+        GrantPurposeV1::Recovery,
+    )])
+    .expect("ein Plan mit genau einem Recovery-Grant muss entstehen")
+    .hash()
+}
+
+/// Welchen Grant-Plan ein Fixture-Eintrag behauptet und mitliefert.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrantPlanSpec {
+    /// Genau ein Recovery-Grant, und das Manifest traegt dessen ECHTEN
+    /// Planhash. Der Regelfall jedes gesunden Fixture-Eintrags.
+    Recovery,
+    /// Genau ein Recovery-Grant, aber das Manifest traegt einen abweichenden
+    /// Planhash.
+    MismatchedHash,
+    /// Nur ein Reader-Grant: der verpflichtende Recovery-Grant fehlt.
+    ///
+    /// Der Planhash des Manifests ist hier bedeutungslos, weil der Plan sich
+    /// gar nicht erst bilden laesst — `GrantPlanV1::new` bricht mit
+    /// `EA-GRANT-MISSING-RECOVERY` ab, bevor ein Hash entstuende.
+    ReaderOnly,
+    /// Gar kein Grant.
+    ///
+    /// Fuer Eintraege, die Gate `manifest-signature` nicht ueberleben: ihr
+    /// `entryHash` weicht von dem des unversehrten Eintrags ab, ein
+    /// mitgelieferter Grant waere deshalb VERWAIST und erzeugte einen zweiten
+    /// Befund neben dem, den das Fixture zeigen will.
+    Omitted,
+}
+
+impl GrantPlanSpec {
+    /// Der Wert, den das Manifest als `initial_grant_plan_hash` traegt.
+    fn manifest_plan_hash(self) -> [u8; 32] {
+        let mut hash = *recovery_grant_plan_hash().as_bytes();
+        match self {
+            Self::Recovery | Self::Omitted => hash,
+            // Genau ein verkipptes Bit: der Eintrag ist unversehrt signiert und
+            // faellt allein an der Planbindung.
+            Self::MismatchedHash => {
+                hash[0] ^= 0x01;
+                hash
+            }
+            Self::ReaderOnly => [0x00; 32],
+        }
+    }
+
+    /// Der Zweck des Grants, den das Fixture neben den Eintrag legt.
+    const fn grant_purpose(self) -> Option<GrantPurposeV1> {
+        match self {
+            Self::Recovery | Self::MismatchedHash => Some(GrantPurposeV1::Recovery),
+            Self::ReaderOnly => Some(GrantPurposeV1::Reader),
+            Self::Omitted => None,
+        }
+    }
+}
+
+/// Die Bestandteile eines Fixture-Eintrags.
+struct EntrySpec {
+    chain_id: ChainId,
+    chain_sequence: u64,
+    previous_entry_hash: Option<EntryHash>,
+    writer_certificate_hash: CertificateHash,
+    registry_version: RegistryVersion,
+    registry_head_hash: Hash32,
+    /// Fuellbyte der `nonce`. Kein Gate dieses Stands liest sie; sie ist der
+    /// einzige Freiheitsgrad, der den Objekthash veraendert, ohne eine
+    /// Sachaussage des Manifests anzutasten.
+    nonce_marker: u8,
+    plan: GrantPlanSpec,
+}
+
+/// Ein gebauter Eintrag mitsamt seinem Grant.
+struct BuiltEntry {
+    entry: EntryPackageV1,
+    bytes: Vec<u8>,
+    grant_bytes: Option<Vec<u8>>,
+}
+
+/// Baut ein signiertes `.eip` und den Grant, der zu seinem Plan gehoert.
+///
+/// Die Reihenfolge ist zwingend und nicht zirkulaer: der Planhash haengt allein
+/// an den Empfaengern, das Manifest an dem Planhash, der `entryHash` an dem
+/// signierten Manifest — und erst der Grant an dem `entryHash`.
+fn build_entry(spec: &EntrySpec) -> BuiltEntry {
+    let ciphertext = vec![0x5a; 16];
+    let manifest = ManifestCoreV1::new(
+        ManifestCoreFieldsV1 {
+            organization_id: trust_support::organization(),
+            chain_id: spec.chain_id,
+            chain_sequence: ChainSequence::new(spec.chain_sequence),
+            previous_entry_hash: spec.previous_entry_hash,
+            writer_certificate_hash: spec.writer_certificate_hash,
+            writer_transition_event_hash: None,
+            registry_version: spec.registry_version,
+            registry_head_hash: *spec.registry_head_hash.as_bytes(),
+            initial_grant_plan_hash: spec.plan.manifest_plan_hash(),
+            nonce: [spec.nonce_marker; 12],
+        },
+        &ciphertext,
+    )
+    .expect("das Fixture-Manifest muss kodieren");
+    let signed = SignedManifestV1::new(manifest, &ciphertext).expect("das Manifest muss binden");
+    let signature = writer_device_signer()
+        .sign_record(signed.exact_bytes())
+        .expect("der Fixture-Signierer muss signieren");
+    let entry = EntryPackageV1::new(signed, ciphertext, signature)
+        .expect("das Fixture-Eintragspaket muss sich zusammensetzen");
+    let bytes = encode_entry_package(&entry)
+        .expect("das Fixture-Eintragspaket muss kodieren")
+        .into_vec();
+    let grant_bytes = spec.plan.grant_purpose().map(|purpose| {
+        grant_bytes(
+            spec.chain_id,
+            entry.entry_hash(),
+            purpose,
+            spec.writer_certificate_hash,
+            spec.registry_version,
+            spec.registry_head_hash,
+        )
+    });
+    BuiltEntry {
+        entry,
+        bytes,
+        grant_bytes,
+    }
+}
+
+/// Ein signierter initialer Grant auf `entry_hash`.
+///
+/// Der Aussteller ist derselbe Schluessel, der auch die Eintraege signiert:
+/// `GrantV1::new` bindet die Ausstellersignatur an
+/// `issuer_key_thumbprint`/`issuer_certificate_hash` des Rumpfes, und nur so
+/// ist der Grant ueberhaupt parsbar. Ob dieser Aussteller die Capability
+/// tatsaechlich traegt, entscheidet Gate `recipient-grant`, nicht dieses Modul.
+fn grant_bytes(
+    chain_id: ChainId,
+    entry_hash: EntryHash,
+    purpose: GrantPurposeV1,
+    writer_certificate_hash: CertificateHash,
+    registry_version: RegistryVersion,
+    registry_head_hash: Hash32,
+) -> Vec<u8> {
+    let (recipient_key_thumbprint, recipient_certificate_hash) = match purpose {
+        GrantPurposeV1::Recovery => (
+            recovery_recipient_key_thumbprint(),
+            recovery_recipient_certificate_hash(),
+        ),
+        GrantPurposeV1::Reader => (
+            reader_recipient_key_thumbprint(),
+            reader_recipient_certificate_hash(),
+        ),
+    };
+    let body = GrantBodyV1::new(GrantBodyFieldsV1 {
+        organization_id: trust_support::organization(),
+        chain_id,
+        entry_hash,
+        kind: GrantKindV1::Initial,
+        purpose,
+        recipient_key_thumbprint,
+        recipient_certificate_hash,
+        issuer_key_thumbprint: writer_device_key_thumbprint(),
+        issuer_certificate_hash: writer_certificate_hash,
+        registry_version,
+        registry_head_hash,
+        created_at_device: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
+        original_recovery_grant_object_hash: None,
+        grant_authorization_object_hash: None,
+        encapsulated_key: [0x07; HPKE_ENCAPSULATED_KEY_SIZE],
+        wrapped_cek: [0x08; HPKE_WRAPPED_CEK_SIZE],
+    })
+    .expect("der Fixture-Grantrumpf muss kodieren");
+    let signature = writer_device_signer()
+        .sign_initial_grant(body.exact_bytes())
+        .expect("der Fixture-Aussteller muss signieren");
+    let grant = GrantV1::new(body, signature).expect("der Fixture-Grant muss binden");
+    encode_grant(&grant)
+        .expect("der Fixture-Grant muss kodieren")
+        .into_vec()
+}
+
+/// Die Linie aus Policy-Kopf und Schreiberkopf, die alle Eintragsfixtures
+/// teilen.
+struct WriterLine {
+    line: trust_support::RegistryLineBuilder,
+    head: trust_support::BuiltHead,
+    writer_certificate_hash: CertificateHash,
+    anchor_bytes: Vec<u8>,
+}
+
+impl WriterLine {
+    fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+
+    /// Der Kopfhash als `Hash32`, wie ihn das Manifest traegt.
+    fn head_hash(&self) -> Hash32 {
+        Hash32::try_from(self.head.object_hash.as_bytes().as_slice())
+            .expect("ein Objekthash sind 32 Bytes")
+    }
+}
+
+/// Baut die geteilte Linie: Policy auf dem Genesisfach, dann das
+/// Schreiberzertifikat fuer die Sequenzen eins bis hundert.
+fn writer_line() -> WriterLine {
+    let mut line = trust_support::RegistryLineBuilder::new();
+    line.push(
+        policy_action(),
+        trust_support::HeadOptions {
+            effective_from: Some(POLICY_LEASE_FROM_V1),
+            valid_through: Some(POLICY_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x11,
+            effective_from: None,
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(WRITER_LEASE_FROM_V1),
+            valid_through: Some(WRITER_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let writer_certificate_hash = CertificateHash::from(
+        head.direct_object_hash
+            .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+    );
+    let anchor_bytes = line.exact_anchor_bytes().to_vec();
+    WriterLine {
+        line,
+        head,
+        writer_certificate_hash,
+        anchor_bytes,
+    }
+}
+
 /// Ein Bestand mit zwei Registrierungskoepfen und zwei Eintragspaketen.
 ///
 /// Der Trust Anchor liegt BEWUSST neben dem Bestand und nicht darin: er ist
@@ -160,86 +476,49 @@ impl WriterArchive {
 /// dieses Fixtures ist genau EIN Quarantaeneeintrag.
 #[must_use]
 pub fn archive_with_one_unknown_writer() -> WriterArchive {
-    let mut line = trust_support::RegistryLineBuilder::new();
-    line.push(
-        policy_action(),
-        trust_support::HeadOptions {
-            effective_from: Some(POLICY_LEASE_FROM_V1),
-            valid_through: Some(POLICY_LEASE_THROUGH_V1),
-            ..trust_support::HeadOptions::default()
-        },
-    );
-    let head = line.push(
-        trust_support::ActionSpec::Device {
-            kind: CertificateKindV1::Writer,
-            marker: 0x11,
-            effective_from: None,
-        },
-        trust_support::HeadOptions {
-            effective_from: Some(WRITER_LEASE_FROM_V1),
-            valid_through: Some(WRITER_LEASE_THROUGH_V1),
-            ..trust_support::HeadOptions::default()
-        },
-    );
-    let writer_certificate_hash = CertificateHash::from(
-        head.direct_object_hash
-            .expect("ein Device-Uebergang traegt ein direktes Ziel"),
-    );
-    let anchor_bytes = line.exact_anchor_bytes().to_vec();
-    let anchor = decode_trust_anchor(&anchor_bytes).expect("der Fixture-Anker muss dekodieren");
-    let registry_head_hash = Hash32::try_from(head.object_hash.as_bytes().as_slice())
-        .expect("ein Objekthash sind 32 Bytes");
-
+    let line = writer_line();
+    let anchor = line.anchor();
     let mut fixture = ArchiveFixture::new();
-    let trust_object_count = push_trust_objects(&mut fixture, &line);
+    let trust_object_count = push_trust_objects(&mut fixture, &line.line);
 
     // Sequenz 1 folgt auf den Genesis-Eintrag des Ankers: ein Manifest mit
     // Sequenz > 0 MUSS einen Vorgaenger benennen (`ea-format` prueft das schon
-    // beim Kodieren). Gate `chain-position` prueft die Kette selbst erst
-    // spaeter; hier zaehlt nur, dass die Bytes wohlgeformt sind.
-    let (known_entry, known_bytes) = entry_package(
-        anchor.chain_id(),
-        KNOWN_WRITER_SEQUENCE_V1,
-        Some(anchor.genesis_entry_hash()),
-        writer_certificate_hash,
-        head.version,
-        registry_head_hash,
-    );
-    let (_, unknown_bytes) = entry_package(
-        anchor.chain_id(),
-        UNKNOWN_WRITER_SEQUENCE_V1,
-        Some(known_entry.entry_hash()),
-        unknown_writer_certificate_hash(),
-        head.version,
-        registry_head_hash,
-    );
-    let known_writer_object_hash = object_hash(&known_bytes);
-    let unknown_writer_object_hash = object_hash(&unknown_bytes);
+    // beim Kodieren).
+    let known = build_entry(&EntrySpec {
+        chain_id: anchor.chain_id(),
+        chain_sequence: KNOWN_WRITER_SEQUENCE_V1,
+        previous_entry_hash: Some(anchor.genesis_entry_hash()),
+        writer_certificate_hash: line.writer_certificate_hash,
+        registry_version: line.head.version,
+        registry_head_hash: line.head_hash(),
+        nonce_marker: DEFAULT_NONCE_MARKER_V1,
+        plan: GrantPlanSpec::Recovery,
+    });
+    let unknown = build_entry(&EntrySpec {
+        chain_id: anchor.chain_id(),
+        chain_sequence: UNKNOWN_WRITER_SEQUENCE_V1,
+        previous_entry_hash: Some(known.entry.entry_hash()),
+        writer_certificate_hash: unknown_writer_certificate_hash(),
+        registry_version: line.head.version,
+        registry_head_hash: line.head_hash(),
+        nonce_marker: DEFAULT_NONCE_MARKER_V1,
+        plan: GrantPlanSpec::Recovery,
+    });
+    let known_writer_object_hash = object_hash(&known.bytes);
+    let unknown_writer_object_hash = object_hash(&unknown.bytes);
     assert!(
         known_writer_object_hash != unknown_writer_object_hash,
         "die beiden Eintraege muessen verschiedene Objekte sein"
     );
 
-    fixture.push_exact_bytes(
-        &format!(
-            "{}{KNOWN_WRITER_SEQUENCE_V1:012}_entry.eip",
-            ea_archive::ENTRIES_DIR_V1
-        ),
-        known_bytes,
-    );
-    fixture.push_exact_bytes(
-        &format!(
-            "{}{UNKNOWN_WRITER_SEQUENCE_V1:012}_entry.eip",
-            ea_archive::ENTRIES_DIR_V1
-        ),
-        unknown_bytes,
-    );
+    push_entry(&mut fixture, KNOWN_WRITER_SEQUENCE_V1, known);
+    push_entry(&mut fixture, UNKNOWN_WRITER_SEQUENCE_V1, unknown);
 
     WriterArchive {
         fixture,
-        anchor_bytes,
-        registry_version: head.version,
-        writer_certificate_hash,
+        anchor_bytes: line.anchor_bytes,
+        registry_version: line.head.version,
+        writer_certificate_hash: line.writer_certificate_hash,
         known_writer_object_hash,
         unknown_writer_object_hash,
         trust_object_count,
@@ -251,8 +530,8 @@ pub const SECOND_LEASE_FROM_V1: u64 = 2;
 /// Letzte Sequenz dieser Lease.
 pub const SECOND_LEASE_THROUGH_V1: u64 = 100;
 
-/// Das Fuellbyte, das die Inventarreihenfolge gegen die Sequenzreihenfolge
-/// stellt.
+/// Das Fuellbyte der `nonce`, das die Inventarreihenfolge gegen die
+/// Sequenzreihenfolge stellt.
 ///
 /// Das Inventar ordnet nach Objekthash. Damit ein Test ueberhaupt merken kann,
 /// ob die Pipeline nach Sequenz behandelt, muss der Eintrag mit der HOEHEREN
@@ -269,7 +548,19 @@ pub const SECOND_LEASE_THROUGH_V1: u64 = 100;
 /// ein anderer Objekthash. Genau dafuer ist die Behauptung in
 /// [`archive_with_a_second_lease`] eine Pruefung — sie brach laut, statt den
 /// Test still aussagelos werden zu lassen.
-pub const DESCENDING_HASH_MARKER_V1: u8 = 0x02;
+///
+/// Mit Gate `grant-plan` wanderte der Marker vom `initial_grant_plan_hash` in
+/// die `nonce` und dabei von `0x02` auf `0x01`. Der Planhash ist seither eine
+/// SACHAUSSAGE — Gate 6 rechnet gegen ihn —, und ein Fuellbyte darin haette
+/// entweder den Test verfaelscht oder das Gate. Die `nonce` liest in diesem
+/// Stand kein Gate; sie ist damit der einzige Freiheitsgrad, der den Objekthash
+/// bewegt, ohne eine Aussage anzutasten. Der neue Wert ist der KLEINSTE, der
+/// die gesuchte Ordnung herstellt; ein Durchlauf ueber alle 256 Fuellbytes
+/// liefert 67 taugliche, die Auswahl ist also weder knapp noch zufaellig.
+pub const DESCENDING_HASH_MARKER_V1: u8 = 0x01;
+
+/// Das Fuellbyte der `nonce` aller uebrigen Fixture-Eintraege.
+pub const DEFAULT_NONCE_MARKER_V1: u8 = 0x07;
 
 /// Ein Bestand, dessen zwei Eintraege unter VERSCHIEDENEN Registrierungskoepfen
 /// liegen und dessen Inventarreihenfolge der Sequenzreihenfolge widerspricht.
@@ -353,45 +644,36 @@ pub fn archive_with_a_second_lease() -> LeasedArchive {
         .expect("ein Objekthash sind 32 Bytes");
     let late_head_hash = Hash32::try_from(late_head.object_hash.as_bytes().as_slice())
         .expect("ein Objekthash sind 32 Bytes");
-    let (early_entry, early_bytes) = entry_package(
-        anchor.chain_id(),
-        KNOWN_WRITER_SEQUENCE_V1,
-        Some(anchor.genesis_entry_hash()),
+    let early = build_entry(&EntrySpec {
+        chain_id: anchor.chain_id(),
+        chain_sequence: KNOWN_WRITER_SEQUENCE_V1,
+        previous_entry_hash: Some(anchor.genesis_entry_hash()),
         writer_certificate_hash,
-        writer_head.version,
-        early_head_hash,
-    );
-    let (_, late_bytes) = entry_package_marked(
-        anchor.chain_id(),
-        UNKNOWN_WRITER_SEQUENCE_V1,
-        Some(early_entry.entry_hash()),
+        registry_version: writer_head.version,
+        registry_head_hash: early_head_hash,
+        nonce_marker: DEFAULT_NONCE_MARKER_V1,
+        plan: GrantPlanSpec::Recovery,
+    });
+    let late = build_entry(&EntrySpec {
+        chain_id: anchor.chain_id(),
+        chain_sequence: UNKNOWN_WRITER_SEQUENCE_V1,
+        previous_entry_hash: Some(early.entry.entry_hash()),
         writer_certificate_hash,
-        late_head.version,
-        late_head_hash,
-        DESCENDING_HASH_MARKER_V1,
-    );
-    let early_object_hash = object_hash(&early_bytes);
-    let late_object_hash = object_hash(&late_bytes);
+        registry_version: late_head.version,
+        registry_head_hash: late_head_hash,
+        nonce_marker: DESCENDING_HASH_MARKER_V1,
+        plan: GrantPlanSpec::Recovery,
+    });
+    let early_object_hash = object_hash(&early.bytes);
+    let late_object_hash = object_hash(&late.bytes);
     assert!(
         late_object_hash < early_object_hash,
         "DESCENDING_HASH_MARKER_V1 stellt die Inventarreihenfolge nicht mehr \
          gegen die Sequenzreihenfolge; der Test waere sonst aussagelos"
     );
 
-    fixture.push_exact_bytes(
-        &format!(
-            "{}{KNOWN_WRITER_SEQUENCE_V1:012}_entry.eip",
-            ea_archive::ENTRIES_DIR_V1
-        ),
-        early_bytes,
-    );
-    fixture.push_exact_bytes(
-        &format!(
-            "{}{UNKNOWN_WRITER_SEQUENCE_V1:012}_entry.eip",
-            ea_archive::ENTRIES_DIR_V1
-        ),
-        late_bytes,
-    );
+    push_entry(&mut fixture, KNOWN_WRITER_SEQUENCE_V1, early);
+    push_entry(&mut fixture, UNKNOWN_WRITER_SEQUENCE_V1, late);
 
     LeasedArchive {
         fixture,
@@ -475,47 +757,34 @@ pub fn archive_with_one_mutated_entry(offset: usize) -> SignedEntryArchive {
 /// behauptet. Eine Layoutaenderung in `ea-format` bricht hier laut, statt die
 /// Mutationen stillschweigend an eine andere Stelle wandern zu lassen.
 fn signed_entry_archive(mutation: Option<usize>) -> SignedEntryArchive {
-    let mut line = trust_support::RegistryLineBuilder::new();
-    line.push(
-        policy_action(),
-        trust_support::HeadOptions {
-            effective_from: Some(POLICY_LEASE_FROM_V1),
-            valid_through: Some(POLICY_LEASE_THROUGH_V1),
-            ..trust_support::HeadOptions::default()
-        },
-    );
-    let head = line.push(
-        trust_support::ActionSpec::Device {
-            kind: CertificateKindV1::Writer,
-            marker: 0x11,
-            effective_from: None,
-        },
-        trust_support::HeadOptions {
-            effective_from: Some(WRITER_LEASE_FROM_V1),
-            valid_through: Some(WRITER_LEASE_THROUGH_V1),
-            ..trust_support::HeadOptions::default()
-        },
-    );
-    let writer_certificate_hash = CertificateHash::from(
-        head.direct_object_hash
-            .expect("ein Device-Uebergang traegt ein direktes Ziel"),
-    );
-    let anchor_bytes = line.exact_anchor_bytes().to_vec();
-    let anchor = decode_trust_anchor(&anchor_bytes).expect("der Fixture-Anker muss dekodieren");
-    let registry_head_hash = Hash32::try_from(head.object_hash.as_bytes().as_slice())
-        .expect("ein Objekthash sind 32 Bytes");
+    let line = writer_line();
+    let anchor = line.anchor();
+    let writer_certificate_hash = line.writer_certificate_hash;
+    let head = line.head;
 
     let mut fixture = ArchiveFixture::new();
-    push_trust_objects(&mut fixture, &line);
+    push_trust_objects(&mut fixture, &line.line);
 
-    let (_, bytes) = entry_package(
-        anchor.chain_id(),
-        KNOWN_WRITER_SEQUENCE_V1,
-        Some(anchor.genesis_entry_hash()),
+    // OHNE Grant, sobald mutiert wird: die Mutation trifft in beiden Faellen
+    // die COSE-Struktur der Schreibersignatur und veraendert damit den
+    // `entryHash`. Ein mitgelieferter Grant zeigte danach ins Leere und waere
+    // ein VERWAISTER Grant — ein zweiter Befund neben dem einen, den diese
+    // Fixture zeigen will.
+    let built = build_entry(&EntrySpec {
+        chain_id: anchor.chain_id(),
+        chain_sequence: KNOWN_WRITER_SEQUENCE_V1,
+        previous_entry_hash: Some(anchor.genesis_entry_hash()),
         writer_certificate_hash,
-        head.version,
-        registry_head_hash,
-    );
+        registry_version: head.version,
+        registry_head_hash: line.head_hash(),
+        nonce_marker: DEFAULT_NONCE_MARKER_V1,
+        plan: if mutation.is_none() {
+            GrantPlanSpec::Recovery
+        } else {
+            GrantPlanSpec::Omitted
+        },
+    });
+    let bytes = built.bytes;
     assert_eq!(
         bytes.len(),
         SIGNED_EIP_LENGTH_V1,
@@ -552,10 +821,13 @@ fn signed_entry_archive(mutation: Option<usize>) -> SignedEntryArchive {
         ),
         bytes,
     );
+    if let Some(grant) = built.grant_bytes {
+        push_grant(&mut fixture, KNOWN_WRITER_SEQUENCE_V1, grant);
+    }
 
     SignedEntryArchive {
         fixture,
-        anchor_bytes,
+        anchor_bytes: line.anchor_bytes,
         registry_version: head.version,
         writer_certificate_hash,
         entry_object_hash,
@@ -635,70 +907,329 @@ fn push_trust_objects(
     count
 }
 
-/// Ein signiertes `.eip` mit frei gewaehltem Schreiberzertifikat.
+/// Legt einen gebauten Eintrag samt seinem Grant im Bestand ab.
 ///
-/// Die COSE-Bindung des Schreibers folgt dem Manifest: `sign_record` liest den
-/// Zertifikatshash aus den signierten Manifestbytes. Die Bytes sind damit
-/// parsbar, und ob das Zertifikat existiert, entscheidet erst Gate `registry`.
-fn entry_package(
+/// Der Pfadhinweis ist ein Hinweis: klassifiziert wird am Praefix.
+fn push_entry(fixture: &mut ArchiveFixture, chain_sequence: u64, built: BuiltEntry) {
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{chain_sequence:012}_entry.eip",
+            ea_archive::ENTRIES_DIR_V1
+        ),
+        built.bytes,
+    );
+    if let Some(grant) = built.grant_bytes {
+        push_grant(fixture, chain_sequence, grant);
+    }
+}
+
+/// Legt Grantbytes im Bestand ab.
+fn push_grant(fixture: &mut ArchiveFixture, chain_sequence: u64, bytes: Vec<u8>) {
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{chain_sequence:012}_grant.eag",
+            ea_archive::GRANTS_DIR_V1
+        ),
+        bytes,
+    );
+}
+
+/// Ein Bestand mit einer echten Registrierungslinie und einer Eintragskette.
+///
+/// Ein Typ fuer alle Fixtures der Gates `chain-position` und `grant-plan`: die
+/// fuenf Faelle unterscheiden sich im BESTAND, nicht in dem, was ein Test von
+/// ihm wissen muss.
+pub struct ChainArchive {
+    pub fixture: ArchiveFixture,
+    pub anchor_bytes: Vec<u8>,
+    /// Objekthashes der abgelegten Eintraege, in Sequenzreihenfolge.
+    pub entry_object_hashes: Vec<ObjectHash>,
+    /// Eintragshashes derselben Eintraege, in derselben Reihenfolge.
+    pub entry_hashes: Vec<EntryHash>,
+    /// Objekthash des verwaisten Grants, falls das Fixture einen ablegt.
+    pub orphan_grant_object_hash: Option<ObjectHash>,
+}
+
+impl ChainArchive {
+    #[must_use]
+    pub fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+}
+
+/// Erste Sequenz der Eintragsketten dieses Moduls.
+///
+/// Eins und nicht null: siehe [`GENESIS_GAP_SEQUENCE_V1`].
+pub const FIRST_ENTRY_SEQUENCE_V1: u64 = 1;
+
+/// Die Sequenz, die [`archive_with_a_missing_middle_entry`] auslaesst.
+pub const MISSING_MIDDLE_SEQUENCE_V1: u64 = 3;
+
+/// Ein Bestand, in dem zwei Eintraege ihre Vorgaengerbindung TAUSCHEN.
+///
+/// Drei Sequenzen, eins bis drei. Der erste Eintrag bindet den Genesis-Eintrag
+/// des Ankers und bleibt unstrittig.
+///
+/// DER TAUSCH IST NOTWENDIG UNSYMMETRISCH, und das ist keine Nachlaessigkeit,
+/// sondern eine Folge der Hashkette. Sequenz drei traegt `EA`, den
+/// Eintragshash von Sequenz eins — also genau die Bindung, die SEQUENZ ZWEI
+/// tragen muesste. Die Gegenrichtung ist unerreichbar: Sequenz zwei muesste
+/// dafuer den Eintragshash von Sequenz drei tragen, und der haengt an einem
+/// Manifest, das seinerseits erst entsteht, wenn Sequenz zwei feststeht.
+/// Stattdessen traegt Sequenz zwei `EB` — den Eintragshash der UNGETAUSCHTEN
+/// zweiten Fassung, die gebaut und nie abgelegt wird. Ihre Bindung zeigt damit
+/// auf ein Objekt, das es im Bestand nicht gibt.
+///
+/// WER DAS ZU EINEM SYMMETRISCHEN TAUSCH „REPARIERT", zerstoert den Test: die
+/// Symmetrie ist ohne eine Hashkollision nicht konstruierbar, und jeder
+/// Versuch endet entweder in einer Zirkelrechnung oder in nur EINEM Bruch.
+///
+/// Erwarteter Befund, beide Male ein Vorgaengerbruch gegen die unmittelbar
+/// vorangehende Sequenz: Sequenz zwei bindet `EB`, die Sequenz eins traegt aber
+/// `EA`; Sequenz drei bindet `EA`, die Sequenz zwei traegt aber ihren eigenen,
+/// neuen Eintragshash. Also ZWEI isolierte Objekte mit Grund `conflicting` —
+/// und ausdruecklich keine Luecke ueber den beiden Sequenzen: die Eintraege
+/// sind da, sie widersprechen sich nur.
+#[must_use]
+pub fn archive_with_swapped_predecessors() -> ChainArchive {
+    let line = writer_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let first = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1,
+        Some(anchor.genesis_entry_hash()),
+    ));
+    // Die ungetauschte zweite Fassung: sie liefert allein ihren Eintragshash
+    // und wird nicht abgelegt.
+    let unswapped_second = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1 + 1,
+        Some(first.entry.entry_hash()),
+    ));
+    let second = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1 + 1,
+        Some(unswapped_second.entry.entry_hash()),
+    ));
+    let third = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1 + 2,
+        Some(first.entry.entry_hash()),
+    ));
+
+    let entry_object_hashes = vec![
+        object_hash(&first.bytes),
+        object_hash(&second.bytes),
+        object_hash(&third.bytes),
+    ];
+    let entry_hashes = vec![
+        first.entry.entry_hash(),
+        second.entry.entry_hash(),
+        third.entry.entry_hash(),
+    ];
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1, first);
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1 + 1, second);
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1 + 2, third);
+
+    ChainArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hashes,
+        entry_hashes,
+        orphan_grant_object_hash: None,
+    }
+}
+
+/// Ein Bestand, dem GENAU EIN Eintrag in der Mitte fehlt.
+///
+/// Die Sequenzen eins, zwei und vier liegen vor, die drei fehlt. Der Eintrag
+/// auf Sequenz vier bindet dabei den Eintragshash des FEHLENDEN Eintrags —
+/// genau so sieht ein Bestand aus, aus dem ein Objekt verschwunden ist, und
+/// gerade nicht wie ein Bruch: `ea-chain` vergleicht Vorgaengerbindungen nur
+/// zwischen unmittelbar benachbarten Sequenzen.
+#[must_use]
+pub fn archive_with_a_missing_middle_entry() -> ChainArchive {
+    let line = writer_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let first = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1,
+        Some(anchor.genesis_entry_hash()),
+    ));
+    let second = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1 + 1,
+        Some(first.entry.entry_hash()),
+    ));
+    // Der Eintrag, der fehlt. Er wird gebaut und nicht abgelegt.
+    let missing = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        MISSING_MIDDLE_SEQUENCE_V1,
+        Some(second.entry.entry_hash()),
+    ));
+    let fourth = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        MISSING_MIDDLE_SEQUENCE_V1 + 1,
+        Some(missing.entry.entry_hash()),
+    ));
+
+    let entry_object_hashes = vec![
+        object_hash(&first.bytes),
+        object_hash(&second.bytes),
+        object_hash(&fourth.bytes),
+    ];
+    let entry_hashes = vec![
+        first.entry.entry_hash(),
+        second.entry.entry_hash(),
+        fourth.entry.entry_hash(),
+    ];
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1, first);
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1 + 1, second);
+    push_entry(&mut fixture, MISSING_MIDDLE_SEQUENCE_V1 + 1, fourth);
+
+    ChainArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hashes,
+        entry_hashes,
+        orphan_grant_object_hash: None,
+    }
+}
+
+/// Der Eintragshash, auf den der verwaiste Grant zeigt.
+///
+/// Ein Eintragshash entsteht aus SHA-256 ueber signiertes Manifest und
+/// Signatur; eine konstante Bytefolge ist deshalb mit an Sicherheit grenzender
+/// Wahrscheinlichkeit keiner.
+#[must_use]
+pub fn orphan_grant_entry_hash() -> EntryHash {
+    EntryHash::try_from(&[0x77_u8; 32][..]).expect("32 Bytes sind ein Eintragshash")
+}
+
+/// Ein unstrittiger Bestand mit EINEM zusaetzlichen, verwaisten Grant.
+///
+/// Der Grant ist wohlgeformt und ausstellersigniert, sein `entryHash` zeigt
+/// aber auf kein Objekt des Bestands. Er ist damit niemandem zuzuordnen —
+/// `unattributable` — und beruehrt die Kette nicht: ein Grant beansprucht kein
+/// Sequenzfach.
+#[must_use]
+pub fn archive_with_an_orphan_grant() -> ChainArchive {
+    let line = writer_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let first = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1,
+        Some(anchor.genesis_entry_hash()),
+    ));
+    let second = build_entry(&chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1 + 1,
+        Some(first.entry.entry_hash()),
+    ));
+    let entry_object_hashes = vec![object_hash(&first.bytes), object_hash(&second.bytes)];
+    let entry_hashes = vec![first.entry.entry_hash(), second.entry.entry_hash()];
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1, first);
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1 + 1, second);
+
+    let orphan = grant_bytes(
+        anchor.chain_id(),
+        orphan_grant_entry_hash(),
+        GrantPurposeV1::Recovery,
+        line.writer_certificate_hash,
+        line.head.version,
+        line.head_hash(),
+    );
+    let orphan_grant_object_hash = object_hash(&orphan);
+    push_grant(&mut fixture, MISSING_MIDDLE_SEQUENCE_V1 + 6, orphan);
+
+    ChainArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hashes,
+        entry_hashes,
+        orphan_grant_object_hash: Some(orphan_grant_object_hash),
+    }
+}
+
+/// Ein Bestand mit genau einem Eintrag, dessen `initial_grant_plan_hash`
+/// NICHT der Hash des mitgelieferten Plans ist.
+///
+/// Der Eintrag ist unversehrt signiert und kettenrichtig; er faellt allein an
+/// Gate `grant-plan`.
+#[must_use]
+pub fn archive_with_a_mismatched_grant_plan_hash() -> ChainArchive {
+    single_entry_archive(GrantPlanSpec::MismatchedHash)
+}
+
+/// Ein Bestand mit genau einem Eintrag, dem der VERPFLICHTENDE Recovery-Grant
+/// fehlt: neben ihm liegt nur ein Reader-Grant.
+#[must_use]
+pub fn archive_without_a_recovery_grant() -> ChainArchive {
+    single_entry_archive(GrantPlanSpec::ReaderOnly)
+}
+
+/// Ein Bestand mit genau einem Eintrag auf der ersten Sequenz.
+fn single_entry_archive(plan: GrantPlanSpec) -> ChainArchive {
+    let line = writer_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let mut spec = chain_entry_spec(
+        &line,
+        anchor.chain_id(),
+        FIRST_ENTRY_SEQUENCE_V1,
+        Some(anchor.genesis_entry_hash()),
+    );
+    spec.plan = plan;
+    let built = build_entry(&spec);
+    let entry_object_hashes = vec![object_hash(&built.bytes)];
+    let entry_hashes = vec![built.entry.entry_hash()];
+    push_entry(&mut fixture, FIRST_ENTRY_SEQUENCE_V1, built);
+
+    ChainArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hashes,
+        entry_hashes,
+        orphan_grant_object_hash: None,
+    }
+}
+
+/// Der gemeinsame Zuschnitt eines Kettenfixture-Eintrags.
+fn chain_entry_spec(
+    line: &WriterLine,
     chain_id: ChainId,
     chain_sequence: u64,
     previous_entry_hash: Option<EntryHash>,
-    writer_certificate_hash: CertificateHash,
-    registry_version: ea_types::RegistryVersion,
-    registry_head_hash: Hash32,
-) -> (EntryPackageV1, Vec<u8>) {
-    entry_package_marked(
+) -> EntrySpec {
+    EntrySpec {
         chain_id,
         chain_sequence,
         previous_entry_hash,
-        writer_certificate_hash,
-        registry_version,
-        registry_head_hash,
-        0x6b,
-    )
-}
-
-/// Wie [`entry_package`], aber mit waehlbarem Fuellbyte im Grant-Plan-Hash.
-///
-/// Das Byte veraendert nichts Fachliches — kein Gate dieses Tasks liest den
-/// Grant-Plan-Hash —, wohl aber den Objekthash des Eintrags. Genau das braucht
-/// [`archive_with_a_second_lease`], um die Inventarreihenfolge gezielt gegen
-/// die Sequenzreihenfolge zu stellen.
-fn entry_package_marked(
-    chain_id: ChainId,
-    chain_sequence: u64,
-    previous_entry_hash: Option<EntryHash>,
-    writer_certificate_hash: CertificateHash,
-    registry_version: ea_types::RegistryVersion,
-    registry_head_hash: Hash32,
-    grant_plan_marker: u8,
-) -> (EntryPackageV1, Vec<u8>) {
-    let ciphertext = vec![0x5a; 16];
-    let manifest = ManifestCoreV1::new(
-        ManifestCoreFieldsV1 {
-            organization_id: trust_support::organization(),
-            chain_id,
-            chain_sequence: ChainSequence::new(chain_sequence),
-            previous_entry_hash,
-            writer_certificate_hash,
-            writer_transition_event_hash: None,
-            registry_version,
-            registry_head_hash: *registry_head_hash.as_bytes(),
-            initial_grant_plan_hash: [grant_plan_marker; 32],
-            nonce: [0x07; 12],
-        },
-        &ciphertext,
-    )
-    .expect("das Fixture-Manifest muss kodieren");
-    let signed = SignedManifestV1::new(manifest, &ciphertext).expect("das Manifest muss binden");
-    let signature = writer_device_signer()
-        .sign_record(signed.exact_bytes())
-        .expect("der Fixture-Signierer muss signieren");
-    let entry = EntryPackageV1::new(signed, ciphertext, signature)
-        .expect("das Fixture-Eintragspaket muss sich zusammensetzen");
-    let bytes = encode_entry_package(&entry)
-        .expect("das Fixture-Eintragspaket muss kodieren")
-        .into_vec();
-    (entry, bytes)
+        writer_certificate_hash: line.writer_certificate_hash,
+        registry_version: line.head.version,
+        registry_head_hash: line.head_hash(),
+        nonce_marker: DEFAULT_NONCE_MARKER_V1,
+        plan: GrantPlanSpec::Recovery,
+    }
 }

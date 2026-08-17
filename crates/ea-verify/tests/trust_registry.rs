@@ -18,8 +18,8 @@ use ea_types::{ChainSequence, DeviceId, Id16, UnixMillis};
 use ea_verify::{EphemeralTrustStateStore, VerifyOptions, verification_state_key, verify_archive};
 
 use support::{
-    FIXTURE_OS_WALL_CLOCK_V1, KNOWN_WRITER_SEQUENCE_V1, archive_with_a_second_lease,
-    archive_with_one_unknown_writer,
+    FIXTURE_OS_WALL_CLOCK_V1, GENESIS_GAP_SEQUENCE_V1, KNOWN_WRITER_SEQUENCE_V1,
+    UNKNOWN_WRITER_SEQUENCE_V1, archive_with_a_second_lease, archive_with_one_unknown_writer,
 };
 
 fn clock() -> UnixMillis {
@@ -43,10 +43,23 @@ fn an_entry_with_an_unknown_writer_certificate_is_unattributable_not_a_gap() {
     assert_eq!(report.destroyed_entry_count(), 0);
     assert_eq!(report.format_errors().len(), 0);
 
-    // Der Befund: KEINE Luecke, sondern genau ein unzuordenbares Objekt.
-    assert_eq!(
-        report.gaps().len(),
-        0,
+    // Der Befund: KEINE Luecke ueber der Sequenz des unzuordenbaren Eintrags,
+    // sondern genau ein unzuordenbares Objekt.
+    //
+    // Die einzige Luecke des Bestands ist die fehlende Genesis auf Sequenz null
+    // — sie traegt JEDER Bestand dieses Moduls, und `support` haelt die Messung
+    // fest, warum sie mit `trust_support::RegistryLineBuilder` nicht zu
+    // vermeiden ist. Geprueft wird deshalb die scharfe Fassung derselben
+    // Aussage: ueber `UNKNOWN_WRITER_SEQUENCE_V1` liegt keine Luecke.
+    let gaps: Vec<_> = report.gaps().collect();
+    assert_eq!(gaps.len(), 1, "ausser der Genesis fehlt nichts");
+    assert_eq!(gaps[0].from_sequence().get(), GENESIS_GAP_SEQUENCE_V1);
+    assert_eq!(gaps[0].through_sequence().get(), GENESIS_GAP_SEQUENCE_V1);
+    assert!(
+        !gaps.iter().any(|gap| {
+            (gap.from_sequence().get()..=gap.through_sequence().get())
+                .contains(&UNKNOWN_WRITER_SEQUENCE_V1)
+        }),
         "ein unzuordenbarer Eintrag darf nie als blosse Luecke erscheinen"
     );
     let quarantined: Vec<_> = report.quarantined_objects().collect();

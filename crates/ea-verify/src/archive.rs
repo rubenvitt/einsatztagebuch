@@ -1,13 +1,15 @@
 //! Der Einstiegspunkt der Verifikation: [`verify_archive`].
 //!
-//! DIESE FASSUNG fuehrt die Gates `format`, `trust`, `registry` und
-//! `manifest-signature` aus. Die Gates `chain-position` bis `recipient-grant`
-//! folgen in den naechsten Tasks; solange bleibt `pipeline_completed` falsch,
-//! und der Bestand gilt ausdruecklich NICHT als vollstaendig verifiziert.
+//! DIESE FASSUNG fuehrt die Gates `format`, `trust`, `registry`,
+//! `manifest-signature`, `chain-position` und `grant-plan` aus. Die Gates
+//! `receipt` bis `recipient-grant` folgen in den naechsten Tasks; solange
+//! bleibt `pipeline_completed` falsch, und der Bestand gilt ausdruecklich NICHT
+//! als vollstaendig verifiziert.
 
 use core::marker::PhantomData;
 
 use ea_archive::{ArchiveInventory, ArchiveSource, QuarantineReason};
+use ea_chain::{ChainNode, build_chain};
 use ea_crypto::{VerificationContext, verify_cose_sign1};
 use ea_format::{CertificateKindV1, EntryPackageV1, Parsed};
 use ea_trust::{
@@ -18,8 +20,12 @@ use ea_trust::{
 use ea_types::{CertificateHash, ChainSequence, KeyThumbprint, ObjectHash, UnixMillis};
 
 use crate::{
-    ChainHeadV1, EphemeralTrustStateStore, ManifestSignatureErrorV1, ObjectErrorV1,
-    QuarantinedObjectV1, VerificationReportV1, VerifyError, state::verification_state_key,
+    ChainGapV1, ChainHeadV1, EphemeralTrustStateStore, ManifestSignatureErrorV1, ObjectErrorV1,
+    QuarantinedObjectV1, VerificationReportV1, VerifyError,
+    entry::{
+        claims_unverifiable_writer_transition, entry_chain_node, grant_plan_finding, orphan_grants,
+    },
+    state::verification_state_key,
 };
 
 /// Die Stellschrauben eines Verifikationslaufs.
@@ -146,6 +152,12 @@ pub fn verify_archive(
             entry.object_hash(),
         )
     });
+    // Die Knotenmenge von Gate `chain-position` und die Objekte, die Gate
+    // `grant-plan` ueberhaupt erreichen. Beides entsteht in DIESER Schleife,
+    // wird aber erst NACH ihr verbraucht: eine Kette ist erst zu beurteilen,
+    // wenn alle ihre Knoten vorliegen.
+    let mut nodes: Vec<ChainNode> = Vec::new();
+    let mut placed: Vec<&Parsed<EntryPackageV1>> = Vec::new();
     for entry in ordered {
         let object_hash = entry.object_hash();
         // Ein bereits isoliertes Objekt geht nicht weiter durch die Gates: es
@@ -179,6 +191,20 @@ pub fn verify_archive(
             Ok(thumbprint) => {
                 report.registry_versions.insert(fields.registry_version);
                 report.public_key_thumbprints.insert(thumbprint);
+
+                // Ein Eintrag mit FREMDER Kettenkennung kommt gar nicht erst in
+                // die Knotenmenge: `build_chain` beantwortete ihn mit
+                // `ForeignChainId` und kippte damit die Aussage ueber den
+                // GANZEN Bestand. Er ist nicht zuordenbar — und ein nicht
+                // zuordenbarer Eintrag darf nie als blosse Luecke erscheinen.
+                if fields.chain_id != anchor.chain_id()
+                    || claims_unverifiable_writer_transition(entry)
+                {
+                    quarantine_unattributable(&mut report, object_hash);
+                    continue;
+                }
+                nodes.push(entry_chain_node(entry));
+                placed.push(entry);
             }
             Err(error) => {
                 // NUR ein Signaturbefund, KEIN Quarantaeneeintrag daneben: ein
@@ -190,7 +216,85 @@ pub fn verify_archive(
         }
     }
 
+    // Gate `chain-position`: einmal ueber die ganze Knotenmenge. Sequenz und
+    // Vorgaengerbindung sind keine Eigenschaft eines Objekts, sondern eine
+    // Beziehung zwischen Objekten — die Frage laesst sich erst beantworten,
+    // wenn alle Knoten vorliegen.
+    place_in_chain(&mut report, anchor, &nodes);
+
+    // Ein Grant, dessen `entryHash` auf kein Objekt des Bestands zeigt, gehoert
+    // zu keinem Eintrag und beruehrt die Kette nicht.
+    for object_hash in orphan_grants(&inventory) {
+        quarantine_unattributable(&mut report, object_hash);
+    }
+
+    // Gate `grant-plan`: nur ueber Objekte, die Gate `chain-position`
+    // ueberstanden haben. Ein Fehlschlag dort verhindert dieses Gate FUER
+    // DASSELBE OBJEKT und laesst die uebrigen unberuehrt (design.md:1585/1593)
+    // — und ein isoliertes Objekt bekaeme sonst einen zweiten Befund in einem
+    // zweiten Array.
+    for entry in placed {
+        let object_hash = entry.object_hash();
+        if report.quarantined_objects.contains_key(&object_hash) {
+            continue;
+        }
+        if let Some(code) = grant_plan_finding(entry, inventory.grants()) {
+            report
+                .signature_errors
+                .insert(ObjectErrorV1::new(object_hash, code));
+        }
+    }
+
     report.seal()
+}
+
+/// Gate `chain-position`: setzt die Knoten in die Kette des Ankers und traegt
+/// die Befunde in den Bericht.
+///
+/// Die Abbildung ist die, die `ea-chain` an seinen Befundtypen festhaelt und
+/// die hier nicht neu erfunden wird: Luecken werden zu `gaps`, Forks und
+/// Kettenbrueche zu `quarantinedObjects` mit Grund `conflicting` — fuer JEDES
+/// beteiligte Objekt, denn bei einem Fork ist gerade nicht entscheidbar,
+/// welche Seite die echte ist.
+///
+/// Die `chainId` jedes Berichtsfeldes stammt AUSSCHLIESSLICH aus dem Anker,
+/// nie aus dem Bestand; `VerifiedChain::chain_id` ist in `ea-chain` deshalb gar
+/// nicht oeffentlich. Bleibt kein verifizierter Kopf uebrig, behaelt der
+/// Bericht das Sentinel aus [`ChainHeadV1::sentinel`].
+fn place_in_chain(report: &mut VerificationReportV1, anchor: &TrustAnchorV1, nodes: &[ChainNode]) {
+    let chain_id = anchor.chain_id();
+    let Ok(chain) = build_chain(chain_id, nodes) else {
+        // UNERREICHBAR, und trotzdem fail-closed behandelt. `build_chain`
+        // kennt genau drei Fehler: `ForeignChainId` ist oben aussortiert,
+        // `GenesisBinding` erzwingt `ea-format` schon beim Kodieren
+        // (`validate_sequence_predecessor`), und `MAX_CHAIN_NODES_V1` ist
+        // genauso gross wie `MAX_ARCHIVE_BLOBS_V1`, das der Bestand vorher
+        // durchsetzt. Statt hier zu panicken oder — schlimmer — stillschweigend
+        // keine Kettenaussage zu treffen, gilt der ganze Knotensatz als
+        // widerspruechlich.
+        for node in nodes {
+            quarantine_conflicting(report, node.object_hash);
+        }
+        return;
+    };
+
+    for gap in chain.gaps() {
+        report.gaps.insert(
+            (chain_id, gap.from_sequence()),
+            ChainGapV1::new(chain_id, gap.from_sequence(), gap.through_sequence()),
+        );
+    }
+    for fork in chain.forks() {
+        for object_hash in fork.competing_object_hashes() {
+            quarantine_conflicting(report, object_hash);
+        }
+    }
+    for entry in chain.breaks() {
+        quarantine_conflicting(report, entry.object_hash());
+    }
+    if let Some(head) = chain.verified_head() {
+        report.chain_head = ChainHeadV1::new(chain_id, head.chain_sequence(), head.entry_hash());
+    }
 }
 
 /// Gate `trust`: laedt den Stand und prueft die Vertrauenskette gegen den Anker.
@@ -313,5 +417,18 @@ fn quarantine_unattributable(report: &mut VerificationReportV1, object_hash: Obj
     report.quarantined_objects.insert(
         object_hash,
         QuarantinedObjectV1::new(object_hash, QuarantineReason::Unattributable),
+    );
+}
+
+/// Traegt `object_hash` als widerspruechlich ein.
+///
+/// Der Grund fuer Fork und Kettenbruch: beide Objekte sind DA und wohlgeformt,
+/// sie widersprechen einander nur. Das ist eine ganz andere Aussage als eine
+/// Luecke — und der Unterschied ist der zwischen einem Angriff und einem
+/// Verlust.
+fn quarantine_conflicting(report: &mut VerificationReportV1, object_hash: ObjectHash) {
+    report.quarantined_objects.insert(
+        object_hash,
+        QuarantinedObjectV1::new(object_hash, QuarantineReason::Conflicting),
     );
 }
