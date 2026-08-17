@@ -429,3 +429,110 @@ fn stage_one_gate_requires_a_complete_requirement_ledger() {
     );
     fs::remove_dir_all(&root).unwrap();
 }
+
+/// Wurzel des echten Arbeitsbaums, von `tools/xtask` aus gerechnet.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("the workspace root must be reachable from tools/xtask")
+}
+
+/// Zerlegt eine Ledger-Zeile in ihre gequoteten Felder.
+///
+/// Bewusst simpel: das eingecheckte Ledger fuehrt KEIN Anfuehrungszeichen im
+/// Freitext. Die Zusicherung steht als Assertion drin, damit ein spaeterer
+/// Eintrag mit maskiertem Anfuehrungszeichen hier laut wird statt still eine
+/// Spalte zu verschieben.
+fn ledger_fields(line: &str) -> Vec<String> {
+    let inner = line
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("every ledger field must be quoted: {line}"));
+    let fields: Vec<String> = inner.split("\",\"").map(str::to_owned).collect();
+    assert_eq!(
+        fields.len(),
+        9,
+        "every ledger row carries nine fields: {line}"
+    );
+    for value in &fields {
+        assert!(
+            !value.contains('"'),
+            "the checked-in ledger must not carry a double quote inside a field: {line}"
+        );
+    }
+    fields
+}
+
+/// Haelt die volle abgeleitete Identifikatormenge des ECHTEN Entwurfs gegen das
+/// ECHTE Requirement-Ledger.
+///
+/// Der Gate laeuft gegen ein Fixture, das die sechs Vektormanifeste synthetisch
+/// mitbringt und `design.md` sowie das Ledger aus dem Arbeitsbaum kopiert. Ein
+/// zweiter Lauf gegen den echten Arbeitsbaum wuerde an den noch fehlenden
+/// Vektorfamilien haengen und in Task 7 invertieren.
+///
+/// Die Zaehlungen sind auf `version` = `v1` eingeschraenkt: Task 6 nimmt sieben
+/// v1.1-Zeilen des Web-Reader-Specs auf, und eine blanke Praefixzaehlung wuerde
+/// dort rot werden, ohne dass sich am Vertrag dieses Tasks etwas aendert.
+#[test]
+fn stage_one_gate_covers_every_functional_requirement_and_acceptance_criterion() {
+    let workspace = workspace_root();
+    let ledger_relative = Path::new("docs/traceability/v0.1-requirements.csv");
+    let design_relative =
+        Path::new("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md");
+
+    let root = fixture_root("real-ledger");
+    for family in STAGE_ONE_FAMILIES {
+        write_family_manifest(&root, family);
+    }
+    for relative in [design_relative, ledger_relative] {
+        let target = root.join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(workspace.join(relative), &target)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", relative.display()));
+    }
+
+    let output = run_stage_gate(&root, "1");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "the checked-in requirement ledger must cover every derived identifier; stderr: {stderr}"
+    );
+
+    let text = fs::read_to_string(workspace.join(ledger_relative)).unwrap();
+    let rows: Vec<Vec<String>> = text
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .map(ledger_fields)
+        .collect();
+    let version_one: Vec<&Vec<String>> = rows.iter().filter(|row| row[1] == "v1").collect();
+    for (prefix, expected) in [("FR-", 69_usize), ("AK-", 54), ("GATE-", 3)] {
+        let found = version_one
+            .iter()
+            .filter(|row| row[0].starts_with(prefix))
+            .count();
+        assert_eq!(
+            found, expected,
+            "the ledger must carry exactly {expected} v1 rows starting with {prefix}, found {found}"
+        );
+    }
+
+    let gate_twenty_two = version_one
+        .iter()
+        .find(|row| row[0] == "GATE-22")
+        .expect("the ledger must carry GATE-22");
+    assert_eq!(
+        gate_twenty_two[8], "planned",
+        "GATE-22 must stay planned while only one fuzz target exists"
+    );
+    assert!(
+        gate_twenty_two[6].contains("Task 12"),
+        "GATE-22 must point at Task 12 for the missing fuzz surfaces; evidence: {}",
+        gate_twenty_two[6]
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
