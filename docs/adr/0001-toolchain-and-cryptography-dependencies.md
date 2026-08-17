@@ -116,6 +116,37 @@ addendum), a `SignerRole` authorized to sign reports, and a matching
 extends the closed Suite 1 surface and therefore requires a new ADR, updated
 schemas, and test vectors covering both directions.
 
+### Delivery ledger for Stage-1 Task 10
+
+Recorded here rather than in a new document because the one part that is *not*
+delivered is the deferral above, and a ledger that points at its own reason from
+another file drifts away from it.
+
+Delivered, each measured by a test that starts the real binary:
+
+| Part | Where it is measured |
+|---|---|
+| The closed command grammar (`verify`, `list`, `decrypt`, `report`, `export`, `--trust-anchor`, `--format text\|json`), parsed by hand without an argument-parser dependency | `apps/cli/tests/commands.rs` |
+| The normative exit-code table `0/2/10/11/12/13/14/15/20/21`, smallest applicable specific code first, with the report keeping every finding | `crates/ea-recovery/tests/exit_codes.rs`, `apps/cli/tests/exit_codes.rs` |
+| The canonical report document with `reportHash`, byte-identical across runs and independent of path order and of `--format` | `apps/cli/tests/determinism.rs` |
+| `--include-runtime-metadata` as the only way runtime facts enter a document, appended after `reportHash` and outside its preimage | `apps/cli/tests/determinism.rs` |
+| `decrypt` and `export`, both verifying in full before the first written byte, both writing only into a new or empty target with owner-only permissions | `apps/cli/tests/decrypt.rs`, `apps/cli/tests/export.rs`, `apps/cli/tests/safety_audit.rs` |
+
+Not delivered, deliberately: the detached COSE_Sign1 signature over the report.
+`--report-signing-key` is accepted and refused with exit code `21`; the reasons
+and the three specification parts needed to unblock it stand in this section
+above. `reportSignature` stays absent from every emitted document, which is the
+conformant shape and not a degraded one.
+
+One further limit belongs in the same ledger: the `wasm32-unknown-unknown` gate
+over the positive list proves **compilability only**. It is not a runtime
+result. The runtime evidence required by
+`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §14.1 —
+a `wasm-bindgen` layer, `getrandom`/`wasm_js` in a real JavaScript environment,
+one HPKE decapsulation and one signature check against a test vector — is still
+outstanding. `ea-recovery` is exempt from that gate by design: it carries
+`std::fs` and plaintext and is therefore not shared browser code.
+
 ## Consequences
 
 - Dependency upgrades, enabled-feature changes, or Suite 1 algorithm changes

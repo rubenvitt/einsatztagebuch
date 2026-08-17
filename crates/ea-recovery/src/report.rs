@@ -51,7 +51,7 @@ use std::{
 
 use ea_verify::{VerificationReportV1, VerifyError};
 
-use crate::RecoveryError;
+use crate::{RecoveryError, target::restrictive_permissions_available};
 
 /// Die nichtdeterministischen Felder eines Laufs.
 ///
@@ -182,7 +182,31 @@ pub fn write_report_document(document: &str, output: &Path) -> Result<(), Recove
 /// dass genau 0600 herauskommt. Das zweite Setzen geschieht auf dem offenen
 /// HANDLE und nicht auf dem Pfad: ein Pfad koennte zwischen beiden Schritten auf
 /// etwas anderes zeigen.
+///
+/// # AUF EINER PLATTFORM OHNE RECHTE WIRD VERWEIGERT
+///
+/// Und zwar HIER und nicht nur in den Kommandopfaden. `decrypt` und `export`
+/// fragen [`restrictive_permissions_available`] schon selbst, `report` tat es
+/// nicht — und genau daran haette der Satz oben („die Zusicherung gilt fuer
+/// JEDE Datei, die dieses Werkzeug schreibt") aufgehoert zu stimmen: unter
+/// `cfg(not(unix))` waeren die beiden `#[cfg(unix)]`-Bloecke dieser Funktion
+/// leer, die Berichtsdatei entstuende mit den Vorgaberechten ihres
+/// Elternverzeichnisses, und der Lauf endete mit 0. Die Zusicherung fiele
+/// STILL. Gefunden hat das der Audit in
+/// `apps/cli/tests/safety_audit.rs`, der (c) ueber ALLE schreibenden Kommandos
+/// fuehrt statt je Kommando einzeln.
+///
+/// Der Aufruf steht vor dem `open` und nicht danach: eine Datei, die erst
+/// entsteht und dann verworfen wird, ist bereits geschrieben worden. Auf unix
+/// ist er ein `Ok(())` und kostet nichts.
+///
+/// # Errors
+///
+/// [`RecoveryError::RestrictivePermissionsUnsupported`] auf einer Plattform
+/// ohne Rechtebits; [`RecoveryError::OutputExists`], wenn `output` existiert;
+/// [`RecoveryError::Io`] fuer jeden anderen Dateisystemfehler.
 pub(crate) fn create_new_file(output: &Path) -> Result<File, RecoveryError> {
+    restrictive_permissions_available()?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
