@@ -858,6 +858,305 @@ const STAGE_ONE_VECTOR_FAMILIES: [&str; 6] = [
     "crypto", "evidence", "format", "grants", "receipts", "trust",
 ];
 
+/// Die primaeren Abnahmekriterien der Stufe 1 nach
+/// `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md`.
+///
+/// Der Bericht nennt sie. Die BELEGPFLICHT — jede dieser Zahlen braucht eine
+/// vollstaendige Ledger-Zeile im Status `implemented` oder `integrated` — wird
+/// erst scharf geschaltet, wenn die Vektorfamilien und Property-Tests
+/// existieren. Wuerde sie hier greifen, koennte das Ledger nur mit erfundenen
+/// Testnamen gruen werden.
+const STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 10] = [4, 5, 6, 9, 14, 16, 17, 20, 38, 51];
+
+/// Das maschinell pruefbare Requirement-Ledger, relativ zur Gate-Wurzel.
+const REQUIREMENT_LEDGER_PATH: &str = "docs/traceability/v0.1-requirements.csv";
+
+/// Die aufzaehlbare Quelle der Pflichtzeilenmenge, relativ zur Gate-Wurzel.
+const DESIGN_DOCUMENT_PATH: &str = "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md";
+
+/// Der Spaltenvertrag des Ledgers. Spaetere Stufen ergaenzen nur Zeilen.
+const LEDGER_COLUMNS: [&str; 9] = [
+    "requirement_id",
+    "version",
+    "source",
+    "title",
+    "primary_acceptance_criterion",
+    "related_acceptance_criteria",
+    "evidence",
+    "stage",
+    "status",
+];
+
+/// Die Spalten, die eine Zeile vollstaendig machen — das `is_complete()`
+/// dieses Ledgers.
+const LEDGER_REQUIRED_COLUMNS: [&str; 4] = ["source", "title", "evidence", "status"];
+
+/// Das erlaubte Statusvokabular, lexikografisch fuer eine stabile Fehlerzeile.
+const LEDGER_STATUSES: [&str; 3] = ["implemented", "integrated", "planned"];
+
+/// Die drei unnummerierten Gates aus `design.md` §21, §22 und §25.
+const UNNUMBERED_GATE_IDENTIFIERS: [&str; 3] = ["GATE-21", "GATE-22", "GATE-25"];
+
+/// Eine Ledger-Zeile, reduziert auf die gepruefte Teilmenge des Spaltenvertrags.
+#[derive(Debug)]
+struct LedgerRow {
+    requirement_id: String,
+    primary_acceptance_criterion: String,
+    values: Vec<String>,
+}
+
+/// Schneidet den Abschnitt zwischen zwei Ueberschriften heraus.
+///
+/// Die Grenze ist zwingend: `design.md` §24 beginnt mit einer nummerierten
+/// Liste, die sonst als Abnahmekriterien zaehlen wuerde, und §27.2 fuehrt
+/// weitere `FR-`-Zeilen, die keine funktionale Pflichtzeile sind.
+fn section_between<'a>(text: &'a str, start: &str, end: &str) -> Result<&'a str, String> {
+    let start_at = text.find(start).ok_or_else(|| {
+        format!(
+            "the design document must contain the heading {}",
+            start.trim()
+        )
+    })?;
+    let tail = &text[start_at + start.len()..];
+    let end_at = tail.find(end).ok_or_else(|| {
+        format!(
+            "the design document must contain the heading {}",
+            end.trim()
+        )
+    })?;
+    Ok(&tail[..end_at])
+}
+
+/// Leitet die Pflichtzeilenmenge aus aufzaehlbaren Quellen ab.
+///
+/// Keine handgepflegte Liste: die funktionalen Anforderungen kommen aus der
+/// Tabelle in §27.1, die Abnahmekriterien aus der nummerierten Liste in §23 —
+/// dort auf zwei Stellen aufgefuellt, damit die lexikografische Sortierung des
+/// Ledgers der numerischen entspricht — und die drei unnummerierten Gates aus
+/// einer festen Pseudo-Identifikatormenge.
+fn required_requirement_identifiers(design: &str) -> Result<BTreeSet<String>, String> {
+    let mut identifiers = BTreeSet::new();
+
+    let acceptance = section_between(
+        design,
+        "\n## 23. Abnahmekriterien\n",
+        "\n## 24. Interne Lieferstufen\n",
+    )?;
+    let mut numbers = Vec::new();
+    for line in acceptance.lines() {
+        let digits: String = line.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() || !line[digits.len()..].starts_with(". ") {
+            continue;
+        }
+        let number = digits
+            .parse::<u32>()
+            .map_err(|error| format!("unreadable acceptance criterion number {digits}: {error}"))?;
+        numbers.push(number);
+    }
+    if numbers.is_empty() {
+        return Err("design.md section 23 must enumerate acceptance criteria".to_owned());
+    }
+    for (index, number) in numbers.iter().enumerate() {
+        let expected = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        if *number != expected {
+            return Err(format!(
+                "design.md section 23 must number its acceptance criteria consecutively; \
+                 expected {expected}, found {number}"
+            ));
+        }
+        identifiers.insert(format!("AK-{number:02}"));
+    }
+
+    let functional = section_between(
+        design,
+        "\n### 27.1 Funktionale Anforderungen\n",
+        "\n### 27.2 Nichtfunktionale Anforderungen\n",
+    )?;
+    let mut functional_count = 0_usize;
+    for line in functional.lines() {
+        let Some(rest) = line.strip_prefix("| FR-") else {
+            continue;
+        };
+        let number = rest.split('|').next().unwrap_or_default().trim();
+        if number.is_empty() {
+            return Err("design.md section 27.1 carries a nameless FR row".to_owned());
+        }
+        identifiers.insert(format!("FR-{number}"));
+        functional_count += 1;
+    }
+    if functional_count == 0 {
+        return Err("design.md section 27.1 must enumerate functional requirements".to_owned());
+    }
+
+    for gate in UNNUMBERED_GATE_IDENTIFIERS {
+        identifiers.insert(gate.to_owned());
+    }
+    Ok(identifiers)
+}
+
+/// Zerlegt eine Ledger-Zeile in ihre Felder.
+///
+/// Jedes Feld MUSS in Anfuehrungszeichen stehen; ein doppeltes
+/// Anfuehrungszeichen im Feld wird verdoppelt. Damit kann kein Trennzeichen im
+/// Freitext eine Spalte verschieben und die Formalpruefung still bestehen.
+fn parse_ledger_fields(line: &str) -> Result<Vec<String>, String> {
+    let mut fields = Vec::new();
+    let mut characters = line.chars();
+    loop {
+        if characters.next() != Some('"') {
+            return Err("every field must be enclosed in double quotes".to_owned());
+        }
+        let mut field = String::new();
+        loop {
+            match characters.next() {
+                Some('"') => {
+                    let mut lookahead = characters.clone();
+                    if lookahead.next() == Some('"') {
+                        characters = lookahead;
+                        field.push('"');
+                    } else {
+                        break;
+                    }
+                }
+                Some(character) => field.push(character),
+                None => return Err("unterminated quoted field".to_owned()),
+            }
+        }
+        fields.push(field);
+        match characters.next() {
+            None => return Ok(fields),
+            Some(',') => {}
+            Some(character) => {
+                return Err(format!(
+                    "unexpected character {character} after a quoted field"
+                ));
+            }
+        }
+    }
+}
+
+/// Prueft Wohlgeformtheit und Zeilenvollstaendigkeit des Ledgers.
+fn parse_requirement_ledger(text: &str) -> Result<Vec<LedgerRow>, String> {
+    if text.contains('\r') {
+        return Err("the requirement ledger must use LF line endings".to_owned());
+    }
+    let mut lines = text.split('\n');
+    let header = lines
+        .next()
+        .ok_or_else(|| "the requirement ledger must carry exactly one header line".to_owned())?;
+    let header_fields = parse_ledger_fields(header)
+        .map_err(|error| format!("requirement ledger line 1: {error}"))?;
+    if header_fields != LEDGER_COLUMNS {
+        return Err(format!(
+            "the requirement ledger header must declare {}",
+            LEDGER_COLUMNS.join(", ")
+        ));
+    }
+
+    let mut rows = Vec::new();
+    let mut problems = Vec::new();
+    let mut blanks = 0_usize;
+    for (index, line) in lines.enumerate() {
+        let number = index + 2;
+        // Genau EINE leere Zeile ist zulaessig: der Rest hinter dem
+        // abschliessenden Zeilenvorschub. Jede weitere ist eine echte Leerzeile.
+        if line.is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                return Err("the requirement ledger must not carry blank lines".to_owned());
+            }
+            continue;
+        }
+        if blanks > 0 {
+            return Err("the requirement ledger must not carry blank lines".to_owned());
+        }
+        let values = match parse_ledger_fields(line) {
+            Ok(values) => values,
+            Err(error) => {
+                problems.push(format!("line {number}: {error}"));
+                continue;
+            }
+        };
+        if values.len() != LEDGER_COLUMNS.len() {
+            problems.push(format!(
+                "line {number}: expected {} columns, found {}",
+                LEDGER_COLUMNS.len(),
+                values.len()
+            ));
+            continue;
+        }
+        let requirement_id = values[0].clone();
+        if requirement_id.is_empty() {
+            problems.push(format!("line {number}: requirement_id must not be empty"));
+            continue;
+        }
+        for column in LEDGER_REQUIRED_COLUMNS {
+            let at = LEDGER_COLUMNS
+                .iter()
+                .position(|declared| *declared == column)
+                .unwrap_or_default();
+            if values[at].trim().is_empty() {
+                problems.push(format!("{requirement_id}: {column} must not be empty"));
+            }
+        }
+        let status = values[8].clone();
+        if !status.is_empty() && !LEDGER_STATUSES.contains(&status.as_str()) {
+            problems.push(format!(
+                "{requirement_id}: status {status} is outside the vocabulary {}",
+                LEDGER_STATUSES.join(", ")
+            ));
+        }
+        let primary_acceptance_criterion = values[4].clone();
+        if !primary_acceptance_criterion.is_empty() {
+            match primary_acceptance_criterion.parse::<u32>() {
+                Ok(criterion) if (1..=54).contains(&criterion) => {}
+                _ => problems.push(format!(
+                    "{requirement_id}: primary_acceptance_criterion \
+                     {primary_acceptance_criterion} must be a number from 1 to 54 or empty"
+                )),
+            }
+        }
+        rows.push(LedgerRow {
+            requirement_id,
+            primary_acceptance_criterion,
+            values,
+        });
+    }
+    if !text.ends_with('\n') {
+        problems.push("the requirement ledger must end with a line feed".to_owned());
+    }
+    if !problems.is_empty() {
+        return Err(format!(
+            "incomplete requirement ledger rows: {}",
+            problems.join("; ")
+        ));
+    }
+    for pair in rows.windows(2) {
+        if pair[0].requirement_id > pair[1].requirement_id {
+            return Err(format!(
+                "the requirement ledger must be sorted by requirement_id; {} precedes {}",
+                pair[0].requirement_id, pair[1].requirement_id
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+/// Liest das Ledger von der Gate-Wurzel.
+///
+/// Eine fehlende Datei ist ein LEERES Ledger, kein IO-Fehler: der Gate soll die
+/// unbelegten Identifikatoren einzeln nennen, nicht bloss melden, dass er nichts
+/// gefunden hat.
+fn read_requirement_ledger(path: &Path) -> Result<Vec<LedgerRow>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => {
+            parse_requirement_ledger(&text).map_err(|error| format!("{}: {error}", path.display()))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("failed to read {}: {error}", path.display())),
+    }
+}
+
 /// Wurzel des Stufengates: `EA_STAGE_GATE_ROOT`, sonst der Arbeitsbaum.
 ///
 /// Der Override ist der Test-Seam. Ohne ihn liefe jeder Test gegen den echten
@@ -875,9 +1174,16 @@ fn stage_gate_root(root: &Path) -> PathBuf {
 /// lesbar ist. Ein blosses Verzeichnis genuegt nicht: `vectors/format/payload-v1/`
 /// existiert im Bestand ohne Manifest und wird von `validate-schemas` getrieben.
 ///
+/// Danach prueft der Gate das Requirement-Ledger: formale Wohlgeformtheit,
+/// Zeilenvollstaendigkeit und Abdeckung der aus `design.md` abgeleiteten
+/// Pflichtzeilenmenge. `evidenced_acceptance_criteria` zeigt, welche primaeren
+/// Abnahmekriterien bereits belegt sind; die Belegpflicht selbst wird erst
+/// scharf geschaltet, wenn Vektoren und Property-Tests existieren.
+///
 /// Das Berichtsschema ist stabil und wird von spaeteren Stufen erweitert, nie
-/// umbenannt. Ledger-Zeilen, primaere Abnahmekriterien und Fuzz-Flaechen folgen
-/// in spaeteren Tasks und bleiben bis dahin leer.
+/// umbenannt. `rows` nennt die `requirement_id` jeder Ledger-Zeile in
+/// Dateireihenfolge; Fuzz-Flaechen folgen in einem spaeteren Task und bleiben
+/// bis dahin leer.
 fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
     if stage != 1 {
         return Err(format!(
@@ -901,11 +1207,46 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
             missing.join(", ")
         ));
     }
+    let gate_root = stage_gate_root(root);
+    let design_path = gate_root.join(DESIGN_DOCUMENT_PATH);
+    let design = fs::read_to_string(&design_path)
+        .map_err(|error| format!("failed to read {}: {error}", design_path.display()))?;
+    let required = required_requirement_identifiers(&design)?;
+    let ledger_path = gate_root.join(REQUIREMENT_LEDGER_PATH);
+    let rows = read_requirement_ledger(&ledger_path)?;
+    let covered = rows
+        .iter()
+        .map(|row| row.requirement_id.clone())
+        .collect::<BTreeSet<_>>();
+    let uncovered = required
+        .difference(&covered)
+        .cloned()
+        .collect::<Vec<String>>();
+    if !uncovered.is_empty() {
+        return Err(format!(
+            "the requirement ledger {} does not cover: {}",
+            ledger_path.display(),
+            uncovered.join(", ")
+        ));
+    }
+    let row_identifiers = rows
+        .iter()
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    let evidenced = rows
+        .iter()
+        .filter(|row| {
+            matches!(row.values[8].as_str(), "implemented" | "integrated")
+                && !row.primary_acceptance_criterion.is_empty()
+        })
+        .filter_map(|row| row.primary_acceptance_criterion.parse::<u32>().ok())
+        .collect::<BTreeSet<_>>();
     let report = serde_json::json!({
         "stage": stage,
         "vector_families": present,
-        "primary_acceptance_criteria": Vec::<String>::new(),
-        "rows": Vec::<String>::new(),
+        "primary_acceptance_criteria": STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA,
+        "evidenced_acceptance_criteria": evidenced,
+        "rows": row_identifiers,
         "fuzz_targets": Vec::<String>::new(),
     });
     println!(
@@ -976,6 +1317,74 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// Pinnt den Ableiter gegen den ECHTEN Entwurf.
+    ///
+    /// `tools/xtask/tests/stage_gate.rs` treibt den Gate gegen ein synthetisches
+    /// Fixture, damit die Fehlerzustaende ueber die Taskkette stabil bleiben.
+    /// Ohne diesen Test bliebe unbemerkt, wenn der Ableiter am gemessenen
+    /// Bestand — 69 `FR-`-Zeilen in §27.1, 54 Abnahmekriterien in §23 — vorbei
+    /// parst und die Pflichtzeilenmenge still schrumpft.
+    #[test]
+    fn the_required_identifier_set_is_derived_from_the_design_document() {
+        let path = super::workspace_root().join(super::DESIGN_DOCUMENT_PATH);
+        let design = std::fs::read_to_string(&path).expect("the design document must be readable");
+        let identifiers = super::required_requirement_identifiers(&design)
+            .expect("the design document must enumerate requirement identifiers");
+
+        let functional = identifiers
+            .iter()
+            .filter(|identifier| identifier.starts_with("FR-"))
+            .count();
+        let acceptance = identifiers
+            .iter()
+            .filter(|identifier| identifier.starts_with("AK-"))
+            .count();
+        assert_eq!(
+            functional, 69,
+            "design.md section 27.1 enumerates 69 functional requirements"
+        );
+        assert_eq!(
+            acceptance, 54,
+            "design.md section 23 enumerates 54 acceptance criteria"
+        );
+        assert!(identifiers.contains("FR-001"));
+        assert!(identifiers.contains("AK-01"));
+        assert!(identifiers.contains("AK-54"));
+        for gate in super::UNNUMBERED_GATE_IDENTIFIERS {
+            assert!(identifiers.contains(gate));
+        }
+        assert_eq!(identifiers.len(), 69 + 54 + 3);
+    }
+
+    #[test]
+    fn the_requirement_ledger_rejects_a_field_without_quotes() {
+        let error = super::parse_ledger_fields("AK-01,v1").expect_err("quoting is mandatory");
+
+        assert!(error.contains("double quotes"), "{error}");
+    }
+
+    /// Genau ein abschliessender Zeilenvorschub, keine Leerzeile.
+    ///
+    /// Ohne diese Grenze bliebe eine Leerzeile am Dateiende unbemerkt, weil sie
+    /// weder eine Spalte verschiebt noch einen Identifikator entfernt — und der
+    /// Diff einer spaeteren Stufe wuerde sie stillschweigend mitschleppen.
+    #[test]
+    fn the_requirement_ledger_rejects_a_trailing_blank_line() {
+        let header = super::LEDGER_COLUMNS
+            .iter()
+            .map(|column| format!("\"{column}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = "\"AK-01\",\"v1\",\"design.md\",\"Titel\",\"1\",\"\",\"gate\",\"1\",\"planned\"";
+        let text = format!("{header}\n{row}\n");
+        super::parse_requirement_ledger(&text).expect("a well formed ledger must parse");
+
+        let error = super::parse_requirement_ledger(&format!("{text}\n"))
+            .expect_err("a trailing blank line must fail closed");
+
+        assert!(error.contains("blank lines"), "{error}");
+    }
+
     #[test]
     fn schema_validation_rejects_malformed_cddl() {
         let error = super::validate_cddl_document("broken.cddl", "root = [")
