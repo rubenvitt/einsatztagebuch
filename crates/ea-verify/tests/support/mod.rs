@@ -1,5 +1,5 @@
 //! Archivfixtures mit einer ECHTEN Registrierungslinie, fuer die Gates
-//! `trust` und `registry`.
+//! `trust`, `registry` und `manifest-signature`.
 //!
 //! Wird per `#[path]` in Testtargets eingebunden, nie in das Lib-Target —
 //! genau wie das Archiv- und das Trust-Support-Modul, auf denen es aufsetzt.
@@ -18,15 +18,18 @@
 #[path = "../../../ea-archive/tests/support/mod.rs"]
 pub mod archive_support;
 
-use ea_crypto::object_hash;
+use ea_crypto::{CanonicalPublicCoseKey, CoseSigner, SecretBytes, object_hash};
 use ea_format::{
-    CertificateKindV1, EntryPackageV1, ManifestCoreFieldsV1, ManifestCoreV1, SignedManifestV1,
-    encode_entry_package,
+    CertificateKindV1, EIP_PREFIX_V1, EntryPackageV1, ManifestCoreFieldsV1, ManifestCoreV1,
+    SignedManifestV1, encode_entry_package,
 };
 use ea_trust::{TrustAnchorV1, TrustObjectSource, decode_trust_anchor};
-use ea_types::{CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash};
+use ea_types::{
+    CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, KeyThumbprint, ObjectHash,
+};
+use ed25519_dalek::SigningKey;
 
-use archive_support::{ArchiveFixture, format_support, trust_support};
+use archive_support::{ArchiveFixture, trust_support};
 
 /// Die Betriebssystemuhr der Fixtures.
 ///
@@ -72,6 +75,57 @@ pub const UNKNOWN_WRITER_SEQUENCE_V1: u64 = 2;
 #[must_use]
 pub fn unknown_writer_certificate_hash() -> CertificateHash {
     CertificateHash::try_from(&[0x99_u8; 32][..]).expect("32 Bytes sind ein Zertifikatshash")
+}
+
+/// Der geheime Schluessel, den die Registrierungslinie in JEDES
+/// Geraetezertifikat schreibt.
+///
+/// GESPIEGELT, nicht importiert: `trust_support` haelt denselben Wert als
+/// privaten `NEW_ADMIN_SECRET` (`crates/ea-trust/tests/support/mod.rs:46`), und
+/// `ea-trust` ist geschlossen. Die Spiegelung ist ungefaehrlich, weil
+/// [`writer_device_signer`] sie nicht behauptet, sondern gegen den
+/// oeffentlichen Abdruck `trust_support::authorized_device_signing_key_thumbprint()`
+/// prueft und laut bricht, sobald die Linie einen anderen Schluessel benutzt.
+///
+/// Ohne diesen Schluessel ist Gate `manifest-signature` gar nicht erreichbar:
+/// `verify_cose_sign1` verwirft jede Signatur, deren Abdruck im geschuetzten
+/// Header nicht der oeffentliche Schluessel des aufgeloesten Zertifikats ist
+/// (`crates/ea-crypto/src/cose.rs:1435-1437`) — noch bevor die Signatur selbst
+/// geprueft wird.
+const WRITER_DEVICE_SECRET_V1: [u8; 32] = [
+    0x83, 0x3f, 0xe6, 0x24, 0x09, 0x23, 0x7b, 0x9d, 0x62, 0xec, 0x77, 0x58, 0x75, 0x20, 0x91, 0x1e,
+    0x9a, 0x75, 0x9c, 0xec, 0x1d, 0x19, 0x75, 0x5b, 0x7d, 0xa9, 0x01, 0xb9, 0x6d, 0xca, 0x3d, 0x42,
+];
+
+/// Der Abdruck des Schluessels aus [`WRITER_DEVICE_SECRET_V1`].
+///
+/// # Panics
+///
+/// Wenn die Registrierungslinie ihre Geraetezertifikate auf einen anderen
+/// Schluessel ausstellt. Dann waere jede Signatur dieses Moduls unpruefbar, und
+/// die Fixture muss das laut sagen statt still ein rotes Gate zu erzeugen.
+#[must_use]
+pub fn writer_device_key_thumbprint() -> KeyThumbprint {
+    let thumbprint = CanonicalPublicCoseKey::ed25519(
+        *SigningKey::from_bytes(&WRITER_DEVICE_SECRET_V1)
+            .verifying_key()
+            .as_bytes(),
+    )
+    .expect("der Fixture-Schluessel muss ein Ed25519-COSE-Schluessel sein")
+    .thumbprint();
+    assert!(
+        thumbprint == trust_support::authorized_device_signing_key_thumbprint(),
+        "WRITER_DEVICE_SECRET_V1 ist nicht mehr der Schluessel der \
+         Geraetezertifikate der Registrierungslinie"
+    );
+    thumbprint
+}
+
+/// Der Signierer, dessen oeffentlicher Schluessel im Schreiberzertifikat steht.
+#[must_use]
+pub fn writer_device_signer() -> CoseSigner {
+    let _ = writer_device_key_thumbprint();
+    CoseSigner::from_secret(SecretBytes::new(WRITER_DEVICE_SECRET_V1))
 }
 
 /// Ein Bestand mit zwei Registrierungskoepfen und zwei Eintragspaketen.
@@ -208,7 +262,14 @@ pub const SECOND_LEASE_THROUGH_V1: u64 = 100;
 /// `ea-format` sie kippt. Bewusst ein fester Wert statt einer Suche zur
 /// Laufzeit: eine Suche faende immer irgendeinen Wert und machte den Test
 /// stillschweigend wieder aussagelos.
-pub const DESCENDING_HASH_MARKER_V1: u8 = 0x01;
+///
+/// Der Wert wanderte von `0x01` auf `0x02`, als die Eintraege dieses Moduls auf
+/// den Schluessel der Registrierungslinie umgestellt wurden
+/// ([`writer_device_signer`]): eine andere Signatur sind andere Bytes und damit
+/// ein anderer Objekthash. Genau dafuer ist die Behauptung in
+/// [`archive_with_a_second_lease`] eine Pruefung — sie brach laut, statt den
+/// Test still aussagelos werden zu lassen.
+pub const DESCENDING_HASH_MARKER_V1: u8 = 0x02;
 
 /// Ein Bestand, dessen zwei Eintraege unter VERSCHIEDENEN Registrierungskoepfen
 /// liegen und dessen Inventarreihenfolge der Sequenzreihenfolge widerspricht.
@@ -342,6 +403,195 @@ pub fn archive_with_a_second_lease() -> LeasedArchive {
     }
 }
 
+/// Ein Bestand mit GENAU EINEM Eintragspaket, wahlweise mit einem
+/// verkippten Byte.
+///
+/// Bewusst nur ein `.eip` und keine weitere Objektfamilie: der Befund der
+/// Mutationsfaelle ist genau EIN `signatureErrors`-Eintrag, und jedes weitere
+/// Objekt gaebe dem Inventar eine zusaetzliche Gelegenheit, etwas anderes zu
+/// melden.
+pub struct SignedEntryArchive {
+    pub fixture: ArchiveFixture,
+    pub anchor_bytes: Vec<u8>,
+    /// Registrierungsversion, unter der der Eintrag steht.
+    pub registry_version: ea_types::RegistryVersion,
+    /// Das Schreiberzertifikat, das die Linie aktiviert.
+    pub writer_certificate_hash: CertificateHash,
+    /// Objekthash der abgelegten Eintragsbytes — nach der Mutation.
+    pub entry_object_hash: ObjectHash,
+}
+
+impl SignedEntryArchive {
+    #[must_use]
+    pub fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+}
+
+/// Laenge der Eintragsbytes aus [`archive_with_one_signed_entry`].
+///
+/// Gepinnt, damit die beiden Mutationsstellen ueberhaupt eine feste Bedeutung
+/// haben koennen.
+pub const SIGNED_EIP_LENGTH_V1: usize = 535;
+
+/// Erstes Byte des Schluesselabdrucks im GESCHUETZTEN COSE-Header.
+///
+/// Erreichbare Signaturklasse (a): der Abdruck geht in die `Sig_structure` ein,
+/// wird beim Parsen aber nirgends gebunden — `VerificationContext::record`
+/// setzt `expected_key_thumbprint` auf `None`
+/// (`crates/ea-crypto/src/cose.rs:859-873`). Die Bytes ueberleben Gate `format`
+/// und fallen erst an Gate `manifest-signature`.
+pub const MUTATED_EIP_KEY_THUMBPRINT_OFFSET_V1: usize = 352;
+
+/// Erstes Byte des rohen Ed25519-Signaturwerts am Ende der COSE-Struktur.
+///
+/// Erreichbare Signaturklasse (b): die Signatur wird beim Parsen nicht
+/// kryptografisch geprueft, sondern erst an Gate `manifest-signature`.
+pub const MUTATED_EIP_SIGNATURE_OFFSET_V1: usize = SIGNED_EIP_LENGTH_V1 - 64;
+
+/// Ein Bestand mit genau einem unversehrten, signierten Eintragspaket.
+#[must_use]
+pub fn archive_with_one_signed_entry() -> SignedEntryArchive {
+    signed_entry_archive(None)
+}
+
+/// Derselbe Bestand mit GENAU EINEM verkippten Byte an `offset`.
+///
+/// # Panics
+///
+/// Wenn die verkippten Bytes Gate `format` nicht mehr ueberleben. Dann traefe
+/// der Test Gate 1 statt Gate 4 und waere aussagelos.
+#[must_use]
+pub fn archive_with_one_mutated_entry(offset: usize) -> SignedEntryArchive {
+    signed_entry_archive(Some(offset))
+}
+
+/// Baut den Bestand aus [`SignedEntryArchive`].
+///
+/// # Panics
+///
+/// Wenn das Layout der Eintragsbytes sich verschoben hat: Laenge, Lage des
+/// Schluesselabdrucks und Lage des rohen Signaturwerts werden geprueft, nie
+/// behauptet. Eine Layoutaenderung in `ea-format` bricht hier laut, statt die
+/// Mutationen stillschweigend an eine andere Stelle wandern zu lassen.
+fn signed_entry_archive(mutation: Option<usize>) -> SignedEntryArchive {
+    let mut line = trust_support::RegistryLineBuilder::new();
+    line.push(
+        policy_action(),
+        trust_support::HeadOptions {
+            effective_from: Some(POLICY_LEASE_FROM_V1),
+            valid_through: Some(POLICY_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x11,
+            effective_from: None,
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(WRITER_LEASE_FROM_V1),
+            valid_through: Some(WRITER_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let writer_certificate_hash = CertificateHash::from(
+        head.direct_object_hash
+            .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+    );
+    let anchor_bytes = line.exact_anchor_bytes().to_vec();
+    let anchor = decode_trust_anchor(&anchor_bytes).expect("der Fixture-Anker muss dekodieren");
+    let registry_head_hash = Hash32::try_from(head.object_hash.as_bytes().as_slice())
+        .expect("ein Objekthash sind 32 Bytes");
+
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line);
+
+    let (_, bytes) = entry_package(
+        anchor.chain_id(),
+        KNOWN_WRITER_SEQUENCE_V1,
+        Some(anchor.genesis_entry_hash()),
+        writer_certificate_hash,
+        head.version,
+        registry_head_hash,
+    );
+    assert_eq!(
+        bytes.len(),
+        SIGNED_EIP_LENGTH_V1,
+        "die gepinnte Laenge der Eintragsbytes stimmt nicht mehr"
+    );
+    assert_eq!(
+        &bytes[MUTATED_EIP_KEY_THUMBPRINT_OFFSET_V1..MUTATED_EIP_KEY_THUMBPRINT_OFFSET_V1 + 32],
+        writer_device_key_thumbprint().as_bytes(),
+        "der Schluesselabdruck steht nicht mehr an der gepinnten Stelle"
+    );
+    assert_eq!(
+        bytes
+            .windows(32)
+            .filter(|window| *window == writer_device_key_thumbprint().as_bytes())
+            .count(),
+        1,
+        "der Schluesselabdruck kommt nicht mehr genau einmal vor"
+    );
+    assert_eq!(
+        MUTATED_EIP_SIGNATURE_OFFSET_V1,
+        bytes.len() - 64,
+        "der rohe Signaturwert steht nicht mehr in den letzten 64 Bytes"
+    );
+
+    let bytes = match mutation {
+        None => bytes,
+        Some(offset) => mutate_one_byte(&bytes, offset),
+    };
+    let entry_object_hash = object_hash(&bytes);
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{KNOWN_WRITER_SEQUENCE_V1:012}_entry.eip",
+            ea_archive::ENTRIES_DIR_V1
+        ),
+        bytes,
+    );
+
+    SignedEntryArchive {
+        fixture,
+        anchor_bytes,
+        registry_version: head.version,
+        writer_certificate_hash,
+        entry_object_hash,
+    }
+}
+
+/// Verkippt genau ein Byte und belegt, dass die Bytes Gate `format` ueberleben.
+fn mutate_one_byte(bytes: &[u8], offset: usize) -> Vec<u8> {
+    let mut mutated = bytes.to_vec();
+    mutated[offset] ^= 0x01;
+    assert_eq!(
+        mutated.len(),
+        bytes.len(),
+        "die Mutation darf die Laenge nicht aendern"
+    );
+    assert_eq!(
+        mutated
+            .iter()
+            .zip(bytes.iter())
+            .filter(|(left, right)| left != right)
+            .count(),
+        1,
+        "genau ein Byte darf sich unterscheiden"
+    );
+    assert!(
+        mutated.starts_with(&EIP_PREFIX_V1),
+        "die Mutation muss das Exact-Object-Praefix unangetastet lassen"
+    );
+    assert!(
+        ea_format::decode_exact_object(&mutated).is_ok(),
+        "die Mutation an {offset} ueberlebt Gate `format` nicht; der Test traefe \
+         Gate 1 statt Gate 4"
+    );
+    mutated
+}
+
 /// Der Policy-Uebergang der Fixtures, ohne Besonderheiten.
 fn policy_action() -> trust_support::ActionSpec {
     trust_support::ActionSpec::Policy {
@@ -442,7 +692,7 @@ fn entry_package_marked(
     )
     .expect("das Fixture-Manifest muss kodieren");
     let signed = SignedManifestV1::new(manifest, &ciphertext).expect("das Manifest muss binden");
-    let signature = format_support::signer()
+    let signature = writer_device_signer()
         .sign_record(signed.exact_bytes())
         .expect("der Fixture-Signierer muss signieren");
     let entry = EntryPackageV1::new(signed, ciphertext, signature)

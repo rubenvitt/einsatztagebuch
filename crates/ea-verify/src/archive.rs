@@ -1,24 +1,25 @@
 //! Der Einstiegspunkt der Verifikation: [`verify_archive`].
 //!
-//! DIESE FASSUNG fuehrt die Gates `format`, `trust` und `registry` aus. Die
-//! Gates `manifest-signature` bis `recipient-grant` folgen in den naechsten
-//! Tasks; solange bleibt `pipeline_completed` falsch, und der Bestand gilt
-//! ausdruecklich NICHT als vollstaendig verifiziert.
+//! DIESE FASSUNG fuehrt die Gates `format`, `trust`, `registry` und
+//! `manifest-signature` aus. Die Gates `chain-position` bis `recipient-grant`
+//! folgen in den naechsten Tasks; solange bleibt `pipeline_completed` falsch,
+//! und der Bestand gilt ausdruecklich NICHT als vollstaendig verifiziert.
 
 use core::marker::PhantomData;
 
 use ea_archive::{ArchiveInventory, ArchiveSource, QuarantineReason};
+use ea_crypto::{VerificationContext, verify_cose_sign1};
 use ea_format::{CertificateKindV1, EntryPackageV1, Parsed};
 use ea_trust::{
     RegistrySelectionOutcome, SelectedRegistryHead, TrustAnchorV1, TrustStateKey, VerifiedTrust,
     load_trust_state, prepare_local_time, select_registry_head, verify_registry_candidate,
     verify_trust,
 };
-use ea_types::{CertificateHash, ChainSequence, ObjectHash, UnixMillis};
+use ea_types::{CertificateHash, ChainSequence, KeyThumbprint, ObjectHash, UnixMillis};
 
 use crate::{
-    ChainHeadV1, EphemeralTrustStateStore, ObjectErrorV1, QuarantinedObjectV1,
-    VerificationReportV1, VerifyError, state::verification_state_key,
+    ChainHeadV1, EphemeralTrustStateStore, ManifestSignatureErrorV1, ObjectErrorV1,
+    QuarantinedObjectV1, VerificationReportV1, VerifyError, state::verification_state_key,
 };
 
 /// Die Stellschrauben eines Verifikationslaufs.
@@ -164,17 +165,28 @@ pub fn verify_archive(
         ) else {
             continue;
         };
-        if writer_is_active(&selected, fields.writer_certificate_hash) {
-            // ZWISCHENSTAND: `registryVersions` fuehrt endgueltig die Werte
-            // der Objekte, die Gate `manifest-signature` bestanden haben. Das
-            // Gate entsteht erst im naechsten Task; bis dahin ist der
-            // ausgewaehlte Kopf die schaerfste verfuegbare Aussage. Der Wert
-            // stammt in jedem Fall aus dem GEPRUEFTEN Kopf, nie aus dem
-            // Manifest — aus unauthentischen Bytes stammen nur Zaehler und
-            // Fehlereintraege, niemals Sachaussagen.
-            report.registry_versions.insert(selected.registry_version());
-        } else {
+        if !writer_is_active(&selected, fields.writer_certificate_hash) {
             quarantine_unattributable(&mut report, object_hash);
+            continue;
+        }
+
+        // Gate `manifest-signature`: erst hier werden die Manifestbytes
+        // AUTHENTISCH. Vorher sind sie blosse Bytes, und aus unauthentischen
+        // Bytes stammen nur Zaehler und Fehlereintraege, niemals Sachaussagen —
+        // deshalb wird `registry_version` NACH und nicht VOR dieser Pruefung
+        // eingetragen.
+        match verified_signer(entry, &selected) {
+            Ok(thumbprint) => {
+                report.registry_versions.insert(fields.registry_version);
+                report.public_key_thumbprints.insert(thumbprint);
+            }
+            Err(error) => {
+                // NUR ein Signaturbefund, KEIN Quarantaeneeintrag daneben: ein
+                // Objekt erscheint in genau einem Fehler-/Quarantaenearray.
+                report
+                    .signature_errors
+                    .insert(ObjectErrorV1::new(object_hash, error.code()));
+            }
         }
     }
 
@@ -262,6 +274,32 @@ fn writer_is_active(selected: &SelectedRegistryHead, writer: CertificateHash) ->
     selected.active_certificates().any(|(hash, fields)| {
         hash == writer && fields.certificate_kind == CertificateKindV1::Writer
     })
+}
+
+/// Gate `manifest-signature`: prueft die Schreibersignatur gegen den
+/// aufgeloesten Schreiber.
+///
+/// Liefert bei Erfolg den Schluesselabdruck, der die Pruefung GETRAGEN hat —
+/// genau das ist der Beitrag zu `publicKeyThumbprints`, das ein Nachweis des
+/// Geprueften ist und kein Katalogabzug.
+///
+/// Die uebrigen Manifestbindungen — Nutzlast gegen `record_digest`,
+/// `ciphertext_hash` gegen den Ciphertext, das Schreiberzertifikat im
+/// geschuetzten Header gegen das Manifest — pruefen `ea-format` und
+/// `ea-crypto` bereits beim Parsen beziehungsweise beim Bilden des Kontexts
+/// (`crates/ea-format/src/eip.rs:288-296`), und der `entryHash` steht gar nicht
+/// erst auf dem Draht. Dieses Gate fuegt genau das hinzu, was dort fehlt: die
+/// kryptografische Pruefung gegen den Schluessel des aufgeloesten Zertifikats.
+///
+/// Ein Fehlschlag ist ein Befund ueber EIN Objekt und nie ein `Err` des Laufs;
+/// deshalb faengt schon das Bilden des Kontexts seinen Fehler ab.
+fn verified_signer(
+    entry: &Parsed<EntryPackageV1>,
+    selected: &SelectedRegistryHead,
+) -> Result<KeyThumbprint, ManifestSignatureErrorV1> {
+    let context = VerificationContext::record(entry.value().signed_manifest().exact_bytes())?;
+    let signer = verify_cose_sign1(entry.value().writer_signature(), selected, &context)?;
+    Ok(signer.key_thumbprint())
 }
 
 /// Traegt `object_hash` als nicht zuordenbar ein.

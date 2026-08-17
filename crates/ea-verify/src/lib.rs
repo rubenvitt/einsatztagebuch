@@ -26,7 +26,7 @@ mod report;
 mod state;
 
 pub use archive::{VerifyOptions, verify_archive};
-pub use error::VerifyError;
+pub use error::{ManifestSignatureErrorV1, VerifyError};
 pub use gates::{
     DECAPSULATION_EVENT_V1, Decapsulation, GATE_ORDER_V1, Gate, GateObserver, GateRunner,
     RecordingObserver, run_gates,
