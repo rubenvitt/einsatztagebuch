@@ -430,6 +430,22 @@ fn stage_one_gate_requires_a_complete_requirement_ledger() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+/// Die sieben MUSS-Anforderungen des Web-Reader-Specs, in der Reihenfolge, in
+/// der das Ledger sie fuehrt: Identifikator, Abschnitt der Normativquelle und
+/// die Stufe, in der die Anforderung faellig wird.
+///
+/// Entscheidung D3 vom 2026-08-17: der Spec ist eine freigegebene
+/// Normativquelle, seine MUSS-Saetze werden als `v1.1`-Zeilen gefuehrt.
+const WEB_READER_MUST_ROWS: [(&str, &str, &str); 7] = [
+    ("WR-041", "4.1", "3"),
+    ("WR-042", "4.2", "3"),
+    ("WR-043", "4.3", "3"),
+    ("WR-052", "5.2", "4"),
+    ("WR-063", "6.3", "4"),
+    ("WR-075", "7.5", "5"),
+    ("WR-082", "8.2", "4"),
+];
+
 /// Wurzel des echten Arbeitsbaums, von `tools/xtask` aus gerechnet.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -535,4 +551,146 @@ fn stage_one_gate_covers_every_functional_requirement_and_acceptance_criterion()
     );
 
     fs::remove_dir_all(&root).unwrap();
+}
+
+/// Haelt Entscheidung D3 fest: die sieben MUSS-Anforderungen des
+/// Web-Reader-Specs stehen als `v1.1`-Zeilen im Ledger, und die beiden durch
+/// den Spec ueberholten Zeilen FR-100 und FR-103 in `design.md` §27.1 tragen
+/// die nachgezogene Rollen- und Speicheraufteilung.
+///
+/// Der Test liest den ECHTEN Arbeitsbaum und haelt einen ZIELzustand fest, kein
+/// Fehlerbild: er kann durch spaetere Tasks nicht invertieren.
+#[test]
+fn web_reader_must_requirements_are_recorded_as_v1_1_rows() {
+    let workspace = workspace_root();
+    let ledger = fs::read_to_string(workspace.join("docs/traceability/v0.1-requirements.csv"))
+        .expect("the requirement ledger must be readable");
+    let rows: Vec<Vec<String>> = ledger
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .map(ledger_fields)
+        .collect();
+
+    for (identifier, section, stage) in WEB_READER_MUST_ROWS {
+        let row = rows
+            .iter()
+            .find(|row| row[0] == identifier)
+            .unwrap_or_else(|| {
+                panic!("missing v1.1 ledger row for {identifier} (web-reader-design.md §{section})")
+            });
+        assert_eq!(
+            row[1], "v1.1",
+            "{identifier} must carry version v1.1, found {}",
+            row[1]
+        );
+        assert!(
+            row[2].contains("2026-08-15-einsatzarchiv-web-reader-design.md")
+                && row[2].ends_with(section),
+            "{identifier} must cite the web reader spec section {section}; source: {}",
+            row[2]
+        );
+        assert!(
+            !row[3].is_empty(),
+            "{identifier} must carry a title; row: {row:?}"
+        );
+        assert_eq!(
+            row[7], stage,
+            "{identifier} becomes due in stage {stage}, found {}",
+            row[7]
+        );
+        assert_eq!(
+            row[8], "planned",
+            "{identifier} must stay planned until its stage delivers it, found {}",
+            row[8]
+        );
+    }
+
+    // D2 traegt WR-042: das Traegerfeld existiert bereits, der positive Vektor
+    // folgt in Task 10 dieses Plans.
+    let refresh = rows
+        .iter()
+        .find(|row| row[0] == "WR-042")
+        .expect("WR-042 must exist");
+    assert!(
+        refresh[6].contains("reader-trust-refresh-ms") && refresh[6].contains("Task 10"),
+        "WR-042 evidence must name the policy field and the vector task; evidence: {}",
+        refresh[6]
+    );
+
+    // D1 traegt WR-075: die 2-of-N-Familie entsteht in Stufe 5,
+    // `organizationAdminAuthorization` bleibt unveraendert.
+    let ceremony = rows
+        .iter()
+        .find(|row| row[0] == "WR-075")
+        .expect("WR-075 must exist");
+    assert!(
+        ceremony[6].contains("organizationAdminAuthorization") && ceremony[6].contains("2-of-N"),
+        "WR-075 evidence must record decision D1; evidence: {}",
+        ceremony[6]
+    );
+
+    // Teil B: FR-100 und FR-103 in `design.md` §27.1.
+    let design = fs::read_to_string(
+        workspace.join("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md"),
+    )
+    .expect("the design document must be readable");
+    let start = design
+        .find("\n### 27.1 Funktionale Anforderungen\n")
+        .expect("design.md must carry section 27.1");
+    let tail = &design[start..];
+    let end = tail
+        .find("\n### 27.2 Nichtfunktionale Anforderungen\n")
+        .expect("design.md must carry section 27.2");
+    let functional = &tail[..end];
+    let functional_rows: Vec<&str> = functional
+        .lines()
+        .filter(|line| line.starts_with("| FR-"))
+        .collect();
+    assert_eq!(
+        functional_rows.len(),
+        69,
+        "section 27.1 must keep exactly 69 functional requirement rows"
+    );
+
+    let hundred = functional_rows
+        .iter()
+        .find(|line| line.starts_with("| FR-100 |"))
+        .expect("section 27.1 must carry FR-100");
+    assert!(
+        !hundred.contains("gemeinsame App"),
+        "FR-100 must no longer claim a shared application; row: {hundred}"
+    );
+    for marker in [
+        "Desktop",
+        "Browser-Reader",
+        "2026-08-15-einsatzarchiv-web-reader-design.md",
+        "3",
+    ] {
+        assert!(
+            hundred.contains(marker),
+            "FR-100 must record the split roles and cite the web reader spec ({marker}); \
+             row: {hundred}"
+        );
+    }
+
+    let hundred_three = functional_rows
+        .iter()
+        .find(|line| line.starts_with("| FR-103 |"))
+        .expect("section 27.1 must carry FR-103");
+    assert!(
+        !hundred_three.contains("Reader-Cache und Index verschlüsselt |"),
+        "FR-103 must no longer describe the SQLCipher cache; row: {hundred_three}"
+    );
+    for marker in [
+        "OPFS",
+        "ChaCha20-Poly1305",
+        "2026-08-15-einsatzarchiv-web-reader-design.md",
+        "8.1",
+    ] {
+        assert!(
+            hundred_three.contains(marker),
+            "FR-103 must record the encrypted Rust index ({marker}); row: {hundred_three}"
+        );
+    }
 }

@@ -2284,10 +2284,10 @@ v0.1 gilt erst nach Stufe 7 und Erfüllung aller Abnahmekriterien als fertig.
 | FR-087 | Replay erzeugt kein Duplikat | 13.3 | AK 8, 36, 50 |
 | FR-088 | synchron erst nach lokalem Receipt | 13.5 | AK 8, 50; Gate §22.3 |
 | FR-089 | Syncstatus ohne Fachklartext | 13.5; 17.4; 18.2 | AK 19, 39 |
-| FR-100 | gemeinsame App, signierte Rollentrennung | 5.1–5.2; 6 | AK 29 |
+| FR-100 | Desktop für Writer und Administration, Browser-Reader, signierte Rollentrennung | 5.1–5.2; 6; `2026-08-15-einsatzarchiv-web-reader-design.md` §3 | AK 29 |
 | FR-101 | vollständig prüfen vor Entschlüsselung | 14.1 | AK 4–6, 9, 13, 17, 42 |
 | FR-102 | Lücke/Signatur/Key/Grant sichtbar | 14.1; 17.2; 17.4 | AK 4, 5, 9, 42 |
-| FR-103 | Reader-Cache und Index verschlüsselt | 14.2; 18.3 | AK 23; Gate §22.4–22.5 |
+| FR-103 | Reader-Index als Ganzes mit ChaCha20-Poly1305 verschlüsselt in OPFS statt SQLCipher | 14.2; 18.3; `2026-08-15-einsatzarchiv-web-reader-design.md` §8.1 | AK 23; Gate §22.4–22.5 |
 | FR-104 | automatische Inaktivitätssperre | 7; 14.2 | Gate §22.4 |
 | FR-105 | kein Klartext-Massenexport als Default | 14.4 | Gate §22.4 |
 | FR-106 | Einzelexport lokal auditieren | 14.4; 18.3 | Gate §22.4–22.5 |
