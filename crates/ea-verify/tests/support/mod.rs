@@ -24,16 +24,18 @@ use ea_crypto::{
     HpkeRecipientPrivateKey, HpkeRecipientPublicKey, SecretBytes, object_hash,
 };
 use ea_format::{
-    CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1,
-    EIP_PREFIX_V1, EntryPackageV1, EvidenceObjectV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1,
-    GrantPlanItemV1, GrantPlanV1, GrantPurposeV1, GrantV1, ManifestCoreFieldsV1, ManifestCoreV1,
-    ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1, SignedManifestV1, encode_destroyed_entry_stub,
-    encode_entry_package, encode_evidence, encode_grant, encode_receipt,
+    CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DeletionAttestationFieldsV1,
+    DestroyedEntryStubV1, DestructionAuthorizationFieldsV1, DestructionTargetV1,
+    DestructionTransitionFieldsV1, EIP_PREFIX_V1, EntryPackageV1, EvidenceObjectV1,
+    GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1, GrantPurposeV1,
+    GrantV1, ManifestCoreFieldsV1, ManifestCoreV1, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1,
+    SignedManifestV1, TrustObjectV1, TrustPayloadV1, encode_destroyed_entry_stub,
+    encode_entry_package, encode_evidence, encode_grant, encode_receipt, encode_trust,
 };
 use ea_trust::{TrustAnchorV1, TrustObjectSource, decode_trust_anchor};
 use ea_types::{
-    CertificateHash, ChainId, ChainSequence, DestructionId, EntryHash, Hash32, KeyThumbprint,
-    ObjectHash, RegistryVersion, UnixMillis,
+    CertificateHash, ChainId, ChainSequence, DestructionId, EntryHash, EventId, Hash32,
+    KeyThumbprint, ObjectHash, RegistryVersion, UnixMillis,
 };
 use ed25519_dalek::SigningKey;
 
@@ -2192,4 +2194,512 @@ fn complete_grant_bytes(
     encode_grant(&grant)
         .expect("der Fixture-Grant muss kodieren")
         .into_vec()
+}
+
+// ---------------------------------------------------------------------------
+// Vernichtungsvorgaenge: `authorizedDestructions` und die Signierer, die sie
+// tragen.
+// ---------------------------------------------------------------------------
+
+/// Erste Sequenz der Lease des Kopfes, der das `deletionAttest`-Zertifikat
+/// aktiviert.
+///
+/// LIEGT HINTER [`COMPLETE_WRITER_LEASE_THROUGH_V1`], und das ist keine
+/// Kosmetik: `verify_cose_sign1` verlangt fuer die Transitionssignatur, dass
+/// die `authorizationSequence` sowohl hinter der `effective_from_sequence` des
+/// Zertifikats als auch hinter der des REGISTRIERUNGSKOPFES liegt
+/// (`crates/ea-crypto/src/cose.rs:1434-1443`). Ein eigener Kopf traegt genau
+/// EINEN Uebergang, also bekommt das `deletionAttest`-Zertifikat einen eigenen
+/// — und dessen Lease beginnt hinter der des Schreibers.
+pub const DESTRUCTION_LEASE_FROM_V1: u64 = 101;
+/// Letzte Sequenz dieser Lease.
+pub const DESTRUCTION_LEASE_THROUGH_V1: u64 = 200;
+
+/// Die `authorizationSequence` jeder Fixture-Vernichtungsautorisierung.
+///
+/// GLEICH dem Beginn der Lease: `destruction_transition_trust_digest` zieht
+/// `expected_sequence` AUSSCHLIESSLICH aus der Autorisierung
+/// (`crates/ea-crypto/src/cose.rs:1069-1090`), nicht aus dem Transitionsobjekt.
+pub const DESTRUCTION_AUTHORIZATION_SEQUENCE_V1: u64 = DESTRUCTION_LEASE_FROM_V1;
+
+/// Erste Sequenz der ZWEITEN Loeschzeugen-Lease.
+///
+/// Sie existiert, damit sich messen laesst, was mit einer einzigen Lease
+/// unsichtbar bleibt: die Registrierungslinie laesst sich nur VORWAERTS
+/// nachziehen, und ein einmal gepinnter Kopf geht nie zurueck. Zwei
+/// Vernichtungen unter VERSCHIEDENEN Leases decken deshalb auf, ob die
+/// Pipeline ihre Kopfabfragen nach Sequenz ordnet oder dem Zufall der
+/// Objekthashes ueberlaesst.
+pub const SECOND_DESTRUCTION_LEASE_FROM_V1: u64 = 201;
+/// Letzte Sequenz dieser Lease.
+pub const SECOND_DESTRUCTION_LEASE_THROUGH_V1: u64 = 300;
+/// Die `authorizationSequence` der Vorgaenge in der zweiten Lease.
+pub const SECOND_DESTRUCTION_AUTHORIZATION_SEQUENCE_V1: u64 = SECOND_DESTRUCTION_LEASE_FROM_V1;
+
+/// Die fuenf `destruction-state-v1`-Codes aus dem Wire-Format-Addendum
+/// (`docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md`:335-336).
+pub const DESTRUCTION_STATE_REQUESTED_V1: u8 = 0;
+/// In Ausfuehrung.
+pub const DESTRUCTION_STATE_IN_PROGRESS_V1: u8 = 1;
+/// Wartet auf den Ablauf von Sicherungen.
+pub const DESTRUCTION_STATE_PENDING_BACKUP_EXPIRY_V1: u8 = 2;
+/// Im verwalteten Bereich vollstaendig.
+pub const DESTRUCTION_STATE_COMPLETE_MANAGED_SCOPE_V1: u8 = 3;
+/// Unvollstaendig, weil eine Replik nicht erreichbar war.
+pub const DESTRUCTION_STATE_INCOMPLETE_UNREACHABLE_REPLICA_V1: u8 = 4;
+
+/// Mit WELCHEM Zertifikat die Ereignisse eines Vorgangs signiert werden.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DestructionSignerSpec {
+    /// Das `deletionAttest`-Zertifikat. Die Pruefung traegt.
+    DeletionAttest,
+    /// Das Schreiberzertifikat: richtige Organisation, richtiger Schluessel,
+    /// aber weder die Rolle noch die Faehigkeit `deletionAttest`. Genau der
+    /// Fall, in dem eine tadellose Ed25519-Signatur trotzdem keine Autoritaet
+    /// traegt.
+    Writer,
+}
+
+/// Ein Vernichtungsvorgang, wie ihn die Fixture ablegt.
+#[derive(Clone, Debug)]
+pub struct DestructionSpec {
+    /// Unterscheidet Vorgaenge: `destructionId`, Ereigniskennungen und
+    /// Zielhashes werden daraus abgeleitet.
+    pub marker: u8,
+    /// Die `to_state`-Codes der Ereigniskette, in Ablagereihenfolge.
+    ///
+    /// Das erste Ereignis ist die Wurzel (`previousEventObjectHash` und
+    /// `fromState` beide abwesend); jedes weitere bindet an das vorige und
+    /// traegt dessen `to_state` als `from_state`. UNZULAESSIGE Uebergaenge
+    /// werden hier schlicht hingeschrieben — das Wire-Format laesst jeden Code
+    /// 0..4 zu, die Zulaessigkeit ist eine Aussage der Verifikation.
+    pub events: Vec<u8>,
+    /// Wer signiert.
+    pub signer: DestructionSignerSpec,
+    /// Ob zusaetzlich eine Loeschbestaetigung abgelegt wird.
+    pub attestation: bool,
+    /// Ob ALLE Ereignisse dieselbe `event_id` tragen.
+    pub duplicate_event_id: bool,
+    /// Ob der Vorgang in der ZWEITEN Loeschzeugen-Lease autorisiert ist.
+    pub second_lease: bool,
+}
+
+impl DestructionSpec {
+    /// Ein Vorgang mit gueltiger Signatur, ohne Attestierung.
+    #[must_use]
+    pub fn new(marker: u8, events: &[u8]) -> Self {
+        Self {
+            marker,
+            events: events.to_vec(),
+            signer: DestructionSignerSpec::DeletionAttest,
+            attestation: false,
+            duplicate_event_id: false,
+            second_lease: false,
+        }
+    }
+
+    /// Derselbe Vorgang, autorisiert in der ZWEITEN Loeschzeugen-Lease.
+    #[must_use]
+    pub fn in_the_second_lease(mut self) -> Self {
+        self.second_lease = true;
+        self
+    }
+
+    /// Derselbe Vorgang mit einer Loeschbestaetigung.
+    #[must_use]
+    pub fn with_attestation(mut self) -> Self {
+        self.attestation = true;
+        self
+    }
+
+    /// Derselbe Vorgang, signiert vom Schreiber statt vom Loeschzeugen.
+    #[must_use]
+    pub fn signed_by_the_writer(mut self) -> Self {
+        self.signer = DestructionSignerSpec::Writer;
+        self
+    }
+
+    /// Derselbe Vorgang, dessen Ereignisse dieselbe Kennung tragen.
+    #[must_use]
+    pub fn with_one_event_id(mut self) -> Self {
+        self.duplicate_event_id = true;
+        self
+    }
+}
+
+/// Was von einem abgelegten Vorgang bekannt ist.
+pub struct BuiltDestruction {
+    pub destruction_id: DestructionId,
+    pub authorization_object_hash: ObjectHash,
+    /// Objekthashes der Transitionsobjekte, in Kettenreihenfolge.
+    pub event_object_hashes: Vec<ObjectHash>,
+    /// Objekthash der Loeschbestaetigung, sofern eine abgelegt wurde.
+    pub attestation_object_hash: Option<ObjectHash>,
+}
+
+/// Ein Bestand aus Registrierungslinie und Vernichtungsvorgaengen.
+///
+/// BEWUSST OHNE EINTRAEGE: dann kann der Abdruck des Geraeteschluessels in
+/// `publicKeyThumbprints` nur aus einer Destruction-Signatur stammen. Mit
+/// Eintraegen waere dieselbe Zahl auch ohne jede gepruefte Transition
+/// erreichbar — die Registrierungslinie stellt JEDES Geraetezertifikat auf
+/// denselben Schluessel aus.
+pub struct DestructionArchive {
+    pub fixture: ArchiveFixture,
+    pub anchor_bytes: Vec<u8>,
+    pub destructions: Vec<BuiltDestruction>,
+}
+
+impl DestructionArchive {
+    #[must_use]
+    pub fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+}
+
+/// Eine Loeschzeugen-Lease: ihr Kopf, ihr Zertifikat und ihre
+/// `authorizationSequence`.
+#[derive(Clone, Copy)]
+struct DestructionLease {
+    head: trust_support::BuiltHead,
+    certificate_hash: CertificateHash,
+    authorization_sequence: u64,
+}
+
+impl DestructionLease {
+    fn head_hash(&self) -> Hash32 {
+        Hash32::try_from(self.head.object_hash.as_bytes().as_slice())
+            .expect("ein Objekthash sind 32 Bytes")
+    }
+}
+
+/// Die Linie der Vernichtungsfixtures: Policy, Schreiber, ZWEI Loeschzeugen.
+///
+/// ZWEI und nicht einer, obwohl die meisten Fixtures nur den ersten brauchen.
+/// Mit einer einzigen Lease deckte jede Kopfabfrage denselben Kopf ab, und die
+/// Reihenfolge der Abfragen waere unbeobachtbar — obwohl die
+/// Registrierungslinie sich nur vorwaerts nachziehen laesst und ein zu frueh
+/// gepinnter Kopf jede niedrigere Sequenz danach unerreichbar macht.
+struct DestructionLine {
+    line: trust_support::RegistryLineBuilder,
+    leases: [DestructionLease; 2],
+    writer_certificate_hash: CertificateHash,
+    anchor_bytes: Vec<u8>,
+}
+
+impl DestructionLine {
+    fn lease(&self, spec: &DestructionSpec) -> DestructionLease {
+        self.leases[usize::from(spec.second_lease)]
+    }
+
+    fn certificate_hash(
+        &self,
+        signer: DestructionSignerSpec,
+        lease: DestructionLease,
+    ) -> CertificateHash {
+        match signer {
+            DestructionSignerSpec::DeletionAttest => lease.certificate_hash,
+            DestructionSignerSpec::Writer => self.writer_certificate_hash,
+        }
+    }
+}
+
+fn destruction_line() -> DestructionLine {
+    let mut line = trust_support::RegistryLineBuilder::new();
+    line.push(
+        policy_action(),
+        trust_support::HeadOptions {
+            effective_from: Some(POLICY_LEASE_FROM_V1),
+            valid_through: Some(POLICY_LEASE_THROUGH_V1),
+            not_after: UnixMillis::new(COMPLETE_POLICY_NOT_AFTER_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let writer = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x11,
+            effective_from: Some(COMPLETE_WRITER_LEASE_FROM_V1),
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(COMPLETE_WRITER_LEASE_FROM_V1),
+            valid_through: Some(COMPLETE_WRITER_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let mut lease = |marker: u8, from: u64, through: u64, sequence: u64| {
+        let head = line.push(
+            trust_support::ActionSpec::Device {
+                kind: CertificateKindV1::DeletionAttest,
+                marker,
+                effective_from: Some(from),
+            },
+            trust_support::HeadOptions {
+                effective_from: Some(from),
+                valid_through: Some(through),
+                ..trust_support::HeadOptions::default()
+            },
+        );
+        DestructionLease {
+            certificate_hash: CertificateHash::from(
+                head.direct_object_hash
+                    .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+            ),
+            head,
+            authorization_sequence: sequence,
+        }
+    };
+    let leases = [
+        lease(
+            0x12,
+            DESTRUCTION_LEASE_FROM_V1,
+            DESTRUCTION_LEASE_THROUGH_V1,
+            DESTRUCTION_AUTHORIZATION_SEQUENCE_V1,
+        ),
+        lease(
+            0x13,
+            SECOND_DESTRUCTION_LEASE_FROM_V1,
+            SECOND_DESTRUCTION_LEASE_THROUGH_V1,
+            SECOND_DESTRUCTION_AUTHORIZATION_SEQUENCE_V1,
+        ),
+    ];
+    let anchor_bytes = line.exact_anchor_bytes().to_vec();
+    DestructionLine {
+        leases,
+        writer_certificate_hash: CertificateHash::from(
+            writer
+                .direct_object_hash
+                .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+        ),
+        line,
+        anchor_bytes,
+    }
+}
+
+/// Baut einen Bestand aus der Linie und den beschriebenen Vorgaengen.
+#[must_use]
+pub fn destruction_archive(specs: &[DestructionSpec]) -> DestructionArchive {
+    let line = destruction_line();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let mut destructions = Vec::new();
+    for spec in specs {
+        destructions.push(push_destruction(&mut fixture, &line, spec));
+    }
+
+    DestructionArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        destructions,
+    }
+}
+
+fn push_destruction(
+    fixture: &mut ArchiveFixture,
+    line: &DestructionLine,
+    spec: &DestructionSpec,
+) -> BuiltDestruction {
+    let destruction_id = DestructionId::try_from(&[spec.marker; 16][..])
+        .expect("16 Bytes sind eine Vorgangskennung");
+    let lease = line.lease(spec);
+    let authorization = destruction_authorization_bytes(line, lease, destruction_id, spec.marker);
+    let authorization_object_hash = object_hash(&authorization);
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{}/authorization.etb",
+            ea_archive::DESTRUCTIONS_DIR_V1,
+            hex::encode(destruction_id.as_bytes())
+        ),
+        authorization,
+    );
+    // Die Autorisierung muss VOR den Transitionen stehen: jede Transition
+    // bindet ihren Objekthash, und `sign_destruction_transition_digest`
+    // rechnet ihn selbst nach.
+    let authorization_bytes = fixture
+        .blobs()
+        .last()
+        .expect("die Autorisierung liegt im Bestand")
+        .1
+        .clone();
+
+    let certificate_hash = line.certificate_hash(spec.signer, lease);
+    let mut event_object_hashes = Vec::new();
+    let mut previous_event_object_hash = None;
+    let mut previous_state = None;
+    for (index, to_state) in spec.events.iter().copied().enumerate() {
+        let event_marker = if spec.duplicate_event_id {
+            spec.marker
+        } else {
+            spec.marker
+                .wrapping_add(u8::try_from(index).expect("ein Byte je Ereignis"))
+        };
+        let bytes = destruction_transition_bytes(
+            &authorization_bytes,
+            destruction_id,
+            authorization_object_hash,
+            EventId::try_from(&[event_marker; 16][..]).expect("16 Bytes sind eine Ereigniskennung"),
+            previous_event_object_hash,
+            previous_state,
+            to_state,
+            certificate_hash,
+        );
+        let hash = object_hash(&bytes);
+        fixture.push_exact_bytes(
+            &format!(
+                "{}{}/{}{}.etb",
+                ea_archive::DESTRUCTIONS_DIR_V1,
+                hex::encode(destruction_id.as_bytes()),
+                ea_archive::DESTRUCTION_EVENTS_SUBDIR_V1,
+                hex::encode(hash.as_bytes())
+            ),
+            bytes,
+        );
+        event_object_hashes.push(hash);
+        previous_event_object_hash = Some(hash);
+        previous_state = Some(to_state);
+    }
+
+    let attestation_object_hash = spec.attestation.then(|| {
+        let bytes = deletion_attestation_bytes(
+            &authorization_bytes,
+            destruction_id,
+            authorization_object_hash,
+            spec.marker,
+            certificate_hash,
+        );
+        let hash = object_hash(&bytes);
+        fixture.push_exact_bytes(
+            &format!(
+                "{}{}/{}{}.etb",
+                ea_archive::DESTRUCTIONS_DIR_V1,
+                hex::encode(destruction_id.as_bytes()),
+                ea_archive::DESTRUCTION_ATTESTATIONS_SUBDIR_V1,
+                hex::encode(hash.as_bytes())
+            ),
+            bytes,
+        );
+        hash
+    });
+
+    BuiltDestruction {
+        destruction_id,
+        authorization_object_hash,
+        event_object_hashes,
+        attestation_object_hash,
+    }
+}
+
+/// Baut die Vernichtungsautorisierung eines Vorgangs.
+///
+/// ZWEI SIGNATUREN UNTER VERSCHIEDENEN ZERTIFIKATEN, weil `ea-format` fuer
+/// diese Unterart mindestens zwei verlangt
+/// (`crates/ea-format/src/etb.rs:1248`): das Vier-Augen-Prinzip aus
+/// `design.md`:1818 steht schon im Wire-Format, und es verlangt ZWEI
+/// UNTERSCHIEDLICHE Approver. Zweimal dasselbe Zertifikat ergaebe zwei
+/// byteidentische Signaturen — strukturell zulaessig und fachlich eine Luege.
+///
+/// Die Signaturen sind darueber hinaus STRUKTURELL gueltig und werden von
+/// dieser Pipeline nie geprueft: `ea-verify` prueft die Transitionen, und die
+/// binden den Objekthash der Autorisierung kryptografisch mit ein.
+fn destruction_authorization_bytes(
+    line: &DestructionLine,
+    lease: DestructionLease,
+    destruction_id: DestructionId,
+    marker: u8,
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::destruction_authorization(DestructionAuthorizationFieldsV1 {
+        destruction_id,
+        organization_id: trust_support::organization(),
+        registry_version: lease.head.version,
+        registry_head_hash: lease.head_hash(),
+        authorization_sequence: lease.authorization_sequence,
+        targets: vec![DestructionTargetV1::new(
+            [marker; 32],
+            lease.authorization_sequence,
+        )],
+        scope_code: 0,
+        legal_reason_code: 0,
+    })
+    .expect("die Fixture-Vernichtungsautorisierung muss kodieren");
+    let signer = writer_device_signer();
+    let signatures = [lease.certificate_hash, line.writer_certificate_hash]
+        .into_iter()
+        .map(|certificate_hash| {
+            signer
+                .sign_destruction_approval_digest(certificate_hash, payload.exact_digest_input())
+                .expect("der Fixture-Signierer muss signieren")
+        })
+        .collect();
+    encode_trust(&TrustObjectV1::new(payload, signatures).expect("die Autorisierung muss binden"))
+        .expect("die Autorisierung muss kodieren")
+        .into_vec()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn destruction_transition_bytes(
+    authorization_bytes: &[u8],
+    destruction_id: DestructionId,
+    authorization_object_hash: ObjectHash,
+    event_id: EventId,
+    previous_event_object_hash: Option<ObjectHash>,
+    from_state: Option<u8>,
+    to_state: u8,
+    certificate_hash: CertificateHash,
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::destruction_transition(DestructionTransitionFieldsV1 {
+        destruction_id,
+        destruction_authorization_object_hash: authorization_object_hash,
+        event_id,
+        previous_event_object_hash,
+        from_state,
+        to_state,
+        trigger_code: 0,
+        executed_at: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
+    })
+    .expect("die Fixture-Transition muss kodieren");
+    let signature = writer_device_signer()
+        .sign_destruction_transition_digest(
+            certificate_hash,
+            payload.exact_digest_input(),
+            authorization_bytes,
+        )
+        .expect("der Fixture-Signierer muss signieren");
+    encode_trust(&TrustObjectV1::new(payload, vec![signature]).expect("die Transition muss binden"))
+        .expect("die Transition muss kodieren")
+        .into_vec()
+}
+
+fn deletion_attestation_bytes(
+    authorization_bytes: &[u8],
+    destruction_id: DestructionId,
+    authorization_object_hash: ObjectHash,
+    marker: u8,
+    certificate_hash: CertificateHash,
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::deletion_attestation(DeletionAttestationFieldsV1 {
+        destruction_id,
+        destruction_authorization_object_hash: authorization_object_hash,
+        replica_id: [marker; 16],
+        replica_kind: 0,
+        removed_object_hashes: vec![
+            ObjectHash::try_from(&[marker; 32][..]).expect("32 Bytes sind ein Objekthash"),
+        ],
+        result: 0,
+        backup_expiry_at: None,
+        executed_at: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
+    })
+    .expect("die Fixture-Loeschbestaetigung muss kodieren");
+    let signature = writer_device_signer()
+        .sign_deletion_attestation_digest(
+            certificate_hash,
+            payload.exact_digest_input(),
+            authorization_bytes,
+        )
+        .expect("der Fixture-Signierer muss signieren");
+    encode_trust(
+        &TrustObjectV1::new(payload, vec![signature]).expect("die Loeschbestaetigung muss binden"),
+    )
+    .expect("die Loeschbestaetigung muss kodieren")
+    .into_vec()
 }

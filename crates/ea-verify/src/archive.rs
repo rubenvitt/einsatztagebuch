@@ -43,6 +43,7 @@ use crate::{
     ManifestSignatureErrorV1, ObjectErrorV1, ObjectResultKindV1, ObjectResultV1, ObjectTypeV1,
     QuarantinedObjectV1, ReceiptGateErrorV1, RecipientGrantErrorV1, ServerConfirmationV1,
     SilentObserver, VerificationReportV1, VerifyError,
+    destruction::record_destructions,
     entry::{
         claims_unverifiable_writer_transition, entry_chain_node, grant_plan_finding, orphan_grants,
         receipt_bindings_hold, receipt_for, standard_checkpoint_claim,
@@ -300,6 +301,19 @@ pub fn verify_archive_observed(
     if verified_trust(&mut store, key, anchor, &inventory).is_none() {
         return report.seal();
     }
+    // ERST HINTER DEM FAIL-CLOSED-AUSSTIEG, nie davor: `publicKeyThumbprints`
+    // ist Nachweis des GEPRUEFTEN. Ein Lauf, dessen Vertrauenskette nicht
+    // traegt, hat nichts geprueft und laesst das Feld leer.
+    //
+    // Eingetragen wird `anchor.root_key_thumbprint()` — die Wurzel, GEGEN die
+    // `verify_trust` die Linie geprueft hat, und der einzige Abdruck, den diese
+    // Crate dafuer erreichen kann: `VerifiedTrust` gibt die angenommene
+    // Wurzellinie nicht heraus. Nach einer Wurzelrotation signieren spaetere
+    // Koepfe unter einer nachgezogenen Wurzel; deren Abdruck steht hier
+    // ausdruecklich NICHT, weil er nicht der Vertrauensboden dieses Laufs ist.
+    report
+        .public_key_thumbprints
+        .insert(anchor.root_key_thumbprint());
 
     // Gate `registry`: je Eintragssequenz einzeln. Ein Eintrag, dessen Sequenz
     // keinen Kopf mit Operationsautoritaet findet, bekommt keine Aussage; ein
@@ -485,6 +499,27 @@ pub fn verify_archive_observed(
     if decapsulation == Decapsulation::Performed {
         protocol.decapsulated();
     }
+
+    // `authorizedDestructions`, UND AUSDRUECKLICH KEIN GATE. Die neun
+    // Bezeichner aus `design.md` §14.1 sind geschlossen, und
+    // [`crate::GATE_ORDER_V1`] ist ihre einzige Quelle; ein zehnter Eintrag im
+    // Protokoll waere eine erfundene Stufe. Der Schritt laeuft deshalb still.
+    //
+    // ZULETZT, und das ist nicht beliebig: die Registrierungslinie laesst sich
+    // nur VORWAERTS nachziehen. Die `authorizationSequence` einer Vernichtung
+    // liegt hinter den Eintragssequenzen ihres Bestands; liefe dieser Schritt
+    // frueher, zoege er die Linie ueber die Lease des Schreiberkopfes hinaus
+    // und keiner der Eintraege waere danach noch zuzuordnen.
+    record_destructions(&mut report, &inventory, |sequence| {
+        select_head_for_sequence(
+            &mut store,
+            key,
+            anchor,
+            &inventory,
+            options.os_wall_clock(),
+            sequence,
+        )
+    });
 
     // ERST HIER, und nach nichts anderem: die Pipeline ist vollstaendig
     // durchgelaufen. Ein frueherer Ausstieg — Gate `trust` traegt nicht —

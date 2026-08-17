@@ -7,8 +7,14 @@
 //! Ausgabe das Schema erfuellt.
 
 /// Die Archivfixtures, per `#[path]` eingebunden statt ueber eine optionale
-/// Dependency. Bindet seinerseits die Trust- und Formatfixtures ein.
-#[path = "../../../crates/ea-archive/tests/support/mod.rs"]
+/// Dependency.
+///
+/// EINGEBUNDEN WIRD DAS `ea-verify`-MODUL, nicht das von `ea-archive`: es
+/// bindet jenes seinerseits als `archive_support` ein und liefert darueber
+/// hinaus die Vernichtungsfixtures. Ohne sie liesse sich `authorizedDestructions`
+/// nur LEER gegen das Schema pruefen — und genau dort liegt der Fallstrick, dass
+/// `destructionId` 32 und ein Objekthash 64 Hex-Zeichen hat.
+#[path = "../../../crates/ea-verify/tests/support/mod.rs"]
 mod support;
 
 use ea_archive::ArchiveSource;
@@ -20,9 +26,14 @@ use ea_verify::{VerificationReportV1, VerifyOptions, verify_archive};
 use serde_json::Value;
 
 use support::{
-    ArchiveFixture, FIXTURE_TIME_FLOOR_V1, MUTATED_EIP_FORMAT_ERROR_CODE_V1,
-    eip_with_one_mutated_body_byte,
-    trust_support::{ActionSpec, HeadOptions, RegistryLineBuilder},
+    DESTRUCTION_STATE_COMPLETE_MANAGED_SCOPE_V1, DESTRUCTION_STATE_IN_PROGRESS_V1,
+    DESTRUCTION_STATE_REQUESTED_V1, DestructionSpec, FIXTURE_OS_WALL_CLOCK_V1,
+    archive_support::{
+        ArchiveFixture, FIXTURE_TIME_FLOOR_V1, MUTATED_EIP_FORMAT_ERROR_CODE_V1,
+        eip_with_one_mutated_body_byte,
+        trust_support::{ActionSpec, HeadOptions, RegistryLineBuilder},
+    },
+    destruction_archive,
 };
 
 /// Das gepinnte Berichtsschema, zur Uebersetzungszeit eingebettet.
@@ -199,14 +210,27 @@ fn a_trust_only_archive_report_validates_against_the_pinned_schema() {
         "signatureErrors",
         "evidenceErrors",
         "decryptionErrors",
-        "publicKeyThumbprints",
     ] {
         assert_eq!(
             document[empty].as_array().map(Vec::len),
             Some(0),
-            "{empty} must be empty while only the format gate has run"
+            "{empty} must be empty over an archive that carries nothing but its trust store"
         );
     }
+
+    // NICHT LEER, und das ist die eine Sachaussage, die dieser Bestand traegt:
+    // Gate `trust` hat die Registrierungslinie GEGEN die Wurzel des Ankers
+    // geprueft und sie getragen. `publicKeyThumbprints` ist Nachweis des
+    // Geprueften, also steht genau dieser eine Abdruck darin — kein
+    // Geraetezertifikat der Linie, denn keines hat in diesem Lauf eine
+    // Signatur getragen.
+    assert_eq!(
+        document["publicKeyThumbprints"],
+        Value::Array(vec![Value::String(hex::encode(
+            anchor.root_key_thumbprint().as_bytes()
+        ))]),
+        "publicKeyThumbprints carries exactly the root the trust gate verified against"
+    );
     assert!(
         document.get("reportSignature").is_none() && document.get("runtimeMetadata").is_none(),
         "Phase B emits neither a report signature nor runtime metadata"
@@ -312,5 +336,82 @@ fn a_malformed_object_pairs_a_format_error_with_a_quarantine_entry() {
     let shuffled = run(&built.fixture.randomized_paths(), &anchor)
         .to_canonical_json()
         .expect("the canonical writer must emit");
+    assert_eq!(json, shuffled);
+}
+
+/// Ein Bericht MIT Vernichtungsvorgaengen gegen dasselbe Schema.
+///
+/// DIE EIGENTLICHE AUSSAGE ist eine Laengenaussage: `destructionId` folgt dem
+/// `uuid`-Muster `^[0-9a-f]{32}$`, `authorizationObjectHash` dem `hash`-Muster
+/// `^[0-9a-f]{64}$`. Beide entstehen aus `Id16` beziehungsweise `Hash32`, und
+/// beide laufen durch DENSELBEN Hexschreiber. Verwechselte er sie, validierte
+/// der Bericht nur zufaellig — deshalb wird hier nicht die Laenge nachgezaehlt,
+/// sondern das Schema selbst befragt.
+#[test]
+fn a_report_with_destructions_validates_against_the_pinned_schema() {
+    let built = destruction_archive(&[
+        DestructionSpec::new(0x91, &[DESTRUCTION_STATE_REQUESTED_V1]),
+        DestructionSpec::new(
+            0x92,
+            &[
+                DESTRUCTION_STATE_REQUESTED_V1,
+                DESTRUCTION_STATE_IN_PROGRESS_V1,
+                DESTRUCTION_STATE_COMPLETE_MANAGED_SCOPE_V1,
+            ],
+        )
+        .with_attestation(),
+    ]);
+    let anchor = built.anchor();
+    let report = verify_archive(
+        &built.fixture,
+        &anchor,
+        VerifyOptions::new(UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1)),
+    )
+    .expect("the fixture archive must report");
+
+    let json = report
+        .to_canonical_json()
+        .expect("the canonical writer must emit");
+    let document = parse(&json);
+    assert_valid_against_schema(&document);
+
+    let destructions = document["authorizedDestructions"]
+        .as_array()
+        .expect("array");
+    assert_eq!(destructions.len(), 2);
+    assert_eq!(
+        destructions[0]["destructionId"],
+        Value::String(hex::encode(built.destructions[0].destruction_id.as_bytes()))
+    );
+    assert_eq!(destructions[0]["state"], "requested");
+    assert_eq!(
+        destructions[1]["authorizationObjectHash"],
+        Value::String(hex::encode(
+            built.destructions[1].authorization_object_hash.as_bytes()
+        ))
+    );
+    assert_eq!(destructions[1]["state"], "completeManagedScope");
+    assert_eq!(
+        destructions[0]["destructionId"].as_str().map(str::len),
+        Some(32),
+        "a destructionId is sixteen bytes, a hash is thirty-two"
+    );
+    assert_eq!(
+        destructions[1]["authorizationObjectHash"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+
+    // Auch mit Vorgaengen haengt die Ausgabe nicht an der Reihenfolge des
+    // Bestands: dieselben Bytes unter vertauschten Hinweisen und rueckwaerts.
+    let shuffled = verify_archive(
+        &built.fixture.randomized_paths(),
+        &anchor,
+        VerifyOptions::new(UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1)),
+    )
+    .expect("the fixture archive must report")
+    .to_canonical_json()
+    .expect("the canonical writer must emit");
     assert_eq!(json, shuffled);
 }

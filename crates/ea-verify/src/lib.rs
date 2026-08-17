@@ -19,6 +19,7 @@
 //! `x-ea-unique-key` ihres Schemas.
 
 mod archive;
+mod destruction;
 mod entry;
 mod error;
 mod evidence;
@@ -31,6 +32,7 @@ mod state;
 pub use archive::{
     EvidenceRequirementV1, RecipientKeyV1, VerifyOptions, verify_archive, verify_archive_observed,
 };
+pub use destruction::DestructionErrorV1;
 pub use entry::GRANT_PLAN_MISMATCH_CODE_V1;
 pub use error::{ManifestSignatureErrorV1, ReceiptGateErrorV1, VerifyError};
 pub use evidence::EvidenceGateErrorV1;

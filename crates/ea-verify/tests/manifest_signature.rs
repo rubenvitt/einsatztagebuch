@@ -95,9 +95,18 @@ fn each_reachable_manifest_signature_binding_fails_on_its_own_one_byte_mutation(
             0,
             "{label}: eine gefallene Signatur traegt keine Registrierungsversion bei"
         );
-        assert_eq!(
-            report.public_key_thumbprints().len(),
-            0,
+        // `publicKeyThumbprints` traegt hier GENAU die Wurzel des Ankers: Gate
+        // `trust` hat die Registrierungslinie gegen sie geprueft, und sonst hat
+        // in diesem Lauf keine Signatur getragen. Der Abdruck des Schreibers
+        // fehlt — das Feld ist Nachweis des GEPRUEFTEN, kein Katalogabzug.
+        let thumbprints: Vec<_> = report.public_key_thumbprints().collect();
+        assert_eq!(thumbprints.len(), 1, "{label}");
+        assert!(
+            thumbprints[0] == anchor.root_key_thumbprint(),
+            "{label}: nur die Wurzel hat geprueft getragen"
+        );
+        assert!(
+            thumbprints[0] != writer_device_key_thumbprint(),
             "{label}: publicKeyThumbprints ist Nachweis des GEPRUEFTEN"
         );
         assert!(!report.is_fully_verified(), "{label}");
@@ -127,8 +136,20 @@ fn a_verified_manifest_signature_feeds_the_registry_version_and_the_thumbprint()
     assert_eq!(versions.len(), 1);
     assert!(versions[0] == built.registry_version);
 
-    // `publicKeyThumbprints` traegt den Abdruck, der die Pruefung getragen hat.
+    // `publicKeyThumbprints` traegt die Abdruecke, die die Pruefungen getragen
+    // haben: die Wurzel aus Gate `trust` und den Schreiber aus Gate
+    // `manifest-signature`. ZWEI, nicht einer — und der zweite ist die Aussage
+    // dieses Tests.
     let thumbprints: Vec<_> = report.public_key_thumbprints().collect();
-    assert_eq!(thumbprints.len(), 1);
-    assert!(thumbprints[0] == writer_device_key_thumbprint());
+    assert_eq!(thumbprints.len(), 2);
+    assert!(
+        thumbprints
+            .iter()
+            .any(|thumbprint| *thumbprint == writer_device_key_thumbprint())
+    );
+    assert!(
+        thumbprints
+            .iter()
+            .any(|thumbprint| *thumbprint == anchor.root_key_thumbprint())
+    );
 }
