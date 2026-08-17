@@ -7,8 +7,11 @@
 //! Objekt — nicht an der Reihenfolge, in der der Bestand durchlaufen wird.
 
 use ea_archive::ArchiveInventory;
-use ea_chain::{ChainNode, ChainNodeKind};
-use ea_format::{EntryPackageV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1, GrantV1, Parsed};
+use ea_chain::{ChainNode, ChainNodeKind, CheckpointClaim};
+use ea_format::{
+    DecodedEvidencePayloadV1, EntryPackageV1, EvidenceObjectV1, GrantKindV1, GrantPlanItemV1,
+    GrantPlanV1, GrantV1, Parsed, ReceiptV1,
+};
 use ea_types::{EntryHash, ObjectHash};
 
 /// Der eigene Code von Gate `grant-plan`.
@@ -162,4 +165,75 @@ pub(crate) fn orphan_grants(inventory: &ArchiveInventory) -> Vec<ObjectHash> {
         })
         .map(Parsed::object_hash)
         .collect()
+}
+
+/// Die Quittung, die GENAU DIESES Eintragspaket bezeugt.
+///
+/// Zugeordnet wird ueber `entry_object_hash` und nicht ueber den `entryHash`:
+/// die Quittung bestaetigt die BYTES, die der Server angenommen hat. Zwei
+/// Quittungen auf denselben Eintrag hat das Inventar bereits als Widerspruch
+/// isoliert (`crates/ea-archive/src/inventory.rs:518-537`), hier bleibt
+/// deshalb hoechstens eine uebrig.
+pub(crate) fn receipt_for<'a>(
+    inventory: &'a ArchiveInventory,
+    entry: &Parsed<EntryPackageV1>,
+) -> Option<&'a Parsed<ReceiptV1>> {
+    let object_hash = entry.object_hash();
+    inventory
+        .receipts()
+        .iter()
+        .find(|receipt| receipt.value().core().fields().entry_object_hash == object_hash)
+}
+
+/// Halten die fuenf Bindungen aus `design.md` §14.1 Schritt 7?
+///
+/// `entryHash`, `chainSequence`, `registryVersion`, `registryHeadHash` und
+/// `initialGrantPlanHash` — jede gegen das Manifest des Eintrags. Der
+/// `policyObjectHash` der Quittung gehoert ausdruecklich NICHT dazu: er
+/// benennt die Policy des Servers, nicht die des Eintrags, und das Manifest
+/// traegt ihn gar nicht.
+///
+/// Diese Pruefung laeuft VOR der Signaturpruefung und ist von ihr unabhaengig:
+/// eine perfekt signierte Quittung ueber einen anderen Eintrag bestaetigt
+/// diesen hier nicht.
+pub(crate) fn receipt_bindings_hold(
+    entry: &Parsed<EntryPackageV1>,
+    receipt: &Parsed<ReceiptV1>,
+) -> bool {
+    let manifest = entry.value().manifest().fields();
+    let fields = receipt.value().core().fields();
+    fields.entry_hash == entry.value().entry_hash()
+        && fields.chain_sequence == manifest.chain_sequence
+        && fields.registry_version == manifest.registry_version
+        && *fields.registry_head_hash.as_bytes() == manifest.registry_head_hash
+        && *fields.initial_grant_plan_hash.as_bytes() == manifest.initial_grant_plan_hash
+}
+
+/// Der Checkpoint-Kern eines `.ecp`, sofern es einen STANDARD-Checkpoint traegt.
+///
+/// AUSDRUECKLICH NUR die Standardvariante. `ea_trust::verify_checkpoint_time`
+/// weist jede andere mit `TimeSourceUnsupported` ab
+/// (`crates/ea-trust/src/time.rs:210-212`); der Checkpoint-Kern einer
+/// Timestamp-Variante ist damit in diesem Stand nicht als Serveraussage
+/// nachweisbar. Aus ihm entsteht deshalb KEIN [`CheckpointClaim`] — was
+/// fail-closed ist: weniger Aussagen koennen nur zu
+/// [`ea_chain::RollbackAssessment::NotAssessable`] fuehren, nie zu einem
+/// falschen `Consistent`. Die RFC-3161-Anteile solcher Objekte gehoeren
+/// ohnehin in Gate `evidence`.
+pub(crate) fn standard_checkpoint_claim(
+    evidence: &Parsed<EvidenceObjectV1>,
+) -> Option<CheckpointClaim> {
+    let DecodedEvidencePayloadV1::Standard { core, .. } =
+        evidence.value().decoded_payload().ok()?
+    else {
+        return None;
+    };
+    let fields = core.fields();
+    Some(CheckpointClaim {
+        chain_id: fields.chain_id,
+        covered_from_sequence: fields.covered_from_sequence,
+        covered_through_sequence: fields.covered_through_sequence,
+        head_entry_hash: fields.head_entry_hash,
+        checkpoint_object_hash: evidence.object_hash(),
+    })
 }

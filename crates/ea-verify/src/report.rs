@@ -17,6 +17,7 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ea_archive::QuarantineReason;
+use ea_chain::RollbackAssessment;
 use ea_crypto::verification_report_hash;
 use ea_types::{
     ChainId, ChainSequence, DestructionId, EntryHash, Hash32, KeyThumbprint, ObjectHash,
@@ -566,6 +567,13 @@ pub struct VerificationReportV1 {
     pub(crate) evidence_errors: BTreeSet<ObjectErrorV1>,
     pub(crate) decryption_errors: BTreeSet<ObjectErrorV1>,
     pub(crate) public_key_thumbprints: BTreeSet<KeyThumbprint>,
+    /// Das Ergebnis der Rollback-Pruefung aus Gate `receipt`.
+    ///
+    /// KEIN Berichtsfeld: das Schema ist `additionalProperties: false` und
+    /// durch Phase A geschlossen. Der Wert wirkt allein ueber
+    /// [`VerificationReportV1::rollback_assessment`]; seine Befunde sind
+    /// daneben bereits in `gaps` und `quarantinedObjects` abgebildet.
+    pub(crate) rollback: RollbackAssessment,
     report_hash: Hash32,
     /// Lief die vollstaendige Pipeline? Wird erst von Task 17 gesetzt.
     ///
@@ -595,6 +603,7 @@ impl VerificationReportV1 {
             evidence_errors: BTreeSet::new(),
             decryption_errors: BTreeSet::new(),
             public_key_thumbprints: BTreeSet::new(),
+            rollback: RollbackAssessment::NotAssessable,
             report_hash: Hash32::ZERO,
             pipeline_completed: false,
         }
@@ -708,6 +717,20 @@ impl VerificationReportV1 {
     /// Bestand liegt, aber nie eine Pruefung getragen hat, steht hier nicht.
     pub fn public_key_thumbprints(&self) -> impl ExactSizeIterator<Item = KeyThumbprint> + '_ {
         self.public_key_thumbprints.iter().copied()
+    }
+
+    /// Was Gate `receipt` ueber einen Rueckbau der Kette sagen konnte.
+    ///
+    /// ABGELEITETER Accessor, KEIN JSON-Feld. Er ist der einzige Ort, an dem
+    /// [`RollbackAssessment::NotAssessable`] ueberhaupt sichtbar wird: ein
+    /// Bestand ohne `.ecp` erzeugt keinen Reporteintrag und senkt
+    /// [`Self::is_fully_verified`] NICHT. Nicht pruefbar ist kein Mangel des
+    /// Bestands, sondern das Fehlen einer Referenz — und ausdruecklich NICHT
+    /// dasselbe wie [`RollbackAssessment::Consistent`], das die affirmative
+    /// Aussage „kein Rollback" traegt.
+    #[must_use]
+    pub const fn rollback_assessment(&self) -> &RollbackAssessment {
+        &self.rollback
     }
 
     /// `reportHash`: SHA-256 ueber [`Self::canonical_hash_preimage`].

@@ -24,14 +24,16 @@ use ea_crypto::{
     SecretBytes, object_hash,
 };
 use ea_format::{
-    CertificateKindV1, EIP_PREFIX_V1, EntryPackageV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1,
+    CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1,
+    EIP_PREFIX_V1, EntryPackageV1, EvidenceObjectV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1,
     GrantPlanItemV1, GrantPlanV1, GrantPurposeV1, GrantV1, ManifestCoreFieldsV1, ManifestCoreV1,
-    SignedManifestV1, encode_entry_package, encode_grant,
+    ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1, SignedManifestV1, encode_destroyed_entry_stub,
+    encode_entry_package, encode_evidence, encode_grant, encode_receipt,
 };
 use ea_trust::{TrustAnchorV1, TrustObjectSource, decode_trust_anchor};
 use ea_types::{
-    CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, KeyThumbprint, ObjectHash,
-    RegistryVersion, UnixMillis,
+    CertificateHash, ChainId, ChainSequence, DestructionId, EntryHash, Hash32, KeyThumbprint,
+    ObjectHash, RegistryVersion, UnixMillis,
 };
 use ed25519_dalek::SigningKey;
 
@@ -1232,4 +1234,481 @@ fn chain_entry_spec(
         nonce_marker: DEFAULT_NONCE_MARKER_V1,
         plan: GrantPlanSpec::Recovery,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gate `receipt`: Quittungen, Checkpoints und Stummel
+// ---------------------------------------------------------------------------
+
+/// Letzte Sequenz der Lease des Policy-Kopfes der Quittungslinie.
+pub const RECEIPT_POLICY_LEASE_THROUGH_V1: u64 = 0;
+
+/// Die Lease des Kopfes, der das SERVERZERTIFIKAT aktiviert.
+///
+/// Ein eigener Kopf ist unvermeidlich: ein Registrierungskopf traegt genau
+/// EINEN Uebergang, und Gate `receipt` braucht neben dem Schreiberzertifikat
+/// zwingend ein Zertifikat der Art [`CertificateKindV1::ServerReceipt`] —
+/// `VerificationContext::receipt` verlangt die Capability `serverReceipt`
+/// (`crates/ea-crypto/src/cose.rs:913-930`). Die Leases muessen aufsteigen,
+/// deshalb belegt dieser Kopf das Fach eins.
+pub const RECEIPT_SERVER_LEASE_V1: u64 = 1;
+
+/// Erste Sequenz der Lease des Schreiberkopfes der Quittungslinie.
+pub const RECEIPT_WRITER_LEASE_FROM_V1: u64 = 2;
+/// Letzte Sequenz dieser Lease.
+pub const RECEIPT_WRITER_LEASE_THROUGH_V1: u64 = 100;
+
+/// Die Luecke, die JEDER Bestand der Quittungslinie traegt: `0..=1`.
+///
+/// GEMESSEN, nicht behauptet, und dieselbe Ursache wie
+/// [`GENESIS_GAP_SEQUENCE_V1`], nur um ein Fach breiter: die Linie braucht drei
+/// Koepfe (Policy, Serverzertifikat, Schreiberzertifikat), und die ersten
+/// beiden verbrauchen die Faecher null und eins, bevor das Schreiberzertifikat
+/// ueberhaupt aktiv ist. Ein `.eip` auf diesen Sequenzen ist damit nicht
+/// herstellbar, und `ea_chain::build_chain` meldet das Fehlen — zu Recht — als
+/// Luecke. Wer sie „wegrepariert", macht die Fixtures unwahr.
+pub const RECEIPT_PRE_ENTRY_GAP_THROUGH_V1: u64 = 1;
+
+/// Sequenz des ersten Eintrags der Quittungsbestaende.
+pub const RECEIPT_FIRST_SEQUENCE_V1: u64 = 2;
+/// Sequenz des zweiten und letzten Eintrags — zugleich der Kettenkopf.
+pub const RECEIPT_HEAD_SEQUENCE_V1: u64 = 3;
+
+/// Die Sequenz, bis zu der der abschneidende Checkpoint bezeugt.
+///
+/// Deutlich ueber dem Kettenkopf, damit die bewiesene Luecke `4..=5` von der
+/// Vorlauf-Luecke `0..=1` unterscheidbar bleibt.
+pub const CHECKPOINT_TRUNCATED_THROUGH_V1: u64 = 5;
+
+/// Erste bewiesen fehlende Sequenz des abschneidenden Checkpoints.
+pub const CHECKPOINT_PROVEN_GAP_FROM_V1: u64 = RECEIPT_HEAD_SEQUENCE_V1 + 1;
+
+/// Die Sequenz, auf der der Stummel-Bestand sein `.eip` NICHT ablegt.
+pub const DESTROYED_STUB_SEQUENCE_V1: u64 = 4;
+
+/// Ein Kopf-Eintragshash, den kein Eintrag dieses Moduls je traegt.
+#[must_use]
+pub fn foreign_head_entry_hash() -> EntryHash {
+    EntryHash::try_from(&[0x66_u8; 32][..]).expect("32 Bytes sind ein Eintragshash")
+}
+
+/// Welchen Checkpoint ein Quittungsbestand mitliefert.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointSpec {
+    /// Gar keinen. Ueber Rollback ist dann NICHTS gesagt.
+    None,
+    /// Einer, der eine Sequenz OBERHALB des Kettenkopfes bezeugt.
+    Truncated,
+    /// Einer, der die Kopfsequenz bezeugt, aber einen anderen Eintragshash.
+    HeadMismatch,
+}
+
+/// Der Zuschnitt eines Quittungsbestands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceiptArchiveSpec {
+    /// Legt der Bestand zu JEDEM Eintrag eine gueltige Quittung dazu?
+    pub receipts: bool,
+    /// Welcher Checkpoint liegt dabei?
+    pub checkpoint: CheckpointSpec,
+    /// Liegt zusaetzlich ein `.eds` auf [`DESTROYED_STUB_SEQUENCE_V1`]?
+    pub destroyed_stub: bool,
+}
+
+impl ReceiptArchiveSpec {
+    /// Zwei Eintraege, keine Quittung, kein Checkpoint, kein Stummel.
+    #[must_use]
+    pub const fn bare() -> Self {
+        Self {
+            receipts: false,
+            checkpoint: CheckpointSpec::None,
+            destroyed_stub: false,
+        }
+    }
+
+    /// Derselbe Bestand MIT Quittungen.
+    #[must_use]
+    pub const fn with_receipts(mut self) -> Self {
+        self.receipts = true;
+        self
+    }
+
+    /// Derselbe Bestand mit `checkpoint`.
+    #[must_use]
+    pub const fn with_checkpoint(mut self, checkpoint: CheckpointSpec) -> Self {
+        self.checkpoint = checkpoint;
+        self
+    }
+
+    /// Derselbe Bestand mit einem Stummel statt eines vierten `.eip`.
+    #[must_use]
+    pub const fn with_destroyed_stub(mut self) -> Self {
+        self.destroyed_stub = true;
+        self
+    }
+}
+
+/// Ein Bestand der Quittungslinie.
+pub struct ReceiptArchive {
+    pub fixture: ArchiveFixture,
+    pub anchor_bytes: Vec<u8>,
+    /// Objekthashes der abgelegten `.eip`, in Sequenzreihenfolge.
+    pub entry_object_hashes: Vec<ObjectHash>,
+    /// Eintragshashes derselben Eintraege, in derselben Reihenfolge.
+    pub entry_hashes: Vec<EntryHash>,
+    /// Objekthashes der abgelegten `.esr`, in derselben Reihenfolge.
+    pub receipt_object_hashes: Vec<ObjectHash>,
+    /// Objekthash des abgelegten `.ecp`, falls einer dabei liegt.
+    pub checkpoint_object_hash: Option<ObjectHash>,
+    /// Objekthash des abgelegten `.eds`, falls einer dabei liegt.
+    pub destroyed_stub_object_hash: Option<ObjectHash>,
+}
+
+impl ReceiptArchive {
+    #[must_use]
+    pub fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+}
+
+/// Die Linie aus Policy-, Server- und Schreiberkopf.
+struct ReceiptLine {
+    line: trust_support::RegistryLineBuilder,
+    head: trust_support::BuiltHead,
+    writer_certificate_hash: CertificateHash,
+    server_certificate_hash: CertificateHash,
+    anchor_bytes: Vec<u8>,
+}
+
+impl ReceiptLine {
+    fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+
+    fn head_hash(&self) -> Hash32 {
+        Hash32::try_from(self.head.object_hash.as_bytes().as_slice())
+            .expect("ein Objekthash sind 32 Bytes")
+    }
+}
+
+/// Baut die Linie: Policy, dann das Serverzertifikat, dann das
+/// Schreiberzertifikat.
+///
+/// BEWUSST NEBEN [`writer_line`] und nicht als Erweiterung: fuenf Fixtures
+/// haengen an deren zwei Koepfen, und `signed_entry_archive` pinnt sogar die
+/// Bytelaenge des entstehenden `.eip`. Ein dritter Kopf dort verschoebe
+/// `line.head` und braeche vier bestehende Testtargets.
+fn receipt_line() -> ReceiptLine {
+    let mut line = trust_support::RegistryLineBuilder::new();
+    line.push(
+        policy_action(),
+        trust_support::HeadOptions {
+            effective_from: Some(POLICY_LEASE_FROM_V1),
+            valid_through: Some(RECEIPT_POLICY_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let server_head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::ServerReceipt,
+            marker: 0x21,
+            effective_from: None,
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(RECEIPT_SERVER_LEASE_V1),
+            valid_through: Some(RECEIPT_SERVER_LEASE_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x11,
+            effective_from: None,
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(RECEIPT_WRITER_LEASE_FROM_V1),
+            valid_through: Some(RECEIPT_WRITER_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let writer_certificate_hash = CertificateHash::from(
+        head.direct_object_hash
+            .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+    );
+    let server_certificate_hash = CertificateHash::from(
+        server_head
+            .direct_object_hash
+            .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+    );
+    let anchor_bytes = line.exact_anchor_bytes().to_vec();
+    ReceiptLine {
+        line,
+        head,
+        writer_certificate_hash,
+        server_certificate_hash,
+        anchor_bytes,
+    }
+}
+
+/// Baut einen Bestand der Quittungslinie nach `spec`.
+///
+/// # Panics
+///
+/// Wenn eines der Fixture-Objekte sich nicht bauen oder kodieren laesst.
+#[must_use]
+pub fn receipt_archive(spec: ReceiptArchiveSpec) -> ReceiptArchive {
+    let line = receipt_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let first = build_entry(&receipt_entry_spec(
+        &line,
+        anchor.chain_id(),
+        RECEIPT_FIRST_SEQUENCE_V1,
+        Some(anchor.genesis_entry_hash()),
+    ));
+    let second = build_entry(&receipt_entry_spec(
+        &line,
+        anchor.chain_id(),
+        RECEIPT_HEAD_SEQUENCE_V1,
+        Some(first.entry.entry_hash()),
+    ));
+    let entry_object_hashes = vec![object_hash(&first.bytes), object_hash(&second.bytes)];
+    let entry_hashes = vec![first.entry.entry_hash(), second.entry.entry_hash()];
+
+    let mut receipt_object_hashes = Vec::new();
+    if spec.receipts {
+        for (index, (sequence, built)) in [
+            (RECEIPT_FIRST_SEQUENCE_V1, &first),
+            (RECEIPT_HEAD_SEQUENCE_V1, &second),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let previous = if index == 0 {
+                anchor.genesis_entry_hash()
+            } else {
+                entry_hashes[0]
+            };
+            let bytes = receipt_bytes(
+                &line,
+                anchor.chain_id(),
+                sequence,
+                built.entry.entry_hash(),
+                entry_object_hashes[index],
+                previous,
+            );
+            receipt_object_hashes.push(object_hash(&bytes));
+            fixture.push_exact_bytes(
+                &format!("{}{sequence:012}_receipt.esr", ea_archive::RECEIPTS_DIR_V1),
+                bytes,
+            );
+        }
+    }
+
+    let checkpoint_object_hash = match spec.checkpoint {
+        CheckpointSpec::None => None,
+        CheckpointSpec::Truncated => Some(push_checkpoint(
+            &mut fixture,
+            &line,
+            anchor.chain_id(),
+            CHECKPOINT_TRUNCATED_THROUGH_V1,
+            entry_hashes[1],
+        )),
+        CheckpointSpec::HeadMismatch => Some(push_checkpoint(
+            &mut fixture,
+            &line,
+            anchor.chain_id(),
+            RECEIPT_HEAD_SEQUENCE_V1,
+            foreign_head_entry_hash(),
+        )),
+    };
+
+    let mut entry_object_hashes = entry_object_hashes;
+    let mut entry_hashes = entry_hashes;
+    let destroyed_stub_object_hash = spec.destroyed_stub.then(|| {
+        let destroyed = build_entry(&receipt_entry_spec(
+            &line,
+            anchor.chain_id(),
+            DESTROYED_STUB_SEQUENCE_V1,
+            Some(second.entry.entry_hash()),
+        ));
+        let stub_hash = push_destroyed_stub(&mut fixture, &destroyed);
+        // EIN EINTRAG OBERHALB DES STUMMELS ist notwendig, damit das fehlende
+        // `.eip` ueberhaupt als Luecke sichtbar wird: `ea_chain` bildet
+        // oberhalb des hoechsten Knotens grundsaetzlich kein Intervall
+        // (`crates/ea-chain/src/chain.rs:763-767`), weil ueber nicht
+        // existierende Fortsetzungen keine Aussage moeglich ist. Ohne diesen
+        // Nachfolger waere die Vernichtung von einem schlicht kuerzeren Bestand
+        // nicht zu unterscheiden.
+        let successor = build_entry(&receipt_entry_spec(
+            &line,
+            anchor.chain_id(),
+            DESTROYED_STUB_SEQUENCE_V1 + 1,
+            Some(destroyed.entry.entry_hash()),
+        ));
+        entry_object_hashes.push(object_hash(&successor.bytes));
+        entry_hashes.push(successor.entry.entry_hash());
+        push_entry(&mut fixture, DESTROYED_STUB_SEQUENCE_V1 + 1, successor);
+        stub_hash
+    });
+
+    push_entry(&mut fixture, RECEIPT_FIRST_SEQUENCE_V1, first);
+    push_entry(&mut fixture, RECEIPT_HEAD_SEQUENCE_V1, second);
+
+    ReceiptArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hashes,
+        entry_hashes,
+        receipt_object_hashes,
+        checkpoint_object_hash,
+        destroyed_stub_object_hash,
+    }
+}
+
+/// Der gemeinsame Zuschnitt eines Eintrags der Quittungslinie.
+fn receipt_entry_spec(
+    line: &ReceiptLine,
+    chain_id: ChainId,
+    chain_sequence: u64,
+    previous_entry_hash: Option<EntryHash>,
+) -> EntrySpec {
+    EntrySpec {
+        chain_id,
+        chain_sequence,
+        previous_entry_hash,
+        writer_certificate_hash: line.writer_certificate_hash,
+        registry_version: line.head.version,
+        registry_head_hash: line.head_hash(),
+        nonce_marker: DEFAULT_NONCE_MARKER_V1,
+        plan: GrantPlanSpec::Recovery,
+    }
+}
+
+/// Baut die Bytes einer gueltigen Serverquittung auf einen Eintrag.
+///
+/// Der Signierer ist derselbe Schluessel wie ueberall in dieser Linie: die
+/// Registrierungslinie stellt JEDES Geraetezertifikat auf
+/// `trust_support::authorized_device_signing_key_thumbprint()` aus. Die
+/// Serverrolle kommt vom ZERTIFIKAT, nicht vom Schluessel.
+fn receipt_bytes(
+    line: &ReceiptLine,
+    chain_id: ChainId,
+    chain_sequence: u64,
+    entry_hash: EntryHash,
+    entry_object_hash: ObjectHash,
+    previous_entry_hash: EntryHash,
+) -> Vec<u8> {
+    let core = ReceiptCoreV1::new(ReceiptCoreFieldsV1 {
+        organization_id: trust_support::organization(),
+        chain_id,
+        chain_sequence: ChainSequence::new(chain_sequence),
+        entry_hash,
+        entry_object_hash,
+        previous_entry_hash: Some(previous_entry_hash),
+        registry_version: line.head.version,
+        registry_head_hash: line.head_hash(),
+        policy_object_hash: fixture_policy_object_hash(),
+        initial_grant_plan_hash: recovery_grant_plan_hash(),
+        initial_grant_object_hashes: vec![fixture_grant_object_hash()],
+        accepted_at_server: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
+        evidence_due_at: None,
+        server_key_thumbprint: writer_device_key_thumbprint(),
+        server_certificate_hash: line.server_certificate_hash,
+    })
+    .expect("der Fixture-Quittungskern muss kodieren");
+    let signature = writer_device_signer()
+        .sign_receipt(core.exact_bytes())
+        .expect("der Fixture-Server muss signieren");
+    let receipt = ReceiptV1::new(core, signature).expect("die Fixture-Quittung muss binden");
+    encode_receipt(&receipt)
+        .expect("die Fixture-Quittung muss kodieren")
+        .into_vec()
+}
+
+/// Ein Policy-Objekthash fuer die Quittung.
+///
+/// Gate `receipt` prueft nach `design.md` §14.1 Schritt 7 die Bindungen
+/// `entryHash`, `chainSequence`, `registryVersion`, `registryHeadHash` und
+/// `initialGrantPlanHash`; der Policy-Hash gehoert NICHT dazu und ist deshalb
+/// ein fester Fuellwert. Waere er gebunden, muesste dieses Fixture ihn aus dem
+/// gewaehlten Kopf ziehen — dann pruefte der Test die Fixture, nicht das Gate.
+#[must_use]
+fn fixture_policy_object_hash() -> ObjectHash {
+    ObjectHash::try_from(&[0x31_u8; 32][..]).expect("32 Bytes sind ein Objekthash")
+}
+
+/// Ein Grant-Objekthash fuer die Quittung; `ea-format` verlangt mindestens einen.
+fn fixture_grant_object_hash() -> ObjectHash {
+    ObjectHash::try_from(&[0x32_u8; 32][..]).expect("32 Bytes sind ein Objekthash")
+}
+
+/// Legt einen signierten Standard-Checkpoint ab und liefert seinen Objekthash.
+fn push_checkpoint(
+    fixture: &mut ArchiveFixture,
+    line: &ReceiptLine,
+    chain_id: ChainId,
+    covered_through_sequence: u64,
+    head_entry_hash: EntryHash,
+) -> ObjectHash {
+    let core = CheckpointCoreV1::new(CheckpointCoreFieldsV1 {
+        organization_id: trust_support::organization(),
+        chain_id,
+        covered_from_sequence: ChainSequence::new(RECEIPT_FIRST_SEQUENCE_V1),
+        covered_through_sequence: ChainSequence::new(covered_through_sequence),
+        head_entry_hash,
+        registry_head_hash: line.head_hash(),
+        issued_at_server: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
+        previous_evidence_hash: None,
+    })
+    .expect("der Fixture-Checkpointkern muss kodieren");
+    let signature = writer_device_signer()
+        .sign_checkpoint(line.server_certificate_hash, core.exact_bytes())
+        .expect("der Fixture-Server muss signieren");
+    let evidence =
+        EvidenceObjectV1::standard(core, signature).expect("der Fixture-Checkpoint muss binden");
+    let bytes = encode_evidence(&evidence)
+        .expect("der Fixture-Checkpoint muss kodieren")
+        .into_vec();
+    let hash = object_hash(&bytes);
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{covered_through_sequence:012}_checkpoint.ecp",
+            ea_archive::CHECKPOINTS_DIR_V1
+        ),
+        bytes,
+    );
+    hash
+}
+
+/// Legt einen `.eds` ab, dessen urspruengliches `.eip` NICHT im Bestand liegt.
+///
+/// Genau so sieht ein autorisiert vernichteter Eintrag aus: der Stummel traegt
+/// das signierte Manifest und die Schreibersignatur weiter, der Klartext ist
+/// fort.
+fn push_destroyed_stub(fixture: &mut ArchiveFixture, built: &BuiltEntry) -> ObjectHash {
+    let original_eip_object_hash = object_hash(&built.bytes);
+    let stub = DestroyedEntryStubV1::new(
+        built.entry.signed_manifest().clone(),
+        built.entry.writer_signature().to_vec(),
+        original_eip_object_hash,
+        DestructionId::try_from(&[0x43_u8; 16][..])
+            .expect("16 Bytes sind eine Vernichtungskennung"),
+        ObjectHash::try_from(&[0x44_u8; 32][..]).expect("32 Bytes sind ein Objekthash"),
+    )
+    .expect("der Fixture-Stummel muss binden");
+    let bytes = encode_destroyed_entry_stub(&stub)
+        .expect("der Fixture-Stummel muss kodieren")
+        .into_vec();
+    let hash = object_hash(&bytes);
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{DESTROYED_STUB_SEQUENCE_V1:012}_entry.eds",
+            ea_archive::DESTROYED_ENTRIES_DIR_V1
+        ),
+        bytes,
+    );
+    hash
 }

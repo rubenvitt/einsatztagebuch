@@ -122,3 +122,66 @@ impl fmt::Display for ManifestSignatureErrorV1 {
         formatter.write_str(self.code())
     }
 }
+
+/// Der Befund von Gate `receipt` ueber GENAU EIN Objekt.
+///
+/// EIGENE FAMILIE, aus demselben Grund wie bei [`ManifestSignatureErrorV1`]:
+/// der Code benennt das GATE, an dem der Befund entstand. Ein Leser des
+/// Berichts muss ihm ansehen, welche der neun Stufen aus `design.md` §14.1
+/// gefallen ist.
+///
+/// Die Codes benennen dabei das OBJEKT, das den Befund traegt — die Quittung
+/// beziehungsweise den Checkpoint —, nicht das Eintragspaket. Ein Eintrag, zu
+/// dem eine untaugliche Quittung liegt, bleibt selbst gueltig und
+/// unbestaetigt; sein Ergebnis steht in `objectResults`, der Befund ueber die
+/// Quittung in `signatureErrors`. Damit erscheint jedes Objekt in genau einem
+/// Feld.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ReceiptGateErrorV1 {
+    /// Die Quittung bezeugt einen anderen Eintrag, als sie behauptet.
+    ///
+    /// Deckt die fuenf Bindungen aus `design.md` §14.1 Schritt 7 ab:
+    /// `entryHash`, `chainSequence`, `registryVersion`, `registryHeadHash` und
+    /// `initialGrantPlanHash`.
+    BindingMismatch,
+    /// Die Quittung taugt nicht als vertrauenswuerdiger Zeitboden.
+    ///
+    /// `ea_trust::verify_receipt_time` hat sie gegen die vorbestehende
+    /// Registrierungsautoritaet abgewiesen, oder der Zeitboden liess sich mit
+    /// ihr nicht fortschreiben.
+    ///
+    /// AUCH DER AUFFANGFALL der Kopfauswahl: laesst sich fuer die Sequenz der
+    /// Quittung ueberhaupt kein Kopf mehr gewinnen, ist damit auch kein
+    /// vertrauenswuerdiger Zeitboden zu haben, und die Quittung bleibt
+    /// unbestaetigt. Das ist die konservative Aussage — sie behauptet nichts
+    /// ueber die Signatur, die dann gar nicht mehr geprueft wurde.
+    UntrustedTime,
+    /// Die Serversignatur der Quittung traegt nicht.
+    ReceiptSignatureInvalid,
+    /// Der Checkpoint liess sich nicht als Serveraussage nachweisen.
+    ///
+    /// Ein solcher Checkpoint wird ausdruecklich KEIN
+    /// `ea_chain::CheckpointClaim`: `assess_rollback` verlangt bereits
+    /// authentifizierte Aussagen, und ein untergeschobenes Objekt duerfte nie
+    /// einen Rueckbau behaupten.
+    CheckpointUnverifiable,
+}
+
+impl ReceiptGateErrorV1 {
+    /// Stabiler Fehlercode. Tests assertieren gegen ihn, nie gegen Formatierung.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::BindingMismatch => "EA-VERIFY-RECEIPT-BINDING-MISMATCH",
+            Self::UntrustedTime => "EA-VERIFY-RECEIPT-UNTRUSTED-TIME",
+            Self::ReceiptSignatureInvalid => "EA-VERIFY-RECEIPT-SIGNATURE-INVALID",
+            Self::CheckpointUnverifiable => "EA-VERIFY-CHECKPOINT-UNVERIFIABLE",
+        }
+    }
+}
+
+impl fmt::Display for ReceiptGateErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
