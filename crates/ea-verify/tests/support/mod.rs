@@ -1597,6 +1597,84 @@ pub fn receipt_archive(spec: ReceiptArchiveSpec) -> ReceiptArchive {
     }
 }
 
+/// Die drei Sequenzen eines Isolations-Quittungsbestands.
+///
+/// Sie schliessen unmittelbar an [`RECEIPT_FIRST_SEQUENCE_V1`] an; die
+/// Vorlauf-Luecke `0..=1` aus [`RECEIPT_PRE_ENTRY_GAP_THROUGH_V1`] bleibt davon
+/// unberuehrt und ist von den Tests ausdruecklich mitzurechnen.
+pub const ISOLATION_RECEIPT_SEQUENCES_V1: [u64; 3] = [
+    RECEIPT_FIRST_SEQUENCE_V1,
+    RECEIPT_FIRST_SEQUENCE_V1 + 1,
+    RECEIPT_FIRST_SEQUENCE_V1 + 2,
+];
+
+/// Drei Eintraege mit je einer gueltigen Quittung, von denen GENAU EINE eine
+/// Evidence-Frist behauptet.
+///
+/// BEWUSST NEBEN [`receipt_archive`] und nicht als weiterer Schalter darin:
+/// sechs Tests haengen an dessen Zwei-Eintrags-Gestalt, und eine dritte Sequenz
+/// dort verschoebe deren Kettenkopf. Gebaut wird aus denselben Bausteinen —
+/// [`receipt_line`], `build_entry`, `receipt_bytes` —, hier wird nichts
+/// nachgebaut.
+///
+/// Die Frist traegt der mittlere Eintrag ([`ISOLATION_DEFECT_INDEX_V1`]). Die
+/// beiden anderen Quittungen bleiben fristlos und damit im Standardprofil
+/// (`design.md`:1679): ohne Frist hat Gate `evidence` an ihnen nichts zu
+/// fordern.
+#[must_use]
+pub fn receipt_archive_with_one_deadline(due_at: i64) -> ReceiptArchive {
+    let line = receipt_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let mut previous_entry_hash = anchor.genesis_entry_hash();
+    let mut entry_object_hashes = Vec::new();
+    let mut entry_hashes = Vec::new();
+    let mut receipt_object_hashes = Vec::new();
+    let mut built = Vec::new();
+    for (index, sequence) in ISOLATION_RECEIPT_SEQUENCES_V1.into_iter().enumerate() {
+        let entry = build_entry(&receipt_entry_spec(
+            &line,
+            anchor.chain_id(),
+            sequence,
+            Some(previous_entry_hash),
+        ));
+        let entry_object_hash = object_hash(&entry.bytes);
+        let bytes = receipt_bytes(
+            &line,
+            anchor.chain_id(),
+            sequence,
+            entry.entry.entry_hash(),
+            entry_object_hash,
+            previous_entry_hash,
+            (index == ISOLATION_DEFECT_INDEX_V1).then_some(due_at),
+        );
+        receipt_object_hashes.push(object_hash(&bytes));
+        fixture.push_exact_bytes(
+            &format!("{}{sequence:012}_receipt.esr", ea_archive::RECEIPTS_DIR_V1),
+            bytes,
+        );
+        entry_object_hashes.push(entry_object_hash);
+        entry_hashes.push(entry.entry.entry_hash());
+        previous_entry_hash = entry.entry.entry_hash();
+        built.push((sequence, entry));
+    }
+    for (sequence, entry) in built {
+        push_entry(&mut fixture, sequence, entry);
+    }
+
+    ReceiptArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hashes,
+        entry_hashes,
+        receipt_object_hashes,
+        checkpoint_object_hash: None,
+        destroyed_stub_object_hash: None,
+    }
+}
+
 /// Der gemeinsame Zuschnitt eines Eintrags der Quittungslinie.
 fn receipt_entry_spec(
     line: &ReceiptLine,
@@ -2032,16 +2110,100 @@ fn complete_archive_for(
     recipient_public_key: &HpkeRecipientPublicKey,
     entry_count: u64,
 ) -> CompleteArchive {
+    complete_archive_with(
+        recipient_key_thumbprint,
+        recipient_certificate_hash,
+        recipient_public_key,
+        entry_count,
+        IsolationDefectV1::None,
+    )
+}
+
+/// Der Defekt, den GENAU EIN Objekt eines Isolationsbestands traegt.
+///
+/// EINER JE BESTAND, und stets auf dem MITTLEREN Eintrag. Ein zweiter Defekt
+/// machte nicht mehr unterscheidbar, welches Objekt welchen Befund traegt; der
+/// mittlere und nicht der letzte, weil ein Defekt am oberen Rand von einem
+/// schlicht kuerzeren Bestand nicht zu unterscheiden waere — dieselbe
+/// Ueberlegung wie bei [`UNKNOWN_WRITER_SEQUENCE_V1`], nur andersherum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IsolationDefectV1 {
+    /// Keiner: drei unversehrte, verkettete Eintraege.
+    None,
+    /// Die Schreibersignatur des mittleren Eintrags traegt ein verkipptes Byte.
+    ///
+    /// Trifft Gate `manifest-signature` und nicht Gate `format`: die Signatur
+    /// wird beim Parsen nicht kryptografisch geprueft.
+    MutatedWriterSignature,
+    /// Der Grant des mittleren Eintrags ist auf einen FREMDEN Schluessel
+    /// gekapselt.
+    ///
+    /// Der Grant nennt weiterhin den EIGENEN Abdruck und dasselbe Zertifikat —
+    /// beides geht in den Planhash ein, und ein anderer Empfaenger im Grant
+    /// faellte bereits an Gate `grant-plan`. Gescheitert wird ausschliesslich in
+    /// der Entkapselung: `hpke_open` bekommt eine Kapselung, die nicht fuer den
+    /// vorgelegten privaten Schluessel gebildet wurde. Der Ciphertext bleibt
+    /// ausdruecklich unangetastet — eine Mutation dort faellt schon an Gate
+    /// `manifest-signature`, weil der Ciphertexthash im signierten Manifest
+    /// steht.
+    ForeignEncapsulation,
+    /// Der mittlere Eintrag liegt ZWEIMAL im Bestand, unter zwei Pfadhinweisen.
+    DuplicateEntry,
+}
+
+/// Zahl der Eintraege eines Isolationsbestands.
+pub const ISOLATION_ENTRY_COUNT_V1: u64 = 3;
+
+/// Der Index des Eintrags, der den Defekt traegt.
+pub const ISOLATION_DEFECT_INDEX_V1: usize = 1;
+
+/// Die Sequenz dieses Eintrags in der lueckenfreien Linie.
+pub const ISOLATION_DEFECT_SEQUENCE_V1: u64 =
+    COMPLETE_GENESIS_SEQUENCE_V1 + ISOLATION_DEFECT_INDEX_V1 as u64;
+
+/// Drei verkettete Eintraege, von denen hoechstens EINER `defect` traegt.
+#[must_use]
+pub fn isolation_archive(defect: IsolationDefectV1) -> CompleteArchive {
+    complete_archive_with(
+        complete_recipient_key_thumbprint(),
+        complete_recipient_certificate_hash(),
+        &complete_recipient_private_key().public_key(),
+        ISOLATION_ENTRY_COUNT_V1,
+        defect,
+    )
+}
+
+/// Baut den lueckenfreien Bestand und setzt `defect` auf den mittleren Eintrag.
+///
+/// `grant_object_hashes` bleibt zu `entry_object_hashes` INDEXGLEICH — mit der
+/// einen Ausnahme [`IsolationDefectV1::MutatedWriterSignature`]: dort traegt der
+/// defekte Eintrag gar keinen Grant, und die Liste ist um einen kuerzer. Das ist
+/// gewollt. Der `entryHash` haengt an der Schreibersignatur; ein mitgelieferter
+/// Grant zeigte nach der Mutation ins Leere und stuende als VERWAISTER Grant mit
+/// einem zweiten Befund auf einem zweiten Objekt im Bericht. Ihn stattdessen
+/// gegen die manipulierten Bytes neu zu bauen hiesse, eine Fixture zu bauen, in
+/// der ein Angreifer mitsigniert.
+fn complete_archive_with(
+    recipient_key_thumbprint: KeyThumbprint,
+    recipient_certificate_hash: CertificateHash,
+    recipient_public_key: &HpkeRecipientPublicKey,
+    entry_count: u64,
+    defect: IsolationDefectV1,
+) -> CompleteArchive {
     let line = complete_line();
     let anchor = line.anchor();
     let mut fixture = ArchiveFixture::new();
     push_trust_objects(&mut fixture, &line.line);
 
     let plan_hash = complete_grant_plan_hash(recipient_key_thumbprint, recipient_certificate_hash);
+    let foreign_public_key = other_recipient_private_key().public_key();
     let mut entry_object_hashes = Vec::new();
     let mut grant_object_hashes = Vec::new();
     let mut previous_entry_hash = None;
-    for sequence in COMPLETE_GENESIS_SEQUENCE_V1..COMPLETE_GENESIS_SEQUENCE_V1 + entry_count {
+    for (index, sequence) in
+        (COMPLETE_GENESIS_SEQUENCE_V1..COMPLETE_GENESIS_SEQUENCE_V1 + entry_count).enumerate()
+    {
+        let defective = index == ISOLATION_DEFECT_INDEX_V1;
         let entry = build_complete_entry(
             &line,
             anchor.chain_id(),
@@ -2049,27 +2211,67 @@ fn complete_archive_for(
             sequence,
             previous_entry_hash,
         );
-        let entry_bytes = encode_entry_package(&entry)
+        let mut entry_bytes = encode_entry_package(&entry)
             .expect("das Fixture-Eintragspaket muss kodieren")
             .into_vec();
-        let grant_bytes = complete_grant_bytes(
-            &line,
-            anchor.chain_id(),
-            entry.entry_hash(),
-            sequence,
-            recipient_key_thumbprint,
-            recipient_certificate_hash,
-            recipient_public_key,
-        );
-        entry_object_hashes.push(object_hash(&entry_bytes));
-        grant_object_hashes.push(object_hash(&grant_bytes));
+        // DIE NACHFOLGERBINDUNG STAMMT AUS DEN UNVERSEHRTEN BYTES, und das ist
+        // der ehrliche Fall: der Bestand wurde gueltig geschrieben, und erst
+        // danach hat jemand ein Byte verkippt. Der mutierte Eintrag wird
+        // ohnehin kein Kettenknoten — er faellt an Gate `manifest-signature` —,
+        // und `ea-chain` vergleicht Vorgaengerbindungen nur zwischen
+        // unmittelbar benachbarten Sequenzen. Es entsteht deshalb eine LUECKE
+        // und ausdruecklich kein Bruch.
         previous_entry_hash = Some(entry.entry_hash());
+
+        let mutated = defective && defect == IsolationDefectV1::MutatedWriterSignature;
+        if mutated {
+            // Der rohe Ed25519-Wert steht in den letzten 64 Bytes. GEPRUEFT und
+            // nicht behauptet: die exakten Bytes enden auf der COSE-Struktur der
+            // Schreibersignatur.
+            assert!(
+                entry_bytes.ends_with(entry.writer_signature()),
+                "die Eintragsbytes enden nicht mehr auf der Schreibersignatur"
+            );
+            let offset = entry_bytes.len() - 64;
+            entry_bytes = mutate_one_byte(&entry_bytes, offset);
+        }
+        entry_object_hashes.push(object_hash(&entry_bytes));
+
+        if !mutated {
+            let sealed_to = if defective && defect == IsolationDefectV1::ForeignEncapsulation {
+                &foreign_public_key
+            } else {
+                recipient_public_key
+            };
+            let grant_bytes = complete_grant_bytes(
+                &line,
+                anchor.chain_id(),
+                entry.entry_hash(),
+                sequence,
+                recipient_key_thumbprint,
+                recipient_certificate_hash,
+                sealed_to,
+            );
+            grant_object_hashes.push(object_hash(&grant_bytes));
+            push_grant(&mut fixture, sequence, grant_bytes);
+        }
 
         fixture.push_exact_bytes(
             &format!("{}{sequence:012}_entry.eip", ea_archive::ENTRIES_DIR_V1),
-            entry_bytes,
+            entry_bytes.clone(),
         );
-        push_grant(&mut fixture, sequence, grant_bytes);
+        if defective && defect == IsolationDefectV1::DuplicateEntry {
+            // DIESELBEN BYTES unter einem zweiten Hinweis: klassifiziert wird am
+            // Praefix, und der Objekthash ist derselbe. Genau das ist ein
+            // Duplikat im Sinne von `QuarantineReason::Duplicate`.
+            fixture.push_exact_bytes(
+                &format!(
+                    "{}{sequence:012}_entry_copy.eip",
+                    ea_archive::ENTRIES_DIR_V1
+                ),
+                entry_bytes,
+            );
+        }
     }
 
     CompleteArchive {
