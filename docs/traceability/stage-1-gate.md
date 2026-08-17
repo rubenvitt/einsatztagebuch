@@ -3,7 +3,10 @@
 Stand: Abschluss der Stufe 1 von v0.1. Dieser Bericht ist ein vom Gate
 geprueftes Artefakt: `xtask stage-gate 1` liest ihn, verlangt die fuenf
 Abschnitte dieses Dokuments, die Belegzeile jedes primaeren Abnahmekriteriums
-und die Reichweitenklausel aus Abschnitt 2 als Literal.
+und die Reichweitenklausel aus Abschnitt 2 als Literal. Der angehaengte
+Abschnitt `Gemessener Gate-Lauf` haelt zusaetzlich den tatsaechlich gelaufenen
+Abschlusslauf fest; `tools/xtask/tests/stage_gate.rs::stage_one_gate_report_records_the_measured_full_gate_run`
+verlangt fuer jedes Kommando der vorgeschriebenen Folge eine eigene Belegzeile.
 
 Maschinelle Gegenstuecke: `docs/traceability/v0.1-requirements.csv` (Ledger,
 maschinell auf Vollstaendigkeit geprueft) und der JSON-Bericht von
@@ -29,16 +32,19 @@ Anteil, nie das ganze Kriterium.
 | AK 38 | CLI und Export | `apps/cli/tests/exit_codes.rs::every_reachable_live_finding_maps_to_its_normative_exit_code`; `apps/cli/tests/export.rs::export_preserves_every_original_byte`; `apps/cli/tests/export.rs::the_exported_archive_verifies_to_the_same_report_hash`; `apps/cli/tests/commands.rs::trust_commands_require_external_anchor` | Serverexport (Stufe 3); Anker-Bereitstellung (Stufe 5); Plattformnachweis (Stufe 7) |
 | AK 51 | Grant-Interoperabilitaet | `vectors/grants/v1/manifest.json` (Plan-Sortierung, Duplikatverbote, `eag-v1`, HPKE-Info/AAD, Kapselungswert, umschlossener CEK, Signaturdigest, Ein-Byte-Negative) ueber `tests/ea-system-tests/tests/conformance_golden_vectors.rs::grant_receipt_and_evidence_vectors_match_their_manifests` | Gegenprobe mit einer fremden Implementierung (Stufe 7) |
 
-Zwei Ledgerzeilen hinken diesem Stand nach. `AK-17` und `AK-51` tragen in
-`docs/traceability/v0.1-requirements.csv` weiterhin den Status `planned` mit
-Verweis auf die Tasks, die die Belege oben geliefert haben; der JSON-Bericht des
-Gates zaehlt deshalb in `evidenced_acceptance_criteria` nur
-`[4, 5, 6, 9, 14, 16, 20, 38]`. Das Nachziehen der beiden Zeilen ist eine
-Ledgeraenderung und gehoert nicht in diesen Task.
+Die zuletzt nachhinkenden Ledgerzeilen sind nachgezogen. `AK-17` und `AK-51`
+tragen in `docs/traceability/v0.1-requirements.csv` den Status `implemented` und
+nennen die Belege dieser Tabelle statt der Tasks, die sie liefern sollten; der
+JSON-Bericht des Gates zaehlt in `evidenced_acceptance_criteria` seither
+gemessen `[4, 5, 6, 9, 14, 16, 17, 20, 38, 51]` — alle zehn primaeren
+Abnahmekriterien der Stufe 1. Die Spalte ganz rechts bleibt dabei tragend: ein
+belegter Stufe-1-Anteil ist kein erfuelltes Kriterium.
 
-Aus demselben Grund ist die Belegpflicht — jedes primaere Abnahmekriterium
-braucht eine Ledgerzeile im Status `implemented` oder `integrated` — im Gate
-bewusst NICHT scharf geschaltet. Der Gate prueft an dieser Stelle die
+Die Belegpflicht selbst — jedes primaere Abnahmekriterium braucht eine
+Ledgerzeile im Status `implemented` oder `integrated` — bleibt im Gate dennoch
+bewusst NICHT scharf geschaltet: sie waere eine Bedingung, die eine spaetere
+Stufe mit einer legitimen Statusaenderung brechen koennte, ohne dass an Stufe 1
+etwas falsch waere. Der Gate prueft an dieser Stelle die
 Belegtabelle dieses Berichts: jede der zehn Zeilen existiert, nennt einen
 konkreten Beleg und nennt den offenen Beitrag.
 
@@ -135,3 +141,44 @@ Wert dreht sich bei einer spaeteren v1.1-Erweiterung von `abgelehnt` nach
 `akzeptiert` und behauptet dann das Gegenteil dessen, was er festhalten soll.
 Das waere der einzige echte Bruch des Permanenzversprechens; die
 Byte-Unveraenderlichkeit selbst ist davon nicht betroffen.
+
+## Gemessener Gate-Lauf
+
+Der vollstaendige Lauf nach Schritt 4 des Stufe-1-Plans
+(`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md`),
+frisch ausgefuehrt am 2026-08-17 in der hier protokollierten Reihenfolge. Jedes
+Kommando lief mit `env -u RUSTUP_TOOLCHAIN`, weil die Shell `RUSTUP_TOOLCHAIN`
+auf `1.97.1` setzt und damit den Pin `1.95.0` aus `rust-toolchain.toml`
+uebersteuern wuerde; die aktive Toolchain war gemessen
+`1.95.0-aarch64-apple-darwin`. Die Zahlen sind abgelesen, nicht geschaetzt:
+`0 passed; N filtered out` waere kein Ergebnis, sondern ein defekter Filter, und
+kommt in keiner Zeile vor.
+
+| Kommando | Exitcode | Gemessenes Ergebnis | Laufzeit |
+|---|---|---|---|
+| `pnpm test:core` | 0 | 75 Testbinaries, 636 bestanden, 0 fehlgeschlagen, 5 ignoriert, 0 gefiltert | 17,49 s |
+| `pnpm test:golden` | 0 | 75 Testbinaries, 636 bestanden, 0 fehlgeschlagen, 5 ignoriert, 0 gefiltert | 15,07 s |
+| `pnpm test:property` | 0 | 75 Testbinaries, 636 bestanden, 0 fehlgeschlagen, 5 ignoriert, 0 gefiltert | 14,89 s |
+| `pnpm test:fuzz --smoke-seconds 60` | 0 | 4 Ziele ohne `--target`, je 61 s Smoke, zusammen 9 114 330 Laeufe: `cbor_object` 5 866 417, `cose_sign1` 1 747 705, `hpke_grant` 138 440, `object_bounds` 1 361 768; kein Absturz, keine geschriebene Testeinheit | 248,21 s |
+| `pnpm test:recovery` | 0 | 75 Testbinaries, 636 bestanden, 0 fehlgeschlagen, 5 ignoriert, 0 gefiltert | 16,24 s |
+| `cargo run --locked -p xtask -- stage-gate 1` | 0 | JSON auf stdout, byteidentisch zum Vorlauf: 6 Vektorfamilien, 133 Ledgerzeilen, 4 Fuzz-Ziele fuer 5 Flaechen, `evidenced_acceptance_criteria` = `[4, 5, 6, 9, 14, 16, 17, 20, 38, 51]` | 0,40 s |
+| `cargo check --target wasm32-unknown-unknown --locked -p ea-types -p ea-cbor -p ea-crypto -p ea-format -p ea-schema -p ea-time -p ea-trust -p ea-archive -p ea-chain -p ea-verify` | 0 | die zehn Crates der Positivliste uebersetzen fehlerfrei, keine Warnung; warmer Build-Cache; Reichweite nach Abschnitt 2 | 0,10 s |
+| `pnpm verify:quick` | 0 | vier Teilkommandos gruen: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne Warnung, `cargo test --workspace --all-targets --locked` mit 75 Testbinaries und 636 bestandenen Tests, der wasm32-Check | 18,71 s |
+
+Der Ausgangsstand vor diesem Vorhaben waren 596 bestandene Tests im Workspace;
+`cargo test --workspace --all-targets --locked` steht am Ende der Stufe 1
+gemessen bei 636 in 75 Testbinaries. Die fuenf ignorierten Tests sind der
+Bestand aus frueheren Stufen und dieser Lauf aendert nichts an ihnen.
+
+Ablauf der Messung, damit sie nachvollziehbar bleibt: der Test
+`stage_one_gate_report_records_the_measured_full_gate_run` entstand vor der
+Messung und schlug fehl, weil dieser Abschnitt fehlte. Danach lief die Folge
+oben frisch durch, und erst danach sind ihre Zahlen hier eingetragen worden. Die
+einzige Aenderung am Arbeitsbaum nach dem protokollierten Lauf ist dieses
+Eintragen selbst; die abschliessende Wiederholung von `cargo fmt --all --check`,
+`cargo clippy`, `cargo test --workspace --all-targets --locked` und
+`xtask verify-quick` bestaetigt, dass sie nichts verschoben hat.
+
+Reichweite dieses Laufs: eine Maschine, `aarch64-apple-darwin`, eine Toolchain.
+Der Lauf belegt den Zustand dieses Arbeitsbaums zum genannten Zeitpunkt, keine
+Plattformmatrix — die steht nach `design.md` Abschnitt 23 in Stufe 7 aus.

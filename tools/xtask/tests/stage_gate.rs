@@ -936,6 +936,127 @@ fn write_document(root: &Path, relative: &str, text: &str) {
     fs::write(root.join(relative), text).unwrap();
 }
 
+/// Ueberschrift des Abschnitts, in dem der Gate-Bericht den gemessenen
+/// Stufe-1-Gate-Lauf protokolliert.
+const MEASURED_RUN_HEADING: &str = "## Gemessener Gate-Lauf";
+
+/// Die acht Kommandos der Schritt-4-Folge des Stufe-1-Plans
+/// (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md`),
+/// in genau der Reihenfolge, in der der Plan sie vorschreibt.
+///
+/// Der wasm32-Check steht mit seinem Praefix, nicht mit seiner vollen
+/// Positivliste: die Belegzeile MUSS ihn nennen, soll die Liste der zehn Crates
+/// aber nicht ein zweites Mal woertlich abschreiben.
+const STEP_FOUR_COMMANDS: [&str; 8] = [
+    "pnpm test:core",
+    "pnpm test:golden",
+    "pnpm test:property",
+    "pnpm test:fuzz --smoke-seconds 60",
+    "pnpm test:recovery",
+    "cargo run --locked -p xtask -- stage-gate 1",
+    "cargo check --target wasm32-unknown-unknown --locked",
+    "pnpm verify:quick",
+];
+
+/// Liest die Belegzeilen des Abschnitts [`MEASURED_RUN_HEADING`] als Tabelle.
+///
+/// Fehlt der Abschnitt, liefert die Funktion eine leere Liste statt zu
+/// panicken: sonst schluege der Test mit einer Meldung ueber die fehlende
+/// Ueberschrift fehl statt mit der Meldung ueber das fehlende Kommando, und der
+/// RED dieses Tasks nennte nicht mehr die Sache, um die es geht.
+fn measured_run_rows(report: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut inside = false;
+    for line in report.lines() {
+        if line.trim_end() == MEASURED_RUN_HEADING {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if line.starts_with("## ") {
+            break;
+        }
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<String> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(|cell| cell.trim().to_owned())
+            .collect();
+        if cells.iter().all(|cell| cell.chars().all(|c| c == '-')) {
+            continue;
+        }
+        rows.push(cells);
+    }
+    rows
+}
+
+/// Haelt fest, dass der Gate-Bericht den vorgeschriebenen vollen Lauf GEMESSEN
+/// protokolliert statt ihn zu behaupten.
+///
+/// Der Test liest den ECHTEN Arbeitsbaum und haelt einen ZIELzustand fest: jede
+/// der acht Kommandozeilen aus Schritt 4 des Stufe-1-Plans braucht eine eigene
+/// Belegzeile mit Kommando, Exitcode und gemessenem Ergebnis. Er kann durch
+/// spaetere Tasks nicht invertieren.
+///
+/// Die Zeile fuer `pnpm test:fuzz --smoke-seconds 60` wird VOR der Schleife
+/// geprueft: sie ist die Zeile, die dieser Task ueberhaupt erst erzwingt — der
+/// Fuzz-Smoke ist das einzige Kommando der Folge, das kein anderes Gate mitlaeuft.
+#[test]
+fn stage_one_gate_report_records_the_measured_full_gate_run() {
+    let workspace = workspace_root();
+    let report = fs::read_to_string(workspace.join(GATE_REPORT_PATH))
+        .expect("the stage 1 gate report must be readable");
+    let rows = measured_run_rows(&report);
+
+    let fuzz = "pnpm test:fuzz --smoke-seconds 60";
+    assert!(
+        rows.iter().any(|row| row[0].contains(fuzz)),
+        "stage-1-gate.md must record the measured run for `{fuzz}`"
+    );
+
+    for command in STEP_FOUR_COMMANDS {
+        let matching: Vec<&Vec<String>> =
+            rows.iter().filter(|row| row[0].contains(command)).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "stage-1-gate.md must record the measured run for `{command}` exactly once"
+        );
+        let row = matching[0];
+        assert!(
+            row.len() >= 3,
+            "the measured row for `{command}` must carry command, exit code and result: {row:?}"
+        );
+        assert_eq!(
+            row[1], "0",
+            "the measured run for `{command}` must have ended with exit code 0: {row:?}"
+        );
+        assert!(
+            !row[2].is_empty(),
+            "the measured row for `{command}` must name the measured result: {row:?}"
+        );
+        assert!(
+            !row[2].contains("0 passed"),
+            "`0 passed; N filtered out` is a broken filter, not a result: {row:?}"
+        );
+    }
+
+    assert_eq!(
+        rows.len(),
+        STEP_FOUR_COMMANDS.len() + 1,
+        "the measured run section carries one header row and one row per step 4 command: {rows:?}"
+    );
+    assert!(
+        report.contains(MEASURED_RUN_HEADING),
+        "stage-1-gate.md must carry the section {MEASURED_RUN_HEADING}"
+    );
+}
+
 /// Haelt fest, dass `stage-gate 1` das Formatpaket und den Gate-Bericht prueft.
 ///
 /// Phase 1 laeuft gegen den ECHTEN Arbeitsbaum und haelt den ZIELzustand fest —
