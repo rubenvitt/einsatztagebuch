@@ -772,6 +772,7 @@ dependencies = [
  "ea-crypto",
  "ea-format",
  "ea-schema",
+ "ea-testkit",
  "ea-time",
  "ea-trust",
  "ea-types",

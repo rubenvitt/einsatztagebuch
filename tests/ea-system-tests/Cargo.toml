@@ -18,6 +18,10 @@ ea-chain.workspace = true
 ea-crypto.workspace = true
 ea-format.workspace = true
 ea-schema.workspace = true
+# Die eingefrorenen Vektoren und ihr Manifestmodell. `ea-testkit` haelt
+# `jsonschema` von sich fern: die Schemavalidierung findet ausschliesslich in
+# dieser Testcrate statt.
+ea-testkit.workspace = true
 ea-time.workspace = true
 ea-trust.workspace = true
 ea-types.workspace = true

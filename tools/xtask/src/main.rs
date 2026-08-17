@@ -1168,6 +1168,29 @@ fn stage_gate_root(root: &Path) -> PathBuf {
     env::var_os("EA_STAGE_GATE_ROOT").map_or_else(|| root.to_path_buf(), PathBuf::from)
 }
 
+/// Wahr, wenn die Familie ein lesbares Manifest traegt.
+///
+/// Eine Familie darf ihre Vektoren versionieren: `vectors/crypto/suite-1/` ist
+/// die Suite-1-Fassung der Primitivvektoren, und eine spaetere Suite kaeme
+/// daneben zu liegen, nicht an ihre Stelle. Der Gate akzeptiert deshalb sowohl
+/// `vectors/<familie>/manifest.json` als auch
+/// `vectors/<familie>/<version>/manifest.json`.
+///
+/// Ein blosses Verzeichnis genuegt weiterhin nicht: `vectors/format/payload-v1/`
+/// existiert im Bestand OHNE Manifest und wird von `validate-schemas` getrieben.
+fn family_carries_a_manifest(vectors: &Path, family: &str) -> bool {
+    let directory = vectors.join(family);
+    if fs::read(directory.join("manifest.json")).is_ok() {
+        return true;
+    }
+    let Ok(versions) = fs::read_dir(&directory) else {
+        return false;
+    };
+    versions
+        .filter_map(Result::ok)
+        .any(|version| fs::read(version.path().join("manifest.json")).is_ok())
+}
+
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
 ///
 /// Eine Familie zaehlt erst als vorhanden, wenn `vectors/<familie>/manifest.json`
@@ -1194,7 +1217,7 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
     let mut present = Vec::new();
     let mut missing = Vec::new();
     for family in STAGE_ONE_VECTOR_FAMILIES {
-        if fs::read(vectors.join(family).join("manifest.json")).is_ok() {
+        if family_carries_a_manifest(&vectors, family) {
             present.push(family);
         } else {
             missing.push(family);
@@ -1391,6 +1414,55 @@ mod tests {
             .expect_err("malformed CDDL must fail closed");
 
         assert!(error.contains("broken.cddl"));
+    }
+
+    /// Eine versionierte Vektorfamilie zaehlt, ein leeres Verzeichnis nicht.
+    ///
+    /// `vectors/crypto/suite-1/manifest.json` ist die erste Familie, die ihre
+    /// Vektoren versioniert. Ohne diese Erweiterung meldete der Gate `crypto`
+    /// weiterhin als fehlend, obwohl das Manifest existiert — und mit einer
+    /// blossen Verzeichnispruefung zaehlte `vectors/format/payload-v1/`
+    /// faelschlich mit, das im Bestand kein Manifest traegt.
+    #[test]
+    fn a_versioned_vector_family_directory_satisfies_the_stage_gate() {
+        struct TempDir(std::path::PathBuf);
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = TempDir(std::env::temp_dir().join(format!(
+            "einsatzarchiv-vector-family-{}-{nonce}",
+            std::process::id()
+        )));
+        let vectors = directory.0.join("vectors");
+        std::fs::create_dir_all(vectors.join("versioned/suite-1")).unwrap();
+        std::fs::write(
+            vectors.join("versioned/suite-1/manifest.json"),
+            "{\"family\":\"versioned\"}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(vectors.join("flat")).unwrap();
+        std::fs::write(
+            vectors.join("flat/manifest.json"),
+            "{\"family\":\"flat\"}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(vectors.join("bare/payload-v1")).unwrap();
+
+        assert!(super::family_carries_a_manifest(&vectors, "versioned"));
+        assert!(super::family_carries_a_manifest(&vectors, "flat"));
+        assert!(
+            !super::family_carries_a_manifest(&vectors, "bare"),
+            "a version directory without manifest.json must not satisfy the gate"
+        );
+        assert!(!super::family_carries_a_manifest(&vectors, "absent"));
     }
 
     #[test]

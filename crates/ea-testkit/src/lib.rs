@@ -564,6 +564,836 @@ pub fn verify_manifest_at(root: &Path) -> Result<VerificationReport, TestkitErro
 }
 
 // ---------------------------------------------------------------------------
+// Vektorfamilie crypto/suite-1
+// ---------------------------------------------------------------------------
+
+/// Der Familienname der Primitivvektoren.
+pub const CRYPTO_FAMILY: &str = "crypto";
+
+/// Der Versionsordner der Primitivvektoren.
+pub const CRYPTO_SUITE_ONE_VERSION: &str = "suite-1";
+
+/// Die Wurzel der Primitivvektoren, relativ zur Arbeitsbaumwurzel.
+pub const CRYPTO_SUITE_ONE_ROOT: &str = "vectors/crypto/suite-1";
+
+/// Die Herkunftsangabe der Vektoren, die kein veroeffentlichter Standard
+/// liefert.
+///
+/// Benannt wird die erzeugende Funktion, nicht ein Commit-Hash: der Hash des
+/// Commits, der einen Vektor einfriert, ist zur Erzeugungszeit noch nicht
+/// bekannt, und ein nachtraeglich eingetragener Hash waere eine Behauptung
+/// statt einer Angabe. `git log -L` auf diese Funktion liefert die Historie
+/// vollstaendig.
+const CRYPTO_GENERATOR: &str = "ea-testkit::crypto_suite_one_manifest";
+
+/// Der Suite-Identifikator, EINGEFROREN.
+///
+/// Bewusst ein Literal und keine Uebernahme aus `ea-types`: der Vektor soll
+/// dem Quelltext WIDERSPRECHEN koennen. Wuerde er die Konstante importieren,
+/// zoege eine Umbenennung den Vektor stillschweigend mit, und die Familie
+/// belegte nur noch sich selbst. `ea-system-tests` stellt beide gegeneinander.
+const CRYPTO_SUITE_ONE_SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+
+/// Der Grant-Suite-Identifikator, aus demselben Grund eingefroren.
+const CRYPTO_SUITE_ONE_GRANT_SUITE_ID: &str = "EINSATZARCHIV-HPKE-1";
+
+/// Das feste Urbild aller Domain-Digest-Vektoren.
+const CRYPTO_PROBE: &[u8] = b"suite-1 digest probe";
+
+/// Die Organisationskennung der strukturierten Vektoren.
+const CRYPTO_ORGANIZATION_ID: [u8; 16] = [0x10; 16];
+
+/// Die Geraetekennung der strukturierten Vektoren.
+const CRYPTO_DEVICE_ID: [u8; 16] = [0x11; 16];
+
+/// Die 20 Domain-Trennungszeichenketten von `crates/ea-crypto`.
+///
+/// Abgeleitet aus dem Quelltext, nicht aus dem Gedaechtnis:
+/// `crates/ea-crypto/src/digest.rs` fuehrt vierzehn Hashdomaenen und drei
+/// Praefixfunktionen, `os_account.rs` eine Bindungsdomaene und `cose.rs` die
+/// beiden Typzeichenketten der signierten Protokollkerne.
+/// `tests/ea-system-tests/tests/conformance_golden_vectors.rs` sucht den
+/// Quelltext erneut ab und faellt, sobald dort eine Zeichenkette ohne Vektor
+/// steht.
+const CRYPTO_DOMAIN_STRINGS: [&str; 20] = [
+    "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
+    "EINSATZARCHIV-AAD-v1",
+    "EINSATZARCHIV-CHECKPOINT-v1",
+    "EINSATZARCHIV-CIPHERTEXT-v1",
+    "EINSATZARCHIV-EVIDENCE-RENEWAL-INPUT-v1",
+    "EINSATZARCHIV-EVIDENCE-RENEWAL-v1",
+    "EINSATZARCHIV-GRANT-PLAN-v1",
+    "EINSATZARCHIV-GRANT-v1",
+    "EINSATZARCHIV-HPKE-AAD-v1",
+    "EINSATZARCHIV-HPKE-INFO-v1",
+    "EINSATZARCHIV-OBJECT-v1",
+    "EINSATZARCHIV-OPERATOR-PROFILE-v1",
+    "EINSATZARCHIV-OS-ACCOUNT-v1",
+    "EINSATZARCHIV-PACKAGE-v1",
+    "EINSATZARCHIV-RECEIPT-v1",
+    "EINSATZARCHIV-RECORD-v1",
+    "EINSATZARCHIV-RECOVERY-TEST-v1",
+    "EINSATZARCHIV-TRUST-ANCHOR-PRE-v1",
+    "EINSATZARCHIV-TRUST-ANCHOR-v1",
+    "EINSATZARCHIV-TRUST-OBJECT-v1",
+];
+
+/// Die domaingetrennten Digestfunktionen mit ihrer Domaene.
+const CRYPTO_DOMAIN_DIGESTS: [(&str, &str); 12] = [
+    (
+        "domain-digest/ciphertext-digest",
+        "EINSATZARCHIV-CIPHERTEXT-v1",
+    ),
+    ("domain-digest/record-digest", "EINSATZARCHIV-RECORD-v1"),
+    (
+        "domain-digest/grant-plan-digest",
+        "EINSATZARCHIV-GRANT-PLAN-v1",
+    ),
+    ("domain-digest/grant-digest", "EINSATZARCHIV-GRANT-v1"),
+    ("domain-digest/receipt-digest", "EINSATZARCHIV-RECEIPT-v1"),
+    (
+        "domain-digest/trust-digest",
+        "EINSATZARCHIV-TRUST-OBJECT-v1",
+    ),
+    (
+        "domain-digest/authorized-trust-digest",
+        "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
+    ),
+    (
+        "domain-digest/renewal-input-digest",
+        "EINSATZARCHIV-EVIDENCE-RENEWAL-INPUT-v1",
+    ),
+    (
+        "domain-digest/bootstrap-anchor-hash",
+        "EINSATZARCHIV-TRUST-ANCHOR-PRE-v1",
+    ),
+    (
+        "domain-digest/trust-anchor-hash",
+        "EINSATZARCHIV-TRUST-ANCHOR-v1",
+    ),
+    (
+        "domain-digest/operator-profile-digest",
+        "EINSATZARCHIV-OPERATOR-PROFILE-v1",
+    ),
+    ("domain-digest/object-hash", "EINSATZARCHIV-OBJECT-v1"),
+];
+
+/// Die drei Praefixfunktionen, deren Ausgabe die Domaene mittraegt.
+const CRYPTO_DOMAIN_CONTEXTS: [(&str, &str); 3] = [
+    ("domain-context/payload-aad", "EINSATZARCHIV-AAD-v1"),
+    ("domain-context/hpke-info", "EINSATZARCHIV-HPKE-INFO-v1"),
+    ("domain-context/hpke-aad", "EINSATZARCHIV-HPKE-AAD-v1"),
+];
+
+/// Die Ed25519-Signatur aus RFC 8032 §7.1, TEST 1 — leere Nachricht.
+///
+/// NICHT ABGESCHRIEBEN, sondern erzeugt: Ed25519 signiert deterministisch, und
+/// der Seed ist der des Standards. `ea-system-tests` signiert im Testlauf neu
+/// und stellt das Ergebnis gegen diese Bytes.
+const ED25519_RFC8032_TEST1_SIGNATURE: &str = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+
+/// Die Ed25519-Signatur aus RFC 8032 §7.1, TEST 2 — Nachricht `0x72`.
+const ED25519_RFC8032_TEST2_SIGNATURE: &str = "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00";
+
+/// Der Schluessel des AEAD-Vektors aus RFC 8439 §2.8.2: `0x80` bis `0x9f`.
+const RFC8439_KEY: &str = "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f";
+
+/// Die Nonce aus RFC 8439 §2.8.2: 32-Bit-Konstante plus 64-Bit-IV.
+const RFC8439_NONCE: &str = "070000004041424344454647";
+
+/// Die zusaetzlichen authentifizierten Daten aus RFC 8439 §2.8.2.
+const RFC8439_AAD: &str = "50515253c0c1c2c3c4c5c6c7";
+
+/// Der Klartext aus RFC 8439 §2.8.2.
+const RFC8439_PLAINTEXT: &[u8] = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+
+/// Chiffrat und Poly1305-Tag aus RFC 8439 §2.8.2.
+const RFC8439_CIPHERTEXT: &str = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691";
+
+/// Das Chiffrat ueber [`CRYPTO_PROBE`] unter der deklarierten Testentropie.
+const DECLARED_ENTROPY_CIPHERTEXT: &str =
+    "22ffe3aa374a6984b02a584dd0bbdfe2d55ae456849bba93d9a755c2ffae7054e3635833";
+
+/// Der oeffentliche X25519-Schluessel zu [`TEST_ENTROPY_RECIPIENT_X25519_SEED`].
+///
+/// Abgeleitet, nicht gewuerfelt; `ea-system-tests` leitet ihn im Testlauf neu
+/// ab und stellt ihn gegen den eingefrorenen Kapselungsvektor.
+const RECIPIENT_X25519_PUBLIC_KEY: &str =
+    "80e1a53d3eee82b62b3048578cf38c980ddd1131243a1047fe48482942d6b648";
+
+/// Kapselungswert und umschlossener CEK, EINMALIG erzeugt und eingefroren.
+///
+/// `hpke_seal` zieht bei jedem Aufruf frische Entropie aus dem Betriebssystem
+/// (`crates/ea-crypto/src/hpke.rs`), und der Injektionspunkt fuer Testentropie
+/// ist privat. Diese 80 Byte sind deshalb nicht regenerierbar; nachgeprueft
+/// werden sie ausschliesslich in der entkapselnden Richtung ueber `hpke_open`,
+/// und das Manifest sagt das ueber [`VectorSource::FrozenOnce`] an.
+const HPKE_ENCAPSULATED_KEY: &str =
+    "53a33a9a549bc5a3d0978e07af5562b3b12d358f56083327888e89be98a4dd01";
+
+/// Der umschlossene Inhaltsschluessel zum eingefrorenen Kapselungswert.
+const HPKE_WRAPPED_CEK: &str = "d8a66d3b3a51a539cb44797af5eb6e9d05ba9d1b8f8dd05caa6373052856871904e0febf4442d852bfb000af7ae2750d";
+
+/// Ein Datensatzbezeichner nach RFC 9562: Version 7, Variante 0b10.
+const UUID_V7_ACCEPTED: &str = "018f2c3d4e5a7b6c8d9ea0b1c2d3e4f5";
+
+/// Derselbe Bezeichner mit Version 4 — von `ea-schema` abzulehnen.
+const UUID_VERSION_FOUR: &str = "018f2c3d4e5a4b6c8d9ea0b1c2d3e4f5";
+
+/// Der Inhalt von `/etc/machine-id` im OS-Kontovektor.
+const LINUX_MACHINE_ID_FILE: &[u8] = b"0123456789abcdef0123456789abcdef\n";
+
+/// Die Benutzerkennung im OS-Kontovektor.
+const LINUX_UID: u32 = 1000;
+
+/// Das Manifest der Vektorfamilie `crypto/suite-1`.
+///
+/// Deterministisch: zwei Laeufe liefern dieselben Bytes. Alles, was nicht aus
+/// einem veroeffentlichten Standard stammt, wird hier aus festen Konstanten
+/// gerechnet — mit einer Ausnahme, der HPKE-Kapselung, die als
+/// [`VectorSource::FrozenOnce`] gekennzeichnet ist.
+///
+/// # Panics
+///
+/// Wenn eine der eingefrorenen Hexkonstanten dieser Datei nicht dekodierbar
+/// ist. Das ist ein Programmierfehler in dieser Crate, kein Laufzeitzustand.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn crypto_suite_one_manifest() -> VectorManifest {
+    // Die Suite-Identifikatoren.
+    //
+    // Die COSE-Algorithmuskennung steht hier in der deterministischen
+    // CBOR-Kodierung des Protected Headers: `0x32` ist die einbytige,
+    // laengenminimale Darstellung der negativen Ganzzahl -19, also des
+    // VOLLSTAENDIG SPEZIFIZIERTEN Ed25519 nach RFC 9864. Die generische
+    // EdDSA-Kennung -8 (`0x27`) ist ausdruecklich NICHT gemeint; genau diese
+    // Unterscheidung traegt RFC 9864 ein, und sie laesst sich nur ueber die
+    // Kennung selbst einfrieren, nicht ueber einen Signaturvektor: die
+    // Signaturmathematik ist in beiden Faellen dieselbe.
+    //
+    // Modus, KEM, KDF und AEAD der Grant-Suite stehen in Netzwerkbyteordnung.
+    let mut entries = vec![
+        crypto_entry(
+            "suite/suite-identifier",
+            "ea.crypto.suite-identifier/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            generator_source(),
+            Vec::new(),
+            BTreeMap::new(),
+            CRYPTO_SUITE_ONE_SUITE_ID.as_bytes().to_vec(),
+            ExpectedOutcome::Accepted,
+        ),
+        crypto_entry(
+            "suite/grant-suite-identifier",
+            "ea.crypto.suite-identifier/v1",
+            CRYPTO_SUITE_ONE_GRANT_SUITE_ID,
+            generator_source(),
+            Vec::new(),
+            BTreeMap::new(),
+            CRYPTO_SUITE_ONE_GRANT_SUITE_ID.as_bytes().to_vec(),
+            ExpectedOutcome::Accepted,
+        ),
+        crypto_entry(
+            "suite/cose-ed25519-algorithm-identifier",
+            "ea.crypto.cose-algorithm-identifier/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            VectorSource::Standard("RFC 9864, COSE Algorithms registry: Ed25519 = -19".to_owned()),
+            Vec::new(),
+            BTreeMap::new(),
+            vec![0x32],
+            ExpectedOutcome::Accepted,
+        ),
+        crypto_entry(
+            "suite/hpke-suite-identifiers",
+            "ea.crypto.hpke-suite/v1",
+            CRYPTO_SUITE_ONE_GRANT_SUITE_ID,
+            VectorSource::Standard("RFC 9180 §7.1, §7.2, §7.3".to_owned()),
+            Vec::new(),
+            BTreeMap::new(),
+            vec![0x00, 0x00, 0x20, 0x00, 0x01, 0x00, 0x03],
+            ExpectedOutcome::Accepted,
+        ),
+    ];
+
+    // Die Domain-Trennungszeichenketten selbst.
+    for domain in CRYPTO_DOMAIN_STRINGS {
+        entries.push(crypto_entry(
+            &format!("domain-string/{}", domain.to_lowercase()),
+            "ea.crypto.domain-separation-string/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            generator_source(),
+            Vec::new(),
+            BTreeMap::new(),
+            domain.as_bytes().to_vec(),
+            ExpectedOutcome::Accepted,
+        ));
+    }
+
+    // SHA-256 gegen die veroeffentlichten Antworten.
+    for (name, preimage) in [
+        ("sha-256/empty", b"".as_slice()),
+        ("sha-256/abc", b"abc".as_slice()),
+    ] {
+        entries.push(crypto_entry(
+            name,
+            "ea.crypto.sha-256/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            VectorSource::Standard("FIPS 180-4, RFC 6234 §8.5".to_owned()),
+            preimage.to_vec(),
+            BTreeMap::new(),
+            sha256(preimage).to_vec(),
+            ExpectedOutcome::Accepted,
+        ));
+    }
+
+    // Die domaingetrennten Digests ueber ein festes Urbild.
+    for (name, domain) in CRYPTO_DOMAIN_DIGESTS {
+        entries.push(crypto_entry(
+            name,
+            "ea.crypto.domain-digest/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            generator_source(),
+            CRYPTO_PROBE.to_vec(),
+            domain_digest_intermediates(domain),
+            domain_digest(domain, CRYPTO_PROBE).to_vec(),
+            ExpectedOutcome::Accepted,
+        ));
+    }
+
+    // `entry_hash` bindet Datensatzdigest und Schreibersignatur zusammen. Das
+    // Urbild IST die Eingabe: Digest und Signaturbytes stehen hintereinander.
+    let record_digest = domain_digest("EINSATZARCHIV-RECORD-v1", CRYPTO_PROBE);
+    let mut entry_hash_input = record_digest.to_vec();
+    entry_hash_input.extend_from_slice(CRYPTO_PROBE);
+    let entry_hash_object = domain_digest("EINSATZARCHIV-PACKAGE-v1", &entry_hash_input).to_vec();
+    entries.push(crypto_entry(
+        "domain-digest/entry-hash",
+        "ea.crypto.domain-digest/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        entry_hash_input,
+        domain_digest_intermediates("EINSATZARCHIV-PACKAGE-v1"),
+        entry_hash_object,
+        ExpectedOutcome::Accepted,
+    ));
+
+    // `recovery_test_digest` hasht einen deterministischen CBOR-Kontext.
+    let challenge = [0x41_u8; 32];
+    let thumbprint = [0x40_u8; 32];
+    let mut recovery_input = challenge.to_vec();
+    recovery_input.extend_from_slice(&thumbprint);
+    let mut recovery_context = vec![0x83, 0x01];
+    recovery_context.extend_from_slice(&cbor_bytes(&challenge));
+    recovery_context.extend_from_slice(&cbor_bytes(&thumbprint));
+    entries.push(crypto_entry(
+        "domain-digest/recovery-test-digest",
+        "ea.crypto.domain-digest/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        recovery_input,
+        domain_digest_intermediates("EINSATZARCHIV-RECOVERY-TEST-v1"),
+        domain_digest("EINSATZARCHIV-RECOVERY-TEST-v1", &recovery_context).to_vec(),
+        ExpectedOutcome::Accepted,
+    ));
+
+    // Die Betriebssystemkontobindung ueber ihren kanonischen CBOR-Kontext.
+    let mut account_input = CRYPTO_ORGANIZATION_ID.to_vec();
+    account_input.extend_from_slice(&CRYPTO_DEVICE_ID);
+    account_input.extend_from_slice(LINUX_MACHINE_ID_FILE);
+    account_input.extend_from_slice(&LINUX_UID.to_be_bytes());
+    let mut account_context = vec![0x83];
+    account_context.extend_from_slice(&cbor_bytes(&CRYPTO_ORGANIZATION_ID));
+    account_context.extend_from_slice(&cbor_bytes(&CRYPTO_DEVICE_ID));
+    account_context.extend_from_slice(&[0x84, 0x01, 0x02]);
+    account_context.extend_from_slice(&cbor_bytes(&decode("0123456789abcdef0123456789abcdef")));
+    account_context.extend_from_slice(&cbor_unsigned(u64::from(LINUX_UID)));
+    entries.push(crypto_entry(
+        "domain-digest/os-account-linux",
+        "ea.crypto.domain-digest/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        account_input,
+        domain_digest_intermediates("EINSATZARCHIV-OS-ACCOUNT-v1"),
+        domain_digest("EINSATZARCHIV-OS-ACCOUNT-v1", &account_context).to_vec(),
+        ExpectedOutcome::Accepted,
+    ));
+
+    // Die Praefixfunktionen liefern die Domaene mit aus.
+    for (name, domain) in CRYPTO_DOMAIN_CONTEXTS {
+        let mut context = domain.as_bytes().to_vec();
+        context.extend_from_slice(CRYPTO_PROBE);
+        entries.push(crypto_entry(
+            name,
+            "ea.crypto.domain-context/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            generator_source(),
+            CRYPTO_PROBE.to_vec(),
+            BTreeMap::new(),
+            context,
+            ExpectedOutcome::Accepted,
+        ));
+    }
+
+    // Ed25519 nach RFC 8032.
+    for (name, message, signature, public, test) in [
+        (
+            "ed25519/rfc8032-test1",
+            Vec::new(),
+            ED25519_RFC8032_TEST1_SIGNATURE,
+            ED25519_RFC8032_TEST1_PUBLIC_KEY,
+            "TEST 1",
+        ),
+        (
+            "ed25519/rfc8032-test2",
+            vec![0x72],
+            ED25519_RFC8032_TEST2_SIGNATURE,
+            ED25519_RFC8032_TEST2_PUBLIC_KEY,
+            "TEST 2",
+        ),
+    ] {
+        entries.push(crypto_entry(
+            name,
+            "ea.crypto.ed25519-signature/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            VectorSource::Standard(format!("RFC 8032 §7.1 {test}")),
+            message,
+            signer_thumbprint_intermediates(0x06, &public),
+            decode(signature),
+            ExpectedOutcome::Accepted,
+        ));
+    }
+    let mut flipped_signature = decode(ED25519_RFC8032_TEST1_SIGNATURE);
+    flipped_signature[0] ^= 0x01;
+    entries.push(crypto_entry(
+        "ed25519/flipped-signature",
+        "ea.crypto.ed25519-signature/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        Vec::new(),
+        signer_thumbprint_intermediates(0x06, &ED25519_RFC8032_TEST1_PUBLIC_KEY),
+        flipped_signature,
+        ExpectedOutcome::Rejected {
+            error_code: "EA-TRUST-SIGNATURE-INVALID".to_owned(),
+        },
+    ));
+    entries.push(crypto_entry(
+        "ed25519/weak-public-key",
+        "ea.crypto.ed25519-public-key/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        Vec::new(),
+        BTreeMap::new(),
+        vec![0; 32],
+        ExpectedOutcome::Rejected {
+            error_code: "EA-CRYPTO-INVALID-PUBLIC-KEY".to_owned(),
+        },
+    ));
+
+    // ChaCha20-Poly1305.
+    entries.push(crypto_entry(
+        "aead/rfc8439-2.8.2",
+        "ea.crypto.chacha20poly1305-ciphertext/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        VectorSource::Standard("RFC 8439 §2.8.2".to_owned()),
+        RFC8439_PLAINTEXT.to_vec(),
+        aead_intermediates(
+            &decode(RFC8439_KEY),
+            &decode(RFC8439_NONCE),
+            &decode(RFC8439_AAD),
+        ),
+        decode(RFC8439_CIPHERTEXT),
+        ExpectedOutcome::Accepted,
+    ));
+    let mut declared_aad = b"EINSATZARCHIV-AAD-v1".to_vec();
+    declared_aad.extend_from_slice(CRYPTO_PROBE);
+    entries.push(crypto_entry(
+        "aead/declared-entropy",
+        "ea.crypto.chacha20poly1305-ciphertext/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        CRYPTO_PROBE.to_vec(),
+        aead_intermediates(
+            &TEST_ENTROPY_CONTENT_ENCRYPTION_KEY,
+            &TEST_ENTROPY_AEAD_NONCE,
+            &declared_aad,
+        ),
+        decode(DECLARED_ENTROPY_CIPHERTEXT),
+        ExpectedOutcome::Accepted,
+    ));
+    let mut tampered = decode(DECLARED_ENTROPY_CIPHERTEXT);
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    entries.push(crypto_entry(
+        "aead/tampered-tag",
+        "ea.crypto.chacha20poly1305-ciphertext/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        CRYPTO_PROBE.to_vec(),
+        aead_intermediates(
+            &TEST_ENTROPY_CONTENT_ENCRYPTION_KEY,
+            &TEST_ENTROPY_AEAD_NONCE,
+            &declared_aad,
+        ),
+        tampered,
+        ExpectedOutcome::Rejected {
+            error_code: "EA-CRYPTO-AEAD-OPEN".to_owned(),
+        },
+    ));
+
+    // HPKE Base Mode.
+    entries.push(crypto_entry(
+        "hpke/rfc7748-recipient-public-key",
+        "ea.crypto.hpke-recipient-public-key/v1",
+        CRYPTO_SUITE_ONE_GRANT_SUITE_ID,
+        VectorSource::Standard("RFC 7748 §6.1".to_owned()),
+        X25519_RFC7748_BOB_PRIVATE_KEY.to_vec(),
+        BTreeMap::new(),
+        X25519_RFC7748_BOB_PUBLIC_KEY.to_vec(),
+        ExpectedOutcome::Accepted,
+    ));
+    let mut sealed = decode(HPKE_ENCAPSULATED_KEY);
+    sealed.extend_from_slice(&decode(HPKE_WRAPPED_CEK));
+    entries.push(crypto_entry(
+        "hpke/base-mode-wrapped-cek",
+        "ea.crypto.hpke-sealed-cek/v1",
+        CRYPTO_SUITE_ONE_GRANT_SUITE_ID,
+        VectorSource::FrozenOnce {
+            verified_via: "hpke_open".to_owned(),
+        },
+        TEST_ENTROPY_CONTENT_ENCRYPTION_KEY.to_vec(),
+        hpke_intermediates(),
+        sealed.clone(),
+        ExpectedOutcome::Accepted,
+    ));
+    for (name, index) in [
+        ("hpke/flipped-encapsulated-key", 0),
+        ("hpke/flipped-wrapped-cek", 32),
+    ] {
+        let mut broken = sealed.clone();
+        broken[index] ^= 0x01;
+        entries.push(crypto_entry(
+            name,
+            "ea.crypto.hpke-sealed-cek/v1",
+            CRYPTO_SUITE_ONE_GRANT_SUITE_ID,
+            VectorSource::FrozenOnce {
+                verified_via: "hpke_open".to_owned(),
+            },
+            TEST_ENTROPY_CONTENT_ENCRYPTION_KEY.to_vec(),
+            hpke_intermediates(),
+            broken,
+            ExpectedOutcome::Rejected {
+                error_code: "EA-CRYPTO-HPKE-OPEN".to_owned(),
+            },
+        ));
+    }
+
+    // RFC 9679 Key-Thumbprints.
+    for (curve, public, key_name, thumbprint_name) in [
+        (
+            0x06_u8,
+            ED25519_RFC8032_TEST1_PUBLIC_KEY,
+            "thumbprint/ed25519-canonical-cose-key",
+            "thumbprint/ed25519",
+        ),
+        (
+            0x04,
+            X25519_RFC7748_BOB_PUBLIC_KEY,
+            "thumbprint/x25519-canonical-cose-key",
+            "thumbprint/x25519",
+        ),
+    ] {
+        let encoded = canonical_public_cose_key(curve, &public);
+        entries.push(crypto_entry(
+            key_name,
+            "ea.crypto.cose-key/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            VectorSource::Standard("RFC 9679 §3".to_owned()),
+            public.to_vec(),
+            digest_map(&[("thumbprint", sha256(&encoded))]),
+            encoded.clone(),
+            ExpectedOutcome::Accepted,
+        ));
+        entries.push(crypto_entry(
+            thumbprint_name,
+            "ea.crypto.cose-key-thumbprint/v1",
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            VectorSource::Standard("RFC 9679 §3".to_owned()),
+            encoded.clone(),
+            BTreeMap::new(),
+            sha256(&encoded).to_vec(),
+            ExpectedOutcome::Accepted,
+        ));
+    }
+    entries.push(crypto_entry(
+        "thumbprint/unknown-curve",
+        "ea.crypto.cose-key/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        ED25519_RFC8032_TEST1_PUBLIC_KEY.to_vec(),
+        BTreeMap::new(),
+        canonical_public_cose_key(0x01, &ED25519_RFC8032_TEST1_PUBLIC_KEY),
+        ExpectedOutcome::Rejected {
+            error_code: "EA-CRYPTO-UNSUPPORTED-SUITE".to_owned(),
+        },
+    ));
+
+    // Die signierten Protokollkerne mit ihrer Typzeichenkette.
+    for (name, schema, valid, mutated, core) in [
+        (
+            "protocol-core/checkpoint",
+            "ea.crypto.checkpoint-core/v1",
+            "EINSATZARCHIV-CHECKPOINT-v1",
+            "EINSATZARCHIV-CHECKPOINT-v2",
+            checkpoint_core as fn(&str) -> Vec<u8>,
+        ),
+        (
+            "protocol-core/evidence-renewal",
+            "ea.crypto.evidence-renewal-core/v1",
+            "EINSATZARCHIV-EVIDENCE-RENEWAL-v1",
+            "EINSATZARCHIV-EVIDENCE-RENEWAL-v2",
+            renewal_core as fn(&str) -> Vec<u8>,
+        ),
+    ] {
+        entries.push(crypto_entry(
+            name,
+            schema,
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            generator_source(),
+            Vec::new(),
+            BTreeMap::new(),
+            core(valid),
+            ExpectedOutcome::Accepted,
+        ));
+        entries.push(crypto_entry(
+            &format!("{name}-mutated-type-string"),
+            schema,
+            CRYPTO_SUITE_ONE_SUITE_ID,
+            generator_source(),
+            Vec::new(),
+            BTreeMap::new(),
+            core(mutated),
+            ExpectedOutcome::Rejected {
+                error_code: "EA-CRYPTO-INVALID-PROTOCOL-CORE".to_owned(),
+            },
+        ));
+    }
+
+    // RFC 9562 UUIDv7.
+    entries.push(crypto_entry(
+        "uuid-v7/valid",
+        "ea.crypto.uuid-v7/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        VectorSource::Standard("RFC 9562 §5.7".to_owned()),
+        Vec::new(),
+        BTreeMap::new(),
+        decode(UUID_V7_ACCEPTED),
+        ExpectedOutcome::Accepted,
+    ));
+    entries.push(crypto_entry(
+        "uuid-v7/version-four",
+        "ea.crypto.uuid-v7/v1",
+        CRYPTO_SUITE_ONE_SUITE_ID,
+        generator_source(),
+        Vec::new(),
+        BTreeMap::new(),
+        decode(UUID_VERSION_FOUR),
+        ExpectedOutcome::Rejected {
+            error_code: "EA-SCHEMA-UUID-V7".to_owned(),
+        },
+    ));
+
+    VectorManifest {
+        family: CRYPTO_FAMILY.to_owned(),
+        version: CRYPTO_SUITE_ONE_VERSION.to_owned(),
+        entries,
+    }
+}
+
+fn generator_source() -> VectorSource {
+    VectorSource::GeneratorCommit(CRYPTO_GENERATOR.to_owned())
+}
+
+/// Baut einen Manifesteintrag und leitet seinen Dateipfad aus dem Namen ab.
+///
+/// Die breite Signatur ist der Vertrag selbst: ein Eintrag hat neun
+/// Pflichtangaben, und acht davon sind hier zu waehlen. Sie zu Gruppen zu
+/// buendeln verstecke den Vertrag, statt ihn zu zeigen — deshalb steht hier ein
+/// ausdrueckliches `allow` und keine Hilfsstruktur.
+#[allow(clippy::too_many_arguments)]
+fn crypto_entry(
+    name: &str,
+    schema_id: &str,
+    suite_id: &str,
+    source: VectorSource,
+    input_bytes: Vec<u8>,
+    intermediate_digests: BTreeMap<String, [u8; 32]>,
+    object_bytes: Vec<u8>,
+    expected_outcome: ExpectedOutcome,
+) -> VectorEntry {
+    VectorEntry {
+        name: name.to_owned(),
+        schema_id: schema_id.to_owned(),
+        suite_id: suite_id.to_owned(),
+        source,
+        input_bytes,
+        intermediate_digests,
+        object_bytes,
+        expected_outcome,
+        file: format!("{name}.bin"),
+    }
+}
+
+/// SHA-256 ueber `bytes`.
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+/// `SHA-256(domain || urbild)` — die Formel jeder domaingetrennten
+/// Hashfunktion von `ea-crypto`.
+fn domain_digest(domain: &str, preimage: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(preimage);
+    hasher.finalize().into()
+}
+
+fn digest_map(pairs: &[(&str, [u8; 32])]) -> BTreeMap<String, [u8; 32]> {
+    pairs
+        .iter()
+        .map(|(name, digest)| ((*name).to_owned(), *digest))
+        .collect()
+}
+
+fn domain_digest_intermediates(domain: &str) -> BTreeMap<String, [u8; 32]> {
+    digest_map(&[("domainString", sha256(domain.as_bytes()))])
+}
+
+fn signer_thumbprint_intermediates(curve: u8, public: &[u8; 32]) -> BTreeMap<String, [u8; 32]> {
+    digest_map(&[(
+        "signerThumbprint",
+        sha256(&canonical_public_cose_key(curve, public)),
+    )])
+}
+
+fn aead_intermediates(key: &[u8], nonce: &[u8], aad: &[u8]) -> BTreeMap<String, [u8; 32]> {
+    digest_map(&[
+        ("aadDigest", sha256(aad)),
+        ("keyDigest", sha256(key)),
+        ("nonceDigest", sha256(nonce)),
+    ])
+}
+
+fn hpke_intermediates() -> BTreeMap<String, [u8; 32]> {
+    let mut info = b"EINSATZARCHIV-HPKE-INFO-v1".to_vec();
+    info.extend_from_slice(CRYPTO_PROBE);
+    let mut aad = b"EINSATZARCHIV-HPKE-AAD-v1".to_vec();
+    aad.extend_from_slice(CRYPTO_PROBE);
+    let public: [u8; 32] = decode(RECIPIENT_X25519_PUBLIC_KEY)
+        .try_into()
+        .expect("the frozen recipient public key is 32 bytes");
+    digest_map(&[
+        ("aadDigest", sha256(&aad)),
+        ("infoDigest", sha256(&info)),
+        (
+            "recipientPublicKeyThumbprint",
+            sha256(&canonical_public_cose_key(0x04, &public)),
+        ),
+    ])
+}
+
+/// Die kanonische COSE-Key-Kodierung nach RFC 9679: `{1: 1, -1: crv, -2: x}`.
+///
+/// Von Hand kodiert, damit dieser Erzeuger keine CBOR-Bibliothek braucht und
+/// die Kodierung nicht aus derselben Quelle stammt wie die geprueften Bytes.
+fn canonical_public_cose_key(curve: u8, public: &[u8; 32]) -> Vec<u8> {
+    let mut bytes = vec![0xa3, 0x01, 0x01, 0x20, curve, 0x21];
+    bytes.extend_from_slice(&cbor_bytes(public));
+    bytes
+}
+
+/// Ein deterministisch kodierter CBOR-Bytestring.
+fn cbor_bytes(value: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(value.len() + 2);
+    match value.len() {
+        length if length < 24 => bytes.push(0x40 | u8::try_from(length).expect("below 24")),
+        length if length < 256 => {
+            bytes.push(0x58);
+            bytes.push(u8::try_from(length).expect("below 256"));
+        }
+        length => panic!("no vector carries a byte string of {length} bytes"),
+    }
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+/// Eine deterministisch kodierte vorzeichenlose CBOR-Ganzzahl.
+fn cbor_unsigned(value: u64) -> Vec<u8> {
+    if value < 24 {
+        return vec![u8::try_from(value).expect("below 24")];
+    }
+    if value <= u64::from(u8::MAX) {
+        return vec![0x18, u8::try_from(value).expect("below 256")];
+    }
+    if value <= u64::from(u16::MAX) {
+        let mut bytes = vec![0x19];
+        bytes.extend_from_slice(&u16::try_from(value).expect("below 65536").to_be_bytes());
+        return bytes;
+    }
+    if value <= u64::from(u32::MAX) {
+        let mut bytes = vec![0x1a];
+        bytes.extend_from_slice(&u32::try_from(value).expect("below 2^32").to_be_bytes());
+        return bytes;
+    }
+    let mut bytes = vec![0x1b];
+    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+/// Eine deterministisch kodierte CBOR-Textzeichenkette unter 256 Zeichen.
+fn cbor_text(value: &str) -> Vec<u8> {
+    let length = u8::try_from(value.len()).expect("every type string is shorter than 256 bytes");
+    assert!(length >= 24, "the type strings are longer than 23 bytes");
+    let mut bytes = vec![0x78, length];
+    bytes.extend_from_slice(value.as_bytes());
+    bytes
+}
+
+/// Der unsignierte Checkpoint-Kern nach `validate_checkpoint_core`.
+fn checkpoint_core(type_string: &str) -> Vec<u8> {
+    let mut bytes = vec![0x8b, 0x01];
+    bytes.extend_from_slice(&cbor_text(type_string));
+    bytes.extend_from_slice(&cbor_bytes(&CRYPTO_ORGANIZATION_ID));
+    bytes.extend_from_slice(&cbor_bytes(&CRYPTO_DEVICE_ID));
+    bytes.extend_from_slice(&cbor_unsigned(1000));
+    bytes.extend_from_slice(&cbor_unsigned(10000));
+    bytes.extend_from_slice(&cbor_bytes(&[0x21; 32]));
+    bytes.extend_from_slice(&cbor_bytes(&[0x22; 32]));
+    bytes.extend_from_slice(&cbor_unsigned(3600));
+    bytes.extend_from_slice(&cbor_bytes(&[0x23; 32]));
+    bytes.push(0x80);
+    bytes
+}
+
+/// Der unsignierte Erneuerungskern nach `validate_renewal_core`.
+fn renewal_core(type_string: &str) -> Vec<u8> {
+    let mut bytes = vec![0x88, 0x01];
+    bytes.extend_from_slice(&cbor_text(type_string));
+    bytes.extend_from_slice(&cbor_bytes(&CRYPTO_ORGANIZATION_ID));
+    bytes.extend_from_slice(&cbor_bytes(&CRYPTO_DEVICE_ID));
+    bytes.extend_from_slice(&cbor_bytes(&[0x31; 32]));
+    bytes.push(0xf6);
+    bytes.push(0x81);
+    bytes.extend_from_slice(&cbor_bytes(&[0x32; 32]));
+    bytes.push(0x80);
+    bytes
+}
+
+/// Dekodiert eine eingefrorene Hexkonstante dieser Datei.
+fn decode(text: &str) -> Vec<u8> {
+    hex::decode(text).expect("every frozen constant of this file is lowercase hex")
+}
+
+// ---------------------------------------------------------------------------
 // Fehler und Helfer
 // ---------------------------------------------------------------------------
 
@@ -914,6 +1744,75 @@ mod tests {
                 "{escaping} must be refused"
             );
         }
+    }
+
+    /// Die Arbeitsbaumwurzel, unabhaengig vom Arbeitsverzeichnis des Laufs.
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Schreibt die Vektorfamilie `crypto/suite-1` in den Arbeitsbaum.
+    ///
+    /// `#[ignore]`, weil dieser Test SCHREIBT. Er ist der dokumentierte
+    /// Erzeugungslauf und wird ausdruecklich angefordert:
+    /// `cargo test -p ea-testkit -- --ignored emit_crypto_suite_one_vectors`.
+    ///
+    /// EINMAL EINGEFRORENE BYTES SIND UNVERAENDERLICH. Ein Lauf, der andere
+    /// Bytes schreibt als die eingecheckten, ist kein Regenerierungslauf,
+    /// sondern ein Befund.
+    #[test]
+    #[ignore = "writes into the working tree; run deliberately to regenerate"]
+    fn emit_crypto_suite_one_vectors() {
+        let root = workspace_root().join(CRYPTO_SUITE_ONE_ROOT);
+        crypto_suite_one_manifest().emit(&root).unwrap();
+        assert!(verify_manifest_at(&root).unwrap().is_clean());
+    }
+
+    /// Das eingecheckte Manifest ist genau die Ausgabe des Erzeugers.
+    ///
+    /// Damit haengt die Familie nicht an einem Lauf, den niemand wiederholen
+    /// kann: wer den Erzeuger aendert, sieht es hier, und nicht erst, wenn ein
+    /// Vektor still von seiner Beschreibung abweicht.
+    #[test]
+    fn the_committed_crypto_suite_one_family_is_exactly_what_the_generator_emits() {
+        let root = workspace_root().join(CRYPTO_SUITE_ONE_ROOT);
+        let text = fs::read_to_string(root.join(MANIFEST_FILE_NAME)).unwrap_or_else(|error| {
+            panic!("failed to read the committed crypto manifest: {error}")
+        });
+        assert_eq!(
+            text,
+            crypto_suite_one_manifest().to_json().unwrap(),
+            "the committed manifest must be byte-identical to the generator output"
+        );
+        let report = verify_manifest_at(&root).unwrap();
+        assert!(report.is_clean(), "{:?}", report.mismatches);
+    }
+
+    /// Der Erzeuger liefert 66 verschiedene Eintraege, und jeder Dateipfad
+    /// liegt unter der Familienwurzel.
+    #[test]
+    fn the_crypto_generator_names_every_entry_and_file_exactly_once() {
+        let manifest = crypto_suite_one_manifest();
+        assert_eq!(manifest.entries.len(), 66);
+        let names = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), manifest.entries.len());
+        for entry in &manifest.entries {
+            assert_eq!(entry.file, format!("{}.bin", entry.name));
+            assert!(matches!(
+                entry.suite_id.as_str(),
+                CRYPTO_SUITE_ONE_SUITE_ID | CRYPTO_SUITE_ONE_GRANT_SUITE_ID
+            ));
+        }
+        // Die Emission ist deterministisch, sonst waere jeder Regenerierungslauf
+        // ein Diff.
+        assert_eq!(
+            manifest.to_json().unwrap(),
+            crypto_suite_one_manifest().to_json().unwrap()
+        );
     }
 
     #[test]
