@@ -1967,6 +1967,28 @@ pub fn other_recipient_private_key() -> HpkeRecipientPrivateKey {
         .expect("der zweite Fixture-Empfaengerschluessel muss ein X25519-Schluessel sein")
 }
 
+/// Die ROHEN 32 Bytes von [`complete_recipient_private_key`].
+///
+/// # Warum das Material selbst herausgeht
+///
+/// `decrypt` nimmt seinen Empfaengerschluessel als DATEI entgegen, und ein Test
+/// dieses Pfades muss diese Datei schreiben koennen.
+/// [`ea_crypto::HpkeRecipientPrivateKey`] gibt sein Material bewusst nicht mehr
+/// heraus — richtig so —, weshalb die Bytes hier aus derselben Konstante
+/// stammen, aus der auch der Schluessel gebaut wird. Ein zweites Literal
+/// anderswo im Workspace koennte auseinanderlaufen, ohne dass ein Test es
+/// saehe.
+#[must_use]
+pub const fn complete_recipient_secret_bytes() -> [u8; 32] {
+    COMPLETE_RECIPIENT_SECRET_V1
+}
+
+/// Die rohen 32 Bytes des ZWEITEN, falschen Schluessels.
+#[must_use]
+pub const fn other_recipient_secret_bytes() -> [u8; 32] {
+    OTHER_RECIPIENT_SECRET_V1
+}
+
 /// Der Abdruck des Schluessels aus [`complete_recipient_private_key`].
 #[must_use]
 pub fn complete_recipient_key_thumbprint() -> KeyThumbprint {

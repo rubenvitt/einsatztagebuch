@@ -173,6 +173,22 @@ pub const fn exit_code_for_error(error: &RecoveryError) -> ExitCode {
         // und der Lauf ist mit einem anderen `--output` unveraendert
         // wiederholbar. Die Begruendung steht an `RecoveryError::OutputExists`.
         RecoveryError::OutputExists => ExitCode::Usage,
+        // Ebenfalls eine Aussage ueber den AUFRUF und nicht ueber den Bestand:
+        // die benannte Datei traegt kein Schluesselmaterial dieser Form. Die
+        // Begruendung, warum das 2 und nicht 14 ist, steht an
+        // `RecoveryError::KeySource`.
+        RecoveryError::KeySource => ExitCode::Usage,
+        // „Schluessel fehlt": der vorgelegte Schluessel oeffnet diesen Bestand
+        // nicht. Der EINZIGE Abbruchgrund dieser Aufzaehlung, der aus einem
+        // vollstaendig gebildeten und makellosen Bericht entsteht — siehe die
+        // Notiz an `exit_code_for`.
+        RecoveryError::NoOwnGrant => ExitCode::Key,
+        // „Entschluesselung fehlgeschlagen", die zweite Haelfte derselben
+        // Zeile der Norm.
+        RecoveryError::Decryption => ExitCode::Key,
+        // „Nicht unterstuetzte Plattformfaehigkeit". Kein Dateisystemfehler:
+        // es ist nichts misslungen, es ist etwas nicht vorhanden.
+        RecoveryError::RestrictivePermissionsUnsupported => ExitCode::Unsupported,
         RecoveryError::Verify(error) => match error {
             VerifyError::Archive(error) => match error {
                 ArchiveError::Unavailable => ExitCode::Io,

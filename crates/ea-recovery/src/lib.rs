@@ -20,16 +20,25 @@
 //! Zielpruefung und Rechtevergabe an genau einer Stelle stehen und ohne
 //! Prozessstart pruefbar bleiben.
 
+mod decrypt;
 mod error;
 mod exit;
 mod report;
 mod source;
+mod target;
 mod verify;
 
+pub use decrypt::{
+    DecryptionV1, RECIPIENT_KEY_SIZE_V1, decrypt_directory, load_recipient_key,
+    recipient_key_thumbprint,
+};
 pub use error::RecoveryError;
 pub use exit::{ExitCode, exit_code_for, exit_code_for_error};
 #[cfg(unix)]
 pub use report::OUTPUT_FILE_MODE_V1;
 pub use report::{RuntimeMetadataV1, emit_report_document, write_report_document};
 pub use source::FsArchiveSource;
+#[cfg(unix)]
+pub use target::OUTPUT_DIRECTORY_MODE_V1;
+pub use target::{output_directory_is_free, prepare_output_directory};
 pub use verify::{load_trust_anchor, verify_directory};

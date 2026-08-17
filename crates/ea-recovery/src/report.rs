@@ -172,13 +172,17 @@ pub fn write_report_document(document: &str, output: &Path) -> Result<(), Recove
 
 /// Legt `output` NEU an und gibt ihm restriktive Rechte.
 ///
+/// Auch der Klartextschreiber aus [`crate::decrypt`] geht hier hindurch: die
+/// Zusicherung „neu angelegt, nie ueberschrieben, 0600" gilt fuer JEDE Datei,
+/// die dieses Werkzeug schreibt, und sie steht deshalb genau einmal da.
+///
 /// Die Rechte stehen schon im `open`-Aufruf und werden danach EXAKT gesetzt:
 /// `mode` unterliegt der `umask` und kann Bits nur wegnehmen, weshalb ein
 /// gesetztes `mode` allein zwar nie zu VIEL erlaubt, aber auch nicht garantiert,
 /// dass genau 0600 herauskommt. Das zweite Setzen geschieht auf dem offenen
 /// HANDLE und nicht auf dem Pfad: ein Pfad koennte zwischen beiden Schritten auf
 /// etwas anderes zeigen.
-fn create_new_file(output: &Path) -> Result<File, RecoveryError> {
+pub(crate) fn create_new_file(output: &Path) -> Result<File, RecoveryError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

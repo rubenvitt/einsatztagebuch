@@ -58,6 +58,54 @@ pub enum RecoveryError {
     /// Der Bestand ist dabei voellig unberuehrt — es wurde nichts gefunden,
     /// sondern nichts geschrieben.
     OutputExists,
+    /// Die Datei hinter `--key` traegt kein Schluesselmaterial dieser Form.
+    ///
+    /// Exitcode 2 und ausdruecklich NICHT 14: Code 14 heisst „Schluessel fehlt
+    /// oder Entschluesselung fehlgeschlagen" und ist eine Aussage ueber den
+    /// LAUF gegen einen Bestand. Hier ist noch gar kein Lauf zustande gekommen
+    /// — der Aufrufer hat eine Datei benannt, die keine 32 Rohbytes und keine
+    /// 64 Hexzeichen enthaelt, und derselbe Aufruf ist mit einer anderen Datei
+    /// unveraendert wiederholbar. Das ist dieselbe Aussage wie bei
+    /// [`Self::OutputExists`]: am Bestand liegt es nicht.
+    ///
+    /// Scharf getrennt von [`Self::Io`]: dort war die Datei nicht LESBAR, hier
+    /// war sie lesbar und traegt das Falsche.
+    KeySource,
+    /// Es gibt keinen Grant dieses Bestands auf den vorgelegten Schluessel.
+    ///
+    /// `ea-verify` meldet das AUSDRUECKLICH NICHT als Befund: ein fehlender
+    /// eigener Grant laesst den Eintrag `valid` und erzeugt keinen
+    /// `decryptionErrors`-Eintrag (`crates/ea-verify/src/recipient.rs:13-15`).
+    /// Fuer die Verifikation ist das richtig — fuer `decrypt` waere es fatal:
+    /// der Bericht ist makellos, `exit_code_for` saehe `Success`, und das
+    /// Werkzeug meldete Erfolg ueber ein LEERES Ziel. Genau diesen Fall
+    /// kuendigt `crate::exit_code_for` in seiner Notiz an: ein Kommando mit
+    /// eigenen Abbruchgruenden bildet sie in SEINEM Pfad.
+    ///
+    /// Exitcode 14, „Schluessel fehlt": der vorgelegte Schluessel oeffnet
+    /// diesen Bestand nicht.
+    NoOwnGrant,
+    /// Ein Grant liess sich nicht oeffnen, obwohl der Bericht makellos ist.
+    ///
+    /// FAIL-CLOSED UND IM REGELFALL UNERREICHBAR: derselbe Grant wurde im
+    /// Verifikationslauf bereits mit demselben Schluessel geoeffnet, sonst
+    /// stuende ein `decryptionErrors`-Eintrag im Bericht und der Lauf waere
+    /// vorher geendet. Der Fall bleibt trotzdem behandelt — eine
+    /// Entschluesselung, die nicht gelingt, darf nie als gelungen gelten.
+    ///
+    /// Deckt auch den gefallenen Waechter der Kontextrekonstruktion ab.
+    /// `crates/ea-verify/src/recipient.rs:202` trifft dieselbe Wahl und meldet
+    /// ihn als [`ea_verify::DecryptionErrorV1::CekUnwrapFailed`], also
+    /// ebenfalls auf Exitcode 14.
+    Decryption,
+    /// Diese Plattform kann die verlangten Rechte nicht setzen.
+    ///
+    /// `decrypt` schreibt KLARTEXT. Die Zusicherung, dass Zielverzeichnis und
+    /// Zieldatei allein ihrem Eigentuemer gehoeren, ist deshalb keine Zugabe,
+    /// sondern Bedingung des Kommandos. Wo sie sich nicht setzen laesst, wird
+    /// nicht ersatzweise ohne sie geschrieben, sondern gar nicht: Exitcode 21,
+    /// „nicht unterstuetzte Plattformfaehigkeit".
+    RestrictivePermissionsUnsupported,
 }
 
 impl RecoveryError {
@@ -70,6 +118,12 @@ impl RecoveryError {
             Self::TrustAnchor(error) => error.code(),
             Self::Verify(error) => error.code(),
             Self::OutputExists => "EA-RECOVERY-OUTPUT-EXISTS",
+            Self::KeySource => "EA-RECOVERY-KEY-SOURCE",
+            Self::NoOwnGrant => "EA-RECOVERY-NO-OWN-GRANT",
+            Self::Decryption => "EA-RECOVERY-DECRYPTION",
+            Self::RestrictivePermissionsUnsupported => {
+                "EA-RECOVERY-RESTRICTIVE-PERMISSIONS-UNSUPPORTED"
+            }
         }
     }
 }

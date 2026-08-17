@@ -52,12 +52,32 @@ pub fn verify_directory(
     recipient: Option<(KeyThumbprint, &HpkeRecipientPrivateKey)>,
 ) -> Result<VerificationReportV1, RecoveryError> {
     let source = FsArchiveSource::open(root)?;
+    verify_source(&source, anchor, now, recipient)
+}
+
+/// Verifiziert einen BEREITS EINGELESENEN Bestand.
+///
+/// # Warum es diesen zweiten Einstieg gibt
+///
+/// Nicht, um ein zweites Lesen zu sparen — sondern damit `decrypt` und
+/// `export` genau die Bytes weiterverarbeiten, ueber die geurteilt wurde.
+/// Laese ein schreibendes Kommando das Verzeichnis nach der Verifikation
+/// erneut, koennte sich zwischen Urteil und Verwendung jedes Byte geaendert
+/// haben, und „verify-before-use" hiesse nur noch „verify, und dann irgendwas".
+/// Der Puffer aus [`FsArchiveSource::open`] ist der Gegenstand beider
+/// Schritte.
+pub(crate) fn verify_source(
+    source: &FsArchiveSource,
+    anchor: &TrustAnchorV1,
+    now: UnixMillis,
+    recipient: Option<(KeyThumbprint, &HpkeRecipientPrivateKey)>,
+) -> Result<VerificationReportV1, RecoveryError> {
     let options = VerifyOptions::new(now);
     let options = match recipient {
         Some((key_thumbprint, private_key)) => options.with_recipient(key_thumbprint, private_key),
         None => options,
     };
-    Ok(verify_archive(&source, anchor, options)?)
+    Ok(verify_archive(source, anchor, options)?)
 }
 
 /// Liest den Trust Anchor aus einer Datei.
