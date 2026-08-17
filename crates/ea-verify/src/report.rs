@@ -575,7 +575,11 @@ pub struct VerificationReportV1 {
     /// daneben bereits in `gaps` und `quarantinedObjects` abgebildet.
     pub(crate) rollback: RollbackAssessment,
     report_hash: Hash32,
-    /// Lief die vollstaendige Pipeline? Wird erst von Task 17 gesetzt.
+    /// Lief die vollstaendige Pipeline?
+    ///
+    /// Gesetzt ausschliesslich am ENDE von [`crate::verify_archive`], nachdem
+    /// alle neun Gates und die Entkapselung dahinter gelaufen sind. Ein Lauf,
+    /// der an Gate `trust` fail-closed endet, laesst den Wert falsch.
     ///
     /// KEIN Berichtsfeld: das Schema ist `additionalProperties: false`. Der
     /// Wert wirkt allein ueber [`VerificationReportV1::is_fully_verified`].

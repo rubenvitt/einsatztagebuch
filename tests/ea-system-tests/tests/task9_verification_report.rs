@@ -245,9 +245,24 @@ fn a_trust_only_archive_report_validates_against_the_pinned_schema() {
         .expect("the canonical writer must emit");
     assert_eq!(json, shuffled);
 
+    // SEIT DIE PIPELINE VOLLSTAENDIG LAEUFT ist dieser Bestand vollstaendig
+    // verifiziert — und zwar LEER-WAHR: er traegt ausser Trust-Objekten nichts,
+    // also gibt es nichts, was unverifiziert bleiben koennte. Kein
+    // `formatError`, kein isoliertes Objekt, keine Luecke; `build_chain` bildet
+    // ueber null Knoten kein Intervall.
+    //
+    // Die Aussage ist damit „an diesem Bestand ist nichts zu beanstanden", nicht
+    // „hier wurde ein Eintrag geprueft". Wer letzteres wissen will, liest
+    // `objectResults` — und das Array ist hier leer.
     assert!(
-        !report.is_fully_verified(),
-        "solange die Pipeline nicht vollstaendig lief, ist nichts vollstaendig verifiziert"
+        report.is_fully_verified(),
+        "ein Bestand ohne jeden Befund ist vollstaendig verifiziert, sobald die Pipeline durchlief"
+    );
+    assert_eq!(
+        report.object_results().len(),
+        0,
+        "vollstaendig verifiziert heisst hier: es gab nichts zu beanstanden, nicht: es wurde ein \
+         Eintrag geprueft"
     );
 }
 

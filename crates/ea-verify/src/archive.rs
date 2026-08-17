@@ -1,10 +1,17 @@
 //! Der Einstiegspunkt der Verifikation: [`verify_archive`].
 //!
-//! DIESE FASSUNG fuehrt die Gates `format`, `trust`, `registry`,
-//! `manifest-signature`, `chain-position`, `grant-plan` und `receipt` aus. Die
-//! Gates `evidence` und `recipient-grant` folgen in den naechsten Tasks;
-//! solange bleibt `pipeline_completed` falsch, und der Bestand gilt
-//! ausdruecklich NICHT als vollstaendig verifiziert.
+//! DIESE FASSUNG fuehrt ALLE NEUN Gates aus `design.md` §14.1 und danach die
+//! Entkapselung, die kein Gate ist. Erst wenn die Strecke vollstaendig
+//! durchgelaufen ist, wird `pipeline_completed` gesetzt — ein Lauf, der an Gate
+//! `trust` fail-closed endet, erreicht diese Zeile nie und gilt ausdruecklich
+//! NICHT als vollstaendig verifiziert.
+//!
+//! DER ABBRUCH IST ARCHIVWEIT NUR EINER. `run_gates` bricht je Objekt beim
+//! ersten fallenden Gate ab; diese Pipeline tut das ausdruecklich nicht, denn
+//! ein Befund ueber EIN Objekt darf die Aussage ueber die uebrigen nicht
+//! kippen. Sie faehrt deshalb alle Stufen und traegt Befunde je Objekt ein —
+//! mit der einen Ausnahme Gate `trust`, dessen Fehlschlag den ganzen Bestand
+//! trifft.
 //!
 //! GATE `receipt` UMFASST QUITTUNG UND CHECKPOINT. `design.md` §14.1 Schritt 7
 //! (:1581) nennt „Server-Receipt und Checkpoints, sofern vorhanden"; Schritt 8
@@ -12,14 +19,16 @@
 //! nahe, weil beide Objektarten in `crates/ea-format/src/ecp.rs` wohnen —
 //! deshalb steht die Abgrenzung hier ausgeschrieben und nicht bloss im Kopf.
 
-use core::marker::PhantomData;
+use core::fmt;
 
 use ea_archive::{ArchiveInventory, ArchiveSource, QuarantineReason};
 use ea_chain::{
     ChainNode, CheckpointClaim, RollbackAssessment, RollbackFinding, VerifiedChain,
     assess_rollback, build_chain,
 };
-use ea_crypto::{VerificationContext, parse_cose_sign1, verify_cose_sign1};
+use ea_crypto::{
+    HpkeRecipientPrivateKey, VerificationContext, parse_cose_sign1, verify_cose_sign1,
+};
 use ea_format::{CertificateKindV1, EntryPackageV1, Parsed, ReceiptV1};
 use ea_trust::{
     PreexistingRegistryAuthority, RegistrySelectionOutcome, SelectedRegistryHead, TrustAnchorV1,
@@ -30,13 +39,17 @@ use ea_trust::{
 use ea_types::{CertificateHash, ChainSequence, KeyThumbprint, ObjectHash, UnixMillis};
 
 use crate::{
-    ChainGapV1, ChainHeadV1, EphemeralTrustStateStore, ManifestSignatureErrorV1, ObjectErrorV1,
-    ObjectResultKindV1, ObjectResultV1, ObjectTypeV1, QuarantinedObjectV1, ReceiptGateErrorV1,
-    ServerConfirmationV1, VerificationReportV1, VerifyError,
+    ChainGapV1, ChainHeadV1, Decapsulation, EphemeralTrustStateStore, Gate, GateObserver,
+    ManifestSignatureErrorV1, ObjectErrorV1, ObjectResultKindV1, ObjectResultV1, ObjectTypeV1,
+    QuarantinedObjectV1, ReceiptGateErrorV1, RecipientGrantErrorV1, ServerConfirmationV1,
+    SilentObserver, VerificationReportV1, VerifyError,
     entry::{
         claims_unverifiable_writer_transition, entry_chain_node, grant_plan_finding, orphan_grants,
         receipt_bindings_hold, receipt_for, standard_checkpoint_claim,
     },
+    evidence::run_evidence_gate,
+    gates::StageProtocol,
+    recipient::{open_entry, own_grant, record_decapsulation, verify_own_grant},
     state::verification_state_key,
 };
 
@@ -55,24 +68,58 @@ use crate::{
 /// entweder eine erfundene Zeit oder eine Uhrabfrage — und `SystemTime::now`
 /// gehoert nicht in diese Crate.
 ///
-/// Der Lebenszeitparameter traegt die spaeteren geliehenen Stellschrauben
-/// (Empfaengerschluessel, Zustandsspeicher, Schema-Registry); bis dahin haelt
-/// [`PhantomData`] ihn offen, damit die gepinnte Signatur `VerifyOptions<'_>`
-/// nicht spaeter bricht.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Der Lebenszeitparameter traegt die geliehenen Stellschrauben — seit diesem
+/// Stand den Empfaengerschluessel.
+#[derive(Clone, Copy)]
 pub struct VerifyOptions<'a> {
     os_wall_clock: UnixMillis,
-    borrowed: PhantomData<&'a ()>,
+    recipient: Option<RecipientKeyV1<'a>>,
+    evidence_requirement: EvidenceRequirementV1,
 }
 
-impl VerifyOptions<'_> {
+impl<'a> VerifyOptions<'a> {
     /// Ein Lauf gegen die uebergebene Betriebssystemuhr.
+    ///
+    /// OHNE Empfaengerschluessel und OHNE Evidence-Forderung: beides ist eine
+    /// Zusatzaussage des Aufrufers, und ein Vorgabewert waere hier eine
+    /// Erfindung. Ohne Schluessel wird nichts entschluesselt — was ausdruecklich
+    /// KEIN Mangel ist.
     #[must_use]
     pub const fn new(os_wall_clock: UnixMillis) -> Self {
         Self {
             os_wall_clock,
-            borrowed: PhantomData,
+            recipient: None,
+            evidence_requirement: EvidenceRequirementV1::NotRequired,
         }
+    }
+
+    /// Derselbe Lauf mit dem eigenen Empfaengerschluessel.
+    ///
+    /// ZWEI TEILE, und das ist keine Bequemlichkeit: `key_thumbprint` benennt,
+    /// WER der Aufrufer laut Registrierung ist — daran erkennt Gate
+    /// `recipient-grant` den eigenen Grant —, `private_key` ist das Material,
+    /// mit dem die Entkapselung dahinter tatsaechlich rechnet. Beide koennen
+    /// auseinanderfallen (ein falsch verdrahteter Schluesselspeicher), und
+    /// genau dieser Fall MUSS als Entschluesselungsfehler sichtbar werden
+    /// statt als fehlender Grant.
+    #[must_use]
+    pub const fn with_recipient(
+        mut self,
+        key_thumbprint: KeyThumbprint,
+        private_key: &'a HpkeRecipientPrivateKey,
+    ) -> Self {
+        self.recipient = Some(RecipientKeyV1 {
+            key_thumbprint,
+            private_key,
+        });
+        self
+    }
+
+    /// Derselbe Lauf mit einer Evidence-Forderung.
+    #[must_use]
+    pub const fn with_evidence_requirement(mut self, requirement: EvidenceRequirementV1) -> Self {
+        self.evidence_requirement = requirement;
+        self
     }
 
     /// Die uebergebene Betriebssystemuhr. Roher Vergleichswert, kein Nachweis.
@@ -80,6 +127,91 @@ impl VerifyOptions<'_> {
     pub const fn os_wall_clock(&self) -> UnixMillis {
         self.os_wall_clock
     }
+
+    /// Der Zeitwert, gegen den Fristen dieses Laufs gemessen werden.
+    ///
+    /// GLEICH der uebergebenen Uhr, und das ist der einzige erreichbare Wert:
+    /// `ea_trust::VerifiedSignedTime` gibt keinen Rohwert heraus
+    /// (`crates/ea-trust/src/time.rs:19-32`), und `select_registry_head` misst
+    /// seinerseits genau diese Uhr gegen `not-before`/`not-after` des Kopfes.
+    /// Ein Kopf, der ueberhaupt gewaehlt wurde, hat diese Uhr also bereits
+    /// passieren lassen — die Frist eines Grants haengt damit an derselben
+    /// Groesse wie seine Registrierungsautoritaet.
+    #[must_use]
+    pub const fn effective_now(&self) -> UnixMillis {
+        self.os_wall_clock
+    }
+
+    /// Der eigene Empfaengerschluessel, sofern einer vorliegt.
+    #[must_use]
+    pub const fn recipient(&self) -> Option<RecipientKeyV1<'a>> {
+        self.recipient
+    }
+
+    /// Ob dieser Lauf Evidence fordert.
+    #[must_use]
+    pub const fn evidence_requirement(&self) -> EvidenceRequirementV1 {
+        self.evidence_requirement
+    }
+}
+
+impl fmt::Debug for VerifyOptions<'_> {
+    /// Gibt NIE Schluesselmaterial aus, nur ob eines vorliegt.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifyOptions")
+            .field("os_wall_clock", &self.os_wall_clock.get())
+            .field("recipient", &self.recipient)
+            .field("evidence_requirement", &self.evidence_requirement)
+            .finish()
+    }
+}
+
+/// Der eigene Empfaenger: seine Kennung und sein Schluessel.
+#[derive(Clone, Copy)]
+pub struct RecipientKeyV1<'a> {
+    key_thumbprint: KeyThumbprint,
+    private_key: &'a HpkeRecipientPrivateKey,
+}
+
+impl<'a> RecipientKeyV1<'a> {
+    /// Der Abdruck, unter dem ein Grant diesen Empfaenger benennt.
+    #[must_use]
+    pub const fn key_thumbprint(&self) -> KeyThumbprint {
+        self.key_thumbprint
+    }
+
+    /// Das Schluesselmaterial der Entkapselung.
+    #[must_use]
+    pub const fn private_key(&self) -> &'a HpkeRecipientPrivateKey {
+        self.private_key
+    }
+}
+
+impl fmt::Debug for RecipientKeyV1<'_> {
+    /// Der Abdruck ist oeffentlich, der Schluessel nie.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RecipientKeyV1 { key_thumbprint: ")?;
+        for byte in self.key_thumbprint.as_bytes() {
+            write!(formatter, "{byte:02x}")?;
+        }
+        formatter.write_str(", private_key: <secret> }")
+    }
+}
+
+/// Ob dieser Lauf Evidence fordert.
+///
+/// `NotRequired` ist der Standardprofilfall: ein Receipt ohne
+/// `evidence-due-at` erzeugt ohne separate Richtlinienaenderung gar keine
+/// Evidence-Grade-Konformitaet (`design.md`:1679), und wo nichts gefordert
+/// ist, ist auch nichts ueberfaellig.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EvidenceRequirementV1 {
+    /// Fehlende Evidence ist kein Mangel.
+    #[default]
+    NotRequired,
+    /// Zu jeder Frist muss qualifizierende Evidence vorliegen.
+    Required,
 }
 
 /// Verifiziert einen Bestand und liefert den Bericht darueber.
@@ -113,9 +245,31 @@ pub fn verify_archive(
     anchor: &TrustAnchorV1,
     options: VerifyOptions<'_>,
 ) -> Result<VerificationReportV1, VerifyError> {
+    verify_archive_observed(source, anchor, options, &mut SilentObserver)
+}
+
+/// Wie [`verify_archive`], meldet aber jede betretene Gate-Stufe an `observer`.
+///
+/// Das Protokoll ist stets ein PRAEFIX von [`crate::GATE_ORDER_V1`], gefolgt
+/// von hoechstens einem [`crate::DECAPSULATION_EVENT_V1`]. Gemeldet wird der
+/// Eintritt in eine STUFE der archivweiten Pipeline und nicht der Eintritt je
+/// Objekt — die Begruendung steht an [`crate::gates::StageProtocol`].
+///
+/// # Errors
+///
+/// Wie [`verify_archive`].
+pub fn verify_archive_observed(
+    source: &dyn ArchiveSource,
+    anchor: &TrustAnchorV1,
+    options: VerifyOptions<'_>,
+    observer: &mut dyn GateObserver,
+) -> Result<VerificationReportV1, VerifyError> {
+    let mut protocol = StageProtocol::new(observer);
+
     // Gate `format`: das Inventar klassifiziert am 9-Byte-Exact-Object-Praefix
     // und parst jede Bytesequenz mit Praefix. Ein Fehlschlag erzeugt PAARWEISE
     // einen `formatError` und einen Quarantaeneeintrag `malformed`.
+    protocol.enter(Gate::Format);
     let inventory = ArchiveInventory::build(source)?;
 
     let mut report = VerificationReportV1::empty(ChainHeadV1::sentinel(anchor.chain_id()));
@@ -142,6 +296,7 @@ pub fn verify_archive(
     // Gate `trust`: einmal fuer den ganzen Bestand. Traegt es nicht, endet der
     // Lauf hier — ohne Vertrauenskette laesst sich ueber kein Objekt etwas
     // sagen.
+    protocol.enter(Gate::Trust);
     if verified_trust(&mut store, key, anchor, &inventory).is_none() {
         return report.seal();
     }
@@ -170,6 +325,11 @@ pub fn verify_archive(
     // wenn alle ihre Knoten vorliegen.
     let mut nodes: Vec<ChainNode> = Vec::new();
     let mut placed: Vec<&Parsed<EntryPackageV1>> = Vec::new();
+    // BEIDE Stufen laufen in DIESER Schleife, je Eintrag erst der Kopf, dann
+    // die Signatur. Das Protokoll meldet den Eintritt in die Stufe, nicht den
+    // Eintritt je Objekt.
+    protocol.enter(Gate::Registry);
+    protocol.enter(Gate::ManifestSignature);
     for entry in ordered {
         let object_hash = entry.object_hash();
         // Ein bereits isoliertes Objekt geht nicht weiter durch die Gates: es
@@ -249,6 +409,7 @@ pub fn verify_archive(
     // vollstaendige Pruefkette BLEIBT EINE LUECKE — das fehlende `.eip`
     // erscheint als `gaps`-Eintrag, `authorizedDestructions` bleibt leer, und
     // `destroyedEntryCount` zaehlt ihn weiterhin als blossen Zaehler.
+    protocol.enter(Gate::ChainPosition);
     let chain = place_in_chain(&mut report, anchor, &nodes);
 
     // Ein Grant, dessen `entryHash` auf kein Objekt des Bestands zeigt, gehoert
@@ -262,6 +423,7 @@ pub fn verify_archive(
     // DASSELBE OBJEKT und laesst die uebrigen unberuehrt (design.md:1585/1593)
     // — und ein isoliertes Objekt bekaeme sonst einen zweiten Befund in einem
     // zweiten Array.
+    protocol.enter(Gate::GrantPlan);
     for entry in &placed {
         let object_hash = entry.object_hash();
         if report.quarantined_objects.contains_key(&object_hash) {
@@ -278,6 +440,7 @@ pub fn verify_archive(
     // Quittungen, weil ein Kopfwiderspruch ein Objekt ISOLIERT — und ein
     // isoliertes Objekt darf danach kein `objectResults`-Ergebnis mehr
     // bekommen. Ein Objekt erscheint in genau einem Feld.
+    protocol.enter(Gate::Receipt);
     if let Some(chain) = &chain {
         assess_checkpoints(
             &mut report,
@@ -292,7 +455,7 @@ pub fn verify_archive(
 
     // Gate `receipt`, ZWEITER TEIL: die Quittungen, und mit ihnen die
     // Objektergebnisse.
-    confirm_entries(
+    let confirmed = confirm_entries(
         &mut report,
         &mut store,
         key,
@@ -302,7 +465,113 @@ pub fn verify_archive(
         &placed,
     );
 
+    // Gate `evidence`: Evidence-Objekte und Zeitstempel, sofern gefordert. Die
+    // Frist stammt AUSSCHLIESSLICH aus bestaetigten Quittungen — deshalb
+    // bekommt dieses Gate `confirmed` und nicht das rohe Inventar der `.esr`.
+    protocol.enter(Gate::Evidence);
+    run_evidence_gate(&mut report, anchor, &inventory, options, &confirmed);
+
+    // Gate `recipient-grant` und, DAHINTER UND ALS KEIN GATE, die Entkapselung.
+    protocol.enter(Gate::RecipientGrant);
+    let decapsulation = claim_own_grants(
+        &mut report,
+        &mut store,
+        key,
+        anchor,
+        &inventory,
+        options,
+        &placed,
+    );
+    if decapsulation == Decapsulation::Performed {
+        protocol.decapsulated();
+    }
+
+    // ERST HIER, und nach nichts anderem: die Pipeline ist vollstaendig
+    // durchgelaufen. Ein frueherer Ausstieg — Gate `trust` traegt nicht —
+    // erreicht diese Zeile nie, und der Bestand gilt dann ausdruecklich NICHT
+    // als vollstaendig verifiziert.
+    report.pipeline_completed = true;
     report.seal()
+}
+
+/// Gate `recipient-grant` ueber alle Eintraege mit Ergebnis, und die
+/// Entkapselung dahinter.
+///
+/// NUR EINTRAEGE MIT ERGEBNIS. Ein isolierter Eintrag oder einer mit
+/// Signaturbefund hat die neun Gates nicht durchlaufen; ueber seinen eigenen
+/// Grant ist dann nichts zu sagen und an ihm nichts zu oeffnen.
+///
+/// OHNE EMPFAENGERSCHLUESSEL passiert hier gar nichts: „eigener Grant" setzt
+/// voraus, dass es ein Eigenes gibt. Das Gate laeuft trotzdem — es hat nur
+/// nichts zu pruefen —, und es wird nichts entkapselt und nichts abgewertet.
+fn claim_own_grants(
+    report: &mut VerificationReportV1,
+    store: &mut EphemeralTrustStateStore,
+    key: TrustStateKey,
+    anchor: &TrustAnchorV1,
+    inventory: &ArchiveInventory,
+    options: VerifyOptions<'_>,
+    placed: &[&Parsed<EntryPackageV1>],
+) -> Decapsulation {
+    let Some(recipient) = options.recipient() else {
+        return Decapsulation::Skipped;
+    };
+    let mut decapsulation = Decapsulation::Skipped;
+    for entry in placed {
+        if !report.object_results.contains_key(&entry.object_hash()) {
+            continue;
+        }
+        // FEHLENDER GRANT ist kein Befund: der Eintrag bleibt gueltig und
+        // sichtbar, er wird nur nicht geoeffnet (`design.md`:1595).
+        let Some(grant) = own_grant(inventory, entry, recipient.key_thumbprint()) else {
+            continue;
+        };
+        // EIN ISOLIERTES OBJEKT WIRD NICHT BENUTZT, und es bekommt auch keinen
+        // zweiten Befund. Eine doppelt abgelegte `.eag` bleibt im Inventar
+        // ihrer Familie (`crates/ea-archive/src/inventory.rs:283-289`) und
+        // stuende sonst zugleich in `quarantinedObjects` und in einem
+        // Fehlerarray. Fuer diesen Lauf ist ein isolierter Grant deshalb so
+        // gut wie keiner — fail-closed und ohne Doppeleintrag.
+        if report
+            .quarantined_objects
+            .contains_key(&grant.object_hash())
+        {
+            continue;
+        }
+        let selected = select_pinned_head(
+            store,
+            key,
+            anchor,
+            inventory,
+            options.os_wall_clock(),
+            entry.value().manifest().fields().chain_sequence,
+            |_| None,
+        );
+        let verified = selected
+            .ok_or(RecipientGrantErrorV1::HeadUnavailable)
+            .and_then(|selected| verify_own_grant(grant, entry, &selected));
+        match verified {
+            Err(error) => {
+                report
+                    .signature_errors
+                    .insert(ObjectErrorV1::new(grant.object_hash(), error.code()));
+                continue;
+            }
+            Ok(thumbprint) => {
+                // Nachweis des Geprueften: der Abdruck des Ausstellers, der
+                // die Grantsignatur GETRAGEN hat.
+                report.public_key_thumbprints.insert(thumbprint);
+            }
+        }
+
+        // HPKE-OPEN, KEIN GATE. Erst hier, hinter dem neunten.
+        if record_decapsulation(report, grant, open_entry(grant, entry, recipient))
+            == Decapsulation::Performed
+        {
+            decapsulation = Decapsulation::Performed;
+        }
+    }
+    decapsulation
 }
 
 /// Gate `receipt` ueber die Eintraege: Quittung suchen, pruefen, Ergebnis
@@ -321,15 +590,20 @@ pub fn verify_archive(
 /// [`VerificationReportV1::is_fully_verified`] sinkt nicht. Eine Quittung, die
 /// NICHT verifiziert, ist dagegen ein `signatureErrors`-Eintrag — ueber die
 /// QUITTUNG, nicht ueber den Eintrag.
-fn confirm_entries(
+///
+/// HERAUSGEGEBEN werden die Paare aus Eintrag und BESTAETIGTER Quittung: Gate
+/// `evidence` braucht sie, weil `evidence-due-at` eine Sachaussage des Servers
+/// ist und aus unauthentischen Bytes keine Sachaussagen stammen duerfen.
+fn confirm_entries<'a>(
     report: &mut VerificationReportV1,
     store: &mut EphemeralTrustStateStore,
     key: TrustStateKey,
     anchor: &TrustAnchorV1,
-    inventory: &ArchiveInventory,
+    inventory: &'a ArchiveInventory,
     os_wall_clock: UnixMillis,
-    placed: &[&Parsed<EntryPackageV1>],
-) {
+    placed: &[&'a Parsed<EntryPackageV1>],
+) -> Vec<(&'a Parsed<EntryPackageV1>, &'a Parsed<ReceiptV1>)> {
+    let mut confirmed = Vec::new();
     for entry in placed {
         let object_hash = entry.object_hash();
         if report.quarantined_objects.contains_key(&object_hash)
@@ -349,6 +623,7 @@ fn confirm_entries(
                     // Serversignatur GETRAGEN hat.
                     report.public_key_thumbprints.insert(thumbprint);
                     confirmation = ServerConfirmationV1::ServerConfirmed;
+                    confirmed.push((*entry, receipt));
                 }
                 Err(error) => {
                     report
@@ -368,6 +643,7 @@ fn confirm_entries(
             ),
         );
     }
+    confirmed
 }
 
 /// Prueft GENAU EINE Quittung gegen GENAU EINEN Eintrag.

@@ -130,9 +130,12 @@ pub trait GateObserver {
 /// Die Pruefarbeit eines Gates, aufgetrennt vom Durchlauf.
 ///
 /// Der Durchlauf (Reihenfolge, Abbruch, Protokoll) gehoert [`run_gates`], die
-/// Sacharbeit dem Implementierer. Die Gates 4 bis 9 entstehen inhaltlich in
-/// den Tasks 13 bis 17 und fuellen `run_gate`; die Reihenfolge bleibt davon
-/// unberuehrt.
+/// Sacharbeit dem Implementierer.
+///
+/// DIESE FORM IST DIE OBJEKTWEISE. Die archivweite Pipeline in
+/// `crate::archive` benutzt sie nicht: sie faehrt dieselbe Reihenfolge als
+/// STUFEN ueber einen ganzen Bestand und meldet ueber [`StageProtocol`], weil
+/// ein Befund ueber ein Objekt dort die Strecke gerade nicht abbrechen darf.
 pub trait GateRunner {
     /// Fehler, mit dem ein Gate abbricht.
     type Error;
@@ -180,6 +183,22 @@ impl GateObserver for RecordingObserver {
     }
 }
 
+/// Ein Beobachter, der nichts tut.
+///
+/// Der Vorgabebeobachter von [`crate::verify_archive`]: wer kein Protokoll
+/// braucht, bezahlt auch keines. Damit bleibt die gepinnte Signatur
+/// `verify_archive(source, anchor, options)` unveraendert, und
+/// [`crate::verify_archive_observed`] ist der einzige Ort, an dem ein
+/// Protokoll entsteht.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SilentObserver;
+
+impl GateObserver for SilentObserver {
+    fn on_gate(&mut self, _gate: Gate) {}
+
+    fn on_decapsulation(&mut self) {}
+}
+
 /// Erzwingt in Debug-Builds, dass die Gates dicht und aufsteigend laufen.
 ///
 /// Der Durchlauf ist strukturell durch [`Gate::ALL`] festgelegt; der
@@ -212,6 +231,48 @@ impl GateSequencer {
             Some(GATE_ORDER_V1.len() - 1),
             "vor der Entkapselung muessen alle neun Gates gelaufen sein"
         );
+    }
+}
+
+/// Das Protokoll der ARCHIVWEITEN Pipeline.
+///
+/// [`run_gates`] faehrt einen Verifizierer ueber GENAU EIN Objekt; die
+/// Pipeline in `crate::archive` faehrt dagegen einen ganzen Bestand und
+/// gruppiert die Gates zu STUFEN: Gate `registry` und Gate
+/// `manifest-signature` laufen beide in derselben Eintragsschleife, je Eintrag
+/// erst der Kopf, dann die Signatur. Ein Protokoll je Objekt gaebe es fuer
+/// einen Bestand mit hundert Eintraegen hundertmal; gemeldet wird deshalb, dass
+/// die Pipeline die STUFE betreten hat, und zwar bevor deren Pruefungen laufen.
+///
+/// Die Reihenfolge bleibt dabei genau [`GATE_ORDER_V1`] — der Sequencer haelt
+/// das in Debug-Builds fest —, und das Protokoll ist damit stets ein PRAEFIX
+/// dieser Reihenfolge, gefolgt von hoechstens einem
+/// [`DECAPSULATION_EVENT_V1`].
+pub(crate) struct StageProtocol<'a> {
+    observer: &'a mut dyn GateObserver,
+    sequencer: GateSequencer,
+}
+
+impl<'a> StageProtocol<'a> {
+    pub(crate) const fn new(observer: &'a mut dyn GateObserver) -> Self {
+        Self {
+            observer,
+            sequencer: GateSequencer::new(),
+        }
+    }
+
+    /// Die Pipeline betritt die Stufe `gate`.
+    pub(crate) fn enter(&mut self, gate: Gate) {
+        self.sequencer.enter(gate);
+        self.observer.on_gate(gate);
+    }
+
+    /// Es wurde tatsaechlich entkapselt.
+    ///
+    /// Nur nach allen neun Stufen; ein uebersprungener Schritt meldet nichts.
+    pub(crate) fn decapsulated(&mut self) {
+        self.sequencer.assert_complete();
+        self.observer.on_decapsulation();
     }
 }
 

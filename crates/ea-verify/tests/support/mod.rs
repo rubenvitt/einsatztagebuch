@@ -21,7 +21,7 @@ pub mod archive_support;
 
 use ea_crypto::{
     CanonicalPublicCoseKey, CoseSigner, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_WRAPPED_CEK_SIZE,
-    SecretBytes, object_hash,
+    HpkeRecipientPrivateKey, HpkeRecipientPublicKey, SecretBytes, object_hash,
 };
 use ea_format::{
     CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1,
@@ -138,36 +138,46 @@ pub fn writer_device_signer() -> CoseSigner {
     CoseSigner::from_secret(SecretBytes::new(WRITER_DEVICE_SECRET_V1))
 }
 
-/// Die Luecke, die JEDES Fixture dieses Moduls traegt: der Genesis-Eintrag.
+/// Die Luecke, die JEDES Fixture dieses Moduls traegt AUSSER dem lueckenfreien:
+/// der Genesis-Eintrag.
 ///
 /// GEMESSEN, nicht behauptet. `ea_chain::build_chain` zaehlt Sequenzen ab null;
 /// ein Bestand, dessen niedrigster Knoten auf Sequenz eins liegt, traegt
 /// deshalb die Luecke `0..=0` (`crates/ea-chain/src/chain.rs:769-792`, dort
-/// ausdruecklich gepinnt: „das Fehlen des Genesis-Knotens ist ein BEFUND").
+/// ausdruecklich gepinnt: "das Fehlen des Genesis-Knotens ist ein BEFUND").
 ///
-/// Ein Eintrag auf Sequenz NULL ist mit `trust_support::RegistryLineBuilder`
-/// nicht herstellbar. Vier Linienformen wurden dafuer gemessen, jede mit einem
-/// `.eip` auf Sequenz null:
+/// Ein Eintrag auf Sequenz NULL braucht einen Kopf, der die Sequenz null deckt
+/// UND unter dem das Schreiberzertifikat schon aktiv ist. Fuenf Linienformen
+/// wurden dafuer gemessen, jede mit einem `.eip` auf Sequenz null:
 ///
-/// | Linie                                        | Ergebnis                    |
-/// |----------------------------------------------|-----------------------------|
-/// | nur `Device(Writer)`, Lease `0..=100`        | Gate `registry` faellt ganz |
-/// | `Device` `0..=0`, dann `Policy` `1..=100`    | Gate `registry` faellt ganz |
-/// | `Policy` `0..=0`, dann `Device` `1..=100`    | `unattributable`            |
-/// | `Policy` `0..=100`, dann `Device` `0..=100`  | `unattributable`            |
+/// | Linie                                              | Ergebnis                    |
+/// |----------------------------------------------------|-----------------------------|
+/// | nur `Device(Writer)`, Lease `0..=100`              | Gate `registry` faellt ganz |
+/// | `Device` `0..=0`, dann `Policy` `1..=100`          | Gate `registry` faellt ganz |
+/// | `Policy` `0..=0`, dann `Device` `1..=100`          | `unattributable`            |
+/// | `Policy` `0..=100`, dann `Device` `0..=100`        | `unattributable`            |
+/// | `Policy` `0..=0` VERALTET, dann `Device` `0..=100` | lueckenfrei, zuordenbar     |
 ///
-/// Der Grund ist strukturell: `verify_registry_candidate` verlangt eine
-/// wirksame Policy, ein Registrierungskopf traegt genau EINEN Uebergang, und
-/// die Leases muessen aufsteigen. Der erste Kopf muss deshalb der Policy-Kopf
-/// sein, und dessen Kandidatenstand kennt das Schreiberzertifikat des zweiten
-/// Kopfes noch nicht — auch dann nicht, wenn das Zertifikat selbst ab Sequenz
-/// null wirksam ist. Die Luecke ist damit die WAHRE Aussage ueber diese
-/// Bestaende: sie tragen keinen verifizierten Genesis-Eintrag. Genau deshalb
-/// setzt der Bericht dort auch nie `anchor.genesis_entry_hash()` ein
-/// (`crates/ea-verify/src/report.rs:159-170`).
+/// Die ersten vier scheitern strukturell: `verify_registry_candidate` verlangt
+/// eine wirksame Policy, ein Registrierungskopf traegt genau EINEN Uebergang,
+/// der erste Kopf muss deshalb der Policy-Kopf sein — und dessen
+/// Kandidatenstand kennt das Schreiberzertifikat des zweiten Kopfes noch nicht,
+/// auch dann nicht, wenn das Zertifikat selbst ab Sequenz null wirksam ist.
+/// Deckt der Policy-Kopf die Sequenz null, wird GENAU ER gewaehlt, und unter
+/// ihm ist der Schreiber unbekannt.
 ///
-/// Wer diese Luecke „wegrepariert", macht die Fixtures unwahr. Tests dieses
-/// Moduls rechnen sie deshalb ausdruecklich mit, statt sie zu verstecken.
+/// Die fuenfte Form loest das: ein Kopf, der zur Uhr des Laufs VERALTET ist,
+/// wird nicht gewaehlt, sondern nachgezogen
+/// (`crates/ea-trust/src/registry.rs:594` und `:640-647` — `stale` fuehrt zu
+/// `Advanced`). Der Schreiberkopf deckt die Sequenz null dann selbst. Genau so
+/// ist [`complete_valid_archive`] gebaut, und genau daran haengt, dass ein
+/// Bestand ueberhaupt `is_fully_verified()` erreichen kann.
+///
+/// FUER DIE UEBRIGEN FIXTURES BLEIBT DIE LUECKE WAHR: sie tragen keinen
+/// verifizierten Genesis-Eintrag. Genau deshalb setzt der Bericht dort auch nie
+/// `anchor.genesis_entry_hash()` ein
+/// (`crates/ea-verify/src/report.rs:159-170`). Wer sie "wegrepariert", macht
+/// diese Fixtures unwahr; ihre Tests rechnen sie deshalb ausdruecklich mit.
 pub const GENESIS_GAP_SEQUENCE_V1: u64 = 0;
 
 /// Der Empfaenger des Recovery-Grants jedes Fixture-Eintrags.
@@ -1312,6 +1322,14 @@ pub struct ReceiptArchiveSpec {
     pub checkpoint: CheckpointSpec,
     /// Liegt zusaetzlich ein `.eds` auf [`DESTROYED_STUB_SEQUENCE_V1`]?
     pub destroyed_stub: bool,
+    /// Welches `evidence-due-at` tragen die Quittungen?
+    ///
+    /// `None` ist das Standardprofil (`design.md`:1679): ohne Frist entsteht
+    /// keine Evidence-Grade-Konformitaet und Gate `evidence` hat nichts zu
+    /// fordern. `Some` macht die Quittung zum FRISTANKER — und nur eine
+    /// Quittung, die Gate `receipt` bestanden hat, darf diese Frist ueberhaupt
+    /// behaupten.
+    pub evidence_due_at: Option<i64>,
 }
 
 impl ReceiptArchiveSpec {
@@ -1322,7 +1340,15 @@ impl ReceiptArchiveSpec {
             receipts: false,
             checkpoint: CheckpointSpec::None,
             destroyed_stub: false,
+            evidence_due_at: None,
         }
+    }
+
+    /// Derselbe Bestand, dessen Quittungen `evidence-due-at` tragen.
+    #[must_use]
+    pub const fn with_evidence_due_at(mut self, due_at: i64) -> Self {
+        self.evidence_due_at = Some(due_at);
+        self
     }
 
     /// Derselbe Bestand MIT Quittungen.
@@ -1498,6 +1524,7 @@ pub fn receipt_archive(spec: ReceiptArchiveSpec) -> ReceiptArchive {
                 built.entry.entry_hash(),
                 entry_object_hashes[index],
                 previous,
+                spec.evidence_due_at,
             );
             receipt_object_hashes.push(object_hash(&bytes));
             fixture.push_exact_bytes(
@@ -1600,6 +1627,7 @@ fn receipt_bytes(
     entry_hash: EntryHash,
     entry_object_hash: ObjectHash,
     previous_entry_hash: EntryHash,
+    evidence_due_at: Option<i64>,
 ) -> Vec<u8> {
     let core = ReceiptCoreV1::new(ReceiptCoreFieldsV1 {
         organization_id: trust_support::organization(),
@@ -1614,7 +1642,7 @@ fn receipt_bytes(
         initial_grant_plan_hash: recovery_grant_plan_hash(),
         initial_grant_object_hashes: vec![fixture_grant_object_hash()],
         accepted_at_server: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
-        evidence_due_at: None,
+        evidence_due_at: evidence_due_at.map(UnixMillis::new),
         server_key_thumbprint: writer_device_key_thumbprint(),
         server_certificate_hash: line.server_certificate_hash,
     })
@@ -1711,4 +1739,399 @@ fn push_destroyed_stub(fixture: &mut ArchiveFixture, built: &BuiltEntry) -> Obje
         bytes,
     );
     hash
+}
+
+// ---------------------------------------------------------------------------
+// Der lueckenfreie Bestand fuer die Gates `evidence`, `recipient-grant` und
+// die Entkapselung dahinter.
+// ---------------------------------------------------------------------------
+
+/// Das `not-after` des Policy-Kopfes der lueckenfreien Linie.
+///
+/// KLEINER ALS [`FIXTURE_OS_WALL_CLOCK_V1`], und genau darin liegt der Trick.
+/// `select_registry_head` liefert fuer einen Kopf, der zur Uhr des Laufs
+/// VERALTET ist, `Advanced` statt `Selected`
+/// (`crates/ea-trust/src/registry.rs:594` und `:640-647`). Der Policy-Kopf
+/// tritt damit zur Seite, und der Schreiberkopf deckt die Sequenz NULL — was
+/// der Genesis-Eintrag braucht, ohne den kein Bestand je lueckenfrei ist
+/// (`crates/ea-chain/src/chain.rs:769-792` zaehlt Sequenzen ab null).
+///
+/// Das ist keine Umgehung, sondern der Regelfall des Aufholens: ein
+/// abgeloester Kopf ist nicht mehr die Autoritaet, und die Linie wird
+/// vorwaerts nachgezogen. Gemessen ist beides — mit `not-after` oberhalb der
+/// Uhr wird derselbe Eintrag `unattributable`, siehe die Tabelle an
+/// [`GENESIS_GAP_SEQUENCE_V1`].
+pub const COMPLETE_POLICY_NOT_AFTER_V1: i64 = 500;
+
+/// Die Lease des Schreiberkopfes der lueckenfreien Linie.
+pub const COMPLETE_WRITER_LEASE_FROM_V1: u64 = 0;
+/// Letzte Sequenz dieser Lease.
+pub const COMPLETE_WRITER_LEASE_THROUGH_V1: u64 = 100;
+/// Die Sequenz des Genesis-Eintrags des lueckenfreien Bestands.
+pub const COMPLETE_GENESIS_SEQUENCE_V1: u64 = 0;
+
+/// Der private X25519-Schluessel des Empfaengers, den die Fixtures BESITZEN.
+///
+/// Echtes Schluesselmaterial und kein Fuellwert: ohne den passenden privaten
+/// Schluessel gibt es keine Entkapselung, und ohne Entkapselung liesse sich
+/// `hpke-open` nur behaupten statt messen.
+const COMPLETE_RECIPIENT_SECRET_V1: [u8; 32] = [
+    0x4c, 0x2b, 0x1f, 0x90, 0x77, 0xd3, 0x0a, 0x65, 0xb8, 0x11, 0xe4, 0x39, 0x5d, 0xa7, 0xc0, 0x62,
+    0x8e, 0x14, 0x73, 0xbb, 0x2f, 0x96, 0x51, 0xcd, 0x08, 0xaf, 0x36, 0x7a, 0xd2, 0x45, 0x19, 0x83,
+];
+
+/// Ein ZWEITER privater Schluessel: ein anderer Empfaenger, ein falscher
+/// Schluessel.
+const OTHER_RECIPIENT_SECRET_V1: [u8; 32] = [
+    0x91, 0x7d, 0x35, 0xe2, 0x4a, 0x08, 0xc6, 0x13, 0x2f, 0xba, 0x59, 0x87, 0x60, 0xd1, 0x3c, 0xe8,
+    0x05, 0x72, 0xab, 0x46, 0x1e, 0xf3, 0x88, 0x2a, 0x64, 0x9b, 0xd7, 0x50, 0x11, 0xcc, 0x27, 0x6f,
+];
+
+/// Der Inhaltsschluessel, den der Grant umschliesst und der Ciphertext braucht.
+const COMPLETE_CEK_V1: [u8; 32] = [0x3c; 32];
+
+/// Die `nonce` des Manifests und damit die des AEAD.
+const COMPLETE_NONCE_V1: [u8; 12] = [0x5e; 12];
+
+/// Der Klartext hinter dem Ciphertext des lueckenfreien Eintrags.
+///
+/// Beliebige Bytes: kein Gate liest ihn, und der Bericht enthaelt ihn NIE.
+/// Er ist ausschliesslich da, damit die Entschluesselung etwas zu pruefen hat.
+const COMPLETE_PLAINTEXT_V1: &[u8] = b"einsatzarchiv-fixture-payload";
+
+/// Der private Empfaengerschluessel, fuer den der Grant gebaut ist.
+#[must_use]
+pub fn complete_recipient_private_key() -> HpkeRecipientPrivateKey {
+    HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(COMPLETE_RECIPIENT_SECRET_V1))
+        .expect("der Fixture-Empfaengerschluessel muss ein X25519-Schluessel sein")
+}
+
+/// Ein anderer privater Schluessel — der FALSCHE zu diesem Grant.
+#[must_use]
+pub fn other_recipient_private_key() -> HpkeRecipientPrivateKey {
+    HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(OTHER_RECIPIENT_SECRET_V1))
+        .expect("der zweite Fixture-Empfaengerschluessel muss ein X25519-Schluessel sein")
+}
+
+/// Der Abdruck des Schluessels aus [`complete_recipient_private_key`].
+#[must_use]
+pub fn complete_recipient_key_thumbprint() -> KeyThumbprint {
+    key_thumbprint_of(&complete_recipient_private_key())
+}
+
+/// Der Abdruck des zweiten Schluessels.
+#[must_use]
+pub fn other_recipient_key_thumbprint() -> KeyThumbprint {
+    key_thumbprint_of(&other_recipient_private_key())
+}
+
+fn key_thumbprint_of(key: &HpkeRecipientPrivateKey) -> KeyThumbprint {
+    CanonicalPublicCoseKey::x25519(*key.public_key().as_bytes())
+        .expect("ein X25519-Punkt muss ein COSE-Schluessel sein")
+        .thumbprint()
+}
+
+/// Das Zertifikat des Empfaengers des lueckenfreien Bestands.
+///
+/// Ein Fuellwert, und das ist gemessen und nicht bequem: Gate
+/// `recipient-grant` loest den AUSSTELLER auf, nie den Empfaenger — der
+/// Empfaenger weist sich durch den Besitz seines privaten Schluessels aus.
+#[must_use]
+pub fn complete_recipient_certificate_hash() -> CertificateHash {
+    CertificateHash::try_from(&[0x41_u8; 32][..]).expect("32 Bytes sind ein Zertifikatshash")
+}
+
+/// Das Zertifikat des zweiten Empfaengers.
+#[must_use]
+pub fn other_recipient_certificate_hash() -> CertificateHash {
+    CertificateHash::try_from(&[0x42_u8; 32][..]).expect("32 Bytes sind ein Zertifikatshash")
+}
+
+/// Der Planhash des lueckenfreien Bestands: GENAU EIN Recovery-Grant an
+/// `recipient`.
+fn complete_grant_plan_hash(
+    recipient_key_thumbprint: KeyThumbprint,
+    recipient_certificate_hash: CertificateHash,
+) -> Hash32 {
+    GrantPlanV1::new(vec![GrantPlanItemV1::new(
+        recipient_key_thumbprint,
+        recipient_certificate_hash,
+        GrantPurposeV1::Recovery,
+    )])
+    .expect("ein Plan mit genau einem Recovery-Grant muss entstehen")
+    .hash()
+}
+
+/// Die exakten Bytes des `grant-context-v1` aus einem `grant-body-v1`.
+///
+/// UNABHAENGIG von der Fassung in `ea-verify` gebaut: dort wird der Kontext
+/// ueber die bekannten Laengen der beiden letzten Glieder herausgeschnitten,
+/// hier ueber den CBOR-Dekoder. Zwei verschiedene Wege auf dieselben Bytes —
+/// stimmten sie nicht ueberein, waere `hpke_info`/`hpke_aad` falsch gebildet
+/// und die Entkapselung schluege fehl, ohne dass ein Test sagte warum.
+fn exact_grant_context(exact_grant_body: &[u8]) -> Vec<u8> {
+    let mut decoder = minicbor::Decoder::new(exact_grant_body);
+    assert_eq!(
+        decoder.array().expect("der Grantrumpf ist ein CBOR-Array"),
+        Some(3),
+        "grant-body-v1 hat genau drei Glieder"
+    );
+    let start = decoder.position();
+    decoder
+        .skip()
+        .expect("der Kontext muss ueberspringbar sein");
+    exact_grant_body[start..decoder.position()].to_vec()
+}
+
+/// Ein Bestand OHNE Luecke, mit echtem Ciphertext und echtem Grant.
+pub struct CompleteArchive {
+    pub fixture: ArchiveFixture,
+    pub anchor_bytes: Vec<u8>,
+    /// Objekthash des einzigen `.eip`.
+    pub entry_object_hash: ObjectHash,
+    /// Objekthash des einzigen `.eag`.
+    pub grant_object_hash: ObjectHash,
+}
+
+impl CompleteArchive {
+    #[must_use]
+    pub fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+}
+
+/// Die lueckenfreie Linie: veralteter Policy-Kopf, dann der Schreiberkopf ab
+/// Sequenz null.
+struct CompleteLine {
+    line: trust_support::RegistryLineBuilder,
+    head: trust_support::BuiltHead,
+    writer_certificate_hash: CertificateHash,
+    anchor_bytes: Vec<u8>,
+}
+
+impl CompleteLine {
+    fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+
+    fn head_hash(&self) -> Hash32 {
+        Hash32::try_from(self.head.object_hash.as_bytes().as_slice())
+            .expect("ein Objekthash sind 32 Bytes")
+    }
+}
+
+fn complete_line() -> CompleteLine {
+    let mut line = trust_support::RegistryLineBuilder::new();
+    line.push(
+        policy_action(),
+        trust_support::HeadOptions {
+            effective_from: Some(POLICY_LEASE_FROM_V1),
+            valid_through: Some(POLICY_LEASE_THROUGH_V1),
+            not_after: UnixMillis::new(COMPLETE_POLICY_NOT_AFTER_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x11,
+            effective_from: Some(COMPLETE_WRITER_LEASE_FROM_V1),
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(COMPLETE_WRITER_LEASE_FROM_V1),
+            valid_through: Some(COMPLETE_WRITER_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let writer_certificate_hash = CertificateHash::from(
+        head.direct_object_hash
+            .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+    );
+    let anchor_bytes = line.exact_anchor_bytes().to_vec();
+    CompleteLine {
+        line,
+        head,
+        writer_certificate_hash,
+        anchor_bytes,
+    }
+}
+
+/// Ein lueckenloser Bestand, dessen Recovery-Grant an
+/// [`complete_recipient_key_thumbprint`] geht.
+#[must_use]
+pub fn complete_valid_archive() -> CompleteArchive {
+    complete_archive_for(
+        complete_recipient_key_thumbprint(),
+        complete_recipient_certificate_hash(),
+        &complete_recipient_private_key().public_key(),
+    )
+}
+
+/// Derselbe Bestand, dessen einziger Grant an einen ANDEREN Empfaenger geht.
+///
+/// Der Plan bleibt vollstaendig — ein Recovery-Grant ist da —, nur ist es
+/// nicht der eigene. Genau der Zustand FEHLENDER GRANT aus `design.md`:1595.
+#[must_use]
+pub fn archive_without_the_own_grant() -> CompleteArchive {
+    complete_archive_for(
+        other_recipient_key_thumbprint(),
+        other_recipient_certificate_hash(),
+        &other_recipient_private_key().public_key(),
+    )
+}
+
+fn complete_archive_for(
+    recipient_key_thumbprint: KeyThumbprint,
+    recipient_certificate_hash: CertificateHash,
+    recipient_public_key: &HpkeRecipientPublicKey,
+) -> CompleteArchive {
+    let line = complete_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let plan_hash = complete_grant_plan_hash(recipient_key_thumbprint, recipient_certificate_hash);
+    let entry = build_complete_entry(&line, anchor.chain_id(), plan_hash);
+    let entry_bytes = encode_entry_package(&entry)
+        .expect("das Fixture-Eintragspaket muss kodieren")
+        .into_vec();
+    let grant_bytes = complete_grant_bytes(
+        &line,
+        anchor.chain_id(),
+        entry.entry_hash(),
+        recipient_key_thumbprint,
+        recipient_certificate_hash,
+        recipient_public_key,
+    );
+    let entry_object_hash = object_hash(&entry_bytes);
+    let grant_object_hash = object_hash(&grant_bytes);
+
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{COMPLETE_GENESIS_SEQUENCE_V1:012}_entry.eip",
+            ea_archive::ENTRIES_DIR_V1
+        ),
+        entry_bytes,
+    );
+    push_grant(&mut fixture, COMPLETE_GENESIS_SEQUENCE_V1, grant_bytes);
+
+    CompleteArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hash,
+        grant_object_hash,
+    }
+}
+
+/// Baut den Genesis-Eintrag mit ECHTEM Ciphertext.
+///
+/// Zwei Durchgaenge, und das ist kein Umweg: `manifestCore` traegt die LAENGE
+/// des Ciphertexts, nicht dessen Hash (`design.md`:669-671 haelt ausdruecklich
+/// fest, dass daraus kein Zirkel entsteht). Der erste Durchgang baut den Kern
+/// ueber einen Platzhalter GLEICHER Laenge und liefert damit exakt die Bytes,
+/// die als AAD in die Verschluesselung gehen; der zweite baut denselben Kern
+/// ueber den echten Ciphertext. Beide Kerne sind byteidentisch — die
+/// Zusicherung unten misst das, statt es zu glauben.
+fn build_complete_entry(
+    line: &CompleteLine,
+    chain_id: ChainId,
+    plan_hash: Hash32,
+) -> EntryPackageV1 {
+    let fields = || ManifestCoreFieldsV1 {
+        organization_id: trust_support::organization(),
+        chain_id,
+        chain_sequence: ChainSequence::new(COMPLETE_GENESIS_SEQUENCE_V1),
+        previous_entry_hash: None,
+        writer_certificate_hash: line.writer_certificate_hash,
+        writer_transition_event_hash: None,
+        registry_version: line.head.version,
+        registry_head_hash: *line.head_hash().as_bytes(),
+        initial_grant_plan_hash: *plan_hash.as_bytes(),
+        nonce: COMPLETE_NONCE_V1,
+    };
+    let placeholder = vec![0x00; COMPLETE_PLAINTEXT_V1.len() + ea_crypto::AEAD_OVERHEAD];
+    let draft =
+        ManifestCoreV1::new(fields(), &placeholder).expect("das Fixture-Manifest muss kodieren");
+    let aad = ea_crypto::payload_aad(draft.exact_bytes());
+    let ciphertext = ea_crypto::aead_seal(
+        &SecretBytes::new(COMPLETE_CEK_V1),
+        &SecretBytes::new(COMPLETE_NONCE_V1),
+        ea_crypto::SecretVec::new(COMPLETE_PLAINTEXT_V1.to_vec()),
+        &aad,
+    )
+    .expect("der Fixture-Klartext muss sich verschluesseln lassen");
+    let manifest =
+        ManifestCoreV1::new(fields(), &ciphertext).expect("das Fixture-Manifest muss kodieren");
+    assert!(
+        manifest.exact_bytes() == draft.exact_bytes(),
+        "der Manifestkern haengt an der LAENGE des Ciphertexts, nicht an seinen Bytes"
+    );
+    let signed = SignedManifestV1::new(manifest, &ciphertext).expect("das Manifest muss binden");
+    let signature = writer_device_signer()
+        .sign_record(signed.exact_bytes())
+        .expect("der Fixture-Signierer muss signieren");
+    EntryPackageV1::new(signed, ciphertext, signature)
+        .expect("das Fixture-Eintragspaket muss sich zusammensetzen")
+}
+
+/// Baut den initialen Recovery-Grant mit ECHTER Kapselung.
+///
+/// Auch hier zwei Durchgaenge, und auch hier ohne Zirkel:
+/// `grant-context-v1` traegt WEDER den Kapselungswert NOCH den umschlossenen
+/// CEK (`design.md`:747-772). Der erste Durchgang liefert also bereits die
+/// endgueltigen Kontextbytes, aus denen `hpkeInfo` und `hpkeAad` entstehen;
+/// der zweite setzt die Kapselung ein. Die Zusicherung unten misst, dass der
+/// Kontext dabei unveraendert bleibt.
+fn complete_grant_bytes(
+    line: &CompleteLine,
+    chain_id: ChainId,
+    entry_hash: EntryHash,
+    recipient_key_thumbprint: KeyThumbprint,
+    recipient_certificate_hash: CertificateHash,
+    recipient_public_key: &HpkeRecipientPublicKey,
+) -> Vec<u8> {
+    let fields = |encapsulated_key, wrapped_cek| GrantBodyFieldsV1 {
+        organization_id: trust_support::organization(),
+        chain_id,
+        entry_hash,
+        kind: GrantKindV1::Initial,
+        purpose: GrantPurposeV1::Recovery,
+        recipient_key_thumbprint,
+        recipient_certificate_hash,
+        issuer_key_thumbprint: writer_device_key_thumbprint(),
+        issuer_certificate_hash: line.writer_certificate_hash,
+        registry_version: line.head.version,
+        registry_head_hash: line.head_hash(),
+        created_at_device: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
+        original_recovery_grant_object_hash: None,
+        grant_authorization_object_hash: None,
+        encapsulated_key,
+        wrapped_cek,
+    };
+    let draft = GrantBodyV1::new(fields(
+        [0x00; HPKE_ENCAPSULATED_KEY_SIZE],
+        [0x00; HPKE_WRAPPED_CEK_SIZE],
+    ))
+    .expect("der Fixture-Grantrumpf muss kodieren");
+    let context = exact_grant_context(draft.exact_bytes());
+    let sealed = ea_crypto::hpke_seal(
+        recipient_public_key,
+        &SecretBytes::new(COMPLETE_CEK_V1),
+        &ea_crypto::hpke_info(&context),
+        &ea_crypto::hpke_aad(&context),
+    )
+    .expect("der Fixture-CEK muss sich kapseln lassen");
+    let body = GrantBodyV1::new(fields(*sealed.encapsulated_key(), *sealed.wrapped_cek()))
+        .expect("der Fixture-Grantrumpf muss kodieren");
+    assert!(
+        exact_grant_context(body.exact_bytes()) == context,
+        "der Grantkontext haengt nicht an der Kapselung"
+    );
+    let signature = writer_device_signer()
+        .sign_initial_grant(body.exact_bytes())
+        .expect("der Fixture-Aussteller muss signieren");
+    let grant = GrantV1::new(body, signature).expect("der Fixture-Grant muss binden");
+    encode_grant(&grant)
+        .expect("der Fixture-Grant muss kodieren")
+        .into_vec()
 }

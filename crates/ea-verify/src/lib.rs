@@ -21,18 +21,24 @@
 mod archive;
 mod entry;
 mod error;
+mod evidence;
 mod gates;
 mod json;
+mod recipient;
 mod report;
 mod state;
 
-pub use archive::{VerifyOptions, verify_archive};
+pub use archive::{
+    EvidenceRequirementV1, RecipientKeyV1, VerifyOptions, verify_archive, verify_archive_observed,
+};
 pub use entry::GRANT_PLAN_MISMATCH_CODE_V1;
 pub use error::{ManifestSignatureErrorV1, ReceiptGateErrorV1, VerifyError};
+pub use evidence::EvidenceGateErrorV1;
 pub use gates::{
     DECAPSULATION_EVENT_V1, Decapsulation, GATE_ORDER_V1, Gate, GateObserver, GateRunner,
-    RecordingObserver, run_gates,
+    RecordingObserver, SilentObserver, run_gates,
 };
+pub use recipient::{DecryptionErrorV1, RecipientGrantErrorV1};
 pub use report::{
     AuthorizedDestructionV1, ChainGapV1, ChainHeadV1, DestructionStateV1, ObjectErrorV1,
     ObjectResultKindV1, ObjectResultV1, ObjectTypeV1, QuarantinedObjectV1, ServerConfirmationV1,
