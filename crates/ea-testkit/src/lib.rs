@@ -44,6 +44,30 @@
 //! neun Pflichtangaben je Eintrag, die Emission und der Re-Hash-Verifizierer.
 //! Die familienweisen Erzeuger entstehen mit ihren Vektoren zusammen, weil erst
 //! dort entschieden ist, welche der beiden Sorten die jeweilige Familie ist.
+//!
+//! # Was die Objektfamilie `format/v1` NICHT belegt
+//!
+//! Drei Zusagen aus `design.md` §22.1 und §23 lassen sich auf der Formatebene
+//! nicht einloesen, und keine davon wird hier stillschweigend behauptet.
+//!
+//! SIDECARS gibt es im Archiv nicht. Abnahmekriterium 4 nennt sie, doch weder
+//! `crates/ea-archive/src/layout.rs` noch irgendein Quelltext des Workspace
+//! kennt den Begriff — gemessen mit einer Volltextsuche ueber `crates`, `apps`,
+//! `tools` und `tests`. Die Objekte, die einen `.eip` im Archiv begleiten, sind
+//! `.eag`, `.esr` und `.eds`; ihre Mutationsvektoren stehen unter genau diesen
+//! Namen. Ein eigener `sidecar/`-Vektor waere ein erfundener Beleg.
+//!
+//! Eine Kippung in den 64 SIGNATURBYTES einer COSE-Struktur wird von
+//! `ea_format::decode_exact_object` ANGENOMMEN: die Formatebene prueft die
+//! Bindung von Inhaltstyp, Zertifikatshash und Nutzinhalt, nicht die
+//! Ed25519-Rechnung. Diese Familie mutiert deshalb den Nutzinhalt; die
+//! Signaturpruefung selbst gehoert zu `ea-verify`.
+//!
+//! `EA-FORMAT-TAG-MISMATCH` ist ueber `decode_exact_object` unerreichbar.
+//! `preflight` liest den Objekttyp aus Byte 6, und `validate_outer` stellt
+//! genau dieses Byte gegen sich selbst; die beiden koennen nicht auseinander
+//! laufen. Ein vertauschtes Tag schickt den Rumpf in den Parser einer fremden
+//! Familie, und was von dort zurueckkommt, steht gemessen im Manifest.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,6 +75,23 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use ea_crypto::{
+    CanonicalPublicCoseKey, CoseSigner, SecretBytes, SecretVec, aead_seal, grant_digest,
+    object_hash, payload_aad, receipt_digest, record_digest, trust_digest,
+};
+use ea_format::{
+    CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1, EntryPackageV1,
+    EvidenceObjectV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPurposeV1, GrantV1,
+    ManifestCoreFieldsV1, ManifestCoreV1, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1,
+    RootCertificateFieldsV1, SignedManifestV1, TrustObjectV1, TrustPayloadV1,
+    encode_destroyed_entry_stub, encode_entry_package, encode_evidence, encode_grant,
+    encode_receipt, encode_trust,
+};
+use ea_types::{
+    CertificateHash, ChainId, ChainSequence, DestructionId, Hash32, KeyThumbprint, ObjectHash,
+    OrganizationId, RegistryVersion, UnixMillis,
+};
+use ed25519_dalek::SigningKey;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -1394,6 +1435,801 @@ fn decode(text: &str) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Die Vektorfamilie `format/v1`
+// ---------------------------------------------------------------------------
+
+/// Der Familienname der Objektvektoren.
+pub const FORMAT_FAMILY: &str = "format";
+
+/// Der Versionsordner der gueltigen Objekte.
+pub const FORMAT_V1_VALID_VERSION: &str = "v1/valid";
+
+/// Der Versionsordner der Ablehnungsvektoren.
+pub const FORMAT_V1_INVALID_VERSION: &str = "v1/invalid";
+
+/// Die Wurzel der gueltigen Objekte, relativ zur Arbeitsbaumwurzel.
+pub const FORMAT_V1_VALID_ROOT: &str = "vectors/format/v1/valid";
+
+/// Die Wurzel der Ablehnungsvektoren, relativ zur Arbeitsbaumwurzel.
+pub const FORMAT_V1_INVALID_ROOT: &str = "vectors/format/v1/invalid";
+
+/// Die Herkunftsangabe der deterministisch erzeugten Objektvektoren.
+const FORMAT_GENERATOR: &str = "ea-testkit::format_v1_objects";
+
+/// Der Suite-Identifikator der Objektvektoren, EINGEFROREN.
+const FORMAT_SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+
+/// Die Organisationskennung aller Objektvektoren.
+const FORMAT_ORGANIZATION_ID: [u8; 16] = [0x20; 16];
+
+/// Die Kettenkennung aller Objektvektoren.
+const FORMAT_CHAIN_ID: [u8; 16] = [0x21; 16];
+
+/// Der Zertifikatshash des schreibenden Geraets.
+const FORMAT_WRITER_CERTIFICATE_HASH: [u8; 32] = [0x22; 32];
+
+/// Der Registrierungskopf-Hash aller Objektvektoren.
+const FORMAT_REGISTRY_HEAD_HASH: [u8; 32] = [0x23; 32];
+
+/// Der Hash des initialen Grant-Plans.
+const FORMAT_INITIAL_GRANT_PLAN_HASH: [u8; 32] = [0x24; 32];
+
+/// Der Zertifikatshash der Serverseite: Receipt und Checkpoint.
+const FORMAT_SERVER_CERTIFICATE_HASH: [u8; 32] = [0x26; 32];
+
+/// Der Zertifikatshash des Empfaengers eines Grants.
+const FORMAT_RECIPIENT_CERTIFICATE_HASH: [u8; 32] = [0x27; 32];
+
+/// Der Schluesselabdruck des Empfaengers eines Grants.
+const FORMAT_RECIPIENT_KEY_THUMBPRINT: [u8; 32] = [0x28; 32];
+
+/// Die Kennung der Vernichtung im `.eds`.
+const FORMAT_DESTRUCTION_ID: [u8; 16] = [0x29; 16];
+
+/// Der Objekthash der Vernichtungsautorisierung im `.eds`.
+const FORMAT_DESTRUCTION_AUTHORIZATION_OBJECT_HASH: [u8; 32] = [0x2a; 32];
+
+/// Der Objekthash der Richtlinie im `.esr`.
+const FORMAT_POLICY_OBJECT_HASH: [u8; 32] = [0x2b; 32];
+
+/// Der Klartext, den der `.eip`-Vektor verschluesselt traegt.
+///
+/// Kurz genug, dass jeder abgeleitete Vektor unter 256 Byte Chiffrat bleibt und
+/// die Laengenkodierung der Bytestrings einbyteig bleibt.
+const FORMAT_PLAINTEXT: &[u8] = b"format/v1 vector plaintext";
+
+/// Die Geraetezeit aller Objektvektoren in Millisekunden seit der Epoche.
+const FORMAT_DEVICE_TIME_MS: i64 = 1_700_000_000_000;
+
+/// Die Serverzeit aller Objektvektoren in Millisekunden seit der Epoche.
+const FORMAT_SERVER_TIME_MS: i64 = 1_700_000_001_000;
+
+/// Die Registrierungsversion aller Objektvektoren.
+const FORMAT_REGISTRY_VERSION: u64 = 4;
+
+/// `MAX_CBOR_TEXT_OR_BYTES_V1` plus genau ein Byte.
+const FORMAT_TEXT_OR_BYTES_OVER_LIMIT: u64 = 1_048_593;
+
+/// `MAX_CIPHERTEXT_BYTES_V1` plus genau ein Byte.
+///
+/// Zahlengleich mit [`FORMAT_TEXT_OR_BYTES_OVER_LIMIT`], und das ist kein
+/// Zufall: `checked_ciphertext_length` addiert genau das 16 Byte lange
+/// Poly1305-Tag, `MAX_CIPHERTEXT_BYTES_V1 = MAX_PLAINTEXT_BYTES_V1 + 16`, und
+/// die CBOR-Grenze ist auf denselben Wert gesetzt.
+const FORMAT_CIPHERTEXT_OVER_LIMIT: u64 = 1_048_593;
+
+/// `MAX_PLAINTEXT_BYTES_V1` plus genau ein Byte.
+const FORMAT_PLAINTEXT_OVER_LIMIT: usize = 1_048_577;
+
+/// Die groesste Containerelementzahl plus eins.
+const FORMAT_CONTAINER_ITEMS_OVER_LIMIT: u64 = 10_001;
+
+/// Die groesste Containerelementzahl selbst.
+///
+/// Ein Container GENAU an der Grenze passiert `read_container_length` und
+/// laesst die Gesamtzahl der Elemente ueberlaufen — nur so ist
+/// `MAX_TOTAL_ITEMS_V1 + 1` ueberhaupt erreichbar, weil beide Grenzen auf
+/// 10_000 stehen.
+const FORMAT_CONTAINER_ITEMS_AT_LIMIT: u64 = 10_000;
+
+/// Der Schema-Identifikator des Vektors, den `ea-schema` prueft.
+const FORMAT_SCHEMA_CHECKED_SCHEMA_ID: &str = "ea.incident";
+
+/// Die sechs Objektfamilien mit Schema-Identifikator und Objekttyp-Tag.
+const FORMAT_FAMILIES: [(&str, &str, u8); 6] = [
+    ("eip", "eip-v1", 1),
+    ("eag", "eag-v1", 2),
+    ("esr", "esr-v1", 3),
+    ("ecp", "ecp-v1", 4),
+    ("etb", "etb-v1", 5),
+    ("eds", "eds-v1", 6),
+];
+
+/// Die sechs gueltigen Objekte samt der Teile, aus denen die Mutationen
+/// entstehen.
+struct FormatObjects {
+    objects: [Vec<u8>; 6],
+    cose_payloads: [Vec<u8>; 6],
+    eip_manifest_exact: Vec<u8>,
+    eip_ciphertext: Vec<u8>,
+    eip_ciphertext_hash: [u8; 32],
+    eip_writer_signature: Vec<u8>,
+    organization_needle: Vec<u8>,
+}
+
+impl FormatObjects {
+    /// Das Objekt der Familie mit diesem Namen.
+    fn object(&self, family: &str) -> &[u8] {
+        &self.objects[format_family_index(family)]
+    }
+
+    /// Der COSE-Nutzinhalt, dessen Mutation die Bindung bricht.
+    fn cose_payload(&self, family: &str) -> &[u8] {
+        &self.cose_payloads[format_family_index(family)]
+    }
+}
+
+/// Der Index einer Familie in [`FORMAT_FAMILIES`].
+fn format_family_index(family: &str) -> usize {
+    FORMAT_FAMILIES
+        .iter()
+        .position(|(name, _, _)| *name == family)
+        .unwrap_or_else(|| panic!("{family} is not one of the six object families"))
+}
+
+/// Ein Signierer aus deklarierter Testentropie.
+fn format_signer(seed: [u8; 32]) -> CoseSigner {
+    CoseSigner::from_secret(SecretBytes::new(seed))
+}
+
+/// Der kanonische oeffentliche COSE-Key zu einem Ed25519-Seed.
+fn format_public_key(seed: [u8; 32]) -> CanonicalPublicCoseKey {
+    let verifying = SigningKey::from_bytes(&seed).verifying_key();
+    CanonicalPublicCoseKey::ed25519(*verifying.as_bytes())
+        .expect("a declared Ed25519 seed yields a canonical public key")
+}
+
+/// Die sechs gueltigen Objekte, deterministisch erzeugt.
+///
+/// # Panics
+///
+/// Wenn eine der Konstruktionen fehlschlaegt. Das waere ein Programmierfehler
+/// dieser Crate, kein Laufzeitzustand.
+fn format_objects() -> FormatObjects {
+    let writer = format_signer(TEST_ENTROPY_DEVICE_ED25519_SEED);
+    let writer_thumbprint = format_public_key(TEST_ENTROPY_DEVICE_ED25519_SEED).thumbprint();
+    let server = format_signer(TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED);
+    let server_thumbprint =
+        format_public_key(TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED).thumbprint();
+    let root = format_signer(TEST_ENTROPY_ROOT_ED25519_SEED);
+    let root_key = format_public_key(TEST_ENTROPY_ROOT_ED25519_SEED);
+
+    // `.eip`. Der Ciphertext ist ein ECHTER AEAD-Wert: `aead_seal` nimmt die
+    // Nonce als Parameter, also ist er reproduzierbar. Die AAD haengt am
+    // Manifestkern, der Manifestkern nur an der LAENGE des Ciphertexts —
+    // deshalb der Vorlauf mit einem gleich langen Platzhalter.
+    let ciphertext_length = FORMAT_PLAINTEXT.len() + ea_crypto::AEAD_OVERHEAD;
+    let probe = format_manifest_core(&vec![0_u8; ciphertext_length]);
+    let aad = payload_aad(probe.exact_bytes());
+    let ciphertext = aead_seal(
+        &SecretBytes::new(TEST_ENTROPY_CONTENT_ENCRYPTION_KEY),
+        &SecretBytes::new(TEST_ENTROPY_AEAD_NONCE),
+        SecretVec::new(FORMAT_PLAINTEXT.to_vec()),
+        &aad,
+    )
+    .expect("sealing the frozen plaintext cannot fail");
+    let manifest = format_manifest_core(&ciphertext);
+    let eip_manifest_exact = manifest.exact_bytes().to_vec();
+    let signed = SignedManifestV1::new(manifest, &ciphertext)
+        .expect("the manifest matches its own ciphertext");
+    let eip_ciphertext_hash = *signed.ciphertext_hash().as_bytes();
+    let writer_signature = writer
+        .sign_record(signed.exact_bytes())
+        .expect("signing the frozen signed manifest cannot fail");
+    let eip_record_digest = record_digest(signed.exact_bytes()).as_bytes().to_vec();
+    let entry = EntryPackageV1::new(signed.clone(), ciphertext.clone(), writer_signature.clone())
+        .expect("the frozen entry package is well formed");
+    let entry_hash = entry.entry_hash();
+    let eip = encode_entry_package(&entry)
+        .expect("encoding the frozen entry package cannot fail")
+        .into_vec();
+
+    // `.eag`. Kapselungswert und umschlossener CEK sind die EINMAL erzeugten
+    // Bytes der Familie `crypto/suite-1`; `hpke_seal` zieht bei jedem Aufruf
+    // frische Entropie und ist von aussen nicht reproduzierbar. Sie sind hier
+    // FUELLUNG vorgeschriebener Laenge und NICHT an den Grant-Kontext dieses
+    // Objekts gebunden — `hpke_open` gegen diesen Kontext liefert gemessen
+    // `EA-CRYPTO-HPKE-OPEN`. `ea-format` oeffnet sie nie; die Bindung eines
+    // Grants an seinen Empfaenger belegt die Familie `grants`, ihre
+    // Entkapselung die Familie `crypto/suite-1`. Siehe [`format_source`].
+    let grant_body = GrantBodyV1::new(GrantBodyFieldsV1 {
+        organization_id: format_organization_id(),
+        chain_id: ChainId::try_from(FORMAT_CHAIN_ID.as_slice()).expect("16 bytes"),
+        entry_hash,
+        kind: GrantKindV1::Initial,
+        purpose: GrantPurposeV1::Reader,
+        recipient_key_thumbprint: KeyThumbprint::try_from(
+            FORMAT_RECIPIENT_KEY_THUMBPRINT.as_slice(),
+        )
+        .expect("32 bytes"),
+        recipient_certificate_hash: CertificateHash::try_from(
+            FORMAT_RECIPIENT_CERTIFICATE_HASH.as_slice(),
+        )
+        .expect("32 bytes"),
+        issuer_key_thumbprint: writer_thumbprint,
+        issuer_certificate_hash: format_writer_certificate_hash(),
+        registry_version: RegistryVersion::new(FORMAT_REGISTRY_VERSION),
+        registry_head_hash: Hash32::try_from(FORMAT_REGISTRY_HEAD_HASH.as_slice())
+            .expect("32 bytes"),
+        created_at_device: UnixMillis::new(FORMAT_DEVICE_TIME_MS),
+        original_recovery_grant_object_hash: None,
+        grant_authorization_object_hash: None,
+        encapsulated_key: decode(HPKE_ENCAPSULATED_KEY)
+            .try_into()
+            .expect("the frozen encapsulated key is 32 bytes"),
+        wrapped_cek: decode(HPKE_WRAPPED_CEK)
+            .try_into()
+            .expect("the frozen wrapped CEK is 48 bytes"),
+    })
+    .expect("the frozen grant body is well formed");
+    let eag_grant_digest = grant_digest(grant_body.exact_bytes()).as_bytes().to_vec();
+    let grant_signature = writer
+        .sign_initial_grant(grant_body.exact_bytes())
+        .expect("signing the frozen grant body cannot fail");
+    let grant = GrantV1::new(grant_body, grant_signature).expect("the frozen grant is well formed");
+    let eag = encode_grant(&grant)
+        .expect("encoding the frozen grant cannot fail")
+        .into_vec();
+
+    // `.esr`.
+    let receipt_core = ReceiptCoreV1::new(ReceiptCoreFieldsV1 {
+        organization_id: format_organization_id(),
+        chain_id: ChainId::try_from(FORMAT_CHAIN_ID.as_slice()).expect("16 bytes"),
+        chain_sequence: ChainSequence::new(0),
+        entry_hash,
+        entry_object_hash: object_hash(&eip),
+        previous_entry_hash: None,
+        registry_version: RegistryVersion::new(FORMAT_REGISTRY_VERSION),
+        registry_head_hash: Hash32::try_from(FORMAT_REGISTRY_HEAD_HASH.as_slice())
+            .expect("32 bytes"),
+        policy_object_hash: ObjectHash::try_from(FORMAT_POLICY_OBJECT_HASH.as_slice())
+            .expect("32 bytes"),
+        initial_grant_plan_hash: Hash32::try_from(FORMAT_INITIAL_GRANT_PLAN_HASH.as_slice())
+            .expect("32 bytes"),
+        initial_grant_object_hashes: vec![object_hash(&eag)],
+        accepted_at_server: UnixMillis::new(FORMAT_SERVER_TIME_MS),
+        evidence_due_at: None,
+        server_key_thumbprint: server_thumbprint,
+        server_certificate_hash: format_server_certificate_hash(),
+    })
+    .expect("the frozen receipt core is well formed");
+    let esr_receipt_digest = receipt_digest(receipt_core.exact_bytes())
+        .as_bytes()
+        .to_vec();
+    let receipt_signature = server
+        .sign_receipt(receipt_core.exact_bytes())
+        .expect("signing the frozen receipt core cannot fail");
+    let receipt =
+        ReceiptV1::new(receipt_core, receipt_signature).expect("the frozen receipt is well formed");
+    let esr = encode_receipt(&receipt)
+        .expect("encoding the frozen receipt cannot fail")
+        .into_vec();
+
+    // `.ecp`. Der COSE-Nutzinhalt ist hier der Kern SELBST, nicht sein Digest;
+    // er steht deshalb ZWEIMAL im Objekt, und die Mutation muss das zweite
+    // Vorkommen treffen.
+    let checkpoint_core = CheckpointCoreV1::new(CheckpointCoreFieldsV1 {
+        organization_id: format_organization_id(),
+        chain_id: ChainId::try_from(FORMAT_CHAIN_ID.as_slice()).expect("16 bytes"),
+        covered_from_sequence: ChainSequence::new(0),
+        covered_through_sequence: ChainSequence::new(0),
+        head_entry_hash: entry_hash,
+        registry_head_hash: Hash32::try_from(FORMAT_REGISTRY_HEAD_HASH.as_slice())
+            .expect("32 bytes"),
+        issued_at_server: UnixMillis::new(FORMAT_SERVER_TIME_MS),
+        previous_evidence_hash: None,
+    })
+    .expect("the frozen checkpoint core is well formed");
+    let ecp_cose_payload = checkpoint_core.exact_bytes().to_vec();
+    let checkpoint_signature = server
+        .sign_checkpoint(
+            format_server_certificate_hash(),
+            checkpoint_core.exact_bytes(),
+        )
+        .expect("signing the frozen checkpoint core cannot fail");
+    let evidence = EvidenceObjectV1::standard(checkpoint_core, checkpoint_signature)
+        .expect("the frozen checkpoint object is well formed");
+    let ecp = encode_evidence(&evidence)
+        .expect("encoding the frozen checkpoint cannot fail")
+        .into_vec();
+
+    // `.etb`. Das initiale Wurzelzertifikat ist der einzige Vertrauensbaustein
+    // ohne Vorgaenger und damit der kleinste vollstaendige Vektor.
+    let trust_payload = TrustPayloadV1::initial_root_certificate(RootCertificateFieldsV1 {
+        organization_id: format_organization_id(),
+        root_public_cose_key: root_key.to_deterministic_cbor(),
+        root_key_thumbprint: root_key.thumbprint(),
+        previous_root_certificate_object_hash: None,
+        effective_from_registry_version: RegistryVersion::new(FORMAT_REGISTRY_VERSION),
+    })
+    .expect("the frozen root certificate payload is well formed");
+    let etb_trust_digest = trust_digest(trust_payload.exact_digest_input())
+        .as_bytes()
+        .to_vec();
+    let trust_signature = root
+        .sign_initial_root(&etb_trust_digest)
+        .expect("signing the frozen trust digest cannot fail");
+    let trust = TrustObjectV1::new(trust_payload, vec![trust_signature])
+        .expect("the frozen trust object is well formed");
+    let etb = encode_trust(&trust)
+        .expect("encoding the frozen trust object cannot fail")
+        .into_vec();
+
+    // `.eds`. Derselbe signierte Manifestkern wie im `.eip`, ohne Ciphertext.
+    let stub = DestroyedEntryStubV1::new(
+        signed,
+        writer_signature.clone(),
+        object_hash(&eip),
+        DestructionId::try_from(FORMAT_DESTRUCTION_ID.as_slice()).expect("16 bytes"),
+        ObjectHash::try_from(FORMAT_DESTRUCTION_AUTHORIZATION_OBJECT_HASH.as_slice())
+            .expect("32 bytes"),
+    )
+    .expect("the frozen destroyed entry stub is well formed");
+    let eds = encode_destroyed_entry_stub(&stub)
+        .expect("encoding the frozen stub cannot fail")
+        .into_vec();
+
+    FormatObjects {
+        objects: [eip, eag, esr, ecp, etb, eds],
+        cose_payloads: [
+            eip_record_digest.clone(),
+            eag_grant_digest,
+            esr_receipt_digest,
+            ecp_cose_payload,
+            etb_trust_digest,
+            eip_record_digest,
+        ],
+        eip_manifest_exact,
+        eip_ciphertext: ciphertext,
+        eip_ciphertext_hash,
+        eip_writer_signature: writer_signature,
+        organization_needle: FORMAT_ORGANIZATION_ID.to_vec(),
+    }
+}
+
+/// Die Organisationskennung als getypter Wert.
+fn format_organization_id() -> OrganizationId {
+    OrganizationId::try_from(FORMAT_ORGANIZATION_ID.as_slice()).expect("16 bytes")
+}
+
+/// Der Zertifikatshash des Schreibers als getypter Wert.
+fn format_writer_certificate_hash() -> CertificateHash {
+    CertificateHash::try_from(FORMAT_WRITER_CERTIFICATE_HASH.as_slice()).expect("32 bytes")
+}
+
+/// Der Zertifikatshash der Serverseite als getypter Wert.
+fn format_server_certificate_hash() -> CertificateHash {
+    CertificateHash::try_from(FORMAT_SERVER_CERTIFICATE_HASH.as_slice()).expect("32 bytes")
+}
+
+/// Der Manifestkern zu einem Ciphertext dieser Laenge.
+fn format_manifest_core(ciphertext: &[u8]) -> ManifestCoreV1 {
+    ManifestCoreV1::new(
+        ManifestCoreFieldsV1 {
+            organization_id: format_organization_id(),
+            chain_id: ChainId::try_from(FORMAT_CHAIN_ID.as_slice()).expect("16 bytes"),
+            chain_sequence: ChainSequence::new(0),
+            previous_entry_hash: None,
+            writer_certificate_hash: format_writer_certificate_hash(),
+            writer_transition_event_hash: None,
+            registry_version: RegistryVersion::new(FORMAT_REGISTRY_VERSION),
+            registry_head_hash: FORMAT_REGISTRY_HEAD_HASH,
+            initial_grant_plan_hash: FORMAT_INITIAL_GRANT_PLAN_HASH,
+            nonce: TEST_ENTROPY_AEAD_NONCE,
+        },
+        ciphertext,
+    )
+    .expect("the frozen manifest core is well formed")
+}
+
+/// Das Manifest der gueltigen Objekte.
+///
+/// # Panics
+///
+/// Wenn eine der Konstruktionen dieser Datei fehlschlaegt.
+#[must_use]
+pub fn format_v1_valid_manifest() -> VectorManifest {
+    let built = format_objects();
+    let entries = FORMAT_FAMILIES
+        .iter()
+        .map(|(family, schema_id, _)| {
+            let bytes = built.object(family).to_vec();
+            let hash = *object_hash(&bytes).as_bytes();
+            format_entry(
+                &format!("{family}/valid"),
+                schema_id,
+                format_source(),
+                Vec::new(),
+                digest_map(&[("objectHash", hash)]),
+                bytes,
+                ExpectedOutcome::Accepted,
+            )
+        })
+        .collect();
+    VectorManifest {
+        family: FORMAT_FAMILY.to_owned(),
+        version: FORMAT_V1_VALID_VERSION.to_owned(),
+        entries,
+    }
+}
+
+/// Die Herkunft eines Vektors dieser Familie: durchweg der Erzeuger.
+///
+/// AUCH FUER `.eag`, und das ist eine bewusste Entscheidung. Kapselungswert und
+/// umschlossener CEK des Grants sind zwar EINMAL von `hpke_seal` gezogene
+/// Bytes — aber dieser Erzeuger zieht sie nicht, er LIEST sie als feste
+/// Konstanten. Seine Ausgabe ist damit deterministisch regenerierbar, und genau
+/// das sagt [`VectorSource::GeneratorCommit`] an.
+///
+/// [`VectorSource::FrozenOnce`] waere hier sogar FALSCH. Sein Feld
+/// `verified_via` benennt die Richtung, in der die Bytes nachgeprueft werden,
+/// und `hpke_open` gegen den Grant-Kontext DIESES Objekts liefert gemessen
+/// `EA-CRYPTO-HPKE-OPEN`: die 80 Byte wurden unter `hpke_info`/`hpke_aad` des
+/// Urbilds von `crypto/suite-1` gekapselt, nicht unter dem 17-Feld-Kontext
+/// dieses Grants. Ihre Entkapselung ist in der Familie `crypto/suite-1`
+/// nachgewiesen und gehoert dorthin. `ea-format` oeffnet sie nie; auf dieser
+/// Ebene sind sie zwei Bytestrings vorgeschriebener Laenge, und die
+/// kryptografische Bindung eines Grants an seinen Empfaenger ist der
+/// Liefergegenstand der Familie `grants`.
+fn format_source() -> VectorSource {
+    VectorSource::GeneratorCommit(FORMAT_GENERATOR.to_owned())
+}
+
+/// Das Manifest der Ablehnungsvektoren.
+///
+/// # Panics
+///
+/// Wenn eine der Konstruktionen dieser Datei fehlschlaegt.
+#[must_use]
+pub fn format_v1_invalid_manifest() -> VectorManifest {
+    let built = format_objects();
+    let mut entries = Vec::new();
+
+    for (family, schema_id, tag) in FORMAT_FAMILIES {
+        let source = built.object(family).to_vec();
+        let digests = digest_map(&[("sourceObjectHash", *object_hash(&source).as_bytes())]);
+
+        // Magic. Das dritte Byte des Bytestrings `EA1\0`.
+        let mut magic = source.clone();
+        magic[2] = b'D';
+        entries.push(format_entry(
+            &format!("{family}/magic-byte-flip"),
+            schema_id,
+            format_source(),
+            source.clone(),
+            digests.clone(),
+            magic,
+            format_rejected("EA-FORMAT-PREFIX"),
+        ));
+
+        // Objekttyp-Tag. Der Parser leitet daraus den Rumpfparser ab; ein
+        // fremdes Tag schickt den Rumpf in die falsche Familie.
+        let mut retagged = source.clone();
+        retagged[6] = tag % 6 + 1;
+        entries.push(format_entry(
+            &format!("{family}/object-type-tag"),
+            schema_id,
+            format_source(),
+            source.clone(),
+            digests.clone(),
+            retagged,
+            format_rejected(format_object_type_tag_code(family)),
+        ));
+
+        // Objektversion.
+        let mut versioned = source.clone();
+        versioned[7] = 2;
+        entries.push(format_entry(
+            &format!("{family}/object-version"),
+            schema_id,
+            format_source(),
+            source.clone(),
+            digests.clone(),
+            versioned,
+            format_rejected("EA-FORMAT-UNKNOWN-VERSION"),
+        ));
+
+        // Unbekanntes kritisches Feld: der Erweiterungsschlitz ist leer und
+        // MUSS leer bleiben.
+        let mut extended = source[..8].to_vec();
+        extended.extend_from_slice(&[0x81, 0x00]);
+        extended.extend_from_slice(&source[9..]);
+        entries.push(format_entry(
+            &format!("{family}/critical-extension"),
+            schema_id,
+            format_source(),
+            source.clone(),
+            digests.clone(),
+            extended,
+            format_rejected("EA-FORMAT-CRITICAL-EXTENSION"),
+        ));
+
+        // COSE-Bindung. Mutiert wird der NUTZINHALT der Signaturstruktur, nicht
+        // ihre 64 Signaturbytes: `ea-format` prueft die Bindung, nicht die
+        // Ed25519-Rechnung. Ein Bitflip in den Signaturbytes allein bliebe auf
+        // dieser Ebene unentdeckt und wird erst von `ea-verify` gefunden.
+        let mutated = format_flip_last_occurrence(&source, built.cose_payload(family));
+        entries.push(format_entry(
+            &format!("{family}/cose-payload-byte-flip"),
+            schema_id,
+            format_source(),
+            source.clone(),
+            digests.clone(),
+            mutated,
+            format_rejected("EA-FORMAT-COSE"),
+        ));
+    }
+
+    // Manifest und Ciphertext.
+    let eip = built.object("eip").to_vec();
+    let eip_digests = digest_map(&[("sourceObjectHash", *object_hash(&eip).as_bytes())]);
+    entries.push(format_entry(
+        "eip/signed-manifest-byte-flip",
+        "eip-v1",
+        format_source(),
+        eip.clone(),
+        eip_digests.clone(),
+        format_flip_last_occurrence(&eip, &built.organization_needle),
+        format_rejected("EA-FORMAT-COSE"),
+    ));
+    entries.push(format_entry(
+        "eip/ciphertext-byte-flip",
+        "eip-v1",
+        format_source(),
+        eip.clone(),
+        eip_digests.clone(),
+        format_flip_last_occurrence(&eip, &built.eip_ciphertext),
+        format_rejected("EA-FORMAT-SHAPE"),
+    ));
+    let eds = built.object("eds").to_vec();
+    entries.push(format_entry(
+        "eds/signed-manifest-byte-flip",
+        "eds-v1",
+        format_source(),
+        eds.clone(),
+        digest_map(&[("sourceObjectHash", *object_hash(&eds).as_bytes())]),
+        format_flip_last_occurrence(&eds, &built.organization_needle),
+        format_rejected("EA-FORMAT-COSE"),
+    ));
+
+    // Die CBOR-Ebene. Diese Vektoren sind SYNTHETISCH: die sechs Familien sind
+    // durchweg Arrays, ihre einzige Map sitzt im geschuetzten COSE-Kopf und
+    // damit in einem Bytestring, in den der aeussere Scanner nicht hineinlaeuft.
+    // Ein doppelter Map-Key ist deshalb nur im Rumpfschlitz darstellbar.
+    for (name, body, code) in [
+        (
+            "cbor/duplicate-map-key",
+            vec![0xa2, 0x01, 0x01, 0x01, 0x02],
+            "EA-CBOR-DUPLICATE-KEY",
+        ),
+        (
+            "cbor/non-canonical-length",
+            vec![0x18, 0x05],
+            "EA-CBOR-NONMINIMAL",
+        ),
+        (
+            "cbor/nesting-depth-17",
+            format_nested_arrays(16),
+            "EA-CBOR-DEPTH-LIMIT",
+        ),
+        (
+            "cbor/container-items-over-limit",
+            format_array_header(FORMAT_CONTAINER_ITEMS_OVER_LIMIT),
+            "EA-CBOR-CONTAINER-LIMIT",
+        ),
+        (
+            "cbor/total-items-over-limit",
+            format_saturated_array(),
+            "EA-CBOR-TOKEN-LIMIT",
+        ),
+        (
+            "limits/cbor-text-or-bytes-plus-one",
+            format_byte_string_header(FORMAT_TEXT_OR_BYTES_OVER_LIMIT),
+            "EA-CBOR-ITEM-LIMIT",
+        ),
+    ] {
+        let mut object = vec![0x85, 0x44, b'E', b'A', b'1', 0, 1, 1, 0x80];
+        object.extend_from_slice(&body);
+        entries.push(format_entry(
+            name,
+            "format-object-v1",
+            VectorSource::GeneratorCommit(FORMAT_GENERATOR.to_owned()),
+            Vec::new(),
+            BTreeMap::new(),
+            object,
+            format_rejected(code),
+        ));
+    }
+
+    // Die Ciphertextgrenze, um genau ein Byte ueberschritten. Der Wert steht im
+    // Manifestkern; der Kern wird an seinem letzten Feldpaar nachgeschnitten,
+    // damit der Vektor klein bleibt statt ein Megabyte zu tragen.
+    entries.push(format_entry(
+        "limits/ciphertext-length-plus-one",
+        "eip-v1",
+        format_source(),
+        eip.clone(),
+        eip_digests,
+        format_eip_with_declared_ciphertext_length(&built, FORMAT_CIPHERTEXT_OVER_LIMIT),
+        format_rejected("EA-FORMAT-CIPHERTEXT-LENGTH"),
+    ));
+
+    // Die Klartextgrenze. Sie ist KEINE Formatgrenze: `ea-format` oeffnet den
+    // AEAD-Ciphertext nie. `crates/ea-schema/src/v1.rs` fuehrt sie, und
+    // `SchemaRegistry::validate` entscheidet vor jeder eingabegrossen
+    // Allokation allein an der Laenge — der Inhalt dieser Bytes ist deshalb
+    // gleichgueltig.
+    entries.push(format_entry(
+        "limits/plaintext-plus-one",
+        FORMAT_SCHEMA_CHECKED_SCHEMA_ID,
+        VectorSource::GeneratorCommit(FORMAT_GENERATOR.to_owned()),
+        Vec::new(),
+        BTreeMap::new(),
+        vec![0xff; FORMAT_PLAINTEXT_OVER_LIMIT],
+        format_rejected("EA-SCHEMA-PLAINTEXT-LIMIT"),
+    ));
+
+    VectorManifest {
+        family: FORMAT_FAMILY.to_owned(),
+        version: FORMAT_V1_INVALID_VERSION.to_owned(),
+        entries,
+    }
+}
+
+/// Der GEMESSENE Fehlercode eines vertauschten Objekttyp-Tags.
+///
+/// Das Tag ist KEIN Widerspruch zwischen zwei Feldern: `preflight` liest es aus
+/// Byte 6, und `validate_outer` stellt genau dieses Byte gegen sich selbst.
+/// `EA-FORMAT-TAG-MISMATCH` ist ueber `decode_exact_object` deshalb
+/// unerreichbar. Was zurueckkommt, entscheidet der Rumpfparser der FREMDEN
+/// Familie — je Quellfamilie ein anderer Wert, hier einzeln gemessen und nicht
+/// hergeleitet.
+fn format_object_type_tag_code(family: &str) -> &'static str {
+    match family {
+        // Alle sechs GEMESSEN, nicht geschlossen: der Rumpf der Quellfamilie
+        // scheitert im fremden Rumpfparser an der Elementzahl des aeusseren
+        // Arrays, und das ist in allen sechs Richtungen dieselbe Aussage.
+        "eip" | "eag" | "esr" | "ecp" | "etb" | "eds" => "EA-FORMAT-SHAPE",
+        other => panic!("{other} is not one of the six object families"),
+    }
+}
+
+/// Eine Ablehnung mit genau diesem Code.
+fn format_rejected(code: &str) -> ExpectedOutcome {
+    ExpectedOutcome::Rejected {
+        error_code: code.to_owned(),
+    }
+}
+
+/// Kippt das erste Bit des LETZTEN Vorkommens von `needle`.
+///
+/// Das letzte Vorkommen, nicht das erste: im `.ecp` steht der Checkpointkern
+/// zweimal — einmal als Element und einmal als COSE-Nutzinhalt —, und nur die
+/// zweite Stelle bricht die Bindung statt der Struktur.
+fn format_flip_last_occurrence(bytes: &[u8], needle: &[u8]) -> Vec<u8> {
+    assert!(!needle.is_empty(), "the needle must not be empty");
+    let at = (0..=bytes.len().saturating_sub(needle.len()))
+        .rev()
+        .find(|start| bytes[*start..*start + needle.len()] == *needle)
+        .unwrap_or_else(|| panic!("the object does not carry the {} byte needle", needle.len()));
+    let mut mutated = bytes.to_vec();
+    mutated[at] ^= 1;
+    mutated
+}
+
+/// `depth` ineinandergeschachtelte einelementige Arrays mit einer 0 im Kern.
+fn format_nested_arrays(depth: usize) -> Vec<u8> {
+    let mut bytes = vec![0x81; depth];
+    bytes.push(0x00);
+    bytes
+}
+
+/// Ein kanonischer CBOR-Arraykopf ueber `length` Elemente.
+fn format_array_header(length: u64) -> Vec<u8> {
+    format_header(0x80, length)
+}
+
+/// Ein kanonischer CBOR-Bytestringkopf ueber `length` Byte, OHNE Nutzlast.
+///
+/// Der Scanner prueft die angekuendigte Laenge, BEVOR er sie liest
+/// (`crates/ea-cbor/src/decode.rs`). Ein Vektor ueber der Grenze braucht seine
+/// Nutzlast deshalb nicht mitzubringen und bleibt zwanzig Byte gross statt
+/// einem Megabyte.
+fn format_byte_string_header(length: u64) -> Vec<u8> {
+    format_header(0x40, length)
+}
+
+/// Ein KANONISCHER CBOR-Kopf: kleinste Argumentbreite, Haupttyp aufgepraegt.
+///
+/// Die kleinste Breite ist keine Kosmetik: `ea-cbor` lehnt jede weitere Form
+/// als `EA-CBOR-NONMINIMAL` ab, und ein Vektor, der schon daran scheitert,
+/// haette die Grenze, die er belegen soll, nie erreicht.
+fn format_header(major: u8, length: u64) -> Vec<u8> {
+    let mut bytes = cbor_unsigned(length);
+    bytes[0] |= major;
+    bytes
+}
+
+/// Ein Array GENAU an der Containergrenze, das die Gesamtelementzahl sprengt.
+fn format_saturated_array() -> Vec<u8> {
+    let mut bytes = format_array_header(FORMAT_CONTAINER_ITEMS_AT_LIMIT);
+    bytes.resize(
+        bytes.len()
+            + usize::try_from(FORMAT_CONTAINER_ITEMS_AT_LIMIT)
+                .expect("the frozen container length fits in a usize"),
+        0x00,
+    );
+    bytes
+}
+
+/// Ein `.eip`, dessen Manifestkern eine andere Ciphertextlaenge ANKUENDIGT.
+///
+/// Der Kern endet auf `<laenge> <leeres array>`; nur dieses Paar wird ersetzt.
+/// Das Objekt wird danach von Hand wieder zusammengesetzt, weil `ea-format`
+/// eine widerspruechliche Ankuendigung — zu Recht — nicht kodiert.
+fn format_eip_with_declared_ciphertext_length(built: &FormatObjects, length: u64) -> Vec<u8> {
+    let mut core = built.eip_manifest_exact.clone();
+    let mut declared = cbor_unsigned(
+        u64::try_from(built.eip_ciphertext.len()).expect("the frozen ciphertext length fits"),
+    );
+    declared.push(0x80);
+    assert!(
+        core.ends_with(&declared),
+        "the frozen manifest core must end in its ciphertext length and an empty extension array"
+    );
+    core.truncate(core.len() - declared.len());
+    core.extend_from_slice(&cbor_unsigned(length));
+    core.push(0x80);
+
+    let mut signed = vec![0x82];
+    signed.extend_from_slice(&core);
+    signed.extend_from_slice(&cbor_bytes(&built.eip_ciphertext_hash));
+
+    let mut body = vec![0x83];
+    body.extend_from_slice(&signed);
+    body.extend_from_slice(&cbor_bytes(&built.eip_ciphertext));
+    body.extend_from_slice(&built.eip_writer_signature);
+
+    let mut object = vec![0x85, 0x44, b'E', b'A', b'1', 0, 1, 1, 0x80];
+    object.extend_from_slice(&body);
+    object
+}
+
+/// Baut einen Manifesteintrag der Objektfamilien und leitet seinen Dateipfad
+/// aus dem Namen ab.
+fn format_entry(
+    name: &str,
+    schema_id: &str,
+    source: VectorSource,
+    input_bytes: Vec<u8>,
+    intermediate_digests: BTreeMap<String, [u8; 32]>,
+    object_bytes: Vec<u8>,
+    expected_outcome: ExpectedOutcome,
+) -> VectorEntry {
+    VectorEntry {
+        name: name.to_owned(),
+        schema_id: schema_id.to_owned(),
+        suite_id: FORMAT_SUITE_ID.to_owned(),
+        source,
+        input_bytes,
+        intermediate_digests,
+        object_bytes,
+        expected_outcome,
+        file: format!("{name}.bin"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fehler und Helfer
 // ---------------------------------------------------------------------------
 
@@ -1826,6 +2662,77 @@ mod tests {
         assert_eq!(
             VectorManifest::from_json(&broken).unwrap_err().code(),
             "malformed_manifest"
+        );
+    }
+
+    /// Schreibt die Vektorfamilie `format/v1` in den Arbeitsbaum.
+    ///
+    /// `#[ignore]`, weil dieser Test SCHREIBT. Er ist der dokumentierte
+    /// Erzeugungslauf und wird ausdruecklich angefordert:
+    /// `cargo test -p ea-testkit -- --ignored emit_format_v1_vectors`.
+    #[test]
+    #[ignore = "writes into the working tree; run deliberately to regenerate"]
+    fn emit_format_v1_vectors() {
+        for (relative, manifest) in [
+            (FORMAT_V1_VALID_ROOT, format_v1_valid_manifest()),
+            (FORMAT_V1_INVALID_ROOT, format_v1_invalid_manifest()),
+        ] {
+            let root = workspace_root().join(relative);
+            manifest.emit(&root).unwrap();
+            assert!(verify_manifest_at(&root).unwrap().is_clean());
+        }
+    }
+
+    /// Die eingecheckten Objektmanifeste sind genau die Ausgabe des Erzeugers.
+    #[test]
+    fn the_committed_format_v1_families_are_exactly_what_the_generator_emits() {
+        for (relative, manifest) in [
+            (FORMAT_V1_VALID_ROOT, format_v1_valid_manifest()),
+            (FORMAT_V1_INVALID_ROOT, format_v1_invalid_manifest()),
+        ] {
+            let root = workspace_root().join(relative);
+            let text = fs::read_to_string(root.join(MANIFEST_FILE_NAME)).unwrap_or_else(|error| {
+                panic!("failed to read the committed manifest of {relative}: {error}")
+            });
+            assert_eq!(
+                text,
+                manifest.to_json().unwrap(),
+                "the committed manifest of {relative} must be byte-identical to the generator \
+                 output"
+            );
+            let report = verify_manifest_at(&root).unwrap();
+            assert!(report.is_clean(), "{:?}", report.mismatches);
+        }
+    }
+
+    /// Der Erzeuger benennt jeden Eintrag und jede Datei genau einmal, und die
+    /// Emission ist deterministisch.
+    #[test]
+    fn the_format_generator_names_every_entry_and_file_exactly_once() {
+        for (expected_entries, manifest) in [
+            (6_usize, format_v1_valid_manifest()),
+            (41, format_v1_invalid_manifest()),
+        ] {
+            assert_eq!(manifest.entries.len(), expected_entries);
+            let names = manifest
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(names.len(), manifest.entries.len());
+            for entry in &manifest.entries {
+                assert_eq!(entry.file, format!("{}.bin", entry.name));
+                assert_eq!(entry.suite_id, FORMAT_SUITE_ID);
+            }
+            assert_eq!(manifest.family, FORMAT_FAMILY);
+        }
+        assert_eq!(
+            format_v1_valid_manifest().to_json().unwrap(),
+            format_v1_valid_manifest().to_json().unwrap()
+        );
+        assert_eq!(
+            format_v1_invalid_manifest().to_json().unwrap(),
+            format_v1_invalid_manifest().to_json().unwrap()
         );
     }
 }

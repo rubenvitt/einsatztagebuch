@@ -789,6 +789,9 @@ dependencies = [
 name = "ea-testkit"
 version = "0.1.0"
 dependencies = [
+ "ea-crypto",
+ "ea-format",
+ "ea-types",
  "ed25519-dalek",
  "hex",
  "serde_json",

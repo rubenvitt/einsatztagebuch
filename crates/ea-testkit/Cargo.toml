@@ -6,6 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Die Objektvektoren der Familie `format/v1` entstehen mit denselben
+# oeffentlichen Konstruktoren, die auch der Bestand nutzt. Ein zweiter,
+# handgeschriebener Kodierer waere eine ZWEITE Quelle der Wahrheit: er koennte
+# vom Bestand abweichen, ohne dass es jemand merkt. Der Schutz liegt woanders —
+# die Bytes sind EINGEFROREN, und `ea-system-tests` fuehrt den echten Parser
+# gegen sie.
+ea-crypto.workspace = true
+ea-format.workspace = true
+ea-types.workspace = true
+# Der Schluesselabdruck des Ausstellers muss VOR dem Signieren feststehen;
+# `CoseSigner` gibt seinen oeffentlichen Schluessel nicht heraus, also wird er
+# aus dem deklarierten Seed abgeleitet. Dieselbe Kiste, die `ea-crypto` bereits
+# nutzt — keine neue externe Abhaengigkeit.
+ed25519-dalek.workspace = true
 # Hexdarstellung der eingefrorenen Bytes im Manifest. Das Manifest ist eine
 # Textdatei; Bytes stehen darin ausschliesslich als Kleinbuchstaben-Hex.
 hex.workspace = true
@@ -19,5 +33,5 @@ sha2.workspace = true
 # Nur zur Selbstpruefung der veroeffentlichten KAT-Schluesselpaare: der
 # oeffentliche Schluessel wird aus dem Seed neu abgeleitet und gegen die
 # Konstante gestellt. Die Konstanten sind damit gemessen, nicht behauptet.
-ed25519-dalek.workspace = true
+# `ed25519-dalek` steht dafuer schon unter `[dependencies]`.
 x25519-dalek.workspace = true

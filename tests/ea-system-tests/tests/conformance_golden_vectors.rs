@@ -38,7 +38,8 @@ use ea_crypto::{
     receipt_digest, record_digest, recovery_test_digest, renewal_input_digest, trust_anchor_hash,
     trust_digest, validate_unsigned_protocol_core, verification_report_hash,
 };
-use ea_schema::{CommonHeaderV1, NativeSourceV1, OperatorSnapshotV1};
+use ea_format::{ParsedArchiveObject, decode_exact_object};
+use ea_schema::{CommonHeaderV1, NativeSourceV1, OperatorSnapshotV1, SchemaRegistry};
 use ea_system_tests::workspace_root;
 use ea_testkit::{
     ED25519_RFC8032_TEST1_SEED, ED25519_RFC8032_TEST2_SEED, ExpectedOutcome,
@@ -1003,4 +1004,315 @@ fn scan_domain_strings(text: &str) -> Vec<String> {
         rest = &tail[end..];
     }
     literals
+}
+
+// ---------------------------------------------------------------------------
+// Die Vektorfamilie `format/v1`
+// ---------------------------------------------------------------------------
+//
+// Zwei Wurzeln, zwei Manifeste: `valid/` traegt je ein gueltiges Objekt der
+// sechs Objektfamilien, `invalid/` die Ablehnungsvektoren nach `design.md`
+// §22.1. Auch hier wird NICHTS gegen sich selbst verglichen — jeder Vektor
+// laeuft durch `ea_format::decode_exact_object`, und der zurueckkommende
+// Fehlercode wird gegen den eingefrorenen gestellt.
+
+/// Der Manifestpfad der gueltigen Objekte, relativ zur Arbeitsbaumwurzel.
+const FORMAT_VALID_MANIFEST_PATH: &str = "vectors/format/v1/valid/manifest.json";
+
+/// Der Manifestpfad der Ablehnungsvektoren.
+const FORMAT_INVALID_MANIFEST_PATH: &str = "vectors/format/v1/invalid/manifest.json";
+
+/// Die Wurzel der gueltigen Objekte.
+const FORMAT_VALID_ROOT: &str = "vectors/format/v1/valid";
+
+/// Die Wurzel der Ablehnungsvektoren.
+const FORMAT_INVALID_ROOT: &str = "vectors/format/v1/invalid";
+
+/// Die sechs Objektfamilien: Name, Schema-Identifikator, Objekttyp-Tag.
+///
+/// Die Tags sind LITERALE. Sie aus `ea-format` zu importieren machte den Vektor
+/// zur Tautologie: eine Umnummerierung zoege ihn stillschweigend mit.
+const FORMAT_FAMILIES: [(&str, &str, u8); 6] = [
+    ("eip", "eip-v1", 1),
+    ("eag", "eag-v1", 2),
+    ("esr", "esr-v1", 3),
+    ("ecp", "ecp-v1", 4),
+    ("etb", "etb-v1", 5),
+    ("eds", "eds-v1", 6),
+];
+
+/// Die Mutationen, die JEDE Familie tragen muss.
+const FORMAT_PER_FAMILY_MUTATIONS: [&str; 5] = [
+    "magic-byte-flip",
+    "object-type-tag",
+    "object-version",
+    "critical-extension",
+    "cose-payload-byte-flip",
+];
+
+/// Die familienspezifischen Mutationen an Manifest und Ciphertext.
+const FORMAT_TARGETED_MUTATIONS: [&str; 3] = [
+    "eds/signed-manifest-byte-flip",
+    "eip/ciphertext-byte-flip",
+    "eip/signed-manifest-byte-flip",
+];
+
+/// Die CBOR-Ebene: doppelte Keys, nicht-kanonische Laenge, Verschachtelung und
+/// die beiden Elementzahlgrenzen.
+const FORMAT_CBOR_MUTATIONS: [&str; 5] = [
+    "cbor/container-items-over-limit",
+    "cbor/duplicate-map-key",
+    "cbor/nesting-depth-17",
+    "cbor/non-canonical-length",
+    "cbor/total-items-over-limit",
+];
+
+/// Die drei Wertgrenzen, je um genau ein Byte ueberschritten.
+const FORMAT_LIMIT_MUTATIONS: [&str; 3] = [
+    "limits/cbor-text-or-bytes-plus-one",
+    "limits/ciphertext-length-plus-one",
+    "limits/plaintext-plus-one",
+];
+
+/// Der Schema-Identifikator, dessen Vektor NICHT von `ea-format` geprueft wird.
+///
+/// `MAX_PLAINTEXT_BYTES_V1` ist keine Formatgrenze: `ea-format` oeffnet den
+/// AEAD-Ciphertext nie. Die Grenze steht in `crates/ea-schema/src/v1.rs` und
+/// wird von `SchemaRegistry::validate` durchgesetzt. Der Vektor nennt deshalb
+/// seinen eigenen Pruefer.
+const FORMAT_SCHEMA_CHECKED_SCHEMA_ID: &str = "ea.incident";
+
+#[test]
+fn format_v1_valid_objects_and_single_byte_mutations_match_their_manifests() {
+    let root = workspace_root();
+    let valid_text = fs::read_to_string(root.join(FORMAT_VALID_MANIFEST_PATH))
+        .unwrap_or_else(|error| panic!("failed to read {FORMAT_VALID_MANIFEST_PATH}: {error}"));
+    let valid = VectorManifest::from_json(&valid_text)
+        .unwrap_or_else(|error| panic!("failed to parse {FORMAT_VALID_MANIFEST_PATH}: {error}"));
+    let invalid_text = fs::read_to_string(root.join(FORMAT_INVALID_MANIFEST_PATH))
+        .unwrap_or_else(|error| panic!("failed to read {FORMAT_INVALID_MANIFEST_PATH}: {error}"));
+    let invalid = VectorManifest::from_json(&invalid_text)
+        .unwrap_or_else(|error| panic!("failed to parse {FORMAT_INVALID_MANIFEST_PATH}: {error}"));
+
+    assert_eq!(valid.family, "format");
+    assert_eq!(valid.version, "v1/valid");
+    assert_eq!(invalid.family, "format");
+    assert_eq!(invalid.version, "v1/invalid");
+
+    for (path, manifest_root, manifest) in [
+        (FORMAT_VALID_ROOT, FORMAT_VALID_ROOT, &valid),
+        (FORMAT_INVALID_ROOT, FORMAT_INVALID_ROOT, &invalid),
+    ] {
+        let report = verify_manifest_at(&root.join(manifest_root))
+            .unwrap_or_else(|error| panic!("failed to verify {path}: {error}"));
+        assert_eq!(report.entries_checked, manifest.entries.len());
+        assert!(
+            report.is_clean(),
+            "the frozen files of {path} contradict their manifest: {:?}",
+            report.mismatches
+        );
+    }
+
+    check_format_valid_objects(&valid.entries);
+    check_format_invalid_objects(&invalid.entries);
+}
+
+/// Jedes gueltige Objekt parst, traegt sein Tag und seinen eingefrorenen
+/// Objekthash.
+fn check_format_valid_objects(entries: &[VectorEntry]) {
+    let recorded = entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<BTreeSet<_>>();
+    let expected = FORMAT_FAMILIES
+        .iter()
+        .map(|(family, _, _)| format!("{family}/valid"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recorded, expected,
+        "the valid manifest must hold exactly one object per family"
+    );
+    assert_eq!(entries.len(), expected.len(), "entry names must be unique");
+
+    for (family, schema_id, tag) in FORMAT_FAMILIES {
+        let vector = entry(entries, &format!("{family}/valid"));
+        expect_accepted(vector);
+        assert_eq!(vector.schema_id, schema_id);
+        assert_eq!(vector.suite_id, "EINSATZARCHIV-SUITE-1");
+        assert_eq!(
+            vector.object_bytes.get(..9).map(<[u8]>::to_vec),
+            Some(vec![0x85, 0x44, b'E', b'A', b'1', 0, tag, 1, 0x80]),
+            "{family} must carry the frozen nine-byte prefix"
+        );
+
+        let parsed = decode_exact_object(&vector.object_bytes)
+            .unwrap_or_else(|error| panic!("{} must parse, not {error}", vector.name));
+        let (exact, object_hash) = format_parsed_parts(&parsed);
+        assert_eq!(
+            exact, vector.object_bytes,
+            "{} must round-trip byte for byte",
+            vector.name
+        );
+        assert_eq!(
+            intermediate(vector, "objectHash"),
+            hex::encode(object_hash.as_bytes()),
+            "{} must record its own object hash",
+            vector.name
+        );
+    }
+}
+
+/// Jeder Ablehnungsvektor liefert exakt den eingefrorenen Fehlercode.
+fn check_format_invalid_objects(entries: &[VectorEntry]) {
+    let recorded = entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut expected = BTreeSet::new();
+    for (family, _, _) in FORMAT_FAMILIES {
+        for mutation in FORMAT_PER_FAMILY_MUTATIONS {
+            expected.insert(format!("{family}/{mutation}"));
+        }
+    }
+    for name in FORMAT_TARGETED_MUTATIONS
+        .into_iter()
+        .chain(FORMAT_CBOR_MUTATIONS)
+        .chain(FORMAT_LIMIT_MUTATIONS)
+    {
+        expected.insert(name.to_owned());
+    }
+    assert_eq!(
+        recorded, expected,
+        "the invalid manifest must cover exactly the mandated negative scope"
+    );
+    assert_eq!(entries.len(), expected.len(), "entry names must be unique");
+
+    for vector in entries {
+        let expected_code = rejection_code(vector);
+        let actual = format_rejection_of(vector);
+        assert_eq!(
+            actual, expected_code,
+            "{} must be rejected with the frozen code",
+            vector.name
+        );
+        check_format_mutation_origin(vector);
+    }
+}
+
+/// Ein Mutationsvektor nennt sein Urbild, und das Urbild ist selbst gueltig.
+///
+/// Ohne diese Pruefung koennte ein Vektor behaupten, aus einem gueltigen Objekt
+/// zu stammen, waehrend er in Wahrheit irgendwelche Bytes traegt — und die
+/// Zusage `Ein-Byte-Manipulation` waere unbelegt.
+fn check_format_mutation_origin(vector: &VectorEntry) {
+    let derived = FORMAT_FAMILIES
+        .iter()
+        .any(|(family, _, _)| vector.name.starts_with(&format!("{family}/")))
+        || vector.name == "limits/ciphertext-length-plus-one";
+    if !derived {
+        assert!(
+            vector.input_bytes.is_empty() && vector.intermediate_digests.is_empty(),
+            "{} is synthetic and must not claim an origin",
+            vector.name
+        );
+        return;
+    }
+
+    assert!(
+        !vector.input_bytes.is_empty(),
+        "{} must record the valid object it was derived from",
+        vector.name
+    );
+    decode_exact_object(&vector.input_bytes)
+        .unwrap_or_else(|error| panic!("the origin of {} must parse, not {error}", vector.name));
+    assert_eq!(
+        intermediate(vector, "sourceObjectHash"),
+        hex::encode(ea_crypto::object_hash(&vector.input_bytes).as_bytes()),
+        "{} must record the object hash of its own origin",
+        vector.name
+    );
+
+    let distance = format_byte_distance(&vector.input_bytes, &vector.object_bytes);
+    let expected = if vector.name.ends_with("/critical-extension") {
+        // Ein unbekanntes kritisches Feld ist keine Kippung, sondern ein
+        // EINGESCHOBENES Element: der leere Erweiterungsschlitz wird einelementig.
+        FormatDistance::Inserted(1)
+    } else if vector.name == "limits/ciphertext-length-plus-one" {
+        // Die angekuendigte Laenge waechst von einem zweibyteigen auf ein
+        // fuenfbyteiges kanonisches CBOR-Argument.
+        FormatDistance::Inserted(3)
+    } else {
+        FormatDistance::Flipped(1)
+    };
+    assert_eq!(
+        distance, expected,
+        "{} must differ from its origin exactly as its name says",
+        vector.name
+    );
+}
+
+/// Der Abstand zweier Vektoren: gekippte Bytes bei gleicher Laenge, sonst der
+/// Laengenzuwachs.
+#[derive(Debug, Eq, PartialEq)]
+enum FormatDistance {
+    Flipped(usize),
+    Inserted(usize),
+}
+
+fn format_byte_distance(origin: &[u8], mutated: &[u8]) -> FormatDistance {
+    if origin.len() == mutated.len() {
+        return FormatDistance::Flipped(
+            origin
+                .iter()
+                .zip(mutated)
+                .filter(|(left, right)| left != right)
+                .count(),
+        );
+    }
+    FormatDistance::Inserted(mutated.len() - origin.len())
+}
+
+/// Fuehrt den fuer diesen Vektor zustaendigen Pruefer aus.
+fn format_rejection_of(vector: &VectorEntry) -> String {
+    if vector.schema_id == FORMAT_SCHEMA_CHECKED_SCHEMA_ID {
+        // Die Laenge ist die Aussage dieses Vektors, und sie steht nirgends
+        // sonst: `spec_completeness.rs` pinnt die beiden anderen Wertgrenzen,
+        // diese nicht. Ohne die Zeile belegte der Vektor nur, dass IRGENDEINE
+        // zu lange Eingabe abgelehnt wird.
+        assert_eq!(
+            vector.object_bytes.len(),
+            ea_schema::PAYLOAD_PLAINTEXT_MAX_BYTES_V1 + 1,
+            "{} must exceed the plaintext limit by exactly one byte",
+            vector.name
+        );
+        return SchemaRegistry::v1()
+            .validate(FORMAT_SCHEMA_CHECKED_SCHEMA_ID, 1, &vector.object_bytes)
+            .map_or_else(|error| error.code().to_owned(), |_| "accepted".to_owned());
+    }
+    decode_exact_object(&vector.object_bytes)
+        .map_or_else(|error| error.code().to_owned(), |_| "accepted".to_owned())
+}
+
+/// Exakte Bytes und Objekthash eines geparsten Objekts, familienunabhaengig.
+fn format_parsed_parts(parsed: &ParsedArchiveObject) -> (Vec<u8>, ObjectHash) {
+    match parsed {
+        ParsedArchiveObject::Entry(value) => {
+            (value.exact_bytes().as_bytes().to_vec(), value.object_hash())
+        }
+        ParsedArchiveObject::Grant(value) => {
+            (value.exact_bytes().as_bytes().to_vec(), value.object_hash())
+        }
+        ParsedArchiveObject::Receipt(value) => {
+            (value.exact_bytes().as_bytes().to_vec(), value.object_hash())
+        }
+        ParsedArchiveObject::Evidence(value) => {
+            (value.exact_bytes().as_bytes().to_vec(), value.object_hash())
+        }
+        ParsedArchiveObject::Trust(value) => {
+            (value.exact_bytes().as_bytes().to_vec(), value.object_hash())
+        }
+        ParsedArchiveObject::Destroyed(value) => {
+            (value.exact_bytes().as_bytes().to_vec(), value.object_hash())
+        }
+    }
 }
