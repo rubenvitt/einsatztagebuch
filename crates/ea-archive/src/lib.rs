@@ -6,6 +6,37 @@
 //! Exact-Object-Praefix klassifiziert, nie am Dateinamen. Das Inventar
 //! bedient `ea_trust::TrustObjectSource` unmittelbar, sodass `ea-trust`
 //! nichts ueber das Archivlayout erfaehrt.
+//!
+//! # Das Portverhaeltnis
+//!
+//! [`ArchiveSource`] ist der NEUE, BREITE Port ueber alle Archivbytes;
+//! `ea_trust::TrustObjectSource` bleibt unveraendert der schmale,
+//! archiv-agnostische Trust-Port. [`ArchiveInventory`] IMPLEMENTIERT den
+//! schmalen Port ueber seinem beschraenkten Trust-Index — es wird nichts
+//! dupliziert und keine Zwischenliste gebaut: der Visitor wird beim Durchlaufen
+//! unmittelbar gerufen, und der Durchlauf haelt VOR dem naechsten Element an,
+//! sobald der Visitor einen Fehler liefert. Die Schranken
+//! `ea_trust::MAX_TRUST_OBJECTS_V1` und `MAX_TOTAL_TRUST_OBJECT_BYTES_V1`
+//! gelten unveraendert und werden hier nicht neu definiert.
+//!
+//! # Drei Inventarklassen (design.md 11.4)
+//!
+//! Das 9-Byte-Praefix entscheidet, nie der Dateiname:
+//!
+//! 1. Bytes MIT Exact-Object-Praefix sind Archivobjekte. Sie zaehlen in
+//!    `archiveObjectCount`, jede Sequenz einzeln und unabhaengig von
+//!    Parse-Erfolg und Duplikat. Ein Parse-Fehlschlag erzeugt PAARWEISE einen
+//!    [`FormatErrorEntry`] und einen [`QuarantinedObject`] mit Grund
+//!    [`QuarantineReason::Malformed`].
+//! 2. Bytes OHNE dieses Praefix sind KEIN Archivobjekt. Sie werden nie
+//!    isoliert und zaehlen ausschliesslich in `nonObjectFileCount` — ohne diese
+//!    Trennung isolierte jedes normkonforme Archiv sein eigenes
+//!    [`README_FORMAT_FILE_V1`] und waere nie vollstaendig verifiziert.
+//! 3. Der Trust Anchor kommt als Parameter und nie aus dem Bestand; er faellt
+//!    in keine der beiden Zaehlklassen.
+//!
+//! Invariante: `archiveObjectCount + nonObjectFileCount` ist die Gesamtzahl der
+//! von [`ArchiveSource`] gelieferten Bytesequenzen.
 
 mod error;
 mod inventory;

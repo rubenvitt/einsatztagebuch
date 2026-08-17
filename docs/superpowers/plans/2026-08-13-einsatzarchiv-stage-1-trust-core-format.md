@@ -1507,7 +1507,7 @@ Drei konkrete Fallen: die dateisystemgestützte `ArchiveSource`-Implementierung 
 
 **Adapterverhältnis, verbindlich.** `ArchiveSource` ist der neue, breitere Port über **alle** Archivbytes; `TrustObjectSource` (`crates/ea-trust/src/source.rs`) bleibt unverändert der schmale, archiv-agnostische Trust-Port. `ea-archive` liefert den offiziellen `ArchiveInventory`-Adapter, der `TrustObjectSource` **implementiert** — es wird nichts dupliziert, und `ea-trust` erfährt nichts über Archivlayout. Der Adapter ruft den Visitor direkt beim Durchlaufen seines beschränkten Trust-Index auf, hält vor dem nächsten Element an, sobald der Visitor einen Fehler liefert, und baut ausdrücklich **keinen** zwischenzeitlichen unbeschränkten `Vec` von Hashes (`2026-08-14-einsatzarchiv-task-8-trust-time-implementation.md:614-617`). Die Schranken `MAX_TRUST_OBJECTS_V1` und `MAX_TOTAL_TRUST_OBJECT_BYTES_V1` gelten unverändert und werden nicht neu definiert.
 
-- [ ] **Step 1: Write verification-order and filename-independence tests**
+- [x] **Step 1: Write verification-order and filename-independence tests**
 
 ```rust
 #[test]
@@ -1551,13 +1551,13 @@ Die neun Gate-Bezeichner sind normativ in `design.md` §14.1 festgelegt und gelt
 
 **Signaturfestlegung:** `fixtures::canonical_paths()` und `fixtures::randomized_paths()` liefern je einen Typ, der `ArchiveSource` implementiert — keine `Vec<PathBuf>`. Der Aufruf `&canonical` ist damit die Unsize-Coercion auf `&dyn ArchiveSource`, kein Typwechsel gegenüber der Signatur in Step 3.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run: `cargo test --locked -p ea-chain -p ea-verify`
 
 Expected: FAIL because inventory and proof-state verification do not exist.
 
-- [ ] **Step 3: Implement reconstruction from bytes and ordered proof states**
+- [x] **Step 3: Implement reconstruction from bytes and ordered proof states**
 
 ```rust
 pub fn verify_archive(
@@ -1575,13 +1575,13 @@ pub fn verify_entry(
 
 Implement the exact archive layout `trust/{organization.etb,registry-events/,operator-bindings/,authorizations/}`, `entries/`, `destroyed-entries/`, `grants/`, `receipts/`, `checkpoints/`, `destructions/<destruction-id>/{events,attestations}/`, `format/{schemas,transformations,compatibility-matrix.json}`, `recovery-reports/`, and `README-FORMAT.txt`. Inventory all bytes by parsed type and object hash, treating every filename only as a hint; quarantine malformed/duplicate/conflicting objects, reconstruct Trust and chain from content, and enforce Genesis sequence 0 followed by exact increments and predecessor hashes. Verify format, Trust/Registry/Writer, signed manifest and hashes, transition, grant plan/Recovery grant, Receipt/checkpoint/evidence when present, and recipient grant in that order. A valid `.eds` preserves chain identity and becomes `AuthorizedDestroyed`; missing `.eip` without a complete Stub/authorization/evidence chain remains `UnexplainedGap`.
 
-- [ ] **Step 4: Run chain, archive, and mutation tests**
+- [x] **Step 4: Run chain, archive, and mutation tests**
 
 Run: `cargo test --locked -p ea-chain -p ea-archive -p ea-verify`
 
 Expected: PASS; gap, swap, fork, rollback, orphan grant, unknown Writer, invalid Stub, and filename manipulation have distinct deterministic outcomes.
 
-- [ ] **Step 5: Commit verification pipeline**
+- [x] **Step 5: Commit verification pipeline**
 
 ```bash
 git add crates/ea-chain crates/ea-archive crates/ea-verify Cargo.toml Cargo.lock

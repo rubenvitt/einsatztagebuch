@@ -17,6 +17,60 @@
 //! Unit-Tests unauffaellig und kippte den Schematest nur sporadisch. Alle
 //! Sammlungen liegen in `BTreeMap`/`BTreeSet` ueber genau dem
 //! `x-ea-unique-key` ihres Schemas.
+//!
+//! # Die Pipeline
+//!
+//! [`verify_archive`] laeuft die neun Gates aus design.md 14.1 in genau der
+//! Reihenfolge von [`GATE_ORDER_V1`] — `format`, `trust`, `registry`,
+//! `manifest-signature`, `chain-position`, `grant-plan`, `receipt`, `evidence`,
+//! `recipient-grant` — und danach, AUSDRUECKLICH ALS KEIN GATE, die
+//! Entkapselung [`DECAPSULATION_EVENT_V1`]. Das Protokoll eines
+//! [`GateObserver`] ist stets ein PRAEFIX von [`GATE_ORDER_V1`], gefolgt von
+//! hoechstens einem Entkapselungsereignis; gemeldet wird der Eintritt in eine
+//! STUFE, nicht der Eintritt je Objekt.
+//!
+//! `authorizedDestructions` entsteht ZULETZT und still: ein zehnter
+//! Protokolleintrag waere eine erfundene Stufe. Zuletzt, weil die
+//! Registrierungslinie sich nur VORWAERTS nachziehen laesst und die
+//! `authorizationSequence` einer Vernichtung hinter den Eintragssequenzen
+//! liegt.
+//!
+//! # Das Portverhaeltnis
+//!
+//! Diese Crate besitzt keinen eigenen Zugriff auf einen Bestand. Sie bekommt
+//! `ea_archive::ArchiveSource` als Parameter, laesst `ea_archive::ArchiveInventory`
+//! daraus klassifizieren und reicht dasselbe Inventar als
+//! `ea_trust::TrustObjectSource` weiter. Kettenaussagen kommen aus `ea-chain`,
+//! das seinerseits nur Werte sieht. Uhr, Trust Anchor und Empfaengerschluessel
+//! sind Parameter in [`VerifyOptions`].
+//!
+//! # Der Reportvertrag
+//!
+//! [`VerificationReportV1`] ist ein reiner Rust-Wert; `to_canonical_json`
+//! schreibt ihn ueber einen handgeschriebenen kanonischen Schreiber. Gepinnt
+//! und nicht verhandelbar:
+//!
+//! - Ein Objekt erscheint ENTWEDER in `objectResults` ODER in genau einem
+//!   Fehler-/Quarantaenearray, niemals in beidem.
+//! - `registryVersions` und `publicKeyThumbprints` sind Nachweise des
+//!   GEPRUEFTEN: die Version stammt nur aus Objekten, die Gate
+//!   `manifest-signature` bestanden haben, der Abdruck nur aus einer
+//!   ERFOLGREICHEN Signaturpruefung. Aus unauthentischen Bytes stammen
+//!   ausschliesslich Zaehler und Fehlereintraege.
+//! - `chainHead` ist Pflicht und nie null; `chainId` ist IMMER
+//!   `anchor.chain_id()`. Ohne verifizierten Kopf gilt das Sentinel aus
+//!   [`ChainHeadV1::sentinel`] — Sequenz null und ein Nullhash, und
+//!   ausdruecklich NICHT `anchor.genesis_entry_hash()`, das einen verifizierten
+//!   Genesis-Eintrag behaupten wuerde.
+//! - [`VerificationReportV1::is_fully_verified`] ist ein ABGELEITETER Accessor
+//!   und kein JSON-Feld; das Schema ist `additionalProperties: false`.
+//!   `notServerConfirmed` und ein fehlender Empfaengerschluessel senken ihn NIE.
+//! - `reportHash` ist SHA-256 ueber die kanonischen Bytes OHNE `reportHash`,
+//!   `reportSignature` und `runtimeMetadata`.
+//!
+//! Ein Befund ueber ein einzelnes Objekt ist NIE ein `Err`. Auch ein
+//! Fehlschlag von Gate `trust` liefert `Ok`, ist aber fail-closed fuer den
+//! ganzen Bestand: es wird ueber keinen Eintrag etwas ausgesagt.
 
 mod archive;
 mod destruction;
