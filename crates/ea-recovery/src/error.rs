@@ -105,7 +105,26 @@ pub enum RecoveryError {
     /// sondern Bedingung des Kommandos. Wo sie sich nicht setzen laesst, wird
     /// nicht ersatzweise ohne sie geschrieben, sondern gar nicht: Exitcode 21,
     /// „nicht unterstuetzte Plattformfaehigkeit".
+    ///
+    /// `export` faellt unter dieselbe Zusicherung. Seine Bytes sind zwar
+    /// verschluesselt, aber `design.md`:1779 nennt beide Kommandos in EINEM
+    /// Satz, und die Dateinamen eines Exports geben die Kettensequenzen des
+    /// Bestands preis.
     RestrictivePermissionsUnsupported,
+    /// Die benannte Exportquelle ist kein Bestand im Dateisystem.
+    ///
+    /// Die Grammatik nennt `<archive-or-server>`; Stage 1 hat keine
+    /// Serverquelle. Ein Argument, das kein existierendes Verzeichnis ist, ist
+    /// deshalb eine NICHT UNTERSTUETZTE Quellart und ausdruecklich kein
+    /// Dateisystemfehler: Exitcode 21 und nicht 20. Der Unterschied ist der
+    /// ganze Zweck — 20 hiesse „ich konnte den Schritt nicht ausfuehren" und
+    /// liesse einen Betreiber nach einer vollen Platte suchen, wo dieses
+    /// Bauwerk schlicht keine Serverquelle kennt.
+    ///
+    /// Ein Verzeichnis, das EXISTIERT und sich nicht lesen laesst, bleibt
+    /// dagegen [`Self::Io`] und damit 20. Die Grenze verlaeuft zwischen „diese
+    /// Quellart trage ich nicht" und „an dieser Quelle ist etwas gescheitert".
+    UnsupportedSource,
 }
 
 impl RecoveryError {
@@ -124,6 +143,7 @@ impl RecoveryError {
             Self::RestrictivePermissionsUnsupported => {
                 "EA-RECOVERY-RESTRICTIVE-PERMISSIONS-UNSUPPORTED"
             }
+            Self::UnsupportedSource => "EA-RECOVERY-UNSUPPORTED-SOURCE",
         }
     }
 }

@@ -9,23 +9,15 @@
 //! deshalb durch [`verified`], und [`verified`] ruft ausschliesslich
 //! [`ea_recovery::verify_directory`].
 //!
-//! # Warum ein Handler noch ein Rumpf ist
+//! # `decrypt` UND `export` gehen NICHT durch [`verified`]
 //!
-//! `export` entsteht in einem eigenen Task. Der Rumpf liefert
-//! [`ExitCode::Unsupported`] (21) und ausdruecklich nicht [`ExitCode::Usage`]
-//! (2): der Code 2 gehoert der Grammatikpruefung und der Zielpruefung eines
-//! schreibenden Kommandos — beides sind Aussagen ueber den AUFRUF. Ein Rumpf,
-//! der ihn schon lieferte, sagte dasselbe ueber einen Lauf, den es gar nicht
-//! gibt, und machte den Nachweis beider wertlos.
-//!
-//! # `decrypt` geht NICHT durch [`verified`]
-//!
-//! Kein Sonderweg, sondern derselbe Weg eine Ebene tiefer: `decrypt` braucht
-//! Bericht UND Klartext aus EINEM eingelesenen Bestand, und die Reihenfolge
-//! seiner Schritte ist der Gegenstand des Kommandos. Beides wohnt deshalb
-//! geschlossen in `ea_recovery::decrypt_directory`, das seinerseits
-//! ausschliesslich durch dieselbe Verifikationsfassade laeuft. Auch hier ruft
-//! kein Kommandopfad `verify_archive`.
+//! Kein Sonderweg, sondern derselbe Weg eine Ebene tiefer: beide brauchen den
+//! Bericht UND die Bytes aus EINEM eingelesenen Bestand, und die Reihenfolge
+//! ihrer Schritte ist der Gegenstand des jeweiligen Kommandos. Beides wohnt
+//! deshalb geschlossen in `ea_recovery::decrypt_directory` beziehungsweise
+//! `ea_recovery::export_directory`, die ihrerseits ausschliesslich durch
+//! dieselbe Verifikationsfassade laufen. Auch hier ruft kein Kommandopfad
+//! `verify_archive`.
 
 pub mod decrypt;
 pub mod export;
@@ -58,7 +50,7 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
             output,
         } => decrypt::run(invocation, archive, key, output, now),
         Command::Report { archive, output } => report::run(invocation, archive, output, now),
-        Command::Export { .. } => export::run(invocation),
+        Command::Export { source, output } => export::run(invocation, source, output, now),
     }
 }
 

@@ -23,6 +23,7 @@
 mod decrypt;
 mod error;
 mod exit;
+mod export;
 mod report;
 mod source;
 mod target;
@@ -34,6 +35,7 @@ pub use decrypt::{
 };
 pub use error::RecoveryError;
 pub use exit::{ExitCode, exit_code_for, exit_code_for_error};
+pub use export::{ExportV1, export_directory};
 #[cfg(unix)]
 pub use report::OUTPUT_FILE_MODE_V1;
 pub use report::{RuntimeMetadataV1, emit_report_document, write_report_document};

@@ -62,7 +62,9 @@ use ea_verify::{ObjectResultKindV1, ObjectTypeV1, VerificationReportV1, VerifyEr
 use crate::{
     ExitCode, FsArchiveSource, RecoveryError, exit_code_for,
     report::create_new_file,
-    target::{output_directory_is_free, prepare_output_directory},
+    target::{
+        output_directory_is_free, prepare_output_directory, restrictive_permissions_available,
+    },
     verify::verify_source,
 };
 
@@ -206,24 +208,6 @@ pub fn recipient_key_thumbprint(
     Ok(CanonicalPublicCoseKey::x25519(*key.public_key().as_bytes())
         .map_err(|_| RecoveryError::KeySource)?
         .thumbprint())
-}
-
-/// Ob diese Plattform restriktive Rechte setzen kann.
-#[cfg(unix)]
-const fn restrictive_permissions_available() -> Result<(), RecoveryError> {
-    Ok(())
-}
-
-/// Auf dieser Plattform kann `decrypt` seine Zusicherung nicht halten.
-///
-/// Windows ist nach der Global Constraint des Stage-1-Plans (Zeile 23) eine
-/// ZIELPLATTFORM. Ein blosser `#[cfg(unix)]`-Rechteblock ohne diesen Gegenzweig
-/// uebersetzte dort anstandslos und liesse die Zusicherung STILL fallen — der
-/// Klartext laege mit den Vorgaberechten des Elternverzeichnisses da. Deshalb
-/// wird hier verweigert statt abgeschwaecht.
-#[cfg(not(unix))]
-const fn restrictive_permissions_available() -> Result<(), RecoveryError> {
-    Err(RecoveryError::RestrictivePermissionsUnsupported)
 }
 
 /// Die 32 Schluesselbytes aus dem Dateiinhalt, oder nichts.

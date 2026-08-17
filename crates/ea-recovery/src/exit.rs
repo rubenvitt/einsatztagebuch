@@ -189,6 +189,11 @@ pub const fn exit_code_for_error(error: &RecoveryError) -> ExitCode {
         // „Nicht unterstuetzte Plattformfaehigkeit". Kein Dateisystemfehler:
         // es ist nichts misslungen, es ist etwas nicht vorhanden.
         RecoveryError::RestrictivePermissionsUnsupported => ExitCode::Unsupported,
+        // Dieselbe Zeile der Norm, andere Haelfte: eine nicht unterstuetzte
+        // PROVIDERFAEHIGKEIT. Stage 1 kennt keine Serverquelle, und eine Quelle,
+        // die kein Verzeichnis ist, wird deshalb nicht ersatzweise als eine
+        // gelesen. Ausdruecklich nicht 20 — es ist nichts misslungen.
+        RecoveryError::UnsupportedSource => ExitCode::Unsupported,
         RecoveryError::Verify(error) => match error {
             VerifyError::Archive(error) => match error {
                 ArchiveError::Unavailable => ExitCode::Io,

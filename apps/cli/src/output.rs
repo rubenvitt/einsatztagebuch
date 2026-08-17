@@ -108,6 +108,30 @@ pub fn print_report_signing_refusal() {
     eprintln!("einsatzarchiv: {REPORT_SIGNING_REFUSAL_V1}");
 }
 
+/// Die Ablehnung einer Quelle, die kein Dateisystembestand ist, Wort fuer Wort.
+///
+/// # Sie NENNT die fehlende Faehigkeit
+///
+/// Die Grammatik nennt `<archive-or-server>`; Stage 1 hat keine Serverquelle.
+/// Wer eine Adresse oder einen Tippfehler uebergibt, soll erfahren, dass diese
+/// Stufe ausschliesslich ein Verzeichnis im Dateisystem exportiert — und nicht
+/// bloss einen Fehlercode sehen, aus dem er auf eine volle Platte schliesst.
+/// Der Exitcode ist 21 und ausdruecklich nicht 20: es ist nichts misslungen, es
+/// ist etwas nicht vorhanden.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers; die
+/// Begruendungen bleiben in den Doc-Kommentaren.
+const EXPORT_SOURCE_REFUSAL_V1: &str = "export takes a file system archive directory only: this \
+     stage has no server source, and the given path is not an existing directory";
+
+/// Druckt die Ablehnung der Exportquelle auf stderr.
+///
+/// stdout bleibt LEER: es ist kein Bericht entstanden, ueber den etwas zu sagen
+/// waere, und im Ziel steht nichts.
+pub fn print_export_source_refusal() {
+    eprintln!("einsatzarchiv: {EXPORT_SOURCE_REFUSAL_V1}");
+}
+
 /// Schreibt `bytes` als Kleinbuchstaben-Hex.
 ///
 /// Von Hand und nicht ueber `hex`: die Kiste ist eine DEV-Dependency dieses

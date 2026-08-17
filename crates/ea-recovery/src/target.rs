@@ -28,6 +28,32 @@ use crate::RecoveryError;
 #[cfg(unix)]
 pub const OUTPUT_DIRECTORY_MODE_V1: u32 = 0o700;
 
+/// Ob diese Plattform restriktive Rechte setzen kann.
+#[cfg(unix)]
+pub(crate) const fn restrictive_permissions_available() -> Result<(), RecoveryError> {
+    Ok(())
+}
+
+/// Auf dieser Plattform kann kein schreibendes Kommando seine Zusicherung
+/// halten.
+///
+/// Windows ist nach der Global Constraint des Stage-1-Plans (Zeile 23) eine
+/// ZIELPLATTFORM. Ein blosser `#[cfg(unix)]`-Rechteblock ohne diesen Gegenzweig
+/// uebersetzte dort anstandslos und liesse die Zusicherung STILL fallen — die
+/// Zieldateien laegen mit den Vorgaberechten des Elternverzeichnisses da.
+/// Deshalb wird hier verweigert statt abgeschwaecht.
+///
+/// Der Zweig gilt fuer `decrypt` UND `export`. Beim Export sind die kopierten
+/// Bytes zwar verschluesselt, aber `design.md`:1779 stellt beide Kommandos in
+/// denselben Satz: sie schreiben „ausschliesslich in ein neu erzeugtes oder
+/// leeres Ziel mit restriktiven Rechten". Ein Export mit weltweit lesbaren
+/// Rechten legte ausserdem saemtliche Dateinamen und damit die Kettensequenzen
+/// des Bestands offen.
+#[cfg(not(unix))]
+pub(crate) const fn restrictive_permissions_available() -> Result<(), RecoveryError> {
+    Err(RecoveryError::RestrictivePermissionsUnsupported)
+}
+
 /// Prueft, ob `output` als Ziel taugt — OHNE etwas anzulegen.
 ///
 /// # Warum die Pruefung von der Vorbereitung getrennt ist
@@ -124,6 +150,40 @@ pub fn prepare_output_directory(output: &Path) -> Result<(), RecoveryError> {
     // fuer ein selbst angelegtes.
     tighten_directory(output)?;
     Ok(())
+}
+
+/// Legt ein UNTERVERZEICHNIS des bereits vorbereiteten Ziels an.
+///
+/// # Warum es diese zweite Funktion gibt und nicht `create_dir_all`
+///
+/// `create_dir_all` legt jede fehlende Ebene mit den VORGABERECHTEN an — unter
+/// der ueblichen `umask` also 0755. Ein Export, der seine Zwischenverzeichnisse
+/// so erzeugte, liesse die Namen jedes Bestandsstuecks und damit dessen
+/// Kettensequenzen weltweit lesbar zurueck, obwohl die Dateien darin 0600
+/// tragen. Jede Ebene entsteht deshalb einzeln ueber dasselbe
+/// [`create_directory`], das schon [`prepare_output_directory`] benutzt.
+///
+/// # EIN VORGEFUNDENES VERZEICHNIS IST HIER KEIN BELEGTES ZIEL
+///
+/// Der einzige Aufrufer legt seine Ebenen der Reihe nach an, und zwei Dateien
+/// desselben Unterverzeichnisses treffen die zweite Ebene ein zweites Mal. Das
+/// Ziel selbst wurde zuvor als NEU ODER LEER erwiesen; was hier bereits steht,
+/// stammt deshalb aus DIESEM Lauf. Ein `AlreadyExists` ist damit kein Befund
+/// ueber den Aufruf, sondern der Regelfall.
+///
+/// Der Fall „hier steht bereits eine DATEI dieses Namens" bleibt trotzdem
+/// fail-closed: das anschliessende [`crate::report::create_new_file`] legt
+/// keine Datei in einer Datei an und meldet [`RecoveryError::Io`].
+///
+/// # Errors
+///
+/// [`RecoveryError::Io`] fuer jeden Dateisystemfehler ausser `AlreadyExists`.
+pub(crate) fn create_output_subdirectory(path: &Path) -> Result<(), RecoveryError> {
+    match create_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Setzt die Rechte eines VORGEFUNDENEN Zielverzeichnisses auf genau
