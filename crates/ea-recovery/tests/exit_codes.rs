@@ -33,8 +33,12 @@
 //!   statt die Fassade dafuer zu verbreitern.
 //! - `Unsupported` (21) gehoert zur abgesetzten Berichtssignatur, die aus
 //!   Task 10 herausgenommen wurde.
-//! - `Usage` (2) ist eine AUFRUFFORM und kein Befund; er entsteht erst im
-//!   Argumentparser von Task 5.
+//! - `Usage` (2) ist eine AUFRUFFORM und kein Befund; aus einem BERICHT
+//!   entsteht er nie. Aus einem LAUF entsteht er an genau einer Stelle dieser
+//!   Crate, naemlich wenn das Ziel eines schreibenden Kommandos bereits belegt
+//!   ist — gemessen in
+//!   [`an_occupied_output_is_a_usage_error_and_leaves_the_file_untouched`].
+//!   Die uebrige Aufrufform prueft der Argumentparser der CLI.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -45,7 +49,7 @@ use ea_crypto::HpkeRecipientPrivateKey;
 use ea_format::EIP_PREFIX_V1;
 use ea_recovery::{
     ExitCode, RecoveryError, exit_code_for, exit_code_for_error, load_trust_anchor,
-    verify_directory,
+    verify_directory, write_report_document,
 };
 use ea_trust::TrustAnchorV1;
 use ea_types::{KeyThumbprint, UnixMillis};
@@ -446,4 +450,75 @@ fn a_valid_trust_anchor_file_loads_into_the_same_anchor() {
             && loaded.root_key_thumbprint() == built.anchor().root_key_thumbprint(),
         "der geladene Anker muss derselbe sein wie der des Bestands"
     );
+}
+
+/// Ein BELEGTES Ziel endet mit 2, und die vorhandene Datei bleibt unberuehrt.
+///
+/// # Warum das hier steht und nicht nur in `apps/cli`
+///
+/// Die Zielregeln und die Rechtevergabe wohnen in dieser Crate, damit sie an
+/// genau EINER Stelle stehen und OHNE Prozessstart messbar sind. `decrypt` und
+/// `export` erben sie unveraendert; ein Nachweis, der einen Prozess braeuchte,
+/// muesste je Kommando wiederholt werden.
+///
+/// Gemessen wird beides: dass ein belegtes Ziel ein KONFIGURATIONSFEHLER ist
+/// (2) und kein Dateisystemfehler (20), und dass ein
+/// Wiederherstellungswerkzeug die vorgefundene Datei nicht antastet — sie
+/// koennte genau das sein, was jemand retten wollte.
+#[test]
+fn an_occupied_output_is_a_usage_error_and_leaves_the_file_untouched() {
+    let root = temp_dir("occupied-output");
+    let occupied = root.path().join("bericht.json");
+    let previous = b"ein fremder Inhalt, der bleiben muss";
+    fs::write(&occupied, previous).expect("die Zieldatei muss anlegbar sein");
+
+    let Err(error) = write_report_document("{}", &occupied) else {
+        panic!("ein belegtes Ziel darf nicht beschrieben werden");
+    };
+    assert!(
+        matches!(error, RecoveryError::OutputExists),
+        "ein belegtes Ziel ist kein Dateisystemfehler, gemessen {error:?}"
+    );
+    assert_eq!(exit_code_for_error(&error), ExitCode::Usage);
+    assert_eq!(
+        fs::read(&occupied).expect("die Zieldatei muss lesbar bleiben"),
+        previous,
+        "die vorgefundene Datei darf nicht angetastet werden"
+    );
+
+    // Die neue Variante faellt nicht aus der Global Constraint heraus: auch sie
+    // nennt in keiner Darstellung einen Hostpfad.
+    let host_path = occupied.display().to_string();
+    for rendered in [format!("{error}"), format!("{error:?}")] {
+        assert!(
+            !rendered.contains(&host_path) && !rendered.contains("bericht.json"),
+            "die Fehlerdarstellung nennt einen Hostpfad: {rendered}"
+        );
+    }
+
+    // Der Gegenfall: ein FREIES Ziel entsteht, traegt genau die uebergebenen
+    // Bytes und gehoert unter unix dem Eigentuemer allein. Ohne ihn bewiese der
+    // Fall oben nur, dass dieser Schreiber IRGENDWAS ablehnt.
+    let fresh = root.path().join("frisch.json");
+    write_report_document("{}", &fresh).expect("ein freies Ziel muss beschreibbar sein");
+    assert_eq!(
+        fs::read(&fresh).expect("das neue Ziel muss lesbar sein"),
+        b"{}",
+        "geschrieben wird genau das uebergebene Dokument"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = fs::metadata(&fresh)
+            .expect("das neue Ziel muss existieren")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            ea_recovery::OUTPUT_FILE_MODE_V1,
+            "das neue Ziel muss 0600 tragen, war: {:o}",
+            mode & 0o777
+        );
+    }
 }

@@ -22,10 +22,14 @@
 
 mod error;
 mod exit;
+mod report;
 mod source;
 mod verify;
 
 pub use error::RecoveryError;
 pub use exit::{ExitCode, exit_code_for, exit_code_for_error};
+#[cfg(unix)]
+pub use report::OUTPUT_FILE_MODE_V1;
+pub use report::{RuntimeMetadataV1, emit_report_document, write_report_document};
 pub use source::FsArchiveSource;
 pub use verify::{load_trust_anchor, verify_directory};

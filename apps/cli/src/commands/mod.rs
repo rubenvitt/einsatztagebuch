@@ -9,12 +9,14 @@
 //! deshalb durch [`verified`], und [`verified`] ruft ausschliesslich
 //! [`ea_recovery::verify_directory`].
 //!
-//! # Warum drei Handler noch Ruempfe sind
+//! # Warum zwei Handler noch Ruempfe sind
 //!
-//! `decrypt`, `report` und `export` entstehen in eigenen Tasks. Die Ruempfe
+//! `decrypt` und `export` entstehen in eigenen Tasks. Die Ruempfe
 //! liefern [`ExitCode::Unsupported`] (21) und ausdruecklich nicht
-//! [`ExitCode::Usage`] (2): der Code 2 gehoert der Grammatikpruefung, und ein
-//! Rumpf, der ihn schon lieferte, machte deren Nachweis wertlos.
+//! [`ExitCode::Usage`] (2): der Code 2 gehoert der Grammatikpruefung und der
+//! Zielpruefung eines schreibenden Kommandos — beides sind Aussagen ueber den
+//! AUFRUF. Ein Rumpf, der ihn schon lieferte, sagte dasselbe ueber einen Lauf,
+//! den es gar nicht gibt, und machte den Nachweis beider wertlos.
 
 pub mod decrypt;
 pub mod export;
@@ -42,7 +44,7 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         Command::Verify { archive } => verify::run(invocation, archive, now),
         Command::List { archive } => list::run(invocation, archive, now),
         Command::Decrypt { .. } => decrypt::run(invocation),
-        Command::Report { .. } => report::run(invocation),
+        Command::Report { archive, output } => report::run(invocation, archive, output, now),
         Command::Export { .. } => export::run(invocation),
     }
 }

@@ -33,8 +33,12 @@ pub enum ExitCode {
     Success = 0,
     /// Aufruf- oder Konfigurationsfehler.
     ///
-    /// Entsteht AUSSCHLIESSLICH im Argumentparser und nie aus einem Bericht:
-    /// eine Aufrufform ist kein Befund ueber einen Bestand.
+    /// Entsteht NIE aus einem Bericht — eine Aufrufform ist kein Befund ueber
+    /// einen Bestand —, sondern an genau zwei Stellen: im Argumentparser der
+    /// CLI und bei der Zielpruefung eines schreibenden Kommandos
+    /// ([`RecoveryError::OutputExists`]). Beide sagen dasselbe: so, wie dieser
+    /// Lauf aufgerufen wurde, wird er nicht ausgefuehrt; am Bestand liegt es
+    /// nicht.
     Usage = 2,
     /// Format-, Hash- oder Signaturfehler.
     Integrity = 10,
@@ -164,6 +168,11 @@ pub const fn exit_code_for_error(error: &RecoveryError) -> ExitCode {
         RecoveryError::ArchiveTooLarge => ExitCode::Integrity,
         // `design.md`:1765: „Jede Abweichung endet mit Exitcode 12."
         RecoveryError::TrustAnchor(_) => ExitCode::Trust,
+        // Ein belegtes Ziel ist ein KONFIGURATIONSFEHLER und kein
+        // Dateisystemfehler: geschrieben wurde nichts, gefunden wurde nichts,
+        // und der Lauf ist mit einem anderen `--output` unveraendert
+        // wiederholbar. Die Begruendung steht an `RecoveryError::OutputExists`.
+        RecoveryError::OutputExists => ExitCode::Usage,
         RecoveryError::Verify(error) => match error {
             VerifyError::Archive(error) => match error {
                 ArchiveError::Unavailable => ExitCode::Io,

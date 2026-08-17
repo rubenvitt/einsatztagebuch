@@ -45,6 +45,19 @@ pub enum RecoveryError {
     TrustAnchor(TrustError),
     /// Die Verifikationspipeline konnte kein Urteil bilden.
     Verify(VerifyError),
+    /// Das Ziel eines schreibenden Kommandos EXISTIERT BEREITS.
+    ///
+    /// Eine eigene Variante und ausdruecklich kein
+    /// [`Self::Io`]`(ErrorKind::AlreadyExists)`: die beiden sagen Verschiedenes.
+    /// Ein Dateisystemfehler heisst „ich konnte den Schritt nicht ausfuehren"
+    /// und endet mit Exitcode 20; ein belegtes Ziel heisst „so wie du es
+    /// aufgerufen hast, fuehre ich den Lauf nicht aus" und ist damit ein
+    /// KONFIGURATIONSFEHLER, also Exitcode 2. Der Betreiber unterscheidet daran
+    /// eine volle Platte von einem Zielpfad, den er noch waehlen muss.
+    ///
+    /// Der Bestand ist dabei voellig unberuehrt — es wurde nichts gefunden,
+    /// sondern nichts geschrieben.
+    OutputExists,
 }
 
 impl RecoveryError {
@@ -56,6 +69,7 @@ impl RecoveryError {
             Self::ArchiveTooLarge => "EA-RECOVERY-ARCHIVE-TOO-LARGE",
             Self::TrustAnchor(error) => error.code(),
             Self::Verify(error) => error.code(),
+            Self::OutputExists => "EA-RECOVERY-OUTPUT-EXISTS",
         }
     }
 }
