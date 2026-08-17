@@ -14,6 +14,13 @@ publish = false
 # nie Dependency einer der Bibliotheks-Crates werden.
 [dev-dependencies]
 ea-archive.workspace = true
+# Die Kanonizitaetseigenschaft der Eigenschaftstests nennt
+# `ea_cbor::validate(..., ParserLimits::V1)` DIREKT. `ea-format` reicht nur
+# `CborError` durch, nicht den Pruefer und nicht die Grenzen; ohne diese Zeile
+# waere die Eigenschaft nur mittelbar ueber `decode_exact_object` behauptet und
+# die Zahlen aus Global Constraint Zeile 30 blieben ungemessen. `ea-cbor` ist
+# eine Pfad-Crate des Workspace und steht bereits in `Cargo.lock`.
+ea-cbor.workspace = true
 ea-chain.workspace = true
 ea-crypto.workspace = true
 ea-format.workspace = true

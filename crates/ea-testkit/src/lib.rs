@@ -5061,6 +5061,953 @@ fn evidence_entry(
 }
 
 // ---------------------------------------------------------------------------
+// Das Eigenschaftskorpus `properties/v1`
+// ---------------------------------------------------------------------------
+
+// Dieses Korpus ist die EINZIGE Eingabequelle der Eigenschaftstests in
+// `tests/ea-system-tests/tests/conformance_properties.rs`. Es tritt bewusst an
+// die Stelle eines Property-Frameworks: der Workspace fuehrt keines, und es
+// kommt keines dazu.
+//
+// # Es liegt NICHT auf der Platte
+//
+// Anders als `crypto/suite-1`, `format/v1`, `trust/v1`, `grants/v1`,
+// `receipts/v1` und `evidence/v1` schreibt diese Familie keine Dateien. Ihr
+// Manifest ist eine Zeichenkette ([`PropertyCorpus::manifest_json`]), und
+// eingefroren ist deren SHA-256 ([`PROPERTY_CORPUS_MANIFEST_SHA256`]).
+// [`verify_manifest_at`] ist auf sie NICHT anwendbar — es gibt keine Wurzel,
+// gegen die es pruefen koennte. Der Grund ist der Zweck: eingefroren werden
+// muss hier die REPRODUZIERBARKEIT eines Fehlschlags, und dafuer genuegen Seed,
+// Umfang und ein Digest ueber das Ganze. Zweihundert Objektdateien ins
+// Repository zu legen, die kein Standard und kein alter Leser je liest, waere
+// Ballast ohne Aussage.
+//
+// # Warum SHA-256 im Zaehlermodus und kein PRNG-Crate
+//
+// [`PropertyRng`] baut aus einem Baustein, der ohnehin im Graphen steht. Ein
+// zusaetzliches PRNG-Crate waere eine neue externe Abhaengigkeit; ein
+// handgeschriebener LCG waere neuer, ungeprueft und ohne jeden Gewinn. Die
+// Folge ist bewusst: dieser Strom ist kein kryptografischer Zufall und will
+// keiner sein. Er erzeugt Testeingaben, nichts weiter.
+//
+// # Kein `hpke_seal`
+//
+// Der `.eag`-Vektor dieses Korpus traegt dieselben EINMAL erzeugten Bytes wie
+// die Familie `format/v1`: [`HPKE_ENCAPSULATED_KEY`] und
+// [`HPKE_WRAPPED_CEK`] sind hier FUELLUNG vorgeschriebener Laenge und NICHT an
+// den Grant-Kontext des jeweiligen Objekts gebunden. Das Korpus belegt die
+// Kodierung eines Grants, nicht seine Entkapselung; letztere belegt
+// `crypto/suite-1` ueber `hpke_open`.
+
+/// Der Familienname des Eigenschaftskorpus.
+pub const PROPERTY_FAMILY: &str = "properties";
+
+/// Der Versionsname des Eigenschaftskorpus.
+pub const PROPERTY_V1_VERSION: &str = "v1";
+
+/// Die Herkunftsangabe des Eigenschaftskorpus.
+const PROPERTY_GENERATOR: &str = "ea-testkit::property_corpus";
+
+/// Die Domaenentrennung des Korpus-PRNG.
+///
+/// BEWUSST OHNE das Praefix `EINSATZARCHIV-`: der Domaenenscanner in
+/// `tests/ea-system-tests/tests/conformance_golden_vectors.rs` zaehlt genau
+/// diese Zeichenketten in `crates/ea-crypto` und verlangt fuer jede einen
+/// eingefrorenen Vektor. Eine Testentropie-Domaene ist keine Hashdomaene des
+/// Protokolls und hat in jener Zaehlung nichts verloren.
+const PROPERTY_RNG_DOMAIN: &[u8] = b"ea-testkit/property-corpus/v1";
+
+/// Der Seed des Eigenschaftskorpus, EINGEFROREN.
+///
+/// Ein Fehlschlag der Eigenschaftstests ist aus dieser Zahl allein
+/// wiederherstellbar. Genau das leistet ein zufaellig geseedetes
+/// Property-Framework nicht.
+pub const PROPERTY_CORPUS_SEED: u64 = 0x4541_3100_5052_4f50;
+
+/// Die Zahl der zufaelligen Feldbelegungen.
+pub const PROPERTY_CORPUS_ASSIGNMENT_COUNT: usize = 8;
+
+/// Die Zahl der Korpusobjekte: sechs Familien je Belegung.
+pub const PROPERTY_CORPUS_CASE_COUNT: usize = PROPERTY_CORPUS_ASSIGNMENT_COUNT * 6;
+
+/// Die Laenge der verketteten `.eip`-Folge.
+pub const PROPERTY_CORPUS_CHAIN_LENGTH: usize = 6;
+
+/// Die Zahl der Einfeld-Differenzpaare.
+///
+/// Zahlengleich mit den variierten Feldern von [`PropertyAssignmentV1`]; der
+/// Selbsttest dieser Crate stellt beides gegeneinander.
+pub const PROPERTY_CORPUS_FIELD_DELTA_COUNT: usize = 12;
+
+/// Die Zahl der Mutationen je Objekt.
+pub const PROPERTY_CORPUS_MUTATIONS_PER_OBJECT: usize = 4;
+
+/// Die Gesamtzahl der Mutationen.
+pub const PROPERTY_CORPUS_MUTATION_COUNT: usize = (PROPERTY_CORPUS_CASE_COUNT
+    + PROPERTY_CORPUS_CHAIN_LENGTH)
+    * PROPERTY_CORPUS_MUTATIONS_PER_OBJECT;
+
+/// Die Zahl der Cross-Version-Faelle: drei je Objektfamilie.
+pub const PROPERTY_CORPUS_CROSS_VERSION_COUNT: usize = 18;
+
+/// SHA-256 ueber [`PropertyCorpus::manifest_json`], EINGEFROREN.
+///
+/// Aendert sich der Erzeuger, aendert sich dieser Wert. Er ist deshalb kein
+/// Selbstabgleich, sondern die Stelle, an der eine Aenderung am Korpus BEWUSST
+/// eingetragen werden muss.
+pub const PROPERTY_CORPUS_MANIFEST_SHA256: &str =
+    "6fa88c30548bf3a916ed55634a9370bbdb28323864253154b0a4f60f97a612fa";
+
+/// Reproduzierbarer Testentropiestrom: SHA-256 im Zaehlermodus.
+///
+/// KEIN kryptografischer Zufall. Der Strom haengt ausschliesslich an Seed und
+/// Zaehler und ist damit auf jeder Plattform und in jedem Lauf derselbe.
+#[derive(Clone, Debug)]
+pub struct PropertyRng {
+    seed: u64,
+    counter: u64,
+    block: [u8; 32],
+    used: usize,
+}
+
+impl PropertyRng {
+    /// Ein Strom fuer diesen Seed.
+    #[must_use]
+    pub const fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            counter: 0,
+            block: [0; 32],
+            // Erzwingt das erste Nachfuellen vor der ersten Ausgabe.
+            used: 32,
+        }
+    }
+
+    fn refill(&mut self) {
+        let mut hasher = Sha256::new();
+        hasher.update(PROPERTY_RNG_DOMAIN);
+        hasher.update(self.seed.to_be_bytes());
+        hasher.update(self.counter.to_be_bytes());
+        self.counter = self.counter.wrapping_add(1);
+        self.block = hasher.finalize().into();
+        self.used = 0;
+    }
+
+    /// Fuellt `out` aus dem Strom.
+    pub fn fill(&mut self, out: &mut [u8]) {
+        for byte in out.iter_mut() {
+            if self.used == self.block.len() {
+                self.refill();
+            }
+            *byte = self.block[self.used];
+            self.used += 1;
+        }
+    }
+
+    /// `length` Bytes aus dem Strom.
+    #[must_use]
+    pub fn bytes(&mut self, length: usize) -> Vec<u8> {
+        let mut out = vec![0_u8; length];
+        self.fill(&mut out);
+        out
+    }
+
+    /// Ein Feld fester Groesse aus dem Strom.
+    #[must_use]
+    pub fn array<const N: usize>(&mut self) -> [u8; N] {
+        let mut out = [0_u8; N];
+        self.fill(&mut out);
+        out
+    }
+
+    /// Eine 64-Bit-Zahl aus dem Strom.
+    #[must_use]
+    pub fn next_u64(&mut self) -> u64 {
+        u64::from_be_bytes(self.array::<8>())
+    }
+
+    /// Eine Zahl echt unterhalb von `bound`.
+    ///
+    /// # Panics
+    ///
+    /// Wenn `bound` null ist.
+    #[must_use]
+    pub fn below(&mut self, bound: usize) -> usize {
+        assert!(bound > 0, "the bound of a corpus index must be positive");
+        let drawn = self.next_u64();
+        usize::try_from(drawn % bound as u64).expect("a value below a usize bound fits a usize")
+    }
+}
+
+/// Die variierten Felder einer Belegung.
+///
+/// Der Zuschnitt folgt `manifest-core-v1`: das `.eip` traegt den breitesten
+/// Feldsatz aller sechs Familien, und nur dort ist Injektivitaet feldweise
+/// messbar. Die uebrigen fuenf Familien uebernehmen die Teilmenge, die sie
+/// selbst fuehren.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyAssignmentV1 {
+    /// Organisationskennung.
+    pub organization_id: [u8; 16],
+    /// Kettenkennung.
+    pub chain_id: [u8; 16],
+    /// Position in der Kette.
+    pub chain_sequence: u64,
+    /// Vorgaengerbindung. Genau bei Sequenz 0 `None`.
+    pub previous_entry_hash: Option<[u8; 32]>,
+    /// Zertifikat des schreibenden Geraets.
+    pub writer_certificate_hash: [u8; 32],
+    /// Uebergangsereignis, falls der Schreiber gewechselt hat.
+    pub writer_transition_event_hash: Option<[u8; 32]>,
+    /// Registrierungsversion.
+    pub registry_version: u64,
+    /// Registrierungskopf-Hash.
+    pub registry_head_hash: [u8; 32],
+    /// Hash des initialen Grant-Plans.
+    pub initial_grant_plan_hash: [u8; 32],
+    /// AEAD-Nonce.
+    pub nonce: [u8; 12],
+    /// Inhaltsschluessel.
+    pub content_encryption_key: [u8; 32],
+    /// Klartext des Nutzinhalts.
+    pub plaintext: Vec<u8>,
+}
+
+/// Die Namen der zwoelf variierten Felder, in der Reihenfolge der
+/// Differenzpaare.
+pub const PROPERTY_VARIED_FIELDS: [&str; PROPERTY_CORPUS_FIELD_DELTA_COUNT] = [
+    "organizationId",
+    "chainId",
+    "chainSequence",
+    "previousEntryHash",
+    "writerCertificateHash",
+    "writerTransitionEventHash",
+    "registryVersion",
+    "registryHeadHash",
+    "initialGrantPlanHash",
+    "nonce",
+    "contentEncryptionKey",
+    "plaintext",
+];
+
+/// Ein Objekt des Korpus.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyCase {
+    /// Eindeutiger Name, etwa `assignment-3/eip`.
+    pub name: String,
+    /// Objektfamilie: `eip`, `eag`, `esr`, `ecp`, `etb` oder `eds`.
+    pub family: &'static str,
+    /// Schema-Identifikator, etwa `eip-v1`.
+    pub schema_id: &'static str,
+    /// Objekttyp-Tag 1 bis 6.
+    pub object_type: u8,
+    /// Exakte Objektbytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Ein Knoten der verketteten `.eip`-Folge, als reine Werte.
+///
+/// `ea-testkit` haengt bewusst NICHT von `ea-chain` ab: das Korpus liefert
+/// Fakten, die Kettenaussage trifft der Test.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyChainNodeV1 {
+    /// Kettenkennung, ueber die ganze Folge gleich.
+    pub chain_id: [u8; 16],
+    /// Position in der Kette. Genesis ist 0.
+    pub chain_sequence: u64,
+    /// Vorgaengerbindung. Genau bei Sequenz 0 `None`.
+    pub previous_entry_hash: Option<[u8; 32]>,
+    /// Eintragshash dieses Knotens.
+    pub entry_hash: [u8; 32],
+    /// Objekthash des `.eip`.
+    pub object_hash: [u8; 32],
+    /// Zertifikat des schreibenden Geraets.
+    pub writer_certificate_hash: [u8; 32],
+    /// Exakte Objektbytes des `.eip`.
+    pub bytes: Vec<u8>,
+}
+
+/// Zwei `.eip`-Objekte, deren Belegungen sich in GENAU einem Feld
+/// unterscheiden.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyFieldDeltaV1 {
+    /// Das eine Feld, das sich unterscheidet.
+    pub field: &'static str,
+    /// Die Bytes unter der Grundbelegung.
+    pub base_bytes: Vec<u8>,
+    /// Die Bytes unter der geaenderten Belegung.
+    pub changed_bytes: Vec<u8>,
+}
+
+/// Ein mutierter Eingabebytestring.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyMutationV1 {
+    /// Eindeutiger Name, etwa `assignment-3/eip/flip`.
+    pub name: String,
+    /// Die mutierten Bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Ein Objekt, dessen Kopf eine unbekannte Version, eine kritische Erweiterung
+/// oder ein fremdes Objekttyp-Tag ankuendigt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyCrossVersionCaseV1 {
+    /// Eindeutiger Name, etwa `eip/object-version-2`.
+    pub name: String,
+    /// Die Bytes.
+    pub bytes: Vec<u8>,
+    /// Der Fehlercode, mit dem ein v1-Leser sie ablehnen MUSS.
+    pub expected_error_code: &'static str,
+}
+
+/// Das vollstaendige Eingabekorpus der Eigenschaftstests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyCorpus {
+    /// Der Seed, aus dem alles Folgende entstanden ist.
+    pub seed: u64,
+    /// Die Objekte: sechs Familien je Belegung.
+    pub cases: Vec<PropertyCase>,
+    /// Die verkettete `.eip`-Folge.
+    pub chain: Vec<PropertyChainNodeV1>,
+    /// Die Einfeld-Differenzpaare der Familie `.eip`.
+    pub field_deltas: Vec<PropertyFieldDeltaV1>,
+    /// Die mutierten Eingaben.
+    pub mutations: Vec<PropertyMutationV1>,
+    /// Die Cross-Version-Faelle.
+    pub cross_version: Vec<PropertyCrossVersionCaseV1>,
+}
+
+impl PropertyCorpus {
+    /// Das Manifest des Korpus als deterministische JSON-Zeichenkette.
+    ///
+    /// Objektschluessel stehen alphabetisch, die Ausgabe endet auf genau einem
+    /// Zeilenumbruch. Der Seed steht als Hexzeichenkette, damit kein
+    /// JSON-Backend ihn ueber eine Gleitkommazahl fuehren kann.
+    ///
+    /// # Panics
+    ///
+    /// Wenn `serde_json` ein Objekt aus Zeichenketten und Zahlen nicht
+    /// serialisieren kann. Das waere ein Fehler von `serde_json`, kein
+    /// Laufzeitzustand.
+    #[must_use]
+    pub fn manifest_json(&self) -> String {
+        let cases = self
+            .cases
+            .iter()
+            .map(|case| {
+                let mut map = BTreeMap::new();
+                map.insert("family".into(), Value::String(case.family.to_owned()));
+                map.insert("length".into(), Value::from(case.bytes.len()));
+                map.insert("name".into(), Value::String(case.name.clone()));
+                map.insert("objectType".into(), Value::from(case.object_type));
+                map.insert("schemaId".into(), Value::String(case.schema_id.to_owned()));
+                map.insert("sha256".into(), Value::String(sha256_hex(&case.bytes)));
+                sorted_object(map)
+            })
+            .collect::<Vec<_>>();
+        let chain = self
+            .chain
+            .iter()
+            .map(|node| {
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "chainSequence".into(),
+                    Value::String(node.chain_sequence.to_string()),
+                );
+                map.insert(
+                    "entryHash".into(),
+                    Value::String(hex::encode(node.entry_hash)),
+                );
+                map.insert(
+                    "objectHash".into(),
+                    Value::String(hex::encode(node.object_hash)),
+                );
+                map.insert(
+                    "previousEntryHash".into(),
+                    node.previous_entry_hash.map_or_else(
+                        || Value::String(String::new()),
+                        |hash| Value::String(hex::encode(hash)),
+                    ),
+                );
+                map.insert("sha256".into(), Value::String(sha256_hex(&node.bytes)));
+                sorted_object(map)
+            })
+            .collect::<Vec<_>>();
+        let field_deltas = self
+            .field_deltas
+            .iter()
+            .map(|delta| {
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "baseSha256".into(),
+                    Value::String(sha256_hex(&delta.base_bytes)),
+                );
+                map.insert(
+                    "changedSha256".into(),
+                    Value::String(sha256_hex(&delta.changed_bytes)),
+                );
+                map.insert("field".into(), Value::String(delta.field.to_owned()));
+                sorted_object(map)
+            })
+            .collect::<Vec<_>>();
+        let mutations = self
+            .mutations
+            .iter()
+            .map(|mutation| {
+                let mut map = BTreeMap::new();
+                map.insert("length".into(), Value::from(mutation.bytes.len()));
+                map.insert("name".into(), Value::String(mutation.name.clone()));
+                map.insert("sha256".into(), Value::String(sha256_hex(&mutation.bytes)));
+                sorted_object(map)
+            })
+            .collect::<Vec<_>>();
+        let cross_version = self
+            .cross_version
+            .iter()
+            .map(|case| {
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "expectedErrorCode".into(),
+                    Value::String(case.expected_error_code.to_owned()),
+                );
+                map.insert("name".into(), Value::String(case.name.clone()));
+                map.insert("sha256".into(), Value::String(sha256_hex(&case.bytes)));
+                sorted_object(map)
+            })
+            .collect::<Vec<_>>();
+
+        let mut map = BTreeMap::new();
+        map.insert("cases".into(), Value::Array(cases));
+        map.insert("chain".into(), Value::Array(chain));
+        map.insert("crossVersion".into(), Value::Array(cross_version));
+        map.insert("family".into(), Value::String(PROPERTY_FAMILY.to_owned()));
+        map.insert("fieldDeltas".into(), Value::Array(field_deltas));
+        map.insert(
+            "generator".into(),
+            Value::String(PROPERTY_GENERATOR.to_owned()),
+        );
+        map.insert("mutations".into(), Value::Array(mutations));
+        map.insert("seed".into(), Value::String(format!("{:#018x}", self.seed)));
+        map.insert(
+            "version".into(),
+            Value::String(PROPERTY_V1_VERSION.to_owned()),
+        );
+        let mut text = serde_json::to_string_pretty(&sorted_object(map))
+            .expect("a manifest of strings and numbers serializes");
+        text.push('\n');
+        text
+    }
+}
+
+/// Das vollstaendige Eingabekorpus der Eigenschaftstests.
+///
+/// Deterministisch: zwei Aufrufe liefern dasselbe Korpus, auf jeder Plattform.
+///
+/// # Panics
+///
+/// Wenn eine der Objektkonstruktionen fehlschlaegt. Das waere ein
+/// Programmierfehler dieser Crate, kein Laufzeitzustand.
+#[must_use]
+pub fn property_corpus() -> PropertyCorpus {
+    let mut rng = PropertyRng::new(PROPERTY_CORPUS_SEED);
+
+    let mut cases = Vec::with_capacity(PROPERTY_CORPUS_CASE_COUNT);
+    for index in 0..PROPERTY_CORPUS_ASSIGNMENT_COUNT {
+        let assignment = property_random_assignment(&mut rng);
+        let built = property_objects(&assignment);
+        for (position, (family, schema_id, object_type)) in FORMAT_FAMILIES.iter().enumerate() {
+            cases.push(PropertyCase {
+                name: format!("assignment-{index}/{family}"),
+                family,
+                schema_id,
+                object_type: *object_type,
+                bytes: built.objects[position].clone(),
+            });
+        }
+    }
+
+    let chain = property_chain(&mut rng);
+    let field_deltas = property_field_deltas();
+    let mutations = property_mutations(&mut rng, &cases, &chain);
+    let cross_version = property_cross_version_cases(&cases);
+
+    PropertyCorpus {
+        seed: PROPERTY_CORPUS_SEED,
+        cases,
+        chain,
+        field_deltas,
+        mutations,
+        cross_version,
+    }
+}
+
+/// Eine Belegung, in der JEDES variierte Feld frisch gezogen ist.
+fn property_random_assignment(rng: &mut PropertyRng) -> PropertyAssignmentV1 {
+    PropertyAssignmentV1 {
+        organization_id: rng.array(),
+        chain_id: rng.array(),
+        // Echt groesser null: die Vorgaengerbindung ist dann `Some`, und die
+        // Belegung deckt den Regelfall statt des Sonderfalls Genesis ab.
+        chain_sequence: (rng.next_u64() % 4096) + 1,
+        previous_entry_hash: Some(rng.array()),
+        writer_certificate_hash: rng.array(),
+        writer_transition_event_hash: None,
+        registry_version: (rng.next_u64() % 1024) + 1,
+        registry_head_hash: rng.array(),
+        initial_grant_plan_hash: rng.array(),
+        nonce: rng.array(),
+        content_encryption_key: rng.array(),
+        plaintext: rng.bytes(PROPERTY_PLAINTEXT_BYTES),
+    }
+}
+
+/// Die Klartextlaenge aller Korpusobjekte.
+///
+/// Fest, nicht gezogen: eine variable Laenge aenderte die Chiffratlaenge und
+/// damit den Manifestkern, und das Differenzpaar `plaintext` belegte dann die
+/// Laenge statt des Inhalts.
+const PROPERTY_PLAINTEXT_BYTES: usize = 48;
+
+/// Die Grundbelegung der Differenzpaare.
+///
+/// Fest verdrahtet und nicht aus dem Strom gezogen: ein Differenzpaar soll aus
+/// dem Quelltext ablesbar sein, nicht aus einem Zaehlerstand.
+fn property_base_assignment() -> PropertyAssignmentV1 {
+    PropertyAssignmentV1 {
+        organization_id: [0x40; 16],
+        chain_id: [0x41; 16],
+        chain_sequence: 7,
+        previous_entry_hash: Some([0x42; 32]),
+        writer_certificate_hash: [0x43; 32],
+        writer_transition_event_hash: None,
+        registry_version: 9,
+        registry_head_hash: [0x44; 32],
+        initial_grant_plan_hash: [0x45; 32],
+        nonce: [0x46; 12],
+        content_encryption_key: [0x47; 32],
+        plaintext: [0x48; PROPERTY_PLAINTEXT_BYTES].to_vec(),
+    }
+}
+
+/// Zwoelf Paare, die sich in genau einem Feld unterscheiden.
+fn property_field_deltas() -> Vec<PropertyFieldDeltaV1> {
+    let base = property_base_assignment();
+    let base_bytes = property_objects(&base).objects[0].clone();
+
+    PROPERTY_VARIED_FIELDS
+        .iter()
+        .map(|field| {
+            let mut changed = base.clone();
+            match *field {
+                "organizationId" => changed.organization_id = [0x50; 16],
+                "chainId" => changed.chain_id = [0x51; 16],
+                "chainSequence" => changed.chain_sequence = 8,
+                "previousEntryHash" => changed.previous_entry_hash = Some([0x52; 32]),
+                "writerCertificateHash" => changed.writer_certificate_hash = [0x53; 32],
+                "writerTransitionEventHash" => {
+                    changed.writer_transition_event_hash = Some([0x54; 32]);
+                }
+                "registryVersion" => changed.registry_version = 10,
+                "registryHeadHash" => changed.registry_head_hash = [0x55; 32],
+                "initialGrantPlanHash" => changed.initial_grant_plan_hash = [0x56; 32],
+                "nonce" => changed.nonce = [0x57; 12],
+                "contentEncryptionKey" => changed.content_encryption_key = [0x58; 32],
+                // Gleiche LAENGE, anderer Inhalt: sonst belegte das Paar die
+                // Chiffratlaenge statt des Klartexts.
+                "plaintext" => changed.plaintext = [0x59; PROPERTY_PLAINTEXT_BYTES].to_vec(),
+                other => panic!("{other} is not one of the varied fields"),
+            }
+            PropertyFieldDeltaV1 {
+                field,
+                base_bytes: base_bytes.clone(),
+                changed_bytes: property_objects(&changed).objects[0].clone(),
+            }
+        })
+        .collect()
+}
+
+/// Eine verkettete `.eip`-Folge: Sequenz 0 bis
+/// [`PROPERTY_CORPUS_CHAIN_LENGTH`] minus eins.
+fn property_chain(rng: &mut PropertyRng) -> Vec<PropertyChainNodeV1> {
+    let chain_id: [u8; 16] = rng.array();
+    let organization_id: [u8; 16] = rng.array();
+    let mut nodes = Vec::with_capacity(PROPERTY_CORPUS_CHAIN_LENGTH);
+    let mut previous_entry_hash: Option<[u8; 32]> = None;
+
+    for sequence in 0..PROPERTY_CORPUS_CHAIN_LENGTH {
+        let assignment = PropertyAssignmentV1 {
+            organization_id,
+            chain_id,
+            chain_sequence: sequence as u64,
+            previous_entry_hash,
+            writer_certificate_hash: rng.array(),
+            writer_transition_event_hash: None,
+            registry_version: (rng.next_u64() % 1024) + 1,
+            registry_head_hash: rng.array(),
+            initial_grant_plan_hash: rng.array(),
+            nonce: rng.array(),
+            content_encryption_key: rng.array(),
+            plaintext: rng.bytes(PROPERTY_PLAINTEXT_BYTES),
+        };
+        let built = property_objects(&assignment);
+        nodes.push(PropertyChainNodeV1 {
+            chain_id,
+            chain_sequence: assignment.chain_sequence,
+            previous_entry_hash,
+            entry_hash: built.entry_hash,
+            object_hash: built.entry_object_hash,
+            writer_certificate_hash: assignment.writer_certificate_hash,
+            bytes: built.objects[0].clone(),
+        });
+        previous_entry_hash = Some(built.entry_hash);
+    }
+    nodes
+}
+
+/// Vier Mutationen je Objekt: Bitkippung, Kuerzung, Anhang, Nullung.
+fn property_mutations(
+    rng: &mut PropertyRng,
+    cases: &[PropertyCase],
+    chain: &[PropertyChainNodeV1],
+) -> Vec<PropertyMutationV1> {
+    let sources = cases
+        .iter()
+        .map(|case| (case.name.clone(), case.bytes.clone()))
+        .chain(chain.iter().map(|node| {
+            (
+                format!("chain-{}/eip", node.chain_sequence),
+                node.bytes.clone(),
+            )
+        }))
+        .collect::<Vec<_>>();
+
+    let mut mutations = Vec::with_capacity(PROPERTY_CORPUS_MUTATION_COUNT);
+    for (name, bytes) in sources {
+        let mut flipped = bytes.clone();
+        let offset = rng.below(flipped.len());
+        flipped[offset] ^= 1 << (rng.below(8));
+        mutations.push(PropertyMutationV1 {
+            name: format!("{name}/flip"),
+            bytes: flipped,
+        });
+
+        let cut = rng.below(bytes.len());
+        mutations.push(PropertyMutationV1 {
+            name: format!("{name}/truncate"),
+            bytes: bytes[..cut].to_vec(),
+        });
+
+        let mut extended = bytes.clone();
+        extended.push(rng.array::<1>()[0]);
+        mutations.push(PropertyMutationV1 {
+            name: format!("{name}/extend"),
+            bytes: extended,
+        });
+
+        let mut zeroed = bytes.clone();
+        let offset = rng.below(zeroed.len());
+        zeroed[offset] = 0;
+        mutations.push(PropertyMutationV1 {
+            name: format!("{name}/zero"),
+            bytes: zeroed,
+        });
+    }
+    mutations
+}
+
+/// Drei Kopfmutationen je Familie, jede mit dem Code, der sie ablehnt.
+///
+/// Die Bytepositionen stammen aus `crates/ea-format/src/parser.rs`: Byte 6
+/// traegt das Objekttyp-Tag, Byte 7 die Objektversion, Byte 8 die leere
+/// Erweiterungsliste.
+fn property_cross_version_cases(cases: &[PropertyCase]) -> Vec<PropertyCrossVersionCaseV1> {
+    let mut built = Vec::with_capacity(PROPERTY_CORPUS_CROSS_VERSION_COUNT);
+    for (family, _, object_type) in FORMAT_FAMILIES {
+        let origin = cases
+            .iter()
+            .find(|case| case.family == family)
+            .unwrap_or_else(|| panic!("the corpus holds a {family} object"));
+        assert_eq!(origin.bytes[6], object_type);
+
+        let mut future_version = origin.bytes.clone();
+        future_version[7] = 2;
+        built.push(PropertyCrossVersionCaseV1 {
+            name: format!("{family}/object-version-2"),
+            bytes: future_version,
+            expected_error_code: "EA-FORMAT-UNKNOWN-VERSION",
+        });
+
+        let mut critical = origin.bytes.clone();
+        critical[8] = 0x81;
+        built.push(PropertyCrossVersionCaseV1 {
+            name: format!("{family}/critical-extension"),
+            bytes: critical,
+            expected_error_code: "EA-FORMAT-CRITICAL-EXTENSION",
+        });
+
+        let mut unknown_tag = origin.bytes.clone();
+        unknown_tag[6] = 7;
+        built.push(PropertyCrossVersionCaseV1 {
+            name: format!("{family}/unknown-object-type"),
+            bytes: unknown_tag,
+            expected_error_code: "EA-FORMAT-PREFIX",
+        });
+    }
+    built
+}
+
+/// Die sechs Objekte einer Belegung und die Kettenfakten des `.eip`.
+struct PropertyBuilt {
+    objects: [Vec<u8>; 6],
+    entry_hash: [u8; 32],
+    entry_object_hash: [u8; 32],
+}
+
+/// Ein aus Domaene und Feld abgeleiteter 32-Byte-Wert.
+///
+/// Die Begleithashes eines Objekts — Empfaenger, Richtlinie, Vernichtung —
+/// sind nicht selbst variierte Felder, muessen aber mit der Belegung wandern,
+/// damit zwei Belegungen nie dasselbe `.esr` oder `.eds` erzeugen.
+fn property_derived(domain: &str, seed: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(PROPERTY_RNG_DOMAIN);
+    hasher.update(domain.as_bytes());
+    hasher.update(seed);
+    hasher.finalize().into()
+}
+
+/// Die sechs Objekte zu einer Belegung.
+///
+/// Gebaut mit denselben oeffentlichen Konstruktoren wie [`format_objects`] —
+/// ein zweiter Kodierer waere eine zweite Quelle der Wahrheit.
+fn property_objects(assignment: &PropertyAssignmentV1) -> PropertyBuilt {
+    let writer = format_signer(TEST_ENTROPY_DEVICE_ED25519_SEED);
+    let writer_thumbprint = format_public_key(TEST_ENTROPY_DEVICE_ED25519_SEED).thumbprint();
+    let server = format_signer(TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED);
+    let server_thumbprint =
+        format_public_key(TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED).thumbprint();
+    let root = format_signer(TEST_ENTROPY_ROOT_ED25519_SEED);
+    let root_key = format_public_key(TEST_ENTROPY_ROOT_ED25519_SEED);
+
+    let organization_id =
+        OrganizationId::try_from(assignment.organization_id.as_slice()).expect("16 bytes");
+    let chain_id = ChainId::try_from(assignment.chain_id.as_slice()).expect("16 bytes");
+    let chain_sequence = ChainSequence::new(assignment.chain_sequence);
+    let previous_entry_hash = assignment
+        .previous_entry_hash
+        .map(|hash| EntryHash::try_from(hash.as_slice()).expect("32 bytes"));
+    let writer_certificate_hash =
+        CertificateHash::try_from(assignment.writer_certificate_hash.as_slice()).expect("32 bytes");
+    let registry_version = RegistryVersion::new(assignment.registry_version);
+    let registry_head_hash =
+        Hash32::try_from(assignment.registry_head_hash.as_slice()).expect("32 bytes");
+    let server_certificate_hash = CertificateHash::try_from(
+        property_derived("server-certificate", &assignment.chain_id).as_slice(),
+    )
+    .expect("32 bytes");
+    let device_time = UnixMillis::new(
+        FORMAT_DEVICE_TIME_MS + i64::try_from(assignment.registry_version).expect("in range"),
+    );
+    let server_time = UnixMillis::new(
+        FORMAT_SERVER_TIME_MS + i64::try_from(assignment.registry_version).expect("in range"),
+    );
+
+    // `.eip`. Die AAD haengt am Manifestkern, der Manifestkern nur an der
+    // LAENGE des Chiffrats — deshalb der Vorlauf mit einem gleich langen
+    // Platzhalter, genau wie in [`format_objects`].
+    let ciphertext_length = assignment.plaintext.len() + ea_crypto::AEAD_OVERHEAD;
+    let probe = ManifestCoreV1::new(
+        property_manifest_fields(assignment),
+        &vec![0_u8; ciphertext_length],
+    )
+    .expect("the probe manifest core is well formed");
+    let aad = payload_aad(probe.exact_bytes());
+    let ciphertext = aead_seal(
+        &SecretBytes::new(assignment.content_encryption_key),
+        &SecretBytes::new(assignment.nonce),
+        SecretVec::new(assignment.plaintext.clone()),
+        &aad,
+    )
+    .expect("sealing a corpus plaintext cannot fail");
+    let manifest = ManifestCoreV1::new(property_manifest_fields(assignment), &ciphertext)
+        .expect("the corpus manifest core is well formed");
+    let signed =
+        SignedManifestV1::new(manifest, &ciphertext).expect("the manifest matches its ciphertext");
+    let writer_signature = writer
+        .sign_record(signed.exact_bytes())
+        .expect("signing a corpus signed manifest cannot fail");
+    let entry = EntryPackageV1::new(signed.clone(), ciphertext, writer_signature.clone())
+        .expect("the corpus entry package is well formed");
+    let entry_hash = entry.entry_hash();
+    let eip = encode_entry_package(&entry)
+        .expect("encoding a corpus entry package cannot fail")
+        .into_vec();
+    let eip_object_hash = object_hash(&eip);
+
+    // `.eag`. Kapselungswert und umschlossener CEK sind die EINMAL erzeugten
+    // Bytes; siehe den Abschnittskopf.
+    let grant_body = GrantBodyV1::new(GrantBodyFieldsV1 {
+        organization_id,
+        chain_id,
+        entry_hash,
+        kind: GrantKindV1::Initial,
+        purpose: GrantPurposeV1::Reader,
+        recipient_key_thumbprint: KeyThumbprint::try_from(
+            property_derived("recipient-key", &assignment.chain_id).as_slice(),
+        )
+        .expect("32 bytes"),
+        recipient_certificate_hash: CertificateHash::try_from(
+            property_derived("recipient-certificate", &assignment.chain_id).as_slice(),
+        )
+        .expect("32 bytes"),
+        issuer_key_thumbprint: writer_thumbprint,
+        issuer_certificate_hash: writer_certificate_hash,
+        registry_version,
+        registry_head_hash,
+        created_at_device: device_time,
+        original_recovery_grant_object_hash: None,
+        grant_authorization_object_hash: None,
+        encapsulated_key: decode(HPKE_ENCAPSULATED_KEY)
+            .try_into()
+            .expect("the frozen encapsulated key is 32 bytes"),
+        wrapped_cek: decode(HPKE_WRAPPED_CEK)
+            .try_into()
+            .expect("the frozen wrapped CEK is 48 bytes"),
+    })
+    .expect("the corpus grant body is well formed");
+    let grant_signature = writer
+        .sign_initial_grant(grant_body.exact_bytes())
+        .expect("signing a corpus grant body cannot fail");
+    let grant = GrantV1::new(grant_body, grant_signature).expect("the corpus grant is well formed");
+    let eag = encode_grant(&grant)
+        .expect("encoding a corpus grant cannot fail")
+        .into_vec();
+
+    // `.esr`.
+    let receipt_core = ReceiptCoreV1::new(ReceiptCoreFieldsV1 {
+        organization_id,
+        chain_id,
+        chain_sequence,
+        entry_hash,
+        entry_object_hash: eip_object_hash,
+        previous_entry_hash,
+        registry_version,
+        registry_head_hash,
+        policy_object_hash: ObjectHash::try_from(
+            property_derived("policy", &assignment.chain_id).as_slice(),
+        )
+        .expect("32 bytes"),
+        initial_grant_plan_hash: Hash32::try_from(assignment.initial_grant_plan_hash.as_slice())
+            .expect("32 bytes"),
+        initial_grant_object_hashes: vec![object_hash(&eag)],
+        accepted_at_server: server_time,
+        evidence_due_at: None,
+        server_key_thumbprint: server_thumbprint,
+        server_certificate_hash,
+    })
+    .expect("the corpus receipt core is well formed");
+    let receipt_signature = server
+        .sign_receipt(receipt_core.exact_bytes())
+        .expect("signing a corpus receipt core cannot fail");
+    let receipt =
+        ReceiptV1::new(receipt_core, receipt_signature).expect("the corpus receipt is well formed");
+    let esr = encode_receipt(&receipt)
+        .expect("encoding a corpus receipt cannot fail")
+        .into_vec();
+
+    // `.ecp`.
+    let checkpoint_core = CheckpointCoreV1::new(CheckpointCoreFieldsV1 {
+        organization_id,
+        chain_id,
+        covered_from_sequence: chain_sequence,
+        covered_through_sequence: chain_sequence,
+        head_entry_hash: entry_hash,
+        registry_head_hash,
+        issued_at_server: server_time,
+        previous_evidence_hash: None,
+    })
+    .expect("the corpus checkpoint core is well formed");
+    let checkpoint_signature = server
+        .sign_checkpoint(server_certificate_hash, checkpoint_core.exact_bytes())
+        .expect("signing a corpus checkpoint core cannot fail");
+    let evidence = EvidenceObjectV1::standard(checkpoint_core, checkpoint_signature)
+        .expect("the corpus checkpoint object is well formed");
+    let ecp = encode_evidence(&evidence)
+        .expect("encoding a corpus checkpoint cannot fail")
+        .into_vec();
+
+    // `.etb`.
+    let trust_payload = TrustPayloadV1::initial_root_certificate(RootCertificateFieldsV1 {
+        organization_id,
+        root_public_cose_key: root_key.to_deterministic_cbor(),
+        root_key_thumbprint: root_key.thumbprint(),
+        previous_root_certificate_object_hash: None,
+        effective_from_registry_version: registry_version,
+    })
+    .expect("the corpus root certificate payload is well formed");
+    let etb_trust_digest = trust_digest(trust_payload.exact_digest_input())
+        .as_bytes()
+        .to_vec();
+    let trust_signature = root
+        .sign_initial_root(&etb_trust_digest)
+        .expect("signing a corpus trust digest cannot fail");
+    let trust = TrustObjectV1::new(trust_payload, vec![trust_signature])
+        .expect("the corpus trust object is well formed");
+    let etb = encode_trust(&trust)
+        .expect("encoding a corpus trust object cannot fail")
+        .into_vec();
+
+    // `.eds`. Derselbe signierte Manifestkern wie im `.eip`, ohne Chiffrat.
+    let stub = DestroyedEntryStubV1::new(
+        signed,
+        writer_signature,
+        eip_object_hash,
+        DestructionId::try_from(
+            property_derived("destruction", &assignment.chain_id)[..16].as_ref(),
+        )
+        .expect("16 bytes"),
+        ObjectHash::try_from(
+            property_derived("destruction-authorization", &assignment.chain_id).as_slice(),
+        )
+        .expect("32 bytes"),
+    )
+    .expect("the corpus destroyed entry stub is well formed");
+    let eds = encode_destroyed_entry_stub(&stub)
+        .expect("encoding a corpus stub cannot fail")
+        .into_vec();
+
+    PropertyBuilt {
+        objects: [eip, eag, esr, ecp, etb, eds],
+        entry_hash: *entry_hash.as_bytes(),
+        entry_object_hash: *eip_object_hash.as_bytes(),
+    }
+}
+
+/// Die Manifestkernfelder einer Belegung.
+fn property_manifest_fields(assignment: &PropertyAssignmentV1) -> ManifestCoreFieldsV1 {
+    ManifestCoreFieldsV1 {
+        organization_id: OrganizationId::try_from(assignment.organization_id.as_slice())
+            .expect("16 bytes"),
+        chain_id: ChainId::try_from(assignment.chain_id.as_slice()).expect("16 bytes"),
+        chain_sequence: ChainSequence::new(assignment.chain_sequence),
+        previous_entry_hash: assignment
+            .previous_entry_hash
+            .map(|hash| EntryHash::try_from(hash.as_slice()).expect("32 bytes")),
+        writer_certificate_hash: CertificateHash::try_from(
+            assignment.writer_certificate_hash.as_slice(),
+        )
+        .expect("32 bytes"),
+        writer_transition_event_hash: assignment
+            .writer_transition_event_hash
+            .map(|hash| ObjectHash::try_from(hash.as_slice()).expect("32 bytes")),
+        registry_version: RegistryVersion::new(assignment.registry_version),
+        registry_head_hash: assignment.registry_head_hash,
+        initial_grant_plan_hash: assignment.initial_grant_plan_hash,
+        nonce: assignment.nonce,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fehler und Helfer
 // ---------------------------------------------------------------------------
 
@@ -5816,5 +6763,71 @@ mod tests {
             evidence_v1_manifest().to_json().unwrap(),
             evidence_v1_manifest().to_json().unwrap()
         );
+    }
+
+    /// Der PRNG haengt AUSSCHLIESSLICH an Seed und Zaehler.
+    #[test]
+    fn the_property_rng_depends_only_on_its_seed() {
+        let mut first = PropertyRng::new(PROPERTY_CORPUS_SEED);
+        let mut second = PropertyRng::new(PROPERTY_CORPUS_SEED);
+        assert_eq!(first.bytes(200), second.bytes(200));
+
+        let mut other = PropertyRng::new(PROPERTY_CORPUS_SEED + 1);
+        assert_ne!(
+            PropertyRng::new(PROPERTY_CORPUS_SEED).bytes(200),
+            other.bytes(200)
+        );
+
+        // Die Blockgrenze von 32 Byte darf nicht durchschlagen: 200 Byte am
+        // Stueck muessen dieselbe Folge sein wie 200 einzelne Ziehungen.
+        let mut streamed = PropertyRng::new(PROPERTY_CORPUS_SEED);
+        let single = (0..200)
+            .map(|_| streamed.array::<1>()[0])
+            .collect::<Vec<_>>();
+        assert_eq!(single, PropertyRng::new(PROPERTY_CORPUS_SEED).bytes(200));
+    }
+
+    /// Der Umfang des Korpus steht in den Konstanten, nicht nur im Erzeuger.
+    #[test]
+    fn the_property_corpus_matches_its_frozen_scope() {
+        assert_eq!(
+            PROPERTY_VARIED_FIELDS.len(),
+            PROPERTY_CORPUS_FIELD_DELTA_COUNT
+        );
+        assert_eq!(
+            PROPERTY_VARIED_FIELDS.iter().collect::<BTreeSet<_>>().len(),
+            PROPERTY_CORPUS_FIELD_DELTA_COUNT,
+            "no varied field may appear twice"
+        );
+
+        let corpus = property_corpus();
+        assert_eq!(corpus.seed, PROPERTY_CORPUS_SEED);
+        assert_eq!(corpus.cases.len(), PROPERTY_CORPUS_CASE_COUNT);
+        assert_eq!(corpus.chain.len(), PROPERTY_CORPUS_CHAIN_LENGTH);
+        assert_eq!(corpus.field_deltas.len(), PROPERTY_CORPUS_FIELD_DELTA_COUNT);
+        assert_eq!(corpus.mutations.len(), PROPERTY_CORPUS_MUTATION_COUNT);
+        assert_eq!(
+            corpus.cross_version.len(),
+            PROPERTY_CORPUS_CROSS_VERSION_COUNT
+        );
+
+        let names = corpus
+            .cases
+            .iter()
+            .map(|case| case.name.clone())
+            .chain(corpus.mutations.iter().map(|entry| entry.name.clone()))
+            .chain(corpus.cross_version.iter().map(|case| case.name.clone()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            names.len(),
+            corpus.cases.len() + corpus.mutations.len() + corpus.cross_version.len(),
+            "every corpus name is unique"
+        );
+
+        assert_eq!(
+            sha256_hex(corpus.manifest_json().as_bytes()),
+            PROPERTY_CORPUS_MANIFEST_SHA256
+        );
+        assert_eq!(property_corpus().manifest_json(), corpus.manifest_json());
     }
 }
