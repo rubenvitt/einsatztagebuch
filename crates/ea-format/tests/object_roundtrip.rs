@@ -803,6 +803,7 @@ fn every_trust_wire_variant_exposes_all_typed_fields_and_exact_regions() {
                     registry_expiry_behavior: 0,
                     evidence_max_delay_ms: 3,
                     reader_inactivity_ms: 4,
+                    reader_trust_refresh_ms: 7,
                     reader_history_access_allowed: true,
                     allowed_archive_profile_hashes: vec![
                         support::typed_hash(1),
@@ -921,6 +922,68 @@ fn externally_decode_constructed_trust(
 }
 
 #[test]
+fn policy_binds_the_device_side_trust_refresh_deadline_directly_after_reader_inactivity() {
+    let expected = PolicyFieldsV1 {
+        organization_id: support::organization(1),
+        policy_version: 1,
+        previous_policy_object_hash: None,
+        operating_profile: 0,
+        max_registry_age_ms: 604_800_000,
+        max_future_clock_skew_ms: 2,
+        registry_expiry_behavior: 0,
+        evidence_max_delay_ms: 3,
+        reader_inactivity_ms: 300_000,
+        reader_trust_refresh_ms: 86_400_000,
+        reader_history_access_allowed: true,
+        allowed_archive_profile_hashes: vec![support::typed_hash(1)],
+        backup_frequency_ms: 5,
+        restore_test_interval_ms: 6,
+        retention_policy: RetentionPolicyFieldsV1 {
+            minimum_retention_ms: None,
+            destruction_enabled: true,
+            eds_privacy_decision_document_hash: None,
+        },
+        free_text_policy: FreeTextPolicyFieldsV1 {
+            free_text_allowed: true,
+            rule_set_version: "v1".into(),
+            local_pattern_warning_enabled: true,
+        },
+        allowed_crypto_suite_ids: vec!["A".into()],
+        allowed_format_versions: vec![1],
+        effective_from_sequence: ChainSequence::new(0),
+    };
+
+    let object = support::constructed_normal_trust(
+        TrustPayloadV1::policy(expected.clone(), support::typed_object_hash(0xf0)).unwrap(),
+        1,
+    );
+    let encoded = encode_trust(&object).unwrap();
+    let (exact_core, _) = exact_authorized_regions(exact_trust_payload_region(encoded.as_bytes()));
+
+    // Die geraeteseitige Frist ist eine eigene Position unmittelbar nach
+    // reader-inactivity-ms und laesst max-registry-age-ms unberuehrt.
+    let mut decoder = Decoder::new(exact_core);
+    assert_eq!(decoder.array().unwrap(), Some(22));
+    for _ in 0..5 {
+        decoder.skip().unwrap();
+    }
+    assert_eq!(decoder.u64().unwrap(), 604_800_000);
+    for _ in 0..3 {
+        decoder.skip().unwrap();
+    }
+    assert_eq!(decoder.u64().unwrap(), 300_000);
+    assert_eq!(decoder.u64().unwrap(), 86_400_000);
+
+    match externally_decode_constructed_trust(
+        TrustPayloadV1::policy(expected.clone(), support::typed_object_hash(0xf0)).unwrap(),
+        1,
+    ) {
+        DecodedTrustPayloadV1::Policy(view) => assert!(view.fields() == &expected),
+        _ => panic!("expected Policy"),
+    }
+}
+
+#[test]
 fn trust_views_preserve_non_default_options_and_every_registry_change_arm() {
     let expected_device = DeviceCertificateFieldsV1 {
         organization_id: support::organization(1),
@@ -1036,6 +1099,7 @@ fn trust_views_preserve_non_default_options_and_every_registry_change_arm() {
         registry_expiry_behavior: 1,
         evidence_max_delay_ms: 12,
         reader_inactivity_ms: 13,
+        reader_trust_refresh_ms: 18,
         reader_history_access_allowed: false,
         allowed_archive_profile_hashes: vec![support::typed_hash(1)],
         backup_frequency_ms: 14,

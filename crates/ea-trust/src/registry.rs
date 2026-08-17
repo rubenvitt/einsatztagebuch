@@ -1760,6 +1760,7 @@ mod tests {
                 registry_expiry_behavior: 0,
                 evidence_max_delay_ms: 60_000,
                 reader_inactivity_ms: 900_000,
+                reader_trust_refresh_ms: 86_400_000,
                 reader_history_access_allowed: true,
                 allowed_archive_profile_hashes: vec![hash32(0xa1)],
                 backup_frequency_ms: 86_400_000,

@@ -590,7 +590,7 @@ fn authorized_wrapper(core: &[u8]) -> Vec<u8> {
 fn policy_core() -> Vec<u8> {
     let mut bytes = Vec::new();
     Encoder::new(&mut bytes)
-        .array(21)
+        .array(22)
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
         .and_then(|encoder| encoder.u8(1))
@@ -601,6 +601,7 @@ fn policy_core() -> Vec<u8> {
         .and_then(|encoder| encoder.u8(0))
         .and_then(|encoder| encoder.u16(100))
         .and_then(|encoder| encoder.u16(100))
+        .and_then(|encoder| encoder.u32(86_400_000))
         .and_then(|encoder| encoder.bool(true))
         .and_then(|encoder| encoder.array(1))
         .and_then(|encoder| encoder.bytes(&[0xb4; 32]))

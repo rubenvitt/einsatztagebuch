@@ -2279,7 +2279,7 @@ fn stage_one_vector_hygiene_reserves_out_of_band_negative_literals() {
 
     for marker in [
         "BLOCKIERT — Formentscheidung nach `web-reader-design.md` §7.5",
-        "BLOCKIERT — Zuordnung der Policy-Frist nach `web-reader-design.md` §4.2",
+        "ENTSCHIEDEN — Zuordnung der Policy-Frist nach `web-reader-design.md` §4.2",
         "BLOCKIERT — Traceability der Web-Reader-Anforderungen",
         "**wasm32-Pflicht.**",
     ] {

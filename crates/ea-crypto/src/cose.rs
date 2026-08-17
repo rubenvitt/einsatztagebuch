@@ -2610,7 +2610,7 @@ fn parse_writer_transition_core(
 fn parse_policy_core(
     decoder: &mut Decoder<'_>,
 ) -> Result<(OrganizationId, ChainSequence), CryptoError> {
-    if protocol_array_length(decoder)? != 21 || decoder.u64().ok() != Some(1) {
+    if protocol_array_length(decoder)? != 22 || decoder.u64().ok() != Some(1) {
         return Err(CryptoError::InvalidProtocolCore);
     }
     let organization_id = protocol_organization(decoder)?;
@@ -2637,7 +2637,8 @@ fn parse_policy_core(
     {
         return Err(CryptoError::InvalidProtocolCore);
     }
-    for _ in 0..2 {
+    // evidence-max-delay-ms, reader-inactivity-ms, reader-trust-refresh-ms
+    for _ in 0..3 {
         decoder
             .u64()
             .map_err(|_| CryptoError::InvalidProtocolCore)?;

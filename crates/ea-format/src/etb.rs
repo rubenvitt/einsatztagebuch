@@ -217,6 +217,7 @@ pub struct PolicyFieldsV1 {
     pub registry_expiry_behavior: u8,
     pub evidence_max_delay_ms: u64,
     pub reader_inactivity_ms: u64,
+    pub reader_trust_refresh_ms: u64,
     pub reader_history_access_allowed: bool,
     pub allowed_archive_profile_hashes: Vec<Hash32>,
     pub backup_frequency_ms: u64,
@@ -901,7 +902,7 @@ fn encode_policy(fields: &PolicyFieldsV1) -> Result<Vec<u8>, FormatError> {
     let mut exact = Vec::with_capacity(1024);
     let mut encoder = Encoder::new(&mut exact);
     encoder
-        .array(21)
+        .array(22)
         .and_then(|encoder| encoder.u8(1))
         .and_then(|encoder| encoder.bytes(fields.organization_id.as_bytes()))
         .and_then(|encoder| encoder.u64(fields.policy_version))
@@ -920,6 +921,7 @@ fn encode_policy(fields: &PolicyFieldsV1) -> Result<Vec<u8>, FormatError> {
         .and_then(|encoder| encoder.u8(fields.registry_expiry_behavior))
         .and_then(|encoder| encoder.u64(fields.evidence_max_delay_ms))
         .and_then(|encoder| encoder.u64(fields.reader_inactivity_ms))
+        .and_then(|encoder| encoder.u64(fields.reader_trust_refresh_ms))
         .and_then(|encoder| encoder.bool(fields.reader_history_access_allowed))
         .and_then(|encoder| encoder.array(archive_count))
         .map_err(|_| FormatError::Shape)?;
@@ -1592,7 +1594,7 @@ fn validate_policy(input: &[u8]) -> Result<(), FormatError> {
 
 pub(crate) fn decode_policy(input: &[u8]) -> Result<PolicyFieldsV1, FormatError> {
     let mut decoder = Decoder::new(input);
-    expect_array_length(&mut decoder, 21)?;
+    expect_array_length(&mut decoder, 22)?;
     expect_version(&mut decoder)?;
     let organization_id = typed_bytes(&mut decoder, 16)?;
     let policy_version = decoder.u64().map_err(|_| FormatError::Shape)?;
@@ -1609,6 +1611,7 @@ pub(crate) fn decode_policy(input: &[u8]) -> Result<PolicyFieldsV1, FormatError>
     }
     let evidence_max_delay_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
     let reader_inactivity_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let reader_trust_refresh_ms = decoder.u64().map_err(|_| FormatError::Shape)?;
     let reader_history_access_allowed = decoder.bool().map_err(|_| FormatError::Shape)?;
     let allowed_archive_profile_hashes = decode_sorted_hash_bytes(&mut decoder, true)?
         .into_iter()
@@ -1638,6 +1641,7 @@ pub(crate) fn decode_policy(input: &[u8]) -> Result<PolicyFieldsV1, FormatError>
             .map_err(|_| FormatError::Shape)?,
         evidence_max_delay_ms,
         reader_inactivity_ms,
+        reader_trust_refresh_ms,
         reader_history_access_allowed,
         allowed_archive_profile_hashes,
         backup_frequency_ms,

@@ -1650,6 +1650,7 @@ pub fn constructed_trust_objects() -> Vec<(TrustSubtypeV1, TrustObjectV1)> {
             registry_expiry_behavior: 0,
             evidence_max_delay_ms: 3,
             reader_inactivity_ms: 4,
+            reader_trust_refresh_ms: 7,
             reader_history_access_allowed: true,
             allowed_archive_profile_hashes: vec![typed_hash(1), typed_hash(2)],
             backup_frequency_ms: 5,
@@ -1763,6 +1764,7 @@ pub fn constructed_policy_with_format_version_count(count: usize) -> TrustObject
             registry_expiry_behavior: 0,
             evidence_max_delay_ms: 3,
             reader_inactivity_ms: 4,
+            reader_trust_refresh_ms: 7,
             reader_history_access_allowed: true,
             allowed_archive_profile_hashes: vec![typed_hash(1)],
             backup_frequency_ms: 5,
@@ -2248,7 +2250,7 @@ fn policy_core(hashes: &[[u8; 32]], suites: &[&str], versions: &[u64]) -> Vec<u8
     let mut core = Vec::new();
     let mut encoder = Encoder::new(&mut core);
     encoder
-        .array(21)
+        .array(22)
         .unwrap()
         .u8(1)
         .unwrap()
@@ -2269,6 +2271,8 @@ fn policy_core(hashes: &[[u8; 32]], suites: &[&str], versions: &[u64]) -> Vec<u8
         .u8(3)
         .unwrap()
         .u8(4)
+        .unwrap()
+        .u8(7)
         .unwrap()
         .bool(true)
         .unwrap()

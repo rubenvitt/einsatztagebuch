@@ -131,6 +131,7 @@ policy-core-v1 = [
   max-registry-age-ms: uint, max-future-clock-skew-ms: uint,
   registry-expiry-behavior: 0..1,
   evidence-max-delay-ms: uint, reader-inactivity-ms: uint,
+  reader-trust-refresh-ms: uint, ; device-side refresh deadline, 0 = unset
   reader-history-access-allowed: bool,
   allowed-archive-profile-hashes: [+ bstr .size 32],
   network-outage-behavior: 0,

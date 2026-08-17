@@ -270,6 +270,7 @@ Eine Root-signierte, versionierte Organisationsrichtlinie ist Teil des Trust Bun
 - maximale Sequenz-Lease `validThroughSequence`; nach deren Verbrauch MUSS jedes Profil blockieren,
 - maximales Evidence-Zeitfenster `evidenceMaxDelayMs`,
 - Reader-Inaktivitätszeit; sicherer Default sind fünf Minuten,
+- geräteseitige Frist zur Aktualisierung des Trust-Bestandes `readerTrustRefreshMs`; `0` bedeutet, dass keine geräteseitige Frist konfiguriert ist,
 - erlaubte Reader-Historienfreigabe,
 - zulässige lokale und kontrollierte Netzlaufwerk-Archivprofile,
 - Verhalten bei Netzarchiv-Ausfall; v0.1 verwendet immer lokalen Commit und verzögerte byteidentische Publikation vor Server-Sync,
@@ -1444,6 +1445,17 @@ Kandidatenfehler verändert diesen Zustand nicht; eine bereits vollständig
 verifizierte unabhängige Referenz bleibt dagegen monoton persistiert.
 
 Ein Registry-Head ist `stale`, sobald `effectiveNow > notAfter`. Evidence Grade oder `policy.registryExpiryBehavior = block` blockieren dann die Finalisierung. Nur im Standardprofil mit dem explizit signierten Wert `warn` bleibt sie nach nicht übergehbarer sichtbarer Warnung, erneuter Benutzerbestätigung und signiertem lokalem Audit-Ereignis erlaubt. `s > validThroughSequence` blockiert in beiden Profilen immer. Ein Angreifer, der sowohl Registry-Updates als auch neue unabhängige Zeitquellen von einem dauerhaft offline gehaltenen Writer fernhält, kann den realen Zeitablauf vor Fortschritt des `trustedTimeFloor` nicht allein durch die Software beweisbar machen; die harte Sequenz-Lease begrenzt dieses unvermeidbare Offline-Fenster.
+
+`policy.readerTrustRefreshMs` ist davon getrennt und beschreibt eine rein
+geräteseitige Frist: Ist seit dem letzten Bezug des Trust-Bestandes mehr als
+`readerTrustRefreshMs` vergangen, MUSS die Anwendung sichtbar zur Aktualisierung
+auffordern. Der Wert `0` bedeutet, dass keine geräteseitige Frist konfiguriert
+ist. Die Frist ist weder `maxRegistryAgeMs`, das als Ausstellungsschranke am
+Registry-Ereignis `notAfter - issuedAt` begrenzt, noch
+`registryExpiryBehavior`, das ausschließlich die Finalisierung steuert — eine
+Operation, die ein Reader nicht ausführt. Sie ist die normative Grundlage für
+[web-reader-design.md §4.2](2026-08-15-einsatzarchiv-web-reader-design.md) und
+gilt für jede Anwendung, die einen Trust-Bestand hält.
 
 ### 12.4 Widerruf
 
