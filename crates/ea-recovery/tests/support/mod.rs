@@ -10,11 +10,49 @@
 //! `#[path]`-Includes werden je Testtarget uebersetzt; ein Target, das nur
 //! einen Teil der Helfer nutzt, erzeugt sonst `dead_code`-Warnungen, die unter
 //! `-D warnings` brechen. Daher `allow(dead_code)` auf Modulebene.
+//!
+//! # ZWEI FIXTUREFAMILIEN, UND SIE SIND NICHT AUSTAUSCHBAR
+//!
+//! Die GEERBTEN Bestaende aus [`verify_support`] — `complete_valid_archive`,
+//! `isolation_archive`, `archive_with_a_missing_middle_entry`,
+//! `destruction_archive` und alles Uebrige — tragen samtlich
+//! Registrierungskoepfe aus `trust_support::HeadOptions::default()`
+//! (`issued_at = 100`, `not_after = 10_000`, Policy `max_registry_age`
+//! 86_400_000). Sie sind AUSSCHLIESSLICH unter der Fixture-Uhr
+//! [`verify_support::FIXTURE_OS_WALL_CLOCK_V1`] aussagekraeftig. Unter der
+//! echten Betriebssystemuhr sind ALLE ihre Koepfe veraltet, Gate `trust` traegt
+//! nicht mehr, und der Bericht degeneriert zu einer LEEREN Aussage, die
+//! faelschlich wie Erfolg aussieht — gemessen in
+//! `crates/ea-recovery/tests/live_clock.rs`.
+//!
+//! Daraus folgt eine feste Trennung:
+//!
+//! - Die geerbten Bestaende sind NUR dort zulaessig, wo die Uhr ein PARAMETER
+//!   ist — also in `crates/ea-recovery/tests`, wo `verify_directory` sie
+//!   entgegennimmt. In keinem Test unter `apps/cli` duerfen sie vorkommen: die
+//!   CLI kennt genau EINE Uhr, `SystemTime::now()`.
+//! - Fuer alles, was gegen die ECHTE Uhr laeuft, gibt es die
+//!   `live_clock_*`-Familie dieses Moduls. Ihre Registrierungsfenster
+//!   enthalten die echte Uhr; ihre Befunde sind deshalb unter
+//!   `SystemTime::now()` messbar.
 #![allow(dead_code)]
 
 /// Die Fixture-Kette aus `ea-verify`, unveraendert weiterverwendet.
 #[path = "../../../ea-verify/tests/support/mod.rs"]
 pub mod verify_support;
+
+mod live;
+
+// GLOBAL wiederausgefuehrt, damit die Familie unter `support::` steht und nicht
+// unter `support::live::`.
+//
+// Das `allow` hat denselben Grund wie das `allow(dead_code)` oben: dieses Modul
+// wird je Testtarget EINZELN uebersetzt, und ein Target, das die Live-Familie
+// gar nicht anfasst — `fs_source` etwa —, sieht eine ungenutzte
+// Wiederausfuhr. Das ist eine Aussage ueber das Target, nicht ueber den Code,
+// und unter `-D warnings` braeche sie den Bau.
+#[allow(unused_imports)]
+pub use live::*;
 
 use std::{
     env, fs,
