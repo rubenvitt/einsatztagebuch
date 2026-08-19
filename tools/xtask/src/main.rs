@@ -145,6 +145,34 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          Rust, and that pipeline ends at `ea-verify`, which stays on the positive \
          list. Test targets depend on this crate, never the other way round.",
     ),
+    (
+        "ea-local-store",
+        "binds a native SQLCipher build and opens files on the host filesystem \
+         — the encrypted database, its write-ahead log and its temporary \
+         spill — and is therefore not shared browser code: \
+         `web-reader-design.md` §9 makes only the verification pipeline shared \
+         Rust, and that pipeline ends at `ea-verify`, which stays on the \
+         positive list. The Reader is a browser PWA and opens no local \
+         database file at all.",
+    ),
+    (
+        "ea-audit",
+        "signs every local audit line through the host keystore provider and \
+         appends it to the encrypted host database, so it reaches past \
+         `ea-verify` into the operating system twice over and is not shared \
+         browser code: `web-reader-design.md` §9 makes only the verification \
+         pipeline shared Rust, and the browser holds no Writer signing key \
+         (§11.3).",
+    ),
+    (
+        "ea-draft",
+        "reaches the same host store and the same native key provider — the \
+         encrypted database file and the wrapped `draftDEK` of the running \
+         draft — and is therefore not shared browser code: \
+         `web-reader-design.md` §9 makes only the verification pipeline shared \
+         Rust, and that pipeline ends at `ea-verify`. The Reader never edits a \
+         draft.",
+    ),
 ];
 
 /// Reports when the running compiler is not the one `rust-toolchain.toml` pins.

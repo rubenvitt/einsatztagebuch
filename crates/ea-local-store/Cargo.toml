@@ -1,0 +1,37 @@
+[package]
+name = "ea-local-store"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# `SecretVec::with_exposed` fuehrt den Datenbankschluessel an das
+# SQLCipher-Pragma. Diese Crate haelt kein Schluesselmaterial und deklariert
+# keinen eigenen Geheimnistyp.
+ea-crypto.workspace = true
+# Der Schluessel der lokalen Datenbank kommt AUSSCHLIESSLICH ueber den
+# synchronen Port; es gibt keinen Konstruktor, der einen Pfad allein nimmt.
+ea-key-provider.workspace = true
+# DIREKT geerbt, obwohl `rusqlite` bereits davon abhaengt (`^0.38.0`): diese
+# Crate traegt die gebundelten SQLCipher-C-Quellen, und ADR 0002 verlangt unter
+# *Consequences* ausdruecklich, dass DIESES Mitglied BEIDE Eintraege mit
+# `workspace = true` erbt. Ohne die Kante bleibt der Pin `=0.38.0` wirkungslos
+# und die Aufloesung nimmt 0.38.2 — gemessen — dessen MSRV ueber dem gepinnten
+# Compiler liegt.
+libsqlite3-sys.workspace = true
+# Gebundeltes SQLCipher ueber gevendortes OpenSSL, gepinnt und in ADR 0002
+# ratifiziert. Kein Featurezusatz dieses Tasks.
+rusqlite.workspace = true
+
+[dev-dependencies]
+# `KeyProtectionProfileV1::OsWrapped` ist das Profil, das die Testfixture beim
+# Erzeugen des Datenbankschluessels VERLANGT. Nur die Fixture ruft
+# `KeyProvider::generate`; der Produktionspfad nimmt einen fertigen Griff
+# entgegen und braucht das Wire-Format deshalb nicht.
+ea-format.workspace = true
+# Der deterministische In-Prozess-Provider der Fixture.
+ea-key-provider = { workspace = true, features = ["test-support"] }
+# `contains_canary` — die Kanarienpruefung ueber die Rohbytes jeder Datei, die
+# die Datenbank anlegt.
+ea-testkit.workspace = true

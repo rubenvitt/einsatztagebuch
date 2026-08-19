@@ -1,0 +1,34 @@
+[package]
+name = "ea-draft"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# `aead_seal`/`aead_open` unter dem `draftDEK`, plus die Geheimnistraeger.
+ea-crypto.workspace = true
+# Ein- und Auspacken des `draftDEK`; der Schluessel selbst liegt im
+# Schluesselspeicher des Betriebssystems.
+ea-key-provider.workspace = true
+# Die verschluesselte Datenbank, ihr Schema und ihre Migrationskette. Diese
+# Crate spricht kein SQL-Dialekt-API und traegt deshalb keine `rusqlite`-Kante.
+ea-local-store.workspace = true
+# `Id16`, `OrganizationId`, `ObjectHash` — kein neuer Bezeichnertyp.
+ea-types.workspace = true
+# Frischer `draftDEK`, frische AEAD-Nonce und frische Entwurfskennung aus dem
+# CSPRNG des Betriebssystems.
+getrandom.workspace = true
+# NFC-Normalisierung der Einsatznummer VOR dem Registerschluessel, damit kein
+# Aufrufer den Schluessel mit einer zerlegten Form aufweichen kann.
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+# `KeyProtectionProfileV1::OsWrapped` fuer den Datenbankschluessel der Fixture.
+# AUSDRUECKLICH nur hier: die Crate selbst kodiert nichts und traegt deshalb
+# keine Wire-Format-Kante.
+ea-format.workspace = true
+ea-key-provider = { workspace = true, features = ["test-support"] }
+# `contains_canary` — der Nachweis, dass der Entwurfstext nicht im Klartext in
+# der Datenbankdatei liegt.
+ea-testkit.workspace = true

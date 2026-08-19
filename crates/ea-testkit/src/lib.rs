@@ -235,6 +235,21 @@ pub const DECLARED_TEST_ENTROPY: [(&str, &[u8]); 8] = [
     ("aead-nonce", &TEST_ENTROPY_AEAD_NONCE),
 ];
 
+/// Sucht eine Bytefolge in einer Bytefolge. Kein Kanary-Treffer heisst: nicht
+/// enthalten.
+///
+/// Ein LEERER Kanarienvogel meldet `false` und nicht `true`: die leere Folge
+/// steckt in jeder Folge, und ein Aufrufer, der versehentlich nichts uebergibt,
+/// bekaeme sonst von jeder Zusicherung „enthalten" — und von jeder
+/// negierten Zusicherung ein stillschweigendes Bestehen.
+#[must_use]
+pub fn contains_canary(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
 /// SHA-256 ueber `bytes`, hexadezimal in Kleinbuchstaben.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
