@@ -8,8 +8,8 @@
 use ea_crypto::CertificateCapability;
 use ea_format::KeyProtectionProfileV1;
 use ea_key_provider::{
-    InMemoryKeyProvider, KeyProvider, KeyPurpose, SecretPurpose, WriterKeyProfile,
-    require_claimed_protection_profile,
+    InMemoryKeyProvider, KeyProvider, KeyPurpose, KeystoreProvider, SecretPurpose,
+    WriterKeyProfile, require_claimed_protection_profile,
 };
 
 #[test]
@@ -49,20 +49,54 @@ fn a_claimed_hardware_profile_never_falls_back_silently() {
     let reached = provider.reached_protection_profile(&handle).unwrap();
     assert_eq!(reached, KeyProtectionProfileV1::OsWrapped);
     assert_eq!(
-        require_claimed_protection_profile(reached, KeyProtectionProfileV1::HardwareNonExportable)
-            .unwrap_err()
-            .code(),
+        require_claimed_protection_profile(
+            handle.keystore_provider(),
+            reached,
+            KeyProtectionProfileV1::HardwareNonExportable
+        )
+        .unwrap_err()
+        .code(),
         "EA-KEY-PROTECTION-PROFILE-MISMATCH"
     );
 }
 
 #[test]
-fn an_equal_and_stage_two_reachable_protection_profile_passes() {
-    for profile in [
-        KeyProtectionProfileV1::OsWrapped,
-        KeyProtectionProfileV1::HardwareNonExportable,
+fn an_equal_os_wrapped_profile_passes_for_every_provider() {
+    for provider in [
+        KeystoreProvider::OperatingSystem,
+        KeystoreProvider::InMemory,
     ] {
-        assert!(require_claimed_protection_profile(profile, profile).is_ok());
+        assert!(
+            require_claimed_protection_profile(
+                provider,
+                KeyProtectionProfileV1::OsWrapped,
+                KeyProtectionProfileV1::OsWrapped
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[test]
+fn a_hardware_claim_needs_an_explicitly_supported_provider_even_when_it_matches() {
+    // Die dritte Klausel der Zusage. Stufe 2 kennt heute KEINEN Provider, der
+    // nicht-exportierbares Hardwarematerial erreicht — ein uebereinstimmender
+    // Hardware-Anspruch besteht deshalb bei keinem Provider, statt
+    // durchzugehen, weil ihm niemand widerspricht.
+    for provider in [
+        KeystoreProvider::OperatingSystem,
+        KeystoreProvider::InMemory,
+    ] {
+        assert_eq!(
+            require_claimed_protection_profile(
+                provider,
+                KeyProtectionProfileV1::HardwareNonExportable,
+                KeyProtectionProfileV1::HardwareNonExportable
+            )
+            .unwrap_err()
+            .code(),
+            "EA-KEY-PROTECTION-PROFILE-UNREACHABLE"
+        );
     }
 }
 
@@ -74,7 +108,7 @@ fn a_protection_profile_outside_stage_two_is_refused_even_when_it_matches() {
         KeyProtectionProfileV1::ServerSecretStoreOrHsm,
     ] {
         assert_eq!(
-            require_claimed_protection_profile(profile, profile)
+            require_claimed_protection_profile(KeystoreProvider::OperatingSystem, profile, profile)
                 .unwrap_err()
                 .code(),
             "EA-KEY-PROTECTION-PROFILE-UNSUPPORTED"

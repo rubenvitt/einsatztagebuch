@@ -143,7 +143,9 @@ impl SecretVec {
 
     /// Runs `use_it` with the secret bytes, scoped to that call.
     ///
-    /// This is the only way plaintext leaves the crate, and it exists because
+    /// This is one of exactly two ways plaintext leaves the crate — the
+    /// variable-size half; the fixed-size half is
+    /// [`SecretBytes::with_exposed`]. It exists because
     /// `einsatzarchiv decrypt --output` has to write it (`design.md` §16;
     /// Stage-1 plan task 10). The global constraint permits persistence exactly
     /// where "the user explicitly requests decrypted CLI output" — so the

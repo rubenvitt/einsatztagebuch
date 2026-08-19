@@ -192,6 +192,30 @@ fn production_crypto_sources_have_no_logging_or_console_emitters() {
     }
 }
 
+/// Schluesselmaterial fester Groesse MUSS die Crate verlassen koennen, sonst
+/// ist der Schluesselport der Stufe 2 nicht baubar: ein Provider uebergibt den
+/// `draftDEK` an den Schluesselspeicher des Betriebssystems und liegt damit
+/// ausserhalb dieser Crate. Der Weg ist derselbe bereichsgebundene wie bei
+/// [`ea_crypto::SecretVec::with_exposed`]: die Bytes sind nur innerhalb des
+/// Rueckrufs sichtbar, gehen nie in den Besitz des Aufrufers ueber, und der
+/// Zeroize-on-Drop-Vertrag bleibt unberuehrt.
+#[test]
+fn a_fixed_size_secret_exposes_its_bytes_only_inside_a_scoped_callback() {
+    let secret = SecretBytes::<32>::new([0x5a; 32]);
+
+    let length = secret.with_exposed(|bytes| {
+        assert_eq!(bytes.len(), 32);
+        assert!(bytes.iter().all(|byte| *byte == 0x5a));
+        bytes.len()
+    });
+    assert_eq!(length, 32);
+
+    // Der Rueckruf darf beliebig oft laufen und veraendert nichts.
+    assert!(secret.with_exposed(|bytes| bytes == &[0x5a; 32]));
+    assert_eq!(secret.len(), 32);
+    assert!(secret.matches(&[0x5a; 32]));
+}
+
 /// Der Klartext eines entschluesselten Payloads MUSS die Crate verlassen
 /// koennen, sonst ist `einsatzarchiv decrypt --output` nicht baubar
 /// (`design.md` §16, Stage-1-Plan Task 10). Der Weg ist bereichsgebunden: die

@@ -32,10 +32,22 @@ const SIGNING_PURPOSES: &[SecretPurpose] = &[
     SecretPurpose::OperatorInstanceKey,
 ];
 
+/// Der Inhalt des Speichers unter EINEM Schloss.
+///
+/// Eintraege und Epochen gehoeren zusammen: `delete` entfernt einen Eintrag und
+/// hebt im selben Zug die Epoche seines Zwecks. Zwei getrennte Schloesser
+/// liessen dazwischen einen Zustand zu, in dem der Eintrag fort und die Epoche
+/// noch die alte ist.
+#[derive(Default)]
+struct Store {
+    entries: HashMap<KeyHandle, [u8; 32]>,
+    epochs: HashMap<SecretPurpose, u32>,
+}
+
 pub struct InMemoryKeyProvider {
     account_instance: Hash32,
     seed: [u8; 32],
-    entries: Mutex<HashMap<KeyHandle, [u8; 32]>>,
+    store: Mutex<Store>,
 }
 
 impl InMemoryKeyProvider {
@@ -50,12 +62,12 @@ impl InMemoryKeyProvider {
             account_instance: Hash32::try_from(seed.as_slice())
                 .expect("a 32-byte seed is a 32-byte hash"),
             seed,
-            entries: Mutex::new(HashMap::new()),
+            store: Mutex::new(Store::default()),
         }
     }
 
-    fn entries(&self) -> MutexGuard<'_, HashMap<KeyHandle, [u8; 32]>> {
-        self.entries
+    fn store(&self) -> MutexGuard<'_, Store> {
+        self.store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -66,28 +78,40 @@ impl InMemoryKeyProvider {
 
     /// Deterministisches Testmaterial, AUSDRUECKLICH OHNE Sicherheitsanspruch.
     ///
-    /// Der Startwert wird mit einer Zweckmarke ueberlagert, damit die vier
-    /// Zwecke verschiedenes Material tragen. Das genuegt fuer einen
-    /// reproduzierbaren Testlauf und fuer nichts sonst; `test-support` ist nie
-    /// ein Default-Feature, also verlaesst dieses Material keinen Testlauf.
-    fn derive(&self, purpose: SecretPurpose) -> [u8; 32] {
+    /// Der Startwert wird mit einer Zweckmarke und der EPOCHE des Zwecks
+    /// ueberlagert. Die Zweckmarke trennt die vier Zwecke; die Epoche trennt
+    /// das, was VOR einem `delete` galt, von dem, was danach entsteht.
+    ///
+    /// Ohne die Epoche waere `derive` eine reine Funktion aus Startwert und
+    /// Zweck, und ein geloeschtes Geheimnis liesse sich durch ein erneutes
+    /// [`KeyProvider::generate`] byteweise wiederherstellen — ueber die
+    /// oeffentliche Flaeche, ohne einen einzigen Blick ins Innere. Der Nachweis
+    /// „kein entschluesselbarer `draftDEK` bleibt zurueck", den spaetere Tasks
+    /// gegen genau diesen Provider fuehren, waere dann wertlos.
+    ///
+    /// Das genuegt fuer einen reproduzierbaren Testlauf und fuer nichts sonst;
+    /// `test-support` ist nie ein Default-Feature, also verlaesst dieses
+    /// Material keinen Testlauf.
+    fn derive(&self, purpose: SecretPurpose, epoch: u32) -> [u8; 32] {
         let tag = match purpose {
             SecretPurpose::WriterSigningKey => 1u8,
             SecretPurpose::OperatorInstanceKey => 2,
             SecretPurpose::DraftDek => 3,
             SecretPurpose::LocalDatabaseKey => 4,
         };
+        let epoch_bytes = epoch.to_be_bytes();
         let mut material = self.seed;
         for (index, byte) in material.iter_mut().enumerate() {
             // Der Index bleibt unter 32, die Umwandlung kann nicht scheitern.
             let mixer = u8::try_from(index).unwrap_or(u8::MAX) | 1;
-            *byte ^= tag.wrapping_mul(mixer);
+            *byte ^= tag.wrapping_mul(mixer).wrapping_add(epoch_bytes[index % 4]);
         }
         material
     }
 
     fn material(&self, handle: &KeyHandle) -> Result<[u8; 32], KeyError> {
-        self.entries()
+        self.store()
+            .entries
             .get(handle)
             .copied()
             .ok_or(KeyError::NotFound)
@@ -106,7 +130,9 @@ impl KeyProvider for InMemoryKeyProvider {
             return Err(KeyError::UnreachableProtectionProfile);
         }
         let handle = self.handle(purpose);
-        self.entries().insert(handle, self.derive(purpose));
+        let epoch = self.store().epochs.get(&purpose).copied().unwrap_or(0);
+        let material = self.derive(purpose, epoch);
+        self.store().entries.insert(handle, material);
         Ok(handle)
     }
 
@@ -134,7 +160,8 @@ impl KeyProvider for InMemoryKeyProvider {
     ) -> Result<KeyHandle, KeyError> {
         let handle = self.handle(purpose);
         handle.require_purpose(&[SecretPurpose::DraftDek])?;
-        self.entries()
+        self.store()
+            .entries
             .insert(handle, secret.with_exposed(|bytes| *bytes));
         Ok(handle)
     }
@@ -151,12 +178,23 @@ impl KeyProvider for InMemoryKeyProvider {
     }
 
     fn delete(&self, handle: &KeyHandle) -> Result<(), KeyError> {
-        self.entries().remove(handle);
+        // Der Eintrag geht fort UND die Epoche seines Zwecks steigt. Die
+        // Adresse selbst bleibt bestehen: sie ist Dienst und Konto und wird
+        // nicht verbraucht, sonst zerfiele das Ersetzen-an-Ort-und-Stelle, das
+        // dieser Provider bewusst traegt.
+        //
+        // Bedingungslos, auch wenn nichts zu entfernen war: eine Epoche, die
+        // nur bei einem Treffer steigt, liesse sich mit einem Loeschen ins
+        // Leere umgehen.
+        let mut store = self.store();
+        store.entries.remove(handle);
+        let epoch = store.epochs.entry(handle.purpose()).or_default();
+        *epoch = epoch.wrapping_add(1);
         Ok(())
     }
 
     fn contains(&self, handle: &KeyHandle) -> Result<bool, KeyError> {
-        Ok(self.entries().contains_key(handle))
+        Ok(self.store().entries.contains_key(handle))
     }
 
     fn reached_protection_profile(

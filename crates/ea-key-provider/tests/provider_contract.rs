@@ -28,6 +28,36 @@ fn deleted_secret_cannot_be_unwrapped_or_restored() {
 }
 
 #[test]
+fn a_deleted_and_regenerated_entry_never_returns_the_old_material() {
+    // Die zweite Haelfte von „oder wiederhergestellt". Der Test darueber deckt
+    // den `wrap_secret`-Pfad; hier steht der `generate`-Pfad, auf dem das
+    // Material aus dem Startwert entsteht. Waere es eine reine Funktion aus
+    // Startwert und Zweck, brauchte ein Angreifer nach einem `delete` nur ein
+    // erneutes `generate` — ueber die oeffentliche Flaeche, ohne einen Blick
+    // ins Innere. Der Nachweis „kein entschluesselbarer draftDEK bleibt
+    // zurueck" spaeterer Tasks laeuft gegen genau diesen Provider.
+    let provider = InMemoryKeyProvider::new_for_test([43; 32]);
+    let first = provider
+        .generate(SecretPurpose::DraftDek, KeyProtectionProfileV1::OsWrapped)
+        .unwrap();
+    let before = provider
+        .unwrap_secret(&first)
+        .unwrap()
+        .with_exposed(|bytes| *bytes);
+
+    provider.delete(&first).unwrap();
+    assert!(!provider.contains(&first).unwrap());
+
+    let second = provider
+        .generate(SecretPurpose::DraftDek, KeyProtectionProfileV1::OsWrapped)
+        .unwrap();
+    // Dieselbe Adresse — Dienst und Konto werden nicht verbraucht —, aber nicht
+    // dasselbe Material.
+    assert_eq!(first, second);
+    assert!(!provider.unwrap_secret(&second).unwrap().matches(&before));
+}
+
+#[test]
 fn a_handle_never_serves_a_second_purpose() {
     let provider = InMemoryKeyProvider::new_for_test([11; 32]);
     let handle = provider
