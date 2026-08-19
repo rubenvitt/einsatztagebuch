@@ -649,6 +649,20 @@ git commit -m "feat(writer): define native key provider boundary"
 
 ### Task 3: Windows, macOS, and Ubuntu Writer Providers and Re-authentication Ports (SYNTHESE.md: Task 2)
 
+> **Ruling R57 (2026-08-19, Controller).** Dieser Task liefert in Stufe 2 die belegbare Hälfte:
+> Portschicht, Eintragspolitik, Plattformkennzeichen und `Unknown` für nicht ermittelbare
+> Posture-Werte. Die namentlich genannten nativen API-Familien (CNG/DPAPI, Windows Hello,
+> Keychain/Secure Enclave, LocalAuthentication, PAM/Polkit, Secret Service,
+> BitLocker/FileVault/LUKS) und der nach `docs/adr/0001-...:152-153` dafür fällige ADR wandern als
+> eigener Posten nach Stufe 7 — dort werden ohnehin alle drei Betriebssysteme gebaut und auf echter
+> Hardware nachgewiesen. Begründung: `design.md:1489` verlangt minimal `osWrapped` und lässt
+> `hardwareNonExportable` nur mit einem explizit unterstützten, in der Suite kodierten Provider zu,
+> Stufe 2 erfüllt damit die normative Mindestanforderung; die Entscheidung D-HE1 hat das Muster
+> „eigener ADR-Task vor dem Verbraucher" gesetzt; und Windows- wie Linux-Aufrufe sind auf dem
+> Host-Target weder baubar noch ausführbar, wären in Stufe 2 also unbelegter Code.
+> `HARDWARE_CAPABLE_PROVIDERS` bleibt deshalb leer (Ruling R54 gilt unverändert), `osWrapped` bleibt
+> der Boden, und Task 18 führt die Lücke als ausdrückliche offene Zeile im Gate-Bericht.
+
 **Files:**
 - Create: `crates/ea-key-provider/src/windows.rs`
 - Create: `crates/ea-key-provider/src/macos.rs`
@@ -4369,6 +4383,13 @@ git commit -m "feat(xtask): open the stage gate for stage 2"
 ```
 
 ### Task 18: Stage 2 Fault Matrix and Acceptance Gate (SYNTHESE.md: Task 10)
+
+> **Pflichtzeile aus Ruling R57.** Der Gate-Bericht `docs/traceability/stage-2-gate.md` führt
+> ausdrücklich als offen: die Key-Provider-Portschicht steht ohne native Aufrufe, vier
+> Posture-Werte bleiben `Unknown`, und der plattformübergreifende Rauchtest belegt sein
+> Schutzprofil gegen den `InMemoryKeyProvider`. Die schließende Stufe ist 7 (native API-Familien
+> je Plattform plus ADR 0003, Nachweis auf echter Hardware je Betriebssystem). Ein grüner
+> Stufe-2-Gate ist ausdrücklich kein Beleg für hardwaregebundene Schlüssel.
 
 **Files:**
 - Create: `docs/traceability/stage-2-gate.md`
