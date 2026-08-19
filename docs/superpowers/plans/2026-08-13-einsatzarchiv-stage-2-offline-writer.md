@@ -24,7 +24,8 @@
 - The server is not required for capture or finalization. Archive bytes, not SQLite status, are authoritative.
 - Schema, format, and suite versions remain independent; all Stage 1 exact bytes and vectors are immutable.
 - Operator data comes from a valid Root-signed device/OS-account binding and native re-authentication, never editable identity text. Die Profilzeile wird nur **lesend** verwendet und ihr Commitment im Writer nachgerechnet; ein neues Byte-Urbild entsteht nicht, weil Präimage, Domain-Separation, Kanonisierung und Feldreihenfolge in Stufe 1 eingefroren sind (`crates/ea-schema/src/encode.rs:429-444`, `crates/ea-crypto/src/digest.rs:30`).
-- Writer must build on supported Windows 11 `x86_64`, current/previous macOS `arm64` plus supported Intel `x86_64`, and Ubuntu 24.04 LTS `x86_64`; full signed min/max release proof belongs to Stage 7. Stufe 2 belegt Baubarkeit ausschließlich für das **Host-Target**: `rust-toolchain.toml:5` stellt nur `wasm32-unknown-unknown` bereit (gepinnt in `tools/xtask/tests/workspace.rs:278-294`), und die vier Cross-Targets `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin` werden von Task 18 namentlich als offene Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet.
+- **Jeder Verifikationslauf der Stufe 2 läuft unter `env -u RUSTUP_TOOLCHAIN`.** Die Entwicklungsumgebung exportiert `RUSTUP_TOOLCHAIN=1.97.1`; diese Variable hat Vorrang vor `rust-toolchain.toml` und überschreibt damit sowohl den Pin `1.95.0` als auch dessen `targets`-Deklaration. Ein grüner Lauf ohne dieses Präfix ist eine Aussage über 1.97.1 und kein Beleg für den gepinnten Compiler. Stufe 1 hat das im gemessenen Gate-Lauf schon so gehandhabt; `xtask` erkennt die Überschreibung und warnt, und Task 18 belegt den Stufe-2-Gate-Lauf ausschließlich mit Kommandos, die das Präfix tragen.
+- Writer must build on supported Windows 11 `x86_64`, current/previous macOS `arm64` plus supported Intel `x86_64`, and Ubuntu 24.04 LTS `x86_64`; full signed min/max release proof belongs to Stage 7. Stufe 2 belegt Baubarkeit ausschließlich für das **Host-Target**: `rust-toolchain.toml:5` stellt nur `wasm32-unknown-unknown` bereit (gepinnt in `tools/xtask/tests/workspace.rs:290-321`), und die vier Cross-Targets `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin` werden von Task 18 namentlich als offene Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet.
 - Cryptographic and format logic remains in shared Rust. TypeScript never creates grants, hashes, signatures, ciphertexts, Registry decisions, or archive bytes.
 - **D-HE1 — lokale Datenbankverschlüsselung.** Die lokale Writer-Datenbank wird mit `rusqlite` und gebundenem SQLCipher vollständig verschlüsselt; vollständig heißt ausdrücklich auch WAL, Indizes und Temp-Spill (`design.md:1961`, `:1967`). Ratifiziert wird die Wahl gegen `docs/adr/0001-toolchain-and-cryptography-dependencies.md:75-77` durch einen neuen `docs/adr/0002-*.md` mit Primärquellen- und RustSec-Prüfung nach dem Muster `docs/adr/0001-…:152-153`; dieser ADR ist Task 5 und läuft vor Task 6, der die Datenbank anlegt. Keine Klartext-Temporärdateien, keine sensiblen Logs; Telemetrie- und Crash-Upload sind standardmäßig aus.
 - **D-B01 — `importProtocolHash` hat ein normatives Urbild.** `schemas/reports/v1/import-report.cddl` wird normativ als `import-report-v1` mit fester Arrayreihenfolge übernommen, und `importProtocolHash = object_hash(exakte import-report-v1-Bytes)` nach der bestehenden Regel `crates/ea-crypto/src/digest.rs:63-66`; eine neue Domainkonstante entsteht **nicht**. Die Vektoren liegen additiv unter `vectors/reports/import-report-v1/`. Task 8 MUSS die exakten Protokollbytes lokal aufbewahren, sonst existiert kein nachprüfbares Urbild für die Provenienzzusage AK 28 (`design.md:404`).
@@ -830,7 +831,7 @@ cargo test --locked -p ea-system-tests --test cross_platform_key_provider_smoke 
 cargo test --locked -p xtask --test workspace
 ```
 
-Expected: PASS. Cross-target compile checks and native smoke runs for x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin and x86_64-apple-darwin are not asserted locally; Task 18 records them as an open Stage 7 ledger row. `rust-toolchain.toml:3-5` provisions only `wasm32-unknown-unknown`, and that toolchain contract is pinned by `tools/xtask/tests/workspace.rs:278-294`; Stage 2 evidences buildability for the host target only.
+Expected: PASS. Cross-target compile checks and native smoke runs for x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin and x86_64-apple-darwin are not asserted locally; Task 18 records them as an open Stage 7 ledger row. `rust-toolchain.toml:3-5` provisions only `wasm32-unknown-unknown`, and that toolchain contract is pinned by `tools/xtask/tests/workspace.rs:290-321`; Stage 2 evidences buildability for the host target only.
 
 - [ ] **Step 5: Commit native provider adapters**
 
@@ -4296,7 +4297,8 @@ const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [
 const STAGE_TWO_HOST_SCOPE_CLAUSE: &str = concat!(
     "Stufe 2 belegt Baubarkeit ausschliesslich fuer das Host-Target: ",
     "rust-toolchain.toml:5 stellt nur wasm32-unknown-unknown bereit (gepinnt in ",
-    "tools/xtask/tests/workspace.rs:278-294), und die vier Cross-Targets ",
+    "tools/xtask/tests/workspace.rs, rust_toolchain_declares_wasm32_and_no_release_target), "
+    "und die vier Cross-Targets ",
     "x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin, ",
     "x86_64-apple-darwin werden von Task 18 namentlich als offene ",
     "Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet."
