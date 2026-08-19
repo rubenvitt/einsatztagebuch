@@ -29,3 +29,26 @@ fn exactly_one_encrypted_draft_is_restored_after_restart() {
         b"CANARY-DRAFT"
     ));
 }
+
+/// `replace_with_blank` laesst genau EINEN leeren Entwurf zurueck.
+///
+/// Der Arm war ungetestet, und in seinem Rumpf sitzt die Raeumung des
+/// Uebergangsplatzes. Der Raeumungszweig selbst ist HIER nicht messbar:
+/// `draft_transition` entsteht erst mit `0002_discard.sql`, also ueberspringt
+/// der Arm ihn in diesem Task — gemessen wird, was hier ausfuehrbar ist, und
+/// der Nachweis der Raeumung gehoert dem Task, der die Tabelle anlegt.
+#[test]
+fn replacing_the_draft_with_a_blank_leaves_exactly_one_empty_draft() {
+    let harness = DraftHarness::new();
+    let draft = harness.repo.load_or_create().unwrap();
+    let saved = harness.repo.save(draft.with_notes("CANARY-DRAFT")).unwrap();
+
+    let blank = harness.repo.replace_with_blank().unwrap();
+
+    assert_eq!(blank.revision(), 0);
+    // `Id16` traegt bewusst kein `Debug`, deshalb der Vergleich ueber die
+    // Bytes — dieselbe Begruendung wie in `register_and_profile.rs`.
+    assert_ne!(blank.draft_id().as_bytes(), saved.draft_id().as_bytes());
+    assert_eq!(harness.active_draft_row_count(), 1);
+    assert_eq!(harness.repo.load_or_create().unwrap().notes(), "");
+}

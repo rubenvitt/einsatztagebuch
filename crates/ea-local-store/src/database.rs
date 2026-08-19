@@ -410,13 +410,25 @@ impl StoreTransaction<'_> {
 /// Zeichenkette im Prozessspeicher liegen, waehrend [`SecretVec`] genau das
 /// verhindern soll.
 fn set_cipher_key(connection: &Connection, key: &[u8]) -> Result<(), StoreError> {
-    let mut statement = String::with_capacity(key.len() * 2 + 16);
+    // Die Kapazitaet muss die GANZE Anweisung tragen: Praefix `PRAGMA key = "x'`
+    // sind 16 Zeichen, die Hexform 2n, der Abschluss `'"` zwei — zusammen
+    // 2n + 18. Waere sie kleiner, wuechse der Puffer beim letzten `push_str`
+    // und wuerde umgelagert; der freigegebene alte Block traege dann den
+    // vollstaendigen Schluessel in Hex, ungenullt, waehrend das Ueberschreiben
+    // unten nur den NEUEN Puffer erreicht.
+    let mut statement = String::with_capacity(key.len() * 2 + 18);
+    let reserved = statement.capacity();
     statement.push_str("PRAGMA key = \"x'");
     for byte in key {
         statement.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
         statement.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
     }
     statement.push_str("'\"");
+    // Ein `String` lagert ausschliesslich beim WACHSEN um. Unveraenderte
+    // Kapazitaet heisst deshalb: derselbe Block, in dem der Schluessel je
+    // stand, ist derjenige, den `overwrite_in_place` schrubbt. Die Zusicherung
+    // laeuft unter `cargo test` mit und ist kein Kommentar.
+    debug_assert_eq!(reserved, statement.capacity());
     let outcome = run_ignoring_rows(connection, &statement);
     // Ueberschreiben statt bloss fallen lassen: `String::clear` gibt den Puffer
     // nicht frei und `drop` nullt ihn nicht.

@@ -248,7 +248,25 @@ impl DraftRepository for AutosaveDraftRepository {
     }
 
     fn replace_with_blank(&self) -> Result<SavedDraft, DraftError> {
+        // Der Entwurf, auf den sich JEDER Uebergang bezog, ist danach fort —
+        // also ist es der Uebergang auch. Bliebe die Zeile stehen, meldete
+        // `pending_discard` dauerhaft eine `draft_id`, die es nicht mehr gibt,
+        // und `remove_ciphertext_and_intent_create_blank` wiese sie mit
+        // `NoDraft` ab: ein Zustand, den kein Arm dieses GEGATETEN Traits mehr
+        // verlassen kann. Der Platz ist geteilt, also wird er GANZ geraeumt und
+        // nicht nach `kind` gefiltert — dieselbe Regel wie unten.
+        //
+        // Die Abfrage steht VOR der Transaktion, weil `has_migration` dieselbe
+        // Verbindung sperrt und `Mutex<Connection>` nicht wiedereintrittsfaehig
+        // ist. Fehlt `0002_discard.sql`, wird die Raeumung UEBERSPRUNGEN und
+        // nicht abgelehnt: dieser Arm ist schon in diesem Task vollstaendig
+        // ausfuehrbar und darf nicht an einer noch nicht existierenden Tabelle
+        // scheitern.
+        let clear_transition = self.transition_table_exists()?;
         self.database.transaction(|transaction| {
+            if clear_transition {
+                transaction.execute("DELETE FROM draft_transition WHERE singleton = 0", &[])?;
+            }
             transaction.execute("DELETE FROM draft WHERE singleton = 0", &[])?;
             self.create_blank(transaction)
         })
@@ -266,11 +284,14 @@ impl DraftRepository for AutosaveDraftRepository {
             if row.draft_id != intent.draft_id() {
                 return Err(DraftError::NoDraft);
             }
+            // Ohne `kind`-Filter: der Platz ist ein EINZIGER, und eine
+            // Abschlussmarke kann eine gebuchte Verwerfensabsicht verdraengt
+            // haben. Eine nach `kind` gefilterte Raeumung traefe dann nichts
+            // und liesse eine Marke auf einem geloeschten Entwurf zurueck —
+            // dieselbe Gestalt, die `replace_with_blank` oben vermeidet. Wer
+            // die Entwurfszeile loescht, raeumt den Uebergangsplatz ganz.
+            transaction.execute("DELETE FROM draft_transition WHERE singleton = 0", &[])?;
             transaction.execute("DELETE FROM draft WHERE singleton = 0", &[])?;
-            transaction.execute(
-                "DELETE FROM draft_transition WHERE singleton = 0 AND kind = ?1",
-                &[StoreValue::Integer(TRANSITION_DISCARD)],
-            )?;
             let blank = self.create_blank(transaction)?;
             Ok(DiscardOutcome::new(row.draft_id, blank))
         })
