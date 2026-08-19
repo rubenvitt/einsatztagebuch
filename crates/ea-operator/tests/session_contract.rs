@@ -523,8 +523,14 @@ fn an_os_lock_event_invalidates_the_proof() {
     let proof = auth
         .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
         .unwrap();
+    let binding_object_hash = proof.binding_object_hash();
     let proof = proof.invalidate_on_lock();
     assert!(!proof.is_valid_for(ReauthPurpose::Finalize, head.preexisting_effective_now()));
+    // Der entwertete Nachweis behaelt seine Bindung; er ist entwertet und nicht
+    // anonym. Und der GUELTIGE Stand existiert nach dem Aufruf nicht mehr:
+    // `OperatorSessionProof` ist weder `Clone` noch `Copy`, was der
+    // `compile_fail`-Doctest der Crate belegt.
+    assert!(proof.binding_object_hash().as_bytes() == binding_object_hash.as_bytes());
 }
 
 /// Der Fuenfminuten-Vorgabewert der Untaetigkeit.

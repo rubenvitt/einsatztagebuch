@@ -1,7 +1,9 @@
 //! Die Wiederanmeldung und ihr undurchsichtiger Praesenznachweis.
 
+use core::fmt;
+
 use ea_trust::PreexistingEffectiveNow;
-use ea_types::UnixMillis;
+use ea_types::{ObjectHash, UnixMillis};
 
 use crate::account::{BoundOperator, OperatorError, OsAccountProvider};
 
@@ -99,11 +101,17 @@ impl ReauthPurpose {
 /// Felder gespeichert, die ein Aufrufer wieder auslesen koennte. Der Nachweis
 /// selbst traegt nur, was seine Gueltigkeit ENTSCHEIDET.
 ///
-/// `Debug` ist zulaessig, weil hier kein Geheimnis liegt: Zweck, zwei Zeitpunkte
-/// und ein Sperrbit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `Debug` ist zulaessig, weil hier kein Geheimnis liegt: Zweck, Bindung, zwei
+/// Zeitpunkte und ein Sperrbit.
+///
+/// AUSDRUECKLICH NICHT `Clone` und nicht `Copy`. Ein kopierbarer Nachweis machte
+/// [`Self::invalidate_on_lock`] wirkungslos: der Aufrufer behielte den gueltigen
+/// Stand daneben und koennte nach der OS-Sperre mit ihm weiterarbeiten. Der
+/// `compile_fail`-Doctest in [`crate`] belegt das.
+#[derive(Eq, PartialEq)]
 pub struct OperatorSessionProof {
     purpose: ReauthPurpose,
+    binding_object_hash: ObjectHash,
     issued_at: UnixMillis,
     expires_at: UnixMillis,
     invalidated: bool,
@@ -139,9 +147,23 @@ impl OperatorSessionProof {
     #[must_use]
     pub const fn invalidate_on_lock(self) -> Self {
         Self {
+            purpose: self.purpose,
+            binding_object_hash: self.binding_object_hash,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
             invalidated: true,
-            ..self
         }
+    }
+
+    /// Die Bedienerbindung, fuer die dieser Nachweis ausgestellt wurde.
+    ///
+    /// Kein Geheimnis: ein Bindungsobjekthash steht im oeffentlichen Trust
+    /// Bundle. Ein Verbraucher, der fuer eine bestimmte Bindung handelt — Task 4
+    /// beim Verwerfen, Task 11 beim Abschluss —, vergleicht ihn mit
+    /// `BoundOperator`, statt jeden Nachweis desselben Zwecks zu akzeptieren.
+    #[must_use]
+    pub const fn binding_object_hash(&self) -> ObjectHash {
+        self.binding_object_hash
     }
 }
 
@@ -208,10 +230,29 @@ pub trait OperatorAuthenticator {
 
         Ok(OperatorSessionProof {
             purpose,
+            binding_object_hash: bound.binding_object_hash(),
             issued_at,
             expires_at,
             invalidated: false,
         })
+    }
+}
+
+impl fmt::Debug for OperatorSessionProof {
+    /// Nennt, was die Gueltigkeit entscheidet — und keinen Hash.
+    ///
+    /// Der Bindungsobjekthash bleibt draussen, weil `ObjectHash` in diesem
+    /// Bauwerk bewusst keine Formatierung traegt: ein Hash in einer
+    /// Protokollzeile ist ein Bezeichner, der dort nichts beitraegt. Dasselbe
+    /// Muster wie `KeyHandle` in `crates/ea-key-provider/src/contract.rs`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OperatorSessionProof")
+            .field("purpose", &self.purpose)
+            .field("issued_at", &self.issued_at.get())
+            .field("expires_at", &self.expires_at.get())
+            .field("invalidated", &self.invalidated)
+            .finish_non_exhaustive()
     }
 }
 

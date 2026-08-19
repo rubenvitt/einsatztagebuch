@@ -33,6 +33,16 @@
 //! }
 //! ```
 //!
+//! Ein Nachweis laesst sich nicht vervielfaeltigen — sonst ueberlebte der
+//! gueltige Stand die OS-Sperre neben dem entwerteten:
+//!
+//! ```compile_fail
+//! use ea_operator::OperatorSessionProof;
+//!
+//! fn require_clone<T: Clone>() {}
+//! require_clone::<OperatorSessionProof>();
+//! ```
+//!
 //! Rohangaben eines Kontos werden nicht selbst zu einem Bindungshash gerechnet;
 //! der Weg fuehrt nur ueber die Stufe-1-Funktionen:
 //!
