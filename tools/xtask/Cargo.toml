@@ -16,6 +16,11 @@ serde_json.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# Der Grammatiktest stellt die ECHT KODIERTEN Kerne von
+# `local-audit-event-core-v1` gegen die eingefrorene CDDL. Ein zweiter,
+# handgeschriebener Kodierer waere eine zweite Quelle der Wahrheit und koennte
+# von `ea_format::encode_local_audit_core` abweichen, ohne dass es auffaellt.
+ea-format.workspace = true
 minicbor.workspace = true
 toml.workspace = true
 

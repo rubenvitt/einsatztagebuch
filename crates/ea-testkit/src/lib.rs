@@ -84,19 +84,25 @@ use ea_crypto::{
     trust_anchor_hash, trust_digest,
 };
 use ea_format::{
-    CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DestroyedEntryStubV1,
-    DeviceCertificateFieldsV1, EntryPackageV1, EvidenceObjectV1, FreeTextPolicyFieldsV1,
-    GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1, GrantPurposeV1,
-    GrantV1, KeyProtectionProfileV1, ManifestCoreFieldsV1, ManifestCoreV1, OperatorBindingFieldsV1,
-    OperatorRoleV1, OrganizationAdminAuthorizationFieldsV1, PolicyFieldsV1, ReceiptCoreFieldsV1,
-    ReceiptCoreV1, ReceiptV1, RegistryChangeV1, RegistryEventFieldsV1, RenewalCoreFieldsV1,
-    RenewalCoreV1, RetentionPolicyFieldsV1, Rfc3161EvidenceFieldsV1, RootCertificateFieldsV1,
-    SignedManifestV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, encode_destroyed_entry_stub,
-    encode_entry_package, encode_evidence, encode_grant, encode_receipt, encode_trust,
+    AdminRootContextV1, ArchiveProfileMigrationContextV1, BindingLifecycleContextV1,
+    CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, ClockReleaseContextV1,
+    ClockReleaseJustificationV1, DestroyedEntryStubV1, DestructionContextV1,
+    DeviceCertificateFieldsV1, EntryPackageV1, EvidenceObjectV1, ExportContextV1,
+    FreeTextPolicyFieldsV1, GenericAuditContextV1, GrantBodyFieldsV1, GrantBodyV1, GrantKindV1,
+    GrantPlanItemV1, GrantPlanV1, GrantPurposeV1, GrantV1, HistoricalRegrantContextV1,
+    IndependentTimeKindV1, IndependentTimeReferenceV1, KeyProtectionProfileV1, LocalAuditActionV1,
+    LocalAuditEventCoreFieldsV1, LocalAuditOutcomeV1, ManifestCoreFieldsV1, ManifestCoreV1,
+    OperatorBindingFieldsV1, OperatorRoleV1, OrganizationAdminAuthorizationFieldsV1,
+    PolicyFieldsV1, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1, RegistryChangeV1,
+    RegistryEventFieldsV1, RenewalCoreFieldsV1, RenewalCoreV1, RetentionPolicyFieldsV1,
+    Rfc3161EvidenceFieldsV1, RootCertificateFieldsV1, SignedManifestV1, StaleRegistryContextV1,
+    TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, encode_destroyed_entry_stub,
+    encode_entry_package, encode_evidence, encode_grant, encode_local_audit_core,
+    encode_local_audit_event, encode_receipt, encode_trust,
 };
 use ea_types::{
     AuthorizationId, CertificateHash, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash,
-    Hash32, KeyThumbprint, ObjectHash, OperatorSubjectId, OrganizationId, RegistryVersion,
+    EventId, Hash32, KeyThumbprint, ObjectHash, OperatorSubjectId, OrganizationId, RegistryVersion,
     SubjectId, UnixMillis,
 };
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -6114,6 +6120,566 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), TestkitError> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Vektorfamilie local-audit/v1
+// ---------------------------------------------------------------------------
+
+/// Der Familienname der lokalen Auditvektoren.
+pub const LOCAL_AUDIT_FAMILY: &str = "local-audit";
+
+/// Der Versionsordner der lokalen Auditvektoren.
+pub const LOCAL_AUDIT_V1_VERSION: &str = "v1";
+
+/// Die Wurzel der lokalen Auditvektoren, relativ zur Arbeitsbaumwurzel.
+pub const LOCAL_AUDIT_V1_ROOT: &str = "vectors/local-audit/v1";
+
+/// Die Herkunftsangabe der lokalen Auditvektoren.
+const LOCAL_AUDIT_GENERATOR: &str = "ea-testkit::local_audit_v1_manifest";
+
+/// Der Suite-Identifikator der lokalen Auditvektoren, EINGEFROREN.
+const LOCAL_AUDIT_SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+
+/// Der Schema-Identifikator eines signierten Auditereignisses.
+const LOCAL_AUDIT_SCHEMA_ID: &str = "local-audit-event-v1";
+
+/// Die Organisationskennung aller lokalen Auditvektoren.
+const LOCAL_AUDIT_ORGANIZATION_ID: [u8; 16] = [0x30; 16];
+
+/// Die Geraetekennung aller lokalen Auditvektoren.
+const LOCAL_AUDIT_DEVICE_ID: [u8; 16] = [0x31; 16];
+
+/// Der Objekthash der Bedienerbindung, wo sie steht.
+const LOCAL_AUDIT_BINDING_OBJECT_HASH: [u8; 32] = [0x32; 32];
+
+/// Der Objekthash des Signaturzertifikats. `CoseSigner::sign_local_audit`
+/// entnimmt ihn dem Kern selbst, es braucht also kein Zertifikatsobjekt.
+const LOCAL_AUDIT_SIGNER_CERTIFICATE_OBJECT_HASH: [u8; 32] = [0x33; 32];
+
+/// Die Wirkzeit aller lokalen Auditvektoren in Millisekunden seit der Epoche.
+///
+/// EINE Zeit fuer alle zwoelf: `effective-now` ist die einzige Position
+/// veraenderlicher Laenge vor dem Kontext, und die drei Byteversaetze unten
+/// haengen daran.
+const LOCAL_AUDIT_EFFECTIVE_NOW_MS: i64 = 1_700_000_000_000;
+
+/// Das Fuellbyte der Ereigniskennung, um den Aktionscode erhoeht.
+const LOCAL_AUDIT_EVENT_ID_FILL_BASE: u8 = 0x40;
+
+/// Das Fuellbyte der Nonce, um den Aktionscode erhoeht.
+const LOCAL_AUDIT_NONCE_FILL_BASE: u8 = 0x90;
+
+// Die Fuellbytes der Kontexthashes, je Kontext ein eigener Abschnitt. Jedes
+// Fuellbyte kommt in der Familie genau EINMAL vor, damit eine Verwechslung im
+// Vektormaterial sichtbar wird statt still durchzulaufen — dieselbe Regel, die
+// `declared_test_entropy_is_pairwise_distinct` fuer das Schluesselmaterial
+// misst.
+
+/// Der Gegenstand des `login`-Ereignisses.
+const LOCAL_AUDIT_LOGIN_SUBJECT_FILL: u8 = 0x71;
+
+/// Die Vorgaengerbindung des Widerrufs.
+const LOCAL_AUDIT_BINDING_OLD_FILL: u8 = 0x72;
+
+/// Die Nachfolgerbindung der Bindungsaenderung.
+const LOCAL_AUDIT_BINDING_NEW_FILL: u8 = 0x73;
+
+/// Der Registrierungskopf des veralteten Registers.
+const LOCAL_AUDIT_STALE_REGISTRY_HEAD_FILL: u8 = 0x74;
+
+/// Die wirksame Richtlinie des veralteten Registers.
+const LOCAL_AUDIT_STALE_POLICY_FILL: u8 = 0x75;
+
+/// Der D-B02-Slot `previewHash`.
+const LOCAL_AUDIT_STALE_PREVIEW_FILL: u8 = 0x76;
+
+/// Der exportierte Eintrag.
+const LOCAL_AUDIT_EXPORT_ENTRY_FILL: u8 = 0x77;
+
+/// Der Registrierungskopf der Taktfreigabe.
+const LOCAL_AUDIT_CLOCK_REGISTRY_HEAD_FILL: u8 = 0x78;
+
+/// Die Wachrichtlinie der Taktfreigabe.
+const LOCAL_AUDIT_CLOCK_GUARD_POLICY_FILL: u8 = 0x79;
+
+/// Die unabhaengige Zeitreferenz der Taktfreigabe.
+const LOCAL_AUDIT_CLOCK_REFERENCE_FILL: u8 = 0x7a;
+
+/// Die Autorisierung der Root-Zeremonie.
+const LOCAL_AUDIT_ADMIN_AUTHORIZATION_FILL: u8 = 0x7b;
+
+/// Das Ziel der Root-Zeremonie.
+const LOCAL_AUDIT_ADMIN_TARGET_FILL: u8 = 0x7c;
+
+/// Der Gegenstand des Wiederherstellungstests.
+const LOCAL_AUDIT_RECOVERY_SUBJECT_FILL: u8 = 0x7d;
+
+/// Die Autorisierung des nachtraeglichen Grants.
+const LOCAL_AUDIT_REGRANT_AUTHORIZATION_FILL: u8 = 0x7e;
+
+/// Der Eintrag des nachtraeglichen Grants.
+const LOCAL_AUDIT_REGRANT_ENTRY_FILL: u8 = 0x7f;
+
+/// Der urspruengliche Recovery-Grant.
+const LOCAL_AUDIT_REGRANT_ORIGINAL_GRANT_FILL: u8 = 0x80;
+
+/// Das Empfaengerzertifikat des nachtraeglichen Grants.
+const LOCAL_AUDIT_REGRANT_RECIPIENT_FILL: u8 = 0x81;
+
+/// Der neue Grant.
+const LOCAL_AUDIT_REGRANT_NEW_GRANT_FILL: u8 = 0x82;
+
+/// Die Vernichtungsautorisierung.
+const LOCAL_AUDIT_DESTRUCTION_AUTHORIZATION_FILL: u8 = 0x83;
+
+/// Das Zustandsereignis der Vernichtung.
+const LOCAL_AUDIT_DESTRUCTION_STATE_EVENT_FILL: u8 = 0x84;
+
+/// Der D-B02-Slot `sourceProfileHash`.
+const LOCAL_AUDIT_MIGRATION_SOURCE_FILL: u8 = 0x85;
+
+/// Der D-B02-Slot `targetProfileHash`.
+const LOCAL_AUDIT_MIGRATION_TARGET_FILL: u8 = 0x86;
+
+/// Der D-B02-Slot `inventoryHash`.
+const LOCAL_AUDIT_MIGRATION_INVENTORY_FILL: u8 = 0x87;
+
+/// Der D-B02-Slot `activePointerHash`.
+const LOCAL_AUDIT_MIGRATION_ACTIVE_POINTER_FILL: u8 = 0x88;
+
+/// Die Sequenz, ab der die neue Bindung wirkt.
+const LOCAL_AUDIT_BINDING_CHANGE_SEQUENCE: u64 = 41;
+
+/// Die Sequenz, ab der der Widerruf wirkt.
+const LOCAL_AUDIT_REVOCATION_SEQUENCE: u64 = 42;
+
+/// Die vorgeschlagene Sequenz des veralteten Registers.
+const LOCAL_AUDIT_STALE_PROPOSED_SEQUENCE: u64 = 43;
+
+/// Die Registrierungsversion der Taktfreigabe.
+const LOCAL_AUDIT_CLOCK_REGISTRY_VERSION: u64 = 44;
+
+/// Die zugelassene Vorwaertsabweichung der Taktfreigabe.
+const LOCAL_AUDIT_MAX_FUTURE_CLOCK_SKEW_MS: u64 = 300_000;
+
+/// Die Zielart des Exports.
+const LOCAL_AUDIT_EXPORT_TARGET_KIND: u64 = 1;
+
+/// Der Aktionscode der Root-Zeremonie innerhalb ihres Kontexts.
+const LOCAL_AUDIT_ADMIN_CONTEXT_ACTION_CODE: u64 = 3;
+
+/// Der Versatz des Aktionscodes im Kern eines Ereignisses MIT Bindung.
+///
+/// Ausgerechnet, nicht gezaehlt: ein `array(12)`-Kopfbyte, das Versionsliteral
+/// `1`, drei 16-Byte-Bytestrings mit Einbytekopf (je 17), zwei
+/// 32-Byte-Bytestrings mit Zweibytekopf (je 34). Jeder Gebrauch prueft das Byte
+/// VOR der Aenderung, damit eine Fixtureverschiebung beim Erzeugen auffaellt
+/// statt still das falsche Byte zu treffen.
+const LOCAL_AUDIT_ACTION_CODE_OFFSET: usize = 1 + 1 + 3 * 17 + 2 * 34;
+
+/// Der Versatz des Ausgangs, unmittelbar hinter dem Aktionscode.
+const LOCAL_AUDIT_OUTCOME_OFFSET: usize = LOCAL_AUDIT_ACTION_CODE_OFFSET + 1;
+
+/// Der Versatz der Kontextmarke: hinter dem Ausgang, der neunstelligen
+/// `effective-now` und dem Kopfbyte des Kontextpaares.
+const LOCAL_AUDIT_CONTEXT_TAG_OFFSET: usize = LOCAL_AUDIT_OUTCOME_OFFSET + 1 + 9 + 1;
+
+/// Die Reichweitennotiz der beiden Vektoren mit D-B02-Hashslots.
+const LOCAL_AUDIT_HASH_SLOT_NOTE: &str = "Die 32-Byte-Hashslots dieses Vektors tragen ERKLAERTE TESTKONSTANTEN. Der Vektor belegt, dass der Kodierer sie an ihrer Position schreibt und der Dekodierer sie dort wiederfindet — und NICHTS darueber, wie sie berechnet werden: die Urbilder und die Domain-Zeichenketten der vier D-B02-Slots (previewHash, sourceProfileHash, targetProfileHash, inventoryHash, activePointerHash) entstehen mit ihren eigenen Vektoren in einer spaeteren Aufgabe.";
+
+/// Die Reichweitennotiz des Vektors mit gekippter Nonce.
+const LOCAL_AUDIT_NONCE_NOTE: &str = "Dieser Vektor ist der Beleg, dass die CDDL NICHT die Annahmegrenze ist: seine Gestalt ist grammatisch einwandfrei — die Nonce bleibt ein 32-Byte-Bytestring — und er wird ausschliesslich deshalb abgewiesen, weil die COSE-Nutzlast nicht mehr Byte fuer Byte der Kern ist.";
+
+/// Die Reichweitennotiz des Vektors mit dem unzulaessigen Aktionscode.
+const LOCAL_AUDIT_UNKNOWN_ACTION_NOTE: &str = "Der Aktionscode 200 ist durch die eingefrorene Vektorhygiene fuer einen UNZULAESSIGEN Code reserviert, damit eine spaetere v1.1-Erweiterung diesen Vektor nicht von abgelehnt zu angenommen drehen kann. Er ist deshalb ausdruecklich KEINE Einbytekippung: 200 braucht einen Zweibytekopf, und ein benachbarter Einbytewert waere ein Code, den eine Erweiterung belegen darf.";
+
+fn local_audit_event_id(fill: u8) -> EventId {
+    EventId::try_from([fill; 16].as_slice()).expect("16 bytes")
+}
+
+fn local_audit_object_hash(fill: u8) -> ObjectHash {
+    ObjectHash::try_from([fill; 32].as_slice()).expect("32 bytes")
+}
+
+fn local_audit_entry_hash(fill: u8) -> EntryHash {
+    EntryHash::try_from([fill; 32].as_slice()).expect("32 bytes")
+}
+
+fn local_audit_hash32(fill: u8) -> Hash32 {
+    Hash32::try_from([fill; 32].as_slice()).expect("32 bytes")
+}
+
+/// Ein Ereignis dieser Familie: die Kennungen folgen dem Aktionscode, damit
+/// eine Verwechslung im Vektormaterial sichtbar wird.
+fn local_audit_event(
+    action: LocalAuditActionV1,
+    outcome: LocalAuditOutcomeV1,
+    operator_binding_object_hash: Option<ObjectHash>,
+) -> LocalAuditEventCoreFieldsV1 {
+    let code = action.code();
+    LocalAuditEventCoreFieldsV1 {
+        event_id: local_audit_event_id(LOCAL_AUDIT_EVENT_ID_FILL_BASE + code),
+        organization_id: OrganizationId::try_from(LOCAL_AUDIT_ORGANIZATION_ID.as_slice())
+            .expect("16 bytes"),
+        device_id: DeviceId::try_from(LOCAL_AUDIT_DEVICE_ID.as_slice()).expect("16 bytes"),
+        operator_binding_object_hash,
+        signer_certificate_object_hash: ObjectHash::try_from(
+            LOCAL_AUDIT_SIGNER_CERTIFICATE_OBJECT_HASH.as_slice(),
+        )
+        .expect("32 bytes"),
+        action,
+        outcome,
+        effective_now: UnixMillis::new(LOCAL_AUDIT_EFFECTIVE_NOW_MS),
+        nonce: [LOCAL_AUDIT_NONCE_FILL_BASE + code; 32],
+    }
+}
+
+/// Die zwoelf Ereignisse, eines je Aktion, mit ihrem Vektornamen.
+///
+/// Alle neun Kontextmarken kommen vor, und beide nullbaren Stellen stehen
+/// mindestens einmal als `null`: die Bedienerbindung im `login`-Ereignis, der
+/// Vorgaenger und der Nachfolger im Bindungslebenslauf.
+fn local_audit_accepted_events() -> Vec<(&'static str, LocalAuditEventCoreFieldsV1)> {
+    let binding =
+        Some(ObjectHash::try_from(LOCAL_AUDIT_BINDING_OBJECT_HASH.as_slice()).expect("32 bytes"));
+    vec![
+        (
+            "event/accepted-login",
+            local_audit_event(
+                LocalAuditActionV1::Login(GenericAuditContextV1::new(Some(
+                    local_audit_object_hash(LOCAL_AUDIT_LOGIN_SUBJECT_FILL),
+                ))),
+                LocalAuditOutcomeV1::Accepted,
+                None,
+            ),
+        ),
+        (
+            "event/accepted-reauth-failure",
+            local_audit_event(
+                LocalAuditActionV1::ReauthFailure(GenericAuditContextV1::new(None)),
+                LocalAuditOutcomeV1::Failed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-binding-change",
+            local_audit_event(
+                LocalAuditActionV1::BindingChange(BindingLifecycleContextV1::new(
+                    None,
+                    Some(local_audit_object_hash(LOCAL_AUDIT_BINDING_NEW_FILL)),
+                    ChainSequence::new(LOCAL_AUDIT_BINDING_CHANGE_SEQUENCE),
+                )),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-revocation",
+            local_audit_event(
+                LocalAuditActionV1::Revocation(BindingLifecycleContextV1::new(
+                    Some(local_audit_object_hash(LOCAL_AUDIT_BINDING_OLD_FILL)),
+                    None,
+                    ChainSequence::new(LOCAL_AUDIT_REVOCATION_SEQUENCE),
+                )),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-registry-stale-warn-acceptance",
+            local_audit_event(
+                LocalAuditActionV1::RegistryStaleWarnAcceptance(StaleRegistryContextV1::new(
+                    local_audit_object_hash(LOCAL_AUDIT_STALE_REGISTRY_HEAD_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_STALE_POLICY_FILL),
+                    ChainSequence::new(LOCAL_AUDIT_STALE_PROPOSED_SEQUENCE),
+                    UnixMillis::new(LOCAL_AUDIT_EFFECTIVE_NOW_MS - 60_000),
+                    UnixMillis::new(LOCAL_AUDIT_EFFECTIVE_NOW_MS),
+                    local_audit_hash32(LOCAL_AUDIT_STALE_PREVIEW_FILL),
+                )),
+                LocalAuditOutcomeV1::Accepted,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-plaintext-export",
+            local_audit_event(
+                LocalAuditActionV1::PlaintextExport(ExportContextV1::new(
+                    local_audit_entry_hash(LOCAL_AUDIT_EXPORT_ENTRY_FILL),
+                    LOCAL_AUDIT_EXPORT_TARGET_KIND,
+                )),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-clock-skew-release",
+            local_audit_event(
+                LocalAuditActionV1::ClockSkewRelease(ClockReleaseContextV1::new(
+                    UnixMillis::new(LOCAL_AUDIT_EFFECTIVE_NOW_MS - 1_000),
+                    UnixMillis::new(LOCAL_AUDIT_EFFECTIVE_NOW_MS),
+                    LOCAL_AUDIT_MAX_FUTURE_CLOCK_SKEW_MS,
+                    RegistryVersion::new(LOCAL_AUDIT_CLOCK_REGISTRY_VERSION),
+                    local_audit_object_hash(LOCAL_AUDIT_CLOCK_REGISTRY_HEAD_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_CLOCK_GUARD_POLICY_FILL),
+                    IndependentTimeReferenceV1::new(
+                        IndependentTimeKindV1::Checkpoint,
+                        local_audit_object_hash(LOCAL_AUDIT_CLOCK_REFERENCE_FILL),
+                        UnixMillis::new(LOCAL_AUDIT_EFFECTIVE_NOW_MS - 2_000),
+                    ),
+                    ClockReleaseJustificationV1::PlatformTimeSourceRecovery,
+                    UnixMillis::new(LOCAL_AUDIT_EFFECTIVE_NOW_MS),
+                    UnixMillis::new(
+                        LOCAL_AUDIT_EFFECTIVE_NOW_MS
+                            + i64::try_from(LOCAL_AUDIT_MAX_FUTURE_CLOCK_SKEW_MS)
+                                .expect("the frozen skew fits an i64"),
+                    ),
+                )),
+                LocalAuditOutcomeV1::Accepted,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-admin-root-ceremony",
+            local_audit_event(
+                LocalAuditActionV1::AdminRootCeremony(AdminRootContextV1::new(
+                    local_audit_object_hash(LOCAL_AUDIT_ADMIN_AUTHORIZATION_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_ADMIN_TARGET_FILL),
+                    LOCAL_AUDIT_ADMIN_CONTEXT_ACTION_CODE,
+                )),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-recovery-test",
+            local_audit_event(
+                LocalAuditActionV1::RecoveryTest(GenericAuditContextV1::new(Some(
+                    local_audit_object_hash(LOCAL_AUDIT_RECOVERY_SUBJECT_FILL),
+                ))),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-historical-regrant",
+            local_audit_event(
+                LocalAuditActionV1::HistoricalRegrant(HistoricalRegrantContextV1::new(
+                    local_audit_object_hash(LOCAL_AUDIT_REGRANT_AUTHORIZATION_FILL),
+                    local_audit_entry_hash(LOCAL_AUDIT_REGRANT_ENTRY_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_REGRANT_ORIGINAL_GRANT_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_REGRANT_RECIPIENT_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_REGRANT_NEW_GRANT_FILL),
+                )),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-destruction",
+            local_audit_event(
+                LocalAuditActionV1::Destruction(DestructionContextV1::new(
+                    local_audit_object_hash(LOCAL_AUDIT_DESTRUCTION_AUTHORIZATION_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_DESTRUCTION_STATE_EVENT_FILL),
+                )),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-archive-profile-migration",
+            local_audit_event(
+                LocalAuditActionV1::ArchiveProfileMigration(ArchiveProfileMigrationContextV1::new(
+                    local_audit_hash32(LOCAL_AUDIT_MIGRATION_SOURCE_FILL),
+                    local_audit_hash32(LOCAL_AUDIT_MIGRATION_TARGET_FILL),
+                    local_audit_hash32(LOCAL_AUDIT_MIGRATION_INVENTORY_FILL),
+                    local_audit_hash32(LOCAL_AUDIT_MIGRATION_ACTIVE_POINTER_FILL),
+                )),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+    ]
+}
+
+/// Das Paar aus Kern und Signatur, wie `encode_local_audit_event` es schreibt.
+///
+/// Von Hand, weil die vier Defektvektoren einen Kern tragen, den der Kodierer
+/// zu Recht nicht mehr annimmt. `array(2)` ist genau ein Byte — zwei Elemente
+/// liegen weit unter der 24er-Grenze der definiten CBOR-Kopfbytes.
+fn local_audit_wrapper(core: &[u8], cose: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(1 + core.len() + cose.len());
+    bytes.push(0x82);
+    bytes.extend_from_slice(core);
+    bytes.extend_from_slice(cose);
+    bytes
+}
+
+/// Setzt ein Byte des Kerns und prueft seinen Wert VORHER.
+fn local_audit_edited_core(core: &[u8], offset: usize, expected: u8, replacement: u8) -> Vec<u8> {
+    assert_eq!(
+        core[offset], expected,
+        "the fixture moved: offset {offset} carries {:#04x}, not {expected:#04x}",
+        core[offset]
+    );
+    let mut edited = core.to_vec();
+    edited[offset] = replacement;
+    edited
+}
+
+/// Das Manifest der Vektorfamilie `local-audit/v1`.
+///
+/// Vollstaendig deterministisch: `CoseSigner` baut aus festen Schluesselbytes,
+/// Ed25519 signiert deterministisch, und jedes Feld ist eine feste Konstante.
+///
+/// KEINE Zwischen-Digests: die Signatur eines lokalen Audits deckt den Kern
+/// BYTE FUER BYTE und nicht einen Digest davon (`ContentType::LocalAuditCbor`
+/// ist kein Digesttyp). Es gibt hier also keinen Zwischenwert, den ein Manifest
+/// benennen koennte; `fileSha256` haelt die Bytes, und `objectBytes` haelt sie
+/// ein zweites Mal.
+///
+/// # Panics
+///
+/// Wenn eine der Konstruktionen fehlschlaegt.
+#[must_use]
+pub fn local_audit_v1_manifest() -> VectorManifest {
+    let signer = format_signer(TEST_ENTROPY_DEVICE_ED25519_SEED);
+    let mut entries = Vec::new();
+    let mut export_core = Vec::new();
+    let mut export_cose = Vec::new();
+    let mut export_nonce = [0_u8; 32];
+
+    for (name, fields) in local_audit_accepted_events() {
+        let core = encode_local_audit_core(&fields).expect("a frozen audit core is well formed");
+        let cose = signer
+            .sign_local_audit(&core)
+            .expect("signing a frozen audit core cannot fail");
+        let object_bytes =
+            encode_local_audit_event(&core, &cose).expect("a frozen audit event is well formed");
+        if name == "event/accepted-plaintext-export" {
+            export_nonce = fields.nonce;
+            export_core = core;
+            export_cose = cose;
+        }
+        let scope_note = match name {
+            "event/accepted-registry-stale-warn-acceptance"
+            | "event/accepted-archive-profile-migration" => Some(LOCAL_AUDIT_HASH_SLOT_NOTE),
+            _ => None,
+        };
+        entries.push(local_audit_entry(
+            name,
+            object_bytes,
+            ExpectedOutcome::Accepted,
+            scope_note,
+        ));
+    }
+    assert!(
+        !export_core.is_empty(),
+        "the four single byte defects need the accepted export event"
+    );
+
+    // Die Aktion springt von `plaintextExport` auf `login`, waehrend die
+    // Kontextmarke `3` stehen bleibt: die Grammatik bindet Aktion 0 an den
+    // generischen Kontext.
+    let flipped_action =
+        local_audit_edited_core(&export_core, LOCAL_AUDIT_ACTION_CODE_OFFSET, 5, 0);
+    // Die Kontextmarke springt von `3` auf `0`, waehrend die Aktion `5` bleibt.
+    let flipped_tag = local_audit_edited_core(&export_core, LOCAL_AUDIT_CONTEXT_TAG_OFFSET, 3, 0);
+    // Der Ausgang `3` liegt jenseits von `local-audit-outcome-v1 = 0..2`.
+    let flipped_outcome = local_audit_edited_core(&export_core, LOCAL_AUDIT_OUTCOME_OFFSET, 2, 3);
+    // Ein Noncebyte, Laenge unveraendert.
+    let nonce_offset = unique_offset(&export_core, &export_nonce);
+    let mut flipped_nonce = export_core.clone();
+    flipped_nonce[nonce_offset] ^= 0x01;
+
+    // Der unzulaessige Aktionscode 200 braucht einen Zweibytekopf und macht den
+    // Kern damit um genau ein Byte laenger.
+    let mut unknown_action = export_core.clone();
+    assert_eq!(
+        unknown_action[LOCAL_AUDIT_ACTION_CODE_OFFSET], 5,
+        "the fixture moved: the action code is not where it is expected"
+    );
+    unknown_action.splice(
+        LOCAL_AUDIT_ACTION_CODE_OFFSET..=LOCAL_AUDIT_ACTION_CODE_OFFSET,
+        [0x18, 0xc8],
+    );
+
+    for (name, core, error_code, scope_note) in [
+        (
+            "event/rejected-flipped-action-code",
+            flipped_action,
+            LOCAL_AUDIT_CORE_ERROR_CODE,
+            None,
+        ),
+        (
+            "event/rejected-flipped-context-tag",
+            flipped_tag,
+            LOCAL_AUDIT_CORE_ERROR_CODE,
+            None,
+        ),
+        (
+            "event/rejected-flipped-outcome",
+            flipped_outcome,
+            LOCAL_AUDIT_CORE_ERROR_CODE,
+            None,
+        ),
+        (
+            "event/rejected-flipped-nonce-byte",
+            flipped_nonce,
+            LOCAL_AUDIT_COSE_ERROR_CODE,
+            Some(LOCAL_AUDIT_NONCE_NOTE),
+        ),
+        (
+            "event/rejected-unknown-action-code-200",
+            unknown_action,
+            LOCAL_AUDIT_CORE_ERROR_CODE,
+            Some(LOCAL_AUDIT_UNKNOWN_ACTION_NOTE),
+        ),
+    ] {
+        entries.push(local_audit_entry(
+            name,
+            local_audit_wrapper(&core, &export_cose),
+            ExpectedOutcome::Rejected {
+                error_code: error_code.to_owned(),
+            },
+            scope_note,
+        ));
+    }
+
+    VectorManifest {
+        family: LOCAL_AUDIT_FAMILY.to_owned(),
+        version: LOCAL_AUDIT_V1_VERSION.to_owned(),
+        entries,
+    }
+}
+
+/// Der Code, mit dem `ea-format` einen Kern abweist, den die Signaturgrenze
+/// nicht annimmt.
+const LOCAL_AUDIT_CORE_ERROR_CODE: &str = "EA-FORMAT-SHAPE";
+
+/// Der Code, mit dem `ea-format` eine Signatur abweist, die diesen Kern nicht
+/// deckt.
+const LOCAL_AUDIT_COSE_ERROR_CODE: &str = "EA-FORMAT-COSE";
+
+/// Ein Eintrag der lokalen Auditfamilie.
+fn local_audit_entry(
+    name: &str,
+    object_bytes: Vec<u8>,
+    expected_outcome: ExpectedOutcome,
+    scope_note: Option<&str>,
+) -> VectorEntry {
+    VectorEntry {
+        name: name.to_owned(),
+        schema_id: LOCAL_AUDIT_SCHEMA_ID.to_owned(),
+        suite_id: LOCAL_AUDIT_SUITE_ID.to_owned(),
+        source: VectorSource::GeneratorCommit(LOCAL_AUDIT_GENERATOR.to_owned()),
+        input_bytes: Vec::new(),
+        intermediate_digests: BTreeMap::new(),
+        object_bytes,
+        expected_outcome,
+        file: format!("{name}.bin"),
+        scope_note: scope_note.map(ToOwned::to_owned),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6829,5 +7395,79 @@ mod tests {
             PROPERTY_CORPUS_MANIFEST_SHA256
         );
         assert_eq!(property_corpus().manifest_json(), corpus.manifest_json());
+    }
+
+    /// Schreibt die Vektorfamilie `local-audit/v1` in den Arbeitsbaum.
+    ///
+    /// `#[ignore]`, weil dieser Test SCHREIBT. Er ist der dokumentierte
+    /// Erzeugungslauf und wird ausdruecklich angefordert:
+    /// `cargo test -p ea-testkit -- --ignored emit_local_audit_vectors`.
+    /// Danach sind die eingecheckten Bytes die Autoritaet.
+    #[test]
+    #[ignore = "writes into the working tree; run deliberately to regenerate"]
+    fn emit_local_audit_vectors() {
+        let root = workspace_root().join(LOCAL_AUDIT_V1_ROOT);
+        local_audit_v1_manifest().emit(&root).unwrap();
+        assert!(verify_manifest_at(&root).unwrap().is_clean());
+    }
+
+    /// Das eingecheckte Manifest der Familie ist genau die Ausgabe ihres
+    /// Erzeugers.
+    ///
+    /// Damit haengt der Kodierer an den eingefrorenen Bytes: aenderte
+    /// `encode_local_audit_core` eine Position, fiele dieser Test, und die
+    /// Bytes muessten bewusst neu erzeugt werden statt still zu veralten.
+    #[test]
+    fn the_committed_local_audit_family_matches_its_generator() {
+        let root = workspace_root().join(LOCAL_AUDIT_V1_ROOT);
+        let text = fs::read_to_string(root.join(MANIFEST_FILE_NAME))
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", root.display()));
+        assert_eq!(
+            text,
+            local_audit_v1_manifest().to_json().unwrap(),
+            "the committed manifest must be byte-identical to the generator output"
+        );
+        let report = verify_manifest_at(&root).unwrap();
+        assert!(report.is_clean(), "{:?}", report.mismatches);
+    }
+
+    /// Der Erzeuger benennt jeden Eintrag und jede Datei genau einmal, deckt
+    /// alle zwoelf Aktionen ab und ist deterministisch.
+    #[test]
+    fn the_local_audit_generator_is_deterministic() {
+        let manifest = local_audit_v1_manifest();
+        assert_eq!(manifest.family, LOCAL_AUDIT_FAMILY);
+        assert_eq!(manifest.version, LOCAL_AUDIT_V1_VERSION);
+        assert_eq!(manifest.entries.len(), 17);
+        let names = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), manifest.entries.len());
+        let accepted = manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.expected_outcome == ExpectedOutcome::Accepted)
+            .count();
+        assert_eq!(
+            accepted, 12,
+            "one accepted vector per action of local-audit-action-v1"
+        );
+        assert_eq!(manifest.entries.len() - accepted, 5);
+        for entry in &manifest.entries {
+            assert_eq!(entry.file, format!("{}.bin", entry.name));
+            assert_eq!(entry.schema_id, LOCAL_AUDIT_SCHEMA_ID);
+            assert_eq!(entry.suite_id, LOCAL_AUDIT_SUITE_ID);
+            assert!(
+                entry.intermediate_digests.is_empty(),
+                "a local audit signature covers the core itself, so there is no \
+                 intermediate value to name"
+            );
+        }
+        assert_eq!(
+            local_audit_v1_manifest().to_json().unwrap(),
+            local_audit_v1_manifest().to_json().unwrap()
+        );
     }
 }

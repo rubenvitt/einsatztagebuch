@@ -47,7 +47,7 @@ use ea_crypto::{
 use ea_format::{
     DecodedEvidencePayloadV1, DecodedTrustPayloadV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1,
     GrantPurposeV1, GrantV1, ParsedArchiveObject, ReceiptV1, Rfc3161EvidenceFieldsV1,
-    decode_exact_object,
+    decode_exact_object, decode_local_audit_event,
 };
 use ea_schema::{CommonHeaderV1, NativeSourceV1, OperatorSnapshotV1, SchemaRegistry};
 use ea_system_tests::workspace_root;
@@ -3381,4 +3381,179 @@ fn policy_core_v1_positive_vectors_pin_the_device_side_trust_refresh_deadline() 
         BTreeSet::from([0, 86_400_000]),
         "the two positive vectors must cover a set and an unset deadline"
     );
+}
+
+// ---------------------------------------------------------------------------
+// local-audit/v1
+// ---------------------------------------------------------------------------
+
+/// Der Manifestpfad der Familie, relativ zur Arbeitsbaumwurzel.
+const LOCAL_AUDIT_MANIFEST_PATH: &str = "vectors/local-audit/v1/manifest.json";
+
+/// Die Wurzel der Familie, relativ zur Arbeitsbaumwurzel.
+const LOCAL_AUDIT_VECTOR_ROOT: &str = "vectors/local-audit/v1";
+
+/// Die Zahl der Eintraege: zwoelf angenommene, einer je Aktion, und fuenf
+/// abgelehnte. Ohne diese Schranke liefe ein truncatiertes Manifest still
+/// durch.
+const LOCAL_AUDIT_EXPECTED_ENTRY_COUNT: usize = 17;
+
+/// Die Zahl der Aktionen aus `schemas/reports/v1/local-audit.cddl:3`.
+const LOCAL_AUDIT_ACTION_COUNT: u8 = 12;
+
+/// Der angenommene Vektor, aus dem die vier Einbyteabweichungen entstehen.
+const LOCAL_AUDIT_EDIT_BASE: &str = "event/accepted-plaintext-export";
+
+/// Die vier Vektoren, die sich in GENAU EINEM Byte von ihrer Grundlage
+/// unterscheiden. Der fuenfte (`rejected-unknown-action-code-200`) ist
+/// ausdruecklich keiner: `200` braucht einen Zweibytekopf.
+const LOCAL_AUDIT_SINGLE_BYTE_DEFECTS: [&str; 4] = [
+    "event/rejected-flipped-action-code",
+    "event/rejected-flipped-context-tag",
+    "event/rejected-flipped-nonce-byte",
+    "event/rejected-flipped-outcome",
+];
+
+/// Die beiden Vektoren, die D-B02-Hashslots tragen und deshalb sagen muessen,
+/// was sie NICHT belegen.
+const LOCAL_AUDIT_HASH_SLOT_VECTORS: [&str; 2] = [
+    "event/accepted-archive-profile-migration",
+    "event/accepted-registry-stale-warn-acceptance",
+];
+
+#[test]
+fn local_audit_vectors_match_their_manifest() {
+    let root = workspace_root();
+    let family = load_frozen_family(
+        &root,
+        LOCAL_AUDIT_MANIFEST_PATH,
+        LOCAL_AUDIT_VECTOR_ROOT,
+        "local-audit",
+        LOCAL_AUDIT_EXPECTED_ENTRY_COUNT,
+    );
+    for vector in family.entries.iter() {
+        assert_eq!(vector.suite_id, ARCHIVE_FROZEN_SUITE_ID);
+        assert_eq!(vector.schema_id, "local-audit-event-v1");
+    }
+    assert_eq!(
+        check_local_audit_vectors(&family.entries),
+        family.entries.len()
+    );
+}
+
+/// Die Familie `local-audit/v1`, vollstaendig ausgefuehrt.
+///
+/// Der Rueckgabewert ist die Zahl der AUSGEFUEHRTEN Eintraege, und sie entsteht
+/// aus einer Namensmenge, die gegen die Namensmenge des Manifests gestellt wird:
+/// eine bloss gezaehlte Schleife waere auch dann vollzaehlig, wenn sie zwoelfmal
+/// denselben Eintrag pruefte.
+fn check_local_audit_vectors(entries: &[VectorEntry]) -> usize {
+    let mut executed = BTreeSet::new();
+    let mut action_codes = BTreeSet::new();
+    let mut null_binding = 0_usize;
+
+    for vector in entries {
+        match &vector.expected_outcome {
+            ExpectedOutcome::Accepted => {
+                let event = decode_local_audit_event(&vector.object_bytes)
+                    .unwrap_or_else(|error| panic!("{} must decode: {error}", vector.name));
+                assert_eq!(
+                    event.exact_bytes(),
+                    vector.object_bytes.as_slice(),
+                    "{} must hold its own bytes",
+                    vector.name
+                );
+                assert!(
+                    action_codes.insert(event.action().code()),
+                    "{} repeats an action code",
+                    vector.name
+                );
+                if event.operator_binding_object_hash().is_none() {
+                    null_binding += 1;
+                }
+            }
+            ExpectedOutcome::Rejected { error_code } => {
+                let error = decode_local_audit_event(&vector.object_bytes)
+                    .err()
+                    .unwrap_or_else(|| panic!("{} must be rejected", vector.name));
+                assert_eq!(
+                    error.code(),
+                    error_code,
+                    "{} must fail for the reason its manifest names",
+                    vector.name
+                );
+            }
+        }
+        executed.insert(vector.name.clone());
+    }
+
+    assert_eq!(
+        action_codes,
+        (0..LOCAL_AUDIT_ACTION_COUNT).collect::<BTreeSet<u8>>(),
+        "the accepted vectors must cover every one of the twelve actions exactly once"
+    );
+    assert_eq!(
+        null_binding, 1,
+        "the nullable operator binding position must stand as null in exactly one \
+         accepted vector"
+    );
+
+    // Die vier Einbyteabweichungen, gegen ihre Grundlage nachgerechnet. Alle
+    // vier messen entweder EA-FORMAT-SHAPE oder EA-FORMAT-COSE; der Code allein
+    // trennt sie nicht, der Ort tut es.
+    let base = entry(entries, LOCAL_AUDIT_EDIT_BASE);
+    for name in LOCAL_AUDIT_SINGLE_BYTE_DEFECTS {
+        let defect = entry(entries, name);
+        assert_eq!(
+            differing_offsets(&base.object_bytes, &defect.object_bytes).len(),
+            1,
+            "{name} must flip exactly one byte of {LOCAL_AUDIT_EDIT_BASE}"
+        );
+    }
+
+    // Der fuenfte ist LAENGER, weil `200` einen Zweibytekopf braucht. Ohne
+    // diese Zusicherung koennte er stillschweigend zu einer Einbytekippung
+    // werden und damit die eingefrorene Hygieneregel verlieren.
+    let unknown = entry(entries, "event/rejected-unknown-action-code-200");
+    assert_eq!(
+        unknown.object_bytes.len(),
+        base.object_bytes.len() + 1,
+        "an inadmissible action code 200 must widen the core by its second head byte"
+    );
+
+    // Die vier D-B02-Slots tragen erklaerte Testkonstanten und belegen nichts
+    // ueber ihre Berechnung. Ohne diese Pruefung waere der Vermerk dekorativ.
+    for name in LOCAL_AUDIT_HASH_SLOT_VECTORS {
+        let note = entry(entries, name)
+            .scope_note
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} must state what it does NOT prove"));
+        assert!(
+            note.contains("D-B02"),
+            "{name} must name the deferred hash decision: {note}"
+        );
+    }
+
+    // Der interessanteste Vektor der Familie muss seine Aussage TRAGEN: die
+    // Grammatik nimmt ihn an, und nur der Nutzlastabgleich weist ihn ab.
+    let nonce = entry(entries, "event/rejected-flipped-nonce-byte");
+    let note = nonce
+        .scope_note
+        .as_deref()
+        .expect("the nonce vector must state that the CDDL is not the boundary");
+    assert!(
+        note.contains("CDDL"),
+        "the nonce vector must name the grammar it still satisfies: {note}"
+    );
+
+    assert_eq!(
+        executed,
+        entries
+            .iter()
+            .map(|vector| vector.name.clone())
+            .collect::<BTreeSet<_>>(),
+        "every manifest entry must be executed, and every execution must address \
+         a manifest entry"
+    );
+    executed.len()
 }

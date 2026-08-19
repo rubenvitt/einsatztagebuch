@@ -2043,6 +2043,151 @@ fn local_audit_cddl_correlates_action_and_context_tag() {
     ));
 }
 
+/// Eine eingefrorene Datei der Familie `local-audit/v1`.
+struct LocalAuditVectorFile {
+    /// Der Name relativ zur Familienwurzel, etwa `event/accepted-login.bin`.
+    name: String,
+    /// Die eingefrorenen Bytes, unveraendert von der Platte.
+    bytes: Vec<u8>,
+}
+
+/// Die Zahl der eingefrorenen Dateien der Familie.
+///
+/// Ohne diese Schranke waeren beide Schleifen unten LEER gruen, sobald das
+/// Verzeichnis fehlt oder ausgeduennt wird — genau der stille Durchlauf, den
+/// `EXPECTED_ENTRY_COUNT` in `conformance_golden_vectors.rs` verhindert.
+const LOCAL_AUDIT_VECTOR_FILE_COUNT: usize = 17;
+
+/// Alle eingefrorenen Dateien der Familie, lexikografisch.
+fn local_audit_vector_files() -> Vec<LocalAuditVectorFile> {
+    let directory = workspace_root().join("vectors/local-audit/v1/event");
+    let mut files = std::fs::read_dir(&directory)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the frozen local audit vectors are unreadable at {}: {error}",
+                directory.display()
+            )
+        })
+        .map(|child| {
+            let path = child.expect("a readable directory entry").path();
+            let name = format!(
+                "event/{}",
+                path.file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .expect("a vector file name is valid UTF-8")
+            );
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("{name} is unreadable: {error}"));
+            LocalAuditVectorFile { name, bytes }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.name.cmp(&right.name));
+    assert_eq!(
+        files.len(),
+        LOCAL_AUDIT_VECTOR_FILE_COUNT,
+        "the frozen local audit family must carry exactly \
+         {LOCAL_AUDIT_VECTOR_FILE_COUNT} files"
+    );
+    files
+}
+
+/// Die zwoelf Kerne des Kodierers, einer je Aktion.
+///
+/// Sie kommen aus den EINGEFRORENEN Bytes und nicht aus einer zweiten,
+/// handgeschriebenen Fixture: `ea_testkit::local_audit_v1_manifest` erzeugt die
+/// Familie mit `encode_local_audit_core`, und
+/// `the_committed_local_audit_family_matches_its_generator` haelt fest, dass die
+/// eingecheckten Bytes genau diese Ausgabe sind. Der Kern wird hier durch
+/// `decode_local_audit_event` gezogen, damit die zwoelf Aktionscodes mitgemessen
+/// werden statt geraten.
+fn local_audit_cores_for_every_action() -> Vec<Vec<u8>> {
+    let mut codes = std::collections::BTreeSet::new();
+    let mut cores = Vec::new();
+    for file in local_audit_vector_files() {
+        if !file.name.starts_with("event/accepted-") {
+            continue;
+        }
+        let event = ea_format::decode_local_audit_event(&file.bytes)
+            .unwrap_or_else(|error| panic!("{} must decode: {error}", file.name));
+        assert!(
+            codes.insert(event.action().code()),
+            "{} repeats an action code",
+            file.name
+        );
+        cores.push(event.exact_core().to_vec());
+    }
+    assert_eq!(
+        codes,
+        (0..12).collect::<std::collections::BTreeSet<u8>>(),
+        "the accepted vectors must cover every one of the twelve actions"
+    );
+    cores
+}
+
+/// Der Kern eines signierten Ereignisses, neu umschlossen als `[core, null]`.
+///
+/// `cddl_cat` kann eine COSE-getaggte Struktur nicht durchlaufen — gemessen:
+/// `[core, #6.18([...])]` scheitert mit `can't handle hidden cbor Value`,
+/// waehrend `[core, null]` besteht. Genau deshalb setzt schon die vorhandene
+/// Fixture `audit_fixture` ein `null` an die Signaturstelle. Die Aussage bleibt
+/// dieselbe: `#6.18(COSE-Sign1)` normalisiert `validate_cbor` zu `any`, und
+/// `any` nimmt `null` an.
+fn local_audit_grammar_fixture(signed: &[u8]) -> Vec<u8> {
+    let mut decoder = minicbor::Decoder::new(signed);
+    assert_eq!(
+        decoder.array().expect("a signed event is an array"),
+        Some(2),
+        "a signed event is the pair of core and signature"
+    );
+    let start = decoder.position();
+    decoder.skip().expect("the core is a complete item");
+    let core = &signed[start..decoder.position()];
+
+    let mut fixture = Vec::with_capacity(core.len() + 2);
+    minicbor::Encoder::new(&mut fixture).array(2).unwrap();
+    fixture.extend_from_slice(core);
+    minicbor::Encoder::new(&mut fixture).null().unwrap();
+    fixture
+}
+
+#[test]
+fn every_encoded_local_audit_core_satisfies_the_frozen_grammar() {
+    let cddl = include_str!("../../../schemas/reports/v1/local-audit.cddl");
+    for core in local_audit_cores_for_every_action() {
+        assert!(validate_cbor("local-audit-event-core-v1", cddl, &core));
+    }
+}
+
+/// Die vier Vektoren, deren Ablehnung GRAMMATISCH ist. Jeder andere Vektor der
+/// Familie — auch `rejected-flipped-nonce-byte` — ist von der CDDL akzeptiert
+/// und wird erst vom Decoder abgelehnt.
+const GRAMMATICALLY_REJECTED: [&str; 4] = [
+    "event/rejected-flipped-action-code.bin",
+    "event/rejected-flipped-context-tag.bin",
+    "event/rejected-flipped-outcome.bin",
+    "event/rejected-unknown-action-code-200.bin",
+];
+
+#[test]
+fn the_frozen_local_audit_vectors_match_the_grammar() {
+    let cddl = include_str!("../../../schemas/reports/v1/local-audit.cddl");
+    for file in local_audit_vector_files() {
+        let expected = !GRAMMATICALLY_REJECTED.contains(&file.name.as_str());
+        assert_eq!(
+            validate_cbor(
+                "local-audit-event-v1",
+                cddl,
+                &local_audit_grammar_fixture(&file.bytes)
+            ),
+            expected,
+            "{} must be {} by local-audit-event-v1",
+            file.name,
+            if expected { "accepted" } else { "rejected" }
+        );
+    }
+}
+
+
 #[test]
 fn report_schemas_compile_and_reject_unknown_properties() {
     let verification_schema: serde_json::Value = serde_json::from_str(include_str!(

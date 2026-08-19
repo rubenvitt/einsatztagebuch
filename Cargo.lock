@@ -2778,6 +2778,7 @@ dependencies = [
  "cddl",
  "cddl-cat",
  "ea-cbor",
+ "ea-format",
  "ea-schema",
  "jsonschema",
  "minicbor",
