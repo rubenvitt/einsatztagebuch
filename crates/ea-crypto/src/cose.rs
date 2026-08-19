@@ -1539,8 +1539,15 @@ pub fn validate_signer_certificate(exact_certificate_bytes: &[u8]) -> Result<(),
     parse_signer_certificate(exact_certificate_bytes).map(|_| ())
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum CertificateCapability {
+/// Die Faehigkeiten, die ein Geraetezertifikat tragen kann.
+///
+/// Die Allowlist der Stufe 1, unveraendert. Sie steht GENAU HIER und wird
+/// nirgends dupliziert: sowohl das Dekodieren eines Zertifikats als auch jede
+/// Entscheidung einer spaeteren Stufe geht ueber [`TryFrom<&str>`], damit eine
+/// Rolle nie gegen die rohen Zeichenketten entschieden wird, die ein
+/// Zertifikat traegt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CertificateCapability {
     InitialGrant,
     HistoricalGrant,
     OrganizationAdminApprove,
@@ -1548,6 +1555,41 @@ enum CertificateCapability {
     DestructionApprove,
     ServerReceipt,
     DeletionAttest,
+}
+
+impl CertificateCapability {
+    /// Das Wire-Literal dieser Faehigkeit.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InitialGrant => "initialGrant",
+            Self::HistoricalGrant => "historicalGrant",
+            Self::OrganizationAdminApprove => "organizationAdminApprove",
+            Self::HistoricalGrantApprove => "historicalGrantApprove",
+            Self::DestructionApprove => "destructionApprove",
+            Self::ServerReceipt => "serverReceipt",
+            Self::DeletionAttest => "deletionAttest",
+        }
+    }
+}
+
+impl TryFrom<&str> for CertificateCapability {
+    type Error = CryptoError;
+
+    /// Fail-closed: ein unbekanntes Literal ist ein Zertifikatsbefund, kein
+    /// ignorierbarer Zusatz.
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "initialGrant" => Ok(Self::InitialGrant),
+            "historicalGrant" => Ok(Self::HistoricalGrant),
+            "organizationAdminApprove" => Ok(Self::OrganizationAdminApprove),
+            "historicalGrantApprove" => Ok(Self::HistoricalGrantApprove),
+            "destructionApprove" => Ok(Self::DestructionApprove),
+            "serverReceipt" => Ok(Self::ServerReceipt),
+            "deletionAttest" => Ok(Self::DeletionAttest),
+            _ => Err(CryptoError::SignerMismatch),
+        }
+    }
 }
 
 fn parse_signer_certificate(bytes: &[u8]) -> Result<ParsedSignerCertificate, CryptoError> {
@@ -1662,16 +1704,7 @@ fn parse_device_certificate_core(
         if previous.is_some_and(|value| value >= literal.as_bytes()) {
             return Err(CryptoError::SignerMismatch);
         }
-        let capability = match literal {
-            "initialGrant" => CertificateCapability::InitialGrant,
-            "historicalGrant" => CertificateCapability::HistoricalGrant,
-            "organizationAdminApprove" => CertificateCapability::OrganizationAdminApprove,
-            "historicalGrantApprove" => CertificateCapability::HistoricalGrantApprove,
-            "destructionApprove" => CertificateCapability::DestructionApprove,
-            "serverReceipt" => CertificateCapability::ServerReceipt,
-            "deletionAttest" => CertificateCapability::DeletionAttest,
-            _ => return Err(CryptoError::SignerMismatch),
-        };
+        let capability = CertificateCapability::try_from(literal)?;
         capabilities.push(capability);
         previous = Some(literal.as_bytes());
     }
@@ -2046,13 +2079,13 @@ fn grant_bindings(
     let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
         .map_err(|_| CryptoError::InvalidProtocolCore)?;
     let required_capability = match kind {
-        GrantKind::Initial => "initialGrant",
-        GrantKind::Historical => "historicalGrant",
+        GrantKind::Initial => CertificateCapability::InitialGrant,
+        GrantKind::Historical => CertificateCapability::HistoricalGrant,
     };
     if decoder
         .str()
         .map_err(|_| CryptoError::InvalidProtocolCore)?
-        != required_capability
+        != required_capability.as_str()
     {
         return Err(CryptoError::InvalidProtocolCore);
     }

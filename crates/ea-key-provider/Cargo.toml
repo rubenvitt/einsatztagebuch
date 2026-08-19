@@ -1,0 +1,50 @@
+[package]
+name = "ea-key-provider"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Der deterministische In-Prozess-Provider fuer Tests.
+#
+# NIEMALS ein Default-Feature: ein Produktionsbau darf keinen Provider
+# uebersetzen, der Schluesselmaterial im Prozessspeicher haelt und exportieren
+# kann. `tests/writer_role_guard.rs` liest genau diese Tabelle und faellt, wenn
+# `test-support` je in `default` auftaucht.
+test-support = []
+
+[dependencies]
+# Die COSE-Kodierflaeche der Stufe 1: ContentType, ProtectedHeader::normal und
+# ProtectedHeader::sig_structure_bytes. Der Signierport komponiert die exakten
+# Signaturbytes darueber und dupliziert nichts davon.
+ea-crypto.workspace = true
+# KeyProtectionProfileV1 unverändert aus dem Wire-Format. Diese Crate definiert
+# ausdruecklich KEINE zweite Schutzprofil-Aufzaehlung.
+ea-format.workspace = true
+ea-types.workspace = true
+# Nur im In-Prozess-Provider: er darf privates Material exportieren, ein
+# nativer Provider niemals.
+ed25519-dalek.workspace = true
+# COSE_Sign1-Rahmen (Tag 18, Array aus vier Gliedern). ea-crypto haelt seinen
+# Kodierer privat; hier entsteht dieselbe Struktur, nicht dieselbe Logik.
+minicbor.workspace = true
+
+[dev-dependencies]
+# Diese Crate haengt als Dev-Abhaengigkeit von sich selbst ab, um `test-support`
+# fuer die eigenen Testziele einzuschalten.
+#
+# Nicht bequemer, sondern noetig: das Testkommando des Workspace laeuft
+# `cargo test --workspace --all-targets --locked` OHNE `--all-features`
+# (`tools/xtask/src/main.rs`). Ohne diesen Eintrag uebersetzten die beiden
+# Integrationstests dort nicht — und die Alternative, sie selbst hinter
+# `#[cfg(feature = "test-support")]` zu haengen, hiesse, dass die Rollentrennung
+# des Writers im Gate stillschweigend GAR NICHT geprueft wird.
+#
+# Der Produktionsbau bleibt unberuehrt: `cargo check` baut keine
+# Dev-Abhaengigkeiten, also uebersetzt `--no-default-features` den
+# In-Prozess-Provider weiterhin nicht.
+ea-key-provider = { workspace = true, features = ["test-support"] }
+# Liest die Feature-Tabelle dieser Datei, damit `test-support` nie ein
+# Default-Feature wird.
+toml.workspace = true

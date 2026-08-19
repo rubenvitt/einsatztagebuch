@@ -23,6 +23,7 @@ const WORKSPACE_MEMBERS: &[&str] = &[
     "crates/ea-verify",
     "crates/ea-recovery",
     "crates/ea-testkit",
+    "crates/ea-key-provider",
     "apps/cli",
 ];
 
@@ -197,8 +198,10 @@ fn every_crates_member_is_classified_for_the_wasm32_gate() {
     //
     // Der Positivlisten-Anker daruber ist das ERSTE zitierte
     // "wasm32-unknown-unknown" von main.rs und MUSS das in
-    // verify_quick_commands() bleiben: main.rs:202 und :207 tragen dasselbe
-    // Literal in der rustup-Meldung von ensure_wasm32_target_available().
+    // verify_quick_commands() bleiben: ensure_wasm32_target_available() traegt
+    // dasselbe Literal ein zweites Mal, in seiner Zielpruefung wie in seiner
+    // rustup-Meldung. Bewusst ohne Zeilennummern, damit die Angabe nicht
+    // abdriften kann.
     const EXEMPT_DECLARATION: &str = "const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[";
     let declaration_at = main_rs.find(EXEMPT_DECLARATION).expect(
         "tools/xtask/src/main.rs must declare WASM32_EXEMPT_CRATES as a slice literal so that a \

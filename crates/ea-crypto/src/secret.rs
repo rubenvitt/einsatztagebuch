@@ -82,6 +82,24 @@ impl<const N: usize> SecretBytes<N> {
         self.0 == *expected
     }
 
+    /// Runs `use_it` with the secret bytes, scoped to that call.
+    ///
+    /// The fixed-size counterpart to [`SecretVec::with_exposed`]. Together the
+    /// two are the only ways plaintext leaves this crate, and both scope the
+    /// borrow to the call, so the bytes never become a buffer the caller owns
+    /// by accident and the zeroize-on-drop contract is untouched.
+    ///
+    /// It exists because a key provider has to hand fixed-size key material to
+    /// an operating-system keystore, and that provider lives outside this
+    /// crate. Hiding the read would only push callers into keeping their own
+    /// unprotected copy of the same bytes.
+    ///
+    /// The type still has no formatting, cloning, comparison, serialization,
+    /// dereferencing, or generic byte-conversion implementations.
+    pub fn with_exposed<R>(&self, use_it: impl FnOnce(&[u8; N]) -> R) -> R {
+        use_it(&self.0)
+    }
+
     pub(crate) const fn expose(&self) -> &[u8; N] {
         &self.0
     }

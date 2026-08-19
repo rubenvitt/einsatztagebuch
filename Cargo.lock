@@ -735,6 +735,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-key-provider"
+version = "0.1.0"
+dependencies = [
+ "ea-crypto",
+ "ea-format",
+ "ea-key-provider",
+ "ea-types",
+ "ed25519-dalek",
+ "minicbor",
+ "toml",
+]
+
+[[package]]
 name = "ea-recovery"
 version = "0.1.0"
 dependencies = [

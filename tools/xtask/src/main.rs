@@ -116,6 +116,16 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          way round.",
     ),
     (
+        "ea-key-provider",
+        "reaches past `ea-verify` into the operating-system keystore of the \
+         Writer device — native key generation, wrapping and non-roaming \
+         keystore entries — and is therefore not shared browser code: \
+         `web-reader-design.md` §9 makes only the verification pipeline shared \
+         Rust, and that pipeline ends at `ea-verify`, which stays on the \
+         positive list. The Reader is a browser PWA and holds no Writer key at \
+         all, so nothing in the browser can depend on this crate.",
+    ),
+    (
         "ea-testkit",
         "owns the deterministic vector file and manifest emission over `std::fs` \
          and is therefore host-side generator code, not shared browser code: \

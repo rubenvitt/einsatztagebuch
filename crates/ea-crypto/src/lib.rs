@@ -13,7 +13,7 @@ pub use aead::{
     AEAD_NONCE_SIZE, AEAD_OVERHEAD, CEK_SIZE, aead_open, aead_seal, checked_ciphertext_length,
 };
 pub use cose::{
-    ContentType, CoseSigner, CoseVerifier, ParsedCoseSign1, ProtectedHeader,
+    CertificateCapability, ContentType, CoseSigner, CoseVerifier, ParsedCoseSign1, ProtectedHeader,
     RecoveryVerificationContext, ResolvedSigner, SignerCertificateResolver, SignerRole,
     UnverifiedRfc3161TimeStampToken, VerificationContext, VerifiedRecoveryTest, VerifiedSigner,
     attach_rfc3161_ctt, cose_sign1_ctt_imprint, encode_signed_protocol_wrapper, parse_cose_sign1,
