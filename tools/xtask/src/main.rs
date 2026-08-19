@@ -126,6 +126,18 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          all, so nothing in the browser can depend on this crate.",
     ),
     (
+        "ea-operator",
+        "reads the native account, presence and posture signals of the host \
+         operating system — Windows SID with Hello/Credential UI, the macOS \
+         directory identifier with LocalAuthentication, the Ubuntu machine ID \
+         with PAM/Polkit — and is therefore not shared browser code: \
+         `web-reader-design.md` §9 keeps the VERIFICATION pipeline shared Rust, \
+         and that pipeline ends at `ea-verify`, which stays on the positive \
+         list. The browser has neither a native key provider \
+         (`web-reader-design.md` §11.3) nor an OS-lock event (§11.2), so \
+         nothing in the browser can depend on this crate.",
+    ),
+    (
         "ea-testkit",
         "owns the deterministic vector file and manifest emission over `std::fs` \
          and is therefore host-side generator code, not shared browser code: \

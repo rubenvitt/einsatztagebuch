@@ -24,6 +24,12 @@ ea-cbor.workspace = true
 ea-chain.workspace = true
 ea-crypto.workspace = true
 ea-format.workspace = true
+# Der plattformuebergreifende Rauchtest der Stufe 2. `test-support` schaltet den
+# deterministischen In-Prozess-Provider ein, gegen den der Test belegt, dass
+# `reached_protection_profile` eine Variante von `KeyProtectionProfileV1` und
+# keine eigene Stufe-2-Aufzaehlung liefert.
+ea-key-provider = { workspace = true, features = ["test-support"] }
+ea-operator.workspace = true
 ea-schema.workspace = true
 # Die eingefrorenen Vektoren und ihr Manifestmodell. `ea-testkit` haelt
 # `jsonschema` von sich fern: die Schemavalidierung findet ausschliesslich in

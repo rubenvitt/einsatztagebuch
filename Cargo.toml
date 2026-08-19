@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "apps/cli"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "apps/cli"]
 resolver = "2"
 
 [workspace.package]
@@ -21,6 +21,7 @@ ea-chain = { path = "crates/ea-chain" }
 ea-crypto = { path = "crates/ea-crypto" }
 ea-format = { path = "crates/ea-format" }
 ea-key-provider = { path = "crates/ea-key-provider" }
+ea-operator = { path = "crates/ea-operator" }
 ea-recovery = { path = "crates/ea-recovery" }
 ea-schema = { path = "crates/ea-schema" }
 ea-testkit = { path = "crates/ea-testkit" }

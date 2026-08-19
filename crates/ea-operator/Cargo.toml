@@ -1,0 +1,37 @@
+[package]
+name = "ea-operator"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Die drei OS-Konto-Bindungshashes und `CanonicalPublicCoseKey::verify_ed25519_strict`.
+# Diese Crate rechnet KEINEN Bindungshash selbst nach und fuehrt keine zweite
+# Domainkonstante der Stufe 1.
+ea-crypto.workspace = true
+# `OperatorBindingFieldsV1` und `DeviceCertificateFieldsV1` unveraendert aus dem
+# Wire-Format.
+ea-format.workspace = true
+# `SelectedRegistryHead` und `PreexistingEffectiveNow`. Gueltigkeit wird
+# ausschliesslich gegen die Zeit des gewaehlten Registry-Head bewertet; eine
+# freie Zeit ist in dieser Crate nicht ausdrueckbar.
+ea-trust.workspace = true
+ea-types.workspace = true
+# Die frische Challenge-Nonce kommt aus dem CSPRNG des Betriebssystems.
+# `ea-crypto` haelt seine eigene Zufallsquelle privat (`hpke.rs:24-33`), also
+# gibt es keinen Accessor, den diese Crate stattdessen rufen koennte. Bereits
+# `=`-gepinnte Dependency des Workspace, also keine neue Familie im Sinne von
+# ADR-0001.
+getrandom.workspace = true
+
+[dev-dependencies]
+# Die Fixture baut eine echte Registry-Linie und waehlt einen echten Head; sie
+# bindet dafuer `crates/ea-trust/tests/support/mod.rs` per `#[path]` ein, wie
+# `tests/ea-system-tests/tests/task8_trust_time.rs` es bereits tut. Diese drei
+# Eintraege sind genau die Importe jenes Moduls, die nicht schon oben stehen,
+# und alle bereits `=`-gepinnte Familien des Workspace — es entsteht keine neue
+# Dependency-Familie.
+ea-time.workspace = true
+ed25519-dalek.workspace = true
+minicbor.workspace = true

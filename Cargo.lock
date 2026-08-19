@@ -748,6 +748,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-operator"
+version = "0.1.0"
+dependencies = [
+ "ea-crypto",
+ "ea-format",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "minicbor",
+]
+
+[[package]]
 name = "ea-recovery"
 version = "0.1.0"
 dependencies = [
@@ -785,6 +799,8 @@ dependencies = [
  "ea-chain",
  "ea-crypto",
  "ea-format",
+ "ea-key-provider",
+ "ea-operator",
  "ea-schema",
  "ea-testkit",
  "ea-time",

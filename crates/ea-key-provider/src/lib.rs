@@ -53,7 +53,17 @@
 mod contract;
 #[cfg(feature = "test-support")]
 mod in_memory;
+// Die drei Plattformraender sind BEDINGUNGSLOS deklariert und nicht per
+// `#[cfg(target_os = …)]` gegated. Ein gegateter Rand wuerde auf dem Host, auf
+// dem Stufe 2 geprueft wird, nicht einmal geparst — der gepinnte Compiler
+// (`rust-toolchain.toml`) belegt so fuer alle drei Raender Typkorrektheit,
+// waehrend nur die Aufloesung des Hosts (`SupportMatrixRow::current_host`)
+// zielabhaengig ist.
+pub mod linux;
+pub mod macos;
+mod posture;
 mod profile;
+pub mod windows;
 
 pub use contract::{
     APPLICATION_NAMESPACE, CoseSign1Bytes, KeyEntryPolicy, KeyError, KeyHandle, KeyProvider,
@@ -61,4 +71,9 @@ pub use contract::{
 };
 #[cfg(feature = "test-support")]
 pub use in_memory::InMemoryKeyProvider;
+#[cfg(feature = "test-support")]
+pub use posture::DevicePostureProviderFake;
+pub use posture::{
+    DevicePostureProvider, DevicePostureReport, PostureCheck, PostureRequirement, SupportMatrixRow,
+};
 pub use profile::{WriterKeyProfile, require_claimed_protection_profile};
