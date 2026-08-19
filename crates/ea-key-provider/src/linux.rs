@@ -16,6 +16,16 @@
 //! Eintragspolitik in die Kennzeichen der Collection und der Haltungsadapter
 //! dieser Zeile.
 //!
+//! Die FOLGE dieser Grenze, damit sie niemand erst im Betrieb entdeckt: es gibt
+//! auf dieser Zeile keinen `KeyProvider`, der eine per PAM entsperrte
+//! Secret-Service-Collection anlegt oder liest, keine PAM- oder
+//! Polkit-Praesenzpruefung und keinen Leser des LUKS-Status.
+//! `UbuntuDevicePosture` meldet vier `Unknown`, also ist
+//! `DevicePostureReport::is_production_ready` auf dieser Zeile immer `false` und
+//! eine Sitzung in produktiver Rolle entsteht hier nicht. Fail-closed und
+//! richtig gerichtet — aber eine SPERRE, die erst der Task loest, der die
+//! nativen API-Familien samt ADR einfuehrt.
+//!
 //! [`KeyProtectionProfileV1::OsWrapped`]: ea_format::KeyProtectionProfileV1::OsWrapped
 
 use crate::{

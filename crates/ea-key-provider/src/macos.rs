@@ -15,6 +15,15 @@
 //! pruefbar ist: die Uebersetzung der einen Eintragspolitik in die Kennzeichen
 //! der Keychain und der Haltungsadapter dieser Zeile.
 //!
+//! Die FOLGE dieser Grenze, damit sie niemand erst im Betrieb entdeckt: es gibt
+//! auf dieser Zeile keinen `KeyProvider`, der Keychain oder Secure Enclave ruft,
+//! keine LocalAuthentication-Praesenzpruefung und keinen Leser des
+//! FileVault-Status. `MacOsDevicePosture` meldet vier `Unknown`, also ist
+//! `DevicePostureReport::is_production_ready` auf beiden macOS-Zeilen immer
+//! `false` und eine Sitzung in produktiver Rolle entsteht hier nicht.
+//! Fail-closed und richtig gerichtet — aber eine SPERRE, die erst der Task
+//! loest, der die nativen API-Familien samt ADR einfuehrt.
+//!
 //! [`KeyProtectionProfileV1::OsWrapped`]: ea_format::KeyProtectionProfileV1::OsWrapped
 
 use crate::{

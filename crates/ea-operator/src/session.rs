@@ -3,7 +3,7 @@
 use core::fmt;
 
 use ea_trust::PreexistingEffectiveNow;
-use ea_types::{ObjectHash, UnixMillis};
+use ea_types::{DeviceId, ObjectHash, OrganizationId, UnixMillis};
 
 use crate::account::{BoundOperator, OperatorError, OsAccountProvider};
 
@@ -94,24 +94,42 @@ impl ReauthPurpose {
 
 /// Ein ausgestellter Praesenznachweis.
 ///
-/// Undurchsichtig: es gibt keinen Leser fuer den Kontobezeichner, den
-/// Instanzschluessel, die Challenge oder die Signatur. Organisation, Geraet,
-/// Bindung und Nonce sind KRYPTOGRAFISCH gebunden — sie stehen in den Bytes, die
-/// der Instanzschluessel signiert hat (siehe [`challenge_bytes`]) — und nicht als
-/// Felder gespeichert, die ein Aufrufer wieder auslesen koennte. Der Nachweis
-/// selbst traegt nur, was seine Gueltigkeit ENTSCHEIDET.
+/// Der Nachweis TRAEGT seine Bindung: Zweck, Organisation, Geraet,
+/// Bedienerbindung, die Nonce der Praesenz-Challenge, Ausstellzeit und Ablauf.
+/// Dieselben Angaben stehen zusaetzlich in den Bytes, die der Instanzschluessel
+/// signiert hat (siehe [`challenge_bytes`]) — die Signatur wird nach ihrer
+/// Pruefung verworfen, und ohne die Felder koennte danach kein Verbraucher mehr
+/// feststellen, zu WELCHEM Bediener ein Nachweis gehoert. Ein Nachweis gegen
+/// Bindung A darf in einer Sitzung gegen Bindung B nicht durchgehen; dafuer
+/// braucht der Vergleich einen Leser, und den geben
+/// [`Self::binding_object_hash`], [`Self::organization_id`] und
+/// [`Self::device_id`].
 ///
-/// `Debug` ist zulaessig, weil hier kein Geheimnis liegt: Zweck, Bindung, zwei
-/// Zeitpunkte und ein Sperrbit.
+/// Undurchsichtig bleibt, was undurchsichtig gehoert: es gibt keinen Leser fuer
+/// den OS-Kontobezeichner, den Instanzschluessel oder die Signatur. Organisation,
+/// Geraet und Bindungsobjekthash sind dagegen oeffentliche Angaben des Trust
+/// Bundle, und die Nonce ist verbraucht — keiner der drei ist ein Geheimnis, und
+/// der `compile_fail`-Doctest in [`crate`] pinnt weiterhin, dass ein
+/// Kontobezeichner nicht aus dem Nachweis zu holen ist.
+///
+/// `Debug` ist zulaessig, weil hier kein Geheimnis liegt: Zweck, zwei Zeitpunkte
+/// und ein Sperrbit.
 ///
 /// AUSDRUECKLICH NICHT `Clone` und nicht `Copy`. Ein kopierbarer Nachweis machte
 /// [`Self::invalidate_on_lock`] wirkungslos: der Aufrufer behielte den gueltigen
 /// Stand daneben und koennte nach der OS-Sperre mit ihm weiterarbeiten. Der
 /// `compile_fail`-Doctest in [`crate`] belegt das.
+///
+/// Die Gleichheit unterscheidet zwei Wiederanmeldungen desselben Zwecks zur
+/// selben Zeit, weil die Challenge-Nonce im Typ liegt: „frische Praesenz" ist
+/// damit am Nachweis ablesbar und nicht nur in einer verworfenen Signatur.
 #[derive(Eq, PartialEq)]
 pub struct OperatorSessionProof {
     purpose: ReauthPurpose,
+    organization_id: OrganizationId,
+    device_id: DeviceId,
     binding_object_hash: ObjectHash,
+    challenge_nonce: [u8; 32],
     issued_at: UnixMillis,
     expires_at: UnixMillis,
     invalidated: bool,
@@ -126,6 +144,16 @@ impl OperatorSessionProof {
     ///
     /// Die Zeit kommt als [`PreexistingEffectiveNow`] und nie als freier Wert:
     /// nur so traegt die Aussage die Zeitstatusbewertung des gewaehlten Head.
+    ///
+    /// Diese Methode prueft ausdruecklich NICHT die Bindung: ein Verbraucher, der
+    /// fuer einen bestimmten Bediener handelt, vergleicht zusaetzlich
+    /// [`Self::binding_object_hash`] mit dem [`BoundOperator`], gegen den er
+    /// handelt — sonst akzeptiert er jeden Nachweis desselben Zwecks, auch einen
+    /// fuer eine andere Bindung. Die Zweiteilung ist nicht Bequemlichkeit,
+    /// sondern die woertlich vorgegebene Signatur dieser Methode; der
+    /// Bindungsabgleich hat mit den drei Lesern seinen Ort, aber nicht seinen
+    /// Zwang. Wer einen Nachweis annimmt, ohne die Bindung zu vergleichen, hat
+    /// einen Fehler gemacht, und dieser Satz steht hier, damit er nachlesbar ist.
     #[must_use]
     pub fn is_valid_for(&self, purpose: ReauthPurpose, now: &PreexistingEffectiveNow) -> bool {
         let now = now.value().get();
@@ -148,7 +176,10 @@ impl OperatorSessionProof {
     pub const fn invalidate_on_lock(self) -> Self {
         Self {
             purpose: self.purpose,
+            organization_id: self.organization_id,
+            device_id: self.device_id,
             binding_object_hash: self.binding_object_hash,
+            challenge_nonce: self.challenge_nonce,
             issued_at: self.issued_at,
             expires_at: self.expires_at,
             invalidated: true,
@@ -165,6 +196,37 @@ impl OperatorSessionProof {
     pub const fn binding_object_hash(&self) -> ObjectHash {
         self.binding_object_hash
     }
+
+    /// Die Organisation, unter der dieser Nachweis ausgestellt wurde.
+    ///
+    /// Oeffentliche Angabe des Trust Bundle. Sie liegt hier, weil ein
+    /// Verbraucher, der fuer eine Organisation handelt, ohne sie einen Nachweis
+    /// aus einer FREMDEN Organisation nicht abweisen koennte.
+    #[must_use]
+    pub const fn organization_id(&self) -> OrganizationId {
+        self.organization_id
+    }
+
+    /// Das Geraet, das das Writer-Zertifikat der Bindung nennt.
+    ///
+    /// Ebenfalls oeffentlich und aus dem Zertifikat aufgeloest, nicht aus einem
+    /// Parameter uebernommen (siehe [`BoundOperator::resolve`]).
+    #[must_use]
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
+
+    /// Die verbrauchte Nonce der Praesenz-Challenge.
+    ///
+    /// Kein Geheimnis: sie war nie eines, sie ist gegen den gebundenen Schluessel
+    /// geprueft und wird nie wiederverwendet. Sie liegt im Nachweis, damit zwei
+    /// Wiederanmeldungen desselben Zwecks zur selben Zeit unterscheidbar sind —
+    /// ohne sie waeren sie gleich, und „frische Praesenz" waere am Nachweis nicht
+    /// ablesbar.
+    #[must_use]
+    pub const fn challenge_nonce(&self) -> &[u8; 32] {
+        &self.challenge_nonce
+    }
 }
 
 /// Der synchrone Port der Wiederanmeldung.
@@ -176,6 +238,16 @@ impl OperatorSessionProof {
 /// dieselbe.
 pub trait OperatorAuthenticator {
     /// Die Bindung, gegen die diese Sitzung prueft.
+    ///
+    /// PFLICHT DES IMPLEMENTIERERS: die zurueckgegebene Bindung traegt die Zeit
+    /// des Head, an dem sie aufgeloest wurde ([`BoundOperator::resolve`]), und
+    /// [`Self::reauthenticate`] stellt gegen genau diese Zeit aus. Ein
+    /// Authenticator, der die Bindung ueber die Lebensdauer einer Sitzung
+    /// festhaelt, muss sie unmittelbar vor jeder Wiederanmeldung gegen den
+    /// AKTUELLEN gewaehlten Head neu aufloesen. Sonst stellt er einen Nachweis
+    /// aus, dessen Fuenfminutenfenster in der Vergangenheit liegt: der Aufrufer
+    /// sieht `Ok`, und `is_valid_for` gegen den aktuellen Head sagt `false`.
+    /// Fail-closed, aber eine erfolgreiche Wiederanmeldung ist es nicht.
     fn bound_operator(&self) -> &BoundOperator;
 
     /// Verlangt Praesenz und signiert `challenge` mit dem
@@ -192,6 +264,19 @@ pub trait OperatorAuthenticator {
     /// Die Reihenfolge ist fail-closed und absichtlich: erst das Konto, dann das
     /// Vorhandensein des Instanzschluessels, dann seine Identitaet, dann die
     /// frische Praesenz. Kein Schritt wird durch einen spaeteren ersetzt.
+    ///
+    /// AUSSTELLZEIT IST DIE ZEIT DER BINDUNG, nicht die des Augenblicks. Diese
+    /// Methode nimmt keine Zeit an — `PreexistingEffectiveNow` ist in Stufe 1
+    /// nicht frei baubar —, sie nimmt sie aus dem [`BoundOperator`], den
+    /// [`Self::bound_operator`] liefert. Ein `Ok` heisst deshalb NICHT „der
+    /// Nachweis gilt jetzt", sondern „Konto, Instanzschluessel und Praesenz sind
+    /// belegt, und der Nachweis gilt fuenf Minuten ab der Zeit dieser Bindung".
+    /// Wer die Bindung eine Stunde vorher aufgeloest hat, bekommt einen Nachweis,
+    /// der bei der Pruefung gegen den aktuellen Head bereits abgelaufen ist. Die
+    /// Pflicht, die Bindung unmittelbar vorher neu aufzuloesen, liegt beim
+    /// Implementierer von [`Self::bound_operator`]; der Test
+    /// `a_binding_resolved_before_the_window_issues_a_proof_that_is_already_expired`
+    /// macht sie messbar.
     fn reauthenticate(
         &self,
         account: Box<dyn OsAccountProvider>,
@@ -230,7 +315,10 @@ pub trait OperatorAuthenticator {
 
         Ok(OperatorSessionProof {
             purpose,
+            organization_id: bound.organization_id(),
+            device_id: bound.device_id(),
             binding_object_hash: bound.binding_object_hash(),
+            challenge_nonce: nonce,
             issued_at,
             expires_at,
             invalidated: false,
@@ -241,10 +329,12 @@ pub trait OperatorAuthenticator {
 impl fmt::Debug for OperatorSessionProof {
     /// Nennt, was die Gueltigkeit entscheidet — und keinen Hash.
     ///
-    /// Der Bindungsobjekthash bleibt draussen, weil `ObjectHash` in diesem
-    /// Bauwerk bewusst keine Formatierung traegt: ein Hash in einer
-    /// Protokollzeile ist ein Bezeichner, der dort nichts beitraegt. Dasselbe
-    /// Muster wie `KeyHandle` in `crates/ea-key-provider/src/contract.rs`.
+    /// Bindungsobjekthash, Organisation, Geraet und Nonce bleiben draussen,
+    /// obwohl der Nachweis sie traegt: `ObjectHash`, `OrganizationId` und
+    /// `DeviceId` tragen in diesem Bauwerk bewusst keine Formatierung, weil ein
+    /// Bezeichner in einer Protokollzeile dort nichts beitraegt. Dasselbe Muster
+    /// wie `KeyHandle` in `crates/ea-key-provider/src/contract.rs`. Wer sie
+    /// braucht, ruft die Leser; eine Protokollzeile braucht sie nicht.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OperatorSessionProof")

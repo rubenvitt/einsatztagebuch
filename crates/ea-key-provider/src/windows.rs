@@ -13,6 +13,15 @@
 //! Eintragspolitik in die DPAPI-Kennzeichen und der Haltungsadapter dieser
 //! Zeile.
 //!
+//! Die FOLGE dieser Grenze, damit sie niemand erst im Betrieb entdeckt: es gibt
+//! auf dieser Zeile keinen `KeyProvider`, der CNG oder DPAPI ruft, keine
+//! Windows-Hello- oder Credential-UI-Praesenzpruefung und keinen Leser des
+//! BitLocker-Status. `WindowsDevicePosture` meldet vier `Unknown`, also ist
+//! `DevicePostureReport::is_production_ready` auf dieser Zeile immer `false` und
+//! eine Sitzung in produktiver Rolle entsteht hier nicht. Fail-closed und
+//! richtig gerichtet — aber eine SPERRE, die erst der Task loest, der die
+//! nativen API-Familien samt ADR einfuehrt.
+//!
 //! [`KeyProtectionProfileV1::OsWrapped`]: ea_format::KeyProtectionProfileV1::OsWrapped
 
 use crate::{

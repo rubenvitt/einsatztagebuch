@@ -19,6 +19,14 @@
 //! LocalAuthentication sind Systemframeworks, und Stufe 2 nimmt keine native
 //! API-Familie in `[workspace.dependencies]` auf
 //! (`docs/adr/0001-toolchain-and-cryptography-dependencies.md:152-153`).
+//!
+//! Die FOLGE, damit sie niemand erst im Betrieb entdeckt: diese Crate liefert
+//! auf dieser Zeile KEINE Implementierung von [`crate::OsAccountProvider`] und
+//! keine von [`crate::OperatorAuthenticator::prove_presence_and_sign`]. Beide
+//! Haken sind Ports; wer eine Sitzung produktiv aufbauen will, braucht den
+//! Task, der Keychain, Secure Enclave und LocalAuthentication samt ADR
+//! einfuehrt. Bis dahin gibt es genau zwei Erfueller: die Attrappen der Tests.
+//! Nichts an dieser Grenze behauptet, eine Praesenz sei geprueft worden.
 
 use crate::account::OsAccountInputs;
 

@@ -183,6 +183,19 @@ impl DevicePostureReport {
     ///
     /// Nur wenn ALLE VIER Anforderungen belegt erfuellt sind. Ein `Fail` sperrt,
     /// und ein `Unknown` sperrt ebenfalls — es ist kein automatischer Pass.
+    ///
+    /// STAND DER STUFE 2, ausgesprochen statt vorausgesetzt: kein nativer
+    /// Haltungsadapter dieser Stufe liest eines der vier Signale
+    /// ([`SupportMatrixRow::posture_provider`]), also meldet JEDE Zeile der
+    /// Support-Matrix vier `Unknown`, und diese Methode gibt in jedem
+    /// Produktivbau auf jeder Zeile `false` zurueck. Ein Verbraucher, der die
+    /// Erzeugung einer Sitzung in produktiver Rolle daran haengt — Task 11 und
+    /// Task 16 —, erzeugt heute also keine. Das ist die richtige Richtung
+    /// (fail-closed: eine unbelegte Haltung ist keine belegte), aber es ist eine
+    /// SPERRE und kein Nebeneffekt: sie loest sich erst, wenn der Task, der die
+    /// nativen API-Familien samt ADR einfuehrt, die vier Signale wirklich liest.
+    /// Bis dahin traegt der Go-live-Bericht die vier `EA-POSTURE-*-UNREPORTABLE`
+    /// Zeilen aus [`Self::go_live_follow_up`].
     #[must_use]
     pub fn is_production_ready(&self) -> bool {
         PostureRequirement::ALL
@@ -287,6 +300,23 @@ impl SupportMatrixRow {
     }
 
     /// Der native Haltungsadapter dieser Zeile.
+    ///
+    /// ALLE VIER Adapter melden heute [`DevicePostureReport::unresolved`], also
+    /// vier `Unknown`: Stufe 2 traegt keine native API-Familie, hinter der die
+    /// vier Signale liegen (BitLocker-Status und Richtlinien-APIs, FileVault und
+    /// Systemframeworks, LUKS und D-Bus-Dienste), und jede solche Familie ist
+    /// eine ADR-pflichtige Dependency-Entscheidung
+    /// (`docs/adr/0001-toolchain-and-cryptography-dependencies.md`, Abschnitt
+    /// „Consequences"). Zusaetzlich fuehrt jede Crate dieses Bauwerks
+    /// `#![forbid(unsafe_code)]`, ein FFI-Aufruf ist hier also nicht nur
+    /// undokumentiert, sondern unuebersetzbar.
+    ///
+    /// Die Folge, damit sie niemand erst im Betrieb entdeckt:
+    /// [`DevicePostureReport::is_production_ready`] ist auf JEDER Zeile immer
+    /// `false`, und [`DevicePostureReport::go_live_follow_up`] nennt immer alle
+    /// vier Anforderungen. Wer diesen Port aufruft, bekommt die WAHRE Aussage
+    /// ueber ein Geraet, dessen Haltung niemand gelesen hat — nicht die Haltung
+    /// des Geraets.
     #[must_use]
     pub fn posture_provider(self) -> Box<dyn DevicePostureProvider> {
         match self {

@@ -554,6 +554,96 @@ fn a_proof_expires_after_the_five_minute_inactivity_default() {
     assert!(!proof.is_valid_for(ReauthPurpose::Finalize, outside.preexisting_effective_now()));
 }
 
+/// Der Nachweis NENNT den Bediener, fuer den er ausgestellt wurde.
+///
+/// Ohne diese drei Leser koennte kein Verbraucher feststellen, zu welchem
+/// Bediener ein Nachweis gehoert: ein Nachweis gegen Bindung A liefe in einer
+/// Sitzung gegen Bindung B durch, weil `is_valid_for` nur Zweck und Zeit prueft.
+/// Der Gegenwert des Bindungsvergleichs ist ein ECHTER Objekthash derselben
+/// Linie — das Writer-Zertifikat —, damit der Test nicht gegen eine erfundene
+/// Zahl vergleicht.
+#[test]
+fn a_proof_names_the_operator_binding_it_was_minted_for() {
+    let head = fixtures::selected_registry_head();
+    let auth = FakeAuthenticator::new(fixtures::binding(&head));
+    let proof = auth
+        .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
+        .unwrap();
+
+    assert!(
+        proof.binding_object_hash().as_bytes() == fixtures::binding_object_hash().as_bytes(),
+        "the proof must name the binding it was minted for"
+    );
+    assert!(
+        proof.binding_object_hash().as_bytes()
+            != fixtures::writer_certificate_object_hash().as_bytes(),
+        "a different object of the same line must be distinguishable from the binding"
+    );
+    assert!(proof.organization_id().as_bytes() == fixtures::organization_id().as_bytes());
+    assert!(proof.device_id().as_bytes() == fixtures::device_id(&head).as_bytes());
+}
+
+/// Zwei Wiederanmeldungen desselben Zwecks zur selben Zeit sind
+/// UNTERSCHEIDBAR.
+///
+/// Ohne die Nonce im Typ waeren beide Nachweise gleich, und „frische Praesenz"
+/// waere am Nachweis nicht ablesbar — nur in einer Signatur, die nach ihrer
+/// Pruefung verworfen wird.
+#[test]
+fn two_reauthentications_of_one_purpose_are_not_the_same_proof() {
+    let head = fixtures::selected_registry_head();
+    let auth = FakeAuthenticator::new(fixtures::binding(&head));
+    let first = auth
+        .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
+        .unwrap();
+    let second = auth
+        .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
+        .unwrap();
+
+    assert!(
+        first.challenge_nonce() != second.challenge_nonce(),
+        "every re-authentication carries its own presence nonce"
+    );
+    assert!(
+        first != second,
+        "two proofs of one purpose at one time must not compare equal"
+    );
+}
+
+/// Eine Bindung ALTERT: wer sie fruehzeitig aufloest und spaet wieder anmeldet,
+/// bekommt einen Nachweis, der bereits abgelaufen ist.
+///
+/// Das ist die Pflicht, die `BoundOperator::resolve` und
+/// `OperatorAuthenticator::bound_operator` dokumentieren, hier gemessen: die
+/// Ausstellzeit ist die Zeit der BINDUNG und nicht die des Augenblicks, also ist
+/// `Ok` von `reauthenticate` keine Aussage darueber, dass der Nachweis jetzt
+/// gilt. Die zweite Haelfte des Tests belegt die Abhilfe — neu aufloesen gegen
+/// den aktuellen Head —, damit der Test nicht nur den Mangel, sondern auch den
+/// vorgeschriebenen Weg festhaelt.
+#[test]
+fn a_binding_resolved_before_the_window_issues_a_proof_that_is_already_expired() {
+    let early = fixtures::selected_registry_head();
+    let late = fixtures::selected_registry_head_at(fixtures::FIXTURE_NOW_MS + 301_000);
+
+    let stale = FakeAuthenticator::new(fixtures::binding(&early));
+    let proof = stale
+        .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
+        .expect("account, instance key and presence are all proven");
+    assert!(
+        !proof.is_valid_for(ReauthPurpose::Finalize, late.preexisting_effective_now()),
+        "a proof issued against a stale binding does not hold at the current Head"
+    );
+
+    let fresh = FakeAuthenticator::new(fixtures::binding(&late));
+    let proof = fresh
+        .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
+        .unwrap();
+    assert!(
+        proof.is_valid_for(ReauthPurpose::Finalize, late.preexisting_effective_now()),
+        "re-resolving the binding against the current Head is the prescribed remedy"
+    );
+}
+
 /// Die Challenge, die der Instanzschluessel signiert, ist domaingetrennt und
 /// bindet Zweck, Organisation, Geraet und Bindung.
 ///

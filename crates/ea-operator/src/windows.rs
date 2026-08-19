@@ -21,6 +21,15 @@
 //! Dependency-Aenderung ist ADR-pflichtig, und dieser Task fuehrt keinen ADR.
 //! Was hier liegt, ist die vollstaendig pruefbare Haelfte: die typisierte
 //! Uebergabe der Rohangaben an Stufe 1, ohne Umformung.
+//!
+//! Die FOLGE, damit sie niemand erst im Betrieb entdeckt: diese Crate liefert
+//! auf dieser Zeile KEINE Implementierung von [`crate::OsAccountProvider`] und
+//! keine von [`crate::OperatorAuthenticator::prove_presence_and_sign`]. Beide
+//! Haken sind Ports; wer eine Sitzung produktiv aufbauen will, braucht den
+//! Task, der CNG/DPAPI und Windows Hello beziehungsweise die Credential UI
+//! samt ADR einfuehrt. Bis dahin gibt es genau zwei Erfueller: die Attrappen
+//! der Tests. Nichts an dieser Grenze behauptet, eine Praesenz sei geprueft
+//! worden.
 
 use crate::account::OsAccountInputs;
 

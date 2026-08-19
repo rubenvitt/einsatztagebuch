@@ -204,6 +204,21 @@ impl BoundOperator {
     /// Das Geraet kommt NICHT aus einem Parameter, sondern aus dem
     /// Writer-Zertifikat, das die Bindung nennt — sonst koennte ein Aufrufer
     /// eine Bindung gegen ein fremdes Geraet pruefen lassen.
+    ///
+    /// EINE AUFLOESUNG IST EINE MOMENTAUFNAHME. Sie nimmt die Zeit des
+    /// gewaehlten Head mit (`effective_now`, crate-intern), und
+    /// `OperatorAuthenticator::reauthenticate` stellt jeden Nachweis gegen genau
+    /// diese Zeit aus. Eine Bindung ist damit NICHT ueber die Lebensdauer einer
+    /// Sitzung wiederverwendbar: wer sie bei der Anmeldung aufloest und eine
+    /// Stunde spaeter eine Wiederanmeldung darauf gruendet, bekommt einen
+    /// Nachweis, dessen Fuenfminutenfenster laengst geschlossen ist —
+    /// `reauthenticate` meldet `Ok`, und `is_valid_for` gegen den aktuellen Head
+    /// meldet `false`. Vor JEDER Wiederanmeldung ist die Bindung deshalb gegen
+    /// den aktuell gewaehlten Head neu aufzuloesen; der Aufruf ist billig und die
+    /// Aktivitaets- sowie Widerrufspruefung laeuft dabei ohnehin erneut, was in
+    /// derselben Bewegung einen zwischenzeitlichen Widerruf faengt.
+    /// `crates/ea-operator/tests/session_contract.rs` misst beide Seiten in
+    /// `a_binding_resolved_before_the_window_issues_a_proof_that_is_already_expired`.
     pub fn resolve(
         head: &SelectedRegistryHead,
         binding_object_hash: ObjectHash,
@@ -249,7 +264,8 @@ impl BoundOperator {
     /// Ein Nachweis wird zu genau dieser Zeit ausgestellt. Es gibt keinen Weg,
     /// stattdessen eine andere Zeit einzusetzen: `PreexistingEffectiveNow` ist
     /// in Stufe 1 nicht frei baubar, und diese Crate nimmt keine Zeit als
-    /// Parameter.
+    /// Parameter. Genau deshalb ALTERT eine aufgeloeste Bindung — siehe die
+    /// Neuaufloesungspflicht auf [`Self::resolve`].
     pub(crate) const fn effective_now(&self) -> UnixMillis {
         self.effective_now
     }
