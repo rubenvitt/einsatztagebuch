@@ -35,6 +35,7 @@ jiff-tzdb = "=0.1.8"
 jsonschema = { version = "=0.49.9", default-features = false, features = ["arbitrary-precision"] }
 libfuzzer-sys = "=0.4.13"
 minicbor = { version = "=2.3.0", features = ["derive", "std"] }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 toml = "=0.8.23"

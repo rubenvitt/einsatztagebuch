@@ -1,6 +1,31 @@
 use std::{collections::BTreeSet, fs, process::Command};
 use toml::Value;
 
+/// The workspace members, maintained as a set rather than as a count.
+///
+/// Every task that adds a member appends its path here and nowhere else: the
+/// duplicate check, the comparison against `Cargo.toml` and the dependency walk
+/// all read this list, so no task has to know how many members the workspace
+/// has. A member added to one of the two files and forgotten in the other still
+/// fails loudly.
+const WORKSPACE_MEMBERS: &[&str] = &[
+    "tools/xtask",
+    "tests/ea-system-tests",
+    "crates/ea-types",
+    "crates/ea-cbor",
+    "crates/ea-crypto",
+    "crates/ea-format",
+    "crates/ea-schema",
+    "crates/ea-time",
+    "crates/ea-trust",
+    "crates/ea-archive",
+    "crates/ea-chain",
+    "crates/ea-verify",
+    "crates/ea-recovery",
+    "crates/ea-testkit",
+    "apps/cli",
+];
+
 #[test]
 fn workspace_declares_exact_planned_members_and_shared_dependencies() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -11,35 +36,22 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
         .parse()
         .unwrap();
     let member_array = root_manifest["workspace"]["members"].as_array().unwrap();
-    assert_eq!(
-        member_array.len(),
-        15,
-        "workspace members must not be duplicated or omitted"
-    );
     let members = member_array
         .iter()
         .map(|member| member.as_str().unwrap())
         .collect::<BTreeSet<_>>();
+    let expected_members = WORKSPACE_MEMBERS.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
-        members,
-        BTreeSet::from([
-            "tools/xtask",
-            "tests/ea-system-tests",
-            "crates/ea-types",
-            "crates/ea-cbor",
-            "crates/ea-crypto",
-            "crates/ea-format",
-            "crates/ea-schema",
-            "crates/ea-time",
-            "crates/ea-trust",
-            "crates/ea-archive",
-            "crates/ea-chain",
-            "crates/ea-verify",
-            "crates/ea-recovery",
-            "crates/ea-testkit",
-            "apps/cli",
-        ])
+        WORKSPACE_MEMBERS.len(),
+        expected_members.len(),
+        "WORKSPACE_MEMBERS must not list a member twice"
     );
+    assert_eq!(
+        member_array.len(),
+        WORKSPACE_MEMBERS.len(),
+        "workspace members must not be duplicated or omitted"
+    );
+    assert_eq!(members, expected_members);
     let workspace_dependencies = root_manifest["workspace"]["dependencies"]
         .as_table()
         .unwrap();
@@ -61,23 +73,7 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
             "{dependency} must be a local workspace dependency"
         );
     }
-    for member in [
-        "tools/xtask",
-        "tests/ea-system-tests",
-        "crates/ea-types",
-        "crates/ea-cbor",
-        "crates/ea-crypto",
-        "crates/ea-format",
-        "crates/ea-schema",
-        "crates/ea-time",
-        "crates/ea-trust",
-        "crates/ea-archive",
-        "crates/ea-chain",
-        "crates/ea-verify",
-        "crates/ea-recovery",
-        "crates/ea-testkit",
-        "apps/cli",
-    ] {
+    for &member in WORKSPACE_MEMBERS {
         let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
             .unwrap()
             .parse()
@@ -109,6 +105,11 @@ fn workspace_declares_exact_planned_members_and_shared_dependencies() {
             );
         }
     }
+    // Lockfile-Vorschritt: --locked beweist, dass Cargo.lock zum Manifest passt.
+    // Ein neues Mitglied oder eine neue Fremdabhaengigkeit schreibt Cargo.lock
+    // neu, deshalb laeuft in dem Task, der sie eintraegt, GENAU EIN Kommando
+    // ohne --locked: `cargo metadata --format-version 1`. Alle weiteren
+    // Kommandos dieses Tasks tragen wieder --locked.
     assert!(
         Command::new("cargo")
             .args(["metadata", "--locked", "--no-deps"])
@@ -189,34 +190,45 @@ fn every_crates_member_is_classified_for_the_wasm32_gate() {
         }
     }
 
-    // Ausnahmeliste: Paare aus Crate-Name und Begruendung. Fehlt die Konstante,
-    // ist die Liste leer — dann muss jedes Mitglied auf der Positivliste stehen.
+    // Ausnahmeliste: Paare aus Crate-Name und Begruendung, gelesen aus der
+    // Deklaration selbst. Der Anker verlangt die Slice-Form: eine Liste mit
+    // fester Arity zwingt jeden Task, der eine Ausnahme ergaenzt, zu einer
+    // Zahlenaenderung, und genau die soll niemand mehr anfassen muessen.
+    //
+    // Der Positivlisten-Anker daruber ist das ERSTE zitierte
+    // "wasm32-unknown-unknown" von main.rs und MUSS das in
+    // verify_quick_commands() bleiben: main.rs:202 und :207 tragen dasselbe
+    // Literal in der rustup-Meldung von ensure_wasm32_target_available().
+    const EXEMPT_DECLARATION: &str = "const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[";
+    let declaration_at = main_rs.find(EXEMPT_DECLARATION).expect(
+        "tools/xtask/src/main.rs must declare WASM32_EXEMPT_CRATES as a slice literal so that a \
+         new exception needs no arity edit",
+    );
+    let body_at = declaration_at + EXEMPT_DECLARATION.len();
+    let body_end = body_at
+        + main_rs[body_at..]
+            .find("];")
+            .expect("WASM32_EXEMPT_CRATES must be terminated with `];`");
+    let entries = quoted_literals(&main_rs[body_at..body_end]);
+    assert!(
+        !entries.is_empty(),
+        "WASM32_EXEMPT_CRATES must list at least one justified exception"
+    );
     let mut exempt_list = BTreeSet::new();
-    if let Some(exempt_at) = main_rs.find("WASM32_EXEMPT_CRATES") {
-        let tail = &main_rs[exempt_at..];
-        let body_at = tail
-            .find("= [")
-            .expect("WASM32_EXEMPT_CRATES must be initialised with an array literal");
-        let body_end = body_at
-            + tail[body_at..]
-                .find("];")
-                .expect("WASM32_EXEMPT_CRATES must be terminated with `];`");
-        let entries = quoted_literals(&tail[body_at..body_end]);
+    assert!(
+        entries.len().is_multiple_of(2),
+        "every WASM32_EXEMPT_CRATES entry must carry a crate name and a justification"
+    );
+    for entry in entries.chunks(2) {
+        let (name, justification) = (entry[0], entry[1]);
         assert!(
-            entries.len().is_multiple_of(2),
-            "every WASM32_EXEMPT_CRATES entry must carry a crate name and a justification"
+            !justification.trim().is_empty(),
+            "the WASM32_EXEMPT_CRATES entry for {name} must state a justification"
         );
-        for entry in entries.chunks(2) {
-            let (name, justification) = (entry[0], entry[1]);
-            assert!(
-                !justification.trim().is_empty(),
-                "the WASM32_EXEMPT_CRATES entry for {name} must state a justification"
-            );
-            assert!(
-                exempt_list.insert(name),
-                "{name} is listed twice on the wasm32 exception list"
-            );
-        }
+        assert!(
+            exempt_list.insert(name),
+            "{name} is listed twice on the wasm32 exception list"
+        );
     }
 
     let mut member_names = BTreeSet::new();
@@ -276,7 +288,7 @@ fn every_crates_member_is_classified_for_the_wasm32_gate() {
 }
 
 #[test]
-fn rust_toolchain_declares_the_wasm32_target() {
+fn rust_toolchain_declares_wasm32_and_no_release_target() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let toolchain: Value = fs::read_to_string(root.join("rust-toolchain.toml"))
         .unwrap()
@@ -291,6 +303,21 @@ fn rust_toolchain_declares_the_wasm32_target() {
             .any(|target| target.as_str() == Some("wasm32-unknown-unknown")),
         "wasm32-unknown-unknown must be provisioned by the pinned toolchain"
     );
+    for release_target in [
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+    ] {
+        assert!(
+            !targets
+                .iter()
+                .any(|target| target.as_str() == Some(release_target)),
+            "{release_target} carries the signed min/max release proof of Stage 7. This stage \
+             proves buildability for the host target only, so the pinned toolchain must not \
+             provision it and no task may run a cross-target check against it."
+        );
+    }
 }
 
 #[test]
@@ -308,5 +335,63 @@ fn workspace_getrandom_enables_the_wasm_js_feature() {
     assert!(
         features.iter().any(|f| f.as_str() == Some("wasm_js")),
         "getrandom must enable wasm_js; getrandom 0.4.3 needs no --cfg getrandom_backend"
+    );
+}
+
+/// Pins that every shared dependency is exact.
+///
+/// `docs/adr/0001-toolchain-and-cryptography-dependencies.md:15` states that all
+/// version requirements in `[workspace.dependencies]` are exact; `deny.toml:6`
+/// denies wildcards but no gate invokes cargo-deny. An entry may omit a version
+/// only when it is a path member of this workspace, so a `git` or registry entry
+/// cannot slip through the hole between the two shapes.
+#[test]
+fn every_workspace_dependency_is_pinned_exactly() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest: Value = fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let dependencies = manifest["workspace"]["dependencies"].as_table().unwrap();
+    for (name, entry) in dependencies {
+        let requirement = match entry {
+            Value::String(requirement) => Some(requirement.as_str()),
+            Value::Table(spec) => spec.get("version").and_then(Value::as_str),
+            _ => panic!("workspace dependency {name} must be a version string or a table"),
+        };
+        match requirement {
+            Some(requirement) => assert!(
+                requirement.starts_with('='),
+                "workspace dependency {name} must pin an exact version (=x.y.z), found \
+                 {requirement}"
+            ),
+            None => assert!(
+                entry
+                    .as_table()
+                    .is_some_and(|spec| spec.contains_key("path")),
+                "workspace dependency {name} declares no version; only path members of this \
+                 workspace may do that"
+            ),
+        }
+    }
+}
+
+#[test]
+fn workspace_serde_is_pinned_with_derive() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest: Value = fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let serde = &manifest["workspace"]["dependencies"]["serde"];
+    assert_eq!(serde["version"].as_str(), Some("=1.0.229"));
+    let features = serde["features"]
+        .as_array()
+        .expect("serde must declare features so members inherit the derive macro");
+    assert!(
+        features
+            .iter()
+            .any(|feature| feature.as_str() == Some("derive")),
+        "serde must enable derive; the desktop DTO surface has no other source for it"
     );
 }

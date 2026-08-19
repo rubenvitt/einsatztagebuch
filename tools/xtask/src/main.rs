@@ -51,9 +51,11 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
         // Positivliste, nicht --workspace: xtask zieht jsonschema/cddl und
         // std::process::Command und ist nicht wasm-tauglich. Nicht --all-targets:
         // das zoege Dev-Dependencies und Integrationstests in den wasm-Graph.
-        // Jede neue Bibliotheks-Crate MUSS hier oder in WASM32_EXEMPT_CRATES
-        // stehen; tools/xtask/tests/workspace.rs erzwingt genau eine Zuordnung
-        // je Mitglied unter crates/.
+        // Diese Positivliste ist zeichengleich an die Kommandozeile des
+        // abgeschlossenen Stufe-1-Plans gebunden (tools/xtask/tests/workspace.rs:259-287)
+        // und wird nicht erweitert. Jede neue Crate unter crates/ gehoert mit
+        // nicht-leerer Begruendung in WASM32_EXEMPT_CRATES; workspace.rs erzwingt
+        // genau eine Zuordnung je Mitglied unter crates/.
         (
             "cargo",
             vec![
@@ -98,8 +100,12 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
 /// Read as TEXT by `tools/xtask/tests/workspace.rs`, which requires exactly one
 /// classification — positive list or justified exception — for every member
 /// under `crates/`. That test is the only consumer, hence `dead_code`.
+///
+/// A slice rather than a fixed-arity array: a later task appends an entry
+/// without touching a count, and `tools/xtask/tests/workspace.rs` anchors on
+/// exactly this declaration.
 #[allow(dead_code)]
-const WASM32_EXEMPT_CRATES: [(&str, &str); 2] = [
+const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
     (
         "ea-recovery",
         "carries the filesystem-backed archive source, plaintext handling and \
