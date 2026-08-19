@@ -34,14 +34,48 @@ const SIGNING_PURPOSES: &[SecretPurpose] = &[
 
 /// Der Inhalt des Speichers unter EINEM Schloss.
 ///
-/// Eintraege und Epochen gehoeren zusammen: `delete` entfernt einen Eintrag und
-/// hebt im selben Zug die Epoche seines Zwecks. Zwei getrennte Schloesser
-/// liessen dazwischen einen Zustand zu, in dem der Eintrag fort und die Epoche
-/// noch die alte ist.
+/// Eintraege und Epochen gehoeren zusammen, und die Regel gilt in BEIDE
+/// Richtungen: jeder Vorgang, der beide beruehrt, laeuft unter EINEM Nehmen des
+/// Schlosses. Das sind genau zwei — `delete`, das einen Eintrag entfernt und im
+/// selben Zug die Epoche seines Zwecks hebt, und
+/// [`Store::insert_fresh_material`], das die Epoche liest und das daraus
+/// gebildete Material ablegt.
+///
+/// Zwei getrennte Nehmen liessen dazwischen jeweils ein Fenster: beim Loeschen
+/// eines, in dem der Eintrag fort und die Epoche noch die alte ist, und beim
+/// Erzeugen das spiegelbildliche, in dem eine gelesene Epoche schon veraltet
+/// ist, wenn das Material abgelegt wird. Das zweite Fenster stellte ein
+/// geloeschtes Geheimnis wieder her.
 #[derive(Default)]
 struct Store {
     entries: HashMap<KeyHandle, [u8; 32]>,
     epochs: HashMap<SecretPurpose, u32>,
+}
+
+impl Store {
+    /// Liest die Epoche des Zwecks und legt das daraus gebildete Material ab —
+    /// EIN Vorgang unter EINEM Schloss.
+    ///
+    /// Dass beides hier zusammenliegt, ist der Zweck der Methode und nicht ihre
+    /// Bequemlichkeit. Faende das Nachschlagen unter einem Schloss statt und
+    /// das Ablegen unter einem zweiten, koennte dazwischen ein `delete` die
+    /// Epoche heben; das Ablegen schriebe dann das Material der ALTEN Epoche
+    /// zurueck, und das geloeschte Geheimnis waere wiederhergestellt — genau
+    /// der Mangel, gegen den die Epoche eingefuehrt wurde, nur durch eine
+    /// engere Tuer.
+    ///
+    /// Die Methode haengt am Speicher und kennt weder den Provider noch das
+    /// Schloss. Ein zweites Nehmen ist darin nicht ausdrueckbar, nicht nur
+    /// unerwuenscht.
+    fn insert_fresh_material(
+        &mut self,
+        seed: &[u8; 32],
+        handle: KeyHandle,
+        purpose: SecretPurpose,
+    ) {
+        let epoch = self.epochs.get(&purpose).copied().unwrap_or(0);
+        self.entries.insert(handle, derive(seed, purpose, epoch));
+    }
 }
 
 pub struct InMemoryKeyProvider {
@@ -76,39 +110,6 @@ impl InMemoryKeyProvider {
         KeyHandle::new(KeystoreProvider::InMemory, self.account_instance, purpose)
     }
 
-    /// Deterministisches Testmaterial, AUSDRUECKLICH OHNE Sicherheitsanspruch.
-    ///
-    /// Der Startwert wird mit einer Zweckmarke und der EPOCHE des Zwecks
-    /// ueberlagert. Die Zweckmarke trennt die vier Zwecke; die Epoche trennt
-    /// das, was VOR einem `delete` galt, von dem, was danach entsteht.
-    ///
-    /// Ohne die Epoche waere `derive` eine reine Funktion aus Startwert und
-    /// Zweck, und ein geloeschtes Geheimnis liesse sich durch ein erneutes
-    /// [`KeyProvider::generate`] byteweise wiederherstellen — ueber die
-    /// oeffentliche Flaeche, ohne einen einzigen Blick ins Innere. Der Nachweis
-    /// „kein entschluesselbarer `draftDEK` bleibt zurueck", den spaetere Tasks
-    /// gegen genau diesen Provider fuehren, waere dann wertlos.
-    ///
-    /// Das genuegt fuer einen reproduzierbaren Testlauf und fuer nichts sonst;
-    /// `test-support` ist nie ein Default-Feature, also verlaesst dieses
-    /// Material keinen Testlauf.
-    fn derive(&self, purpose: SecretPurpose, epoch: u32) -> [u8; 32] {
-        let tag = match purpose {
-            SecretPurpose::WriterSigningKey => 1u8,
-            SecretPurpose::OperatorInstanceKey => 2,
-            SecretPurpose::DraftDek => 3,
-            SecretPurpose::LocalDatabaseKey => 4,
-        };
-        let epoch_bytes = epoch.to_be_bytes();
-        let mut material = self.seed;
-        for (index, byte) in material.iter_mut().enumerate() {
-            // Der Index bleibt unter 32, die Umwandlung kann nicht scheitern.
-            let mixer = u8::try_from(index).unwrap_or(u8::MAX) | 1;
-            *byte ^= tag.wrapping_mul(mixer).wrapping_add(epoch_bytes[index % 4]);
-        }
-        material
-    }
-
     fn material(&self, handle: &KeyHandle) -> Result<[u8; 32], KeyError> {
         self.store()
             .entries
@@ -130,9 +131,8 @@ impl KeyProvider for InMemoryKeyProvider {
             return Err(KeyError::UnreachableProtectionProfile);
         }
         let handle = self.handle(purpose);
-        let epoch = self.store().epochs.get(&purpose).copied().unwrap_or(0);
-        let material = self.derive(purpose, epoch);
-        self.store().entries.insert(handle, material);
+        self.store()
+            .insert_fresh_material(&self.seed, handle, purpose);
         Ok(handle)
     }
 
@@ -203,4 +203,37 @@ impl KeyProvider for InMemoryKeyProvider {
     ) -> Result<KeyProtectionProfileV1, KeyError> {
         self.material(handle).map(|_| REACHED_PROTECTION_PROFILE)
     }
+}
+
+/// Deterministisches Testmaterial, AUSDRUECKLICH OHNE Sicherheitsanspruch.
+///
+/// Der Startwert wird mit einer Zweckmarke und der EPOCHE des Zwecks
+/// ueberlagert. Die Zweckmarke trennt die vier Zwecke; die Epoche trennt
+/// das, was VOR einem `delete` galt, von dem, was danach entsteht.
+///
+/// Ohne die Epoche waere `derive` eine reine Funktion aus Startwert und
+/// Zweck, und ein geloeschtes Geheimnis liesse sich durch ein erneutes
+/// [`KeyProvider::generate`] byteweise wiederherstellen — ueber die
+/// oeffentliche Flaeche, ohne einen einzigen Blick ins Innere. Der Nachweis
+/// „kein entschluesselbarer `draftDEK` bleibt zurueck", den spaetere Tasks
+/// gegen genau diesen Provider fuehren, waere dann wertlos.
+///
+/// Das genuegt fuer einen reproduzierbaren Testlauf und fuer nichts sonst;
+/// `test-support` ist nie ein Default-Feature, also verlaesst dieses
+/// Material keinen Testlauf.
+fn derive(seed: &[u8; 32], purpose: SecretPurpose, epoch: u32) -> [u8; 32] {
+    let tag = match purpose {
+        SecretPurpose::WriterSigningKey => 1u8,
+        SecretPurpose::OperatorInstanceKey => 2,
+        SecretPurpose::DraftDek => 3,
+        SecretPurpose::LocalDatabaseKey => 4,
+    };
+    let epoch_bytes = epoch.to_be_bytes();
+    let mut material = *seed;
+    for (index, byte) in material.iter_mut().enumerate() {
+        // Der Index bleibt unter 32, die Umwandlung kann nicht scheitern.
+        let mixer = u8::try_from(index).unwrap_or(u8::MAX) | 1;
+        *byte ^= tag.wrapping_mul(mixer).wrapping_add(epoch_bytes[index % 4]);
+    }
+    material
 }
