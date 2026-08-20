@@ -24,18 +24,28 @@ pub struct Migration {
 }
 
 /// Die Kette, aufsteigend. Ein spaeterer Task HAENGT AN und schreibt nicht um.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "0001_writer.sql",
-    sql: include_str!("../migrations/0001_writer.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "0001_writer.sql",
+        sql: include_str!("../migrations/0001_writer.sql"),
+    },
+    Migration {
+        version: DISCARD_MIGRATION_VERSION,
+        name: "0002_discard.sql",
+        sql: include_str!("../migrations/0002_discard.sql"),
+    },
+];
 
 /// Die Fassung, in der die Uebergangstabelle des Verwerfens entsteht.
 ///
 /// Sie wird HIER benannt und nicht in `ea-draft`, weil dieses Modul die
-/// Registratur besitzt. Bis `0002_discard.sql` registriert ist, existiert
-/// `draft_transition` nicht, und die Uebergangsarme der Entwurfsablage sagen
-/// das ausdruecklich, statt an einem rohen SQL-Fehler zu scheitern.
+/// Registratur besitzt. Die Uebergangsarme der Entwurfsablage fragen sie
+/// POSITIV ab, statt an einem rohen SQL-Fehler zu scheitern — „die Tabelle gibt
+/// es noch nicht" ist eine andere Aussage als „die Datenbank ist beschaedigt".
+/// Seit Task 7 ist `0002_discard.sql` registriert, und die Abfrage ist auf einer
+/// migrierten Datenbank wahr; sie bleibt stehen, weil eine Datenbank, die vor
+/// dieser Migration entstand, sie beim Oeffnen noch durchlaeuft.
 pub const DISCARD_MIGRATION_VERSION: u32 = 2;
 
 const CREATE_REGISTRY: &str = "CREATE TABLE IF NOT EXISTS schema_migration (\

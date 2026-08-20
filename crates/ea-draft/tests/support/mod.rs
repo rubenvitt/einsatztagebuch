@@ -10,18 +10,46 @@
 // Crate.
 #![allow(dead_code, unused_imports)]
 
+// Die ECHTE Registry-Linie der Fixture. Sie liegt hier und nicht in den
+// einzelnen Testzielen, weil `support` sie braucht und ein `#[path]` in jedem
+// Ziel die drei Ziele aus Task 6 mitaendern muesste, die davon nichts wissen.
+#[path = "../../../ea-trust/tests/support/mod.rs"]
+mod trust_support;
+
 use std::{
+    cell::RefCell,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ea_draft::{AutosaveDraftRepository, IncidentNumberRegister, OperatorProfileRepository};
-use ea_format::KeyProtectionProfileV1;
-use ea_key_provider::{InMemoryKeyProvider, KeyProvider, SecretPurpose};
+use ea_crypto::{AEAD_NONCE_SIZE, CanonicalPublicCoseKey, SecretBytes, aead_open};
+use ea_draft::{
+    AutosaveDraftRepository, DiscardFaultPoint, DiscardPhase, DiscardService, DraftError,
+    IncidentNumberRegister, OperatorProfileRepository, PreparedFinalizationMarker, RestartState,
+};
+use ea_format::{CertificateKindV1, KeyProtectionProfileV1, OperatorRoleV1};
+use ea_key_provider::{InMemoryKeyProvider, KeyHandle, KeyProvider, SecretPurpose};
 use ea_local_store::{EncryptedDatabase, StoreValue};
-use ea_types::{ObjectHash, OperatorSubjectId, OrganizationId};
+use ea_operator::{
+    BoundOperator, OperatorAuthenticator, OperatorError, OperatorSessionProof, OsAccountProvider,
+    ReauthPurpose,
+};
+use ea_time::TrustedTimeState;
+use ea_trust::{
+    ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin,
+    RegistrySelectionCommit, RegistrySelectionOutcome, SelectedRegistryHead, StateStoreError,
+    TrustStateKey, TrustStateStore, prepare_local_time, select_registry_head,
+    verify_registry_candidate,
+};
+use ea_types::{
+    ChainSequence, DeviceId, Hash32, Id16, KeyThumbprint, ObjectHash, OperatorSubjectId,
+    OrganizationId, UnixMillis,
+};
+use ed25519_dalek::{Signer as _, SigningKey};
+
+use self::trust_support::{ActionSpec, HeadOptions, Pin, RegistryLineBuilder};
 
 pub use ea_draft::DraftRepository;
 
@@ -312,4 +340,672 @@ impl ClosedDraftHarness {
             fs::read(self.root.join(DATABASE_FILE)).expect("die Hauptdatei muss lesbar sein")
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 7 — die Fixture der Verwerfens- und Neustartpruefung
+// ---------------------------------------------------------------------------
+
+/// Die Zeit des Head, gegen die dieser Task jede Gueltigkeit bewertet.
+///
+/// Sie liegt bewusst WEIT hinter [`STALE_HEAD_NOW_MS`], damit ein Nachweis, der
+/// gegen den frueheren Stand ausgestellt wurde, gegen diesen Stand ECHT
+/// abgelaufen ist — `issued_at + MAX_INACTIVITY_MS` liegt dann in der
+/// Vergangenheit. Ohne diesen Abstand liesse sich „nicht frisch" nur ueber
+/// `invalidate_on_lock` herstellen, und die Zeitbedingung von
+/// `OperatorSessionProof::is_valid_for` bliebe ungemessen.
+const HEAD_NOW_MS: i64 = 1_000_000;
+/// Die Zeit des frueheren Head, aus dem der abgelaufene Nachweis stammt.
+const STALE_HEAD_NOW_MS: i64 = 1_000;
+const FIXTURE_NOT_AFTER_MS: i64 = 10_000_000;
+const PROPOSED_SEQUENCE: u64 = 30;
+const BINDING_MARKER: u8 = 0x71;
+
+/// Der Bedienerinstanzschluessel der Fixture — ein ECHTES Ed25519-Paar.
+const INSTANCE_SECRET: [u8; 32] = [
+    0x4a, 0x1c, 0x2e, 0x93, 0x77, 0x05, 0xbb, 0x61, 0x18, 0x8f, 0xd2, 0x40, 0x36, 0xa7, 0x5c, 0xe1,
+    0x09, 0x94, 0x6d, 0x3b, 0xcf, 0x82, 0x17, 0x50, 0xe4, 0x2a, 0x68, 0xd9, 0x0b, 0x73, 0xf6, 0x84,
+];
+
+/// Der Inhalt, der den ORIGINALENTWURF von einem leeren unterscheidbar macht.
+///
+/// `RestartState::OriginalDraftUnchanged` und `RestartState::NewBlankDraft`
+/// sind am Entwurf ablesbar, weil der eine Inhalt traegt und der andere nicht.
+/// Ein LEERER Originalentwurf waere von einem frischen leeren Entwurf
+/// ununterscheidbar — genau das ist die Zusage des unwiderruflichen Verwerfens
+/// —, und deshalb heisst die Fixture `with_nonempty_draft`.
+const ORIGINAL_NOTES: &str = "ORIGINALENTWURF-KANARIENVOGEL";
+
+/// Die Nebendateien, die SQLite neben der Hauptdatei fuehrt.
+const DATABASE_SIDECARS: [&str; 2] = ["writer.sqlite3-wal", "writer.sqlite3-shm"];
+/// Die Sperrdatei von [`ea_draft::DraftLock`] neben der Datenbank.
+const LOCK_FILE: &str = "writer.sqlite3.draft-lock";
+
+struct ModelStore {
+    key: TrustStateKey,
+    revision: u64,
+    trusted_time: TrustedTimeState,
+    pinned_head: RegistryHeadPin,
+}
+
+impl TrustStateStore for ModelStore {
+    fn load(&mut self, key: TrustStateKey) -> Result<PersistedTrustRecord, StateStoreError> {
+        if key != self.key {
+            return Err(StateStoreError::Conflict);
+        }
+        Ok(PersistedTrustRecord::new(
+            self.revision,
+            self.trusted_time.clone(),
+            Some(self.pinned_head),
+        ))
+    }
+
+    fn commit_independent_time(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &IndependentTimeCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn clock_release_consumed(
+        &mut self,
+        _key: &ClockReleaseReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        Ok(false)
+    }
+
+    fn commit_registry_selection(
+        &mut self,
+        key: TrustStateKey,
+        expected_revision: u64,
+        commit: &RegistrySelectionCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        if key != self.key || expected_revision != self.revision {
+            return Err(StateStoreError::Conflict);
+        }
+        self.revision += 1;
+        self.trusted_time = commit.next_trusted_time().clone();
+        self.pinned_head = *commit.next_head();
+        Ok(PersistedTrustRecord::new(
+            self.revision,
+            self.trusted_time.clone(),
+            Some(self.pinned_head),
+        ))
+    }
+}
+
+fn instance_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&INSTANCE_SECRET)
+}
+
+fn instance_public_key() -> CanonicalPublicCoseKey {
+    CanonicalPublicCoseKey::ed25519(instance_signing_key().verifying_key().to_bytes())
+        .expect("der Instanzschluessel der Fixture ist ein gueltiger Ed25519-Schluessel")
+}
+
+fn head_options(effective_from: u64, valid_through: u64) -> HeadOptions {
+    HeadOptions {
+        effective_from: Some(effective_from),
+        valid_through: Some(valid_through),
+        not_after: UnixMillis::new(FIXTURE_NOT_AFTER_MS),
+        ..HeadOptions::default()
+    }
+}
+
+/// Baut die Registry-Linie und nennt die Bedienerbindung.
+fn build_line() -> (RegistryLineBuilder, ObjectHash) {
+    let mut line = RegistryLineBuilder::new();
+    line.push(
+        ActionSpec::Policy {
+            policy_version: None,
+            previous_policy_hash: None,
+            effective_from: None,
+        },
+        head_options(1, 10),
+    );
+    let writer = line.push(
+        ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x61,
+            effective_from: None,
+        },
+        head_options(11, 20),
+    );
+    let binding = line.push(
+        ActionSpec::OperatorBinding {
+            certificate_hash: writer
+                .direct_object_hash
+                .expect("das Writer-Zertifikat der Fixture ist ein direktes Ziel"),
+            role: OperatorRoleV1::Writer,
+            marker: BINDING_MARKER,
+            effective_from: None,
+        },
+        HeadOptions {
+            binding_instance_key_thumbprint_override: Some(KeyThumbprint::from(
+                Hash32::try_from(instance_public_key().thumbprint().as_bytes().as_slice())
+                    .expect("ein Thumbprint ist 32 Byte lang"),
+            )),
+            ..head_options(21, 100)
+        },
+    );
+    let binding_object_hash = binding
+        .direct_object_hash
+        .expect("die Bedienerbindung der Fixture ist ein direktes Ziel");
+    (line, binding_object_hash)
+}
+
+/// Waehlt einen ECHTEN Head, dessen `PreexistingEffectiveNow` genau `now_ms`
+/// ist.
+///
+/// Die Zeit ist der EINZIGE Unterschied zwischen dem Head, gegen den geprueft
+/// wird, und dem, aus dem der abgelaufene Nachweis stammt.
+fn selected_registry_head_at(now_ms: i64) -> SelectedRegistryHead {
+    let (line, _) = build_line();
+    let head_index = line.heads().len() - 1;
+    let head = line.heads()[head_index];
+    let key = trust_support::state_key();
+    let trusted_time = TrustedTimeState::initial(UnixMillis::new(now_ms));
+    let trust = line.verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
+    let candidate =
+        verify_registry_candidate(&trust, ChainSequence::new(PROPOSED_SEQUENCE)).unwrap();
+    let mut store = ModelStore {
+        key,
+        revision: 17,
+        trusted_time,
+        pinned_head: RegistryHeadPin::new(head.version, head.object_hash),
+    };
+    let local_time =
+        prepare_local_time(&mut store, &candidate, UnixMillis::new(now_ms), &[]).unwrap();
+    let RegistrySelectionOutcome::Selected(selected) =
+        select_registry_head(candidate, local_time, None).unwrap()
+    else {
+        panic!("die Fixture muss ihren eigenen aktuellen Head waehlen");
+    };
+    selected
+}
+
+struct FakeAccount {
+    binding_hash: Hash32,
+}
+
+impl OsAccountProvider for FakeAccount {
+    fn os_account_binding_hash(
+        &self,
+        _organization_id: OrganizationId,
+        _device_id: DeviceId,
+    ) -> Result<Hash32, OperatorError> {
+        Ok(self.binding_hash)
+    }
+
+    fn operator_instance_public_key(
+        &self,
+    ) -> Result<Option<CanonicalPublicCoseKey>, OperatorError> {
+        Ok(Some(instance_public_key()))
+    }
+}
+
+/// Die Attrappe der nativen Praesenzpruefung — AUSSCHLIESSLICH die zwei
+/// Plattformhaken; Kontoabgleich, Instanzschluesselpruefung und Ausstellung
+/// liegen im Standardkoerper von `OperatorAuthenticator::reauthenticate`.
+struct FakeAuthenticator {
+    bound: BoundOperator,
+}
+
+impl OperatorAuthenticator for FakeAuthenticator {
+    fn bound_operator(&self) -> &BoundOperator {
+        &self.bound
+    }
+
+    fn prove_presence_and_sign(&self, challenge: &[u8]) -> Result<[u8; 64], OperatorError> {
+        Ok(instance_signing_key().sign(challenge).to_bytes())
+    }
+}
+
+/// Stellt einen ECHTEN Praesenznachweis fuer `purpose` gegen `head` aus.
+fn issue_proof(head: &SelectedRegistryHead, purpose: ReauthPurpose) -> OperatorSessionProof {
+    let (_, binding_object_hash) = build_line();
+    let bound = BoundOperator::resolve(head, binding_object_hash)
+        .expect("die Bindung der Fixture ist an der gewaehlten Sequenz aktiv");
+    let authenticator = FakeAuthenticator { bound };
+    let account: Box<dyn OsAccountProvider> = Box::new(FakeAccount {
+        binding_hash: trust_support::hash32(BINDING_MARKER.wrapping_add(2)),
+    });
+    authenticator
+        .reauthenticate(account, purpose)
+        .expect("die Fixture meldet den gebundenen Bediener wieder an")
+}
+
+/// Der ORIGINALENTWURF, wie er vor dem Verwerfen dalag.
+///
+/// Die Fixture haelt Chiffrat, Nonce und Griff — NICHT den Schluessel. Nur so
+/// ist „kein entschluesselbarer `draftDEK` bleibt zurueck" ueberhaupt messbar:
+/// die Fixture versucht nach dem Verwerfen, GENAU diese Bytes zu oeffnen.
+struct OriginalDraft {
+    draft_id: Id16,
+    revision: u64,
+    ciphertext: Vec<u8>,
+    nonce: [u8; AEAD_NONCE_SIZE],
+    dek: KeyHandle,
+}
+
+/// Die geoeffnete Datenbank samt Ablage.
+struct OpenStore {
+    database: Arc<EncryptedDatabase>,
+    repo: Arc<AutosaveDraftRepository>,
+}
+
+/// Die Fixture der Verwerfens- und Neustartpruefung.
+///
+/// Sie liegt hinter einem [`RefCell`], weil ein Neustart die Datenbank
+/// SCHLIESSEN und neu oeffnen muss und die Briefform `restart_and_resume` auch
+/// auf einer nicht-`mut` Bindung ruft.
+pub struct DiscardHarness {
+    _lock: MutexGuard<'static, ()>,
+    root: PathBuf,
+    provider: Arc<InMemoryKeyProvider>,
+    database_key: KeyHandle,
+    head: SelectedRegistryHead,
+    stale_head: SelectedRegistryHead,
+    original: OriginalDraft,
+    /// Die Momentaufnahme der Datenbankdateien VOR dem Verwerfen — die
+    /// simulierte Sicherung. Der Schluesselspeicher ist ausdruecklich NICHT
+    /// darin: ein geraetegebundener Eintrag ist aus der gewoehnlichen
+    /// Anwendungs- und Systemsicherung ausgenommen (`design.md`:428, :1491).
+    backup: Vec<(String, Vec<u8>)>,
+    open: RefCell<Option<OpenStore>>,
+}
+
+impl DraftHarness {
+    /// Saet EINEN gespeicherten Entwurf MIT Inhalt und haelt eine Kopie der
+    /// Datenbankdateien als simulierte Sicherung.
+    ///
+    /// Gibt eine [`DiscardHarness`] zurueck und nicht wieder eine
+    /// [`DraftHarness`]: nur ein Traeger, der die Datenbank vollstaendig
+    /// FALLEN lassen kann, kann einen Neustart und eine
+    /// Sicherungsrueckspielung ueberhaupt darstellen.
+    #[must_use]
+    pub fn with_nonempty_draft() -> DiscardHarness {
+        DiscardHarness::new()
+    }
+}
+
+impl DiscardHarness {
+    fn new() -> Self {
+        let lock = take_harness_lock();
+        let root = fixture_root("discard");
+        let provider = Arc::new(InMemoryKeyProvider::new_for_test(FIXTURE_PROVIDER_SEED));
+        let database_key = provider
+            .generate(
+                SecretPurpose::LocalDatabaseKey,
+                KeyProtectionProfileV1::OsWrapped,
+            )
+            .expect("der In-Prozess-Provider erreicht OsWrapped");
+
+        let open = Self::open_store(&root, &provider, &database_key);
+        let draft = open.repo.load_or_create().unwrap();
+        let saved = open.repo.save(draft.with_notes(ORIGINAL_NOTES)).unwrap();
+        let (ciphertext, nonce) = stored_payload(&open.database);
+        let original = OriginalDraft {
+            draft_id: saved.draft_id(),
+            revision: saved.revision(),
+            ciphertext,
+            nonce,
+            dek: open.repo.draft_dek_handle(&saved).unwrap(),
+        };
+        drop(open);
+
+        // Die Sicherung wird an der GESCHLOSSENEN Datenbank genommen. Eine
+        // Kopie einer offenen WAL-Datenbank waere ein halber Zustand, und der
+        // Test wollte dann nicht das Verwerfen messen, sondern die Kopie.
+        let backup = capture_database_files(&root);
+        let open = Self::open_store(&root, &provider, &database_key);
+
+        Self {
+            _lock: lock,
+            root,
+            provider,
+            database_key,
+            head: selected_registry_head_at(HEAD_NOW_MS),
+            stale_head: selected_registry_head_at(STALE_HEAD_NOW_MS),
+            original,
+            backup,
+            open: RefCell::new(Some(open)),
+        }
+    }
+
+    fn open_store(
+        root: &Path,
+        provider: &Arc<InMemoryKeyProvider>,
+        database_key: &KeyHandle,
+    ) -> OpenStore {
+        // DERSELBE Griff, nicht ein neu erzeugter: ein zweites `generate`
+        // schriebe frisches Material an dieselbe Adresse.
+        let database = Arc::new(
+            EncryptedDatabase::open(&root.join(DATABASE_FILE), provider.as_ref(), database_key)
+                .expect("dieselbe Datenbank muss sich mit demselben Schluessel wieder oeffnen"),
+        );
+        let repo = Arc::new(AutosaveDraftRepository::new(
+            Arc::clone(&database),
+            Arc::clone(provider) as Arc<dyn KeyProvider>,
+        ));
+        OpenStore { database, repo }
+    }
+
+    fn repo(&self) -> Arc<dyn DraftRepository> {
+        let borrowed = self.open.borrow();
+        let open = borrowed
+            .as_ref()
+            .expect("die Fixture haelt eine geoeffnete Datenbank");
+        Arc::clone(&open.repo) as Arc<dyn DraftRepository>
+    }
+
+    /// Schliesst die Datenbank vollstaendig — beide Halter des `Arc` fallen.
+    fn close(&self) {
+        *self.open.borrow_mut() = None;
+    }
+
+    fn reopen(&self) {
+        self.close();
+        *self.open.borrow_mut() = Some(Self::open_store(
+            &self.root,
+            &self.provider,
+            &self.database_key,
+        ));
+    }
+
+    /// Der Dienst unter Pruefung.
+    ///
+    /// Er BORGT die Zeit des gewaehlten Head und haelt keine Momentaufnahme
+    /// davon.
+    #[must_use]
+    pub fn discard_service(&self) -> DiscardService<'_> {
+        DiscardService::new(
+            self.repo(),
+            Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
+            self.head.preexisting_effective_now(),
+        )
+    }
+
+    /// Ein ECHTER, FRISCHER Praesenznachweis fuer `purpose`.
+    #[must_use]
+    pub fn proof_for(&self, purpose: ReauthPurpose) -> OperatorSessionProof {
+        issue_proof(&self.head, purpose)
+    }
+
+    /// Ein ECHTER, aber ABGELAUFENER Nachweis fuer `DiscardDraft`.
+    ///
+    /// Er ist gegen den frueheren Head ausgestellt; sein Fuenfminutenfenster
+    /// endet lange vor der Zeit des gewaehlten Head. Das ist der Fall, den
+    /// `OperatorAuthenticator::reauthenticate` ausdruecklich beschreibt: ein
+    /// `Ok` heisst nicht „der Nachweis gilt jetzt".
+    #[must_use]
+    pub fn expired_proof(&self) -> OperatorSessionProof {
+        issue_proof(&self.stale_head, ReauthPurpose::DiscardDraft)
+    }
+
+    /// Fuehrt ein Verwerfen, das an GENAU `point` abbricht.
+    pub fn discard_with_fault(&mut self, point: DiscardFaultPoint) -> Result<(), DraftError> {
+        let outcome = self
+            .discard_service()
+            .begin_discard_interrupted_at(self.proof_for(ReauthPurpose::DiscardDraft), point);
+        if point == DiscardFaultPoint::BackupRestoreAfterKeyDeletion {
+            // Der Punkt IST die Rueckspielung: der Schluessel ist fort, und der
+            // Bediener legt die Datenbankdateien seiner Sicherung zurueck.
+            self.put_back_backup();
+        }
+        outcome
+    }
+
+    /// Fuehrt ein SAUBERES Verwerfen, das nach genau `phase` haelt.
+    pub fn discard_up_to(&mut self, phase: DiscardPhase) -> Result<(), DraftError> {
+        let point = match phase {
+            DiscardPhase::Editable => DiscardFaultPoint::BeforeIntentCommit,
+            DiscardPhase::IntentDurable => DiscardFaultPoint::AfterIntentCommit,
+            DiscardPhase::KeyAbsent => DiscardFaultPoint::AfterAbsenceConfirmation,
+            DiscardPhase::DraftRemoved => DiscardFaultPoint::AfterDraftRemoval,
+        };
+        self.discard_service()
+            .begin_discard_interrupted_at(self.proof_for(ReauthPurpose::DiscardDraft), point)
+    }
+
+    /// Oeffnet die Ablage NEU und laeuft den Neustartpfad.
+    pub fn restart_and_resume(&self) -> Result<RestartState, DraftError> {
+        let proof = self.proof_for(ReauthPurpose::DiscardDraft);
+        self.restart_and_resume_with(&proof)
+    }
+
+    /// Derselbe Neustartpfad, aber mit einem VORGEGEBENEN Nachweis.
+    pub fn restart_and_resume_with(
+        &self,
+        proof: &OperatorSessionProof,
+    ) -> Result<RestartState, DraftError> {
+        self.reopen();
+        self.discard_service().resume_after_restart(proof)
+    }
+
+    /// Legt die aufgenommene Sicherung zurueck und laeuft den Neustartpfad
+    /// erneut.
+    pub fn restore_captured_backup(&mut self) -> Result<RestartState, DraftError> {
+        self.put_back_backup();
+        self.restart_and_resume()
+    }
+
+    fn put_back_backup(&mut self) {
+        self.close();
+        // Erst alles fort, was jetzt daliegt — sonst ueberlebte ein WAL, das
+        // die Sicherung nicht kennt, und die „Rueckspielung" waere eine
+        // Mischung aus zwei Zustaenden.
+        for name in
+            std::iter::once(DATABASE_FILE).chain(DATABASE_SIDECARS.into_iter().chain([LOCK_FILE]))
+        {
+            let _ = fs::remove_file(self.root.join(name));
+        }
+        for (name, bytes) in &self.backup {
+            fs::write(self.root.join(name), bytes).expect("die Sicherung muss schreibbar sein");
+        }
+    }
+
+    /// Setzt die vorbereitete Abschlussmarke durch `DraftRepository`.
+    pub fn set_prepared_finalization_marker(&mut self) {
+        self.repo()
+            .replace_prepared_finalization_marker(Some(PreparedFinalizationMarker::new(
+                b"VORBEREITETER-ABSCHLUSS".to_vec(),
+            )))
+            .expect("die Abschlussmarke muss sich setzen lassen");
+    }
+
+    /// Ob der ORIGINALENTWURF noch entschluesselbar ist.
+    ///
+    /// Die Frage ist ausdruecklich NICHT `KeyProvider::contains`: die Adresse
+    /// eines Griffs ist Dienst und Konto und wird nicht verbraucht, also traegt
+    /// sie nach dem Verwerfen den `draftDEK` des NEUEN leeren Entwurfs.
+    /// Gemessen wird deshalb, was die Zusage wirklich behauptet — dass die
+    /// Bytes des verworfenen Entwurfs nicht mehr zu oeffnen sind.
+    #[must_use]
+    pub fn draft_dek_is_present(&self) -> bool {
+        let Ok(dek) = self.provider.unwrap_secret(&self.original.dek) else {
+            return false;
+        };
+        aead_open(
+            &dek,
+            &SecretBytes::new(self.original.nonce),
+            &self.original.ciphertext,
+            &original_associated_data(self.original.draft_id, self.original.revision),
+        )
+        .is_ok()
+    }
+
+    /// Ob der Schluesselspeichereintrag des ORIGINALENTWURFS WIRKLICH fort ist.
+    ///
+    /// Das ist eine ANDERE Frage als [`Self::draft_dek_is_present`], und der
+    /// Unterschied ist der Kern dieses Tasks. Die Adresse eines Griffs ist
+    /// Dienst und Konto und wird nicht verbraucht: sobald der leere Entwurf
+    /// entsteht, liegt an DERSELBEN Adresse wieder ein Eintrag, und die
+    /// Unentschluesselbarkeit der alten Bytes waere dann auch ohne ein
+    /// Loeschen erreicht — durch das Ueberschreiben allein. Nur ZWISCHEN dem
+    /// Loeschen und dem Anlegen des leeren Entwurfs ist der dauerhafte Schritt
+    /// „der `draftDEK` ist fort" ueberhaupt sichtbar, und genau dort fragt
+    /// dieser Leser.
+    #[must_use]
+    pub fn draft_dek_entry_is_absent(&self) -> bool {
+        !self
+            .provider
+            .contains(&self.original.dek)
+            .expect("der In-Prozess-Provider antwortet immer")
+    }
+
+    /// Derselbe Dienst, aber mit einem Schluesselspeicher, der sein `delete`
+    /// verschluckt.
+    #[must_use]
+    pub fn discard_service_with_deaf_keystore(&self) -> DiscardService<'_> {
+        DiscardService::new(
+            self.repo(),
+            Arc::new(DeafDeleteProvider {
+                inner: Arc::clone(&self.provider),
+            }) as Arc<dyn KeyProvider>,
+            self.head.preexisting_effective_now(),
+        )
+    }
+
+    /// Ersetzt den Entwurf durch einen leeren — DIREKT ueber die Ablage.
+    ///
+    /// Nicht ueber den Dienst: der Nachweis, den Task 6 ausdruecklich diesem
+    /// Task uebergeben hat, betrifft den TRAIT-Arm und nicht den Dienst.
+    pub fn replace_with_blank(&self) -> Result<(), DraftError> {
+        self.repo().replace_with_blank().map(|_| ())
+    }
+
+    /// Die Zahl der Zeilen der Entwurfstabelle.
+    #[must_use]
+    pub fn draft_row_count(&self) -> i64 {
+        let borrowed = self.open.borrow();
+        let open = borrowed
+            .as_ref()
+            .expect("die Fixture haelt eine geoeffnete Datenbank");
+        open.database
+            .query_row("SELECT count(*) FROM draft", &[] as &[StoreValue])
+            .expect("die Entwurfstabelle muss zaehlbar sein")
+            .expect("count(*) liefert immer eine Zeile")
+            .integer(0)
+            .expect("count(*) ist eine Zahl")
+    }
+
+    /// Ob KEINE Verwerfensabsicht mehr gebucht ist.
+    #[must_use]
+    pub fn pending_discard_is_absent(&self) -> bool {
+        self.repo()
+            .pending_discard()
+            .expect("die Uebergangstabelle muss lesbar sein")
+            .is_none()
+    }
+}
+
+/// Ein Schluesselspeicher, der sein `delete` VERSCHLUCKT und `Ok` meldet.
+///
+/// Er existiert, damit die Abwesenheitsbestaetigung des Dienstes TRAGEND ist
+/// und nicht dekorativ: gegen einen wahrhaftigen Provider kann sie nie
+/// fehlschlagen, also waere sie ohne diesen Doppelgaenger eine Zeile, die kein
+/// Test je ausfuehrt. Genau der Fall — ein Provider, der ein Loeschen meldet und
+/// nicht loescht — ist der, gegen den sie steht.
+struct DeafDeleteProvider {
+    inner: Arc<InMemoryKeyProvider>,
+}
+
+impl KeyProvider for DeafDeleteProvider {
+    fn generate(
+        &self,
+        purpose: SecretPurpose,
+        protection: KeyProtectionProfileV1,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.generate(purpose, protection)
+    }
+
+    fn sign(
+        &self,
+        handle: &KeyHandle,
+        content_type: ea_crypto::ContentType,
+        certificate_hash: ea_types::CertificateHash,
+        payload: &[u8],
+    ) -> Result<ea_key_provider::CoseSign1Bytes, ea_key_provider::KeyError> {
+        self.inner
+            .sign(handle, content_type, certificate_hash, payload)
+    }
+
+    fn wrap_secret(
+        &self,
+        purpose: SecretPurpose,
+        secret: SecretBytes<32>,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.wrap_secret(purpose, secret)
+    }
+
+    fn unwrap_secret(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<SecretBytes<32>, ea_key_provider::KeyError> {
+        self.inner.unwrap_secret(handle)
+    }
+
+    fn unwrap_database_key(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<ea_crypto::SecretVec, ea_key_provider::KeyError> {
+        self.inner.unwrap_database_key(handle)
+    }
+
+    /// Meldet Erfolg und tut NICHTS.
+    fn delete(&self, _handle: &KeyHandle) -> Result<(), ea_key_provider::KeyError> {
+        Ok(())
+    }
+
+    fn contains(&self, handle: &KeyHandle) -> Result<bool, ea_key_provider::KeyError> {
+        self.inner.contains(handle)
+    }
+
+    fn reached_protection_profile(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<KeyProtectionProfileV1, ea_key_provider::KeyError> {
+        self.inner.reached_protection_profile(handle)
+    }
+}
+
+/// Liest Chiffrat und Nonce der Entwurfszeile DURCH SQLCipher hindurch.
+fn stored_payload(database: &EncryptedDatabase) -> (Vec<u8>, [u8; AEAD_NONCE_SIZE]) {
+    let row = database
+        .query_row(
+            "SELECT payload_ciphertext, payload_nonce FROM draft WHERE singleton = 0",
+            &[] as &[StoreValue],
+        )
+        .expect("die Entwurfszeile muss lesbar sein")
+        .expect("nach einer Speicherung liegt genau eine Entwurfszeile");
+    let ciphertext = row.blob(0).unwrap().to_vec();
+    let nonce: [u8; AEAD_NONCE_SIZE] = row.blob(1).unwrap().try_into().unwrap();
+    (ciphertext, nonce)
+}
+
+/// Nimmt jede vorhandene Datenbankdatei auf.
+fn capture_database_files(root: &Path) -> Vec<(String, Vec<u8>)> {
+    std::iter::once(DATABASE_FILE)
+        .chain(DATABASE_SIDECARS)
+        .filter_map(|name| {
+            fs::read(root.join(name))
+                .ok()
+                .map(|bytes| (name.to_owned(), bytes))
+        })
+        .collect()
+}
+
+/// Die AEAD-Zusatzdaten des Entwurfs — `draft_id || zielfassung_be`.
+///
+/// Sie stehen hier NACHGEBILDET, weil sie in `ea-draft` privat sind. Waeren sie
+/// oeffentlich, koennte ein Aufrufer sie unterschieben; die Fixture bildet sie
+/// deshalb nach, statt die Grenze zu oeffnen.
+fn original_associated_data(draft_id: Id16, revision: u64) -> Vec<u8> {
+    let mut associated = Vec::with_capacity(24);
+    associated.extend_from_slice(draft_id.as_bytes());
+    associated.extend_from_slice(&revision.to_be_bytes());
+    associated
 }

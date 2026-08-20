@@ -40,6 +40,30 @@ pub enum DraftError {
     Payload,
     /// Die lokale Zufallsquelle hat kein Material geliefert.
     LocalRng,
+    /// Der Praesenznachweis ist veraltet oder durch eine Sperre entwertet.
+    ///
+    /// Verwerfen ist auf einem unbeaufsichtigt stehenden Geraet genauso
+    /// unwiderruflich wie ein Abschluss (`design.md`:256, :432), also verlangt
+    /// jeder Eingang eine FRISCHE Wiederanmeldung.
+    ReauthRequired,
+    /// Der Nachweis ist frisch, autorisiert aber einen ANDEREN Zweck.
+    ///
+    /// Eine Wiederanmeldung fuer den Abschluss eines Eintrags ist keine fuer
+    /// das Verwerfen eines Entwurfs.
+    ReauthPurposeMismatch,
+    /// Eine vorbereitete Abschlussmarke liegt und hat Vorrang.
+    ///
+    /// Nach dem unwiderruflichen Schritt MUSS die Transaktion aus den
+    /// vorbereiteten Bytes vollendet werden (`design.md`:456, :467); ein
+    /// Verwerfen darf sie nicht ueberholen.
+    PreparedFinalizationPresent,
+    /// Es ist keine Verwerfensabsicht gebucht, die fortzusetzen waere.
+    NoPendingDiscard,
+    /// Der Schluesselspeicher meldet den `draftDEK` nach dem Loeschen weiterhin.
+    ///
+    /// Fail-closed: ein `Ok` von `delete` ist die Aussage des Providers ueber
+    /// sich selbst, und die Zusage haengt an der ABWESENHEIT.
+    KeyDeletionNotConfirmed,
     /// Ein Vorgang der Kryptografieschicht ist gescheitert.
     Crypto(CryptoError),
     /// Der Schluesselport hat abgelehnt.
@@ -60,6 +84,11 @@ impl DraftError {
             Self::TransitionUnavailable => "EA-DRAFT-TRANSITION-UNAVAILABLE",
             Self::Payload => "EA-DRAFT-PAYLOAD",
             Self::LocalRng => "EA-DRAFT-LOCAL-RNG",
+            Self::ReauthRequired => "EA-DRAFT-REAUTH-REQUIRED",
+            Self::ReauthPurposeMismatch => "EA-DRAFT-REAUTH-PURPOSE-MISMATCH",
+            Self::PreparedFinalizationPresent => "EA-DRAFT-PREPARED-FINALIZATION-PRESENT",
+            Self::NoPendingDiscard => "EA-DRAFT-NO-PENDING-DISCARD",
+            Self::KeyDeletionNotConfirmed => "EA-DRAFT-KEY-DELETION-NOT-CONFIRMED",
             Self::Crypto(error) => error.code(),
             Self::Key(error) => error.code(),
             Self::Store(error) => error.code(),

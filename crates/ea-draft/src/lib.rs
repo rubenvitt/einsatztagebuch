@@ -16,12 +16,21 @@
 //!    zurueckholen.
 //! 3. **Stufe 2 konsumiert Bedieneridentitaet und stellt sie nicht aus.**
 //!    [`OperatorProfileRepository`] hat GENAU einen Arm, und der liest.
+//! 4. **Verwerfen ist unwiderruflich UND fortsetzbar.** [`DiscardService`]
+//!    bucht die Absicht dauerhaft, BEVOR irgendetwas Unwiderrufliches
+//!    geschieht; danach ist jeder Neustart eine Fortsetzung. Jeder Punkt von
+//!    [`DiscardFaultPoint::ALL`] fuehrt auf genau zwei Zustaende — der alte
+//!    Entwurf steht, oder ein DAUERHAFT leerer Entwurf steht. Ein durabler
+//!    `PreparedFinalization` gewinnt an jedem Eingang
+//!    ([`PREPARED_FINALIZATION_BEATS_DISCARD_INTENT`]).
 //!
 //! Alle Methoden sind synchron, wie der ganze Rust-Kern; `Arc<dyn
 //! DraftRepository>` ist damit trivial konstruierbar.
 #![forbid(unsafe_code)]
 
 mod autosave;
+mod discard;
+mod fault;
 mod incident_number;
 mod lock;
 mod model;
@@ -29,6 +38,8 @@ mod operator_profile;
 mod repository;
 
 pub use autosave::AutosaveDraftRepository;
+pub use discard::{DiscardPhase, DiscardService};
+pub use fault::{DiscardFaultPoint, PREPARED_FINALIZATION_BEATS_DISCARD_INTENT, RestartState};
 pub use incident_number::IncidentNumberRegister;
 pub use lock::DraftLock;
 pub use model::{

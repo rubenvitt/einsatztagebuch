@@ -14,6 +14,16 @@ ea-key-provider.workspace = true
 # Die verschluesselte Datenbank, ihr Schema und ihre Migrationskette. Diese
 # Crate spricht kein SQL-Dialekt-API und traegt deshalb keine `rusqlite`-Kante.
 ea-local-store.workspace = true
+# `OperatorSessionProof` und `ReauthPurpose`. Verwerfen ist unwiderruflich und
+# verlangt deshalb eine frische Wiederanmeldung fuer GENAU
+# `ReauthPurpose::DiscardDraft` (`design.md`:256, :432).
+ea-operator.workspace = true
+# `PreexistingEffectiveNow`. `OperatorSessionProof::is_valid_for` nimmt
+# ausschliesslich die Zeit eines gewaehlten Registry-Head; eine freie Zeit ist
+# in Stufe 1 nicht baubar, und `ea-operator` re-exportiert den Typ nicht. Ohne
+# diese Kante gaebe es keine Frischepruefung, sondern nur eine injizierbare
+# Attrappe davon.
+ea-trust.workspace = true
 # `Id16`, `OrganizationId`, `ObjectHash` — kein neuer Bezeichnertyp.
 ea-types.workspace = true
 # Frischer `draftDEK`, frische AEAD-Nonce und frische Entwurfskennung aus dem
@@ -32,3 +42,11 @@ ea-key-provider = { workspace = true, features = ["test-support"] }
 # `contains_canary` — der Nachweis, dass der Entwurfstext nicht im Klartext in
 # der Datenbankdatei liegt.
 ea-testkit.workspace = true
+# Die Fixture baut eine ECHTE Registry-Linie und waehlt einen ECHTEN Head, um
+# daraus einen echten Praesenznachweis auszustellen; sie bindet
+# `crates/ea-trust/tests/support/mod.rs` per `#[path]` ein, wie
+# `crates/ea-audit/tests/redaction.rs` es bereits tut. Diese drei Eintraege sind
+# genau dessen Importe, die nicht schon oben stehen.
+ea-time.workspace = true
+ed25519-dalek.workspace = true
+minicbor.workspace = true

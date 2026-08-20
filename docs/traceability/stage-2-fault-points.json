@@ -1,0 +1,35 @@
+{
+  "stage": 2,
+  "discard": [
+    {
+      "name": "BeforeIntentCommit",
+      "brackets": "vor dem dauerhaften Buchen der Verwerfensabsicht"
+    },
+    {
+      "name": "AfterIntentCommit",
+      "brackets": "nach dem dauerhaften Buchen der Verwerfensabsicht"
+    },
+    {
+      "name": "AfterKeystoreDelete",
+      "brackets": "nach dem Loeschen des draftDEK und vor der Bestaetigung seiner Abwesenheit"
+    },
+    {
+      "name": "AfterAbsenceConfirmation",
+      "brackets": "nach der bestaetigten Abwesenheit des draftDEK"
+    },
+    {
+      "name": "AfterDraftRemoval",
+      "brackets": "nach der Transaktion, die Chiffrat und Absicht entfernt und den leeren Entwurf anlegt"
+    },
+    {
+      "name": "BackupRestoreAfterKeyDeletion",
+      "brackets": "nach dem Loeschen des draftDEK, mit zurueckgespielten Datenbankdateien"
+    }
+  ],
+  "precedence": [
+    {
+      "name": "PreparedFinalizationBeatsDiscardIntent",
+      "brackets": "vor jedem Eingang des Verwerfens: solange eine vorbereitete Abschlussmarke liegt, wird kein Verwerfen begonnen und keines fortgesetzt"
+    }
+  ]
+}

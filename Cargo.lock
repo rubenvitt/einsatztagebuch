@@ -750,9 +750,14 @@ dependencies = [
  "ea-format",
  "ea-key-provider",
  "ea-local-store",
+ "ea-operator",
  "ea-testkit",
+ "ea-time",
+ "ea-trust",
  "ea-types",
+ "ed25519-dalek",
  "getrandom 0.4.3",
+ "minicbor",
  "unicode-normalization",
 ]
 
