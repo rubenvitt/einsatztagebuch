@@ -1421,6 +1421,44 @@ pub fn health_scenario_with_capability_scratch_leftover() -> HealthScenario {
     }
 }
 
+/// Ein Szenario, dessen FORMATBEIWERK ein veraendertes Byte traegt.
+///
+/// Es hebt genau die Kehrseite auf, die das Oeffnen unter der Sperre erlaubt:
+/// ein Bestand mit abweichendem Beiwerkbyte laesst sich weiter oeffnen, und
+/// deshalb MUSS der Gesundheitscheck die Abweichung befunden. Das Beiwerk ist
+/// inventarisiert; der Befund ist damit `ModifiedFile` und braucht keinen
+/// eigenen elften Erkenner.
+///
+/// Der Bestand wird nach dem Schaden ERNEUT geoeffnet — auf diesem Backend
+/// laeuft der Check, und dass das zweite Oeffnen ueberhaupt traegt, ist die
+/// halbe Aussage.
+#[must_use]
+pub fn health_scenario_with_a_tampered_beiwerk_byte() -> HealthScenario {
+    let complete = verify_support::complete_valid_archive();
+    let (lock, backend) = materialized("health-beiwerk", complete.fixture.blobs());
+    let expected_inventory = backend.inventory().expect("das Inventar muss entstehen");
+    let capabilities = proven_capabilities(&backend);
+    let verification = verification_of(&backend, &complete.anchor_bytes);
+    backend.overwrite_for_test(
+        ea_archive::README_FORMAT_FILE_V1,
+        b"eine andere Formatbeschreibung",
+    );
+    let reopened = LocalPathBackend::open(
+        backend.root().to_path_buf(),
+        local_profile(),
+        &BoundArchiveProfilePolicyV1::from_policy(&policy_with(vec![source_profile_hash()])),
+    )
+    .expect("ein veraendertes Beiwerkbyte darf den Bestand nicht unoeffenbar machen");
+    HealthScenario {
+        _lock: lock,
+        backend: reopened,
+        expected_inventory,
+        free_space: ample_free_space(),
+        capabilities,
+        verification,
+    }
+}
+
 /// Das Szenario, das GENAU `finding` erzeugt.
 ///
 /// # Panics

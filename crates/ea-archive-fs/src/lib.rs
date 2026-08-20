@@ -30,7 +30,8 @@ pub use controlled_network::{
     ProvenLocalCommitComponentV1,
 };
 pub use format_package::{
-    FORMAT_PACKAGE_FILES_V1, FormatPackageReport, format_package_target, materialize_format_package,
+    FORMAT_PACKAGE_FILES_V1, FormatPackageOutcomeV1, FormatPackageReport, format_package_target,
+    materialize_format_package,
 };
 pub use health::{ArchiveHealthCheckV1, ArchiveHealthReport, FreeSpaceV1, HealthFinding};
 pub use local_path::{

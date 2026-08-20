@@ -189,6 +189,42 @@ impl FormatPackageReport {
     }
 }
 
+/// Was die Erzeugungsstrecke eines Bestands mit dem Formatbeiwerk getan hat.
+///
+/// Sie schreibt es UNTER der exklusiven Schreibersperre oder gar nicht, und ein
+/// abweichendes Beiwerkbyte laesst den Bestand nicht unoeffenbar werden. Beide
+/// Aussagen brauchen einen Beobachtungspunkt, sonst waeren sie stille
+/// Zustaende: ein Aufrufer, der nicht erfaehrt, dass das Beiwerk aufgeschoben
+/// oder abweichend ist, kann daraus nichts folgern.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormatPackageOutcomeV1 {
+    /// GAR NICHT versucht.
+    ///
+    /// Die Kratzwurzel des Capability-Tests ist kein Bestand und traegt
+    /// ausdruecklich kein Beiwerk.
+    NotAttempted,
+    /// Das Beiwerk liegt vollstaendig und bytegleich im Bestand.
+    Materialized,
+    /// AUFGESCHOBEN: ein anderer Schreiber hielt die Sperre.
+    ///
+    /// Das Beiwerk ist eingebettet und wird bei jedem Oeffnen erneut
+    /// materialisiert; der Sperrhalter schreibt es, und das naechste Oeffnen
+    /// ohne fremde Sperre traegt es nach. Deshalb ist der aufgeschobene Fall
+    /// KEIN Fehler: das Oeffnen an einer fremden Sperre scheitern zu lassen
+    /// waere ein Bestand, den ein zweiter Leser nicht mehr aufmacht.
+    Deferred,
+    /// Eine Beiwerkadresse traegt ANDERE Bytes als dieses Programm einbettet.
+    ///
+    /// Die abweichenden Bytes bleiben unangetastet — Create-if-absent
+    /// ueberschreibt nichts —, und das Oeffnen traegt trotzdem: der
+    /// Gesundheitscheck ist das Werkzeug, das einen BESCHAEDIGTEN Bestand
+    /// befunden soll, und er braucht dafuer ein offenes Backend. Eine
+    /// Beiwerkdatei ist im Inventar; ihre Abweichung ist damit
+    /// `EA-ARCHIVE-HEALTH-MODIFIED-FILE` und kein Grund, den Bestand
+    /// wegzuschliessen.
+    Deviating,
+}
+
 /// Schreibt das vollstaendige Formatbeiwerk in `backend`.
 ///
 /// Reihenfolge: erst die vier Verzeichnisse — auch die zwei, die leer bleiben
@@ -202,6 +238,15 @@ impl FormatPackageReport {
 /// eigenes Beiwerk an. Ein VERAENDERTES Beiwerkbyte ist dagegen ein
 /// [`ArchiveBackendError::ByteConflict`] — dieselbe Zusage wie fuer
 /// Archivobjekte, auf demselben Weg.
+///
+/// # Der Aufruf gehoert UNTER die Schreibersperre
+///
+/// Diese Funktion schreibt in den Bestand und nimmt selbst KEINE Sperre: sie
+/// nimmt den Port und nicht das Wirtbackend, und die Sperre gehoert dem
+/// Aufrufer, der sie ueber die Dauer seiner ganzen Arbeit haelt. Die
+/// Erzeugungsstrecke von [`LocalPathBackend::open`](crate::LocalPathBackend::open)
+/// nimmt sie deshalb um genau diesen Aufruf und meldet den Bytekonflikt als
+/// [`FormatPackageOutcomeV1::Deviating`], statt ihn herauszureichen.
 ///
 /// # Dauerhaftigkeit der Zwischenverzeichnisse — benannte Luecke
 ///

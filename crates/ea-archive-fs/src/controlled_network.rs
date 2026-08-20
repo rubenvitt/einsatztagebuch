@@ -223,7 +223,13 @@ impl ControlledNetworkBackend {
     /// [`materialize_format_package`](crate::materialize_format_package) das
     /// Beiwerk aus `design.md` §11.4. Es gibt hier bewusst KEINEN zweiten
     /// Aufruf: ein zweiter Schreibweg zu denselben Bytes waere eine zweite
-    /// Wahrheit, und der Netzbestand ist der Bestand.
+    /// Wahrheit, und der Netzbestand ist der Bestand. Damit erbt diese Strecke
+    /// auch die Sperrfuehrung des Beiwerks: es entsteht unter der exklusiven
+    /// Schreibersperre des Netzbestands, wird bei fremder Sperre aufgeschoben,
+    /// und ein abweichendes Beiwerkbyte macht den Netzbestand nicht
+    /// unoeffenbar. Was tatsaechlich geschah, steht an
+    /// [`LocalPathBackend::format_package_outcome`] des Ziels
+    /// ([`Self::network`]) — der einzige Aufruf ist auch die einzige Auskunft.
     ///
     /// Die lokale Commit-Komponente traegt das Beiwerk ausdruecklich NICHT. Sie
     /// ist kein Bestand, sondern die verschluesselte Zwischenablage der

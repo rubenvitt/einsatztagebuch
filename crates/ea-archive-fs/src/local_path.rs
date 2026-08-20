@@ -29,7 +29,7 @@ use ea_format::{
 };
 use ea_types::Hash32;
 
-use crate::materialize_format_package;
+use crate::{FormatPackageOutcomeV1, materialize_format_package};
 
 /// Die Kontrolldateien des Backends an der Bestandswurzel.
 ///
@@ -211,6 +211,12 @@ pub struct LocalPathBackend {
     /// den ABLEHNUNGSZWEIG deterministisch zu belegen. Die native
     /// Zertifizierung ueber echte Mountgrenzen bleibt Stufe 7.
     foreign: Mutex<BTreeSet<String>>,
+    /// Was die Erzeugungsstrecke mit dem Formatbeiwerk getan hat.
+    ///
+    /// Ein Feld und kein Rueckgabewert von [`LocalPathBackend::open`], weil die
+    /// Aussage zum BESTAND gehoert und nicht zu einem Aufruf: wer das Backend
+    /// spaeter in die Hand bekommt, muss sie noch lesen koennen.
+    format_package: FormatPackageOutcomeV1,
 }
 
 impl LocalPathBackend {
@@ -225,25 +231,41 @@ impl LocalPathBackend {
     /// [`materialize_format_package`](crate::materialize_format_package): das
     /// Formatbeiwerk aus `design.md` §11.4 entsteht mit dem Bestand und nicht
     /// spaeter. Der Aufruf ist idempotent — ein bestehender Bestand erlebt
-    /// einen Leerlauf.
+    /// einen Leerlauf — und er laeuft UNTER der exklusiven Schreibersperre;
+    /// [`Self::format_package_outcome`] sagt danach, was tatsaechlich geschah.
     ///
-    /// # Ein veraendertes Beiwerkbyte macht den Bestand UNOEFFENBAR
+    /// # Das Beiwerk entsteht UNTER der Sperre, oder es entsteht nicht
     ///
-    /// Traegt eine Beiwerkadresse andere Bytes, liefert `open`
-    /// [`ArchiveBackendError::ByteConflict`]. Das ist fail-closed und
-    /// beabsichtigt: das Beiwerk ist eine Zusage des Formats, und ein Bestand,
-    /// der eine andere Formatbeschreibung traegt als die Bytes, die dieses
-    /// Programm einbettet, ist kein Bestand dieses Programms. Die Kehrseite
-    /// steht im Bericht der Aufgabe: der Gesundheitscheck ist das Werkzeug, das
-    /// einen BESCHAEDIGTEN Bestand befunden soll, und er oeffnet dafuer ein
-    /// Backend.
+    /// Diese Strecke ist der einzige Schreibweg, der VOR jeder fachlichen
+    /// Sperre laeuft, und die Nicht-Klobber-Zusage von
+    /// [`Self::create_if_absent`] beruht ausdruecklich darauf, dass zwischen
+    /// Pruefung und Schreiben kein zweiter Schreiber steht (siehe
+    /// [`Self::atomic_rename_same_fs`]). Deshalb nimmt `open` die Sperre um
+    /// genau diesen Aufruf und gibt sie danach wieder frei. Haelt sie ein
+    /// anderer, wird das Beiwerk AUFGESCHOBEN
+    /// ([`FormatPackageOutcomeV1::Deferred`]) und nicht sperrenfrei
+    /// geschrieben: sonst saehe ein zweiter Oeffner die halb geschriebene
+    /// Datei des ersten und hielte sie fuer eine Abweichung. Ohne Sperre kein
+    /// Byte — und ein gehaltener Schreiber verhindert das Oeffnen nie.
+    ///
+    /// # Ein veraendertes Beiwerkbyte macht den Bestand NICHT unoeffenbar
+    ///
+    /// Traegt eine Beiwerkadresse andere Bytes, bleiben diese Bytes
+    /// unangetastet und `open` traegt trotzdem; die Abweichung steht als
+    /// [`FormatPackageOutcomeV1::Deviating`] an
+    /// [`Self::format_package_outcome`]. Das ist keine Nachsicht, sondern die
+    /// Stelle, an die der Befund gehoert: das Beiwerk ist inventarisiert, seine
+    /// Abweichung ist damit `EA-ARCHIVE-HEALTH-MODIFIED-FILE` des
+    /// Gesundheitschecks — und der braucht ein OFFENES Backend, um einen
+    /// beschaedigten Bestand ueberhaupt befunden zu koennen. Ein Bestand, den
+    /// sein eigenes Diagnosewerkzeug nicht mehr aufmacht, ist nicht
+    /// fail-closed, sondern stumm.
     ///
     /// # Errors
     ///
     /// [`ArchiveBackendError::ProfileNotAllowed`] fail-closed, wenn die Policy
-    /// das Profil nicht traegt; [`ArchiveBackendError::ByteConflict`], wenn eine
-    /// Beiwerkadresse abweichende Bytes traegt; sonst der Fehler des
-    /// Wirtdateisystems.
+    /// das Profil nicht traegt; sonst der Fehler des Wirtdateisystems. Ein
+    /// Bytekonflikt des Beiwerks ist ausdruecklich KEIN Fehler dieser Strecke.
     pub fn open(
         root: PathBuf,
         profile: ArchiveBackendProfileV1,
@@ -256,16 +278,43 @@ impl LocalPathBackend {
             profile,
             held: Arc::new(AtomicBool::new(false)),
             foreign: Mutex::new(BTreeSet::new()),
+            format_package: FormatPackageOutcomeV1::NotAttempted,
         };
         // Der LETZTE Schritt der Erzeugungsstrecke, bevor die erste
         // Archivadresse benutzt wird: `design.md` §11.4 fuehrt das
         // Formatbeiwerk als Verpflichtung JEDES Bestands, und Stufe 2 ist die
-        // erste, die Bestaende erzeugt. Der Aufruf ist idempotent, ein
-        // bestehender Bestand erlebt also einen Leerlauf; ein VERAENDERTES
-        // Beiwerkbyte laesst `open` dagegen fail-closed mit
-        // `EA-ARCHIVE-BYTE-CONFLICT` scheitern.
-        materialize_format_package(&backend)?;
-        Ok(backend)
+        // erste, die Bestaende erzeugt.
+        let format_package = backend.materialize_format_package_under_lock()?;
+        Ok(Self {
+            format_package,
+            ..backend
+        })
+    }
+
+    /// Materialisiert das Beiwerk UNTER der exklusiven Schreibersperre.
+    ///
+    /// Drei Ausgaenge, und keiner davon ist ein Fehler dieser Strecke: die
+    /// Sperre ist frei und das Beiwerk entsteht; die Sperre ist fremd und das
+    /// Beiwerk wird aufgeschoben; das Beiwerk weicht ab und der Bestand bleibt
+    /// offenbar. Der Fehler des Wirtdateisystems wird dagegen herausgereicht —
+    /// ein Bestand, in den nicht geschrieben werden kann, ist kein Bestand, den
+    /// dieses Programm fuehren kann.
+    fn materialize_format_package_under_lock(
+        &self,
+    ) -> Result<FormatPackageOutcomeV1, ArchiveBackendError> {
+        let Ok(lock) = self.acquire_writer_lock() else {
+            return Ok(FormatPackageOutcomeV1::Deferred);
+        };
+        let outcome = match materialize_format_package(self) {
+            Ok(_) => FormatPackageOutcomeV1::Materialized,
+            Err(ArchiveBackendError::ByteConflict) => FormatPackageOutcomeV1::Deviating,
+            Err(other) => return Err(other),
+        };
+        // AUSDRUECKLICH hier: die Sperre gehoert zur Materialisierung und nicht
+        // zum Backend. Wer nach `open` schreiben will, nimmt sie selbst — sonst
+        // haette das Oeffnen eines Bestands ihn stillschweigend belegt.
+        drop(lock);
+        Ok(outcome)
     }
 
     /// Wie [`Self::open`], aber OHNE Policypruefung.
@@ -282,12 +331,25 @@ impl LocalPathBackend {
             profile,
             held: Arc::new(AtomicBool::new(false)),
             foreign: Mutex::new(BTreeSet::new()),
+            // Die Kratzwurzel ist kein Bestand: sie traegt kein Beiwerk, und
+            // der Versuch findet hier ausdruecklich nicht statt.
+            format_package: FormatPackageOutcomeV1::NotAttempted,
         })
     }
 
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Was die Erzeugungsstrecke mit dem Formatbeiwerk getan hat.
+    ///
+    /// Der Beobachtungspunkt zu [`Self::open`]: das Beiwerk entsteht unter der
+    /// Sperre, wird bei fremder Sperre aufgeschoben und macht einen Bestand mit
+    /// abweichendem Byte nicht unoeffenbar.
+    #[must_use]
+    pub const fn format_package_outcome(&self) -> FormatPackageOutcomeV1 {
+        self.format_package
     }
 
     #[must_use]

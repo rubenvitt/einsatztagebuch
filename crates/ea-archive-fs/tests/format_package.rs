@@ -17,8 +17,8 @@ mod support;
 
 use ea_archive::{ArchiveBackend as _, ArchiveInventory, ArchivePath};
 use ea_archive_fs::{
-    ControlledNetworkBackend, FORMAT_PACKAGE_FILES_V1, LocalPathBackend, format_package_target,
-    materialize_format_package,
+    ControlledNetworkBackend, FORMAT_PACKAGE_FILES_V1, FormatPackageOutcomeV1, HealthFinding,
+    LocalPathBackend, format_package_target, materialize_format_package,
 };
 
 /// Ein Bestand auf einer frischen Temporaerwurzel.
@@ -196,6 +196,101 @@ fn materializing_twice_is_idempotent_and_a_changed_beiwerk_byte_conflicts() {
     assert_eq!(
         materialize_format_package(&backend).unwrap_err().code(),
         "EA-ARCHIVE-BYTE-CONFLICT"
+    );
+}
+
+/// Oeffnet denselben Bestand ERNEUT, mit demselben Profil und derselben Policy.
+fn reopen(backend: &LocalPathBackend) -> LocalPathBackend {
+    LocalPathBackend::open(
+        backend.root().to_path_buf(),
+        support::local_profile(),
+        &support::policy_allowing_source_and_target(),
+    )
+    .expect("das erneute Oeffnen desselben Bestands muss tragen")
+}
+
+#[test]
+fn a_second_opener_writes_no_beiwerk_byte_while_another_writer_holds_the_lock() {
+    let (_guard, first) = backend("format-package-deferred");
+    assert_eq!(
+        first.format_package_outcome(),
+        FormatPackageOutcomeV1::Materialized,
+        "die Erzeugungsstrecke des ersten Oeffners MUSS das Beiwerk anlegen"
+    );
+
+    // Die Sperre bleibt genommen, und der Bestand wird leergeraeumt: nur so ist
+    // MESSBAR, dass der zweite Oeffner nichts schreibt — laege das Beiwerk
+    // noch, waere jeder Ausgang ununterscheidbar.
+    let held = first
+        .acquire_writer_lock()
+        .expect("nach `open` ist die Sperre wieder frei");
+    for (relative, _) in FORMAT_PACKAGE_FILES_V1 {
+        let path = format_package_target(relative).expect("die Zieladresse ist gueltig");
+        first.remove_for_test(path.as_str());
+    }
+
+    let second = reopen(&first);
+    assert_eq!(
+        second.format_package_outcome(),
+        FormatPackageOutcomeV1::Deferred,
+        "an fremder Sperre wird das Beiwerk AUFGESCHOBEN und nicht sperrenfrei geschrieben"
+    );
+    for (relative, _) in FORMAT_PACKAGE_FILES_V1 {
+        let path = format_package_target(relative).expect("die Zieladresse ist gueltig");
+        assert!(
+            !second.exists_for_test(path.as_str()),
+            "der zweite Oeffner hat {relative} OHNE Sperre geschrieben"
+        );
+    }
+
+    // Und sobald die Sperre frei ist, traegt das Beiwerk nach.
+    drop(held);
+    let third = reopen(&first);
+    assert_eq!(
+        third.format_package_outcome(),
+        FormatPackageOutcomeV1::Materialized
+    );
+    for (relative, _) in FORMAT_PACKAGE_FILES_V1 {
+        let path = format_package_target(relative).expect("die Zieladresse ist gueltig");
+        assert!(
+            third.exists_for_test(path.as_str()),
+            "das aufgeschobene Beiwerk MUSS beim naechsten Oeffnen nachgetragen werden: \
+             {relative} fehlt"
+        );
+    }
+}
+
+#[test]
+fn a_changed_beiwerk_byte_keeps_the_archive_openable_and_is_reported_as_a_deviation() {
+    let (_guard, first) = backend("format-package-deviating");
+    let readme = ArchivePath::at_layout_file(ea_archive::README_FORMAT_FILE_V1)
+        .expect("die Wurzeldatei liegt in der Layoutliste");
+    first.overwrite_for_test(readme.as_str(), b"eine andere Formatbeschreibung");
+
+    // Das ist der Kern: der Gesundheitscheck haelt ein OFFENES Backend, also
+    // darf ein beschaedigtes Beiwerk das Oeffnen nicht verweigern — sonst waere
+    // genau der Bestand unbefundbar, fuer den das Werkzeug gebaut ist.
+    let second = reopen(&first);
+    assert_eq!(
+        second.format_package_outcome(),
+        FormatPackageOutcomeV1::Deviating
+    );
+    assert_eq!(
+        second.read_for_test(readme.as_str()).as_deref(),
+        Some(b"eine andere Formatbeschreibung".as_slice()),
+        "die abweichenden Bytes werden NICHT stillschweigend ueberschrieben"
+    );
+}
+
+#[test]
+fn the_health_check_reports_a_changed_beiwerk_byte_as_a_modified_file() {
+    let scenario = support::health_scenario_with_a_tampered_beiwerk_byte();
+    let report = scenario.run();
+    assert!(
+        report.contains(HealthFinding::ModifiedFile),
+        "ein veraendertes Beiwerkbyte MUSS als geaenderte Datei gemeldet werden; gemeldet \
+         wurde {:?}",
+        report.findings()
     );
 }
 
