@@ -37,7 +37,8 @@ use ea_crypto::{
     AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, ContentType, GRANT_SUITE_ID, HPKE_AEAD_ID,
     HPKE_ENCAPSULATED_KEY_SIZE, HPKE_KDF_ID, HPKE_KEM_ID, HPKE_MODE, HPKE_WRAPPED_CEK_SIZE,
     HpkeRecipientPrivateKey, HpkeSealed, ProtectedHeader, SUITE_ID, SecretBytes, SecretVec,
-    aead_open, aead_seal, authorized_trust_digest, bootstrap_anchor_hash, ciphertext_digest,
+    active_profile_pointer_digest, aead_open, aead_seal, archive_inventory_digest,
+    archive_profile_digest, authorized_trust_digest, bootstrap_anchor_hash, ciphertext_digest,
     cose_sign1_ctt_imprint, entry_hash, grant_digest, grant_plan_digest, hpke_aad, hpke_info,
     hpke_open, linux_os_account_binding_hash, object_hash, operator_profile_digest,
     parse_cose_sign1, payload_aad, receipt_digest, record_digest, recovery_test_digest,
@@ -81,12 +82,12 @@ const MANIFEST_PATH: &str = "vectors/crypto/suite-1/manifest.json";
 
 /// Die Zahl der Eintraege. Ein truncatiertes Manifest darf nicht still
 /// durchlaufen: ohne diese Schranke waere ein leeres Manifest trivial gruen.
-const EXPECTED_ENTRY_COUNT: usize = 66;
+const EXPECTED_ENTRY_COUNT: usize = 72;
 
 /// Die Zahl der VERSCHIEDENEN `EINSATZARCHIV-`-Zeichenketten im Quelltext von
 /// `crates/ea-crypto`. Ohne diese Schranke koennte ein Scanner, der nichts
 /// findet, die Abdeckungspruefung leer bestehen.
-const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 21;
+const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 24;
 
 /// Das feste Urbild der Domain-Digest-Vektoren.
 const PROBE: &[u8] = b"suite-1 digest probe";
@@ -101,7 +102,7 @@ type DigestFn = fn(&[u8]) -> Hash32;
 /// Eine Tabelle, kein Fliesstext: Erzeuger und Test leiten ihre Eintraege aus
 /// derselben Aufzaehlung ab, und eine neue Domain faellt sofort als fehlender
 /// Eintrag auf.
-const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 11] = [
+const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 14] = [
     (
         "domain-digest/ciphertext-digest",
         "EINSATZARCHIV-CIPHERTEXT-v1",
@@ -157,6 +158,21 @@ const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 11] = [
         "EINSATZARCHIV-OPERATOR-PROFILE-v1",
         operator_profile_digest,
     ),
+    (
+        "domain-digest/archive-profile-digest",
+        "EINSATZARCHIV-ARCHIVE-PROFILE-v1",
+        archive_profile_digest,
+    ),
+    (
+        "domain-digest/archive-inventory-digest",
+        "EINSATZARCHIV-ARCHIVE-INVENTORY-v1",
+        archive_inventory_digest,
+    ),
+    (
+        "domain-digest/active-profile-pointer-digest",
+        "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
+        active_profile_pointer_digest,
+    ),
 ];
 
 type ContextFn = fn(&[u8]) -> Vec<u8>;
@@ -180,8 +196,8 @@ const DOMAIN_CONTEXTS: [(&str, &str, ContextFn); 3] = [
     ),
 ];
 
-/// Die 20 Domain-Trennungszeichenketten als eigene Eintraege.
-const DOMAIN_STRINGS: [&str; 20] = [
+/// Die 23 Domain-Trennungszeichenketten als eigene Eintraege.
+const DOMAIN_STRINGS: [&str; 23] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
     "EINSATZARCHIV-CHECKPOINT-v1",
@@ -202,6 +218,9 @@ const DOMAIN_STRINGS: [&str; 20] = [
     "EINSATZARCHIV-TRUST-ANCHOR-PRE-v1",
     "EINSATZARCHIV-TRUST-ANCHOR-v1",
     "EINSATZARCHIV-TRUST-OBJECT-v1",
+    "EINSATZARCHIV-ARCHIVE-PROFILE-v1",
+    "EINSATZARCHIV-ARCHIVE-INVENTORY-v1",
+    "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
 ];
 
 /// Der Schluessel des RFC-8439-Vektors: 0x80 bis 0x9f.

@@ -687,6 +687,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-archive-fs"
+version = "0.1.0"
+dependencies = [
+ "ea-archive",
+ "ea-audit",
+ "ea-crypto",
+ "ea-format",
+ "ea-key-provider",
+ "ea-operator",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ea-verify",
+ "ed25519-dalek",
+ "hex",
+ "minicbor",
+]
+
+[[package]]
 name = "ea-audit"
 version = "0.1.0"
 dependencies = [
@@ -770,9 +789,11 @@ version = "0.1.0"
 dependencies = [
  "ea-cbor",
  "ea-crypto",
+ "ea-testkit",
  "ea-types",
  "hex",
  "minicbor",
+ "unicode-normalization",
 ]
 
 [[package]]

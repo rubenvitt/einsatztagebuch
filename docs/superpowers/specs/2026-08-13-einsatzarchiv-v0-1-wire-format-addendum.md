@@ -16,6 +16,8 @@ Die folgenden versionierten Dateien sind Bestandteil dieses Addendums und normat
   Reader-Ack-Cores samt nichtzirkulären Signaturhüllen,
 - `schemas/identity/v1/os-account.cddl`: der geschlossene OS-Kontokontext,
 - `schemas/reports/v1/local-audit.cddl`: signiertes, klartextfreies lokales Audit,
+- `schemas/archive/v1/archive-profile.cddl`: Archivbackendprofil, Objektinventar
+  und aktiver Profilzeiger,
 - `schemas/reports/v1/verification-report.schema.json` und
   `key-inventory.schema.json`: geschlossene JSON-Schemata.
 
@@ -546,6 +548,57 @@ Nicht-Key-Feldern ab. Die produktiven Serializer in Tasks 9/10 und Stage 5 müss
 denselben Vertrag implementieren. Jedes JSON-Objekt, auch jedes geschachtelte, setzt
 `additionalProperties: false`.
 
+## Archivbackendprofil, Inventar und aktiver Profilzeiger
+
+`schemas/archive/v1/archive-profile.cddl` schließt drei Urbilder: den
+geschlossenen Profilkern mit **fünfzehn** Positionen, die Inventarliste und den
+Zeigerkern. Ihre Hashwerte entstehen in der bestehenden Konvention
+`SHA-256(DOMAIN || deterministicCbor(core))` (`crates/ea-crypto/src/digest.rs`),
+mit `DOMAIN` als ASCII-Bytes ohne Trenner und dem Versionsmarker als erster
+Arrayposition — genau wie `recovery_test_digest_ref`:
+
+```text
+archiveProfileHash = SHA-256("EINSATZARCHIV-ARCHIVE-PROFILE-v1" || deterministicCbor(archive-backend-profile-core-v1))
+inventoryHash      = SHA-256("EINSATZARCHIV-ARCHIVE-INVENTORY-v1" || deterministicCbor(archive-inventory-list-v1))
+activePointerHash  = SHA-256("EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1" || deterministicCbor(active-profile-pointer-core-v1))
+```
+
+**Erstens.** Kein Ausgabepfad, kein Hostname und kein Kontoname geht in eines
+der drei Urbilder ein. Die Digests sind damit über Organisationsgrenzen hinweg
+portabel und reproduzierbar; zwei Installationen mit derselben Profilzeile,
+demselben Protokoll und denselben Grenzen errechnen denselben
+`archiveProfileHash`, obwohl ihre Ausgabepfade verschieden sind.
+
+**Zweitens.** `contentHash` eines Inventareintrags ist `object_hash` über die
+exakten Dateibytes (`crates/ea-crypto/src/digest.rs`) für **jede**
+inventarisierte Datei, das Formatbeiwerk eingeschlossen, obwohl dieses Beiwerk
+kein Exact-Object-Präfix trägt (`design.md` §11.4) — andernfalls hätten die
+Schema- und Berichtsbytes, die `design.md` §11.5 im Inventar verlangt, überhaupt
+keine Identität. Der relative Pfad ist wurzelrelativ mit `/` als Trenner in
+UTF-8 NFC, die Einträge stehen byteweise aufsteigend und duplikatfrei, und der
+Pfad erscheint ausschließlich im Urbild, niemals im Auditereignis: dieses trägt
+allein die zweiunddreißig Digestbytes.
+
+**Drittens.** `generation` steigt je erfolgreichem Wechsel monoton um genau
+eins. Ein Rückfall auf ein früheres Profil ergibt deshalb eine neue, höhere
+Generation und damit einen anderen Zeigerhash. Nach dem Wechsel ist
+`active-profile-hash` gleich `target-profile-hash`; beim Ausgang `failed`
+(`schemas/reports/v1/local-audit.cddl`, Wert 0) ist er gleich
+`source-profile-hash`.
+
+**Viertens.** `allowed-archive-profile-hashes` innerhalb des Root-signierten
+`policy-core-v1` (`schemas/archive/v1/trust.cddl`) trägt genau diese Werte,
+berechnet nach genau dieser Regel, und eine Profilmigration, deren
+Zielprofilhash nicht in der wirksamen Policy steht, wird fail-closed abgelehnt.
+Ohne diesen Satz bliebe das Policyfeld ein toter Buchstabe.
+
+**Fünftens.** Die Werte von `filesystem-row-id`, `capability-test-vector-id` und
+`failover-config-id` kommen aus der `support-matrix.json` der Stufe 7, ihre
+**Struktur** ist jedoch hier festgelegt. Stufe 7 liefert Werte und passt ihr
+Zeilen-ID-Schema an diesen Kern an; sie definiert ihn nicht neu. Stufe 2 signiert
+mit diesen Digests dauerhafte Auditnachweise, also kann die Richtung der
+Anpassung nicht die umgekehrte sein.
+
 ## Feld-zu-Design-Review
 
 Die Gruppen führen jedes hinzugefügte Feld mindestens einmal auf. Status
@@ -554,6 +607,7 @@ Die Gruppen führen jedes hinzugefügte Feld mindestens einmal auf. Status
 | Artefakt / Felder | Designquelle | Status |
 |---|---|---|
 | signed protocol: Challenge-, Enrollment- und Reader-Ack-Core sowie jeweils getrennte `[core, COSE-Sign1]`-Hülle | §§10.1, 10.5, 12.7 | bestätigt |
+| archive profile: profile-kind, filesystem-row-id, protocol-id, server-product, server-version, mount-options, failover-config-id, capability-test-vector-id, queue-max-objects, queue-max-bytes, resume-backoff-initial-ms, resume-backoff-max-ms, resume-max-attempts; inventory relative-path/content-hash; pointer active-profile-hash/generation | §11.5 | bestätigt |
 | OS account: organization-id, device-id, geschlossene selbstversionierende Windows-SID-/macOS-GUID+UID-/Linux-Machine-ID+UID-Union | §§6.8, 10.1, 12.2 | bestätigt |
 | `.ecp`: magic, object-type, format-version, critical-extensions, variant tag | §11.1 Typ-Tags und Hülle | bestätigt |
 | checkpoint: object-version, domain `EINSATZARCHIV-CHECKPOINT-v1`, organization-id, chain-id, covered-from-sequence, covered-through-sequence, head-entry-hash, registry-head-hash, issued-at-server, previous-evidence-hash, critical-extensions | §§15.2–15.3 | bestätigt |

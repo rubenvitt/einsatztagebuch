@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod archive_profile;
 mod eag;
 mod ecp;
 mod eds;
@@ -12,6 +13,12 @@ mod object;
 mod parser;
 mod trust_view;
 
+pub use archive_profile::{
+    ActiveProfilePointerCoreV1, ArchiveBackendProfileCoreFieldsV1, ArchiveBackendProfileCoreV1,
+    ArchiveInventoryEntryV1, ArchiveInventoryListV1, ArchiveProfileKindV1,
+    encode_active_profile_pointer_core, encode_archive_backend_profile_core,
+    encode_archive_inventory_list,
+};
 pub use eag::{
     GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1, GrantPurposeV1,
     GrantV1,
@@ -42,7 +49,8 @@ pub use local_audit::{
     ExportContextV1, GenericAuditContextV1, HistoricalRegrantContextV1, IndependentTimeKindV1,
     IndependentTimeReferenceV1, LocalAuditActionV1, LocalAuditEventCoreFieldsV1, LocalAuditEventV1,
     LocalAuditOutcomeV1, StaleRegistryContextV1, decode_clock_release_audit,
-    decode_local_audit_event, encode_local_audit_core, encode_local_audit_event,
+    decode_local_audit_event, encode_archive_profile_migration_context, encode_local_audit_core,
+    encode_local_audit_event,
 };
 pub use object::{ExactObjectBytes, FormatError, Parsed, ParsedArchiveObject};
 pub use parser::{

@@ -10,6 +10,15 @@ ea-cbor.workspace = true
 ea-crypto.workspace = true
 ea-types.workspace = true
 minicbor.workspace = true
+# NFC-Pruefung der wurzelrelativen Inventarpfade. Dieselbe Kiste, die
+# `ea-cbor` fuer die Kanonisierung von Textschluesseln schon nutzt — keine
+# neue externe Abhaengigkeit des Workspaces.
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+# `contains_canary` fuer die Kanarienvogel-Zusicherungen der Urbildtests.
+# Dev-Dependency-Zyklus mit Absicht: `ea-testkit` haengt an `ea-format`, und
+# Cargo erlaubt genau diese Richtung, weil der Dev-Graph des Testtargets vom
+# Lib-Graphen getrennt ist. Im wasm32-Lib-Graphen erscheint nichts davon.
+ea-testkit.workspace = true

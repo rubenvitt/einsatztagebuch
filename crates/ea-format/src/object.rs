@@ -29,6 +29,11 @@ pub enum FormatError {
     DuplicateRecovery,
     DuplicateRecipientKey,
     DuplicateRecipientCertificate,
+    /// Zwei Inventareintraege nennen denselben wurzelrelativen Pfad.
+    InventoryDuplicate,
+    /// Ein Inventarpfad ist leer, absolut, traegt `..`, einen Backslash, ein
+    /// leeres Segment oder steht nicht in NFC.
+    InventoryPath,
     Cbor(CborError),
 }
 
@@ -56,6 +61,8 @@ impl FormatError {
             Self::DuplicateRecovery => "EA-GRANT-DUPLICATE-RECOVERY",
             Self::DuplicateRecipientKey => "EA-GRANT-DUPLICATE-RECIPIENT-KEY",
             Self::DuplicateRecipientCertificate => "EA-GRANT-DUPLICATE-RECIPIENT-CERTIFICATE",
+            Self::InventoryDuplicate => "EA-FORMAT-INVENTORY-DUPLICATE",
+            Self::InventoryPath => "EA-FORMAT-INVENTORY-PATH",
             Self::Cbor(error) => error.code(),
         }
     }

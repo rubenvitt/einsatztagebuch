@@ -25,6 +25,14 @@ pub mod trust_support;
 #[path = "../../../ea-format/tests/support/mod.rs"]
 pub mod format_support;
 
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+
 use ea_archive::{ArchiveBlob, ArchiveError, ArchiveSource};
 use ea_crypto::CoseSigner;
 use ea_format::{
@@ -553,4 +561,192 @@ pub fn unpinned_snapshot() -> TrustStateSnapshot {
         )),
     };
     load_trust_state(&mut store, key).expect("the fixture state store must load exactly once")
+}
+
+/// Eine DETERMINISTISCHE Attrappe des schreibenden Ports.
+///
+/// Sie haelt Bytes, Dateiflushes, Verzeichnisflushes und die Sperre im
+/// Speicher. Damit belegt `crates/ea-archive` seinen Staging-Vertrag OHNE
+/// Dateisystem — genau wie die Crate selbst kein `std::fs` traegt.
+///
+/// Der eingespielte Fehlerpunkt ist ein ZAEHLER und kein Schalter: so faellt
+/// genau der n-te Flush aus, und der Test kann sagen, WELCHE Stufe nicht
+/// getragen hat.
+pub struct InMemoryArchiveBackend {
+    files: Mutex<BTreeMap<String, Vec<u8>>>,
+    synced_files: Mutex<BTreeSet<String>>,
+    synced_directories: Mutex<BTreeSet<String>>,
+    file_sync_calls: AtomicUsize,
+    failing_file_sync_call: Option<usize>,
+    /// Ein `Arc`, damit der RAII-Waechter GENAU DIESE Flagge zuruecksetzt.
+    /// Ein eigener Zustand im Waechter waere eine zweite Wahrheit, und der
+    /// zweite Sperrversuch nach `drop` schlage dann falsch fehl.
+    locked: Arc<AtomicBool>,
+}
+
+impl InMemoryArchiveBackend {
+    /// Eine Attrappe, deren Flushes alle tragen.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_failing_file_sync(None)
+    }
+
+    /// Eine Attrappe, deren `failing`-ter Dateiflush fehlschlaegt (1-basiert).
+    #[must_use]
+    pub fn with_failing_file_sync(failing: Option<usize>) -> Self {
+        Self {
+            files: Mutex::new(BTreeMap::new()),
+            synced_files: Mutex::new(BTreeSet::new()),
+            synced_directories: Mutex::new(BTreeSet::new()),
+            file_sync_calls: AtomicUsize::new(0),
+            failing_file_sync_call: failing,
+            locked: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Traegt die Attrappe diese Adresse?
+    #[must_use]
+    pub fn exists(&self, relative: &str) -> bool {
+        self.files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(relative)
+    }
+
+    /// Die Bytes unter dieser Adresse.
+    #[must_use]
+    pub fn read(&self, relative: &str) -> Option<Vec<u8>> {
+        self.files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(relative)
+            .cloned()
+    }
+
+    /// Wurde diese Datei geflusht?
+    #[must_use]
+    pub fn file_synced(&self, relative: &str) -> bool {
+        self.synced_files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(relative)
+    }
+
+    /// Wurde dieses Verzeichnis geflusht?
+    #[must_use]
+    pub fn directory_synced(&self, directory: &str) -> bool {
+        self.synced_directories
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(directory)
+    }
+
+    fn insert_if_absent(
+        &self,
+        relative: &str,
+        bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+        match files.get(relative) {
+            Some(existing) if existing == bytes => Ok(()),
+            Some(_) => Err(ea_archive::ArchiveBackendError::ByteConflict),
+            None => {
+                files.insert(relative.to_owned(), bytes.to_vec());
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Default for InMemoryArchiveBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Gibt die Sperre der Attrappe frei.
+struct InMemoryLockRelease {
+    locked: Arc<AtomicBool>,
+}
+
+impl ea_archive::WriterLockRelease for InMemoryLockRelease {
+    fn release(&self) {
+        self.locked.store(false, Ordering::SeqCst);
+    }
+}
+
+impl ea_archive::ArchiveBackend for InMemoryArchiveBackend {
+    fn create_if_absent(
+        &self,
+        relative: &ea_archive::ArchivePath,
+        bytes: &ExactObjectBytes,
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        self.insert_if_absent(relative.as_str(), bytes.as_bytes())
+    }
+
+    fn create_non_object_if_absent(
+        &self,
+        relative: &ea_archive::ArchivePath,
+        bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        self.insert_if_absent(relative.as_str(), bytes)
+    }
+
+    fn sync_file(
+        &self,
+        relative: &ea_archive::ArchivePath,
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        let call = self.file_sync_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.failing_file_sync_call == Some(call) {
+            return Err(ea_archive::ArchiveBackendError::FlushFailed);
+        }
+        if !self.exists(relative.as_str()) {
+            return Err(ea_archive::ArchiveBackendError::Io);
+        }
+        self.synced_files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(relative.as_str().to_owned());
+        Ok(())
+    }
+
+    fn sync_directory(
+        &self,
+        relative: &ea_archive::ArchivePath,
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        self.synced_directories
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(relative.directory().to_owned());
+        Ok(())
+    }
+
+    fn atomic_rename_same_fs(
+        &self,
+        from: &ea_archive::ArchivePath,
+        to: &ea_archive::ArchivePath,
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        // Die Attrappe kennt genau EIN Dateisystem, also ist jeder Rename
+        // dateisystemintern. Der Fall verschiedener Dateisysteme gehoert dem
+        // Wirtbackend und wird dort geprueft.
+        let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+        let bytes = files
+            .remove(from.as_str())
+            .ok_or(ea_archive::ArchiveBackendError::Io)?;
+        files.insert(to.as_str().to_owned(), bytes);
+        Ok(())
+    }
+
+    fn acquire_writer_lock(
+        &self,
+    ) -> Result<ea_archive::WriterLock, ea_archive::ArchiveBackendError> {
+        // Der Waechter haelt eine geteilte Referenz auf DIESE Flagge, damit
+        // `drop` sie tatsaechlich freigibt.
+        if self.locked.swap(true, Ordering::SeqCst) {
+            return Err(ea_archive::ArchiveBackendError::AlreadyLocked);
+        }
+        Ok(ea_archive::WriterLock::new(Arc::new(InMemoryLockRelease {
+            locked: Arc::clone(&self.locked),
+        })))
+    }
 }

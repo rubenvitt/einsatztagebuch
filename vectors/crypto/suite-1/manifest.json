@@ -119,6 +119,63 @@
       "expectedOutcome": {
         "kind": "accepted"
       },
+      "file": "domain-digest/active-profile-pointer-digest.bin",
+      "fileSha256": "22c75c1f7630e641aac9df2e72565e0dcea93eddd12ea5a16efe3c7c08b779b3",
+      "inputBytes": "73756974652d31206469676573742070726f6265",
+      "intermediateDigests": {
+        "domainString": "8ffc950c0cfbce0e2f0947632d500b863e94d53fe7ce5c7610e4300f5201b44a"
+      },
+      "name": "domain-digest/active-profile-pointer-digest",
+      "objectBytes": "bcb461ca72915f04c43180079b39a73145d1148b7e51c21c01965036ce796bfa",
+      "schemaId": "ea.crypto.domain-digest/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-digest/archive-inventory-digest.bin",
+      "fileSha256": "6cb0d0b57fc2b541041d5a2ae7ec5224fd3551d60094f811198f808b7d326007",
+      "inputBytes": "73756974652d31206469676573742070726f6265",
+      "intermediateDigests": {
+        "domainString": "0d48767a712ad8dfc8a5f4054c1ccced51af9b44a1a0df77c3e9a9b6e38d41b6"
+      },
+      "name": "domain-digest/archive-inventory-digest",
+      "objectBytes": "5643d2c497dd139a477929b37dd4960daca06e4a844f718f2931991458f0de0a",
+      "schemaId": "ea.crypto.domain-digest/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-digest/archive-profile-digest.bin",
+      "fileSha256": "90c467e9ef9d3a57ef7c002d2b6a3b158af01dc02e8a8f10224dec7e69ea16dd",
+      "inputBytes": "73756974652d31206469676573742070726f6265",
+      "intermediateDigests": {
+        "domainString": "9b85c16e21a5938d5eff877b65fe67fa23ae82de46eb399f3513c01111482f14"
+      },
+      "name": "domain-digest/archive-profile-digest",
+      "objectBytes": "6f7a50c02be0f96259d4520d79055a3ea6bdbb1afba4627278a2dec5b51c1675",
+      "schemaId": "ea.crypto.domain-digest/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
       "file": "domain-digest/authorized-trust-digest.bin",
       "fileSha256": "6c8e8c13f37e0884346b870ece23645c08b4ca68d13dc48cd4f9d7ff0d0d45d7",
       "inputBytes": "73756974652d31206469676573742070726f6265",
@@ -421,12 +478,63 @@
       "expectedOutcome": {
         "kind": "accepted"
       },
+      "file": "domain-string/einsatzarchiv-active-profile-pointer-v1.bin",
+      "fileSha256": "8ffc950c0cfbce0e2f0947632d500b863e94d53fe7ce5c7610e4300f5201b44a",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-active-profile-pointer-v1",
+      "objectBytes": "45494e5341545a4152434849562d4143544956452d50524f46494c452d504f494e5445522d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
       "file": "domain-string/einsatzarchiv-admin-authorized-trust-v1.bin",
       "fileSha256": "e9f98833780d638c5fa22cb8a97f06bff888fe22de96b736e4129a03e1f456f8",
       "inputBytes": "",
       "intermediateDigests": {},
       "name": "domain-string/einsatzarchiv-admin-authorized-trust-v1",
       "objectBytes": "45494e5341545a4152434849562d41444d494e2d415554484f52495a45442d54525553542d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-string/einsatzarchiv-archive-inventory-v1.bin",
+      "fileSha256": "0d48767a712ad8dfc8a5f4054c1ccced51af9b44a1a0df77c3e9a9b6e38d41b6",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-archive-inventory-v1",
+      "objectBytes": "45494e5341545a4152434849562d415243484956452d494e56454e544f52592d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-string/einsatzarchiv-archive-profile-v1.bin",
+      "fileSha256": "9b85c16e21a5938d5eff877b65fe67fa23ae82de46eb399f3513c01111482f14",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-archive-profile-v1",
+      "objectBytes": "45494e5341545a4152434849562d415243484956452d50524f46494c452d7631",
       "schemaId": "ea.crypto.domain-separation-string/v1",
       "source": {
         "commit": "ea-testkit::crypto_suite_one_manifest",

@@ -1,0 +1,53 @@
+[package]
+name = "ea-archive-fs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ea-archive.workspace = true
+# Die Migration schreibt eine SIGNIERTE lokale Auditzeile, bevor sie
+# zurueckkehrt (`design.md` §11.5). `LocalAuditService::record_signed` ist der
+# einzige Weg dorthin; ohne diese Kante liesse sich die Zusage nicht ausdruecken.
+ea-audit.workspace = true
+ea-crypto.workspace = true
+ea-format.workspace = true
+# Der Profilwechsel verlangt einen FRISCHEN Bedienernachweis mit genau dem
+# Zweck `ReauthPurpose::ArchiveProfileMigration`. Der Nachweistyp lebt hier.
+ea-operator.workspace = true
+ea-trust.workspace = true
+ea-types.workspace = true
+# Das neue Archiv wird VOLLSTAENDIG OFFLINE verifiziert, bevor der Zeiger
+# umschaltet. Die Richtung ist erzwungen: `crates/ea-verify/Cargo.toml`
+# haengt schon an `ea-archive`, eine Kante von `ea-archive` auf `ea-verify`
+# waere ein Cargo-Zyklus. Deshalb liegt jede Wirtimplementierung hier.
+ea-verify.workspace = true
+
+[features]
+# Die Beobachtungsflaeche von `LocalPathBackend`, die Task 10 und Task 12
+# benutzen: `exists_for_test`, `read_for_test`, `overwrite_for_test` und die
+# uebrigen.
+#
+# Sie steht hinter einem Feature, damit ein Release der Stufe 7 sie mit
+# `--no-default-features` weglassen kann. Es ist trotzdem ein DEFAULT-Feature,
+# und zwar aus einem Cargo-Grund und nicht aus Bequemlichkeit: ein
+# Integrationstest kann das Feature SEINER EIGENEN Crate nicht einschalten, und
+# der uebliche Ausweg — eine Selbst-Dev-Dependency — schriebe `Cargo.lock` um.
+# Der Gate-Lauf `cargo test --workspace --all-targets --locked` laeuft OHNE
+# `--all-features`; ohne diesen Default uebersetzten die fuenf
+# Integrationstests dort nicht.
+default = ["test-support"]
+test-support = []
+
+[dev-dependencies]
+# Nur fuer die Auditattrappe der Migrationstests: `SignedLocalAuditService`
+# verlangt einen `KeyProvider`, und `InMemoryKeyProvider` ist der einzige, der
+# ohne Betriebssystemschluesselspeicher auskommt.
+ea-key-provider = { workspace = true, features = ["test-support"] }
+# Fuer die per #[path] eingebundenen Fixture-Module von ea-verify, ea-archive,
+# ea-trust und ea-format. Dev-Dependencies, also nie im wasm32-Lib-Graphen.
+ea-time.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+minicbor.workspace = true

@@ -1164,16 +1164,46 @@ fn encode_local_audit_context(
                 .map_err(|_| FormatError::Shape)?;
         }
         LocalAuditActionV1::ArchiveProfileMigration(context) => {
-            encoder
-                .array(4)
-                .and_then(|encoder| encoder.bytes(context.source_profile_hash.as_bytes()))
-                .and_then(|encoder| encoder.bytes(context.target_profile_hash.as_bytes()))
-                .and_then(|encoder| encoder.bytes(context.inventory_hash.as_bytes()))
-                .and_then(|encoder| encoder.bytes(context.active_pointer_hash.as_bytes()))
-                .map_err(|_| FormatError::Shape)?;
+            // DIESELBE Funktion, die auch der eigenstaendige Kodierer ruft.
+            // Zwei Koerper koennten auseinanderlaufen; einer kann es nicht.
+            write_archive_profile_migration_context(encoder, context)?;
         }
     }
     Ok(())
+}
+
+fn write_archive_profile_migration_context(
+    encoder: &mut Encoder<&mut Vec<u8>>,
+    context: &ArchiveProfileMigrationContextV1,
+) -> Result<(), FormatError> {
+    encoder
+        .array(4)
+        .and_then(|encoder| encoder.bytes(context.source_profile_hash.as_bytes()))
+        .and_then(|encoder| encoder.bytes(context.target_profile_hash.as_bytes()))
+        .and_then(|encoder| encoder.bytes(context.inventory_hash.as_bytes()))
+        .and_then(|encoder| encoder.bytes(context.active_pointer_hash.as_bytes()))
+        .map_err(|_| FormatError::Shape)?;
+    Ok(())
+}
+
+/// Die deterministischen `archive-profile-migration-context-v1`-Bytes, ALLEIN.
+///
+/// Dieselben vier mal zweiunddreissig Bytes, die
+/// [`encode_local_audit_core`] in die Auditzeile schreibt — physisch dieselbe
+/// Funktion, damit der eigenstaendige und der eingebettete Kodierer nicht
+/// auseinanderlaufen koennen. Der Kontext traegt AUSSCHLIESSLICH Digests: kein
+/// Pfad, kein Hostname, kein fachlicher Name.
+///
+/// # Errors
+///
+/// [`FormatError::Shape`], wenn das Kodieren nicht gelingt.
+pub fn encode_archive_profile_migration_context(
+    context: &ArchiveProfileMigrationContextV1,
+) -> Result<Vec<u8>, FormatError> {
+    let mut bytes = Vec::with_capacity(140);
+    let mut encoder = Encoder::new(&mut bytes);
+    write_archive_profile_migration_context(&mut encoder, context)?;
+    Ok(bytes)
 }
 
 /// Der dekodierte Kern jeder Aktion.

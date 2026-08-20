@@ -1,0 +1,57 @@
+; Einsatzarchiv v0.1 — Archivbackendprofil, Objektinventar und aktiver
+; Profilzeiger. Normativer Bestandteil des Wire-Format-Addendums.
+;
+; Dieses Dokument genuegt sich SELBST: es referenziert keine Regel ausserhalb
+; seiner selbst und wird deshalb einzeln validiert, nicht als Teil des
+; Archivbuendels.
+;
+; Symbolische Namen dokumentieren ARRAYPOSITIONEN; sie werden nie als
+; CBOR-Map-Keys serialisiert. Alle Objekte werden deterministisch nach
+; Design §10.1 kodiert.
+;
+; Die drei Hashregeln, in der bestehenden Konvention
+; SHA-256(DOMAIN || deterministicCbor(core)) mit DOMAIN als ASCII-Bytes ohne
+; Trenner und dem Versionsmarker als erster Arrayposition:
+;
+;   archiveProfileHash = SHA-256("EINSATZARCHIV-ARCHIVE-PROFILE-v1"
+;                                || deterministicCbor(archive-backend-profile-core-v1))
+;   inventoryHash      = SHA-256("EINSATZARCHIV-ARCHIVE-INVENTORY-v1"
+;                                || deterministicCbor(archive-inventory-list-v1))
+;   activePointerHash  = SHA-256("EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1"
+;                                || deterministicCbor(active-profile-pointer-core-v1))
+
+archive-backend-profile-core-v1 = [
+  1,                                  ; Strukturversion
+  profile-kind: 0..1,                 ; 0 = localPath, 1 = controlledNetworkPath
+  filesystem-row-id: tstr,            ; Zeilen-ID der support-matrix, nie ein Pfad
+  protocol-id: tstr,                  ; "" bei localPath
+  server-product: tstr,               ; "" bei localPath
+  server-version: tstr,               ; "" bei localPath
+  mount-options: [* tstr],            ; byteweise aufsteigend, duplikatfrei
+  failover-config-id: tstr,           ; "" bei localPath
+  capability-test-vector-id: tstr,
+  queue-max-objects: uint,            ; 0 bei localPath
+  queue-max-bytes: uint,              ; 0 bei localPath
+  resume-backoff-initial-ms: uint,    ; 0 bei localPath
+  resume-backoff-max-ms: uint,        ; 0 bei localPath
+  resume-max-attempts: uint,          ; 0 bei localPath
+  []                                  ; kritische Erweiterungen
+]
+
+; contentHash ist object_hash ueber die EXAKTEN Dateibytes, fuer JEDE
+; inventarisierte Datei — auch fuer das Formatbeiwerk, das kein
+; Exact-Object-Praefix traegt. relative-path ist wurzelrelativ mit `/` als
+; Trenner in UTF-8 NFC; er erscheint ausschliesslich in diesem Urbild und nie
+; im Auditereignis.
+archive-inventory-entry-v1 = [relative-path: tstr, content-hash: bstr .size 32]
+
+; count ist die Zahl der tatsaechlich getragenen Eintraege. Die Eintraege
+; stehen byteweise aufsteigend und duplikatfrei.
+archive-inventory-list-v1 = [1, count: uint, * archive-inventory-entry-v1]
+
+; generation steigt je erfolgreichem Wechsel um genau eins. Nach dem Wechsel
+; ist active-profile-hash gleich dem Zielprofilhash; beim Ausgang `failed`
+; bleibt er der Quellprofilhash.
+active-profile-pointer-core-v1 = [
+  1, active-profile-hash: bstr .size 32, generation: uint
+]

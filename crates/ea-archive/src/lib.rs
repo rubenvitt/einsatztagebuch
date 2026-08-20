@@ -38,11 +38,19 @@
 //! Invariante: `archiveObjectCount + nonObjectFileCount` ist die Gesamtzahl der
 //! von [`ArchiveSource`] gelieferten Bytesequenzen.
 
+mod backend;
+mod backend_error;
 mod error;
 mod inventory;
 mod layout;
+mod lock;
+mod path;
+mod profile;
 mod source;
+mod transaction;
 
+pub use backend::ArchiveBackend;
+pub use backend_error::ArchiveBackendError;
 pub use error::ArchiveError;
 pub use inventory::{ArchiveInventory, FormatErrorEntry, QuarantineReason, QuarantinedObject};
 pub use layout::{
@@ -54,4 +62,11 @@ pub use layout::{
     README_FORMAT_FILE_V1, RECEIPTS_DIR_V1, RECOVERY_REPORTS_DIR_V1, REGISTRY_EVENTS_DIR_V1,
     TRUST_DIR_V1,
 };
+pub use lock::{WriterLock, WriterLockRelease};
+pub use path::ArchivePath;
+pub use profile::{
+    ArchiveBackendProfileV1, BoundArchiveProfilePolicyV1, ControlledNetworkProfileV1,
+    LocalPathProfileV1,
+};
 pub use source::{ArchiveBlob, ArchiveSource};
+pub use transaction::{ArchiveTransaction, STAGING_SUFFIX_V1, StagedBytesV1, StagedObjectV1};

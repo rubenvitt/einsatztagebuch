@@ -173,6 +173,17 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          Rust, and that pipeline ends at `ea-verify`. The Reader never edits a \
          draft.",
     ),
+    (
+        "ea-archive-fs",
+        "carries filesystem-backed create-if-absent, file and directory flush, \
+         same-filesystem rename and exclusive writer locking on top of \
+         `std::fs`, so it reaches PAST `ea-verify` into the host operating \
+         system and is not shared browser code: `web-reader-design.md` §9 makes \
+         only the verification pipeline shared Rust, and that pipeline ends at \
+         `ea-verify`, which stays on the positive list. `ea-archive` itself \
+         keeps only target-independent ports and therefore stays there too; \
+         this crate depends on both, never the other way round.",
+    ),
 ];
 
 /// Reports when the running compiler is not the one `rust-toolchain.toml` pins.
@@ -942,6 +953,17 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     validate_cddl_document(import_report_path, &import_report)?;
     let report_vectors = validate_import_report_vectors(root, &import_report)?;
 
+    // Das eigenstaendige Dokument des Archivprofils (D-B02). Es referenziert
+    // nichts ausserhalb seiner selbst und wird deshalb EINZELN validiert, nach
+    // dem Vorbild der Protokoll-, Identitaets- und Auditdokumente. Auch hier
+    // gilt: `validate_schemas` ist eine HARTE Pfadliste ohne
+    // Verzeichnisscanner, eine nicht registrierte `.cddl`-Datei waere
+    // wirkungslos.
+    let archive_profile_path = "schemas/archive/v1/archive-profile.cddl";
+    let archive_profile = fs::read_to_string(root.join(archive_profile_path))
+        .map_err(|error| format!("failed to read {archive_profile_path}: {error}"))?;
+    validate_cddl_document(archive_profile_path, &archive_profile)?;
+
     let payload_path = "schemas/payload/v1/payload.cddl";
     let payload = fs::read_to_string(root.join(payload_path))
         .map_err(|error| format!("failed to read {payload_path}: {error}"))?;
@@ -998,7 +1020,7 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
         "report vectors"
     };
     println!(
-        "validated 8 CDDL, 7 JSON schemas, 5 payload vectors, \
+        "validated 9 CDDL, 7 JSON schemas, 5 payload vectors, \
          {report_vectors} {report_vector_noun}, and compatibility matrix"
     );
     Ok(())

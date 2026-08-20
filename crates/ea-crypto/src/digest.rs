@@ -29,6 +29,9 @@ const ANCHOR_PRE_DOMAIN: &[u8] = b"EINSATZARCHIV-TRUST-ANCHOR-PRE-v1";
 const ANCHOR_DOMAIN: &[u8] = b"EINSATZARCHIV-TRUST-ANCHOR-v1";
 const OPERATOR_PROFILE_DOMAIN: &[u8] = b"EINSATZARCHIV-OPERATOR-PROFILE-v1";
 const RECOVERY_TEST_DOMAIN: &[u8] = b"EINSATZARCHIV-RECOVERY-TEST-v1";
+const ARCHIVE_PROFILE_DOMAIN: &[u8] = b"EINSATZARCHIV-ARCHIVE-PROFILE-v1";
+const ARCHIVE_INVENTORY_DOMAIN: &[u8] = b"EINSATZARCHIV-ARCHIVE-INVENTORY-v1";
+const ACTIVE_PROFILE_POINTER_DOMAIN: &[u8] = b"EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1";
 
 pub(crate) fn sha256_parts(parts: &[&[u8]]) -> Hash32 {
     let mut hasher = Sha256::new();
@@ -59,6 +62,19 @@ digest_fn!(renewal_input_digest, RENEWAL_INPUT_DOMAIN);
 digest_fn!(bootstrap_anchor_hash, ANCHOR_PRE_DOMAIN);
 digest_fn!(trust_anchor_hash, ANCHOR_DOMAIN);
 digest_fn!(operator_profile_digest, OPERATOR_PROFILE_DOMAIN);
+
+// `archiveProfileHash` ueber die deterministischen
+// `archive-backend-profile-core-v1`-Bytes. Das Urbild traegt WEDER einen
+// Ausgabepfad NOCH einen Hostnamen NOCH einen Kontonamen
+// (`schemas/archive/v1/archive-profile.cddl`), damit der Wert ueber
+// Organisationsgrenzen hinweg reproduzierbar bleibt. Genau diese Werte stehen
+// in `allowed-archive-profile-hashes` des Root-signierten `policy-core-v1`.
+digest_fn!(archive_profile_digest, ARCHIVE_PROFILE_DOMAIN);
+// `inventoryHash` ueber die deterministischen `archive-inventory-list-v1`-Bytes.
+digest_fn!(archive_inventory_digest, ARCHIVE_INVENTORY_DOMAIN);
+// `activePointerHash` ueber die deterministischen
+// `active-profile-pointer-core-v1`-Bytes.
+digest_fn!(active_profile_pointer_digest, ACTIVE_PROFILE_POINTER_DOMAIN);
 
 #[must_use]
 pub fn object_hash(exact_object_bytes: &[u8]) -> ObjectHash {

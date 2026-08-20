@@ -33,8 +33,21 @@ fn cddl_registers_every_v1_wire_type() {
         "local-audit-event-v1",
         "stale-registry-context-v1",
         "clock-release-context-v1",
+        "archive-profile-migration-context-v1",
     ] {
         assert!(audit.contains(name), "missing {name}");
+    }
+    // Das eigenstaendige Dokument des Archivprofils. `validate_schemas` ist
+    // eine harte Pfadliste; ein nicht registrierter Wurzelname waere hier
+    // unsichtbar, und genau deshalb steht er hier.
+    let archive_profile = archive_profile_cddl();
+    for name in [
+        "archive-backend-profile-core-v1",
+        "archive-inventory-entry-v1",
+        "archive-inventory-list-v1",
+        "active-profile-pointer-core-v1",
+    ] {
+        assert!(archive_profile.contains(name), "missing {name}");
     }
     let protocol = protocol_cddl();
     for name in [
@@ -90,6 +103,14 @@ fn archive_cddl() -> String {
         include_str!("../../../schemas/archive/v1/evidence.cddl"),
     ]
     .join("\n")
+}
+
+/// Die eigenstaendige Grammatik des Archivprofils.
+///
+/// Getrennt von [`archive_cddl`], weil das Dokument sich selbst genuegt und
+/// nichts ausserhalb seiner selbst referenziert.
+fn archive_profile_cddl() -> String {
+    include_str!("../../../schemas/archive/v1/archive-profile.cddl").to_owned()
 }
 
 fn assert_contains_all(name: &str, source: &str, required: &[&str]) {
@@ -3095,5 +3116,117 @@ fn import_report_cddl_rejects_a_thirteenth_position_and_an_unpinned_code() {
     assert!(
         cddl_cat::validate_cbor_bytes("import-issue-v1", &cddl, &bytes).is_ok(),
         "eine dateiweite Zeile mit null-Spalte muss angenommen werden"
+    );
+}
+
+/// Die Gestalt, in der ein `archive-backend-profile-core-v1`-Fixture kodiert
+/// wird.
+///
+/// Dasselbe Muster wie [`PolicyCoreShapeV1`]: der Kern wird auf der Rustseite
+/// POSITIONSWEISE gelesen und geschrieben, und ohne diese Zusicherung pinnt
+/// nichts die Laenge gegen die NORMATIVE Seite. Das Urbild traegt einen
+/// signierten Auditkontext (`archive-profile-migration-context-v1`), also
+/// entscheidet die Arity darueber, ob zwei Werkzeuge denselben
+/// `archiveProfileHash` errechnen.
+///
+/// # Was das faengt, und was nicht
+///
+/// Das positive Fixture schreibt an jeder Position einen KONKRETEN Typ. Eine
+/// Loeschung, eine Einfuegung, eine Umsortierung und eine Typ-VERENGUNG fallen
+/// damit auf. Eine Typ-ERWEITERUNG nicht: aus `uint` ein `any` zu machen laesst
+/// jedes Fixture hier gueltig. Deshalb steht die Positionsnamenszusicherung
+/// daneben — eine Umbenennung ist so laut wie eine Loeschung.
+enum ArchiveProfileCoreShapeV1 {
+    /// Alle 15 Positionen der Norm, in der Reihenfolge der Norm.
+    Exact,
+    /// OHNE `resume-max-attempts` — 14 Positionen.
+    WithoutResumeMaxAttempts,
+    /// Eine Position zu viel hinter der Erweiterungsliste — 16.
+    WithExtraPosition,
+}
+
+fn archive_profile_core_fixture(shape: &ArchiveProfileCoreShapeV1) -> Vec<u8> {
+    let positions = match shape {
+        ArchiveProfileCoreShapeV1::Exact => 15,
+        ArchiveProfileCoreShapeV1::WithoutResumeMaxAttempts => 14,
+        ArchiveProfileCoreShapeV1::WithExtraPosition => 16,
+    };
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(positions).unwrap();
+    encoder.u8(1).unwrap(); //  1 Strukturversion
+    encoder.u8(1).unwrap(); //  2 profile-kind
+    encoder.str("smb-3-1-1-windows-server-2022").unwrap(); //  3 filesystem-row-id
+    encoder.str("smb-3.1.1").unwrap(); //  4 protocol-id
+    encoder.str("windows-server").unwrap(); //  5 server-product
+    encoder.str("2022").unwrap(); //  6 server-version
+    encoder.array(1).unwrap(); //  7 mount-options
+    encoder.str("sync").unwrap();
+    encoder.str("failover-single-node").unwrap(); //  8 failover-config-id
+    encoder.str("cap-v1-smb").unwrap(); //  9 capability-test-vector-id
+    encoder.u32(4096).unwrap(); // 10 queue-max-objects
+    encoder.u32(1_073_741_824).unwrap(); // 11 queue-max-bytes
+    encoder.u32(250).unwrap(); // 12 resume-backoff-initial-ms
+    encoder.u32(60_000).unwrap(); // 13 resume-backoff-max-ms
+    if !matches!(shape, ArchiveProfileCoreShapeV1::WithoutResumeMaxAttempts) {
+        encoder.u32(12).unwrap(); // 14 resume-max-attempts
+    }
+    encoder.array(0).unwrap(); // 15 kritische Erweiterungen
+    if matches!(shape, ArchiveProfileCoreShapeV1::WithExtraPosition) {
+        encoder.u8(0).unwrap(); // 16 — eine zu viel
+    }
+    encoder.into_writer()
+}
+
+#[test]
+fn archive_profile_cddl_enforces_the_exact_fifteen_positions_of_the_profile_core() {
+    let cddl = archive_profile_cddl();
+
+    assert!(
+        validate_cbor(
+            "archive-backend-profile-core-v1",
+            &cddl,
+            &archive_profile_core_fixture(&ArchiveProfileCoreShapeV1::Exact)
+        ),
+        "die 15 Positionen, die der Workspace kodiert, MUESSEN gegen die Grammatik gelten"
+    );
+    assert!(
+        !validate_cbor(
+            "archive-backend-profile-core-v1",
+            &cddl,
+            &archive_profile_core_fixture(&ArchiveProfileCoreShapeV1::WithoutResumeMaxAttempts)
+        ),
+        "14 Positionen MUESSEN abgelehnt werden"
+    );
+    assert!(
+        !validate_cbor(
+            "archive-backend-profile-core-v1",
+            &cddl,
+            &archive_profile_core_fixture(&ArchiveProfileCoreShapeV1::WithExtraPosition)
+        ),
+        "16 Positionen MUESSEN abgelehnt werden"
+    );
+
+    // Die Positionen beim Namen, damit eine Umbenennung so laut ist wie eine
+    // Loeschung.
+    assert_contains_all(
+        "archive profile CDDL",
+        &cddl,
+        &[
+            "profile-kind: 0..1",
+            "filesystem-row-id: tstr",
+            "protocol-id: tstr",
+            "server-product: tstr",
+            "server-version: tstr",
+            "mount-options: [* tstr]",
+            "failover-config-id: tstr",
+            "capability-test-vector-id: tstr",
+            "queue-max-objects: uint",
+            "queue-max-bytes: uint",
+            "resume-backoff-initial-ms: uint",
+            "resume-backoff-max-ms: uint",
+            "resume-max-attempts: uint",
+            "active-profile-hash: bstr .size 32",
+            "generation: uint",
+        ],
     );
 }
