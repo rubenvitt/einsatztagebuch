@@ -29,7 +29,7 @@ use ea_format::{
 };
 use ea_types::Hash32;
 
-use crate::{FormatPackageOutcomeV1, materialize_format_package};
+use crate::{FormatPackageOutcomeV1, format_package::materialize_format_package_reporting};
 
 /// Die Kontrolldateien des Backends an der Bestandswurzel.
 ///
@@ -251,9 +251,13 @@ impl LocalPathBackend {
     /// # Ein veraendertes Beiwerkbyte macht den Bestand NICHT unoeffenbar
     ///
     /// Traegt eine Beiwerkadresse andere Bytes, bleiben diese Bytes
-    /// unangetastet und `open` traegt trotzdem; die Abweichung steht als
-    /// [`FormatPackageOutcomeV1::Deviating`] an
-    /// [`Self::format_package_outcome`]. Das ist keine Nachsicht, sondern die
+    /// unangetastet und `open` traegt trotzdem; die Abweichung steht mit ihrer
+    /// ZAHL als [`FormatPackageOutcomeV1::Deviating`] an
+    /// [`Self::format_package_outcome`]. Das UEBRIGE Beiwerk entsteht dabei
+    /// vollstaendig — die Abweichung einer Adresse laesst keine zweite
+    /// ungeschrieben —, sonst waere ein Bestand mit einer fremden
+    /// `README-FORMAT.txt` (Eintrag 1 von 18) offen und benutzbar und traege
+    /// siebzehn Beiwerkadressen nicht. Das ist keine Nachsicht, sondern die
     /// Stelle, an die der Befund gehoert: das Beiwerk ist inventarisiert, seine
     /// Abweichung ist damit `EA-ARCHIVE-HEALTH-MODIFIED-FILE` des
     /// Gesundheitschecks — und der braucht ein OFFENES Backend, um einen
@@ -295,8 +299,9 @@ impl LocalPathBackend {
     ///
     /// Drei Ausgaenge, und keiner davon ist ein Fehler dieser Strecke: die
     /// Sperre ist frei und das Beiwerk entsteht; die Sperre ist fremd und das
-    /// Beiwerk wird aufgeschoben; das Beiwerk weicht ab und der Bestand bleibt
-    /// offenbar. Der Fehler des Wirtdateisystems wird dagegen herausgereicht —
+    /// Beiwerk wird aufgeschoben; einzelne Adressen weichen ab, der REST
+    /// entsteht trotzdem und der Bestand bleibt offenbar. Der Fehler des
+    /// Wirtdateisystems wird dagegen herausgereicht —
     /// ein Bestand, in den nicht geschrieben werden kann, ist kein Bestand, den
     /// dieses Programm fuehren kann.
     fn materialize_format_package_under_lock(
@@ -305,10 +310,14 @@ impl LocalPathBackend {
         let Ok(lock) = self.acquire_writer_lock() else {
             return Ok(FormatPackageOutcomeV1::Deferred);
         };
-        let outcome = match materialize_format_package(self) {
-            Ok(_) => FormatPackageOutcomeV1::Materialized,
-            Err(ArchiveBackendError::ByteConflict) => FormatPackageOutcomeV1::Deviating,
-            Err(other) => return Err(other),
+        // Der berichtende Weg und nicht `materialize_format_package`: die
+        // Zahl der Abweichungen ist der Beobachtungspunkt, und ein `Result`,
+        // das im Fehlerfall den Bericht verwirft, traegt sie nicht.
+        let outcome = match materialize_format_package_reporting(self)? {
+            (_, deviating) if deviating.is_empty() => FormatPackageOutcomeV1::Materialized,
+            (_, deviating) => FormatPackageOutcomeV1::Deviating {
+                deviating_file_count: deviating.len(),
+            },
         };
         // AUSDRUECKLICH hier: die Sperre gehoert zur Materialisierung und nicht
         // zum Backend. Wer nach `open` schreiben will, nimmt sie selbst — sonst

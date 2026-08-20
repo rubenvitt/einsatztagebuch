@@ -213,7 +213,9 @@ pub enum FormatPackageOutcomeV1 {
     /// KEIN Fehler: das Oeffnen an einer fremden Sperre scheitern zu lassen
     /// waere ein Bestand, den ein zweiter Leser nicht mehr aufmacht.
     Deferred,
-    /// Eine Beiwerkadresse traegt ANDERE Bytes als dieses Programm einbettet.
+    /// `deviating_file_count` Beiwerkadressen tragen ANDERE Bytes als dieses
+    /// Programm einbettet — der REST des Beiwerks liegt vollstaendig im
+    /// Bestand.
     ///
     /// Die abweichenden Bytes bleiben unangetastet — Create-if-absent
     /// ueberschreibt nichts —, und das Oeffnen traegt trotzdem: der
@@ -222,7 +224,17 @@ pub enum FormatPackageOutcomeV1 {
     /// Beiwerkdatei ist im Inventar; ihre Abweichung ist damit
     /// `EA-ARCHIVE-HEALTH-MODIFIED-FILE` und kein Grund, den Bestand
     /// wegzuschliessen.
-    Deviating,
+    ///
+    /// Die ZAHL steht hier, weil sie sonst nirgends stehen wuerde: der
+    /// Gesundheitscheck vergleicht gegen ein Erwartungsinventar, das der
+    /// Aufrufer mitbringt, und fuer einen frischen Bestand fuehrt es die
+    /// Beiwerkadressen nicht. `Deviating { deviating_file_count: 1 }` ist damit
+    /// von `Deviating { deviating_file_count: 18 }` unterscheidbar — „ein Byte
+    /// weicht ab" von „der ganze Bestand traegt fremdes Beiwerk". Die
+    /// ADRESSLISTE ist ausdruecklich nicht Teil dieses Zustands: sie waere eine
+    /// Allokation an einem `Copy`-Typ, und die Diagnose je Adresse ist Aufgabe
+    /// des Gesundheitschecks auf einem inventarisierten Bestand.
+    Deviating { deviating_file_count: usize },
 }
 
 /// Schreibt das vollstaendige Formatbeiwerk in `backend`.
@@ -238,6 +250,18 @@ pub enum FormatPackageOutcomeV1 {
 /// eigenes Beiwerk an. Ein VERAENDERTES Beiwerkbyte ist dagegen ein
 /// [`ArchiveBackendError::ByteConflict`] — dieselbe Zusage wie fuer
 /// Archivobjekte, auf demselben Weg.
+///
+/// # Der Bytekonflikt bricht den Lauf NICHT ab
+///
+/// JEDER Eintrag wird versucht; der Konflikt wird gesammelt und erst NACH dem
+/// vollstaendigen Durchlauf gemeldet. Sonst haette eine einzige abweichende
+/// Datei alle SPAETEREN Adressen ungeschrieben gelassen — und
+/// `README-FORMAT.txt` ist Eintrag 1 von 18, der schlechteste Fall waere also
+/// der wahrscheinlichste. Weil die Erzeugungsstrecke den Konflikt nicht
+/// herausreicht ([`FormatPackageOutcomeV1::Deviating`]), waere der Bestand
+/// danach offen und benutzbar, mit siebzehn fehlenden Beiwerkadressen. Ein
+/// Fehler des Wirtdateisystems bricht dagegen weiterhin sofort ab: er sagt
+/// nichts ueber die uebrigen Eintraege aus.
 ///
 /// # Der Aufruf gehoert UNTER die Schreibersperre
 ///
@@ -261,22 +285,64 @@ pub enum FormatPackageOutcomeV1 {
 ///
 /// # Errors
 ///
-/// [`ArchiveBackendError::ByteConflict`], wenn eine Beiwerkadresse ANDERE
-/// Bytes traegt; sonst der Fehler des Wirtdateisystems.
+/// [`ArchiveBackendError::ByteConflict`], wenn MINDESTENS eine Beiwerkadresse
+/// ANDERE Bytes traegt — nach dem vollstaendigen Durchlauf; sonst der Fehler
+/// des Wirtdateisystems, sofort.
 pub fn materialize_format_package(
     backend: &dyn ArchiveBackend,
 ) -> Result<FormatPackageReport, ArchiveBackendError> {
+    let (report, deviating) = materialize_format_package_reporting(backend)?;
+    if deviating.is_empty() {
+        return Ok(report);
+    }
+    Err(ArchiveBackendError::ByteConflict)
+}
+
+/// Wie [`materialize_format_package`], aber die Abweichungen kommen als LISTE
+/// zurueck statt als Fehler.
+///
+/// Der Unterschied ist ausschliesslich der Rueckkanal: beide schreiben dasselbe
+/// und versuchen jeden Eintrag. Die Erzeugungsstrecke von
+/// [`LocalPathBackend::open`](crate::LocalPathBackend::open) braucht die ZAHL
+/// der Abweichungen fuer [`FormatPackageOutcomeV1::Deviating`], und ein
+/// `Result`, das im Fehlerfall den Bericht verwirft, kann sie nicht tragen.
+///
+/// Crate-privat: die oeffentliche Flaeche des Briefs bleibt
+/// [`materialize_format_package`] mit seiner gepinnten Signatur. Braucht ein
+/// spaeterer Aufrufer die Zahl, wird diese Funktion befoerdert.
+///
+/// # Errors
+///
+/// Der Fehler des Wirtdateisystems, sofort. Ein Bytekonflikt ist hier KEIN
+/// Fehler, sondern ein Eintrag der zurueckgegebenen Liste.
+pub(crate) fn materialize_format_package_reporting(
+    backend: &dyn ArchiveBackend,
+) -> Result<(FormatPackageReport, Vec<&'static str>), ArchiveBackendError> {
     for directory in FORMAT_PACKAGE_DIRECTORIES_V1 {
         backend.create_directory_if_absent(directory)?;
     }
+    let mut deviating = Vec::new();
     for (relative, bytes) in FORMAT_PACKAGE_FILES_V1 {
         let path = format_package_target(relative)?;
-        backend.create_non_object_if_absent(&path, bytes)?;
+        match backend.create_non_object_if_absent(&path, bytes) {
+            Ok(()) => {}
+            // GESAMMELT und nicht herausgereicht: die Bytes dieser Adresse
+            // bleiben fremd, aber die uebrigen Eintraege entstehen trotzdem.
+            // Geflusht wird hier nichts — geschrieben wurde nichts.
+            Err(ArchiveBackendError::ByteConflict) => {
+                deviating.push(*relative);
+                continue;
+            }
+            Err(other) => return Err(other),
+        }
         backend.sync_file(&path)?;
         backend.sync_directory(&path)?;
     }
-    Ok(FormatPackageReport {
-        written_file_count: FORMAT_PACKAGE_FILES_V1.len(),
-        directories: FORMAT_PACKAGE_DIRECTORIES_V1,
-    })
+    Ok((
+        FormatPackageReport {
+            written_file_count: FORMAT_PACKAGE_FILES_V1.len(),
+            directories: FORMAT_PACKAGE_DIRECTORIES_V1,
+        },
+        deviating,
+    ))
 }

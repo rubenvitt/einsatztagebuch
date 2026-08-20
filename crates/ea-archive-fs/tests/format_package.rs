@@ -273,12 +273,114 @@ fn a_changed_beiwerk_byte_keeps_the_archive_openable_and_is_reported_as_a_deviat
     let second = reopen(&first);
     assert_eq!(
         second.format_package_outcome(),
-        FormatPackageOutcomeV1::Deviating
+        FormatPackageOutcomeV1::Deviating {
+            deviating_file_count: 1
+        }
     );
     assert_eq!(
         second.read_for_test(readme.as_str()).as_deref(),
         Some(b"eine andere Formatbeschreibung".as_slice()),
         "die abweichenden Bytes werden NICHT stillschweigend ueberschrieben"
+    );
+}
+
+/// Die Quelle eines Beiwerkeintrags im ARBEITSBAUM.
+///
+/// Der Vergleichswert kommt aus dem Baum und nicht aus demselben
+/// `include_bytes!`, das die Produktion benutzt — sonst waere die Gleichheit
+/// eine Tautologie.
+fn repository_source_of(relative: &str) -> String {
+    if relative == ea_archive::README_FORMAT_FILE_V1 {
+        return "docs/format/README-FORMAT.txt".to_owned();
+    }
+    if relative == ea_archive::COMPATIBILITY_MATRIX_FILE_V1 {
+        return "schemas/compatibility-matrix.json".to_owned();
+    }
+    let below = relative
+        .strip_prefix(ea_archive::FORMAT_SCHEMAS_DIR_V1)
+        .expect("jeder uebrige Eintrag liegt unter dem Schemaverzeichnis");
+    format!("schemas/{below}")
+}
+
+#[test]
+fn a_deviating_first_beiwerk_entry_leaves_no_other_address_unwritten() {
+    let (_guard, root) = support::temp_root("format-package-deviating-first");
+    let archive = root.join("archive");
+    std::fs::create_dir_all(&archive).expect("die Bestandswurzel muss anlegbar sein");
+    // Eintrag 1 von 18 weicht ab, BEVOR der Bestand je geoeffnet wurde: der
+    // Bestand einer alten Programmversion, ein kopiertes Verzeichnis, eine
+    // Manipulation. Genau dieser Fall ist der schlechteste UND der
+    // wahrscheinlichste, weil `README-FORMAT.txt` der erste Eintrag ist.
+    let foreign = b"eine andere Formatbeschreibung".as_slice();
+    std::fs::write(archive.join(ea_archive::README_FORMAT_FILE_V1), foreign)
+        .expect("die abweichende Wurzeldatei muss schreibbar sein");
+    // ZWEI Abweichungen, damit die gemeldete Zahl eine ZAHL ist und keine
+    // Konstante: bei nur einer waere `deviating.len()` von einem Literal `1`
+    // nicht unterscheidbar. Der bestehende Zeuge steht bei 1, dieser bei 2.
+    std::fs::create_dir_all(archive.join("format"))
+        .expect("das Formatverzeichnis muss anlegbar sein");
+    std::fs::write(
+        archive.join(ea_archive::COMPATIBILITY_MATRIX_FILE_V1),
+        foreign,
+    )
+    .expect("die abweichende Matrix muss schreibbar sein");
+
+    let backend = LocalPathBackend::open(
+        archive,
+        support::local_profile(),
+        &support::policy_allowing_source_and_target(),
+    )
+    .expect("ein abweichendes Beiwerkbyte darf den Bestand nicht unoeffenbar machen");
+    assert_eq!(
+        backend.format_package_outcome(),
+        FormatPackageOutcomeV1::Deviating {
+            deviating_file_count: 2
+        },
+        "GENAU zwei Adressen weichen ab; die Zahl unterscheidet ein veraendertes Byte von einem ganz fremden Beiwerk"
+    );
+
+    // Der Kern: die sechzehn uebrigen Adressen entstehen trotzdem — und
+    // bytegleich zum Arbeitsbaum.
+    for (relative, _) in FORMAT_PACKAGE_FILES_V1 {
+        if *relative == ea_archive::README_FORMAT_FILE_V1
+            || *relative == ea_archive::COMPATIBILITY_MATRIX_FILE_V1
+        {
+            continue;
+        }
+        let path = format_package_target(relative).expect("die Zieladresse ist gueltig");
+        assert_eq!(
+            backend.read_for_test(path.as_str()).as_deref(),
+            Some(support::repository_bytes(&repository_source_of(relative)).as_slice()),
+            "die Abweichung des ERSTEN Eintrags liess {relative} ungeschrieben"
+        );
+    }
+    for directory in [
+        ea_archive::FORMAT_DIR_V1,
+        ea_archive::FORMAT_SCHEMAS_DIR_V1,
+        ea_archive::FORMAT_TRANSFORMATIONS_DIR_V1,
+        ea_archive::RECOVERY_REPORTS_DIR_V1,
+    ] {
+        assert!(
+            backend.directory_exists_for_test(directory),
+            "das Verzeichnis {directory} fehlt"
+        );
+    }
+    for deviating in [
+        ea_archive::README_FORMAT_FILE_V1,
+        ea_archive::COMPATIBILITY_MATRIX_FILE_V1,
+    ] {
+        assert_eq!(
+            backend.read_for_test(deviating).as_deref(),
+            Some(foreign),
+            "die abweichenden Bytes von {deviating} werden NICHT stillschweigend ueberschrieben"
+        );
+    }
+
+    // Der Fehlerkanal der Funktion selbst bleibt: mindestens eine Abweichung
+    // ist ein Bytekonflikt — gemeldet NACH dem vollstaendigen Durchlauf.
+    assert_eq!(
+        materialize_format_package(&backend).unwrap_err().code(),
+        "EA-ARCHIVE-BYTE-CONFLICT"
     );
 }
 
