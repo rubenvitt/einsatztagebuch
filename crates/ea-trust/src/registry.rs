@@ -49,6 +49,10 @@ struct SelectedHeadInner {
     effective_from_sequence: ChainSequence,
     valid_through_sequence: ChainSequence,
     proposed_sequence: ChainSequence,
+    /// `notAfter` des Head-Ereignisses. NUR lesend nach aussen; die
+    /// Veralterungspruefung der Auswahl liest `candidate.head_event.not_after`
+    /// unveraendert an ihrer eigenen Stelle.
+    head_event_not_after: UnixMillis,
     preexisting_effective_now: PreexistingEffectiveNow,
     warnings: TimeWarnings,
     committed_revision: u64,
@@ -148,6 +152,30 @@ impl SelectedRegistryHead {
             .candidate_state
             .active_operator_binding(object_hash, self.inner.proposed_sequence)
             .map(|binding| &binding.fields)
+    }
+
+    /// `notAfter` des gebundenen Head — die Zeitgrenze, ab der er `stale` ist.
+    ///
+    /// Sie ist LESEND und aendert an der Auswahl nichts: `select_registry_head`
+    /// weist einen bei der Auswahl schon veralteten AKTUELLEN Head weiterhin
+    /// fail-closed ab, und dieser Zugriff kommt an jener Stelle nicht vor.
+    ///
+    /// Er existiert, weil [`Self::preexisting_effective_now`] die Zeit ZUM
+    /// AUSWAHLZEITPUNKT ist. Ein bei der Auswahl frischer Head wird veraltet,
+    /// waehrend dieser Wert weiterlebt — genau der Fall, den
+    /// `registryExpiryBehavior` regelt (`design.md`:1447, :1455: das Feld
+    /// steuert AUSSCHLIESSLICH die Finalisierung). Wer `stale` feststellen
+    /// will, braucht deshalb eine FRISCHE Zeit gegen genau diese Grenze; ohne
+    /// diesen Zugriff waere die Grenze nach aussen unsichtbar und die
+    /// Feststellung nicht moeglich.
+    ///
+    /// Sie ist zugleich Pflichtposition sechs des Vorschauurbilds
+    /// `finalization-preview-core-v1`
+    /// (`schemas/reports/v1/finalization-preview.cddl`), damit eine bestaetigte
+    /// Vorschau die Zeitgrenze mit abdeckt, gegen die sie bestaetigt wurde.
+    #[must_use]
+    pub fn not_after(&self) -> UnixMillis {
+        self.inner.head_event_not_after
     }
 
     #[must_use]
@@ -795,6 +823,7 @@ fn selected_head(
             effective_from_sequence: candidate.head_event.effective_from_sequence,
             valid_through_sequence: candidate.head_event.valid_through_sequence,
             proposed_sequence: candidate.proposed_sequence,
+            head_event_not_after: candidate.head_event.not_after,
             preexisting_effective_now: PreexistingEffectiveNow { value: raw_now },
             warnings,
             committed_revision,

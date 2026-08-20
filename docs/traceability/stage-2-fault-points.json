@@ -26,6 +26,125 @@
       "brackets": "nach dem Loeschen des draftDEK, mit zurueckgespielten Datenbankdateien"
     }
   ],
+  "finalization": {
+    "steps": [
+      {
+        "number": 1,
+        "name": "RebuildLocalHead"
+      },
+      {
+        "number": 2,
+        "name": "CompareServerCheckpoint"
+      },
+      {
+        "number": 3,
+        "name": "SelectRegistryHeadAndOperator"
+      },
+      {
+        "number": 4,
+        "name": "ValidateAndSerialize"
+      },
+      {
+        "number": 5,
+        "name": "BuildAndHashGrantPlan"
+      },
+      {
+        "number": 6,
+        "name": "DrawSecretsAndBuildEntryHash"
+      },
+      {
+        "number": 7,
+        "name": "ProduceGrantsAndEntryBytes"
+      },
+      {
+        "number": 8,
+        "name": "StageAndFlush"
+      },
+      {
+        "number": 9,
+        "name": "ZeroAndDeleteDraftKey"
+      },
+      {
+        "number": 10,
+        "name": "PublishGrants"
+      },
+      {
+        "number": 11,
+        "name": "PublishEntryLast"
+      },
+      {
+        "number": 12,
+        "name": "PublishToNetworkArchive"
+      },
+      {
+        "number": 13,
+        "name": "ReconcileAndOpenBlankDraft"
+      }
+    ],
+    "points": [
+      {
+        "name": "BeforeStagingCreate",
+        "brackets": "vor dem ersten Create-if-absent des Staging-Bereichs",
+        "phase": "ReversibleDraft"
+      },
+      {
+        "name": "AfterStagingCreateBeforeFileFlush",
+        "brackets": "nach dem Create-if-absent jeder Staging-Adresse und vor dem Dateiflush",
+        "phase": "ReversibleDraft"
+      },
+      {
+        "name": "AfterStagingFileFlushBeforeDirectoryFlush",
+        "brackets": "nach dem Dateiflush jeder Staging-Adresse und vor dem Verzeichnisflush",
+        "phase": "ReversibleDraft"
+      },
+      {
+        "name": "AfterStagingDirectoryFlushBeforeMarker",
+        "brackets": "nach dem Verzeichnisflush des Stagings und vor der Datenbanktransaktion",
+        "phase": "ReversibleDraft"
+      },
+      {
+        "name": "AfterPreparedMarkerCommit",
+        "brackets": "nach dem dauerhaften Buchen der Abschlussmarke in der verschluesselten Ablage",
+        "phase": "PreparedAndFlushed"
+      },
+      {
+        "name": "AfterKeystoreDelete",
+        "brackets": "nach dem Loeschen des draftDEK und vor der Bestaetigung seiner Abwesenheit",
+        "phase": "DraftKeyAbsent"
+      },
+      {
+        "name": "AfterAbsenceConfirmation",
+        "brackets": "nach der bestaetigten Abwesenheit des draftDEK",
+        "phase": "DraftKeyAbsent"
+      },
+      {
+        "name": "AfterGrantPublishBeforeEntryRename",
+        "brackets": "nach der Veroeffentlichung jedes Grants und vor dem Rename des .eip",
+        "phase": "GrantsPublished"
+      },
+      {
+        "name": "AfterEntryRenameBeforeDirectoryFlush",
+        "brackets": "nach dem atomaren Rename des .eip und vor dem Verzeichnisflush der Eintraege",
+        "phase": "EntryCommitted"
+      },
+      {
+        "name": "AfterEntryDirectoryFlush",
+        "brackets": "nach dem Verzeichnisflush der Eintraege",
+        "phase": "EntryCommitted"
+      },
+      {
+        "name": "AfterReconciliationBeforeBlankDraft",
+        "brackets": "nach dem Abgleich und vor dem Bereinigen des Stagings samt leerem Entwurf",
+        "phase": "NetworkArchivePublished"
+      },
+      {
+        "name": "BackupRestoreAfterKeyDeletion",
+        "brackets": "nach dem Loeschen des draftDEK, mit zurueckgespielten Datenbankdateien",
+        "phase": "DraftKeyAbsent"
+      }
+    ]
+  },
+
   "precedence": [
     {
       "name": "PreparedFinalizationBeatsDiscardIntent",

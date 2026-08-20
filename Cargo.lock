@@ -965,7 +965,9 @@ dependencies = [
  "ea-types",
  "ea-verify",
  "ea-writer",
+ "ed25519-dalek",
  "getrandom 0.4.3",
+ "minicbor",
  "zeroize",
 ]
 

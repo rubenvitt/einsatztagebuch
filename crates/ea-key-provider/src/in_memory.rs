@@ -100,6 +100,42 @@ impl InMemoryKeyProvider {
         }
     }
 
+    /// Der OEFFENTLICHE Ed25519-Signaturschluessel eines Zwecks — NUR fuer
+    /// Fixtures.
+    ///
+    /// Sie existiert, weil eine Harness sonst kein Geraetezertifikat bauen
+    /// kann, das zu DIESEM Provider passt: [`KeyProvider::sign`] liefert
+    /// COSE-Bytes, deren Protected Header nur den Abdruck traegt, und die
+    /// Registry-Fixture der Stufe 1 baut Zertifikate umgekehrt aus dem
+    /// oeffentlichen Schluessel. Ohne diesen Zugriff bliebe der Weg, die
+    /// private Ableitung dieses Moduls in der Fixture NACHZUBAUEN — ein Test,
+    /// der an einem Implementierungsdetail haengt statt an der Schnittstelle.
+    ///
+    /// SIE GIBT NICHTS PRIVATES HERAUS. Der oeffentliche Teil eines
+    /// Signaturschluessels ist genau das, was jede Signatur ohnehin
+    /// veroeffentlicht; das private Material verlaesst den Provider hier nicht.
+    /// Sie liegt trotzdem hinter `test-support`, weil ein nativer Provider
+    /// diesen Zugriff nicht anbieten kann und ein Produktionspfad ihn deshalb
+    /// nicht benutzen darf.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyError::NotFound`], wenn fuer `purpose` noch nichts erzeugt wurde,
+    /// sonst [`KeyError::PurposeMismatch`] fuer einen Zweck ohne
+    /// Signaturschluessel.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn signing_public_key_for_test(
+        &self,
+        purpose: SecretPurpose,
+    ) -> Result<[u8; 32], KeyError> {
+        if !SIGNING_PURPOSES.contains(&purpose) {
+            return Err(KeyError::PurposeMismatch);
+        }
+        let handle = self.handle(purpose);
+        let material = self.material(&handle)?;
+        Ok(SigningKey::from_bytes(&material).verifying_key().to_bytes())
+    }
+
     fn store(&self) -> MutexGuard<'_, Store> {
         self.store
             .lock()

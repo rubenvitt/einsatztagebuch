@@ -54,6 +54,11 @@ ea-types.workspace = true
 ea-verify.workspace = true
 # Sequenz, UUIDv7, CEK und AEAD-Nonce — die EINE Entropiequelle dieser Crate.
 getrandom.workspace = true
+# Der deterministische CBOR-Kodierer fuer GENAU ZWEI Urbilder: das
+# EINGEFRORENE `operatorProfileCommitment` (`design.md`:242-252, Domain und
+# Feldreihenfolge aus Stufe 1) und die crate-eigene Abschlussmarke. Kein
+# Archivobjekt entsteht hier — jedes davon baut `ea-format`.
+minicbor.workspace = true
 # Das Nullen der CEK- und Serialisierungspuffer an der unwiderruflichen
 # Grenze.
 zeroize.workspace = true
@@ -67,8 +72,23 @@ test-support = []
 [dev-dependencies]
 # Die SELBSTKANTE, die `test-support` fuer die Integrationstests einschaltet.
 ea-writer = { workspace = true, features = ["test-support"] }
-# Der deterministische Speicherprovider sitzt hinter diesem
-# NICHT-Vorgabemerkmal.
+# Die Harness bindet `crates/ea-draft/tests/support/mod.rs` per `#[path]` ein —
+# dasselbe Muster, mit dem jene Fixture `crates/ea-trust/tests/support/mod.rs`
+# einbindet. Sie ruft `DiscardService::begin_discard_interrupted_at`, und das
+# liegt hinter `test-support`; ohne dieses Merkmal uebersetzt die Fixture nicht.
+# Eine ZWEITE Entwurfsfixture waere die Alternative — und damit eine zweite
+# Quelle derselben Registry-Linie, derselben Profilzeile und desselben
+# Bedienernachweises.
+ea-draft = { workspace = true, features = ["test-support"] }
+# Der Vorrangpunkt aus Task 7 — sein NAME, damit dieser Task ihn nicht
+# duplizieren kann.
+# Der deterministische Speicherprovider und `signing_public_key_for_test`
+# sitzen hinter diesem NICHT-Vorgabemerkmal.
 ea-key-provider = { workspace = true, features = ["test-support"] }
 # Root, Registry, Policy, Genesis, Zertifikate und `contains_canary`.
 ea-testkit.workspace = true
+# Die drei Importe der eingebundenen Fixtures, die nicht schon oben stehen:
+# `TrustedTimeState`, die Signierschluessel der Registry-Linie und ihr
+# CBOR-Kodierer.
+ea-time.workspace = true
+ed25519-dalek.workspace = true

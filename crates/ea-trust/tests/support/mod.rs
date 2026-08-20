@@ -98,6 +98,51 @@ pub struct HeadOptions {
     pub policy_max_registry_age_ms_override: Option<u64>,
     pub policy_max_future_clock_skew_ms_override: Option<u64>,
     pub certificate_capabilities_override: Option<Vec<String>>,
+    /// Der oeffentliche SIGNATURschluessel eines Geraetezertifikats.
+    ///
+    /// Ohne diese Ueberschreibung tragen ALLE Geraetezertifikate der Linie
+    /// denselben Schluessel (`NEW_ADMIN_SECRET`). Ein Verbraucher, der die
+    /// Signatur nicht selbst legt, sondern durch einen Schluesselport ziehen
+    /// laesst — der Writer der Stufe 2 durch `KeyProvider::sign` —, braucht ein
+    /// Zertifikat, das GENAU zu jenem Port passt. `None` laesst das
+    /// bestehende Verhalten und damit jede bestehende Fixture unveraendert.
+    pub signing_public_key_override: Option<CanonicalPublicCoseKey>,
+    /// Der oeffentliche KEM-Schluessel eines Reader- oder
+    /// Recovery-Zertifikats.
+    ///
+    /// Ohne diese Ueberschreibung tragen ALLE Reader und ALLE
+    /// Recovery-Empfaenger `x25519([0xa5; 32])` und damit denselben
+    /// `kemKeyThumbprint`. `GrantPlanV1::new` verbietet doppelte Empfaenger,
+    /// also waere ein Plan aus einem Recovery-Empfaenger PLUS mehreren Readern
+    /// mit dem Vorgabewert nicht baubar. `None` laesst das bestehende Verhalten
+    /// und damit jede bestehende Fixture unveraendert.
+    pub kem_public_key_override: Option<CanonicalPublicCoseKey>,
+    /// Die Profilzusage einer Bedienerbindung.
+    ///
+    /// Ohne diese Ueberschreibung ist sie `hash32(marker + 1)` und damit ein
+    /// synthetischer Wert. Ein Verbraucher, der `operatorProfileCommitment`
+    /// aus einer ECHTEN Profilzeile nachrechnet und gegen die gebundene
+    /// Bindung stellt, braucht die Bindung mit genau diesem nachgerechneten
+    /// Wert. `None` laesst das bestehende Verhalten unveraendert.
+    pub binding_operator_profile_commitment_override: Option<Hash32>,
+    /// `allowed-archive-profile-hashes` des Root-signierten `policy-core-v1`.
+    ///
+    /// Ohne diese Ueberschreibung traegt die Policy den synthetischen Wert
+    /// `hash32(0xa1)`. Ein Verbraucher, der einen ECHTEN
+    /// `archiveProfileHash` gegen die wirksame Policy stellt — der Writer der
+    /// Stufe 2 vor jeder Serialisierung —, braucht den echten Wert darin;
+    /// sonst pruefte er gegen eine Zahl, die kein Backend je errechnet.
+    /// `None` laesst das bestehende Verhalten unveraendert.
+    pub policy_allowed_archive_profile_hashes_override: Option<Vec<Hash32>>,
+    /// Laesst den KEM-Schluessel eines Reader- oder Recovery-Zertifikats WEG.
+    ///
+    /// `kem_key_thumbprint: None` ist im Wire-Format erlaubt, und
+    /// `SelectedRegistryHead::active_certificates` dokumentiert ausdruecklich,
+    /// dass NICHTS es erzwingt und die Empfaengerentscheidung dem Aufrufer
+    /// gehoert. Ein Verbraucher, der einen solchen Reader ablehnen MUSS statt
+    /// ihn zu ueberspringen, braucht das Zertifikat, um es zu belegen.
+    /// `false` laesst das bestehende Verhalten unveraendert.
+    pub omit_kem_public_key: bool,
     pub revoked_from_sequence: Option<ChainSequence>,
     pub binding_instance_key_thumbprint_override: Option<KeyThumbprint>,
     pub writer_chain_id_override: Option<ChainId>,
@@ -137,6 +182,11 @@ impl Default for HeadOptions {
             policy_max_registry_age_ms_override: None,
             policy_max_future_clock_skew_ms_override: None,
             certificate_capabilities_override: None,
+            signing_public_key_override: None,
+            kem_public_key_override: None,
+            binding_operator_profile_commitment_override: None,
+            policy_allowed_archive_profile_hashes_override: None,
+            omit_kem_public_key: false,
             revoked_from_sequence: None,
             binding_instance_key_thumbprint_override: None,
             writer_chain_id_override: None,
@@ -726,6 +776,9 @@ fn direct_payload(
                 options
                     .policy_max_future_clock_skew_ms_override
                     .unwrap_or(300_000),
+                options
+                    .policy_allowed_archive_profile_hashes_override
+                    .clone(),
             ),
             authorization_hash,
         )
@@ -735,13 +788,23 @@ fn direct_payload(
             marker,
             effective_from,
         } => {
-            let signing_key = (!matches!(kind, CertificateKindV1::RecoveryRecipient))
-                .then(|| key_from_secret(NEW_ADMIN_SECRET));
-            let kem_key = matches!(
-                kind,
-                CertificateKindV1::Reader | CertificateKindV1::RecoveryRecipient
-            )
-            .then(|| CanonicalPublicCoseKey::x25519([0xa5; 32]).unwrap());
+            let signing_key = (!matches!(kind, CertificateKindV1::RecoveryRecipient)).then(|| {
+                options
+                    .signing_public_key_override
+                    .clone()
+                    .unwrap_or_else(|| key_from_secret(NEW_ADMIN_SECRET))
+            });
+            let kem_key = (!options.omit_kem_public_key
+                && matches!(
+                    kind,
+                    CertificateKindV1::Reader | CertificateKindV1::RecoveryRecipient
+                ))
+            .then(|| {
+                options
+                    .kem_public_key_override
+                    .clone()
+                    .unwrap_or_else(|| CanonicalPublicCoseKey::x25519([0xa5; 32]).unwrap())
+            });
             let authority_subject_id = matches!(
                 kind,
                 CertificateKindV1::OrganizationAdmin | CertificateKindV1::KeyApprover
@@ -805,7 +868,9 @@ fn direct_payload(
             OperatorBindingFieldsV1 {
                 organization_id: organization(),
                 operator_subject_id: OperatorSubjectId::try_from(&[*marker; 16][..]).unwrap(),
-                operator_profile_commitment: hash32(marker.wrapping_add(1)),
+                operator_profile_commitment: options
+                    .binding_operator_profile_commitment_override
+                    .unwrap_or_else(|| hash32(marker.wrapping_add(1))),
                 device_certificate_hash: CertificateHash::from(*certificate_hash),
                 operator_role: *role,
                 os_account_binding_hash: hash32(marker.wrapping_add(2)),
@@ -993,6 +1058,7 @@ fn policy_fields(
     effective_from_sequence: ChainSequence,
     max_registry_age_ms: u64,
     max_future_clock_skew_ms: u64,
+    allowed_archive_profile_hashes: Option<Vec<Hash32>>,
 ) -> PolicyFieldsV1 {
     PolicyFieldsV1 {
         organization_id: organization(),
@@ -1006,7 +1072,8 @@ fn policy_fields(
         reader_inactivity_ms: 900_000,
         reader_trust_refresh_ms: 86_400_000,
         reader_history_access_allowed: true,
-        allowed_archive_profile_hashes: vec![hash32(0xa1)],
+        allowed_archive_profile_hashes: allowed_archive_profile_hashes
+            .unwrap_or_else(|| vec![hash32(0xa1)]),
         backup_frequency_ms: 86_400_000,
         restore_test_interval_ms: 2_592_000_000,
         retention_policy: RetentionPolicyFieldsV1 {

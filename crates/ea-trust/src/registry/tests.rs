@@ -323,6 +323,7 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
         effective_from_sequence,
         valid_through_sequence,
         proposed_sequence,
+        head_event_not_after,
         preexisting_effective_now,
         warnings,
         committed_revision,
@@ -335,6 +336,11 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
     assert!(*effective_from_sequence == expected_event.effective_from_sequence);
     assert!(*valid_through_sequence == expected_event.valid_through_sequence);
     assert!(*proposed_sequence == ChainSequence::new(60));
+    // Das `notAfter` des Head-Ereignisses, UNVERAENDERT durchgereicht. Der
+    // Wert ist die Zeitgrenze, gegen die eine spaetere Veralterung festgestellt
+    // wird; kaeme er aus einer anderen Quelle als dem gewaehlten Ereignis,
+    // waere jede solche Feststellung ueber den falschen Head.
+    assert!(*head_event_not_after == expected_event.not_after);
     assert!(preexisting_effective_now.value() == expected_now);
     assert!(*warnings == expected_warnings);
     assert_eq!(*committed_revision, 41);
