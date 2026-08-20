@@ -1,4 +1,4 @@
-import type { PlaywrightTestConfig } from '@playwright/test'
+import type { BrowserContext, PlaywrightTestConfig, Route } from '@playwright/test'
 
 // Die Vorschau der GEBAUTEN Anwendung. `vite preview` liefert `dist/`, also
 // genau die Bytes, die ins Tauri-Paket eingehen — nicht den Dev-Server mit
@@ -39,12 +39,45 @@ export const PREVIEW_ORIGIN = `http://127.0.0.1:${PREVIEW_PORT}`
  *     Praedikat "blocked", mit einem stets wahren Praedikat "reached". Das ist
  *     die Zusage "PASS mit abgeschaltetem Netz".
  *
- * Task 16 verdrahtet es in seiner Fixture unter `tests/e2e/`:
- *   await context.route('**', route =>
- *     isPreviewRequest(route.request().url()) ? route.continue() : route.abort())
+ * Die ENTSCHEIDUNG steht hier, die VERDRAHTUNG in `installOfflineGuard`
+ * darunter — Task 16 ruft nur noch auf.
  */
 export function isPreviewRequest(url: string): boolean {
   return url === PREVIEW_ORIGIN || url.startsWith(`${PREVIEW_ORIGIN}/`)
+}
+
+/**
+ * Die VERDRAHTUNG der zweiten Haelfte der Offline-Zusage — der einzige Aufruf,
+ * den die Fixture von Task 16 unter `apps/desktop/tests/e2e/` noch fuehren
+ * muss:
+ *
+ *   import { installOfflineGuard } from '../../playwright.config'
+ *   await installOfflineGuard(context)   // VOR der ersten Navigation
+ *
+ * Warum die Verdrahtung hier steht und nicht als Vorschrift im Kommentar: ein
+ * Kommentar hat keinen Zeugen. So ist die Entscheidung "durchlassen oder
+ * abbrechen" samt Anfragemuster Code dieses Tasks und faellt in
+ * `src/e2e-config.test.ts`, wenn sie sich aendert. Was hier NICHT erzwungen
+ * werden kann: dass Task 16 den Aufruf ueberhaupt fuehrt — der Files-Block
+ * dieses Tasks nennt keine Fixture, also gehoert diese Zuweisung dem
+ * Controller.
+ *
+ * `'**'` und kein engeres Muster: das Muster ist die Reichweite des Waechters,
+ * ein engeres liesse die nicht getroffenen Anfragen STILL durch. Kein
+ * kontextweites `offline: true` (Messung oben), und `route.abort()` weist auch
+ * eine Antwort ab, die ein Service Worker oder der HTTP-Cache bediente — der
+ * Waechter sitzt vor beiden.
+ *
+ * Der Parametertyp ist `Pick<BrowserContext, 'route'>` und nicht der ganze
+ * Kontext: ein echter `BrowserContext` ist zuweisbar, und der Zeuge kann ein
+ * Doppel ohne Browser einsetzen.
+ */
+export async function installOfflineGuard(
+  context: Pick<BrowserContext, 'route'>,
+): Promise<void> {
+  await context.route('**', (route: Route) =>
+    isPreviewRequest(route.request().url()) ? route.continue() : route.abort(),
+  )
 }
 
 // `satisfies` statt `defineConfig(...)`: die Signatur von `defineConfig` gibt
@@ -72,8 +105,8 @@ export default {
     baseURL: PREVIEW_ORIGIN,
     // AUSDRUECKLICH FALSCH UND NICHT VERGESSEN. `offline: true` auf
     // Kontextebene schneidet die Schleife mit ab (Messung oben), die eigene
-    // Anwendung laedt dann nie. Den Netzzugang schaltet `isPreviewRequest` in
-    // der Fixture von Task 16 ab, und zwar praeziser: die Herkunft der
+    // Anwendung laedt dann nie. Den Netzzugang schaltet `installOfflineGuard`
+    // in der Fixture von Task 16 ab, und zwar praeziser: die Herkunft der
     // Vorschau bleibt erreichbar, jede andere Anfrage bricht ab — auch nach
     // einem `reload`, was ein nachgelagertes `context.setOffline(true)` nicht
     // aushaelt (ebenfalls gemessen).

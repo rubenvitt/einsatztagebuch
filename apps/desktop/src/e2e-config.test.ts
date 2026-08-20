@@ -45,6 +45,58 @@ it('lets the preview origin through and aborts every other request', async () =>
   expect(isPreviewRequest('http://127.0.0.1:4173.angreifer.example/x')).toBe(false)
 })
 
+// Die VERDRAHTUNG des Waechters, nicht nur seine Entscheidung. Ohne diesen
+// Zeugen stand der Aufruf, den Task 16 fuehren muss, nur als Kommentar in
+// `playwright.config.ts` — und ein Kommentar faellt nicht. Gemessen wird gegen
+// ein Kontext-Doppel, also ohne Browser und ohne `dist/`.
+type Decision = 'continue' | 'abort'
+
+function routeDouble(url: string) {
+  const decisions: Decision[] = []
+  const route = {
+    request: () => ({ url: () => url }),
+    continue: async () => {
+      decisions.push('continue')
+    },
+    abort: async () => {
+      decisions.push('abort')
+    },
+  }
+  return { decisions, route }
+}
+
+it('wires the guard onto every request and decides it per origin', async () => {
+  const { installOfflineGuard, PREVIEW_ORIGIN } = await import('../playwright.config')
+
+  const patterns: unknown[] = []
+  let handler: ((route: unknown) => unknown) | undefined
+  const context = {
+    route: async (pattern: unknown, given: (route: unknown) => unknown) => {
+      patterns.push(pattern)
+      handler = given
+    },
+  }
+
+  await installOfflineGuard(context as unknown as Parameters<typeof installOfflineGuard>[0])
+
+  // DIE REICHWEITE. Ein engeres Muster laesst die nicht getroffenen Anfragen
+  // still durch, und nichts sonst wuerde das bemerken.
+  expect(patterns).toEqual(['**'])
+  expect(handler).toBeTypeOf('function')
+
+  const asset = routeDouble(`${PREVIEW_ORIGIN}/assets/index-abc123.js`)
+  await handler?.(asset.route)
+  expect(asset.decisions).toEqual(['continue'])
+
+  const telemetry = routeDouble('https://example.com/telemetry')
+  await handler?.(telemetry.route)
+  expect(telemetry.decisions).toEqual(['abort'])
+
+  const foreignLoopback = routeDouble('http://127.0.0.1:4174/probe')
+  await handler?.(foreignLoopback.route)
+  expect(foreignLoopback.decisions).toEqual(['abort'])
+})
+
 it('keeps the Playwright spec of Task 16 out of the Vitest run', async () => {
   const config = (await import('../vite.config')).default
   const include = config.test?.include ?? []
