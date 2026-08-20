@@ -489,7 +489,7 @@ fn u64_of(value: usize) -> Result<[u8; 8], BundleError> {
 fn sync_parent_directory(target: &Path) -> Result<(), BundleError> {
     #[cfg(unix)]
     {
-        let Some(parent) = target.parent() else {
+        let Some(parent) = parent_for_sync(target) else {
             return Ok(());
         };
         let directory = File::open(parent).map_err(|_| BundleError::Io)?;
@@ -499,5 +499,61 @@ fn sync_parent_directory(target: &Path) -> Result<(), BundleError> {
     {
         let _ = target;
         Ok(())
+    }
+}
+
+/// Das zu flushende Verzeichnis einer Zieladresse.
+///
+/// [`Path::parent`] liefert fuer einen EINKOMPONENTIGEN relativen Pfad
+/// `Some("")` und nicht `None` — und `File::open("")` ist `ENOENT`. Ohne diese
+/// Uebersetzung endete ein GELUNGENER Export an seinem Verzeichnisflush: die
+/// Datei laege vollstaendig und geflusht am Ziel, der Aufruf meldete
+/// [`BundleError::Io`], und jede Wiederholung scheiterte danach dauerhaft an
+/// `create_new`. Der leere Elternpfad IST das Arbeitsverzeichnis und heisst
+/// hier `.`.
+///
+/// `None` bleibt genau dem Fall vorbehalten, in dem es kein Elternverzeichnis
+/// gibt — der Wurzel selbst. Eine Zieladresse ohne Eltern ist keine Datei, die
+/// dieser Weg angelegt haben kann; es gibt dann nichts zu flushen.
+fn parent_for_sync(target: &Path) -> Option<&Path> {
+    match target.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Some(Path::new(".")),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Path, parent_for_sync};
+
+    /// Der leere Elternpfad ist das Arbeitsverzeichnis, nicht „kein Eltern".
+    ///
+    /// Ein Integrationstest koennte das nicht messen: er muesste das
+    /// Arbeitsverzeichnis des Prozesses umstellen, und die Fixture dieses
+    /// Ziels serialisiert Tests ueber eine Sperre, nicht ueber Prozesse.
+    #[test]
+    fn a_bare_relative_target_flushes_the_working_directory() {
+        assert_eq!(
+            parent_for_sync(Path::new("bundle.eabundle")),
+            Some(Path::new(".")),
+            "Path::parent liefert hier Some(\"\"), und File::open(\"\") ist ENOENT"
+        );
+        assert_eq!(
+            parent_for_sync(Path::new("./bundle.eabundle")),
+            Some(Path::new("."))
+        );
+        assert_eq!(
+            parent_for_sync(Path::new("/tmp/bundle.eabundle")),
+            Some(Path::new("/tmp"))
+        );
+        assert_eq!(
+            parent_for_sync(Path::new("out/bundle.eabundle")),
+            Some(Path::new("out"))
+        );
+        assert_eq!(
+            parent_for_sync(Path::new("/")),
+            None,
+            "die Wurzel hat kein Elternverzeichnis, und es gibt nichts zu flushen"
+        );
     }
 }
