@@ -12,7 +12,10 @@
     "test:golden": "cargo run --locked -p xtask -- test-golden",
     "test:property": "cargo run --locked -p xtask -- test-property",
     "test:fuzz": "cargo run --locked -p xtask -- test-fuzz",
-    "test:recovery": "cargo run --locked -p xtask -- test-recovery"
+    "test:recovery": "cargo run --locked -p xtask -- test-recovery",
+    "desktop:typecheck": "pnpm --dir apps/desktop typecheck",
+    "desktop:test": "pnpm --dir apps/desktop test --run",
+    "desktop:e2e": "pnpm --dir apps/desktop e2e"
   }
 }
 

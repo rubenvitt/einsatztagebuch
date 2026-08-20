@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "apps/cli"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "apps/cli", "apps/desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -47,6 +47,8 @@ rusqlite = { version = "=0.40.0", default-features = false, features = ["bundled
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+tauri = { version = "=2.11.5" }
+tauri-build = { version = "=2.6.3" }
 toml = "=0.8.23"
 unicode-normalization = "=0.1.25"
 zeroize = { version = "=1.9.0", features = ["derive"] }

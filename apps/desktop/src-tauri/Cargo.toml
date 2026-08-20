@@ -1,0 +1,78 @@
+[package]
+name = "ea-desktop"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Der Wirt der Oberflaeche. Die Merkmalsauswahl ist ausgeschrieben und nicht
+# `default` geerbt, weil zwei der Merkmale TRAGEND sind und ein spaeteres
+# `default-features = false` sie sonst still fallen liesse:
+#
+# - `wry`     — die Webview selbst (WebKit auf macOS, WebView2 auf Windows,
+#               WebKitGTK auf Ubuntu) und damit der Kanal, ueber den
+#               `apps/desktop/src/app/session-lock.ts` (Task 15) ein Ereignis
+#               ueberhaupt empfangen kann.
+# - `dbus`    — die D-Bus-Anbindung des Ubuntu-Laufzeitteils. Das
+#               Sitzungssperr-Signal von `org.freedesktop.login1` bzw. des
+#               Screensavers ist auf Ubuntu nur ueber D-Bus zu beobachten.
+# - `webview2-com` (ueber `wry`) — die Windows-COM-Anbindung, an der die
+#               Sitzungsbenachrichtigung von Windows haengt.
+# - `common-controls-v6` — Windows-Dialoge in der v6-Variante.
+# - `x11`     — der X11-Zweig des Ubuntu-Laufzeitteils.
+# - `compression`, `dynamic-acl` — die zwei uebrigen Vorgabemerkmale; sie
+#               stehen hier, damit die Liste die VOLLSTAENDIGE Auswahl ist und
+#               nicht eine Ergaenzung zu einer unsichtbaren.
+#
+# Kein `tokio` in der Wurzeltabelle: dass es transitiv ueber `tauri` im
+# Lockfile erscheint, ist erwartet. Async lebt ausschliesslich hier, jeder
+# `#[tauri::command]` fuehrt die synchrone Kernoperation ueber
+# `tauri::async_runtime::spawn_blocking` aus.
+tauri = { workspace = true, features = [
+  "common-controls-v6",
+  "compression",
+  "dbus",
+  "dynamic-acl",
+  "wry",
+  "x11",
+] }
+# Die DTO-Grenze zwischen Kern und Oberflaeche. `serde` traegt `derive` aus der
+# Wurzeltabelle; `serde_json` ist die Drahtform der `#[tauri::command]`-Argumente
+# und -Rueckgaben.
+serde.workspace = true
+serde_json.workspace = true
+# Der Stufe-2-Kern, den die Kommandos dieses Pakets aufrufen. Alle Kanten stehen
+# HIER, damit Task 15 genau eine weitere Kante zieht und jedes Kommando dort
+# `--locked` behalten kann.
+#
+# `Id16`, `EntryHash`, `ObjectHash`, `ChainSequence` — kein neuer Bezeichnertyp.
+ea-types.workspace = true
+# Die geschlossenen Stufe-1-Vereinigungen der validierten Nutzlast.
+ea-schema.workspace = true
+# Die eingefrorenen Konstruktoren der Archivbytes.
+ea-format.workspace = true
+# Der schreibende und der lesende Port ueber einen Bestand.
+ea-archive.workspace = true
+# Die Wirtbackends `LocalPathBackend` und `ControlledNetworkBackend`.
+ea-archive-fs.workspace = true
+# Der Signaturport des Writer-Geraets.
+ea-key-provider.workspace = true
+# `OperatorSessionProof` samt `invalidate_on_lock` — der Empfaenger des
+# Sitzungssperr-Ereignisses.
+ea-operator.workspace = true
+# Die verschluesselte lokale Ablage.
+ea-local-store.workspace = true
+# Die signierte lokale Auditlinie.
+ea-audit.workspace = true
+# Die EINE aktive Entwurfsablage.
+ea-draft.workspace = true
+# Die Fachlogik der Erfassung und der Finalisierung.
+ea-writer.workspace = true
+
+[build-dependencies]
+# Erzeugt die ACL- und Kontextbeiwerke aus `src-tauri/tauri.conf.json`. Diese
+# Datei entsteht in Task 15; bis dahin bleibt `build.rs` ein Stumpf und ruft
+# `tauri_build::build()` nicht auf.
+tauri-build = { workspace = true }
