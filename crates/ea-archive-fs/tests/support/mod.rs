@@ -1301,6 +1301,32 @@ impl HealthScenario {
     }
 }
 
+/// Der erste Inventareintrag, der KEINE Beiwerkdatei ist.
+///
+/// Seit Task 10 traegt jeder Bestand das Formatbeiwerk, und `README-FORMAT.txt`
+/// sortiert byteweise VOR jedem Layoutverzeichnis (`0x52` vor `0x61`) —
+/// `entries()[0]` waere damit die Formatbeschreibung und nicht mehr ein
+/// Archivobjekt. Die Szenarien „fehlende Datei" und „geaenderte Datei" wollen
+/// aber genau ein ARCHIVOBJEKT beschaedigen; sonst messen sie die
+/// Dauerhaftigkeit des Beiwerks und nicht die des Bestands.
+///
+/// # Panics
+///
+/// Wenn der Bestand ausser dem Beiwerk nichts traegt.
+fn first_non_beiwerk_entry(inventory: &ea_format::ArchiveInventoryListV1) -> String {
+    inventory
+        .entries()
+        .iter()
+        .map(ea_format::ArchiveInventoryEntryV1::relative_path)
+        .find(|relative| {
+            !ea_archive_fs::FORMAT_PACKAGE_FILES_V1
+                .iter()
+                .any(|(beiwerk, _)| beiwerk == relative)
+        })
+        .expect("die Fixture MUSS mindestens ein Archivobjekt tragen")
+        .to_owned()
+}
+
 /// Ein Bestand mit den Bytes von `blobs`, auf einer frischen Wurzel.
 fn materialized(
     label: &str,
@@ -1413,7 +1439,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
             // Bericht des UNVERSEHRTEN Bestands ist fuer dieses Szenario
             // befundfrei — der Befund kommt allein vom Inventarvergleich.
             let verification = verification_of(&backend, &complete.anchor_bytes);
-            backend.remove_for_test(expected_inventory.entries()[0].relative_path());
+            backend.remove_for_test(&first_non_beiwerk_entry(&expected_inventory));
             HealthScenario {
                 _lock: lock,
                 backend,
@@ -1430,7 +1456,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
             let capabilities = proven_capabilities(&backend);
             let verification = verification_of(&backend, &complete.anchor_bytes);
             backend.overwrite_for_test(
-                expected_inventory.entries()[0].relative_path(),
+                &first_non_beiwerk_entry(&expected_inventory),
                 b"andere Bytes",
             );
             HealthScenario {
@@ -1586,6 +1612,88 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 capabilities,
                 verification,
             }
+        }
+    }
+}
+
+/// Die Wurzel des ARBEITSBAUMS, erreicht aus `CARGO_MANIFEST_DIR`.
+///
+/// Dasselbe Muster wie `tools/xtask/tests/stage_gate.rs`: eine relative
+/// Kletterei plus `canonicalize`, damit ein Test die eingecheckten Bytes lesen
+/// kann, ohne einen Pfad zu erfinden.
+///
+/// # Panics
+///
+/// Wenn die Wurzel von `crates/ea-archive-fs` aus nicht erreichbar ist.
+#[must_use]
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("die Arbeitsbaumwurzel muss von crates/ea-archive-fs aus erreichbar sein")
+}
+
+/// Die EINGECHECKTEN Bytes von `relative`, wurzelrelativ.
+///
+/// Der Vergleichswert der Beiwerktests kommt damit aus dem Arbeitsbaum und
+/// nicht aus demselben `include_bytes!`, das die Produktion benutzt — sonst
+/// waere die Gleichheit eine Tautologie und ein falscher Einbettungspfad
+/// unsichtbar.
+///
+/// # Panics
+///
+/// Wenn die Datei nicht lesbar ist.
+#[must_use]
+pub fn repository_bytes(relative: &str) -> Vec<u8> {
+    let path = workspace_root().join(relative);
+    fs::read(&path).unwrap_or_else(|error| panic!("{relative} muss lesbar sein: {error}"))
+}
+
+/// Alle Pfade unter `schemas/`, RELATIV zu `schemas/`, ohne die
+/// Kompatibilitaetsmatrix.
+///
+/// Die Matrix bleibt draussen, weil sie im Bestand nicht unter
+/// `format/schemas/` liegt, sondern an ihrer eigenen Layoutadresse
+/// (`ea_archive::COMPATIBILITY_MATRIX_FILE_V1`).
+///
+/// Die Liste entsteht durch einen LAUF ueber das Verzeichnis und nicht als
+/// Literal: ein spaeter hinzugefuegtes Schema faellt damit in den Tests auf,
+/// statt still in jedem neuen Bestand zu fehlen.
+///
+/// # Panics
+///
+/// Wenn `schemas/` nicht lesbar ist.
+#[must_use]
+pub fn repository_schema_paths() -> Vec<String> {
+    let root = workspace_root().join("schemas");
+    let mut found = Vec::new();
+    collect_files_below(&root, "", &mut found);
+    found.retain(|relative| relative != "compatibility-matrix.json");
+    found.sort();
+    found
+}
+
+/// Sammelt alle Dateien unter `directory` rekursiv, als `/`-getrennte Pfade.
+fn collect_files_below(directory: &std::path::Path, prefix: &str, found: &mut Vec<String>) {
+    let read = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("{} muss lesbar sein: {error}", directory.display()));
+    for entry in read {
+        let entry = entry.expect("jeder Verzeichniseintrag muss lesbar sein");
+        let name = entry
+            .file_name()
+            .into_string()
+            .expect("jeder Dateiname im Arbeitsbaum ist UTF-8");
+        let relative = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let kind = entry.file_type().expect("der Eintragstyp muss lesbar sein");
+        if kind.is_dir() {
+            collect_files_below(&entry.path(), &relative, found);
+        } else if kind.is_file() {
+            found.push(relative);
         }
     }
 }

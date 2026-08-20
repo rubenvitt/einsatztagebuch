@@ -574,6 +574,14 @@ pub fn unpinned_snapshot() -> TrustStateSnapshot {
 /// getragen hat.
 pub struct InMemoryArchiveBackend {
     files: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// Die LEER angelegten Layoutverzeichnisse.
+    ///
+    /// Eine Attrappe ohne Dateisystem kennt ein Verzeichnis nur, wenn es
+    /// jemand angelegt hat: `format/transformations/` und `recovery-reports/`
+    /// tragen nie eine Datei, aus der man sie ableiten koennte. Aufgezeichnet
+    /// wird deshalb, was `create_directory_if_absent` anlegt — ein Leser
+    /// entsteht erst mit dem ersten Porttest, der ihn braucht.
+    directories: Mutex<BTreeSet<String>>,
     synced_files: Mutex<BTreeSet<String>>,
     synced_directories: Mutex<BTreeSet<String>>,
     file_sync_calls: AtomicUsize,
@@ -596,6 +604,7 @@ impl InMemoryArchiveBackend {
     pub fn with_failing_file_sync(failing: Option<usize>) -> Self {
         Self {
             files: Mutex::new(BTreeMap::new()),
+            directories: Mutex::new(BTreeSet::new()),
             synced_files: Mutex::new(BTreeSet::new()),
             synced_directories: Mutex::new(BTreeSet::new()),
             file_sync_calls: AtomicUsize::new(0),
@@ -752,6 +761,22 @@ impl ea_archive::ArchiveBackend for InMemoryArchiveBackend {
                 Ok(())
             }
         }
+    }
+
+    fn create_directory_if_absent(
+        &self,
+        directory: &str,
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        // Dieselbe Ablehnung wie im Wirt: waere die Attrappe grosszuegiger,
+        // pruefte ein Test die Attrappe und nicht den Port.
+        if !ea_archive::LAYOUT_PATHS_V1.contains(&directory) || !directory.ends_with('/') {
+            return Err(ea_archive::ArchiveBackendError::Path);
+        }
+        self.directories
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(directory.to_owned());
+        Ok(())
     }
 
     fn acquire_writer_lock(

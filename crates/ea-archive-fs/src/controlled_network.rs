@@ -216,6 +216,19 @@ impl ControlledNetworkBackend {
     /// [`ArchiveBackendError::ProfileNotAllowed`] oder
     /// [`ArchiveBackendError::MissingLocalCommitComponent`], jeweils
     /// fail-closed.
+    /// # Das Formatbeiwerk entsteht am NETZBESTAND
+    ///
+    /// Der letzte Schritt dieser Strecke ist
+    /// [`LocalPathBackend::open`], und dort materialisiert
+    /// [`materialize_format_package`](crate::materialize_format_package) das
+    /// Beiwerk aus `design.md` §11.4. Es gibt hier bewusst KEINEN zweiten
+    /// Aufruf: ein zweiter Schreibweg zu denselben Bytes waere eine zweite
+    /// Wahrheit, und der Netzbestand ist der Bestand.
+    ///
+    /// Die lokale Commit-Komponente traegt das Beiwerk ausdruecklich NICHT. Sie
+    /// ist kein Bestand, sondern die verschluesselte Zwischenablage der
+    /// Publikation; ein Leser oeffnet sie nie, und eine Formatbeschreibung
+    /// darin waere Klartextbeiwerk neben verschluesselten Objekten.
     pub fn open(
         network_root: PathBuf,
         local_commit: Option<LocalCommitComponentV1>,

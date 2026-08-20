@@ -19,8 +19,8 @@ use std::{
 
 use ea_archive::{
     ArchiveBackend, ArchiveBackendError, ArchiveBackendProfileV1, ArchiveBlob, ArchiveError,
-    ArchivePath, ArchiveSource, BoundArchiveProfilePolicyV1, STAGING_SUFFIX_V1, WriterLock,
-    WriterLockRelease,
+    ArchivePath, ArchiveSource, BoundArchiveProfilePolicyV1, LAYOUT_PATHS_V1, STAGING_SUFFIX_V1,
+    WriterLock, WriterLockRelease,
 };
 use ea_crypto::object_hash;
 use ea_format::{
@@ -28,6 +28,8 @@ use ea_format::{
     encode_active_profile_pointer_core,
 };
 use ea_types::Hash32;
+
+use crate::materialize_format_package;
 
 /// Die Kontrolldateien des Backends an der Bestandswurzel.
 ///
@@ -219,10 +221,29 @@ impl LocalPathBackend {
     /// Policy gestellt, BEVOR irgendein Pfad des Ziels benutzt wird. Ein
     /// abgelehntes Profil legt deshalb nicht einmal die Wurzel an.
     ///
+    /// Der letzte Schritt ist
+    /// [`materialize_format_package`](crate::materialize_format_package): das
+    /// Formatbeiwerk aus `design.md` §11.4 entsteht mit dem Bestand und nicht
+    /// spaeter. Der Aufruf ist idempotent — ein bestehender Bestand erlebt
+    /// einen Leerlauf.
+    ///
+    /// # Ein veraendertes Beiwerkbyte macht den Bestand UNOEFFENBAR
+    ///
+    /// Traegt eine Beiwerkadresse andere Bytes, liefert `open`
+    /// [`ArchiveBackendError::ByteConflict`]. Das ist fail-closed und
+    /// beabsichtigt: das Beiwerk ist eine Zusage des Formats, und ein Bestand,
+    /// der eine andere Formatbeschreibung traegt als die Bytes, die dieses
+    /// Programm einbettet, ist kein Bestand dieses Programms. Die Kehrseite
+    /// steht im Bericht der Aufgabe: der Gesundheitscheck ist das Werkzeug, das
+    /// einen BESCHAEDIGTEN Bestand befunden soll, und er oeffnet dafuer ein
+    /// Backend.
+    ///
     /// # Errors
     ///
     /// [`ArchiveBackendError::ProfileNotAllowed`] fail-closed, wenn die Policy
-    /// das Profil nicht traegt; sonst der Fehler des Wirtdateisystems.
+    /// das Profil nicht traegt; [`ArchiveBackendError::ByteConflict`], wenn eine
+    /// Beiwerkadresse abweichende Bytes traegt; sonst der Fehler des
+    /// Wirtdateisystems.
     pub fn open(
         root: PathBuf,
         profile: ArchiveBackendProfileV1,
@@ -230,12 +251,21 @@ impl LocalPathBackend {
     ) -> Result<Self, ArchiveBackendError> {
         policy.require(profile.profile_hash()?)?;
         fs::create_dir_all(&root).map_err(|_| ArchiveBackendError::Io)?;
-        Ok(Self {
+        let backend = Self {
             root,
             profile,
             held: Arc::new(AtomicBool::new(false)),
             foreign: Mutex::new(BTreeSet::new()),
-        })
+        };
+        // Der LETZTE Schritt der Erzeugungsstrecke, bevor die erste
+        // Archivadresse benutzt wird: `design.md` §11.4 fuehrt das
+        // Formatbeiwerk als Verpflichtung JEDES Bestands, und Stufe 2 ist die
+        // erste, die Bestaende erzeugt. Der Aufruf ist idempotent, ein
+        // bestehender Bestand erlebt also einen Leerlauf; ein VERAENDERTES
+        // Beiwerkbyte laesst `open` dagegen fail-closed mit
+        // `EA-ARCHIVE-BYTE-CONFLICT` scheitern.
+        materialize_format_package(&backend)?;
+        Ok(backend)
     }
 
     /// Wie [`Self::open`], aber OHNE Policypruefung.
@@ -625,6 +655,23 @@ impl ArchiveBackend for LocalPathBackend {
             return fs::remove_file(&source).map_err(|_| ArchiveBackendError::Io);
         }
         fs::rename(&source, &target).map_err(|_| ArchiveBackendError::Io)
+    }
+
+    fn create_directory_if_absent(&self, directory: &str) -> Result<(), ArchiveBackendError> {
+        if !LAYOUT_PATHS_V1.contains(&directory) || !directory.ends_with('/') {
+            return Err(ArchiveBackendError::Path);
+        }
+        let absolute = self.absolute(directory);
+        fs::create_dir_all(&absolute).map_err(|_| ArchiveBackendError::Io)?;
+        // Beide Flushes sind noetig und keiner ist Zutat: der erste macht das
+        // Verzeichnis selbst dauerhaft, der zweite seinen NAMEN, der im
+        // Elternverzeichnis lebt. Ein leeres Verzeichnis traegt keine Datei, an
+        // deren Adresse sich `sync_directory` haengen liesse.
+        sync_directory_at(&absolute)?;
+        if let Some(parent) = absolute.parent() {
+            sync_directory_at(parent)?;
+        }
+        Ok(())
     }
 
     fn acquire_writer_lock(&self) -> Result<WriterLock, ArchiveBackendError> {

@@ -89,6 +89,37 @@ pub trait ArchiveBackend: Send + Sync {
         to: &ArchivePath,
     ) -> Result<(), ArchiveBackendError>;
 
+    /// Legt ein LEERES Verzeichnis der Layoutliste an, wenn es fehlt.
+    ///
+    /// Sie existiert, weil `design.md` §11.4 zwei Verzeichnisse als
+    /// Verpflichtung jedes Bestands fuehrt, die BEIDE leer bleiben:
+    /// `format/transformations/` (jede Sicht von v0.1 ist `identity` mit
+    /// `preservesSourceBytes`, es gibt also keine Ableitung zu beschreiben) und
+    /// `recovery-reports/` (ein Wiederherstellungsbericht entsteht erst mit
+    /// einem echten Wiederherstellungslauf). Ueber
+    /// [`Self::create_non_object_if_absent`] sind sie nicht erreichbar — dort
+    /// entsteht ein Verzeichnis nur als Traeger einer Datei —, und ein Leser
+    /// muss eine leere Verpflichtung von einer fehlenden unterscheiden koennen.
+    ///
+    /// `directory` MUSS ein Verzeichniseintrag von
+    /// [`LAYOUT_PATHS_V1`](crate::LAYOUT_PATHS_V1) sein. Damit legt diese
+    /// Methode kein frei gewaehltes Verzeichnis an und fuegt der Layoutliste
+    /// keinen Pfad hinzu.
+    ///
+    /// Sie ist DAUERHAFT: ein leeres Verzeichnis traegt keine Datei, an deren
+    /// Adresse sich [`Self::sync_directory`] haengen liesse, und sein Name lebt
+    /// im Elternverzeichnis. Die Wirtimplementierung flusht deshalb beides.
+    ///
+    /// Idempotent: ein bestehendes Verzeichnis ist ein Erfolg.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::Path`], wenn `directory` kein Verzeichnis der
+    /// Layoutliste ist; [`ArchiveBackendError::FlushFailed`], wenn der Wirt die
+    /// Dauerhaftigkeit nicht bestaetigt; sonst der Fehler des
+    /// Wirtdateisystems.
+    fn create_directory_if_absent(&self, directory: &str) -> Result<(), ArchiveBackendError>;
+
     /// Nimmt die exklusive Schreibersperre.
     ///
     /// # Errors
