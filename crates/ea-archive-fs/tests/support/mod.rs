@@ -1735,3 +1735,265 @@ fn collect_files_below(directory: &std::path::Path, prefix: &str, found: &mut Ve
         }
     }
 }
+
+/// Die Bytekarte einer Lesequelle: relativer Pfad -> Abdruck der Bytes.
+///
+/// Sie ist der Vergleichsmassstab des Buendelexports und laeuft ueber den PORT
+/// und nicht ueber ein Dateisystem — nur so vergleicht dieselbe Funktion das
+/// Verzeichnis mit dem Buendel. Der Abdruck ist [`ea_crypto::object_hash`] und
+/// damit ein domainseparierter SHA-256 ueber die exakten Bytes; er wird als
+/// rohes `[u8; 32]` gehalten, weil die Hashtypen der Stufe 1 absichtlich kein
+/// `Debug` tragen und ein Kartenvergleich sonst nicht assertierbar waere.
+///
+/// # Panics
+///
+/// Wenn die Quelle sich nicht vollstaendig durchlaufen laesst.
+#[must_use]
+pub fn digest_map_of(source: &dyn ea_archive::ArchiveSource) -> BTreeMap<String, [u8; 32]> {
+    let mut map = BTreeMap::new();
+    source
+        .visit_blobs(&mut |blob: ea_archive::ArchiveBlob<'_>| {
+            map.insert(
+                blob.path_hint().to_owned(),
+                *ea_crypto::object_hash(blob.bytes()).as_bytes(),
+            );
+            Ok(())
+        })
+        .expect("die Quelle muss sich durchlaufen lassen");
+    map
+}
+
+/// Die Pfadhinweise einer Lesequelle, in Durchlaufreihenfolge.
+///
+/// # Panics
+///
+/// Wie [`digest_map_of`].
+#[must_use]
+pub fn path_hints_of(source: &dyn ea_archive::ArchiveSource) -> Vec<String> {
+    let mut hints = Vec::new();
+    source
+        .visit_blobs(&mut |blob: ea_archive::ArchiveBlob<'_>| {
+            hints.push(blob.path_hint().to_owned());
+            Ok(())
+        })
+        .expect("die Quelle muss sich durchlaufen lassen");
+    hints
+}
+
+/// Die Fixture des Ein-Datei-Buendelexports.
+///
+/// Beide Seiten kommen aus DEMSELBEN [`LocalPathBackend`] ueber einer eigenen
+/// Temporaerwurzel: die Schreibseite fuer den Export, die Lesesicht
+/// desselben Backends als Verzeichnisvergleich. Sie greift ausdruecklich NICHT
+/// nach `FsArchiveSource` — der Typ lebt in `ea-recovery`, und die
+/// Abhaengigkeitsrichtung ist `apps/cli` -> `ea-recovery`, niemals
+/// `ea-archive-fs` -> `ea-recovery`.
+///
+/// Das Buendelziel liegt AUSSERHALB der Bestandswurzel. Laege es darin, waere
+/// es selbst eine Bytesequenz des Bestands, und der zweite Export truege den
+/// ersten.
+pub struct BundleHarness {
+    _lock: MutexGuard<'static, ()>,
+    root: PathBuf,
+    backend: LocalPathBackend,
+    anchor: ea_trust::TrustAnchorV1,
+}
+
+impl BundleHarness {
+    /// Ein vollstaendiger, abgeschlossener Bestand auf einer frischen Wurzel.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Wurzel oder der Bestand nicht anlegbar ist.
+    #[must_use]
+    pub fn finalized_archive() -> Self {
+        let complete = verify_support::complete_valid_archive();
+        let (lock, root) = temp_root("bundle");
+        let backend = LocalPathBackend::open(
+            root.join("archive"),
+            local_profile(),
+            &BoundArchiveProfilePolicyV1::from_policy(&policy_with(vec![source_profile_hash()])),
+        )
+        .expect("der Bestand muss sich oeffnen lassen");
+        for (path_hint, bytes) in complete.fixture.blobs() {
+            backend.materialize_for_test(path_hint, bytes);
+        }
+        Self {
+            _lock: lock,
+            root,
+            backend,
+            anchor: complete.anchor(),
+        }
+    }
+
+    /// Derselbe Bestand, dessen erster Eintrag ABGESCHNITTEN ist.
+    ///
+    /// Die Bytes behalten ihr Exact-Object-Praefix — sie bleiben also ein
+    /// Archivobjekt und werden nicht still zu Beiwerk —, und der Parser
+    /// scheitert dahinter. Der Lauf liefert damit einen BERICHT MIT BEFUND und
+    /// keinen harten Fehlschlag: genau der Zustand, an dem der Export abbrechen
+    /// MUSS.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Bestand keinen Eintrag traegt.
+    #[must_use]
+    pub fn with_truncated_entry(self) -> Self {
+        let inventory = self
+            .backend
+            .inventory()
+            .expect("das Inventar muss entstehen");
+        let entry = inventory
+            .entries()
+            .iter()
+            .map(ea_format::ArchiveInventoryEntryV1::relative_path)
+            .find(|relative| relative.ends_with(".eip"))
+            .expect("die Fixture MUSS einen Eintrag tragen")
+            .to_owned();
+        let bytes = self
+            .backend
+            .read_for_test(&entry)
+            .expect("der Eintrag muss lesbar sein");
+        assert!(
+            bytes.len() > 16,
+            "ein Eintrag MUSS laenger sein als sein Praefix"
+        );
+        self.backend
+            .overwrite_for_test(&entry, &bytes[..bytes.len() / 2]);
+        self
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> &LocalPathBackend {
+        &self.backend
+    }
+
+    #[must_use]
+    pub const fn anchor(&self) -> &ea_trust::TrustAnchorV1 {
+        &self.anchor
+    }
+
+    /// Die Betriebssystemuhr der Fixture.
+    ///
+    /// GENAU die der Bestandsfixture: sie waehlt den Registrierungskopf, und
+    /// eine zweite Uhr waehlte zufaellig einen anderen.
+    #[must_use]
+    pub const fn os_wall_clock(&self) -> UnixMillis {
+        UnixMillis::new(verify_support::FIXTURE_OS_WALL_CLOCK_V1)
+    }
+
+    /// Die Verifikationsstellschrauben des Vergleichslaufs.
+    ///
+    /// OHNE Empfaengerschluessel — genau wie der Lauf INNERHALB des Exports.
+    /// Zwei verschiedene Stellschrauben ergaeben zwei verschiedene Berichte,
+    /// und die Berichtsgleichheit waere nicht mehr die gemessene Aussage.
+    #[must_use]
+    pub const fn options(&self) -> ea_verify::VerifyOptions<'static> {
+        ea_verify::VerifyOptions::new(self.os_wall_clock())
+    }
+
+    /// Die Lesesicht des Verzeichnisses als [`ea_archive::ArchiveSource`].
+    #[must_use]
+    pub const fn directory_source(&self) -> ea_archive_fs::LocalPathArchiveSource<'_> {
+        self.backend.as_archive_source()
+    }
+
+    /// Die Bytekarte des Verzeichnisses.
+    #[must_use]
+    pub fn digest_map(&self) -> BTreeMap<String, [u8; 32]> {
+        digest_map_of(&self.directory_source())
+    }
+
+    #[must_use]
+    pub fn bundle_path(&self) -> PathBuf {
+        self.bundle_path_named("bundle")
+    }
+
+    #[must_use]
+    pub fn bundle_path_named(&self, name: &str) -> PathBuf {
+        self.root.join(format!(
+            "{name}.{}",
+            ea_archive_fs::BUNDLE_FILE_EXTENSION_V1
+        ))
+    }
+
+    /// Exportiert und liefert die Containerbytes.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Export nicht gelingt oder die Zieldatei nicht lesbar ist.
+    #[must_use]
+    pub fn exported_bytes(&self) -> Vec<u8> {
+        let target = self.bundle_path_named("exported");
+        ea_archive_fs::write_archive_bundle(
+            self.backend(),
+            self.anchor(),
+            self.os_wall_clock(),
+            &target,
+        )
+        .expect("der Export muss gelingen");
+        fs::read(&target).expect("die Zieldatei muss lesbar sein")
+    }
+
+    /// Derselbe Bestand, dem das FORMATBEIWERK fehlt.
+    ///
+    /// Er ist der einzige Weg, Schritt 1 des Exports ueberhaupt zu beobachten:
+    /// [`LocalPathBackend::open`] materialisiert das Beiwerk selbst, und auf
+    /// einem so erzeugten Bestand ist der Schritt ein Leerlauf, den kein Test
+    /// von seiner Abwesenheit unterscheiden koennte. Hier liegt beim Oeffnen
+    /// eine FREMDE Schreibersperre, das Beiwerk wird deshalb
+    /// [`FormatPackageOutcomeV1::Deferred`] — und danach wird die Sperre
+    /// weggenommen, damit der Export sie nehmen kann.
+    ///
+    /// # Panics
+    ///
+    /// Wenn das Beiwerk NICHT aufgeschoben wurde — dann messte der Test nichts.
+    #[must_use]
+    pub fn without_the_format_package() -> Self {
+        let complete = verify_support::complete_valid_archive();
+        let (lock, root) = temp_root("bundle-deferred");
+        let archive_root = root.join("archive");
+        fs::create_dir_all(&archive_root).expect("die Bestandswurzel muss anlegbar sein");
+        let lock_file = archive_root.join(ea_archive_fs::CONTROL_FILES_V1[0]);
+        fs::write(&lock_file, b"").expect("die Sperrdatei muss anlegbar sein");
+        let backend = LocalPathBackend::open(
+            archive_root,
+            local_profile(),
+            &BoundArchiveProfilePolicyV1::from_policy(&policy_with(vec![source_profile_hash()])),
+        )
+        .expect("der Bestand muss sich oeffnen lassen");
+        assert_eq!(
+            backend.format_package_outcome(),
+            ea_archive_fs::FormatPackageOutcomeV1::Deferred,
+            "die Fixture MUSS einen Bestand OHNE Beiwerk hinterlassen"
+        );
+        fs::remove_file(&lock_file).expect("die Sperrdatei muss entfernbar sein");
+        for (path_hint, bytes) in complete.fixture.blobs() {
+            backend.materialize_for_test(path_hint, bytes);
+        }
+        Self {
+            _lock: lock,
+            root,
+            backend,
+            anchor: complete.anchor(),
+        }
+    }
+
+    /// Ein Kopf, der `count` Blobs BEHAUPTET, und ein leerer Index.
+    ///
+    /// Er belegt, dass der Leser die Blobgrenze aus dem KOPF durchsetzt, bevor
+    /// er einen Index anfasst — sonst muesste ein Angreifer erst 1 048 577
+    /// Indexsaetze mitliefern, um die Grenze ueberhaupt zu erreichen.
+    #[must_use]
+    pub fn synthetic_index_claiming(count: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(ea_archive_fs::BUNDLE_HEADER_BYTES_V1);
+        bytes.extend_from_slice(&ea_archive_fs::BUNDLE_MAGIC_V1);
+        bytes.extend_from_slice(
+            &u64::try_from(count)
+                .expect("die Blobzahl der Fixture passt in u64")
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&0_u64.to_be_bytes());
+        bytes
+    }
+}

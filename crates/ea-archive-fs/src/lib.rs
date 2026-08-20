@@ -18,6 +18,8 @@
 //! Alles hier ist SYNCHRON, wie der ganze Rust-Kern. Blockierendes Datei- und
 //! Netz-I/O ist unter dem `spawn_blocking`-Modell der Shell korrekt.
 
+mod bundle;
+mod bundle_error;
 mod controlled_network;
 mod format_package;
 mod health;
@@ -25,6 +27,11 @@ mod local_path;
 mod profile_migration;
 mod publication_queue;
 
+pub use bundle::{
+    ArchiveBundleSource, BUNDLE_FILE_EXTENSION_V1, BUNDLE_HEADER_BYTES_V1, BUNDLE_MAGIC_V1,
+    BundleExportReport, write_archive_bundle,
+};
+pub use bundle_error::BundleError;
 pub use controlled_network::{
     AtRestEncryptedStoreV1, ControlledNetworkBackend, LocalCommitComponentV1,
     ProvenLocalCommitComponentV1,
