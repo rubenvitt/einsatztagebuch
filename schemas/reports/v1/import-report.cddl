@@ -1,0 +1,64 @@
+; Kanonisches Urbild des importProtocolHash. Bleibt lokal, wird nie archiviert.
+;
+; `importProtocolHash` sitzt an einer PFLICHTPOSITION von
+; `imported-provenance-v1` (`schemas/payload/v1/payload.cddl`:125-129,
+; `schemas/payload/v1/incident.schema.json`:152-160). Ohne ein normatives
+; Urbild wuerde dort ein geratener 32-Byte-Wert unwiderruflich versiegelt.
+;
+; Die Regel benutzt die BESTEHENDE Objektkonvention und fuehrt keine neue
+; Domainkonstante ein (D-B01, `crates/ea-crypto/src/digest.rs`:21, :63-66):
+;
+;   importProtocolHash = SHA-256("EINSATZARCHIV-OBJECT-v1" || exactImportReportV1Bytes)
+;
+; Kanonisierung, damit zwei Implementierungen dieselben Bytes erzeugen:
+;
+;   1. Feste Arrayreihenfolge wie unten. Keine Position ist optional, keine
+;      darf entfallen. Deterministisches CBOR: keine unbestimmten Laengen,
+;      keine Gleitkommazahlen, keine doppelten Kartenschluessel.
+;   2. `warnings` und `errors` sortieren aufsteigend nach
+;      `(row, column, code)`, eine `null`-Spalte VOR jeder `tstr`-Spalte und
+;      `column` byteweise verglichen. Das ist die EINZIGE Abweichung von der
+;      Autorenreihenfolge und existiert fuer die Reproduzierbarkeit.
+;   3. `input-file-hash` ist ein roher, domainfreier `SHA-256` ueber die
+;      exakten Eingabebytes — derselbe Wert, den der Trockenlauf meldet, damit
+;      Buchungsgleichheit und Protokollinhalt EINE Zahl benutzen.
+;   4. `header-line` traegt keine Byte-Order-Mark und keinen Zeilenabschluss.
+;   5. Textpositionen sind NFC-normalisiert wie `normalize_text`
+;      (`crates/ea-schema/src/model.rs`:1524-1526).
+;   6. `source-id` ist `"csv-persons"` oder `"csv-vehicles"` und
+;      `source-format-version` ist `1`. Der Quellbezeichner benennt die
+;      Importquelle und keine Stammdatenzeile.
+;
+; Der Codebereich ist GESCHLOSSEN und in der Grammatik benannt, nicht bloss im
+; Kommentar: nur so lehnt auch `cddl_cat::validate_cbor_bytes` einen
+; ungepinnten Code ab und nicht allein der Kodierer. Fehler sind
+; 0 byte-order-mark-present, 1 input-not-utf8, 2 unknown-header,
+; 3 duplicate-header-column, 4 access-format-detected, 5 field-count-mismatch,
+; 6 empty-required-value, 7 invalid-boolean, 8 duplicate-master-id,
+; 9 value-not-in-closed-set, 10 value-too-long; Warnungen sind
+; 11 inactive-row-imported und 12 trailing-empty-line-skipped. Die
+; Klassifikation Fehler-gegen-Warnung ist pro Code fest und nie pro
+; Aufrufstelle. Die Codes 0..4 sind dateiweit und tragen `row = 0` und
+; `column = null`.
+import-report-v1 = [
+  1,                                 ; report-version, fest
+  source-kind: 0 / 1,                ; 0 = persons, 1 = vehicles
+  source-id: tstr,                   ; identisch mit provenance.sourceId
+  source-format-version: uint,       ; identisch mit provenance.sourceFormatVersion
+  input-file-hash: bstr .size 32,    ; SHA-256 der EXAKTEN Eingabebytes, ohne Domain
+  header-line: tstr,                 ; exakte akzeptierte Headerzeile
+  imported-at: int,                  ; Epoch-Millis, i64
+  row-count-total: uint,
+  row-count-accepted: uint,
+  row-count-rejected: uint,
+  warnings: [* import-issue-v1],
+  errors:   [* import-issue-v1]
+]
+
+import-issue-v1 = [
+  row: uint,                         ; 1-basiert, 0 = dateiweit
+  column: tstr / null,               ; exakter Headername oder null
+  code: import-issue-code-v1
+]
+
+import-issue-code-v1 = 0..12

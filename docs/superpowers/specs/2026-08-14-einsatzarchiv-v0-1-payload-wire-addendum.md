@@ -5,8 +5,10 @@ Datum: 2026-08-14
 Dieser Nachtrag ist normativ für v0.1. Er schließt die Klartext-Payload-Wire-
 Repräsentation, die reproduzierbare Zeitzonenbasis und die fachliche Basis der
 Einsatznummern-Eindeutigkeit vor der Implementierung von `ea-schema`. Die
-CBOR-Grammatik in `schemas/payload/v1/payload.cddl` und die fünf unveränderlichen
-Hex-Vektoren sind maschinenlesbare Bestandteile dieses Vertrags.
+CBOR-Grammatik in `schemas/payload/v1/payload.cddl`, die CBOR-Grammatik des
+Importprotokoll-Urbilds in `schemas/reports/v1/import-report.cddl` und die fünf
+unveränderlichen Hex-Vektoren sind maschinenlesbare Bestandteile dieses
+Vertrags.
 
 ## 1. Autorität und Fail-closed-Grenze
 
@@ -152,6 +154,21 @@ Dabei ist `revision` exakt `[0, revisionNumber:uint] / [1, changedAt:int]` und
 `importedProvenance` exakt
 `[sourceId:tstr, sourceFormatVersion:uint, importProtocolHash:bstr .size 32]`.
 Patientenidentifizierende Felder sind nicht registriert.
+
+Der `importProtocolHash` hat ein normatives Urbild. Es ist `import-report-v1`
+nach `schemas/reports/v1/import-report.cddl` mit fester Arrayreihenfolge, und
+die Rechenregel benutzt die bestehende Objektkonvention ohne neue
+Domainkonstante:
+
+```text
+importProtocolHash = SHA-256("EINSATZARCHIV-OBJECT-v1" || exactImportReportV1Bytes)
+```
+
+Die exakten `import-report-v1`-Bytes MÜSSEN lokal in der verschlüsselten
+Writer-Datenbank aufbewahrt werden; ohne sie existiert kein nachprüfbares
+Urbild für die Provenienzzusage. Die Vektoren liegen additiv unter
+`vectors/reports/import-report-v1/`. Ein Writer erzeugt `revision`
+ausschließlich als `[0, revisionNumber:uint]`.
 
 Die Rust-Semantik von Task 7 erzwingt zusätzlich: Einsatznummer 1..64 Zeichen,
 Keyword/Referenz 1..128 Zeichen, höchstens 200 Personen und 100 Fahrzeuge,

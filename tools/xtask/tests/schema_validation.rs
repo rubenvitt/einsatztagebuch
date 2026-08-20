@@ -13,6 +13,6 @@ fn validate_schemas_checks_payload_cddl_and_all_five_literal_vectors() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "validated 7 CDDL, 7 JSON schemas, 5 payload vectors, and compatibility matrix\n"
+        "validated 8 CDDL, 7 JSON schemas, 5 payload vectors, 1 report vector, and compatibility matrix\n"
     );
 }

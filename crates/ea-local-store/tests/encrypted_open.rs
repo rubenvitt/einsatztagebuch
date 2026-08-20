@@ -3,6 +3,7 @@
 use std::{
     fs,
     path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,6 +16,9 @@ const KEYED_SEED: [u8; 32] = [0x5a; 32];
 /// Der Startwert eines Providers, in dem NIE ein Datenbankschluessel erzeugt
 /// wurde. Er ist zugleich die Kontoinstanz, unter der der Griff adressiert.
 const KEYLESS_SEED: [u8; 32] = [0xa5; 32];
+
+/// Die laufende Nummer der Harness-Wurzel dieses Prozesses.
+static HARNESS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Eine Rohdatei, die die Datenbank angelegt hat.
 pub struct RawFile {
@@ -33,8 +37,18 @@ impl StoreHarness {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("ea-local-store-{}-{nanos}", std::process::id()));
+        // Der Zaehler ist TRAGEND und keine Verzierung: die beiden Tests dieses
+        // Ziels laufen als Faeden EINES Prozesses, also ist `process::id()` fuer
+        // beide gleich, und `SystemTime::now()` liefert unter Last durchaus
+        // zweimal denselben Wert. Zwei gleiche Wurzeln hiessen, dass das
+        // `remove_dir_all` des zweiten Harness die gerade geoeffnete Datenbank
+        // des ersten unter den Fuessen wegloescht — beobachtet als
+        // `EA-STORE-DATABASE` in einem vollen `--workspace`-Lauf.
+        let unique = HARNESS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "ea-local-store-{}-{nanos}-{unique}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let provider = InMemoryKeyProvider::new_for_test(KEYED_SEED);

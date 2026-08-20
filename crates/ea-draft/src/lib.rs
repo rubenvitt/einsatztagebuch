@@ -4,7 +4,7 @@
 //! ihn verschluesselt, speichert ihn als Vergleich-und-Setze und gibt ihn nach
 //! einem Neustart unveraendert zurueck.
 //!
-//! Drei Zusagen tragen sie:
+//! Fuenf Zusagen tragen sie:
 //!
 //! 1. **Zwei Verschluesselungen uebereinander.** Die Nutzlast liegt als
 //!    AEAD-Chiffrat unter einem eigenen `draftDEK`, BEVOR die Zeile SQLCipher
@@ -23,25 +23,34 @@
 //!    Entwurf steht, oder ein DAUERHAFT leerer Entwurf steht. Ein durabler
 //!    `PreparedFinalization` gewinnt an jedem Eingang
 //!    ([`PREPARED_FINALIZATION_BEATS_DISCARD_INTENT`]).
+//! 5. **Stammdaten werden importiert, nie erfunden.** [`CsvImporter`] nimmt
+//!    GENAU zwei eingefrorene Kopfzeilen an, hasht die exakten Eingabebytes und
+//!    trennt Trockenlauf von Buchung. Die exakten `import-report-v1`-Bytes
+//!    bleiben aufbewahrt, damit der in einer Momentaufnahme versiegelte
+//!    `importProtocolHash` ein nachpruefbares Urbild hat.
 //!
 //! Alle Methoden sind synchron, wie der ganze Rust-Kern; `Arc<dyn
 //! DraftRepository>` ist damit trivial konstruierbar.
 #![forbid(unsafe_code)]
 
 mod autosave;
+mod csv_import;
 mod discard;
 mod fault;
 mod incident_number;
 mod lock;
+mod master_data;
 mod model;
 mod operator_profile;
 mod repository;
 
 pub use autosave::AutosaveDraftRepository;
+pub use csv_import::{CsvImporter, ImportError};
 pub use discard::{DiscardPhase, DiscardService};
 pub use fault::{DiscardFaultPoint, PREPARED_FINALIZATION_BEATS_DISCARD_INTENT, RestartState};
 pub use incident_number::IncidentNumberRegister;
 pub use lock::DraftLock;
+pub use master_data::{MasterDataError, MasterDataRepository};
 pub use model::{
     DiscardIntent, DiscardOutcome, Draft, DraftError, PreparedFinalizationMarker, SavedDraft,
 };

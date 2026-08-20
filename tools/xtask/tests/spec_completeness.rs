@@ -2943,3 +2943,157 @@ fn layout_usize_constant(layout: &str, name: &str) -> usize {
         .parse()
         .unwrap_or_else(|error| panic!("{name} must be a decimal literal: {error}"))
 }
+
+// ---------------------------------------------------------------------------
+// `import-report-v1` — das normative Urbild des `importProtocolHash`.
+// ---------------------------------------------------------------------------
+
+/// Die zwoelf Positionen von `import-report-v1`, in Dokumentreihenfolge.
+///
+/// Die Reihenfolge IST der Vertrag: `importProtocolHash` ist ein Hash ueber
+/// genau diese Bytefolge, und eine vertauschte Position ergaebe einen anderen
+/// Hash bei unveraendertem Inhalt.
+const IMPORT_REPORT_POSITIONS_V1: [&str; 12] = [
+    "1,",
+    "source-kind:",
+    "source-id:",
+    "source-format-version:",
+    "input-file-hash:",
+    "header-line:",
+    "imported-at:",
+    "row-count-total:",
+    "row-count-accepted:",
+    "row-count-rejected:",
+    "warnings:",
+    "errors:",
+];
+
+fn import_report_cddl() -> String {
+    read_required("schemas/reports/v1/import-report.cddl")
+}
+
+/// Der Rumpf von `import-report-v1` OHNE die erlaeuternde Prosa davor.
+///
+/// Die Positionspruefung laeuft ausschliesslich auf diesem Ausschnitt: die
+/// Kopfkommentare nennen jeden Codenamen ebenfalls, und eine Suche ueber das
+/// ganze Dokument fiele auf die Prosa statt auf die Grammatik.
+fn import_report_body(cddl: &str) -> String {
+    let at = cddl
+        .find("import-report-v1 = [")
+        .expect("die Grammatik muss import-report-v1 deklarieren");
+    let tail = &cddl[at..];
+    let end = tail
+        .find("\n]")
+        .expect("import-report-v1 muss mit `]` schliessen");
+    tail[..end].to_owned()
+}
+
+/// Ein `import-report-v1`-Wert mit frei waehlbarer Positionszahl und Codeliste.
+fn import_report_cbor(positions: u64, codes: &[u64]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(128);
+    let mut encoder = minicbor::Encoder::new(&mut bytes);
+    encoder
+        .array(positions)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.str("csv-persons"))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x91; 32]))
+        .and_then(|encoder| encoder.str("id,display_name,role,active"))
+        .and_then(|encoder| encoder.i64(1_760_000_000_000))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.array(0))
+        .and_then(|encoder| encoder.array(codes.len() as u64))
+        .expect("das Kodieren in einen Vec kann nicht fehlschlagen");
+    for code in codes {
+        encoder
+            .array(3)
+            .and_then(|encoder| encoder.u8(1))
+            .and_then(|encoder| encoder.str("display_name"))
+            .and_then(|encoder| encoder.u64(*code))
+            .expect("das Kodieren in einen Vec kann nicht fehlschlagen");
+    }
+    if positions > 12 {
+        encoder
+            .u8(0)
+            .expect("das Kodieren in einen Vec kann nicht fehlschlagen");
+    }
+    bytes
+}
+
+#[test]
+fn import_report_cddl_carries_its_twelve_positions_in_order() {
+    let cddl = import_report_cddl();
+    cddl::pest_bridge::cddl_from_pest_str_checked(&cddl)
+        .expect("die Importberichtsgrammatik muss vollstaendig parsen");
+    let body = import_report_body(&cddl);
+    let mut previous = 0;
+    for position in IMPORT_REPORT_POSITIONS_V1 {
+        let at = body
+            .find(position)
+            .unwrap_or_else(|| panic!("import-report-v1 nennt die Position {position} nicht"));
+        assert!(
+            at >= previous,
+            "die Position {position} steht nicht in der festgelegten Reihenfolge"
+        );
+        previous = at;
+    }
+    for name in ["import-issue-v1", "import-issue-code-v1 = 0..12"] {
+        assert!(cddl.contains(name), "die Grammatik nennt {name} nicht");
+    }
+    // Jeder gepinnte Code der Rust-Seite steht NAMENTLICH mit seiner
+    // Diskriminante in der normativen Grammatik. Ohne diese Zusicherung koennte
+    // ein Code umbenannt oder umnummeriert werden, ohne dass das Dokument, das
+    // ihn schliesst, davon erfaehrt.
+    for code in ea_format::ImportIssueCodeV1::ALL {
+        let named = format!("{} {}", code.code(), code.name());
+        assert!(
+            cddl.contains(&named),
+            "die Grammatik nennt den Code {named} nicht"
+        );
+    }
+    assert_eq!(
+        ea_format::ImportIssueCodeV1::ALL.len(),
+        13,
+        "der Codebereich 0..12 hat dreizehn Mitglieder"
+    );
+}
+
+#[test]
+fn import_report_cddl_rejects_a_thirteenth_position_and_an_unpinned_code() {
+    let cddl = import_report_cddl();
+    let twelve = import_report_cbor(12, &[6, 9]);
+    assert!(
+        cddl_cat::validate_cbor_bytes("import-report-v1", &cddl, &twelve).is_ok(),
+        "die zwoelfstellige Gestalt muss angenommen werden"
+    );
+    assert!(
+        ea_cbor::validate(&twelve, ea_cbor::ParserLimits::V1).is_ok(),
+        "die zwoelfstellige Gestalt muss kanonisch sein"
+    );
+    let thirteen = import_report_cbor(13, &[6, 9]);
+    assert!(
+        cddl_cat::validate_cbor_bytes("import-report-v1", &cddl, &thirteen).is_err(),
+        "eine dreizehnte Position muss abgelehnt werden"
+    );
+    let unpinned = import_report_cbor(12, &[13]);
+    assert!(
+        cddl_cat::validate_cbor_bytes("import-report-v1", &cddl, &unpinned).is_err(),
+        "ein Code jenseits von 0..12 muss abgelehnt werden"
+    );
+    // Und die dateiweite Gestalt — `null`-Spalte — bleibt gueltig.
+    let mut bytes = Vec::with_capacity(64);
+    let mut encoder = minicbor::Encoder::new(&mut bytes);
+    encoder
+        .array(3)
+        .and_then(|encoder| encoder.u8(0))
+        .and_then(|encoder| encoder.null())
+        .and_then(|encoder| encoder.u8(0))
+        .expect("das Kodieren in einen Vec kann nicht fehlschlagen");
+    assert!(
+        cddl_cat::validate_cbor_bytes("import-issue-v1", &cddl, &bytes).is_ok(),
+        "eine dateiweite Zeile mit null-Spalte muss angenommen werden"
+    );
+}

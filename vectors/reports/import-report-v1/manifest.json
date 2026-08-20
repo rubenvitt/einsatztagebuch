@@ -1,0 +1,23 @@
+{
+  "entries": [
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "import-report/persons-two-issues-in-one-row.bin",
+      "fileSha256": "c66a5575af64a67aa57c938224f764cabd993565ce4aa495366d2cfaacd12859",
+      "inputBytes": "",
+      "intermediateDigests": {
+        "objectHash": "7869104a5f0ad9a428287bbb88f04cb2784f29bbf7f2bc6ce4613713352d48c1"
+      },
+      "name": "import-report/persons-two-issues-in-one-row",
+      "objectBytes": "8c01006b6373762d706572736f6e730158209191919191919191919191919191919191919191919191919191919191919191781b69642c646973706c61795f6e616d652c726f6c652c6163746976651b00000199c82cc000030201818302666163746976650b8283036c646973706c61795f6e616d6506830364726f6c6509",
+      "schemaId": "import-report-v1",
+      "source": {
+        "commit": "ea-format::encode_import_report",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    }
+  ]
+}

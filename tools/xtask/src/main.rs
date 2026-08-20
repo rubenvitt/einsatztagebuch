@@ -822,6 +822,85 @@ fn validate_payload_vector_file(
         .map_err(|error| format!("payload vector {relative} violates {root}: {error:?}"))
 }
 
+/// Die additive Vektorfamilie des `import-report-v1`-Urbilds.
+///
+/// Sie liegt NEBEN den Stufe-1-Familien und beruehrt keine von ihnen:
+/// `STAGE_ONE_VECTOR_FAMILIES` bleibt unveraendert, kein bestehendes Manifest
+/// und keine bestehende Vektordatei wird gelesen, umsortiert oder neu
+/// geschrieben.
+const IMPORT_REPORT_VECTOR_FAMILY: &str = "vectors/reports/import-report-v1";
+
+/// Der Wurzelbezeichner der Grammatik, gegen die die Familie validiert wird.
+const IMPORT_REPORT_CDDL_ROOT: &str = "import-report-v1";
+
+/// Dekodiert eine strikt kleingeschriebene Hexzeichenkette aus einem Manifest.
+fn decode_manifest_hex(context: &str, input: &str) -> Result<Vec<u8>, String> {
+    if input.is_empty() || !input.len().is_multiple_of(2) {
+        return Err(format!(
+            "{context} must contain an even, nonempty number of hexadecimal digits"
+        ));
+    }
+    input
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Ok(byte - b'0'),
+                b'a'..=b'f' => Ok(byte - b'a' + 10),
+                _ => Err(format!("{context} contains a non-lowercase-hex digit")),
+            };
+            Ok((digit(pair[0])? << 4) | digit(pair[1])?)
+        })
+        .collect()
+}
+
+/// Treibt jeden Vektor der Importberichtsfamilie durch Kanonisierung und
+/// Grammatik.
+///
+/// Der Rueckgabewert ist die Zahl der geprueften Vektoren; die Berichtszeile
+/// nennt sie, damit ein stillschweigend leeres Verzeichnis nicht als Erfolg
+/// durchgeht. Anders als die Payload-Vektoren liegen diese als ROHE Bytes und
+/// nicht als Hexzeilen: das Urbild ist genau die Bytefolge, die gehasht wird.
+fn validate_import_report_vectors(root: &Path, cddl: &str) -> Result<usize, String> {
+    let family = root.join(IMPORT_REPORT_VECTOR_FAMILY);
+    let manifest_relative = format!("{IMPORT_REPORT_VECTOR_FAMILY}/manifest.json");
+    let manifest_text = fs::read_to_string(family.join("manifest.json"))
+        .map_err(|error| format!("failed to read {manifest_relative}: {error}"))?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
+        .map_err(|error| format!("invalid {manifest_relative}: {error}"))?;
+    let entries = manifest
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{manifest_relative} must carry an entries array"))?;
+    if entries.is_empty() {
+        return Err(format!("{manifest_relative} must name at least one vector"));
+    }
+    for entry in entries {
+        let file = entry
+            .get("file")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{manifest_relative} entry lacks a file"))?;
+        let relative = format!("{IMPORT_REPORT_VECTOR_FAMILY}/{file}");
+        let bytes = fs::read(family.join(file))
+            .map_err(|error| format!("failed to read {relative}: {error}"))?;
+        ea_cbor::validate(&bytes, ea_cbor::ParserLimits::V1)
+            .map_err(|error| format!("report vector {relative} is not canonical: {error}"))?;
+        cddl_cat::validate_cbor_bytes(IMPORT_REPORT_CDDL_ROOT, cddl, &bytes).map_err(|error| {
+            format!("report vector {relative} violates {IMPORT_REPORT_CDDL_ROOT}: {error:?}")
+        })?;
+        let recorded = entry
+            .get("objectBytes")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{manifest_relative} entry {file} lacks objectBytes"))?;
+        if decode_manifest_hex(&format!("{manifest_relative} entry {file}"), recorded)? != bytes {
+            return Err(format!(
+                "report vector {relative} differs from the objectBytes its manifest records"
+            ));
+        }
+    }
+    Ok(entries.len())
+}
+
 fn validate_schemas(root: &Path) -> Result<(), String> {
     let archive_paths = [
         "schemas/archive/v1/archive.cddl",
@@ -853,6 +932,15 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     let audit = fs::read_to_string(root.join(audit_path))
         .map_err(|error| format!("failed to read {audit_path}: {error}"))?;
     validate_cddl_document(audit_path, &audit)?;
+
+    // Das normative Urbild des `importProtocolHash` (D-B01). `validate_schemas`
+    // ist eine HARTE Pfadliste ohne Verzeichnisscanner: eine nicht
+    // registrierte `.cddl`-Datei waere wirkungslos.
+    let import_report_path = "schemas/reports/v1/import-report.cddl";
+    let import_report = fs::read_to_string(root.join(import_report_path))
+        .map_err(|error| format!("failed to read {import_report_path}: {error}"))?;
+    validate_cddl_document(import_report_path, &import_report)?;
+    let report_vectors = validate_import_report_vectors(root, &import_report)?;
 
     let payload_path = "schemas/payload/v1/payload.cddl";
     let payload = fs::read_to_string(root.join(payload_path))
@@ -904,7 +992,15 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     let addendum = fs::read_to_string(&addendum_path)
         .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
     validate_addendum_review(&addendum)?;
-    println!("validated 7 CDDL, 7 JSON schemas, 5 payload vectors, and compatibility matrix");
+    let report_vector_noun = if report_vectors == 1 {
+        "report vector"
+    } else {
+        "report vectors"
+    };
+    println!(
+        "validated 8 CDDL, 7 JSON schemas, 5 payload vectors, \
+         {report_vectors} {report_vector_noun}, and compatibility matrix"
+    );
     Ok(())
 }
 

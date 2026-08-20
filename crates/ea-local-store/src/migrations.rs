@@ -35,6 +35,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0002_discard.sql",
         sql: include_str!("../migrations/0002_discard.sql"),
     },
+    Migration {
+        version: MASTER_DATA_MIGRATION_VERSION,
+        name: "0003_master_data.sql",
+        sql: include_str!("../migrations/0003_master_data.sql"),
+    },
 ];
 
 /// Die Fassung, in der die Uebergangstabelle des Verwerfens entsteht.
@@ -47,6 +52,15 @@ pub const MIGRATIONS: &[Migration] = &[
 /// migrierten Datenbank wahr; sie bleibt stehen, weil eine Datenbank, die vor
 /// dieser Migration entstand, sie beim Oeffnen noch durchlaeuft.
 pub const DISCARD_MIGRATION_VERSION: u32 = 2;
+
+/// Die Fassung, in der die Stammdatentabellen und die Aufbewahrungstabelle der
+/// exakten `import-report-v1`-Bytes entstehen.
+///
+/// Sie wird HIER benannt und nicht in `ea-draft`, weil dieses Modul die
+/// Registratur besitzt. `0001_writer.sql` legt diese Tabellen ausdruecklich
+/// NICHT nachtraeglich an: eine registrierte Migration wird nie mehr
+/// geaendert.
+pub const MASTER_DATA_MIGRATION_VERSION: u32 = 3;
 
 const CREATE_REGISTRY: &str = "CREATE TABLE IF NOT EXISTS schema_migration (\
      version INTEGER PRIMARY KEY, \

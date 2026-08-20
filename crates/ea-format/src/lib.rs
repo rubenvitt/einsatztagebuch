@@ -6,6 +6,7 @@ mod eds;
 mod eip;
 mod esr;
 mod etb;
+mod import_report;
 mod local_audit;
 mod object;
 mod parser;
@@ -30,6 +31,10 @@ pub use etb::{
     PolicyFieldsV1, RegistryChangeV1, RegistryEventFieldsV1, RetentionPolicyFieldsV1,
     RootCertificateFieldsV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1,
     WriterTransitionFieldsV1, validate_destruction_targets,
+};
+pub use import_report::{
+    ImportIssueCodeV1, ImportIssueV1, ImportReportFieldsV1, ImportReportV1, ImportRowErrorV1,
+    ImportSourceKindV1, encode_import_report,
 };
 pub use local_audit::{
     AdminRootContextV1, ArchiveProfileMigrationContextV1, BindingLifecycleContextV1,

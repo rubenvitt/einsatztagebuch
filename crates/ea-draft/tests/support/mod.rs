@@ -26,10 +26,13 @@ use std::{
 
 use ea_crypto::{AEAD_NONCE_SIZE, CanonicalPublicCoseKey, SecretBytes, aead_open};
 use ea_draft::{
-    AutosaveDraftRepository, DiscardFaultPoint, DiscardPhase, DiscardService, DraftError,
-    IncidentNumberRegister, OperatorProfileRepository, PreparedFinalizationMarker, RestartState,
+    AutosaveDraftRepository, CsvImporter, DiscardFaultPoint, DiscardPhase, DiscardService,
+    DraftError, IncidentNumberRegister, MasterDataRepository, OperatorProfileRepository,
+    PreparedFinalizationMarker, RestartState,
 };
-use ea_format::{CertificateKindV1, KeyProtectionProfileV1, OperatorRoleV1};
+use ea_format::{
+    CertificateKindV1, ImportReportV1, ImportSourceKindV1, KeyProtectionProfileV1, OperatorRoleV1,
+};
 use ea_key_provider::{InMemoryKeyProvider, KeyHandle, KeyProvider, SecretPurpose};
 use ea_local_store::{EncryptedDatabase, StoreValue};
 use ea_operator::{
@@ -1143,4 +1146,107 @@ fn original_associated_data(draft_id: Id16, revision: u64) -> Vec<u8> {
     associated.extend_from_slice(draft_id.as_bytes());
     associated.extend_from_slice(&revision.to_be_bytes());
     associated
+}
+
+// ---------------------------------------------------------------------------
+// Die Fixture der Stammdaten- und Importpruefung.
+// ---------------------------------------------------------------------------
+
+/// Die Fixture des CSV-Imports und der Stammdatenmomentaufnahmen.
+///
+/// Sie oeffnet die verschluesselte Datenbank EINMAL und gibt sie an Importeur
+/// und Ablage weiter. Ein Neustart wird hier nicht dargestellt: kein Test
+/// dieses Tasks braucht einen, und ein Traeger, der die Datenbank fallen lassen
+/// koennte, waere Flaeche ohne Nachfrage.
+pub struct ImportHarness {
+    _lock: MutexGuard<'static, ()>,
+    /// Die temporaere Wurzel. Sie bleibt gehalten, damit der Pfad ueber die
+    /// Lebensdauer der Fixture stabil ist.
+    root: PathBuf,
+    /// Der Schluesselspeicher. Er bleibt gehalten, weil der Datenbankschluessel
+    /// IN ihm entstanden ist und nirgends sonst liegt.
+    provider: Arc<InMemoryKeyProvider>,
+    database: Arc<EncryptedDatabase>,
+}
+
+impl ImportHarness {
+    #[must_use]
+    pub fn new() -> Self {
+        let lock = take_harness_lock();
+        let root = fixture_root("import");
+        let provider = Arc::new(InMemoryKeyProvider::new_for_test(FIXTURE_PROVIDER_SEED));
+        let database = open_database(&root, &provider);
+        Self {
+            _lock: lock,
+            root,
+            provider,
+            database,
+        }
+    }
+
+    /// Der Importeur auf DERSELBEN Datenbank.
+    #[must_use]
+    pub fn importer(&self) -> CsvImporter {
+        CsvImporter::new(Arc::clone(&self.database))
+    }
+
+    /// Die Stammdatenablage auf DERSELBEN Datenbank.
+    #[must_use]
+    pub fn master_data_repo(&self) -> MasterDataRepository {
+        MasterDataRepository::new(Arc::clone(&self.database))
+    }
+
+    /// Trockenlauf UND Buchung in einem Schritt, fuer die Tests, denen der
+    /// Trockenlauf selbst nichts sagt.
+    ///
+    /// Gibt den Bericht zurueck, weil die Provenienzpruefung genau seinen
+    /// `importProtocolHash` gegen die Momentaufnahme stellt. Ohne `must_use`:
+    /// den meisten Tests sagt der Bericht nichts, sie wollen nur den Zustand.
+    pub fn import_persons(&self, csv: &[u8]) -> ImportReportV1 {
+        self.import(ImportSourceKindV1::Persons, csv)
+    }
+
+    pub fn import_vehicles(&self, csv: &[u8]) -> ImportReportV1 {
+        self.import(ImportSourceKindV1::Vehicles, csv)
+    }
+
+    fn import(&self, kind: ImportSourceKindV1, csv: &[u8]) -> ImportReportV1 {
+        let importer = self.importer();
+        let report = importer
+            .dry_run(kind, csv)
+            .expect("die Fixture-Eingabe muss annehmbar sein");
+        importer
+            .commit(&report, csv)
+            .expect("ein fehlerfreier Bericht muss buchbar sein");
+        report
+    }
+
+    /// Die Zahl der Zeilen des Einsatznummernregisters.
+    ///
+    /// Der Importpfad darf sie NIE erhoehen: eine Einsatznummer entsteht unter
+    /// der ausschliesslichen Writer-Sperre beim Abschluss und nirgends sonst.
+    #[must_use]
+    pub fn consumed_incident_number_count(&self) -> u64 {
+        let row = self
+            .database
+            .query_row(
+                "SELECT count(*) FROM incident_number_register",
+                &[] as &[StoreValue],
+            )
+            .expect("das Register muss zaehlbar sein")
+            .expect("count(*) liefert immer eine Zeile");
+        u64::try_from(row.integer(0).unwrap()).unwrap()
+    }
+
+    /// Der Pfad der Fixture-Wurzel.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Der Schluesselspeicher der Fixture.
+    #[must_use]
+    pub fn provider(&self) -> &Arc<InMemoryKeyProvider> {
+        &self.provider
+    }
 }

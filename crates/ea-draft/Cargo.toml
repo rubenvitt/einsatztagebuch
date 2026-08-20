@@ -8,6 +8,13 @@ license.workspace = true
 [dependencies]
 # `aead_seal`/`aead_open` unter dem `draftDEK`, plus die Geheimnistraeger.
 ea-crypto.workspace = true
+# `encode_import_report`, `ImportReportV1`, `ImportIssueCodeV1` und
+# `ImportSourceKindV1`. Der deterministische Kodierer des
+# `import-report-v1`-Urbilds lebt in `ea-format` und NICHT hier: eine zweite
+# Typmenge waere genau der Weg, auf dem falsche Bytes entstehen. Zugleich
+# liefert die Kante `KeyProtectionProfileV1` fuer die Fixture, die dafuer bis
+# Task 7 eine Entwicklungskante brauchte.
+ea-format.workspace = true
 # Ein- und Auspacken des `draftDEK`; der Schluessel selbst liegt im
 # Schluesselspeicher des Betriebssystems.
 ea-key-provider.workspace = true
@@ -18,6 +25,12 @@ ea-local-store.workspace = true
 # verlangt deshalb eine frische Wiederanmeldung fuer GENAU
 # `ReauthPurpose::DiscardDraft` (`design.md`:256, :432).
 ea-operator.workspace = true
+# Die GESCHLOSSENEN Stufe-1-Vereinigungen der Stammdatenmomentaufnahmen:
+# `PersonnelSnapshotV1`, `VehicleSnapshotV1`, `MasterDataRevisionV1` und
+# `ImportedProvenanceV1`. Sie werden KONSUMIERT und nie neu deklariert; ein
+# eigener Momentaufnahmetyp der Stufe 2 waere eine zweite Quelle derselben
+# Wahrheit.
+ea-schema.workspace = true
 # `PreexistingEffectiveNow`. `OperatorSessionProof::is_valid_for` nimmt
 # ausschliesslich die Zeit eines gewaehlten Registry-Head; eine freie Zeit ist
 # in Stufe 1 nicht baubar, und `ea-operator` re-exportiert den Typ nicht. Ohne
@@ -29,6 +42,13 @@ ea-types.workspace = true
 # Frischer `draftDEK`, frische AEAD-Nonce und frische Entwurfskennung aus dem
 # CSPRNG des Betriebssystems.
 getrandom.workspace = true
+# Der ROHE, domainfreie SHA-256 ueber die EXAKTEN Eingabebytes einer
+# CSV-Datei — `inputFileHash` des Trockenlaufs und des Protokollurbilds.
+# `ea-crypto` fuehrt AUSSCHLIESSLICH domaingetrennte Hashfunktionen, und
+# `verification_report_hash` ist per Dokumentation auf Berichtsbytes
+# beschraenkt; eine neue Domainkonstante entsteht hier ausdruecklich nicht
+# (D-B01).
+sha2.workspace = true
 # NFC-Normalisierung der Einsatznummer VOR dem Registerschluessel, damit kein
 # Aufrufer den Schluessel mit einer zerlegten Form aufweichen kann.
 unicode-normalization.workspace = true
@@ -56,10 +76,6 @@ test-support = []
 # Pfadkante hier waere eine zweite, danebenlaufende Quelle derselben Wahrheit
 # und bricht jene Zusicherung.
 ea-draft = { workspace = true, features = ["test-support"] }
-# `KeyProtectionProfileV1::OsWrapped` fuer den Datenbankschluessel der Fixture.
-# AUSDRUECKLICH nur hier: die Crate selbst kodiert nichts und traegt deshalb
-# keine Wire-Format-Kante.
-ea-format.workspace = true
 ea-key-provider = { workspace = true, features = ["test-support"] }
 # `contains_canary` — der Nachweis, dass der Entwurfstext nicht im Klartext in
 # der Datenbankdatei liegt.

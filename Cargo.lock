@@ -752,6 +752,7 @@ dependencies = [
  "ea-key-provider",
  "ea-local-store",
  "ea-operator",
+ "ea-schema",
  "ea-testkit",
  "ea-time",
  "ea-trust",
@@ -759,6 +760,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "minicbor",
+ "sha2",
  "unicode-normalization",
 ]
 
