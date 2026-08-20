@@ -615,21 +615,23 @@ impl WriterService<'_> {
         let incident = self.build_incident(input, &profile, record_id, effective_now)?;
         let uniqueness = incident.incident_uniqueness_key()?;
         let year = i32::from(uniqueness.local_civil_year());
-        // Die Nummer wird nur im ABSCHLIESSENDEN Lauf BEANSPRUCHT. Eine
-        // Vorschau, die sie verbraucht, machte ihren eigenen Abschluss
-        // unmoeglich — und sie ist ausdruecklich wiederholbar. Der Vorschaulauf
-        // FRAGT deshalb, und beide Wege liefern denselben Code.
-        let taken = match stop {
-            Stop::Confirmed(_) => self
-                .incident_numbers
-                .claim(profile.organization_id(), year, &incident_number)
-                .is_err_and(|error| error == ea_draft::DraftError::IncidentNumberTaken),
-            _ => {
-                self.incident_numbers
-                    .contains(profile.organization_id(), year, &incident_number)?
-            }
-        };
-        if taken {
+        // GEFRAGT wird hier, BEANSPRUCHT wird nach dem letzten fail-closed
+        // Tor (Schritt 5, unten). Der Brief verlangt den Anspruch „unter dieser
+        // Sperre, vor dem Serialisieren", und sein GRUND — „refuse a taken
+        // number before serializing" — ist mit der Frage vollstaendig erfuellt.
+        //
+        // Der DAUERHAFTE Anspruch darf hier nicht stehen:
+        // `IncidentNumberRegister` hat `claim` und `contains` und KEINE
+        // Freigabe. Faellt danach noch ein Tor — ein geaenderter Head, eine
+        // geaenderte Policy, ein fortgeschrittenes `effectiveNow`, alles Faelle,
+        // die laut Addendum „eine neue Vorschau und eine neue Bestaetigung"
+        // ergeben sollen und keine Umgehung —, waere die Nummer fuer immer
+        // verbrannt, und der Bediener muesste sich fuer denselben realen Einsatz
+        // eine andere ausdenken.
+        if self
+            .incident_numbers
+            .contains(profile.organization_id(), year, &incident_number)?
+        {
             return Err(WriterError::IncidentNumberTaken);
         }
         state.draft_record_bytes = encode_payload(&PayloadV1::Incident(incident))?;
@@ -698,6 +700,19 @@ impl WriterService<'_> {
             }
         } else if decision == StaleDecision::StaleAcknowledgeable {
             return Err(WriterError::StaleAckRequired);
+        }
+
+        // Der DAUERHAFTE Anspruch auf die Einsatznummer — hinter dem letzten
+        // fail-closed Tor und vor der ersten Ziehung eines Geheimnisses. Nur
+        // der abschliessende Lauf beansprucht; eine Vorschau, die sie
+        // verbrauchte, machte ihren eigenen Abschluss unmoeglich.
+        if matches!(stop, Stop::Confirmed(_))
+            && self
+                .incident_numbers
+                .claim(profile.organization_id(), year, &incident_number)
+                .is_err_and(|error| error == ea_draft::DraftError::IncidentNumberTaken)
+        {
+            return Err(WriterError::IncidentNumberTaken);
         }
 
         // ---- 6. Die Geheimnisse EINMAL ziehen und den entryHash bilden ----
@@ -1180,37 +1195,46 @@ impl WriterService<'_> {
 impl WriterService<'_> {
     /// Veroeffentlicht ein vorbereitetes Objekt unter seinem Zielnamen.
     ///
-    /// ZWEI Schritte, und beide sind IDEMPOTENT — genau das verlangt
-    /// `design.md` §9.3 Schritt 10: „Bereits vorhandene Zielnamen sind nur bei
-    /// bytegleichem Objekt zulaessig".
+    /// Der REGELWEG ist der atomare Rename aus dem Staging, und das ist keine
+    /// Vorliebe: `create_if_absent` legt die Zieladresse an und schreibt DANN
+    /// (`create_new` auf der ENDADRESSE), also waere ein Absturz zwischen
+    /// Anlegen und fertigem Schreiben eine halb geschriebene Datei UNTER ihrem
+    /// endgueltigen Commit-Marker-Namen — genau der Fall, den die Reihenfolge
+    /// der Archivtransaktion ausschliesst („ohne diese Reihenfolge waere ein
+    /// halb geschriebenes Objekt unter seinem endgueltigen Namen sichtbar",
+    /// `crates/ea-archive/src/transaction.rs`). Schritt 8 hat jedes Byte
+    /// geschrieben, gegengelesen und geflusht; veroeffentlicht wird aus GENAU
+    /// diesen Bytes.
     ///
-    /// 1. `create_if_absent` auf der ZIELADRESSE. Es traegt eine bytegleiche
-    ///    Wiederholung und liefert `EA-ARCHIVE-BYTE-CONFLICT` bei abweichenden
-    ///    Bytes. Damit ist die Veroeffentlichung selbst wiederholbar, und die
-    ///    Wiederherstellung darf denselben Weg gehen wie der glatte Lauf, ohne
-    ///    zu wissen, wie weit die abgebrochene Publikation gekommen war.
-    /// 2. Der Rename der Staging-Adresse auf dasselbe Ziel. Er VEROEFFENTLICHT
-    ///    nichts mehr — das Ziel steht schon — sondern VERWIRFT die
-    ///    Staging-Datei; `atomic_rename_same_fs` sagt fuer die bytegleiche
-    ///    Wiederholung ausdruecklich zu, dass die Quelladresse verworfen wird
-    ///    und das Ziel unveraendert bleibt (`crates/ea-archive/src/backend.rs`).
+    /// Der Rename ist zugleich IDEMPOTENT, wie `design.md` §9.3 Schritt 10 es
+    /// verlangt („Bereits vorhandene Zielnamen sind nur bei bytegleichem Objekt
+    /// zulaessig"): `atomic_rename_same_fs` traegt eine bytegleiche
+    /// Wiederholung und verwirft dabei die Quelladresse.
     ///
-    /// Scheitert NUR der zweite Schritt, bleibt eine temporaere Datei liegen.
-    /// Das ist ein GESUNDHEITSBEFUND und keine Beschaedigung: das Ziel traegt
-    /// die richtigen Bytes, und der Schreibport hat bewusst keine
-    /// Loeschprimitive, mit der sich eine Staging-Datei anders entfernen liesse.
-    /// Genau dieser Fall tritt ein, wenn eine Wiederherstellung eine bereits
-    /// veroeffentlichte Adresse noch einmal anfasst — die Staging-Datei ist
-    /// dann schon vom ersten Rename verbraucht.
+    /// `create_if_absent` kommt NUR zum Zug, wenn die Staging-Adresse schon
+    /// verbraucht ist — der Wiederholungsfall einer Wiederherstellung, deren
+    /// erster Anlauf diese Adresse bereits veroeffentlicht hatte. Dort ist
+    /// nichts mehr halb zu schreiben: entweder die Bytes stimmen ueberein, oder
+    /// es faellt fail-closed `EA-ARCHIVE-BYTE-CONFLICT`.
     fn publish_object(
         &self,
         target: &ArchivePath,
         bytes: &ea_format::ExactObjectBytes,
     ) -> Result<(), WriterError> {
-        self.backend.create_if_absent(target, bytes)?;
-        self.backend.sync_file(target)?;
         let staging = crate::marker::staging_path(target)?;
-        let _ = self.backend.atomic_rename_same_fs(&staging, target);
+        if self
+            .backend
+            .atomic_rename_same_fs(&staging, target)
+            .is_err()
+        {
+            // Die Staging-Adresse ist VERBRAUCHT — ein erster Rename hat sie
+            // schon veroeffentlicht. Nur DANN etabliert `create_if_absent` die
+            // Bytes direkt: es traegt eine bytegleiche Wiederholung und faellt
+            // sonst fail-closed auf `EA-ARCHIVE-BYTE-CONFLICT`. Das ist der
+            // Wiederholungsfall der Wiederherstellung und nicht der Regelweg.
+            self.backend.create_if_absent(target, bytes)?;
+        }
+        self.backend.sync_file(target)?;
         Ok(())
     }
 }
@@ -1232,6 +1256,24 @@ fn chain_nodes(inventory: &ea_archive::ArchiveInventory) -> Vec<ChainNode> {
             writer_certificate_hash: fields.writer_certificate_hash,
             writer_transition_event_hash: fields.writer_transition_event_hash,
             kind: ChainNodeKind::EntryPackage,
+        });
+    }
+    // Ein Stub eines autorisiert geloeschten Eintrags BESETZT seine Sequenz.
+    // Liesse man ihn weg, sahe `build_chain` dort eine Luecke, `verified_head`
+    // hielte darunter an, und Schritt 3 verlangte auf einem GESUNDEN Bestand
+    // den externen Kopfabgleich. `ChainNodeKind::DestroyedStub` existiert
+    // genau dafuer.
+    for stub in inventory.destroyed() {
+        let fields = stub.value().signed_manifest().manifest().fields();
+        nodes.push(ChainNode {
+            chain_id: fields.chain_id,
+            chain_sequence: fields.chain_sequence,
+            previous_entry_hash: fields.previous_entry_hash,
+            entry_hash: stub.value().entry_hash(),
+            object_hash: stub.object_hash(),
+            writer_certificate_hash: fields.writer_certificate_hash,
+            writer_transition_event_hash: fields.writer_transition_event_hash,
+            kind: ChainNodeKind::DestroyedStub,
         });
     }
     nodes

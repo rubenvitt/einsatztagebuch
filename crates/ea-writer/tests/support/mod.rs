@@ -666,6 +666,18 @@ impl WriterHarness {
         self.head.registry_version()
     }
 
+    /// Ob eine Einsatznummer im Register dieses Jahres schon verbraucht ist.
+    #[must_use]
+    pub fn incident_number_is_taken(&self, number: &str) -> bool {
+        IncidentNumberRegister::new(Arc::clone(&self.database))
+            .contains(
+                trust_support::organization(),
+                FIXTURE_LOCAL_CIVIL_YEAR,
+                number,
+            )
+            .expect("das Register muss lesbar sein")
+    }
+
     /// Beansprucht die Nummer der Fixture VORAB im Register.
     ///
     /// Sie isoliert die Anspruchspruefung von der Kettenfortschreibung: ein
@@ -761,11 +773,25 @@ fn seed_operator_profile(database: &EncryptedDatabase, built: &BuiltLine) {
 /// `previewHash` nachrechnen kann.
 #[must_use]
 pub fn valid_incident() -> FinalizationInputV1 {
+    incident_numbered(FIXTURE_INCIDENT_NUMBER)
+}
+
+/// Ein GUELTIGER Einsatz mit einer ANDEREN Einsatznummer.
+///
+/// Er unterscheidet sich in genau einem Feld, und dieses Feld geht ueber den
+/// `recordDigest` in den `previewHash` ein — er ist damit der Aufbau, mit dem
+/// sich eine Vorschau von einem Inhalt unterscheiden laesst.
+#[must_use]
+pub fn other_incident() -> FinalizationInputV1 {
+    incident_numbered("2026-000043")
+}
+
+fn incident_numbered(number: &str) -> FinalizationInputV1 {
     FinalizationInputV1 {
         timezone: "Europe/Berlin".to_owned(),
         source: NativeSourceV1::new("ea.writer.fixture", 1)
             .expect("die Quelle der Fixture ist gueltig"),
-        human_incident_number: FIXTURE_INCIDENT_NUMBER.to_owned(),
+        human_incident_number: number.to_owned(),
         occurred_at: OccurredAtV1::new(UnixMillis::new(FIXTURE_NOW_MS - 3_600_000), None)
             .expect("das Intervall der Fixture ist gueltig"),
         keyword: KeywordV1::free_text("Verkehrsunfall")

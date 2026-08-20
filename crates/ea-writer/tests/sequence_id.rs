@@ -158,3 +158,49 @@ fn a_second_finalization_against_a_consumed_sequence_blocks() {
         "kein zweiter Eintrag"
     );
 }
+
+/// Eine ABGEWIESENE Finalisierung verbrennt die Einsatznummer NICHT.
+///
+/// `IncidentNumberRegister` hat `claim` und `contains` und KEINE Freigabe. Stand
+/// der dauerhafte Anspruch vor dem Vorschauvergleich, dann machte jede
+/// fail-closed Ablehnung — ein geaenderter Head, eine geaenderte Policy, ein
+/// fortgeschrittenes `effectiveNow` — die Nummer fuer immer unbenutzbar, und
+/// der Bediener muesste sich fuer denselben realen Einsatz eine andere
+/// ausdenken. Das Addendum verlangt an genau dieser Stelle „eine neue Vorschau
+/// und eine neue Bestaetigung" und ausdruecklich keine Umgehung — eine
+/// verbrannte Nummer waere weder das eine noch das andere.
+#[test]
+fn a_refused_finalization_does_not_burn_the_incident_number() {
+    let harness = WriterHarness::with_incident();
+    let source = harness.source();
+    let service = harness.service(&source);
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+
+    // Eine Vorschau ueber einen ANDEREN Inhalt, gegen den Abschluss des
+    // ersten gestellt: der Inhalt geht ueber den `recordDigest` in den
+    // `previewHash` ein, also weicht die unter der Sperre nachgerechnete
+    // Vorschau ab.
+    let foreign = service
+        .preview(&proof, support::other_incident())
+        .expect("die zweite Vorschau muss entstehen");
+    let error = service
+        .finalize(&proof, valid_incident(), &foreign)
+        .expect_err("eine fremde Vorschau MUSS fail-closed abgewiesen werden");
+    assert_eq!(error.code(), "EA-REGISTRY-STALE-ACK-PREVIEW-MISMATCH");
+
+    // Und die Nummer ist FREI — der dauerhafte Anspruch liegt hinter dem Tor.
+    assert!(
+        !harness.incident_number_is_taken("2026-000042"),
+        "die abgewiesene Finalisierung darf die Nummer nicht verbrauchen"
+    );
+    assert!(!harness.incident_number_is_taken("2026-000043"));
+
+    // Der Beleg, dass die Nummer wirklich noch benutzbar ist.
+    let preview = service
+        .preview(&proof, valid_incident())
+        .expect("die Vorschau muss erneut entstehen");
+    service
+        .finalize(&proof, valid_incident(), &preview)
+        .expect("derselbe Einsatz MUSS danach abschliessbar sein");
+    assert!(harness.incident_number_is_taken("2026-000042"));
+}
