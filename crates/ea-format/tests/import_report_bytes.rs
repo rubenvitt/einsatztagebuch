@@ -269,3 +269,50 @@ fn the_committed_vector_reproduces_the_encoder_and_its_manifest_expectation() {
         "das Manifest nennt die Vektordatei nicht"
     );
 }
+
+#[test]
+fn a_report_that_claims_another_source_format_version_is_refused() {
+    // Kanonisierungsregel 6 sagt „`source-format-version` ist `1`". Die
+    // Grammatik sagt an dieser Position nur `uint`, und `CsvImporter::commit`
+    // vergleicht Zaehler und Befundlisten, nicht die Fassung. Bliebe die Regel
+    // Prosa, buchte ein selbstgebauter Bericht ueber denselben Eingabebytes eine
+    // beliebige `sourceFormatVersion` in die `ImportedProvenanceV1`, die Task 11
+    // VERSIEGELT — irreversibel und ohne zweiten Leser. Der Konstruktor ist die
+    // einzige Stelle, an der die Regel jeden Aufrufer bindet.
+    assert_eq!(ImportReportV1::SOURCE_FORMAT_VERSION, 1);
+    for claimed in [0_u64, 2, 7, u64::MAX] {
+        // `FormatError` traegt bewusst kein `Debug`; der Code ist die
+        // vergleichbare Fassung derselben Aussage.
+        let refused = ImportReportV1::new(persons_fields_with_source_format_version(claimed))
+            .err()
+            .map(ea_format::FormatError::code);
+        assert_eq!(
+            refused,
+            Some("EA-FORMAT-SHAPE"),
+            "Fassung {claimed} wurde gebucht statt abgelehnt"
+        );
+    }
+    let pinned = ImportReportV1::new(persons_fields_with_source_format_version(
+        ImportReportV1::SOURCE_FORMAT_VERSION,
+    ));
+    assert!(
+        pinned.is_ok(),
+        "die gepinnte Fassung muss weiterhin baubar sein"
+    );
+}
+
+/// Ein sonst gueltiger Personenbericht mit frei gesetzter Quellformatfassung.
+fn persons_fields_with_source_format_version(version: u64) -> ImportReportFieldsV1 {
+    ImportReportFieldsV1 {
+        source_kind: ImportSourceKindV1::Persons,
+        source_format_version: version,
+        input_file_hash: Hash32::try_from([0x91; 32].as_slice()).unwrap(),
+        header_line: ImportSourceKindV1::Persons.header_line().to_owned(),
+        imported_at: support::FIXTURE_IMPORTED_AT_MS,
+        row_count_total: 1,
+        row_count_accepted: 1,
+        row_count_rejected: 0,
+        warnings: Vec::new(),
+        errors: Vec::new(),
+    }
+}

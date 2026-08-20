@@ -19,5 +19,7 @@
       },
       "suiteId": "EINSATZARCHIV-SUITE-1"
     }
-  ]
+  ],
+  "family": "reports",
+  "version": "import-report-v1"
 }

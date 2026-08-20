@@ -261,6 +261,8 @@ impl ImportRowErrorV1 {
 /// koennte sonst von ihm abweichen.
 pub struct ImportReportFieldsV1 {
     pub source_kind: ImportSourceKindV1,
+    /// MUSS [`ImportReportV1::SOURCE_FORMAT_VERSION`] sein; der Konstruktor
+    /// lehnt jede andere Fassung mit [`FormatError::Shape`] ab.
     pub source_format_version: u64,
     /// Roher, DOMAINFREIER `SHA-256` ueber die exakten Eingabebytes.
     pub input_file_hash: Hash32,
@@ -310,6 +312,19 @@ impl ImportReportV1 {
     /// Die eingefrorene Fassung des Berichts an Position `report-version`.
     pub const REPORT_VERSION: u8 = 1;
 
+    /// Die EINZIGE zulaessige Fassung des Quellformats.
+    ///
+    /// Kanonisierungsregel 6 des Briefs sagt „`source-format-version` ist `1`",
+    /// und die Grammatik sagt an dieser Position nur `uint`. Bliebe die Regel
+    /// Prosa, koennte ein selbstgebauter Bericht ueber denselben Eingabebytes
+    /// eine beliebige Fassung fuehren — und sie landete ueber
+    /// `master_person.source_format_version` in der `ImportedProvenanceV1`, die
+    /// Task 11 versiegelt. Geprueft wird HIER und nur hier: der Konstruktor ist
+    /// der einzige Weg zu einem Bericht, also bindet er auch den reinen
+    /// `ea-format`-Aufrufer. Ein zweiter Vergleich in `CsvImporter::commit`
+    /// waere eine Pruefung, die nicht mehr fehlschlagen kann.
+    pub const SOURCE_FORMAT_VERSION: u64 = 1;
+
     /// Baut den Bericht, sortiert beide Listen und kodiert ihn EINMAL.
     ///
     /// Sortiert wird HIER und nicht im Kodierer: sonst gaebe der Leser eine
@@ -319,12 +334,17 @@ impl ImportReportV1 {
     /// # Errors
     ///
     /// [`FormatError::Shape`], wenn die Kopfzeile nicht die der Quelle ist,
-    /// wenn die Zeilenzahlen nicht aufgehen oder wenn ein Code in der falschen
-    /// Liste steht; [`FormatError::Duplicate`] bei zwei identischen Befunden;
+    /// wenn `source_format_version` nicht
+    /// [`ImportReportV1::SOURCE_FORMAT_VERSION`] ist, wenn die Zeilenzahlen
+    /// nicht aufgehen oder wenn ein Code in der falschen Liste steht;
+    /// [`FormatError::Duplicate`] bei zwei identischen Befunden;
     /// [`FormatError::Cbor`], wenn die erzeugten Bytes die strenge
     /// Kanonisierungspruefung nicht bestehen.
     pub fn new(mut fields: ImportReportFieldsV1) -> Result<Self, FormatError> {
         if fields.header_line != fields.source_kind.header_line() {
+            return Err(FormatError::Shape);
+        }
+        if fields.source_format_version != Self::SOURCE_FORMAT_VERSION {
             return Err(FormatError::Shape);
         }
         if fields

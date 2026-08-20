@@ -429,7 +429,7 @@ impl CsvImporter {
 
         let report = ImportReportV1::new(ImportReportFieldsV1 {
             source_kind,
-            source_format_version: SOURCE_FORMAT_VERSION_V1,
+            source_format_version: ImportReportV1::SOURCE_FORMAT_VERSION,
             input_file_hash: raw_sha256(input),
             header_line: expected_header.to_owned(),
             imported_at: unix_millis_now(),
@@ -446,9 +446,6 @@ impl CsvImporter {
         Ok(ParsedImport { report, rows })
     }
 }
-
-/// Die Fassung des Quellformats. Beide Kopfzeilen sind Fassung `1`.
-const SOURCE_FORMAT_VERSION_V1: u64 = 1;
 
 struct ParsedImport {
     report: ImportReportV1,

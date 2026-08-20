@@ -362,6 +362,28 @@ fn a_forged_report_over_the_same_bytes_is_refused() {
             .unwrap()
             .is_none()
     );
+
+    // Die Fassung des Quellformats deckt dieser Abgleich NICHT ab: `commit`
+    // vergleicht Zaehler und Befundlisten. Sie ist deshalb im Konstruktor
+    // gepinnt — ein Bericht mit einer erfundenen `sourceFormatVersion` entsteht
+    // gar nicht und kann darum nicht in die von Task 11 versiegelte
+    // `ImportedProvenanceV1` gelangen.
+    assert!(
+        ImportReportV1::new(ImportReportFieldsV1 {
+            source_kind: ImportSourceKindV1::Persons,
+            source_format_version: 7,
+            input_file_hash: honest.input_file_hash(),
+            header_line: ImportSourceKindV1::Persons.header_line().to_owned(),
+            imported_at: honest.imported_at(),
+            row_count_total: honest.total(),
+            row_count_accepted: honest.accepted(),
+            row_count_rejected: honest.rejected(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        })
+        .is_err(),
+        "eine andere Quellformatfassung als 1 ist nicht buchbar, weil sie nicht baubar ist"
+    );
 }
 
 #[test]
