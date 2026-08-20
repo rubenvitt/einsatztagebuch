@@ -1,0 +1,36 @@
+[package]
+name = "ea-ui-contracts"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# `QuarantineReason` — der Grund, aus dem ein Objekt isoliert wurde. Er wird
+# RE-EXPORTIERT und nie neu erklaert: eine zweite Gruendemenge waere genau die
+# Abweichung, die die Driftschranke dieser Crate verhindern soll.
+ea-archive.workspace = true
+# `SyncStatus` und `DetailCause`. Die vier Sync-Beschriftungen sind woertliche
+# Oberflaechenkopie aus den globalen Randbedingungen, und die Detailursache
+# steht DANEBEN und ist nie ein fuenfter Zustand. Beide kommen von hier und
+# werden hier nur weitergegeben.
+ea-archive-fs.workspace = true
+# `SignerRole`. Eine Rolle, die ueber die Guelltigkeit einer Signatur
+# mitentscheidet, gehoert nicht in eine handgeschriebene TypeScript-Liste.
+ea-crypto.workspace = true
+# `LocalAuditOutcomeV1`, `KeyProtectionProfileV1` und `OperatorRoleV1` — die
+# drei Sicherheitsaufzaehlungen, die dort definiert bleiben, wo sie entstanden
+# sind.
+ea-format.workspace = true
+# Die GESCHLOSSENEN Stufe-1-Vereinigungen der Momentaufnahmen und des
+# Vorgangs. `IncidentUniquenessKey` ist die Identitaet EINES Vorgangs, und die
+# Bestaetigungsansicht muss benennen, welchen Vorgang sie abschliesst.
+ea-schema.workspace = true
+# `Id16`, `ChainSequence`, `UnixMillis`, `OrganizationId` — kein neuer
+# Bezeichnertyp.
+ea-types.workspace = true
+# `FinalizationPreview`, `FinalizeOutcome`, `FinalizationPhase` und
+# `RecoveryOutcome`. Die Ansichtsmodelle entstehen AUS diesen Werten; ohne
+# diese Kante waeren sie eine daneben laufende zweite Beschreibung derselben
+# Finalisierung.
+ea-writer.workspace = true

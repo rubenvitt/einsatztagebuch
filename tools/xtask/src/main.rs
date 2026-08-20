@@ -195,6 +195,18 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          positive list. The Reader is a browser PWA and never writes an archive \
          object at all.",
     ),
+    (
+        "ea-ui-contracts",
+        "carries a file-writing binary in `src/bin/emit-ts.rs`, and \
+         `cargo check --target wasm32-unknown-unknown -p ...` checks binaries \
+         too, so the positive list would turn the wasm32 command red. The \
+         binary is the only writer of \
+         `apps/desktop/src/bridge/generated-contracts.ts`; the crate itself \
+         performs no cryptographic operation and produces no archive byte, and \
+         it re-exports the security enums of `ea-format`, `ea-crypto`, \
+         `ea-archive` and `ea-archive-fs` instead of re-declaring them, which \
+         is why it also inherits their host-side edges.",
+    ),
 ];
 
 /// Reports when the running compiler is not the one `rust-toolchain.toml` pins.

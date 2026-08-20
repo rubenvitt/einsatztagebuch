@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "apps/cli", "apps/desktop/src-tauri"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "apps/cli", "apps/desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -32,6 +32,7 @@ ea-testkit = { path = "crates/ea-testkit" }
 ea-time = { path = "crates/ea-time" }
 ea-trust = { path = "crates/ea-trust" }
 ea-types = { path = "crates/ea-types" }
+ea-ui-contracts = { path = "crates/ea-ui-contracts" }
 ea-verify = { path = "crates/ea-verify" }
 ea-writer = { path = "crates/ea-writer" }
 hex = "=0.4.3"
