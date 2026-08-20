@@ -37,6 +37,14 @@ ea-verify.workspace = true
 # Der Gate-Lauf `cargo test --workspace --all-targets --locked` laeuft OHNE
 # `--all-features`; ohne diesen Default uebersetzten die fuenf
 # Integrationstests dort nicht.
+#
+# RELEASEAUSSCHLUSS, namentlich: die drei MUTIERENDEN Methoden
+# `overwrite_for_test`, `materialize_for_test` und `remove_for_test` liegen
+# hinter genau diesem Feature. `overwrite_for_test` umgeht Create-if-absent und
+# `remove_for_test` loescht Archivbytes; ein Releasebau der Stufe 7 baut diese
+# Crate deshalb mit `--no-default-features` und traegt keine der drei in seiner
+# oeffentlichen API. `tools/xtask/tests/workspace.rs` pinnt diesen Absatz
+# zusammen mit der Lage der drei Methoden hinter dem cfg.
 default = ["test-support"]
 test-support = []
 

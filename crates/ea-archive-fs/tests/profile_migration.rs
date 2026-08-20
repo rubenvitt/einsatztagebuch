@@ -156,3 +156,51 @@ fn every_durable_step_has_a_named_fault_point_before_and_after_it() {
         );
     }
 }
+
+#[test]
+fn a_pending_old_profile_publication_stops_the_switch_before_the_inventory() {
+    let harness = support::migration_harness_with_a_pending_publication();
+    let migrator = harness.migrator();
+
+    // Das Ziel der Warteschlange ist getrennt, die Publikation bleibt also
+    // `Upload ausstehend`. Ein Wechsel, der sie zuruecklaesst, verliert genau
+    // die Objekte, die noch nicht im Quellinventar stehen — und zwar unbemerkt,
+    // weil Quell- und Zielinventar dann uebereinstimmen.
+    assert_eq!(
+        migrator
+            .run_with(support::profile_migration_proof())
+            .unwrap_err()
+            .code(),
+        "EA-ARCHIVE-PENDING-PUBLICATION"
+    );
+    assert_eq!(
+        migrator.active_profile_hash().as_bytes(),
+        support::source_profile_hash().as_bytes()
+    );
+    assert_eq!(
+        migrator.staged_object_count(),
+        0,
+        "der Abbruch liegt VOR der Uebernahme"
+    );
+    assert!(migrator.finalization_lock().is_available());
+}
+
+#[test]
+fn a_finished_old_profile_publication_lets_the_switch_proceed() {
+    let harness = support::migration_harness_with_a_pending_publication();
+    // Wiederverbindung: die aufgeschobene Publikation laeuft byteidentisch zu
+    // Ende, und ERST DANN traegt der Wechsel.
+    harness.reconnect_pending_publications();
+    let migrator = harness.migrator();
+    let result = migrator
+        .run_with(support::profile_migration_proof())
+        .expect("nach dem Beenden der Publikation MUSS der Wechsel tragen");
+    assert_eq!(
+        migrator.active_profile_hash().as_bytes(),
+        support::target_profile_hash().as_bytes()
+    );
+    assert_eq!(
+        result.source_inventory_hash().as_bytes(),
+        result.target_inventory_hash().as_bytes()
+    );
+}

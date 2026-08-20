@@ -44,6 +44,12 @@ pub enum ArchiveBackendError {
     ReauthMismatch,
     /// Ein eingespielter Fehlerpunkt der Migration hat gegriffen.
     MigrationFault,
+    /// Eine Publikation des alten Profils ist noch nicht beendet.
+    ///
+    /// Ein Profilwechsel, der eine aufgeschobene Publikation zurueckliesse,
+    /// verlore genau die Objekte, die noch nicht im Quellinventar stehen
+    /// (`design.md` §11.5, Schritt 2). Er bricht deshalb fail-closed ab.
+    PendingPublication,
     /// Quell- und Zielinventar stimmen nicht ueberein.
     InventoryMismatch,
     /// Die vollstaendige Offlineverifikation des Ziels hat nicht getragen.
@@ -70,6 +76,7 @@ impl ArchiveBackendError {
             Self::MissingLocalCommitComponent => "EA-ARCHIVE-MISSING-LOCAL-COMMIT",
             Self::ReauthMismatch => "EA-ARCHIVE-REAUTH-MISMATCH",
             Self::MigrationFault => "EA-ARCHIVE-MIGRATION-FAULT",
+            Self::PendingPublication => "EA-ARCHIVE-PENDING-PUBLICATION",
             Self::InventoryMismatch => "EA-ARCHIVE-INVENTORY-MISMATCH",
             Self::VerificationFailed => "EA-ARCHIVE-VERIFICATION-FAILED",
             Self::AuditFailed => "EA-ARCHIVE-AUDIT-FAILED",

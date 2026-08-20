@@ -39,7 +39,15 @@ use ea_types::Hash32;
 pub const CONTROL_FILES_V1: [&str; 2] = [".ea-writer.lock", ".ea-active-profile"];
 
 /// Das Verzeichnis, in dem der Capability-Test arbeitet.
-const CAPABILITY_SCRATCH_DIR: &str = ".ea-capability";
+///
+/// Es liegt UNTERHALB der Bestandswurzel, damit der Rename-Nachweis auf
+/// demselben Dateisystem laeuft — und es ist deshalb ausdruecklich NICHT aus
+/// dem Inventar und aus der Lesesicht ausgeblendet: Bytes, die hier
+/// liegenbleiben, weil ein Capability-Test abgebrochen ist, sind ein
+/// Gesundheitsbefund (temporaere Datei) und keine unsichtbare Restmenge. Der
+/// Name gehoert damit zum Layout-/Gesundheitsvertrag und nicht zu einer
+/// Filterliste; `ArchiveHealthCheckV1` liest ihn.
+pub const CAPABILITY_SCRATCH_DIR_V1: &str = ".ea-capability";
 
 /// Der Capability-Testvektor eines Profils.
 ///
@@ -290,6 +298,11 @@ impl LocalPathBackend {
     }
 
     /// Alle wurzelrelativen Pfade unter `root`, ohne die Kontrolldateien.
+    ///
+    /// Ausgeblendet werden GENAU die zwei Kontrolldateien an der Wurzel und
+    /// sonst nichts — die Kratzwurzel des Capability-Tests eingeschlossen.
+    /// Ein Verzeichnis am NAMEN auszublenden hiesse, dass Bytes darin fuer
+    /// Inventar, Verifikation und Waisenerkennung unsichtbar waeren.
     fn walk(&self) -> Result<Vec<String>, ArchiveBackendError> {
         let mut found = Vec::new();
         self.walk_into(&self.root, "", &mut found)?;
@@ -303,10 +316,14 @@ impl LocalPathBackend {
         prefix: &str,
         found: &mut Vec<String>,
     ) -> Result<(), ArchiveBackendError> {
-        let read = match fs::read_dir(directory) {
-            Ok(read) => read,
-            Err(_) => return Ok(()),
-        };
+        // Jeder Lesefehler wird PROPAGIERT und nie als „leeres Verzeichnis"
+        // gelesen. Ein verschluckter `PermissionDenied` machte das Inventar
+        // still kuerzer, und an der Wurzel machte er es LEER — dann waeren
+        // Quell- und Zielinventar eines Profilwechsels beide leer und
+        // bytegleich, und der Zeiger schaltete auf eine Migration um, die
+        // nichts uebernommen hat. Genau diese stille Herabstufung ist
+        // verboten.
+        let read = fs::read_dir(directory).map_err(|_| ArchiveBackendError::Io)?;
         for entry in read {
             let entry = entry.map_err(|_| ArchiveBackendError::Io)?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -317,9 +334,6 @@ impl LocalPathBackend {
             };
             let kind = entry.file_type().map_err(|_| ArchiveBackendError::Io)?;
             if kind.is_dir() {
-                if name == CAPABILITY_SCRATCH_DIR {
-                    continue;
-                }
                 self.walk_into(&entry.path(), &format!("{relative}/"), found)?;
             } else if kind.is_file() && !CONTROL_FILES_V1.contains(&relative.as_str()) {
                 found.push(relative);
@@ -332,6 +346,16 @@ impl LocalPathBackend {
     ///
     /// Erst in eine Nebendatei, dann Flush, dann Rename: ein halb
     /// geschriebener Zeiger waere ein Bestand ohne aktives Profil.
+    ///
+    /// Dies ist die EINZIGE ueberschreibende Schreibstelle dieser Crate, und
+    /// sie ist es mit Absicht: der Zeiger ist eine Aussage ueber die
+    /// INSTALLATION und kein Archivobjekt, und die Ruecknahme eines
+    /// vollzogenen Wechsels schreibt ihn ein zweites Mal mit ANDEREN Bytes
+    /// (Quellprofil, naechsthoehere Generation). Sie laeuft deshalb bewusst
+    /// ueber `fs::rename` und nicht ueber
+    /// [`ArchiveBackend::atomic_rename_same_fs`], die ein bestehendes Ziel
+    /// niemals ersetzt — ein Zeigerwechsel dorthin geleitet endete am
+    /// Bytekonflikt und die Ruecknahme waere unmoeglich.
     ///
     /// # Errors
     ///
@@ -390,7 +414,7 @@ impl LocalPathBackend {
         &self,
         vector: &CapabilityTestVectorV1,
     ) -> Result<CapabilityReportV1, ArchiveBackendError> {
-        let scratch_root = self.root.join(CAPABILITY_SCRATCH_DIR).join(vector.id());
+        let scratch_root = self.root.join(CAPABILITY_SCRATCH_DIR_V1).join(vector.id());
         let _ = fs::remove_dir_all(&scratch_root);
         let scratch = Self::open_scratch(scratch_root.clone(), self.profile.clone())?;
         let report = scratch.capability_probes(vector);
@@ -580,6 +604,25 @@ impl ArchiveBackend for LocalPathBackend {
             && left != right
         {
             return Err(ArchiveBackendError::NotSameFilesystem);
+        }
+        // NICHT KLOBBERND. `fs::rename` ersetzt auf POSIX ein bestehendes Ziel
+        // stillschweigend; genau darueber liesse sich Create-if-absent
+        // umgehen — die Staging-Adresse ist frei, also traegt der Rename, und
+        // die veroeffentlichten Bytes waeren ueberschrieben. Ein bestehendes
+        // Ziel MUSS deshalb bytegleich sein: dann wird die Quelladresse
+        // verworfen und das Ziel bleibt unangetastet. Sonst ist es ein
+        // Bytekonflikt.
+        //
+        // Die exklusive Schreibersperre und die Produktzusage „genau ein
+        // aktiver Writer" schliessen einen zweiten Schreiber zwischen Pruefung
+        // und Rename aus; ohne sie waere auch das `create_new` von
+        // Create-if-absent nur die halbe Aussage.
+        if let Ok(existing) = fs::read(&target) {
+            let staged = fs::read(&source).map_err(|_| ArchiveBackendError::Io)?;
+            if existing != staged {
+                return Err(ArchiveBackendError::ByteConflict);
+            }
+            return fs::remove_file(&source).map_err(|_| ArchiveBackendError::Io);
         }
         fs::rename(&source, &target).map_err(|_| ArchiveBackendError::Io)
     }

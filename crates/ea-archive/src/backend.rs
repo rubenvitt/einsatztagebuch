@@ -64,13 +64,25 @@ pub trait ArchiveBackend: Send + Sync {
     /// [`ArchiveBackendError::FlushFailed`], wenn der Wirt es nicht bestaetigt.
     fn sync_directory(&self, relative: &ArchivePath) -> Result<(), ArchiveBackendError>;
 
-    /// Benennt ATOMAR um, ausschliesslich innerhalb desselben Dateisystems.
+    /// Benennt ATOMAR um, ausschliesslich innerhalb desselben Dateisystems —
+    /// und NIE ueber eine bestehende Zieladresse hinweg.
+    ///
+    /// Das ist die zweite Haelfte von Create-if-absent und keine Zutat: die
+    /// Staging-Stufe schuetzt nur die STAGING-Adresse, und ein Rename, der ein
+    /// bestehendes Ziel ersetzt, hebelte die Zusage „`.eip`-Bytes werden nie
+    /// ueberschrieben" ueber genau den Weg aus, der Veroeffentlichung sicher
+    /// machen soll. Die Semantik ist deshalb dieselbe wie die von
+    /// [`Self::create_if_absent`]: eine bytegleiche Wiederholung traegt (die
+    /// Quelladresse wird verworfen, das Ziel bleibt Byte fuer Byte dasselbe),
+    /// abweichende Bytes am Ziel liefern
+    /// [`ArchiveBackendError::ByteConflict`].
     ///
     /// # Errors
     ///
     /// [`ArchiveBackendError::NotSameFilesystem`], wenn Quelle und Ziel nicht
     /// auf demselben Dateisystem liegen — ABGELEHNT und nie durch Kopieren
-    /// ersetzt.
+    /// ersetzt; [`ArchiveBackendError::ByteConflict`], wenn die Zieladresse
+    /// schon existiert und ANDERE Bytes traegt.
     fn atomic_rename_same_fs(
         &self,
         from: &ArchivePath,

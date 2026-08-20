@@ -159,3 +159,60 @@ fn a_writer_lock_is_released_on_drop() {
         "nach dem Verwerfen des Waechters MUSS die Sperre wieder frei sein"
     );
 }
+
+#[test]
+fn a_second_transaction_never_republishes_a_target_with_other_bytes() {
+    let backend = InMemoryArchiveBackend::new();
+    let mut first = ArchiveTransaction::new(&backend);
+    first.plan(planned_entry());
+    first.commit().expect("die erste Publikation traegt");
+
+    let (entry, _) = support::signed_entry_package();
+    let published = encode_entry_package(&entry).expect("das Eintragspaket kodiert");
+
+    // Die BYTEGLEICHE Wiederholung traegt: Create-if-absent ist idempotent,
+    // und das gilt fuer die Veroeffentlichung genauso.
+    let mut again = ArchiveTransaction::new(&backend);
+    again.plan(planned_entry());
+    again
+        .commit()
+        .expect("eine bytegleiche Wiederholung MUSS idempotent sein");
+    assert_eq!(
+        backend.read(entry_target().as_str()).as_deref(),
+        Some(published.as_bytes())
+    );
+    assert!(
+        !backend.exists(&entry_staging()),
+        "die Staging-Adresse der Wiederholung darf nicht liegenbleiben"
+    );
+
+    // Dieselbe Zieladresse, ANDERE Bytes. Create-if-absent schuetzt nur die
+    // Staging-Adresse — die war frei —, also muss die Veroeffentlichung selbst
+    // fail-closed sein. Ohne das waere „`.eip`-Bytes werden nie
+    // ueberschrieben" ueber genau den Weg umgehbar, der Veroeffentlichung
+    // sicher machen soll.
+    let mut second = ArchiveTransaction::new(&backend);
+    second.plan(StagedObjectV1::new(
+        entry_target(),
+        StagedBytesV1::NonObject(b"andere Bytes unter derselben Adresse".to_vec()),
+    ));
+    assert_eq!(
+        second
+            .commit()
+            .expect_err("eine zweite Publikation mit ANDEREN Bytes MUSS abgewiesen werden")
+            .code(),
+        "EA-ARCHIVE-BYTE-CONFLICT"
+    );
+    assert_eq!(
+        backend.read(entry_target().as_str()).as_deref(),
+        Some(published.as_bytes()),
+        "die veroeffentlichten Bytes MUESSEN unveraendert sein"
+    );
+    // Die abgewiesenen Bytes bleiben unter ihrer Staging-Adresse liegen: die
+    // Ablehnung loescht nichts, und ein liegengebliebenes Staging-Artefakt ist
+    // ein Gesundheitsbefund (temporaere Datei).
+    assert_eq!(
+        backend.read(&entry_staging()).as_deref(),
+        Some(b"andere Bytes unter derselben Adresse".as_slice())
+    );
+}

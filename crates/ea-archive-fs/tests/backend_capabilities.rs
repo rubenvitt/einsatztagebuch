@@ -121,3 +121,119 @@ fn a_directory_flush_addresses_the_carrying_directory_and_not_the_file() {
         vec!["grants/flushed.eag".to_owned()]
     );
 }
+
+#[test]
+fn a_rename_never_overwrites_an_existing_target_on_the_host_filesystem() {
+    let (_guard, backend) = backend("rename-write-once");
+    let target = ArchivePath::in_dir(GRANTS_DIR_V1, "published.eag").expect("gueltige Adresse");
+    let staged = support::staged_path();
+    let published = support::signed_grant_a();
+    let other = support::signed_grant_b();
+
+    backend.create_if_absent(&target, &published).unwrap();
+    backend.create_if_absent(&staged, &other).unwrap();
+
+    // `fs::rename` ersetzt auf POSIX ein bestehendes Ziel stillschweigend.
+    // Genau darueber liesse sich Create-if-absent umgehen: die Staging-Adresse
+    // war frei, also traegt der Rename — und die veroeffentlichten Bytes waeren
+    // ueberschrieben.
+    assert_eq!(
+        backend
+            .atomic_rename_same_fs(&staged, &target)
+            .unwrap_err()
+            .code(),
+        "EA-ARCHIVE-BYTE-CONFLICT"
+    );
+    assert_eq!(
+        backend.read_for_test(target.as_str()).as_deref(),
+        Some(published.as_bytes()),
+        "die veroeffentlichten Bytes MUESSEN unveraendert sein"
+    );
+    assert_eq!(
+        backend.read_for_test(staged.as_str()).as_deref(),
+        Some(other.as_bytes()),
+        "die abgewiesene Quelle bleibt liegen; die Ablehnung loescht nichts"
+    );
+
+    // Die BYTEGLEICHE Veroeffentlichung derselben Adresse traegt und laesst
+    // keine Staging-Datei zurueck: Create-if-absent ist idempotent, und die
+    // Veroeffentlichung ist seine zweite Haelfte.
+    let equal = ArchivePath::in_dir(GRANTS_DIR_V1, "equal.eag").expect("gueltige Adresse");
+    backend.create_if_absent(&equal, &published).unwrap();
+    backend.atomic_rename_same_fs(&equal, &target).unwrap();
+    assert!(
+        !backend.exists_for_test(equal.as_str()),
+        "die bytegleiche Quelle MUSS verworfen sein"
+    );
+    assert_eq!(
+        backend.read_for_test(target.as_str()).as_deref(),
+        Some(published.as_bytes())
+    );
+}
+
+#[test]
+fn capability_scratch_leftovers_stay_visible_to_the_inventory() {
+    let (_guard, backend) = backend("scratch-visible");
+    let leftover = format!(
+        "{}/aborted-run/leftover.bin",
+        ea_archive_fs::CAPABILITY_SCRATCH_DIR_V1
+    );
+    backend.materialize_for_test(&leftover, b"Rest eines abgebrochenen Capability-Tests");
+
+    // Der Skip am VERZEICHNISNAMEN machte diese Bytes fuer Inventar,
+    // Verifikation und Waisenerkennung unsichtbar — und damit die
+    // Vollstaendigkeitszusage des Bestands unwahr.
+    let inventory = backend.inventory().expect("das Inventar muss entstehen");
+    assert!(
+        inventory.content_hash_of(&leftover).is_some(),
+        "Bytes unter der Kratzwurzel MUESSEN inventarisiert werden: {:?}",
+        inventory
+            .entries()
+            .iter()
+            .map(ea_format::ArchiveInventoryEntryV1::relative_path)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        backend.relative_paths_below_for_test(ea_archive_fs::CAPABILITY_SCRATCH_DIR_V1),
+        vec![leftover]
+    );
+
+    // Und der Capability-Test raeumt seine eigene Kratzwurzel weiterhin ab:
+    // ein Lauf darf nichts hinterlassen, das das Inventar dann fuehrt.
+    let before = backend.inventory().expect("das Inventar muss entstehen");
+    backend
+        .run_capability_test(&support::capability_test_vector())
+        .expect("der Capability-Test muss laufen");
+    let after = backend.inventory().expect("das Inventar muss entstehen");
+    assert_eq!(before.entries().len(), after.entries().len());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_directory_makes_the_inventory_fail_closed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_guard, backend) = backend("unreadable-directory");
+    backend
+        .create_if_absent(&support::staged_path(), &support::signed_grant_a())
+        .unwrap();
+    let blocked = std::path::Path::new(backend.root()).join(GRANTS_DIR_V1);
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
+        .expect("die Rechte muessen setzbar sein");
+
+    let outcome = backend.inventory();
+    // Die Rechte werden VOR der Zusicherung zurueckgesetzt, damit die
+    // Temporaerwurzel abraeumbar bleibt.
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755))
+        .expect("die Rechte muessen zuruecksetzbar sein");
+
+    assert_eq!(
+        outcome
+            .expect_err("ein unlesbares Verzeichnis MUSS fail-closed sein")
+            .code(),
+        "EA-ARCHIVE-IO",
+        "ein verschluckter Lesefehler ergaebe ein still kuerzeres Inventar — an der Wurzel ein \
+         LEERES, und dann schaltete ein Profilwechsel auf eine Migration um, die nichts \
+         uebernommen hat"
+    );
+}

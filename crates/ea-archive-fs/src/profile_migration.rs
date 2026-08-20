@@ -19,7 +19,59 @@ use ea_trust::{PreexistingEffectiveNow, decode_trust_anchor};
 use ea_types::{EventId, Hash32};
 use ea_verify::{VerifyOptions, verify_archive};
 
-use crate::LocalPathBackend;
+use crate::{LocalPathBackend, PublicationQueue, SyncStatus};
+
+/// Das QUELLPROFIL eines Wechsels: sein Bestand und seine offenen
+/// Publikationen.
+///
+/// Die Warteschlangen sind KONSTRUKTORPARAMETER und kein Zusatz, weil
+/// `design.md` §11.5 in Schritt 2 zuerst „alle ausstehenden Publikationen des
+/// alten Profils beenden" verlangt und erst danach das Inventar. Ein Wechsel,
+/// der eine aufgeschobene Publikation zuruecklaesst, verliert genau die
+/// Objekte, die noch nicht im Quellinventar stehen — und zwar unbemerkt, weil
+/// beide Inventare dann uebereinstimmen.
+///
+/// Ein Quellprofil ohne Netzziel uebergibt eine leere Liste; das ist eine
+/// AUSSAGE des Aufrufers und keine uebersprungene Pruefung.
+pub struct MigrationSourceV1<'a> {
+    backend: &'a LocalPathBackend,
+    pending: Vec<&'a PublicationQueue>,
+}
+
+impl<'a> MigrationSourceV1<'a> {
+    /// Baut das Quellprofil aus seinem Bestand und seinen Warteschlangen.
+    #[must_use]
+    pub const fn new(backend: &'a LocalPathBackend, pending: Vec<&'a PublicationQueue>) -> Self {
+        Self { backend, pending }
+    }
+
+    /// Der Bestand des Quellprofils.
+    #[must_use]
+    pub const fn backend(&self) -> &'a LocalPathBackend {
+        self.backend
+    }
+
+    /// Beendet jede offene Publikation des Quellprofils.
+    ///
+    /// Sie laeuft ueber `resume`, weil genau das die byteidentische
+    /// Fortsetzung ist. Was danach nicht `synchronisiert` ist, bricht den
+    /// Wechsel ab: eine noch wartende Publikation ist ein Objekt, das das
+    /// Zielprofil nie sehen wuerde.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::PendingPublication`], wenn eine Warteschlange
+    /// nicht `synchronisiert` erreicht; sonst der Fehler des Ziels.
+    fn finish_pending(&self) -> Result<(), ArchiveBackendError> {
+        for queue in &self.pending {
+            let state = queue.resume()?;
+            if state.sync_status() != SyncStatus::Synchronized {
+                return Err(ArchiveBackendError::PendingPublication);
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Ein eingespielter Fehlerpunkt der Migration.
 ///
@@ -185,7 +237,7 @@ struct MigratorState {
 
 /// Der Profilwechsler.
 pub struct ProfileMigrator<'a> {
-    source: &'a LocalPathBackend,
+    source: MigrationSourceV1<'a>,
     target: &'a LocalPathBackend,
     policy: &'a BoundArchiveProfilePolicyV1,
     audit: &'a dyn LocalAuditService,
@@ -206,7 +258,7 @@ impl<'a> ProfileMigrator<'a> {
     ///
     /// Der Kodierfehler des Quellprofils.
     pub fn new(
-        source: &'a LocalPathBackend,
+        source: MigrationSourceV1<'a>,
         target: &'a LocalPathBackend,
         policy: &'a BoundArchiveProfilePolicyV1,
         audit: &'a dyn LocalAuditService,
@@ -214,7 +266,7 @@ impl<'a> ProfileMigrator<'a> {
         effective_now: &'a PreexistingEffectiveNow,
         proof: OperatorSessionProof,
     ) -> Result<Self, ArchiveBackendError> {
-        let active_profile_hash = source.profile_hash()?;
+        let active_profile_hash = source.backend().profile_hash()?;
         Ok(Self {
             source,
             target,
@@ -351,7 +403,7 @@ impl<'a> ProfileMigrator<'a> {
             return Err(ArchiveBackendError::ReauthMismatch);
         }
 
-        let source_profile_hash = self.source.profile_hash()?;
+        let source_profile_hash = self.source.backend().profile_hash()?;
         let target_profile_hash = self.target.profile_hash()?;
         // Fail-closed VOR jeder Kopie: Task 11 wiederholt genau diese Pruefung
         // gegen dieselbe gebundene Policyfassung in der Finalisierung.
@@ -360,7 +412,7 @@ impl<'a> ProfileMigrator<'a> {
         self.fault_at(MigrationFaultPoint::BeforeFinalizationLock)?;
         // Schritt 1: Finalisierung, Profilaenderungen und Objektbereinigung
         // exklusiv sperren.
-        let writer_lock = self.source.acquire_writer_lock()?;
+        let writer_lock = self.source.backend().acquire_writer_lock()?;
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -381,9 +433,14 @@ impl<'a> ProfileMigrator<'a> {
         target_profile_hash: Hash32,
     ) -> Result<MigrationResultV1, ArchiveBackendError> {
         self.fault_at(MigrationFaultPoint::BeforeInventory)?;
-        // Schritt 2: aus den Bytes des alten Profils ein VOLLSTAENDIGES
+        // Schritt 2a: ALLE ausstehenden Publikationen des alten Profils
+        // beenden. Erst danach ist sein Inventar vollstaendig; eine
+        // aufgeschobene Publikation waere ein Objekt, das im Quellinventar
+        // fehlt und deshalb auch im Zielprofil nie erschiene.
+        self.source.finish_pending()?;
+        // Schritt 2b: aus den Bytes des alten Profils ein VOLLSTAENDIGES
         // Objektinventar bilden — Trust, Schemata, Objekte und Berichte.
-        let source_inventory = self.source.inventory()?;
+        let source_inventory = self.source.backend().inventory()?;
         let source_bytes = encode_archive_inventory_list(&source_inventory)
             .map_err(ArchiveBackendError::Format)?;
         let source_inventory_hash = archive_inventory_digest(&source_bytes);
@@ -397,6 +454,7 @@ impl<'a> ProfileMigrator<'a> {
         for entry in source_inventory.entries() {
             let bytes = self
                 .source
+                .backend()
                 .read_relative(entry.relative_path())
                 .ok_or(ArchiveBackendError::Io)?;
             let address = archive_path_of(entry.relative_path())?;
@@ -415,7 +473,7 @@ impl<'a> ProfileMigrator<'a> {
         let anchor = decode_trust_anchor(self.anchor_bytes)
             .map_err(|_| ArchiveBackendError::VerificationFailed)?;
         let source_report = verify_archive(
-            &self.source.as_archive_source(),
+            &self.source.backend().as_archive_source(),
             &anchor,
             VerifyOptions::new(self.effective_now.value()),
         )
@@ -504,7 +562,7 @@ impl<'a> ProfileMigrator<'a> {
                 // Das alte Profil wird ERNEUT inventarisiert. Stimmt sein Hash
                 // noch, ist es lesbar und unangetastet — und genau das ist die
                 // Zusage „die Anwendung loescht es nicht automatisch".
-                source_remains_readable: self.source.inventory().is_ok_and(|inventory| {
+                source_remains_readable: self.source.backend().inventory().is_ok_and(|inventory| {
                     encode_archive_inventory_list(&inventory).is_ok_and(|bytes| {
                         archive_inventory_digest(&bytes).as_bytes()
                             == source_inventory_hash.as_bytes()

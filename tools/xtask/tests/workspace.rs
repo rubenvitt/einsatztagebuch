@@ -403,3 +403,74 @@ fn workspace_serde_is_pinned_with_derive() {
         "serde must enable derive; the desktop DTO surface has no other source for it"
     );
 }
+
+/// Pins the release exclusion of the `ea-archive-fs` test surface.
+///
+/// `test-support` is a DEFAULT feature for a Cargo reason: an integration test
+/// cannot enable a feature of its own crate, and the usual way out — a
+/// self dev-dependency — would rewrite `Cargo.lock`. The residual risk is not
+/// the readers but the three MUTATING methods: `overwrite_for_test` bypasses
+/// create-if-absent and `remove_for_test` deletes archive bytes, so in a
+/// default build both are `pub`. Two things therefore have to hold, and this
+/// test pins both: the manifest names the three methods as a release exclusion
+/// together with the `--no-default-features` release build, and no
+/// `*_for_test` method sits in the crate OUTSIDE the feature gate.
+#[test]
+fn ea_archive_fs_names_its_mutating_test_surface_as_a_release_exclusion() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest_text = fs::read_to_string(root.join("crates/ea-archive-fs/Cargo.toml")).unwrap();
+    let manifest: Value = manifest_text.parse().unwrap();
+    assert_eq!(
+        manifest["features"]["default"].as_array().map(|d| d.len()),
+        Some(1),
+        "test-support stays the single default feature; a second one would widen the release \
+         surface silently"
+    );
+    assert_eq!(
+        manifest["features"]["default"][0].as_str(),
+        Some("test-support")
+    );
+    const MUTATORS: [&str; 3] = [
+        "overwrite_for_test",
+        "materialize_for_test",
+        "remove_for_test",
+    ];
+    for mutator in MUTATORS {
+        assert!(
+            manifest_text.contains(mutator),
+            "{mutator} mutates archive bytes and must be named in the manifest as a release \
+             exclusion, so a Stage 7 release build cannot forget it"
+        );
+    }
+    assert!(
+        manifest_text.contains("--no-default-features"),
+        "the manifest must state that the Stage 7 release build drops the default feature"
+    );
+
+    let source = fs::read_to_string(root.join("crates/ea-archive-fs/src/local_path.rs")).unwrap();
+    let gate = source
+        .find("#[cfg(any(test, feature = \"test-support\"))]")
+        .expect("the observation surface must live behind the test-support gate");
+    for method in MUTATORS {
+        let declaration = format!("pub fn {method}(");
+        let at = source
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("{method} must exist; it is named in the manifest"));
+        assert!(
+            at > gate,
+            "{method} must be declared behind the test-support gate, never in the unconditional \
+             surface of a release build"
+        );
+    }
+    for (index, _) in source.match_indices("pub fn ") {
+        let tail = &source[index..];
+        let name_end = tail.find('(').expect("a declaration carries parentheses");
+        if tail[..name_end].contains("_for_test") {
+            assert!(
+                index > gate,
+                "every *_for_test method must sit behind the gate: {}",
+                &tail[..name_end]
+            );
+        }
+    }
+}

@@ -47,3 +47,15 @@ fn every_finding_carries_a_distinct_stable_code() {
         );
     }
 }
+
+#[test]
+fn a_leftover_under_the_capability_scratch_root_is_reported() {
+    let scenario = support::health_scenario_with_capability_scratch_leftover();
+    let report = scenario.run();
+    assert!(
+        report.contains(HealthFinding::OrphanGrantOrTemporaryFile),
+        "ein Rest unter der Kratzwurzel MUSS als temporaere Datei gemeldet werden; gemeldet \
+         wurde {:?}",
+        report.findings()
+    );
+}

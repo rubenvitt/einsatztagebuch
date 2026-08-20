@@ -729,12 +729,29 @@ impl ea_archive::ArchiveBackend for InMemoryArchiveBackend {
         // Die Attrappe kennt genau EIN Dateisystem, also ist jeder Rename
         // dateisystemintern. Der Fall verschiedener Dateisysteme gehoert dem
         // Wirtbackend und wird dort geprueft.
+        //
+        // NICHT KLOBBERND, genau wie der Wirt: eine bestehende Zieladresse
+        // MUSS bytegleich sein, sonst ist es ein Bytekonflikt. Waere die
+        // Attrappe hier grosszuegiger als der Wirt, pruefte
+        // `transaction_stages.rs` den Vertrag des Ports nicht mehr, sondern
+        // die Nachsicht der Attrappe.
         let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
         let bytes = files
             .remove(from.as_str())
             .ok_or(ea_archive::ArchiveBackendError::Io)?;
-        files.insert(to.as_str().to_owned(), bytes);
-        Ok(())
+        match files.get(to.as_str()) {
+            Some(existing) if existing != &bytes => {
+                // Die Quelladresse bleibt liegen: sie ist ein
+                // Gesundheitsbefund (temporaere Datei) und keine
+                // Veroeffentlichung.
+                files.insert(from.as_str().to_owned(), bytes);
+                Err(ea_archive::ArchiveBackendError::ByteConflict)
+            }
+            _ => {
+                files.insert(to.as_str().to_owned(), bytes);
+                Ok(())
+            }
+        }
     }
 
     fn acquire_writer_lock(

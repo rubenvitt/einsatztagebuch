@@ -16,7 +16,7 @@ use ea_crypto::object_hash;
 use ea_format::ArchiveInventoryListV1;
 use ea_verify::{ObjectResultKindV1, VerificationReportV1};
 
-use crate::{CapabilityReportV1, LocalPathBackend};
+use crate::{CAPABILITY_SCRATCH_DIR_V1, CapabilityReportV1, LocalPathBackend};
 
 /// Ein Gesundheitsbefund — GESCHLOSSEN, zehn Arme.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -119,43 +119,45 @@ impl ArchiveHealthReport {
 }
 
 /// Ein Gesundheitscheck ueber einen lokalen Bestand.
+///
+/// Der Verifikationsbericht ist KONSTRUKTORPARAMETER und kein Zusatz: fuenf der
+/// zehn Erkenner lesen ausschliesslich ihn, und ein Bericht ohne sie liesse
+/// [`ArchiveHealthReport::is_empty`] — das Gesundheitssignal — auch fuer einen
+/// Bestand mit Signaturbruch, fehlendem Pflicht-Grant, Fork und
+/// unvollstaendigen Vertrauensdaten `true` melden. Ein Gesundheitscheck, den
+/// man ohne die Haelfte seiner Erkenner bauen kann, ist fail-open.
 pub struct ArchiveHealthCheckV1<'a> {
     backend: &'a LocalPathBackend,
     expected_inventory: &'a ArchiveInventoryListV1,
     free_space: FreeSpaceV1,
     capabilities: &'a CapabilityReportV1,
-    verification: Option<&'a VerificationReportV1>,
+    verification: &'a VerificationReportV1,
 }
 
 impl<'a> ArchiveHealthCheckV1<'a> {
+    /// Baut den Check. JEDER Erkenner laeuft danach.
     #[must_use]
     pub const fn new(
         backend: &'a LocalPathBackend,
         expected_inventory: &'a ArchiveInventoryListV1,
         free_space: FreeSpaceV1,
         capabilities: &'a CapabilityReportV1,
+        verification: &'a VerificationReportV1,
     ) -> Self {
         Self {
             backend,
             expected_inventory,
             free_space,
             capabilities,
-            verification: None,
+            verification,
         }
     }
 
-    /// Nimmt den Bericht der vollstaendigen Offlineverifikation hinzu.
+    /// Fuehrt ALLE ZEHN Erkenner aus.
     ///
-    /// OHNE ihn bleiben die fuenf verifikationsgetragenen Befunde ungeprueft —
-    /// und zwar sichtbar: der Bericht sagt dann nichts ueber sie, statt sie
-    /// stillschweigend als in Ordnung auszuweisen.
-    #[must_use]
-    pub const fn with_verification(mut self, report: &'a VerificationReportV1) -> Self {
-        self.verification = Some(report);
-        self
-    }
-
-    /// Fuehrt alle Erkenner aus.
+    /// Es gibt keinen Weg, den Lauf zu verkuerzen: ein leerer Bericht ist
+    /// deshalb die Aussage „alle zehn Erkenner haben nichts gefunden" und nicht
+    /// „einige liefen nicht".
     ///
     /// # Errors
     ///
@@ -175,10 +177,17 @@ impl<'a> ArchiveHealthCheckV1<'a> {
             }
         }
 
-        // 7: liegengebliebene Staging-Artefakte und Grants, die das Inventar
-        // nicht fuehrt.
+        // 7: liegengebliebene Staging-Artefakte, Reste eines abgebrochenen
+        // Capability-Tests und Grants, die das Inventar nicht fuehrt.
+        //
+        // Die Kratzwurzel des Capability-Tests wird NICHT aus der Lesesicht
+        // ausgeblendet — genau deshalb ist sie hier zu melden. Ein Verzeichnis
+        // am Namen auszublenden hiesse, dass seine Bytes nirgends gezaehlt,
+        // nirgends verifiziert und nirgends gemeldet wuerden.
+        let scratch_prefix = format!("{CAPABILITY_SCRATCH_DIR_V1}/");
         for relative in self.backend.relative_paths()? {
-            let temporary = relative.ends_with(STAGING_SUFFIX_V1);
+            let temporary =
+                relative.ends_with(STAGING_SUFFIX_V1) || relative.starts_with(&scratch_prefix);
             let orphan_grant = relative.starts_with(ea_archive::GRANTS_DIR_V1)
                 && self.expected_inventory.content_hash_of(&relative).is_none();
             if temporary || orphan_grant {
@@ -196,7 +205,8 @@ impl<'a> ArchiveHealthCheckV1<'a> {
             report.insert(HealthFinding::UnsuitableFilesystemSemantics);
         }
 
-        if let Some(verification) = self.verification {
+        {
+            let verification = self.verification;
             // Ein Grantbefund traegt einen Code aus der `EA-GRANT-`-Familie
             // (`crates/ea-format/src/object.rs`): fehlender oder doppelter
             // Recovery-Grant, doppelter Empfaengerschluessel, doppeltes

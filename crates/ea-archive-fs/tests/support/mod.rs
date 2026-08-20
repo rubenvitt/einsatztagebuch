@@ -46,13 +46,14 @@ use ea_archive::{
 use ea_archive_fs::{
     ArchiveHealthCheckV1, ArchiveHealthReport, CapabilityReportV1, CapabilityTestVectorV1,
     FreeSpaceV1, HealthFinding, LocalCommitComponentV1, LocalPathBackend, MigrationFaultPoint,
-    PlannedPublicationV1, ProfileMigrator, PublicationQueue, PublicationTargetV1,
+    MigrationSourceV1, PlannedPublicationV1, ProfileMigrator, PublicationQueue,
+    PublicationTargetV1,
 };
 use ea_audit::{
     AuditError, LocalAuditRepository, LocalAuditService, SignedLocalAuditEvent,
     SignedLocalAuditService,
 };
-use ea_crypto::CanonicalPublicCoseKey;
+use ea_crypto::{AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, SecretBytes};
 use ea_format::{
     CertificateKindV1, ExactObjectBytes, FreeTextPolicyFieldsV1, GrantV1, KeyProtectionProfileV1,
     OperatorRoleV1, Parsed, ParsedArchiveObject, PolicyFieldsV1, RetentionPolicyFieldsV1,
@@ -601,10 +602,129 @@ pub fn capability_test_vector() -> CapabilityTestVectorV1 {
         .expect("der Testvektor der Fixture ist gueltig")
 }
 
-/// Die verschluesselte lokale Commit-Komponente der Fixture.
+/// Eine Ablage, die ihre Bytes mit ChaCha20-Poly1305 verschluesselt ablegt.
+///
+/// NUR FUER TESTS und ausdruecklich KEIN freigegebener Ruheort-Behaelter: der
+/// Schluessel ist ein Fixturewert, und die Nonce wird DETERMINISTISCH aus der
+/// Adresse abgeleitet. Zwei verschiedene Klartexte unter derselben Adresse
+/// benutzten damit dieselbe Nonce — in einem Produktionsbehaelter waere das ein
+/// Defekt. Die Fixture legt jede Adresse genau einmal ab.
+///
+/// Sie existiert, damit die Zusage „verschluesselte lokale Commit-Komponente"
+/// MESSBAR ist: `bytes_at_rest` gibt den Chiffretext, `get` den Klartext.
+pub struct AeadCommitStore {
+    root: PathBuf,
+    cek: SecretBytes<CEK_SIZE>,
+}
+
+impl AeadCommitStore {
+    #[must_use]
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            cek: SecretBytes::new([0x2b; CEK_SIZE]),
+        }
+    }
+
+    fn absolute(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
+    }
+
+    /// Die deterministische Nonce dieser Adresse.
+    fn nonce(relative: &str) -> SecretBytes<AEAD_NONCE_SIZE> {
+        let digest = ea_crypto::object_hash(relative.as_bytes());
+        let mut nonce = [0_u8; AEAD_NONCE_SIZE];
+        nonce.copy_from_slice(&digest.as_bytes()[..AEAD_NONCE_SIZE]);
+        SecretBytes::new(nonce)
+    }
+}
+
+impl ea_archive_fs::AtRestEncryptedStoreV1 for AeadCommitStore {
+    fn put(&self, relative: &str, bytes: &[u8]) -> Result<(), ea_archive::ArchiveBackendError> {
+        let ciphertext = ea_crypto::aead_seal(
+            &self.cek,
+            &Self::nonce(relative),
+            ea_crypto::SecretVec::new(bytes.to_vec()),
+            relative.as_bytes(),
+        )
+        .map_err(|_| ea_archive::ArchiveBackendError::Io)?;
+        let absolute = self.absolute(relative);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).map_err(|_| ea_archive::ArchiveBackendError::Io)?;
+        }
+        fs::write(absolute, ciphertext).map_err(|_| ea_archive::ArchiveBackendError::Io)
+    }
+
+    fn get(&self, relative: &str) -> Option<Vec<u8>> {
+        let ciphertext = fs::read(self.absolute(relative)).ok()?;
+        let opened = ea_crypto::aead_open(
+            &self.cek,
+            &Self::nonce(relative),
+            &ciphertext,
+            relative.as_bytes(),
+        )
+        .ok()?;
+        Some(opened.with_exposed(<[u8]>::to_vec))
+    }
+
+    fn bytes_at_rest(&self, relative: &str) -> Option<Vec<u8>> {
+        fs::read(self.absolute(relative)).ok()
+    }
+
+    fn remove(&self, relative: &str) {
+        let _ = fs::remove_file(self.absolute(relative));
+    }
+}
+
+/// Eine Ablage, die ihre Bytes im KLARTEXT ablegt.
+///
+/// Sie rundet fehlerfrei — `get` gibt genau zurueck, was `put` bekam — und wird
+/// trotzdem abgewiesen: die Messung liest den Ruheort und findet dort den
+/// Klartext der Sonde. Ohne diese Ablage waere „verschluesselt" nicht von
+/// „unverschluesselt" unterscheidbar.
+pub struct PlaintextCommitStore {
+    root: PathBuf,
+}
+
+impl PlaintextCommitStore {
+    #[must_use]
+    pub const fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+
+impl ea_archive_fs::AtRestEncryptedStoreV1 for PlaintextCommitStore {
+    fn put(&self, relative: &str, bytes: &[u8]) -> Result<(), ea_archive::ArchiveBackendError> {
+        let absolute = self.root.join(relative);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).map_err(|_| ea_archive::ArchiveBackendError::Io)?;
+        }
+        fs::write(absolute, bytes).map_err(|_| ea_archive::ArchiveBackendError::Io)
+    }
+
+    fn get(&self, relative: &str) -> Option<Vec<u8>> {
+        fs::read(self.root.join(relative)).ok()
+    }
+
+    fn bytes_at_rest(&self, relative: &str) -> Option<Vec<u8>> {
+        fs::read(self.root.join(relative)).ok()
+    }
+
+    fn remove(&self, relative: &str) {
+        let _ = fs::remove_file(self.root.join(relative));
+    }
+}
+
+/// Die VERSCHLUESSELTE lokale Commit-Komponente der Fixture.
 #[must_use]
 pub fn encrypted_local_commit(root: PathBuf) -> LocalCommitComponentV1 {
-    LocalCommitComponentV1::encrypted(root)
+    LocalCommitComponentV1::new(root.clone(), Box::new(AeadCommitStore::new(root)))
+}
+
+/// Eine lokale Commit-Komponente, deren Ablage KLARTEXT schreibt.
+#[must_use]
+pub fn plaintext_local_commit(root: PathBuf) -> LocalCommitComponentV1 {
+    LocalCommitComponentV1::new(root.clone(), Box::new(PlaintextCommitStore::new(root)))
 }
 
 /// Zwei SIGNIERTE Grants, die sich in mindestens einem Byte unterscheiden.
@@ -743,6 +863,18 @@ pub struct MigrationHarness {
     /// lebt: dessen Nachweispruefung leiht sich seine
     /// `PreexistingEffectiveNow`.
     head: SelectedRegistryHead,
+    /// Die offenen Publikationen des QUELLPROFILS.
+    ///
+    /// Sie gehoeren der Fixture und nicht `migrator()`, weil der Migrator sie
+    /// borgt und laenger leben wuerde als eine im Aufruf gebaute
+    /// Warteschlange.
+    ///
+    /// FIXTUREVEREINFACHUNG, ausgeschrieben: ein `localPath`-Quellprofil hat
+    /// gar keine Warteschlange (seine Queuegrenzen sind null). Die
+    /// Warteschlange hier traegt deshalb das kontrollierte Netzprofil und
+    /// steht fuer „das Quellprofil hat noch etwas offen" — die Zusage, die
+    /// geprueft wird, ist der SCHRITT und nicht das Profil, an dem er haengt.
+    pending: Vec<PublicationQueue>,
 }
 
 impl MigrationHarness {
@@ -785,6 +917,38 @@ impl MigrationHarness {
             audit: AuditHarness::new(),
             anchor_bytes: complete.anchor_bytes.clone(),
             head: selected_registry_head(),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Legt EINE noch nicht beendete Publikation des Quellprofils an.
+    ///
+    /// Das Ziel ist getrennt, der Plan liegt also nach `publish` als
+    /// `Upload ausstehend` in der Warteschlange — genau der Zustand, den ein
+    /// Profilwechsel nicht zuruecklassen darf.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Warteschlange nicht entsteht oder den Plan nicht annimmt.
+    #[must_use]
+    pub fn with_a_pending_source_publication(mut self) -> Self {
+        let queue = queue_with_disconnecting_adapter();
+        let state = queue
+            .publish(two_grants_and_one_entry())
+            .expect("die Warteschlange nimmt den Plan an");
+        assert_eq!(
+            state.sync_status(),
+            ea_archive_fs::SyncStatus::UploadPending,
+            "die Fixture MUSS eine WARTENDE Publikation hinterlassen"
+        );
+        self.pending.push(queue);
+        self
+    }
+
+    /// Stellt die Verbindung jeder offenen Warteschlange wieder her.
+    pub fn reconnect_pending_publications(&self) {
+        for queue in &self.pending {
+            let _ = queue.reconnect();
         }
     }
 
@@ -792,7 +956,7 @@ impl MigrationHarness {
     #[must_use]
     pub fn migrator(&self) -> ProfileMigrator<'_> {
         ProfileMigrator::new(
-            &self.source,
+            MigrationSourceV1::new(&self.source, self.pending.iter().collect()),
             &self.target,
             &self.policy,
             self.audit.service(),
@@ -828,6 +992,12 @@ impl MigrationHarness {
 #[must_use]
 pub fn migration_harness() -> MigrationHarness {
     MigrationHarness::new(policy_allowing_source_and_target())
+}
+
+/// Die Fixture mit einer noch nicht beendeten Publikation des Quellprofils.
+#[must_use]
+pub fn migration_harness_with_a_pending_publication() -> MigrationHarness {
+    MigrationHarness::new(policy_allowing_source_and_target()).with_a_pending_source_publication()
 }
 
 /// Die Fixture mit einer Policy, die das ZIELPROFIL nicht traegt.
@@ -871,7 +1041,14 @@ pub struct HealthScenario {
     expected_inventory: ea_format::ArchiveInventoryListV1,
     free_space: FreeSpaceV1,
     capabilities: CapabilityReportV1,
-    verification: Option<ea_verify::VerificationReportV1>,
+    /// Der Verifikationsbericht — jedes Szenario traegt einen.
+    ///
+    /// Die fuenf Szenarien, deren Befund NICHT aus der Verifikation kommt,
+    /// bringen einen fuer sie befundfreien Bericht mit; sie bilden ihn VOR dem
+    /// eingespielten Schaden, weil `verify_archive` an einem beschaedigten
+    /// Bestand hart fehlschlagen kann und die Fixture dann an ihrem eigenen
+    /// `expect` scheiterte statt am Erkenner.
+    verification: ea_verify::VerificationReportV1,
 }
 
 impl HealthScenario {
@@ -882,16 +1059,14 @@ impl HealthScenario {
     /// Wenn der Bestand nicht lesbar ist.
     #[must_use]
     pub fn run(&self) -> ArchiveHealthReport {
-        let check = ArchiveHealthCheckV1::new(
+        ArchiveHealthCheckV1::new(
             &self.backend,
             &self.expected_inventory,
             self.free_space,
             &self.capabilities,
-        );
-        match self.verification.as_ref() {
-            None => check.run(),
-            Some(report) => check.with_verification(report).run(),
-        }
+            &self.verification,
+        )
+        .run()
         .expect("der Gesundheitscheck muss laufen")
     }
 }
@@ -957,7 +1132,36 @@ pub fn intact_health_scenario() -> HealthScenario {
         expected_inventory,
         free_space: ample_free_space(),
         capabilities,
-        verification: Some(verification),
+        verification,
+    }
+}
+
+/// Ein Szenario mit einem Rest unter der Kratzwurzel des Capability-Tests.
+///
+/// Ein abgebrochener Capability-Test laesst genau solche Bytes liegen. Sie sind
+/// weder aus dem Inventar noch aus der Lesesicht ausgeblendet, also MUSS der
+/// Gesundheitscheck sie melden.
+#[must_use]
+pub fn health_scenario_with_capability_scratch_leftover() -> HealthScenario {
+    let complete = verify_support::complete_valid_archive();
+    let (lock, backend) = materialized("health-scratch", complete.fixture.blobs());
+    let expected_inventory = backend.inventory().expect("das Inventar muss entstehen");
+    let capabilities = proven_capabilities(&backend);
+    let verification = verification_of(&backend, &complete.anchor_bytes);
+    backend.materialize_for_test(
+        &format!(
+            "{}/aborted-run/leftover.bin",
+            ea_archive_fs::CAPABILITY_SCRATCH_DIR_V1
+        ),
+        b"Rest eines abgebrochenen Capability-Tests",
+    );
+    HealthScenario {
+        _lock: lock,
+        backend,
+        expected_inventory,
+        free_space: ample_free_space(),
+        capabilities,
+        verification,
     }
 }
 
@@ -974,8 +1178,11 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
             let (lock, backend) = materialized("health-missing", complete.fixture.blobs());
             let expected_inventory = backend.inventory().expect("das Inventar muss entstehen");
             let capabilities = proven_capabilities(&backend);
-            // ERST das Inventar, DANN das Loeschen: das Inventar ist die
-            // Erwartung, und die Erwartung entsteht vor dem Schaden.
+            // ERST das Inventar UND den Verifikationsbericht, DANN das
+            // Loeschen: die Erwartung entsteht vor dem Schaden, und der
+            // Bericht des UNVERSEHRTEN Bestands ist fuer dieses Szenario
+            // befundfrei — der Befund kommt allein vom Inventarvergleich.
+            let verification = verification_of(&backend, &complete.anchor_bytes);
             backend.remove_for_test(expected_inventory.entries()[0].relative_path());
             HealthScenario {
                 _lock: lock,
@@ -983,7 +1190,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: None,
+                verification,
             }
         }
         HealthFinding::ModifiedFile => {
@@ -991,6 +1198,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
             let (lock, backend) = materialized("health-modified", complete.fixture.blobs());
             let expected_inventory = backend.inventory().expect("das Inventar muss entstehen");
             let capabilities = proven_capabilities(&backend);
+            let verification = verification_of(&backend, &complete.anchor_bytes);
             backend.overwrite_for_test(
                 expected_inventory.entries()[0].relative_path(),
                 b"andere Bytes",
@@ -1001,7 +1209,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: None,
+                verification,
             }
         }
         HealthFinding::OrphanGrantOrTemporaryFile => {
@@ -1009,6 +1217,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
             let (lock, backend) = materialized("health-orphan", complete.fixture.blobs());
             let expected_inventory = backend.inventory().expect("das Inventar muss entstehen");
             let capabilities = proven_capabilities(&backend);
+            let verification = verification_of(&backend, &complete.anchor_bytes);
             backend.overwrite_for_test("entries/000000000001_entry.eip.staging", b"halb fertig");
             HealthScenario {
                 _lock: lock,
@@ -1016,7 +1225,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: None,
+                verification,
             }
         }
         HealthFinding::InsufficientFreeSpace => {
@@ -1024,6 +1233,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
             let (lock, backend) = materialized("health-space", complete.fixture.blobs());
             let expected_inventory = backend.inventory().expect("das Inventar muss entstehen");
             let capabilities = proven_capabilities(&backend);
+            let verification = verification_of(&backend, &complete.anchor_bytes);
             HealthScenario {
                 _lock: lock,
                 backend,
@@ -1033,13 +1243,14 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                     available_bytes: 1_024,
                 },
                 capabilities,
-                verification: None,
+                verification,
             }
         }
         HealthFinding::UnsuitableFilesystemSemantics => {
             let complete = verify_support::complete_valid_archive();
             let (lock, backend) = materialized("health-semantics", complete.fixture.blobs());
             let expected_inventory = backend.inventory().expect("das Inventar muss entstehen");
+            let verification = verification_of(&backend, &complete.anchor_bytes);
             HealthScenario {
                 _lock: lock,
                 backend,
@@ -1048,7 +1259,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 // KEINE Faehigkeit belegt — genau das ist ungeeignete
                 // Dateisystemsemantik.
                 capabilities: CapabilityReportV1::unproven(),
-                verification: None,
+                verification,
             }
         }
         HealthFinding::HashSignatureOrChainError => {
@@ -1065,7 +1276,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: Some(verification),
+                verification,
             }
         }
         HealthFinding::UnexpectedSequenceForkOrRollback => {
@@ -1080,7 +1291,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: Some(verification),
+                verification,
             }
         }
         HealthFinding::MissingMandatoryGrant => {
@@ -1095,7 +1306,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: Some(verification),
+                verification,
             }
         }
         HealthFinding::IncompleteTrustData => {
@@ -1120,7 +1331,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: Some(verification),
+                verification,
             }
         }
         HealthFinding::InvalidOrUnauthorizedStub => {
@@ -1143,7 +1354,7 @@ pub fn health_scenario_for(finding: HealthFinding) -> HealthScenario {
                 expected_inventory,
                 free_space: ample_free_space(),
                 capabilities,
-                verification: Some(verification),
+                verification,
             }
         }
     }

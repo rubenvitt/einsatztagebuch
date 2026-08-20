@@ -24,14 +24,18 @@ mod local_path;
 mod profile_migration;
 mod publication_queue;
 
-pub use controlled_network::{ControlledNetworkBackend, LocalCommitComponentV1};
+pub use controlled_network::{
+    AtRestEncryptedStoreV1, ControlledNetworkBackend, LocalCommitComponentV1,
+    ProvenLocalCommitComponentV1,
+};
 pub use health::{ArchiveHealthCheckV1, ArchiveHealthReport, FreeSpaceV1, HealthFinding};
 pub use local_path::{
-    CONTROL_FILES_V1, CapabilityReportV1, CapabilityTestVectorV1, LocalPathArchiveSource,
-    LocalPathBackend,
+    CAPABILITY_SCRATCH_DIR_V1, CONTROL_FILES_V1, CapabilityReportV1, CapabilityTestVectorV1,
+    LocalPathArchiveSource, LocalPathBackend,
 };
 pub use profile_migration::{
-    FinalizationLockStateV1, MigrationFaultPoint, MigrationResultV1, ProfileMigrator,
+    FinalizationLockStateV1, MigrationFaultPoint, MigrationResultV1, MigrationSourceV1,
+    ProfileMigrator,
 };
 pub use publication_queue::{
     DetailCause, PlannedPublicationV1, PublicationQueue, PublicationStateV1, PublicationTargetV1,
