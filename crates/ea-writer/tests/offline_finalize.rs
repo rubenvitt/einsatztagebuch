@@ -2,7 +2,7 @@
 
 mod support;
 
-use ea_writer::{FinalizationPhase, FinalizationStep, StaleDecision};
+use ea_writer::{FinalizationFaultPoint, FinalizationPhase, FinalizationStep, StaleDecision};
 use support::{WriterHarness, valid_incident};
 
 #[test]
@@ -13,12 +13,12 @@ fn offline_finalize_commits_grants_then_entry_and_returns_no_content() {
     let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
 
     let preview = service
-        .preview(&proof, valid_incident())
+        .preview(&proof, valid_incident(), harness.observed_now())
         .expect("die Vorschau des glatten Pfades muss entstehen");
     assert_eq!(preview.decision(), StaleDecision::Fresh);
 
     let out = service
-        .finalize(&proof, valid_incident(), &preview)
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
         .expect("der glatte Pfad muss abschliessen");
     assert_eq!(out.sync_status, ea_archive_fs::SyncStatus::LocallySaved);
     assert_eq!(out.sequence, preview.proposed_sequence());
@@ -45,22 +45,60 @@ fn offline_finalize_commits_grants_then_entry_and_returns_no_content() {
     );
     assert!(grants.iter().all(|path| path.ends_with(".eag")));
 
-    // Kein nutzbarer `draftDEK` mehr, und ein leerer Entwurf.
-    assert!(
-        !harness.draft_dek_is_present() || harness.draft_is_blank(),
-        "nach dem Abschluss steht ein leerer Entwurf mit frischem Schluessel"
+    // Kein Geheimnis dieses Schluesselspeichers oeffnet den Eintrag mehr.
+    //
+    // Die Zusicherung `!draft_dek_is_present() || draft_is_blank()` stand hier
+    // vorher und KONNTE nicht fehlschlagen: Schritt 13 legt einen leeren
+    // Entwurf an, also war die rechte Haelfte immer wahr. Gemessen wird jetzt
+    // die Zusage selbst.
+    assert!(harness.writer_keys_cannot_decrypt(out.entry_hash));
+    assert!(harness.draft_is_blank());
+}
+
+/// Die Grants liegen VOR dem `.eip` — beobachtet und nicht gefolgert.
+///
+/// Der Zeuge ist der Abbruchpunkt: an
+/// [`FinalizationFaultPoint::AfterGrantPublishBeforeEntryRename`] MUSS JEDER
+/// Grant unter seinem Zielnamen liegen und das `.eip` NOCH NICHT. Der Endzustand
+/// eines glatten Laufs kann das nicht sagen — dort liegt beides.
+#[test]
+fn every_grant_is_published_before_the_entry_is_renamed() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterGrantPublishBeforeEntryRename)
+        .expect("der Abbruch zwischen Grants und Eintrag muss erreichbar sein");
+
+    assert_eq!(
+        harness.published_grant_paths().len(),
+        harness.expected_grant_count(),
+        "JEDER geplante Grant liegt veroeffentlicht: {:?}",
+        harness.published_grant_paths()
     );
+    assert!(
+        harness.published_entry_paths().is_empty(),
+        "das .eip ist noch NICHT veroeffentlicht: {:?}",
+        harness.published_entry_paths()
+    );
+
+    // Und die Ordnung ist keine Sackgasse: die eigene vorbereitete Transaktion
+    // vollendet sie.
+    let source = harness.source();
+    let service = harness.service(&source);
+    service
+        .recover_pending()
+        .expect("die Wiederherstellung hinter der Grenze muss tragen");
+    assert_eq!(harness.published_entry_paths().len(), 1);
 }
 
 #[test]
 fn each_reached_step_has_its_own_observable_postcondition() {
-    for step in FinalizationStep::ALL.iter().copied().take(8) {
+    for step in FinalizationStep::ALL.iter().copied() {
         let harness = WriterHarness::with_incident();
         let source = harness.source();
         let service = harness.service(&source);
         let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
         let reached = service
-            .finalize_up_to(&proof, valid_incident(), step)
+            .finalize_up_to(&proof, valid_incident(), harness.observed_now(), step)
             .unwrap_or_else(|error| panic!("{step:?} muss erreichbar sein: {error:?}"));
         assert_eq!(reached.reached_step(), Some(step), "{step:?}");
         match step {
@@ -119,13 +157,10 @@ fn each_reached_step_has_its_own_observable_postcondition() {
                 assert_eq!(reached.phase(), FinalizationPhase::PreparedAndFlushed);
                 assert!(reached.prepared().is_some());
                 // NICHTS ist veroeffentlicht.
-                let published = harness
-                    .backend()
-                    .relative_paths_below_for_test("entries/")
-                    .into_iter()
-                    .filter(|path| path.ends_with(".eip"))
-                    .count();
-                assert_eq!(published, 0, "Schritt 8 veroeffentlicht nichts");
+                assert!(
+                    harness.published_entry_paths().is_empty(),
+                    "Schritt 8 veroeffentlicht nichts"
+                );
                 // Und doch liegt schon jedes Byte: das ist der Unterschied
                 // zwischen vorbereitet und veroeffentlicht.
                 assert!(
@@ -137,7 +172,60 @@ fn each_reached_step_has_its_own_observable_postcondition() {
                     "Schritt 8 stagt das .eip"
                 );
             }
-            _ => unreachable!("die Schleife laeuft nur bis Schritt 8"),
+            FinalizationStep::ZeroAndDeleteDraftKey => {
+                assert_eq!(reached.phase(), FinalizationPhase::DraftKeyAbsent);
+                assert!(
+                    !harness.draft_dek_is_present(),
+                    "die Grenze ist der GELOESCHTE draftDEK"
+                );
+                assert!(
+                    harness.published_entry_paths().is_empty(),
+                    "und vor Schritt 11 ist nichts committed"
+                );
+            }
+            FinalizationStep::PublishGrants => {
+                assert_eq!(reached.phase(), FinalizationPhase::GrantsPublished);
+                assert_eq!(
+                    harness.published_grant_paths().len(),
+                    harness.expected_grant_count()
+                );
+                assert!(
+                    harness.published_entry_paths().is_empty(),
+                    "Schritt 10 veroeffentlicht die Grants und NICHT den Eintrag"
+                );
+            }
+            FinalizationStep::PublishEntryLast => {
+                assert_eq!(reached.phase(), FinalizationPhase::EntryCommitted);
+                // `sync_status` gehoert zum Ergebnis, und ein Lauf, der hier
+                // anhaelt, hat keines — Schritt 13 bildet es. Die
+                // Nachbedingung von Schritt 11 ist der Commit-Marker selbst.
+                assert_eq!(harness.published_entry_paths().len(), 1);
+                assert!(reached.outcome().is_none());
+            }
+            FinalizationStep::PublishToNetworkArchive => {
+                assert_eq!(reached.phase(), FinalizationPhase::NetworkArchivePublished);
+                // Beim LOKALEN Profil ist Schritt 12 ohne Publikation
+                // abgeschlossen; die Abschlussmarke liegt noch, weil erst
+                // Schritt 13 sie loest.
+                assert!(harness.prepared_marker_is_present());
+            }
+            FinalizationStep::ReconcileAndOpenBlankDraft => {
+                assert_eq!(reached.phase(), FinalizationPhase::Reconciled);
+                assert!(
+                    !harness.prepared_marker_is_present(),
+                    "Schritt 13 loest die Abschlussmarke"
+                );
+                assert_eq!(
+                    harness.staged_object_count(),
+                    0,
+                    "und laesst keine Staging-Adresse zurueck"
+                );
+                assert!(harness.draft_is_blank());
+                assert_eq!(
+                    reached.outcome().map(|outcome| outcome.sync_status),
+                    Some(ea_archive_fs::SyncStatus::LocallySaved)
+                );
+            }
         }
     }
 }

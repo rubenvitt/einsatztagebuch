@@ -36,10 +36,21 @@
 //!
 //! Der Bestaetigungspfad eines VERALTETEN Registry-Head
 //! (`acknowledge_stale_registry`, `StaleRegistryAcknowledgement`) ist nicht
-//! gebaut. [`StaleDecision::StaleAcknowledgeable`] ist erreichbar und wird
-//! fail-closed zu [`WriterError::StaleAckRequired`]: ohne den Pfad gibt es
-//! keine Bestaetigung, und ein veralteter Head blockiert. Ein Typ ohne
-//! Erzeuger waere eine Attrappe und schlimmer als eine benannte Auslassung.
+//! gebaut. Die ERKENNUNG ist es: [`WriterService::preview`] und
+//! [`WriterService::finalize`] nehmen die beobachtete Zeit des Wirts als
+//! Argument, und gegen sie sind [`StaleDecision::StaleAcknowledgeable`] und
+//! [`StaleDecision::HardBlock`] erreichbar — gemessen in
+//! `tests/stale_registry_warning.rs`. Ohne den Bestaetigungspfad ist der
+//! Ausgang fail-closed: [`WriterError::StaleAckRequired`] fuer das
+//! Standardprofil mit signiertem `warn`, [`WriterError::RegistryStaleBlocked`]
+//! fuer Evidence Grade und signiertes `block`. Ein Typ ohne Erzeuger waere eine
+//! Attrappe und schlimmer als eine benannte Auslassung.
+//!
+//! Was die beobachtete Zeit NICHT ist: eine Zeit, die dieser Kern selbst
+//! feststellt. Sie kommt vom Wirt, wie jede Zeit in diesem Workspace
+//! (`apps/cli/src/main.rs`), und ein Aufrufer, der eine Zeit vor `notAfter`
+//! einreicht, laesst einen veralteten Head frisch erscheinen. Der Boden am
+//! Auswahlzeitpunkt macht nur das gemeldete VERTRAUENSALTER monoton.
 #![forbid(unsafe_code)]
 
 mod entropy;

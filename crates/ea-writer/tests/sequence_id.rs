@@ -12,7 +12,7 @@ fn uuid_cek_and_nonce_are_drawn_exactly_once() {
     let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
 
     let preview = service
-        .preview(&proof, valid_incident())
+        .preview(&proof, valid_incident(), harness.observed_now())
         .expect("die Vorschau muss entstehen");
     // Nach der Vorschau ist GENAU der UUIDv7 gezogen — und kein Geheimnis. Das
     // ist die tragende Zusage: keine lebende CEK ueberdauert den
@@ -28,7 +28,7 @@ fn uuid_cek_and_nonce_are_drawn_exactly_once() {
     );
 
     service
-        .finalize(&proof, valid_incident(), &preview)
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
         .expect("der Abschluss muss tragen");
     assert_eq!(
         ea_writer::entropy_draws(),
@@ -51,6 +51,7 @@ fn the_entry_uuid_is_version_seven_and_variant_two() {
         .finalize_up_to(
             &proof,
             valid_incident(),
+            harness.observed_now(),
             ea_writer::FinalizationStep::ValidateAndSerialize,
         )
         .expect("Schritt 4 muss erreichbar sein");
@@ -80,7 +81,7 @@ fn the_first_entry_binds_no_predecessor_and_claims_sequence_zero() {
     let service = harness.service(&source);
     let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
     let preview = service
-        .preview(&proof, valid_incident())
+        .preview(&proof, valid_incident(), harness.observed_now())
         .expect("die Vorschau muss entstehen");
     assert_eq!(preview.proposed_sequence().get(), 0);
     assert!(
@@ -89,7 +90,7 @@ fn the_first_entry_binds_no_predecessor_and_claims_sequence_zero() {
     );
 
     let out = service
-        .finalize(&proof, valid_incident(), &preview)
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
         .expect("der Abschluss muss tragen");
     assert_eq!(out.sequence.get(), 0);
 }
@@ -112,7 +113,7 @@ fn a_taken_incident_number_is_refused_before_anything_is_staged() {
     // `expect_err` verlangt `Debug` am Ok-Typ, und `FinalizationPreview` traegt
     // keines — er haelt Hashes, und Stufe 1 leitet fuer die kein `Debug` ab.
     let error = service
-        .preview(&proof, valid_incident())
+        .preview(&proof, valid_incident(), harness.observed_now())
         .err()
         .expect("dieselbe Nummer im selben Jahr ist verbraucht");
     assert_eq!(error.code(), "EA-WRITER-INCIDENT-NUMBER-TAKEN");
@@ -136,14 +137,14 @@ fn a_second_finalization_against_a_consumed_sequence_blocks() {
     let service = harness.service(&source);
     let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
     let preview = service
-        .preview(&proof, valid_incident())
+        .preview(&proof, valid_incident(), harness.observed_now())
         .expect("die Vorschau muss entstehen");
     service
-        .finalize(&proof, valid_incident(), &preview)
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
         .expect("der erste Abschluss muss tragen");
 
     let error = service
-        .preview(&proof, valid_incident())
+        .preview(&proof, valid_incident(), harness.observed_now())
         .err()
         .expect("die verbrauchte Sequenz MUSS blockieren");
     assert_eq!(error.code(), "EA-WRITER-HEAD-RECONCILIATION-REQUIRED");
@@ -181,10 +182,10 @@ fn a_refused_finalization_does_not_burn_the_incident_number() {
     // `previewHash` ein, also weicht die unter der Sperre nachgerechnete
     // Vorschau ab.
     let foreign = service
-        .preview(&proof, support::other_incident())
+        .preview(&proof, support::other_incident(), harness.observed_now())
         .expect("die zweite Vorschau muss entstehen");
     let error = service
-        .finalize(&proof, valid_incident(), &foreign)
+        .finalize(&proof, valid_incident(), &foreign, harness.observed_now())
         .expect_err("eine fremde Vorschau MUSS fail-closed abgewiesen werden");
     assert_eq!(error.code(), "EA-REGISTRY-STALE-ACK-PREVIEW-MISMATCH");
 
@@ -197,10 +198,10 @@ fn a_refused_finalization_does_not_burn_the_incident_number() {
 
     // Der Beleg, dass die Nummer wirklich noch benutzbar ist.
     let preview = service
-        .preview(&proof, valid_incident())
+        .preview(&proof, valid_incident(), harness.observed_now())
         .expect("die Vorschau muss erneut entstehen");
     service
-        .finalize(&proof, valid_incident(), &preview)
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
         .expect("derselbe Einsatz MUSS danach abschliessbar sein");
     assert!(harness.incident_number_is_taken("2026-000042"));
 }

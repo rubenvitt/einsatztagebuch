@@ -134,6 +134,32 @@ pub struct HeadOptions {
     /// sonst pruefte er gegen eine Zahl, die kein Backend je errechnet.
     /// `None` laesst das bestehende Verhalten unveraendert.
     pub policy_allowed_archive_profile_hashes_override: Option<Vec<Hash32>>,
+    /// `operating-profile` des Root-signierten `policy-core-v1`.
+    ///
+    /// Ohne diese Ueberschreibung ist es `0` (Standardprofil). `1` ist
+    /// Evidence Grade, und `design.md`:1447 verlangt fuer diesen Wert bei einem
+    /// veralteten Registry-Head IMMER einen harten Fehler statt einer
+    /// bestaetigungsfaehigen Warnung. Ein Verbraucher, der diesen harten Block
+    /// belegen MUSS, braucht eine Policy, die das Profil wirklich traegt —
+    /// sonst pruefte er gegen einen Wert, den keine Fixture je setzt.
+    /// `None` laesst das bestehende Verhalten unveraendert.
+    pub policy_operating_profile_override: Option<u8>,
+    /// `registry-expiry-behavior` des Root-signierten `policy-core-v1`.
+    ///
+    /// Ohne diese Ueberschreibung ist es `0` (`warn`). `1` ist `block` und
+    /// steuert AUSSCHLIESSLICH die Finalisierung (`design.md`:1455). Dieselbe
+    /// Begruendung wie oben: der harte Block ist ohne diesen Wert nicht
+    /// belegbar. `None` laesst das bestehende Verhalten unveraendert.
+    pub policy_registry_expiry_behavior_override: Option<u8>,
+    /// `reader-trust-refresh-ms` des Root-signierten `policy-core-v1`.
+    ///
+    /// Ohne diese Ueberschreibung sind es `86_400_000`. Der Vorgabewert liegt
+    /// UEBER der Lebensdauer jedes Fixture-Head, also ist mit ihm eine
+    /// ueberschrittene Auffrischungsfrist bei einem FRISCHEN Head arithmetisch
+    /// unerreichbar — und genau die ist die Zusage: eine sichtbare Warnung und
+    /// niemals eine Blockade. `None` laesst das bestehende Verhalten
+    /// unveraendert.
+    pub policy_reader_trust_refresh_ms_override: Option<u64>,
     /// Laesst den KEM-Schluessel eines Reader- oder Recovery-Zertifikats WEG.
     ///
     /// `kem_key_thumbprint: None` ist im Wire-Format erlaubt, und
@@ -186,6 +212,9 @@ impl Default for HeadOptions {
             kem_public_key_override: None,
             binding_operator_profile_commitment_override: None,
             policy_allowed_archive_profile_hashes_override: None,
+            policy_operating_profile_override: None,
+            policy_registry_expiry_behavior_override: None,
+            policy_reader_trust_refresh_ms_override: None,
             omit_kem_public_key: false,
             revoked_from_sequence: None,
             binding_instance_key_thumbprint_override: None,
@@ -779,6 +808,13 @@ fn direct_payload(
                 options
                     .policy_allowed_archive_profile_hashes_override
                     .clone(),
+                options.policy_operating_profile_override.unwrap_or(0),
+                options
+                    .policy_registry_expiry_behavior_override
+                    .unwrap_or(0),
+                options
+                    .policy_reader_trust_refresh_ms_override
+                    .unwrap_or(86_400_000),
             ),
             authorization_hash,
         )
@@ -1052,6 +1088,7 @@ fn exact_authorization(
     exact_object(payload, vec![signature])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn policy_fields(
     policy_version: u64,
     previous_policy_object_hash: Option<ObjectHash>,
@@ -1059,18 +1096,21 @@ fn policy_fields(
     max_registry_age_ms: u64,
     max_future_clock_skew_ms: u64,
     allowed_archive_profile_hashes: Option<Vec<Hash32>>,
+    operating_profile: u8,
+    registry_expiry_behavior: u8,
+    reader_trust_refresh_ms: u64,
 ) -> PolicyFieldsV1 {
     PolicyFieldsV1 {
         organization_id: organization(),
         policy_version,
         previous_policy_object_hash,
-        operating_profile: 0,
+        operating_profile,
         max_registry_age_ms,
         max_future_clock_skew_ms,
-        registry_expiry_behavior: 0,
+        registry_expiry_behavior,
         evidence_max_delay_ms: 60_000,
         reader_inactivity_ms: 900_000,
-        reader_trust_refresh_ms: 86_400_000,
+        reader_trust_refresh_ms,
         reader_history_access_allowed: true,
         allowed_archive_profile_hashes: allowed_archive_profile_hashes
             .unwrap_or_else(|| vec![hash32(0xa1)]),

@@ -53,6 +53,11 @@ struct SelectedHeadInner {
     /// Veralterungspruefung der Auswahl liest `candidate.head_event.not_after`
     /// unveraendert an ihrer eigenen Stelle.
     head_event_not_after: UnixMillis,
+    /// `issuedAt` des Head-Ereignisses — der Bezugspunkt des
+    /// Vertrauensalters. NUR lesend nach aussen; die Zeitpruefungen der
+    /// Auswahl lesen `candidate.head_event.issued_at` unveraendert an ihren
+    /// eigenen Stellen.
+    head_event_issued_at: UnixMillis,
     preexisting_effective_now: PreexistingEffectiveNow,
     warnings: TimeWarnings,
     committed_revision: u64,
@@ -176,6 +181,21 @@ impl SelectedRegistryHead {
     #[must_use]
     pub fn not_after(&self) -> UnixMillis {
         self.inner.head_event_not_after
+    }
+
+    /// `issuedAt` des gebundenen Head — der Bezugspunkt des Vertrauensalters.
+    ///
+    /// Dieselbe Bauart und dieselbe Begruendung wie [`Self::not_after`]: rein
+    /// lesend, an der Auswahl aendert er nichts. Er existiert, weil das ALTER
+    /// des gebundenen Vertrauensbestands eine Aussage UEBER DEN GEBUNDENEN
+    /// HEAD ist und nicht ueber eine Zahl, die ein Aufrufer daneben mitfuehrt:
+    /// wer `effectiveNow - issuedAt` rechnen will, muss `issuedAt` DIESES Head
+    /// lesen koennen, sonst zeigt die Auffrischungswarnung des Writers
+    /// (`readerTrustRefreshMs`, `design.md`:1447) das Alter eines Head, den
+    /// niemand gebunden hat.
+    #[must_use]
+    pub fn issued_at(&self) -> UnixMillis {
+        self.inner.head_event_issued_at
     }
 
     #[must_use]
@@ -824,6 +844,7 @@ fn selected_head(
             valid_through_sequence: candidate.head_event.valid_through_sequence,
             proposed_sequence: candidate.proposed_sequence,
             head_event_not_after: candidate.head_event.not_after,
+            head_event_issued_at: candidate.head_event.issued_at,
             preexisting_effective_now: PreexistingEffectiveNow { value: raw_now },
             warnings,
             committed_revision,

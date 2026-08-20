@@ -36,7 +36,14 @@ use crate::WriterError;
 /// blockiert.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaleDecision {
-    /// `effectiveNow <= notAfter` — der Head ist frisch.
+    /// Der Head ist frisch: die BEOBACHTETE Zeit liegt nicht hinter
+    /// `notAfter`.
+    ///
+    /// Ausdruecklich nicht das `effectiveNow` dieses Urbilds (Position 12) —
+    /// das ist die Zeit ZUM AUSWAHLZEITPUNKT, und gegen sie ist jeder
+    /// ausgelieferte Head immer frisch: `select_registry_head` gibt einen
+    /// aktuellen Head nur bei `rawNow <= notAfter` heraus. Die Zeit der
+    /// Feststellung kommt vom Wirt, mit dem Auswahlzeitpunkt als Boden.
     Fresh,
     /// Standardprofil MIT signiertem `warn`: nach nicht uebergehbarer sichtbarer
     /// Warnung, frischer `RegistryStaleFinalize`-Wiederanmeldung und
@@ -108,8 +115,12 @@ impl FinalizationPreview {
         self.decision
     }
 
-    /// Das ALTER des gebundenen Vertrauensbestands in Millisekunden —
-    /// `effectiveNow` minus dem Ausstellungszeitpunkt des Head.
+    /// Das ALTER des gebundenen Vertrauensbestands in Millisekunden — die
+    /// BEOBACHTETE Zeit (mit dem Auswahlzeitpunkt als Boden) minus
+    /// `SelectedRegistryHead::issued_at` des GEBUNDENEN Head.
+    ///
+    /// Der Bezugspunkt ist damit eine Aussage ueber den gebundenen Head und
+    /// nicht ueber eine Zahl, die ein Aufrufer daneben mitfuehrt.
     #[must_use]
     pub const fn trust_age_ms(&self) -> u64 {
         self.trust_age_ms

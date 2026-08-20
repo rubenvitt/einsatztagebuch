@@ -36,7 +36,9 @@
 
 use std::sync::Arc;
 
-use ea_archive::{ArchiveBackend, ArchivePath, ArchiveSource};
+use ea_archive::{
+    ArchiveBackend, ArchiveBlob, ArchiveError, ArchivePath, ArchiveSource, STAGING_SUFFIX_V1,
+};
 use ea_chain::{
     ChainNode, ChainNodeKind, CheckpointClaim, RollbackAssessment, assess_rollback, build_chain,
 };
@@ -185,9 +187,6 @@ pub struct WriterBindingV1 {
     /// Der `archiveProfileHash` des konfigurierten Backends. Er wird gegen
     /// `allowed_archive_profile_hashes` DESSELBEN gebundenen Head geprueft.
     pub archive_profile_hash: Hash32,
-    /// Der Ausstellungszeitpunkt des gebundenen Head — der Bezugspunkt des
-    /// Vertrauensalters.
-    pub head_issued_at: UnixMillis,
 }
 
 impl<'a> WriterService<'a> {
@@ -230,6 +229,11 @@ impl<'a> WriterService<'a> {
     /// ohne ihn nicht serialisierbar ist (siehe [`crate::preview`]); CEK und
     /// AEAD-Nonce entstehen erst in Schritt 6.
     ///
+    /// `observed_now` ist die Uhr des WIRTS. Sie ist ein Argument JE AUFRUF und
+    /// kein Feld des Dienstes, weil `finalize` „Registry und Zeit vor der
+    /// `draftDEK`-Grenze neu bewertet" — eine erneute Bewertung gegen denselben
+    /// gespeicherten Messwert waere keine.
+    ///
     /// # Errors
     ///
     /// Jeder Blockadegrund der Schritte 1 bis 5, mit seinem stabilen Code.
@@ -237,12 +241,14 @@ impl<'a> WriterService<'a> {
         &self,
         proof: &OperatorSessionProof,
         input: FinalizationInputV1,
+        observed_now: UnixMillis,
     ) -> Result<FinalizationPreview, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
         let reached = self.run(
             proof,
             input,
+            observed_now,
             Stop::After(FinalizationStep::BuildAndHashGrantPlan),
         )?;
         reached.preview.ok_or(WriterError::NoDraftContent)
@@ -261,10 +267,11 @@ impl<'a> WriterService<'a> {
         proof: &OperatorSessionProof,
         input: FinalizationInputV1,
         confirmed: &FinalizationPreview,
+        observed_now: UnixMillis,
     ) -> Result<FinalizeOutcome, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
-        let reached = self.run(proof, input, Stop::Confirmed(confirmed))?;
+        let reached = self.run(proof, input, observed_now, Stop::Confirmed(confirmed))?;
         reached.outcome.ok_or(WriterError::NoDraftContent)
     }
 
@@ -282,11 +289,12 @@ impl<'a> WriterService<'a> {
         &self,
         proof: &OperatorSessionProof,
         input: FinalizationInputV1,
+        observed_now: UnixMillis,
         step: FinalizationStep,
     ) -> Result<ReachedState, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
-        self.run(proof, input, Stop::After(step))
+        self.run(proof, input, observed_now, Stop::After(step))
     }
 
     /// Laeuft die Reihenfolge und bricht an GENAU `point` ab.
@@ -299,11 +307,12 @@ impl<'a> WriterService<'a> {
         &self,
         proof: &OperatorSessionProof,
         input: FinalizationInputV1,
+        observed_now: UnixMillis,
         point: FinalizationFaultPoint,
     ) -> Result<ReachedState, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
-        self.run(proof, input, Stop::AtFault(point))
+        self.run(proof, input, observed_now, Stop::AtFault(point))
     }
 }
 
@@ -512,6 +521,7 @@ impl WriterService<'_> {
         &self,
         proof: &OperatorSessionProof,
         input: FinalizationInputV1,
+        observed_now: UnixMillis,
         stop: Stop<'_>,
     ) -> Result<ReachedState, WriterError> {
         let mut state = ReachedState::empty();
@@ -524,7 +534,8 @@ impl WriterService<'_> {
         }
 
         // ---- 1. Den vertrauenswuerdigen lokalen Kettenkopf rekonstruieren ----
-        let inventory = ea_archive::ArchiveInventory::build(self.source)?;
+        let published = PublishedObjectsOnly { inner: self.source };
+        let inventory = ea_archive::ArchiveInventory::build(&published)?;
         let nodes = chain_nodes(&inventory);
         let chain = build_chain(self.binding.chain_id, &nodes)?;
         state.head_from_committed_bytes = true;
@@ -660,8 +671,8 @@ impl WriterService<'_> {
                 effective_now,
             },
             record_id,
-            self.stale_decision(effective_now),
-            self.trust_age_ms(effective_now),
+            self.stale_decision(observed_now),
+            self.trust_age_ms(observed_now),
             self.head.policy_fields().reader_trust_refresh_ms,
         )?;
         state.grant_plan = Some(plan);
@@ -706,13 +717,24 @@ impl WriterService<'_> {
         // fail-closed Tor und vor der ersten Ziehung eines Geheimnisses. Nur
         // der abschliessende Lauf beansprucht; eine Vorschau, die sie
         // verbrauchte, machte ihren eigenen Abschluss unmoeglich.
-        if matches!(stop, Stop::Confirmed(_))
-            && self
+        //
+        // JEDER Fehler des Anspruchs bricht ab, und nicht nur der belegte Name.
+        // Die Asymmetrie waere das Leck: die FRAGE dreissig Zeilen darueber
+        // reicht ihren Speicherfehler mit `?` weiter, also ist derselbe Ausfall
+        // auf der Leseseite fail-closed. Verschluckte ihn die Schreibseite,
+        // committete der Lauf einen Eintrag, dessen Einsatznummer NIE dauerhaft
+        // beansprucht wurde — eine stille Herabstufung.
+        if matches!(stop, Stop::Confirmed(_)) {
+            match self
                 .incident_numbers
                 .claim(profile.organization_id(), year, &incident_number)
-                .is_err_and(|error| error == ea_draft::DraftError::IncidentNumberTaken)
-        {
-            return Err(WriterError::IncidentNumberTaken);
+            {
+                Ok(()) => {}
+                Err(ea_draft::DraftError::IncidentNumberTaken) => {
+                    return Err(WriterError::IncidentNumberTaken);
+                }
+                Err(other) => return Err(WriterError::Draft(other)),
+            }
         }
 
         // ---- 6. Die Geheimnisse EINMAL ziehen und den entryHash bilden ----
@@ -980,7 +1002,31 @@ impl WriterService<'_> {
         )?)
     }
 
-    /// Der Zeitstatus des gebundenen Head, gegen eine FRISCHE Zeit.
+    /// Die beobachtete Zeit, mit dem Auswahlzeitpunkt als BODEN.
+    ///
+    /// Der Rust-Kern fragt keine Uhr — `SystemTime::now()` steht im Wirt und
+    /// nirgends sonst (`apps/cli/src/main.rs`) —, also ist die beobachtete Zeit
+    /// ein Argument. Der Boden macht sie MONOTON gegen die Auswahl: eine
+    /// zurueckgedrehte Uhr kann das gemeldete Vertrauensalter nicht unter das
+    /// Alter druecken, das der Head bei seiner Auswahl schon hatte.
+    ///
+    /// Was er NICHT leistet, und das gehoert hierher statt in eine Zusage: ein
+    /// Aufrufer, der eine Zeit VOR `notAfter` einreicht, laesst einen
+    /// veralteten Head frisch erscheinen. Der Auswahlzeitpunkt liegt immer vor
+    /// `notAfter`, also ist der Boden dagegen kein Schutz. Die Uhr des Wirts
+    /// ist Vertrauensgrundlage dieser Feststellung; der blockierende
+    /// Zeitbegriff, den der Kern selbst haelt, ist der Vertrauensboden von
+    /// `ea-time` bei der AUSWAHL.
+    fn floored_now(&self, observed_now: UnixMillis) -> UnixMillis {
+        let floor = self.head.preexisting_effective_now().value();
+        if observed_now.get() < floor.get() {
+            floor
+        } else {
+            observed_now
+        }
+    }
+
+    /// Der Zeitstatus des gebundenen Head, gegen die BEOBACHTETE Zeit.
     ///
     /// `stale` heisst `effectiveNow > notAfter` (`design.md`:1447). Der Head war
     /// bei seiner AUSWAHL frisch — `select_registry_head` weist einen schon
@@ -988,11 +1034,20 @@ impl WriterService<'_> {
     /// er gebunden ist. Genau deshalb ist die Feststellung hier und nicht in
     /// der Auswahl.
     ///
+    /// Die Zeit MUSS deshalb von aussen kommen und darf NICHT
+    /// [`SelectedRegistryHead::preexisting_effective_now`] sein: dieser Wert ist
+    /// die Zeit ZUM AUSWAHLZEITPUNKT, und gegen ihn ist die Veralterung
+    /// strukturell unerreichbar — die Auswahl gibt einen aktuellen Head nur
+    /// heraus, wenn `raw_now <= notAfter` gilt. Mit ihm waere dieser Zweig
+    /// immer `Fresh`, und der harte Block fuer Evidence Grade eine Attrappe.
+    /// [`Self::floored_now`] nennt, was die beobachtete Zeit leisten kann und
+    /// was nicht.
+    ///
     /// Evidence Grade (`operatingProfile == 1`) und der signierte Wert `block`
     /// (`registryExpiryBehavior == 1`) blockieren; nur das Standardprofil mit
     /// signiertem `warn` ist bestaetigungsfaehig.
-    fn stale_decision(&self, effective_now: UnixMillis) -> StaleDecision {
-        if effective_now.get() <= self.head.not_after().get() {
+    fn stale_decision(&self, observed_now: UnixMillis) -> StaleDecision {
+        if self.floored_now(observed_now).get() <= self.head.not_after().get() {
             return StaleDecision::Fresh;
         }
         let policy = self.head.policy_fields();
@@ -1002,10 +1057,17 @@ impl WriterService<'_> {
         StaleDecision::StaleAcknowledgeable
     }
 
-    /// Das Alter des gebundenen Vertrauensbestands in Millisekunden.
-    fn trust_age_ms(&self, effective_now: UnixMillis) -> u64 {
+    /// Das Alter des GEBUNDENEN Vertrauensbestands in Millisekunden.
+    ///
+    /// Der Bezugspunkt kommt aus [`SelectedRegistryHead::issued_at`] und
+    /// ausdruecklich NICHT aus einem Feld, das der Aufrufer neben der Bindung
+    /// mitfuehrt: das Alter ist eine Aussage UEBER DEN GEBUNDENEN HEAD, und ein
+    /// freies Feld waere eine Warnung, die der Aufrufer abschalten kann, indem
+    /// er den Bezugspunkt naeher an die Gegenwart legt.
+    fn trust_age_ms(&self, observed_now: UnixMillis) -> u64 {
         u64::try_from(
-            i128::from(effective_now.get()) - i128::from(self.binding.head_issued_at.get()),
+            i128::from(self.floored_now(observed_now).get())
+                - i128::from(self.head.issued_at().get()),
         )
         .unwrap_or(0)
     }
@@ -1236,6 +1298,52 @@ impl WriterService<'_> {
         }
         self.backend.sync_file(target)?;
         Ok(())
+    }
+}
+
+/// Der Bestand OHNE die Staging-Adressen dieses Schreibpfades.
+///
+/// # Warum das noetig ist
+///
+/// [`ea_archive::ArchiveInventory`] klassifiziert AUSSCHLIESSLICH ueber das
+/// 9-Byte-Exact-Object-Praefix, und der Pfadhinweis ist dort ausdruecklich keine
+/// Identitaet. Die gestagten Bytes von Schritt 8 SIND das exakte Archivobjekt —
+/// Schritt 8 dekodiert sie sogar dafuer. Ohne diesen Filter wuerde eine
+/// liegengebliebene `entries/<seq>_<hash>.eip.staging` also zu einem
+/// [`ChainNode`]: `verified_head` stuende auf einem Objekt, das NIE
+/// veroeffentlicht wurde, Schritt 3 verlangte den externen Kopfabgleich auf
+/// einem Bestand, in dem nichts liegt, und der naechste Eintrag bindet einen
+/// Vorgaenger, den es nicht gibt. Die Zusage „die Sequenz gilt dann als NICHT
+/// verbraucht" (`design.md` §9.4) waere gebrochen.
+///
+/// # Warum der NAME hier entscheiden DARF
+///
+/// Er entscheidet nicht, ob Bytes ein Archivobjekt sind — das bleibt Sache des
+/// Praefix. Er entscheidet, ob ein Objekt VEROEFFENTLICHT ist, und genau das
+/// ist eine Aussage ueber den Namen: §11.4 macht den Zielnamen zum
+/// Commit-Marker, und veroeffentlicht wird durch Rename AUF ihn. Eine Adresse
+/// mit [`STAGING_SUFFIX_V1`] ist per Konstruktion dieses Schreibpfades eine
+/// temporaere Datei und damit ein Gesundheitsbefund.
+///
+/// Der Filter sitzt in DIESER Crate und nicht in `ea-archive`: das Inventar ist
+/// Stufe-1-Code und wird mit `ea-verify` geteilt. Ob das Archivgate liegen
+/// gebliebene Staging-Dateien heute schon als Eintraege sieht, ist eine
+/// breitere Frage als diese Finalisierung und bleibt UNVERAENDERT.
+struct PublishedObjectsOnly<'a> {
+    inner: &'a dyn ArchiveSource,
+}
+
+impl ArchiveSource for PublishedObjectsOnly<'_> {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        self.inner.visit_blobs(&mut |blob| {
+            if blob.path_hint().ends_with(STAGING_SUFFIX_V1) {
+                return Ok(());
+            }
+            visitor(blob)
+        })
     }
 }
 

@@ -324,6 +324,7 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
         valid_through_sequence,
         proposed_sequence,
         head_event_not_after,
+        head_event_issued_at,
         preexisting_effective_now,
         warnings,
         committed_revision,
@@ -341,6 +342,11 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
     // wird; kaeme er aus einer anderen Quelle als dem gewaehlten Ereignis,
     // waere jede solche Feststellung ueber den falschen Head.
     assert!(*head_event_not_after == expected_event.not_after);
+    // Und `issuedAt` DESSELBEN Ereignisses, ebenso unveraendert durchgereicht.
+    // Es ist der Bezugspunkt des Vertrauensalters; kaeme es aus einer anderen
+    // Quelle als dem gewaehlten Ereignis, waere jede Altersangabe ueber den
+    // falschen Head.
+    assert!(*head_event_issued_at == expected_event.issued_at);
     assert!(preexisting_effective_now.value() == expected_now);
     assert!(*warnings == expected_warnings);
     assert_eq!(*committed_revision, 41);

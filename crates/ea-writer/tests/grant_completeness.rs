@@ -85,6 +85,7 @@ fn every_planned_grant_exists_as_an_eag_before_the_entry_is_published() {
         .finalize_up_to(
             &proof,
             valid_incident(),
+            harness.observed_now(),
             ea_writer::FinalizationStep::ProduceGrantsAndEntryBytes,
         )
         .expect("Schritt 7 muss erreichbar sein");
