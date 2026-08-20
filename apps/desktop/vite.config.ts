@@ -14,6 +14,15 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],
+    // NUR die Einheitentests des Pakets. Die Vitest-4-Vorgaben sind
+    // `include = ["**/*.{test,spec}.?(c|m)[jt]s?(x)"]` und
+    // `exclude = ["**/node_modules/**", "**/.git/**"]` — also KEINE E2E-Ausnahme
+    // und kein `dist`. Ohne diese Eingrenzung sammelt `pnpm desktop:test` ab
+    // Task 16 die Playwright-Spec `tests/e2e/writer-offline.spec.ts` ein und
+    // faellt, weil `@playwright/test` unter Vitest keinen Runner findet
+    // (gemessen: mit Spec und ohne diesen Schluessel 3 Dateien, eine rot; mit
+    // dem Schluessel 2 Dateien, alle gruen).
+    include: ['src/**/*.test.{ts,tsx}'],
     // Node 26 definiert ein EIGENES `localStorage` auf `globalThis`, das ohne
     // `--localstorage-file` `undefined` liefert. Vitests `populateGlobal`
     // ueberspringt jeden Fensterschluessel, der bereits in `globalThis` steht
