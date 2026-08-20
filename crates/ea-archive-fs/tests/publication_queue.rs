@@ -32,6 +32,78 @@ fn resumption_publishes_byte_identical_objects_in_the_same_order() {
 }
 
 #[test]
+fn a_hard_target_failure_keeps_the_whole_plan_pending() {
+    let (_guard, _root) = support::temp_root("queue-hard-failure");
+    let (queue, target) = support::queue_with_a_reconnected_but_failing_target();
+    let planned = support::two_grants_and_one_entry();
+
+    // Das Ziel ist ERREICHBAR und lehnt am zweiten Objekt hart ab. Der Fehler
+    // wird gemeldet — und ist ausdruecklich NICHT die verlorene
+    // Erreichbarkeit, sonst prueefte der Test den alten Pfad weiter.
+    assert_eq!(
+        queue.resume().unwrap_err().code(),
+        "EA-ARCHIVE-FLUSH-FAILED"
+    );
+    assert_eq!(
+        target.published_order().len(),
+        1,
+        "genau das erste Objekt kam durch"
+    );
+
+    // Der aufgeschobene Plan darf dabei NICHT verloren gehen: ein zweiter
+    // `resume` faende sonst einen leeren Slot und meldete `synchronisiert`,
+    // obwohl zwei Objekte nie ankamen.
+    assert_eq!(
+        queue.resume().unwrap_err().code(),
+        "EA-ARCHIVE-FLUSH-FAILED",
+        "der Plan MUSS aufgeschoben geblieben sein"
+    );
+
+    // Nach der Reparatur laeuft der GANZE Plan byteidentisch und in seiner
+    // Reihenfolge zu Ende — auch das erste, schon veroeffentlichte Objekt
+    // erscheint wieder, weil der ganze Plan aufbewahrt wurde.
+    target.repair();
+    let resumed = queue.resume().unwrap();
+    assert_eq!(resumed.sync_status(), SyncStatus::Synchronized);
+    assert_eq!(resumed.published_bytes(), planned.exact_bytes());
+    assert_eq!(resumed.published_order(), planned.order());
+    assert_eq!(target.published_order(), planned.order());
+
+    // Und jetzt, und erst jetzt, ist die Warteschlange leer.
+    let empty = queue.resume().unwrap();
+    assert_eq!(empty.sync_status(), SyncStatus::Synchronized);
+    assert!(empty.published_order().is_empty());
+}
+
+#[test]
+fn a_hard_target_failure_keeps_a_freshly_accepted_plan_pending() {
+    let (_guard, _root) = support::temp_root("queue-publish-hard-failure");
+    let (queue, target) = support::queue_on_a_connected_but_failing_target();
+    let planned = support::two_grants_and_one_entry();
+
+    // Der Weg ueber `publish`: das Ziel war NIE getrennt, der Plan kommt frisch
+    // an und laeuft am zweiten Objekt in den Hartfehler. Auch dieser Plan ist
+    // ANGENOMMEN und darf nicht verloren gehen — dieser Aufrufer entsteht in
+    // Task 11.
+    assert_eq!(
+        queue.publish(planned.clone()).unwrap_err().code(),
+        "EA-ARCHIVE-FLUSH-FAILED"
+    );
+    assert_eq!(
+        target.published_order().len(),
+        1,
+        "genau das erste Objekt kam durch"
+    );
+
+    target.repair();
+    let resumed = queue.resume().unwrap();
+    assert_eq!(resumed.sync_status(), SyncStatus::Synchronized);
+    assert_eq!(resumed.published_bytes(), planned.exact_bytes());
+    assert_eq!(resumed.published_order(), planned.order());
+    assert_eq!(target.published_order(), planned.order());
+}
+
+#[test]
 fn the_four_sync_states_carry_the_exact_normative_copy() {
     assert_eq!(
         SyncStatus::ALL

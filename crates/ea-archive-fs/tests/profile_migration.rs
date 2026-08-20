@@ -186,6 +186,62 @@ fn a_pending_old_profile_publication_stops_the_switch_before_the_inventory() {
 }
 
 #[test]
+fn a_hard_target_failure_keeps_the_second_migration_attempt_fail_closed() {
+    let harness = support::migration_harness_with_a_hard_failing_publication();
+
+    // Das Ziel der Warteschlange ist ERREICHBAR und lehnt hart ab. Der erste
+    // Versuch bricht damit vor dem Inventar ab.
+    assert_eq!(
+        harness
+            .migrator()
+            .run_with(support::profile_migration_proof())
+            .unwrap_err()
+            .code(),
+        "EA-ARCHIVE-PENDING-PUBLICATION"
+    );
+
+    // Und der ZWEITE Versuch ebenso: verliert die Warteschlange ihren Plan am
+    // Hartfehler, meldet ihr `resume` beim naechsten Mal `synchronisiert`, und
+    // der Wechsel laeuft durch, ohne dass die geplanten Objekte je beim Ziel
+    // angekommen sind. Genau diese stille Herabstufung darf es nicht geben.
+    let second = harness.migrator();
+    assert_eq!(
+        second
+            .run_with(support::profile_migration_proof())
+            .unwrap_err()
+            .code(),
+        "EA-ARCHIVE-PENDING-PUBLICATION",
+        "der Wiederholungsweg darf nicht fail-open werden"
+    );
+    assert_eq!(
+        second.active_profile_hash().as_bytes(),
+        support::source_profile_hash().as_bytes()
+    );
+    assert_eq!(
+        second.staged_object_count(),
+        0,
+        "der Abbruch liegt VOR der Uebernahme"
+    );
+    assert!(second.finalization_lock().is_available());
+
+    // Erst wenn das Ziel die Publikation wirklich annimmt, traegt der Wechsel —
+    // und dann liegen alle drei geplanten Objekte beim Ziel.
+    harness.repair_hard_failing_targets();
+    let third = harness.migrator();
+    third
+        .run_with(support::profile_migration_proof())
+        .expect("nach dem Beenden der Publikation MUSS der Wechsel tragen");
+    assert_eq!(
+        third.active_profile_hash().as_bytes(),
+        support::target_profile_hash().as_bytes()
+    );
+    assert_eq!(
+        harness.published_by_hard_failing_targets(),
+        support::two_grants_and_one_entry().order()
+    );
+}
+
+#[test]
 fn a_finished_old_profile_publication_lets_the_switch_proceed() {
     let harness = support::migration_harness_with_a_pending_publication();
     // Wiederverbindung: die aufgeschobene Publikation laeuft byteidentisch zu

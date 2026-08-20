@@ -815,6 +815,190 @@ impl PublicationTargetV1 for DisconnectingTarget {
     }
 }
 
+/// Ein Ziel, das ERREICHBAR ist und die Publikation dennoch HART ablehnt.
+///
+/// Der Unterschied zu [`DisconnectingTarget`] ist der ganze Punkt: verlorene
+/// Erreichbarkeit ist ein ZUSTAND (`Upload ausstehend`), ein Hartfehler ist ein
+/// FEHLER. Beide muessen den aufgeschobenen Plan aufbewahren, sonst meldet der
+/// naechste `resume` `synchronisiert`, obwohl nie etwas ankam.
+///
+/// Zwei Fixtureeigenschaften sind tragend:
+///
+/// 1. Der Ausfall liegt am ZWEITEN Objekt des Plans. Nur so belegt der
+///    Wiederanlauf, dass der GANZE Plan aufbewahrt wurde und nicht bloss sein
+///    unveroeffentlichter Rest.
+/// 2. `publish_one` ist fuer bytegleiche Wiederholungen idempotent, weil das
+///    reale Ziel Create-if-absent traegt. Ein blind anhaengender Zaehler
+///    machte den Wiederanlauf zu einem Fixturebefund (doppeltes erstes Objekt)
+///    statt zu einer Messung; abweichende Bytes an einer bereits belegten
+///    Adresse laesst die Attrappe deshalb NICHT durchgehen.
+pub struct HardFailingTarget {
+    connected: Mutex<bool>,
+    fails_hard: Mutex<bool>,
+    published: Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+impl HardFailingTarget {
+    /// Anfangs getrennt, nach der Wiederverbindung ablehnend.
+    #[must_use]
+    pub fn disconnected_and_failing() -> Arc<Self> {
+        Arc::new(Self {
+            connected: Mutex::new(false),
+            fails_hard: Mutex::new(true),
+            published: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Von Anfang an ERREICHBAR und ablehnend.
+    ///
+    /// Fuer den Weg ueber `publish`: dort nimmt die Warteschlange den Plan
+    /// FRISCH an und laeuft ohne jede Trennung in den Hartfehler.
+    #[must_use]
+    pub fn connected_and_failing() -> Arc<Self> {
+        Arc::new(Self {
+            connected: Mutex::new(true),
+            fails_hard: Mutex::new(true),
+            published: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Das Ziel nimmt ab jetzt an.
+    pub fn repair(&self) {
+        *self
+            .fails_hard
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = false;
+    }
+
+    /// Die Adressen, die das Ziel TATSAECHLICH tragt, in Ankunftsreihenfolge.
+    #[must_use]
+    pub fn published_order(&self) -> Vec<String> {
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+}
+
+/// Der Griff, mit dem die Warteschlange dasselbe Ziel haelt wie die Fixture.
+///
+/// Die Warteschlange BESITZT ihr Ziel (`Box<dyn PublicationTargetV1>`); ohne
+/// diesen Griff koennte der Test es nach dem Bau nicht mehr reparieren.
+struct SharedHardFailingTarget(Arc<HardFailingTarget>);
+
+impl PublicationTargetV1 for SharedHardFailingTarget {
+    fn is_connected(&self) -> bool {
+        *self
+            .0
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn reconnect(&self) {
+        *self
+            .0
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    fn publish_one(
+        &self,
+        relative: &ArchivePath,
+        bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        if !self.is_connected() {
+            return Err(ea_archive::ArchiveBackendError::Io);
+        }
+        let mut published = self
+            .0
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let address = relative.as_str().to_owned();
+        if let Some((_, existing)) = published.iter().find(|(path, _)| path == &address) {
+            assert_eq!(
+                existing.as_slice(),
+                bytes,
+                "die Wiederaufnahme MUSS byteidentisch sein"
+            );
+            return Ok(());
+        }
+        if *self
+            .0
+            .fails_hard
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            && !published.is_empty()
+        {
+            // Erreichbar und ablehnend, am ZWEITEN Objekt des Plans.
+            //
+            // `FlushFailed` und nicht `Io`, obwohl der Arm eine
+            // Flush-Operation beschreibt: `Io` ist genau der Fehler, den die
+            // Trennung liefert (siehe oben), und der Test MUSS den Hartfehler
+            // vom Trennungspfad unterscheiden koennen. Der Arm ist hier
+            // Stellvertreter fuer „das Ziel lehnt ab"; welchen Fehler ein
+            // echtes Netzziel liefert, entscheidet Task 11.
+            return Err(ea_archive::ArchiveBackendError::FlushFailed);
+        }
+        published.push((address, bytes.to_vec()));
+        Ok(())
+    }
+}
+
+/// Eine Warteschlange, deren Ziel nach der Wiederverbindung HART ablehnt.
+///
+/// Der Plan liegt nach dem Bau als `Upload ausstehend` in der Warteschlange und
+/// das Ziel ist WIEDER erreichbar: der naechste `resume` laeuft also in den
+/// Hartfehler und nicht in die Trennung.
+///
+/// # Panics
+///
+/// Wenn die Warteschlange nicht entsteht oder den Plan nicht aufschiebt.
+#[must_use]
+pub fn queue_with_a_reconnected_but_failing_target() -> (PublicationQueue, Arc<HardFailingTarget>) {
+    let target = HardFailingTarget::disconnected_and_failing();
+    let queue = PublicationQueue::new(
+        Box::new(SharedHardFailingTarget(Arc::clone(&target))),
+        controlled_network_profile(),
+        &policy_allowing_controlled_network(),
+    )
+    .expect("die Warteschlange der Fixture muss entstehen");
+    let state = queue
+        .publish(two_grants_and_one_entry())
+        .expect("die Warteschlange nimmt den Plan an");
+    assert_eq!(
+        state.sync_status(),
+        ea_archive_fs::SyncStatus::UploadPending,
+        "die Fixture MUSS eine WARTENDE Publikation hinterlassen"
+    );
+    let _ = queue.reconnect();
+    (queue, target)
+}
+
+/// Eine Warteschlange, deren Ziel ERREICHBAR ist und HART ablehnt.
+///
+/// Sie ist LEER: der Plan wird ihr im Test frisch uebergeben. Nur so laeuft
+/// der Weg ueber `publish` und nicht der ueber `resume`.
+///
+/// # Panics
+///
+/// Wenn die Warteschlange nicht entsteht.
+#[must_use]
+pub fn queue_on_a_connected_but_failing_target() -> (PublicationQueue, Arc<HardFailingTarget>) {
+    let target = HardFailingTarget::connected_and_failing();
+    let queue = PublicationQueue::new(
+        Box::new(SharedHardFailingTarget(Arc::clone(&target))),
+        controlled_network_profile(),
+        &policy_allowing_controlled_network(),
+    )
+    .expect("die Warteschlange der Fixture muss entstehen");
+    (queue, target)
+}
+
 /// Eine Warteschlange auf einem Ziel, das anfangs getrennt ist.
 #[must_use]
 pub fn queue_with_disconnecting_adapter() -> PublicationQueue {
@@ -875,6 +1059,9 @@ pub struct MigrationHarness {
     /// steht fuer „das Quellprofil hat noch etwas offen" — die Zusage, die
     /// geprueft wird, ist der SCHRITT und nicht das Profil, an dem er haengt.
     pending: Vec<PublicationQueue>,
+    /// Die Attrappen der HART ablehnenden Ziele, damit der Test sie nach dem
+    /// Bau noch reparieren kann.
+    hard_targets: Vec<Arc<HardFailingTarget>>,
 }
 
 impl MigrationHarness {
@@ -918,6 +1105,7 @@ impl MigrationHarness {
             anchor_bytes: complete.anchor_bytes.clone(),
             head: selected_registry_head(),
             pending: Vec::new(),
+            hard_targets: Vec::new(),
         }
     }
 
@@ -943,6 +1131,41 @@ impl MigrationHarness {
         );
         self.pending.push(queue);
         self
+    }
+
+    /// Legt EINE aufgeschobene Publikation an, deren Ziel ERREICHBAR ist und
+    /// dennoch HART ablehnt.
+    ///
+    /// Genau diese Kette ist der Pruefstein: der Wechsel bricht ab, der Plan
+    /// MUSS aber in der Warteschlange bleiben, sonst faende ein zweiter
+    /// Versuch eine leere Warteschlange, meldete `synchronisiert` und liefe
+    /// durch, ohne dass die geplanten Objekte je beim Ziel angekommen sind.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Warteschlange nicht entsteht oder den Plan nicht aufschiebt.
+    #[must_use]
+    pub fn with_a_hard_failing_source_publication(mut self) -> Self {
+        let (queue, target) = queue_with_a_reconnected_but_failing_target();
+        self.pending.push(queue);
+        self.hard_targets.push(target);
+        self
+    }
+
+    /// Repariert jedes HART ablehnende Ziel dieser Fixture.
+    pub fn repair_hard_failing_targets(&self) {
+        for target in &self.hard_targets {
+            target.repair();
+        }
+    }
+
+    /// Die Adressen, die die HART ablehnenden Ziele tatsaechlich tragen.
+    #[must_use]
+    pub fn published_by_hard_failing_targets(&self) -> Vec<String> {
+        self.hard_targets
+            .iter()
+            .flat_map(|target| target.published_order())
+            .collect()
     }
 
     /// Stellt die Verbindung jeder offenen Warteschlange wieder her.
@@ -998,6 +1221,13 @@ pub fn migration_harness() -> MigrationHarness {
 #[must_use]
 pub fn migration_harness_with_a_pending_publication() -> MigrationHarness {
     MigrationHarness::new(policy_allowing_source_and_target()).with_a_pending_source_publication()
+}
+
+/// Die Fixture mit einer Publikation, deren erreichbares Ziel HART ablehnt.
+#[must_use]
+pub fn migration_harness_with_a_hard_failing_publication() -> MigrationHarness {
+    MigrationHarness::new(policy_allowing_source_and_target())
+        .with_a_hard_failing_source_publication()
 }
 
 /// Die Fixture mit einer Policy, die das ZIELPROFIL nicht traegt.

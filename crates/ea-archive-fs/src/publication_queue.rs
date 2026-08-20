@@ -236,10 +236,17 @@ impl PublicationQueue {
 
     /// Nimmt den Plan an und veroeffentlicht, soweit das Ziel erreichbar ist.
     ///
+    /// Ein ANGENOMMENER Plan geht nicht mehr verloren: sowohl die verlorene
+    /// Erreichbarkeit als auch ein Hartfehler des Ziels lassen ihn
+    /// AUFGESCHOBEN in der Warteschlange zurueck, `resume` setzt ihn dann
+    /// byteidentisch fort. Nur die ueberschrittene Queuegrenze ist eine
+    /// Ablehnung und wird deshalb nicht aufbewahrt.
+    ///
     /// # Errors
     ///
     /// Der Fehler des Ziels, wenn er NICHT die verlorene Erreichbarkeit ist —
-    /// jene ist ein Zustand und kein Fehler.
+    /// jene ist ein Zustand und kein Fehler. Der Plan bleibt in diesem Fall
+    /// aufgeschoben.
     pub fn publish(
         &self,
         planned: PlannedPublicationV1,
@@ -278,9 +285,13 @@ impl PublicationQueue {
     /// Setzt die aufgeschobene Publikation fort — BYTEIDENTISCH und in
     /// derselben Reihenfolge.
     ///
+    /// Ein Hartfehler des Ziels laesst den Plan aufgeschoben; ein weiterer
+    /// `resume` nimmt ihn deshalb WIEDER auf. `synchronisiert` ohne
+    /// veroeffentlichte Bytes heisst genau eines: es lag nichts an.
+    ///
     /// # Errors
     ///
-    /// Der Fehler des Ziels.
+    /// Der Fehler des Ziels. Der Plan bleibt in diesem Fall aufgeschoben.
     pub fn resume(&self) -> Result<PublicationStateV1, ArchiveBackendError> {
         let planned = self
             .pending
@@ -300,6 +311,13 @@ impl PublicationQueue {
     }
 
     /// Veroeffentlicht den Plan in seiner Reihenfolge.
+    ///
+    /// Der Plan verlaesst die Warteschlange NUR vollstaendig veroeffentlicht:
+    /// jeder andere Ausgang — verlorene Erreichbarkeit wie Hartfehler des
+    /// Ziels — legt ihn GANZ zurueck. Ein fallengelassener Plan waere eine
+    /// stille Herabstufung: der naechste `resume` faende einen leeren Slot,
+    /// meldete `synchronisiert` und ein Profilwechsel liefe durch, ohne dass
+    /// die geplanten Objekte je beim Ziel angekommen sind.
     fn drain(
         &self,
         planned: PlannedPublicationV1,
@@ -322,7 +340,16 @@ impl PublicationQueue {
                     published_order,
                 });
             }
-            self.target.publish_one(path, bytes)?;
+            if let Err(error) = self.target.publish_one(path, bytes) {
+                // HARTFEHLER, keine verlorene Erreichbarkeit: das Ziel ist
+                // erreichbar und lehnt ab. Der GANZE Plan bleibt aufgeschoben
+                // — dieselbe Aufbewahrung wie oben und aus demselben Grund,
+                // denn ein Wiederanlauf ist ueber Create-if-absent idempotent.
+                // Der Fehler des Ziels wird trotzdem gemeldet: aufbewahrt ist
+                // nicht behoben.
+                *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(planned);
+                return Err(error);
+            }
             published_bytes.push(bytes.clone());
             published_order.push(path.as_str().to_owned());
         }

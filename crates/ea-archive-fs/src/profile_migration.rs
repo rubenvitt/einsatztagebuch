@@ -54,19 +54,29 @@ impl<'a> MigrationSourceV1<'a> {
     /// Beendet jede offene Publikation des Quellprofils.
     ///
     /// Sie laeuft ueber `resume`, weil genau das die byteidentische
-    /// Fortsetzung ist. Was danach nicht `synchronisiert` ist, bricht den
+    /// Fortsetzung ist. Was NICHT `synchronisiert` erreicht, bricht den
     /// Wechsel ab: eine noch wartende Publikation ist ein Objekt, das das
     /// Zielprofil nie sehen wuerde.
+    ///
+    /// Ein HARTFEHLER des Ziels ist dabei derselbe Befund wie eine wartende
+    /// Publikation und nicht ein anderer: die Warteschlange bewahrt den Plan
+    /// auch dann auf, es liegt also weiterhin etwas an. Der Fehler des Ziels
+    /// wird deshalb ABSICHTLICH nicht durchgereicht — er beschreibt, WARUM
+    /// nichts durchkam, aber der Befund des Wechsels ist, DASS noch etwas
+    /// aussteht. Ein `?` an dieser Stelle liesse den Wechsel mit
+    /// `EA-ARCHIVE-IO` abbrechen und den Bediener glauben, ein zweiter
+    /// Versuch fange bei einer leeren Warteschlange an.
     ///
     /// # Errors
     ///
     /// [`ArchiveBackendError::PendingPublication`], wenn eine Warteschlange
-    /// nicht `synchronisiert` erreicht; sonst der Fehler des Ziels.
+    /// `synchronisiert` nicht erreicht — sei es als Zustand oder als
+    /// Hartfehler ihres Ziels.
     fn finish_pending(&self) -> Result<(), ArchiveBackendError> {
         for queue in &self.pending {
-            let state = queue.resume()?;
-            if state.sync_status() != SyncStatus::Synchronized {
-                return Err(ArchiveBackendError::PendingPublication);
+            match queue.resume() {
+                Ok(state) if state.sync_status() == SyncStatus::Synchronized => {}
+                Ok(_) | Err(_) => return Err(ArchiveBackendError::PendingPublication),
             }
         }
         Ok(())
