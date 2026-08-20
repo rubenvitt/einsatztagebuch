@@ -719,7 +719,7 @@ const CRYPTO_ORGANIZATION_ID: [u8; 16] = [0x10; 16];
 /// Die Geraetekennung der strukturierten Vektoren.
 const CRYPTO_DEVICE_ID: [u8; 16] = [0x11; 16];
 
-/// Die 23 Domain-Trennungszeichenketten von `crates/ea-crypto`.
+/// Die 24 Domain-Trennungszeichenketten von `crates/ea-crypto`.
 ///
 /// Abgeleitet aus dem Quelltext, nicht aus dem Gedaechtnis:
 /// `crates/ea-crypto/src/digest.rs` fuehrt siebzehn Hashdomaenen und drei
@@ -729,11 +729,12 @@ const CRYPTO_DEVICE_ID: [u8; 16] = [0x11; 16];
 /// Quelltext erneut ab und faellt, sobald dort eine Zeichenkette ohne Vektor
 /// steht.
 ///
-/// ADDITIV erweitert um die drei Domaenen des Archivbackendprofils (D-B02).
+/// ADDITIV erweitert um die drei Domaenen des Archivbackendprofils (D-B02) und
+/// um die Vorschaudomaene der Abschlussbestaetigung.
 /// Kein bestehender Eintrag wurde umbenannt, entfernt oder umsortiert; das
 /// Manifest sortiert seine Eintraege ohnehin nach Namen
 /// ([`VectorManifest::to_json`]).
-const CRYPTO_DOMAIN_STRINGS: [&str; 23] = [
+const CRYPTO_DOMAIN_STRINGS: [&str; 24] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
     "EINSATZARCHIV-CHECKPOINT-v1",
@@ -757,10 +758,11 @@ const CRYPTO_DOMAIN_STRINGS: [&str; 23] = [
     "EINSATZARCHIV-ARCHIVE-PROFILE-v1",
     "EINSATZARCHIV-ARCHIVE-INVENTORY-v1",
     "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
+    "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
 ];
 
 /// Die domaingetrennten Digestfunktionen mit ihrer Domaene.
-const CRYPTO_DOMAIN_DIGESTS: [(&str, &str); 15] = [
+const CRYPTO_DOMAIN_DIGESTS: [(&str, &str); 16] = [
     (
         "domain-digest/ciphertext-digest",
         "EINSATZARCHIV-CIPHERTEXT-v1",
@@ -808,6 +810,10 @@ const CRYPTO_DOMAIN_DIGESTS: [(&str, &str); 15] = [
     (
         "domain-digest/active-profile-pointer-digest",
         "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
+    ),
+    (
+        "domain-digest/finalization-preview-digest",
+        "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
     ),
 ];
 
@@ -7004,12 +7010,12 @@ mod tests {
         assert!(report.is_clean(), "{:?}", report.mismatches);
     }
 
-    /// Der Erzeuger liefert 72 verschiedene Eintraege, und jeder Dateipfad
+    /// Der Erzeuger liefert 74 verschiedene Eintraege, und jeder Dateipfad
     /// liegt unter der Familienwurzel.
     #[test]
     fn the_crypto_generator_names_every_entry_and_file_exactly_once() {
         let manifest = crypto_suite_one_manifest();
-        assert_eq!(manifest.entries.len(), 72);
+        assert_eq!(manifest.entries.len(), 74);
         let names = manifest
             .entries
             .iter()

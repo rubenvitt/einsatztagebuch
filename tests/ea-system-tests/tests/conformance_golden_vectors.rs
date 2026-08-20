@@ -39,11 +39,11 @@ use ea_crypto::{
     HpkeRecipientPrivateKey, HpkeSealed, ProtectedHeader, SUITE_ID, SecretBytes, SecretVec,
     active_profile_pointer_digest, aead_open, aead_seal, archive_inventory_digest,
     archive_profile_digest, authorized_trust_digest, bootstrap_anchor_hash, ciphertext_digest,
-    cose_sign1_ctt_imprint, entry_hash, grant_digest, grant_plan_digest, hpke_aad, hpke_info,
-    hpke_open, linux_os_account_binding_hash, object_hash, operator_profile_digest,
-    parse_cose_sign1, payload_aad, receipt_digest, record_digest, recovery_test_digest,
-    renewal_input_digest, trust_anchor_hash, trust_digest, validate_unsigned_protocol_core,
-    verification_report_hash,
+    cose_sign1_ctt_imprint, entry_hash, finalization_preview_digest, grant_digest,
+    grant_plan_digest, hpke_aad, hpke_info, hpke_open, linux_os_account_binding_hash, object_hash,
+    operator_profile_digest, parse_cose_sign1, payload_aad, receipt_digest, record_digest,
+    recovery_test_digest, renewal_input_digest, trust_anchor_hash, trust_digest,
+    validate_unsigned_protocol_core, verification_report_hash,
 };
 use ea_format::{
     DecodedEvidencePayloadV1, DecodedTrustPayloadV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1,
@@ -82,12 +82,12 @@ const MANIFEST_PATH: &str = "vectors/crypto/suite-1/manifest.json";
 
 /// Die Zahl der Eintraege. Ein truncatiertes Manifest darf nicht still
 /// durchlaufen: ohne diese Schranke waere ein leeres Manifest trivial gruen.
-const EXPECTED_ENTRY_COUNT: usize = 72;
+const EXPECTED_ENTRY_COUNT: usize = 74;
 
 /// Die Zahl der VERSCHIEDENEN `EINSATZARCHIV-`-Zeichenketten im Quelltext von
 /// `crates/ea-crypto`. Ohne diese Schranke koennte ein Scanner, der nichts
 /// findet, die Abdeckungspruefung leer bestehen.
-const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 24;
+const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 25;
 
 /// Das feste Urbild der Domain-Digest-Vektoren.
 const PROBE: &[u8] = b"suite-1 digest probe";
@@ -102,7 +102,7 @@ type DigestFn = fn(&[u8]) -> Hash32;
 /// Eine Tabelle, kein Fliesstext: Erzeuger und Test leiten ihre Eintraege aus
 /// derselben Aufzaehlung ab, und eine neue Domain faellt sofort als fehlender
 /// Eintrag auf.
-const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 14] = [
+const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 15] = [
     (
         "domain-digest/ciphertext-digest",
         "EINSATZARCHIV-CIPHERTEXT-v1",
@@ -173,6 +173,11 @@ const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 14] = [
         "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
         active_profile_pointer_digest,
     ),
+    (
+        "domain-digest/finalization-preview-digest",
+        "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
+        finalization_preview_digest,
+    ),
 ];
 
 type ContextFn = fn(&[u8]) -> Vec<u8>;
@@ -197,7 +202,7 @@ const DOMAIN_CONTEXTS: [(&str, &str, ContextFn); 3] = [
 ];
 
 /// Die 23 Domain-Trennungszeichenketten als eigene Eintraege.
-const DOMAIN_STRINGS: [&str; 23] = [
+const DOMAIN_STRINGS: [&str; 24] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
     "EINSATZARCHIV-CHECKPOINT-v1",
@@ -221,6 +226,7 @@ const DOMAIN_STRINGS: [&str; 23] = [
     "EINSATZARCHIV-ARCHIVE-PROFILE-v1",
     "EINSATZARCHIV-ARCHIVE-INVENTORY-v1",
     "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
+    "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
 ];
 
 /// Der Schluessel des RFC-8439-Vektors: 0x80 bis 0x9f.

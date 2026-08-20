@@ -944,6 +944,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-writer"
+version = "0.1.0"
+dependencies = [
+ "ea-archive",
+ "ea-archive-fs",
+ "ea-audit",
+ "ea-cbor",
+ "ea-chain",
+ "ea-crypto",
+ "ea-draft",
+ "ea-format",
+ "ea-key-provider",
+ "ea-local-store",
+ "ea-operator",
+ "ea-schema",
+ "ea-testkit",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ea-verify",
+ "ea-writer",
+ "getrandom 0.4.3",
+ "zeroize",
+]
+
+[[package]]
 name = "ed25519"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

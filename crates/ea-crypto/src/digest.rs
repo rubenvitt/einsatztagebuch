@@ -32,6 +32,7 @@ const RECOVERY_TEST_DOMAIN: &[u8] = b"EINSATZARCHIV-RECOVERY-TEST-v1";
 const ARCHIVE_PROFILE_DOMAIN: &[u8] = b"EINSATZARCHIV-ARCHIVE-PROFILE-v1";
 const ARCHIVE_INVENTORY_DOMAIN: &[u8] = b"EINSATZARCHIV-ARCHIVE-INVENTORY-v1";
 const ACTIVE_PROFILE_POINTER_DOMAIN: &[u8] = b"EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1";
+const FINALIZATION_PREVIEW_DOMAIN: &[u8] = b"EINSATZARCHIV-FINALIZATION-PREVIEW-v1";
 
 pub(crate) fn sha256_parts(parts: &[&[u8]]) -> Hash32 {
     let mut hasher = Sha256::new();
@@ -75,6 +76,13 @@ digest_fn!(archive_inventory_digest, ARCHIVE_INVENTORY_DOMAIN);
 // `activePointerHash` ueber die deterministischen
 // `active-profile-pointer-core-v1`-Bytes.
 digest_fn!(active_profile_pointer_digest, ACTIVE_PROFILE_POINTER_DOMAIN);
+// `previewHash` ueber die deterministischen
+// `finalization-preview-core-v1`-Bytes. Das Urbild deckt alles, worauf
+// `finalize` handelt, und NICHTS, was ein CSPRNG erzeugt: es wird am Ende von
+// Spec-Schritt 5 gerechnet, also VOR der einmaligen Ziehung von Sequenz,
+// UUIDv7, CEK und AEAD-Nonce, damit `finalize` es unter dem Writer-Lock Byte
+// fuer Byte nachrechnen kann. Der Wert wandert nie in Archivbytes.
+digest_fn!(finalization_preview_digest, FINALIZATION_PREVIEW_DOMAIN);
 
 #[must_use]
 pub fn object_hash(exact_object_bytes: &[u8]) -> ObjectHash {

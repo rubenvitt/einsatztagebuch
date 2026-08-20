@@ -252,6 +252,25 @@
       "expectedOutcome": {
         "kind": "accepted"
       },
+      "file": "domain-digest/finalization-preview-digest.bin",
+      "fileSha256": "8a600b8508bfa3eed11c8ca765d94b67b53ba0678e5e5a953e4f449c2cdeb81b",
+      "inputBytes": "73756974652d31206469676573742070726f6265",
+      "intermediateDigests": {
+        "domainString": "f376b4823fce2bc4bdf643ab5e5be96af784906be4e4a6ec6c9bacce99c22d78"
+      },
+      "name": "domain-digest/finalization-preview-digest",
+      "objectBytes": "2c489db20edf6c885fe268be15f2b28187591a9832a9e8b5d4d92685de4c08e4",
+      "schemaId": "ea.crypto.domain-digest/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
       "file": "domain-digest/grant-digest.bin",
       "fileSha256": "8d8e962a2d045c2ca93d02c3ccb39214c9ebb06800dd6693f5066b4f70523278",
       "inputBytes": "73756974652d31206469676573742070726f6265",
@@ -603,6 +622,23 @@
       "intermediateDigests": {},
       "name": "domain-string/einsatzarchiv-evidence-renewal-v1",
       "objectBytes": "45494e5341545a4152434849562d45564944454e43452d52454e4557414c2d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-string/einsatzarchiv-finalization-preview-v1.bin",
+      "fileSha256": "f376b4823fce2bc4bdf643ab5e5be96af784906be4e4a6ec6c9bacce99c22d78",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-finalization-preview-v1",
+      "objectBytes": "45494e5341545a4152434849562d46494e414c495a4154494f4e2d505245564945572d7631",
       "schemaId": "ea.crypto.domain-separation-string/v1",
       "source": {
         "commit": "ea-testkit::crypto_suite_one_manifest",

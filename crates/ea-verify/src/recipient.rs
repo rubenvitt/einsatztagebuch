@@ -40,11 +40,10 @@ use core::fmt;
 
 use ea_archive::ArchiveInventory;
 use ea_crypto::{
-    AEAD_NONCE_SIZE, CEK_SIZE, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_WRAPPED_CEK_SIZE, HpkeSealed,
-    SecretBytes, VerificationContext, aead_open, hpke_aad, hpke_info, hpke_open, payload_aad,
-    verify_cose_sign1,
+    AEAD_NONCE_SIZE, CEK_SIZE, HpkeSealed, SecretBytes, VerificationContext, aead_open, hpke_aad,
+    hpke_info, hpke_open, payload_aad, verify_cose_sign1,
 };
-use ea_format::{EntryPackageV1, GrantBodyV1, GrantKindV1, GrantV1, Parsed};
+use ea_format::{EntryPackageV1, GrantKindV1, GrantV1, Parsed};
 use ea_trust::SelectedRegistryHead;
 use ea_types::KeyThumbprint;
 
@@ -199,7 +198,9 @@ pub(crate) fn open_entry(
     recipient: RecipientKeyV1<'_>,
 ) -> Result<(), DecryptionErrorV1> {
     let body = grant.value().grant_body();
-    let context = exact_grant_context(body).ok_or(DecryptionErrorV1::CekUnwrapFailed)?;
+    let context = body
+        .exact_grant_context()
+        .ok_or(DecryptionErrorV1::CekUnwrapFailed)?;
     let fields = body.fields();
     let sealed = HpkeSealed::from_parts(fields.encapsulated_key, fields.wrapped_cek)
         .map_err(|_| DecryptionErrorV1::CekUnwrapFailed)?;
@@ -242,47 +243,4 @@ pub(crate) fn record_decapsulation(
             Decapsulation::Skipped
         }
     }
-}
-
-/// Die exakten Bytes des `grant-context-v1` aus einem `grant-body-v1`.
-///
-/// `hpkeInfo` und `hpkeAad` sind ueber GENAU diese Bytes definiert
-/// (`design.md`:788-791) — nicht ueber den Grantrumpf, der Kapselung und
-/// umschlossenen CEK zusaetzlich enthaelt. `ea-format` gibt den Kontext nicht
-/// eigens heraus, und `ea-format` ist geschlossen; der Kontext wird deshalb
-/// aus dem Rumpf HERAUSGESCHNITTEN.
-///
-/// DER SCHNITT IST BEWIESEN, NICHT GERATEN, und genau deshalb steht hier ein
-/// Waechter statt eines Kommentars: `grant-body-v1` ist ein CBOR-Array fester
-/// Laenge drei (`0x83`), dessen zweites und drittes Glied Bytefolgen fester
-/// Groesse 32 und 48 sind. Beide werden kanonisch als `0x58 0x20 || …`
-/// beziehungsweise `0x58 0x30 || …` kodiert — 84 Bytes, deren Inhalt hier
-/// unabhaengig aus den dekodierten Feldern nachgebaut und gegen den Rumpf
-/// geprueft wird. Stimmt der Schwanz exakt, ist alles davor (nach dem
-/// Arraykopf) definitionsgemaess das erste Glied: der Kontext.
-///
-/// Faellt der Waechter, wird `None` geliefert und nichts geoeffnet — eine
-/// Entkapselung auf geratenen Bytes gaebe es hier nicht.
-fn exact_grant_context(body: &GrantBodyV1) -> Option<&[u8]> {
-    /// CBOR-Kopf einer Bytefolge mit einbytiger Laengenangabe.
-    const BYTE_STRING_ONE_BYTE_LENGTH: u8 = 0x58;
-    /// CBOR-Kopf eines Arrays fester Laenge drei.
-    const ARRAY_OF_THREE: u8 = 0x83;
-
-    let exact = body.exact_bytes();
-    let fields = body.fields();
-    let mut tail = Vec::with_capacity(4 + HPKE_ENCAPSULATED_KEY_SIZE + HPKE_WRAPPED_CEK_SIZE);
-    tail.push(BYTE_STRING_ONE_BYTE_LENGTH);
-    tail.push(u8::try_from(HPKE_ENCAPSULATED_KEY_SIZE).ok()?);
-    tail.extend_from_slice(&fields.encapsulated_key);
-    tail.push(BYTE_STRING_ONE_BYTE_LENGTH);
-    tail.push(u8::try_from(HPKE_WRAPPED_CEK_SIZE).ok()?);
-    tail.extend_from_slice(&fields.wrapped_cek);
-
-    let context_end = exact.len().checked_sub(tail.len())?;
-    let (head, actual_tail) = exact.split_at(context_end);
-    if actual_tail != tail.as_slice() || head.first() != Some(&ARRAY_OF_THREE) {
-        return None;
-    }
-    head.get(1..)
 }

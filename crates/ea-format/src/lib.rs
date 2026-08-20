@@ -7,6 +7,7 @@ mod eds;
 mod eip;
 mod esr;
 mod etb;
+mod finalization_preview;
 mod import_report;
 mod local_audit;
 mod object;
@@ -38,6 +39,9 @@ pub use etb::{
     PolicyFieldsV1, RegistryChangeV1, RegistryEventFieldsV1, RetentionPolicyFieldsV1,
     RootCertificateFieldsV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1,
     WriterTransitionFieldsV1, validate_destruction_targets,
+};
+pub use finalization_preview::{
+    FinalizationPreviewCoreFieldsV1, FinalizationPreviewCoreV1, encode_finalization_preview_core,
 };
 pub use import_report::{
     ImportIssueCodeV1, ImportIssueV1, ImportReportFieldsV1, ImportReportV1, ImportRowErrorV1,

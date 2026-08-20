@@ -23,9 +23,10 @@ pub use cose::{
 pub use digest::{
     GRANT_SUITE_ID, SUITE_ID, SuiteV1, active_profile_pointer_digest, archive_inventory_digest,
     archive_profile_digest, authorized_trust_digest, bootstrap_anchor_hash, ciphertext_digest,
-    entry_hash, grant_digest, grant_plan_digest, hpke_aad, hpke_info, object_hash,
-    operator_profile_digest, payload_aad, receipt_digest, record_digest, recovery_test_digest,
-    renewal_input_digest, trust_anchor_hash, trust_digest, verification_report_hash,
+    entry_hash, finalization_preview_digest, grant_digest, grant_plan_digest, hpke_aad, hpke_info,
+    object_hash, operator_profile_digest, payload_aad, receipt_digest, record_digest,
+    recovery_test_digest, renewal_input_digest, trust_anchor_hash, trust_digest,
+    verification_report_hash,
 };
 pub use error::CryptoError;
 pub use hpke::{

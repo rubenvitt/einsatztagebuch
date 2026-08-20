@@ -1,0 +1,74 @@
+[package]
+name = "ea-writer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Der SCHREIBENDE und der LESENDE Port ueber einen Bestand:
+# `ArchiveBackend`, `ArchiveTransaction`, `ArchivePath`, `WriterLock`,
+# `ArchiveSource` und `ArchiveInventory`.
+ea-archive.workspace = true
+# Die Wirtbackends `LocalPathBackend` und `ControlledNetworkBackend` samt
+# Publikationsschlange und `SyncStatus`. Diese Kante ist der Grund, warum diese
+# Crate nicht auf der wasm32-Positivliste steht.
+ea-archive-fs.workspace = true
+# `LocalAuditService::record_signed` und `SignedLocalAuditEvent` — die
+# Bestaetigung eines veralteten Registry-Head ist eine SIGNIERTE Auditzeile.
+ea-audit.workspace = true
+# Der deterministische Parser, mit dem die Vorschaubytes gegengelesen werden.
+ea-cbor.workspace = true
+# `assess_rollback`, `build_chain`, `ChainNode` — der Kettenkopf entsteht
+# ausschliesslich aus committed Archivbytes.
+ea-chain.workspace = true
+# `aead_seal`, `payload_aad`, `hpke_seal`, `hpke_info`, `hpke_aad`,
+# `record_digest`, `object_hash`, `finalization_preview_digest` und die
+# Geheimnistraeger.
+ea-crypto.workspace = true
+# Die EINE aktive Entwurfsablage: `DraftLock`, `DraftRepository`,
+# `IncidentNumberRegister`, `OperatorProfileRepository`.
+ea-draft.workspace = true
+# Die eingefrorenen Stufe-1-Konstruktoren der Archivbytes: `ManifestCoreV1`,
+# `SignedManifestV1`, `EntryPackageV1`, `GrantPlanV1`, `GrantBodyV1`, `GrantV1`.
+ea-format.workspace = true
+# Der Writer-Signaturport `KeyProvider::sign` plus `delete` und `contains`.
+ea-key-provider.workspace = true
+# Die verschluesselte lokale Ablage, in der die Abschlussmarke dauerhaft wird.
+ea-local-store.workspace = true
+# `OperatorSessionProof` und `ReauthPurpose::{Finalize, RegistryStaleFinalize}`.
+ea-operator.workspace = true
+# Die GESCHLOSSENEN Stufe-1-Vereinigungen der validierten Nutzlast und der
+# Momentaufnahmen. Sie werden KONSUMIERT und nie neu deklariert.
+ea-schema.workspace = true
+# Die Zeitquelle des gewaehlten Head.
+ea-time.workspace = true
+# `SelectedRegistryHead` samt `proposed_sequence`, `registry_version`,
+# `policy_fields`, `valid_through_sequence` und `active_certificates`.
+ea-trust.workspace = true
+# `Id16`, `EntryHash`, `ObjectHash`, `ChainSequence` — kein neuer
+# Bezeichnertyp.
+ea-types.workspace = true
+# Die Wiederverwendung der Empfaengerentscheidung und der bewiesenen
+# Grant-Kontextschnitt der Oeffnungsseite.
+ea-verify.workspace = true
+# Sequenz, UUIDv7, CEK und AEAD-Nonce — die EINE Entropiequelle dieser Crate.
+getrandom.workspace = true
+# Das Nullen der CEK- und Serialisierungspuffer an der unwiderruflichen
+# Grenze.
+zeroize.workspace = true
+
+[features]
+# Die Naht der Fehlerinjektion — `WriterService::finalize_interrupted_at` und
+# `finalize_up_to` — und NICHTS sonst. Ohne dieses Merkmal existiert dieser
+# zweite Eingang in die unwiderrufliche Reihenfolge nicht.
+test-support = []
+
+[dev-dependencies]
+# Die SELBSTKANTE, die `test-support` fuer die Integrationstests einschaltet.
+ea-writer = { workspace = true, features = ["test-support"] }
+# Der deterministische Speicherprovider sitzt hinter diesem
+# NICHT-Vorgabemerkmal.
+ea-key-provider = { workspace = true, features = ["test-support"] }
+# Root, Registry, Policy, Genesis, Zertifikate und `contains_canary`.
+ea-testkit.workspace = true

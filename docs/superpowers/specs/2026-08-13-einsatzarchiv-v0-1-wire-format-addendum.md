@@ -18,6 +18,8 @@ Die folgenden versionierten Dateien sind Bestandteil dieses Addendums und normat
 - `schemas/reports/v1/local-audit.cddl`: signiertes, klartextfreies lokales Audit,
 - `schemas/archive/v1/archive-profile.cddl`: Archivbackendprofil, Objektinventar
   und aktiver Profilzeiger,
+- `schemas/reports/v1/finalization-preview.cddl`: das Urbild der
+  Abschlussvorschau,
 - `schemas/reports/v1/verification-report.schema.json` und
   `key-inventory.schema.json`: geschlossene JSON-Schemata.
 
@@ -599,6 +601,53 @@ Zeilen-ID-Schema an diesen Kern an; sie definiert ihn nicht neu. Stufe 2 signier
 mit diesen Digests dauerhafte Auditnachweise, also kann die Richtung der
 Anpassung nicht die umgekehrte sein.
 
+## Urbild der Abschlussvorschau
+
+`schemas/reports/v1/finalization-preview.cddl` schließt **ein** Urbild: den
+geschlossenen Vorschaukern mit **dreizehn** Positionen. Sein Hashwert entsteht in
+der bestehenden Konvention `SHA-256(DOMAIN || deterministicCbor(core))`
+(`crates/ea-crypto/src/digest.rs`), mit `DOMAIN` als ASCII-Bytes ohne Trenner und
+dem Versionsmarker als erster Arrayposition:
+
+```text
+previewHash = SHA-256("EINSATZARCHIV-FINALIZATION-PREVIEW-v1" || deterministicCbor(finalization-preview-core-v1))
+```
+
+Die **Feldliste ist die Sicherheitsentscheidung**: die Zusage, dass `finalize`
+eine andere oder neu gebaute Vorschau ablehnt und jeder Replay scheitert, gilt
+nur so weit, wie das Urbild alles deckt, worauf `finalize` handelt.
+
+**Erstens.** `record-digest` und `grant-plan-digest` folgen den bestehenden
+Digestfunktionen `record_digest` und `grant_plan_digest`
+(`crates/ea-crypto/src/digest.rs`). `grant-plan-digest` ist genau der
+`initialGrantPlanHash`, den `GrantPlanV1::new` über den in die normative
+Totalordnung sortierten Plan rechnet, und `record-digest` wird über den exakten,
+deterministisch serialisierten Nutzlastsatz von Spec-Schritt 4 (`design.md` §9.3)
+gebildet — **nicht** über den `signedManifest`. Diese Unterscheidung ist
+erzwungen und nicht gewählt: der `recordDigest` eines Eintragspakets ist über
+`signedManifest` definiert (`design.md` §10) und existiert deshalb erst nach
+Schritt 6, dessen Sequenz, UUIDv7, CEK und AEAD-Nonce **einmal** aus einem
+CSPRNG gezogen werden. Eine Vorschau, die sie erzeugte, müsste über einen
+offenen Bestätigungsdialog hinweg eine lebende CEK halten, und ein `finalize`,
+das sie neu zöge, könnte den bestätigten Wert nie nachrechnen. Der Vorschauwert
+wandert **nie** in Archivbytes und wird nie gegen ein Eintragspaket gestellt.
+
+**Zweitens.** `previewHash` wird am Ende von Spec-Schritt 5 über Material
+gerechnet, das die Schritte 1 bis 5 erzeugen und das kein CSPRNG berührt. Genau
+deshalb kann `finalize` ihn unter dem Writer-Lock Byte für Byte nachrechnen.
+
+**Drittens.** `finalize` rechnet `previewHash` unter dem Lock nach und weist
+jede Abweichung fail-closed ab. Ein geänderter Head, eine geänderte Policy, ein
+fortgeschrittenes `effectiveNow`, eine geänderte vorgeschlagene Sequenz oder
+geänderter Inhalt ergeben einen anderen Wert — und das heißt eine neue Vorschau
+und eine neue Bestätigung, nicht eine Umgehung.
+
+**Viertens.** Die Bestätigung ist **genau einmal** verbrauchbar. Sie wird als
+signierte Auditzeile mit dem Kontext `stale-registry-context-v1`
+(`schemas/reports/v1/local-audit.cddl`) dauerhaft geschrieben, **bevor** der
+Bestätigungsnachweis zurückgegeben wird, und ihr `preview-hash` an Position sechs
+ist genau dieser Wert.
+
 ## Feld-zu-Design-Review
 
 Die Gruppen führen jedes hinzugefügte Feld mindestens einmal auf. Status
@@ -630,6 +679,7 @@ Die Gruppen führen jedes hinzugefügte Feld mindestens einmal auf. Status
 | Audit core: object-version, event-id, organization-id, device-id, operator-binding-object-hash, signer-certificate-object-hash, strukturell gekoppeltes action/context-Paar, outcome, effective-now, nonce, critical-extensions, COSE-Sign1 | §§12.2–12.3, 14.4, 16.2–16.4 | bestätigt |
 | Audit contexts: subject-object-hash; registry-head-hash, policy-object-hash, proposed-sequence, registry-not-after, acknowledged-at, preview-hash; trusted-time-floor, observed-os-wall-clock, max-future-clock-skew-ms, justification-code, issued-at, expires-at; entry-hash, target-kind; old/new-binding-object-hash, effective-from-sequence; authorization-object-hash, target-object-hash, action-code; original-recovery-grant-object-hash, recipient-certificate-object-hash, new-grant-object-hash; destruction-authorization-object-hash, state-event-object-hash; source/target-profile-hash, inventory-hash, active-pointer-hash | §§11.5, 12.2–12.3, 12.6, 14.4, 16.2–16.4 | bestätigt |
 | Verification report required fields plus reportSignature/runtimeMetadata; nested chain/result/destruction/gap/error/runtime fields; maschinenlesbare Sort-/Unique-Keys für registryVersions, objectResults, authorizedDestructions, gaps, alle drei Fehlerarrays und publicKeyThumbprints | §16.1 Bericht und deterministische JSON-Ausgabe; §16.3 Vernichtungszustände | bestätigt |
+| Finalization preview: organization-id, chain-id, registry-head-hash, registry-version, registry-not-after, policy-object-hash, proposed-sequence, previous-entry-hash, record-digest, grant-plan-digest, effective-now, critical-extensions | §9.3 Schritte 4–5 mit §12.3 | bestätigt |
 | Key inventory: schemaId, inventoryId, media; mediumId, keyRole, expectedKeyThumbprint, certificateObjectHash, protectionProfile, testKind; maschinenlesbarer Sort-/Unique-Key mediumId | §16.4 | bestätigt |
 
 **Review-Ergebnis:** keine ungelöste Zeile und kein Widerspruch zu Design §§10–16.

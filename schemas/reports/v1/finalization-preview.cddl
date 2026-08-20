@@ -1,0 +1,48 @@
+; Einsatzarchiv v0.1 — das Urbild der Abschlussvorschau. Normativer
+; Bestandteil des Wire-Format-Addendums.
+;
+; Dieses Dokument genuegt sich SELBST: es referenziert keine Regel ausserhalb
+; seiner selbst und wird deshalb einzeln validiert, nicht als Teil des
+; Archivbuendels.
+;
+; Symbolische Namen dokumentieren ARRAYPOSITIONEN; sie werden nie als
+; CBOR-Map-Keys serialisiert. Das Objekt wird deterministisch nach
+; Design §10.1 kodiert.
+;
+; Die Hashregel, in der bestehenden Konvention
+; SHA-256(DOMAIN || deterministicCbor(core)) mit DOMAIN als ASCII-Bytes ohne
+; Trenner und dem Versionsmarker als erster Arrayposition:
+;
+;   previewHash = SHA-256("EINSATZARCHIV-FINALIZATION-PREVIEW-v1"
+;                         || deterministicCbor(finalization-preview-core-v1))
+;
+; Die FELDLISTE ist die Sicherheitsentscheidung: die Zusage, dass `finalize`
+; eine andere oder neu gebaute Vorschau ablehnt und jeder Replay scheitert,
+; gilt nur, soweit das Urbild alles deckt, worauf `finalize` handelt.
+;
+; record-digest ist record_digest ueber den EXAKTEN, deterministisch
+; serialisierten Nutzlastsatz aus Spec-Schritt 4 — NICHT ueber den
+; signedManifest. Der recordDigest eines Eintragspakets ist ueber signedManifest
+; definiert und existiert erst nach Schritt 6, dessen Sequenz, UUIDv7, CEK und
+; AEAD-Nonce EINMAL aus einem CSPRNG gezogen werden.
+;
+; grant-plan-digest ist genau der initialGrantPlanHash, den GrantPlanV1::new
+; ueber den in die normative Totalordnung sortierten Plan rechnet.
+;
+; Der Wert wandert NIE in Archivbytes und wird nie gegen ein Eintragspaket
+; gestellt.
+finalization-preview-core-v1 = [
+  1,
+  organization-id: bstr .size 16,
+  chain-id: bstr .size 16,
+  registry-head-hash: bstr .size 32,
+  registry-version: uint,
+  registry-not-after: int,
+  policy-object-hash: bstr .size 32,
+  proposed-sequence: uint,
+  previous-entry-hash: (bstr .size 32) / null,
+  record-digest: bstr .size 32,
+  grant-plan-digest: bstr .size 32,
+  effective-now: int,
+  []
+]

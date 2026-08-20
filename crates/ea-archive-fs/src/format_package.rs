@@ -127,6 +127,10 @@ pub const FORMAT_PACKAGE_FILES_V1: &[(&str, &[u8])] = &[
         include_bytes!("../../../schemas/protocol/v1/signed-protocol.cddl"),
     ),
     (
+        "format/schemas/reports/v1/finalization-preview.cddl",
+        include_bytes!("../../../schemas/reports/v1/finalization-preview.cddl"),
+    ),
+    (
         "format/schemas/reports/v1/import-report.cddl",
         include_bytes!("../../../schemas/reports/v1/import-report.cddl"),
     ),

@@ -8,12 +8,13 @@ use ea_format::{
     CertificateKindV1, CheckpointCoreFieldsV1, CheckpointCoreV1, DeletionAttestationFieldsV1,
     DestructionAuthorizationFieldsV1, DestructionTargetV1, DestructionTransitionFieldsV1,
     DeviceCertificateFieldsV1, EntryPackageV1, EvidenceKindV1, EvidenceObjectV1,
-    FreeTextPolicyFieldsV1, GrantAuthorizationFieldsV1, GrantPlanItemV1, GrantPurposeV1,
-    KeyProtectionProfileV1, ManifestCoreFieldsV1, ManifestCoreV1, OperatorBindingFieldsV1,
-    OperatorRoleV1, OrganizationAdminAuthorizationFieldsV1, ParsedArchiveObject, PolicyFieldsV1,
-    RegistryChangeV1, RegistryEventFieldsV1, RenewalCoreFieldsV1, RenewalCoreV1,
-    RetentionPolicyFieldsV1, Rfc3161EvidenceFieldsV1, RootCertificateFieldsV1, SignedManifestV1,
-    TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, WriterTransitionFieldsV1, decode_exact_object,
+    FinalizationPreviewCoreFieldsV1, FinalizationPreviewCoreV1, FreeTextPolicyFieldsV1,
+    GrantAuthorizationFieldsV1, GrantPlanItemV1, GrantPurposeV1, KeyProtectionProfileV1,
+    ManifestCoreFieldsV1, ManifestCoreV1, OperatorBindingFieldsV1, OperatorRoleV1,
+    OrganizationAdminAuthorizationFieldsV1, ParsedArchiveObject, PolicyFieldsV1, RegistryChangeV1,
+    RegistryEventFieldsV1, RenewalCoreFieldsV1, RenewalCoreV1, RetentionPolicyFieldsV1,
+    Rfc3161EvidenceFieldsV1, RootCertificateFieldsV1, SignedManifestV1, TrustObjectV1,
+    TrustPayloadV1, TrustSubtypeV1, WriterTransitionFieldsV1, decode_exact_object,
     encode_entry_package,
 };
 use ea_types::{
@@ -2585,4 +2586,205 @@ fn _typed_hashes(
     hash: Hash32,
 ) -> ([u8; 32], [u8; 32], [u8; 32]) {
     (*entry.as_bytes(), *object.as_bytes(), *hash.as_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Das Urbild der Abschlussvorschau — `finalization-preview-core-v1`.
+// ---------------------------------------------------------------------------
+
+/// Die elf offenen Positionen der Grammatik, als benennbare Menge.
+///
+/// Sie ist die EINE Quelle, aus der sich die Mutantenliste ableitet: eine
+/// spaeter hinzugefuegte Position bekommt hier einen Arm und faellt damit in
+/// [`preview_core_with_one_position_changed`], statt still unbeprueft zu
+/// bleiben.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewPositionV1 {
+    OrganizationId,
+    ChainId,
+    RegistryHeadHash,
+    RegistryVersion,
+    RegistryNotAfter,
+    PolicyObjectHash,
+    ProposedSequence,
+    PreviousEntryHash,
+    RecordDigest,
+    GrantPlanDigest,
+    EffectiveNow,
+}
+
+impl PreviewPositionV1 {
+    pub const ALL: [Self; 11] = [
+        Self::OrganizationId,
+        Self::ChainId,
+        Self::RegistryHeadHash,
+        Self::RegistryVersion,
+        Self::RegistryNotAfter,
+        Self::PolicyObjectHash,
+        Self::ProposedSequence,
+        Self::PreviousEntryHash,
+        Self::RecordDigest,
+        Self::GrantPlanDigest,
+        Self::EffectiveNow,
+    ];
+}
+
+pub fn preview_core_fields() -> FinalizationPreviewCoreFieldsV1 {
+    FinalizationPreviewCoreFieldsV1 {
+        organization_id: organization(0x31),
+        chain_id: chain(0x32),
+        registry_head_hash: typed_hash(0x33),
+        registry_version: RegistryVersion::new(7),
+        registry_not_after: UnixMillis::new(1_800_000_000_000),
+        policy_object_hash: typed_object_hash(0x34),
+        proposed_sequence: ChainSequence::new(41),
+        previous_entry_hash: Some(entry_hash(0x35)),
+        record_digest: typed_hash(0x36),
+        grant_plan_digest: typed_hash(0x37),
+        effective_now: UnixMillis::new(1_700_000_000_000),
+    }
+}
+
+pub fn preview_core() -> FinalizationPreviewCoreV1 {
+    FinalizationPreviewCoreV1::new(preview_core_fields())
+}
+
+/// Dasselbe Urbild mit NULL an der Vorgaengerposition und sonst identisch.
+///
+/// Genau eine Position unterscheidet die beiden, damit die Aussage „null und
+/// vorhanden sind unterscheidbar" die Vorgaengerposition trifft und nicht
+/// nebenbei die Sequenz.
+pub fn preview_core_genesis() -> FinalizationPreviewCoreV1 {
+    FinalizationPreviewCoreV1::new(FinalizationPreviewCoreFieldsV1 {
+        previous_entry_hash: None,
+        ..preview_core_fields()
+    })
+}
+
+/// Ein Kern je offener Position, jeder gegen [`preview_core`] an GENAU einer
+/// Position verschieden.
+pub fn preview_core_with_one_position_changed() -> Vec<FinalizationPreviewCoreV1> {
+    PreviewPositionV1::ALL
+        .iter()
+        .copied()
+        .map(|position| {
+            let base = preview_core_fields();
+            let fields = match position {
+                PreviewPositionV1::OrganizationId => FinalizationPreviewCoreFieldsV1 {
+                    organization_id: organization(0x41),
+                    ..base
+                },
+                PreviewPositionV1::ChainId => FinalizationPreviewCoreFieldsV1 {
+                    chain_id: chain(0x42),
+                    ..base
+                },
+                PreviewPositionV1::RegistryHeadHash => FinalizationPreviewCoreFieldsV1 {
+                    registry_head_hash: typed_hash(0x43),
+                    ..base
+                },
+                PreviewPositionV1::RegistryVersion => FinalizationPreviewCoreFieldsV1 {
+                    registry_version: RegistryVersion::new(8),
+                    ..base
+                },
+                PreviewPositionV1::RegistryNotAfter => FinalizationPreviewCoreFieldsV1 {
+                    registry_not_after: UnixMillis::new(1_800_000_000_001),
+                    ..base
+                },
+                PreviewPositionV1::PolicyObjectHash => FinalizationPreviewCoreFieldsV1 {
+                    policy_object_hash: typed_object_hash(0x44),
+                    ..base
+                },
+                PreviewPositionV1::ProposedSequence => FinalizationPreviewCoreFieldsV1 {
+                    proposed_sequence: ChainSequence::new(42),
+                    ..base
+                },
+                PreviewPositionV1::PreviousEntryHash => FinalizationPreviewCoreFieldsV1 {
+                    previous_entry_hash: Some(entry_hash(0x45)),
+                    ..base
+                },
+                PreviewPositionV1::RecordDigest => FinalizationPreviewCoreFieldsV1 {
+                    record_digest: typed_hash(0x46),
+                    ..base
+                },
+                PreviewPositionV1::GrantPlanDigest => FinalizationPreviewCoreFieldsV1 {
+                    grant_plan_digest: typed_hash(0x47),
+                    ..base
+                },
+                PreviewPositionV1::EffectiveNow => FinalizationPreviewCoreFieldsV1 {
+                    effective_now: UnixMillis::new(1_700_000_000_001),
+                    ..base
+                },
+            };
+            FinalizationPreviewCoreV1::new(fields)
+        })
+        .collect()
+}
+
+/// Die Laenge des aeusseren CBOR-Arrays.
+pub fn array_length(bytes: &[u8]) -> u64 {
+    let mut decoder = Decoder::new(bytes);
+    decoder
+        .array()
+        .expect("the preview core is a definite-length array")
+        .expect("the preview core is not indefinite")
+}
+
+/// Ob die LETZTE Position ein leeres Array ist.
+pub fn last_position_is_an_empty_array(bytes: &[u8]) -> bool {
+    let mut decoder = Decoder::new(bytes);
+    let Ok(Some(length)) = decoder.array() else {
+        return false;
+    };
+    for index in 0..length {
+        if index + 1 == length {
+            return matches!(decoder.array(), Ok(Some(0)));
+        }
+        if decoder.skip().is_err() {
+            return false;
+        }
+    }
+    false
+}
+
+/// Ob JEDE Position ein festbreiter Skalar, `null` oder das leere Array ist.
+///
+/// Kein Textstring, kein gefuellter Behaelter, keine Abbildung. Genau das ist
+/// die pruefbare Haelfte der Zusage „kein Inhalt und kein Pfad": eine
+/// Position, die Text tragen kann, kann einen Einsatztext oder einen
+/// Ausgabepfad tragen.
+pub fn every_preview_position_is_a_fixed_width_scalar(bytes: &[u8]) -> bool {
+    use minicbor::data::Type;
+
+    let mut decoder = Decoder::new(bytes);
+    let Ok(Some(length)) = decoder.array() else {
+        return false;
+    };
+    for _ in 0..length {
+        let Ok(datatype) = decoder.datatype() else {
+            return false;
+        };
+        match datatype {
+            Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::Null
+            | Type::Bytes => {
+                if decoder.skip().is_err() {
+                    return false;
+                }
+            }
+            Type::Array | Type::ArrayIndef => {
+                if !matches!(decoder.array(), Ok(Some(0))) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    decoder.position() == bytes.len()
 }

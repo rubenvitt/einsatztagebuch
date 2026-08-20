@@ -49,6 +49,14 @@ fn cddl_registers_every_v1_wire_type() {
     ] {
         assert!(archive_profile.contains(name), "missing {name}");
     }
+    // Das eigenstaendige Dokument der Abschlussvorschau. Auch hier ist
+    // `validate_schemas` eine harte Pfadliste, und der Wurzelname waere ohne
+    // diese Zeile unsichtbar.
+    let finalization_preview = finalization_preview_cddl();
+    assert!(
+        finalization_preview.contains("finalization-preview-core-v1"),
+        "missing finalization-preview-core-v1"
+    );
     let protocol = protocol_cddl();
     for name in [
         "challenge-response-core-v1",
@@ -111,6 +119,16 @@ fn archive_cddl() -> String {
 /// nichts ausserhalb seiner selbst referenziert.
 fn archive_profile_cddl() -> String {
     include_str!("../../../schemas/archive/v1/archive-profile.cddl").to_owned()
+}
+
+/// Die eigenstaendige Grammatik der Abschlussvorschau.
+///
+/// Getrennt aus demselben Grund wie [`archive_profile_cddl`]: das Dokument
+/// genuegt sich selbst. Sein Kern ist das Urbild von `previewHash`, und
+/// `finalize` weist jede Abweichung davon fail-closed ab — die Arity ist
+/// deshalb eine Sicherheitszusage und keine Formsache.
+fn finalization_preview_cddl() -> String {
+    include_str!("../../../schemas/reports/v1/finalization-preview.cddl").to_owned()
 }
 
 fn assert_contains_all(name: &str, source: &str, required: &[&str]) {
@@ -917,6 +935,109 @@ fn eip_cddl_enforces_the_exact_suite_v1_ciphertext_boundaries() {
         &cddl,
         &eip_fixture(1_048_593, 1_048_593)
     ));
+}
+
+/// The shape a `finalization-preview-core-v1` fixture is encoded in.
+///
+/// `finalization-preview-core-v1` is read POSITIONALLY on the Rust side:
+/// `ea_format::encode_finalization_preview_core` writes the thirteen positions
+/// in order, and `ea_crypto::finalization_preview_digest` hashes exactly those
+/// bytes. Nothing else pins that length against the NORMATIVE side — the
+/// document is standalone, so no archive object ever carries it to a validator.
+///
+/// The arity is a SECURITY promise here and not a formality: `finalize`
+/// recomputes `previewHash` under the Writer lock and refuses every deviation
+/// fail-closed. A position silently dropped from the grammar is a field the
+/// confirmation stops covering.
+///
+/// # What this catches, and what it does not
+///
+/// The positive fixture writes a concrete type at every position, so a
+/// deletion, an insertion, a reordering and a type NARROWING all fail it.
+/// WIDENING does not — the same limit the `policy-core-v1` pin next door
+/// carries.
+enum FinalizationPreviewShapeV1 {
+    /// All 13 positions of the norm, in the order of the norm.
+    Exact,
+    /// WITHOUT `grant-plan-digest` — 12 positions. Dropping it would let a
+    /// confirmed preview stand for a DIFFERENT recipient set.
+    WithoutGrantPlanDigest,
+    /// One position too many behind the reserved tail — 14.
+    WithExtraPosition,
+}
+
+fn finalization_preview_fixture(shape: &FinalizationPreviewShapeV1) -> Vec<u8> {
+    let positions = match shape {
+        FinalizationPreviewShapeV1::Exact => 13,
+        FinalizationPreviewShapeV1::WithoutGrantPlanDigest => 12,
+        FinalizationPreviewShapeV1::WithExtraPosition => 14,
+    };
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(positions).unwrap();
+    encoder.u8(1).unwrap(); //  1 version
+    encoder.bytes(&[0x31; 16]).unwrap(); //  2 organization-id
+    encoder.bytes(&[0x32; 16]).unwrap(); //  3 chain-id
+    encoder.bytes(&[0x33; 32]).unwrap(); //  4 registry-head-hash
+    encoder.u8(7).unwrap(); //  5 registry-version
+    encoder.u64(1_800_000_000_000).unwrap(); //  6 registry-not-after
+    encoder.bytes(&[0x34; 32]).unwrap(); //  7 policy-object-hash
+    encoder.u8(41).unwrap(); //  8 proposed-sequence
+    encoder.bytes(&[0x35; 32]).unwrap(); //  9 previous-entry-hash
+    encoder.bytes(&[0x36; 32]).unwrap(); // 10 record-digest
+    if !matches!(shape, FinalizationPreviewShapeV1::WithoutGrantPlanDigest) {
+        encoder.bytes(&[0x37; 32]).unwrap(); // 11 grant-plan-digest
+    }
+    encoder.u64(1_700_000_000_000).unwrap(); // 12 effective-now
+    encoder.array(0).unwrap(); // 13 reserved tail
+    if matches!(shape, FinalizationPreviewShapeV1::WithExtraPosition) {
+        encoder.u8(0).unwrap(); // 14 — one too many
+    }
+    encoder.into_writer()
+}
+
+#[test]
+fn the_preview_cddl_enforces_the_exact_thirteen_positions_of_finalization_preview_core_v1() {
+    let cddl = finalization_preview_cddl();
+
+    assert!(
+        validate_cbor(
+            "finalization-preview-core-v1",
+            &cddl,
+            &finalization_preview_fixture(&FinalizationPreviewShapeV1::Exact)
+        ),
+        "the 13 positions the workspace encodes MUST validate against the preview CDDL"
+    );
+    assert!(
+        !validate_cbor(
+            "finalization-preview-core-v1",
+            &cddl,
+            &finalization_preview_fixture(&FinalizationPreviewShapeV1::WithoutGrantPlanDigest)
+        ),
+        "12 positions MUST NOT validate: a dropped grant-plan-digest would let a \
+         confirmed preview stand for a different recipient set"
+    );
+    assert!(
+        !validate_cbor(
+            "finalization-preview-core-v1",
+            &cddl,
+            &finalization_preview_fixture(&FinalizationPreviewShapeV1::WithExtraPosition)
+        ),
+        "14 positions MUST NOT validate"
+    );
+
+    // Die Positionen NAMENTLICH, damit eine Umbenennung so laut ist wie eine
+    // Loeschung.
+    assert_contains_all(
+        "finalization-preview CDDL",
+        &cddl,
+        &[
+            "record-digest: bstr .size 32",
+            "grant-plan-digest: bstr .size 32",
+            "previous-entry-hash: (bstr .size 32) / null",
+            "proposed-sequence: uint",
+            "effective-now: int",
+        ],
+    );
 }
 
 #[test]

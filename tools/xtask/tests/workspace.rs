@@ -29,6 +29,7 @@ const WORKSPACE_MEMBERS: &[&str] = &[
     "crates/ea-local-store",
     "crates/ea-audit",
     "crates/ea-draft",
+    "crates/ea-writer",
     "apps/cli",
 ];
 

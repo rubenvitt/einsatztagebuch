@@ -1,7 +1,10 @@
 use core::{cmp::Ordering, fmt};
 use std::collections::BTreeSet;
 
-use ea_crypto::{ContentType, grant_digest, grant_plan_digest, parse_cose_sign1};
+use ea_crypto::{
+    ContentType, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_WRAPPED_CEK_SIZE, grant_digest,
+    grant_plan_digest, parse_cose_sign1,
+};
 use ea_types::{
     CertificateHash, ChainId, EntryHash, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
     RegistryVersion, UnixMillis,
@@ -187,6 +190,57 @@ impl GrantBodyV1 {
     #[must_use]
     pub fn exact_bytes(&self) -> &[u8] {
         &self.exact
+    }
+
+    /// Die exakten Bytes des `grant-context-v1` aus diesem `grant-body-v1`.
+    ///
+    /// `hpkeInfo` und `hpkeAad` sind ueber GENAU diese Bytes definiert
+    /// (`design.md`:788-791) — nicht ueber den Grantrumpf, der Kapselung und
+    /// umschlossenen CEK zusaetzlich enthaelt. Der Kontext hat keine eigene
+    /// Kodierfunktion; er wird deshalb aus dem Rumpf HERAUSGESCHNITTEN.
+    ///
+    /// Sie steht HIER und nicht bei einem Verbraucher, weil beide Seiten
+    /// dieselben Bytes brauchen: die Oeffnungsseite in `ea-verify` und die
+    /// Versiegelungsseite des Writers. Zwei Kopien des Schnitts waeren zwei
+    /// Gelegenheiten, `hpke_info` und `hpke_aad` mit verschiedenen Bytes zu
+    /// speisen — und damit ein Grant, den niemand oeffnen kann.
+    ///
+    /// DER SCHNITT IST BEWIESEN, NICHT GERATEN, und genau deshalb steht hier
+    /// ein Waechter statt eines Kommentars: `grant-body-v1` ist ein
+    /// CBOR-Array fester Laenge drei (`0x83`), dessen zweites und drittes
+    /// Glied Bytefolgen fester Groesse 32 und 48 sind. Beide werden kanonisch
+    /// als `0x58 0x20 || …` beziehungsweise `0x58 0x30 || …` kodiert — 84
+    /// Bytes, deren Inhalt hier unabhaengig aus den dekodierten Feldern
+    /// nachgebaut und gegen den Rumpf geprueft wird. Stimmt der Schwanz exakt,
+    /// ist alles davor (nach dem Arraykopf) definitionsgemaess das erste
+    /// Glied: der Kontext.
+    ///
+    /// Faellt der Waechter, wird `None` geliefert. Der Dekodierpfad bekommt
+    /// feindliche Bytes in die Hand; eine Entkapselung auf geratenen Bytes
+    /// gibt es hier deshalb nicht.
+    #[must_use]
+    pub fn exact_grant_context(&self) -> Option<&[u8]> {
+        /// CBOR-Kopf einer Bytefolge mit einbytiger Laengenangabe.
+        const BYTE_STRING_ONE_BYTE_LENGTH: u8 = 0x58;
+        /// CBOR-Kopf eines Arrays fester Laenge drei.
+        const ARRAY_OF_THREE: u8 = 0x83;
+
+        let exact = self.exact_bytes();
+        let fields = self.fields();
+        let mut tail = Vec::with_capacity(4 + HPKE_ENCAPSULATED_KEY_SIZE + HPKE_WRAPPED_CEK_SIZE);
+        tail.push(BYTE_STRING_ONE_BYTE_LENGTH);
+        tail.push(u8::try_from(HPKE_ENCAPSULATED_KEY_SIZE).ok()?);
+        tail.extend_from_slice(&fields.encapsulated_key);
+        tail.push(BYTE_STRING_ONE_BYTE_LENGTH);
+        tail.push(u8::try_from(HPKE_WRAPPED_CEK_SIZE).ok()?);
+        tail.extend_from_slice(&fields.wrapped_cek);
+
+        let context_end = exact.len().checked_sub(tail.len())?;
+        let (head, actual_tail) = exact.split_at(context_end);
+        if actual_tail != tail.as_slice() || head.first() != Some(&ARRAY_OF_THREE) {
+            return None;
+        }
+        head.get(1..)
     }
 
     fn from_exact(input: &[u8]) -> Result<Self, FormatError> {

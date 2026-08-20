@@ -76,3 +76,54 @@ fn a_parsed_grant_exposes_its_verified_body_fields() {
         parsed.value().exact_grant_body()
     );
 }
+
+/// Der Schnitt auf `grant-context-v1` ist jetzt oeffentlich, weil BEIDE Seiten
+/// dieselben Bytes brauchen: `ea-verify` oeffnet damit, und der Writer
+/// versiegelt damit. Zwei Kopien des Schnitts waeren zwei Gelegenheiten,
+/// `hpke_info` und `hpke_aad` mit verschiedenen Bytes zu speisen.
+#[test]
+fn the_grant_context_cut_is_the_body_without_its_fixed_eighty_four_byte_tail() {
+    let body = GrantBodyV1::new(sample_fields()).unwrap();
+    let exact = body.exact_bytes();
+    let context = body
+        .exact_grant_context()
+        .expect("ein selbst gebauter Rumpf traegt den bewiesenen Schwanz");
+
+    // Arraykopf (1) + Kontext + zwei kanonische Bytefolgen (2 + 32, 2 + 48).
+    assert_eq!(exact.len(), 1 + context.len() + 84);
+    assert_eq!(&exact[1..1 + context.len()], context);
+    assert_eq!(
+        exact[0], 0x83,
+        "grant-body-v1 ist ein Array der Laenge drei"
+    );
+
+    // Kapselung und umschlossener CEK stehen AUSSERHALB des Kontexts. Genau
+    // das ist der Grund fuer den Schnitt: `hpkeInfo` und `hpkeAad` binden den
+    // Kontext und nie das Material, das sie selbst erzeugen — sonst waere die
+    // Versiegelung zirkulaer und der Writer koennte sie nicht zweistufig
+    // bauen.
+    let other_material = GrantBodyV1::new(GrantBodyFieldsV1 {
+        encapsulated_key: [99; 32],
+        wrapped_cek: [11; 48],
+        ..sample_fields()
+    })
+    .unwrap();
+    assert_eq!(
+        other_material.exact_grant_context().unwrap(),
+        context,
+        "Kapselung und umschlossener CEK duerfen den Kontext nicht veraendern"
+    );
+
+    // Ein Feld INNERHALB des Kontexts veraendert ihn. Ohne diese Haelfte waere
+    // die Zusage mit einem konstanten Schnitt erfuellbar.
+    let other_entry = GrantBodyV1::new(GrantBodyFieldsV1 {
+        entry_hash: support::entry_hash(77),
+        ..sample_fields()
+    })
+    .unwrap();
+    assert_ne!(
+        other_entry.exact_grant_context().unwrap(),
+        context,
+        "ein anderer gebundener Eintrag MUSS einen anderen Kontext ergeben"
+    );
+}
