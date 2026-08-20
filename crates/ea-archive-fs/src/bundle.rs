@@ -93,6 +93,33 @@ pub const BUNDLE_FILE_EXTENSION_V1: &str = "eabundle";
 /// Die Bytelaenge eines Indexsatzes ohne seine Adresse.
 const INDEX_RECORD_FIXED_BYTES: usize = 2 + 8 + 8;
 
+/// Die groesste Dateilaenge, die [`ArchiveBundleSource::open`] ueberhaupt in
+/// den Speicher holt.
+///
+/// # Es ist eine WIRTsschranke und KEINE Strukturregel
+///
+/// Der Deckel entscheidet nichts darueber, was ein gueltiger Container ist —
+/// das tut allein [`ArchiveBundleSource::from_bytes`], und dessen Regeln
+/// bleiben unveraendert. Er ist die Allokationsschranke des Wirtsteils, genau
+/// die Zweistufigkeit, die der Verzeichnisleser schon traegt
+/// (`crates/ea-recovery/src/source.rs:170-178`: ZUERST `metadata.len()` gegen
+/// den Deckel, DANN `fs::read`). Ohne sie allokierte eine unvertraute Datei
+/// vollstaendig, bevor irgendeine Regel je gefeuert haette.
+///
+/// # Er ist ABGELEITET und kein zweiter Satz Zahlen
+///
+/// Kopf, plus die groesste Indexregion, die die zwei bestehenden Deckel
+/// ueberhaupt zulassen — [`MAX_ARCHIVE_BLOBS_V1`] Saetze mit ihren festen
+/// Bytes und einer Adresse, deren Laenge ein `u16` traegt —, plus
+/// [`MAX_TOTAL_ARCHIVE_BYTES_V1`] Nutzlast. Die Schranke ist damit LOSE
+/// (Groessenordnung 71 GB): sie ist bewusst so gewaehlt, dass sie keine Datei
+/// abweist, die `from_bytes` annehmen wuerde, und trotzdem das tut, was sie
+/// tun muss — eine Datei jenseits jeder moeglichen Containergroesse wird
+/// abgewiesen, BEVOR ein Byte allokiert ist.
+const MAX_BUNDLE_FILE_BYTES_V1: u64 = BUNDLE_HEADER_BYTES_V1 as u64
+    + (MAX_ARCHIVE_BLOBS_V1 as u64) * (INDEX_RECORD_FIXED_BYTES as u64 + u16::MAX as u64)
+    + MAX_TOTAL_ARCHIVE_BYTES_V1 as u64;
+
 /// Was ein Buendelexport getan hat.
 ///
 /// Traegt die Zahl der uebertragenen Bytesequenzen und sonst nichts: sie ist
@@ -139,11 +166,37 @@ pub struct ArchiveBundleSource {
 impl ArchiveBundleSource {
     /// Liest ein Buendel von der Platte.
     ///
+    /// Die Datei ist UNVERTRAUT: sie kommt durch den gewoehnlichen
+    /// Dateidialog. Deshalb wird ZUERST ihre angekuendigte Laenge gegen
+    /// [`MAX_BUNDLE_FILE_BYTES_V1`] geprueft und DANN gelesen — dieselbe
+    /// Reihenfolge, die `crates/ea-recovery/src/source.rs:170-178` fuer den
+    /// Verzeichnisleser aufschreibt. Andersherum legte eine uebergrosse Datei
+    /// ihren Puffer vollstaendig an, bevor eine Regel sie je abgewiesen haette.
+    ///
     /// # Errors
     ///
-    /// [`BundleError::Io`], wenn die Datei nicht lesbar ist; sonst der Befund
-    /// von [`Self::from_bytes`].
+    /// [`BundleError::Io`], wenn die Datei nicht lesbar ist,
+    /// [`BundleError::TotalByteLimit`], wenn sie jenseits jeder moeglichen
+    /// Containergroesse liegt; sonst der Befund von [`Self::from_bytes`].
     pub fn open(path: &Path) -> Result<Self, BundleError> {
+        Self::open_capped(path, MAX_BUNDLE_FILE_BYTES_V1)
+    }
+
+    /// [`Self::open`] mit einstellbarer Wirtsschranke.
+    ///
+    /// Die Schranke ist ein Parameter, damit die Reihenfolge MESSBAR ist: mit
+    /// einem Deckel unterhalb der Dateilaenge muss der Befund
+    /// [`BundleError::TotalByteLimit`] sein und nicht der Strukturbefund der
+    /// Bytes, die sonst gelesen wuerden. Ein Zeuge mit der echten Schranke
+    /// braeuchte eine Datei von zig Gigabyte, und das ist kein Test.
+    ///
+    /// `fs::metadata` und NICHT `symlink_metadata`: `fs::read` folgt einem
+    /// Symlink, also muss gemessen werden, was tatsaechlich gelesen wird.
+    fn open_capped(path: &Path, cap: u64) -> Result<Self, BundleError> {
+        let declared = fs::metadata(path).map_err(|_| BundleError::Io)?.len();
+        if declared > cap {
+            return Err(BundleError::TotalByteLimit);
+        }
         let bytes = fs::read(path).map_err(|_| BundleError::Io)?;
         Self::from_bytes(bytes)
     }
@@ -417,6 +470,21 @@ pub fn write_archive_bundle(
         return Err(BundleError::SourceNotFullyVerified);
     }
 
+    // Schritt 5, erster Teil: eine Zieladresse, die dem BESTAND gehoert, ist
+    // belegt — auch wenn dort noch keine Datei liegt.
+    //
+    // `create_new` prueft nur, ob die Adresse FREI ist, nicht, wem sie gehoert.
+    // Laege das Ziel unter der Bestandswurzel, wuerde das Buendel selbst eine
+    // Bytesequenz des Bestands: `nonObjectFileCount` stiege, der Bestand
+    // verifizierte danach zu einem ANDEREN Bericht als vorher — genau die
+    // Groesse, deren Gleichheit dieser Weg belegt —, und ein zweiter Export
+    // truege den ersten in sich. `TargetOccupied` ist der richtige Befund und
+    // die geschlossene Sechserliste bleibt geschlossen: die Adresse ist nicht
+    // frei, sondern vergeben.
+    if target_belongs_to_holding(source.root(), target)? {
+        return Err(BundleError::TargetOccupied);
+    }
+
     // Schritt 5 UND 6 in einem: `create_new` IST die Zielpruefung.
     //
     // Bewusst KEIN vorangestelltes `exists`/`symlink_metadata` daneben. Anders
@@ -515,6 +583,31 @@ fn sync_parent_directory(target: &Path) -> Result<(), BundleError> {
 /// `None` bleibt genau dem Fall vorbehalten, in dem es kein Elternverzeichnis
 /// gibt — der Wurzel selbst. Eine Zieladresse ohne Eltern ist keine Datei, die
 /// dieser Weg angelegt haben kann; es gibt dann nichts zu flushen.
+/// Ob die Zieladresse unter der Bestandswurzel liegt.
+///
+/// Verglichen werden KANONISIERTE Pfade, nicht Zeichenketten: sonst fuehrte
+/// jeder `..`-Schritt und jeder Symlink am Deckel vorbei. Kanonisiert wird das
+/// ELTERNVERZEICHNIS des Ziels, weil das Ziel selbst noch nicht existiert —
+/// und zwar durch [`parent_for_sync`], damit die eine Regel ueber den leeren
+/// Elternpfad (`Some("")` IST das Arbeitsverzeichnis) genau einmal
+/// aufgeschrieben ist.
+///
+/// Ein Elternverzeichnis, das nicht existiert, laesst `canonicalize`
+/// fehlschlagen und liefert [`BundleError::Io`] — genau den Befund, den
+/// `create_new` unmittelbar danach ohnehin gaebe. Es ist also kein
+/// verschluckter Fehler, sondern derselbe Fehler eine Zeile frueher.
+///
+/// `None` bleibt der Wurzel des Dateisystems vorbehalten: sie ist kein Ziel,
+/// das unter einer Bestandswurzel liegen koennte.
+fn target_belongs_to_holding(root: &Path, target: &Path) -> Result<bool, BundleError> {
+    let Some(parent) = parent_for_sync(target) else {
+        return Ok(false);
+    };
+    let parent = fs::canonicalize(parent).map_err(|_| BundleError::Io)?;
+    let root = fs::canonicalize(root).map_err(|_| BundleError::Io)?;
+    Ok(parent.starts_with(&root))
+}
+
 fn parent_for_sync(target: &Path) -> Option<&Path> {
     match target.parent() {
         Some(parent) if parent.as_os_str().is_empty() => Some(Path::new(".")),
@@ -524,7 +617,46 @@ fn parent_for_sync(target: &Path) -> Option<&Path> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Path, parent_for_sync};
+    use super::{
+        ArchiveBundleSource, BundleError, MAX_BUNDLE_FILE_BYTES_V1, Path, fs, parent_for_sync,
+    };
+
+    /// Die Laengenpruefung liegt VOR dem Lesen, und ihre Grenze ist inklusiv.
+    ///
+    /// Gemessen wird an der Schranke selbst, nicht an der echten: eine Datei
+    /// jenseits von [`MAX_BUNDLE_FILE_BYTES_V1`] waere zig Gigabyte gross und
+    /// kein Test. Der Beweis ist die UNTERSCHEIDUNG der zwei Befunde auf
+    /// DENSELBEN Bytes — mit einem Deckel unterhalb der Laenge kommt
+    /// `TotalByteLimit`, also ohne dass die Bytes je angesehen wurden; mit
+    /// einem Deckel genau AUF der Laenge kommt der Strukturbefund, also
+    /// nachdem sie gelesen wurden.
+    #[test]
+    fn the_reader_checks_the_declared_file_length_before_it_reads() {
+        let path = std::env::temp_dir().join(format!(
+            "ea-archive-fs-open-capped-{}.bin",
+            std::process::id()
+        ));
+        let bytes = vec![0_u8; 100];
+        fs::write(&path, &bytes).expect("die Kratzdatei muss schreibbar sein");
+
+        assert_eq!(
+            ArchiveBundleSource::open_capped(&path, 99).err(),
+            Some(BundleError::TotalByteLimit),
+            "unterhalb der Laenge darf NICHTS gelesen werden"
+        );
+        assert_eq!(
+            ArchiveBundleSource::open_capped(&path, 100).err(),
+            Some(BundleError::Malformed),
+            "genau auf der Laenge wird gelesen und die Struktur entscheidet"
+        );
+        // Die echte Schranke weist keine gewoehnliche Datei ab. Als
+        // `const`-Block, weil die Aussage zur Uebersetzungszeit entschieden ist.
+        const {
+            assert!(MAX_BUNDLE_FILE_BYTES_V1 > 100);
+        }
+
+        fs::remove_file(&path).expect("die Kratzdatei muss entfernbar sein");
+    }
 
     /// Der leere Elternpfad ist das Arbeitsverzeichnis, nicht „kein Eltern".
     ///

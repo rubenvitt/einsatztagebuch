@@ -148,3 +148,55 @@ fn export_refuses_an_occupied_target_without_touching_it() {
     ));
     assert_eq!(fs::read(harness.bundle_path()).unwrap(), b"CANARY-EXISTING");
 }
+
+/// Eine Zieladresse INNERHALB der Bestandswurzel ist belegt, auch wenn dort
+/// keine Datei liegt.
+///
+/// Laege das Buendel unter der Wurzel, waere es selbst eine Bytesequenz des
+/// Bestands: `nonObjectFileCount` stiege, der Bestand verifizierte danach zu
+/// einem ANDEREN Bericht als vorher — genau die Groesse, deren Gleichheit
+/// `bundle_verifies_to_the_same_report_as_the_directory` belegt —, und ein
+/// zweiter Export truege den ersten in sich. Geprueft werden BEIDE Formen: die
+/// Wurzel selbst und ein Unterverzeichnis darin, denn ein Deckel, der nur die
+/// Wurzel kennt, liesse `format/` offen.
+///
+/// Die Gegenprobe stehen die uebrigen Tests dieses Ziels: ihre Zieladresse
+/// liegt NEBEN der Wurzel und gelingt.
+#[test]
+fn export_refuses_a_target_inside_the_archive_root() {
+    let harness = BundleHarness::finalized_archive();
+    let before = harness.digest_map();
+    let root = harness.backend().root().to_owned();
+
+    for target in [
+        root.join(format!(
+            "in-root.{}",
+            ea_archive_fs::BUNDLE_FILE_EXTENSION_V1
+        )),
+        root.join(ea_archive::FORMAT_DIR_V1).join(format!(
+            "in-subdirectory.{}",
+            ea_archive_fs::BUNDLE_FILE_EXTENSION_V1
+        )),
+    ] {
+        assert!(
+            matches!(
+                write_archive_bundle(
+                    harness.backend(),
+                    harness.anchor(),
+                    harness.os_wall_clock(),
+                    &target
+                ),
+                Err(BundleError::TargetOccupied)
+            ),
+            "{} gehoert dem Bestand",
+            target.display()
+        );
+        assert!(!target.exists(), "der Bestand bekommt kein neues Byte");
+    }
+
+    assert_eq!(
+        harness.digest_map(),
+        before,
+        "die Bytekarte des Bestands bleibt unveraendert"
+    );
+}
