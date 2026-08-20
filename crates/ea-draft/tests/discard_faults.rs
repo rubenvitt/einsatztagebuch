@@ -115,6 +115,75 @@ fn a_proof_of_another_purpose_never_authorizes_a_discard() {
     );
 }
 
+/// Die BINDUNGSPRUEFUNG — der Vergleich, den `OperatorSessionProof` seinem
+/// Verbraucher ausdruecklich zuweist.
+///
+/// `is_valid_for` prueft die Bindung nicht (`crates/ea-operator/src/session.rs`:
+/// „Wer einen Nachweis annimmt, ohne die Bindung zu vergleichen, hat einen
+/// Fehler gemacht"), und `binding_object_hash` nennt „Task 4 beim Verwerfen"
+/// als den Verbraucher, der vergleichen MUSS. Ohne den Vergleich autorisierte
+/// ein frischer, zweckgleicher Nachweis EINER FREMDEN Bedienerbindung das
+/// unwiderrufliche Verwerfen.
+#[test]
+fn a_proof_of_another_operator_binding_never_authorizes_a_discard() {
+    let h = DraftHarness::with_nonempty_draft();
+    // Der Nachweis ist taufrisch UND nennt genau `DiscardDraft`. Er scheitert
+    // ALLEIN daran, dass der Dienst fuer eine andere Bindung handelt.
+    let service = h.discard_service_for_binding(h.foreign_binding_object_hash());
+    assert_eq!(
+        service
+            .begin_discard(h.proof_for(ReauthPurpose::DiscardDraft))
+            .unwrap_err()
+            .code(),
+        "EA-DRAFT-REAUTH-BINDING-MISMATCH"
+    );
+    // Auch der Neustartpfad nimmt ihn nicht an: die Bindung wird an JEDEM
+    // Eingang verglichen, nicht nur am ersten.
+    assert_eq!(
+        h.discard_service_for_binding(h.foreign_binding_object_hash())
+            .resume_after_restart(&h.proof_for(ReauthPurpose::DiscardDraft))
+            .unwrap_err()
+            .code(),
+        "EA-DRAFT-REAUTH-BINDING-MISMATCH"
+    );
+    // Nichts ist dauerhaft geworden: keine Absicht gebucht, der Entwurf steht.
+    assert!(h.pending_discard_is_absent());
+    assert!(h.draft_dek_is_present());
+    assert_eq!(
+        h.restart_and_resume().unwrap(),
+        RestartState::OriginalDraftUnchanged
+    );
+}
+
+/// Ein Neustart nach einem Absturz ZWISCHEN Loeschen und Entfernen verklemmt
+/// auch gegen einen Speicher, der ein Loeschen ins Leere ABLEHNT.
+///
+/// `KeyProvider::delete` sagt keine Idempotenz zu. Meldete der Neustartpfad
+/// jedes `delete` weiter, blieb der Entwurf unlesbar UND die Absicht gebucht,
+/// und kein Arm loeste sie mehr auf — die Zusage „ein zweites resume ist ein
+/// no-op fuer JEDEN Punkt" faellt gegen einen nativen Speicher, ohne dass ein
+/// Lauf gegen `InMemoryKeyProvider` es sehen koennte.
+#[test]
+fn a_keystore_that_refuses_a_second_delete_still_resumes_the_discard() {
+    let mut h = DraftHarness::with_nonempty_draft();
+    h.discard_up_to(DiscardPhase::KeyAbsent).unwrap();
+    // Der Eintrag ist schon fort; das `delete` des Neustartpfades faellt genau
+    // in das Loch, in dem ein nativer Speicher `EA-KEY-NOT-FOUND` meldet.
+    assert!(h.draft_dek_entry_is_absent());
+    assert_eq!(
+        h.restart_and_resume_with_strict_keystore().unwrap(),
+        RestartState::NewBlankDraft
+    );
+    // Und die Absicht ist WIRKLICH aufgeloest und nicht bloss uebersprungen.
+    assert!(h.pending_discard_is_absent());
+    assert!(!h.draft_dek_is_present());
+    // Ein zweiter Lauf gegen denselben strengen Speicher ist ein no-op.
+    assert_eq!(
+        h.restart_and_resume_with_strict_keystore().unwrap(),
+        RestartState::NewBlankDraft
+    );
+}
+
 #[test]
 fn a_prepared_finalization_takes_precedence_over_resume_discard() {
     let mut h = DraftHarness::with_nonempty_draft();

@@ -51,6 +51,14 @@ pub enum DraftError {
     /// Eine Wiederanmeldung fuer den Abschluss eines Eintrags ist keine fuer
     /// das Verwerfen eines Entwurfs.
     ReauthPurposeMismatch,
+    /// Der Nachweis gehoert zu einer ANDEREN Bedienerbindung.
+    ///
+    /// `OperatorSessionProof::is_valid_for` prueft die Bindung ausdruecklich
+    /// NICHT (`crates/ea-operator/src/session.rs`); der Vergleich ist Pflicht
+    /// des Verbrauchers, und ohne ihn autorisierte ein frischer Nachweis
+    /// EINES BELIEBIGEN gebundenen Bedieners das unwiderrufliche Verwerfen des
+    /// Entwurfs dieses Geraets.
+    ReauthBindingMismatch,
     /// Eine vorbereitete Abschlussmarke liegt und hat Vorrang.
     ///
     /// Nach dem unwiderruflichen Schritt MUSS die Transaktion aus den
@@ -86,6 +94,7 @@ impl DraftError {
             Self::LocalRng => "EA-DRAFT-LOCAL-RNG",
             Self::ReauthRequired => "EA-DRAFT-REAUTH-REQUIRED",
             Self::ReauthPurposeMismatch => "EA-DRAFT-REAUTH-PURPOSE-MISMATCH",
+            Self::ReauthBindingMismatch => "EA-DRAFT-REAUTH-BINDING-MISMATCH",
             Self::PreparedFinalizationPresent => "EA-DRAFT-PREPARED-FINALIZATION-PRESENT",
             Self::NoPendingDiscard => "EA-DRAFT-NO-PENDING-DISCARD",
             Self::KeyDeletionNotConfirmed => "EA-DRAFT-KEY-DELETION-NOT-CONFIRMED",

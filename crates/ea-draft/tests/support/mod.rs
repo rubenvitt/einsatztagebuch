@@ -718,12 +718,48 @@ impl DiscardHarness {
     /// Der Dienst unter Pruefung.
     ///
     /// Er BORGT die Zeit des gewaehlten Head und haelt keine Momentaufnahme
-    /// davon.
+    /// davon, und er ist an die ECHTE Bindung der Fixture gebaut — dieselbe,
+    /// gegen die `issue_proof` jeden Nachweis ausstellt. Sie kommt aus
+    /// `build_line()` und ausdruecklich NICHT aus
+    /// [`FIXTURE_OPERATOR_BINDING_OBJECT_HASH`]: der eingefrorene Wert der
+    /// Profilzeile ist nicht der Bindungsobjekthash der gebauten Linie, und ihn
+    /// hier einzusetzen liesse JEDEN Nachweis der Fixture an der
+    /// Bindungspruefung scheitern — die vier Briefzusicherungen ueber
+    /// `EA-DRAFT-REAUTH-REQUIRED`, `EA-DRAFT-REAUTH-PURPOSE-MISMATCH` und
+    /// `EA-DRAFT-PREPARED-FINALIZATION-PRESENT` maessen dann nicht mehr, was
+    /// sie behaupten.
     #[must_use]
     pub fn discard_service(&self) -> DiscardService<'_> {
+        self.discard_service_for_binding(self.bound_binding_object_hash())
+    }
+
+    /// Der ECHTE Bindungsobjekthash der Fixture.
+    #[must_use]
+    pub fn bound_binding_object_hash(&self) -> ObjectHash {
+        let (_, binding_object_hash) = build_line();
+        binding_object_hash
+    }
+
+    /// Ein Bindungsobjekthash, der zu KEINER Bindung dieser Linie gehoert.
+    ///
+    /// Er ist die FREMDE Bindung der Bindungspruefung: ein Dienst, der fuer ihn
+    /// handelt, darf keinen Nachweis der Fixture annehmen, so frisch und so
+    /// zweckgleich er auch sei.
+    #[must_use]
+    pub fn foreign_binding_object_hash(&self) -> ObjectHash {
+        ObjectHash::try_from([0xf0; 32].as_slice()).unwrap()
+    }
+
+    /// Derselbe Dienst, aber gebaut FUER `binding_object_hash`.
+    #[must_use]
+    pub fn discard_service_for_binding(
+        &self,
+        binding_object_hash: ObjectHash,
+    ) -> DiscardService<'_> {
         DiscardService::new(
             self.repo(),
             Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
+            binding_object_hash,
             self.head.preexisting_effective_now(),
         )
     }
@@ -865,8 +901,30 @@ impl DiscardHarness {
             Arc::new(DeafDeleteProvider {
                 inner: Arc::clone(&self.provider),
             }) as Arc<dyn KeyProvider>,
+            self.bound_binding_object_hash(),
             self.head.preexisting_effective_now(),
         )
+    }
+
+    /// Oeffnet die Ablage NEU und laeuft den Neustartpfad gegen einen
+    /// Schluesselspeicher, der ein zweites `delete` mit `NotFound` ABLEHNT.
+    ///
+    /// Das ist der Vertrag, den `KeyProvider::delete` WIRKLICH zusagt:
+    /// „Loescht den Eintrag endgueltig" — keine Idempotenz. Nur gegen diesen
+    /// Doppelgaenger ist messbar, dass der Neustartpfad einen schon abwesenden
+    /// Eintrag nicht als Fehler nimmt und sich damit dauerhaft verklemmt.
+    pub fn restart_and_resume_with_strict_keystore(&self) -> Result<RestartState, DraftError> {
+        let proof = self.proof_for(ReauthPurpose::DiscardDraft);
+        self.reopen();
+        DiscardService::new(
+            self.repo(),
+            Arc::new(StrictDeleteProvider {
+                inner: Arc::clone(&self.provider),
+            }) as Arc<dyn KeyProvider>,
+            self.bound_binding_object_hash(),
+            self.head.preexisting_effective_now(),
+        )
+        .resume_after_restart(&proof)
     }
 
     /// Ersetzt den Entwurf durch einen leeren — DIREKT ueber die Ablage.
@@ -958,6 +1016,83 @@ impl KeyProvider for DeafDeleteProvider {
     /// Meldet Erfolg und tut NICHTS.
     fn delete(&self, _handle: &KeyHandle) -> Result<(), ea_key_provider::KeyError> {
         Ok(())
+    }
+
+    fn contains(&self, handle: &KeyHandle) -> Result<bool, ea_key_provider::KeyError> {
+        self.inner.contains(handle)
+    }
+
+    fn reached_protection_profile(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<KeyProtectionProfileV1, ea_key_provider::KeyError> {
+        self.inner.reached_protection_profile(handle)
+    }
+}
+
+/// Ein Schluesselspeicher, der ein `delete` auf einem ABWESENDEN Eintrag mit
+/// [`KeyError::NotFound`] ABLEHNT.
+///
+/// Er ist der NATIVE Speicher, wie sein Vertrag ihn erlaubt.
+/// `KeyProvider::delete` sagt „Loescht den Eintrag endgueltig" und sagt
+/// AUSDRUECKLICH keine Idempotenz zu; dass `InMemoryKeyProvider::delete`
+/// bedingungslos `Ok` meldet, ist die Eigenschaft EINER Implementierung. Gegen
+/// diesen Doppelgaenger ist messbar, dass ein Neustart nach einem Absturz
+/// ZWISCHEN Loeschen und Entfernen sich nicht dauerhaft verklemmt — ohne ihn
+/// waere die Zusage „ein zweites resume ist ein no-op" nur gegen den einen
+/// gutmuetigen Provider gemessen.
+struct StrictDeleteProvider {
+    inner: Arc<InMemoryKeyProvider>,
+}
+
+impl KeyProvider for StrictDeleteProvider {
+    fn generate(
+        &self,
+        purpose: SecretPurpose,
+        protection: KeyProtectionProfileV1,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.generate(purpose, protection)
+    }
+
+    fn sign(
+        &self,
+        handle: &KeyHandle,
+        content_type: ea_crypto::ContentType,
+        certificate_hash: ea_types::CertificateHash,
+        payload: &[u8],
+    ) -> Result<ea_key_provider::CoseSign1Bytes, ea_key_provider::KeyError> {
+        self.inner
+            .sign(handle, content_type, certificate_hash, payload)
+    }
+
+    fn wrap_secret(
+        &self,
+        purpose: SecretPurpose,
+        secret: SecretBytes<32>,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.wrap_secret(purpose, secret)
+    }
+
+    fn unwrap_secret(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<SecretBytes<32>, ea_key_provider::KeyError> {
+        self.inner.unwrap_secret(handle)
+    }
+
+    fn unwrap_database_key(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<ea_crypto::SecretVec, ea_key_provider::KeyError> {
+        self.inner.unwrap_database_key(handle)
+    }
+
+    /// Lehnt ein Loeschen ins Leere ab — wie ein nativer Speicher es darf.
+    fn delete(&self, handle: &KeyHandle) -> Result<(), ea_key_provider::KeyError> {
+        if !self.inner.contains(handle)? {
+            return Err(ea_key_provider::KeyError::NotFound);
+        }
+        self.inner.delete(handle)
     }
 
     fn contains(&self, handle: &KeyHandle) -> Result<bool, ea_key_provider::KeyError> {

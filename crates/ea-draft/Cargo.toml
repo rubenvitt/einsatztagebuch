@@ -33,7 +33,29 @@ getrandom.workspace = true
 # Aufrufer den Schluessel mit einer zerlegten Form aufweichen kann.
 unicode-normalization.workspace = true
 
+[features]
+# Die Naht der Fehlerinjektion — `DiscardService::begin_discard_interrupted_at`
+# — und NICHTS sonst. Sie bricht die unwiderrufliche Reihenfolge an einem
+# beliebigen Punkt ab und hinterlaesst einen dauerhaften Halbzustand; ohne
+# dieses Merkmal existiert dieser zweite Eingang in die Sequenz nicht. Die
+# Testziele dieser Crate erreichen ihn ueber die Selbstkante unten, nicht ueber
+# ein `--all-features` auf der Kommandozeile.
+test-support = []
+
 [dev-dependencies]
+# Die SELBSTKANTE, die `test-support` fuer die Integrationstests einschaltet.
+# Ein Merkmal erreicht ein Integrationstestziel ueber die
+# Abhaengigkeitskante — genau so, wie `ea-key-provider` unten seines
+# einschaltet — und nicht ueber die Kommandozeile des Laufs. Zyklische
+# Entwicklungsabhaengigkeiten sind ausdruecklich erlaubt.
+#
+# Sie steht als `workspace = true` und NICHT als `path = "."`: die
+# Wurzeltabelle fuehrt `ea-draft = { path = "crates/ea-draft" }` schon, und
+# `tools/xtask/tests/workspace.rs`:86-101 verlangt fuer JEDE Kante jedes
+# Mitglieds — auch fuer eine Entwicklungskante — die geteilte Fassung. Eine
+# Pfadkante hier waere eine zweite, danebenlaufende Quelle derselben Wahrheit
+# und bricht jene Zusicherung.
+ea-draft = { workspace = true, features = ["test-support"] }
 # `KeyProtectionProfileV1::OsWrapped` fuer den Datenbankschluessel der Fixture.
 # AUSDRUECKLICH nur hier: die Crate selbst kodiert nichts und traegt deshalb
 # keine Wire-Format-Kante.

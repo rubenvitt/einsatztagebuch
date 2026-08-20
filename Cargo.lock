@@ -747,6 +747,7 @@ name = "ea-draft"
 version = "0.1.0"
 dependencies = [
  "ea-crypto",
+ "ea-draft",
  "ea-format",
  "ea-key-provider",
  "ea-local-store",

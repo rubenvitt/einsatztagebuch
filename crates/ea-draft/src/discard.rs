@@ -18,9 +18,17 @@ use ea_crypto::CryptoError;
 use ea_key_provider::{KeyError, KeyHandle, KeyProvider};
 use ea_operator::{OperatorSessionProof, ReauthPurpose};
 use ea_trust::PreexistingEffectiveNow;
+use ea_types::ObjectHash;
 
+// `DiscardFaultPoint` erscheint AUSSCHLIESSLICH in der Signatur von
+// `begin_discard_interrupted_at`, und die traegt dasselbe Gate. Ohne diese
+// Bedingung waere der Import bei abgeschaltetem Merkmal unbenutzt und
+// `clippy -D warnings` fiele an einer Stelle, die mit der Sache nichts zu tun
+// hat.
+#[cfg(any(test, feature = "test-support"))]
+use crate::fault::DiscardFaultPoint;
 use crate::{
-    fault::{DiscardFaultPoint, RestartState},
+    fault::RestartState,
     model::{DiscardIntent, DiscardOutcome, DraftError, SavedDraft},
     repository::DraftRepository,
 };
@@ -28,8 +36,8 @@ use crate::{
 /// Die Phase, die ein Verwerfen erreicht hat.
 ///
 /// Vier Phasen, und jede hat GENAU EINEN Neustartausgang. Sie sind groeber als
-/// [`DiscardFaultPoint`]: eine Phase ist ein Zustand der Datenbank und des
-/// Schluesselspeichers, ein Unterbrechungspunkt eine Stelle im Programm.
+/// [`crate::DiscardFaultPoint`]: eine Phase ist ein Zustand der Datenbank und
+/// des Schluesselspeichers, ein Unterbrechungspunkt eine Stelle im Programm.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DiscardPhase {
     /// Nichts Dauerhaftes ist geschehen; der Entwurf ist bearbeitbar.
@@ -61,19 +69,37 @@ impl DiscardPhase {
 pub struct DiscardService<'now> {
     repository: Arc<dyn DraftRepository>,
     key_provider: Arc<dyn KeyProvider>,
+    bound_binding_object_hash: ObjectHash,
     now: &'now PreexistingEffectiveNow,
 }
 
 impl<'now> DiscardService<'now> {
+    /// Baut den Dienst FUER GENAU EINE Bedienerbindung.
+    ///
+    /// `bound_binding_object_hash` ist der Bindungsobjekthash des
+    /// `BoundOperator`, gegen den diese Sitzung handelt — derselbe Wert, den
+    /// der Aufrufer `ea_operator::BoundOperator::resolve` uebergeben hat.
+    ///
+    /// ER IST PFLICHT UND KEINE OPTION. `OperatorSessionProof::is_valid_for`
+    /// prueft die Bindung ausdruecklich nicht
+    /// (`crates/ea-operator/src/session.rs`: „Wer einen Nachweis annimmt, ohne
+    /// die Bindung zu vergleichen, hat einen Fehler gemacht"), also muss der
+    /// Verbraucher vergleichen. Weil der Wert im Konstruktor steht und kein
+    /// `Option` ist, gibt es den Fall „keine Bindung bekannt" ZUR LAUFZEIT
+    /// NICHT: fail-closed ist hier nicht ein Zweig, sondern der Typ. Ein
+    /// Dienst ohne bekannte Bindung ist nicht baubar und kann deshalb auch
+    /// nichts unwiderruflich verwerfen.
     #[must_use]
     pub fn new(
         repository: Arc<dyn DraftRepository>,
         key_provider: Arc<dyn KeyProvider>,
+        bound_binding_object_hash: ObjectHash,
         now: &'now PreexistingEffectiveNow,
     ) -> Self {
         Self {
             repository,
             key_provider,
+            bound_binding_object_hash,
             now,
         }
     }
@@ -135,6 +161,15 @@ impl<'now> DiscardService<'now> {
     /// unwiderruflichen Schritt die Transaktion aus den vorbereiteten Bytes
     /// vollendet werden MUSS (`design.md`:456, :467).
     ///
+    /// Er vergleicht die Bindung wie jeder andere Eingang, und das heisst:
+    /// eine unter Bindung A gebuchte Absicht ist NUR mit einem Nachweis der
+    /// Bindung A aufloesbar. Ein fremder Bediener kann den Entwurf dieses
+    /// Geraets weder verwerfen noch die gebuchte Absicht wieder loesen — beides
+    /// ist gewollt und fail-closed: der Dienst wird aus demselben
+    /// `BoundOperator` gebaut, gegen den `OperatorAuthenticator::reauthenticate`
+    /// ausstellt, also heisst „fremde Bindung" hier „der falsche Bediener steht
+    /// an der Tastatur", und nicht „der berechtigte Bediener ist ausgesperrt".
+    ///
     /// Findet er weder Marke noch Absicht, aber einen Entwurf, dessen
     /// `draftDEK` fort ist — der Fall der zurueckgespielten Sicherung —, dann
     /// ersetzt er ihn durch einen leeren. Ein Entwurf, der nie mehr zu oeffnen
@@ -149,7 +184,7 @@ impl<'now> DiscardService<'now> {
         proof: &OperatorSessionProof,
     ) -> Result<RestartState, DraftError> {
         let _lock = self.repository.acquire_draft_lock()?;
-        require_fresh_proof(proof, self.now)?;
+        require_fresh_proof(proof, self.bound_binding_object_hash, self.now)?;
         if self.repository.prepared_finalization_marker()?.is_some() {
             return Ok(RestartState::PreparedFinalizationPending);
         }
@@ -205,9 +240,19 @@ impl<'now> DiscardService<'now> {
     /// Rueckspielung selbst ist ein Ereignis am Dateisystem und nicht in diesem
     /// Programm.
     ///
+    /// SIE IST KEINE PRODUKTIONSFLAECHE. Das Merkmal `test-support` schaltet
+    /// sie frei, und die Testziele dieser Crate erreichen es ueber die
+    /// Abhaengigkeitskante `[dev-dependencies] ea-draft = { path = ".",
+    /// features = ["test-support"] }` — nicht ueber ein `--all-features` auf
+    /// der Kommandozeile, wie `ea-key-provider = { workspace = true, features
+    /// = ["test-support"] }` in derselben `Cargo.toml` es bereits zeigt. Ohne
+    /// das Merkmal existiert dieser zweite Eingang in die unwiderrufliche
+    /// Reihenfolge nicht.
+    ///
     /// # Errors
     ///
     /// Wie [`Self::begin_discard`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn begin_discard_interrupted_at(
         &self,
         proof: OperatorSessionProof,
@@ -223,7 +268,7 @@ impl<'now> DiscardService<'now> {
             return Ok(());
         }
         let handle = self.draft_dek_handle(&intent)?;
-        self.key_provider.delete(&handle)?;
+        self.delete_draft_dek(&handle)?;
         if point == DiscardFaultPoint::AfterKeystoreDelete {
             return Ok(());
         }
@@ -240,10 +285,10 @@ impl<'now> DiscardService<'now> {
         Ok(())
     }
 
-    /// Die zwei Bedingungen, die JEDER Eingang stellt: frischer,
-    /// zweckgleicher Nachweis, und keine liegende Abschlussmarke.
+    /// Die Bedingungen, die JEDER Eingang stellt: ein Nachweis der EIGENEN
+    /// Bindung, frisch und zweckgleich, und keine liegende Abschlussmarke.
     fn enter(&self, proof: &OperatorSessionProof) -> Result<(), DraftError> {
-        require_fresh_proof(proof, self.now)?;
+        require_fresh_proof(proof, self.bound_binding_object_hash, self.now)?;
         if self.repository.prepared_finalization_marker()?.is_some() {
             return Err(DraftError::PreparedFinalizationPresent);
         }
@@ -266,10 +311,36 @@ impl<'now> DiscardService<'now> {
     /// Platte stehen.
     fn complete(&self, intent: &DiscardIntent) -> Result<DiscardOutcome, DraftError> {
         let handle = self.draft_dek_handle(intent)?;
-        self.key_provider.delete(&handle)?;
+        self.delete_draft_dek(&handle)?;
         self.confirm_absence(&handle)?;
         self.repository
             .remove_ciphertext_and_intent_create_blank(intent)
+    }
+
+    /// Loescht den `draftDEK` und behandelt einen SCHON ABWESENDEN Eintrag als
+    /// Erfolg.
+    ///
+    /// Der Vertrag von [`KeyProvider::delete`]
+    /// (`crates/ea-key-provider/src/contract.rs`: „Loescht den Eintrag
+    /// endgueltig") sagt KEINE Idempotenz zu; dass
+    /// `InMemoryKeyProvider::delete` „bedingungslos, auch wenn nichts zu
+    /// entfernen war" loescht, ist die Eigenschaft EINER Implementierung. Ein
+    /// nativer Speicher, der [`KeyError::NotFound`] meldet, verklemmte sonst
+    /// jeden Neustart nach einem Absturz an
+    /// `AfterKeystoreDelete`/`AfterAbsenceConfirmation` dauerhaft: der Entwurf
+    /// ist schon unlesbar, die Absicht bleibt gebucht, und kein Arm loeste sie
+    /// mehr auf — die Zusage „ein zweites resume ist ein no-op" faellt.
+    ///
+    /// Die Zusage wird davon NICHT schwaecher, weil
+    /// [`Self::confirm_absence`] unmittelbar danach zurueckfragt: „der
+    /// `draftDEK` ist fort" haengt weiterhin an `contains() == false` und
+    /// niemals an einer Meldung des Providers. `NotFound` heisst genau das,
+    /// was der Schritt erreichen wollte.
+    fn delete_draft_dek(&self, handle: &KeyHandle) -> Result<(), DraftError> {
+        match self.key_provider.delete(handle) {
+            Ok(()) | Err(KeyError::NotFound) => Ok(()),
+            Err(other) => Err(DraftError::Key(other)),
+        }
     }
 
     fn draft_dek_handle(&self, intent: &DiscardIntent) -> Result<KeyHandle, DraftError> {
@@ -291,13 +362,26 @@ impl<'now> DiscardService<'now> {
     }
 }
 
-/// Verlangt einen FRISCHEN Nachweis fuer [`ReauthPurpose::DiscardDraft`].
+/// Verlangt einen Nachweis der EIGENEN Bindung, FRISCH und fuer
+/// [`ReauthPurpose::DiscardDraft`].
 ///
-/// Die Entscheidung faellt in der ERSTEN Zeile, und sie ist fail-closed: nur
-/// ein Nachweis, der GENAU diesen Zweck zur Zeit des gewaehlten Head
-/// autorisiert, laesst ein Verwerfen zu. Verwerfen ist auf einem unbeaufsichtigt
-/// stehenden Geraet genauso unwiderruflich wie ein Abschluss
-/// (`design.md`:256, :432).
+/// ZWEI Pruefungen, und die BINDUNG kommt zuerst. „Dieser Nachweis gehoert
+/// nicht zu mir" ist die grundlegendere Ablehnung als „er ist abgelaufen" oder
+/// „er nennt einen anderen Zweck": ein Nachweis einer fremden Bindung ist auch
+/// dann keine Autorisierung, wenn er taufrisch ist und genau diesen Zweck
+/// nennt. `OperatorSessionProof::is_valid_for` prueft die Bindung
+/// AUSDRUECKLICH nicht (`crates/ea-operator/src/session.rs`) und weist den
+/// Vergleich dem Verbraucher zu; der Nachweis TRAEGT seinen
+/// Bindungsobjekthash genau dafuer, und `binding_object_hash` nennt „Task 4
+/// beim Verwerfen" als den Verbraucher, der ihn vergleicht. Ohne diesen
+/// Vergleich autorisierte der frische `DiscardDraft`-Nachweis eines BELIEBIGEN
+/// gebundenen Bedieners das unwiderrufliche Verwerfen des Entwurfs dieses
+/// Geraets.
+///
+/// Danach die Frische, fail-closed: nur ein Nachweis, der GENAU diesen Zweck
+/// zur Zeit des gewaehlten Head autorisiert, laesst ein Verwerfen zu. Verwerfen
+/// ist auf einem unbeaufsichtigt stehenden Geraet genauso unwiderruflich wie
+/// ein Abschluss (`design.md`:256, :432).
 ///
 /// Der Rest waehlt NUR den Fehlercode. `OperatorSessionProof` gibt seinen Zweck
 /// bewusst nicht heraus — er beantwortet ausschliesslich die Frage „autorisierst
@@ -307,8 +391,12 @@ impl<'now> DiscardService<'now> {
 /// Unterscheidung ist diagnostisch, die Ablehnung war schon gefallen.
 fn require_fresh_proof(
     proof: &OperatorSessionProof,
+    bound_binding_object_hash: ObjectHash,
     now: &PreexistingEffectiveNow,
 ) -> Result<(), DraftError> {
+    if proof.binding_object_hash() != bound_binding_object_hash {
+        return Err(DraftError::ReauthBindingMismatch);
+    }
     if proof.is_valid_for(ReauthPurpose::DiscardDraft, now) {
         return Ok(());
     }
