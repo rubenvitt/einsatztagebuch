@@ -41,10 +41,10 @@ pub use emit::emit_typescript;
 // Die Sicherheitsaufzaehlungen bleiben, wo sie definiert wurden. Hier steht
 // ausschliesslich die Weitergabe.
 pub use ea_archive::QuarantineReason;
-pub use ea_archive_fs::{DetailCause, SyncStatus};
+pub use ea_archive_fs::{DetailCause, HealthFinding, SyncStatus};
 pub use ea_crypto::SignerRole;
 pub use ea_format::{KeyProtectionProfileV1, LocalAuditOutcomeV1, OperatorRoleV1};
-pub use ea_writer::FinalizationPhase;
+pub use ea_writer::{FinalizationPhase, StaleDecision};
 
 use ea_archive::QuarantinedObject;
 use ea_archive_fs::ArchiveHealthReport;
@@ -72,8 +72,11 @@ pub const SECURITY_ENUMS_V1: &[(&str, &[&str])] = &[
 /// Die geschlossenen Aufzaehlungen der Writer-Ansicht, die keine
 /// Sicherheitsaufzaehlung sind — aber genauso emittiert und genauso bewacht
 /// werden.
-pub const WRITER_ENUMS_V1: &[(&str, &[&str])] =
-    &[("FinalizationPhase", FINALIZATION_PHASE_LITERALS)];
+pub const WRITER_ENUMS_V1: &[(&str, &[&str])] = &[
+    ("FinalizationPhase", FINALIZATION_PHASE_LITERALS),
+    ("StaleDecision", STALE_DECISION_LITERALS),
+    ("HealthFinding", HEALTH_FINDING_LITERALS),
+];
 
 /// Die woertliche Oberflaechenkopie der vier Sync-Zustaende.
 ///
@@ -232,6 +235,57 @@ const FINALIZATION_PHASE_LITERALS: &[&str] = &[
     finalization_phase_literal(FinalizationPhase::Reconciled),
 ];
 
+/// Der Zeitstatus des gebundenen Vertrauensbestands.
+///
+/// `ea-writer` fuehrt fuer diese Aufzaehlung keinen Zeichenkettenzugriff, also
+/// IST der Variantenname das Literal.
+const fn stale_decision_literal(value: StaleDecision) -> &'static str {
+    match value {
+        StaleDecision::Fresh => "Fresh",
+        StaleDecision::StaleAcknowledgeable => "StaleAcknowledgeable",
+        StaleDecision::HardBlock => "HardBlock",
+    }
+}
+
+const STALE_DECISION_LITERALS: &[&str] = &[
+    stale_decision_literal(StaleDecision::Fresh),
+    stale_decision_literal(StaleDecision::StaleAcknowledgeable),
+    stale_decision_literal(StaleDecision::HardBlock),
+];
+
+/// Der stabile Code EINES Gesundheitsbefundes.
+///
+/// Wie bei [`sync_status_literal`] eine Oder-Verzweigung ueber ALLE zehn
+/// Varianten mit anschliessendem [`HealthFinding::code`]: das Literal bleibt in
+/// `ea-archive-fs`, der fehlende Sammelarm faengt trotzdem jede neue Variante.
+const fn health_finding_literal(value: HealthFinding) -> &'static str {
+    match value {
+        HealthFinding::MissingFile
+        | HealthFinding::ModifiedFile
+        | HealthFinding::HashSignatureOrChainError
+        | HealthFinding::MissingMandatoryGrant
+        | HealthFinding::InvalidOrUnauthorizedStub
+        | HealthFinding::IncompleteTrustData
+        | HealthFinding::OrphanGrantOrTemporaryFile
+        | HealthFinding::UnexpectedSequenceForkOrRollback
+        | HealthFinding::InsufficientFreeSpace
+        | HealthFinding::UnsuitableFilesystemSemantics => value.code(),
+    }
+}
+
+const HEALTH_FINDING_LITERALS: &[&str] = &[
+    health_finding_literal(HealthFinding::MissingFile),
+    health_finding_literal(HealthFinding::ModifiedFile),
+    health_finding_literal(HealthFinding::HashSignatureOrChainError),
+    health_finding_literal(HealthFinding::MissingMandatoryGrant),
+    health_finding_literal(HealthFinding::InvalidOrUnauthorizedStub),
+    health_finding_literal(HealthFinding::IncompleteTrustData),
+    health_finding_literal(HealthFinding::OrphanGrantOrTemporaryFile),
+    health_finding_literal(HealthFinding::UnexpectedSequenceForkOrRollback),
+    health_finding_literal(HealthFinding::InsufficientFreeSpace),
+    health_finding_literal(HealthFinding::UnsuitableFilesystemSemantics),
+];
+
 /// Der Sync-Zustand mit seiner Detailursache DANEBEN.
 ///
 /// Nie ein fuenfter Zustand: verliert ein freigegebenes Netzbackend eine
@@ -249,6 +303,14 @@ pub struct SyncStateView {
 /// als zwei getrennte Zahlen, weil die Ueberschreitung eine WARNUNG ist und die
 /// Blockade an `notAfter` haengt — zwei verschiedene Aussagen, die eine
 /// Oberflaeche verschieden anzeigen muss.
+///
+/// [`StaleDecision`] steht UNGEFALTET darin und nicht als abgeleitetes
+/// `hardBlock: boolean`. Die Aufzaehlung ist dreiarmig, und der mittlere Arm
+/// `StaleAcknowledgeable` verlangt eine nicht uebergehbare sichtbare Warnung
+/// und eine ausdrueckliche Bestaetigung; ein Wahrheitswert macht ihn von
+/// `Fresh` ununterscheidbar und degradiert damit still, statt fail-closed zu
+/// bleiben. `trustRefreshOverdue` deckt das NICHT ab — das ist die
+/// Auffrischungsfrist und eine andere Aussage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FinalizationPreviewView {
     pub proposed_sequence: ChainSequence,
@@ -257,7 +319,7 @@ pub struct FinalizationPreviewView {
     pub trust_age_ms: u64,
     pub reader_trust_refresh_ms: u64,
     pub trust_refresh_overdue: bool,
-    pub hard_block: bool,
+    pub stale_decision: StaleDecision,
 }
 
 impl From<&FinalizationPreview> for FinalizationPreviewView {
@@ -269,7 +331,7 @@ impl From<&FinalizationPreview> for FinalizationPreviewView {
             trust_age_ms: preview.trust_age_ms(),
             reader_trust_refresh_ms: preview.reader_trust_refresh_ms(),
             trust_refresh_overdue: preview.trust_refresh_overdue(),
-            hard_block: preview.decision().is_hard_block(),
+            stale_decision: preview.decision(),
         }
     }
 }
@@ -303,10 +365,17 @@ impl FinalizeOutcomeView {
 ///
 /// `healthy` ist ausdruecklich UND-verknuepft: ein isoliertes Objekt ist ein
 /// ungesunder Bestand, auch wenn kein Gesundheitsbefund daneben steht.
+/// `finding_codes` traegt die GESCHLOSSENE Aufzaehlung [`HealthFinding`] und
+/// nicht ihre Codes als nackte Zeichenketten: nur so stehen die zehn Codes in
+/// der emittierten Vereinigung, und nur dann sieht
+/// `no-hand-written-contracts.test.ts` einen spaeteren handgeschriebenen
+/// Vergleich gegen einen von ihnen. Die Reihenfolge kommt aus dem
+/// `BTreeSet` des Berichts und damit — die Aufzaehlung ist feldlos und leitet
+/// `Ord` ab — aus der Deklarationsreihenfolge: deterministisch ohne Zutun.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArchiveHealthSummaryView {
     pub healthy: bool,
-    pub finding_codes: Vec<&'static str>,
+    pub finding_codes: Vec<HealthFinding>,
     pub quarantine_reasons: Vec<QuarantineReason>,
 }
 
@@ -315,11 +384,7 @@ impl ArchiveHealthSummaryView {
     pub fn new(report: &ArchiveHealthReport, quarantined: &[QuarantinedObject]) -> Self {
         Self {
             healthy: report.is_empty() && quarantined.is_empty(),
-            finding_codes: report
-                .findings()
-                .into_iter()
-                .map(|finding| finding.code())
-                .collect(),
+            finding_codes: report.findings(),
             quarantine_reasons: quarantined.iter().map(QuarantinedObject::reason).collect(),
         }
     }
@@ -378,16 +443,25 @@ pub struct PendingFinalizationResumeView {
 impl PendingFinalizationResumeView {
     #[must_use]
     pub fn new(phase: FinalizationPhase, recovery: Option<&RecoveryOutcome>) -> Self {
-        let summary = recovery.map(RecoveryOutcome::summary);
         Self {
             phase,
             irreversible: phase.is_irreversible(),
-            outcome_code: summary.map(|(code, _)| code.to_owned()),
-            // `NothingPending` traegt keine Sequenz, und `summary` drueckt das
-            // als Null aus. Eine angezeigte Sequenz 0 waere eine erfundene.
-            outcome_sequence: summary
-                .and_then(|(_, sequence)| (sequence != 0).then_some(sequence))
-                .map(ChainSequence::new),
+            outcome_code: recovery.map(|outcome| outcome.summary().0.to_owned()),
+            // Die VARIANTE entscheidet, nicht der Zahlenwert. `summary` benutzt
+            // die Null bei `NothingPending` als Sentinel, aber Sequenz 0 ist
+            // der GUELTIGE erste Eintrag jeder Kette
+            // (`ea-chain/src/chain.rs`: `is_genesis` heisst
+            // `chain_sequence.get() == 0`; `ea-writer/src/finalize.rs`
+            // schlaegt bei leerer Kette `ChainSequence::new(0)` vor). Ein
+            // Filter auf `!= 0` haette die unterbrochene Finalisierung des
+            // ERSTEN Eintrags als „committet, Sequenz unbekannt" angezeigt.
+            // Der `match` ohne Sammelarm faellt bei einem vierten Ausgang von
+            // `RecoveryOutcome` in die Uebersetzung.
+            outcome_sequence: match recovery {
+                None | Some(RecoveryOutcome::NothingPending) => None,
+                Some(RecoveryOutcome::DraftRestored { unused_sequence }) => Some(*unused_sequence),
+                Some(RecoveryOutcome::CommittedFromPreparedBytes { sequence }) => Some(*sequence),
+            },
         }
     }
 }
@@ -414,5 +488,55 @@ impl From<&IncidentUniquenessKey> for IncidentIdentityView {
             // kann.
             incident_number: String::from_utf8_lossy(key.incident_number_nfc_bytes()).into_owned(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChainSequence, FinalizationPhase, PendingFinalizationResumeView, RecoveryOutcome};
+
+    /// Sequenz 0 ist der GENESIS-Eintrag und kein Sentinel.
+    ///
+    /// Der Fehlerfall, den diese Zusicherung faengt: die unterbrochene
+    /// Finalisierung des ERSTEN Eintrags eines Archivs liefert
+    /// `outcome_code: Some("CommittedFromPreparedBytes")`, und eine Ansicht,
+    /// die auf `!= 0` filtert, zeigt dazu „Sequenz unbekannt", obwohl sie
+    /// bekannt ist.
+    #[test]
+    fn resume_of_the_genesis_entry_keeps_sequence_zero() {
+        let committed = RecoveryOutcome::CommittedFromPreparedBytes {
+            sequence: ChainSequence::new(0),
+        };
+        let view =
+            PendingFinalizationResumeView::new(FinalizationPhase::EntryCommitted, Some(&committed));
+        assert_eq!(
+            view.outcome_code.as_deref(),
+            Some("CommittedFromPreparedBytes")
+        );
+        assert_eq!(view.outcome_sequence, Some(ChainSequence::new(0)));
+
+        let restored = RecoveryOutcome::DraftRestored {
+            unused_sequence: ChainSequence::new(0),
+        };
+        let view =
+            PendingFinalizationResumeView::new(FinalizationPhase::ReversibleDraft, Some(&restored));
+        assert_eq!(view.outcome_code.as_deref(), Some("DraftRestored"));
+        assert_eq!(view.outcome_sequence, Some(ChainSequence::new(0)));
+    }
+
+    /// Der EINE Ausgang ohne Sequenz — und er ist es, weil seine Variante keine
+    /// traegt, und nicht, weil ein Zahlenwert null ist.
+    #[test]
+    fn nothing_pending_carries_no_sequence() {
+        let pending = PendingFinalizationResumeView::new(
+            FinalizationPhase::ReversibleDraft,
+            Some(&RecoveryOutcome::NothingPending),
+        );
+        assert_eq!(pending.outcome_code.as_deref(), Some("NothingPending"));
+        assert_eq!(pending.outcome_sequence, None);
+
+        let absent = PendingFinalizationResumeView::new(FinalizationPhase::ReversibleDraft, None);
+        assert_eq!(absent.outcome_code, None);
+        assert_eq!(absent.outcome_sequence, None);
     }
 }

@@ -59,6 +59,23 @@ export type FinalizationPhase =
   | 'NetworkArchivePublished'
   | 'Reconciled'
 
+export type StaleDecision =
+  | 'Fresh'
+  | 'StaleAcknowledgeable'
+  | 'HardBlock'
+
+export type HealthFinding =
+  | 'EA-ARCHIVE-HEALTH-MISSING-FILE'
+  | 'EA-ARCHIVE-HEALTH-MODIFIED-FILE'
+  | 'EA-ARCHIVE-HEALTH-HASH-SIGNATURE-CHAIN'
+  | 'EA-ARCHIVE-HEALTH-MISSING-GRANT'
+  | 'EA-ARCHIVE-HEALTH-UNAUTHORIZED-STUB'
+  | 'EA-ARCHIVE-HEALTH-INCOMPLETE-TRUST'
+  | 'EA-ARCHIVE-HEALTH-ORPHAN-OR-TEMPORARY'
+  | 'EA-ARCHIVE-HEALTH-SEQUENCE-FORK-ROLLBACK'
+  | 'EA-ARCHIVE-HEALTH-FREE-SPACE'
+  | 'EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS'
+
 // The Writer view models.
 
 export type SyncStateView = {
@@ -73,7 +90,7 @@ export type FinalizationPreviewView = {
   readonly trustAgeMs: number
   readonly readerTrustRefreshMs: number
   readonly trustRefreshOverdue: boolean
-  readonly hardBlock: boolean
+  readonly staleDecision: StaleDecision
 }
 
 export type FinalizeOutcomeView = {
@@ -83,7 +100,7 @@ export type FinalizeOutcomeView = {
 
 export type ArchiveHealthSummaryView = {
   readonly healthy: boolean
-  readonly findingCodes: readonly string[]
+  readonly findingCodes: readonly HealthFinding[]
   readonly quarantineReasons: readonly QuarantineReason[]
 }
 
@@ -173,4 +190,23 @@ export const FINALIZATION_PHASE_VALUES = [
   'EntryCommitted',
   'NetworkArchivePublished',
   'Reconciled',
+] as const
+
+export const STALE_DECISION_VALUES = [
+  'Fresh',
+  'StaleAcknowledgeable',
+  'HardBlock',
+] as const
+
+export const HEALTH_FINDING_VALUES = [
+  'EA-ARCHIVE-HEALTH-MISSING-FILE',
+  'EA-ARCHIVE-HEALTH-MODIFIED-FILE',
+  'EA-ARCHIVE-HEALTH-HASH-SIGNATURE-CHAIN',
+  'EA-ARCHIVE-HEALTH-MISSING-GRANT',
+  'EA-ARCHIVE-HEALTH-UNAUTHORIZED-STUB',
+  'EA-ARCHIVE-HEALTH-INCOMPLETE-TRUST',
+  'EA-ARCHIVE-HEALTH-ORPHAN-OR-TEMPORARY',
+  'EA-ARCHIVE-HEALTH-SEQUENCE-FORK-ROLLBACK',
+  'EA-ARCHIVE-HEALTH-FREE-SPACE',
+  'EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS',
 ] as const

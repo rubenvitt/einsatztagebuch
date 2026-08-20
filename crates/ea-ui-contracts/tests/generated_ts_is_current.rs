@@ -127,6 +127,11 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
         ("KeyProtectionProfileV1", 5),
         ("OperatorRoleV1", 3),
         ("SignerRole", 9),
+        // `ea-writer` fuehrt fuer `StaleDecision` kein `ALL`, die Drei steht
+        // deshalb hier — und macht ein Entfernen des bestaetigungspflichtigen
+        // mittleren Arms zu einer sichtbaren Aenderung.
+        ("StaleDecision", 3),
+        ("HealthFinding", ea_ui_contracts::HealthFinding::ALL.len()),
     ] {
         assert_eq!(
             union_members(&named_union_block(&emitted, name)).len(),
@@ -172,7 +177,12 @@ fn the_emitted_file_declares_types_and_computes_nothing() {
         let masked = line
             .to_ascii_lowercase()
             .replace("signerrole", "")
-            .replace("signer_role", "");
+            .replace("signer_role", "")
+            // Der zweite Name, der die verbotene Zeichenfolge im WERT traegt:
+            // der Gesundheitscode `EA-ARCHIVE-HEALTH-HASH-SIGNATURE-CHAIN` aus
+            // `ea-archive-fs`. Maskiert wird der GANZE Code und nicht das Wort
+            // — `signature` an jeder anderen Stelle faellt weiterhin auf.
+            .replace("ea-archive-health-hash-signature-chain", "");
         assert!(
             !masked.contains("sign"),
             "the generated contracts must contain no sign outside the SignerRole \

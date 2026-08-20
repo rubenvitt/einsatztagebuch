@@ -45,7 +45,7 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ("trustAgeMs", "number"),
             ("readerTrustRefreshMs", "number"),
             ("trustRefreshOverdue", "boolean"),
-            ("hardBlock", "boolean"),
+            ("staleDecision", "StaleDecision"),
         ],
     ),
     (
@@ -56,7 +56,7 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
         "ArchiveHealthSummaryView",
         &[
             ("healthy", "boolean"),
-            ("findingCodes", "readonly string[]"),
+            ("findingCodes", "readonly HealthFinding[]"),
             ("quarantineReasons", "readonly QuarantineReason[]"),
         ],
     ),
