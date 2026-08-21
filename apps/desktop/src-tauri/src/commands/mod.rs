@@ -7,6 +7,7 @@
 
 pub mod master_data;
 pub mod session;
+pub mod writer;
 
 use serde::Serialize;
 
@@ -39,6 +40,20 @@ pub const STARTUP_RECOVERY_FAILED: &str = "EA-DESKTOP-STARTUP-RECOVERY-FAILED";
 pub const MASTER_DATA_UNAVAILABLE: &str = "EA-DESKTOP-MASTER-DATA-UNAVAILABLE";
 /// Die Stammdatenablage hat abgelehnt.
 pub const MASTER_DATA_UNREADABLE: &str = "EA-DESKTOP-MASTER-DATA-UNREADABLE";
+/// Keine geoeffnete Entwurfsablage.
+pub const DRAFTS_UNAVAILABLE: &str = "EA-DESKTOP-DRAFTS-UNAVAILABLE";
+/// Kein Bestand fuer den Gesundheitscheck geoeffnet.
+pub const ARCHIVE_HEALTH_UNAVAILABLE: &str = "EA-DESKTOP-ARCHIVE-HEALTH-UNAVAILABLE";
+/// Kein aufgeloester `WriterService` auf diesem Geraet.
+pub const WRITER_UNAVAILABLE: &str = "EA-DESKTOP-WRITER-UNAVAILABLE";
+/// Keine native Wiederanmeldung aufgeloest.
+pub const REAUTH_UNAVAILABLE: &str = "EA-DESKTOP-REAUTH-UNAVAILABLE";
+/// Der Bestaetigungspfad des veralteten Head existiert im Kern nicht.
+pub const STALE_ACK_UNAVAILABLE: &str = "EA-DESKTOP-STALE-ACK-UNAVAILABLE";
+/// Kein Verwerfensdienst aufgeloest.
+pub const DISCARD_UNAVAILABLE: &str = "EA-DESKTOP-DISCARD-UNAVAILABLE";
+/// Kein aufgeloester Vertrauensanker fuer den Buendelexport.
+pub const BUNDLE_EXPORT_UNAVAILABLE: &str = "EA-DESKTOP-BUNDLE-EXPORT-UNAVAILABLE";
 /// Der Blockierthread ist verlorengegangen.
 pub const BLOCKING_WORK_LOST: &str = "EA-DESKTOP-BLOCKING-WORK-LOST";
 
@@ -48,6 +63,19 @@ pub const COMMAND_NAMES: &[&str] = &[
     "invalidate_session_on_lock",
     "startup_recovery",
     "master_data_counts",
+    "session_reauthenticate",
+    "master_data_search",
+    "draft_load_active",
+    "draft_save",
+    "draft_discard_begin",
+    "draft_discard_resume",
+    "writer_recover_pending",
+    "writer_preview",
+    "writer_acknowledge_stale_registry",
+    "writer_finalize",
+    "archive_health_report",
+    "device_posture_report",
+    "archive_export_bundle_file",
 ];
 
 /// Fuehrt die SYNCHRONE Kernoperation auf einem Blockierthread aus.

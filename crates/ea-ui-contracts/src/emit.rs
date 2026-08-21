@@ -88,6 +88,119 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
         "IncidentIdentityView",
         &[("localCivilYear", "number"), ("incidentNumber", "string")],
     ),
+    (
+        "CoordinatesView",
+        &[("latE7", "number"), ("lonE7", "number")],
+    ),
+    (
+        "OccurredAtView",
+        &[("start", "number"), ("end", "number | null")],
+    ),
+    (
+        "KeywordView",
+        &[("referenceId", "string | null"), ("displayText", "string")],
+    ),
+    (
+        "StructuredAddressView",
+        &[
+            ("street", "string | null"),
+            ("houseNumber", "string | null"),
+            ("postalCode", "string | null"),
+            ("locality", "string | null"),
+            ("adminArea", "string | null"),
+            ("countryCode", "string | null"),
+        ],
+    ),
+    (
+        "LocationView",
+        &[
+            ("freeText", "string | null"),
+            ("address", "StructuredAddressView | null"),
+            ("coordinates", "CoordinatesView | null"),
+        ],
+    ),
+    (
+        "PersonnelSelectionView",
+        &[
+            ("masterPersonnelId", "string | null"),
+            ("displayName", "string"),
+            ("roleLabel", "string | null"),
+        ],
+    ),
+    (
+        "VehicleSelectionView",
+        &[
+            ("masterVehicleId", "string | null"),
+            ("displayName", "string"),
+            ("radioCallName", "string | null"),
+            ("licensePlate", "string | null"),
+        ],
+    ),
+    (
+        "ExternalOrganizationView",
+        &[("id", "string | null"), ("displayName", "string")],
+    ),
+    (
+        "IncidentInputView",
+        &[
+            ("humanIncidentNumber", "string"),
+            ("occurredAt", "OccurredAtView"),
+            ("keyword", "KeywordView"),
+            ("location", "LocationView"),
+            ("personnel", "readonly PersonnelSelectionView[]"),
+            ("personnelEmptyReason", "string | null"),
+            ("vehicles", "readonly VehicleSelectionView[]"),
+            ("vehiclesEmptyReason", "string | null"),
+            ("patientCountStatus", "PatientCountStatus"),
+            ("patientCount", "number | null"),
+            ("notes", "string | null"),
+            (
+                "externalOrganizations",
+                "readonly ExternalOrganizationView[]",
+            ),
+        ],
+    ),
+    (
+        "DraftStateView",
+        &[("incident", "IncidentInputView"), ("sync", "SyncStateView")],
+    ),
+    (
+        "MasterDataResultView",
+        &[
+            ("personnel", "readonly PersonnelSelectionView[]"),
+            ("vehicles", "readonly VehicleSelectionView[]"),
+            ("personnelTotal", "number"),
+            ("vehicleTotal", "number"),
+        ],
+    ),
+    (
+        "StaleAcknowledgementView",
+        &[("captured", "boolean"), ("proofCode", "string")],
+    ),
+    (
+        "ReauthResultView",
+        &[("fresh", "boolean"), ("purposeCode", "string")],
+    ),
+    (
+        "DiscardStateView",
+        &[("phaseCode", "string"), ("complete", "boolean")],
+    ),
+    (
+        "BundleExportView",
+        &[
+            ("path", "string"),
+            ("objectCount", "number"),
+            ("byteCount", "number"),
+        ],
+    ),
+    (
+        "PendingResumeOutcomeView",
+        &[
+            ("resume", "PendingFinalizationResumeView"),
+            ("blockedCode", "string | null"),
+            ("sync", "SyncStateView | null"),
+        ],
+    ),
 ];
 
 /// Die vollstaendige TypeScript-Kontraktdatei als Zeichenkette.

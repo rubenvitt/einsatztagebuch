@@ -10,6 +10,7 @@ import type { EaRoute, VerifiedSession } from './role-gate'
 import { verifiedSession, watchSessionLock } from './session-lock'
 import type { SessionLockHandlers } from './session-lock'
 import type { FinalizationPreviewView, PendingFinalizationResumeView } from '../bridge/generated-contracts'
+import { WriterSurface } from '../features/writer/WriterPage'
 import { DecorativeIcon } from '../design/icons'
 import { eaRuntimeTheme } from '../design/tokens'
 
@@ -34,11 +35,17 @@ function RouteSurface({ route }: { readonly route: EaRoute }): ReactElement {
           <DecorativeIcon name={route.icon} />
           <Typography.Title level={2}>{route.label}</Typography.Title>
         </Space>
-        <Typography.Paragraph>
-          {route.path === '/'
-            ? 'Dieses Gerät führt genau einen Writer und genau einen Entwurf. Der Verlauf und die abgeschlossenen Inhalte sind hier nicht einsehbar.'
-            : 'Die Erfassungsmaske ist in dieser Ausbaustufe noch nicht freigeschaltet. Der Kettenzustand dieses Geräts ist geprüft.'}
-        </Typography.Paragraph>
+        {route.path === '/' ? (
+          <Typography.Paragraph>
+            Dieses Gerät führt genau einen Writer und genau einen Entwurf. Der Verlauf und die
+            abgeschlossenen Inhalte sind hier nicht einsehbar.
+          </Typography.Paragraph>
+        ) : (
+          // Die Erfassung selbst. Sie baut ihre Bruecke zum Wirt und zeigt
+          // erst danach ein Formular: ohne gelesenen Entwurf gaebe es einen
+          // zweiten aktiven Entwurf, und es gibt genau einen.
+          <WriterSurface />
+        )}
       </Space>
     </section>
   )

@@ -17,7 +17,37 @@
       }
     ],
     "security": {
-      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "capabilities": [
+        "default",
+        {
+          "identifier": "ea-writer-commands",
+          "description": "Die VOLLSTAENDIGE Erlaubnisliste der Kommandos dieses Pakets. Sie wirkt, weil build.rs ein App-ACL-Manifest erklaert: dann verlangt tauri fuer JEDES Kommando eine aufgeloeste Erlaubnis, und eine Erlaubnis ohne Kommando laesst generate_context! mit UnknownPermission abbrechen. Kein Name hier bedient das Entschluesseln, den Verlauf oder den Inhalt eines abgeschlossenen Eintrags.",
+          "local": true,
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "allow-verified-session",
+            "allow-invalidate-session-on-lock",
+            "allow-startup-recovery",
+            "allow-master-data-counts",
+            "allow-session-reauthenticate",
+            "allow-master-data-search",
+            "allow-draft-load-active",
+            "allow-draft-save",
+            "allow-draft-discard-begin",
+            "allow-draft-discard-resume",
+            "allow-writer-recover-pending",
+            "allow-writer-preview",
+            "allow-writer-acknowledge-stale-registry",
+            "allow-writer-finalize",
+            "allow-archive-health-report",
+            "allow-device-posture-report",
+            "allow-archive-export-bundle-file"
+          ]
+        }
+      ]
     }
   },
   "bundle": {

@@ -48,7 +48,10 @@ pub use ea_writer::{FinalizationPhase, StaleDecision};
 
 use ea_archive::QuarantinedObject;
 use ea_archive_fs::ArchiveHealthReport;
-use ea_schema::IncidentUniquenessKey;
+use ea_schema::{
+    CoordinatesV1, ExternalOrganizationV1, IncidentUniquenessKey, KeywordV1, LocationV1,
+    OccurredAtV1, PatientCount, SchemaError, StructuredAddressV1,
+};
 use ea_types::{ChainSequence, UnixMillis};
 use ea_writer::{FinalizationPreview, FinalizeOutcome, RecoveryOutcome};
 
@@ -76,6 +79,7 @@ pub const WRITER_ENUMS_V1: &[(&str, &[&str])] = &[
     ("FinalizationPhase", FINALIZATION_PHASE_LITERALS),
     ("StaleDecision", STALE_DECISION_LITERALS),
     ("HealthFinding", HEALTH_FINDING_LITERALS),
+    ("PatientCountStatus", PATIENT_COUNT_STATUS_LITERALS),
 ];
 
 /// Die woertliche Oberflaechenkopie der vier Sync-Zustaende.
@@ -273,6 +277,28 @@ const fn health_finding_literal(value: HealthFinding) -> &'static str {
     }
 }
 
+/// Der Zustand der Patientenzahl — `unknown` und `known`, in WIRE-Reihenfolge.
+///
+/// `payload-wire-addendum.md`:120 setzt `patientCountStatus = 0` fuer `unknown`
+/// und `= 1` fuer `known`. Die Reihenfolge hier ist deshalb die des Drahts und
+/// nicht die der Rustdeklaration; das Literal IST der Variantenname, weil
+/// `ea-schema` fuer diese Aufzaehlung keinen Zeichenkettenzugriff fuehrt.
+const fn patient_count_status_literal(value: &PatientCount) -> &'static str {
+    match value {
+        PatientCount::Unknown => "Unknown",
+        PatientCount::Known(_) => "Known",
+    }
+}
+
+/// Die zwei Literale des Patientenzahlzustands, in WIRE-Reihenfolge.
+///
+/// Oeffentlich, damit ein Verbraucher — die Kommandogrenze etwa — den leeren
+/// Rumpf nicht mit einem eigenen Literal fuellt.
+pub const PATIENT_COUNT_STATUS_LITERALS: &[&str] = &[
+    patient_count_status_literal(&PatientCount::Unknown),
+    patient_count_status_literal(&PatientCount::Known(0)),
+];
+
 const HEALTH_FINDING_LITERALS: &[&str] = &[
     health_finding_literal(HealthFinding::MissingFile),
     health_finding_literal(HealthFinding::ModifiedFile),
@@ -285,6 +311,20 @@ const HEALTH_FINDING_LITERALS: &[&str] = &[
     health_finding_literal(HealthFinding::InsufficientFreeSpace),
     health_finding_literal(HealthFinding::UnsuitableFilesystemSemantics),
 ];
+
+/// Das Literal des Patientenzahlzustands aus seiner DRAHTFORM — fail-closed.
+///
+/// `None` fuer jede Zeichenkette, die nicht in der emittierten Vereinigung
+/// steht. Ohne diese Pruefung waere der Zustand ein ungeprueftes Wort aus einer
+/// Antwort, und die Unterscheidung „bekannte Null gegen unbekannt" haette an der
+/// Grenze keinen Waechter.
+#[must_use]
+pub fn patient_count_status_from_wire(wire: &str) -> Option<&'static str> {
+    PATIENT_COUNT_STATUS_LITERALS
+        .iter()
+        .copied()
+        .find(|literal| *literal == wire)
+}
 
 /// Der Sync-Zustand mit seiner Detailursache DANEBEN.
 ///
@@ -491,9 +531,381 @@ impl From<&IncidentUniquenessKey> for IncidentIdentityView {
     }
 }
 
+/// Ein Koordinatenpaar als GANZZAHLIGES E7-Paar.
+///
+/// Kein Gleitkommawert an der Grenze: `payload-wire-addendum.md`:108 fixiert
+/// `int`, und eine Oberflaeche, die daraus eine Fliesskommazahl macht, gibt
+/// einen anderen Wert zurueck, als sie bekam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoordinatesView {
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+}
+
+/// Der Zeitraum eines Einsatzes: Beginn und OPTIONALES Ende.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OccurredAtView {
+    pub start: UnixMillis,
+    pub end: Option<UnixMillis>,
+}
+
+/// Das Einsatzstichwort — Freitext ODER Verweis samt Anzeigetext.
+///
+/// EIN Typ mit optionaler Kennung und nicht zwei: der Draht traegt beide Formen
+/// unter derselben Position, und die Unterscheidung ist genau die Anwesenheit
+/// der Kennung.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeywordView {
+    pub reference_id: Option<String>,
+    pub display_text: String,
+}
+
+/// Die strukturierte Adresse, Position fuer Position wie
+/// [`StructuredAddressV1`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StructuredAddressView {
+    pub street: Option<String>,
+    pub house_number: Option<String>,
+    pub postal_code: Option<String>,
+    pub locality: Option<String>,
+    pub admin_area: Option<String>,
+    pub country_code: Option<String>,
+}
+
+/// Der Einsatzort — Freitext ODER strukturierte Adresse, je mit optionalen
+/// Koordinaten.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocationView {
+    pub free_text: Option<String>,
+    pub address: Option<StructuredAddressView>,
+    pub coordinates: Option<CoordinatesView>,
+}
+
+/// EINE Personalauswahl der Oberflaeche.
+///
+/// Sie ist ausdruecklich KEINE Momentaufnahme: eine
+/// [`ea_schema::PersonnelSnapshotV1`] mit Stammdatenbezug verlangt Revision und
+/// Provenienz, und beide kommen aus der Stammdatenablage und niemals aus einer
+/// Eingabe. Traegt die Auswahl eine Stammdatenkennung, LOEST der Wirt sie auf;
+/// traegt sie keine, ist sie ein Ad-hoc-Eintrag. Der Anzeigename ist in beiden
+/// Faellen nur Anzeige.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersonnelSelectionView {
+    pub master_personnel_id: Option<String>,
+    pub display_name: String,
+    pub role_label: Option<String>,
+}
+
+/// EINE Fahrzeugauswahl der Oberflaeche, mit derselben Zusage wie
+/// [`PersonnelSelectionView`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VehicleSelectionView {
+    pub master_vehicle_id: Option<String>,
+    pub display_name: String,
+    pub radio_call_name: Option<String>,
+    pub license_plate: Option<String>,
+}
+
+/// Eine beteiligte externe Organisation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalOrganizationView {
+    pub id: Option<String>,
+    pub display_name: String,
+}
+
+/// Der VOLLSTAENDIGE Eingabevertrag des Einsatzrumpfes.
+///
+/// Zwoelf Positionen in der Reihenfolge von `payload-wire-addendum.md`:102-118.
+/// Was hier NICHT steht, ist der Kopf: `recordId`, `finalizedAtDevice`, der
+/// `operator`-Snapshot, die `registryVersion`, die Zeitzone und die
+/// Quellkennung entstehen im Wirt aus der geprueften Sitzung, der nur lesend
+/// geoeffneten Profilzeile und dem gebundenen Head
+/// (`ea_writer::FinalizationInputV1`). Stuenden sie hier, koennte eine
+/// Oberflaeche einen fremden Bediener in den signierten Kopf schreiben.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncidentInputView {
+    pub human_incident_number: String,
+    pub occurred_at: OccurredAtView,
+    pub keyword: KeywordView,
+    pub location: LocationView,
+    pub personnel: Vec<PersonnelSelectionView>,
+    pub personnel_empty_reason: Option<String>,
+    pub vehicles: Vec<VehicleSelectionView>,
+    pub vehicles_empty_reason: Option<String>,
+    pub patient_count_status: &'static str,
+    pub patient_count: Option<u32>,
+    pub notes: Option<String>,
+    pub external_organizations: Vec<ExternalOrganizationView>,
+}
+
+/// Die skalaren Positionen des Einsatzrumpfes als VALIDIERTE Stufe-1-Werte.
+///
+/// Die zwei Momentaufnahmelisten stehen nicht darin: sie verlangen die
+/// Stammdatenablage. Alles andere prueft `ea-schema` hier — Zeichenlaengen,
+/// Zeitintervall, Koordinatenbereich, NFC-Form —, und zwar mit denselben
+/// Konstruktoren, die die eingefrorenen Bytes bauen. Ein zweiter Pruefpfad
+/// entsteht nicht.
+pub struct IncidentScalarsV1 {
+    pub occurred_at: OccurredAtV1,
+    pub keyword: KeywordV1,
+    pub location: LocationV1,
+    pub patient_count: PatientCount,
+    pub external_organizations: Vec<ExternalOrganizationV1>,
+}
+
+impl IncidentInputView {
+    /// Wandelt die skalaren Positionen in ihre Stufe-1-Werte.
+    ///
+    /// # Errors
+    ///
+    /// Der [`SchemaError`] der Stufe 1, unveraendert — samt seinem stabilen
+    /// Code und dem Feldnamen.
+    pub fn try_into_scalars(&self) -> Result<IncidentScalarsV1, SchemaError> {
+        let occurred_at = OccurredAtV1::new(self.occurred_at.start, self.occurred_at.end)?;
+        let keyword = match self.keyword.reference_id.as_deref() {
+            None => KeywordV1::free_text(self.keyword.display_text.clone()),
+            Some(reference) => KeywordV1::reference(reference, self.keyword.display_text.clone()),
+        }?;
+        let coordinates = match self.location.coordinates {
+            None => None,
+            Some(pair) => Some(CoordinatesV1::new(pair.lat_e7, pair.lon_e7)?),
+        };
+        let location = match (&self.location.address, &self.location.free_text) {
+            (Some(address), _) => LocationV1::structured(
+                StructuredAddressV1::new(
+                    address.street.clone(),
+                    address.house_number.clone(),
+                    address.postal_code.clone(),
+                    address.locality.clone(),
+                    address.admin_area.clone(),
+                    address.country_code.clone(),
+                )?,
+                coordinates,
+            )?,
+            (None, Some(free_text)) => LocationV1::free_text(free_text.clone(), coordinates)?,
+            // Fail-closed: ohne Ort gibt es keinen Ort, und ein leerer Freitext
+            // ist keiner. `LocationV1::free_text` traegt die Laengenpruefung.
+            (None, None) => LocationV1::free_text(String::new(), coordinates)?,
+        };
+        // Die Polaritaet des Drahts, und sie steht genau hier EINMAL:
+        // `patientCountStatus = 0` heisst `unknown` und verlangt
+        // `patientCount = null`.
+        let patient_count =
+            if self.patient_count_status == patient_count_status_literal(&PatientCount::Known(0)) {
+                PatientCount::Known(self.patient_count.unwrap_or_default())
+            } else {
+                PatientCount::Unknown
+            };
+        let mut external_organizations = Vec::with_capacity(self.external_organizations.len());
+        for organization in &self.external_organizations {
+            external_organizations.push(ExternalOrganizationV1::new(
+                organization.id.as_deref(),
+                organization.display_name.clone(),
+            )?);
+        }
+        Ok(IncidentScalarsV1 {
+            occurred_at,
+            keyword,
+            location,
+            patient_count,
+            external_organizations,
+        })
+    }
+}
+
+/// Der aktive Entwurf samt seinem Speicherzustand.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DraftStateView {
+    pub incident: IncidentInputView,
+    pub sync: SyncStateView,
+}
+
+/// Das Ergebnis einer Stammdatensuche samt den GESAMTZAHLEN der Ablage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MasterDataResultView {
+    pub personnel: Vec<PersonnelSelectionView>,
+    pub vehicles: Vec<VehicleSelectionView>,
+    pub personnel_total: u64,
+    pub vehicle_total: u64,
+}
+
+/// Die Bestaetigung eines veralteten Registry-Head.
+///
+/// `captured` ist die AUSSAGE DES WIRTS und nicht die eines Klicks. Ohne diese
+/// Trennung zeigte die Oberflaeche eine erfasste Bestaetigung, sobald jemand
+/// den Knopf drueckt — und der Kern kann sie heute gar nicht ausstellen
+/// (`ea-writer`: der Bestaetigungspfad ist eine benannte Auslassung).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaleAcknowledgementView {
+    pub captured: bool,
+    pub proof_code: String,
+}
+
+/// Das Ergebnis einer nativen erneuten Authentisierung.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReauthResultView {
+    pub fresh: bool,
+    pub purpose_code: String,
+}
+
+/// Der Stand eines Verwerfens — dauerhaft gebucht und fortsetzbar.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscardStateView {
+    pub phase_code: String,
+    pub complete: bool,
+}
+
+/// Das Ergebnis des Ein-Datei-Buendelexports.
+///
+/// Kein Inhalt, kein Eintrag, keine Entschluesselung: der Export kopiert
+/// versiegelte Bytes, und die Oberflaeche erfaehrt Pfad, Objektzahl und
+/// Byteumfang.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundleExportView {
+    pub path: String,
+    pub object_count: u64,
+    pub byte_count: u64,
+}
+
+/// Die angetroffene Finalisierung: die Fortsetzung ODER die Blockade.
+///
+/// `blocked_code` traegt den Code des Wirts, der die Fortsetzung verweigert —
+/// `EA-WRITER-HEAD-RECONCILIATION-REQUIRED` nach dem Zurueckspielen eines
+/// Backups. Genau zwei sichtbare Ausgaenge folgen daraus, und der zweite
+/// traegt KEINE Abschlusshandhabe.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingResumeOutcomeView {
+    pub resume: PendingFinalizationResumeView,
+    pub blocked_code: Option<String>,
+    pub sync: Option<SyncStateView>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ChainSequence, FinalizationPhase, PendingFinalizationResumeView, RecoveryOutcome};
+    use super::{
+        ChainSequence, FinalizationPhase, IncidentInputView, KeywordView, LocationView,
+        OccurredAtView, PATIENT_COUNT_STATUS_LITERALS, PendingFinalizationResumeView,
+        RecoveryOutcome, UnixMillis, patient_count_status_from_wire,
+    };
+
+    fn scalar_input(status: &'static str, count: Option<u32>) -> IncidentInputView {
+        IncidentInputView {
+            human_incident_number: "2026-0001".to_owned(),
+            occurred_at: OccurredAtView {
+                start: UnixMillis::new(1_771_000_000_000),
+                end: None,
+            },
+            keyword: KeywordView {
+                reference_id: None,
+                display_text: "Verkehrsunfall".to_owned(),
+            },
+            location: LocationView {
+                free_text: Some("Bahnhofstrasse 1".to_owned()),
+                address: None,
+                coordinates: None,
+            },
+            personnel: Vec::new(),
+            personnel_empty_reason: None,
+            vehicles: Vec::new(),
+            vehicles_empty_reason: None,
+            patient_count_status: status,
+            patient_count: count,
+            notes: None,
+            external_organizations: Vec::new(),
+        }
+    }
+
+    /// Die bekannte NULL und der unbekannte Stand sind zwei verschiedene Werte.
+    ///
+    /// Der Fehlerfall, den diese Zusicherung faengt: eine Wandlung, die aus
+    /// `patientCount = 0` ein `Unknown` macht (oder umgekehrt aus `Unknown` die
+    /// Null). Beides ist am Draht eine andere Aussage — `patientCountStatus = 1`
+    /// verlangt einen `uint`, `= 0` verlangt `null` —, und ein Einsatzbericht,
+    /// der „keine Patienten" mit „Zahl unbekannt" verwechselt, ist falsch.
+    #[test]
+    fn a_known_zero_is_not_an_unknown_patient_count() {
+        let known = scalar_input(PATIENT_COUNT_STATUS_LITERALS[1], Some(0));
+        let Ok(scalars) = known.try_into_scalars() else {
+            panic!("bekannte Null ist gueltig")
+        };
+        assert_eq!(scalars.patient_count.known(), Some(0));
+        assert!(!scalars.patient_count.is_unknown());
+
+        // Und `unknown` traegt KEINE Zahl, auch wenn eine mitgeschickt wird.
+        let unknown = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], Some(7));
+        let Ok(scalars) = unknown.try_into_scalars() else {
+            panic!("unbekannt ist gueltig")
+        };
+        assert!(scalars.patient_count.is_unknown());
+        assert_eq!(scalars.patient_count.known(), None);
+    }
+
+    /// Die Drahtform des Zustands ist GESCHLOSSEN.
+    #[test]
+    fn only_the_emitted_status_literals_come_back_from_the_wire() {
+        for literal in PATIENT_COUNT_STATUS_LITERALS {
+            assert_eq!(patient_count_status_from_wire(literal), Some(*literal));
+        }
+        for foreign in ["known", "0", "1", "Vielleicht", ""] {
+            assert_eq!(patient_count_status_from_wire(foreign), None);
+        }
+    }
+
+    /// Die skalaren Positionen werden von der STUFE 1 geprueft und nicht hier.
+    ///
+    /// Drei Ablehnungen mit drei verschiedenen Codes, alle aus `ea-schema`: ein
+    /// Ende vor dem Beginn, eine Koordinate jenseits des eingefrorenen Bereichs
+    /// und ein leeres Stichwort. Ohne diesen Zeugen koennte die Wandlung jede
+    /// Eingabe durchlassen und der Fehler erst tief im Schreibdienst auffallen.
+    #[test]
+    fn the_scalar_positions_carry_the_stage_one_rejections() {
+        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        input.occurred_at.end = Some(UnixMillis::new(1_770_999_999_999));
+        let Err(error) = input.try_into_scalars() else {
+            panic!("ein Ende vor dem Beginn ist kein Zeitraum")
+        };
+        assert_eq!(error.code(), "EA-SCHEMA-INTERVAL");
+
+        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        input.location.coordinates = Some(super::CoordinatesView {
+            lat_e7: 900_000_001,
+            lon_e7: 0,
+        });
+        let Err(error) = input.try_into_scalars() else {
+            panic!("eine Breite jenseits des Bereichs ist keine Koordinate")
+        };
+        assert_eq!(error.code(), "EA-SCHEMA-COORDINATES");
+
+        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        input.keyword.display_text = String::new();
+        assert!(
+            input.try_into_scalars().is_err(),
+            "ein leeres Stichwort ist keins"
+        );
+    }
+
+    /// Der Verweis gewinnt gegen den Freitext, und die Adresse gegen den
+    /// Freitext — genau die zwei Alternativen des Drahts.
+    #[test]
+    fn the_two_alternatives_of_keyword_and_location_are_kept_apart() {
+        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        input.keyword.reference_id = Some("STW-042".to_owned());
+        input.location.address = Some(super::StructuredAddressView {
+            locality: Some("Koeln".to_owned()),
+            ..super::StructuredAddressView::default()
+        });
+        let Ok(scalars) = input.try_into_scalars() else {
+            panic!("beide Alternativen sind gueltig")
+        };
+        assert!(matches!(
+            scalars.keyword,
+            ea_schema::KeywordV1::Reference { .. }
+        ));
+        assert!(matches!(
+            scalars.location,
+            ea_schema::LocationV1::Structured { .. }
+        ));
+    }
 
     /// Sequenz 0 ist der GENESIS-Eintrag und kein Sentinel.
     ///

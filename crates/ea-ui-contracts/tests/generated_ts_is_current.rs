@@ -132,6 +132,11 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
         // mittleren Arms zu einer sichtbaren Aenderung.
         ("StaleDecision", 3),
         ("HealthFinding", ea_ui_contracts::HealthFinding::ALL.len()),
+        // `ea-schema` fuehrt fuer `PatientCount` kein `ALL`; die Zwei steht
+        // deshalb hier und macht das Entfernen eines der zwei Arme zu einer
+        // sichtbaren Aenderung. Der Unterschied zwischen bekannter Null und
+        // unbekannt haengt an genau diesen zwei Armen.
+        ("PatientCountStatus", 2),
     ] {
         assert_eq!(
             union_members(&named_union_block(&emitted, name)).len(),

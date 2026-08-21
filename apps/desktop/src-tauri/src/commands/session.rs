@@ -58,7 +58,7 @@ pub(crate) const fn capabilities_of(role: OperatorRoleV1) -> &'static [&'static 
 /// dieser Schritt setzt [`FinalizationPhase::Reconciled`]
 /// (`ea-writer/src/finalize.rs`) — ein Erfolg kann also keine andere Phase
 /// erreicht haben.
-const fn phase_of(outcome: &RecoveryOutcome) -> FinalizationPhase {
+pub(crate) const fn phase_of(outcome: &RecoveryOutcome) -> FinalizationPhase {
     match outcome {
         RecoveryOutcome::NothingPending | RecoveryOutcome::DraftRestored { .. } => {
             FinalizationPhase::ReversibleDraft
@@ -288,7 +288,7 @@ mod tests {
         role: Option<OperatorRoleV1>,
         startup: Option<std::sync::Arc<dyn StartupRecoveryPort + Send + Sync>>,
     ) -> DesktopState {
-        DesktopState::new(SessionState::new(role, None), startup, None)
+        DesktopState::new(SessionState::new(role, None), startup, None, None, None)
     }
 
     #[test]

@@ -79,12 +79,27 @@ pub fn run() {
             state::SessionState::new(None, None),
             None,
             None,
+            None,
+            None,
         ))
         .invoke_handler(tauri::generate_handler![
             commands::session::verified_session,
             commands::session::invalidate_session_on_lock,
             commands::session::startup_recovery,
-            commands::master_data::master_data_counts
+            commands::master_data::master_data_counts,
+            commands::writer::session_reauthenticate,
+            commands::writer::master_data_search,
+            commands::writer::draft_load_active,
+            commands::writer::draft_save,
+            commands::writer::draft_discard_begin,
+            commands::writer::draft_discard_resume,
+            commands::writer::writer_recover_pending,
+            commands::writer::writer_preview,
+            commands::writer::writer_acknowledge_stale_registry,
+            commands::writer::writer_finalize,
+            commands::writer::archive_health_report,
+            commands::writer::device_posture_report,
+            commands::writer::archive_export_bundle_file
         ])
         .run(tauri::generate_context!())
         .expect("der Wirt der Writer-Oberflaeche liess sich nicht starten");
@@ -95,12 +110,13 @@ mod tests {
     use super::{COMMAND_NAMES, registered_command_names};
 
     /// Die Quellen der Kommandomodule, wie sie uebersetzt wurden.
-    const COMMAND_SOURCES: [(&str, &str); 2] = [
+    const COMMAND_SOURCES: [(&str, &str); 3] = [
         ("commands/session.rs", include_str!("commands/session.rs")),
         (
             "commands/master_data.rs",
             include_str!("commands/master_data.rs"),
         ),
+        ("commands/writer.rs", include_str!("commands/writer.rs")),
     ];
 
     /// Diese Datei selbst — die Quelle der Registrierung.

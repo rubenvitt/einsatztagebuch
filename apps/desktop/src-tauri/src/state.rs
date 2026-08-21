@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use ea_draft::MasterDataRepository;
+use ea_archive::ArchiveBackendError;
+use ea_archive_fs::{ArchiveHealthCheckV1, ArchiveHealthReport};
+use ea_draft::{DraftRepository, MasterDataRepository};
 use ea_format::OperatorRoleV1;
 use ea_operator::OperatorSessionProof;
 use ea_writer::{RecoveryOutcome, WriterError, WriterService};
@@ -30,6 +32,29 @@ pub trait StartupRecoveryPort {
 impl StartupRecoveryPort for WriterService<'_> {
     fn resolve_pending_finalization(&self) -> Result<RecoveryOutcome, WriterError> {
         self.recover_pending()
+    }
+}
+
+/// Der synchrone Port des Archivgesundheitschecks.
+///
+/// Derselbe Grund wie bei [`StartupRecoveryPort`]: [`ArchiveHealthCheckV1`]
+/// traegt fuenf Referenzen und damit eine Lebensdauer, passt also nicht in den
+/// `'static`-Zustand einer Tauri-Anwendung. Die Implementierung darunter ist die
+/// Naht — der Aufruf von [`ArchiveHealthCheckV1::run`] steht damit KOMPILIERT im
+/// Code, und ein Implementierer, der Bestand, Inventar, Faehigkeitsbericht und
+/// Verifikationsbericht besitzt, baut den Check je Aufruf.
+pub trait ArchiveHealthPort {
+    /// Fuehrt alle zehn Erkenner aus.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Bestands, unveraendert.
+    fn health(&self) -> Result<ArchiveHealthReport, ArchiveBackendError>;
+}
+
+impl ArchiveHealthPort for ArchiveHealthCheckV1<'_> {
+    fn health(&self) -> Result<ArchiveHealthReport, ArchiveBackendError> {
+        self.run()
     }
 }
 
@@ -103,6 +128,8 @@ pub struct DesktopState {
     session: Arc<Mutex<SessionState>>,
     startup: Option<Arc<dyn StartupRecoveryPort + Send + Sync>>,
     master_data: Option<Arc<MasterDataRepository>>,
+    drafts: Option<Arc<dyn DraftRepository>>,
+    health: Option<Arc<dyn ArchiveHealthPort + Send + Sync>>,
 }
 
 impl DesktopState {
@@ -111,11 +138,15 @@ impl DesktopState {
         session: SessionState,
         startup: Option<Arc<dyn StartupRecoveryPort + Send + Sync>>,
         master_data: Option<Arc<MasterDataRepository>>,
+        drafts: Option<Arc<dyn DraftRepository>>,
+        health: Option<Arc<dyn ArchiveHealthPort + Send + Sync>>,
     ) -> Self {
         Self {
             session: Arc::new(Mutex::new(session)),
             startup,
             master_data,
+            drafts,
+            health,
         }
     }
 
@@ -149,6 +180,18 @@ impl DesktopState {
     #[must_use]
     pub fn master_data(&self) -> Option<&MasterDataRepository> {
         self.master_data.as_deref()
+    }
+
+    /// Die Entwurfsablage, wenn eine geoeffnete Datenbank vorliegt.
+    #[must_use]
+    pub fn drafts(&self) -> Option<&dyn DraftRepository> {
+        self.drafts.as_deref()
+    }
+
+    /// Der Gesundheitscheck, wenn ein Bestand geoeffnet ist.
+    #[must_use]
+    pub fn health(&self) -> Option<&(dyn ArchiveHealthPort + Send + Sync)> {
+        self.health.as_deref()
     }
 }
 
@@ -192,6 +235,8 @@ mod tests {
     fn the_lock_is_honored_before_the_shell_is_told() {
         let state = DesktopState::new(
             SessionState::new(Some(OperatorRoleV1::Writer), None),
+            None,
+            None,
             None,
             None,
         );

@@ -76,6 +76,10 @@ export type HealthFinding =
   | 'EA-ARCHIVE-HEALTH-FREE-SPACE'
   | 'EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS'
 
+export type PatientCountStatus =
+  | 'Unknown'
+  | 'Known'
+
 // The Writer view models.
 
 export type SyncStateView = {
@@ -125,6 +129,108 @@ export type PendingFinalizationResumeView = {
 export type IncidentIdentityView = {
   readonly localCivilYear: number
   readonly incidentNumber: string
+}
+
+export type CoordinatesView = {
+  readonly latE7: number
+  readonly lonE7: number
+}
+
+export type OccurredAtView = {
+  readonly start: number
+  readonly end: number | null
+}
+
+export type KeywordView = {
+  readonly referenceId: string | null
+  readonly displayText: string
+}
+
+export type StructuredAddressView = {
+  readonly street: string | null
+  readonly houseNumber: string | null
+  readonly postalCode: string | null
+  readonly locality: string | null
+  readonly adminArea: string | null
+  readonly countryCode: string | null
+}
+
+export type LocationView = {
+  readonly freeText: string | null
+  readonly address: StructuredAddressView | null
+  readonly coordinates: CoordinatesView | null
+}
+
+export type PersonnelSelectionView = {
+  readonly masterPersonnelId: string | null
+  readonly displayName: string
+  readonly roleLabel: string | null
+}
+
+export type VehicleSelectionView = {
+  readonly masterVehicleId: string | null
+  readonly displayName: string
+  readonly radioCallName: string | null
+  readonly licensePlate: string | null
+}
+
+export type ExternalOrganizationView = {
+  readonly id: string | null
+  readonly displayName: string
+}
+
+export type IncidentInputView = {
+  readonly humanIncidentNumber: string
+  readonly occurredAt: OccurredAtView
+  readonly keyword: KeywordView
+  readonly location: LocationView
+  readonly personnel: readonly PersonnelSelectionView[]
+  readonly personnelEmptyReason: string | null
+  readonly vehicles: readonly VehicleSelectionView[]
+  readonly vehiclesEmptyReason: string | null
+  readonly patientCountStatus: PatientCountStatus
+  readonly patientCount: number | null
+  readonly notes: string | null
+  readonly externalOrganizations: readonly ExternalOrganizationView[]
+}
+
+export type DraftStateView = {
+  readonly incident: IncidentInputView
+  readonly sync: SyncStateView
+}
+
+export type MasterDataResultView = {
+  readonly personnel: readonly PersonnelSelectionView[]
+  readonly vehicles: readonly VehicleSelectionView[]
+  readonly personnelTotal: number
+  readonly vehicleTotal: number
+}
+
+export type StaleAcknowledgementView = {
+  readonly captured: boolean
+  readonly proofCode: string
+}
+
+export type ReauthResultView = {
+  readonly fresh: boolean
+  readonly purposeCode: string
+}
+
+export type DiscardStateView = {
+  readonly phaseCode: string
+  readonly complete: boolean
+}
+
+export type BundleExportView = {
+  readonly path: string
+  readonly objectCount: number
+  readonly byteCount: number
+}
+
+export type PendingResumeOutcomeView = {
+  readonly resume: PendingFinalizationResumeView
+  readonly blockedCode: string | null
+  readonly sync: SyncStateView | null
 }
 
 // The value arrays, so that no consumer repeats a literal.
@@ -209,4 +315,9 @@ export const HEALTH_FINDING_VALUES = [
   'EA-ARCHIVE-HEALTH-SEQUENCE-FORK-ROLLBACK',
   'EA-ARCHIVE-HEALTH-FREE-SPACE',
   'EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS',
+] as const
+
+export const PATIENT_COUNT_STATUS_VALUES = [
+  'Unknown',
+  'Known',
 ] as const
