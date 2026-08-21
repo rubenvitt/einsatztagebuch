@@ -12,6 +12,16 @@ import type { FinalizationPreviewView, StaleAcknowledgementView } from '../../br
  * EINZIGE Weg an ihr vorbei ist die Bestaetigung — nach einer erneuten nativen
  * Authentisierung und mit dem Nachweis, den der Wirt ausstellt.
  *
+ * Was diese Warnung NICHT tut: eine fehlende Angabe durch eine andere Zahl
+ * ersetzen. Die Vorschau (`FinalizationPreviewView`) fuehrt die
+ * Registry-Version, den Head-Hash und den Ablaufzeitpunkt nicht — sie liegen in
+ * `FinalizationPreview` hinter privaten Feldern, und `ea-writer` gehoert nicht
+ * zum Umfang dieses Tasks. Die drei stehen deshalb als „nicht gemeldet" da.
+ * Genannt wird, was die Vorschau WIRKLICH traegt: die vorgeschlagene
+ * Kettensequenz und die beobachtete Zeit — unter ihren eigenen Namen. Eine
+ * falsch benannte Zahl in einer sicherheitsrelevanten Warnung ist schlimmer als
+ * eine benannte Abwesenheit.
+ *
  * `captured` kommt AUS DER ANTWORT und nicht aus dem Klick. Der
  * Bestaetigungspfad ist im Kern eine benannte Auslassung
  * (`ea-writer/src/lib.rs`: `acknowledge_stale_registry` ist nicht gebaut, der
@@ -40,8 +50,10 @@ export function StaleRegistryWarning({
         closable={false}
         message="Der gebundene Registry-Head ist abgelaufen"
         description={
-          `Gebundene Registry-Version: ${String(preview.proposedSequence)} in Folge; ` +
+          `Vorgeschlagene Sequenz: ${String(preview.proposedSequence)}; ` +
           `beobachtete Zeit: ${String(preview.effectiveNow)}. ` +
+          'Registry-Version: nicht gemeldet. Registry-Head: nicht gemeldet. ' +
+          'Ablauf des Head: nicht gemeldet. ' +
           'Die Gültigkeit des gebundenen Vertrauensbestands ist überschritten. ' +
           'Ein Abschluss ohne ausdrückliche Bestätigung wird vom Kern abgelehnt, und ' +
           'ohne Netz kann dieses Gerät keinen frischen Head auswählen — die Bestätigung ' +

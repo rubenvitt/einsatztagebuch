@@ -243,7 +243,7 @@ const FINALIZATION_PHASE_LITERALS: &[&str] = &[
 ///
 /// `ea-writer` fuehrt fuer diese Aufzaehlung keinen Zeichenkettenzugriff, also
 /// IST der Variantenname das Literal.
-const fn stale_decision_literal(value: StaleDecision) -> &'static str {
+pub const fn stale_decision_literal(value: StaleDecision) -> &'static str {
     match value {
         StaleDecision::Fresh => "Fresh",
         StaleDecision::StaleAcknowledgeable => "StaleAcknowledgeable",
@@ -256,6 +256,24 @@ const STALE_DECISION_LITERALS: &[&str] = &[
     stale_decision_literal(StaleDecision::StaleAcknowledgeable),
     stale_decision_literal(StaleDecision::HardBlock),
 ];
+
+/// Der Zeitstatus des gebundenen Head aus seiner DRAHTFORM — fail-closed.
+///
+/// `None` fuer jedes Wort, das nicht in der emittierten Vereinigung steht.
+/// Diese Richtung gibt es, weil die BESTAETIGTE Vorschau ueber den Draht
+/// zurueckkommt: der mittlere Arm `StaleAcknowledgeable` verlangt eine
+/// ausdrueckliche Bestaetigung, und ein ungeprueftes Wort an dieser Stelle
+/// koennte ihn zu `Fresh` machen.
+#[must_use]
+pub fn stale_decision_from_wire(wire: &str) -> Option<StaleDecision> {
+    [
+        StaleDecision::Fresh,
+        StaleDecision::StaleAcknowledgeable,
+        StaleDecision::HardBlock,
+    ]
+    .into_iter()
+    .find(|decision| stale_decision_literal(*decision) == wire)
+}
 
 /// Der stabile Code EINES Gesundheitsbefundes.
 ///
@@ -326,6 +344,93 @@ pub fn patient_count_status_from_wire(wire: &str) -> Option<&'static str> {
         .find(|literal| *literal == wire)
 }
 
+/// Der Patientenzahlzustand SAMT seiner Zahl — EIN Wert.
+///
+/// Am Draht sind es ZWEI Positionen (`patientCountStatus` und `patientCount`,
+/// `payload-wire-addendum.md`:102-118), und genau daran koennen sie
+/// auseinanderlaufen: ein Zustand `known` neben einer fehlenden Zahl ist am
+/// Draht darstellbar, und wer ihn mit einem Vorgabewert auffuellt, schreibt
+/// „bekannt, null" unter eine Anzeige, die „unbekannt" sagt. Diese Aufzaehlung
+/// faltet die zwei Positionen an der Grenze zu einem Wert; danach kann sie
+/// nichts mehr trennen.
+///
+/// Sie steht HIER und nicht als Weitergabe von [`PatientCount`], weil jene
+/// Stufe-1-Aufzaehlung keine Ableitungen traegt (kein `Clone`, kein `Debug`,
+/// kein `Eq`) und die Stufe 1 geschlossen ist. Die zwei Arme sind dieselben,
+/// und [`Self::into_schema`] ist die einzige Uebersetzung.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PatientCountView {
+    /// Die Zahl ist unbekannt — und ausdruecklich nicht null.
+    Unknown,
+    /// Die Zahl ist bekannt; `0` ist ein gueltiger, bekannter Wert.
+    Known(u32),
+}
+
+impl PatientCountView {
+    /// Der Zustand aus seiner DRAHTFORM — fail-closed in BEIDE Richtungen.
+    ///
+    /// `None`, wenn das Wort nicht in der emittierten Vereinigung steht, wenn
+    /// `known` ohne Zahl kommt und wenn `unknown` mit einer Zahl kommt. Alle
+    /// drei sind an dieser Grenze eine Eingabe, die niemand ansehen kann, ohne
+    /// zu raten — und ein Vorgabewert waere hier die Zahl selbst.
+    #[must_use]
+    pub fn from_wire(status: &str, count: Option<u32>) -> Option<Self> {
+        match (patient_count_status_from_wire(status)?, count) {
+            (literal, Some(count))
+                if literal == patient_count_status_literal(&PatientCount::Known(0)) =>
+            {
+                Some(Self::Known(count))
+            }
+            (literal, None) if literal == patient_count_status_literal(&PatientCount::Unknown) => {
+                Some(Self::Unknown)
+            }
+            _ => None,
+        }
+    }
+
+    /// Das Literal der Drahtform dieses Zustands.
+    #[must_use]
+    pub const fn literal(self) -> &'static str {
+        match self {
+            Self::Unknown => patient_count_status_literal(&PatientCount::Unknown),
+            Self::Known(_) => patient_count_status_literal(&PatientCount::Known(0)),
+        }
+    }
+
+    /// Die Zahl der Drahtform — `None` fuer `unknown`.
+    #[must_use]
+    pub const fn count(self) -> Option<u32> {
+        match self {
+            Self::Unknown => None,
+            Self::Known(count) => Some(count),
+        }
+    }
+
+    /// Derselbe Wert als Stufe-1-Aufzaehlung. KEIN Vorgabewert unterwegs.
+    #[must_use]
+    pub const fn into_schema(self) -> PatientCount {
+        match self {
+            Self::Unknown => PatientCount::Unknown,
+            Self::Known(count) => PatientCount::Known(count),
+        }
+    }
+}
+
+/// Zweiunddreissig Bytes als Kleinbuchstaben-Hex.
+///
+/// Sie steht hier, weil ein Hash in der Oberflaeche ein ANZEIGEWERT ist: die
+/// Byteform gehoert dem Archiv, und `ea-types` fuehrt bewusst keinen
+/// Zeichenkettenzugriff auf sie. Diese Funktion RECHNET nichts — sie
+/// formatiert, und die Oberflaeche formatiert deshalb nicht selbst.
+fn hex32(bytes: &[u8; 32]) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// Der Sync-Zustand mit seiner Detailursache DANEBEN.
 ///
 /// Nie ein fuenfter Zustand: verliert ein freigegebenes Netzbackend eine
@@ -380,9 +485,17 @@ impl From<&FinalizationPreview> for FinalizationPreviewView {
 ///
 /// Was die Oberflaeche hier nicht bekommt, ist die Zusage: nach der
 /// Finalisierung hat der Writer keinen Zugriff mehr auf den Inhalt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Was sie bekommt, sind die zwei HASHES und die Sequenz. Sie stehen als
+/// Kleinbuchstaben-Hex darin, weil sie nach dem Commit alles sind, was ueber
+/// den Eintrag noch gesagt werden darf: `entryHash` bindet ihn in die Kette,
+/// `objectHash` benennt das Archivobjekt, und keiner von beiden gibt einen
+/// Inhalt heraus.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FinalizeOutcomeView {
     pub sequence: ChainSequence,
+    pub entry_hash: String,
+    pub object_hash: String,
     pub sync: SyncStateView,
 }
 
@@ -390,9 +503,11 @@ impl FinalizeOutcomeView {
     /// Die Ursache kommt als eigener Parameter und nicht aus dem Ergebnis: sie
     /// ist eine Aussage der Publikationsschlange und nicht der Finalisierung.
     #[must_use]
-    pub const fn new(outcome: &FinalizeOutcome, detail_cause: Option<DetailCause>) -> Self {
+    pub fn new(outcome: &FinalizeOutcome, detail_cause: Option<DetailCause>) -> Self {
         Self {
             sequence: outcome.sequence,
+            entry_hash: hex32(outcome.entry_hash.as_bytes()),
+            object_hash: hex32(outcome.object_hash.as_bytes()),
             sync: SyncStateView {
                 status: outcome.sync_status,
                 detail_cause,
@@ -632,8 +747,14 @@ pub struct IncidentInputView {
     pub personnel_empty_reason: Option<String>,
     pub vehicles: Vec<VehicleSelectionView>,
     pub vehicles_empty_reason: Option<String>,
-    pub patient_count_status: &'static str,
-    pub patient_count: Option<u32>,
+    /// Zustand UND Zahl als EIN Wert.
+    ///
+    /// Die Drahtform traegt weiterhin die zwei Positionen
+    /// `patientCountStatus` und `patientCount`; die Grenze faltet sie mit
+    /// [`PatientCountView::from_wire`] fail-closed zusammen. Ein Paar, das
+    /// nicht zusammenpasst, kommt deshalb nicht bis hierher — und ab hier kann
+    /// die Anzeige nicht mehr etwas anderes sagen als der Draht.
+    pub patient_count: PatientCountView,
     pub notes: Option<String>,
     pub external_organizations: Vec<ExternalOrganizationView>,
 }
@@ -687,15 +808,11 @@ impl IncidentInputView {
             // ist keiner. `LocationV1::free_text` traegt die Laengenpruefung.
             (None, None) => LocationV1::free_text(String::new(), coordinates)?,
         };
-        // Die Polaritaet des Drahts, und sie steht genau hier EINMAL:
-        // `patientCountStatus = 0` heisst `unknown` und verlangt
-        // `patientCount = null`.
-        let patient_count =
-            if self.patient_count_status == patient_count_status_literal(&PatientCount::Known(0)) {
-                PatientCount::Known(self.patient_count.unwrap_or_default())
-            } else {
-                PatientCount::Unknown
-            };
+        // KEIN Vorgabewert: der Zustand ist schon an der Grenze zu einem Wert
+        // gefaltet worden (`PatientCountView::from_wire`), und diese Wandlung
+        // traegt ihn nur weiter. Ein `unwrap_or_default` hier machte aus einer
+        // fehlenden Zahl die bekannte Null.
+        let patient_count = self.patient_count.into_schema();
         let mut external_organizations = Vec::with_capacity(self.external_organizations.len());
         for organization in &self.external_organizations {
             external_organizations.push(ExternalOrganizationV1::new(
@@ -783,12 +900,13 @@ pub struct PendingResumeOutcomeView {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChainSequence, FinalizationPhase, IncidentInputView, KeywordView, LocationView,
-        OccurredAtView, PATIENT_COUNT_STATUS_LITERALS, PendingFinalizationResumeView,
-        RecoveryOutcome, UnixMillis, patient_count_status_from_wire,
+        ChainSequence, FinalizationPhase, FinalizeOutcome, FinalizeOutcomeView, IncidentInputView,
+        KeywordView, LocationView, OccurredAtView, PATIENT_COUNT_STATUS_LITERALS, PatientCountView,
+        PendingFinalizationResumeView, RecoveryOutcome, SyncStatus, UnixMillis, hex32,
+        patient_count_status_from_wire,
     };
 
-    fn scalar_input(status: &'static str, count: Option<u32>) -> IncidentInputView {
+    fn scalar_input(patient_count: PatientCountView) -> IncidentInputView {
         IncidentInputView {
             human_incident_number: "2026-0001".to_owned(),
             occurred_at: OccurredAtView {
@@ -808,8 +926,7 @@ mod tests {
             personnel_empty_reason: None,
             vehicles: Vec::new(),
             vehicles_empty_reason: None,
-            patient_count_status: status,
-            patient_count: count,
+            patient_count,
             notes: None,
             external_organizations: Vec::new(),
         }
@@ -824,15 +941,14 @@ mod tests {
     /// der „keine Patienten" mit „Zahl unbekannt" verwechselt, ist falsch.
     #[test]
     fn a_known_zero_is_not_an_unknown_patient_count() {
-        let known = scalar_input(PATIENT_COUNT_STATUS_LITERALS[1], Some(0));
+        let known = scalar_input(PatientCountView::Known(0));
         let Ok(scalars) = known.try_into_scalars() else {
             panic!("bekannte Null ist gueltig")
         };
         assert_eq!(scalars.patient_count.known(), Some(0));
         assert!(!scalars.patient_count.is_unknown());
 
-        // Und `unknown` traegt KEINE Zahl, auch wenn eine mitgeschickt wird.
-        let unknown = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], Some(7));
+        let unknown = scalar_input(PatientCountView::Unknown);
         let Ok(scalars) = unknown.try_into_scalars() else {
             panic!("unbekannt ist gueltig")
         };
@@ -851,6 +967,80 @@ mod tests {
         }
     }
 
+    /// Ein Zustand `known` OHNE Zahl ist keine Eingabe — und wird auch nicht zu
+    /// einer bekannten Null.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: die Faltung der zwei
+    /// Drahtpositionen fuellt die fehlende Zahl mit einem Vorgabewert auf. Dann
+    /// zeigte die Bestaetigungsansicht „Patientenzahl unbekannt", waehrend der
+    /// Draht `known, 0` truege — die Anzeige und der Eintrag sagten Verschiedenes
+    /// ueber dieselbe Zahl. Die zweite Haelfte ist ebenso notwendig: `unknown`
+    /// MIT Zahl ist am Draht verboten (`patientCountStatus = 0` verlangt
+    /// `null`), und ein stilles Wegwerfen der Zahl waere die andere Richtung
+    /// derselben Luege.
+    #[test]
+    fn a_divergent_status_and_count_pair_is_no_input_at_all() {
+        let [unknown, known] = [
+            PATIENT_COUNT_STATUS_LITERALS[0],
+            PATIENT_COUNT_STATUS_LITERALS[1],
+        ];
+        assert_eq!(
+            PatientCountView::from_wire(known, Some(0)),
+            Some(PatientCountView::Known(0))
+        );
+        assert_eq!(
+            PatientCountView::from_wire(unknown, None),
+            Some(PatientCountView::Unknown)
+        );
+        assert_eq!(PatientCountView::from_wire(known, None), None);
+        assert_eq!(PatientCountView::from_wire(unknown, Some(7)), None);
+        assert_eq!(PatientCountView::from_wire("Vielleicht", Some(1)), None);
+
+        // Und die Rueckrichtung traegt dieselben zwei Positionen.
+        assert_eq!(PatientCountView::Known(0).literal(), known);
+        assert_eq!(PatientCountView::Known(0).count(), Some(0));
+        assert_eq!(PatientCountView::Unknown.literal(), unknown);
+        assert_eq!(PatientCountView::Unknown.count(), None);
+    }
+
+    /// Nach dem Commit stehen HASHES und Sequenz da — und die Hashes kommen aus
+    /// den Bytes des Ergebnisses.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Ansicht, die die zwei
+    /// Hashes fallen laesst (dann zeigte der `FingerprintBlock` nur eine
+    /// Sequenz, und der Bediener haette nach dem unwiderruflichen Schritt
+    /// keinen Fingerabdruck) oder sie in einer anderen Schreibweise als
+    /// Kleinbuchstaben-Hex ausgibt.
+    #[test]
+    fn the_finalize_outcome_carries_both_hashes_as_lowercase_hex() {
+        let mut bytes = [0_u8; 32];
+        bytes[0] = 0x0a;
+        bytes[31] = 0xff;
+        assert_eq!(
+            hex32(&bytes),
+            "0a000000000000000000000000000000000000000000000000000000000000ff"
+        );
+        assert!(!hex32(&bytes).chars().any(char::is_uppercase));
+
+        // Und JEDES Feld traegt SEINEN Hash: zwei verschiedene Bytemuster, zwei
+        // verschiedene Zeichenketten, jede an ihrer Position. Eine Laengen- oder
+        // Ungleichheitspruefung allein liesse die zwei Felder vertauschen.
+        let outcome = FinalizeOutcome {
+            sequence: ChainSequence::new(7),
+            entry_hash: ea_types::EntryHash::try_from([0x11_u8; 32].as_slice())
+                .expect("zweiunddreissig Bytes"),
+            object_hash: ea_types::ObjectHash::try_from([0x22_u8; 32].as_slice())
+                .expect("zweiunddreissig Bytes"),
+            sync_status: SyncStatus::LocallySaved,
+        };
+        let view = FinalizeOutcomeView::new(&outcome, None);
+        assert_eq!(view.entry_hash, "11".repeat(32));
+        assert_eq!(view.object_hash, "22".repeat(32));
+        assert_eq!(view.sequence, ChainSequence::new(7));
+        assert_eq!(view.sync.status, SyncStatus::LocallySaved);
+        assert_eq!(view.sync.detail_cause, None);
+    }
+
     /// Die skalaren Positionen werden von der STUFE 1 geprueft und nicht hier.
     ///
     /// Drei Ablehnungen mit drei verschiedenen Codes, alle aus `ea-schema`: ein
@@ -859,14 +1049,14 @@ mod tests {
     /// Eingabe durchlassen und der Fehler erst tief im Schreibdienst auffallen.
     #[test]
     fn the_scalar_positions_carry_the_stage_one_rejections() {
-        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        let mut input = scalar_input(PatientCountView::Unknown);
         input.occurred_at.end = Some(UnixMillis::new(1_770_999_999_999));
         let Err(error) = input.try_into_scalars() else {
             panic!("ein Ende vor dem Beginn ist kein Zeitraum")
         };
         assert_eq!(error.code(), "EA-SCHEMA-INTERVAL");
 
-        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        let mut input = scalar_input(PatientCountView::Unknown);
         input.location.coordinates = Some(super::CoordinatesView {
             lat_e7: 900_000_001,
             lon_e7: 0,
@@ -876,7 +1066,7 @@ mod tests {
         };
         assert_eq!(error.code(), "EA-SCHEMA-COORDINATES");
 
-        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        let mut input = scalar_input(PatientCountView::Unknown);
         input.keyword.display_text = String::new();
         assert!(
             input.try_into_scalars().is_err(),
@@ -888,7 +1078,7 @@ mod tests {
     /// Freitext — genau die zwei Alternativen des Drahts.
     #[test]
     fn the_two_alternatives_of_keyword_and_location_are_kept_apart() {
-        let mut input = scalar_input(PATIENT_COUNT_STATUS_LITERALS[0], None);
+        let mut input = scalar_input(PatientCountView::Unknown);
         input.keyword.reference_id = Some("STW-042".to_owned());
         input.location.address = Some(super::StructuredAddressView {
             locality: Some("Koeln".to_owned()),

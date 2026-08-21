@@ -288,7 +288,14 @@ mod tests {
         role: Option<OperatorRoleV1>,
         startup: Option<std::sync::Arc<dyn StartupRecoveryPort + Send + Sync>>,
     ) -> DesktopState {
-        DesktopState::new(SessionState::new(role, None), startup, None, None, None)
+        DesktopState::new(
+            SessionState::new(role, None),
+            startup,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     #[test]

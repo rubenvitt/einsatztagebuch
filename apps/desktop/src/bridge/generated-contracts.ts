@@ -99,6 +99,8 @@ export type FinalizationPreviewView = {
 
 export type FinalizeOutcomeView = {
   readonly sequence: number
+  readonly entryHash: string
+  readonly objectHash: string
   readonly sync: SyncStateView
 }
 

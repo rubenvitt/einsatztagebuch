@@ -83,7 +83,12 @@ const HOST_DOUBLE = String(function installHostDouble(): void {
       staleDecision: 'Fresh',
     },
     session_reauthenticate: { fresh: true, purposeCode: 'EA-OPERATOR-REAUTH-FINALIZE' },
-    writer_finalize: { sequence: 7, sync: { status: 'lokal gesichert', detailCause: null } },
+    writer_finalize: {
+      sequence: 7,
+      entryHash: '11'.repeat(32),
+      objectHash: '22'.repeat(32),
+      sync: { status: 'lokal gesichert', detailCause: null },
+    },
     archive_health_report: { healthy: true, findingCodes: [], quarantineReasons: [] },
     device_posture_report: {
       requirements: [
@@ -138,6 +143,9 @@ test('finalizes with the network cut off and reopens a blank form', async ({ con
   await expect(closing).toBeVisible()
   await expect(closing).toContainText('lokal gesichert')
   await expect(closing).toContainText('7')
+  // Hashes UND Sequenz, durch die echte IPC-Vermittlung des Wirts.
+  await expect(closing).toContainText('11'.repeat(32))
+  await expect(closing).toContainText('22'.repeat(32))
   // Und danach ein LEERES Formular — kein Verlauf, kein letzter Einsatz.
   await expect(page.getByLabel('Einsatznummer')).toHaveValue('')
 })

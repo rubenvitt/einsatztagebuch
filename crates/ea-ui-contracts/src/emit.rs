@@ -49,8 +49,16 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        // Hashes UND Sequenz: nach dem Commit ist das alles, was die
+        // Oberflaeche ueber den Eintrag erfaehrt — und mehr als die Sequenz
+        // allein, weil ein Fingerabdruck ohne Hash keiner ist.
         "FinalizeOutcomeView",
-        &[("sequence", "number"), ("sync", "SyncStateView")],
+        &[
+            ("sequence", "number"),
+            ("entryHash", "string"),
+            ("objectHash", "string"),
+            ("sync", "SyncStateView"),
+        ],
     ),
     (
         "ArchiveHealthSummaryView",
@@ -151,6 +159,12 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ("personnelEmptyReason", "string | null"),
             ("vehicles", "readonly VehicleSelectionView[]"),
             ("vehiclesEmptyReason", "string | null"),
+            // ZWEI Positionen, obwohl `IncidentInputView` in Rust EINEN Wert
+            // fuehrt (`PatientCountView`). Das ist Absicht und keine Drift:
+            // die Drahtform ist `payload-wire-addendum.md`:102-118 mit
+            // `patientCountStatus` und `patientCount` als getrennte Positionen,
+            // und die Grenze faltet sie fail-closed zusammen, damit Anzeige und
+            // Draht danach nicht mehr auseinanderlaufen koennen.
             ("patientCountStatus", "PatientCountStatus"),
             ("patientCount", "number | null"),
             ("notes", "string | null"),

@@ -1,13 +1,32 @@
-//! Der Zustand des Wirts — und die zwei Naehte, an denen Task 16 andockt.
+//! Der Zustand des Wirts — und die Naehte, an denen Task 16 andockt.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ea_archive::ArchiveBackendError;
 use ea_archive_fs::{ArchiveHealthCheckV1, ArchiveHealthReport};
-use ea_draft::{DraftRepository, MasterDataRepository};
+use ea_draft::{DraftError, DraftRepository, MasterDataRepository};
 use ea_format::OperatorRoleV1;
 use ea_operator::OperatorSessionProof;
-use ea_writer::{RecoveryOutcome, WriterError, WriterService};
+use ea_schema::{NativeSourceV1, PersonnelSnapshotV1, SchemaError, VehicleSnapshotV1};
+use ea_types::UnixMillis;
+use ea_ui_contracts::{
+    FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView, PersonnelSelectionView,
+    VehicleSelectionView,
+};
+use ea_writer::{
+    FinalizationInputV1, FinalizationPreview, RecoveryOutcome, WriterError, WriterService,
+};
+
+use crate::commands::{CommandError, MASTER_DATA_UNREADABLE, PREVIEW_MISMATCH, PREVIEW_NOT_ISSUED};
+
+/// Die Quellkennung dieses Wirts und ihre Formatversion.
+///
+/// Sie beschreibt das ERFASSENDE Programm und nicht den Einsatz; sie gehoert
+/// deshalb dem Wirt und kommt niemals aus einer Antwort der Oberflaeche. Eine
+/// Oberflaeche, die ihre eigene Quellkennung waehlen kann, kann einen fremden
+/// Erfasser in die signierte Nutzlast schreiben.
+const NATIVE_SOURCE_ID: &str = "ea.desktop.writer";
+const NATIVE_SOURCE_FORMAT_VERSION: u64 = 1;
 
 /// Der synchrone Port des automatischen Startpfads.
 ///
@@ -56,6 +75,285 @@ impl ArchiveHealthPort for ArchiveHealthCheckV1<'_> {
     fn health(&self) -> Result<ArchiveHealthReport, ArchiveBackendError> {
         self.run()
     }
+}
+
+/// Der synchrone Port der Entwurfsnutzlast.
+///
+/// Er ist die Naht zur Autospeicherung, und er ist ABSICHTLICH schmaler als
+/// [`DraftRepository`]: die Grenze braucht genau zwei Wirkungen — die Nutzlast
+/// des EINEN aktiven Entwurfs lesen und sie schreiben —, und beide werden hier
+/// als Zeichenkette benannt. Der Rest des Entwurfsvertrages (Verwerfensabsicht,
+/// Abschlussmarke, Schluesselgriff, Sperre) gehoert nicht an diese Grenze.
+///
+/// Der zweite Grund ist die MESSBARKEIT: [`ea_draft::Draft`] und
+/// [`ea_draft::SavedDraft`] haben ausschliesslich `pub(crate)`-Konstruktoren, es
+/// kann also ausserhalb von `ea-draft` gar kein Doppel eines
+/// [`DraftRepository`] geben. Ein Port ueber Zeichenketten kann eines haben —
+/// und ohne Doppel bliebe „das Speichern schreibt WIRKLICH die Eingabe" eine
+/// Behauptung.
+pub trait DraftPayloadPort {
+    /// Die Nutzlast des EINEN aktiven Entwurfs, entsiegelt.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Ablage, unveraendert.
+    fn load_payload(&self) -> Result<String, DraftError>;
+
+    /// Schreibt die Nutzlast des EINEN aktiven Entwurfs.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Ablage, unveraendert — [`DraftError::RevisionConflict`]
+    /// eingeschlossen: dann ist NICHTS geschrieben.
+    fn save_payload(&self, payload: String) -> Result<(), DraftError>;
+}
+
+/// Jede echte Entwurfsablage IST dieser Port.
+///
+/// Die zwei Rumpfe sind die Naht: `load_or_create` liefert den einen aktiven
+/// Entwurf, `Draft::with_notes` setzt die Nutzlast, und
+/// `DraftRepository::save` siegelt sie als AEAD-Chiffrat unter dem `draftDEK`
+/// (`ea-draft/src/autosave.rs`) und schreibt sie als Vergleich-und-Setze ueber
+/// die Fassung. Diese Crate verschluesselt selbst nichts.
+impl<T: DraftRepository + ?Sized> DraftPayloadPort for T {
+    fn load_payload(&self) -> Result<String, DraftError> {
+        Ok(self.load_or_create()?.notes().to_owned())
+    }
+
+    fn save_payload(&self, payload: String) -> Result<(), DraftError> {
+        let draft = self.load_or_create()?;
+        self.save(draft.with_notes(payload)).map(|_| ())
+    }
+}
+
+/// Der synchrone Port der Abschlussvorschau.
+///
+/// Derselbe Lebensdauergrund wie bei den zwei Ports darueber. Zusaetzlich ist
+/// hier der SITZUNGSNACHWEIS nicht in der Signatur: er ist kein Wert, den eine
+/// Grenze weiterreicht — [`OperatorSessionProof`] ist ausdruecklich nicht
+/// `Clone`, und ausserhalb von `ea-operator` kann ihn niemand bauen. Er gehoert
+/// dem Implementierer, und [`BoundWriter`] ist der eine, der ihn haelt.
+///
+/// Die Ansichtsmodelle stehen in der Signatur und nicht [`FinalizationPreview`]:
+/// dessen Konstruktoren sind privat (`ea-writer/src/preview.rs`), eine Vorschau
+/// kann also niemand ausserhalb des Kerns herstellen. Genau das ist gewollt —
+/// und es heisst, dass die Grenze die ANSICHT weiterreicht und der Kern seine
+/// eigene Vorschau behaelt.
+pub trait WriterPreviewPort {
+    /// Die Vorschau zu genau diesem Einsatzrumpf.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns, oder eine benannte Voraussetzung des Wirts.
+    fn preview(
+        &self,
+        incident: &IncidentInputView,
+    ) -> Result<FinalizationPreviewView, CommandError>;
+}
+
+/// Der synchrone Port des unwiderruflichen Abschlusses.
+///
+/// Er hat [`WriterPreviewPort`] als Obertyp, weil ein Abschluss ohne die
+/// Vorschau, gegen die er bestaetigt wurde, keiner ist: derselbe Wirt muss
+/// beides koennen.
+pub trait WriterFinalizePort: WriterPreviewPort {
+    /// Schliesst den Eintrag ab — unwiderruflich.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns, oder eine benannte Voraussetzung des Wirts.
+    fn finalize(
+        &self,
+        incident: &IncidentInputView,
+        confirmed: &FinalizationPreviewView,
+    ) -> Result<FinalizeOutcomeView, CommandError>;
+}
+
+/// Der Schreibdienst SAMT dem, was nur der Wirt hat.
+///
+/// Fuenf Teile, und keiner davon darf aus einer Antwort der Oberflaeche kommen:
+/// der Dienst, der Sitzungsnachweis, die Stammdatenablage (aus ihr entstehen die
+/// Momentaufnahmen mit Revision und Provenienz), die Geraetezeitzone und die
+/// Vorschau, die dieser Wirt ausgestellt hat.
+///
+/// Sie traegt eine Lebensdauer und liegt deshalb NICHT im `'static`-Zustand der
+/// Anwendung — wie [`ArchiveHealthCheckV1`] wird sie je Aufruf gebaut. Die
+/// Aufloesung von Bindung, Nachweis, Datenbank, Bestand und Zeitzone gehoert
+/// einem spaeteren Task; was hier steht, ist die Naht, an der er andockt, und
+/// die zwei Aufrufe [`WriterService::preview`] und [`WriterService::finalize`]
+/// stehen damit UEBERSETZT im Baum.
+pub struct BoundWriter<'a> {
+    service: &'a WriterService<'a>,
+    proof: &'a OperatorSessionProof,
+    master_data: &'a MasterDataRepository,
+    timezone: &'a str,
+    issued: Option<&'a FinalizationPreview>,
+}
+
+impl<'a> BoundWriter<'a> {
+    #[must_use]
+    pub const fn new(
+        service: &'a WriterService<'a>,
+        proof: &'a OperatorSessionProof,
+        master_data: &'a MasterDataRepository,
+        timezone: &'a str,
+        issued: Option<&'a FinalizationPreview>,
+    ) -> Self {
+        Self {
+            service,
+            proof,
+            master_data,
+            timezone,
+            issued,
+        }
+    }
+
+    /// Die Eingabe des Kerns aus der Ansicht der Oberflaeche.
+    fn input(&self, incident: &IncidentInputView) -> Result<FinalizationInputV1, CommandError> {
+        let personnel = incident
+            .personnel
+            .iter()
+            .map(|person| self.personnel_snapshot(person))
+            .collect::<Result<Vec<_>, _>>()?;
+        let vehicles = incident
+            .vehicles
+            .iter()
+            .map(|vehicle| self.vehicle_snapshot(vehicle))
+            .collect::<Result<Vec<_>, _>>()?;
+        finalization_input(incident, self.timezone, personnel, vehicles)
+            .map_err(|error| CommandError::new(error.code()))
+    }
+
+    /// Die Momentaufnahme EINER Auswahl.
+    ///
+    /// Eine Stammdatenauswahl wird in der Ablage aufgeloest, damit Revision und
+    /// Provenienz aus der Zeile kommen und nicht aus der Antwort einer
+    /// Oberflaeche. Ein Ad-hoc-Eintrag traegt beides nicht — und zwar sichtbar.
+    fn personnel_snapshot(
+        &self,
+        person: &PersonnelSelectionView,
+    ) -> Result<PersonnelSnapshotV1, CommandError> {
+        match person.master_personnel_id.as_deref() {
+            None => {
+                PersonnelSnapshotV1::ad_hoc(person.display_name.clone(), person.role_label.clone())
+                    .map_err(|error| CommandError::new(error.code()))
+            }
+            Some(id) => self
+                .master_data
+                .snapshot_person(id)
+                .map_err(|_| CommandError::new(MASTER_DATA_UNREADABLE)),
+        }
+    }
+
+    fn vehicle_snapshot(
+        &self,
+        vehicle: &VehicleSelectionView,
+    ) -> Result<VehicleSnapshotV1, CommandError> {
+        match vehicle.master_vehicle_id.as_deref() {
+            None => VehicleSnapshotV1::ad_hoc(
+                vehicle.display_name.clone(),
+                vehicle.radio_call_name.clone(),
+                vehicle.license_plate.clone(),
+            )
+            .map_err(|error| CommandError::new(error.code())),
+            Some(id) => self
+                .master_data
+                .snapshot_vehicle(id)
+                .map_err(|_| CommandError::new(MASTER_DATA_UNREADABLE)),
+        }
+    }
+}
+
+impl WriterPreviewPort for BoundWriter<'_> {
+    fn preview(
+        &self,
+        incident: &IncidentInputView,
+    ) -> Result<FinalizationPreviewView, CommandError> {
+        let input = self.input(incident)?;
+        self.service
+            .preview(self.proof, input, host_now())
+            .map(|preview| FinalizationPreviewView::from(&preview))
+            .map_err(|error| CommandError::new(error.code()))
+    }
+}
+
+impl WriterFinalizePort for BoundWriter<'_> {
+    /// Der Abschluss gegen die Vorschau, die DIESER Wirt ausgestellt hat.
+    ///
+    /// Die Bestaetigung der Oberflaeche ist eine ANSICHT und keine Vorschau; sie
+    /// wird deshalb gegen die gehaltene verglichen und nicht in eine
+    /// zurueckgerechnet. Der Vergleich hier ist die Vorpruefung mit einem
+    /// eigenen Code — die AUTORITATIVE Nachrechnung macht
+    /// [`WriterService::finalize`] unter dem Writer-Lock und lehnt eine
+    /// abweichende Vorschau mit dem Code des Kerns ab.
+    fn finalize(
+        &self,
+        incident: &IncidentInputView,
+        confirmed: &FinalizationPreviewView,
+    ) -> Result<FinalizeOutcomeView, CommandError> {
+        let issued = self
+            .issued
+            .ok_or_else(|| CommandError::new(PREVIEW_NOT_ISSUED))?;
+        if FinalizationPreviewView::from(issued) != *confirmed {
+            return Err(CommandError::new(PREVIEW_MISMATCH));
+        }
+        let input = self.input(incident)?;
+        self.service
+            .finalize(self.proof, input, issued, host_now())
+            .map(|outcome| FinalizeOutcomeView::new(&outcome, None))
+            .map_err(|error| CommandError::new(error.code()))
+    }
+}
+
+/// Die beobachtete Zeit des Wirts, JE AUFRUF gelesen.
+///
+/// Kein Feld: `WriterService::preview` bewertet Registry und Zeit bei jedem
+/// Aufruf neu, und eine gespeicherte Messung waere keine erneute Bewertung. Vor
+/// der Epoche liegt kein Zeitpunkt, den dieser Wirt melden koennte — der
+/// Sattelpunkt ist deshalb null, und der Kern entscheidet dann ueber die
+/// Zeitgrenzen des gebundenen Head.
+fn host_now() -> UnixMillis {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        });
+    UnixMillis::new(millis)
+}
+
+/// Die Eingabe des Kerns aus Ansicht, Zeitzone und Momentaufnahmen — REIN.
+///
+/// Was diese Funktion NICHT tut: eine Momentaufnahme herstellen (die verlangt
+/// die Stammdatenablage), einen Kopf fuellen (`recordId`,
+/// `finalizedAtDevice`, der `operator`-Snapshot und die `registryVersion`
+/// entstehen im Kern aus der geprueften Sitzung) und eine Zeitzone raten.
+///
+/// # Errors
+///
+/// Der [`SchemaError`] der Stufe 1, unveraendert — dieselben Konstruktoren, die
+/// die eingefrorenen Bytes bauen.
+pub fn finalization_input(
+    incident: &IncidentInputView,
+    timezone: &str,
+    personnel: Vec<PersonnelSnapshotV1>,
+    vehicles: Vec<VehicleSnapshotV1>,
+) -> Result<FinalizationInputV1, SchemaError> {
+    let scalars = incident.try_into_scalars()?;
+    Ok(FinalizationInputV1 {
+        timezone: timezone.to_owned(),
+        source: NativeSourceV1::new(NATIVE_SOURCE_ID, NATIVE_SOURCE_FORMAT_VERSION)?,
+        human_incident_number: incident.human_incident_number.clone(),
+        occurred_at: scalars.occurred_at,
+        keyword: scalars.keyword,
+        location: scalars.location,
+        personnel,
+        personnel_empty_reason: incident.personnel_empty_reason.clone(),
+        vehicles,
+        vehicles_empty_reason: incident.vehicles_empty_reason.clone(),
+        patient_count: scalars.patient_count,
+        notes: incident.notes.clone(),
+        external_organizations: scalars.external_organizations,
+    })
 }
 
 /// Die geprueften Sitzungsangaben dieses Geraets.
@@ -128,8 +426,9 @@ pub struct DesktopState {
     session: Arc<Mutex<SessionState>>,
     startup: Option<Arc<dyn StartupRecoveryPort + Send + Sync>>,
     master_data: Option<Arc<MasterDataRepository>>,
-    drafts: Option<Arc<dyn DraftRepository>>,
+    drafts: Option<Arc<dyn DraftPayloadPort + Send + Sync>>,
     health: Option<Arc<dyn ArchiveHealthPort + Send + Sync>>,
+    writer: Option<Arc<dyn WriterFinalizePort + Send + Sync>>,
 }
 
 impl DesktopState {
@@ -138,8 +437,9 @@ impl DesktopState {
         session: SessionState,
         startup: Option<Arc<dyn StartupRecoveryPort + Send + Sync>>,
         master_data: Option<Arc<MasterDataRepository>>,
-        drafts: Option<Arc<dyn DraftRepository>>,
+        drafts: Option<Arc<dyn DraftPayloadPort + Send + Sync>>,
         health: Option<Arc<dyn ArchiveHealthPort + Send + Sync>>,
+        writer: Option<Arc<dyn WriterFinalizePort + Send + Sync>>,
     ) -> Self {
         Self {
             session: Arc::new(Mutex::new(session)),
@@ -147,6 +447,7 @@ impl DesktopState {
             master_data,
             drafts,
             health,
+            writer,
         }
     }
 
@@ -182,9 +483,9 @@ impl DesktopState {
         self.master_data.as_deref()
     }
 
-    /// Die Entwurfsablage, wenn eine geoeffnete Datenbank vorliegt.
+    /// Die Entwurfsnutzlast, wenn eine geoeffnete Datenbank vorliegt.
     #[must_use]
-    pub fn drafts(&self) -> Option<&dyn DraftRepository> {
+    pub fn drafts(&self) -> Option<&(dyn DraftPayloadPort + Send + Sync)> {
         self.drafts.as_deref()
     }
 
@@ -193,6 +494,16 @@ impl DesktopState {
     pub fn health(&self) -> Option<&(dyn ArchiveHealthPort + Send + Sync)> {
         self.health.as_deref()
     }
+
+    /// Der Schreibdienst, wenn Bindung, Nachweis und Bestand aufgeloest sind.
+    ///
+    /// EIN Feld fuer Vorschau und Abschluss: ein Wirt, der die Vorschau
+    /// ausstellen kann, ist derselbe, der abschliesst — und ein Wirt, der nur
+    /// eines von beiden koennte, waere eine halbe Finalisierung.
+    #[must_use]
+    pub fn writer(&self) -> Option<&(dyn WriterFinalizePort + Send + Sync)> {
+        self.writer.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -200,8 +511,87 @@ mod tests {
     use std::cell::Cell;
 
     use ea_format::OperatorRoleV1;
+    use ea_schema::PersonnelSnapshotV1;
+    use ea_types::UnixMillis;
+    use ea_ui_contracts::{
+        IncidentInputView, KeywordView, LocationView, OccurredAtView, PatientCountView,
+        PersonnelSelectionView,
+    };
 
-    use super::{DesktopState, SessionState};
+    use super::{DesktopState, NATIVE_SOURCE_ID, SessionState, finalization_input};
+
+    fn view() -> IncidentInputView {
+        IncidentInputView {
+            human_incident_number: "2026-0001".to_owned(),
+            occurred_at: OccurredAtView {
+                start: UnixMillis::new(1_771_000_000_000),
+                end: None,
+            },
+            keyword: KeywordView {
+                reference_id: None,
+                display_text: "Verkehrsunfall".to_owned(),
+            },
+            location: LocationView {
+                free_text: Some("Bahnhofstrasse 1".to_owned()),
+                address: None,
+                coordinates: None,
+            },
+            personnel: vec![PersonnelSelectionView {
+                master_personnel_id: None,
+                display_name: "A. Beispiel".to_owned(),
+                role_label: None,
+            }],
+            personnel_empty_reason: None,
+            vehicles: Vec::new(),
+            vehicles_empty_reason: Some("kein Fahrzeug alarmiert".to_owned()),
+            patient_count: PatientCountView::Known(0),
+            notes: Some("keine".to_owned()),
+            external_organizations: Vec::new(),
+        }
+    }
+
+    /// Die Eingabe des Kerns traegt JEDE Position der Ansicht — und die
+    /// Quellkennung des WIRTS.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Zusammenstellung, die eine
+    /// Position fallen laesst (eine verlorene Begruendung verletzt die
+    /// biconditionale Regel `EA-SCHEMA-LIST-REASON` erst tief im Schreibdienst)
+    /// oder die Quellkennung aus der Antwort einer Oberflaeche nimmt. Die
+    /// bekannte NULL ist dabei ausdruecklich mitgemessen: sie darf auf diesem
+    /// Weg nicht zu `Unknown` werden.
+    #[test]
+    fn the_finalization_input_carries_every_position_of_the_view() {
+        let personnel =
+            vec![PersonnelSnapshotV1::ad_hoc("A. Beispiel", None).expect("ad hoc ist gueltig")];
+        let input = finalization_input(&view(), "Europe/Berlin", personnel, Vec::new())
+            .expect("die Stufe 1 nimmt an");
+        assert_eq!(input.timezone, "Europe/Berlin");
+        assert_eq!(input.source.source_id(), NATIVE_SOURCE_ID);
+        assert_eq!(input.human_incident_number, "2026-0001");
+        assert_eq!(input.personnel.len(), 1);
+        assert!(!input.personnel[0].is_master());
+        assert_eq!(input.personnel_empty_reason, None);
+        assert!(input.vehicles.is_empty());
+        assert_eq!(
+            input.vehicles_empty_reason.as_deref(),
+            Some("kein Fahrzeug alarmiert")
+        );
+        assert_eq!(input.patient_count.known(), Some(0));
+        assert_eq!(input.notes.as_deref(), Some("keine"));
+        assert!(input.external_organizations.is_empty());
+    }
+
+    /// Eine verletzte SKALARE Position kommt mit dem Code der Stufe 1 zurueck.
+    #[test]
+    fn a_violated_scalar_position_carries_the_stage_one_code() {
+        let mut incident = view();
+        incident.occurred_at.end = Some(UnixMillis::new(1_770_999_999_999));
+        let Err(error) = finalization_input(&incident, "Europe/Berlin", Vec::new(), Vec::new())
+        else {
+            panic!("ein Ende vor dem Beginn ist kein Zeitraum")
+        };
+        assert_eq!(error.code(), "EA-SCHEMA-INTERVAL");
+    }
 
     /// Der Zeuge der Klammer aus [`SessionState::role`].
     ///
@@ -235,6 +625,7 @@ mod tests {
     fn the_lock_is_honored_before_the_shell_is_told() {
         let state = DesktopState::new(
             SessionState::new(Some(OperatorRoleV1::Writer), None),
+            None,
             None,
             None,
             None,

@@ -55,7 +55,7 @@ mod tests {
     /// waere eine Aussage ueber leere Stammdaten.
     #[test]
     fn a_shell_without_an_open_database_gets_a_named_absence() {
-        let state = DesktopState::new(SessionState::new(None, None), None, None, None, None);
+        let state = DesktopState::new(SessionState::new(None, None), None, None, None, None, None);
         assert_eq!(
             master_data_counts_core(&state).unwrap_err().code,
             MASTER_DATA_UNAVAILABLE

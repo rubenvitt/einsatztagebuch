@@ -52,6 +52,16 @@ pub const REAUTH_UNAVAILABLE: &str = "EA-DESKTOP-REAUTH-UNAVAILABLE";
 pub const STALE_ACK_UNAVAILABLE: &str = "EA-DESKTOP-STALE-ACK-UNAVAILABLE";
 /// Kein Verwerfensdienst aufgeloest.
 pub const DISCARD_UNAVAILABLE: &str = "EA-DESKTOP-DISCARD-UNAVAILABLE";
+/// Die Nutzlast des Entwurfs ist keine Erfassung dieser Grenze.
+///
+/// Sie liegt entsiegelt vor und ist trotzdem nicht lesbar: dann ist sie von
+/// einer anderen Fassung dieser Anwendung geschrieben worden. Ein leerer Rumpf
+/// waere hier die stille Loeschung einer Erfassung.
+pub const DRAFT_PAYLOAD_UNREADABLE: &str = "EA-DESKTOP-DRAFT-PAYLOAD-UNREADABLE";
+/// Dieser Wirt hat keine Vorschau ausgestellt, gegen die bestaetigt werden kann.
+pub const PREVIEW_NOT_ISSUED: &str = "EA-DESKTOP-PREVIEW-NOT-ISSUED";
+/// Die bestaetigte Vorschau ist nicht die ausgestellte.
+pub const PREVIEW_MISMATCH: &str = "EA-DESKTOP-PREVIEW-MISMATCH";
 /// Kein aufgeloester Vertrauensanker fuer den Buendelexport.
 pub const BUNDLE_EXPORT_UNAVAILABLE: &str = "EA-DESKTOP-BUNDLE-EXPORT-UNAVAILABLE";
 /// Der Blockierthread ist verlorengegangen.

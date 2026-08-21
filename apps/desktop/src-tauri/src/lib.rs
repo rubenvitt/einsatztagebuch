@@ -81,6 +81,7 @@ pub fn run() {
             None,
             None,
             None,
+            None,
         ))
         .invoke_handler(tauri::generate_handler![
             commands::session::verified_session,

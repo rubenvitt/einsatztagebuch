@@ -6,6 +6,7 @@ import { MasterDataSelect } from './MasterDataSelect'
 import type { SelectableRow } from './MasterDataSelect'
 import { PATIENT_COUNT_STATUS_VALUES } from '../../bridge/generated-contracts'
 import type {
+  CoordinatesView,
   IncidentInputView,
   MasterDataResultView,
   PersonnelSelectionView,
@@ -69,6 +70,70 @@ function vehicleRow(vehicle: VehicleSelectionView): SelectableRow {
     detail: vehicle.radioCallName ?? vehicle.licensePlate,
     adHoc: vehicle.masterVehicleId === null,
   }
+}
+
+/**
+ * Die zwei Positionen des Koordinatenpaares, als GANZZAHLIGE E7-Werte.
+ *
+ * Das Paar ist entweder ganz da oder ganz fort: `latE7` ohne `lonE7` ist keine
+ * Koordinate, und ein halbes Paar mit einer erfundenen Null waere ein Ort am
+ * Nullmeridian. Der Bereich selbst gehoert der Stufe 1 (`CoordinatesV1::new`,
+ * `EA-SCHEMA-COORDINATES`) und wird hier nicht nachgebaut.
+ */
+const COORDINATE_FIELDS: readonly (readonly [keyof CoordinatesView, string])[] = [
+  ['latE7', 'Breite (E7)'],
+  ['lonE7', 'Länge (E7)'],
+]
+
+function coordinatePair(
+  current: CoordinatesView | null,
+  field: keyof CoordinatesView,
+  raw: string,
+): CoordinatesView | null {
+  // Eine geleerte Position nimmt das PAAR mit: die halbe Angabe waere ein Ort
+  // auf dem Nullmeridian, den niemand eingegeben hat.
+  if (raw === '') {
+    return null
+  }
+  const parsed = Number.parseInt(raw, 10)
+  if (Number.isNaN(parsed)) {
+    return current
+  }
+  const base: CoordinatesView = current ?? { latE7: 0, lonE7: 0 }
+  return field === 'latE7'
+    ? { latE7: parsed, lonE7: base.lonE7 }
+    : { latE7: base.latE7, lonE7: parsed }
+}
+
+/** Die zwei Felder des Koordinatenpaares — in BEIDEN Ortsformen dieselben. */
+function CoordinateFields({
+  coordinates,
+  onChange,
+}: {
+  readonly coordinates: CoordinatesView | null
+  readonly onChange: (next: CoordinatesView | null) => void
+}): ReactElement {
+  return (
+    <>
+      {COORDINATE_FIELDS.map(([field, label]) => (
+        <Space key={field} direction="vertical" size="small">
+          <label htmlFor={`koordinate-${field}`}>{label}</label>
+          <Input
+            id={`koordinate-${field}`}
+            type="number"
+            value={coordinates === null ? '' : String(coordinates[field])}
+            onChange={(event) => {
+              onChange(coordinatePair(coordinates, field, event.target.value))
+            }}
+          />
+        </Space>
+      ))}
+      <Typography.Text type="secondary">
+        Optional, als ganzzahliges E7-Paar. Über den zulässigen Bereich entscheidet die
+        Stufe-1-Prüfung im Wirt.
+      </Typography.Text>
+    </>
+  )
 }
 
 const EMPTY_ADDRESS: StructuredAddressView = {
@@ -267,6 +332,12 @@ export function IncidentForm({
             />
           </>
         )}
+        <CoordinateFields
+          coordinates={incident.location.coordinates}
+          onChange={(coordinates) => {
+            onChange({ ...incident, location: { ...incident.location, coordinates } })
+          }}
+        />
         <PatientDataWarning />
       </Space>
 

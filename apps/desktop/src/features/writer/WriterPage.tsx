@@ -12,6 +12,7 @@ import { ReviewStep } from './ReviewStep'
 import { validateResume } from '../../app/StartupRecovery'
 import {
   DETAIL_CAUSE_VALUES,
+  PATIENT_COUNT_STATUS_VALUES,
   SYNC_STATUS_VALUES,
 } from '../../bridge/generated-contracts'
 import type {
@@ -33,6 +34,15 @@ import type {
 } from '../../bridge/generated-contracts'
 import { FingerprintBlock } from '../../components/integrity/FingerprintBlock'
 import { SyncStatus } from '../../components/integrity/SyncStatus'
+
+/**
+ * Der Zustand „bekannt", AUS der emittierten Vereinigung.
+ *
+ * Am Draht ist `patientCountStatus = 0` gleich `unknown` und `= 1` gleich
+ * `known`; die Zerlegung traegt deshalb die Polaritaet und nicht ein Literal
+ * dieser Datei.
+ */
+const [, KNOWN_STATUS] = PATIENT_COUNT_STATUS_VALUES
 
 /** Der Zweck einer erneuten Authentisierung — je Handlung ein eigener. */
 export const FINALIZE_PURPOSE = 'finalize'
@@ -118,6 +128,17 @@ export function firstInputViolation(incident: IncidentInputView): string | null 
   }
   if (incident.vehicles.length === 0 && (incident.vehiclesEmptyReason ?? '') === '') {
     return 'Die Fahrzeugliste ist leer. Dann ist eine Begründung Pflicht.'
+  }
+  // Der Draht traegt ZWEI Positionen, und nur zwei Paarungen sind eine Eingabe:
+  // `known` MIT Zahl und `unknown` OHNE. Ohne diese Pruefung waere ein geleertes
+  // Feld bei `bekannt` eine Anzeige „Patientenzahl unbekannt" ueber einem Draht,
+  // der `known, 0` traegt — die Grenze lehnt das ab (`INCIDENT_INPUT_REJECTED`),
+  // und diese Zeile sagt dem Bediener, WAS fehlt.
+  if (incident.patientCountStatus === KNOWN_STATUS && incident.patientCount === null) {
+    return 'Die Patientenzahl ist als bekannt gewählt. Dann ist eine Anzahl Pflicht.'
+  }
+  if (incident.patientCountStatus !== KNOWN_STATUS && incident.patientCount !== null) {
+    return 'Ohne bekannte Patientenzahl wird keine Zahl gesendet.'
   }
   return null
 }
@@ -346,7 +367,11 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
             <Space direction="vertical" size="small">
               <Typography.Text strong>Der Eintrag ist lokal abgeschlossen</Typography.Text>
               <FingerprintBlock
-                entries={[{ label: 'Sequenz', value: String(stage.outcome.sequence) }]}
+                entries={[
+                  { label: 'Eintragshash', value: stage.outcome.entryHash },
+                  { label: 'Objekthash', value: stage.outcome.objectHash },
+                  { label: 'Sequenz', value: String(stage.outcome.sequence) },
+                ]}
               />
               <SyncStatus state={stage.outcome.sync} label="Veröffentlichung" />
               <Typography.Text>

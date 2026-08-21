@@ -104,6 +104,8 @@ function fakeWriterBridge(overrides: Partial<WriterBridge> = {}): WriterBridge {
     finalize: vi.fn(() =>
       Promise.resolve({
         sequence: 7,
+        entryHash: 'a'.repeat(64),
+        objectHash: 'b'.repeat(64),
         sync: { status: locallySaved, detailCause: null },
       }),
     ),
@@ -374,6 +376,12 @@ it('clears the surface after the commit and offers no history and no final conte
   const closing = screen.getByRole('region', { name: 'Abschluss' })
   expect(closing).toHaveTextContent(SYNC_STATUS_VALUES[0])
   expect(closing).toHaveTextContent('7')
+  // Hashes UND Sequenz: ohne diese zwei Zeilen zeigte der Fingerabdruck nach
+  // dem unwiderruflichen Schritt nur eine Zahl.
+  expect(closing).toHaveTextContent('a'.repeat(64))
+  expect(closing).toHaveTextContent('b'.repeat(64))
+  expect(closing).toHaveTextContent('Eintragshash')
+  expect(closing).toHaveTextContent('Objekthash')
   expect(screen.getByLabelText('Einsatznummer')).toHaveValue('')
   expect(screen.queryByRole('button', { name: /verlauf|letzter einsatz|inhalt öffnen/i })).toBeNull()
 })
@@ -560,4 +568,59 @@ it('validates the pending finalization instead of believing it', () => {
   for (const candidate of rejected) {
     expect(() => validatePendingResume(candidate), JSON.stringify(candidate)).toThrow()
   }
+})
+
+// Der Weg, den der Defektbefund C2 gegangen ist: Zustand „bekannt", Anzahl
+// geleert. Die Anzeige sagte „Patientenzahl unbekannt", und der Draht truege
+// `known, 0`. Ohne diesen Zeugen bleibt die Paarung ungeprueft, weil alle
+// anderen Zeugen wohlgeformte Paare schicken.
+it('blocks a known patient count without a number and asks the host for nothing', async () => {
+  const bridge = fakeWriterBridge()
+  render(<WriterPage bridge={bridge} />)
+  await user.click(screen.getByRole('radio', { name: 'bekannt' }))
+  await user.clear(screen.getByLabelText('Anzahl'))
+  await user.click(screen.getByRole('button', { name: 'Prüfen' }))
+  expect(screen.getByRole('alert')).toHaveTextContent(/Anzahl Pflicht/i)
+  expect(bridge.preview).not.toHaveBeenCalled()
+  expect(
+    screen.queryByRole('button', { name: 'Unwiderruflich finalisieren' }),
+  ).toBeDisabled()
+  expect(screen.queryByText('0 Patienten')).not.toBeInTheDocument()
+})
+
+// Die Koordinaten sind eine EINGABE und nicht bloss eine Anzeige. Ohne diesen
+// Zeugen bliebe `location.coordinates` aus der Oberflaeche immer `null`, und der
+// Eingabevertrag waere unvollstaendig.
+it('sends a typed coordinate pair as integer E7 values', async () => {
+  const bridge = fakeWriterBridge()
+  render(<WriterPage bridge={bridge} />)
+  await user.type(screen.getByLabelText('Breite (E7)'), '507000000')
+  await user.type(screen.getByLabelText('Länge (E7)'), '69000000')
+  await user.click(screen.getByRole('button', { name: 'Prüfen' }))
+  expect(bridge.preview).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      location: expect.objectContaining({ coordinates: { latE7: 507000000, lonE7: 69000000 } }),
+    }),
+  )
+  // Und die Felder stehen in BEIDEN Ortsformen.
+  await user.click(screen.getByRole('button', { name: 'Zurück zur Erfassung' }))
+  await user.click(screen.getByRole('radio', { name: 'Ort als Adresse' }))
+  expect(screen.getByLabelText('Breite (E7)')).toHaveValue(507000000)
+  expect(screen.getByLabelText('Länge (E7)')).toHaveValue(69000000)
+})
+
+// Die Warnung ueber den veralteten Head nennt die Zahlen, die sie WIRKLICH hat,
+// unter ihren eigenen Namen — und benennt die drei Angaben, die diese
+// Ausbaustufe nicht meldet. Eine falsch benannte Zahl in einer
+// sicherheitsrelevanten Warnung ist schlimmer als eine benannte Abwesenheit.
+it('names the stale registry numbers correctly and declares the unreported ones', async () => {
+  render(<WriterPage bridge={staleWarnBridge()} />)
+  await advanceToFinalize()
+  const alert = screen.getByRole('alert')
+  expect(alert).toHaveTextContent('Vorgeschlagene Sequenz: 7')
+  expect(alert).toHaveTextContent('beobachtete Zeit: 1771000100000')
+  expect(alert).toHaveTextContent('Registry-Version: nicht gemeldet')
+  expect(alert).toHaveTextContent('Registry-Head: nicht gemeldet')
+  expect(alert).toHaveTextContent('Ablauf des Head: nicht gemeldet')
+  expect(alert).not.toHaveTextContent('Gebundene Registry-Version: 7')
 })

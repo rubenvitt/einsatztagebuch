@@ -11,11 +11,17 @@
 //!    Startpfad auf und unterscheidet die Fortsetzung von der Blockade;
 //!    [`archive_health_report`], [`draft_load_active`], [`draft_save`] und
 //!    [`master_data_search`] rufen ihre Ports beziehungsweise Ablagen direkt.
-//! 2. **Eingabevertrag ausgefuehrt, Kern benannt abwesend.**
+//!    [`draft_save`] schreibt die EINGABE — nicht den gelesenen Entwurf — und
+//!    meldet `lokal gesichert` erst hinter dem `?` der Ablage;
+//!    [`draft_load_active`] liest sie zurueck.
+//! 2. **Eingabevertrag ausgefuehrt, Naht gebaut, Wirt nicht verdrahtet.**
 //!    [`writer_preview`] und [`writer_finalize`] wandeln den Einsatzrumpf mit
-//!    den Stufe-1-Konstruktoren von `ea-schema` und lehnen eine verletzte
-//!    Eingabe mit DEREN Code ab. Erst danach melden sie, dass auf diesem Geraet
-//!    keine aufgeloeste Bedienerbindung und damit kein `WriterService` steht.
+//!    den Stufe-1-Konstruktoren von `ea-schema`, lehnen eine verletzte Eingabe
+//!    mit DEREN Code ab und rufen dann den Schreibport
+//!    (`crate::state::WriterPreviewPort`, `WriterFinalizePort`). Solange dieses
+//!    Geraet keine aufgeloeste Bedienerbindung hat, ist KEIN Port verdrahtet,
+//!    und die Abwesenheit sitzt genau dort — am fehlenden Port und nicht an
+//!    einer fehlenden Zeile.
 //! 3. **Benannte Abwesenheit.** [`session_reauthenticate`],
 //!    [`writer_acknowledge_stale_registry`], [`draft_discard_begin`],
 //!    [`draft_discard_resume`] und [`archive_export_bundle_file`] antworten mit
@@ -30,17 +36,18 @@ use ea_archive_fs::ArchiveHealthReport;
 use ea_key_provider::{DevicePostureReport, PostureRequirement, SupportMatrixRow};
 use ea_schema::SchemaError;
 use ea_ui_contracts::{
-    ArchiveHealthSummaryView, DevicePostureSummaryView, IncidentInputView,
-    PendingFinalizationResumeView, PendingResumeOutcomeView, PostureRequirementView,
-    patient_count_status_from_wire,
+    ArchiveHealthSummaryView, DevicePostureSummaryView, FinalizationPreviewView,
+    FinalizeOutcomeView, IncidentInputView, PatientCountView, PendingFinalizationResumeView,
+    PendingResumeOutcomeView, PostureRequirementView,
 };
 use ea_writer::{RecoveryOutcome, WriterError};
 use serde::{Deserialize, Serialize};
 
 use super::{
     ARCHIVE_HEALTH_UNAVAILABLE, BUNDLE_EXPORT_UNAVAILABLE, CommandError, DISCARD_UNAVAILABLE,
-    DRAFTS_UNAVAILABLE, MASTER_DATA_UNAVAILABLE, MASTER_DATA_UNREADABLE, REAUTH_UNAVAILABLE,
-    STALE_ACK_UNAVAILABLE, STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
+    DRAFT_PAYLOAD_UNREADABLE, DRAFTS_UNAVAILABLE, MASTER_DATA_UNAVAILABLE, MASTER_DATA_UNREADABLE,
+    REAUTH_UNAVAILABLE, STALE_ACK_UNAVAILABLE, STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE,
+    run_blocking,
 };
 use crate::state::DesktopState;
 
@@ -147,13 +154,15 @@ impl IncidentInputDto {
     ///
     /// # Errors
     ///
-    /// [`INCIDENT_INPUT_REJECTED`], wenn der Zustand der Patientenzahl nicht in
-    /// der emittierten Vereinigung steht. Ein unbekanntes Wort waere sonst
-    /// stillschweigend `unknown` — und damit die Unterscheidung, um die es
-    /// geht, verloren.
+    /// [`INCIDENT_INPUT_REJECTED`], wenn das PAAR aus Zustand und Zahl keine
+    /// Eingabe ist: ein Wort, das nicht in der emittierten Vereinigung steht,
+    /// ein `known` OHNE Zahl oder ein `unknown` MIT Zahl. Alle drei sind hier
+    /// eine Ablehnung und kein Vorgabewert — ein `known` ohne Zahl waere sonst
+    /// die bekannte Null unter einer Anzeige, die „unbekannt" sagt.
     pub fn to_view(&self) -> Result<IncidentInputView, CommandError> {
-        let status = patient_count_status_from_wire(&self.patient_count_status)
-            .ok_or_else(|| CommandError::new(INCIDENT_INPUT_REJECTED))?;
+        let patient_count =
+            PatientCountView::from_wire(&self.patient_count_status, self.patient_count)
+                .ok_or_else(|| CommandError::new(INCIDENT_INPUT_REJECTED))?;
         Ok(IncidentInputView {
             human_incident_number: self.human_incident_number.clone(),
             occurred_at: ea_ui_contracts::OccurredAtView {
@@ -204,8 +213,7 @@ impl IncidentInputDto {
                 })
                 .collect(),
             vehicles_empty_reason: self.vehicles_empty_reason.clone(),
-            patient_count_status: status,
-            patient_count: self.patient_count,
+            patient_count,
             notes: self.notes.clone(),
             external_organizations: self
                 .external_organizations
@@ -267,12 +275,68 @@ pub struct FinalizationPreviewDto {
     pub stale_decision: String,
 }
 
+impl From<FinalizationPreviewView> for FinalizationPreviewDto {
+    fn from(view: FinalizationPreviewView) -> Self {
+        Self {
+            proposed_sequence: view.proposed_sequence.get(),
+            binds_predecessor: view.binds_predecessor,
+            effective_now: view.effective_now.get(),
+            trust_age_ms: view.trust_age_ms,
+            reader_trust_refresh_ms: view.reader_trust_refresh_ms,
+            trust_refresh_overdue: view.trust_refresh_overdue,
+            stale_decision: ea_ui_contracts::stale_decision_literal(view.stale_decision).to_owned(),
+        }
+    }
+}
+
+/// Die BESTAETIGTE Vorschau ist eine Drahtform und wird geprueft.
+pub const PREVIEW_REJECTED: &str = "EA-DESKTOP-PREVIEW-REJECTED";
+
+impl FinalizationPreviewDto {
+    /// Die bestaetigte Vorschau als Ansichtsmodell — mit GEPRUEFTEM Zeitstatus.
+    ///
+    /// # Errors
+    ///
+    /// [`PREVIEW_REJECTED`], wenn der Zeitstatus nicht in der emittierten
+    /// Vereinigung steht. Ein unbekanntes Wort waere sonst ein `Fresh`, und
+    /// damit faellt genau die Bestaetigungspflicht des mittleren Arms.
+    pub fn to_view(&self) -> Result<FinalizationPreviewView, CommandError> {
+        Ok(FinalizationPreviewView {
+            proposed_sequence: ea_types::ChainSequence::new(self.proposed_sequence),
+            binds_predecessor: self.binds_predecessor,
+            effective_now: ea_types::UnixMillis::new(self.effective_now),
+            trust_age_ms: self.trust_age_ms,
+            reader_trust_refresh_ms: self.reader_trust_refresh_ms,
+            trust_refresh_overdue: self.trust_refresh_overdue,
+            stale_decision: ea_ui_contracts::stale_decision_from_wire(&self.stale_decision)
+                .ok_or_else(|| CommandError::new(PREVIEW_REJECTED))?,
+        })
+    }
+}
+
 /// Das Ergebnis eines abgeschlossenen Eintrags — OHNE jede Nutzlast.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+///
+/// Die zwei HASHES und die Sequenz: das ist alles, was der Writer nach dem
+/// Commit ueber den Eintrag erfaehrt, und ein Fingerabdruck ohne Hash ist
+/// keiner.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalizeOutcomeDto {
     pub sequence: u64,
+    pub entry_hash: String,
+    pub object_hash: String,
     pub sync: SyncStateDto,
+}
+
+impl From<FinalizeOutcomeView> for FinalizeOutcomeDto {
+    fn from(view: FinalizeOutcomeView) -> Self {
+        Self {
+            sequence: view.sequence.get(),
+            entry_hash: view.entry_hash,
+            object_hash: view.object_hash,
+            sync: SyncStateDto::from(&view.sync),
+        }
+    }
 }
 
 /// Die Bestaetigung eines veralteten Registry-Head.
@@ -565,26 +629,46 @@ fn master_data_search_core(
 
 /// Der Kern von [`draft_load_active`].
 ///
-/// `DraftRepository::load_or_create` gibt den EINEN aktiven Entwurf zurueck
-/// oder legt den einen an, den es geben darf. Die Nutzlast des Entwurfs ist
-/// AEAD-Chiffrat unter dem `draftDEK`; die Wandlung in einen Einsatzrumpf
-/// verlangt den Entwurfsschluessel und gehoert damit nicht an diese Grenze.
-/// Solange sie fehlt, ist die ehrliche Antwort ein leerer Rumpf mit dem
-/// gemeldeten Speicherzustand — und nicht ein erfundener Inhalt.
+/// Die Nutzlast kommt ueber [`DraftPayloadPort`] und damit aus derselben
+/// Ablage, in die [`draft_save_core`] sie geschrieben hat: entsiegelt unter dem
+/// `draftDEK` durch `ea-draft` und hier nur noch entschluesselt IM SINNE der
+/// Drahtform. Eine leere Nutzlast ist der frisch angelegte Entwurf und damit
+/// ein leerer Rumpf; eine nicht lesbare Nutzlast ist eine BENANNTE Abwesenheit
+/// und nicht der leere Rumpf, weil das die stille Loeschung einer Erfassung
+/// waere.
 fn draft_load_core(state: &DesktopState) -> Result<DraftStateDto, CommandError> {
     let repository = state
         .drafts()
         .ok_or_else(|| CommandError::new(DRAFTS_UNAVAILABLE))?;
-    repository
-        .load_or_create()
+    let payload = repository
+        .load_payload()
         .map_err(|_| CommandError::new(DRAFTS_UNAVAILABLE))?;
     Ok(DraftStateDto {
-        incident: blank_incident_dto(),
+        incident: decode_draft_payload(&payload)?,
         sync: SyncStateDto {
             status: ea_archive_fs::SyncStatus::LocallySaved.label(),
             detail_cause: None,
         },
     })
+}
+
+/// Die Nutzlast eines Entwurfs als Einsatzrumpf.
+///
+/// # Errors
+///
+/// [`DRAFT_PAYLOAD_UNREADABLE`], wenn die entsiegelte Nutzlast keine Drahtform
+/// dieser Anwendung ist. Fail-closed: der leere Rumpf ist die Antwort fuer den
+/// LEEREN Entwurf und niemals die fuer einen unlesbaren.
+fn decode_draft_payload(payload: &str) -> Result<IncidentInputDto, CommandError> {
+    if payload.is_empty() {
+        return Ok(blank_incident_dto());
+    }
+    serde_json::from_str(payload).map_err(|_| CommandError::new(DRAFT_PAYLOAD_UNREADABLE))
+}
+
+/// Der Einsatzrumpf als Nutzlast eines Entwurfs.
+fn encode_draft_payload(incident: &IncidentInputDto) -> Result<String, CommandError> {
+    serde_json::to_string(incident).map_err(|_| CommandError::new(DRAFT_PAYLOAD_UNREADABLE))
 }
 
 /// Ein leerer Einsatzrumpf in seiner Drahtform.
@@ -624,6 +708,11 @@ pub fn blank_incident_dto() -> IncidentInputDto {
 /// Der Eingabevertrag wird ZUERST geprueft: eine Autospeicherung, die einen
 /// unzulaessigen Rumpf annimmt, macht die Ablehnung erst beim Abschluss
 /// sichtbar.
+///
+/// Danach wird die EINGABE geschrieben und nicht der gelesene Entwurf. Der
+/// gemeldete Zustand `lokal gesichert` ist eine Aussage ueber genau diesen
+/// Schreibvorgang: er steht hinter dem `?` der Ablage, und ein Fehlschlag
+/// erreicht ihn nicht.
 fn draft_save_core(
     state: &DesktopState,
     incident: &IncidentInputDto,
@@ -634,11 +723,8 @@ fn draft_save_core(
     let repository = state
         .drafts()
         .ok_or_else(|| CommandError::new(DRAFTS_UNAVAILABLE))?;
-    let draft = repository
-        .load_or_create()
-        .map_err(|_| CommandError::new(DRAFTS_UNAVAILABLE))?;
     repository
-        .save(draft)
+        .save_payload(encode_draft_payload(incident)?)
         .map_err(|_| CommandError::new(DRAFTS_UNAVAILABLE))?;
     Ok(SyncStateDto {
         status: ea_archive_fs::SyncStatus::LocallySaved.label(),
@@ -656,22 +742,52 @@ fn schema_code(error: &SchemaError) -> &'static str {
     error.code()
 }
 
-/// Der Kern von [`writer_preview`] und [`writer_finalize`].
+/// Der gepruefte Einsatzrumpf als Ansichtsmodell.
 ///
-/// Er tut, was hier getan werden KANN — die SKALAREN Positionen des
-/// Einsatzrumpfes gegen die Stufe-1-Konstruktoren pruefen — und meldet dann die
-/// eine Voraussetzung, die dieses Geraet nicht hat.
+/// Er tut, was an dieser Grenze getan werden KANN — die SKALAREN Positionen des
+/// Einsatzrumpfes gegen die Stufe-1-Konstruktoren pruefen — und gibt die
+/// Ansicht heraus, mit der der Schreibport gerufen wird.
 ///
 /// Was er ausdruecklich nicht prueft: die biconditionale Listenregel
 /// `EA-SCHEMA-LIST-REASON`. Sie lebt in `IncidentV1::new`, und dieser
 /// Konstruktor verlangt Momentaufnahmen mit Revision und Provenienz aus der
 /// Stammdatenablage. Sie wird also im Schreibdienst erzwungen und nicht hier
 /// nachgebaut; die Oberflaeche fuehrt sie zusaetzlich als Gestalt.
-fn writer_input_core(incident: &IncidentInputDto) -> Result<(), CommandError> {
+fn writer_input_core(incident: &IncidentInputDto) -> Result<IncidentInputView, CommandError> {
     let view = incident.to_view()?;
     view.try_into_scalars()
         .map_err(|error| CommandError::new(schema_code(&error)))?;
-    Err(CommandError::new(WRITER_UNAVAILABLE))
+    Ok(view)
+}
+
+/// Der Kern von [`writer_preview`].
+///
+/// Die Reihenfolge ist die Aussage: erst der Eingabevertrag, dann der PORT. Die
+/// Abwesenheit sitzt damit an der fehlenden Naht — kein aufgeloester
+/// `WriterService` auf diesem Geraet — und nicht an einer fehlenden Zeile.
+fn preview_core(
+    state: &DesktopState,
+    incident: &IncidentInputDto,
+) -> Result<FinalizationPreviewDto, CommandError> {
+    let view = writer_input_core(incident)?;
+    let port = state
+        .writer()
+        .ok_or_else(|| CommandError::new(WRITER_UNAVAILABLE))?;
+    port.preview(&view).map(FinalizationPreviewDto::from)
+}
+
+/// Der Kern von [`writer_finalize`].
+fn finalize_core(
+    state: &DesktopState,
+    incident: &IncidentInputDto,
+    confirmed: &FinalizationPreviewDto,
+) -> Result<FinalizeOutcomeDto, CommandError> {
+    let view = writer_input_core(incident)?;
+    let port = state
+        .writer()
+        .ok_or_else(|| CommandError::new(WRITER_UNAVAILABLE))?;
+    port.finalize(&view, &confirmed.to_view()?)
+        .map(FinalizeOutcomeDto::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -780,13 +896,15 @@ pub async fn writer_recover_pending(
 ///
 /// # Errors
 ///
-/// Der Code der Stufe 1 bei verletztem Eingabevertrag, sonst
-/// [`WRITER_UNAVAILABLE`].
+/// Der Code der Stufe 1 bei verletztem Eingabevertrag, [`WRITER_UNAVAILABLE`]
+/// ohne verdrahteten Schreibport, sonst der stabile Code des Kerns.
 #[tauri::command]
 pub async fn writer_preview(
+    state: tauri::State<'_, DesktopState>,
     incident: IncidentInputDto,
 ) -> Result<FinalizationPreviewDto, CommandError> {
-    run_blocking(move || writer_input_core(&incident).map(|()| unreachable())).await
+    let state = state.inner().clone();
+    run_blocking(move || preview_core(&state, &incident)).await
 }
 
 /// Die Bestaetigung eines veralteten Registry-Head.
@@ -806,17 +924,16 @@ pub async fn writer_acknowledge_stale_registry() -> Result<StaleAcknowledgementD
 ///
 /// # Errors
 ///
-/// Wie [`writer_preview`].
+/// Wie [`writer_preview`], zusaetzlich [`PREVIEW_REJECTED`], wenn die
+/// BESTAETIGTE Vorschau keinen Zeitstatus des Kontrakts nennt.
 #[tauri::command]
 pub async fn writer_finalize(
+    state: tauri::State<'_, DesktopState>,
     incident: IncidentInputDto,
     confirmed: FinalizationPreviewDto,
 ) -> Result<FinalizeOutcomeDto, CommandError> {
-    run_blocking(move || {
-        let _ = confirmed;
-        writer_input_core(&incident).map(|()| unreachable())
-    })
-    .await
+    let state = state.inner().clone();
+    run_blocking(move || finalize_core(&state, &incident, &confirmed)).await
 }
 
 /// Der Gesundheitsbefund des Bestands.
@@ -859,16 +976,6 @@ pub async fn archive_export_bundle_file() -> Result<BundleExportDto, CommandErro
     run_blocking(|| Err(CommandError::new(BUNDLE_EXPORT_UNAVAILABLE))).await
 }
 
-/// Der Wert, den ein `Err`-Pfad nie erreicht.
-///
-/// [`writer_input_core`] gibt ausschliesslich `Err` zurueck; `map` laeuft also
-/// nie. Die Funktion existiert, damit der Rueckgabetyp des Kommandos die
-/// DRAHTFORM nennt und nicht `()` — verschwindet die Auslassung, steht die
-/// Signatur schon richtig da.
-fn unreachable<T>() -> T {
-    unreachable!("der Eingabepfad endet immer in einer benannten Abwesenheit")
-}
-
 #[cfg(test)]
 mod tests {
     use ea_key_provider::{DevicePostureReport, PostureRequirement};
@@ -876,15 +983,16 @@ mod tests {
     use ea_writer::{RecoveryOutcome, WriterError};
 
     use super::{
-        ARCHIVE_HEALTH_UNAVAILABLE, ArchiveHealthReport, DesktopState, INCIDENT_INPUT_REJECTED,
-        IncidentInputDto, WRITER_UNAVAILABLE, archive_health_core, blank_incident_dto,
-        blocked_view, device_posture_core, master_data_search_core, posture_view,
-        recover_pending_core, resume_view, writer_input_core,
+        ARCHIVE_HEALTH_UNAVAILABLE, ArchiveHealthReport, CommandError, DesktopState,
+        FinalizationPreviewView, FinalizeOutcomeView, INCIDENT_INPUT_REJECTED, IncidentInputDto,
+        IncidentInputView, WRITER_UNAVAILABLE, archive_health_core, blank_incident_dto,
+        blocked_view, device_posture_core, draft_load_core, draft_save_core, finalize_core,
+        master_data_search_core, posture_view, preview_core, recover_pending_core, resume_view,
     };
     use crate::state::{ArchiveHealthPort, SessionState, StartupRecoveryPort};
 
     fn bare_state() -> DesktopState {
-        DesktopState::new(SessionState::new(None, None), None, None, None, None)
+        DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
     }
 
     struct FixedStartup(Result<RecoveryOutcome, WriterError>);
@@ -923,6 +1031,146 @@ mod tests {
             None,
             None,
             None,
+            None,
+        )
+    }
+
+    /// Eine Entwurfsablage, die AUFSCHREIBT, was sie bekommt.
+    ///
+    /// Sie ist der Grund, warum der Port ueber Zeichenketten geht: ein Doppel
+    /// eines `DraftRepository` kann es ausserhalb von `ea-draft` nicht geben
+    /// (`Draft` und `SavedDraft` haben nur `pub(crate)`-Konstruktoren), und ohne
+    /// Doppel bliebe „das Speichern schreibt die EINGABE" eine Behauptung.
+    struct RecordingDrafts {
+        payload: std::sync::Mutex<String>,
+        refuse: bool,
+    }
+
+    impl RecordingDrafts {
+        fn accepting(payload: &str) -> Self {
+            Self {
+                payload: std::sync::Mutex::new(payload.to_owned()),
+                refuse: false,
+            }
+        }
+
+        fn refusing() -> Self {
+            Self {
+                payload: std::sync::Mutex::new(String::new()),
+                refuse: true,
+            }
+        }
+
+        fn written(&self) -> String {
+            self.payload
+                .lock()
+                .expect("kein vergiftetes Schloss")
+                .clone()
+        }
+    }
+
+    impl crate::state::DraftPayloadPort for RecordingDrafts {
+        fn load_payload(&self) -> Result<String, ea_draft::DraftError> {
+            if self.refuse {
+                return Err(ea_draft::DraftError::NoDraft);
+            }
+            Ok(self.written())
+        }
+
+        fn save_payload(&self, payload: String) -> Result<(), ea_draft::DraftError> {
+            if self.refuse {
+                return Err(ea_draft::DraftError::RevisionConflict);
+            }
+            *self.payload.lock().expect("kein vergiftetes Schloss") = payload;
+            Ok(())
+        }
+    }
+
+    fn state_with_drafts(drafts: std::sync::Arc<RecordingDrafts>) -> DesktopState {
+        DesktopState::new(
+            SessionState::new(None, None),
+            None,
+            None,
+            Some(drafts),
+            None,
+            None,
+        )
+    }
+
+    /// Ein Schreibport, der die Vorschau und den Abschluss ZURUECKGIBT.
+    ///
+    /// Er haelt fest, mit welchem Rumpf er gerufen wurde: ohne dieses Argument
+    /// koennte die Grenze eine andere Erfassung weiterreichen als die gepruefte,
+    /// und der Zeuge bliebe gruen.
+    struct FixedWriter {
+        preview: FinalizationPreviewView,
+        outcome: FinalizeOutcomeView,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::state::WriterPreviewPort for FixedWriter {
+        fn preview(
+            &self,
+            incident: &IncidentInputView,
+        ) -> Result<FinalizationPreviewView, CommandError> {
+            self.seen
+                .lock()
+                .expect("kein vergiftetes Schloss")
+                .push(incident.human_incident_number.clone());
+            Ok(self.preview)
+        }
+    }
+
+    impl crate::state::WriterFinalizePort for FixedWriter {
+        fn finalize(
+            &self,
+            incident: &IncidentInputView,
+            confirmed: &FinalizationPreviewView,
+        ) -> Result<FinalizeOutcomeView, CommandError> {
+            assert_eq!(
+                *confirmed, self.preview,
+                "die bestaetigte Vorschau reist mit"
+            );
+            self.seen
+                .lock()
+                .expect("kein vergiftetes Schloss")
+                .push(incident.human_incident_number.clone());
+            Ok(self.outcome.clone())
+        }
+    }
+
+    fn fixed_writer() -> std::sync::Arc<FixedWriter> {
+        std::sync::Arc::new(FixedWriter {
+            preview: FinalizationPreviewView {
+                proposed_sequence: ChainSequence::new(7),
+                binds_predecessor: true,
+                effective_now: ea_types::UnixMillis::new(1_771_000_100_000),
+                trust_age_ms: 3_600_000,
+                reader_trust_refresh_ms: 604_800_000,
+                trust_refresh_overdue: false,
+                stale_decision: ea_ui_contracts::StaleDecision::Fresh,
+            },
+            seen: std::sync::Mutex::new(Vec::new()),
+            outcome: FinalizeOutcomeView {
+                sequence: ChainSequence::new(7),
+                entry_hash: "aa".repeat(32),
+                object_hash: "bb".repeat(32),
+                sync: ea_ui_contracts::SyncStateView {
+                    status: ea_archive_fs::SyncStatus::LocallySaved,
+                    detail_cause: None,
+                },
+            },
+        })
+    }
+
+    fn state_with_writer(writer: std::sync::Arc<FixedWriter>) -> DesktopState {
+        DesktopState::new(
+            SessionState::new(None, None),
+            None,
+            None,
+            None,
+            None,
+            Some(writer),
         )
     }
 
@@ -1036,6 +1284,7 @@ mod tests {
             Some(std::sync::Arc::new(FixedHealth(
                 ArchiveHealthReport::default(),
             ))),
+            None,
         );
         let dto = archive_health_core(&state).expect("der Bericht liegt");
         assert!(dto.healthy);
@@ -1070,7 +1319,7 @@ mod tests {
     fn the_incident_input_is_checked_before_the_writer_absence_is_reported() {
         let mut incident = valid_incident();
         assert_eq!(
-            writer_input_core(&incident)
+            preview_core(&bare_state(), &incident)
                 .expect_err("kein Schreibdienst")
                 .code,
             WRITER_UNAVAILABLE
@@ -1078,7 +1327,7 @@ mod tests {
 
         incident.patient_count_status = "Vielleicht".to_owned();
         assert_eq!(
-            writer_input_core(&incident)
+            preview_core(&bare_state(), &incident)
                 .expect_err("ein unbekannter Zustand ist keine Eingabe")
                 .code,
             INCIDENT_INPUT_REJECTED
@@ -1104,12 +1353,12 @@ mod tests {
     fn the_scalar_positions_are_rejected_with_the_stage_one_code() {
         let mut incident = valid_incident();
         incident.occurred_at.end = Some(incident.occurred_at.start - 1);
-        let error = writer_input_core(&incident).expect_err("ein Ende vor dem Beginn");
+        let error = preview_core(&bare_state(), &incident).expect_err("ein Ende vor dem Beginn");
         assert_eq!(error.code, "EA-SCHEMA-INTERVAL");
 
         incident.occurred_at.end = None;
         assert_eq!(
-            writer_input_core(&incident)
+            preview_core(&bare_state(), &incident)
                 .expect_err("jetzt faellt nur der Dienst")
                 .code,
             WRITER_UNAVAILABLE
@@ -1125,7 +1374,7 @@ mod tests {
             lon_e7: 0,
         });
         assert_eq!(
-            writer_input_core(&incident)
+            preview_core(&bare_state(), &incident)
                 .expect_err("Breite jenseits des Bereichs")
                 .code,
             "EA-SCHEMA-COORDINATES"
@@ -1138,7 +1387,7 @@ mod tests {
     fn the_blank_incident_is_wire_valid_and_stage_one_invalid() {
         let blank = blank_incident_dto();
         assert!(blank.to_view().is_ok());
-        assert!(writer_input_core(&blank).is_err());
+        assert!(preview_core(&bare_state(), &blank).is_err());
     }
 
     /// Die Fortsetzungsansicht traegt den Veroeffentlichungszustand, wenn einer
@@ -1153,6 +1402,200 @@ mod tests {
         };
         let view = resume_view(&outcome, Some(sync));
         assert_eq!(view.sync, Some(sync));
+    }
+
+    /// Das Speichern schreibt die EINGABE — und meldet erst danach `lokal
+    /// gesichert`.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Grenze, die die Eingabe
+    /// prueft und dann den GELADENEN Entwurf zurueckspeichert. Sie meldete den
+    /// bestaetigenden Zustand, der Bediener startete neu, und die Erfassung waere
+    /// fort — ohne dass irgendein Pfad eine Abwesenheit benannt haette.
+    #[test]
+    fn saving_a_draft_writes_the_typed_incident_and_reads_it_back() {
+        let drafts = std::sync::Arc::new(RecordingDrafts::accepting(""));
+        let state = state_with_drafts(std::sync::Arc::clone(&drafts));
+
+        // Der leere Entwurf ist ein leerer Rumpf und kein erfundener Inhalt.
+        let loaded = draft_load_core(&state).expect("der Entwurf liegt");
+        assert_eq!(loaded.incident, blank_incident_dto());
+
+        let incident = valid_incident();
+        let sync = draft_save_core(&state, &incident).expect("die Ablage nimmt an");
+        assert_eq!(sync.status, ea_archive_fs::SyncStatus::LocallySaved.label());
+        assert!(!drafts.written().is_empty(), "die Nutzlast ist geschrieben");
+
+        let reloaded = draft_load_core(&state).expect("der Entwurf liegt");
+        assert_eq!(
+            reloaded.incident, incident,
+            "jede Position der Erfassung kommt zurueck"
+        );
+        assert_ne!(reloaded.incident, blank_incident_dto());
+    }
+
+    /// Eine abgelehnte Speicherung meldet KEINEN bestaetigten Zustand.
+    #[test]
+    fn a_refused_draft_write_reports_no_confirmed_sync_state() {
+        let refusing = state_with_drafts(std::sync::Arc::new(RecordingDrafts::refusing()));
+        assert_eq!(
+            draft_save_core(&refusing, &valid_incident())
+                .expect_err("die Ablage lehnt ab")
+                .code,
+            super::DRAFTS_UNAVAILABLE
+        );
+        assert_eq!(
+            draft_save_core(&bare_state(), &valid_incident())
+                .expect_err("keine Ablage")
+                .code,
+            super::DRAFTS_UNAVAILABLE
+        );
+    }
+
+    /// Eine unlesbare Nutzlast ist eine BENANNTE Abwesenheit und nicht der leere
+    /// Rumpf.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: ein `unwrap_or_default` beim
+    /// Lesen. Es zeigte dem Bediener eine leere Maske ueber einer Erfassung, die
+    /// noch da ist — und das naechste Speichern ueberschriebe sie.
+    #[test]
+    fn an_unreadable_draft_payload_is_a_named_absence() {
+        let state = state_with_drafts(std::sync::Arc::new(RecordingDrafts::accepting(
+            "kein Einsatzrumpf",
+        )));
+        assert_eq!(
+            draft_load_core(&state)
+                .expect_err("das ist keine Drahtform")
+                .code,
+            super::DRAFT_PAYLOAD_UNREADABLE
+        );
+    }
+
+    /// Die Vorschau des Kerns kommt durch die GRENZE — als Drahtform.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Grenze, die den Port nicht
+    /// ruft (oder eine andere Erfassung weiterreicht als die gepruefte). Dann
+    /// stuende der Aufruf von `WriterService::preview` nirgends, und die
+    /// Bestaetigungsflaeche zeigte eine Vorschau, die niemand gerechnet hat.
+    #[test]
+    fn the_preview_comes_through_the_writer_port_as_the_wire_form() {
+        let writer = fixed_writer();
+        let state = state_with_writer(std::sync::Arc::clone(&writer));
+        let dto = preview_core(&state, &valid_incident()).expect("der Port antwortet");
+        assert_eq!(dto.proposed_sequence, 7);
+        assert!(dto.binds_predecessor);
+        assert_eq!(dto.effective_now, 1_771_000_100_000);
+        // Die zwei Zahlen der Vertrauensfrist stehen NEBENEINANDER und sind
+        // verschieden: vertauscht saehe der Bediener ein Alter von sieben Tagen
+        // gegen eine Frist von einer Stunde.
+        assert_eq!(dto.trust_age_ms, 3_600_000);
+        assert_eq!(dto.reader_trust_refresh_ms, 604_800_000);
+        assert!(!dto.trust_refresh_overdue);
+        assert_eq!(dto.stale_decision, "Fresh");
+        assert_eq!(
+            writer
+                .seen
+                .lock()
+                .expect("kein vergiftetes Schloss")
+                .as_slice(),
+            ["2026-0001"],
+            "der GEPRUEFTE Rumpf erreicht den Port"
+        );
+    }
+
+    /// Der Abschluss traegt die zwei HASHES und die Sequenz.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Drahtform, die die Hashes
+    /// fallen laesst. Dann zeigte der `FingerprintBlock` nach dem
+    /// unwiderruflichen Schritt nur eine Zahl, und der Bediener haette keinen
+    /// Fingerabdruck des Eintrags.
+    #[test]
+    fn the_finalize_outcome_carries_both_hashes_and_the_sequence() {
+        let state = state_with_writer(fixed_writer());
+        let confirmed = preview_core(&state, &valid_incident()).expect("der Port antwortet");
+        let dto =
+            finalize_core(&state, &valid_incident(), &confirmed).expect("der Port schliesst ab");
+        assert_eq!(dto.sequence, 7);
+        // JEDES Feld an SEINER Position: eine Laengenpruefung liesse die zwei
+        // Hashes vertauschen, und ein vertauschter Fingerabdruck ist einer.
+        assert_eq!(dto.entry_hash, "aa".repeat(32));
+        assert_eq!(dto.object_hash, "bb".repeat(32));
+        assert_eq!(
+            dto.sync.status,
+            ea_archive_fs::SyncStatus::LocallySaved.label()
+        );
+    }
+
+    /// Ohne verdrahteten Schreibport: die Abwesenheit sitzt am PORT.
+    #[test]
+    fn without_a_writer_port_preview_and_finalize_name_the_absence() {
+        let state = state_with_writer(fixed_writer());
+        let confirmed = preview_core(&state, &valid_incident()).expect("der Port antwortet");
+        assert_eq!(
+            preview_core(&bare_state(), &valid_incident())
+                .expect_err("kein Port")
+                .code,
+            WRITER_UNAVAILABLE
+        );
+        assert_eq!(
+            finalize_core(&bare_state(), &valid_incident(), &confirmed)
+                .expect_err("kein Port")
+                .code,
+            WRITER_UNAVAILABLE
+        );
+    }
+
+    /// Eine bestaetigte Vorschau mit unbekanntem Zeitstatus ist keine.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: ein ungeprueftes Wort, das zu
+    /// `Fresh` wird. Dann faellt die Bestaetigungspflicht des mittleren Arms
+    /// `StaleAcknowledgeable` still weg.
+    #[test]
+    fn a_confirmed_preview_with_an_unknown_time_status_is_rejected() {
+        let state = state_with_writer(fixed_writer());
+        let mut confirmed = preview_core(&state, &valid_incident()).expect("der Port antwortet");
+        confirmed.stale_decision = "Egal".to_owned();
+        assert_eq!(
+            finalize_core(&state, &valid_incident(), &confirmed)
+                .expect_err("das ist kein Zeitstatus")
+                .code,
+            super::PREVIEW_REJECTED
+        );
+    }
+
+    /// Ein Zustand `known` OHNE Zahl ist keine Eingabe — und ein `unknown` MIT
+    /// Zahl auch nicht.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: die Grenze fuellt die fehlende
+    /// Zahl mit einem Vorgabewert auf. Die Bestaetigungsansicht sagte dann
+    /// „Patientenzahl unbekannt", und der Draht truege `known, 0` — zwei
+    /// verschiedene Aussagen ueber dieselbe Zahl.
+    #[test]
+    fn a_divergent_patient_count_pair_is_rejected_at_the_boundary() {
+        let mut incident = valid_incident();
+        incident.patient_count = None;
+        assert_eq!(
+            incident
+                .to_view()
+                .expect_err("bekannt ohne Zahl ist keine Eingabe")
+                .code,
+            INCIDENT_INPUT_REJECTED
+        );
+
+        incident.patient_count_status = super::blank_incident_dto().patient_count_status;
+        incident.patient_count = Some(3);
+        assert_eq!(
+            incident
+                .to_view()
+                .expect_err("unbekannt mit Zahl ist keine Eingabe")
+                .code,
+            INCIDENT_INPUT_REJECTED
+        );
+
+        incident.patient_count = None;
+        assert!(
+            incident.to_view().is_ok(),
+            "unbekannt ohne Zahl ist gueltig"
+        );
     }
 
     fn valid_incident() -> IncidentInputDto {
