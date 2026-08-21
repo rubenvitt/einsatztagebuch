@@ -43,6 +43,14 @@ impl PreexistingEffectiveNow {
 #[cfg_attr(not(test), allow(dead_code))]
 struct SelectedHeadInner {
     candidate_state: Arc<PreviousHeadState>,
+    /// Die Kettenkennung DES ANKERS, gegen den dieser Head gewaehlt wurde.
+    ///
+    /// Sie reist mit der Auswahl, weil sie sonst nirgends autoritativ zu haben
+    /// ist: `PreviousHeadState`, `RegistryEventFieldsV1` und
+    /// `OperatorBindingFieldsV1` fuehren keine, und ein Verbraucher, der seine
+    /// eigene `chain_id` gegen NICHTS pruefen kann, mintet auf einem leeren
+    /// Bestand einen Genesis-Knoten in einer Phantomkette.
+    chain_id: ChainId,
     registry_version: RegistryVersion,
     registry_head_hash: ObjectHash,
     policy: ResolvedPolicy,
@@ -84,6 +92,17 @@ impl SelectedRegistryHead {
     #[must_use]
     pub fn registry_head_hash(&self) -> ObjectHash {
         self.inner.registry_head_hash
+    }
+
+    /// Die Kettenkennung des Ankers, gegen den dieser Head gewaehlt wurde.
+    ///
+    /// Sie ist die AUTORITAET fuer die Frage „in welche Kette schreibe ich
+    /// hier". Ein Verbraucher, der eine eigene `chain_id` traegt, vergleicht
+    /// sie gegen DIESE — auf einem leeren Bestand gibt es keinen Knoten, der
+    /// die Frage sonst beantworten koennte.
+    #[must_use]
+    pub fn chain_id(&self) -> ChainId {
+        self.inner.chain_id
     }
 
     #[must_use]
@@ -310,6 +329,8 @@ struct FallbackSuccessorBarrier {
 }
 
 pub struct RegistryCandidate {
+    /// Die Kettenkennung des Ankers, gegen den dieser Kandidat geprueft wurde.
+    chain_id: ChainId,
     registry_version: RegistryVersion,
     registry_head_hash: ObjectHash,
     preexisting_authority: Option<PreexistingRegistryAuthority>,
@@ -536,6 +557,7 @@ pub fn verify_registry_candidate(
     let target_policy = state.policy.clone().ok_or(TrustError::ActionMismatch)?;
     let guard_policy = guard_policy.unwrap_or_else(|| target_policy.clone());
     Ok(RegistryCandidate {
+        chain_id: trust.chain_id(),
         registry_version: event.fields.registry_version,
         registry_head_hash: event.object_hash,
         preexisting_authority: authority_state
@@ -572,6 +594,7 @@ fn current_candidate(
     let head_event = state.head_event.clone().ok_or(RegistryError::Rollback)?;
     let authority_state = Arc::new(state);
     Ok(RegistryCandidate {
+        chain_id: trust.chain_id(),
         registry_version: pin.registry_version(),
         registry_head_hash: pin.registry_head_hash(),
         preexisting_authority: Some(PreexistingRegistryAuthority {
@@ -837,6 +860,7 @@ fn selected_head(
     SelectedRegistryHead {
         inner: Arc::new(SelectedHeadInner {
             candidate_state: candidate.candidate_state,
+            chain_id: candidate.chain_id,
             registry_version: candidate.registry_version,
             registry_head_hash: candidate.registry_head_hash,
             policy: candidate.target_policy,

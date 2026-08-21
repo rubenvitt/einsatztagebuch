@@ -54,6 +54,13 @@ pub enum WriterError {
     /// Eine zurueckgespielte Sicherung verlangt den externen
     /// Kopfabgleich, bevor wieder finalisiert werden darf.
     HeadReconciliationRequired,
+    /// Die gebundene `chain_id` ist nicht die des gewaehlten Registry-Head.
+    ///
+    /// Fail-closed VOR jedem Schreibvorgang: auf einem leeren Bestand gibt es
+    /// keinen Knoten, an dem die Kettenpruefung eine fremde Kennung erkennen
+    /// koennte, und ein dort geminteter Genesis-Knoten machte den Bestand
+    /// dauerhaft unfinalisierbar.
+    ChainIdMismatch,
     /// Es liegt schon eine vorbereitete Abschlussmarke.
     PreparedFinalizationPresent,
     /// Es liegt keine vorbereitete Abschlussmarke.
@@ -108,6 +115,7 @@ impl WriterError {
             Self::ReauthPurposeMismatch => "EA-WRITER-REAUTH-PURPOSE-MISMATCH",
             Self::ReauthBindingMismatch => "EA-WRITER-REAUTH-BINDING-MISMATCH",
             Self::HeadReconciliationRequired => "EA-WRITER-HEAD-RECONCILIATION-REQUIRED",
+            Self::ChainIdMismatch => "EA-WRITER-CHAIN-ID-MISMATCH",
             Self::PreparedFinalizationPresent => "EA-WRITER-PREPARED-FINALIZATION-PRESENT",
             Self::NoPreparedFinalization => "EA-WRITER-NO-PREPARED-FINALIZATION",
             Self::PreparedFinalizationUnreadable => "EA-WRITER-PREPARED-FINALIZATION-UNREADABLE",

@@ -335,3 +335,270 @@ fn a_prepared_finalization_beats_a_pending_discard_intent() {
         Some("EA-DRAFT-PREPARED-FINALIZATION-PRESENT")
     );
 }
+
+/// Eine Ablage, die den leeren Entwurf NICHT anlegen kann.
+///
+/// Sie existiert fuer genau eine Messung: Schritt 13 wechselt Abschlussmarke
+/// und leeren Entwurf in EINEM dauerhaften Schritt, und diese Zusage ist nur
+/// dort messbar, wo dieser Schritt FEHLSCHLAEGT. Gegen die echte Ablage kann er
+/// es nicht — der In-Prozess-Schluesselspeicher liefert immer.
+///
+/// `DraftError::LocalRng` ist der ehrliche Fehler: `create_blank` zieht den
+/// frischen `draftDEK` und eine `draft_id` aus der Zufallsquelle, und genau
+/// dieser Zug liegt INNERHALB der Transaktion.
+struct BlankDraftRefusingRepository {
+    inner: std::sync::Arc<dyn ea_draft::DraftRepository>,
+}
+
+impl ea_draft::DraftRepository for BlankDraftRefusingRepository {
+    fn load_or_create(&self) -> Result<ea_draft::Draft, ea_draft::DraftError> {
+        self.inner.load_or_create()
+    }
+
+    fn save(
+        &self,
+        draft: ea_draft::Draft,
+    ) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
+        self.inner.save(draft)
+    }
+
+    fn draft_dek_handle(
+        &self,
+        draft: &ea_draft::SavedDraft,
+    ) -> Result<ea_key_provider::KeyHandle, ea_draft::DraftError> {
+        self.inner.draft_dek_handle(draft)
+    }
+
+    fn commit_discard_intent(
+        &self,
+        draft: &ea_draft::SavedDraft,
+    ) -> Result<ea_draft::DiscardIntent, ea_draft::DraftError> {
+        self.inner.commit_discard_intent(draft)
+    }
+
+    fn pending_discard(&self) -> Result<Option<ea_draft::DiscardIntent>, ea_draft::DraftError> {
+        self.inner.pending_discard()
+    }
+
+    fn replace_with_blank(&self) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
+        Err(ea_draft::DraftError::LocalRng)
+    }
+
+    fn remove_ciphertext_and_intent_create_blank(
+        &self,
+        intent: &ea_draft::DiscardIntent,
+    ) -> Result<ea_draft::DiscardOutcome, ea_draft::DraftError> {
+        self.inner.remove_ciphertext_and_intent_create_blank(intent)
+    }
+
+    fn prepared_finalization_marker(
+        &self,
+    ) -> Result<Option<ea_draft::PreparedFinalizationMarker>, ea_draft::DraftError> {
+        self.inner.prepared_finalization_marker()
+    }
+
+    fn replace_prepared_finalization_marker(
+        &self,
+        marker: Option<ea_draft::PreparedFinalizationMarker>,
+    ) -> Result<(), ea_draft::DraftError> {
+        self.inner.replace_prepared_finalization_marker(marker)
+    }
+
+    fn acquire_draft_lock(&self) -> Result<ea_draft::DraftLock, ea_draft::DraftError> {
+        self.inner.acquire_draft_lock()
+    }
+}
+
+/// Schritt 13 wechselt Marke und leeren Entwurf in EINEM dauerhaften Schritt.
+///
+/// Der Zwischenzustand „Marke fort, alter Entwurf mit geloeschtem `draftDEK`
+/// noch da" ist der EINZIGE, aus dem kein Arm mehr herausfuehrt: `load_or_create`
+/// scheitert an `unwrap_secret`, `recover_pending` findet keine Marke und meldet
+/// `NothingPending`, und das Geraet ist ohne Eingriff in die Datenbank
+/// unbenutzbar. Diese Zusicherung ist FALSIFIZIERBAR: schreibt Schritt 13 die
+/// Marke wieder in einem eigenen, vorangestellten Schritt fort, ist die Marke
+/// hier fort und `recover_pending` meldet `NothingPending` — beide Zeilen unten
+/// fallen dann.
+#[test]
+fn a_failed_blank_draft_leaves_the_prepared_marker_and_stays_recoverable() {
+    let harness = WriterHarness::with_incident();
+    let source = harness.source();
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+
+    let refusing = std::sync::Arc::new(BlankDraftRefusingRepository {
+        inner: harness.repository(),
+    }) as std::sync::Arc<dyn ea_draft::DraftRepository>;
+    let blocked = ea_writer::WriterService::new(
+        refusing,
+        harness.provider() as std::sync::Arc<dyn ea_key_provider::KeyProvider>,
+        harness.backend(),
+        &source,
+        harness.head(),
+        &[],
+        ea_draft::IncidentNumberRegister::new(harness.database()),
+        ea_draft::OperatorProfileRepository::new(harness.database()),
+        harness.binding(),
+    );
+    let preview = blocked
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .expect("die Vorschau beruehrt Schritt 13 nicht");
+    let error = blocked
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
+        .expect_err("der leere Entwurf laesst sich nicht anlegen");
+    assert_eq!(error.code(), "EA-DRAFT-LOCAL-RNG");
+
+    // Der Eintrag ist committed — Schritt 13 liegt HINTER der Grenze.
+    assert_eq!(harness.published_entry_paths().len(), 1);
+    // Und die Marke steht noch: der Wechsel ist nicht zur Haelfte passiert.
+    assert!(
+        harness.prepared_marker_is_present(),
+        "die Marke MUSS liegen, sonst gibt es keinen Weg zurueck"
+    );
+
+    // Damit bleibt das Geraet benutzbar: derselbe Veroeffentlichungspfad
+    // vollendet aus denselben vorbereiteten Bytes.
+    let service = harness.service(&source);
+    let outcome = service
+        .recover_pending()
+        .expect("die Wiederaufnahme muss die Marke finden");
+    assert!(matches!(
+        outcome,
+        RecoveryOutcome::CommittedFromPreparedBytes { .. }
+    ));
+    assert_eq!(harness.published_entry_paths().len(), 1);
+    assert!(!harness.prepared_marker_is_present());
+    assert!(harness.draft_is_blank());
+}
+
+/// Ein Renamefehler bei FREIER Zieladresse schreibt nichts unter den
+/// Commit-Namen.
+///
+/// # Was hier gemessen wird
+///
+/// Der Fallback auf `create_if_absent` gilt AUSSCHLIESSLICH dem
+/// Wiederholungsfall, in dem die Zieladresse schon liegt. Fiel er bei JEDEM
+/// Renamefehler an, liefe sein `create_new` + `write_all` auf die ENDADRESSE:
+/// ein Abbruch mittendrin — volles Medium — liesse eine abgeschnittene Datei
+/// unter ihrem endgueltigen Commit-Marker-Namen zurueck, und jeder weitere
+/// Anlauf traefe sie mit `EA-ARCHIVE-BYTE-CONFLICT`.
+///
+/// Der eingespielte Fehler ist ein Rename ueber eine Dateisystemgrenze, weil
+/// nur er im Testwirt reproduzierbar ist und VOR jeder Dateisystemarbeit
+/// greift; die Zusage gilt fuer jeden Renamefehler gleich, denn das Backend
+/// meldet sie alle als `Io` oder `NotSameFilesystem` und unterscheidet sie
+/// nicht.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR: faellt der Zweig wieder auf JEDEN
+/// Fehler in `create_if_absent`, dann VEROEFFENTLICHT dieser Lauf, die
+/// Wiederaufnahme meldet Erfolg statt Fehler, und die Zeile ueber
+/// `exists_for_test` faellt.
+#[test]
+fn a_rename_failure_with_a_free_target_never_writes_under_the_commit_name() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterGrantPublishBeforeEntryRename)
+        .expect("der Abbruch vor dem Eintragsrename muss erreichbar sein");
+    assert!(harness.published_entry_paths().is_empty());
+
+    // Die Zieladresse dieser vorbereiteten Transaktion — abgeleitet aus der
+    // liegenden Staging-Adresse und nicht neu gebildet.
+    let staged = harness
+        .backend()
+        .relative_paths_below_for_test("entries/")
+        .into_iter()
+        .find(|path| path.ends_with(".eip.staging"))
+        .expect("Schritt 8 hat die Eintragsbytes gestagt");
+    let target = staged
+        .strip_suffix(".staging")
+        .expect("die Staging-Adresse ist die Zieladresse plus Suffix")
+        .to_owned();
+
+    harness.backend().mark_foreign_filesystem_for_test(&target);
+    let source = harness.source();
+    let service = harness.service(&source);
+    let error = service
+        .recover_pending()
+        .expect_err("ein Rename ueber die Dateisystemgrenze MUSS propagieren");
+    assert_eq!(error.code(), "EA-ARCHIVE-NOT-SAME-FILESYSTEM");
+    assert!(
+        !harness.backend().exists_for_test(&target),
+        "unter dem Commit-Namen darf NICHTS liegen, wenn der Rename gescheitert ist"
+    );
+    assert!(
+        harness.backend().exists_for_test(&staged),
+        "das unversehrte Staging MUSS liegen bleiben, sonst gibt es keinen zweiten Anlauf"
+    );
+    assert!(harness.prepared_marker_is_present());
+
+    // Und der Zustand ist fortsetzbar: dieselbe Marke, dieselben Bytes,
+    // derselbe Pfad.
+    harness
+        .backend()
+        .clear_foreign_filesystem_for_test(&target);
+    let outcome = service
+        .recover_pending()
+        .expect("die Wiederaufnahme muss nach dem Fehler tragen");
+    assert!(matches!(
+        outcome,
+        RecoveryOutcome::CommittedFromPreparedBytes { .. }
+    ));
+    assert_eq!(harness.published_entry_paths(), vec![target]);
+}
+
+/// Eine gebuchte Verwerfensabsicht blockiert die Finalisierung NICHT — und das
+/// ist eine Entscheidung und kein Versehen.
+///
+/// # Warum diese Zeile hier steht
+///
+/// Die Vorrangregel („keiner der beiden wird dauerhaft geschrieben, solange der
+/// andere vorliegt") haelt am Schreibort in beide Richtungen: `commit_discard_intent`
+/// weist eine liegende Abschlussmarke fail-closed ab
+/// (`crates/ea-draft/tests/discard_faults.rs`). Die Gegenrichtung — Marke
+/// schreiben, waehrend eine Absicht gebucht ist — ist AUSDRUECKLICH offen:
+/// `draft_transition` ist EIN Platz, die Marke verdraengt die Absicht
+/// strukturell, und der Bediener behaelt damit einen Weg aus einem gebuchten
+/// Verwerfen heraus. Die Alternative waere eine dauerhafte Blockade: die
+/// Verwerfenskommandos des Wirts sind in dieser Stufe Stummel, ein gebuchtes
+/// Verwerfen hat also keinen Aufloesungspfad an der Oberflaeche, und eine
+/// fail-closed Abweisung an dieser Stelle machte das Geraet unbenutzbar.
+///
+/// Die Zeile ist ein Waechter fuer genau diese Abwaegung: wer hier eine
+/// Blockade einbaut, faellt hier auf und muss den Aufloesungspfad mitliefern.
+#[test]
+fn a_booked_discard_intent_is_displaced_by_the_prepared_finalization() {
+    let harness = WriterHarness::with_incident();
+    let repository = harness.repository();
+    let draft = repository
+        .load_or_create()
+        .expect("der Entwurf der Fixture muss lesbar sein");
+    let saved = repository.save(draft).expect("das Speichern muss tragen");
+    repository
+        .commit_discard_intent(&saved)
+        .expect("ohne liegende Marke MUSS die Buchung tragen");
+    assert!(
+        repository
+            .pending_discard()
+            .expect("die Uebergangstabelle muss lesbar sein")
+            .is_some()
+    );
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+    let preview = service
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .expect("die gebuchte Absicht blockiert die Vorschau nicht");
+    service
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
+        .expect("die gebuchte Absicht blockiert den Abschluss nicht");
+
+    assert_eq!(harness.published_entry_paths().len(), 1);
+    assert!(
+        repository
+            .pending_discard()
+            .expect("die Uebergangstabelle muss lesbar sein")
+            .is_none(),
+        "die Absicht ist mit der Marke verdraengt und mit Schritt 13 geraeumt"
+    );
+    assert!(!harness.prepared_marker_is_present());
+}

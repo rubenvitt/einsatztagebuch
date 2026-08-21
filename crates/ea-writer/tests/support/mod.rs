@@ -61,7 +61,7 @@ use ea_trust::{
     verify_registry_candidate,
 };
 use ea_types::{
-    ChainId, ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
+    ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
     UnixMillis,
 };
 use ea_writer::{
@@ -625,7 +625,14 @@ impl WriterHarness {
             writer_certificate_hash: built.writer_certificate_hash.into(),
             writer_key_thumbprint: writer_public.thumbprint(),
             writer_signing_handle,
-            chain_id: ChainId::try_from(&[0x50; 16][..]).expect("16 Byte"),
+            // Die Kettenkennung kommt aus DEM GEWAEHLTEN HEAD und nicht aus
+            // einem eigenen Literal. Ein eigenes Literal war genau der Zustand,
+            // den die Finalisierung inzwischen fail-closed abweist: die Bindung
+            // behauptete eine Kette, die die Vertrauenslinie dieser Fixture
+            // nicht fuehrt, und auf einem LEEREN Bestand faellt das nirgends
+            // auf — dort gibt es keinen Knoten, an dem eine fremde Kennung
+            // erkennbar waere.
+            chain_id: head.chain_id(),
             archive_profile_hash: profile_hash,
         };
 
@@ -695,6 +702,30 @@ impl WriterHarness {
             IncidentNumberRegister::new(Arc::clone(&self.store().database)),
             OperatorProfileRepository::new(Arc::clone(&self.store().database)),
             self.binding,
+        )
+    }
+
+    /// Derselbe Dienst mit einer ABWEICHENDEN Geraetebindung.
+    ///
+    /// Sie ist der einzige Weg, eine Bindung zu messen, die nicht zu dieser
+    /// Vertrauenslinie gehoert: die Fixture bildet ihre Bindung aus GENAU dem
+    /// gewaehlten Head, und eine unstimmige entsteht darum nur absichtlich.
+    #[must_use]
+    pub fn service_with_binding<'a>(
+        &'a self,
+        source: &'a dyn ea_archive::ArchiveSource,
+        binding: WriterBindingV1,
+    ) -> WriterService<'a> {
+        WriterService::new(
+            Arc::clone(&self.store().repository),
+            Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
+            &self.backend,
+            source,
+            &self.head,
+            &[],
+            IncidentNumberRegister::new(Arc::clone(&self.store().database)),
+            OperatorProfileRepository::new(Arc::clone(&self.store().database)),
+            binding,
         )
     }
 

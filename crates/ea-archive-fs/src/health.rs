@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use ea_archive::{ArchiveBackendError, QuarantineReason, STAGING_SUFFIX_V1};
+use ea_archive::{ArchiveBackendError, QuarantineReason};
 use ea_crypto::object_hash;
 use ea_format::ArchiveInventoryListV1;
 use ea_verify::{ObjectResultKindV1, VerificationReportV1};
@@ -187,7 +187,7 @@ impl<'a> ArchiveHealthCheckV1<'a> {
         let scratch_prefix = format!("{CAPABILITY_SCRATCH_DIR_V1}/");
         for relative in self.backend.relative_paths()? {
             let temporary =
-                relative.ends_with(STAGING_SUFFIX_V1) || relative.starts_with(&scratch_prefix);
+                ea_archive::is_staging_path(&relative) || relative.starts_with(&scratch_prefix);
             let orphan_grant = relative.starts_with(ea_archive::GRANTS_DIR_V1)
                 && self.expected_inventory.content_hash_of(&relative).is_none();
             if temporary || orphan_grant {

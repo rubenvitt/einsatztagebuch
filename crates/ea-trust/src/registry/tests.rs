@@ -317,6 +317,7 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
 
     let SelectedHeadInner {
         candidate_state,
+        chain_id: selected_chain_id,
         registry_version,
         registry_head_hash,
         policy,
@@ -330,6 +331,11 @@ fn real_selected_path_retains_only_the_exact_authority_and_committed_view() {
         committed_revision,
     } = selected.inner.as_ref();
     assert!(Arc::ptr_eq(candidate_state, &expected_candidate_state));
+    // Die Kettenkennung DES ANKERS, unveraendert durchgereicht. Sie ist die
+    // einzige Autoritaet fuer die Frage „in welche Kette schreibe ich hier":
+    // ein Verbraucher auf einem LEEREN Bestand hat keinen Knoten, an dem eine
+    // fremde Kennung auffiele.
+    assert!(*selected_chain_id == chain_id());
     assert!(*registry_version == fixture.candidate_head.version);
     assert!(*registry_head_hash == fixture.candidate_head.object_hash);
     assert!(policy.object_hash == expected_policy.object_hash);

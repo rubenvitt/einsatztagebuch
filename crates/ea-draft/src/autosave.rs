@@ -217,6 +217,33 @@ impl DraftRepository for AutosaveDraftRepository {
             if row.draft_id != draft.draft_id() || row.revision != draft.revision() {
                 return Err(DraftError::RevisionConflict);
             }
+            // Fail-closed gegen eine liegende Abschlussmarke, IN DERSELBEN
+            // Transaktion wie der Schreibvorgang.
+            //
+            // `draft_transition` ist EIN Platz, also verdraengt dieser Upsert
+            // eine liegende Marke — und mit ihr die EINZIGE Spur der
+            // vorbereiteten Transaktion: die gestagten Bytes lagen dann ohne
+            // Marke im Bestand, `recover_pending` meldete `NothingPending`,
+            // und der Eintrag waere verloren, obwohl seine Bytes vollstaendig
+            // geschrieben sind. Die Vorrangregel („keiner der beiden wird
+            // dauerhaft geschrieben, solange der andere vorliegt") haelt
+            // deshalb AM SCHREIBORT und nicht erst am Diensteingang:
+            // `DiscardService::enter` prueft dasselbe, aber vor dem Nehmen der
+            // Transaktion, und das ist ein Zeitfenster.
+            //
+            // Gelesen wird ueber `transaction` und nicht ueber
+            // `Self::prepared_finalization_marker`: jene Abfrage nimmt dieselbe
+            // Verbindung, und `Mutex<Connection>` ist nicht
+            // wiedereintrittsfaehig.
+            if transaction
+                .query_row(
+                    "SELECT marker FROM draft_transition WHERE singleton = 0 AND kind = ?1",
+                    &[StoreValue::Integer(TRANSITION_FINALIZATION)],
+                )?
+                .is_some()
+            {
+                return Err(DraftError::PreparedFinalizationPresent);
+            }
             transaction.execute(
                 UPSERT_TRANSITION,
                 &[

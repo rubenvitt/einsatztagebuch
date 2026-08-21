@@ -410,12 +410,7 @@ impl WriterMatrixHarness {
         let capabilities = backend
             .run_capability_test(&archive_support::capability_test_vector())
             .expect("der Capability-Test muss laufen");
-        let verification = ea_verify::verify_archive(
-            &backend.as_archive_source(),
-            &self.inner.anchor(),
-            ea_verify::VerifyOptions::new(self.inner.observed_now()),
-        )
-        .expect("der Verifikationslauf muss ein Ergebnis liefern");
+        let verification = self.verification();
         ArchiveHealthCheckV1::new(
             backend,
             expected,
@@ -428,6 +423,22 @@ impl WriterMatrixHarness {
         )
         .run()
         .expect("der Gesundheitscheck muss laufen")
+    }
+
+    /// Der Verifikationslauf UEBER DIE PLATTE.
+    ///
+    /// Er wird herausgegeben und nicht nur intern gebildet, weil zwei Befunde
+    /// des Gesundheitschecks nur aus ihm entstehen — Lueckenliste und
+    /// bestrittene Objekte —, und eine Zusicherung ueber sie am Bericht selbst
+    /// zu messen ist genauer als am abgeleiteten Befund.
+    #[must_use]
+    pub fn verification(&self) -> ea_verify::VerificationReportV1 {
+        ea_verify::verify_archive(
+            &self.inner.backend().as_archive_source(),
+            &self.inner.anchor(),
+            ea_verify::VerifyOptions::new(self.inner.observed_now()),
+        )
+        .expect("der Verifikationslauf muss ein Ergebnis liefern")
     }
 }
 

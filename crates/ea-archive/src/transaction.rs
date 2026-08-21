@@ -47,6 +47,30 @@ impl StagedObjectV1 {
 /// das Ziel, aber das Inventar klassifiziert am Praefix und nicht am Namen.
 pub const STAGING_SUFFIX_V1: &str = ".staging";
 
+/// Ob diese wurzelrelative Adresse eine STAGING-Adresse ist.
+///
+/// Die Regel steht EINMAL und nicht an jeder Leseflaeche neu: die Lesesicht auf
+/// einen Bestand (`crates/ea-archive-fs/src/local_path.rs`), der
+/// Gesundheitscheck (`crates/ea-archive-fs/src/health.rs`) und der
+/// Veroeffentlichungsfilter der Finalisierung
+/// (`crates/ea-writer/src/finalize.rs`) fragen dieselbe Funktion. Fielen sie
+/// auseinander, sahen zwei Leser DERSELBEN Bytes verschiedene Bestaende — und
+/// genau daraus entsteht ein falscher Fork-Befund ueber einen Bestand, dessen
+/// committete Bytes stimmen.
+///
+/// # Warum der NAME hier entscheiden DARF
+///
+/// Er entscheidet nicht, ob Bytes ein Archivobjekt sind — das bleibt Sache des
+/// 9-Byte-Exact-Object-Praefixes, und der Pfadhinweis ist dort ausdruecklich
+/// keine Identitaet (`crate::inventory`). Er entscheidet, ob ein Objekt
+/// VEROEFFENTLICHT ist, und das ist eine Aussage ueber den Namen: `design.md`
+/// §11.4 macht den Zielnamen zum Commit-Marker, und veroeffentlicht wird durch
+/// Rename AUF ihn.
+#[must_use]
+pub fn is_staging_path(relative: &str) -> bool {
+    relative.ends_with(STAGING_SUFFIX_V1)
+}
+
 /// Eine Archivtransaktion mit expliziter Staging-Stufe.
 ///
 /// Die Reihenfolge ist die Zusage, nicht eine Vorliebe:

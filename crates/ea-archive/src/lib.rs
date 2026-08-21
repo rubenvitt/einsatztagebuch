@@ -69,4 +69,6 @@ pub use profile::{
     LocalPathProfileV1,
 };
 pub use source::{ArchiveBlob, ArchiveSource};
-pub use transaction::{ArchiveTransaction, STAGING_SUFFIX_V1, StagedBytesV1, StagedObjectV1};
+pub use transaction::{
+    ArchiveTransaction, STAGING_SUFFIX_V1, StagedBytesV1, StagedObjectV1, is_staging_path,
+};

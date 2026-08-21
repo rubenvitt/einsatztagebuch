@@ -312,3 +312,66 @@ fn replacing_the_draft_with_a_blank_clears_a_booked_discard_intent() {
     assert_eq!(h.draft_row_count(), 1);
     assert_eq!(h.restart_and_resume().unwrap(), RestartState::NewBlankDraft);
 }
+
+/// Die Spiegelrichtung: `replace_with_blank` raeumt auch die ABSCHLUSSMARKE.
+///
+/// Das ist der Vertrag, auf den sich Schritt 13 der Finalisierung stuetzt, seit
+/// er Marke und leeren Entwurf in EINEM dauerhaften Schritt wechselt
+/// (`crates/ea-writer/src/finalize.rs`, Schritt 13): der Uebergangsplatz ist
+/// EINE Zeile, und `replace_with_blank` raeumt ihn GANZ statt nach `kind` zu
+/// filtern. Ohne diese Zeile waere jene Zusammenlegung eine Annahme ueber einen
+/// fremden Rumpf; mit ihr ist sie gemessen.
+#[test]
+fn replacing_the_draft_with_a_blank_clears_a_prepared_finalization_marker() {
+    let mut h = DraftHarness::with_nonempty_draft();
+    h.set_prepared_finalization_marker();
+    assert!(
+        !h.prepared_finalization_marker_is_absent(),
+        "die Marke muss liegen, sonst messen die Zeilen darunter nichts"
+    );
+
+    h.replace_with_blank().unwrap();
+
+    assert!(h.prepared_finalization_marker_is_absent());
+    assert_eq!(h.draft_row_count(), 1);
+    // Und der Neustart liest danach KEINE Fortsetzung mehr: laege die Marke
+    // noch, meldete er `PreparedFinalizationPending` und der leere Entwurf
+    // waere unerreichbar.
+    assert_eq!(h.restart_and_resume().unwrap(), RestartState::NewBlankDraft);
+}
+
+/// Der Waechter im TRAIT-ARM: eine liegende Marke verhindert die Buchung.
+///
+/// # Warum das nicht die Zusicherung daneben doppelt
+///
+/// `a_prepared_finalization_takes_precedence_over_resume_discard` misst den
+/// DIENSTEINGANG (`DiscardService::enter`). Der prueft die Marke, bevor er die
+/// Transaktion nimmt — dazwischen liegt ein Zeitfenster, und der Schreibvorgang
+/// selbst war ungeschuetzt. `draft_transition` ist EIN Platz, also haette ein
+/// Upsert dort die Marke verdraengt: die gestagten Bytes lagen ohne Marke im
+/// Bestand, `recover_pending` meldete `NothingPending`, und der Eintrag waere
+/// verloren, obwohl seine Bytes vollstaendig geschrieben sind.
+///
+/// Die Vorrangregel haelt damit in BEIDE Richtungen am Schreibort: die Marke
+/// verdraengt eine gebuchte Absicht (die Zusicherung darueber), und eine Absicht
+/// verdraengt keine liegende Marke (diese hier).
+#[test]
+fn a_prepared_finalization_marker_refuses_a_new_discard_intent_at_the_write_site() {
+    let mut h = DraftHarness::with_nonempty_draft();
+    h.set_prepared_finalization_marker();
+
+    assert_eq!(
+        h.commit_discard_intent_directly()
+            .unwrap_err()
+            .code(),
+        "EA-DRAFT-PREPARED-FINALIZATION-PRESENT"
+    );
+    // Und die Marke steht unangetastet: der abgewiesene Schreibvorgang hat den
+    // Uebergangsplatz nicht angefasst.
+    assert!(!h.prepared_finalization_marker_is_absent());
+    assert!(h.pending_discard_is_absent());
+    assert_eq!(
+        h.restart_and_resume().unwrap(),
+        RestartState::PreparedFinalizationPending
+    );
+}

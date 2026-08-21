@@ -23,7 +23,7 @@
 
 mod support;
 
-use ea_archive::ArchiveBackendError;
+use ea_archive::{ArchiveBackendError, QuarantineReason};
 use ea_archive_fs::{HealthFinding, MigrationFaultPoint};
 use ea_draft::{DiscardFaultPoint, RestartState};
 use ea_format::{ActiveProfilePointerCoreV1, EAG_PREFIX_V1, EIP_PREFIX_V1};
@@ -536,4 +536,85 @@ fn a_prepared_finalization_survives_a_crash_and_beats_a_pending_discard() {
         harness.draft_dek_is_present(),
         "solange die Marke liegt, wird kein Verwerfen fortgesetzt"
     );
+}
+
+/// Eine liegengebliebene `.eip.staging` macht denselben Bestand nach einem
+/// zweiten Anlauf NICHT „geforkt".
+///
+/// # Der Weg, und warum er der gewoehnliche ist
+///
+/// Ein Absturz an [`FinalizationFaultPoint::AfterStagingDirectoryFlushBeforeMarker`]
+/// laesst die geflushten Stagingbytes liegen; die Wiederaufnahme raeumt sie
+/// ausdruecklich nicht auf, weil der Port kein Loeschprimitiv hat. Der zweite
+/// Anlauf zieht frischen CEK, frische Nonce und frische `recordId`, hat damit
+/// einen ANDEREN `entryHash` — und committet dieselbe Sequenz, weil der Kopf
+/// des Writers weiterhin davor steht. Damit lagen zwei Eintragsobjekte mit
+/// derselben Sequenz und verschiedenem `entryHash` im Bestand, SOBALD ein
+/// Leser die Staging-Adresse als Archivobjekt nimmt.
+///
+/// # Was hier gemessen wird
+///
+/// Dass ALLE Leser derselben Bytes denselben Bestand sehen: die Regel steht in
+/// [`ea_archive::is_staging_path`], und die Lesesicht des Wirtsbestands wendet
+/// sie an. Beide Haelften sind noetig, und die zweite ist die scharfe: ohne sie
+/// waere dieselbe Zusicherung auch gruen, wenn die Datei UEBERALL unsichtbar
+/// waere — dann waere aus einem falschen Fork-Alarm ein verschwiegener
+/// Gesundheitsbefund geworden.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR: sieht die Lesesicht die Staging-Adresse
+/// wieder, meldet der Verifikationslauf ein bestrittenes Objekt und der
+/// Gesundheitsbericht [`HealthFinding::UnexpectedSequenceForkOrRollback`] —
+/// DAUERHAFT, denn es gibt kein Loeschprimitiv.
+#[test]
+fn a_leftover_staging_object_never_forks_a_successful_second_attempt() {
+    let mut harness = WriterMatrixHarness::with_incident();
+    let _ = harness.interrupt_at(FinalizationFaultPoint::AfterStagingDirectoryFlushBeforeMarker);
+    assert!(matches!(
+        harness.restart_from_disk(),
+        MatrixOutcome::DraftUnchanged
+    ));
+    assert!(
+        harness.inner().staged_object_count() > 0,
+        "ohne liegengebliebenes Staging messe dieser Test nichts"
+    );
+    assert!(harness.archive_has_no_entry());
+
+    // Der gewoehnliche zweite Anlauf — dieselbe Sequenz, andere Geheimnisse.
+    let committed = harness
+        .finalize()
+        .expect("der zweite Anlauf muss tragen, die Sequenz war unverbraucht");
+    assert_eq!(committed.sequence.get(), 0);
+    assert_eq!(harness.inner().published_entry_paths().len(), 1);
+    assert!(
+        harness.inner().staged_object_count() > 0,
+        "die Reste liegen weiter — gemessen wird der Filter und keine Bereinigung"
+    );
+
+    // 1. Die Kette ist unbestritten und lueckenlos.
+    let verification = harness.verification();
+    assert_eq!(verification.gaps().len(), 0, "die Kette hat keine Luecke");
+    assert!(
+        !verification
+            .quarantined_objects()
+            .any(|object| object.reason() == QuarantineReason::Conflicting),
+        "kein Objekt ist bestritten"
+    );
+
+    // 2. Und der Gesundheitsbericht trennt die beiden Aussagen: kein Fork,
+    //    aber die temporaere Datei ist gemeldet.
+    let expected = harness.inventory();
+    let report = harness.health_against(&expected);
+    assert!(
+        !report.contains(HealthFinding::UnexpectedSequenceForkOrRollback),
+        "ein korrekter Bestand traegt keinen Fork-Befund; gemeldet wurde {:?}",
+        report.findings()
+    );
+    assert!(
+        report.contains(HealthFinding::OrphanGrantOrTemporaryFile),
+        "die liegengebliebene Staging-Datei MUSS gemeldet bleiben; gemeldet wurde {:?}",
+        report.findings()
+    );
+    harness
+        .every_published_object_is_complete()
+        .unwrap_or_else(|defect| panic!("{defect}"));
 }

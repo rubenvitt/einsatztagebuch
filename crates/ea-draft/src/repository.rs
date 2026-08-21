@@ -50,10 +50,17 @@ pub trait DraftRepository: Send + Sync {
 
     /// Bucht die Verwerfensabsicht dauerhaft.
     ///
+    /// Fail-closed gegen eine liegende Abschlussmarke: der Uebergangsplatz ist
+    /// EINE Zeile, ein Upsert darauf verdraengte die Marke und damit die
+    /// einzige Spur einer vorbereiteten Transaktion. Die Ablehnung steht am
+    /// SCHREIBORT und in derselben Transaktion wie der Schreibvorgang; der
+    /// Diensteingang prueft dasselbe, aber vor dem Nehmen der Transaktion.
+    ///
     /// # Errors
     ///
     /// [`DraftError::TransitionUnavailable`], solange `0002_discard.sql` nicht
-    /// registriert ist.
+    /// registriert ist; [`DraftError::PreparedFinalizationPresent`], wenn eine
+    /// Abschlussmarke liegt.
     fn commit_discard_intent(&self, draft: &SavedDraft) -> Result<DiscardIntent, DraftError>;
 
     /// Die gebuchte, noch nicht ausgefuehrte Verwerfensabsicht.
@@ -64,6 +71,20 @@ pub trait DraftRepository: Send + Sync {
     fn pending_discard(&self) -> Result<Option<DiscardIntent>, DraftError>;
 
     /// Ersetzt den Entwurf durch einen leeren mit frischem `draftDEK`.
+    ///
+    /// EINE Transaktion, und der geteilte Uebergangsplatz wird dabei GANZ
+    /// geraeumt: eine gebuchte Verwerfensabsicht UND eine liegende
+    /// Abschlussmarke sind danach fort. Beides ist Zusage und nicht
+    /// Nebenwirkung — Schritt 13 der Finalisierung verlaesst sich darauf, um
+    /// Marke und leeren Entwurf in EINEM dauerhaften Schritt zu wechseln
+    /// (`crates/ea-writer/src/finalize.rs`). Ein zweiter, vorangestellter
+    /// Schreibvorgang auf den Uebergangsplatz erzeugte genau den
+    /// Zwischenzustand, den es hier nicht geben darf: Marke fort, alter
+    /// Entwurf mit geloeschtem `draftDEK` noch da.
+    ///
+    /// Schlaegt das Anlegen des leeren Entwurfs fehl — der Schluesselport zieht
+    /// den frischen `draftDEK` INNERHALB der Transaktion —, dann wird NICHTS
+    /// geschrieben und die Marke steht weiter.
     ///
     /// # Errors
     ///

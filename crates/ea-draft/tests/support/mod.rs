@@ -961,6 +961,28 @@ impl DiscardHarness {
             .expect("die Uebergangstabelle muss lesbar sein")
             .is_none()
     }
+
+    /// Bucht die Verwerfensabsicht DIREKT ueber die Ablage.
+    ///
+    /// Nicht ueber den Dienst: dessen Eingang prueft die Abschlussmarke schon,
+    /// und genau deshalb ist der Waechter IM TRAIT-ARM nur hier messbar. Er ist
+    /// kein zweiter Weg in die Ablage — `DiscardService::commit_intent` ruft
+    /// denselben Arm mit demselben Argument.
+    pub fn commit_discard_intent_directly(&self) -> Result<(), DraftError> {
+        let repository = self.repo();
+        let draft = repository.load_or_create()?;
+        let saved = repository.save(draft)?;
+        repository.commit_discard_intent(&saved).map(|_| ())
+    }
+
+    /// Ob KEINE Abschlussmarke mehr liegt.
+    #[must_use]
+    pub fn prepared_finalization_marker_is_absent(&self) -> bool {
+        self.repo()
+            .prepared_finalization_marker()
+            .expect("die Uebergangstabelle muss lesbar sein")
+            .is_none()
+    }
 }
 
 /// Ein Schluesselspeicher, der sein `delete` VERSCHLUCKT und `Ok` meldet.

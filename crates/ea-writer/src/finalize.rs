@@ -18,7 +18,7 @@
 //!
 //! # Der Staging-Bereich
 //!
-//! Er ist der Suffix [`STAGING_SUFFIX_V1`] im ZIELVERZEICHNIS und kein
+//! Er ist der Suffix [`ea_archive::STAGING_SUFFIX_V1`] im ZIELVERZEICHNIS und kein
 //! Sammelverzeichnis. Zwei Gruende, beide aus dem Bestand: [`ArchivePath`]
 //! kann keine Adresse ausserhalb von `LAYOUT_PATHS_V1` bilden, und der Suffix
 //! im Zielverzeichnis macht [`ArchiveBackend::atomic_rename_same_fs`] schon
@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use ea_archive::{
-    ArchiveBackend, ArchiveBlob, ArchiveError, ArchivePath, ArchiveSource, STAGING_SUFFIX_V1,
+    ArchiveBackend, ArchiveBlob, ArchiveError, ArchivePath, ArchiveSource,
 };
 use ea_chain::{
     ChainNode, ChainNodeKind, CheckpointClaim, RollbackAssessment, assess_rollback, build_chain,
@@ -597,6 +597,23 @@ impl WriterService<'_> {
             .contains(&self.binding.archive_profile_hash)
         {
             return Err(WriterError::ArchiveProfileNotAllowed);
+        }
+        // Die vierte Pruefung der Bindung gegen DENSELBEN Head, und die
+        // asymmetrischste der vier: `binding_object_hash`,
+        // `archive_profile_hash` und das Bedienerprofil wurden hier immer gegen
+        // ihn geprueft, die `chain_id` nicht — obwohl Schritt 1 sie unbesehen
+        // an `build_chain` uebergibt.
+        //
+        // Der einzige andere Waechter (`ea_chain`, `ForeignChainId`) greift
+        // NUR, wenn schon ein Knoten mit anderer Kennung liegt. Auf einem
+        // LEEREN Bestand greift er nicht: der Kopf ist `None`, Schritt 3
+        // rechnet Sequenz 0, und die Finalisierung mintet Genesis in einer
+        // Kette, die die Vertrauenslinie nicht kennt. Danach ist derselbe
+        // Bestand mit `ForeignChainId` DAUERHAFT nicht mehr finalisierbar —
+        // ein Fehler, der sich nur durch das Verwerfen von Archivbytes heilen
+        // liesse, und die werden nicht verworfen.
+        if self.binding.chain_id != self.head.chain_id() {
+            return Err(WriterError::ChainIdMismatch);
         }
         state.selected_registry_version = Some(self.head.registry_version());
         state.reached_step = Some(FinalizationStep::SelectRegistryHeadAndOperator);
@@ -1238,10 +1255,25 @@ impl WriterService<'_> {
 
         // ---- 13. Abgleichen, Staging bereinigen, leeren Entwurf oeffnen ----
         //
-        // Die Marke wird ZUERST geloescht und der leere Entwurf DANACH
-        // angelegt: solange sie liegt, ist ein Neustart eine Fortsetzung, und
-        // eine Fortsetzung darf nicht auf einen schon leeren Entwurf treffen.
-        self.repository.replace_prepared_finalization_marker(None)?;
+        // EIN Aufruf und EINE Transaktion, und das ist die Zusage:
+        // [`DraftRepository::replace_with_blank`] raeumt den geteilten
+        // Uebergangsplatz GANZ — die Abschlussmarke eingeschlossen — und legt
+        // den leeren Entwurf in DERSELBEN Datenbanktransaktion an
+        // (`crates/ea-draft/src/autosave.rs`, `replace_with_blank`).
+        //
+        // Ein zweiter, vorangestellter `replace_prepared_finalization_marker(None)`
+        // waere kein zusaetzlicher Schutz, sondern ein zweiter DAUERHAFTER
+        // Schritt ohne Abbruchpunkt dazwischen: stirbt der Prozess danach,
+        // steht die alte Entwurfszeile noch, ihr `draftDEK` ist in Schritt 9
+        // aber geloescht, `load_or_create` scheitert an `unwrap_secret`, und
+        // `recover_pending` findet keine Marke mehr — das Geraet waere ohne
+        // Eingriff in die Datenbank unbenutzbar. Mit der EINEN Transaktion
+        // gibt es diesen Zwischenzustand nicht: entweder liegen Marke UND
+        // alter Entwurf (ein Neustart ist dann eine Fortsetzung, und die
+        // vollendet aus denselben vorbereiteten Bytes), oder es liegt der
+        // leere Entwurf ohne Marke. Ein Fehlschlag im Anlegen des leeren
+        // Entwurfs — der Schluesselport zieht den frischen `draftDEK` INNERHALB
+        // der Transaktion — rollt beides zurueck und laesst die Marke stehen.
         self.repository.replace_with_blank()?;
         state.phase = FinalizationPhase::Reconciled;
         state.reached_step = Some(FinalizationStep::ReconcileAndOpenBlankDraft);
@@ -1273,31 +1305,66 @@ impl WriterService<'_> {
     /// zulaessig"): `atomic_rename_same_fs` traegt eine bytegleiche
     /// Wiederholung und verwirft dabei die Quelladresse.
     ///
-    /// `create_if_absent` kommt NUR zum Zug, wenn die Staging-Adresse schon
-    /// verbraucht ist — der Wiederholungsfall einer Wiederherstellung, deren
-    /// erster Anlauf diese Adresse bereits veroeffentlicht hatte. Dort ist
-    /// nichts mehr halb zu schreiben: entweder die Bytes stimmen ueberein, oder
-    /// es faellt fail-closed `EA-ARCHIVE-BYTE-CONFLICT`.
+    /// `create_if_absent` kommt NUR zum Zug, wenn die ZIELADRESSE schon liegt —
+    /// der Wiederholungsfall einer Wiederherstellung, deren erster Anlauf diese
+    /// Adresse bereits veroeffentlicht hatte. Dort ist nichts mehr zu
+    /// schreiben: `create_if_absent` liest die liegenden Bytes und
+    /// BESTAETIGT sie, oder es faellt fail-closed auf
+    /// `EA-ARCHIVE-BYTE-CONFLICT`.
+    ///
+    /// # Warum das Ziel geprueft wird und nicht bloss der Fehler
+    ///
+    /// `atomic_rename_same_fs` meldet JEDES Scheitern des Wirts als
+    /// `ArchiveBackendError::Io` (`crates/ea-archive-fs/src/local_path.rs`) —
+    /// ein volles Medium und eine verbrauchte Staging-Adresse sind daran nicht
+    /// zu unterscheiden. Wer aus JEDEM Renamefehler in `create_if_absent`
+    /// faellt, laesst dessen `create_new` + `write_all` auf die ENDADRESSE
+    /// laufen; bricht dieser Schreibvorgang mittendrin ab, liegt eine
+    /// ABGESCHNITTENE Datei unter ihrem endgueltigen Commit-Marker-Namen, und
+    /// jeder weitere Anlauf trifft sie mit `EA-ARCHIVE-BYTE-CONFLICT`. Genau
+    /// die Reihenfolge der Archivtransaktion schliesst das aus.
+    ///
+    /// Liegt die Zieladresse dagegen SCHON, kann `create_if_absent` keine
+    /// Bytes mehr etablieren: sein erster Zweig liest und vergleicht. Der
+    /// Zweig ist damit auf seinen dokumentierten Fall eingeengt, und jeder
+    /// andere Renamefehler PROPAGIERT — das unversehrte Staging bleibt liegen,
+    /// und die Wiederaufnahme benennt daraus erneut um.
     fn publish_object(
         &self,
         target: &ArchivePath,
         bytes: &ea_format::ExactObjectBytes,
     ) -> Result<(), WriterError> {
         let staging = crate::marker::staging_path(target)?;
-        if self
-            .backend
-            .atomic_rename_same_fs(&staging, target)
-            .is_err()
-        {
-            // Die Staging-Adresse ist VERBRAUCHT — ein erster Rename hat sie
-            // schon veroeffentlicht. Nur DANN etabliert `create_if_absent` die
-            // Bytes direkt: es traegt eine bytegleiche Wiederholung und faellt
-            // sonst fail-closed auf `EA-ARCHIVE-BYTE-CONFLICT`. Das ist der
-            // Wiederholungsfall der Wiederherstellung und nicht der Regelweg.
+        if let Err(error) = self.backend.atomic_rename_same_fs(&staging, target) {
+            if !self.object_is_published(target)? {
+                return Err(WriterError::Backend(error));
+            }
             self.backend.create_if_absent(target, bytes)?;
         }
         self.backend.sync_file(target)?;
         Ok(())
+    }
+
+    /// Ob unter `target` schon ein Objekt im Bestand liegt.
+    ///
+    /// Gelesen wird ueber [`ArchiveSource`] und damit ueber dieselbe Sicht, aus
+    /// der Schritt 1 den Kettenkopf bildet — nicht ueber eine zweite,
+    /// backendeigene Leseflaeche, die etwas anderes sehen koennte. Der
+    /// Pfadhinweis ist hier eine ADRESSE und keine Identitaet: gefragt ist, ob
+    /// die Commit-Adresse belegt ist, und das ist eine Aussage ueber den Namen.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Lesequelle.
+    fn object_is_published(&self, target: &ArchivePath) -> Result<bool, WriterError> {
+        let mut found = false;
+        self.source.visit_blobs(&mut |blob| {
+            if blob.path_hint() == target.as_str() {
+                found = true;
+            }
+            Ok(())
+        })?;
+        Ok(found)
     }
 }
 
@@ -1322,13 +1389,19 @@ impl WriterService<'_> {
 /// Praefix. Er entscheidet, ob ein Objekt VEROEFFENTLICHT ist, und genau das
 /// ist eine Aussage ueber den Namen: §11.4 macht den Zielnamen zum
 /// Commit-Marker, und veroeffentlicht wird durch Rename AUF ihn. Eine Adresse
-/// mit [`STAGING_SUFFIX_V1`] ist per Konstruktion dieses Schreibpfades eine
+/// mit [`ea_archive::STAGING_SUFFIX_V1`] ist per Konstruktion dieses Schreibpfades eine
 /// temporaere Datei und damit ein Gesundheitsbefund.
 ///
-/// Der Filter sitzt in DIESER Crate und nicht in `ea-archive`: das Inventar ist
-/// Stufe-1-Code und wird mit `ea-verify` geteilt. Ob das Archivgate liegen
-/// gebliebene Staging-Dateien heute schon als Eintraege sieht, ist eine
-/// breitere Frage als diese Finalisierung und bleibt UNVERAENDERT.
+/// # Warum der Filter BLEIBT, obwohl die Lesesicht ihn schon hat
+///
+/// Die REGEL steht genau einmal, in [`ea_archive::is_staging_path`], und
+/// [`ea_archive_fs::LocalPathArchiveSource`] wendet sie inzwischen selbst an —
+/// darum sieht auch jeder ANDERE Verbraucher derselben Bytes denselben Bestand,
+/// und ein falscher Fork-Befund nach einem zweiten Anlauf entsteht nicht mehr.
+/// Dieser Wrapper ist deshalb keine zweite Regel, sondern die Zusage AN DIESEM
+/// PORT: [`WriterService`] nimmt ein beliebiges [`ArchiveSource`], und ein
+/// fremdes Backend, das seine Staging-Adressen mitliefert, darf den Kettenkopf
+/// dieser Finalisierung nicht verschieben.
 struct PublishedObjectsOnly<'a> {
     inner: &'a dyn ArchiveSource,
 }
@@ -1339,7 +1412,7 @@ impl ArchiveSource for PublishedObjectsOnly<'_> {
         visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
     ) -> Result<(), ArchiveError> {
         self.inner.visit_blobs(&mut |blob| {
-            if blob.path_hint().ends_with(STAGING_SUFFIX_V1) {
+            if ea_archive::is_staging_path(blob.path_hint()) {
                 return Ok(());
             }
             visitor(blob)

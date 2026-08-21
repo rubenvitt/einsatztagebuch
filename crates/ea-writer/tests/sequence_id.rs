@@ -205,3 +205,52 @@ fn a_refused_finalization_does_not_burn_the_incident_number() {
         .expect("derselbe Einsatz MUSS danach abschliessbar sein");
     assert!(harness.incident_number_is_taken("2026-000042"));
 }
+
+/// Eine Bindung in einer FREMDEN Kette wird abgewiesen, bevor etwas gestagt ist.
+///
+/// # Warum diese Zusicherung auf dem LEEREN Bestand gemessen wird
+///
+/// Der Waechter der Kettenpruefung (`ea_chain`, `EA-CHAIN-FOREIGN-CHAIN-ID`)
+/// greift nur, wenn schon ein Knoten mit ANDERER Kennung liegt. Auf einem
+/// leeren Bestand gibt es keinen: der Kopf ist `None`, Schritt 3 rechnet
+/// Sequenz 0, und ohne diese Pruefung mintete die Finalisierung Genesis in
+/// einer Kette, die die Vertrauenslinie nicht fuehrt. Danach waere derselbe
+/// Bestand mit `ForeignChainId` DAUERHAFT nicht mehr finalisierbar, und heilen
+/// liesse sich das nur durch das Verwerfen von Archivbytes.
+///
+/// Die Positivkontrolle steht daneben und ist nicht dekorativ: ohne sie waere
+/// dieselbe Zusicherung auch gruen, wenn die Vorschau aus einem GANZ ANDEREN
+/// Grund abwiese.
+#[test]
+fn a_binding_in_a_foreign_chain_is_refused_before_anything_is_staged() {
+    let harness = WriterHarness::with_incident();
+    let source = harness.source();
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+
+    // Positivkontrolle: MIT der Bindung dieser Linie traegt dieselbe Vorschau.
+    harness
+        .service(&source)
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .expect("die Bindung dieser Linie MUSS tragen");
+
+    let mut foreign = harness.binding();
+    foreign.chain_id = ea_types::ChainId::try_from(&[0x7f; 16][..]).expect("16 Byte");
+    // `FinalizationPreview` traegt bewusst kein `Debug` (Stufe 1 leitet es fuer
+    // Werte mit Hashes nicht ab), also wird der Fehlerarm ueber `map_or_else`
+    // genommen und nicht ueber `expect_err`.
+    let code = harness
+        .service_with_binding(&source, foreign)
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .map_or_else(
+            |error| error.code(),
+            |_| panic!("eine fremde Kettenkennung MUSS fail-closed abweisen"),
+        );
+    assert_eq!(code, "EA-WRITER-CHAIN-ID-MISMATCH");
+
+    // Und nichts ist passiert: kein Objekt, kein Staging, keine Marke, und der
+    // Entwurf ist unberuehrt.
+    assert!(harness.published_entry_paths().is_empty());
+    assert_eq!(harness.staged_object_count(), 0);
+    assert!(!harness.prepared_marker_is_present());
+    assert!(harness.draft_dek_is_present());
+}

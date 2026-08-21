@@ -785,11 +785,34 @@ impl std::fmt::Debug for LocalPathBackend {
     }
 }
 
-/// Die Lesesicht auf einen lokalen Bestand.
+/// Die Lesesicht auf einen VEROEFFENTLICHTEN lokalen Bestand.
 ///
-/// Sie liefert JEDE Bytesequenz — auch Beiwerk ohne Exact-Object-Praefix,
-/// sonst waere `nonObjectFileCount` nicht bildbar. Die Kontrolldateien des
-/// Backends bleiben draussen: sie gehoeren der Installation, nicht dem Bestand.
+/// Sie liefert JEDE veroeffentlichte Bytesequenz — auch Beiwerk ohne
+/// Exact-Object-Praefix, sonst waere `nonObjectFileCount` nicht bildbar. Die
+/// Kontrolldateien des Backends bleiben draussen: sie gehoeren der
+/// Installation, nicht dem Bestand.
+///
+/// # Warum die Staging-Adressen draussen bleiben
+///
+/// [`ea_archive::ArchiveInventory`] klassifiziert AUSSCHLIESSLICH am 9-Byte-
+/// Exact-Object-Praefix, und der Pfadhinweis ist dort ausdruecklich keine
+/// Identitaet. Die gestagten Bytes SIND das exakte Archivobjekt; ohne diesen
+/// Filter waere eine liegengebliebene `entries/<seq>_<hash>.eip.staging`
+/// deshalb ein Kettenknoten wie jeder andere — und weil ein zweiter Anlauf
+/// frische Geheimnisse und damit einen ANDEREN `entryHash` zieht, lagen danach
+/// zwei Eintragsobjekte mit derselben Sequenz im Bestand. Die Kettenpruefung
+/// meldete eine `SequenceCollision`, und der Gesundheitsbericht traege
+/// DAUERHAFT einen Fork-Befund ueber einen Bestand, dessen COMMITTETE Bytes
+/// stimmen.
+///
+/// Die Regel steht deshalb genau EINMAL, in [`ea_archive::is_staging_path`],
+/// und jeder Verbraucher dieser Sicht teilt sie: der Kettenkopf der
+/// Finalisierung, jeder Verifikationslauf und der Gesundheitscheck.
+///
+/// Verloren geht dabei nichts: [`LocalPathBackend::relative_paths`] blendet
+/// nichts aus, und der Gesundheitscheck meldet die liegengebliebene Datei
+/// darueber weiterhin als temporaere Datei
+/// ([`crate::HealthFinding::OrphanGrantOrTemporaryFile`]).
 pub struct LocalPathArchiveSource<'a> {
     backend: &'a LocalPathBackend,
 }
@@ -801,6 +824,9 @@ impl ArchiveSource for LocalPathArchiveSource<'_> {
     ) -> Result<(), ArchiveError> {
         let paths = self.backend.walk().map_err(|_| ArchiveError::Unavailable)?;
         for relative in paths {
+            if ea_archive::is_staging_path(&relative) {
+                continue;
+            }
             let bytes = fs::read(self.backend.absolute(&relative))
                 .map_err(|_| ArchiveError::Unavailable)?;
             visitor(ArchiveBlob::new(&relative, &bytes))?;
@@ -886,5 +912,19 @@ impl LocalPathBackend {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(relative.to_owned());
+    }
+
+    /// Nimmt die Markierung zurueck.
+    ///
+    /// Sie existiert, damit ein Zeuge nicht nur den ABBRUCH messen kann,
+    /// sondern auch, dass er FORTSETZBAR ist: ein Renamefehler, der die
+    /// Zieladresse frei laesst, muss propagieren UND das unversehrte Staging
+    /// liegen lassen, aus dem derselbe Pfad danach umbenennt. Ohne die
+    /// Ruecknahme waere die zweite Haelfte nicht messbar.
+    pub fn clear_foreign_filesystem_for_test(&self, relative: &str) {
+        self.foreign
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(relative);
     }
 }
