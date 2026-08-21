@@ -1,5 +1,7 @@
-// Stumpf. `tauri_build::build()` liest `src-tauri/tauri.conf.json`, und diese
-// Datei entsteht in Task 15 — derselbe Schritt, der diesen Stumpf und den von
-// `src/main.rs` fuellt. Ein Aufruf vor der Konfiguration liesse jeden Bau
-// dieses Pakets fehlschlagen.
-fn main() {}
+// `tauri_build::build()` liest `src-tauri/tauri.conf.json` und erzeugt daraus
+// die ACL- und Kontextbeiwerke, die `tauri::generate_context!` in `src/lib.rs`
+// einliest. Beides entsteht in Task 15; der Stumpf von Task 13 ist damit
+// abgeloest.
+fn main() {
+    tauri_build::build();
+}

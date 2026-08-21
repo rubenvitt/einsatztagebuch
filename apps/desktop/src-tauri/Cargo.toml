@@ -70,6 +70,11 @@ ea-audit.workspace = true
 ea-draft.workspace = true
 # Die Fachlogik der Erfassung und der Finalisierung.
 ea-writer.workspace = true
+# Die EINE benannte Quelle der DTO-Flaeche. Diese Kante konnte Task 13 nicht
+# ziehen, weil `crates/ea-ui-contracts` erst in Task 14 entsteht; sie ist die
+# EINZIGE Abhaengigkeit, die dieser Task hinzufuegt, und deshalb der Grund fuer
+# den einen `cargo metadata`-Lauf ohne `--locked` im Vorlaufschritt.
+ea-ui-contracts.workspace = true
 
 [build-dependencies]
 # Erzeugt die ACL- und Kontextbeiwerke aus `src-tauri/tauri.conf.json`. Diese

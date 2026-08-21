@@ -1341,6 +1341,7 @@ dependencies = [
  "ea-operator",
  "ea-schema",
  "ea-types",
+ "ea-ui-contracts",
  "ea-writer",
  "serde",
  "serde_json",

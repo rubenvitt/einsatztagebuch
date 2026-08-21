@@ -11,6 +11,31 @@ import { defineConfig } from 'vitest/config'
 // `userEvent`-Fixture.
 export default defineConfig({
   plugins: [react()],
+  // Der Bau-Einstieg und die gehashten Beiwerke — und sonst nichts. `index.html`
+  // steht ausdruecklich da, weil dieser Eintrag der Einstieg IST und nicht die
+  // Wiederholung einer Vorgabe: die Vorschau von `playwright.config.ts` und das
+  // Paket von Tauri lesen beide `dist/`, und ein Bau ohne benannten Einstieg
+  // waere an dieser Stelle nicht nachlesbar.
+  build: {
+    // Die Webview des Wirts ist WebKit (macOS), WebView2 (Windows) oder
+    // WebKitGTK (Ubuntu); `es2022` ist von allen dreien in den unterstuetzten
+    // Staenden abgedeckt.
+    target: 'es2022',
+    assetsDir: 'assets',
+    // Gehashte Beiwerke: `static-antd.css` erreicht das Paket als
+    // `assets/index-<hash>.css` und damit als lokale, wiedererkennbare
+    // Ressource.
+    assetsInlineLimit: 0,
+    sourcemap: false,
+    emptyOutDir: true,
+    // RELATIV zur Wurzel und nicht ueber `import.meta.url` aufgeloest: diese
+    // Datei wird von `src/e2e-config.test.ts` als MODUL importiert, und dort
+    // ist `import.meta.url` keine `file:`-URL (gemessen: `TypeError: The URL
+    // must be of scheme file`).
+    rollupOptions: {
+      input: 'index.html',
+    },
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],
