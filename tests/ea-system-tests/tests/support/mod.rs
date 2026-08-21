@@ -129,6 +129,14 @@ impl WriterMatrixHarness {
             "die Fixture MUSS einen Entwurf MIT Inhalt saeen, sonst ist die \
              Unveraendertheitszusicherung leer"
         );
+        // Die POSITIVKONTROLLE zur Abwesenheitsmessung nach der Rueckspielung:
+        // der Schluesselspeicher fuehrt den `draftDEK` dieser Fixture JETZT.
+        // Ohne sie waere „der Eintrag ist fort" auch an einem Speicher gruen,
+        // der ihn nie hatte.
+        assert!(
+            !inner.draft_dek_entry_is_absent(),
+            "die Fixture MUSS mit einem gefuehrten draftDEK beginnen"
+        );
         Self {
             inner,
             notes_before,
@@ -228,22 +236,33 @@ impl WriterMatrixHarness {
         self.inner.published_entry_paths().is_empty()
     }
 
-    /// Ob der `draftDEK` DIESES Einsatzes fort ist.
-    ///
-    /// Gemessen wird der ENTWURF und nicht die blosse Anwesenheit EINES
-    /// Schluessels: Schritt 13 oeffnet einen leeren Entwurf mit FRISCHEM
-    /// `draftDEK`, und der ist die Nachbedingung und nicht der Verstoss.
-    #[must_use]
-    pub fn draft_key_is_gone(&self) -> bool {
-        self.inner.draft_is_blank() || !self.inner.draft_dek_is_present()
-    }
-
     /// Die exakten Bytes des veroeffentlichten Eintrags, falls einer liegt.
     #[must_use]
     pub fn committed_entry_bytes(&self) -> Option<Vec<u8>> {
         let paths = self.inner.published_entry_paths();
         let path = paths.first()?;
         self.inner.backend().read_for_test(path)
+    }
+
+    /// Der Eintragshash des veroeffentlichten Eintrags, GELESEN aus seinen
+    /// eigenen Bytes.
+    ///
+    /// Er ist die Adresse, unter der
+    /// [`writer_support::WriterHarness::writer_keys_cannot_decrypt`] den
+    /// Ciphertext holt. Dass jener Leser den Hash gegen DENSELBEN Eintrag
+    /// prueft, aus dem er hier gelesen wurde, ist damit trivial wahr — tragend
+    /// ist dort der Durchlauf durch `aead_open` mit seiner Positivkontrolle,
+    /// und dass die veroeffentlichten Bytes die der Abschlussmarke sind, steht
+    /// als eigene Zusicherung in der Fehlermatrix darueber.
+    #[must_use]
+    pub fn committed_entry_hash(&self) -> Option<EntryHash> {
+        let bytes = self.committed_entry_bytes()?;
+        let parsed = ea_format::decode_exact_object(&bytes)
+            .expect("das veroeffentlichte .eip muss dekodieren");
+        let ea_format::ParsedArchiveObject::Entry(entry) = &parsed else {
+            panic!("unter entries/ liegt ein Eintragspaket");
+        };
+        Some(entry.value().entry_hash())
     }
 
     /// Die exakten Bytes JEDES veroeffentlichten Grants, in Inventarordnung.
@@ -815,10 +834,16 @@ impl CanaryHarness {
         self.inner.writer_keys_cannot_decrypt(entry_hash)
     }
 
-    /// Ob der `draftDEK` DIESES Einsatzes fort ist.
+    /// Ob der aktive Entwurf LEER ist.
+    ///
+    /// Die Zusage „kein nutzbarer `draftDEK` neben einem committed Eintrag"
+    /// haengt NICHT hier: dieser Leser sagt nur, dass Schritt 13 seinen leeren
+    /// Entwurf angelegt hat. Gemessen wird die Zusage von
+    /// [`Self::writer_keys_cannot_decrypt`], und die steht neben jeder
+    /// Verwendung dieses Lesers.
     #[must_use]
-    pub fn draft_key_is_gone(&self) -> bool {
-        self.inner.draft_is_blank() || !self.inner.draft_dek_is_present()
+    pub fn draft_is_blank(&self) -> bool {
+        self.inner.draft_is_blank()
     }
 
     /// Legt einen Marker WIRKLICH auf die Platte — die Gegenkontrolle.

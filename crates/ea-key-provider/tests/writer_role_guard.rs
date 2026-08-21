@@ -4,6 +4,31 @@
 //! Grant-Authority- oder Key-Approver-Schluessel. `WriterKeyProfile::validate`
 //! ist die negative Haelfte dieser Zusage und kann nur ablehnen;
 //! `WriterKeyProfile::validate_local` ist die positive Haelfte.
+//!
+//! # Wo diese Zusage WIRKLICH haengt, und was diese Datei dazu beitraegt
+//!
+//! Am TYP. `SecretPurpose` und `KeyPurpose` sind disjunkt, es gibt keine
+//! Umwandlung zwischen ihnen, und ein fremder Zweck ist kein Argument von
+//! `validate_local` — deshalb kann `validate_local` nur `Ok` liefern, und
+//! deshalb ist eine Zusicherung ueber `is_ok()` KEIN Zeuge: sie kann fuer keine
+//! uebersetzende Aenderung fehlschlagen. Hier stand genau so eine, und sie
+//! trug den Namen der Invariante.
+//!
+//! Belegt wird der Typteil compilezeitlich, von den vier
+//! `compile_fail`-Doctests im Wurzelmodul von `ea_key_provider` — zwei von
+//! ihnen (kein `From`, kein fremder Zweck als Argument) gehoeren genau dieser
+//! Zusage. Sie laufen unter
+//! `cargo test --locked -p ea-key-provider --features test-support --doc` und
+//! AUSDRUECKLICH nicht unter dem `--all-targets`-Lauf des Workspace, der
+//! Doctests ausschliesst (`crates/ea-key-provider/src/lib.rs` nennt beides).
+//!
+//! Was diese Datei beitraegt, ist der Teil, den der `--all-targets`-Lauf
+//! UEBERSETZT: der Vollstaendigkeitspin unten. Ein fuenfter lokaler Zweck
+//! bricht ihn — auch dann, wenn `validate_local` gleichzeitig mit einem
+//! Platzhalterarm beruhigt wird. Und die negative Haelfte ist ohnehin
+//! laufzeitmessbar: sie kann ablehnen, also wird sie mit ihrem Code gemessen.
+
+use std::collections::HashSet;
 
 use ea_crypto::CertificateCapability;
 use ea_format::KeyProtectionProfileV1;
@@ -12,29 +37,97 @@ use ea_key_provider::{
     WriterKeyProfile, require_claimed_protection_profile,
 };
 
+/// Die vier fremden Zwecke sind FREMD — einzeln, gemeinsam, und die leere
+/// Liste ist der dokumentierte Grenzfall.
+///
+/// Gemessen wird der CODE und nicht `is_err()`: `validate` hat genau einen
+/// Ablehnungsgrund, und ein anderer Code an dieser Stelle waere eine andere
+/// Aussage.
 #[test]
 fn writer_profile_rejects_forbidden_private_key_purposes() {
-    for purpose in [
+    let all = [
         KeyPurpose::ReaderKem,
         KeyPurpose::RecoveryKem,
         KeyPurpose::HistoricalGrantAuthority,
         KeyPurpose::KeyApprover,
-    ] {
-        assert!(WriterKeyProfile::validate(&[purpose]).is_err());
+    ];
+    for purpose in all {
+        assert_eq!(
+            WriterKeyProfile::validate(&[purpose]).unwrap_err().code(),
+            "EA-KEY-FORBIDDEN-PURPOSE"
+        );
+    }
+    // Alle vier zugleich, und nicht nur je einer: eine Implementierung, die
+    // nur das erste Element ansieht, faellt hier nicht auf — eine, die eine
+    // MEHRELEMENTIGE Liste durchliesse, sehr wohl.
+    assert_eq!(
+        WriterKeyProfile::validate(&all).unwrap_err().code(),
+        "EA-KEY-FORBIDDEN-PURPOSE"
+    );
+    // Der dokumentierte Grenzfall: nichts zu beanstanden ist kein Fehler.
+    // Ohne ihn koennte `validate` bedingungslos ablehnen und waere gruen.
+    assert!(WriterKeyProfile::validate(&[]).is_ok());
+}
+
+/// Der Vollstaendigkeitspin der lokalen Zwecke: eine Kette OHNE
+/// Platzhalterarm.
+///
+/// Ein fuenfter [`SecretPurpose`] bricht die Uebersetzung DIESES Testziels und
+/// erzwingt damit eine Entscheidung — und zwar auch dann, wenn jemand
+/// `WriterKeyProfile::validate_local` gleichzeitig mit `_ => {}` beruhigt.
+/// Genau diese Aenderung, das stille Zulassen eines fuenften Zwecks, konnte die
+/// frueher hier stehende `is_ok()`-Zusicherung nicht bemerken.
+///
+/// MEHR sagt der Pin nicht. Dass ein FREMDER Zweck hier ueberhaupt nicht
+/// einsetzbar ist, gehoert dem Typ und ist von den `compile_fail`-Doctests des
+/// Wurzelmoduls belegt, nicht von dieser Datei.
+const fn purpose_after(purpose: SecretPurpose) -> Option<SecretPurpose> {
+    match purpose {
+        SecretPurpose::WriterSigningKey => Some(SecretPurpose::OperatorInstanceKey),
+        SecretPurpose::OperatorInstanceKey => Some(SecretPurpose::DraftDek),
+        SecretPurpose::DraftDek => Some(SecretPurpose::LocalDatabaseKey),
+        SecretPurpose::LocalDatabaseKey => None,
     }
 }
 
+/// Die lokalen Zwecke, ABGELAUFEN und nicht abgeschrieben.
+///
+/// Der Lauf endet auch bei einer Kette, die sich SCHLIESST: das erste
+/// wiederkehrende Glied wird angehaengt und der Lauf gebrochen, damit die
+/// Zusicherung im Test es BERICHTET, statt dass dieser Aufruf haengt.
+fn every_local_purpose() -> Vec<SecretPurpose> {
+    let mut all = vec![SecretPurpose::WriterSigningKey];
+    while let Some(next) = purpose_after(*all.last().expect("die Kette beginnt mit einem Glied")) {
+        let repeated = all.contains(&next);
+        all.push(next);
+        if repeated {
+            break;
+        }
+    }
+    all
+}
+
 #[test]
-fn writer_profile_admits_only_the_four_local_purposes() {
-    assert!(
-        WriterKeyProfile::validate_local(&[
-            SecretPurpose::WriterSigningKey,
-            SecretPurpose::OperatorInstanceKey,
-            SecretPurpose::DraftDek,
-            SecretPurpose::LocalDatabaseKey,
-        ])
-        .is_ok()
+fn the_local_purposes_are_pinned_and_every_one_of_them_is_admitted() {
+    let all = every_local_purpose();
+    // Die Kette laeuft geradeaus und schliesst sich nicht: kein Zweck kommt
+    // zweimal. Ohne diese Zeile waere `LocalDatabaseKey => Some(DraftDek)` eine
+    // Liste, die dieselben vier Zwecke mehrfach fuehrt, und die Zaehlung
+    // darunter waere gruen zu machen, indem man Glieder wiederholt.
+    assert_eq!(
+        all.iter().copied().collect::<HashSet<_>>().len(),
+        all.len(),
+        "die Kette fuehrt jeden Zweck genau einmal"
     );
+    // Die Zahl steht hier, damit ein fuenfter Zweck AUCH dann auffaellt, wenn
+    // ihn jemand ordentlich in die Kette einhaengt: dann ist die Frage, ob er
+    // ein lokaler Zweck eines Writers sein DARF, und diese Zeile stellt sie.
+    assert_eq!(
+        all.len(),
+        4,
+        "vier lokale Zwecke, ein fuenfter ist eine Entscheidung"
+    );
+    assert!(WriterKeyProfile::validate_local(&all).is_ok());
 }
 
 #[test]

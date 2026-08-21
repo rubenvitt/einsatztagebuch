@@ -143,7 +143,11 @@ fn a_restored_backup_never_returns_a_finalized_or_discarded_key() {
     let entry_hash: EntryHash = harness.finalize().expect("die Finalisierung muss gelingen");
     // Der Zustand NACH dem Abschluss — die Datenbankdatei, die eine
     // gewoehnliche Anwendungssicherung jetzt mitnehmen wuerde.
-    assert!(harness.draft_key_is_gone());
+    // Zwei Aussagen und keine Disjunktion: die Nachbedingung von Schritt 13
+    // (der Entwurf ist leer) und die ZUSAGE (kein Geheimnis dieses Writers
+    // oeffnet den Eintrag). Als `draft_is_blank() || !draft_dek_is_present()`
+    // war die erste Haelfte immer wahr und sagte nichts ueber die zweite.
+    assert!(harness.draft_is_blank());
     assert!(harness.writer_keys_cannot_decrypt(entry_hash));
     // Und die Sicherung von VOR dem Abschluss, zurueckgespielt: die
     // Datenbankdateien kehren zurueck, der geraetegebundene

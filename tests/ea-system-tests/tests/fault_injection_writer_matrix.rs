@@ -130,8 +130,29 @@ fn every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome() {
                     harness.inner().expected_grant_count(),
                     "{point:?}: nicht jeder geplante Grant ist veroeffentlicht"
                 );
+                // Die Zusage, die `docs/traceability/stage-2-gate.md` von
+                // dieser Datei zitiert: ein committed `.eip` und ein nutzbarer
+                // `draftDEK` existieren NIE zugleich. Sie stand hier als
+                // `draft_is_blank() || !draft_dek_is_present()` und konnte sie
+                // nicht messen — `draft_dek_is_present` ist
+                // `load_or_create().is_ok()`, und nach Schritt 13 liegt ein
+                // leerer Entwurf mit FRISCHEM Schluessel, also war die linke
+                // Haelfte immer wahr und die rechte immer falsch. Gemessen wird
+                // jetzt der CIPHERTEXT: kein Geheimnis, das dieser
+                // Schluesselspeicher hergibt, oeffnet den veroeffentlichten
+                // Eintrag — mit Positivkontrolle in
+                // `writer_keys_cannot_decrypt`.
+                let entry_hash = harness
+                    .committed_entry_hash()
+                    .expect("eine Vollendung veroeffentlicht genau einen Eintrag");
                 assert!(
-                    harness.draft_key_is_gone(),
+                    harness.inner().writer_keys_cannot_decrypt(entry_hash),
+                    "{point:?}: ein Geheimnis dieses Writers oeffnet den committed Eintrag"
+                );
+                // Und die Nachbedingung von Schritt 13 daneben, als eigene
+                // Aussage statt als Oder-Zweig: der Entwurf ist leer.
+                assert!(
+                    harness.inner().draft_is_blank(),
                     "{point:?}: ein committed Eintrag und der ihn erzeugende Entwurf zugleich"
                 );
             }
@@ -148,8 +169,21 @@ fn every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome() {
                     harness.archive_has_no_entry(),
                     "die Rueckspielung veroeffentlicht nichts"
                 );
+                // Gefragt wird der SCHLUESSELSPEICHER und nicht die Ablage.
+                // Hier stand `draft_is_blank() || !draft_dek_is_present()`, und
+                // das war eine WIEDERHOLUNG der Bedingung, die diesen Arm
+                // ueberhaupt erkennt: `restart_from_disk` klassifiziert
+                // `BackupTookThePreparedBytes` genau dann, wenn `draft_notes()`
+                // nichts liefert — und das ist derselbe fehlgeschlagene
+                // `load_or_create`. Die Zusicherung konnte deshalb nicht
+                // fehlschlagen. Der Speicher ist die andere Seite: er fuehrt
+                // den Eintrag unter der Adresse, die die Fixture beim Saeen
+                // genommen hat (Positivkontrolle in
+                // `WriterMatrixHarness::with_incident`), und nach dem Loeschen
+                // fuehrt er ihn nicht mehr — die Rueckspielung der
+                // DATENBANKDATEIEN bringt ihn nicht zurueck.
                 assert!(
-                    harness.draft_key_is_gone(),
+                    harness.inner().draft_dek_entry_is_absent(),
                     "der geraetegebundene Schluesselspeichereintrag kehrt NICHT mit den Dateien \
                      zurueck"
                 );

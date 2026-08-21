@@ -222,6 +222,14 @@ pub struct LineVariantV1 {
     /// Lebensdauer des Head (`notAfter = issuedAt + 86_399_000`), und `Fresh`
     /// verlangt eine Zeit vor `notAfter`.
     pub short_reader_trust_refresh: bool,
+    /// KEIN Recovery-Empfaenger ist aktiv.
+    ///
+    /// Das NULL-Bein der dritten Produktinvariante. Die beiden anderen Beine
+    /// sind ueber `second_recovery_recipient` (zu viele) und ueber den
+    /// vollstaendigen Plan (genau einer je aktivem Empfaenger) bezeugt; ohne
+    /// diesen Knopf gibt es keinen Aufbau, in dem der Waechter
+    /// `NoActiveRecoveryRecipient` ueberhaupt erreichbar ist.
+    pub without_recovery_recipient: bool,
 }
 
 /// Baut die EINE Registrierungslinie der Fixture.
@@ -258,17 +266,19 @@ fn build_line(
             ..head_options(0, 20)
         },
     );
-    line.push(
-        ActionSpec::Device {
-            kind: CertificateKindV1::RecoveryRecipient,
-            marker: RECOVERY_MARKER,
-            effective_from: Some(0),
-        },
-        HeadOptions {
-            kem_public_key_override: Some(kem_key(RECOVERY_MARKER)),
-            ..head_options(0, 30)
-        },
-    );
+    if !variant.without_recovery_recipient {
+        line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::RecoveryRecipient,
+                marker: RECOVERY_MARKER,
+                effective_from: Some(0),
+            },
+            HeadOptions {
+                kem_public_key_override: Some(kem_key(RECOVERY_MARKER)),
+                ..head_options(0, 30)
+            },
+        );
+    }
     line.push(
         ActionSpec::Device {
             kind: CertificateKindV1::Reader,
@@ -729,6 +739,40 @@ impl WriterHarness {
         )
     }
 
+    /// Ein VOLLER Abschluss gegen einen Schluesselspeicher, dessen `delete`
+    /// sein `Ok` meldet und NICHTS tut.
+    ///
+    /// Der Dienst bekommt den tauben Doppelgaenger, die Entwurfsablage behaelt
+    /// den wahrhaftigen Provider — dieselbe Aufteilung wie in
+    /// `DraftHarness::discard_service_with_deaf_keystore`: gemessen wird die
+    /// Abwesenheitsbestaetigung des DIENSTES, und dafuer muss der Entwurf
+    /// vorher normal lesbar und speicherbar sein.
+    ///
+    /// Kein dreizehnter Abbruchpunkt: `FinalizationFaultPoint` beschreibt
+    /// STELLEN der Reihenfolge, und ein luegender Schluesselspeicher ist keine
+    /// Stelle, sondern ein Verhalten eines Ports. `stage-2-fault-points.json`
+    /// bleibt bei zwoelf.
+    pub fn finalize_with_deaf_keystore(&self) -> Result<ea_writer::FinalizeOutcome, WriterError> {
+        let source = self.source();
+        let deaf: Arc<dyn KeyProvider> = Arc::new(DeafDeleteProvider {
+            inner: Arc::clone(&self.provider),
+        });
+        let service = WriterService::new(
+            Arc::clone(&self.store().repository),
+            deaf,
+            &self.backend,
+            &source,
+            &self.head,
+            &[],
+            IncidentNumberRegister::new(Arc::clone(&self.store().database)),
+            OperatorProfileRepository::new(Arc::clone(&self.store().database)),
+            self.binding,
+        );
+        let proof = self.proof_for(ReauthPurpose::Finalize);
+        let preview = service.preview(&proof, valid_incident(), self.observed_now())?;
+        service.finalize(&proof, valid_incident(), &preview, self.observed_now())
+    }
+
     /// Der Lesezugriff auf den Bestand.
     #[must_use]
     pub fn source(&self) -> ea_archive_fs::LocalPathArchiveSource<'_> {
@@ -866,6 +910,34 @@ impl WriterHarness {
     #[must_use]
     pub fn draft_dek_is_present(&self) -> bool {
         self.store().repository.load_or_create().is_ok()
+    }
+
+    /// Ob der SCHLUESSELSPEICHER den `draftDEK` dieser Fixture nicht mehr
+    /// fuehrt.
+    ///
+    /// Eine ANDERE Frage als [`Self::draft_dek_is_present`], und die Trennung
+    /// ist der Punkt: jene liest die ABLAGE (`load_or_create` scheitert, wenn
+    /// die Entwurfszeile ihr Geheimnis nicht mehr findet), diese fragt den
+    /// SCHLUESSELSPEICHER unter der Adresse, die die Fixture beim Saeen
+    /// genommen hat. Nach einer Rueckspielung sind die beiden Antworten
+    /// dasselbe Ereignis von zwei Seiten — und nur diese Seite ist keine
+    /// Wiederholung der Bedingung, die den Fall ueberhaupt erkannt hat.
+    ///
+    /// # Das Fenster, in dem dieser Leser etwas sagt
+    ///
+    /// Die Adresse ist (Speicher, Konto, `DraftDek`) und damit EIN Platz, den
+    /// Schritt 13 mit dem Schluessel des neuen LEEREN Entwurfs wieder belegt.
+    /// „Fort" ist deshalb die Aussage des Fensters ZWISCHEN dem Loeschen und
+    /// dem leeren Entwurf — nach einem vollendeten Abschluss ist der Platz
+    /// wieder belegt, und das ist die Nachbedingung und kein Verstoss. Was nach
+    /// einem vollendeten Abschluss gemessen gehoert, ist
+    /// [`Self::writer_keys_cannot_decrypt`].
+    #[must_use]
+    pub fn draft_dek_entry_is_absent(&self) -> bool {
+        !self
+            .provider
+            .contains(&self.draft_dek_handle)
+            .expect("der In-Prozess-Provider antwortet immer")
     }
 
     /// Die VEROEFFENTLICHTEN Eintraege — ohne jede Staging-Adresse.
@@ -1061,6 +1133,78 @@ impl WriterHarness {
     #[must_use]
     pub const fn line(&self) -> &RegistryLineBuilder {
         &self.line
+    }
+}
+
+/// Ein Schluesselspeicher, der sein `delete` VERSCHLUCKT und `Ok` meldet.
+///
+/// Er existiert, damit die Abwesenheitsbestaetigung in Schritt 9 TRAGEND ist
+/// und nicht dekorativ: gegen einen wahrhaftigen Provider kann sie nie
+/// fehlschlagen, also waere `WriterError::KeyDeletionNotConfirmed` ohne diesen
+/// Doppelgaenger eine Zeile, die kein Test je ausfuehrt. Wortgleich zum
+/// Doppelgaenger der VERWERFENSSEITE (`crates/ea-draft/tests/support/mod.rs`) —
+/// dieselbe Zusage, dieselbe Bauart, und die Asymmetrie zwischen den beiden
+/// Seiten war der Befund.
+struct DeafDeleteProvider {
+    inner: Arc<InMemoryKeyProvider>,
+}
+
+impl KeyProvider for DeafDeleteProvider {
+    fn generate(
+        &self,
+        purpose: SecretPurpose,
+        protection: KeyProtectionProfileV1,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.generate(purpose, protection)
+    }
+
+    fn sign(
+        &self,
+        handle: &KeyHandle,
+        content_type: ea_crypto::ContentType,
+        certificate_hash: ea_types::CertificateHash,
+        payload: &[u8],
+    ) -> Result<ea_key_provider::CoseSign1Bytes, ea_key_provider::KeyError> {
+        self.inner
+            .sign(handle, content_type, certificate_hash, payload)
+    }
+
+    fn wrap_secret(
+        &self,
+        purpose: SecretPurpose,
+        secret: ea_crypto::SecretBytes<32>,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.wrap_secret(purpose, secret)
+    }
+
+    fn unwrap_secret(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<ea_crypto::SecretBytes<32>, ea_key_provider::KeyError> {
+        self.inner.unwrap_secret(handle)
+    }
+
+    fn unwrap_database_key(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<ea_crypto::SecretVec, ea_key_provider::KeyError> {
+        self.inner.unwrap_database_key(handle)
+    }
+
+    /// Meldet Erfolg und tut NICHTS.
+    fn delete(&self, _handle: &KeyHandle) -> Result<(), ea_key_provider::KeyError> {
+        Ok(())
+    }
+
+    fn contains(&self, handle: &KeyHandle) -> Result<bool, ea_key_provider::KeyError> {
+        self.inner.contains(handle)
+    }
+
+    fn reached_protection_profile(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<KeyProtectionProfileV1, ea_key_provider::KeyError> {
+        self.inner.reached_protection_profile(handle)
     }
 }
 

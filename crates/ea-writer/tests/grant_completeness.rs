@@ -106,3 +106,79 @@ fn every_planned_grant_exists_as_an_eag_before_the_entry_is_published() {
         "das Manifest bindet den Plan und nicht die erzeugten Objekthashes"
     );
 }
+
+/// Das NULL-Bein der dritten Invariante: kein aktiver Recovery-Empfaenger.
+///
+/// Die beiden anderen Beine sind bezeugt — der VOLLSTAENDIGE Plan oben und der
+/// ZWEITE Empfaenger, den der eingefrorene Konstruktor abweist. Fuer das Null-Bein
+/// gab es keinen Aufbau: `WriterError::NoActiveRecoveryRecipient` (Schritt 3) hatte
+/// in allen Testverzeichnissen null Treffer. Der sechste Knopf der Fixture stellt
+/// den Zustand her, und er ist ERREICHBAR und keine Attrappe: die Kandidatenpruefung
+/// der Stufe 1 weist eine Linie ohne Recovery-Empfaenger NICHT ab.
+#[test]
+fn a_registry_without_an_active_recovery_recipient_is_refused_before_any_secret_is_drawn() {
+    let variant = LineVariantV1 {
+        without_recovery_recipient: true,
+        ..LineVariantV1::default()
+    };
+    // Erstens: Stufe 1 laesst diese Linie durch. Ohne diese Zeile koennte die
+    // Zusicherung unten auch von einem Aufbau kommen, den der Vertrauenspfad
+    // schon verworfen hat — dann bezeugte sie nichts ueber Schritt 3.
+    assert_eq!(
+        WriterHarness::candidate_rejection(variant),
+        None,
+        "die Linie ohne Recovery-Empfaenger MUSS verifizieren, sonst ist der Waechter \
+         unerreichbar und dieser Test leer"
+    );
+    let harness = WriterHarness::with_variant(variant);
+    // Zweitens: der Head weicht in GENAU diesem Punkt ab. Kein
+    // Recovery-Empfaenger, aber weiterhin seine zwei Reader — sonst faellt die
+    // Finalisierung an einem leeren Head statt am fehlenden Empfaenger.
+    assert_eq!(
+        harness
+            .head()
+            .active_certificates()
+            .filter(|(_, fields)| fields.certificate_kind
+                == ea_format::CertificateKindV1::RecoveryRecipient)
+            .count(),
+        0
+    );
+    assert_eq!(
+        harness.expected_grant_count(),
+        2,
+        "die zwei Reader stehen weiter aktiv"
+    );
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+    // Die VORSCHAU ist der Produktionseinstieg, der Schritt 3 zuerst erreicht,
+    // und sie zieht KEIN Geheimnis: der Abschluss ist damit abgewiesen, bevor
+    // CEK und AEAD-Nonce ueberhaupt entstehen.
+    // `let Err(...) else` statt `expect_err`: `FinalizationPreview` leitet kein
+    // `Debug` ab — eine Vorschau gehoert in keine Protokollzeile.
+    let Err(refused) = service.preview(&proof, valid_incident(), harness.observed_now()) else {
+        panic!("ohne Recovery-Empfaenger entsteht keine Vorschau");
+    };
+    // Gemessen wird der CODE und nicht blosses `is_err`, und das trennt die zwei
+    // Waechter des Null-Beins: nimmt man den aus Schritt 3 heraus, weist der
+    // eingefrorene Konstruktor der Stufe 1 denselben Aufbau mit
+    // `EA-GRANT-MISSING-RECOVERY` ab — nachgeprueft per Mutation. Diese
+    // Zusicherung bezeugt also GENAU den frueheren der beiden: die Pruefung am
+    // HEAD, vor jeder Serialisierung.
+    assert_eq!(refused.code(), "EA-WRITER-NO-ACTIVE-RECOVERY-RECIPIENT");
+
+    // Und die Abweisung verklemmt nichts und hinterlaesst nichts: kein
+    // gestagtes Objekt, keine Abschlussmarke, die Nummer unverbraucht, der
+    // Entwurf unveraendert lesbar.
+    assert_eq!(harness.staged_object_count(), 0);
+    assert!(!harness.prepared_marker_is_present());
+    assert!(!harness.incident_number_is_taken(&valid_incident().human_incident_number));
+    assert!(!harness.draft_is_blank());
+
+    // Die Gegenkontrolle steht in diesem Ziel und wird nicht wiederholt:
+    // `every_planned_grant_exists_as_an_eag_before_the_entry_is_published`
+    // faehrt DIESELBE Fixture mit der glatten Linie bis Schritt 7. Eine zweite
+    // Fixture hier waere ausserdem eine zweite prozessweite Sperre im selben
+    // Test und damit ein Selbstblock.
+}

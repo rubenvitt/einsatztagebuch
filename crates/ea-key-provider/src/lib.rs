@@ -32,21 +32,47 @@
 //! }
 //! ```
 //!
+//! Und die vierte Produktinvariante — kein privater Reader-, Recovery-,
+//! Historical-Grant-Authority- oder Key-Approver-Schluessel auf einem Writer —
+//! haengt am TYP und nicht an einer Laufzeitpruefung: [`KeyPurpose`] und
+//! [`SecretPurpose`] sind disjunkt, und aus einem fremden Zweck entsteht kein
+//! lokaler. Es gibt keine Umwandlung:
+//!
+//! ```compile_fail
+//! use ea_key_provider::{KeyPurpose, SecretPurpose};
+//!
+//! fn local_from_foreign(purpose: KeyPurpose) -> SecretPurpose {
+//!     SecretPurpose::from(purpose)
+//! }
+//! ```
+//!
+//! Und es gibt keinen Weg an der positiven Haelfte vorbei: ein fremder Zweck
+//! ist kein Argument von `validate_local`, und das entscheidet der Uebersetzer
+//! und keine Zeile, die jemand vergessen kann.
+//!
+//! ```compile_fail
+//! use ea_key_provider::{KeyPurpose, WriterKeyProfile};
+//!
+//! WriterKeyProfile::validate_local(&[KeyPurpose::ReaderKem]).unwrap();
+//! ```
+//!
 //! Was der Griff dagegen sehr wohl herausgibt, ist seine Bindung — Speicher,
 //! Anwendung, Kontoinstanz, Zweck und Verbreitungspolitik. Dieser Doctest
-//! uebersetzt und belegt damit zugleich, dass die beiden obigen an ihrem
+//! uebersetzt und belegt damit zugleich, dass die vier obigen an ihrem
 //! jeweiligen Gegenstand scheitern und nicht an ihren Importen:
 //!
 //! ```
 //! use ea_crypto::SecretBytes;
-//! use ea_key_provider::{SecretPurpose, WriterKeyProfile};
+//! use ea_key_provider::{KeyPurpose, SecretPurpose, WriterKeyProfile};
 //!
 //! WriterKeyProfile::validate_local(&[SecretPurpose::DraftDek]).unwrap();
-//! // Benennt BEIDE Pfade, die die `compile_fail`-Doctests oben brauchen. Ohne
-//! // diese Zeile bestuende der zweite auch dann, wenn `ea_crypto::SecretBytes`
-//! // in einem Doctest gar nicht aufloest — er waere dann kein Beleg fuer die
-//! // fehlende Umwandlung, sondern nur fuer einen kaputten Import.
+//! // Benennt JEDEN Pfad, den die `compile_fail`-Doctests oben brauchen. Ohne
+//! // diese Zeilen bestuenden sie auch dann, wenn `ea_crypto::SecretBytes` oder
+//! // `ea_key_provider::KeyPurpose` in einem Doctest gar nicht aufloest — sie
+//! // waeren dann kein Beleg fuer die fehlende Umwandlung, sondern nur fuer
+//! // einen kaputten Import.
 //! let _secret = SecretBytes::<32>::new([0; 32]);
+//! WriterKeyProfile::validate(&[KeyPurpose::ReaderKem]).unwrap_err();
 //! ```
 #![forbid(unsafe_code)]
 

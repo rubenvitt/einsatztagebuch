@@ -355,10 +355,7 @@ impl ea_draft::DraftRepository for BlankDraftRefusingRepository {
         self.inner.load_or_create()
     }
 
-    fn save(
-        &self,
-        draft: ea_draft::Draft,
-    ) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
+    fn save(&self, draft: ea_draft::Draft) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
         self.inner.save(draft)
     }
 
@@ -532,9 +529,7 @@ fn a_rename_failure_with_a_free_target_never_writes_under_the_commit_name() {
 
     // Und der Zustand ist fortsetzbar: dieselbe Marke, dieselben Bytes,
     // derselbe Pfad.
-    harness
-        .backend()
-        .clear_foreign_filesystem_for_test(&target);
+    harness.backend().clear_foreign_filesystem_for_test(&target);
     let outcome = service
         .recover_pending()
         .expect("die Wiederaufnahme muss nach dem Fehler tragen");
@@ -601,4 +596,78 @@ fn a_booked_discard_intent_is_displaced_by_the_prepared_finalization() {
         "die Absicht ist mit der Marke verdraengt und mit Schritt 13 geraeumt"
     );
     assert!(!harness.prepared_marker_is_present());
+}
+
+/// Ein Schluesselspeicher, der ein `delete` MELDET und nicht loescht, kommt
+/// nicht ueber die Grenze.
+///
+/// `WriterError::KeyDeletionNotConfirmed` (Schritt 9) ist der EINZIGE Waechter
+/// der unwiderruflichen Grenze, und er hatte in allen Testverzeichnissen null
+/// Treffer — waehrend derselbe Waechter der VERWERFENSSEITE
+/// (`crates/ea-draft/tests/discard_faults.rs`,
+/// `a_keystore_that_reports_a_deletion_without_deleting_stops_the_discard`)
+/// bezeugt war. Diese Asymmetrie war der Befund; dieser Test schliesst sie mit
+/// demselben Doppelgaenger und derselben Zweiteilung.
+///
+/// Gegen einen wahrhaftigen Provider kann die Abwesenheitsbestaetigung nie
+/// fehlschlagen — ohne den tauben Doppelgaenger waere sie eine Zeile, die kein
+/// Test je ausfuehrt.
+#[test]
+fn a_keystore_that_reports_a_deletion_without_deleting_stops_the_finalization() {
+    let harness = WriterHarness::with_incident();
+    // `let Err(...) else` statt `expect_err`: `FinalizeOutcome` leitet kein
+    // `Debug` ab — ein Abschlussergebnis gehoert in keine Protokollzeile.
+    let Err(refused) = harness.finalize_with_deaf_keystore() else {
+        panic!("ein gemeldetes, nicht ausgefuehrtes Loeschen MUSS den Abschluss anhalten");
+    };
+    assert_eq!(refused.code(), "EA-WRITER-KEY-DELETION-NOT-CONFIRMED");
+
+    // Die POSITIVKONTROLLE: der Lauf hat die Grenze wirklich erreicht. Ohne
+    // diese zwei Zeilen waere „nichts veroeffentlicht" darunter auch fuer einen
+    // Lauf gruen, der schon an Schritt 1 gescheitert ist — dort ist ebenfalls
+    // nichts veroeffentlicht, und der Fehlercode allein sagt nicht, wie weit
+    // gekommen wurde.
+    assert!(
+        harness.prepared_marker_is_present(),
+        "Schritt 8 liegt VOR Schritt 9: die Abschlussmarke MUSS stehen"
+    );
+    assert_eq!(
+        harness.staged_object_count(),
+        harness.expected_grant_count() + 1,
+        "jeder Grant und der Eintrag liegen gestaget"
+    );
+
+    // Und trotzdem ist NICHTS veroeffentlicht.
+    assert!(harness.published_entry_paths().is_empty());
+    assert!(harness.published_grant_paths().is_empty());
+
+    // Der `draftDEK` liegt weiter — der taube Speicher hat ihn nicht entfernt.
+    // Die Grenze ist damit NICHT ueberschritten, und deshalb ist der richtige
+    // Neustartausgang die WIEDERHERSTELLUNG des Entwurfs und nicht die
+    // Vollendung: `recover.rs` liest den ENTWURF als Zeugen der Grenze, und er
+    // laesst sich oeffnen. Eine Vollendung hier waere ein Eintrag, dessen
+    // `draftDEK` noch benutzbar ist — genau der Zustand, den die vierte
+    // Invariante ausschliesst.
+    assert!(!harness.draft_dek_entry_is_absent());
+    let source = harness.source();
+    let service = harness.service(&source);
+    let first = service
+        .recover_pending()
+        .expect("die Wiederaufnahme muss tragen");
+    assert!(
+        first.is_original_draft(),
+        "vor der Grenze wird der Entwurf wiederhergestellt, nicht vollendet: {first:?}"
+    );
+    assert_eq!(
+        service
+            .recover_pending()
+            .expect("das zweite recover muss tragen"),
+        RecoveryOutcome::NothingPending,
+        "ein zweites recover ist ein no-op"
+    );
+    // Der Abbruch verklemmt nichts: die Marke ist geloest, der Entwurf traegt
+    // weiter seinen Inhalt, und veroeffentlicht ist nach wie vor nichts.
+    assert!(!harness.prepared_marker_is_present());
+    assert!(!harness.draft_is_blank());
+    assert!(harness.published_entry_paths().is_empty());
 }
