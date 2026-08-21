@@ -469,19 +469,31 @@ fn stage_one_gate_requires_a_complete_requirement_ledger() {
 }
 
 /// Die sieben MUSS-Anforderungen des Web-Reader-Specs, in der Reihenfolge, in
-/// der das Ledger sie fuehrt: Identifikator, Abschnitt der Normativquelle und
-/// die Stufe, in der die Anforderung faellig wird.
+/// der das Ledger sie fuehrt: Identifikator, Abschnitt der Normativquelle, die
+/// Stufe, in der die Anforderung faellig wird, und der Status, den ihre Zeile
+/// dort traegt.
 ///
 /// Entscheidung D3 vom 2026-08-17: der Spec ist eine freigegebene
 /// Normativquelle, seine MUSS-Saetze werden als `v1.1`-Zeilen gefuehrt.
-const WEB_READER_MUST_ROWS: [(&str, &str, &str); 7] = [
-    ("WR-041", "4.1", "3"),
-    ("WR-042", "4.2", "3"),
-    ("WR-043", "4.3", "3"),
-    ("WR-052", "5.2", "4"),
-    ("WR-063", "6.3", "4"),
-    ("WR-075", "7.5", "5"),
-    ("WR-082", "8.2", "4"),
+///
+/// Entscheidung D-HE2 vom 2026-08-18 UEBERSCHREIBT die Stufenzuordnung, die D3
+/// GENAU EINER dieser Zeilen gegeben hat: `WR-052` (der universelle Datei-Weg)
+/// wird von Stufe 2 geliefert und nicht von Stufe 4 — Task 12 dieses Plans
+/// baut den Ein-Datei-Buendelexport, ohne ein siebtes Objektpraefix zu praegen.
+/// Die Zeile wandert deshalb auf Stufe `2` und Status `integrated`. Die
+/// uebrigen sechs Zeilen behalten ihre Stufe UND ihr `planned`; die
+/// Erwartungsspalte ist hinzugekommen, damit diese eine Verschiebung
+/// AUSGESCHRIEBEN dasteht statt die Zusicherung fuer alle sieben aufzuweichen.
+/// Der geschlossene Stufe-1-Gate-Bericht (`docs/traceability/stage-1-gate.md`)
+/// wird dafuer NICHT angefasst: er haelt den Stand am Stufe-1-Gate fest.
+const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 7] = [
+    ("WR-041", "4.1", "3", "planned"),
+    ("WR-042", "4.2", "3", "planned"),
+    ("WR-043", "4.3", "3", "planned"),
+    ("WR-052", "5.2", "2", "integrated"),
+    ("WR-063", "6.3", "4", "planned"),
+    ("WR-075", "7.5", "5", "planned"),
+    ("WR-082", "8.2", "4", "planned"),
 ];
 
 /// Wurzel des echten Arbeitsbaums, von `tools/xtask` aus gerechnet.
@@ -612,7 +624,7 @@ fn web_reader_must_requirements_are_recorded_as_v1_1_rows() {
         .map(ledger_fields)
         .collect();
 
-    for (identifier, section, stage) in WEB_READER_MUST_ROWS {
+    for (identifier, section, stage, status) in WEB_READER_MUST_ROWS {
         let row = rows
             .iter()
             .find(|row| row[0] == identifier)
@@ -640,8 +652,8 @@ fn web_reader_must_requirements_are_recorded_as_v1_1_rows() {
             row[7]
         );
         assert_eq!(
-            row[8], "planned",
-            "{identifier} must stay planned until its stage delivers it, found {}",
+            row[8], status,
+            "{identifier} must carry status {status} in stage {stage}, found {}",
             row[8]
         );
     }
@@ -1404,14 +1416,28 @@ fn write_stage_two_ledger(root: &Path, defect: LedgerDefect) {
         let mut fields = ledger_fields(line);
         if fields[7] == "2" {
             stage_two_rows += 1;
-            let keep_planned = matches!(
+            let force_planned = matches!(
                 defect,
                 LedgerDefect::OneRowPlannedAndOneHostTargetUnnamed(identifier, _)
                     if identifier == fields[0]
             );
-            if !keep_planned {
-                fields[8] = "implemented".to_owned();
-            }
+            // GESETZT und nicht bloss stehengelassen: seit Task 18 traegt die
+            // eingecheckte Zeile `integrated`, und ein Fixture, das den Status
+            // nur nicht ueberschreibt, erzeugte damit gar keinen Mangel mehr.
+            // Der Fixture-Zustand kommt vom DEFEKT und nie vom Arbeitsbaum.
+            fields[8] = if force_planned {
+                "planned".to_owned()
+            } else {
+                "implemented".to_owned()
+            };
+        }
+        // Die Belegspalten der KOPIERTEN Zeilen duerfen keine Zielarchitektur
+        // nennen: seit Task 18 fuehrt das eingecheckte Ledger vier eigene
+        // Stufe-7-Zeilen, die alle vier nennen, und die Phase „genau EIN
+        // unbenanntes Ziel" waere sonst nicht mehr herstellbar. Welche Ziele
+        // benannt sind, entscheidet ausschliesslich `host_target_rows` unten.
+        for target in STAGE_TWO_HOST_TARGETS {
+            fields[6] = fields[6].replace(target, "<Zielarchitektur>");
         }
         text.push_str(&format!("\"{}\"", fields.join("\",\"")));
         text.push('\n');
@@ -1924,4 +1950,142 @@ fn the_stage_switch_still_refuses_an_undefined_stage() {
         stderr.contains("stages 1 and 2"),
         "the switch must name the stages it defines; stderr: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stufe 2 — die ZIELzustandstests der Stufenabnahme (Task 18).
+//
+// Sie lesen den ECHTEN Arbeitsbaum und halten einen ZIELzustand. Sie koennen
+// durch einen spaeteren Task nicht invertieren: was hier gruen ist, bleibt
+// gruen, solange die Stufe geschlossen bleibt.
+// ---------------------------------------------------------------------------
+
+/// Die zwoelf Abbruchpunkte der Finalisierung, als LITERALE.
+///
+/// Textgleich mit den Varianten von `ea_writer::FinalizationFaultPoint`
+/// (`crates/ea-writer/src/fault.rs`), aber ausdruecklich als Zeichenketten:
+/// so bleibt `tools/xtask/Cargo.toml` frei von jeder Stufe-2-Abhaengigkeit, und
+/// die Deklaration wird gegen eine UNABHAENGIGE Liste verglichen statt gegen
+/// sich selbst. Verglichen mit der Aufzaehlung selbst koennte eine Aufzaehlung
+/// mit einer einzigen Variante beide Zusagen erfuellen und gruen melden.
+const FINALIZATION_FAULT_POINT_NAMES: &[&str] = &[
+    "BeforeStagingCreate",
+    "AfterStagingCreateBeforeFileFlush",
+    "AfterStagingFileFlushBeforeDirectoryFlush",
+    "AfterStagingDirectoryFlushBeforeMarker",
+    "AfterPreparedMarkerCommit",
+    "AfterKeystoreDelete",
+    "AfterAbsenceConfirmation",
+    "AfterGrantPublishBeforeEntryRename",
+    "AfterEntryRenameBeforeDirectoryFlush",
+    "AfterEntryDirectoryFlush",
+    "AfterReconciliationBeforeBlankDraft",
+    "BackupRestoreAfterKeyDeletion",
+];
+
+/// Die sechs Abbruchpunkte des Verwerfens, als LITERALE.
+///
+/// Textgleich mit den Varianten von `ea_draft::DiscardFaultPoint`
+/// (`crates/ea-draft/src/fault.rs`); dieselbe Begruendung wie oben.
+const DISCARD_FAULT_POINT_NAMES: &[&str] = &[
+    "BeforeIntentCommit",
+    "AfterIntentCommit",
+    "AfterKeystoreDelete",
+    "AfterAbsenceConfirmation",
+    "AfterDraftRemoval",
+    "BackupRestoreAfterKeyDeletion",
+];
+
+/// Haelt fest, dass der Stufe-2-Gate jede unwiderrufliche Grenze DEKLARIERT.
+///
+/// Die Kanarienzusicherung ist hier ABSICHTLICH nicht dabei: ob ein
+/// Kanarienvogel gefunden wurde, ist eine Aussage ueber einen LAUF, und die
+/// traegt `tests/ea-system-tests/tests/privacy_canaries_writer.rs`.
+#[test]
+fn stage_two_gate_declares_every_irreversible_boundary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["stage-gate", "2"])
+        .env_remove("EA_STAGE_GATE_ROOT")
+        .output()
+        .expect("xtask stage-gate must start");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let declared = report["declared_fault_points"].as_array().unwrap();
+    for point in FINALIZATION_FAULT_POINT_NAMES
+        .iter()
+        .chain(DISCARD_FAULT_POINT_NAMES)
+    {
+        assert!(
+            declared.iter().any(|value| value == point),
+            "der Stufe-2-Gate deklariert {point} nicht"
+        );
+    }
+    assert_eq!(
+        report["stage_two_primary_acceptance_criteria"],
+        serde_json::json!([1, 2, 3, 15, 23, 25, 28, 34, 39, 46, 48, 54])
+    );
+    assert!(!report["host_evidence_rows"].as_array().unwrap().is_empty());
+    let planned = report["stage_two_rows_still_planned"].as_array().unwrap();
+    assert!(
+        planned.is_empty(),
+        "Stufe-2-Ledgerzeilen stehen noch auf planned: {planned:?}"
+    );
+}
+
+/// Die zehn Kommandos der Schritt-6-Folge dieses Plans, in genau der
+/// Reihenfolge, in der der Plan sie vorschreibt.
+///
+/// Das erste Kommando steht mit seinem Praefix, nicht mit seiner vollen
+/// Paketliste: die Belegzeile MUSS es nennen, soll die zehn `-p`-Namen aber
+/// nicht ein zweites Mal woertlich abschreiben.
+const STAGE_TWO_STEP_SIX_COMMANDS: [&str; 10] = [
+    "cargo test --locked -p ea-writer",
+    "cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix",
+    "cargo test --locked -p ea-system-tests --test privacy_canaries_writer",
+    "cargo test --locked -p ea-system-tests --test e2e_writer_archive",
+    "pnpm desktop:typecheck",
+    "pnpm desktop:test",
+    "pnpm desktop:e2e",
+    "pnpm supply-chain",
+    "pnpm stage-gate:2",
+    "pnpm verify:quick",
+];
+
+/// Haelt fest, dass der Stufe-2-Gate-Bericht den vorgeschriebenen vollen Lauf
+/// GEMESSEN protokolliert statt ihn zu behaupten.
+///
+/// Er lebt hier und nicht im Gate, aus dem Grund, den Stufe 1 schon
+/// entschieden hat: der protokollierte Lauf enthaelt `pnpm stage-gate:2` und
+/// `pnpm verify:quick` selbst, und ein Gate, der seine eigene Messzeile
+/// verlangte, koennte auf dem Lauf, der sie erzeugt, nie gruen sein.
+#[test]
+fn stage_two_gate_report_records_the_measured_full_gate_run() {
+    let report = fs::read_to_string(workspace_root().join("docs/traceability/stage-2-gate.md"))
+        .expect("the stage 2 gate report must be readable");
+    let rows = measured_run_rows(&report);
+    for command in STAGE_TWO_STEP_SIX_COMMANDS {
+        let matching: Vec<&Vec<String>> =
+            rows.iter().filter(|row| row[0].contains(command)).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "stage-2-gate.md must record the measured run for `{command}` exactly once"
+        );
+        let row = matching[0];
+        assert!(row.len() >= 3, "{row:?}");
+        assert_eq!(
+            row[1], "0",
+            "`{command}` must have ended with exit code 0: {row:?}"
+        );
+        assert!(!row[2].is_empty(), "{row:?}");
+        assert!(
+            !row[2].contains("0 passed"),
+            "`0 passed; N filtered out` is a broken filter, not a result: {row:?}"
+        );
+    }
+    assert_eq!(rows.len(), STAGE_TWO_STEP_SIX_COMMANDS.len() + 1);
 }

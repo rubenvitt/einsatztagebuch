@@ -719,6 +719,17 @@ impl WriterHarness {
         self.binding
     }
 
+    /// Der Vertrauensanker DIESER Linie.
+    ///
+    /// Er wird herausgegeben, weil ein Verifikationslauf UEBER den erzeugten
+    /// Bestand gegen GENAU diesen Anker laufen muss; ein zweiter, daneben
+    /// gebauter Anker waere eine zweite Wahrheit.
+    #[must_use]
+    pub fn anchor(&self) -> ea_trust::TrustAnchorV1 {
+        ea_trust::decode_trust_anchor(self.line.exact_anchor_bytes())
+            .expect("der Anker der Fixture muss dekodieren")
+    }
+
     #[must_use]
     pub fn repository(&self) -> Arc<dyn DraftRepository> {
         Arc::clone(&self.store().repository)

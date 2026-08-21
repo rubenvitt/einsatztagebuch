@@ -1457,11 +1457,15 @@ name = "ea-system-tests"
 version = "0.1.0"
 dependencies = [
  "ea-archive",
+ "ea-archive-fs",
+ "ea-audit",
  "ea-cbor",
  "ea-chain",
  "ea-crypto",
+ "ea-draft",
  "ea-format",
  "ea-key-provider",
+ "ea-local-store",
  "ea-operator",
  "ea-schema",
  "ea-testkit",
@@ -1469,6 +1473,7 @@ dependencies = [
  "ea-trust",
  "ea-types",
  "ea-verify",
+ "ea-writer",
  "ed25519-dalek",
  "hex",
  "jsonschema",

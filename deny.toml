@@ -1,9 +1,49 @@
 [advisories]
 yanked = "deny"
+# Die Ausnahmen tragen ihre BEGRUENDUNG mit. Jeder Eintrag ist ein
+# `unmaintained`-Befund und KEINE Verwundbarkeit und kein `unsound`; jeder wird
+# ausschliesslich ueber den Tauri-Teilbaum von `apps/desktop/src-tauri`
+# erreicht, und fuer keinen davon gibt es ein sicheres Upgrade
+# („No safe upgrade is available"). Die Entscheidung dazu steht im Abschnitt
+# `Gemessener Gate-Lauf` von `docs/traceability/stage-2-gate.md`; sie ist eine
+# Stufe-7-Verpflichtung (Releasehaertung) und keine Stufe-2-Zusage.
+#
+# Die Liste ist NAMENTLICH und nie `unmaintained = "allow"`: eine neue
+# unbetreute Crate oder eine echte Verwundbarkeit faellt weiterhin auf.
+ignore = [
+  # gtk-rs GTK3-Bindings, RUSTSEC-2024-0411..0420: der Linux-Fensterpfad von
+  # `tauri` ueber `gtk 0.18`. Auf dem Host-Target dieser Stufe (Darwin) wird
+  # keine dieser Crates gebaut; sie stehen nur im Graphen.
+  { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0412", reason = "gdk 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0413", reason = "atk 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0414", reason = "gdkx11-sys 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0415", reason = "gtk 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0416", reason = "atk-sys 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0417", reason = "gdkx11 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0418", reason = "gdk-sys 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0419", reason = "gtk3-macros 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2024-0420", reason = "gtk-sys 0.18.2, gtk-rs GTK3, nur ueber tauri; kein sicheres Upgrade" },
+  # Ein Makro-Hilfspaket im Bauzweig von `glib-macros`, das der Tauri-Teilbaum
+  # mitzieht. Es laeuft zur BAUZEIT und traegt keinen Laufzeitcode der App.
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error 1.0.4, Bauzeit ueber glib-macros/tauri; kein sicheres Upgrade" },
+  # Die fuenf unic-Crates ueber `urlpattern` in `tauri-utils`.
+  { id = "RUSTSEC-2025-0075", reason = "unic-char-range 0.9.0, nur ueber tauri-utils/urlpattern; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2025-0080", reason = "unic-common 0.9.0, nur ueber tauri-utils/urlpattern; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2025-0081", reason = "unic-char-property 0.9.0, nur ueber tauri-utils/urlpattern; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version 0.9.0, nur ueber tauri-utils/urlpattern; kein sicheres Upgrade" },
+  { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident 0.9.0, nur ueber tauri-utils/urlpattern; kein sicheres Upgrade" },
+]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Jede Kante zwischen zwei Mitgliedern dieses Workspace ist eine Pfadkante ohne
+# Versionsangabe, und cargo-deny liest sie als Wildcard. Diese Zeile nimmt genau
+# diese Kanten aus — und NUR sie: sie greift ausschliesslich fuer Crates mit
+# `publish = false`, also fuer die Mitglieder dieses Workspace. Eine echte
+# Wildcard auf eine Registry-Crate bleibt ein Fehler.
+allow-wildcard-paths = true
 
 [licenses]
 allow = [
@@ -14,9 +54,34 @@ allow = [
   "Unicode-3.0",
 ]
 confidence-threshold = 0.8
+# Die Allowlist oben bleibt bei FUENF Eintraegen. Was hier steht, sind
+# NAMENTLICHE Ausnahmen je Crate: eine neue Crate unter derselben Lizenz wird
+# weiterhin abgewiesen, und das ist der Unterschied zwischen einer Ausnahme und
+# einer stillschweigenden Erweiterung. Jede Zeile nennt die Crate, ihre Lizenz
+# und den Weg, ueber den sie in den Graphen kommt; die Entscheidung steht im
+# Abschnitt `Gemessener Gate-Lauf` von `docs/traceability/stage-2-gate.md`.
+exceptions = [
+  # CC0-1.0 — Public-Domain-Widmung, keine Copyleft-Wirkung.
+  { crate = "base16", allow = ["CC0-1.0"] },
+  { crate = "hexf-parse", allow = ["CC0-1.0"] },
+  # MIT-0 — MIT ohne Namensnennungspflicht.
+  { crate = "borrow-or-share", allow = ["MIT-0"] },
+  # Zlib — permissiv.
+  { crate = "foldhash", allow = ["Zlib"] },
+  # Apache-2.0 mit LLVM-Ausnahme — permissiver als Apache-2.0 allein.
+  { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
+  # MPL-2.0 — DATEIWEISES Copyleft. Alle fuenf kommen unveraendert und
+  # ausschliesslich als Abhaengigkeit des Tauri-Teilbaums in den Graphen; es
+  # wird keine dieser Dateien veraendert, also entsteht keine
+  # Offenlegungspflicht fuer eigenen Code.
+  { crate = "cssparser", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+  { crate = "selectors", allow = ["MPL-2.0"] },
+]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-

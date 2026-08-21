@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 # Fuer ea_crypto::object_hash: der Objekthash ist auch fuer NICHT parsbare

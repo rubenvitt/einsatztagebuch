@@ -14,6 +14,12 @@ publish = false
 # nie Dependency einer der Bibliotheks-Crates werden.
 [dev-dependencies]
 ea-archive.workspace = true
+# Die Wirtbackends der Stufe 2: `LocalPathBackend`, `ControlledNetworkBackend`,
+# `ArchiveHealthCheckV1`, `ProfileMigrator`, `MigrationFaultPoint` und der
+# Buendelschreiber `write_archive_bundle`.
+ea-archive-fs.workspace = true
+# Die signierte lokale Auditzeile, die die Profilmigration schreibt.
+ea-audit.workspace = true
 # Die Kanonizitaetseigenschaft der Eigenschaftstests nennt
 # `ea_cbor::validate(..., ParserLimits::V1)` DIREKT. `ea-format` reicht nur
 # `CborError` durch, nicht den Pruefer und nicht die Grenzen; ohne diese Zeile
@@ -23,12 +29,22 @@ ea-archive.workspace = true
 ea-cbor.workspace = true
 ea-chain.workspace = true
 ea-crypto.workspace = true
+# `DiscardService`, `DraftRepository`, `MasterDataRepository` und die
+# benannten Verwerfenspunkte. `test-support` schaltet
+# `DiscardService::begin_discard_interrupted_at` ein; ohne das Merkmal
+# existiert dieser Eingang in die unwiderrufliche Reihenfolge nicht, und die
+# Fehlermatrix koennte kein Verwerfen unterbrechen. Es ist KEIN
+# Vorgabemerkmal, und `cargo test -p ea-system-tests` allein wuerde es ueber
+# keine andere Kante bekommen.
+ea-draft = { workspace = true, features = ["test-support"] }
 ea-format.workspace = true
 # Der plattformuebergreifende Rauchtest der Stufe 2. `test-support` schaltet den
 # deterministischen In-Prozess-Provider ein, gegen den der Test belegt, dass
 # `reached_protection_profile` eine Variante von `KeyProtectionProfileV1` und
 # keine eigene Stufe-2-Aufzaehlung liefert.
 ea-key-provider = { workspace = true, features = ["test-support"] }
+# Die verschluesselte lokale Ablage, in der Entwurf und Abschlussmarke liegen.
+ea-local-store.workspace = true
 ea-operator.workspace = true
 ea-schema.workspace = true
 # Die eingefrorenen Vektoren und ihr Manifestmodell. `ea-testkit` haelt
@@ -39,6 +55,10 @@ ea-time.workspace = true
 ea-trust.workspace = true
 ea-types.workspace = true
 ea-verify.workspace = true
+# Der Zustandsautomat der Finalisierung samt `FinalizationFaultPoint::ALL`.
+# `test-support` schaltet `WriterService::finalize_interrupted_at` und
+# `finalize_up_to` ein — dieselbe Begruendung wie bei `ea-draft`.
+ea-writer = { workspace = true, features = ["test-support"] }
 ed25519-dalek.workspace = true
 # Fuer das per `#[path]` eingebundene Archiv-Support-Modul, das Objekthashes
 # hexadezimal in Pfadhinweise schreibt.
