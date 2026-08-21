@@ -46,10 +46,10 @@ use serde::{Deserialize, Serialize};
 use super::{
     ARCHIVE_HEALTH_UNAVAILABLE, BUNDLE_EXPORT_UNAVAILABLE, CommandError, DISCARD_UNAVAILABLE,
     DRAFT_PAYLOAD_UNREADABLE, DRAFTS_UNAVAILABLE, MASTER_DATA_UNAVAILABLE, MASTER_DATA_UNREADABLE,
-    REAUTH_UNAVAILABLE, STALE_ACK_UNAVAILABLE, STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE,
-    run_blocking,
+    NO_VERIFIED_SESSION, REAUTH_UNAVAILABLE, SESSION_STATE_UNREADABLE, STALE_ACK_UNAVAILABLE,
+    STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
 };
-use crate::state::DesktopState;
+use crate::state::{DesktopState, DraftPayloadPort};
 
 // ---------------------------------------------------------------------------
 // Drahtformen. Jede traegt `rename_all = "camelCase"` und ist die EINE
@@ -629,17 +629,56 @@ fn master_data_search_core(
 
 /// Der Kern von [`draft_load_active`].
 ///
-/// Die Nutzlast kommt ueber [`DraftPayloadPort`] und damit aus derselben
-/// Ablage, in die [`draft_save_core`] sie geschrieben hat: entsiegelt unter dem
-/// `draftDEK` durch `ea-draft` und hier nur noch entschluesselt IM SINNE der
-/// Drahtform. Eine leere Nutzlast ist der frisch angelegte Entwurf und damit
-/// ein leerer Rumpf; eine nicht lesbare Nutzlast ist eine BENANNTE Abwesenheit
-/// und nicht der leere Rumpf, weil das die stille Loeschung einer Erfassung
-/// waere.
+/// Der ENTWURFSKLARTEXT verlaesst diese Grenze ausschliesslich mit einem
+/// `ea_operator::OperatorSessionProof`, und die Pruefung steht VOR dem Port:
+/// eine Ablehnung liest die Nutzlast nicht, also kann der Klartext auch nicht
+/// im Fehlerfall entstehen. `SessionState::role` ist die Klammer um den
+/// Nachweis — sie liefert `None`, solange keiner vorliegt (siehe
+/// `crate::state::SessionState::role`) —, und dieser Kern liest genau sie und
+/// baut keine zweite Bedingung daneben.
+///
+/// Der Grund, warum das nicht schon in Task 16 stand: die zwei UNWIDERRUFLICHEN
+/// Handlungen pruefen die Frische im Kern (`ea_draft::DiscardService` und
+/// `ea_writer::WriterService::finalize` gegen `OperatorSessionProof::is_valid_for`),
+/// das HERAUSGEBEN des laufenden Entwurfs war dagegen an nichts gebunden. Ein
+/// Geraet, das gesperrt und wieder entsperrt wurde, zeigte den Einsatzrumpf
+/// ohne Wiederanmeldung.
+///
+/// Messbar ist hier nur die ABLEHNUNG, und das ist keine Luecke des Zeugen:
+/// [`ea_operator::OperatorSessionProof`] hat ausserhalb von `ea-operator`
+/// keinen Konstruktor, und `OperatorAuthenticator::reauthenticate` verlangt eine
+/// aufgeloeste Root-signierte Bindung samt `PreexistingEffectiveNow`. Dieselbe
+/// Lage und dieselbe Begruendung wie bei `commands::session::verified_session_core`.
+/// Die ABBILDUNG Nutzlast → Drahtform ist deshalb in
+/// [`draft_state_of`] herausgezogen und dort vollstaendig bezeugt.
 fn draft_load_core(state: &DesktopState) -> Result<DraftStateDto, CommandError> {
+    state
+        .session()
+        .lock()
+        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
+        .role()
+        .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
     let repository = state
         .drafts()
         .ok_or_else(|| CommandError::new(DRAFTS_UNAVAILABLE))?;
+    draft_state_of(repository)
+}
+
+/// Die Nutzlast EINES Entwurfsports als Drahtform.
+///
+/// Sie nimmt den Port und nicht den Zustand: so kann dieser Halbschritt nicht
+/// versehentlich der Kern eines Kommandos werden, denn von `&DesktopState` zur
+/// Drahtform fuehrt nur [`draft_load_core`] — und der traegt das Sitzungstor.
+///
+/// Die Nutzlast kommt aus derselben Ablage, in die [`draft_save_core`] sie
+/// geschrieben hat: entsiegelt unter dem `draftDEK` durch `ea-draft` und hier
+/// nur noch entschluesselt IM SINNE der Drahtform. Eine leere Nutzlast ist der
+/// frisch angelegte Entwurf und damit ein leerer Rumpf; eine nicht lesbare
+/// Nutzlast ist eine BENANNTE Abwesenheit und nicht der leere Rumpf, weil das
+/// die stille Loeschung einer Erfassung waere.
+fn draft_state_of(
+    repository: &(dyn DraftPayloadPort + Send + Sync),
+) -> Result<DraftStateDto, CommandError> {
     let payload = repository
         .load_payload()
         .map_err(|_| CommandError::new(DRAFTS_UNAVAILABLE))?;
@@ -831,7 +870,12 @@ pub async fn master_data_search(
 ///
 /// # Errors
 ///
-/// [`DRAFTS_UNAVAILABLE`] ohne geoeffnete Entwurfsablage.
+/// [`NO_VERIFIED_SESSION`] ohne `ea_operator::OperatorSessionProof` — der
+/// Entwurfsklartext wird ohne Nachweis nicht herausgegeben und dafuer auch nicht
+/// gelesen; [`SESSION_STATE_UNREADABLE`] bei vergiftetem Sitzungsschloss;
+/// [`DRAFTS_UNAVAILABLE`] ohne geoeffnete Entwurfsablage;
+/// [`DRAFT_PAYLOAD_UNREADABLE`], wenn die entsiegelte Nutzlast keine Drahtform
+/// dieser Anwendung ist.
 #[tauri::command]
 pub async fn draft_load_active(
     state: tauri::State<'_, DesktopState>,
@@ -986,9 +1030,11 @@ mod tests {
         ARCHIVE_HEALTH_UNAVAILABLE, ArchiveHealthReport, CommandError, DesktopState,
         FinalizationPreviewView, FinalizeOutcomeView, INCIDENT_INPUT_REJECTED, IncidentInputDto,
         IncidentInputView, WRITER_UNAVAILABLE, archive_health_core, blank_incident_dto,
-        blocked_view, device_posture_core, draft_load_core, draft_save_core, finalize_core,
-        master_data_search_core, posture_view, preview_core, recover_pending_core, resume_view,
+        blocked_view, device_posture_core, draft_load_core, draft_save_core, draft_state_of,
+        finalize_core, master_data_search_core, posture_view, preview_core, recover_pending_core,
+        resume_view,
     };
+    use crate::commands::NO_VERIFIED_SESSION;
     use crate::state::{ArchiveHealthPort, SessionState, StartupRecoveryPort};
 
     fn bare_state() -> DesktopState {
@@ -1044,6 +1090,12 @@ mod tests {
     struct RecordingDrafts {
         payload: std::sync::Mutex<String>,
         refuse: bool,
+        /// Wie oft die Nutzlast GELESEN wurde.
+        ///
+        /// Ohne diesen Zaehler waere „ohne Nachweis kein Klartext" nur am
+        /// Fehlercode messbar — und der stuende auch dann da, wenn die Grenze
+        /// die entsiegelte Nutzlast erst holt und danach ablehnt.
+        reads: std::sync::atomic::AtomicUsize,
     }
 
     impl RecordingDrafts {
@@ -1051,6 +1103,7 @@ mod tests {
             Self {
                 payload: std::sync::Mutex::new(payload.to_owned()),
                 refuse: false,
+                reads: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
@@ -1058,6 +1111,7 @@ mod tests {
             Self {
                 payload: std::sync::Mutex::new(String::new()),
                 refuse: true,
+                reads: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
@@ -1067,10 +1121,16 @@ mod tests {
                 .expect("kein vergiftetes Schloss")
                 .clone()
         }
+
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl crate::state::DraftPayloadPort for RecordingDrafts {
         fn load_payload(&self) -> Result<String, ea_draft::DraftError> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.refuse {
                 return Err(ea_draft::DraftError::NoDraft);
             }
@@ -1087,14 +1147,14 @@ mod tests {
     }
 
     fn state_with_drafts(drafts: std::sync::Arc<RecordingDrafts>) -> DesktopState {
-        DesktopState::new(
-            SessionState::new(None, None),
-            None,
-            None,
-            Some(drafts),
-            None,
-            None,
-        )
+        state_with_drafts_and_session(drafts, SessionState::new(None, None))
+    }
+
+    fn state_with_drafts_and_session(
+        drafts: std::sync::Arc<RecordingDrafts>,
+        session: SessionState,
+    ) -> DesktopState {
+        DesktopState::new(session, None, None, Some(drafts), None, None)
     }
 
     /// Ein Schreibport, der die Vorschau und den Abschluss ZURUECKGIBT.
@@ -1417,7 +1477,14 @@ mod tests {
         let state = state_with_drafts(std::sync::Arc::clone(&drafts));
 
         // Der leere Entwurf ist ein leerer Rumpf und kein erfundener Inhalt.
-        let loaded = draft_load_core(&state).expect("der Entwurf liegt");
+        //
+        // Gelesen wird ueber `draft_state_of` und nicht ueber `draft_load_core`:
+        // der Kern traegt seit VM-15 das Sitzungstor, und ein
+        // `OperatorSessionProof` ist ausserhalb von `ea-operator` nicht baubar.
+        // Die ABBILDUNG Nutzlast → Drahtform, um die es diesem Zeugen geht,
+        // liegt vollstaendig in `draft_state_of`; das Tor selbst hat seinen
+        // eigenen Zeugen.
+        let loaded = draft_state_of(drafts.as_ref()).expect("der Entwurf liegt");
         assert_eq!(loaded.incident, blank_incident_dto());
 
         let incident = valid_incident();
@@ -1425,7 +1492,7 @@ mod tests {
         assert_eq!(sync.status, ea_archive_fs::SyncStatus::LocallySaved.label());
         assert!(!drafts.written().is_empty(), "die Nutzlast ist geschrieben");
 
-        let reloaded = draft_load_core(&state).expect("der Entwurf liegt");
+        let reloaded = draft_state_of(drafts.as_ref()).expect("der Entwurf liegt");
         assert_eq!(
             reloaded.incident, incident,
             "jede Position der Erfassung kommt zurueck"
@@ -1459,15 +1526,63 @@ mod tests {
     /// noch da ist — und das naechste Speichern ueberschriebe sie.
     #[test]
     fn an_unreadable_draft_payload_is_a_named_absence() {
-        let state = state_with_drafts(std::sync::Arc::new(RecordingDrafts::accepting(
-            "kein Einsatzrumpf",
-        )));
+        let drafts = std::sync::Arc::new(RecordingDrafts::accepting("kein Einsatzrumpf"));
         assert_eq!(
-            draft_load_core(&state)
+            draft_state_of(drafts.as_ref())
                 .expect_err("das ist keine Drahtform")
                 .code,
             super::DRAFT_PAYLOAD_UNREADABLE
         );
+    }
+
+    /// Der Entwurfsklartext verlaesst die Grenze NUR mit Sitzungsnachweis — und
+    /// wird ohne ihn nicht einmal gelesen.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: `draft_load_core` holt den
+    /// Entwurfsport und ruft `load_payload()` — die unter dem `draftDEK`
+    /// ENTSIEGELTE Nutzlast — ohne einen `OperatorSessionProof` zu konsultieren.
+    /// Ein Geraet, das gesperrt und wieder entsperrt wird, zeigte den
+    /// Einsatzrumpf dann ohne Wiederanmeldung, obwohl die Sperre den Nachweis
+    /// entwertet hat (`crate::honor_session_lock`).
+    ///
+    /// Die Rolle ist hier GESETZT und der Nachweis fehlt: das ist der Zustand,
+    /// in dem eine Grenze ohne die Klammer von `SessionState::role` eine
+    /// Sitzung zu sehen glaubt. Der Zaehler ist die zweite Haelfte — er
+    /// unterscheidet „abgelehnt, bevor gelesen wurde" von „gelesen und danach
+    /// abgelehnt".
+    #[test]
+    fn loading_the_active_draft_without_a_session_proof_never_reads_the_payload() {
+        let drafts = std::sync::Arc::new(RecordingDrafts::accepting(""));
+        let state = state_with_drafts_and_session(
+            std::sync::Arc::clone(&drafts),
+            SessionState::new(Some(ea_format::OperatorRoleV1::Writer), None),
+        );
+        let incident = valid_incident();
+        draft_save_core(&state, &incident).expect("das Speichern verlangt keinen Nachweis");
+        assert!(!drafts.written().is_empty(), "die Nutzlast liegt jetzt da");
+
+        assert_eq!(
+            draft_load_core(&state)
+                .expect_err("ohne Nachweis gibt diese Grenze keinen Klartext heraus")
+                .code,
+            NO_VERIFIED_SESSION
+        );
+        assert_eq!(
+            drafts.reads(),
+            0,
+            "die entsiegelte Nutzlast wird ohne Nachweis nicht einmal geholt"
+        );
+
+        // Positivkontrolle: derselbe Port gibt genau diesen Rumpf heraus, wenn
+        // er gefragt wird. Ohne sie koennte die Ablehnung oben auch an einem
+        // leeren Port liegen.
+        assert_eq!(
+            draft_state_of(drafts.as_ref())
+                .expect("der Entwurf liegt")
+                .incident,
+            incident
+        );
+        assert_eq!(drafts.reads(), 1);
     }
 
     /// Die Vorschau des Kerns kommt durch die GRENZE — als Drahtform.

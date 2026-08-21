@@ -46,6 +46,17 @@ ea-verify.workspace = true
 # Crate deshalb mit `--no-default-features` und traegt keine der drei in seiner
 # oeffentlichen API. `tools/xtask/tests/workspace.rs` pinnt diesen Absatz
 # zusammen mit der Lage der drei Methoden hinter dem cfg.
+#
+# Dieser Absatz allein GENUEGTE NICHT, und deshalb steht der Schalter jetzt in
+# der geteilten Kante: `--no-default-features` wirkt auf das AUSGEWAEHLTE Paket
+# und nicht auf Default-Features seiner Abhaengigkeiten, also erbte jeder Wirt
+# (`apps/desktop/src-tauri`, `crates/ea-writer`, `crates/ea-ui-contracts`) die
+# drei Methoden in seiner oeffentlichen Flaeche. `workspace.dependencies` in
+# `Cargo.toml` setzt darum `default-features = false`; wer die
+# Beobachtungsflaeche braucht, fordert `features = ["test-support"]` an einer
+# DEV-Kante an. Der Zeuge
+# `no_non_test_edge_carries_the_ea_archive_fs_test_surface` liest dafuer den
+# AUFGELOESTEN Merkmalsbaum des Wirts und nicht diesen Text.
 default = ["test-support"]
 test-support = []
 

@@ -14,6 +14,14 @@ ea-archive.workspace = true
 # Die Wirtbackends `LocalPathBackend` und `ControlledNetworkBackend` samt
 # Publikationsschlange und `SyncStatus`. Diese Kante ist der Grund, warum diese
 # Crate nicht auf der wasm32-Positivliste steht.
+# OHNE Default-Features, und der Schalter dafuer steht in
+# `workspace.dependencies` (Cargo laesst `default-features = false` neben
+# `workspace = true` nicht zu). `test-support` ist bei `ea-archive-fs` ein
+# DEFAULT-Feature, und hinter ihm liegen die drei mutierenden Methoden
+# `overwrite_for_test`, `materialize_for_test` und `remove_for_test`; mit ihnen
+# traegt jeder Wirt, der DIESE Crate zieht, sie in seiner oeffentlichen
+# Flaeche. Die Beobachtungsflaeche kommt fuer die Testziele dieser Crate ueber
+# die Dev-Kante unten zurueck.
 ea-archive-fs.workspace = true
 # `LocalAuditService::record_signed` und `SignedLocalAuditEvent` — die
 # Bestaetigung eines veralteten Registry-Head ist eine SIGNIERTE Auditzeile.
@@ -73,6 +81,13 @@ test-support = []
 [dev-dependencies]
 # Die SELBSTKANTE, die `test-support` fuer die Integrationstests einschaltet.
 ea-writer = { workspace = true, features = ["test-support"] }
+# Die BEOBACHTUNGSFLAECHE von `LocalPathBackend` — `relative_paths_below_for_test`,
+# `read_for_test`, `exists_for_test`, `mark_foreign_filesystem_for_test`. Sie
+# liegt hinter `test-support`, und die Lib-Kante oben schaltet das Merkmal
+# ausdruecklich AB, damit die drei mutierenden Methoden nicht in der Flaeche des
+# Wirts landen. Diese Dev-Kante gibt sie den TESTZIELEN dieser Crate zurueck und
+# nur ihnen: Dev-Merkmale vereinigen sich nicht in den Lib-Bau.
+ea-archive-fs = { workspace = true, features = ["test-support"] }
 # Die Harness bindet `crates/ea-draft/tests/support/mod.rs` per `#[path]` ein —
 # dasselbe Muster, mit dem jene Fixture `crates/ea-trust/tests/support/mod.rs`
 # einbindet. Sie ruft `DiscardService::begin_discard_interrupted_at`, und das

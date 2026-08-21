@@ -16,7 +16,18 @@ coset = { version = "=0.4.2", features = ["std"] }
 der = { version = "=0.7.10", features = ["alloc", "oid"] }
 ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }
 ea-archive = { path = "crates/ea-archive" }
-ea-archive-fs = { path = "crates/ea-archive-fs" }
+# `default-features = false` an der GETEILTEN Kante, und zwar hier, weil Cargo
+# es am einzelnen Mitglied nicht zulaesst: `default-features = false` neben
+# `workspace = true` ist ein Fehler, solange die Workspace-Kante selbst nichts
+# dazu sagt. Das Default-Feature `test-support` von `ea-archive-fs` traegt
+# `overwrite_for_test` (umgeht Create-if-absent), `materialize_for_test` und
+# `remove_for_test` (loescht Archivbytes); ohne diesen Schalter lagen alle drei
+# in der oeffentlichen Flaeche jedes Wirts, der die Crate zieht — ein
+# `--no-default-features` am AUSGEWAEHLTEN Paket wirkt nicht auf
+# Default-Features seiner Abhaengigkeiten. Hier ist der Schalter ausserdem
+# fail-closed: ein neues Mitglied erbt die Flaeche NICHT und muss sie an einer
+# Dev-Kante ausdruecklich anfordern.
+ea-archive-fs = { path = "crates/ea-archive-fs", default-features = false }
 ea-audit = { path = "crates/ea-audit" }
 ea-cbor = { path = "crates/ea-cbor" }
 ea-chain = { path = "crates/ea-chain" }

@@ -1,6 +1,8 @@
 import { Button, Input, Space, Tag, Typography } from 'antd'
 import type { ReactElement } from 'react'
 
+import { PatientDataWarning } from '../../components/integrity/PatientDataWarning'
+
 /** Eine auswaehlbare oder ausgewaehlte Zeile — Stammdaten ODER ad hoc. */
 export type SelectableRow = {
   /** Die Stammdatenkennung, oder der Anzeigename bei einem Ad-hoc-Eintrag. */
@@ -134,6 +136,14 @@ export function MasterDataSelect({
                 emptyReason.onChange(event.target.value)
               }}
             />
+            {/*
+              Die Begruendung ist ein Freitext, der PERSISTIERT wird: ihr Wert
+              liegt als `personnel_empty_reason` bzw. `vehicles_empty_reason` in
+              der Nutzlast des Entwurfs und spaeter im Eintrag. Sie traegt
+              deshalb dieselbe Warnung wie jedes andere Freitextfeld — anders
+              als das Suchfeld oben, dessen Inhalt in keine Nutzlast geht.
+            */}
+            <PatientDataWarning />
           </Space>
         )}
       </Space>

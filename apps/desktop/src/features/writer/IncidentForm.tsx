@@ -546,6 +546,13 @@ export function IncidentForm({
             setOrganizationDraft(event.target.value)
           }}
         />
+        {/*
+          Unter dem Feld und nicht darueber: die Warnung des Notizenblocks steht
+          VOR diesem Feld und ist die Aussage ueber jenen Block. Der
+          Anzeigename einer weiteren Organisation wird persistiert
+          (`externalOrganizations`), also traegt auch dieses Feld seine eigene.
+        */}
+        <PatientDataWarning />
         <Button
           onClick={() => {
             if (organizationDraft === '') {

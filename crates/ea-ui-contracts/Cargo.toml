@@ -15,6 +15,10 @@ ea-archive.workspace = true
 # Oberflaechenkopie aus den globalen Randbedingungen, und die Detailursache
 # steht DANEBEN und ist nie ein fuenfter Zustand. Beide kommen von hier und
 # werden hier nur weitergegeben.
+# OHNE Default-Features (der Schalter steht in `workspace.dependencies`):
+# `test-support` ist bei `ea-archive-fs` ein Default-Feature, und seine drei
+# MUTIERENDEN Methoden wanderten sonst ueber diese Kante in die Flaeche des
+# Wirts. Diese Crate braucht von dort nur `SyncStatus` und `DetailCause`.
 ea-archive-fs.workspace = true
 # `SignerRole`. Eine Rolle, die ueber die Guelltigkeit einer Signatur
 # mitentscheidet, gehoert nicht in eine handgeschriebene TypeScript-Liste.

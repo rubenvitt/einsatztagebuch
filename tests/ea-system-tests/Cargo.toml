@@ -17,7 +17,11 @@ ea-archive.workspace = true
 # Die Wirtbackends der Stufe 2: `LocalPathBackend`, `ControlledNetworkBackend`,
 # `ArchiveHealthCheckV1`, `ProfileMigrator`, `MigrationFaultPoint` und der
 # Buendelschreiber `write_archive_bundle`.
-ea-archive-fs.workspace = true
+# Die Beobachtungsflaeche von `LocalPathBackend` hinter `test-support`. Die
+# Workspace-Kante schaltet das Merkmal AB (die drei mutierenden Methoden
+# gehoeren in keine Wirtflaeche); diese DEV-Kante fordert es fuer die
+# Testziele hier ausdruecklich an.
+ea-archive-fs = { workspace = true, features = ["test-support"] }
 # Die signierte lokale Auditzeile, die die Profilmigration schreibt.
 ea-audit.workspace = true
 # Die Kanonizitaetseigenschaft der Eigenschaftstests nennt

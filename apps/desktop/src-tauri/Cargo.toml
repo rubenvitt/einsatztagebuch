@@ -56,6 +56,13 @@ ea-format.workspace = true
 # Der schreibende und der lesende Port ueber einen Bestand.
 ea-archive.workspace = true
 # Die Wirtbackends `LocalPathBackend` und `ControlledNetworkBackend`.
+# OHNE Default-Features (der Schalter steht in `workspace.dependencies`, weil
+# Cargo ihn am Mitglied nicht zulaesst): das Default-Feature `test-support` von
+# `ea-archive-fs` traegt `overwrite_for_test` (umgeht Create-if-absent),
+# `materialize_for_test` und `remove_for_test` (loescht Archivbytes). Bis
+# hierher lagen alle drei im WIRT der Oberflaeche, und die Zusage „.eip-Bytes
+# werden nie ueberschrieben" ruhte im Binary auf „niemand ruft es" statt auf
+# „es ist nicht da".
 ea-archive-fs.workspace = true
 # Der Signaturport des Writer-Geraets.
 ea-key-provider.workspace = true

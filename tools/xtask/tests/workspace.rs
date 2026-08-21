@@ -477,3 +477,124 @@ fn ea_archive_fs_names_its_mutating_test_surface_as_a_release_exclusion() {
         }
     }
 }
+
+/// Pins that NO non-test edge carries the `ea-archive-fs` test surface — read
+/// off the RESOLVED feature graph and not off manifest prose.
+///
+/// The neighbouring test pins the manifest text and the position of the three
+/// mutating methods behind the `cfg`. Both held while the surface was still in
+/// the host: `test-support` is a DEFAULT feature, `apps/desktop/src-tauri`
+/// inherited it, and `overwrite_for_test` (bypasses create-if-absent),
+/// `materialize_for_test` and `remove_for_test` (deletes archive bytes) were
+/// therefore `pub` in the shipped binary. The promise rested on "nobody calls
+/// them" instead of on "they are not there".
+///
+/// Three assertions, and the third is the one that cannot be satisfied by
+/// prose:
+///
+/// 1. the SHARED workspace edge disables the default features (Cargo rejects
+///    `default-features = false` next to `workspace = true` at the member, so
+///    the switch has to sit here — and here it is fail-closed: a new member
+///    inherits no test surface),
+/// 2. no `[dependencies]` or `[build-dependencies]` entry of any member asks
+///    for `test-support` — only `[dev-dependencies]` may,
+/// 3. `cargo tree -e features` resolves the host's graph WITHOUT the feature.
+///
+/// Assertion 3 carries its own positive control: an empty tree, a failed
+/// command or a mistyped package name would all be free of `test-support` and
+/// would otherwise pass.
+#[test]
+fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
+    const CRATE: &str = "ea-archive-fs";
+    const SURFACE: &str = "test-support";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    let root_manifest: Value = fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let shared = root_manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(|dependencies| dependencies.get(CRATE))
+        .unwrap_or_else(|| panic!("the workspace must declare the shared {CRATE} edge"));
+    assert_eq!(
+        shared.get("default-features").and_then(Value::as_bool),
+        Some(false),
+        "the shared {CRATE} edge must disable its default features; otherwise every member \
+         inherits the three mutating test methods"
+    );
+
+    let mut dev_edges = 0_usize;
+    for member in WORKSPACE_MEMBERS {
+        let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        for table in ["dependencies", "build-dependencies", "dev-dependencies"] {
+            let Some(edge) = manifest.get(table).and_then(|deps| deps.get(CRATE)) else {
+                continue;
+            };
+            let asks_for_the_surface = edge
+                .get("features")
+                .and_then(Value::as_array)
+                .is_some_and(|features| {
+                    features
+                        .iter()
+                        .any(|feature| feature.as_str() == Some(SURFACE))
+                });
+            if table == "dev-dependencies" {
+                if asks_for_the_surface {
+                    dev_edges += 1;
+                }
+                continue;
+            }
+            assert!(
+                !asks_for_the_surface,
+                "{member} {table} re-enables {CRATE}/{SURFACE}; the three mutating methods would \
+                 be back in a non-test build"
+            );
+        }
+    }
+    assert!(
+        dev_edges > 0,
+        "no dev edge asks for {CRATE}/{SURFACE} any more — then this test proves nothing about a \
+         surface that is still reachable elsewhere"
+    );
+
+    // Der aufgeloeste Baum des WIRTS. `-e features` zeigt die Merkmalskanten,
+    // `-i` dreht ihn auf die Verbraucher von `ea-archive-fs`.
+    let resolved = Command::new("cargo")
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            "ea-desktop",
+            "-e",
+            "features",
+            "-i",
+            CRATE,
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        resolved.status.success(),
+        "cargo tree must resolve the host graph: {}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let tree = String::from_utf8(resolved.stdout).unwrap();
+    // Positivkontrolle: der Baum enthaelt die Kante, die geprueft werden soll.
+    // Ohne sie waere die Abwesenheit des Merkmals kein Befund.
+    for consumer in ["ea-desktop", "ea-writer", "ea-ui-contracts"] {
+        assert!(
+            tree.contains(consumer),
+            "{consumer} must appear as a consumer of {CRATE} in the resolved tree; without the \
+             edge the assertion below cannot fail:\n{tree}"
+        );
+    }
+    assert!(
+        !tree.contains(SURFACE),
+        "the resolved feature graph of the host must not contain {CRATE}/{SURFACE}:\n{tree}"
+    );
+}

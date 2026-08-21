@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 
 import { WriterPage, validatePendingResume } from './WriterPage'
@@ -62,6 +62,24 @@ function freshPreview(): FinalizationPreviewView {
     readerTrustRefreshMs: 7 * 24 * 60 * 60 * 1000,
     trustRefreshOverdue: false,
     staleDecision: 'Fresh',
+  }
+}
+
+/**
+ * Derselbe Entwurf mit ZWEI LEEREN Momentaufnahmelisten und je einer
+ * Begruendung.
+ *
+ * Nur in diesem Zustand existieren die beiden Begruendungsfelder ueberhaupt:
+ * `MasterDataSelect` zeigt sie ausschliesslich bei leerer Liste, weil die
+ * biconditionale Regel `EA-SCHEMA-LIST-REASON` sie sonst verbietet.
+ */
+function emptyListIncident(): IncidentInputView {
+  return {
+    ...completeIncident(),
+    personnel: [],
+    personnelEmptyReason: 'kein Personal disponiert',
+    vehicles: [],
+    vehiclesEmptyReason: 'kein Fahrzeug alarmiert',
   }
 }
 
@@ -481,13 +499,55 @@ it('shows archive health and device posture with unknown as unresolved', async (
 
 // Jede freie Texteingabe traegt die Warnung, dass hier keine
 // identifizierenden Patientendaten stehen duerfen.
+//
+// Eine feste MINDESTZAHL und nicht `> 0`: mit `> 0` blieb der Zeuge gruen,
+// solange irgendwo EINE Warnung stand — er konnte den Verlust der anderen nicht
+// sehen. Vier sind es auf diesem Bestand, und zwar diese vier: Stichwort samt
+// Referenz, Ort, Notizen und „Weitere Organisation". Die zwei
+// Begruendungsfelder der leeren Listen existieren hier nicht (beide Listen sind
+// besetzt) und haben ihren eigenen Zeugen darunter. Eine Gleichheit waere die
+// falsche Form: ein fuenftes Freitextfeld MIT Warnung darf diesen Zeugen nicht
+// rot machen, ein fehlendes Feld muss es.
+const WARNED_FREE_TEXT_BLOCKS = 4
+
 it('warns about patient data on every free text field', () => {
   render(<WriterPage bridge={fakeWriterBridge()} />)
   const warnings = screen.getAllByText(/keine identifizierenden Patientendaten/i)
-  expect(warnings.length).toBeGreaterThan(0)
+  expect(warnings.length).toBeGreaterThanOrEqual(WARNED_FREE_TEXT_BLOCKS)
   for (const warning of warnings) {
     expect(warning).toBeVisible()
   }
+})
+
+// Das Begruendungsfeld der leeren Liste ist ein PERSISTIERTER Freitext: sein
+// Wert reist als `personnelEmptyReason` bzw. `vehiclesEmptyReason` in der
+// Nutzlast des Entwurfs und spaeter im Eintrag mit. Der Zeuge oben kann es
+// nicht sehen — es existiert nur bei leerer Liste, und auf dem Bestand mit zwei
+// besetzten Listen steht es nicht da.
+//
+// Die zweite Haelfte bindet die Warnung an GENAU dieses Feld und nicht bloss an
+// den Abschnitt: das Suchfeld daneben traegt keine, weil sein Inhalt in keiner
+// Nutzlast landet. Ohne diese Haelfte bliebe der Zeuge gruen, wenn die Warnung
+// an das Suchfeld wanderte.
+it('warns about patient data in the empty list reason of both master data sections', () => {
+  const SECTIONS = ['Personal suchen', 'Fahrzeuge suchen']
+  const filled = render(<WriterPage bridge={fakeWriterBridge()} />)
+  for (const name of SECTIONS) {
+    const section = screen.getByRole('region', { name })
+    expect(within(section).queryByLabelText(/^Begründung für leere/)).toBeNull()
+    expect(within(section).queryByText(/keine identifizierenden Patientendaten/i)).toBeNull()
+  }
+  filled.unmount()
+
+  render(<WriterPage bridge={fakeWriterBridge({ draft: draftState(emptyListIncident()) })} />)
+  for (const name of SECTIONS) {
+    const section = screen.getByRole('region', { name })
+    expect(within(section).getByLabelText(/^Begründung für leere/)).toBeVisible()
+    expect(within(section).getByText(/keine identifizierenden Patientendaten/i)).toBeVisible()
+  }
+  expect(screen.getAllByText(/keine identifizierenden Patientendaten/i).length).toBeGreaterThanOrEqual(
+    WARNED_FREE_TEXT_BLOCKS + SECTIONS.length,
+  )
 })
 
 // Der Autospeicherzustand steht im Wortlaut da und kommt aus der emittierten
