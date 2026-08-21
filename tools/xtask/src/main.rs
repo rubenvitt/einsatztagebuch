@@ -1274,6 +1274,113 @@ const WASM32_SCOPE_CLAUSE: &str = concat!(
     "HPKE-Entkapselung, eine Signaturpruefung gegen einen Testvektor) steht aus."
 );
 
+// ---------------------------------------------------------------------------
+// Stufe 2 — „Offline Writer". Jede Konstante steht neben ihrem
+// Stufe-1-Gegenstueck und folgt seiner Sortierregel: lexikografisch oder in
+// Dokumentreihenfolge, damit Bericht und Fehlerzeile byteidentisch
+// reproduzierbar sind.
+// ---------------------------------------------------------------------------
+
+/// Die Vektorfamilien, die Stufe 2 additiv anlegt: der lokale Audit-Encoder
+/// (Task 4) und das Importprotokoll (Task 8).
+const STAGE_TWO_VECTOR_FAMILIES: [&str; 2] = ["local-audit", "reports"];
+
+/// Die primaeren Abnahmekriterien der Stufe 2 nach `design.md` Abschnitt 23.
+const STAGE_TWO_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 12] =
+    [1, 2, 3, 15, 23, 25, 28, 34, 39, 46, 48, 54];
+
+/// Der Stufe-2-Gate-Bericht, relativ zur Gate-Wurzel.
+const STAGE_TWO_GATE_REPORT_PATH: &str = "docs/traceability/stage-2-gate.md";
+
+/// Das Manifest der deklarierten Abbruchpunkte, relativ zur Gate-Wurzel.
+///
+/// Ein eingechecktes Artefakt an festem Pfad, nach dem Muster des
+/// Formatpakets ([`FORMAT_PACKAGE_PATH`]): der Gate liest die DEKLARATION und
+/// braucht dafuer keine Abhaengigkeit auf `ea-writer` oder `ea-draft`.
+const STAGE_TWO_FAULT_POINT_MANIFEST_PATH: &str = "docs/traceability/stage-2-fault-points.json";
+
+/// Die Wurzel-`package.json`, relativ zur Gate-Wurzel.
+const PACKAGE_MANIFEST_PATH: &str = "package.json";
+
+/// Die drei Abschnitte, die das Abbruchpunkt-Manifest fuehren MUSS, in
+/// Dokumentreihenfolge.
+const STAGE_TWO_FAULT_POINT_SECTIONS: [&str; 3] = ["discard", "finalization", "precedence"];
+
+/// Der Abbruchpunkt, der nicht in `DiscardFaultPoint::ALL` liegt und den der
+/// Gate dennoch namentlich verlangt: er startet planmaessig in
+/// `PreparedFinalizationPending` und nicht in einen unveraenderten Entwurf.
+const DISCARD_PRECEDENCE_FAULT_POINT: &str = "PreparedFinalizationBeatsDiscardIntent";
+
+/// Die vier Zielarchitekturen, deren native Ausfuehrung Stufe 2 NICHT
+/// behauptet. Jede MUSS von mindestens einer Ledgerzeile namentlich als
+/// offener Stufe-7-Nachweis gefuehrt werden.
+const STAGE_TWO_HOST_TARGETS: [&str; 4] = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+];
+
+/// Die Skripte, die die Wurzel-`package.json` fuehren MUSS.
+const STAGE_TWO_REQUIRED_SCRIPTS: [&str; 5] = [
+    "desktop:e2e",
+    "desktop:test",
+    "desktop:typecheck",
+    "stage-gate:2",
+    "supply-chain",
+];
+
+/// Die Pflichtabschnitte des Stufe-2-Gate-Berichts, in Dokumentreihenfolge.
+const STAGE_TWO_GATE_REPORT_SECTIONS: [&str; 5] = [
+    "## 1. Primaere Abnahmekriterien und ihre Belege",
+    "## 2. Reichweite der Stufe-2-Abnahme",
+    "## 3. Fehlermatrix und deklarierte Abbruchpunkte",
+    "## 4. Die vier Entscheidungen vom 2026-08-18",
+    "## 5. Unwiderruflichkeit, Schluesselvernichtung und Kanarienvoegel",
+];
+
+/// Die Literale, die der Stufe-2-Gate-Bericht nennen MUSS.
+///
+/// Der Gate prueft Literale, keine Prosa: ein Abnahmebericht, der eine der
+/// vier festgeschriebenen Hashdomains, das Urbild des Importprotokolls, den
+/// vorgezogenen Datei-Weg oder die fail-closed abgelehnte Profilmigration
+/// verschweigt, belegt die Stufe nicht. Die vier Zielarchitekturen stehen
+/// hier NICHT: sie stehen bereits in der woertlich verlangten
+/// Reichweitenklausel, und ein zweites Mal geprueft belegen sie nichts.
+const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [
+    "previewHash",
+    "archiveProfileHash",
+    "inventoryHash",
+    "activePointerHash",
+    "allowed-archive-profile-hashes",
+    "importProtocolHash",
+    "import-report-v1",
+    "local-audit-event-v1",
+    "draftDEK",
+    "SQLCipher",
+    "webBundleRelease",
+    "WR-052",
+    "PreparedFinalizationBeatsDiscardIntent",
+    "EA-ARCHIVE-PROFILE-NOT-ALLOWED",
+    "docs/traceability/stage-2-fault-points.json",
+];
+
+/// Die Reichweitenklausel der Stufe 2: die Global Constraint zur
+/// Host-Baubarkeit, Wort fuer Wort, in der umlaut- und auszeichnungsfreien
+/// Umschrift, die diese Datei durchgehend verwendet (Muster:
+/// [`WASM32_SCOPE_CLAUSE`]).
+///
+/// Der Gate-Bericht MUSS sie woertlich tragen. Ohne sie liest sich ein
+/// gruener Stufe-2-Gate als Plattformnachweis, den er nicht erbringt.
+const STAGE_TWO_HOST_SCOPE_CLAUSE: &str = concat!(
+    "Stufe 2 belegt Baubarkeit ausschliesslich fuer das Host-Target: ",
+    "rust-toolchain.toml:5 stellt nur wasm32-unknown-unknown bereit (gepinnt in ",
+    "tools/xtask/tests/workspace.rs:278-294), und die vier Cross-Targets ",
+    "x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin, ",
+    "x86_64-apple-darwin werden von Task 18 namentlich als offene ",
+    "Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet."
+);
+
 /// Der Spaltenvertrag des Ledgers. Spaetere Stufen ergaenzen nur Zeilen.
 const LEDGER_COLUMNS: [&str; 9] = [
     "requirement_id",
@@ -1688,8 +1795,14 @@ fn reject_legal_overclaim(path: &Path, text: &str) -> Result<(), String> {
 /// Jede Zeile hat die Form `| AK <nummer> | <titel> | <beleg> | <offen> |`.
 /// Beleg und offener Beitrag MUESSEN gefuellt sein: ein leerer Beleg waere
 /// genau die Scheinzusage, die dieser Bericht ausschliesst. Die gefundenen
-/// Nummern MUESSEN exakt die zehn primaeren Abnahmekriterien sein.
-fn gate_report_acceptance_criteria(path: &Path, text: &str) -> Result<Vec<u32>, String> {
+/// Nummern MUESSEN exakt die primaeren Abnahmekriterien der geprueften Stufe
+/// sein — `expected` traegt sie, damit dieselbe Pruefung fuer Stufe 1 und
+/// Stufe 2 gilt, ohne dass eine der beiden Listen hier eingebrannt ist.
+fn gate_report_acceptance_criteria(
+    path: &Path,
+    text: &str,
+    expected: &[u32],
+) -> Result<Vec<u32>, String> {
     let mut found = Vec::new();
     for line in text.lines() {
         let Some(rest) = line.strip_prefix("| AK ") else {
@@ -1719,15 +1832,15 @@ fn gate_report_acceptance_criteria(path: &Path, text: &str) -> Result<Vec<u32>, 
         found.push(number);
     }
     found.sort_unstable();
-    if found != STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA {
-        let missing = STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA
+    if found.as_slice() != expected {
+        let missing = expected
             .iter()
             .filter(|criterion| !found.contains(criterion))
             .map(u32::to_string)
             .collect::<Vec<_>>();
         let unexpected = found
             .iter()
-            .filter(|criterion| !STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA.contains(criterion))
+            .filter(|criterion| !expected.contains(criterion))
             .map(u32::to_string)
             .collect::<Vec<_>>();
         return Err(format!(
@@ -1771,7 +1884,365 @@ fn stage_one_documents(gate_root: &Path) -> Result<Vec<u32>, String> {
             report_path.display()
         ));
     }
-    gate_report_acceptance_criteria(&report_path, &report)
+    gate_report_acceptance_criteria(
+        &report_path,
+        &report,
+        &STAGE_ONE_PRIMARY_ACCEPTANCE_CRITERIA,
+    )
+}
+
+/// Liest die deklarierten Abbruchpunkte aus dem eingecheckten Manifest.
+///
+/// Der Gate prueft die DEKLARATION, nicht den Lauf — dieselbe Entscheidung wie
+/// bei den Fuzz-Flaechen. Deshalb liegt die Abdeckung als eingecheckte
+/// JSON-Datei und nicht als Rust-Typ: `tools/xtask/Cargo.toml` bekommt keine
+/// Kante auf eine Stufe-2-Crate, und der Gate zieht weder SQLCipher noch die
+/// Wirtsbackends in seinen eigenen Graph.
+///
+/// Ein Abschnitt ist entweder ein Feld von Eintraegen oder ein Objekt, dessen
+/// `points`-Feld die Eintraege traegt: der Finalisierungsabschnitt fuehrt neben
+/// seinen Abbruchpunkten die dreizehn Abschlussschritte, und die sind KEINE
+/// Abbruchpunkte — sie tragen `number` und `name`, aber bewusst keinen
+/// Klammertext, weil ein Schritt kein Absturzfenster ist. Ein Objekt OHNE
+/// `points` ist deshalb ein Mangel und nicht ein leerer Abschnitt.
+///
+/// Doppelungen werden je Abschnitt zurueckgewiesen, nicht ueber das ganze
+/// Manifest: `AfterKeystoreDelete`, `AfterAbsenceConfirmation` und
+/// `BackupRestoreAfterKeyDeletion` sind dasselbe Absturzfenster in der
+/// Verwerfens- UND in der Abschlussmatrix, und das ist die Aussage des
+/// Manifests, kein Fehler. [`DISCARD_PRECEDENCE_FAULT_POINT`] wird davon
+/// unabhaengig genau einmal ueber das ganze Manifest verlangt.
+fn stage_two_fault_points(gate_root: &Path, problems: &mut Vec<String>) -> Vec<String> {
+    let path = gate_root.join(STAGE_TWO_FAULT_POINT_MANIFEST_PATH);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            problems.push(format!("failed to read {}: {error}", path.display()));
+            return Vec::new();
+        }
+    };
+    let manifest = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            problems.push(format!("invalid {}: {error}", path.display()));
+            return Vec::new();
+        }
+    };
+    let Some(sections) = manifest.as_object() else {
+        problems.push(format!("{} must be a JSON object", path.display()));
+        return Vec::new();
+    };
+
+    let mut declared = BTreeSet::new();
+    let mut precedence_occurrences = 0_usize;
+    for section in STAGE_TWO_FAULT_POINT_SECTIONS {
+        let entries = match sections.get(section) {
+            Some(serde_json::Value::Array(entries)) => entries,
+            Some(serde_json::Value::Object(nested)) => {
+                match nested.get("points").and_then(serde_json::Value::as_array) {
+                    Some(entries) => entries,
+                    None => {
+                        problems.push(format!(
+                            "{}: the {section} section is an object without a points array",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                }
+            }
+            _ => {
+                problems.push(format!(
+                    "{}: the {section} section must exist as an array of fault points",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if entries.is_empty() {
+            problems.push(format!(
+                "{}: the {section} section must not be empty",
+                path.display()
+            ));
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        for entry in entries {
+            let name = entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            let Some(name) = name else {
+                problems.push(format!(
+                    "{}: an entry of the {section} section carries no name",
+                    path.display()
+                ));
+                continue;
+            };
+            if name == DISCARD_PRECEDENCE_FAULT_POINT {
+                precedence_occurrences += 1;
+            }
+            let bracketed = entry
+                .get("brackets")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|brackets| !brackets.trim().is_empty());
+            if !bracketed {
+                problems.push(format!(
+                    "{}: {name} in the {section} section carries no non-empty brackets",
+                    path.display()
+                ));
+            }
+            if !seen.insert(name.to_owned()) {
+                problems.push(format!(
+                    "{}: the {section} section declares {name} twice",
+                    path.display()
+                ));
+            }
+            declared.insert(name.to_owned());
+        }
+    }
+    if precedence_occurrences != 1 {
+        problems.push(format!(
+            "{} must declare {DISCARD_PRECEDENCE_FAULT_POINT} exactly once, found \
+             {precedence_occurrences}",
+            path.display()
+        ));
+    }
+    declared.into_iter().collect()
+}
+
+/// Prueft die Deklarationen der Stufe 2 und schreibt den Bericht nach stdout.
+///
+/// Der Zweig sammelt JEDEN unerfuellten Punkt und meldet sie gemeinsam,
+/// getrennt durch `"; "`, nach der sammelnden Form von
+/// [`parse_requirement_ledger`]. Ein fehlender Gate-Bericht ist damit ein
+/// gesammelter Mangel und kein IO-Abbruch — genau wie ein fehlendes Ledger
+/// bewusst ein leeres Ledger ist. Ohne das benennte die Stufenabnahme in ihrem
+/// RED-Schritt eine fehlende Datei statt dessen, was tatsaechlich unbelegt ist.
+///
+/// Das Berichtsschema der Stufe 1 bleibt und wird um genau vier Positionen
+/// erweitert; Schluessel werden ergaenzt, nie umbenannt. Der gemessene Lauf
+/// wird hier absichtlich NICHT geprueft, sondern von einem benannten Test der
+/// Stufenabnahme: ein Gate, der seine eigene Messzeile verlangte, koennte auf
+/// dem Lauf, der sie erzeugt, nie gruen sein.
+fn run_stage_two_gate(root: &Path) -> Result<(), String> {
+    let gate_root = stage_gate_root(root);
+    let mut problems = Vec::new();
+
+    // 1. Vektorfamilien.
+    let vectors = gate_root.join("vectors");
+    let mut families = Vec::new();
+    for family in STAGE_TWO_VECTOR_FAMILIES {
+        if family_carries_a_manifest(&vectors, family) {
+            families.push(family);
+        } else {
+            problems.push(format!(
+                "stage 2 vector family without a readable manifest under {}: {family}",
+                vectors.display()
+            ));
+        }
+    }
+
+    // 2. Ledger: Wohlgeformtheit, Abdeckung der Pflichtzeilenmenge und die
+    // Zeilen, die die Stufe noch offen fuehrt. Die Menge kommt aus den SPALTEN
+    // und nicht aus einer Literalliste: eine Zeile, die Stufe 2 vergessen hat,
+    // kann sich so nicht verstecken, und WR-052 wird automatisch mitgezaehlt,
+    // sobald seine Stufenspalte auf 2 steht.
+    let ledger_path = gate_root.join(REQUIREMENT_LEDGER_PATH);
+    let rows = match read_requirement_ledger(&ledger_path) {
+        Ok(rows) => rows,
+        Err(error) => {
+            problems.push(error);
+            Vec::new()
+        }
+    };
+    let design_path = gate_root.join(DESIGN_DOCUMENT_PATH);
+    match fs::read_to_string(&design_path)
+        .map_err(|error| format!("failed to read {}: {error}", design_path.display()))
+        .and_then(|design| required_requirement_identifiers(&design))
+    {
+        Ok(required) => {
+            let covered = rows
+                .iter()
+                .map(|row| row.requirement_id.clone())
+                .collect::<BTreeSet<_>>();
+            let uncovered = required
+                .difference(&covered)
+                .cloned()
+                .collect::<Vec<String>>();
+            if !uncovered.is_empty() {
+                problems.push(format!(
+                    "the requirement ledger {} does not cover: {}",
+                    ledger_path.display(),
+                    uncovered.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+    let still_planned = rows
+        .iter()
+        .filter(|row| row.values[7] == "2" && row.values[8] == "planned")
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    if !still_planned.is_empty() {
+        problems.push(format!(
+            "stage 2 requirement ledger rows still on planned: {}",
+            still_planned.join(", ")
+        ));
+    }
+
+    // 3. Host-Nachweis. Die Fehlerzeile nennt genau das unbenannte Ziel und
+    // NIE die Belegspalte einer Zeile: eine Zeile zitieren hiesse, die drei
+    // uebrigen Ziele mitzunennen, und die Fehlermeldung wuerde unlesbar.
+    let host_evidence_rows = rows
+        .iter()
+        .filter(|row| {
+            STAGE_TWO_HOST_TARGETS
+                .iter()
+                .any(|target| row.values[6].contains(target))
+        })
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    for target in STAGE_TWO_HOST_TARGETS {
+        if !rows.iter().any(|row| row.values[6].contains(target)) {
+            problems.push(format!(
+                "no requirement ledger row names {target} as open stage 7 evidence"
+            ));
+        }
+    }
+
+    // 4. Abbruchpunkte.
+    let declared_fault_points = stage_two_fault_points(&gate_root, &mut problems);
+
+    // 5. Skripte. Sie verankern die Frontendspur und die Lieferkettenspur im
+    // Gate; `cargo deny` selbst ruft der Gate nie auf und bleibt damit ohne
+    // installiertes `cargo-deny` lauffaehig.
+    let package_path = gate_root.join(PACKAGE_MANIFEST_PATH);
+    match fs::read_to_string(&package_path)
+        .map_err(|error| format!("failed to read {}: {error}", package_path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|error| format!("invalid {}: {error}", package_path.display()))
+        }) {
+        Ok(manifest) => {
+            let missing = STAGE_TWO_REQUIRED_SCRIPTS
+                .iter()
+                .filter(|script| {
+                    manifest
+                        .get("scripts")
+                        .and_then(|scripts| scripts.get(*script))
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|command| command.trim().is_empty())
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "{} does not declare the required scripts: {}",
+                    package_path.display(),
+                    missing.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+
+    // 6a. Das oeffentliche Formatpaket, mit derselben Pruefung wie in Stufe 1.
+    // Der Stufe-2-Bericht NENNT den Pfad; ein genanntes und nie gelesenes
+    // Dokument waere genau die Scheinzusage, die dieser Gate ausschliesst.
+    let format_path = gate_root.join(FORMAT_PACKAGE_PATH);
+    match fs::read_to_string(&format_path) {
+        Ok(package) => {
+            for (literals, kind) in [
+                (FORMAT_PACKAGE_SECTIONS.as_slice(), "section"),
+                (FORMAT_PACKAGE_LITERALS.as_slice(), "literal"),
+            ] {
+                if let Err(error) =
+                    require_document_literals(&format_path, &package, literals, kind)
+                {
+                    problems.push(error);
+                }
+            }
+            if let Err(error) = reject_legal_overclaim(&format_path, &package) {
+                problems.push(error);
+            }
+        }
+        Err(error) => problems.push(format!("failed to read {}: {error}", format_path.display())),
+    }
+
+    // 6b. Der Gate-Bericht.
+    let report_path = gate_root.join(STAGE_TWO_GATE_REPORT_PATH);
+    let mut gate_report_criteria = Vec::new();
+    match fs::read_to_string(&report_path) {
+        Ok(report) => {
+            for (literals, kind) in [
+                (STAGE_TWO_GATE_REPORT_SECTIONS.as_slice(), "section"),
+                (STAGE_TWO_GATE_REPORT_LITERALS.as_slice(), "literal"),
+            ] {
+                if let Err(error) = require_document_literals(&report_path, &report, literals, kind)
+                {
+                    problems.push(error);
+                }
+            }
+            if !report.contains(STAGE_TWO_HOST_SCOPE_CLAUSE) {
+                // Bewusst OHNE die Klausel im Text: sie nennt alle vier
+                // Zielarchitekturen, und eine Fehlerzeile, die sie zitiert,
+                // liesse sich nicht mehr von der Meldung ueber ein einzelnes
+                // unbenanntes Ziel unterscheiden.
+                problems.push(format!(
+                    "{} does not carry the stage 2 host scope clause verbatim",
+                    report_path.display()
+                ));
+            }
+            match gate_report_acceptance_criteria(
+                &report_path,
+                &report,
+                &STAGE_TWO_PRIMARY_ACCEPTANCE_CRITERIA,
+            ) {
+                Ok(found) => gate_report_criteria = found,
+                Err(error) => problems.push(error),
+            }
+        }
+        Err(error) => problems.push(format!("failed to read {}: {error}", report_path.display())),
+    }
+
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
+
+    let row_identifiers = rows
+        .iter()
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    let evidenced = rows
+        .iter()
+        .filter(|row| {
+            matches!(row.values[8].as_str(), "implemented" | "integrated")
+                && !row.primary_acceptance_criterion.is_empty()
+        })
+        .filter_map(|row| row.primary_acceptance_criterion.parse::<u32>().ok())
+        .collect::<BTreeSet<_>>();
+    let report = serde_json::json!({
+        "stage": 2,
+        "vector_families": families,
+        "primary_acceptance_criteria": STAGE_TWO_PRIMARY_ACCEPTANCE_CRITERIA,
+        "evidenced_acceptance_criteria": evidenced,
+        "rows": row_identifiers,
+        "format_package": FORMAT_PACKAGE_PATH,
+        "gate_report": STAGE_TWO_GATE_REPORT_PATH,
+        "gate_report_acceptance_criteria": gate_report_criteria,
+        "declared_fault_points": declared_fault_points,
+        "stage_two_primary_acceptance_criteria": STAGE_TWO_PRIMARY_ACCEPTANCE_CRITERIA,
+        "host_evidence_rows": host_evidence_rows,
+        "stage_two_rows_still_planned": still_planned,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&report)
+            .map_err(|error| format!("failed to render the stage gate report: {error}"))?
+    );
+    Ok(())
 }
 
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
@@ -1795,9 +2266,12 @@ fn stage_one_documents(gate_root: &Path) -> Result<Vec<u32>, String> {
 /// Dateireihenfolge; `fuzz_targets` nennt die deklarierten Ziele lexikografisch
 /// und `fuzz_surfaces` die Zuordnung Flaeche zu Ziel in Entwurfsreihenfolge.
 fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
+    if stage == 2 {
+        return run_stage_two_gate(root);
+    }
     if stage != 1 {
         return Err(format!(
-            "stage-gate is only defined for stage 1 so far, not {stage}"
+            "stage-gate is only defined for stages 1 and 2 so far, not {stage}"
         ));
     }
     let vectors = stage_gate_root(root).join("vectors");

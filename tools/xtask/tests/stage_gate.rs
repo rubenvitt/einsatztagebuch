@@ -1237,3 +1237,592 @@ fn stage_one_gate_requires_the_format_package_and_the_gate_report() {
     );
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ===========================================================================
+// Stufe 2 — „Offline Writer".
+//
+// Fixturegetrieben wie die Stufe-1-Tests darueber: jede Phase haelt einen
+// FEHLERzustand an genau EINER Stelle fest. Der ZIELzustand gegen den echten
+// Arbeitsbaum ist Sache von Task 18 — der echte Gate-Bericht existiert vor
+// diesem Task nicht, und die Stufe-2-Ledgerzeilen stehen noch auf `planned`.
+// ===========================================================================
+
+/// Die beiden Vektorfamilien, die Stufe 2 additiv anlegt.
+const STAGE_TWO_FAMILIES: [&str; 2] = ["local-audit", "reports"];
+
+/// Die zwoelf primaeren Abnahmekriterien der Stufe 2.
+const STAGE_TWO_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 12] =
+    [1, 2, 3, 15, 23, 25, 28, 34, 39, 46, 48, 54];
+
+/// Die vier Zielarchitekturen, fuer die Stufe 2 keine lokale Behauptung
+/// aufstellt und deren Nachweis als offene Stufe-7-Ledgerzeile steht.
+const STAGE_TWO_HOST_TARGETS: [&str; 4] = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+];
+
+/// Die fuenf Skripte, die die Wurzel-`package.json` fuehren MUSS.
+const STAGE_TWO_SCRIPTS: [&str; 5] = [
+    "desktop:e2e",
+    "desktop:test",
+    "desktop:typecheck",
+    "stage-gate:2",
+    "supply-chain",
+];
+
+/// Der Stufe-2-Gate-Bericht, relativ zur Gate-Wurzel.
+const STAGE_TWO_GATE_REPORT_PATH: &str = "docs/traceability/stage-2-gate.md";
+
+/// Das Manifest der deklarierten Abbruchpunkte, relativ zur Gate-Wurzel.
+const STAGE_TWO_FAULT_POINTS_PATH: &str = "docs/traceability/stage-2-fault-points.json";
+
+/// Das Requirement-Ledger und das Entwurfsdokument, relativ zur Gate-Wurzel.
+const REQUIREMENT_LEDGER_RELATIVE: &str = "docs/traceability/v0.1-requirements.csv";
+const DESIGN_DOCUMENT_RELATIVE: &str =
+    "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md";
+
+/// Liest ein Feld von Zeichenkettenliteralen dort, wo es normativ steht: in der
+/// Gate-Quelle.
+///
+/// Das Fixture soll den Inhaltsvertrag ERFUELLEN, nicht ihn abschreiben. Eine
+/// zweite Abschrift der fuenfzehn Literale und der fuenf Abschnitte in dieser
+/// Datei wuerde den Bericht gegen die Abschrift pruefen statt gegen die Quelle,
+/// und dieselbe Entscheidung liegt schon
+/// [`wasm32_scope_clause_from_the_gate_source`] zugrunde.
+fn string_array_from_the_gate_source(declaration: &str) -> Vec<String> {
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("the xtask source must be readable");
+    let at = source
+        .find(declaration)
+        .unwrap_or_else(|| panic!("the xtask source must carry the declaration {declaration}"));
+    let body_at = at + declaration.len();
+    // Der Abschluss haengt an der Klammer, mit der die Deklaration OEFFNET:
+    // ein Feldliteral endet auf `];`, ein `concat!` auf `);`. Ein festes `];`
+    // liefe ueber ein `concat!` hinaus in die naechste Deklaration.
+    let terminator = if declaration.ends_with('(') {
+        ");"
+    } else {
+        "];"
+    };
+    let body_end = body_at
+        + source[body_at..]
+            .find(terminator)
+            .unwrap_or_else(|| panic!("{declaration} must be terminated with `{terminator}`"));
+    let body = &source[body_at..body_end];
+    assert!(
+        !body.contains('\\'),
+        "{declaration} must not carry an escape sequence, or this extractor would misread it"
+    );
+    let mut literals = Vec::new();
+    let mut rest = body;
+    while let Some(open) = rest.find('"') {
+        let tail = &rest[open + 1..];
+        let close = tail
+            .find('"')
+            .unwrap_or_else(|| panic!("{declaration} carries an unterminated literal"));
+        literals.push(tail[..close].to_owned());
+        rest = &tail[close + 1..];
+    }
+    assert!(
+        !literals.is_empty(),
+        "{declaration} must carry at least one literal"
+    );
+    literals
+}
+
+/// Liest die Reichweitenklausel der Stufe 2 aus ihrer `concat!`-Deklaration.
+///
+/// Wie [`wasm32_scope_clause_from_the_gate_source`]: der Bericht MUSS sie
+/// woertlich tragen, und das Fixture stellt sie deshalb aus der Quelle her.
+fn stage_two_host_scope_clause_from_the_gate_source() -> String {
+    let clause =
+        string_array_from_the_gate_source("const STAGE_TWO_HOST_SCOPE_CLAUSE: &str = concat!(")
+            .concat();
+    assert!(
+        clause.ends_with("statt lokal behauptet."),
+        "the stage 2 host scope clause must be readable from the gate source; found: {clause}"
+    );
+    clause
+}
+
+/// Der Fehlerzustand, den [`write_stage_two_ledger`] in das Ledger einbaut.
+#[derive(Clone, Copy)]
+enum LedgerDefect {
+    /// Jede Stufe-2-Zeile traegt `implemented`, jede Host-Zeile steht.
+    None,
+    /// Die genannte Stufe-2-Zeile bleibt auf `planned`, und die Host-Zeile, die
+    /// das genannte Ziel nennt, entfaellt — zwei Luecken auf einen Schlag.
+    OneRowPlannedAndOneHostTargetUnnamed(&'static str, &'static str),
+}
+
+/// Die vier synthetischen Ledgerzeilen, die die Host-Zielarchitekturen als
+/// offenen Stufe-7-Nachweis fuehren.
+///
+/// `ZZ-` sortiert hinter jeden echten Identifikator, also haengen die Zeilen an
+/// das kopierte Ledger an, ohne dass es neu sortiert werden muss. Der Gate
+/// prueft, dass jede PFLICHTzeile abgedeckt ist, nie dass keine weitere Zeile
+/// existiert — eine zusaetzliche Zeile ist deshalb erlaubt.
+fn host_target_rows() -> Vec<(String, &'static str)> {
+    STAGE_TWO_HOST_TARGETS
+        .iter()
+        .enumerate()
+        .map(|(index, target)| (format!("ZZ-HOST-{:02}", index + 1), *target))
+        .collect()
+}
+
+/// Schreibt das Requirement-Ledger des Fixtures.
+///
+/// Grundlage ist das ECHTE eingecheckte Ledger: nur so bleibt die aus
+/// `design.md` abgeleitete Pflichtzeilenmenge abgedeckt, ohne sie hier
+/// abzuschreiben. Darueber genau zwei Eingriffe: jede Stufe-2-Zeile wandert auf
+/// `implemented`, und die vier Host-Zeilen kommen hinzu.
+fn write_stage_two_ledger(root: &Path, defect: LedgerDefect) {
+    let source = fs::read_to_string(workspace_root().join(REQUIREMENT_LEDGER_RELATIVE))
+        .expect("the checked-in requirement ledger must be readable");
+    let mut lines = source.split('\n');
+    let mut text = String::from(lines.next().expect("the ledger must carry a header line"));
+    text.push('\n');
+    let mut stage_two_rows = 0_usize;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = ledger_fields(line);
+        if fields[7] == "2" {
+            stage_two_rows += 1;
+            let keep_planned = matches!(
+                defect,
+                LedgerDefect::OneRowPlannedAndOneHostTargetUnnamed(identifier, _)
+                    if identifier == fields[0]
+            );
+            if !keep_planned {
+                fields[8] = "implemented".to_owned();
+            }
+        }
+        text.push_str(&format!("\"{}\"", fields.join("\",\"")));
+        text.push('\n');
+    }
+    assert!(
+        stage_two_rows > 0,
+        "the checked-in ledger must carry stage 2 rows, or this fixture measures nothing"
+    );
+    for (identifier, target) in host_target_rows() {
+        if matches!(
+            defect,
+            LedgerDefect::OneRowPlannedAndOneHostTargetUnnamed(_, unnamed) if unnamed == target
+        ) {
+            continue;
+        }
+        text.push_str(&format!(
+            "\"{identifier}\",\"v1\",\"global-constraints.md\",\
+             \"offener Plattformnachweis\",\"\",\"\",\
+             \"Stufe 7, offener Nachweis fuer {target}\",\"7\",\"planned\"\n"
+        ));
+    }
+    let path = root.join(REQUIREMENT_LEDGER_RELATIVE);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, text).unwrap();
+}
+
+/// Der Fehlerzustand, den [`write_fault_point_manifest`] in das Manifest
+/// einbaut.
+#[derive(Clone, Copy)]
+enum FaultManifestDefect {
+    None,
+    /// Der Finalisierungsteil verschwindet ganz.
+    NoFinalizationSection,
+    /// Der Finalisierungsteil bleibt als Objekt, verliert aber seine
+    /// Punkteliste: eine Schrittliste allein deklariert keinen Abbruchpunkt.
+    FinalizationWithoutPoints,
+    /// Derselbe Abbruchpunkt steht zweimal im SELBEN Abschnitt.
+    DuplicateWithinASection,
+    /// Ein Abbruchpunkt ohne Klammertext.
+    EntryWithoutBrackets,
+    /// Der Vorrangpunkt fehlt.
+    NoPrecedencePoint,
+    /// Ein Abschnitt steht als LEERES Feld: die Ueberschrift ist da, die
+    /// Deklaration nicht.
+    EmptyDiscardSection,
+}
+
+/// Schreibt ein synthetisches Manifest der deklarierten Abbruchpunkte.
+///
+/// Die drei Abschnitte stehen als Feld — der Gate akzeptiert daneben die
+/// eingecheckte Objektform mit `points`, und `FinalizationWithoutPoints` haelt
+/// fest, dass eine Objektform ohne Punkteliste NICHT durchgeht.
+fn write_fault_point_manifest(root: &Path, defect: FaultManifestDefect) {
+    let mut manifest = serde_json::json!({
+        "stage": 2,
+        "discard": [
+            {
+                "name": "BeforeIntentCommit",
+                "brackets": "vor dem dauerhaften Buchen der Verwerfensabsicht"
+            },
+            {
+                "name": "AfterKeystoreDelete",
+                "brackets": "nach dem Loeschen des draftDEK"
+            }
+        ],
+        "finalization": [
+            {
+                "name": "AfterPreparedMarkerCommit",
+                "brackets": "nach dem Buchen der Abschlussmarke"
+            },
+            {
+                "name": "AfterEntryDirectoryFlush",
+                "brackets": "nach dem Verzeichnisflush der Eintraege"
+            }
+        ],
+        "precedence": [
+            {
+                "name": "PreparedFinalizationBeatsDiscardIntent",
+                "brackets": "vor jedem Eingang des Verwerfens"
+            }
+        ]
+    });
+    let object = manifest.as_object_mut().unwrap();
+    match defect {
+        FaultManifestDefect::None => {}
+        FaultManifestDefect::NoFinalizationSection => {
+            object.remove("finalization");
+        }
+        FaultManifestDefect::FinalizationWithoutPoints => {
+            object.insert(
+                "finalization".to_owned(),
+                serde_json::json!({ "steps": [{ "number": 1, "name": "RebuildLocalHead" }] }),
+            );
+        }
+        FaultManifestDefect::DuplicateWithinASection => {
+            let discard = object["discard"].as_array().unwrap().clone();
+            object["discard"]
+                .as_array_mut()
+                .unwrap()
+                .push(discard[0].clone());
+        }
+        FaultManifestDefect::EntryWithoutBrackets => {
+            object["discard"][0]
+                .as_object_mut()
+                .unwrap()
+                .insert("brackets".to_owned(), serde_json::json!("   "));
+        }
+        FaultManifestDefect::NoPrecedencePoint => {
+            object["precedence"][0]
+                .as_object_mut()
+                .unwrap()
+                .insert("name".to_owned(), serde_json::json!("SomethingElse"));
+        }
+        FaultManifestDefect::EmptyDiscardSection => {
+            object["discard"].as_array_mut().unwrap().clear();
+        }
+    }
+    let path = root.join(STAGE_TWO_FAULT_POINTS_PATH);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+/// Der Fehlerzustand, den [`write_stage_two_report`] in den Bericht einbaut.
+#[derive(Clone, Copy)]
+enum ReportDefect {
+    None,
+    /// Die Belegzeile des genannten Abnahmekriteriums laesst die Spalte
+    /// `Offen in spaeterer Stufe` leer.
+    EmptyOpenColumn(u32),
+}
+
+/// Schreibt einen synthetischen Stufe-2-Gate-Bericht, der den Inhaltsvertrag
+/// erfuellt.
+///
+/// Abschnitte, Literale und Reichweitenklausel kommen aus der Gate-Quelle; die
+/// Belegtabelle entsteht aus den zwoelf primaeren Abnahmekriterien.
+fn write_stage_two_report(root: &Path, defect: ReportDefect) {
+    let mut text = String::from("# Stufe-2-Gate (Fixture)\n\n");
+    text.push_str(&stage_two_host_scope_clause_from_the_gate_source());
+    text.push_str("\n\n");
+    for literal in
+        string_array_from_the_gate_source("const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [")
+    {
+        text.push_str(&format!("- {literal}\n"));
+    }
+    text.push('\n');
+    for section in
+        string_array_from_the_gate_source("const STAGE_TWO_GATE_REPORT_SECTIONS: [&str; 5] = [")
+    {
+        text.push_str(&format!("{section}\n\n"));
+    }
+    // Die Kopfzeile beginnt bewusst NICHT mit `| AK `: der Gate liest jede
+    // solche Zeile als Belegzeile und verlangt dort eine Nummer.
+    text.push_str("| Kriterium | Titel | Beleg | Offen in spaeterer Stufe |\n|---|---|---|---|\n");
+    for criterion in STAGE_TWO_PRIMARY_ACCEPTANCE_CRITERIA {
+        let open = match defect {
+            ReportDefect::EmptyOpenColumn(number) if number == criterion => "",
+            _ => "Stufe 7",
+        };
+        text.push_str(&format!(
+            "| AK {criterion} | Titel {criterion} | tests/stage_gate.rs | {open} |\n"
+        ));
+    }
+    let path = root.join(STAGE_TWO_GATE_REPORT_PATH);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, text).unwrap();
+}
+
+/// Schreibt eine Wurzel-`package.json`, die genau die genannten Skripte fuehrt.
+fn write_package_manifest(root: &Path, scripts: &[&str]) {
+    let mut declared = serde_json::Map::new();
+    for script in scripts {
+        declared.insert(
+            (*script).to_owned(),
+            serde_json::json!(format!("echo {script}")),
+        );
+    }
+    let manifest = serde_json::json!({
+        "name": "einsatzarchiv-fixture",
+        "private": true,
+        "scripts": serde_json::Value::Object(declared),
+    });
+    let path = root.join("package.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+/// Baut eine gruene Stufe-2-Grundlage.
+///
+/// Nach dem Muster von [`fixture_with_the_checked_in_documents`]: die beiden
+/// Vektorfamilien der Stufe 2, das kopierte Entwurfsdokument und dann jedes der
+/// vier Stufe-2-Artefakte in seiner mangelfreien Fassung. Formatpaket und
+/// Fuzz-Manifest bringt [`fixture_root`] mit.
+fn stage_two_fixture(label: &str) -> PathBuf {
+    let root = fixture_root(label);
+    for family in STAGE_TWO_FAMILIES {
+        write_family_manifest(&root, family);
+    }
+    copy_from_the_workspace(&root, DESIGN_DOCUMENT_RELATIVE);
+    write_stage_two_ledger(&root, LedgerDefect::None);
+    write_fault_point_manifest(&root, FaultManifestDefect::None);
+    write_stage_two_report(&root, ReportDefect::None);
+    write_package_manifest(&root, &STAGE_TWO_SCRIPTS);
+    root
+}
+
+#[test]
+fn stage_two_gate_names_every_missing_declaration_at_once() {
+    // Phase 1: die gruene Grundlage. Der Gate beendet mit 0 und liefert die
+    // vier additiven Berichtsfelder.
+    let root = stage_two_fixture("baseline");
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "stage-gate 2 must accept the complete fixture; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout must be JSON: {error}; stdout: {stdout}"));
+    assert_eq!(report["stage"], serde_json::json!(2));
+    assert_eq!(
+        report["vector_families"],
+        serde_json::json!(STAGE_TWO_FAMILIES)
+    );
+    assert_eq!(
+        report["stage_two_primary_acceptance_criteria"],
+        serde_json::json!(STAGE_TWO_PRIMARY_ACCEPTANCE_CRITERIA)
+    );
+    assert!(
+        report["declared_fault_points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "PreparedFinalizationBeatsDiscardIntent"),
+        "the declared points carry the precedence point; stdout: {stdout}"
+    );
+    assert!(!report["host_evidence_rows"].as_array().unwrap().is_empty());
+    assert!(
+        report["stage_two_rows_still_planned"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Phase 2: der Gate-Bericht fehlt, ein Stufe-2-Ledgereintrag steht auf
+    // `planned`, und eine Host-Zielarchitektur wird von keiner Zeile genannt.
+    // Der Gate nennt ALLE DREI in EINER Fehlermeldung — sonst begruendet der
+    // RED-Schritt der Stufenabnahme nur den ersten Mangel.
+    let root = stage_two_fixture("three-gaps");
+    fs::remove_file(root.join(STAGE_TWO_GATE_REPORT_PATH)).unwrap();
+    write_stage_two_ledger(
+        &root,
+        LedgerDefect::OneRowPlannedAndOneHostTargetUnnamed("FR-043", "x86_64-pc-windows-msvc"),
+    );
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    for expected in [STAGE_TWO_GATE_REPORT_PATH, "FR-043"] {
+        assert!(
+            stderr.contains(expected),
+            "stage-gate 2 must name {expected} in the same failure; stderr: {stderr}"
+        );
+    }
+    for target in STAGE_TWO_HOST_TARGETS {
+        assert_eq!(
+            stderr.contains(target),
+            target == "x86_64-pc-windows-msvc",
+            "stage-gate 2 must name exactly the unnamed host target; stderr: {stderr}"
+        );
+    }
+
+    // Phase 3: das Fault-Punkt-Manifest verliert seinen Finalisierungsteil.
+    let root = stage_two_fixture("manifest");
+    write_fault_point_manifest(&root, FaultManifestDefect::NoFinalizationSection);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("finalization"),
+        "stage-gate 2 must name the empty manifest section; stderr: {stderr}"
+    );
+
+    // Phase 4: eine Abnahmekriteriumszeile ohne Eintrag in der Spalte
+    // `Offen in spaeterer Stufe`. Eine leere Spalte ist genau die
+    // Scheinzusage, die dieser Bericht ausschliesst.
+    let root = stage_two_fixture("empty-open-column");
+    write_stage_two_report(&root, ReportDefect::EmptyOpenColumn(46));
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("AK 46"),
+        "stage-gate 2 must name the incomplete row; stderr: {stderr}"
+    );
+
+    // Phase 5: die drei Frontend-Skripte fehlen in der Wurzel-`package.json`.
+    // Ohne sie hat die Stufe keine UI-Spur, und jede exakte UI-Zusage waere
+    // nach Stufe 2 unbelegt.
+    let root = stage_two_fixture("scripts");
+    write_package_manifest(&root, &["stage-gate:2", "supply-chain"]);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("desktop:e2e"),
+        "stage-gate 2 must name the missing frontend script; stderr: {stderr}"
+    );
+}
+
+/// Haelt die Formregeln des Abbruchpunkt-Manifests fest, die
+/// `stage_two_gate_names_every_missing_declaration_at_once` nicht beruehrt.
+///
+/// Ohne diesen Test liefen die Objektform ohne `points`, die Doppelung
+/// innerhalb eines Abschnitts, der leere Klammertext, das leere Abschnittsfeld
+/// und die Abwesenheit des Vorrangpunkts ungemessen mit.
+#[test]
+fn the_fault_point_manifest_must_declare_shaped_entries() {
+    // Phase 1: Objektform ohne `points`. Eine Schrittliste allein deklariert
+    // keinen Abbruchpunkt — genau die Mutation, die die eingecheckte Objektform
+    // andernfalls still passieren liesse.
+    let root = stage_two_fixture("no-points");
+    write_fault_point_manifest(&root, FaultManifestDefect::FinalizationWithoutPoints);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("finalization"),
+        "the gate must name the section without a points array; stderr: {stderr}"
+    );
+
+    // Phase 2: derselbe Abbruchpunkt zweimal im selben Abschnitt.
+    let root = stage_two_fixture("duplicate");
+    write_fault_point_manifest(&root, FaultManifestDefect::DuplicateWithinASection);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("BeforeIntentCommit"),
+        "the gate must name the duplicated fault point; stderr: {stderr}"
+    );
+
+    // Phase 3: ein Abbruchpunkt ohne Klammertext. Ein Name ohne Klammer sagt
+    // nicht, WANN der Absturz eintritt, und belegt damit nichts.
+    let root = stage_two_fixture("no-brackets");
+    write_fault_point_manifest(&root, FaultManifestDefect::EntryWithoutBrackets);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("BeforeIntentCommit") && stderr.contains("brackets"),
+        "the gate must name the entry without a bracketed step; stderr: {stderr}"
+    );
+
+    // Phase 4: ein Abschnitt steht als leeres Feld. Eine Ueberschrift ohne
+    // Eintrag deklariert nichts, und der Gate muss den Abschnitt nennen — ohne
+    // diese Phase liesse sich die Leerpruefung streichen, ohne dass ein Test
+    // fiele, weil Phase 3 des Brieftests den Schluessel ganz entfernt.
+    let root = stage_two_fixture("empty-section");
+    write_fault_point_manifest(&root, FaultManifestDefect::EmptyDiscardSection);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("discard") && stderr.contains("empty"),
+        "the gate must name the empty manifest section; stderr: {stderr}"
+    );
+
+    // Phase 5: der Vorrangpunkt fehlt. Er liegt bewusst NICHT in
+    // `DiscardFaultPoint::ALL` und muss deshalb namentlich verlangt werden.
+    let root = stage_two_fixture("no-precedence");
+    write_fault_point_manifest(&root, FaultManifestDefect::NoPrecedencePoint);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("PreparedFinalizationBeatsDiscardIntent"),
+        "the gate must name the missing precedence fault point; stderr: {stderr}"
+    );
+}
+
+/// Haelt die beiden Pruefungen fest, die der Stufe-2-Zweig an der Wurzel
+/// wiederholt: die zwei additiven Vektorfamilien und das oeffentliche
+/// Formatpaket.
+///
+/// Ohne diese Phasen liesse sich beides aus dem Zweig streichen, ohne dass ein
+/// Test fiele — das Fixture bringt sie in jedem anderen Test mit.
+#[test]
+fn stage_two_gate_requires_the_new_families_and_the_format_package() {
+    // Phase 1: die Familie `reports` traegt kein Manifest mehr. Sie liefert das
+    // Urbild des Importprotokolls; ohne sie ist AK 28 unbelegt.
+    let root = stage_two_fixture("families");
+    fs::remove_dir_all(root.join("vectors/reports")).unwrap();
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("reports") && !stderr.contains("local-audit"),
+        "the gate must name exactly the family without a manifest; stderr: {stderr}"
+    );
+
+    // Phase 2: das oeffentliche Formatpaket fehlt. Der Stufe-2-Bericht NENNT
+    // seinen Pfad; ein genanntes und nie gelesenes Dokument waere genau die
+    // Scheinzusage, die dieser Gate ausschliesst.
+    let root = stage_two_fixture("format-package");
+    fs::remove_file(root.join(FORMAT_PACKAGE_PATH)).unwrap();
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains(FORMAT_PACKAGE_PATH),
+        "the gate must name the missing format package; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn the_stage_switch_still_refuses_an_undefined_stage() {
+    let root = stage_two_fixture("stage-three");
+    let output = run_stage_gate(&root, "3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("stages 1 and 2"),
+        "the switch must name the stages it defines; stderr: {stderr}"
+    );
+}
