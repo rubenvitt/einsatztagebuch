@@ -1305,7 +1305,7 @@ const DESIGN_DOCUMENT_RELATIVE: &str =
 const STAGE_TWO_GATE_REPORT_SECTIONS_DECLARATION: &str =
     "const STAGE_TWO_GATE_REPORT_SECTIONS: [&str; 5] = [";
 const STAGE_TWO_GATE_REPORT_LITERALS_DECLARATION: &str =
-    "const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [";
+    "const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 16] = [";
 
 /// Liest ein Feld von Zeichenkettenliteralen dort, wo es normativ steht: in der
 /// Gate-Quelle.

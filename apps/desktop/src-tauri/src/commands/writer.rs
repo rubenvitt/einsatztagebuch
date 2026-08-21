@@ -1129,8 +1129,7 @@ mod tests {
 
     impl crate::state::DraftPayloadPort for RecordingDrafts {
         fn load_payload(&self) -> Result<String, ea_draft::DraftError> {
-            self.reads
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.refuse {
                 return Err(ea_draft::DraftError::NoDraft);
             }

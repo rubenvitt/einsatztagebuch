@@ -361,9 +361,7 @@ fn a_prepared_finalization_marker_refuses_a_new_discard_intent_at_the_write_site
     h.set_prepared_finalization_marker();
 
     assert_eq!(
-        h.commit_discard_intent_directly()
-            .unwrap_err()
-            .code(),
+        h.commit_discard_intent_directly().unwrap_err().code(),
         "EA-DRAFT-PREPARED-FINALIZATION-PRESENT"
     );
     // Und die Marke steht unangetastet: der abgewiesene Schreibvorgang hat den

@@ -32,13 +32,13 @@ Stufe-2-Anteil, nie das ganze Kriterium.
 | AK 3 | Neue Maske | `tests/ea-system-tests/tests/e2e_writer_archive.rs::one_incident_goes_from_the_blank_mask_to_a_committed_archive_without_a_network`; `apps/desktop/src/features/writer/WriterPage.test.tsx::clears the surface after the commit and offers no history and no final content` | Die Historienansicht, die es hier NICHT gibt, entsteht als Lesesicht in Stufe 4 |
 | AK 15 | Stromausfall | `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_media_failure_at_any_durable_step_never_produces_a_half_written_archive` | Der Nachweis auf echter Hardware und auf den vier Zielarchitekturen steht in Stufe 7 aus |
 | AK 23 | Plattform-Key-Provider | `crates/ea-key-provider/tests/writer_role_guard.rs::a_claimed_hardware_profile_never_falls_back_silently`; `crates/ea-key-provider/tests/device_posture.rs::every_support_matrix_row_reaches_only_the_os_wrapped_floor`; `tests/ea-system-tests/tests/cross_platform_key_provider_smoke.rs` | Die native Ausfuehrung auf `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` und `x86_64-apple-darwin` steht in Stufe 7 aus und wird von vier eigenen `AK-23`-`v1.1`-Ledgerzeilen offen gefuehrt |
-| AK 25 | Writer-Restore | `crates/ea-writer/tests/prepared_recovery.rs::a_prepared_finalization_beats_a_second_finalization_attempt`; `tests/ea-system-tests/tests/privacy_canaries_writer.rs::a_restored_backup_never_returns_a_finalized_or_discarded_key` | Der Kopfabgleich gegen einen erreichbaren signierten Server-Checkpoint steht in Stufe 3 aus |
+| AK 25 | Writer-Restore | `crates/ea-writer/tests/prepared_recovery.rs::a_prepared_finalization_beats_a_second_finalization_attempt`; `tests/ea-system-tests/tests/privacy_canaries_writer.rs::a_restored_backup_never_returns_a_finalized_or_discarded_key`; die BLOCKADE selbst, in der Kette Kern - Naht - Oberflaeche: `crates/ea-writer/tests/sequence_id.rs::a_second_finalization_against_a_consumed_sequence_blocks` (`EA-WRITER-HEAD-RECONCILIATION-REQUIRED`), `apps/desktop/src-tauri/src/commands/writer.rs::a_refused_startup_path_becomes_a_blocked_outcome_with_its_code` (durchgereicht statt in einen Fehler verwandelt) und `apps/desktop/src/features/writer/WriterPage.test.tsx::resumes a prepared finalization and blocks a restored backup without any finalize control` (kein Finalisierungsknopf) | Der Kopfabgleich gegen einen erreichbaren signierten Server-Checkpoint steht in Stufe 3 aus; Stufe 2 blockiert fail-closed, sie loest nicht auf |
 | AK 28 | CSV-Stammdatenimport | `crates/ea-draft/tests/csv_import.rs::dry_run_does_not_write_and_commit_is_all_or_nothing`; `crates/ea-draft/tests/csv_import.rs::retained_protocol_bytes_reproduce_the_snapshot_hash`; `vectors/reports/` | Die Verwaltung der Stammdaten durch eine Administrationsrolle bleibt Stufe 5 |
 | AK 34 | Prepared Recovery | `crates/ea-writer/tests/prepared_recovery.rs::after_the_key_boundary_recovery_completes_the_exact_prepared_bytes`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_prepared_finalization_survives_a_crash_and_beats_a_pending_discard` | Die Wiederaufnahme einer im Netz haengenden Publikation gehoert Stufe 3 |
-| AK 39 | Durable Backend | `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_media_failure_at_any_durable_step_never_produces_a_half_written_archive`; `crates/ea-archive-fs/tests/backend_capabilities.rs::every_declared_capability_is_proven_on_the_host_filesystem` | Die signierte Betriebssystem- und Dateisystemmatrix steht in Stufe 7 aus |
+| AK 39 | Durable Backend | `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_media_failure_at_any_durable_step_never_produces_a_half_written_archive`; `crates/ea-archive-fs/tests/backend_capabilities.rs::every_declared_capability_is_proven_on_the_host_filesystem`; `crates/ea-archive-fs/tests/controlled_network_profile.rs::controlled_network_requires_a_local_commit_component_and_rejects_a_generic_share` | Die signierte Betriebssystem- und Dateisystemmatrix steht in Stufe 7 aus; der Weg ueber ein tatsaechlich erreichbares kontrolliertes Netz steht in Stufe 3 aus; liegengebliebene Sperrdateien nach einem harten Prozessabbruch sind als offene Zeile in Abschnitt 2.2 gefuehrt und in Stufe 7 zu schliessen |
 | AK 46 | Entwurfsverwaltung | `crates/ea-draft/tests/single_draft.rs::exactly_one_encrypted_draft_is_restored_after_restart`; `crates/ea-draft/tests/discard_faults.rs::every_discard_fault_yields_old_draft_or_permanent_blank_draft`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_discard_fault_point_restarts_into_one_of_two_states` | Der Nachweis ueber ein Releasepaket mit abgeschalteten Absturzberichten bleibt Stufe 7 |
-| AK 48 | Bestandsprofile | `tests/ea-system-tests/tests/e2e_writer_archive.rs::one_incident_goes_from_the_blank_mask_to_a_committed_archive_without_a_network`; `crates/ea-archive-fs/tests/controlled_network_profile.rs::controlled_network_requires_a_local_commit_component_and_rejects_a_generic_share` | Der Weg ueber ein tatsaechlich erreichbares kontrolliertes Netz steht in Stufe 3 aus; der hier erzeugte Bestand verifiziert NICHT vollstaendig (keine archivresidente Vertrauenslinie), ist deshalb nicht als Buendel exportierbar, und `tests/ea-system-tests/tests/e2e_writer_archive.rs::the_single_file_bundle_refuses_a_committed_archive_that_does_not_fully_verify` haelt genau diese fail-closed-Grenze fest |
-| AK 54 | Profilwechsel | `crates/ea-archive-fs/tests/profile_migration.rs::the_inventory_hash_is_equal_on_both_profiles_after_a_successful_switch`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::an_interrupted_profile_migration_leaves_exactly_one_active_pointer` | Die Freigabe eines neuen `archiveProfileHash` gegen `allowed-archive-profile-hashes` bindet Stufe 7 |
+| AK 48 | Archivprofilwechsel | `crates/ea-archive-fs/tests/profile_migration.rs::the_inventory_hash_is_equal_on_both_profiles_after_a_successful_switch`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::an_interrupted_profile_migration_leaves_exactly_one_active_pointer` | Die Freigabe eines neuen `archiveProfileHash` gegen `allowed-archive-profile-hashes` bindet Stufe 7; der hier erzeugte Bestand verifiziert NICHT vollstaendig (keine archivresidente Vertrauenslinie), ist deshalb nicht als Buendel exportierbar, und `tests/ea-system-tests/tests/e2e_writer_archive.rs::the_single_file_bundle_refuses_a_committed_archive_that_does_not_fully_verify` haelt genau diese fail-closed-Grenze fest |
+| AK 54 | Record-ID und Sequenz | `crates/ea-writer/tests/sequence_id.rs::the_entry_uuid_is_version_seven_and_variant_two` (UUIDv7 nach RFC 9562); `crates/ea-writer/tests/sequence_id.rs::the_first_entry_binds_no_predecessor_and_claims_sequence_zero`; `crates/ea-writer/tests/sequence_id.rs::a_taken_incident_number_is_refused_before_anything_is_staged`; `crates/ea-writer/tests/sequence_id.rs::a_second_finalization_against_a_consumed_sequence_blocks` (eine verbrauchte Sequenz wird nie zweimal benutzt) | Die ORGANISATIONSWEITE Eindeutigkeit der `recordId` und ein echter PARALLELITAETSTEST sind hier NICHT belegt und stehen in Stufe 3 aus: Stufe 2 hat genau einen Writer und genau einen Entwurf, Eindeutigkeit ueber Geraetegrenzen entsteht erst am Serverabgleich. Der Crash- und Replayanteil ist gedeckt (`tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_prepared_finalization_survives_a_crash_and_beats_a_pending_discard`) |
 
 Vier weitere Kriterien bekommen von Stufe 2 nur einen TEIL ihres Belegs. Sie
 stehen bewusst UNTER der Tabelle und mit dem Praefix `| Teilbeleg AK `: der
@@ -63,7 +63,7 @@ Die Klausel, Wort fuer Wort, wie `tools/xtask/src/main.rs` sie als
 `STAGE_TWO_HOST_SCOPE_CLAUSE` fuehrt und wie der Gate sie hier als Literal
 verlangt:
 
-Stufe 2 belegt Baubarkeit ausschliesslich fuer das Host-Target: rust-toolchain.toml:5 stellt nur wasm32-unknown-unknown bereit (gepinnt in tools/xtask/tests/workspace.rs:278-294), und die vier Cross-Targets x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-apple-darwin werden von Task 18 namentlich als offene Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet.
+Stufe 2 belegt Baubarkeit ausschliesslich fuer das Host-Target: rust-toolchain.toml:5 stellt nur wasm32-unknown-unknown bereit (gepinnt in tools/xtask/tests/workspace.rs, rust_toolchain_declares_wasm32_and_no_release_target), und die vier Cross-Targets x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-apple-darwin werden von Task 18 namentlich als offene Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet.
 
 Die vier Architekturen, die Stufe 2 NICHT behauptet, und die Ledgerzeilen, die
 sie offen halten:
@@ -81,13 +81,96 @@ nicht faehrt. Dazu kommt `GATE-21` `v1.1` auf Stufe 7: der Go-live-Bericht MUSS
 ein unaufgeloestes Postureergebnis (`Unknown`) als unaufgeloest zeigen und nie
 als automatisches Bestehen.
 
+### 2.1 Der Key-Provider steht als PORTSCHICHT — Offenlegung aus Ruling R57
+
+Diese Zeile ist Pflicht und keine Hoeflichkeit: ohne sie waere Ruling R57 ein
+Verschweigen. Der ihm zugehoerige Satz ist zugleich ein vom Gate geprueftes
+Pflichtliteral (`STAGE_TWO_GATE_REPORT_LITERALS`), damit ein spaeterer
+Berichtsumbau ihn nicht verlieren kann.
+
+- Die Key-Provider-Schicht der Stufe 2 ist eine PORTSCHICHT OHNE NATIVE
+  AUFRUFE. Keine der von Step 3 namentlich verlangten API-Familien ist
+  aufgerufen — nicht CNG/DPAPI, nicht Windows Hello, nicht Keychain oder Secure
+  Enclave, nicht LocalAuthentication, nicht PAM/Polkit, nicht Secret Service,
+  nicht BitLocker/FileVault/LUKS. `HARDWARE_CAPABLE_PROVIDERS`
+  (`crates/ea-key-provider/src/profile.rs`) ist deshalb LEER und fail-closed:
+  ein behauptetes Hardwareprofil bricht, statt still auf `osWrapped`
+  zurueckzufallen.
+- VIER Posture-Werte bleiben `Unknown` (`crates/ea-key-provider/src/posture.rs`,
+  bezeugt von
+  `apps/desktop/src-tauri/src/commands/writer.rs::the_host_posture_reports_four_unresolved_requirements_and_is_not_production_ready`).
+  `production_ready` ist damit `false`, und das ist die WAHRE Aussage ueber ein
+  Geraet, dessen Haltung niemand gelesen hat.
+- Der plattformuebergreifende Rauchtest
+  (`tests/ea-system-tests/tests/cross_platform_key_provider_smoke.rs`) belegt
+  sein Schutzprofil gegen den `InMemoryKeyProvider` und gegen keinen nativen
+  Speicher.
+- Die schliessende Stufe ist 7: native API-Familien je Plattform plus ADR 0003,
+  Nachweis auf echter Hardware je Betriebssystem.
+
+Und deshalb, in einer eigenen Zeile, weil der Gate sie als UNGEBROCHENES Literal
+verlangt und ein Zeilenumbruch mitten im Satz sie unfindbar machen wuerde:
+
+**Ein gruener Stufe-2-Gate ist ausdruecklich kein Beleg fuer hardwaregebundene Schluessel.**
+
+Ledgeranker: `AK-23` `v1.1` auf Stufe 7, Status `planned`, mit genau diesem
+Wortlaut. Die vier Zielarchitekturzeilen daneben halten die AUSFUEHRUNG offen,
+diese Zeile die native BINDUNG selbst — zwei verschiedene Luecken.
+
+### 2.2 Drei weitere offene Zeilen, die Stufe 2 NICHT belegt
+
+Jede steht hier, damit sie nicht als geprueft gilt, und jede hat ihren
+Ledgeranker auf Stufe 7 mit Status `planned`.
+
+| Offene Zeile | Was Stufe 2 hat | Was fehlt | Ledgeranker |
+|---|---|---|---|
+| Liegengebliebene Sperrdateien (Ruling R60) | `crates/ea-archive-fs/src/local_path.rs` und `crates/ea-draft/src/lock.rs` nehmen die Sperre per `create_new` und geben sie im `Drop` frei; die Fehlermatrix bricht prozessintern ab, der `Drop` raeumt, und Invariante 1 bleibt gewahrt | Nach SIGKILL oder Stromausfall bleibt die Datei LIEGEN. `recover.rs` nimmt beide Sperren als erstes und liefert dann dauerhaft `EA-ARCHIVE-ALREADY-LOCKED` bzw. `DraftError::LockHeld`; es gibt keinen Reaper, keine PID-Pruefung, und `CONTROL_FILES_V1` ist aus dem Inventar ausgeblendet, also kann auch der Gesundheitsbericht die Datei nicht befunden. Der von `design.md` Abschnitt 8 verlangte Neustartpfad nach dem harten Prozessabbruch ist damit unerreichbar — zu STRENG, nicht zu lax, und ohne Datenverlust, aber mit einem manuellen Schritt | `AK-39` `v1.1`, Stufe 7, `planned` |
+| Echte Betriebssystemsperre statt `create_new` plus `Drop` (Fernziel von Ruling R60) | dieselbe Stelle wie oben | `flock`/`LockFileEx` — eine native Plattformschnittstelle, auf diesem Host nicht fuer drei Betriebssysteme belegbar, und damit aus demselben Grund Stufe-7-Arbeit wie die Key-Provider-Familien | `AK-39` `v1.1`, Stufe 7, `planned` (dieselbe Zeile: dieselbe Naht, dasselbe Fernziel) |
+| Bildschirmsperre und Frischepruefung, Teil 2 (Ruling R59) | Teil 1 ist gebaut: `draft_load_core` gibt den Entwurfsklartext nur gegen einen `OperatorSessionProof` heraus, bezeugt von `apps/desktop/src-tauri/src/commands/writer.rs::loading_the_active_draft_without_a_session_proof_never_reads_the_payload`; die Frist reist im Nachweis | Die PLATTFORMBEOBACHTER je Betriebssystem fuer das Sperrereignis sind nicht gebaut, und `is_valid_for`/`MAX_INACTIVITY_MS` werden im Wirt nicht ausgewertet. Die Inaktivitaetssperre wirkt in v0.1 also nur ueber die Frist im Nachweis, nicht ueber ein Betriebssystemereignis. Native Plattform-APIs, ADR-pflichtig, auf diesem Host nicht belegbar — dieselbe Begruendung wie Ruling R57 | `AK-53` `v1.1`, Stufe 7, `planned` |
+
+### 2.3 Was Stufe 2 an der eingefrorenen Vektorfamilie `vectors/crypto/suite-1` getan hat
+
+Eine Stufe-2-TAT an einem Stufe-1-Artefakt, festgehalten wie die Verschiebung
+von `WR-052` in Abschnitt 4: die Familie `vectors/crypto/suite-1` ist von 66 auf
+74 Eintraege gewachsen — ADDITIV, mit 0 geaenderten und 0 entfernten
+Eintraegen. Die acht neuen sind die vier Domainzeichenketten und die vier
+Domain-Digests der in dieser Stufe entstandenen Hashdomains
+`einsatzarchiv-finalization-preview-v1`, `einsatzarchiv-archive-profile-v1`,
+`einsatzarchiv-archive-inventory-v1` und
+`einsatzarchiv-active-profile-pointer-v1`.
+
+Die Unveraenderlichkeit der 66 Stufe-1-Eintraege ist GETRENNT von der Summe
+gepinnt, und zwar an Namen UND Bytes:
+`tests/ea-system-tests/tests/conformance_golden_vectors.rs::the_sixty_six_stage_one_vectors_are_unchanged_and_stage_two_only_added_eight`
+fuehrt die 66 Paare aus Eintragsname und `fileSha256` als Literaltabelle und
+verlangt zusaetzlich, dass die Restmenge des Manifests GENAU die acht benannten
+Neuzugaenge ist. Ohne diese Trennung waere mit dem Anheben von
+`EXPECTED_ENTRY_COUNT` von 66 auf 74 der Waechter der Unveraenderlichkeit
+ersatzlos entfallen: eine Summe allein laesst einen geaenderten Alteintrag neben
+einem neuen durch.
+
+Und die Spannung ausdruecklich, statt sie zu verschweigen: der Wortlaut
+„nie an ihrer Stelle“ in `docs/traceability/stage-1-gate.md:115-121` ist von
+dieser additiven Erweiterung BERUEHRT. In der Sache ist kein Stufe-1-Byte
+veraendert (0 geaendert, 0 entfernt, nachgemessen), im Wortlaut ist die Familie
+sehr wohl an ihrer Stelle gewachsen. `docs/traceability/stage-1-gate.md` wird
+dafuer NICHT umgeschrieben — Stufe 1 ist geschlossen und haelt den Stand an
+ihrem eigenen Gate fest. Die Erzwingung steht stattdessen hier und in
+`the_sixty_six_stage_one_vectors_are_unchanged_and_stage_two_only_added_eight`.
+
 Eine Folge des GETEILTEN Berichtsschemas, damit sie niemand spaeter als Drift
 liest: `evidenced_acceptance_criteria` wird stufenUNabhaengig ueber alle
-Ledgerzeilen gerechnet (`tools/xtask/src/main.rs:1642-1649`). `stage-gate 1`
-listet seit diesem Task deshalb AUCH die Stufe-2-Kriterien; die gemessene Zeile
-in `docs/traceability/stage-1-gate.md:164` bleibt der Beleg IHRER eigenen
-Messung und wird nicht umgeschrieben. Der geschlossene Stufe-1-Gate-Bericht ist
-in diesem Task nicht angefasst.
+Ledgerzeilen gerechnet — die Berechnung steht in `tools/xtask/src/main.rs` in
+`run_stage_two_gate` (Stufe-2-Pfad) und in `run_stage_gate` (Stufe-1-Pfad),
+beide Male als derselbe Filter `implemented | integrated` mit nichtleerem
+`primary_acceptance_criterion` ueber ALLE Ledgerzeilen. Benannt statt mit
+Zeilenbereich zitiert, aus demselben Grund, den Ruling R52 fuer die
+Reichweitenklausel gibt: ein Zeilenverweis bricht bei jeder spaeteren
+Aenderung an dieser Datei, und der Verweis wird von keinem Gate nachgelesen.
+`stage-gate 1` listet seit diesem Task deshalb AUCH die Stufe-2-Kriterien; die
+gemessene Zeile in `docs/traceability/stage-1-gate.md:164` bleibt der Beleg
+IHRER eigenen Messung und wird nicht umgeschrieben. Der geschlossene
+Stufe-1-Gate-Bericht ist in diesem Task nicht angefasst.
 
 ## 3. Fehlermatrix und deklarierte Abbruchpunkte
 
@@ -264,26 +347,27 @@ uebersteuern wuerde; die aktive Toolchain war gemessen
 `cargo install --locked cargo-deny` voraus; installiert und gemessen war
 `cargo-deny 0.20.2`. Die Zahlen sind abgelesen, nicht geschaetzt:
 `0 passed; N filtered out` waere kein Ergebnis, sondern ein defekter Filter, und
-kommt in keiner Zeile vor. Der Ausgangsstand vor diesem Task waren 122
-Testbinaries mit 930 bestandenen Tests; am Ende der Stufe 2 steht
-`cargo test --workspace --all-targets --locked` gemessen bei 125 Testbinaries
-mit 943 bestandenen Tests — die dreizehn Tests dieses Tasks in drei neuen
-Testbinaries, keine bestehende Zusicherung entfernt oder aufgeweicht. Die sechs
-ignorierten Tests sind der Bestand aus frueheren Stufen und dieser Lauf aendert
-nichts an ihnen.
+kommt in keiner Zeile vor. Der Ausgangsstand vor Task 18 waren 122
+Testbinaries mit 930 bestandenen Tests; am Ende der Stufe 2 stand
+`cargo test --workspace --all-targets --locked` bei 125 Testbinaries mit 943
+bestandenen Tests. Nach der Fix-Welle des Abschlussreviews (siehe den Nachtrag
+unter der Tabelle) steht derselbe Lauf gemessen bei 125 Testbinaries mit 955
+bestandenen Tests — keine bestehende Zusicherung entfernt oder aufgeweicht, in
+keinem der vier Buendel. Die sechs ignorierten Tests sind der Bestand aus
+frueheren Stufen und dieser Lauf aendert nichts an ihnen.
 
 | Kommando | Exitcode | Gemessenes Ergebnis | Laufzeit |
 |---|---|---|---|
-| `cargo test --locked -p ea-writer` mit den zehn `-p`-Namen der Schritt-6-Folge | 0 | 45 Testbinaries und die zehn Doctest-Ziele der zehn Pakete, 265 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 250,96 s |
-| `cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix` | 0 | 5 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 25,45 s |
-| `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` | 0 | 4 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 7,78 s |
-| `cargo test --locked -p ea-system-tests --test e2e_writer_archive` | 0 | 2 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 6,63 s |
-| `pnpm desktop:typecheck` | 0 | `tsc --noEmit` ohne eine einzige Diagnose | 1,93 s |
-| `pnpm desktop:test` | 0 | 9 Testdateien, 82 Tests bestanden, 0 fehlgeschlagen | 13,27 s |
-| `pnpm desktop:e2e` | 0 | 3 Playwright-Tests bestanden, 1 Worker, Netz abgeschaltet | 5,37 s |
-| `pnpm supply-chain` | 0 | `advisories ok, bans ok, licenses ok, sources ok`; 37 `duplicate`-Warnungen aus dem Tauri-Teilbaum, die `multiple-versions = warn` bewusst nur warnt; `cargo-deny 0.20.2` | 2,12 s |
-| `pnpm stage-gate:2` | 0 | JSON auf stdout: 16 deklarierte Abbruchpunkte, 143 Ledgerzeilen, 4 `host_evidence_rows`, `stage_two_rows_still_planned` leer, `vector_families` = `[local-audit, reports]` | 1,54 s |
-| `pnpm verify:quick` | 0 | fuenf Teilkommandos gruen: `cargo fmt --all --check`, `pnpm --dir apps/desktop build`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne Warnung, `cargo test --workspace --all-targets --locked` und der wasm32-Check; `cargo test --workspace --all-targets --locked` mit 125 Testbinaries, 943 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert | 464,43 s |
+| `cargo test --locked -p ea-writer` mit den zehn `-p`-Namen der Schritt-6-Folge | 0 | 45 Testbinaries und die zehn Doctest-Ziele der zehn Pakete, 276 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 56,50 s |
+| `cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix` | 0 | 6 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 10,20 s |
+| `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` | 0 | 4 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 1,05 s |
+| `cargo test --locked -p ea-system-tests --test e2e_writer_archive` | 0 | 2 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 0,60 s |
+| `pnpm desktop:typecheck` | 0 | `tsc --noEmit` ohne eine einzige Diagnose | 1,58 s |
+| `pnpm desktop:test` | 0 | 9 Testdateien, 83 Tests bestanden, 0 fehlgeschlagen | 12,07 s |
+| `pnpm desktop:e2e` | 0 | 3 Playwright-Tests bestanden, 1 Worker, Netz abgeschaltet | 4,74 s |
+| `pnpm supply-chain` | 0 | `advisories ok, bans ok, licenses ok, sources ok`; 37 `duplicate`-Warnungen aus dem Tauri-Teilbaum, die `multiple-versions = warn` bewusst nur warnt; `cargo-deny 0.20.2` | 2,18 s |
+| `pnpm stage-gate:2` | 0 | JSON auf stdout: 16 deklarierte Abbruchpunkte, 146 Ledgerzeilen, 4 `host_evidence_rows`, `stage_two_rows_still_planned` leer, `vector_families` = `[local-audit, reports]` | 1,43 s |
+| `pnpm verify:quick` | 0 | SIEBEN Teilkommandos gruen, in dieser Reihenfolge: `cargo fmt --all --check`; `pnpm --dir apps/desktop build`; `pnpm desktop:typecheck` (`tsc --noEmit` ohne Diagnose); `pnpm desktop:test` (9 Testdateien, 83 Tests bestanden); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne eine einzige Warnung; `cargo test --workspace --all-targets --locked` mit 125 Testbinaries, 955 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert; `cargo test --workspace --doc --all-features --locked` mit 24 Doctest-Zielen, 93 bestanden, 0 fehlgeschlagen (darunter die `compile_fail`-Doctests aus Ruling R55); und der wasm32-Check ueber die elf Pakete der Positivliste | 610,00 s |
 
 Ablauf der Messung, damit sie nachvollziehbar bleibt: der Test
 `stage_two_gate_report_records_the_measured_full_gate_run` entstand VOR der
@@ -295,6 +379,53 @@ mit. `pnpm stage-gate:2` selbst war schon auf dem Messlauf gruen, weil der Gate
 diesen Abschnitt AUSDRUECKLICH nicht liest. Danach wurde die Tabelle aus den
 abgelesenen Zahlen gefuellt und die Folge ein zweites Mal gefahren; die Zahlen
 dieser Tabelle sind die des BESTAETIGENDEN Laufs.
+
+Nachtrag der Fix-Welle des Abschlussreviews (2026-08-21): das Abschlussreview
+ueber sechs Dimensionen hat keinen Merge-Blocker, aber siebzehn Positionen
+gefunden, die in VIER thematischen Buendeln behoben wurden (Ruling R61,
+Reihenfolge B - C - D - A). Vier Wirkungen dieser Welle stehen in DIESER
+Tabelle, und deshalb wurden alle zehn Kommandos VOLLSTAENDIG NEU gefahren:
+
+1. `verify_quick_commands()` fuehrt jetzt SIEBEN statt fuenf Teilkommandos.
+   Neu sind `cargo test --workspace --doc --all-features --locked` (Ruling R55:
+   die `compile_fail`-Doctests waren der einzige Beleg dafuer, dass die
+   oeffentliche API kein privates Schluesselmaterial exportiert, und liefen in
+   keinem Gate-Kommando, weil `--all-targets` Doctests gerade AUSSCHLIESST) und
+   die zwei deklarierten Frontendskripte `pnpm desktop:typecheck` und
+   `pnpm desktop:test`. Damit laeuft der einzige Waechter der Produktinvariante
+   „TypeScript erzeugt nie Grants, Hashes, Signaturen, Chiffrate,
+   Registry-Entscheidungen oder Archivbytes" auf der TypeScript-Seite
+   (`apps/desktop/src/bridge/no-hand-written-contracts.test.ts`) erstmals in
+   einer automatisierten Folge und nicht nur als Handmessung. `pnpm desktop:e2e`
+   steht bewusst NICHT in `verify_quick_commands()` — Playwright verlangt
+   installierte Browser und einen gebauten Wirt; seine benannte Folge ist
+   `STAGE_TWO_STEP_SIX_COMMANDS` samt der Belegzeile in dieser Tabelle.
+2. Die Suite ist von 943 auf 955 bestandene Tests gewachsen, bei
+   UNVERAENDERTEN 125 Testbinaries — jeder neue Zeuge lebt in einem bestehenden
+   Testziel. Die zwoelf sind buendelweise abgerechnet: Buendel B `+7`,
+   Buendel C `+2`, Buendel D `+2` und Buendel A `+1`. Der dritte Zeuge des
+   Buendels D ist ein TypeScript-Test und zaehlt nicht hier, sondern in
+   `pnpm desktop:test`, das im selben Zug von 82 auf 83 Tests gestiegen ist.
+   Gemessen im ARBEITSBAUM, also einschliesslich der zwoelf vor Stufe 2
+   geaenderten und nicht committeten Dateien; Buendel B hat seinen Commit allein
+   in einem eigenen `git worktree` isoliert gemessen und dort `+7` gegen
+   `37c4d14` bestaetigt.
+3. Das Ledger ist von 143 auf 146 Zeilen gewachsen: drei neue `v1.1`-Zeilen auf
+   Stufe 7 mit Status `planned`, die die drei offenen Zeilen aus Abschnitt 2.1
+   und 2.2 verankern (`AK-23` fuer Ruling R57, `AK-39` fuer Ruling R60, `AK-53`
+   fuer Ruling R59 Teil 2). `stage_two_rows_still_planned` bleibt leer — keine
+   dieser Zeilen steht auf Stufe 2.
+4. `cargo fmt --all --check` war am Kopf der Welle an vier Stellen rot
+   (`apps/desktop/src-tauri/src/commands/writer.rs`,
+   `crates/ea-draft/tests/discard_faults.rs`,
+   `crates/ea-writer/src/finalize.rs`, `tools/xtask/tests/workspace.rs` — reine
+   Umbrueche aus den Buendeln B, C und D). Ohne das waere `pnpm verify:quick` an
+   seinem ERSTEN Teilkommando gefallen; das Gate-Buendel hat die vier Stellen
+   formatiert, damit diese Zeile eine gemessene und keine behauptete ist.
+
+Die Laufzeiten dieser Tabelle sind die des bestaetigenden Laufs auf einem WARMEN
+`target/`-Verzeichnis und deshalb kuerzer als die des Erstlaufs; das Kriterium
+dieser Tabelle ist der Exitcode und das abgelesene Ergebnis, nicht die Dauer.
 
 Nachtrag der Reviewrunde 1 (2026-08-21): die Befunde I1 bis I5 haben
 `tests/ea-system-tests/tests/{support/mod.rs, fault_injection_writer_matrix.rs,

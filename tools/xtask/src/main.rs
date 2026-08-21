@@ -37,6 +37,26 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
         // `Command::new("pnpm")` loest auf Windows kein `pnpm.cmd` auf — die
         // Drei-Betriebssystem-Matrix ist Stufe 7.
         ("pnpm", vec!["--dir", "apps/desktop", "build"]),
+        // Die zwei deklarierten Frontendskripte, gefahren ueber die WURZEL-Skripte
+        // und nicht ueber `--dir apps/desktop`: `STAGE_TWO_REQUIRED_SCRIPTS`
+        // verlangt sie in der Wurzel-`package.json`, und ein Gate, der nur die
+        // Existenz eines Schluessels liest, belegt nichts. Ohne diese zwei Zeilen
+        // stehen `apps/desktop/src/bridge/no-hand-written-contracts.test.ts` — der
+        // EINZIGE Waechter der Produktinvariante „TypeScript erzeugt nie Grants,
+        // Hashes, Signaturen, Chiffrate, Registry-Entscheidungen oder Archivbytes"
+        // auf der TypeScript-Seite —, `WriterPage.test.tsx`, `AppShell.test.tsx`
+        // und `csp.test.ts` in keiner automatisierten Folge.
+        //
+        // Vor den langen Cargo-Kommandos, damit ein Typfehler in Sekunden statt
+        // nach Minuten auffaellt. `desktop:e2e` steht hier AUSDRUECKLICH NICHT:
+        // Playwright verlangt installierte Browser und einen gebauten Wirt, das
+        // waere eine neue Voraussetzung fuer jeden Schnelllauf. Seine benannte
+        // Folge ist `STAGE_TWO_STEP_SIX_COMMANDS` in
+        // `tools/xtask/tests/stage_gate.rs`, und
+        // `stage_two_gate_report_records_the_measured_full_gate_run` verlangt
+        // dafuer eine gemessene Belegzeile im Stufe-2-Gate-Bericht.
+        ("pnpm", vec!["desktop:typecheck"]),
+        ("pnpm", vec!["desktop:test"]),
         (
             "cargo",
             vec![
@@ -53,6 +73,18 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
         (
             "cargo",
             vec!["test", "--workspace", "--all-targets", "--locked"],
+        ),
+        // Die Doctests, Wort fuer Wort nach Ruling R55. `--all-targets` schliesst
+        // sie GERADE AUS, `--doc` ist das einzige Kommando, das sie faehrt, und
+        // `crates/ea-key-provider/src/lib.rs` fuehrt seine `compile_fail`-Doctests
+        // selbst als den EINZIGEN Beleg dafuer, dass die oeffentliche API kein
+        // privates Schluesselmaterial exportiert. Dasselbe gilt fuer
+        // `crates/ea-crypto/src/secret.rs`, `crates/ea-trust/src/registry.rs` und
+        // `crates/ea-operator/src/lib.rs`. `--all-features` gehoert dazu, weil ein
+        // Doctest hinter einem Merkmalstor sonst ungefahren bliebe.
+        (
+            "cargo",
+            vec!["test", "--workspace", "--doc", "--all-features", "--locked"],
         ),
         // Belegt ausschliesslich UEBERSETZBARKEIT fuer wasm32-unknown-unknown, nicht
         // Lauffaehigkeit. Der Laufzeitnachweis nach
@@ -1347,7 +1379,14 @@ const STAGE_TWO_GATE_REPORT_SECTIONS: [&str; 5] = [
 /// verschweigt, belegt die Stufe nicht. Die vier Zielarchitekturen stehen
 /// hier NICHT: sie stehen bereits in der woertlich verlangten
 /// Reichweitenklausel, und ein zweites Mal geprueft belegen sie nichts.
-const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [
+///
+/// Der sechzehnte Eintrag ist die Offenlegungspflicht aus Ruling R57, und er
+/// steht hier aus demselben Grund wie [`STAGE_TWO_HOST_SCOPE_CLAUSE`]: ein
+/// gruener Stufe-2-Gate ohne diesen Satz liest sich als Nachweis
+/// hardwaregebundener Schluessel, den die Stufe nicht erbringt. Der Satz und
+/// nicht ein Stichwort wie `InMemoryKeyProvider`: ein Stichwort waere von einer
+/// beilaeufigen Erwaehnung irgendwo im Bericht bedient, dieser Satz nicht.
+const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 16] = [
     "previewHash",
     "archiveProfileHash",
     "inventoryHash",
@@ -1363,6 +1402,7 @@ const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [
     "PreparedFinalizationBeatsDiscardIntent",
     "EA-ARCHIVE-PROFILE-NOT-ALLOWED",
     "docs/traceability/stage-2-fault-points.json",
+    "Ein gruener Stufe-2-Gate ist ausdruecklich kein Beleg fuer hardwaregebundene Schluessel",
 ];
 
 /// Die Reichweitenklausel der Stufe 2: die Global Constraint zur
@@ -1375,7 +1415,8 @@ const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [
 const STAGE_TWO_HOST_SCOPE_CLAUSE: &str = concat!(
     "Stufe 2 belegt Baubarkeit ausschliesslich fuer das Host-Target: ",
     "rust-toolchain.toml:5 stellt nur wasm32-unknown-unknown bereit (gepinnt in ",
-    "tools/xtask/tests/workspace.rs:278-294), und die vier Cross-Targets ",
+    "tools/xtask/tests/workspace.rs, rust_toolchain_declares_wasm32_and_no_release_target), ",
+    "und die vier Cross-Targets ",
     "x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin, ",
     "x86_64-apple-darwin werden von Task 18 namentlich als offene ",
     "Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet."
@@ -3066,6 +3107,8 @@ vor Task 3 akzeptiert
             vec![
                 ("cargo", vec!["fmt", "--all", "--check"]),
                 ("pnpm", vec!["--dir", "apps/desktop", "build"]),
+                ("pnpm", vec!["desktop:typecheck"]),
+                ("pnpm", vec!["desktop:test"]),
                 (
                     "cargo",
                     vec![
@@ -3082,6 +3125,10 @@ vor Task 3 akzeptiert
                 (
                     "cargo",
                     vec!["test", "--workspace", "--all-targets", "--locked"],
+                ),
+                (
+                    "cargo",
+                    vec!["test", "--workspace", "--doc", "--all-features", "--locked"],
                 ),
                 (
                     "cargo",

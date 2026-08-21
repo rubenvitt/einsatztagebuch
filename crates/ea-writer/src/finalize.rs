@@ -36,9 +36,7 @@
 
 use std::sync::Arc;
 
-use ea_archive::{
-    ArchiveBackend, ArchiveBlob, ArchiveError, ArchivePath, ArchiveSource,
-};
+use ea_archive::{ArchiveBackend, ArchiveBlob, ArchiveError, ArchivePath, ArchiveSource};
 use ea_chain::{
     ChainNode, ChainNodeKind, CheckpointClaim, RollbackAssessment, assess_rollback, build_chain,
 };

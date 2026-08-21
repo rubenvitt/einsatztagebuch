@@ -296,6 +296,388 @@ fn array32(bytes: &[u8], label: &str) -> [u8; 32] {
         .unwrap_or_else(|_| panic!("{label} must be 32 bytes, not {}", bytes.len()))
 }
 
+/// Die 66 Eintraege, die die Familie `vectors/crypto/suite-1` am
+/// Stufe-1-Gate hatte — je Eintrag der Name UND der `fileSha256` seiner Bytes.
+///
+/// Warum das GETRENNT von [`EXPECTED_ENTRY_COUNT`] steht: Stufe 2 hat die
+/// Familie an ihrer Stelle von 66 auf 74 Eintraege erweitert (die vier
+/// Domainzeichenketten und die vier Domain-Digests der in Stufe 2 entstandenen
+/// Hashdomains). Mit dem Anheben der SUMME allein waere der Waechter der
+/// Unveraenderlichkeit ersatzlos entfallen: 74 bleiben 74, wenn ein
+/// Stufe-1-Eintrag geaendert und ein neuer hinzugefuegt wird, und
+/// `verify_manifest_at` prueft die Datei nur gegen ihr eigenes Manifest — beide
+/// zusammen zu aendern faellt keiner Summe auf.
+///
+/// Der `fileSha256` und nicht bloss der Name: `VectorEntry::from_value`
+/// verlangt, dass er die `objectBytes` desselben Eintrags hasht
+/// (`crates/ea-testkit/src/lib.rs`, „records a fileSha256 that does not hash
+/// its own objectBytes"), und `verify_manifest_at` hasht zusaetzlich die Datei
+/// auf der Platte. Diese 66 Zeilen binden damit die exakten BYTES, nicht nur
+/// die Namensmenge.
+///
+/// Die Werte sind aus dem Manifest am Stufe-1-Kopf `638c657` abgelesen, nicht
+/// aus dem heutigen Code gerechnet. Eine Aenderung an einem der 66 Eintraege
+/// MUSS diese Tabelle rot faerben; sie zu „reparieren" waere die Aufweichung,
+/// die `docs/traceability/stage-1-gate.md` als „nie an ihrer Stelle"
+/// ausschliesst.
+const STAGE_ONE_SUITE_ONE_ENTRIES: [(&str, &str); 66] = [
+    (
+        "aead/declared-entropy",
+        "432a6f8e98aca55673ae9a826d725f0ed02e255642431319d3536a8d5987d1dd",
+    ),
+    (
+        "aead/rfc8439-2.8.2",
+        "4e54427e462f3beb69677d39865c5da8d57f603a85f7bf71368dce8ec9b9933c",
+    ),
+    (
+        "aead/tampered-tag",
+        "69a038a0c9357672ca9aa133f68502ebd6f042d9fc54e990e3c8990c32bd3540",
+    ),
+    (
+        "domain-context/hpke-aad",
+        "485e08ef1cbfa06e20c9df779fdf67e3f9a2d59e8b73556e563d11a25bcad68d",
+    ),
+    (
+        "domain-context/hpke-info",
+        "dc2a276919943d010ad7e804a655f596458a7d16a8ede594ff2bc0a7258a3a67",
+    ),
+    (
+        "domain-context/payload-aad",
+        "01409a5d74367bcf74b752b46c5fb36ed7df822b9400229ed2c195c3f5d2baa5",
+    ),
+    (
+        "domain-digest/authorized-trust-digest",
+        "6c8e8c13f37e0884346b870ece23645c08b4ca68d13dc48cd4f9d7ff0d0d45d7",
+    ),
+    (
+        "domain-digest/bootstrap-anchor-hash",
+        "7094f2692d357ad0161a44faaa9bcc61ac1d73b7a8f7a502a1113a48b0211bb4",
+    ),
+    (
+        "domain-digest/ciphertext-digest",
+        "899a300b53966baab9dfb3f2426a73a26d45434a141bb69e9a8bb9bce952c144",
+    ),
+    (
+        "domain-digest/entry-hash",
+        "59dd4505c5d583d8388a52e47dfa7445c04ff0d0e91211f8d953273c2984cc56",
+    ),
+    (
+        "domain-digest/grant-digest",
+        "8d8e962a2d045c2ca93d02c3ccb39214c9ebb06800dd6693f5066b4f70523278",
+    ),
+    (
+        "domain-digest/grant-plan-digest",
+        "533a59074d397326c96a6f178a4e1a683ec593c70a8fd99092889ee2e87e2bc1",
+    ),
+    (
+        "domain-digest/object-hash",
+        "bc47e6f7e225c2e9ce6c83e9f534bfb22d84b32b0be4940eb2a6c2bbade6c454",
+    ),
+    (
+        "domain-digest/operator-profile-digest",
+        "3eb4298dc0e108e6dd410c8ce60b19bb5a68dee80279c7eb761aadfb11ff9b6e",
+    ),
+    (
+        "domain-digest/os-account-linux",
+        "f1297512adb57c9040c0645e6b997ae9e99aca1070380487b5a715805ac762d5",
+    ),
+    (
+        "domain-digest/receipt-digest",
+        "91d92132fae4234319b15cbd0d40bdc0a0e9f3aef42a8a7c39422f3d754b61cd",
+    ),
+    (
+        "domain-digest/record-digest",
+        "98bc4d6f437d4bb4f4970df0a5f8139e581b4a8a83eaa5fbc3a7d0103155d010",
+    ),
+    (
+        "domain-digest/recovery-test-digest",
+        "e8149a6d2cd3f218feedb2b78494fd67cefa511c868b845fac15fd9ac5fcab1b",
+    ),
+    (
+        "domain-digest/renewal-input-digest",
+        "07a45f5736ff6dc6a630b91c9da504b65bb8e58226f6d1963bdcc4f778a33a4d",
+    ),
+    (
+        "domain-digest/trust-anchor-hash",
+        "1e4accc313008525b220c632167e1f416a209e869d0b839a480fab1e81ce3641",
+    ),
+    (
+        "domain-digest/trust-digest",
+        "b7236e64c5cdaf80cfbc6ff96afc31cb0e12aeb0b6e507085eac3b3b34283e9a",
+    ),
+    (
+        "domain-string/einsatzarchiv-aad-v1",
+        "582e8c18c3527744e4a507e9cfc9e804d0bfa76ed2dfbc067327625ab9acfe29",
+    ),
+    (
+        "domain-string/einsatzarchiv-admin-authorized-trust-v1",
+        "e9f98833780d638c5fa22cb8a97f06bff888fe22de96b736e4129a03e1f456f8",
+    ),
+    (
+        "domain-string/einsatzarchiv-checkpoint-v1",
+        "d0d6462b1c944eb58158d9b76925aead68b29b0dc4a83a8a11e315b475f61655",
+    ),
+    (
+        "domain-string/einsatzarchiv-ciphertext-v1",
+        "e9c263d08bc0fcc10800295db908a8e26b3991531572924e45d7e447d8cb585a",
+    ),
+    (
+        "domain-string/einsatzarchiv-evidence-renewal-input-v1",
+        "65132e7952a151fba208cbcfedceb30071d75a8e265c1aace3e7830839443223",
+    ),
+    (
+        "domain-string/einsatzarchiv-evidence-renewal-v1",
+        "eac20a1741735d6db03e1c3f2da5e3e03a0dc88c7e2f6995011df81bf3068e6e",
+    ),
+    (
+        "domain-string/einsatzarchiv-grant-plan-v1",
+        "e574144c0dfb5fad975ada942b61309828de660d76872a0a9b8c117911f4b0c0",
+    ),
+    (
+        "domain-string/einsatzarchiv-grant-v1",
+        "0492160ffae4cca1d82bd1b29f68b9c60c9d67f657792529ae8578f18d42ab36",
+    ),
+    (
+        "domain-string/einsatzarchiv-hpke-aad-v1",
+        "a25fd07e947f0c1517edefaa1210371c8f1cc8ae869d25a8e9db07d4e9e084cb",
+    ),
+    (
+        "domain-string/einsatzarchiv-hpke-info-v1",
+        "8286f0c15711e6a23d2d75a92b8c08e0415602f913336458a716b4fec326232c",
+    ),
+    (
+        "domain-string/einsatzarchiv-object-v1",
+        "7ef11281e67e8b4f55fc2c71eec3e58aeebf1834c86a727689528d52f359a490",
+    ),
+    (
+        "domain-string/einsatzarchiv-operator-profile-v1",
+        "9909109987f4070317807c068504824b9f08e5e52d230774ed911539f146c36e",
+    ),
+    (
+        "domain-string/einsatzarchiv-os-account-v1",
+        "f7a59c0f826c2deebe33f4fae328351226af6a8bbdc82673379673960af02b2f",
+    ),
+    (
+        "domain-string/einsatzarchiv-package-v1",
+        "3df7945d28394132a627e33aae284fe5a2aa782bfd2164930dd11660985a1441",
+    ),
+    (
+        "domain-string/einsatzarchiv-receipt-v1",
+        "6d0cc71746fd44d7d1b39d7f76f10ec40f746a1698b69febcc8ba5ad0e4105de",
+    ),
+    (
+        "domain-string/einsatzarchiv-record-v1",
+        "bf7139de9762a9b97f523ea559d3f8ebbc53b28abb614bd9f24a6ef0a61bc64b",
+    ),
+    (
+        "domain-string/einsatzarchiv-recovery-test-v1",
+        "b8e86454ce2f53695542db784f18dae0cde285f228a2096b7cec550e07c65009",
+    ),
+    (
+        "domain-string/einsatzarchiv-trust-anchor-pre-v1",
+        "5586414322d18c115c5a87c65087448f18d3612e08550d3e315dee108a3ffb62",
+    ),
+    (
+        "domain-string/einsatzarchiv-trust-anchor-v1",
+        "6c7f06f9bf69bcb7e8d680b4cb81a8177867b81f1a6bd7569a77ba48b257620a",
+    ),
+    (
+        "domain-string/einsatzarchiv-trust-object-v1",
+        "d3b5d55d7e32e4527758d3af90461ea55de584eb22bca4b93243e328b89101ef",
+    ),
+    (
+        "ed25519/flipped-signature",
+        "3318852f469795a27a864a1a5c63544754a14447c703486d5bae1cc9350a2563",
+    ),
+    (
+        "ed25519/rfc8032-test1",
+        "a99e560bf0a0bbf8566a5a13200f1348301b6f691644d95b8ea276ae34c429e6",
+    ),
+    (
+        "ed25519/rfc8032-test2",
+        "4f6c8aac3951c1a998dce0fb3e1105e2457e53f409ef28ed0b072ddd43aefa72",
+    ),
+    (
+        "ed25519/weak-public-key",
+        "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
+    ),
+    (
+        "hpke/base-mode-wrapped-cek",
+        "35db387d02afca4c46b2ae77cfce83702ed52d2b5f61d65aef9ea794b814f1ea",
+    ),
+    (
+        "hpke/flipped-encapsulated-key",
+        "d7fc60e1a754cbf14213774fcc45e28aea5fd0199852835eadf3ea071033bdfe",
+    ),
+    (
+        "hpke/flipped-wrapped-cek",
+        "e47c340e99e59c7965f71483e03ae39555bbe0bfc6d1bf88504d159ed6bb12cc",
+    ),
+    (
+        "hpke/rfc7748-recipient-public-key",
+        "f35e5616160a30bf3c6e79fa73c576d40205e8fc3ba4e1c6dcf93e6b98e857b4",
+    ),
+    (
+        "protocol-core/checkpoint",
+        "43f8ba9af647a78210a1cdc13bd1dc8f6f65f9a92997ce3e98f625179da574d6",
+    ),
+    (
+        "protocol-core/checkpoint-mutated-type-string",
+        "5810118ad5b16f72eb63b3d0bb2f0ee59860819bd375650d612b318ccb87cda9",
+    ),
+    (
+        "protocol-core/evidence-renewal",
+        "202a0146792f847afd3180f772535171216124116199ac57bbedfddcd1559437",
+    ),
+    (
+        "protocol-core/evidence-renewal-mutated-type-string",
+        "e60731c2227e0e03885e48967f9afdd622f2bd959dc503d8d6db834e3a87ee88",
+    ),
+    (
+        "sha-256/abc",
+        "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358",
+    ),
+    (
+        "sha-256/empty",
+        "5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456",
+    ),
+    (
+        "suite/cose-ed25519-algorithm-identifier",
+        "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+    ),
+    (
+        "suite/grant-suite-identifier",
+        "03881d04ec7b9111602f74b53f266a6d7324c4ca24db45b315876adcffb78bdc",
+    ),
+    (
+        "suite/hpke-suite-identifiers",
+        "835a38b239400cf03ab4a1619c45d04a4827dfb587b09ed2fb4b98e3628dcdef",
+    ),
+    (
+        "suite/suite-identifier",
+        "880914da6cbe6c4aa02b9c16881f797b1c06d6b7eb64c5aa801eb0f4632639bd",
+    ),
+    (
+        "thumbprint/ed25519",
+        "36b64305309f7f5d14ad4c942f7ebb46c2fa9f7e3ac3cdb71545d9bf90e11d68",
+    ),
+    (
+        "thumbprint/ed25519-canonical-cose-key",
+        "866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+    ),
+    (
+        "thumbprint/unknown-curve",
+        "7973c0ba96a24e75a407bba67c8cebeed4e02deccfbb89b0c2ae62fda7d203df",
+    ),
+    (
+        "thumbprint/x25519",
+        "af0ed269f3a6fa78909f74dd181bd5daff8bdfa6d14c8311b28ca492c7d995aa",
+    ),
+    (
+        "thumbprint/x25519-canonical-cose-key",
+        "dee0d7067c3179ba8e72827b0f971abe5ce35c1a134b21350f993f827812d354",
+    ),
+    (
+        "uuid-v7/valid",
+        "7f79bef27d97391860fdad14d02dc81b9331cf181c5129791a37cf15c58a9474",
+    ),
+    (
+        "uuid-v7/version-four",
+        "efebf922fd99b818ec82661aba1c7660f3d13d546be6e16506065d2be3fed40c",
+    ),
+];
+
+/// Die acht Eintraege, die STUFE 2 additiv hinzugefuegt hat.
+///
+/// Ausgeschrieben, damit der neunte auffaellt: die Erweiterung ist eine
+/// Stufe-2-TAT an einem Stufe-1-Artefakt und in
+/// `docs/traceability/stage-2-gate.md` Abschnitt 2.3 als solche gefuehrt.
+const STAGE_TWO_SUITE_ONE_ADDITIONS: [&str; 8] = [
+    "domain-digest/active-profile-pointer-digest",
+    "domain-digest/archive-inventory-digest",
+    "domain-digest/archive-profile-digest",
+    "domain-digest/finalization-preview-digest",
+    "domain-string/einsatzarchiv-active-profile-pointer-v1",
+    "domain-string/einsatzarchiv-archive-inventory-v1",
+    "domain-string/einsatzarchiv-archive-profile-v1",
+    "domain-string/einsatzarchiv-finalization-preview-v1",
+];
+
+/// Haelt fest, dass die 66 Stufe-1-Vektoren dieser Familie UNVERAENDERT sind
+/// und Stufe 2 genau acht Eintraege HINZUGEFUEGT hat.
+///
+/// Zwei Richtungen, und beide sind noetig:
+///
+/// 1. Jeder der 66 Stufe-1-Eintraege liegt noch da und traegt BYTEGLEICH
+///    denselben `fileSha256`. Faengt: Entfernen, Umbenennen und jede
+///    Byte-Aenderung an einem eingefrorenen Vektor — auch dann, wenn das
+///    Manifest im selben Zug „mitgepflegt" wird.
+/// 2. Die Restmenge des Manifests ist GENAU
+///    [`STAGE_TWO_SUITE_ONE_ADDITIONS`]. Faengt: einen neunten Zugang, der
+///    sich hinter der Summe versteckt, und ein Umsortieren der Familien.
+///
+/// Was dieser Zeuge NICHT ist: eine zweite Pruefung der Digestrechnung. Die
+/// Erwartungswerte von
+/// `crypto_suite_one_vectors_reproduce_every_primitive_and_domain_string`
+/// entstehen durch eine `DigestFn` aus dem AKTUELLEN Code und koennen deshalb
+/// mit dem Code mitwandern; diese Tabelle kann es nicht.
+#[test]
+fn the_sixty_six_stage_one_vectors_are_unchanged_and_stage_two_only_added_eight() {
+    let root = workspace_root();
+    let text = fs::read_to_string(root.join(MANIFEST_PATH))
+        .unwrap_or_else(|error| panic!("failed to read {MANIFEST_PATH}: {error}"));
+    let manifest = VectorManifest::from_json(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {MANIFEST_PATH}: {error}"));
+
+    // Die Arithmetik der Erweiterung, ausgeschrieben statt gerechnet: 66 + 8
+    // MUSS die Summe sein, die EXPECTED_ENTRY_COUNT pinnt.
+    assert_eq!(
+        STAGE_ONE_SUITE_ONE_ENTRIES.len() + STAGE_TWO_SUITE_ONE_ADDITIONS.len(),
+        EXPECTED_ENTRY_COUNT,
+        "66 eingefrorene plus 8 in Stufe 2 hinzugefuegte Eintraege sind die Summe"
+    );
+
+    let present = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.file_sha256()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        present.len(),
+        manifest.entries.len(),
+        "Eintragsnamen sind eindeutig"
+    );
+
+    for (name, digest) in STAGE_ONE_SUITE_ONE_ENTRIES {
+        let recorded = present.get(name).unwrap_or_else(|| {
+            panic!(
+                "der eingefrorene Stufe-1-Vektor {name} fehlt in {MANIFEST_PATH}; \
+                 Stufe 1 ist geschlossen und ihre Vektoren werden nicht entfernt"
+            )
+        });
+        assert_eq!(
+            recorded, digest,
+            "der eingefrorene Stufe-1-Vektor {name} hat andere Bytes als am Stufe-1-Gate"
+        );
+    }
+
+    let frozen = STAGE_ONE_SUITE_ONE_ENTRIES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<BTreeSet<_>>();
+    let added = present
+        .keys()
+        .copied()
+        .filter(|name| !frozen.contains(name))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        added,
+        STAGE_TWO_SUITE_ONE_ADDITIONS.into_iter().collect(),
+        "ueber die 66 eingefrorenen Eintraege hinaus traegt die Familie GENAU die acht \
+         in Stufe 2 hinzugefuegten Eintraege"
+    );
+}
+
 #[test]
 fn crypto_suite_one_vectors_reproduce_every_primitive_and_domain_string() {
     let root = workspace_root();

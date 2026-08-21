@@ -535,14 +535,14 @@ fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
             let Some(edge) = manifest.get(table).and_then(|deps| deps.get(CRATE)) else {
                 continue;
             };
-            let asks_for_the_surface = edge
-                .get("features")
-                .and_then(Value::as_array)
-                .is_some_and(|features| {
-                    features
-                        .iter()
-                        .any(|feature| feature.as_str() == Some(SURFACE))
-                });
+            let asks_for_the_surface =
+                edge.get("features")
+                    .and_then(Value::as_array)
+                    .is_some_and(|features| {
+                        features
+                            .iter()
+                            .any(|feature| feature.as_str() == Some(SURFACE))
+                    });
             if table == "dev-dependencies" {
                 if asks_for_the_surface {
                     dev_edges += 1;
