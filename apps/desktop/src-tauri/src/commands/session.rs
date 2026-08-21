@@ -101,6 +101,23 @@ impl From<&PendingFinalizationResumeView> for ResumeDto {
     }
 }
 
+/// Die Drahtform EINER geprueften Rolle.
+///
+/// Getrennt von [`verified_session_core`], damit die Abbildung Rolle → Drahtform
+/// messbar bleibt: `SessionState::role` liefert seit der Klammer um den Nachweis
+/// nur MIT [`ea_operator::OperatorSessionProof`] eine Rolle, und ein Nachweis ist
+/// ausserhalb von `ea-operator` nicht baubar (kein Konstruktor, und
+/// `OperatorAuthenticator::reauthenticate` verlangt eine aufgeloeste
+/// Root-signierte Bindung samt `PreexistingEffectiveNow`). Der Weg durch das
+/// Kommando ist damit hier nur fail-closed messbar — die Abbildung selbst
+/// vollstaendig.
+fn session_dto(role: OperatorRoleV1) -> SessionDto {
+    SessionDto {
+        role: role_slug(role),
+        capabilities: capabilities_of(role).to_vec(),
+    }
+}
+
 pub(crate) fn verified_session_core(state: &DesktopState) -> Result<SessionDto, CommandError> {
     let role = state
         .session()
@@ -108,10 +125,7 @@ pub(crate) fn verified_session_core(state: &DesktopState) -> Result<SessionDto, 
         .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
         .role()
         .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
-    Ok(SessionDto {
-        role: role_slug(role),
-        capabilities: capabilities_of(role).to_vec(),
-    })
+    Ok(session_dto(role))
 }
 
 pub(crate) fn startup_recovery_core(state: &DesktopState) -> Result<ResumeDto, CommandError> {
@@ -179,7 +193,7 @@ mod tests {
 
     use super::{
         CAPTURE_CAPABILITY, ResumeDto, capabilities_of, phase_literal, phase_of, role_slug,
-        startup_recovery_core, verified_session_core,
+        session_dto, startup_recovery_core, verified_session_core,
     };
     use crate::commands::{NO_VERIFIED_SESSION, STARTUP_RECOVERY_UNAVAILABLE};
     use crate::state::{DesktopState, SessionState, StartupRecoveryPort};
@@ -286,24 +300,34 @@ mod tests {
         );
     }
 
+    /// Eine Rolle OHNE Nachweis ist keine Sitzung.
+    ///
+    /// Die Klammer aus `SessionState::role`, an der Kommandogrenze gemessen:
+    /// dieses Geraet TRAEGT eine Writer-Rolle im Feld, und `verified_session`
+    /// gibt sie trotzdem nicht heraus. Ohne die Klammer waere dieser Zeuge gruen
+    /// mit einer Sitzung, die niemand nachgewiesen hat — genau die Naht, die
+    /// Task 16 sonst erbt.
     #[test]
-    fn a_bound_writer_reports_its_role_and_capability() {
+    fn a_role_without_a_proof_is_no_verified_session() {
         let state = state_with(Some(OperatorRoleV1::Writer), None);
-        let session = verified_session_core(&state).unwrap();
-        assert_eq!(session.role, "writer");
-        assert_eq!(session.capabilities, ["capture"]);
-    }
-
-    /// Die Sperre nimmt die Rolle mit. Ohne diese Haelfte blieben Rolle und
-    /// Faehigkeit nach der Sperre lesbar.
-    #[test]
-    fn the_lock_removes_the_whole_session() {
-        let state = state_with(Some(OperatorRoleV1::Writer), None);
-        assert!(verified_session_core(&state).is_ok());
-        state.invalidate_session_on_lock();
         assert_eq!(
             verified_session_core(&state).unwrap_err().code,
             NO_VERIFIED_SESSION
+        );
+    }
+
+    /// Die Abbildung Rolle → Drahtform, vollstaendig und ohne Nachweis
+    /// messbar.
+    #[test]
+    fn the_writer_dto_names_its_role_and_its_capability() {
+        let session = session_dto(OperatorRoleV1::Writer);
+        assert_eq!(session.role, "writer");
+        assert_eq!(session.capabilities, ["capture"]);
+        assert!(session_dto(OperatorRoleV1::Reader).capabilities.is_empty());
+        assert!(
+            session_dto(OperatorRoleV1::OrganizationAdmin)
+                .capabilities
+                .is_empty()
         );
     }
 
@@ -378,8 +402,7 @@ mod tests {
         assert!(!json.contains("$serde_json"), "{json}");
         assert!(json.contains("\"outcomeSequence\":7"), "{json}");
         assert!(json.contains("\"irreversible\":true"), "{json}");
-        let state = state_with(Some(OperatorRoleV1::Writer), None);
-        let session = serde_json::to_string(&verified_session_core(&state).unwrap()).unwrap();
+        let session = serde_json::to_string(&session_dto(OperatorRoleV1::Writer)).unwrap();
         assert_eq!(
             session,
             "{\"role\":\"writer\",\"capabilities\":[\"capture\"]}"

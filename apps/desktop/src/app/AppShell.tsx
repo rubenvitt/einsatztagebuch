@@ -1,6 +1,6 @@
 import { App, ConfigProvider, Layout, Result, Space, Typography } from 'antd'
 import deDE from 'antd/locale/de_DE'
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import { StartupRecovery, startupRecovery } from './StartupRecovery'
@@ -8,6 +8,7 @@ import { TrustAgeStatus } from './TrustAgeStatus'
 import { enabledRoutes } from './role-gate'
 import type { EaRoute, VerifiedSession } from './role-gate'
 import { verifiedSession, watchSessionLock } from './session-lock'
+import type { SessionLockHandlers } from './session-lock'
 import type { FinalizationPreviewView, PendingFinalizationResumeView } from '../bridge/generated-contracts'
 import { DecorativeIcon } from '../design/icons'
 import { eaRuntimeTheme } from '../design/tokens'
@@ -16,13 +17,13 @@ import { eaRuntimeTheme } from '../design/tokens'
 export type EaDesktopBridge = {
   readonly loadSession: () => Promise<VerifiedSession>
   readonly recover: () => Promise<PendingFinalizationResumeView>
-  readonly watchLock: (onLocked: () => void) => Promise<() => void>
+  readonly watchLock: (handlers: SessionLockHandlers) => Promise<() => void>
 }
 
 export const eaDesktopBridge: EaDesktopBridge = {
   loadSession: () => verifiedSession(),
   recover: () => startupRecovery(),
-  watchLock: (onLocked) => watchSessionLock(onLocked),
+  watchLock: (handlers) => watchSessionLock(handlers),
 }
 
 function RouteSurface({ route }: { readonly route: EaRoute }): ReactElement {
@@ -108,88 +109,161 @@ export function AppShell({
 }
 
 /**
+ * Der Grund, aus dem die Schale KEINE Flaeche zeigt.
+ *
+ * Vier Gruende und nicht einer: „der Wirt nennt keine Sitzung" ist eine andere
+ * Aussage als „eine Sperre ist eingetreten, und der Wirt hat die Entwertung
+ * nicht bestaetigt". Der zweite Fall verlangt einen Neustart, der erste bloss
+ * eine Anmeldung — und beide stehen im Wortlaut da, nicht in einer Farbe.
+ */
+export type ShellClosure = 'no-session' | 'locked' | 'lock-watch-refused' | 'lock-unconfirmed'
+
+/**
+ * Die Schwere der vier Gruende.
+ *
+ * Sie steigt und sinkt nie: eine Sitzungsantwort, die NACH dem Sperrereignis
+ * eintrifft, darf die Aussage nicht abmildern, und eine bestaetigte Sperre darf
+ * eine unbestaetigte nicht ueberschreiben.
+ */
+const CLOSURE_SEVERITY: Record<ShellClosure, number> = {
+  'no-session': 0,
+  locked: 1,
+  'lock-watch-refused': 2,
+  'lock-unconfirmed': 3,
+}
+
+const CLOSURE_NOTICE: Record<ShellClosure, { readonly title: string; readonly subTitle: string }> = {
+  'no-session': {
+    title: 'Keine geprüfte Sitzung',
+    subTitle:
+      'Dieses Gerät hat keine gültige Bedienerbindung mit frischer Präsenz. Melden Sie sich ' +
+      'über die Anmeldung des Betriebssystems erneut an; die Erfassung bleibt bis dahin ' +
+      'geschlossen.',
+  },
+  locked: {
+    title: 'Keine geprüfte Sitzung',
+    subTitle:
+      'Eine Sperre des Betriebssystems hat die Sitzung entwertet, und der Wirt hat die ' +
+      'Entwertung bestätigt. Melden Sie sich über die Anmeldung des Betriebssystems erneut an; ' +
+      'die Erfassung bleibt bis dahin geschlossen.',
+  },
+  'lock-watch-refused': {
+    title: 'Sperrpflicht nicht eingehängt',
+    subTitle:
+      'Das Sperr- und Sitzungsereignis des Betriebssystems konnte nicht abonniert werden. Ohne ' +
+      'dieses Abonnement überlebte eine Sitzung die Sperre des Bildschirms, deshalb wird keine ' +
+      'Sitzung geladen und keine Fläche geöffnet. Starten Sie die Anwendung neu.',
+  },
+  'lock-unconfirmed': {
+    title: 'Sperre nicht bestätigt',
+    subTitle:
+      'Eine Sperre des Betriebssystems ist eingetreten, der Wirt hat die Entwertung der Sitzung ' +
+      'aber nicht bestätigt. Die Erfassung bleibt geschlossen. Beenden Sie die Anwendung und ' +
+      'starten Sie sie neu, bevor Sie weiterarbeiten.',
+  },
+}
+
+/**
  * Die Flaeche OHNE gepruefte Sitzung.
  *
  * Kein Verweis, keine Route, kein Kommando — und ausdruecklicher Text statt
- * einer leeren Seite. Sie erscheint vor der ersten Antwort des Wirts und nach
- * jeder Sperre.
+ * einer leeren Seite. Sie erscheint vor der ersten Antwort des Wirts, nach jeder
+ * Sperre und immer dann, wenn die Sperrpflicht selbst nicht haengt.
  */
-function LockedNotice(): ReactElement {
+function LockedNotice({ closure }: { readonly closure: ShellClosure }): ReactElement {
+  const notice = CLOSURE_NOTICE[closure]
   return (
     <ConfigProvider locale={deDE} theme={eaRuntimeTheme}>
       <App>
         <Result
           icon={<DecorativeIcon name="locked" size={48} />}
-          title="Keine geprüfte Sitzung"
-          subTitle={
-            'Dieses Gerät hat keine gültige Bedienerbindung mit frischer Präsenz. Melden Sie sich ' +
-            'über die Anmeldung des Betriebssystems erneut an; die Erfassung bleibt bis dahin ' +
-            'geschlossen.'
-          }
+          title={notice.title}
+          subTitle={notice.subTitle}
         />
       </App>
     </ConfigProvider>
   )
 }
 
+type ShellState =
+  | { readonly kind: 'starting' }
+  | { readonly kind: 'active'; readonly session: VerifiedSession }
+  | { readonly kind: 'closed'; readonly closure: ShellClosure }
+
 /**
- * Der Einstieg: geprueft Sitzung holen, Sperrpflicht einhaengen, Schale zeigen.
+ * Der Einstieg: Sperrpflicht einhaengen, DANN gepruefte Sitzung holen, dann
+ * Schale zeigen.
  *
- * Ein Fehlschlag beim Holen und JEDES Sperrereignis fuehren zur selben Flaeche,
- * und das ist die Zusage: nach der Sperre ist die Sitzung fort, nicht bloss ein
- * Verweis ausgegraut. Die Rueckkehr aus der Sperre ist damit eine
- * Wiederanmeldepflicht.
+ * Die Reihenfolge ist die Zusage, und sie ist die Antwort auf zwei Loecher: ohne
+ * eingehaengtes Sperrereignis darf keine Sitzung geladen werden (sonst
+ * ueberlebte sie die Sperre des Bildschirms), und ohne bestaetigte Entwertung im
+ * Wirt ist die Sperre keine erledigte Sache, sondern eine Neustartpflicht. Ein
+ * Fehlschlag beim Holen, JEDES Sperrereignis und ein Abonnement, das nicht
+ * haengt, fuehren zu KEINER Flaeche — jeder mit seinem eigenen Wortlaut.
+ *
+ * Die Uebergaenge sind monoton: die Schwere steigt und sinkt nie, und eine
+ * Flaeche geht nur aus dem Anfangszustand auf.
  */
 export function EaDesktopApp({
   bridge = eaDesktopBridge,
 }: {
   readonly bridge?: EaDesktopBridge
 }): ReactElement {
-  const [session, setSession] = useState<VerifiedSession | null>(null)
-  const lock = useCallback(() => {
-    setSession(null)
-  }, [])
+  const [state, setState] = useState<ShellState>({ kind: 'starting' })
 
   useEffect(() => {
     let live = true
-    bridge.loadSession().then(
-      (loaded) => {
-        if (live) {
-          setSession(loaded)
-        }
-      },
-      () => {
-        if (live) {
-          setSession(null)
-        }
-      },
-    )
-    return () => {
-      live = false
-    }
-  }, [bridge])
-
-  useEffect(() => {
     let stop: (() => void) | undefined
-    let live = true
-    bridge.watchLock(lock).then(
-      (unlisten) => {
-        if (live) {
+    const open = (session: VerifiedSession): void => {
+      if (!live) {
+        return
+      }
+      setState((current) => (current.kind === 'starting' ? { kind: 'active', session } : current))
+    }
+    const close = (closure: ShellClosure): void => {
+      if (!live) {
+        return
+      }
+      setState((current) =>
+        current.kind === 'closed' && CLOSURE_SEVERITY[current.closure] >= CLOSURE_SEVERITY[closure]
+          ? current
+          : { kind: 'closed', closure },
+      )
+    }
+
+    bridge
+      .watchLock({
+        onLocked: () => {
+          close('locked')
+        },
+        onUnconfirmed: () => {
+          close('lock-unconfirmed')
+        },
+      })
+      .then(
+        (unlisten) => {
+          if (!live) {
+            unlisten()
+            return
+          }
           stop = unlisten
-        } else {
-          unlisten()
-        }
-      },
-      () => undefined,
-    )
+          bridge.loadSession().then(open, () => {
+            close('no-session')
+          })
+        },
+        () => {
+          close('lock-watch-refused')
+        },
+      )
+
     return () => {
       live = false
       stop?.()
     }
-  }, [bridge, lock])
+  }, [bridge])
 
-  if (session === null) {
-    return <LockedNotice />
+  if (state.kind !== 'active') {
+    return <LockedNotice closure={state.kind === 'starting' ? 'no-session' : state.closure} />
   }
-  return <AppShell session={session} />
+  return <AppShell session={state.session} />
 }

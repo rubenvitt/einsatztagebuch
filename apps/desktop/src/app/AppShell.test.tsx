@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { expect, it } from 'vitest'
 
 import { AppShell, EaDesktopApp } from './AppShell'
@@ -9,7 +9,13 @@ import type { EaDesktopBridge } from './AppShell'
 import { validateResume } from './StartupRecovery'
 import { routeTable } from './role-gate'
 import type { VerifiedSession } from './role-gate'
-import { validateSession } from './session-lock'
+import {
+  INVALIDATE_SESSION_COMMAND,
+  SESSION_LOCK_EVENT,
+  validateSession,
+  watchSessionLock,
+} from './session-lock'
+import type { SessionBridge, SessionLockHandlers } from './session-lock'
 import type {
   FinalizationPreviewView,
   PendingFinalizationResumeView,
@@ -190,12 +196,12 @@ it('shows no surface at all without a verified session', async () => {
 })
 
 it('drops the whole surface when the native lock event arrives', async () => {
-  let lock: (() => void) | undefined
+  let lock: SessionLockHandlers | undefined
   render(
     <EaDesktopApp
       bridge={bridgeDouble({
-        watchLock: (onLocked) => {
-          lock = onLocked
+        watchLock: (handlers) => {
+          lock = handlers
           return Promise.resolve(() => undefined)
         },
       })}
@@ -204,11 +210,183 @@ it('drops the whole surface when the native lock event arrives', async () => {
   await waitFor(() => {
     expect(screen.getByRole('link', { name: /einsatz erfassen/i })).toBeVisible()
   })
-  lock?.()
+  lock?.onLocked()
   await waitFor(() => {
     expect(screen.queryByRole('link', { name: /einsatz erfassen/i })).not.toBeInTheDocument()
   })
   expect(screen.getByText(/keine geprüfte sitzung/i)).toBeVisible()
+})
+
+// Die Sperre, deren Entwertung im Wirt NICHT bestaetigt ist, ist die
+// gefaehrlichere Haelfte: die Oberflaeche schliesst zwar, aber `SessionState` im
+// Wirt kann gueltig geblieben sein, und ein Neuladen der Webview bekaeme wieder
+// eine Sitzung. Deshalb ist der Wortlaut ein anderer — Neustart und nicht bloss
+// Anmeldung — und der Uebergang ist monoton: aus der bestaetigten Sperre wird
+// die unbestaetigte, nie umgekehrt.
+it('names the restart obligation when the host does not confirm the invalidation', async () => {
+  let lock: SessionLockHandlers | undefined
+  render(
+    <EaDesktopApp
+      bridge={bridgeDouble({
+        watchLock: (handlers) => {
+          lock = handlers
+          return Promise.resolve(() => undefined)
+        },
+      })}
+    />,
+  )
+  await waitFor(() => {
+    expect(screen.getByRole('link', { name: /einsatz erfassen/i })).toBeVisible()
+  })
+  lock?.onLocked()
+  lock?.onUnconfirmed()
+  await waitFor(() => {
+    expect(screen.getByText('Sperre nicht bestätigt')).toBeVisible()
+  })
+  expect(screen.getByText(/beenden sie die anwendung/i)).toBeVisible()
+  expect(screen.queryAllByRole('link')).toHaveLength(0)
+})
+
+// Der Zeuge zu I-1: haengt die Sperrpflicht nicht an — und genau das tut sie
+// ohne Faehigkeitserklaerung, weil `core:event:allow-listen` dann von der ACL
+// verweigert wird —, dann darf ueberhaupt keine Sitzung geladen werden. Vorher
+// wurde der Fehlschlag verschluckt und die Schale zeigte ihre Flaeche weiter.
+it('loads no session at all when the lock duty cannot be attached', async () => {
+  let loadCalls = 0
+  render(
+    <EaDesktopApp
+      bridge={bridgeDouble({
+        loadSession: () => {
+          loadCalls += 1
+          return Promise.resolve(writerSession)
+        },
+        watchLock: () => Promise.reject(new Error('acl refused core:event:allow-listen')),
+      })}
+    />,
+  )
+  await waitFor(() => {
+    expect(screen.getByText('Sperrpflicht nicht eingehängt')).toBeVisible()
+  })
+  expect(loadCalls).toBe(0)
+  expect(screen.queryAllByRole('link')).toHaveLength(0)
+})
+
+// Die Monotonie als MESSUNG: die Sitzungsantwort trifft NACH dem Sperrereignis
+// ein. Ohne die Klammer um den Anfangszustand oeffnete sie die Flaeche wieder —
+// eine Sperre, die ein spaeter eintreffendes Versprechen aufhebt.
+it('does not reopen the surface when the session answer arrives after the lock', async () => {
+  let lock: SessionLockHandlers | undefined
+  let release: ((session: VerifiedSession) => void) | undefined
+  let loadCalls = 0
+  const pending = new Promise<VerifiedSession>((resolve) => {
+    release = resolve
+  })
+  render(
+    <EaDesktopApp
+      bridge={bridgeDouble({
+        loadSession: () => {
+          loadCalls += 1
+          return pending
+        },
+        watchLock: (handlers) => {
+          lock = handlers
+          return Promise.resolve(() => undefined)
+        },
+      })}
+    />,
+  )
+  await waitFor(() => {
+    expect(loadCalls).toBe(1)
+  })
+  lock?.onLocked()
+  await waitFor(() => {
+    expect(screen.getByText(/keine geprüfte sitzung/i)).toBeVisible()
+  })
+  // `act` und nicht ein blosser Mikrotask: ohne das Ausspuelen der Effekte waere
+  // die Zusicherung darunter gruen, weil der Baum noch nicht neu gezeichnet ist —
+  // sie wuerde dann nichts ueber die Monotonie sagen (gemessen: die Zusicherung
+  // hielt auch OHNE die Klammer, bis dieses `act` hier stand).
+  await act(async () => {
+    release?.(writerSession)
+  })
+  expect(screen.queryByRole('link', { name: /einsatz erfassen/i })).not.toBeInTheDocument()
+  expect(screen.getByText(/keine geprüfte sitzung/i)).toBeVisible()
+})
+
+/** Eine Bruecke ohne Wirt, die das Sperrereignis von Hand ausloest. */
+function lockBridgeDouble(invocation: (command: string) => Promise<unknown>): {
+  readonly bridge: SessionBridge
+  readonly events: string[]
+  readonly commands: string[]
+  readonly fire: () => void
+} {
+  const events: string[] = []
+  const commands: string[] = []
+  let fire: (() => void) | undefined
+  const bridge: SessionBridge = {
+    invoke: (command) => {
+      commands.push(command)
+      return invocation(command)
+    },
+    listen: (event, handler) => {
+      events.push(event)
+      fire = handler
+      return Promise.resolve(() => undefined)
+    },
+  }
+  return {
+    bridge,
+    events,
+    commands,
+    fire: () => {
+      if (fire === undefined) {
+        throw new Error('das Sperrereignis wurde nie abonniert')
+      }
+      fire()
+    },
+  }
+}
+
+// Der Zeuge zu I-2 an der Naht selbst: das Abonnement traegt GENAU das Ereignis,
+// das der Wirt meldet, die Meldung an die Oberflaeche kommt sofort, und die
+// Verstaerkung im Wirt wird verlangt. Bestaetigt der Wirt, bleibt es bei der
+// Sperre.
+it('closes the surface at once and asks the host to invalidate', async () => {
+  const locked: string[] = []
+  const double = lockBridgeDouble(() => Promise.resolve(undefined))
+  await watchSessionLock(
+    {
+      onLocked: () => locked.push('locked'),
+      onUnconfirmed: () => locked.push('unconfirmed'),
+    },
+    double.bridge,
+  )
+  expect(double.events).toEqual([SESSION_LOCK_EVENT])
+  double.fire()
+  expect(locked).toEqual(['locked'])
+  expect(double.commands).toEqual([INVALIDATE_SESSION_COMMAND])
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(locked).toEqual(['locked'])
+})
+
+// Und der Fehlschlag wird NICHT verschluckt: vorher stand hier
+// `.catch(() => undefined)`, und eine fehlgeschlagene Entwertung war von einer
+// gelungenen nicht zu unterscheiden.
+it('escalates when the invalidation command fails', async () => {
+  const locked: string[] = []
+  const double = lockBridgeDouble(() => Promise.reject(new Error('blocking work lost')))
+  await watchSessionLock(
+    {
+      onLocked: () => locked.push('locked'),
+      onUnconfirmed: () => locked.push('unconfirmed'),
+    },
+    double.bridge,
+  )
+  double.fire()
+  await waitFor(() => {
+    expect(locked).toEqual(['locked', 'unconfirmed'])
+  })
 })
 
 // Die zwei Validierer sind die Grenze, an der eine Wirtsantwort zu einem

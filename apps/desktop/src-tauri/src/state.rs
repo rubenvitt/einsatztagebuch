@@ -43,7 +43,9 @@ impl StartupRecoveryPort for WriterService<'_> {
 ///
 /// Der Nachweis liegt daneben und nicht in der Rolle: [`OperatorSessionProof`]
 /// ist absichtlich nicht `Clone`, damit [`Self::invalidate_on_lock`] keinen
-/// gueltigen Stand daneben lassen kann.
+/// gueltigen Stand daneben lassen kann. Er ist trotzdem keine Beigabe:
+/// [`Self::role`] liefert `None`, solange er fehlt — die zwei Felder koennen
+/// deshalb nicht auseinanderlaufen.
 pub struct SessionState {
     role: Option<OperatorRoleV1>,
     proof: Option<OperatorSessionProof>,
@@ -55,9 +57,23 @@ impl SessionState {
         Self { role, proof }
     }
 
-    /// Die geprueften Rolle, wenn eine Bindung gilt.
+    /// Die geprueften Rolle — und ausschliesslich MIT ihrem Nachweis.
+    ///
+    /// Der Nachweis ist die Bedingung und nicht die Beigabe: ohne
+    /// [`OperatorSessionProof`] ist die Rolle hier nicht lesbar, auch wenn das
+    /// Feld sie traegt. Ohne diese Klammer waeren Rolle und Nachweis zwei
+    /// unabhaengige Felder, und ein Aufrufer, der die Rolle setzt und den
+    /// Nachweis vergisst — Task 16 loest die Bindung auf —, bekaeme eine
+    /// Sitzung, die niemand nachgewiesen hat. Die Frischepruefung des Nachweises
+    /// (`OperatorSessionProof::is_valid_for` samt `MAX_INACTIVITY_MS`) verlangt
+    /// eine `PreexistingEffectiveNow` aus `ea-trust` und gehoert damit Task 16;
+    /// die ANWESENHEIT des Nachweises ist die Haelfte, die dieser Task
+    /// erzwingen kann.
     #[must_use]
     pub const fn role(&self) -> Option<OperatorRoleV1> {
+        if self.proof.is_none() {
+            return None;
+        }
         self.role
     }
 
@@ -133,5 +149,56 @@ impl DesktopState {
     #[must_use]
     pub fn master_data(&self) -> Option<&MasterDataRepository> {
         self.master_data.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use ea_format::OperatorRoleV1;
+
+    use super::{DesktopState, SessionState};
+
+    /// Der Zeuge der Klammer aus [`SessionState::role`].
+    ///
+    /// Er liest das FELD und den LESER getrennt — das ist der Grund, warum er
+    /// hier steht und nicht in `commands/session.rs`: nur innerhalb dieses
+    /// Moduls ist beides sichtbar. Faellt die Klammer weg, liefert `role()`
+    /// wieder die Rolle ohne Nachweis, und `verified_session` gaebe eine
+    /// Sitzung heraus, die niemand nachgewiesen hat.
+    #[test]
+    fn a_role_without_a_proof_is_not_a_readable_role() {
+        let session = SessionState::new(Some(OperatorRoleV1::Writer), None);
+        assert_eq!(session.role, Some(OperatorRoleV1::Writer));
+        assert_eq!(session.role(), None);
+    }
+
+    /// Die Sperre nimmt AUCH das Feld mit und nicht bloss den Nachweis.
+    #[test]
+    fn the_lock_clears_the_declared_role_as_well() {
+        let mut session = SessionState::new(Some(OperatorRoleV1::Writer), None);
+        session.invalidate_on_lock();
+        assert_eq!(session.role, None);
+        assert!(session.proof.is_none());
+    }
+
+    /// Die Reihenfolge von [`crate::honor_session_lock`], gemessen und nicht
+    /// behauptet: zum Zeitpunkt der MELDUNG ist die Sitzung schon fort.
+    ///
+    /// Meldete der Wirt zuerst, gaebe es ein Fenster, in dem die Webview neu
+    /// laedt und `verified_session` noch eine gueltige Sitzung liefert.
+    #[test]
+    fn the_lock_is_honored_before_the_shell_is_told() {
+        let state = DesktopState::new(
+            SessionState::new(Some(OperatorRoleV1::Writer), None),
+            None,
+            None,
+        );
+        let declared_at_announcement = Cell::new(Some(OperatorRoleV1::Writer));
+        crate::honor_session_lock(&state, || {
+            declared_at_announcement.set(state.session().lock().unwrap().role);
+        });
+        assert_eq!(declared_at_announcement.get(), None);
     }
 }

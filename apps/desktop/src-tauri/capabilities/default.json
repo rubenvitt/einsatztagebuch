@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Das Hauptfenster des Writers. Ohne diese Erklaerung ist gen/schemas/capabilities.json leer, und jedes Kernplugin-Kommando ist von der ACL verweigert — darunter core:event:allow-listen, an dem die Sperrpflicht von apps/desktop/src/app/session-lock.ts haengt. Die Kommandos aus generate_handler! umgehen die ACL, das Ereignisplugin nicht. core:default ist der dokumentierte Grundsatz von Tauri 2 und schliesst core:event:default ein; eine Verengung auf einzelne Erlaubnisse verlangt eine Messung in einem echten Fenster und gehoert damit zur E2E-Spezifikation von Task 16.",
+  "local": true,
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

@@ -76,24 +76,43 @@ export async function verifiedSession(
 }
 
 /**
+ * Die zwei Nachrichten, die eine Sperre auslöst.
+ *
+ * `onLocked` ist die unbedingte: die Fläche schließt, sobald das Ereignis
+ * ankommt. `onUnconfirmed` ist die ESKALATION und kommt nur, wenn der Wirt die
+ * Entwertung nicht bestätigt hat — die Schwere steigt damit immer nur, nie
+ * sinkt sie.
+ */
+export type SessionLockHandlers = {
+  readonly onLocked: () => void
+  readonly onUnconfirmed: () => void
+}
+
+/**
  * Haengt die Sperrpflicht ein.
  *
  * Die Reihenfolge ist die Zusage: ZUERST entwertet der Wirt den
- * `OperatorSessionProof` (`OperatorSessionProof::invalidate_on_lock` nimmt
- * `self`, also bleibt kein gueltiger Stand daneben liegen), DANN erfaehrt die
- * Oberflaeche davon. Das Fuenfminutenfenster der Untaetigkeit liegt im
- * Nachweis selbst (`ea-operator`: `MAX_INACTIVITY_MS`) und wird hier nicht
- * nachgebaut; die Sperre kommt zusaetzlich und sofort.
+ * `OperatorSessionProof` (`ea_desktop::honor_session_lock` entwertet VOR dem
+ * `emit`, und `OperatorSessionProof::invalidate_on_lock` nimmt `self`, also
+ * bleibt kein gueltiger Stand daneben liegen), DANN erfaehrt die Oberflaeche
+ * davon. Das Kommando hier ist deshalb die VERSTAERKUNG und nicht die einzige
+ * Wirkung. Das Fuenfminutenfenster der Untaetigkeit liegt im Nachweis selbst
+ * (`ea-operator`: `MAX_INACTIVITY_MS`) und wird hier nicht nachgebaut; die
+ * Sperre kommt zusaetzlich und sofort.
  *
- * Faellt das Kommando aus, gilt die Sitzung trotzdem als verloren: eine Sperre,
- * die niemandem gemeldet wird, waere die gefaehrlichere Haelfte.
+ * Der Fehlschlag des Kommandos wird NICHT verschluckt. Er ist die Aussage
+ * „der Wirt hat die Entwertung nicht bestaetigt", und die ist strenger als die
+ * Sperre selbst: wer sie ignoriert, laesst eine Oberflaeche zu, die nach einem
+ * Neuladen der Webview wieder eine gueltige Sitzung bekommen koennte.
  */
 export async function watchSessionLock(
-  onLocked: () => void,
+  handlers: SessionLockHandlers,
   bridge: SessionBridge = tauriSessionBridge,
 ): Promise<() => void> {
   return bridge.listen(SESSION_LOCK_EVENT, () => {
-    void bridge.invoke(INVALIDATE_SESSION_COMMAND).catch(() => undefined)
-    onLocked()
+    handlers.onLocked()
+    void bridge.invoke(INVALIDATE_SESSION_COMMAND).catch(() => {
+      handlers.onUnconfirmed()
+    })
   })
 }

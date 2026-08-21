@@ -82,3 +82,67 @@ it('serves the frontend from the local bundle and from no development server', (
   expect(typeof config.build?.frontendDist).toBe('string')
   expect(String(config.build?.frontendDist)).not.toMatch(/^https?:/)
 })
+
+type Capability = {
+  readonly windows?: unknown
+  readonly permissions?: unknown
+  readonly local?: unknown
+  readonly remote?: unknown
+}
+
+function capability(): Capability {
+  return JSON.parse(
+    readFileSync(path.join(packageRoot, 'src-tauri/capabilities/default.json'), 'utf8'),
+  ) as Capability
+}
+
+function strings(value: unknown, field: string): string[] {
+  expect(Array.isArray(value), field).toBe(true)
+  const list = value as unknown[]
+  expect(list.length, field).toBeGreaterThan(0)
+  for (const entry of list) {
+    expect(typeof entry, field).toBe('string')
+  }
+  return list as string[]
+}
+
+// Die ACL, ohne die die Sperrpflicht nicht haengt. Fehlt die Erklaerung, ist
+// `src-tauri/gen/schemas/capabilities.json` genau `{}` — eine LEERE ACL —, und
+// `listen()` aus `@tauri-apps/api/event` ist das Kernplugin-Kommando
+// `core:event:allow-listen` und damit verweigert. Die Kommandos aus
+// `generate_handler!` umgehen die ACL, das Ereignisplugin nicht.
+it('grants the main window the event permission the lock duty needs', () => {
+  const permissions = strings(capability().permissions, 'permissions')
+  const grantsListen = permissions.some((permission) =>
+    ['core:default', 'core:event:default', 'core:event:allow-listen'].includes(permission),
+  )
+  expect(permissions.join(' ')).toBeTruthy()
+  expect(grantsListen, `keine Erlaubnis fuer core:event:allow-listen: ${permissions.join(', ')}`).toBe(true)
+})
+
+// Die Erklaerung deckt das Fenster, das die Konfiguration erklaert — Quelle
+// gegen Quelle. Deckte sie ein anderes, waere die ACL des erzeugten Fensters
+// leer, ohne dass irgendetwas rot wird.
+it('covers exactly the window the configuration declares', () => {
+  const config = tauriConfig() as TauriConfig & {
+    readonly app?: { readonly windows?: readonly { readonly label?: unknown }[] }
+  }
+  const declared = config.app?.windows
+  expect(Array.isArray(declared)).toBe(true)
+  const labels = (declared ?? []).map((window) => window.label)
+  expect(labels.length).toBeGreaterThan(0)
+  const covered = strings(capability().windows, 'windows')
+  for (const label of labels) {
+    // AUSGESCHRIEBEN und nicht der Vorgabewert von Tauri: dieser Vergleich soll
+    // nichts raten.
+    expect(typeof label).toBe('string')
+    expect(covered).toContain(label)
+  }
+})
+
+// Rein lokal: eine Faehigkeitserklaerung mit `remote` liesse ein entferntes
+// Fenster dieselben Kommandos rufen.
+it('declares no remote origin', () => {
+  expect(capability().remote).toBeUndefined()
+  expect(capability().local).not.toBe(false)
+})

@@ -25,6 +25,18 @@ fn workspace_root() -> PathBuf {
 fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![
         ("cargo", vec!["fmt", "--all", "--check"]),
+        // Der Frontendbau VOR den Cargo-Kommandos, und das ist eine Reihenfolge und
+        // kein Beiwerk: `apps/desktop/src-tauri/tauri.conf.json` setzt
+        // `frontendDist: "../dist"`, `tauri::generate_context!` bricht ohne diesen
+        // Ordner mit einem Proc-Macro-Panic ab ("this path doesn't exist"), und `dist/`
+        // ist ignoriert. Ohne diese Zeile brechen `clippy --workspace` und
+        // `test --workspace` darunter aus einem frischen Checkout ab, statt zu pruefen —
+        // beide uebersetzen `ea-desktop`. Ein eingecheckter Platzhalter hilft nicht:
+        // `apps/desktop/vite.config.ts` setzt `emptyOutDir: true` und loescht ihn bei
+        // jedem Bau. `pnpm install` bleibt die Voraussetzung des Checkouts, und
+        // `Command::new("pnpm")` loest auf Windows kein `pnpm.cmd` auf — die
+        // Drei-Betriebssystem-Matrix ist Stufe 7.
+        ("pnpm", vec!["--dir", "apps/desktop", "build"]),
         (
             "cargo",
             vec![
@@ -2579,6 +2591,7 @@ vor Task 3 akzeptiert
             super::verify_quick_commands(),
             vec![
                 ("cargo", vec!["fmt", "--all", "--check"]),
+                ("pnpm", vec!["--dir", "apps/desktop", "build"]),
                 (
                     "cargo",
                     vec![

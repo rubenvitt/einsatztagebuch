@@ -8,6 +8,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Einsatzarchiv — Writer",
         "width": 1280,
         "height": 840,

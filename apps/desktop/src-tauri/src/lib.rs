@@ -16,10 +16,49 @@ pub mod state;
 
 pub use commands::COMMAND_NAMES;
 
+/// Das Ereignis, mit dem der Wirt eine Sperre oder einen Sitzungswechsel des
+/// Betriebssystems an die Oberflaeche meldet.
+///
+/// Zeichengleich mit `SESSION_LOCK_EVENT` in
+/// `apps/desktop/src/app/session-lock.ts`; der Zeuge unten liest die
+/// TypeScript-Quelle und vergleicht sie mit dieser Konstante.
+pub const SESSION_LOCK_EVENT: &str = "ea://session-lock";
+
 /// Jeder Kommandoname, den [`run`] registriert.
 #[must_use]
 pub fn registered_command_names() -> &'static [&'static str] {
     COMMAND_NAMES
+}
+
+/// Die EINE Stelle, an der eine Sperre des Betriebssystems wirkt.
+///
+/// Die Reihenfolge IST die Zusage: zuerst entwertet der Wirt seine Sitzung,
+/// danach erfaehrt die Oberflaeche davon. Umgekehrt gaebe es ein Fenster, in dem
+/// die Webview neu laedt und `verified_session` noch eine gueltige Sitzung
+/// liefert, obwohl der Bildschirm gesperrt war. Das Kommando
+/// `invalidate_session_on_lock`, das die Oberflaeche danach ruft, ist deshalb
+/// nur die VERSTAERKUNG und nie die einzige Wirkung.
+///
+/// Wer das Sperrsignal der Plattform beobachtet — Windows-Sitzungswechsel,
+/// macOS-Screen-Lock-Notification, Ubuntu-Sitzungsmanager —, ruft genau diese
+/// Funktion und nicht `emit` allein. Der Beobachter selbst fehlt noch: er
+/// braucht plattformnahe Abhaengigkeiten, die dieser Task nicht ziehen darf.
+pub fn honor_session_lock(state: &state::DesktopState, announce: impl FnOnce()) {
+    state.invalidate_session_on_lock();
+    announce();
+}
+
+/// [`honor_session_lock`] mit dem Melder des Wirts.
+///
+/// Die Zeile, die ein Plattformbeobachter aufruft. Ein Fehlschlag des `emit`
+/// aendert die Entwertung nicht mehr — sie ist zu diesem Zeitpunkt geschehen —
+/// und die Oberflaeche faellt beim naechsten `verified_session` ohnehin auf ihre
+/// Flaeche ohne Sitzung zurueck.
+pub fn announce_session_lock<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let state = tauri::Manager::state::<state::DesktopState>(app);
+    honor_session_lock(state.inner(), || {
+        let _ = tauri::Emitter::emit(app, SESSION_LOCK_EVENT, ());
+    });
 }
 
 /// Startet die Anwendung.
@@ -66,6 +105,20 @@ mod tests {
 
     /// Diese Datei selbst — die Quelle der Registrierung.
     const HOST_SOURCE: &str = include_str!("lib.rs");
+
+    /// Die Faehigkeitserklaerung des Fensters, wie sie eingecheckt ist.
+    ///
+    /// `include_str!` und nicht `fs::read_to_string`: verschwindet die Datei,
+    /// UEBERSETZT dieses Paket nicht mehr. Ein Zeuge, der sie zur Laufzeit liest,
+    /// waere in einem Baum ohne sie bloss rot — und `gen/schemas/capabilities.json`
+    /// waere wieder `{}`, also die ACL, unter der `listen()` verweigert wird.
+    const CAPABILITY_SOURCE: &str = include_str!("../capabilities/default.json");
+
+    /// Die Wirtskonfiguration, aus der das Fensterlabel kommt.
+    const TAURI_CONF_SOURCE: &str = include_str!("../tauri.conf.json");
+
+    /// Die Quelle der Sperrpflicht der Oberflaeche.
+    const SESSION_LOCK_SOURCE: &str = include_str!("../../src/app/session-lock.ts");
 
     /// Jedes Kommando, das eine Modulquelle DEKLARIERT.
     ///
@@ -162,6 +215,58 @@ mod tests {
                 "{name} ist nicht in Schlangenschreibweise"
             );
         }
+    }
+
+    /// Die Faehigkeitserklaerung deckt GENAU das Fenster, das die
+    /// Konfiguration erklaert.
+    ///
+    /// Quelle gegen Quelle und nicht Konstante gegen Konstante: das Label steht
+    /// in `tauri.conf.json`, die Fensterliste in `capabilities/default.json`.
+    /// Deckt die Erklaerung ein anderes Fenster, greift die ACL fuer das
+    /// erzeugte nicht — und `listen()` in `session-lock.ts` ist verweigert, ohne
+    /// dass irgendetwas rot wird.
+    #[test]
+    fn the_capability_covers_the_window_the_configuration_declares() {
+        let capability: serde_json::Value = serde_json::from_str(CAPABILITY_SOURCE)
+            .expect("die Faehigkeitserklaerung ist kein JSON");
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_CONF_SOURCE).expect("die Wirtskonfiguration ist kein JSON");
+        let windows = conf["app"]["windows"]
+            .as_array()
+            .expect("die Konfiguration erklaert kein Fenster");
+        assert!(!windows.is_empty());
+        let covered = capability["windows"]
+            .as_array()
+            .expect("die Faehigkeitserklaerung nennt keine Fensterliste");
+        assert!(!covered.is_empty());
+        for window in windows {
+            let label = window["label"]
+                .as_str()
+                .expect("jedes Fenster traegt ein AUSGESCHRIEBENES Label, damit dieser Vergleich keinen Vorgabewert raten muss");
+            assert!(
+                covered.iter().any(|entry| entry.as_str() == Some(label)),
+                "das Fenster {label} traegt keine Faehigkeitserklaerung"
+            );
+        }
+    }
+
+    /// Der Wirt und die Oberflaeche nennen DASSELBE Sperrereignis.
+    ///
+    /// Zwei Zeichenketten in zwei Sprachen: laeuft eine davon fort, meldet der
+    /// Wirt in ein Ereignis, auf das niemand hoert — und die Sperrpflicht faellt
+    /// still aus.
+    #[test]
+    fn the_shell_listens_to_the_event_the_host_announces() {
+        assert!(
+            SESSION_LOCK_SOURCE.contains(&format!("'{}'", super::SESSION_LOCK_EVENT)),
+            "session-lock.ts nennt {} nicht",
+            super::SESSION_LOCK_EVENT
+        );
+        assert!(
+            SESSION_LOCK_SOURCE.contains("'invalidate_session_on_lock'"),
+            "session-lock.ts ruft das Verstaerkungskommando nicht"
+        );
+        assert!(COMMAND_NAMES.contains(&"invalidate_session_on_lock"));
     }
 
     /// Der Desktop traegt keine Reader- und keine Verwaltungsflaeche, und
