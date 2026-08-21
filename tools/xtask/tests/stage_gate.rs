@@ -2088,4 +2088,118 @@ fn stage_two_gate_report_records_the_measured_full_gate_run() {
         );
     }
     assert_eq!(rows.len(), STAGE_TWO_STEP_SIX_COMMANDS.len() + 1);
+
+    // Und die Zahl in der Belegzeile von `pnpm verify:quick` gegen die Quelle,
+    // damit sie beim naechsten Teilkommando nicht wieder driftet: die Welle des
+    // Abschlussreviews hat drei Teilkommandos hinzugefuegt und die
+    // ausgeschriebene Zahl in dieser Zeile stehen gelassen (SIEBEN statt ACHT),
+    // und kein Gate hat es gefangen, weil kein Literal die Zahl hielt.
+    //
+    // Die Zusicherung lebt IN diesem Test und nicht in einem eigenen: ein
+    // zweites `#[test]` erhoehte die Testzahl des Workspace, und genau die
+    // steht zwei Saetze weiter in derselben Zeile, die hier geprueft wird.
+    let verify_quick: Vec<&Vec<String>> = rows
+        .iter()
+        .filter(|row| row[0].contains("pnpm verify:quick"))
+        .collect();
+    assert_eq!(
+        verify_quick.len(),
+        1,
+        "stage-2-gate.md must record the measured run for `pnpm verify:quick` exactly once"
+    );
+    let count = verify_quick_subcommand_count();
+    let expected = GERMAN_COUNT_WORDS.get(count).unwrap_or_else(|| {
+        panic!("verify_quick_commands() carries {count} subcommands, which no spelled-out number in GERMAN_COUNT_WORDS covers")
+    });
+    let cell = verify_quick[0];
+    assert!(cell.len() >= 3, "{cell:?}");
+    let stated = cell[2]
+        .split_whitespace()
+        .next()
+        .expect("the verify:quick evidence cell must not be empty");
+    assert_eq!(
+        stated, *expected,
+        "stage-2-gate.md must open the verify:quick evidence cell with the spelled-out number of \
+         subcommands that verify_quick_commands() actually carries ({count})"
+    );
+}
+
+/// Die deutschen Zahlwoerter in der Schreibweise der Belegzeile, indiziert mit
+/// der Zahl selbst.
+///
+/// Der Bericht schreibt die Zahl aus und in Grossbuchstaben (`ACHT
+/// Teilkommandos gruen`), also vergleicht der Test gegen genau diese
+/// Schreibweise und nicht gegen `8`.
+const GERMAN_COUNT_WORDS: [&str; 13] = [
+    "NULL", "EIN", "ZWEI", "DREI", "VIER", "FUENF", "SECHS", "SIEBEN", "ACHT", "NEUN", "ZEHN",
+    "ELF", "ZWOELF",
+];
+
+/// Zaehlt die Teilkommandos von `verify_quick_commands()` an dem zeichengenauen
+/// Pin, der sie festhaelt.
+///
+/// Gezaehlt wird am PIN und nicht am Rumpf der Funktion: der Rumpf traegt
+/// zwischen den Tupeln Kommentare, und einer davon nennt woertlich
+/// `Command::new("pnpm")` — jede Zaehlung ueber die Programmliterale des Rumpfs
+/// verzaehlte sich daran. Der Pin traegt keinen Kommentar, und
+/// `verify_quick_uses_the_required_locked_commands` (Unit-Test in
+/// `tools/xtask/src/main.rs`) haelt ihn zeichengenau gegen die Funktion — wer
+/// die Funktion aendert und den Pin nicht, wird DORT rot und nicht hier.
+///
+/// Gezaehlt wird ueber die Klammerbilanz und nicht ueber die Programmnamen: ein
+/// Tupel ist ein `(`, das auf der aeussersten Ebene des `vec![` oeffnet. Das
+/// bleibt richtig, gleichgueltig wie rustfmt die Liste bricht, und es haengt an
+/// keiner Annahme darueber, welche Programme dort stehen duerfen.
+fn verify_quick_subcommand_count() -> usize {
+    const CALL: &str = "super::verify_quick_commands(),";
+
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("the xtask source must be readable");
+    let at = source
+        .find(CALL)
+        .unwrap_or_else(|| panic!("the xtask source must pin the commands with `{CALL}`"));
+    let list_at = at
+        + source[at..]
+            .find("vec![")
+            .unwrap_or_else(|| panic!("`{CALL}` must be pinned against a `vec![` literal"))
+        + "vec![".len();
+
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut count = 0_usize;
+    for character in source[list_at..].chars() {
+        // Ein `\` im Pin brachte die Zeichenkettenbilanz aus dem Tritt und
+        // damit die Zaehlung; der Pin traegt keines, und wenn eines dazukaeme,
+        // soll dieser Zaehler abbrechen statt falsch zu zaehlen.
+        assert!(
+            character != '\\',
+            "the pin of verify_quick_commands() must not carry an escape sequence, or this counter \
+             would misread it"
+        );
+        if character == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match character {
+            '(' => {
+                if depth == 0 {
+                    count += 1;
+                }
+                depth += 1;
+            }
+            '[' => depth += 1,
+            ')' => depth -= 1,
+            ']' => {
+                if depth == 0 {
+                    return count;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    panic!("the pin of verify_quick_commands() must be closed with `]`");
 }

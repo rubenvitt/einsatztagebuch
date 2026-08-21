@@ -367,7 +367,7 @@ frueheren Stufen und dieser Lauf aendert nichts an ihnen.
 | `pnpm desktop:e2e` | 0 | 3 Playwright-Tests bestanden, 1 Worker, Netz abgeschaltet | 4,74 s |
 | `pnpm supply-chain` | 0 | `advisories ok, bans ok, licenses ok, sources ok`; 37 `duplicate`-Warnungen aus dem Tauri-Teilbaum, die `multiple-versions = warn` bewusst nur warnt; `cargo-deny 0.20.2` | 2,18 s |
 | `pnpm stage-gate:2` | 0 | JSON auf stdout: 16 deklarierte Abbruchpunkte, 146 Ledgerzeilen, 4 `host_evidence_rows`, `stage_two_rows_still_planned` leer, `vector_families` = `[local-audit, reports]` | 1,43 s |
-| `pnpm verify:quick` | 0 | SIEBEN Teilkommandos gruen, in dieser Reihenfolge: `cargo fmt --all --check`; `pnpm --dir apps/desktop build`; `pnpm desktop:typecheck` (`tsc --noEmit` ohne Diagnose); `pnpm desktop:test` (9 Testdateien, 83 Tests bestanden); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne eine einzige Warnung; `cargo test --workspace --all-targets --locked` mit 125 Testbinaries, 955 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert; `cargo test --workspace --doc --all-features --locked` mit 24 Doctest-Zielen, 93 bestanden, 0 fehlgeschlagen (darunter die `compile_fail`-Doctests aus Ruling R55); und der wasm32-Check ueber die elf Pakete der Positivliste | 610,00 s |
+| `pnpm verify:quick` | 0 | ACHT Teilkommandos gruen, in dieser Reihenfolge: `cargo fmt --all --check`; `pnpm --dir apps/desktop build`; `pnpm desktop:typecheck` (`tsc --noEmit` ohne Diagnose); `pnpm desktop:test` (9 Testdateien, 83 Tests bestanden); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne eine einzige Warnung; `cargo test --workspace --all-targets --locked` mit 125 Testbinaries, 955 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert; `cargo test --workspace --doc --all-features --locked` mit 24 Doctest-Zielen, 93 bestanden, 0 fehlgeschlagen (darunter die `compile_fail`-Doctests aus Ruling R55); und der wasm32-Check ueber die elf Pakete der Positivliste | 610,00 s |
 
 Ablauf der Messung, damit sie nachvollziehbar bleibt: der Test
 `stage_two_gate_report_records_the_measured_full_gate_run` entstand VOR der
@@ -386,7 +386,7 @@ gefunden, die in VIER thematischen Buendeln behoben wurden (Ruling R61,
 Reihenfolge B - C - D - A). Vier Wirkungen dieser Welle stehen in DIESER
 Tabelle, und deshalb wurden alle zehn Kommandos VOLLSTAENDIG NEU gefahren:
 
-1. `verify_quick_commands()` fuehrt jetzt SIEBEN statt fuenf Teilkommandos.
+1. `verify_quick_commands()` fuehrt jetzt ACHT statt fuenf Teilkommandos.
    Neu sind `cargo test --workspace --doc --all-features --locked` (Ruling R55:
    die `compile_fail`-Doctests waren der einzige Beleg dafuer, dass die
    oeffentliche API kein privates Schluesselmaterial exportiert, und liefen in
