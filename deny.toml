@@ -6,7 +6,10 @@ yanked = "deny"
 # erreicht, und fuer keinen davon gibt es ein sicheres Upgrade
 # („No safe upgrade is available"). Die Entscheidung dazu steht im Abschnitt
 # `Gemessener Gate-Lauf` von `docs/traceability/stage-2-gate.md`; sie ist eine
-# Stufe-7-Verpflichtung (Releasehaertung) und keine Stufe-2-Zusage.
+# Stufe-7-Verpflichtung (Releasehaertung) und keine Stufe-2-Zusage. Ihr
+# LEDGERANKER ist die `v1.1`-Zeile `GATE-25` auf Stufe 7 in
+# `docs/traceability/v0.1-requirements.csv`: sie nennt alle sechzehn
+# RUSTSEC-Kennungen und macht die erneute Bewertung zur Releasepflicht.
 #
 # Die Liste ist NAMENTLICH und nie `unmaintained = "allow"`: eine neue
 # unbetreute Crate oder eine echte Verwundbarkeit faellt weiterhin auf.

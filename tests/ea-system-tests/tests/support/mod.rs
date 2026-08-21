@@ -74,8 +74,17 @@ pub enum MediumFailure {
     /// nichts mehr an, waehrend die Wurzel weiter beschreibbar bleibt. Genau
     /// das Fenster, in dem ein halb geschriebener Bestand entstehen wuerde.
     NoSpaceLeft,
-    /// Der Traeger ist nur lesend eingehaengt: KEIN Verzeichnis des Bestands
-    /// nimmt noch etwas an.
+    /// Der Traeger ist nur lesend eingehaengt: kein VERZEICHNIS UNTERHALB der
+    /// Bestandswurzel nimmt noch etwas an.
+    ///
+    /// Die Wurzel selbst bleibt beschreibbar, und das ist gemessen und nicht
+    /// abgesprochen: die Schreibersperre ist eine Datei IN der Wurzel
+    /// (`ea_archive::CONTROL_FILES_V1[0]`, angelegt mit `create_new`). Eine
+    /// nur lesende Wurzel weist damit schon `acquire_writer_lock` mit
+    /// [`ea_archive::ArchiveBackendError::AlreadyLocked`] ab — VOR dem ersten
+    /// dauerhaften Schritt. Die Verweigerung waere dann eine Aussage ueber die
+    /// Sperrdatei und keine ueber das Medium, und genau diese Leere soll dieser
+    /// Test nicht haben.
     ReadOnlyMount,
 }
 
@@ -237,6 +246,34 @@ impl WriterMatrixHarness {
         self.inner.backend().read_for_test(path)
     }
 
+    /// Die exakten Bytes JEDES veroeffentlichten Grants, in Inventarordnung.
+    #[must_use]
+    pub fn committed_grant_bytes(&self) -> Vec<(String, Vec<u8>)> {
+        self.inner
+            .published_grant_paths()
+            .into_iter()
+            .filter_map(|path| {
+                self.inner
+                    .backend()
+                    .read_for_test(&path)
+                    .map(|bytes| (path, bytes))
+            })
+            .collect()
+    }
+
+    /// Der Wiederaufnahmepfad AUS DER ABLAGE, mit seinem Ergebnis.
+    ///
+    /// Anders als [`Self::restart_from_disk`] bricht er nicht ab: hinter der
+    /// unwiderruflichen Grenze ist die Wiederaufnahme der EINZIGE Weg, auf dem
+    /// noch Bytes in den Bestand gehen (`WriterService::recover_pending` ruft
+    /// denselben `publish_from_prepared`-Pfad wie der glatte Lauf), und ein
+    /// verweigerndes Medium MUSS dort als Fehler sichtbar werden.
+    pub fn resume_pending(&self) -> Result<RecoveryOutcome, WriterError> {
+        let source = self.inner.source();
+        let service = self.inner.service(&source);
+        service.recover_pending()
+    }
+
     /// Ob JEDES veroeffentlichte Archivobjekt vollstaendig ist.
     ///
     /// Das ist die Zusage „ein Archivobjekt existiert mit allen seinen Bytes
@@ -257,25 +294,27 @@ impl WriterMatrixHarness {
     /// nichts bewirkt haette.
     pub fn fail_the_medium(&self, failure: MediumFailure) {
         let root = self.inner.backend().root().to_owned();
+        // Die zwei VEROEFFENTLICHUNGSverzeichnisse werden angelegt, wenn sie
+        // noch fehlen: `LocalPathBackend` legt sie erst beim ersten
+        // Create-if-absent an, und vor dem ersten Staging gibt es sie nicht.
+        // Ohne diesen Schritt griffe BEIDE Verweigerungen an einem Punkt vor
+        // dem Staging ins Leere — die Adresse, die verweigern soll, existierte
+        // nicht, und der Lauf legte sie selbst an. Ein LEERES Verzeichnis ist
+        // kein Archivobjekt und steht in keinem Inventar, veraendert also den
+        // Bestand nicht.
+        let publication = vec![
+            root.join(ea_archive::ENTRIES_DIR_V1.trim_end_matches('/')),
+            root.join(ea_archive::GRANTS_DIR_V1.trim_end_matches('/')),
+        ];
+        for directory in &publication {
+            fs::create_dir_all(directory).expect("die Adresse muss anlegbar sein");
+        }
         let directories = match failure {
-            MediumFailure::NoSpaceLeft => {
-                let publication = vec![
-                    root.join(ea_archive::ENTRIES_DIR_V1.trim_end_matches('/')),
-                    root.join(ea_archive::GRANTS_DIR_V1.trim_end_matches('/')),
-                ];
-                // Die zwei Verzeichnisse werden angelegt, wenn sie noch
-                // fehlen: `LocalPathBackend` legt sie erst beim ersten
-                // Create-if-absent an, und vor dem ersten Staging gibt es
-                // sie nicht. Ein LEERES Verzeichnis ist kein Archivobjekt
-                // und steht in keinem Inventar, veraendert also den Bestand
-                // nicht — es ist nur die Adresse, die das volle Medium
-                // verweigert.
-                for directory in &publication {
-                    fs::create_dir_all(directory).expect("die Adresse muss anlegbar sein");
-                }
-                publication
-            }
-            MediumFailure::ReadOnlyMount => every_directory_under(&root),
+            MediumFailure::NoSpaceLeft => publication,
+            MediumFailure::ReadOnlyMount => every_directory_under(&root)
+                .into_iter()
+                .filter(|directory| directory != &root)
+                .collect(),
         };
         for directory in &directories {
             if directory.is_dir() {
@@ -422,6 +461,44 @@ pub fn published_objects_are_complete(backend: &LocalPathBackend) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// Wie oft `needle` in `haystack` steht.
+///
+/// Der Zaehler traegt die Byteidentitaetszusicherung: die Abschlussmarke traegt
+/// GENAU die veroeffentlichten Objekte, und ein zweites `.eip` oder ein
+/// fehlender Grant faellt hier auf.
+#[must_use]
+pub fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
+}
+
+/// Die EINE Stelle, an der `needle` in `haystack` steht.
+///
+/// [`None`], wenn es keine oder mehr als eine gibt: eine Enthaltenseinspruefung
+/// sagt nicht, dass die Bytes GENAU EINMAL und an einer bestimmten Stelle
+/// stehen, und die Byteidentitaet hinter der Grenze ist genau diese Aussage.
+#[must_use]
+pub fn single_offset(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    let mut found = None;
+    for (offset, window) in haystack.windows(needle.len()).enumerate() {
+        if window == needle {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(offset);
+        }
+    }
+    found
 }
 
 /// Jedes Verzeichnis unter `root`, `root` selbst eingeschlossen.

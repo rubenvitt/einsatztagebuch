@@ -140,6 +140,24 @@ fn one_incident_goes_from_the_blank_mask_to_a_committed_archive_without_a_networ
     );
 }
 
+/// Der ERSATZ fuer die briefvorgeschriebene Berichtsgleichheit von Verzeichnis
+/// und Buendel — und ein Test, der INVERTIERT.
+///
+/// # INVERTIERT, wenn die Vertrauenslinie archivresident wird
+///
+/// Dieser Test ist gruen, WEIL der Writer nichts unter
+/// `trust/registry-events/` veroeffentlicht: der von ihm erzeugte Bestand
+/// verifiziert damit nie vollstaendig, und `write_archive_bundle` ist
+/// fail-closed auf genau diese Bedingung. Wer die Luecke schliesst — Stufe 3
+/// (Sync) oder Stufe 5 (Registry-Verwaltung), oder eine Fixture, die die
+/// Registrierungsobjekte in den Bestand legt —, faerbt diesen Test ROT, und er
+/// liest sich dann als Regress, obwohl er ein Fortschritt ist.
+///
+/// DIESELBE Aenderung MUSS ihn deshalb ersetzen durch die Zusicherung, die der
+/// Brief hier urspruenglich verlangt hat: ein Verifikationslauf ueber das
+/// Verzeichnis UND ueber das Ein-Datei-Buendel mit GLEICHEM Berichtshash. Ihr
+/// Nachfolger steht schon und muss nur ueber diesen Bestand gefahren werden:
+/// `crates/ea-archive-fs/tests/bundle_export.rs::bundle_verifies_to_the_same_report_as_the_directory`.
 #[test]
 fn the_single_file_bundle_refuses_a_committed_archive_that_does_not_fully_verify() {
     let harness = WriterMatrixHarness::with_incident();

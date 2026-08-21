@@ -23,13 +23,15 @@
 
 mod support;
 
+use ea_archive::ArchiveBackendError;
 use ea_archive_fs::{HealthFinding, MigrationFaultPoint};
 use ea_draft::{DiscardFaultPoint, RestartState};
-use ea_writer::FinalizationFaultPoint;
+use ea_format::{ActiveProfilePointerCoreV1, EAG_PREFIX_V1, EIP_PREFIX_V1};
+use ea_writer::{FinalizationFaultPoint, RecoveryOutcome, WriterError};
 
 use support::{
-    MatrixOutcome, MediumFailure, WriterMatrixHarness, archive_support, draft_support,
-    published_objects_are_complete,
+    MatrixOutcome, MediumFailure, WriterMatrixHarness, archive_support, draft_support, occurrences,
+    published_objects_are_complete, single_offset,
 };
 
 /// Die Befunde, die einen HALB geschriebenen Bestand bezeugen wuerden.
@@ -73,15 +75,60 @@ fn every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome() {
                 let committed = harness
                     .committed_entry_bytes()
                     .expect("eine Vollendung veroeffentlicht genau einen Eintrag");
-                // Byteidentisch: die veroeffentlichten Bytes stehen
-                // UNVERAENDERT in der Abschlussmarke. `CommittedFinalization`
+                // BYTEIDENTITAET, und nicht Enthaltensein. `CommittedFinalization`
                 // mit `exact_bytes` ist nicht gebaut (`crates/ea-writer/src/lib.rs`
                 // nennt den Grund), also wird gegen die Marke selbst gemessen —
-                // dieselbe Zusicherung wie in
-                // `crates/ea-writer/tests/prepared_recovery.rs:170-176`.
-                assert!(
-                    prepared.windows(committed.len()).any(|w| w == committed),
-                    "{point:?}: die veroeffentlichten Bytes stehen nicht in der Abschlussmarke"
+                // aber in DREI Aussagen, von denen keine eine
+                // Teilmengenpruefung ist:
+                //
+                // 1. der veroeffentlichte Eintrag steht GENAU EINMAL in der
+                //    Marke, und die Scheibe an dieser Stelle ist ihm GLEICH;
+                // 2. dasselbe fuer JEDEN veroeffentlichten Grant;
+                // 3. die Marke traegt GENAU SO VIELE Archivobjekte, wie
+                //    veroeffentlicht wurden — kein Objekt der Marke blieb
+                //    liegen, und keines kam hinzu.
+                //
+                // Ohne 3. sagte 1. nur „etwas davon steht drin"; ohne 1. sagte
+                // 3. nichts ueber die Bytes.
+                let offset = single_offset(&prepared, &committed).unwrap_or_else(|| {
+                    panic!(
+                        "{point:?}: die veroeffentlichten Eintragsbytes stehen nicht GENAU EINMAL \
+                         in der Abschlussmarke"
+                    )
+                });
+                assert_eq!(
+                    &prepared[offset..offset + committed.len()],
+                    committed.as_slice(),
+                    "{point:?}: die Abschlussmarke traegt an dieser Stelle andere Bytes"
+                );
+                for (path, bytes) in harness.committed_grant_bytes() {
+                    let grant_offset = single_offset(&prepared, &bytes).unwrap_or_else(|| {
+                        panic!("{point:?}: {path} steht nicht GENAU EINMAL in der Abschlussmarke")
+                    });
+                    assert_eq!(
+                        &prepared[grant_offset..grant_offset + bytes.len()],
+                        bytes.as_slice(),
+                        "{point:?}: {path} traegt in der Marke andere Bytes"
+                    );
+                }
+                assert_eq!(
+                    occurrences(&prepared, &EIP_PREFIX_V1),
+                    harness.inner().published_entry_paths().len(),
+                    "{point:?}: die Marke fuehrt nicht genau die veroeffentlichten .eip-Objekte"
+                );
+                assert_eq!(
+                    occurrences(&prepared, &EAG_PREFIX_V1),
+                    harness.inner().published_grant_paths().len(),
+                    "{point:?}: die Marke fuehrt nicht genau die veroeffentlichten .eag-Objekte"
+                );
+                // Und die veroeffentlichte Zahl gegen die GEPLANTE: ohne diese
+                // Zeile sagten die beiden Zaehlungen nur, dass Marke und
+                // Bestand einander gleichen — auch bei einem Grant zu wenig
+                // auf beiden Seiten.
+                assert_eq!(
+                    harness.inner().published_grant_paths().len(),
+                    harness.inner().expected_grant_count(),
+                    "{point:?}: nicht jeder geplante Grant ist veroeffentlicht"
                 );
                 assert!(
                     harness.draft_key_is_gone(),
@@ -139,31 +186,222 @@ fn every_declared_discard_fault_point_restarts_into_one_of_two_states() {
     }
 }
 
+/// Wie eine Medienverweigerung an einem Abbruchpunkt UEBERHAUPT einen
+/// dauerhaften Schreibvorgang treffen kann.
+///
+/// # Warum diese Klassifikation ueberhaupt noetig ist
+///
+/// `WriterService::finalize` weist einen zweiten Anlauf an der Markenpruefung
+/// ab, BEVOR ein einziges Byte geschrieben wird. Fuer jeden Punkt ab
+/// [`FinalizationFaultPoint::AfterPreparedMarkerCommit`] beruehrt eine zweite
+/// Finalisierung das Medium also NIE, und ein blosses `is_err()` waere dort aus
+/// einem mit dem Medium unverwandten Grund wahr. Hinter der Grenze ist
+/// `WriterService::recover_pending` der einzige Weg, auf dem noch Bytes in den
+/// Bestand gehen — und er geht denselben `publish_from_prepared`-Pfad wie der
+/// glatte Lauf. Deshalb faehrt dieser Test je Punkt GENAU die Operation, die
+/// dort noch schreiben kann, und sichert den erwarteten FEHLERTYP zu statt
+/// irgendeinen Fehler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MediumProbe {
+    /// Vor der Abschlussmarke: eine neue Finalisierung laeuft an und schreibt in
+    /// den Staging-Bereich. Das Medium MUSS sie abweisen.
+    FinalizeIsRefused,
+    /// Die Marke liegt und der `draftDEK` ist noch da: der Neustart LOEST die
+    /// Marke und schreibt keinen Byte in den Bestand.
+    RecoveryReleasesTheMarker,
+    /// Die Marke liegt, der Schluessel ist fort und es steht noch ein Objekt
+    /// aus: der Neustart will veroeffentlichen, und das Medium MUSS ihn
+    /// abweisen.
+    RecoveryPublishIsRefused,
+    /// Die Marke liegt, und JEDES ihrer Objekte ist schon veroeffentlicht. Die
+    /// Wiederholung schreibt keinen NEUEN Byte — `create_if_absent` traegt die
+    /// bytegleiche Wiederholung — und vollendet deshalb auch auf einem
+    /// verweigernden Medium. Ein Fehler waere hier der Defekt.
+    RepetitionWritesNothing,
+    /// Die zurueckgespielte Sicherung wurde VOR dem Buchen der Marke
+    /// aufgenommen: es liegt keine Marke, der Schluessel ist fort, und der
+    /// Neustart hat nichts zu tun. Kein Weg fuehrt hier noch an das Medium.
+    NoMarkerAndNothingPending,
+}
+
+impl MediumProbe {
+    /// Ob an diesem Punkt eine Abschlussmarke in der Ablage steht.
+    ///
+    /// Die Erwartung steht als LITERAL neben dem Punkt und wird gegen die
+    /// gemessene Ablage geprueft: verschiebt ein spaeterer Baustand die Grenze,
+    /// faellt die Klassifikation auf und nicht bloss die Zusicherung dahinter.
+    const fn expects_a_prepared_marker(self) -> bool {
+        matches!(
+            self,
+            Self::RecoveryReleasesTheMarker
+                | Self::RecoveryPublishIsRefused
+                | Self::RepetitionWritesNothing
+        )
+    }
+
+    /// Ob diese Klasse das Medium wirklich erreicht.
+    const fn reaches_the_medium(self) -> bool {
+        matches!(
+            self,
+            Self::FinalizeIsRefused | Self::RecoveryPublishIsRefused
+        )
+    }
+}
+
+/// Die Klasse JEDES der zwoelf Punkte, als unabhaengiges Literal.
+const fn medium_probe_of(point: FinalizationFaultPoint) -> MediumProbe {
+    match point {
+        FinalizationFaultPoint::BeforeStagingCreate
+        | FinalizationFaultPoint::AfterStagingCreateBeforeFileFlush
+        | FinalizationFaultPoint::AfterStagingFileFlushBeforeDirectoryFlush
+        | FinalizationFaultPoint::AfterStagingDirectoryFlushBeforeMarker => {
+            MediumProbe::FinalizeIsRefused
+        }
+        FinalizationFaultPoint::AfterPreparedMarkerCommit => MediumProbe::RecoveryReleasesTheMarker,
+        FinalizationFaultPoint::AfterKeystoreDelete
+        | FinalizationFaultPoint::AfterAbsenceConfirmation
+        | FinalizationFaultPoint::AfterGrantPublishBeforeEntryRename => {
+            MediumProbe::RecoveryPublishIsRefused
+        }
+        // Die drei letzten Punkte der Reihenfolge haben ihre Objekte schon
+        // veroeffentlicht: `.eag` und `.eip` liegen, und die Wiederaufnahme
+        // wiederholt sie bytegleich.
+        FinalizationFaultPoint::AfterEntryRenameBeforeDirectoryFlush
+        | FinalizationFaultPoint::AfterEntryDirectoryFlush
+        | FinalizationFaultPoint::AfterReconciliationBeforeBlankDraft => {
+            MediumProbe::RepetitionWritesNothing
+        }
+        FinalizationFaultPoint::BackupRestoreAfterKeyDeletion => {
+            MediumProbe::NoMarkerAndNothingPending
+        }
+    }
+}
+
+/// Wie viele der 24 Iterationen (12 Punkte x 2 Verweigerungen) das Medium
+/// WIRKLICH erreichen.
+///
+/// Die Zahl steht als Literal und nicht als Nebenprodukt: acht Iterationen vor
+/// der Grenze (vier Staging-Punkte) und sechs dahinter (die drei Punkte, an
+/// denen die Wiederaufnahme noch veroeffentlichen muss). Die uebrigen zehn
+/// haben nichts zu schreiben, und diese Datei sagt das AUS statt sie als
+/// Messung mitzuzaehlen.
+const ITERATIONS_THAT_REACH_THE_MEDIUM: usize = 14;
+
+/// Die Fehler, mit denen das MEDIUM eine Verweigerung meldet.
+///
+/// Eng aufgezaehlt und nicht `is_err()`: `AlreadyLocked`,
+/// `PreparedFinalizationPresent` oder ein Entwurfsfehler waeren ebenfalls
+/// `Err`, sagten aber nichts ueber das Medium.
+fn is_a_medium_refusal(error: &WriterError) -> bool {
+    matches!(
+        error,
+        WriterError::Backend(ArchiveBackendError::Io | ArchiveBackendError::FlushFailed)
+    )
+}
+
 #[test]
 fn a_media_failure_at_any_durable_step_never_produces_a_half_written_archive() {
+    let mut reached_the_medium = 0_usize;
     for point in FinalizationFaultPoint::ALL.iter().copied() {
         for failure in [MediumFailure::NoSpaceLeft, MediumFailure::ReadOnlyMount] {
+            let probe = medium_probe_of(point);
             let mut harness = WriterMatrixHarness::with_incident();
             let _ = harness.interrupt_at(point);
+            assert_eq!(
+                harness.inner().prepared_marker_is_present(),
+                probe.expects_a_prepared_marker(),
+                "{point:?}: die Ablage widerspricht der Klasse {probe:?}"
+            );
             // Das ERWARTETE Inventar entsteht VOR der Verweigerung. Aus den
             // tatsaechlichen Bytes gebildet koennten `MissingFile` und
             // `ModifiedFile` nie feuern, und die Zusicherung waere leer.
             let expected = harness.inventory();
             let before = harness.archive_digest_map();
             harness.fail_the_medium(failure);
-            let refused = harness.finalize();
-            assert!(
-                refused.is_err(),
-                "{point:?}/{failure:?}: das Medium verweigert, und der Abschluss meldet Erfolg"
-            );
-            // Der TRAGENDE Zeuge: der fehlgeschlagene Schreibvorgang hat den
+            // GENAU die Operation, die an diesem Punkt noch schreiben kann —
+            // und ihr erwarteter Ausgang, nicht bloss „irgendein Fehler".
+            match probe {
+                MediumProbe::FinalizeIsRefused => {
+                    let error = harness.finalize().map_or_else(
+                        |error| error,
+                        |outcome| {
+                            panic!(
+                                "{point:?}/{failure:?}: das Medium verweigert, und der Abschluss \
+                                 meldet {outcome:?}"
+                            )
+                        },
+                    );
+                    assert!(
+                        is_a_medium_refusal(&error),
+                        "{point:?}/{failure:?}: abgewiesen wurde mit {error:?} und nicht vom Medium"
+                    );
+                    reached_the_medium += 1;
+                }
+                MediumProbe::RecoveryReleasesTheMarker => {
+                    let resumed = harness
+                        .resume_pending()
+                        .expect("die Marke vor der Grenze MUSS sich loesen lassen");
+                    assert!(
+                        matches!(resumed, RecoveryOutcome::DraftRestored { .. }),
+                        "{point:?}/{failure:?}: {resumed:?} statt eines geloesten Entwurfs"
+                    );
+                    assert!(
+                        !harness.inner().prepared_marker_is_present(),
+                        "{point:?}/{failure:?}: die Marke liegt noch"
+                    );
+                }
+                MediumProbe::RecoveryPublishIsRefused => {
+                    let error = harness.resume_pending().map_or_else(
+                        |error| error,
+                        |outcome| {
+                            panic!(
+                                "{point:?}/{failure:?}: das Medium verweigert, und die \
+                                 Wiederaufnahme meldet {outcome:?}"
+                            )
+                        },
+                    );
+                    assert!(
+                        is_a_medium_refusal(&error),
+                        "{point:?}/{failure:?}: abgewiesen wurde mit {error:?} und nicht vom Medium"
+                    );
+                    reached_the_medium += 1;
+                }
+                MediumProbe::RepetitionWritesNothing => {
+                    // Sie VOLLENDET. Die Zusage traegt hier NICHT das `Ok` —
+                    // es sagt nur, dass die Wiederholung nichts mehr
+                    // anzufordern hatte —, sondern die Bytekarte unten:
+                    // `archive_digest_map() == before` ist die Aussage „kein
+                    // neuer Byte". Ein Fehler waere trotzdem der Defekt: er
+                    // hiesse, dass die Wiederholung ein schon liegendes Objekt
+                    // NEU schreiben will.
+                    let resumed = harness.resume_pending().unwrap_or_else(|error| {
+                        panic!("{point:?}/{failure:?}: nichts steht aus, und dennoch {error:?}")
+                    });
+                    assert!(
+                        matches!(resumed, RecoveryOutcome::CommittedFromPreparedBytes { .. }),
+                        "{point:?}/{failure:?}: {resumed:?} statt einer Vollendung"
+                    );
+                }
+                MediumProbe::NoMarkerAndNothingPending => {
+                    let resumed = harness.resume_pending().unwrap_or_else(|error| {
+                        panic!("{point:?}/{failure:?}: nichts steht aus, und dennoch {error:?}")
+                    });
+                    assert_eq!(
+                        resumed,
+                        RecoveryOutcome::NothingPending,
+                        "{point:?}/{failure:?}: die zurueckgespielte Sicherung traegt keine Marke"
+                    );
+                }
+            }
+            // Der TRAGENDE Zeuge: der verweigerte Schreibvorgang hat den
             // Bestand nicht angetastet. Er wird VOR dem Heilen und vor dem
             // Gesundheitscheck genommen, weil der Capability-Test des Checks
             // selbst in die Kratzwurzel schreibt.
             assert_eq!(
                 harness.archive_digest_map(),
                 before,
-                "{point:?}/{failure:?}: der abgewiesene Abschluss hat Bytes im Bestand veraendert"
+                "{point:?}/{failure:?}: der abgewiesene Schreibvorgang hat Bytes im Bestand \
+                 veraendert"
             );
             harness.heal_the_medium();
             let report = harness.health_against(&expected);
@@ -179,6 +417,21 @@ fn a_media_failure_at_any_durable_step_never_produces_a_half_written_archive() {
                 .unwrap_or_else(|defect| panic!("{point:?}/{failure:?}: {defect}"));
         }
     }
+    // Die POSITIVKONTROLLE der Matrix selbst: eine Klassifikation, die alles
+    // als „nichts zu schreiben" fuehrte, waere gruen und leer.
+    assert_eq!(
+        reached_the_medium, ITERATIONS_THAT_REACH_THE_MEDIUM,
+        "so viele Iterationen haben das Medium wirklich erreicht"
+    );
+    assert_eq!(
+        FinalizationFaultPoint::ALL
+            .iter()
+            .copied()
+            .filter(|point| medium_probe_of(*point).reaches_the_medium())
+            .count()
+            * 2,
+        ITERATIONS_THAT_REACH_THE_MEDIUM
+    );
 }
 
 #[test]
@@ -188,9 +441,54 @@ fn an_interrupted_profile_migration_leaves_exactly_one_active_pointer() {
         let migrator = harness.migrator();
         let outcome = migrator.with_fault(point).run();
         assert!(outcome.is_err(), "{point:?} MUSS die Migration abbrechen");
-        // GENAU EIN aktiver Zeiger, und es ist der ALTE: `active_profile_hash`
-        // liefert einen einzigen Wert, und dass er der des Quellprofils ist,
-        // ist die Aussage „das Zielprofil ist nicht aktiv geworden".
+        // GENAU EIN aktiver Zeiger — und gelesen AUS DER ABLAGE.
+        //
+        // `migrator.active_profile_hash()` liest den In-Memory-Spiegel DERSELBEN
+        // abgebrochenen Instanz; ein Zeiger, der auf der Platte das Zielprofil
+        // nennt, waehrend der Spiegel das Quellprofil zeigt, fiele dort nicht
+        // auf. Der dauerhafte Zeiger liegt in der Wurzel des ZIELprofils —
+        // dorthin schreiben Umschaltung UND Ruecknahme
+        // (`crates/ea-archive-fs/src/profile_migration.rs`) —, also werden
+        // BEIDE Wurzeln gelesen.
+        let on_disk: Vec<(&str, Vec<u8>)> = [
+            ("die Quellwurzel", harness.source()),
+            ("die Zielwurzel", harness.target()),
+        ]
+        .into_iter()
+        .filter_map(|(label, backend)| {
+            backend
+                .active_profile_pointer_bytes()
+                .map(|bytes| (label, bytes))
+        })
+        .collect();
+        assert!(
+            on_disk.len() <= 1,
+            "{point:?}: zwei Wurzeln fuehren einen aktiven Profilzeiger: {:?}",
+            on_disk.iter().map(|(label, _)| *label).collect::<Vec<_>>()
+        );
+        if let Some((label, bytes)) = on_disk.first() {
+            // GLEICHHEIT gegen die einzigen zwei erreichbaren Zeiger und keine
+            // Beschreibung: Generation 1 entsteht beim Umschalten, Generation 2
+            // bei der Ruecknahme, und beide MUESSEN das QUELLprofil nennen.
+            // Ein Zeiger auf das Zielprofil faellt hier auf, gleich welcher
+            // Generation.
+            let allowed: Vec<Vec<u8>> = [1_u64, 2]
+                .into_iter()
+                .map(|generation| {
+                    ea_format::encode_active_profile_pointer_core(&ActiveProfilePointerCoreV1::new(
+                        archive_support::source_profile_hash(),
+                        generation,
+                    ))
+                    .expect("der Zeiger der Fixture ist kodierbar")
+                })
+                .collect();
+            assert!(
+                allowed.contains(bytes),
+                "{point:?}: {label} fuehrt einen Zeiger, der nicht das Quellprofil bei \
+                 Generation 1 oder 2 nennt"
+            );
+        }
+        // Und der Spiegel sagt dasselbe wie die Ablage.
         assert_eq!(
             migrator.active_profile_hash().as_bytes(),
             archive_support::source_profile_hash().as_bytes(),
