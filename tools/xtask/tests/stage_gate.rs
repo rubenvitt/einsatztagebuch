@@ -1283,6 +1283,18 @@ const REQUIREMENT_LEDGER_RELATIVE: &str = "docs/traceability/v0.1-requirements.c
 const DESIGN_DOCUMENT_RELATIVE: &str =
     "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md";
 
+/// Die beiden Feldeklarationen des Stufe-2-Inhaltsvertrags, wie sie in der
+/// Gate-Quelle stehen.
+///
+/// Sie stehen hier als Konstante, weil sowohl [`write_stage_two_report`] als
+/// auch die Phasen von [`the_stage_two_gate_report_must_carry_its_content_contract`]
+/// dieselbe Liste lesen muessen: das Fixture laesst ein Element aus, der Test
+/// nennt dasselbe Element in seiner Zusicherung.
+const STAGE_TWO_GATE_REPORT_SECTIONS_DECLARATION: &str =
+    "const STAGE_TWO_GATE_REPORT_SECTIONS: [&str; 5] = [";
+const STAGE_TWO_GATE_REPORT_LITERALS_DECLARATION: &str =
+    "const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [";
+
 /// Liest ein Feld von Zeichenkettenliteralen dort, wo es normativ steht: in der
 /// Gate-Quelle.
 ///
@@ -1529,6 +1541,16 @@ enum ReportDefect {
     /// Die Belegzeile des genannten Abnahmekriteriums laesst die Spalte
     /// `Offen in spaeterer Stufe` leer.
     EmptyOpenColumn(u32),
+    /// Der Pflichtabschnitt mit dem genannten Index fehlt im Bericht.
+    ///
+    /// Der Index zeigt in die aus der Gate-Quelle gelesene Liste, damit weder
+    /// Fixture noch Zusicherung eine Ueberschrift abschreiben.
+    MissingSection(usize),
+    /// Das Pflichtliteral mit dem genannten Index fehlt im Bericht — Index
+    /// wie bei [`ReportDefect::MissingSection`].
+    MissingLiteral(usize),
+    /// Der Bericht traegt die Reichweitenklausel der Stufe 2 nicht.
+    NoScopeClause,
 }
 
 /// Schreibt einen synthetischen Stufe-2-Gate-Bericht, der den Inhaltsvertrag
@@ -1538,17 +1560,29 @@ enum ReportDefect {
 /// Belegtabelle entsteht aus den zwoelf primaeren Abnahmekriterien.
 fn write_stage_two_report(root: &Path, defect: ReportDefect) {
     let mut text = String::from("# Stufe-2-Gate (Fixture)\n\n");
-    text.push_str(&stage_two_host_scope_clause_from_the_gate_source());
-    text.push_str("\n\n");
-    for literal in
-        string_array_from_the_gate_source("const STAGE_TWO_GATE_REPORT_LITERALS: [&str; 15] = [")
+    if !matches!(defect, ReportDefect::NoScopeClause) {
+        text.push_str(&stage_two_host_scope_clause_from_the_gate_source());
+        text.push_str("\n\n");
+    }
+    for (index, literal) in
+        string_array_from_the_gate_source(STAGE_TWO_GATE_REPORT_LITERALS_DECLARATION)
+            .into_iter()
+            .enumerate()
     {
+        if matches!(defect, ReportDefect::MissingLiteral(omitted) if omitted == index) {
+            continue;
+        }
         text.push_str(&format!("- {literal}\n"));
     }
     text.push('\n');
-    for section in
-        string_array_from_the_gate_source("const STAGE_TWO_GATE_REPORT_SECTIONS: [&str; 5] = [")
+    for (index, section) in
+        string_array_from_the_gate_source(STAGE_TWO_GATE_REPORT_SECTIONS_DECLARATION)
+            .into_iter()
+            .enumerate()
     {
+        if matches!(defect, ReportDefect::MissingSection(omitted) if omitted == index) {
+            continue;
+        }
         text.push_str(&format!("{section}\n\n"));
     }
     // Die Kopfzeile beginnt bewusst NICHT mit `| AK `: der Gate liest jede
@@ -1813,6 +1847,71 @@ fn stage_two_gate_requires_the_new_families_and_the_format_package() {
         stderr.contains(FORMAT_PACKAGE_PATH),
         "the gate must name the missing format package; stderr: {stderr}"
     );
+}
+
+/// Bezeugt die drei Inhaltspruefungen des Stufe-2-Gate-Berichts, die sonst
+/// kein Test beruehrt: die fuenf Pflichtabschnitte, die fuenfzehn
+/// Pflichtliterale und die woertliche Reichweitenklausel
+/// (`tools/xtask/src/main.rs`, Schritt 6b).
+///
+/// Das Fixture stellt alle drei aus der Gate-Quelle her und erfuellt den
+/// Vertrag deshalb immer. Ohne diese Phasen liessen sich die drei Bloecke im
+/// Gate streichen, ohne dass ein Test faellt — und der gruene
+/// ZIELzustandslauf der Stufenabnahme waere danach genauso gruen, die Luecke
+/// also dauerhaft. Die Phasen haben die Form von
+/// [`ReportDefect::EmptyOpenColumn`]: ein Fehlerzustand an genau einer Stelle.
+#[test]
+fn the_stage_two_gate_report_must_carry_its_content_contract() {
+    // Phase 1: ein Pflichtabschnitt fehlt. Der Gate nennt ihn.
+    let sections = string_array_from_the_gate_source(STAGE_TWO_GATE_REPORT_SECTIONS_DECLARATION);
+    let omitted_section = &sections[1];
+    let root = stage_two_fixture("missing-section");
+    write_stage_two_report(&root, ReportDefect::MissingSection(1));
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains(omitted_section.as_str()),
+        "stage-gate 2 must name the missing section {omitted_section}; stderr: {stderr}"
+    );
+
+    // Phase 2: ein Pflichtliteral fehlt. `draftDEK` steht in keiner anderen
+    // Meldung des Zweigs, die Zusicherung kann also nicht von einem fremden
+    // Mangel bedient werden.
+    let literals = string_array_from_the_gate_source(STAGE_TWO_GATE_REPORT_LITERALS_DECLARATION);
+    let omitted_literal = &literals[8];
+    assert_eq!(
+        omitted_literal, "draftDEK",
+        "the omitted literal must stay the one this phase argues about"
+    );
+    let root = stage_two_fixture("missing-literal");
+    write_stage_two_report(&root, ReportDefect::MissingLiteral(8));
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains(omitted_literal.as_str()),
+        "stage-gate 2 must name the missing literal {omitted_literal}; stderr: {stderr}"
+    );
+
+    // Phase 3: die Reichweitenklausel fehlt. Ein gruener Stufe-2-Gate ohne sie
+    // liest sich als Plattformnachweis, den die Stufe nicht erbringt.
+    let root = stage_two_fixture("no-scope-clause");
+    write_stage_two_report(&root, ReportDefect::NoScopeClause);
+    let output = run_stage_gate(&root, "2");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("scope clause"),
+        "stage-gate 2 must report the missing scope clause; stderr: {stderr}"
+    );
+    for target in STAGE_TWO_HOST_TARGETS {
+        assert!(
+            !stderr.contains(target),
+            "the missing-clause message must not quote the clause, or it would \
+             become indistinguishable from an unnamed host target; stderr: {stderr}"
+        );
+    }
 }
 
 #[test]
