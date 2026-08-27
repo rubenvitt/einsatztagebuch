@@ -77,6 +77,18 @@ const INSTANCE_SECRET: [u8; 32] = [
     0x2f, 0x8d, 0x11, 0x4c, 0x63, 0xa0, 0xde, 0x57, 0x94, 0x21, 0xbb, 0x0e, 0x77, 0xf3, 0x48, 0x9c,
     0x15, 0x6a, 0xd2, 0x30, 0xcb, 0x84, 0x39, 0x62, 0xe1, 0x0d, 0x5f, 0xa7, 0x48, 0x76, 0x91, 0x23,
 ];
+/// Der Signaturschluessel des Writer-Zertifikats der ZWEITEN Linie.
+///
+/// Er existiert ALLEIN, damit eine zweite Bedienerbindung mit einem anderen
+/// Objekthash entsteht (siehe
+/// [`WriterHarness::proof_of_another_operator_binding`]). Ein anderer
+/// Signaturschluessel ist die kleinste Abweichung, die den Zertifikatshash und
+/// damit den Bindungshash verschiebt, ohne irgendeine markerabgeleitete
+/// Groesse anzuruehren.
+const OTHER_WRITER_SECRET: [u8; 32] = [
+    0x51, 0xac, 0x0d, 0x74, 0x2e, 0xb8, 0x96, 0x1f, 0x43, 0xd5, 0x60, 0x8a, 0x27, 0xce, 0x19, 0xb3,
+    0x7d, 0x04, 0xe2, 0x5b, 0x98, 0x36, 0xaf, 0x11, 0x6c, 0xd9, 0x40, 0x83, 0x2a, 0xf7, 0x65, 0x1e,
+];
 const BINDING_MARKER: u8 = 0x22;
 const WRITER_MARKER: u8 = 0x61;
 const RECOVERY_MARKER: u8 = 0x62;
@@ -172,6 +184,17 @@ fn expected_profile_commitment(organization: OrganizationId) -> Hash32 {
     ea_crypto::operator_profile_digest(&bytes)
 }
 
+/// Eine Profilzusage, die zu KEINER Profilzeile dieser Fixture passt.
+///
+/// KEIN Nullhash: `Hash32::ZERO` waere auch der Wert eines vergessenen Feldes,
+/// und ein Waechter, der gegen ihn anspricht, spraeche vielleicht gegen eine
+/// Auslassung an und nicht gegen eine Abweichung.
+fn foreign_profile_commitment() -> Hash32 {
+    let mut bytes = [0x5a_u8; 32];
+    bytes[0] = 0xa5;
+    Hash32::try_from(bytes.as_slice()).expect("32 Byte sind 32 Byte")
+}
+
 fn head_options(effective_from: u64, valid_through: u64) -> HeadOptions {
     HeadOptions {
         effective_from: Some(effective_from),
@@ -222,6 +245,15 @@ pub struct LineVariantV1 {
     /// Lebensdauer des Head (`notAfter = issuedAt + 86_399_000`), und `Fresh`
     /// verlangt eine Zeit vor `notAfter`.
     pub short_reader_trust_refresh: bool,
+    /// Die Bedienerbindung traegt eine ANDERE Profilzusage als die, die sich
+    /// aus der Profilzeile dieser Fixture nachrechnen laesst.
+    ///
+    /// Der einzige Weg zu `EA-OPERATOR-PROFILE-COMMITMENT`: die Zusage steht in
+    /// der SIGNIERTEN Bindung, und der Writer rechnet sie in Schritt 4 aus der
+    /// lokalen Profilzeile nach. Stimmen beide ueberein — und in der glatten
+    /// Fixture tun sie das per Konstruktion —, ist der Waechter eine Zeile, die
+    /// kein Test je ausfuehrt.
+    pub foreign_operator_profile_commitment: bool,
     /// KEIN Recovery-Empfaenger ist aktiv.
     ///
     /// Das NULL-Bein der dritten Produktinvariante. Die beiden anderen Beine
@@ -335,9 +367,13 @@ fn build_line(
                 )
                 .expect("ein Thumbprint ist 32 Byte lang"),
             )),
-            binding_operator_profile_commitment_override: Some(expected_profile_commitment(
-                trust_support::organization(),
-            )),
+            binding_operator_profile_commitment_override: Some(
+                if variant.foreign_operator_profile_commitment {
+                    foreign_profile_commitment()
+                } else {
+                    expected_profile_commitment(trust_support::organization())
+                },
+            ),
             ..head_options(0, 100)
         },
     );
@@ -739,6 +775,32 @@ impl WriterHarness {
         )
     }
 
+    /// Derselbe Dienst mit erreichbaren SERVER-CHECKPOINTAUSSAGEN.
+    ///
+    /// Der glatte Pfad gibt `&[]` weiter. Ohne eine Aussage ueber DIESE Kette
+    /// ist Schritt 2 `NotAssessable` (`ea_chain::assess_rollback`), und der
+    /// Rollbackwaechter kann gar nicht ansprechen — er waere eine Zeile, die
+    /// kein Test je ausfuehrt. Erst eine Aussage macht ihn messbar, und erst
+    /// eine STIMMIGE Aussage daneben macht die Messung falsifizierbar.
+    #[must_use]
+    pub fn service_with_checkpoints<'a>(
+        &'a self,
+        source: &'a dyn ea_archive::ArchiveSource,
+        checkpoint_claims: &'a [ea_chain::CheckpointClaim],
+    ) -> WriterService<'a> {
+        WriterService::new(
+            Arc::clone(&self.store().repository),
+            Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
+            &self.backend,
+            source,
+            &self.head,
+            checkpoint_claims,
+            IncidentNumberRegister::new(Arc::clone(&self.store().database)),
+            OperatorProfileRepository::new(Arc::clone(&self.store().database)),
+            self.binding,
+        )
+    }
+
     /// Ein VOLLER Abschluss gegen einen Schluesselspeicher, dessen `delete`
     /// sein `Ok` meldet und NICHTS tut.
     ///
@@ -823,19 +885,61 @@ impl WriterHarness {
     /// Ein ECHTER Praesenznachweis fuer `purpose`, gegen den gewaehlten Head.
     #[must_use]
     pub fn proof_for(&self, purpose: ReauthPurpose) -> OperatorSessionProof {
-        let bound = BoundOperator::resolve(&self.head, self.binding.binding_object_hash)
-            .expect("die Bindung der Fixture ist an der gewaehlten Sequenz aktiv");
-        let authenticator = FakeAuthenticator {
-            bound,
-            signing_key: signing_key(INSTANCE_SECRET),
-            challenges: RefCell::new(Vec::new()),
-        };
-        let account: Box<dyn OsAccountProvider> = Box::new(FakeAccount {
-            binding_hash: trust_support::hash32(BINDING_MARKER.wrapping_add(2)),
-        });
-        authenticator
-            .reauthenticate(account, purpose)
-            .expect("die Fixture meldet den gebundenen Bediener wieder an")
+        issue_proof(&self.head, self.binding.binding_object_hash, purpose)
+    }
+
+    /// Ein ECHTER, aber ABGELAUFENER Nachweis fuer `Finalize`.
+    ///
+    /// Er ist gegen DIESELBE Linie und DIESELBE Bindung ausgestellt — nur
+    /// gegen einen FRUEHER gewaehlten Head. Sein Fuenfminutenfenster beginnt
+    /// bei [`FIXTURE_ISSUED_AT_MS`] und endet lange vor der `effectiveNow` des
+    /// gebundenen Head (eine Stunde spaeter). Die Bindung stimmt also, der
+    /// Zweck stimmt, und ALLEIN die Zeit entscheidet — dieselbe Bauart wie
+    /// `DraftHarness::expired_proof` auf der Verwerfensseite.
+    #[must_use]
+    pub fn expired_proof(&self) -> OperatorSessionProof {
+        let earlier_head = select_head(&self.line, FIXTURE_ISSUED_AT_MS);
+        issue_proof(
+            &earlier_head,
+            self.binding.binding_object_hash,
+            ReauthPurpose::Finalize,
+        )
+    }
+
+    /// Ein ECHTER, TAUFRISCHER Nachweis fuer `purpose` — aber fuer eine
+    /// ANDERE Bedienerbindung.
+    ///
+    /// # Warum eine zweite Linie und nicht ein erfundener Hash
+    ///
+    /// `OperatorSessionProof` entsteht ausschliesslich ueber
+    /// `OperatorAuthenticator::reauthenticate` aus einem `BoundOperator`, und
+    /// der wiederum nur ueber `BoundOperator::resolve` aus einem Head, in dem
+    /// die Bindung AKTIV ist. Ein Nachweis mit erfundenem Bindungshash ist
+    /// nicht konstruierbar — und ein Dienst, der auf einen erfundenen Hash
+    /// gebunden waere, faellt schon an `active_operator_binding_fields` und
+    /// bezeugte damit einen ANDEREN Waechter unter demselben Code.
+    ///
+    /// Diese zweite Linie weicht in GENAU EINEM Punkt ab: ihr
+    /// Writer-Zertifikat traegt einen anderen Signaturschluessel. Damit weicht
+    /// der Zertifikatshash ab, damit die `certificateHash` der Bindung, damit
+    /// ihr Objekthash. Alles Markerabgeleitete — `osAccountBindingHash`, die
+    /// Instanzschluesselzusage, die Profilzusage — bleibt gleich, also meldet
+    /// sich derselbe Bediener wirklich an, und der Nachweis ist echt.
+    #[must_use]
+    pub fn proof_of_another_operator_binding(
+        &self,
+        purpose: ReauthPurpose,
+    ) -> OperatorSessionProof {
+        let profile_hash = local_profile()
+            .profile_hash()
+            .expect("das Profil der Fixture ist kodierbar");
+        let other = build_line(
+            &public_key(OTHER_WRITER_SECRET),
+            vec![profile_hash],
+            LineVariantV1::default(),
+        );
+        let other_head = select_head(&other.line, FIXTURE_NOW_MS);
+        issue_proof(&other_head, other.binding_object_hash, purpose)
     }
 
     /// Wie viele Grants der Plan tragen MUSS: ein Recovery plus jeder aktive
@@ -869,6 +973,21 @@ impl WriterHarness {
                 number,
             )
             .expect("das Register muss lesbar sein")
+    }
+
+    /// Nimmt die Profilzeile aus der verschluesselten Ablage.
+    ///
+    /// Der einzige Weg zu `EA-OPERATOR-PROFILE-MISSING`: die Fixture SETZT die
+    /// Zeile beim Oeffnen (`seed_operator_profile`), weil ohne sie kein
+    /// einziger glatter Pfad liefe. Ein Bestand ohne Zeile ist die Lage nach
+    /// einer zurueckgespielten Sicherung, die aelter ist als die Bedieneranlage
+    /// — und Schritt 4 MUSS dort abbrechen statt eine Momentaufnahme aus
+    /// Vorgabewerten zu bauen.
+    pub fn remove_operator_profile(&self) {
+        self.store()
+            .database
+            .execute("DELETE FROM operator_profile", &[])
+            .expect("die Profilzeile muss sich entfernen lassen");
     }
 
     /// Beansprucht die Nummer der Fixture VORAB im Register.
@@ -1134,6 +1253,34 @@ impl WriterHarness {
     pub const fn line(&self) -> &RegistryLineBuilder {
         &self.line
     }
+}
+
+/// Stellt einen ECHTEN Praesenznachweis fuer `binding_object_hash` gegen `head`
+/// aus.
+///
+/// EINE Stelle fuer alle drei Nachweise der Fixture — der frische, der
+/// abgelaufene und der einer fremden Bindung. Waeren es drei Kopien, koennte
+/// eine von ihnen leise etwas anderes tun als „derselbe Bediener meldet sich
+/// wieder an", und genau das ist der Unterschied, den die drei Zusicherungen
+/// messen.
+fn issue_proof(
+    head: &SelectedRegistryHead,
+    binding_object_hash: ObjectHash,
+    purpose: ReauthPurpose,
+) -> OperatorSessionProof {
+    let bound = BoundOperator::resolve(head, binding_object_hash)
+        .expect("die Bindung ist an der gewaehlten Sequenz aktiv");
+    let authenticator = FakeAuthenticator {
+        bound,
+        signing_key: signing_key(INSTANCE_SECRET),
+        challenges: RefCell::new(Vec::new()),
+    };
+    let account: Box<dyn OsAccountProvider> = Box::new(FakeAccount {
+        binding_hash: trust_support::hash32(BINDING_MARKER.wrapping_add(2)),
+    });
+    authenticator
+        .reauthenticate(account, purpose)
+        .expect("der gebundene Bediener meldet sich wieder an")
 }
 
 /// Ein Schluesselspeicher, der sein `delete` VERSCHLUCKT und `Ok` meldet.
