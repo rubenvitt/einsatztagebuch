@@ -144,14 +144,29 @@ impl SelectedRegistryHead {
     /// Every certificate active at the proposed sequence, ascending by
     /// `CertificateHash`.
     ///
-    /// Gate `grant-plan` (design.md §14.1 step 6) has to reconstruct the initial
-    /// grant plan, which needs the *set* of active recipients — the point
-    /// lookups above cannot answer that. The order is deterministic so a
-    /// reconstructed plan is byte-stable.
+    /// The point lookups above answer "is *this* hash active"; this answers
+    /// "which are". `ea-verify` needs the set to resolve a manifest's writer
+    /// against a *kind* rather than a hash it was handed
+    /// (`crates/ea-verify/src/archive.rs:1046-1047`), and the ascending order
+    /// keeps any set-derived value byte-stable.
     ///
-    /// Callers decide which of these certificates are grant recipients: a
-    /// certificate whose `kem_key_thumbprint` is `None` cannot receive a key
-    /// envelope and is not part of a grant plan.
+    /// # What this is NOT
+    ///
+    /// It is not how Gate `grant-plan` (design.md §14.1 step 6) works. That
+    /// gate reconstructs the plan from the `.eag` objects that are actually in
+    /// the archive and compares it against the signed
+    /// `initialGrantPlanHash` (`crates/ea-verify/src/entry.rs:118`) — the
+    /// registry's active set would answer a different question, namely who
+    /// *could* have been a recipient rather than who was named.
+    ///
+    /// A caller that does build a grant plan from this set has to make the
+    /// recipient decision itself: a certificate whose `kem_key_thumbprint` is
+    /// `None` cannot receive a key envelope. Nothing here enforces that. The
+    /// caller that makes the decision is the writer —
+    /// `crates/ea-writer/src/grant_plan.rs:36-46` builds the initial plan from
+    /// exactly this set and answers a missing `kem_key_thumbprint` with
+    /// `WriterError::ReaderWithoutKemKey` rather than by silently skipping the
+    /// certificate.
     pub fn active_certificates(
         &self,
     ) -> impl Iterator<Item = (CertificateHash, &DeviceCertificateFieldsV1)> {

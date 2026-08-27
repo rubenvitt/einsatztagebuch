@@ -4,7 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ea_archive::{ArchiveBlob, ArchiveError, ArchiveSource, MAX_TOTAL_ARCHIVE_BYTES_V1};
+use ea_archive::{
+    ArchiveBlob, ArchiveError, ArchiveSource, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
+};
 
 use crate::RecoveryError;
 
@@ -28,8 +30,14 @@ use crate::RecoveryError;
 /// begrenzt derselbe Wert lediglich den Puffer, BEVOR er entsteht, und meldet
 /// [`RecoveryError::ArchiveTooLarge`].
 ///
-/// [`ArchiveError::BlobLimit`] hat hier bewusst KEINE Entsprechung: eine Zahl
-/// von Blobs kostet nichts, was vor dem Inventar begrenzt werden muesste.
+/// Genauso gedeckelt wird die ZAHL der Bytesequenzen, und zwar aus demselben
+/// Grund. Der Bytedeckel allein traegt sie nicht: eine leere Datei zaehlt null
+/// Bytes und kostet im Puffer trotzdem einen `String` und einen `Vec` — ein
+/// Verzeichnisbaum aus leeren Dateien passiert [`MAX_TOTAL_ARCHIVE_BYTES_V1`]
+/// vollstaendig und legte vor dem Inventar beliebig viel Speicher an. Gedeckelt
+/// wird deshalb auf [`MAX_ARCHIVE_BLOBS_V1`] — auf denselben Wert, den das
+/// Inventar anschliessend als [`ArchiveError::BlobLimit`] durchsetzt, und mit
+/// derselben inklusiven Grenze: genau so viele Blobs bleiben zulaessig.
 ///
 /// # Kein `Debug`
 ///
@@ -70,7 +78,8 @@ impl FsArchiveSource {
     /// gelesen werden kann oder ein Dateiname kein gueltiges UTF-8 ist — ein
     /// unbenennbares Element stillschweigend zu ueberspringen hiesse, Bytes des
     /// Bestands zu verlieren, ohne es zu sagen. [`RecoveryError::ArchiveTooLarge`],
-    /// wenn die Gesamtzahl der Bytes [`MAX_TOTAL_ARCHIVE_BYTES_V1`] uebersteigt.
+    /// wenn die Gesamtzahl der Bytes [`MAX_TOTAL_ARCHIVE_BYTES_V1`] oder die Zahl
+    /// der Bytesequenzen [`MAX_ARCHIVE_BLOBS_V1`] uebersteigt.
     pub fn open(root: &Path) -> Result<Self, RecoveryError> {
         let mut blobs = Vec::new();
         let mut total_bytes = 0usize;
@@ -128,6 +137,15 @@ fn read_directory(
             .ok_or(RecoveryError::Io(ErrorKind::InvalidData))?
             .to_owned();
         entries.push((name, entry.path()));
+        // AUCH DIESE EBENE IST EIN PUFFER. Ihre Namen liegen vollstaendig im
+        // Speicher, bevor der erste Blob entsteht; der Deckel am Push allein
+        // greift fuer sie deshalb zu spaet. Mehr Eintraege als
+        // `MAX_ARCHIVE_BLOBS_V1` kann keine Ebene eines zulaessigen Bestands
+        // tragen — waeren es Dateien, ueberschritten sie die Schranke bereits
+        // fuer sich allein.
+        if entries.len() > MAX_ARCHIVE_BLOBS_V1 {
+            return Err(RecoveryError::ArchiveTooLarge);
+        }
     }
     // Der Pfadhinweis wird aus den Namen zusammengesetzt und nie aus einer
     // Plattformdarstellung des ganzen Pfades: ein Namensbestandteil enthaelt
@@ -167,6 +185,12 @@ fn read_directory(
                 return Err(RecoveryError::ArchiveTooLarge);
             }
             blobs.push((relative, bytes));
+            // Nach dem Push und mit `>`: genau `MAX_ARCHIVE_BLOBS_V1` Blobs
+            // bleiben zulaessig, dieselbe inklusive Grenze wie in
+            // `crates/ea-archive/src/inventory.rs:447`.
+            if blobs.len() > MAX_ARCHIVE_BLOBS_V1 {
+                return Err(RecoveryError::ArchiveTooLarge);
+            }
         }
     }
     Ok(())

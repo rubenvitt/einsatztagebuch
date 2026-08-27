@@ -141,12 +141,57 @@ impl fmt::Display for DecryptionErrorV1 {
     }
 }
 
-/// Der eigene Grant auf `entry`, sofern der Bestand einen enthaelt.
+/// Der eigene INITIALE Grant auf `entry`, sofern der Bestand einen enthaelt.
 ///
-/// ZWEI BINDUNGEN, beide aus `design.md` §14.1 Schritt 9: der `entryHash` —
-/// nicht der Objekthash, denn der Grant bezieht sich auf den EINTRAG — und der
-/// eigene Schluesselabdruck. Ein Grant auf einen anderen Empfaenger ist nicht
-/// der eigene, und sein Fehlen ist der Zustand FEHLENDER GRANT.
+/// DREI BINDUNGEN, UND SIE SIND ABGELEITET, NICHT ZITIERT. `design.md` §14.1
+/// Schritt 9 (`:1595`) nennt vier Verpflichtungen ausdruecklich — die
+/// Aussteller-Capability, die Authorization, die Nutzungsfrist gegen
+/// `effectiveNow` und den `entryHash` — und eine fuenfte steckt im Wort
+/// „eigenen": den eigenen Schluesselabdruck. DIESE Stelle traegt davon die
+/// AUSWAHL, und das sind zwei: der `entryHash` — nicht der Objekthash, denn
+/// der Grant bezieht sich auf den EINTRAG — und der eigene
+/// Schluesselabdruck. Ein Grant auf einen anderen Empfaenger ist nicht der
+/// eigene, und sein Fehlen ist der Zustand FEHLENDER GRANT. Ueber die
+/// Aussteller-Capability entscheidet [`verify_own_grant`] durch den Kontext,
+/// den es waehlt; Authorization und Nutzungsfrist gehoeren zu den historischen
+/// Grants und bleiben mit ihnen Stufe 5 (FR-145).
+///
+/// # Die dritte Bindung ist die Art, und ohne sie waere dieser Lauf angreifbar
+///
+/// [`GrantKindV1::Initial`], nach genau demselben Praedikat, mit dem
+/// `crates/ea-verify/src/entry.rs:118` den initialen Plan bildet und
+/// `crates/ea-recovery/src/decrypt.rs:321` den Entschluesselungsplan. Auch sie
+/// ist keine Ergaenzung zur Norm, sondern deren Voraussetzung: die Capability
+/// aus Schritt 9 ist nach `design.md`:782 eine Funktion der ART, und wer die
+/// Art nicht kennt, kann Schritt 9 nicht ausfuehren. Vorher
+/// filterte diese Stelle allein nicht — und `grants()` entsteht aus einer
+/// `BTreeMap` ueber dem OBJEKTHASH
+/// (`crates/ea-archive/src/inventory.rs:600`), `find` liefert also den
+/// KLEINSTEN passenden Hash.
+///
+/// Ein untergeschobener historischer Grant mit kleinerem Objekthash verdraengte
+/// damit den echten initialen: [`verify_own_grant`] kehrte fuer ihn mit
+/// [`RecipientGrantErrorV1::AuthorizationUnverifiable`] um, und weil das VOR
+/// [`verify_cose_sign1`] geschieht, wurde seine Ausstellersignatur dabei nie
+/// geprueft — der Rumpf ist ohne jedes Schluesselmaterial herstellbar
+/// (`crates/ea-format/src/eag.rs:324-337` bindet nur Digest und Abdruecke an
+/// sich selbst, und der Signaturbeweis aus
+/// `crates/ea-crypto/src/cose.rs:653-669` laeuft auf diesem Pfad nie). Ein
+/// einziges gefaelschtes `.eag` machte so jeden Eintrag fuer den benannten
+/// Empfaenger unentschluesselbar, waehrend `verify` ohne Schluessel weiter
+/// stumm blieb und Gate `grant-plan` es nie zu sehen bekam.
+///
+/// EIN OBJEKT, DESSEN SIGNATUR NIE GEPRUEFT WURDE, TRAEGT KEINEN BEFUND —
+/// dieselbe Regel, nach der `crates/ea-verify/src/archive.rs:570` ein
+/// isoliertes Grant uebergeht. Ein historischer Grant ist fuer diesen Lauf
+/// deshalb so gut wie keiner: der Eintrag bleibt gueltig und sichtbar, er wird
+/// nur nicht geoeffnet.
+///
+/// GEMESSEN, und nicht bloss behauptet, in
+/// `crates/ea-verify/tests/evidence_recipient_grant.rs`,
+/// `a_forged_historical_grant_with_a_smaller_object_hash_does_not_displace_the_own_grant`:
+/// ohne dieses Praedikat traegt der Bericht dort einen
+/// `signatureErrors`-Eintrag ueber die Faelschung.
 pub(crate) fn own_grant<'a>(
     inventory: &'a ArchiveInventory,
     entry: &Parsed<EntryPackageV1>,
@@ -155,7 +200,9 @@ pub(crate) fn own_grant<'a>(
     let entry_hash = entry.value().entry_hash();
     inventory.grants().iter().find(|grant| {
         let fields = grant.value().grant_body().fields();
-        fields.entry_hash == entry_hash && fields.recipient_key_thumbprint == key_thumbprint
+        fields.kind == GrantKindV1::Initial
+            && fields.entry_hash == entry_hash
+            && fields.recipient_key_thumbprint == key_thumbprint
     })
 }
 
@@ -173,8 +220,14 @@ pub(crate) fn verify_own_grant(
     let body = grant.value().grant_body();
     let context = match grant.value().kind() {
         GrantKindV1::Initial => VerificationContext::initial_grant(body.exact_bytes(), sequence),
-        // Ein historischer Grant traegt eine Authorization, die dieser Lauf
-        // nicht aufloesen kann. Er wird deshalb gar nicht erst geprueft.
+        // UNERREICHBAR DURCH KONSTRUKTION: [`own_grant`] gibt nur initiale
+        // Grants heraus, und das ist der einzige Weg hierher
+        // (`crates/ea-verify/src/archive.rs:561`). Der Zweig bleibt als
+        // Absicherung stehen — `VerificationContext::initial_grant` gilt
+        // ausschliesslich fuer die initiale Art, und ein historischer Grant
+        // traegt eine Authorization, die Suite v1 nicht aufloest. Er darf
+        // deshalb nie in diesen Kontext geraten, auch nicht, wenn ein
+        // spaeterer Aufrufer die Auswahl umgeht.
         GrantKindV1::Historical => {
             return Err(RecipientGrantErrorV1::AuthorizationUnverifiable);
         }

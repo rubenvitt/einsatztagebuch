@@ -2186,6 +2186,138 @@ pub fn archive_without_the_own_grant() -> CompleteArchive {
     )
 }
 
+/// Derselbe Bestand, dem ein GEFAELSCHTER historischer Grant untergeschoben
+/// wurde — auf denselben `entryHash`, an denselben Empfaenger, mit KLEINEREM
+/// Objekthash.
+///
+/// # Warum das ohne jedes Schluesselmaterial geht
+///
+/// Der Einlesepfad einer `.eag` prueft die Ausstellersignatur nur auf FORM:
+/// `validate_issuer_signature` (`crates/ea-format/src/eag.rs:324-337`) haelt
+/// Inhaltstyp, Abdruck, Zertifikatshash und Digest gegen die Felder DESSELBEN
+/// Rumpfes; der kryptografische Beweis sitzt in
+/// `CoseSign1::verify_with_key` (`crates/ea-crypto/src/cose.rs:653-669`) und
+/// laeuft hier nie. Diese Fixture benutzt trotzdem den echten Fixture-Signierer
+/// — nicht, weil sie muesste, sondern weil ein Angreifer ohne Schluessel exakt
+/// dasselbe Objekt bauen kann und der Unterschied fuer die AUSWAHL keiner ist.
+///
+/// # Warum der Objekthash kleiner sein MUSS
+///
+/// `inventory.grants()` entsteht aus einer `BTreeMap` ueber dem Objekthash
+/// (`crates/ea-archive/src/inventory.rs:600`) und ist damit aufsteigend
+/// geordnet; `own_grant` nimmt mit `find` den ERSTEN Treffer. Nur ein
+/// kleinerer Hash verdraengt den echten Grant. Gemahlen wird ueber
+/// `created_at_device` — ein Feld, das der Faelscher frei waehlt.
+#[must_use]
+pub fn complete_archive_with_a_forged_historical_grant() -> ForgedHistoricalGrantArchive {
+    let mut archive = complete_valid_archive();
+    let line = complete_line();
+    let anchor = line.anchor();
+    let entry = build_complete_entry(
+        line.head_ref(),
+        line.writer_certificate_hash,
+        anchor.chain_id(),
+        complete_grant_plan_hash(
+            complete_recipient_key_thumbprint(),
+            complete_recipient_certificate_hash(),
+        ),
+        COMPLETE_GENESIS_SEQUENCE_V1,
+        None,
+    );
+    assert!(
+        object_hash(
+            &encode_entry_package(&entry)
+                .expect("das Fixture-Eintragspaket muss kodieren")
+                .into_vec()
+        ) == archive.entry_object_hash(),
+        "die Fixture-Kette ist nicht mehr deterministisch"
+    );
+
+    let genuine = archive.grant_object_hash();
+    let forged = forged_historical_grant_bytes(
+        line.head_ref(),
+        line.writer_certificate_hash,
+        anchor.chain_id(),
+        entry.entry_hash(),
+        genuine,
+    );
+    let forged_grant_object_hash = object_hash(&forged);
+    assert!(
+        forged_grant_object_hash < genuine,
+        "der untergeschobene Grant muss den echten verdraengen koennen"
+    );
+    push_grant(
+        &mut archive.fixture,
+        COMPLETE_FORGED_GRANT_SEQUENCE_V1,
+        forged,
+    );
+    ForgedHistoricalGrantArchive {
+        archive,
+        forged_grant_object_hash,
+    }
+}
+
+/// Das Sequenzfach im PFADHINWEIS der gefaelschten `.eag`.
+///
+/// Frei waehlbar und ausdruecklich ohne Aussage: Pfade klassifizieren im
+/// Bestand nichts. Es ist nur ein anderer Hinweis als der des echten Grants,
+/// damit beide Objekte nebeneinander liegen.
+const COMPLETE_FORGED_GRANT_SEQUENCE_V1: u64 = 900;
+
+/// Ein Bestand samt dem Objekthash der Faelschung, die in ihm liegt.
+pub struct ForgedHistoricalGrantArchive {
+    pub archive: CompleteArchive,
+    pub forged_grant_object_hash: ObjectHash,
+}
+
+/// Mahlt einen historischen Grant, dessen Objekthash unter `below` liegt.
+///
+/// `GrantKindV1::Historical` verlangt nach
+/// `validate_grant_field_correlations` (`crates/ea-format/src/eag.rs:418-434`)
+/// genau dreierlei: `GrantPurposeV1::Reader` und zwei gesetzte Objekthashes.
+/// Alle drei sind frei waehlbar, und keiner davon wird in diesem Lauf gegen
+/// irgendetwas gehalten.
+fn forged_historical_grant_bytes(
+    head: HeadRefV1,
+    writer_certificate_hash: CertificateHash,
+    chain_id: ChainId,
+    entry_hash: EntryHash,
+    below: ObjectHash,
+) -> Vec<u8> {
+    for attempt in 0..4096_i64 {
+        let body = GrantBodyV1::new(GrantBodyFieldsV1 {
+            organization_id: trust_support::organization(),
+            chain_id,
+            entry_hash,
+            kind: GrantKindV1::Historical,
+            purpose: GrantPurposeV1::Reader,
+            recipient_key_thumbprint: complete_recipient_key_thumbprint(),
+            recipient_certificate_hash: complete_recipient_certificate_hash(),
+            issuer_key_thumbprint: writer_device_key_thumbprint(),
+            issuer_certificate_hash: writer_certificate_hash,
+            registry_version: head.version,
+            registry_head_hash: head.hash,
+            created_at_device: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1 + attempt),
+            original_recovery_grant_object_hash: Some(below),
+            grant_authorization_object_hash: Some(below),
+            encapsulated_key: [0x5a; HPKE_ENCAPSULATED_KEY_SIZE],
+            wrapped_cek: [0x5a; HPKE_WRAPPED_CEK_SIZE],
+        })
+        .expect("der gefaelschte Grantrumpf muss kodieren");
+        let signature = writer_device_signer()
+            .sign_historical_grant(body.exact_bytes())
+            .expect("der Fixture-Aussteller muss signieren");
+        let grant = GrantV1::new(body, signature).expect("der gefaelschte Grant muss binden");
+        let bytes = encode_grant(&grant)
+            .expect("der gefaelschte Grant muss kodieren")
+            .into_vec();
+        if object_hash(&bytes) < below {
+            return bytes;
+        }
+    }
+    panic!("kein Objekthash unter dem echten Grant gefunden");
+}
+
 fn complete_archive_for(
     recipient_key_thumbprint: KeyThumbprint,
     recipient_certificate_hash: CertificateHash,

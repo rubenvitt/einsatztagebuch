@@ -678,7 +678,16 @@ fn canonical_value(
             .as_u64()
             .ok_or_else(|| format!("{name} key {} must be an unsigned integer", part.path))
             .map(CanonicalValue::Uint),
-        _ => unreachable!(),
+        // Unerreichbar, und trotzdem kein Panic: `canonical_key_parts` laesst
+        // nur die drei Kodierungen dieses `match` durch (`:491`), und ein
+        // `CanonicalKeyPart` entsteht nirgends sonst. Sollte je ein zweiter
+        // Konstruktor dazukommen, bricht dieses Gate mit seiner eigenen
+        // Fehlerzeile ab statt mit Exitcode 101 — dieselbe Entscheidung wie in
+        // `crates/ea-recovery/src/decrypt.rs:306-310`.
+        encoding => Err(format!(
+            "{name} key {} declares the unknown encoding {encoding}",
+            part.path
+        )),
     }
 }
 

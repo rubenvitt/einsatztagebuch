@@ -224,6 +224,14 @@ fn receipts_confirm_checkpoints_bound_rollback_and_a_stub_stays_a_gap() {
         0,
         "eine bewiesene Luecke isoliert kein Objekt — es fehlt ja gerade"
     );
+    // GEGENFALL ZU ABSCHNITT 5: Der Rueckbaubefund allein nimmt dem Bericht
+    // seinen Kopf NICHT. Hier ist nichts isoliert, der Kopfknoten traegt seine
+    // Pruefung weiter, und `chainHead` weist ihn deshalb weiter aus.
+    assert_eq!(
+        truncated.chain_head().sequence().get(),
+        RECEIPT_HEAD_SEQUENCE_V1,
+        "ein unberuehrter Kopf bleibt der Kopf des Berichts"
+    );
 
     // ---------------------------------------------------------------- 5 ----
     // CHECKPOINT MIT ANDEREM KOPFHASH: GENAU EIN Widerspruch, keine Luecke.
@@ -271,6 +279,26 @@ fn receipts_confirm_checkpoints_bound_rollback_and_a_stub_stays_a_gap() {
             .object_results()
             .all(|result| result.object_hash() != built.entry_object_hashes[1]),
         "ein isoliertes Objekt bekommt kein Objektergebnis"
+    );
+    // DER BERICHT DARF SEINEN EIGENEN WIDERSPRUCH NICHT AUSWEISEN. Isoliert
+    // wurde der KOPFKNOTEN — genau die Sequenz, die der Checkpoint bezeugt.
+    // `chainHead` stammt aus Gate `chain-position`, das VOR dieser Isolation
+    // laeuft; ohne Widerruf benannte das Feld ein Objekt, das derselbe Bericht
+    // unter `quarantinedObjects` als widerspruechlich fuehrt. Das Sentinel ist
+    // der vertragsgemaesse Zustand: kein verifizierter Kopf.
+    let head = conflicting.chain_head();
+    assert!(
+        head.chain_id() == anchor.chain_id(),
+        "die Kettenkennung stammt IMMER aus dem Anker, auch im Sentinel"
+    );
+    assert_eq!(
+        head.sequence().get(),
+        0,
+        "ein isolierter Kopf ist kein verifizierter Kopf"
+    );
+    assert!(
+        head.entry_hash().as_bytes() == &[0_u8; 32],
+        "das Sentinel traegt 32 Nullbytes und ausdruecklich nicht den Genesishash"
     );
 
     // ---------------------------------------------------------------- 6 ----

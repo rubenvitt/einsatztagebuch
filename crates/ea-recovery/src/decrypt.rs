@@ -111,6 +111,23 @@ pub struct DecryptionV1 {
 /// Ein BEFUND ist kein Fehler: er kommt als `Ok` mit einem Bericht zurueck,
 /// dessen [`exit_code_for`] ihn benennt, und mit
 /// [`DecryptionV1::written_entries`] gleich null.
+///
+/// # EIN FEHLER AB SCHRITT 6 LAESST GESCHRIEBENEN KLARTEXT LIEGEN
+///
+/// Bis Schritt 5 gilt „kein Ziel, solange nicht geschrieben wird" — jeder
+/// Ausgang davor hinterlaesst nichts. AB Schritt 6 gilt das nicht mehr, und
+/// zwar unvermeidlich: `write_plaintext` laeuft je Planeintrag, und der erste
+/// Fehler — `ENOSPC` und `EIO` sind die realistischen — bricht die Schleife ab.
+/// Die bereits geschriebenen Dateien bleiben dann im Ziel stehen. Sie tragen
+/// 0600 und liegen in einem Verzeichnis mit 0700; sie sind also nicht
+/// preisgegeben, aber sie sind DA.
+///
+/// AUFGERAEUMT WIRD ABSICHTLICH NICHT. Ein Loeschpfad im Fehlerfall braucht
+/// selbst eine Antwort auf sein eigenes Scheitern, und die zweite Antwort waere
+/// dieselbe wie die erste: der Klartext liegt noch da. Statt eine Zusicherung zu
+/// behaupten, die nicht zu halten ist, steht sie hier ausdruecklich nicht: wer
+/// diese Funktion aufruft und einen Fehler bekommt, MUSS das von ihm selbst
+/// benannte Ziel als moeglicherweise teilbefuellt behandeln.
 pub fn decrypt_directory(
     root: &Path,
     anchor: &TrustAnchorV1,
@@ -156,7 +173,8 @@ pub fn decrypt_directory(
         return Err(RecoveryError::NoOwnGrant);
     }
 
-    // 6 — erst jetzt.
+    // 6 — erst jetzt. AB HIER KANN EIN FEHLER KLARTEXT ZURUECKLASSEN; der
+    // `# Errors`-Abschnitt oben fuehrt aus, warum das so bleibt.
     prepare_output_directory(output)?;
     for (entry, grant) in &plan {
         write_plaintext(entry, grant, key, output)?;

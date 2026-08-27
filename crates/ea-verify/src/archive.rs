@@ -811,11 +811,35 @@ fn assess_checkpoints(
                     .insert((chain_id, from), ChainGapV1::new(chain_id, from, through));
             }
             if let RollbackFinding::HeadEntryHashMismatch {
+                sequence,
                 conflicting_object_hash,
                 ..
             } = finding
             {
                 quarantine_conflicting(report, *conflicting_object_hash);
+                // EIN QUARANTAENISIERTER KOPF IST KEIN VERIFIZIERTER KOPF.
+                //
+                // `place_in_chain` setzt `chain_head` an Gate `chain-position`
+                // aus `VerifiedChain::verified_head` und revidiert es nie. Faellt
+                // der Kopfknoten hier in die Quarantaene — und er faellt genau
+                // dann hinein, wenn der Checkpoint EBEN DIESE Sequenz bezeugt —,
+                // wiese der Bericht sonst in `chainHead` ein Objekt aus, das er
+                // selbst unter `quarantinedObjects` als widerspruechlich fuehrt.
+                //
+                // Das Sentinel ist dafuer die richtige Antwort und keine
+                // Notloesung: sein Vertrag lautet auf „kein verifizierter Kopf"
+                // (`crates/ea-verify/src/report.rs:167`), und ein Kopf, dem ein
+                // nachgewiesener Checkpoint widerspricht, ist keiner mehr. Der
+                // Ausstieg des Laufs aendert sich dadurch nicht — die nicht
+                // leere Quarantaene traegt ihn bereits nach Regel 1
+                // (`crates/ea-recovery/src/exit.rs:82`) —, wohl aber die
+                // Widerspruchsfreiheit des Berichts.
+                if chain
+                    .verified_head()
+                    .is_some_and(|head| head.chain_sequence() == *sequence)
+                {
+                    report.chain_head = ChainHeadV1::sentinel(chain_id);
+                }
             }
         }
     }

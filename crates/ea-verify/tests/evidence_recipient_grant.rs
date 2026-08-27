@@ -33,7 +33,8 @@ use ea_verify::{
 
 use support::{
     CheckpointSpec, CompleteArchive, FIXTURE_OS_WALL_CLOCK_V1, ReceiptArchiveSpec,
-    archive_without_the_own_grant, complete_recipient_private_key, complete_valid_archive,
+    archive_without_the_own_grant, complete_archive_with_a_forged_historical_grant,
+    complete_recipient_private_key, complete_valid_archive,
     complete_valid_archive_with_two_entries, other_recipient_private_key, receipt_archive,
 };
 
@@ -295,5 +296,73 @@ fn a_missing_own_grant_keeps_the_entry_valid_without_any_decryption_error() {
     assert!(
         report.is_fully_verified(),
         "der Zustand `fehlender Grant` senkt die Verifikation nicht"
+    );
+}
+
+/// EIN UNTERGESCHOBENER HISTORISCHER GRANT VERDRAENGT DEN EIGENEN NICHT.
+///
+/// Der Bestand traegt zwei `.eag` auf denselben `entryHash` und denselben
+/// Empfaengerabdruck: den echten initialen und einen gefaelschten historischen
+/// mit KLEINEREM Objekthash. `own_grant` nimmt mit `find` den ersten Treffer
+/// aus einer nach Objekthash aufsteigenden Liste — ohne die Bindung an
+/// [`ea_format::GrantKindV1::Initial`] waere das die Faelschung.
+///
+/// Gemessen wird beides, weil eines allein nichts belegt:
+///
+/// 1. `signatureErrors` bleibt LEER. Die Faelschung ist ohne jedes
+///    Schluesselmaterial herstellbar; kehrte `verify_own_grant` fuer sie mit
+///    `AuthorizationUnverifiable` um, traege ein Objekt einen Befund, dessen
+///    Signatur nie geprueft wurde.
+/// 2. Es wird TATSAECHLICH ENTKAPSELT. Ohne diese Haelfte waere der Test auch
+///    dann gruen, wenn gar kein Grant mehr gefunden wuerde — fehlender Grant
+///    ist ja ebenfalls befundfrei.
+///
+/// Der historische Grant bleibt dabei ein wohlgeformtes, unisoliertes Objekt
+/// des Bestands: er faellt in keine Quarantaene, ist nicht verwaist, und Gate
+/// `grant-plan` sieht ihn nicht, weil der rekonstruierte Plan nur initiale
+/// Grants kennt (`crates/ea-verify/src/entry.rs:118`).
+#[test]
+fn a_forged_historical_grant_with_a_smaller_object_hash_does_not_displace_the_own_grant() {
+    let forged = complete_archive_with_a_forged_historical_grant();
+    let archive = &forged.archive;
+    let recipient = complete_recipient_private_key();
+    let mut observer = RecordingObserver::new();
+
+    let report = verify_archive_observed(
+        &archive.fixture,
+        &archive.anchor(),
+        VerifyOptions::new(clock())
+            .with_recipient(support::complete_recipient_key_thumbprint(), &recipient),
+        &mut observer,
+    )
+    .expect("der Bestand traegt auch mit einem untergeschobenen Grant");
+
+    assert!(
+        forged.forged_grant_object_hash < archive.grant_object_hash(),
+        "die Faelschung stuende sonst hinter dem echten Grant und bewiese nichts"
+    );
+    assert_eq!(
+        report.quarantined_objects().len(),
+        0,
+        "die Faelschung ist wohlgeformt, einmalig und nennt einen Eintrag, den es gibt — sie faellt in keine Quarantaene und ist auch nicht verwaist"
+    );
+    assert_eq!(
+        report.signature_errors().len(),
+        0,
+        "ein Objekt, dessen Signatur nie geprueft wurde, traegt keinen Befund"
+    );
+    assert!(
+        observer.events().contains(&DECAPSULATION_EVENT_V1),
+        "der echte initiale Grant muss gefunden und benutzt werden"
+    );
+    assert_eq!(
+        report.decryption_errors().len(),
+        0,
+        "entkapselt wird mit dem echten Grant, und der traegt"
+    );
+    assert_eq!(report.object_results().len(), 1);
+    assert!(
+        report.is_fully_verified(),
+        "eine untergeschobene `.eag` darf den Bestand nicht entwerten"
     );
 }

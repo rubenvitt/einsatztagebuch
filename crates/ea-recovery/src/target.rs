@@ -73,8 +73,32 @@ pub(crate) const fn restrictive_permissions_available() -> Result<(), RecoveryEr
 /// # Errors
 ///
 /// [`RecoveryError::OutputExists`], wenn `output` existiert und kein leeres
-/// Verzeichnis ist.
+/// Verzeichnis ist — eine Datei ebenso wie ein belegtes Verzeichnis und ebenso
+/// wie ein SYMLINK, auch einer auf ein leeres Verzeichnis.
 pub fn output_directory_is_free(output: &Path) -> Result<(), RecoveryError> {
+    // ZUERST DIESELBE FRAGE WIE IN [`prepare_output_directory`]: ist das der
+    // genannte Pfad selbst? `read_dir` folgt einem Symlink, und ein Link auf
+    // ein leeres Verzeichnis gaelte hier sonst als freies Ziel — waehrend das
+    // Anlegen ihn abweist. Diese Funktion steht aber genau deshalb VOR den
+    // spezifischeren Abbruchgruenden, und ein Ziel, das nicht taugt, muss
+    // seinen Code 2 vor ihnen tragen (`design.md`:1810). Gemessen wird mit
+    // [`fs::symlink_metadata`], nie mit [`fs::metadata`], denn letzteres folgt.
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.is_symlink() => return Err(RecoveryError::OutputExists),
+        Ok(_) => {}
+        // HIER heisst `NotFound` „frei" und nicht „im Rennfenster
+        // verschwunden": dies ist der ERSTE Zugriff dieser Funktion, und genau
+        // danach fragt ihr Vertrag. In [`prepare_output_directory`] steht
+        // dieselbe Fehlerart hinter einem bewiesenen `AlreadyExists` und traegt
+        // deshalb die umgekehrte Aussage — und dass sie DORT fail-closed
+        // beantwortet wird, ist der zweite Grund: jene Funktion legt an, diese
+        // raet nur.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // Es gibt es, aber es laesst sich nicht befragen. Auch das heisst: so,
+        // wie du es aufgerufen hast, schreibe ich dort nicht.
+        Err(_) => return Err(RecoveryError::OutputExists),
+    }
+
     match fs::read_dir(output) {
         // Es gibt es, es ist ein Verzeichnis — dann entscheidet sein Inhalt.
         Ok(mut entries) => {
@@ -83,7 +107,14 @@ pub fn output_directory_is_free(output: &Path) -> Result<(), RecoveryError> {
             }
             Ok(())
         }
-        // Es gibt es nicht: der Regelfall, und der beste.
+        // Zwischen den beiden Fragen ist es verschwunden — der Regelfall
+        // „gibt es nicht" hat die Frage oben schon beantwortet. Die Antwort
+        // bleibt trotzdem „frei", und der umgekehrte Ausgang im
+        // Rennzweig von [`prepare_output_directory`] ist kein Widerspruch: diese
+        // Funktion RAET und legt nichts an. Die bindende Entscheidung faellt
+        // dort, und dort ist derselbe Ausgang fail-closed. Ein Abbruch schon
+        // hier verwuerfe einen Pfad, der in diesem Augenblick tatsaechlich
+        // frei ist.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         // Es gibt es, aber es ist kein lesbares Verzeichnis — eine Datei etwa.
         // Auch das heisst: so, wie du es aufgerufen hast, schreibe ich dort
@@ -121,7 +152,8 @@ pub fn output_directory_is_free(output: &Path) -> Result<(), RecoveryError> {
 /// # Errors
 ///
 /// [`RecoveryError::OutputExists`], wenn `output` existiert und keine leeres
-/// Verzeichnis ist — eine Datei ebenso wie ein belegtes Verzeichnis.
+/// Verzeichnis ist — eine Datei ebenso wie ein belegtes Verzeichnis und ebenso
+/// wie ein SYMLINK, auch einer auf ein leeres Verzeichnis.
 /// [`RecoveryError::Io`] fuer jeden Dateisystemfehler.
 pub fn prepare_output_directory(output: &Path) -> Result<(), RecoveryError> {
     // ZUERST der Versuch, es anzulegen, und danach erst die Frage nach dem
@@ -135,11 +167,29 @@ pub fn prepare_output_directory(output: &Path) -> Result<(), RecoveryError> {
         Err(error) => return Err(error.into()),
     }
 
-    // Es existiert bereits. Dann traegt es entweder nichts — und darf benutzt
-    // werden — oder es ist belegt beziehungsweise gar kein Verzeichnis.
-    // `read_dir` beantwortet beides in einem Schritt: auf einer Datei liefert
-    // es `NotADirectory` beziehungsweise `Other`, und jeder Lesefehler zaehlt
-    // hier als „so, wie du es aufgerufen hast, schreibe ich dort nicht".
+    // ZUERST DIE FRAGE, OB ES DER GENANNTE PFAD SELBST IST. `read_dir` und
+    // `set_permissions` folgen beide einem Symlink; zusammen hiessen sie sonst,
+    // die Rechte eines FREMDEN Verzeichnisses auf 0700 zu setzen und den
+    // Klartext ausserhalb des genannten Pfades abzulegen — beides allein
+    // deshalb, weil dort ein Link steht. Gemessen wird mit
+    // [`fs::symlink_metadata`], nie mit [`fs::metadata`], denn letzteres folgt;
+    // dieselbe Regel wie beim Einlesen in `crate::source`. Ein Link ist damit
+    // kein leeres Ziel, sondern ein belegtes.
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.is_symlink() => return Err(RecoveryError::OutputExists),
+        Ok(_) => {}
+        // Zwischen dem `AlreadyExists` und dieser Frage kann das Ziel
+        // verschwunden sein. Dann ist nicht erwiesen, dass dort ein leeres
+        // Verzeichnis steht — und ohne diesen Nachweis wird nicht geschrieben.
+        Err(_) => return Err(RecoveryError::OutputExists),
+    }
+
+    // Es existiert bereits und ist der genannte Pfad selbst. Dann traegt es
+    // entweder nichts — und darf benutzt werden — oder es ist belegt
+    // beziehungsweise gar kein Verzeichnis. `read_dir` beantwortet beides in
+    // einem Schritt: auf einer Datei liefert es `NotADirectory` beziehungsweise
+    // `Other`, und jeder Lesefehler zaehlt hier als „so, wie du es aufgerufen
+    // hast, schreibe ich dort nicht".
     let Ok(mut entries) = fs::read_dir(output) else {
         return Err(RecoveryError::OutputExists);
     };
@@ -194,6 +244,11 @@ pub(crate) fn create_output_subdirectory(path: &Path) -> Result<(), RecoveryErro
 /// Zeitfenster, das dadurch entsteht, ist dasselbe, das zwischen der
 /// Leerheitspruefung und dem ersten Schreiben ohnehin besteht — und es endet
 /// enger, als es begann.
+///
+/// DASS DER PFAD KEIN SYMLINK IST, ist deshalb Vorbedingung und nicht Zufall:
+/// [`prepare_output_directory`] weist einen Link zuvor mit
+/// [`RecoveryError::OutputExists`] ab. Ohne diesen Ausschluss verengte
+/// [`fs::set_permissions`] das Ziel des Links statt des genannten Pfades.
 #[cfg(unix)]
 fn tighten_directory(output: &Path) -> Result<(), RecoveryError> {
     use std::{fs::Permissions, os::unix::fs::PermissionsExt as _};

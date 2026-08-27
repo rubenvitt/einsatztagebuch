@@ -25,20 +25,46 @@
 //! `SystemTime::now()`, und unter ihr degenerieren die geerbten Koepfe zu einer
 //! leeren Aussage. Die `live_clock_*`-Familie ist dort die einzige zulaessige.
 //!
-//! # ZWEI CODES SIND HIER NICHT ERREICHBAR, UND DAS IST KEIN VERSAEUMNIS
+//! # EIN CODE IST HIER NICHT ERREICHBAR, UND DAS IST KEIN VERSAEUMNIS
 //!
-//! - `Evidence` (13) verlangt `VerifyOptions::with_evidence_requirement`, das
-//!   die feste Signatur von [`verify_directory`] ausdruecklich nicht
-//!   durchreicht. Die Regel steht verbatim im Code und bleibt hier ungemessen,
-//!   statt die Fassade dafuer zu verbreitern.
-//! - `Unsupported` (21) gehoert zur abgesetzten Berichtssignatur, die aus
-//!   Task 10 herausgenommen wurde.
-//! - `Usage` (2) ist eine AUFRUFFORM und kein Befund; aus einem BERICHT
-//!   entsteht er nie. Aus einem LAUF entsteht er an genau einer Stelle dieser
-//!   Crate, naemlich wenn das Ziel eines schreibenden Kommandos bereits belegt
-//!   ist — gemessen in
-//!   [`an_occupied_output_is_a_usage_error_and_leaves_the_file_untouched`].
-//!   Die uebrige Aufrufform prueft der Argumentparser der CLI.
+//! `Unsupported` (21) gehoert zur abgesetzten Berichtssignatur, die aus
+//! Task 10 herausgenommen wurde.
+//!
+//! # `Usage` (2) IST ERREICHBAR — nur nie aus einem BERICHT
+//!
+//! Er ist eine AUFRUFFORM und kein Befund; aus einem BERICHT entsteht er nie.
+//! Aus einem LAUF entsteht er in der ZIELPRUEFUNG dieser Crate: wenn das Ziel
+//! eines schreibenden Kommandos bereits belegt ist — gemessen in
+//! [`an_occupied_output_is_a_usage_error_and_leaves_the_file_untouched`] — und
+//! wenn der genannte Zielpfad ein SYMLINK ist, gemessen in
+//! `a_symlinked_output_is_a_usage_error_on_both_paths_and_spares_the_foreign_directory`.
+//! Die uebrige Aufrufform prueft der Argumentparser der CLI.
+//!
+//! # `Evidence` (13) GEHOERT NICHT IN DIESE LISTE
+//!
+//! Hier stand, Code 13 verlange `VerifyOptions::with_evidence_requirement`, das
+//! die feste Signatur von [`verify_directory`] nicht durchreicht. Das ist
+//! FALSCH: `run_evidence_gate` fuellt `evidenceErrors` mit `TokenNotBound` und
+//! `RenewalInputUnknown`, BEVOR es ohne Forderung zurueckkehrt
+//! (`crates/ea-verify/src/evidence.rs:157`), und Regel 4 fragt allein nach
+//! einem nicht leeren `evidenceErrors` (`crates/ea-recovery/src/exit.rs:111`).
+//! Die Forderung entscheidet nur ueber `Missing` und `Overdue`, nicht ueber die
+//! Bindungsbefunde.
+//!
+//! Ungemessen bleibt der Pfad, weil keine Fixture dieser Kette ein `.ecp` mit
+//! RFC-3161-Anteilen baut — nicht, weil der Code ihn nicht erreicht. Die
+//! Begruendung steht ausfuehrlich in `apps/cli/tests/exit_codes.rs`.
+//!
+//! # WAS [`every_finding_maps_to_its_normative_exit_code`] ZUSAGT
+//!
+//! Jeden GEMESSENEN Befund auf genau seine Zeile der Norm — und ausdruecklich
+//! nicht die Vollstaendigkeit der Codemenge. `Evidence` (13) ist nach dem
+//! Abschnitt oben erreichbar und steht trotzdem nicht in diesem Test, weil
+//! keine Fixture dieser Kette seinen Pfad baut. Der NAME bleibt, weil
+//! `docs/traceability/stage-1-gate.md`:31 ihn als Beleg fuer AK 20 fuehrt;
+//! seine Reichweite steht hier. Geschlossen ueber die Menge ist allein
+//! [`every_exit_code_carries_its_normative_number`] — und der pinnt die
+//! ZAHLEN, nicht die Erreichbarkeit.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -49,7 +75,7 @@ use ea_crypto::HpkeRecipientPrivateKey;
 use ea_format::EIP_PREFIX_V1;
 use ea_recovery::{
     ExitCode, RecoveryError, exit_code_for, exit_code_for_error, load_trust_anchor,
-    verify_directory, write_report_document,
+    output_directory_is_free, prepare_output_directory, verify_directory, write_report_document,
 };
 use ea_trust::TrustAnchorV1;
 use ea_types::{KeyThumbprint, UnixMillis};
@@ -521,4 +547,78 @@ fn an_occupied_output_is_a_usage_error_and_leaves_the_file_untouched() {
             mode & 0o777
         );
     }
+}
+
+/// EIN SYMLINK IST KEIN ZIEL, sondern ein Verweis auf eines.
+///
+/// Gemessen werden BEIDE Wege, denn beide muessen dasselbe sagen:
+/// [`output_directory_is_free`] raet vor der Verifikation, und
+/// [`prepare_output_directory`] legt danach an. Sagte nur der zweite ab, endete
+/// ein `decrypt` auf einen verlinkten Pfad mit dem spezifischeren Code des
+/// naechsten Abbruchgrundes statt mit der 2 — `design.md`:1810 verlangt aber
+/// den kleinsten zutreffenden spezifischen Code, und genau dafuer steht die
+/// Vorpruefung ueberhaupt.
+///
+/// Und gemessen wird nicht nur der Code: das VERLINKTE Verzeichnis behaelt
+/// seine Rechte. Ohne die Pruefung folgten `read_dir` und `set_permissions`
+/// beide dem Link, verengten ein FREMDES Verzeichnis auf 0700 und legten den
+/// Klartext ausserhalb des genannten Pfades ab.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_output_is_a_usage_error_on_both_paths_and_spares_the_foreign_directory() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let root = temp_dir("symlinked-output");
+    let foreign = root.path().join("fremd");
+    fs::create_dir(&foreign).expect("das fremde Verzeichnis muss anlegbar sein");
+    fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755))
+        .expect("das fremde Verzeichnis muss seine Rechte tragen");
+    let link = root.path().join("ziel");
+    symlink(&foreign, &link).expect("der Symlink muss anlegbar sein");
+
+    // ZUERST DER RATENDE WEG: er veraendert nichts und traegt den Vorrang der 2.
+    let Err(guessed) = output_directory_is_free(&link) else {
+        panic!("ein Symlink ist kein freies Ziel");
+    };
+    assert!(
+        matches!(guessed, RecoveryError::OutputExists),
+        "ein verlinktes Ziel ist kein Dateisystemfehler, gemessen {guessed:?}"
+    );
+    assert_eq!(exit_code_for_error(&guessed), ExitCode::Usage);
+
+    // DANN DER SCHREIBENDE: er ist die Sperre und muss dasselbe sagen.
+    let Err(prepared) = prepare_output_directory(&link) else {
+        panic!("ein Symlink ist kein anlegbares Ziel");
+    };
+    assert!(
+        matches!(prepared, RecoveryError::OutputExists),
+        "ein verlinktes Ziel ist kein Dateisystemfehler, gemessen {prepared:?}"
+    );
+    assert_eq!(exit_code_for_error(&prepared), ExitCode::Usage);
+
+    // Das fremde Verzeichnis bleibt, wie es war — Rechte wie Inhalt.
+    let mode = fs::metadata(&foreign)
+        .expect("das fremde Verzeichnis muss existieren")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o755,
+        "die Rechte des verlinkten Verzeichnisses duerfen nicht verengt werden, war: {mode:o}"
+    );
+    assert_eq!(
+        fs::read_dir(&foreign)
+            .expect("das fremde Verzeichnis muss lesbar bleiben")
+            .count(),
+        0,
+        "in das verlinkte Verzeichnis darf nichts geschrieben werden"
+    );
+
+    // Und der Link selbst ist weder ersetzt noch aufgeloest worden.
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("der Symlink muss liegen bleiben")
+            .is_symlink(),
+        "der genannte Pfad darf nicht durch ein Verzeichnis ersetzt werden"
+    );
 }

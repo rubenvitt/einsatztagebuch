@@ -98,9 +98,9 @@ Baseline: 05c2a4e
 Baseline gate: `rtk cargo test --workspace --all-targets --locked` — <Exit-Code>, <n> passed, <m> suites.
 Baseline toolchain: <Ausgabe von rustup show active-toolchain>
 Pre-flight conflict 1: Web-Reader-Spec §1 (:20-24) bestreitet Objektfamilien-Änderungen, §11.5/11.6 (:420-421) führt zwei ein. — offen
-Pre-flight conflict 2: Spec §7.5 Zwei-Approver — universelle Arity-Aufweitung vs. eigene 2-of-N-Familie. Blockiert Task 11. — offen
+Pre-flight conflict 2: Spec §7.5 Zwei-Approver — universelle Arity-Aufweitung vs. eigene 2-of-N-Familie. — ENTSCHIEDEN am 2026-08-17: eigene 2-of-N-Familie in Stage 5 als v1.1, `organizationAdminAuthorization` bleibt bei Kardinalität 1 und 15 Feldern. Wortlaut in `2026-08-13-einsatzarchiv-stage-1-trust-core-format.md` (Block `web-reader-blockers`). Task 11 nicht mehr blockiert; die Vektoren sind eingefroren.
 Pre-flight conflict 3: Ablageort des Escrow-Chiffrats; „Administrationszone" ist im Design nicht definiert. Blockiert Stage 5. — offen
-Pre-flight conflict 4: Policy-Frist nach Spec §4.2 (:88-90) ist keinem Feld von policy-core-v1 zuzuordnen. Blockiert Task 11. — offen
+Pre-flight conflict 4: Policy-Frist nach Spec §4.2 (:88-90) ist keinem Feld von policy-core-v1 zuzuordnen. — ENTSCHIEDEN am 2026-08-17: `policy-core-v1` bekommt ein eigenes Feld `reader-trust-refresh-ms` unmittelbar nach `reader-inactivity-ms`; das geschlossene Array hat damit 22 statt 21 Positionen, und `parse_policy_core` zieht positionsgleich mit. Wortlaut in `2026-08-13-einsatzarchiv-stage-1-trust-core-format.md` (Block `web-reader-blockers`). Task 11 nicht mehr blockiert; die Positivvektoren sind eingefroren (`vectors/trust/v1/manifest.json`). Die Aritaet ist seit dem Stage-1-Review auch gegen die CDDL gepinnt (`tools/xtask/tests/spec_completeness.rs`, `trust_cddl_enforces_the_exact_twenty_two_positions_of_policy_core_v1`).
 Pre-flight defect: Stage-1-Plan:1710 nennt `pnpm test:fuzz -- --smoke-seconds 60` (in cfd5a65 für den Task-8-Plan bereits als fehlerhaft korrigiert; korrekt ist die Form ohne freistehendes `--`). Gehört in Task 11.
 Pre-flight defect: Stage-1-Plan:1711 nennt `cargo run --locked -p xtask -- stage-gate 1`; `stage-gate` ist kein Subcommand des Dispatchers (tools/xtask/src/main.rs:701-724). Gehört in Task 11.
 Pre-flight defect: schemas/reports/v1/verification-report.schema.json kennt kein formatErrors und kein Quarantäne-Array, während Stage-1-Plan:1533 Quarantäne erzeugt. Gehört in Task 9.
@@ -648,6 +648,16 @@ nicht betroffen.
 ```
 
 - [ ] **Step 2: Die drei Blockaden in den Task-11-Abschnitt schreiben**
+
+> **ÜBERHOLT — Stand nach der Entscheidung vom 2026-08-17.** Der Textbaustein unten ist
+> die Fassung VOR der menschlichen Entscheidung; alle drei Blockaden sind aufgelöst
+> (Konflikt 2 und 4 siehe Step 1, Traceability: die sieben MUSS-Anforderungen des
+> Web-Reader-Specs sind als v1.1-Zeilen ins Requirement-Ledger aufgenommen). Die
+> EINGESETZTE Fassung steht im Block `web-reader-blockers` von
+> `2026-08-13-einsatzarchiv-stage-1-trust-core-format.md` und lautet dort auf
+> ENTSCHIEDEN statt auf BLOCKIERT. Der Baustein bleibt als Beleg des Planungsstands
+> stehen und ist KEINE Weisung mehr — insbesondere gilt das „DARF … nicht einfrieren"
+> beider Familien nicht mehr.
 
 **Invariante:** Jede Prosa, die einen künftigen Trust-Subtype beim Namen nennen MUSS, liegt innerhalb eines markierten Blocks. Der Abwesenheitstest in Step 4 entfernt **alle** markierten Blöcke, bevor er prüft. Ein Kandidatenname außerhalb eines markierten Blocks ist ein Fehler — er könnte in einen eingefrorenen Vektor wandern.
 

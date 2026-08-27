@@ -17,15 +17,37 @@
 //! `complete_valid_archive` — steht hier ausdruecklich als GEGENFALL und ist in
 //! [`an_inherited_archive_at_the_real_clock_fails_with_fifteen`] begruendet.
 //!
-//! # ZWEI CODES SIND AUS `verify` UND `list` NICHT ERREICHBAR
+//! # EIN CODE IST AUS `verify` UND `list` NICHT ERREICHBAR
 //!
 //! - `Key` (14) verlangt einen Entschluesselungsfehler, und der entsteht nur,
 //!   wenn ein Empfaengerschluessel im Lauf steht. `--key` gehoert nach
 //!   `apps/cli/src/args.rs` AUSSCHLIESSLICH zu `decrypt`; `verify` und `list`
 //!   entkapseln nichts. Gemessen und gepinnt in
 //!   [`a_foreign_encapsulation_stays_invisible_without_a_recipient_key`].
-//! - `Evidence` (13) verlangt `VerifyOptions::with_evidence_requirement`, das
-//!   `ea_recovery::verify_directory` ausdruecklich nicht durchreicht.
+//!
+//! # `Evidence` (13) IST ERREICHBAR — ungemessen ist nicht dasselbe wie
+//! unerreichbar
+//!
+//! Hier stand, Code 13 verlange `VerifyOptions::with_evidence_requirement`, das
+//! `ea_recovery::verify_directory` nicht durchreicht. DAS IST FALSCH, und die
+//! Begruendung ist an zwei Stellen im Code nachlesbar widerlegt:
+//! `run_evidence_gate` legt `TokenNotBound` und `RenewalInputUnknown` in
+//! `evidenceErrors` ab, BEVOR es ohne Forderung zurueckkehrt
+//! (`crates/ea-verify/src/evidence.rs:157`), und Regel 4 der Ableitung fragt
+//! allein, ob `evidenceErrors` leer ist — nach der Forderung fragt sie nicht
+//! (`crates/ea-recovery/src/exit.rs:111`). Ein schlichtes `verify` ueber einen
+//! Bestand mit einem `.ecp`, dessen archiviertes `rfc3161Response` nicht zum
+//! `3161-ctt`-Header seines COSE-Objekts passt, endet deshalb mit 13.
+//!
+//! UNGEMESSEN bleibt der Pfad aus einem Grund der Fixture-Kette und nicht der
+//! Norm: keine Fixture dieser Kette baut ein `.ecp` mit RFC-3161-Anteilen. Der
+//! eingefrorene Vektor, der es koennte —
+//! `timestamp/rejected-replaced-ctt-header`, gepinnt in
+//! `tests/ea-system-tests/tests/conformance_golden_vectors.rs:3149` — liegt in
+//! einer Testcrate ohne `ea-recovery` im Graphen, und `ea-testkit` steht
+//! umgekehrt nicht in den Dev-Dependencies dieser Kette. Wer den Fall messen
+//! will, verdrahtet zuerst das eine oder das andere; er darf sich nur nicht
+//! darauf verlassen, dass der Code hier nicht hinkommt.
 
 #[path = "support/mod.rs"]
 mod support;

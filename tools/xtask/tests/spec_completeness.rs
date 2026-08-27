@@ -937,6 +937,138 @@ fn eip_cddl_enforces_the_exact_suite_v1_ciphertext_boundaries() {
     ));
 }
 
+/// The shape a `policy-core-v1` fixture is encoded in.
+///
+/// `policy-core-v1` is read POSITIONALLY on the Rust side: `parse_policy_core`
+/// in `ea-crypto` walks the 22 positions in order and pins the array length,
+/// and `ea_format::encode_policy` writes them in the same order. Nothing pinned
+/// that length against the NORMATIVE side — deleting a position from
+/// `schemas/archive/v1/trust.cddl` left `xtask validate-schemas`, `xtask
+/// stage-gate 1` and the whole workspace test suite green, because the archive
+/// CDDL was only ever parsed, never validated against a trust object.
+///
+/// The frozen vectors cannot close that: `cddl_cat` refuses CBOR carrying COSE
+/// tags (`can't handle hidden cbor Value`) and cannot parse `#6.18(...)` at all,
+/// so a real `.etb` never reaches the validator. A hand-cut fixture can — with
+/// `null` standing in for the signature exactly as `eip_fixture` does.
+///
+/// # What this catches, and what it does not
+///
+/// The positive fixture encodes a concrete type at every position, so a
+/// deletion, an insertion, a reordering and a type NARROWING all fail it.
+/// WIDENING does not: turning `uint` into `any` or `0..1` into `uint` keeps
+/// every fixture here valid. The both-edges pattern for ranges lives next door
+/// in `eip_cddl_enforces_the_exact_suite_v1_ciphertext_boundaries`.
+enum PolicyCoreShapeV1 {
+    /// All 22 positions of the norm, in the order of the norm.
+    Exact,
+    /// WITHOUT `reader-trust-refresh-ms` — 21 positions. This is the mutation
+    /// that used to pass every gate.
+    WithoutReaderTrustRefresh,
+    /// One position too many behind `effective-from-sequence` — 23.
+    WithExtraPosition,
+}
+
+fn encode_policy_core(encoder: &mut minicbor::Encoder<Vec<u8>>, shape: &PolicyCoreShapeV1) {
+    let positions = match shape {
+        PolicyCoreShapeV1::Exact => 22,
+        PolicyCoreShapeV1::WithoutReaderTrustRefresh => 21,
+        PolicyCoreShapeV1::WithExtraPosition => 23,
+    };
+    encoder.array(positions).unwrap();
+    encoder.u8(1).unwrap(); //  1 version
+    encoder.bytes(&[0x21; 16]).unwrap(); //  2 organization-id
+    encoder.u8(1).unwrap(); //  3 policy-version
+    encoder.null().unwrap(); //  4 previous-policy-object-hash
+    encoder.u8(0).unwrap(); //  5 operating-profile
+    encoder.u32(86_400_000).unwrap(); //  6 max-registry-age-ms
+    encoder.u32(300_000).unwrap(); //  7 max-future-clock-skew-ms
+    encoder.u8(0).unwrap(); //  8 registry-expiry-behavior
+    encoder.u32(60_000).unwrap(); //  9 evidence-max-delay-ms
+    encoder.u32(900_000).unwrap(); // 10 reader-inactivity-ms
+    if !matches!(shape, PolicyCoreShapeV1::WithoutReaderTrustRefresh) {
+        encoder.u32(86_400_000).unwrap(); // 11 reader-trust-refresh-ms
+    }
+    encoder.bool(true).unwrap(); // 12 reader-history-access-allowed
+    encoder.array(1).unwrap(); // 13 allowed-archive-profile-hashes
+    encoder.bytes(&[0xa1; 32]).unwrap();
+    encoder.u8(0).unwrap(); // 14 network-outage-behavior
+    encoder.u32(86_400_000).unwrap(); // 15 backup-frequency-ms
+    encoder.u32(2_592_000_000).unwrap(); // 16 restore-test-interval-ms
+    encoder.array(3).unwrap(); // 17 retention-policy-v1
+    encoder.null().unwrap();
+    encoder.bool(false).unwrap();
+    encoder.null().unwrap();
+    encoder.array(3).unwrap(); // 18 free-text-policy-v1
+    encoder.bool(false).unwrap();
+    encoder.str("1").unwrap();
+    encoder.bool(true).unwrap();
+    encoder.array(1).unwrap(); // 19 allowed-crypto-suite-ids
+    encoder.str("EINSATZARCHIV-SUITE-1").unwrap();
+    encoder.array(1).unwrap(); // 20 allowed-format-versions
+    encoder.u8(1).unwrap();
+    encoder.u8(0).unwrap(); // 21 effective-from-sequence
+    encoder.array(0).unwrap(); // 22 reserved tail
+    if matches!(shape, PolicyCoreShapeV1::WithExtraPosition) {
+        encoder.u8(0).unwrap(); // 23 — one too many
+    }
+}
+
+/// An `.etb` policy object around one `policy-core-v1` fixture.
+fn etb_policy_fixture(shape: &PolicyCoreShapeV1) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(5).unwrap();
+    encoder.bytes(b"EA1\0").unwrap();
+    encoder.u8(5).unwrap(); // trust block type
+    encoder.u8(1).unwrap();
+    encoder.array(0).unwrap();
+    encoder.array(3).unwrap(); // etb-body-v1, "policy" arm
+    encoder.str("policy").unwrap();
+    encoder.array(2).unwrap(); // authorized-trust-payload-v1<policy-core-v1>
+    encode_policy_core(&mut encoder, shape);
+    encoder.bytes(&[7; 32]).unwrap(); // organizationAdminAuthorizationObjectHash
+    encoder.array(1).unwrap(); // [+ cose-sign1-v1]
+    encoder.null().unwrap(); // COSE-Sign1 = any, as in eip_fixture
+    encoder.into_writer()
+}
+
+#[test]
+fn trust_cddl_enforces_the_exact_twenty_two_positions_of_policy_core_v1() {
+    let cddl = archive_cddl();
+
+    assert!(
+        validate_cbor(
+            "etb-v1",
+            &cddl,
+            &etb_policy_fixture(&PolicyCoreShapeV1::Exact)
+        ),
+        "the 22 positions the workspace encodes MUST validate against trust.cddl"
+    );
+    assert!(
+        !validate_cbor(
+            "etb-v1",
+            &cddl,
+            &etb_policy_fixture(&PolicyCoreShapeV1::WithoutReaderTrustRefresh)
+        ),
+        "21 positions MUST NOT validate — this is the mutation that passed every gate"
+    );
+    assert!(
+        !validate_cbor(
+            "etb-v1",
+            &cddl,
+            &etb_policy_fixture(&PolicyCoreShapeV1::WithExtraPosition)
+        ),
+        "23 positions MUST NOT validate"
+    );
+
+    // The position by name, so a rename is as loud as a deletion.
+    assert_contains_all(
+        "trust CDDL",
+        include_str!("../../../schemas/archive/v1/trust.cddl"),
+        &["reader-trust-refresh-ms: uint"],
+    );
+}
+
 /// The shape a `finalization-preview-core-v1` fixture is encoded in.
 ///
 /// `finalization-preview-core-v1` is read POSITIONALLY on the Rust side:
@@ -2328,7 +2460,6 @@ fn the_frozen_local_audit_vectors_match_the_grammar() {
         );
     }
 }
-
 
 #[test]
 fn report_schemas_compile_and_reject_unknown_properties() {
