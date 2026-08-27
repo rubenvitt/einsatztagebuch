@@ -1997,3 +1997,131 @@ impl BundleHarness {
         bytes
     }
 }
+
+// ---------------------------------------------------------------------------
+// Zusatz zu den vier fail-closed-Ausgaengen der Profilmigration (Befund F9).
+//
+// ADDITIV angehaengt: keine bestehende Funktion, kein bestehender Typ und kein
+// bestehender `impl`-Block dieses Moduls ist beruehrt. `MigrationHarness`
+// bekommt einen ZWEITEN inhaerenten `impl`-Block statt einer Erweiterung des
+// ersten, damit ein gleichzeitig laufender Bearbeiter derselben Datei nicht
+// mit dieser Ergaenzung kollidiert.
+// ---------------------------------------------------------------------------
+
+/// Eine Auditablage, die JEDE Zeile ablehnt.
+///
+/// Steht fuer den vollen Datentraeger, die gesperrte Datenbank und jeden
+/// anderen Grund, aus dem `append` nicht durchkommt.
+///
+/// FIXTUREVEREINFACHUNG, ausgeschrieben: der zurueckgegebene `AuditError` ist
+/// [`AuditError::Encoding`] und nicht der treffendere `AuditError::Store`, weil
+/// `ea-local-store` keine Dev-Kante dieser Crate ist und ein neuer Eintrag in
+/// `Cargo.toml` das gesperrte `Cargo.lock` umschriebe. Fuer die gemessene
+/// Zusage ist das gleichgueltig: `ProfileMigrator::audit_after_swap`
+/// (`crates/ea-archive-fs/src/profile_migration.rs:619`) bildet JEDEN
+/// `AuditError` auf `ArchiveBackendError::AuditFailed` ab und liest die
+/// Variante nicht.
+pub struct RefusingAuditRepository;
+
+impl LocalAuditRepository for RefusingAuditRepository {
+    fn append(&self, _event: &SignedLocalAuditEvent) -> Result<(), AuditError> {
+        Err(AuditError::Encoding)
+    }
+
+    fn event(&self, _id: EventId) -> Result<SignedLocalAuditEvent, AuditError> {
+        Err(AuditError::NotFound)
+    }
+}
+
+/// Derselbe ECHTE Auditdienst wie in [`AuditHarness`], aber mit einer Ablage,
+/// die nichts annimmt.
+///
+/// Signiert wird also wirklich — nur das Buchen scheitert. Ein Dienst, der
+/// schon vor der Signatur abbraeche, belegte einen anderen Fehlerpunkt als den
+/// hier gemeinten.
+pub struct RefusingAuditHarness {
+    service: SignedLocalAuditService,
+}
+
+impl RefusingAuditHarness {
+    /// # Panics
+    ///
+    /// Wenn der Signaturgriff der Fixture nicht entsteht.
+    #[must_use]
+    pub fn new() -> Self {
+        let provider = Arc::new(InMemoryKeyProvider::new_for_test(FIXTURE_PROVIDER_SEED));
+        let signing_handle = provider
+            .generate(
+                SecretPurpose::WriterSigningKey,
+                KeyProtectionProfileV1::OsWrapped,
+            )
+            .expect("der Signaturgriff der Fixture muss entstehen");
+        let (_, _, writer_certificate_object_hash) = build_line();
+        Self {
+            service: SignedLocalAuditService::new(
+                Arc::new(RefusingAuditRepository) as Arc<dyn LocalAuditRepository>,
+                Arc::clone(&provider) as Arc<dyn KeyProvider>,
+                signing_handle,
+                writer_certificate_object_hash,
+                UnixMillis::new(FIXTURE_NOW_MS),
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn service(&self) -> &dyn LocalAuditService {
+        &self.service
+    }
+}
+
+impl Default for RefusingAuditHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Bytes, die KEIN `trust-anchor-v1` sind.
+///
+/// Nicht leer und nicht zufaellig: eine gueltige, aber fachfremde
+/// CBOR-Zeichenkette. Damit scheitert `decode_trust_anchor` an der FORM des
+/// Ankers und nicht schon am CBOR-Rahmen — der Fehlerpunkt liegt dort, wo die
+/// Migration ihn erwartet.
+#[must_use]
+pub fn undecodable_anchor_bytes() -> Vec<u8> {
+    let text = "kein trust-anchor-v1";
+    let mut bytes = vec![0x60_u8 | u8::try_from(text.len()).expect("kurz genug")];
+    bytes.extend_from_slice(text.as_bytes());
+    bytes
+}
+
+impl MigrationHarness {
+    /// Der Migrator dieser Fixture mit AUSGETAUSCHTEM Anker und Auditdienst.
+    ///
+    /// Alles andere — Quelle, Ziel, Policy, Zeit und der echte
+    /// Profilwechselnachweis — bleibt genau das, was [`Self::migrator`]
+    /// benutzt. Nur so ist der gemessene Abbruch dem ausgetauschten Stueck
+    /// zuzurechnen und nicht einer zweiten Abweichung.
+    #[must_use]
+    pub fn migrator_with<'h>(
+        &'h self,
+        anchor_bytes: &'h [u8],
+        audit: &'h dyn LocalAuditService,
+    ) -> ProfileMigrator<'h> {
+        ProfileMigrator::new(
+            MigrationSourceV1::new(&self.source, self.pending.iter().collect()),
+            &self.target,
+            &self.policy,
+            audit,
+            anchor_bytes,
+            self.head.preexisting_effective_now(),
+            profile_migration_proof(),
+        )
+        .expect("der Migrator der Fixture muss entstehen")
+    }
+
+    /// Die Ankerbytes, die [`Self::migrator`] benutzt.
+    #[must_use]
+    pub fn anchor_bytes(&self) -> &[u8] {
+        &self.anchor_bytes
+    }
+}

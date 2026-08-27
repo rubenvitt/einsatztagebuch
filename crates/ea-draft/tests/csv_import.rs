@@ -21,7 +21,14 @@ fn dry_run_does_not_write_and_commit_is_all_or_nothing() {
     let report = importer.dry_run(ImportSourceKindV1::Persons, csv).unwrap();
     assert_eq!((report.accepted(), report.errors().len()), (1, 1));
     assert_eq!(repo.person_count().unwrap(), 0);
-    assert!(importer.commit(&report, csv).is_err());
+    // Der Grund der Ablehnung gehoert dazu. `is_err()` allein waere auch dann
+    // gruen, wenn `commit` an irgendetwas anderem scheiterte — an einer
+    // Schemabedingung etwa —, und die Zusage „ein Bericht MIT Fehlern wird
+    // nicht gebucht" waere nicht gemessen.
+    assert_eq!(
+        importer.commit(&report, csv).unwrap_err().code(),
+        "EA-IMPORT-REPORT-HAS-ERRORS"
+    );
     assert_eq!(repo.person_count().unwrap(), 0);
 }
 
@@ -60,7 +67,13 @@ fn commit_rejects_a_mutated_dry_run_hash() {
         first.input_file_hash().as_bytes(),
         second.input_file_hash().as_bytes()
     );
-    assert!(importer.commit(&first, &csv).is_err());
+    // Der Grund ist der HASHVERGLEICH und nicht irgendein Fehlschlag: die
+    // beiden Berichte tragen dieselben Zaehler, also faellt der Abgleich
+    // dahinter nicht, und `ReportMismatch` waere hier eine andere Aussage.
+    assert_eq!(
+        importer.commit(&first, &csv).unwrap_err().code(),
+        "EA-IMPORT-INPUT-CHANGED"
+    );
     assert_eq!(repo.person_count().unwrap(), 0);
     // Der UNVERAENDERTE Stand geht durch: sonst koennte die Ablehnung oben von
     // etwas anderem als dem Hashvergleich kommen.
@@ -161,20 +174,37 @@ fn a_header_carrying_an_incident_number_column_is_not_an_accepted_header() {
 fn every_documented_rejection_carries_its_pinned_issue_code() {
     let harness = ImportHarness::new();
     let importer = harness.importer();
-    let cases: [(&[u8], u32); 5] = [
+    // Die dritte Spalte ist der STABILE Fehlercode. Ohne sie misst diese
+    // Tabelle nur die Zuordnung auf den Befundcode; die Zeichenkette, gegen die
+    // jeder Aufrufer assertiert, waere frei wandernd.
+    let cases: [(&[u8], u32, &str); 5] = [
         (
             b"\xef\xbb\xbfid,display_name,role,active\np1,Ada,Fuehrung,true\n",
             0,
+            "EA-IMPORT-BYTE-ORDER-MARK",
         ),
-        (b"id,display_name,role,active\np1,Ada,\xffX,true\n", 1),
-        (b"id,name,role,active\np1,Ada,Fuehrung,true\n", 2),
-        (b"id,display_name,role,role\np1,Ada,Fuehrung,true\n", 3),
+        (
+            b"id,display_name,role,active\np1,Ada,\xffX,true\n",
+            1,
+            "EA-IMPORT-NOT-UTF8",
+        ),
+        (
+            b"id,name,role,active\np1,Ada,Fuehrung,true\n",
+            2,
+            "EA-IMPORT-UNKNOWN-HEADER",
+        ),
+        (
+            b"id,display_name,role,role\np1,Ada,Fuehrung,true\n",
+            3,
+            "EA-IMPORT-DUPLICATE-HEADER-COLUMN",
+        ),
         (
             b"\x00\x01\x00\x00Standard Jet DB\x00id,display_name,role,active\n",
             4,
+            "EA-IMPORT-ACCESS-FORMAT",
         ),
     ];
-    for (input, expected) in cases {
+    for (input, expected, code) in cases {
         let error = importer
             .dry_run(ImportSourceKindV1::Persons, input)
             .unwrap_err();
@@ -184,6 +214,7 @@ fn every_documented_rejection_carries_its_pinned_issue_code() {
             "die Ablehnung traegt einen anderen Code als den gepinnten: {}",
             error.code()
         );
+        assert_eq!(error.code(), code);
     }
 }
 

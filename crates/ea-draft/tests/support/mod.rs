@@ -20,21 +20,26 @@ use std::{
     cell::RefCell,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ea_crypto::{AEAD_NONCE_SIZE, CanonicalPublicCoseKey, SecretBytes, aead_open};
+use ea_crypto::{
+    AEAD_NONCE_SIZE, CanonicalPublicCoseKey, SecretBytes, SecretVec, aead_open, aead_seal,
+};
 use ea_draft::{
     AutosaveDraftRepository, CsvImporter, DiscardFaultPoint, DiscardPhase, DiscardService,
-    DraftError, IncidentNumberRegister, MasterDataRepository, OperatorProfileRepository,
-    PreparedFinalizationMarker, RestartState,
+    DraftError, DraftLock, IncidentNumberRegister, MasterDataRepository, OperatorProfileRepository,
+    PreparedFinalizationMarker, RestartState, SavedDraft,
 };
 use ea_format::{
     CertificateKindV1, ImportReportV1, ImportSourceKindV1, KeyProtectionProfileV1, OperatorRoleV1,
 };
 use ea_key_provider::{InMemoryKeyProvider, KeyHandle, KeyProvider, SecretPurpose};
-use ea_local_store::{EncryptedDatabase, StoreValue};
+use ea_local_store::{EncryptedDatabase, StoreValue, migrations::DISCARD_MIGRATION_VERSION};
 use ea_operator::{
     BoundOperator, OperatorAuthenticator, OperatorError, OperatorSessionProof, OsAccountProvider,
     ReauthPurpose,
@@ -293,6 +298,67 @@ impl DraftHarness {
             .expect("die Entwurfszeile muss lesbar sein")
             .expect("nach einer Speicherung liegt genau eine Entwurfszeile");
         row.blob(0).unwrap().to_vec()
+    }
+
+    /// Ersetzt die Nutzlast der Entwurfszeile durch ein GUELTIGES Chiffrat, das
+    /// KEIN UTF-8 verschluesselt.
+    ///
+    /// Es wird unter demselben `draftDEK` und mit denselben Zusatzdaten
+    /// versiegelt wie das echte: die AEAD geht auf, und erst die Pruefung
+    /// DAHINTER faellt. Ohne diese Sorgfalt maesse der Test die
+    /// Entschluesselung und nicht die Gestaltpruefung.
+    pub fn overwrite_payload_with_non_utf8(&self, saved: &SavedDraft) {
+        let handle = self
+            .repo
+            .draft_dek_handle(saved)
+            .expect("der Griff des stehenden Entwurfs muss lesbar sein");
+        let dek = self
+            .provider
+            .unwrap_secret(&handle)
+            .expect("der In-Prozess-Provider gibt den draftDEK heraus");
+        let nonce = SecretBytes::<AEAD_NONCE_SIZE>::new([0x99; AEAD_NONCE_SIZE]);
+        // Eine einzelne Fortsetzungsbyte-Sequenz ohne Anfangsbyte: kein UTF-8,
+        // in keiner Kodierung.
+        let ciphertext = aead_seal(
+            &dek,
+            &nonce,
+            SecretVec::new(vec![0x80, 0xff]),
+            &original_associated_data(saved.draft_id(), saved.revision()),
+        )
+        .expect("die Fixture muss versiegeln koennen");
+        self.database
+            .execute(
+                "UPDATE draft SET payload_ciphertext = ?1, payload_nonce = ?2 WHERE singleton = 0",
+                &[
+                    StoreValue::Blob(ciphertext),
+                    StoreValue::Blob(nonce.with_exposed(|bytes| bytes.to_vec())),
+                ],
+            )
+            .expect("die Nutzlastspalte muss sich setzen lassen");
+    }
+
+    /// Nimmt die Registrierung von `0002_discard.sql` ZURUECK.
+    ///
+    /// Sie stellt den Zustand her, gegen den
+    /// [`ea_draft::DraftError::TransitionUnavailable`] steht: eine Datenbank,
+    /// die vor dieser Migration entstanden ist. BEIDES wird entfernt — die
+    /// Uebergangstabelle und ihre Registraturzeile. Nur die Zeile zu loeschen
+    /// liesse die Tabelle stehen, und der Waechter waere dann gegen einen
+    /// Zustand gemessen, den es im Bestand nicht gibt.
+    ///
+    /// Die Fixture darf danach NICHT wieder geoeffnet werden: die
+    /// Migrationskette laeuft bei jedem Oeffnen und legte die Tabelle sofort
+    /// wieder an.
+    pub fn unregister_discard_migration(&self) {
+        self.database
+            .execute("DROP TABLE draft_transition", &[] as &[StoreValue])
+            .expect("die Uebergangstabelle muss sich entfernen lassen");
+        self.database
+            .execute(
+                "DELETE FROM schema_migration WHERE version = ?1",
+                &[StoreValue::Integer(i64::from(DISCARD_MIGRATION_VERSION))],
+            )
+            .expect("die Registraturzeile muss sich entfernen lassen");
     }
 }
 
@@ -982,6 +1048,160 @@ impl DiscardHarness {
             .prepared_finalization_marker()
             .expect("die Uebergangstabelle muss lesbar sein")
             .is_none()
+    }
+
+    /// Nimmt die AUSSCHLIESSLICHE Entwurfssperre und HAELT sie.
+    ///
+    /// Der Rueckgabewert ist der Waechter selbst und kein `()`: `DraftLock`
+    /// gibt die Sperre in seinem `Drop` frei, ein weggeworfener Rueckgabewert
+    /// haette sie also nie gehalten.
+    #[must_use]
+    pub fn hold_draft_lock(&self) -> DraftLock {
+        self.repo()
+            .acquire_draft_lock()
+            .expect("die freie Sperre muss sich nehmen lassen")
+    }
+
+    /// Der Text, den die Fixture in den Originalentwurf geschrieben hat.
+    #[must_use]
+    pub const fn original_notes() -> &'static str {
+        ORIGINAL_NOTES
+    }
+
+    /// Der Text, den die Ablage JETZT zurueckgibt.
+    pub fn draft_notes(&self) -> Result<String, DraftError> {
+        self.repo()
+            .load_or_create()
+            .map(|draft| draft.notes().to_owned())
+    }
+
+    /// Oeffnet die Ablage NEU auf einem Geraet, das GENAU EINEN Zugriff auf den
+    /// `draftDEK` verweigert.
+    ///
+    /// Der Doppelgaenger ist EINMALIG und nicht dauerhaft verweigernd, und das
+    /// ist tragend statt bequem. Ein dauerhaft verweigernder Speicher liesse
+    /// auch das `replace_with_blank` des verallgemeinerten Zweigs scheitern —
+    /// mit DEMSELBEN Fehlercode. Der Zeuge maesse dann nichts: er waere auch
+    /// dann gruen, wenn die enge Aufzaehlung in
+    /// `crates/ea-draft/src/discard.rs` zu `Err(_)` verallgemeinert waere.
+    ///
+    /// Einmalig ist ausserdem genau der Fall, den der Kommentar dort
+    /// beschreibt: das Geraet ist im Augenblick des Neustarts gesperrt und
+    /// kurz danach wieder offen. Der Entwurf ist die ganze Zeit
+    /// wiederherstellbar, und ein voruebergehender Fehler darf ihn nicht
+    /// unwiderruflich vernichten.
+    pub fn restart_and_resume_on_a_briefly_locked_device(
+        &self,
+    ) -> Result<RestartState, DraftError> {
+        let proof = self.proof_for(ReauthPurpose::DiscardDraft);
+        self.reopen();
+        let borrowed = self.open.borrow();
+        let open = borrowed
+            .as_ref()
+            .expect("die Fixture haelt eine geoeffnete Datenbank");
+        // Die Datenbank wurde mit dem WAHRHAFTIGEN Speicher geoeffnet: der
+        // Datenbankschluessel laeuft ueber `unwrap_database_key`, und eine
+        // Verweigerung dort maesse das Oeffnen und nicht den Neustartpfad.
+        let locked = Arc::new(BrieflyLockedProvider {
+            inner: Arc::clone(&self.provider),
+            refusals_left: AtomicUsize::new(1),
+        }) as Arc<dyn KeyProvider>;
+        let repository = Arc::new(AutosaveDraftRepository::new(
+            Arc::clone(&open.database),
+            Arc::clone(&locked),
+        )) as Arc<dyn DraftRepository>;
+        DiscardService::new(
+            repository,
+            locked,
+            self.bound_binding_object_hash(),
+            self.head.preexisting_effective_now(),
+        )
+        .resume_after_restart(&proof)
+    }
+}
+
+/// Ein Schluesselspeicher eines Geraets, das GENAU EINEN Zugriff auf ein
+/// eingepacktes Geheimnis verweigert.
+///
+/// Er meldet [`KeyError::PurposeMismatch`] — einen der drei Fehler, die der
+/// Kommentar in `crates/ea-draft/src/discard.rs` ausdruecklich als Aussage
+/// ueber JETZT und nicht ueber den Entwurf benennt („Geraet gesperrt, TPM
+/// belegt, Praesenz nicht verfuegbar"). Danach gibt er den Zugriff frei, wie
+/// ein Bediener, der sein Geraet entsperrt.
+///
+/// Verweigert wird AUSSCHLIESSLICH `unwrap_secret`. `unwrap_database_key`
+/// laeuft durch, weil sonst schon das Oeffnen der Datenbank scheiterte und der
+/// Neustartpfad gar nicht erreicht wuerde.
+struct BrieflyLockedProvider {
+    inner: Arc<InMemoryKeyProvider>,
+    refusals_left: AtomicUsize,
+}
+
+impl KeyProvider for BrieflyLockedProvider {
+    fn generate(
+        &self,
+        purpose: SecretPurpose,
+        protection: KeyProtectionProfileV1,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.generate(purpose, protection)
+    }
+
+    fn sign(
+        &self,
+        handle: &KeyHandle,
+        content_type: ea_crypto::ContentType,
+        certificate_hash: ea_types::CertificateHash,
+        payload: &[u8],
+    ) -> Result<ea_key_provider::CoseSign1Bytes, ea_key_provider::KeyError> {
+        self.inner
+            .sign(handle, content_type, certificate_hash, payload)
+    }
+
+    fn wrap_secret(
+        &self,
+        purpose: SecretPurpose,
+        secret: SecretBytes<32>,
+    ) -> Result<KeyHandle, ea_key_provider::KeyError> {
+        self.inner.wrap_secret(purpose, secret)
+    }
+
+    /// Verweigert die ersten `refusals_left` Zugriffe und laesst danach durch.
+    fn unwrap_secret(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<SecretBytes<32>, ea_key_provider::KeyError> {
+        if self
+            .refusals_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ea_key_provider::KeyError::PurposeMismatch);
+        }
+        self.inner.unwrap_secret(handle)
+    }
+
+    fn unwrap_database_key(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<ea_crypto::SecretVec, ea_key_provider::KeyError> {
+        self.inner.unwrap_database_key(handle)
+    }
+
+    fn delete(&self, handle: &KeyHandle) -> Result<(), ea_key_provider::KeyError> {
+        self.inner.delete(handle)
+    }
+
+    fn contains(&self, handle: &KeyHandle) -> Result<bool, ea_key_provider::KeyError> {
+        self.inner.contains(handle)
+    }
+
+    fn reached_protection_profile(
+        &self,
+        handle: &KeyHandle,
+    ) -> Result<KeyProtectionProfileV1, ea_key_provider::KeyError> {
+        self.inner.reached_protection_profile(handle)
     }
 }
 

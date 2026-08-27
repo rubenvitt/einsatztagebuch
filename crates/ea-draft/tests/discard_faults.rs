@@ -10,7 +10,7 @@ mod support;
 
 use ea_draft::{DiscardFaultPoint, DiscardPhase, RestartState};
 use ea_operator::ReauthPurpose;
-use support::DraftHarness;
+use support::{DiscardHarness, DraftHarness};
 
 #[test]
 fn every_discard_fault_yields_old_draft_or_permanent_blank_draft() {
@@ -372,4 +372,94 @@ fn a_prepared_finalization_marker_refuses_a_new_discard_intent_at_the_write_site
         h.restart_and_resume().unwrap(),
         RestartState::PreparedFinalizationPending
     );
+}
+
+/// Ein VORUEBERGEHENDER Schluesselfehler bricht den Neustartpfad ab und
+/// vernichtet NICHTS.
+///
+/// `resume_after_restart` zaehlt genau zwei Fehler auf, die „der Entwurf ist
+/// dauerhaft unlesbar" heissen — `KeyError::NotFound` und `CryptoError::AeadOpen`
+/// (`crates/ea-draft/src/discard.rs`). Jeder andere Schluesselfehler ist eine
+/// Aussage ueber JETZT: Geraet gesperrt, TPM belegt, Praesenz nicht verfuegbar.
+/// Waere die Aufzaehlung zu `Err(_) => replace_with_blank` verallgemeinert,
+/// vollendete ein Neustart auf einem kurzzeitig gesperrten Geraet die
+/// Vernichtung — obwohl der Entwurf die ganze Zeit wiederherstellbar war. Das
+/// ist die Umkehrung von fail-closed.
+///
+/// # Warum der Doppelgaenger nur EINEN Zugriff verweigert
+///
+/// Ein dauerhaft verweigernder Speicher liesse auch das `replace_with_blank`
+/// des verallgemeinerten Zweigs scheitern, und zwar mit DEMSELBEN Fehlercode:
+/// der Zeuge waere dann auch ohne die enge Aufzaehlung gruen und maesse nichts.
+/// Erst die einmalige Verweigerung trennt die beiden Faelle — und sie ist
+/// zugleich der Fall, den der Kommentar im Produktionscode beschreibt.
+#[test]
+fn a_transient_key_failure_aborts_the_restart_path_and_destroys_nothing() {
+    let h = DraftHarness::with_nonempty_draft();
+
+    assert_eq!(
+        h.restart_and_resume_on_a_briefly_locked_device()
+            .unwrap_err()
+            .code(),
+        "EA-KEY-PURPOSE-MISMATCH"
+    );
+
+    // Nichts ist dauerhaft geworden — und die Zustandsmarke allein sagte das
+    // nicht: gemessen wird, dass der ORIGINALTEXT noch da ist.
+    assert!(h.draft_dek_is_present());
+    assert!(h.pending_discard_is_absent());
+    assert_eq!(
+        h.restart_and_resume().unwrap(),
+        RestartState::OriginalDraftUnchanged
+    );
+    assert_eq!(
+        h.draft_notes().unwrap(),
+        DiscardHarness::original_notes(),
+        "der Entwurf war die ganze Zeit wiederherstellbar"
+    );
+}
+
+/// Solange die AUSSCHLIESSLICHE Entwurfssperre liegt, beginnt kein Verwerfen.
+///
+/// Die Sperre ist die prozessuebergreifende Fassung von Produktinvariante 1
+/// („es existiert genau ein aktiver Entwurf", `design.md`:426): sie steht gegen
+/// ZWEI Writer-Instanzen auf demselben Konto. Sie zuerst zu nehmen ist deshalb
+/// keine Reihenfolgenfrage — ohne sie koennten zwei Instanzen denselben Entwurf
+/// gleichzeitig unwiderruflich verwerfen, und der zweite fiele auf einen
+/// Zustand, den der erste gerade wechselt.
+///
+/// Die Zusicherung ueber der Ablage steht in `repository_guards.rs`; diese hier
+/// misst den DIENSTEINGANG und damit, dass er die Sperre wirklich als ERSTES
+/// nimmt — vor dem Nachweis, vor der Marke, vor jedem Lesen.
+#[test]
+fn a_held_draft_lock_refuses_every_entry_into_the_discard() {
+    let h = DraftHarness::with_nonempty_draft();
+    let held = h.hold_draft_lock();
+
+    assert_eq!(
+        h.discard_service()
+            .begin_discard(h.proof_for(ReauthPurpose::DiscardDraft))
+            .unwrap_err()
+            .code(),
+        "EA-DRAFT-LOCK-HELD"
+    );
+    assert_eq!(
+        h.discard_service()
+            .resume_after_restart(&h.proof_for(ReauthPurpose::DiscardDraft))
+            .unwrap_err()
+            .code(),
+        "EA-DRAFT-LOCK-HELD"
+    );
+    // Nichts ist dauerhaft geworden: keine Absicht gebucht, der Entwurf steht.
+    assert!(h.pending_discard_is_absent());
+    assert!(h.draft_dek_is_present());
+
+    // Und die Sperre ist ein Waechter und keine Wand: nach ihrem Fallen laeuft
+    // derselbe Eingang durch.
+    drop(held);
+    assert_eq!(
+        h.restart_and_resume().unwrap(),
+        RestartState::OriginalDraftUnchanged
+    );
+    assert_eq!(h.draft_notes().unwrap(), DiscardHarness::original_notes());
 }

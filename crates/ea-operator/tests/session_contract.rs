@@ -274,7 +274,16 @@ mod fixtures {
     /// `PreexistingEffectiveNow`.
     #[must_use]
     pub fn selected_registry_head_at(now_ms: i64) -> SelectedRegistryHead {
-        let (line, _, _) = build_line();
+        select_head_of(&build_line().0, now_ms)
+    }
+
+    /// Waehlt den letzten Head EINER GEBAUTEN LINIE — der gemeinsame Rumpf von
+    /// [`selected_registry_head_at`] und den beiden Randlinien darunter.
+    ///
+    /// Herausgezogen und nicht abgeschrieben: eine zweite Kopie des
+    /// Auswahlpfads koennte still von diesem abweichen, und dann pruefte die
+    /// Randlinie eine andere Auswahl als die Standardfixture.
+    fn select_head_of(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead {
         let head_index = line.heads().len() - 1;
         let head = line.heads()[head_index];
         let key = support::state_key();
@@ -296,6 +305,147 @@ mod fixtures {
             panic!("the fixture must select its own current Head");
         };
         selected
+    }
+
+    /// Dieselbe Linie wie [`build_line`], aber mit ihrem Zeitfenster DICHT AN
+    /// `axis_end` statt bei den vierstelligen Vorgabewerten.
+    ///
+    /// Nur das Zeitfenster wandert; Sequenzen, Marken, Rollen und der
+    /// Instanzschluessel bleiben. `issuedAt` und `notBefore` wandern MIT, damit
+    /// `notAfter - issuedAt` klein bleibt: `validate_event_time_shape`
+    /// (`crates/ea-trust/src/registry.rs:1383-1396`) stellt genau diese
+    /// Differenz gegen `max-registry-age-ms`, und eine Linie, die dafuer die
+    /// Policy aufweiten muesste, belegte den Ueberlauf zusammen mit einer
+    /// zweiten, unnoetigen Abweichung.
+    fn build_line_near(axis_end: i64) -> (RegistryLineBuilder, ObjectHash) {
+        let options = |effective_from: u64, valid_through: u64| HeadOptions {
+            effective_from: Some(effective_from),
+            valid_through: Some(valid_through),
+            issued_at: UnixMillis::new(axis_end - 2_000),
+            not_before: UnixMillis::new(axis_end - 3_000),
+            not_after: UnixMillis::new(axis_end),
+            ..HeadOptions::default()
+        };
+        let mut line = RegistryLineBuilder::new();
+        line.push(
+            ActionSpec::Policy {
+                policy_version: None,
+                previous_policy_hash: None,
+                effective_from: None,
+            },
+            options(1, 10),
+        );
+        let writer = line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::Writer,
+                marker: 0x61,
+                effective_from: None,
+            },
+            options(11, 20),
+        );
+        let binding = line.push(
+            ActionSpec::OperatorBinding {
+                certificate_hash: writer
+                    .direct_object_hash
+                    .expect("the fixture Writer certificate is a direct target"),
+                role: OperatorRoleV1::Writer,
+                marker: BINDING_MARKER,
+                effective_from: None,
+            },
+            HeadOptions {
+                binding_instance_key_thumbprint_override: Some(KeyThumbprint::from(
+                    Hash32::try_from(
+                        public_key(INSTANCE_SECRET)
+                            .thumbprint()
+                            .as_bytes()
+                            .as_slice(),
+                    )
+                    .expect("a thumbprint is 32 bytes"),
+                )),
+                ..options(21, 100)
+            },
+        );
+        let binding_object_hash = binding
+            .direct_object_hash
+            .expect("the fixture operator binding is a direct target");
+        (line, binding_object_hash)
+    }
+
+    /// Ein aufgeloester Bediener auf einer Linie, deren Head bei `axis_end`
+    /// endet, gewaehlt bei `axis_end - 1_000`.
+    ///
+    /// Die Bindung kommt AUS DIESEM Head — nicht aus der Standardlinie, deren
+    /// Objekthashes andere sind.
+    #[must_use]
+    pub fn binding_near_the_end_of_the_time_axis(axis_end: i64) -> BoundOperator {
+        let (line, binding_object_hash) = build_line_near(axis_end);
+        let head = select_head_of(&line, axis_end - 1_000);
+        BoundOperator::resolve(&head, binding_object_hash)
+            .expect("the fixture binding is active at the selected sequence")
+    }
+
+    /// Dieselbe Linie wie [`build_line`], aber das Writer-Zertifikat ist ab
+    /// `revoked_from` widerrufen — VOR [`PROPOSED_SEQUENCE`], waehrend das
+    /// Fenster der Bindung selbst (21..100) offen bleibt.
+    fn build_line_with_revoked_writer(revoked_from: u64) -> (RegistryLineBuilder, ObjectHash) {
+        let mut line = RegistryLineBuilder::new();
+        line.push(
+            ActionSpec::Policy {
+                policy_version: None,
+                previous_policy_hash: None,
+                effective_from: None,
+            },
+            head_options(1, 10),
+        );
+        let writer = line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::Writer,
+                marker: 0x61,
+                effective_from: None,
+            },
+            HeadOptions {
+                revoked_from_sequence: Some(ChainSequence::new(revoked_from)),
+                ..head_options(11, 20)
+            },
+        );
+        let binding = line.push(
+            ActionSpec::OperatorBinding {
+                certificate_hash: writer
+                    .direct_object_hash
+                    .expect("the fixture Writer certificate is a direct target"),
+                role: OperatorRoleV1::Writer,
+                marker: BINDING_MARKER,
+                effective_from: None,
+            },
+            HeadOptions {
+                binding_instance_key_thumbprint_override: Some(KeyThumbprint::from(
+                    Hash32::try_from(
+                        public_key(INSTANCE_SECRET)
+                            .thumbprint()
+                            .as_bytes()
+                            .as_slice(),
+                    )
+                    .expect("a thumbprint is 32 bytes"),
+                )),
+                ..head_options(21, 100)
+            },
+        );
+        let binding_object_hash = binding
+            .direct_object_hash
+            .expect("the fixture operator binding is a direct target");
+        (line, binding_object_hash)
+    }
+
+    /// Der Head und der Bindungshash einer Linie, deren gebundenes
+    /// Writer-Zertifikat bei der gewaehlten Sequenz widerrufen ist.
+    ///
+    /// Der Widerruf greift bei 25, gewaehlt wird bei
+    /// [`PROPOSED_SEQUENCE`] = 30, und das Fenster der Bindung reicht bis 100 —
+    /// also ist NUR das Zertifikat unwirksam.
+    #[must_use]
+    pub fn head_with_a_revoked_device_certificate() -> (SelectedRegistryHead, ObjectHash) {
+        let (line, binding_object_hash) = build_line_with_revoked_writer(25);
+        (select_head_of(&line, FIXTURE_NOW_MS), binding_object_hash)
     }
 
     /// Der Head zum Standardzeitpunkt der Fixture.
@@ -843,4 +993,96 @@ fn the_operator_ports_are_object_safe_and_the_inputs_are_closed() {
         OsAccountInputs::binding_hash;
     let _: &dyn OsAccountProvider = &*fixtures::valid_account();
     let _: BoundOperator = fixtures::binding(&head);
+}
+
+/// Ein Gueltigkeitsfenster, das nicht mehr auf die Millisekundenachse passt,
+/// wird abgelehnt — und zwar VOR der Praesenzabfrage.
+///
+/// `reauthenticate` bildet `expiresAt` als `issuedAt + MAX_INACTIVITY_MS`
+/// (`crates/ea-operator/src/session.rs:304-308`). Ohne den `checked_add` liefe
+/// die Summe am oberen Rand der `i64`-Achse um, und der Nachweis truege ein
+/// `expiresAt` VOR seinem `issuedAt` — `is_valid_for` verglicht dann gegen ein
+/// Fenster, das es nicht gibt. Der Abbruch ist deshalb kein Formfehler, sondern
+/// die Weigerung, einen Nachweis mit unbestimmter Lebensdauer auszustellen.
+///
+/// Die Zeit entsteht wie ueberall in dieser Datei als
+/// `PreexistingEffectiveNow` eines ECHT gewaehlten Head; nur das Zeitfenster der
+/// Linie liegt am Achsenende. Die POSITIVKONTROLLE davor faehrt dieselbe Linie
+/// eine Million Millisekunden frueher und stellt einen Nachweis aus — ohne sie
+/// waere ein Fixturefehler (eine Linie, die aus einem ganz anderen Grund keinen
+/// Nachweis hergibt) von der gemessenen Zusage nicht zu unterscheiden.
+///
+/// Die zweite Zusicherung ist die eigentliche fail-closed-Aussage: die Attrappe
+/// hat KEINE Challenge zu signieren bekommen. Ein Bediener wird also nicht zur
+/// Fingerabdruck- oder PIN-Eingabe aufgefordert fuer eine Sitzung, die danach
+/// ohnehin nicht ausgestellt werden kann.
+#[test]
+fn a_validity_window_beyond_the_millisecond_axis_is_refused_before_any_presence_prompt() {
+    let representable = FakeAuthenticator::new(fixtures::binding_near_the_end_of_the_time_axis(
+        i64::MAX - 1_000_000,
+    ));
+    representable
+        .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
+        .expect("a window that still fits on the axis issues a proof");
+    assert_eq!(
+        representable.challenges().len(),
+        1,
+        "the representable case DOES reach the presence prompt"
+    );
+
+    let at_the_edge =
+        FakeAuthenticator::new(fixtures::binding_near_the_end_of_the_time_axis(i64::MAX));
+    assert_eq!(
+        at_the_edge
+            .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
+            .unwrap_err()
+            .code(),
+        "EA-OPERATOR-VALIDITY-WINDOW-UNREPRESENTABLE"
+    );
+    assert!(
+        at_the_edge.challenges().is_empty(),
+        "no presence prompt is raised for a session that cannot be represented"
+    );
+}
+
+/// Ein widerrufenes Geraetezertifikat stoppt die Aufloesung schon an der
+/// BINDUNG — und nicht erst am Zertifikatsarm dahinter.
+///
+/// Das ist der gemessene Grund dafuer, dass
+/// `EA-OPERATOR-DEVICE-CERTIFICATE-NOT-ACTIVE` (`account.rs:52`, erhoben in
+/// `account.rs:231`) ueber `SelectedRegistryHead` nicht erreichbar ist:
+/// `PreviousHeadState::active_operator_binding`
+/// (`crates/ea-trust/src/resolver.rs:151-168`) fuehrt die Zertifikatspruefung
+/// SELBST — mit derselben `at_sequence`, die `BoundOperator::resolve`
+/// unmittelbar danach benutzt. Ist das Zertifikat unwirksam, meldet schon der
+/// erste Zugriff `None`, und `resolve` bricht mit
+/// `EA-OPERATOR-BINDING-NOT-ACTIVE` ab. Der zweite Arm ist ein Tiefenschutz,
+/// kein erreichbarer Ausgang.
+///
+/// Dieser Test haelt genau diese Kopplung fest: faellt die Zertifikatspruefung
+/// je aus `active_operator_binding` heraus, wird der bislang tote Arm lebendig,
+/// der gemessene Code wechselt und der Test wird rot. Er ersetzt keinen Zeugen
+/// fuer den Code — es gibt keinen zu bauen — sondern bewacht die Aussage, dass
+/// keiner noetig ist.
+#[test]
+fn a_revoked_device_certificate_already_stops_the_binding_lookup() {
+    let (head, binding_object_hash) = fixtures::head_with_a_revoked_device_certificate();
+    assert!(
+        head.active_operator_binding_fields(binding_object_hash)
+            .is_none(),
+        "the Head itself refuses a binding whose device certificate is revoked"
+    );
+    let Err(error) = BoundOperator::resolve(&head, binding_object_hash) else {
+        panic!("a binding on a revoked device certificate must not resolve");
+    };
+    assert_eq!(error.code(), "EA-OPERATOR-BINDING-NOT-ACTIVE");
+
+    // Positivkontrolle: dieselbe Linie OHNE den Widerruf loest auf. Ohne sie
+    // waere der Test auch dann gruen, wenn die Fixture aus einem beliebigen
+    // anderen Grund keine Bindung mehr herstellte.
+    let intact = fixtures::selected_registry_head();
+    assert!(
+        BoundOperator::resolve(&intact, fixtures::binding_object_hash()).is_ok(),
+        "without the revocation the very same shape resolves"
+    );
 }

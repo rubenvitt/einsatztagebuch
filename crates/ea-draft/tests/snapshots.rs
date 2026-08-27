@@ -102,4 +102,26 @@ fn an_unknown_master_id_is_a_named_absence_and_not_an_empty_snapshot() {
             .map(MasterDataError::code),
         Some(MasterDataError::UnknownMasterId.code())
     );
+
+    // Die drei Zusicherungen darueber vergleichen `code()` mit `code()`: sie
+    // messen den PFAD und blieben auch dann gruen, wenn die Zeichenkette
+    // wanderte. Der stabile Code ist eine eigene Zusage und wird deshalb
+    // gepinnt.
+    assert_eq!(
+        MasterDataError::UnknownMasterId.code(),
+        "EA-MASTER-UNKNOWN-ID"
+    );
+    // Die zwei uebrigen Codes dieser Grenze sind im Bestand nicht erreichbar —
+    // `Snapshot` liegt hinter fuenf `map_err` ueber Konstruktoren, die
+    // ausnahmslos `Ok` liefern (`crates/ea-schema/src/model.rs`:820-1000), und
+    // `RevisionOverflow` verlangt eine negative Revisionsspalte, die
+    // `CHECK (revision >= 1)` in `0003_master_data.sql` ausschliesst. Sie
+    // bleiben Vertragsflaeche und werden deshalb gepinnt, aber nicht
+    // erzwungen: dieselbe Begruendung wie `ChainError::NodeLimit` in
+    // `crates/ea-chain/tests/chain_core.rs`:149.
+    assert_eq!(MasterDataError::Snapshot.code(), "EA-MASTER-SNAPSHOT");
+    assert_eq!(
+        MasterDataError::RevisionOverflow.code(),
+        "EA-MASTER-REVISION-OVERFLOW"
+    );
 }

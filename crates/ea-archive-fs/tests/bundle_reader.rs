@@ -248,3 +248,34 @@ fn the_bundle_carries_the_format_package_and_every_non_object_file() {
     }
     assert!(paths.contains(&ea_archive::README_FORMAT_FILE_V1.to_owned()));
 }
+
+/// Die STABILEN Fehlercodes des Containers.
+///
+/// Fuenf der sechs Varianten sind in diesem Ziel und in `bundle_export.rs`
+/// ueber den VARIANTENNAMEN erreicht — `BundleError` ist `PartialEq`, also
+/// vergleichen jene Zusicherungen Werte und nie Zeichenketten. Der Fehlercode
+/// ist aber eine eigene Zusage: er verlaesst die Crate, und ein Aufrufer
+/// assertiert gegen ihn. Wanderte er, faende es keine dieser Zusicherungen.
+///
+/// `Io` steht mit dabei, obwohl kein Test seinen PFAD faehrt: der Vertrag
+/// umfasst ihn, und den Code zu pinnen ist eine andere Aussage als das
+/// Wirtdateisystem zu einer Ablehnung zu zwingen. Dieselbe Begruendung wie
+/// `ChainError::NodeLimit` in `crates/ea-chain/tests/chain_core.rs`:149.
+#[test]
+fn every_bundle_error_keeps_its_stable_code() {
+    assert_eq!(
+        BundleError::SourceNotFullyVerified.code(),
+        "EA-BUNDLE-SOURCE-NOT-FULLY-VERIFIED"
+    );
+    assert_eq!(
+        BundleError::TargetOccupied.code(),
+        "EA-BUNDLE-TARGET-OCCUPIED"
+    );
+    assert_eq!(BundleError::Malformed.code(), "EA-BUNDLE-MALFORMED");
+    assert_eq!(BundleError::BlobLimit.code(), "EA-BUNDLE-BLOB-LIMIT");
+    assert_eq!(
+        BundleError::TotalByteLimit.code(),
+        "EA-BUNDLE-TOTAL-BYTE-LIMIT"
+    );
+    assert_eq!(BundleError::Io.code(), "EA-BUNDLE-IO");
+}
