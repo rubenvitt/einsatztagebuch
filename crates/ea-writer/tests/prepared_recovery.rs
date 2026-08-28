@@ -671,3 +671,163 @@ fn a_keystore_that_reports_a_deletion_without_deleting_stops_the_finalization() 
     assert!(!harness.draft_is_blank());
     assert!(harness.published_entry_paths().is_empty());
 }
+
+/// Die Adresse der GESTAGTEN Eintragsbytes dieser vorbereiteten Transaktion.
+fn staged_entry_path(harness: &WriterHarness) -> String {
+    harness
+        .backend()
+        .relative_paths_below_for_test("entries/")
+        .into_iter()
+        .find(|path| path.ends_with(".eip.staging"))
+        .expect("Schritt 8 hat die Eintragsbytes gestagt")
+}
+
+/// Der `initialGrantPlanHash`, den das vorbereitete `.eip` SIGNIERT.
+///
+/// Er wird aus den gestagten Bytes gelesen und nicht neu gerechnet: die Marke
+/// soll gegen das gemessen werden, was der Writer unterschrieben hat, und eine
+/// zweite Rechnung waere eine zweite Wahrheit.
+fn signed_grant_plan_hash(harness: &WriterHarness) -> [u8; 32] {
+    let bytes = harness
+        .backend()
+        .read_for_test(&staged_entry_path(harness))
+        .expect("die gestagten Eintragsbytes muessen lesbar sein");
+    let parsed = ea_format::decode_exact_object(&bytes).expect("das .eip muss dekodieren");
+    let ea_format::ParsedArchiveObject::Entry(entry) = &parsed else {
+        panic!("unter entries/ liegt ein .eip");
+    };
+    entry.value().manifest().fields().initial_grant_plan_hash
+}
+
+/// Die liegenden Markenbytes.
+fn prepared_marker_bytes(harness: &WriterHarness) -> Vec<u8> {
+    harness
+        .repository()
+        .prepared_finalization_marker()
+        .expect("die Ablage muss lesbar sein")
+        .expect("hinter der Grenze liegt eine Marke")
+        .as_bytes()
+        .to_vec()
+}
+
+/// Legt `bytes` als Abschlussmarke ab.
+fn put_prepared_marker(harness: &WriterHarness, bytes: Vec<u8>) {
+    harness
+        .repository()
+        .replace_prepared_finalization_marker(Some(ea_draft::PreparedFinalizationMarker::new(
+            bytes,
+        )))
+        .expect("die Marke muss sich ersetzen lassen");
+}
+
+/// Eine Marke, deren Grant-Plan-Hash NICHT der ist, den das `.eip` signiert,
+/// wird fail-closed abgewiesen.
+///
+/// # Was hier gemessen wird
+///
+/// `grant_plan_hash` steht MIT in der Marke, „damit die Wiederherstellung
+/// belegen kann, dass die uebernommenen Grants zu dem Plan gehoeren, den das
+/// `.eip` signiert" (`crates/ea-writer/src/marker.rs`) — und dieser Beleg wurde
+/// nie gefuehrt: das Feld wurde geschrieben, gelesen und nie verglichen. Ohne
+/// den Vergleich uebernimmt die Wiederaufnahme hinter der unwiderruflichen
+/// Grenze eine BELIEBIGE Grantmenge unter einem `.eip`, das einen anderen Plan
+/// bindet — und `design.md` §9.4 verlangt genau umgekehrt, dass vorab
+/// veroeffentlichte Grants „nur von der ZUGEHOERIGEN vorbereiteten Transaktion
+/// uebernommen" werden.
+///
+/// Manipuliert wird GENAU dieses Feld und kein beliebiges Byte: der Hash steht
+/// zweimal in der Marke — einmal als ihr eigenes Feld, einmal im eingebetteten
+/// `manifestCore` des `.eip` —, und nur die ERSTE Fundstelle ist das Feld. Eine
+/// Manipulation an einer beliebigen Stelle fiele schon an der Gestalt auf und
+/// wuerde diesen Leser nie erreichen.
+#[test]
+fn a_marker_whose_grant_plan_hash_contradicts_the_entry_is_refused() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterAbsenceConfirmation)
+        .expect("der Abbruch hinter der Grenze muss erreichbar sein");
+
+    let plan_hash = signed_grant_plan_hash(&harness);
+    let mut bytes = prepared_marker_bytes(&harness);
+    let occurrences = bytes
+        .windows(plan_hash.len())
+        .filter(|window| *window == plan_hash.as_slice())
+        .count();
+    assert_eq!(
+        occurrences, 2,
+        "der Plan-Hash steht als eigenes Markenfeld UND im signierten manifestCore — \
+         ohne beide Fundstellen misst dieser Test nichts"
+    );
+    let field = bytes
+        .windows(plan_hash.len())
+        .position(|window| window == plan_hash.as_slice())
+        .expect("die erste Fundstelle ist das Markenfeld");
+    bytes[field..field + plan_hash.len()].copy_from_slice(&[0xa5; 32]);
+    put_prepared_marker(&harness, bytes);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service
+        .recover_pending()
+        .expect_err("eine Marke, die ihrem eigenen .eip widerspricht, MUSS abgewiesen werden");
+    assert_eq!(
+        refused.code(),
+        "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+    );
+    assert!(
+        harness.published_entry_paths().is_empty(),
+        "eine abgewiesene Marke veroeffentlicht nichts"
+    );
+    assert!(harness.published_grant_paths().is_empty());
+}
+
+/// Eine Marke OHNE einen einzigen Grant wird fail-closed abgewiesen.
+///
+/// Der Grant-Plan traegt „genau einen aktiven Recovery-Empfaenger und
+/// ausnahmslos jedes aktive Reader-Zertifikat" (`design.md` §9.3 Schritt 5), ist
+/// also NIE leer. Eine leere Marke ist damit keine Transaktion dieses Bauwerks,
+/// und sie zu vollenden hiesse, einen Eintrag zu veroeffentlichen, den kein
+/// Recovery-Empfaenger je wieder oeffnen kann.
+///
+/// Gebaut wird sie aus der ECHTEN Marke: die Grantliste wird an ihrer Grenze
+/// abgeschnitten und durch die leere Liste ersetzt. Die Grenze ist die Stelle
+/// unmittelbar hinter den eingebetteten Eintragsbytes, und die Zusicherung ueber
+/// das dort stehende Byte belegt, dass wirklich der Listenkopf getroffen wurde.
+#[test]
+fn a_marker_without_a_single_grant_is_refused() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterAbsenceConfirmation)
+        .expect("der Abbruch hinter der Grenze muss erreichbar sein");
+
+    let entry_bytes = harness
+        .backend()
+        .read_for_test(&staged_entry_path(&harness))
+        .expect("die gestagten Eintragsbytes muessen lesbar sein");
+    let mut bytes = prepared_marker_bytes(&harness);
+    let start = bytes
+        .windows(entry_bytes.len())
+        .position(|window| window == entry_bytes.as_slice())
+        .expect("die Marke TRAEGT die Eintragsbytes");
+    let list = start + entry_bytes.len();
+    assert_eq!(
+        bytes[list],
+        0x80 | u8::try_from(harness.expected_grant_count()).expect("weniger als 24 Grants"),
+        "hinter den Eintragsbytes steht der Kopf der Grantliste"
+    );
+    bytes.truncate(list);
+    bytes.push(0x80);
+    put_prepared_marker(&harness, bytes);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service
+        .recover_pending()
+        .expect_err("eine Marke ohne Grant MUSS abgewiesen werden");
+    assert_eq!(
+        refused.code(),
+        "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+    );
+    assert!(harness.published_entry_paths().is_empty());
+    assert!(harness.published_grant_paths().is_empty());
+}

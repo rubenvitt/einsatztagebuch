@@ -162,6 +162,84 @@ impl PreparedTransactionV1 {
     }
 }
 
+impl PreparedTransactionV1 {
+    /// Rechnet die Marke gegen IHRE EIGENEN BYTES und gegen den Inhalt nach,
+    /// den sie traegt.
+    ///
+    /// # Warum das Dekodieren allein nicht reicht
+    ///
+    /// [`Self::decode`] belegt die GESTALT und sonst nichts. Eine Marke, die
+    /// diese Gestalt hat, aber einen fremden Objekthash, einen fremden
+    /// `entryHash` oder einen Grant-Plan-Hash nennt, den das eingebettete
+    /// `.eip` nicht signiert, wuerde ohne diese Nachrechnung hinter der
+    /// unwiderruflichen Grenze VOLLENDET — und zwar ausgerechnet auf dem
+    /// einzigen Weg, der keine zweite Gelegenheit zur Pruefung mehr hat.
+    /// `design.md` §9.4 verlangt umgekehrt, dass vorab veroeffentlichte Grants
+    /// „nur von der ZUGEHOERIGEN vorbereiteten Transaktion uebernommen" werden;
+    /// die Zugehoerigkeit ist genau das, was `grant_plan_hash` behauptet, und
+    /// bis hierher hat sie niemand nachgerechnet.
+    ///
+    /// Fuenf Aussagen, jede gegen eine ANDERE Quelle:
+    ///
+    /// 1. Die Marke kodiert sich BYTEGLEICH zurueck. Damit ist sie kanonisch
+    ///    und traegt keinen Anhang, den der Dekodierer ueberliest.
+    /// 2. Die Grantliste ist NICHT leer. Der Plan traegt „genau einen aktiven
+    ///    Recovery-Empfaenger und ausnahmslos jedes aktive Reader-Zertifikat"
+    ///    (`design.md` §9.3 Schritt 5), ist also nie leer; eine leere Liste
+    ///    ergaebe einen Eintrag, den kein Recovery-Empfaenger je oeffnet.
+    /// 3. Jeder Grant liegt unter SEINEM Objekthash — derselbe Hash, aus dem
+    ///    [`Self::targets`] die Zieladresse bildet.
+    /// 4. Die Eintragsbytes tragen den genannten Objekthash und den genannten
+    ///    `entryHash`.
+    /// 5. Der `grant_plan_hash` der Marke ist der `initialGrantPlanHash`, den
+    ///    das `.eip` SIGNIERT.
+    ///
+    /// # Errors
+    ///
+    /// [`WriterError::PreparedFinalizationInconsistent`] fuer jede der fuenf
+    /// Aussagen — fail-closed und ohne Teilausgabe.
+    pub(crate) fn verify(&self, exact: &[u8]) -> Result<(), WriterError> {
+        let inconsistent = || WriterError::PreparedFinalizationInconsistent;
+        if self.encode()? != exact {
+            return Err(inconsistent());
+        }
+        if self.grant_object_hashes.len() != self.grant_bytes.len() || self.grant_bytes.is_empty() {
+            return Err(inconsistent());
+        }
+        for (hash, bytes) in self.grant_object_hashes.iter().zip(&self.grant_bytes) {
+            let parsed = ea_format::decode_exact_object(bytes).map_err(|_| inconsistent())?;
+            let ea_format::ParsedArchiveObject::Grant(grant) = &parsed else {
+                return Err(inconsistent());
+            };
+            if grant.object_hash().as_bytes() != hash.as_bytes() {
+                return Err(inconsistent());
+            }
+        }
+        let parsed =
+            ea_format::decode_exact_object(&self.entry_bytes).map_err(|_| inconsistent())?;
+        let ea_format::ParsedArchiveObject::Entry(entry) = &parsed else {
+            return Err(inconsistent());
+        };
+        if entry.object_hash().as_bytes() != self.entry_object_hash.as_bytes() {
+            return Err(inconsistent());
+        }
+        if entry.value().entry_hash().as_bytes() != self.entry_hash.as_bytes() {
+            return Err(inconsistent());
+        }
+        if entry
+            .value()
+            .manifest()
+            .fields()
+            .initial_grant_plan_hash
+            .as_slice()
+            != self.grant_plan_hash.as_slice()
+        {
+            return Err(inconsistent());
+        }
+        Ok(())
+    }
+}
+
 /// Die Staging-Adresse zu einer Zieladresse — derselbe Suffix wie in
 /// [`ea_archive::ArchiveTransaction`], im SELBEN Layoutverzeichnis.
 pub(crate) fn staging_path(target: &ArchivePath) -> Result<ArchivePath, ArchiveBackendError> {
