@@ -91,8 +91,15 @@ fn every_fault_recovers_the_draft_or_completes_the_same_prepared_transaction() {
                 harness.published_entry_paths().is_empty(),
                 "die Rueckspielung veroeffentlicht nichts"
             );
+            // Gefragt ist der SCHLUESSELSPEICHER und nicht die Ablage:
+            // `draft_dek_is_present` liest ueber `load_or_create` und wiederholt
+            // damit genau die Bedingung, an der `recover_pending` den Fall
+            // ueberhaupt erkannt hat. `draft_dek_entry_is_absent` fragt den
+            // Speicher unter der Adresse, die die Fixture beim Saeen genommen
+            // hat — die zweite Seite desselben Ereignisses und keine
+            // Wiederholung.
             assert!(
-                !harness.draft_dek_is_present(),
+                harness.draft_dek_entry_is_absent(),
                 "der geraetegebundene Schluesselspeichereintrag kehrt NICHT mit den Dateien zurueck"
             );
         } else if point.phase().is_irreversible() {
@@ -830,4 +837,202 @@ fn a_marker_without_a_single_grant_is_refused() {
     );
     assert!(harness.published_entry_paths().is_empty());
     assert!(harness.published_grant_paths().is_empty());
+}
+
+/// Eine Marke, die sich nicht DEKODIEREN laesst, haelt die Wiederaufnahme an.
+///
+/// # Der Unterschied zu den zwei Zeugen darueber
+///
+/// Dort sind die Bytes WOHLGEFORMT und widersprechen sich
+/// (`EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT`); hier haben sie die Gestalt
+/// dieses Baustands gar nicht erst. Die Klausel
+/// (`crates/ea-writer/src/recover.rs`) ist die aelteste fail-closed Zusage des
+/// Wiederaufnahmepfads — „aus halb gelesenen Bytes darf kein Bestand entstehen"
+/// — und war in keinem Testverzeichnis getroffen: jede Marke, die je zur
+/// Wiederaufnahme kam, hatte dieser Lauf selbst geschrieben.
+///
+/// Der Zwilling der Verwerfensseite ist
+/// `crates/ea-draft/tests/discard_faults.rs`
+/// ::a_transient_key_failure_aborts_the_restart_path_and_destroys_nothing:
+/// dieselbe Bauart, ein Doppelgaenger fuer eine Lage, die der wahrhaftige Pfad
+/// nie erzeugt.
+#[test]
+fn a_marker_that_does_not_decode_stops_the_recovery() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterPreparedMarkerCommit)
+        .expect("der Abbruch vor der Grenze muss erreichbar sein");
+    // Nicht leer und nicht zufaellig: ein CBOR-Feld der FALSCHEN Stelligkeit.
+    // Damit faellt die Marke am ersten Gestalttor und nicht an einem
+    // Laengenfehler, den ein Dekodierer auch anders melden koennte.
+    put_prepared_marker(&harness, vec![0x86, 0x01]);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service
+        .recover_pending()
+        .expect_err("eine unlesbare Marke MUSS die Wiederaufnahme anhalten");
+    assert_eq!(refused.code(), "EA-WRITER-PREPARED-FINALIZATION-UNREADABLE");
+
+    // Nichts ist geschehen: nicht veroeffentlicht, und die Marke ist NICHT
+    // geloest — ein Abbruch raeumt keinen Zustand weg, den er nicht versteht.
+    assert!(harness.published_entry_paths().is_empty());
+    assert!(harness.published_grant_paths().is_empty());
+    assert!(harness.prepared_marker_is_present());
+    assert!(!harness.draft_is_blank(), "der Entwurf steht unveraendert");
+}
+
+/// Eine Ablage, deren `load_or_create` GENAU EINMAL an einem
+/// VORUEBERGEHENDEN Schluesselfehler scheitert.
+///
+/// Sie ist der Doppelgaenger fuer die Lage, die `recover_pending` ausdruecklich
+/// benennt und die kein wahrhaftiger Port erzeugt: „Geraet gesperrt, TPM
+/// belegt" — eine Aussage ueber JETZT und nicht ueber den Entwurf.
+///
+/// EINMALIG und nicht dauerhaft, aus demselben Grund wie
+/// `BrieflyLockedProvider` auf der Verwerfensseite: erst das spaetere
+/// Durchlassen belegt, dass der Entwurf die ganze Zeit wiederherstellbar war —
+/// und damit, dass das Abbrechen die richtige Antwort war und keine verpasste
+/// Gelegenheit.
+struct BrieflyLockedRepository {
+    inner: std::sync::Arc<dyn ea_draft::DraftRepository>,
+    refusals_left: std::sync::atomic::AtomicUsize,
+}
+
+impl ea_draft::DraftRepository for BrieflyLockedRepository {
+    fn load_or_create(&self) -> Result<ea_draft::Draft, ea_draft::DraftError> {
+        use std::sync::atomic::Ordering;
+        if self
+            .refusals_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ea_draft::DraftError::Key(
+                ea_key_provider::KeyError::PurposeMismatch,
+            ));
+        }
+        self.inner.load_or_create()
+    }
+
+    fn save(&self, draft: ea_draft::Draft) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
+        self.inner.save(draft)
+    }
+
+    fn draft_dek_handle(
+        &self,
+        draft: &ea_draft::SavedDraft,
+    ) -> Result<ea_key_provider::KeyHandle, ea_draft::DraftError> {
+        self.inner.draft_dek_handle(draft)
+    }
+
+    fn commit_discard_intent(
+        &self,
+        draft: &ea_draft::SavedDraft,
+    ) -> Result<ea_draft::DiscardIntent, ea_draft::DraftError> {
+        self.inner.commit_discard_intent(draft)
+    }
+
+    fn pending_discard(&self) -> Result<Option<ea_draft::DiscardIntent>, ea_draft::DraftError> {
+        self.inner.pending_discard()
+    }
+
+    fn replace_with_blank(&self) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
+        self.inner.replace_with_blank()
+    }
+
+    fn remove_ciphertext_and_intent_create_blank(
+        &self,
+        intent: &ea_draft::DiscardIntent,
+    ) -> Result<ea_draft::DiscardOutcome, ea_draft::DraftError> {
+        self.inner.remove_ciphertext_and_intent_create_blank(intent)
+    }
+
+    fn prepared_finalization_marker(
+        &self,
+    ) -> Result<Option<ea_draft::PreparedFinalizationMarker>, ea_draft::DraftError> {
+        self.inner.prepared_finalization_marker()
+    }
+
+    fn replace_prepared_finalization_marker(
+        &self,
+        marker: Option<ea_draft::PreparedFinalizationMarker>,
+    ) -> Result<(), ea_draft::DraftError> {
+        self.inner.replace_prepared_finalization_marker(marker)
+    }
+
+    fn acquire_draft_lock(&self) -> Result<ea_draft::DraftLock, ea_draft::DraftError> {
+        self.inner.acquire_draft_lock()
+    }
+}
+
+/// Ein VORUEBERGEHENDER Schluesselfehler bricht die Wiederaufnahme ab und
+/// vollendet NICHTS.
+///
+/// # Was hier gemessen wird
+///
+/// `recover_pending` liest den ENTWURF als Zeugen der unwiderruflichen Grenze
+/// und zaehlt GENAU ZWEI Fehler auf, die „der Schluessel ist fort" heissen:
+/// `Key(NotFound)` und `Crypto(AeadOpen)`. Jeder andere Schluesselfehler ist
+/// eine Aussage ueber JETZT — Geraet gesperrt, TPM belegt — und bricht ab.
+/// Diese Klausel war unbezeugt.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR und misst wirklich die enge Aufzaehlung:
+/// waere sie zu `Err(_) => key_present = false` verallgemeinert, laese die
+/// Wiederaufnahme den gesperrten Speicher als „Grenze ueberschritten", vollendete
+/// aus den vorbereiteten Bytes — `publish_from_prepared` fragt keinen
+/// Schluesselport — und veroeffentlichte ein `.eip`, dessen `draftDEK` in
+/// Wahrheit noch benutzbar ist. Genau der Zustand, den `design.md` §9.4 mit
+/// „zu keinem Zeitpunkt gleichzeitig ein committed `.eip` und ein nutzbarer
+/// `draftDEK`" ausschliesst. Die Zeile ueber `published_entry_paths` faellt
+/// dann.
+#[test]
+fn a_transient_key_failure_stops_the_recovery_and_completes_nothing() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterPreparedMarkerCommit)
+        .expect("der Abbruch vor der Grenze muss erreichbar sein");
+    let source = harness.source();
+    let locked = std::sync::Arc::new(BrieflyLockedRepository {
+        inner: harness.repository(),
+        refusals_left: std::sync::atomic::AtomicUsize::new(1),
+    }) as std::sync::Arc<dyn ea_draft::DraftRepository>;
+    let service = ea_writer::WriterService::new(
+        locked,
+        harness.provider() as std::sync::Arc<dyn ea_key_provider::KeyProvider>,
+        harness.backend(),
+        &source,
+        harness.head(),
+        &[],
+        ea_draft::IncidentNumberRegister::new(harness.database()),
+        ea_draft::OperatorProfileRepository::new(harness.database()),
+        harness.binding(),
+    );
+
+    let refused = service
+        .recover_pending()
+        .expect_err("ein voruebergehender Schluesselfehler MUSS abbrechen");
+    assert_eq!(refused.code(), "EA-KEY-PURPOSE-MISMATCH");
+
+    // Nichts ist dauerhaft geworden — und der Zustandscode allein sagte das
+    // nicht: gemessen wird, dass NICHTS veroeffentlicht ist und die Marke
+    // unberuehrt liegt.
+    assert!(
+        harness.published_entry_paths().is_empty(),
+        "ein gesperrtes Geraet vollendet keine Transaktion"
+    );
+    assert!(harness.published_grant_paths().is_empty());
+    assert!(harness.prepared_marker_is_present());
+
+    // Und der Entwurf war die ganze Zeit wiederherstellbar: derselbe Dienst,
+    // ein Zugriff spaeter, loest dieselbe Marke als Wiederherstellung auf.
+    assert!(
+        service
+            .recover_pending()
+            .expect("nach dem Entsperren muss die Wiederaufnahme tragen")
+            .is_original_draft()
+    );
+    assert!(!harness.draft_is_blank());
+    assert!(harness.published_entry_paths().is_empty());
 }
