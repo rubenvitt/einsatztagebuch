@@ -273,77 +273,158 @@ erfundene Kennung im Ledger wäre schlechter als ein benannter Merker im Plan.
 
 ---
 
-## 7. Korrekturanträge zu `final/testqualitaet.md` §9b (B.8)
+## 7. Korrekturanträge zu `final/testqualitaet.md` §9b
 
 `final/testqualitaet.md` ist ein abgeschlossenes Reviewdokument und bleibt
-unangetastet. Die F9-Runde und diese Nacharbeit haben aber gemessen, dass §9b
-die Lage an mindestens ACHT Stellen ungenau beschreibt. Belege: die Commits
-`66a3934` und `475f38a` sowie Task 2 dieser Nacharbeit
+unangetastet. **Es liegt nicht in diesem Arbeitsbaum** — `final/` existiert hier
+nicht. Was folgt, ist deshalb kein Abgleich mit dem Dokument selbst, sondern die
+Nachmessung der acht Positionen, mit denen die F9-Runde §9b widersprochen hat.
+Jede Position ist am 2026-08-28 gegen HEAD neu gemessen; wo die Nachmessung von
+der überlieferten Fassung abweicht, steht die Abweichung ausdrücklich da. Die
+Commitbelege der Runde: `66a3934`, `475f38a` und Task 2 dieser Nacharbeit
 (`594b20a..5373288`).
 
-1. **Zwei tote Varianten mit behaupteter Erhebungsstelle.**
+1. **Zwei tote Varianten mit behaupteter Erhebungsstelle — HÄLT.**
    `WriterError::NoPreparedFinalization` (`crates/ea-writer/src/error.rs:67`,
    Code `EA-WRITER-NO-PREPARED-FINALIZATION` an `:132`) und
    `WriterError::StaleAckReplay` (`:89`, Code `EA-REGISTRY-STALE-ACK-REPLAY` an
-   `:139`) haben im ganzen Baum nur Deklaration und Codearm, keine
-   Erhebungsstelle.
-2. **Vier strukturell unerreichbare Codes** werden als bloß unbezeugt geführt:
-   `EA-WRITER-SEQUENCE-LEASE-EXHAUSTED`, `EA-WRITER-NO-DRAFT-CONTENT`,
-   `EA-MASTER-REVISION-OVERFLOW` und
-   `EA-OPERATOR-DEVICE-CERTIFICATE-NOT-ACTIVE`. Unerreichbar ist etwas anderes
-   als unbezeugt: gegen das erste hilft ein Test, gegen das zweite nur eine
-   Entwurfsentscheidung.
-3. **Falscher Erhebungsort der vier Archivcodes.** Sie sind in `crates/ea-archive`
-   deklariert, aber ausnahmslos in
-   `crates/ea-archive-fs/src/profile_migration.rs` erhoben — `ea-archive` kann
-   sie ohne Cargo-Zyklus gar nicht bezeugen.
+   `:139`). Nachgemessen über `crates/`, `apps/` und `tests/`: für beide Namen
+   ausschließlich Deklaration und Codearm, keine Erhebungsstelle, kein Test.
+
+2. **„Vier strukturell unerreichbare Codes" — nachgemessen halten ZWEI.** Das
+   ist die zweite Korrektur an der überlieferten Fassung.
+   - `EA-MASTER-REVISION-OVERFLOW`: **hält.** Einzige Erhebungsstelle
+     `crates/ea-draft/src/master_data.rs:334` verlangt eine negative
+     Revisionsspalte, die `CHECK (revision >= 1)` ausschließt
+     (`crates/ea-local-store/migrations/0003_master_data.sql:55` und `:70`). Der Code ist gepinnt
+     (`crates/ea-draft/tests/snapshots.rs:122`), und die Begründung steht dort
+     an `:115-118`.
+   - `EA-OPERATOR-DEVICE-CERTIFICATE-NOT-ACTIVE`: **hält.** Erhebungsstelle
+     `crates/ea-operator/src/account.rs:231`; über `SelectedRegistryHead` nicht
+     erreichbar, weil `PreviousHeadState::active_operator_binding`
+     (`crates/ea-trust/src/resolver.rs:151-168`) die Zertifikatsprüfung selbst
+     führt und schon der erste Zugriff `None` meldet. Bewacht von
+     `crates/ea-operator/tests/session_contract.rs::a_revoked_device_certificate_already_stops_the_binding_lookup`
+     — ein Test, der nicht den Code bezeugt, sondern die Aussage, dass keiner
+     nötig ist.
+   - `EA-WRITER-SEQUENCE-LEASE-EXHAUSTED`: **hält NICHT.**
+     `crates/ea-writer/src/finalize.rs:631` ist eine gewöhnliche
+     Bereichsprüfung gegen `effective_from_sequence`/`valid_through_sequence`,
+     und der Baum trägt keine Begründung für Unerreichbarkeit. Kein Test pinnt
+     den Code; der einzige Berührungspunkt ist
+     `apps/desktop/src-tauri/src/commands/writer.rs::the_blocked_code_is_the_code_of_the_core_error`,
+     der den Fehlerwert durch die Naht reicht, statt die Prüfung auszulösen.
+     Richtig ist: **erreichbar und ungepinnt** — ein echtes Versäumnis.
+   - `EA-WRITER-NO-DRAFT-CONTENT`: **hält NICHT.**
+     `crates/ea-writer/src/finalize.rs:252` und `:273` sind `ok_or`-Tiefenschutz
+     auf `reached.preview` beziehungsweise `reached.outcome`, die der interne
+     Ablauf auf dem vollständigen Weg füllt. Anders als bei den zwei ersten
+     trägt der Baum dafür KEINE Unerreichbarkeitsbegründung, und kein Test pinnt
+     den Code. Richtig ist: **erreichbar aus dem Aufrufvertrag heraus,
+     ungepinnt, ohne Nachweis der Unerreichbarkeit.**
+
+3. **Falscher Erhebungsort der Archivcodes — HÄLT, aber es sind SECHS und nicht
+   vier.** Deklariert in `crates/ea-archive/src/backend_error.rs:77-82`, erhoben
+   ausnahmslos in `crates/ea-archive-fs/src/profile_migration.rs`:
+   `ReauthMismatch` (`:413`), `MigrationFault` (`:381`, `:528`),
+   `PendingPublication` (`:79`), `InventoryMismatch` (`:502`, `:509`),
+   `VerificationFailed` (`:484`, `:490`, `:496`) und `AuditFailed` (`:619`).
+   `ea-archive` kann sie ohne Cargo-Zyklus gar nicht bezeugen.
+
 4. **Drei Codes waren erreicht, aber nur ungepinnt** (`is_err()` statt
-   Codevergleich): `EA-ARCHIVE-MIGRATION-FAULT`,
-   `EA-IMPORT-REPORT-HAS-ERRORS` und `EA-IMPORT-INPUT-CHANGED`
-   (`crates/ea-draft/src/csv_import.rs:103`, gepinnt in
-   `crates/ea-draft/tests/csv_import.rs:75`). Gepinnt in `475f38a`.
-5. **`EA-MASTER-UNKNOWN-ID` war bereits bezeugt**
-   (`crates/ea-draft/src/master_data.rs:70`, gepinnt in
-   `crates/ea-draft/tests/snapshots.rs:112`) und steht dennoch auf der
-   Versäumnisliste.
-6. **`EA-MASTER-SNAPSHOT` ist toter Code, aber keine Validierungslücke.** Alle
-   fünf Erhebungsstellen (`crates/ea-draft/src/master_data.rs:196,230,245,264,481`)
-   sind `map_err` über Konstruktoren, die in
-   `crates/ea-schema/src/model.rs:818-985` bedingungslos `Ok` liefern.
-   Geprüft und entwarnt: `crates/ea-schema/src/decode.rs:330-362` baut die
-   Snapshots direkt über die Enum-Varianten und prüft selbst. Das ist eine
-   Entwurfsfrage, keine Testlücke — §9b zählt sie als Testlücke.
-7. **Die Blob-Schranke bleibt unbezeugt, und das ist keine Nachlässigkeit.** Ein
-   Zeuge bräuchte 1 048 577 Dateien, und `FsArchiveSource` bietet keine Naht.
-   Geprüft: der Wächter emittiert denselben Code wie seine drei vorbestehenden
-   Schwestern derselben Funktion.
+   Codevergleich) — **HÄLT, und alle drei sind inzwischen gepinnt**:
+   `EA-ARCHIVE-MIGRATION-FAULT` (`crates/ea-archive/src/backend_error.rs:78`,
+   gepinnt in `crates/ea-archive-fs/tests/profile_migration.rs:45`, Test
+   `every_fault_point_leaves_only_the_old_profile_active`),
+   `EA-IMPORT-REPORT-HAS-ERRORS` (`crates/ea-draft/src/csv_import.rs:102`,
+   gepinnt in `crates/ea-draft/tests/csv_import.rs:30`, Test
+   `dry_run_does_not_write_and_commit_is_all_or_nothing`) und
+   `EA-IMPORT-INPUT-CHANGED` (`csv_import.rs:103`, gepinnt in
+   `crates/ea-draft/tests/csv_import.rs:75`, Test
+   `commit_rejects_a_mutated_dry_run_hash`). Gepinnt in `475f38a`.
+
+5. **`EA-MASTER-UNKNOWN-ID` war bereits bezeugt — HÄLT.**
+   `crates/ea-draft/src/master_data.rs:70`, gepinnt in
+   `crates/ea-draft/tests/snapshots.rs:112`, Test
+   `an_unknown_master_id_is_a_named_absence_and_not_an_empty_snapshot`.
+
+6. **`EA-MASTER-SNAPSHOT` — diese Position KEHRT SICH UM.** Die überlieferte
+   Fassung sagte „toter Code, keine Validierungslücke": die fünf
+   `map_err`-Stellen (`crates/ea-draft/src/master_data.rs:198`, `:232`, `:247`,
+   `:266`, `:483`) hingen an Konstruktoren ohne einen einzigen `Err`-Zweig. Zum
+   Zeitpunkt von §9b stimmte das. **Auf diesem Branch stimmt es nicht mehr.**
+   Der Basis-Commit dieser Nacharbeit, `42cbfaf` („validate snapshot texts and
+   make EA-MASTER-SNAPSHOT reachable"), hat `value.validate()?` in die
+   Konstruktoren gelegt — `crates/ea-schema/src/model.rs:891`
+   (`PersonnelSnapshotV1::master`) und `:903` (`::ad_hoc`) —, und
+   `crates/ea-draft/tests/snapshots.rs:128::a_snapshot_that_breaks_the_stage_1_text_rule_is_named`
+   erzwingt den Code auf sechs Wegen. Nachgemessen am 2026-08-28:
+   `cargo test --locked -p ea-draft --test snapshots` → 6 passed, 0 failed.
+   **Richtig ist deshalb:** der Code war zum Zeitpunkt von §9b eine tote
+   Variante, ist seit `42cbfaf` erhoben UND bezeugt, und er ist heute weder tot
+   noch eine offene Testlücke. Warum die alte Fassung sich hielt: ihr Beleg war
+   „null `Err(`-Zweige im ganzen Bereich", und ein `grep` auf das Literal
+   `Err(` findet `value.validate()?` nicht.
+
+7. **Die Blob-Schranke bleibt unbezeugt, und das ist keine Nachlässigkeit —
+   HÄLT.** Ein Zeuge bräuchte 1 048 577 Dateien, und `FsArchiveSource` bietet
+   keine Naht. Nachgemessen: `RecoveryError::ArchiveTooLarge`
+   (`crates/ea-recovery/src/error.rs:34`) wird an fünf Stellen von
+   `crates/ea-recovery/src/source.rs` erhoben (`:147`, `:175`, `:177`, `:185`,
+   `:192`)
+   und bildet auf `ExitCode::Integrity` ab
+   (`crates/ea-recovery/src/exit.rs:168`) — dieselbe Klasse wie ihre
+   vorbestehenden Schwestern `ArchiveError::BlobLimit` und `TotalByteLimit`
+   (`exit.rs:200`). Ob `Integrity` für eine überschrittene Blobanzahl die
+   richtige Klasse ist, ist eine vorbestehende Frage, die dieser Diff weder
+   schafft noch verschärft.
+
 8. **Der Zeuge von `EA-ARCHIVE-MIGRATION-FAULT` ist eingeschränkt
-   falsifizierbar.** Gegen den Wächter als Ganzes ja, gegen die Einzelklausel
-   nein: mit nur `crates/ea-archive-fs/src/profile_migration.rs:502`
-   ausgehebelt bleibt er grün, weil `:509` denselben
-   `ArchiveBackendError::InventoryMismatch` meldet. Das steht so im Testkommentar und gehört in die
-   Bewertung.
+   falsifizierbar — HÄLT.** Gegen den Wächter als Ganzes ja, gegen die
+   Einzelklausel nein: mit nur
+   `crates/ea-archive-fs/src/profile_migration.rs:502` ausgehebelt bleibt er
+   grün, weil `:509` denselben `ArchiveBackendError::InventoryMismatch` meldet.
+   Das steht so im Testkommentar und gehört in die Bewertung.
 
-**Schlusssatz.** Die Zahl „rund 25 Versäumnisse" trägt damit nicht. Sie sinkt
-auf **rund 21** und darunter.
+**Schlusssatz — die gemessene Zahl.** Die Zahl „rund 25 Versäumnisse" trägt
+nicht; die Richtung der F9-Runde stimmt. Ihre Zahl „rund 21" trägt nach dieser
+Nachmessung aber ebenfalls nicht mehr: Position 2 gibt zwei Posten zurück
+(`EA-WRITER-SEQUENCE-LEASE-EXHAUSTED` und `EA-WRITER-NO-DRAFT-CONTENT` sind
+erreichbar und ungepinnt, also echte Versäumnisse), während Position 6 ihren
+Posten weiterhin abzieht — nur aus dem stärkeren Grund, dass der Code seit
+`42cbfaf` bezeugt ist statt tot. **Gemessen sind es damit rund 23 statt rund
+25.**
 
----
+Und die Grenze dieser Zahl ausdrücklich, weil sie sonst genauer klänge, als sie
+ist: `final/testqualitaet.md` liegt nicht in diesem Arbeitsbaum, die
+Grundgesamtheit der 25 ist hier also nicht nachzählbar. „Rund 23" ist die um
+die acht nachgemessenen Positionen korrigierte Fassung derselben Schätzung und
+keine unabhängig neu gerechnete Summe. Nachzählbar ist allein, was oben je
+Position steht.
 
 ## 8. Web-Reader-Prerequisites (B.9)
 
 Stand der drei offenen Punkte aus
 `docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md`.
 
-**Pre-flight-Konflikt 1 (`:100`) — Objektfamilien.** Der Ledgereintrag lautet
-weiterhin „offen": Web-Reader-Spec §1 (`:20-24`) bestreitet Änderungen an den
-Objektfamilien, §11.5/11.6 (`:420-421`) führt zwei neue ein. Die
-Auflösungsrichtung ist im Self-Review desselben Plans (`:1014`) festgehalten —
-die zwei neuen Familien werden bewusst NICHT gebaut und als `v1.1` geführt.
-Nachgemessen am 2026-08-28: im Ledger
-`docs/traceability/v0.1-requirements.csv` steht KEINE Zeile, deren
-`source`-Spalte `web-reader-design.md 11` nennt. Die Auflösungsrichtung ist also
-im Plan dokumentiert und im Ledger noch nicht verankert. Sie blockiert Stufe 3
-nicht — die betroffenen Familien entstehen frühestens mit dem Reader.
+**Pre-flight-Konflikt 1 (`:100`) — Objektfamilien: im Ledgereintrag „offen", in
+der Sache GELÖST.** Der Eintrag lautet: Web-Reader-Spec §1 (`:20-24`) bestreitet
+Änderungen an den Objektfamilien, §11.5/11.6 (`:420-421`) führt zwei neue ein.
+Die Auflösung schreibt Task 2 Step 1 desselben Plans vor (`:295-313`, der
+Ersatztext an `:311`), und sie ist AUSGEFÜHRT: die genannte Stelle
+`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md:20-24`
+trägt heute den Ersatztext, der die zwei Familien benennt und sie
+ausdrücklich zu einer „v1.1-Erweiterung außerhalb Stage 1" erklärt, gebaut
+in Stufe 3 (`webBundleRelease`) beziehungsweise Stufe 5 (Reader-Key-Escrow).
+Der Selbstwiderspruch besteht also nicht mehr; nur die Statuszeile des
+git-ignorierten SDD-Ledgers wurde nicht nachgezogen.
+
+Nachgemessen am 2026-08-28: im Ledger `docs/traceability/v0.1-requirements.csv`
+steht KEINE Zeile, deren `source`-Spalte `web-reader-design.md 11` nennt — die
+zwei Familien sind dort also noch nicht als `v1.1`-Zeilen verankert. Für
+`webBundleRelease` trägt `WR-052` `v1.1` den Dateiweg bereits auf Stufe 2
+(Entscheidung D-HE2); die Familie selbst hat keine eigene Zeile. Stufe 3 ist
+davon nicht blockiert.
 
 **Pre-flight-Konflikt 3 (`:102`) — Ablageort des Escrow-Chiffrats.** Offen. Der
 Begriff „Administrationszone" aus Web-Reader-Spec §7.3 ist im Design nicht
