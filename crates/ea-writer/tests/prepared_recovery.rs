@@ -15,7 +15,7 @@
 mod support;
 
 use ea_writer::{FinalizationFaultPoint, FinalizationStep, RecoveryOutcome};
-use support::{WriterHarness, valid_incident};
+use support::{FIXTURE_INCIDENT_NUMBER, WriterHarness, valid_incident};
 
 #[test]
 fn every_fault_recovers_the_draft_or_completes_the_same_prepared_transaction() {
@@ -1035,4 +1035,112 @@ fn a_transient_key_failure_stops_the_recovery_and_completes_nothing() {
     );
     assert!(!harness.draft_is_blank());
     assert!(harness.published_entry_paths().is_empty());
+}
+
+/// Eine Finalisierung, die VOR der unwiderruflichen Grenze scheitert, gibt die
+/// beanspruchte Einsatznummer wieder FREI.
+///
+/// # Warum der Zeuge einen tauben Schluesselspeicher braucht
+///
+/// Der dauerhafte Anspruch faellt erst im BESTAETIGTEN Lauf
+/// (`crates/ea-writer/src/finalize.rs`, Schritt 5); ein Abbruch ueber
+/// `finalize_interrupted_at` beansprucht die Nummer gar nicht erst und maesse
+/// deshalb nichts. Gebraucht wird ein VOLLER Lauf, der zwischen dem Anspruch
+/// und der Grenze scheitert — und der taube Speicher ist genau das: er haelt an
+/// `EA-WRITER-KEY-DELETION-NOT-CONFIRMED` an, und dieser Code faellt
+/// AUSSCHLIESSLICH, wenn `contains` den `draftDEK` positiv gemeldet hat. Die
+/// Grenze ist damit nachweislich NICHT ueberschritten, der Entwurf ist
+/// wiederherstellbar, und die Nummer gehoert demselben realen Einsatz.
+///
+/// Ohne die Freigabe muesste der Bediener sich fuer denselben Einsatz eine
+/// andere Nummer ausdenken — dieselbe Abwaegung, die
+/// `crates/ea-writer/tests/sequence_id.rs`
+/// ::a_refused_finalization_does_not_burn_the_incident_number vor dem Anspruch
+/// fuehrt, hier hinter ihm.
+#[test]
+fn a_finalization_that_fails_before_the_boundary_releases_the_incident_number() {
+    let harness = WriterHarness::with_incident();
+    let Err(refused) = harness.finalize_with_deaf_keystore() else {
+        panic!("ein gemeldetes, nicht ausgefuehrtes Loeschen MUSS den Abschluss anhalten");
+    };
+    assert_eq!(refused.code(), "EA-WRITER-KEY-DELETION-NOT-CONFIRMED");
+    // Die POSITIVKONTROLLE: der Lauf hat den Anspruch wirklich passiert. Ohne
+    // sie waere „die Nummer ist frei" auch fuer einen Lauf gruen, der schon an
+    // Schritt 3 gescheitert ist.
+    assert!(
+        harness.prepared_marker_is_present(),
+        "Schritt 8 liegt hinter dem Anspruch: die Abschlussmarke MUSS stehen"
+    );
+
+    assert!(
+        !harness.incident_number_is_taken(FIXTURE_INCIDENT_NUMBER),
+        "vor der Grenze gibt ein Fehlschlag die Nummer wieder frei"
+    );
+
+    // Und sie ist wirklich WIEDER BENUTZBAR — das ist die Zusage, nicht die
+    // Registerzeile. Derselbe Bestand, dieselbe Nummer, ein wahrhaftiger
+    // Speicher.
+    let source = harness.source();
+    let service = harness.service(&source);
+    assert!(
+        service
+            .recover_pending()
+            .expect("die Wiederaufnahme muss tragen")
+            .is_original_draft()
+    );
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+    let preview = service
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .expect("die Vorschau MUSS erneut entstehen");
+    service
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
+        .expect("derselbe Einsatz MUSS danach abschliessbar sein");
+    assert!(harness.incident_number_is_taken(FIXTURE_INCIDENT_NUMBER));
+    assert_eq!(harness.published_entry_paths().len(), 1);
+}
+
+/// Hinter der Grenze bleibt die Einsatznummer VERBRAUCHT.
+///
+/// Der Waechter gegen eine zu grosszuegige Freigabe, und er ist die haertere
+/// Haelfte: Schritt 13 scheitert, der Eintrag ist COMMITTED, und seine
+/// Einsatznummer steht in einer veroeffentlichten Nutzlast. Gaebe die Freigabe
+/// sie hier zurueck, koennte ein zweiter Einsatz dieselbe Nummer beanspruchen,
+/// und die lokale Eindeutigkeitspruefung von `design.md`:1900 waere gebrochen —
+/// bei zwei committed Eintraegen, die sich nicht mehr zuruecknehmen lassen.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR: wandert die Entwaffnung der Freigabe
+/// hinter Schritt 13, faellt die letzte Zeile.
+#[test]
+fn a_finalization_that_fails_after_the_boundary_keeps_the_incident_number() {
+    let harness = WriterHarness::with_incident();
+    let source = harness.source();
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+    let refusing = std::sync::Arc::new(BlankDraftRefusingRepository {
+        inner: harness.repository(),
+    }) as std::sync::Arc<dyn ea_draft::DraftRepository>;
+    let blocked = ea_writer::WriterService::new(
+        refusing,
+        harness.provider() as std::sync::Arc<dyn ea_key_provider::KeyProvider>,
+        harness.backend(),
+        &source,
+        harness.head(),
+        &[],
+        ea_draft::IncidentNumberRegister::new(harness.database()),
+        ea_draft::OperatorProfileRepository::new(harness.database()),
+        harness.binding(),
+    );
+    let preview = blocked
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .expect("die Vorschau beruehrt Schritt 13 nicht");
+    let error = blocked
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
+        .expect_err("der leere Entwurf laesst sich nicht anlegen");
+    assert_eq!(error.code(), "EA-DRAFT-LOCAL-RNG");
+
+    // Der Eintrag ist committed — Schritt 13 liegt HINTER der Grenze.
+    assert_eq!(harness.published_entry_paths().len(), 1);
+    assert!(
+        harness.incident_number_is_taken(FIXTURE_INCIDENT_NUMBER),
+        "hinter der Grenze traegt ein veroeffentlichter Eintrag die Nummer"
+    );
 }

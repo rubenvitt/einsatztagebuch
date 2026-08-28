@@ -314,6 +314,19 @@ impl<'a> WriterService<'a> {
     }
 }
 
+/// Eine dauerhaft beanspruchte Einsatznummer samt allem, was ihre Freigabe
+/// braucht.
+///
+/// Der Schluessel des Registers und nichts sonst (`design.md`:361-373). Er
+/// reist ausschliesslich im Prozessspeicher zwischen Anspruch und Freigabe;
+/// eine Protokollzeile bekommt er nie, und deshalb traegt der Typ auch kein
+/// `Debug`.
+struct ClaimedIncidentNumber {
+    organization_id: ea_types::OrganizationId,
+    local_civil_year: i32,
+    human_incident_number: String,
+}
+
 /// Wo der Lauf anhaelt.
 #[derive(Clone, Copy)]
 pub(crate) enum Stop<'p> {
@@ -515,12 +528,63 @@ impl core::fmt::Debug for ReachedState {
 impl WriterService<'_> {
     /// Die dreizehn Schritte, in der einzigen konstruierbaren Reihenfolge.
     #[allow(clippy::too_many_lines)]
+    /// Laeuft die Reihenfolge und GIBT die beanspruchte Einsatznummer wieder
+    /// frei, wenn der Lauf vor der unwiderruflichen Grenze scheitert.
+    ///
+    /// # Warum die Freigabe HIER steht und nicht im Rumpf
+    ///
+    /// Zwischen dem Anspruch (Schritt 5) und der Grenze (Schritt 9) liegen ein
+    /// gutes Dutzend `?`-Ausgaenge — Entropie, Signatur, Staging, Datenbank.
+    /// Sie einzeln zu bedienen hiesse, die Freigabe an ein Dutzend Stellen zu
+    /// wiederholen und beim naechsten hinzukommenden Ausgang zu vergessen.
+    /// [`Self::run_claiming`] meldet den Anspruch stattdessen nach aussen und
+    /// nimmt ihn zurueck, sobald die Grenze ueberschritten ist; dieser Rahmen
+    /// gibt frei, was dann noch gemeldet ist.
+    ///
+    /// AUSSCHLIESSLICH am FEHLERausgang. Ein frueher `Ok`-Ausgang gibt nichts
+    /// frei — er ist ein Halt der Fehlerinjektion, und die beansprucht gar
+    /// nicht erst (siehe die Klausel `matches!(stop, Stop::Confirmed(_))` am
+    /// Anspruch).
     fn run(
         &self,
         proof: &OperatorSessionProof,
         input: FinalizationInputV1,
         observed_now: UnixMillis,
         stop: Stop<'_>,
+    ) -> Result<ReachedState, WriterError> {
+        let mut claimed = None;
+        let reached = self.run_claiming(proof, input, observed_now, stop, &mut claimed);
+        let Err(error) = reached else {
+            return reached;
+        };
+        if let Some(claim) = claimed {
+            // Der GRUND des Abbruchs gewinnt, und der Fehlschlag einer
+            // Freigabe wird nicht an seiner Stelle gemeldet: er liesse die
+            // Nummer stehen — den Zustand VOR dieser Zusage — und ist damit
+            // fail-closed, waehrend ein vertauschter Code dem Bediener den
+            // Abbruchgrund verschwiege.
+            let _ = self.incident_numbers.release(
+                claim.organization_id,
+                claim.local_civil_year,
+                &claim.human_incident_number,
+            );
+        }
+        Err(error)
+    }
+
+    /// Der Rumpf der Reihenfolge.
+    ///
+    /// `claimed` ist der Kanal nach aussen: er traegt die dauerhaft
+    /// beanspruchte Einsatznummer, solange sie sich noch zuruecknehmen laesst,
+    /// und wird geleert, sobald die unwiderrufliche Grenze ueberschritten oder
+    /// UNGEKLAERT ist.
+    fn run_claiming(
+        &self,
+        proof: &OperatorSessionProof,
+        input: FinalizationInputV1,
+        observed_now: UnixMillis,
+        stop: Stop<'_>,
+        claimed: &mut Option<ClaimedIncidentNumber>,
     ) -> Result<ReachedState, WriterError> {
         let mut state = ReachedState::empty();
 
@@ -739,12 +803,25 @@ impl WriterService<'_> {
         // auf der Leseseite fail-closed. Verschluckte ihn die Schreibseite,
         // committete der Lauf einen Eintrag, dessen Einsatznummer NIE dauerhaft
         // beansprucht wurde — eine stille Herabstufung.
+        //
+        // Der Anspruch ist RUECKNEHMBAR, solange die Grenze nicht ueberschritten
+        // ist: er wird an [`Self::run`] gemeldet, und der gibt ihn frei, falls
+        // dieser Lauf mit einem Fehler endet. Zurueckgenommen wird die Meldung
+        // in Schritt 9, unmittelbar mit der bestaetigten Abwesenheit des
+        // `draftDEK` — ab da traegt ein Eintrag die Nummer, der sich nicht mehr
+        // zuruecknehmen laesst.
         if matches!(stop, Stop::Confirmed(_)) {
             match self
                 .incident_numbers
                 .claim(profile.organization_id(), year, &incident_number)
             {
-                Ok(()) => {}
+                Ok(()) => {
+                    *claimed = Some(ClaimedIncidentNumber {
+                        organization_id: profile.organization_id(),
+                        local_civil_year: year,
+                        human_incident_number: incident_number.clone(),
+                    });
+                }
                 Err(ea_draft::DraftError::IncidentNumberTaken) => {
                     return Err(WriterError::IncidentNumberTaken);
                 }
@@ -939,6 +1016,7 @@ impl WriterService<'_> {
         // KEINE Verbesserung, sondern ein Datenverlust: `save` schriebe den
         // leeren Text dauerhaft, und scheiterte danach das Loeschen des
         // `draftDEK`, stellte die Wiederaufnahme einen LEEREN Entwurf her.
+        //
         // Der Griff auf den `draftDEK` verlangt einen `SavedDraft`, und dessen
         // Konstruktor ist in `ea-draft` `pub(crate)`. Der EINZIGE Weg von
         // aussen ist eine Vergleich-und-Setze-Speicherung — und die ist hier
@@ -951,14 +1029,35 @@ impl WriterService<'_> {
         let handle = self.repository.draft_dek_handle(&saved)?;
         match self.key_provider.delete(&handle) {
             Ok(()) | Err(ea_key_provider::KeyError::NotFound) => {}
-            Err(other) => return Err(WriterError::Key(other)),
+            Err(other) => {
+                // Die Grenze ist UNGEKLAERT: ein gescheitertes `delete` sagt
+                // nicht, ob der Schluessel noch liegt, und eine Wiederaufnahme
+                // koennte den Eintrag aus den vorbereiteten Bytes vollenden.
+                // Fail-closed heisst hier: die Nummer bleibt verbraucht.
+                *claimed = None;
+                return Err(WriterError::Key(other));
+            }
         }
         if stop.breaks_at(FinalizationFaultPoint::AfterKeystoreDelete) {
             return Ok(state);
         }
-        if self.key_provider.contains(&handle)? {
-            return Err(WriterError::KeyDeletionNotConfirmed);
+        match self.key_provider.contains(&handle) {
+            // POSITIV festgestellt: der Schluessel liegt noch, die Grenze ist
+            // NICHT ueberschritten, der Entwurf ist wiederherstellbar. Die
+            // gemeldete Beanspruchung bleibt stehen, und [`Self::run`] gibt die
+            // Nummer frei.
+            Ok(true) => return Err(WriterError::KeyDeletionNotConfirmed),
+            Ok(false) => {}
+            // Wie oben ungeklaert.
+            Err(error) => {
+                *claimed = None;
+                return Err(WriterError::Key(error));
+            }
         }
+        // AB HIER unwiderruflich: die Nummer ist verbraucht, auch wenn die
+        // Schritte 10 bis 13 noch scheitern — die Wiederaufnahme vollendet
+        // dann aus denselben vorbereiteten Bytes, und der Eintrag traegt sie.
+        *claimed = None;
         state.phase = FinalizationPhase::DraftKeyAbsent;
         state.reached_step = Some(FinalizationStep::ZeroAndDeleteDraftKey);
         if stop.breaks_at(FinalizationFaultPoint::AfterAbsenceConfirmation)
