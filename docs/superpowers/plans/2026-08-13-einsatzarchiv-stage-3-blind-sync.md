@@ -569,20 +569,23 @@ git commit -m "feat(sync): add signed device and trust endpoints"
 ### Task 6: Atomic Entry Commit, Idempotent Replay, and Immutable Receipts (formerly Task 4)
 
 **Files:**
+- Consume existing unchanged: `vectors/receipts/v1/`
 - Create: `crates/ea-sync-server/src/commit.rs`
+- Create: `crates/ea-sync-server/src/receipt.rs`
 - Create: `crates/ea-sync-server/src/validation.rs`
 - Create: `crates/ea-sync-server/src/reconcile.rs`
 - Create: `apps/server/src/http/entry_commits.rs`
 - Modify: `apps/server/src/router.rs`
 - Test: `crates/ea-sync-server/tests/commit_service.rs`
+- Test: `crates/ea-sync-server/tests/receipt_golden.rs`
 - Test: `apps/server/tests/entry_commit_api.rs`
 - Test: `apps/server/tests/commit_failures.rs`
 
 **Interfaces:**
-- Consumes: `AuthenticatedDevice`, exact Entry/plan/grants, `ObjectStore`, `CommitRepository`, selected server-known Registry head.
-- Produces: `CommitService::commit -> CommitOutcome::{Accepted,IdempotentReplay}` and quarantined/reconcilable invisible orphans.
+- Consumes: `AuthenticatedDevice`, `EntryCommitRequestV1`, `EntryCommitIdentity`, exact Entry/plan/grants, `ObjectStore`, `CommitRepository`, `ServerClock`, server Receipt signer, and `SelectedRegistryHead` with `active_certificates()` as the single source of the active recipient set.
+- Produces: `CommitService::commit -> CommitOutcome::{Accepted,IdempotentReplay}`, exact `esr-v1` Receipt bytes built once and persisted inside the commit transaction, monotonic `acceptedAtServer`, immutable `evidenceDueAt` for Stage 6, and quarantined/reconcilable invisible orphans.
 
-- [ ] **Step 1: Write grant-completeness, fork, replay, and partial-failure tests**
+- [ ] **Step 1: Write grant-completeness, fork, replay, Receipt, and partial-failure tests**
 
 ```rust
 #[tokio::test]
@@ -601,56 +604,14 @@ async fn identical_replay_returns_same_receipt_bytes() {
     assert_eq!(first.receipt_bytes(), second.receipt_bytes());
     assert!(matches!(second, CommitOutcome::IdempotentReplay { .. }));
 }
-```
 
-- [ ] **Step 2: Run commit tests and verify failure**
-
-Run: `cargo test --locked -p ea-sync-server --test commit_service && cargo test --locked -p einsatzarchiv-server --test entry_commit_api --test commit_failures`
-
-Expected: FAIL because no atomic commit service exists.
-
-- [ ] **Step 3: Implement the nine-step server commit transaction**
-
-Stream and limit each object to a temporary key while hashing; parse/verify Entry, object hash, Writer, suite, Registry line, plan, each grant signature/context, exactly one Recovery, and every active Reader. Put verified bytes content-addressed with byte-conflict detection. Lock the chain head in PostgreSQL; choose the highest server-known applicable Registry head for `acceptedAtServer` and sequence; reject an older bound head. Accept only current sequence + 1, exact predecessor, and authorized Writer. Build Receipt once, persist exact Receipt bytes, then atomically make Entry, grants, head, and Receipt hash visible. Read the Receipt back by hash and verify exact bytes before response.
-
-Only the tuple `(entryHash, entryObjectHash, initialGrantPlanHash, sorted initialGrant objectHashes)` is idempotent. Same Entry hash with different bytes/grants, same sequence with different Entry, wrong predecessor, or wrong Writer creates a cleartext-free Security Event. Pre-commit Object Store artifacts remain invisible and are reverified before adoption or quarantine.
-
-- [ ] **Step 4: Run real-service concurrency and failure tests**
-
-Run: `cargo test --locked -p einsatzarchiv-server --test entry_commit_api --test commit_failures -- --test-threads=1`
-
-Expected: PASS under parallel commits, database aborts, object-store faults, response loss, and retry; no failure exposes a head or accepted Receipt without the full grant set.
-
-- [ ] **Step 5: Commit atomic Entry acceptance**
-
-```bash
-git add crates/ea-sync-server apps/server
-git commit -m "feat(sync): atomically accept entries and grants"
-```
-
-### Task 7: Standard Checkpoints and the Checkpoint Chain (formerly Task 5)
-
-**Files:**
-- Create: `crates/ea-sync-server/src/receipt.rs`
-- Create: `crates/ea-sync-server/src/checkpoint.rs`
-- Create: `apps/server/src/http/checkpoints.rs`
-- Test: `crates/ea-sync-server/tests/receipt_golden.rs`
-- Test: `crates/ea-sync-server/tests/checkpoint.rs`
-
-**Interfaces:**
-- Consumes: committed head, policy, server Receipt/checkpoint signer.
-- Produces: exact `esr-v1`, standard `.ecp` checkpoint, monotonic `acceptedAtServer`, and immutable `evidenceDueAt` for Stage 6.
-
-- [ ] **Step 1: Write exact Receipt and monotonic-time tests**
-
-```rust
 #[test]
 fn evidence_due_time_is_signed_once_from_receipt_policy() {
     let standard = build_receipt(fixtures::standard_policy(), UnixMillis(100)).unwrap();
-    assert_eq!(standard.core().evidence_due_at, None);
+    assert_eq!(standard.core().fields().evidence_due_at, None);
     let evidence = build_receipt(fixtures::evidence_policy(500), UnixMillis(100)).unwrap();
-    assert_eq!(evidence.core().evidence_due_at, Some(UnixMillis(600)));
-    assert_eq!(evidence.exact_bytes(), fixtures::expected_evidence_receipt_bytes());
+    assert_eq!(evidence.core().fields().evidence_due_at, Some(UnixMillis(600)));
+    assert_eq!(encode_receipt(&evidence).unwrap().as_bytes(), fixtures::expected_evidence_receipt_bytes());
 }
 
 #[test]
@@ -659,29 +620,100 @@ fn accepted_time_never_precedes_prior_receipt() {
 }
 ```
 
-- [ ] **Step 2: Run tests and verify exact Receipt generation is absent**
+The two Receipt tests read the Evidence due time one level deeper than a first draft suggests, and they never call `exact_bytes()` on a `ReceiptV1`. `ReceiptCoreV1` hands its fields out through `pub const fn fields()` (`crates/ea-format/src/esr.rs:46`), while `ReceiptV1` carries only `core()`, `server_signature()` and a crate-private `body_bytes()` (`crates/ea-format/src/esr.rs:169-178`). `ReceiptCoreV1::exact_bytes()` (`crates/ea-format/src/esr.rs:61`) yields the CORE bytes, not the object bytes; a golden test against it would stand green and freeze the wrong bytes. The object bytes arise exclusively through `encode_receipt(&ReceiptV1) -> Result<ExactObjectBytes, FormatError>` (`crates/ea-format/src/parser.rs:59`), and `ExactObjectBytes::as_bytes() -> &[u8]` (`crates/ea-format/src/object.rs:100`) is public. The access pattern already exists in the tree: `run_evidence_gate` in `crates/ea-verify/src/evidence.rs` reads the due time as `receipt.value().core().fields().evidence_due_at`.
 
-Run: `cargo test --locked -p ea-sync-server --test receipt_golden --test checkpoint`
+- [ ] **Step 2: Run commit and Receipt tests and verify failure**
 
-Expected: FAIL because Receipt/checkpoint builders do not exist.
+Run: `cargo test --locked -p ea-sync-server --test commit_service --test receipt_golden && cargo test --locked -p einsatzarchiv-server --test entry_commit_api --test commit_failures`
 
-- [ ] **Step 3: Implement Receipt fields and standard checkpoint bytes exactly once**
+Expected: FAIL because neither an atomic commit service nor a Receipt builder exists.
 
-Sort duplicate-free grant hashes bytewise. Compute `acceptedAtServer = max(current server UTC, predecessor acceptedAtServer)`. Standard policy sets `evidenceDueAt = null`; Evidence Grade sets exact checked addition `acceptedAtServer + policy.evidenceMaxDelayMs`. Bind policy hash, Registry head, plan hash, Entry/object/predecessor hashes, server thumbprint/certificate, and empty critical extensions. Sign the Receipt digest with capability `serverReceipt` and persist exact bytes in the same commit.
+- [ ] **Step 3: Implement the nine-step server commit transaction**
 
-After accepted commit, build a standard checkpoint over organization, chain, covered range, head Entry, Registry head, `issuedAtServer`, and previous checkpoint hash. Sign and archive it; Stage 6 adds CTT without changing historical Receipt or standard checkpoint bytes.
+The order of the following paragraph maps the nine server steps of design.md §13.3 (:1534-1542) one to one. Drawing in the Receipt construction (steps 5 and 7) renumbers, merges or drops NO step; the numbering stays nine positions long. No task of this plan offsets these nine steps against the thirteen steps of the Writer finalization in design.md §9.3 (:446-460), which is a different transaction.
 
-- [ ] **Step 4: Run golden, replay, overflow, and checkpoint-chain tests**
+Stream and limit each object to a temporary key while hashing; parse/verify Entry, object hash, Writer, suite, Registry line, plan, each grant signature/context, exactly one Recovery, and every active Reader. Put verified bytes content-addressed with byte-conflict detection. Lock the chain head in PostgreSQL; choose the highest server-known applicable Registry head for `acceptedAtServer` and sequence; reject an older bound head. Accept only current sequence + 1, exact predecessor, and authorized Writer. Build Receipt once, persist exact Receipt bytes, then atomically make Entry, grants, head, and Receipt hash visible. Read the Receipt back by hash and verify exact bytes before response.
 
-Run: `cargo test --locked -p ea-sync-server --test receipt_golden --test checkpoint`
+Sort duplicate-free grant hashes bytewise. Compute `acceptedAtServer = max(current server UTC, predecessor acceptedAtServer)`. Standard policy sets `evidenceDueAt = null`; Evidence Grade sets exact checked addition `acceptedAtServer + policy.evidenceMaxDelayMs`. Bind policy hash, Registry head, plan hash, Entry/object/predecessor hashes, server thumbprint/certificate, and empty critical extensions. Sign the Receipt digest with capability `serverReceipt` and persist exact bytes in the same commit. The Registry-head selection of step 5 binds the head applicable for exactly this time and sequence; it computes no second acceptance time, and acceptance time, due time and signature are never recomputed for one commit.
 
-Expected: PASS; replay never changes Receipt time/signature/bytes, overflow fails, and divergent checkpoint predecessors become Security Events.
+Only the tuple `(entryHash, entryObjectHash, initialGrantPlanHash, sorted initialGrant objectHashes)` is idempotent — this is exactly `EntryCommitIdentity` from the task „Normative Sync Framing and RFC-9421 Request Verification“, so this task consumes the existing enumeration and derives no active recipient set of its own from database rows. Same Entry hash with different bytes/grants, same sequence with different Entry, wrong predecessor, or wrong Writer creates a cleartext-free Security Event. Pre-commit Object Store artifacts remain invisible and are reverified before adoption or quarantine.
 
-- [ ] **Step 5: Commit Receipts and checkpoints**
+The server evaluates `RegistrySelectionOutcome::Selected` and `::Advanced`, but persists no `Advanced` transition as an authority extension of its own — it indexes exclusively verified `.etb` bytes; `PendingFuture` leads to `409` with `required-registry-version`.
+
+`checkpoint-bytes` of `entry-commit-response-v1` stays `null` in this task. The task „Standard Checkpoints and the Checkpoint Chain“ supplies that field value afterwards and changes no Receipt byte in doing so.
+
+- [ ] **Step 4: Run real-service concurrency and failure tests**
+
+Run: `cargo test --locked -p ea-sync-server --test receipt_golden && cargo test --locked -p einsatzarchiv-server --test entry_commit_api --test commit_failures -- --test-threads=1`
+
+Expected: PASS under parallel commits, database aborts, object-store faults, response loss, and retry; a successful replay delivers byte-identical `.esr` bytes; a `TrustError::StateConflict` out of the Registry selection under parallel load is its own scenario and leaves no partially visible commit; no failure exposes a head or accepted Receipt without the full grant set.
+
+- [ ] **Step 5: Commit atomic Entry acceptance**
 
 ```bash
-git add crates/ea-sync-server apps/server vectors/receipts vectors/evidence
-git commit -m "feat(sync): issue immutable receipts and checkpoints"
+git add crates/ea-sync-server apps/server
+git commit -m "feat(sync): atomically accept entries, grants, and receipts"
+```
+
+### Task 7: Standard Checkpoints and the Checkpoint Chain (formerly Task 5)
+
+**Files:**
+- Consume existing unchanged: `vectors/receipts/v1/`
+- Consume existing unchanged: `vectors/evidence/v1/`
+- Create: `crates/ea-sync-server/src/checkpoint.rs`
+- Create: `apps/server/src/http/checkpoints.rs`
+- Test: `crates/ea-sync-server/tests/checkpoint.rs`
+
+**Interfaces:**
+- Consumes: `CommitOutcome` with exact `esr-v1` bytes from the task „Atomic Entry Commit, Idempotent Replay, and Immutable Receipts“, committed head, policy, `ServerClock`, server checkpoint signer, and the frozen receipts/evidence vector families read-only.
+- Produces: standard `.ecp` checkpoint, the checkpoint chain with `previous-evidence-hash`, the non-null `checkpoint-bytes` value of `entry-commit-response-v1`, and golden-file evidence read from the frozen receipts/evidence vector families.
+
+- [ ] **Step 1: Write checkpoint-chain and divergent-predecessor tests**
+
+```rust
+#[test]
+fn checkpoint_chain_binds_each_predecessor_by_previous_evidence_hash() {
+    let first = build_checkpoint(fixtures::head_at_sequence(1), None, UnixMillis(1_000)).unwrap();
+    let second = build_checkpoint(fixtures::head_at_sequence(2), Some(first.object_hash()),
+                                  UnixMillis(2_000)).unwrap();
+    assert_eq!(first.core().fields().previous_evidence_hash, None);
+    assert_eq!(second.core().fields().previous_evidence_hash, Some(first.object_hash()));
+    assert_eq!(second.core().fields().covered_through_sequence,
+               fixtures::head_at_sequence(2).sequence());
+}
+
+#[tokio::test]
+async fn commit_response_carries_checkpoint_bytes_and_divergent_predecessors_are_security_events() {
+    let accepted = api.commit(fixtures::valid_commit()).await.unwrap();
+    assert_eq!(accepted.checkpoint_bytes(), Some(api.last_checkpoint_bytes().await));
+    assert_eq!(api.publish_checkpoint(fixtures::foreign_predecessor()).await.unwrap_err().code(),
+               "EA-CHECKPOINT-PREDECESSOR-CONFLICT");
+}
+```
+
+- [ ] **Step 2: Run tests and verify the checkpoint chain is absent**
+
+Run: `cargo test --locked -p ea-sync-server --test checkpoint`
+
+Expected: FAIL because the checkpoint builder and the checkpoint chain do not exist.
+
+- [ ] **Step 3: Implement standard checkpoint bytes and the checkpoint chain exactly once**
+
+After accepted commit, build a standard checkpoint over the frozen `checkpoint-core-v1` positions: `domain: "EINSATZARCHIV-CHECKPOINT-v1"`, organization, chain, covered range, head Entry, Registry head, `issuedAtServer`, and `previous-evidence-hash`. Sign and archive it; Stage 6 adds CTT without changing historical Receipt or standard checkpoint bytes. Only here does `checkpoint-bytes` of `entry-commit-response-v1` become non-null, and the exact `esr-v1` bytes of the task „Atomic Entry Commit, Idempotent Replay, and Immutable Receipts“ stay untouched.
+
+The seven frozen Receipt vectors and the eight Evidence vectors are consumed exclusively READING as golden files; `fixtures::expected_evidence_receipt_bytes()`, called from the Receipt golden test of the task „Atomic Entry Commit, Idempotent Replay, and Immutable Receipts“, reads the frozen bytes out of `vectors/receipts/v1/`. Stage 3 produces no new vector of these two families. Should a vector arise in this stage that evidences a new behavior, it lays a new version BESIDE the old one (`vectors/receipts/v2/`), never in its place (docs/traceability/stage-1-gate.md:116-121), and is declared with its own `Create:` line in the Files block. No `Create:`, `Modify:` or `Test:` line of this task names `vectors/` or `crates/ea-testkit` — exactly that holds the count bindings 7 and 8 and keeps the byte-identity test `grant_receipt_and_evidence_vectors_match_their_manifests` green.
+
+- [ ] **Step 4: Run checkpoint-chain and divergence tests**
+
+Run: `cargo test --locked -p ea-sync-server --test checkpoint`
+
+Expected: PASS; every checkpoint binds its predecessor through `previous-evidence-hash`, the covered range follows the committed head, divergent checkpoint predecessors become Security Events, and no historical Receipt or standard checkpoint byte changes.
+
+- [ ] **Step 5: Commit standard checkpoints**
+
+```bash
+git add crates/ea-sync-server apps/server
+git commit -m "feat(sync): issue standard checkpoints and the checkpoint chain"
 ```
 
 ### Task 8: Reader, Object, Export, Historical-Grant, and Destruction API Surfaces (formerly Task 6)
@@ -699,7 +731,7 @@ git commit -m "feat(sync): issue immutable receipts and checkpoints"
 - Test: `apps/server/tests/export_api.rs`
 
 **Interfaces:**
-- Consumes: verified Trust fixtures now; full Stage 5 authorization workflows later.
+- Consumes: `RequestVerifier`, `AuthenticatedDevice`, `ReaderBatchV1`, `TechnicalCursorV1` and the response frames `grant-list-response-v1`, `checkpoint-list-response-v1`, `archive-export-manifest-v1` and `destruction-status-response-v1` from the task „Normative Sync Framing and RFC-9421 Request Verification“, `ObjectStore`, `CommitRepository` and `ServerSigner` including the cursor signing operation from the task „PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port“, verified Trust fixtures now; full Stage 5 authorization workflows later.
 - Produces: exact-object read APIs, start-head-bound Reader batches, full encrypted export, historical grant expiry enforcement, and append-only destruction orchestration storage.
 
 - [ ] **Step 1: Write authorization and exact-byte response tests**
@@ -728,7 +760,7 @@ Expected: FAIL because endpoints and authorization checks do not exist.
 
 - [ ] **Step 3: Implement content-blind read and workflow surfaces**
 
-Reader batch binds requested `afterSequence/afterEntryHash`, returns exact later `.eip/.eds`, grants, Trust, Receipts, and checkpoints plus an opaque cursor, and never treats a database list as verification. Object GET streams exact stored bytes. Reader acknowledgements are signed technical objects.
+Reader batch binds requested `afterSequence/afterEntryHash`, returns exact later `.eip/.eds`, grants, Trust, Receipts, and checkpoints plus a `TechnicalCursorV1`, and never treats a database list as verification. Object GET streams exact stored bytes. Reader acknowledgements are signed technical objects.
 
 Historical grant POST validates HGA capability, original Recovery grant, two-Approver authorization, exact Entry/recipient, current Registry, and `effectiveNow <= expiresAt`; GET rechecks expiry before delivery. It never alters `.eip`, initial plan, or head. Destruction POST accepts only a two-Approver authorization, blocks delivery/re-grant, and persists append-only state/attestations; fixture-backed Stage 3 tests exercise validation, while Stage 5 supplies the full workflow. Export streams all encrypted originals, Stubs, grants, Receipts, Evidence, and complete Trust without plaintext conversion.
 
