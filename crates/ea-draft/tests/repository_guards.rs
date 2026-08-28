@@ -146,3 +146,152 @@ fn a_payload_that_is_not_a_draft_is_refused_instead_of_repaired() {
     // ist KEIN zweiter Entwurf entstanden, der die Invariante brechen wuerde.
     assert_eq!(harness.active_draft_row_count(), 1);
 }
+
+/// Ein Schluesselspeicher, der GENAU EINEN Zugriff auf ein eingepacktes
+/// Geheimnis verweigert.
+///
+/// Er meldet [`ea_key_provider::KeyError::PurposeMismatch`] — ein
+/// voruebergehender Fehler, der eine Aussage ueber JETZT ist: Geraet gesperrt,
+/// TPM belegt. Verweigert wird ausschliesslich `unwrap_secret`, und der erste
+/// solche Zugriff des Anlegens liegt INNERHALB der Datenbanktransaktion,
+/// unmittelbar hinter dem `wrap_secret`, das den Eintrag schon geschrieben hat.
+///
+/// EINMALIG und nicht dauerhaft: erst das spaetere Durchlassen belegt, dass die
+/// Fixture ausser diesem einen Zugriff nichts fehlt.
+struct BrieflyLockedProvider {
+    inner: std::sync::Arc<ea_key_provider::InMemoryKeyProvider>,
+    refusals_left: std::sync::atomic::AtomicUsize,
+}
+
+impl ea_key_provider::KeyProvider for BrieflyLockedProvider {
+    fn generate(
+        &self,
+        purpose: ea_key_provider::SecretPurpose,
+        protection: ea_format::KeyProtectionProfileV1,
+    ) -> Result<ea_key_provider::KeyHandle, ea_key_provider::KeyError> {
+        self.inner.generate(purpose, protection)
+    }
+
+    fn sign(
+        &self,
+        handle: &ea_key_provider::KeyHandle,
+        content_type: ea_crypto::ContentType,
+        certificate_hash: ea_types::CertificateHash,
+        payload: &[u8],
+    ) -> Result<ea_key_provider::CoseSign1Bytes, ea_key_provider::KeyError> {
+        self.inner
+            .sign(handle, content_type, certificate_hash, payload)
+    }
+
+    fn wrap_secret(
+        &self,
+        purpose: ea_key_provider::SecretPurpose,
+        secret: ea_crypto::SecretBytes<32>,
+    ) -> Result<ea_key_provider::KeyHandle, ea_key_provider::KeyError> {
+        self.inner.wrap_secret(purpose, secret)
+    }
+
+    fn unwrap_secret(
+        &self,
+        handle: &ea_key_provider::KeyHandle,
+    ) -> Result<ea_crypto::SecretBytes<32>, ea_key_provider::KeyError> {
+        use std::sync::atomic::Ordering;
+        if self
+            .refusals_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ea_key_provider::KeyError::PurposeMismatch);
+        }
+        self.inner.unwrap_secret(handle)
+    }
+
+    fn unwrap_database_key(
+        &self,
+        handle: &ea_key_provider::KeyHandle,
+    ) -> Result<ea_crypto::SecretVec, ea_key_provider::KeyError> {
+        self.inner.unwrap_database_key(handle)
+    }
+
+    fn delete(&self, handle: &ea_key_provider::KeyHandle) -> Result<(), ea_key_provider::KeyError> {
+        self.inner.delete(handle)
+    }
+
+    fn contains(
+        &self,
+        handle: &ea_key_provider::KeyHandle,
+    ) -> Result<bool, ea_key_provider::KeyError> {
+        self.inner.contains(handle)
+    }
+
+    fn reached_protection_profile(
+        &self,
+        handle: &ea_key_provider::KeyHandle,
+    ) -> Result<ea_format::KeyProtectionProfileV1, ea_key_provider::KeyError> {
+        self.inner.reached_protection_profile(handle)
+    }
+}
+
+/// Ein zurueckgerollter leerer Entwurf laesst KEINEN verwaisten
+/// Schluesselspeichereintrag zurueck.
+///
+/// # Was hier gemessen wird
+///
+/// `replace_with_blank` IST Schritt 13 der Finalisierung
+/// (`crates/ea-writer/src/finalize.rs`): Uebergangsplatz raeumen, alte
+/// Entwurfszeile loeschen und den leeren Entwurf mit FRISCHEM `draftDEK` in
+/// DERSELBEN Datenbanktransaktion anlegen. Der frische Schluessel entsteht
+/// dabei im Schluesselspeicher — und der kennt keine Transaktion. Rollt die
+/// Datenbank zurueck, bleibt sein Eintrag liegen: ein Geheimnis, auf das keine
+/// Zeile mehr zeigt, an genau der Adresse, unter der die Ablage den naechsten
+/// Entwurf sucht.
+///
+/// Gemessen wird ausdruecklich am SPEICHER (`contains`) und nicht daran, ob
+/// sich ein Entwurf oeffnen laesst: die zweite Frage waere auch dann gruen,
+/// wenn der Eintrag laege, denn die zurueckgerollte Zeile ist ohnehin die alte.
+///
+/// Der frische Eintrag ueberschreibt beim Anlegen, was an der Adresse lag —
+/// sie ist (Speicher, Konto, `DraftDek`) und damit EIN Platz. Das Abraeumen
+/// STELLT den vorigen Schluessel deshalb nicht wieder her; es sorgt dafuer,
+/// dass kein LEBENDES Geheimnis ohne Zeile zurueckbleibt. Der Zeuge loescht den
+/// alten Schluessel darum vorher, genau wie Schritt 9 es tut.
+#[test]
+fn a_rolled_back_blank_draft_leaves_no_orphaned_keystore_entry() {
+    let harness = DraftHarness::new();
+    let draft = harness.repo.load_or_create().unwrap();
+    let saved = harness.repo.save(draft.with_notes("CANARY-DRAFT")).unwrap();
+    let handle = harness.repo.draft_dek_handle(&saved).unwrap();
+
+    // Schritt 9: der `draftDEK` ist fort. Ab hier ist jede Anwesenheit unter
+    // dieser Adresse ein Eintrag, den Schritt 13 angelegt hat.
+    ea_key_provider::KeyProvider::delete(harness.provider().as_ref(), &handle).unwrap();
+    assert!(!ea_key_provider::KeyProvider::contains(harness.provider().as_ref(), &handle).unwrap());
+
+    let locked = std::sync::Arc::new(BrieflyLockedProvider {
+        inner: harness.provider(),
+        refusals_left: std::sync::atomic::AtomicUsize::new(1),
+    }) as std::sync::Arc<dyn ea_key_provider::KeyProvider>;
+    let repo = harness.repo_with_provider(std::sync::Arc::clone(&locked));
+    let refused = repo
+        .replace_with_blank()
+        .expect_err("der frische draftDEK laesst sich nicht auspacken");
+    assert_eq!(refused.code(), "EA-KEY-PURPOSE-MISMATCH");
+
+    // Die Datenbanktransaktion ist ZURUECKGEROLLT: die alte Zeile steht noch.
+    assert_eq!(harness.active_draft_row_count(), 1);
+    // Und der Schluesselspeicher traegt nichts, worauf sie zeigt.
+    assert!(
+        !ea_key_provider::KeyProvider::contains(harness.provider().as_ref(), &handle).unwrap(),
+        "der fuer den leeren Entwurf angelegte draftDEK darf den Rollback nicht ueberleben"
+    );
+
+    // Die POSITIVKONTROLLE: ausser diesem einen Zugriff fehlt der Fixture
+    // nichts — derselbe Aufruf traegt jetzt durch.
+    let blank = repo
+        .replace_with_blank()
+        .expect("nach dem Entsperren muss Schritt 13 tragen");
+    assert_eq!(blank.revision(), 0);
+    assert_eq!(harness.active_draft_row_count(), 1);
+}

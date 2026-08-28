@@ -234,6 +234,28 @@ impl DraftHarness {
         }
     }
 
+    /// Der Schluesselspeicher dieser Fixture.
+    ///
+    /// Er wird herausgegeben, damit ein Zeuge den Speicher UNMITTELBAR fragen
+    /// kann — „liegt unter dieser Adresse ein Eintrag" ist eine andere Frage
+    /// als „laesst sich der Entwurf oeffnen", und nur die erste erkennt einen
+    /// verwaisten Eintrag.
+    #[must_use]
+    pub fn provider(&self) -> Arc<InMemoryKeyProvider> {
+        Arc::clone(&self.provider)
+    }
+
+    /// Dieselbe Ablage auf DERSELBEN Datenbank, mit einem anderen
+    /// Schluesselspeicher.
+    ///
+    /// Der einzige Weg, einen Fehlschlag INNERHALB der Datenbanktransaktion
+    /// einzuspielen: die Ablage zieht den frischen `draftDEK` dort, und gegen
+    /// den wahrhaftigen In-Prozess-Speicher kann dieser Zug nie scheitern.
+    #[must_use]
+    pub fn repo_with_provider(&self, provider: Arc<dyn KeyProvider>) -> AutosaveDraftRepository {
+        AutosaveDraftRepository::new(Arc::clone(&self.database), provider)
+    }
+
     /// Die Zahl der Zeilen der Entwurfstabelle.
     #[must_use]
     pub fn active_draft_row_count(&self) -> u64 {
