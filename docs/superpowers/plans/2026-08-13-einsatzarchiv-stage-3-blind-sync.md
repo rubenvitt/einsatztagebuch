@@ -118,7 +118,7 @@ Expected: FAIL because `docs/adr/0004-server-runtime-and-dependency-class.md` do
 
 Write `docs/adr/0004-server-runtime-and-dependency-class.md` in the shape the existing witness already enforces: every mandatory section heading, every mandatory literal, each class named with its exact pin **on the same line**, and the reviewed feature selection as one verbatim ledger line `name = ["feature", "feature"]`. Each class carries its own primary-source and RustSec review after the procedure of `docs/adr/0001-toolchain-and-cryptography-dependencies.md:152-154`. The ADR ratifies the async runtime, the HTTP server, the PostgreSQL driver, the S3 client and the TLS stack, and it additionally carries the section `OCI base image`. The reach of `docs/adr/0001-toolchain-and-cryptography-dependencies.md:75-77` (OpenSSL and `ring` as suite-wide abstractions) is settled and is not reopened here: `docs/adr/0002-local-database-encryption.md:52-64` rejects the wide reading verbatim as a rejected alternative, so the TLS stack is named and reviewed, not defended.
 
-The ADR number is **0004**. `docs/adr/` today carries `0001-toolchain-and-cryptography-dependencies.md` and `0002-local-database-encryption.md`; the constant `ADR_PATH` in `tools/xtask/tests/adr_gate.rs` pins 0002 hard, and `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md:371` creates `docs/adr/0003-release-supply-chain.md`.
+The ADR number is **0004**. `docs/adr/` today carries `0001-toolchain-and-cryptography-dependencies.md` and `0002-local-database-encryption.md`; the constant `ADR_PATH` in `tools/xtask/tests/adr_gate.rs` pins 0002 hard, and `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md:372` creates `docs/adr/0003-release-supply-chain.md`.
 
 Enter the ratified classes exactly `=`-pinned in `[workspace.dependencies]` of the root `Cargo.toml` and **name the S3 client crate by name**; `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md:121` says only "S3-kompatibler Object Store". This task deliberately registers **no workspace member** — a `members` line pointing at a directory without a manifest fails `cargo metadata` and with it every test; the tasks that create the four crates register them. No pin is entered that no member of this stage consumes. Because this task rewrites `Cargo.lock` for the first time, `cargo metadata --format-version 1` is the exactly one command it runs without `--locked`; every other command of this task carries `--locked` again, as the lockfile-progress rule inside `workspace_declares_exact_planned_members_and_shared_dependencies` in `tools/xtask/tests/workspace.rs` requires.
 
@@ -523,10 +523,10 @@ git commit -m "feat(sync): add technical server persistence"
 - Test: `apps/server/tests/webauthn_credential_api.rs`
 
 **Interfaces:**
-- Consumes: `RequestVerifier`, `AuthenticatedDevice` including `ProofOfPossession`, `ServerClock`, Trust verifier/Registry line, Postgres nonce/request stores.
+- Consumes: `RequestVerifier`, `AuthenticatedDevice` including `ProofOfPossession`, `ServerClock`, Trust verifier/Registry line, Postgres nonce/request stores, and the six core codecs `encode_challenge_response_core`/`decode_challenge_response_core`, `encode_device_registration_request_core`/`decode_device_registration_request_core`, `encode_reader_ack_core`/`decode_reader_ack_core` of the task „Geteilte Format- und Kryptokerne für die Serverfläche“.
 - Produces: rate-limited single-use challenges, pending self-signed registration requests, `POST /v1/webauthn-credentials` with the registered WebAuthn credentials carrying the pseudonymous `subjectId` as `userHandle`, and exact Root-signed Trust object distribution.
 
-- [ ] **Step 1: Write challenge replay and pending-registration tests**
+- [ ] **Step 1: Write challenge replay, pending-registration, and credential-registration tests**
 
 ```rust
 #[tokio::test]
@@ -537,13 +537,24 @@ async fn challenge_is_single_use_and_registration_remains_pending() {
     assert_eq!(api.register(request).await.unwrap_err().code(), "EA-AUTH-NONCE-REPLAY");
     assert!(!api.device_is_authorized(fixtures::device_id()).await);
 }
+
+#[tokio::test]
+async fn credential_registration_binds_the_subject_and_spends_its_challenge() {
+    let challenge = api.issue_challenge(org).await.unwrap();
+    let registration = fixtures::credential_registration(subject(), challenge);
+    let credential = api.register_webauthn_credential(registration.clone()).await.unwrap();
+    assert_eq!(credential.user_handle(), subject());
+    assert_eq!(api.register_webauthn_credential(registration).await.unwrap_err().code(),
+               "EA-AUTH-NONCE-REPLAY");
+    assert!(!api.device_is_authorized(fixtures::device_id()).await);
+}
 ```
 
 - [ ] **Step 2: Run API tests and verify endpoints are absent**
 
-Run: `cargo test --locked -p einsatzarchiv-server --test auth_trust_api`
+Run: `cargo test --locked -p einsatzarchiv-server --test auth_trust_api --test webauthn_credential_api`
 
-Expected: FAIL because challenge, registration, and Trust handlers do not exist.
+Expected: FAIL because challenge, registration, `POST /v1/webauthn-credentials`, and Trust handlers do not exist.
 
 - [ ] **Step 3: Implement pending-only registration and signed Trust publication**
 
@@ -555,9 +566,9 @@ The subtype set accepted by the Trust endpoint is the one that `TrustSubtypeV1` 
 
 - [ ] **Step 4: Run auth, capability, and Trust rollback tests**
 
-Run: `cargo test --locked -p einsatzarchiv-server --test auth_trust_api`
+Run: `cargo test --locked -p einsatzarchiv-server --test auth_trust_api --test webauthn_credential_api`
 
-Expected: PASS; pending, unpinned, revoked, wrong-organization, wrong-capability, stale, and replayed callers cannot mutate Trust.
+Expected: PASS; pending, unpinned, revoked, wrong-organization, wrong-capability, stale, and replayed callers cannot mutate Trust, and `POST /v1/webauthn-credentials` binds the pseudonymous `subjectId` as `userHandle` and refuses a second registration on a spent challenge.
 
 - [ ] **Step 5: Commit auth and Trust endpoints**
 
@@ -891,13 +902,13 @@ git commit -m "feat(sync): release wrapped vault blobs against a webauthn assert
 - Modify: `tools/xtask/tests/workspace.rs`
 - Modify: `crates/ea-archive-fs/src/publication_queue.rs`
 - Modify: `crates/ea-archive-fs/src/profile_migration.rs`
-- Test: `crates/ea-archive-fs/tests/publication_queue.rs`
-- Test: `crates/ea-archive-fs/tests/support/mod.rs`
+- Modify: `crates/ea-archive-fs/tests/publication_queue.rs`
+- Modify: `crates/ea-archive-fs/tests/support/mod.rs`
 - Modify: `crates/ea-archive/src/backend.rs`
 - Modify: `crates/ea-archive-fs/src/local_path.rs`
 - Modify: `crates/ea-archive-fs/src/health.rs`
 - Modify: `crates/ea-writer/src/recover.rs`
-- Test: `crates/ea-writer/tests/prepared_recovery.rs`
+- Modify: `crates/ea-writer/tests/prepared_recovery.rs`
 - Modify: `crates/ea-local-store/src/migrations.rs`
 - Modify: `crates/ea-types/src/status.rs`
 - Modify: `crates/ea-types/src/lib.rs`
@@ -1171,7 +1182,7 @@ Server-key rotation carries one further rule, because the same Root-signed serve
 
 `apps/server/src/config.rs` terminates TLS at minimum version 1.3 fail-closed. The negative proof belongs to this task: a TLS-1.2 handshake against the configured listener is REJECTED and never negotiated down, and that rejection is the scenario `"tls-downgrade"` of the failure matrix.
 
-Pin the OCI base by the digest recorded in ADR 0004 (server runtime and dependency class), section `OCI base image`, and record the exact digest verbatim in the `Gemessener Gate-Lauf` section of `docs/traceability/stage-3-gate.md`. The base image MUST carry the Rust toolchain pinned in `rust-toolchain.toml` (`1.95.0`), so that no second, unpinned compiler produces production bytes. The authoritative release digest and the platform proof close in Stage 7 (Global Constraint above). Run as non-root, read-only root filesystem, dropped capabilities, dedicated writable volumes, and external secret injection for server signer. As a marker of a foreign stage, recorded here and NOT resolved here: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md:42` wants to create `docs/adr/0002-support-matrix-signature.md`, although `0002` is taken by `docs/adr/0002-local-database-encryption.md` and pinned hard by `ADR_PATH` in `tools/xtask/tests/adr_gate.rs` — an independent defect of that plan.
+Pin the OCI base by the digest recorded in ADR 0004 (server runtime and dependency class), section `OCI base image`, and record the exact digest verbatim in the `Gemessener Gate-Lauf` section of `docs/traceability/stage-3-gate.md`. The base image MUST carry the Rust toolchain pinned in `rust-toolchain.toml` (`1.95.0`), so that no second, unpinned compiler produces production bytes. The authoritative release digest and the platform proof close in Stage 7 (Global Constraint above). Run as non-root, read-only root filesystem, dropped capabilities, dedicated writable volumes, and external secret injection for server signer. As a marker of a foreign stage, recorded here and NOT resolved here: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md:43` wants to create `docs/adr/0002-support-matrix-signature.md`, although `0002` is taken by `docs/adr/0002-local-database-encryption.md` and pinned hard by `ADR_PATH` in `tools/xtask/tests/adr_gate.rs` — an independent defect of that plan.
 
 `ServerAdminConfig::schema_capabilities()` describes the capability set of the ADMINISTRATION CONFIGURATION, not that of the receipt key; the equality on exactly `CertificateCapability::ServerReceipt` says that the server administrator can configure no authority beyond it. The three prohibitions — no decrypting, no Writer signing, no Registry authorizing — are expressed through the ABSENCE of every grant and signature capability plus that closing equality, and not through variants that do not exist: `CertificateCapability` is closed on the seven variants `InitialGrant`, `HistoricalGrant`, `OrganizationAdminApprove`, `HistoricalGrantApprove`, `DestructionApprove`, `ServerReceipt` and `DeletionAttest`. Declaring a parallel `Capability` enum in `crates/ea-sync-server` or `apps/server` is excluded. The capability set stays at seven variants: the purpose separation of the technical cursor runs over an additive domain string and not over an eighth variant, so this assurance stands without reservation.
 
@@ -1185,7 +1196,7 @@ Open the stage switch in `run_stage_gate` (`tools/xtask/src/main.rs`) by `if sta
 
 Extend `package.json` (today ELEVEN scripts, `package.json:9-21`) by exactly two keys: `"test:server": "cargo test --locked -p einsatzarchiv-server --test migrations --test object_store --test auth_trust_api --test webauthn_credential_api --test entry_commit_api --test commit_failures --test checkpoint_api --test read_apis --test historical_grant_api --test destruction_api --test export_api --test vault_blob_api"` and `"stage-gate:3": "cargo run --locked -p xtask -- stage-gate 3"`. The twelve `--test` targets are exactly the `apps/server` integration test targets that the tasks of this stage declare, in the order in which they declare them. Both keys belong in `STAGE_THREE_REQUIRED_SCRIPTS`, so that the gate enforces their existence the way it enforces the five Stage-2 scripts.
 
-The report `docs/traceability/stage-3-gate.md` is bound in content, not only in name. It carries a section `Gemessener Gate-Lauf` with one row per command of the run in Step 4 — command, exit code, evidence text, measured runtime — machine-pinned through `STAGE_THREE_STEP_SIX_COMMANDS` after the model of `STAGE_TWO_STEP_SIX_COMMANDS`. Within it stand (a) the license ruling for every new named exception in `deny.toml` — this section is the decision place that `deny.toml` prescribes normatively; (b) the scope clause for Auflegung A after the model of `STAGE_TWO_HOST_SCOPE_CLAUSE`, writing out which services ran under which versions and image digests; (c) the verbatim OCI base digest; (d) the evidence row for `pnpm verify:quick` with measured runtime plus the statement whether it was measured on a warm or a cold `target/` — reference value: the Stage-2 run measured 125 s and left warm or cold UNSTATED, which is exactly why this stage states it; Stage 3 comes above that value and additionally requires two running containers. In that same evidence row the package count of the wasm32 positive list is BOUND TO ITS SOURCE (`verify_quick_commands()` in `tools/xtask/src/main.rs`) instead of written out as a number. Under the points that stay open the report carries (e) the migration reservation of the task „PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port“ — migration evolution against an already delivered installation is Stage 7 — and (f) a named marker for Stages 4 and 6, whose gate runs today drive `pnpm verify:quick` bare (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md:534`, `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-6-evidence-grade.md:408`) although `apps/server` is a workspace member from this stage on. That consequence is caused by Auflegung A and is named here, not filed away as a foreign-stage legacy defect.
+The report `docs/traceability/stage-3-gate.md` is bound in content, not only in name. It carries a section `Gemessener Gate-Lauf` with one row per command of the run in Step 4 — command, exit code, evidence text, measured runtime — machine-pinned through `STAGE_THREE_STEP_SIX_COMMANDS` after the model of `STAGE_TWO_STEP_SIX_COMMANDS`. Within it stand (a) the license ruling for every new named exception in `deny.toml` — this section is the decision place that `deny.toml` prescribes normatively; (b) the scope clause for Auflegung A after the model of `STAGE_TWO_HOST_SCOPE_CLAUSE`, writing out which services ran under which versions and image digests; (c) the verbatim OCI base digest; (d) the evidence row for `pnpm verify:quick` with measured runtime plus the statement whether it was measured on a warm or a cold `target/` — reference value: the Stage-2 run measured 125 s and left warm or cold UNSTATED, which is exactly why this stage states it; Stage 3 comes above that value and additionally requires two running containers. In that same evidence row the package count of the wasm32 positive list is BOUND TO ITS SOURCE (`verify_quick_commands()` in `tools/xtask/src/main.rs`) instead of written out as a number. Under the points that stay open the report carries (e) the migration reservation of the task „PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port“ — migration evolution against an already delivered installation is Stage 7 — and (f) a named marker for Stages 4 and 6, whose gate runs today drive `pnpm verify:quick` bare (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md:537`, `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-6-evidence-grade.md:409`) although `apps/server` is a workspace member from this stage on. That consequence is caused by Auflegung A and is named here, not filed away as a foreign-stage legacy defect.
 
 Three further sections of the report hold three verified negatives, so that their silence cannot be read as "not checked". They stay SEPARATE.
 
