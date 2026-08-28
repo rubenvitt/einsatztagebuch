@@ -893,6 +893,11 @@ git commit -m "feat(sync): release wrapped vault blobs against a webauthn assert
 - Modify: `crates/ea-archive-fs/src/profile_migration.rs`
 - Test: `crates/ea-archive-fs/tests/publication_queue.rs`
 - Test: `crates/ea-archive-fs/tests/support/mod.rs`
+- Modify: `crates/ea-archive/src/backend.rs`
+- Modify: `crates/ea-archive-fs/src/local_path.rs`
+- Modify: `crates/ea-archive-fs/src/health.rs`
+- Modify: `crates/ea-writer/src/recover.rs`
+- Test: `crates/ea-writer/tests/prepared_recovery.rs`
 - Modify: `crates/ea-local-store/src/migrations.rs`
 - Modify: `crates/ea-types/src/status.rs`
 - Modify: `crates/ea-types/src/lib.rs`
@@ -921,15 +926,29 @@ async fn synchronized_requires_locally_verified_receipt() {
     assert_eq!(h.push_pending().await.unwrap_err().code(), "EA-SYNC-RECEIPT-INVALID");
     assert_ne!(h.status(), SyncStatus::Synchronized);
 }
+
+#[test]
+fn staging_and_grant_leftovers_fall_only_after_a_proven_outcome() {
+    let mut h = RecoveryHarness::prepared_finalization_interrupted();
+    let staged = |h: &RecoveryHarness| {
+        h.archive().relative_paths().unwrap().iter().any(|p| ea_archive::is_staging_path(p))
+    };
+    assert!(staged(&h));
+    h.recover_pending().unwrap();
+    assert!(staged(&h), "before the irreversible boundary nothing is ever removed");
+    h.reconcile_to_completion().unwrap();
+    assert!(!staged(&h));
+    assert!(!h.health().contains(&HealthFinding::OrphanGrantOrTemporaryFile));
+}
 ```
 
 - [ ] **Step 2: Run sync-client tests and verify failure**
 
-Run: `cargo metadata --format-version 1 && cargo test --locked -p ea-sync-client && pnpm --dir apps/desktop test --run SyncStatus`
+Run: `cargo metadata --format-version 1 && cargo test --locked -p ea-sync-client && cargo test --locked -p ea-writer --test prepared_recovery && pnpm --dir apps/desktop test --run SyncStatus`
 
 `cargo metadata --format-version 1` is the exactly one command of this task without `--locked`, because this task enters a new member and new foreign dependencies. The lockfile-progress rule stands verbatim in `workspace_declares_exact_planned_members_and_shared_dependencies` in `tools/xtask/tests/workspace.rs`: "Ein neues Mitglied oder eine neue Fremdabhaengigkeit schreibt Cargo.lock neu, deshalb laeuft in dem Task, der sie eintraegt, GENAU EIN Kommando ohne --locked … Alle weiteren Kommandos dieses Tasks tragen wieder --locked."
 
-Expected: FAIL because queue/client/status integration does not exist.
+Expected: FAIL because queue/client/status integration does not exist and the archive port carries no delete primitive, so the staging leftovers are never cleaned.
 
 - [ ] **Step 3: Implement queue derivation and bounded retry**
 
@@ -945,18 +964,20 @@ Attempt counter and `nextAttemptAt` lie in an own table of the local encrypted s
 
 `SyncStateView` in `crates/ea-ui-contracts` stays UNCHANGED: this task adds no retry or Receipt evidence field to the DTO, so neither `crates/ea-ui-contracts/src/lib.rs`, nor `crates/ea-ui-contracts/src/emit.rs`, nor `apps/desktop/src/bridge/generated-contracts.ts` is touched. Hand-written status literals in `SyncStatus.tsx` stay forbidden; the guard is `apps/desktop/src/bridge/no-hand-written-contracts.test.ts`, and the component keeps unpacking the four names out of the emitted `SYNC_STATUS_VALUES` array.
 
+The archive port gains its first delete primitive in this task, and it is the reason `FR-043` can close in this stage at all: `ArchiveBackend` (`crates/ea-archive/src/backend.rs`) receives `remove_if_present` in the naming symmetry of `create_if_absent`, implemented by `LocalPathBackend` (`crates/ea-archive-fs/src/local_path.rs`); `recover.rs` uses it to clean staging after COMPLETE reconciliation (design.md:460, step 13) and pre-published grants without a committed `.eip` after a PROVEN abort (design.md:468), never before the irreversible boundary, where the comment „sie zu entfernen verlangt eine Loeschprimitive, die der Port bewusst nicht hat" stands today; and `crates/ea-archive-fs/src/health.rs` stops raising `HealthFinding::OrphanGrantOrTemporaryFile` for leftovers that have been cleaned, while every uncleaned one keeps raising it unchanged. This stage is where the Writer first learns of a proven outcome — a verified Receipt, or a completed reconciliation — which is exactly the precondition the cleanup was missing in Stage 2.
+
 `SyncStatus.tsx` stays on the design-system state accepted in Stage 2: Ant Design 6, static `zeroRuntime`, local CSP, direct CSR imports from `@phosphor-icons/react`; no new tokens, no runtime CSS and no TypeScript security logic arise.
 
 - [ ] **Step 4: Run offline/reconnect/restart/replay tests**
 
-Run: `cargo test --locked -p ea-sync-client && cargo test --locked -p ea-archive-fs && pnpm --dir apps/desktop test --run SyncStatus && pnpm --dir apps/desktop typecheck`
+Run: `cargo test --locked -p ea-sync-client && cargo test --locked -p ea-archive-fs && cargo test --locked -p ea-writer && pnpm --dir apps/desktop test --run SyncStatus && pnpm --dir apps/desktop typecheck`
 
-Expected: PASS; queue reconstruction ignores mutable queue rows and an interrupted response resumes idempotently to the same Receipt.
+Expected: PASS; queue reconstruction ignores mutable queue rows, an interrupted response resumes idempotently to the same Receipt, and staging and grant leftovers fall only after a proven outcome — never before the irreversible boundary, where the existing prepared-recovery assurances stay green unchanged.
 
 - [ ] **Step 5: Commit Writer sync**
 
 ```bash
-git add crates/ea-sync-client crates/ea-archive-fs crates/ea-local-store crates/ea-types apps/desktop tools/xtask Cargo.toml Cargo.lock pnpm-lock.yaml
+git add crates/ea-sync-client crates/ea-archive crates/ea-archive-fs crates/ea-writer crates/ea-local-store crates/ea-types apps/desktop tools/xtask Cargo.toml Cargo.lock pnpm-lock.yaml
 git commit -m "feat(sync): resume Writer uploads from archive bytes"
 ```
 
@@ -1201,7 +1222,7 @@ Four Stage-3 rows are left over by the fourteen closings, and the still-planned 
 
 `WEB_READER_MUST_ROWS` follows in the same commit. Its arity when this task starts is EIGHT: seven tuples in the checked-in state plus the tuple `("WR-064", "6.4", "3", "implemented")` of the task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS“. This task adds EXACTLY ONE tuple, `("WR-042D", "4.2", "3", "implemented")`, so the arity goes from eight to nine. The three existing tuples change their stage column from `"3"` to `"4"`: `("WR-041", "4.1", "4", "planned")`, `("WR-042", "4.2", "4", "planned")`, `("WR-043", "4.3", "4", "planned")`. The shift is WRITTEN OUT in the doc comment of the constant, exactly after the pattern of the decision D-HE2 already standing there. The closed Stage-1 and Stage-2 gate reports are NOT edited for it; `docs/traceability/stage-2-gate.md:288-295` carries this mechanism as precedent.
 
-The fourth left-over row is `FR-043` in version `v1.1` („Bereinigung von Staging- und Abbruchresten"), and it is the third movement of this task, of the same permitted kind: no task of this stage builds its artefact. Its evidence column names `crates/ea-writer/src/recover.rs` and `crates/ea-archive-fs/src/health.rs` — Writer-side staging cleanup after complete reconciliation and cleanup of pre-published grants after a proven abort. Both are administration actions on the local Writer archive and require a delete primitive of the archive port, which no task of this blind-sync stage creates; the sibling fail-closed resolution paths in `crates/ea-writer/src/recover.rs` are already carried as a marker by `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-5-administration-recovery.md:20`. The row therefore moves to `stage=5` with an adjusted evidence column referring to that plan; its `v1` sibling row on `stage=2`, `status=integrated` stays untouched. After this movement no ledger row with `stage=3` is left on `planned`.
+The fourth left-over row is `FR-043` in version `v1.1` („Bereinigung von Staging- und Abbruchresten"), and it KEEPS `stage=3` and goes to `status=implemented`. It is named separately from the fourteen above for one reason only: its evidence is built by another task of this stage, not by this one. The task „Writer Sync Queue, Network-Archive Ordering, and Receipt Persistence“ gives the archive port its delete primitive and cleans staging after complete reconciliation (design.md:460, step 13) and pre-published grants without a committed `.eip` after a proven abort (design.md:468); the evidence column is rewritten from its open finding onto `crates/ea-writer/tests/prepared_recovery.rs::staging_and_grant_leftovers_fall_only_after_a_proven_outcome`. Its `v1` sibling row on `stage=2`, `status=integrated` stays untouched. With these fifteen closings and the Web-Reader split above, no ledger row with `stage=3` is left on `planned`.
 
 - [ ] **Step 4: Run the complete Stage 3 gate**
 
@@ -1220,7 +1241,7 @@ cargo run --locked -p xtask -- integration down
 
 Three things about this run are deliberate and are not to be simplified back. `pnpm supply-chain` stands in the second-to-last position before `pnpm verify:quick`, exactly where the Stage-2 run put it (`docs/traceability/stage-2-gate.md`, section `Gemessener Gate-Lauf`); without that line `deny.toml` is completely dead for Stage 3, because no gate calls `cargo deny` by itself, and this stage pulls the largest new dependency tree of the project. The privacy and restore evidence runs as a direct `cargo test` command and not through a wrapper: gates named `test-privacy` and `test-backup-restore` do not exist in the dispatcher, AND the `test-*` gates reject every argument, so the wrapper route would be two changes, while the Stage-2 model `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` is a one-change precedent. And `pnpm stage-gate:3` rather than `cargo run --locked -p xtask -- stage-gate 3`, so that the script really appears in the measured run, the way `pnpm stage-gate:2` does in Stage 2.
 
-Expected: PASS. All commit/replay/partial-failure assertions hold, no canary appears, and the report marks production restore/release evidence open for Stage 7. Step 3 executes every ledger movement, so by the time this run happens the gate is green; the ledger is nevertheless the one place where a RED gate can be expected rather than a defect, and the boundary is exact. While any ledger movement of Step 3 is still outstanding, `pnpm stage-gate:3` reports exactly one line, and it names all four rows the filter still finds, in ledger order: `stage 3 requirement ledger rows still on planned: FR-043, WR-041, WR-042, WR-043`. Three of them — WR-041, WR-042, WR-043 — leave that line through the Web-Reader split of Step 3; the fourth, FR-043, leaves it through the re-staging of Step 3 and is not part of that split. A red gate BEFORE those movements is therefore the expected pre-state and no implementation error; a red gate AFTER them is a defect and is to be treated as one. The line is also the exact form to compare against: any other row name in it means a Stage-3 row was forgotten, not that the movement failed.
+Expected: PASS. All commit/replay/partial-failure assertions hold, no canary appears, and the report marks production restore/release evidence open for Stage 7. Step 3 executes every ledger movement, so by the time this run happens the gate is green; the ledger is nevertheless the one place where a RED gate can be expected rather than a defect, and the boundary is exact. While any ledger movement of Step 3 is still outstanding, `pnpm stage-gate:3` reports exactly one line, and it names all four rows the filter still finds, in ledger order: `stage 3 requirement ledger rows still on planned: FR-043, WR-041, WR-042, WR-043`. Three of them — WR-041, WR-042, WR-043 — leave that line through the Web-Reader split of Step 3; the fourth, FR-043, leaves it by being closed on the evidence of the task „Writer Sync Queue, Network-Archive Ordering, and Receipt Persistence“ and is not part of that split. A red gate BEFORE those movements is therefore the expected pre-state and no implementation error; a red gate AFTER them is a defect and is to be treated as one. The line is also the exact form to compare against: any other row name in it means a Stage-3 row was forgotten, not that the movement failed.
 
 - [ ] **Step 5: Commit the Stage 3 gate**
 
