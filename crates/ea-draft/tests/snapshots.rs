@@ -111,17 +111,75 @@ fn an_unknown_master_id_is_a_named_absence_and_not_an_empty_snapshot() {
         MasterDataError::UnknownMasterId.code(),
         "EA-MASTER-UNKNOWN-ID"
     );
-    // Die zwei uebrigen Codes dieser Grenze sind im Bestand nicht erreichbar —
-    // `Snapshot` liegt hinter fuenf `map_err` ueber Konstruktoren, die
-    // ausnahmslos `Ok` liefern (`crates/ea-schema/src/model.rs`:820-1000), und
-    // `RevisionOverflow` verlangt eine negative Revisionsspalte, die
-    // `CHECK (revision >= 1)` in `0003_master_data.sql` ausschliesst. Sie
-    // bleiben Vertragsflaeche und werden deshalb gepinnt, aber nicht
-    // erzwungen: dieselbe Begruendung wie `ChainError::NodeLimit` in
+    // `Snapshot` wird in `a_snapshot_that_breaks_the_stage_1_text_rule_is_named`
+    // erzwungen. `RevisionOverflow` verlangt eine negative Revisionsspalte, die
+    // `CHECK (revision >= 1)` in `0003_master_data.sql` ausschliesst; der Code
+    // bleibt Vertragsflaeche und wird deshalb gepinnt, aber nicht erzwungen:
+    // dieselbe Begruendung wie `ChainError::NodeLimit` in
     // `crates/ea-chain/tests/chain_core.rs`:149.
     assert_eq!(MasterDataError::Snapshot.code(), "EA-MASTER-SNAPSHOT");
     assert_eq!(
         MasterDataError::RevisionOverflow.code(),
         "EA-MASTER-REVISION-OVERFLOW"
     );
+}
+
+#[test]
+fn a_snapshot_that_breaks_the_stage_1_text_rule_is_named() {
+    // Die Stufe 1 verlangt 1..200 NFC-Zeichen je Text einer Momentaufnahme
+    // (`ea_schema::SNAPSHOT_TEXT_MAX_CHARS_V1`). Beide Wege zu
+    // `EA-MASTER-SNAPSHOT` werden hier begangen: der Ad-hoc-Weg ohne Zeile und
+    // der Stammdatenweg ueber eine Zeile, die nach einer Umbenennung ueber der
+    // Grenze liegt — `rename_*` prueft nicht, die Momentaufnahme schon.
+    let harness = ImportHarness::new();
+    let repo = harness.master_data_repo();
+    let snapshot = Some(MasterDataError::Snapshot.code());
+
+    assert_eq!(
+        repo.ad_hoc_person("", None)
+            .err()
+            .map(MasterDataError::code),
+        snapshot
+    );
+    assert_eq!(
+        repo.ad_hoc_person("Helfer", Some(""))
+            .err()
+            .map(MasterDataError::code),
+        snapshot
+    );
+    assert_eq!(
+        repo.ad_hoc_vehicle("", None, None)
+            .err()
+            .map(MasterDataError::code),
+        snapshot
+    );
+    assert_eq!(
+        repo.ad_hoc_vehicle("MTW", None, Some(&"x".repeat(201)))
+            .err()
+            .map(MasterDataError::code),
+        snapshot
+    );
+
+    harness.import_persons(b"id,display_name,role,active\np1,Ada,Fuehrung,true\n");
+    harness.import_vehicles(
+        b"id,display_name,radio_call_sign,license_plate,active\n\
+          v1,MTW,Rotkreuz 1,HH-DRK 1,true\n",
+    );
+    assert!(repo.snapshot_person("p1").is_ok());
+    assert!(repo.snapshot_vehicle("v1").is_ok());
+    let too_long = "x".repeat(201);
+    assert_eq!(repo.rename_person("p1", &too_long).unwrap(), 2);
+    assert_eq!(repo.rename_vehicle("v1", &too_long).unwrap(), 2);
+    assert_eq!(
+        repo.snapshot_person("p1").err().map(MasterDataError::code),
+        snapshot
+    );
+    assert_eq!(
+        repo.snapshot_vehicle("v1").err().map(MasterDataError::code),
+        snapshot
+    );
+    // Genau an der Grenze bleibt die Zeile brauchbar.
+    let at_limit = "y".repeat(200);
+    assert_eq!(repo.rename_person("p1", &at_limit).unwrap(), 3);
+    assert_eq!(repo.snapshot_person("p1").unwrap().display_name(), at_limit);
 }

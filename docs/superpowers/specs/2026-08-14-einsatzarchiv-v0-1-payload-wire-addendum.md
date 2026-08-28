@@ -174,6 +174,11 @@ Die Rust-Semantik von Task 7 erzwingt zusätzlich: Einsatznummer 1..64 Zeichen,
 Keyword/Referenz 1..128 Zeichen, höchstens 200 Personen und 100 Fahrzeuge,
 eine nichtleere Begründung für jede leere der beiden Listen, maximal 20.000
 Zeichen Notizen, höchstens 100 externe Organisationen und `end >= start`.
+Jeder Text einer Personen-, Fahrzeug- oder Organisationsmomentaufnahme sowie
+`sourceId` der Provenienz trägt 1..200 NFC-Zeichen (`SNAPSHOT_TEXT_MAX_CHARS_V1`,
+deckungsgleich mit der CSV-Feldgrenze des Imports); ein optionaler Text ist
+entweder `null` oder nichtleer. Die Regel gilt im Konstruktor UND nach dem
+Dekodieren, damit beide Wege dieselbe Menge annehmen.
 Personen, Fahrzeuge und externe Organisationen bewahren die Autorenreihenfolge;
 deterministisches CBOR sortiert diese normalen Listen DARF NICHT.
 

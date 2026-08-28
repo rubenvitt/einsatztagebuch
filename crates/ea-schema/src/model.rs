@@ -482,6 +482,9 @@ impl IncidentV1 {
         if self.body.personnel.len() > 200 {
             return Err(SchemaError::invalid("EA-SCHEMA-COUNT", Some("personnel")));
         }
+        for snapshot in &self.body.personnel {
+            snapshot.validate()?;
+        }
         validate_empty_reason(
             self.body.personnel.is_empty(),
             self.body.personnel_empty_reason.as_deref(),
@@ -489,6 +492,9 @@ impl IncidentV1 {
         )?;
         if self.body.vehicles.len() > 100 {
             return Err(SchemaError::invalid("EA-SCHEMA-COUNT", Some("vehicles")));
+        }
+        for snapshot in &self.body.vehicles {
+            snapshot.validate()?;
         }
         validate_empty_reason(
             self.body.vehicles.is_empty(),
@@ -503,6 +509,9 @@ impl IncidentV1 {
                 "EA-SCHEMA-COUNT",
                 Some("externalOrganizations"),
             ));
+        }
+        for organization in &self.body.external_organizations {
+            organization.validate()?;
         }
         Ok(())
     }
@@ -821,11 +830,17 @@ impl ImportedProvenanceV1 {
         source_format_version: u64,
         import_protocol_hash: ObjectHash,
     ) -> Result<Self, SchemaError> {
-        Ok(Self {
+        let value = Self {
             source_id: normalize_text(source_id),
             source_format_version,
             import_protocol_hash,
-        })
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), SchemaError> {
+        validate_snapshot_text(&self.source_id, "importedProvenance.sourceId")
     }
 
     #[must_use]
@@ -866,23 +881,65 @@ impl PersonnelSnapshotV1 {
         revision: MasterDataRevisionV1,
         imported_provenance: Option<ImportedProvenanceV1>,
     ) -> Result<Self, SchemaError> {
-        Ok(Self::Master {
+        let value = Self::Master {
             master_personnel_id: normalize_text(master_personnel_id),
             display_name: normalize_text(display_name),
             role_or_function: role_or_function.map(normalize_text),
             revision,
             imported_provenance,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     pub fn ad_hoc(
         display_name: impl Into<String>,
         role_or_function: Option<String>,
     ) -> Result<Self, SchemaError> {
-        Ok(Self::AdHoc {
+        let value = Self::AdHoc {
             display_name: normalize_text(display_name),
             role_or_function: role_or_function.map(normalize_text),
-        })
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Die Textregel der Momentaufnahme: Kennung und Anzeigename 1..200
+    /// NFC-Zeichen, die optionale Funktion, WENN vorhanden, ebenso.
+    ///
+    /// Der Dekodierpfad baut die Varianten direkt und ruft dieselbe Regel
+    /// ueber [`IncidentV1::validate`]; beide Wege nehmen dieselbe Menge an.
+    pub(crate) fn validate(&self) -> Result<(), SchemaError> {
+        match self {
+            Self::Master {
+                master_personnel_id,
+                display_name,
+                role_or_function,
+                imported_provenance,
+                ..
+            } => {
+                validate_snapshot_text(master_personnel_id, "personnel.masterPersonnelId")?;
+                validate_snapshot_text(display_name, "personnel.displayName")?;
+                validate_optional_snapshot_text(
+                    role_or_function.as_deref(),
+                    "personnel.roleOrFunction",
+                )?;
+                if let Some(provenance) = imported_provenance {
+                    provenance.validate()?;
+                }
+                Ok(())
+            }
+            Self::AdHoc {
+                display_name,
+                role_or_function,
+            } => {
+                validate_snapshot_text(display_name, "personnel.displayName")?;
+                validate_optional_snapshot_text(
+                    role_or_function.as_deref(),
+                    "personnel.roleOrFunction",
+                )
+            }
+        }
     }
 
     #[must_use]
@@ -966,14 +1023,16 @@ impl VehicleSnapshotV1 {
         revision: MasterDataRevisionV1,
         imported_provenance: Option<ImportedProvenanceV1>,
     ) -> Result<Self, SchemaError> {
-        Ok(Self::Master {
+        let value = Self::Master {
             master_vehicle_id: normalize_text(master_vehicle_id),
             display_name: normalize_text(display_name),
             radio_call_sign: radio_call_sign.map(normalize_text),
             license_plate: license_plate.map(normalize_text),
             revision,
             imported_provenance,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     pub fn ad_hoc(
@@ -981,11 +1040,52 @@ impl VehicleSnapshotV1 {
         radio_call_sign: Option<String>,
         license_plate: Option<String>,
     ) -> Result<Self, SchemaError> {
-        Ok(Self::AdHoc {
+        let value = Self::AdHoc {
             display_name: normalize_text(display_name),
             radio_call_sign: radio_call_sign.map(normalize_text),
             license_plate: license_plate.map(normalize_text),
-        })
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Wie [`PersonnelSnapshotV1::validate`]: Kennung und Bezeichnung 1..200
+    /// NFC-Zeichen, Funkrufname und Kennzeichen, WENN vorhanden, ebenso.
+    pub(crate) fn validate(&self) -> Result<(), SchemaError> {
+        match self {
+            Self::Master {
+                master_vehicle_id,
+                display_name,
+                radio_call_sign,
+                license_plate,
+                imported_provenance,
+                ..
+            } => {
+                validate_snapshot_text(master_vehicle_id, "vehicles.masterVehicleId")?;
+                validate_snapshot_text(display_name, "vehicles.displayName")?;
+                validate_optional_snapshot_text(
+                    radio_call_sign.as_deref(),
+                    "vehicles.radioCallSign",
+                )?;
+                validate_optional_snapshot_text(license_plate.as_deref(), "vehicles.licensePlate")?;
+                if let Some(provenance) = imported_provenance {
+                    provenance.validate()?;
+                }
+                Ok(())
+            }
+            Self::AdHoc {
+                display_name,
+                radio_call_sign,
+                license_plate,
+            } => {
+                validate_snapshot_text(display_name, "vehicles.displayName")?;
+                validate_optional_snapshot_text(
+                    radio_call_sign.as_deref(),
+                    "vehicles.radioCallSign",
+                )?;
+                validate_optional_snapshot_text(license_plate.as_deref(), "vehicles.licensePlate")
+            }
+        }
     }
 
     #[must_use]
@@ -1058,10 +1158,17 @@ pub struct ExternalOrganizationV1 {
 
 impl ExternalOrganizationV1 {
     pub fn new(id: Option<&str>, display_name: impl Into<String>) -> Result<Self, SchemaError> {
-        Ok(Self {
+        let value = Self {
             id: id.map(normalize_text),
             display_name: normalize_text(display_name),
-        })
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), SchemaError> {
+        validate_optional_snapshot_text(self.id.as_deref(), "externalOrganizations.id")?;
+        validate_snapshot_text(&self.display_name, "externalOrganizations.displayName")
     }
 
     #[must_use]
@@ -1557,6 +1664,26 @@ fn validate_char_count(
         return Err(SchemaError::invalid("EA-SCHEMA-LENGTH", Some(field)));
     }
     Ok(())
+}
+
+/// Obergrenze fuer JEDEN Text einer Stammdaten- oder Organisationsmomentaufnahme.
+///
+/// Deckungsgleich mit `MAX_FIELD_CHARS` des CSV-Imports in `ea-draft`: eine
+/// angenommene Importzeile ergibt damit immer eine gueltige Momentaufnahme,
+/// und die Grenze ist an EINER Stelle der Stufe 1 festgelegt.
+pub const SNAPSHOT_TEXT_MAX_CHARS_V1: usize = 200;
+
+fn validate_snapshot_text(value: &str, field: &'static str) -> Result<(), SchemaError> {
+    validate_char_count(value, 1, SNAPSHOT_TEXT_MAX_CHARS_V1, field)
+}
+
+/// `None` ist die Abwesenheit; `Some("")` ist KEINE zweite Schreibweise dafuer
+/// und wird abgelehnt, damit ein Wert genau eine Darstellung hat.
+fn validate_optional_snapshot_text(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<(), SchemaError> {
+    value.map_or(Ok(()), |value| validate_snapshot_text(value, field))
 }
 
 fn validate_uuid_v7(record_id: RecordId, field: &'static str) -> Result<(), SchemaError> {

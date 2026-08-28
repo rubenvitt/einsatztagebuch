@@ -4,8 +4,9 @@ use ea_schema::{
     ExternalOrganizationV1, GenesisV1, IANA_TZDB_VERSION_V1, ImportedProvenanceV1, IncidentV1,
     KeyTransitionV1, KeywordV1, LocationV1, MasterDataRevisionV1, NativeSourceV1, OccurredAtV1,
     OperatorSnapshotV1, PAYLOAD_PLAINTEXT_MAX_BYTES_V1, PatientCount, PayloadV1,
-    PersonnelSnapshotV1, ReplicaResultV1, SCHEMA_VERSION_V1, SUITE_ID_V1, SchemaError,
-    SchemaRegistry, StructuredAddressV1, VehicleSnapshotV1, encode_payload,
+    PersonnelSnapshotV1, ReplicaResultV1, SCHEMA_VERSION_V1, SNAPSHOT_TEXT_MAX_CHARS_V1,
+    SUITE_ID_V1, SchemaError, SchemaRegistry, StructuredAddressV1, VehicleSnapshotV1,
+    encode_payload,
 };
 use ea_types::{
     ChainId, ChainSequence, DestructionId, EntryHash, Id16, ObjectHash, OperatorSubjectId,
@@ -685,6 +686,136 @@ fn incident_constructor_boundaries_fail_closed() {
     )
     .unwrap_err();
     assert_eq!(error.field(), Some("externalOrganizations"));
+}
+
+#[test]
+fn a_decoded_snapshot_with_an_empty_text_is_rejected_on_the_wire() {
+    // Der Dekodierpfad baut die Varianten OHNE Konstruktor; die Textregel
+    // muss ihn ueber `IncidentV1::validate` trotzdem treffen, sonst naehme das
+    // Register eine Momentaufnahme an, die kein Writer erzeugen kann.
+    let registry = SchemaRegistry::v1();
+    let exact =
+        hex::decode(include_str!("../../../vectors/format/payload-v1/incident.hex").trim_end())
+            .unwrap();
+    let master_vehicle_id = b"vehicle-7";
+    let start = exact
+        .windows(master_vehicle_id.len())
+        .position(|window| window == master_vehicle_id)
+        .unwrap();
+    assert_eq!(exact[start - 1], 0x60 + master_vehicle_id.len() as u8);
+    let mut empty_master_id = exact;
+    empty_master_id.splice(start - 1..start + master_vehicle_id.len(), [0x60]);
+    let error = registry
+        .validate("ea.incident", 1, &empty_master_id)
+        .unwrap_err();
+    assert_eq!(error.code(), "EA-SCHEMA-LENGTH");
+    assert_eq!(error.field(), Some("vehicles.masterVehicleId"));
+}
+
+#[test]
+fn snapshot_constructors_enforce_the_text_rule_on_every_text() {
+    // Jeder Text einer Momentaufnahme traegt 1..200 NFC-Zeichen; `Some("")`
+    // ist keine zweite Schreibweise fuer `None`. Jede Zusicherung nennt das
+    // Feld, damit ein Weg, der eine andere Pruefung zuerst trifft, auffaellt.
+    assert_eq!(SNAPSHOT_TEXT_MAX_CHARS_V1, 200);
+    let too_long = "x".repeat(SNAPSHOT_TEXT_MAX_CHARS_V1 + 1);
+    let revision = || MasterDataRevisionV1::RevisionNumber(1);
+    let field = |result: Result<PersonnelSnapshotV1, SchemaError>| {
+        result.err().and_then(|error| error.field())
+    };
+    let vehicle_field = |result: Result<VehicleSnapshotV1, SchemaError>| {
+        result.err().and_then(|error| error.field())
+    };
+
+    assert_eq!(
+        field(PersonnelSnapshotV1::ad_hoc("", None)),
+        Some("personnel.displayName")
+    );
+    assert_eq!(
+        field(PersonnelSnapshotV1::ad_hoc("Kraft", Some(String::new()))),
+        Some("personnel.roleOrFunction")
+    );
+    assert_eq!(
+        field(PersonnelSnapshotV1::master(
+            "",
+            "Kraft",
+            None,
+            revision(),
+            None
+        )),
+        Some("personnel.masterPersonnelId")
+    );
+    assert_eq!(
+        field(PersonnelSnapshotV1::master(
+            "p1",
+            too_long.clone(),
+            None,
+            revision(),
+            None
+        )),
+        Some("personnel.displayName")
+    );
+    assert_eq!(
+        vehicle_field(VehicleSnapshotV1::ad_hoc("", None, None)),
+        Some("vehicles.displayName")
+    );
+    assert_eq!(
+        vehicle_field(VehicleSnapshotV1::ad_hoc("MTW", Some(String::new()), None)),
+        Some("vehicles.radioCallSign")
+    );
+    assert_eq!(
+        vehicle_field(VehicleSnapshotV1::ad_hoc(
+            "MTW",
+            None,
+            Some(too_long.clone())
+        )),
+        Some("vehicles.licensePlate")
+    );
+    assert_eq!(
+        vehicle_field(VehicleSnapshotV1::master(
+            "",
+            "MTW",
+            None,
+            None,
+            revision(),
+            None
+        )),
+        Some("vehicles.masterVehicleId")
+    );
+    assert_eq!(
+        ImportedProvenanceV1::new("", 1, object_hash(0x81))
+            .err()
+            .and_then(|error| error.field()),
+        Some("importedProvenance.sourceId")
+    );
+    assert_eq!(
+        ExternalOrganizationV1::new(Some(""), "Klinik")
+            .err()
+            .and_then(|error| error.field()),
+        Some("externalOrganizations.id")
+    );
+    assert_eq!(
+        ExternalOrganizationV1::new(None, "")
+            .err()
+            .and_then(|error| error.field()),
+        Some("externalOrganizations.displayName")
+    );
+
+    // Die Grenze selbst ist erlaubt, und der Konstruktor normalisiert vor dem
+    // Zaehlen: ein zerlegtes Zeichen zaehlt als eines.
+    let at_limit = "y".repeat(SNAPSHOT_TEXT_MAX_CHARS_V1);
+    assert!(PersonnelSnapshotV1::ad_hoc(at_limit.clone(), None).is_ok());
+    assert!(VehicleSnapshotV1::ad_hoc(at_limit.clone(), Some(at_limit.clone()), None).is_ok());
+    assert!(ExternalOrganizationV1::new(Some(&at_limit), &at_limit).is_ok());
+    let decomposed = format!("{}u\u{308}", "y".repeat(SNAPSHOT_TEXT_MAX_CHARS_V1 - 1));
+    assert_eq!(
+        PersonnelSnapshotV1::ad_hoc(decomposed, None)
+            .unwrap()
+            .display_name()
+            .chars()
+            .count(),
+        SNAPSHOT_TEXT_MAX_CHARS_V1
+    );
 }
 
 #[test]

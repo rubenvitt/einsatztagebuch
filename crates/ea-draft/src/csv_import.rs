@@ -182,7 +182,11 @@ impl CsvImporter {
     pub const MAX_INPUT_BYTES: usize = 1_048_576;
 
     /// Die groesste annehmbare Zeichenzahl EINES Feldes.
-    pub const MAX_FIELD_CHARS: usize = 200;
+    ///
+    /// Dieselbe Schranke, die Stufe 1 an jeden Text einer Momentaufnahme
+    /// legt: eine angenommene Zeile MUSS spaeter eine gueltige Momentaufnahme
+    /// ergeben, sonst waere der Import eine Zusage ohne Deckung.
+    pub const MAX_FIELD_CHARS: usize = ea_schema::SNAPSHOT_TEXT_MAX_CHARS_V1;
 
     /// Der Name der Spalte, die die Stammdatenkennung traegt.
     const ID_COLUMN: &'static str = "id";

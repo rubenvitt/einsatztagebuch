@@ -51,7 +51,9 @@ pub enum MasterDataError {
     /// Sie kommt aus [`ea_schema::SchemaError`] und wird ABGEFLACHT: die
     /// Stufe-1-Fehlermenge ist nicht `Copy`, und eine Stammdatenzeile, die die
     /// eingefrorene Gestalt verletzt, hat genau einen Grund — sie ist
-    /// unbrauchbar.
+    /// unbrauchbar. Erreichbar ueber die Textregel der Stufe 1 (1..200
+    /// NFC-Zeichen je Text): ein Ad-hoc-Eintrag ohne Namen oder eine
+    /// umbenannte Stammdatenzeile ueber der Grenze.
     Snapshot,
     /// Die Revisionsspalte laesst sich nicht mehr erhoehen.
     RevisionOverflow,

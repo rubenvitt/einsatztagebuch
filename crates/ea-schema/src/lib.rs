@@ -15,7 +15,8 @@ pub use model::{
     ExternalOrganizationV1, GenesisV1, ImportedProvenanceV1, IncidentUniquenessKey, IncidentV1,
     KeyTransitionV1, KeywordV1, LocationV1, MasterDataRevisionV1, NativeSourceV1, OccurredAtV1,
     OperatorSnapshotV1, PatientCount, PayloadV1, PersonnelSnapshotV1, ReplicaResultV1,
-    ReplicaStateV1, StructuredAddressV1, ValidatedPayload, VehicleSnapshotV1,
+    ReplicaStateV1, SNAPSHOT_TEXT_MAX_CHARS_V1, StructuredAddressV1, ValidatedPayload,
+    VehicleSnapshotV1,
 };
 pub use registry::{SchemaDescriptor, SchemaRegistry};
 pub use transform::DerivedView;
