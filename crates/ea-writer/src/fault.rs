@@ -212,9 +212,23 @@ pub enum FinalizationFaultPoint {
     ///
     /// Der lokale Archiv-Commit ist vollstaendig; das Archivpaket ist jetzt die
     /// Wahrheit, und ein Neustart erzeugt kein Duplikat.
+    ///
+    /// Bis [`Self::AfterReconciliationBeforeBlankDraft`] ist dieser Punkt auf
+    /// der Platte BYTEIDENTISCH: Schritt 12 (Netzarchiv) schreibt beim
+    /// LOKALEN Profil kein einziges Byte, sondern haengt nur den
+    /// In-Memory-Zustand weiter (`crates/ea-writer/src/finalize.rs`, Schritt
+    /// 12-Kommentar). Beide bleiben trotzdem eigene, benannte Punkte: sie
+    /// klammern die Phasengrenze `EntryCommitted` -> `NetworkArchivePublished`
+    /// und den in `design.md` §9.3 spezifizierten Schritt 12, der beim
+    /// (noch nicht gebauten) Netzprofilweg wieder eigene Bytes schreiben wird
+    /// — dann divergieren die beiden Stellen, und der Test braucht seinen
+    /// eigenen Ansatzpunkt schon jetzt.
     AfterEntryDirectoryFlush,
     /// Nach dem Abgleich, VOR dem Bereinigen des Stagings und dem Oeffnen des
     /// leeren Entwurfs.
+    ///
+    /// Auf der Platte BYTEIDENTISCH mit [`Self::AfterEntryDirectoryFlush`] —
+    /// Begruendung dort.
     AfterReconciliationBeforeBlankDraft,
     /// Eine zurueckgespielte Sicherung, NACHDEM der `draftDEK` geloescht war.
     ///

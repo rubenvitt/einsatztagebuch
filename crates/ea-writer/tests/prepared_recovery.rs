@@ -185,11 +185,23 @@ fn after_the_key_boundary_recovery_completes_the_exact_prepared_bytes() {
         .backend()
         .read_for_test(&entries[0])
         .expect("das committed .eip muss lesbar sein");
+    // GENAU EINE Fundstelle statt bloss „irgendwo enthalten": eine
+    // Enthaltenspruefung besteht auch, wenn dieselben Bytes zufaellig oder
+    // mehrfach vorkommen, und sagt nichts ueber die Stelle. Ein
+    // `single_offset`-Helfer wie in
+    // `tests/ea-system-tests/tests/support/mod.rs` existiert in dieser Crate
+    // nicht (getrennte Test-Binaries); die Zusicherung steht deshalb direkt
+    // hier statt hinter einem neuen geteilten Helfer.
+    let mut offsets = prepared_bytes
+        .windows(committed.len())
+        .enumerate()
+        .filter(|(_, window)| *window == committed.as_slice())
+        .map(|(offset, _)| offset);
+    let first_offset = offsets.next();
     assert!(
-        prepared_bytes
-            .windows(committed.len())
-            .any(|w| w == committed),
-        "die veroeffentlichten Bytes stehen unveraendert in der Abschlussmarke"
+        first_offset.is_some() && offsets.next().is_none(),
+        "die veroeffentlichten Bytes muessen GENAU EINMAL und unveraendert in der \
+         Abschlussmarke stehen"
     );
 }
 
