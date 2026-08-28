@@ -13,10 +13,13 @@ use self::support::DraftHarness;
 
 /// Die AUSSCHLIESSLICHE Entwurfssperre laesst genau einen Bewerber durch.
 ///
-/// `create_new` ist auf allen drei Plattformen atomar (`crates/ea-draft/src/lock.rs`),
-/// und daran haengt die prozessuebergreifende Fassung von Invariante 1: eine
-/// zweite Writer-Instanz auf demselben Konto ist der Fall, gegen den die Sperre
-/// steht. Waere das Anlegen ein gewoehnliches `create`, gelaenge es beiden.
+/// Die Sperre liegt auf einer BETRIEBSSYSTEMSPERRE ueber der Sperrdatei
+/// (`crates/ea-draft/src/lock.rs`), nicht auf dem Dasein der Datei. Zwei
+/// Bewerber sind hier zwei getrennte Dateigriffe im selben Prozess; `flock`
+/// bzw. `LockFileEx` binden je Dateigriff und nicht je Prozess, also ist die
+/// Ablehnung unten dieselbe, die eine zweite Writer-Instanz auf demselben
+/// Konto bekaeme — der Fall, gegen den Invariante 1 steht. Ohne die Sperre
+/// gelaenge das blosse Oeffnen beiden.
 #[test]
 fn the_exclusive_draft_lock_admits_exactly_one_holder() {
     let harness = DraftHarness::new();
@@ -32,6 +35,38 @@ fn the_exclusive_draft_lock_admits_exactly_one_holder() {
     // mehr passierbar.
     drop(held);
     let _next = harness.repo.acquire_draft_lock().unwrap();
+}
+
+/// Eine LIEGENGEBLIEBENE Sperrdatei ohne lebende Sperre blockiert nicht.
+///
+/// Der Fall ist ein harter Abbruch — `SIGKILL`, Stromausfall — mitten unter
+/// der Entwurfssperre. Haengt die Sperre am DASEIN der Datei, ist der Entwurf
+/// danach dauerhaft unerreichbar: der Neustartpfad
+/// (`DiscardService::resume_after_restart`) nimmt selbst die Sperre und kaeme
+/// nie an ihr vorbei, das Geraet waere ohne Handeingriff tot. Die
+/// Betriebssystemsperre gibt der Kern beim Prozessende frei; die
+/// zurueckgebliebene Datei ist danach ein leeres Gehaeuse.
+#[test]
+fn a_leftover_draft_lock_file_without_a_live_lock_is_reclaimed() {
+    let harness = DraftHarness::new();
+    harness.leave_a_stale_lock_file();
+
+    let held = harness
+        .repo
+        .acquire_draft_lock()
+        .expect("eine tote Sperrdatei darf die Entwurfssperre NICHT blockieren");
+
+    // Und der Griff ist eine ECHTE Sperre und kein blosses Oeffnen: der
+    // zweite Bewerber bekommt weiterhin den gepinnten Code.
+    assert_eq!(
+        harness.repo.acquire_draft_lock().unwrap_err().code(),
+        "EA-DRAFT-LOCK-HELD"
+    );
+    drop(held);
+    assert!(
+        harness.repo.acquire_draft_lock().is_ok(),
+        "nach dem `Drop` MUSS die Sperre wieder frei sein"
+    );
 }
 
 /// Ein Griff auf einen Entwurf, den es nicht mehr gibt, bekommt KEINEN

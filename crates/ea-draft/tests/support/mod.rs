@@ -234,6 +234,16 @@ impl DraftHarness {
         }
     }
 
+    /// Legt eine Sperrdatei OHNE lebende Sperre neben die Datenbank.
+    ///
+    /// Der Rest eines HART abgebrochenen Writers: `SIGKILL` oder Stromausfall
+    /// mitten unter der Entwurfssperre lassen die Datei liegen, waehrend der
+    /// Prozess fort ist. Die Fixture stellt genau diese Lage her — und NICHT
+    /// eine gehaltene Sperre, die [`DraftHarness::hold_draft_lock`] herstellte.
+    pub fn leave_a_stale_lock_file(&self) {
+        fs::write(self.root.join(LOCK_FILE), b"").expect("die Sperrdatei muss anlegbar sein");
+    }
+
     /// Der Schluesselspeicher dieser Fixture.
     ///
     /// Er wird herausgegeben, damit ein Zeuge den Speicher UNMITTELBAR fragen
