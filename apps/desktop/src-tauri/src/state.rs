@@ -210,6 +210,13 @@ pub trait DraftDiscardPort {
 /// Task; was hier steht, ist die Naht, an der er andockt, und die drei Aufrufe
 /// [`DiscardService::begin_discard`], [`DiscardService::resume_discard`] und
 /// [`DiscardService::resume_after_restart`] stehen damit UEBERSETZT im Baum.
+///
+/// UEBERSETZT heisst nicht AUSGEFUEHRT: [`BoundDiscard::new`] hat heute keine
+/// Aufrufstelle, weil kein Wirt einen Nachweis aufloest. Der heilende Arm des
+/// Neustartpfads (`ea-draft/src/discard.rs`:220-224, VM-11) ist damit
+/// STRUKTURELL VORBEREITET und nicht erreicht — er wird erreichbar, sobald ein
+/// Wirt diese Naht baut, und keine Zeile dieses Pakets muss sich dafuer
+/// aendern.
 pub struct BoundDiscard<'a> {
     service: &'a DiscardService<'a>,
     proof: Mutex<Option<OperatorSessionProof>>,
@@ -252,23 +259,38 @@ impl DraftDiscardPort for BoundDiscard<'_> {
     /// Neustartpfad.
     ///
     /// Die Reihenfolge ist die Aussage. `resume_discard` setzt genau die
-    /// gebuchte Absicht fort; meldet der Kern, dass keine gebucht ist, ist die
-    /// Frage nicht beantwortet, sondern eine andere: was findet der Bediener
-    /// vor? Das beantwortet `resume_after_restart` — samt der Vorrangregel der
-    /// liegenden Abschlussmarke und samt dem heilenden Arm fuer einen Entwurf,
-    /// dessen `draftDEK` nach einer zurueckgespielten Sicherung fort ist. Ein
-    /// Entwurf, der nie mehr zu oeffnen ist, bliebe sonst als unladbare Zeile
-    /// liegen.
+    /// gebuchte Absicht fort; kommt es dort nicht zum Fortsetzen, ist die Frage
+    /// nicht beantwortet, sondern eine andere: was findet der Bediener vor? Das
+    /// beantwortet `resume_after_restart` — samt der Vorrangregel der liegenden
+    /// Abschlussmarke und samt dem heilenden Arm fuer einen Entwurf, dessen
+    /// `draftDEK` nach einer zurueckgespielten Sicherung fort ist. Ein Entwurf,
+    /// der nie mehr zu oeffnen ist, bliebe sonst als unladbare Zeile liegen.
+    ///
+    /// GENAU ZWEI Fehler fallen deshalb durch, und der zweite ist der wichtige:
+    ///
+    /// - [`DraftError::NoPendingDiscard`] — es ist keine Absicht gebucht.
+    /// - [`DraftError::PreparedFinalizationPresent`] — eine Abschlussmarke
+    ///   liegt. `DiscardService::resume_discard` prueft die Marke in `enter()`
+    ///   und damit VOR `pending_discard()` (`ea-draft/src/discard.rs`:290-296),
+    ///   meldet in diesem Fall also NIEMALS `NoPendingDiscard`. Ohne diesen
+    ///   zweiten Arm waere `RestartState::PreparedFinalizationPending` von
+    ///   dieser Naht aus UNERREICHBAR — der Ausgang, den die Oberflaeche als
+    ///   Vorrangregel anzeigt, entstuende nie. Der Durchfall ist auch sachlich
+    ///   richtig: `resume_after_restart` prueft die Marke als ERSTES und kehrt
+    ///   mit genau diesem Ausgang zurueck, ohne ein Verwerfen fortzusetzen —
+    ///   die Marke gewinnt an JEDEM Eingang.
     ///
     /// Jeder ANDERE Fehler bricht ab und wird nicht in den zweiten Weg
     /// umgedeutet: eine gehaltene Sperre oder ein Nachweis des falschen Zwecks
-    /// ist keine Aussage darueber, ob eine Absicht gebucht ist.
+    /// ist keine Aussage darueber, was der Bediener vorfindet.
     fn resume(&self) -> Result<RestartState, DraftError> {
         let guard = self.proof();
         let proof = guard.as_ref().ok_or(DraftError::ReauthRequired)?;
         match self.service.resume_discard(proof) {
             Ok(_) => Ok(RestartState::NewBlankDraft),
-            Err(DraftError::NoPendingDiscard) => self.service.resume_after_restart(proof),
+            Err(DraftError::NoPendingDiscard | DraftError::PreparedFinalizationPresent) => {
+                self.service.resume_after_restart(proof)
+            }
             Err(other) => Err(other),
         }
     }

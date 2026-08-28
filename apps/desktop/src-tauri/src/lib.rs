@@ -137,6 +137,14 @@ mod tests {
     /// Die Quelle der Sperrpflicht der Oberflaeche.
     const SESSION_LOCK_SOURCE: &str = include_str!("../../src/app/session-lock.ts");
 
+    /// Die Quelle der Verwerfensflaeche.
+    ///
+    /// Dieselbe Bauart wie [`SESSION_LOCK_SOURCE`]: `include_str!` und nicht
+    /// `fs::read_to_string`, damit ein Verschwinden der Datei die UEBERSETZUNG
+    /// bricht und nicht bloss einen Zeugen rot faerbt.
+    const DISCARD_ACTION_SOURCE: &str =
+        include_str!("../../src/features/writer/DiscardDraftAction.tsx");
+
     /// Jedes Kommando, das eine Modulquelle DEKLARIERT.
     ///
     /// Die Marke wird aus zwei Teilen gefuegt, damit dieser Zeuge nicht sich
@@ -284,6 +292,49 @@ mod tests {
             "session-lock.ts ruft das Verstaerkungskommando nicht"
         );
         assert!(COMMAND_NAMES.contains(&"invalidate_session_on_lock"));
+    }
+
+    /// Die Oberflaeche kennt JEDEN Phasencode, zu dem es nichts fortzusetzen
+    /// gibt — beim Namen, den der WIRT vergibt.
+    ///
+    /// Zwei Sprachen, eine Wahrheit: `phaseCode` ist am Draht eine freie
+    /// Zeichenkette, und `ea-ui-contracts` emittiert dafuer keine Vereinigung,
+    /// die `no-hand-written-contracts.test.ts` bewachen koennte. Ohne diesen
+    /// Zeugen liefen die Literale der Schale und
+    /// `commands::writer::restart_state_code` auseinander, ohne dass irgendetwas
+    /// rot wird: die Schale fiele auf ihren Sammelzweig zurueck und schriebe
+    /// „Verwerfen gebucht — die Fortsetzung steht aus" ueber einen
+    /// unveraenderten Entwurf, samt einer Handhabe, die nichts fortsetzen kann.
+    ///
+    /// Die drei Ausgaenge sind hier ausgeschrieben und nicht aus einer
+    /// Konstanten gelesen, weil `ea_draft::RestartState` kein `ALL` traegt; ein
+    /// vierter Ausgang bricht dafuer den Sammelzweig-freien `match` in
+    /// `restart_state_code` und faellt dort auf.
+    #[test]
+    fn the_shell_names_every_discard_phase_without_a_continuation() {
+        use ea_draft::RestartState;
+
+        let mut checked = 0_usize;
+        for state in [
+            RestartState::NewBlankDraft,
+            RestartState::OriginalDraftUnchanged,
+            RestartState::PreparedFinalizationPending,
+        ] {
+            let view = crate::commands::writer::discard_view(state);
+            if view.complete {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                DISCARD_ACTION_SOURCE.contains(&format!("'{}'", view.phase_code)),
+                "DiscardDraftAction.tsx nennt den Phasencode {} nicht",
+                view.phase_code
+            );
+        }
+        // Ohne diese Zusicherung liefe die Schleife ueber die leere Menge, wenn
+        // eines Tages jeder Ausgang `complete` waere — und der Zeuge bliebe
+        // gruen, ohne etwas zu vergleichen.
+        assert_eq!(checked, 2, "genau zwei Ausgaenge tragen keine Fortsetzung");
     }
 
     /// Der Desktop traegt keine Reader- und keine Verwaltungsflaeche, und

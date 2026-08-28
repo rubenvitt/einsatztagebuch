@@ -2019,6 +2019,14 @@ mod tests {
     /// Kern hat das Verwerfen VERWEIGERT, weil eine Abschlussmarke liegt, und
     /// das ist eine Blockade und kein Fehlschlag des Kommandos. Sie traegt
     /// deshalb `complete: false` und den Namen der Regel.
+    ///
+    /// Dieser Zeuge misst die ABBILDUNG an einem Doppel. Dass eine echte Naht
+    /// diesen Ausgang ueberhaupt liefern KANN, haengt am zweiten Durchfallarm
+    /// in `crate::state::BoundDiscard::resume`: `resume_discard` prueft die
+    /// Marke in `enter()` und meldet dann `PreparedFinalizationPresent` statt
+    /// `NoPendingDiscard`. Faellt dieser Arm weg, ist der hier gemessene
+    /// Ausgang von der Naht aus unerreichbar, und dieser Zeuge bezeugte einen
+    /// Pfad, den es nicht gibt.
     #[test]
     fn a_prepared_finalization_blocks_the_discard_under_its_named_rule() {
         let port = std::sync::Arc::new(FixedDiscard::returning(
