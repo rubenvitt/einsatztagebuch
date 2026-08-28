@@ -1093,13 +1093,16 @@ git commit -m "feat(format): define the webBundleRelease trust object"
 - Create: `tests/ea-system-tests/tests/privacy_canaries_server.rs`
 - Create: `tests/ea-system-tests/tests/backup_restore_server_restore.rs`
 - Create: `docs/traceability/stage-3-gate.md`
+- Create: `docs/traceability/stage-3-fault-points.json`
 - Modify: `docs/traceability/v0.1-requirements.csv`
 - Modify: `tools/xtask/src/main.rs`
-- Test: `tools/xtask/tests/stage_gate.rs`
+- Modify: `package.json`
+- Modify: `tools/xtask/tests/stage_gate.rs`
+- Modify: `tests/ea-system-tests/tests/conformance_golden_vectors.rs`
 
 **Interfaces:**
-- Consumes: complete server and sync client.
-- Produces: cleartext-free privileged audit, pinned OCI build input, `xtask stage-gate 3`, primary AK 7, 8, 13, 33, 36, 45, 50 evidence.
+- Consumes: complete server and sync client; ADR 0004 with its section `OCI base image`, `cargo run --locked -p xtask -- integration up|down` and `ops/compose/integration.yaml` from the task „Stufe-3-Workspace- und Toolchain-Vorlauf“; the permanently frozen vector family `vectors/web-bundle/v1/` from the task „Trust-Objektfamilie webBundleRelease: Codec, CDDL-Arme und Signaturprofil“; the ledger row `WR-064` together with its tuple in `WEB_READER_MUST_ROWS` from the task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS“; and the frozen vector family `vectors/trust/v1/` read-only.
+- Produces: cleartext-free privileged audit, pinned OCI build input, `xtask stage-gate 3`, primary AK 7, 8, 13, 33, 36, 45, 50 evidence, and closing evidence for the seven Stage-3 FR rows FR-004, FR-048, FR-081, FR-082, FR-087, FR-088, FR-089.
 
 - [ ] **Step 1: Write administrative-separation and gate tests**
 
@@ -1107,9 +1110,13 @@ git commit -m "feat(format): define the webBundleRelease trust object"
 #[test]
 fn server_admin_configuration_has_no_content_or_grant_authority() {
     let caps = ServerAdminConfig::schema_capabilities();
-    assert!(!caps.iter().any(|c| matches!(c, Capability::Decrypt | Capability::InitialGrant |
-                                             Capability::HistoricalGrant | Capability::WriterSign |
-                                             Capability::RegistryAuthorize)));
+    assert_eq!(caps, vec![CertificateCapability::ServerReceipt]);
+    assert!(!caps.iter().any(|c| matches!(c, CertificateCapability::InitialGrant
+                                            | CertificateCapability::HistoricalGrant
+                                            | CertificateCapability::OrganizationAdminApprove
+                                            | CertificateCapability::HistoricalGrantApprove
+                                            | CertificateCapability::DestructionApprove
+                                            | CertificateCapability::DeletionAttest)));
 }
 
 #[test]
@@ -1117,21 +1124,84 @@ fn stage_three_gate_requires_real_service_failures_and_primary_ak() {
     let gate = xtask_test::stage_gate(3);
     assert_eq!(gate.primary_acceptance_criteria, [7, 8, 13, 33, 36, 45, 50]);
     assert!(gate.scenarios.contains_all(["db-before-commit", "db-after-object-put", "s3-stage",
-                                         "response-loss", "parallel-fork", "nonce-replay", "restore"]));
+                                         "response-loss", "parallel-fork", "nonce-replay",
+                                         "tls-downgrade", "cursor-key-rotation", "restore"]));
+    assert!(gate.stage_three_rows_still_planned.is_empty());
 }
 ```
+
+The new test `stage_three_gate_requires_real_service_failures_and_primary_ak` stands BESIDE the existing Stage-1 and Stage-2 gate tests and replaces none of them; `tools/xtask/tests/stage_gate.rs` is therefore modified and never rewritten. The nine scenario names are the exact keys of `docs/traceability/stage-3-fault-points.json`, and `"tls-downgrade"` and `"cursor-key-rotation"` are the two that this stage adds beyond the seven service-failure scenarios.
+
+Marker for the same step: `WEB_READER_MUST_ROWS` in `tools/xtask/tests/stage_gate.rs` today pins WR-041, WR-042 and WR-043 written out to `("3","planned")` and checks it with `assert_eq!`. Every change of that expectation column is a ledger movement; it is written out in Step 3 of this task and is EXECUTED there, never decided ad hoc by an implementer. The additive extension by the tuple `("WR-064", "6.4", "3", "implemented")` from the task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS“ is NOT affected by it: that tuple is already in place when this task starts.
 
 - [ ] **Step 2: Run gate tests and confirm missing evidence fails**
 
 Run: `cargo test --locked -p xtask --test stage_gate stage_three`
 
-Expected: FAIL listing absent failure, privacy, audit, and restore evidence.
+Expected: FAIL listing absent failure, privacy, audit, and restore evidence, `docs/traceability/stage-3-fault-points.json` as the missing declaration behind `gate.scenarios`, and every Stage-3 ledger row still on `planned` — the last of these clears only in Step 3 and is the reason the ledger assertion stands in the same test.
 
 - [ ] **Step 3: Complete hardening evidence without claiming release readiness**
 
-Audit privileged login, config changes, backup/restore, Object Lock changes, server-key rotation, updates, and Security Event handling with pseudonymous actor/device, action code, technical result, time, and object hashes only. Search every fachliche canary through logs, error bodies, PostgreSQL values, S3 keys/tags/metadata, metrics labels, traces, and container output. Restore PostgreSQL and bucket into a separate integration namespace and verify exact objects/head against a known checkpoint. Pin the OCI base by digest selected in ADR 0001; run as non-root, read-only root filesystem, dropped capabilities, dedicated writable volumes, and external secret injection for server signer.
+This task carries the closing role of a stage in the shape the earlier stages already used; the closing task „Stage 2 Fault Matrix and Acceptance Gate“ of `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-2-offline-writer.md` is the direct pattern: administration separation, failure matrix, privacy canaries, restore, gate tooling, gate report, and ledger maintenance in one task.
 
-Update ledger rows only to `implemented`/`integrated`; Stage 7 retains production backup, signed image, and full platform release verification.
+Audit privileged login, config changes, backup/restore, Object Lock changes, server-key rotation, updates, and Security Event handling with pseudonymous actor/device, action code, technical result, time, and object hashes only. Search every fachliche canary through logs, error bodies, PostgreSQL values, S3 keys/tags/metadata, metrics labels, traces, and container output. Restore PostgreSQL and bucket into a separate integration namespace and verify exact objects/head against a known checkpoint.
+
+Server-key rotation carries one further rule, because the same Root-signed server Ed25519 also signs the technical cursor under its own domain string: an issued `TechnicalCursorV1` outlives the rotation of that key. Exactly one of two behaviours is configured and written out, never a silent third: either OVERLAPPING acceptance of both key generations for the length of the declared validity window, or FAIL-CLOSED invalidation of every cursor of the previous generation with a defined `409`. Whichever is chosen, `docs/traceability/stage-3-fault-points.json` carries it as the scenario `"cursor-key-rotation"`, and the restored client resumes from a fresh cursor without a gap in the batch sequence.
+
+`apps/server/src/config.rs` terminates TLS at minimum version 1.3 fail-closed. The negative proof belongs to this task: a TLS-1.2 handshake against the configured listener is REJECTED and never negotiated down, and that rejection is the scenario `"tls-downgrade"` of the failure matrix.
+
+Pin the OCI base by the digest recorded in ADR 0004 (server runtime and dependency class), section `OCI base image`, and record the exact digest verbatim in the `Gemessener Gate-Lauf` section of `docs/traceability/stage-3-gate.md`. The base image MUST carry the Rust toolchain pinned in `rust-toolchain.toml` (`1.95.0`), so that no second, unpinned compiler produces production bytes. The authoritative release digest and the platform proof close in Stage 7 (Global Constraint above). Run as non-root, read-only root filesystem, dropped capabilities, dedicated writable volumes, and external secret injection for server signer. As a marker of a foreign stage, recorded here and NOT resolved here: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md:42` wants to create `docs/adr/0002-support-matrix-signature.md`, although `0002` is taken by `docs/adr/0002-local-database-encryption.md` and pinned hard by `ADR_PATH` in `tools/xtask/tests/adr_gate.rs` — an independent defect of that plan.
+
+`ServerAdminConfig::schema_capabilities()` describes the capability set of the ADMINISTRATION CONFIGURATION, not that of the receipt key; the equality on exactly `CertificateCapability::ServerReceipt` says that the server administrator can configure no authority beyond it. The three prohibitions — no decrypting, no Writer signing, no Registry authorizing — are expressed through the ABSENCE of every grant and signature capability plus that closing equality, and not through variants that do not exist: `CertificateCapability` is closed on the seven variants `InitialGrant`, `HistoricalGrant`, `OrganizationAdminApprove`, `HistoricalGrantApprove`, `DestructionApprove`, `ServerReceipt` and `DeletionAttest`. Declaring a parallel `Capability` enum in `crates/ea-sync-server` or `apps/server` is excluded. The capability set stays at seven variants: the purpose separation of the technical cursor runs over an additive domain string and not over an eighth variant, so this assurance stands without reservation.
+
+Open the stage switch in `run_stage_gate` (`tools/xtask/src/main.rs`) by `if stage == 3 { return run_stage_three_gate(root); }` and pull its error message along. Today it reads `"stage-gate is only defined for stages 1 and 2 so far, not {stage}"`; it becomes `"stage-gate is only defined for stages 1, 2 and 3 so far, not {stage}"`. No test holds that string — `grep -rn "only defined for stages" tools/ tests/ docs/ apps/ crates/` hits exactly one code site plus two prose sites in the Stage-2 plan — so the switch opens without a test repair. This is the only uncritical part of the gate extension and is named as such here so that nobody searches for a missing pin.
+
+`run_stage_three_gate` gets the Stage-3 counterparts of the Stage-2 constants, each after its Stage-2 model, in `tools/xtask/src/main.rs`: `STAGE_THREE_FAULT_POINT_MANIFEST_PATH` (model `STAGE_TWO_FAULT_POINT_MANIFEST_PATH`) pointing at `docs/traceability/stage-3-fault-points.json`, which feeds `gate.scenarios` exactly as `stage_two_fault_points()` feeds `declared_fault_points` and carries the SAME SHAPE as `docs/traceability/stage-2-fault-points.json`: a JSON object with `"stage": 3` at the top level and one key per section, each an array of `{"name", "brackets"}` entries (an object with a `points` array is accepted in its place); `STAGE_THREE_FAULT_POINT_SECTIONS` (model `STAGE_TWO_FAULT_POINT_SECTIONS` with `["discard","finalization","precedence"]`) with the four sections that carry the nine scenarios — `["commit","replay","transport","restore"]`, where `commit` holds `db-before-commit`, `db-after-object-put`, `s3-stage` and `response-loss`, `replay` holds `parallel-fork` and `nonce-replay`, `transport` holds `tls-downgrade` and `cursor-key-rotation`, and `restore` holds the single scenario `restore` — one section with exactly one entry, which is deliberate and not an oversight: the restore proof has no sibling in this stage; `STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA = [7, 8, 13, 33, 36, 45, 50]`; `STAGE_THREE_GATE_REPORT_PATH = "docs/traceability/stage-3-gate.md"`; `STAGE_THREE_GATE_REPORT_SECTIONS` (model: five mandatory sections); `STAGE_THREE_GATE_REPORT_LITERALS` (model: sixteen mandatory literals); `STAGE_THREE_HOST_SCOPE_CLAUSE`; `STAGE_THREE_REQUIRED_SCRIPTS` (model: five scripts); and `STAGE_THREE_STEP_SIX_COMMANDS` in `tools/xtask/tests/stage_gate.rs` (model `STAGE_TWO_STEP_SIX_COMMANDS` with ten commands). The shared paths `REQUIREMENT_LEDGER_PATH`, `DESIGN_DOCUMENT_PATH` and `PACKAGE_MANIFEST_PATH` are REUSED, never duplicated.
+
+`STAGE_THREE_VECTOR_FAMILIES` (model `STAGE_TWO_VECTOR_FAMILIES`, there `["local-audit","reports"]`) carries the vector families frozen in this stage. It carries EXACTLY ONE entry, `web-bundle`, the family that the task „Trust-Objektfamilie webBundleRelease: Codec, CDDL-Arme und Signaturprofil“ freezes permanently under `vectors/web-bundle/v1/`. It is deliberately its own family and NOT `trust`: `vectors/trust/v1/` is a frozen Stage-1 family whose bytes this stage only reads. Receipt and evidence vectors are likewise not listed — Stage 3 freezes neither, it consumes them read-only, and an entry would claim a Stage-3 freeze that does not exist.
+
+`run_stage_three_gate` takes over the still-planned check from `run_stage_two_gate` unchanged in shape: the filter reads `row.values[7] == "3" && row.values[8] == "planned"` and the error line reads `"stage 3 requirement ledger rows still on planned: {}"`. The filter is built unconditionally, and it is not relaxed for any row; the ledger movement below is what turns it green.
+
+Extend `package.json` (today ELEVEN scripts, `package.json:9-21`) by exactly two keys: `"test:server": "cargo test --locked -p einsatzarchiv-server --test migrations --test object_store --test auth_trust_api --test webauthn_credential_api --test entry_commit_api --test commit_failures --test checkpoint_api --test read_apis --test historical_grant_api --test destruction_api --test export_api --test vault_blob_api"` and `"stage-gate:3": "cargo run --locked -p xtask -- stage-gate 3"`. The twelve `--test` targets are exactly the `apps/server` integration test targets that the tasks of this stage declare, in the order in which they declare them. Both keys belong in `STAGE_THREE_REQUIRED_SCRIPTS`, so that the gate enforces their existence the way it enforces the five Stage-2 scripts.
+
+The report `docs/traceability/stage-3-gate.md` is bound in content, not only in name. It carries a section `Gemessener Gate-Lauf` with one row per command of the run in Step 4 — command, exit code, evidence text, measured runtime — machine-pinned through `STAGE_THREE_STEP_SIX_COMMANDS` after the model of `STAGE_TWO_STEP_SIX_COMMANDS`. Within it stand (a) the license ruling for every new named exception in `deny.toml` — this section is the decision place that `deny.toml` prescribes normatively; (b) the scope clause for the service precondition of this stage after the model of `STAGE_TWO_HOST_SCOPE_CLAUSE`, writing out which services ran under which versions and image digests; (c) the verbatim OCI base digest; (d) the evidence row for `pnpm verify:quick` with measured runtime plus the statement whether it was measured on a warm or a cold `target/` — reference value: the Stage-2 run measured 125 s and left warm or cold UNSTATED, which is exactly why this stage states it; Stage 3 comes above that value and additionally requires two running containers. In that same evidence row the package count of the wasm32 positive list is BOUND TO ITS SOURCE (`verify_quick_commands()` in `tools/xtask/src/main.rs`) instead of written out as a number. Under the points that stay open the report carries (e) the migration reservation of the task „PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port“ — migration evolution against an already delivered installation is Stage 7 — and (f) a named marker for Stages 4 and 6, whose gate runs today drive `pnpm verify:quick` bare (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md:534`, `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-6-evidence-grade.md:408`) although `apps/server` is a workspace member from this stage on. That consequence is caused by the service precondition of this stage and is named here, not filed away as a foreign-stage legacy defect.
+
+Three further sections of the report hold three verified negatives, so that their silence cannot be read as "not checked". They stay SEPARATE.
+
+`## Endpunkt- und Signaturabdeckung` with three measured statements: (a) before this stage the endpoint list of this plan was byte-identical with `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md` §13.2 (:1514-1527) — a `diff` produced no output; (b) the signature coverage of this plan covers design.md:1501-1507 position for position, with no missing and no additional position; (c) this stage adds three endpoints, so both sides carry SEVENTEEN lines once §13.2 has been pulled along, and the equality is measured again. Cost note, measured: no test, no schema and no code pins any of the seventeen paths — §13.2 carries no closing clause — so the three new endpoints cost exactly the two document pages and nothing else.
+
+`## Serverhälften fremder Stufen` with three rows. AK-35 (design.md:2146, ledger `stage=5`) and AK-49 (design.md:2160, ledger `stage=5`) come into existence in the task „Atomic Entry Commit, Idempotent Replay, and Immutable Receipts“ („choose the highest server-known applicable Registry head … reject an older bound head“); AK-43 (design.md:2154, ledger `stage=4`) comes into existence as to its server half in the task „Reader, Object, Export, Historical-Grant, and Destruction API Surfaces“. This plan claims none of these rows and MUST NOT: their stage columns stay unchanged. The purpose is solely that Stages 4 and 5 find the server half already built. The proving test path is recorded in the same three rows as soon as it exists.
+
+`## Nicht berührte Nachbarzeilen`: FR-100 („Desktop für Writer und Administration, Browser-Reader, signierte Rollentrennung“) and FR-103 („Reader-Index als Ganzes mit ChaCha20-Poly1305 verschlüsselt in OPFS statt SQLCipher“) carry `stage=4`, `status=planned`, are checked, and are not touched by Stage 3, because role split and index storage are Reader surface. Delimitation in the same section: the three WR rows from the same Stage-1 decision — WR-041, WR-042, WR-043 — are Stage-3 rows and are moved by the ledger movement of this task, not by silence.
+
+The family `trust/v1` gets an entry-count pin in this stage, because Stage 3 commits itself to the immutability of exactly these bytes and builds the first distribution surface for them over `GET /v1/trust/registry` and `POST /v1/trust/events`. Beside the existing constants `GRANTS_EXPECTED_ENTRY_COUNT`, `RECEIPTS_EXPECTED_ENTRY_COUNT` and `EVIDENCE_EXPECTED_ENTRY_COUNT` in `tests/ea-system-tests/tests/conformance_golden_vectors.rs`, `const TRUST_EXPECTED_ENTRY_COUNT: usize = 130;` is created with the doc comment „Die Zahl der Trust-Einträge. Ohne diese Schranke liefe ein truncatiertes oder still neu erzeugtes Manifest durch."; in `trust_v1_vectors_cover_every_negative_named_in_design_22_1` the line `assert_eq!(manifest.entries.len(), TRUST_EXPECTED_ENTRY_COUNT);` is inserted immediately after `assert_eq!(manifest.version, "v1");`. The gate report carries the sentence: „Die Familie `trust/v1` trägt ab dieser Stufe einen Eintragszahl-Pin (130). Damit gilt die Zusage aus docs/traceability/stage-1-gate.md:116-121 für alle fünf eingefrorenen Familien ausführbar und nicht nur als Prosa."
+
+Ledger maintenance. Update exactly these existing Stage 3 ledger rows to `implemented`/`integrated`: AK-07, AK-08, AK-13, AK-33, AK-36, AK-45, AK-50, FR-004, FR-048, FR-081, FR-082, FR-087, FR-088, FR-089. The ledger carries today EIGHTEEN rows with `stage = 3`, all with `status = planned` and all with this plan in their evidence column; `run_stage_three_gate` takes over the filter of `run_stage_two_gate`, which rejects rows of its own stage on `planned`. FR-004 („keine Reader-/Recovery-Keys am Server") is updated in the same move in its EVIDENCE column as well, so that it matches the narrower binding wording of the Global Constraint above: wrapped Reader vault blobs stored server-side are opaque ciphertext, worthless without an authenticator assertion, and the server knows neither vault key nor PRF output. Two further movements are expressly permitted and are to be justified one by one: creating partial-evidence rows for acceptance criteria whose server half comes into existence here, and re-staging a row together with an adjusted evidence column when its building artefact demonstrably lies in a later stage. The row WR-064 is created by the task that builds its surface and is only counted along here. Stage 7 retains production backup, signed image, and full platform release verification.
+
+Two partial-evidence rows are created in this task, each `stage=3`, `status=implemented`, after the pattern that the repository already carries for AK-19, AK-24, AK-29 and AK-53 on Stage 2: „Keine Klartextlogs - Stufe-3-Teilbeleg (Server)" for AK-19 with `tests/ea-system-tests/tests/privacy_canaries_server.rs` as evidence, and „Backup-Restore - Stufe-3-Teilbeleg (Server-Restore)" for AK-21 with `tests/ea-system-tests/tests/backup_restore_server_restore.rs`. Both full rows keep their `stage=7`.
+
+The seven Stage-3 FR rows close against a named task and a named test path, after the pattern that WR-052 already uses with `crates/ea-archive-fs/tests/bundle_export.rs::…`. Without this mapping the gate has no way to check whether a row may be closed:
+
+| Ledger row | Proving task | Proving test path |
+|---|---|---|
+| FR-004 | Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS | `apps/server/tests/vault_blob_api.rs` and `tests/ea-system-tests/tests/privacy_canaries_server.rs` |
+| FR-048 | Atomic Entry Commit, Idempotent Replay, and Immutable Receipts | `apps/server/tests/commit_failures.rs` |
+| FR-081 | Atomic Entry Commit, Idempotent Replay, and Immutable Receipts | `apps/server/tests/entry_commit_api.rs` |
+| FR-082 | Atomic Entry Commit, Idempotent Replay, and Immutable Receipts | `apps/server/tests/entry_commit_api.rs` |
+| FR-087 | Atomic Entry Commit, Idempotent Replay, and Immutable Receipts | `crates/ea-sync-server/tests/commit_service.rs` and `crates/ea-sync-server/tests/receipt_golden.rs` |
+| FR-088 | Writer Sync Queue, Network-Archive Ordering, and Receipt Persistence | `crates/ea-sync-client/tests/status.rs` |
+| FR-089 | Writer Sync Queue, Network-Archive Ordering, and Receipt Persistence | `crates/ea-sync-client/tests/status.rs` and `tests/ea-system-tests/tests/privacy_canaries_server.rs` |
+
+Four Stage-3 rows are left over by the fourteen closings, and the still-planned filter names every one of them. Three of them are the Web-Reader rows WR-041, WR-042 and WR-043, and they are the second permitted movement, executed here. All three are browser-side — separate delivery origin (web-reader-design.md:72), Service-Worker activation against a pinned release (:84), enforced fingerprint comparison (:117) — and their building artefact `apps/web` is introduced by web-reader-design.md §12 (:459-461), whose Stage-4 entry (:446-449) is the one that rewrites the Reader tasks. The family definition, on the other hand, is delivered by THIS stage. The ledger therefore splits:
+
+- WR-041 moves to `stage=4` with `status=planned` and an evidence column referring to `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md`.
+- WR-043 moves to `stage=4` in the same shape.
+- WR-042 also stays on `stage=4` for the ACTIVATION behaviour of the Service Worker, likewise referring to the Stage-4 plan.
+- ONE new row carries the family definition on `stage=3` and reaches `status=implemented` in this stage through the task „Trust-Objektfamilie webBundleRelease: Codec, CDDL-Arme und Signaturprofil“. The scheme `WR-0<Abschnitt>` cannot express two rows for §4.2, so this row expressly receives an identifier OUTSIDE the scheme: `WR-042D`. Version `v1.1`, source column ending on `4.2` — `web_reader_must_requirements_are_recorded_as_v1_1_rows` compares with `ends_with` — and an evidence column naming `crates/ea-format/tests/web_bundle_release.rs` and `vectors/web-bundle/v1/`.
+
+`WEB_READER_MUST_ROWS` follows in the same commit. Its arity when this task starts is EIGHT: seven tuples in the checked-in state plus the tuple `("WR-064", "6.4", "3", "implemented")` of the task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS“. This task adds EXACTLY ONE tuple, `("WR-042D", "4.2", "3", "implemented")`, so the arity goes from eight to nine. The three existing tuples change their stage column from `"3"` to `"4"`: `("WR-041", "4.1", "4", "planned")`, `("WR-042", "4.2", "4", "planned")`, `("WR-043", "4.3", "4", "planned")`. The shift is WRITTEN OUT in the doc comment of the constant, exactly after the pattern of the decision D-HE2 already standing there. The closed Stage-1 and Stage-2 gate reports are NOT edited for it; `docs/traceability/stage-2-gate.md:288-295` carries this mechanism as precedent.
+
+The fourth left-over row is `FR-043` in version `v1.1` („Bereinigung von Staging- und Abbruchresten"), and it is the third movement of this task, of the same permitted kind: no task of this stage builds its artefact. Its evidence column names `crates/ea-writer/src/recover.rs` and `crates/ea-archive-fs/src/health.rs` — Writer-side staging cleanup after complete reconciliation and cleanup of pre-published grants after a proven abort. Both are administration actions on the local Writer archive and require a delete primitive of the archive port, which no task of this blind-sync stage creates; the sibling fail-closed resolution paths in `crates/ea-writer/src/recover.rs` are already carried as a marker by `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-5-administration-recovery.md:20`. The row therefore moves to `stage=5` with an adjusted evidence column referring to that plan; its `v1` sibling row on `stage=2`, `status=integrated` stays untouched. After this movement no ledger row with `stage=3` is left on `planned`.
 
 - [ ] **Step 4: Run the complete Stage 3 gate**
 
@@ -1140,18 +1210,21 @@ Run:
 ```bash
 cargo run --locked -p xtask -- integration up
 pnpm test:server
-cargo run --locked -p xtask -- test-privacy --scope server
-cargo run --locked -p xtask -- test-backup-restore --scope server
-cargo run --locked -p xtask -- stage-gate 3
+cargo test --locked -p ea-system-tests --test privacy_canaries_server
+cargo test --locked -p ea-system-tests --test backup_restore_server_restore
+pnpm supply-chain
+pnpm stage-gate:3
 pnpm verify:quick
 cargo run --locked -p xtask -- integration down
 ```
 
-Expected: PASS; all commit/replay/partial-failure assertions hold, no canary appears, and the report marks production restore/release evidence open for Stage 7.
+Three things about this run are deliberate and are not to be simplified back. `pnpm supply-chain` stands in the second-to-last position before `pnpm verify:quick`, exactly where the Stage-2 run put it (`docs/traceability/stage-2-gate.md`, section `Gemessener Gate-Lauf`); without that line `deny.toml` is completely dead for Stage 3, because no gate calls `cargo deny` by itself, and this stage pulls the largest new dependency tree of the project. The privacy and restore evidence runs as a direct `cargo test` command and not through a wrapper: gates named `test-privacy` and `test-backup-restore` do not exist in the dispatcher, AND the `test-*` gates reject every argument, so the wrapper route would be two changes, while the Stage-2 model `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` is a one-change precedent. And `pnpm stage-gate:3` rather than `cargo run --locked -p xtask -- stage-gate 3`, so that the script really appears in the measured run, the way `pnpm stage-gate:2` does in Stage 2.
+
+Expected: PASS. All commit/replay/partial-failure assertions hold, no canary appears, and the report marks production restore/release evidence open for Stage 7. Step 3 executes every ledger movement, so by the time this run happens the gate is green; the ledger is nevertheless the one place where a RED gate can be expected rather than a defect, and the boundary is exact. While any ledger movement of Step 3 is still outstanding, `pnpm stage-gate:3` reports exactly one line, and it names all four rows the filter still finds, in ledger order: `stage 3 requirement ledger rows still on planned: FR-043, WR-041, WR-042, WR-043`. Three of them — WR-041, WR-042, WR-043 — leave that line through the Web-Reader split of Step 3; the fourth, FR-043, leaves it through the re-staging of Step 3 and is not part of that split. A red gate BEFORE those movements is therefore the expected pre-state and no implementation error; a red gate AFTER them is a defect and is to be treated as one. The line is also the exact form to compare against: any other row name in it means a Stage-3 row was forgotten, not that the movement failed.
 
 - [ ] **Step 5: Commit the Stage 3 gate**
 
 ```bash
-git add apps/server ops tests docs/traceability tools/xtask
+git add apps/server ops tests docs/traceability tools/xtask package.json
 git commit -m "test(sync): close blind sync stage"
 ```
