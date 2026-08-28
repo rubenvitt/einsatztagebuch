@@ -193,6 +193,74 @@ fn after_the_key_boundary_recovery_completes_the_exact_prepared_bytes() {
     );
 }
 
+/// Der Neustart nach einem HARTEN Abbruch kommt an beiden Sperrdateien vorbei.
+///
+/// Der Zeuge, an dem die Betriebssystemsperre haengt, und der einzige auf
+/// PRODUKTEBENE. `recover_pending` nimmt zuerst die Schreibersperre des
+/// Bestands und dann die Entwurfssperre (`crates/ea-writer/src/recover.rs`);
+/// solange beide am DASEIN ihrer Datei hingen, war der Weg nach einem
+/// `SIGKILL` oder einem Stromausfall unter der Finalisierung dauerhaft
+/// versperrt — die vorbereiteten Bytes lagen da, und kein Neustart erreichte
+/// sie mehr. Genau das ist der Befund, gegen den B.4 steht
+/// (`docs/traceability/stage-2-gate.md` §2.2, Ruling R60).
+///
+/// Die Lage wird ausdruecklich NICHT ueber
+/// [`WriterHarness::restore_captured_backup`] hergestellt: jene Fixture
+/// ENTFERNT die Sperrdateien und stellte damit genau die Bedingung nicht her,
+/// um die es hier geht. Deshalb legt der Zeuge sie selbst hin.
+#[test]
+fn a_hard_crash_under_both_locks_still_lets_the_restart_complete() {
+    let harness = WriterHarness::with_incident();
+    let source = harness.source();
+    let service = harness.service(&source);
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+
+    let interrupted = service
+        .finalize_interrupted_at(
+            &proof,
+            valid_incident(),
+            harness.observed_now(),
+            FinalizationFaultPoint::AfterAbsenceConfirmation,
+        )
+        .expect("der Abbruch an der Grenze muss erreichbar sein");
+    let sequence = interrupted
+        .prepared()
+        .expect("hinter der Grenze liegt eine Abschlussmarke")
+        .sequence();
+
+    // Der harte Abbruch: beide Sperrdateien bleiben liegen, kein Prozess haelt
+    // eine Sperre darauf.
+    harness.leave_stale_lock_files();
+    assert!(
+        harness.both_lock_files_are_present(),
+        "die Fixture MUSS beide Sperrdateien hinterlassen, sonst misst der Zeuge nichts"
+    );
+
+    let recovered = service
+        .recover_pending()
+        .expect("der Neustart MUSS an beiden liegengebliebenen Sperrdateien vorbeikommen");
+    assert_eq!(
+        recovered,
+        RecoveryOutcome::CommittedFromPreparedBytes { sequence },
+        "der Neustart vollendet dieselbe vorbereitete Transaktion"
+    );
+    assert_eq!(
+        harness.published_entry_paths().len(),
+        1,
+        "genau ein committed .eip"
+    );
+
+    // Und die Dateien liegen danach immer noch da: die Freigabe loest die
+    // Sperre und raeumt NICHT auf. Das ist die Zusage, nicht ein Versehen —
+    // wer die Datei entfernte, oeffnete das Fenster, in dem ein zweiter Halter
+    // den alten Inode haelt, waehrend ein dritter unter demselben Namen eine
+    // neue Datei anlegt und darauf sperrt.
+    assert!(
+        harness.both_lock_files_are_present(),
+        "die Sperrdateien bleiben liegen und sind harmlos"
+    );
+}
+
 #[test]
 fn before_the_key_boundary_the_sequence_stays_unused() {
     let harness = WriterHarness::with_incident();

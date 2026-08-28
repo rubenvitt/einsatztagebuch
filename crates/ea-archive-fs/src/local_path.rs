@@ -33,11 +33,21 @@ use crate::{FormatPackageOutcomeV1, format_package::materialize_format_package_r
 
 /// Die Kontrolldateien des Backends an der Bestandswurzel.
 ///
-/// Sie sind KEIN Archivbeiwerk und gehoeren in kein Inventar: die Sperre ist
-/// ein Laufzeitzustand und der Profilzeiger eine Aussage ueber die
-/// INSTALLATION, nicht ueber den Bestand. Wuerden sie mitinventarisiert, waere
-/// das Quellinventar eines Profilwechsels nie gleich dem Zielinventar — die
-/// Quelle haelt beim Kopieren ihre Sperre.
+/// Sie sind KEIN Archivbeiwerk und gehoeren in kein Inventar: die Sperrdatei
+/// traegt einen Betriebszustand und der Profilzeiger eine Aussage ueber die
+/// INSTALLATION, keine von beiden eine ueber den Bestand. Wuerden sie
+/// mitinventarisiert, waere das Quellinventar eines Profilwechsels nie gleich
+/// dem Zielinventar.
+///
+/// Das galt schon, als die Sperrdatei nur SOLANGE dalag, wie jemand die Sperre
+/// hielt — die Quelle haelt beim Kopieren ihre Sperre. Seit die Sperre eine
+/// Betriebssystemsperre ueber der Datei ist (siehe
+/// [`ArchiveBackend::acquire_writer_lock`] an [`LocalPathBackend`]), bleibt
+/// die Datei DAUERHAFT liegen: sie entsteht beim ersten Nehmen und wird nie
+/// wieder entfernt. Der Grund ist damit staerker geworden und nicht schwaecher.
+/// Ein frisch angelegtes Ziel traegt sie noch nicht, eine gewachsene Quelle
+/// laengst — ohne diese Zeile waere der Inventarvergleich eines Profilwechsels
+/// dauerhaft ungleich statt nur waehrend eines gehaltenen Griffs.
 pub const CONTROL_FILES_V1: [&str; 2] = [".ea-writer.lock", ".ea-active-profile"];
 
 /// Das Verzeichnis, in dem der Capability-Test arbeitet.
@@ -183,15 +193,13 @@ impl CapabilityReportV1 {
 
 /// Gibt die Sperre des lokalen Backends frei.
 ///
-/// Der Griff auf die Sperrdatei liegt HIER und nicht bloss ihr Pfad: die
+/// Der GRIFF auf die Sperrdatei liegt HIER und nicht bloss ihr Pfad: die
 /// Betriebssystemsperre haengt am geoeffneten Griff, und ein weggeworfener
-/// Griff waere eine sofort wieder freie Sperre.
+/// Griff waere eine sofort wieder freie Sperre. [`File::unlock`] nimmt `&self`,
+/// also genuegt das schlichte Feld — es muss nichts herausbewegt werden.
 struct LocalWriterLockRelease {
     held: Arc<AtomicBool>,
-    /// `None`, sobald freigegeben wurde. Ein [`Mutex`], weil
-    /// [`WriterLockRelease::release`] `&self` nimmt und der Griff dabei
-    /// herausbewegt werden muss.
-    lock_file: Mutex<Option<File>>,
+    lock_file: File,
 }
 
 impl WriterLockRelease for LocalWriterLockRelease {
@@ -208,14 +216,11 @@ impl WriterLockRelease for LocalWriterLockRelease {
         // derselben Sperre. Die liegengebliebene Datei ist harmlos: sie traegt
         // keinen Inhalt, sperrt nichts, und [`CONTROL_FILES_V1`] haelt sie
         // ohnehin aus Inventar und Gesundheitsbericht heraus.
-        if let Some(file) = self
-            .lock_file
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            let _ = file.unlock();
-        }
+        //
+        // Ein Fehlschlag ist nicht behandelbar und folgenlos: das Schliessen
+        // des Griffs — spaetestens, wenn dieser Waechter faellt — gibt die
+        // Sperre ohnehin frei.
+        let _ = self.lock_file.unlock();
         self.held.store(false, Ordering::SeqCst);
     }
 }
@@ -651,6 +656,30 @@ impl LocalPathBackend {
     }
 }
 
+/// Oeffnet `path` und belegt es mit der exklusiven Betriebssystemsperre.
+///
+/// `None`, wenn schon jemand sperrt ODER die Datei sich nicht oeffnen laesst.
+/// Die beiden Faelle werden ABSICHTLICH nicht unterschieden: der Aufrufer hat
+/// an dieser Stelle ohnehin nur EINE Handlung — nicht schreiben.
+///
+/// `create(true)` und NICHT `truncate`: die Datei traegt keinen Inhalt, und ein
+/// Abschneiden waere ein Schreibzugriff, BEVOR die Sperre steht.
+///
+/// Wortgleich zu `DraftLock::acquire` in `crates/ea-draft/src/lock.rs`. Die
+/// beiden Crates duerfen nicht voneinander abhaengen, also steht die Sperre
+/// zweimal da; sie steht dann aber auch in derselben Gestalt, damit ein Leser
+/// die eine an der anderen pruefen kann.
+fn open_and_lock_exclusively(path: &Path) -> Option<File> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
 /// Flusht ein Verzeichnis.
 ///
 /// Auf Unix wird das Verzeichnis geoeffnet und `fsync` gerufen — ohne diesen
@@ -816,19 +845,10 @@ impl ArchiveBackend for LocalPathBackend {
         // Fehlt eine von beiden, ist die Sperre in genau einem der beiden
         // Faelle wirkungslos.
         //
-        // `create(true)` und NICHT `truncate`: die Datei traegt keinen Inhalt,
-        // und ein Abschneiden waere ein Schreibzugriff, bevor die Sperre steht.
-        let taken = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_file)
-            .ok()
-            .and_then(|file| file.try_lock().ok().map(|()| file));
-        match taken {
+        match open_and_lock_exclusively(&lock_file) {
             Some(file) => Ok(WriterLock::new(Arc::new(LocalWriterLockRelease {
                 held: Arc::clone(&self.held),
-                lock_file: Mutex::new(Some(file)),
+                lock_file: file,
             }))),
             None => {
                 self.held.store(false, Ordering::SeqCst);

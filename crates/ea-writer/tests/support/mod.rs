@@ -1106,6 +1106,39 @@ impl WriterHarness {
         reached
     }
 
+    /// Laesst BEIDE Sperrdateien liegen, als waere der Prozess unter ihnen
+    /// gestorben.
+    ///
+    /// `SIGKILL` oder Stromausfall mitten in der Finalisierung hinterlaesst
+    /// genau das: die Sperrdatei des Bestands und die des Entwurfs stehen da,
+    /// aber kein Prozess haelt eine Sperre darauf. Der Neustartpfad
+    /// [`ea_writer::WriterService::recover_pending`] nimmt BEIDE Sperren, in
+    /// dieser Reihenfolge — solange sie am DASEIN der Dateien haengen, kommt
+    /// er an keiner von beiden vorbei.
+    ///
+    /// AUSDRUECKLICH nicht [`Self::restore_captured_backup`]: das raeumt die
+    /// Sperrdateien ab und stellte damit genau die Lage her, die hier gemessen
+    /// werden soll, gerade NICHT her.
+    pub fn leave_stale_lock_files(&self) {
+        fs::write(
+            self.backend.root().join(ea_archive_fs::CONTROL_FILES_V1[0]),
+            b"",
+        )
+        .expect("die Sperrdatei des Bestands muss anlegbar sein");
+        fs::write(self.root.join(LOCK_FILE), b"")
+            .expect("die Sperrdatei des Entwurfs muss anlegbar sein");
+    }
+
+    /// Ob BEIDE Sperrdateien (noch) liegen.
+    #[must_use]
+    pub fn both_lock_files_are_present(&self) -> bool {
+        self.backend
+            .root()
+            .join(ea_archive_fs::CONTROL_FILES_V1[0])
+            .exists()
+            && self.root.join(LOCK_FILE).exists()
+    }
+
     /// Legt die aufgenommene Sicherung zurueck.
     ///
     /// Der Schluesselspeichereintrag kehrt NICHT zurueck: er ist geraetegebunden

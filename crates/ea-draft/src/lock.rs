@@ -43,28 +43,14 @@ impl DraftLock {
     /// fremden Prozesses ohne Beleg. Die Sperre des Kerns kennt die Antwort
     /// dagegen genau und ohne Heuristik.
     ///
-    /// Die Datei wird mit `create(true)` geoeffnet und NICHT abgeschnitten:
-    /// sie traegt keinen Inhalt, und ein `truncate` waere ein Schreibzugriff,
-    /// bevor die Sperre steht.
-    ///
     /// Prozessuebergreifend UND prozessintern: `flock` bindet je Dateigriff,
     /// also weist die Sperre auch einen zweiten Griff im selben Prozess ab —
     /// zwei Writer-Instanzen auf demselben Konto sind der Fall, gegen den sie
     /// steht.
     pub(crate) fn acquire(database_path: &Path) -> Result<Self, DraftError> {
-        let path = lock_path(database_path);
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|_| DraftError::LockHeld)?;
-        // Fail-closed und eng: JEDER Ausgang ausser der genommenen Sperre ist
-        // `LockHeld`. Ein Fehler des Wirtdateisystems waere ein zweiter
-        // Fehlercode an einer Stelle, an der der Aufrufer ohnehin nur EINE
-        // Handlung hat — nicht schreiben.
-        file.try_lock().map_err(|_| DraftError::LockHeld)?;
-        Ok(Self { file })
+        open_and_lock_exclusively(&lock_path(database_path))
+            .map(|file| Self { file })
+            .ok_or(DraftError::LockHeld)
     }
 }
 
@@ -89,6 +75,31 @@ impl fmt::Debug for DraftLock {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DraftLock(<held>)")
     }
+}
+
+/// Oeffnet `path` und belegt es mit der exklusiven Betriebssystemsperre.
+///
+/// `None`, wenn schon jemand sperrt ODER die Datei sich nicht oeffnen laesst.
+/// Die beiden Faelle werden ABSICHTLICH nicht unterschieden: der Aufrufer hat
+/// an dieser Stelle ohnehin nur EINE Handlung — nicht schreiben.
+///
+/// `create(true)` und NICHT `truncate`: die Datei traegt keinen Inhalt, und ein
+/// Abschneiden waere ein Schreibzugriff, BEVOR die Sperre steht.
+///
+/// Wortgleich zu `LocalPathBackend::acquire_writer_lock` in
+/// `crates/ea-archive-fs/src/local_path.rs`. Die beiden Crates duerfen nicht
+/// voneinander abhaengen, also steht die Sperre zweimal da; sie steht dann aber
+/// auch in derselben Gestalt, damit ein Leser die eine an der anderen pruefen
+/// kann.
+fn open_and_lock_exclusively(path: &Path) -> Option<File> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 
 fn lock_path(database_path: &Path) -> PathBuf {
