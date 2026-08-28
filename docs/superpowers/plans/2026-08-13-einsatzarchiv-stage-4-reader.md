@@ -24,7 +24,7 @@ Rücknahmeliste für diesen Fall, erzeugt von `docs/superpowers/plans/2026-08-16
 3. der vierte Eintrag in `verify_quick_commands()` samt Pin-Test, `ensure_wasm32_target_available()`, dem normativen Codeblock und der Gate-Kommandoliste im Stage-1-Plan;
 4. die Merker-Zeilen in den Stage-Plänen 2 bis 7;
 5. die Normativkorrekturen an `design.md` (§5.1, §5.2, §5.3, §7, §14.2, §17.4, §18.3, Support-Matrix) und an den Global Constraints des Stage-1-Plans.
-6. die Ledgerzeilen `WR-041`, `WR-042` und `WR-043` in `docs/traceability/v0.1-requirements.csv` samt ihrem laufenden Pin in `tools/xtask/tests/stage_gate.rs` (Konstante `WEB_READER_MUST_ROWS`): sie tragen das Browser-Verhalten des Readers und blieben bei einem Scheitern des Spikes ohne bauendes Artefakt zurück. Die Liste nannte bisher keine einzige Ledgerzeile.
+6. die Ledgerzeilen `WR-041`, `WR-042` und `WR-043` in `docs/traceability/v0.1-requirements.csv` samt ihrem laufenden Pin in `tools/xtask/tests/stage_gate.rs` (Konstante `WEB_READER_MUST_ROWS`): sie tragen das Browser-Verhalten des Readers und blieben bei einem Scheitern des Spikes ohne bauendes Artefakt zurück.
 <!-- /web-reader-stage-4-block -->
 - Microsoft Access is outside scope; **Access Grant** means only the signed key envelope.
 - Non-goals are fixed: no live incident log, dispatch/alarm/control-center integration, patient record or identifying patient data, concurrent offline Writers, normal-app mutation/deletion of finalized content, AI summarization/OCR, public links, server-side content search, unprofiled network paths, qualified personal electronic signature, TR-ESOR certification claim, screenshot/transcription prevention, or cryptographic recall of already decrypted data.
