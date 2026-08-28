@@ -1138,6 +1138,11 @@ pub async fn writer_preview(
 
 /// Die Bestaetigung eines veralteten Registry-Head.
 ///
+/// Sie BLEIBT ein Stummel, und zwar entschieden: Ruling R62 (DRK-206,
+/// 2026-08-28): Quittungspfad nach Stufe 5 verschoben. `WriterService::acknowledge_stale_registry`
+/// existiert nicht, und diese Grenze baut den Kern nicht nach — eine hier
+/// erfundene Quittung waere eine Bestaetigung, die niemand geprueft hat.
+///
 /// # Errors
 ///
 /// [`STALE_ACK_UNAVAILABLE`]: der Bestaetigungspfad ist im Kern eine benannte
