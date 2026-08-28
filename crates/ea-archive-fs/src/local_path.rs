@@ -182,18 +182,40 @@ impl CapabilityReportV1 {
 }
 
 /// Gibt die Sperre des lokalen Backends frei.
+///
+/// Der Griff auf die Sperrdatei liegt HIER und nicht bloss ihr Pfad: die
+/// Betriebssystemsperre haengt am geoeffneten Griff, und ein weggeworfener
+/// Griff waere eine sofort wieder freie Sperre.
 struct LocalWriterLockRelease {
     held: Arc<AtomicBool>,
-    lock_file: PathBuf,
+    /// `None`, sobald freigegeben wurde. Ein [`Mutex`], weil
+    /// [`WriterLockRelease::release`] `&self` nimmt und der Griff dabei
+    /// herausbewegt werden muss.
+    lock_file: Mutex<Option<File>>,
 }
 
 impl WriterLockRelease for LocalWriterLockRelease {
     fn release(&self) {
-        // Erst die Datei, dann die Flagge: waere es umgekehrt, koennte ein
-        // zweiter Nehmer die Flagge schon frei sehen, waehrend die Datei noch
-        // liegt — und dann an `create_new` scheitern statt die Sperre zu
+        // Erst die Betriebssystemsperre, dann die Flagge: waere es umgekehrt,
+        // koennte ein zweiter Nehmer die Flagge schon frei sehen, waehrend die
+        // Sperre des Kerns noch steht — und dann an ihr scheitern statt sie zu
         // bekommen.
-        let _ = fs::remove_file(&self.lock_file);
+        //
+        // Die DATEI bleibt liegen, und das ist Absicht. Wer sie entfernte,
+        // oeffnete ein Fenster: ein zweiter Halter kann den Griff auf denselben
+        // Inode schon haben, waehrend ein dritter unter demselben Namen eine
+        // NEUE Datei anlegt und darauf ungehindert sperrt — zwei Halter
+        // derselben Sperre. Die liegengebliebene Datei ist harmlos: sie traegt
+        // keinen Inhalt, sperrt nichts, und [`CONTROL_FILES_V1`] haelt sie
+        // ohnehin aus Inventar und Gesundheitsbericht heraus.
+        if let Some(file) = self
+            .lock_file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let _ = file.unlock();
+        }
         self.held.store(false, Ordering::SeqCst);
     }
 }
@@ -553,14 +575,23 @@ impl LocalPathBackend {
             && fs::read(self.absolute(renamed.as_str())).ok().as_deref()
                 == Some(vector.object_bytes());
 
+        // Die Sperre wird an ZWEI GRIFFEN gemessen und nicht an einem. Ein
+        // einzelnes `LocalPathBackend` weist den zweiten Griff schon an seiner
+        // prozessinternen Flagge ab, BEVOR das Dateisystem ueberhaupt gefragt
+        // ist — die Zusage, die dieser Bericht traegt, ist aber eine ueber das
+        // DATEISYSTEM. Ein zweiter Griff traegt eine eigene Flagge; die
+        // Ablehnung unten kann deshalb nur aus der Betriebssystemsperre kommen,
+        // und ein Traeger, der `flock`/`LockFileEx` stillschweigend ignoriert,
+        // faellt hier auf statt durch.
+        let contender = Self::open_scratch(self.root.clone(), self.profile.clone())?;
         let held = self.acquire_writer_lock()?;
         report.exclusive_writer_lock = matches!(
-            self.acquire_writer_lock(),
+            contender.acquire_writer_lock(),
             Err(ArchiveBackendError::AlreadyLocked)
         );
         drop(held);
         report.exclusive_writer_lock =
-            report.exclusive_writer_lock && self.acquire_writer_lock().is_ok();
+            report.exclusive_writer_lock && contender.acquire_writer_lock().is_ok();
 
         // Verbindungsabbruch und Wiederanlauf: der Bestand wird ERNEUT
         // geoeffnet — alle Griffe des ersten Oeffnens sind damit fort — und die
@@ -745,24 +776,61 @@ impl ArchiveBackend for LocalPathBackend {
         Ok(())
     }
 
+    /// Nimmt die exklusive Schreibersperre des Bestands.
+    ///
+    /// Die Sperre ist eine BETRIEBSSYSTEMSPERRE ueber der Sperrdatei —
+    /// `flock(2)` auf Unix, `LockFileEx` auf Windows, beides ueber
+    /// [`File::try_lock`] — und ausdruecklich NICHT das blosse Anlegen der
+    /// Datei. Der Unterschied ist der harte Abbruch: `create_new` haengt die
+    /// Sperre an das DASEIN der Datei, und nach `SIGKILL` oder Stromausfall
+    /// liegt sie fuer immer da. Der Bestand waere dann dauerhaft
+    /// unbeschreibbar — auch fuer die Wiederaufnahme von `ea-writer`, die
+    /// selbst diese Sperre nimmt. Der Kern dagegen gibt die Sperre beim
+    /// Prozessende frei; die zurueckbleibende Datei ist danach ein leeres
+    /// Gehaeuse.
+    ///
+    /// # Kein Reaper und keine PID-Pruefung
+    ///
+    /// Beide waeren die uebliche Nacharbeit an einer Dasein-Sperre und beide
+    /// sind hier UEBERFLUESSIG: eine hinterlegte PID muss geraten werden (sie
+    /// kann laengst neu vergeben sein), und ein Aufraeumer, der eine „alte"
+    /// Sperrdatei entfernt, entscheidet ueber Leben und Tod eines fremden
+    /// Prozesses ohne Beleg. Die Sperre des Kerns kennt die Antwort dagegen
+    /// genau und ohne Heuristik.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::AlreadyLocked`], wenn sie schon gehalten wird —
+    /// und ebenso, wenn die Sperrdatei sich nicht oeffnen laesst. Fail-closed:
+    /// ohne genommene Sperre wird nicht geschrieben, und der Aufrufer hat an
+    /// dieser Stelle ohnehin nur EINE Handlung.
     fn acquire_writer_lock(&self) -> Result<WriterLock, ArchiveBackendError> {
         if self.held.swap(true, Ordering::SeqCst) {
             return Err(ArchiveBackendError::AlreadyLocked);
         }
         let lock_file = self.absolute(CONTROL_FILES_V1[0]);
-        // ZWEI Stufen: die Prozessflagge schliesst einen zweiten Nehmer im
-        // selben Prozess aus, die Sperrdatei einen in einem anderen. Fehlt eine
-        // von beiden, ist die Sperre in genau einem der beiden Faelle wirkungslos.
-        match OpenOptions::new()
+        // ZWEI Stufen, und die aeussere ist nicht bloss Beiwerk: die
+        // Prozessflagge schliesst einen zweiten Nehmer ueber DIESES Backend
+        // aus, die Betriebssystemsperre einen ueber jedes andere — ein zweites
+        // `LocalPathBackend` auf derselben Wurzel oder einen fremden Prozess.
+        // Fehlt eine von beiden, ist die Sperre in genau einem der beiden
+        // Faelle wirkungslos.
+        //
+        // `create(true)` und NICHT `truncate`: die Datei traegt keinen Inhalt,
+        // und ein Abschneiden waere ein Schreibzugriff, bevor die Sperre steht.
+        let taken = OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&lock_file)
-        {
-            Ok(_) => Ok(WriterLock::new(Arc::new(LocalWriterLockRelease {
+            .ok()
+            .and_then(|file| file.try_lock().ok().map(|()| file));
+        match taken {
+            Some(file) => Ok(WriterLock::new(Arc::new(LocalWriterLockRelease {
                 held: Arc::clone(&self.held),
-                lock_file,
+                lock_file: Mutex::new(Some(file)),
             }))),
-            Err(_) => {
+            None => {
                 self.held.store(false, Ordering::SeqCst);
                 Err(ArchiveBackendError::AlreadyLocked)
             }

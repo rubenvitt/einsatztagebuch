@@ -1955,7 +1955,21 @@ impl BundleHarness {
         let archive_root = root.join("archive");
         fs::create_dir_all(&archive_root).expect("die Bestandswurzel muss anlegbar sein");
         let lock_file = archive_root.join(ea_archive_fs::CONTROL_FILES_V1[0]);
-        fs::write(&lock_file, b"").expect("die Sperrdatei muss anlegbar sein");
+        // Eine ECHTE fremde Sperre und nicht bloss die Datei: die
+        // Schreibersperre liegt seit Task 3 der Stufe-2-Nacharbeit auf einer
+        // BETRIEBSSYSTEMSPERRE ueber dieser Datei, und eine liegengebliebene
+        // Datei ohne lebende Sperre haelt niemanden mehr auf. Der Griff MUSS
+        // deshalb das `open` unten ueberleben — ein sofort fallengelassener
+        // waere eine Fixture, die nichts herstellt.
+        let foreign = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_file)
+            .expect("die Sperrdatei muss anlegbar sein");
+        foreign
+            .try_lock()
+            .expect("die frische Sperrdatei darf niemand halten");
         let backend = LocalPathBackend::open(
             archive_root,
             local_profile(),
@@ -1967,6 +1981,12 @@ impl BundleHarness {
             ea_archive_fs::FormatPackageOutcomeV1::Deferred,
             "die Fixture MUSS einen Bestand OHNE Beiwerk hinterlassen"
         );
+        // Erst die Sperre loesen, dann die Datei fort — der Export unten nimmt
+        // die Sperre selbst.
+        foreign
+            .unlock()
+            .expect("die eigene Sperre muss loesbar sein");
+        drop(foreign);
         fs::remove_file(&lock_file).expect("die Sperrdatei muss entfernbar sein");
         for (path_hint, bytes) in complete.fixture.blobs() {
             backend.materialize_for_test(path_hint, bytes);

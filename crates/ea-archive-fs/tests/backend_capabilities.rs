@@ -60,6 +60,80 @@ fn every_declared_capability_is_proven_on_the_host_filesystem() {
     assert!(report.all_proven());
 }
 
+/// Eine LIEGENGEBLIEBENE Sperrdatei ohne lebende Sperre blockiert nicht.
+///
+/// Der Fall ist ein harter Abbruch — SIGKILL, Stromausfall — mitten unter der
+/// Schreibersperre: die Datei bleibt liegen, der Prozess ist fort. Solange die
+/// Sperre am DASEIN der Datei haengt, waere der Bestand danach dauerhaft
+/// unbeschreibbar, und `ea-writer`s Wiederaufnahme kaeme nie an ihrer eigenen
+/// Sperre vorbei. Die Betriebssystemsperre gibt der Kern beim Prozessende
+/// frei; die zurueckgebliebene Datei ist damit ein leeres Gehaeuse.
+#[test]
+fn a_leftover_lock_file_without_a_live_lock_is_reclaimed() {
+    let (_guard, root) = support::temp_root("stale-writer-lock");
+    std::fs::write(root.join(ea_archive_fs::CONTROL_FILES_V1[0]), b"")
+        .expect("die Sperrdatei muss anlegbar sein");
+
+    let backend = LocalPathBackend::open(
+        root,
+        support::local_profile(),
+        &support::policy_allowing_source_and_target(),
+    )
+    .expect("der Bestand muss sich oeffnen lassen");
+
+    // Zwei Aussagen, und beide haengen an derselben Sperre: das Beiwerk
+    // entsteht UNTER ihr, also belegt sein Ergebnis, dass `open` sie nehmen
+    // konnte — und der ausdrueckliche Griff danach belegt es noch einmal
+    // unmittelbar.
+    assert_eq!(
+        backend.format_package_outcome(),
+        ea_archive_fs::FormatPackageOutcomeV1::Materialized,
+        "eine tote Sperrdatei darf das Beiwerk NICHT aufschieben"
+    );
+    assert!(
+        backend.acquire_writer_lock().is_ok(),
+        "eine tote Sperrdatei darf die Schreibersperre NICHT blockieren"
+    );
+}
+
+/// Zwei Bestandsgriffe auf DERSELBEN Wurzel lassen genau einen Schreiber zu.
+///
+/// Der Unterschied zu [`a_second_writer_lock_is_refused_and_released_on_drop`]
+/// ist der Beobachtungspunkt und nicht die Zusage: dort steht EIN
+/// `LocalPathBackend`, und schon seine prozessinterne Flagge weist den zweiten
+/// Griff ab, bevor das Betriebssystem ueberhaupt gefragt wird. Hier tragen
+/// zwei Griffe zwei getrennte Flaggen; die Ablehnung kann also nur aus der
+/// Sperre des Betriebssystems kommen. Ohne diesen Zeugen liesse sich die
+/// aeussere Stufe der Sperre entfernen, ohne dass ein Test rot wird.
+#[test]
+fn two_backends_on_the_same_root_admit_exactly_one_writer() {
+    let (_guard, root) = support::temp_root("cross-backend-writer-lock");
+    let first = LocalPathBackend::open(
+        root.clone(),
+        support::local_profile(),
+        &support::policy_allowing_source_and_target(),
+    )
+    .expect("der erste Griff muss sich oeffnen lassen");
+    let second = LocalPathBackend::open(
+        root,
+        support::local_profile(),
+        &support::policy_allowing_source_and_target(),
+    )
+    .expect("der zweite Griff muss sich oeffnen lassen");
+
+    let held = first.acquire_writer_lock().unwrap();
+    assert_eq!(
+        second.acquire_writer_lock().unwrap_err().code(),
+        "EA-ARCHIVE-ALREADY-LOCKED"
+    );
+
+    drop(held);
+    assert!(
+        second.acquire_writer_lock().is_ok(),
+        "nach dem `Drop` des ersten Halters MUSS der zweite Griff durchkommen"
+    );
+}
+
 #[test]
 fn a_second_writer_lock_is_refused_and_released_on_drop() {
     let (_guard, backend) = backend("writer-lock");
