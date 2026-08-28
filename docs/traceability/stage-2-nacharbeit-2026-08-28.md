@@ -30,8 +30,11 @@ Fortsetzung unter einem veralteten Registry-Kopf im Standardprofil.
 nur die: `crates/ea-writer/tests/stale_registry_warning.rs::a_head_that_expires_while_bound_is_acknowledgeable_and_blocks_fail_closed`
 und `::an_overdue_refresh_deadline_warns_without_blocking`. Der
 Bestätigungspfad selbst ist NICHT gebaut —
-`WriterService::acknowledge_stale_registry` existiert nicht, und der
-Wirtsstummel `writer_acknowledge_stale_registry` meldet
+`WriterService::acknowledge_stale_registry` existiert nicht — die Crate sagt es
+selbst (`crates/ea-writer/src/lib.rs:37-39`: „Der Bestaetigungspfad eines
+VERALTETEN Registry-Head … ist nicht gebaut. Die ERKENNUNG ist es"), und der
+Baum trägt keine Definition dieses Namens —, und der Wirtsstummel
+`writer_acknowledge_stale_registry` meldet
 `EA-DESKTOP-STALE-ACK-UNAVAILABLE`
 (`apps/desktop/src-tauri/src/commands/mod.rs:52`, Doku am Stummel in
 `apps/desktop/src-tauri/src/commands/writer.rs:1148`). Task 4 dieser Nacharbeit
@@ -258,8 +261,11 @@ Gate-Bericht steht, nichts erzwingt.
 
 Zu R60 gehört ein Nebenbefund, der mit übergeht: `ea-recovery`
 (`FsArchiveSource`) zählt die Sperrdatei `.ea-writer.lock` als
-`nonObjectFile` (+1), und `ea-recovery export` kopiert sie mit. Die Präzedenz
-ist `.ea-active-profile`, das sich seit je genauso verhält.
+`nonObjectFile` (+1), und `ea-recovery export` kopiert sie mit:
+`crates/ea-recovery/src/source.rs:125-175` liest jede reguläre Datei unter der
+Wurzel ein, und `CONTROL_FILES_V1` kommt in `crates/ea-recovery/src/` an keiner
+Stelle vor. Die Präzedenz ist `.ea-active-profile`, das sich seit je genauso
+verhält.
 
 QS-11 hat bewusst keine eigene Ledgerzeile bekommen: der Punkt betrifft die
 Releasezeremonie und keine nummerierte Anforderung des Entwurfs, und eine

@@ -200,7 +200,8 @@ behauptete, als er belegt. Der vollstaendige Bericht der Nacharbeit steht in
    Phasenbenennung der Schale:
    `apps/desktop/src-tauri/src/lib.rs::the_shell_names_every_discard_phase_without_a_continuation`.
 3. **Eine sich selbst widersprechende Abschlussmarke bleibt liegen.** Die
-   Nachrechnung der Marke (`crates/ea-writer/src/recover.rs`) weist eine Marke
+   Nachrechnung der Marke (`crates/ea-writer/src/recover.rs`, Einstieg
+   `recover_pending` an `:100`) weist eine Marke
    mit `grant_count = 0`, abweichendem `grant_plan_hash` oder einer der
    Eintragssequenz widersprechenden Sequenz fail-closed mit
    `EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT` ab. Folge: `recover_pending`
@@ -210,7 +211,10 @@ behauptete, als er belegt. Der vollstaendige Bericht der Nacharbeit steht in
    derselbe Aufloesungspfad: Stufe 5.
 4. **Die Sperrdatei reist im Recovery-Export mit.** `ea-recovery`
    (`FsArchiveSource`) zaehlt `.ea-writer.lock` als `nonObjectFile` (+1), und
-   `ea-recovery export` kopiert sie mit. Praezedenz ist `.ea-active-profile`,
+   `ea-recovery export` kopiert sie mit: `crates/ea-recovery/src/source.rs:125-175`
+   liest JEDE regulaere Datei unter der Wurzel ein, und `CONTROL_FILES_V1` — die
+   Ausblendung, die Inventar und Gesundheitsbericht anwenden — kommt in
+   `crates/ea-recovery/src/` an keiner Stelle vor. Praezedenz ist `.ea-active-profile`,
    das sich seit je genauso verhaelt. Kein Vertraulichkeits- und kein
    Integritaetsbefund — die Datei ist leer und traegt keine fachlichen Bytes —,
    aber eine Abweichung von der Erwartung, ein Export enthalte nur Bestand.
@@ -591,8 +595,10 @@ Das Gate-Bullet
 `docs/superpowers/plans/2026-08-13-einsatzarchiv-v0-1.md:358` verlangt fuer
 Stufe 2 eine dauerhafte signierte Einmal-Quittung. Stufe 2 liefert die
 ERKENNUNG mit fail-closed-Ausgang und nicht die Quittung;
-`WriterService::acknowledge_stale_registry` ist nicht gebaut, und
-`writer_acknowledge_stale_registry` bleibt im Wirt ein benannter Stummel. Die
+`WriterService::acknowledge_stale_registry` ist nicht gebaut — die Crate sagt
+es selbst (`crates/ea-writer/src/lib.rs:37-39`), und der Baum traegt keine
+Definition dieses Namens —, und `writer_acknowledge_stale_registry` bleibt im
+Wirt ein benannter Stummel. Die
 Quittung gehoert AUSDRUECKLICH zur Stufe 5, wo auch die Administrationsseite
 von AK 24 steht. Begruendung und Belege in
 `docs/traceability/stage-2-nacharbeit-2026-08-28.md`.
