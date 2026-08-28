@@ -68,6 +68,7 @@ Signature coverage is exact: `@method`, `@authority`, `@target-uri`, `content-ty
 - Create: `docs/adr/0004-server-runtime-and-dependency-class.md`
 - Create: `ops/compose/integration.yaml`
 - Create: `mise.toml`
+- Modify: `.gitignore`
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
 - Modify: `deny.toml`
@@ -123,9 +124,9 @@ Enter the ratified classes exactly `=`-pinned in `[workspace.dependencies]` of t
 
 Add the license exceptions to the `exceptions` block of `deny.toml` in the pattern already used there (crate, license, justification, path into the graph). The allowlist stays at **five** entries — `Apache-2.0`, `BSD-3-Clause`, `BlueOak-1.0.0`, `MIT`, `Unicode-3.0` — because the comment above the block says verbatim that "eine neue Crate unter derselben Lizenz wird weiterhin abgewiesen, und das ist der Unterschied zwischen einer Ausnahme und einer stillschweigenden Erweiterung". Expected candidates from the TLS/S3 subtree are `rustls-webpki` and `untrusted` (ISC alone); no copyleft is in the plausible set. The same comment fixes the place of decision normatively: it points at the section `Gemessener Gate-Lauf` of `docs/traceability/stage-2-gate.md`, so for this stage the section of the same name in `docs/traceability/stage-3-gate.md`. Every new license exception gets a ledger anchor in `docs/traceability/v0.1-requirements.csv` after the pattern of the row `GATE-25` that carries the sixteen advisory exceptions; an exception without an anchor enforces nothing.
 
-Version `mise.toml` and replace `pnpm = "latest"` with the exact pin `pnpm = "11.20.0"`, so the file does not stand against `docs/adr/0001-toolchain-and-cryptography-dependencies.md:28` and `package.json:4` (`"packageManager": "pnpm@11.20.0"`). The same file carries the container-runtime pin below. ADR 0001 pins Rust, Node, pnpm, the fuzz nightly and cargo-fuzz exactly (:26-30) and has no line for Docker/Podman/colima to this day.
+Version `mise.toml`: the file is untracked today because `.gitignore:12` carries the line `mise.toml`, so that line is removed first. Then replace `pnpm = "latest"` with the exact pin `pnpm = "11.20.0"`, so the file does not stand against `docs/adr/0001-toolchain-and-cryptography-dependencies.md:28` and `package.json:4` (`"packageManager": "pnpm@11.20.0"`). The same file carries the container-runtime pin below. ADR 0001 pins Rust, Node, pnpm, the fuzz nightly and cargo-fuzz exactly (:26-30) and has no line for Docker/Podman/colima to this day.
 
-Build the subcommand `integration` with the two arguments `up` and `down` into the dispatcher (`match gate.as_str()` in `fn run` of `tools/xtask/src/main.rs`). Write the argument grammar out rather than opening it silently: the `test-*` gates and `validate-schemas` reject every argument explicitly, `stage-gate` takes exactly one NUMERIC argument, and `integration` is the first gate with a symbolic one — the two accepted words are `up` and `down`, everything else is an error. `integration up` starts the two services from `ops/compose/integration.yaml` and prints the connection data so that `DATABASE_URL` and the S3 endpoint are set for the following `cargo test` commands, because `#[sqlx::test]` reads `DATABASE_URL` at runtime. Both subcommands are idempotent.
+Build the subcommand `integration` with the two arguments `up` and `down` into the dispatcher (`match gate.as_str()` in `fn run` of `tools/xtask/src/main.rs`). Write the argument grammar out rather than opening it silently: the `test-*` gates and `validate-schemas` reject every argument explicitly, `stage-gate` takes exactly one NUMERIC argument, and `integration` is the first gate with a symbolic one — the two accepted words are `up` and `down`, everything else is an error. `integration up` starts the two services from `ops/compose/integration.yaml` and prints the connection data so that `DATABASE_URL` and the S3 endpoint are set for the following `cargo test` commands, because `#[sqlx::test]` reads `DATABASE_URL` at runtime. Both subcommands are idempotent. The `verify-quick` arm of the same dispatcher gets the fail-closed reachability check for PostgreSQL and the object store that the service precondition above demands, built in the form of `ensure_wasm32_target_available()`: it runs before the affected command, reports the missing service with an instruction, and offers no environment-variable bypass.
 
 Choose and pin the container runtime (Docker/Podman/colima), the two integration images with **tag AND digest**, and the S3-compatible service **by name** in this same task. MinIO, SeaweedFS, LocalStack and Garage differ in versioning, object lock and conditional put, and the stage requires bucket versioning; an unpinned `integration up` is worthless.
 
@@ -149,7 +150,7 @@ Expected: PASS; the ADR names every class with its pin on one line and its revie
 - [ ] **Step 6: Commit the toolchain and pin surface before any server code**
 
 ```bash
-git add docs/adr/0004-server-runtime-and-dependency-class.md ops/compose mise.toml deny.toml tools/xtask docs/traceability/v0.1-requirements.csv Cargo.toml Cargo.lock
+git add docs/adr/0004-server-runtime-and-dependency-class.md ops/compose mise.toml .gitignore deny.toml tools/xtask docs/traceability/v0.1-requirements.csv Cargo.toml Cargo.lock
 git commit -m "build(sync): ratify and pin the server dependency class"
 ```
 
