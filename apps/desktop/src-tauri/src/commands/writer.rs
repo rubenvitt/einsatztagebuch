@@ -27,12 +27,14 @@
 //!    aufgeloeste Bedienerbindung hat, ist KEIN Port verdrahtet, und die
 //!    Abwesenheit sitzt genau dort — am fehlenden Port und nicht an einer
 //!    fehlenden Zeile.
-//! 3. **Benannte Abwesenheit.** [`session_reauthenticate`],
-//!    [`writer_acknowledge_stale_registry`] und
-//!    [`archive_export_bundle_file`] antworten mit einem stabilen Code. Jeder
-//!    dieser Codes benennt eine Voraussetzung, die in diesem Bauzustand nicht
-//!    aufgeloest ist — und keiner von ihnen ist ein Vorgabewert, der etwas
-//!    Gutes behauptet.
+//!    [`archive_export_bundle_file`] ruft den Buendelport
+//!    (`crate::state::ArchiveBundleExportPort`) und reicht jede Abweisung mit
+//!    dem Code aus `ea-archive-fs/src/bundle_error.rs` weiter.
+//! 3. **Benannte Abwesenheit.** [`session_reauthenticate`] und
+//!    [`writer_acknowledge_stale_registry`] antworten mit einem stabilen Code.
+//!    Jeder dieser Codes benennt eine Voraussetzung, die in diesem Bauzustand
+//!    nicht aufgeloest ist — und keiner von ihnen ist ein Vorgabewert, der
+//!    etwas Gutes behauptet.
 //!
 //! Fail-closed ist die durchgaengige Richtung: eine unbekannte Voraussetzung
 //! ist keine erfuellte.
@@ -42,9 +44,9 @@ use ea_draft::{DraftError, RestartState};
 use ea_key_provider::{DevicePostureReport, PostureRequirement, SupportMatrixRow};
 use ea_schema::SchemaError;
 use ea_ui_contracts::{
-    ArchiveHealthSummaryView, DevicePostureSummaryView, DiscardStateView, FinalizationPreviewView,
-    FinalizeOutcomeView, IncidentInputView, PatientCountView, PendingFinalizationResumeView,
-    PendingResumeOutcomeView, PostureRequirementView,
+    ArchiveHealthSummaryView, BundleExportView, DevicePostureSummaryView, DiscardStateView,
+    FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView, PatientCountView,
+    PendingFinalizationResumeView, PendingResumeOutcomeView, PostureRequirementView,
 };
 use ea_writer::{RecoveryOutcome, WriterError};
 use serde::{Deserialize, Serialize};
@@ -55,7 +57,7 @@ use super::{
     NO_VERIFIED_SESSION, REAUTH_UNAVAILABLE, SESSION_STATE_UNREADABLE, STALE_ACK_UNAVAILABLE,
     STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
 };
-use crate::state::{DesktopState, DraftDiscardPort, DraftPayloadPort};
+use crate::state::{ArchiveBundleExportPort, DesktopState, DraftDiscardPort, DraftPayloadPort};
 
 // ---------------------------------------------------------------------------
 // Drahtformen. Jede traegt `rename_all = "camelCase"` und ist die EINE
@@ -385,6 +387,16 @@ pub struct BundleExportDto {
     pub path: String,
     pub object_count: u64,
     pub byte_count: u64,
+}
+
+impl From<&BundleExportView> for BundleExportDto {
+    fn from(view: &BundleExportView) -> Self {
+        Self {
+            path: view.path.clone(),
+            object_count: view.object_count,
+            byte_count: view.byte_count,
+        }
+    }
 }
 
 /// Der Gesundheitsbefund in seiner Drahtform.
@@ -917,6 +929,40 @@ fn discard_resume_core(state: &DesktopState) -> Result<DiscardStateDto, CommandE
     discard_resume_of(discard_port(state)?)
 }
 
+/// Das Ergebnis EINES Buendelexports als Drahtform.
+///
+/// Sie nimmt den Port und nicht den Zustand — dieselbe Aufteilung wie bei
+/// [`draft_state_of`]: die Abbildung ist damit vollstaendig bezeugt, und die
+/// benannte Abwesenheit hat ihren eigenen Zeugen.
+///
+/// Eine ABWEISUNG des Schreibers ist hier ein Fehlschlag mit SEINEM Code und
+/// niemals ein leerer Bericht: ein Bericht ueber `0` Objekte waere die Aussage
+/// „exportiert, und zwar nichts" ueber einen Bestand, der nicht vollstaendig
+/// verifiziert ist.
+fn bundle_export_of(
+    port: &(dyn ArchiveBundleExportPort + Send + Sync),
+) -> Result<BundleExportDto, CommandError> {
+    port.export()
+        .map(|view| BundleExportDto::from(&view))
+        .map_err(|error| CommandError::new(error.code()))
+}
+
+/// Der Kern von [`archive_export_bundle_file`].
+///
+/// KEIN Sitzungstor, und das ist eine Entscheidung: der Export kopiert
+/// VERSIEGELTE Bytes — er entschluesselt nichts, rendert keinen Inhalt und
+/// oeffnet keinen Verlauf. Das Tor von [`draft_load_core`] steht dort, weil das
+/// Holen der entsiegelten Nutzlast selbst die Wirkung ist; hier gibt es keinen
+/// Klartext, den ein Nachweis schuetzen wuerde, und die Zugriffsentscheidung
+/// ueber den Inhalt trifft der Bestand mit seinen Berechtigungen. Derselbe
+/// Grund wie bei [`archive_health_core`].
+fn bundle_export_core(state: &DesktopState) -> Result<BundleExportDto, CommandError> {
+    let port = state
+        .bundle_export()
+        .ok_or_else(|| CommandError::new(BUNDLE_EXPORT_UNAVAILABLE))?;
+    bundle_export_of(port)
+}
+
 /// Der Kern von [`writer_preview`].
 ///
 /// Die Reihenfolge ist die Aussage: erst der Eingabevertrag, dann der PORT. Die
@@ -1144,23 +1190,35 @@ pub async fn device_posture_report() -> Result<DevicePostureDto, CommandError> {
 
 /// Der Ein-Datei-Buendelexport.
 ///
-/// # Errors
-///
-/// [`BUNDLE_EXPORT_UNAVAILABLE`]: `ea_archive_fs::write_archive_bundle`
-/// verlangt einen aufgeloesten `TrustAnchorV1`, und `ea-trust` steht nicht in
-/// der Abhaengigkeitsmenge dieses Pakets. Der Export ist deshalb PERMANENT
-/// angeboten und heute benannt unverfuegbar — nicht bedingt versteckt.
-///
 /// OHNE Argument: das Ziel gehoert dem WIRT. Eine Oberflaeche, die einen
 /// Dateipfad einreicht, waehlte einen Ort im Dateisystem — und die
-/// Freies-Ziel-Regel samt `O_CREAT|O_EXCL` liegt im Kern.
+/// Freies-Ziel-Regel samt `O_CREAT|O_EXCL` liegt im Kern. Der Port
+/// (`crate::state::ArchiveBundleExportPort`) haelt das Ziel deshalb selbst.
+///
+/// # Errors
+///
+/// [`BUNDLE_EXPORT_UNAVAILABLE`] ohne verdrahteten Buendelport:
+/// `ea_archive_fs::write_archive_bundle` verlangt einen aufgeloesten
+/// `TrustAnchorV1`, und `ea-trust` steht nicht in der Abhaengigkeitsmenge
+/// dieses Pakets. Der Export ist deshalb PERMANENT angeboten und ohne Port
+/// benannt unverfuegbar — nicht bedingt versteckt.
+///
+/// Sonst der stabile Code des Buendelschreibers, unveraendert
+/// (`ea-archive-fs/src/bundle_error.rs`): ein Bestand, der nicht VOLLSTAENDIG
+/// verifiziert, ist `EA-BUNDLE-SOURCE-NOT-FULLY-VERIFIED` und wird niemals
+/// still exportiert; eine belegte Zieladresse ist
+/// `EA-BUNDLE-TARGET-OCCUPIED`, und es wird nichts ueberschrieben.
 #[tauri::command]
-pub async fn archive_export_bundle_file() -> Result<BundleExportDto, CommandError> {
-    run_blocking(|| Err(CommandError::new(BUNDLE_EXPORT_UNAVAILABLE))).await
+pub async fn archive_export_bundle_file(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<BundleExportDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || bundle_export_core(&state)).await
 }
 
 #[cfg(test)]
 mod tests {
+    use ea_archive_fs::BundleError;
     use ea_key_provider::{DevicePostureReport, PostureRequirement};
     use ea_types::ChainSequence;
     use ea_writer::{RecoveryOutcome, WriterError};
@@ -1174,11 +1232,14 @@ mod tests {
         resume_view,
     };
     use super::{
-        DraftError, RestartState, discard_begin_core, discard_begin_of, discard_resume_core,
-        discard_resume_of, discard_view,
+        BundleExportView, DraftError, RestartState, bundle_export_core, bundle_export_of,
+        discard_begin_core, discard_begin_of, discard_resume_core, discard_resume_of, discard_view,
     };
     use crate::commands::NO_VERIFIED_SESSION;
-    use crate::state::{ArchiveHealthPort, DraftDiscardPort, SessionState, StartupRecoveryPort};
+    use crate::state::{
+        ArchiveBundleExportPort, ArchiveHealthPort, DraftDiscardPort, SessionState,
+        StartupRecoveryPort,
+    };
 
     fn bare_state() -> DesktopState {
         DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
@@ -2052,6 +2113,106 @@ mod tests {
         assert!(
             port.calls().is_empty(),
             "der Verwerfensdienst wird ohne Nachweis nicht einmal gerufen"
+        );
+    }
+
+    /// Ein Buendelport, der genau EINEN Ausgang liefert.
+    ///
+    /// Er ist der Grund, warum der Port die Ansicht und nicht
+    /// `ea_archive_fs::BundleExportReport` liefert: dessen Feld ist privat, es
+    /// gibt keinen oeffentlichen Konstruktor, und der Bericht nennt ausserdem
+    /// nur die Objektzahl — Pfad und Byteumfang sind Tatsachen des WIRTS ueber
+    /// das Ziel, das er gewaehlt hat.
+    struct FixedBundleExport(Result<BundleExportView, BundleError>);
+
+    impl ArchiveBundleExportPort for FixedBundleExport {
+        fn export(&self) -> Result<BundleExportView, BundleError> {
+            match &self.0 {
+                Ok(view) => Ok(view.clone()),
+                Err(error) => Err(*error),
+            }
+        }
+    }
+
+    fn state_with_bundle_export(port: FixedBundleExport) -> DesktopState {
+        DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+            .with_bundle_export(std::sync::Arc::new(port))
+    }
+
+    /// Der Export meldet Pfad, Objektzahl und Byteumfang — jede Zahl an IHRER
+    /// Position.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: zwei vertauschte Zahlen. Die
+    /// Oberflaeche schriebe „4096 Objekte, 12 Bytes", und ein Bediener koennte
+    /// an der Anzeige nicht mehr erkennen, ob sein Bestand vollstaendig
+    /// mitgekommen ist.
+    #[test]
+    fn the_bundle_export_reports_path_object_count_and_byte_count() {
+        let state = state_with_bundle_export(FixedBundleExport(Ok(BundleExportView {
+            path: "/tmp/archiv.eab".to_owned(),
+            object_count: 12,
+            byte_count: 4096,
+        })));
+        let dto = bundle_export_core(&state).expect("der Port hat geschrieben");
+        assert_eq!(dto.path, "/tmp/archiv.eab");
+        assert_eq!(dto.object_count, 12);
+        assert_eq!(dto.byte_count, 4096);
+    }
+
+    /// Ein Bestand, der nicht VOLLSTAENDIG verifiziert, wird abgewiesen — mit
+    /// dem Code der Grenze in `ea-archive-fs` und niemals still exportiert.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Grenze, die den Fehlschlag
+    /// des Schreibers zu einem leeren Bericht macht. Die Oberflaeche zeigte
+    /// „0 Objekte, 0 Bytes" statt der Abweisung, und der Bediener hielte einen
+    /// unverifizierten Bestand fuer exportiert.
+    #[test]
+    fn a_source_that_does_not_fully_verify_is_refused_with_its_code() {
+        let state =
+            state_with_bundle_export(FixedBundleExport(Err(BundleError::SourceNotFullyVerified)));
+        assert_eq!(
+            bundle_export_core(&state)
+                .expect_err("ein unverifizierter Bestand wird nicht exportiert")
+                .code,
+            "EA-BUNDLE-SOURCE-NOT-FULLY-VERIFIED"
+        );
+    }
+
+    /// Jeder Ausgang des Buendelschreibers reist mit SEINEM Code.
+    ///
+    /// Die belegte Zieladresse ist ausdruecklich dabei: sie ist die
+    /// Freies-Ziel-Regel, und ein eingeebneter Code liesse die Oberflaeche
+    /// „Export gescheitert" sagen, wo „diese Datei existiert schon" die
+    /// Handlungsanweisung waere.
+    #[test]
+    fn every_bundle_refusal_carries_the_code_of_the_core() {
+        for error in [
+            BundleError::SourceNotFullyVerified,
+            BundleError::TargetOccupied,
+            BundleError::Malformed,
+            BundleError::BlobLimit,
+            BundleError::TotalByteLimit,
+            BundleError::Io,
+        ] {
+            let port = FixedBundleExport(Err(error));
+            assert_eq!(
+                bundle_export_of(&port)
+                    .expect_err("der Schreiber hat abgelehnt")
+                    .code,
+                error.code()
+            );
+        }
+    }
+
+    /// Ohne verdrahteten Buendelport: eine BENANNTE Abwesenheit und kein
+    /// leerer Bericht.
+    #[test]
+    fn without_a_bundle_port_the_export_names_its_absence() {
+        assert_eq!(
+            bundle_export_core(&bare_state())
+                .expect_err("kein Buendelport")
+                .code,
+            super::BUNDLE_EXPORT_UNAVAILABLE
         );
     }
 

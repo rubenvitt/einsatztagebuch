@@ -3,15 +3,15 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ea_archive::ArchiveBackendError;
-use ea_archive_fs::{ArchiveHealthCheckV1, ArchiveHealthReport};
+use ea_archive_fs::{ArchiveHealthCheckV1, ArchiveHealthReport, BundleError};
 use ea_draft::{DiscardService, DraftError, DraftRepository, MasterDataRepository, RestartState};
 use ea_format::OperatorRoleV1;
 use ea_operator::OperatorSessionProof;
 use ea_schema::{NativeSourceV1, PersonnelSnapshotV1, SchemaError, VehicleSnapshotV1};
 use ea_types::UnixMillis;
 use ea_ui_contracts::{
-    FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView, PersonnelSelectionView,
-    VehicleSelectionView,
+    BundleExportView, FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView,
+    PersonnelSelectionView, VehicleSelectionView,
 };
 use ea_writer::{
     FinalizationInputV1, FinalizationPreview, RecoveryOutcome, WriterError, WriterService,
@@ -124,6 +124,41 @@ impl<T: DraftRepository + ?Sized> DraftPayloadPort for T {
         let draft = self.load_or_create()?;
         self.save(draft.with_notes(payload)).map(|_| ())
     }
+}
+
+/// Der synchrone Port des Ein-Datei-Buendelexports.
+///
+/// # Warum hier keine Naht wie [`BoundWriter`] steht
+///
+/// `ea_archive_fs::write_archive_bundle` verlangt einen aufgeloesten
+/// `TrustAnchorV1`, und dieser Typ lebt in `ea-trust`. `ea-trust` steht nicht in
+/// der Abhaengigkeitsmenge dieses Pakets, `ea-archive-fs` gibt ihn nicht weiter,
+/// und kein erreichbares Paket liefert einen Wert dieses Typs — der Aufruf ist
+/// hier also nicht einmal HINSCHREIBBAR. Diese Grenze erfindet ihn deshalb
+/// nicht; sie zieht die Naht so eng an den Kern, wie es ohne diese Kante geht:
+/// der Fehlerausgang IST [`BundleError`], und der Code einer Abweisung kommt
+/// damit woertlich aus `ea-archive-fs/src/bundle_error.rs` und nicht aus einer
+/// zweiten Liste. Ein Bestand, der nicht vollstaendig verifiziert, kommt als
+/// [`BundleError::SourceNotFullyVerified`] an und wird abgewiesen.
+///
+/// Der Erfolgsausgang ist die ANSICHT und nicht `ea_archive_fs::BundleExportReport`:
+/// dessen Feld ist privat und ohne oeffentlichen Konstruktor, und er nennt nur
+/// die Objektzahl. Pfad und Byteumfang sind Tatsachen des Wirts ueber das Ziel,
+/// das er selbst gewaehlt hat.
+///
+/// # Ohne Argument
+///
+/// Das Ziel gehoert dem WIRT und kommt nie aus einer Antwort der Oberflaeche;
+/// der Implementierer haelt es, wie [`BoundWriter`] den Nachweis haelt. Die
+/// Freies-Ziel-Regel samt `O_CREAT|O_EXCL` liegt im Kern und wird hier nicht
+/// nachgebaut.
+pub trait ArchiveBundleExportPort {
+    /// Schreibt den Bestand als EINE Datei und meldet, was hinausging.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Buendelschreibers, unveraendert.
+    fn export(&self) -> Result<BundleExportView, BundleError>;
 }
 
 /// Der synchrone Port des Verwerfens.
@@ -543,6 +578,7 @@ pub struct DesktopState {
     health: Option<Arc<dyn ArchiveHealthPort + Send + Sync>>,
     writer: Option<Arc<dyn WriterFinalizePort + Send + Sync>>,
     discard: Option<Arc<dyn DraftDiscardPort + Send + Sync>>,
+    bundle_export: Option<Arc<dyn ArchiveBundleExportPort + Send + Sync>>,
 }
 
 impl DesktopState {
@@ -563,6 +599,7 @@ impl DesktopState {
             health,
             writer,
             discard: None,
+            bundle_export: None,
         }
     }
 
@@ -578,6 +615,20 @@ impl DesktopState {
     #[must_use]
     pub fn with_discard(mut self, discard: Arc<dyn DraftDiscardPort + Send + Sync>) -> Self {
         self.discard = Some(discard);
+        self
+    }
+
+    /// Der Buendelexport dieses Wirts.
+    ///
+    /// Aus demselben Grund eine eigene Naht wie [`Self::with_discard`]: er
+    /// verlangt einen aufgeloesten Vertrauensanker und ein gewaehltes Ziel, und
+    /// beides hat die Anwendung beim Hochkommen nicht.
+    #[must_use]
+    pub fn with_bundle_export(
+        mut self,
+        bundle_export: Arc<dyn ArchiveBundleExportPort + Send + Sync>,
+    ) -> Self {
+        self.bundle_export = Some(bundle_export);
         self
     }
 
@@ -639,6 +690,13 @@ impl DesktopState {
     #[must_use]
     pub fn discard(&self) -> Option<&(dyn DraftDiscardPort + Send + Sync)> {
         self.discard.as_deref()
+    }
+
+    /// Der Buendelexport, wenn Bestand, Vertrauensanker und Ziel aufgeloest
+    /// sind.
+    #[must_use]
+    pub fn bundle_export(&self) -> Option<&(dyn ArchiveBundleExportPort + Send + Sync)> {
+        self.bundle_export.as_deref()
     }
 }
 
