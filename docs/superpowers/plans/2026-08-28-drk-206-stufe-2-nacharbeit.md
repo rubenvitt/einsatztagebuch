@@ -64,6 +64,8 @@ Fünf Posten aus dem Abschlussreview, jeder mit eigenem Zeugen (Test zuerst rot)
 
 **Nicht in diesem Task:** Plattform-Sperrbeobachter (Bildschirmsperre, R59 Teil 2) — bleibt Stufe 7, wird in Task 6 dokumentiert. Kein Reaper, keine PID-Prüfung (durch die OS-Sperre überflüssig; begründen im Doc-Kommentar).
 
+> **Fußnote 2026-08-28 (Task-Text oben unverändert):** Umgesetzt wurde die Sperre OHNE die hier genannte Crate `fs4` (und ohne `fd-lock`) — `std::fs::File::try_lock` ist seit dem Toolchain-Pin `1.95.0` stabil und leistet dasselbe (`flock` bzw. `LockFileEx`). Es kam also KEINE neue Abhängigkeit hinzu, `deny.toml` blieb unberührt. Commits `bee2cfa..c7e789d`.
+
 **Verify:** `env -u RUSTUP_TOOLCHAIN cargo test --locked -p ea-archive-fs -p ea-draft -p ea-writer`, `cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix`, `pnpm supply-chain`, fmt, clippy. Wasm32-Positivliste ist nicht betroffen (weder Crate steht darauf) — prüfen mit `pnpm verify:quick`-Teilschritt oder `cargo check --target wasm32-unknown-unknown` für die elf Pakete der Positivliste, falls schnell.
 
 ---
