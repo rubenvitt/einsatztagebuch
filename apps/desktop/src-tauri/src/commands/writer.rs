@@ -18,25 +18,31 @@
 //!    [`writer_preview`] und [`writer_finalize`] wandeln den Einsatzrumpf mit
 //!    den Stufe-1-Konstruktoren von `ea-schema`, lehnen eine verletzte Eingabe
 //!    mit DEREN Code ab und rufen dann den Schreibport
-//!    (`crate::state::WriterPreviewPort`, `WriterFinalizePort`). Solange dieses
-//!    Geraet keine aufgeloeste Bedienerbindung hat, ist KEIN Port verdrahtet,
-//!    und die Abwesenheit sitzt genau dort — am fehlenden Port und nicht an
-//!    einer fehlenden Zeile.
+//!    (`crate::state::WriterPreviewPort`, `WriterFinalizePort`).
+//!    [`draft_discard_begin`] und [`draft_discard_resume`] tragen das
+//!    Sitzungstor und rufen den Verwerfensport
+//!    (`crate::state::DraftDiscardPort`), dessen Naht
+//!    `crate::state::BoundDiscard` die drei Eingaenge von
+//!    `ea_draft::DiscardService` uebersetzt haelt. Solange dieses Geraet keine
+//!    aufgeloeste Bedienerbindung hat, ist KEIN Port verdrahtet, und die
+//!    Abwesenheit sitzt genau dort — am fehlenden Port und nicht an einer
+//!    fehlenden Zeile.
 //! 3. **Benannte Abwesenheit.** [`session_reauthenticate`],
-//!    [`writer_acknowledge_stale_registry`], [`draft_discard_begin`],
-//!    [`draft_discard_resume`] und [`archive_export_bundle_file`] antworten mit
-//!    einem stabilen Code. Jeder dieser Codes benennt eine Voraussetzung, die
-//!    in diesem Bauzustand nicht aufgeloest ist — und keiner von ihnen ist ein
-//!    Vorgabewert, der etwas Gutes behauptet.
+//!    [`writer_acknowledge_stale_registry`] und
+//!    [`archive_export_bundle_file`] antworten mit einem stabilen Code. Jeder
+//!    dieser Codes benennt eine Voraussetzung, die in diesem Bauzustand nicht
+//!    aufgeloest ist — und keiner von ihnen ist ein Vorgabewert, der etwas
+//!    Gutes behauptet.
 //!
 //! Fail-closed ist die durchgaengige Richtung: eine unbekannte Voraussetzung
 //! ist keine erfuellte.
 
 use ea_archive_fs::ArchiveHealthReport;
+use ea_draft::{DraftError, RestartState};
 use ea_key_provider::{DevicePostureReport, PostureRequirement, SupportMatrixRow};
 use ea_schema::SchemaError;
 use ea_ui_contracts::{
-    ArchiveHealthSummaryView, DevicePostureSummaryView, FinalizationPreviewView,
+    ArchiveHealthSummaryView, DevicePostureSummaryView, DiscardStateView, FinalizationPreviewView,
     FinalizeOutcomeView, IncidentInputView, PatientCountView, PendingFinalizationResumeView,
     PendingResumeOutcomeView, PostureRequirementView,
 };
@@ -49,7 +55,7 @@ use super::{
     NO_VERIFIED_SESSION, REAUTH_UNAVAILABLE, SESSION_STATE_UNREADABLE, STALE_ACK_UNAVAILABLE,
     STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
 };
-use crate::state::{DesktopState, DraftPayloadPort};
+use crate::state::{DesktopState, DraftDiscardPort, DraftPayloadPort};
 
 // ---------------------------------------------------------------------------
 // Drahtformen. Jede traegt `rename_all = "camelCase"` und ist die EINE
@@ -361,6 +367,15 @@ pub struct ReauthResultDto {
 pub struct DiscardStateDto {
     pub phase_code: String,
     pub complete: bool,
+}
+
+impl From<&DiscardStateView> for DiscardStateDto {
+    fn from(view: &DiscardStateView) -> Self {
+        Self {
+            phase_code: view.phase_code.clone(),
+            complete: view.complete,
+        }
+    }
 }
 
 /// Das Ergebnis des Ein-Datei-Buendelexports.
@@ -799,6 +814,109 @@ fn writer_input_core(incident: &IncidentInputDto) -> Result<IncidentInputView, C
     Ok(view)
 }
 
+/// Der stabile Code EINES Neustartausgangs.
+///
+/// Ein `match` ohne Sammelarm: ein vierter Ausgang in `ea-draft` bricht die
+/// Uebersetzung, statt still zu verschwinden — dieselbe Bauart wie
+/// `requirement_code` und `session::phase_literal`. Die zwei ersten Literale
+/// sind die Variantennamen; das dritte ist die BENANNTE Vorrangregel aus
+/// `ea-draft` selbst und keine Zeichenkette dieser Datei.
+const fn restart_state_code(state: RestartState) -> &'static str {
+    match state {
+        RestartState::OriginalDraftUnchanged => "OriginalDraftUnchanged",
+        RestartState::NewBlankDraft => "NewBlankDraft",
+        RestartState::PreparedFinalizationPending => {
+            ea_draft::PREPARED_FINALIZATION_BEATS_DISCARD_INTENT
+        }
+    }
+}
+
+/// Der Stand eines Verwerfens als Ansicht.
+///
+/// `complete` sagt AUSSCHLIESSLICH: der leere Entwurf steht. Ein unveraenderter
+/// Entwurf und eine liegende Abschlussmarke sind deshalb beide `false` — ein
+/// `true` hiesse dem Bediener, seine Erfassung sei fort, waehrend sie in der
+/// Ablage liegt.
+#[must_use]
+pub fn discard_view(state: RestartState) -> DiscardStateView {
+    DiscardStateView {
+        phase_code: restart_state_code(state).to_owned(),
+        complete: matches!(state, RestartState::NewBlankDraft),
+    }
+}
+
+/// Das Ergebnis EINES Verwerfensschritts als Drahtform.
+///
+/// Sie nimmt das Ergebnis und nicht den Zustand: so ist die Abbildung
+/// vollstaendig bezeugt, obwohl der Weg durch das Kommando am Sitzungstor endet
+/// (`ea_operator::OperatorSessionProof` ist ausserhalb von `ea-operator` nicht
+/// baubar) — dieselbe Lage und dieselbe Aufteilung wie bei [`draft_state_of`].
+///
+/// Ein ABGELEHNTER Kern wird hier ein Fehlschlag mit SEINEM Code und keine
+/// Antwort. Das ist die Stelle, an der dieser Pfad vom Startpfad abweicht, und
+/// zwar mit Grund: [`PendingResumeOutcomeDto`] traegt ein eigenes Feld
+/// `blocked_code` fuer die Blockade, [`DiscardStateDto`] hat keines. Ein
+/// Fehlercode in `phase_code` waere eine gebuchte Phase, die niemand gebucht
+/// hat — die Oberflaeche schriebe „Verwerfen gebucht" ueber einen Vorgang, der
+/// nicht stattgefunden hat. Die EINE Blockade, die dieser Pfad kennt, kommt
+/// deshalb als `Ok` aus dem Kern selbst: `RestartState::PreparedFinalizationPending`
+/// samt ihrem benannten Punkt.
+fn discard_state_of(
+    result: Result<RestartState, DraftError>,
+) -> Result<DiscardStateDto, CommandError> {
+    result
+        .map(|state| DiscardStateDto::from(&discard_view(state)))
+        .map_err(|error| CommandError::new(error.code()))
+}
+
+/// Der Verwerfensport EINES Wirts, mit dem Sitzungstor davor.
+///
+/// Die Reihenfolge — erst der Port nachschlagen, dann das Tor — ist eine
+/// Entscheidung und keine Nachlaessigkeit: das Nachschlagen einer `Option` ist
+/// WIRKUNGSLOS, es liest keinen Entwurf und ruft keinen Kern. Damit sind beide
+/// Abwesenheiten bezeugt statt nur die erste — anders als bei
+/// [`draft_load_core`], wo das Holen der Nutzlast selbst schon die Wirkung ist
+/// und das Tor deshalb davor stehen MUSS. Gehandelt wird auch hier erst hinter
+/// dem Tor.
+fn discard_port(
+    state: &DesktopState,
+) -> Result<&(dyn DraftDiscardPort + Send + Sync), CommandError> {
+    let port = state
+        .discard()
+        .ok_or_else(|| CommandError::new(DISCARD_UNAVAILABLE))?;
+    state
+        .session()
+        .lock()
+        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
+        .role()
+        .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
+    Ok(port)
+}
+
+/// Das Beginnen an EINEM Port.
+fn discard_begin_of(
+    port: &(dyn DraftDiscardPort + Send + Sync),
+) -> Result<DiscardStateDto, CommandError> {
+    discard_state_of(port.begin())
+}
+
+/// Die Fortsetzung an EINEM Port.
+fn discard_resume_of(
+    port: &(dyn DraftDiscardPort + Send + Sync),
+) -> Result<DiscardStateDto, CommandError> {
+    discard_state_of(port.resume())
+}
+
+/// Der Kern von [`draft_discard_begin`].
+fn discard_begin_core(state: &DesktopState) -> Result<DiscardStateDto, CommandError> {
+    discard_begin_of(discard_port(state)?)
+}
+
+/// Der Kern von [`draft_discard_resume`].
+fn discard_resume_core(state: &DesktopState) -> Result<DiscardStateDto, CommandError> {
+    discard_resume_of(discard_port(state)?)
+}
+
 /// Der Kern von [`writer_preview`].
 ///
 /// Die Reihenfolge ist die Aussage: erst der Eingabevertrag, dann der PORT. Die
@@ -899,26 +1017,47 @@ pub async fn draft_save(
     run_blocking(move || draft_save_core(&state, &incident)).await
 }
 
-/// Bucht die Verwerfensabsicht dauerhaft.
+/// Bucht die Verwerfensabsicht dauerhaft und fuehrt das Verwerfen zu Ende.
+///
+/// Der Nachweis wird dabei VERBRAUCHT: ein Verwerfen ist unwiderruflich, und
+/// ein zweites Verwerfen ist eine zweite Wiederanmeldung
+/// (`ea_draft::DiscardService::begin_discard`).
 ///
 /// # Errors
 ///
-/// [`DISCARD_UNAVAILABLE`]: `DiscardService` verlangt einen
-/// `OperatorSessionProof` und eine beobachtete Zeit, und ein Nachweis ist auf
-/// diesem Geraet nicht aufgeloest.
+/// [`DISCARD_UNAVAILABLE`] ohne aufgeloesten `ea_draft::DiscardService` — er
+/// verlangt einen `OperatorSessionProof` mit dem Zweck
+/// `ReauthPurpose::DiscardDraft`, und eine Wiederanmeldung ist auf diesem
+/// Geraet noch nicht aufgeloest; [`NO_VERIFIED_SESSION`] ohne Nachweis,
+/// [`SESSION_STATE_UNREADABLE`] bei vergiftetem Sitzungsschloss, sonst der
+/// stabile Code des Kerns — `EA-DRAFT-PREPARED-FINALIZATION-PRESENT`,
+/// `EA-DRAFT-REAUTH-PURPOSE-MISMATCH`, `EA-DRAFT-LOCK-HELD` und die uebrigen
+/// reisen unveraendert mit. Der Fehler der ABLAGE kommt auf demselben Weg: er
+/// ist ein `ea_draft::DraftError::Store` und traegt dessen Code.
 #[tauri::command]
-pub async fn draft_discard_begin() -> Result<DiscardStateDto, CommandError> {
-    run_blocking(|| Err(CommandError::new(DISCARD_UNAVAILABLE))).await
+pub async fn draft_discard_begin(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<DiscardStateDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || discard_begin_core(&state)).await
 }
 
 /// Setzt ein unterbrochenes Verwerfen fort.
+///
+/// Sie nimmt zuerst die gebuchte Absicht und dann den Neustartpfad
+/// (`crate::state::BoundDiscard::resume`). Eine liegende Abschlussmarke gewinnt
+/// dort gegen die Absicht — das ist eine ANTWORT mit dem benannten Punkt der
+/// Regel und kein Fehlschlag dieses Kommandos.
 ///
 /// # Errors
 ///
 /// Wie [`draft_discard_begin`].
 #[tauri::command]
-pub async fn draft_discard_resume() -> Result<DiscardStateDto, CommandError> {
-    run_blocking(|| Err(CommandError::new(DISCARD_UNAVAILABLE))).await
+pub async fn draft_discard_resume(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<DiscardStateDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || discard_resume_core(&state)).await
 }
 
 /// Loest eine liegende Abschlussmarke auf und meldet, wo sie steht.
@@ -1034,8 +1173,12 @@ mod tests {
         finalize_core, master_data_search_core, posture_view, preview_core, recover_pending_core,
         resume_view,
     };
+    use super::{
+        DraftError, RestartState, discard_begin_core, discard_begin_of, discard_resume_core,
+        discard_resume_of, discard_view,
+    };
     use crate::commands::NO_VERIFIED_SESSION;
-    use crate::state::{ArchiveHealthPort, SessionState, StartupRecoveryPort};
+    use crate::state::{ArchiveHealthPort, DraftDiscardPort, SessionState, StartupRecoveryPort};
 
     fn bare_state() -> DesktopState {
         DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
@@ -1709,6 +1852,206 @@ mod tests {
         assert!(
             incident.to_view().is_ok(),
             "unbekannt ohne Zahl ist gueltig"
+        );
+    }
+
+    /// Ein Verwerfensport, der AUFSCHREIBT, welcher Eingang gerufen wurde.
+    ///
+    /// Er ist auch der Grund, warum der Port [`RestartState`] liefert und nicht
+    /// `ea_draft::DiscardOutcome`: dessen Konstruktoren sind `pub(crate)`, ein
+    /// Doppel kann es ausserhalb von `ea-draft` also gar nicht geben — und ohne
+    /// Doppel bliebe jede Aussage ueber diese Grenze eine Behauptung.
+    struct FixedDiscard {
+        begin: Result<RestartState, DraftError>,
+        resume: Result<RestartState, DraftError>,
+        calls: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl FixedDiscard {
+        fn returning(
+            begin: Result<RestartState, DraftError>,
+            resume: Result<RestartState, DraftError>,
+        ) -> Self {
+            Self {
+                begin,
+                resume,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().expect("kein vergiftetes Schloss").clone()
+        }
+    }
+
+    impl DraftDiscardPort for FixedDiscard {
+        fn begin(&self) -> Result<RestartState, DraftError> {
+            self.calls
+                .lock()
+                .expect("kein vergiftetes Schloss")
+                .push("begin");
+            self.begin
+        }
+
+        fn resume(&self) -> Result<RestartState, DraftError> {
+            self.calls
+                .lock()
+                .expect("kein vergiftetes Schloss")
+                .push("resume");
+            self.resume
+        }
+    }
+
+    fn state_with_discard(
+        discard: std::sync::Arc<FixedDiscard>,
+        session: SessionState,
+    ) -> DesktopState {
+        DesktopState::new(session, None, None, None, None, None).with_discard(discard)
+    }
+
+    /// Jeder Eingang ruft SEINEN Kern — und das abgeschlossene Verwerfen ist
+    /// der leere Entwurf.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: zwei Kommandos, die denselben
+    /// Kern rufen. `draft_discard_resume` fuehrte dann ein NEUES Verwerfen
+    /// aus, statt das unterbrochene fortzusetzen — und `begin_discard`
+    /// verbraucht den Nachweis ein zweites Mal.
+    #[test]
+    fn each_discard_entrance_calls_its_own_core() {
+        let port = std::sync::Arc::new(FixedDiscard::returning(
+            Ok(RestartState::NewBlankDraft),
+            Ok(RestartState::NewBlankDraft),
+        ));
+        let begun = discard_begin_of(port.as_ref()).expect("der Port hat verworfen");
+        assert_eq!(begun.phase_code, "NewBlankDraft");
+        assert!(begun.complete, "der leere Entwurf steht");
+        assert_eq!(port.calls(), ["begin"]);
+
+        let resumed = discard_resume_of(port.as_ref()).expect("der Port hat fortgesetzt");
+        assert_eq!(resumed, begun);
+        assert_eq!(port.calls(), ["begin", "resume"]);
+    }
+
+    /// Ein UNVERAENDERTER Entwurf ist niemals ein abgeschlossenes Verwerfen.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: ein `complete: true` fuer jeden
+    /// Ausgang, den der Neustartpfad ohne Fehler liefert. Die Oberflaeche
+    /// meldete „der leere Entwurf steht", waehrend die Erfassung unangetastet
+    /// in der Ablage liegt — der Bediener hielte seine Arbeit fuer vernichtet.
+    #[test]
+    fn an_unchanged_draft_is_never_a_completed_discard() {
+        let view = discard_view(RestartState::OriginalDraftUnchanged);
+        assert_eq!(view.phase_code, "OriginalDraftUnchanged");
+        assert!(!view.complete);
+    }
+
+    /// Die Vorrangregel reist unter IHREM benannten Punkt aus `ea-draft` mit —
+    /// als Ausgang und nicht als Fehler.
+    ///
+    /// Dasselbe Muster wie beim Startpfad
+    /// (`a_refused_startup_path_becomes_a_blocked_outcome_with_its_code`): der
+    /// Kern hat das Verwerfen VERWEIGERT, weil eine Abschlussmarke liegt, und
+    /// das ist eine Blockade und kein Fehlschlag des Kommandos. Sie traegt
+    /// deshalb `complete: false` und den Namen der Regel.
+    #[test]
+    fn a_prepared_finalization_blocks_the_discard_under_its_named_rule() {
+        let port = std::sync::Arc::new(FixedDiscard::returning(
+            Ok(RestartState::NewBlankDraft),
+            Ok(RestartState::PreparedFinalizationPending),
+        ));
+        let blocked = discard_resume_of(port.as_ref()).expect("die Blockade ist die Antwort");
+        assert_eq!(
+            blocked.phase_code,
+            ea_draft::PREPARED_FINALIZATION_BEATS_DISCARD_INTENT
+        );
+        assert!(!blocked.complete);
+    }
+
+    /// Ein abgelehntes Verwerfen traegt den Code des KERNS und nicht einen
+    /// eigenen.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Grenze, die jede Ablehnung
+    /// zu `DISCARD_UNAVAILABLE` einebnet. Der Bediener saehe „kein
+    /// Verwerfensdienst", obwohl in Wahrheit die Wiederanmeldung den falschen
+    /// Zweck trug oder die Sperre jemand haelt.
+    #[test]
+    fn a_refused_discard_carries_the_code_of_the_core() {
+        for error in [
+            DraftError::LockHeld,
+            DraftError::ReauthRequired,
+            DraftError::ReauthPurposeMismatch,
+            DraftError::ReauthBindingMismatch,
+            DraftError::PreparedFinalizationPresent,
+            DraftError::NoPendingDiscard,
+        ] {
+            let port = std::sync::Arc::new(FixedDiscard::returning(Err(error), Err(error)));
+            assert_eq!(
+                discard_begin_of(port.as_ref())
+                    .expect_err("der Kern hat abgelehnt")
+                    .code,
+                error.code()
+            );
+            assert_eq!(
+                discard_resume_of(port.as_ref())
+                    .expect_err("der Kern hat abgelehnt")
+                    .code,
+                error.code()
+            );
+        }
+    }
+
+    /// Ohne verdrahteten Verwerfensdienst: eine BENANNTE Abwesenheit.
+    #[test]
+    fn without_a_discard_service_the_discard_names_its_absence() {
+        assert_eq!(
+            discard_begin_core(&bare_state())
+                .expect_err("kein Verwerfensdienst")
+                .code,
+            super::DISCARD_UNAVAILABLE
+        );
+        assert_eq!(
+            discard_resume_core(&bare_state())
+                .expect_err("kein Verwerfensdienst")
+                .code,
+            super::DISCARD_UNAVAILABLE
+        );
+    }
+
+    /// Ohne Nachweis wird NICHTS verworfen — und der Port wird dafuer nicht
+    /// einmal gerufen.
+    ///
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Grenze, die den
+    /// Verwerfensdienst ruft und sich auf dessen Frischepruefung verlaesst. Die
+    /// Rolle ist hier GESETZT und der Nachweis fehlt — genau der Zustand nach
+    /// einer Sperre des Betriebssystems (`crate::honor_session_lock`) —, und
+    /// das Verwerfen ist unwiderruflich. Die Aufrufliste ist die zweite
+    /// Haelfte: sie unterscheidet „abgelehnt, bevor gehandelt wurde" von
+    /// „gehandelt und danach abgelehnt".
+    #[test]
+    fn a_discard_without_a_session_proof_never_reaches_the_core() {
+        let port = std::sync::Arc::new(FixedDiscard::returning(
+            Ok(RestartState::NewBlankDraft),
+            Ok(RestartState::NewBlankDraft),
+        ));
+        let state = state_with_discard(
+            std::sync::Arc::clone(&port),
+            SessionState::new(Some(ea_format::OperatorRoleV1::Writer), None),
+        );
+        assert_eq!(
+            discard_begin_core(&state)
+                .expect_err("ohne Nachweis verwirft diese Grenze nichts")
+                .code,
+            NO_VERIFIED_SESSION
+        );
+        assert_eq!(
+            discard_resume_core(&state)
+                .expect_err("ohne Nachweis setzt diese Grenze nichts fort")
+                .code,
+            NO_VERIFIED_SESSION
+        );
+        assert!(
+            port.calls().is_empty(),
+            "der Verwerfensdienst wird ohne Nachweis nicht einmal gerufen"
         );
     }
 
