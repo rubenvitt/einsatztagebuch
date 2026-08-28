@@ -396,10 +396,11 @@ Belegt von `tests/ea-system-tests/tests/privacy_canaries_writer.rs::no_fachliche
 
 Der vollstaendige Lauf nach Schritt 6 des Stufe-2-Plans
 (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-2-offline-writer.md`),
-frisch ausgefuehrt am 2026-08-21 in der hier protokollierten Reihenfolge. Jedes
-Kommando lief mit `env -u RUSTUP_TOOLCHAIN`, weil die Shell `RUSTUP_TOOLCHAIN`
-auf `1.97.1` setzt und damit den Pin `1.95.0` aus `rust-toolchain.toml`
-uebersteuern wuerde; die aktive Toolchain war gemessen
+zuletzt frisch ausgefuehrt am 2026-08-28 in der hier protokollierten
+Reihenfolge, auf dem Kopf `a82b593` des Zweiges `drk-206-stufe-2-nacharbeit`.
+Jedes Kommando lief mit `env -u RUSTUP_TOOLCHAIN`, weil die Shell
+`RUSTUP_TOOLCHAIN` auf `1.98.0` setzt und damit den Pin `1.95.0` aus
+`rust-toolchain.toml` uebersteuern wuerde; die aktive Toolchain war gemessen
 `1.95.0-aarch64-apple-darwin`. `pnpm supply-chain` setzt
 `cargo install --locked cargo-deny` voraus; installiert und gemessen war
 `cargo-deny 0.20.2`. Die Zahlen sind abgelesen, nicht geschaetzt:
@@ -407,24 +408,85 @@ uebersteuern wuerde; die aktive Toolchain war gemessen
 kommt in keiner Zeile vor. Der Ausgangsstand vor Task 18 waren 122
 Testbinaries mit 930 bestandenen Tests; am Ende der Stufe 2 stand
 `cargo test --workspace --all-targets --locked` bei 125 Testbinaries mit 943
-bestandenen Tests. Nach der Fix-Welle des Abschlussreviews (siehe den Nachtrag
-unter der Tabelle) steht derselbe Lauf gemessen bei 125 Testbinaries mit 955
-bestandenen Tests — keine bestehende Zusicherung entfernt oder aufgeweicht, in
-keinem der vier Buendel. Die sechs ignorierten Tests sind der Bestand aus
-frueheren Stufen und dieser Lauf aendert nichts an ihnen.
+bestandenen Tests, nach der Fix-Welle des Abschlussreviews bei 125
+Testbinaries mit 955. Gemessen am 2026-08-28 steht derselbe Lauf bei
+127 Testbinaries mit 1005 bestandenen Tests (siehe den Nachtrag
+`Nachmessung DRK-206` unter der Tabelle) — keine bestehende Zusicherung
+entfernt oder aufgeweicht. Die sechs ignorierten Tests sind der Bestand aus
+frueheren Stufen und auch dieser Lauf aendert nichts an ihnen.
 
 | Kommando | Exitcode | Gemessenes Ergebnis | Laufzeit |
 |---|---|---|---|
-| `cargo test --locked -p ea-writer` mit den zehn `-p`-Namen der Schritt-6-Folge | 0 | 45 Testbinaries und die zehn Doctest-Ziele der zehn Pakete, 276 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 56,50 s |
-| `cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix` | 0 | 6 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 10,20 s |
-| `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` | 0 | 4 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 1,05 s |
-| `cargo test --locked -p ea-system-tests --test e2e_writer_archive` | 0 | 2 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 0,60 s |
-| `pnpm desktop:typecheck` | 0 | `tsc --noEmit` ohne eine einzige Diagnose | 1,58 s |
-| `pnpm desktop:test` | 0 | 9 Testdateien, 83 Tests bestanden, 0 fehlgeschlagen | 12,07 s |
-| `pnpm desktop:e2e` | 0 | 3 Playwright-Tests bestanden, 1 Worker, Netz abgeschaltet | 4,74 s |
-| `pnpm supply-chain` | 0 | `advisories ok, bans ok, licenses ok, sources ok`; 37 `duplicate`-Warnungen aus dem Tauri-Teilbaum, die `multiple-versions = warn` bewusst nur warnt; `cargo-deny 0.20.2` | 2,18 s |
-| `pnpm stage-gate:2` | 0 | JSON auf stdout: 16 deklarierte Abbruchpunkte, 146 Ledgerzeilen, 4 `host_evidence_rows`, `stage_two_rows_still_planned` leer, `vector_families` = `[local-audit, reports]` | 1,43 s |
-| `pnpm verify:quick` | 0 | ACHT Teilkommandos gruen, in dieser Reihenfolge: `cargo fmt --all --check`; `pnpm --dir apps/desktop build`; `pnpm desktop:typecheck` (`tsc --noEmit` ohne Diagnose); `pnpm desktop:test` (9 Testdateien, 83 Tests bestanden); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne eine einzige Warnung; `cargo test --workspace --all-targets --locked` mit 125 Testbinaries, 955 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert; `cargo test --workspace --doc --all-features --locked` mit 24 Doctest-Zielen, 93 bestanden, 0 fehlgeschlagen (darunter die `compile_fail`-Doctests aus Ruling R55); und der wasm32-Check ueber die elf Pakete der Positivliste | 610,00 s |
+| `cargo test --locked -p ea-writer` mit den zehn `-p`-Namen der Schritt-6-Folge | 0 | 47 Testbinaries und die zehn Doctest-Ziele der zehn Pakete, 321 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 94 s |
+| `cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix` | 0 | 6 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 14 s |
+| `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` | 0 | 4 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 2 s |
+| `cargo test --locked -p ea-system-tests --test e2e_writer_archive` | 0 | 2 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 2 s |
+| `pnpm desktop:typecheck` | 0 | `tsc --noEmit` ohne eine einzige Diagnose | 2 s |
+| `pnpm desktop:test` | 0 | 9 Testdateien, 83 Tests bestanden, 0 fehlgeschlagen | 12 s |
+| `pnpm desktop:e2e` | 0 | 3 Playwright-Tests bestanden, 1 Worker, Netz abgeschaltet | 6 s |
+| `pnpm supply-chain` | 0 | `advisories ok, bans ok, licenses ok, sources ok`; kein einziges `error[...]`; 37 `duplicate`-Warnungen aus dem Tauri-Teilbaum, die `multiple-versions = warn` bewusst nur warnt; `cargo-deny 0.20.2` | 3 s |
+| `pnpm stage-gate:2` | 0 | JSON auf stdout: 16 deklarierte Abbruchpunkte, 149 Ledgerzeilen, 4 `host_evidence_rows`, `stage_two_rows_still_planned` leer, `vector_families` = `[local-audit, reports]` | 2 s |
+| `pnpm verify:quick` | 0 | ACHT Teilkommandos gruen, in dieser Reihenfolge: `cargo fmt --all --check`; `pnpm --dir apps/desktop build`; `pnpm desktop:typecheck` (`tsc --noEmit` ohne Diagnose); `pnpm desktop:test` (9 Testdateien, 83 Tests bestanden); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne eine einzige Warnung; `cargo test --workspace --all-targets --locked` mit 127 Testbinaries, 1005 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert; `cargo test --workspace --doc --all-features --locked` mit 24 Ergebniszeilen ueber 22 Doctest-Ziele, 93 bestanden, 0 fehlgeschlagen (darunter die `compile_fail`-Doctests aus Ruling R55, die als zweiter Block eines Ziels laufen); und der wasm32-Check ueber die zehn Pakete der Positivliste | 125 s |
+
+Nachmessung DRK-206 (2026-08-28): die Zahlen dieser Tabelle sind auf dem Kopf
+`a82b593` des Zweiges `drk-206-stufe-2-nacharbeit` neu gemessen, nachdem die
+Nacharbeit DRK-206 (`docs/traceability/stage-2-nacharbeit-2026-08-28.md`) sie
+bewegt hat. Vorher standen hier 955 bestandene Tests und 146 Ledgerzeilen.
+Bewegt haben sie die Tasks der Nacharbeit: Task 1 `+1` in `ea-verify`, Task 2
+`+9` in `ea-writer` und `ea-draft`, Task 3 `+4`, Task 4 `+11` in `ea-desktop`,
+Task 5 `±0`. Die drei zusaetzlichen Ledgerzeilen kommen aus denselben Tasks.
+
+Diese Deltas sind ausdruecklich KEINE Rechnung, sondern eine Zuordnung: sie
+summieren sich auf `+25`, gemessen sind aber `+50` bestandene Tests und `+2`
+Testbinaries gegenueber dem Lauf vom 2026-08-21. Der Unterschied liegt nicht in
+diesem Zweig — `git diff --name-status main..HEAD` fuehrt keine einzige neu
+angelegte Testdatei, die Nacharbeit hat also kein neues Testbinary erzeugt. Die
+zwei zusaetzlichen Binaries und die restlichen Tests sind zwischen dem
+Gate-Lauf vom 2026-08-21 und dem Abzweigpunkt `42cbfaf` auf `main` gelandet.
+Autoritaet ist deshalb die GEMESSENE Endzahl 127 Testbinaries mit 1005
+bestandenen Tests, nicht die fortgeschriebene Reihe — dieselbe Konvention, die
+der Abschnitt `N4` weiter unten schon festhaelt.
+
+Ein Kommando war auf dem ersten Anlauf dieser Nachmessung rot, und zwar ohne
+Zutun des Baumes: `pnpm supply-chain` meldete
+`error[yanked]: detected yanked crate chacha20 0.10.1` und
+`advisories FAILED`. `deny.toml` fuehrt `[advisories] yanked = "deny"`, und
+crates.io hatte `chacha20 0.10.1` nach dem 2026-08-21 zurueckgezogen; dieselbe
+Version stand unveraendert auch auf `main`. Aufgeloest wurde das mit dem
+Patchsprung `chacha20 0.10.1 -> 0.10.2` (Commit `a82b593`), der genau einen
+Eintrag der Sperrdatei bewegt — Version und Pruefsumme, sonst nichts. Der
+ADR-0001-Pin `chacha20poly1305 = "=0.11.0"` bleibt unberuehrt; `chacha20` haengt
+transitiv darunter. Verhaltensnachweis ist
+`tests/ea-system-tests/tests/conformance_golden_vectors.rs`, gefahren als
+`cargo test --locked -p ea-system-tests --test conformance_golden_vectors`,
+Exitcode 0, 7 bestanden: die goldenen Vektoren rechnen nach dem Sprung
+byteidentisch. Danach meldet `pnpm supply-chain` wieder
+`advisories ok, bans ok, licenses ok, sources ok` und kein einziges `error`.
+
+Nach dem Sprung wurden die Kommandos 1 bis 4, 8, 9 und 10 auf `a82b593`
+VOLLSTAENDIG NEU gefahren; ihre abgelesenen Zahlen sind mit denen vor dem
+Sprung identisch. Die Zeilen `pnpm desktop:typecheck`, `pnpm desktop:test` und
+`pnpm desktop:e2e` tragen die Zahlen des Laufs von demselben Tag VOR dem
+Sprung: keines der drei Kommandos liest `Cargo.lock` — sie fahren `tsc`,
+Vitest und Playwright.
+
+Zwei Angaben der Tabelle waren beim Nachmessen sachlich falsch und sind
+richtiggestellt, ohne dass sich ein Kommando geaendert haette. Erstens faehrt
+`cargo test --workspace --doc --all-features --locked` 22 `Doc-tests`-Ziele mit
+24 Ergebniszeilen und nicht 24 Ziele: `ea_key_provider` und `ea_operator` fahren
+ihre `compile_fail`-Doctests als zweiten Block desselben Ziels. Zweitens zaehlt
+die wasm32-Positivliste ZEHN Pakete und nicht elf — nachgezaehlt an den
+`-p`-Namen des wasm32-Blocks von `verify_quick_commands()`; dieselbe Zahl fuehrt
+`docs/traceability/stage-1-gate.md:165` seit Stufe 1 und ebenso der Kommentar in
+`tools/xtask/tests/stage_gate.rs:960`.
+
+Die Laufzeiten dieser Nachmessung sind volle Wanduhrsekunden und keine
+Harnesszeiten; das Kriterium bleibt der Exitcode und das abgelesene Ergebnis.
+Die Umgebung hat sich seit dem 2026-08-21 in einem Punkt verschoben, der im
+Vorspann steht: die Shell setzt `RUSTUP_TOOLCHAIN` inzwischen auf `1.98.0`
+statt `1.97.1`, weshalb `env -u RUSTUP_TOOLCHAIN` vor jedem Kommando noch
+noetiger ist als vorher; die aktive Toolchain bleibt gemessen
+`1.95.0-aarch64-apple-darwin`.
 
 Ablauf der Messung, damit sie nachvollziehbar bleibt: der Test
 `stage_two_gate_report_records_the_measured_full_gate_run` entstand VOR der
