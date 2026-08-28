@@ -630,13 +630,13 @@ Expected: FAIL because neither an atomic commit service nor a Receipt builder ex
 
 - [ ] **Step 3: Implement the nine-step server commit transaction**
 
-The order of the following paragraph maps the nine server steps of design.md §13.3 (:1534-1542) one to one. Drawing in the Receipt construction (steps 5 and 7) renumbers, merges or drops NO step; the numbering stays nine positions long. No task of this plan offsets these nine steps against the thirteen steps of the Writer finalization in design.md §9.3 (:446-460), which is a different transaction.
+The order of the following paragraph maps the nine server steps of design.md §13.3 (:1536-1544) one to one. Drawing in the Receipt construction (steps 5 and 7) renumbers, merges or drops NO step; the numbering stays nine positions long. No task of this plan offsets these nine steps against the thirteen steps of the Writer finalization in design.md §9.3 (:448-460), which is a different transaction.
 
 Stream and limit each object to a temporary key while hashing; parse/verify Entry, object hash, Writer, suite, Registry line, plan, each grant signature/context, exactly one Recovery, and every active Reader. Put verified bytes content-addressed with byte-conflict detection. Lock the chain head in PostgreSQL; choose the highest server-known applicable Registry head for `acceptedAtServer` and sequence; reject an older bound head. Accept only current sequence + 1, exact predecessor, and authorized Writer. Build Receipt once, persist exact Receipt bytes, then atomically make Entry, grants, head, and Receipt hash visible. Read the Receipt back by hash and verify exact bytes before response.
 
 Sort duplicate-free grant hashes bytewise. Compute `acceptedAtServer = max(current server UTC, predecessor acceptedAtServer)`. Standard policy sets `evidenceDueAt = null`; Evidence Grade sets exact checked addition `acceptedAtServer + policy.evidenceMaxDelayMs`. Bind policy hash, Registry head, plan hash, Entry/object/predecessor hashes, server thumbprint/certificate, and empty critical extensions. Sign the Receipt digest with capability `serverReceipt` and persist exact bytes in the same commit. The Registry-head selection of step 5 binds the head applicable for exactly this time and sequence; it computes no second acceptance time, and acceptance time, due time and signature are never recomputed for one commit.
 
-Only the tuple `(entryHash, entryObjectHash, initialGrantPlanHash, sorted initialGrant objectHashes)` is idempotent — this is exactly `EntryCommitIdentity` from the task „Normative Sync Framing and RFC-9421 Request Verification“, so this task consumes the existing enumeration and derives no active recipient set of its own from database rows. Same Entry hash with different bytes/grants, same sequence with different Entry, wrong predecessor, or wrong Writer creates a cleartext-free Security Event. Pre-commit Object Store artifacts remain invisible and are reverified before adoption or quarantine.
+Only the tuple `(entryHash, entryObjectHash, initialGrantPlanHash, sorted initialGrant objectHashes)` is idempotent — this is exactly `EntryCommitIdentity` from the task „Normative Sync Framing and RFC-9421 Request Verification“. This task consumes the enumeration of `SelectedRegistryHead::active_certificates` and derives no active recipient set of its own from database rows. Same Entry hash with different bytes/grants, same sequence with different Entry, wrong predecessor, or wrong Writer creates a cleartext-free Security Event. Pre-commit Object Store artifacts remain invisible and are reverified before adoption or quarantine.
 
 The server evaluates `RegistrySelectionOutcome::Selected` and `::Advanced`, but persists no `Advanced` transition as an authority extension of its own — it indexes exclusively verified `.etb` bytes; `PendingFuture` leads to `409` with `required-registry-version`.
 
@@ -644,7 +644,7 @@ The server evaluates `RegistrySelectionOutcome::Selected` and `::Advanced`, but 
 
 - [ ] **Step 4: Run real-service concurrency and failure tests**
 
-Run: `cargo test --locked -p ea-sync-server --test receipt_golden && cargo test --locked -p einsatzarchiv-server --test entry_commit_api --test commit_failures -- --test-threads=1`
+Run: `cargo test --locked -p ea-sync-server --test commit_service --test receipt_golden && cargo test --locked -p einsatzarchiv-server --test entry_commit_api --test commit_failures -- --test-threads=1`
 
 Expected: PASS under parallel commits, database aborts, object-store faults, response loss, and retry; a successful replay delivers byte-identical `.esr` bytes; a `TrustError::StateConflict` out of the Registry selection under parallel load is its own scenario and leaves no partially visible commit; no failure exposes a head or accepted Receipt without the full grant set.
 
@@ -662,7 +662,9 @@ git commit -m "feat(sync): atomically accept entries, grants, and receipts"
 - Consume existing unchanged: `vectors/evidence/v1/`
 - Create: `crates/ea-sync-server/src/checkpoint.rs`
 - Create: `apps/server/src/http/checkpoints.rs`
+- Modify: `apps/server/src/router.rs`
 - Test: `crates/ea-sync-server/tests/checkpoint.rs`
+- Test: `apps/server/tests/checkpoint_api.rs`
 
 **Interfaces:**
 - Consumes: `CommitOutcome` with exact `esr-v1` bytes from the task „Atomic Entry Commit, Idempotent Replay, and Immutable Receipts“, committed head, policy, `ServerClock`, server checkpoint signer, and the frozen receipts/evidence vector families read-only.
@@ -693,9 +695,9 @@ async fn commit_response_carries_checkpoint_bytes_and_divergent_predecessors_are
 
 - [ ] **Step 2: Run tests and verify the checkpoint chain is absent**
 
-Run: `cargo test --locked -p ea-sync-server --test checkpoint`
+Run: `cargo test --locked -p ea-sync-server --test checkpoint && cargo test --locked -p einsatzarchiv-server --test checkpoint_api`
 
-Expected: FAIL because the checkpoint builder and the checkpoint chain do not exist.
+Expected: FAIL because the checkpoint builder, the checkpoint chain, and the checkpoint route do not exist.
 
 - [ ] **Step 3: Implement standard checkpoint bytes and the checkpoint chain exactly once**
 
@@ -705,7 +707,7 @@ The seven frozen Receipt vectors and the eight Evidence vectors are consumed exc
 
 - [ ] **Step 4: Run checkpoint-chain and divergence tests**
 
-Run: `cargo test --locked -p ea-sync-server --test checkpoint`
+Run: `cargo test --locked -p ea-sync-server --test checkpoint && cargo test --locked -p einsatzarchiv-server --test checkpoint_api`
 
 Expected: PASS; every checkpoint binds its predecessor through `previous-evidence-hash`, the covered range follows the committed head, divergent checkpoint predecessors become Security Events, and no historical Receipt or standard checkpoint byte changes.
 
