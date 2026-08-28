@@ -1508,11 +1508,16 @@ Das Einsatzarchiv-Profil deckt zwingend ab:
 
 Der Server stellt über einen rate-limitierten Challenge-Endpunkt Single-Use-Nonces und seine aktuelle Zeit bereit. Nonces und Request-IDs werden nur einmal akzeptiert. Falsche Gerätezeit darf nicht durch ein unbegrenzt großes Replay-Fenster kompensiert werden.
 
+**Reader-Vorbehalt.** Neben dem rate-limitierten Challenge-Endpunkt gilt genau eine weitere Signaturausnahme: `POST /v1/vault-blobs/retrievals` trägt keine RFC-9421-Signatur (`2026-08-15-einsatzarchiv-web-reader-design.md` §6.4.1). Der Reader-Signaturschlüssel liegt im Vault, der ohne den abgerufenen Wrapped-Blob nicht entsperrt werden kann; alleinige Autorität ist deshalb eine WebAuthn-Assertion über ein auffindbares Credential dieses Readers, und der Server gibt ausschließlich die zu dieser `subjectId` gehörenden opaken Chiffrate heraus. Die Registrierung dieser Credentials und das Ablegen des Blobs sind selbst regulär signiert; ab dem entsperrten Vault läuft jede weitere Anfrage RFC-9421-signiert. Für Writer, Administration und CLI entsteht keine Ausnahme.
+
 ### 13.2 API
 
 ```text
 POST /v1/auth/challenges
 POST /v1/device-registrations
+POST /v1/webauthn-credentials
+PUT  /v1/vault-blobs
+POST /v1/vault-blobs/retrievals
 GET  /v1/trust/registry?afterVersion={n}
 POST /v1/trust/events
 POST /v1/chains/{chainId}/entry-commits

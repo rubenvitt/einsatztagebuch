@@ -426,6 +426,14 @@ spätere Crate-Änderungen die Browser-Fähigkeit nicht unbemerkt zerstören.
    Administration und CLI.
 5. **Neue Trust-Objektfamilie** `webBundleRelease` nach Abschnitt 4.2.
 6. **Neues Escrow-Objekt** nach Abschnitt 7.
+7. **Design §13.1** kennt heute nur den rate-limitierten Challenge-Endpunkt als
+   Signaturausnahme. Abschnitt 6.4.1 fügt genau eine zweite hinzu:
+   `POST /v1/vault-blobs/retrievals` trägt keine RFC-9421-Signatur, weil der
+   Reader-Signaturschlüssel im noch verschlossenen Vault liegt; alleinige
+   Autorität ist die WebAuthn-Assertion über ein auffindbares Credential dieses
+   Readers. Die drei zugehörigen Endpunkte `POST /v1/webauthn-credentials`,
+   `PUT /v1/vault-blobs` und `POST /v1/vault-blobs/retrievals` ergänzen die
+   API-Liste von Design §13.2; die ersten beiden bleiben regulär signiert.
 
 ## 12. Auswirkungen auf die Stufenpläne
 
