@@ -189,15 +189,41 @@ impl PreparedTransactionV1 {
     ///    ergaebe einen Eintrag, den kein Recovery-Empfaenger je oeffnet.
     /// 3. Jeder Grant liegt unter SEINEM Objekthash — derselbe Hash, aus dem
     ///    [`Self::targets`] die Zieladresse bildet.
-    /// 4. Die Eintragsbytes tragen den genannten Objekthash und den genannten
-    ///    `entryHash`.
+    /// 4. Die Eintragsbytes tragen den genannten Objekthash, den genannten
+    ///    `entryHash` UND die genannte Sequenz.
     /// 5. Der `grant_plan_hash` der Marke ist der `initialGrantPlanHash`, den
     ///    das `.eip` SIGNIERT.
+    ///
+    /// Die Sequenz gehoert ausdruecklich zu Aussage 4 und nicht zu Aussage 1:
+    /// sie ist der EINZIGE Wert der Marke, den nichts ausserhalb ihrer selbst
+    /// belegt, also spielt das Rueckkodieren einen manipulierten Wert
+    /// bytegleich wieder ab. Erst das signierte `manifestCore` ist eine zweite
+    /// Quelle — und aus genau diesem Feld bildet [`Self::targets`] den
+    /// Zielnamen des `.eip`.
+    ///
+    /// # Warum nur die WIEDERAUFNAHME sie ruft und nicht auch der glatte Lauf
+    ///
+    /// Nicht, weil dort die exakten Bytes fehlten — Schritt 8 bildet sie mit
+    /// `transaction.encode()`. Sondern weil die Nachrechnung dort
+    /// TAUTOLOGISCH waere: die Marke und das `manifestCore` nehmen ihren
+    /// Plan-Hash aus DEMSELBEN `state.grant_plan`, `entryHash` und Objekthash
+    /// entstehen aus denselben Bytes, und ein Vergleich zweier Kopien einer
+    /// Quelle ist keine Messung. Erst nach einem Neustart ist die Marke eine
+    /// FREMDE Eingabe aus der Ablage, und erst dann sagt der Vergleich etwas.
     ///
     /// # Errors
     ///
     /// [`WriterError::PreparedFinalizationInconsistent`] fuer jede der fuenf
     /// Aussagen — fail-closed und ohne Teilausgabe.
+    ///
+    /// Aussage 1 kodiert dafuer zurueck, und [`Self::encode`] hat eine eigene,
+    /// ENGERE Fehlermenge ([`WriterError::PreparedFinalizationUnreadable`],
+    /// [`WriterError::LocalRng`]). Sie wird UNVERAENDERT durchgereicht und
+    /// nicht auf den Code oben abgebildet: „diese Marke laesst sich gar nicht
+    /// kodieren" ist eine andere Aussage als „sie widerspricht sich selbst",
+    /// und ein umetikettierter Code verschwiege sie. Erreichbar ist sie hier
+    /// ohnehin nicht — der Wert ist gerade erst aus denselben Bytes dekodiert
+    /// worden —, und genau deshalb wird sie benannt statt verschluckt.
     pub(crate) fn verify(&self, exact: &[u8]) -> Result<(), WriterError> {
         let inconsistent = || WriterError::PreparedFinalizationInconsistent;
         if self.encode()? != exact {
@@ -224,6 +250,9 @@ impl PreparedTransactionV1 {
             return Err(inconsistent());
         }
         if entry.value().entry_hash().as_bytes() != self.entry_hash.as_bytes() {
+            return Err(inconsistent());
+        }
+        if entry.value().manifest().fields().chain_sequence != self.sequence {
             return Err(inconsistent());
         }
         if entry

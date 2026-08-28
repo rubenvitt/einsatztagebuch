@@ -526,8 +526,6 @@ impl core::fmt::Debug for ReachedState {
 }
 
 impl WriterService<'_> {
-    /// Die dreizehn Schritte, in der einzigen konstruierbaren Reihenfolge.
-    #[allow(clippy::too_many_lines)]
     /// Laeuft die Reihenfolge und GIBT die beanspruchte Einsatznummer wieder
     /// frei, wenn der Lauf vor der unwiderruflichen Grenze scheitert.
     ///
@@ -572,12 +570,13 @@ impl WriterService<'_> {
         Err(error)
     }
 
-    /// Der Rumpf der Reihenfolge.
+    /// Die dreizehn Schritte, in der einzigen konstruierbaren Reihenfolge.
     ///
     /// `claimed` ist der Kanal nach aussen: er traegt die dauerhaft
     /// beanspruchte Einsatznummer, solange sie sich noch zuruecknehmen laesst,
     /// und wird geleert, sobald die unwiderrufliche Grenze ueberschritten oder
     /// UNGEKLAERT ist.
+    #[allow(clippy::too_many_lines)]
     fn run_claiming(
         &self,
         proof: &OperatorSessionProof,

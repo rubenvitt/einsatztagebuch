@@ -1144,3 +1144,90 @@ fn a_finalization_that_fails_after_the_boundary_keeps_the_incident_number() {
         "hinter der Grenze traegt ein veroeffentlichter Eintrag die Nummer"
     );
 }
+
+/// Eine Marke, deren SEQUENZ nicht die des signierten `manifestCore` ist, wird
+/// fail-closed abgewiesen.
+///
+/// # Warum das eigene Byte-Nachrechnen dieses Feld NICHT erwischt
+///
+/// `sequence` ist der einzige Wert der Marke, den nichts ausserhalb ihrer
+/// selbst belegte. Das Rueckkodieren spielt den GESPEICHERTEN Wert wieder ab,
+/// also kodiert sich auch eine manipulierte Sequenz bytegleich zurueck und
+/// besteht die erste Aussage; Objekthash, `entryHash` und Grant-Plan-Hash
+/// hangen an den eingebetteten Eintragsbytes und bleiben unberuehrt.
+///
+/// # Was daran gefaehrlich ist
+///
+/// Aus GENAU diesem Feld bildet [`PreparedTransactionV1::targets`] den
+/// Zielnamen `entries/<12-stellige-Sequenz>_<entry-hash>.eip`, und
+/// `RecoveryOutcome::CommittedFromPreparedBytes` meldet ihn nach aussen. Ohne
+/// den Vergleich veroeffentlicht die Wiederaufnahme hinter der unwiderruflichen
+/// Grenze ein `.eip` unter einer Sequenz, die sein eigenes signiertes
+/// `manifestCore` NICHT nennt — der Dateiname und die Kette sagten dann
+/// Verschiedenes, und `design.md` §9.4 verlangt, dass ein Neustart „exakt die
+/// vollstaendig geprueften Staging-Bytes" fertigstellt.
+///
+/// # Der gemessene Zustand OHNE diesen Vergleich
+///
+/// Nicht bloss ein falscher Name, sondern ein DAUERHAFTER Halbzustand.
+/// NACHGEMESSEN am Stand vor dieser Zusicherung: die Wiederaufnahme
+/// veroeffentlicht alle drei Grants — deren Zieladressen tragen den
+/// `entryHash` und NICHT die Sequenz, also stimmen sie weiterhin —, scheitert
+/// dann am Rename des `.eip`, weil unter dem manipulierten Sequenznamen keine
+/// Staging-Datei liegt, und meldet `EA-ARCHIVE-IO`. Zurueck bleiben
+/// veroeffentlichte Grants ohne committed `.eip` — nach `design.md` §9.4
+/// „keine gueltigen Freigaben" — und eine Marke, die JEDER weitere Anlauf
+/// genauso wieder trifft. Das Geraet ist damit fest, und die Meldung nennt ein
+/// MEDIUM, wo eine Manipulation vorliegt.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR: faellt der Sequenzvergleich weg, meldet
+/// dieser Lauf `EA-ARCHIVE-IO` statt des Codes unten, und die Zeile ueber
+/// `published_grant_paths` faellt mit drei veroeffentlichten Grants.
+#[test]
+fn a_marker_whose_sequence_contradicts_the_entry_is_refused() {
+    let mut harness = WriterHarness::with_incident();
+    let interrupted = harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterAbsenceConfirmation)
+        .expect("der Abbruch hinter der Grenze muss erreichbar sein");
+    assert_eq!(
+        interrupted
+            .prepared()
+            .expect("hinter der Grenze liegt eine Marke")
+            .sequence()
+            .get(),
+        0,
+        "die Fixture beginnt auf leerem Bestand bei Sequenz 0"
+    );
+
+    let mut bytes = prepared_marker_bytes(&harness);
+    // Die drei ersten Bytes sind das Feld der Stelligkeit sieben, die Fassung
+    // und die Sequenz — jede als kleinstmoegliche CBOR-Kodierung. Die
+    // Zusicherung ist die Positivkontrolle des Griffs: trifft sie nicht mehr,
+    // manipulierte die Zeile darunter ein anderes Feld und maesse nichts.
+    assert_eq!(
+        &bytes[..3],
+        &[0x87, 0x01, 0x00],
+        "array(7), Markenfassung 1, Sequenz 0"
+    );
+    bytes[2] = 0x09;
+    put_prepared_marker(&harness, bytes);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service.recover_pending().expect_err(
+        "eine Marke, deren Sequenz ihr eigenes .eip nicht nennt, MUSS abgewiesen werden",
+    );
+    assert_eq!(
+        refused.code(),
+        "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+    );
+    assert!(
+        harness.published_entry_paths().is_empty(),
+        "unter KEINEM Sequenznamen darf etwas liegen"
+    );
+    // Die SCHAERFSTE Zeile dieses Zeugen — siehe die Messung im Kopf.
+    assert!(
+        harness.published_grant_paths().is_empty(),
+        "die Grants liegen VOR dem Eintrag: ohne den Vergleich sind sie schon veroeffentlicht"
+    );
+}
