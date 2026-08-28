@@ -52,3 +52,34 @@ fn replacing_the_draft_with_a_blank_leaves_exactly_one_empty_draft() {
     assert_eq!(harness.active_draft_row_count(), 1);
     assert_eq!(harness.repo.load_or_create().unwrap().notes(), "");
 }
+
+/// Der ENTWURFSKLARTEXT wird beim Fallenlassen genullt.
+///
+/// Ein Compile-Zeuge, und das ist die einzige ehrliche Bauart: nach einem
+/// `drop` ist der Speicher freigegeben, und ihn in sicherem Rust noch einmal zu
+/// lesen ginge nicht. Was sich BELEGEN laesst, ist die Zusage des Typs — und
+/// sie ist keine Formalie, sondern genau das, was `design.md`:456 fuer Schritt 9
+/// verlangt („fachlichen UI-Zustand leeren"): [`ea_draft::Draft`] haelt den
+/// einzigen Entwurfsklartext dieses Bauwerks, und Schritt 9 der Finalisierung
+/// reicht ihn an `save` weiter, das ihn am Ende seines Rumpfes fallen laesst.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR: verschwindet `ZeroizeOnDrop` von
+/// [`ea_draft::Draft`], uebersetzt diese Datei nicht mehr.
+#[test]
+fn the_draft_plaintext_zeroizes_itself_when_it_is_dropped() {
+    const fn requires_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    requires_zeroize_on_drop::<ea_draft::Draft>();
+
+    // Und der Ersatztext laesst den alten Puffer nicht stehen: `with_notes`
+    // nullt ihn, bevor es ihn ersetzt. Messbar ist davon der ERHALT der
+    // uebrigen Felder — der Zeuge fuer das Nullen selbst ist die Zeile
+    // darueber.
+    let harness = DraftHarness::new();
+    let draft = harness.repo.load_or_create().unwrap();
+    let draft_id = draft.draft_id().as_bytes().to_vec();
+    let revision = draft.revision();
+    let replaced = draft.with_notes("CANARY-DRAFT-REPLACED");
+    assert_eq!(replaced.notes(), "CANARY-DRAFT-REPLACED");
+    assert_eq!(replaced.draft_id().as_bytes().to_vec(), draft_id);
+    assert_eq!(replaced.revision(), revision);
+}

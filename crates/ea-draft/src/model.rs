@@ -9,6 +9,7 @@ use ea_crypto::CryptoError;
 use ea_key_provider::KeyError;
 use ea_local_store::StoreError;
 use ea_types::Id16;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Ein Fehlschlag an der Entwurfsgrenze.
 ///
@@ -141,9 +142,24 @@ impl From<StoreError> for DraftError {
 ///
 /// Er traegt die Fassung, gegen die er gelesen wurde. Genau daran entscheidet
 /// [`crate::DraftRepository::save`], ob er noch der aktuelle ist.
-#[derive(Clone, Eq, PartialEq)]
+///
+/// # Warum er sich selbst nullt
+///
+/// `notes` ist der EINE fachliche Klartext, den diese Crate im Prozessspeicher
+/// haelt — alles andere reist verschluesselt. `design.md`:456 verlangt fuer
+/// Schritt 9 der Finalisierung ausdruecklich, „fachlichen UI-Zustand zu
+/// leeren", und ein Serialisierungspuffer allein ist dieser Zustand nicht: der
+/// Entwurfstext liegt VOR dem Puffer und ueberlebte ihn. [`ZeroizeOnDrop`]
+/// macht das Nullen zur Eigenschaft des TYPS und damit unabhaengig davon, ob
+/// eine einzelne Aufrufstelle daran denkt.
+///
+/// `draft_id` und `revision` sind ausgenommen: sie sind eine nichtsprechende
+/// Kennung und ein Zaehler, kein Inhalt.
+#[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
 pub struct Draft {
+    #[zeroize(skip)]
     draft_id: Id16,
+    #[zeroize(skip)]
     revision: u64,
     notes: String,
 }
@@ -182,12 +198,17 @@ impl Draft {
     /// daran nichts. Wuerde sie hier mitwandern, koennte eine zweite
     /// Autospeicherung den Vergleich-und-Setze-Schritt bestehen und den
     /// Gewinner ueberschreiben.
+    ///
+    /// Der ALTE Text wird dabei genullt und nicht bloss fallen gelassen: die
+    /// Struktur-Update-Schreibweise `..self` ist an einem Typ mit `Drop` ohnehin
+    /// nicht mehr moeglich, und ein stilles `self.notes = neu` liesse den alten
+    /// Puffer als Rest im Prozessspeicher stehen — genau das, was
+    /// [`ZeroizeOnDrop`] am Typ verhindert.
     #[must_use]
-    pub fn with_notes(self, notes: impl Into<String>) -> Self {
-        Self {
-            notes: notes.into(),
-            ..self
-        }
+    pub fn with_notes(mut self, notes: impl Into<String>) -> Self {
+        self.notes.zeroize();
+        self.notes = notes.into();
+        self
     }
 }
 

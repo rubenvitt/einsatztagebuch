@@ -53,6 +53,11 @@ sha2.workspace = true
 # NFC-Normalisierung der Einsatznummer VOR dem Registerschluessel, damit kein
 # Aufrufer den Schluessel mit einer zerlegten Form aufweichen kann.
 unicode-normalization.workspace = true
+# `ZeroizeOnDrop` am Entwurfsklartext. Dieselbe Fassung wie in `ea-crypto`, das
+# `SecretBytes` und `SecretVec` damit traegt: der Entwurfstext ist der EINE
+# fachliche Klartext, den diese Crate im Prozessspeicher haelt, und er darf ihn
+# nicht ueberleben.
+zeroize.workspace = true
 
 [features]
 # Die Naht der Fehlerinjektion — `DiscardService::begin_discard_interrupted_at`

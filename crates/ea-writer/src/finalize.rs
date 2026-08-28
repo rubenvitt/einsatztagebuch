@@ -929,6 +929,16 @@ impl WriterService<'_> {
         drop(cek);
         drop(nonce);
         state.draft_record_bytes.zeroize();
+        // Der SERIALISIERUNGSPUFFER ist damit genullt — der KLARTEXT noch
+        // nicht. `design.md`:456 verlangt beides („CEK und Serialisierungspuffer
+        // bestmoeglich nullen, fachlichen UI-Zustand leeren"), und der zweite
+        // Teil liegt nicht hier, sondern am TYP: [`ea_draft::Draft`] traegt
+        // `ZeroizeOnDrop` (`crates/ea-draft/src/model.rs`), also nullt der
+        // geladene Entwurf unten seinen Text, sobald `save` ihn am Ende seines
+        // Rumpfes fallen laesst. Ein `with_notes("")` an dieser Stelle waere
+        // KEINE Verbesserung, sondern ein Datenverlust: `save` schriebe den
+        // leeren Text dauerhaft, und scheiterte danach das Loeschen des
+        // `draftDEK`, stellte die Wiederaufnahme einen LEEREN Entwurf her.
         // Der Griff auf den `draftDEK` verlangt einen `SavedDraft`, und dessen
         // Konstruktor ist in `ea-draft` `pub(crate)`. Der EINZIGE Weg von
         // aussen ist eine Vergleich-und-Setze-Speicherung — und die ist hier
