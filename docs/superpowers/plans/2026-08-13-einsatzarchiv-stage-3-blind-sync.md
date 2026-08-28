@@ -8,31 +8,42 @@
 
 **Tech Stack:** Shared Stage 1/2 Rust crates, Axum, TLS 1.3, RFC 9421 HTTP Message Signatures, RFC 9530 Digest Fields, PostgreSQL, SQL migrations, S3-compatible object storage, Tokio, OCI Linux `amd64`, integration tests against real PostgreSQL and S3-compatible services.
 
+**Task numbering:** This plan carries twelve tasks. Former numbers map to new ones as 1→3, 2→4, 3→5, 4→6, 5→7, 6→8, 7→10, 8→12; tasks 1, 2, 9, and 11 are new. Every cross-reference in this plan cites a task by its title, never by its number.
+
 ## Global Constraints
 
 - Die Schlüsselwörter **MUSS**, **DARF NICHT**, **SOLL**, **SOLL NICHT** und **DARF** sind normativ zu verstehen. Ein Release darf von einer MUSS-Anforderung nicht abweichen. Eine Abweichung von SOLL erfordert eine dokumentierte Sicherheits- oder Betriebsbegründung.
-- **Merker Web-Reader**, `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §12: neue Fläche für Bundle-Auslieferung und -Pinning, Ablage der Wrapped-Vault-Blobs, CORS und RFC-9421-Request-Signatur aus dem Browser; dazu §6.4.1, WebAuthn-Credentials am Sync-Server mit der pseudonymen `subjectId` als `userHandle`. Die acht bestehenden Tasks bleiben, die API-Flächen aus Task 6 ändern sich nicht. Das Web-Bundle MUSS von einem **vom Sync-Server getrennten Origin** ausgeliefert werden (§4.1); der Sync-Server ist kein Bestandteil des Vertrauenspfades für ausgeführten Code. Die Trust-Objektfamilie `webBundleRelease` (§4.2) ist eine v1.1-Erweiterung und wird hier eingeführt — nicht in Stage 1.
+- **Merker Web-Reader**, `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §12: Ablage und Abruf der Wrapped-Vault-Blobs, WebAuthn-Credentials, CORS und RFC-9421-Request-Signatur aus dem Browser (Bundle-Auslieferung und -Pinning entfallen als Sync-Server-Fläche: web-reader-design.md §4.1, :70-75, verbietet sie dort; das Bundle kommt von einem getrennten Origin.); dazu §6.4.1, WebAuthn-Credentials am Sync-Server mit der pseudonymen `subjectId` als `userHandle`. Die bestehenden Tasks werden nicht umgeschrieben; die neue Fläche entsteht additiv im Task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS“. Die bereits gebauten Lese- und Verwaltungsflächen bleiben unverändert, die Endpunktmenge wächst um genau drei Einträge. Das Web-Bundle MUSS von einem **vom Sync-Server getrennten Origin** ausgeliefert werden (§4.1); der Sync-Server ist kein Bestandteil des Vertrauenspfades für ausgeführten Code. Die Trust-Objektfamilie `webBundleRelease` (§4.2; die Stufenzuordnung steht in §1, :23-25 — §12, :443-446, nennt für Stufe 3 nur Flächen und nicht die Objektfamilie) ist eine v1.1-Erweiterung. Stufe 3 liefert den Umfang aus docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md:1016 — Codec, CDDL-Arm und Signaturprofil — und friert die Vektoren der Familie in dieser Stufe permanent ein. Gegenstand dieser Stufe sind ausschließlich die Wrapped-Vault-Blobs nach §6.4/§6.4.1. Das Escrow-Chiffrat nach §7.3 bleibt Stufe 5 und wird hier nicht berührt; der Ablageort dafür rückt in dieser Stufe nicht vor.
 - Microsoft Access is outside scope; **Access Grant** is only a signed CEK envelope.
 - Non-goals are fixed: no live incident log, dispatch/alarm/control-center integration, patient record or identifying patient data, concurrent offline Writers, normal-app mutation/deletion of finalized content, AI summarization/OCR, public links, server-side content search, unprofiled network paths, qualified personal electronic signature, TR-ESOR certification claim, screenshot/transcription prevention, or cryptographic recall of already decrypted data.
 - Product invariants apply verbatim: exactly one active Writer; never-reused predecessor-bound sequences; immutable `.eip` bytes except whole-object authorized replacement by `.eds`; amendment-only corrections; one fresh CEK/ciphertext; one signed grant per recipient; exactly one active Recovery grant before commit; no Reader/Recovery/HGA/Approver private key on Writer; no retained CEK/decryptable draft key; no server decrypt/grant key; server-independent archive verification; independent schema/format/suite versions with old bytes unchanged; separate Sync/verification/Evidence/Entry/destruction statuses; no legal overclaim from a hash chain; every active Reader initially granted; external-anchor recovery; and only Root-signed OS/device-bound operator snapshots.
 - Exactly one active Writer exists. Sequence increases by one and binds the predecessor. The server never “repairs” a fork or conflicting replay.
 - Final `.eip` bytes remain immutable. Entry plus exact initial grant plan, one Recovery grant, and every active Reader grant form one atomic acceptance unit.
-- The server holds no Reader/Recovery/HGA/Approver private key and cannot decrypt content, create grants, sign Writer packages, or add Registry authority.
+- The server holds no usable Reader/Recovery/HGA/Approver private key and cannot decrypt content, create grants, sign Writer packages, or add Registry authority. Wrapped Reader vault blobs stored server-side are opaque ciphertext that is worthless without an authenticator assertion; the server knows neither vault key nor PRF output (web-reader-design.md §6.4, §6.4.1).
 - The local Writer archive commit always precedes upload. Server or TSA outage never invalidates local finalization.
 - Server technical databases/lists are derived indexes, not content or Trust authority. Exact archived bytes and Root-signed Trust objects remain authoritative.
 - Schema/format/suite versions and Stage 1 vectors stay immutable; server uses the same Rust parser/crypto/trust crates rather than a second implementation.
+- Reichweite des Stufe-1-Freeze, gemessen und verbindlich für diese Stufe: Der einzige stufenübergreifend permanente Freeze ist docs/traceability/stage-1-gate.md Abschnitt 5 (:114-143), und er steht auf den BYTES unter `vectors/`, nicht auf der Grammatik. Die Verbotslisten in docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md:43 und docs/superpowers/plans/2026-08-16-einsatzarchiv-task-9-phase-a-report-and-gate-order.md:44 binden wörtlich nur ihren jeweils eigenen Plan; eine additive Erweiterung von `schemas/archive/v1/trust.cddl` ist dieser Stufe nicht verboten. Der wirksame Schutz der reservierten Literale sind NICHT die Prosa-Tests — `stage_one_vector_hygiene_reserves_out_of_band_negative_literals` in `tools/xtask/tests/spec_completeness.rs` lädt ausschließlich den Stufe-1-Plan —, sondern die zwei Textscanner in `tests/ea-system-tests/tests/conformance_golden_vectors.rs` und `crates/ea-testkit/src/lib.rs`, die Bytes und nicht Prosa scannen. Die im Prerequisites-Plan formulierte Marker-Invariante DARF in diesem Plan nicht als repositoriumsweite Regel zitiert werden.
 - Request bodies, Object Store keys/tags/metadata, PostgreSQL, audit, and logs contain no fachliche plaintext. Keys are type plus `objectHash` only.
-- All `/v1` requests use TLS 1.3; except the rate-limited challenge endpoint, they carry RFC-9421 signatures with one-time nonce and request ID.
+- All `/v1` requests use TLS 1.3; except the rate-limited challenge endpoint and `POST /v1/vault-blobs/retrievals`, they carry RFC-9421 signatures with one-time nonce and request ID. `POST /v1/vault-blobs/retrievals` carries no RFC-9421 signature; its sole authority is a WebAuthn assertion over a discoverable credential of the requesting Reader (web-reader-design.md §6.4.1), the server releases only the opaque ciphertexts bound to that `subjectId`, and the registration grants the server no authority.
+- Browserzugriffe werden über eine konfigurierte Origin-Positivliste zugelassen; ein Wildcard-`Access-Control-Allow-Origin` ist ausgeschlossen, `Access-Control-Allow-Credentials` bleibt aus, und der getrennte Bundle-Origin (§4.1) steht als einziger Eintrag der Auslieferungsseite darin. Die RFC-9421-Abdeckung von `@authority` und `@target-uri` (siehe Signaturabdeckung unten) bleibt davon unberührt: der Browser signiert über die Ziel-URI des Sync-Servers, nicht über seinen eigenen Origin. Zielorigin und Betriebsverantwortung des Bundle-Hosts sind in web-reader-design.md:485-486 selbst als offen deklariert; die konfigurierbare Positivliste ist die ableitbare Antwort und braucht keine Entscheidung.
 - Writer UI exposes exactly `lokal gesichert`, `Upload ausstehend`, `synchronisiert`, `Fehler`; `synchronisiert` requires a verified Receipt persisted locally and in a configured network archive.
 - Desktop UI remains on the shared Ant Design 6 German/static-`zeroRuntime`/local-CSP token system and direct CSR `@phosphor-icons/react` imports; no TypeScript security logic or nonnormative status synonyms are introduced.
-- Sync server ships as Linux OCI `amd64`; exact base digest and platform proof close in Stage 7.
+- Sync server ships as Linux OCI `amd64`; exact base digest and platform proof close in Stage 7. Der `amd64`-Bau findet AUSSCHLIESSLICH im Container statt (ops/container/Dockerfile), nie als Host-Cross-Compile. rust-toolchain.toml:5 bleibt bei `targets = ["wasm32-unknown-unknown"]`; der Toolchain-Test `rust_toolchain_declares_wasm32_and_no_release_target` in tools/xtask/tests/workspace.rs verbietet x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin und x86_64-apple-darwin in der gepinnten Toolchain ausdrücklich, weil sie den signierten min/max-Release-Nachweis der Stufe 7 tragen. Kein Task dieser Stufe führt einen Cross-Target-Check gegen eines dieser vier Tripel.
+- **Auflegung A — Dienste als Vorbedingung.** Ab dieser Stufe setzt `pnpm verify:quick` laufende Integrationsdienste voraus, weil das Teilkommando `cargo test --workspace --all-targets --locked` (`verify_quick_commands()` in tools/xtask/src/main.rs) die Integrationstestziele von `apps/server` und `crates/ea-sync-server` mitfährt. Die Dienste werden mit `cargo run --locked -p xtask -- integration up` gestartet und mit `integration down` beendet; `DATABASE_URL` und der S3-Endpunkt werden dabei gesetzt, weil `#[sqlx::test]` `DATABASE_URL` zur Laufzeit liest. `verify-quick` prüft die Erreichbarkeit von PostgreSQL und Object Store FAIL-CLOSED vor dem betroffenen Kommando und bricht mit einer Anweisung ab, wenn sie fehlt — genau die Bauform von `ensure_wasm32_target_available()`, die den fehlenden wasm32-Target vor dem betroffenen Kommando meldet. Ein Überspringen über eine Umgebungsvariable ist AUSGESCHLOSSEN. Die erzwungenen Kanten sind zwei: `workspace_declares_exact_planned_members_and_shared_dependencies` verlangt für jede Mitglieds-Abhängigkeit einen `workspace = true`-Eintrag in der Wurzeltabelle, und `verify_quick_commands()` fährt `cargo test --workspace --all-targets --locked`.
+- Die vier neuen Mitglieder (`crates/ea-sync-protocol`, `crates/ea-sync-server`, `crates/ea-sync-client`, `apps/server`) DÜRFEN KEINE `[target.'cfg(...)'.dependencies]`-Tabelle führen. Der Durchlauf über die Cargo-Manifeste in tools/xtask/tests/workspace.rs iteriert ausschließlich über `dependencies`, `dev-dependencies` und `build-dependencies`; eine target-Tabelle wäre für die Pin-Pflicht und die `workspace = true`-Pflicht unsichtbar. Jede Abhängigkeit steht exakt gepinnt in `[workspace.dependencies]` der Wurzel-`Cargo.toml` und wird mit `workspace = true` geerbt.
+- Die Async-Grenze liegt an `apps/server`: die Kern-Crates unter `crates/` bleiben synchron, die Tokio-Laufzeit lebt ausschließlich in `apps/server`, `crates/ea-sync-server` exportiert `#[async_trait]`-Ports und ruft die synchronen Kernbibliotheken direkt, und `crates/ea-sync-client` kapselt jeden synchronen `ea-archive-fs`-Aufruf in `spawn_blocking`.
 - v0.1 is complete only after Stage 7 and all acceptance criteria/gates pass.
+- Jeder Verweis dieses Plans in `tools/xtask/`, `crates/ea-verify/`, `crates/ea-recovery/` und `crates/ea-trust/` nennt einen FUNKTIONS-, KONSTANTEN- oder TESTNAMEN, nie eine Zeilennummer. Zeilennummern in diesem Plan sind Suchhilfe, kein Vertrag.
 
 Required endpoints are exact:
 
 ```text
 POST /v1/auth/challenges
 POST /v1/device-registrations
+POST /v1/webauthn-credentials
+PUT  /v1/vault-blobs
+POST /v1/vault-blobs/retrievals
 GET  /v1/trust/registry?afterVersion={n}
 POST /v1/trust/events
 POST /v1/chains/{chainId}/entry-commits
@@ -51,7 +62,177 @@ Signature coverage is exact: `@method`, `@authority`, `@target-uri`, `content-ty
 
 ---
 
-### Task 1: Normative Sync Framing and RFC-9421 Request Verification
+### Task 1: Stufe-3-Workspace- und Toolchain-Vorlauf
+
+**Files:**
+- Create: `docs/adr/0004-server-runtime-and-dependency-class.md`
+- Create: `ops/compose/integration.yaml`
+- Create: `mise.toml`
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `deny.toml`
+- Modify: `tools/xtask/src/main.rs`
+- Modify: `docs/traceability/v0.1-requirements.csv`
+- Test: `tools/xtask/tests/adr_gate.rs`
+- Test: `tools/xtask/tests/integration_services.rs`
+
+**Interfaces:**
+- Consumes: the pinned toolchain, `[workspace.dependencies]` of the root `Cargo.toml`, the existing ADR witness in `tools/xtask/tests/adr_gate.rs`, and the five-entry license allowlist of `deny.toml`.
+- Produces: ADR 0004, `cargo run --locked -p xtask -- integration up|down`, `ops/compose/integration.yaml`, exact `=` pins for the server dependency class, named license exceptions with ledger anchors, and a versioned `mise.toml`.
+
+- [ ] **Step 1: Write the ratification and integration-service witnesses**
+
+```rust
+#[test]
+fn server_runtime_dependency_class_is_ratified_before_use() {
+    let adr = read_adr(SERVER_ADR_PATH);
+    for section in SERVER_ADR_SECTIONS { assert!(adr.contains(section)); }
+    for literal in SERVER_ADR_LITERALS { assert!(adr.contains(literal)); }
+    for name in SERVER_RUNTIME_DEPENDENCIES {
+        let spec = shared_dependency(name);
+        let version = spec.get("version").and_then(Value::as_str).unwrap();
+        assert!(version.starts_with('='), "{name} must be pinned exactly");
+        assert!(adr.lines().any(|line| line.contains(&format!("`{name}`")) && line.contains(version)));
+        assert!(adr.contains(&reviewed_feature_ledger_line(name, spec)));
+    }
+}
+
+#[test]
+fn integration_up_is_idempotent_and_exports_both_endpoints() {
+    run_gate(["integration", "up"]).unwrap();
+    run_gate(["integration", "up"]).unwrap();
+    assert!(postgres_is_reachable(env("DATABASE_URL")));
+    assert!(object_store_is_reachable(env("EA_OBJECT_STORE_ENDPOINT")));
+    assert_eq!(run_gate(["integration", "sideways"]).unwrap_err(), "unknown gate: integration");
+}
+```
+
+- [ ] **Step 2: Run the witnesses and confirm the decision and the command are absent**
+
+Run: `cargo test --locked -p xtask --test adr_gate --test integration_services`
+
+Expected: FAIL because `docs/adr/0004-server-runtime-and-dependency-class.md` does not exist and the dispatcher answers `unknown gate: integration`.
+
+- [ ] **Step 3: Ratify the server dependency class, pin it, and build the integration command**
+
+Write `docs/adr/0004-server-runtime-and-dependency-class.md` in the shape the existing witness already enforces: every mandatory section heading, every mandatory literal, each class named with its exact pin **on the same line**, and the reviewed feature selection as one verbatim ledger line `name = ["feature", "feature"]`. Each class carries its own primary-source and RustSec review after the procedure of `docs/adr/0001-toolchain-and-cryptography-dependencies.md:152-154`. The ADR ratifies the async runtime, the HTTP server, the PostgreSQL driver, the S3 client and the TLS stack, and it additionally carries the section `OCI base image`. The reach of `docs/adr/0001-toolchain-and-cryptography-dependencies.md:75-77` (OpenSSL and `ring` as suite-wide abstractions) is settled and is not reopened here: `docs/adr/0002-local-database-encryption.md:52-64` rejects the wide reading verbatim as a rejected alternative, so the TLS stack is named and reviewed, not defended.
+
+The ADR number is **0004**. `docs/adr/` today carries `0001-toolchain-and-cryptography-dependencies.md` and `0002-local-database-encryption.md`; the constant `ADR_PATH` in `tools/xtask/tests/adr_gate.rs` pins 0002 hard, and `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md:371` creates `docs/adr/0003-release-supply-chain.md`.
+
+Enter the ratified classes exactly `=`-pinned in `[workspace.dependencies]` of the root `Cargo.toml` and **name the S3 client crate by name**; `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md:121` says only "S3-kompatibler Object Store". This task deliberately registers **no workspace member** — a `members` line pointing at a directory without a manifest fails `cargo metadata` and with it every test; the tasks that create the four crates register them. No pin is entered that no member of this stage consumes. Because this task rewrites `Cargo.lock` for the first time, `cargo metadata --format-version 1` is the exactly one command it runs without `--locked`; every other command of this task carries `--locked` again, as the lockfile-progress rule in `tools/xtask/tests/workspace.rs` requires.
+
+Add the license exceptions to the `exceptions` block of `deny.toml` in the pattern already used there (crate, license, justification, path into the graph). The allowlist stays at **five** entries — `Apache-2.0`, `BSD-3-Clause`, `BlueOak-1.0.0`, `MIT`, `Unicode-3.0` — because the comment above the block says verbatim that "eine neue Crate unter derselben Lizenz wird weiterhin abgewiesen, und das ist der Unterschied zwischen einer Ausnahme und einer stillschweigenden Erweiterung". Expected candidates from the TLS/S3 subtree are `rustls-webpki` and `untrusted` (ISC alone); no copyleft is in the plausible set. The same comment fixes the place of decision normatively: it points at the section `Gemessener Gate-Lauf` of `docs/traceability/stage-2-gate.md`, so for this stage the section of the same name in `docs/traceability/stage-3-gate.md`. Every new license exception gets a ledger anchor in `docs/traceability/v0.1-requirements.csv` after the pattern of the row `GATE-25` that carries the sixteen advisory exceptions; an exception without an anchor enforces nothing.
+
+Version `mise.toml` and replace `pnpm = "latest"` with the exact pin `pnpm = "11.20.0"`, so the file does not stand against `docs/adr/0001-toolchain-and-cryptography-dependencies.md:28` and `package.json:4` (`"packageManager": "pnpm@11.20.0"`). The same file carries the container-runtime pin below. ADR 0001 pins Rust, Node, pnpm, the fuzz nightly and cargo-fuzz exactly (:26-30) and has no line for Docker/Podman/colima to this day.
+
+Build the subcommand `integration` with the two arguments `up` and `down` into the dispatcher (`match gate.as_str()` in `fn run` of `tools/xtask/src/main.rs`). Write the argument grammar out rather than opening it silently: the `test-*` gates and `validate-schemas` reject every argument explicitly, `stage-gate` takes exactly one NUMERIC argument, and `integration` is the first gate with a symbolic one — the two accepted words are `up` and `down`, everything else is an error. `integration up` starts the two services from `ops/compose/integration.yaml` and prints the connection data so that `DATABASE_URL` and the S3 endpoint are set for the following `cargo test` commands, because `#[sqlx::test]` reads `DATABASE_URL` at runtime. Both subcommands are idempotent.
+
+Choose and pin the container runtime (Docker/Podman/colima), the two integration images with **tag AND digest**, and the S3-compatible service **by name** in this same task. MinIO, SeaweedFS, LocalStack and Garage differ in versioning, object lock and conditional put, and the stage requires bucket versioning; an unpinned `integration up` is worthless.
+
+- [ ] **Step 4: Prove the feature selection resolves under `--all-features` before any task enters it**
+
+Run:
+
+```bash
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --doc --all-features --locked
+```
+
+Expected: PASS. These are exactly the two `verify:quick` subcommands that carry `--all-features`. If backend features are mutually exclusive (typical for the sqlx drivers and the TLS providers), the feature selection is fixed VERBATIM in ADR 0004 and carried in the crate manifests with `default-features = false` plus explicitly enumerated features — the same form the existing witness in `tools/xtask/tests/adr_gate.rs` already enforces.
+
+- [ ] **Step 5: Run the ratification gate and the integration services**
+
+Run: `cargo run --locked -p xtask -- integration up && cargo test --locked -p xtask --test adr_gate --test integration_services && cargo run --locked -p xtask -- integration down`
+
+Expected: PASS; the ADR names every class with its pin on one line and its reviewed features verbatim, `integration up` is idempotent, both endpoints answer, and an unknown argument stays an error.
+
+- [ ] **Step 6: Commit the toolchain and pin surface before any server code**
+
+```bash
+git add docs/adr/0004-server-runtime-and-dependency-class.md ops/compose mise.toml deny.toml tools/xtask docs/traceability/v0.1-requirements.csv Cargo.toml Cargo.lock
+git commit -m "build(sync): ratify and pin the server dependency class"
+```
+
+### Task 2: Geteilte Format- und Kryptokerne für die Serverfläche
+
+**Files:**
+- Modify: `crates/ea-format/src/eag.rs`
+- Modify: `crates/ea-format/src/parser.rs`
+- Modify: `crates/ea-format/src/lib.rs`
+- Modify: `crates/ea-crypto/src/cose.rs`
+- Modify: `crates/ea-crypto/src/lib.rs`
+- Modify: `crates/ea-verify/src/report.rs`
+- Test: `crates/ea-format/tests/grant_plan_codec.rs`
+- Test: `crates/ea-format/tests/object_type.rs`
+- Test: `crates/ea-crypto/tests/protocol_cores.rs`
+
+**Interfaces:**
+- Consumes: the frozen vectors under `vectors/grants/v1/plan/`, `schemas/protocol/v1/signed-protocol.cddl`, and the three existing unsigned-core shape validators behind `validate_unsigned_protocol_core`.
+- Produces: `GrantPlanV1::exact_bytes`, `decode_grant_plan`, `encode_challenge_response_core`/`decode_challenge_response_core`, `encode_device_registration_request_core`/`decode_device_registration_request_core`, `encode_reader_ack_core`/`decode_reader_ack_core`, and one single `ObjectTypeV1` exported from `ea-format`.
+
+- [ ] **Step 1: Write round-trip and rejection tests for the three shared cores**
+
+```rust
+#[test]
+fn grant_plan_round_trips_and_rejects_a_wrong_order() {
+    let plan = GrantPlanV1::new(fixtures::plan_items()).unwrap();
+    let decoded = decode_grant_plan(plan.exact_bytes()).unwrap();
+    assert_eq!(decoded.exact_bytes(), plan.exact_bytes());
+    assert_eq!(decoded.hash(), plan.hash());
+    assert!(decode_grant_plan(&fixtures::vector("rejected-unsorted-plan-items")).is_err());
+}
+
+#[test]
+fn every_protocol_core_encodes_validates_and_decodes() {
+    let bytes = encode_challenge_response_core(&fixtures::challenge_core()).unwrap();
+    validate_unsigned_protocol_core(ContentType::ChallengeResponseCbor, &bytes).unwrap();
+    assert_eq!(decode_challenge_response_core(&bytes).unwrap(), fixtures::challenge_core());
+    assert!(decode_challenge_response_core(&fixtures::challenge_core_short_nonce()).is_err());
+}
+
+#[test]
+fn object_type_v1_is_declared_once_and_re_exported() {
+    assert_eq!(ea_format::ObjectTypeV1::Entry.code(), 1);
+    assert_eq!(ea_format::ObjectTypeV1::Destroyed.code(), 6);
+    assert_eq!(ea_verify::ObjectTypeV1::Trust, ea_format::ObjectTypeV1::Trust);
+}
+```
+
+- [ ] **Step 2: Run the tests and verify the shared access does not exist**
+
+Run: `cargo test --locked -p ea-format --test grant_plan_codec --test object_type && cargo test --locked -p ea-crypto --test protocol_cores`
+
+Expected: FAIL because `decode_grant_plan`, `GrantPlanV1::exact_bytes`, the six core codecs, and an `ObjectTypeV1` exported from `ea-format` do not exist.
+
+- [ ] **Step 3: Publish the existing bytes instead of choosing new ones**
+
+There is nothing to choose here, only something to publish: the bytes are already frozen through `grant_plan_digest` with the domain `EINSATZARCHIV-GRANT-PLAN-v1` and through the positive vectors under `vectors/grants/v1/plan/`. `crates/ea-format/src/eag.rs` gets `pub fn exact_bytes(&self) -> &[u8]` on `GrantPlanV1` — today that access exists only on `GrantBodyV1`, while `GrantPlanV1::new` produces the exact bytes and drops them immediately. It also gets `pub fn decode_grant_plan(bytes: &[u8]) -> Result<GrantPlanV1, FormatError>` as the counterpart to the today-private `encode_plan_items`; `crates/ea-format/src/lib.rs` takes both names into its existing `pub use` block. The decoder MUST run the same ordering and duplicate checks as `GrantPlanV1::new` and REJECT a divergent order or a duplicate instead of re-sorting — otherwise the `initialGrantPlanHash` and with it the replay identity diverges from the Writer. This task extends `ea-format` by access and decoder ONLY: `GrantPlanV1::new`, `GrantPlanItemV1::new` and the existing `Debug` implementations stay unchanged, no new constructor appears, and no visibility on the encoder side changes. No reimplementation of the item encoding in `crates/ea-sync-protocol` is admissible afterwards; the global constraint against a second implementation forbids it.
+
+`crates/ea-crypto/src/cose.rs` gets, beside the three existing shape validators, one encoder and one typed decoder each, all six exported through `crates/ea-crypto/src/lib.rs`: `encode_challenge_response_core`/`decode_challenge_response_core`, the same pair for `device-registration-request-core-v1`, and the same pair for `reader-ack-core-v1`. The field structure follows `schemas/protocol/v1/signed-protocol.cddl:5-13`, `:15-24` and `:26-34` character for character; the file stays UNCHANGED and is not registered again, because it already stands in `validate_schemas`. Every decoder calls the existing validator before it hands out fields, and every encoder produces bytes the existing validator accepts. `crates/ea-sync-server/src/auth.rs` must carry no encoder of its own afterwards.
+
+`ObjectTypeV1` is NOT declared a fourth time. The closed set 1..6 lives today three times: as the prefix constants `EIP_PREFIX_V1`..`EDS_PREFIX_V1` in `crates/ea-format/src/parser.rs`, as the `match object_type { 1 => .. 6 => .. }` inside `decode_exact_object`, and as the already typed enum `ObjectTypeV1` in `crates/ea-verify/src/report.rs`. The type moves from `crates/ea-verify/src/report.rs` into `crates/ea-format/src/parser.rs` next to the six prefix constants — the name stays `ObjectTypeV1`, the variants stay `Entry`, `Grant`, `Receipt`, `Evidence`, `Trust`, `Destroyed`, and `code()` stays 1..6 —, it is exported through `crates/ea-format/src/lib.rs`, `decode_exact_object` binds its match to it, and `crates/ea-verify` re-exports it with `pub use ea_format::ObjectTypeV1;` instead of declaring it again — exactly the established pattern of `crates/ea-ui-contracts/src/lib.rs`. The direction is admissible: `crates/ea-verify/Cargo.toml` carries `ea-format.workspace = true`. This is the riskiest single change of the preludes because it alters the public API of a closed Stage 1 crate.
+
+- [ ] **Step 4: Run the shared-core tests plus the frozen golden and property surfaces**
+
+Run:
+
+```bash
+cargo test --locked -p ea-format --test grant_plan_codec --test object_type
+cargo test --locked -p ea-crypto --test protocol_cores
+cargo run --locked -p xtask -- test-golden
+cargo run --locked -p xtask -- test-property
+```
+
+Expected: PASS; round trip and hash are byte-identical, a wrong item order and every core negative vector are rejected, and no frozen vector and no golden expectation changes.
+
+- [ ] **Step 5: Commit the shared cores before the server consumes them**
+
+```bash
+git add crates/ea-format crates/ea-crypto crates/ea-verify
+git commit -m "feat(format): publish the shared grant-plan, protocol-core, and object-type surface"
+```
+
+### Task 3: Normative Sync Framing and RFC-9421 Request Verification (formerly Task 1)
 
 **Files:**
 - Consume existing unchanged: `schemas/protocol/v1/signed-protocol.cddl`
@@ -188,7 +369,7 @@ git add docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-sync-wire-addendum.
 git commit -m "feat(sync): define signed v1 protocol framing"
 ```
 
-### Task 2: PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port
+### Task 4: PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port (formerly Task 2)
 
 **Files:**
 - Create: `crates/ea-sync-server/Cargo.toml`
@@ -227,8 +408,8 @@ async fn chain_sequence_entry_hash_object_hash_and_request_id_are_unique(pool: P
 
 #[tokio::test]
 async fn same_object_key_with_different_bytes_is_security_event() {
-    store.put_if_absent(ObjectType::Entry, hash, b"first").await.unwrap();
-    assert_eq!(store.put_if_absent(ObjectType::Entry, hash, b"second").await.unwrap_err().code(),
+    store.put_if_absent(ObjectTypeV1::Entry, hash, b"first").await.unwrap();
+    assert_eq!(store.put_if_absent(ObjectTypeV1::Entry, hash, b"second").await.unwrap_err().code(),
                "EA-STORE-HASH-CONFLICT");
 }
 ```
@@ -244,7 +425,7 @@ Expected: FAIL because migrations and adapters do not exist.
 ```rust
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync {
-    async fn stage_stream(&self, kind: ObjectType, body: ByteStream, limit: u64)
+    async fn stage_stream(&self, kind: ObjectTypeV1, body: ByteStream, limit: u64)
         -> Result<StagedObject, StoreError>;
     async fn put_if_absent(&self, staged: StagedObject)
         -> Result<StoredObject, StoreError>;
@@ -273,7 +454,7 @@ git add crates/ea-sync-server apps/server ops/compose Cargo.toml Cargo.lock
 git commit -m "feat(sync): add technical server persistence"
 ```
 
-### Task 3: Challenges, Device Registrations, and Trust Distribution
+### Task 5: Challenges, Device Registrations, and Trust Distribution (formerly Task 3)
 
 **Files:**
 - Create: `crates/ea-sync-server/src/auth.rs`
@@ -324,7 +505,7 @@ git add crates/ea-sync-server apps/server
 git commit -m "feat(sync): add signed device and trust endpoints"
 ```
 
-### Task 4: Atomic Entry Commit and Idempotent Replay
+### Task 6: Atomic Entry Commit, Idempotent Replay, and Immutable Receipts (formerly Task 4)
 
 **Files:**
 - Create: `crates/ea-sync-server/src/commit.rs`
@@ -386,7 +567,7 @@ git add crates/ea-sync-server apps/server
 git commit -m "feat(sync): atomically accept entries and grants"
 ```
 
-### Task 5: Immutable Receipts and Standard Checkpoints
+### Task 7: Standard Checkpoints and the Checkpoint Chain (formerly Task 5)
 
 **Files:**
 - Create: `crates/ea-sync-server/src/receipt.rs`
@@ -442,7 +623,7 @@ git add crates/ea-sync-server apps/server vectors/receipts vectors/evidence
 git commit -m "feat(sync): issue immutable receipts and checkpoints"
 ```
 
-### Task 6: Reader, Object, Export, Historical-Grant, and Destruction API Surfaces
+### Task 8: Reader, Object, Export, Historical-Grant, and Destruction API Surfaces (formerly Task 6)
 
 **Files:**
 - Create: `crates/ea-sync-server/src/reader_sync.rs`
@@ -503,7 +684,11 @@ git add crates/ea-sync-server apps/server
 git commit -m "feat(sync): add blind read and administration APIs"
 ```
 
-### Task 7: Writer Sync Queue, Network-Archive Ordering, and Receipt Persistence
+### Task 9: Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS
+
+_(written in a later editing pass)_
+
+### Task 10: Writer Sync Queue, Network-Archive Ordering, and Receipt Persistence (formerly Task 7)
 
 **Files:**
 - Create: `crates/ea-sync-client/Cargo.toml`
@@ -566,7 +751,11 @@ git add crates/ea-sync-client apps/desktop Cargo.toml Cargo.lock pnpm-lock.yaml
 git commit -m "feat(sync): resume Writer uploads from archive bytes"
 ```
 
-### Task 8: Server Administration Separation, Failure Matrix, Privacy, and Stage Gate
+### Task 11: Trust-Objektfamilie webBundleRelease: Codec, CDDL-Arm und Signaturprofil
+
+_(written in a later editing pass)_
+
+### Task 12: Server Administration Separation, Failure Matrix, Privacy, and Stage Gate (formerly Task 8)
 
 **Files:**
 - Create: `apps/server/src/admin_audit.rs`
