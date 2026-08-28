@@ -257,10 +257,16 @@ git commit -m "feat(format): publish the shared grant-plan, protocol-core, and o
 - Create: `crates/ea-sync-protocol/src/error.rs`
 - Test: `crates/ea-sync-protocol/tests/signatures.rs`
 - Test: `crates/ea-sync-protocol/tests/framing.rs`
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `tools/xtask/src/main.rs`
+- Modify: `tools/xtask/tests/workspace.rs`
+- Modify: `tools/xtask/tests/schema_validation.rs`
+- Modify: `tools/xtask/tests/spec_completeness.rs`
 
 **Interfaces:**
 - Consumes: exact object bytes, `GrantPlanV1`, device certificates, COSE/Ed25519 verifier.
-- Produces: byte-stable request/response bodies, `RequestVerifier`, `AuthenticatedDevice`, `EntryCommitRequestV1`, `EntryCommitIdentity`, `ReaderBatchV1`, `TechnicalCursorV1`.
+- Produces: byte-stable request/response bodies, `RequestSigner`, `RequestVerifier`, `AuthenticatedDevice` including `ProofOfPossession`, `EntryCommitRequestV1`, `EntryCommitIdentity`, `ReaderBatchV1`, `TechnicalCursorV1`.
 
 - [ ] **Step 1: Write signed-component and framing tests**
 
@@ -283,7 +289,9 @@ fn commit_identity_is_independent_of_transport_order() {
 
 - [ ] **Step 2: Run tests and verify missing protocol definitions fail**
 
-Run: `cargo test --locked -p ea-sync-protocol`
+Run: `cargo metadata --format-version 1 && cargo test --locked -p ea-sync-protocol`
+
+`cargo metadata --format-version 1` is the exactly one command of this task without `--locked`, because this task enters a new member and new foreign dependencies. The lockfile-progress rule stands verbatim in `workspace_declares_exact_planned_members_and_shared_dependencies` in `tools/xtask/tests/workspace.rs`: "Ein neues Mitglied oder eine neue Fremdabhaengigkeit schreibt Cargo.lock neu, deshalb laeuft in dem Task, der sie eintraegt, GENAU EIN Kommando ohne --locked … Alle weiteren Kommandos dieses Tasks tragen wieder --locked."
 
 Expected: FAIL because protocol framing and verifier do not exist.
 
@@ -319,8 +327,6 @@ trust-registry-response-v1 = [
   1, requested-after-version: uint,
   events: [* [registry-version: uint, object-hash: bstr .size 32, exact-etb-bytes: bstr]], []
 ]
-
-object-response-v1 = exact-archive-object-bytes: bstr
 
 historical-grant-upload-v1 = [1, exact-eag-bytes: bstr, []]
 grant-list-response-v1 = [
@@ -358,22 +364,46 @@ protocol-error-v1 = [
 ]
 ```
 
-The addendum fixes media types `application/einsatzarchiv+cbor;v=1` for structured bodies, `application/einsatzarchiv-object` for raw object GETs, and a streamed sequence of exact objects plus final `archive-export-manifest-v1` for export. It defines every endpoint's request/response schema, required caller capability, status/error codes, empty-body behavior, pagination and no-content response. For `POST /v1/webauthn-credentials`, `PUT /v1/vault-blobs` and `POST /v1/vault-blobs/retrievals` it fixes URL, media type, required caller capability, and status and error codes exactly as for the other fourteen endpoints. All object/hash lists are bytewise sorted and duplicate-free. A `TechnicalCursorV1` is an opaque, expiring server-authenticated deterministic-CBOR token over `[1, organizationId, endpointCode, chainId-or-null, startHeadHash-or-null, lastTechnicalIndex, expiresAt, nonce]`; clients never parse or trust it, and it contains no fachliche metadata.
+The addendum fixes media types `application/einsatzarchiv+cbor;v=1` for structured bodies, `application/einsatzarchiv-object` for raw object GETs, and a streamed sequence of exact objects plus final `archive-export-manifest-v1` for export. It defines every endpoint's request/response schema, required caller capability, status/error codes, empty-body behavior, pagination and no-content response. For `POST /v1/webauthn-credentials`, `PUT /v1/vault-blobs` and `POST /v1/vault-blobs/retrievals` it fixes URL, media type, required caller capability, and status and error codes exactly as for the other fourteen endpoints. All object/hash lists are bytewise sorted and duplicate-free. `GET /v1/objects/{objectHash}` carries no CBOR frame: the response is the raw, exactly archived byte stream with `Content-Type: application/einsatzarchiv-object`, `Content-Length` and an RFC-9530 `content-digest` over exactly those bytes — design.md:1530 says „Objektantworten liefern exakte archivierte Bytes“, and a `bstr` declaration would claim a CBOR header that is not on the wire. A `TechnicalCursorV1` is an opaque, expiring server-authenticated deterministic-CBOR token over `[1, organizationId, endpointCode, chainId-or-null, startHeadHash-or-null, lastTechnicalIndex, expiresAt, nonce]`; clients never parse or trust it, and it contains no fachliche metadata. Its authentication is a COSE-Sign1 over the server Ed25519 with its OWN domain constant `EINSATZARCHIV-TECHNICAL-CURSOR-v1` and a written-out validity window; the addendum fixes domain, signature shape and window. There is deliberately NO new `CertificateCapability` variant: design.md:221 says verbatim „Der Server besitzt einen eigenen Ed25519-Schlüssel für Receipts und Checkpoints“, so one key already carries two purposes there and the purpose binding runs through the domain rather than through the capability. `CertificateCapability` in `crates/ea-crypto/src/cose.rs:1550-1558` is closed on seven variants; an eighth would extend a frozen set and would carry its own justification duty. The 24 frozen domain constants under `vectors/crypto/suite-1/domain-string/` know no cursor today, so the new constant is additive and MUST be named as such. No HMAC: the suite knows none.
 
-Fix v1 limits exactly in the addendum: structured request/response CBOR depth/item/string limits reuse Stage 1; entry commit accepts one `.eip`, at most 10,000 grant-plan/grant items, and total body at most 643 MiB (2 MiB Entry plus 10,000 × 64 KiB grant ceiling plus bounded framing); Reader batches and export streams may contain at most 1,000 object records per page and 64 MiB of bytes; Trust pages at most 1,000 `.etb`; grant/checkpoint pages at most 10,000/1,000 objects; challenge/registration/errors at most 64 KiB. The server must enforce both count and streamed byte limit before accumulation. HTTP mapping is exact: `400` malformed framing/content digest; `401` missing/invalid/expired signature or challenge; `403` valid identity without capability/organization access; `404` unknown object/chain/Entry/destruction ID; `409` fork, head mismatch, byte conflict, non-idempotent replay, or required newer Registry head; `413` byte/count/parser limit; `422` well-formed but invalid Trust/format/grant/authorization; `429` challenge/rate limit; `503` temporary database/Object Store/TSA dependency; other internal failures `500`. Response bodies always use `protocol-error-v1`, contain no supplied payload fragment, and set `retryable=true` only for `429`, `500`, or `503` technical failures.
+Fix v1 limits exactly in the addendum: structured request/response CBOR depth/item/string limits reuse Stage 1; entry commit accepts one `.eip`, at most 10,000 grant-plan/grant items, at most 2 KiB per `.eag`, and total body at most 24 MiB (2 MiB Entry plus 10,000 × 2 KiB grant ceiling plus bounded framing); Reader batches and export streams may contain at most 1,000 object records per page and 64 MiB of bytes; Trust pages at most 1,000 `.etb`; grant/checkpoint pages at most 10,000/1,000 objects; challenge/registration/errors at most 64 KiB. The server must enforce both count and streamed byte limit before accumulation. The addendum writes the derivation of the `.eag` ceiling down so the number cannot drift again: `grant-body-v1` is, by `schemas/archive/v1/archive.cddl:36`, a closed array of `grant-context-v1` plus `bstr .size 32` and `bstr .size 48`, and `grant-context-v1` (`schemas/archive/v1/archive.cddl:24`) consists exclusively of fixed-length fields; the six frozen vectors under `vectors/grants/v1/grant/` measure 641 to 710 bytes and `vectors/format/v1/valid/eag/valid.bin` measures exactly 641 bytes, so 2 KiB is just under three times the measured maximum. The 2 MiB Entry limit stays and bounds an `.eip` whose ciphertext is capped by `ciphertext-length-v1 = 16..1048592` in the same file. HTTP mapping is exact: `400` malformed framing/content digest; `401` missing/invalid/expired signature or challenge; `403` valid identity without capability/organization access; `404` unknown object/chain/Entry/destruction ID; `409` fork, head mismatch, byte conflict, non-idempotent replay, or required newer Registry head; `413` byte/count/parser limit; `422` well-formed but invalid Trust/format/grant/authorization; `429` challenge/rate limit; `503` temporary database/Object Store/TSA dependency; other internal failures `500`. Response bodies always use `protocol-error-v1`, contain no supplied payload fragment, and set `retryable=true` only for `429`, `500`, or `503` technical failures.
 
 Stable Entry replay identity is exactly `[entryHash, entryObjectHash, initialGrantPlanHash, sortedInitialGrantObjectHashes]`. Reject duplicate object/grant hashes before service invocation. `RequestVerifier` checks signature coverage, certificate/key identity, capability, organization tag, `created < expires`, bounded validity window, request digest, single-use nonce, and globally unique request ID before routing.
 
+Exactly one endpoint is routed differently: `POST /v1/device-registrations` accepts, after design.md:1497 and design.md:1530, the requested, not yet released device key as proof of possession. `RequestVerifier` returns `AuthenticatedDevice::ProofOfPossession { requested_key }` for it, checks signature coverage, digest, nonce, request ID and window unchanged, but neither certificate chain nor capability, and carries no organization authority. `crates/ea-sync-protocol/tests/signatures.rs` carries the negative case that the same requested key yields `401` on every other endpoint. This path is RFC-9421 signed with the requested key and is therefore NO signature exception; the only signature exception beside the rate-limited challenge endpoint stays `POST /v1/vault-blobs/retrievals`.
+
+`RequestSigner` is the client-side counterpart and covers exactly the component list of the signature coverage fixed in the Global Constraints; `crates/ea-sync-protocol/tests/signatures.rs` runs signer and verifier against the same fixtures in a round trip, plus the negative cases enumerated in the validation step of this task. `RequestSigner` MUST come without a host operating-system dependency, because the browser signs the regular server access with the Reader's Ed25519 key (web-reader-design.md:213) and that key material lives in WASM memory during an unlocked session (web-reader-design.md §6.5, :241-244).
+
+The addendum opens with the header shape that `validate_addendum_review` in `tools/xtask/src/main.rs` — called from `validate_schemas` — already enforces mechanically, built after `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md:3-24`. The header is written out verbatim so that nothing is chosen again during implementation:
+
+> Status: **normativ für v0.1**. Dieses Addendum wird vor Task 3 Step 3 akzeptiert und ist damit eine Voraussetzung für jeden produktiven Encoder und jeden Serverpfad. Es schließt ausschließlich offene Serialisierungs- und Transportdetails der Designabschnitte 13.1 bis 13.5. Es darf kein dort bereits festgelegtes Feld, keine Semantik und keine Sicherheitsanforderung überschreiben. Bei einem Widerspruch gilt die Umsetzung als blockiert, bis Design und Addendum im selben Review korrigiert wurden; Produktionscode darf nicht wählen.
+
+Below it stands the list of constituents, which names `schemas/protocol/v1/openapi.yaml`, `schemas/protocol/v1/entry-commit.cddl` and `schemas/protocol/v1/reader-batch.cddl` as „Bestandteil dieses Addendums und normativ“. The Stage 1 wire-format addendum is NOT changed and therefore carries no `Modify:` line. Then follows the section `## Feld-zu-Design-Review` with one row per endpoint and per field, every row closing with the result `bestätigt`, and the closing sentence `**Review-Ergebnis:** keine ungelöste Zeile und kein Widerspruch`.
+
+`validate_schemas` today reads exactly one addendum path and runs `validate_addendum_review` over it; it now runs the function over BOTH addendum paths, so the new file is actually checked instead of merely well shaped. The enforcement pitfall is the mandatory-sentence set: `validate_addendum_review` MUST carry it per addendum file instead of globally, and the split is mandatory rather than stylistic, because „vor Task 3 Step 3 akzeptiert“ does not contain „vor Task 3 akzeptiert“ as a substring and a global set would fail both files at once. Only „normativ für v0.1“ and „darf kein dort bereits festgelegtes Feld“ stay common to both files; the acceptance sentence is pinned per file, so the Stage 1 addendum keeps its Stage 1 acceptance sentence unchanged while the sync wire addendum is pinned on its own. A gap deliberately left open here: `docs/superpowers/specs/2026-08-14-einsatzarchiv-v0-1-payload-wire-addendum.md` is not covered by the check at all; the per-file mapping is built so that it can take that file up later.
+
+`openapi.yaml` is descriptive and not normative; normative are the sync wire addendum and the CDDL documents under `schemas/protocol/v1/`. Stage 3 introduces no YAML/OpenAPI validation tool. The alternative — a pinned tool in the workspace prelude plus an entry in `[workspace.dependencies]` — is deliberately rejected, because it would introduce a dependency class for an artifact that carries no byte promise. The choice stands written out here so that it is not raised again.
+
+`validate_schemas` in `tools/xtask/src/main.rs` is a hard path list without a directory scanner, so both new CDDL documents are registered in it: after the block that reads `schemas/protocol/v1/signed-protocol.cddl` and runs it through `validate_cddl_document`, two identically built blocks for `schemas/protocol/v1/entry-commit.cddl` and `schemas/protocol/v1/reader-batch.cddl` are inserted. It is TWO new CDDL, not three — `openapi.yaml` gets no validator —, so the fixed number goes from 10 to 12 and is carried at BOTH pinned places character for character. In `tools/xtask/src/main.rs` the line `"validated 10 CDDL, 7 JSON schemas, 5 payload vectors, \` becomes `"validated 12 CDDL, 7 JSON schemas, 5 payload vectors, \`, and in `tools/xtask/tests/schema_validation.rs` the expectation of `validate_schemas_checks_payload_cddl_and_all_five_literal_vectors` becomes `"validated 12 CDDL, 7 JSON schemas, 5 payload vectors, 1 report vector, and compatibility matrix\n"`. That test pins the output with `assert_eq!` and runs inside `pnpm verify:quick` through `cargo test --workspace --all-targets --locked`, so an unregistered schema file is not a quietly wrong count but a red gate.
+
+`entry-commit.cddl` writes the rule `grant-plan-v1` out in exactly the format that `encode_plan_items` in `crates/ea-format/src/eag.rs:504-519` produces — an array of four-element items with the 32-byte recipient key thumbprint, the 32-byte recipient certificate hash, the suite text `EINSATZARCHIV-HPKE-1` and the one-byte purpose (`0` Recovery, `1` Reader) — as a normative constituent of the sync wire addendum.
+
+This task enters `crates/ea-sync-protocol` in `[workspace] members` of `Cargo.toml` AND in the constant `WORKSPACE_MEMBERS` (`tools/xtask/tests/workspace.rs`, 24 entries today), both in the same commit; the doc comment of the constant says verbatim: "Every task that adds a member appends its path here and nowhere else … A member added to one of the two files and forgotten in the other still fails loudly." The enforcement in `workspace_declares_exact_planned_members_and_shared_dependencies` is an exact set equality, not a counter. It further enters the pair (`"ea-sync-protocol"`, justification) in the constant `WASM32_EXEMPT_CRATES` (`tools/xtask/src/main.rs`, 10 entries today), because `every_crates_member_is_classified_for_the_wasm32_gate` demands exactly one classification for every member under `crates/`. The justification starts at the admission criterion of that list — the reason the crate cannot OR NEED NOT compile for `wasm32-unknown-unknown` — and reads: "carries the RFC-9421 request verification against a server-side nonce and request-ID store plus the streamed body limits of the sync protocol; Stage 3 ships no browser path that loads this crate, so it need not compile for wasm32-unknown-unknown. The browser access of web-reader-design.md §12 is built in Stage 4 with apps/web/ea-reader; the collision between web-reader-design.md:461 and the frozen sentence in tools/xtask/src/main.rs („wird nicht erweitert“) is noted there as a Stage 4 Vorbehalt and is not resolved here."
+
+Extending the wasm32 positive list instead is not admissible and is not to be raised again: the comment above that list binds it character for character to the closed Stage 1 plan document and states that it is not extended, and there is no precedent for editing a closed plan document — `2907803` (2026-08-16 22:55) predates both `ba96e7e` (2026-08-17 22:32) and `638c657` (2026-08-17 23:05).
+
+Three numeric bindings are written as assertions rather than as comments, because a comment carrying line references produces exactly the drift class this repository has seen more than once. `tools/xtask/tests/spec_completeness.rs` gets two additional assertions: `object-type` in `archive-export-manifest-v1` covers exactly the six archive object types `.eip`, `.eag`, `.esr`, `.ecp`, `.etb`, `.eds`, and `state` in `destruction-status-response-v1` covers exactly the five values of `destruction-state-v1`. Both reference their sources exclusively through the rule names `archive-object-v1` (`schemas/archive/v1/archive.cddl:3`) and `destruction-state-v1` (`schemas/archive/v1/trust.cddl:173`), never through line numbers of the CDDL bodies. No second gate is introduced for this. `requested-role` stays unchanged at `0..2` in the imported `device-registration-request-core-v1`, because web-reader-design.md §3 (:47-59) does not widen the role set but only changes its application mapping.
+
 - [ ] **Step 4: Validate OpenAPI/CDDL and all positive/negative signature fixtures**
 
-Run: `cargo test --locked -p ea-sync-protocol && cargo run --locked -p xtask -- validate-protocol`
+Run: `cargo test --locked -p ea-sync-protocol && cargo run --locked -p xtask -- validate-schemas`
 
 Expected: PASS; absent/duplicate component, wrong digest/authority/URI/tag, expired request, nonce replay, request-ID replay, and wrong certificate all fail distinctly.
 
 - [ ] **Step 5: Commit protocol definitions before server code**
 
 ```bash
-git add docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-sync-wire-addendum.md schemas/protocol crates/ea-sync-protocol Cargo.toml Cargo.lock
+git add docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-sync-wire-addendum.md schemas/protocol crates/ea-sync-protocol tools/xtask Cargo.toml Cargo.lock
 git commit -m "feat(sync): define signed v1 protocol framing"
 ```
 
@@ -391,14 +421,19 @@ git commit -m "feat(sync): define signed v1 protocol framing"
 - Create: `apps/server/src/adapters/postgres.rs`
 - Create: `apps/server/src/adapters/s3.rs`
 - Create: `apps/server/src/adapters/server_keys.rs`
+- Create: `apps/server/src/adapters/trust_state.rs`
 - Create: `apps/server/migrations/0001_initial.sql`
-- Create: `ops/compose/integration.yaml`
+- Consume existing unchanged: `ops/compose/integration.yaml`
 - Test: `apps/server/tests/migrations.rs`
 - Test: `apps/server/tests/object_store.rs`
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `tools/xtask/src/main.rs`
+- Modify: `tools/xtask/tests/workspace.rs`
 
 **Interfaces:**
 - Consumes: protocol and shared verification crates.
-- Produces: `CommitRepository`, `ObjectStore`, `ServerSigner`, `ServerClock`, real PostgreSQL/S3 adapters, and technical tables with required uniqueness.
+- Produces: `CommitRepository`, `ObjectStore`, `ServerSigner` including the cursor signing operation, `ServerClock`, a PostgreSQL-backed `TrustStateStore` adapter with an explicit concurrency statement, real PostgreSQL/S3 adapters, and technical tables with required uniqueness.
 
 - [ ] **Step 1: Write migration and object conflict tests against real services**
 
@@ -424,7 +459,9 @@ async fn same_object_key_with_different_bytes_is_security_event() {
 
 - [ ] **Step 2: Start integration services and confirm tests fail before schema/adapters**
 
-Run: `cargo run --locked -p xtask -- integration up && cargo test --locked -p einsatzarchiv-server --test migrations --test object_store`
+Run: `cargo metadata --format-version 1 && cargo run --locked -p xtask -- integration up && cargo test --locked -p einsatzarchiv-server --test migrations --test object_store`
+
+`cargo metadata --format-version 1` is the exactly one command of this task without `--locked`, because this task enters two new members and the whole server dependency tree. The lockfile-progress rule stands verbatim in `workspace_declares_exact_planned_members_and_shared_dependencies` in `tools/xtask/tests/workspace.rs`: "Ein neues Mitglied oder eine neue Fremdabhaengigkeit schreibt Cargo.lock neu, deshalb laeuft in dem Task, der sie eintraegt, GENAU EIN Kommando ohne --locked … Alle weiteren Kommandos dieses Tasks tragen wieder --locked."
 
 Expected: FAIL because migrations and adapters do not exist.
 
@@ -447,7 +484,17 @@ pub trait CommitRepository: Send + Sync {
 }
 ```
 
-Create tables for organizations, pending device requests, Trust/Registry events, role intervals, chain heads, Entries, object index, grants, Receipts, checkpoints, evidence jobs, Reader acknowledgements, replay nonces, request IDs, Security Events, and technical admin audit. Store no incident number/time/keyword/location/person/vehicle/patient/note. Object keys are `<type>/<hex objectHash>` only; tags/custom metadata contain content type and size, never domain fields. Enable bucket versioning in integration configuration. `crates/ea-sync-server` declares no `ObjectType` enum of its own; it consumes `ea_format::ObjectTypeV1`.
+Create tables for organizations, pending device requests, Trust/Registry events, role intervals, chain heads, Entries, object index, grants, Receipts, checkpoints, evidence jobs, Reader acknowledgements, replay nonces, request IDs, Security Events, technical admin audit, WebAuthn credentials, and wrapped Reader vault blobs. Store no incident number/time/keyword/location/person/vehicle/patient/note. Object keys are `<type>/<hex objectHash>` only; tags/custom metadata contain content type and size, never domain fields. Enable bucket versioning in integration configuration. `crates/ea-sync-server` declares no `ObjectType` enum of its own; it consumes `ea_format::ObjectTypeV1`.
+
+The two web-surface tables are specified here so that the schema canary of the next step already covers them: the credential table carries the pseudonymous `subjectId`, the credential ID, the public key and the signature counter with a uniqueness constraint per (`organizationId`, `credentialId`); the blob table carries `subjectId` and one opaque ciphertext, keyed exclusively by `subjectId` and blob hash. The blob explicitly does NOT lie in the Object Store under `<type>/<hex objectHash>` — that namespace is reserved for archive object types by the Global Constraint on Object Store keys. Neither table carries any fachliche value (web-reader-design.md §6.4, §6.4.1).
+
+`apps/server/src/config.rs` fixes the TLS termination: minimum version 1.3 fail-closed, a named certificate and key source, no downgrade and no negotiation of older versions; `apps/server/src/router.rs` binds exclusively the listener configured that way. Should the termination deliberately lie outside the process, the same sentence writes that out and names the enforcing component — the plan MUST NOT stay silent here, because TLS 1.3 is a Global Constraint and the first sentence of design.md:1497.
+
+The `TrustStateStore` gets a real home: `apps/server/src/adapters/trust_state.rs` implements the trait behind PostgreSQL with an explicit concurrency statement. The way to the only public selection entry point is a writing one — `prepare_local_time` in `crates/ea-trust/src/time.rs` takes `&mut dyn TrustStateStore` and calls `commit_independent_time`, and `select_registry_head` in `crates/ea-trust/src/registry.rs` then answers with the three arms Selected, Advanced and PendingFuture —, so the adapter states which revision it expects and how a lost race is answered. The reading model is `EphemeralTrustStateStore` in `crates/ea-verify`, which the archive verification path already drives.
+
+Stage 3 delivers exactly one migration `0001_initial.sql`; the unique constraints of design.md §13.4 (`chainId` + `sequence`, `entryHash`, `objectHash`, Registry version, request ID) come into existence in it and are not pulled in later. Migration evolution against an already delivered installation — ordering, backward compatibility, proof against an existing database — is expressly the subject of Stage 7 and MUST NOT come into existence ad hoc in Stage 3.
+
+This task enters `crates/ea-sync-server` AND `apps/server` in `[workspace] members` of `Cargo.toml` and in `WORKSPACE_MEMBERS` (`tools/xtask/tests/workspace.rs`), both in the same commit. In `WASM32_EXEMPT_CRATES` (`tools/xtask/src/main.rs`) goes EXCLUSIVELY `ea-sync-server`; `apps/server` MUST NOT stand there, because `every_crates_member_is_classified_for_the_wasm32_gate` filters the classification duty on the prefix `crates/` and rejects every classified name that is not a workspace member under `crates/` ("the wasm32 classification in tools/xtask/src/main.rs names {classified}, which is not a workspace member under crates/"). The justification for `ea-sync-server` reads: "binds Axum, Tokio, sqlx and the S3 client and therefore reaches past `ea-verify` into the host operating system, the network stack and the process environment; web-reader-design.md §9 makes only the verification pipeline shared browser code, and that pipeline ends at `ea-verify`."
 
 - [ ] **Step 4: Run migrations, streaming, and schema-canary tests**
 
@@ -458,7 +505,7 @@ Expected: PASS; the S3 adapter streams and hashes without buffering a full paylo
 - [ ] **Step 5: Commit server persistence ports**
 
 ```bash
-git add crates/ea-sync-server apps/server ops/compose Cargo.toml Cargo.lock
+git add crates/ea-sync-server apps/server tools/xtask Cargo.toml Cargo.lock
 git commit -m "feat(sync): add technical server persistence"
 ```
 
@@ -470,11 +517,13 @@ git commit -m "feat(sync): add technical server persistence"
 - Create: `apps/server/src/http/challenges.rs`
 - Create: `apps/server/src/http/device_registrations.rs`
 - Create: `apps/server/src/http/trust.rs`
+- Create: `apps/server/src/http/webauthn_credentials.rs`
 - Modify: `apps/server/src/router.rs`
 - Test: `apps/server/tests/auth_trust_api.rs`
+- Test: `apps/server/tests/webauthn_credential_api.rs`
 
 **Interfaces:**
-- Consumes: `RequestVerifier`, Trust verifier/Registry line, Postgres nonce/request stores.
+- Consumes: `RequestVerifier`, `AuthenticatedDevice` including `ProofOfPossession`, `ServerClock`, Trust verifier/Registry line, Postgres nonce/request stores.
 - Produces: rate-limited single-use challenges, pending self-signed registration requests, and exact Root-signed Trust object distribution.
 
 - [ ] **Step 1: Write challenge replay and pending-registration tests**
@@ -499,6 +548,10 @@ Expected: FAIL because challenge, registration, and Trust handlers do not exist.
 - [ ] **Step 3: Implement pending-only registration and signed Trust publication**
 
 Challenge responses include random nonce, server time, expiration, and server signature; store only nonce digest and state. Rate limit by non-content technical identity. Registration accepts device ID, requested role, public keys, format capabilities, and self-signature only; it cannot activate authority. `POST /v1/trust/events` requires currently authorized Root/device capability as specified and validates exact `.etb` bytes before transactionally indexing them. `GET /v1/trust/registry` returns exact objects after the requested version and never synthesizes a Trust decision from database rows.
+
+Registering a WebAuthn credential with the pseudonymous `subjectId` as `userHandle` grants the server NO role, capability or device authority (web-reader-design.md §6.4.1, :230-233); it writes exclusively into the technical credential table and creates no Trust entry.
+
+The subtype set accepted by the Trust endpoint is the one that `TrustSubtypeV1` (`crates/ea-format/src/etb.rs`, eleven arms today) carries at the time of the run; a twelfth and thirteenth arm added later by the task „Trust-Objektfamilie webBundleRelease: Codec, CDDL-Arm und Signaturprofil“ widens it without any rebuild of this task.
 
 - [ ] **Step 4: Run auth, capability, and Trust rollback tests**
 
