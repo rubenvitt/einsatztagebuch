@@ -1712,6 +1712,144 @@ pub fn receipt_archive_with_one_deadline(due_at: i64) -> ReceiptArchive {
     }
 }
 
+/// Das Sequenzfach im PFADHINWEIS der gefaelschten `.esr`.
+///
+/// Frei waehlbar und ausdruecklich ohne Aussage: Pfade klassifizieren im
+/// Bestand nichts. Es ist nur ein anderer Hinweis als der der echten Quittung,
+/// damit beide Objekte nebeneinander liegen.
+const RECEIPT_FORGED_SEQUENCE_V1: u64 = 900;
+
+/// Ein Quittungsbestand samt dem Objekthash der Faelschung, die in ihm liegt.
+pub struct ForgedReceiptArchive {
+    pub archive: ReceiptArchive,
+    pub forged_receipt_object_hash: ObjectHash,
+}
+
+/// Derselbe Zwei-Eintrags-Bestand mit Quittungen, dem eine ZWEITE Quittung auf
+/// den ERSTEN Eintrag untergeschoben wurde — auf denselben
+/// `entryObjectHash`, mit KLEINEREM Objekthash.
+///
+/// # Warum der Objekthash kleiner sein MUSS
+///
+/// `inventory.receipts()` entsteht aus einer `BTreeMap` ueber dem Objekthash
+/// und ist damit aufsteigend geordnet; `receipt_for` nimmt mit `find` den
+/// ERSTEN Treffer. Nur ein kleinerer Hash verdraengt die echte Quittung.
+/// Gemahlen wird ueber `acceptedAtServer` — ein Feld, das der Faelscher frei
+/// waehlt und das an keiner der fuenf Bindungen aus `design.md` §14.1
+/// Schritt 7 haengt.
+///
+/// # Was die Faelschung NICHT kann
+///
+/// Ihr `entryHash` ist ein fremder ([`foreign_head_entry_hash`]), also faellt
+/// sie an der ERSTEN Bindung und noch vor jeder Kryptografie
+/// (`crates/ea-verify/src/archive.rs:726`). Genau so sieht die erreichbare
+/// Faelschung aus: `validate_server_signature`
+/// (`crates/ea-format/src/esr.rs:198-208`) haelt Inhaltstyp, Abdruck,
+/// Zertifikatshash und Digest gegen die Felder DESSELBEN Kerns; der
+/// kryptografische Beweis sitzt in `verify_cose_sign1` und laeuft auf dem
+/// Einlesepfad nie. Diese Fixture benutzt trotzdem den echten
+/// Fixture-Signierer — nicht, weil sie muesste, sondern weil ein Angreifer
+/// ohne Schluessel exakt dasselbe Objekt bauen kann und der Unterschied fuer
+/// die AUSWAHL keiner ist.
+///
+/// # Beide Quittungen sind danach isoliert
+///
+/// `receipt_conflicts` (`crates/ea-archive/src/inventory.rs:518-537`)
+/// gruppiert ueber `entryObjectHash` und isoliert JEDES Mitglied einer Gruppe
+/// mit mehr als einem Objekt — die echte Quittung also mit. Der zweite Eintrag
+/// des Bestands bleibt davon unberuehrt und behaelt seine Bestaetigung; er ist
+/// die Kontrolle dieses Zeugen.
+#[must_use]
+pub fn receipt_archive_with_a_forged_second_receipt() -> ForgedReceiptArchive {
+    let mut archive = receipt_archive(ReceiptArchiveSpec::bare().with_receipts());
+    let line = receipt_line();
+    let anchor = line.anchor();
+    let genuine = archive.receipt_object_hashes[0];
+    assert!(
+        object_hash(&receipt_bytes(
+            line.head_ref(),
+            line.server_certificate_hash,
+            recovery_grant_plan_hash(),
+            anchor.chain_id(),
+            RECEIPT_FIRST_SEQUENCE_V1,
+            archive.entry_hashes[0],
+            archive.entry_object_hashes[0],
+            Some(anchor.genesis_entry_hash()),
+            None,
+        )) == genuine,
+        "die Fixture-Quittungslinie ist nicht mehr deterministisch"
+    );
+
+    let forged = forged_receipt_bytes(
+        line.head_ref(),
+        line.server_certificate_hash,
+        anchor.chain_id(),
+        archive.entry_object_hashes[0],
+        anchor.genesis_entry_hash(),
+        genuine,
+    );
+    let forged_receipt_object_hash = object_hash(&forged);
+    assert!(
+        forged_receipt_object_hash < genuine,
+        "die untergeschobene Quittung muss die echte verdraengen koennen"
+    );
+    archive.fixture.push_exact_bytes(
+        &format!(
+            "{}{RECEIPT_FORGED_SEQUENCE_V1:012}_receipt.esr",
+            ea_archive::RECEIPTS_DIR_V1
+        ),
+        forged,
+    );
+    ForgedReceiptArchive {
+        archive,
+        forged_receipt_object_hash,
+    }
+}
+
+/// Mahlt eine Quittung auf `entry_object_hash`, deren Objekthash unter `below`
+/// liegt und deren `entryHash` ein fremder ist.
+fn forged_receipt_bytes(
+    head: HeadRefV1,
+    server_certificate_hash: CertificateHash,
+    chain_id: ChainId,
+    entry_object_hash: ObjectHash,
+    previous_entry_hash: EntryHash,
+    below: ObjectHash,
+) -> Vec<u8> {
+    for attempt in 0..4096_i64 {
+        let core = ReceiptCoreV1::new(ReceiptCoreFieldsV1 {
+            organization_id: trust_support::organization(),
+            chain_id,
+            chain_sequence: ChainSequence::new(RECEIPT_FIRST_SEQUENCE_V1),
+            entry_hash: foreign_head_entry_hash(),
+            entry_object_hash,
+            previous_entry_hash: Some(previous_entry_hash),
+            registry_version: head.version,
+            registry_head_hash: head.hash,
+            policy_object_hash: fixture_policy_object_hash(),
+            initial_grant_plan_hash: recovery_grant_plan_hash(),
+            initial_grant_object_hashes: vec![fixture_grant_object_hash()],
+            accepted_at_server: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1 + attempt),
+            evidence_due_at: None,
+            server_key_thumbprint: writer_device_key_thumbprint(),
+            server_certificate_hash,
+        })
+        .expect("der gefaelschte Quittungskern muss kodieren");
+        let signature = writer_device_signer()
+            .sign_receipt(core.exact_bytes())
+            .expect("der Fixture-Server muss signieren");
+        let receipt =
+            ReceiptV1::new(core, signature).expect("die gefaelschte Quittung muss binden");
+        let bytes = encode_receipt(&receipt)
+            .expect("die gefaelschte Quittung muss kodieren")
+            .into_vec();
+        if object_hash(&bytes) < below {
+            return bytes;
+        }
+    }
+    panic!("kein Objekthash unter der echten Quittung gefunden");
+}
+
 /// Der gemeinsame Zuschnitt eines Eintrags der Quittungslinie.
 fn receipt_entry_spec(
     line: &ReceiptLine,

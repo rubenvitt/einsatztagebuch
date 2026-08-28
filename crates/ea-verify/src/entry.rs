@@ -170,10 +170,24 @@ pub(crate) fn orphan_grants(inventory: &ArchiveInventory) -> Vec<ObjectHash> {
 /// Die Quittung, die GENAU DIESES Eintragspaket bezeugt.
 ///
 /// Zugeordnet wird ueber `entry_object_hash` und nicht ueber den `entryHash`:
-/// die Quittung bestaetigt die BYTES, die der Server angenommen hat. Zwei
-/// Quittungen auf denselben Eintrag hat das Inventar bereits als Widerspruch
-/// isoliert (`crates/ea-archive/src/inventory.rs:518-537`), hier bleibt
-/// deshalb hoechstens eine uebrig.
+/// die Quittung bestaetigt die BYTES, die der Server angenommen hat.
+///
+/// # Diese Auswahl filtert NICHT nach Quarantaene, und das ist Absicht
+///
+/// Das Inventar isoliert zwei Quittungen auf denselben Eintrag zwar als
+/// Widerspruch (`crates/ea-archive/src/inventory.rs:518-537`), laesst dabei
+/// aber BEIDE in ihrer Objektfamilie stehen — die echte eingeschlossen. Hier
+/// bleibt deshalb ausdruecklich nicht hoechstens eine uebrig, und `find`
+/// liefert aus dieser nach Objekthash aufsteigenden Sammlung den KLEINSTEN
+/// Treffer, isoliert oder nicht. Diese Stelle kennt den Bericht nicht und kann
+/// die Frage gar nicht beantworten; die Schranke sitzt an der einzigen
+/// Aufrufstelle, `confirm_entries` in `crates/ea-verify/src/archive.rs`, nach
+/// demselben Muster wie die des Grantpfads in `claim_own_grants`.
+///
+/// GEMESSEN in `crates/ea-verify/tests/receipt_checkpoint.rs`,
+/// `a_forged_second_receipt_with_a_smaller_object_hash_is_never_the_chosen_one`:
+/// ohne jene Schranke traegt der Bericht dort die Faelschung zugleich in
+/// `quarantinedObjects` und in `signatureErrors`.
 pub(crate) fn receipt_for<'a>(
     inventory: &'a ArchiveInventory,
     entry: &Parsed<EntryPackageV1>,

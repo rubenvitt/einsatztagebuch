@@ -48,7 +48,7 @@ use support::{
     CHECKPOINT_PROVEN_GAP_FROM_V1, CHECKPOINT_TRUNCATED_THROUGH_V1, CheckpointSpec,
     DESTROYED_STUB_SEQUENCE_V1, FIXTURE_OS_WALL_CLOCK_V1, GENESIS_GAP_SEQUENCE_V1,
     RECEIPT_HEAD_SEQUENCE_V1, RECEIPT_PRE_ENTRY_GAP_THROUGH_V1, ReceiptArchiveSpec,
-    receipt_archive,
+    receipt_archive, receipt_archive_with_a_forged_second_receipt,
 };
 
 fn options() -> VerifyOptions<'static> {
@@ -360,5 +360,90 @@ fn receipts_confirm_checkpoints_bound_rollback_and_a_stub_stays_a_gap() {
         stubbed.chain_head().sequence().get(),
         RECEIPT_HEAD_SEQUENCE_V1,
         "der Kopf bleibt der letzte unstrittige Eintrag"
+    );
+}
+
+/// EINE UNTERGESCHOBENE ZWEITE QUITTUNG WIRD NIE DIE GEWAEHLTE.
+///
+/// Der Bestand traegt zwei `.esr` auf denselben `entryObjectHash`: die echte
+/// und eine gefaelschte mit KLEINEREM Objekthash. `receipt_for` nimmt mit
+/// `find` den ersten Treffer aus einer nach Objekthash aufsteigenden Liste —
+/// ohne die Quarantaeneschranke waere das die Faelschung.
+///
+/// GEMESSEN WIRD DER WIDERSPRUCH IM BERICHT, nicht eine Fehlannahme: beide
+/// Quittungen sind isoliert (`receipt_conflicts` isoliert JEDES Mitglied einer
+/// Gruppe mit mehr als einem Objekt), der Ausgang ist damit ohnehin
+/// fail-closed. Ohne die Schranke stuende die Faelschung aber ZUGLEICH in
+/// `quarantinedObjects` und in `signatureErrors` — ein Objekt in zwei
+/// Mangelfeldern, genau das, was der Grantpfad seit
+/// `crates/ea-verify/src/archive.rs:564-575` verhindert.
+///
+/// DER ZWEITE EINTRAG IST DIE KONTROLLE. Seine Quittung ist unberuehrt und
+/// unisoliert; bliebe er hier unbestaetigt, verboete die Schranke mehr als den
+/// Widerspruch, und der Zeuge waere auch dann gruen, wenn `receipt_for` gar
+/// keine Quittung mehr herausgaebe.
+#[test]
+fn a_forged_second_receipt_with_a_smaller_object_hash_is_never_the_chosen_one() {
+    let forged = receipt_archive_with_a_forged_second_receipt();
+    let built = &forged.archive;
+    let report = verify_archive(&built.fixture, &built.anchor(), options())
+        .expect("der Bestand traegt auch mit einer untergeschobenen Quittung");
+
+    assert!(
+        forged.forged_receipt_object_hash < built.receipt_object_hashes[0],
+        "die Faelschung stuende sonst hinter der echten Quittung und bewiese nichts"
+    );
+    let isolated: Vec<_> = report.quarantined_objects().collect();
+    for expected in [
+        forged.forged_receipt_object_hash,
+        built.receipt_object_hashes[0],
+    ] {
+        assert!(
+            isolated
+                .iter()
+                .any(|object| object.object_hash() == expected
+                    && object.reason() == QuarantineReason::Conflicting),
+            "zwei Quittungen auf denselben Eintrag isolieren einander"
+        );
+    }
+
+    // DIE EIGENTLICHE AUSSAGE: kein Objekt traegt zugleich einen
+    // Quarantaene- und einen Signaturbefund.
+    assert!(
+        report
+            .signature_errors()
+            .all(|error| error.object_hash() != forged.forged_receipt_object_hash),
+        "eine isolierte Quittung wird nicht geprueft und traegt deshalb keinen zweiten Befund"
+    );
+    assert_eq!(
+        report.signature_errors().len(),
+        0,
+        "an diesem Bestand ist ausser der Isolation nichts zu beanstanden"
+    );
+
+    let results: Vec<_> = report.object_results().collect();
+    let first = results
+        .iter()
+        .find(|result| result.object_hash() == built.entry_object_hashes[0])
+        .expect("der Eintrag selbst ist nicht isoliert und behaelt sein Ergebnis");
+    assert_eq!(
+        first.result(),
+        ObjectResultKindV1::Valid,
+        "eine untergeschobene Quittung entwertet den Eintrag nicht"
+    );
+    assert_eq!(
+        first.server_confirmation(),
+        ServerConfirmationV1::NotServerConfirmed,
+        "seine einzige unstrittige Quittung ist mitisoliert — bestaetigt ist er damit nicht"
+    );
+
+    let head = results
+        .iter()
+        .find(|result| result.object_hash() == built.entry_object_hashes[1])
+        .expect("der zweite Eintrag ist unberuehrt");
+    assert_eq!(
+        head.server_confirmation(),
+        ServerConfirmationV1::ServerConfirmed,
+        "die Schranke verbietet den Widerspruch, nicht die Bestaetigung"
     );
 }
