@@ -78,9 +78,11 @@ pub enum MediumFailure {
     /// Bestandswurzel nimmt noch etwas an.
     ///
     /// Die Wurzel selbst bleibt beschreibbar, und das ist gemessen und nicht
-    /// abgesprochen: die Schreibersperre ist eine Datei IN der Wurzel
-    /// (`ea_archive::CONTROL_FILES_V1[0]`, angelegt mit `create_new`). Eine
-    /// nur lesende Wurzel weist damit schon `acquire_writer_lock` mit
+    /// abgesprochen: die Schreibersperre liegt auf einer Betriebssystemsperre
+    /// ueber einer Datei IN der Wurzel (`ea_archive::CONTROL_FILES_V1[0]`), und
+    /// die Sperre laesst sich nur nehmen, wenn diese Datei sich oeffnen bzw.
+    /// anlegen laesst. Eine nur lesende Wurzel weist damit schon
+    /// `acquire_writer_lock` mit
     /// [`ea_archive::ArchiveBackendError::AlreadyLocked`] ab — VOR dem ersten
     /// dauerhaften Schritt. Die Verweigerung waere dann eine Aussage ueber die
     /// Sperrdatei und keine ueber das Medium, und genau diese Leere soll dieser

@@ -3,15 +3,15 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ea_archive::ArchiveBackendError;
-use ea_archive_fs::{ArchiveHealthCheckV1, ArchiveHealthReport};
-use ea_draft::{DraftError, DraftRepository, MasterDataRepository};
+use ea_archive_fs::{ArchiveHealthCheckV1, ArchiveHealthReport, BundleError};
+use ea_draft::{DiscardService, DraftError, DraftRepository, MasterDataRepository, RestartState};
 use ea_format::OperatorRoleV1;
 use ea_operator::OperatorSessionProof;
 use ea_schema::{NativeSourceV1, PersonnelSnapshotV1, SchemaError, VehicleSnapshotV1};
 use ea_types::UnixMillis;
 use ea_ui_contracts::{
-    FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView, PersonnelSelectionView,
-    VehicleSelectionView,
+    BundleExportView, FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView,
+    PersonnelSelectionView, VehicleSelectionView,
 };
 use ea_writer::{
     FinalizationInputV1, FinalizationPreview, RecoveryOutcome, WriterError, WriterService,
@@ -123,6 +123,176 @@ impl<T: DraftRepository + ?Sized> DraftPayloadPort for T {
     fn save_payload(&self, payload: String) -> Result<(), DraftError> {
         let draft = self.load_or_create()?;
         self.save(draft.with_notes(payload)).map(|_| ())
+    }
+}
+
+/// Der synchrone Port des Ein-Datei-Buendelexports.
+///
+/// # Warum hier keine Naht wie [`BoundWriter`] steht
+///
+/// `ea_archive_fs::write_archive_bundle` verlangt einen aufgeloesten
+/// `TrustAnchorV1`, und dieser Typ lebt in `ea-trust`. `ea-trust` steht nicht in
+/// der Abhaengigkeitsmenge dieses Pakets, `ea-archive-fs` gibt ihn nicht weiter,
+/// und kein erreichbares Paket liefert einen Wert dieses Typs — der Aufruf ist
+/// hier also nicht einmal HINSCHREIBBAR. Diese Grenze erfindet ihn deshalb
+/// nicht; sie zieht die Naht so eng an den Kern, wie es ohne diese Kante geht:
+/// der Fehlerausgang IST [`BundleError`], und der Code einer Abweisung kommt
+/// damit woertlich aus `ea-archive-fs/src/bundle_error.rs` und nicht aus einer
+/// zweiten Liste. Ein Bestand, der nicht vollstaendig verifiziert, kommt als
+/// [`BundleError::SourceNotFullyVerified`] an und wird abgewiesen.
+///
+/// Der Erfolgsausgang ist die ANSICHT und nicht `ea_archive_fs::BundleExportReport`:
+/// dessen Feld ist privat und ohne oeffentlichen Konstruktor, und er nennt nur
+/// die Objektzahl. Pfad und Byteumfang sind Tatsachen des Wirts ueber das Ziel,
+/// das er selbst gewaehlt hat.
+///
+/// # Ohne Argument
+///
+/// Das Ziel gehoert dem WIRT und kommt nie aus einer Antwort der Oberflaeche;
+/// der Implementierer haelt es, wie [`BoundWriter`] den Nachweis haelt. Die
+/// Freies-Ziel-Regel samt `O_CREAT|O_EXCL` liegt im Kern und wird hier nicht
+/// nachgebaut.
+pub trait ArchiveBundleExportPort {
+    /// Schreibt den Bestand als EINE Datei und meldet, was hinausging.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Buendelschreibers, unveraendert.
+    fn export(&self) -> Result<BundleExportView, BundleError>;
+}
+
+/// Der synchrone Port des Verwerfens.
+///
+/// Derselbe Lebensdauergrund wie bei den Ports darueber: [`DiscardService`]
+/// BORGT die Zeit des gewaehlten Registry-Head (`&'now PreexistingEffectiveNow`)
+/// und haelt keine Momentaufnahme davon, traegt also eine Lebensdauer und passt
+/// nicht in den `'static`-Zustand einer Tauri-Anwendung.
+///
+/// Der SITZUNGSNACHWEIS steht wie bei [`WriterPreviewPort`] nicht in der
+/// Signatur: [`OperatorSessionProof`] ist ausdruecklich nicht `Clone`, und
+/// ausserhalb von `ea-operator` kann ihn niemand bauen. Er gehoert dem
+/// Implementierer, und [`BoundDiscard`] ist der eine, der ihn haelt.
+///
+/// Beide Rumpfe liefern [`RestartState`] und nicht `ea_draft::DiscardOutcome`.
+/// Das ist eine Entscheidung mit zwei Gruenden: `DiscardOutcome` traegt die
+/// Entwurfskennung und den leeren Entwurf — nichts davon gehoert an eine
+/// Oberflaechengrenze —, und seine Konstruktoren sind `pub(crate)`, ein Doppel
+/// kann es ausserhalb von `ea-draft` also gar nicht geben. [`RestartState`]
+/// nennt dagegen GENAU das, was ein Bediener vorfindet, und ist messbar.
+pub trait DraftDiscardPort {
+    /// Bucht die Verwerfensabsicht dauerhaft und fuehrt das Verwerfen zu Ende.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Verwerfensdienstes, unveraendert.
+    fn begin(&self) -> Result<RestartState, DraftError>;
+
+    /// Setzt ein unterbrochenes Verwerfen fort.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Verwerfensdienstes, unveraendert.
+    fn resume(&self) -> Result<RestartState, DraftError>;
+}
+
+/// Der Verwerfensdienst SAMT dem Nachweis, den nur der Wirt hat.
+///
+/// Der Nachweis liegt hinter einem Schloss und als `Option`, und das ist die
+/// Zusage von `ea_draft::DiscardService::begin_discard` im Typ: die Methode
+/// nimmt den Nachweis ALS WERT, weil ein Verwerfen unwiderruflich ist und ein
+/// zweites Verwerfen eine zweite Wiederanmeldung verlangt. Ein gehaltener
+/// Nachweis, der nach dem ersten Beginnen noch dalaege, waere genau die zweite
+/// Autorisierung, die der Kern ausschliesst.
+///
+/// Sie traegt eine Lebensdauer und liegt deshalb NICHT im `'static`-Zustand der
+/// Anwendung — wie [`BoundWriter`] wird sie je Aufruf gebaut. Die Aufloesung
+/// von Bindung, Nachweis, Ablage und Schluesselport gehoert einem spaeteren
+/// Task; was hier steht, ist die Naht, an der er andockt, und die drei Aufrufe
+/// [`DiscardService::begin_discard`], [`DiscardService::resume_discard`] und
+/// [`DiscardService::resume_after_restart`] stehen damit UEBERSETZT im Baum.
+///
+/// UEBERSETZT heisst nicht AUSGEFUEHRT: [`BoundDiscard::new`] hat heute keine
+/// Aufrufstelle, weil kein Wirt einen Nachweis aufloest. Der heilende Arm des
+/// Neustartpfads (`ea-draft/src/discard.rs`:220-224, VM-11) ist damit
+/// STRUKTURELL VORBEREITET und nicht erreicht — er wird erreichbar, sobald ein
+/// Wirt diese Naht baut, und keine Zeile dieses Pakets muss sich dafuer
+/// aendern.
+pub struct BoundDiscard<'a> {
+    service: &'a DiscardService<'a>,
+    proof: Mutex<Option<OperatorSessionProof>>,
+}
+
+impl<'a> BoundDiscard<'a> {
+    #[must_use]
+    pub fn new(service: &'a DiscardService<'a>, proof: OperatorSessionProof) -> Self {
+        Self {
+            service,
+            proof: Mutex::new(Some(proof)),
+        }
+    }
+
+    /// Der Nachweis unter seinem Schloss — vergiftet oder nicht.
+    ///
+    /// Ein vergiftetes Schloss darf hier kein `Err` werden: es waere ein
+    /// Verwerfen, das nicht laeuft, weil ein anderer Thread abgestuerzt ist,
+    /// und der Nachweis selbst bleibt davon unberuehrt.
+    fn proof(&self) -> std::sync::MutexGuard<'_, Option<OperatorSessionProof>> {
+        self.proof.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl DraftDiscardPort for BoundDiscard<'_> {
+    /// Das Beginnen VERBRAUCHT den Nachweis.
+    ///
+    /// Ist er fort, ist das [`DraftError::ReauthRequired`] — derselbe Code, den
+    /// der Kern fuer einen entwerteten Nachweis meldet, und keine erfundene
+    /// zweite Aussage: ohne frische Wiederanmeldung verwirft dieses Geraet
+    /// nichts.
+    fn begin(&self) -> Result<RestartState, DraftError> {
+        let proof = self.proof().take().ok_or(DraftError::ReauthRequired)?;
+        self.service
+            .begin_discard(proof)
+            .map(|_| RestartState::NewBlankDraft)
+    }
+
+    /// Die Fortsetzung nimmt ZUERST die gebuchte Absicht und dann den
+    /// Neustartpfad.
+    ///
+    /// Die Reihenfolge ist die Aussage. `resume_discard` setzt genau die
+    /// gebuchte Absicht fort; kommt es dort nicht zum Fortsetzen, ist die Frage
+    /// nicht beantwortet, sondern eine andere: was findet der Bediener vor? Das
+    /// beantwortet `resume_after_restart` — samt der Vorrangregel der liegenden
+    /// Abschlussmarke und samt dem heilenden Arm fuer einen Entwurf, dessen
+    /// `draftDEK` nach einer zurueckgespielten Sicherung fort ist. Ein Entwurf,
+    /// der nie mehr zu oeffnen ist, bliebe sonst als unladbare Zeile liegen.
+    ///
+    /// GENAU ZWEI Fehler fallen deshalb durch, und der zweite ist der wichtige:
+    ///
+    /// - [`DraftError::NoPendingDiscard`] — es ist keine Absicht gebucht.
+    /// - [`DraftError::PreparedFinalizationPresent`] — eine Abschlussmarke
+    ///   liegt. `DiscardService::resume_discard` prueft die Marke in `enter()`
+    ///   und damit VOR `pending_discard()` (`ea-draft/src/discard.rs`:290-296),
+    ///   meldet in diesem Fall also NIEMALS `NoPendingDiscard`. Ohne diesen
+    ///   zweiten Arm waere `RestartState::PreparedFinalizationPending` von
+    ///   dieser Naht aus UNERREICHBAR — der Ausgang, den die Oberflaeche als
+    ///   Vorrangregel anzeigt, entstuende nie. Der Durchfall ist auch sachlich
+    ///   richtig: `resume_after_restart` prueft die Marke als ERSTES und kehrt
+    ///   mit genau diesem Ausgang zurueck, ohne ein Verwerfen fortzusetzen —
+    ///   die Marke gewinnt an JEDEM Eingang.
+    ///
+    /// Jeder ANDERE Fehler bricht ab und wird nicht in den zweiten Weg
+    /// umgedeutet: eine gehaltene Sperre oder ein Nachweis des falschen Zwecks
+    /// ist keine Aussage darueber, was der Bediener vorfindet.
+    fn resume(&self) -> Result<RestartState, DraftError> {
+        let guard = self.proof();
+        let proof = guard.as_ref().ok_or(DraftError::ReauthRequired)?;
+        match self.service.resume_discard(proof) {
+            Ok(_) => Ok(RestartState::NewBlankDraft),
+            Err(DraftError::NoPendingDiscard | DraftError::PreparedFinalizationPresent) => {
+                self.service.resume_after_restart(proof)
+            }
+            Err(other) => Err(other),
+        }
     }
 }
 
@@ -429,6 +599,8 @@ pub struct DesktopState {
     drafts: Option<Arc<dyn DraftPayloadPort + Send + Sync>>,
     health: Option<Arc<dyn ArchiveHealthPort + Send + Sync>>,
     writer: Option<Arc<dyn WriterFinalizePort + Send + Sync>>,
+    discard: Option<Arc<dyn DraftDiscardPort + Send + Sync>>,
+    bundle_export: Option<Arc<dyn ArchiveBundleExportPort + Send + Sync>>,
 }
 
 impl DesktopState {
@@ -448,7 +620,38 @@ impl DesktopState {
             drafts,
             health,
             writer,
+            discard: None,
+            bundle_export: None,
         }
+    }
+
+    /// Der Verwerfensdienst dieses Wirts.
+    ///
+    /// Eine eigene Naht und keine siebte Stellung von [`Self::new`]: sechs
+    /// Stellungen sind an der Aufrufstelle gerade noch lesbar, und
+    /// `clippy::too_many_arguments` faellt ab der achten. Wichtiger ist die
+    /// Aussage — der Verwerfensdienst kommt NICHT mit der Anwendung hoch: er
+    /// verlangt einen Nachweis mit dem Zweck `ReauthPurpose::DiscardDraft`, und
+    /// den gibt es erst, wenn ein Bediener sich fuer genau dieses Verwerfen neu
+    /// angemeldet hat.
+    #[must_use]
+    pub fn with_discard(mut self, discard: Arc<dyn DraftDiscardPort + Send + Sync>) -> Self {
+        self.discard = Some(discard);
+        self
+    }
+
+    /// Der Buendelexport dieses Wirts.
+    ///
+    /// Aus demselben Grund eine eigene Naht wie [`Self::with_discard`]: er
+    /// verlangt einen aufgeloesten Vertrauensanker und ein gewaehltes Ziel, und
+    /// beides hat die Anwendung beim Hochkommen nicht.
+    #[must_use]
+    pub fn with_bundle_export(
+        mut self,
+        bundle_export: Arc<dyn ArchiveBundleExportPort + Send + Sync>,
+    ) -> Self {
+        self.bundle_export = Some(bundle_export);
+        self
     }
 
     /// Die geprueften Sitzungsangaben, unter ihrem Schloss.
@@ -503,6 +706,19 @@ impl DesktopState {
     #[must_use]
     pub fn writer(&self) -> Option<&(dyn WriterFinalizePort + Send + Sync)> {
         self.writer.as_deref()
+    }
+
+    /// Der Verwerfensdienst, wenn Bindung, Nachweis und Ablage aufgeloest sind.
+    #[must_use]
+    pub fn discard(&self) -> Option<&(dyn DraftDiscardPort + Send + Sync)> {
+        self.discard.as_deref()
+    }
+
+    /// Der Buendelexport, wenn Bestand, Vertrauensanker und Ziel aufgeloest
+    /// sind.
+    #[must_use]
+    pub fn bundle_export(&self) -> Option<&(dyn ArchiveBundleExportPort + Send + Sync)> {
+        self.bundle_export.as_deref()
     }
 }
 

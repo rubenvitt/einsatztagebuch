@@ -69,6 +69,49 @@ impl IncidentNumberRegister {
         }
     }
 
+    /// Gibt eine Nummer wieder FREI.
+    ///
+    /// # Wer sie aufrufen darf
+    ///
+    /// AUSSCHLIESSLICH eine Finalisierung, die nach ihrem Anspruch und VOR der
+    /// unwiderruflichen Grenze gescheitert ist (`design.md` §9.4: „vor der
+    /// dauerhaften Loeschung des `draftDEK` darf der Entwurf wiederhergestellt
+    /// werden"). Fuer sie gehoert die Nummer weiterhin demselben realen Einsatz,
+    /// und ohne die Freigabe muesste der Bediener sich fuer ihn eine andere
+    /// ausdenken.
+    ///
+    /// Hinter der Grenze ist der Aufruf VERBOTEN: dort traegt ein
+    /// veroeffentlichter Eintrag die Nummer in seiner Nutzlast, und eine
+    /// Freigabe liesse einen zweiten Einsatz dieselbe beanspruchen — zwei
+    /// committed Eintraege, die sich nicht mehr zuruecknehmen lassen.
+    ///
+    /// Normalisiert dieselbe Zeichenkette wie [`Self::claim`]; eine zerlegte
+    /// Form gaebe sonst einen anderen Schluessel frei als den beanspruchten.
+    ///
+    /// # Errors
+    ///
+    /// [`DraftError::Store`], wenn die Ablage ablehnt. Dass KEINE Zeile
+    /// getroffen wurde, ist KEIN Fehler: die Freigabe ist idempotent, und ein
+    /// zweiter Aufruf ueber denselben Schluessel soll nichts anderes bedeuten
+    /// als der erste.
+    pub fn release(
+        &self,
+        organization_id: OrganizationId,
+        local_civil_year: i32,
+        human_incident_number: &str,
+    ) -> Result<(), DraftError> {
+        self.database.execute(
+            "DELETE FROM incident_number_register WHERE organization_id = ?1 \
+             AND local_civil_year = ?2 AND human_incident_number = ?3",
+            &[
+                StoreValue::Blob(organization_id.as_bytes().to_vec()),
+                StoreValue::Integer(i64::from(local_civil_year)),
+                StoreValue::Blob(register_key(human_incident_number)),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Meldet, ob der Schluessel bereits verbraucht ist.
     ///
     /// Normalisiert dieselbe Zeichenkette wie [`Self::claim`]: eine zerlegte

@@ -20,7 +20,11 @@ fn the_plan_holds_exactly_one_recovery_and_every_active_reader() {
             .count(),
         1
     );
-    assert_eq!(plan.items().len(), harness.expected_grant_count());
+    // Literal statt `harness.expected_grant_count()`: die glatte Fixture legt
+    // GENAU einen Recovery-Empfaenger und zwei Reader an (`support::build_line`),
+    // und diese Zusicherung bezeugt DAS — nicht bloss, dass zwei unabhaengige
+    // Zaehlungen sich selbst gleich sind.
+    assert_eq!(plan.items().len(), 3);
     assert_eq!(
         plan.items()
             .iter()

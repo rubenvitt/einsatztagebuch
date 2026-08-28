@@ -2091,6 +2091,7 @@ After this task AK 28 (`docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-des
 - Modify: `tools/xtask/tests/spec_completeness.rs`
 - Modify: `tools/xtask/tests/workspace.rs`
 - Modify: `tests/ea-system-tests/tests/conformance_golden_vectors.rs`
+- Modify: `vectors/crypto/suite-1`
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
 - Create: `crates/ea-archive-fs/tests/support/mod.rs`
@@ -2631,6 +2632,7 @@ git commit -m "feat(archive): materialize the format package when creating an ar
 - Modify: `tools/xtask/tests/spec_completeness.rs`
 - Modify: `tools/xtask/tests/workspace.rs`
 - Modify: `tests/ea-system-tests/tests/conformance_golden_vectors.rs`
+- Modify: `vectors/crypto/suite-1`
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
 - Test: `crates/ea-format/tests/finalization_preview.rs`

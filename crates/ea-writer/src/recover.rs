@@ -88,7 +88,15 @@ impl WriterService<'_> {
     ///
     /// [`WriterError::PreparedFinalizationUnreadable`], wenn die Marke nicht
     /// die Gestalt dieses Baustands hat — fail-closed, denn aus halb gelesenen
-    /// Bytes darf kein Bestand entstehen; sonst der Fehler des Ports.
+    /// Bytes darf kein Bestand entstehen.
+    ///
+    /// [`WriterError::PreparedFinalizationInconsistent`], wenn sie die Gestalt
+    /// zwar hat, sich aber selbst widerspricht: abweichender Objekthash,
+    /// `entryHash`, Sequenz oder Grant-Plan-Hash, oder eine leere Grantliste
+    /// (siehe [`PreparedTransactionV1::verify`]). Auch dieser Ausgang
+    /// veroeffentlicht KEIN Byte und loest die Marke NICHT.
+    ///
+    /// Sonst der Fehler des Ports.
     pub fn recover_pending(&self) -> Result<RecoveryOutcome, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
@@ -96,6 +104,14 @@ impl WriterService<'_> {
             return Ok(RecoveryOutcome::NothingPending);
         };
         let transaction = PreparedTransactionV1::decode(marker.as_bytes())?;
+        // NACHGERECHNET, bevor irgendetwas anderes geschieht — und ausdruecklich
+        // VOR der Frage nach der Grenze. Hinter der Grenze ist diese Marke die
+        // einzige Quelle des Bestands, und dann gibt es keine zweite Pruefung
+        // mehr; VOR der Grenze ist eine sich selbst widersprechende Marke ein
+        // Manipulationsbefund und keine Lage, aus der ein Programm sich selbst
+        // heraushilft. Fail-closed heisst hier in beide Richtungen: abbrechen,
+        // ohne ein Byte zu veroeffentlichen und ohne die Marke zu loesen.
+        transaction.verify(marker.as_bytes())?;
 
         // Der ZEUGE der Grenze ist der ENTWURF SELBST, und nicht ein Feld der
         // Marke: laesst er sich laden, war sein `draftDEK` da und

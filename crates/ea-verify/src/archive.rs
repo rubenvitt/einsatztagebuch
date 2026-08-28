@@ -651,7 +651,27 @@ fn confirm_entries<'a>(
         }
 
         let mut confirmation = ServerConfirmationV1::NotServerConfirmed;
-        if let Some(receipt) = receipt_for(inventory, entry) {
+        // EINE ISOLIERTE QUITTUNG WIRD NICHT GEPRUEFT, und sie bekommt auch
+        // keinen zweiten Befund — dieselbe Schranke, die [`claim_own_grants`]
+        // ueber dem Grant traegt. Zwei `.esr` auf denselben
+        // `entryObjectHash` isolieren EINANDER, die echte eingeschlossen
+        // (`crates/ea-archive/src/inventory.rs:518-537`), und beide bleiben
+        // dabei in ihrer Objektfamilie stehen; [`receipt_for`] waehlt aus
+        // dieser nach Objekthash aufsteigenden Sammlung den KLEINSTEN Treffer.
+        // Ohne diese Zeile stuende eine untergeschobene Quittung mit kleinerem
+        // Objekthash zugleich in `quarantinedObjects` und in
+        // `signatureErrors`. Der Ausgang des Laufs aendert sich dadurch nicht
+        // — die nicht leere Quarantaene traegt ihn bereits —, wohl aber die
+        // Widerspruchsfreiheit des Berichts.
+        //
+        // FUER GATE `evidence` sagt sie dasselbe noch einmal: aus einem
+        // isolierten Objekt stammt keine `evidence-due-at`-Frist, denn es
+        // gelangt gar nicht erst in `confirmed`.
+        if let Some(receipt) = receipt_for(inventory, entry).filter(|receipt| {
+            !report
+                .quarantined_objects
+                .contains_key(&receipt.object_hash())
+        }) {
             match confirm_receipt(store, key, anchor, inventory, os_wall_clock, entry, receipt) {
                 Ok(thumbprint) => {
                     // Nachweis des Geprueften: der Abdruck, der die

@@ -15,7 +15,7 @@
 mod support;
 
 use ea_writer::{FinalizationFaultPoint, FinalizationStep, RecoveryOutcome};
-use support::{WriterHarness, valid_incident};
+use support::{FIXTURE_INCIDENT_NUMBER, WriterHarness, valid_incident};
 
 #[test]
 fn every_fault_recovers_the_draft_or_completes_the_same_prepared_transaction() {
@@ -91,8 +91,15 @@ fn every_fault_recovers_the_draft_or_completes_the_same_prepared_transaction() {
                 harness.published_entry_paths().is_empty(),
                 "die Rueckspielung veroeffentlicht nichts"
             );
+            // Gefragt ist der SCHLUESSELSPEICHER und nicht die Ablage:
+            // `draft_dek_is_present` liest ueber `load_or_create` und wiederholt
+            // damit genau die Bedingung, an der `recover_pending` den Fall
+            // ueberhaupt erkannt hat. `draft_dek_entry_is_absent` fragt den
+            // Speicher unter der Adresse, die die Fixture beim Saeen genommen
+            // hat — die zweite Seite desselben Ereignisses und keine
+            // Wiederholung.
             assert!(
-                !harness.draft_dek_is_present(),
+                harness.draft_dek_entry_is_absent(),
                 "der geraetegebundene Schluesselspeichereintrag kehrt NICHT mit den Dateien zurueck"
             );
         } else if point.phase().is_irreversible() {
@@ -178,11 +185,91 @@ fn after_the_key_boundary_recovery_completes_the_exact_prepared_bytes() {
         .backend()
         .read_for_test(&entries[0])
         .expect("das committed .eip muss lesbar sein");
+    // GENAU EINE Fundstelle statt bloss „irgendwo enthalten": eine
+    // Enthaltenspruefung besteht auch, wenn dieselben Bytes zufaellig oder
+    // mehrfach vorkommen, und sagt nichts ueber die Stelle. Ein
+    // `single_offset`-Helfer wie in
+    // `tests/ea-system-tests/tests/support/mod.rs` existiert in dieser Crate
+    // nicht (getrennte Test-Binaries); die Zusicherung steht deshalb direkt
+    // hier statt hinter einem neuen geteilten Helfer.
+    let mut offsets = prepared_bytes
+        .windows(committed.len())
+        .enumerate()
+        .filter(|(_, window)| *window == committed.as_slice())
+        .map(|(offset, _)| offset);
+    let first_offset = offsets.next();
     assert!(
-        prepared_bytes
-            .windows(committed.len())
-            .any(|w| w == committed),
-        "die veroeffentlichten Bytes stehen unveraendert in der Abschlussmarke"
+        first_offset.is_some() && offsets.next().is_none(),
+        "die veroeffentlichten Bytes muessen GENAU EINMAL und unveraendert in der \
+         Abschlussmarke stehen"
+    );
+}
+
+/// Der Neustart nach einem HARTEN Abbruch kommt an beiden Sperrdateien vorbei.
+///
+/// Der Zeuge, an dem die Betriebssystemsperre haengt, und der einzige auf
+/// PRODUKTEBENE. `recover_pending` nimmt zuerst die Schreibersperre des
+/// Bestands und dann die Entwurfssperre (`crates/ea-writer/src/recover.rs`);
+/// solange beide am DASEIN ihrer Datei hingen, war der Weg nach einem
+/// `SIGKILL` oder einem Stromausfall unter der Finalisierung dauerhaft
+/// versperrt — die vorbereiteten Bytes lagen da, und kein Neustart erreichte
+/// sie mehr. Genau das ist der Befund, gegen den B.4 steht
+/// (`docs/traceability/stage-2-gate.md` §2.2, Ruling R60).
+///
+/// Die Lage wird ausdruecklich NICHT ueber
+/// [`WriterHarness::restore_captured_backup`] hergestellt: jene Fixture
+/// ENTFERNT die Sperrdateien und stellte damit genau die Bedingung nicht her,
+/// um die es hier geht. Deshalb legt der Zeuge sie selbst hin.
+#[test]
+fn a_hard_crash_under_both_locks_still_lets_the_restart_complete() {
+    let harness = WriterHarness::with_incident();
+    let source = harness.source();
+    let service = harness.service(&source);
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+
+    let interrupted = service
+        .finalize_interrupted_at(
+            &proof,
+            valid_incident(),
+            harness.observed_now(),
+            FinalizationFaultPoint::AfterAbsenceConfirmation,
+        )
+        .expect("der Abbruch an der Grenze muss erreichbar sein");
+    let sequence = interrupted
+        .prepared()
+        .expect("hinter der Grenze liegt eine Abschlussmarke")
+        .sequence();
+
+    // Der harte Abbruch: beide Sperrdateien bleiben liegen, kein Prozess haelt
+    // eine Sperre darauf.
+    harness.leave_stale_lock_files();
+    assert!(
+        harness.both_lock_files_are_present(),
+        "die Fixture MUSS beide Sperrdateien hinterlassen, sonst misst der Zeuge nichts"
+    );
+
+    let recovered = service
+        .recover_pending()
+        .expect("der Neustart MUSS an beiden liegengebliebenen Sperrdateien vorbeikommen");
+    assert_eq!(
+        recovered,
+        RecoveryOutcome::CommittedFromPreparedBytes { sequence },
+        "der Neustart vollendet dieselbe vorbereitete Transaktion"
+    );
+    assert_eq!(
+        harness.published_entry_paths().len(),
+        1,
+        "genau ein committed .eip"
+    );
+
+    // Und die Dateien liegen danach immer noch da: die Freigabe loest die
+    // Sperre und raeumt NICHT auf. Das ist die Zusage, nicht ein Versehen —
+    // wer die Datei entfernte, oeffnete das Fenster, in dem ein zweiter Halter
+    // den alten Inode haelt, waehrend ein dritter unter demselben Namen eine
+    // neue Datei anlegt und darauf sperrt.
+    assert!(
+        harness.both_lock_files_are_present(),
+        "die Sperrdateien bleiben liegen und sind harmlos"
     );
 }
 
@@ -670,4 +757,557 @@ fn a_keystore_that_reports_a_deletion_without_deleting_stops_the_finalization() 
     assert!(!harness.prepared_marker_is_present());
     assert!(!harness.draft_is_blank());
     assert!(harness.published_entry_paths().is_empty());
+}
+
+/// Die Adresse der GESTAGTEN Eintragsbytes dieser vorbereiteten Transaktion.
+fn staged_entry_path(harness: &WriterHarness) -> String {
+    harness
+        .backend()
+        .relative_paths_below_for_test("entries/")
+        .into_iter()
+        .find(|path| path.ends_with(".eip.staging"))
+        .expect("Schritt 8 hat die Eintragsbytes gestagt")
+}
+
+/// Der `initialGrantPlanHash`, den das vorbereitete `.eip` SIGNIERT.
+///
+/// Er wird aus den gestagten Bytes gelesen und nicht neu gerechnet: die Marke
+/// soll gegen das gemessen werden, was der Writer unterschrieben hat, und eine
+/// zweite Rechnung waere eine zweite Wahrheit.
+fn signed_grant_plan_hash(harness: &WriterHarness) -> [u8; 32] {
+    let bytes = harness
+        .backend()
+        .read_for_test(&staged_entry_path(harness))
+        .expect("die gestagten Eintragsbytes muessen lesbar sein");
+    let parsed = ea_format::decode_exact_object(&bytes).expect("das .eip muss dekodieren");
+    let ea_format::ParsedArchiveObject::Entry(entry) = &parsed else {
+        panic!("unter entries/ liegt ein .eip");
+    };
+    entry.value().manifest().fields().initial_grant_plan_hash
+}
+
+/// Die liegenden Markenbytes.
+fn prepared_marker_bytes(harness: &WriterHarness) -> Vec<u8> {
+    harness
+        .repository()
+        .prepared_finalization_marker()
+        .expect("die Ablage muss lesbar sein")
+        .expect("hinter der Grenze liegt eine Marke")
+        .as_bytes()
+        .to_vec()
+}
+
+/// Legt `bytes` als Abschlussmarke ab.
+fn put_prepared_marker(harness: &WriterHarness, bytes: Vec<u8>) {
+    harness
+        .repository()
+        .replace_prepared_finalization_marker(Some(ea_draft::PreparedFinalizationMarker::new(
+            bytes,
+        )))
+        .expect("die Marke muss sich ersetzen lassen");
+}
+
+/// Eine Marke, deren Grant-Plan-Hash NICHT der ist, den das `.eip` signiert,
+/// wird fail-closed abgewiesen.
+///
+/// # Was hier gemessen wird
+///
+/// `grant_plan_hash` steht MIT in der Marke, „damit die Wiederherstellung
+/// belegen kann, dass die uebernommenen Grants zu dem Plan gehoeren, den das
+/// `.eip` signiert" (`crates/ea-writer/src/marker.rs`) — und dieser Beleg wurde
+/// nie gefuehrt: das Feld wurde geschrieben, gelesen und nie verglichen. Ohne
+/// den Vergleich uebernimmt die Wiederaufnahme hinter der unwiderruflichen
+/// Grenze eine BELIEBIGE Grantmenge unter einem `.eip`, das einen anderen Plan
+/// bindet — und `design.md` §9.4 verlangt genau umgekehrt, dass vorab
+/// veroeffentlichte Grants „nur von der ZUGEHOERIGEN vorbereiteten Transaktion
+/// uebernommen" werden.
+///
+/// Manipuliert wird GENAU dieses Feld und kein beliebiges Byte: der Hash steht
+/// zweimal in der Marke — einmal als ihr eigenes Feld, einmal im eingebetteten
+/// `manifestCore` des `.eip` —, und nur die ERSTE Fundstelle ist das Feld. Eine
+/// Manipulation an einer beliebigen Stelle fiele schon an der Gestalt auf und
+/// wuerde diesen Leser nie erreichen.
+#[test]
+fn a_marker_whose_grant_plan_hash_contradicts_the_entry_is_refused() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterAbsenceConfirmation)
+        .expect("der Abbruch hinter der Grenze muss erreichbar sein");
+
+    let plan_hash = signed_grant_plan_hash(&harness);
+    let mut bytes = prepared_marker_bytes(&harness);
+    let occurrences = bytes
+        .windows(plan_hash.len())
+        .filter(|window| *window == plan_hash.as_slice())
+        .count();
+    assert_eq!(
+        occurrences, 2,
+        "der Plan-Hash steht als eigenes Markenfeld UND im signierten manifestCore — \
+         ohne beide Fundstellen misst dieser Test nichts"
+    );
+    let field = bytes
+        .windows(plan_hash.len())
+        .position(|window| window == plan_hash.as_slice())
+        .expect("die erste Fundstelle ist das Markenfeld");
+    bytes[field..field + plan_hash.len()].copy_from_slice(&[0xa5; 32]);
+    put_prepared_marker(&harness, bytes);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service
+        .recover_pending()
+        .expect_err("eine Marke, die ihrem eigenen .eip widerspricht, MUSS abgewiesen werden");
+    assert_eq!(
+        refused.code(),
+        "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+    );
+    assert!(
+        harness.published_entry_paths().is_empty(),
+        "eine abgewiesene Marke veroeffentlicht nichts"
+    );
+    assert!(harness.published_grant_paths().is_empty());
+}
+
+/// Eine Marke OHNE einen einzigen Grant wird fail-closed abgewiesen.
+///
+/// Der Grant-Plan traegt „genau einen aktiven Recovery-Empfaenger und
+/// ausnahmslos jedes aktive Reader-Zertifikat" (`design.md` §9.3 Schritt 5), ist
+/// also NIE leer. Eine leere Marke ist damit keine Transaktion dieses Bauwerks,
+/// und sie zu vollenden hiesse, einen Eintrag zu veroeffentlichen, den kein
+/// Recovery-Empfaenger je wieder oeffnen kann.
+///
+/// Gebaut wird sie aus der ECHTEN Marke: die Grantliste wird an ihrer Grenze
+/// abgeschnitten und durch die leere Liste ersetzt. Die Grenze ist die Stelle
+/// unmittelbar hinter den eingebetteten Eintragsbytes, und die Zusicherung ueber
+/// das dort stehende Byte belegt, dass wirklich der Listenkopf getroffen wurde.
+#[test]
+fn a_marker_without_a_single_grant_is_refused() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterAbsenceConfirmation)
+        .expect("der Abbruch hinter der Grenze muss erreichbar sein");
+
+    let entry_bytes = harness
+        .backend()
+        .read_for_test(&staged_entry_path(&harness))
+        .expect("die gestagten Eintragsbytes muessen lesbar sein");
+    let mut bytes = prepared_marker_bytes(&harness);
+    let start = bytes
+        .windows(entry_bytes.len())
+        .position(|window| window == entry_bytes.as_slice())
+        .expect("die Marke TRAEGT die Eintragsbytes");
+    let list = start + entry_bytes.len();
+    assert_eq!(
+        bytes[list],
+        0x80 | u8::try_from(harness.expected_grant_count()).expect("weniger als 24 Grants"),
+        "hinter den Eintragsbytes steht der Kopf der Grantliste"
+    );
+    bytes.truncate(list);
+    bytes.push(0x80);
+    put_prepared_marker(&harness, bytes);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service
+        .recover_pending()
+        .expect_err("eine Marke ohne Grant MUSS abgewiesen werden");
+    assert_eq!(
+        refused.code(),
+        "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+    );
+    assert!(harness.published_entry_paths().is_empty());
+    assert!(harness.published_grant_paths().is_empty());
+}
+
+/// Eine Marke, die sich nicht DEKODIEREN laesst, haelt die Wiederaufnahme an.
+///
+/// # Der Unterschied zu den zwei Zeugen darueber
+///
+/// Dort sind die Bytes WOHLGEFORMT und widersprechen sich
+/// (`EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT`); hier haben sie die Gestalt
+/// dieses Baustands gar nicht erst. Die Klausel
+/// (`crates/ea-writer/src/recover.rs`) ist die aelteste fail-closed Zusage des
+/// Wiederaufnahmepfads — „aus halb gelesenen Bytes darf kein Bestand entstehen"
+/// — und war in keinem Testverzeichnis getroffen: jede Marke, die je zur
+/// Wiederaufnahme kam, hatte dieser Lauf selbst geschrieben.
+///
+/// Der Zwilling der Verwerfensseite ist
+/// `crates/ea-draft/tests/discard_faults.rs`
+/// ::a_transient_key_failure_aborts_the_restart_path_and_destroys_nothing:
+/// dieselbe Bauart, ein Doppelgaenger fuer eine Lage, die der wahrhaftige Pfad
+/// nie erzeugt.
+#[test]
+fn a_marker_that_does_not_decode_stops_the_recovery() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterPreparedMarkerCommit)
+        .expect("der Abbruch vor der Grenze muss erreichbar sein");
+    // Nicht leer und nicht zufaellig: ein CBOR-Feld der FALSCHEN Stelligkeit.
+    // Damit faellt die Marke am ersten Gestalttor und nicht an einem
+    // Laengenfehler, den ein Dekodierer auch anders melden koennte.
+    put_prepared_marker(&harness, vec![0x86, 0x01]);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service
+        .recover_pending()
+        .expect_err("eine unlesbare Marke MUSS die Wiederaufnahme anhalten");
+    assert_eq!(refused.code(), "EA-WRITER-PREPARED-FINALIZATION-UNREADABLE");
+
+    // Nichts ist geschehen: nicht veroeffentlicht, und die Marke ist NICHT
+    // geloest — ein Abbruch raeumt keinen Zustand weg, den er nicht versteht.
+    assert!(harness.published_entry_paths().is_empty());
+    assert!(harness.published_grant_paths().is_empty());
+    assert!(harness.prepared_marker_is_present());
+    assert!(!harness.draft_is_blank(), "der Entwurf steht unveraendert");
+}
+
+/// Eine Ablage, deren `load_or_create` GENAU EINMAL an einem
+/// VORUEBERGEHENDEN Schluesselfehler scheitert.
+///
+/// Sie ist der Doppelgaenger fuer die Lage, die `recover_pending` ausdruecklich
+/// benennt und die kein wahrhaftiger Port erzeugt: „Geraet gesperrt, TPM
+/// belegt" — eine Aussage ueber JETZT und nicht ueber den Entwurf.
+///
+/// EINMALIG und nicht dauerhaft, aus demselben Grund wie
+/// `BrieflyLockedProvider` auf der Verwerfensseite: erst das spaetere
+/// Durchlassen belegt, dass der Entwurf die ganze Zeit wiederherstellbar war —
+/// und damit, dass das Abbrechen die richtige Antwort war und keine verpasste
+/// Gelegenheit.
+struct BrieflyLockedRepository {
+    inner: std::sync::Arc<dyn ea_draft::DraftRepository>,
+    refusals_left: std::sync::atomic::AtomicUsize,
+}
+
+impl ea_draft::DraftRepository for BrieflyLockedRepository {
+    fn load_or_create(&self) -> Result<ea_draft::Draft, ea_draft::DraftError> {
+        use std::sync::atomic::Ordering;
+        if self
+            .refusals_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ea_draft::DraftError::Key(
+                ea_key_provider::KeyError::PurposeMismatch,
+            ));
+        }
+        self.inner.load_or_create()
+    }
+
+    fn save(&self, draft: ea_draft::Draft) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
+        self.inner.save(draft)
+    }
+
+    fn draft_dek_handle(
+        &self,
+        draft: &ea_draft::SavedDraft,
+    ) -> Result<ea_key_provider::KeyHandle, ea_draft::DraftError> {
+        self.inner.draft_dek_handle(draft)
+    }
+
+    fn commit_discard_intent(
+        &self,
+        draft: &ea_draft::SavedDraft,
+    ) -> Result<ea_draft::DiscardIntent, ea_draft::DraftError> {
+        self.inner.commit_discard_intent(draft)
+    }
+
+    fn pending_discard(&self) -> Result<Option<ea_draft::DiscardIntent>, ea_draft::DraftError> {
+        self.inner.pending_discard()
+    }
+
+    fn replace_with_blank(&self) -> Result<ea_draft::SavedDraft, ea_draft::DraftError> {
+        self.inner.replace_with_blank()
+    }
+
+    fn remove_ciphertext_and_intent_create_blank(
+        &self,
+        intent: &ea_draft::DiscardIntent,
+    ) -> Result<ea_draft::DiscardOutcome, ea_draft::DraftError> {
+        self.inner.remove_ciphertext_and_intent_create_blank(intent)
+    }
+
+    fn prepared_finalization_marker(
+        &self,
+    ) -> Result<Option<ea_draft::PreparedFinalizationMarker>, ea_draft::DraftError> {
+        self.inner.prepared_finalization_marker()
+    }
+
+    fn replace_prepared_finalization_marker(
+        &self,
+        marker: Option<ea_draft::PreparedFinalizationMarker>,
+    ) -> Result<(), ea_draft::DraftError> {
+        self.inner.replace_prepared_finalization_marker(marker)
+    }
+
+    fn acquire_draft_lock(&self) -> Result<ea_draft::DraftLock, ea_draft::DraftError> {
+        self.inner.acquire_draft_lock()
+    }
+}
+
+/// Ein VORUEBERGEHENDER Schluesselfehler bricht die Wiederaufnahme ab und
+/// vollendet NICHTS.
+///
+/// # Was hier gemessen wird
+///
+/// `recover_pending` liest den ENTWURF als Zeugen der unwiderruflichen Grenze
+/// und zaehlt GENAU ZWEI Fehler auf, die „der Schluessel ist fort" heissen:
+/// `Key(NotFound)` und `Crypto(AeadOpen)`. Jeder andere Schluesselfehler ist
+/// eine Aussage ueber JETZT — Geraet gesperrt, TPM belegt — und bricht ab.
+/// Diese Klausel war unbezeugt.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR und misst wirklich die enge Aufzaehlung:
+/// waere sie zu `Err(_) => key_present = false` verallgemeinert, laese die
+/// Wiederaufnahme den gesperrten Speicher als „Grenze ueberschritten", vollendete
+/// aus den vorbereiteten Bytes — `publish_from_prepared` fragt keinen
+/// Schluesselport — und veroeffentlichte ein `.eip`, dessen `draftDEK` in
+/// Wahrheit noch benutzbar ist. Genau der Zustand, den `design.md` §9.4 mit
+/// „zu keinem Zeitpunkt gleichzeitig ein committed `.eip` und ein nutzbarer
+/// `draftDEK`" ausschliesst. Die Zeile ueber `published_entry_paths` faellt
+/// dann.
+#[test]
+fn a_transient_key_failure_stops_the_recovery_and_completes_nothing() {
+    let mut harness = WriterHarness::with_incident();
+    harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterPreparedMarkerCommit)
+        .expect("der Abbruch vor der Grenze muss erreichbar sein");
+    let source = harness.source();
+    let locked = std::sync::Arc::new(BrieflyLockedRepository {
+        inner: harness.repository(),
+        refusals_left: std::sync::atomic::AtomicUsize::new(1),
+    }) as std::sync::Arc<dyn ea_draft::DraftRepository>;
+    let service = ea_writer::WriterService::new(
+        locked,
+        harness.provider() as std::sync::Arc<dyn ea_key_provider::KeyProvider>,
+        harness.backend(),
+        &source,
+        harness.head(),
+        &[],
+        ea_draft::IncidentNumberRegister::new(harness.database()),
+        ea_draft::OperatorProfileRepository::new(harness.database()),
+        harness.binding(),
+    );
+
+    let refused = service
+        .recover_pending()
+        .expect_err("ein voruebergehender Schluesselfehler MUSS abbrechen");
+    assert_eq!(refused.code(), "EA-KEY-PURPOSE-MISMATCH");
+
+    // Nichts ist dauerhaft geworden — und der Zustandscode allein sagte das
+    // nicht: gemessen wird, dass NICHTS veroeffentlicht ist und die Marke
+    // unberuehrt liegt.
+    assert!(
+        harness.published_entry_paths().is_empty(),
+        "ein gesperrtes Geraet vollendet keine Transaktion"
+    );
+    assert!(harness.published_grant_paths().is_empty());
+    assert!(harness.prepared_marker_is_present());
+
+    // Und der Entwurf war die ganze Zeit wiederherstellbar: derselbe Dienst,
+    // ein Zugriff spaeter, loest dieselbe Marke als Wiederherstellung auf.
+    assert!(
+        service
+            .recover_pending()
+            .expect("nach dem Entsperren muss die Wiederaufnahme tragen")
+            .is_original_draft()
+    );
+    assert!(!harness.draft_is_blank());
+    assert!(harness.published_entry_paths().is_empty());
+}
+
+/// Eine Finalisierung, die VOR der unwiderruflichen Grenze scheitert, gibt die
+/// beanspruchte Einsatznummer wieder FREI.
+///
+/// # Warum der Zeuge einen tauben Schluesselspeicher braucht
+///
+/// Der dauerhafte Anspruch faellt erst im BESTAETIGTEN Lauf
+/// (`crates/ea-writer/src/finalize.rs`, Schritt 5); ein Abbruch ueber
+/// `finalize_interrupted_at` beansprucht die Nummer gar nicht erst und maesse
+/// deshalb nichts. Gebraucht wird ein VOLLER Lauf, der zwischen dem Anspruch
+/// und der Grenze scheitert — und der taube Speicher ist genau das: er haelt an
+/// `EA-WRITER-KEY-DELETION-NOT-CONFIRMED` an, und dieser Code faellt
+/// AUSSCHLIESSLICH, wenn `contains` den `draftDEK` positiv gemeldet hat. Die
+/// Grenze ist damit nachweislich NICHT ueberschritten, der Entwurf ist
+/// wiederherstellbar, und die Nummer gehoert demselben realen Einsatz.
+///
+/// Ohne die Freigabe muesste der Bediener sich fuer denselben Einsatz eine
+/// andere Nummer ausdenken — dieselbe Abwaegung, die
+/// `crates/ea-writer/tests/sequence_id.rs`
+/// ::a_refused_finalization_does_not_burn_the_incident_number vor dem Anspruch
+/// fuehrt, hier hinter ihm.
+#[test]
+fn a_finalization_that_fails_before_the_boundary_releases_the_incident_number() {
+    let harness = WriterHarness::with_incident();
+    let Err(refused) = harness.finalize_with_deaf_keystore() else {
+        panic!("ein gemeldetes, nicht ausgefuehrtes Loeschen MUSS den Abschluss anhalten");
+    };
+    assert_eq!(refused.code(), "EA-WRITER-KEY-DELETION-NOT-CONFIRMED");
+    // Die POSITIVKONTROLLE: der Lauf hat den Anspruch wirklich passiert. Ohne
+    // sie waere „die Nummer ist frei" auch fuer einen Lauf gruen, der schon an
+    // Schritt 3 gescheitert ist.
+    assert!(
+        harness.prepared_marker_is_present(),
+        "Schritt 8 liegt hinter dem Anspruch: die Abschlussmarke MUSS stehen"
+    );
+
+    assert!(
+        !harness.incident_number_is_taken(FIXTURE_INCIDENT_NUMBER),
+        "vor der Grenze gibt ein Fehlschlag die Nummer wieder frei"
+    );
+
+    // Und sie ist wirklich WIEDER BENUTZBAR — das ist die Zusage, nicht die
+    // Registerzeile. Derselbe Bestand, dieselbe Nummer, ein wahrhaftiger
+    // Speicher.
+    let source = harness.source();
+    let service = harness.service(&source);
+    assert!(
+        service
+            .recover_pending()
+            .expect("die Wiederaufnahme muss tragen")
+            .is_original_draft()
+    );
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+    let preview = service
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .expect("die Vorschau MUSS erneut entstehen");
+    service
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
+        .expect("derselbe Einsatz MUSS danach abschliessbar sein");
+    assert!(harness.incident_number_is_taken(FIXTURE_INCIDENT_NUMBER));
+    assert_eq!(harness.published_entry_paths().len(), 1);
+}
+
+/// Hinter der Grenze bleibt die Einsatznummer VERBRAUCHT.
+///
+/// Der Waechter gegen eine zu grosszuegige Freigabe, und er ist die haertere
+/// Haelfte: Schritt 13 scheitert, der Eintrag ist COMMITTED, und seine
+/// Einsatznummer steht in einer veroeffentlichten Nutzlast. Gaebe die Freigabe
+/// sie hier zurueck, koennte ein zweiter Einsatz dieselbe Nummer beanspruchen,
+/// und die lokale Eindeutigkeitspruefung von `design.md`:1900 waere gebrochen —
+/// bei zwei committed Eintraegen, die sich nicht mehr zuruecknehmen lassen.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR: wandert die Entwaffnung der Freigabe
+/// hinter Schritt 13, faellt die letzte Zeile.
+#[test]
+fn a_finalization_that_fails_after_the_boundary_keeps_the_incident_number() {
+    let harness = WriterHarness::with_incident();
+    let source = harness.source();
+    let proof = harness.proof_for(ea_operator::ReauthPurpose::Finalize);
+    let refusing = std::sync::Arc::new(BlankDraftRefusingRepository {
+        inner: harness.repository(),
+    }) as std::sync::Arc<dyn ea_draft::DraftRepository>;
+    let blocked = ea_writer::WriterService::new(
+        refusing,
+        harness.provider() as std::sync::Arc<dyn ea_key_provider::KeyProvider>,
+        harness.backend(),
+        &source,
+        harness.head(),
+        &[],
+        ea_draft::IncidentNumberRegister::new(harness.database()),
+        ea_draft::OperatorProfileRepository::new(harness.database()),
+        harness.binding(),
+    );
+    let preview = blocked
+        .preview(&proof, valid_incident(), harness.observed_now())
+        .expect("die Vorschau beruehrt Schritt 13 nicht");
+    let error = blocked
+        .finalize(&proof, valid_incident(), &preview, harness.observed_now())
+        .expect_err("der leere Entwurf laesst sich nicht anlegen");
+    assert_eq!(error.code(), "EA-DRAFT-LOCAL-RNG");
+
+    // Der Eintrag ist committed — Schritt 13 liegt HINTER der Grenze.
+    assert_eq!(harness.published_entry_paths().len(), 1);
+    assert!(
+        harness.incident_number_is_taken(FIXTURE_INCIDENT_NUMBER),
+        "hinter der Grenze traegt ein veroeffentlichter Eintrag die Nummer"
+    );
+}
+
+/// Eine Marke, deren SEQUENZ nicht die des signierten `manifestCore` ist, wird
+/// fail-closed abgewiesen.
+///
+/// # Warum das eigene Byte-Nachrechnen dieses Feld NICHT erwischt
+///
+/// `sequence` ist der einzige Wert der Marke, den nichts ausserhalb ihrer
+/// selbst belegte. Das Rueckkodieren spielt den GESPEICHERTEN Wert wieder ab,
+/// also kodiert sich auch eine manipulierte Sequenz bytegleich zurueck und
+/// besteht die erste Aussage; Objekthash, `entryHash` und Grant-Plan-Hash
+/// hangen an den eingebetteten Eintragsbytes und bleiben unberuehrt.
+///
+/// # Was daran gefaehrlich ist
+///
+/// Aus GENAU diesem Feld bildet [`PreparedTransactionV1::targets`] den
+/// Zielnamen `entries/<12-stellige-Sequenz>_<entry-hash>.eip`, und
+/// `RecoveryOutcome::CommittedFromPreparedBytes` meldet ihn nach aussen. Ohne
+/// den Vergleich veroeffentlicht die Wiederaufnahme hinter der unwiderruflichen
+/// Grenze ein `.eip` unter einer Sequenz, die sein eigenes signiertes
+/// `manifestCore` NICHT nennt — der Dateiname und die Kette sagten dann
+/// Verschiedenes, und `design.md` §9.4 verlangt, dass ein Neustart „exakt die
+/// vollstaendig geprueften Staging-Bytes" fertigstellt.
+///
+/// # Der gemessene Zustand OHNE diesen Vergleich
+///
+/// Nicht bloss ein falscher Name, sondern ein DAUERHAFTER Halbzustand.
+/// NACHGEMESSEN am Stand vor dieser Zusicherung: die Wiederaufnahme
+/// veroeffentlicht alle drei Grants — deren Zieladressen tragen den
+/// `entryHash` und NICHT die Sequenz, also stimmen sie weiterhin —, scheitert
+/// dann am Rename des `.eip`, weil unter dem manipulierten Sequenznamen keine
+/// Staging-Datei liegt, und meldet `EA-ARCHIVE-IO`. Zurueck bleiben
+/// veroeffentlichte Grants ohne committed `.eip` — nach `design.md` §9.4
+/// „keine gueltigen Freigaben" — und eine Marke, die JEDER weitere Anlauf
+/// genauso wieder trifft. Das Geraet ist damit fest, und die Meldung nennt ein
+/// MEDIUM, wo eine Manipulation vorliegt.
+///
+/// Die Zusicherung ist FALSIFIZIERBAR: faellt der Sequenzvergleich weg, meldet
+/// dieser Lauf `EA-ARCHIVE-IO` statt des Codes unten, und die Zeile ueber
+/// `published_grant_paths` faellt mit drei veroeffentlichten Grants.
+#[test]
+fn a_marker_whose_sequence_contradicts_the_entry_is_refused() {
+    let mut harness = WriterHarness::with_incident();
+    let interrupted = harness
+        .finalize_with_fault(FinalizationFaultPoint::AfterAbsenceConfirmation)
+        .expect("der Abbruch hinter der Grenze muss erreichbar sein");
+    assert_eq!(
+        interrupted
+            .prepared()
+            .expect("hinter der Grenze liegt eine Marke")
+            .sequence()
+            .get(),
+        0,
+        "die Fixture beginnt auf leerem Bestand bei Sequenz 0"
+    );
+
+    let mut bytes = prepared_marker_bytes(&harness);
+    // Die drei ersten Bytes sind das Feld der Stelligkeit sieben, die Fassung
+    // und die Sequenz — jede als kleinstmoegliche CBOR-Kodierung. Die
+    // Zusicherung ist die Positivkontrolle des Griffs: trifft sie nicht mehr,
+    // manipulierte die Zeile darunter ein anderes Feld und maesse nichts.
+    assert_eq!(
+        &bytes[..3],
+        &[0x87, 0x01, 0x00],
+        "array(7), Markenfassung 1, Sequenz 0"
+    );
+    bytes[2] = 0x09;
+    put_prepared_marker(&harness, bytes);
+
+    let source = harness.source();
+    let service = harness.service(&source);
+    let refused = service.recover_pending().expect_err(
+        "eine Marke, deren Sequenz ihr eigenes .eip nicht nennt, MUSS abgewiesen werden",
+    );
+    assert_eq!(
+        refused.code(),
+        "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+    );
+    assert!(
+        harness.published_entry_paths().is_empty(),
+        "unter KEINEM Sequenznamen darf etwas liegen"
+    );
+    // Die SCHAERFSTE Zeile dieses Zeugen — siehe die Messung im Kopf.
+    assert!(
+        harness.published_grant_paths().is_empty(),
+        "die Grants liegen VOR dem Eintrag: ohne den Vergleich sind sie schon veroeffentlicht"
+    );
 }

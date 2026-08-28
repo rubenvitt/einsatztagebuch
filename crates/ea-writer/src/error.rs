@@ -68,6 +68,18 @@ pub enum WriterError {
     /// Die vorbereitete Abschlussmarke traegt nicht die Gestalt, die dieser
     /// Baustand schreibt.
     PreparedFinalizationUnreadable,
+    /// Die vorbereitete Abschlussmarke ist LESBAR und widerspricht sich selbst.
+    ///
+    /// Ein EIGENER Code neben [`Self::PreparedFinalizationUnreadable`], und der
+    /// Unterschied ist keine Kosmetik: „nicht die Gestalt dieses Baustands"
+    /// sagt einem Bediener, dass die Bytes aus einer anderen Fassung stammen
+    /// oder beschaedigt sind, „widerspricht sich selbst" sagt, dass
+    /// wohlgeformte Bytes eine Transaktion behaupten, die es so nie gab —
+    /// abweichender Objekthash, abweichender `entryHash`, ein Grant-Plan-Hash,
+    /// den das `.eip` nicht signiert, oder eine leere Grantliste. Die zweite
+    /// Aussage ist ein Manipulationsbefund und keine Versionsfrage, und beide
+    /// Wege enden fail-closed, ohne dass ein Byte veroeffentlicht wird.
+    PreparedFinalizationInconsistent,
     /// Die Vorschau ist eine andere als die, die `finalize` unter der Sperre
     /// nachrechnet.
     StaleAckPreviewMismatch,
@@ -119,6 +131,9 @@ impl WriterError {
             Self::PreparedFinalizationPresent => "EA-WRITER-PREPARED-FINALIZATION-PRESENT",
             Self::NoPreparedFinalization => "EA-WRITER-NO-PREPARED-FINALIZATION",
             Self::PreparedFinalizationUnreadable => "EA-WRITER-PREPARED-FINALIZATION-UNREADABLE",
+            Self::PreparedFinalizationInconsistent => {
+                "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+            }
             Self::StaleAckPreviewMismatch => "EA-REGISTRY-STALE-ACK-PREVIEW-MISMATCH",
             Self::StaleAckRequired => "EA-REGISTRY-STALE-ACK-REQUIRED",
             Self::StaleAckReplay => "EA-REGISTRY-STALE-ACK-REPLAY",

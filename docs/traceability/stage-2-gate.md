@@ -27,18 +27,18 @@ Stufe-2-Anteil, nie das ganze Kriterium.
 
 | Kriterium | Gegenstand | Beleg | Offen in spaeterer Stufe |
 |---|---|---|---|
-| AK 1 | Offline-Abschluss | `tests/ea-system-tests/tests/e2e_writer_archive.rs::one_incident_goes_from_the_blank_mask_to_a_committed_archive_without_a_network`; `crates/ea-writer/tests/offline_finalize.rs::offline_finalize_commits_grants_then_entry_and_returns_no_content` | Serverabgleich und unteilbarer Entry-Commit auf dem Sync-Weg (Stufe 3); der hier erzeugte Bestand traegt KEINE archivresidente Vertrauenslinie, `is_fully_verified` ist damit `false`, und die Berichtsgleichheit von Verzeichnis und Ein-Datei-Buendel steht in `crates/ea-archive-fs/tests/bundle_export.rs::bundle_verifies_to_the_same_report_as_the_directory` |
-| AK 2 | Kein Writer-Zugriff | `tests/ea-system-tests/tests/privacy_canaries_writer.rs::no_fachliche_canary_survives_finalization_anywhere_on_disk`; `tests/ea-system-tests/tests/privacy_canaries_writer.rs::a_restored_backup_never_returns_a_finalized_or_discarded_key` | Der Nachweis der Lesesicht — dass ein berechtigter Reader denselben Eintrag oeffnet — steht in Stufe 4 aus |
+| AK 1 | Offline-Abschluss | `tests/ea-system-tests/tests/e2e_writer_archive.rs::one_incident_goes_from_the_blank_mask_to_a_committed_archive_without_a_network`; `crates/ea-writer/tests/offline_finalize.rs::offline_finalize_commits_grants_then_entry_and_returns_no_content` | Serverabgleich und unteilbarer Entry-Commit auf dem Sync-Weg (Stufe 3); der hier erzeugte Bestand traegt KEINE archivresidente Vertrauenslinie, `is_fully_verified` ist damit `false`, und die Berichtsgleichheit von Verzeichnis und Ein-Datei-Buendel steht in `crates/ea-archive-fs/tests/bundle_export.rs::bundle_verifies_to_the_same_report_as_the_directory`; der Buendelexport des Wirts ist seit dem 2026-08-28 als Naht gebaut, der Wirt aber nicht verdrahtet (`apps/desktop/src-tauri/src/state.rs::ArchiveBundleExportPort`, Abschnitt 2.4) |
+| AK 2 | Kein Writer-Zugriff | `tests/ea-system-tests/tests/privacy_canaries_writer.rs::no_fachliche_canary_survives_finalization_anywhere_on_disk`; `tests/ea-system-tests/tests/privacy_canaries_writer.rs::a_restored_backup_never_returns_a_finalized_or_discarded_key` | Der Nachweis der Lesesicht — dass ein berechtigter Reader denselben Eintrag oeffnet — steht in Stufe 4 aus. Seit dem 2026-08-28 nullt sich der Entwurfsklartext zusaetzlich selbst (`crates/ea-draft/tests/single_draft.rs::the_draft_plaintext_zeroizes_itself_when_it_is_dropped`); fachlicher Klartext AUSSERHALB von `ea_draft::Draft` bleibt ungenullt (Abschnitt 2.4) |
 | AK 3 | Neue Maske | `tests/ea-system-tests/tests/e2e_writer_archive.rs::one_incident_goes_from_the_blank_mask_to_a_committed_archive_without_a_network`; `apps/desktop/src/features/writer/WriterPage.test.tsx::clears the surface after the commit and offers no history and no final content` | Die Historienansicht, die es hier NICHT gibt, entsteht als Lesesicht in Stufe 4 |
 | AK 15 | Stromausfall | `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_media_failure_at_any_durable_step_never_produces_a_half_written_archive` | Der Nachweis auf echter Hardware und auf den vier Zielarchitekturen steht in Stufe 7 aus |
-| AK 23 | Plattform-Key-Provider | `crates/ea-key-provider/tests/writer_role_guard.rs::a_claimed_hardware_profile_never_falls_back_silently`; `crates/ea-key-provider/tests/device_posture.rs::every_support_matrix_row_reaches_only_the_os_wrapped_floor`; `tests/ea-system-tests/tests/cross_platform_key_provider_smoke.rs` | Die native Ausfuehrung auf `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` und `x86_64-apple-darwin` steht in Stufe 7 aus und wird von vier eigenen `AK-23`-`v1.1`-Ledgerzeilen offen gefuehrt |
-| AK 25 | Writer-Restore | `crates/ea-writer/tests/prepared_recovery.rs::a_prepared_finalization_beats_a_second_finalization_attempt`; `tests/ea-system-tests/tests/privacy_canaries_writer.rs::a_restored_backup_never_returns_a_finalized_or_discarded_key`; die BLOCKADE selbst, in der Kette Kern - Naht - Oberflaeche: `crates/ea-writer/tests/sequence_id.rs::a_second_finalization_against_a_consumed_sequence_blocks` (`EA-WRITER-HEAD-RECONCILIATION-REQUIRED`), `apps/desktop/src-tauri/src/commands/writer.rs::a_refused_startup_path_becomes_a_blocked_outcome_with_its_code` (durchgereicht statt in einen Fehler verwandelt) und `apps/desktop/src/features/writer/WriterPage.test.tsx::resumes a prepared finalization and blocks a restored backup without any finalize control` (kein Finalisierungsknopf) | Der Kopfabgleich gegen einen erreichbaren signierten Server-Checkpoint steht in Stufe 3 aus; Stufe 2 blockiert fail-closed, sie loest nicht auf |
+| AK 23 | Plattform-Key-Provider | `crates/ea-key-provider/tests/writer_role_guard.rs::a_claimed_hardware_profile_never_falls_back_silently`; `crates/ea-key-provider/tests/device_posture.rs::every_support_matrix_row_reaches_only_the_os_wrapped_floor`; `tests/ea-system-tests/tests/cross_platform_key_provider_smoke.rs` | Die native Ausfuehrung auf `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` und `x86_64-apple-darwin` steht in Stufe 7 aus und wird von vier eigenen `AK-23`-`v1.1`-Ledgerzeilen offen gefuehrt. NICHT belegter Rest des Wortlauts von `design.md` Abschnitt 23, Kriterium 23: „nach Sperre nicht ohne Re-Authentisierung verwendet" — die Plattformbeobachter des Sperrereignisses fehlen, und `is_valid_for`/`MAX_INACTIVITY_MS` werden im Wirt nicht ausgewertet (Ruling R59 Teil 2, Abschnitt 2.2). Ebenfalls offen die native BINDUNG selbst (Ruling R57, Abschnitt 2.1) |
+| AK 25 | Writer-Restore | `crates/ea-writer/tests/prepared_recovery.rs::a_prepared_finalization_beats_a_second_finalization_attempt`; `tests/ea-system-tests/tests/privacy_canaries_writer.rs::a_restored_backup_never_returns_a_finalized_or_discarded_key`; die BLOCKADE selbst, in der Kette Kern - Naht - Oberflaeche: `crates/ea-writer/tests/sequence_id.rs::a_second_finalization_against_a_consumed_sequence_blocks` (`EA-WRITER-HEAD-RECONCILIATION-REQUIRED`), `apps/desktop/src-tauri/src/commands/writer.rs::a_refused_startup_path_becomes_a_blocked_outcome_with_its_code` (durchgereicht statt in einen Fehler verwandelt) und `apps/desktop/src/features/writer/WriterPage.test.tsx::resumes a prepared finalization and blocks a restored backup without any finalize control` (kein Finalisierungsknopf) | Der Kopfabgleich gegen einen erreichbaren signierten Server-Checkpoint steht in Stufe 3 aus; Stufe 2 blockiert fail-closed, sie loest nicht auf. Die Auswahl der Quittung ist seit dem 2026-08-28 gegen eine zweite, isolierte Quittung gehaertet (`crates/ea-verify/tests/receipt_checkpoint.rs::a_forged_second_receipt_with_a_smaller_object_hash_is_never_the_chosen_one`) |
 | AK 28 | CSV-Stammdatenimport | `crates/ea-draft/tests/csv_import.rs::dry_run_does_not_write_and_commit_is_all_or_nothing`; `crates/ea-draft/tests/csv_import.rs::retained_protocol_bytes_reproduce_the_snapshot_hash`; `vectors/reports/` | Die Verwaltung der Stammdaten durch eine Administrationsrolle bleibt Stufe 5 |
-| AK 34 | Prepared Recovery | `crates/ea-writer/tests/prepared_recovery.rs::after_the_key_boundary_recovery_completes_the_exact_prepared_bytes`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_prepared_finalization_survives_a_crash_and_beats_a_pending_discard` | Die Wiederaufnahme einer im Netz haengenden Publikation gehoert Stufe 3 |
-| AK 39 | Durable Backend | `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_media_failure_at_any_durable_step_never_produces_a_half_written_archive`; `crates/ea-archive-fs/tests/backend_capabilities.rs::every_declared_capability_is_proven_on_the_host_filesystem`; `crates/ea-archive-fs/tests/controlled_network_profile.rs::controlled_network_requires_a_local_commit_component_and_rejects_a_generic_share` | Die signierte Betriebssystem- und Dateisystemmatrix steht in Stufe 7 aus; der Weg ueber ein tatsaechlich erreichbares kontrolliertes Netz steht in Stufe 3 aus; liegengebliebene Sperrdateien nach einem harten Prozessabbruch sind als offene Zeile in Abschnitt 2.2 gefuehrt und in Stufe 7 zu schliessen |
-| AK 46 | Entwurfsverwaltung | `crates/ea-draft/tests/single_draft.rs::exactly_one_encrypted_draft_is_restored_after_restart`; `crates/ea-draft/tests/discard_faults.rs::every_discard_fault_yields_old_draft_or_permanent_blank_draft`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_discard_fault_point_restarts_into_one_of_two_states` | Der Nachweis ueber ein Releasepaket mit abgeschalteten Absturzberichten bleibt Stufe 7 |
+| AK 34 | Prepared Recovery | `crates/ea-writer/tests/prepared_recovery.rs::after_the_key_boundary_recovery_completes_the_exact_prepared_bytes`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_prepared_finalization_survives_a_crash_and_beats_a_pending_discard`; die Abschlussmarke wird seit dem 2026-08-28 bei der Wiederaufnahme gegen ihre eigenen Bytes nachgerechnet und fail-closed mit `EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT` abgewiesen (`crates/ea-writer/tests/prepared_recovery.rs::a_marker_without_a_single_grant_is_refused`, `::a_marker_whose_grant_plan_hash_contradicts_the_entry_is_refused`, `::a_marker_whose_sequence_contradicts_the_entry_is_refused`, `::a_marker_that_does_not_decode_stops_the_recovery`, `::a_transient_key_failure_stops_the_recovery_and_completes_nothing`) | Die Wiederaufnahme einer im Netz haengenden Publikation gehoert Stufe 3. Eine sich selbst widersprechende Abschlussmarke laesst die Wiederaufnahme dauerhaft scheitern und bleibt liegen — zu STRENG, nicht zu lax; der Aufloesungspfad ist Stufe 5 (Abschnitt 2.4) |
+| AK 39 | Durable Backend | `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_stage_two_fault_point_has_exactly_one_survivable_outcome`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_media_failure_at_any_durable_step_never_produces_a_half_written_archive`; `crates/ea-archive-fs/tests/backend_capabilities.rs::every_declared_capability_is_proven_on_the_host_filesystem`; `crates/ea-archive-fs/tests/controlled_network_profile.rs::controlled_network_requires_a_local_commit_component_and_rejects_a_generic_share` | Die signierte Betriebssystem- und Dateisystemmatrix steht in Stufe 7 aus; der Weg ueber ein tatsaechlich erreichbares kontrolliertes Netz steht in Stufe 3 aus; liegengebliebene Sperrdateien nach einem harten Prozessabbruch blockieren seit dem 2026-08-28 NICHT mehr — die Sperre ist eine echte Betriebssystemsperre ueber `std::fs::File::try_lock` (`crates/ea-archive-fs/tests/backend_capabilities.rs::a_leftover_lock_file_without_a_live_lock_is_reclaimed`, `::two_backends_on_the_same_root_admit_exactly_one_writer`, `crates/ea-writer/tests/prepared_recovery.rs::a_hard_crash_under_both_locks_still_lets_the_restart_complete`); NICHT belegter Rest des Wortlauts von `design.md` Abschnitt 23, Kriterium 39: „Jede Plattform beweist" — die advisory-lock-Semantik ist nur auf dem Host-Target bewiesen, der Nachweis auf drei Betriebssystemen und auf Netzdateisystemen bleibt Stufe 7 (Abschnitt 2.2) |
+| AK 46 | Entwurf und Eingabevertrag | `crates/ea-draft/tests/single_draft.rs::exactly_one_encrypted_draft_is_restored_after_restart`; `crates/ea-draft/tests/discard_faults.rs::every_discard_fault_yields_old_draft_or_permanent_blank_draft`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::every_declared_discard_fault_point_restarts_into_one_of_two_states`; seit dem 2026-08-28 hinterlaesst auch der Rollback des frischen leeren Entwurfs keinen verwaisten Schluesselspeichereintrag (`crates/ea-draft/tests/repository_guards.rs::a_rolled_back_blank_draft_leaves_no_orphaned_keystore_entry`) | Der Nachweis ueber ein Releasepaket mit abgeschalteten Absturzberichten bleibt Stufe 7. NICHT belegter Rest: das Kriterium heisst in `design.md` Abschnitt 23 „Entwurf und Eingabevertrag" und ist hier am KERN belegt; der Desktop-Wirt konstruiert bis heute keinen Entwurfsdienst (`apps/desktop/src-tauri/src/lib.rs:77-85`), das Verwerfen ist im Wirt strukturell vorbereitet, nicht erreicht (VM-11, Abschnitt 2.4) |
 | AK 48 | Archivprofilwechsel | `crates/ea-archive-fs/tests/profile_migration.rs::the_inventory_hash_is_equal_on_both_profiles_after_a_successful_switch`; `tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::an_interrupted_profile_migration_leaves_exactly_one_active_pointer` | Die Freigabe eines neuen `archiveProfileHash` gegen `allowed-archive-profile-hashes` bindet Stufe 7; der hier erzeugte Bestand verifiziert NICHT vollstaendig (keine archivresidente Vertrauenslinie), ist deshalb nicht als Buendel exportierbar, und `tests/ea-system-tests/tests/e2e_writer_archive.rs::the_single_file_bundle_refuses_a_committed_archive_that_does_not_fully_verify` haelt genau diese fail-closed-Grenze fest |
-| AK 54 | Record-ID und Sequenz | `crates/ea-writer/tests/sequence_id.rs::the_entry_uuid_is_version_seven_and_variant_two` (UUIDv7 nach RFC 9562); `crates/ea-writer/tests/sequence_id.rs::the_first_entry_binds_no_predecessor_and_claims_sequence_zero`; `crates/ea-writer/tests/sequence_id.rs::a_taken_incident_number_is_refused_before_anything_is_staged`; `crates/ea-writer/tests/sequence_id.rs::a_second_finalization_against_a_consumed_sequence_blocks` (eine verbrauchte Sequenz wird nie zweimal benutzt) | Die ORGANISATIONSWEITE Eindeutigkeit der `recordId` und ein echter PARALLELITAETSTEST sind hier NICHT belegt und stehen in Stufe 3 aus: Stufe 2 hat genau einen Writer und genau einen Entwurf, Eindeutigkeit ueber Geraetegrenzen entsteht erst am Serverabgleich. Der Crash- und Replayanteil ist gedeckt (`tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_prepared_finalization_survives_a_crash_and_beats_a_pending_discard`) |
+| AK 54 | Record-ID und Sequenz | `crates/ea-writer/tests/sequence_id.rs::the_entry_uuid_is_version_seven_and_variant_two` (UUIDv7 nach RFC 9562); `crates/ea-writer/tests/sequence_id.rs::the_first_entry_binds_no_predecessor_and_claims_sequence_zero`; `crates/ea-writer/tests/sequence_id.rs::a_taken_incident_number_is_refused_before_anything_is_staged`; `crates/ea-writer/tests/sequence_id.rs::a_second_finalization_against_a_consumed_sequence_blocks` (eine verbrauchte Sequenz wird nie zweimal benutzt) | Die ORGANISATIONSWEITE Eindeutigkeit der `recordId` und ein echter PARALLELITAETSTEST sind hier NICHT belegt und stehen in Stufe 3 aus: Stufe 2 hat genau einen Writer und genau einen Entwurf, Eindeutigkeit ueber Geraetegrenzen entsteht erst am Serverabgleich. Der Crash- und Replayanteil ist gedeckt (`tests/ea-system-tests/tests/fault_injection_writer_matrix.rs::a_prepared_finalization_survives_a_crash_and_beats_a_pending_discard`). Seit dem 2026-08-28 wird eine VOR der unwiderruflichen Grenze gescheiterte Finalisierung ihre Einsatznummer wieder los (`crates/ea-writer/tests/prepared_recovery.rs::a_finalization_that_fails_before_the_boundary_releases_the_incident_number`), nach der Grenze bleibt sie verbraucht (`::a_finalization_that_fails_after_the_boundary_keeps_the_incident_number`); die Freigabe ist best effort — scheitert das Loeschen, bleibt die Nummer verbraucht |
 
 Vier weitere Kriterien bekommen von Stufe 2 nur einen TEIL ihres Belegs. Sie
 stehen bewusst UNTER der Tabelle und mit dem Praefix `| Teilbeleg AK `: der
@@ -49,7 +49,7 @@ jener Gestalt waere ein unerwartetes Kriterium und faerbte den Gate rot.
 | Teilbeitrag | Gegenstand | Stufe-2-Anteil | Wo das Kriterium faellig wird |
 |---|---|---|---|
 | Teilbeleg AK 19 | Keine Klartextlogs | `tests/ea-system-tests/tests/privacy_canaries_writer.rs::no_fachliche_canary_survives_finalization_anywhere_on_disk` ueber jeden beobachtbaren Bytestrom, `tests/ea-system-tests/tests/privacy_canaries_writer.rs::the_search_finds_a_marker_that_really_lies_on_disk` als Gegenkontrolle, und `crates/ea-audit/tests/redaction.rs::typed_audit_never_carries_fachliche_bytes_and_never_leaks_in_errors` | Stufe 7 — der Nachweis ueber ein Releasepaket mit abgeschalteten Absturzberichten und abgeschalteter Telemetrie |
-| Teilbeleg AK 24 | Registry-Ueberalterung | `crates/ea-writer/tests/stale_registry_warning.rs::a_head_that_expires_while_bound_is_acknowledgeable_and_blocks_fail_closed` und `::an_overdue_refresh_deadline_warns_without_blocking` — die ERKENNUNG samt fail-closed-Ausgang | Stufe 5 — der Bestaetigungspfad eines veralteten Kopfes selbst |
+| Teilbeleg AK 24 | Registry-Ueberalterung | `crates/ea-writer/tests/stale_registry_warning.rs::a_head_that_expires_while_bound_is_acknowledgeable_and_blocks_fail_closed` und `::an_overdue_refresh_deadline_warns_without_blocking` — die ERKENNUNG samt fail-closed-Ausgang | Stufe 5 — der Bestaetigungspfad eines veralteten Kopfes selbst, ausdruecklich festgeschrieben durch Ruling R62 vom 2026-08-28 (`docs/traceability/stage-2-nacharbeit-2026-08-28.md`) |
 | Teilbeleg AK 29 | Rollentrennung | `crates/ea-key-provider/tests/writer_role_guard.rs::writer_profile_rejects_forbidden_private_key_purposes` und `apps/desktop/src/app/csp.test.ts` fuer die Kommandoerlaubnisliste der Wirtsseite | Stufe 5 — die Administrationsseite der Rollentrennung |
 | Teilbeleg AK 53 | Operator-Identitaet | `crates/ea-operator/tests/session_contract.rs::finalization_requires_matching_account_instance_key_and_fresh_presence` und `crates/ea-draft/tests/discard_faults.rs::a_proof_of_another_operator_binding_never_authorizes_a_discard` — die Bindung des Bedieners an jede unwiderrufliche Handlung | Stufe 5 — die Ausstellung der Bindung und die Transport-Fingerprint-Bindung |
 
@@ -117,15 +117,14 @@ Ledgeranker: `AK-23` `v1.1` auf Stufe 7, Status `planned`, mit genau diesem
 Wortlaut. Die vier Zielarchitekturzeilen daneben halten die AUSFUEHRUNG offen,
 diese Zeile die native BINDUNG selbst — zwei verschiedene Luecken.
 
-### 2.2 Drei weitere offene Zeilen, die Stufe 2 NICHT belegt
+### 2.2 Zwei weitere offene Zeilen, die Stufe 2 NICHT belegt
 
 Jede steht hier, damit sie nicht als geprueft gilt, und jede hat ihren
 Ledgeranker auf Stufe 7 mit Status `planned`.
 
 | Offene Zeile | Was Stufe 2 hat | Was fehlt | Ledgeranker |
 |---|---|---|---|
-| Liegengebliebene Sperrdateien (Ruling R60) | `crates/ea-archive-fs/src/local_path.rs` und `crates/ea-draft/src/lock.rs` nehmen die Sperre per `create_new` und geben sie im `Drop` frei; die Fehlermatrix bricht prozessintern ab, der `Drop` raeumt, und Invariante 1 bleibt gewahrt | Nach SIGKILL oder Stromausfall bleibt die Datei LIEGEN. `recover.rs` nimmt beide Sperren als erstes und liefert dann dauerhaft `EA-ARCHIVE-ALREADY-LOCKED` bzw. `DraftError::LockHeld`; es gibt keinen Reaper, keine PID-Pruefung, und `CONTROL_FILES_V1` ist aus dem Inventar ausgeblendet, also kann auch der Gesundheitsbericht die Datei nicht befunden. Der von `design.md` Abschnitt 8 verlangte Neustartpfad nach dem harten Prozessabbruch ist damit unerreichbar — zu STRENG, nicht zu lax, und ohne Datenverlust, aber mit einem manuellen Schritt | `AK-39` `v1.1`, Stufe 7, `planned` |
-| Echte Betriebssystemsperre statt `create_new` plus `Drop` (Fernziel von Ruling R60) | dieselbe Stelle wie oben | `flock`/`LockFileEx` — eine native Plattformschnittstelle, auf diesem Host nicht fuer drei Betriebssysteme belegbar, und damit aus demselben Grund Stufe-7-Arbeit wie die Key-Provider-Familien | `AK-39` `v1.1`, Stufe 7, `planned` (dieselbe Zeile: dieselbe Naht, dasselbe Fernziel) |
+| Sperrnachweis auf drei Betriebssystemen (Ruling R60, Rest nach dem 2026-08-28) | Die echte Betriebssystemsperre IST gebaut: `crates/ea-archive-fs/src/local_path.rs::acquire_writer_lock` und `crates/ea-draft/src/lock.rs` nehmen die Sperrdatei per `std::fs::File::try_lock` (`flock` bzw. `LockFileEx`, ohne neue Abhaengigkeit). Eine liegengebliebene Sperrdatei eines toten Prozesses wird uebernommen (`crates/ea-archive-fs/tests/backend_capabilities.rs::a_leftover_lock_file_without_a_live_lock_is_reclaimed`, `crates/ea-draft/tests/repository_guards.rs::a_leftover_draft_lock_file_without_a_live_lock_is_reclaimed`), zwei Halter auf derselben Wurzel schliessen sich weiterhin aus (`crates/ea-archive-fs/tests/backend_capabilities.rs::two_backends_on_the_same_root_admit_exactly_one_writer`), und der Neustartpfad nach hartem Abbruch ist erreichbar (`crates/ea-writer/tests/prepared_recovery.rs::a_hard_crash_under_both_locks_still_lets_the_restart_complete`). Kein Reaper und keine PID-Pruefung — die OS-Sperre macht beide ueberfluessig. `Drop` unlinkt die Sperrdatei NICHT (Unlink-nach-Unlock-Race); `.ea-writer.lock` bleibt dauerhaft in jeder Archivwurzel und ist per `CONTROL_FILES_V1` aus Inventar und Gesundheitsbericht ausgeblendet | Die advisory-lock-Semantik ist NUR auf dem Host-Target bewiesen. Offen bleiben der Nachweis auf drei Betriebssystemen und auf Netzdateisystemen sowie die signierte Betriebssystem- und Dateisystemmatrix. Ebenfalls offen: `ea-recovery` (`FsArchiveSource`) zaehlt die Sperrdatei als `nonObjectFile` (+1) und `ea-recovery export` kopiert sie mit — dieselbe Praezedenz wie `.ea-active-profile` (Abschnitt 2.4) | `AK-39` `v1.1`, Stufe 7, `planned` (Belegspalte am 2026-08-28 umgeschrieben) |
 | Bildschirmsperre und Frischepruefung, Teil 2 (Ruling R59) | Teil 1 ist gebaut: `draft_load_core` gibt den Entwurfsklartext nur gegen einen `OperatorSessionProof` heraus, bezeugt von `apps/desktop/src-tauri/src/commands/writer.rs::loading_the_active_draft_without_a_session_proof_never_reads_the_payload`; die Frist reist im Nachweis | Die PLATTFORMBEOBACHTER je Betriebssystem fuer das Sperrereignis sind nicht gebaut, und `is_valid_for`/`MAX_INACTIVITY_MS` werden im Wirt nicht ausgewertet. Die Inaktivitaetssperre wirkt in v0.1 also nur ueber die Frist im Nachweis, nicht ueber ein Betriebssystemereignis. Native Plattform-APIs, ADR-pflichtig, auf diesem Host nicht belegbar — dieselbe Begruendung wie Ruling R57 | `AK-53` `v1.1`, Stufe 7, `planned` |
 
 ### 2.3 Was Stufe 2 an der eingefrorenen Vektorfamilie `vectors/crypto/suite-1` getan hat
@@ -171,6 +170,64 @@ Aenderung an dieser Datei, und der Verweis wird von keinem Gate nachgelesen.
 gemessene Zeile in `docs/traceability/stage-1-gate.md:164` bleibt der Beleg
 IHRER eigenen Messung und wird nicht umgeschrieben. Der geschlossene
 Stufe-1-Gate-Bericht ist in diesem Task nicht angefasst.
+
+### 2.4 Offenlegungen der Nacharbeit vom 2026-08-28
+
+Vier Befunde aus der Nacharbeit DRK-206, die den Stufe-2-Stand praeziser machen
+statt ihn zu verbessern. Sie stehen hier, weil ein gruener Gate sonst mehr
+behauptete, als er belegt. Der vollstaendige Bericht der Nacharbeit steht in
+`docs/traceability/stage-2-nacharbeit-2026-08-28.md`.
+
+1. **Der Wirt konstruiert heute keinen einzigen Dienst.**
+   `apps/desktop/src-tauri/src/lib.rs:77-85` uebergibt
+   `state::SessionState::new(None, None)` und danach fuenfmal `None`. Jedes
+   Tauri-Kommando ist damit eine NAHT: uebersetzt, typgeprueft und mit Zeugen
+   belegt, aber ohne Backend, ohne `WriterService` und ohne Vertrauensanker
+   hinter sich. Der Bootstrap des Wirts ist eine offene Zeile fuer Stufe 3
+   beziehungsweise Stufe 5.
+2. **Der Buendelexport ist eine Naht, der Wirt ist nicht verdrahtet.**
+   `archive_export_bundle_file` haengt seit dem 2026-08-28 am Port
+   `apps/desktop/src-tauri/src/state.rs::ArchiveBundleExportPort` mit dem
+   Fehlertyp `ea_archive_fs::BundleError`. Verdrahtet ist er NICHT: der Wirt
+   haelt keinen `TrustAnchorV1` (`apps/desktop/src-tauri/src/state.rs:134`,
+   `apps/desktop/src-tauri/src/commands/writer.rs:1207`, keine Kante auf
+   `ea-trust`), und das Kommando bleibt bei
+   `EA-DESKTOP-BUNDLE-EXPORT-UNAVAILABLE`
+   (`apps/desktop/src-tauri/src/commands/mod.rs:66`, erhoben in
+   `apps/desktop/src-tauri/src/commands/writer.rs:962`). Ebenso ist das Verwerfen im Wirt
+   STRUKTURELL VORBEREITET, NICHT ERREICHT: `state::BoundDiscard::new` hat im
+   Wirt keine Aufrufstelle, und damit bleibt VM-11 unerreicht. Zeuge fuer die
+   Phasenbenennung der Schale:
+   `apps/desktop/src-tauri/src/lib.rs::the_shell_names_every_discard_phase_without_a_continuation`.
+3. **Eine sich selbst widersprechende Abschlussmarke bleibt liegen.** Die
+   Nachrechnung der Marke (`crates/ea-writer/src/recover.rs`, Einstieg
+   `recover_pending` an `:100`) weist eine Marke
+   mit `grant_count = 0`, abweichendem `grant_plan_hash` oder einer der
+   Eintragssequenz widersprechenden Sequenz fail-closed mit
+   `EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT` ab. Folge: `recover_pending`
+   scheitert fuer diesen Bestand DAUERHAFT, und die Marke bleibt liegen. Das
+   ist zu STRENG und nicht zu lax, es entsteht kein Datenverlust, aber die
+   Aufloesung ist ein manueller Schritt — dieselbe Klasse wie Ruling R60 und
+   derselbe Aufloesungspfad: Stufe 5.
+4. **Die Sperrdatei reist im Recovery-Export mit.** `ea-recovery`
+   (`FsArchiveSource`) zaehlt `.ea-writer.lock` als `nonObjectFile` (+1), und
+   `ea-recovery export` kopiert sie mit: `crates/ea-recovery/src/source.rs:125-175`
+   liest JEDE regulaere Datei unter der Wurzel ein, und `CONTROL_FILES_V1` — die
+   Ausblendung, die Inventar und Gesundheitsbericht anwenden — kommt in
+   `crates/ea-recovery/src/` an keiner Stelle vor. Praezedenz ist `.ea-active-profile`,
+   das sich seit je genauso verhaelt. Kein Vertraulichkeits- und kein
+   Integritaetsbefund — die Datei ist leer und traegt keine fachlichen Bytes —,
+   aber eine Abweichung von der Erwartung, ein Export enthalte nur Bestand.
+
+Und eine Grenze der Schluesselvernichtung, damit Abschnitt 5.1 nicht mehr
+verspricht, als er haelt: `ea_draft::Draft` nullt seinen Klartext seit dem
+2026-08-28 selbst (`ZeroizeOnDrop`, Zeuge
+`crates/ea-draft/tests/single_draft.rs::the_draft_plaintext_zeroizes_itself_when_it_is_dropped`).
+Fachlicher Klartext AUSSERHALB dieses Typs bleibt ungenullt — genannt seien
+`FinalizationInputV1`, die `ea-schema`-Nutzlast und
+`apps/desktop/src-tauri/src/state.rs`, dessen `notes()` einen `String`
+zurueckgibt. Die Kanarienvogelmessung in Abschnitt 5.3 misst die PLATTE und ist
+davon unberuehrt; der Arbeitsspeicher ist keine von ihr belegte Flaeche.
 
 ## 3. Fehlermatrix und deklarierte Abbruchpunkte
 
@@ -339,10 +396,11 @@ Belegt von `tests/ea-system-tests/tests/privacy_canaries_writer.rs::no_fachliche
 
 Der vollstaendige Lauf nach Schritt 6 des Stufe-2-Plans
 (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-2-offline-writer.md`),
-frisch ausgefuehrt am 2026-08-21 in der hier protokollierten Reihenfolge. Jedes
-Kommando lief mit `env -u RUSTUP_TOOLCHAIN`, weil die Shell `RUSTUP_TOOLCHAIN`
-auf `1.97.1` setzt und damit den Pin `1.95.0` aus `rust-toolchain.toml`
-uebersteuern wuerde; die aktive Toolchain war gemessen
+zuletzt frisch ausgefuehrt am 2026-08-28 in der hier protokollierten
+Reihenfolge, auf dem Kopf `a82b593` des Zweiges `drk-206-stufe-2-nacharbeit`.
+Jedes Kommando lief mit `env -u RUSTUP_TOOLCHAIN`, weil die Shell
+`RUSTUP_TOOLCHAIN` auf `1.98.0` setzt und damit den Pin `1.95.0` aus
+`rust-toolchain.toml` uebersteuern wuerde; die aktive Toolchain war gemessen
 `1.95.0-aarch64-apple-darwin`. `pnpm supply-chain` setzt
 `cargo install --locked cargo-deny` voraus; installiert und gemessen war
 `cargo-deny 0.20.2`. Die Zahlen sind abgelesen, nicht geschaetzt:
@@ -350,24 +408,85 @@ uebersteuern wuerde; die aktive Toolchain war gemessen
 kommt in keiner Zeile vor. Der Ausgangsstand vor Task 18 waren 122
 Testbinaries mit 930 bestandenen Tests; am Ende der Stufe 2 stand
 `cargo test --workspace --all-targets --locked` bei 125 Testbinaries mit 943
-bestandenen Tests. Nach der Fix-Welle des Abschlussreviews (siehe den Nachtrag
-unter der Tabelle) steht derselbe Lauf gemessen bei 125 Testbinaries mit 955
-bestandenen Tests — keine bestehende Zusicherung entfernt oder aufgeweicht, in
-keinem der vier Buendel. Die sechs ignorierten Tests sind der Bestand aus
-frueheren Stufen und dieser Lauf aendert nichts an ihnen.
+bestandenen Tests, nach der Fix-Welle des Abschlussreviews bei 125
+Testbinaries mit 955. Gemessen am 2026-08-28 steht derselbe Lauf bei
+127 Testbinaries mit 1005 bestandenen Tests (siehe den Nachtrag
+`Nachmessung DRK-206` unter der Tabelle) — keine bestehende Zusicherung
+entfernt oder aufgeweicht. Die sechs ignorierten Tests sind der Bestand aus
+frueheren Stufen und auch dieser Lauf aendert nichts an ihnen.
 
 | Kommando | Exitcode | Gemessenes Ergebnis | Laufzeit |
 |---|---|---|---|
-| `cargo test --locked -p ea-writer` mit den zehn `-p`-Namen der Schritt-6-Folge | 0 | 45 Testbinaries und die zehn Doctest-Ziele der zehn Pakete, 276 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 56,50 s |
-| `cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix` | 0 | 6 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 10,20 s |
-| `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` | 0 | 4 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 1,05 s |
-| `cargo test --locked -p ea-system-tests --test e2e_writer_archive` | 0 | 2 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 0,60 s |
-| `pnpm desktop:typecheck` | 0 | `tsc --noEmit` ohne eine einzige Diagnose | 1,58 s |
-| `pnpm desktop:test` | 0 | 9 Testdateien, 83 Tests bestanden, 0 fehlgeschlagen | 12,07 s |
-| `pnpm desktop:e2e` | 0 | 3 Playwright-Tests bestanden, 1 Worker, Netz abgeschaltet | 4,74 s |
-| `pnpm supply-chain` | 0 | `advisories ok, bans ok, licenses ok, sources ok`; 37 `duplicate`-Warnungen aus dem Tauri-Teilbaum, die `multiple-versions = warn` bewusst nur warnt; `cargo-deny 0.20.2` | 2,18 s |
-| `pnpm stage-gate:2` | 0 | JSON auf stdout: 16 deklarierte Abbruchpunkte, 146 Ledgerzeilen, 4 `host_evidence_rows`, `stage_two_rows_still_planned` leer, `vector_families` = `[local-audit, reports]` | 1,43 s |
-| `pnpm verify:quick` | 0 | ACHT Teilkommandos gruen, in dieser Reihenfolge: `cargo fmt --all --check`; `pnpm --dir apps/desktop build`; `pnpm desktop:typecheck` (`tsc --noEmit` ohne Diagnose); `pnpm desktop:test` (9 Testdateien, 83 Tests bestanden); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne eine einzige Warnung; `cargo test --workspace --all-targets --locked` mit 125 Testbinaries, 955 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert; `cargo test --workspace --doc --all-features --locked` mit 24 Doctest-Zielen, 93 bestanden, 0 fehlgeschlagen (darunter die `compile_fail`-Doctests aus Ruling R55); und der wasm32-Check ueber die elf Pakete der Positivliste | 610,00 s |
+| `cargo test --locked -p ea-writer` mit den zehn `-p`-Namen der Schritt-6-Folge | 0 | 47 Testbinaries und die zehn Doctest-Ziele der zehn Pakete, 321 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 94 s |
+| `cargo test --locked -p ea-system-tests --test fault_injection_writer_matrix` | 0 | 6 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 14 s |
+| `cargo test --locked -p ea-system-tests --test privacy_canaries_writer` | 0 | 4 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 2 s |
+| `cargo test --locked -p ea-system-tests --test e2e_writer_archive` | 0 | 2 bestanden, 0 fehlgeschlagen, 0 ignoriert, 0 gefiltert | 2 s |
+| `pnpm desktop:typecheck` | 0 | `tsc --noEmit` ohne eine einzige Diagnose | 2 s |
+| `pnpm desktop:test` | 0 | 9 Testdateien, 83 Tests bestanden, 0 fehlgeschlagen | 12 s |
+| `pnpm desktop:e2e` | 0 | 3 Playwright-Tests bestanden, 1 Worker, Netz abgeschaltet | 6 s |
+| `pnpm supply-chain` | 0 | `advisories ok, bans ok, licenses ok, sources ok`; kein einziges `error[...]`; 37 `duplicate`-Warnungen aus dem Tauri-Teilbaum, die `multiple-versions = warn` bewusst nur warnt; `cargo-deny 0.20.2` | 3 s |
+| `pnpm stage-gate:2` | 0 | JSON auf stdout: 16 deklarierte Abbruchpunkte, 149 Ledgerzeilen, 4 `host_evidence_rows`, `stage_two_rows_still_planned` leer, `vector_families` = `[local-audit, reports]` | 2 s |
+| `pnpm verify:quick` | 0 | ACHT Teilkommandos gruen, in dieser Reihenfolge: `cargo fmt --all --check`; `pnpm --dir apps/desktop build`; `pnpm desktop:typecheck` (`tsc --noEmit` ohne Diagnose); `pnpm desktop:test` (9 Testdateien, 83 Tests bestanden); `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ohne eine einzige Warnung; `cargo test --workspace --all-targets --locked` mit 127 Testbinaries, 1005 bestanden, 0 fehlgeschlagen, 6 ignoriert, 0 gefiltert; `cargo test --workspace --doc --all-features --locked` mit 24 Ergebniszeilen ueber 22 Doctest-Ziele, 93 bestanden, 0 fehlgeschlagen (darunter die `compile_fail`-Doctests aus Ruling R55, die als zweiter Block eines Ziels laufen); und der wasm32-Check ueber die zehn Pakete der Positivliste | 125 s |
+
+Nachmessung DRK-206 (2026-08-28): die Zahlen dieser Tabelle sind auf dem Kopf
+`a82b593` des Zweiges `drk-206-stufe-2-nacharbeit` neu gemessen, nachdem die
+Nacharbeit DRK-206 (`docs/traceability/stage-2-nacharbeit-2026-08-28.md`) sie
+bewegt hat. Vorher standen hier 955 bestandene Tests und 146 Ledgerzeilen.
+Bewegt haben sie die Tasks der Nacharbeit: Task 1 `+1` in `ea-verify`, Task 2
+`+9` in `ea-writer` und `ea-draft`, Task 3 `+4`, Task 4 `+11` in `ea-desktop`,
+Task 5 `±0`. Die drei zusaetzlichen Ledgerzeilen kommen aus denselben Tasks.
+
+Diese Deltas sind ausdruecklich KEINE Rechnung, sondern eine Zuordnung: sie
+summieren sich auf `+25`, gemessen sind aber `+50` bestandene Tests und `+2`
+Testbinaries gegenueber dem Lauf vom 2026-08-21. Der Unterschied liegt nicht in
+diesem Zweig — `git diff --name-status main..HEAD` fuehrt keine einzige neu
+angelegte Testdatei, die Nacharbeit hat also kein neues Testbinary erzeugt. Die
+zwei zusaetzlichen Binaries und die restlichen Tests sind zwischen dem
+Gate-Lauf vom 2026-08-21 und dem Abzweigpunkt `42cbfaf` auf `main` gelandet.
+Autoritaet ist deshalb die GEMESSENE Endzahl 127 Testbinaries mit 1005
+bestandenen Tests, nicht die fortgeschriebene Reihe — dieselbe Konvention, die
+der Abschnitt `N4` weiter unten schon festhaelt.
+
+Ein Kommando war auf dem ersten Anlauf dieser Nachmessung rot, und zwar ohne
+Zutun des Baumes: `pnpm supply-chain` meldete
+`error[yanked]: detected yanked crate chacha20 0.10.1` und
+`advisories FAILED`. `deny.toml` fuehrt `[advisories] yanked = "deny"`, und
+crates.io hatte `chacha20 0.10.1` nach dem 2026-08-21 zurueckgezogen; dieselbe
+Version stand unveraendert auch auf `main`. Aufgeloest wurde das mit dem
+Patchsprung `chacha20 0.10.1 -> 0.10.2` (Commit `a82b593`), der genau einen
+Eintrag der Sperrdatei bewegt — Version und Pruefsumme, sonst nichts. Der
+ADR-0001-Pin `chacha20poly1305 = "=0.11.0"` bleibt unberuehrt; `chacha20` haengt
+transitiv darunter. Verhaltensnachweis ist
+`tests/ea-system-tests/tests/conformance_golden_vectors.rs`, gefahren als
+`cargo test --locked -p ea-system-tests --test conformance_golden_vectors`,
+Exitcode 0, 7 bestanden: die goldenen Vektoren rechnen nach dem Sprung
+byteidentisch. Danach meldet `pnpm supply-chain` wieder
+`advisories ok, bans ok, licenses ok, sources ok` und kein einziges `error`.
+
+Nach dem Sprung wurden die Kommandos 1 bis 4, 8, 9 und 10 auf `a82b593`
+VOLLSTAENDIG NEU gefahren; ihre abgelesenen Zahlen sind mit denen vor dem
+Sprung identisch. Die Zeilen `pnpm desktop:typecheck`, `pnpm desktop:test` und
+`pnpm desktop:e2e` tragen die Zahlen des Laufs von demselben Tag VOR dem
+Sprung: keines der drei Kommandos liest `Cargo.lock` — sie fahren `tsc`,
+Vitest und Playwright.
+
+Zwei Angaben der Tabelle waren beim Nachmessen sachlich falsch und sind
+richtiggestellt, ohne dass sich ein Kommando geaendert haette. Erstens faehrt
+`cargo test --workspace --doc --all-features --locked` 22 `Doc-tests`-Ziele mit
+24 Ergebniszeilen und nicht 24 Ziele: `ea_key_provider` und `ea_operator` fahren
+ihre `compile_fail`-Doctests als zweiten Block desselben Ziels. Zweitens zaehlt
+die wasm32-Positivliste ZEHN Pakete und nicht elf — nachgezaehlt an den
+`-p`-Namen des wasm32-Blocks von `verify_quick_commands()`; dieselbe Zahl fuehrt
+`docs/traceability/stage-1-gate.md:165` seit Stufe 1 und ebenso der Kommentar in
+`tools/xtask/tests/stage_gate.rs:960`.
+
+Die Laufzeiten dieser Nachmessung sind volle Wanduhrsekunden und keine
+Harnesszeiten; das Kriterium bleibt der Exitcode und das abgelesene Ergebnis.
+Die Umgebung hat sich seit dem 2026-08-21 in einem Punkt verschoben, der im
+Vorspann steht: die Shell setzt `RUSTUP_TOOLCHAIN` inzwischen auf `1.98.0`
+statt `1.97.1`, weshalb `env -u RUSTUP_TOOLCHAIN` vor jedem Kommando noch
+noetiger ist als vorher; die aktive Toolchain bleibt gemessen
+`1.95.0-aarch64-apple-darwin`.
 
 Ablauf der Messung, damit sie nachvollziehbar bleibt: der Test
 `stage_two_gate_report_records_the_measured_full_gate_run` entstand VOR der
@@ -491,3 +610,57 @@ Politik erledigt:
    `allow-wildcard-paths` allein blieben 19 Fehler, mit `publish = false` dazu
    meldet der Lauf `bans ok`. Die Gegenoption — `wildcards = "allow"` — wurde
    ABGELEHNT: sie haette eine echte Registry-Wildcard nicht mehr gefunden.
+
+## Nachtraege der Nacharbeit DRK-206 (2026-08-28)
+
+Dieser Abschnitt steht ABSICHTLICH hinter `Gemessener Gate-Lauf` und traegt
+keine Tabellenzeile: `tools/xtask/tests/stage_gate.rs::measured_run_rows` liest
+jede mit `|` beginnende Zeile jenes Abschnitts bis zur naechsten
+`##`-Ueberschrift als Belegzeile, und eine weitere waere dort ein Messwert, der
+nie gemessen wurde. Die gemessenen Zahlen der Tabelle selbst ruehrt dieser
+Abschnitt nicht an.
+
+**N4 — der Zwischenschritt 942/943 ist nicht rekonstruierbar.** Der Vorspann der
+Tabelle nennt fuer den Stand vor Task 18 „930 bestandene Tests" und fuer das
+Ende der Stufe 2 „943". Die Buendelbilanz der Fix-Welle (`+7`, `+2`, `+2`, `+1`)
+rechnet gegen 943 auf 955. Der Schritt von 942 auf 943 ist aus den vorliegenden
+Berichten NICHT rekonstruierbar — er steht in keinem Taskbericht und in keiner
+Messzeile. Richtiggestellt wird deshalb nur, was belegbar ist: die ENDZAHL 955
+in 125 Testbinaries ist gemessen und stimmt; der Zwischenwert 943 ist
+uebernommen und nicht nachgemessen. Wer die Reihe nachrechnen will, misst die
+Zahl neu, statt sich auf die Zwischenschritte zu stuetzen.
+
+**G5 — die Stufe-1-Endzahl im Fortschrittsprotokoll war falsch.** Das
+git-ignorierte Fortschrittsprotokoll der Stufe 2 fuehrt die Reihe als
+„Stufe-1-Abschluss 82 Ziele / 688 Tests". Das ist unrichtig. Richtig ist:
+**Stufe 1 endete bei 75 Testzielen und 636 bestandenen Tests**, gemessen und
+protokolliert in `docs/traceability/stage-1-gate.md:160-167`
+(`stage-1-gate.md:166`, `pnpm verify:quick`, Exitcode 0, woertlich „75
+Testbinaries und 636 bestandenen Tests"; `:160`, `:161` und `:163` nennen
+dieselben Zahlen).
+Der geschlossene Stufe-1-Gate-Bericht wird dafuer NICHT bearbeitet; er ist die
+Quelle, nicht der Fehler.
+
+**Merker: zwei nicht ausgefuehrte Teile des Befundes F10.** Die mechanischen
+Teile von F10 sind am 2026-08-28 erledigt (Commit `2a076dc`:
+`crates/ea-writer/tests/grant_completeness.rs` mit abgeleitetem statt
+literalem Erwartungswert, `crates/ea-writer/tests/prepared_recovery.rs` mit der
+exakten Einzelposition statt `windows().any()`, `crates/ea-writer/src/fault.rs`
+mit dem Doc-Kommentar zu den zwei auf der Platte deckungsgleichen Punkten).
+NICHT gemacht und ausdruecklich offen sind die zwei nicht-mechanischen Teile:
+die Verwerfensmatrix prueft ohne Produktpfad, und die Harnesswurzel traegt
+keinen Zaehler. Beide sind Testqualitaet, kein Produktbefund, und keiner der
+beiden schwaecht eine bestehende Zusicherung.
+
+**Ruling R62 — die Quittung der Registry-Ueberalterung wandert nach Stufe 5.**
+Das Gate-Bullet
+`docs/superpowers/plans/2026-08-13-einsatzarchiv-v0-1.md:358` verlangt fuer
+Stufe 2 eine dauerhafte signierte Einmal-Quittung. Stufe 2 liefert die
+ERKENNUNG mit fail-closed-Ausgang und nicht die Quittung;
+`WriterService::acknowledge_stale_registry` ist nicht gebaut — die Crate sagt
+es selbst (`crates/ea-writer/src/lib.rs:37-39`), und der Baum traegt keine
+Definition dieses Namens —, und `writer_acknowledge_stale_registry` bleibt im
+Wirt ein benannter Stummel. Die
+Quittung gehoert AUSDRUECKLICH zur Stufe 5, wo auch die Administrationsseite
+von AK 24 steht. Begruendung und Belege in
+`docs/traceability/stage-2-nacharbeit-2026-08-28.md`.

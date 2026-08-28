@@ -11,7 +11,7 @@
 //! gewoehnlichen Anwendungs- und Systemsicherung ausgenommen
 //! (`design.md`:428, :1491). Die Zeile traegt nur den Verweis auf seinen Griff.
 
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
 use ea_crypto::{AEAD_NONCE_SIZE, CEK_SIZE, SecretBytes, SecretVec, aead_open, aead_seal};
 use ea_key_provider::{KeyHandle, KeyProvider, KeystoreProvider, SecretPurpose};
@@ -49,6 +49,46 @@ impl AutosaveDraftRepository {
         Self { database, provider }
     }
 
+    /// Fuehrt eine Transaktion, die einen leeren Entwurf anlegt, und raeumt
+    /// dessen frischen `draftDEK` ab, wenn sie NICHT committet.
+    ///
+    /// # Warum es diesen Rahmen gibt
+    ///
+    /// Der Schluesselspeicher kennt keine Datenbanktransaktion. Der frische
+    /// `draftDEK` entsteht INNERHALB von [`Self::create_blank`], und rollt die
+    /// Transaktion danach zurueck — ein Fehlschlag in ihrem Rumpf oder im
+    /// Commit selbst —, bliebe sein Eintrag liegen: ein LEBENDES Geheimnis an
+    /// genau der Adresse, unter der die Ablage den naechsten Entwurf sucht,
+    /// ohne eine Zeile, die auf ihn zeigt.
+    ///
+    /// Das Abraeumen STELLT nicht her, was vorher an der Adresse lag: sie ist
+    /// (Speicher, Konto, `DraftDek`) und damit EIN Platz, den das `wrap_secret`
+    /// schon ueberschrieben hat. Es sorgt dafuer, dass der Platz danach LEER
+    /// ist — und damit „der Schluessel ist fort", eine Aussage, die beide
+    /// Neustartpfade aufloesen koennen.
+    ///
+    /// Der Fehlschlag des Abraeumens wird nicht an die Stelle des
+    /// Abbruchgrundes gesetzt: er liesse den Eintrag stehen — den Zustand VOR
+    /// dieser Zusage — waehrend ein vertauschter Code den Grund verschwiege.
+    fn transaction_creating_blank<T>(
+        &self,
+        work: impl FnOnce(&StoreTransaction<'_>, &Cell<Option<KeyHandle>>) -> Result<T, DraftError>,
+    ) -> Result<T, DraftError> {
+        let created = Cell::new(None);
+        let outcome = self
+            .database
+            .transaction(|transaction| work(transaction, &created));
+        if outcome.is_err() {
+            // NACH der Transaktion: `EncryptedDatabase::transaction` haelt die
+            // Verbindung unter einem `Mutex`, und der Schluesselport darf sie
+            // nicht von innen ein zweites Mal nehmen.
+            if let Some(handle) = created.take() {
+                let _ = self.provider.delete(&handle);
+            }
+        }
+        outcome
+    }
+
     /// Legt den einen leeren Entwurf an, den es geben darf.
     ///
     /// Der frische `draftDEK` wird eingepackt und danach WIEDER AUSGEPACKT,
@@ -56,13 +96,22 @@ impl AutosaveDraftRepository {
     /// Geheimnis, und ein zweites, ungeschuetztes Abbild davon waere genau der
     /// Prozessspeicher-Rest, den `SecretBytes` verhindern soll. Der Umweg
     /// belegt in derselben Bewegung, dass der Eintrag wirklich liegt.
-    fn create_blank(&self, transaction: &StoreTransaction<'_>) -> Result<SavedDraft, DraftError> {
+    ///
+    /// `created` nimmt den Griff auf, SOBALD er existiert — vor jedem Schritt,
+    /// der noch scheitern kann. [`Self::transaction_creating_blank`] raeumt ihn
+    /// ab, wenn die Transaktion nicht committet.
+    fn create_blank(
+        &self,
+        transaction: &StoreTransaction<'_>,
+        created: &Cell<Option<KeyHandle>>,
+    ) -> Result<SavedDraft, DraftError> {
         let draft_id =
             Id16::try_from(fresh::<16>()?.as_slice()).map_err(|_| DraftError::Payload)?;
         let handle = self.provider.wrap_secret(
             SecretPurpose::DraftDek,
             SecretBytes::new(fresh::<CEK_SIZE>()?),
         )?;
+        created.set(Some(handle));
         let dek = self.provider.unwrap_secret(&handle)?;
         let nonce = SecretBytes::<AEAD_NONCE_SIZE>::new(fresh::<AEAD_NONCE_SIZE>()?);
         let ciphertext = aead_seal(
@@ -132,7 +181,7 @@ struct StoredDraftRow {
 
 impl DraftRepository for AutosaveDraftRepository {
     fn load_or_create(&self) -> Result<Draft, DraftError> {
-        self.database.transaction(|transaction| {
+        self.transaction_creating_blank(|transaction, created| {
             if let Some(row) = self.read_row(transaction)? {
                 let dek = self.provider.unwrap_secret(&row.handle)?;
                 let plaintext = aead_open(
@@ -146,10 +195,10 @@ impl DraftRepository for AutosaveDraftRepository {
                     .map_err(|_| DraftError::Payload)?;
                 return Ok(Draft::restored(row.draft_id, row.revision, notes));
             }
-            let created = self.create_blank(transaction)?;
+            let blank = self.create_blank(transaction, created)?;
             Ok(Draft::restored(
-                created.draft_id(),
-                created.revision(),
+                blank.draft_id(),
+                blank.revision(),
                 String::new(),
             ))
         })
@@ -290,12 +339,12 @@ impl DraftRepository for AutosaveDraftRepository {
         // ausfuehrbar und darf nicht an einer noch nicht existierenden Tabelle
         // scheitern.
         let clear_transition = self.transition_table_exists()?;
-        self.database.transaction(|transaction| {
+        self.transaction_creating_blank(|transaction, created| {
             if clear_transition {
                 transaction.execute("DELETE FROM draft_transition WHERE singleton = 0", &[])?;
             }
             transaction.execute("DELETE FROM draft WHERE singleton = 0", &[])?;
-            self.create_blank(transaction)
+            self.create_blank(transaction, created)
         })
     }
 
@@ -306,7 +355,7 @@ impl DraftRepository for AutosaveDraftRepository {
         if !self.transition_table_exists()? {
             return Err(DraftError::TransitionUnavailable);
         }
-        self.database.transaction(|transaction| {
+        self.transaction_creating_blank(|transaction, created| {
             let row = self.read_row(transaction)?.ok_or(DraftError::NoDraft)?;
             if row.draft_id != intent.draft_id() {
                 return Err(DraftError::NoDraft);
@@ -319,7 +368,7 @@ impl DraftRepository for AutosaveDraftRepository {
             // die Entwurfszeile loescht, raeumt den Uebergangsplatz ganz.
             transaction.execute("DELETE FROM draft_transition WHERE singleton = 0", &[])?;
             transaction.execute("DELETE FROM draft WHERE singleton = 0", &[])?;
-            let blank = self.create_blank(transaction)?;
+            let blank = self.create_blank(transaction, created)?;
             Ok(DiscardOutcome::new(row.draft_id, blank))
         })
     }

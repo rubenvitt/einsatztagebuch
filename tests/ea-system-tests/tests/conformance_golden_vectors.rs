@@ -201,7 +201,7 @@ const DOMAIN_CONTEXTS: [(&str, &str, ContextFn); 3] = [
     ),
 ];
 
-/// Die 23 Domain-Trennungszeichenketten als eigene Eintraege.
+/// Die 24 Domain-Trennungszeichenketten als eigene Eintraege.
 const DOMAIN_STRINGS: [&str; 24] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
