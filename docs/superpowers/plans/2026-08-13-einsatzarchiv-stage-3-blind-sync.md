@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Die Schlüsselwörter **MUSS**, **DARF NICHT**, **SOLL**, **SOLL NICHT** und **DARF** sind normativ zu verstehen. Ein Release darf von einer MUSS-Anforderung nicht abweichen. Eine Abweichung von SOLL erfordert eine dokumentierte Sicherheits- oder Betriebsbegründung.
-- **Merker Web-Reader**, `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §12: Ablage und Abruf der Wrapped-Vault-Blobs, WebAuthn-Credentials, CORS und RFC-9421-Request-Signatur aus dem Browser (Bundle-Auslieferung und -Pinning entfallen als Sync-Server-Fläche: web-reader-design.md §4.1, :70-75, verbietet sie dort; das Bundle kommt von einem getrennten Origin.); dazu §6.4.1, WebAuthn-Credentials am Sync-Server mit der pseudonymen `subjectId` als `userHandle`. Die bestehenden Tasks werden nicht umgeschrieben; die neue Fläche entsteht additiv im Task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS“. Die bereits gebauten Lese- und Verwaltungsflächen bleiben unverändert, die Endpunktmenge wächst um genau drei Einträge. Das Web-Bundle MUSS von einem **vom Sync-Server getrennten Origin** ausgeliefert werden (§4.1); der Sync-Server ist kein Bestandteil des Vertrauenspfades für ausgeführten Code. Die Trust-Objektfamilie `webBundleRelease` (§4.2; die Stufenzuordnung steht in §1, :23-25 — §12, :443-446, nennt für Stufe 3 nur Flächen und nicht die Objektfamilie) ist eine v1.1-Erweiterung. Stufe 3 liefert genau den Umfang aus docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md:1016 — Codec, CDDL-Arm und Signaturprofil — und friert die Vektoren der Familie in dieser Stufe permanent ein. Gegenstand dieser Stufe sind ausschließlich die Wrapped-Vault-Blobs nach §6.4/§6.4.1. Das Escrow-Chiffrat nach §7.3 bleibt Stufe 5 und wird hier nicht berührt; der Ablageort dafür rückt in dieser Stufe nicht vor.
+- **Merker Web-Reader**, `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §12: Ablage und Abruf der Wrapped-Vault-Blobs, WebAuthn-Credentials, CORS und RFC-9421-Request-Signatur aus dem Browser (Bundle-Auslieferung und -Pinning entfallen als Sync-Server-Fläche: web-reader-design.md §4.1, :70-75, verbietet sie dort; das Bundle kommt von einem getrennten Origin.); dazu §6.4.1, WebAuthn-Credentials am Sync-Server mit der pseudonymen `subjectId` als `userHandle`. Die bestehenden Tasks werden nicht umgeschrieben; die neue Fläche entsteht additiv im Task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS“. Die bereits gebauten Lese- und Verwaltungsflächen bleiben unverändert, die Endpunktmenge wächst um genau drei Einträge. Das Web-Bundle MUSS von einem **vom Sync-Server getrennten Origin** ausgeliefert werden (§4.1); der Sync-Server ist kein Bestandteil des Vertrauenspfades für ausgeführten Code. Die Trust-Objektfamilie `webBundleRelease` (§4.2; die Stufenzuordnung steht in §1, :23-25 — §12, :443-446, nennt für Stufe 3 nur Flächen und nicht die Objektfamilie) ist eine v1.1-Erweiterung. Stufe 3 liefert genau den Umfang aus docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md:1016 — Codec, die zwei CDDL-Arme des Release-Objekts und seines Widerrufs-Folgeobjekts, und Signaturprofil — und friert die Vektoren der Familie in dieser Stufe permanent ein. Gegenstand dieser Stufe sind ausschließlich die Wrapped-Vault-Blobs nach §6.4/§6.4.1. Das Escrow-Chiffrat nach §7.3 bleibt Stufe 5 und wird hier nicht berührt; der Ablageort dafür rückt in dieser Stufe nicht vor.
 - Microsoft Access is outside scope; **Access Grant** is only a signed CEK envelope.
 - Non-goals are fixed: no live incident log, dispatch/alarm/control-center integration, patient record or identifying patient data, concurrent offline Writers, normal-app mutation/deletion of finalized content, AI summarization/OCR, public links, server-side content search, unprofiled network paths, qualified personal electronic signature, TR-ESOR certification claim, screenshot/transcription prevention, or cryptographic recall of already decrypted data.
 - Product invariants apply verbatim: exactly one active Writer; never-reused predecessor-bound sequences; immutable `.eip` bytes except whole-object authorized replacement by `.eds`; amendment-only corrections; one fresh CEK/ciphertext; one signed grant per recipient; exactly one active Recovery grant before commit; no Reader/Recovery/HGA/Approver private key on Writer; no retained CEK/decryptable draft key; no server decrypt/grant key; server-independent archive verification; independent schema/format/suite versions with old bytes unchanged; separate Sync/verification/Evidence/Entry/destruction statuses; no legal overclaim from a hash chain; every active Reader initially granted; external-anchor recovery; and only Root-signed OS/device-bound operator snapshots.
@@ -781,7 +781,94 @@ git commit -m "feat(sync): add blind read and administration APIs"
 
 ### Task 9: Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS
 
-_(written in a later editing pass)_
+**Files:**
+- Create: `crates/ea-sync-server/src/vault_blob.rs`
+- Create: `apps/server/src/http/vault_blobs.rs`
+- Modify: `apps/server/src/router.rs`
+- Modify: `apps/server/src/config.rs`
+- Modify: `docs/traceability/v0.1-requirements.csv`
+- Modify: `tools/xtask/tests/stage_gate.rs`
+- Test: `apps/server/tests/vault_blob_api.rs`
+
+**Interfaces:**
+- Consumes: `RequestSigner` and `RequestVerifier` from the task „Normative Sync Framing and RFC-9421 Request Verification“, the WebAuthn credential table and the wrapped Reader vault blob table of the task „PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port“, the rate-limited single-use challenges and the registered WebAuthn credentials of the task „Challenges, Device Registrations, and Trust Distribution“, `ServerClock`, and `apps/server/src/router.rs`.
+- Produces: `PUT /v1/vault-blobs`, `POST /v1/vault-blobs/retrievals`, the CORS layer with its configured `Origin` allowlist, and the ledger row `WR-064`.
+
+- [ ] **Step 1: Write the assertion, enumeration, and origin witnesses**
+
+```rust
+#[tokio::test]
+async fn no_ciphertext_leaves_the_server_without_a_valid_assertion() {
+    let stored = api.put_blob(fixtures::signed_blob_upload(subject())).await.unwrap();
+    assert_eq!(api.retrieve_blobs(fixtures::retrieval_without_assertion(subject()))
+                   .await.unwrap_err().code(), "EA-WEBAUTHN-ASSERTION-INVALID");
+    assert_eq!(api.retrieve_blobs(fixtures::retrieval_with_assertion(subject(),
+                   api.spent_challenge().await)).await.unwrap_err().code(),
+               "EA-WEBAUTHN-ASSERTION-INVALID");
+    let released = api.retrieve_blobs(fixtures::retrieval_with_assertion(subject(),
+        api.fresh_challenge().await)).await.unwrap();
+    assert_eq!(released.ciphertexts(), [stored.exact_ciphertext()]);
+}
+
+#[tokio::test]
+async fn the_retrieval_endpoint_offers_no_enumeration_surface() {
+    let unknown = api.retrieve_blobs(fixtures::retrieval_with_assertion(never_enrolled_subject(),
+        api.fresh_challenge().await)).await.unwrap_err();
+    let foreign = api.retrieve_blobs(fixtures::assertion_of(other_subject(),
+        api.fresh_challenge().await).claiming(subject())).await.unwrap_err();
+    assert_eq!((unknown.code(), unknown.status()), ("EA-WEBAUTHN-ASSERTION-INVALID", 401));
+    assert_eq!((foreign.code(), foreign.status()), (unknown.code(), unknown.status()));
+    assert_eq!(foreign.body_bytes(), unknown.body_bytes());
+}
+
+#[tokio::test]
+async fn an_unlisted_origin_receives_no_cors_headers() {
+    let refused = api.preflight("https://not-listed.example", "/v1/vault-blobs/retrievals").await;
+    assert!(refused.header("access-control-allow-origin").is_none());
+    let allowed = api.preflight(config::bundle_origin(), "/v1/vault-blobs/retrievals").await;
+    assert_eq!(allowed.header("access-control-allow-origin"), Some(config::bundle_origin()));
+    assert!(allowed.header("access-control-allow-credentials").is_none());
+}
+```
+
+The ledger witness is written in this step as well, not in the implementing one: `WEB_READER_MUST_ROWS` in `tools/xtask/tests/stage_gate.rs` receives the additional tuple `("WR-064", "6.4", "3", "implemented")`, so the missing ledger row is a red gate instead of a silent gap.
+
+- [ ] **Step 2: Run the tests and verify the web surface is absent**
+
+Run: `cargo test --locked -p einsatzarchiv-server --test vault_blob_api && cargo test --locked -p xtask --test stage_gate web_reader_must_requirements_are_recorded_as_v1_1_rows`
+
+Expected: FAIL because neither vault-blob routes, nor the assertion check, nor the CORS layer, nor the ledger row `WR-064` exist.
+
+- [ ] **Step 3: Implement blob storage, assertion-authenticated release, and the origin allowlist**
+
+`PUT /v1/vault-blobs` is RFC-9421 signed and writes exactly one opaque ciphertext for the pseudonymous `subjectId` of the enrolling Reader into the wrapped vault blob table of the task „PostgreSQL Schema, Content-Addressed Object Port, and Server Key Port“: create-if-absent over (`subjectId`, blob hash), no update and no delete path in this stage. The blob deliberately does NOT lie in the Object Store under `<type>/<hex objectHash>`; that namespace belongs to the six archive object types. The server stores bytes it cannot read and knows neither vault key nor PRF output (web-reader-design.md §6.4, :206-207).
+
+`POST /v1/vault-blobs/retrievals` carries no RFC-9421 signature. Its sole authority is a WebAuthn assertion over a discoverable credential of the requesting Reader with the pseudonymous `subjectId` as `userHandle` (web-reader-design.md §6.4.1, :218-224). The server resolves the credential over the uniqueness constraint (`organizationId`, `credentialId`) of the credential table, verifies the assertion signature against the stored public key, requires a strictly increasing signature counter, and requires the `clientDataJSON` challenge to be one that `POST /v1/auth/challenges` issued and that has not been spent — without that binding the assertion would be a capability that can be replayed forever. Only then does the server release the opaque ciphertexts bound to exactly that `subjectId`, and nothing else. The registration itself grants the server no role, capability or device authority (web-reader-design.md §6.4.1, :230-233); the two uses of the same authenticator stay separated, the assertion authenticates the transport and the PRF evaluation unlocks the vault afterwards (:226-228).
+
+Exactly ONE additional signature exception arises here, and the reason is written out so that it is not widened later: `PUT /v1/vault-blobs` and `POST /v1/webauthn-credentials` — the latter built by the task „Challenges, Device Registrations, and Trust Distribution“, so that of the three web endpoints this task carries exactly two — are enrollment through the Reader's own device, the Reader's Ed25519 key is present at that moment, and both are therefore RFC-9421 signed like every other endpoint. Only `POST /v1/vault-blobs/retrievals` runs from a fresh browser whose vault — and with it the signing key — is still locked, which is the situation web-reader-design.md:213-216 describes. The exception list of the Global Constraints therefore stays at exactly two entries: the rate-limited challenge endpoint and this retrieval.
+
+`apps/server/src/router.rs` gets one explicit `AuthenticatedDevice`-free routing line for the retrieval, so that `RequestVerifier` does not reject the path for a missing signature: the route is mounted in a branch that carries neither the verifier layer nor an `AuthenticatedDevice` extractor. This is NOT the differently routed device registration of the task „Normative Sync Framing and RFC-9421 Request Verification“, which is signed with the requested key and yields `AuthenticatedDevice::ProofOfPossession`; here no device identity exists at all, and `crates/ea-sync-server/src/vault_blob.rs` therefore takes the verified assertion rather than an authenticated device as its input.
+
+The endpoint offers no enumeration surface (web-reader-design.md §6.4.1, :228). An unknown `subjectId` and a `subjectId` whose assertion does not verify answer with the identical `401`, the identical error code and an identical `protocol-error-v1` body, and both run the same work before answering; a `404` for an unknown subject would be exactly the enumeration surface the section forbids. This does not touch the `404` line of the HTTP mapping, which names unknown object, chain, Entry and destruction IDs and no `subjectId`.
+
+`apps/server/src/config.rs` carries the `Origin` allowlist: a positive list from the configuration, never a wildcard, `Access-Control-Allow-Credentials` off, and the separate bundle origin as the only delivery-side entry. An unlisted origin does not pass the preflight and receives no `Access-Control-Allow-Origin` header at all. The reason the surface exists: web-reader-design.md §4.1 (:70-75) requires a delivery origin separate from the sync server, so cross-origin access follows necessarily. The RFC-9421 coverage of `@authority` and `@target-uri` stays untouched by this — the browser signs over the target URI of the sync server, not over its own origin; CORS decides whether the browser may issue the request, the signature decides whether the server accepts it. The browser-side signing itself is not built here but is the `RequestSigner` of the task „Normative Sync Framing and RFC-9421 Request Verification“, which this task names in its Consumes. The CORS layer is written as an own middleware layer of `apps/server` on top of the already ratified HTTP-server dependency class: no new crate enters here, because this task carries no `Cargo.toml`/`Cargo.lock` line and every one of its commands runs `--locked`, which a fresh dependency would contradict.
+
+`docs/traceability/v0.1-requirements.csv` gains the row `WR-064` for §6.4/§6.4.1 after the schema `WR-0<Abschnitt>`: version `v1.1`, `stage = 3`, status `implemented` once this task closes, and an evidence column naming `apps/server/tests/vault_blob_api.rs`. Two shapes are fixed here because `web_reader_must_requirements_are_recorded_as_v1_1_rows` in `tools/xtask/tests/stage_gate.rs` compares them exactly: the source column MUST end on `6.4` — the assertion uses `ends_with`, so `6.4.1` or `6.4/6.4.1` would fail — and §6.4.1 is named in the title column instead. The ledger row and the tuple of the first step land in the SAME commit as the passing validation, because a tuple demanding `implemented` while the row still says `planned` would leave the gate red for every following task.
+
+The decision on `WEB_READER_MUST_ROWS` is taken here, once, so that no later task shifts the arity a second time: the constant DOES grow, arity 7 to 8, by exactly the tuple named above. Measured: the loop iterates the CONSTANT and looks up one CSV row per tuple, so a new CSV row without a tuple would be invisible to it and would break nothing — the tuple is deliberate additional hardening and not a duty, and every later task that counts this constant counts from eight.
+
+- [ ] **Step 4: Run the assertion, enumeration, origin, and ledger checks**
+
+Run: `cargo test --locked -p einsatzarchiv-server --test vault_blob_api && cargo test --locked -p xtask --test stage_gate web_reader_must_requirements_are_recorded_as_v1_1_rows`
+
+Expected: PASS; no ciphertext leaves the server without a valid, unspent assertion, unknown and unauthenticated subjects are indistinguishable, an unlisted origin receives no `Access-Control-Allow-Origin`, and the ledger carries `WR-064` in status `implemented`.
+
+- [ ] **Step 5: Commit the web server surface**
+
+```bash
+git add crates/ea-sync-server apps/server docs/traceability/v0.1-requirements.csv tools/xtask/tests/stage_gate.rs
+git commit -m "feat(sync): release wrapped vault blobs against a webauthn assertion"
+```
 
 ### Task 10: Writer Sync Queue, Network-Archive Ordering, and Receipt Persistence (formerly Task 7)
 
@@ -792,15 +879,25 @@ _(written in a later editing pass)_
 - Create: `crates/ea-sync-client/src/client.rs`
 - Create: `crates/ea-sync-client/src/retry.rs`
 - Create: `crates/ea-sync-client/src/receipt.rs`
+- Create: `crates/ea-local-store/migrations/0004_sync_retry.sql`
 - Create: `apps/desktop/src-tauri/src/commands/sync.rs`
 - Modify: `apps/desktop/src/components/integrity/SyncStatus.tsx`
 - Test: `crates/ea-sync-client/tests/resume.rs`
 - Test: `crates/ea-sync-client/tests/status.rs`
 - Test: `apps/desktop/src/components/integrity/SyncStatus.test.tsx`
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `tools/xtask/src/main.rs`
+- Modify: `tools/xtask/tests/workspace.rs`
+- Modify: `crates/ea-archive-fs/src/publication_queue.rs`
+- Modify: `crates/ea-local-store/src/migrations.rs`
+- Modify: `crates/ea-types/src/status.rs`
+- Modify: `crates/ea-types/src/lib.rs`
+- Modify: `crates/ea-types/tests/contracts.rs`
 
 **Interfaces:**
-- Consumes: committed archive inventory, configured network archive publisher, signed HTTP client, full Receipt verifier.
-- Produces: `SyncClient::push_pending(limit) -> PushSummary`, reconstructible queue, bounded retry, and exact four-state UI DTO.
+- Consumes: committed archive inventory, configured network archive publisher, `RequestSigner` from the task „Normative Sync Framing and RFC-9421 Request Verification“ together with its HTTP transport, `TechnicalCursorV1`, full Receipt verifier.
+- Produces: `SyncClient::push_pending(limit) -> PushSummary`, reconstructible queue, a persisted bounded retry state that first constructs `DetailCause::ResumeAttemptsExhausted`, and the unchanged four-state `SyncStateView` DTO re-emitted from `ea-ui-contracts`.
 
 - [ ] **Step 1: Write ordering, restart, and status tests**
 
@@ -825,30 +922,163 @@ async fn synchronized_requires_locally_verified_receipt() {
 
 - [ ] **Step 2: Run sync-client tests and verify failure**
 
-Run: `cargo test --locked -p ea-sync-client && pnpm --dir apps/desktop test --run SyncStatus`
+Run: `cargo metadata --format-version 1 && cargo test --locked -p ea-sync-client && pnpm --dir apps/desktop test --run SyncStatus`
+
+`cargo metadata --format-version 1` is the exactly one command of this task without `--locked`, because this task enters a new member and new foreign dependencies. The lockfile-progress rule stands verbatim in `workspace_declares_exact_planned_members_and_shared_dependencies` in `tools/xtask/tests/workspace.rs`: "Ein neues Mitglied oder eine neue Fremdabhaengigkeit schreibt Cargo.lock neu, deshalb laeuft in dem Task, der sie eintraegt, GENAU EIN Kommando ohne --locked … Alle weiteren Kommandos dieses Tasks tragen wieder --locked."
 
 Expected: FAIL because queue/client/status integration does not exist.
 
 - [ ] **Step 3: Implement queue derivation and bounded retry**
 
-Rebuild pending Entries from committed `.eip` plus exact initial grants and absence of a valid local `.esr`. For controlled network profiles, publish exact committed grants then `.eip`, verify byte equality, and only then call server. Sign every request using a fresh challenge. Retry network/timeout/5xx with bounded exponential backoff plus jitter and persisted next attempt; do not auto-retry format, signature, fork, Registry, or authorization errors as success. Verify and create-if-absent persist Receipt locally and remotely before `Synchronized`. Detail causes are nonnormative and cleartext-free; public status remains exactly four values.
+Rebuild pending Entries from committed `.eip` plus exact initial grants and absence of a valid local `.esr`. For controlled network profiles, publish exact committed grants then `.eip`, verify byte equality, and only then call server. Sign every request using a fresh challenge. Retry network/timeout/5xx with bounded exponential backoff plus jitter and persisted next attempt, and resume from the last confirmed `TechnicalCursorV1`; do not auto-retry format, signature, fork, Registry, or authorization errors as success. Verify and create-if-absent persist Receipt locally and remotely before `Synchronized`. Detail causes are nonnormative and cleartext-free; public status remains exactly four values.
+
+This task enters `crates/ea-sync-client` in `[workspace] members` of `Cargo.toml` and in `WORKSPACE_MEMBERS` (`tools/xtask/tests/workspace.rs`, 24 entries today plus the three members the earlier tasks of this stage add), and the pair (`"ea-sync-client"`, justification) in `WASM32_EXEMPT_CRATES` (`tools/xtask/src/main.rs`), because `every_crates_member_is_classified_for_the_wasm32_gate` demands exactly one classification for every member under `crates/`. The justification reads: "drives a signed HTTP client with Tokio, bounded retry timers and persisted queue state on top of the local archive directory, so it reaches past `ea-verify` into the host operating system and the network stack."
+
+`PublicationQueue` no longer asserts `SyncStatus::Synchronized` itself; `resume()` and `drain()` only deliver the publication outcome, and the mapping onto the four public states moves completely into `crates/ea-sync-client/src/queue.rs`, where the verified Receipt — persisted locally and, where configured, in the network archive — is the condition for `Synchronized`. The doc comment of `PublicationQueue::resume` („synchronisiert ohne veröffentlichte Bytes heißt genau eines: es lag nichts an“) is rewritten onto the new outcome in the same move. There is then exactly one truth about the state; today's second one falls away. Normative coverage: design.md:1579.
+
+The applicable `SyncStatus` is the one from `crates/ea-archive-fs/src/publication_queue.rs` (`LocallySaved`, `UploadPending`, `Synchronized`, `Failed`) with `label()` as the verbatim surface copy; `crates/ea-sync-client` re-exports it with `pub use`, does not declare it again, and the dead enum in `crates/ea-types/src/status.rs` falls away in the same move. Should the dead enum be kept instead, it MUST be renamed to an unmistakably separate name in this same step — otherwise `ea-sync-client` creates the third truth. Measured, so that the removal is complete in one commit: the enum has no production caller, `crates/ea-types/src/lib.rs` re-exports it in its `pub use status::{…}` block, and `crates/ea-types/tests/contracts.rs` pins its codes in `status_is_machine_stable` and in `every_status_variant_has_an_exhaustive_stable_code`; only the `SyncStatus` lines of those two tests fall, their remaining assertions stay untouched.
+
+Attempt counter and `nextAttemptAt` lie in an own table of the local encrypted store and are reconstructed at start together with the queue derived from committed archive bytes; `PublicationQueue::pending` is a process field and carries no persisted state. The table arrives as the next ascending migration `0004_sync_retry.sql`, appended to `MIGRATIONS` in `crates/ea-local-store/src/migrations.rs` with its own named `pub const … _MIGRATION_VERSION`, because that module owns the registry and a registered migration is never rewritten. The task constructs `DetailCause::ResumeAttemptsExhausted` when the bound is exhausted — today the label exists without an attempt counter, a backoff or a persisted next attempt, and this is where it gains all three.
+
+`SyncStateView` in `crates/ea-ui-contracts` stays UNCHANGED: this task adds no retry or Receipt evidence field to the DTO, so neither `crates/ea-ui-contracts/src/lib.rs`, nor `crates/ea-ui-contracts/src/emit.rs`, nor `apps/desktop/src/bridge/generated-contracts.ts` is touched. Hand-written status literals in `SyncStatus.tsx` stay forbidden; the guard is `apps/desktop/src/bridge/no-hand-written-contracts.test.ts`, and the component keeps unpacking the four names out of the emitted `SYNC_STATUS_VALUES` array.
+
+`SyncStatus.tsx` stays on the design-system state accepted in Stage 2: Ant Design 6, static `zeroRuntime`, local CSP, direct CSR imports from `@phosphor-icons/react`; no new tokens, no runtime CSS and no TypeScript security logic arise.
 
 - [ ] **Step 4: Run offline/reconnect/restart/replay tests**
 
-Run: `cargo test --locked -p ea-sync-client && pnpm --dir apps/desktop test --run SyncStatus`
+Run: `cargo test --locked -p ea-sync-client && pnpm --dir apps/desktop test --run SyncStatus && pnpm --dir apps/desktop typecheck`
 
 Expected: PASS; queue reconstruction ignores mutable queue rows and an interrupted response resumes idempotently to the same Receipt.
 
 - [ ] **Step 5: Commit Writer sync**
 
 ```bash
-git add crates/ea-sync-client apps/desktop Cargo.toml Cargo.lock pnpm-lock.yaml
+git add crates/ea-sync-client crates/ea-archive-fs crates/ea-local-store crates/ea-types apps/desktop tools/xtask Cargo.toml Cargo.lock pnpm-lock.yaml
 git commit -m "feat(sync): resume Writer uploads from archive bytes"
 ```
 
 ### Task 11: Trust-Objektfamilie webBundleRelease: Codec, CDDL-Arm und Signaturprofil
 
-_(written in a later editing pass)_
+**Files:**
+- Modify: `crates/ea-format/src/etb.rs`
+- Modify: `crates/ea-format/src/lib.rs`
+- Modify: `schemas/archive/v1/trust.cddl`
+- Modify: `tools/xtask/tests/spec_completeness.rs`
+- Modify: `crates/ea-testkit/src/lib.rs`
+- Modify: `tests/ea-system-tests/tests/conformance_golden_vectors.rs`
+- Create: `vectors/web-bundle/v1/manifest.json`
+- Create: `vectors/web-bundle/v1/object/` — the frozen `.etb` bytes of both subtypes
+- Test: `crates/ea-format/tests/web_bundle_release.rs`
+
+**Interfaces:**
+- Consumes: the COSE/Ed25519 verifier, the Root trust anchor out of `ea-trust`, and the deterministic CBOR of Stage 1.
+- Produces: `TrustSubtypeV1::WebBundleRelease` and `TrustSubtypeV1::WebBundleRevocation`, `WebBundleReleaseCoreV1` and `WebBundleRevocationCoreV1`, the twelfth and thirteenth arm of `etb-body-v1`, the signature profile of the family, and the permanently frozen vector family `vectors/web-bundle/v1/`.
+
+- [ ] **Step 1: Write the codec, cardinality, and reference tests**
+
+```rust
+#[test]
+fn the_release_object_round_trips_through_the_public_path() {
+    let payload = TrustPayloadV1::web_bundle_release(fixtures::release_fields()).unwrap();
+    let object = TrustObjectV1::new(payload, vec![fixtures::root_signature()]).unwrap();
+    let bytes = encode_trust(&object).unwrap();
+    let ParsedArchiveObject::Trust(parsed) = decode_exact_object(bytes.as_bytes()).unwrap()
+        else { panic!("a release object parses as a trust object") };
+    assert_eq!(parsed.value().subtype(), TrustSubtypeV1::WebBundleRelease);
+    assert_eq!(TrustSubtypeV1::WebBundleRelease.as_str(), "webBundleRelease");
+    assert_eq!(bytes.as_bytes(), fixtures::frozen_release_vector_bytes());
+}
+
+#[test]
+fn both_wire_literals_decode_into_their_variant_instead_of_a_tag_mismatch() {
+    for literal in ["webBundleRelease", "webBundleRevocation"] {
+        assert!(decode_exact_object(&fixtures::hand_built_trust_object(literal)).is_ok());
+    }
+    assert_eq!(decode_exact_object(&fixtures::hand_built_trust_object("webBundleReleases"))
+                   .unwrap_err(), FormatError::TagMismatch);
+}
+
+#[test]
+fn exactly_one_root_signature_is_admissible_for_both_subtypes() {
+    for payload in [fixtures::release_payload(), fixtures::revocation_payload()] {
+        assert!(TrustObjectV1::new(payload.clone(), vec![fixtures::root_signature()]).is_ok());
+        assert_eq!(TrustObjectV1::new(payload.clone(), Vec::new()).unwrap_err(),
+                   FormatError::Shape);
+        assert_eq!(TrustObjectV1::new(payload, vec![fixtures::root_signature(),
+                       fixtures::second_root_signature()]).unwrap_err(), FormatError::Shape);
+    }
+}
+
+#[test]
+fn the_revocation_binds_the_release_it_withdraws() {
+    let revocation = fixtures::decode_revocation(fixtures::frozen_revocation_vector_bytes());
+    assert_eq!(revocation.release_object_hash, fixtures::frozen_release_object_hash());
+    assert_eq!(revocation.effective_from_registry_version, 7);
+}
+```
+
+The two new CDDL rule names are written into the fixed list of `cddl_registers_every_v1_wire_type` (`tools/xtask/tests/spec_completeness.rs`, eleven subtype rule names today) in this step as well, so that the presence of the rules is a checked assurance and not an accident. The private `from_str` is reached exclusively through `decode_exact_object`; this task does NOT widen its visibility, and the test therefore drives the same path the Trust endpoint of the task „Challenges, Device Registrations, and Trust Distribution“ drives.
+
+- [ ] **Step 2: Run the tests and verify the family is rejected today**
+
+Run: `cargo test --locked -p ea-format --test web_bundle_release`
+
+Expected: FAIL because `webBundleRelease` and `webBundleRevocation` reach the fallback arm of `from_str` (`crates/ea-format/src/etb.rs:45`) and answer `FormatError::TagMismatch`.
+
+- [ ] **Step 3: Implement the two variants, their cores, and their CDDL arms**
+
+The norm to be edited is the alternatives block `etb-body-v1` (`schemas/archive/v1/trust.cddl:8-32`), which writes the eleven subtype literals out INLINE; it receives the twelfth and the thirteenth arm. The rule `trust-subtype-v1` (`:1-4`) is normative but referenced by no CDDL rule and no Rust path; it is carried along character-identically so that it does not become deader still, but it is NOT the enforcing place. `TrustSubtypeV1` stays closed: NO unknown fallback arises in `from_str` and NO reserved, non-issuable variant — both new variants are fully issuable and testable. `as_str` stays the exact inverse without a catch-all arm; the compiler enforces completeness in every caller through the non-exhaustive match expressions.
+
+The two arms carry the signature cardinality `[cose-sign1-v1]` — exactly one Root signature, exactly like `organizationAdminAuthorization` (`schemas/archive/v1/trust.cddl:21-22`). The grammar alone does not enforce this: `validate_signature_count` in `crates/ea-format/src/etb.rs` closes on `count == 1` for `RootCertificate` and `OrganizationAdminAuthorization` and falls back to `_ => count >= 1` for everything else, so both new variants are taken INTO the `count == 1` arm. Without that edit the parser would accept two Root signatures while the grammar allows one, and the cardinality test of the first step is what holds the two together. `validate_payload` in the same file is exhaustive over the subtype, so the compiler already demands the two new payload validators.
+
+Both payloads take the DIRECT shape like `organizationAdminAuthorization` and are not wrapped in `authorized-trust-payload-v1<…>`: a Root signature needs no administrative authorization. The digest input needs no new domain constant — `trust_digest_input` in `crates/ea-format/src/etb.rs` prefixes the subtype literal in front of the exact payload, so the two literals separate the domains by themselves.
+
+The core arrays follow web-reader-design.md §4.2 (:79-82) and stay minimal; their field order is FROZEN by the vectors of this stage and cannot be reordered afterwards:
+
+```cddl
+web-bundle-release-core-v1 = [
+  1, organization-id: bstr .size 16,
+  bundle-hash: bstr .size 32, bundle-version: tstr,
+  effective-from-registry-version: uint,
+  issued-at: int, root-key-thumbprint: bstr .size 32, []
+]
+
+web-bundle-revocation-core-v1 = [
+  1, organization-id: bstr .size 16,
+  release-object-hash: bstr .size 32,
+  effective-from-registry-version: uint,
+  issued-at: int, root-key-thumbprint: bstr .size 32, []
+]
+```
+
+Every position has a source. The leading `1`, the `organization-id` and the closing empty array are the shape every core of this family carries (`initial-root-certificate-core-v1`, `schemas/archive/v1/trust.cddl:44-49`). `bundle-hash` and `bundle-version` are the two fields §4.2 names verbatim; the hash is 32 bytes like every other hash of the family, the version is a `tstr` after the model of `rule-set-version` in `free-text-policy-v1`. `effective-from-registry-version` carries the effectiveness information of §4.2 and reuses the field name that `initial-root-certificate-core-v1` already uses. `issued-at` and `root-key-thumbprint` follow `organization-admin-authorization-v1` (`:85-95`) and `registry-event-core-v1` (`:110-117`) and bind the issuing Root key. The revocation information §4.2 also demands is carried by the follow-up object and not by a field of the release: `webBundleRevocation` is append-only, references the release exclusively by its object hash, and never rewrites the released object — that is why the release core carries no revocation field and is nonetheless complete against „bindet mindestens“.
+
+Whether the two subtypes are admissible as the target of a `registryEvent` is classified here explicitly, because otherwise the authorization consequence would arise silently: they are NOT. Two places carry the narrower literal union and both stay character-identical. `target-trust-subtype` in `organization-admin-authorization-v1` (`schemas/archive/v1/trust.cddl:91-92`) enumerates six literals, and its Rust twin is the `matches!` guard that `crates/ea-format/src/etb.rs` runs at the encoding and at the decoding site of the admin authorization; `registry-change-v1` (`:101-108`) is a closed seven-arm union and carries no arm for a bundle release. The structural reason is the one above: both objects take the direct, Root-signed payload shape instead of `authorized-trust-payload-v1<…>`, so they never appear as the target of an administrative authorization, and an eighth registry-change arm would alter the meaning of the Registry head and with it a verification order that web-reader-design.md:20-22 declares unchanged for this v1.1 extension. The pinning activation behaviour of §4.2 (:84-87) is a Stage 4 subject and is not built here; this stage defines the family.
+
+Vectors of this family live in an OWN family `vectors/web-bundle/v1/` and never under `vectors/trust/v1/`. Reason, measured: `tests/ea-system-tests/tests/conformance_golden_vectors.rs` carries `TRUST_RESERVED_SUBTYPE_NAMES: [&str; 2] = ["webBundleRelease", "readerKeyEscrow"]` and forbids each of these literals in the ENTIRE trust manifest text through `check_trust_hygiene`; `crates/ea-testkit/src/lib.rs` checks the same against the generator output in `every_trust_admin_authorization_states_what_it_does_not_prove`. Object bytes are recorded as hex in the manifests, so the literal reaches a manifest text through the entry NAME, and independently of that the on-disk trust manifest is pinned byte for byte against the generator output — every new entry would force the frozen Stage 1 manifest (130 entries, own measurement) to be regenerated. Both tests would run red. The hygiene rule of `docs/traceability/stage-1-gate.md:134-143` stays untouched: no negative vector of any family carries the literal `webBundleRelease`; the only subtype negative of the existing stock carries `xxUnknownxx`, the action-code negative `200`. The negatives of the new family carry their subtype literal exclusively inside their hex-recorded object bytes, and their entry names stay kebab-case, so no manifest text of any family carries the literal.
+
+The new family brings the protection pattern of `crypto/suite-1` with it, in `tests/ea-system-tests/tests/conformance_golden_vectors.rs`: an entry-count pin after the model of `EXPECTED_ENTRY_COUNT`, a name-plus-`fileSha256` freeze list after the model of `STAGE_ONE_SUITE_ONE_ENTRIES`, and a named admission list for later stages after the model of `STAGE_TWO_SUITE_ONE_ADDITIONS`, which is empty at the end of this stage. `crates/ea-testkit/src/lib.rs` gets the generator of the family, and the manifest on disk is compared against its output exactly as for the existing families. The freeze is permanent: from the commit of this task on, these bytes are not regenerated, not resorted and not reformatted, and a later behavioural change lays `vectors/web-bundle/v2/` BESIDE them, never in their place (`docs/traceability/stage-1-gate.md:116-121`). The task „Server Administration Separation, Failure Matrix, Privacy, and Stage Gate“ names `web-bundle` as the vector family this stage freezes.
+
+- [ ] **Step 4: Validate codec, grammar, registry, and frozen vectors**
+
+Run:
+
+```bash
+cargo test --locked -p ea-format
+cargo test --locked -p ea-testkit
+cargo test --locked -p ea-system-tests --test conformance_golden_vectors
+cargo run --locked -p xtask -- validate-schemas
+cargo test --locked -p xtask --test spec_completeness
+```
+
+Expected: PASS; both literals round trip, two signatures and zero signatures are rejected for both subtypes, the CDDL documents validate, the two rule names are registered, every frozen vector of every other family is byte-identical, and the manifest of the new family matches its generator output.
+
+- [ ] **Step 5: Commit the trust object family**
+
+```bash
+git add crates/ea-format schemas/archive/v1/trust.cddl tools/xtask crates/ea-testkit tests/ea-system-tests vectors/web-bundle
+git commit -m "feat(format): define the webBundleRelease trust object"
+```
 
 ### Task 12: Server Administration Separation, Failure Matrix, Privacy, and Stage Gate (formerly Task 8)
 
