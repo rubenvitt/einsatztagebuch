@@ -292,10 +292,23 @@ zertifiziert.
 
 ### 7.3 Getrennte Verwahrung
 
-Das Escrow-Chiffrat liegt im Root-signierten, append-only Trust-Bestand der
-Administrationszone. Es liegt NICHT beim Recovery Custodian. Der Custodian hält
-den Schlüssel ohne Chiffrat, die Administrationszone das Chiffrat ohne Schlüssel.
-Ein einzelner kompromittierter Verwahrort genügt nicht.
+Das Escrow-Chiffrat liegt als Root-signiertes, append-only Trust-Objekt
+`readerKeyEscrow` im Trust-Bestand `trust/` des Archivs (Design §11.4) und wird
+wie jedes Trust-Objekt an alle Reader repliziert und exportiert. Es liegt NICHT
+beim Recovery Custodian: der Custodian hält den Schlüssel ohne Chiffrat, das
+Archiv das Chiffrat ohne Schlüssel.
+
+Entschieden am 2026-08-28 (DRK-213). Die Replikation ist bewusst: Öffnen kann das
+Chiffrat nur der Recovery-KEM-Schlüssel, und der entkapselt per Invariante bereits
+den Recovery-Grant jedes Eintrags in `grants/`, der ebenso repliziert wird. Ein
+Reader, der das Chiffrat eines anderen Readers besitzt, gewinnt damit keine
+Inhaltsfähigkeit, keine Signaturfähigkeit (Abschnitt 7.2) und keine Metadaten, die
+nicht schon im Reader-Zertifikat stehen. Die Trennung, auf der die Sicherheit
+beruht, ist die zwischen Recovery-Schlüssel und Archiv, nicht die des Chiffrats.
+Der Bestand `trust/` ist der einzige normativ definierte Root-signierte,
+append-only und serverunabhängig exportierte Ort; ein reiner Server-Blob wäre bei
+Serververlust weg und nicht offline verifizierbar. Die Objektart entsteht in
+Stufe 5 als v1.1 im selben Cutover wie die 2-of-N-Familie nach Abschnitt 7.5.
 
 ### 7.4 Bindung
 
