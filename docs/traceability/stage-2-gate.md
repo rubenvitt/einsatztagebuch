@@ -569,7 +569,9 @@ git-ignorierte Fortschrittsprotokoll der Stufe 2 fuehrt die Reihe als
 „Stufe-1-Abschluss 82 Ziele / 688 Tests". Das ist unrichtig. Richtig ist:
 **Stufe 1 endete bei 75 Testzielen und 636 bestandenen Tests**, gemessen und
 protokolliert in `docs/traceability/stage-1-gate.md:160-167`
-(`pnpm verify:quick`, Exitcode 0, „75 Testbinaries und 636 bestandene Tests").
+(`stage-1-gate.md:166`, `pnpm verify:quick`, Exitcode 0, woertlich „75
+Testbinaries und 636 bestandenen Tests"; `:160`, `:161` und `:163` nennen
+dieselben Zahlen).
 Der geschlossene Stufe-1-Gate-Bericht wird dafuer NICHT bearbeitet; er ist die
 Quelle, nicht der Fehler.
 
