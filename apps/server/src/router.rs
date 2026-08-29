@@ -6,25 +6,55 @@
 //! [`crate::config`] steht. Ein Klartext-Lauscher existiert nicht — auch nicht
 //! hinter einem Schalter, weil ein Schalter irgendwann umgelegt wird.
 //!
-//! Die Routentafel ist in dieser Stufe noch leer: die siebzehn Endpunkte aus
-//! `design.md` §13.2 entstehen in den folgenden Tasks. Was hier steht, ist die
-//! Klammer, in die sie kommen.
+//! Die Routentafel traegt GENAU die fuenf Endpunkte, die es heute gibt. Die
+//! uebrigen zwoelf der siebzehn aus `design.md` §13.2 sind NICHT gemountet —
+//! ein nicht gemounteter Endpunkt antwortet mit `404` und kann nicht
+//! versehentlich halb fertig erreichbar sein.
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{
+    Router,
+    routing::{get, post},
+};
+use ea_sync_protocol::EndpointV1;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
+use crate::http::{AppState, challenges, device_registrations, trust, webauthn_credentials};
+
 /// Die Routentafel des Servers.
 ///
-/// Noch ohne Endpunkte, aber schon mit der Zusage, die sie tragen: kein
-/// JSON-Extraktor. Das Merkmal `json` ist an Axum ABGESCHALTET (ADR 0004),
-/// damit neben dem deterministischen CBOR des Protokolls kein zweiter,
-/// ungepruefter Dekodierweg in den Server fuehrt.
-pub fn router() -> Router {
+/// Kein JSON-Extraktor: das Merkmal `json` ist an Axum ABGESCHALTET
+/// (ADR 0004), damit neben dem deterministischen CBOR des Protokolls kein
+/// zweiter, ungepruefter Dekodierweg in den Server fuehrt. Die Pfade stehen
+/// nicht als Zeichenketten hier, sondern kommen aus
+/// [`EndpointV1::path_template`] — eine abweichende Route waere sonst ein
+/// Tippfehler, den nur ein Klient bemerkte.
+pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route(
+            EndpointV1::AuthChallenges.path_template(),
+            post(challenges::create_challenge),
+        )
+        .route(
+            EndpointV1::DeviceRegistrations.path_template(),
+            post(device_registrations::create_device_registration),
+        )
+        .route(
+            EndpointV1::WebauthnCredentials.path_template(),
+            post(webauthn_credentials::register_credential),
+        )
+        .route(
+            EndpointV1::TrustRegistry.path_template(),
+            get(trust::list_trust_registry),
+        )
+        .route(
+            EndpointV1::TrustEvents.path_template(),
+            post(trust::upload_trust_event),
+        )
+        .with_state(state)
 }
 
 /// Ein Lauscher, der ausschliesslich TLS-Verbindungen herausgibt.

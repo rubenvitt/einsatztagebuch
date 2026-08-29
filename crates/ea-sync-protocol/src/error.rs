@@ -326,8 +326,39 @@ impl ProtocolErrorV1 {
         required_registry_version: Option<RegistryVersion>,
         required_registry_head_hash: Option<Hash32>,
     ) -> Self {
-        let error_code = error.code().to_owned();
-        let retryable = error.retryable();
+        Self::with_code(
+            error.code(),
+            request_id,
+            error.retryable(),
+            required_registry_version,
+            required_registry_head_hash,
+        )
+    }
+
+    /// Derselbe Koerper fuer einen Befund, den DIESE Crate nicht kennt.
+    ///
+    /// Die Dienstschicht ueber dem Protokoll — `crates/ea-sync-server` — traegt
+    /// eigene stabile Codes (`EA-AUTH-…`, `EA-TRUST-EVENT-…`) fuer Verstoesse,
+    /// die es erst gibt, wenn ein Dienst hinter dem Rahmen steht: eine
+    /// verbrauchte Challenge, ein widersprechender Registrierungsantrag, ein
+    /// abgewiesenes Trust-Ereignis. Sie hier als `SyncProtocolError`-Arme zu
+    /// fuehren, zoege die Dienstsemantik in die Rahmenschicht; sie neben
+    /// `protocol-error-v1` als zweiten Fehlerkoerper zu fuehren, zerbraeche die
+    /// Zusage des Addendums, dass es GENAU EINEN gibt. Also derselbe Koerper,
+    /// derselbe Kodierer, nur ein Code, den der Aufrufer mitbringt.
+    ///
+    /// `retryable` bleibt an die Abbildung des Addendums gebunden — 429, 500
+    /// und 503 —, und der Aufrufer bringt es aus DERSELBEN Quelle mit wie den
+    /// Status.
+    #[must_use]
+    pub fn with_code(
+        error_code: &str,
+        request_id: RequestIdV1,
+        retryable: bool,
+        required_registry_version: Option<RegistryVersion>,
+        required_registry_head_hash: Option<Hash32>,
+    ) -> Self {
+        let error_code = error_code.to_owned();
         let exact = encode(
             &error_code,
             request_id,

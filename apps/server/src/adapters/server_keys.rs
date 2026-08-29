@@ -78,6 +78,10 @@ impl ServerSigner for ServerKeyStore {
         self.signer
             .sign_checkpoint(self.certificate_hash, exact_checkpoint_core)
     }
+
+    fn sign_challenge_response(&self, exact_challenge_core: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        self.signer.sign_challenge_response(exact_challenge_core)
+    }
 }
 
 impl TechnicalCursorSigner for ServerKeyStore {

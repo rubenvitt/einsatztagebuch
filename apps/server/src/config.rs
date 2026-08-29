@@ -50,6 +50,18 @@ pub const ENV_OBJECT_STORE_REGION: &str = "EA_OBJECT_STORE_REGION";
 pub const ENV_OBJECT_STORE_ACCESS_KEY_ID: &str = "EA_OBJECT_STORE_ACCESS_KEY_ID";
 pub const ENV_OBJECT_STORE_SECRET_ACCESS_KEY: &str = "EA_OBJECT_STORE_SECRET_ACCESS_KEY";
 pub const ENV_MIGRATIONS_DIRECTORY: &str = "EA_MIGRATIONS_DIRECTORY";
+/// Die Autoritaet, gegen die jede RFC-9421-Signatur `@authority` und
+/// `@target-uri` stellt. Sie wird KONFIGURIERT und nicht aus dem `Host`-Header
+/// abgeleitet: sonst setzte der Aufrufer selbst die Erwartung, gegen die er
+/// geprueft wird.
+pub const ENV_SYNC_AUTHORITY: &str = "EA_SYNC_AUTHORITY";
+/// Die Organisation, die diese Installation bedient. Der Object Store schreibt
+/// seine Security Events unter ihr, und die Ratenbegrenzung des
+/// Challenge-Endpunkts zaehlt je Organisation.
+pub const ENV_ORGANIZATION_ID: &str = "EA_ORGANIZATION_ID";
+pub const ENV_SERVER_SIGNING_KEY: &str = "EA_SERVER_SIGNING_KEY_HEX";
+pub const ENV_SERVER_CERTIFICATE_HASH: &str = "EA_SERVER_CERTIFICATE_HASH_HEX";
+pub const ENV_SERVER_KEY_GENERATION: &str = "EA_SERVER_KEY_GENERATION";
 
 /// Die Befunde beim Hochfahren. Alle fail-closed: der Server startet nicht.
 #[derive(Debug)]
@@ -94,6 +106,14 @@ pub struct ObjectStoreConfig {
 
 pub struct ServerConfiguration {
     pub bind_address: String,
+    pub sync_authority: String,
+    pub organization_id: ea_types::OrganizationId,
+    /// Der geheime Ed25519-Skalar des Servers. Er kommt aus der Umgebung und
+    /// wird von hier an ausschliesslich als [`ea_crypto::SecretBytes`]
+    /// weitergereicht — nie als `String`, den ein `Debug` mitdruckte.
+    pub server_signing_key: ea_crypto::SecretBytes<32>,
+    pub server_certificate_hash: ea_types::CertificateHash,
+    pub server_key_generation: u32,
     pub tls_certificate_path: PathBuf,
     pub tls_private_key_path: PathBuf,
     pub database_url: String,
@@ -109,11 +129,36 @@ fn optional(name: &'static str, fallback: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| fallback.to_owned())
 }
 
+/// Eine Bytefolge FESTER Laenge aus Kleinbuchstaben-Hex.
+///
+/// Die Laenge ist Teil des Formats und keine Meinung: ein zu kurzer Schluessel
+/// ist kein kuerzerer Schluessel, sondern ein Konfigurationsfehler.
+fn fixed_hex<const N: usize>(name: &'static str) -> Result<[u8; N], ConfigError> {
+    let mut bytes = [0_u8; N];
+    hex::decode_to_slice(required(name)?, &mut bytes).map_err(|_| ConfigError::Invalid(name))?;
+    Ok(bytes)
+}
+
 impl ServerConfiguration {
     /// Liest die Konfiguration aus der Umgebung — vollstaendig oder gar nicht.
     pub fn from_environment() -> Result<Self, ConfigError> {
         Ok(Self {
             bind_address: optional(ENV_BIND_ADDRESS, "127.0.0.1:8443"),
+            sync_authority: required(ENV_SYNC_AUTHORITY)?,
+            organization_id: ea_types::OrganizationId::try_from(
+                &fixed_hex::<16>(ENV_ORGANIZATION_ID)?[..],
+            )
+            .map_err(|_| ConfigError::Invalid(ENV_ORGANIZATION_ID))?,
+            server_signing_key: ea_crypto::SecretBytes::new(fixed_hex::<32>(
+                ENV_SERVER_SIGNING_KEY,
+            )?),
+            server_certificate_hash: ea_types::CertificateHash::try_from(
+                &fixed_hex::<32>(ENV_SERVER_CERTIFICATE_HASH)?[..],
+            )
+            .map_err(|_| ConfigError::Invalid(ENV_SERVER_CERTIFICATE_HASH))?,
+            server_key_generation: optional(ENV_SERVER_KEY_GENERATION, "1")
+                .parse()
+                .map_err(|_| ConfigError::Invalid(ENV_SERVER_KEY_GENERATION))?,
             tls_certificate_path: PathBuf::from(required(ENV_TLS_CERTIFICATE)?),
             tls_private_key_path: PathBuf::from(required(ENV_TLS_PRIVATE_KEY)?),
             database_url: required(ENV_DATABASE_URL)?,

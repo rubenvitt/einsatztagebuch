@@ -2119,6 +2119,7 @@ dependencies = [
  "ea-format",
  "ea-sync-protocol",
  "ea-sync-server",
+ "ea-testkit",
  "ea-time",
  "ea-trust",
  "ea-types",

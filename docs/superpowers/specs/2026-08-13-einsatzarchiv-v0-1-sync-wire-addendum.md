@@ -187,6 +187,24 @@ bleibt und begrenzt ein `.eip`, dessen Chiffrat durch
 24 MiB des Commitkörpers sind 2 MiB Entry plus 10 000 mal 2 KiB Grant-Decke plus
 begrenzter Rahmen.
 
+## Die beiden ergänzten Aufnahmerahmen
+
+`schemas/protocol/v1/openapi.yaml` nennt für den Körper von
+`POST /v1/auth/challenges` und für den von `POST /v1/webauthn-credentials` nur
+den Medientyp und ein leeres Schema, und keines der beiden CDDL-Dokumente trug
+bisher eine Produktion dafür. Das ist eine **Lücke** und kein Widerspruch: die
+Blockade dieses Addendums gilt dem Fall, in dem Design und Addendum einander
+widersprechen. Die beiden Produktionen `challenge-request-v1` und
+`webauthn-credential-registration-v1` stehen deshalb seither normativ in
+`schemas/protocol/v1/entry-commit.cddl`, in derselben Form wie jeder andere
+v1-Rahmen und unter derselben 64-KiB-Decke.
+
+`challenge-request-v1` trägt die `organizationId`, weil der Challenge-Endpunkt
+die eine Signaturausnahme ohne WebAuthn-Assertion ist und es dort kein
+`tag` gibt, aus dem die Organisation käme, `challenge-response-core-v1` sie aber
+an Position 2 führt. Dieselbe `organizationId` ist die nicht-inhaltliche
+technische Identität, an der die Ratenbegrenzung hängt.
+
 ## HTTP-Abbildung
 
 | Status | Auslöser |
@@ -273,6 +291,8 @@ Stelle ist damit benannt und nicht stillschweigend offen.
 | `GET /v1/archive-exports/current` — Aufrufer: jedes freigegebene Gerät der Organisation; Request: kein Körper; Response: Objektfolge plus archive-export-manifest-v1; Status: 200; 400, 401, 403, 413, 500, 503 | §13.3 | bestätigt |
 | `POST /v1/destructions` — Aufrufer: destructionApprove; Request: destruction-request-v1; Response: destruction-status-response-v1; Status: 202; 400, 401, 403, 404, 409, 413, 422, 500, 503 | §13.3, §16 | bestätigt |
 | `GET /v1/destructions/{destructionId}` — Aufrufer: jedes freigegebene Gerät der Organisation; Request: kein Körper; Response: destruction-status-response-v1; Status: 200; 400, 401, 403, 404, 500, 503 | §16 | bestätigt |
+| `challenge-request-v1` / organization-id | §13.1, ratenbegrenzter Challenge-Endpunkt ohne `tag` | bestätigt |
+| `webauthn-credential-registration-v1` / subject-id, credential-id, credential-public-cose-key | web-reader-design.md §6.4.1 | bestätigt |
 | grant-plan-v1 / recipient-key-thumbprint | encode_plan_items in crates/ea-format/src/eag.rs | bestätigt |
 | grant-plan-v1 / recipient-certificate-hash | encode_plan_items in crates/ea-format/src/eag.rs | bestätigt |
 | grant-plan-v1 / "EINSATZARCHIV-HPKE-1" | GRANT_SUITE_ID in crates/ea-crypto/src/digest.rs | bestätigt |

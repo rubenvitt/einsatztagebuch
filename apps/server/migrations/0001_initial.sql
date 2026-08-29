@@ -23,8 +23,43 @@
 CREATE TABLE organizations (
     organization_id BYTEA PRIMARY KEY CHECK (octet_length(organization_id) = 16),
     root_key_thumbprint BYTEA NOT NULL CHECK (octet_length(root_key_thumbprint) = 32),
+    -- Die exakten Bytes des Trust Anchors dieser Organisation. Sie sind der
+    -- EINZIGE Einstieg, an dem `ea_trust::verify_trust` serverseitig ueberhaupt
+    -- ansetzen kann: ohne Anker gibt es keine Wurzel, gegen die eine
+    -- Zertifikatskette prueft, und der Server muesste Rollen aus Zeilen raten.
+    -- Genau das verbietet `design.md` §12. Nullable, weil eine Organisation
+    -- technisch angelegt sein kann, bevor ihr Anker vorliegt; ohne Anker
+    -- antwortet die Autoritaetsaufloesung fail-closed mit „unbekannt“.
+    trust_anchor_bytes BYTEA,
     created_at_millis BIGINT NOT NULL
 );
+
+-- Ausgestellte Challenges (`design.md` §13.1). Die Tabelle wird EINMAL
+-- geschrieben — von `POST /v1/auth/challenges` — und von der
+-- Geraeteregistrierung, der WebAuthn-Credential-Registrierung und dem
+-- Vault-Blob-Abruf gelesen. Gespeichert wird ausschliesslich der DIGEST der
+-- Nonce und ihr Zustand: der Server braucht die Nonce nie im Klartext zurueck,
+-- er muss nur wiedererkennen, dass er sie ausgegeben hat und dass sie noch
+-- offen ist. Ein Auslesen dieser Tabelle gibt deshalb keine gueltige Nonce her.
+--
+-- Sie und nicht `replay_nonces` fuehrt die Einmaligkeit der Challenge-Nonce:
+-- der Verbrauch allein reichte nicht, weil auch die AUSGABE gelesen werden
+-- muss — vom signierten Registrierungs- und Credentialpfad ebenso wie vom
+-- UNSIGNIERTEN Vault-Blob-Abruf, der gar keinen RFC-9421-Speicher anfasst.
+CREATE TABLE challenges (
+    organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
+    nonce_digest BYTEA NOT NULL CHECK (octet_length(nonce_digest) = 32),
+    challenge_state TEXT NOT NULL CHECK (challenge_state IN ('issued', 'spent')),
+    issued_at_millis BIGINT NOT NULL,
+    expires_at_millis BIGINT NOT NULL,
+    spent_at_millis BIGINT,
+    PRIMARY KEY (organization_id, nonce_digest),
+    CHECK ((challenge_state = 'spent') = (spent_at_millis IS NOT NULL))
+);
+
+-- Die Ratenbegrenzung zaehlt je Organisation ueber ein Zeitfenster. Ohne
+-- diesen Index waere das ein Scan ueber alle je ausgegebenen Challenges.
+CREATE INDEX challenges_rate_window ON challenges (organization_id, issued_at_millis);
 
 -- Beantragte, noch nicht freigegebene Geraete (`design.md` §13.1, Proof of
 -- Possession). Der beantragte Schluessel ist hier abgelegt, verleiht aber
@@ -167,7 +202,12 @@ CREATE TABLE reader_acknowledgements (
     PRIMARY KEY (organization_id, subject_id, entry_hash)
 );
 
--- Single-Use-Nonces des Challenge-Endpunkts (`design.md` §13.1).
+-- RESERVIERT. Die Einmaligkeit der Challenge-Nonce fuehrt seit dem
+-- Auth-Task die Tabelle `challenges`: sie kennt neben dem Verbrauch auch die
+-- AUSGABE, und die liest der unsignierte Vault-Blob-Abruf ebenfalls. Diese
+-- Tabelle bleibt fuer Einmalwerte, die nicht aus einer Challenge stammen; sie
+-- wird derzeit von keinem Pfad beschrieben. Sie steht hier statt in einer
+-- spaeteren Migration, weil die Stufe 3 GENAU EINE Migration liefert.
 CREATE TABLE replay_nonces (
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     nonce BYTEA NOT NULL CHECK (octet_length(nonce) = 32),

@@ -18,15 +18,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod models;
 pub mod ports;
+pub mod trust;
 
 pub use models::{
-    CommitDbCommand, CommitIdentityV1, CommittedDbState, IndexedObjectV1, RepositoryError,
-    SecurityEventKindV1, SecurityEventV1, StagedObject, StoreError, StoredObject, object_key,
-    object_type_segment,
+    CommitDbCommand, CommitIdentityV1, CommittedDbState, CredentialRegistrationOutcome,
+    IndexedObjectV1, PENDING_REGISTRATION_STATE_V1, PendingDeviceRequestV1,
+    PendingRegistrationOutcome, RegistryLineEntryV1, RepositoryError, SecurityEventKindV1,
+    SecurityEventV1, StagedObject, StoreError, StoredObject, TrustEventCommandV1,
+    TrustIndexOutcome, WebauthnCredentialV1, object_key, object_type_segment,
 };
 pub use ports::{
-    CommitRepository, ObjectStore, ObjectTypeDirectory, SecurityEventSink, ServerClock,
-    ServerSigner,
+    ChallengeSpendOutcome, ChallengeStore, CommitRepository, DeviceAuthorityDirectory,
+    DeviceRegistrationStore, ObjectStore, ObjectTypeDirectory, RequestIdStore, SecurityEventSink,
+    ServerClock, ServerSigner, TrustEventStore, WebauthnCredentialStore,
 };

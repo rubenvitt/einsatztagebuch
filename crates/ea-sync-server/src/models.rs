@@ -11,8 +11,8 @@ use core::fmt;
 
 use ea_format::ObjectTypeV1;
 use ea_types::{
-    ChainId, ChainSequence, DeviceId, EntryHash, Hash32, ObjectHash, OrganizationId,
-    RegistryVersion, UnixMillis,
+    ChainId, ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
+    RegistryVersion, SubjectId, UnixMillis,
 };
 
 /// Das Namensraumsegment einer Objektart im Object Store.
@@ -364,3 +364,134 @@ impl fmt::Display for RepositoryError {
 }
 
 impl std::error::Error for RepositoryError {}
+
+/// Ein beantragtes, noch NICHT freigegebenes Geraet
+/// (`design.md` §13.1, Proof of Possession).
+///
+/// Der Antrag traegt den beantragten Schluesselabdruck und den Hash der
+/// exakten Antragsbytes — und sonst nichts. Er verleiht keine Autoritaet, und
+/// es gibt in diesem Typ kein Feld, das eine verliehe.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PendingDeviceRequestV1 {
+    pub organization_id: OrganizationId,
+    pub device_id: DeviceId,
+    pub requested_key_thumbprint: KeyThumbprint,
+    /// SHA-256 ueber die exakten `device-registration-request-v1`-Bytes.
+    pub request_object_hash: Hash32,
+    pub received_at: UnixMillis,
+}
+
+impl fmt::Debug for PendingDeviceRequestV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PendingDeviceRequestV1(<bound>)")
+    }
+}
+
+/// Der EINZIGE Zustand, den ein Registrierungsantrag dieser Stufe annimmt.
+///
+/// Er steht als Konstante und nicht als Aufzaehlung, weil es genau einen gibt:
+/// die Freigabe entsteht spaeter aus einem Root-signierten Trust-Objekt und
+/// nicht aus einem Zustandswechsel in dieser Tabelle.
+pub const PENDING_REGISTRATION_STATE_V1: &str = "pending";
+
+/// Wie die Ablage auf einen Antrag antwortet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingRegistrationOutcome {
+    /// Neu aufgenommen.
+    Recorded,
+    /// Byteweise DERSELBE Antrag lag schon vor — der zulaessige idempotente
+    /// Wiederholungsfall.
+    AlreadyPending,
+    /// Fuer dieses Geraet liegt ein ANDERER Antrag vor. Kein Replay, sondern
+    /// ein Widerspruch, und er wird nicht repariert.
+    Conflict,
+}
+
+/// Ein registriertes WebAuthn-Credential (`web-reader-design.md` §6.4.1).
+///
+/// `subject_id` IST der `userHandle`. Es gibt hier keinen Anzeigenamen, keine
+/// Kennung eines Menschen und keinen fachlichen Wert.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WebauthnCredentialV1 {
+    pub organization_id: OrganizationId,
+    pub subject_id: SubjectId,
+    pub credential_id: Vec<u8>,
+    pub credential_public_cose_key: Vec<u8>,
+    pub registered_at: UnixMillis,
+}
+
+impl fmt::Debug for WebauthnCredentialV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WebauthnCredentialV1(<bound>)")
+    }
+}
+
+/// Wie die Credentialtabelle auf eine Registrierung antwortet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRegistrationOutcome {
+    Registered,
+    /// Genau dasselbe Credential fuer genau dieselbe `subjectId`.
+    AlreadyRegistered,
+    /// Diese `credentialId` gehoert in dieser Organisation bereits einer
+    /// ANDEREN `subjectId`.
+    Conflict,
+}
+
+/// Ein geprueftes `.etb`, wie es in den Index geht.
+///
+/// `registry_version` ist `Some` GENAU fuer ein `registryEvent`. Nur diese
+/// Objektart traegt eine Registry-Version, und nur sie steht deshalb auf der
+/// Registry-Linie von `GET /v1/trust/registry`: die Antwort verlangt streng
+/// aufsteigende, duplikatfreie Versionen (`trust-registry-response-v1`), also
+/// kann dort kein zweites Objekt unter derselben Version stehen.
+#[derive(Clone, Eq, PartialEq)]
+pub struct TrustEventCommandV1 {
+    pub organization_id: OrganizationId,
+    pub object_hash: ObjectHash,
+    pub size_bytes: u64,
+    pub subtype_code: String,
+    pub registry_version: Option<RegistryVersion>,
+    pub effective_from: UnixMillis,
+    pub received_at: UnixMillis,
+}
+
+impl fmt::Debug for TrustEventCommandV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "TrustEventCommandV1({})",
+            object_key(ObjectTypeV1::Trust, self.object_hash)
+        )
+    }
+}
+
+/// Wie der Index auf ein Trust-Ereignis antwortet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrustIndexOutcome {
+    Indexed,
+    /// Byteweise dasselbe Objekt lag schon indiziert vor.
+    AlreadyIndexed,
+    /// Dieselbe Registry-Version traegt bereits ein ANDERES Objekt.
+    Conflict,
+}
+
+/// Ein Satz der Registry-Linie.
+///
+/// Er traegt die Version und den Objekthash — NICHT die Bytes. Die exakten
+/// Bytes kommen aus dem Object Store, damit die Leseantwort das archivierte
+/// Objekt ausliefert und keine aus Zeilen zusammengesetzte Fassung davon.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct RegistryLineEntryV1 {
+    pub registry_version: RegistryVersion,
+    pub object_hash: ObjectHash,
+}
+
+impl fmt::Debug for RegistryLineEntryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "RegistryLineEntryV1(version={})",
+            self.registry_version.get()
+        )
+    }
+}

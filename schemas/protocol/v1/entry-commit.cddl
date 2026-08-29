@@ -33,6 +33,22 @@ entry-commit-response-v1 = [
   receipt-bytes: bstr, checkpoint-bytes: bstr / null, []
 ]
 
+; Die beiden UNSIGNIERTEN Aufnahmerahmen. openapi.yaml nennt fuer beide nur
+; den Medientyp und ein leeres Schema; ihre Produktionen stehen deshalb hier.
+; challenge-request-v1 traegt die organization-id, weil der Challenge-Endpunkt
+; die eine Signaturausnahme ohne tag-Parameter ist, challenge-response-core-v1
+; die Organisation aber an Position 2 fuehrt. Sie ist zugleich die
+; nicht-inhaltliche technische Identitaet der Ratenbegrenzung.
+challenge-request-v1 = [1, organization-id: bstr .size 16, []]
+
+; Die pseudonyme subject-id IST der userHandle (web-reader-design.md §6.4.1).
+; Der Rahmen traegt keinen Anzeigenamen und keinen fachlichen Wert.
+webauthn-credential-registration-v1 = [
+  1, subject-id: bstr .size 16,
+  credential-id: bstr .size (16..1023),
+  credential-public-cose-key: bstr, []
+]
+
 trust-event-upload-v1 = [1, exact-etb-bytes: bstr, []]
 
 historical-grant-upload-v1 = [1, exact-eag-bytes: bstr, []]

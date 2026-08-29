@@ -20,6 +20,7 @@
 
 mod challenge;
 mod commit;
+mod enrollment;
 mod error;
 mod http_signature;
 mod reader;
@@ -28,6 +29,10 @@ pub use challenge::{ChallengeResponseV1, DeviceRegistrationRequestV1, ReaderAckV
 pub use commit::{
     DestructionRequestV1, EntryCommitIdentity, EntryCommitOutcome, EntryCommitRequestV1,
     EntryCommitResponseV1, HistoricalGrantUploadV1, TrustEventUploadV1,
+};
+pub use enrollment::{
+    ChallengeRequestV1, MAX_WEBAUTHN_CREDENTIAL_ID_BYTES_V1, MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1,
+    WebauthnCredentialRegistrationV1,
 };
 pub use error::{ProtocolErrorV1, SyncProtocolError};
 pub use http_signature::{

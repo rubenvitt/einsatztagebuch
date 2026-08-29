@@ -18,7 +18,7 @@ use ea_types::{CertificateHash, Id16, ObjectHash, OrganizationId, UnixMillis};
 use einsatzarchiv_server::{
     adapters::server_keys::ServerKeyStore,
     config::tls_server_config,
-    router::{TlsListener, router, serve},
+    router::{TlsListener, serve},
 };
 use rustls::pki_types::pem::PemObject as _;
 use tokio::{
@@ -94,7 +94,11 @@ async fn a_tls12_only_client_handshake_is_rejected() {
         .local_address()
         .expect("the bound address must be readable");
     let server = tokio::spawn(async move {
-        let _ = serve(listener, router()).await;
+        // Eine LEERE Routentafel: dieser Fall entscheidet sich im
+        // TLS-Handschlag und erreicht nie eine Route. Der echte Router
+        // verlangte einen vollstaendigen `AppState` samt Datenbank und Object
+        // Store, und der bewiese hier nichts.
+        let _ = serve(listener, axum::Router::new()).await;
     });
 
     let mut stream = TcpStream::connect(address)
@@ -145,7 +149,11 @@ async fn the_same_listener_completes_a_tls13_handshake() {
         .local_address()
         .expect("the bound address must be readable");
     let server = tokio::spawn(async move {
-        let _ = serve(listener, router()).await;
+        // Eine LEERE Routentafel: dieser Fall entscheidet sich im
+        // TLS-Handschlag und erreicht nie eine Route. Der echte Router
+        // verlangte einen vollstaendigen `AppState` samt Datenbank und Object
+        // Store, und der bewiese hier nichts.
+        let _ = serve(listener, axum::Router::new()).await;
     });
 
     // Vertraut wird der TEST-CA, nicht dem Blatt: ein selbstsigniertes Blatt

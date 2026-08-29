@@ -27,4 +27,5 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
+ea-testkit.workspace = true
 sha2.workspace = true
