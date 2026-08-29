@@ -48,9 +48,10 @@ use ea_sync_protocol::{
 use ea_types::{ChainId, ObjectHash, OrganizationId, RegistryVersion, UnixMillis};
 
 use crate::{
+    checkpoint::{CheckpointBindingV1, CheckpointError, build_checkpoint},
     models::{
-        ChainHeadStateV1, CommitDbCommand, CommitIdentityV1, IndexedObjectV1, RepositoryError,
-        SecurityEventKindV1, SecurityEventV1, StoreError,
+        ChainHeadStateV1, CheckpointCommitV1, CommitDbCommand, CommitIdentityV1, IndexedObjectV1,
+        RepositoryError, SecurityEventKindV1, SecurityEventV1, StoreError, object_key,
     },
     ports::{
         ActiveRegistryHeadV1, AuthorityError, CommitRepository, ObjectStore, RegistryHeadDirectory,
@@ -72,23 +73,49 @@ pub struct CommitPorts<'a> {
 
 /// Der Ausgang eines angenommenen Commits.
 ///
-/// Beide Arme tragen die EXAKTEN, ZURUECKGELESENEN Receipt-Bytes. Der Replay
-/// traegt ausdruecklich nicht die eben gebildeten: `design.md` §13.3 sagt,
-/// „nach dem Commit kann ein Retry ausschliesslich die GESPEICHERTEN
-/// Receipt-Bytes wieder ausliefern".
+/// Beide Arme tragen die EXAKTEN, ZURUECKGELESENEN Receipt- UND
+/// Checkpoint-Bytes. Der Replay traegt ausdruecklich nicht die eben
+/// gebildeten: `design.md` §13.3 sagt, „nach dem Commit kann ein Retry
+/// ausschliesslich die GESPEICHERTEN Receipt-Bytes wieder ausliefern", und
+/// fuer den Anker gilt dasselbe — er ist mit demselben Commit sichtbar
+/// geworden.
 #[derive(Clone, Eq, PartialEq)]
 pub enum CommitOutcome {
-    Accepted { receipt_bytes: Vec<u8> },
-    IdempotentReplay { receipt_bytes: Vec<u8> },
+    Accepted {
+        receipt_bytes: Vec<u8>,
+        checkpoint_bytes: Vec<u8>,
+    },
+    IdempotentReplay {
+        receipt_bytes: Vec<u8>,
+        checkpoint_bytes: Vec<u8>,
+    },
 }
 
 impl CommitOutcome {
     #[must_use]
     pub fn receipt_bytes(&self) -> &[u8] {
         match self {
-            Self::Accepted { receipt_bytes } | Self::IdempotentReplay { receipt_bytes } => {
+            Self::Accepted { receipt_bytes, .. } | Self::IdempotentReplay { receipt_bytes, .. } => {
                 receipt_bytes
             }
+        }
+    }
+
+    /// Die exakten `.ecp`-Bytes des Standard-Checkpoints dieses Commits.
+    ///
+    /// Sie sind der Wert, den `entry-commit-response-v1` an der Position
+    /// `checkpoint-bytes` fuehrt. Ein `Option` gibt es hier nicht: der
+    /// Checkpoint reist IN der Commit-Transaktion, also gibt es keinen
+    /// angenommenen Commit ohne ihn.
+    #[must_use]
+    pub fn checkpoint_bytes(&self) -> &[u8] {
+        match self {
+            Self::Accepted {
+                checkpoint_bytes, ..
+            }
+            | Self::IdempotentReplay {
+                checkpoint_bytes, ..
+            } => checkpoint_bytes,
         }
     }
 
@@ -118,6 +145,8 @@ pub enum CommitServiceError {
     Validation(CommitValidationError),
     /// Ein Befund aus Schritt 7 oder 9.
     Receipt(ReceiptError),
+    /// Ein Befund des Standard-Checkpoints (`design.md` §15.2).
+    Checkpoint(CheckpointError),
     /// Derselbe `entryHash` mit anderen Objektbytes oder Grants.
     IdentityConflict,
     /// Dieselbe Sequenz traegt bereits einen anderen Eintrag.
@@ -166,6 +195,7 @@ impl CommitServiceError {
         match self {
             Self::Validation(error) => error.code(),
             Self::Receipt(error) => error.code(),
+            Self::Checkpoint(error) => error.code(),
             Self::IdentityConflict => "EA-COMMIT-IDENTITY-CONFLICT",
             Self::SequenceFork => "EA-COMMIT-SEQUENCE-FORK",
             Self::PredecessorMismatch => "EA-COMMIT-PREDECESSOR",
@@ -209,6 +239,7 @@ impl CommitServiceError {
             | Self::HeadConflict
             | Self::ObjectConflict
             | Self::RegistryHeadRequired => 409,
+            Self::Checkpoint(error) => error.http_status(),
             Self::Validation(CommitValidationError::OrganizationMismatch) => 403,
             Self::Validation(_)
             | Self::NoApplicableRegistryHead
@@ -251,6 +282,12 @@ impl From<ReceiptError> for CommitServiceError {
     }
 }
 
+impl From<CheckpointError> for CommitServiceError {
+    fn from(value: CheckpointError) -> Self {
+        Self::Checkpoint(value)
+    }
+}
+
 impl From<SyncProtocolError> for CommitServiceError {
     fn from(value: SyncProtocolError) -> Self {
         Self::Protocol(value)
@@ -280,6 +317,9 @@ impl From<RepositoryError> for CommitServiceError {
             // nicht entstehen, und sie stillschweigend zu einem Kopfkonflikt
             // zu machen waere eine falsche Auskunft.
             RepositoryError::RequestIdReplay => Self::Internal,
+            RepositoryError::CheckpointPredecessorConflict => {
+                Self::Checkpoint(CheckpointError::PredecessorConflict)
+            }
             RepositoryError::Unavailable => Self::DependencyUnavailable,
         }
     }
@@ -524,6 +564,11 @@ pub async fn commit_entry(
     // Schritt 7: `receipt-core-v1` samt `evidence-due-at` bilden, signieren
     // und die exakten `esr-v1`-Bytes content-addressed ablegen. EINMAL.
     // ---------------------------------------------------------------------
+    // EINE Umschreibung des Registry-Heads fuer Quittung und Anker: beide
+    // fuehren denselben Kopf unter dem allgemeinen Hashtyp, und zwei
+    // Umrechnungen waeren zwei Stellen, an denen sie auseinanderlaufen
+    // koennten.
+    let registry_head_hash = hash32_of(head.registry_head_hash())?;
     let receipt = build_receipt(
         ReceiptBindingV1 {
             organization_id,
@@ -533,7 +578,7 @@ pub async fn commit_entry(
             entry_object_hash: validated.entry_object_hash,
             previous_entry_hash: validated.previous_entry_hash,
             registry_version: head.registry_version(),
-            registry_head_hash: hash32_of(head.registry_head_hash())?,
+            registry_head_hash,
             policy_object_hash: head.policy_object_hash(),
             initial_grant_plan_hash: request.identity().initial_grant_plan_hash(),
             initial_grant_object_hashes: validated.grant_object_hashes.clone(),
@@ -560,14 +605,70 @@ pub async fn commit_entry(
     put_verified(staged_receipt, organization_id, now, ports).await?;
 
     // ---------------------------------------------------------------------
-    // Schritt 8: Entry, initiale Grants, neuer Kettenkopf und der
-    // `receiptObjectHash` GEMEINSAM sichtbar, in EINER Transaktion.
+    // Der Standard-Checkpoint aus `design.md` §15.2.
+    //
+    // KEIN zehnter Schritt: die neun Schritte von §13.3 bleiben, wie sie
+    // sind. Der Anker haengt an Schritt 8 und entsteht wie die Quittung VOR
+    // der Sperre — gebildet, signiert, content-addressed abgelegt —, damit
+    // Schritt 8 ihn GEMEINSAM mit Eintrag, Grants, Objektindex, Quittung und
+    // neuem Kopf sichtbar schalten kann.
+    //
+    // Der Vorgaenger wird hier OHNE Sperre gelesen; die Transaktion stellt
+    // ihn erneut gegen den tatsaechlichen Kopf der Checkpoint-Kette. Nur
+    // deshalb kann die Kette sich nicht gabeln.
+    //
+    // Die Ausstellungszeit ist `acceptedAtServer` und ausdruecklich KEINE
+    // zweite Uhrablesung: liegt die Annahmezeit des Vorgaengers ueber der
+    // Serveruhr, laege ein frisch gelesener Zeitpunkt VOR dem Eintrag, den
+    // dieser Checkpoint abdeckt.
+    // ---------------------------------------------------------------------
+    let previous_evidence_hash = ports
+        .commits
+        .checkpoint_head(organization_id, chain_id)
+        .await
+        .map_err(CommitFailure::from)?;
+    let checkpoint = build_checkpoint(
+        CheckpointBindingV1 {
+            organization_id,
+            chain_id,
+            covered_sequence: validated.chain_sequence,
+            head_entry_hash: validated.entry_hash,
+            registry_head_hash,
+            previous_evidence_hash,
+        },
+        accepted_at_server,
+        ports.signer,
+    )
+    .map_err(CommitFailure::from)?;
+    let checkpoint_limit = u64::try_from(ea_format::ECP_MAX_RAW_BYTES_V1).unwrap_or(u64::MAX);
+    let staged_checkpoint = ports
+        .objects
+        .stage_stream(
+            ObjectTypeV1::Evidence,
+            ByteStream::from(checkpoint.exact_bytes().to_vec()),
+            checkpoint_limit,
+        )
+        .await
+        .map_err(CommitFailure::from)?;
+    let checkpoint_object_hash = staged_checkpoint.object_hash();
+    let checkpoint_size = staged_checkpoint.size_bytes();
+    put_verified(staged_checkpoint, organization_id, now, ports).await?;
+
+    // ---------------------------------------------------------------------
+    // Schritt 8: Entry, initiale Grants, neuer Kettenkopf, der
+    // `receiptObjectHash` UND der Standard-Checkpoint GEMEINSAM sichtbar, in
+    // EINER Transaktion.
     // ---------------------------------------------------------------------
     let mut indexed_objects = validated.indexed_objects.clone();
     indexed_objects.push(IndexedObjectV1 {
         kind: ObjectTypeV1::Receipt,
         object_hash: receipt_object_hash,
         size_bytes: receipt_size,
+    });
+    indexed_objects.push(IndexedObjectV1 {
+        kind: ObjectTypeV1::Evidence,
+        object_hash: checkpoint_object_hash,
+        size_bytes: checkpoint_size,
     });
     let committed = match ports
         .commits
@@ -584,6 +685,12 @@ pub async fn commit_entry(
             registry_version: head.registry_version(),
             registry_head_hash: head.registry_head_hash(),
             indexed_objects,
+            checkpoint: CheckpointCommitV1 {
+                object_hash: checkpoint_object_hash,
+                covered_sequence: validated.chain_sequence,
+                issued_at_server: accepted_at_server,
+                previous_evidence_hash,
+            },
         })
         .await
     {
@@ -610,6 +717,23 @@ pub async fn commit_entry(
             )
             .await);
         }
+        Err(RepositoryError::CheckpointPredecessorConflict) => {
+            // Zwei Anker derselben Kette ueber demselben Vorgaenger waeren
+            // ein Fork der Evidence-Kette. Der Gegenstand des Ereignisses ist
+            // der ABGEWIESENE Checkpoint, und sein Objektschluessel traegt
+            // ausschliesslich seine Adresse.
+            record_subject(
+                organization_id,
+                SecurityEventKindV1::CheckpointPredecessorConflict,
+                object_key(ObjectTypeV1::Evidence, checkpoint_object_hash),
+                now,
+                ports,
+            )
+            .await;
+            return Err(
+                CommitServiceError::Checkpoint(CheckpointError::PredecessorConflict).into(),
+            );
+        }
         Err(error) => return Err(CommitFailure::from(error)),
     };
 
@@ -621,17 +745,36 @@ pub async fn commit_entry(
     // gebildete: bei einem Replay sind das verschiedene Objekte, und
     // ausgeliefert wird das gespeicherte.
     // ---------------------------------------------------------------------
-    let stored_bytes = read_back(committed.receipt_object_hash, ports).await?;
+    let stored_bytes = read_back(
+        committed.receipt_object_hash,
+        CommitServiceError::Receipt(ReceiptError::ReadBack),
+        ports,
+    )
+    .await?;
+    // Derselbe Rueckweg fuer den Anker: gelesen wird der Hash, den die
+    // TRANSAKTION nennt, und nicht der eben gebildete — bei einem Replay sind
+    // das verschiedene Objekte.
+    let stored_checkpoint = read_back(
+        committed.checkpoint_object_hash,
+        CommitServiceError::Checkpoint(CheckpointError::ReadBack),
+        ports,
+    )
+    .await?;
     if committed.newly_committed {
         if stored_bytes != receipt_bytes {
             return Err(CommitServiceError::Receipt(ReceiptError::ReadBack).into());
         }
+        if stored_checkpoint != checkpoint.exact_bytes() {
+            return Err(CommitServiceError::Checkpoint(CheckpointError::ReadBack).into());
+        }
         return Ok(CommitOutcome::Accepted {
             receipt_bytes: stored_bytes,
+            checkpoint_bytes: stored_checkpoint,
         });
     }
     Ok(CommitOutcome::IdempotentReplay {
         receipt_bytes: stored_bytes,
+        checkpoint_bytes: stored_checkpoint,
     })
 }
 
@@ -838,15 +981,22 @@ async fn put_verified(
 }
 
 /// Schritt 9: die exakten Bytes zu diesem Hash.
+///
+/// `missing` ist der Befund fuer „unter diesem Hash steht nicht, was dort
+/// stehen muesste“ — je nach Objektart der Quittungs- oder der
+/// Checkpoint-Rueckleseabbruch. Ein ANTWORTENDER, aber ausgefallener Object
+/// Store bleibt davon unberuehrt: er ist wiederholbar und wird nicht in einen
+/// endgueltigen Befund umgedeutet.
 async fn read_back(
-    receipt_object_hash: ObjectHash,
+    object_hash: ObjectHash,
+    missing: CommitServiceError,
     ports: &CommitPorts<'_>,
 ) -> Result<Vec<u8>, CommitFailure> {
-    let stream = ports
-        .objects
-        .get_exact(receipt_object_hash)
-        .await
-        .map_err(CommitFailure::from)?;
+    let stream = match ports.objects.get_exact(object_hash).await {
+        Ok(stream) => stream,
+        Err(StoreError::NotFound) => return Err(missing.into()),
+        Err(error) => return Err(CommitFailure::from(error)),
+    };
     let bytes = stream
         .collect()
         .await
@@ -856,8 +1006,8 @@ async fn read_back(
     // Der Beweis, dass die zurueckgelesenen Bytes DIESES Objekt sind: ihr Hash
     // gegen den Hash, unter dem sie stehen. Ohne ihn waere „zurueckgelesen"
     // nur ein zweiter Netzzugriff.
-    if ea_crypto::object_hash(&bytes) != receipt_object_hash {
-        return Err(CommitServiceError::Receipt(ReceiptError::ReadBack).into());
+    if ea_crypto::object_hash(&bytes) != object_hash {
+        return Err(missing.into());
     }
     Ok(bytes)
 }

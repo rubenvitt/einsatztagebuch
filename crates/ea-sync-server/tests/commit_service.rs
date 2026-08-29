@@ -726,6 +726,10 @@ enum CommitFault {
     Abort,
     /// Der Kopf hat sich unter der Sperre bewegt.
     HeadRace,
+    /// Der Kopf der CHECKPOINT-Kette hat sich unter der Sperre bewegt: der
+    /// signierte Anker nennt einen anderen Vorgaenger als den, den die
+    /// Transaktion vorfindet.
+    CheckpointFork,
 }
 
 /// Ein sichtbar geschalteter Commit.
@@ -736,6 +740,7 @@ struct StoredCommit {
     plan_hash: ea_types::Hash32,
     grants: Vec<ObjectHash>,
     receipt_object_hash: ObjectHash,
+    checkpoint_object_hash: ObjectHash,
     accepted_at_server: UnixMillis,
 }
 
@@ -758,6 +763,8 @@ struct FakeCommits {
     /// vorziehen. Ohne diese Kulisse saehen Lesen und Transaktion IMMER
     /// denselben Stand, und die beiden Faelle waeren unerreichbar.
     staged_head_reads: Mutex<std::collections::VecDeque<Option<ChainHeadStateV1>>>,
+    /// Der Kopf der Checkpoint-Kette dieser einen Kette.
+    checkpoint_head: Mutex<Option<ObjectHash>>,
 }
 
 impl FakeCommits {
@@ -784,6 +791,14 @@ impl FakeCommits {
 
 #[async_trait::async_trait]
 impl CommitRepository for FakeCommits {
+    async fn checkpoint_head(
+        &self,
+        _organization_id: OrganizationId,
+        _chain_id: ChainId,
+    ) -> Result<Option<ObjectHash>, RepositoryError> {
+        Ok(*self.checkpoint_head.lock().expect("not poisoned"))
+    }
+
     async fn head_state(
         &self,
         _organization_id: OrganizationId,
@@ -807,10 +822,14 @@ impl CommitRepository for FakeCommits {
         match *self.fault.lock().expect("not poisoned") {
             CommitFault::Abort => return Err(RepositoryError::Unavailable),
             CommitFault::HeadRace => return Err(RepositoryError::HeadConflict),
+            CommitFault::CheckpointFork => {
+                return Err(RepositoryError::CheckpointPredecessorConflict);
+            }
             CommitFault::None => {}
         }
         let mut entries = self.entries.lock().expect("not poisoned");
         let mut head = self.head.lock().expect("not poisoned");
+        let mut checkpoint_head = self.checkpoint_head.lock().expect("not poisoned");
 
         // Die Identitaetssuche steht VOR jeder Sequenzpruefung — genau so wie
         // im Adapter. Ohne diese Reihenfolge waere kein Replay moeglich.
@@ -826,6 +845,7 @@ impl CommitRepository for FakeCommits {
                 sequence: ChainSequence::new(existing.sequence),
                 entry_hash: command.identity.entry_hash,
                 receipt_object_hash: existing.receipt_object_hash,
+                checkpoint_object_hash: existing.checkpoint_object_hash,
                 accepted_at_server: existing.accepted_at_server,
                 newly_committed: false,
             });
@@ -845,6 +865,13 @@ impl CommitRepository for FakeCommits {
             return Err(RepositoryError::HeadConflict);
         }
 
+        // Der Vorgaenger der Checkpoint-Kette, unter derselben Sperre wie im
+        // Adapter — und NACH Sequenz und Vorgaenger, damit ein verlorenes
+        // Rennen ein Kopfkonflikt bleibt.
+        if command.checkpoint.previous_evidence_hash != *checkpoint_head {
+            return Err(RepositoryError::CheckpointPredecessorConflict);
+        }
+
         entries.insert(
             command.identity.entry_hash.as_bytes().to_vec(),
             StoredCommit {
@@ -853,9 +880,11 @@ impl CommitRepository for FakeCommits {
                 plan_hash: command.identity.initial_grant_plan_hash,
                 grants: command.identity.initial_grant_object_hashes.clone(),
                 receipt_object_hash: command.receipt_object_hash,
+                checkpoint_object_hash: command.checkpoint.object_hash,
                 accepted_at_server: command.accepted_at_server,
             },
         );
+        *checkpoint_head = Some(command.checkpoint.object_hash);
         *head = Some(ChainHeadStateV1 {
             sequence: command.sequence,
             entry_hash: command.identity.entry_hash,
@@ -865,6 +894,7 @@ impl CommitRepository for FakeCommits {
             sequence: command.sequence,
             entry_hash: command.identity.entry_hash,
             receipt_object_hash: command.receipt_object_hash,
+            checkpoint_object_hash: command.checkpoint.object_hash,
             accepted_at_server: command.accepted_at_server,
             newly_committed: true,
         })
@@ -2092,6 +2122,117 @@ async fn a_bound_head_older_than_the_selected_one_names_the_servers_head() {
             .required_registry_head_hash
             .map(|hash| hash.as_bytes().to_vec()),
         Some(REGISTRY_HEAD_HASH.to_vec())
+    );
+    assert_eq!(harness.commits.visible_entry_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Der Standard-Checkpoint (`design.md` §15.2)
+// ---------------------------------------------------------------------------
+
+/// Der Kern eines archivierten Standard-Checkpoints.
+fn checkpoint_core(bytes: &[u8]) -> ea_format::CheckpointCoreV1 {
+    let ea_format::ParsedArchiveObject::Evidence(parsed) =
+        ea_format::decode_exact_object(bytes).expect("the checkpoint parses")
+    else {
+        panic!("a standard checkpoint is an evidence object");
+    };
+    let ea_format::DecodedEvidencePayloadV1::Standard { core, .. } = parsed
+        .value()
+        .decoded_payload()
+        .expect("the payload decodes")
+    else {
+        panic!("Stufe 3 stellt keinen zeitgestempelten Checkpoint aus");
+    };
+    core
+}
+
+/// Der angenommene Commit traegt seinen Anker, und die Kette bindet den
+/// Vorgaenger. Die Quittung bleibt davon unberuehrt.
+#[tokio::test]
+async fn an_accepted_commit_anchors_its_head_and_the_next_binds_the_predecessor() {
+    let harness = Harness::new();
+
+    let first_request = valid_commit(&harness.head);
+    let first = harness
+        .commit(&first_request)
+        .await
+        .expect("the first commit must be accepted");
+    let first_core = checkpoint_core(first.checkpoint_bytes());
+    assert!(first_core.fields().previous_evidence_hash.is_none());
+    assert_eq!(first_core.fields().covered_from_sequence.get(), 0);
+    assert_eq!(first_core.fields().covered_through_sequence.get(), 0);
+    assert!(first_core.fields().head_entry_hash == first_request.identity().entry_hash());
+    // Der Anker traegt die ANNAHMEZEIT des Commits — dieselbe Zahl wie die
+    // Quittung, und keine zweite Uhrablesung.
+    let ea_format::ParsedArchiveObject::Receipt(receipt) =
+        ea_format::decode_exact_object(first.receipt_bytes()).expect("the receipt parses")
+    else {
+        panic!("the response carries a receipt");
+    };
+    assert_eq!(
+        first_core.fields().issued_at_server,
+        receipt.value().core().fields().accepted_at_server
+    );
+
+    let second_request = commit_request(
+        &harness.head,
+        1,
+        Some(first_request.identity().entry_hash()),
+        &[reader_recipient(), recovery_recipient()],
+        0xb1,
+    );
+    let second = harness
+        .commit(&second_request)
+        .await
+        .expect("the successor must be accepted");
+    let second_core = checkpoint_core(second.checkpoint_bytes());
+    assert!(
+        second_core.fields().previous_evidence_hash
+            == Some(ea_crypto::object_hash(first.checkpoint_bytes())),
+        "every checkpoint binds its predecessor"
+    );
+    assert_eq!(second_core.fields().covered_through_sequence.get(), 1);
+}
+
+/// Ein Replay liefert den GESPEICHERTEN Anker byteweise zurueck.
+#[tokio::test]
+async fn a_replay_returns_the_stored_checkpoint_bytes() {
+    let harness = Harness::new();
+    let request = valid_commit(&harness.head);
+
+    harness.clock.set(1_000);
+    let first = harness.commit(&request).await.expect("accepted");
+    harness.clock.set(9_000);
+    let second = harness.commit(&request).await.expect("replayed");
+
+    assert_eq!(first.checkpoint_bytes(), second.checkpoint_bytes());
+    assert_eq!(
+        checkpoint_core(second.checkpoint_bytes())
+            .fields()
+            .issued_at_server,
+        UnixMillis::new(1_000),
+        "a replay never re-issues the anchor"
+    );
+}
+
+/// Ein abweichender Vorgaenger der Checkpoint-Kette ist ein Security Event,
+/// ein `409` — und nichts wird sichtbar.
+#[tokio::test]
+async fn a_divergent_checkpoint_predecessor_is_a_conflict_and_a_security_event() {
+    let harness = Harness::new();
+    harness.commits.set_fault(CommitFault::CheckpointFork);
+
+    let failure = harness
+        .commit(&valid_commit(&harness.head))
+        .await
+        .expect_err("a forking anchor must not become visible");
+    assert_eq!(failure.error.code(), "EA-CHECKPOINT-PREDECESSOR-CONFLICT");
+    assert_eq!(failure.error.http_status(), 409);
+    assert!(!failure.error.retryable());
+    assert_eq!(
+        harness.security.codes(),
+        vec!["checkpoint-predecessor-conflict".to_owned()]
     );
     assert_eq!(harness.commits.visible_entry_count(), 0);
 }

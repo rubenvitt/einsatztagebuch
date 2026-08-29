@@ -229,8 +229,66 @@ pub struct CommitDbCommand {
     pub evidence_due_at: Option<UnixMillis>,
     pub registry_version: RegistryVersion,
     pub registry_head_hash: ObjectHash,
-    /// Der Objektindex des Commits: Entry, initiale Grants und Receipt.
+    /// Der Objektindex des Commits: Entry, initiale Grants, Receipt UND
+    /// Checkpoint. Die Fremdschluessel von `grants`, `receipts` und
+    /// `checkpoints` zeigen alle darauf.
     pub indexed_objects: Vec<IndexedObjectV1>,
+    /// Der Standard-Checkpoint, der GEMEINSAM mit dem Eintrag sichtbar wird.
+    pub checkpoint: CheckpointCommitV1,
+}
+
+/// Der Datenbankteil eines Standard-Checkpoints.
+///
+/// Er reist IM Commit-Auftrag und nicht in einem eigenen, weil `design.md`
+/// §15.2 den Checkpoint an die Annahme bindet: derselbe Kettenkopf, unter
+/// derselben Sperre, in derselben Transaktion. Ein zweiter Auftrag danach
+/// koennte ausfallen, und dann stuende ein angenommener Eintrag ohne seinen
+/// Anker da.
+///
+/// `covered_sequence` ist der abgedeckte Sequenzbereich — von und bis fallen
+/// im Standardprofil zusammen, weil ein Checkpoint GENAU EINEN Kopf-Eintrag
+/// bindet und ueber keinen weiteren einen Nachweis fuehrt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CheckpointCommitV1 {
+    pub object_hash: ObjectHash,
+    pub covered_sequence: ChainSequence,
+    pub issued_at_server: UnixMillis,
+    /// Der Checkpoint, auf dem dieser aufsetzt — `None` genau fuer den ersten
+    /// Checkpoint einer Kette. Die Transaktion stellt ihn gegen den
+    /// tatsaechlichen Checkpoint-Kopf; weichen sie ab, gaebelte sich die
+    /// Kette, und der Commit wird abgewiesen.
+    pub previous_evidence_hash: Option<ObjectHash>,
+}
+
+impl fmt::Debug for CheckpointCommitV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "CheckpointCommitV1(covered={})",
+            self.covered_sequence.get()
+        )
+    }
+}
+
+/// Ein Satz des Checkpoint-Index: Blaetterposition und Objekthash.
+///
+/// `technical_index` ist eine reine Zaehlgroesse — sie ist die Position, auf
+/// die sich der `lastTechnicalIndex` eines technischen Cursors bezieht, und
+/// traegt keine fachliche Bedeutung.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CheckpointIndexEntryV1 {
+    pub technical_index: u64,
+    pub object_hash: ObjectHash,
+}
+
+impl fmt::Debug for CheckpointIndexEntryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "CheckpointIndexEntryV1(index={})",
+            self.technical_index
+        )
+    }
 }
 
 /// Der aktuelle Kettenkopf, wie Schritt 5 ihn liest.
@@ -261,6 +319,10 @@ pub struct CommittedDbState {
     pub sequence: ChainSequence,
     pub entry_hash: EntryHash,
     pub receipt_object_hash: ObjectHash,
+    /// Der Checkpoint, der zu DIESEM Commit gehoert. Bei einem Replay ist es
+    /// der GESPEICHERTE und nicht der eben gebildete — genau wie bei der
+    /// Quittung.
+    pub checkpoint_object_hash: ObjectHash,
     pub accepted_at_server: UnixMillis,
     /// `false` heisst: derselbe Commit lag schon vor und wird unveraendert
     /// wieder ausgeliefert.
@@ -294,6 +356,11 @@ pub enum SecurityEventKindV1 {
     PredecessorMismatch,
     /// Unzulaessiger Writer.
     WriterUnauthorized,
+    /// Der Standard-Checkpoint setzt auf einem ANDEREN Vorgaenger auf als dem
+    /// Kopf der Checkpoint-Kette. Die Kette darf sich nicht gabeln: zwei
+    /// Checkpoints ueber demselben Vorgaenger waeren zwei einander
+    /// widersprechende Anker derselben Kette (`design.md` §15.2).
+    CheckpointPredecessorConflict,
 }
 
 impl SecurityEventKindV1 {
@@ -306,6 +373,7 @@ impl SecurityEventKindV1 {
             Self::SequenceFork => "sequence-fork",
             Self::PredecessorMismatch => "predecessor-mismatch",
             Self::WriterUnauthorized => "writer-unauthorized",
+            Self::CheckpointPredecessorConflict => "checkpoint-predecessor-conflict",
         }
     }
 }
@@ -373,6 +441,11 @@ pub enum RepositoryError {
     CommitIdentityConflict,
     /// Die Request-ID war schon einmal da (`design.md` §13.1).
     RequestIdReplay,
+    /// Der Standard-Checkpoint nennt einen anderen Vorgaenger als den Kopf der
+    /// Checkpoint-Kette. Ein eigener Befund und KEIN Kopfkonflikt: der
+    /// Kettenkopf kann unbewegt stehen, waehrend die Evidence-Kette sich
+    /// gabelte.
+    CheckpointPredecessorConflict,
     /// Die Datenbank antwortet nicht.
     Unavailable,
 }
@@ -384,6 +457,7 @@ impl RepositoryError {
             Self::HeadConflict => "EA-DB-HEAD-CONFLICT",
             Self::CommitIdentityConflict => "EA-DB-COMMIT-IDENTITY-CONFLICT",
             Self::RequestIdReplay => "EA-DB-REQUEST-ID-REPLAY",
+            Self::CheckpointPredecessorConflict => "EA-DB-CHECKPOINT-PREDECESSOR",
             Self::Unavailable => "EA-DB-UNAVAILABLE",
         }
     }

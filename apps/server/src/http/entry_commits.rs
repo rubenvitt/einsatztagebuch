@@ -127,14 +127,15 @@ pub async fn create_entry_commit(
     .await
     {
         Ok(outcome) => {
-            // `checkpoint-bytes` bleibt in DIESER Aufgabe `null`. Der
-            // Standard-Checkpoint fuellt das Feld spaeter und aendert dabei
-            // KEIN Receipt-Byte: die Quittung ist zu diesem Zeitpunkt
-            // signiert und abgelegt.
+            // `checkpoint-bytes` traegt den Standard-Checkpoint aus
+            // `design.md` §15.2 — den GESPEICHERTEN, zurueckgelesenen. Er
+            // beruehrt dabei kein Receipt-Byte: die Quittung ist zu diesem
+            // Zeitpunkt signiert, abgelegt und in derselben Transaktion
+            // sichtbar geworden wie der Anker.
             let response = EntryCommitResponseV1::new(
                 outcome.wire_outcome(),
                 outcome.receipt_bytes().to_vec(),
-                None,
+                Some(outcome.checkpoint_bytes().to_vec()),
             );
             (
                 StatusCode::OK,

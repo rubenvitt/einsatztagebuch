@@ -19,6 +19,7 @@
 //! die Nullkennung — sichtbar leer statt erfunden.
 
 pub mod challenges;
+pub mod checkpoints;
 pub mod device_registrations;
 pub mod entry_commits;
 pub mod trust;
@@ -39,6 +40,7 @@ use ea_sync_protocol::{
 use ea_sync_server::{
     ObjectStore, ServerClock, ServerSigner,
     auth::{AuthPorts, AuthServiceError},
+    checkpoint::CheckpointPorts,
     commit::CommitPorts,
     trust::TrustPorts,
 };
@@ -90,6 +92,16 @@ impl AppState {
             commits: self.repository.as_ref(),
             heads: self.trust_authority.as_ref(),
             security: self.repository.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn checkpoint_ports(&self) -> CheckpointPorts<'_> {
+        CheckpointPorts {
+            clock: self.clock.as_ref(),
+            signer: self.signer.as_ref(),
+            objects: self.objects.as_ref(),
+            checkpoints: self.repository.as_ref(),
         }
     }
 

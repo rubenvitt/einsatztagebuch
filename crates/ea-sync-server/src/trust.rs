@@ -153,7 +153,8 @@ impl From<RepositoryError> for TrustServiceError {
             RepositoryError::Unavailable => Self::DependencyUnavailable,
             RepositoryError::HeadConflict
             | RepositoryError::CommitIdentityConflict
-            | RepositoryError::RequestIdReplay => Self::Conflict,
+            | RepositoryError::RequestIdReplay
+            | RepositoryError::CheckpointPredecessorConflict => Self::Conflict,
         }
     }
 }

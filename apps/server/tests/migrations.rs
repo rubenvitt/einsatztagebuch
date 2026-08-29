@@ -395,17 +395,25 @@ async fn the_head_race_constraints_carry_the_names_the_adapter_maps() {
 
     let rows = sqlx::query(
         "SELECT conname FROM pg_constraint \
-         WHERE conrelid IN ('entries'::regclass, 'chain_heads'::regclass) \
-         AND contype IN ('u', 'p') ORDER BY conname",
+         WHERE conrelid IN ('entries'::regclass, 'chain_heads'::regclass, \
+         'checkpoints'::regclass) AND contype IN ('u', 'p') ORDER BY conname",
     )
     .fetch_all(database.pool())
     .await
     .expect("reading pg_constraint must succeed");
     let names: Vec<String> = rows.iter().map(|row| row.get("conname")).collect();
+    // Der Checkpoint-Zwang steht MIT in der Liste: `map_commit_error` bildet
+    // genau diesen Namen auf `EA-DB-CHECKPOINT-PREDECESSOR` ab. Waere er
+    // laenger als die 63 Zeichen, die PostgreSQL fuer einen Bezeichner
+    // zulaesst, wuerde er stillschweigend gekuerzt — und die Zuordnung fiele
+    // auf „Widerspruch in der Commit-Identitaet" zurueck.
     assert_eq!(
         names,
         vec![
             "chain_heads_pkey",
+            "checkpoints_organization_id_chain_id_covered_sequence_key",
+            "checkpoints_pkey",
+            "checkpoints_technical_index_key",
             "entries_chain_id_sequence_number_key",
             "entries_entry_object_hash_key",
             "entries_pkey",
@@ -679,7 +687,7 @@ async fn the_trust_state_store_fails_closed_on_a_current_thread_runtime() {
 
 mod commit {
     use ea_format::ObjectTypeV1;
-    use ea_sync_server::{CommitDbCommand, CommitIdentityV1, IndexedObjectV1};
+    use ea_sync_server::{CheckpointCommitV1, CommitDbCommand, CommitIdentityV1, IndexedObjectV1};
     use ea_types::{
         ChainId, ChainSequence, DeviceId, EntryHash, Hash32, Id16, ObjectHash, OrganizationId,
         RegistryVersion, UnixMillis,
@@ -716,6 +724,9 @@ mod commit {
         pub grant_plan: Hash32,
         pub grants: Vec<ObjectHash>,
         pub receipt: ObjectHash,
+        pub checkpoint: ObjectHash,
+        /// Der Anker, auf dem der Checkpoint dieses Commits aufsetzt.
+        pub previous_checkpoint: Option<ObjectHash>,
         pub accepted_at: i64,
     }
 
@@ -731,6 +742,8 @@ mod commit {
                 grant_plan: hash32(0x30),
                 grants: vec![object(0x40), object(0x41)],
                 receipt: object(0x50),
+                checkpoint: object(0x51),
+                previous_checkpoint: None,
                 accepted_at: 1_700_000_000_000,
             }
         }
@@ -745,6 +758,11 @@ mod commit {
                 IndexedObjectV1 {
                     kind: ObjectTypeV1::Receipt,
                     object_hash: self.receipt,
+                    size_bytes: 256,
+                },
+                IndexedObjectV1 {
+                    kind: ObjectTypeV1::Evidence,
+                    object_hash: self.checkpoint,
                     size_bytes: 256,
                 },
             ];
@@ -773,6 +791,12 @@ mod commit {
                 registry_version: RegistryVersion::new(1),
                 registry_head_hash: object(0x70),
                 indexed_objects: indexed,
+                checkpoint: CheckpointCommitV1 {
+                    object_hash: self.checkpoint,
+                    covered_sequence: ChainSequence::new(self.sequence),
+                    issued_at_server: UnixMillis::new(self.accepted_at),
+                    previous_evidence_hash: self.previous_checkpoint,
+                },
             }
         }
     }
@@ -809,15 +833,18 @@ async fn a_commit_makes_entry_grants_receipt_and_head_visible_together() {
     assert!(state.newly_committed);
     assert_eq!(state.sequence.get(), 0);
 
-    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM entries), (SELECT count(*) FROM grants), \
-         (SELECT count(*) FROM receipts), (SELECT count(*) FROM object_index), \
-         (SELECT count(*) FROM chain_heads)",
+         (SELECT count(*) FROM receipts), (SELECT count(*) FROM checkpoints), \
+         (SELECT count(*) FROM object_index), (SELECT count(*) FROM chain_heads)",
     )
     .fetch_one(database.pool())
     .await
     .expect("counting must succeed");
-    assert_eq!(counts, (1, 2, 1, 4, 1));
+    // Der Objektindex traegt fuenf Zeilen: Entry, zwei Grants, Quittung UND
+    // den Standard-Checkpoint. Der Anker wird mit demselben Commit sichtbar
+    // (`design.md` §15.2).
+    assert_eq!(counts, (1, 2, 1, 1, 5, 1));
 
     let head: (i64, Vec<u8>) =
         sqlx::query_as("SELECT head_sequence, head_entry_hash FROM chain_heads")
@@ -857,6 +884,8 @@ async fn an_accepted_time_below_the_head_is_a_head_conflict() {
     successor.entry_hash = commit::entry(0x1a);
     successor.entry_object = commit::object(0x2a);
     successor.receipt = commit::object(0x5a);
+    successor.checkpoint = commit::object(0x5b);
+    successor.previous_checkpoint = Some(commit::object(0x51));
     successor.grants = vec![commit::object(0x4a)];
     successor.previous = Some(commit::entry(0x10));
     successor.accepted_at = 1_700_000_009_999;
@@ -1039,6 +1068,8 @@ async fn a_failed_commit_rolls_back_everything_it_had_written() {
     colliding.entry_hash = commit::entry(0x14);
     colliding.previous = Some(commit::entry(0x10));
     colliding.receipt = commit::object(0x54);
+    colliding.checkpoint = commit::object(0x55);
+    colliding.previous_checkpoint = Some(commit::object(0x51));
     colliding.grants = vec![commit::object(0x45)];
     let error = repository
         .commit_locked_head(colliding.build())

@@ -149,10 +149,27 @@ async fn a_complete_commit_is_accepted_and_becomes_visible_together() {
 
     let decoded = EntryCommitResponseV1::decode(&response.body).expect("the response decodes");
     assert_eq!(decoded.outcome(), EntryCommitOutcome::Accepted);
-    // `checkpoint-bytes` bleibt in DIESER Stufe `null`; der
-    // Standard-Checkpoint fuellt es spaeter und beruehrt dabei kein
-    // Receipt-Byte.
-    assert_eq!(decoded.checkpoint_bytes(), None);
+    // `checkpoint-bytes` traegt den Standard-Checkpoint aus `design.md`
+    // §15.2 — und beruehrt dabei kein Receipt-Byte. Der Anker selbst ist in
+    // `apps/server/tests/checkpoint_api.rs` vollstaendig geprueft; hier steht
+    // nur, DASS der angenommene Commit ihn traegt und dass er zu diesem Kopf
+    // gehoert.
+    let checkpoint_bytes = decoded
+        .checkpoint_bytes()
+        .expect("an accepted commit carries its standard checkpoint");
+    let ea_format::ParsedArchiveObject::Evidence(checkpoint) =
+        ea_format::decode_exact_object(checkpoint_bytes).expect("the checkpoint parses")
+    else {
+        panic!("a standard checkpoint is an evidence object");
+    };
+    let ea_format::DecodedEvidencePayloadV1::Standard { core, .. } = checkpoint
+        .value()
+        .decoded_payload()
+        .expect("the payload decodes")
+    else {
+        panic!("Stufe 3 stellt keinen zeitgestempelten Checkpoint aus");
+    };
+    assert!(core.fields().head_entry_hash == request.identity().entry_hash());
 
     let ea_format::ParsedArchiveObject::Receipt(receipt) =
         ea_format::decode_exact_object(decoded.receipt_bytes()).expect("the receipt parses")
@@ -198,6 +215,7 @@ async fn a_complete_commit_is_accepted_and_becomes_visible_together() {
         "SELECT (SELECT count(*) FROM entries) AS entries, \
          (SELECT count(*) FROM grants) AS grants, \
          (SELECT count(*) FROM receipts) AS receipts, \
+         (SELECT count(*) FROM checkpoints) AS checkpoints, \
          (SELECT head_sequence FROM chain_heads) AS head",
     )
     .fetch_one(database.pool())
@@ -206,6 +224,7 @@ async fn a_complete_commit_is_accepted_and_becomes_visible_together() {
     assert_eq!(row.get::<i64, _>("entries"), 1);
     assert_eq!(row.get::<i64, _>("grants"), 2);
     assert_eq!(row.get::<i64, _>("receipts"), 1);
+    assert_eq!(row.get::<i64, _>("checkpoints"), 1);
     assert_eq!(
         u64::try_from(row.get::<i64, _>("head")).expect("a sequence is not negative"),
         trust_closure::ExtendedClosure::commit_sequence()

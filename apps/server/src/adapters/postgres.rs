@@ -14,8 +14,9 @@
 use async_trait::async_trait;
 use ea_format::ObjectTypeV1;
 use ea_sync_server::{
-    ChainHeadStateV1, CommitDbCommand, CommitRepository, CommittedDbState, ObjectTypeDirectory,
-    RepositoryError, SecurityEventSink, SecurityEventV1,
+    ChainHeadStateV1, CheckpointDirectory, CheckpointIndexEntryV1, CommitDbCommand,
+    CommitRepository, CommittedDbState, ObjectTypeDirectory, RepositoryError, SecurityEventSink,
+    SecurityEventV1,
 };
 use ea_types::{ChainSequence, EntryHash, ObjectHash, UnixMillis};
 use sqlx::{PgPool, Row};
@@ -85,6 +86,34 @@ impl CommitRepository for PostgresRepository {
         }))
     }
 
+    /// Der Kopf der CHECKPOINT-Kette, OHNE Sperre.
+    ///
+    /// Er ist der Anker mit der hoechsten abgedeckten Sequenz dieser Kette —
+    /// und weil jede Sequenz genau einen Anker traegt (Eindeutigkeitszwang in
+    /// `0001_initial.sql`), ist das genau einer. Der Lesezugriff entscheidet
+    /// nichts: [`Self::commit_locked_head`] stellt den genannten Vorgaenger
+    /// unter der Sperre erneut gegen diesen Kopf.
+    async fn checkpoint_head(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<ObjectHash>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT object_hash FROM checkpoints WHERE organization_id = $1 AND chain_id = $2 \
+             ORDER BY covered_sequence DESC LIMIT 1",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&chain_id.as_bytes()[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        row.map(|row| {
+            let hash: Vec<u8> = row.get("object_hash");
+            ObjectHash::try_from(hash.as_slice()).map_err(|_| RepositoryError::Unavailable)
+        })
+        .transpose()
+    }
+
     async fn commit_locked_head(
         &self,
         command: CommitDbCommand,
@@ -137,11 +166,18 @@ impl CommitRepository for PostgresRepository {
             }
             let receipt: Vec<u8> = existing.get("receipt_object_hash");
             let accepted: i64 = existing.get("accepted_at_server_millis");
+            // Der GESPEICHERTE Anker dieses Commits, nicht der eben
+            // gebildete. Er ist in derselben Transaktion entstanden wie der
+            // Eintrag, also traegt jede Sequenz mit einem Eintrag auch ihren
+            // Checkpoint; ein fehlender waere ein Widerspruch im Bestand und
+            // wird fail-closed gemeldet statt erfunden.
+            let checkpoint = stored_checkpoint(&mut transaction, &command).await?;
             return Ok(CommittedDbState {
                 sequence: ChainSequence::new(command.sequence.get()),
                 entry_hash: command.identity.entry_hash,
                 receipt_object_hash: ObjectHash::try_from(receipt.as_slice())
                     .map_err(|_| RepositoryError::Unavailable)?,
+                checkpoint_object_hash: checkpoint,
                 accepted_at_server: UnixMillis::new(accepted),
                 newly_committed: false,
             });
@@ -194,7 +230,36 @@ impl CommitRepository for PostgresRepository {
             return Err(RepositoryError::HeadConflict);
         }
 
-        // Schritt 8: Objektindex, Entry, Receipt und Kopf gemeinsam.
+        // Der Vorgaenger der CHECKPOINT-Kette, unter derselben Sperre.
+        //
+        // `design.md` §15.2 gibt jedem Anker seinen Vorgaenger; zwei Anker
+        // ueber demselben Vorgaenger waeren zwei einander widersprechende
+        // Ketten. Der Dienst hat den Kopf sperrfrei gelesen und in den
+        // signierten Checkpoint gebunden — hier wird er ERNEUT gestellt, denn
+        // erst unter der Sperre ist die Aussage unter Nebenlaeufigkeit wahr.
+        //
+        // Die Pruefung steht NACH Sequenz und Vorgaenger: ein schlicht
+        // verlorenes Rennen bleibt ein Kopfkonflikt und wird nicht zu einem
+        // Gabelungsvorwurf umgedeutet.
+        let checkpoint_head: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT object_hash FROM checkpoints WHERE organization_id = $1 AND chain_id = $2 \
+             ORDER BY covered_sequence DESC LIMIT 1",
+        )
+        .bind(&command.organization_id.as_bytes()[..])
+        .bind(&command.chain_id.as_bytes()[..])
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let claimed_predecessor = command
+            .checkpoint
+            .previous_evidence_hash
+            .map(|hash| hash.as_bytes().to_vec());
+        if checkpoint_head != claimed_predecessor {
+            return Err(RepositoryError::CheckpointPredecessorConflict);
+        }
+
+        // Schritt 8: Objektindex, Entry, Receipt, Checkpoint und Kopf
+        // gemeinsam.
         for object in &command.indexed_objects {
             sqlx::query(
                 "INSERT INTO object_index (object_hash, organization_id, object_type_code, \
@@ -273,6 +338,22 @@ impl CommitRepository for PostgresRepository {
         .await
         .map_err(map_commit_error)?;
 
+        sqlx::query(
+            "INSERT INTO checkpoints (object_hash, organization_id, chain_id, covered_sequence, \
+             issued_at_millis) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&command.checkpoint.object_hash.as_bytes()[..])
+        .bind(&command.organization_id.as_bytes()[..])
+        .bind(&command.chain_id.as_bytes()[..])
+        .bind(
+            i64::try_from(command.checkpoint.covered_sequence.get())
+                .map_err(|_| RepositoryError::Unavailable)?,
+        )
+        .bind(command.checkpoint.issued_at_server.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_commit_error)?;
+
         let head_rows = sqlx::query(
             "INSERT INTO chain_heads (organization_id, chain_id, head_sequence, \
              head_entry_hash, head_accepted_at_server_millis, revision) \
@@ -303,10 +384,70 @@ impl CommitRepository for PostgresRepository {
             sequence: command.sequence,
             entry_hash: command.identity.entry_hash,
             receipt_object_hash: command.receipt_object_hash,
+            checkpoint_object_hash: command.checkpoint.object_hash,
             accepted_at_server: command.accepted_at_server,
             newly_committed: true,
         })
     }
+}
+
+/// Der Checkpoint-Index einer Organisation, aufsteigend nach Blaetterposition.
+///
+/// Er BLAETTERT und entscheidet nichts: die gelieferten Adressen loest der
+/// Dienst gegen den Object Store auf, und die exakten Bytes prueft der
+/// Empfaenger selbst.
+#[async_trait]
+impl CheckpointDirectory for PostgresRepository {
+    async fn checkpoints_after(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        after_technical_index: u64,
+        limit: usize,
+    ) -> Result<Vec<CheckpointIndexEntryV1>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT object_hash, technical_index FROM checkpoints \
+             WHERE organization_id = $1 AND technical_index > $2 \
+             ORDER BY technical_index LIMIT $3",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(i64::try_from(after_technical_index).map_err(|_| RepositoryError::Unavailable)?)
+        .bind(i64::try_from(limit).map_err(|_| RepositoryError::Unavailable)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        rows.into_iter()
+            .map(|row| {
+                let hash: Vec<u8> = row.get("object_hash");
+                let index: i64 = row.get("technical_index");
+                Ok(CheckpointIndexEntryV1 {
+                    technical_index: u64::try_from(index)
+                        .map_err(|_| RepositoryError::Unavailable)?,
+                    object_hash: ObjectHash::try_from(hash.as_slice())
+                        .map_err(|_| RepositoryError::Unavailable)?,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Der Anker, der zu einem bereits gespeicherten Commit gehoert.
+async fn stored_checkpoint(
+    transaction: &mut sqlx::PgTransaction<'_>,
+    command: &CommitDbCommand,
+) -> Result<ObjectHash, RepositoryError> {
+    let hash: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT object_hash FROM checkpoints \
+         WHERE organization_id = $1 AND chain_id = $2 AND covered_sequence = $3",
+    )
+    .bind(&command.organization_id.as_bytes()[..])
+    .bind(&command.chain_id.as_bytes()[..])
+    .bind(i64::try_from(command.sequence.get()).map_err(|_| RepositoryError::Unavailable)?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|e| unavailable(&e))?;
+    hash.ok_or(RepositoryError::Unavailable).and_then(|hash| {
+        ObjectHash::try_from(hash.as_slice()).map_err(|_| RepositoryError::Unavailable)
+    })
 }
 
 /// Die Grants eines bereits gespeicherten Commits, sortiert, gegen die
@@ -348,6 +489,13 @@ fn map_commit_error(error: sqlx::Error) -> RepositoryError {
             return match database.constraint() {
                 Some("entries_chain_id_sequence_number_key" | "chain_heads_pkey") => {
                     RepositoryError::HeadConflict
+                }
+                // Eine Sequenz traegt genau EINEN Anker. Reisst dieser Zwang,
+                // haette sich die Checkpoint-Kette gegabelt — und das ist
+                // weder ein Kopfkonflikt noch ein Widerspruch in der
+                // Commit-Identitaet.
+                Some("checkpoints_organization_id_chain_id_covered_sequence_key") => {
+                    RepositoryError::CheckpointPredecessorConflict
                 }
                 _ => RepositoryError::CommitIdentityConflict,
             };

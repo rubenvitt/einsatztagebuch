@@ -102,10 +102,51 @@ pub trait CommitRepository: Send + Sync {
         chain_id: ea_types::ChainId,
     ) -> Result<Option<crate::models::ChainHeadStateV1>, RepositoryError>;
 
+    /// Der Kopf der CHECKPOINT-Kette dieser Kette — ohne Sperre.
+    ///
+    /// Er ist der Vorgaenger, den der naechste Standard-Checkpoint ueber
+    /// `previous-evidence-hash` bindet. `None` heisst „diese Kette traegt
+    /// noch keinen Checkpoint“, und das ist eine Antwort und kein Ausfall.
+    ///
+    /// Wie [`Self::head_state`] entscheidet dieser Lesezugriff NICHTS: die
+    /// gesperrte Transaktion stellt den genannten Vorgaenger noch einmal
+    /// gegen den tatsaechlichen Kopf und weist mit
+    /// [`RepositoryError::CheckpointPredecessorConflict`] ab, wenn er sich
+    /// dazwischen bewegt hat. Ohne diese zweite Pruefung koennte die
+    /// Evidence-Kette sich gabeln.
+    async fn checkpoint_head(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<ObjectHash>, RepositoryError>;
+
     async fn commit_locked_head(
         &self,
         command: CommitDbCommand,
     ) -> Result<CommittedDbState, RepositoryError>;
+}
+
+/// Der technische Checkpoint-Index einer Organisation.
+///
+/// Ein eigener Port neben [`CommitRepository`], weil er eine andere Frage
+/// stellt: jener SCHREIBT unter der Kettenkopfsperre, dieser BLAETTERT ueber
+/// alle Ketten einer Organisation. `GET /v1/checkpoints` kennt keine Kette —
+/// der Endpunkt traegt keine im Pfad, und ein technischer Cursor auf ihn
+/// fuehrt deshalb `chainId = null`.
+///
+/// Der Port entscheidet nichts. Die Leseantwort liefert exakte Objektbytes,
+/// und der Empfaenger prueft die Kette selbst (`design.md` §13.2: technische
+/// Listen sind nicht autoritativ).
+#[async_trait]
+pub trait CheckpointDirectory: Send + Sync {
+    /// Die Checkpoints nach `after_technical_index`, aufsteigend nach
+    /// Blaetterposition, hoechstens `limit` Saetze.
+    async fn checkpoints_after(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        after_technical_index: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::models::CheckpointIndexEntryV1>, RepositoryError>;
 }
 
 /// Der zur EINTRAGSSEQUENZ gewaehlte Registry-Head.

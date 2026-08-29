@@ -208,9 +208,13 @@ impl From<RepositoryError> for AuthServiceError {
     fn from(value: RepositoryError) -> Self {
         match value {
             RepositoryError::RequestIdReplay => Self::RequestIdReplay,
-            RepositoryError::CommitIdentityConflict | RepositoryError::HeadConflict => {
-                Self::RegistrationConflict
-            }
+            // Der Vorgaengerkonflikt der Checkpoint-Kette gehoert dem
+            // Commit-Pfad; hier kann er nicht entstehen. Er bleibt trotzdem
+            // ein eigener Arm, damit er nicht stillschweigend zu einem
+            // Registrierungskonflikt wird.
+            RepositoryError::CommitIdentityConflict
+            | RepositoryError::HeadConflict
+            | RepositoryError::CheckpointPredecessorConflict => Self::RegistrationConflict,
             RepositoryError::Unavailable => Self::DependencyUnavailable,
         }
     }

@@ -189,13 +189,21 @@ CREATE TABLE receipts (
 -- Checkpoints. `technical_index` ist die Blaetterposition, auf die sich der
 -- `lastTechnicalIndex` eines technischen Cursors bezieht — eine reine
 -- Zaehlgroesse ohne fachliche Bedeutung.
+--
+-- Der Eindeutigkeitszwang ueber (`organizationId`, `chainId`,
+-- `coveredSequence`) ist die DAUERHAFTE Fassung der Zusage aus
+-- `design.md` §15.2, dass die Checkpoint-Kette sich nicht gabelt: eine
+-- Sequenz traegt genau einen Anker. Der Adapter prueft den Vorgaenger
+-- ausserdem unter der Kettenkopfsperre; dieser Zwang ueberlebt auch einen
+-- Fehler in jener Pruefung.
 CREATE TABLE checkpoints (
     object_hash BYTEA PRIMARY KEY REFERENCES object_index (object_hash),
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     chain_id BYTEA NOT NULL CHECK (octet_length(chain_id) = 16),
     covered_sequence BIGINT NOT NULL CHECK (covered_sequence >= 0),
     issued_at_millis BIGINT NOT NULL,
-    technical_index BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE
+    technical_index BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+    UNIQUE (organization_id, chain_id, covered_sequence)
 );
 
 -- Evidence-Auftraege. `due_at_millis` ist die `evidence-due-at` des Receipts.
