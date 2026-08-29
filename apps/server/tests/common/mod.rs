@@ -793,3 +793,347 @@ pub async fn fresh_challenge(
         .core()
         .nonce
 }
+
+// ---------------------------------------------------------------------------
+// Die gemeinsame Kulisse der LESENDEN und VERWALTENDEN Testziele
+// ---------------------------------------------------------------------------
+//
+// `read_apis`, `historical_grant_api`, `destruction_api` und `export_api`
+// brauchen alle denselben Aufbau: eine Organisation mit fortgeschriebenem
+// Abschluss, eine laufende Kette und mindestens einen ECHT committeten
+// Eintrag. Vier Kopien davon waeren vier Gelegenheiten, sie verschieden zu
+// machen — und ein Testziel, dessen Kulisse von den anderen abweicht, prueft
+// etwas anderes, als es behauptet.
+
+/// Innerhalb des `notBefore`/`notAfter`-Fensters aller Koepfe.
+pub const READ_SERVER_NOW_MILLIS: i64 = 1_000;
+pub const READ_SERVER_SECRET: [u8; 32] = [0x51; 32];
+pub const READ_SERVER_CERTIFICATE_HASH: [u8; 32] = [0x52; 32];
+/// Der Kopf, auf dem die Kette steht, bevor der erste Eintrag committet wird.
+pub const READ_SEEDED_HEAD_ENTRY_HASH: [u8; 32] = [0x77; 32];
+const READ_SEEDED_HEAD_ACCEPTED_AT: i64 = 500;
+
+/// Ein aufgebauter Server samt seinem Abschluss.
+pub struct ReadyServer {
+    pub server: TestServer,
+    pub closure: trust_closure::ExtendedClosure,
+}
+
+#[must_use]
+pub fn request_signer(seed: [u8; 32]) -> ea_sync_protocol::RequestSigner {
+    ea_sync_protocol::RequestSigner::from_secret(ea_crypto::SecretBytes::new(seed))
+}
+
+/// Der Fehlercode eines `protocol-error-v1`, oder `None`.
+#[must_use]
+pub fn error_code(body: &[u8]) -> Option<String> {
+    ea_sync_protocol::ProtocolErrorV1::decode(body)
+        .ok()
+        .map(|error| error.error_code().to_owned())
+}
+
+/// Eine Organisation mit fortgeschriebenem Abschluss und laufender Kette.
+///
+/// `with_grant_authorities` schaltet die Historical Grant Authority und die
+/// beiden Key Approver dazu; ohne sie sind ein historischer Re-Grant und eine
+/// Vernichtung gar nicht baubar.
+///
+/// # Panics
+///
+/// Wenn die Kulisse nicht steht — dann ist sie defekt, nicht der Server.
+pub async fn stand_up_read_server(
+    database: &TestDatabase,
+    now_millis: i64,
+    with_grant_authorities: bool,
+) -> ReadyServer {
+    let fixture = seed_trust_fixture(database.pool(), trust_closure::ROTATION_CASE, &[]).await;
+    let closure = trust_closure::build_with(false, with_grant_authorities);
+    assert!(
+        closure.organization_id == fixture.organization_id,
+        "the extension binds to the frozen anchor's organization"
+    );
+    let server = spawn_server(
+        database.pool().clone(),
+        ea_types::UnixMillis::new(now_millis),
+        closure.organization_id,
+        READ_SERVER_SECRET,
+        ea_types::CertificateHash::try_from(&READ_SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+    publish_closure(
+        &server,
+        &closure,
+        &request_signer(trust_closure::ADMIN_SEED),
+        0,
+    )
+    .await;
+    trust_closure::seed_chain_head(
+        database.pool(),
+        closure.organization_id,
+        closure.chain_id,
+        trust_closure::ExtendedClosure::seeded_head_sequence(),
+        READ_SEEDED_HEAD_ENTRY_HASH,
+        READ_SEEDED_HEAD_ACCEPTED_AT,
+    )
+    .await;
+    ReadyServer { server, closure }
+}
+
+/// Ein ECHT committeter Eintrag, samt seinen Adressen.
+pub struct CommittedEntry {
+    pub sequence: u64,
+    pub entry_hash: ea_types::EntryHash,
+    pub entry_object_hash: ea_types::ObjectHash,
+    pub recovery_grant_object_hash: ea_types::ObjectHash,
+    pub reader_grant_object_hash: ea_types::ObjectHash,
+}
+
+/// Committet EINEN Eintrag ueber den ECHTEN Endpunkt.
+///
+/// Nicht per `INSERT`: die Leseflaechen sollen das ausliefern, was der
+/// Commit-Pfad abgelegt hat, und nicht das, was ein Test daneben gestellt hat.
+///
+/// # Panics
+///
+/// Wenn der Commit nicht mit `200` beantwortet wird.
+pub async fn commit_one_entry(
+    ready: &ReadyServer,
+    sequence: u64,
+    previous_entry_hash: Option<ea_types::EntryHash>,
+    marker: u8,
+) -> CommittedEntry {
+    use ea_sync_protocol::EndpointV1;
+
+    let closure = &ready.closure;
+    let recipients = [
+        archive_objects::Recipient::reader(closure),
+        archive_objects::Recipient::recovery(closure),
+    ];
+    let plan = archive_objects::plan(&recipients);
+    let spec = archive_objects::CommitSpec {
+        closure,
+        sequence,
+        previous_entry_hash,
+        recipients: &recipients,
+        marker,
+        writer_override: None,
+        registry_override: None,
+    };
+    let entry_bytes = archive_objects::entry_bytes(&spec, &plan);
+    let entry_hash = archive_objects::entry_hash_of(&entry_bytes);
+    let request = archive_objects::commit_request(&spec);
+
+    let target = archive_objects::entry_commit_path(closure.chain_id);
+    let nonce = fresh_challenge(&ready.server, closure.organization_id).await;
+    let mut request_id = [0xc0_u8; 16];
+    request_id[15] = marker;
+    let headers = signed_headers(&SignedCall {
+        signer: &request_signer(trust_closure::WRITER_SEED),
+        endpoint: EndpointV1::EntryCommits,
+        authority: &ready.server.authority,
+        target: &target,
+        body: Some(request.exact_bytes()),
+        organization_id: closure.organization_id,
+        request_id,
+        nonce,
+        created: READ_SERVER_NOW_MILLIS.div_euclid(1_000),
+    });
+    let response = https_request(
+        ready.server.address,
+        &ready.server.authority,
+        "POST",
+        &target,
+        &headers,
+        request.exact_bytes(),
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        200,
+        "the fixture commit must be accepted; the server answered {:?}",
+        error_code(&response.body)
+    );
+
+    CommittedEntry {
+        sequence,
+        entry_hash,
+        entry_object_hash: ea_crypto::object_hash(&entry_bytes),
+        recovery_grant_object_hash: ea_crypto::object_hash(&archive_objects::grant_bytes(
+            closure,
+            entry_hash,
+            archive_objects::Recipient::recovery(closure),
+        )),
+        reader_grant_object_hash: ea_crypto::object_hash(&archive_objects::grant_bytes(
+            closure,
+            entry_hash,
+            archive_objects::Recipient::reader(closure),
+        )),
+    }
+}
+
+/// Ein signierter Request gegen den echten Server — die gemeinsame Klammer der
+/// vier lesenden und verwaltenden Testziele.
+pub struct ApiCall<'a> {
+    pub ready: &'a ReadyServer,
+    pub signer_seed: [u8; 32],
+    pub endpoint: ea_sync_protocol::EndpointV1,
+    pub target: &'a str,
+    pub body: Option<&'a [u8]>,
+    pub request_id: [u8; 16],
+}
+
+/// Sendet ihn und gibt die Antwort heraus.
+///
+/// # Panics
+///
+/// Wenn der Challenge-Endpunkt nicht antwortet.
+pub async fn call(request: &ApiCall<'_>) -> HttpResponse {
+    let organization_id = request.ready.closure.organization_id;
+    let nonce = fresh_challenge(&request.ready.server, organization_id).await;
+    let headers = signed_headers(&SignedCall {
+        signer: &request_signer(request.signer_seed),
+        endpoint: request.endpoint,
+        authority: &request.ready.server.authority,
+        target: request.target,
+        body: request.body,
+        organization_id,
+        request_id: request.request_id,
+        nonce,
+        created: READ_SERVER_NOW_MILLIS.div_euclid(1_000),
+    });
+    let method = match request.endpoint.method() {
+        ea_sync_protocol::HttpMethod::Get => "GET",
+        ea_sync_protocol::HttpMethod::Put => "PUT",
+        ea_sync_protocol::HttpMethod::Post => "POST",
+    };
+    https_request(
+        request.ready.server.address,
+        &request.ready.server.authority,
+        method,
+        request.target,
+        &headers,
+        request.body.unwrap_or(&[]),
+    )
+    .await
+}
+
+/// Legt exakte `.etb`-Bytes DIREKT in den Object Store.
+///
+/// Bewusst NICHT ueber `POST /v1/trust/events`: die Aufnahme weist
+/// `grantAuthorization` und `destructionAuthorization` fail-closed als
+/// `EA-TRUST-EVENT-UNVERIFIABLE` ab, weil `ea-trust` fuer sie im
+/// Registrierungsabschluss keine Signiererregel fuehrt. Sie erreichen den
+/// Server auf ihrem eigenen Weg — die Vernichtung ueber `POST /v1/destructions`,
+/// die Grant-Autorisierung als das Objekt, das ein historisches `.eag` NENNT
+/// und das der Server content-addressed aufloest. Fuer das zweite gibt es in
+/// dieser Stufe noch keinen Aufnahmeendpunkt; die Kulisse legt es deshalb
+/// dorthin, wo Stufe 5 es hinlegen wird.
+///
+/// # Panics
+///
+/// Wenn die Ablage scheitert.
+pub async fn seed_trust_object_bytes(bytes: &[u8]) -> ea_types::ObjectHash {
+    let hash = ea_crypto::object_hash(bytes);
+    object_store_client()
+        .await
+        .put_object()
+        .bucket(INTEGRATION_BUCKET)
+        .key(ea_sync_server::object_key(
+            ea_format::ObjectTypeV1::Trust,
+            hash,
+        ))
+        .body(aws_sdk_s3::primitives::ByteStream::from(bytes.to_vec()))
+        .send()
+        .await
+        .expect("storing a fixture trust object must succeed");
+    hash
+}
+
+/// Ein ZWEITER Server auf derselben Datenbank, mit einer anderen Uhr.
+///
+/// Die Uhr eines Servers steht bei seinem Aufbau fest — sie ist ein Port und
+/// kein Zustand. Ein Fall, der eine Frist ueberschreiten laesst, braucht
+/// deshalb einen zweiten Server und nicht einen zweiten Testfall: derselbe
+/// Bestand, dieselbe Kette, eine spaetere Zeit.
+///
+/// # Panics
+///
+/// Wenn der Lauscher nicht bindet.
+pub async fn respawn_read_server(
+    database: &TestDatabase,
+    closure: &trust_closure::ExtendedClosure,
+    now_millis: i64,
+) -> ReadyServer {
+    let server = spawn_server(
+        database.pool().clone(),
+        ea_types::UnixMillis::new(now_millis),
+        closure.organization_id,
+        READ_SERVER_SECRET,
+        ea_types::CertificateHash::try_from(&READ_SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+    ReadyServer {
+        server,
+        closure: trust_closure::build_with(false, true),
+    }
+}
+
+/// Derselbe signierte Request, aber mit ausdruecklich gesetzter Signaturzeit.
+///
+/// `call` folgt der Standarduhr; ein Fall gegen einen Server mit VERSTELLTER
+/// Uhr muss seine Signatur mitverstellen, sonst faellt er am Signaturfenster
+/// und nicht an der Sache, die er prueft.
+pub async fn call_at(request: &ApiCall<'_>, now_millis: i64) -> HttpResponse {
+    let organization_id = request.ready.closure.organization_id;
+    let nonce = fresh_challenge(&request.ready.server, organization_id).await;
+    let headers = signed_headers(&SignedCall {
+        signer: &request_signer(request.signer_seed),
+        endpoint: request.endpoint,
+        authority: &request.ready.server.authority,
+        target: request.target,
+        body: request.body,
+        organization_id,
+        request_id: request.request_id,
+        nonce,
+        created: now_millis.div_euclid(1_000),
+    });
+    let method = match request.endpoint.method() {
+        ea_sync_protocol::HttpMethod::Get => "GET",
+        ea_sync_protocol::HttpMethod::Put => "PUT",
+        ea_sync_protocol::HttpMethod::Post => "POST",
+    };
+    https_request(
+        request.ready.server.address,
+        &request.ready.server.authority,
+        method,
+        request.target,
+        &headers,
+        request.body.unwrap_or(&[]),
+    )
+    .await
+}
+
+/// Ein ECHTER technischer Cursor, ausgestellt mit DEMSELBEN Serverschluessel,
+/// den die Testkulisse dem Server gibt.
+///
+/// Er steht hier, weil eine Blaetterseite in diesen Testfaellen nie voll wird —
+/// zwei Eintraege reissen keine Decke von tausend Objekten. Ohne ihn pruefte
+/// jeder Cursorfall nur die ABWEISUNG, und ein Cursor, den der Server
+/// ausstellt, aber nie wieder oeffnet, kaeme durch alle davon.
+///
+/// # Panics
+///
+/// Wenn der Schluessel nicht laedt oder der Cursor nicht entsteht.
+#[must_use]
+pub fn issue_technical_cursor(fields: &ea_sync_protocol::TechnicalCursorFieldsV1) -> Vec<u8> {
+    let signer = einsatzarchiv_server::adapters::server_keys::ServerKeyStore::new(
+        ea_crypto::SecretBytes::new(READ_SERVER_SECRET),
+        ea_types::CertificateHash::try_from(&READ_SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+        1,
+    )
+    .expect("the test server key must load");
+    ea_sync_protocol::TechnicalCursorV1::issue(fields, &signer)
+        .expect("issuing a technical cursor must succeed")
+        .token_bytes()
+        .to_vec()
+}

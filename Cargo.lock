@@ -1939,6 +1939,7 @@ dependencies = [
  "ea-trust",
  "ea-types",
  "hex",
+ "sha2 0.11.0",
  "tokio",
 ]
 

@@ -6,10 +6,11 @@
 //! [`crate::config`] steht. Ein Klartext-Lauscher existiert nicht — auch nicht
 //! hinter einem Schalter, weil ein Schalter irgendwann umgelegt wird.
 //!
-//! Die Routentafel traegt GENAU die sieben Endpunkte, die es heute gibt. Die
-//! uebrigen zehn der siebzehn aus `design.md` §13.2 sind NICHT gemountet —
-//! ein nicht gemounteter Endpunkt antwortet mit `404` und kann nicht
-//! versehentlich halb fertig erreichbar sein.
+//! Die Routentafel traegt GENAU die fuenfzehn Endpunkte, die es heute gibt.
+//! Die uebrigen zwei der siebzehn aus `design.md` §13.2 — `PUT
+//! /v1/vault-blobs` und `POST /v1/vault-blobs/retrievals` — sind NICHT
+//! gemountet; ein nicht gemounteter Endpunkt antwortet mit `404` und kann
+//! nicht versehentlich halb fertig erreichbar sein.
 
 use std::sync::Arc;
 
@@ -24,8 +25,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 use crate::http::{
-    AppState, challenges, checkpoints, device_registrations, entry_commits, trust,
-    webauthn_credentials,
+    AppState, challenges, checkpoints, destructions, device_registrations, entries, entry_commits,
+    exports, grants, objects, reader_acks, trust, webauthn_credentials,
 };
 
 /// Die Routentafel des Servers.
@@ -65,6 +66,38 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             EndpointV1::Checkpoints.path_template(),
             get(checkpoints::list_checkpoints),
+        )
+        .route(
+            EndpointV1::ChainEntries.path_template(),
+            get(entries::list_chain_entries),
+        )
+        .route(
+            EndpointV1::Objects.path_template(),
+            get(objects::read_object),
+        )
+        .route(
+            EndpointV1::HistoricalGrants.path_template(),
+            post(grants::create_historical_grant),
+        )
+        .route(
+            EndpointV1::EntryGrants.path_template(),
+            get(grants::list_entry_grants),
+        )
+        .route(
+            EndpointV1::ReaderAcks.path_template(),
+            post(reader_acks::create_reader_ack),
+        )
+        .route(
+            EndpointV1::ArchiveExports.path_template(),
+            get(exports::read_current_export),
+        )
+        .route(
+            EndpointV1::Destructions.path_template(),
+            post(destructions::create_destruction),
+        )
+        .route(
+            EndpointV1::DestructionStatus.path_template(),
+            get(destructions::read_destruction),
         )
         .with_state(state)
 }

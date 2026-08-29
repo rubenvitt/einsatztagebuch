@@ -52,7 +52,7 @@ const FORMAT_VERSION_V1: u64 = 1;
 /// LEITET AUSSCHLIESSLICH WEITER — er trifft keine eigene Aussage darueber,
 /// welches Zertifikat aufloest, und er ist ausdruecklich keine zweite
 /// Aufloesung neben der des gewaehlten Kopfes.
-struct HeadResolver<'a>(&'a dyn ActiveRegistryHeadV1);
+pub(crate) struct HeadResolver<'a>(pub(crate) &'a dyn ActiveRegistryHeadV1);
 
 impl SignerCertificateResolver for HeadResolver<'_> {
     fn resolve(

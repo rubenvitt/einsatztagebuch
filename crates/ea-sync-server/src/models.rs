@@ -601,3 +601,166 @@ impl fmt::Debug for RegistryLineEntryV1 {
         )
     }
 }
+
+/// Ein Satz des Eintragsindex einer Kette.
+///
+/// Er traegt GENAU die Adressen, die ein Lesestapel ausliefert: das `.eip`
+/// beziehungsweise `.eds` des Eintrags und seine Quittung. Die Bytes kommen
+/// aus dem Object Store — diese Zeile ist eine Adresse und keine Aussage.
+///
+/// `sequence` ist zugleich die Blaetterposition: sie ist je Kette eindeutig
+/// (`entries UNIQUE (chain_id, sequence_number)`) und steigt streng. Eine
+/// zweite Zaehlspalte daneben waere eine zweite Ordnung fuer dieselbe Kette.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct EntryIndexEntryV1 {
+    pub sequence: ChainSequence,
+    pub entry_hash: EntryHash,
+    /// Die Adresse des Eintragsobjekts. Ob `.eip` oder `.eds`, sagt der
+    /// Objektindex — nicht diese Zeile.
+    pub entry_object_hash: ObjectHash,
+    pub receipt_object_hash: ObjectHash,
+    /// Der Registrierungskopf, den DIESER Eintrag gebunden hat. Er ist das
+    /// Trust-Objekt, das der Lesestapel mitliefert: ohne es kann der Empfaenger
+    /// Gate `registry` aus `design.md` §14.1 gar nicht laufen lassen.
+    pub registry_head_hash: ObjectHash,
+}
+
+impl fmt::Debug for EntryIndexEntryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "EntryIndexEntryV1(sequence={})",
+            self.sequence.get()
+        )
+    }
+}
+
+/// Ein Satz des Grant-Index eines Eintrags.
+///
+/// `expires_at` ist `None` fuer jeden initialen Grant und `Some` fuer einen
+/// historischen: `design.md` §16.2 bindet dessen Nutzungsfrist an die
+/// `expiresAt` seiner Mehr-Augen-Authorization, und die Auslieferung prueft
+/// sie ERNEUT (`design.md` §13.3: „abgelaufene Grants werden weder angenommen
+/// noch ausgeliefert“).
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct GrantIndexEntryV1 {
+    pub object_hash: ObjectHash,
+    pub expires_at: Option<UnixMillis>,
+}
+
+impl fmt::Debug for GrantIndexEntryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GrantIndexEntryV1(<bound>)")
+    }
+}
+
+/// Ein Satz des Exportstroms: Blaetterposition und das indizierte Objekt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ExportIndexEntryV1 {
+    pub technical_index: u64,
+    pub object: IndexedObjectV1,
+}
+
+impl fmt::Debug for ExportIndexEntryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "ExportIndexEntryV1(index={})",
+            self.technical_index
+        )
+    }
+}
+
+/// Ein historischer Grant, wie er in die Ablage geht.
+///
+/// Es gibt hier kein Feld fuer den Klartext eines Eintrags und keins fuer den
+/// Empfaenger als Person: `recipient_key_thumbprint` ist ein Schluesselabdruck
+/// und sonst nichts.
+#[derive(Clone, Eq, PartialEq)]
+pub struct HistoricalGrantCommandV1 {
+    pub organization_id: OrganizationId,
+    pub entry_hash: EntryHash,
+    pub object: IndexedObjectV1,
+    pub recipient_key_thumbprint: KeyThumbprint,
+    /// Die `expiresAt` der Mehr-Augen-Authorization. PFLICHT: ein historischer
+    /// Grant ohne Frist gaebe es nach `design.md` §16.2 nicht.
+    pub expires_at: UnixMillis,
+    pub stored_at: UnixMillis,
+}
+
+impl fmt::Debug for HistoricalGrantCommandV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HistoricalGrantCommandV1(<bound>)")
+    }
+}
+
+/// Ein Reader-Acknowledgement, wie es append-only abgelegt wird.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ReaderAckCommandV1 {
+    pub organization_id: OrganizationId,
+    pub reader_certificate_hash: ea_types::CertificateHash,
+    pub entry_hash: EntryHash,
+    /// SHA-256 ueber die exakten `reader-ack-v1`-Bytes. Der Rahmen ist ein
+    /// PROTOKOLLKOERPER und kein Archivobjekt; er liegt deshalb nicht unter
+    /// `<type>/<hex objectHash>` im Object Store, und diese Spalte ist seine
+    /// einzige Adresse.
+    pub ack_object_hash: ObjectHash,
+    pub acknowledged_at: UnixMillis,
+}
+
+impl fmt::Debug for ReaderAckCommandV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReaderAckCommandV1(<bound>)")
+    }
+}
+
+/// Wie eine append-only Ablage auf einen wiederholten Satz antwortet.
+///
+/// DREI Ausgaenge: aufgenommen, byteweise derselbe Satz lag schon vor, oder
+/// unter derselben Kennung liegt ein ANDERER. Der dritte wird nicht repariert.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppendOutcome {
+    Recorded,
+    AlreadyRecorded,
+    Conflict,
+}
+
+/// Ein angenommener Vernichtungsvorgang, wie er in die Ablage geht.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DestructionRequestCommandV1 {
+    pub organization_id: OrganizationId,
+    pub destruction_id: ea_types::DestructionId,
+    pub authorization: IndexedObjectV1,
+    /// Die Ziele in der Ordnung der Authorization. Die Zielidentitaet ist der
+    /// `entryHash`; `chain_sequence` ist ausschliesslich der Cross-Check.
+    pub targets: Vec<(EntryHash, u64)>,
+    pub requested_at: UnixMillis,
+}
+
+impl fmt::Debug for DestructionRequestCommandV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "DestructionRequestCommandV1({} targets)",
+            self.targets.len()
+        )
+    }
+}
+
+/// Der gespeicherte Stand eines Vernichtungsvorgangs.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DestructionStateV1 {
+    pub authorization_object_hash: ObjectHash,
+    /// Der Zustand als Zahl aus `destruction-state-v1`.
+    pub state: u8,
+    /// Die Uebergaenge in Blaetterreihenfolge — append-only.
+    pub transition_object_hashes: Vec<ObjectHash>,
+    /// Die Attestierungen in Blaetterreihenfolge — append-only.
+    pub attestation_object_hashes: Vec<ObjectHash>,
+}
+
+impl fmt::Debug for DestructionStateV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "DestructionStateV1(state={})", self.state)
+    }
+}

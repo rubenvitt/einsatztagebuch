@@ -98,11 +98,33 @@ pub const RECOVERY_KEM_SEED: [u8; 32] = [0xd3; 32];
 /// Der KEM-Schluessel eines ZWEITEN Readers, den nur einzelne Faelle aktiv
 /// schalten.
 pub const SECOND_READER_KEM_SEED: [u8; 32] = [0xd4; 32];
+/// Der Signaturschluessel der HISTORICAL GRANT AUTHORITY.
+///
+/// Sie ist die Rolle, die `design.md` §6.5 von der Recovery-Custodianschaft
+/// TRENNT: der Custodian entkapselt den historischen CEK, die Authority
+/// signiert den neuen Grant. Ihr Zertifikat traegt deshalb `historicalGrant`
+/// und keine Empfaengerschluessel.
+pub const HISTORICAL_GRANT_AUTHORITY_SEED: [u8; 32] = [0xd7; 32];
+/// Der ERSTE Key Approver. Zwei UNTERSCHIEDLICHE braucht jede
+/// Mehr-Augen-Autorisierung (`design.md` §16.2, §16.3).
+pub const APPROVER_A_SEED: [u8; 32] = [0xd8; 32];
+/// Der ZWEITE Key Approver.
+pub const APPROVER_B_SEED: [u8; 32] = [0xd9; 32];
 
 const WRITER_DEVICE_ID: [u8; 16] = [0xe1; 16];
 const READER_DEVICE_ID: [u8; 16] = [0xe2; 16];
 const RECOVERY_DEVICE_ID: [u8; 16] = [0xe3; 16];
 const SECOND_READER_DEVICE_ID: [u8; 16] = [0xe4; 16];
+const HISTORICAL_GRANT_AUTHORITY_DEVICE_ID: [u8; 16] = [0xe5; 16];
+const APPROVER_A_DEVICE_ID: [u8; 16] = [0xe6; 16];
+const APPROVER_B_DEVICE_ID: [u8; 16] = [0xe7; 16];
+/// Die pseudonyme Betreiberkennung eines Approver-Zertifikats.
+///
+/// `Some` gilt GENAU fuer die Arten 2 und 3 — Organisationsadministrator und
+/// Key Approver (`crates/ea-format/src/etb.rs`, `decode_device_core`); ohne
+/// sie entsteht das Zertifikat gar nicht erst.
+const APPROVER_A_SUBJECT_ID: [u8; 16] = [0xf1; 16];
+const APPROVER_B_SUBJECT_ID: [u8; 16] = [0xf2; 16];
 
 /// Ab dieser Kettensequenz gelten die neuen Zertifikate.
 ///
@@ -136,6 +158,10 @@ pub struct ExtendedClosure {
     pub recovery_certificate_hash: CertificateHash,
     /// Nur gesetzt, wenn der Abschluss den zweiten Reader traegt.
     pub second_reader_certificate_hash: Option<CertificateHash>,
+    /// Nur gesetzt, wenn der Abschluss die Grant- und Vernichtungsrollen
+    /// traegt: Historical Grant Authority und zwei Key Approver.
+    pub historical_grant_authority_certificate_hash: Option<CertificateHash>,
+    pub approver_certificate_hashes: Option<[CertificateHash; 2]>,
     /// Der Kopf, den ein Commit binden muss.
     pub registry_version: RegistryVersion,
     pub registry_head_hash: ObjectHash,
@@ -329,6 +355,7 @@ fn exact_object(payload: TrustPayloadV1, signatures: Vec<Vec<u8>>) -> Vec<u8> {
 }
 
 /// Die Felder eines Geraetezertifikats dieses Moduls.
+#[allow(clippy::too_many_arguments)]
 fn device_fields(
     context: &FrozenContext,
     device: [u8; 16],
@@ -337,6 +364,7 @@ fn device_fields(
     kem_seed: Option<[u8; 32]>,
     capabilities: Vec<CertificateCapability>,
     effective_from: u64,
+    authority_subject_id: Option<[u8; 16]>,
 ) -> DeviceCertificateFieldsV1 {
     DeviceCertificateFieldsV1 {
         organization_id: context.organization_id,
@@ -358,7 +386,8 @@ fn device_fields(
         // `Some` gilt GENAU fuer die Arten 2 und 3 — Organisationsadministrator
         // und Key Approver (`crates/ea-format/src/etb.rs`, `decode_device_core`).
         // Writer, Reader und Recovery-Empfaenger tragen keine.
-        authority_subject_id: None,
+        authority_subject_id: authority_subject_id
+            .map(|id| ea_types::SubjectId::try_from(&id[..]).expect("16 bytes")),
     }
 }
 
@@ -495,10 +524,32 @@ fn certificate_transition(
 /// fehlschlaegt. Beides waere ein Fehler dieser Kulisse, kein Laufzeitzustand.
 #[must_use]
 pub fn build(with_second_reader: bool) -> ExtendedClosure {
+    build_with(with_second_reader, false)
+}
+
+/// Derselbe Abschluss, aber mit den Rollen des historischen Re-Grants und der
+/// kontrollierten Vernichtung.
+///
+/// `with_grant_authorities` haengt DREI weitere Uebergaenge an: eine Historical
+/// Grant Authority mit `historicalGrant` und ZWEI Key Approver mit
+/// `historicalGrantApprove` und `destructionApprove`. Zwei und nicht einer,
+/// weil eine Mehr-Augen-Autorisierung sonst gar nicht baubar waere — und genau
+/// das ist die Aussage, die diese Endpunkte pruefen.
+///
+/// Die eingefrorenen Vektoren unter `vectors/trust/v1/` tragen keine dieser
+/// Rollen (ihr Erzeuger vergibt ausschliesslich `organizationAdminApprove`),
+/// und `vectors/` wie `crates/ea-testkit` bleiben unangetastet. Der Abschluss
+/// wird deshalb FORTGESCHRIEBEN, nicht ersetzt.
+///
+/// # Panics
+///
+/// Wie [`build`].
+#[must_use]
+pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> ExtendedClosure {
     let context = frozen_context();
 
     // Jeder Zwischenkopf deckt genau EINE Sequenz; der letzte deckt den Rest.
-    let count = if with_second_reader { 4 } else { 3 };
+    let count = 3 + usize::from(with_second_reader) + if with_grant_authorities { 3 } else { 0 };
     let lease_of = |index: usize| {
         let from = LEASE_FROM_SEQUENCE + index as u64;
         let through = if index + 1 == count {
@@ -519,6 +570,7 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
             None,
             vec![CertificateCapability::InitialGrant],
             lease_of(0).0,
+            None,
         ),
         2,
         context.head_two_hash,
@@ -541,6 +593,7 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
             Some(READER_KEM_SEED),
             Vec::new(),
             lease_of(1).0,
+            None,
         ),
         3,
         writer.head_hash,
@@ -563,6 +616,7 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
             Some(RECOVERY_KEM_SEED),
             Vec::new(),
             lease_of(2).0,
+            None,
         ),
         4,
         reader.head_hash,
@@ -583,6 +637,9 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
     let mut registry_version = 5;
     let mut registry_head_hash = recovery.head_hash;
     let mut second_reader = None;
+    let mut next_lease = 3;
+    let mut historical_grant_authority = None;
+    let mut approvers = None;
 
     if with_second_reader {
         let second = certificate_transition(
@@ -595,6 +652,7 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
                 Some(SECOND_READER_KEM_SEED),
                 Vec::new(),
                 lease_of(3).0,
+                None,
             ),
             5,
             recovery.head_hash,
@@ -611,6 +669,102 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
         registry_version = 6;
         registry_head_hash = second.head_hash;
         second_reader = Some(second.certificate_hash);
+        next_lease = 4;
+    }
+
+    if with_grant_authorities {
+        let authority = certificate_transition(
+            &context,
+            device_fields(
+                &context,
+                HISTORICAL_GRANT_AUTHORITY_DEVICE_ID,
+                CertificateKindV1::HistoricalGrantAuthority,
+                Some(HISTORICAL_GRANT_AUTHORITY_SEED),
+                None,
+                vec![CertificateCapability::HistoricalGrant],
+                lease_of(next_lease).0,
+                None,
+            ),
+            registry_version,
+            registry_head_hash,
+            lease_of(next_lease),
+            0x40,
+            [
+                "historical-grant-authority-certificate-authorization",
+                "historical-grant-authority-certificate",
+                "historical-grant-authority-head-authorization",
+                "historical-grant-authority-head-event",
+            ],
+        );
+        objects.extend(authority.objects);
+        registry_version += 1;
+        registry_head_hash = authority.head_hash;
+        historical_grant_authority = Some(authority.certificate_hash);
+
+        // Beide Approver tragen BEIDE Capabilities: derselbe Ausschuss
+        // autorisiert einen historischen Re-Grant und eine Vernichtung, und
+        // eine zweite Personenmenge dafuer waere eine Erfindung dieser
+        // Kulisse.
+        let mut approver_hashes = Vec::with_capacity(2);
+        for (index, (device, subject, seed, names)) in [
+            (
+                APPROVER_A_DEVICE_ID,
+                APPROVER_A_SUBJECT_ID,
+                APPROVER_A_SEED,
+                [
+                    "approver-a-certificate-authorization",
+                    "approver-a-certificate",
+                    "approver-a-head-authorization",
+                    "approver-a-head-event",
+                ],
+            ),
+            (
+                APPROVER_B_DEVICE_ID,
+                APPROVER_B_SUBJECT_ID,
+                APPROVER_B_SEED,
+                [
+                    "approver-b-certificate-authorization",
+                    "approver-b-certificate",
+                    "approver-b-head-authorization",
+                    "approver-b-head-event",
+                ],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let lease_index = next_lease + 1 + index;
+            let approver = certificate_transition(
+                &context,
+                device_fields(
+                    &context,
+                    device,
+                    CertificateKindV1::KeyApprover,
+                    Some(seed),
+                    None,
+                    // Die Reihenfolge ist die des WIRE-Literals und keine
+                    // Geschmacksfrage: `ea-format` verlangt eine sortierte
+                    // Capability-Liste, und `destructionApprove` steht vor
+                    // `historicalGrantApprove`.
+                    vec![
+                        CertificateCapability::DestructionApprove,
+                        CertificateCapability::HistoricalGrantApprove,
+                    ],
+                    lease_of(lease_index).0,
+                    Some(subject),
+                ),
+                registry_version,
+                registry_head_hash,
+                lease_of(lease_index),
+                0x44_u8.wrapping_add(u8::try_from(index * 4).expect("two approvers")),
+                names,
+            );
+            objects.extend(approver.objects);
+            registry_version += 1;
+            registry_head_hash = approver.head_hash;
+            approver_hashes.push(approver.certificate_hash);
+        }
+        approvers = Some([approver_hashes[0], approver_hashes[1]]);
     }
 
     ExtendedClosure {
@@ -620,6 +774,8 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
         reader_certificate_hash: reader.certificate_hash,
         recovery_certificate_hash: recovery.certificate_hash,
         second_reader_certificate_hash: second_reader,
+        historical_grant_authority_certificate_hash: historical_grant_authority,
+        approver_certificate_hashes: approvers,
         registry_version: RegistryVersion::new(registry_version),
         registry_head_hash,
         objects,

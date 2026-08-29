@@ -335,3 +335,221 @@ pub const fn organization_of(closure: &ExtendedClosure) -> OrganizationId {
 pub const fn registry_version_of(closure: &ExtendedClosure) -> RegistryVersion {
     closure.registry_version
 }
+
+// ---------------------------------------------------------------------------
+// Historischer Re-Grant und kontrollierte Vernichtung
+// ---------------------------------------------------------------------------
+//
+// Die drei Bauer unten sind so echt wie alles darueber: `grantAuthorization`
+// und `destructionAuthorization` entstehen ueber die eingefrorenen
+// `TrustPayloadV1`-Konstruktoren und werden von ZWEI verschiedenen
+// Approver-Schluesseln ueber `sign_historical_grant_approval_digest`
+// beziehungsweise `sign_destruction_approval_digest` unterschrieben — also
+// ueber genau die Kante, die der Server anschliessend prueft. Eine Attrappe
+// gaebe es hier nicht zu bauen: `ea-crypto` leitet den Digest selbst aus dem
+// Nutzinhalt ab und weist eine Abweichung ab.
+
+use ea_format::{
+    DestructionAuthorizationFieldsV1, DestructionTargetV1, GrantAuthorizationFieldsV1,
+    TrustObjectV1, TrustPayloadV1, encode_trust,
+};
+use ea_types::{AuthorizationId, DestructionId, KeyThumbprint, ObjectHash};
+
+/// Die Sequenz, unter der eine Mehr-Augen-Autorisierung ihre Approver
+/// aufloest.
+///
+/// Dieselbe wie die des committeten Eintrags: die Approver-Zertifikate sind
+/// genau dort aktiv, und eine andere Sequenz waehlte einen Kopf, der sie noch
+/// nicht kennt.
+#[must_use]
+pub const fn authorization_sequence() -> u64 {
+    ExtendedClosure::commit_sequence()
+}
+
+fn signer_of(seed: [u8; 32]) -> CoseSigner {
+    CoseSigner::from_secret(SecretBytes::new(seed))
+}
+
+/// Der Abdruck eines deklarierten Signaturschluessels.
+#[must_use]
+pub fn signing_thumbprint(seed: [u8; 32]) -> KeyThumbprint {
+    signer_of(seed)
+        .public_key()
+        .expect("a declared Ed25519 seed loads")
+        .thumbprint()
+}
+
+/// Die beiden Approver eines Abschlusses — Zertifikat und Schluessel.
+///
+/// # Panics
+///
+/// Wenn der Abschluss ohne die Grant- und Vernichtungsrollen gebaut wurde.
+#[must_use]
+pub fn approvers(closure: &ExtendedClosure) -> [(CertificateHash, [u8; 32]); 2] {
+    let hashes = closure
+        .approver_certificate_hashes
+        .expect("this closure carries two key approvers");
+    [
+        (hashes[0], trust_closure::APPROVER_A_SEED),
+        (hashes[1], trust_closure::APPROVER_B_SEED),
+    ]
+}
+
+/// Eine `grantAuthorization` ueber genau diesen Eintrag und diesen Empfaenger.
+///
+/// `signers` sind die Approver, die unterschreiben. ZWEI verschiedene sind der
+/// Normalfall; derselbe zweimal ist der Fall, den der Server abweisen MUSS.
+///
+/// # Panics
+///
+/// Wenn ein Konstruktor oder eine Signatur fehlschlaegt — beides waere ein
+/// Fehler dieser Kulisse.
+#[must_use]
+pub fn grant_authorization(
+    closure: &ExtendedClosure,
+    entry_hashes: Vec<EntryHash>,
+    recipient: Recipient,
+    expires_at: i64,
+    marker: u8,
+    signers: &[(CertificateHash, [u8; 32])],
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::grant_authorization(GrantAuthorizationFieldsV1 {
+        authorization_id: AuthorizationId::try_from([marker; 16].as_slice()).expect("16 bytes"),
+        organization_id: closure.organization_id,
+        registry_version: closure.registry_version,
+        registry_head_hash: Hash32::try_from(closure.registry_head_hash.as_bytes().as_slice())
+            .expect("a registry head hash is 32 bytes"),
+        authorization_sequence: authorization_sequence(),
+        entry_hashes,
+        recipient_key_thumbprint: trust_closure::kem_key(recipient.kem_seed).thumbprint(),
+        recipient_certificate_hash: recipient.certificate_hash,
+        expires_at: UnixMillis::new(expires_at),
+    })
+    .expect("the grant authorization payload is well formed");
+    let signatures = signers
+        .iter()
+        .map(|(certificate_hash, seed)| {
+            signer_of(*seed)
+                .sign_historical_grant_approval_digest(
+                    *certificate_hash,
+                    payload.exact_digest_input(),
+                )
+                .expect("signing the grant approval must succeed")
+        })
+        .collect();
+    encode_trust(&TrustObjectV1::new(payload, signatures).expect("the trust object is well formed"))
+        .expect("encoding a well formed trust object cannot fail")
+        .into_vec()
+}
+
+/// Eine `destructionAuthorization` ueber genau diese Ziele.
+///
+/// # Panics
+///
+/// Wie [`grant_authorization`].
+#[must_use]
+pub fn destruction_authorization(
+    closure: &ExtendedClosure,
+    targets: Vec<(EntryHash, u64)>,
+    marker: u8,
+    signers: &[(CertificateHash, [u8; 32])],
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::destruction_authorization(DestructionAuthorizationFieldsV1 {
+        destruction_id: DestructionId::try_from([marker; 16].as_slice()).expect("16 bytes"),
+        organization_id: closure.organization_id,
+        registry_version: closure.registry_version,
+        registry_head_hash: Hash32::try_from(closure.registry_head_hash.as_bytes().as_slice())
+            .expect("a registry head hash is 32 bytes"),
+        authorization_sequence: authorization_sequence(),
+        targets: targets
+            .into_iter()
+            .map(|(entry_hash, sequence)| {
+                DestructionTargetV1::new(*entry_hash.as_bytes(), sequence)
+            })
+            .collect(),
+        scope_code: 0,
+        legal_reason_code: 0,
+    })
+    .expect("the destruction authorization payload is well formed");
+    let signatures = signers
+        .iter()
+        .map(|(certificate_hash, seed)| {
+            signer_of(*seed)
+                .sign_destruction_approval_digest(*certificate_hash, payload.exact_digest_input())
+                .expect("signing the destruction approval must succeed")
+        })
+        .collect();
+    encode_trust(&TrustObjectV1::new(payload, signatures).expect("the trust object is well formed"))
+        .expect("encoding a well formed trust object cannot fail")
+        .into_vec()
+}
+
+/// Die Kennung, die eine `destructionAuthorization` dieses Markers traegt.
+#[must_use]
+pub fn destruction_id_of(marker: u8) -> DestructionId {
+    DestructionId::try_from([marker; 16].as_slice()).expect("16 bytes")
+}
+
+/// Die exakten `.eag`-Bytes eines echten HISTORISCHEN Grants.
+///
+/// Er bindet Eintrag, Empfaengerzertifikat, den urspruenglichen
+/// Recovery-Grant, die Authorization und die aktuelle Registrierung —
+/// `design.md` §16.2 zaehlt genau diese fuenf auf.
+///
+/// # Panics
+///
+/// Wenn Rumpf, Signatur oder Kodierung fehlschlagen.
+#[must_use]
+pub fn historical_grant_bytes(
+    closure: &ExtendedClosure,
+    entry_hash: EntryHash,
+    recipient: Recipient,
+    original_recovery_grant_object_hash: ObjectHash,
+    grant_authorization_object_hash: ObjectHash,
+) -> Vec<u8> {
+    let authority = closure
+        .historical_grant_authority_certificate_hash
+        .expect("this closure carries a historical grant authority");
+    let body = GrantBodyV1::new(GrantBodyFieldsV1 {
+        organization_id: closure.organization_id,
+        chain_id: closure.chain_id,
+        entry_hash,
+        kind: GrantKindV1::Historical,
+        purpose: recipient.purpose,
+        recipient_key_thumbprint: trust_closure::kem_key(recipient.kem_seed).thumbprint(),
+        recipient_certificate_hash: recipient.certificate_hash,
+        issuer_key_thumbprint: signing_thumbprint(trust_closure::HISTORICAL_GRANT_AUTHORITY_SEED),
+        issuer_certificate_hash: authority,
+        registry_version: closure.registry_version,
+        registry_head_hash: Hash32::try_from(closure.registry_head_hash.as_bytes().as_slice())
+            .expect("a registry head hash is 32 bytes"),
+        created_at_device: UnixMillis::new(100),
+        original_recovery_grant_object_hash: Some(original_recovery_grant_object_hash),
+        grant_authorization_object_hash: Some(grant_authorization_object_hash),
+        encapsulated_key: [0xa7; ea_crypto::HPKE_ENCAPSULATED_KEY_SIZE],
+        wrapped_cek: [0xa8; ea_crypto::HPKE_WRAPPED_CEK_SIZE],
+    })
+    .expect("the fixture historical grant body is well formed");
+    let signature = signer_of(trust_closure::HISTORICAL_GRANT_AUTHORITY_SEED)
+        .sign_historical_grant(body.exact_bytes())
+        .expect("signing the fixture historical grant must succeed");
+    let grant = GrantV1::new(body, signature).expect("the fixture historical grant is well formed");
+    encode_grant(&grant)
+        .expect("encoding the fixture grant cannot fail")
+        .into_vec()
+}
+
+/// Der Pfad des historischen Re-Grants.
+#[must_use]
+pub fn historical_grant_path(entry_hash: EntryHash) -> String {
+    format!(
+        "/v1/entries/{}/historical-grants",
+        hex::encode(entry_hash.as_bytes())
+    )
+}
+
+/// Der Pfad der Grantliste.
+#[must_use]
+pub fn entry_grants_path(entry_hash: EntryHash) -> String {
+    format!("/v1/entries/{}/grants", hex::encode(entry_hash.as_bytes()))
+}

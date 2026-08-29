@@ -1823,6 +1823,17 @@ impl ObjectTypeDirectory for FakeObjectTypes {
             .get(hash.as_bytes().as_slice())
             .copied())
     }
+
+    /// Die Reconciliation fragt organisationsfrei; diese Attrappe kennt keine
+    /// Organisation und beantwortet die organisationsgebundene Frage deshalb
+    /// nicht — sie wird auf diesem Pfad auch nie gestellt.
+    async fn indexed_object(
+        &self,
+        _organization_id: ea_types::OrganizationId,
+        _hash: ObjectHash,
+    ) -> Result<Option<ea_sync_server::IndexedObjectV1>, RepositoryError> {
+        Ok(None)
+    }
 }
 
 /// Ein Objekt, dessen Bytes tragen und das eine Commit-Referenz nennt, wird

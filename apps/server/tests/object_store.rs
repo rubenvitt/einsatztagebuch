@@ -49,6 +49,16 @@ impl ObjectTypeDirectory for FixedDirectory {
     ) -> Result<Option<ObjectTypeV1>, RepositoryError> {
         Ok(Some(self.0))
     }
+
+    /// Die organisationsgebundene Frage stellt nur der Leseweg, und dieses
+    /// Ziel prueft den Object Store.
+    async fn indexed_object(
+        &self,
+        _organization_id: ea_types::OrganizationId,
+        _hash: ObjectHash,
+    ) -> Result<Option<ea_sync_server::IndexedObjectV1>, RepositoryError> {
+        Ok(None)
+    }
 }
 
 async fn object_store_client() -> Client {

@@ -14,9 +14,12 @@
 use async_trait::async_trait;
 use ea_format::ObjectTypeV1;
 use ea_sync_server::{
-    ChainHeadStateV1, CheckpointDirectory, CheckpointIndexEntryV1, CommitDbCommand,
-    CommitRepository, CommittedDbState, ObjectTypeDirectory, RepositoryError, SecurityEventSink,
-    SecurityEventV1,
+    AppendOutcome, ArchiveExportDirectory, ChainHeadStateV1, CheckpointDirectory,
+    CheckpointIndexEntryV1, CommitDbCommand, CommitRepository, CommittedDbState,
+    DestructionRequestCommandV1, DestructionStateV1, DestructionStore, EntryDirectory,
+    EntryIndexEntryV1, ExportIndexEntryV1, GrantIndexEntryV1, HistoricalGrantCommandV1,
+    HistoricalGrantStore, IndexedObjectV1, ObjectTypeDirectory, ReaderAckCommandV1, ReaderAckStore,
+    RepositoryError, SecurityEventSink, SecurityEventV1,
 };
 use ea_types::{ChainSequence, EntryHash, ObjectHash, UnixMillis};
 use sqlx::{PgPool, Row};
@@ -536,19 +539,15 @@ impl ObjectTypeDirectory for PostgresRepository {
         let Some(row) = row else {
             return Ok(None);
         };
-        let code: i16 = row.get("object_type_code");
-        // Die Zuordnung laeuft ueber die geschlossene Menge von `ea-format`;
-        // ein Wert ausserhalb 1..6 kann die Spaltenpruefung gar nicht passiert
-        // haben und ist deshalb ein Ausfall, keine Objektart.
-        Ok(Some(match code {
-            1 => ObjectTypeV1::Entry,
-            2 => ObjectTypeV1::Grant,
-            3 => ObjectTypeV1::Receipt,
-            4 => ObjectTypeV1::Evidence,
-            5 => ObjectTypeV1::Trust,
-            6 => ObjectTypeV1::Destroyed,
-            _ => return Err(RepositoryError::Unavailable),
-        }))
+        object_type_of_code(row.get("object_type_code")).map(Some)
+    }
+
+    async fn indexed_object(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        hash: ObjectHash,
+    ) -> Result<Option<IndexedObjectV1>, RepositoryError> {
+        self.indexed_object_row(organization_id, hash).await
     }
 }
 
@@ -582,5 +581,523 @@ impl PostgresRepository {
         } else {
             Err(RepositoryError::RequestIdReplay)
         }
+    }
+}
+
+/// Die Aufloesung eines Hashes INNERHALB einer Organisation.
+///
+/// Sie steht neben [`ObjectTypeDirectory::object_type_of`] und nicht an deren
+/// Stelle: jene geht den eigenen Bestand durch und darf deshalb
+/// organisationsfrei fragen, diese beantwortet eine LESEANFRAGE und darf es
+/// nicht.
+impl PostgresRepository {
+    async fn indexed_object_row(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        hash: ObjectHash,
+    ) -> Result<Option<IndexedObjectV1>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT object_type_code, size_bytes FROM object_index \
+             WHERE object_hash = $1 AND organization_id = $2",
+        )
+        .bind(&hash.as_bytes()[..])
+        .bind(&organization_id.as_bytes()[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let size: i64 = row.get("size_bytes");
+        Ok(Some(IndexedObjectV1 {
+            kind: object_type_of_code(row.get("object_type_code"))?,
+            object_hash: hash,
+            size_bytes: u64::try_from(size).map_err(|_| RepositoryError::Unavailable)?,
+        }))
+    }
+}
+
+/// Die Zuordnung Code zu Objektart, EINMAL.
+///
+/// Sie laeuft ueber die geschlossene Menge von `ea-format`; ein Wert
+/// ausserhalb 1..6 kann die Spaltenpruefung gar nicht passiert haben und ist
+/// deshalb ein Ausfall, keine Objektart.
+const fn object_type_of_code(code: i16) -> Result<ObjectTypeV1, RepositoryError> {
+    Ok(match code {
+        1 => ObjectTypeV1::Entry,
+        2 => ObjectTypeV1::Grant,
+        3 => ObjectTypeV1::Receipt,
+        4 => ObjectTypeV1::Evidence,
+        5 => ObjectTypeV1::Trust,
+        6 => ObjectTypeV1::Destroyed,
+        _ => return Err(RepositoryError::Unavailable),
+    })
+}
+
+fn object_hash_of(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<ObjectHash, RepositoryError> {
+    let bytes: Vec<u8> = row.get(column);
+    ObjectHash::try_from(bytes.as_slice()).map_err(|_| RepositoryError::Unavailable)
+}
+
+fn entry_index_entry(row: &sqlx::postgres::PgRow) -> Result<EntryIndexEntryV1, RepositoryError> {
+    let sequence: i64 = row.get("sequence_number");
+    let entry_hash: Vec<u8> = row.get("entry_hash");
+    Ok(EntryIndexEntryV1 {
+        sequence: ChainSequence::new(
+            u64::try_from(sequence).map_err(|_| RepositoryError::Unavailable)?,
+        ),
+        entry_hash: EntryHash::try_from(entry_hash.as_slice())
+            .map_err(|_| RepositoryError::Unavailable)?,
+        entry_object_hash: object_hash_of(row, "entry_object_hash")?,
+        receipt_object_hash: object_hash_of(row, "receipt_object_hash")?,
+        registry_head_hash: object_hash_of(row, "registry_head_hash")?,
+    })
+}
+
+/// Die Spalten, die ein Satz des Eintragsindex braucht — EINMAL geschrieben,
+/// damit die vier Abfragen darunter nicht auseinanderlaufen.
+const ENTRY_INDEX_COLUMNS: &str = "sequence_number, entry_hash, entry_object_hash, \
+                                   receipt_object_hash, registry_head_hash";
+
+#[async_trait]
+impl EntryDirectory for PostgresRepository {
+    async fn entry_at(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+        sequence: ChainSequence,
+    ) -> Result<Option<EntryIndexEntryV1>, RepositoryError> {
+        let statement = format!(
+            "SELECT {ENTRY_INDEX_COLUMNS} FROM entries \
+             WHERE organization_id = $1 AND chain_id = $2 AND sequence_number = $3"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(statement))
+            .bind(&organization_id.as_bytes()[..])
+            .bind(&chain_id.as_bytes()[..])
+            .bind(i64::try_from(sequence.get()).map_err(|_| RepositoryError::Unavailable)?)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        row.as_ref().map(entry_index_entry).transpose()
+    }
+
+    async fn entry_of(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        entry_hash: EntryHash,
+    ) -> Result<Option<EntryIndexEntryV1>, RepositoryError> {
+        let statement = format!(
+            "SELECT {ENTRY_INDEX_COLUMNS} FROM entries \
+             WHERE organization_id = $1 AND entry_hash = $2"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(statement))
+            .bind(&organization_id.as_bytes()[..])
+            .bind(&entry_hash.as_bytes()[..])
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        row.as_ref().map(entry_index_entry).transpose()
+    }
+
+    async fn entries_after(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+        after_sequence: ChainSequence,
+        limit: usize,
+    ) -> Result<Vec<EntryIndexEntryV1>, RepositoryError> {
+        let statement = format!(
+            "SELECT {ENTRY_INDEX_COLUMNS} FROM entries \
+             WHERE organization_id = $1 AND chain_id = $2 AND sequence_number > $3 \
+             ORDER BY sequence_number LIMIT $4"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(statement))
+            .bind(&organization_id.as_bytes()[..])
+            .bind(&chain_id.as_bytes()[..])
+            .bind(i64::try_from(after_sequence.get()).map_err(|_| RepositoryError::Unavailable)?)
+            .bind(i64::try_from(limit).map_err(|_| RepositoryError::Unavailable)?)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        rows.iter().map(entry_index_entry).collect()
+    }
+
+    async fn chain_head(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<ChainHeadStateV1>, RepositoryError> {
+        CommitRepository::head_state(self, organization_id, chain_id).await
+    }
+
+    async fn grants_of(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        entry_hash: EntryHash,
+    ) -> Result<Vec<GrantIndexEntryV1>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT object_hash, expires_at_millis FROM grants \
+             WHERE organization_id = $1 AND entry_hash = $2 ORDER BY object_hash",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&entry_hash.as_bytes()[..])
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        rows.iter()
+            .map(|row| {
+                let expires: Option<i64> = row.get("expires_at_millis");
+                Ok(GrantIndexEntryV1 {
+                    object_hash: object_hash_of(row, "object_hash")?,
+                    expires_at: expires.map(UnixMillis::new),
+                })
+            })
+            .collect()
+    }
+
+    async fn checkpoint_covering(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+        covered_sequence: ChainSequence,
+    ) -> Result<Option<ObjectHash>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT object_hash FROM checkpoints \
+             WHERE organization_id = $1 AND chain_id = $2 AND covered_sequence = $3",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&chain_id.as_bytes()[..])
+        .bind(i64::try_from(covered_sequence.get()).map_err(|_| RepositoryError::Unavailable)?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        row.as_ref()
+            .map(|row| object_hash_of(row, "object_hash"))
+            .transpose()
+    }
+}
+
+#[async_trait]
+impl ArchiveExportDirectory for PostgresRepository {
+    async fn objects_after(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        after_technical_index: u64,
+        limit: usize,
+    ) -> Result<Vec<ExportIndexEntryV1>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT object_hash, object_type_code, size_bytes, technical_index FROM object_index \
+             WHERE organization_id = $1 AND technical_index > $2 \
+             ORDER BY technical_index LIMIT $3",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(i64::try_from(after_technical_index).map_err(|_| RepositoryError::Unavailable)?)
+        .bind(i64::try_from(limit).map_err(|_| RepositoryError::Unavailable)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        rows.iter()
+            .map(|row| {
+                let index: i64 = row.get("technical_index");
+                let size: i64 = row.get("size_bytes");
+                Ok(ExportIndexEntryV1 {
+                    technical_index: u64::try_from(index)
+                        .map_err(|_| RepositoryError::Unavailable)?,
+                    object: IndexedObjectV1 {
+                        kind: object_type_of_code(row.get("object_type_code"))?,
+                        object_hash: object_hash_of(row, "object_hash")?,
+                        size_bytes: u64::try_from(size)
+                            .map_err(|_| RepositoryError::Unavailable)?,
+                    },
+                })
+            })
+            .collect()
+    }
+}
+
+/// Der historische Grant. Er beruehrt AUSSCHLIESSLICH `object_index` und
+/// `grants` — kein `entries`, kein `chain_heads`, kein `receipts`.
+///
+/// `ON CONFLICT DO NOTHING` plus Rueckvergleich statt `DO UPDATE`: derselbe
+/// Grant zweimal ist der zulaessige idempotente Fall, derselbe `objectHash`
+/// mit anderer Zuordnung ein Widerspruch — und ein Widerspruch wird nicht
+/// repariert.
+#[async_trait]
+impl HistoricalGrantStore for PostgresRepository {
+    async fn record_historical_grant(
+        &self,
+        command: HistoricalGrantCommandV1,
+    ) -> Result<AppendOutcome, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(|e| unavailable(&e))?;
+        sqlx::query(
+            "INSERT INTO object_index (object_hash, organization_id, object_type_code, \
+             size_bytes, stored_at_millis) VALUES ($1, $2, 2, $3, $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(&command.object.object_hash.as_bytes()[..])
+        .bind(&command.organization_id.as_bytes()[..])
+        .bind(i64::try_from(command.object.size_bytes).map_err(|_| RepositoryError::Unavailable)?)
+        .bind(command.stored_at.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?;
+
+        let inserted = sqlx::query(
+            "INSERT INTO grants (object_hash, organization_id, entry_hash, \
+             recipient_key_thumbprint, grant_kind_code, expires_at_millis) \
+             VALUES ($1, $2, $3, $4, 'historical', $5) ON CONFLICT DO NOTHING",
+        )
+        .bind(&command.object.object_hash.as_bytes()[..])
+        .bind(&command.organization_id.as_bytes()[..])
+        .bind(&command.entry_hash.as_bytes()[..])
+        .bind(&command.recipient_key_thumbprint.as_bytes()[..])
+        .bind(command.expires_at.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?
+        .rows_affected();
+
+        let outcome = if inserted == 1 {
+            AppendOutcome::Recorded
+        } else {
+            // Es lag schon eine Zeile da. Ob sie DIESELBE ist, entscheidet der
+            // Rueckvergleich und nicht die Annahme des Aufrufers.
+            let row = sqlx::query(
+                "SELECT entry_hash, expires_at_millis FROM grants WHERE object_hash = $1",
+            )
+            .bind(&command.object.object_hash.as_bytes()[..])
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|e| unavailable(&e))?;
+            match row {
+                Some(row) => {
+                    let entry: Vec<u8> = row.get("entry_hash");
+                    let expires: Option<i64> = row.get("expires_at_millis");
+                    if entry == command.entry_hash.as_bytes()
+                        && expires == Some(command.expires_at.get())
+                    {
+                        AppendOutcome::AlreadyRecorded
+                    } else {
+                        AppendOutcome::Conflict
+                    }
+                }
+                None => AppendOutcome::Conflict,
+            }
+        };
+        transaction.commit().await.map_err(|e| unavailable(&e))?;
+        Ok(outcome)
+    }
+}
+
+/// Die Lesequittung, APPEND-ONLY.
+///
+/// Der Primaerschluessel schliesst `ack_object_hash` ein: zwei Quittungen
+/// desselben Lesers zu verschiedenen Kettenstaenden sind zwei Saetze und kein
+/// Ueberschreiben. Der eindeutige Zwang auf `ack_object_hash` faengt dieselbe
+/// Quittung zweimal ab.
+#[async_trait]
+impl ReaderAckStore for PostgresRepository {
+    async fn record_reader_ack(
+        &self,
+        command: ReaderAckCommandV1,
+    ) -> Result<AppendOutcome, RepositoryError> {
+        let inserted = sqlx::query(
+            "INSERT INTO reader_acknowledgements (organization_id, reader_certificate_hash, \
+             entry_hash, ack_object_hash, acknowledged_at_millis) VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&command.organization_id.as_bytes()[..])
+        .bind(&command.reader_certificate_hash.as_bytes()[..])
+        .bind(&command.entry_hash.as_bytes()[..])
+        .bind(&command.ack_object_hash.as_bytes()[..])
+        .bind(command.acknowledged_at.get())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?
+        .rows_affected();
+        if inserted == 1 {
+            return Ok(AppendOutcome::Recorded);
+        }
+        let row = sqlx::query(
+            "SELECT organization_id, reader_certificate_hash, entry_hash \
+             FROM reader_acknowledgements WHERE ack_object_hash = $1",
+        )
+        .bind(&command.ack_object_hash.as_bytes()[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let Some(row) = row else {
+            return Ok(AppendOutcome::Conflict);
+        };
+        let organization: Vec<u8> = row.get("organization_id");
+        let certificate: Vec<u8> = row.get("reader_certificate_hash");
+        let entry: Vec<u8> = row.get("entry_hash");
+        if organization == command.organization_id.as_bytes()
+            && certificate == command.reader_certificate_hash.as_bytes()
+            && entry == command.entry_hash.as_bytes()
+        {
+            Ok(AppendOutcome::AlreadyRecorded)
+        } else {
+            Ok(AppendOutcome::Conflict)
+        }
+    }
+}
+
+/// Der Vernichtungsvorgang, APPEND-ONLY.
+#[async_trait]
+impl DestructionStore for PostgresRepository {
+    async fn record_destruction_request(
+        &self,
+        command: DestructionRequestCommandV1,
+    ) -> Result<AppendOutcome, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(|e| unavailable(&e))?;
+        sqlx::query(
+            "INSERT INTO object_index (object_hash, organization_id, object_type_code, \
+             size_bytes, stored_at_millis) VALUES ($1, $2, 5, $3, $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(&command.authorization.object_hash.as_bytes()[..])
+        .bind(&command.organization_id.as_bytes()[..])
+        .bind(
+            i64::try_from(command.authorization.size_bytes)
+                .map_err(|_| RepositoryError::Unavailable)?,
+        )
+        .bind(command.requested_at.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?;
+
+        let inserted = sqlx::query(
+            "INSERT INTO destructions (organization_id, destruction_id, \
+             authorization_object_hash, state_code, requested_at_millis) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+        )
+        .bind(&command.organization_id.as_bytes()[..])
+        .bind(&command.destruction_id.as_bytes()[..])
+        .bind(&command.authorization.object_hash.as_bytes()[..])
+        .bind(i16::from(
+            ea_sync_server::destruction::DESTRUCTION_STATE_REQUESTED_V1,
+        ))
+        .bind(command.requested_at.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?
+        .rows_affected();
+
+        if inserted == 0 {
+            // Derselbe Vorgang noch einmal ist idempotent; eine ANDERE
+            // Autorisierung unter derselben Kennung ist ein Widerspruch.
+            let row = sqlx::query(
+                "SELECT authorization_object_hash FROM destructions \
+                 WHERE organization_id = $1 AND destruction_id = $2",
+            )
+            .bind(&command.organization_id.as_bytes()[..])
+            .bind(&command.destruction_id.as_bytes()[..])
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|e| unavailable(&e))?;
+            let same = row.is_some_and(|row| {
+                let stored: Vec<u8> = row.get("authorization_object_hash");
+                stored == command.authorization.object_hash.as_bytes()
+            });
+            transaction.commit().await.map_err(|e| unavailable(&e))?;
+            return Ok(if same {
+                AppendOutcome::AlreadyRecorded
+            } else {
+                AppendOutcome::Conflict
+            });
+        }
+
+        for (entry_hash, chain_sequence) in &command.targets {
+            sqlx::query(
+                "INSERT INTO destruction_targets (organization_id, destruction_id, entry_hash, \
+                 chain_sequence) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            )
+            .bind(&command.organization_id.as_bytes()[..])
+            .bind(&command.destruction_id.as_bytes()[..])
+            .bind(&entry_hash.as_bytes()[..])
+            .bind(i64::try_from(*chain_sequence).map_err(|_| RepositoryError::Unavailable)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        }
+        transaction.commit().await.map_err(|e| unavailable(&e))?;
+        Ok(AppendOutcome::Recorded)
+    }
+
+    async fn destruction_state(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        destruction_id: ea_types::DestructionId,
+    ) -> Result<Option<DestructionStateV1>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT authorization_object_hash, state_code FROM destructions \
+             WHERE organization_id = $1 AND destruction_id = $2",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&destruction_id.as_bytes()[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let state: i16 = row.get("state_code");
+        Ok(Some(DestructionStateV1 {
+            authorization_object_hash: object_hash_of(&row, "authorization_object_hash")?,
+            state: u8::try_from(state).map_err(|_| RepositoryError::Unavailable)?,
+            transition_object_hashes: self
+                .destruction_objects("destruction_transitions", organization_id, destruction_id)
+                .await?,
+            attestation_object_hashes: self
+                .destruction_objects("destruction_attestations", organization_id, destruction_id)
+                .await?,
+        }))
+    }
+
+    async fn is_destruction_target(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        entry_hash: EntryHash,
+    ) -> Result<bool, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT 1 AS present FROM destruction_targets \
+             WHERE organization_id = $1 AND entry_hash = $2 LIMIT 1",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&entry_hash.as_bytes()[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        Ok(row.is_some())
+    }
+}
+
+impl PostgresRepository {
+    /// Die Objektadressen einer append-only Vernichtungstabelle, in
+    /// Blaetterreihenfolge.
+    ///
+    /// Der Tabellenname ist eine KONSTANTE dieser Datei und kommt niemals aus
+    /// einem Request; die beiden Aufrufer oben sind die einzigen.
+    async fn destruction_objects(
+        &self,
+        table: &'static str,
+        organization_id: ea_types::OrganizationId,
+        destruction_id: ea_types::DestructionId,
+    ) -> Result<Vec<ObjectHash>, RepositoryError> {
+        let statement = format!(
+            "SELECT object_hash FROM {table} \
+             WHERE organization_id = $1 AND destruction_id = $2 ORDER BY technical_index"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(statement))
+            .bind(&organization_id.as_bytes()[..])
+            .bind(&destruction_id.as_bytes()[..])
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        rows.iter()
+            .map(|row| object_hash_of(row, "object_hash"))
+            .collect()
     }
 }

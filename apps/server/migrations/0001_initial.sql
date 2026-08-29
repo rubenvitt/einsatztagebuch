@@ -161,7 +161,15 @@ CREATE TABLE object_index (
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     object_type_code SMALLINT NOT NULL CHECK (object_type_code BETWEEN 1 AND 6),
     size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
-    stored_at_millis BIGINT NOT NULL
+    stored_at_millis BIGINT NOT NULL,
+    -- Die Blaetterposition des ARCHIVEXPORTS. Sie steht hier aus demselben
+    -- Grund, aus dem `checkpoints` eine traegt: `GET /v1/archive-exports/current`
+    -- blaettert ueber den gesamten Objektbestand einer Organisation, und der
+    -- `lastTechnicalIndex` eines technischen Cursors ist eine Zahl. Eine
+    -- Blaetterung ueber `OFFSET` waere unter gleichzeitigen Einfuegungen
+    -- nicht stabil und liesse Objekte aus — genau das, was ein VOLLSTAENDIGER
+    -- Export nicht darf. Eine reine Zaehlgroesse ohne fachliche Bedeutung.
+    technical_index BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE
 );
 
 -- Freigaben. Der Empfaenger steht als Schluesselabdruck da, nicht als Person.
@@ -217,14 +225,80 @@ CREATE TABLE evidence_jobs (
     PRIMARY KEY (organization_id, entry_hash)
 );
 
--- Reader-Acknowledgements. Der Leser steht als pseudonyme `subjectId` da.
+-- Reader-Acknowledgements, APPEND-ONLY. Der Leser steht als
+-- ZERTIFIKATSHASH da und nicht als `subjectId`: `reader-ack-core-v1` ist ein
+-- EINGEFRORENER Stufe-1-Kern (`schemas/protocol/v1/signed-protocol.cddl`) und
+-- fuehrt `reader-certificate-hash`, aber keine `subjectId`. Eine hier
+-- erfundene `subjectId` waere eine zweite Leseridentitaet neben der einen, die
+-- das signierte Objekt selbst nennt — und der Server leitete sie aus nichts
+-- ab. Der Zertifikatshash ist genauso pseudonym: er ist der Hash eines
+-- Geraetezertifikats und traegt keinen Namen.
 CREATE TABLE reader_acknowledgements (
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
-    subject_id BYTEA NOT NULL CHECK (octet_length(subject_id) = 16),
+    reader_certificate_hash BYTEA NOT NULL CHECK (octet_length(reader_certificate_hash) = 32),
     entry_hash BYTEA NOT NULL REFERENCES entries (entry_hash),
     ack_object_hash BYTEA NOT NULL UNIQUE CHECK (octet_length(ack_object_hash) = 32),
     acknowledged_at_millis BIGINT NOT NULL,
-    PRIMARY KEY (organization_id, subject_id, entry_hash)
+    PRIMARY KEY (organization_id, reader_certificate_hash, ack_object_hash)
+);
+
+-- Der angenommene Vernichtungsvorgang (`design.md` §16.3). Er traegt den
+-- Hash seiner Mehr-Augen-`DestructionAuthorization` und den Zustand des
+-- Automaten als Zahl aus `destruction-state-v1`
+-- (`schemas/archive/v1/trust.cddl`): `requested` = 0 bis
+-- `incompleteUnreachableReplica` = 4. Der Zustand steht als ZAHL und nicht als
+-- Text, weil `ea-format` ihn in `DestructionTransitionFieldsV1` ebenfalls als
+-- Zahl fuehrt; ein zweiter Wertebereich waere eine zweite Quelle.
+CREATE TABLE destructions (
+    organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
+    destruction_id BYTEA NOT NULL CHECK (octet_length(destruction_id) = 16),
+    authorization_object_hash BYTEA NOT NULL UNIQUE CHECK (octet_length(authorization_object_hash) = 32),
+    state_code SMALLINT NOT NULL CHECK (state_code BETWEEN 0 AND 4),
+    requested_at_millis BIGINT NOT NULL,
+    PRIMARY KEY (organization_id, destruction_id)
+);
+
+-- Die Ziele eines Vernichtungsvorgangs. Sie sind der Grund, aus dem
+-- `design.md` §16.3 Schritt 2 ueberhaupt serverseitig durchsetzbar ist: neue
+-- Auslieferungen und historische Re-Grants werden GEGEN DIESE ZEILEN
+-- blockiert. `chain_sequence` steht daneben und ist ausdruecklich nur der
+-- Cross-Check gegen das signierte Manifest — die Zielidentitaet ist der
+-- `entryHash`.
+--
+-- KEIN Fremdschluessel auf `entries`: eine Authorization darf einen Eintrag
+-- benennen, den dieser Server nie gesehen hat, und ein Fremdschluessel machte
+-- daraus einen Ausfall statt einer Sperre.
+CREATE TABLE destruction_targets (
+    organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
+    destruction_id BYTEA NOT NULL CHECK (octet_length(destruction_id) = 16),
+    entry_hash BYTEA NOT NULL CHECK (octet_length(entry_hash) = 32),
+    chain_sequence BIGINT NOT NULL CHECK (chain_sequence >= 0),
+    PRIMARY KEY (organization_id, destruction_id, entry_hash)
+);
+
+-- Die Sperre wird je Eintrag gefragt, nicht je Vorgang.
+CREATE INDEX destruction_targets_by_entry ON destruction_targets (organization_id, entry_hash);
+
+-- Die Zustandsuebergaenge, APPEND-ONLY. Sie stehen als exakte `.etb`-Objekte
+-- im Object Store; hier steht ausschliesslich ihre Adresse und ihre
+-- Reihenfolge. `technical_index` ist wie bei `checkpoints` eine reine
+-- Zaehlgroesse.
+CREATE TABLE destruction_transitions (
+    object_hash BYTEA PRIMARY KEY REFERENCES object_index (object_hash),
+    organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
+    destruction_id BYTEA NOT NULL CHECK (octet_length(destruction_id) = 16),
+    to_state_code SMALLINT NOT NULL CHECK (to_state_code BETWEEN 0 AND 4),
+    recorded_at_millis BIGINT NOT NULL,
+    technical_index BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE
+);
+
+-- Die Loeschattestierungen, APPEND-ONLY, nach derselben Regel.
+CREATE TABLE destruction_attestations (
+    object_hash BYTEA PRIMARY KEY REFERENCES object_index (object_hash),
+    organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
+    destruction_id BYTEA NOT NULL CHECK (octet_length(destruction_id) = 16),
+    recorded_at_millis BIGINT NOT NULL,
+    technical_index BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE
 );
 
 -- RESERVIERT. Die Einmaligkeit der Challenge-Nonce fuehrt seit dem

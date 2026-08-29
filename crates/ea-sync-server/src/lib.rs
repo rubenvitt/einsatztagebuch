@@ -21,25 +21,31 @@
 pub mod auth;
 pub mod checkpoint;
 pub mod commit;
+pub mod destruction;
+pub mod export;
+pub mod historical_grant;
 pub mod models;
 pub mod ports;
+pub mod reader_sync;
 pub mod receipt;
 pub mod reconcile;
 pub mod trust;
 pub mod validation;
 
 pub use models::{
-    ChainHeadStateV1, CheckpointCommitV1, CheckpointIndexEntryV1, CommitDbCommand,
-    CommitIdentityV1, CommittedDbState, CredentialRegistrationOutcome, IndexedObjectV1,
-    PENDING_REGISTRATION_STATE_V1, PendingDeviceRequestV1, PendingRegistrationOutcome,
-    RegistryLineEntryV1, RepositoryError, SecurityEventKindV1, SecurityEventV1, StagedObject,
-    StoreError, StoredObject, TrustEventCommandV1, TrustIndexOutcome, WebauthnCredentialV1,
-    object_key, object_type_segment,
+    AppendOutcome, ChainHeadStateV1, CheckpointCommitV1, CheckpointIndexEntryV1, CommitDbCommand,
+    CommitIdentityV1, CommittedDbState, CredentialRegistrationOutcome, DestructionRequestCommandV1,
+    DestructionStateV1, EntryIndexEntryV1, ExportIndexEntryV1, GrantIndexEntryV1,
+    HistoricalGrantCommandV1, IndexedObjectV1, PENDING_REGISTRATION_STATE_V1,
+    PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, RegistryLineEntryV1,
+    RepositoryError, SecurityEventKindV1, SecurityEventV1, StagedObject, StoreError, StoredObject,
+    TrustEventCommandV1, TrustIndexOutcome, WebauthnCredentialV1, object_key, object_type_segment,
 };
 pub use ports::{
-    ActiveRegistryHeadV1, AuthorityError, ChallengeSpendOutcome, ChallengeStore,
-    CheckpointDirectory, CommitRepository, DeviceAuthorityDirectory, DeviceRegistrationStore,
-    ObjectStore, ObjectTypeDirectory, RegistryHeadDirectory, RegistryHeadSelectionV1,
-    RequestIdStore, SecurityEventSink, ServerClock, ServerSigner, TrustEventStore,
-    WebauthnCredentialStore,
+    ActiveRegistryHeadV1, ArchiveExportDirectory, AuthorityError, ChallengeSpendOutcome,
+    ChallengeStore, CheckpointDirectory, CommitRepository, DestructionStore,
+    DeviceAuthorityDirectory, DeviceRegistrationStore, EntryDirectory, HistoricalGrantStore,
+    ObjectStore, ObjectTypeDirectory, ReaderAckStore, RegistryHeadDirectory,
+    RegistryHeadSelectionV1, RequestIdStore, SecurityEventSink, ServerClock, ServerSigner,
+    TrustEventStore, WebauthnCredentialStore,
 };

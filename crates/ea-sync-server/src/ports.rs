@@ -80,6 +80,24 @@ pub trait ObjectTypeDirectory: Send + Sync {
         &self,
         hash: ObjectHash,
     ) -> Result<Option<ObjectTypeV1>, RepositoryError>;
+
+    /// Derselbe Index, aber ORGANISATIONSGEBUNDEN und mit der Groesse.
+    ///
+    /// [`Self::object_type_of`] loest einen Hash organisationsFREI auf, und
+    /// das ist fuer die Reconciliation richtig: sie geht den eigenen Bestand
+    /// durch. Fuer `GET /v1/objects/{objectHash}` waere es eine Luecke — ein
+    /// Aufrufer laese damit ein Objekt einer FREMDEN Organisation, und schon
+    /// die Antwort „gibt es“ waere eine Aussage ueber deren Bestand. Der
+    /// Leseweg fragt deshalb hier, und ein fremdes Objekt ist ihm unbekannt.
+    ///
+    /// Die Groesse kommt mit, weil die Objektantwort `Content-Length` traegt
+    /// und sie sonst aus dem Strom gezaehlt werden muesste — also erst
+    /// bekannt waere, wenn die Kopfzeilen laengst geschrieben sind.
+    async fn indexed_object(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        hash: ObjectHash,
+    ) -> Result<Option<crate::models::IndexedObjectV1>, RepositoryError>;
 }
 
 /// Die gesperrte Kettenkopf-Transaktion (`design.md` §13.3, Schritte 4 bis 8).
@@ -492,4 +510,137 @@ impl AuthorityError {
             Self::StateConflict => "EA-TRUST-STATE-CONFLICT",
         }
     }
+}
+
+/// Der technische Eintrags- und Grant-Index einer Kette.
+///
+/// Ein eigener Port neben [`CommitRepository`], weil er eine andere Frage
+/// stellt: jener SCHREIBT unter der Kettenkopfsperre, dieser BLAETTERT. Er
+/// entscheidet nichts — `design.md` §13.2 haelt fest, dass technische Listen
+/// nicht autoritativ sind; die gelieferten Adressen loest der Dienst gegen den
+/// Object Store auf, und die exakten Bytes prueft der Empfaenger selbst.
+#[async_trait]
+pub trait EntryDirectory: Send + Sync {
+    /// Der Eintrag an GENAU dieser Sequenz dieser Kette.
+    ///
+    /// Er beantwortet die Bindung des Lesestapels: der Leser nennt
+    /// `afterSequence` UND den zugehoerigen `afterEntryHash`, und beide
+    /// muessen zusammenpassen. `Ok(None)` heisst „diese Kette traegt dort
+    /// keinen Eintrag“ — eine Antwort, kein Ausfall.
+    async fn entry_at(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+        sequence: ea_types::ChainSequence,
+    ) -> Result<Option<crate::models::EntryIndexEntryV1>, RepositoryError>;
+
+    /// Der Eintrag zu diesem `entryHash` — in DIESER Organisation.
+    ///
+    /// Die Organisation steht dabei, weil `entries.entry_hash` global
+    /// eindeutig ist: ohne sie beantwortete ein Aufrufer die Frage „gibt es
+    /// diesen Eintrag?“ ueber eine fremde Organisation hinweg.
+    async fn entry_of(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        entry_hash: ea_types::EntryHash,
+    ) -> Result<Option<crate::models::EntryIndexEntryV1>, RepositoryError>;
+
+    /// Die Eintraege NACH `after_sequence`, aufsteigend, hoechstens `limit`.
+    async fn entries_after(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+        after_sequence: ea_types::ChainSequence,
+        limit: usize,
+    ) -> Result<Vec<crate::models::EntryIndexEntryV1>, RepositoryError>;
+
+    /// Der aktuelle Kopf dieser Kette, oder `None` fuer eine unbekannte Kette.
+    async fn chain_head(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<crate::models::ChainHeadStateV1>, RepositoryError>;
+
+    /// Die Grants dieses Eintrags, aufsteigend nach `objectHash`.
+    async fn grants_of(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        entry_hash: ea_types::EntryHash,
+    ) -> Result<Vec<crate::models::GrantIndexEntryV1>, RepositoryError>;
+
+    /// Der Checkpoint, der GENAU diese Sequenz dieser Kette deckt.
+    async fn checkpoint_covering(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+        covered_sequence: ea_types::ChainSequence,
+    ) -> Result<Option<ObjectHash>, RepositoryError>;
+}
+
+/// Der Objektbestand einer Organisation, in Blaetterreihenfolge.
+///
+/// Er traegt den ARCHIVEXPORT und sonst nichts. Ein eigener Port neben
+/// [`ObjectTypeDirectory`], weil der eine EINEN Hash aufloest und dieser den
+/// gesamten Bestand durchgeht.
+#[async_trait]
+pub trait ArchiveExportDirectory: Send + Sync {
+    async fn objects_after(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        after_technical_index: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::models::ExportIndexEntryV1>, RepositoryError>;
+}
+
+/// Die Ablage der historischen Grants.
+///
+/// Sie schreibt AUSSCHLIESSLICH in `object_index` und `grants`. Sie beruehrt
+/// weder `entries` noch `chain_heads` noch `receipts`: `design.md` §13.3 sagt
+/// woertlich, der Endpunkt „veraendert weder `.eip`, initialen Grant-Plan noch
+/// Kettenkopf“, und dieser Port hat kein Feld, mit dem er es koennte.
+#[async_trait]
+pub trait HistoricalGrantStore: Send + Sync {
+    async fn record_historical_grant(
+        &self,
+        command: crate::models::HistoricalGrantCommandV1,
+    ) -> Result<crate::models::AppendOutcome, RepositoryError>;
+}
+
+/// Die APPEND-ONLY-Ablage der Reader-Acknowledgements (`design.md` §13.4).
+#[async_trait]
+pub trait ReaderAckStore: Send + Sync {
+    async fn record_reader_ack(
+        &self,
+        command: crate::models::ReaderAckCommandV1,
+    ) -> Result<crate::models::AppendOutcome, RepositoryError>;
+}
+
+/// Die APPEND-ONLY-Ablage der Vernichtungsvorgaenge (`design.md` §16.3).
+#[async_trait]
+pub trait DestructionStore: Send + Sync {
+    /// Nimmt eine gepruefte Mehr-Augen-Authorization an und legt den Vorgang
+    /// im Zustand `requested` an — mit seinen Zielen, gegen die anschliessend
+    /// jede Auslieferung und jeder Re-Grant gesperrt wird.
+    async fn record_destruction_request(
+        &self,
+        command: crate::models::DestructionRequestCommandV1,
+    ) -> Result<crate::models::AppendOutcome, RepositoryError>;
+
+    /// Der gespeicherte Stand, oder `None` fuer eine unbekannte Kennung.
+    async fn destruction_state(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        destruction_id: ea_types::DestructionId,
+    ) -> Result<Option<crate::models::DestructionStateV1>, RepositoryError>;
+
+    /// `true`, wenn fuer diesen Eintrag ein Vernichtungsvorgang laeuft.
+    ///
+    /// Das ist die serverseitige Sperre aus `design.md` §16.3, Schritt 2:
+    /// „Neue Auslieferungen und historische Re-Grants fuer die Ziele
+    /// serverseitig blockieren.“
+    async fn is_destruction_target(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        entry_hash: ea_types::EntryHash,
+    ) -> Result<bool, RepositoryError>;
 }

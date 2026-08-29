@@ -20,8 +20,14 @@
 
 pub mod challenges;
 pub mod checkpoints;
+pub mod destructions;
 pub mod device_registrations;
+pub mod entries;
 pub mod entry_commits;
+pub mod exports;
+pub mod grants;
+pub mod objects;
+pub mod reader_acks;
 pub mod trust;
 pub mod webauthn_credentials;
 
@@ -42,6 +48,10 @@ use ea_sync_server::{
     auth::{AuthPorts, AuthServiceError},
     checkpoint::CheckpointPorts,
     commit::CommitPorts,
+    destruction::DestructionPorts,
+    export::ExportPorts,
+    historical_grant::HistoricalGrantPorts,
+    reader_sync::ReaderPorts,
     trust::TrustPorts,
 };
 
@@ -102,6 +112,50 @@ impl AppState {
             signer: self.signer.as_ref(),
             objects: self.objects.as_ref(),
             checkpoints: self.repository.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn reader_ports(&self) -> ReaderPorts<'_> {
+        ReaderPorts {
+            clock: self.clock.as_ref(),
+            signer: self.signer.as_ref(),
+            objects: self.objects.as_ref(),
+            object_types: self.repository.as_ref(),
+            entries: self.repository.as_ref(),
+            acks: self.repository.as_ref(),
+            destructions: self.repository.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn historical_grant_ports(&self) -> HistoricalGrantPorts<'_> {
+        HistoricalGrantPorts {
+            clock: self.clock.as_ref(),
+            objects: self.objects.as_ref(),
+            entries: self.repository.as_ref(),
+            grants: self.repository.as_ref(),
+            heads: self.trust_authority.as_ref(),
+            destructions: self.repository.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn destruction_ports(&self) -> DestructionPorts<'_> {
+        DestructionPorts {
+            clock: self.clock.as_ref(),
+            objects: self.objects.as_ref(),
+            destructions: self.repository.as_ref(),
+            heads: self.trust_authority.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn export_ports(&self) -> ExportPorts<'_> {
+        ExportPorts {
+            clock: self.clock.as_ref(),
+            signer: self.signer.as_ref(),
+            inventory: self.repository.as_ref(),
         }
     }
 
@@ -291,4 +345,40 @@ pub fn require_structured_media_type(headers: &HeaderMap) -> Result<(), SyncProt
     } else {
         Err(SyncProtocolError::ContentTypeMismatch)
     }
+}
+
+/// Eine 16-Byte-Cursor-Nonce aus dem CSPRNG des TLS-Anbieters.
+///
+/// Sie steht hier, weil DREI blaetternde Endpunkte sie brauchen — Checkpoints,
+/// Lesestapel und Export — und drei Kopien derselben vier Zeilen drei
+/// Gelegenheiten waeren, sie verschieden zu machen.
+pub fn fresh_cursor_nonce() -> Result<[u8; 16], AuthServiceError> {
+    let full = AppState::fresh_nonce()?;
+    let mut nonce = [0_u8; 16];
+    nonce.copy_from_slice(&full[..16]);
+    Ok(nonce)
+}
+
+/// Der Wert eines Abfrageparameters, oder `None`.
+#[must_use]
+pub fn query_value<'a>(uri: &'a Uri, name: &str) -> Option<&'a str> {
+    uri.query()?.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
+/// Ein 32-Byte-Hash aus einem Hex-Pfadsegment.
+///
+/// Ein unlesbares Segment ist ein RAHMENFEHLER und kein „unbekanntes Objekt“:
+/// `404` behauptete, der Server habe nachgesehen.
+pub fn hash32_from_hex(value: &str) -> Result<ea_types::Hash32, SyncProtocolError> {
+    let bytes = hex::decode(value).map_err(|_| SyncProtocolError::FrameShape)?;
+    ea_types::Hash32::try_from(bytes.as_slice()).map_err(|_| SyncProtocolError::FrameShape)
+}
+
+/// Eine 16-Byte-Kennung aus einem Hex-Pfadsegment.
+pub fn id16_from_hex(value: &str) -> Result<[u8; 16], SyncProtocolError> {
+    let bytes = hex::decode(value).map_err(|_| SyncProtocolError::FrameShape)?;
+    <[u8; 16]>::try_from(bytes.as_slice()).map_err(|_| SyncProtocolError::FrameShape)
 }

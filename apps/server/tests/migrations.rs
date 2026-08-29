@@ -296,7 +296,7 @@ async fn no_column_of_the_schema_carries_a_domain_value() {
     .expect("reading information_schema.columns must succeed");
 
     // Positivkontrolle: ein leeres Ergebnis waere ebenfalls frei von verbotenen
-    // Woertern und bewiese nichts. Die Migration legt zweiundzwanzig Tabellen
+    // Woertern und bewiese nichts. Die Migration legt sechsundzwanzig Tabellen
     // an; deutlich weniger Spalten als hier gefordert hiesse, dass der
     // Kanarienvogel gar nicht hingesehen hat.
     assert!(
@@ -325,7 +325,7 @@ async fn no_column_of_the_schema_carries_a_domain_value() {
     database.cleanup().await;
 }
 
-/// Alle zweiundzwanzig Tabellen der Stufe 3 sind da, und es ist bei EINER
+/// Alle sechsundzwanzig Tabellen der Stufe 3 sind da, und es ist bei EINER
 /// Migration geblieben.
 #[tokio::test]
 async fn the_single_migration_creates_every_planned_table() {
@@ -336,6 +336,10 @@ async fn the_single_migration_creates_every_planned_table() {
         "challenges",
         "checkpoints",
         "clock_release_replays",
+        "destruction_attestations",
+        "destruction_targets",
+        "destruction_transitions",
+        "destructions",
         "entries",
         "evidence_jobs",
         "grants",
