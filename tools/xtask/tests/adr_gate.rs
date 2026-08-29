@@ -66,13 +66,24 @@ const SERVER_ADR_LITERALS: [&str; 6] = [
 /// The classes ADR 0004 ratifies: async runtime, HTTP server, PostgreSQL
 /// driver, S3 client and TLS stack, plus the trait-object helper that the
 /// server crates' abstractions need.
-const SERVER_RUNTIME_DEPENDENCIES: [&str; 6] = [
+///
+/// The list is EVERY entry of the server class, not the headline crate of each
+/// class. `aws-smithy-http-client` and `tokio-rustls` are the two whose feature
+/// selection ADR 0004 itself calls load-bearing — `:225` because reaching the
+/// connector through `aws-sdk-s3`'s own `rustls` feature would silently select
+/// the legacy hyper 0.14 stack, and `:227` because a `tokio-rustls` that
+/// re-enabled `tls12` would put TLS 1.2 back on the listening side alone.
+/// Leaving them out would have left exactly the two drifts ungated that the
+/// document argues hardest about.
+const SERVER_RUNTIME_DEPENDENCIES: [&str; 8] = [
     "async-trait",
     "aws-sdk-s3",
+    "aws-smithy-http-client",
     "axum",
     "rustls",
     "sqlx",
     "tokio",
+    "tokio-rustls",
 ];
 
 /// Reads the workspace root the way every check in `workspace.rs` does.
