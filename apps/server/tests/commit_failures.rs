@@ -606,3 +606,47 @@ async fn the_error_body_carries_no_fragment_of_the_delivered_payload() {
 
     database.cleanup().await;
 }
+
+/// Ein UEBERZAEHLIGER Grant wird ebenso abgewiesen wie ein fehlender: der
+/// gelieferte Satz muss die aktive Empfaengermenge GENAU treffen.
+///
+/// Der Commit wird gegen einen Abschluss MIT zweitem Reader gebaut und gegen
+/// einen Server OHNE ihn gefuehrt. Der Server kennt dieses Zertifikat also
+/// gar nicht — und genau das ist der Punkt: die Menge gehoert dem Kopf, nicht
+/// dem Aufrufer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_superfluous_grant_is_refused_as_well() {
+    let database = common::fresh_database().await;
+    let (server, narrow) = stand_up(&database, false).await;
+    let wide = trust_closure::build(true);
+
+    let request = archive_objects::commit_request(&archive_objects::CommitSpec {
+        closure: &wide,
+        sequence: commit_sequence(),
+        previous_entry_hash: Some(seeded_head_entry_hash()),
+        recipients: &[
+            archive_objects::Recipient::reader(&wide),
+            archive_objects::Recipient::second_reader(&wide),
+            archive_objects::Recipient::recovery(&wide),
+        ],
+        marker: 0xbb,
+        writer_override: None,
+        registry_override: None,
+    });
+    // Gegen den SCHMALEN Server: er kennt weder den zweiten Reader noch den
+    // Kopf, den das Paket bindet.
+    let response = post_commit(&server, &narrow, request.exact_bytes(), [0x2f; 16]).await;
+
+    assert_eq!(response.status, 422);
+    assert!(
+        matches!(
+            error_code(&response.body).as_deref(),
+            Some("EA-COMMIT-GRANT-SET" | "EA-COMMIT-REGISTRY")
+        ),
+        "a grant set the head does not name is never accepted, got {:?}",
+        error_code(&response.body)
+    );
+    assert_eq!(visible(database.pool()).await, (0, 0, 0));
+
+    database.cleanup().await;
+}

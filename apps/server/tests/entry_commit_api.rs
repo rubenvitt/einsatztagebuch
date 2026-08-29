@@ -398,3 +398,148 @@ async fn the_accepted_receipt_is_stored_content_addressed() {
 
     database.cleanup().await;
 }
+
+/// Der bei einem Replay verworfene Receipt bleibt eine UNSICHTBARE Waise —
+/// gemessen gegen die ECHTEN Adapter.
+///
+/// `design.md` §13.3, vorletzter Absatz: eine Reconciliation „darf einen
+/// Receipt nicht als angenommen ausgeben, solange keine atomare
+/// Commit-Referenz existiert". Ein Replay bildet zuerst eine Quittung — er
+/// weiss vorher nicht, dass er einer ist —, legt sie content-addressed ab und
+/// liefert dann die GESPEICHERTE aus. Die verworfene liegt danach wirklich im
+/// Object Store.
+///
+/// Der Fall laeuft ueber `reconcile_object` mit dem ECHTEN Object Store und
+/// dem ECHTEN Objektindex. Genau darin liegt seine Aussage: eine Attrappe des
+/// Index wuerde die Invariante nachbilden, die der Test beweisen soll, statt
+/// die zu messen, die die Adapter tatsaechlich halten.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_receipt_discarded_by_a_replay_stays_an_invisible_orphan() {
+    use std::sync::Arc;
+
+    use ea_sync_server::reconcile::{ReconcileOutcomeV1, ReconcilePorts, reconcile_object};
+    use einsatzarchiv_server::adapters::{
+        clock::FixedClock, postgres::PostgresRepository, s3::S3ObjectStore,
+    };
+
+    let database = common::fresh_database().await;
+    let (server, closure) = stand_up(&database, SERVER_NOW_MILLIS, false).await;
+
+    let request = archive_objects::valid_commit(
+        &closure,
+        trust_closure::ExtendedClosure::commit_sequence(),
+        Some(seeded_head_entry_hash()),
+        0xa6,
+    );
+    let accepted = post_commit(&server, &closure, request.exact_bytes(), [0x07; 16]).await;
+    assert_eq!(accepted.status, 200, "{:?}", error_code(&accepted.body));
+    let accepted = EntryCommitResponseV1::decode(&accepted.body).expect("the response decodes");
+    let accepted_hash = ea_crypto::object_hash(accepted.receipt_bytes());
+
+    // Ein zweiter Server mit SPAETERER Uhr: sein Replay bildet eine andere
+    // Quittung, legt sie ab und liefert dennoch die gespeicherte aus.
+    let later = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS + 4_000),
+        closure.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+    let replay = post_commit_at(
+        &later,
+        &closure,
+        request.exact_bytes(),
+        [0x08; 16],
+        SERVER_NOW_MILLIS + 4_000,
+    )
+    .await;
+    assert_eq!(replay.status, 200, "{:?}", error_code(&replay.body));
+
+    // Die verworfene Quittung: dieselben Bindungen, aber die spaetere
+    // Annahmezeit. Sie wird hier NACHGEBILDET, um ihre Adresse zu kennen.
+    let discarded_hash = {
+        let esr_prefix = ea_format::ESR_PREFIX_V1;
+        let client = common::object_store_client().await;
+        let listed = client
+            .list_objects_v2()
+            .bucket(common::INTEGRATION_BUCKET)
+            .prefix("esr/")
+            .send()
+            .await
+            .expect("listing the receipts must succeed");
+        let mut orphan = None;
+        for object in listed.contents() {
+            let key = object.key().expect("a stored object has a key");
+            let bytes = client
+                .get_object()
+                .bucket(common::INTEGRATION_BUCKET)
+                .key(key)
+                .send()
+                .await
+                .expect("reading a stored receipt must succeed")
+                .body
+                .collect()
+                .await
+                .expect("collecting must succeed")
+                .into_bytes()
+                .to_vec();
+            assert!(bytes.starts_with(&esr_prefix), "the esr prefix holds");
+            let hash = ea_crypto::object_hash(&bytes);
+            if hash != accepted_hash {
+                orphan = Some(hash);
+            }
+        }
+        orphan.expect("the replay left its discarded receipt behind")
+    };
+
+    let repository = Arc::new(PostgresRepository::new(database.pool().clone()));
+    let clock = Arc::new(FixedClock(UnixMillis::new(SERVER_NOW_MILLIS)));
+    let objects = S3ObjectStore::new(
+        common::object_store_client().await,
+        common::INTEGRATION_BUCKET.to_owned(),
+        closure.organization_id,
+        repository.clone(),
+        repository.clone(),
+        clock.clone(),
+    );
+    let ports = ReconcilePorts {
+        clock: clock.as_ref(),
+        objects: &objects,
+        object_types: repository.as_ref(),
+        security: repository.as_ref(),
+    };
+
+    // Die ANGENOMMENE Quittung nennt eine Commit-Referenz.
+    assert_eq!(
+        reconcile_object(
+            accepted_hash,
+            ea_format::ObjectTypeV1::Receipt,
+            closure.organization_id,
+            &ports
+        )
+        .await
+        .expect("the accepted receipt is readable"),
+        ReconcileOutcomeV1::Adopted
+    );
+    // Die VERWORFENE nicht — und sie wird niemals als angenommen ausgegeben.
+    assert_eq!(
+        reconcile_object(
+            discarded_hash,
+            ea_format::ObjectTypeV1::Receipt,
+            closure.organization_id,
+            &ports
+        )
+        .await
+        .expect("the discarded receipt is readable"),
+        ReconcileOutcomeV1::InvisibleOrphan
+    );
+    // Eine Waise ist kein Angriff.
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM security_events")
+        .fetch_one(database.pool())
+        .await
+        .expect("counting security events must succeed");
+    assert_eq!(events, 0);
+
+    database.cleanup().await;
+}

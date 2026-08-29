@@ -660,6 +660,18 @@ impl ObjectStore for FakeObjectStore {
             .ok_or(StoreError::NotFound)?;
         Ok(ByteStream::from(bytes))
     }
+
+    /// Aus dem Namensraum, OHNE den Index zu befragen — genau wie der echte
+    /// Adapter. Die Attrappe darf hier nicht bequemer sein als er: der echte
+    /// `get_exact` loest die Art ueber den Index auf, und eine Waise hat dort
+    /// keine Zeile.
+    async fn get_exact_in(
+        &self,
+        _kind: ObjectTypeV1,
+        hash: ObjectHash,
+    ) -> Result<ByteStream, StoreError> {
+        self.get_exact(hash).await
+    }
 }
 
 /// Welcher Ausfall die Commit-Transaktion gerade vortaeuscht.

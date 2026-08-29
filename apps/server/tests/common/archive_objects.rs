@@ -53,6 +53,22 @@ impl Recipient {
         }
     }
 
+    /// Der ZWEITE Reader — nur in einem Abschluss vorhanden, der ihn traegt.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Abschluss ohne zweiten Reader gebaut wurde.
+    #[must_use]
+    pub fn second_reader(closure: &ExtendedClosure) -> Self {
+        Self {
+            kem_seed: trust_closure::SECOND_READER_KEM_SEED,
+            certificate_hash: closure
+                .second_reader_certificate_hash
+                .expect("this closure carries a second reader"),
+            purpose: GrantPurposeV1::Reader,
+        }
+    }
+
     #[must_use]
     pub fn recovery(closure: &ExtendedClosure) -> Self {
         Self {

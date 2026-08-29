@@ -262,6 +262,14 @@ impl ObjectStore for S3ObjectStore {
             .await
             .map_err(|_| StoreError::Unavailable)?
             .ok_or(StoreError::NotFound)?;
+        self.get_exact_in(kind, hash).await
+    }
+
+    async fn get_exact_in(
+        &self,
+        kind: ObjectTypeV1,
+        hash: ObjectHash,
+    ) -> Result<ByteStream, StoreError> {
         let response = self
             .client
             .get_object()

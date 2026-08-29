@@ -42,7 +42,30 @@ pub trait ObjectStore: Send + Sync {
 
     /// Liefert die EXAKT archivierten Bytes zu diesem Hash
     /// (`design.md` §13.2, „Objektantworten liefern exakte archivierte Bytes“).
+    ///
+    /// Der Schluessel traegt `<type>/<hex objectHash>`, die Art kommt also aus
+    /// dem technischen Objektindex. Das ist fuer eine LESEANTWORT richtig — sie
+    /// liefert nur, was sichtbar ist.
     async fn get_exact(&self, hash: ObjectHash) -> Result<ByteStream, StoreError>;
+
+    /// Dieselben Bytes, aber aus dem BENANNTEN Namensraum.
+    ///
+    /// Sie existiert fuer die Reconciliation, und der Grund ist ein Zirkel:
+    /// [`Self::get_exact`] loest die Objektart ueber den Index auf, und eine
+    /// unsichtbare Waise hat dort per Definition keine Zeile. Ueber jenen Weg
+    /// waere sie unlesbar, und `design.md` §13.3 verlangt genau, dass sie
+    /// gelesen und ERNEUT geprueft wird.
+    ///
+    /// Der Aufrufer kennt die Art, weil er einen Namensraum durchgeht — nicht,
+    /// weil er sie behauptet: [`crate::reconcile::reconcile_object`] stellt die
+    /// zurueckgegebenen Bytes anschliessend gegen ihre Adresse UND gegen die
+    /// erwartete Art. Ein falsch benannter Namensraum liefert deshalb keine
+    /// Uebernahme, sondern eine Quarantaene.
+    async fn get_exact_in(
+        &self,
+        kind: ObjectTypeV1,
+        hash: ObjectHash,
+    ) -> Result<ByteStream, StoreError>;
 }
 
 /// Die Aufloesung Hash zu Objektart.

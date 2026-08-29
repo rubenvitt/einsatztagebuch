@@ -435,30 +435,4 @@ impl PostgresRepository {
             Err(RepositoryError::RequestIdReplay)
         }
     }
-
-    /// Der aktuelle Kettenkopf, ohne Sperre — fuer Leseantworten.
-    pub async fn chain_head(
-        &self,
-        organization_id: ea_types::OrganizationId,
-        chain_id: ea_types::ChainId,
-    ) -> Result<Option<(ChainSequence, EntryHash)>, RepositoryError> {
-        let row = sqlx::query(
-            "SELECT head_sequence, head_entry_hash FROM chain_heads \
-             WHERE organization_id = $1 AND chain_id = $2",
-        )
-        .bind(&organization_id.as_bytes()[..])
-        .bind(&chain_id.as_bytes()[..])
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| unavailable(&e))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let sequence: i64 = row.get("head_sequence");
-        let hash: Vec<u8> = row.get("head_entry_hash");
-        Ok(Some((
-            ChainSequence::new(u64::try_from(sequence).map_err(|_| RepositoryError::Unavailable)?),
-            EntryHash::try_from(hash.as_slice()).map_err(|_| RepositoryError::Unavailable)?,
-        )))
-    }
 }

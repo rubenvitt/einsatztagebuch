@@ -8,11 +8,22 @@
 //!
 //! # Was „atomare Commit-Referenz" hier konkret ist
 //!
-//! Die Zeile im technischen Objektindex. Sie entsteht AUSSCHLIESSLICH in der
-//! Transaktion von Schritt 8, gemeinsam mit Entry, Grants, Receipt und Kopf
+//! Die Zeile im technischen Objektindex. Fuer die Objektarten dieses Pfades —
+//! Entry, Grant und Receipt — entsteht sie AUSSCHLIESSLICH in der Transaktion
+//! von Schritt 8, gemeinsam mit Entry, Grants, Receipt und Kopf
 //! (`apps/server/src/adapters/postgres.rs`). Ein Objekt, das im Object Store
 //! liegt und im Index fehlt, ist deshalb genau das, was §13.3 als zulaessige
 //! Waise benennt — und es ist nicht angenommen.
+//!
+//! NACHGESEHEN und nicht angenommen: `INSERT INTO object_index` steht im
+//! ganzen Baum an genau ZWEI Stellen. Die eine ist jene Commit-Transaktion;
+//! die andere ist `apps/server/src/adapters/trust_index.rs`, und sie schreibt
+//! ausschliesslich `ObjectTypeV1::Trust` in derselben Transaktion, die auch
+//! `trust_events` fuellt — fuer ein `.etb` ist also auch dort die Zeile die
+//! atomare Referenz. Der Object-Store-Adapter schreibt den Index NICHT: er
+//! bekommt das Verzeichnis nur lesend, um zu einem Hash die Objektart
+//! aufzuloesen (`apps/server/src/adapters/s3.rs`). Ein content-addressed
+//! abgelegtes Objekt wird durch die Ablage allein deshalb nie sichtbar.
 //!
 //! Der Index ist damit NICHT die Quelle der Gueltigkeit, sondern der Beleg der
 //! SICHTBARKEIT. Die Gueltigkeit stellt weiterhin die erneute Pruefung der
@@ -102,7 +113,8 @@ pub struct ReconcilePorts<'a> {
 ///
 /// Die Reihenfolge ist fail-closed und nicht verhandelbar:
 ///
-/// 1. die exakten Bytes holen,
+/// 1. die exakten Bytes aus dem BENANNTEN Namensraum holen — nicht ueber den
+///    Index, denn genau der fehlt einer Waise,
 /// 2. sie ERNEUT gegen ihre Adresse hashen — der Inhalt muss seine Adresse
 ///    tragen, sonst ist er quarantaenepflichtig,
 /// 3. sie ERNEUT parsen und ihre Objektart gegen die erwartete stellen,
@@ -124,7 +136,7 @@ pub async fn reconcile_object(
 ) -> Result<ReconcileOutcomeV1, ReconcileError> {
     let stream = ports
         .objects
-        .get_exact(object_hash)
+        .get_exact_in(expected_kind, object_hash)
         .await
         .map_err(|error| match error {
             StoreError::NotFound => ReconcileError::NotFound,
