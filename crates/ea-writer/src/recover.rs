@@ -15,6 +15,7 @@
 //! Wirklichkeit: liegt der `draftDEK` noch, ist die Grenze nicht ueberschritten.
 //! Ein Feld waere eine Behauptung, der Schluesselspeicher ist der Zeuge.
 
+use ea_archive::{ArchiveBlob, ArchivePath, GRANTS_DIR_V1, is_staging_path};
 use ea_types::ChainSequence;
 
 use crate::{
@@ -134,9 +135,12 @@ impl WriterService<'_> {
 
         if key_present {
             // Vor der Grenze: unvollstaendiges Staging verwerfen und die Marke
-            // loesen. Die Staging-Dateien bleiben liegen und sind ein
-            // Gesundheitsbefund (temporaere Datei); sie zu entfernen verlangt
-            // eine Loeschprimitive, die der Port bewusst nicht hat.
+            // loesen. Die Staging-Dateien bleiben HIER liegen, und das ist die
+            // Zusage und keine Auslassung: solange dieser Aufruf laeuft, ist
+            // der Ausgang noch nicht NACHGEWIESEN — die Marke faellt erst mit
+            // der naechsten Zeile. Bereinigt wird ausschliesslich in
+            // [`Self::reconcile_to_completion`], hinter dem Nachweis. Bis
+            // dahin sind sie ein Gesundheitsbefund (temporaere Datei).
             self.repository.replace_prepared_finalization_marker(None)?;
             return Ok(RecoveryOutcome::DraftRestored {
                 unused_sequence: transaction.sequence,
@@ -156,4 +160,131 @@ impl WriterService<'_> {
             sequence: transaction.sequence,
         })
     }
+}
+
+/// Was eine Bereinigung vorgefunden und daraus gemacht hat.
+///
+/// GENAU zwei Ausgaenge. Ein halb bereinigter Bestand ist keiner von ihnen:
+/// entweder der Ausgang ist NACHGEWIESEN und die Reste fallen, oder es wird
+/// kein Byte angefasst.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationOutcomeV1 {
+    /// Es liegt noch eine Abschlussmarke. Der Ausgang ist damit NICHT
+    /// nachgewiesen, und es wird nichts entfernt.
+    NotProven,
+    /// Der Ausgang ist nachgewiesen; die Reste sind fort.
+    Reconciled {
+        /// Liegengebliebene Staging-Dateien.
+        removed_staging: usize,
+        /// Vorab veroeffentlichte Grants ohne committetes `.eip`.
+        removed_orphan_grants: usize,
+    },
+}
+
+impl WriterService<'_> {
+    /// Bereinigt die Reste — und AUSSCHLIESSLICH hinter einem nachgewiesenen
+    /// Ausgang.
+    ///
+    /// # Die zwei Stellen, die `design.md` §9.3/§9.4 erlaubt
+    ///
+    /// 1. **Staging nach VOLLSTAENDIGER Reconciliation** (§9.3 Schritt 13:
+    ///    „Kettenkopf und Queues ausschliesslich aus der lokalen committed
+    ///    Archivkomponente ableiten, Staging nach vollstaendiger Reconciliation
+    ///    bereinigen"). Im glatten Lauf gibt es dabei nichts zu tun — dort ist
+    ///    der Rename selbst die Bereinigung und laesst keine Staging-Adresse
+    ///    zurueck. Etwas zu tun gibt es genau dort, wo ein Abbruch Staging
+    ///    liegengelassen hat.
+    /// 2. **Vorab veroeffentlichte Grants ohne committetes `.eip` nach
+    ///    NACHGEWIESENEM Abbruch** (§9.4: „Sie werden quarantaenisiert und nur
+    ///    von der zugehoerigen vorbereiteten Transaktion uebernommen oder nach
+    ///    nachgewiesenem Abbruch bereinigt").
+    ///
+    /// # Was der NACHWEIS ist
+    ///
+    /// Die AUFGELOESTE Abschlussmarke. Liegt sie noch, kann dieselbe
+    /// vorbereitete Transaktion die Reste noch uebernehmen — sie zu entfernen
+    /// waere dann kein Bereinigen, sondern das Zerstoeren der einzigen Quelle,
+    /// aus der ein Neustart hinter der Grenze vollenden darf. Deshalb steht
+    /// dieser Aufruf NEBEN [`Self::recover_pending`] und nicht darin: die
+    /// Wiederherstellung LOEST die Marke, und erst danach ist der Ausgang
+    /// nachgewiesen. Vor der unwiderruflichen Grenze faellt damit zu keinem
+    /// Zeitpunkt ein Byte.
+    ///
+    /// Idempotent: ein zweiter Aufruf findet nichts mehr und entfernt nichts.
+    ///
+    /// # Errors
+    ///
+    /// [`WriterError::Draft`], wenn die Marke nicht lesbar ist; sonst der
+    /// Fehler des Ports.
+    pub fn reconcile_to_completion(&self) -> Result<ReconciliationOutcomeV1, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        if self.repository.prepared_finalization_marker()?.is_some() {
+            return Ok(ReconciliationOutcomeV1::NotProven);
+        }
+
+        // Die committeten Eintragskennungen und die Reste, in EINEM Durchlauf.
+        // Ein zweiter Durchlauf sähe einen anderen Bestand, wenn dazwischen
+        // etwas geschieht — die Schreibersperre oben schliesst das aus, und
+        // genau deshalb steht sie vor dieser Zeile.
+        //
+        // Die Staging-Adressen kommen aus dem SCHREIBPORT und die committeten
+        // Objekte aus der LESESICHT, und das ist keine Umstaendlichkeit: die
+        // Lesesicht blendet jede Staging-Adresse aus, damit eine vorbereitete
+        // Datei nie als Kettenknoten zaehlt. Genau deshalb kann sie die zu
+        // bereinigenden Reste gar nicht nennen, und genau deshalb traegt der
+        // Schreibport dafuer `staged_paths`.
+        let mut committed_entry_hashes = std::collections::BTreeSet::new();
+        let staging: Vec<String> = self.backend.staged_paths()?;
+        let mut grants: Vec<(String, ea_types::EntryHash)> = Vec::new();
+        self.source.visit_blobs(&mut |blob: ArchiveBlob<'_>| {
+            let hint = blob.path_hint();
+            if is_staging_path(hint) {
+                return Ok(());
+            }
+            match ea_format::decode_exact_object(blob.bytes()) {
+                Ok(ea_format::ParsedArchiveObject::Entry(entry)) => {
+                    committed_entry_hashes.insert(entry.value().entry_hash());
+                }
+                Ok(ea_format::ParsedArchiveObject::Grant(grant))
+                    if hint.starts_with(GRANTS_DIR_V1) =>
+                {
+                    grants.push((
+                        hint.to_owned(),
+                        grant.value().grant_body().fields().entry_hash,
+                    ));
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+
+        let mut removed_staging = 0_usize;
+        for relative in &staging {
+            self.backend
+                .remove_if_present(&archive_path_of(relative)?)?;
+            removed_staging += 1;
+        }
+        let mut removed_orphan_grants = 0_usize;
+        for (relative, entry_hash) in &grants {
+            if committed_entry_hashes.contains(entry_hash) {
+                continue;
+            }
+            self.backend
+                .remove_if_present(&archive_path_of(relative)?)?;
+            removed_orphan_grants += 1;
+        }
+        Ok(ReconciliationOutcomeV1::Reconciled {
+            removed_staging,
+            removed_orphan_grants,
+        })
+    }
+}
+
+/// Die wurzelrelative Adresse als validierte Transportadresse.
+fn archive_path_of(relative: &str) -> Result<ArchivePath, WriterError> {
+    let (directory, name) = relative
+        .split_once('/')
+        .ok_or(ea_archive::ArchiveBackendError::Path)?;
+    Ok(ArchivePath::in_dir(&format!("{directory}/"), name)?)
 }

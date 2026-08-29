@@ -44,7 +44,8 @@
             "allow-writer-finalize",
             "allow-archive-health-report",
             "allow-device-posture-report",
-            "allow-archive-export-bundle-file"
+            "allow-archive-export-bundle-file",
+            "allow-sync-state"
           ]
         }
       ]

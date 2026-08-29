@@ -11,7 +11,7 @@ use ea_schema::{NativeSourceV1, PersonnelSnapshotV1, SchemaError, VehicleSnapsho
 use ea_types::UnixMillis;
 use ea_ui_contracts::{
     BundleExportView, FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView,
-    PersonnelSelectionView, VehicleSelectionView,
+    PersonnelSelectionView, SyncStateView, VehicleSelectionView,
 };
 use ea_writer::{
     FinalizationInputV1, FinalizationPreview, RecoveryOutcome, WriterError, WriterService,
@@ -62,6 +62,32 @@ impl StartupRecoveryPort for WriterService<'_> {
 /// Naht — der Aufruf von [`ArchiveHealthCheckV1::run`] steht damit KOMPILIERT im
 /// Code, und ein Implementierer, der Bestand, Inventar, Faehigkeitsbericht und
 /// Verifikationsbericht besitzt, baut den Check je Aufruf.
+/// Der SYNC-ZUSTAND dieses Geraets.
+///
+/// Ein PORT und kein `SyncClient`-Feld, und zwar aus demselben Grund wie bei
+/// jedem anderen: solange dieses Geraet keinen aufgeloesten Sync-Aufbau hat,
+/// ist kein Port verdrahtet, und die Abwesenheit sitzt am fehlenden Port statt
+/// an einer fehlenden Zeile. Ein Vorgabewert waere hier eine Behauptung ueber
+/// einen Bestand, ueber den nichts bekannt ist — und die freundlichste
+/// Behauptung waere zufaellig `synchronisiert`.
+///
+/// SYNCHRON, wie jeder Port dieses Wirts: `crates/ea-sync-client` ist die
+/// asynchrone Schale, und die Ableitung des Zustands dahinter ist es nicht.
+pub trait SyncStatePort {
+    /// Der Zustand aus committeten Archivbytes und dem dauerhaften
+    /// Wiederaufnahmezustand.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError`], unveraendert — dieselbe Fehlerkante wie bei
+    /// [`ArchiveHealthPort`], und aus demselben Grund: die Ableitung liest den
+    /// BESTAND, und ihr Fehlschlag ist der des Bestands. Der Kommandorumpf
+    /// uebersetzt ihn in einen stabilen Code und reicht keinen Text weiter;
+    /// ein durchgereichter Fehlertext koennte einen Pfad oder eine Kennung
+    /// nennen.
+    fn sync_state(&self) -> Result<SyncStateView, ArchiveBackendError>;
+}
+
 pub trait ArchiveHealthPort {
     /// Fuehrt alle zehn Erkenner aus.
     ///
@@ -598,6 +624,7 @@ pub struct DesktopState {
     master_data: Option<Arc<MasterDataRepository>>,
     drafts: Option<Arc<dyn DraftPayloadPort + Send + Sync>>,
     health: Option<Arc<dyn ArchiveHealthPort + Send + Sync>>,
+    sync_state: Option<Arc<dyn SyncStatePort + Send + Sync>>,
     writer: Option<Arc<dyn WriterFinalizePort + Send + Sync>>,
     discard: Option<Arc<dyn DraftDiscardPort + Send + Sync>>,
     bundle_export: Option<Arc<dyn ArchiveBundleExportPort + Send + Sync>>,
@@ -619,10 +646,33 @@ impl DesktopState {
             master_data,
             drafts,
             health,
+            sync_state: None,
             writer,
             discard: None,
             bundle_export: None,
         }
+    }
+
+    /// Der Sync-Zustandsport dieses Wirts.
+    ///
+    /// Aus demselben Grund eine eigene Naht wie [`Self::with_discard`]: er
+    /// verlangt einen aufgeloesten Bestand, eine geoeffnete lokale Ablage und
+    /// ein konfiguriertes Sync-Ziel, und keines davon hat die Anwendung beim
+    /// Hochkommen.
+    #[must_use]
+    pub fn with_sync_state(mut self, sync_state: Arc<dyn SyncStatePort + Send + Sync>) -> Self {
+        self.sync_state = Some(sync_state);
+        self
+    }
+
+    /// Der Sync-Zustandsport, als GETEILTER Griff.
+    ///
+    /// Ein Griff und keine Referenz: der Kommandorumpf reicht ihn ueber
+    /// `spawn_blocking` auf einen anderen Thread, und das verlangt einen
+    /// besitzenden Wert.
+    #[must_use]
+    pub fn sync_state_port(&self) -> Option<Arc<dyn SyncStatePort + Send + Sync>> {
+        self.sync_state.clone()
     }
 
     /// Der Verwerfensdienst dieses Wirts.

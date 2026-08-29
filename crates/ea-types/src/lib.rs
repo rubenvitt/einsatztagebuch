@@ -16,6 +16,6 @@ pub use ids::{
     UnixMillis,
 };
 pub use redaction::Redacted;
-pub use status::{EntryStatus, EvidenceStatus, SyncStatus, VerificationStatus};
+pub use status::{EntryStatus, EvidenceStatus, VerificationStatus};
 
 pub const SUITE_ID_V1: &str = "EINSATZARCHIV-SUITE-1";

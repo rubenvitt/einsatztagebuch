@@ -56,6 +56,10 @@ through rustls with the `ring` cryptography provider.
 | --- | --- | --- |
 | [`tokio`](https://crates.io/crates/tokio/1.53.1) | `=1.53.1`; `default-features = false`, `macros`, `net`, `rt-multi-thread`, `signal`, `sync`, `time` | The [Tokio upstream](https://github.com/tokio-rs/tokio) is the async runtime every other crate of this class is built against; there is no second candidate that Axum, SQLx and the AWS SDK all support. `rt-multi-thread` plus `net` and `time` is the runtime the server binary needs, `macros` is what `#[tokio::main]` and the `#[tokio::test]` functions in `crates/ea-sync-server/tests/` resolve to, `signal` carries the ordered shutdown, and `sync` carries the shared state. `fs`, `process` and `io-std` stay disabled: the server writes no file of its own. |
 | [`axum`](https://crates.io/crates/axum/0.8.9) | `=0.8.9`; `default-features = false`, `http1`, `http2`, `tokio` | The [tokio-rs upstream](https://github.com/tokio-rs/axum) is the HTTP server the design names by name. Defaults are off, which removes `form`, `query`, `json`, `matched-path`, `original-uri`, `tower-log` and `tracing` from the surface. `json` in particular is **deliberately absent**: the sync protocol carries deterministic CBOR, and a JSON extractor in the router would be a second, unreviewed decoding path into the server. `tokio` pulls the `hyper`/`hyper-util` serving glue and `tower`'s `make` layer, which is how hyper and tower enter this tree — transitively and reviewed, not as direct pins. |
+| [`hyper`](https://crates.io/crates/hyper/1.11.0) | `=1.11.0`; `default-features = false`, `client`, `http1` | The [hyperium upstream](https://github.com/hyperium/hyper) is the HTTP implementation Axum already serves on, and this pin is what turns the *server* half of that tree into a reviewed **client** for `crates/ea-sync-client`: the Writer uploads its committed entries over the same protocol the server speaks, and a hand-rolled HTTP/1.1 writer in production code would be a second, unreviewed wire implementation. `client` and `http1` only — `server` is already reached transitively through `axum`, `http2` stays off because the Writer opens one short-lived connection per signed request and negotiates `http/1.1` by ALPN, and `ffi`, `capi` and `tracing` stay off. Chosen over `reqwest`, which would add a second connection pool, a second TLS selection path and a redirect/cookie surface this protocol never uses. |
+| [`hyper-util`](https://crates.io/crates/hyper-util/0.1.20) | `=0.1.20`; `default-features = false`, `tokio` | The [hyperium upstream](https://github.com/hyperium/hyper-util) supplies `TokioIo`, the adapter between Tokio's `AsyncRead`/`AsyncWrite` and hyper's own I/O traits. Exactly one feature: `tokio` adds `TokioIo`, `TokioExecutor` and `TokioTimer` and nothing else. `client-legacy` — the pooled high-level client — stays **off** deliberately: it carries `socket2`, `libc` and a connection pool the Writer does not use, and the pool would keep a TLS session alive across signed requests whose freshness is the point. |
+| [`http`](https://crates.io/crates/http/1.5.0) | `=1.5.0`; `default-features = false`, `std` | The [hyperium upstream](https://github.com/hyperium/http) carries `Request`, `Response`, `StatusCode` and the header types every crate of this family speaks. It is pinned **directly** rather than reached through `hyper`'s re-export, following the precedent of the direct `sqlx-core` pin: `crates/ea-sync-client` names these types in its own signatures, so the version it compiles against belongs in the reviewed table and not in a re-export chain. `std` is the crate's only feature and its default; `default-features = false` keeps the selection explicit rather than inherited. |
+| [`http-body-util`](https://crates.io/crates/http-body-util/0.1.5) | `=0.1.5`; `default-features = false` | The [hyperium upstream](https://github.com/hyperium/http-body) supplies `Full` — the fully buffered request body of a signed CBOR frame — and `BodyExt::collect`, which reads the bounded response body back. Buffered and not streamed is the correct shape here and not a shortcut: every request body of this protocol is digest-covered by the RFC-9421 signature (`crates/ea-sync-protocol/src/http_signature.rs`), so the bytes must exist in full before the request can be signed at all. Its `channel` feature — the only one it declares — stays off, which is why its reviewed selection below is the empty ledger line. |
 | [`sqlx`](https://crates.io/crates/sqlx/0.9.0) | `=0.9.0`; `default-features = false`, `postgres`, `runtime-tokio`, `tls-rustls-ring-webpki` | The [launchbadge upstream](https://github.com/launchbadge/sqlx) is the async PostgreSQL driver. Defaults are off, which removes `any` — the runtime driver multiplexer — so a connection string cannot silently select MySQL or SQLite. `postgres` is the only backend, `runtime-tokio` the only runtime, and `tls-rustls-ring-webpki` selects the same `ring` provider as the rest of this class. **`macros` and `migrate` are deliberately NOT enabled on the facade**, and that is a measured constraint rather than a preference: both features carry weak references `sqlx-sqlite?/offline` respectively `sqlx-sqlite?/migrate`. A weak reference does not activate the dependency, but Cargo must still resolve a version for it, and `sqlx-sqlite 0.9.0` requires `libsqlite3-sys >=0.30.1, <0.38.0` while `docs/adr/0002-local-database-encryption.md` pins `=0.38.0`. Both declare `links = "sqlite3"`, so the whole workspace stops resolving with `failed to select a version for libsqlite3-sys`. Reproduced in a bare scratch package outside this workspace, so it is a property of the two pins and not of this repository. The consequence is recorded rather than hidden: `#[sqlx::test]` is unreachable here — `sqlx::test` sits behind `#[cfg(feature = "macros")]` and `sqlx::testing`, where its generated code lands, behind `#[cfg(feature = "migrate")]` (`sqlx-0.9.0/src/lib.rs`:83, :88) — and every `apps/server` integration test target of this stage therefore brings its own disposable database in `apps/server/tests/common/mod.rs`. The backend, runtime and TLS feature families are mutually exclusive upstream, which is why the selection is recorded verbatim below. |
 | [`sqlx-core`](https://crates.io/crates/sqlx-core/0.9.0) | `=0.9.0`; `default-features = false`, `migrate` | The same upstream release as `sqlx`, pinned **directly** for exactly one reason: it carries `sqlx_core::migrate::Migrator`, the directory-based migration runner, and — unlike the facade's `migrate` feature — it does not depend on `sqlx-sqlite` at all, so it never drags `libsqlite3-sys` into resolution. Enabling it here keeps the migration bookkeeping table `_sqlx_migrations` and the resolved-at-run-time `migrations/` directory, so Stage 3 invents **no** migration machinery of its own — which is what `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-3-blind-sync.md` reserves for Stage 7. It resolves to the same `sqlx-core` instance the facade already uses, so the types unify. |
 | [`sqlx-postgres`](https://crates.io/crates/sqlx-postgres/0.9.0) | `=0.9.0`; `default-features = false`, `migrate` | Same release again, and pinned directly for the mirror reason: `Migrator::run` requires `A::Connection: Migrate`, and the `Migrate` implementation for `PgConnection` lives behind `sqlx-postgres`'s own `migrate` feature (`migrate = ["sqlx-core/migrate", "dep:crc"]`). Without this edge the migrator compiles but cannot run against PostgreSQL. `sqlx-postgres` carries no `sqlx-sqlite` dependency either. The facade's `postgres` feature already activates this crate, so this entry adds a feature and not a second copy. |
@@ -144,6 +148,10 @@ below is published and **not yanked**.
 | --- | --- | --- | --- | --- | --- |
 | `tokio` | `=1.53.1` | 2026-07-20 | `MIT` | <https://crates.io/crates/tokio/1.53.1> | <https://github.com/tokio-rs/tokio> |
 | `axum` | `=0.8.9` | 2026-04-14 | `MIT` | <https://crates.io/crates/axum/0.8.9> | <https://github.com/tokio-rs/axum> |
+| `hyper` | `=1.11.0` | not retrieved | `MIT` | <https://crates.io/crates/hyper/1.11.0> | <https://github.com/hyperium/hyper> |
+| `hyper-util` | `=0.1.20` | not retrieved | `MIT` | <https://crates.io/crates/hyper-util/0.1.20> | <https://github.com/hyperium/hyper-util> |
+| `http` | `=1.5.0` | not retrieved | `MIT OR Apache-2.0` | <https://crates.io/crates/http/1.5.0> | <https://github.com/hyperium/http> |
+| `http-body-util` | `=0.1.5` | not retrieved | `MIT` | <https://crates.io/crates/http-body-util/0.1.5> | <https://github.com/hyperium/http-body> |
 | `sqlx` | `=0.9.0` | 2026-05-21 | `MIT OR Apache-2.0` | <https://crates.io/crates/sqlx/0.9.0> | <https://github.com/launchbadge/sqlx> |
 | `sqlx-core` | `=0.9.0` | 2026-05-21 | `MIT OR Apache-2.0` | <https://crates.io/crates/sqlx-core/0.9.0> | <https://github.com/launchbadge/sqlx> |
 | `sqlx-postgres` | `=0.9.0` | 2026-05-21 | `MIT OR Apache-2.0` | <https://crates.io/crates/sqlx-postgres/0.9.0> | <https://github.com/launchbadge/sqlx> |
@@ -152,6 +160,21 @@ below is published and **not yanked**.
 | `rustls` | `=0.23.43` | 2026-07-29 | `Apache-2.0 OR ISC OR MIT` | <https://crates.io/crates/rustls/0.23.43> | <https://github.com/rustls/rustls> |
 | `tokio-rustls` | `=0.26.4` | 2025-09-26 | `MIT OR Apache-2.0` | <https://crates.io/crates/tokio-rustls/0.26.4> | <https://github.com/rustls/tokio-rustls> |
 | `async-trait` | `=0.1.92` | 2026-08-08 | `MIT OR Apache-2.0` | <https://crates.io/crates/async-trait/0.1.92> | <https://github.com/dtolnay/async-trait> |
+
+The four rows of the HTTP **client family** — `hyper`, `hyper-util`, `http`,
+`http-body-util` — were added on 2026-08-29 by the task that created
+`crates/ea-sync-client`, and their provenance is recorded exactly as far as it
+was actually retrieved. Their declared SPDX expressions, their `rust-version`
+values and their complete feature tables were read from the **published
+manifests** of the pinned releases as they lie in the local registry source
+(`~/.cargo/registry/src/index.crates.io-*/<name>-<version>/Cargo.toml`) — the
+same manifests Cargo resolves. Their **publication dates** and their **RustSec
+advisory histories** were **not** independently retrieved in that task and are
+marked accordingly below; the crates.io and advisory-database review of these
+four rows is therefore an open obligation and not a completed one. The `cargo
+deny check advisories` run over the resolved workspace answered `advisories ok`
+with no new `ignore` entry, which is a statement about the *resolved tree* and
+not a substitute for the per-crate reading the sections below otherwise record.
 
 ### 2. Verified feature names
 
@@ -213,6 +236,10 @@ async-trait = []
 aws-sdk-s3 = ["behavior-version-latest", "http-1x", "rt-tokio"]
 aws-smithy-http-client = ["rustls-ring"]
 axum = ["http1", "http2", "tokio"]
+http = ["std"]
+http-body-util = []
+hyper = ["client", "http1"]
+hyper-util = ["tokio"]
 rustls = ["logging", "ring", "std"]
 sqlx = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"]
 sqlx-core = ["migrate"]
@@ -230,6 +257,10 @@ class needs no derivation from release dates.
 | --- | --- | --- |
 | `tokio` 1.53.1 | 1.71 | yes |
 | `axum` 0.8.9 | 1.80 | yes |
+| `hyper` 1.11.0 | 1.63 | yes |
+| `hyper-util` 0.1.20 | 1.64 | yes |
+| `http` 1.5.0 | 1.57.0 | yes |
+| `http-body-util` 0.1.5 | 1.61 | yes |
 | `sqlx` 0.9.0 | 1.94.0 | yes |
 | `sqlx-core` 0.9.0 | 1.94.0 | yes |
 | `sqlx-postgres` 0.9.0 | 1.94.0 | yes |
@@ -256,6 +287,10 @@ answered `advisories ok` with no new `ignore` entry.
 | --- | --- | --- | --- |
 | `tokio` | `RUSTSEC-2021-0072`, `RUSTSEC-2021-0124`, `RUSTSEC-2023-0001`, `RUSTSEC-2023-0005`, `RUSTSEC-2025-0023` | `>= 1.44.2` | `1.53.1` is past all five. |
 | `axum` | none — `crates/axum/` does not exist in the database | — | An empty result, recorded as the finding it is. |
+| `hyper` | not retrieved — see the note above §2 | — | Covered only by the `cargo deny check advisories` run over the resolved tree. |
+| `hyper-util` | not retrieved — see the note above §2 | — | Covered only by the `cargo deny check advisories` run over the resolved tree. |
+| `http` | not retrieved — see the note above §2 | — | Covered only by the `cargo deny check advisories` run over the resolved tree. |
+| `http-body-util` | not retrieved — see the note above §2 | — | Covered only by the `cargo deny check advisories` run over the resolved tree. |
 | `sqlx` | `RUSTSEC-2024-0363` | `>= 0.8.1` | `0.9.0` is past it. |
 | `sqlx-core` | `RUSTSEC-2024-0363` (recorded against the `sqlx` family) | `>= 0.8.1` | `0.9.0` is past it; it is the same upstream release as the facade. |
 | `sqlx-postgres` | none — directory absent | — | Empty result; it ships in the same release as `sqlx`. |
@@ -272,7 +307,9 @@ answered `advisories ok` with no new `ignore` entry.
 Three findings belong in this table rather than in a footnote.
 
 First, the five empty results are an absence of *recorded* advisories on
-2026-08-28 and not a statement about those crates' futures.
+2026-08-28 and not a statement about those crates' futures. The four rows of
+the HTTP client family are **not** among them: they are marked `not retrieved`,
+which is a different statement and deliberately not the friendlier one.
 
 Second, `ring` carries two `informational = "unmaintained"` entries that are
 **not** current defects of the pinned release, and saying so precisely matters
@@ -459,7 +496,8 @@ owns the signed, reproducible image itself.
   SQLCipher class to `libsqlite3-sys =0.37.0` / `rusqlite =0.39.0`, which is
   expressly out of scope for this stage.
 - A `tokio`, `axum`, `sqlx`, `sqlx-core`, `sqlx-postgres`, `aws-sdk-s3`,
-  `aws-smithy-http-client`, `rustls`, `tokio-rustls` or `async-trait` upgrade is
+  `aws-smithy-http-client`, `rustls`, `tokio-rustls`, `hyper`, `hyper-util`,
+  `http`, `http-body-util` or `async-trait` upgrade is
   a new reviewed decision under
   `docs/adr/0001-toolchain-and-cryptography-dependencies.md`:152-154. So is a
   change to any of the three mutually exclusive feature families: swapping

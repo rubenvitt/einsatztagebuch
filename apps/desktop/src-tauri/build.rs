@@ -36,6 +36,7 @@ const EA_COMMANDS: &[&str] = &[
     "archive_health_report",
     "device_posture_report",
     "archive_export_bundle_file",
+    "sync_state",
 ];
 
 fn main() {

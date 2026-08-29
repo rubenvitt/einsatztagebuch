@@ -36,6 +36,7 @@ const BRIEF_EXPECTED: &[&str] = &[
     "archive_health_report",
     "device_posture_report",
     "archive_export_bundle_file",
+    "sync_state",
 ];
 
 /// EIN Name des Briefes traegt bereits ein Kommando der Stufe 2.
@@ -75,6 +76,7 @@ const EXPECTED: &[&str] = &[
     "archive_health_report",
     "device_posture_report",
     "archive_export_bundle_file",
+    "sync_state",
 ];
 
 /// Die Kommandonamen, die die Faehigkeitserklaerung der Wirtskonfiguration

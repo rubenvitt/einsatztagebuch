@@ -1299,8 +1299,11 @@ impl WriterService<'_> {
         // Create-if-absent-Semantik: eine bytegleiche Wiederholung gelingt,
         // abweichende Bytes am Ziel sind `EA-ARCHIVE-BYTE-CONFLICT`
         // (`crates/ea-archive/src/backend.rs`). Der Rename ist zugleich die
-        // Bereinigung — er laesst keine temporaere Datei zurueck, und der Port
-        // hat keine Loeschprimitive, mit der man sie sonst entfernen koennte.
+        // Bereinigung — er laesst keine temporaere Datei zurueck. Im glatten
+        // Lauf hat Schritt 13 deshalb nichts zu raeumen, und das ist der
+        // Grund, warum `WriterService::reconcile_to_completion` hier nicht
+        // gerufen wird: sie raeumt, was ein ABBRUCH liegengelassen hat, und
+        // ausschliesslich hinter einem nachgewiesenen Ausgang.
         //
         // Vor jedem Rename werden die Bytes ERNEUT dekodiert. Das ist die
         // „erneute Pruefung" von Schritt 8, sie belegt, dass die vorbereiteten

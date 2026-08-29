@@ -538,7 +538,7 @@ pub struct WriterHarness {
     /// Speichern des Entwurfs dalagen — an der GESCHLOSSENEN Datenbank
     /// genommen.
     backup: Vec<(String, Vec<u8>)>,
-    backend: LocalPathBackend,
+    backend: Arc<LocalPathBackend>,
     head: SelectedRegistryHead,
     binding: WriterBindingV1,
     line: RegistryLineBuilder,
@@ -690,7 +690,7 @@ impl WriterHarness {
             draft_dek_handle,
             open: Some(open),
             backup,
-            backend,
+            backend: Arc::new(backend),
             head,
             binding,
             line: built.line,
@@ -741,7 +741,7 @@ impl WriterHarness {
         WriterService::new(
             Arc::clone(&self.store().repository),
             Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
-            &self.backend,
+            self.backend.as_ref(),
             source,
             &self.head,
             &[],
@@ -765,7 +765,7 @@ impl WriterHarness {
         WriterService::new(
             Arc::clone(&self.store().repository),
             Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
-            &self.backend,
+            self.backend.as_ref(),
             source,
             &self.head,
             &[],
@@ -791,7 +791,7 @@ impl WriterHarness {
         WriterService::new(
             Arc::clone(&self.store().repository),
             Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
-            &self.backend,
+            self.backend.as_ref(),
             source,
             &self.head,
             checkpoint_claims,
@@ -822,7 +822,7 @@ impl WriterHarness {
         let service = WriterService::new(
             Arc::clone(&self.store().repository),
             deaf,
-            &self.backend,
+            self.backend.as_ref(),
             &source,
             &self.head,
             &[],
@@ -842,8 +842,52 @@ impl WriterHarness {
     }
 
     #[must_use]
-    pub const fn backend(&self) -> &LocalPathBackend {
+    pub fn backend(&self) -> &LocalPathBackend {
         &self.backend
+    }
+
+    /// Der GETEILTE Griff auf denselben Bestand.
+    ///
+    /// Er existiert fuer die Schale vor dem Kern: `ea-sync-client` reicht jeden
+    /// synchronen Aufruf durch `spawn_blocking`, und das verlangt einen
+    /// besitzenden `'static`-Wert. Ein zweiter, daneben geoeffneter Bestand
+    /// waere ein zweiter Griff auf dieselben Bytes — und damit eine zweite
+    /// Gelegenheit, sie verschieden zu sehen.
+    #[must_use]
+    pub fn backend_handle(&self) -> Arc<LocalPathBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    /// Die EXAKTEN Ankerbytes dieser Linie.
+    ///
+    /// Neben [`Self::anchor`], weil ein Verifikationslauf hinter einer
+    /// `spawn_blocking`-Grenze den Anker nicht ausleihen kann und
+    /// `TrustAnchorV1` nicht `Clone` ist; die Bytes reisen, der Anker entsteht
+    /// drueben aus GENAU ihnen.
+    #[must_use]
+    pub fn anchor_bytes(&self) -> Vec<u8> {
+        self.line.exact_anchor_bytes().to_vec()
+    }
+
+    /// Finalisiert GENAU EINEN Eintrag und laesst ihn committet liegen.
+    ///
+    /// Die Kulisse jedes Sync-Tests: eine Warteschlange entsteht nur aus
+    /// committeten Archivbytes, also muss vorher wirklich einer committet
+    /// worden sein.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Finalisierung nicht traegt.
+    pub fn finalize_once(&self) -> ea_writer::FinalizeOutcome {
+        let source = self.source();
+        let service = self.service(&source);
+        let proof = self.proof_for(ReauthPurpose::Finalize);
+        let preview = service
+            .preview(&proof, valid_incident(), self.observed_now())
+            .expect("die Vorschau der Fixture muss tragen");
+        service
+            .finalize(&proof, valid_incident(), &preview, self.observed_now())
+            .expect("die Finalisierung der Fixture muss tragen")
     }
 
     #[must_use]
@@ -1504,5 +1548,140 @@ fn incident_numbered(number: &str) -> FinalizationInputV1 {
         patient_count: PatientCount::Known(0),
         notes: None,
         external_organizations: Vec::new(),
+    }
+}
+
+/// Die Kulisse der BEREINIGUNG.
+///
+/// Sie steht neben [`WriterHarness`] und nicht darin, weil sie eine andere
+/// Frage stellt: nicht „wie loest ein Neustart eine liegende Marke auf", sondern
+/// „wann genau duerfen die Reste fallen". Sie besitzt eine `WriterHarness` und
+/// erfindet keine zweite Linie.
+pub struct RecoveryHarness {
+    inner: WriterHarness,
+}
+
+impl RecoveryHarness {
+    /// Ein Bestand mit UNTERBROCHENER Finalisierung, VOR der unwiderruflichen
+    /// Grenze.
+    ///
+    /// [`FinalizationFaultPoint::AfterPreparedMarkerCommit`] ist der letzte
+    /// Punkt vor der Grenze: die Abschlussmarke liegt, der `draftDEK` liegt
+    /// auch, und das Staging ist vollstaendig geschrieben. Genau hier muss
+    /// sichtbar werden, dass vor der Grenze nichts entfernt wird.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Abbruch nicht erreichbar ist.
+    #[must_use]
+    pub fn prepared_finalization_interrupted() -> Self {
+        let mut inner = WriterHarness::with_incident();
+        inner
+            .finalize_with_fault(FinalizationFaultPoint::AfterPreparedMarkerCommit)
+            .expect("der Abbruch an der Marke muss erreichbar sein");
+        Self { inner }
+    }
+
+    /// Alle wurzelrelativen Pfade des Bestands.
+    ///
+    /// Ueber die OEFFENTLICHE Adressliste von `LocalPathBackend` — dieselbe,
+    /// die der Gesundheitscheck und der Sync-Klient lesen. Ein eigener
+    /// Verzeichnisdurchlauf hier waere ein zweiter Blick auf denselben Bestand.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Ports.
+    pub fn relative_paths(&self) -> Result<Vec<String>, ea_archive::ArchiveBackendError> {
+        self.inner.backend().relative_paths()
+    }
+
+    /// Loest eine liegende Abschlussmarke auf.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Wiederherstellung.
+    pub fn recover_pending(&self) -> Result<ea_writer::RecoveryOutcome, WriterError> {
+        let source = self.inner.source();
+        self.inner.service(&source).recover_pending()
+    }
+
+    /// Bereinigt hinter einem NACHGEWIESENEN Ausgang.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Bereinigung.
+    pub fn reconcile_to_completion(
+        &self,
+    ) -> Result<ea_writer::ReconciliationOutcomeV1, WriterError> {
+        let source = self.inner.source();
+        self.inner.service(&source).reconcile_to_completion()
+    }
+
+    /// Traegt der Bestand noch eine Staging-Datei?
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Bestand nicht lesbar ist.
+    #[must_use]
+    pub fn has_staging(&self) -> bool {
+        self.relative_paths()
+            .expect("der Bestand muss lesbar sein")
+            .iter()
+            .any(|path| ea_archive::is_staging_path(path))
+    }
+
+    /// Der Befund `OrphanGrantOrTemporaryFile` des Gesundheitschecks.
+    ///
+    /// Er laeuft ueber den ECHTEN [`ea_archive_fs::ArchiveHealthCheckV1`] und
+    /// nicht ueber eine nachgebaute Regel: die Frage lautet, ob der Bestand
+    /// nach der Bereinigung noch einen temporaeren Rest MELDET, und das
+    /// entscheidet der Check und nicht dieser Test.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Check nicht laeuft.
+    #[must_use]
+    pub fn raises_orphan_or_temporary_finding(&self) -> bool {
+        // Ein LEERES Erwartungsinventar. Es macht den Befund nur
+        // WAHRSCHEINLICHER und nie unwahrscheinlicher: Erkenner 7 meldet jeden
+        // Grant, den das Inventar nicht fuehrt, und ein leeres fuehrt keinen.
+        // Eine gruene Zusicherung darueber ist damit die staerkere Aussage.
+        let inventory = ea_format::ArchiveInventoryListV1::new(Vec::new())
+            .expect("ein leeres Inventar ist gueltig");
+        let capabilities = self
+            .inner
+            .backend()
+            .run_capability_test(&capability_test_vector())
+            .expect("der Capability-Test muss laufen");
+        // Der ECHTE Bericht ueber den ECHTEN Bestand. Ein leerer waere hier
+        // nicht baubar — `VerificationReportV1::empty` ist crate-intern —, und
+        // er waere auch falsch: fuenf der zehn Erkenner lesen ausschliesslich
+        // ihn.
+        let source = self.inner.source();
+        let anchor = self.inner.anchor();
+        let verification = ea_verify::verify_archive(
+            &source,
+            &anchor,
+            ea_verify::VerifyOptions::new(self.inner.observed_now()),
+        )
+        .expect("der Verifikationslauf muss ein Ergebnis liefern");
+        ea_archive_fs::ArchiveHealthCheckV1::new(
+            self.inner.backend(),
+            &inventory,
+            ea_archive_fs::FreeSpaceV1 {
+                required_bytes: 0,
+                available_bytes: u64::MAX,
+            },
+            &capabilities,
+            &verification,
+        )
+        .run()
+        .expect("der Gesundheitscheck muss laufen")
+        .contains(ea_archive_fs::HealthFinding::OrphanGrantOrTemporaryFile)
+    }
+
+    #[must_use]
+    pub const fn inner(&self) -> &WriterHarness {
+        &self.inner
     }
 }

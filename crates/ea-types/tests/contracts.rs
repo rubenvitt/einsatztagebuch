@@ -3,7 +3,7 @@ use ea_types::{
     EntryStatus, ErrorClass, EventId, EvidenceStatus, FormatVersion, Hash32, Id16, JitterSource,
     KeyThumbprint, ObjectHash, ObjectVersion, OperatorSubjectId, OrganizationId, RecordId,
     Redacted, RegistryVersion, RetryConfig, RetryDecision, RetryDisposition, SchemaVersion,
-    SubjectId, SyncStatus, TechnicalError, TechnicalErrorCode, UnixMillis, VerificationStatus,
+    SubjectId, TechnicalError, TechnicalErrorCode, UnixMillis, VerificationStatus,
 };
 
 #[test]
@@ -16,7 +16,6 @@ fn hashes_require_exact_length_and_errors_do_not_echo_input() {
 
 #[test]
 fn status_is_machine_stable() {
-    assert_eq!(SyncStatus::UploadPending.code(), "uploadPending");
     assert_eq!(EntryHash::from(Hash32::ZERO).as_bytes(), &[0_u8; 32]);
 }
 
@@ -109,11 +108,6 @@ fn domain_ids_are_closed_and_cannot_be_accidentally_interchanged() {
 
 #[test]
 fn every_status_variant_has_an_exhaustive_stable_code() {
-    assert_eq!(SyncStatus::LocallySecured.code(), "locallySecured");
-    assert_eq!(SyncStatus::UploadPending.code(), "uploadPending");
-    assert_eq!(SyncStatus::Synchronized.code(), "synchronized");
-    assert_eq!(SyncStatus::Error.code(), "error");
-
     assert_eq!(VerificationStatus::Verified.code(), "verified");
     assert_eq!(VerificationStatus::Gap.code(), "gap");
     assert_eq!(VerificationStatus::MissingGrant.code(), "missingGrant");

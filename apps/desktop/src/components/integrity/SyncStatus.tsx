@@ -53,7 +53,14 @@ export function SyncStatus({
 }): ReactElement {
   const confirmed = CONFIRMED[state.status]
   return (
-    <div role="status" aria-label={label}>
+    // `data-confirmed` traegt die Bestaetigung als eigenes, PRUEFBARES
+    // Merkmal. Bis Stufe 3 lebte sie ausschliesslich im Symbol, und das Symbol
+    // ist `aria-hidden` und dekorativ: die Unterscheidung „bestaetigt / nicht
+    // bestaetigt" stand damit nirgends, wo ein Zeuge oder eine
+    // Bildschirmleseausgabe sie haette finden koennen. Sie ist ein ATTRIBUT
+    // und kein Text, weil sie keine zweite Beschriftung neben den vier
+    // normativen Namen sein darf.
+    <div role="status" aria-label={label} data-confirmed={confirmed}>
       <Space size="small">
         <DecorativeIcon
           name={confirmed ? 'verified' : 'warning'}

@@ -1913,6 +1913,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-sync-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ea-archive",
+ "ea-archive-fs",
+ "ea-chain",
+ "ea-crypto",
+ "ea-draft",
+ "ea-format",
+ "ea-key-provider",
+ "ea-local-store",
+ "ea-operator",
+ "ea-schema",
+ "ea-sync-protocol",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ea-verify",
+ "ea-writer",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "http 1.5.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "minicbor",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "ea-sync-protocol"
 version = "0.1.0"
 dependencies = [

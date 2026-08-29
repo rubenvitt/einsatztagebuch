@@ -260,6 +260,13 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          pipeline shared browser code, and that pipeline ends at `ea-verify`.",
     ),
     (
+        "ea-sync-client",
+        "drives a signed HTTP client with Tokio, bounded retry timers and \
+         persisted queue state on top of the local archive directory, so it \
+         reaches past `ea-verify` into the host operating system and the \
+         network stack.",
+    ),
+    (
         "ea-ui-contracts",
         "carries a file-writing binary in `src/bin/emit-ts.rs`, and \
          `cargo check --target wasm32-unknown-unknown -p ...` checks binaries \

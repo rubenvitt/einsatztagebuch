@@ -19,7 +19,7 @@ use ea_trust::{PreexistingEffectiveNow, decode_trust_anchor};
 use ea_types::{EventId, Hash32};
 use ea_verify::{VerifyOptions, verify_archive};
 
-use crate::{LocalPathBackend, PublicationQueue, SyncStatus};
+use crate::{LocalPathBackend, PublicationQueue};
 
 /// Das QUELLPROFIL eines Wechsels: sein Bestand und seine offenen
 /// Publikationen.
@@ -72,10 +72,19 @@ impl<'a> MigrationSourceV1<'a> {
     /// [`ArchiveBackendError::PendingPublication`], wenn eine Warteschlange
     /// `synchronisiert` nicht erreicht — sei es als Zustand oder als
     /// Hartfehler ihres Ziels.
+    /// Beendet jede ausstehende Publikation — oder BRICHT AB.
+    ///
+    /// Das Tor fragt seit Task 10 das PUBLIKATIONSERGEBNIS und nicht mehr
+    /// einen Sync-Zustand: ein leerer Platz und kein Hartfehler des Ziels.
+    /// Seine Bedeutung ist damit dieselbe geblieben — jeder andere Ausgang
+    /// bleibt [`ArchiveBackendError::PendingPublication`] —, aber es fragt
+    /// nicht laenger nach einem Zustand, den die Warteschlange gar nicht mehr
+    /// entscheidet: `synchronisiert` haengt an der verifizierten Quittung, und
+    /// von der weiss ein Profilwechsel nichts.
     fn finish_pending(&self) -> Result<(), ArchiveBackendError> {
         for queue in &self.pending {
             match queue.resume() {
-                Ok(state) if state.sync_status() == SyncStatus::Synchronized => {}
+                Ok(state) if state.outcome().nothing_outstanding() => {}
                 Ok(_) | Err(_) => return Err(ArchiveBackendError::PendingPublication),
             }
         }

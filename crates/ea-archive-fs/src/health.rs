@@ -180,6 +180,16 @@ impl<'a> ArchiveHealthCheckV1<'a> {
         // 7: liegengebliebene Staging-Artefakte, Reste eines abgebrochenen
         // Capability-Tests und Grants, die das Inventar nicht fuehrt.
         //
+        // Der Erkenner liest den BESTAND und fuehrt ausdruecklich KEINE Liste
+        // dessen, was einmal bereinigt wurde. Seit Stufe 3 raeumt
+        // `WriterService::reconcile_to_completion` diese Reste hinter einem
+        // nachgewiesenen Ausgang wirklich weg, und dann findet der Durchlauf
+        // sie schlicht nicht mehr — der Befund verschwindet, weil die Datei
+        // verschwunden ist, und nicht, weil hier jemand eine Ausnahme
+        // eingetragen haette. Eine solche Ausnahmeliste waere eine zweite
+        // Wahrheit ueber den Platteninhalt neben der Platte selbst. Jeder
+        // UNBEREINIGTE Rest meldet unveraendert.
+        //
         // Die Kratzwurzel des Capability-Tests wird NICHT aus der Lesesicht
         // ausgeblendet — genau deshalb ist sie hier zu melden. Ein Verzeichnis
         // am Namen auszublenden hiesse, dass seine Bytes nirgends gezaehlt,

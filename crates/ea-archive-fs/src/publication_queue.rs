@@ -156,10 +156,56 @@ impl PlannedPublicationV1 {
     }
 }
 
-/// Der beobachtbare Zustand einer Publikation.
+/// Was mit den geplanten Bytes GESCHAH — und ausdruecklich kein Zustand.
+///
+/// # Warum das hier steht und der Zustand nicht mehr
+///
+/// Bis Task 10 entschied diese Datei den oeffentlichen Sync-Zustand ein
+/// ZWEITES Mal: einmal hier, einmal im Writer-Sync. `synchronisiert` ist aber
+/// erst zulaessig, wenn der Server-Receipt in der lokalen Archivkomponente und
+/// — sofern konfiguriert — im Netzarchiv liegt (`design.md`:1584), und davon
+/// weiss die Warteschlange nichts. Seither sagt sie, was mit den Bytes
+/// geschah, und `crates/ea-sync-client/src/queue.rs` bildet daraus den einen
+/// oeffentlichen Zustand. Es gibt damit genau eine Wahrheit darueber.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum PublicationOutcomeV1 {
+    /// Es lag nichts an. KEINE Aussage darueber, ob je etwas veroeffentlicht
+    /// wurde — nur darueber, dass gerade nichts aufgeschoben war.
+    NothingPending,
+    /// Jedes geplante Objekt ist beim Ziel angekommen.
+    PublishedCompletely,
+    /// Der Plan liegt VOLLSTAENDIG aufgeschoben in der Warteschlange; ein
+    /// weiterer `resume` nimmt ihn byteidentisch wieder auf.
+    Deferred,
+    /// Die Queuegrenze des Profils ist ueberschritten. Der Plan wird
+    /// ABGELEHNT und nicht aufbewahrt.
+    QueueLimitReached,
+}
+
+impl PublicationOutcomeV1 {
+    /// Alle Ausgaenge, in Deklarationsreihenfolge.
+    pub const ALL: [Self; 4] = [
+        Self::NothingPending,
+        Self::PublishedCompletely,
+        Self::Deferred,
+        Self::QueueLimitReached,
+    ];
+
+    /// Ob der Plan die Warteschlange VOLLSTAENDIG verlassen hat.
+    ///
+    /// Die Frage, die ein Profilwechsel stellt: ein leerer Platz und kein
+    /// Hartfehler. `NothingPending` traegt sie mit, weil ein nie belegter
+    /// Platz derselbe Befund ist wie ein geleerter.
+    #[must_use]
+    pub const fn nothing_outstanding(self) -> bool {
+        matches!(self, Self::NothingPending | Self::PublishedCompletely)
+    }
+}
+
+/// Der beobachtbare Ausgang einer Publikation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicationStateV1 {
-    sync_status: SyncStatus,
+    outcome: PublicationOutcomeV1,
     detail_cause: Option<DetailCause>,
     fell_back: bool,
     published_bytes: Vec<Vec<u8>>,
@@ -167,9 +213,15 @@ pub struct PublicationStateV1 {
 }
 
 impl PublicationStateV1 {
+    /// Was mit den geplanten Bytes geschah.
+    ///
+    /// Es gab hier einmal ein `sync_status`. Es ist mit Task 10 gefallen, und
+    /// zwar ersatzlos: die Abbildung auf die vier oeffentlichen Zustaende
+    /// liegt seither ausschliesslich in `crates/ea-sync-client/src/queue.rs`,
+    /// wo die verifizierte und abgelegte Quittung ueberhaupt bekannt ist.
     #[must_use]
-    pub const fn sync_status(&self) -> SyncStatus {
-        self.sync_status
+    pub const fn outcome(&self) -> PublicationOutcomeV1 {
+        self.outcome
     }
 
     #[must_use]
@@ -255,7 +307,7 @@ impl PublicationQueue {
             // Die Grenze ist ueberschritten: `Fehler`, und ausdruecklich KEIN
             // Ausweichen auf ein anderes Ziel.
             return Ok(PublicationStateV1 {
-                sync_status: SyncStatus::Failed,
+                outcome: PublicationOutcomeV1::QueueLimitReached,
                 detail_cause: Some(DetailCause::QueueLimitReached),
                 fell_back: false,
                 published_bytes: Vec::new(),
@@ -265,7 +317,7 @@ impl PublicationQueue {
         if !self.target.is_connected() {
             *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(planned);
             return Ok(PublicationStateV1 {
-                sync_status: SyncStatus::UploadPending,
+                outcome: PublicationOutcomeV1::Deferred,
                 detail_cause: Some(DetailCause::NetworkArchiveWaiting),
                 fell_back: false,
                 published_bytes: Vec::new(),
@@ -286,8 +338,11 @@ impl PublicationQueue {
     /// derselben Reihenfolge.
     ///
     /// Ein Hartfehler des Ziels laesst den Plan aufgeschoben; ein weiterer
-    /// `resume` nimmt ihn deshalb WIEDER auf. `synchronisiert` ohne
-    /// veroeffentlichte Bytes heisst genau eines: es lag nichts an.
+    /// `resume` nimmt ihn deshalb WIEDER auf.
+    /// [`PublicationOutcomeV1::NothingPending`] heisst genau eines: es lag
+    /// nichts an. Es heisst ausdruecklich NICHT `synchronisiert` — ob der
+    /// Eintrag synchronisiert ist, entscheidet die verifizierte Quittung in
+    /// `crates/ea-sync-client/src/queue.rs` und nicht ein leerer Platz.
     ///
     /// # Errors
     ///
@@ -300,7 +355,7 @@ impl PublicationQueue {
             .take();
         match planned {
             None => Ok(PublicationStateV1 {
-                sync_status: SyncStatus::Synchronized,
+                outcome: PublicationOutcomeV1::NothingPending,
                 detail_cause: None,
                 fell_back: false,
                 published_bytes: Vec::new(),
@@ -316,8 +371,9 @@ impl PublicationQueue {
     /// jeder andere Ausgang — verlorene Erreichbarkeit wie Hartfehler des
     /// Ziels — legt ihn GANZ zurueck. Ein fallengelassener Plan waere eine
     /// stille Herabstufung: der naechste `resume` faende einen leeren Slot,
-    /// meldete `synchronisiert` und ein Profilwechsel liefe durch, ohne dass
-    /// die geplanten Objekte je beim Ziel angekommen sind.
+    /// meldete [`PublicationOutcomeV1::NothingPending`] und ein Profilwechsel
+    /// liefe durch, ohne dass die geplanten Objekte je beim Ziel angekommen
+    /// sind.
     fn drain(
         &self,
         planned: PlannedPublicationV1,
@@ -333,7 +389,7 @@ impl PublicationQueue {
                 // idempotent.
                 *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(planned);
                 return Ok(PublicationStateV1 {
-                    sync_status: SyncStatus::UploadPending,
+                    outcome: PublicationOutcomeV1::Deferred,
                     detail_cause: Some(DetailCause::NetworkArchiveWaiting),
                     fell_back: false,
                     published_bytes,
@@ -354,7 +410,7 @@ impl PublicationQueue {
             published_order.push(path.as_str().to_owned());
         }
         Ok(PublicationStateV1 {
-            sync_status: SyncStatus::Synchronized,
+            outcome: PublicationOutcomeV1::PublishedCompletely,
             detail_cause: None,
             fell_back: false,
             published_bytes,

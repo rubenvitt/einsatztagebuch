@@ -1,22 +1,13 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SyncStatus {
-    LocallySecured,
-    UploadPending,
-    Synchronized,
-    Error,
-}
-
-impl SyncStatus {
-    #[must_use]
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::LocallySecured => "locallySecured",
-            Self::UploadPending => "uploadPending",
-            Self::Synchronized => "synchronized",
-            Self::Error => "error",
-        }
-    }
-}
+//! Die maschinenstabilen Codes der Statusvereinigungen.
+//!
+//! EINE Aufzaehlung fehlt hier, und ihre Abwesenheit ist die Aussage: der
+//! Sync-Zustand. Er lebt in `crates/ea-archive-fs/src/publication_queue.rs`,
+//! traegt dort die WOERTLICHE Oberflaechenkopie („lokal gesichert", „Upload
+//! ausstehend", „synchronisiert", „Fehler") und wird von `ea-ui-contracts` und
+//! `ea-sync-client` von dort re-exportiert. Diese Datei fuehrte bis Stufe 3
+//! eine zweite, namensverschiedene Kopie (`LocallySecured`/`Error`) ohne einen
+//! einzigen Produktionsaufrufer; mit dem Writer-Sync waere sie die dritte
+//! Wahrheit ueber denselben Zustand geworden und ist deshalb gefallen.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VerificationStatus {

@@ -625,8 +625,19 @@ impl LocalPathBackend {
 
     /// Alle wurzelrelativen Pfade des Bestands, aufsteigend.
     ///
-    /// Crate-intern, aus demselben Grund.
-    pub(crate) fn relative_paths(&self) -> Result<Vec<String>, ArchiveBackendError> {
+    /// OEFFENTLICH seit Task 10, und zwar so eng wie moeglich: sie gibt
+    /// ADRESSEN heraus und kein einziges Byte. Der Gesundheitscheck brauchte
+    /// sie schon crate-intern; seit dieser Stufe braucht sie auch der
+    /// Writer-Sync-Klient, der aus committeten Archivbytes eine Warteschlange
+    /// ableitet und dafuer wissen muss, unter welcher Adresse ein Objekt
+    /// committet liegt. Das GEGENSTUECK — `relative_paths_below_for_test` —
+    /// bleibt hinter `test-support`: es filtert, und ein Filter ist eine
+    /// Bequemlichkeit des Tests und keine Zusage des Ports.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::Io`] beim Durchlaufen des Bestands.
+    pub fn relative_paths(&self) -> Result<Vec<String>, ArchiveBackendError> {
         self.walk()
     }
 
@@ -739,6 +750,32 @@ impl ArchiveBackend for LocalPathBackend {
     }
 
     fn sync_directory(&self, relative: &ArchivePath) -> Result<(), ArchiveBackendError> {
+        sync_directory_at(&self.absolute(relative.directory()))
+    }
+
+    fn staged_paths(&self) -> Result<Vec<String>, ArchiveBackendError> {
+        Ok(self
+            .walk()?
+            .into_iter()
+            .filter(|relative| ea_archive::is_staging_path(relative))
+            .collect())
+    }
+
+    /// Entfernt die Adresse und macht den VERSCHWUNDENEN Namen dauerhaft.
+    ///
+    /// Der zweite Flush ist dieselbe Zusage wie bei
+    /// [`ArchiveBackend::create_directory_if_absent`], nur in die andere
+    /// Richtung: ohne ihn kann ein entfernter Name nach einem Stromausfall
+    /// wieder dastehen, obwohl seine Bytes fort sind. Eine FEHLENDE Adresse
+    /// laeuft durch, ohne das Verzeichnis anzufassen — es gibt dann nichts,
+    /// dessen Verschwinden dauerhaft zu machen waere.
+    fn remove_if_present(&self, relative: &ArchivePath) -> Result<(), ArchiveBackendError> {
+        let absolute = self.absolute(relative.as_str());
+        match fs::remove_file(&absolute) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(ArchiveBackendError::Io),
+        }
         sync_directory_at(&self.absolute(relative.directory()))
     }
 

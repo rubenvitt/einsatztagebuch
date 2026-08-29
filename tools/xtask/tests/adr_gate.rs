@@ -65,7 +65,17 @@ const SERVER_ADR_LITERALS: [&str; 6] = [
 
 /// The classes ADR 0004 ratifies: async runtime, HTTP server, PostgreSQL
 /// driver, S3 client and TLS stack, plus the trait-object helper that the
-/// server crates' abstractions need.
+/// server crates' abstractions need and the four crates of the HTTP CLIENT
+/// family that `crates/ea-sync-client` uploads through.
+///
+/// The client family — `hyper`, `hyper-util`, `http`, `http-body-util` — is the
+/// same dependency class and therefore the same gate: it speaks the protocol
+/// this server serves, it terminates on the same `rustls`/`ring` selection, and
+/// hyper 1.x already lay in the graph through `axum`. Reaching it through that
+/// transitive edge instead of a reviewed pin is exactly the drift this list
+/// exists to stop, and a hand-rolled HTTP/1.1 writer in production code — the
+/// only alternative that adds no pin — would be an unreviewed second wire
+/// implementation.
 ///
 /// The list is EVERY entry of the server class, not the headline crate of each
 /// class. `aws-smithy-http-client` and `tokio-rustls` are the two whose feature
@@ -83,11 +93,15 @@ const SERVER_ADR_LITERALS: [&str; 6] = [
 /// `links = "sqlite3"` and stops the workspace resolving. The `migrate`
 /// capability therefore sits on the two subcrates. Re-adding either feature to
 /// the facade must pass through this gate.
-const SERVER_RUNTIME_DEPENDENCIES: [&str; 10] = [
+const SERVER_RUNTIME_DEPENDENCIES: [&str; 14] = [
     "async-trait",
     "aws-sdk-s3",
     "aws-smithy-http-client",
     "axum",
+    "http",
+    "http-body-util",
+    "hyper",
+    "hyper-util",
     "rustls",
     "sqlx",
     "sqlx-core",
