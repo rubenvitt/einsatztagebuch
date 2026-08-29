@@ -149,18 +149,23 @@ pub trait ChallengeStore: Send + Sync {
         &self,
         organization_id: ea_types::OrganizationId,
         nonce_digest: ea_types::Hash32,
+        rate_key_digest: ea_types::Hash32,
         issued_at: ea_types::UnixMillis,
         expires_at: ea_types::UnixMillis,
     ) -> Result<(), RepositoryError>;
 
-    /// Wie viele Challenges diese Organisation seit `since` bekommen hat.
+    /// Wie viele Challenges dieser AUFRUFER seit `since` bekommen hat.
     ///
-    /// Die Ratenbegrenzung haengt an der `organizationId` und damit an einer
-    /// NICHT-INHALTLICHEN technischen Identitaet; sie traegt nach dem
-    /// Sync-Wire-Nachtrag keinen fachlichen Wert.
+    /// Gezaehlt wird ueber den verbindungsseitigen Zaehlschluessel und
+    /// ausdruecklich NICHT ueber die `organizationId`: die kommt beim
+    /// Challenge-Endpunkt aus dem unsignierten Koerper, und ein frei
+    /// behaupteter Wert ist keine Identitaet. Ein Fremder koennte die
+    /// Organisation sonst mit ihrer eigenen Kennung aussperren — und weil
+    /// jeder signierte Request eine frische Challenge braucht, waere das ein
+    /// Totalausfall dieser Organisation.
     async fn count_issued_since(
         &self,
-        organization_id: ea_types::OrganizationId,
+        rate_key_digest: ea_types::Hash32,
         since: ea_types::UnixMillis,
     ) -> Result<u64, RepositoryError>;
 
@@ -253,10 +258,38 @@ pub trait TrustEventStore: Send + Sync {
 /// `role_intervals` oder `pending_device_requests` eine Capability verliehe.
 #[async_trait]
 pub trait DeviceAuthorityDirectory: Send + Sync {
+    /// `Ok(None)` heisst „kein aktuell freigegebenes Geraet unter diesem
+    /// Abdruck“ — und AUSSCHLIESSLICH das. Ein Ausfall und ein verlorenes
+    /// Rennen sind eigene Befunde: sie als `None` auszugeben machte aus einer
+    /// toten Datenbank ein „dein Schluessel ist unbekannt“, also aus einem
+    /// wiederholbaren 503 ein endgueltiges 401.
     async fn resolve(
         &self,
         organization_id: ea_types::OrganizationId,
         key_thumbprint: ea_types::KeyThumbprint,
         now: ea_types::UnixMillis,
-    ) -> Result<Option<ea_sync_protocol::RegisteredDevice>, RepositoryError>;
+    ) -> Result<Option<ea_sync_protocol::RegisteredDevice>, AuthorityError>;
+}
+
+/// Warum die Autoritaetsaufloesung KEINE Antwort geben konnte.
+///
+/// „Kein freigegebenes Geraet“ steht bewusst NICHT darin: das ist eine
+/// Antwort, kein Fehler, und es ist [`Option::None`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorityError {
+    /// Datenbank oder Object Store antworten nicht.
+    Unavailable,
+    /// Der persistente Vertrauenszustand hat sich unter dem Aufrufer bewegt.
+    /// Wiederholbar — und ausdruecklich KEIN Autorisierungsbefund.
+    StateConflict,
+}
+
+impl AuthorityError {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Unavailable => "EA-AUTH-DEPENDENCY-UNAVAILABLE",
+            Self::StateConflict => "EA-TRUST-STATE-CONFLICT",
+        }
+    }
 }

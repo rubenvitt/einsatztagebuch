@@ -49,6 +49,13 @@ CREATE TABLE organizations (
 CREATE TABLE challenges (
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     nonce_digest BYTEA NOT NULL CHECK (octet_length(nonce_digest) = 32),
+    -- Der Zaehlschluessel der Ratenbegrenzung: SHA-256 ueber die
+    -- VERBINDUNGSSEITIGE Adresse des Aufrufers. Er steht hier und nicht die
+    -- `organizationId`, weil die aus dem UNSIGNIERTEN Koerper kommt — ein
+    -- Wert, den der Aufrufer frei behauptet, ist keine Identitaet, und die
+    -- Begrenzung darauf sperrte eine fremde Organisation aus. Als DIGEST,
+    -- damit keine Adresse im Klartext im Bestand steht.
+    rate_key_digest BYTEA NOT NULL CHECK (octet_length(rate_key_digest) = 32),
     challenge_state TEXT NOT NULL CHECK (challenge_state IN ('issued', 'spent')),
     issued_at_millis BIGINT NOT NULL,
     expires_at_millis BIGINT NOT NULL,
@@ -57,9 +64,9 @@ CREATE TABLE challenges (
     CHECK ((challenge_state = 'spent') = (spent_at_millis IS NOT NULL))
 );
 
--- Die Ratenbegrenzung zaehlt je Organisation ueber ein Zeitfenster. Ohne
--- diesen Index waere das ein Scan ueber alle je ausgegebenen Challenges.
-CREATE INDEX challenges_rate_window ON challenges (organization_id, issued_at_millis);
+-- Die Ratenbegrenzung zaehlt je Aufrufer ueber ein Zeitfenster. Ohne diesen
+-- Index waere das ein Scan ueber alle je ausgegebenen Challenges.
+CREATE INDEX challenges_rate_window ON challenges (rate_key_digest, issued_at_millis);
 
 -- Beantragte, noch nicht freigegebene Geraete (`design.md` §13.1, Proof of
 -- Possession). Der beantragte Schluessel ist hier abgelegt, verleiht aber

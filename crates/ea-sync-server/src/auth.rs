@@ -8,15 +8,29 @@
 //!
 //! # Die Reihenfolge der Einmalwerte
 //!
-//! Der Sync-Wire-Nachtrag legt sie fest: „Ein Einmalwert wird **erst nach**
-//! gueltiger Signatur verbraucht.“ [`ea_sync_protocol::RequestVerifier`] ruft
-//! seinen [`ea_sync_protocol::ReplayStore`] aber SYNCHRON, waehrend die
-//! Einmalspeicher dieses Servers in PostgreSQL liegen. Deshalb bekommt der
-//! Pruefer hier [`DeferredReplayStore`] — einen Speicher, der nichts
-//! verbraucht — und [`authenticate`] holt den Verbrauch unmittelbar nach der
-//! gueltigen Signatur nach, in genau der Reihenfolge des Nachtrags: erst die
-//! Nonce, dann die Request-ID. Die Reihenfolge steht damit an EINER Stelle und
-//! nicht in jedem Handler.
+//! Der Sync-Wire-Nachtrag schreibt sie vollstaendig aus: „… Signatur,
+//! **Einmalverbrauch von Nonce und Request-ID, zuletzt Organisationsbindung
+//! und Capability**“. Der Verbrauch liegt also NACH der Signatur und VOR der
+//! Autorisierung — beide Grenzen zaehlen.
+//!
+//! [`ea_sync_protocol::RequestVerifier`] haelt diese Reihenfolge intern
+//! bereits ein, ruft seinen [`ea_sync_protocol::ReplayStore`] aber SYNCHRON,
+//! waehrend die Einmalspeicher dieses Servers in PostgreSQL liegen. Der
+//! Pruefer bekommt deshalb [`DeferredReplayStore`], der nichts verbraucht, und
+//! [`authenticate`] holt den Verbrauch an der richtigen Stelle nach.
+//!
+//! „An der richtigen Stelle“ heisst konkret: verbraucht wird auch dann, wenn
+//! der Pruefer mit `EA-HTTP-ORGANIZATION-MISMATCH` oder
+//! `EA-HTTP-CAPABILITY-MISSING` endet. Das sind die EINZIGEN beiden Befunde,
+//! die er nach gueltiger Signatur noch erheben kann
+//! (`crates/ea-sync-protocol/src/http_signature.rs`, `verify`), also
+//! reproduziert genau diese Menge die Reihenfolge des Nachtrags. Ohne sie
+//! behielte ein Aufrufer, dem die Capability fehlt, seine Challenge und seine
+//! Request-ID und koennte damit beliebig oft nachfassen.
+//!
+//! Der Vorrang bleibt dabei der des Nachtrags: reisst der Verbrauch, gewinnt
+//! sein Befund (`EA-AUTH-NONCE-REPLAY`) ueber die spaetere
+//! Autorisierungsabweisung.
 //!
 //! # Was die Registrierung NICHT tut
 //!
@@ -59,11 +73,19 @@ pub const CHALLENGE_LIFETIME_MILLIS_V1: i64 = 120_000;
 
 /// Das Fenster der Ratenbegrenzung und die Zahl der Challenges darin.
 ///
-/// Sie haengt an der `organizationId` — der nicht-inhaltlichen technischen
-/// Identitaet des Sync-Wire-Nachtrags — und nicht an einer IP-Adresse: eine
-/// Adresse ist weder stabil noch organisationsgebunden.
+/// Gezaehlt wird je AUFRUFER — ueber den verbindungsseitigen Zaehlschluessel,
+/// den `apps/server` aus der Gegenstellenadresse bildet — und ausdruecklich
+/// NICHT je Organisation. Die `organizationId` steht beim Challenge-Endpunkt
+/// im unsignierten Koerper: eine Begrenzung darauf liesse jeden Fremden eine
+/// Organisation mit ihrer eigenen, oeffentlich mitgereisten Kennung
+/// aussperren, und weil jeder signierte Request eine frische Challenge
+/// braucht, waere das der Totalausfall dieser Organisation.
+///
+/// Die Zahl ist deshalb auch keine Durchsatzdecke einer Organisation mehr:
+/// sechshundert Challenges je Minute und Gegenstelle sind grosszuegig fuer ein
+/// Geraet und eng genug, dass eine einzelne Quelle den Endpunkt nicht flutet.
 pub const CHALLENGE_RATE_WINDOW_MILLIS_V1: i64 = 60_000;
-pub const CHALLENGE_RATE_LIMIT_V1: u64 = 60;
+pub const CHALLENGE_RATE_LIMIT_V1: u64 = 600;
 
 /// Wie lange eine verbrauchte Request-ID gesperrt bleibt.
 ///
@@ -95,6 +117,9 @@ pub enum AuthServiceError {
     CredentialConflict,
     /// `keyid` benennt kein aktuell freigegebenes Geraet dieser Organisation.
     DeviceUnauthorized,
+    /// Der persistente Vertrauenszustand hat sich unter dem Aufrufer bewegt.
+    /// Wiederholbar, und ausdruecklich KEINE Aussage ueber seine Autoritaet.
+    TrustStateConflict,
     /// Datenbank oder Object Store antworten nicht.
     DependencyUnavailable,
     /// Interner Fehler ohne fachliche Ursache.
@@ -105,7 +130,7 @@ pub enum AuthServiceError {
 
 impl AuthServiceError {
     /// Jeder eigene Befund dieses Dienstes.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::ChallengeUnknown,
         Self::ChallengeExpired,
         Self::NonceReplay,
@@ -114,6 +139,7 @@ impl AuthServiceError {
         Self::RegistrationConflict,
         Self::CredentialConflict,
         Self::DeviceUnauthorized,
+        Self::TrustStateConflict,
         Self::DependencyUnavailable,
         Self::Internal,
     ];
@@ -129,6 +155,7 @@ impl AuthServiceError {
             Self::RegistrationConflict => "EA-AUTH-REGISTRATION-CONFLICT",
             Self::CredentialConflict => "EA-AUTH-CREDENTIAL-CONFLICT",
             Self::DeviceUnauthorized => "EA-AUTH-DEVICE-UNAUTHORIZED",
+            Self::TrustStateConflict => "EA-TRUST-STATE-CONFLICT",
             Self::DependencyUnavailable => "EA-AUTH-DEPENDENCY-UNAVAILABLE",
             Self::Internal => "EA-AUTH-INTERNAL",
             Self::Protocol(error) => error.code(),
@@ -148,7 +175,9 @@ impl AuthServiceError {
             Self::RegistrationConflict | Self::CredentialConflict => 409,
             Self::RateLimited => 429,
             Self::Internal => 500,
-            Self::DependencyUnavailable => 503,
+            // Wiederholbar: der Aufrufer hat ein Rennen verloren, nicht seine
+            // Autoritaet.
+            Self::TrustStateConflict | Self::DependencyUnavailable => 503,
             Self::Protocol(error) => error.http_status(),
         }
     }
@@ -163,6 +192,15 @@ impl AuthServiceError {
 impl From<SyncProtocolError> for AuthServiceError {
     fn from(value: SyncProtocolError) -> Self {
         Self::Protocol(value)
+    }
+}
+
+impl From<crate::ports::AuthorityError> for AuthServiceError {
+    fn from(value: crate::ports::AuthorityError) -> Self {
+        match value {
+            crate::ports::AuthorityError::Unavailable => Self::DependencyUnavailable,
+            crate::ports::AuthorityError::StateConflict => Self::TrustStateConflict,
+        }
     }
 }
 
@@ -200,6 +238,16 @@ impl std::error::Error for AuthServiceError {}
 #[must_use]
 pub fn challenge_nonce_digest(nonce: &[u8; 32]) -> Hash32 {
     hash32(body_digest(nonce))
+}
+
+/// Der Zaehlschluessel der Ratenbegrenzung aus einer Gegenstellenadresse.
+///
+/// SHA-256 ueber die Adressbytes. Als DIGEST, damit keine Adresse im Klartext
+/// in den Bestand kommt: sie ist eine technische Identitaet und trotzdem kein
+/// Wert, den ein blinder Server aufheben muss.
+#[must_use]
+pub fn rate_key_digest(peer: &[u8]) -> Hash32 {
+    hash32(body_digest(peer))
 }
 
 /// Ein blankes SHA-256-Ergebnis als [`Hash32`].
@@ -331,7 +379,7 @@ pub async fn authenticate(
     // deshalb nicht ueber ein `await` hinweg leben, sonst waere die Zukunft
     // dieses Dienstes nicht mehr `Send` und Axum koennte sie nicht fuehren.
     // Sie sterben also, bevor der erste Datenbankzugriff wartet.
-    let device = {
+    let outcome = {
         let directory = SingleDeviceDirectory(resolved);
         let mut verifier = RequestVerifier::new(
             endpoint,
@@ -343,27 +391,47 @@ pub async fn authenticate(
         if let Some(key) = requested_key {
             verifier = verifier.with_requested_key(key);
         }
-        verifier.verify(request, &mut DeferredReplayStore)?
+        verifier.verify(request, &mut DeferredReplayStore)
     };
 
-    spend_challenge(ports, organization_id, request.parameters().nonce(), now).await?;
-    if !ports
-        .request_ids
-        .claim(
-            organization_id,
-            *request.request_id().as_bytes(),
-            now,
-            UnixMillis::new(now.get().saturating_add(REQUEST_ID_LIFETIME_MILLIS_V1)),
-        )
-        .await?
-    {
-        return Err(AuthServiceError::RequestIdReplay);
+    // Verbraucht wird, sobald die Signatur GILT — auch wenn der Pruefer danach
+    // noch die Organisationsbindung oder die Capability abweist. Alles davor
+    // liegt vor der Signatur und darf nichts verbrauchen: sonst brauchte ein
+    // Fremder fremde Nonces auf.
+    if consumption_is_due(&outcome) {
+        spend_challenge(ports, organization_id, request.parameters().nonce(), now).await?;
+        if !ports
+            .request_ids
+            .claim(
+                organization_id,
+                *request.request_id().as_bytes(),
+                now,
+                UnixMillis::new(now.get().saturating_add(REQUEST_ID_LIFETIME_MILLIS_V1)),
+            )
+            .await?
+        {
+            return Err(AuthServiceError::RequestIdReplay);
+        }
     }
 
     Ok(AuthenticatedRequest {
         organization_id,
-        device,
+        device: outcome?,
     })
+}
+
+/// Gilt die Signatur dieses Requests bereits?
+///
+/// `Ok` heisst ja. Die beiden Autorisierungsbefunde heissen ebenfalls ja: der
+/// Pruefer erhebt sie AUSSCHLIESSLICH hinter der gueltigen Signatur. Jeder
+/// andere Befund liegt davor, und davor wird nichts verbraucht.
+const fn consumption_is_due(outcome: &Result<AuthenticatedDevice, SyncProtocolError>) -> bool {
+    matches!(
+        outcome,
+        Ok(_)
+            | Err(SyncProtocolError::OrganizationMismatch)
+            | Err(SyncProtocolError::CapabilityMissing)
+    )
 }
 
 /// Verbraucht die Challenge hinter einer Nonce — einmal und fail-closed.
@@ -389,10 +457,11 @@ pub async fn spend_challenge(
 ///
 /// Die Nonce kommt vom Aufrufer als PARAMETER: eine Zufallsquelle waere eine
 /// Wirtsentscheidung, und `crates/` haelt keine. `apps/server` beschafft sie
-/// aus `getrandom`.
+/// aus dem CSPRNG des TLS-Anbieters (`rustls::crypto::…::secure_random`).
 pub async fn issue_challenge(
     request: &ChallengeRequestV1,
     nonce: [u8; 32],
+    rate_key_digest: Hash32,
     clock: &dyn ServerClock,
     challenges: &dyn ChallengeStore,
     signer: &dyn ServerSigner,
@@ -401,7 +470,7 @@ pub async fn issue_challenge(
     let now = clock.now();
     let window_start = UnixMillis::new(now.get().saturating_sub(CHALLENGE_RATE_WINDOW_MILLIS_V1));
     if challenges
-        .count_issued_since(organization_id, window_start)
+        .count_issued_since(rate_key_digest, window_start)
         .await?
         >= CHALLENGE_RATE_LIMIT_V1
     {
@@ -413,6 +482,7 @@ pub async fn issue_challenge(
         .issue(
             organization_id,
             challenge_nonce_digest(&nonce),
+            rate_key_digest,
             now,
             expires_at,
         )

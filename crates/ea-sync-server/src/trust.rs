@@ -53,6 +53,15 @@ pub enum TrustServiceError {
     OrganizationMismatch,
     /// Dieselbe Registry-Version traegt bereits ein ANDERES Objekt.
     Conflict,
+    /// Das Objekt traegt, gilt aber jetzt nicht: veraltet, in der Zukunft oder
+    /// ausserhalb seiner Sequenzleihe.
+    EventNotApplicable,
+    /// Die geteilte Pruefung kann ueber dieses Objekt heute NICHTS beweisen.
+    /// Fail-closed abgewiesen, statt es ungeprueft in den Bestand zu nehmen.
+    EventUnverifiable,
+    /// Der persistente Vertrauenszustand hat sich unter dem Aufrufer bewegt.
+    /// Wiederholbar — der Aufrufer hat ein Rennen verloren, nicht sein Recht.
+    StateConflict,
     /// Die Organisation hat keinen hinterlegten Trust Anchor; ohne ihn gibt es
     /// keine Wurzel, gegen die geprueft werden koennte.
     AnchorMissing,
@@ -65,11 +74,14 @@ pub enum TrustServiceError {
 }
 
 impl TrustServiceError {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::ObjectFamily,
         Self::EventInvalid,
         Self::OrganizationMismatch,
         Self::Conflict,
+        Self::EventNotApplicable,
+        Self::EventUnverifiable,
+        Self::StateConflict,
         Self::AnchorMissing,
         Self::DependencyUnavailable,
         Self::Internal,
@@ -82,6 +94,9 @@ impl TrustServiceError {
             Self::EventInvalid => "EA-TRUST-EVENT-INVALID",
             Self::OrganizationMismatch => "EA-TRUST-EVENT-ORGANIZATION",
             Self::Conflict => "EA-TRUST-EVENT-CONFLICT",
+            Self::EventNotApplicable => "EA-TRUST-EVENT-NOT-APPLICABLE",
+            Self::EventUnverifiable => "EA-TRUST-EVENT-UNVERIFIABLE",
+            Self::StateConflict => "EA-TRUST-STATE-CONFLICT",
             Self::AnchorMissing => "EA-TRUST-EVENT-ANCHOR-MISSING",
             Self::DependencyUnavailable => "EA-TRUST-EVENT-DEPENDENCY-UNAVAILABLE",
             Self::Internal => "EA-TRUST-EVENT-INTERNAL",
@@ -93,11 +108,17 @@ impl TrustServiceError {
     pub const fn http_status(self) -> u16 {
         match self {
             // Wohlgeformt, aber ungueltig in Trust oder Format.
-            Self::ObjectFamily | Self::EventInvalid | Self::AnchorMissing => 422,
+            Self::ObjectFamily
+            | Self::EventInvalid
+            | Self::EventNotApplicable
+            | Self::EventUnverifiable
+            | Self::AnchorMissing => 422,
             Self::OrganizationMismatch => 403,
             Self::Conflict => 409,
             Self::Internal => 500,
-            Self::DependencyUnavailable => 503,
+            // Wiederholbar: ein verlorenes Rennen ist keine Aussage ueber das
+            // gelieferte Objekt.
+            Self::StateConflict | Self::DependencyUnavailable => 503,
             Self::Protocol(error) => error.http_status(),
         }
     }
@@ -115,10 +136,14 @@ impl From<SyncProtocolError> for TrustServiceError {
 }
 
 impl From<RepositoryError> for TrustServiceError {
+    /// Jeder Arm einzeln, damit ein spaeter ergaenzter nicht stillschweigend
+    /// zu `Conflict` wird.
     fn from(value: RepositoryError) -> Self {
         match value {
             RepositoryError::Unavailable => Self::DependencyUnavailable,
-            _ => Self::Conflict,
+            RepositoryError::HeadConflict
+            | RepositoryError::CommitIdentityConflict
+            | RepositoryError::RequestIdReplay => Self::Conflict,
         }
     }
 }
@@ -166,6 +191,11 @@ pub trait TrustEventValidator: Send + Sync {
     /// Bestand nichts verloren. Die Pruefung sieht damit genau die Objektmenge,
     /// die der Reader spaeter sieht: den bestehenden Katalog PLUS dieses eine
     /// Objekt.
+    ///
+    /// Geprueft wird das OBJEKT, nicht nur die Organisation: die Umsetzung
+    /// muss belegen, dass die geteilte Pruefung ueber genau diese Bytes eine
+    /// Aussage getroffen hat, und ein Objekt abweisen, ueber das sie keine
+    /// treffen kann.
     async fn validate_exact_etb(
         &self,
         organization_id: OrganizationId,

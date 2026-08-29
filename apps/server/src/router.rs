@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    extract::connect_info::Connected,
     routing::{get, post},
 };
 use ea_sync_protocol::EndpointV1;
@@ -112,11 +113,32 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
+/// Die Gegenstellenadresse einer Verbindung.
+///
+/// Sie ist die einzige Identitaet, die ein UNSIGNIERTER Request mitbringt, die
+/// er nicht selbst behaupten kann: sie entsteht aus dem TCP-Handschlag und
+/// nicht aus dem Koerper. Der Challenge-Endpunkt haengt seine Ratenbegrenzung
+/// daran (`crates/ea-sync-server/src/auth.rs`).
+///
+/// Axum liefert `SocketAddr` als `ConnectInfo` nur fuer seinen eigenen
+/// `TcpListener`; fuer [`TlsListener`] muss die Bruecke hier stehen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PeerAddress(pub std::net::SocketAddr);
+
+impl Connected<axum::serve::IncomingStream<'_, TlsListener>> for PeerAddress {
+    fn connect_info(stream: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
 /// Bedient den Router auf dem TLS-Lauscher, bis das Abschaltsignal kommt.
 pub async fn serve(listener: TlsListener, router: Router) -> Result<(), std::io::Error> {
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<PeerAddress>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
 }
 
 /// Das geordnete Abschalten: `SIGTERM` im Container, `Ctrl-C` von Hand.

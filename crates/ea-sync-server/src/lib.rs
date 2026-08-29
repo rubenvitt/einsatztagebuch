@@ -31,7 +31,8 @@ pub use models::{
     TrustIndexOutcome, WebauthnCredentialV1, object_key, object_type_segment,
 };
 pub use ports::{
-    ChallengeSpendOutcome, ChallengeStore, CommitRepository, DeviceAuthorityDirectory,
-    DeviceRegistrationStore, ObjectStore, ObjectTypeDirectory, RequestIdStore, SecurityEventSink,
-    ServerClock, ServerSigner, TrustEventStore, WebauthnCredentialStore,
+    AuthorityError, ChallengeSpendOutcome, ChallengeStore, CommitRepository,
+    DeviceAuthorityDirectory, DeviceRegistrationStore, ObjectStore, ObjectTypeDirectory,
+    RequestIdStore, SecurityEventSink, ServerClock, ServerSigner, TrustEventStore,
+    WebauthnCredentialStore,
 };

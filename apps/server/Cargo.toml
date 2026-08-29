@@ -18,6 +18,7 @@ ea-sync-server.workspace = true
 ea-time.workspace = true
 ea-trust.workspace = true
 ea-types.workspace = true
+ea-verify.workspace = true
 hex.workspace = true
 rustls.workspace = true
 sqlx.workspace = true

@@ -2123,6 +2123,7 @@ dependencies = [
  "ea-time",
  "ea-trust",
  "ea-types",
+ "ea-verify",
  "hex",
  "rustls",
  "sha2 0.11.0",

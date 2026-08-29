@@ -33,6 +33,7 @@ impl ChallengeStore for PostgresRepository {
         &self,
         organization_id: OrganizationId,
         nonce_digest: Hash32,
+        rate_key_digest: Hash32,
         issued_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<(), RepositoryError> {
@@ -40,11 +41,13 @@ impl ChallengeStore for PostgresRepository {
         // die Zufallsquelle dieselbe Nonce zweimal geliefert hat. Das ist kein
         // Wiederholungsfall, sondern ein Befund.
         sqlx::query(
-            "INSERT INTO challenges (organization_id, nonce_digest, challenge_state, \
-             issued_at_millis, expires_at_millis) VALUES ($1, $2, 'issued', $3, $4)",
+            "INSERT INTO challenges (organization_id, nonce_digest, rate_key_digest, \
+             challenge_state, issued_at_millis, expires_at_millis) \
+             VALUES ($1, $2, $3, 'issued', $4, $5)",
         )
         .bind(&organization_id.as_bytes()[..])
         .bind(&nonce_digest.as_bytes()[..])
+        .bind(&rate_key_digest.as_bytes()[..])
         .bind(issued_at.get())
         .bind(expires_at.get())
         .execute(self.pool())
@@ -55,14 +58,14 @@ impl ChallengeStore for PostgresRepository {
 
     async fn count_issued_since(
         &self,
-        organization_id: OrganizationId,
+        rate_key_digest: Hash32,
         since: UnixMillis,
     ) -> Result<u64, RepositoryError> {
         let row = sqlx::query(
             "SELECT count(*) AS issued FROM challenges \
-             WHERE organization_id = $1 AND issued_at_millis >= $2",
+             WHERE rate_key_digest = $1 AND issued_at_millis >= $2",
         )
-        .bind(&organization_id.as_bytes()[..])
+        .bind(&rate_key_digest.as_bytes()[..])
         .bind(since.get())
         .fetch_one(self.pool())
         .await

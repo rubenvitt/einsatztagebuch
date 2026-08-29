@@ -574,3 +574,270 @@ fn a_released_device_without_the_capability_cannot_publish_a_trust_event() {
     assert_eq!(refusal.code(), "EA-HTTP-CAPABILITY-MISSING");
     assert_eq!(refusal.http_status(), 403);
 }
+
+/// Zwei gleichzeitige authentisierte Requests derselben Organisation gelingen
+/// BEIDE.
+///
+/// Die Aufloesung der Autoritaet ist lesend: sie laeuft ueber einen
+/// Speicher, der nach der Antwort fort ist, und schreibt keine Zeile. Vorher
+/// pinnte jeder Request den Kopf im persistenten Zustand, alle Requests einer
+/// Organisation liefen ueber DIESELBE Zeile, und der Verlierer eines Rennens
+/// bekam ein endgueltiges `401` mit „dein Schluessel ist unbekannt“ — obwohl
+/// er nichts falsch gemacht hatte.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_concurrent_authenticated_requests_both_succeed() {
+    let database = common::fresh_database().await;
+    let fixture =
+        common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[WITHHELD_HEAD]).await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+
+    // Die Challenges VORHER holen: der Wettlauf soll um die Autoritaet gehen,
+    // nicht um die Ausgabe der Nonce.
+    let first_nonce = fresh_challenge(&server, fixture.organization_id).await;
+    let second_nonce = fresh_challenge(&server, fixture.organization_id).await;
+    let target = format!(
+        "{}?afterVersion=0",
+        EndpointV1::TrustRegistry.path_template()
+    );
+
+    let read = |nonce: [u8; 32], request_id: [u8; 16]| {
+        let target = target.clone();
+        let authority = server.authority.clone();
+        let address = server.address;
+        let organization_id = fixture.organization_id;
+        async move {
+            let headers = common::signed_headers(&common::SignedCall {
+                signer: &signer(ADMIN_SEED),
+                endpoint: EndpointV1::TrustRegistry,
+                authority: &authority,
+                target: &target,
+                body: None,
+                organization_id,
+                request_id,
+                nonce,
+                created: 0,
+            });
+            common::https_request(address, &authority, "GET", &target, &headers, &[]).await
+        }
+    };
+
+    let (first, second) = tokio::join!(
+        read(first_nonce, [0x21; 16]),
+        read(second_nonce, [0x22; 16])
+    );
+    assert_eq!(
+        (first.status, second.status),
+        (200, 200),
+        "both concurrent callers must be authorized; they answered {:?} and {:?}",
+        error_code(&first.body),
+        error_code(&second.body)
+    );
+
+    // Und die lesende Aufloesung hat KEINE Zeile geschrieben.
+    let rows: i64 = sqlx::query("SELECT count(*) AS n FROM trust_state")
+        .fetch_one(database.pool())
+        .await
+        .expect("counting trust state rows must succeed")
+        .get("n");
+    assert_eq!(
+        rows, 0,
+        "authentication resolves authority read-only and must not pin the head"
+    );
+
+    database.cleanup().await;
+}
+
+/// Eine Challenge-Flut unter FREMDER Organisationskennung sperrt die
+/// Organisation nicht aus.
+///
+/// Vorher zaehlte die Ratenbegrenzung je `organizationId` — ein Wert aus dem
+/// UNSIGNIERTEN Koerper. Sechzig Anfragen mit der Kennung eines Opfers
+/// erschoepften dessen Fenster, und weil jeder signierte Request eine frische
+/// Challenge braucht, stand danach die ganze Organisation. Gezaehlt wird
+/// jetzt je Gegenstelle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flood_under_a_foreign_organization_id_does_not_lock_that_organization_out() {
+    let database = common::fresh_database().await;
+    let fixture =
+        common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[WITHHELD_HEAD]).await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+
+    // Deutlich mehr als die frueher je Organisation erlaubten sechzig.
+    let body = ChallengeRequestV1::new(fixture.organization_id);
+    for _ in 0..65 {
+        let response = common::https_request(
+            server.address,
+            &server.authority,
+            "POST",
+            EndpointV1::AuthChallenges.path_template(),
+            &[("content-type", STRUCTURED_MEDIA_TYPE_V1.to_owned())],
+            body.exact_bytes(),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            200,
+            "the flood itself must not be what fails; it answered {:?}",
+            error_code(&response.body)
+        );
+    }
+
+    // Der legitime Aufrufer kommt weiterhin durch — Challenge UND signierter
+    // Request.
+    let nonce = fresh_challenge(&server, fixture.organization_id).await;
+    let target = format!(
+        "{}?afterVersion=0",
+        EndpointV1::TrustRegistry.path_template()
+    );
+    let headers = common::signed_headers(&common::SignedCall {
+        signer: &signer(ADMIN_SEED),
+        endpoint: EndpointV1::TrustRegistry,
+        authority: &server.authority,
+        target: &target,
+        body: None,
+        organization_id: fixture.organization_id,
+        request_id: [0x23; 16],
+        nonce,
+        created: 0,
+    });
+    let response = common::https_request(
+        server.address,
+        &server.authority,
+        "GET",
+        &target,
+        &headers,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        200,
+        "a flood under the victim's own organization id must not lock it out; it answered {:?}",
+        error_code(&response.body)
+    );
+
+    database.cleanup().await;
+}
+
+/// Kein ungeprueftes `.etb` kommt in den Bestand.
+///
+/// Drei Objekte, drei Gruende, dreimal `422` — und dreimal bleibt die
+/// Registry-Linie bei ihrem einen Kopf.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_unverified_trust_object_is_indexed() {
+    let database = common::fresh_database().await;
+    let fixture =
+        common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[WITHHELD_HEAD]).await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+
+    let honest = fixture
+        .withheld
+        .first()
+        .expect("the case withholds its second registry head")
+        .clone();
+    // Der Bestand VOR den drei Versuchen. Gemessen und nicht behauptet: eine
+    // feste Zahl hier waere eine zweite Quelle fuer die Groesse des Vektors.
+    let indexed_before = indexed_trust_objects(database.pool()).await;
+
+    // 1. Dieselbe Kopfmeldung mit EINEM verdrehten Signaturbit.
+    let mut tampered = honest.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    assert!(
+        ea_format::decode_exact_object(&tampered).is_ok(),
+        "the tampered object must still PARSE, so the refusal below is a trust finding and not a \
+         framing one"
+    );
+
+    // 2. Eine Kopfmeldung, die der Administrator statt der Wurzel signiert hat
+    //    — ein unzulaessiger Aussteller aus einem eingefrorenen Negativvektor.
+    let wrong_signer =
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../vectors/trust/v1/registry/rejected-root-only-signed-by-admin/head-event.bin",
+        ))
+        .expect("the frozen negative vector must read");
+
+    // 3. Ein Objekt, ueber das die geteilte Pruefung heute NICHTS beweisen
+    //    kann: eine Administratorautorisierung, die kein Kopf nennt.
+    let unprovable = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vectors/trust/v1/object/accepted-handmade-admin-authorization/admin-authorization.bin"),
+    )
+    .expect("the frozen object vector must read");
+
+    for (index, (bytes, expected)) in [
+        (tampered, "EA-TRUST-EVENT-INVALID"),
+        (wrong_signer, "EA-TRUST-EVENT-INVALID"),
+        (unprovable, "EA-TRUST-EVENT-UNVERIFIABLE"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let upload = TrustEventUploadV1::new(bytes).expect("the upload frame must build");
+        let nonce = fresh_challenge(&server, fixture.organization_id).await;
+        let mut request_id = [0x30_u8; 16];
+        request_id[15] = u8::try_from(index).expect("three cases fit in a byte");
+        let headers = common::signed_headers(&common::SignedCall {
+            signer: &signer(ADMIN_SEED),
+            endpoint: EndpointV1::TrustEvents,
+            authority: &server.authority,
+            target: EndpointV1::TrustEvents.path_template(),
+            body: Some(upload.exact_bytes()),
+            organization_id: fixture.organization_id,
+            request_id,
+            nonce,
+            created: 0,
+        });
+        let response = post_trust_event(&server, &headers, upload.exact_bytes()).await;
+        assert_eq!(
+            error_code(&response.body).as_deref(),
+            Some(expected),
+            "case {index} must be refused with its stable code"
+        );
+        assert_eq!(response.status, 422, "case {index}");
+    }
+
+    // Nichts davon ist im Bestand gelandet.
+    let heads: i64 = sqlx::query("SELECT count(*) AS n FROM registry_events")
+        .fetch_one(database.pool())
+        .await
+        .expect("counting registry heads must succeed")
+        .get("n");
+    assert_eq!(heads, 1, "no unverified object may join the registry line");
+    assert_eq!(
+        indexed_trust_objects(database.pool()).await,
+        indexed_before,
+        "the seeded catalogue must be unchanged; an unverified object is never indexed"
+    );
+
+    database.cleanup().await;
+}
+
+async fn indexed_trust_objects(pool: &PgPool) -> i64 {
+    sqlx::query("SELECT count(*) AS n FROM trust_events")
+        .fetch_one(pool)
+        .await
+        .expect("counting trust events must succeed")
+        .get("n")
+}
