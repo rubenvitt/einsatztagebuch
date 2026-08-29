@@ -12,7 +12,8 @@ use ea_types::{
 use minicbor::{Decoder, Encoder};
 
 use crate::object::{
-    FormatError, bytes_exact, exact_item, expect_array_length, finish, optional_bytes_exact,
+    FormatError, bytes_exact, exact_array_length, exact_item, expect_array_length, finish,
+    optional_bytes_exact,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -102,39 +103,33 @@ impl fmt::Debug for GrantPlanItemV1 {
 
 pub struct GrantPlanV1 {
     items: Vec<GrantPlanItemV1>,
+    exact: Vec<u8>,
     hash: Hash32,
 }
 
 impl GrantPlanV1 {
     pub fn new(mut items: Vec<GrantPlanItemV1>) -> Result<Self, FormatError> {
-        let recovery_count = items
-            .iter()
-            .filter(|item| item.purpose == GrantPurposeV1::Recovery)
-            .count();
-        match recovery_count {
-            0 => return Err(FormatError::MissingRecovery),
-            1 => {}
-            _ => return Err(FormatError::DuplicateRecovery),
-        }
-        let mut recipient_keys = BTreeSet::new();
-        let mut recipient_certificates = BTreeSet::new();
-        for item in &items {
-            if !recipient_keys.insert(*item.recipient_key_thumbprint.as_bytes()) {
-                return Err(FormatError::DuplicateRecipientKey);
-            }
-            if !recipient_certificates.insert(*item.recipient_certificate_hash.as_bytes()) {
-                return Err(FormatError::DuplicateRecipientCertificate);
-            }
-        }
+        validate_plan_items(&items)?;
         items.sort_by(GrantPlanItemV1::tuple_cmp);
         let exact = encode_plan_items(&items)?;
         let hash = grant_plan_digest(&exact);
-        Ok(Self { items, hash })
+        Ok(Self { items, exact, hash })
     }
 
     #[must_use]
     pub fn items(&self) -> &[GrantPlanItemV1] {
         &self.items
+    }
+
+    /// Die exakten Bytes, ueber die `grant_plan_digest` den Planhash bildet.
+    ///
+    /// Sie stehen HIER und nicht bei einem Verbraucher, weil der Serverpfad
+    /// dieselben Bytes braucht wie der Schreiber. Eine zweite Kodierung des
+    /// Elementmaterials waere eine zweite Gelegenheit, `initialGrantPlanHash`
+    /// und damit die Wiedergabeidentitaet auseinanderlaufen zu lassen.
+    #[must_use]
+    pub fn exact_bytes(&self) -> &[u8] {
+        &self.exact
     }
 
     #[must_use]
@@ -147,6 +142,88 @@ impl fmt::Debug for GrantPlanV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("GrantPlanV1(<bound>)")
     }
+}
+
+/// Der Plan aus seinen Wire-Bytes — das Gegenstueck zu `encode_plan_items`.
+///
+/// Der Dekodierer laeuft GENAU die Regeln von [`GrantPlanV1::new`]: genau eine
+/// Wiederherstellung, kein doppelter Empfaengerschluessel, kein doppeltes
+/// Empfaengerzertifikat. Danach besteht er zusaetzlich auf der KANONISCHEN
+/// Reihenfolge und SORTIERT NICHT NACH: ein nachsortierender Dekodierer
+/// lieferte zu abweichenden Bytes denselben Hash und loeste damit genau die
+/// Bindung, die der Plan traegt — `initialGrantPlanHash` und mit ihm die
+/// Wiedergabeidentitaet wichen vom Schreiber ab.
+///
+/// Die Gleichheit von Ein- und Ausgabebytes ist BEWIESEN, nicht geraten: die
+/// dekodierten Elemente werden mit demselben `encode_plan_items` zurueck
+/// kodiert, das der Schreiber benutzt, und gegen die Eingabe geprueft.
+pub fn decode_grant_plan(bytes: &[u8]) -> Result<GrantPlanV1, FormatError> {
+    ea_cbor::validate(bytes, ea_cbor::ParserLimits::V1)?;
+    let mut decoder = Decoder::new(bytes);
+    let length = exact_array_length(&mut decoder)?;
+    let count = usize::try_from(length).map_err(|_| FormatError::Shape)?;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        expect_array_length(&mut decoder, 4)?;
+        let recipient_key_thumbprint = KeyThumbprint::try_from(bytes_exact(&mut decoder, 32)?)
+            .map_err(|_| FormatError::Shape)?;
+        let recipient_certificate_hash = CertificateHash::try_from(bytes_exact(&mut decoder, 32)?)
+            .map_err(|_| FormatError::Shape)?;
+        if decoder.str().map_err(|_| FormatError::Shape)? != ea_crypto::GRANT_SUITE_ID {
+            return Err(FormatError::TagMismatch);
+        }
+        let purpose = GrantPurposeV1::try_from(decoder.u64().map_err(|_| FormatError::Shape)?)?;
+        items.push(GrantPlanItemV1::new(
+            recipient_key_thumbprint,
+            recipient_certificate_hash,
+            purpose,
+        ));
+    }
+    finish(&decoder, bytes)?;
+
+    validate_plan_items(&items)?;
+    if items
+        .windows(2)
+        .any(|pair| pair[0].tuple_cmp(&pair[1]) != Ordering::Less)
+    {
+        return Err(FormatError::Unsorted);
+    }
+
+    let exact = encode_plan_items(&items)?;
+    if exact != bytes {
+        return Err(FormatError::Shape);
+    }
+    let hash = grant_plan_digest(&exact);
+    Ok(GrantPlanV1 { items, exact, hash })
+}
+
+/// Die Kardinalitaets- und Doppelregeln des Plans, geteilt von Konstruktor und
+/// Dekodierer.
+///
+/// Sie stehen einmal, damit beide Seiten bei DEMSELBEN Material DENSELBEN
+/// Fehlercode liefern; die eingefrorenen `plan/rejected-*`-Vektoren nennen je
+/// einen davon.
+fn validate_plan_items(items: &[GrantPlanItemV1]) -> Result<(), FormatError> {
+    let recovery_count = items
+        .iter()
+        .filter(|item| item.purpose == GrantPurposeV1::Recovery)
+        .count();
+    match recovery_count {
+        0 => return Err(FormatError::MissingRecovery),
+        1 => {}
+        _ => return Err(FormatError::DuplicateRecovery),
+    }
+    let mut recipient_keys = BTreeSet::new();
+    let mut recipient_certificates = BTreeSet::new();
+    for item in items {
+        if !recipient_keys.insert(*item.recipient_key_thumbprint.as_bytes()) {
+            return Err(FormatError::DuplicateRecipientKey);
+        }
+        if !recipient_certificates.insert(*item.recipient_certificate_hash.as_bytes()) {
+            return Err(FormatError::DuplicateRecipientCertificate);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Eq, PartialEq)]

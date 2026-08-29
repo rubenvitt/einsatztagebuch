@@ -4,8 +4,8 @@ use cms::{content_info::ContentInfo, signed_data::SignedData};
 use der::{Decode, asn1::ObjectIdentifier};
 use ea_cbor::{ParserLimits, validate};
 use ea_types::{
-    CertificateHash, ChainSequence, DeviceId, Hash32, KeyThumbprint, OrganizationId,
-    RegistryVersion, SubjectId,
+    CertificateHash, ChainId, ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint,
+    OrganizationId, RegistryVersion, SubjectId, UnixMillis,
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use minicbor::{Decoder, Encoder, data::Type};
@@ -3453,6 +3453,301 @@ fn validate_payload(content_type: ContentType, payload: &[u8]) -> Result<(), Cry
         return Err(CryptoError::InvalidCose);
     }
     validate_unsigned_protocol_core(content_type, payload)
+}
+
+/// Der unsignierte Kern `challenge-response-core-v1`.
+///
+/// Die Feldfolge ist die von `schemas/protocol/v1/signed-protocol.cddl`:5-13.
+/// Geprueft wird sie weiterhin von [`validate_unsigned_protocol_core`]; dieser
+/// Typ traegt keine zweite Regel, nur die Felder.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ChallengeResponseCoreV1 {
+    pub organization_id: OrganizationId,
+    pub nonce: [u8; 32],
+    pub issued_at_server: UnixMillis,
+    pub expires_at: UnixMillis,
+    pub server_certificate_hash: CertificateHash,
+}
+
+impl fmt::Debug for ChallengeResponseCoreV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ChallengeResponseCoreV1(<bound>)")
+    }
+}
+
+/// Der unsignierte Kern `device-registration-request-core-v1`.
+///
+/// Die Feldfolge ist die von `schemas/protocol/v1/signed-protocol.cddl`:15-24.
+/// `requested_role` bleibt die ZAHL des Schemas (`0..2`) und wird nicht zu
+/// einer eigenen Aufzaehlung erhoben: die Rollenmenge selbst ist anderswo
+/// festgelegt, hier steht nur der Wertebereich des Kerns.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DeviceRegistrationRequestCoreV1 {
+    pub organization_id: OrganizationId,
+    pub device_id: DeviceId,
+    pub requested_role: u8,
+    pub signing_public_cose_key: CanonicalPublicCoseKey,
+    pub kem_public_cose_key: Option<CanonicalPublicCoseKey>,
+    pub supported_format_versions: Vec<u64>,
+    pub supported_suite_ids: Vec<String>,
+}
+
+impl fmt::Debug for DeviceRegistrationRequestCoreV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DeviceRegistrationRequestCoreV1(<bound>)")
+    }
+}
+
+/// Der unsignierte Kern `reader-ack-core-v1`.
+///
+/// Die Feldfolge ist die von `schemas/protocol/v1/signed-protocol.cddl`:26-34.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ReaderAckCoreV1 {
+    pub organization_id: OrganizationId,
+    pub chain_id: ChainId,
+    pub reader_certificate_hash: CertificateHash,
+    pub through_sequence: ChainSequence,
+    pub head_entry_hash: EntryHash,
+    pub acknowledged_at_device: UnixMillis,
+}
+
+impl fmt::Debug for ReaderAckCoreV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReaderAckCoreV1(<bound>)")
+    }
+}
+
+/// Die Bytes von [`ChallengeResponseCoreV1`].
+///
+/// Der Kodierer gibt nur heraus, was [`validate_unsigned_protocol_core`]
+/// annimmt: die Pruefung steht am ENDE dieser Funktion und nicht in der
+/// Zusicherung des Aufrufers.
+pub fn encode_challenge_response_core(
+    core: &ChallengeResponseCoreV1,
+) -> Result<Vec<u8>, CryptoError> {
+    let mut bytes = Vec::with_capacity(128);
+    Encoder::new(&mut bytes)
+        .array(7)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(core.organization_id.as_bytes()))
+        .and_then(|encoder| encoder.bytes(&core.nonce))
+        .and_then(|encoder| encoder.i64(core.issued_at_server.get()))
+        .and_then(|encoder| encoder.i64(core.expires_at.get()))
+        .and_then(|encoder| encoder.bytes(core.server_certificate_hash.as_bytes()))
+        .and_then(|encoder| encoder.array(0))
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    validate_unsigned_protocol_core(ContentType::ChallengeResponseCbor, &bytes)?;
+    Ok(bytes)
+}
+
+/// Die Felder von [`ChallengeResponseCoreV1`] aus ihren Bytes.
+///
+/// Der Waechter laeuft ZUERST; erst danach werden Felder herausgegeben.
+pub fn decode_challenge_response_core(
+    bytes: &[u8],
+) -> Result<ChallengeResponseCoreV1, CryptoError> {
+    validate_unsigned_protocol_core(ContentType::ChallengeResponseCbor, bytes)?;
+    let mut decoder = Decoder::new(bytes);
+    exact_array_length(&mut decoder)?;
+    protocol_version(&mut decoder)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let nonce: [u8; 32] = protocol_bstr(&mut decoder, 32)?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let issued_at_server = UnixMillis::new(
+        decoder
+            .i64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    let expires_at = UnixMillis::new(
+        decoder
+            .i64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    let server_certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    Ok(ChallengeResponseCoreV1 {
+        organization_id,
+        nonce,
+        issued_at_server,
+        expires_at,
+        server_certificate_hash,
+    })
+}
+
+/// Die Bytes von [`DeviceRegistrationRequestCoreV1`].
+pub fn encode_device_registration_request_core(
+    core: &DeviceRegistrationRequestCoreV1,
+) -> Result<Vec<u8>, CryptoError> {
+    let signing = core.signing_public_cose_key.to_deterministic_cbor();
+    let mut bytes = Vec::with_capacity(256);
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(9)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(core.organization_id.as_bytes()))
+        .and_then(|encoder| encoder.bytes(core.device_id.as_bytes()))
+        .and_then(|encoder| encoder.u8(core.requested_role))
+        .and_then(|encoder| encoder.bytes(&signing))
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    match &core.kem_public_cose_key {
+        Some(key) => encoder.bytes(&key.to_deterministic_cbor()),
+        None => encoder.null(),
+    }
+    .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    encoder
+        .array(
+            u64::try_from(core.supported_format_versions.len())
+                .map_err(|_| CryptoError::InvalidProtocolCore)?,
+        )
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    for version in &core.supported_format_versions {
+        encoder
+            .u64(*version)
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    }
+    encoder
+        .array(
+            u64::try_from(core.supported_suite_ids.len())
+                .map_err(|_| CryptoError::InvalidProtocolCore)?,
+        )
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    for suite in &core.supported_suite_ids {
+        encoder
+            .str(suite)
+            .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    }
+    encoder
+        .array(0)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    validate_unsigned_protocol_core(ContentType::DeviceRegistrationRequestCbor, &bytes)?;
+    Ok(bytes)
+}
+
+/// Die Felder von [`DeviceRegistrationRequestCoreV1`] aus ihren Bytes.
+pub fn decode_device_registration_request_core(
+    bytes: &[u8],
+) -> Result<DeviceRegistrationRequestCoreV1, CryptoError> {
+    validate_unsigned_protocol_core(ContentType::DeviceRegistrationRequestCbor, bytes)?;
+    let mut decoder = Decoder::new(bytes);
+    exact_array_length(&mut decoder)?;
+    protocol_version(&mut decoder)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let device_id = DeviceId::try_from(protocol_bstr(&mut decoder, 16)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let requested_role = u8::try_from(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    )
+    .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let signing_public_cose_key = CanonicalPublicCoseKey::from_deterministic_cbor(
+        decoder
+            .bytes()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    )?;
+    let kem_public_cose_key = match decoder
+        .datatype()
+        .map_err(|_| CryptoError::InvalidProtocolCore)?
+    {
+        Type::Null => {
+            decoder
+                .null()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?;
+            None
+        }
+        Type::Bytes => Some(CanonicalPublicCoseKey::from_deterministic_cbor(
+            decoder
+                .bytes()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?,
+        )?),
+        _ => return Err(CryptoError::InvalidProtocolCore),
+    };
+    let mut supported_format_versions = Vec::new();
+    for _ in 0..exact_array_length(&mut decoder)? {
+        supported_format_versions.push(
+            decoder
+                .u64()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?,
+        );
+    }
+    let mut supported_suite_ids = Vec::new();
+    for _ in 0..exact_array_length(&mut decoder)? {
+        supported_suite_ids.push(
+            decoder
+                .str()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?
+                .to_owned(),
+        );
+    }
+    Ok(DeviceRegistrationRequestCoreV1 {
+        organization_id,
+        device_id,
+        requested_role,
+        signing_public_cose_key,
+        kem_public_cose_key,
+        supported_format_versions,
+        supported_suite_ids,
+    })
+}
+
+/// Die Bytes von [`ReaderAckCoreV1`].
+pub fn encode_reader_ack_core(core: &ReaderAckCoreV1) -> Result<Vec<u8>, CryptoError> {
+    let mut bytes = Vec::with_capacity(160);
+    Encoder::new(&mut bytes)
+        .array(8)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(core.organization_id.as_bytes()))
+        .and_then(|encoder| encoder.bytes(core.chain_id.as_bytes()))
+        .and_then(|encoder| encoder.bytes(core.reader_certificate_hash.as_bytes()))
+        .and_then(|encoder| encoder.u64(core.through_sequence.get()))
+        .and_then(|encoder| encoder.bytes(core.head_entry_hash.as_bytes()))
+        .and_then(|encoder| encoder.i64(core.acknowledged_at_device.get()))
+        .and_then(|encoder| encoder.array(0))
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    validate_unsigned_protocol_core(ContentType::ReaderAckCbor, &bytes)?;
+    Ok(bytes)
+}
+
+/// Die Felder von [`ReaderAckCoreV1`] aus ihren Bytes.
+pub fn decode_reader_ack_core(bytes: &[u8]) -> Result<ReaderAckCoreV1, CryptoError> {
+    validate_unsigned_protocol_core(ContentType::ReaderAckCbor, bytes)?;
+    let mut decoder = Decoder::new(bytes);
+    exact_array_length(&mut decoder)?;
+    protocol_version(&mut decoder)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let chain_id = ChainId::try_from(protocol_bstr(&mut decoder, 16)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let reader_certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let through_sequence = ChainSequence::new(
+        decoder
+            .u64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    let head_entry_hash = EntryHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let acknowledged_at_device = UnixMillis::new(
+        decoder
+            .i64()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?,
+    );
+    Ok(ReaderAckCoreV1 {
+        organization_id,
+        chain_id,
+        reader_certificate_hash,
+        through_sequence,
+        head_entry_hash,
+        acknowledged_at_device,
+    })
+}
+
+/// Die fuehrende Versionszahl eines Kerns, die der Waechter schon gepruft hat.
+fn protocol_version(decoder: &mut Decoder<'_>) -> Result<(), CryptoError> {
+    decoder
+        .u64()
+        .map(|_| ())
+        .map_err(|_| CryptoError::InvalidProtocolCore)
 }
 
 pub fn validate_unsigned_protocol_core(

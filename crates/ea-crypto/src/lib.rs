@@ -13,10 +13,14 @@ pub use aead::{
     AEAD_NONCE_SIZE, AEAD_OVERHEAD, CEK_SIZE, aead_open, aead_seal, checked_ciphertext_length,
 };
 pub use cose::{
-    CertificateCapability, ContentType, CoseSigner, CoseVerifier, ParsedCoseSign1, ProtectedHeader,
+    CertificateCapability, ChallengeResponseCoreV1, ContentType, CoseSigner, CoseVerifier,
+    DeviceRegistrationRequestCoreV1, ParsedCoseSign1, ProtectedHeader, ReaderAckCoreV1,
     RecoveryVerificationContext, ResolvedSigner, SignerCertificateResolver, SignerRole,
     UnverifiedRfc3161TimeStampToken, VerificationContext, VerifiedRecoveryTest, VerifiedSigner,
-    attach_rfc3161_ctt, cose_sign1_ctt_imprint, encode_signed_protocol_wrapper, parse_cose_sign1,
+    attach_rfc3161_ctt, cose_sign1_ctt_imprint, decode_challenge_response_core,
+    decode_device_registration_request_core, decode_reader_ack_core,
+    encode_challenge_response_core, encode_device_registration_request_core,
+    encode_reader_ack_core, encode_signed_protocol_wrapper, parse_cose_sign1,
     validate_signer_certificate, validate_unsigned_protocol_core, verify_cose_sign1,
     verify_enrollment_pop, verify_initial_root_pop, verify_recovery_test,
 };

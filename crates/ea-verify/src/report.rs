@@ -19,6 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use ea_archive::QuarantineReason;
 use ea_chain::RollbackAssessment;
 use ea_crypto::verification_report_hash;
+// `ObjectTypeV1` wird NICHT hier deklariert: die geschlossene Menge 1..6 steht
+// neben den Exact-Object-Praefixen in `crates/ea-format/src/parser.rs`.
+use ea_format::ObjectTypeV1;
 use ea_types::{
     ChainId, ChainSequence, DestructionId, EntryHash, Hash32, KeyThumbprint, ObjectHash,
     RegistryVersion,
@@ -39,41 +42,6 @@ fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
         write!(formatter, "{byte:02x}")?;
     }
     Ok(())
-}
-
-/// Die sechs Objektarten aus `crates/ea-format/src/parser.rs`.
-///
-/// Die Zahlenwerte sind die Typbytes der Exact-Object-Praefixe und zugleich der
-/// Wertebereich von `objectResult.objectType` (1..6) im Berichtsschema.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum ObjectTypeV1 {
-    /// `.eip` — signiertes Eintragspaket.
-    Entry,
-    /// `.eag` — Freigabe.
-    Grant,
-    /// `.esr` — Serverquittung.
-    Receipt,
-    /// `.ecp` — Evidence- beziehungsweise Checkpoint-Objekt.
-    Evidence,
-    /// `.etb` — Trust-Objekt.
-    Trust,
-    /// `.eds` — Stummel eines autorisiert vernichteten Eintrags.
-    Destroyed,
-}
-
-impl ObjectTypeV1 {
-    /// Das Typbyte, wie es im Praefix und im Bericht steht.
-    #[must_use]
-    pub const fn code(self) -> u64 {
-        match self {
-            Self::Entry => 1,
-            Self::Grant => 2,
-            Self::Receipt => 3,
-            Self::Evidence => 4,
-            Self::Trust => 5,
-            Self::Destroyed => 6,
-        }
-    }
 }
 
 /// Der Ausgang der Pruefung eines Objekts.

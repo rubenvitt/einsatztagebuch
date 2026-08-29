@@ -83,6 +83,13 @@ mod recipient;
 mod report;
 mod state;
 
+/// Die geschlossene Menge der sechs Objektarten, DURCHGEREICHT.
+///
+/// Sie steht neben den Exact-Object-Praefixen in `ea-format` und nicht ein
+/// zweites Mal hier; `objectResult.objectType` des Berichts ist genau ihr
+/// Wertebereich.
+pub use ea_format::ObjectTypeV1;
+
 pub use archive::{
     EvidenceRequirementV1, RecipientKeyV1, VerifyOptions, verify_archive, verify_archive_observed,
 };
@@ -97,7 +104,7 @@ pub use gates::{
 pub use recipient::{DecryptionErrorV1, RecipientGrantErrorV1};
 pub use report::{
     AuthorizedDestructionV1, ChainGapV1, ChainHeadV1, DestructionStateV1, ObjectErrorV1,
-    ObjectResultKindV1, ObjectResultV1, ObjectTypeV1, QuarantinedObjectV1, ServerConfirmationV1,
+    ObjectResultKindV1, ObjectResultV1, QuarantinedObjectV1, ServerConfirmationV1,
     VerificationReportV1,
 };
 pub use state::{EphemeralTrustStateStore, verification_state_key};

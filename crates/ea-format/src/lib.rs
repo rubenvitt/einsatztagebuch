@@ -22,7 +22,7 @@ pub use archive_profile::{
 };
 pub use eag::{
     GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1, GrantPurposeV1,
-    GrantV1,
+    GrantV1, decode_grant_plan,
 };
 pub use ecp::{
     CheckpointCoreFieldsV1, CheckpointCoreV1, DecodedEvidencePayloadV1, EvidenceKindV1,
@@ -60,8 +60,8 @@ pub use object::{ExactObjectBytes, FormatError, Parsed, ParsedArchiveObject};
 pub use parser::{
     EAG_MAX_RAW_BYTES_V1, EAG_PREFIX_V1, ECP_MAX_RAW_BYTES_V1, ECP_PREFIX_V1, EDS_MAX_RAW_BYTES_V1,
     EDS_PREFIX_V1, EIP_MAX_RAW_BYTES_V1, EIP_PREFIX_V1, ESR_MAX_RAW_BYTES_V1, ESR_PREFIX_V1,
-    ETB_MAX_RAW_BYTES_V1, ETB_PREFIX_V1, MAX_ARCHIVE_OBJECT_BYTES_V1, decode_exact_object,
-    encode_destroyed_entry_stub, encode_entry_package, encode_evidence, encode_grant,
-    encode_receipt, encode_trust,
+    ETB_MAX_RAW_BYTES_V1, ETB_PREFIX_V1, MAX_ARCHIVE_OBJECT_BYTES_V1, ObjectTypeV1,
+    decode_exact_object, encode_destroyed_entry_stub, encode_entry_package, encode_evidence,
+    encode_grant, encode_receipt, encode_trust,
 };
 pub use trust_view::{AuthorizedTrustCoreV1, DecodedTrustPayloadV1};
