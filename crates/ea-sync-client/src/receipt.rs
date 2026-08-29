@@ -23,9 +23,9 @@
 //!
 //! Die Reihenfolge ist die ganze Zusage. Die Kandidatenbytes werden in einer
 //! Lesesicht NEBEN den Bestand gelegt, nicht IN ihn; erst der bestandene
-//! Bericht fuehrt zu `create_if_absent`. Eine abgelegte und danach geprueffte
+//! Bericht fuehrt zu `create_if_absent`. Eine abgelegte und danach gepruefte
 //! Quittung waere ein Bestand, der zwischen den beiden Schritten eine
-//! ungeprueffte Serveraussage traegt.
+//! ungepruefte Serveraussage traegt.
 
 use ea_archive::{ArchiveBlob, ArchiveError, ArchivePath, ArchiveSource, RECEIPTS_DIR_V1};
 use ea_format::{ParsedArchiveObject, decode_exact_object};

@@ -141,8 +141,11 @@ independent formal audit.
 
 ### 1. Primary sources per crate
 
-Read from the official crates.io records of the pinned releases. Every release
-below is published and **not yanked**.
+Read from the official crates.io records of the pinned releases for the ten
+rows of the server class: every one of those releases is published and **not
+yanked**. The four rows of the HTTP client family carry `not retrieved` in the
+publication column, and for them this sentence is expressly NOT claimed — see
+the paragraph above.
 
 | Crate | Pinned release | Published | Declared SPDX | crates.io record | Upstream project |
 | --- | --- | --- | --- | --- | --- |
@@ -278,10 +281,13 @@ patch bump.
 ### 4. RustSec advisory review
 
 Queried on 2026-08-28 against the [RustSec advisory database](https://github.com/RustSec/advisory-db)
-by reading `crates/<name>/` for each crate of the pinned tree, and confirmed
+by reading `crates/<name>/` for each crate of the SERVER class, and confirmed
 mechanically by resolving the selection above in a scratch package and running
 `cargo deny check advisories` against this repository's `deny.toml`, which
-answered `advisories ok` with no new `ignore` entry.
+answered `advisories ok` with no new `ignore` entry. The four rows of the HTTP
+client family were NOT read that way — they carry `not retrieved`, and the only
+statement this document makes about them is the `cargo deny` result over the
+resolved tree.
 
 | Crate | Advisories found | Highest patched floor | Verdict for the pinned tree |
 | --- | --- | --- | --- |

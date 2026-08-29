@@ -139,3 +139,52 @@ async fn a_format_valid_but_unverifiable_local_receipt_never_confirms_an_entry()
         "der Eintrag bleibt anstehend, solange keine GEPRUEFTE Quittung auf ihn zeigt"
     );
 }
+
+/// Der Commit geht an den Pfad des Endpunkts, mit der KETTE darin.
+///
+/// Der Regressionszeuge zu einem Befund der Selbstpruefung: die Ziel-URI trug
+/// einmal den Eintragshash, wo die Kettenkennung hingehoert. Die Signatur deckt
+/// `@target-uri` ab, also ist das keine stille Fehladressierung, sondern eine
+/// Signatur ueber eine andere Ressource — und die Attrappe echote jeden Pfad,
+/// also sah es niemand.
+#[tokio::test]
+async fn the_commit_goes_to_the_endpoint_path_of_this_chain() {
+    let mut harness = SyncHarness::new().await;
+    harness.server.return_receipt(fixtures::bad_receipt());
+    let _ = harness.push_pending().await;
+
+    let targets = harness.server.seen_targets();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0], harness.expected_commit_target());
+    assert!(
+        targets[0].starts_with("/v1/chains/") && targets[0].ends_with("/entry-commits"),
+        "der Pfad ist der des Endpunkts: {}",
+        targets[0]
+    );
+}
+
+/// Der ueberschrittene Queuebound erreicht den oeffentlichen Zustand `Fehler`.
+///
+/// Die Kette ganz, an einer echten Warteschlange: das Profil laesst genau ein
+/// Objekt zu, der Plan traegt mehr, und was am Ende dasteht, ist `Fehler` mit
+/// `Queuegrenze erreicht` daneben. Vor Task 10 pinnte
+/// `crates/ea-archive-fs/tests/publication_queue.rs` diesen Zustand direkt;
+/// seit die Abbildung in `ea-sync-client` liegt, gehoert der Zeuge hierher.
+#[tokio::test]
+async fn an_exceeded_queue_bound_reaches_the_public_failed_state() {
+    let mut harness = SyncHarness::controlled_network_with_a_single_object_bound().await;
+    let summary = harness
+        .push_pending()
+        .await
+        .expect("die Grenze ist ein ZUSTAND");
+    assert_eq!(summary.status(), SyncStatus::Failed);
+    assert_eq!(
+        summary.detail_cause(),
+        Some(ea_archive_fs::DetailCause::QueueLimitReached)
+    );
+    assert_eq!(
+        harness.server.commit_calls(),
+        0,
+        "eine abgelehnte Netzarchivpublikation gibt den Serverupload NICHT frei"
+    );
+}

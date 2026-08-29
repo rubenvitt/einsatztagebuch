@@ -223,8 +223,22 @@ impl SyncClient {
                 break;
             }
             if !schedule.is_due(self.config.observed_now) {
+                // ABBRUCH und nicht Ueberspringen, und das ist dieselbe
+                // Reihenfolgezusage wie drei Zeilen weiter unten: die Kette
+                // wird in IHRER Reihenfolge hochgeladen, und
+                // `SyncQueueV1::derive` sortiert die anstehenden Eintraege
+                // genau dafuer aufsteigend nach Sequenz.
+                //
+                // Ein `continue` waere hier ein stiller Reihenfolgebruch mit
+                // dauerhafter Folge: liegt Sequenz 7 nach einem
+                // voruebergehenden Leitungsfehler auf ihrem Backoff, ginge
+                // Sequenz 8 vor ihr auf die Leitung, der Dienst prueft die
+                // Kettenposition und antwortet mit einem Fork — und ein Fork
+                // wird zu Recht NICHT automatisch wiederholt. Aus einem
+                // Netzaussetzer auf einem Eintrag waere eine harte Ablehnung
+                // des naechsten geworden.
                 step = Some(PendingStepV1::ServerUpload);
-                continue;
+                break;
             }
 
             // Schritt 12, ERSTE Haelfte: das Netzarchiv. Solange es wartet,
@@ -254,7 +268,14 @@ impl SyncClient {
         }
 
         let outstanding = queue.pending().len().saturating_sub(pushed);
-        let (status, detail_cause) = sync_state_of(outstanding, step);
+        // Die BESTAETIGTEN sind die, die schon vor diesem Lauf eine gepruefte
+        // Quittung trugen, PLUS die, die dieser Lauf bestaetigt hat. Ohne den
+        // zweiten Summanden meldete ein Lauf, der genau den letzten
+        // anstehenden Eintrag bestaetigt, `lokal gesichert` statt
+        // `synchronisiert` — die Ableitung, die den Zuwachs saehe, lief vor
+        // ihm.
+        let confirmed = queue.confirmed().saturating_add(pushed);
+        let (status, detail_cause) = sync_state_of(outstanding, confirmed, step);
         Ok(PushSummary {
             pushed,
             outstanding,
@@ -515,13 +536,18 @@ impl SyncClient {
             return Err(SyncClientError::Protocol);
         }
         // Der Challenge-Endpunkt antwortet mit einem signierten
-        // `challenge-response-v1`. Eine Attrappe darf die 32 Nonce-Bytes roh
-        // liefern; beide Wege enden bei denselben 32 Byte, und ein dritter
-        // waere eine zweite Auslegung des Endpunkts.
-        if let Ok(decoded) = ea_sync_protocol::ChallengeResponseV1::decode(&response.body) {
-            return Ok(decoded.core().nonce);
-        }
-        <[u8; 32]>::try_from(response.body.as_slice()).map_err(|_| SyncClientError::Protocol)
+        // `challenge-response-v1`, und nur damit. Es gab hier einmal einen
+        // zweiten Zweig, der beliebige 32 Byte als Nonce annahm; er existierte
+        // ausschliesslich, damit eine Attrappe sich das Rahmen sparen konnte —
+        // also ein Testpfad in der Produktionsflaeche, und obendrein einer,
+        // der einen ungerahmten, unzugeordneten Koerper von der Leitung
+        // akzeptierte. Die Attrappe rahmt jetzt wie der Dienst.
+        Ok(
+            ea_sync_protocol::ChallengeResponseV1::decode(&response.body)
+                .map_err(|_| SyncClientError::Protocol)?
+                .core()
+                .nonce,
+        )
     }
 
     /// Signiert genau die Komponentenliste des Profils.

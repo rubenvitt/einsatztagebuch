@@ -60,6 +60,22 @@ pub fn controlled_network_profile() -> ArchiveBackendProfileV1 {
     })
 }
 
+/// Dasselbe Profil mit einer Queuegrenze von GENAU EINEM Objekt.
+///
+/// Der einzige Weg zum oeffentlichen Zustand `Fehler`, den ein Bestand aus
+/// eigener Kraft erreicht: der Publikationsplan eines Eintrags traegt seine
+/// Grants UND das `.eip`, also mindestens zwei Objekte.
+#[must_use]
+pub fn controlled_network_profile_with_a_single_object_bound() -> ArchiveBackendProfileV1 {
+    let ArchiveBackendProfileV1::ControlledNetworkPath(mut profile) = controlled_network_profile()
+    else {
+        unreachable!("die Fixture baut ein kontrolliertes Netzprofil");
+    };
+    profile.filesystem_row_id = "fixture-sync-fs-tight".to_owned();
+    profile.queue_max_objects = 1;
+    ArchiveBackendProfileV1::ControlledNetworkPath(profile)
+}
+
 /// Die wirksame Zulassung, die dieses Profil traegt.
 ///
 /// Sie entsteht aus der ECHTEN Policy des gewaehlten Registrierungskopfs, mit
@@ -71,11 +87,16 @@ pub fn policy_allowing_the_network_profile(
     head: &ea_trust::SelectedRegistryHead,
 ) -> BoundArchiveProfilePolicyV1 {
     let mut policy = head.policy_fields().clone();
-    policy.allowed_archive_profile_hashes.push(
-        controlled_network_profile()
-            .profile_hash()
-            .expect("das Netzprofil muss hashbar sein"),
-    );
+    for profile in [
+        controlled_network_profile(),
+        controlled_network_profile_with_a_single_object_bound(),
+    ] {
+        policy.allowed_archive_profile_hashes.push(
+            profile
+                .profile_hash()
+                .expect("das Netzprofil muss hashbar sein"),
+        );
+    }
     BoundArchiveProfilePolicyV1::from_policy(&policy)
 }
 
@@ -192,6 +213,8 @@ pub struct FakeServer {
     seen_commit_bodies: Mutex<Vec<Vec<u8>>>,
     /// Jede Nonce, mit der ein Commit signiert war.
     seen_nonces: Mutex<Vec<[u8; 32]>>,
+    /// Jeder Zielpfad, unter dem ein Commit ankam.
+    seen_targets: Mutex<Vec<String>>,
     /// Die Antworten, die vor `reply` der Reihe nach ausgegeben werden.
     scripted: Mutex<Vec<CommitReplyV1>>,
 }
@@ -205,6 +228,7 @@ impl FakeServer {
             reply: Mutex::new(reply),
             seen_commit_bodies: Mutex::new(Vec::new()),
             seen_nonces: Mutex::new(Vec::new()),
+            seen_targets: Mutex::new(Vec::new()),
             scripted: Mutex::new(Vec::new()),
         }
     }
@@ -251,6 +275,15 @@ impl FakeServer {
             .clone()
     }
 
+    /// Jeder Zielpfad, unter dem ein Commit ankam.
+    #[must_use]
+    pub fn seen_targets(&self) -> Vec<String> {
+        self.seen_targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn next_reply(&self) -> CommitReplyV1 {
         self.scripted
             .lock()
@@ -278,12 +311,25 @@ impl SyncTransportV1 for FakeServer {
             // messen kann.
             let mut nonce = [0_u8; 32];
             nonce[..8].copy_from_slice(&(count as u64 + 1).to_be_bytes());
+            // GERAHMT wie beim Dienst. Die Attrappe lieferte hier einmal die
+            // 32 Byte roh, und der Klient trug dafuer einen zweiten,
+            // nachsichtigen Zweig — ein Testpfad in der Produktionsflaeche.
+            // Jetzt laeuft der Zeuge durch denselben `ChallengeResponseV1`,
+            // den der Dienst schickt, und der Klient hat nur noch einen Weg.
             return Ok(TransportResponseV1 {
                 status: 200,
-                body: nonce.to_vec(),
+                body: challenge_response_bytes(nonce),
             });
         }
 
+        // Der SIGNIERTE Zielpfad, wie die Gegenstelle ihn sieht. Er wird
+        // aufgezeichnet, weil die Signatur `@target-uri` abdeckt: ein falscher
+        // Pfad ist keine stille Fehladressierung, sondern eine Signatur ueber
+        // eine andere Ressource — und ohne diese Zeile faende kein Zeuge das.
+        self.seen_targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request.target.clone());
         self.commit_calls.fetch_add(1, Ordering::SeqCst);
         self.seen_commit_bodies
             .lock()
@@ -352,9 +398,73 @@ impl SyncHarness {
         Self::build(Some(true)).await
     }
 
+    /// Ein LOKALES Profil, dessen Linie ein Serverquittungszertifikat traegt.
+    ///
+    /// Die einzige Kulisse, in der eine Quittung ueberhaupt BESTAETIGT werden
+    /// kann: Gate `receipt` verlangt die Capability `serverReceipt`.
+    pub async fn with_server_receipt_certificate() -> Self {
+        Self::build_with(None, true).await
+    }
+
+    /// Dieselbe Linie mit erreichbarem Netzarchiv.
+    pub async fn controlled_network_with_server_receipt_certificate() -> Self {
+        Self::build_with(Some(true), true).await
+    }
+
     async fn build(network: Option<bool>) -> Self {
-        let writer = WriterHarness::with_incident();
+        Self::build_with(network, false).await
+    }
+
+    /// Ein Netzprofil, dessen Queuegrenze der Plan eines Eintrags ueberschreitet.
+    pub async fn controlled_network_with_a_single_object_bound() -> Self {
+        let mut harness = Self::build_with(Some(true), false).await;
+        let target = Arc::new(SwitchableTarget::new(true));
+        harness.queue = Some(Arc::new(
+            PublicationQueue::new(
+                Box::new(SharedTarget(Arc::clone(&target))),
+                controlled_network_profile_with_a_single_object_bound(),
+                &policy_allowing_the_network_profile(harness.writer.head()),
+            )
+            .expect("die Warteschlange des engen Profils muss stehen"),
+        ));
+        harness.target = Some(target);
+        harness
+    }
+
+    /// Der Zielpfad, unter dem ein Commit dieser Kette ankommen MUSS.
+    ///
+    /// Aus der VORLAGE des Endpunkts gebildet, genau wie im Klienten — der
+    /// Zeuge vergleicht damit zwei Wege zu derselben Adresse und nicht eine
+    /// Adresse mit sich selbst.
+    #[must_use]
+    pub fn expected_commit_target(&self) -> String {
+        let chain = self
+            .writer
+            .binding()
+            .chain_id
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        ea_sync_protocol::EndpointV1::EntryCommits
+            .path_template()
+            .replace("{chainId}", &chain)
+    }
+
+    async fn build_with(network: Option<bool>, server_receipt_certificate: bool) -> Self {
+        let writer = WriterHarness::with_variant(writer_support::LineVariantV1 {
+            with_server_receipt_certificate: server_receipt_certificate,
+            ..writer_support::LineVariantV1::default()
+        });
         writer.finalize_once();
+        if server_receipt_certificate {
+            // Der Bestand bekommt seine VERTRAUENSABLAGE. Ohne sie waehlt der
+            // volle Verifizierer keinen Registrierungskopf, meldet null
+            // Objektergebnisse — und keine Quittung koennte je bestaetigt
+            // werden. Die uebrigen Kulissen lassen sie AUS: sie messen den
+            // Bestand, den der Writer selbst geschrieben hat.
+            writer.materialize_trust_objects();
+        }
         let target = network.map(|connected| Arc::new(SwitchableTarget::new(connected)));
         let queue = target.as_ref().map(|target| {
             Arc::new(
@@ -475,6 +585,16 @@ impl SyncHarness {
         &self.writer
     }
 
+    /// Die Bytes einer ECHTEN Serverquittung auf diesen Eintrag.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Linie kein Serverquittungszertifikat traegt.
+    #[must_use]
+    pub fn genuine_receipt(&self, entry: &ea_sync_client::PendingEntryV1) -> Vec<u8> {
+        genuine_receipt_bytes(&self.writer, entry)
+    }
+
     /// Legt eine FORMGUELTIGE, aber unpruefbare `.esr` in den Bestand.
     ///
     /// Sie traegt das Exact-Object-Praefix einer Quittung, dekodiert
@@ -511,6 +631,23 @@ impl SyncHarness {
             .map(ea_sync_client::PendingEntryV1::entry_object_hash)
     }
 
+    /// Die Zahl der anstehenden Eintraege.
+    pub async fn pending_count(&self) -> usize {
+        let backend = self.writer.backend_handle();
+        let anchor_bytes = self.writer.anchor_bytes();
+        let observed_now = self.observed_now();
+        tokio::task::spawn_blocking(move || {
+            let anchor =
+                ea_trust::decode_trust_anchor(&anchor_bytes).expect("der Anker muss dekodieren");
+            ea_sync_client::SyncQueueV1::derive(&backend.as_archive_source(), &anchor, observed_now)
+                .expect("die Ableitung muss tragen")
+                .pending()
+                .len()
+        })
+        .await
+        .expect("der Blockierthread darf nicht verlorengehen")
+    }
+
     /// Der eine anstehende Eintrag, so wie die Ableitung ihn sieht.
     pub async fn pending_entry(&self) -> Option<ea_sync_client::PendingEntryV1> {
         let backend = self.writer.backend_handle();
@@ -540,7 +677,7 @@ impl SyncHarness {
     ///
     /// Ein echter [`ea_sync_protocol::TechnicalCursorV1`] und keine erfundenen
     /// Bytes: der Klient nimmt nur signierte Cursor an, und ein Test mit
-    /// Zufallsbytes prueefte einen Weg, den es nicht gibt.
+    /// Zufallsbytes pruefte einen Weg, den es nicht gibt.
     ///
     /// # Panics
     ///
@@ -567,33 +704,44 @@ impl SyncHarness {
     }
 }
 
-/// Baut eine formgueltige `.esr` mit einer Signatur, die niemand bestaetigt.
+/// Die Felder EINER Quittung auf diesen Eintrag, aus dem committeten `.eip`.
 ///
-/// Der KERN entsteht mit dem echten [`ea_format::ReceiptCoreV1`] und die
-/// Objektbytes mit [`ea_format::encode_receipt`] — eine von Hand gebaute
-/// Bytefolge waere keine formgueltige Quittung und wuerde schon am Parser
-/// scheitern, also am falschen Tor. Der Signaturschluessel ist einer, den die
-/// Registrierungslinie der Fixture nicht fuehrt.
-fn forged_receipt_bytes(writer: &WriterHarness, entry: &ea_sync_client::PendingEntryV1) -> Vec<u8> {
-    let head = writer.head();
-    let signer = ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new([0x9e; 32]));
-    let certificate_hash = ea_types::CertificateHash::try_from(&[0x77_u8; 32][..])
-        .expect("32 Byte sind ein Zertifikatshash");
-    let fields = ea_format::ReceiptCoreFieldsV1 {
-        organization_id: writer_support::trust_support::organization(),
-        chain_id: writer.binding().chain_id,
-        chain_sequence: entry.sequence(),
+/// Die fuenf Bindungen aus `design.md` §14.1 Schritt 7 — `entryHash`,
+/// `chainSequence`, `registryVersion`, `registryHeadHash` und
+/// `initialGrantPlanHash` — werden AUS DEM MANIFEST gelesen und nicht daneben
+/// gebaut. Eine Fixture, die sie selbst zusammensetzt, prueft am Ende sich
+/// selbst; so gelesen halten sie per Konstruktion, und was der Test misst, ist
+/// die SIGNATUR.
+fn receipt_fields_for(
+    writer: &WriterHarness,
+    entry: &ea_sync_client::PendingEntryV1,
+    server_certificate_hash: ea_types::CertificateHash,
+    server_key_thumbprint: ea_types::KeyThumbprint,
+) -> ea_format::ReceiptCoreFieldsV1 {
+    let ea_format::ParsedArchiveObject::Entry(parsed) =
+        ea_format::decode_exact_object(entry.entry_bytes())
+            .expect("das committete .eip muss dekodieren")
+    else {
+        unreachable!("ein committetes .eip ist ein Eintragspaket");
+    };
+    let manifest = parsed.value().manifest().fields();
+    ea_format::ReceiptCoreFieldsV1 {
+        organization_id: manifest.organization_id,
+        chain_id: manifest.chain_id,
+        chain_sequence: manifest.chain_sequence,
         entry_hash: entry.entry_hash(),
         entry_object_hash: entry.entry_object_hash(),
-        previous_entry_hash: None,
-        registry_version: head.registry_version(),
-        registry_head_hash: ea_types::Hash32::try_from(&head.registry_head_hash().as_bytes()[..])
+        previous_entry_hash: manifest.previous_entry_hash,
+        registry_version: manifest.registry_version,
+        registry_head_hash: ea_types::Hash32::try_from(&manifest.registry_head_hash[..])
             .expect("32 Byte sind ein Hash"),
-        policy_object_hash: head.policy_object_hash(),
-        initial_grant_plan_hash: entry
-            .grant_plan()
-            .expect("der Plan der Fixture entsteht")
-            .hash(),
+        // NICHT gebunden (`receipt_bindings_hold` laesst ihn ausdruecklich
+        // aus): ein fester Fuellwert, damit die Fixture ihn nicht aus dem Kopf
+        // zieht und am Ende sich selbst prueft.
+        policy_object_hash: ea_types::ObjectHash::try_from(&[0x44_u8; 32][..])
+            .expect("32 Byte sind ein Objekthash"),
+        initial_grant_plan_hash: ea_types::Hash32::try_from(&manifest.initial_grant_plan_hash[..])
+            .expect("32 Byte sind ein Hash"),
         initial_grant_object_hashes: {
             let mut hashes: Vec<ea_types::ObjectHash> = entry
                 .grant_bytes()
@@ -605,27 +753,110 @@ fn forged_receipt_bytes(writer: &WriterHarness, entry: &ea_sync_client::PendingE
         },
         accepted_at_server: writer.observed_now(),
         evidence_due_at: None,
-        server_key_thumbprint: signer
-            .public_key()
-            .expect("der oeffentliche Punkt ist gueltig")
-            .thumbprint(),
-        server_certificate_hash: certificate_hash,
-    };
-    let core = ea_format::ReceiptCoreV1::new(fields).expect("der Quittungskern muss entstehen");
-    let signature = signer
-        .sign_receipt(core.exact_bytes())
-        .expect("die Signatur der Fixture muss entstehen");
+        server_key_thumbprint,
+        server_certificate_hash,
+    }
+}
+
+/// Kodiert Kern und Signatur zu den exakten `.esr`-Objektbytes.
+fn encode_receipt_bytes(core: ea_format::ReceiptCoreV1, signature: Vec<u8>) -> Vec<u8> {
     ea_format::encode_receipt(
-        &ea_format::ReceiptV1::new(core, signature).expect("die Quittung muss entstehen"),
+        &ea_format::ReceiptV1::new(core, signature).expect("die Quittung muss binden"),
     )
     .expect("die Objektbytes muessen entstehen")
     .into_vec()
 }
 
+/// Eine ECHTE Serverquittung dieser Linie.
+///
+/// Der Signierer ist der Schluessel, auf den die Registrierungslinie ihre
+/// Geraetezertifikate ausstellt, und das Zertifikat ist das der Art
+/// `ServerReceipt`. Die ROLLE kommt vom Zertifikat und nicht vom Schluessel —
+/// dieselbe Aufteilung wie in `crates/ea-verify/tests/support`.
+///
+/// # Panics
+///
+/// Wenn die Linie kein Serverquittungszertifikat traegt.
+fn genuine_receipt_bytes(
+    writer: &WriterHarness,
+    entry: &ea_sync_client::PendingEntryV1,
+) -> Vec<u8> {
+    let certificate = writer
+        .server_receipt_certificate_hash()
+        .expect("diese Kulisse verlangt ein Serverquittungszertifikat");
+    let signer = writer_support::trust_support::authorized_device_signer();
+    let fields = receipt_fields_for(
+        writer,
+        entry,
+        ea_types::CertificateHash::from(certificate),
+        writer_support::trust_support::authorized_device_signing_key_thumbprint(),
+    );
+    let core = ea_format::ReceiptCoreV1::new(fields).expect("der Quittungskern muss entstehen");
+    let signature = signer
+        .sign_receipt(core.exact_bytes())
+        .expect("der Fixture-Server muss signieren");
+    encode_receipt_bytes(core, signature)
+}
+
+/// Eine formgueltige `.esr` mit einer Signatur, die niemand bestaetigt.
+///
+/// Sie traegt das Exact-Object-Praefix einer Quittung, dekodiert anstandslos
+/// und zeigt auf DIESEN Eintrag — nur ihr Signaturschluessel ist einer, den
+/// die Registrierungslinie nicht fuehrt. Genau so sieht die Faelschung aus,
+/// gegen die die Ableitung sich wehren muss: das Inventar klassifiziert am
+/// Praefix, und `esr::parse_body` prueft Gestalt und Content Type, aber weder
+/// Signatur noch Bindung.
+fn forged_receipt_bytes(writer: &WriterHarness, entry: &ea_sync_client::PendingEntryV1) -> Vec<u8> {
+    let signer = ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new([0x9e; 32]));
+    let certificate_hash = ea_types::CertificateHash::try_from(&[0x77_u8; 32][..])
+        .expect("32 Byte sind ein Zertifikatshash");
+    let fields = receipt_fields_for(
+        writer,
+        entry,
+        certificate_hash,
+        signer
+            .public_key()
+            .expect("der oeffentliche Punkt ist gueltig")
+            .thumbprint(),
+    );
+    let core = ea_format::ReceiptCoreV1::new(fields).expect("der Quittungskern muss entstehen");
+    let signature = signer
+        .sign_receipt(core.exact_bytes())
+        .expect("die Signatur der Fixture muss entstehen");
+    encode_receipt_bytes(core, signature)
+}
+
+/// Rahmt eine Nonce als `challenge-response-v1`, so wie der Dienst es tut.
+///
+/// Mit dem ECHTEN Kern und der ECHTEN COSE-Signatur: `ChallengeResponseV1::new`
+/// prueft Profil, Content Type und die Bindung der Signatur an genau diesen
+/// Kern, und eine von Hand gebaute Bytefolge kaeme daran nicht vorbei.
+fn challenge_response_bytes(nonce: [u8; 32]) -> Vec<u8> {
+    let signer = ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new([0x3d; 32]));
+    let certificate_hash = ea_types::CertificateHash::try_from(&[0x52_u8; 32][..])
+        .expect("32 Byte sind ein Zertifikatshash");
+    let core = ea_crypto::ChallengeResponseCoreV1 {
+        organization_id: writer_support::trust_support::organization(),
+        nonce,
+        issued_at_server: ea_types::UnixMillis::new(1),
+        expires_at: ea_types::UnixMillis::new(300_001),
+        server_certificate_hash: certificate_hash,
+    };
+    let exact_core =
+        ea_crypto::encode_challenge_response_core(&core).expect("der Kern muss kodieren");
+    let signature = signer
+        .sign_challenge_response(&exact_core)
+        .expect("die Attrappe muss signieren");
+    ea_sync_protocol::ChallengeResponseV1::new(core, &signature)
+        .expect("die Challenge-Antwort muss rahmen")
+        .exact_bytes()
+        .to_vec()
+}
+
 /// Rahmt Quittungsbytes so, wie der Dienst sie ausliefert.
 ///
 /// Der Rahmen entsteht mit dem ECHTEN [`ea_sync_protocol::EntryCommitResponseV1`]
-/// und nicht von Hand: eine Attrappe, die ihren eigenen Rahmen baut, prueefte
+/// und nicht von Hand: eine Attrappe, die ihren eigenen Rahmen baut, pruefte
 /// den Klienten gegen eine zweite Auslegung derselben Leitung.
 fn framed(outcome: ea_sync_protocol::EntryCommitOutcome, receipt_bytes: Vec<u8>) -> Vec<u8> {
     ea_sync_protocol::EntryCommitResponseV1::new(outcome, receipt_bytes, None)
@@ -636,7 +867,7 @@ fn framed(outcome: ea_sync_protocol::EntryCommitOutcome, receipt_bytes: Vec<u8>)
 /// Der Cursorsignierer der Fixture — ein ECHTES Ed25519-Paar.
 ///
 /// Der Klient nimmt nur einen ausgestellten [`ea_sync_protocol::TechnicalCursorV1`]
-/// an; erfundene Tokenbytes prueeften einen Weg, den es nicht gibt.
+/// an; erfundene Tokenbytes prueften einen Weg, den es nicht gibt.
 struct FixtureCursorSigner;
 
 impl ea_sync_protocol::TechnicalCursorSigner for FixtureCursorSigner {

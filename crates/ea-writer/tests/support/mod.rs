@@ -95,6 +95,7 @@ const RECOVERY_MARKER: u8 = 0x62;
 const READER_ONE_MARKER: u8 = 0x63;
 const READER_TWO_MARKER: u8 = 0x64;
 const SECOND_RECOVERY_MARKER: u8 = 0x65;
+const SERVER_RECEIPT_MARKER: u8 = 0x66;
 
 /// Der Ausstellungszeitpunkt jedes Head-Ereignisses und der Bezugspunkt des
 /// Vertrauensalters — 2026-01-01T00:00:00Z.
@@ -224,6 +225,9 @@ struct BuiltLine {
     line: RegistryLineBuilder,
     binding_object_hash: ObjectHash,
     writer_certificate_hash: ObjectHash,
+    /// Der Objekthash des Serverquittungszertifikats — `None`, solange die
+    /// Variante es nicht anfordert.
+    server_receipt_certificate_hash: Option<ObjectHash>,
 }
 
 /// Wie eine Fixture von der glatten Linie abweicht.
@@ -254,6 +258,20 @@ pub struct LineVariantV1 {
     /// Fixture tun sie das per Konstruktion —, ist der Waechter eine Zeile, die
     /// kein Test je ausfuehrt.
     pub foreign_operator_profile_commitment: bool,
+    /// Die Linie traegt ein Zertifikat der Art
+    /// [`CertificateKindV1::ServerReceipt`].
+    ///
+    /// ADDITIV und per Vorgabe AUS: eingeschaltet schiebt es einen weiteren
+    /// Registrierungskopf in die Linie und verschiebt damit jeden Kopfhash
+    /// dahinter. Jede bestehende Fixture laesst es deshalb aus und sieht
+    /// dieselbe Linie wie zuvor.
+    ///
+    /// Es existiert, weil Gate `receipt` ohne dieses Zertifikat gar nicht
+    /// durchlaufen werden kann: `VerificationContext::receipt` verlangt die
+    /// Capability `serverReceipt`, und ohne einen Bestand, in dem eine
+    /// Serverquittung wirklich BESTAETIGT wird, bliebe die annehmende Haelfte
+    /// des Quittungspfades ungetestet.
+    pub with_server_receipt_certificate: bool,
     /// KEIN Recovery-Empfaenger ist aktiv.
     ///
     /// Das NULL-Bein der dritten Produktinvariante. Die beiden anderen Beine
@@ -347,6 +365,18 @@ fn build_line(
             },
         );
     }
+    let server_receipt_certificate_hash = variant.with_server_receipt_certificate.then(|| {
+        line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::ServerReceipt,
+                marker: SERVER_RECEIPT_MARKER,
+                effective_from: Some(0),
+            },
+            head_options(0, 70),
+        )
+        .direct_object_hash
+        .expect("das Serverquittungszertifikat ist ein direktes Ziel")
+    });
     let writer_certificate_hash = writer
         .direct_object_hash
         .expect("das Writer-Zertifikat ist ein direktes Ziel");
@@ -382,6 +412,7 @@ fn build_line(
             .direct_object_hash
             .expect("die Bedienerbindung ist ein direktes Ziel"),
         writer_certificate_hash,
+        server_receipt_certificate_hash,
         line,
     }
 }
@@ -539,6 +570,7 @@ pub struct WriterHarness {
     /// genommen.
     backup: Vec<(String, Vec<u8>)>,
     backend: Arc<LocalPathBackend>,
+    server_receipt_certificate_hash: Option<ObjectHash>,
     head: SelectedRegistryHead,
     binding: WriterBindingV1,
     line: RegistryLineBuilder,
@@ -690,6 +722,7 @@ impl WriterHarness {
             draft_dek_handle,
             open: Some(open),
             backup,
+            server_receipt_certificate_hash: built.server_receipt_certificate_hash,
             backend: Arc::new(backend),
             head,
             binding,
@@ -856,6 +889,58 @@ impl WriterHarness {
     #[must_use]
     pub fn backend_handle(&self) -> Arc<LocalPathBackend> {
         Arc::clone(&self.backend)
+    }
+
+    /// Legt JEDES Trust-Objekt der Linie in den Bestand.
+    ///
+    /// Ohne diesen Schritt traegt der Bestand der Fixture zwar Eintraege und
+    /// Grants, aber keine Vertrauensablage — und ein
+    /// [`ea_verify::verify_archive`] darueber waehlt dann gar keinen
+    /// Registrierungskopf, meldet null Objektergebnisse und kann folglich auch
+    /// keine Serverquittung bestaetigen. Der Pfadhinweis ist ein HINWEIS;
+    /// klassifiziert wird am Exact-Object-Praefix
+    /// (`crates/ea-archive/src/source.rs`).
+    ///
+    /// Sie wird AUSDRUECKLICH nicht beim Aufbau gerufen: die Finalisierungs-
+    /// und Wiederherstellungstests messen Bestandsgroessen und
+    /// Gesundheitsbefunde ueber einem Bestand, der nur enthaelt, was der
+    /// Writer selbst geschrieben hat.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Linie nicht aufzaehlbar oder der Bestand nicht beschreibbar ist.
+    pub fn materialize_trust_objects(&self) {
+        let source = self.line.source();
+        let mut hashes = Vec::new();
+        ea_trust::TrustObjectSource::visit_trust_object_hashes(&source, &mut |hash| {
+            hashes.push(hash);
+            Ok(())
+        })
+        .expect("die Linie muss aufzaehlen");
+        for hash in hashes {
+            let bytes = ea_trust::TrustObjectSource::read_exact_trust_object(&source, hash)
+                .expect("die Linie muss lesen")
+                .expect("ein aufgezaehltes Trust-Objekt muss lesbar sein");
+            let name: String = hash
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            self.backend.materialize_for_test(
+                &format!("{}{name}.etb", ea_archive::REGISTRY_EVENTS_DIR_V1),
+                &bytes,
+            );
+        }
+    }
+
+    /// Der Objekthash des Serverquittungszertifikats dieser Linie.
+    ///
+    /// `None`, solange die Variante es nicht angefordert hat — und dann kann
+    /// ueber dieser Linie auch keine Quittung bestaetigt werden, weil Gate
+    /// `receipt` die Capability `serverReceipt` verlangt.
+    #[must_use]
+    pub const fn server_receipt_certificate_hash(&self) -> Option<ObjectHash> {
+        self.server_receipt_certificate_hash
     }
 
     /// Die EXAKTEN Ankerbytes dieser Linie.

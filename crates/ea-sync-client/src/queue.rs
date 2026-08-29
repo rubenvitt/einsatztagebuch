@@ -180,8 +180,18 @@ impl SyncQueueV1 {
                 confirmed += 1;
                 continue;
             }
+            // FAIL-CLOSED, und aus demselben Grund wie der fehlende Grant acht
+            // Zeilen weiter unten: das Inventar klassifiziert am
+            // Exact-Object-Praefix und ist pfadunabhaengig
+            // (`crates/ea-archive/src/inventory.rs`), waehrend committete
+            // Adressen nur unter `entries/` und `grants/` gezaehlt werden. Ein
+            // inventarisiertes `.eip` ohne committete Adresse ist deshalb
+            // etwas, das dieser Klient nicht erklaeren kann — und ein
+            // stillschweigend uebersprungener Eintrag faellt aus BEIDEN
+            // Zaehlern heraus, worauf ein Bestand ohne eine einzige gepruefte
+            // Quittung als `synchronisiert` dastuende.
             let Some(entry_path) = committed_paths.get(object_hash.as_bytes()) else {
-                continue;
+                return Err(SyncClientError::QueueDerivation);
             };
 
             let entry_hash = entry.value().entry_hash();
@@ -321,16 +331,29 @@ pub enum PendingStepV1 {
 
 /// Die EINE Abbildung auf die vier oeffentlichen Zustaende.
 ///
-/// `synchronisiert` verlangt beides: es steht nichts mehr an, UND kein Schritt
-/// wartet. Ein leerer Warteschlangenrest allein genuegte nicht — er ist auch
-/// dann leer, wenn nie etwas anlag.
+/// `synchronisiert` verlangt DREIERLEI: es steht nichts mehr an, kein Schritt
+/// wartet, UND mindestens ein Eintrag traegt eine GEPRUEFTE Quittung.
+///
+/// Die dritte Bedingung ist die tragende, und sie ist gemessen und nicht
+/// gefolgert. Ein leerer Warteschlangenrest allein genuegt nicht: er ist auch
+/// dann leer, wenn nie etwas anlag, und `step` ist in beiden Faellen `None` —
+/// die zwei liessen sich daran also gar nicht unterscheiden. `confirmed` ist
+/// die Zahl, die sie unterscheidet, und sie zaehlt ausschliesslich Eintraege,
+/// fuer die [`crate::entry_is_server_confirmed`] wahr war.
+///
+/// Ein Bestand ohne einen einzigen committeten Eintrag meldet deshalb `lokal
+/// gesichert` und nicht `synchronisiert`: es ist nichts offen, aber es ist
+/// auch nichts bestaetigt, und von den vier Zustaenden ist das der einzige,
+/// der ueber den Server nichts behauptet.
 #[must_use]
 pub const fn sync_state_of(
     outstanding: usize,
+    confirmed: usize,
     step: Option<PendingStepV1>,
 ) -> (SyncStatus, Option<DetailCause>) {
     match step {
-        None if outstanding == 0 => (SyncStatus::Synchronized, None),
+        None if outstanding == 0 && confirmed > 0 => (SyncStatus::Synchronized, None),
+        None if outstanding == 0 => (SyncStatus::LocallySaved, None),
         None => (SyncStatus::UploadPending, None),
         Some(PendingStepV1::NetworkArchive) => (
             SyncStatus::UploadPending,
@@ -365,15 +388,61 @@ pub const fn step_of(outcome: PublicationOutcomeV1) -> Option<PendingStepV1> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingStepV1, sync_state_of};
-    use ea_archive_fs::{DetailCause, SyncStatus};
+    use super::{PendingStepV1, step_of, sync_state_of};
+    use ea_archive_fs::{DetailCause, PublicationOutcomeV1, SyncStatus};
 
-    /// `synchronisiert` ist NUR ohne offenen Rest und ohne wartenden Schritt
-    /// erreichbar, und keine Ursache erzeugt einen fuenften Zustand.
+    /// `synchronisiert` ist NUR mit einer gepruefften Quittung erreichbar.
+    ///
+    /// Die dritte Zeile ist die eigentliche: ohne offenen Rest und ohne
+    /// wartenden Schritt, aber ohne eine einzige bestaetigte Quittung, ist der
+    /// Zustand `lokal gesichert` — nicht `synchronisiert`. Genau dieser Fall
+    /// entsteht ueber einem Bestand, in dem noch nie etwas hochgeladen wurde.
     #[test]
-    fn only_a_settled_run_reaches_synchronized() {
-        assert_eq!(sync_state_of(0, None), (SyncStatus::Synchronized, None));
-        assert_eq!(sync_state_of(1, None).0, SyncStatus::UploadPending);
+    fn only_a_settled_run_with_a_confirmed_receipt_reaches_synchronized() {
+        assert_eq!(sync_state_of(0, 1, None), (SyncStatus::Synchronized, None));
+        assert_eq!(sync_state_of(0, 0, None), (SyncStatus::LocallySaved, None));
+        assert_eq!(sync_state_of(1, 0, None).0, SyncStatus::UploadPending);
+        assert_eq!(sync_state_of(1, 3, None).0, SyncStatus::UploadPending);
+    }
+
+    /// JEDER wartende Schritt bildet auf GENAU einen der vier Zustaende ab.
+    ///
+    /// Die Tabelle steht ausgeschrieben da, weil sie die Zusage IST. Eine
+    /// Schleife, die nur `!= Synchronized` und Mitgliedschaft in `ALL` prueft,
+    /// bliebe auch dann gruen, wenn `Queuegrenze erreicht` auf `Upload
+    /// ausstehend` abbildete — und die Queuegrenze ist der einzige Weg zum
+    /// oeffentlichen Zustand `Fehler`, den dieser Bestand kennt.
+    #[test]
+    fn every_pending_step_maps_to_exactly_one_public_state() {
+        assert_eq!(
+            sync_state_of(1, 0, Some(PendingStepV1::NetworkArchive)),
+            (
+                SyncStatus::UploadPending,
+                Some(DetailCause::NetworkArchiveWaiting)
+            )
+        );
+        assert_eq!(
+            sync_state_of(1, 0, Some(PendingStepV1::ServerUpload)),
+            (SyncStatus::UploadPending, None)
+        );
+        assert_eq!(
+            sync_state_of(1, 0, Some(PendingStepV1::ResumeExhausted)),
+            (
+                SyncStatus::Failed,
+                Some(DetailCause::ResumeAttemptsExhausted)
+            )
+        );
+        assert_eq!(
+            sync_state_of(1, 0, Some(PendingStepV1::QueueLimit)),
+            (SyncStatus::Failed, Some(DetailCause::QueueLimitReached))
+        );
+        assert_eq!(
+            sync_state_of(1, 0, Some(PendingStepV1::ProfileNotAllowed)),
+            (SyncStatus::Failed, Some(DetailCause::ProfileNotAllowed))
+        );
+
+        // Und kein wartender Schritt meldet je `synchronisiert` — auch nicht
+        // mit leerer Warteschlange und bestaetigten Quittungen daneben.
         for step in [
             PendingStepV1::NetworkArchive,
             PendingStepV1::ServerUpload,
@@ -381,16 +450,43 @@ mod tests {
             PendingStepV1::QueueLimit,
             PendingStepV1::ProfileNotAllowed,
         ] {
-            let (status, cause) = sync_state_of(0, Some(step));
-            assert_ne!(
-                status,
-                SyncStatus::Synchronized,
-                "{step:?} darf nie synchronisiert melden"
-            );
+            let (status, cause) = sync_state_of(0, 9, Some(step));
+            assert_ne!(status, SyncStatus::Synchronized, "{step:?}");
             assert!(SyncStatus::ALL.contains(&status));
             if let Some(cause) = cause {
                 assert!(DetailCause::ALL.contains(&cause));
             }
         }
+    }
+
+    /// Der ueberschrittene Queuebound wird zum oeffentlichen Zustand `Fehler`.
+    ///
+    /// Die Kette Publikationsergebnis -> wartender Schritt -> Zustand steht
+    /// hier GANZ da. Bis Task 10 pinnte
+    /// `crates/ea-archive-fs/tests/publication_queue.rs` das Ende dieser Kette
+    /// direkt; seit die Abbildung hierher gewandert ist, gehoert der Zeuge
+    /// dafuer hierher — sonst haette der oeffentliche Zustand `Fehler` gar
+    /// keinen mehr.
+    #[test]
+    fn the_exceeded_queue_bound_reaches_the_public_failed_state() {
+        assert_eq!(
+            step_of(PublicationOutcomeV1::QueueLimitReached),
+            Some(PendingStepV1::QueueLimit)
+        );
+        assert_eq!(
+            sync_state_of(1, 0, step_of(PublicationOutcomeV1::QueueLimitReached)),
+            (SyncStatus::Failed, Some(DetailCause::QueueLimitReached))
+        );
+    }
+
+    /// Die zwei Ausgaenge, die KEINEN Schritt warten lassen, und der dritte.
+    #[test]
+    fn a_settled_publication_leaves_no_waiting_step() {
+        assert_eq!(step_of(PublicationOutcomeV1::NothingPending), None);
+        assert_eq!(step_of(PublicationOutcomeV1::PublishedCompletely), None);
+        assert_eq!(
+            step_of(PublicationOutcomeV1::Deferred),
+            Some(PendingStepV1::NetworkArchive)
+        );
     }
 }

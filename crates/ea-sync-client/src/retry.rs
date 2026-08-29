@@ -24,7 +24,7 @@
 //! `resume_backoff_max_ms` und `resume_max_attempts`, und die Beschriftung der
 //! Ursache sagt woertlich „die Wiederaufnahmeversuche DES PROFILS".
 
-use ea_local_store::{EncryptedDatabase, StoreError, StoreValue, unix_millis_now};
+use ea_local_store::{EncryptedDatabase, StoreError, StoreValue};
 use ea_types::{JitterSource, ObjectHash, RetryConfig, RetryDecision, RetryPolicy, UnixMillis};
 
 use crate::SyncClientError;
@@ -248,6 +248,14 @@ impl RetryStore {
         Ok(())
     }
 
+    /// Schreibt die Zeile — mit der BEOBACHTETEN Uhr.
+    ///
+    /// `recorded_at_ms` traegt genau die Uhr, gegen die auch
+    /// `next_attempt_at_ms` gilt. Eine Wanduhr daneben waere eine zweite
+    /// Zeitquelle in derselben Zeile: unter einer vorgestellten Testuhr
+    /// widersprechen sich die beiden Spalten dann per Konstruktion, und beim
+    /// Lesen liesse sich nicht mehr sagen, welche der beiden den Wartepunkt
+    /// erklaert.
     fn write(
         &self,
         entry: ObjectHash,
@@ -256,7 +264,6 @@ impl RetryStore {
         cursor: &Option<Vec<u8>>,
         now: UnixMillis,
     ) -> Result<(), SyncClientError> {
-        let _ = now;
         self.database.execute(
             "INSERT INTO sync_retry \
              (entry_object_hash, failed_attempts, next_attempt_at_ms, cursor, recorded_at_ms) \
@@ -273,7 +280,7 @@ impl RetryStore {
                 cursor
                     .as_ref()
                     .map_or(StoreValue::Null, |bytes| StoreValue::Blob(bytes.clone())),
-                StoreValue::Integer(unix_millis_now()),
+                StoreValue::Integer(now.get()),
             ],
         )?;
         Ok(())

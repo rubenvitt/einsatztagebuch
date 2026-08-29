@@ -1364,6 +1364,18 @@ pub fn authorized_device_signing_key_thumbprint() -> KeyThumbprint {
     key_from_secret(NEW_ADMIN_SECRET).thumbprint()
 }
 
+/// Der Signierer, dessen oeffentlicher Schluessel in JEDEM Geraetezertifikat
+/// dieser Linie steht, das keinen eigenen bekommt.
+///
+/// Er wird HERAUSGEGEBEN und das Geheimnis nicht: ein Verbraucher, der eine
+/// Serverquittung dieser Linie bauen will, braucht genau diese Signatur, und
+/// eine zweite Kopie der 32 Byte daneben waere eine zweite Wahrheit ueber den
+/// Schluessel der Linie. Die ROLLE kommt ohnehin vom Zertifikat und nicht vom
+/// Schluessel — dieselbe Aufteilung wie in `crates/ea-verify/tests/support`.
+pub fn authorized_device_signer() -> ea_crypto::CoseSigner {
+    ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(NEW_ADMIN_SECRET))
+}
+
 fn hash32_from_object(value: ObjectHash) -> Hash32 {
     Hash32::try_from(value.as_bytes().as_slice()).unwrap()
 }
