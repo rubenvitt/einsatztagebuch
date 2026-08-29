@@ -253,6 +253,13 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          resolved here.",
     ),
     (
+        "ea-sync-server",
+        "binds Axum, Tokio, sqlx and the S3 client and therefore reaches past \
+         `ea-verify` into the host operating system, the network stack and the \
+         process environment; web-reader-design.md §9 makes only the verification \
+         pipeline shared browser code, and that pipeline ends at `ea-verify`.",
+    ),
+    (
         "ea-ui-contracts",
         "carries a file-writing binary in `src/bin/emit-ts.rs`, and \
          `cargo check --target wasm32-unknown-unknown -p ...` checks binaries \

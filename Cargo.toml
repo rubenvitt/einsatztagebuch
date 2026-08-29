@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "apps/cli", "apps/desktop/src-tauri"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "crates/ea-sync-server", "apps/server", "apps/cli", "apps/desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -44,6 +44,7 @@ ea-operator = { path = "crates/ea-operator" }
 ea-recovery = { path = "crates/ea-recovery" }
 ea-schema = { path = "crates/ea-schema" }
 ea-sync-protocol = { path = "crates/ea-sync-protocol" }
+ea-sync-server = { path = "crates/ea-sync-server" }
 ea-testkit = { path = "crates/ea-testkit" }
 ea-time = { path = "crates/ea-time" }
 ea-trust = { path = "crates/ea-trust" }
@@ -65,7 +66,17 @@ rustls = { version = "=0.23.43", default-features = false, features = ["logging"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
-sqlx = { version = "=0.9.0", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+# `migrate` steht an den beiden Teilcrates statt an der Fassade, und das ist
+# keine Geschmacksfrage: die Fassadenmerkmale `macros` und `migrate` verweisen
+# beide schwach auf `sqlx-sqlite?/...`, und eine schwache Merkmalsreferenz
+# zwingt Cargo trotzdem, `sqlx-sqlite` zu VERSIONIEREN. Dessen
+# `libsqlite3-sys >=0.30.1, <0.38.0` kollidiert dann mit dem `=0.38.0` aus
+# `docs/adr/0002-local-database-encryption.md` ueber `links = "sqlite3"`, und
+# der ganze Arbeitsbereich loest nicht mehr auf. Begruendet in
+# `docs/adr/0004-server-runtime-and-dependency-class.md`.
+sqlx-core = { version = "=0.9.0", default-features = false, features = ["migrate"] }
+sqlx-postgres = { version = "=0.9.0", default-features = false, features = ["migrate"] }
 tauri = { version = "=2.11.5" }
 tauri-build = { version = "=2.6.3" }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

@@ -75,13 +75,23 @@ const SERVER_ADR_LITERALS: [&str; 6] = [
 /// re-enabled `tls12` would put TLS 1.2 back on the listening side alone.
 /// Leaving them out would have left exactly the two drifts ungated that the
 /// document argues hardest about.
-const SERVER_RUNTIME_DEPENDENCIES: [&str; 8] = [
+///
+/// `sqlx-core` and `sqlx-postgres` are the third such entry, for a reason the
+/// document measures rather than asserts: the facade features `macros` and
+/// `migrate` carry weak references to `sqlx-sqlite`, whose
+/// `libsqlite3-sys >=0.30.1, <0.38.0` collides with ADR 0002's `=0.38.0` over
+/// `links = "sqlite3"` and stops the workspace resolving. The `migrate`
+/// capability therefore sits on the two subcrates. Re-adding either feature to
+/// the facade must pass through this gate.
+const SERVER_RUNTIME_DEPENDENCIES: [&str; 10] = [
     "async-trait",
     "aws-sdk-s3",
     "aws-smithy-http-client",
     "axum",
     "rustls",
     "sqlx",
+    "sqlx-core",
+    "sqlx-postgres",
     "tokio",
     "tokio-rustls",
 ];

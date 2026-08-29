@@ -56,7 +56,9 @@ through rustls with the `ring` cryptography provider.
 | --- | --- | --- |
 | [`tokio`](https://crates.io/crates/tokio/1.53.1) | `=1.53.1`; `default-features = false`, `macros`, `net`, `rt-multi-thread`, `signal`, `sync`, `time` | The [Tokio upstream](https://github.com/tokio-rs/tokio) is the async runtime every other crate of this class is built against; there is no second candidate that Axum, SQLx and the AWS SDK all support. `rt-multi-thread` plus `net` and `time` is the runtime the server binary needs, `macros` is what `#[tokio::main]` and the `#[tokio::test]` functions in `crates/ea-sync-server/tests/` resolve to, `signal` carries the ordered shutdown, and `sync` carries the shared state. `fs`, `process` and `io-std` stay disabled: the server writes no file of its own. |
 | [`axum`](https://crates.io/crates/axum/0.8.9) | `=0.8.9`; `default-features = false`, `http1`, `http2`, `tokio` | The [tokio-rs upstream](https://github.com/tokio-rs/axum) is the HTTP server the design names by name. Defaults are off, which removes `form`, `query`, `json`, `matched-path`, `original-uri`, `tower-log` and `tracing` from the surface. `json` in particular is **deliberately absent**: the sync protocol carries deterministic CBOR, and a JSON extractor in the router would be a second, unreviewed decoding path into the server. `tokio` pulls the `hyper`/`hyper-util` serving glue and `tower`'s `make` layer, which is how hyper and tower enter this tree — transitively and reviewed, not as direct pins. |
-| [`sqlx`](https://crates.io/crates/sqlx/0.9.0) | `=0.9.0`; `default-features = false`, `macros`, `migrate`, `postgres`, `runtime-tokio`, `tls-rustls-ring-webpki` | The [launchbadge upstream](https://github.com/launchbadge/sqlx) is the async PostgreSQL driver with compile-time checked queries. Defaults are off, which removes `any` — the runtime driver multiplexer — so a connection string cannot silently select MySQL or SQLite. `postgres` is the only backend, `runtime-tokio` the only runtime, `macros` plus `migrate` are what `#[sqlx::test]` resolves to, and `tls-rustls-ring-webpki` selects the same `ring` provider as the rest of this class. The backend, runtime and TLS feature families are mutually exclusive upstream, which is why the selection is recorded verbatim below. |
+| [`sqlx`](https://crates.io/crates/sqlx/0.9.0) | `=0.9.0`; `default-features = false`, `postgres`, `runtime-tokio`, `tls-rustls-ring-webpki` | The [launchbadge upstream](https://github.com/launchbadge/sqlx) is the async PostgreSQL driver. Defaults are off, which removes `any` — the runtime driver multiplexer — so a connection string cannot silently select MySQL or SQLite. `postgres` is the only backend, `runtime-tokio` the only runtime, and `tls-rustls-ring-webpki` selects the same `ring` provider as the rest of this class. **`macros` and `migrate` are deliberately NOT enabled on the facade**, and that is a measured constraint rather than a preference: both features carry weak references `sqlx-sqlite?/offline` respectively `sqlx-sqlite?/migrate`. A weak reference does not activate the dependency, but Cargo must still resolve a version for it, and `sqlx-sqlite 0.9.0` requires `libsqlite3-sys >=0.30.1, <0.38.0` while `docs/adr/0002-local-database-encryption.md` pins `=0.38.0`. Both declare `links = "sqlite3"`, so the whole workspace stops resolving with `failed to select a version for libsqlite3-sys`. Reproduced in a bare scratch package outside this workspace, so it is a property of the two pins and not of this repository. The consequence is recorded rather than hidden: `#[sqlx::test]` is unreachable here — `sqlx::test` sits behind `#[cfg(feature = "macros")]` and `sqlx::testing`, where its generated code lands, behind `#[cfg(feature = "migrate")]` (`sqlx-0.9.0/src/lib.rs`:83, :88) — and every `apps/server` integration test target of this stage therefore brings its own disposable database in `apps/server/tests/common/mod.rs`. The backend, runtime and TLS feature families are mutually exclusive upstream, which is why the selection is recorded verbatim below. |
+| [`sqlx-core`](https://crates.io/crates/sqlx-core/0.9.0) | `=0.9.0`; `default-features = false`, `migrate` | The same upstream release as `sqlx`, pinned **directly** for exactly one reason: it carries `sqlx_core::migrate::Migrator`, the directory-based migration runner, and — unlike the facade's `migrate` feature — it does not depend on `sqlx-sqlite` at all, so it never drags `libsqlite3-sys` into resolution. Enabling it here keeps the migration bookkeeping table `_sqlx_migrations` and the resolved-at-run-time `migrations/` directory, so Stage 3 invents **no** migration machinery of its own — which is what `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-3-blind-sync.md` reserves for Stage 7. It resolves to the same `sqlx-core` instance the facade already uses, so the types unify. |
+| [`sqlx-postgres`](https://crates.io/crates/sqlx-postgres/0.9.0) | `=0.9.0`; `default-features = false`, `migrate` | Same release again, and pinned directly for the mirror reason: `Migrator::run` requires `A::Connection: Migrate`, and the `Migrate` implementation for `PgConnection` lives behind `sqlx-postgres`'s own `migrate` feature (`migrate = ["sqlx-core/migrate", "dep:crc"]`). Without this edge the migrator compiles but cannot run against PostgreSQL. `sqlx-postgres` carries no `sqlx-sqlite` dependency either. The facade's `postgres` feature already activates this crate, so this entry adds a feature and not a second copy. |
 | [`aws-sdk-s3`](https://crates.io/crates/aws-sdk-s3/1.144.0) | `=1.144.0`; `default-features = false`, `behavior-version-latest`, `http-1x`, `rt-tokio` | The [AWS SDK for Rust](https://github.com/awslabs/aws-sdk-rust) is the S3 client; the spec says only `S3-kompatibler Object Store`, so this ADR names the crate. Its operation surface carries `put_bucket_versioning`, `get_bucket_versioning` and `list_object_versions`, which is what makes **bucket versioning** — a requirement of this stage — administrable from Rust rather than only from an operator console. `default-features = false` is load-bearing: the default set enables `rustls` and `default-https-client`, and those pull a *legacy* hyper 0.14 / rustls 0.21 connector and `aws-lc-sys` respectively. `behavior-version-latest` fixes the SDK's own behaviour contract, `http-1x` and `rt-tokio` bind it to hyper 1.x and Tokio, and `sigv4a` stays off because a single-region S3-compatible endpoint does not use multi-region access points. |
 | [`aws-smithy-http-client`](https://crates.io/crates/aws-smithy-http-client/1.4.0) | `=1.4.0`; `default-features = false`, `rustls-ring` | Pinned **directly** although `aws-sdk-s3` already depends on it, following the precedent of the direct `libsqlite3-sys` pin (`docs/adr/0002-local-database-encryption.md`:45): this crate decides which TLS provider the S3 client uses, and reaching it only through the SDK's own `rustls` feature would silently select the legacy hyper 0.14 stack. `rustls-ring` is the one feature that yields hyper 1.x plus rustls 0.23 on `ring`, so the whole class shares one TLS implementation and one certificate parser. The connector is built explicitly in the server and handed to `aws_sdk_s3::Config::http_client`. |
 | [`rustls`](https://crates.io/crates/rustls/0.23.43) | `=0.23.43`; `default-features = false`, `logging`, `ring`, `std` | The [rustls upstream](https://github.com/rustls/rustls) is the TLS implementation. Defaults are off for two separate reasons. `tls12` is **omitted**, which makes this a TLS 1.3-only stack by construction rather than by configuration. `aws_lc_rs` and `prefer-post-quantum` (which requires it) are omitted in favour of `ring`, so the tree carries no `aws-lc-sys` and no CMake/NASM build requirement; the resulting native-toolchain footprint is smaller than the one `docs/adr/0002-local-database-encryption.md`:269-287 already accepted for SQLCipher. |
@@ -143,6 +145,8 @@ below is published and **not yanked**.
 | `tokio` | `=1.53.1` | 2026-07-20 | `MIT` | <https://crates.io/crates/tokio/1.53.1> | <https://github.com/tokio-rs/tokio> |
 | `axum` | `=0.8.9` | 2026-04-14 | `MIT` | <https://crates.io/crates/axum/0.8.9> | <https://github.com/tokio-rs/axum> |
 | `sqlx` | `=0.9.0` | 2026-05-21 | `MIT OR Apache-2.0` | <https://crates.io/crates/sqlx/0.9.0> | <https://github.com/launchbadge/sqlx> |
+| `sqlx-core` | `=0.9.0` | 2026-05-21 | `MIT OR Apache-2.0` | <https://crates.io/crates/sqlx-core/0.9.0> | <https://github.com/launchbadge/sqlx> |
+| `sqlx-postgres` | `=0.9.0` | 2026-05-21 | `MIT OR Apache-2.0` | <https://crates.io/crates/sqlx-postgres/0.9.0> | <https://github.com/launchbadge/sqlx> |
 | `aws-sdk-s3` | `=1.144.0` | 2026-08-25 | `Apache-2.0` | <https://crates.io/crates/aws-sdk-s3/1.144.0> | <https://github.com/awslabs/aws-sdk-rust> |
 | `aws-smithy-http-client` | `=1.4.0` | 2026-08-19 | `Apache-2.0` | <https://crates.io/crates/aws-smithy-http-client/1.4.0> | <https://github.com/smithy-lang/smithy-rs> |
 | `rustls` | `=0.23.43` | 2026-07-29 | `Apache-2.0 OR ISC OR MIT` | <https://crates.io/crates/rustls/0.23.43> | <https://github.com/rustls/rustls> |
@@ -210,7 +214,9 @@ aws-sdk-s3 = ["behavior-version-latest", "http-1x", "rt-tokio"]
 aws-smithy-http-client = ["rustls-ring"]
 axum = ["http1", "http2", "tokio"]
 rustls = ["logging", "ring", "std"]
-sqlx = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"]
+sqlx = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"]
+sqlx-core = ["migrate"]
+sqlx-postgres = ["migrate"]
 tokio = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"]
 tokio-rustls = ["logging", "ring"]
 ```
@@ -225,6 +231,8 @@ class needs no derivation from release dates.
 | `tokio` 1.53.1 | 1.71 | yes |
 | `axum` 0.8.9 | 1.80 | yes |
 | `sqlx` 0.9.0 | 1.94.0 | yes |
+| `sqlx-core` 0.9.0 | 1.94.0 | yes |
+| `sqlx-postgres` 0.9.0 | 1.94.0 | yes |
 | `aws-sdk-s3` 1.144.0 | 1.94.1 | yes |
 | `aws-smithy-http-client` 1.4.0 | 1.94.1 | yes |
 | `rustls` 0.23.43 | 1.71 | yes |
@@ -249,6 +257,8 @@ answered `advisories ok` with no new `ignore` entry.
 | `tokio` | `RUSTSEC-2021-0072`, `RUSTSEC-2021-0124`, `RUSTSEC-2023-0001`, `RUSTSEC-2023-0005`, `RUSTSEC-2025-0023` | `>= 1.44.2` | `1.53.1` is past all five. |
 | `axum` | none — `crates/axum/` does not exist in the database | — | An empty result, recorded as the finding it is. |
 | `sqlx` | `RUSTSEC-2024-0363` | `>= 0.8.1` | `0.9.0` is past it. |
+| `sqlx-core` | `RUSTSEC-2024-0363` (recorded against the `sqlx` family) | `>= 0.8.1` | `0.9.0` is past it; it is the same upstream release as the facade. |
+| `sqlx-postgres` | none — directory absent | — | Empty result; it ships in the same release as `sqlx`. |
 | `aws-sdk-s3` | none — directory absent | — | Empty result. |
 | `aws-smithy-http-client` | none — directory absent | — | Empty result. |
 | `rustls` | `RUSTSEC-2024-0336`, `RUSTSEC-2024-0399` | `>= 0.23.18` | `0.23.43` is past both. |
@@ -372,8 +382,10 @@ know it.
 `cargo run --locked -p xtask -- integration up` starts both services, waits for
 their health checks, creates the bucket `einsatzarchiv-objects` with versioning
 enabled, and prints two `eval`-able lines on stdout — `export DATABASE_URL=…`
-and `export EA_OBJECT_STORE_ENDPOINT=…` — because `#[sqlx::test]` reads
-`DATABASE_URL` at run time. Compose's own output goes to stderr so that the
+and `export EA_OBJECT_STORE_ENDPOINT=…` — because the disposable-database
+harness of `apps/server/tests/common/mod.rs` reads `DATABASE_URL` at run time.
+(The plans of this stage still say `#[sqlx::test]` there; see the `sqlx` row of
+the Decision table for why that macro is unreachable in this workspace.) Compose's own output goes to stderr so that the
 `eval` sees only those two lines. Both subcommands are idempotent.
 `verify-quick` refuses to run while either service is silent, with an
 instruction and without an environment-variable bypass.
@@ -424,8 +436,31 @@ owns the signed, reproducible image itself.
   implementation cannot be written without it — and none of it appears at the
   edge of code written here; no `libc` dependency is introduced into our own
   crates.
-- A `tokio`, `axum`, `sqlx`, `aws-sdk-s3`, `aws-smithy-http-client`, `rustls`,
-  `tokio-rustls` or `async-trait` upgrade is a new reviewed decision under
+- **`sqlx`'s `macros` and `migrate` features stay off the facade, permanently.**
+  Both carry weak feature references — `sqlx-sqlite?/offline` respectively
+  `sqlx-sqlite?/migrate` — and a weak reference does not activate the optional
+  dependency but still forces Cargo to resolve a version for it. `sqlx-sqlite`
+  0.9.0 requires `libsqlite3-sys >=0.30.1, <0.38.0`, while
+  `docs/adr/0002-local-database-encryption.md` pins `=0.38.0`; both declare
+  `links = "sqlite3"`, so enabling either feature makes the whole workspace stop
+  resolving with `failed to select a version for libsqlite3-sys`. Measured in a
+  bare scratch package outside this workspace, so it is a property of the two
+  pins and not of this repository. The migration capability therefore sits on
+  `sqlx-core` and `sqlx-postgres`, and the consequence for tests is recorded
+  rather than hidden: `#[sqlx::test]` is unreachable here — `sqlx::test` sits
+  behind `#[cfg(feature = "macros")]` and `sqlx::testing`, where its generated
+  code lands, behind `#[cfg(feature = "migrate")]` (`sqlx-0.9.0/src/lib.rs`:83,
+  :88) — so every `apps/server` integration test target of this stage takes its
+  disposable database from the harness in `apps/server/tests/common/mod.rs` (a
+  directory module, deliberately not a test target). **No later task may re-add
+  `macros` or `migrate` to the facade**; doing so reintroduces the conflict, and
+  `tools/xtask/tests/adr_gate.rs` fails on the changed ledger line before the
+  build does. Resolving it the other way would mean downgrading ADR 0002's
+  SQLCipher class to `libsqlite3-sys =0.37.0` / `rusqlite =0.39.0`, which is
+  expressly out of scope for this stage.
+- A `tokio`, `axum`, `sqlx`, `sqlx-core`, `sqlx-postgres`, `aws-sdk-s3`,
+  `aws-smithy-http-client`, `rustls`, `tokio-rustls` or `async-trait` upgrade is
+  a new reviewed decision under
   `docs/adr/0001-toolchain-and-cryptography-dependencies.md`:152-154. So is a
   change to any of the three mutually exclusive feature families: swapping
   `ring` for `aws_lc_rs`, adding `tls12`, or changing the SQLx backend,

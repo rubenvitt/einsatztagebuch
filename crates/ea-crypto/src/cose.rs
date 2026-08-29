@@ -34,6 +34,21 @@ pub enum ContentType {
     DeviceRegistrationRequestCbor,
     ReaderAckCbor,
     RecoveryTestDigest,
+    /// Der domaenengetrennte Digest eines technischen Cursors.
+    ///
+    /// Der ZWOELFTE Wert dieser geschlossenen Menge, und er kommt nicht
+    /// beilaeufig: der Sync-Wire-Nachtrag
+    /// (`docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-sync-wire-addendum.md`,
+    /// „Vorbehalt fuer den Serverschluessel-Port“) benennt genau diese Stelle
+    /// und weist sie dem Task zu, der den Serverschluessel-Port baut. Der
+    /// Cursor ist eine COSE-Sign1 ueber den Serverschluessel, und ohne einen
+    /// eigenen Content-Type traege sie den eines fremden Zwecks — die
+    /// Zweckbindung des Serverschluessels liefe dann ins Leere.
+    ///
+    /// Es entsteht dabei KEINE achte `CertificateCapability`: der Server
+    /// signiert Receipts, Checkpoints und Cursor mit demselben Schluessel, und
+    /// getrennt werden die drei ueber Domaene und Content-Type.
+    TechnicalCursorDigest,
 }
 
 impl ContentType {
@@ -53,6 +68,7 @@ impl ContentType {
             }
             Self::ReaderAckCbor => "application/vnd.einsatzarchiv.reader-ack+cbor",
             Self::RecoveryTestDigest => "application/vnd.einsatzarchiv.recovery-test-digest",
+            Self::TechnicalCursorDigest => "application/vnd.einsatzarchiv.technical-cursor-digest",
         }
     }
 
@@ -65,6 +81,7 @@ impl ContentType {
                 | Self::ReceiptDigest
                 | Self::TrustDigest
                 | Self::RecoveryTestDigest
+                | Self::TechnicalCursorDigest
         )
     }
 
@@ -94,6 +111,9 @@ impl TryFrom<&str> for ContentType {
             }
             "application/vnd.einsatzarchiv.reader-ack+cbor" => Ok(Self::ReaderAckCbor),
             "application/vnd.einsatzarchiv.recovery-test-digest" => Ok(Self::RecoveryTestDigest),
+            "application/vnd.einsatzarchiv.technical-cursor-digest" => {
+                Ok(Self::TechnicalCursorDigest)
+            }
             _ => Err(CryptoError::UnsupportedSuite),
         }
     }
@@ -321,6 +341,15 @@ impl CoseSigner {
         Self(SigningKey::from_bytes(secret.expose()))
     }
 
+    /// Der oeffentliche Schluessel dieses Signierers in kanonischer COSE-Form.
+    ///
+    /// Nur der OEFFENTLICHE Teil: `CoseSigner` gibt sein Geheimnis nirgends
+    /// heraus, und dieser Zugriff aendert daran nichts. Der Serverschluessel-Port
+    /// braucht ihn, um seine eigene Cursor-Signatur wieder zu pruefen.
+    pub fn public_key(&self) -> Result<CanonicalPublicCoseKey, CryptoError> {
+        CanonicalPublicCoseKey::ed25519(*self.0.verifying_key().as_bytes())
+    }
+
     fn sign_normal(
         &self,
         content_type: ContentType,
@@ -542,6 +571,27 @@ impl CoseSigner {
                 public.thumbprint(),
                 certificate_hash,
             ),
+            digest.as_bytes(),
+        )
+    }
+
+    /// Signiert den domaenengetrennten Digest eines technischen Cursors.
+    ///
+    /// Der Digest kommt fertig herein — gebildet hat ihn
+    /// `ea_sync_protocol::technical_cursor_digest` ueber
+    /// `ea_sync_protocol::TECHNICAL_CURSOR_DOMAIN_V1` und die exakten
+    /// Core-Bytes. Diese Crate kennt weder Cursorform noch Blaetterposition und
+    /// soll sie auch nicht kennen; die Domaenenkonstante steht deshalb DORT und
+    /// wird hier bewusst nicht als Zeichenkette wiederholt — sie gehoert nicht
+    /// zur eingefrorenen Domaenenmenge von `ea-crypto`.
+    pub fn sign_technical_cursor(
+        &self,
+        certificate_hash: CertificateHash,
+        digest: ea_types::Hash32,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.sign_normal(
+            ContentType::TechnicalCursorDigest,
+            certificate_hash,
             digest.as_bytes(),
         )
     }
@@ -1393,6 +1443,35 @@ impl fmt::Debug for VerifiedSigner {
             .field("organization_id", &hexless(self.organization_id.as_bytes()))
             .finish()
     }
+}
+
+/// Prueft die COSE-Sign1 eines technischen Cursors gegen GENAU einen
+/// Serverschluessel.
+///
+/// Bewusst OHNE [`VerificationContext`] und ohne Zertifikatsaufloesung: ein
+/// technischer Cursor ist keine Archivaussage, sondern die Frage „ist dieses
+/// Token meines?“. Der Server beantwortet sie gegen den Schluessel, den er
+/// gerade fuehrt — und nach einer Rotation eben nicht mehr, was der Zweck der
+/// Rotation ist.
+pub fn verify_technical_cursor(
+    bytes: &[u8],
+    server_public_key: &CanonicalPublicCoseKey,
+    expected_certificate_hash: CertificateHash,
+    expected_digest: ea_types::Hash32,
+) -> Result<(), CryptoError> {
+    let parsed = parse_cose_sign1(bytes, &[])?;
+    if parsed.protected.profile != ProtectedProfile::Normal
+        || parsed.protected.content_type != ContentType::TechnicalCursorDigest
+    {
+        return Err(CryptoError::InvalidCose);
+    }
+    if parsed.payload != expected_digest.as_bytes() {
+        return Err(CryptoError::SignerMismatch);
+    }
+    if parsed.protected.certificate_hash != Some(expected_certificate_hash) {
+        return Err(CryptoError::SignerMismatch);
+    }
+    parsed.verify_with_key(server_public_key)
 }
 
 pub fn verify_cose_sign1(
