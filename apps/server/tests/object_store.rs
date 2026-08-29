@@ -117,10 +117,11 @@ async fn same_object_key_with_different_bytes_is_security_event() {
         Arc::new(FixedClock(UnixMillis::new(1_700_000_000_000))),
     );
 
-    // Zwei Koerper mit demselben Inhalt-Marker, aber unterschiedlichen Bytes.
     // Der Konflikt wird HERGESTELLT, nicht erhofft: zwei ehrliche Koerper
     // haetten verschiedene Hashwerte und damit verschiedene Schluessel, und die
-    // Kollision aus §13.3 Schritt 3 traete nie ein.
+    // Kollision aus §13.3 Schritt 3 traete nie ein. Hier weichen zusaetzlich
+    // die LAENGEN ab — das ist der Schnellpfad. Den Bytevergleich selbst faehrt
+    // der Zeuge darunter.
     let honest = unique_trust_object(96);
     let hash = object_hash(&honest);
     let target = object_key(ObjectTypeV1::Trust, hash);
@@ -165,6 +166,89 @@ async fn same_object_key_with_different_bytes_is_security_event() {
     // die Funktion mit sich selbst und die Schluesselform waere ungeprueft.
     assert_eq!(subject, format!("etb/{}", hex::encode(hash.as_bytes())));
     assert_eq!(subject, target);
+
+    cleanup_key(&target).await;
+    database.cleanup().await;
+}
+
+/// Derselbe Schluessel, GLEICHE LAENGE, andere Bytes.
+///
+/// Der eigentliche Bytevergleich aus `design.md` §13.3, Schritt 3. Der Zeuge
+/// daruber weicht in der Laenge ab und wird deshalb schon vom Schnellpfad
+/// entschieden; erst hier laeuft der Hashvergleich wirklich. Genau diesen Weg
+/// hatte die fruehere Fassung mit `!same_length || …` uebersprungen: `||` kam
+/// nie bis zum Hash, solange die Laengen abwichen, und ein Angreifer mit
+/// gleicher Laenge waere als idempotenter Replay durchgegangen.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_key_with_same_length_but_different_bytes_is_a_conflict() {
+    let database = common::fresh_database().await;
+    insert_organization(database.pool()).await;
+    let repository = Arc::new(PostgresRepository::new(database.pool().clone()));
+    let client = object_store_client().await;
+    let store = S3ObjectStore::new(
+        client.clone(),
+        common::INTEGRATION_BUCKET.to_owned(),
+        organization_id(),
+        repository,
+        Arc::new(FixedDirectory(ObjectTypeV1::Trust)),
+        Arc::new(FixedClock(UnixMillis::new(1_700_000_000_000))),
+    );
+
+    let honest = unique_trust_object(96);
+    // Gleiche Laenge, ein einziges gekipptes Byte hinter dem Praefix.
+    let mut impostor = honest.clone();
+    let last = impostor.len() - 1;
+    impostor[last] ^= 0xff;
+    assert_eq!(impostor.len(), honest.len());
+    assert_ne!(impostor, honest);
+
+    let target = object_key(ObjectTypeV1::Trust, object_hash(&honest));
+    client
+        .put_object()
+        .bucket(common::INTEGRATION_BUCKET)
+        .key(&target)
+        .body(ByteStream::from(impostor.clone()))
+        .send()
+        .await
+        .expect("planting the same length impostor must succeed");
+
+    // Positivkontrolle fuer den WEG: die Laengen sind gleich, also kann der
+    // Schnellpfad hier nichts entscheiden — der Befund kommt vom Hash.
+    let planted = client
+        .head_object()
+        .bucket(common::INTEGRATION_BUCKET)
+        .key(&target)
+        .send()
+        .await
+        .expect("the planted object must exist");
+    assert_eq!(
+        planted.content_length().and_then(|l| u64::try_from(l).ok()),
+        Some(honest.len() as u64),
+        "the impostor must have the same length; otherwise the fast path decides and the byte \
+         comparison stays untested"
+    );
+
+    let staged = store
+        .stage_stream(
+            ObjectTypeV1::Trust,
+            ByteStream::from(honest.clone()),
+            1_024 * 1_024,
+        )
+        .await
+        .expect("staging the honest object must succeed");
+    let error = store
+        .put_if_absent(staged)
+        .await
+        .expect_err("same length with different bytes must not pass as an idempotent replay");
+    assert_eq!(error.code(), "EA-STORE-HASH-CONFLICT");
+
+    let events: Vec<String> =
+        sqlx::query_scalar("SELECT event_code FROM security_events WHERE organization_id = $1")
+            .bind(&ORGANIZATION[..])
+            .fetch_all(database.pool())
+            .await
+            .expect("reading the security events must succeed");
+    assert_eq!(events, vec!["object-hash-conflict".to_owned()]);
 
     cleanup_key(&target).await;
     database.cleanup().await;

@@ -22,7 +22,7 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 /// Noch ohne Endpunkte, aber schon mit der Zusage, die sie tragen: kein
 /// JSON-Extraktor. Das Merkmal `json` ist an Axum ABGESCHALTET (ADR 0004),
 /// damit neben dem deterministischen CBOR des Protokolls kein zweiter,
-/// ungeprueftear Dekodierweg in den Server fuehrt.
+/// ungepruefter Dekodierweg in den Server fuehrt.
 pub fn router() -> Router {
     Router::new()
 }

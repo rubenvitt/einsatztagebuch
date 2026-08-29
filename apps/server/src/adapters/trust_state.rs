@@ -40,11 +40,17 @@
 //! [`PostgresTrustStateStore`] fuehrt jede Anweisung ueber
 //! `block_in_place` plus `Handle::block_on`.
 //!
-//! DAS SETZT DIE MEHRFADEN-LAUFZEIT VORAUS. `block_in_place` bricht auf einer
-//! Ein-Faden-Laufzeit mit Panik ab, und das ist der Vorgabewert von
-//! `#[tokio::test]`. Jeder Test, der diesen Adapter fuehrt, laeuft deshalb als
-//! `#[tokio::test(flavor = "multi_thread")]`; der Serverbinaerteil laeuft
-//! ohnehin auf `rt-multi-thread` (ADR 0004).
+//! DAS SETZT DIE MEHRFADEN-LAUFZEIT VORAUS — und zwar NACHPRUEFBAR statt nur
+//! zugesagt. `task::block_in_place` bricht auf einer Ein-Faden-Laufzeit mit
+//! Panik ab, und die ist der Vorgabewert von `#[tokio::test]`. Eine Panik ist
+//! aber die falsche Antwort auf eine Fehlkonfiguration: sie reisst den Faden
+//! mit, statt einen Befund zu liefern. [`PostgresTrustStateStore`] fragt
+//! deshalb VORHER nach der Laufzeitform und antwortet auf jeder anderen als der
+//! Mehrfaden-Laufzeit fail-closed mit [`StateStoreError::Unavailable`]
+//! (`EA-TRUST-STATE-UNAVAILABLE`). Der Serverbinaerteil laeuft auf
+//! `rt-multi-thread` (ADR 0004); ein Test, der diesen Adapter fuehrt, laeuft als
+//! `#[tokio::test(flavor = "multi_thread")]`. Beide Zweige sind in
+//! `apps/server/tests/migrations.rs` gepinnt.
 
 use ea_time::{IndependentTimeInput, IndependentTimeKind, TrustedTimeState};
 use ea_trust::{
@@ -53,7 +59,10 @@ use ea_trust::{
 };
 use ea_types::{ObjectHash, RegistryVersion, UnixMillis};
 use sqlx::{PgPool, Row, postgres::PgRow};
-use tokio::{runtime::Handle, task};
+use tokio::{
+    runtime::{Handle, RuntimeFlavor},
+    task,
+};
 
 pub struct PostgresTrustStateStore {
     pool: PgPool,
@@ -76,12 +85,25 @@ impl PostgresTrustStateStore {
     }
 
     /// Fuehrt eine asynchrone Anweisung aus einem synchronen Vertrag heraus.
-    fn block_on<F: Future>(future: F) -> F::Output {
-        task::block_in_place(|| Handle::current().block_on(future))
+    ///
+    /// Die Laufzeitform wird GEPRUEFT, nicht vorausgesetzt: `block_in_place`
+    /// verlangt die Mehrfaden-Laufzeit und bricht sonst mit Panik ab. Auf jeder
+    /// anderen Form endet der Aufruf hier mit einem Befund, den der Aufrufer
+    /// behandeln kann.
+    fn block_on<F: Future<Output = Result<T, StateStoreError>>, T>(
+        future: F,
+    ) -> Result<T, StateStoreError> {
+        let Ok(handle) = Handle::try_current() else {
+            return Err(StateStoreError::Unavailable);
+        };
+        if handle.runtime_flavor() != RuntimeFlavor::MultiThread {
+            return Err(StateStoreError::Unavailable);
+        }
+        task::block_in_place(|| handle.block_on(future))
     }
 
     fn read(&self, key: TrustStateKey) -> Result<PersistedTrustRecord, StateStoreError> {
-        let row = Self::block_on(
+        let row = Self::block_on(async {
             sqlx::query(
                 "SELECT revision, trusted_floor_millis, independent_kind_code, \
                  independent_object_hash, independent_verified_at_millis, \
@@ -90,9 +112,10 @@ impl PostgresTrustStateStore {
             )
             .bind(&key.organization_id.as_bytes()[..])
             .bind(&key.device_id.as_bytes()[..])
-            .fetch_optional(&self.pool),
-        )
-        .map_err(|_| StateStoreError::Unavailable)?;
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| StateStoreError::Unavailable)
+        })?;
         match row {
             Some(row) => decode_record(&row),
             // Ein unbekannter Schluessel ist KEIN Fehler: er ist der leere
@@ -230,7 +253,7 @@ impl TrustStateStore for PostgresTrustStateStore {
         &mut self,
         key: &ClockReleaseReplayKey,
     ) -> Result<bool, StateStoreError> {
-        let row = Self::block_on(
+        let row = Self::block_on(async {
             sqlx::query(
                 "SELECT 1 AS present FROM clock_release_replays WHERE organization_id = $1 \
                  AND target_device_id = $2 AND nonce = $3",
@@ -238,9 +261,10 @@ impl TrustStateStore for PostgresTrustStateStore {
             .bind(&key.organization_id().as_bytes()[..])
             .bind(&key.target_device_id().as_bytes()[..])
             .bind(&key.nonce()[..])
-            .fetch_optional(&self.pool),
-        )
-        .map_err(|_| StateStoreError::Unavailable)?;
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| StateStoreError::Unavailable)
+        })?;
         Ok(row.is_some())
     }
 

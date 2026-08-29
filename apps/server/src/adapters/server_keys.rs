@@ -14,7 +14,7 @@
 //! ## Generationen
 //!
 //! Der Speicher fuehrt die AKTUELLE Generation und signiert ausschliesslich mit
-//! ihr. Frueherе Generationen werden nicht mitgefuehrt: ein technischer Cursor
+//! ihr. Fruehere Generationen werden nicht mitgefuehrt: ein technischer Cursor
 //! ist ein kurzlebiges Blaetterzeichen mit eigenem Ablaufdatum, und nach einer
 //! Rotation soll er genau NICHT mehr oeffnen. Ein Klient blaettert dann neu an
 //! — das ist der Zweck der Rotation und kein Datenverlust.

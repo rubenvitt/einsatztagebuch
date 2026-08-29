@@ -194,12 +194,17 @@ impl ObjectStore for S3ObjectStore {
 
         let outcome = match existing {
             Ok(head) => {
-                // Erst die Laenge, dann die Bytes: eine abweichende Laenge ist
-                // schon der Konflikt und erspart den vollen Abruf.
-                let same_length = head
-                    .content_length()
-                    .is_some_and(|length| u64::try_from(length) == Ok(staged.size_bytes()));
-                if !same_length || self.stored_hash(&target).await? != staged.object_hash() {
+                // DIE BYTES ENTSCHEIDEN, die Laenge ist nur ein Schnellpfad.
+                //
+                // Siehe [`length_proves_conflict`]: eine fehlende
+                // `content-length` ist KEIN Konflikt, sondern ein Grund, die
+                // Bytes zu holen.
+                if length_proves_conflict(
+                    head.content_length()
+                        .and_then(|length| u64::try_from(length).ok()),
+                    staged.size_bytes(),
+                ) || self.stored_hash(&target).await? != staged.object_hash()
+                {
                     self.record_hash_conflict(&target).await;
                     let _ = self
                         .client
@@ -436,5 +441,46 @@ where
             matches!(service.err().code(), Some("NoSuchKey" | "NotFound" | "404"))
         }
         _ => false,
+    }
+}
+
+/// Entscheidet allein anhand der LAENGEN, ob ein Konflikt schon feststeht.
+///
+/// Der Schnellpfad des Put-if-absent, und er taugt nur in EINE Richtung: zwei
+/// vollstaendige Objekte verschiedener Laenge koennen nicht dieselben Bytes
+/// sein, also erspart eine bekannte, abweichende Laenge den vollen Abruf. Alles
+/// andere faellt auf den neu gerechneten Objekthash durch.
+///
+/// `None` heisst „der Dienst hat keine `content-length` geliefert“ — `HeadObject`
+/// muss das nicht. Das ist AUSDRUECKLICH kein Konflikt. Die fruehere Fassung
+/// fragte `!same_length || …` und machte daraus eines: ein Security Event ueber
+/// Bytes, die nie jemand verglichen hat.
+const fn length_proves_conflict(stored_length: Option<u64>, staged_length: u64) -> bool {
+    match stored_length {
+        Some(length) => length != staged_length,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::length_proves_conflict;
+
+    /// Die drei Antworten des Schnellpfads, einzeln.
+    ///
+    /// Der mittlere Fall ist der sicherheitsrelevante: eine unbekannte Laenge
+    /// darf niemals fuer sich allein einen Konflikt begruenden, sonst zeichnet
+    /// der Server ein Security Event ueber Bytes auf, die er nicht angesehen
+    /// hat. Das Gegenstueck — gleiche Laenge, andere Bytes — laeuft in
+    /// `apps/server/tests/object_store.rs` gegen den echten Dienst.
+    #[test]
+    fn only_a_known_differing_length_settles_the_conflict() {
+        assert!(length_proves_conflict(Some(8), 9));
+        assert!(!length_proves_conflict(Some(9), 9));
+        assert!(
+            !length_proves_conflict(None, 9),
+            "an unknown content-length must fall through to the byte comparison, never become a \
+             Security Event of its own"
+        );
     }
 }
