@@ -1,272 +1,400 @@
 //! `POST /v1/chains/{chainId}/entry-commits` gegen ECHTE Dienste.
 //!
-//! Jeder Fall laeuft den ganzen Weg: TLS 1.3, Axum, die Adapter, PostgreSQL
-//! und der Object Store. Ein `oneshot` gegen den Router prueefte eine
-//! Abkuerzung, die es im Betrieb nicht gibt.
+//! Jeder Fall laeuft den ganzen Weg: TLS 1.3, Axum, RFC-9421-Pruefung, die
+//! geteilte `ea-trust`-Pruefung, PostgreSQL und der Object Store. Ein
+//! `oneshot` gegen den Router prueefte eine Abkuerzung, die es im Betrieb
+//! nicht gibt.
 //!
-//! # Die Reichweite dieses Ziels, ausgeschrieben
-//!
-//! Der Endpunkt verlangt die Capability `initialGrant`
-//! (`crates/ea-sync-protocol/src/lib.rs`, `required_capability`). Der einzige
-//! serverseitige Vertrauensbestand dieses Standes sind die EINGEFRORENEN
-//! Vektoren unter `vectors/trust/v1/`, und in denen gibt es kein einziges
-//! Zertifikat mit dieser Capability: der Erzeuger vergibt ausschliesslich
-//! `organizationAdminApprove` (`crates/ea-testkit/src/lib.rs`:2711, :3241),
-//! und es gibt dort weder ein `Writer`- noch ein `Reader`- noch ein
-//! `RecoveryRecipient`-Zertifikat. `vectors/` und `crates/ea-testkit` sind
-//! fuer diese Aufgabe eingefroren.
-//!
-//! Ein ANGENOMMENER Commit ist ueber diesen Weg deshalb nicht herstellbar, und
-//! dieses Ziel behauptet es auch nicht. Es misst, was hier tatsaechlich
-//! messbar ist: dass die Route gemountet ist, dass die signierte Anfrage den
-//! ganzen Weg durch TLS, Signaturpruefung und Rahmendekodierung nimmt, und
-//! dass sie am Capability-Tor fail-closed und mit dem eingefrorenen
-//! Fehlerkoerper endet.
-//!
-//! Die neun Schritte selbst — Vollstaendigkeit der Empfaengermenge, Fork,
-//! falscher Vorgaenger, unzulaessiger Writer, Bytekonflikt, Replay mit
-//! bytegleicher Quittung, Datenbankabbruch, Object-Store-Ausfall und
-//! Nebenlaeufigkeit — sind in `crates/ea-sync-server/tests/commit_service.rs`
-//! gegen ECHTE Objekte und die ECHTE Signaturpruefung gemessen, mit Attrappen
-//! ausschliesslich an den Ports.
+//! Der Vertrauensabschluss mit Writer, Reader und Recovery-Empfaenger kommt aus
+//! `common::trust_closure` und wird ueber den ECHTEN Endpunkt
+//! `POST /v1/trust/events` eingespielt; die Eintraege und Grants baut
+//! `common::archive_objects`. Warum beides noetig ist, steht in den Kopfnoten
+//! jener Module.
 
 mod common;
 
+use common::{archive_objects, trust_closure};
 use ea_crypto::SecretBytes;
 use ea_sync_protocol::{
-    ChallengeRequestV1, ChallengeResponseV1, EndpointV1, EntryCommitOutcome, EntryCommitResponseV1,
-    ProtocolErrorV1, RequestSigner, STRUCTURED_MEDIA_TYPE_V1,
+    EndpointV1, EntryCommitOutcome, EntryCommitResponseV1, ProtocolErrorV1, RequestSigner,
 };
-use ea_types::{CertificateHash, OrganizationId, UnixMillis};
+use ea_types::{CertificateHash, EntryHash, UnixMillis};
+use sqlx::Row;
 
-/// Innerhalb des `notBefore`/`notAfter`-Fensters der eingefrorenen Koepfe.
+/// Innerhalb des `notBefore`/`notAfter`-Fensters aller Koepfe.
 const SERVER_NOW_MILLIS: i64 = 1_000;
-const ADMIN_SEED: [u8; 32] = ea_testkit::TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519_SEED;
 const SERVER_SECRET: [u8; 32] = [0x51; 32];
 const SERVER_CERTIFICATE_HASH: [u8; 32] = [0x52; 32];
-const ROTATION_CASE: &str = "registry/accepted-admin-rotation";
 
-/// Die Kette, in die geschrieben wuerde.
-const CHAIN_ID: [u8; 16] = [0x71; 16];
+/// Der Kopf, auf dem die Kette bereits steht, bevor der Testfall committet.
+const SEEDED_HEAD_ENTRY_HASH: [u8; 32] = [0x77; 32];
+/// Die Annahmezeit dieses Kopfes. Sie liegt UNTER der Serverzeit, damit der
+/// glueckliche Pfad die Serverzeit nimmt.
+const SEEDED_HEAD_ACCEPTED_AT: i64 = 500;
 
-pub fn signer(seed: [u8; 32]) -> RequestSigner {
+fn signer(seed: [u8; 32]) -> RequestSigner {
     RequestSigner::from_secret(SecretBytes::new(seed))
 }
 
-pub fn error_code(body: &[u8]) -> Option<String> {
+fn error_code(body: &[u8]) -> Option<String> {
     ProtocolErrorV1::decode(body)
         .ok()
         .map(|error| error.error_code().to_owned())
 }
 
-pub fn entry_commit_path(chain_id: [u8; 16]) -> String {
-    format!("/v1/chains/{}/entry-commits", hex::encode(chain_id))
+fn seeded_head_entry_hash() -> EntryHash {
+    EntryHash::try_from(&SEEDED_HEAD_ENTRY_HASH[..]).expect("32 bytes")
 }
 
-pub async fn fresh_challenge(
-    server: &common::TestServer,
-    organization_id: OrganizationId,
-) -> [u8; 32] {
-    let body = ChallengeRequestV1::new(organization_id);
-    let response = common::https_request(
-        server.address,
-        &server.authority,
-        "POST",
-        EndpointV1::AuthChallenges.path_template(),
-        &[("content-type", STRUCTURED_MEDIA_TYPE_V1.to_owned())],
-        body.exact_bytes(),
-    )
-    .await;
-    assert_eq!(response.status, 200);
-    ChallengeResponseV1::decode(&response.body)
-        .expect("the challenge response must decode")
-        .core()
-        .nonce
-}
-
-/// Ein syntaktisch gueltiger, vollstaendig gerahmter Commit-Koerper.
-///
-/// Die Objekte darin sind EINGEFRORENE Vektoren: ein `.eip` aus
-/// `vectors/format/v1/valid` und ein `.eag` aus `vectors/grants/v1`. Sie
-/// gehoeren ausdruecklich NICHT zum Trust-Bestand dieser Organisation — der
-/// Koerper soll den Rahmen und den Weg pruefen, nicht die neun Schritte, die
-/// er nach der Reichweitennotiz oben gar nicht erreicht.
-pub fn framed_commit_body() -> Vec<u8> {
-    use ea_format::{GrantPlanItemV1, GrantPlanV1, ParsedArchiveObject};
-
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vectors");
-    let entry = std::fs::read(root.join("format/v1/valid/eip/valid.bin"))
-        .expect("the frozen entry vector must read");
-    let grant = std::fs::read(root.join("grants/v1/grant/accepted-initial-reader.bin"))
-        .expect("the frozen grant vector must read");
-
-    let ParsedArchiveObject::Grant(parsed) =
-        ea_format::decode_exact_object(&grant).expect("the frozen grant parses")
-    else {
-        panic!("the frozen grant vector is a grant");
-    };
-    let fields = parsed.value().grant_body().fields();
-    // Der Plan wird aus dem GELIEFERTEN Grant gebildet, damit der Rahmen
-    // konsistent ist. `GrantPlanV1::new` verlangt genau einen
-    // Recovery-Empfaenger — der eingefrorene Reader-Grant allein ergaebe
-    // keinen Plan, also traegt der Plan hier zusaetzlich einen
-    // Recovery-Eintrag ueber denselben Empfaenger unter anderem Zweck.
-    let plan = GrantPlanV1::new(vec![
-        GrantPlanItemV1::new(
-            fields.recipient_key_thumbprint,
-            fields.recipient_certificate_hash,
-            fields.purpose,
-        ),
-        GrantPlanItemV1::new(
-            fields.issuer_key_thumbprint,
-            fields.issuer_certificate_hash,
-            ea_format::GrantPurposeV1::Recovery,
-        ),
-    ])
-    .expect("the framed plan is well formed");
-    ea_sync_protocol::EntryCommitRequestV1::new(entry, plan, vec![grant])
-        .expect("the framed commit request is valid")
-        .exact_bytes()
-        .to_vec()
-}
-
-/// Die Route IST gemountet, und ein vollstaendig signierter Commit nimmt den
-/// ganzen Weg — bis zum Capability-Tor.
-///
-/// Die Aussage ist doppelt: `404` traefe hier eine nicht gemountete Route,
-/// `401` eine gescheiterte Signatur. Genau `403` mit
-/// `EA-HTTP-CAPABILITY-MISSING` belegt, dass TLS, Routing, RFC-9421-Pruefung,
-/// Challenge-Verbrauch und die Aufloesung des Zertifikats getragen haben und
-/// dass allein die fehlende Capability den Commit verweigert.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_signed_commit_reaches_the_capability_gate_of_the_mounted_route() {
-    let database = common::fresh_database().await;
-    let fixture = common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[]).await;
+/// Ein Server, dessen Organisation den fortgeschriebenen Abschluss traegt und
+/// dessen Kette bereits innerhalb der Sequenzleihe steht.
+async fn stand_up(
+    database: &common::TestDatabase,
+    now_millis: i64,
+    with_second_reader: bool,
+) -> (common::TestServer, trust_closure::ExtendedClosure) {
+    let fixture =
+        common::seed_trust_fixture(database.pool(), trust_closure::ROTATION_CASE, &[]).await;
+    let closure = trust_closure::build(with_second_reader);
+    assert!(
+        closure.organization_id == fixture.organization_id,
+        "the extension binds to the frozen anchor's organization"
+    );
     let server = common::spawn_server(
         database.pool().clone(),
-        UnixMillis::new(SERVER_NOW_MILLIS),
-        fixture.organization_id,
+        UnixMillis::new(now_millis),
+        closure.organization_id,
         SERVER_SECRET,
         CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
     )
     .await;
+    common::publish_closure(&server, &closure, &signer(trust_closure::ADMIN_SEED), 0).await;
+    trust_closure::seed_chain_head(
+        database.pool(),
+        closure.organization_id,
+        closure.chain_id,
+        trust_closure::ExtendedClosure::seeded_head_sequence(),
+        SEEDED_HEAD_ENTRY_HASH,
+        SEEDED_HEAD_ACCEPTED_AT,
+    )
+    .await;
+    (server, closure)
+}
 
-    let body = framed_commit_body();
-    let target = entry_commit_path(CHAIN_ID);
-    let nonce = fresh_challenge(&server, fixture.organization_id).await;
+/// Ein signierter Commit-Request gegen den echten Server.
+/// `created` folgt der Uhr DIESES Servers: das Signaturfenster wird gegen die
+/// Serverzeit gestellt, und ein Fall, der die Uhr bewusst verstellt, muss
+/// seine Signatur mitverstellen.
+async fn post_commit_at(
+    server: &common::TestServer,
+    closure: &trust_closure::ExtendedClosure,
+    body: &[u8],
+    request_id: [u8; 16],
+    now_millis: i64,
+) -> common::HttpResponse {
+    let target = archive_objects::entry_commit_path(closure.chain_id);
+    let nonce = common::fresh_challenge(server, closure.organization_id).await;
     let headers = common::signed_headers(&common::SignedCall {
-        signer: &signer(ADMIN_SEED),
+        signer: &signer(trust_closure::WRITER_SEED),
         endpoint: EndpointV1::EntryCommits,
         authority: &server.authority,
         target: &target,
-        body: Some(&body),
-        organization_id: fixture.organization_id,
-        request_id: [0x01; 16],
+        body: Some(body),
+        organization_id: closure.organization_id,
+        request_id,
         nonce,
-        created: SERVER_NOW_MILLIS / 1_000,
+        created: now_millis.div_euclid(1_000),
     });
-    let response = common::https_request(
+    common::https_request(
         server.address,
         &server.authority,
         "POST",
         &target,
         &headers,
-        &body,
+        body,
     )
-    .await;
+    .await
+}
 
-    assert_eq!(
-        response.status, 403,
-        "an organizationAdminApprove certificate carries no initialGrant capability"
+/// Derselbe Aufruf gegen einen Server mit der Standarduhr.
+async fn post_commit(
+    server: &common::TestServer,
+    closure: &trust_closure::ExtendedClosure,
+    body: &[u8],
+    request_id: [u8; 16],
+) -> common::HttpResponse {
+    post_commit_at(server, closure, body, request_id, SERVER_NOW_MILLIS).await
+}
+
+/// Der glueckliche Pfad: Eintrag, Grants, Kopf und Quittung werden GEMEINSAM
+/// sichtbar, und die ausgelieferte Quittung ist die gespeicherte.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_complete_commit_is_accepted_and_becomes_visible_together() {
+    let database = common::fresh_database().await;
+    let (server, closure) = stand_up(&database, SERVER_NOW_MILLIS, false).await;
+
+    let request = archive_objects::valid_commit(
+        &closure,
+        trust_closure::ExtendedClosure::commit_sequence(),
+        Some(seeded_head_entry_hash()),
+        0xa1,
     );
+    let response = post_commit(&server, &closure, request.exact_bytes(), [0x01; 16]).await;
     assert_eq!(
-        error_code(&response.body).as_deref(),
-        Some("EA-HTTP-CAPABILITY-MISSING")
+        response.status,
+        200,
+        "a complete commit must be accepted; the server answered {:?}",
+        error_code(&response.body)
     );
-    // Nichts ist entstanden: kein Eintrag, kein Kopf, keine Quittung.
-    let counts: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM entries), (SELECT count(*) FROM chain_heads), \
-         (SELECT count(*) FROM receipts)",
+
+    let decoded = EntryCommitResponseV1::decode(&response.body).expect("the response decodes");
+    assert_eq!(decoded.outcome(), EntryCommitOutcome::Accepted);
+    // `checkpoint-bytes` bleibt in DIESER Stufe `null`; der
+    // Standard-Checkpoint fuellt es spaeter und beruehrt dabei kein
+    // Receipt-Byte.
+    assert_eq!(decoded.checkpoint_bytes(), None);
+
+    let ea_format::ParsedArchiveObject::Receipt(receipt) =
+        ea_format::decode_exact_object(decoded.receipt_bytes()).expect("the receipt parses")
+    else {
+        panic!("the response carries a receipt");
+    };
+    let fields = receipt.value().core().fields();
+    assert!(fields.entry_hash == request.identity().entry_hash());
+    assert!(fields.entry_object_hash == request.identity().entry_object_hash());
+    assert_eq!(
+        fields.chain_sequence.get(),
+        trust_closure::ExtendedClosure::commit_sequence()
+    );
+    assert!(fields.registry_version == closure.registry_version);
+    // Der gebundene Kopf ist der GEWAEHLTE — nicht irgendeiner aus einer Zeile.
+    assert_eq!(
+        fields.registry_head_hash.as_bytes(),
+        closure.registry_head_hash.as_bytes()
+    );
+    // Die Grant-Hashes der Quittung sind exakt die des unteilbar angenommenen
+    // Satzes, sortiert.
+    assert_eq!(
+        fields.initial_grant_object_hashes.len(),
+        request.identity().sorted_grant_object_hashes().len()
+    );
+    assert!(
+        fields
+            .initial_grant_object_hashes
+            .iter()
+            .zip(request.identity().sorted_grant_object_hashes())
+            .all(|(left, right)| left == right)
+    );
+    // Standardprofil: keine Evidence-Frist.
+    assert_eq!(fields.evidence_due_at, None);
+    // Die Annahmezeit ist das Maximum aus Serverzeit und Vorgaengerzeit.
+    assert_eq!(
+        fields.accepted_at_server,
+        UnixMillis::new(SERVER_NOW_MILLIS)
+    );
+
+    // Schritt 8: alles gemeinsam sichtbar.
+    let row = sqlx::query(
+        "SELECT (SELECT count(*) FROM entries) AS entries, \
+         (SELECT count(*) FROM grants) AS grants, \
+         (SELECT count(*) FROM receipts) AS receipts, \
+         (SELECT head_sequence FROM chain_heads) AS head",
     )
     .fetch_one(database.pool())
     .await
     .expect("counting must succeed");
-    assert_eq!(counts, (0, 0, 0));
+    assert_eq!(row.get::<i64, _>("entries"), 1);
+    assert_eq!(row.get::<i64, _>("grants"), 2);
+    assert_eq!(row.get::<i64, _>("receipts"), 1);
+    assert_eq!(
+        u64::try_from(row.get::<i64, _>("head")).expect("a sequence is not negative"),
+        trust_closure::ExtendedClosure::commit_sequence()
+    );
+    // Kein Security Event auf dem glueklichen Pfad.
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM security_events")
+        .fetch_one(database.pool())
+        .await
+        .expect("counting security events must succeed");
+    assert_eq!(events, 0);
 
     database.cleanup().await;
 }
 
-/// Der Fehlerkoerper traegt KEIN Fragment der gelieferten Nutzdaten.
+/// Ein identischer zweiter Commit liefert BYTEGLEICH dieselbe Quittung — auch
+/// wenn die Serveruhr inzwischen weitergelaufen ist.
 ///
-/// Gemessen und nicht behauptet: die Objektbytes des Koerpers kommen als
-/// Kanarienvogel in die Suche.
+/// Genau die Zusage aus `design.md` §13.3: „Nach dem Commit kann ein Retry
+/// ausschliesslich die gespeicherten Receipt-Bytes wieder ausliefern." Die
+/// zweite Anfrage laeuft gegen einen Server mit einer SPAETEREN festen Uhr,
+/// also gegen genau den Fall, den ein Neustart nach verlorener Antwort
+/// erzeugt.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_error_body_carries_no_fragment_of_the_delivered_payload() {
+async fn identical_replay_returns_byte_identical_receipt_bytes() {
     let database = common::fresh_database().await;
-    let fixture = common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[]).await;
-    let server = common::spawn_server(
+    let (server, closure) = stand_up(&database, SERVER_NOW_MILLIS, false).await;
+
+    let request = archive_objects::valid_commit(
+        &closure,
+        trust_closure::ExtendedClosure::commit_sequence(),
+        Some(seeded_head_entry_hash()),
+        0xa2,
+    );
+    let first = post_commit(&server, &closure, request.exact_bytes(), [0x02; 16]).await;
+    assert_eq!(first.status, 200, "{:?}", error_code(&first.body));
+    let first = EntryCommitResponseV1::decode(&first.body).expect("the response decodes");
+    assert_eq!(first.outcome(), EntryCommitOutcome::Accepted);
+
+    // Ein zweiter Server auf DERSELBEN Datenbank, mit einer spaeteren Uhr.
+    let later = common::spawn_server(
         database.pool().clone(),
-        UnixMillis::new(SERVER_NOW_MILLIS),
-        fixture.organization_id,
+        UnixMillis::new(SERVER_NOW_MILLIS + 4_000),
+        closure.organization_id,
         SERVER_SECRET,
         CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
     )
     .await;
-
-    let body = framed_commit_body();
-    let target = entry_commit_path(CHAIN_ID);
-    let nonce = fresh_challenge(&server, fixture.organization_id).await;
-    let headers = common::signed_headers(&common::SignedCall {
-        signer: &signer(ADMIN_SEED),
-        endpoint: EndpointV1::EntryCommits,
-        authority: &server.authority,
-        target: &target,
-        body: Some(&body),
-        organization_id: fixture.organization_id,
-        request_id: [0x02; 16],
-        nonce,
-        created: SERVER_NOW_MILLIS / 1_000,
-    });
-    let response = common::https_request(
-        server.address,
-        &server.authority,
-        "POST",
-        &target,
-        &headers,
-        &body,
+    let second = post_commit_at(
+        &later,
+        &closure,
+        request.exact_bytes(),
+        [0x03; 16],
+        SERVER_NOW_MILLIS + 4_000,
     )
     .await;
+    assert_eq!(second.status, 200, "{:?}", error_code(&second.body));
+    let second = EntryCommitResponseV1::decode(&second.body).expect("the response decodes");
 
-    // Zweiunddreissig Byte aus der Mitte des Koerpers sind lang genug, um
-    // zufaellige Treffer auszuschliessen.
-    let canary = &body[body.len() / 2..body.len() / 2 + 32];
-    assert!(
-        !ea_testkit::contains_canary(&response.body, canary),
-        "the error body must not echo the delivered payload"
+    assert_eq!(second.outcome(), EntryCommitOutcome::IdempotentReplay);
+    assert_eq!(
+        first.receipt_bytes(),
+        second.receipt_bytes(),
+        "a replay changes neither the time nor a single byte"
     );
-    assert!(ProtocolErrorV1::decode(&response.body).is_ok());
+
+    // Nichts ist doppelt entstanden, und der Kopf steht unveraendert.
+    let row = sqlx::query(
+        "SELECT (SELECT count(*) FROM entries) AS entries, \
+         (SELECT count(*) FROM receipts) AS receipts, \
+         (SELECT count(*) FROM security_events) AS events",
+    )
+    .fetch_one(database.pool())
+    .await
+    .expect("counting must succeed");
+    assert_eq!(row.get::<i64, _>("entries"), 1);
+    assert_eq!(row.get::<i64, _>("receipts"), 1);
+    assert_eq!(
+        row.get::<i64, _>("events"),
+        0,
+        "a replay is never a security event"
+    );
 
     database.cleanup().await;
 }
 
-/// `checkpoint-bytes` bleibt in DIESER Stufe `null`.
-///
-/// Eine Aussage ueber den Antwortrahmen und keine ueber einen Lauf: der
-/// Handler setzt das Feld auf `None`, und der Standard-Checkpoint fuellt es
-/// spaeter, ohne ein Receipt-Byte zu beruehren.
-#[test]
-fn the_response_frame_carries_a_null_checkpoint_in_this_stage() {
-    let receipt = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../vectors/receipts/v1/receipt/accepted-with-evidence-due.bin"),
-    )
-    .expect("the frozen receipt vector must read");
-    let response = EntryCommitResponseV1::new(EntryCommitOutcome::Accepted, receipt.clone(), None);
-    assert_eq!(response.checkpoint_bytes(), None);
-    assert_eq!(response.receipt_bytes(), receipt.as_slice());
+/// Zwei aufeinanderfolgende Eintraege: die Kette waechst, und die Annahmezeit
+/// laeuft nie rueckwaerts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successor_extends_the_chain_and_never_moves_time_backwards() {
+    let database = common::fresh_database().await;
+    let (server, closure) = stand_up(&database, SERVER_NOW_MILLIS, false).await;
 
-    let decoded = EntryCommitResponseV1::decode(response.exact_bytes())
-        .expect("the response frame round-trips");
-    assert_eq!(decoded.checkpoint_bytes(), None);
-    assert_eq!(decoded.outcome(), EntryCommitOutcome::Accepted);
+    let first = archive_objects::valid_commit(
+        &closure,
+        trust_closure::ExtendedClosure::commit_sequence(),
+        Some(seeded_head_entry_hash()),
+        0xa3,
+    );
+    let response = post_commit(&server, &closure, first.exact_bytes(), [0x04; 16]).await;
+    assert_eq!(response.status, 200, "{:?}", error_code(&response.body));
+
+    // Der Nachfolger laeuft gegen einen Server, dessen Uhr ZURUECK steht.
+    let earlier = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS - 400),
+        closure.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+    let second = archive_objects::valid_commit(
+        &closure,
+        trust_closure::ExtendedClosure::commit_sequence() + 1,
+        Some(first.identity().entry_hash()),
+        0xa4,
+    );
+    let response = post_commit_at(
+        &earlier,
+        &closure,
+        second.exact_bytes(),
+        [0x05; 16],
+        SERVER_NOW_MILLIS - 400,
+    )
+    .await;
+    assert_eq!(response.status, 200, "{:?}", error_code(&response.body));
+    let decoded = EntryCommitResponseV1::decode(&response.body).expect("the response decodes");
+    let ea_format::ParsedArchiveObject::Receipt(receipt) =
+        ea_format::decode_exact_object(decoded.receipt_bytes()).expect("the receipt parses")
+    else {
+        panic!("the response carries a receipt");
+    };
+    assert_eq!(
+        receipt.value().core().fields().accepted_at_server,
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        "the successor never precedes its predecessor"
+    );
+
+    let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM entries")
+        .fetch_one(database.pool())
+        .await
+        .expect("counting must succeed");
+    assert_eq!(entries, 2);
+
+    database.cleanup().await;
+}
+
+/// Die Quittung liegt content-addressed im Object Store und ist von dort
+/// BYTEGLEICH abrufbar — Schritt 9 liest genau das zurueck.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_accepted_receipt_is_stored_content_addressed() {
+    let database = common::fresh_database().await;
+    let (server, closure) = stand_up(&database, SERVER_NOW_MILLIS, false).await;
+
+    let request = archive_objects::valid_commit(
+        &closure,
+        trust_closure::ExtendedClosure::commit_sequence(),
+        Some(seeded_head_entry_hash()),
+        0xa5,
+    );
+    let response = post_commit(&server, &closure, request.exact_bytes(), [0x06; 16]).await;
+    assert_eq!(response.status, 200, "{:?}", error_code(&response.body));
+    let decoded = EntryCommitResponseV1::decode(&response.body).expect("the response decodes");
+
+    let hash = ea_crypto::object_hash(decoded.receipt_bytes());
+    let stored: Vec<u8> = common::object_store_client()
+        .await
+        .get_object()
+        .bucket(common::INTEGRATION_BUCKET)
+        .key(ea_sync_server::object_key(
+            ea_format::ObjectTypeV1::Receipt,
+            hash,
+        ))
+        .send()
+        .await
+        .expect("the receipt must be in the object store")
+        .body
+        .collect()
+        .await
+        .expect("reading the receipt must succeed")
+        .into_bytes()
+        .to_vec();
+    assert_eq!(stored, decoded.receipt_bytes());
+
+    // Und die Datenbank nennt genau diesen Hash.
+    let indexed: Vec<u8> = sqlx::query_scalar("SELECT receipt_object_hash FROM entries")
+        .fetch_one(database.pool())
+        .await
+        .expect("reading the receipt hash must succeed");
+    assert_eq!(indexed, hash.as_bytes());
+
+    database.cleanup().await;
 }

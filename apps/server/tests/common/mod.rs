@@ -23,6 +23,9 @@
 
 #![allow(dead_code)]
 
+pub mod archive_objects;
+pub mod trust_closure;
+
 use std::{
     path::Path,
     process,
@@ -685,4 +688,108 @@ pub async fn seed_trust_fixture_named(
         },
         withheld,
     )
+}
+
+/// Spielt den FORTGESCHRIEBENEN Vertrauensabschluss ueber den ECHTEN Endpunkt
+/// `POST /v1/trust/events` ein.
+///
+/// Nicht per `INSERT`: der Weg durch den Endpunkt fuehrt jedes Objekt durch die
+/// geteilte `ea-trust`-Pruefung, also durch dieselbe Instanz, die auch ein
+/// Reader fuehrt. Ein falsch gebautes Objekt der Kulisse faellt damit HIER auf
+/// und nicht erst als raetselhafter Commit-Fehler — die Kulisse kann sich
+/// nicht selbst fuer gueltig erklaeren.
+///
+/// Die Reihenfolge ist die ABHAENGIGKEITSREIHENFOLGE aus
+/// [`trust_closure::build`]: Autorisierung vor Ziel, Ziel vor Kopf.
+///
+/// # Panics
+///
+/// Wenn ein Objekt abgewiesen wird — dann ist die Kulisse defekt.
+pub async fn publish_closure(
+    server: &TestServer,
+    closure: &trust_closure::ExtendedClosure,
+    signer: &ea_sync_protocol::RequestSigner,
+    created: i64,
+) {
+    use ea_sync_protocol::{EndpointV1, TrustEventUploadV1};
+
+    for (index, object) in closure.objects.iter().enumerate() {
+        let upload =
+            TrustEventUploadV1::new(object.bytes.clone()).expect("the upload frame must build");
+        let nonce = fresh_challenge(server, closure.organization_id).await;
+        let mut request_id = [0xa0_u8; 16];
+        request_id[15] = u8::try_from(index).expect("the closure holds fewer than 256 objects");
+        let headers = signed_headers(&SignedCall {
+            signer,
+            endpoint: EndpointV1::TrustEvents,
+            authority: &server.authority,
+            target: EndpointV1::TrustEvents.path_template(),
+            body: Some(upload.exact_bytes()),
+            organization_id: closure.organization_id,
+            request_id,
+            nonce,
+            created,
+        });
+        let response = https_request(
+            server.address,
+            &server.authority,
+            "POST",
+            EndpointV1::TrustEvents.path_template(),
+            &headers,
+            upload.exact_bytes(),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            201,
+            "the closure object {} must be accepted; the server answered {:?}",
+            object.name,
+            ea_sync_protocol::ProtocolErrorV1::decode(&response.body)
+                .ok()
+                .map(|error| (
+                    error.error_code().to_owned(),
+                    error.required_registry_version().map(|v| v.get()),
+                    error
+                        .required_registry_head_hash()
+                        .map(|h| hex::encode(h.as_bytes()))
+                ))
+        );
+    }
+}
+
+/// Eine frische Challenge-Nonce.
+///
+/// Sie steht hier und nicht in jedem Testziel: jeder signierte Request braucht
+/// eine, und drei Kopien derselben zehn Zeilen waeren drei Gelegenheiten, sie
+/// verschieden zu machen.
+///
+/// # Panics
+///
+/// Wenn der Challenge-Endpunkt nicht mit `200` antwortet.
+pub async fn fresh_challenge(
+    server: &TestServer,
+    organization_id: ea_types::OrganizationId,
+) -> [u8; 32] {
+    use ea_sync_protocol::{
+        ChallengeRequestV1, ChallengeResponseV1, EndpointV1, STRUCTURED_MEDIA_TYPE_V1,
+    };
+
+    let body = ChallengeRequestV1::new(organization_id);
+    let response = https_request(
+        server.address,
+        &server.authority,
+        "POST",
+        EndpointV1::AuthChallenges.path_template(),
+        &[("content-type", STRUCTURED_MEDIA_TYPE_V1.to_owned())],
+        body.exact_bytes(),
+    )
+    .await;
+    assert_eq!(
+        response.status, 200,
+        "the challenge endpoint must answer 200"
+    );
+    ChallengeResponseV1::decode(&response.body)
+        .expect("the challenge response must decode")
+        .core()
+        .nonce
 }
