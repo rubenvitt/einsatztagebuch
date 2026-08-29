@@ -96,9 +96,9 @@ use ea_format::{
     PolicyFieldsV1, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1, RegistryChangeV1,
     RegistryEventFieldsV1, RenewalCoreFieldsV1, RenewalCoreV1, RetentionPolicyFieldsV1,
     Rfc3161EvidenceFieldsV1, RootCertificateFieldsV1, SignedManifestV1, StaleRegistryContextV1,
-    TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, encode_destroyed_entry_stub,
-    encode_entry_package, encode_evidence, encode_grant, encode_local_audit_core,
-    encode_local_audit_event, encode_receipt, encode_trust,
+    TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, WebBundleReleaseCoreV1,
+    WebBundleRevocationCoreV1, encode_destroyed_entry_stub, encode_entry_package, encode_evidence,
+    encode_grant, encode_local_audit_core, encode_local_audit_event, encode_receipt, encode_trust,
 };
 use ea_types::{
     AuthorizationId, CertificateHash, ChainId, ChainSequence, DestructionId, DeviceId, EntryHash,
@@ -6743,6 +6743,313 @@ fn local_audit_entry(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Vektorfamilie web-bundle/v1
+// ---------------------------------------------------------------------------
+
+/// Der Familienname der Bundle-Freigaben.
+pub const WEB_BUNDLE_FAMILY: &str = "web-bundle";
+
+/// Der Versionsordner der Bundle-Vektoren.
+pub const WEB_BUNDLE_V1_VERSION: &str = "v1";
+
+/// Die Wurzel der Bundle-Vektoren, relativ zur Arbeitsbaumwurzel.
+///
+/// Eine EIGENE Familie, ausdruecklich nicht `vectors/trust/v1`: das dortige
+/// Manifest ist Stufe-1-Bestand und wird nicht neu erzeugt, und seine
+/// Vektorhygiene verbietet die Literale dieser Familie im Manifesttext.
+pub const WEB_BUNDLE_V1_ROOT: &str = "vectors/web-bundle/v1";
+
+/// Die Herkunftsangabe der Bundle-Vektoren.
+const WEB_BUNDLE_GENERATOR: &str = "ea-testkit::web_bundle_v1_manifest";
+
+/// Der Suite-Identifikator der Bundle-Vektoren, EINGEFROREN.
+const WEB_BUNDLE_SUITE_ID: &str = "EINSATZARCHIV-SUITE-1";
+
+/// Der Schema-Identifikator eines Vertrauensbausteins.
+const WEB_BUNDLE_SCHEMA_ID: &str = "etb-v1";
+
+/// Die Organisationskennung aller Bundle-Vektoren.
+const WEB_BUNDLE_ORGANIZATION_ID: [u8; 16] = [0x90; 16];
+
+/// Der Bundle-Hash der Freigabe.
+const WEB_BUNDLE_HASH: [u8; 32] = [0x91; 32];
+
+/// Der Zertifikatshash, unter dem die Wurzel signiert.
+///
+/// Eine erklaerte Testkonstante und kein Objekthash: ein Objektvektor wird
+/// gegen keinen Katalog aufgeloest — dieselbe Begruendung wie bei
+/// [`TRUST_POLICY_CERTIFICATE_HASH`].
+const WEB_BUNDLE_ROOT_CERTIFICATE_HASH: [u8; 32] = [0x92; 32];
+
+/// Der Zertifikatshash der ZWEITEN Signatur des Kardinalitaetsnegativs.
+const WEB_BUNDLE_SECOND_ROOT_CERTIFICATE_HASH: [u8; 32] = [0x93; 32];
+
+/// Die Bundle-Version der Freigabe.
+const WEB_BUNDLE_VERSION_STRING: &str = "2026.3.1";
+
+/// Die Registry-Version, ab der die Freigabe wirksam ist.
+const WEB_BUNDLE_RELEASE_EFFECTIVE_FROM_REGISTRY_VERSION: u64 = 6;
+
+/// Die Registry-Version, ab der der Widerruf wirksam ist.
+const WEB_BUNDLE_REVOCATION_EFFECTIVE_FROM_REGISTRY_VERSION: u64 = 7;
+
+/// Der Ausstellungszeitpunkt der Freigabe.
+const WEB_BUNDLE_RELEASE_ISSUED_AT_MS: i64 = 1_700_000_005_000;
+
+/// Der Ausstellungszeitpunkt des Widerrufs.
+const WEB_BUNDLE_REVOCATION_ISSUED_AT_MS: i64 = 1_700_000_006_000;
+
+/// Das Literal des Subtype-Negativvektors dieser Familie.
+///
+/// Es steht AUSSCHLIESSLICH in den hexkodierten Objektbytes und nie in einem
+/// Eintragsnamen; die Namen bleiben kebab-case.
+const WEB_BUNDLE_UNKNOWN_SUBTYPE: &str = "webBundleReleases";
+
+/// Der Code, mit dem `ea-format` eine unzulaessige Gestalt abweist.
+const WEB_BUNDLE_SHAPE_ERROR_CODE: &str = "EA-FORMAT-SHAPE";
+
+/// Der Code, mit dem `ea-format` ein unbekanntes Subtype-Literal abweist.
+const WEB_BUNDLE_TAG_MISMATCH_ERROR_CODE: &str = "EA-FORMAT-TAG-MISMATCH";
+
+/// Die Organisationskennung als getypter Wert.
+fn web_bundle_organization_id() -> OrganizationId {
+    OrganizationId::try_from(WEB_BUNDLE_ORGANIZATION_ID.as_slice()).expect("16 bytes")
+}
+
+/// Die Felder der Freigabe.
+fn web_bundle_release_fields() -> WebBundleReleaseCoreV1 {
+    WebBundleReleaseCoreV1 {
+        organization_id: web_bundle_organization_id(),
+        bundle_hash: Hash32::try_from(WEB_BUNDLE_HASH.as_slice()).expect("32 bytes"),
+        bundle_version: WEB_BUNDLE_VERSION_STRING.to_owned(),
+        effective_from_registry_version: RegistryVersion::new(
+            WEB_BUNDLE_RELEASE_EFFECTIVE_FROM_REGISTRY_VERSION,
+        ),
+        issued_at: UnixMillis::new(WEB_BUNDLE_RELEASE_ISSUED_AT_MS),
+        root_key_thumbprint: trust_public_key(TEST_ENTROPY_ROOT_ED25519_SEED).thumbprint(),
+    }
+}
+
+/// Die Felder des Widerrufs zu einer gegebenen Freigabe.
+fn web_bundle_revocation_fields(release_object_hash: ObjectHash) -> WebBundleRevocationCoreV1 {
+    WebBundleRevocationCoreV1 {
+        organization_id: web_bundle_organization_id(),
+        release_object_hash,
+        effective_from_registry_version: RegistryVersion::new(
+            WEB_BUNDLE_REVOCATION_EFFECTIVE_FROM_REGISTRY_VERSION,
+        ),
+        issued_at: UnixMillis::new(WEB_BUNDLE_REVOCATION_ISSUED_AT_MS),
+        root_key_thumbprint: trust_public_key(TEST_ENTROPY_ROOT_ED25519_SEED).thumbprint(),
+    }
+}
+
+/// Die Wurzelsignatur ueber den Digest-Eingang genau dieses Nutzinhalts.
+fn web_bundle_root_signature(certificate_hash: [u8; 32], exact_digest_input: &[u8]) -> Vec<u8> {
+    trust_signed_normal(
+        TEST_ENTROPY_ROOT_ED25519_SEED,
+        CertificateHash::try_from(certificate_hash.as_slice()).expect("32 bytes"),
+        trust_digest(exact_digest_input).as_bytes(),
+    )
+}
+
+/// Ein von Hand gebauter Vertrauensbaustein `[subtype, nutzinhalt, [sig*]]`.
+///
+/// Von Hand, weil die Negativvektoren gerade NICHT durch `TrustObjectV1::new`
+/// gehen duerfen: null und zwei Signaturen weist der Kodierer ab, und genau
+/// diese Bytes sollen eingefroren werden.
+fn web_bundle_handmade_object(
+    subtype: &str,
+    exact_payload: &[u8],
+    signatures: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut object = vec![0x85, 0x44, b'E', b'A', b'1', 0, 5, 1, 0x80];
+    object.extend_from_slice(&trust_cbor_array(3));
+    object.extend_from_slice(&trust_cbor_text(subtype));
+    object.extend_from_slice(exact_payload);
+    object.extend_from_slice(&trust_cbor_array(
+        u64::try_from(signatures.len()).expect("no vector carries 24 signatures"),
+    ));
+    for signature in signatures {
+        object.extend_from_slice(signature);
+    }
+    object
+}
+
+/// Der Digest-Eingang `[subtype, nutzinhalt]`, von Hand.
+fn web_bundle_digest_input(subtype: &str, exact_payload: &[u8]) -> Vec<u8> {
+    let mut input = trust_cbor_array(2);
+    input.extend_from_slice(&trust_cbor_text(subtype));
+    input.extend_from_slice(exact_payload);
+    input
+}
+
+/// Der Releasekern OHNE sein leeres Erweiterungsarray: sieben statt acht
+/// Positionen.
+fn web_bundle_release_core_without_extension_array(exact_payload: &[u8]) -> Vec<u8> {
+    assert_eq!(
+        exact_payload[0], 0x88,
+        "a release core is an eight element array"
+    );
+    assert_eq!(
+        exact_payload[exact_payload.len() - 1],
+        0x80,
+        "a release core ends on its empty extension array"
+    );
+    let mut shortened = vec![0x87];
+    shortened.extend_from_slice(&exact_payload[1..exact_payload.len() - 1]);
+    shortened
+}
+
+/// Das Manifest der Vektorfamilie `web-bundle/v1`.
+///
+/// Deterministisch: Ed25519 signiert deterministisch, alle Felder sind feste
+/// Konstanten, und keine Kapselung zieht Entropie. Zwei Laeufe liefern
+/// dieselben Bytes.
+///
+/// # Panics
+///
+/// Wenn eine der Konstruktionen fehlschlaegt. Das waere ein Programmierfehler
+/// dieser Kiste, kein Laufzeitzustand.
+#[must_use]
+pub fn web_bundle_v1_manifest() -> VectorManifest {
+    let release_payload = TrustPayloadV1::web_bundle_release(web_bundle_release_fields())
+        .expect("the frozen release payload is well formed");
+    let release_signature = web_bundle_root_signature(
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        release_payload.exact_digest_input(),
+    );
+    let release_digest = trust_digest(release_payload.exact_digest_input());
+    let release_exact_payload = release_payload.exact_payload().to_vec();
+    let release_bytes = trust_exact_object(release_payload, vec![release_signature.clone()]);
+
+    let revocation_payload = TrustPayloadV1::web_bundle_revocation(web_bundle_revocation_fields(
+        object_hash(&release_bytes),
+    ))
+    .expect("the frozen revocation payload is well formed");
+    let revocation_signature = web_bundle_root_signature(
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        revocation_payload.exact_digest_input(),
+    );
+    let revocation_digest = trust_digest(revocation_payload.exact_digest_input());
+    let revocation_bytes = trust_exact_object(revocation_payload, vec![revocation_signature]);
+
+    let mut entries = vec![
+        web_bundle_entry(
+            "object/accepted-release",
+            release_bytes,
+            digest_map(&[("trust-digest", *release_digest.as_bytes())]),
+            ExpectedOutcome::Accepted,
+        ),
+        web_bundle_entry(
+            "object/accepted-revocation",
+            revocation_bytes,
+            digest_map(&[("trust-digest", *revocation_digest.as_bytes())]),
+            ExpectedOutcome::Accepted,
+        ),
+    ];
+
+    // Null Signaturen: die Grammatik schreibt `[cose-sign1-v1]` vor, also
+    // genau eine.
+    entries.push(web_bundle_entry(
+        "object/rejected-release-without-signature",
+        web_bundle_handmade_object(
+            TrustSubtypeV1::WebBundleRelease.as_str(),
+            &release_exact_payload,
+            &[],
+        ),
+        BTreeMap::new(),
+        web_bundle_rejected(WEB_BUNDLE_SHAPE_ERROR_CODE),
+    ));
+
+    // Zwei fuer sich wohlgeformte Wurzelsignaturen. Die Kardinalitaet faellt
+    // VOR der Signaturpruefung, und genau das ist die Aussage des Vektors.
+    entries.push(web_bundle_entry(
+        "object/rejected-release-with-two-signatures",
+        web_bundle_handmade_object(
+            TrustSubtypeV1::WebBundleRelease.as_str(),
+            &release_exact_payload,
+            &[
+                release_signature.clone(),
+                web_bundle_root_signature(
+                    WEB_BUNDLE_SECOND_ROOT_CERTIFICATE_HASH,
+                    &web_bundle_digest_input(
+                        TrustSubtypeV1::WebBundleRelease.as_str(),
+                        &release_exact_payload,
+                    ),
+                ),
+            ],
+        ),
+        BTreeMap::new(),
+        web_bundle_rejected(WEB_BUNDLE_SHAPE_ERROR_CODE),
+    ));
+
+    // Ein Literal, das um genau ein `s` neben dem echten liegt. Es steht nur
+    // in den Objektbytes.
+    let unknown_digest_input =
+        web_bundle_digest_input(WEB_BUNDLE_UNKNOWN_SUBTYPE, &release_exact_payload);
+    entries.push(web_bundle_entry(
+        "object/rejected-unknown-bundle-subtype",
+        web_bundle_handmade_object(
+            WEB_BUNDLE_UNKNOWN_SUBTYPE,
+            &release_exact_payload,
+            &[web_bundle_root_signature(
+                WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+                &unknown_digest_input,
+            )],
+        ),
+        BTreeMap::new(),
+        web_bundle_rejected(WEB_BUNDLE_TAG_MISMATCH_ERROR_CODE),
+    ));
+
+    // Der Kern ohne sein leeres Erweiterungsarray: sieben statt acht
+    // Positionen. Die Gestalt faellt, bevor die Signatur geprueft wird.
+    entries.push(web_bundle_entry(
+        "object/rejected-release-core-without-extension-array",
+        web_bundle_handmade_object(
+            TrustSubtypeV1::WebBundleRelease.as_str(),
+            &web_bundle_release_core_without_extension_array(&release_exact_payload),
+            &[release_signature],
+        ),
+        BTreeMap::new(),
+        web_bundle_rejected(WEB_BUNDLE_SHAPE_ERROR_CODE),
+    ));
+
+    VectorManifest {
+        family: WEB_BUNDLE_FAMILY.to_owned(),
+        version: WEB_BUNDLE_V1_VERSION.to_owned(),
+        entries,
+    }
+}
+
+/// Ein abgelehnter Ausgang mit seinem Fehlercode.
+fn web_bundle_rejected(code: &str) -> ExpectedOutcome {
+    ExpectedOutcome::Rejected {
+        error_code: code.to_owned(),
+    }
+}
+
+/// Ein Eintrag der Bundle-Familie.
+fn web_bundle_entry(
+    name: &str,
+    object_bytes: Vec<u8>,
+    intermediate_digests: BTreeMap<String, [u8; 32]>,
+    expected_outcome: ExpectedOutcome,
+) -> VectorEntry {
+    VectorEntry {
+        name: name.to_owned(),
+        schema_id: WEB_BUNDLE_SCHEMA_ID.to_owned(),
+        suite_id: WEB_BUNDLE_SUITE_ID.to_owned(),
+        source: VectorSource::GeneratorCommit(WEB_BUNDLE_GENERATOR.to_owned()),
+        input_bytes: Vec::new(),
+        intermediate_digests,
+        object_bytes,
+        expected_outcome,
+        file: format!("{name}.bin"),
+        scope_note: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7492,6 +7799,87 @@ mod tests {
         );
         let report = verify_manifest_at(&root).unwrap();
         assert!(report.is_clean(), "{:?}", report.mismatches);
+    }
+
+    /// Schreibt die Vektorfamilie `web-bundle/v1` in den Arbeitsbaum.
+    ///
+    /// `#[ignore]`, weil dieser Test SCHREIBT. Er ist der dokumentierte
+    /// Erzeugungslauf und wird ausdruecklich angefordert:
+    /// `cargo test -p ea-testkit -- --ignored emit_web_bundle_v1_vectors`.
+    /// Ab dem Einfriercommit sind die eingecheckten Bytes die Autoritaet und
+    /// werden NICHT neu erzeugt; eine spaetere Verhaltensaenderung legt
+    /// `vectors/web-bundle/v2/` DANEBEN.
+    #[test]
+    #[ignore = "writes into the working tree; run deliberately to regenerate"]
+    fn emit_web_bundle_v1_vectors() {
+        let root = workspace_root().join(WEB_BUNDLE_V1_ROOT);
+        web_bundle_v1_manifest().emit(&root).unwrap();
+        assert!(verify_manifest_at(&root).unwrap().is_clean());
+    }
+
+    /// Das eingecheckte Manifest der Bundle-Familie ist genau die Ausgabe
+    /// ihres Erzeugers.
+    #[test]
+    fn the_committed_web_bundle_v1_family_matches_its_generator() {
+        let root = workspace_root().join(WEB_BUNDLE_V1_ROOT);
+        let text = fs::read_to_string(root.join(MANIFEST_FILE_NAME))
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", root.display()));
+        assert_eq!(
+            text,
+            web_bundle_v1_manifest().to_json().unwrap(),
+            "the committed manifest must be byte-identical to the generator output"
+        );
+        let report = verify_manifest_at(&root).unwrap();
+        assert!(report.is_clean(), "{:?}", report.mismatches);
+    }
+
+    /// Der Erzeuger der Bundle-Familie benennt jeden Eintrag und jede Datei
+    /// genau einmal, ist deterministisch und haelt die Vektorhygiene ein.
+    ///
+    /// Die Hygiene ist der Grund fuer die eigene Familie: kein Eintragsname
+    /// und kein Notizfeld traegt das Subtype-Literal, es steht ausschliesslich
+    /// in den hexkodierten Objektbytes.
+    #[test]
+    fn the_web_bundle_generator_keeps_its_names_free_of_the_subtype_literal() {
+        let manifest = web_bundle_v1_manifest();
+        assert_eq!(manifest.family, WEB_BUNDLE_FAMILY);
+        assert_eq!(manifest.version, WEB_BUNDLE_V1_VERSION);
+        assert_eq!(manifest.entries.len(), 6);
+        let names = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), manifest.entries.len());
+        let accepted = manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.expected_outcome == ExpectedOutcome::Accepted)
+            .count();
+        assert_eq!(accepted, 2, "one accepted vector per subtype of the family");
+        assert_eq!(manifest.entries.len() - accepted, 4);
+        for entry in &manifest.entries {
+            assert_eq!(entry.file, format!("{}.bin", entry.name));
+            assert_eq!(entry.schema_id, WEB_BUNDLE_SCHEMA_ID);
+            assert_eq!(entry.suite_id, WEB_BUNDLE_SUITE_ID);
+            assert!(entry.scope_note.is_none(), "{} needs no note", entry.name);
+            assert!(
+                entry.name.chars().all(|value| value.is_ascii_lowercase()
+                    || value.is_ascii_digit()
+                    || value == '-'
+                    || value == '/'),
+                "{} must stay kebab-case",
+                entry.name
+            );
+        }
+        assert!(
+            !manifest.to_json().unwrap().contains("webBundle"),
+            "the subtype literals live in the hex recorded object bytes only"
+        );
+        assert_eq!(
+            web_bundle_v1_manifest().to_json().unwrap(),
+            web_bundle_v1_manifest().to_json().unwrap()
+        );
     }
 
     /// Der Erzeuger benennt jeden Eintrag und jede Datei genau einmal, deckt

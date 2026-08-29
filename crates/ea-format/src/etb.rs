@@ -26,6 +26,8 @@ pub enum TrustSubtypeV1 {
     DestructionAuthorization,
     DestructionTransition,
     DeletionAttestation,
+    WebBundleRelease,
+    WebBundleRevocation,
 }
 
 impl TrustSubtypeV1 {
@@ -42,6 +44,8 @@ impl TrustSubtypeV1 {
             "destructionAuthorization" => Ok(Self::DestructionAuthorization),
             "destructionTransition" => Ok(Self::DestructionTransition),
             "deletionAttestation" => Ok(Self::DeletionAttestation),
+            "webBundleRelease" => Ok(Self::WebBundleRelease),
+            "webBundleRevocation" => Ok(Self::WebBundleRevocation),
             _ => Err(FormatError::TagMismatch),
         }
     }
@@ -60,6 +64,8 @@ impl TrustSubtypeV1 {
             Self::DestructionAuthorization => "destructionAuthorization",
             Self::DestructionTransition => "destructionTransition",
             Self::DeletionAttestation => "deletionAttestation",
+            Self::WebBundleRelease => "webBundleRelease",
+            Self::WebBundleRevocation => "webBundleRevocation",
         }
     }
 }
@@ -289,6 +295,36 @@ pub struct DeletionAttestationFieldsV1 {
     pub executed_at: UnixMillis,
 }
 
+/// Der Kern einer Bundle-Freigabe, `web-bundle-release-core-v1`.
+///
+/// Die Feldreihenfolge ist mit den Vektoren unter `vectors/web-bundle/v1/`
+/// EINGEFROREN und wird nicht umsortiert. Der Kern traegt bewusst KEIN
+/// Widerrufsfeld: der Widerruf ist ein eigenes Folgeobjekt
+/// ([`WebBundleRevocationCoreV1`]), das die Freigabe ueber ihren Objekthash
+/// nennt und sie nie umschreibt.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WebBundleReleaseCoreV1 {
+    pub organization_id: OrganizationId,
+    pub bundle_hash: Hash32,
+    pub bundle_version: String,
+    pub effective_from_registry_version: RegistryVersion,
+    pub issued_at: UnixMillis,
+    pub root_key_thumbprint: KeyThumbprint,
+}
+
+/// Der Kern eines Bundle-Widerrufs, `web-bundle-revocation-core-v1`.
+///
+/// Append-only: er nennt die widerrufene Freigabe ausschliesslich ueber ihren
+/// Objekthash.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WebBundleRevocationCoreV1 {
+    pub organization_id: OrganizationId,
+    pub release_object_hash: ObjectHash,
+    pub effective_from_registry_version: RegistryVersion,
+    pub issued_at: UnixMillis,
+    pub root_key_thumbprint: KeyThumbprint,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct TrustPayloadV1 {
     subtype: TrustSubtypeV1,
@@ -454,6 +490,28 @@ impl TrustPayloadV1 {
             TrustSubtypeV1::DeletionAttestation,
             PayloadKind::Other,
             encode_deletion_attestation(&fields)?,
+        )
+    }
+
+    /// Die Bundle-Freigabe: DIREKTE Gestalt, wie
+    /// `organizationAdminAuthorization`. Eine Wurzelsignatur braucht keine
+    /// administrative Autorisierung, also gibt es hier kein
+    /// `authorized-trust-payload-v1`.
+    pub fn web_bundle_release(fields: WebBundleReleaseCoreV1) -> Result<Self, FormatError> {
+        Self::from_encoded(
+            TrustSubtypeV1::WebBundleRelease,
+            PayloadKind::Other,
+            encode_web_bundle_release(&fields)?,
+        )
+    }
+
+    /// Der Bundle-Widerruf: dieselbe direkte Gestalt, mit dem Objekthash der
+    /// widerrufenen Freigabe an Position 3.
+    pub fn web_bundle_revocation(fields: WebBundleRevocationCoreV1) -> Result<Self, FormatError> {
+        Self::from_encoded(
+            TrustSubtypeV1::WebBundleRevocation,
+            PayloadKind::Other,
+            encode_web_bundle_revocation(&fields)?,
         )
     }
 
@@ -1124,6 +1182,39 @@ fn encode_deletion_attestation(
     Ok(exact)
 }
 
+fn encode_web_bundle_release(fields: &WebBundleReleaseCoreV1) -> Result<Vec<u8>, FormatError> {
+    let mut exact = Vec::with_capacity(128);
+    Encoder::new(&mut exact)
+        .array(8)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fields.organization_id.as_bytes()))
+        .and_then(|encoder| encoder.bytes(fields.bundle_hash.as_bytes()))
+        .and_then(|encoder| encoder.str(&fields.bundle_version))
+        .and_then(|encoder| encoder.u64(fields.effective_from_registry_version.get()))
+        .and_then(|encoder| encoder.i64(fields.issued_at.get()))
+        .and_then(|encoder| encoder.bytes(fields.root_key_thumbprint.as_bytes()))
+        .and_then(|encoder| encoder.array(0))
+        .map_err(|_| FormatError::Shape)?;
+    Ok(exact)
+}
+
+fn encode_web_bundle_revocation(
+    fields: &WebBundleRevocationCoreV1,
+) -> Result<Vec<u8>, FormatError> {
+    let mut exact = Vec::with_capacity(128);
+    Encoder::new(&mut exact)
+        .array(7)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(fields.organization_id.as_bytes()))
+        .and_then(|encoder| encoder.bytes(fields.release_object_hash.as_bytes()))
+        .and_then(|encoder| encoder.u64(fields.effective_from_registry_version.get()))
+        .and_then(|encoder| encoder.i64(fields.issued_at.get()))
+        .and_then(|encoder| encoder.bytes(fields.root_key_thumbprint.as_bytes()))
+        .and_then(|encoder| encoder.array(0))
+        .map_err(|_| FormatError::Shape)?;
+    Ok(exact)
+}
+
 fn encode_optional_vec(
     encoder: &mut Encoder<&mut Vec<u8>>,
     value: Option<&[u8]>,
@@ -1230,6 +1321,14 @@ fn validate_payload(subtype: TrustSubtypeV1, payload: &[u8]) -> Result<PayloadKi
             validate_deletion_attestation(payload)?;
             Ok(PayloadKind::Other)
         }
+        TrustSubtypeV1::WebBundleRelease => {
+            validate_web_bundle_release(payload)?;
+            Ok(PayloadKind::Other)
+        }
+        TrustSubtypeV1::WebBundleRevocation => {
+            validate_web_bundle_revocation(payload)?;
+            Ok(PayloadKind::Other)
+        }
     }
 }
 
@@ -1239,9 +1338,14 @@ fn validate_signature_count(
     count: u64,
 ) -> Result<(), FormatError> {
     let valid = match subtype {
-        TrustSubtypeV1::RootCertificate | TrustSubtypeV1::OrganizationAdminAuthorization => {
-            count == 1
-        }
+        // Genau EINE Wurzelsignatur. Die beiden Bundle-Subtypen stehen hier
+        // und nicht im `_`-Zweig: die Grammatik schreibt ihnen
+        // `[cose-sign1-v1]` vor, und der Auffangzweig `count >= 1` naehme
+        // zwei Signaturen an, die `trust.cddl` verbietet.
+        TrustSubtypeV1::RootCertificate
+        | TrustSubtypeV1::OrganizationAdminAuthorization
+        | TrustSubtypeV1::WebBundleRelease
+        | TrustSubtypeV1::WebBundleRevocation => count == 1,
         TrustSubtypeV1::DeviceCertificate | TrustSubtypeV1::OperatorBinding
             if payload_kind == PayloadKind::InitialAdminDirect =>
         {
@@ -1866,6 +1970,62 @@ pub(crate) fn decode_deletion_attestation(
         result: u8::try_from(result).map_err(|_| FormatError::Shape)?,
         backup_expiry_at,
         executed_at,
+    })
+}
+
+fn validate_web_bundle_release(input: &[u8]) -> Result<(), FormatError> {
+    decode_web_bundle_release(input).map(|_| ())
+}
+
+pub(crate) fn decode_web_bundle_release(
+    input: &[u8],
+) -> Result<WebBundleReleaseCoreV1, FormatError> {
+    let mut decoder = Decoder::new(input);
+    expect_array_length(&mut decoder, 8)?;
+    expect_version(&mut decoder)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let bundle_hash = typed_bytes(&mut decoder, 32)?;
+    let bundle_version = decoder.str().map_err(|_| FormatError::Shape)?.to_owned();
+    let effective_from_registry_version =
+        RegistryVersion::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let issued_at = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
+    let root_key_thumbprint = typed_bytes(&mut decoder, 32)?;
+    expect_empty_array(&mut decoder)?;
+    finish(&decoder, input)?;
+    Ok(WebBundleReleaseCoreV1 {
+        organization_id,
+        bundle_hash,
+        bundle_version,
+        effective_from_registry_version,
+        issued_at,
+        root_key_thumbprint,
+    })
+}
+
+fn validate_web_bundle_revocation(input: &[u8]) -> Result<(), FormatError> {
+    decode_web_bundle_revocation(input).map(|_| ())
+}
+
+pub(crate) fn decode_web_bundle_revocation(
+    input: &[u8],
+) -> Result<WebBundleRevocationCoreV1, FormatError> {
+    let mut decoder = Decoder::new(input);
+    expect_array_length(&mut decoder, 7)?;
+    expect_version(&mut decoder)?;
+    let organization_id = typed_bytes(&mut decoder, 16)?;
+    let release_object_hash = typed_bytes(&mut decoder, 32)?;
+    let effective_from_registry_version =
+        RegistryVersion::new(decoder.u64().map_err(|_| FormatError::Shape)?);
+    let issued_at = UnixMillis::new(decoder.i64().map_err(|_| FormatError::Shape)?);
+    let root_key_thumbprint = typed_bytes(&mut decoder, 32)?;
+    expect_empty_array(&mut decoder)?;
+    finish(&decoder, input)?;
+    Ok(WebBundleRevocationCoreV1 {
+        organization_id,
+        release_object_hash,
+        effective_from_registry_version,
+        issued_at,
+        root_key_thumbprint,
     })
 }
 

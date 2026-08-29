@@ -18,9 +18,35 @@ fn cddl_registers_every_v1_wire_type() {
         "destruction-authorization-core-v1",
         "destruction-transition-core-v1",
         "deletion-attestation-core-v1",
+        "web-bundle-release-core-v1",
+        "web-bundle-revocation-core-v1",
     ] {
         assert!(trust.contains(subtype), "missing {subtype}");
     }
+    // Die beiden Bundle-Subtypen sind KEIN zulaessiges Ziel einer
+    // Admin-Autorisierung und tragen keinen achten Arm in
+    // `registry-change-v1`. Jedes Literal steht deshalb GENAU ZWEIMAL im
+    // Dokument: in `trust-subtype-v1` und in seinem Arm von `etb-body-v1`.
+    // Ein dritter Fundort waere genau die Aufweichung, die dieser Test
+    // ausschliesst.
+    for literal in ["\"webBundleRelease\"", "\"webBundleRevocation\""] {
+        assert_eq!(
+            trust.matches(literal).count(),
+            2,
+            "{literal} belongs into trust-subtype-v1 and its etb-body-v1 arm, nowhere else"
+        );
+    }
+    assert!(
+        trust.contains(concat!(
+            "  target-trust-subtype: \"deviceCertificate\" / \"operatorBinding\" /\n",
+            "    \"registryEvent\" / \"policy\" / \"writerTransition\" / \"rootCertificate\","
+        )),
+        "the administrative target union must stay character-identical"
+    );
+    assert!(
+        !trust.contains("[7,"),
+        "registry-change-v1 must stay a closed seven arm union"
+    );
     for name in [
         "checkpoint-core-v1",
         "timestamp-evidence-v1",

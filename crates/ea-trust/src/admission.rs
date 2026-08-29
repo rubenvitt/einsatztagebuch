@@ -184,10 +184,17 @@ pub fn verify_catalogue_admission(
         // Registrierungsabschluss: `ea-trust` fuehrt fuer sie heute keine
         // Signiererregel, und eine hier zu erfinden waere genau die zweite
         // Umsetzung, die es nicht geben darf.
+        //
+        // Die Bundle-Freigabe und ihr Widerruf stehen aus demselben Grund
+        // hier: sie tragen die DIREKTE, wurzelsignierte Gestalt, sind kein
+        // zulaessiges Ziel einer Admin-Autorisierung und deshalb auch kein
+        // Gegenstand des Registrierungsabschlusses.
         DecodedTrustPayloadV1::GrantAuthorization(_)
         | DecodedTrustPayloadV1::DestructionAuthorization(_)
         | DecodedTrustPayloadV1::DestructionTransition(_)
-        | DecodedTrustPayloadV1::DeletionAttestation(_) => {
+        | DecodedTrustPayloadV1::DeletionAttestation(_)
+        | DecodedTrustPayloadV1::WebBundleRelease(_)
+        | DecodedTrustPayloadV1::WebBundleRevocation(_) => {
             return Err(TrustError::ActionMismatch);
         }
     }

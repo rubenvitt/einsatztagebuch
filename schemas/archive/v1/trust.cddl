@@ -1,7 +1,8 @@
 trust-subtype-v1 = "rootCertificate" / "deviceCertificate" / "operatorBinding" /
   "organizationAdminAuthorization" / "registryEvent" / "policy" /
   "writerTransition" / "grantAuthorization" / "destructionAuthorization" /
-  "destructionTransition" / "deletionAttestation"
+  "destructionTransition" / "deletionAttestation" / "webBundleRelease" /
+  "webBundleRevocation"
 
 cose-sign1-v1 = #6.18(COSE-Sign1)
 
@@ -29,7 +30,9 @@ etb-body-v1 =
   ["destructionAuthorization", destruction-authorization-core-v1,
    [2* cose-sign1-v1]] /
   ["destructionTransition", destruction-transition-core-v1, [+ cose-sign1-v1]] /
-  ["deletionAttestation", deletion-attestation-core-v1, [+ cose-sign1-v1]]
+  ["deletionAttestation", deletion-attestation-core-v1, [+ cose-sign1-v1]] /
+  ["webBundleRelease", web-bundle-release-core-v1, [cose-sign1-v1]] /
+  ["webBundleRevocation", web-bundle-revocation-core-v1, [cose-sign1-v1]]
 
 ; 0 writer, 1 reader, 2 organizationAdmin, 3 keyApprover,
 ; 4 recoveryRecipient, 5 historicalGrantAuthority, 6 serverReceipt,
@@ -187,6 +190,27 @@ deletion-attestation-core-v1 = [
   replica-id: bstr .size 16, replica-kind: uint,
   sorted-removed-object-hashes: [* bstr .size 32],
   result: 0..2, backup-expiry-at: int / null, executed-at: int, []
+]
+
+; Die Bundle-Freigabe des Web-Readers (web-reader-design.md 4.2). DIREKTE,
+; wurzelsignierte Gestalt wie organization-admin-authorization-v1: eine
+; Wurzelsignatur braucht keine administrative Autorisierung. Beide Subtypen
+; sind KEIN zulaessiges target-trust-subtype und tragen keinen Arm in
+; registry-change-v1.
+web-bundle-release-core-v1 = [
+  1, organization-id: bstr .size 16,
+  bundle-hash: bstr .size 32, bundle-version: tstr,
+  effective-from-registry-version: uint,
+  issued-at: int, root-key-thumbprint: bstr .size 32, []
+]
+
+; Der Widerruf ist append-only: er nennt die widerrufene Freigabe
+; ausschliesslich ueber ihren Objekthash und schreibt sie nie um.
+web-bundle-revocation-core-v1 = [
+  1, organization-id: bstr .size 16,
+  release-object-hash: bstr .size 32,
+  effective-from-registry-version: uint,
+  issued-at: int, root-key-thumbprint: bstr .size 32, []
 ]
 
 authorized-trust-payload-v1<T> = [

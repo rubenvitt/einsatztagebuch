@@ -37,8 +37,8 @@ pub use etb::{
     FreeTextPolicyFieldsV1, GrantAuthorizationFieldsV1, KeyProtectionProfileV1,
     OperatorBindingFieldsV1, OperatorRoleV1, OrganizationAdminAuthorizationFieldsV1,
     PolicyFieldsV1, RegistryChangeV1, RegistryEventFieldsV1, RetentionPolicyFieldsV1,
-    RootCertificateFieldsV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1,
-    WriterTransitionFieldsV1, validate_destruction_targets,
+    RootCertificateFieldsV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, WebBundleReleaseCoreV1,
+    WebBundleRevocationCoreV1, WriterTransitionFieldsV1, validate_destruction_targets,
 };
 pub use finalization_preview::{
     FinalizationPreviewCoreFieldsV1, FinalizationPreviewCoreV1, encode_finalization_preview_core,
