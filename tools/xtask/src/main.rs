@@ -1,9 +1,11 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{self, Read},
+    io::{self, Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{self, Command},
+    time::Duration,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -336,6 +338,218 @@ fn ensure_wasm32_target_available() -> Result<(), String> {
          Note: RUSTUP_TOOLCHAIN in the environment overrides rust-toolchain.toml, \
          including its targets declaration.",
     ))
+}
+
+/// Die Compose-Datei der beiden Integrationsdienste, relativ zur Wurzel.
+const INTEGRATION_COMPOSE_FILE: &str = "ops/compose/integration.yaml";
+
+/// Die EINE Fehlerzeile der Argumentgrammatik von `integration`.
+///
+/// Sie folgt dem Muster `{gate} does not accept arguments` der Arme darueber:
+/// der Verteiler nennt die erlaubte Eingabe, statt sie stillschweigend zu
+/// erweitern.
+const INTEGRATION_ARGUMENT_ERROR: &str = "integration accepts exactly one of: up, down";
+
+/// Der Bucket, den `integration up` versioniert anlegt.
+const INTEGRATION_BUCKET: &str = "einsatzarchiv-objects";
+
+/// Die Wurzeldaten des Testdienstes, wortgleich zu
+/// `ops/compose/integration.yaml`. Sie oeffnen ausschliesslich einen an
+/// `127.0.0.1` gebundenen Container ohne einen einzigen fachlichen Inhalt.
+const INTEGRATION_OBJECT_STORE_ROOT_USER: &str = "einsatzarchiv";
+const INTEGRATION_OBJECT_STORE_ROOT_PASSWORD: &str = "einsatzarchiv";
+
+/// Die beiden Endpunkte, EINMAL im Baum.
+///
+/// `integration up` druckt sie, und `verify-quick` prueft genau sie. Das ist
+/// bewusst KEINE Auswertung von `DATABASE_URL` aus der Umgebung: eine
+/// Erreichbarkeitspruefung, die ihre eigene Adresse aus einer setzbaren
+/// Variablen liest, laesst sich durch das Setzen derselben Variablen umgehen,
+/// und der Gate waere fail-open.
+const INTEGRATION_DATABASE_URL: &str =
+    "postgres://einsatzarchiv:einsatzarchiv@127.0.0.1:55432/einsatzarchiv";
+const INTEGRATION_POSTGRES_AUTHORITY: &str = "127.0.0.1:55432";
+const INTEGRATION_OBJECT_STORE_URL: &str = "http://127.0.0.1:59000";
+const INTEGRATION_OBJECT_STORE_AUTHORITY: &str = "127.0.0.1:59000";
+
+/// Frist jeder einzelnen Erreichbarkeitsstufe.
+const INTEGRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Ruft `docker compose` und haelt stdout FREI.
+///
+/// `integration up` druckt zwei `export`-Zeilen, die der Aufrufer mit `eval`
+/// uebernimmt; jede Zeile, die Compose selbst nach stdout schreibt, landete
+/// sonst in derselben Auswertung. Deshalb wird die Ausgabe eingesammelt und
+/// nach stderr weitergereicht.
+fn run_compose(root: &Path, arguments: &[&str]) -> Result<(), String> {
+    let mut args = vec!["compose", "--file", INTEGRATION_COMPOSE_FILE];
+    args.extend_from_slice(arguments);
+    let output = Command::new("docker")
+        .args(&args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to invoke docker: {error}. \
+                 The integration services need a running Docker engine; \
+                 mise.toml pins EA_CONTAINER_RUNTIME."
+            )
+        })?;
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(format!("docker {} failed", args.join(" ")));
+    }
+    Ok(())
+}
+
+/// Oeffnet eine TCP-Verbindung mit Frist zu `host:port`.
+fn connect_with_timeout(authority: &str) -> Option<TcpStream> {
+    let address = authority.to_socket_addrs().ok()?.next()?;
+    let stream = TcpStream::connect_timeout(&address, INTEGRATION_PROBE_TIMEOUT).ok()?;
+    stream
+        .set_read_timeout(Some(INTEGRATION_PROBE_TIMEOUT))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(INTEGRATION_PROBE_TIMEOUT))
+        .ok()?;
+    Some(stream)
+}
+
+/// Belegt, dass am Port wirklich PostgreSQL antwortet.
+///
+/// Ein offener Port belegt nichts: Docker bindet die Weiterleitung, bevor der
+/// Server bereit ist. Der SSLRequest des Frontend-Protokolls (Laenge 8, Code
+/// 80877103) ist die kuerzeste Anfrage, die ein echter Server beantwortet —
+/// mit genau einem Byte, `S` oder `N`.
+fn postgres_answers() -> bool {
+    let Some(mut stream) = connect_with_timeout(INTEGRATION_POSTGRES_AUTHORITY) else {
+        return false;
+    };
+    let mut request = [0u8; 8];
+    request[..4].copy_from_slice(&8u32.to_be_bytes());
+    request[4..].copy_from_slice(&80_877_103u32.to_be_bytes());
+    if stream.write_all(&request).is_err() {
+        return false;
+    }
+    let mut answer = [0u8; 1];
+    stream.read_exact(&mut answer).is_ok() && matches!(answer[0], b'S' | b'N')
+}
+
+/// Belegt, dass der Object Store seine Bereitschaft selbst bestaetigt.
+fn object_store_answers() -> bool {
+    let Some(mut stream) = connect_with_timeout(INTEGRATION_OBJECT_STORE_AUTHORITY) else {
+        return false;
+    };
+    let request = format!(
+        "GET /minio/health/live HTTP/1.1\r\nHost: {INTEGRATION_OBJECT_STORE_AUTHORITY}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut answer = Vec::new();
+    if stream.read_to_end(&mut answer).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200")
+}
+
+/// Faellt geschlossen aus, solange einer der beiden Dienste nicht antwortet.
+///
+/// Gebaut wie [`ensure_wasm32_target_available`]: sie laeuft VOR den
+/// betroffenen Kommandos und nennt die Abhilfe. Ein Unterschied ist Absicht —
+/// `ensure_wasm32_target_available` gibt `Ok(())` zurueck, wenn `rustup` gar
+/// nicht startet, und ist an dieser Stelle fail-OPEN. Hier gibt es diesen Zweig
+/// nicht: ein nicht durchfuehrbarer Test ist ein nicht bestandener Test, und
+/// eine Umgehung ueber eine Umgebungsvariable existiert nicht.
+fn ensure_integration_services_available() -> Result<(), String> {
+    let mut missing = Vec::new();
+    if !postgres_answers() {
+        missing.push(format!("PostgreSQL at {INTEGRATION_POSTGRES_AUTHORITY}"));
+    }
+    if !object_store_answers() {
+        missing.push(format!(
+            "the object store at {INTEGRATION_OBJECT_STORE_AUTHORITY}"
+        ));
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} did not answer. \
+         Run `cargo run --locked -p xtask -- integration up` first; it starts both services \
+         from {INTEGRATION_COMPOSE_FILE} and exports DATABASE_URL and EA_OBJECT_STORE_ENDPOINT. \
+         There is no environment variable that skips this check.",
+        missing.join(" and ")
+    ))
+}
+
+/// Startet beide Dienste und druckt die zwei Verbindungswerte.
+///
+/// Wiederholbar: `docker compose up --wait` laesst laufende, gesunde Container
+/// stehen, `mc mb --ignore-existing` und `mc version enable` sind auf einem
+/// bereits versionierten Bucket wirkungslos, und die gedruckten Zeilen haengen
+/// an Konstanten statt an Laufzeitzustand.
+fn run_integration_up(root: &Path) -> Result<(), String> {
+    run_compose(root, &["up", "--detach", "--wait"])?;
+    // Der Alias, den das Bild von sich aus fuehrt, traegt keine Anmeldedaten —
+    // er reicht fuer `mc ready local` in der Bereitschaftspruefung, nicht fuer
+    // eine Bucket-Operation. Deshalb wird er hier mit den Wurzeldaten aus
+    // `ops/compose/integration.yaml` neu gesetzt; das ist wiederholbar.
+    run_compose(
+        root,
+        &[
+            "exec",
+            "-T",
+            "objectstore",
+            "mc",
+            "alias",
+            "set",
+            "local",
+            "http://127.0.0.1:9000",
+            INTEGRATION_OBJECT_STORE_ROOT_USER,
+            INTEGRATION_OBJECT_STORE_ROOT_PASSWORD,
+        ],
+    )?;
+    // Die Bucket-Versionierung ist eine Anforderung dieser Stufe und keine
+    // Voreinstellung: MinIO legt Buckets unversioniert an.
+    run_compose(
+        root,
+        &[
+            "exec",
+            "-T",
+            "objectstore",
+            "mc",
+            "mb",
+            "--ignore-existing",
+            &format!("local/{INTEGRATION_BUCKET}"),
+        ],
+    )?;
+    run_compose(
+        root,
+        &[
+            "exec",
+            "-T",
+            "objectstore",
+            "mc",
+            "version",
+            "enable",
+            &format!("local/{INTEGRATION_BUCKET}"),
+        ],
+    )?;
+    ensure_integration_services_available()?;
+    println!("export DATABASE_URL={INTEGRATION_DATABASE_URL}");
+    println!("export EA_OBJECT_STORE_ENDPOINT={INTEGRATION_OBJECT_STORE_URL}");
+    Ok(())
+}
+
+/// Haelt beide Dienste an und raeumt ihre Volumes ab.
+///
+/// Wiederholbar: `docker compose down` auf einem bereits abgeraeumten Projekt
+/// ist erfolgreich und ohne Wirkung.
+fn run_integration_down(root: &Path) -> Result<(), String> {
+    run_compose(root, &["down", "--volumes", "--remove-orphans"])
 }
 
 fn parse_fuzz_settings(input: &str) -> Result<FuzzSettings, String> {
@@ -2416,6 +2630,11 @@ fn run() -> Result<(), String> {
                 eprintln!("{warning}");
             }
             ensure_wasm32_target_available()?;
+            // Vor den Cargo-Kommandos, weil `#[sqlx::test]` seine Datenbank
+            // erst zur Laufzeit sucht: ohne diese Zeile scheitert der
+            // Schnelllauf ab Stufe 3 mit einer Verbindungsmeldung tief im
+            // Testprotokoll statt hier mit einer Anweisung.
+            ensure_integration_services_available()?;
             for (program, command_args) in verify_quick_commands() {
                 run_process(&root, program, &command_args)
                     .map_err(|error| format!("failed to invoke {program}: {error}"))?;
@@ -2441,6 +2660,19 @@ fn run() -> Result<(), String> {
                 .parse::<u32>()
                 .map_err(|error| format!("stage-gate stage must be a number: {stage}: {error}"))?;
             run_stage_gate(&root, stage)
+        }
+        "integration" => {
+            let action = args
+                .next()
+                .ok_or_else(|| INTEGRATION_ARGUMENT_ERROR.to_owned())?;
+            if args.next().is_some() {
+                return Err(INTEGRATION_ARGUMENT_ERROR.to_owned());
+            }
+            match action.as_str() {
+                "up" => run_integration_up(&root),
+                "down" => run_integration_down(&root),
+                _ => Err(INTEGRATION_ARGUMENT_ERROR.to_owned()),
+            }
         }
         "validate-schemas" => {
             if args.next().is_some() {

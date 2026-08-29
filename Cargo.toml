@@ -8,6 +8,10 @@ rust-version = "1.95"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
+async-trait = { version = "=0.1.92", default-features = false }
+aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = ["behavior-version-latest", "http-1x", "rt-tokio"] }
+aws-smithy-http-client = { version = "=1.4.0", default-features = false, features = ["rustls-ring"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "tokio"] }
 cddl = { version = "=0.10.7", default-features = false, features = ["additional-controls", "ast-span", "cbor", "json"] }
 cddl-cat = { version = "=0.7.1", default-features = false, features = ["ciborium"] }
 chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
@@ -56,11 +60,15 @@ libfuzzer-sys = "=0.4.13"
 libsqlite3-sys = { version = "=0.38.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 minicbor = { version = "=2.3.0", features = ["derive", "std"] }
 rusqlite = { version = "=0.40.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["logging", "ring", "std"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
 tauri = { version = "=2.11.5" }
 tauri-build = { version = "=2.6.3" }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["logging", "ring"] }
 toml = "=0.8.23"
 unicode-normalization = "=0.1.25"
 zeroize = { version = "=1.9.0", features = ["derive"] }

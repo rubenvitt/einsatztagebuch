@@ -38,9 +38,77 @@ const ADR_LITERALS: [&str; 5] = [
 
 const DATABASE_DEPENDENCIES: [&str; 2] = ["rusqlite", "libsqlite3-sys"];
 
+/// ADR 0004 ratifies the Stage 3 server dependency class.
+///
+/// `docs/adr/` carries 0001 and 0002 today; 0003 is claimed by
+/// `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-7-release-hardening.md:372`
+/// for the release supply chain, so the server decision is 0004.
+const SERVER_ADR_PATH: &str = "docs/adr/0004-server-runtime-and-dependency-class.md";
+
+const SERVER_ADR_SECTIONS: [&str; 6] = [
+    "## Context",
+    "## Decision",
+    "## Rejected alternatives",
+    "## Primary-source and RustSec review",
+    "## OCI base image",
+    "## Consequences",
+];
+
+const SERVER_ADR_LITERALS: [&str; 6] = [
+    "docs/adr/0001-toolchain-and-cryptography-dependencies.md",
+    "docs/adr/0002-local-database-encryption.md",
+    "RustSec advisory database",
+    "S3-kompatibler Object Store",
+    "bucket versioning",
+    "no member of this stage consumes",
+];
+
+/// The classes ADR 0004 ratifies: async runtime, HTTP server, PostgreSQL
+/// driver, S3 client and TLS stack, plus the trait-object helper that the
+/// server crates' abstractions need.
+const SERVER_RUNTIME_DEPENDENCIES: [&str; 6] = [
+    "async-trait",
+    "aws-sdk-s3",
+    "axum",
+    "rustls",
+    "sqlx",
+    "tokio",
+];
+
 /// Reads the workspace root the way every check in `workspace.rs` does.
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Rebuilds the reviewed feature selection in the exact ledger form both ADR
+/// gates require. A crate without a `features` array yields `name = []`, so an
+/// added feature still has to pass through the review.
+fn reviewed_feature_ledger_line(name: &str, spec: &Value) -> String {
+    let features = spec
+        .get("features")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    format!(
+        "{name} = [{}]",
+        features
+            .iter()
+            .map(|feature| format!("\"{}\"", feature.as_str().unwrap()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Reads the shared dependency table of the root manifest.
+fn shared_dependencies() -> toml::map::Map<String, Value> {
+    let manifest: Value = fs::read_to_string(workspace_root().join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    manifest["workspace"]["dependencies"]
+        .as_table()
+        .unwrap()
+        .clone()
 }
 
 #[test]
@@ -101,17 +169,53 @@ fn every_database_dependency_is_pinned_and_named_by_adr_0002() {
         // reviewed selection is therefore also required as one exact ledger
         // line, rebuilt here from the manifest, so that an added, removed or
         // reordered feature has to pass through the review to reach the gate.
-        let ledger = format!(
-            "{name} = [{}]",
-            features
-                .iter()
-                .map(|feature| format!("\"{}\"", feature.as_str().unwrap()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let ledger = reviewed_feature_ledger_line(name, spec);
         assert!(
             adr.contains(&ledger),
             "ADR 0002 must carry the reviewed feature selection verbatim: {ledger}"
+        );
+    }
+}
+
+/// Couples the Stage 3 server dependency class to ADR 0004 before it is used.
+///
+/// The shape is the one `every_database_dependency_is_pinned_and_named_by_adr_0002`
+/// established: every class exactly pinned, its pin on the same line as its
+/// name, and the reviewed feature selection as one verbatim ledger line. It is
+/// a second instance of the same gate and not a generalization of it, because
+/// ADR 0002 and ADR 0004 ratify different classes and must stay separable.
+#[test]
+fn server_runtime_dependency_class_is_ratified_before_use() {
+    let adr = fs::read_to_string(workspace_root().join(SERVER_ADR_PATH))
+        .expect("ADR 0004 must exist before any server dependency is pinned");
+    for section in SERVER_ADR_SECTIONS {
+        assert!(adr.contains(section), "ADR 0004 is missing {section}");
+    }
+    for literal in SERVER_ADR_LITERALS {
+        assert!(
+            adr.contains(literal),
+            "ADR 0004 is missing the literal {literal}"
+        );
+    }
+    let shared = shared_dependencies();
+    for name in SERVER_RUNTIME_DEPENDENCIES {
+        let spec = shared
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} must be a shared workspace dependency"));
+        let version = spec
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{name} must carry an explicit version"));
+        assert!(version.starts_with('='), "{name} must be pinned exactly");
+        assert!(
+            adr.lines()
+                .any(|line| line.contains(&format!("`{name}`")) && line.contains(version)),
+            "ADR 0004 must carry {name} and its pin {version} on one line"
+        );
+        let ledger = reviewed_feature_ledger_line(name, spec);
+        assert!(
+            adr.contains(&ledger),
+            "ADR 0004 must carry the reviewed feature selection verbatim: {ledger}"
         );
     }
 }
