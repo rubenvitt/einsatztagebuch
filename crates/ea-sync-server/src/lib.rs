@@ -35,7 +35,7 @@ pub mod validation;
 pub use models::{
     AppendOutcome, ChainHeadStateV1, CheckpointCommitV1, CheckpointIndexEntryV1, CommitDbCommand,
     CommitIdentityV1, CommittedDbState, CredentialRegistrationOutcome, DestructionRequestCommandV1,
-    DestructionStateV1, EntryIndexEntryV1, ExportIndexEntryV1, GrantIndexEntryV1,
+    DestructionStateV1, EntryIndexEntryV1, ExportIndexEntryV1, GrantDeliveryV1, GrantIndexEntryV1,
     HistoricalGrantCommandV1, IndexedObjectV1, PENDING_REGISTRATION_STATE_V1,
     PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, RegistryLineEntryV1,
     RepositoryError, SecurityEventKindV1, SecurityEventV1, StagedObject, StoreError, StoredObject,

@@ -119,7 +119,10 @@ async fn a_two_approver_authorization_is_accepted_and_blocks_delivery_and_regran
         request_id: [0x83; 16],
     })
     .await;
-    assert_eq!(blocked.status, 422);
+    // `403` und nicht `422`: die Statustafel des Nachtrags fuehrt fuer diesen
+    // Endpunkt kein `422`, und die 422-Zeile der Abbildung spricht ueber einen
+    // gelieferten Koerper — eine Leseanfrage hat keinen.
+    assert_eq!(blocked.status, 403);
     assert_eq!(
         common::error_code(&blocked.body).as_deref(),
         Some("EA-DESTRUCTION-BLOCKED")
@@ -400,6 +403,77 @@ async fn a_running_destruction_also_withholds_the_grants_from_the_reader_batch()
             "no grant of a destruction target leaves the server"
         );
     }
+
+    database.cleanup().await;
+}
+
+/// Die Sperre gilt auch fuer den EINZELOBJEKTABRUF.
+///
+/// Er ist der dritte Auslieferungsweg: ein Aufrufer, der die Adresse eines
+/// Grants schon kennt, holt sie erneut. Ohne diese Pruefung waere er die
+/// Luecke, durch die genau die Grants wieder herauskaemen, die Lesestapel und
+/// Grantliste zurueckhalten.
+///
+/// Nur GRANTS werden gesperrt: der Eintrag selbst bleibt lesbar, damit die
+/// Kettenkontinuitaet pruefbar bleibt — dieselbe Abgrenzung wie im Stapel.
+#[tokio::test]
+async fn a_running_destruction_also_blocks_the_single_object_read() {
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, true).await;
+    let approvers = archive_objects::approvers(&ready.closure);
+    let prepared = prepare(&ready, 0x78, &approvers).await;
+
+    let grant_target = format!(
+        "/v1/objects/{}",
+        hex::encode(prepared.entry.reader_grant_object_hash.as_bytes())
+    );
+    let before = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::Objects,
+        target: &grant_target,
+        body: None,
+        request_id: [0x90; 16],
+    })
+    .await;
+    assert_eq!(before.status, 200);
+
+    let accepted = post_destruction(&ready, &prepared, [0x91; 16]).await;
+    assert_eq!(accepted.status, 202);
+
+    let blocked = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::Objects,
+        target: &grant_target,
+        body: None,
+        request_id: [0x92; 16],
+    })
+    .await;
+    assert_eq!(blocked.status, 403);
+    assert_eq!(
+        common::error_code(&blocked.body).as_deref(),
+        Some("EA-DESTRUCTION-BLOCKED")
+    );
+
+    // Der Eintrag selbst bleibt lesbar.
+    let entry_target = format!(
+        "/v1/objects/{}",
+        hex::encode(prepared.entry.entry_object_hash.as_bytes())
+    );
+    let still = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::Objects,
+        target: &entry_target,
+        body: None,
+        request_id: [0x93; 16],
+    })
+    .await;
+    assert_eq!(
+        still.status, 200,
+        "chain continuity stays readable through the object endpoint"
+    );
 
     database.cleanup().await;
 }

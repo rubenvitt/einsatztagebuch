@@ -545,12 +545,22 @@ pub trait EntryDirectory: Send + Sync {
         entry_hash: ea_types::EntryHash,
     ) -> Result<Option<crate::models::EntryIndexEntryV1>, RepositoryError>;
 
-    /// Die Eintraege NACH `after_sequence`, aufsteigend, hoechstens `limit`.
-    async fn entries_after(
+    /// Die Eintraege AB `from_sequence` — EINSCHLIESSLICH —, aufsteigend,
+    /// hoechstens `limit`.
+    ///
+    /// EINSCHLIESSLICH und nicht „danach", und das ist eine Sicherheitsaussage
+    /// und keine Geschmacksfrage: Sequenz NULL ist der Genesis-Eintrag
+    /// (`ea_format`s `eip`-Pruefung erzwingt „ohne Vorgaenger genau dann, wenn
+    /// Sequenz null"), und ein Leser ohne verifizierten Kopf fragt genau ab
+    /// dort. Eine exklusive Grenze liesse den ersten Eintrag jeder Kette
+    /// unerreichbar, und zwar OHNE Fehlermeldung — die Antwort waere ein
+    /// plausibles `200`. Der Aufrufer, der nach einer bekannten Position
+    /// weiterliest, uebergibt deshalb `position + 1`.
+    async fn entries_from(
         &self,
         organization_id: ea_types::OrganizationId,
         chain_id: ea_types::ChainId,
-        after_sequence: ea_types::ChainSequence,
+        from_sequence: ea_types::ChainSequence,
         limit: usize,
     ) -> Result<Vec<crate::models::EntryIndexEntryV1>, RepositoryError>;
 
@@ -560,6 +570,18 @@ pub trait EntryDirectory: Send + Sync {
         organization_id: ea_types::OrganizationId,
         chain_id: ea_types::ChainId,
     ) -> Result<Option<crate::models::ChainHeadStateV1>, RepositoryError>;
+
+    /// Der Eintrag und die Frist EINES Grants, ueber seine Adresse.
+    ///
+    /// Der Objektabruf kennt nur den Objekthash; ohne diese Aufloesung koennte
+    /// er die beiden Auslieferungssperren gar nicht anwenden. `Ok(None)`
+    /// heisst „dieses Objekt ist kein Grant dieser Organisation" — fuer jede
+    /// andere Objektart ist das die richtige Antwort und kein Ausfall.
+    async fn grant_delivery(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        object_hash: ObjectHash,
+    ) -> Result<Option<crate::models::GrantDeliveryV1>, RepositoryError>;
 
     /// Die Grants dieses Eintrags, aufsteigend nach `objectHash`.
     async fn grants_of(

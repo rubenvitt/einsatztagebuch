@@ -654,6 +654,24 @@ impl fmt::Debug for GrantIndexEntryV1 {
     }
 }
 
+/// Was ueber die AUSLIEFERBARKEIT eines einzelnen Grants entscheidet.
+///
+/// Der Objektabruf kennt nur eine Adresse. Um die beiden Sperren aus
+/// `design.md` §13.3 und §16.3 anwenden zu koennen, braucht er den Eintrag, zu
+/// dem der Grant gehoert, und seine Frist — und sonst nichts.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct GrantDeliveryV1 {
+    pub entry_hash: EntryHash,
+    /// `None` fuer jeden initialen Grant, `Some` fuer einen historischen.
+    pub expires_at: Option<UnixMillis>,
+}
+
+impl fmt::Debug for GrantDeliveryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GrantDeliveryV1(<bound>)")
+    }
+}
+
 /// Ein Satz des Exportstroms: Blaetterposition und das indizierte Objekt.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ExportIndexEntryV1 {

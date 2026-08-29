@@ -17,9 +17,9 @@ use ea_sync_server::{
     AppendOutcome, ArchiveExportDirectory, ChainHeadStateV1, CheckpointDirectory,
     CheckpointIndexEntryV1, CommitDbCommand, CommitRepository, CommittedDbState,
     DestructionRequestCommandV1, DestructionStateV1, DestructionStore, EntryDirectory,
-    EntryIndexEntryV1, ExportIndexEntryV1, GrantIndexEntryV1, HistoricalGrantCommandV1,
-    HistoricalGrantStore, IndexedObjectV1, ObjectTypeDirectory, ReaderAckCommandV1, ReaderAckStore,
-    RepositoryError, SecurityEventSink, SecurityEventV1,
+    EntryIndexEntryV1, ExportIndexEntryV1, GrantDeliveryV1, GrantIndexEntryV1,
+    HistoricalGrantCommandV1, HistoricalGrantStore, IndexedObjectV1, ObjectTypeDirectory,
+    ReaderAckCommandV1, ReaderAckStore, RepositoryError, SecurityEventSink, SecurityEventV1,
 };
 use ea_types::{ChainSequence, EntryHash, ObjectHash, UnixMillis};
 use sqlx::{PgPool, Row};
@@ -702,27 +702,57 @@ impl EntryDirectory for PostgresRepository {
         row.as_ref().map(entry_index_entry).transpose()
     }
 
-    async fn entries_after(
+    /// `>=` und nicht `>`: die Grenze ist EINSCHLIESSLICH, weil Sequenz null
+    /// der Genesis-Eintrag ist und ein Leser ohne verifizierten Kopf genau ab
+    /// dort fragt. Der Aufrufer, der nach einer bekannten Position
+    /// weiterliest, uebergibt `position + 1`.
+    async fn entries_from(
         &self,
         organization_id: ea_types::OrganizationId,
         chain_id: ea_types::ChainId,
-        after_sequence: ChainSequence,
+        from_sequence: ChainSequence,
         limit: usize,
     ) -> Result<Vec<EntryIndexEntryV1>, RepositoryError> {
         let statement = format!(
             "SELECT {ENTRY_INDEX_COLUMNS} FROM entries \
-             WHERE organization_id = $1 AND chain_id = $2 AND sequence_number > $3 \
+             WHERE organization_id = $1 AND chain_id = $2 AND sequence_number >= $3 \
              ORDER BY sequence_number LIMIT $4"
         );
         let rows = sqlx::query(sqlx::AssertSqlSafe(statement))
             .bind(&organization_id.as_bytes()[..])
             .bind(&chain_id.as_bytes()[..])
-            .bind(i64::try_from(after_sequence.get()).map_err(|_| RepositoryError::Unavailable)?)
+            .bind(i64::try_from(from_sequence.get()).map_err(|_| RepositoryError::Unavailable)?)
             .bind(i64::try_from(limit).map_err(|_| RepositoryError::Unavailable)?)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| unavailable(&e))?;
         rows.iter().map(entry_index_entry).collect()
+    }
+
+    async fn grant_delivery(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        object_hash: ObjectHash,
+    ) -> Result<Option<GrantDeliveryV1>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT entry_hash, expires_at_millis FROM grants \
+             WHERE organization_id = $1 AND object_hash = $2",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&object_hash.as_bytes()[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let entry: Vec<u8> = row.get("entry_hash");
+        let expires: Option<i64> = row.get("expires_at_millis");
+        Ok(Some(GrantDeliveryV1 {
+            entry_hash: EntryHash::try_from(entry.as_slice())
+                .map_err(|_| RepositoryError::Unavailable)?,
+            expires_at: expires.map(UnixMillis::new),
+        }))
     }
 
     async fn chain_head(

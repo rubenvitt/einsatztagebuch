@@ -125,6 +125,7 @@ impl AppState {
             entries: self.repository.as_ref(),
             acks: self.repository.as_ref(),
             destructions: self.repository.as_ref(),
+            heads: self.trust_authority.as_ref(),
         }
     }
 

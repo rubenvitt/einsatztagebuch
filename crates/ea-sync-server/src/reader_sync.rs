@@ -38,7 +38,10 @@
 
 use core::fmt;
 
-use ea_crypto::{ReaderAckCoreV1, StreamingObjectHasher};
+use ea_crypto::{
+    ReaderAckCoreV1, StreamingObjectHasher, VerificationContext, encode_reader_ack_core,
+    verify_cose_sign1,
+};
 use ea_format::ObjectTypeV1;
 use ea_sync_protocol::{
     EndpointV1, GrantListResponseV1, MAX_GRANT_PAGE_OBJECTS_V1, MAX_READER_PAGE_BYTES_V1,
@@ -51,9 +54,10 @@ use sha2::{Digest, Sha256};
 use crate::{
     models::{AppendOutcome, IndexedObjectV1, ReaderAckCommandV1, RepositoryError, StoreError},
     ports::{
-        DestructionStore, EntryDirectory, ObjectStore, ObjectTypeDirectory, ReaderAckStore,
-        ServerClock, ServerSigner,
+        AuthorityError, DestructionStore, EntryDirectory, ObjectStore, ObjectTypeDirectory,
+        ReaderAckStore, RegistryHeadDirectory, RegistryHeadSelectionV1, ServerClock, ServerSigner,
     },
+    validation::HeadResolver,
 };
 
 /// Die Lebensdauer eines Lesestapel-Cursors — dieselbe Begruendung wie beim
@@ -78,6 +82,14 @@ const MAX_ENTRIES_PER_PAGE_V1: usize = MAX_READER_PAGE_OBJECTS_V1 / 4;
 /// koennte. `afterSequence = 0` allein reichte als Kennzeichen nicht: Sequenz
 /// null ist eine gueltige Kettenposition, und ein Stapel „nach Eintrag 0“ ist
 /// etwas anderes als einer „ab Genesis“.
+///
+/// GENAU DARAUS folgt die Blaettergrenze: der Sentinel liest AB Sequenz null
+/// EINSCHLIESSLICH, jede andere Anfrage ab der genannten Position PLUS EINS.
+/// Sequenz null ist der Genesis-Eintrag — `ea-format` erzwingt „ohne
+/// Vorgaenger genau dann, wenn Sequenz null“, und `commit.rs` verlangt fuer
+/// den ersten Commit einer Kette genau diese Sequenz. Waere die Grenze auch
+/// hier exklusiv, bekaeme ein Leser ohne Kopf den ersten Eintrag seiner Kette
+/// NIE, und zwar ohne Fehlermeldung.
 #[must_use]
 pub fn is_genesis_start(after_sequence: u64, after_entry_hash: EntryHash) -> bool {
     after_sequence == 0 && after_entry_hash.as_bytes() == &[0_u8; 32]
@@ -92,6 +104,10 @@ pub struct ReaderPorts<'a> {
     pub entries: &'a dyn EntryDirectory,
     pub acks: &'a dyn ReaderAckStore,
     pub destructions: &'a dyn DestructionStore,
+    /// Der zur Kettenposition gewaehlte Registrierungskopf. Die Lesequittung
+    /// braucht ihn: ihre Signatur wird gegen das Zertifikat geprueft, das
+    /// dieser Kopf als aktiv ausweist.
+    pub heads: &'a dyn RegistryHeadDirectory,
 }
 
 /// Jeder Befund der Leseflaechen.
@@ -111,6 +127,15 @@ pub enum ReaderError {
     /// Die Quittung ist nicht vom AUFRUFER signiert, oder sie bindet eine
     /// andere Kette als der Eintrag, den sie nennt.
     AckMismatch,
+    /// Die COSE-Signatur der Quittung traegt nicht, oder das genannte
+    /// Zertifikat ist zur Kettenposition nicht als READER aktiv.
+    AckSignature,
+    /// Fuer diesen Eintrag laeuft ein Vernichtungsvorgang; die Auslieferung
+    /// ist gesperrt (`design.md` §16.3, Schritt 2).
+    DeliveryBlocked,
+    /// Die Nutzungsfrist dieses historischen Grants ist abgelaufen
+    /// (`design.md`:1164).
+    GrantExpired,
     /// Unter derselben Adresse liegt bereits eine ANDERE Quittung.
     AckConflict,
     /// Datenbank oder Object Store antworten nicht.
@@ -121,13 +146,16 @@ pub enum ReaderError {
 
 impl ReaderError {
     /// Die Arme ohne Nutzlast — damit ein spaeter ergaenzter auffaellt.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::ChainUnknown,
         Self::StartHeadMismatch,
         Self::ObjectUnknown,
         Self::EntryUnknown,
         Self::AckMismatch,
+        Self::AckSignature,
         Self::AckConflict,
+        Self::DeliveryBlocked,
+        Self::GrantExpired,
         Self::DependencyUnavailable,
         Self::Internal,
     ];
@@ -141,7 +169,10 @@ impl ReaderError {
             Self::ObjectUnknown => "EA-READER-OBJECT-UNKNOWN",
             Self::EntryUnknown => "EA-READER-ENTRY-UNKNOWN",
             Self::AckMismatch => "EA-READER-ACK-MISMATCH",
+            Self::AckSignature => "EA-READER-ACK-SIGNATURE",
             Self::AckConflict => "EA-READER-ACK-CONFLICT",
+            Self::DeliveryBlocked => crate::destruction::DESTRUCTION_BLOCKED_CODE_V1,
+            Self::GrantExpired => "EA-READER-GRANT-EXPIRED",
             Self::DependencyUnavailable => "EA-READER-DEPENDENCY-UNAVAILABLE",
             Self::Internal => "EA-READER-INTERNAL",
         }
@@ -157,7 +188,17 @@ impl ReaderError {
             Self::ChainUnknown | Self::ObjectUnknown | Self::EntryUnknown => 404,
             // Die 409-Zeile nennt „Fork, Kopfabweichung, …“.
             Self::StartHeadMismatch | Self::AckConflict => 409,
-            Self::AckMismatch => 422,
+            Self::AckMismatch | Self::AckSignature => 422,
+            // Eine gesperrte oder abgelaufene AUSLIEFERUNG ist `403` und nicht
+            // `422`. Die 422-Zeile der Abbildung sagt „wohlgeformt, aber
+            // ungueltig in Trust, Format, Grant oder Autorisierung“ — sie
+            // spricht ueber einen GELIEFERTEN Koerper, und eine Leseanfrage
+            // hat keinen. Die Statustafeln des Nachtrags fuehren fuer
+            // `GET /v1/objects/{objectHash}` und
+            // `GET /v1/entries/{entryHash}/grants` beide `403` und beide KEIN
+            // `422`; `403` ist dort der einzige Status, der „gueltige
+            // Identitaet, kein Zugriff auf diesen Gegenstand“ ausdrueckt.
+            Self::DeliveryBlocked | Self::GrantExpired => 403,
             Self::DependencyUnavailable => 503,
             Self::Internal => 500,
         }
@@ -178,6 +219,16 @@ impl From<SyncProtocolError> for ReaderError {
 impl From<RepositoryError> for ReaderError {
     fn from(_: RepositoryError) -> Self {
         Self::DependencyUnavailable
+    }
+}
+
+impl From<AuthorityError> for ReaderError {
+    fn from(value: AuthorityError) -> Self {
+        match value {
+            AuthorityError::Unavailable | AuthorityError::StateConflict => {
+                Self::DependencyUnavailable
+            }
+        }
     }
 }
 
@@ -278,39 +329,53 @@ pub async fn reader_batch(
     // Ohne Cursor beginnt die Strecke an der angefragten Position; mit Cursor
     // dort, wo die letzte Seite endete. Der Cursor bindet dabei GENAU diese
     // Kette und GENAU diesen Startkopf.
-    let after_sequence = match request.cursor_token {
+    //
+    // Die Grenze ist EINSCHLIESSLICH, und die Umrechnung steht deshalb hier:
+    // der Genesisstart liest ab Sequenz null, jede andere Position ab „danach".
+    // Ein Cursor zeigt immer auf eine bereits gelieferte Position, also
+    // ebenfalls „danach".
+    let last_delivered = match request.cursor_token {
         Some(token) => {
-            TechnicalCursorV1::open(token, ports.signer, now, &scope)?.last_technical_index()
+            Some(TechnicalCursorV1::open(token, ports.signer, now, &scope)?.last_technical_index())
         }
-        None => request.after_sequence,
+        None if genesis => None,
+        None => Some(request.after_sequence),
+    };
+    let from_sequence = match last_delivered {
+        Some(position) => position.checked_add(1).ok_or(ReaderError::Internal)?,
+        None => 0,
     };
 
     let indexed = ports
         .entries
-        .entries_after(
+        .entries_from(
             request.organization_id,
             request.chain_id,
-            ChainSequence::new(after_sequence),
+            ChainSequence::new(from_sequence),
             MAX_ENTRIES_PER_PAGE_V1,
         )
         .await?;
 
     let mut page = PageBuilder::default();
-    let mut covered_through = after_sequence;
+    let mut covered_through = last_delivered.unwrap_or(0);
     let mut truncated = false;
     for entry in &indexed {
-        if page.would_overflow() {
+        // PROBEWEISE: der Eintrag wird ganz gebildet und erst dann gegen die
+        // Decke gestellt. Ein Eintrag, der sie reissen wuerde, wird NICHT
+        // aufgenommen — die Seite endet davor und gibt einen Cursor heraus.
+        //
+        // Nachtraeglich zu pruefen genuegte nicht: `ReaderBatchV1::new`
+        // erzwingt beide Decken HART, und eine Seite, die sie um einen Eintrag
+        // ueberschreitet, waere kein Blaettern mehr, sondern ein
+        // `EA-SYNC-ITEM-LIMIT` beziehungsweise `EA-SYNC-BODY-LIMIT` auf genau
+        // dem Weg, ueber den ein Reader synchronisiert.
+        let candidate =
+            entry_objects(request.organization_id, request.chain_id, entry, ports).await?;
+        if !page.accepts(&candidate) {
             truncated = true;
             break;
         }
-        accumulate_entry(
-            request.organization_id,
-            request.chain_id,
-            entry,
-            ports,
-            &mut page,
-        )
-        .await?;
+        page.absorb(candidate);
         covered_through = entry.sequence.get();
     }
 
@@ -360,12 +425,38 @@ struct PageBuilder {
 }
 
 impl PageBuilder {
-    /// `true`, sobald die Seite ihre Satz- oder ihre Bytedecke erreicht hat.
+    /// `true`, wenn dieser Eintrag NOCH auf die Seite passt.
     ///
-    /// Gefragt wird VOR dem naechsten Eintrag und nicht danach: die Decke
-    /// begrenzt, was der Server akkumuliert, und nicht erst, was er ausliefert.
-    fn would_overflow(&self) -> bool {
-        self.records.len() >= MAX_READER_PAGE_OBJECTS_V1 || self.bytes >= MAX_READER_PAGE_BYTES_V1
+    /// Gerechnet wird PROSPEKTIV und ueber genau die Saetze, die neu
+    /// hinzukaemen: was schon auf der Seite liegt — der Registrierungskopf
+    /// etwa —, kostet kein zweites Mal. Eine leere Seite nimmt ihren ersten
+    /// Eintrag IMMER an, auch wenn er allein die Decke reisst; sonst bliebe
+    /// die Strecke an ihm haengen und der Leser kaeme nie weiter. Ein solcher
+    /// Eintrag ist ohnehin nicht baubar: sechs Objekte zu je hoechstens 4 MiB
+    /// liegen weit unter der Bytedecke.
+    fn accepts(&self, candidate: &[(ObjectHash, Vec<u8>)]) -> bool {
+        if self.records.is_empty() {
+            return true;
+        }
+        let mut records = self.records.len();
+        let mut bytes = self.bytes;
+        for (hash, object) in candidate {
+            if self.records.contains_key(hash.as_bytes()) {
+                continue;
+            }
+            records += 1;
+            bytes = bytes.saturating_add(object.len());
+        }
+        records <= MAX_READER_PAGE_OBJECTS_V1 && bytes <= MAX_READER_PAGE_BYTES_V1
+    }
+
+    /// Nimmt einen Eintrag GANZ auf. Nur nach einem `true` von
+    /// [`Self::accepts`] — ein halber Eintrag waere fuer den Empfaenger eine
+    /// Luecke und keine Seite.
+    fn absorb(&mut self, candidate: Vec<(ObjectHash, Vec<u8>)>) {
+        for (hash, bytes) in candidate {
+            self.insert(hash, bytes);
+        }
     }
 
     fn insert(&mut self, hash: ObjectHash, bytes: Vec<u8>) {
@@ -397,44 +488,46 @@ impl PageBuilder {
 /// Das ist die Menge, die `design.md` §14.5 nennt — „die dazugehoerigen
 /// `.eip`/`.eds`, Grants, Trust-, Receipt- und Evidence-Objekte“. Sie wird
 /// GANZ oder gar nicht aufgenommen: ein halber Eintrag waere fuer den
-/// Empfaenger eine Luecke und keine Seite.
+/// Empfaenger eine Luecke und keine Seite. Deshalb gibt diese Funktion die
+/// Menge HERAUS, statt sie einzutragen — erst danach entscheidet
+/// [`PageBuilder::accepts`], ob sie noch auf die Seite passt.
 ///
-/// # Die beiden Filter gelten HIER genauso
+/// # Die beiden Auslieferungssperren gelten HIER genauso
 ///
 /// Der Lesestapel ist der Weg, ueber den ein Reader tatsaechlich
 /// synchronisiert — er ist damit der WICHTIGSTE Auslieferungspfad und nicht
-/// eine Nebenflaeche. Beide Sperren aus [`grant_list`] wirken deshalb auch
-/// hier, und zwar Wort fuer Wort dieselben:
+/// eine Nebenflaeche. Beide Sperren wirken deshalb auch hier, und zwar Wort
+/// fuer Wort dieselben wie in [`grant_list`] und [`object_response_head`]:
 ///
 /// 1. Ein laufender Vernichtungsvorgang sperrt die Auslieferung der Grants
-///    dieses Eintrags (`design.md` §16.3, Schritt 2). In dieser Stufe ist die
-///    Sperre der EINZIGE Schutz: es gibt noch keinen `.eds`-Stub, das `.eip`
-///    liegt unveraendert da, und ein Grant, der weiter hinausgeht, macht die
-///    ganze Sperre wirkungslos.
+///    dieses Eintrags (`design.md` §16.3, Schritt 2: „Neue Auslieferungen und
+///    historische Re-Grants fuer die Ziele serverseitig blockieren“). In
+///    dieser Stufe ist die Sperre der EINZIGE Schutz: es gibt noch keinen
+///    `.eds`-Stub, das `.eip` liegt unveraendert da, und ein Grant, der weiter
+///    hinausgeht, macht die ganze Sperre wirkungslos.
 /// 2. Ein abgelaufener historischer Grant wird nicht ausgeliefert
-///    (`design.md` §13.3, ohne Einschraenkung auf einen Endpunkt).
+///    (`design.md`:1164, „Server bei Annahme UND Auslieferung“).
 ///
 /// # Warum der Stapel dabei OMITTIERT und nicht abweist
 ///
-/// [`grant_list`] weist einen Vernichtungsziel-Eintrag mit `422` ab, und das
-/// ist dort richtig: dieser Endpunkt liefert AUSSCHLIESSLICH Grants, eine
-/// leere Antwort waere eine Auskunft ueber den Bestand, die er nicht geben
-/// soll. Der Lesestapel liest dagegen die KETTE. Ihn wegen eines einzigen
-/// Zieleintrags ganz abzuweisen spraeche dem Leser den Zugang zu jeder
-/// anderen Kettenposition ab — und `design.md` §16.3, Schritt 6 haelt
-/// ausdruecklich fest, dass „Writer-Signatur, `entryHash` und
-/// Kettenkontinuitaet ueber den Stub pruefbar bleiben“. Der Eintrag, seine
-/// Quittung, sein Checkpoint und sein Registrierungskopf gehen deshalb weiter
-/// hinaus; seine Grants nicht. Die REGEL ist in beiden Pfaden dieselbe — kein
-/// Grant eines Zieleintrags verlaesst den Server —, nur die Antwortform
-/// unterscheidet sich, und zwar begruendet.
-async fn accumulate_entry(
+/// Schritt 2 sperrt „neue Auslieferungen … fuer die ZIELE“ — gemeint sind die
+/// Grants, ueber die ein Ziel noch geoeffnet werden koennte, nicht die
+/// Kettenposition als solche. Den ganzen Stapel wegen eines einzigen
+/// Zieleintrags abzuweisen spraeche dem Leser den Zugang zu jeder anderen
+/// Position derselben Kette ab, und die Statustafel des Sync-Wire-Nachtrags
+/// stuetzt das: `GET /v1/chains/{chainId}/entries` fuehrt gar keinen Status
+/// fuer eine abgewiesene Einzelposition. Der Eintrag, seine Quittung, sein
+/// Checkpoint und sein Registrierungskopf gehen deshalb weiter hinaus; seine
+/// Grants nicht. Die REGEL ist auf allen drei Wegen dieselbe — kein Grant
+/// eines Zieleintrags und kein abgelaufener Grant verlaesst den Server —, nur
+/// die Antwortform unterscheidet sich, weil `GET …/grants` und
+/// `GET /v1/objects/…` ausschliesslich das eine liefern, das hier fehlt.
+async fn entry_objects(
     organization_id: OrganizationId,
     chain_id: ChainId,
     entry: &crate::models::EntryIndexEntryV1,
     ports: &ReaderPorts<'_>,
-    page: &mut PageBuilder,
-) -> Result<(), ReaderError> {
+) -> Result<Vec<(ObjectHash, Vec<u8>)>, ReaderError> {
     let mut hashes = vec![
         entry.entry_object_hash,
         entry.receipt_object_hash,
@@ -458,16 +551,32 @@ async fn accumulate_entry(
             .grants_of(organization_id, entry.entry_hash)
             .await?
         {
-            if grant.expires_at.is_some_and(|expires| now > expires) {
+            if is_expired(grant.expires_at, now) {
                 continue;
             }
             hashes.push(grant.object_hash);
         }
     }
+    let mut objects = Vec::with_capacity(hashes.len());
     for hash in hashes {
-        page.insert(hash, exact_object_bytes(hash, ports).await?);
+        objects.push((hash, exact_object_bytes(hash, ports).await?));
     }
-    Ok(())
+    Ok(objects)
+}
+
+/// Die EINE Ablaufregel dieses Systems: `effectiveNow <= expiresAt`.
+///
+/// Sie steht einmal, weil vier Stellen sie stellen — Lesestapel, Grantliste,
+/// Objektabruf und die Annahme eines historischen Grants. Vier Kopien
+/// desselben Vergleichs waeren vier Gelegenheiten, das Gleichheitszeichen zu
+/// verlieren. `None` heisst „ohne Frist“ und damit „nie abgelaufen“: das ist
+/// jeder initiale Grant.
+#[must_use]
+pub const fn is_expired(expires_at: Option<UnixMillis>, now: UnixMillis) -> bool {
+    match expires_at {
+        Some(expires) => now.get() > expires.get(),
+        None => false,
+    }
 }
 
 /// Die exakten Bytes eines indizierten Objekts, gegen SEINE Adresse gestellt.
@@ -573,6 +682,36 @@ pub async fn object_response_head(
         .await?
         .ok_or(ReaderError::ObjectUnknown)?;
 
+    // DIE BEIDEN AUSLIEFERUNGSSPERREN, an der dritten Auslieferungsflaeche.
+    //
+    // Der Objektabruf ist der Weg, auf dem ein Aufrufer eine ihm bereits
+    // bekannte Adresse erneut holt. Ohne diese Pruefung waere er die Luecke,
+    // durch die genau die Grants wieder herauskaemen, die Lesestapel und
+    // Grantliste zurueckhalten — und `design.md`:1164 verlangt die Frist
+    // ausdruecklich „bei Annahme UND Auslieferung“, ohne Einschraenkung auf
+    // einen Endpunkt.
+    //
+    // Gefragt wird nur fuer GRANTS: nur sie oeffnen einen Eintrag. Eintrag,
+    // Quittung, Checkpoint und Trust-Objekt eines Vernichtungsziels bleiben
+    // lesbar, damit die Kettenkontinuitaet pruefbar bleibt — dieselbe
+    // Abgrenzung wie im Lesestapel.
+    if let Some(delivery) = ports
+        .entries
+        .grant_delivery(organization_id, object_hash)
+        .await?
+    {
+        if ports
+            .destructions
+            .is_destruction_target(organization_id, delivery.entry_hash)
+            .await?
+        {
+            return Err(ReaderError::DeliveryBlocked);
+        }
+        if is_expired(delivery.expires_at, ports.clock.now()) {
+            return Err(ReaderError::GrantExpired);
+        }
+    }
+
     let mut stream = ports
         .objects
         .get_exact_in(indexed.kind, object_hash)
@@ -647,12 +786,28 @@ pub async fn grant_list(
         .grants_of(organization_id, entry_hash)
         .await
         .map_err(ReaderError::from)?;
-    let mut records = Vec::with_capacity(indexed.len().min(MAX_GRANT_PAGE_OBJECTS_V1));
-    for grant in indexed {
-        if grant.expires_at.is_some_and(|expires| now > expires) {
-            continue;
-        }
+    let deliverable: Vec<_> = indexed
+        .into_iter()
+        .filter(|grant| !is_expired(grant.expires_at, now))
+        .collect();
+    // Die Satzdecke wirkt, BEVOR das erste Byte geholt wird. `grant-list-response-v1`
+    // kennt keinen Cursor — diese Antwort ist die ganze Liste oder keine —,
+    // also ist die Decke hier eine ABWEISUNG und kein Blaettern. Sie erst von
+    // `GrantListResponseV1::new` stellen zu lassen hiesse, zehntausend
+    // Objekte zu laden, um sie danach zu verwerfen.
+    if deliverable.len() > MAX_GRANT_PAGE_OBJECTS_V1 {
+        return Err(ReaderError::Protocol(SyncProtocolError::ItemLimit).into());
+    }
+    let mut records = Vec::with_capacity(deliverable.len());
+    let mut bytes_total = 0_usize;
+    for grant in deliverable {
         let bytes = exact_object_bytes(grant.object_hash, ports).await?;
+        bytes_total = bytes_total.saturating_add(bytes.len());
+        // Dieselbe Rechnung fuer die Bytedecke, und aus demselben Grund
+        // waehrend des Ladens statt danach.
+        if bytes_total > MAX_READER_PAGE_BYTES_V1 {
+            return Err(ReaderError::Protocol(SyncProtocolError::BodyLimit).into());
+        }
         records.push(ObjectRecordV1::new(grant.object_hash, bytes));
     }
     records.sort_unstable_by(|left, right| {
@@ -688,7 +843,11 @@ impl GrantListError {
     pub const fn http_status(self) -> u16 {
         match self {
             Self::Reader(error) => error.http_status(),
-            Self::Blocked => 422,
+            // `403` und nicht `422`: die Statustafel des Nachtrags fuehrt fuer
+            // diesen Endpunkt „200; 400, 401, 403, 404, 413, 500, 503“ und
+            // KEIN `422`. Die 422-Zeile der Abbildung spricht ueber einen
+            // gelieferten Koerper, und eine Leseanfrage hat keinen.
+            Self::Blocked => 403,
         }
     }
 
@@ -720,11 +879,28 @@ impl std::error::Error for GrantListError {}
 
 /// `POST /v1/reader-acks` — eine signierte Lesequittung, append-only.
 ///
-/// Die Quittung ist ein SIGNIERTES technisches Objekt und keine Zeile:
-/// [`ea_sync_protocol::ReaderAckV1`] rahmt `[core, COSE-Sign1]` und laesst die
-/// Signatur ueber `ea-crypto` gegen genau diesen Kern binden. Was hier
-/// zusaetzlich geprueft wird, ist die Zuordnung zum AUFRUFER — sonst
-/// quittierte ein Geraet fuer ein anderes.
+/// # Was der Rahmen leistet — und was er NICHT leistet
+///
+/// [`ea_sync_protocol::ReaderAckV1`] rahmt `[core, #6.18(COSE-Sign1)]` und
+/// stellt Profil, Content Type und die Bindung der NUTZLAST an genau diesen
+/// Kern. Er prueft die SIGNATUR nicht — das kann er nicht: dafuer braucht es
+/// das Zertifikat des Lesers, und das kennt nur der Server. Eine Quittung
+/// aufzunehmen, deren Signatur nie gerechnet wurde, waere ein append-only
+/// abgelegter Objekthash ohne jede Aussage.
+///
+/// Geprueft wird deshalb HIER, ueber dieselbe geteilte Kante wie jede andere
+/// Signatur dieses Servers: [`ea_crypto::VerificationContext::reader_ack`]
+/// bindet Content Type, Kernbytes, Zertifikatshash, Organisation, Sequenz und
+/// die Rolle [`ea_crypto::SignerRole::Reader`], und
+/// [`ea_crypto::verify_cose_sign1`] loest das Zertifikat gegen den fuer die
+/// Kettenposition GEWAEHLTEN Registrierungskopf auf. Damit faellt zugleich
+/// die zweite Luecke: `POST /v1/reader-acks` traegt per Nachtrag keine
+/// Capability, also duerfte sonst jedes freigegebene Geraet — auch ein
+/// Writer — fuer sich selbst quittieren. Die Rolle steckt im Kontext.
+///
+/// Die Zuordnung zum AUFRUFER kommt dazu: der Kern nennt sein Zertifikat
+/// selbst, und ohne den Vergleich quittierte ein Geraet mit dem Zertifikat
+/// eines anderen, das es gar nicht besitzt.
 ///
 /// # Errors
 ///
@@ -755,6 +931,8 @@ pub async fn record_reader_ack(
         return Err(ReaderError::AckMismatch);
     }
 
+    verify_reader_ack_signature(organization_id, core, ack, ports).await?;
+
     let outcome = ports
         .acks
         .record_reader_ack(ReaderAckCommandV1 {
@@ -768,5 +946,123 @@ pub async fn record_reader_ack(
     match outcome {
         AppendOutcome::Recorded | AppendOutcome::AlreadyRecorded => Ok(()),
         AppendOutcome::Conflict => Err(ReaderError::AckConflict),
+    }
+}
+
+/// Prueft die COSE-Signatur einer Lesequittung gegen den fuer ihre
+/// Kettenposition gewaehlten Registrierungskopf.
+///
+/// Die Kernbytes werden NEU kodiert und nicht aus dem Koerper geschnitten:
+/// `ReaderAckV1::decode` hat die uebertragenen Bytes bereits gegen genau
+/// diese Kodierung gestellt, also ist die Neukodierung dieselbe Folge — und
+/// sie kommt aus dem einen Kodierer, statt aus einer zweiten Zerlegung.
+async fn verify_reader_ack_signature(
+    organization_id: OrganizationId,
+    core: &ReaderAckCoreV1,
+    ack: &ReaderAckV1,
+    ports: &ReaderPorts<'_>,
+) -> Result<(), ReaderError> {
+    let head = match ports
+        .heads
+        .select_head_for_sequence(organization_id, core.through_sequence, ports.clock.now())
+        .await?
+    {
+        RegistryHeadSelectionV1::Selected(head) => head,
+        // Ohne anwendbaren Kopf ist ueber die Rolle des Signierers nichts zu
+        // sagen. Die konservative Antwort ist die Abweisung, kein Freispruch.
+        RegistryHeadSelectionV1::PendingFuture { .. }
+        | RegistryHeadSelectionV1::NoApplicableHead => return Err(ReaderError::AckSignature),
+    };
+    let exact_core = encode_reader_ack_core(core).map_err(|_| ReaderError::Internal)?;
+    let context = VerificationContext::reader_ack(&exact_core, head.registry_version())
+        .map_err(|_| ReaderError::AckSignature)?;
+    let signature = crate::auth::wrapper_signature(ack.exact_bytes(), &exact_core)
+        .map_err(|_| ReaderError::Internal)?;
+    verify_cose_sign1(signature, &HeadResolver(head.as_ref()), &context)
+        .map_err(|_| ReaderError::AckSignature)?;
+    Ok(())
+}
+
+/// Die Seitendecke, an ihrer Grenze.
+///
+/// Ein Integrationszeuge dafuer braeuchte eine Kette aus fuenfzehn Eintraegen
+/// zu je vier Megabyte; er pruefte dieselbe Arithmetik und kostete eine
+/// Minute Object-Store-Verkehr. Die Grenze gehoert dem [`PageBuilder`], also
+/// wird sie hier gestellt — und zwar an genau den drei Stellen, an denen sie
+/// kippt.
+#[cfg(test)]
+mod page_builder_tests {
+    use super::{MAX_READER_PAGE_BYTES_V1, MAX_READER_PAGE_OBJECTS_V1, ObjectHash, PageBuilder};
+
+    fn object(marker: u8, size: usize) -> (ObjectHash, Vec<u8>) {
+        let mut address = [0_u8; 32];
+        address[0] = marker;
+        address[1] = u8::try_from(size % 251).unwrap_or(0);
+        (
+            ObjectHash::try_from(&address[..]).expect("32 bytes"),
+            vec![marker; size],
+        )
+    }
+
+    /// Eine LEERE Seite nimmt ihren ersten Eintrag immer an — sonst bliebe die
+    /// Lesestrecke an ihm haengen und der Leser kaeme nie weiter.
+    #[test]
+    fn an_empty_page_accepts_any_first_entry() {
+        let page = PageBuilder::default();
+        assert!(page.accepts(&[object(1, MAX_READER_PAGE_BYTES_V1 + 1)]));
+    }
+
+    /// Ein Eintrag, der die BYTEDECKE reissen wuerde, wird NICHT aufgenommen.
+    ///
+    /// Genau dieser Fall lief vorher durch und liess `ReaderBatchV1::new`
+    /// danach die ganze Seite mit `EA-SYNC-BODY-LIMIT` abweisen — kein
+    /// Blaettern, sondern ein Fehlerstatus auf dem Weg, ueber den ein Reader
+    /// synchronisiert.
+    #[test]
+    fn an_entry_that_would_cross_the_byte_ceiling_is_refused() {
+        let mut page = PageBuilder::default();
+        page.absorb(vec![object(1, MAX_READER_PAGE_BYTES_V1 - 10)]);
+        assert!(page.accepts(&[object(2, 10)]), "exactly full still fits");
+        assert!(
+            !page.accepts(&[object(3, 11)]),
+            "one byte over the ceiling does not"
+        );
+    }
+
+    /// Dasselbe fuer die SATZDECKE.
+    #[test]
+    fn an_entry_that_would_cross_the_record_ceiling_is_refused() {
+        let mut page = PageBuilder::default();
+        let filled: Vec<_> = (0..MAX_READER_PAGE_OBJECTS_V1 - 1)
+            .map(|index| {
+                let mut address = [0_u8; 32];
+                address[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                (
+                    ObjectHash::try_from(&address[..]).expect("32 bytes"),
+                    vec![0_u8; 1],
+                )
+            })
+            .collect();
+        page.absorb(filled);
+        assert!(page.accepts(&[object(0xf1, 1)]), "the last slot still fits");
+        assert!(
+            !page.accepts(&[object(0xf2, 1), object(0xf3, 1)]),
+            "two more records do not"
+        );
+    }
+
+    /// Ein Objekt, das die Seite SCHON traegt, kostet kein zweites Mal.
+    ///
+    /// Der Registrierungskopf wiederholt sich ueber jeden Eintrag derselben
+    /// Kette; ihn mehrfach zu zaehlen liesse die Seite lange vor der Decke
+    /// enden.
+    #[test]
+    fn an_object_already_on_the_page_costs_nothing_twice() {
+        let mut page = PageBuilder::default();
+        page.absorb(vec![object(1, MAX_READER_PAGE_BYTES_V1 - 10)]);
+        assert!(
+            page.accepts(&[object(1, MAX_READER_PAGE_BYTES_V1 - 10), object(2, 10)]),
+            "a repeated object is not charged again"
+        );
     }
 }

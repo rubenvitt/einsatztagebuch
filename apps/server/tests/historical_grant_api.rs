@@ -272,16 +272,22 @@ async fn a_caller_without_the_historical_grant_capability_is_refused() {
     database.cleanup().await;
 }
 
-/// Ein unbekannter Eintrag ist `404` — und der Endpunkt legt nichts an.
+/// Ein `.eag`, das an einen FREMDEN Pfad geht, faellt an der Bindung.
+///
+/// Der Pfad nennt einen anderen Eintrag als das Objekt; das ist ein
+/// Formbefund und keine Aussage darueber, ob es den Eintrag gibt — der
+/// Endpunkt hat noch nirgends nachgesehen. Der Fall, in dem das `.eag`
+/// tatsaechlich AUF einen unbekannten Eintrag zeigt, steht weiter unten und
+/// ist `404`.
 #[tokio::test]
-async fn a_historical_grant_for_an_unknown_entry_is_not_found() {
+async fn a_grant_posted_to_a_foreign_entry_path_is_refused() {
     let database = common::fresh_database().await;
     let ready = common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, true).await;
     let approvers = archive_objects::approvers(&ready.closure);
     let prepared = prepare(&ready, AUTHORIZATION_EXPIRES_AT, 0x54, &approvers).await;
 
-    let unknown = EntryHash::try_from(&[0x8e_u8; 32][..]).expect("32 bytes");
-    let target = archive_objects::historical_grant_path(unknown);
+    let foreign = EntryHash::try_from(&[0x8e_u8; 32][..]).expect("32 bytes");
+    let target = archive_objects::historical_grant_path(foreign);
     let response = common::call(&common::ApiCall {
         ready: &ready,
         signer_seed: trust_closure::HISTORICAL_GRANT_AUTHORITY_SEED,
@@ -291,8 +297,6 @@ async fn a_historical_grant_for_an_unknown_entry_is_not_found() {
         request_id: [0x67; 16],
     })
     .await;
-    // Der Pfad nennt einen anderen Eintrag als das `.eag`; das faellt schon an
-    // der Bindung, bevor der Eintrag gesucht wird.
     assert_eq!(response.status, 422);
     assert_eq!(
         common::error_code(&response.body).as_deref(),
@@ -499,6 +503,71 @@ async fn a_grant_bound_to_an_unknown_entry_is_not_found() {
     assert_eq!(
         common::error_code(&response.body).as_deref(),
         Some("EA-GRANT-ENTRY-UNKNOWN")
+    );
+
+    database.cleanup().await;
+}
+
+/// Ein abgelaufener historischer Grant faellt auch aus dem
+/// EINZELOBJEKTABRUF.
+///
+/// `design.md`:1164 verlangt `effectiveNow <= expiresAt` „bei Annahme UND
+/// Auslieferung“ — ohne Einschraenkung auf einen Endpunkt. Der Objektabruf ist
+/// der Weg, auf dem ein Aufrufer eine ihm bereits bekannte Adresse erneut
+/// holt; ohne diese Pruefung waere die Frist auf allen anderen Wegen Zierde.
+#[tokio::test]
+async fn an_expired_historical_grant_is_refused_by_the_object_endpoint_too() {
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, true).await;
+    let approvers = archive_objects::approvers(&ready.closure);
+    let prepared = prepare(&ready, AUTHORIZATION_EXPIRES_AT, 0x58, &approvers).await;
+    let accepted = post_grant(
+        &ready,
+        &prepared,
+        [0x6e; 16],
+        common::READ_SERVER_NOW_MILLIS,
+    )
+    .await;
+    assert_eq!(accepted.status, 201);
+
+    let target = format!(
+        "/v1/objects/{}",
+        hex::encode(ea_crypto::object_hash(&prepared.grant_bytes).as_bytes())
+    );
+
+    // Waehrend die Frist laeuft: lesbar.
+    let during = common::call_at(
+        &common::ApiCall {
+            ready: &ready,
+            signer_seed: trust_closure::READER_SIGNING_SEED,
+            endpoint: EndpointV1::Objects,
+            target: &target,
+            body: None,
+            request_id: [0x6f; 16],
+        },
+        common::READ_SERVER_NOW_MILLIS,
+    )
+    .await;
+    assert_eq!(during.status, 200);
+
+    // Danach nicht mehr.
+    let later = common::respawn_read_server(&database, &ready.closure, AFTER_EXPIRY_MILLIS).await;
+    let after = common::call_at(
+        &common::ApiCall {
+            ready: &later,
+            signer_seed: trust_closure::READER_SIGNING_SEED,
+            endpoint: EndpointV1::Objects,
+            target: &target,
+            body: None,
+            request_id: [0x70; 16],
+        },
+        AFTER_EXPIRY_MILLIS,
+    )
+    .await;
+    assert_eq!(after.status, 403);
+    assert_eq!(
+        common::error_code(&after.body).as_deref(),
+        Some("EA-READER-GRANT-EXPIRED")
     );
 
     database.cleanup().await;

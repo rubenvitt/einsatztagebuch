@@ -535,7 +535,7 @@ pub async fn register_device(
     let exact_core = ea_crypto::encode_device_registration_request_core(core)
         .map_err(|_| AuthServiceError::Internal)?;
     CoseVerifier::verify_enrollment_pop(
-        self_signature(body.exact_bytes(), &exact_core)?,
+        wrapper_signature(body.exact_bytes(), &exact_core)?,
         &core.signing_public_cose_key,
         &exact_core,
     )
@@ -568,7 +568,20 @@ pub const fn pending_registration_state() -> &'static str {
 /// genau der Rest hinter dem Kopfbyte und dem Core. Es wird NICHT neu
 /// dekodiert: `DeviceRegistrationRequestV1::decode` hat den Rahmen bereits
 /// gegen seine eigene Kodierung gestellt.
-fn self_signature<'a>(exact: &'a [u8], exact_core: &[u8]) -> Result<&'a [u8], AuthServiceError> {
+/// Die COSE-Haelfte eines `[core, #6.18(COSE-Sign1)]`-Koerpers.
+///
+/// Der Schnitt ist BEWIESEN und nicht geraten: die Huelle ist ein CBOR-Array
+/// fester Laenge zwei, also genau ein Kopfbyte, gefolgt von den exakten
+/// Kernbytes; alles danach ist die Signatur. `ea_sync_protocol` hat den Rahmen
+/// beim Dekodieren bereits gegen genau diese Form gestellt.
+///
+/// `pub(crate)`, weil ZWEI Aufnahmepfade dieselbe Haelfte brauchen — der
+/// Proof-of-Possession-Antrag und die Lesequittung. Zwei Kopien derselben
+/// Rechnung waeren zwei Gelegenheiten, sie verschieden zu machen.
+pub(crate) fn wrapper_signature<'a>(
+    exact: &'a [u8],
+    exact_core: &[u8],
+) -> Result<&'a [u8], AuthServiceError> {
     exact
         .get(1_usize.saturating_add(exact_core.len())..)
         .ok_or(AuthServiceError::Internal)

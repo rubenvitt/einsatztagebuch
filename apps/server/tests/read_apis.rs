@@ -614,3 +614,178 @@ async fn an_authentic_cursor_of_this_endpoint_resumes_where_it_points() {
 
     database.cleanup().await;
 }
+
+/// Der GENESIS-Eintrag verlaesst den Server.
+///
+/// Sequenz null ist eine echte Kettenposition — `ea-format` erzwingt „ohne
+/// Vorgaenger genau dann, wenn Sequenz null“, und `commit.rs` verlangt fuer
+/// den ersten Commit einer Kette genau diese Sequenz. Eine exklusive
+/// Blaettergrenze liesse den ersten Eintrag JEDER Kette unerreichbar, und zwar
+/// ohne Fehlermeldung: die Antwort waere ein plausibles `200`. `design.md`
+/// §21 fuehrt „Rekonstruktion ab Genesis/Checkpoint“ ausdruecklich als
+/// Testziel.
+#[tokio::test]
+async fn the_genesis_entry_at_sequence_zero_leaves_the_server() {
+    let database = common::fresh_database().await;
+    let ready =
+        common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, false).await;
+    let (first, _) = two_entries(&ready).await;
+
+    let receipt = common::receipt_object_hash_of(database.pool(), first.entry_hash).await;
+    let (genesis_entry_hash, genesis_object_hash) =
+        common::seed_genesis_entry(database.pool(), &ready.closure, receipt).await;
+
+    let target = entries_path(ready.closure.chain_id, 0, genesis_start(), None);
+    let response = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::ChainEntries,
+        target: &target,
+        body: None,
+        request_id: [0x29; 16],
+    })
+    .await;
+    assert_eq!(
+        response.status,
+        200,
+        "the batch must be delivered; the server answered {:?}",
+        common::error_code(&response.body)
+    );
+    let batch = ReaderBatchV1::decode(&response.body).expect("the batch frame must decode");
+    let delivered: Vec<ObjectHash> = batch
+        .objects()
+        .iter()
+        .map(ea_sync_protocol::ObjectRecordV1::object_hash)
+        .collect();
+    assert!(
+        delivered.contains(&genesis_object_hash),
+        "a reader without a verified head must receive the genesis entry"
+    );
+    let _ = genesis_entry_hash;
+
+    // Die Grenze bleibt EXKLUSIV, sobald der Leser eine Position NENNT: wer
+    // ab dem Genesis-Eintrag weiterliest, bekommt ihn nicht noch einmal.
+    let after_genesis = entries_path(ready.closure.chain_id, 0, genesis_entry_hash, None);
+    let next = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::ChainEntries,
+        target: &after_genesis,
+        body: None,
+        request_id: [0x2a; 16],
+    })
+    .await;
+    assert_eq!(next.status, 200);
+    let batch = ReaderBatchV1::decode(&next.body).expect("the batch frame must decode");
+    assert!(
+        !batch
+            .objects()
+            .iter()
+            .any(|record| record.object_hash() == genesis_object_hash),
+        "a named position stays exclusive"
+    );
+
+    database.cleanup().await;
+}
+
+/// Eine Quittung, deren COSE-Signatur nicht traegt, wird abgewiesen.
+///
+/// Der Rahmen prueft nur Profil, Content Type und die Bindung der Nutzlast an
+/// den Kern — die GUELTIGKEIT der Signatur prueft er nicht und kann es nicht:
+/// dafuer braucht es das Zertifikat des Lesers. Ohne diesen Zeugen laege eine
+/// Quittung append-only im Bestand, deren Signatur nie gerechnet wurde.
+#[tokio::test]
+async fn an_acknowledgement_with_a_broken_signature_is_refused() {
+    let database = common::fresh_database().await;
+    let ready =
+        common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, false).await;
+    let (_, second) = two_entries(&ready).await;
+
+    // Dieselbe Quittung, aber von einem FREMDEN Schluessel unterschrieben. Der
+    // Kern nennt weiterhin das Zertifikat des Lesers, der Aufrufer ist der
+    // Leser — nur die Signatur traegt nicht.
+    let core = ReaderAckCoreV1 {
+        organization_id: ready.closure.organization_id,
+        chain_id: ready.closure.chain_id,
+        reader_certificate_hash: ready.closure.reader_certificate_hash,
+        through_sequence: ChainSequence::new(second.sequence),
+        head_entry_hash: second.entry_hash,
+        acknowledged_at_device: UnixMillis::new(common::READ_SERVER_NOW_MILLIS),
+    };
+    let exact_core = encode_reader_ack_core(&core).expect("the core encodes");
+    let signature = ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new([0x77; 32]))
+        .sign_reader_ack(&exact_core)
+        .expect("signing with a foreign key must succeed");
+    let body = ReaderAckV1::new(core, &signature).expect("the acknowledgement frame builds");
+
+    let response = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::ReaderAcks,
+        target: EndpointV1::ReaderAcks.path_template(),
+        body: Some(body.exact_bytes()),
+        request_id: [0x44; 16],
+    })
+    .await;
+    assert_eq!(response.status, 422);
+    assert_eq!(
+        common::error_code(&response.body).as_deref(),
+        Some("EA-READER-ACK-SIGNATURE")
+    );
+
+    let stored: (i64,) = sqlx::query_as("SELECT count(*) FROM reader_acknowledgements")
+        .fetch_one(database.pool())
+        .await
+        .expect("counting the acknowledgements must succeed");
+    assert_eq!(stored.0, 0, "an unverified acknowledgement is not stored");
+
+    database.cleanup().await;
+}
+
+/// Ein WRITER quittiert nicht.
+///
+/// `POST /v1/reader-acks` traegt per Nachtrag keine Capability — jedes
+/// freigegebene Geraet erreicht den Handler. Die Rolle steckt deshalb im
+/// Signaturkontext: `VerificationContext::reader_ack` bindet
+/// `SignerRole::Reader`, und ein Writer-Zertifikat traegt sie nicht.
+#[tokio::test]
+async fn a_writer_cannot_acknowledge_reading() {
+    let database = common::fresh_database().await;
+    let ready =
+        common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, false).await;
+    let (_, second) = two_entries(&ready).await;
+
+    let core = ReaderAckCoreV1 {
+        organization_id: ready.closure.organization_id,
+        chain_id: ready.closure.chain_id,
+        reader_certificate_hash: ready.closure.writer_certificate_hash,
+        through_sequence: ChainSequence::new(second.sequence),
+        head_entry_hash: second.entry_hash,
+        acknowledged_at_device: UnixMillis::new(common::READ_SERVER_NOW_MILLIS),
+    };
+    let exact_core = encode_reader_ack_core(&core).expect("the core encodes");
+    let signature =
+        ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(trust_closure::WRITER_SEED))
+            .sign_reader_ack(&exact_core)
+            .expect("signing with the writer key must succeed");
+    let body = ReaderAckV1::new(core, &signature).expect("the acknowledgement frame builds");
+
+    // Der Aufrufer IST der Writer, der Kern nennt SEIN Zertifikat, und die
+    // Signatur traegt. Was fehlt, ist die Rolle.
+    let response = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::WRITER_SEED,
+        endpoint: EndpointV1::ReaderAcks,
+        target: EndpointV1::ReaderAcks.path_template(),
+        body: Some(body.exact_bytes()),
+        request_id: [0x45; 16],
+    })
+    .await;
+    assert_eq!(response.status, 422);
+    assert_eq!(
+        common::error_code(&response.body).as_deref(),
+        Some("EA-READER-ACK-SIGNATURE")
+    );
+
+    database.cleanup().await;
+}

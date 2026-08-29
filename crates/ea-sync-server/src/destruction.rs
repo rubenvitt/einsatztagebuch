@@ -334,12 +334,22 @@ pub async fn destruction_status(
 }
 
 /// Die exakten `.etb`-Bytes zu diesen Adressen, sortiert und duplikatfrei.
+///
+/// Duplikatfrei ueber einen `BTreeMap` und nicht ueber ein nachtraegliches
+/// `dedup`: `destruction-status-response-v1` verlangt bytweise aufsteigende,
+/// DUPLIKATFREIE Objektlisten, und die Sortierung faellt beim Sammeln ohnehin
+/// an. Die Ablage kann heute keinen Hash zweimal liefern — beide Tabellen
+/// fuehren `object_hash` als Primaerschluessel —, aber die Zusage des Rahmens
+/// haengt dann an einer Eigenschaft, die woanders steht.
 async fn exact_records(
     hashes: &[ObjectHash],
     ports: &DestructionPorts<'_>,
 ) -> Result<Vec<ObjectRecordV1>, DestructionError> {
-    let mut records = Vec::with_capacity(hashes.len());
+    let mut sorted = std::collections::BTreeMap::new();
     for hash in hashes {
+        if sorted.contains_key(hash.as_bytes()) {
+            continue;
+        }
         let bytes = ports
             .objects
             .get_exact_in(ObjectTypeV1::Trust, *hash)
@@ -352,12 +362,7 @@ async fn exact_records(
         if ea_crypto::object_hash(&bytes) != *hash {
             return Err(DestructionError::Internal);
         }
-        records.push(ObjectRecordV1::new(*hash, bytes));
+        sorted.insert(*hash.as_bytes(), ObjectRecordV1::new(*hash, bytes));
     }
-    records.sort_unstable_by(|left, right| {
-        left.object_hash()
-            .as_bytes()
-            .cmp(right.object_hash().as_bytes())
-    });
-    Ok(records)
+    Ok(sorted.into_values().collect())
 }

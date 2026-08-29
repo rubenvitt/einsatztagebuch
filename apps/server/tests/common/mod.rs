@@ -1137,3 +1137,116 @@ pub fn issue_technical_cursor(fields: &ea_sync_protocol::TechnicalCursorFieldsV1
         .token_bytes()
         .to_vec()
 }
+
+/// Ein Eintrag an Sequenz NULL — der Genesis-Eintrag.
+///
+/// # Warum diese Zeile von Hand entsteht
+///
+/// Der ECHTE Commit-Pfad kann sie in dieser Kulisse nicht erzeugen, und das
+/// liegt an der Sequenzleihe und nicht am Commit: die eingefrorenen
+/// Registrierungskoepfe leihen sich `0..=100` und `101..=200`, und
+/// `select_registry_head` haelt beim ERSTEN Kopf an, dessen Leihe die
+/// vorgeschlagene Sequenz deckt. Fuer Sequenz null ist das der erste
+/// eingefrorene Kopf — und der traegt kein Writer-Zertifikat. Ein echter
+/// Commit an Sequenz null waere deshalb `EA-COMMIT-WRITER-UNAUTHORIZED` und
+/// kein Genesis-Eintrag.
+///
+/// Was dieser Zeuge misst, ist auch nicht der Commit, sondern die
+/// BLAETTERGRENZE des Lesestapels: Sequenz null ist eine echte Kettenposition,
+/// und eine exklusive Grenze liesse sie unerreichbar. Das `.eip` ist deshalb
+/// ECHT und liegt content-addressed im Object Store; Quittung und
+/// Registrierungskopf sind die ADRESSEN vorhandener, ebenfalls echter Objekte
+/// — der Stapel liefert sie aus und rechnet sie gegen ihre Adresse zurueck,
+/// und genau das soll er.
+///
+/// # Panics
+///
+/// Wenn das Einfuegen oder die Ablage scheitert.
+pub async fn seed_genesis_entry(
+    pool: &sqlx::PgPool,
+    closure: &trust_closure::ExtendedClosure,
+    receipt_object_hash: ea_types::ObjectHash,
+) -> (ea_types::EntryHash, ea_types::ObjectHash) {
+    let recipients = [
+        archive_objects::Recipient::reader(closure),
+        archive_objects::Recipient::recovery(closure),
+    ];
+    let plan = archive_objects::plan(&recipients);
+    let spec = archive_objects::CommitSpec {
+        closure,
+        sequence: 0,
+        previous_entry_hash: None,
+        recipients: &recipients,
+        marker: 0x0e,
+        writer_override: None,
+        registry_override: None,
+    };
+    let entry_bytes = archive_objects::entry_bytes(&spec, &plan);
+    let entry_hash = archive_objects::entry_hash_of(&entry_bytes);
+    let entry_object_hash = ea_crypto::object_hash(&entry_bytes);
+
+    object_store_client()
+        .await
+        .put_object()
+        .bucket(INTEGRATION_BUCKET)
+        .key(ea_sync_server::object_key(
+            ea_format::ObjectTypeV1::Entry,
+            entry_object_hash,
+        ))
+        .body(aws_sdk_s3::primitives::ByteStream::from(
+            entry_bytes.clone(),
+        ))
+        .send()
+        .await
+        .expect("storing the genesis entry must succeed");
+
+    sqlx::query(
+        "INSERT INTO object_index (object_hash, organization_id, object_type_code, size_bytes, \
+         stored_at_millis) VALUES ($1, $2, 1, $3, 0)",
+    )
+    .bind(&entry_object_hash.as_bytes()[..])
+    .bind(&closure.organization_id.as_bytes()[..])
+    .bind(i64::try_from(entry_bytes.len()).expect("a fixture entry is small"))
+    .execute(pool)
+    .await
+    .expect("indexing the genesis entry must succeed");
+
+    sqlx::query(
+        "INSERT INTO entries (entry_hash, organization_id, chain_id, sequence_number, \
+         previous_entry_hash, entry_object_hash, initial_grant_plan_hash, receipt_object_hash, \
+         device_id, accepted_at_server_millis, registry_version, registry_head_hash) \
+         VALUES ($1, $2, $3, 0, NULL, $4, $5, $6, $7, 0, $8, $9)",
+    )
+    .bind(&entry_hash.as_bytes()[..])
+    .bind(&closure.organization_id.as_bytes()[..])
+    .bind(&closure.chain_id.as_bytes()[..])
+    .bind(&entry_object_hash.as_bytes()[..])
+    .bind(&plan.hash().as_bytes()[..])
+    .bind(&receipt_object_hash.as_bytes()[..])
+    .bind(&[0xe1_u8; 16][..])
+    .bind(i64::try_from(closure.registry_version.get()).expect("a test version is small"))
+    .bind(&closure.registry_head_hash.as_bytes()[..])
+    .execute(pool)
+    .await
+    .expect("inserting the genesis entry must succeed");
+
+    (entry_hash, entry_object_hash)
+}
+
+/// Die Quittungsadresse eines bereits committeten Eintrags.
+///
+/// # Panics
+///
+/// Wenn der Eintrag nicht existiert.
+pub async fn receipt_object_hash_of(
+    pool: &sqlx::PgPool,
+    entry_hash: ea_types::EntryHash,
+) -> ea_types::ObjectHash {
+    let row: (Vec<u8>,) =
+        sqlx::query_as("SELECT receipt_object_hash FROM entries WHERE entry_hash = $1")
+            .bind(&entry_hash.as_bytes()[..])
+            .fetch_one(pool)
+            .await
+            .expect("reading the receipt address must succeed");
+    ea_types::ObjectHash::try_from(row.0.as_slice()).expect("32 bytes")
+}
