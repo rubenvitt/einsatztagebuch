@@ -695,6 +695,14 @@ struct FakeCommits {
     entries: Mutex<BTreeMap<Vec<u8>, StoredCommit>>,
     head: Mutex<Option<ChainHeadStateV1>>,
     fault: Mutex<CommitFault>,
+    /// Gestellte Antworten fuer die naechsten SPERRFREIEN Kopfabfragen.
+    ///
+    /// Nur so laesst sich das Fenster zwischen Schritt 4 und der Sperre
+    /// ueberhaupt betreten: der Dienst liest den Kopf ohne Sperre, und
+    /// zwischen diesem Lesen und der Transaktion kann ein anderer Commit ihn
+    /// vorziehen. Ohne diese Kulisse saehen Lesen und Transaktion IMMER
+    /// denselben Stand, und die beiden Faelle waeren unerreichbar.
+    staged_head_reads: Mutex<std::collections::VecDeque<Option<ChainHeadStateV1>>>,
 }
 
 impl FakeCommits {
@@ -705,6 +713,18 @@ impl FakeCommits {
     fn visible_entry_count(&self) -> usize {
         self.entries.lock().expect("not poisoned").len()
     }
+
+    /// Die naechste sperrfreie Kopfabfrage bekommt DIESEN Stand.
+    fn stage_head_read(&self, state: Option<ChainHeadStateV1>) {
+        self.staged_head_reads
+            .lock()
+            .expect("not poisoned")
+            .push_back(state);
+    }
+
+    fn set_head(&self, state: Option<ChainHeadStateV1>) {
+        *self.head.lock().expect("not poisoned") = state;
+    }
 }
 
 #[async_trait::async_trait]
@@ -714,6 +734,14 @@ impl CommitRepository for FakeCommits {
         _organization_id: OrganizationId,
         _chain_id: ChainId,
     ) -> Result<Option<ChainHeadStateV1>, RepositoryError> {
+        if let Some(staged) = self
+            .staged_head_reads
+            .lock()
+            .expect("not poisoned")
+            .pop_front()
+        {
+            return Ok(staged);
+        }
         Ok(*self.head.lock().expect("not poisoned"))
     }
 
@@ -751,6 +779,13 @@ impl CommitRepository for FakeCommits {
         let expected_sequence = head.map_or(0, |state| state.sequence.get() + 1);
         if command.sequence.get() != expected_sequence
             || command.previous_entry_hash != head.map(|state| state.entry_hash)
+            // Die Monotonie der Annahmezeit, unter derselben Sperre wie im
+            // Adapter: ein Nachzuegler mit einer Zeit UNTER der des neuen
+            // Vorgaengers hat ein Rennen verloren und darf nicht signiert
+            // sichtbar werden.
+            || head.is_some_and(|state| {
+                command.accepted_at_server.get() < state.accepted_at_server.get()
+            })
         {
             return Err(RepositoryError::HeadConflict);
         }
@@ -1472,12 +1507,16 @@ async fn evidence_grade_binds_the_due_time_into_the_receipt() {
     );
 }
 
-/// Nebenlaeufig: GENAU EINER der gleichzeitigen Erstcommits gewinnt, die
-/// uebrigen bekommen einen Konflikt — und die Kette traegt danach genau einen
-/// Eintrag.
-#[tokio::test]
+/// ECHT nebenlaeufig: vier gleichzeitige Erstcommits, und genau EINER gewinnt.
+///
+/// `tokio::spawn` und nicht eine Schleife mit `await`: eine Schleife misst
+/// „ein zweiter Erstcommit wird abgewiesen", und das steht schon in
+/// `a_fork_on_the_same_sequence_is_a_security_event`. Die Zusage dieses Falls
+/// ist die NEBENLAEUFIGKEIT, und die entsteht nur, wenn die Aufgaben
+/// tatsaechlich gleichzeitig laufen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parallel_first_commits_leave_exactly_one_entry() {
-    let harness = Harness::new();
+    let harness = Arc::new(Harness::new());
     let requests: Vec<_> = (0..4)
         .map(|marker| {
             commit_request(
@@ -1490,14 +1529,105 @@ async fn parallel_first_commits_leave_exactly_one_entry() {
         })
         .collect();
 
+    let mut tasks = Vec::with_capacity(requests.len());
+    for request in requests {
+        let harness = Arc::clone(&harness);
+        tasks.push(tokio::spawn(async move {
+            harness.commit(&request).await.is_ok()
+        }));
+    }
     let mut accepted = 0;
-    for request in &requests {
-        if harness.commit(request).await.is_ok() {
+    for task in tasks {
+        if task.await.expect("no commit task may panic") {
             accepted += 1;
         }
     }
+
     assert_eq!(accepted, 1, "exactly one first commit wins the head");
     assert_eq!(harness.commits.visible_entry_count(), 1);
+}
+
+/// Ein VERALTETER Kopfstand kann niemals eine Quittung signieren, deren
+/// Annahmezeit unter der ihres Vorgaengers liegt.
+///
+/// Der Fall, den Sequenz- und Vorgaengerpruefung allein NICHT fangen: der
+/// Nachzuegler sitzt korrekt hinter dem Kopf, hat dessen Annahmezeit aber vor
+/// dem Vorziehen gelesen. Die Monotonie wird deshalb unter der Sperre
+/// geprueft, und der Verlierer bekommt ein RENNEN — keinen Vorwurf.
+#[tokio::test]
+async fn a_stale_head_read_can_never_sign_a_receipt_that_moves_time_backwards() {
+    let harness = Harness::new();
+    harness.clock.set(5_000);
+    harness
+        .commit(&valid_commit(&harness.head))
+        .await
+        .expect("the first commit must be accepted");
+
+    let stale = harness
+        .commits
+        .head
+        .lock()
+        .expect("not poisoned")
+        .expect("the head exists");
+    // Ein anderer Commit hat den Kopf inzwischen mit einer SPAETEREN
+    // Annahmezeit vorgezogen — der Nachzuegler hier hat den alten Stand
+    // gelesen und rechnet daraus eine zu kleine Zeit.
+    harness.commits.set_head(Some(ChainHeadStateV1 {
+        accepted_at_server: UnixMillis::new(12_000),
+        ..stale
+    }));
+    harness.commits.stage_head_read(Some(stale));
+
+    harness.clock.set(3_000);
+    let successor = commit_request(
+        &harness.head,
+        1,
+        Some(stale.entry_hash),
+        &[reader_recipient(), recovery_recipient()],
+        0xc1,
+    );
+    let failure = harness
+        .commit(&successor)
+        .await
+        .expect_err("a receipt below the predecessor's accepted time must never be committed");
+    assert_eq!(failure.error, CommitServiceError::HeadConflict);
+    assert_eq!(failure.error.http_status(), 409);
+    assert!(
+        harness.security.codes().is_empty(),
+        "losing this race is not an accusation"
+    );
+    assert_eq!(harness.commits.visible_entry_count(), 1);
+}
+
+/// Ein VERALTETER Kopfstand fuehrt zu keinem falschen Fork-Ereignis.
+///
+/// Bewegt sich der Kopf zwischen dem Lesen aus Schritt 4 und der Sperre, ist
+/// jeder Vergleich gegen den alten Stand eine Anschuldigung ueber einen
+/// Zustand, den es nicht mehr gibt. Die Zerlegung liest deshalb erneut und
+/// faellt auf „Rennen verloren" zurueck.
+#[tokio::test]
+async fn a_head_that_moved_under_the_caller_is_a_race_and_not_a_fork() {
+    let harness = Harness::new();
+    // Der ECHTE Kopf steht weit vorn; der Aufrufer liest einen leeren Stand
+    // und haelt sich fuer den Erstcommit.
+    harness.commits.set_head(Some(ChainHeadStateV1 {
+        sequence: ChainSequence::new(7),
+        entry_hash: EntryHash::try_from(&[0x88; 32][..]).expect("32 bytes"),
+        accepted_at_server: UnixMillis::new(20_000),
+    }));
+    harness.commits.stage_head_read(None);
+
+    let failure = harness
+        .commit(&valid_commit(&harness.head))
+        .await
+        .expect_err("a moved head must be reported");
+    assert_eq!(failure.error, CommitServiceError::HeadConflict);
+    assert_eq!(failure.error.code(), "EA-COMMIT-HEAD-CONFLICT");
+    assert!(
+        harness.security.codes().is_empty(),
+        "a moved head is a lost race, never a fork"
+    );
+    assert_eq!(harness.commits.visible_entry_count(), 0);
 }
 
 /// Kein Befund traegt einen fachlichen Wert, und die Codes sind stabil.

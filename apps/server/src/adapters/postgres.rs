@@ -104,8 +104,8 @@ impl CommitRepository for PostgresRepository {
         // Rennen um den Kopf und nicht um die Commit-Identitaet verloren ging.
         // Die Zuordnung leistet `map_commit_error` ueber den Constraintnamen.
         let head = sqlx::query(
-            "SELECT head_sequence, head_entry_hash, revision FROM chain_heads \
-             WHERE organization_id = $1 AND chain_id = $2 FOR UPDATE",
+            "SELECT head_sequence, head_entry_hash, head_accepted_at_server_millis, revision \
+             FROM chain_heads WHERE organization_id = $1 AND chain_id = $2 FOR UPDATE",
         )
         .bind(&command.organization_id.as_bytes()[..])
         .bind(&command.chain_id.as_bytes()[..])
@@ -169,6 +169,28 @@ impl CommitRepository for PostgresRepository {
             .previous_entry_hash
             .map(|hash| hash.as_bytes().to_vec());
         if expected_previous != actual_previous {
+            return Err(RepositoryError::HeadConflict);
+        }
+
+        // Die MONOTONIE der Annahmezeit, unter der Sperre.
+        //
+        // `design.md`:929: „`accepted-at-server` … darf je Kette nicht unter
+        // der des vorherigen Receipts liegen." Der Dienst bildet die Zahl aus
+        // einem Kopf, den er OHNE Sperre gelesen hat; zieht ein anderer Commit
+        // dazwischen den Kopf mit einer SPAETEREN Annahmezeit vor, traegt die
+        // schon gerechnete Zahl eine Zeit, die unter der des neuen Vorgaengers
+        // liegt. Sequenz und Vorgaengerhash faengen das NICHT: der Nachzuegler
+        // sitzt korrekt hinter dem neuen Kopf.
+        //
+        // Und danach ist es unheilbar — die Zeit ist dann signiert. Also wird
+        // sie hier geprueft, wo der Kopf gesperrt ist, und der Verlierer
+        // bekommt `HeadConflict`: er hat ein RENNEN verloren, und sein
+        // naechster Versuch liest den neuen Kopf und rechnet richtig.
+        if head
+            .as_ref()
+            .map(|row| -> i64 { row.get("head_accepted_at_server_millis") })
+            .is_some_and(|previous| command.accepted_at_server.get() < previous)
+        {
             return Err(RepositoryError::HeadConflict);
         }
 

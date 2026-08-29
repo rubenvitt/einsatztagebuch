@@ -830,6 +830,61 @@ async fn a_commit_makes_entry_grants_receipt_and_head_visible_together() {
     database.cleanup().await;
 }
 
+/// Eine Annahmezeit UNTER der des Vorgaengers wird unter der Sperre
+/// abgewiesen.
+///
+/// `design.md`:929: „`accepted-at-server` … darf je Kette nicht unter der des
+/// vorherigen Receipts liegen." Sequenz und Vorgaengerhash fangen das NICHT —
+/// der Nachzuegler sitzt korrekt hinter dem Kopf. Er hat dessen Annahmezeit
+/// nur gelesen, BEVOR ein anderer Commit sie vorgezogen hat, und ohne diese
+/// Pruefung wuerde er eine rueckwaerts laufende Zeit SIGNIERT sichtbar
+/// schalten. Danach waere sie unheilbar.
+#[tokio::test]
+async fn an_accepted_time_below_the_head_is_a_head_conflict() {
+    let database = common::fresh_database().await;
+    let (organization, chain) = commit_fixture(database.pool()).await;
+    let repository = PostgresRepository::new(database.pool().clone());
+
+    let mut first = commit::Builder::new(organization, chain, 0);
+    first.accepted_at = 1_700_000_010_000;
+    repository
+        .commit_locked_head(first.build())
+        .await
+        .expect("the first commit must land");
+
+    // Korrekte Sequenz, korrekter Vorgaenger — nur die Zeit laeuft zurueck.
+    let mut successor = commit::Builder::new(organization, chain, 1);
+    successor.entry_hash = commit::entry(0x1a);
+    successor.entry_object = commit::object(0x2a);
+    successor.receipt = commit::object(0x5a);
+    successor.grants = vec![commit::object(0x4a)];
+    successor.previous = Some(commit::entry(0x10));
+    successor.accepted_at = 1_700_000_009_999;
+    let error = repository
+        .commit_locked_head(successor.build())
+        .await
+        .expect_err("a receipt time below the head must be refused");
+    assert_eq!(error.code(), "EA-DB-HEAD-CONFLICT");
+
+    // Genau die Kopfzeit ist zulaessig — die Zusage ist „nicht darunter",
+    // nicht „streng darueber".
+    successor.accepted_at = 1_700_000_010_000;
+    repository
+        .commit_locked_head(successor.build())
+        .await
+        .expect("an accepted time equal to the head must land");
+
+    let times: Vec<i64> = sqlx::query_scalar(
+        "SELECT accepted_at_server_millis FROM entries ORDER BY sequence_number",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("reading the accepted times must succeed");
+    assert_eq!(times, vec![1_700_000_010_000, 1_700_000_010_000]);
+
+    database.cleanup().await;
+}
+
 /// Dieselbe Commit-Identitaet ein zweites Mal ist ein IDEMPOTENTER REPLAY und
 /// liefert denselben gespeicherten Receipt — kein zweiter Eintrag, kein
 /// fortgeschriebener Kopf.

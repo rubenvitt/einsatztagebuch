@@ -561,9 +561,15 @@ pub async fn commit_entry(
             return Err(CommitServiceError::IdentityConflict.into());
         }
         Err(RepositoryError::HeadConflict) => {
-            return Err(
-                classify_head_conflict(&validated, current, organization_id, now, ports).await,
-            );
+            return Err(classify_head_conflict(
+                &validated,
+                current,
+                organization_id,
+                chain_id,
+                now,
+                ports,
+            )
+            .await);
         }
         Err(error) => return Err(CommitFailure::from(error)),
     };
@@ -656,23 +662,38 @@ async fn validation_failure(
 
 /// Den „Kopfkonflikt" der Transaktion in die Befunde von §13.3 zerlegen.
 ///
-/// `commit_locked_head` kennt genau einen Ausgang fuer drei verschiedene
+/// `commit_locked_head` kennt genau einen Ausgang fuer vier verschiedene
 /// Sachverhalte: die Sequenz war nicht `currentSequence + 1`, der Vorgaenger
-/// war nicht der aktuelle Kopf, oder jemand anderes hat das Rennen um den Kopf
-/// gewonnen. `design.md` §13.3 unterscheidet sie — die ersten beiden sind
-/// Security Events, das dritte ausdruecklich nicht.
+/// war nicht der aktuelle Kopf, die Annahmezeit lag unter der des Vorgaengers,
+/// oder jemand anderes hat das Rennen um den Kopf gewonnen. `design.md` §13.3
+/// unterscheidet sie — die ersten beiden sind Security Events, die letzten
+/// beiden ausdruecklich nicht.
 ///
-/// Unterschieden wird gegen den Kopf, der in Schritt 4 GELESEN wurde. Passte
-/// der Commit damals auf ihn und scheitert er jetzt trotzdem, hat er zwischen
-/// Lesen und Sperre ein Rennen verloren: kein Vorwurf, kein Ereignis, `409`
-/// und ein neuer Versuch.
+/// ZUERST wird der Kopf ERNEUT gelesen. Bewegt er sich zwischen dem Lesen aus
+/// Schritt 4 und der Sperre, dann ist jeder Vergleich gegen den ALTEN Stand
+/// eine Anschuldigung ueber einen Zustand, den es nicht mehr gibt: ein
+/// Nachzuegler, der ein Rennen verloren hat, bekaeme ein `sequence-fork`
+/// eingetragen. Ein bewegter Kopf ist deshalb IMMER ein verlorenes Rennen,
+/// und nur ein UNVERAENDERTER Kopf laesst die Unterscheidung zu.
+///
+/// Ist der Kopf auch beim Wiederlesen nicht abrufbar, wird ebenfalls kein
+/// Ereignis geschrieben: eine Anschuldigung auf einer nicht beweisbaren
+/// Grundlage ist schlimmer als keine.
 async fn classify_head_conflict(
     validated: &ValidatedCommitV1,
     current: Option<ChainHeadStateV1>,
     organization_id: OrganizationId,
+    chain_id: ChainId,
     now: UnixMillis,
     ports: &CommitPorts<'_>,
 ) -> CommitFailure {
+    let Ok(observed) = ports.commits.head_state(organization_id, chain_id).await else {
+        return CommitServiceError::HeadConflict.into();
+    };
+    if observed.map(head_identity) != current.map(head_identity) {
+        return CommitServiceError::HeadConflict.into();
+    }
+
     let expected_sequence = current.map_or(Some(0), |head| head.sequence.get().checked_add(1));
     let Some(expected_sequence) = expected_sequence else {
         return CommitServiceError::Internal.into();
@@ -699,7 +720,25 @@ async fn classify_head_conflict(
         .await;
         return CommitServiceError::PredecessorMismatch.into();
     }
+    // Sequenz und Vorgaenger passten, der Kopf steht unveraendert — dann hat
+    // die Transaktion an der MONOTONIE der Annahmezeit abgewiesen, oder das
+    // Rennen ging in einem Fenster verloren, das dieser Lesezugriff nicht
+    // sieht. Beides ist ein verlorenes Rennen und kein Vorwurf.
     CommitServiceError::HeadConflict.into()
+}
+
+/// Die Identitaet eines Kopfes fuer den Vergleich zweier Lesezugriffe.
+///
+/// Sequenz, Eintragshash UND Annahmezeit: die ersten beiden koennten in einem
+/// Sonderfall gleich bleiben, waehrend die Annahmezeit sich bewegt, und genau
+/// diese Bewegung ist der Grund, aus dem die Transaktion abgewiesen haben
+/// kann.
+fn head_identity(head: ChainHeadStateV1) -> (u64, [u8; 32], i64) {
+    (
+        head.sequence.get(),
+        *head.entry_hash.as_bytes(),
+        head.accepted_at_server.get(),
+    )
 }
 
 /// Schritt 3 fuer EIN Objekt, samt Security Event bei Bytekonflikt.
