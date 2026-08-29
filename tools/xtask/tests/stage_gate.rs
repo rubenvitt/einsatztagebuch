@@ -486,12 +486,13 @@ fn stage_one_gate_requires_a_complete_requirement_ledger() {
 /// AUSGESCHRIEBEN dasteht statt die Zusicherung fuer alle sieben aufzuweichen.
 /// Der geschlossene Stufe-1-Gate-Bericht (`docs/traceability/stage-1-gate.md`)
 /// wird dafuer NICHT angefasst: er haelt den Stand am Stufe-1-Gate fest.
-const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 7] = [
+const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 8] = [
     ("WR-041", "4.1", "3", "planned"),
     ("WR-042", "4.2", "3", "planned"),
     ("WR-043", "4.3", "3", "planned"),
     ("WR-052", "5.2", "2", "integrated"),
     ("WR-063", "6.3", "4", "planned"),
+    ("WR-064", "6.4", "3", "implemented"),
     ("WR-075", "7.5", "5", "planned"),
     ("WR-082", "8.2", "4", "planned"),
 ];

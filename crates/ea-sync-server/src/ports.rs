@@ -436,6 +436,60 @@ pub trait WebauthnCredentialStore: Send + Sync {
         &self,
         credential: crate::models::WebauthnCredentialV1,
     ) -> Result<crate::models::CredentialRegistrationOutcome, RepositoryError>;
+
+    /// Loest ein Credential ueber den Eindeutigkeitszwang
+    /// (`organizationId`, `credentialId`) auf.
+    ///
+    /// `None` heisst „unbekannt" und ist NICHT `404`: der Abrufpfad rechnet
+    /// mit derselben Ersatzantwort weiter, damit ein unbekanntes Credential
+    /// dieselbe Arbeit ausloest wie ein bekanntes (`web-reader-design.md`
+    /// §6.4.1, :228).
+    async fn resolve(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        credential_id: &[u8],
+    ) -> Result<Option<crate::models::StoredWebauthnCredentialV1>, RepositoryError>;
+
+    /// Schreibt den Signaturzaehler fort — Compare-and-Set.
+    ///
+    /// `true`, wenn die Zeile noch auf `from` stand. Ein `false` heisst, dass
+    /// ein zweiter Abruf mit derselben Assertion schneller war; der Zaehler
+    /// bleibt damit auch unter Nebenlaeufigkeit streng steigend.
+    async fn advance_counter(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        credential_id: &[u8],
+        from: u32,
+        to: u32,
+    ) -> Result<bool, RepositoryError>;
+}
+
+/// Die Ablage der gewrappten Reader-Vault-Blobs
+/// (`web-reader-design.md` §6.4).
+///
+/// Sie ist AUSDRUECKLICH nicht der Object Store: dessen Namensraum
+/// `<type>/<hex objectHash>` gehoert den sechs Archivobjektarten
+/// (`design.md` §13.4). Hier liegen Bytes, die der Server nicht lesen kann und
+/// zu denen er weder Vault-Key noch PRF-Ausgabe kennt.
+#[async_trait]
+pub trait VaultBlobStore: Send + Sync {
+    /// Legt GENAU EIN Chiffrat ab: create-if-absent ueber
+    /// (`subjectId`, Blobhash), ohne Aenderungs- und ohne Loeschpfad.
+    ///
+    /// `max_per_subject` ist Teil derselben Anweisung und keine zweite
+    /// Abfrage: Zaehlung und Einfuegung getrennt zu fuehren, liesse zwei
+    /// gleichzeitige Ablagen die Decke gemeinsam ueberschreiten.
+    async fn store(
+        &self,
+        blob: crate::models::ReaderVaultBlobV1,
+        max_per_subject: u64,
+    ) -> Result<crate::models::VaultBlobOutcome, RepositoryError>;
+
+    /// Die Chiffrate GENAU EINER `subjectId`, in stabiler Reihenfolge.
+    async fn list_for_subject(
+        &self,
+        subject_id: ea_types::SubjectId,
+    ) -> Result<Vec<Vec<u8>>, RepositoryError>;
 }
 
 /// Der technische Index der Trust-Objekte einer Organisation.

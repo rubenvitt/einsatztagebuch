@@ -43,11 +43,49 @@ challenge-request-v1 = [1, organization-id: bstr .size 16, []]
 
 ; Die pseudonyme subject-id IST der userHandle (web-reader-design.md §6.4.1).
 ; Der Rahmen traegt keinen Anzeigenamen und keinen fachlichen Wert.
+; credential-public-cose-key ist die KANONISCHE COSE-Karte dieses
+; Arbeitsbereichs, {1: 1 (OKP), -1: 6 (Ed25519), -2: x}, und darin genau der
+; Ed25519-Arm: §6.4.1 nennt keinen Algorithmus, die Suite ist durchgehend
+; Ed25519 (Design §13.1, alg="ed25519"), und die spaetere Assertion muss gegen
+; genau diesen Schluessel tragen.
 webauthn-credential-registration-v1 = [
   1, subject-id: bstr .size 16,
   credential-id: bstr .size (16..1023),
   credential-public-cose-key: bstr, []
 ]
+
+; Die drei Rahmen der Vault-Blob-Flaeche (web-reader-design.md §6.4/§6.4.1).
+; openapi.yaml nennt fuer beide Endpunkte nur den Medientyp und ein leeres
+; Schema; ihre Produktionen stehen deshalb hier.
+;
+; vault-blob-upload-v1 traegt KEINEN Blobhash: der Server rechnet ihn als
+; SHA-256 ueber die exakten Chiffratbytes und schreibt create-if-absent ueber
+; (subject-id, Blobhash). Ein behaupteter Hash waere eine Adresse, die nicht
+; auf ihren Inhalt zeigen muss.
+vault-blob-upload-v1 = [1, subject-id: bstr .size 16, ciphertext: bstr .size (1..4096), []]
+
+; Der Abruf ist die ZWEITE und letzte Signaturausnahme (Design §13.1,
+; Reader-Vorbehalt), traegt deshalb wie challenge-request-v1 die
+; organization-id — die Credentialaufloesung laeuft ueber den
+; Eindeutigkeitszwang (organization-id, credential-id) — und stellt die
+; subject-id nur als BEHAUPTUNG: der Server prueft sie gegen den userHandle des
+; aufgeloesten Credentials. Die client-data-json steht auf dem Draht, weil die
+; Assertion ueber genau diese Bytes signiert; der Server PARST sie nicht,
+; sondern serialisiert die erwartete CollectedClientData aus challenge und
+; Bundle-Origin und vergleicht byteweise (ADR 0004: kein zweiter Dekodierweg).
+vault-blob-retrieval-request-v1 = [
+  1, organization-id: bstr .size 16, subject-id: bstr .size 16,
+  credential-id: bstr .size (16..1023),
+  challenge: bstr .size 32,
+  authenticator-data: bstr .size (37..1024),
+  client-data-json: bstr .size (1..2048),
+  signature: bstr .size 64, []
+]
+
+; Die opaken Chiffrate genau einer subject-id. Kein Blobhash, kein
+; Zeitstempel, keine Zaehlung: alles Weitere waere ein Servermetadatum ueber
+; einen Bestand, den der Server nicht lesen kann.
+vault-blob-retrieval-response-v1 = [1, ciphertexts: [* bstr .size (1..4096)], []]
 
 trust-event-upload-v1 = [1, exact-etb-bytes: bstr, []]
 

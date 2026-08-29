@@ -592,6 +592,40 @@ pub(crate) fn wrapper_signature<'a>(
 ///
 /// Kein Trust-Objekt, keine Rolle, keine Capability, keine Geraeteautoritaet
 /// (`web-reader-design.md` §6.4.1, :230-233).
+///
+/// # Die `subjectId` wird NICHT an den Aufrufer gebunden, und warum
+///
+/// Ein freigegebenes Geraet dieser Organisation darf hier jede `subjectId`
+/// eintragen. Das ist eine FESTLEGUNG und kein Versehen, und sie steht hier
+/// ausgeschrieben statt in einer Fussnote:
+///
+/// * Eine kryptographische Bindung gaebe es nur ueber ein Root-signiertes
+///   Objekt, das `subjectId` und Geraet verknuepft. §6.4.1 sagt ausdruecklich,
+///   dass diese Registrierung dem Server KEINE Autoritaet verleiht und Rollen,
+///   Capabilities und Geraeteautoritaet unveraendert allein aus
+///   Root-signierten Trust-Objekten stammen — und ein solches Objekt gibt es
+///   in dieser Stufe nicht. [`RegisteredDevice`] traegt folgerichtig keine
+///   `subjectId`; `authority_subject_id` steht nur an zwei Zertifikatsarten
+///   und nicht an einem Geraet. Die Bindung waere also erfunden, nicht
+///   abgeleitet.
+/// * Was TRAEGT, traegt trotzdem: der Eindeutigkeitszwang
+///   (`organizationId`, `credentialId`) haelt eine `credentialId` fuer immer
+///   bei der `subjectId`, unter der sie zuerst eingetragen wurde. Eine
+///   bestehende Zeile laesst sich nicht umhaengen, und ein zweiter Anspruch
+///   auf dieselbe `credentialId` ist
+///   [`AuthServiceError::CredentialConflict`].
+/// * Das Restrisiko ist benannt: ein freigegebenes Geraet kann seinen EIGENEN
+///   Authenticator unter einer fremden `subjectId` eintragen und danach deren
+///   Chiffrate abholen. Diese Chiffrate sind ohne die PRF-Ausgabe genau jenes
+///   fremden Authenticators wertlos (§6.2), und dasselbe Geraet hat als
+///   freigegebenes Geraet ohnehin Zugang zur Leseflaeche. Der Blobabruf
+///   verschafft ihm damit keine Faehigkeit, die es nicht schon haette.
+/// * Die Decke je `subjectId`
+///   ([`ea_sync_protocol::MAX_VAULT_BLOBS_PER_SUBJECT_V1`]) begrenzt, was ein
+///   solches Geraet auf der Ablageseite anrichten kann.
+///
+/// Eine echte Bindung entsteht mit dem Root-signierten Reader-Zertifikat der
+/// Stufe 4; dann ist sie ABGELEITET und nicht behauptet.
 pub async fn register_webauthn_credential(
     registration: &WebauthnCredentialRegistrationV1,
     organization_id: OrganizationId,

@@ -14,5 +14,6 @@
 
 pub mod adapters;
 pub mod config;
+pub mod cors;
 pub mod http;
 pub mod router;

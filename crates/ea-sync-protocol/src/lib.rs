@@ -24,6 +24,7 @@ mod enrollment;
 mod error;
 mod http_signature;
 mod reader;
+mod vault;
 
 pub use challenge::{ChallengeResponseV1, DeviceRegistrationRequestV1, ReaderAckV1};
 pub use commit::{
@@ -47,6 +48,12 @@ pub use reader::{
     ReaderBatchV1, TECHNICAL_CURSOR_DOMAIN_V1, TechnicalCursorFieldsV1, TechnicalCursorScopeV1,
     TechnicalCursorSigner, TechnicalCursorV1, TechnicalCursorVerifier, TrustEventRecordV1,
     TrustRegistryResponseV1, technical_cursor_digest,
+};
+pub use vault::{
+    MAX_AUTHENTICATOR_DATA_BYTES_V1, MAX_CLIENT_DATA_JSON_BYTES_V1,
+    MAX_VAULT_BLOB_CIPHERTEXT_BYTES_V1, MAX_VAULT_BLOBS_PER_SUBJECT_V1,
+    MIN_AUTHENTICATOR_DATA_BYTES_V1, VaultBlobRetrievalRequestV1, VaultBlobRetrievalResponseV1,
+    VaultBlobUploadV1,
 };
 
 /// Der Medientyp jedes strukturierten Rahmens dieser Version.

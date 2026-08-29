@@ -204,6 +204,78 @@ die eine Signaturausnahme ohne WebAuthn-Assertion ist und es dort kein
 `tag` gibt, aus dem die Organisation käme, `challenge-response-core-v1` sie aber
 an Position 2 führt.
 
+## Die drei Rahmen der Vault-Blob-Fläche
+
+Dieselbe **Lücke** und dieselbe Auflösung: `openapi.yaml` nennt für
+`PUT /v1/vault-blobs` und `POST /v1/vault-blobs/retrievals` nur den Medientyp
+und ein leeres Schema. Die Produktionen `vault-blob-upload-v1`,
+`vault-blob-retrieval-request-v1` und `vault-blob-retrieval-response-v1` stehen
+deshalb ebenfalls normativ in `schemas/protocol/v1/entry-commit.cddl`.
+
+`vault-blob-upload-v1` trägt **keinen** Blobhash. Der Server rechnet ihn als
+SHA-256 über die exakten Chiffratbytes und schreibt create-if-absent über
+(`subjectId`, Blobhash); ein vom Aufrufer behaupteter Hash wäre eine Adresse,
+die nicht auf ihren Inhalt zeigen muss. Eine `subjectId` hält höchstens acht
+Blobs von je höchstens 4 KiB — §6.3 verlangt mindestens zwei Authenticators, und
+die Decke hält zugleich ein freigegebenes Gerät davon ab, die Tabelle unter
+einer fremden `subjectId` unbegrenzt zu füllen. Ihr Reißen ist
+`EA-VAULT-BLOB-LIMIT` mit `413`, die Byte-, Zähl- und Parsergrenzenzeile der
+HTTP-Abbildung.
+
+`vault-blob-retrieval-request-v1` trägt die `organizationId` aus demselben Grund
+wie `challenge-request-v1`: der Abruf ist die zweite Signaturausnahme, es gibt
+kein `tag`, und die Credentialauflösung läuft über den Eindeutigkeitszwang
+(`organizationId`, `credentialId`). Die `subjectId` steht darin als
+**Behauptung** und wird gegen den `userHandle` des aufgelösten Credentials
+gestellt.
+
+Die `clientDataJSON` steht auf dem Draht, weil die Assertion über genau diese
+Bytes signiert. Der Server **parst** sie nicht: ADR 0004 hat `json` an Axum
+abgeschaltet, damit neben dem deterministischen CBOR kein zweiter, ungeprüfter
+Dekodierweg in den Server führt. Er serialisiert stattdessen die erwartete
+`CollectedClientData` aus Challenge und Bundle-Origin und vergleicht byteweise;
+das pinnt `type`, `challenge`, `origin` und `crossOrigin` in einem Zug.
+
+**Der Signaturalgorithmus.** `credential-public-cose-key` ist die kanonische
+COSE-Karte dieses Arbeitsbereichs — `{1: 1 (OKP), -1: 6 (Ed25519), -2: x}`, ohne
+`alg` an Label 3 — und darin genau der Ed25519-Arm. `web-reader-design.md`
+§6.4.1 nennt keinen Algorithmus, und die Suite ist durchgehend Ed25519 (Design
+§13.1, `alg="ed25519"`); ES256 verlangte einen P-256-Prüfer, den dieser Baum
+nicht enthält. Der Web-Reader normalisiert den `credentialPublicKey` seines
+Authenticators vor der Registrierung in diese Form. Geprüft wird
+`authenticatorData ‖ SHA-256(clientDataJSON)` (WebAuthn Level 2, §6.3.3), dazu
+`rpIdHash` gegen die konfigurierte `rpId`, das `UP`-Flag und ein **streng
+steigender** `signCount` — mit der einen Ausnahme, die WebAuthn Level 2 §6.1.3
+selbst benennt: sind gespeicherter und gelieferter Zähler beide null, führt der
+Authenticator keinen, und der synchronisierte Passkey aus §6.4.1 bliebe sonst
+dauerhaft ausgesperrt.
+
+**Ein einziger Ablehnungscode.** Unbekanntes Credential, fremde `subjectId`,
+falscher Origin, falsche `rpIdHash`, fehlendes `UP`, nicht steigender Zähler,
+verbrauchte Challenge und nicht tragende Signatur antworten alle mit `401` und
+`EA-WEBAUTHN-ASSERTION-INVALID`, mit identischem `protocol-error-v1` bis auf die
+global eindeutige `request-id`. Beide Wege verbrauchen dabei die Challenge —
+bliebe sie auf einem stehen, unterschiede ein Angreifer die Fälle daran, ob er
+seine Nonce wiederverwenden kann. Ein `404` für eine unbekannte `subjectId` gibt
+es ausdrücklich nicht; die `404`-Zeile der HTTP-Abbildung nennt unbekanntes
+Objekt, unbekannte Kette, unbekannten Eintrag und unbekannte Vernichtungs-ID und
+keine `subjectId`.
+
+## Die CORS-Positivliste
+
+`web-reader-design.md` §4.1 verlangt einen Auslieferungs-Origin, der vom
+Sync-Server getrennt ist; jeder Zugriff des Bundles ist damit cross-origin. Der
+Server führt deshalb eine **Positivliste** aus der Konfiguration, niemals einen
+Platzhalter, mit dem getrennten Bundle-Origin als einzigem lieferseitigem
+Eintrag. `Access-Control-Allow-Credentials` bleibt aus — der Abruf trägt seine
+Autorität im Körper und nicht in einem umgebenden Cookie —, und ein nicht
+gelisteter Origin erhält **überhaupt keinen** `Access-Control-Allow-Origin`.
+
+Die RFC-9421-Abdeckung von `@authority` und `@target-uri` bleibt davon
+unberührt: der Browser signiert über die Ziel-URI des Sync-Servers und nicht
+über seinen eigenen Origin. CORS entscheidet, ob der Browser fragen darf; die
+Signatur entscheidet, ob der Server antwortet.
+
 ## Die Identität der Ratenbegrenzung
 
 Der ratenbegrenzte Challenge-Endpunkt zählt je **Gegenstellenadresse** des
@@ -265,6 +337,15 @@ Die Codes der Trust-Annahme, mit ihrer Abbildung:
 | `EA-TRUST-EVENT-NOT-VALID-NOW` | 422 | Das Objekt trägt, gilt aber jetzt nicht: veraltet, in der Zukunft oder außerhalb seiner Sequenzleihe |
 | `EA-TRUST-EVENT-NOT-APPLICABLE` | 409 | Ein `registryEvent`, das nicht der nächste Kopf ist — die Zeile „erforderlicher neuerer Registry-Head“. Der Körper führt `required-registry-version` und `required-registry-head-hash` |
 | `EA-TRUST-STATE-CONFLICT` | 503 | Der persistente Vertrauenszustand hat sich unter dem Aufrufer bewegt; `retryable=true`, und ausdrücklich keine Aussage über seine Autorität |
+
+Die Codes der Vault-Blob-Fläche, mit ihrer Abbildung:
+
+| Code | Status | Bedeutung |
+| --- | --- | --- |
+| `EA-WEBAUTHN-ASSERTION-INVALID` | 401 | Die WebAuthn-Assertion trägt nicht — aus jedem Grund derselbe Code, damit der Endpunkt keine Enumerationsfläche bietet |
+| `EA-VAULT-BLOB-LIMIT` | 413 | Diese `subjectId` hält bereits so viele Wrapped-Blobs, wie sie halten darf |
+| `EA-VAULT-DEPENDENCY-UNAVAILABLE` | 503 | Die Datenbank antwortet nicht; `retryable=true` |
+| `EA-VAULT-INTERNAL` | 500 | Interner Fehler ohne fachliche Ursache |
 
 Antworten ohne Inhalt: `POST /v1/reader-acks` antwortet mit `204` und ohne
 Körper; `POST /v1/webauthn-credentials`, `PUT /v1/vault-blobs`,

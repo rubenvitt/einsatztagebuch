@@ -391,6 +391,18 @@ pub fn install_crypto_provider() {
     });
 }
 
+/// Der getrennte Auslieferungs-Origin der Testkulisse
+/// (`web-reader-design.md` §4.1, :70-75).
+///
+/// Er steht hier und nicht in jedem Testziel: die CORS-Positivliste und die
+/// WebAuthn-`rpId` muessen dieselbe Quelle haben, sonst prueft ein Testfall
+/// gegen eine andere Gegenstelle als die konfigurierte.
+pub const TEST_BUNDLE_ORIGIN: &str = "https://reader.einsatzarchiv.test";
+
+/// Die `rpId`, die der Server aus [`TEST_BUNDLE_ORIGIN`] ableitet: sein
+/// Hostname.
+pub const TEST_RELYING_PARTY_ID: &str = "reader.einsatzarchiv.test";
+
 /// Ein laufender Server auf einem TLS-Lauscher an `127.0.0.1`.
 pub struct TestServer {
     pub address: std::net::SocketAddr,
@@ -451,6 +463,10 @@ pub async fn spawn_server(
         repository.clone(),
         clock.clone(),
     ));
+    let web_origins = Arc::new(
+        einsatzarchiv_server::config::WebOriginPolicy::new(TEST_BUNDLE_ORIGIN.to_owned(), &[])
+            .expect("the test bundle origin must be a usable https origin"),
+    );
     let state = Arc::new(AppState {
         authority: authority.clone(),
         clock,
@@ -458,10 +474,14 @@ pub async fn spawn_server(
         objects: objects.clone(),
         repository: repository.clone(),
         trust_authority: Arc::new(PostgresTrustAuthority::new(pool, objects)),
+        relying_party: ea_sync_server::vault_blob::WebauthnRelyingPartyV1::new(
+            web_origins.bundle_origin().to_owned(),
+            web_origins.relying_party_id(),
+        ),
     });
 
     tokio::spawn(async move {
-        let _ = serve(listener, router(state)).await;
+        let _ = serve(listener, router(state, web_origins)).await;
     });
     TestServer { address, authority }
 }

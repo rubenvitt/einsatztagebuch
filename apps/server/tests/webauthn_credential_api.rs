@@ -34,6 +34,24 @@ const ADMIN_SEED: [u8; 32] = ea_testkit::TEST_ENTROPY_ORGANIZATION_ADMIN_ED25519
 const SERVER_SECRET: [u8; 32] = [0x51; 32];
 const SERVER_CERTIFICATE_HASH: [u8; 32] = [0x52; 32];
 
+/// Der Seed des Authenticators dieser Kulisse. Er ist KEIN Geraeteschluessel:
+/// der Authenticator signiert spaeter die Assertion, der Ed25519-Schluessel des
+/// Lesers signiert die Requests (`web-reader-design.md` §6.4.1, :226-228).
+const AUTHENTICATOR_SEED: [u8; 32] = [0x91; 32];
+
+/// Der kanonische oeffentliche COSE-Schluessel eines Authenticators.
+///
+/// Der Server nimmt GENAU die kanonische Form dieses Arbeitsbereichs an
+/// (`ea_crypto::CanonicalPublicCoseKey`, OKP/Ed25519) und weist alles andere
+/// schon bei der Aufnahme ab: die Assertion muss spaeter gegen genau diesen
+/// Schluessel tragen, also ist ein unlesbarer Schluessel hier ein Befund und
+/// keine Zeile.
+fn credential_public_cose_key(seed: [u8; 32]) -> Vec<u8> {
+    ea_crypto::CanonicalPublicCoseKey::ed25519(ea_testkit::ed25519_public_key(&seed))
+        .expect("a declared test seed yields a usable Ed25519 key")
+        .to_deterministic_cbor()
+}
+
 fn signer(seed: [u8; 32]) -> RequestSigner {
     RequestSigner::from_secret(ea_crypto::SecretBytes::new(seed))
 }
@@ -96,9 +114,12 @@ async fn credential_registration_binds_the_subject_and_spends_its_challenge() {
     let before = authority_snapshot(database.pool()).await;
 
     let subject = SubjectId::try_from(&[0x71_u8; 16][..]).expect("16 bytes");
-    let registration =
-        WebauthnCredentialRegistrationV1::new(subject, vec![0x81; 32], vec![0x82; 48])
-            .expect("the registration frame must build");
+    let registration = WebauthnCredentialRegistrationV1::new(
+        subject,
+        vec![0x81; 32],
+        credential_public_cose_key(AUTHENTICATOR_SEED),
+    )
+    .expect("the registration frame must build");
 
     let nonce = fresh_challenge(&server, fixture.organization_id).await;
     let signer = signer(ADMIN_SEED);
@@ -190,6 +211,37 @@ async fn authority_snapshot(pool: &PgPool) -> (i64, i64, i64) {
         count("SELECT count(*) AS n FROM pending_device_requests").await,
         count("SELECT count(*) AS n FROM trust_events").await,
     )
+}
+
+/// Ein Credential, dessen oeffentlicher Schluessel keine kanonische
+/// OKP-Ed25519-Karte ist, wird schon vom RAHMEN abgewiesen.
+///
+/// Ohne diese Grenze legte die Registrierung eine Zeile an, gegen die spaeter
+/// keine Assertion je tragen kann — der Server koennte sie dann nur noch
+/// fail-closed abweisen und wuesste nicht, warum.
+#[test]
+fn a_credential_key_that_is_not_a_canonical_ed25519_cose_key_is_refused() {
+    let subject = SubjectId::try_from(&[0x71_u8; 16][..]).expect("16 bytes");
+    assert!(
+        WebauthnCredentialRegistrationV1::new(subject, vec![0x81; 32], vec![0x82; 48]).is_err(),
+        "an opaque byte string is not a COSE key"
+    );
+    let x25519 = ea_crypto::CanonicalPublicCoseKey::x25519([0x07; 32])
+        .expect("a non-zero X25519 key is usable")
+        .to_deterministic_cbor();
+    assert!(
+        WebauthnCredentialRegistrationV1::new(subject, vec![0x81; 32], x25519).is_err(),
+        "the suite is Ed25519 throughout; an X25519 key can never carry an assertion"
+    );
+    assert!(
+        WebauthnCredentialRegistrationV1::new(
+            subject,
+            vec![0x81; 32],
+            credential_public_cose_key(AUTHENTICATOR_SEED)
+        )
+        .is_ok(),
+        "the canonical OKP/Ed25519 form is the one the server accepts"
+    );
 }
 
 /// Der Endpunkt ist REGULAER signiert und keine der beiden Ausnahmen.

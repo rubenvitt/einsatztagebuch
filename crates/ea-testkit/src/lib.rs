@@ -258,6 +258,28 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Der oeffentliche Ed25519-Schluessel zu einem deklarierten Seed.
+///
+/// Die Ableitung steht hier, weil sie im Bestand an vier Stellen gebraucht
+/// wird und vier Kopien vier Gelegenheiten waeren, sie verschieden zu machen.
+#[must_use]
+pub fn ed25519_public_key(seed: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
+}
+
+/// Eine ROHE Ed25519-Signatur ueber `message`.
+///
+/// Die Testhaelfte zu [`ea_crypto::CanonicalPublicCoseKey::verify_ed25519_strict`]
+/// — und ausdruecklich KEIN Weg, im Bestand ohne Domaenenkonstante zu
+/// signieren: die einzige Nachricht ohne eigene Domaene ist die WebAuthn-
+/// Assertion, deren Domaenentrennung `authenticatorData` selbst traegt
+/// (`rpIdHash`). Diese Crate ist eine Testhilfe und wird von keinem
+/// Auslieferungsziel gezogen.
+#[must_use]
+pub fn ed25519_sign_raw(seed: &[u8; 32], message: &[u8]) -> [u8; 64] {
+    SigningKey::from_bytes(seed).sign(message).to_bytes()
+}
+
 // ---------------------------------------------------------------------------
 // Manifestmodell
 // ---------------------------------------------------------------------------

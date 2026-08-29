@@ -9,6 +9,7 @@
 
 use std::{path::Path, sync::Arc};
 
+use ea_sync_server::vault_blob::WebauthnRelyingPartyV1;
 use einsatzarchiv_server::{
     adapters::{
         clock::SystemClock, postgres::PostgresRepository, s3::S3ObjectStore,
@@ -81,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         repository.clone(),
         clock.clone(),
     ));
+    let web_origins = Arc::new(configuration.web_origins);
     let state = Arc::new(AppState {
         authority: configuration.sync_authority.clone(),
         clock,
@@ -88,9 +90,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         objects: objects.clone(),
         repository: repository.clone(),
         trust_authority: Arc::new(PostgresTrustAuthority::new(pool.clone(), objects)),
+        relying_party: WebauthnRelyingPartyV1::new(
+            web_origins.bundle_origin().to_owned(),
+            web_origins.relying_party_id(),
+        ),
     });
 
     let listener = TlsListener::bind(&configuration.bind_address, tls).await?;
-    serve(listener, router(state)).await?;
+    serve(listener, router(state, web_origins)).await?;
     Ok(())
 }

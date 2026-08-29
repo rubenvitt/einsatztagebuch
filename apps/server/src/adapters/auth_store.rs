@@ -14,9 +14,10 @@ use async_trait::async_trait;
 use ea_sync_server::{
     ChallengeSpendOutcome, ChallengeStore, CredentialRegistrationOutcome, DeviceRegistrationStore,
     PENDING_REGISTRATION_STATE_V1, PendingDeviceRequestV1, PendingRegistrationOutcome,
-    RepositoryError, RequestIdStore, WebauthnCredentialStore, WebauthnCredentialV1,
+    ReaderVaultBlobV1, RepositoryError, RequestIdStore, StoredWebauthnCredentialV1,
+    VaultBlobOutcome, VaultBlobStore, WebauthnCredentialStore, WebauthnCredentialV1,
 };
-use ea_types::{Hash32, OrganizationId, UnixMillis};
+use ea_types::{Hash32, OrganizationId, SubjectId, UnixMillis};
 use sqlx::Row;
 
 use crate::adapters::postgres::PostgresRepository;
@@ -243,5 +244,127 @@ impl WebauthnCredentialStore for PostgresRepository {
         } else {
             Ok(CredentialRegistrationOutcome::Conflict)
         }
+    }
+
+    async fn resolve(
+        &self,
+        organization_id: OrganizationId,
+        credential_id: &[u8],
+    ) -> Result<Option<StoredWebauthnCredentialV1>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT subject_id, public_key, signature_counter FROM webauthn_credentials \
+             WHERE organization_id = $1 AND credential_id = $2",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(credential_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let subject: Vec<u8> = row.get("subject_id");
+        let counter: i64 = row.get("signature_counter");
+        Ok(Some(StoredWebauthnCredentialV1 {
+            subject_id: SubjectId::try_from(subject.as_slice())
+                .map_err(|_| RepositoryError::Unavailable)?,
+            credential_public_cose_key: row.get("public_key"),
+            signature_counter: u32::try_from(counter).map_err(|_| RepositoryError::Unavailable)?,
+        }))
+    }
+
+    async fn advance_counter(
+        &self,
+        organization_id: OrganizationId,
+        credential_id: &[u8],
+        from: u32,
+        to: u32,
+    ) -> Result<bool, RepositoryError> {
+        // Compare-and-Set in EINER Anweisung: das `WHERE` auf den gelesenen
+        // Zaehler ist zugleich die Sperre. Zwei Abrufe mit derselben Assertion
+        // treffen nie beide eine Zeile.
+        let updated = sqlx::query(
+            "UPDATE webauthn_credentials SET signature_counter = $4 \
+             WHERE organization_id = $1 AND credential_id = $2 AND signature_counter = $3",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(credential_id)
+        .bind(i64::from(from))
+        .bind(i64::from(to))
+        .execute(self.pool())
+        .await
+        .map_err(|e| unavailable(&e))?;
+        Ok(updated.rows_affected() == 1)
+    }
+}
+
+#[async_trait]
+impl VaultBlobStore for PostgresRepository {
+    async fn store(
+        &self,
+        blob: ReaderVaultBlobV1,
+        max_per_subject: u64,
+    ) -> Result<VaultBlobOutcome, RepositoryError> {
+        // Decke und Einfuegung in EINER Anweisung. Getrennt gefuehrt liessen
+        // zwei gleichzeitige Ablagen die Decke gemeinsam ueberschreiten, weil
+        // beide dieselbe Zaehlung laesen.
+        let inserted = sqlx::query(
+            "INSERT INTO reader_vault_blobs (subject_id, blob_hash, ciphertext, stored_at_millis) \
+             SELECT $1, $2, $3, $4 \
+             WHERE (SELECT count(*) FROM reader_vault_blobs WHERE subject_id = $1) < $5 \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&blob.subject_id.as_bytes()[..])
+        .bind(&blob.blob_hash.as_bytes()[..])
+        .bind(&blob.ciphertext[..])
+        .bind(blob.stored_at.get())
+        .bind(i64::try_from(max_per_subject).map_err(|_| RepositoryError::Unavailable)?)
+        .execute(self.pool())
+        .await
+        .map_err(|e| unavailable(&e))?;
+        if inserted.rows_affected() == 1 {
+            return Ok(VaultBlobOutcome::Stored);
+        }
+
+        // Nichts eingefuegt: entweder lag die Adresse schon da — der
+        // idempotente Wiederholer — oder die Decke ist erreicht. Der Blobhash
+        // ist SHA-256 ueber die Bytes, also traegt dieselbe Adresse immer
+        // dieselben Bytes; ein Bytekonflikt kann hier nicht entstehen.
+        let existing = sqlx::query(
+            "SELECT 1 AS present FROM reader_vault_blobs WHERE subject_id = $1 AND blob_hash = $2",
+        )
+        .bind(&blob.subject_id.as_bytes()[..])
+        .bind(&blob.blob_hash.as_bytes()[..])
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| unavailable(&e))?;
+        if existing.is_some() {
+            Ok(VaultBlobOutcome::AlreadyStored)
+        } else {
+            Ok(VaultBlobOutcome::LimitReached)
+        }
+    }
+
+    async fn list_for_subject(
+        &self,
+        subject_id: SubjectId,
+    ) -> Result<Vec<Vec<u8>>, RepositoryError> {
+        // Nach dem Blobhash geordnet: die Antwort soll fuer denselben Bestand
+        // dieselbe sein, und eine Einfuegereihenfolge ist keine Ordnung.
+        //
+        // BEWUSST ohne `LIMIT`: die Decke steht in `store` und im Rahmen
+        // (`VaultBlobRetrievalResponseV1::new` weist mehr als
+        // `MAX_VAULT_BLOBS_PER_SUBJECT_V1` ab). Ein `LIMIT` hier schnitte
+        // einen Bestand, der die Decke doch gerissen hat, stillschweigend zu
+        // und lieferte eine unvollstaendige Antwort aus; der Rahmenfehler ist
+        // die fail-closed Antwort darauf.
+        let rows = sqlx::query(
+            "SELECT ciphertext FROM reader_vault_blobs WHERE subject_id = $1 ORDER BY blob_hash",
+        )
+        .bind(&subject_id.as_bytes()[..])
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| unavailable(&e))?;
+        Ok(rows.iter().map(|row| row.get("ciphertext")).collect())
     }
 }

@@ -31,15 +31,17 @@ pub mod receipt;
 pub mod reconcile;
 pub mod trust;
 pub mod validation;
+pub mod vault_blob;
 
 pub use models::{
     AppendOutcome, ChainHeadStateV1, CheckpointCommitV1, CheckpointIndexEntryV1, CommitDbCommand,
     CommitIdentityV1, CommittedDbState, CredentialRegistrationOutcome, DestructionRequestCommandV1,
     DestructionStateV1, EntryIndexEntryV1, ExportIndexEntryV1, GrantDeliveryV1, GrantIndexEntryV1,
     HistoricalGrantCommandV1, IndexedObjectV1, PENDING_REGISTRATION_STATE_V1,
-    PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, RegistryLineEntryV1,
-    RepositoryError, SecurityEventKindV1, SecurityEventV1, StagedObject, StoreError, StoredObject,
-    TrustEventCommandV1, TrustIndexOutcome, WebauthnCredentialV1, object_key, object_type_segment,
+    PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, ReaderVaultBlobV1,
+    RegistryLineEntryV1, RepositoryError, SecurityEventKindV1, SecurityEventV1, StagedObject,
+    StoreError, StoredObject, StoredWebauthnCredentialV1, TrustEventCommandV1, TrustIndexOutcome,
+    VaultBlobOutcome, WebauthnCredentialV1, object_key, object_type_segment,
 };
 pub use ports::{
     ActiveRegistryHeadV1, ArchiveExportDirectory, AuthorityError, ChallengeSpendOutcome,
@@ -47,5 +49,5 @@ pub use ports::{
     DeviceAuthorityDirectory, DeviceRegistrationStore, EntryDirectory, HistoricalGrantStore,
     ObjectStore, ObjectTypeDirectory, ReaderAckStore, RegistryHeadDirectory,
     RegistryHeadSelectionV1, RequestIdStore, SecurityEventSink, ServerClock, ServerSigner,
-    TrustEventStore, WebauthnCredentialStore,
+    TrustEventStore, VaultBlobStore, WebauthnCredentialStore,
 };

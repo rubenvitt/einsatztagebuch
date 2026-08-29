@@ -543,6 +543,59 @@ pub enum CredentialRegistrationOutcome {
     Conflict,
 }
 
+/// Ein eingetragenes Credential, wie der Abrufpfad es liest.
+///
+/// Er braucht drei Dinge und keines mehr: den `userHandle`, gegen den er den
+/// behaupteten stellt, den oeffentlichen Schluessel, gegen den er die Assertion
+/// prueft, und den Signaturzaehler, der streng steigen muss. Die `credentialId`
+/// steht nicht darin — sie war der Schluessel der Abfrage.
+#[derive(Clone, Eq, PartialEq)]
+pub struct StoredWebauthnCredentialV1 {
+    pub subject_id: SubjectId,
+    pub credential_public_cose_key: Vec<u8>,
+    pub signature_counter: u32,
+}
+
+impl fmt::Debug for StoredWebauthnCredentialV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StoredWebauthnCredentialV1(<bound>)")
+    }
+}
+
+/// Ein gewrappter Reader-Vault-Blob, wie er in die Tabelle geht.
+///
+/// `blob_hash` ist GERECHNET — SHA-256 ueber die exakten Chiffratbytes — und
+/// nicht behauptet. Der Blob liegt ausdruecklich NICHT im Object Store unter
+/// `<type>/<hex objectHash>`: dieser Namensraum gehoert den sechs
+/// Archivobjektarten.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ReaderVaultBlobV1 {
+    pub subject_id: SubjectId,
+    pub blob_hash: Hash32,
+    pub ciphertext: Vec<u8>,
+    pub stored_at: UnixMillis,
+}
+
+impl fmt::Debug for ReaderVaultBlobV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReaderVaultBlobV1(<bound>)")
+    }
+}
+
+/// Wie die Blobtabelle auf eine Ablage antwortet.
+///
+/// DREI Ausgaenge und nicht `bool`: create-if-absent unterscheidet den ersten
+/// Schreiber vom idempotenten Wiederholer, und die Decke je `subjectId` ist
+/// ein dritter, eigener Befund mit eigener HTTP-Abbildung.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultBlobOutcome {
+    Stored,
+    /// Genau diese Bytes lagen unter genau dieser `subjectId` bereits.
+    AlreadyStored,
+    /// Diese `subjectId` haelt schon so viele Blobs, wie sie halten darf.
+    LimitReached,
+}
+
 /// Ein geprueftes `.etb`, wie es in den Index geht.
 ///
 /// `registry_version` ist `Some` GENAU fuer ein `registryEvent`. Nur diese

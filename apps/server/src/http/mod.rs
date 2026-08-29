@@ -29,6 +29,7 @@ pub mod grants;
 pub mod objects;
 pub mod reader_acks;
 pub mod trust;
+pub mod vault_blobs;
 pub mod webauthn_credentials;
 
 use std::sync::Arc;
@@ -53,6 +54,7 @@ use ea_sync_server::{
     historical_grant::HistoricalGrantPorts,
     reader_sync::ReaderPorts,
     trust::TrustPorts,
+    vault_blob::{VaultPorts, WebauthnRelyingPartyV1},
 };
 
 use crate::adapters::{postgres::PostgresRepository, trust_authority::PostgresTrustAuthority};
@@ -80,6 +82,10 @@ pub struct AppState {
     pub objects: Arc<dyn ObjectStore>,
     pub repository: Arc<PostgresRepository>,
     pub trust_authority: Arc<PostgresTrustAuthority>,
+    /// Die Gegenstelle, gegen die eine WebAuthn-Assertion gestellt wird.
+    /// KONFIGURIERT wie [`Self::authority`] und aus demselben Grund: der
+    /// Aufrufer darf die Erwartung nicht setzen, gegen die er geprueft wird.
+    pub relying_party: WebauthnRelyingPartyV1,
 }
 
 impl AppState {
@@ -90,6 +96,16 @@ impl AppState {
             challenges: self.repository.as_ref(),
             request_ids: self.repository.as_ref(),
             directory: self.trust_authority.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn vault_ports(&self) -> VaultPorts<'_> {
+        VaultPorts {
+            clock: self.clock.as_ref(),
+            challenges: self.repository.as_ref(),
+            credentials: self.repository.as_ref(),
+            blobs: self.repository.as_ref(),
         }
     }
 

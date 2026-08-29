@@ -59,6 +59,15 @@ pub const ENV_SYNC_AUTHORITY: &str = "EA_SYNC_AUTHORITY";
 /// seine Security Events unter ihr, und die Ratenbegrenzung des
 /// Challenge-Endpunkts zaehlt je Organisation.
 pub const ENV_ORGANIZATION_ID: &str = "EA_ORGANIZATION_ID";
+/// Der getrennte Auslieferungs-Origin des Web-Bundles
+/// (`web-reader-design.md` §4.1, :70-75). Er ist der EINE lieferseitige
+/// Eintrag der CORS-Positivliste und zugleich der Origin, gegen den die
+/// `clientDataJSON` einer WebAuthn-Assertion gestellt wird.
+pub const ENV_WEB_BUNDLE_ORIGIN: &str = "EA_WEB_BUNDLE_ORIGIN";
+/// Weitere zugelassene Origins, durch Komma getrennt. LEER ist der Normalfall.
+/// Ein `*` ist an dieser Stelle kein Platzhalter, sondern ein
+/// Konfigurationsfehler.
+pub const ENV_WEB_ADDITIONAL_ORIGINS: &str = "EA_WEB_ADDITIONAL_ORIGINS";
 pub const ENV_SERVER_SIGNING_KEY: &str = "EA_SERVER_SIGNING_KEY_HEX";
 pub const ENV_SERVER_CERTIFICATE_HASH: &str = "EA_SERVER_CERTIFICATE_HASH_HEX";
 pub const ENV_SERVER_KEY_GENERATION: &str = "EA_SERVER_KEY_GENERATION";
@@ -104,6 +113,141 @@ pub struct ObjectStoreConfig {
     pub secret_access_key: String,
 }
 
+/// Die Positivliste der Origins, die diesen Server ueber den Browser erreichen
+/// duerfen.
+///
+/// # Warum es diese Flaeche ueberhaupt gibt
+///
+/// `web-reader-design.md` §4.1 (:70-75) verlangt einen Auslieferungs-Origin,
+/// der vom Sync-Server GETRENNT ist — der Server ist damit nicht Bestandteil
+/// des Vertrauenspfades fuer ausgefuehrten Code. Ein getrennter Origin macht
+/// jeden Zugriff des Bundles cross-origin, also entscheidet CORS, ob der
+/// Browser den Request ueberhaupt absetzen darf.
+///
+/// # Was sie NICHT ist
+///
+/// Sie ist keine Authentisierung. Die RFC-9421-Abdeckung von `@authority` und
+/// `@target-uri` bleibt davon unberuehrt: der Browser signiert ueber die
+/// Ziel-URI des Sync-Servers und nicht ueber seinen eigenen Origin. CORS
+/// entscheidet, ob der Browser fragen darf; die Signatur entscheidet, ob der
+/// Server antwortet.
+///
+/// # Drei Festlegungen
+///
+/// 1. Eine POSITIVLISTE, nie ein `*`. Ein Platzhalter wird abgewiesen, statt
+///    still zu einer offenen Flaeche zu werden.
+/// 2. `Access-Control-Allow-Credentials` bleibt AUS. Der Abrufendpunkt traegt
+///    seine Autoritaet im Koerper — eine WebAuthn-Assertion —, nicht in einem
+///    umgebenden Cookie; ein `true` an dieser Stelle laedt genau die
+///    Ambient-Authority ein, die es hier nicht geben soll.
+/// 3. Ein nicht gelisteter Origin bekommt UEBERHAUPT keinen
+///    `Access-Control-Allow-Origin`, nicht etwa einen mit fremdem Wert.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WebOriginPolicy {
+    bundle_origin: String,
+    relying_party_id: String,
+    allowed_origins: Vec<String>,
+}
+
+impl WebOriginPolicy {
+    /// Baut die Liste — vollstaendig oder gar nicht.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`], wenn ein Eintrag kein `https`-Origin ohne Pfad
+    /// ist oder ein Platzhalter darin steht.
+    pub fn new(bundle_origin: String, additional: &[String]) -> Result<Self, ConfigError> {
+        let relying_party_id = relying_party_id_of(&bundle_origin, ENV_WEB_BUNDLE_ORIGIN)?;
+        let mut allowed_origins = Vec::with_capacity(additional.len().saturating_add(1));
+        allowed_origins.push(bundle_origin.clone());
+        for origin in additional {
+            let _ = relying_party_id_of(origin, ENV_WEB_ADDITIONAL_ORIGINS)?;
+            if !allowed_origins.iter().any(|known| known == origin) {
+                allowed_origins.push(origin.clone());
+            }
+        }
+        Ok(Self {
+            bundle_origin,
+            relying_party_id,
+            allowed_origins,
+        })
+    }
+
+    /// Liest die Liste aus der Umgebung.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Missing`] ohne Bundle-Origin, [`ConfigError::Invalid`]
+    /// bei einem unbrauchbaren Eintrag.
+    pub fn from_environment() -> Result<Self, ConfigError> {
+        let additional: Vec<String> = optional(ENV_WEB_ADDITIONAL_ORIGINS, "")
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        Self::new(required(ENV_WEB_BUNDLE_ORIGIN)?, &additional)
+    }
+
+    /// Der getrennte Auslieferungs-Origin des Bundles.
+    #[must_use]
+    pub fn bundle_origin(&self) -> &str {
+        &self.bundle_origin
+    }
+
+    /// Die `rpId` der WebAuthn-Assertion: der Hostname des Bundle-Origins.
+    ///
+    /// ABGELEITET und nicht eigens konfiguriert — zwei Werte, die
+    /// zusammenpassen muessen, sind zwei Gelegenheiten, sie auseinanderlaufen
+    /// zu lassen.
+    #[must_use]
+    pub fn relying_party_id(&self) -> &str {
+        &self.relying_party_id
+    }
+
+    /// Steht dieser Origin auf der Liste?
+    #[must_use]
+    pub fn allows(&self, origin: &str) -> bool {
+        self.allowed_origins.iter().any(|known| known == origin)
+    }
+}
+
+impl std::fmt::Debug for WebOriginPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WebOriginPolicy(<bound>)")
+    }
+}
+
+/// Der Hostname eines `https`-Origins, zugleich seine Pruefung.
+///
+/// Ein Origin ist `https://host` oder `https://host:port` und traegt KEINEN
+/// Pfad. `http` kommt nicht in Frage: §13.1 laesst nur TLS 1.3, und ein
+/// Klartext-Origin waere die Ausnahme davon, die es nicht gibt.
+///
+/// `name` wird DURCHGEREICHT und nicht fest gesetzt: die Umgebungsnamen stehen
+/// in dieser Datei, damit eine Fehlermeldung denselben Namen nennt wie die
+/// Dokumentation — ein Tippfehler in der Zusatzliste darf nicht den
+/// Bundle-Origin beschuldigen.
+fn relying_party_id_of(origin: &str, name: &'static str) -> Result<String, ConfigError> {
+    let host_and_port = origin
+        .strip_prefix("https://")
+        .ok_or(ConfigError::Invalid(name))?;
+    if host_and_port.is_empty()
+        || host_and_port.contains('/')
+        || host_and_port.contains('*')
+        || host_and_port.contains(char::is_whitespace)
+    {
+        return Err(ConfigError::Invalid(name));
+    }
+    let host = host_and_port
+        .rsplit_once(':')
+        .map_or(host_and_port, |(host, _)| host);
+    if host.is_empty() {
+        return Err(ConfigError::Invalid(name));
+    }
+    Ok(host.to_owned())
+}
+
 pub struct ServerConfiguration {
     pub bind_address: String,
     pub sync_authority: String,
@@ -119,6 +263,7 @@ pub struct ServerConfiguration {
     pub database_url: String,
     pub migrations_directory: PathBuf,
     pub object_store: ObjectStoreConfig,
+    pub web_origins: WebOriginPolicy,
 }
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
@@ -170,6 +315,7 @@ impl ServerConfiguration {
                 access_key_id: required(ENV_OBJECT_STORE_ACCESS_KEY_ID)?,
                 secret_access_key: required(ENV_OBJECT_STORE_SECRET_ACCESS_KEY)?,
             },
+            web_origins: WebOriginPolicy::from_environment()?,
         })
     }
 

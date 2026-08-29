@@ -6,27 +6,53 @@
 //! [`crate::config`] steht. Ein Klartext-Lauscher existiert nicht — auch nicht
 //! hinter einem Schalter, weil ein Schalter irgendwann umgelegt wird.
 //!
-//! Die Routentafel traegt GENAU die fuenfzehn Endpunkte, die es heute gibt.
-//! Die uebrigen zwei der siebzehn aus `design.md` §13.2 — `PUT
-//! /v1/vault-blobs` und `POST /v1/vault-blobs/retrievals` — sind NICHT
-//! gemountet; ein nicht gemounteter Endpunkt antwortet mit `404` und kann
-//! nicht versehentlich halb fertig erreichbar sein.
+//! Die Routentafel traegt GENAU die siebzehn Endpunkte aus `design.md` §13.2 —
+//! seit dieser Aufgabe vollstaendig.
+//!
+//! # Die eine signaturfreie Routenzeile
+//!
+//! `POST /v1/vault-blobs/retrievals` steht ausdruecklich SEPARAT
+//! (`web-reader-design.md` §6.4.1, :213-216): der Browser, der ihn ruft, hat
+//! seinen Vault noch nicht entsperrt und kommt deshalb an seinen
+//! Ed25519-Schluessel gar nicht heran. Sein Handler ruft
+//! [`ea_sync_server::auth::authenticate`] NICHT — und weil dieser Server
+//! innerhalb der Handler authentisiert und nicht in einer vorgelagerten
+//! Schicht, IST das bereits der Zweig ohne Pruefer und ohne
+//! `AuthenticatedDevice`-Extraktor. Es gibt keine Schicht, an der
+//! vorbeigeroutet werden muesste, und deshalb auch keine, die jemand
+//! versehentlich fuer diesen Pfad abschalten koennte.
+//!
+//! Das ist NICHT die anders geroutete Geraeteregistrierung: die ist mit dem
+//! BEANTRAGTEN Schluessel signiert und liefert
+//! `AuthenticatedDevice::ProofOfPossession`. Hier existiert ueberhaupt keine
+//! Geraeteidentitaet.
+//!
+//! # Die CORS-Schicht
+//!
+//! Sie liegt ueber dem GESAMTEN Router (`crate::cors`), sieht den Request also
+//! vor der Wegwahl und kann den Vorabflug beantworten; eine `OPTIONS`-Route
+//! gibt es nicht.
 
 use std::sync::Arc;
 
 use axum::{
     Router,
     extract::connect_info::Connected,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use ea_sync_protocol::EndpointV1;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
-use crate::http::{
-    AppState, challenges, checkpoints, destructions, device_registrations, entries, entry_commits,
-    exports, grants, objects, reader_acks, trust, webauthn_credentials,
+use crate::{
+    config::WebOriginPolicy,
+    cors::apply_cors,
+    http::{
+        AppState, challenges, checkpoints, destructions, device_registrations, entries,
+        entry_commits, exports, grants, objects, reader_acks, trust, vault_blobs,
+        webauthn_credentials,
+    },
 };
 
 /// Die Routentafel des Servers.
@@ -37,7 +63,7 @@ use crate::http::{
 /// nicht als Zeichenketten hier, sondern kommen aus
 /// [`EndpointV1::path_template`] — eine abweichende Route waere sonst ein
 /// Tippfehler, den nur ein Klient bemerkte.
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router(state: Arc<AppState>, web_origins: Arc<WebOriginPolicy>) -> Router {
     Router::new()
         .route(
             EndpointV1::AuthChallenges.path_template(),
@@ -50,6 +76,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             EndpointV1::WebauthnCredentials.path_template(),
             post(webauthn_credentials::register_credential),
+        )
+        .route(
+            EndpointV1::VaultBlobs.path_template(),
+            put(vault_blobs::put_vault_blob),
+        )
+        // Die eine signaturfreie Zeile. Ihr Handler ruft `authenticate` nicht.
+        .route(
+            EndpointV1::VaultBlobRetrievals.path_template(),
+            post(vault_blobs::create_vault_blob_retrieval),
         )
         .route(
             EndpointV1::TrustRegistry.path_template(),
@@ -100,6 +135,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(destructions::read_destruction),
         )
         .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            web_origins,
+            apply_cors,
+        ))
 }
 
 /// Ein Lauscher, der ausschliesslich TLS-Verbindungen herausgibt.

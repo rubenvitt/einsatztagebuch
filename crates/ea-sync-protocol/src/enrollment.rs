@@ -107,6 +107,17 @@ impl fmt::Debug for ChallengeRequestV1 {
 /// `credentialId` und den oeffentlichen COSE-Schluessel des Authenticators —
 /// keinen Anzeigenamen, keine Kennung eines Menschen und keinen fachlichen
 /// Wert.
+///
+/// # Der Schluessel wird GEPARST
+///
+/// `credential_public_cose_key` ist die kanonische COSE-Karte dieses
+/// Arbeitsbereichs ([`ea_crypto::CanonicalPublicCoseKey`]) und darin GENAU der
+/// OKP-Ed25519-Arm. §6.4.1 nennt keinen Algorithmus, die Suite ist
+/// durchgehend Ed25519 (`design.md` §13.1, `alg="ed25519"`), und die Assertion
+/// muss spaeter gegen genau diesen Schluessel tragen — ein Schluessel, den der
+/// Server nicht lesen kann, ist deshalb schon bei der Aufnahme ein Befund und
+/// keine Zeile. Der Web-Reader normalisiert den `credentialPublicKey` seines
+/// Authenticators vor der Registrierung in diese Form.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WebauthnCredentialRegistrationV1 {
     subject_id: SubjectId,
@@ -123,8 +134,18 @@ impl WebauthnCredentialRegistrationV1 {
     ) -> Result<Self, SyncProtocolError> {
         if credential_id.len() < MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1
             || credential_id.len() > MAX_WEBAUTHN_CREDENTIAL_ID_BYTES_V1
-            || credential_public_cose_key.is_empty()
         {
+            return Err(SyncProtocolError::FrameShape);
+        }
+        // Der oeffentliche Schluessel wird HIER geparst und nicht erst beim
+        // Abruf. Ein Credential, dessen Schluessel keine gueltige kanonische
+        // OKP-Ed25519-Karte ist, koennte nie eine Assertion tragen; ihn
+        // ungeprueft aufzunehmen legte eine Zeile an, die spaeter nur noch
+        // fail-closed abweisen kann.
+        if !matches!(
+            ea_crypto::CanonicalPublicCoseKey::from_deterministic_cbor(&credential_public_cose_key),
+            Ok(ea_crypto::CanonicalPublicCoseKey::Ed25519(_))
+        ) {
             return Err(SyncProtocolError::FrameShape);
         }
         let mut exact = Vec::with_capacity(128);
