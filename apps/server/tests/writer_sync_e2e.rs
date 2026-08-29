@@ -20,7 +20,7 @@
 //! `SyncClient` mit dem echten `hyper`-Transport, und die Quittung, die
 //! zurueckkommt, ist die, die der Server gebildet und signiert hat.
 //!
-//! # Die zwei Zusagen
+//! # Die drei Zusagen
 //!
 //! 1. `design.md`:1584 — `synchronisiert` erst, wenn die vom VOLLEN
 //!    Verifizierer bestaetigte Quittung in der lokalen Archivkomponente liegt.
@@ -28,6 +28,9 @@
 //!    same Receipt": die Antwort geht verloren, NACHDEM der Server committet
 //!    hat; der Wiederanlauf trifft auf denselben Commit, bekommt dieselben
 //!    Quittungsbytes und legt GENAU EINE Quittung ab.
+//! 3. Und die Gegenprobe: signiert der Lauscher unter einem Zertifikat, das
+//!    die Linie NICHT fuehrt, wird seine — sonst tadellose — Quittung
+//!    fail-closed abgewiesen und erreicht den Bestand nie.
 
 mod common;
 
@@ -372,60 +375,24 @@ fn receipt_paths(archive: &LocalArchive) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Der Zeuge
+// Die zwei Zeugen
 // ---------------------------------------------------------------------------
 
-/// Der ECHTE Weg bis an das Quittungstor — und die fail-closed Abweisung davor.
-///
-/// # Was dieser Zeuge beweist
-///
-/// 1. Der lokale Bestand, aus committeten Bytes dieses Abschlusses gebaut,
-///    VERIFIZIERT: `verify_archive` waehlt einen Registrierungskopf und fuehrt
-///    den Eintrag als `Valid`. (Die Stufe-2-Writer-Fixture kann das nicht —
-///    Begruendung im Modulkopf.)
-/// 2. Der echte `SyncClient` mit dem echten `hyper`-Transport signiert nach
-///    RFC 9421, holt eine frische Challenge und bringt den Commit beim echten
-///    Server durch: `200`.
-/// 3. Geht die Antwort verloren, ist der Wiederanlauf IDEMPOTENT: derselbe
-///    Rumpf, und der Server liefert BYTEIDENTISCH dieselbe Quittung unter
-///    `idempotentReplay` — die Zusage aus Schritt 4 des Briefes, auf der
-///    Serverseite gemessen.
-/// 4. Und der Klient legt sie trotzdem NICHT ab: die Kulisse traegt kein
-///    Zertifikat der Art `ServerReceipt`, also bestaetigt Gate `receipt` die
-///    Quittung nicht, und `synchronisiert` bleibt aus. Fail-closed gegen eine
-///    ECHTE Serverquittung — schaerfer als gegen eine gefaelschte.
-///
-/// # Was er NICHT beweist, und warum
-///
-/// Den letzten Schritt: verifizierte Quittung abgelegt, Zustand
-/// `synchronisiert`. Er ist an dieser Kulisse unerreichbar, und die Ursache ist
-/// GEMESSEN und benannt: `trust_closure::build_with` stellt Zertifikate der
-/// Arten `Writer`, `Reader`, `RecoveryRecipient`, `HistoricalGrantAuthority`
-/// und `KeyApprover` aus — KEINES der Art `ServerReceipt`. Der Lauscher
-/// signiert seine Quittungen dagegen mit `READ_SERVER_SECRET` unter dem
-/// SYNTHETISCHEN Zertifikatshash `READ_SERVER_CERTIFICATE_HASH` (`[0x52; 32]`),
-/// den kein Trust-Objekt der Linie fuehrt. `VerificationContext::receipt`
-/// verlangt die Capability `serverReceipt`, und `ea_trust::verify_receipt_time`
-/// loest den Signierer gegen den gewaehlten Kopf auf — der Befund lautet
-/// deshalb `EA-VERIFY-RECEIPT-UNTRUSTED-TIME`, und zwar fuer JEDE Quittung,
-/// die diese Kulisse ausstellen kann.
+/// Der ganze Weg: Commit, verlorene Antwort, idempotente Wiedergabe,
+/// verifizierte Quittung, `synchronisiert`.
 #[tokio::test]
-async fn a_real_server_receipt_is_replayed_idempotently_and_refused_without_its_certificate() {
+async fn a_server_receipt_is_verified_persisted_and_reaches_synchronized() {
     common::install_crypto_provider();
     let database = common::fresh_database().await;
     let ready = common::stand_up_read_server(&database, NOW_MILLIS, false).await;
     let (archive, _entry) = build_local_archive(&ready.closure);
 
-    // Der lokale Bestand VERIFIZIERT — das ist die Vorbedingung, an der die
-    // Stufe-2-Fixture scheitert, und ohne sie misst alles Weitere nichts.
+    // Der lokale Bestand VERIFIZIERT schon vor dem Lauf — das ist die
+    // Vorbedingung, an der die Stufe-2-Fixture scheitert, und ohne sie misst
+    // alles Weitere nichts.
     let anchor =
         ea_trust::decode_trust_anchor(&archive.anchor_bytes).expect("der Anker muss dekodieren");
-    let before = ea_verify::verify_archive(
-        &archive.backend.as_archive_source(),
-        &anchor,
-        ea_verify::VerifyOptions::new(ea_types::UnixMillis::new(NOW_MILLIS)),
-    )
-    .expect("der Verifikationslauf muss ein Ergebnis liefern");
+    let before = verify(&archive, &anchor);
     assert_eq!(
         before.registry_versions().len(),
         1,
@@ -438,13 +405,22 @@ async fn a_real_server_receipt_is_replayed_idempotently_and_refused_without_its_
                 && result.result() == ea_verify::ObjectResultKindV1::Valid),
         "der committete Eintrag MUSS gueltig sein"
     );
+    assert!(
+        before
+            .object_results()
+            .all(|result| result.server_confirmation()
+                == ea_verify::ServerConfirmationV1::NotServerConfirmed),
+        "und er ist NOCH NICHT serverbestaetigt"
+    );
     assert!(receipt_paths(&archive).is_empty());
 
     let transport = Arc::new(DropsTheFirstResponse::new(common::hyper_transport(
         &ready.server,
     )));
 
-    // Erster Anlauf: der Server nimmt an, die Antwort geht verloren.
+    // Erster Anlauf: der Server nimmt an, die Antwort geht verloren. Nichts
+    // wird abgelegt — eine nie empfangene Quittung darf den Bestand nicht
+    // erreichen.
     let first = client(
         &archive,
         &ready.closure,
@@ -457,12 +433,13 @@ async fn a_real_server_receipt_is_replayed_idempotently_and_refused_without_its_
     .expect("ein Leitungsabriss ist ein ZUSTAND und kein Fehler");
     assert_eq!(first.pushed(), 0);
     assert_ne!(first.status(), SyncStatus::Synchronized);
+    assert!(receipt_paths(&archive).is_empty());
 
     // Zweiter Anlauf. Die Uhr geht ueber den gebuchten Backoff hinaus, aber um
     // WENIGER als eine Sekunde: sonst wanderte die `created`-Sekunde der
     // RFC-9421-Signatur vor die Uhr des Servers, und der Request scheiterte an
     // seinem Signaturfenster statt am Kettenzustand.
-    let refused = client(
+    let second = client(
         &archive,
         &ready.closure,
         &ready.server.authority,
@@ -471,16 +448,26 @@ async fn a_real_server_receipt_is_replayed_idempotently_and_refused_without_its_
     )
     .push_pending(4)
     .await
-    .expect_err("ohne Serverquittungszertifikat MUSS die Quittung abgewiesen werden");
-    assert_eq!(refused.code(), "EA-SYNC-RECEIPT-INVALID");
+    .expect("der Wiederanlauf muss tragen");
+    assert_eq!(second.pushed(), 1);
+    assert_eq!(second.outstanding(), 0);
+    assert_eq!(second.status(), SyncStatus::Synchronized);
+    assert_eq!(second.detail_cause(), None);
+
+    // GENAU EINE Quittung, unter ihrem Objekthash, mit den Bytes des Servers.
+    let paths = receipt_paths(&archive);
+    assert_eq!(paths.len(), 1, "eine Quittung, nicht zwei: {paths:?}");
+    let stored = archive
+        .backend
+        .read_for_test(&paths[0])
+        .expect("die abgelegte Quittung muss lesbar sein");
     assert!(
-        receipt_paths(&archive).is_empty(),
-        "eine unbestaetigte Quittung darf den Bestand NIE erreichen"
+        paths[0].contains(&hex::encode(ea_crypto::object_hash(&stored).as_bytes())),
+        "die Adresse traegt den Objekthash der Quittung"
     );
 
-    // Der Server hat BEIDE Male angenommen, und beim zweiten Mal als
-    // WIEDERGABE — mit byteidentischer Quittung. Das ist Schritt 4 des
-    // Briefes, auf der Serverseite gemessen.
+    // Der Server hat BEIDE Male angenommen, das zweite Mal als WIEDERGABE —
+    // mit byteidentischer Quittung. Das ist Schritt 4 des Briefes.
     assert_eq!(transport.commit_calls(), 2);
     let answers = transport.receipts_from_the_server();
     let accepted = ea_sync_protocol::EntryCommitResponseV1::decode(&answers[0])
@@ -499,47 +486,227 @@ async fn a_real_server_receipt_is_replayed_idempotently_and_refused_without_its_
     );
     assert_eq!(
         accepted.outcome(),
-        ea_sync_protocol::EntryCommitOutcome::Accepted,
-        "der erste Anlauf ist der Commit"
-    );
-    assert_ne!(
-        answers[0], answers[1],
-        "und die Rahmen unterscheiden sich GENAU im Ausgang"
-    );
-    let bodies = transport.commit_bodies();
-    assert_eq!(
-        bodies[0], bodies[1],
-        "und auf denselben Rumpf — die Warteschlange entsteht jedes Mal neu aus denselben committeten Bytes"
+        ea_sync_protocol::EntryCommitOutcome::Accepted
     );
     assert_eq!(
         replay.outcome(),
         ea_sync_protocol::EntryCommitOutcome::IdempotentReplay,
         "der zweite Anlauf ist eine WIEDERGABE und kein zweiter Commit"
     );
+    assert_eq!(
+        stored.as_slice(),
+        replay.receipt_bytes(),
+        "abgelegt sind exakt die Bytes des Servers"
+    );
+    let bodies = transport.commit_bodies();
+    assert_eq!(
+        bodies[0], bodies[1],
+        "und derselbe Rumpf — die Warteschlange entsteht jedes Mal neu aus denselben committeten Bytes"
+    );
 
-    // Und der Grund der Abweisung ist GENAU der benannte — nicht irgendeiner.
-    archive
-        .backend
-        .materialize_for_test("receipts/candidate.esr", replay.receipt_bytes());
-    let after = ea_verify::verify_archive(
-        &archive.backend.as_archive_source(),
-        &anchor,
-        ea_verify::VerifyOptions::new(ea_types::UnixMillis::new(NOW_MILLIS)),
-    )
-    .expect("der Verifikationslauf muss ein Ergebnis liefern");
+    // Der Bestand traegt die Bestaetigung jetzt SELBST: ein Verifikationslauf
+    // ueber ihn allein fuehrt den Eintrag als serverbestaetigt. Genau das ist
+    // die Bedingung, an der `design.md`:1584 `synchronisiert` bindet.
+    let after = verify(&archive, &anchor);
     assert!(
         after
             .signature_errors()
-            .any(|error| error.code() == "EA-VERIFY-RECEIPT-UNTRUSTED-TIME"),
-        "der Befund ist der fehlende Serverquittungs-Signierer"
+            .all(|error| error.code() != "EA-VERIFY-RECEIPT-UNTRUSTED-TIME"),
+        "die Quittung traegt einen Signierer, den die Linie fuehrt"
     );
     assert!(
         after
             .object_results()
-            .all(|result| result.server_confirmation()
-                == ea_verify::ServerConfirmationV1::NotServerConfirmed),
-        "ohne Zertifikat wird KEIN Eintrag serverbestaetigt"
+            .any(|result| result.object_hash() == archive.entry_object_hash
+                && result.result() == ea_verify::ObjectResultKindV1::Valid
+                && result.server_confirmation()
+                    == ea_verify::ServerConfirmationV1::ServerConfirmed),
+        "der Eintrag MUSS serverbestaetigt sein"
+    );
+
+    // Und ein dritter Lauf hat nichts mehr zu tun: die Ableitung erkennt die
+    // GEPRUEFTE Quittung wieder und schickt den Eintrag nicht noch einmal.
+    let third = client(
+        &archive,
+        &ready.closure,
+        &ready.server.authority,
+        NOW_MILLIS + 800,
+        Arc::clone(&transport) as Arc<dyn SyncTransportV1>,
+    )
+    .push_pending(4)
+    .await
+    .expect("der dritte Lauf muss tragen");
+    assert_eq!(third.pushed(), 0);
+    assert_eq!(third.outstanding(), 0);
+    assert_eq!(third.status(), SyncStatus::Synchronized);
+    assert_eq!(
+        transport.commit_calls(),
+        2,
+        "ein erledigter Eintrag geht nicht erneut auf die Leitung"
     );
 
     database.cleanup().await;
+}
+
+/// Die GEGENPROBE: eine tadellose Quittung unter einem Zertifikat, das die
+/// Linie nicht fuehrt, wird fail-closed abgewiesen.
+///
+/// Der Lauscher ist derselbe, der Abschluss ist derselbe, der Commit gelingt
+/// mit `200` — nur sein Signaturschluessel und dessen Zertifikatshash stehen in
+/// keinem Trust-Objekt. `VerificationContext::receipt` verlangt die Capability
+/// `serverReceipt`, und `ea_trust::verify_receipt_time` loest den Signierer
+/// gegen den gewaehlten Kopf auf; der Befund ist deshalb
+/// `EA-VERIFY-RECEIPT-UNTRUSTED-TIME`, und der Klient legt NICHTS ab.
+///
+/// Schaerfer als eine selbstgebaute Faelschung: hier ist die Quittung echt,
+/// korrekt gerahmt und korrekt signiert — sie ist nur nicht ZUGEORDNET.
+#[tokio::test]
+async fn a_receipt_from_an_unlisted_server_key_is_refused_and_never_stored() {
+    common::install_crypto_provider();
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server_with_server_key(
+        &database,
+        NOW_MILLIS,
+        false,
+        Some((
+            [0x9b; 32],
+            ea_types::CertificateHash::try_from(&[0x9c_u8; 32][..]).expect("32 bytes"),
+        )),
+    )
+    .await;
+    let (archive, _entry) = build_local_archive(&ready.closure);
+
+    let transport: Arc<dyn SyncTransportV1> = Arc::new(common::hyper_transport(&ready.server));
+    let refused = client(
+        &archive,
+        &ready.closure,
+        &ready.server.authority,
+        NOW_MILLIS,
+        transport,
+    )
+    .push_pending(4)
+    .await
+    .expect_err("eine nicht zugeordnete Quittung MUSS abgewiesen werden");
+    assert_eq!(refused.code(), "EA-SYNC-RECEIPT-INVALID");
+    assert!(
+        receipt_paths(&archive).is_empty(),
+        "eine unbestaetigte Quittung darf den Bestand NIE erreichen"
+    );
+
+    database.cleanup().await;
+}
+
+/// Wartet das NETZARCHIV, entsteht lokal KEINE Quittung.
+///
+/// Die Reihenfolge aus `client.rs`: `design.md`:1584 verlangt die Quittung in
+/// der lokalen Archivkomponente UND — sofern konfiguriert — im Netzarchiv.
+/// Beide sind Bedingung, aber nur EINE kann der Zeuge sein, und es muss die
+/// SPAETERE sein: die lokale Quittung ist das, woran die Warteschlange den
+/// Eintrag als erledigt erkennt. Laege sie zuerst und bliebe die
+/// Netzpublikation aufgeschoben, naehme der naechste Lauf den Eintrag aus der
+/// Warteschlange, obwohl das Netzarchiv sie nie bekommen hat.
+///
+/// Gemessen wird deshalb der harte Fall: das Netzziel ist NICHT erreichbar,
+/// der Server hat die Quittung laengst ausgestellt — und lokal liegt trotzdem
+/// nichts.
+#[tokio::test]
+async fn a_waiting_network_archive_leaves_no_local_receipt_behind() {
+    common::install_crypto_provider();
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server(&database, NOW_MILLIS, false).await;
+    let (archive, _entry) = build_local_archive(&ready.closure);
+
+    let target = Arc::new(UnreachableTarget);
+    let queue = ea_archive_fs::PublicationQueue::new(
+        Box::new(UnreachableTarget),
+        network_profile(),
+        &ea_archive::BoundArchiveProfilePolicyV1::from_policy(&policy_allowing(&network_profile())),
+    )
+    .expect("die Warteschlange des Netzprofils muss stehen");
+
+    let transport: Arc<dyn SyncTransportV1> = Arc::new(common::hyper_transport(&ready.server));
+    let outcome = SyncClient::new(SyncClientConfigV1 {
+        backend: Arc::clone(&archive.backend),
+        anchor_bytes: archive.anchor_bytes.clone(),
+        network: Some(Arc::new(queue)),
+        transport,
+        signer: Arc::new(common::request_signer(CLIENT_SEED)),
+        organization_id: ready.closure.organization_id,
+        chain_id: ready.closure.chain_id,
+        authority: ready.server.authority.clone(),
+        database: Arc::clone(&archive.database),
+        retry: ea_types::RetryConfig::new(3, 10, 100).expect("bounds are non-zero"),
+        max_resume_attempts: 3,
+        observed_now: ea_types::UnixMillis::new(NOW_MILLIS),
+    })
+    .expect("der Klient muss stehen")
+    .push_pending(4)
+    .await;
+
+    // Kein Serverupload, kein lokaler Abzug — und `synchronisiert` schon gar
+    // nicht.
+    match outcome {
+        Ok(summary) => {
+            assert_ne!(summary.status(), SyncStatus::Synchronized);
+            assert_eq!(summary.pushed(), 0);
+        }
+        Err(error) => assert_eq!(error.code(), "EA-SYNC-RECEIPT-NOT-PERSISTED"),
+    }
+    assert!(
+        receipt_paths(&archive).is_empty(),
+        "solange das Netzarchiv wartet, entsteht LOKAL keine Quittung"
+    );
+    let _ = target;
+
+    database.cleanup().await;
+}
+
+/// Ein Netzziel, das nie erreichbar ist.
+struct UnreachableTarget;
+
+impl ea_archive_fs::PublicationTargetV1 for UnreachableTarget {
+    fn is_connected(&self) -> bool {
+        false
+    }
+
+    fn reconnect(&self) {}
+
+    fn publish_one(
+        &self,
+        _relative: &ea_archive::ArchivePath,
+        _bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        Err(ea_archive::ArchiveBackendError::Io)
+    }
+}
+
+/// Das kontrollierte Netzprofil dieses Ziels.
+fn network_profile() -> ArchiveBackendProfileV1 {
+    ArchiveBackendProfileV1::ControlledNetworkPath(ea_archive::ControlledNetworkProfileV1 {
+        filesystem_row_id: "writer-sync-e2e-net".to_owned(),
+        protocol_id: "smb3".to_owned(),
+        server_product: "fixture-nas".to_owned(),
+        server_version: "1.0.0".to_owned(),
+        mount_options: vec!["nobrl".to_owned(), "vers=3.1.1".to_owned()],
+        failover_config_id: "fixture-failover".to_owned(),
+        capability_test_vector_id: "cap-v1-e2e-net".to_owned(),
+        queue_max_objects: 64,
+        queue_max_bytes: 16 * 1024 * 1024,
+        resume_backoff_initial_ms: 10,
+        resume_backoff_max_ms: 100,
+        resume_max_attempts: 3,
+    })
+}
+
+/// Der volle Verifizierer ueber genau diesen Bestand.
+fn verify(
+    archive: &LocalArchive,
+    anchor: &ea_trust::TrustAnchorV1,
+) -> ea_verify::VerificationReportV1 {
+    ea_verify::verify_archive(
+        &archive.backend.as_archive_source(),
+        anchor,
+        ea_verify::VerifyOptions::new(ea_types::UnixMillis::new(NOW_MILLIS)),
+    )
+    .expect("der Verifikationslauf muss ein Ergebnis liefern")
 }

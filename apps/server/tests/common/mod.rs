@@ -851,8 +851,13 @@ pub async fn fresh_challenge(
 
 /// Innerhalb des `notBefore`/`notAfter`-Fensters aller Koepfe.
 pub const READ_SERVER_NOW_MILLIS: i64 = 1_000;
-pub const READ_SERVER_SECRET: [u8; 32] = [0x51; 32];
-pub const READ_SERVER_CERTIFICATE_HASH: [u8; 32] = [0x52; 32];
+/// Der Signaturschluessel des Lauschers.
+///
+/// DIESELBE Konstante, die im `ServerReceipt`-Zertifikat des Abschlusses
+/// steht — eine zweite Kopie daneben waere eine zweite Wahrheit ueber den
+/// Schluessel, und die Quittungen des Lauschers waeren wieder nicht
+/// bestaetigbar, sobald die zwei auseinanderlaufen.
+pub const READ_SERVER_SECRET: [u8; 32] = trust_closure::SERVER_SEED;
 /// Der Kopf, auf dem die Kette steht, bevor der erste Eintrag committet wird.
 pub const READ_SEEDED_HEAD_ENTRY_HASH: [u8; 32] = [0x77; 32];
 const READ_SEEDED_HEAD_ACCEPTED_AT: i64 = 500;
@@ -890,6 +895,29 @@ pub async fn stand_up_read_server(
     now_millis: i64,
     with_grant_authorities: bool,
 ) -> ReadyServer {
+    stand_up_read_server_with_server_key(database, now_millis, with_grant_authorities, None).await
+}
+
+/// Dieselbe Kulisse, aber mit einem WAEHLBAREN Serversignaturschluessel.
+///
+/// `None` nimmt den Schluessel, dessen oeffentlicher Teil im
+/// `ServerReceipt`-Zertifikat des Abschlusses steht — der Regelfall, und der
+/// einzige, in dem Gate `receipt` eine Quittung dieses Lauschers bestaetigt.
+/// `Some` setzt ein FREMDES Paar ein: der Lauscher signiert dann unter einem
+/// Zertifikat, das die Linie nicht fuehrt, und jede seiner Quittungen muss
+/// offline fail-closed abgewiesen werden. Ohne diesen Eingang liesse sich die
+/// Abweisung nur gegen eine selbstgebaute Faelschung messen und nicht gegen
+/// eine ECHTE, korrekt signierte Serverquittung.
+///
+/// # Panics
+///
+/// Wie [`stand_up_read_server`].
+pub async fn stand_up_read_server_with_server_key(
+    database: &TestDatabase,
+    now_millis: i64,
+    with_grant_authorities: bool,
+    foreign_server_key: Option<([u8; 32], ea_types::CertificateHash)>,
+) -> ReadyServer {
     let fixture = seed_trust_fixture(database.pool(), trust_closure::ROTATION_CASE, &[]).await;
     let closure = trust_closure::build_with(false, with_grant_authorities);
     assert!(
@@ -900,8 +928,8 @@ pub async fn stand_up_read_server(
         database.pool().clone(),
         ea_types::UnixMillis::new(now_millis),
         closure.organization_id,
-        READ_SERVER_SECRET,
-        ea_types::CertificateHash::try_from(&READ_SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+        foreign_server_key.map_or(READ_SERVER_SECRET, |(secret, _)| secret),
+        foreign_server_key.map_or(closure.server_receipt_certificate_hash, |(_, hash)| hash),
     )
     .await;
     publish_closure(
@@ -1113,7 +1141,7 @@ pub async fn respawn_read_server(
         ea_types::UnixMillis::new(now_millis),
         closure.organization_id,
         READ_SERVER_SECRET,
-        ea_types::CertificateHash::try_from(&READ_SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+        closure.server_receipt_certificate_hash,
     )
     .await;
     ReadyServer {
@@ -1172,7 +1200,7 @@ pub async fn call_at(request: &ApiCall<'_>, now_millis: i64) -> HttpResponse {
 pub fn issue_technical_cursor(fields: &ea_sync_protocol::TechnicalCursorFieldsV1) -> Vec<u8> {
     let signer = einsatzarchiv_server::adapters::server_keys::ServerKeyStore::new(
         ea_crypto::SecretBytes::new(READ_SERVER_SECRET),
-        ea_types::CertificateHash::try_from(&READ_SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+        trust_closure::server_receipt_certificate_hash(),
         1,
     )
     .expect("the test server key must load");

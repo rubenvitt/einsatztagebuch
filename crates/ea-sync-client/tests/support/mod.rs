@@ -680,6 +680,40 @@ impl SyncHarness {
         .expect("der Blockierthread darf nicht verlorengehen")
     }
 
+    /// Bucht einen vergeblichen Versuch mit dem GROESSTMOEGLICHEN Jitter.
+    ///
+    /// Der Jitter des Klienten ist „full jitter": er zieht gleichverteilt aus
+    /// `[0, ceiling]`, und das schliesst die NULL ein — ein Eintrag kann nach
+    /// einem Fehlversuch also voellig regelkonform sofort wieder faellig sein.
+    /// Ein Zeuge, der „noch nicht faellig" messen will, darf sich deshalb nicht
+    /// auf eine Ziehung verlassen; er bucht die Wartezeit selbst, ueber
+    /// dieselbe oeffentliche Ablage, die auch der Klient benutzt.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Ablage nicht schreibt.
+    pub fn book_longest_backoff(&self, entry: ea_types::ObjectHash) {
+        struct LongestJitter;
+        impl ea_types::JitterSource for LongestJitter {
+            fn jitter_ms(&mut self, ceiling_ms: u64) -> u64 {
+                ceiling_ms
+            }
+        }
+        self.retry_store()
+            .record_failure(entry, self.observed_now(), &mut LongestJitter)
+            .expect("der Fehlversuch muss buchbar sein")
+            .expect("die Schranke des Profils ist noch nicht erschoepft");
+    }
+
+    fn retry_store(&self) -> ea_sync_client::RetryStore {
+        ea_sync_client::RetryStore::open(
+            self.writer.database(),
+            ea_types::RetryConfig::new(3, 10, 100).expect("die Schranken sind nicht null"),
+            3,
+        )
+        .expect("die Wiederaufnahmeablage muss stehen")
+    }
+
     /// Der dauerhafte Wiederaufnahmezustand eines Eintrags.
     ///
     /// # Panics
@@ -687,14 +721,9 @@ impl SyncHarness {
     /// Wenn die lokale Ablage ihn nicht hergibt.
     #[must_use]
     pub fn retry_schedule(&self, entry: ea_types::ObjectHash) -> ea_sync_client::RetryScheduleV1 {
-        ea_sync_client::RetryStore::open(
-            self.writer.database(),
-            ea_types::RetryConfig::new(3, 10, 100).expect("die Schranken sind nicht null"),
-            3,
-        )
-        .expect("die Wiederaufnahmeablage muss stehen")
-        .load(entry)
-        .expect("der Wiederaufnahmezustand muss lesbar sein")
+        self.retry_store()
+            .load(entry)
+            .expect("der Wiederaufnahmezustand muss lesbar sein")
     }
 
     /// Der bestaetigte Cursor, gelesen von einem FRISCH gebauten Klienten.

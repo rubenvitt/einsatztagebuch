@@ -251,6 +251,17 @@ async fn a_waiting_entry_stops_the_chain_instead_of_being_overtaken() {
     assert_eq!(first.pushed(), 0);
     assert_eq!(first.status(), SyncStatus::UploadPending);
 
+    // Der erste Eintrag bekommt eine BESTIMMTE Wartezeit gebucht. Nicht die
+    // gezogene: der Jitter des Klienten ist „full jitter" und schliesst die
+    // Null ein, ein Eintrag kann nach einem Fehlversuch also regelkonform
+    // sofort wieder faellig sein. Der Zeuge will die Reihenfolge messen und
+    // nicht eine Ziehung, also setzt er die Wartezeit selbst.
+    let entry = harness
+        .pending_entry()
+        .await
+        .expect("die Warteschlange traegt ihren ersten Eintrag");
+    harness.book_longest_backoff(entry.entry_object_hash());
+
     // Der zweite Lauf, OHNE die Uhr vorzustellen: der erste Eintrag liegt auf
     // seinem Backoff. Jetzt darf KEIN Commit laufen — und ausdruecklich auch
     // nicht der des zweiten Eintrags.
@@ -266,12 +277,11 @@ async fn a_waiting_entry_stops_the_chain_instead_of_being_overtaken() {
 
     // Und der Wiederaufnahmezustand des ERSTEN ist dauerhaft gebucht: genau er
     // ist der Grund, aus dem der zweite Lauf nichts tat.
-    let entry = harness
-        .pending_entry()
-        .await
-        .expect("die Warteschlange traegt ihren ersten Eintrag");
     let schedule = harness.retry_schedule(entry.entry_object_hash());
-    assert_eq!(schedule.failed_attempts, 1);
+    assert!(
+        schedule.failed_attempts >= 1,
+        "der Fehlversuch des ersten Eintrags ist gebucht"
+    );
     assert!(
         !schedule.is_due(harness.observed_now()),
         "der erste Eintrag ist noch nicht faellig"

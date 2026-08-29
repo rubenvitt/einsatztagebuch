@@ -81,6 +81,16 @@ pub const ADMIN_SEED: [u8; 32] = ea_testkit::TEST_ENTROPY_ORGANIZATION_ADMIN_ED2
 
 /// Der Signaturschluessel des WRITERS — der Aufrufer des Commit-Endpunkts.
 pub const WRITER_SEED: [u8; 32] = [0xd1; 32];
+/// Der Signaturschluessel des SERVERS — Quittungen und Checkpoints.
+///
+/// Er steht HIER und nicht neben dem Lauscher, weil sein oeffentlicher Teil im
+/// Zertifikat der Art `ServerReceipt` dieser Linie liegt. Bis Stufe 3 signierte
+/// der Lauscher unter einem SYNTHETISCHEN Zertifikatshash, den kein
+/// Trust-Objekt fuehrte; keine seiner Quittungen war damit offline
+/// bestaetigbar, denn `VerificationContext::receipt` verlangt die Capability
+/// `serverReceipt` und `ea_trust::verify_receipt_time` loest den Signierer
+/// gegen den gewaehlten Kopf auf.
+pub const SERVER_SEED: [u8; 32] = [0x51; 32];
 /// Der KEM-Schluessel des Readers.
 pub const READER_KEM_SEED: [u8; 32] = [0xd2; 32];
 /// Der SIGNATURSCHLUESSEL des Readers.
@@ -114,6 +124,7 @@ pub const APPROVER_B_SEED: [u8; 32] = [0xd9; 32];
 const WRITER_DEVICE_ID: [u8; 16] = [0xe1; 16];
 const READER_DEVICE_ID: [u8; 16] = [0xe2; 16];
 const RECOVERY_DEVICE_ID: [u8; 16] = [0xe3; 16];
+const SERVER_DEVICE_ID: [u8; 16] = [0xe8; 16];
 const SECOND_READER_DEVICE_ID: [u8; 16] = [0xe4; 16];
 const HISTORICAL_GRANT_AUTHORITY_DEVICE_ID: [u8; 16] = [0xe5; 16];
 const APPROVER_A_DEVICE_ID: [u8; 16] = [0xe6; 16];
@@ -156,6 +167,9 @@ pub struct ExtendedClosure {
     pub writer_certificate_hash: CertificateHash,
     pub reader_certificate_hash: CertificateHash,
     pub recovery_certificate_hash: CertificateHash,
+    /// Das Zertifikat, unter dem der Lauscher seine Quittungen und Checkpoints
+    /// signiert. Ohne es bestaetigt Gate `receipt` keine einzige davon.
+    pub server_receipt_certificate_hash: CertificateHash,
     /// Nur gesetzt, wenn der Abschluss den zweiten Reader traegt.
     pub second_reader_certificate_hash: Option<CertificateHash>,
     /// Nur gesetzt, wenn der Abschluss die Grant- und Vernichtungsrollen
@@ -527,6 +541,20 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
     build_with(with_second_reader, false)
 }
 
+/// Der Objekthash des Serverquittungszertifikats.
+///
+/// Er ist ueber ALLE Varianten des Abschlusses derselbe, und das ist keine
+/// Beobachtung, sondern Bauart: das Zertifikat steht im FESTEN Teil, sein
+/// Nutzinhalt haengt nur an `recovery.head_hash`, an seiner
+/// `effective-from-sequence` und an seinem Marker — die Leihe des Kopfes, die
+/// mit den Schaltern wandert, steht im Kopfereignis und nicht im Zertifikat.
+/// Ein Aufrufer ohne Abschluss in der Hand — der Cursor-Signierer etwa —
+/// braucht ihn deshalb nicht durchgereicht zu bekommen.
+#[must_use]
+pub fn server_receipt_certificate_hash() -> CertificateHash {
+    build(false).server_receipt_certificate_hash
+}
+
 /// Derselbe Abschluss, aber mit den Rollen des historischen Re-Grants und der
 /// kontrollierten Vernichtung.
 ///
@@ -549,7 +577,7 @@ pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> Ext
     let context = frozen_context();
 
     // Jeder Zwischenkopf deckt genau EINE Sequenz; der letzte deckt den Rest.
-    let count = 3 + usize::from(with_second_reader) + if with_grant_authorities { 3 } else { 0 };
+    let count = 4 + usize::from(with_second_reader) + if with_grant_authorities { 3 } else { 0 };
     let lease_of = |index: usize| {
         let from = LEASE_FROM_SEQUENCE + index as u64;
         let through = if index + 1 == count {
@@ -630,14 +658,43 @@ pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> Ext
         ],
     );
 
+    // Der SERVER. Er steht im festen Teil des Abschlusses und nicht hinter
+    // einem Schalter: eine Quittung ohne dieses Zertifikat ist offline nicht
+    // bestaetigbar, und `synchronisiert` haengt genau daran
+    // (`design.md`:1584).
+    let server = certificate_transition(
+        &context,
+        device_fields(
+            &context,
+            SERVER_DEVICE_ID,
+            CertificateKindV1::ServerReceipt,
+            Some(SERVER_SEED),
+            None,
+            vec![CertificateCapability::ServerReceipt],
+            lease_of(3).0,
+            None,
+        ),
+        5,
+        recovery.head_hash,
+        lease_of(3),
+        0x3a,
+        [
+            "server-certificate-authorization",
+            "server-certificate",
+            "server-head-authorization",
+            "server-head-event",
+        ],
+    );
+
     let mut objects = Vec::new();
     objects.extend(writer.objects);
     objects.extend(reader.objects);
     objects.extend(recovery.objects);
-    let mut registry_version = 5;
-    let mut registry_head_hash = recovery.head_hash;
+    objects.extend(server.objects);
+    let mut registry_version = 6;
+    let mut registry_head_hash = server.head_hash;
     let mut second_reader = None;
-    let mut next_lease = 3;
+    let mut next_lease = 4;
     let mut historical_grant_authority = None;
     let mut approvers = None;
 
@@ -651,12 +708,12 @@ pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> Ext
                 Some(SECOND_READER_SIGNING_SEED),
                 Some(SECOND_READER_KEM_SEED),
                 Vec::new(),
-                lease_of(3).0,
+                lease_of(4).0,
                 None,
             ),
-            5,
-            recovery.head_hash,
-            lease_of(3),
+            6,
+            server.head_hash,
+            lease_of(4),
             0x3c,
             [
                 "second-reader-certificate-authorization",
@@ -666,10 +723,10 @@ pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> Ext
             ],
         );
         objects.extend(second.objects);
-        registry_version = 6;
+        registry_version = 7;
         registry_head_hash = second.head_hash;
         second_reader = Some(second.certificate_hash);
-        next_lease = 4;
+        next_lease = 5;
     }
 
     if with_grant_authorities {
@@ -771,6 +828,7 @@ pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> Ext
         organization_id: context.organization_id,
         chain_id: context.chain_id,
         writer_certificate_hash: writer.certificate_hash,
+        server_receipt_certificate_hash: server.certificate_hash,
         reader_certificate_hash: reader.certificate_hash,
         recovery_certificate_hash: recovery.certificate_hash,
         second_reader_certificate_hash: second_reader,
