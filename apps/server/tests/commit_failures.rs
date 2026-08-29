@@ -326,7 +326,10 @@ async fn a_package_binding_an_older_head_names_the_required_head() {
     });
     let response = post_commit(&server, &closure, request.exact_bytes(), [0x26; 16]).await;
 
-    assert_eq!(response.status, 422);
+    // `409` und nicht `422`: die 409-Zeile des Nachtrags nennt „erforderlicher
+    // neuerer Registry-Head" ausdruecklich, und der Aufrufer soll
+    // wiederkommen statt aufzugeben.
+    assert_eq!(response.status, 409);
     assert_eq!(
         error_code(&response.body).as_deref(),
         Some("EA-COMMIT-REGISTRY")
@@ -618,33 +621,31 @@ async fn the_error_body_carries_no_fragment_of_the_delivered_payload() {
 async fn a_superfluous_grant_is_refused_as_well() {
     let database = common::fresh_database().await;
     let (server, narrow) = stand_up(&database, false).await;
+    // Nur fuer das ZERTIFIKAT des zweiten Readers — Eintrag, Grants und
+    // gebundener Kopf gehoeren dem schmalen Abschluss, damit die
+    // Registry-Pruefung traegt und der Befund wirklich die Empfaengermenge
+    // trifft.
     let wide = trust_closure::build(true);
 
     let request = archive_objects::commit_request(&archive_objects::CommitSpec {
-        closure: &wide,
+        closure: &narrow,
         sequence: commit_sequence(),
         previous_entry_hash: Some(seeded_head_entry_hash()),
         recipients: &[
-            archive_objects::Recipient::reader(&wide),
+            archive_objects::Recipient::reader(&narrow),
             archive_objects::Recipient::second_reader(&wide),
-            archive_objects::Recipient::recovery(&wide),
+            archive_objects::Recipient::recovery(&narrow),
         ],
         marker: 0xbb,
         writer_override: None,
         registry_override: None,
     });
-    // Gegen den SCHMALEN Server: er kennt weder den zweiten Reader noch den
-    // Kopf, den das Paket bindet.
     let response = post_commit(&server, &narrow, request.exact_bytes(), [0x2f; 16]).await;
 
     assert_eq!(response.status, 422);
-    assert!(
-        matches!(
-            error_code(&response.body).as_deref(),
-            Some("EA-COMMIT-GRANT-SET" | "EA-COMMIT-REGISTRY")
-        ),
-        "a grant set the head does not name is never accepted, got {:?}",
-        error_code(&response.body)
+    assert_eq!(
+        error_code(&response.body).as_deref(),
+        Some("EA-COMMIT-GRANT-SET")
     );
     assert_eq!(visible(database.pool()).await, (0, 0, 0));
 
@@ -687,6 +688,57 @@ async fn a_wrong_recovery_recipient_is_refused() {
     assert_eq!(
         error_code(&response.body).as_deref(),
         Some("EA-COMMIT-GRANT-SET")
+    );
+    assert_eq!(visible(database.pool()).await, (0, 0, 0));
+
+    database.cleanup().await;
+}
+
+/// Ein Paket, das einen NEUEREN Kopf bindet als der Server kennt, wird NICHT
+/// rueckwaerts geschickt.
+///
+/// Hier hinkt der SERVER, nicht der Aufrufer. `required-registry-version` nennt
+/// deshalb die Version des PAKETS — die, die der Server erst lernen muss —
+/// und nicht seine eigene, aeltere. Ihm die eigene zu nennen hiesse, ihn zu
+/// einem Kopf zu schicken, den er nachweislich schon ueberholt hat.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bound_head_newer_than_the_server_knows_never_points_backwards() {
+    let database = common::fresh_database().await;
+    // Der Server kennt den SCHMALEN Abschluss; das Paket bindet den Kopf des
+    // breiten, den es hier wirklich gibt — er ist nur nicht eingespielt.
+    let (server, narrow) = stand_up(&database, false).await;
+    let wide = trust_closure::build(true);
+    assert!(
+        wide.registry_version.get() > narrow.registry_version.get(),
+        "the wide closure really is ahead"
+    );
+
+    let request = archive_objects::commit_request(&archive_objects::CommitSpec {
+        closure: &narrow,
+        sequence: commit_sequence(),
+        previous_entry_hash: Some(seeded_head_entry_hash()),
+        recipients: &standard_recipients(&narrow),
+        marker: 0xbd,
+        writer_override: None,
+        registry_override: Some((wide.registry_version, *wide.registry_head_hash.as_bytes())),
+    });
+    let response = post_commit(&server, &narrow, request.exact_bytes(), [0x31; 16]).await;
+
+    assert_eq!(response.status, 409);
+    assert_eq!(
+        error_code(&response.body).as_deref(),
+        Some("EA-COMMIT-REGISTRY-HEAD-REQUIRED")
+    );
+    let error = ProtocolErrorV1::decode(&response.body).expect("the error body decodes");
+    assert!(
+        error.required_registry_version() == Some(wide.registry_version),
+        "the required version is the one the server must learn, never an older one"
+    );
+    assert_eq!(
+        error
+            .required_registry_head_hash()
+            .map(|hash| hash.as_bytes().to_vec()),
+        Some(wide.registry_head_hash.as_bytes().to_vec())
     );
     assert_eq!(visible(database.pool()).await, (0, 0, 0));
 

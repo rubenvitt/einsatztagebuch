@@ -184,14 +184,25 @@ impl CommitServiceError {
 
     /// Die HTTP-Abbildung des Sync-Wire-Nachtrags.
     ///
-    /// Die VIER Abweichungsfaelle des letzten Absatzes von §13.3 — nicht
+    /// Die 409-Zeile des Nachtrags lautet VOLLSTAENDIG „Fork, Kopfabweichung,
+    /// Bytekonflikt, nicht idempotenter Replay oder ERFORDERLICHER NEUERER
+    /// REGISTRY-HEAD" (`…sync-wire-addendum.md`:248). Der letzte Halbsatz
+    /// gehoert dazu: ein Paket, das den falschen Registry-Head bindet, ist
+    /// genau dieser Fall — und `protocol-error-v1` traegt dafuer
+    /// `required-registry-version` und `required-registry-head-hash` (ebenda
+    /// :266). Es waere kein 422: der Aufrufer soll wiederkommen, nicht
+    /// aufgeben.
+    ///
+    /// Die vier Abweichungsfaelle des letzten Absatzes von §13.3 — nicht
     /// idempotenter Replay, Fork, falscher Vorgaenger, unzulaessiger Writer —
-    /// stehen samt Bytekonflikt und Kopfabweichung in der 409-Zeile. Alles
-    /// uebrige, was wohlgeformt aber ungueltig ist, ist 422.
+    /// stehen in derselben Zeile. Alles uebrige, was wohlgeformt aber ungueltig
+    /// ist, ist 422.
     #[must_use]
     pub const fn http_status(self) -> u16 {
         match self {
-            Self::Validation(CommitValidationError::WriterUnauthorized)
+            Self::Validation(
+                CommitValidationError::WriterUnauthorized | CommitValidationError::RegistryMismatch,
+            )
             | Self::IdentityConflict
             | Self::SequenceFork
             | Self::PredecessorMismatch
@@ -388,7 +399,22 @@ pub async fn commit_entry(
     let entry = parse_entry(request.entry_bytes()).map_err(CommitFailure::from)?;
     let sequence = entry.value().manifest().fields().chain_sequence;
     let now = ports.clock.now();
-    let head = select_head(organization_id, sequence, now, ports).await?;
+
+    // Schritt 4 (das LESEN) und Schritt 5 (die Bestimmung) laufen HIER, vor
+    // der Pruefung — nicht, weil die Nummerierung sich verschoebe, sondern weil
+    // §13.3 selbst diese Abhaengigkeit stellt: Schritt 2 verlangt „genau einen
+    // initialen Grant fuer jedes ZUR EINTRAGSSEQUENZ aktive Reader-Zertifikat",
+    // und WELCHE das sind, sagt der Kopf, den Schritt 5 „fuer diese Zeit und
+    // Sequenz" bestimmt. Die Zeit ist dabei `acceptedAtServer` und
+    // ausdruecklich NICHT die rohe Serveruhr; beide fallen auseinander, sobald
+    // die Annahmezeit des Vorgaengers vor der Uhr liegt.
+    let current = ports
+        .commits
+        .head_state(organization_id, chain_id)
+        .await
+        .map_err(CommitFailure::from)?;
+    let accepted_at_server = accepted_at(now, current.map(|head| head.accepted_at_server));
+    let head = select_head(organization_id, sequence, accepted_at_server, ports).await?;
     // Der gestromte Hash und der geparste Hash MUESSEN derselbe sein. Sie
     // entstehen auf zwei Wegen — im Object Store beim Stromen, in `ea-format`
     // beim Parsen —, und ein Auseinanderlaufen waere ein Objekt, dessen
@@ -410,6 +436,7 @@ pub async fn commit_entry(
             return Err(validation_failure(
                 error,
                 entry.value().entry_hash(),
+                bound_head(&entry),
                 head.as_ref(),
                 organization_id,
                 now,
@@ -418,6 +445,13 @@ pub async fn commit_entry(
             .await);
         }
     };
+    // Die LAENGEN zuerst: `zip` haelt bei der kuerzeren an, und ein Vergleich
+    // ueber ein Praefix ist kein Vergleich. Beide Listen entstehen aus derselben
+    // sortierten Lieferung, also ist eine Abweichung ein Widerspruch und keine
+    // Erwartung.
+    if staged_grants.len() != validated.grant_object_hashes.len() {
+        return Err(CommitServiceError::Internal.into());
+    }
     for (staged, expected) in staged_grants.iter().zip(&validated.grant_object_hashes) {
         if staged.object_hash() != *expected {
             return Err(CommitServiceError::ObjectConflict.into());
@@ -438,25 +472,30 @@ pub async fn commit_entry(
     //
     // Die SPERRE selbst haelt `commit_locked_head` — sie muss dieselbe
     // Transaktion sein, in der Schritt 8 sichtbar schaltet, sonst waere
-    // zwischen Sperre und Sichtbarkeit ein Fenster. Hier wird der Kopf
-    // GELESEN, weil die Schritte 5 bis 7 seine Annahmezeit und seine Sequenz
-    // brauchen, bevor der Auftrag ueberhaupt zusammengestellt werden kann.
-    // Bewegt er sich dazwischen, weist die Transaktion ihn ab.
+    // zwischen Sperre und Sichtbarkeit ein Fenster. Das LESEN des Kopfes ist
+    // oben schon geschehen (`current`), weil Schritt 5 seine Annahmezeit
+    // braucht und Schritt 2 wiederum den Kopf, den Schritt 5 daraus waehlt.
+    // Bewegt er sich dazwischen, weist die Transaktion ihn ab, und
+    // `classify_head_conflict` liest ihn dafuer erneut.
     // ---------------------------------------------------------------------
-    let current = ports
-        .commits
-        .head_state(organization_id, chain_id)
-        .await
-        .map_err(CommitFailure::from)?;
 
     // ---------------------------------------------------------------------
     // Schritt 5: `acceptedAtServer` EINMALIG als Maximum aus Serverzeit und
-    // Annahmezeit des direkten Vorgaengers; und der fuer genau diese Zeit und
-    // Sequenz gewaehlte Kopf ist gebunden. Bindet das Paket einen AELTEREN
-    // Kopf, hat Schritt 2 das mit `RegistryMismatch` festgestellt, und
-    // `validation_failure` nennt dem Aufrufer die erforderliche Version.
+    // Annahmezeit des direkten Vorgaengers, und der fuer GENAU DIESE ZEIT und
+    // diese Sequenz gewaehlte Kopf.
+    //
+    // Beides ist oben geschehen, und die Reihenfolge darin ist die des
+    // Spezifikationssatzes: erst die Zeit, dann der Kopf „fuer diese Zeit und
+    // Sequenz" (`design.md`:1545). Die rohe Serveruhr taugt dafuer NICHT — sie
+    // faellt von `acceptedAtServer` genau dann ab, wenn die Annahmezeit des
+    // Vorgaengers vor ihr liegt, und dann waehlte sie einen Kopf fuer einen
+    // Zeitpunkt, den keine Quittung je traegt.
+    //
+    // Bindet das Paket einen anderen Kopf als den so gewaehlten, hat Schritt 2
+    // das mit `RegistryMismatch` festgestellt, und `validation_failure` nennt
+    // dem Aufrufer den erforderlichen — in der Richtung, in die er zu gehen
+    // hat.
     // ---------------------------------------------------------------------
-    let accepted_at_server = accepted_at(now, current.map(|head| head.accepted_at_server));
 
     // ---------------------------------------------------------------------
     // Schritt 6: ausschliesslich `currentSequence + 1`, der aktuelle Entry-Hash
@@ -624,10 +663,34 @@ async fn select_head(
     }
 }
 
+/// Der Registry-Head, den das PAKET bindet.
+fn bound_head(entry: &ea_format::Parsed<ea_format::EntryPackageV1>) -> (RegistryVersion, [u8; 32]) {
+    let manifest = entry.value().manifest().fields();
+    (manifest.registry_version, manifest.registry_head_hash)
+}
+
 /// Ein Pruefbefund, samt Security Event und erforderlichem Kopf.
+///
+/// # Der Registry-Head hat eine RICHTUNG
+///
+/// „Erforderlicher neuerer Registry-Head" steht in der 409-Zeile der Abbildung,
+/// und `protocol-error-v1` fuehrt Version und Hash an eigenen
+/// Pflichtpositionen. WELCHE Version dort steht, haengt daran, wer
+/// hinterherhinkt:
+///
+/// * Bindet das Paket einen AELTEREN Kopf als den gewaehlten, hinkt der
+///   Aufrufer. Er bekommt den Kopf des Servers genannt und holt ihn nach —
+///   `design.md` §13.3, Schritt 5, woertlich.
+/// * Bindet es einen NEUEREN, hinkt der SERVER. Ihm den Kopf des Servers zu
+///   nennen hiesse, ihn rueckwaerts zu schicken: er soll einen Kopf binden, den
+///   er nachweislich schon ueberholt hat. Genannt wird deshalb der Kopf, den
+///   das Paket bindet — der Server muss ihn erst lernen, und der Weg dahin ist
+///   `POST /v1/trust/events`. Es ist derselbe Befund wie ein noch nicht
+///   anwendbarer Kopf aus der Auswahl, und er traegt denselben Code.
 async fn validation_failure(
     error: CommitValidationError,
     entry_hash: ea_types::EntryHash,
+    bound: (RegistryVersion, [u8; 32]),
     head: &dyn ActiveRegistryHeadV1,
     organization_id: OrganizationId,
     now: UnixMillis,
@@ -648,9 +711,17 @@ async fn validation_failure(
         .await;
     }
     if error == CommitValidationError::RegistryMismatch {
-        // „bindet das Paket einen aelteren Head, wird es mit dem
-        // erforderlichen `registryVersion`/`registryHeadHash` abgelehnt"
-        // (`design.md` §13.3, Schritt 5).
+        let (bound_version, bound_hash) = bound;
+        if bound_version.get() > head.registry_version().get() {
+            let Ok(required) = ObjectHash::try_from(&bound_hash[..]) else {
+                return CommitServiceError::Internal.into();
+            };
+            return CommitFailure::requiring_head(
+                CommitServiceError::RegistryHeadRequired,
+                bound_version,
+                required,
+            );
+        }
         return CommitFailure::requiring_head(
             CommitServiceError::Validation(error),
             head.registry_version(),

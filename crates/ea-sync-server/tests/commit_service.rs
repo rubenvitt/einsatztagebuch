@@ -389,6 +389,25 @@ fn entry_bytes(
     plan: &GrantPlanV1,
     ciphertext_marker: u8,
 ) -> Vec<u8> {
+    entry_bytes_with(
+        head,
+        sequence,
+        previous,
+        plan,
+        ciphertext_marker,
+        (RegistryVersion::new(REGISTRY_VERSION), REGISTRY_HEAD_HASH),
+    )
+}
+
+/// Dasselbe `.eip`, aber mit ausdruecklich gesetztem Registry-Head.
+fn entry_bytes_with(
+    head: &FakeHead,
+    sequence: u64,
+    previous: Option<EntryHash>,
+    plan: &GrantPlanV1,
+    ciphertext_marker: u8,
+    registry: (RegistryVersion, [u8; 32]),
+) -> Vec<u8> {
     let ciphertext = vec![ciphertext_marker; 32];
     let manifest = ManifestCoreV1::new(
         ManifestCoreFieldsV1 {
@@ -398,8 +417,8 @@ fn entry_bytes(
             previous_entry_hash: previous,
             writer_certificate_hash: head.certificate_hash_of(WRITER_DEVICE_ID),
             writer_transition_event_hash: None,
-            registry_version: RegistryVersion::new(REGISTRY_VERSION),
-            registry_head_hash: REGISTRY_HEAD_HASH,
+            registry_version: registry.0,
+            registry_head_hash: registry.1,
             initial_grant_plan_hash: *plan.hash().as_bytes(),
             nonce: [0x40; 12],
         },
@@ -485,6 +504,30 @@ fn commit_request(
 ) -> EntryCommitRequestV1 {
     let plan = plan_of(head, recipients);
     let entry = entry_bytes(head, sequence, previous, &plan, ciphertext_marker);
+    let ea_format::ParsedArchiveObject::Entry(parsed) =
+        ea_format::decode_exact_object(&entry).expect("the fixture entry parses")
+    else {
+        panic!("the fixture entry is an entry package");
+    };
+    let entry_hash = parsed.value().entry_hash();
+    let grants = recipients
+        .iter()
+        .map(|recipient| grant_bytes(head, entry_hash, *recipient))
+        .collect();
+    EntryCommitRequestV1::new(entry, plan, grants).expect("the fixture commit request is valid")
+}
+
+/// Derselbe Commit, aber mit ausdruecklich gesetztem Registry-Head.
+fn commit_request_with_registry(
+    head: &FakeHead,
+    sequence: u64,
+    previous: Option<EntryHash>,
+    recipients: &[Recipient],
+    ciphertext_marker: u8,
+    registry: (RegistryVersion, [u8; 32]),
+) -> EntryCommitRequestV1 {
+    let plan = plan_of(head, recipients);
+    let entry = entry_bytes_with(head, sequence, previous, &plan, ciphertext_marker, registry);
     let ea_format::ParsedArchiveObject::Entry(parsed) =
         ea_format::decode_exact_object(&entry).expect("the fixture entry parses")
     else {
@@ -857,10 +900,23 @@ impl ea_sync_server::SecurityEventSink for FakeSecurity {
 /// Die Kopfauswahl im Speicher.
 struct FakeHeads {
     outcome: Mutex<HeadOutcome>,
+    /// Der Zeitpunkt, mit dem zuletzt gewaehlt wurde.
+    last_instant: Mutex<Option<i64>>,
 }
 
 enum HeadOutcome {
     Selected(Arc<FakeHead>),
+    /// Vor `at` der eine Kopf, ab `at` der andere.
+    ///
+    /// Die Kulisse fuer die Frage, WELCHEN Zeitpunkt Schritt 5 der Auswahl
+    /// gibt: die rohe Serveruhr oder die Annahmezeit, die er gerade festgelegt
+    /// hat. Ein Kopf, der erst ab einer Zeit gilt, ist in der Produktion nichts
+    /// Exotisches — `not-before` steht in jedem `registryEvent`.
+    Switching {
+        before: Arc<FakeHead>,
+        from: i64,
+        after: Arc<FakeHead>,
+    },
     PendingFuture,
     None,
 }
@@ -869,7 +925,12 @@ impl FakeHeads {
     fn selecting(head: Arc<FakeHead>) -> Self {
         Self {
             outcome: Mutex::new(HeadOutcome::Selected(head)),
+            last_instant: Mutex::new(None),
         }
+    }
+
+    fn last_instant(&self) -> Option<i64> {
+        *self.last_instant.lock().expect("not poisoned")
     }
 
     fn set(&self, outcome: HeadOutcome) {
@@ -885,9 +946,20 @@ impl RegistryHeadDirectory for FakeHeads {
         _proposed_sequence: ChainSequence,
         _now: UnixMillis,
     ) -> Result<RegistryHeadSelectionV1, ea_sync_server::AuthorityError> {
+        *self.last_instant.lock().expect("not poisoned") = Some(_now.get());
         Ok(match &*self.outcome.lock().expect("not poisoned") {
             HeadOutcome::Selected(head) => {
                 RegistryHeadSelectionV1::Selected(Arc::clone(head) as Arc<dyn ActiveRegistryHeadV1>)
+            }
+            HeadOutcome::Switching {
+                before,
+                from,
+                after,
+            } => {
+                let chosen = if _now.get() < *from { before } else { after };
+                RegistryHeadSelectionV1::Selected(
+                    Arc::clone(chosen) as Arc<dyn ActiveRegistryHeadV1>
+                )
             }
             HeadOutcome::PendingFuture => RegistryHeadSelectionV1::PendingFuture {
                 required_registry_version: RegistryVersion::new(REGISTRY_VERSION + 1),
@@ -1871,4 +1943,155 @@ async fn a_missing_object_is_a_finding_and_not_a_verdict() {
     .expect_err("a missing object is a finding");
     assert_eq!(failure.code(), "EA-RECONCILE-NOT-FOUND");
     assert!(harness.security.codes().is_empty());
+}
+
+/// Schritt 5 waehlt den Kopf fuer die ANNAHMEZEIT, nicht fuer die rohe
+/// Serveruhr.
+///
+/// `design.md`:1545 sagt „fuer diese Zeit und Sequenz", und „diese Zeit" ist
+/// das `acceptedAtServer`, das derselbe Schritt gerade festgelegt hat. Die
+/// beiden fallen genau dann auseinander, wenn die Annahmezeit des Vorgaengers
+/// VOR der Uhr liegt — und dann waehlte die Uhr einen Kopf fuer einen
+/// Zeitpunkt, den keine Quittung je traegt.
+///
+/// Gemessen wird die Wirkung und nicht nur der Parameter: die Kulisse fuehrt
+/// ZWEI Koepfe mit verschiedenen Registry-Versionen, und der Eintrag bindet
+/// den, der ab der Annahmezeit gilt. Waehlte der Dienst nach der Uhr, kaeme
+/// der andere heraus und der Commit scheiterte an `RegistryMismatch`.
+#[tokio::test]
+async fn the_head_is_selected_for_the_accepted_time_and_not_the_raw_clock() {
+    let early = standard_head();
+    let late = Arc::new(FakeHead::new(
+        vec![
+            writer_certificate_fields(),
+            reader_fields(),
+            recovery_fields(),
+        ],
+        policy(0, 500),
+    ));
+    // Der spaetere Kopf traegt eine ANDERE Registry-Version, damit die Wahl
+    // sichtbar wird.
+    let harness = Harness::with_head(Arc::clone(&late));
+    harness.heads.set(HeadOutcome::Switching {
+        before: Arc::clone(&early),
+        from: 8_000,
+        after: Arc::clone(&late),
+    });
+
+    // Die Uhr steht VOR dem Umschaltpunkt; die Annahmezeit des Vorgaengers
+    // liegt dahinter.
+    harness.clock.set(3_000);
+    harness.commits.set_head(Some(ChainHeadStateV1 {
+        sequence: ChainSequence::new(0),
+        entry_hash: EntryHash::try_from(&[0x66; 32][..]).expect("32 bytes"),
+        accepted_at_server: UnixMillis::new(9_000),
+    }));
+
+    let request = commit_request(
+        &harness.head,
+        1,
+        Some(EntryHash::try_from(&[0x66; 32][..]).expect("32 bytes")),
+        &[reader_recipient(), recovery_recipient()],
+        0xd1,
+    );
+    let outcome = harness
+        .commit(&request)
+        .await
+        .expect("the commit binds the head that holds at the accepted time");
+
+    assert_eq!(
+        harness.heads.last_instant(),
+        Some(9_000),
+        "the selection ran at the accepted time, not at the clock"
+    );
+    let ea_format::ParsedArchiveObject::Receipt(receipt) =
+        ea_format::decode_exact_object(outcome.receipt_bytes()).expect("the receipt parses")
+    else {
+        panic!("the response carries a receipt");
+    };
+    assert_eq!(
+        receipt.value().core().fields().accepted_at_server,
+        UnixMillis::new(9_000)
+    );
+}
+
+/// Ein Paket, das einen NEUEREN Kopf bindet als der Server kennt, wird nicht
+/// rueckwaerts geschickt.
+///
+/// Der Nachtrag fuehrt „erforderlicher neuerer Registry-Head" in der
+/// 409-Zeile, und `required-registry-version` nennt die Version, die gelten
+/// MUSS. Hinkt der SERVER, ist das die des Pakets: er muss sie erst lernen.
+/// Ihm die eigene, aeltere zu nennen hiesse, den Aufrufer zu einem Kopf zu
+/// schicken, den er nachweislich schon ueberholt hat.
+#[tokio::test]
+async fn a_bound_head_newer_than_the_server_knows_never_points_backwards() {
+    let harness = Harness::new();
+    let newer = REGISTRY_VERSION + 5;
+    let request = commit_request_with_registry(
+        &harness.head,
+        0,
+        None,
+        &[reader_recipient(), recovery_recipient()],
+        0xd2,
+        (RegistryVersion::new(newer), [0x7e; 32]),
+    );
+    let failure = harness
+        .commit(&request)
+        .await
+        .expect_err("a head the server does not know is never committed");
+
+    assert_eq!(failure.error, CommitServiceError::RegistryHeadRequired);
+    assert_eq!(failure.error.http_status(), 409);
+    assert_eq!(
+        failure.required_registry_version.map(RegistryVersion::get),
+        Some(newer),
+        "the caller is never told to go backwards"
+    );
+    assert_eq!(
+        failure
+            .required_registry_head_hash
+            .map(|hash| hash.as_bytes().to_vec()),
+        Some([0x7e; 32].to_vec())
+    );
+    assert_eq!(harness.commits.visible_entry_count(), 0);
+}
+
+/// Ein Paket, das einen AELTEREN Kopf bindet, bekommt den des Servers genannt
+/// — und zwar mit `409`, nicht `422`.
+#[tokio::test]
+async fn a_bound_head_older_than_the_selected_one_names_the_servers_head() {
+    let harness = Harness::new();
+    let request = commit_request_with_registry(
+        &harness.head,
+        0,
+        None,
+        &[reader_recipient(), recovery_recipient()],
+        0xd3,
+        (RegistryVersion::new(REGISTRY_VERSION - 1), [0x7f; 32]),
+    );
+    let failure = harness
+        .commit(&request)
+        .await
+        .expect_err("an older bound head is never committed");
+
+    assert_eq!(
+        failure.error,
+        CommitServiceError::Validation(CommitValidationError::RegistryMismatch)
+    );
+    assert_eq!(
+        failure.error.http_status(),
+        409,
+        "the addendum lists the required newer registry head in the 409 row"
+    );
+    assert_eq!(
+        failure.required_registry_version.map(RegistryVersion::get),
+        Some(REGISTRY_VERSION)
+    );
+    assert_eq!(
+        failure
+            .required_registry_head_hash
+            .map(|hash| hash.as_bytes().to_vec()),
+        Some(REGISTRY_HEAD_HASH.to_vec())
+    );
+    assert_eq!(harness.commits.visible_entry_count(), 0);
 }
