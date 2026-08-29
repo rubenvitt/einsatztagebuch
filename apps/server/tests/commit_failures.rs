@@ -650,3 +650,45 @@ async fn a_superfluous_grant_is_refused_as_well() {
 
     database.cleanup().await;
 }
+
+/// Ein FALSCHER Recovery-Empfaenger wird abgewiesen: die Rolle gehoert dem
+/// Zertifikat, das der Kopf als `RecoveryRecipient` fuehrt, und keinem, den
+/// der Aufrufer dazu erklaert.
+///
+/// Der gelieferte Satz nennt hier den zweiten READER unter dem Zweck
+/// `Recovery`. Beide Zertifikate sind dem Kopf bekannt und beide Grants sind
+/// echt signiert — abgewiesen wird allein die ZUORDNUNG. Zusammen mit dem
+/// fehlenden und dem ueberzaehligen Grant ist die Empfaengermenge damit in
+/// allen drei Richtungen gemessen.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_recovery_recipient_is_refused() {
+    let database = common::fresh_database().await;
+    let (server, closure) = stand_up(&database, true).await;
+
+    let miscast = archive_objects::Recipient {
+        kem_seed: trust_closure::SECOND_READER_KEM_SEED,
+        certificate_hash: closure
+            .second_reader_certificate_hash
+            .expect("this closure carries a second reader"),
+        purpose: ea_format::GrantPurposeV1::Recovery,
+    };
+    let request = archive_objects::commit_request(&archive_objects::CommitSpec {
+        closure: &closure,
+        sequence: commit_sequence(),
+        previous_entry_hash: Some(seeded_head_entry_hash()),
+        recipients: &[archive_objects::Recipient::reader(&closure), miscast],
+        marker: 0xbc,
+        writer_override: None,
+        registry_override: None,
+    });
+    let response = post_commit(&server, &closure, request.exact_bytes(), [0x30; 16]).await;
+
+    assert_eq!(response.status, 422);
+    assert_eq!(
+        error_code(&response.body).as_deref(),
+        Some("EA-COMMIT-GRANT-SET")
+    );
+    assert_eq!(visible(database.pool()).await, (0, 0, 0));
+
+    database.cleanup().await;
+}
