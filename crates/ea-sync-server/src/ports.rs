@@ -474,21 +474,32 @@ pub trait WebauthnCredentialStore: Send + Sync {
 #[async_trait]
 pub trait VaultBlobStore: Send + Sync {
     /// Legt GENAU EIN Chiffrat ab: create-if-absent ueber
-    /// (`subjectId`, Blobhash), ohne Aenderungs- und ohne Loeschpfad.
+    /// (`organizationId`, `subjectId`, Blobhash), ohne Aenderungs- und ohne
+    /// Loeschpfad.
     ///
-    /// `max_per_subject` ist Teil derselben Anweisung und keine zweite
-    /// Abfrage: Zaehlung und Einfuegung getrennt zu fuehren, liesse zwei
-    /// gleichzeitige Ablagen die Decke gemeinsam ueberschreiten.
+    /// `max_per_subject` MUSS unter gegenseitigem Ausschluss durchgesetzt
+    /// werden. Eine Zaehlung in derselben Anweisung reicht NICHT: unter
+    /// `READ COMMITTED` liest die Unterabfrage einen Schnappschuss und nimmt
+    /// keine Sperre, also kaemen zwei gleichzeitige Ablagen beide an einer
+    /// Decke von sieben vorbei und landeten bei neun. Ein Bestand ueber der
+    /// Decke waere nicht reparierbar — diese Stufe hat keinen Loeschpfad.
     async fn store(
         &self,
         blob: crate::models::ReaderVaultBlobV1,
         max_per_subject: u64,
     ) -> Result<crate::models::VaultBlobOutcome, RepositoryError>;
 
-    /// Die Chiffrate GENAU EINER `subjectId`, in stabiler Reihenfolge.
+    /// Die Chiffrate GENAU EINER `subjectId` in GENAU EINER Organisation, in
+    /// stabiler Reihenfolge und hoechstens `limit` Stueck.
+    ///
+    /// Die Grenze ist Tiefenverteidigung: die Decke steht bereits in
+    /// [`Self::store`], und ein Bestand darueber koennte die Antwort sonst gar
+    /// nicht mehr rahmen — was diese `subjectId` dauerhaft aussperrte.
     async fn list_for_subject(
         &self,
+        organization_id: ea_types::OrganizationId,
         subject_id: ea_types::SubjectId,
+        limit: u64,
     ) -> Result<Vec<Vec<u8>>, RepositoryError>;
 }
 

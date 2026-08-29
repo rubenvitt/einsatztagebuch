@@ -568,8 +568,13 @@ impl fmt::Debug for StoredWebauthnCredentialV1 {
 /// nicht behauptet. Der Blob liegt ausdruecklich NICHT im Object Store unter
 /// `<type>/<hex objectHash>`: dieser Namensraum gehoert den sechs
 /// Archivobjektarten.
+///
+/// Die `organization_id` gehoert zum Schluessel und nicht zum Beiwerk: die
+/// `subjectId` liefert der Aufrufer, also traegt erst die Organisation die
+/// Grenze, die §6.4.1 fuer die Herausgabe verlangt.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ReaderVaultBlobV1 {
+    pub organization_id: OrganizationId,
     pub subject_id: SubjectId,
     pub blob_hash: Hash32,
     pub ciphertext: Vec<u8>,

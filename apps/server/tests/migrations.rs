@@ -202,13 +202,14 @@ async fn web_surface_tables_carry_their_required_uniqueness() {
         "a credential ID must be unique per organization (web-reader-design.md §6.4.1)"
     );
 
-    let store_blob = |ciphertext: &'static [u8]| {
+    let store_blob = |organization: [u8; 16], ciphertext: &'static [u8]| {
         let pool = database.pool().clone();
         async move {
             sqlx::query(
-                "INSERT INTO reader_vault_blobs (subject_id, blob_hash, ciphertext, \
-                 stored_at_millis) VALUES ($1, $2, $3, $4)",
+                "INSERT INTO reader_vault_blobs (organization_id, subject_id, blob_hash, \
+                 ciphertext, stored_at_millis) VALUES ($1, $2, $3, $4, $5)",
             )
+            .bind(&organization[..])
             .bind(&[0x66_u8; 16][..])
             .bind(&[0x88_u8; 32][..])
             .bind(ciphertext)
@@ -217,11 +218,21 @@ async fn web_surface_tables_carry_their_required_uniqueness() {
             .await
         }
     };
-    store_blob(b"opaque-a").await.unwrap();
+    store_blob(ORGANIZATION_ID, b"opaque-a").await.unwrap();
     assert!(
-        store_blob(b"opaque-b").await.is_err(),
-        "a wrapped blob is keyed exclusively by subjectId and blob hash"
+        store_blob(ORGANIZATION_ID, b"opaque-b").await.is_err(),
+        "a wrapped blob is keyed by organization, subjectId and blob hash"
     );
+
+    // Dieselbe `subjectId` und derselbe Blobhash in einer ANDEREN Organisation
+    // sind eine andere Zeile. Ohne die Organisation im Schluessel waere die
+    // Herausgabe nicht organisationsgebunden, obwohl die Credentialaufloesung
+    // es ist (`web-reader-design.md` §6.4.1).
+    let foreign = [0x9f_u8; 16];
+    insert_organization(database.pool(), &foreign).await;
+    store_blob(foreign, b"opaque-c")
+        .await
+        .expect("a foreign organization holds its own row under the same subjectId");
 
     database.cleanup().await;
 }

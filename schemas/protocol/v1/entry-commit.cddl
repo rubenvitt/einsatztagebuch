@@ -60,8 +60,11 @@ webauthn-credential-registration-v1 = [
 ;
 ; vault-blob-upload-v1 traegt KEINEN Blobhash: der Server rechnet ihn als
 ; SHA-256 ueber die exakten Chiffratbytes und schreibt create-if-absent ueber
-; (subject-id, Blobhash). Ein behaupteter Hash waere eine Adresse, die nicht
-; auf ihren Inhalt zeigen muss.
+; (organization-id, subject-id, Blobhash). Ein behaupteter Hash waere eine
+; Adresse, die nicht auf ihren Inhalt zeigen muss. Die organization-id steht
+; ebenfalls nicht im Rahmen: sie kommt aus der geprueften RFC-9421-Identitaet
+; des Aufrufers. Die subject-id darf der Aufrufer waehlen, die Organisation
+; nicht.
 vault-blob-upload-v1 = [1, subject-id: bstr .size 16, ciphertext: bstr .size (1..4096), []]
 
 ; Der Abruf ist die ZWEITE und letzte Signaturausnahme (Design §13.1,

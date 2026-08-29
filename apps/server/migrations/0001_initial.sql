@@ -365,16 +365,26 @@ CREATE TABLE webauthn_credentials (
 );
 
 -- Wrapped-Reader-Vault-Blobs (`web-reader-design.md` §6.4). Ein opakes
--- Chiffrat, ausschliesslich ueber `subjectId` und Blobhash geschluesselt. Es
+-- Chiffrat, ueber Organisation, `subjectId` und Blobhash geschluesselt. Es
 -- liegt AUSDRUECKLICH NICHT im Object Store unter `<type>/<hex objectHash>`:
 -- dieser Namensraum ist dem Archivobjekt vorbehalten. Der Server kennt weder
 -- Vault-Key noch PRF-Ausgaben.
+--
+-- Die `organization_id` steht hier, weil §6.4.1 die Herausgabe auf „die zu
+-- dieser `subjectId` gehoerenden opaken Chiffrate" begrenzt und die
+-- Credentialtabelle diese Begrenzung ueber (`organizationId`, `credentialId`)
+-- bereits fuehrt. Ohne die Spalte waere die AUFLOESUNG organisationsgebunden
+-- und die HERAUSGABE nicht: die `subjectId` wird vom Aufrufer geliefert, also
+-- koennte ein freigegebenes Geraet der Organisation A unter einer in
+-- Organisation B belegten `subjectId` ablegen und abholen. Die Opazitaet des
+-- Chiffrats faengt das ab, aber die Grenze soll nicht auf ihr allein ruhen.
 CREATE TABLE reader_vault_blobs (
+    organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     subject_id BYTEA NOT NULL CHECK (octet_length(subject_id) = 16),
     blob_hash BYTEA NOT NULL CHECK (octet_length(blob_hash) = 32),
     ciphertext BYTEA NOT NULL,
     stored_at_millis BIGINT NOT NULL,
-    PRIMARY KEY (subject_id, blob_hash)
+    PRIMARY KEY (organization_id, subject_id, blob_hash)
 );
 
 -- Der persistente `ea_trust::TrustStateStore` des Servers. `revision` traegt

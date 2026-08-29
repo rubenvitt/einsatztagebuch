@@ -214,8 +214,17 @@ deshalb ebenfalls normativ in `schemas/protocol/v1/entry-commit.cddl`.
 
 `vault-blob-upload-v1` trägt **keinen** Blobhash. Der Server rechnet ihn als
 SHA-256 über die exakten Chiffratbytes und schreibt create-if-absent über
-(`subjectId`, Blobhash); ein vom Aufrufer behaupteter Hash wäre eine Adresse,
-die nicht auf ihren Inhalt zeigen muss. Eine `subjectId` hält höchstens acht
+(`organizationId`, `subjectId`, Blobhash); ein vom Aufrufer behaupteter Hash
+wäre eine Adresse, die nicht auf ihren Inhalt zeigen muss. Die
+`organizationId` steht ebenfalls **nicht** im Rahmen: sie kommt aus der
+geprüften RFC-9421-Identität des Aufrufers. Die `subjectId` darf der Aufrufer
+wählen, die Organisation nicht — und weil §6.4.1 die Herausgabe auf „die zu
+dieser `subjectId` gehörenden opaken Chiffrate" begrenzt und die
+Credentialauflösung ohnehin über (`organizationId`, `credentialId`) läuft, ist
+auch die **Ablage und die Herausgabe** organisationsgebunden. Ohne diese
+Bindung könnte ein freigegebenes Gerät der Organisation A unter einer in
+Organisation B belegten `subjectId` ablegen und abholen; die Opazität des
+Chiffrats fängt das ab, aber die Grenze ruht nicht auf ihr allein. Eine `subjectId` hält höchstens acht
 Blobs von je höchstens 4 KiB — §6.3 verlangt mindestens zwei Authenticators, und
 die Decke hält zugleich ein freigegebenes Gerät davon ab, die Tabelle unter
 einer fremden `subjectId` unbegrenzt zu füllen. Ihr Reißen ist
@@ -232,9 +241,16 @@ gestellt.
 Die `clientDataJSON` steht auf dem Draht, weil die Assertion über genau diese
 Bytes signiert. Der Server **parst** sie nicht: ADR 0004 hat `json` an Axum
 abgeschaltet, damit neben dem deterministischen CBOR kein zweiter, ungeprüfter
-Dekodierweg in den Server führt. Er serialisiert stattdessen die erwartete
-`CollectedClientData` aus Challenge und Bundle-Origin und vergleicht byteweise;
-das pinnt `type`, `challenge`, `origin` und `crossOrigin` in einem Zug.
+Dekodierweg in den Server führt. Er serialisiert stattdessen die
+Pflichtglieder der `CollectedClientData` nach WebAuthn Level 2 §5.8.1.1 aus
+Challenge und Bundle-Origin und verlangt nach dem **Limited Verification
+Algorithm** (§5.8.1.2), dass die gelieferten Bytes damit **beginnen**. Das
+pinnt `type`, `challenge`, `origin` und `crossOrigin` in einem Zug und lässt
+zugleich zu, was §5.8.1.1 ausdrücklich vorsieht: weitere Glieder hinter
+`crossOrigin` (Level 3 ergänzt etwa `topOrigin`). Ein Gleichheitstest wiese
+einen regelkonformen Browser ab, der irgendetwas anhängt. Strenger als die
+Spezifikation an genau einer Stelle: hinter dem Präfix MUSS `}` oder `,`
+stehen — beides sind die einzigen Fortsetzungen, die §5.8.1.1 erzeugt.
 
 **Der Signaturalgorithmus.** `credential-public-cose-key` ist die kanonische
 COSE-Karte dieses Arbeitsbereichs — `{1: 1 (OKP), -1: 6 (Ed25519), -2: x}`, ohne
@@ -260,6 +276,34 @@ seine Nonce wiederverwenden kann. Ein `404` für eine unbekannte `subjectId` gib
 es ausdrücklich nicht; die `404`-Zeile der HTTP-Abbildung nennt unbekanntes
 Objekt, unbekannte Kette, unbekannten Eintrag und unbekannte Vernichtungs-ID und
 keine `subjectId`.
+
+## Vorbehalt: EdDSA-only bei `POST /v1/webauthn-credentials`
+
+**Festlegung.** `POST /v1/webauthn-credentials` nimmt **ausschließlich** ein
+Credential mit einem Ed25519-Schlüssel in der kanonischen COSE-Form dieses
+Arbeitsbereichs an. Ein Schlüssel in einer anderen Form oder über einer anderen
+Kurve wird **bei der Registrierung** abgewiesen — `EA-SYNC-FRAME-SHAPE`, `400`,
+bevor eine Zeile entsteht —, nicht erst still beim Abruf. Zulässig ist die
+Beschränkung, weil `web-reader-design.md` §6.4.1 keinen Algorithmus nennt,
+`webauthn-credential-registration-v1` kein Algorithmusfeld führt und die Suite
+durchgehend `alg="ed25519"` ist (Design §13.1).
+
+**Der Vorbehalt.** Plattform-Authenticators — Touch ID, Windows Hello — und die
+meisten synchronisierten Passkeys bieten heute **nur ES256** (COSE `alg = -7`,
+ECDSA über P-256) an. Ein Web-Reader gegen diese Fläche kann auf einem
+typischen Plattform-Authenticator deshalb **überhaupt kein** Credential
+registrieren. Das ist keine Randbedingung, sondern der Regelfall der Geräte,
+auf denen §6.4.1 den Blob-Abruf vorsieht.
+
+**Was Stufe 4 entscheiden MUSS, bevor der Browser-Reader ausgeliefert wird.**
+Ob ein ES256-Prüfer aufgenommen wird. Der Baum enthält heute keinen: `p256`,
+`ecdsa`, `elliptic-curve` und `sec1` stehen nicht in `Cargo.lock`, und `ring`
+liegt nur als transitive Kante unter `rustls`. Der Weg ist benannt und
+kostenpflichtig: ein `p256`-Pin oder eine direkte `ring`-Kante unter dem
+Verfahren aus `docs/adr/0004-server-runtime-and-dependency-class.md`, danach ein
+zweiter Arm an `ea_crypto::CanonicalPublicCoseKey` und ein zweiter
+Prüfzweig in `release_vault_blobs`. Der Rahmen selbst bleibt unverändert: er
+trägt den öffentlichen Schlüssel als Bytes und kennt den Algorithmus nicht.
 
 ## Die CORS-Positivliste
 
@@ -417,6 +461,8 @@ Stelle ist damit benannt und nicht stillschweigend offen.
 | `challenge-request-v1` / organization-id | §13.1, ratenbegrenzter Challenge-Endpunkt ohne `tag` | bestätigt |
 | Ratenbegrenzung / Zählschlüssel = SHA-256 der Gegenstellenadresse ohne Port | §13.1, ratenbegrenzter Challenge-Endpunkt | bestätigt |
 | `webauthn-credential-registration-v1` / subject-id, credential-id, credential-public-cose-key | web-reader-design.md §6.4.1 | bestätigt |
+| `webauthn-credential-registration-v1` / credential-public-cose-key auf den Ed25519-Arm der kanonischen COSE-Karte beschränkt, mit Stufe-4-Vorbehalt ES256 | web-reader-design.md §6.4.1 | bestätigt |
+| `vault-blob-upload-v1`, `vault-blob-retrieval-request-v1`, `vault-blob-retrieval-response-v1`; Ablage und Herausgabe organisationsgebunden | web-reader-design.md §6.4, §6.4.1 | bestätigt |
 | grant-plan-v1 / recipient-key-thumbprint | encode_plan_items in crates/ea-format/src/eag.rs | bestätigt |
 | grant-plan-v1 / recipient-certificate-hash | encode_plan_items in crates/ea-format/src/eag.rs | bestätigt |
 | grant-plan-v1 / "EINSATZARCHIV-HPKE-1" | GRANT_SUITE_ID in crates/ea-crypto/src/digest.rs | bestätigt |

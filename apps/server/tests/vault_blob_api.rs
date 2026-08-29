@@ -26,6 +26,8 @@ use ea_sync_protocol::{
     STRUCTURED_MEDIA_TYPE_V1, VaultBlobRetrievalRequestV1, VaultBlobRetrievalResponseV1,
     VaultBlobUploadV1, WebauthnCredentialRegistrationV1,
 };
+use std::sync::Arc;
+
 use ea_types::{CertificateHash, OrganizationId, SubjectId, UnixMillis};
 use sha2::{Digest as _, Sha256};
 
@@ -109,14 +111,23 @@ fn base64url_no_pad(bytes: &[u8]) -> String {
 }
 
 /// Die `clientDataJSON`, wie ein Browser sie fuer `navigator.credentials.get`
-/// serialisiert (WebAuthn Level 2, §5.8.1).
-fn client_data_json(challenge: &[u8; 32], origin: &str) -> Vec<u8> {
-    format!(
-        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"{}\",\"crossOrigin\":false}}",
+/// serialisiert (WebAuthn Level 2, §5.8.1.1).
+///
+/// `trailing` haengt ein WEITERES Glied hinter `crossOrigin` an — genau das,
+/// was §5.8.1.1 ausdruecklich zulaesst und was Level 3 mit `topOrigin` selbst
+/// tut. Ein Server, der auf Bytegleichheit prueft, weist es ab.
+fn client_data_json(challenge: &[u8; 32], origin: &str, trailing: Option<&str>) -> Vec<u8> {
+    let mut json = format!(
+        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"{}\",\"crossOrigin\":false",
         base64url_no_pad(challenge),
         origin
-    )
-    .into_bytes()
+    );
+    if let Some(trailing) = trailing {
+        json.push(',');
+        json.push_str(trailing);
+    }
+    json.push('}');
+    json.into_bytes()
 }
 
 /// `authenticatorData`: `rpIdHash` ‖ `flags` ‖ `signCount`.
@@ -144,6 +155,18 @@ struct Assertion {
     signature_counter: u32,
     /// Setzt die Signatur auf Nullbytes — „ohne Assertion" auf dem Draht.
     without_signature: bool,
+    /// Die `rpId`, ueber deren Hash der Authenticator signiert. Abweichend
+    /// gesetzt ist sie eine Assertion, die auf einer FREMDEN Seite entstanden
+    /// ist.
+    relying_party_id: &'static str,
+    /// Der Origin in der `clientDataJSON`.
+    origin: &'static str,
+    /// Das Flagbyte der `authenticatorData`. `0x05` ist `UP` und `UV`.
+    flags: u8,
+    /// Ein weiteres Glied hinter `crossOrigin`.
+    trailing_client_data_member: Option<&'static str>,
+    /// Eine abweichend BEHAUPTETE `organizationId`.
+    claimed_organization: Option<[u8; 16]>,
 }
 
 impl Assertion {
@@ -155,6 +178,11 @@ impl Assertion {
             challenge: [0; 32],
             signature_counter: 1,
             without_signature: false,
+            relying_party_id: common::TEST_RELYING_PARTY_ID,
+            origin: common::TEST_BUNDLE_ORIGIN,
+            flags: 0x05,
+            trailing_client_data_member: None,
+            claimed_organization: None,
         }
     }
 
@@ -178,10 +206,39 @@ impl Assertion {
         self
     }
 
+    const fn with_relying_party(mut self, relying_party_id: &'static str) -> Self {
+        self.relying_party_id = relying_party_id;
+        self
+    }
+
+    const fn with_origin(mut self, origin: &'static str) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    const fn with_flags(mut self, flags: u8) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    const fn with_trailing_client_data_member(mut self, member: &'static str) -> Self {
+        self.trailing_client_data_member = Some(member);
+        self
+    }
+
+    const fn claiming_organization(mut self, organization: [u8; 16]) -> Self {
+        self.claimed_organization = Some(organization);
+        self
+    }
+
     fn into_request(self, organization_id: OrganizationId) -> VaultBlobRetrievalRequestV1 {
-        let client_data = client_data_json(&self.challenge, common::TEST_BUNDLE_ORIGIN);
-        let authenticator =
-            authenticator_data(common::TEST_RELYING_PARTY_ID, self.signature_counter);
+        let client_data = client_data_json(
+            &self.challenge,
+            self.origin,
+            self.trailing_client_data_member,
+        );
+        let mut authenticator = authenticator_data(self.relying_party_id, self.signature_counter);
+        authenticator[32] = self.flags;
         let mut message = authenticator.clone();
         message.extend_from_slice(&Sha256::digest(&client_data));
         let signature = if self.without_signature {
@@ -190,7 +247,10 @@ impl Assertion {
             ea_testkit::ed25519_sign_raw(&self.authenticator_seed, &message)
         };
         VaultBlobRetrievalRequestV1::new(
-            organization_id,
+            self.claimed_organization
+                .map_or(organization_id, |claimed| {
+                    OrganizationId::try_from(&claimed[..]).expect("an organization id is 16 bytes")
+                }),
             subject(self.claimed_subject),
             self.credential_id.to_vec(),
             self.challenge,
@@ -354,6 +414,19 @@ impl Api {
             upload.exact_bytes(),
         )
         .await
+    }
+
+    /// Wie viele Blobs diese `subjectId` in dieser Organisation haelt.
+    async fn stored_blob_count(&self, subject_bytes: [u8; 16]) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM reader_vault_blobs \
+             WHERE organization_id = $1 AND subject_id = $2",
+        )
+        .bind(&self.organization_id.as_bytes()[..])
+        .bind(&subject_bytes[..])
+        .fetch_one(self.database.pool())
+        .await
+        .expect("counting the stored blobs must succeed")
     }
 
     async fn put_blob(&self, subject_bytes: [u8; 16], ciphertext: &[u8]) -> common::HttpResponse {
@@ -768,13 +841,11 @@ async fn the_upload_is_create_if_absent_and_capped_per_subject() {
         api.put_blob(READER_SUBJECT, &WRAPPED_BLOB).await.status,
         201
     );
-    let rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM reader_vault_blobs WHERE subject_id = $1")
-            .bind(&READER_SUBJECT[..])
-            .fetch_one(api.database.pool())
-            .await
-            .expect("counting the stored blobs must succeed");
-    assert_eq!(rows, 1, "create-if-absent over (subjectId, blob hash)");
+    assert_eq!(
+        api.stored_blob_count(READER_SUBJECT).await,
+        1,
+        "create-if-absent over (organizationId, subjectId, blob hash)"
+    );
 
     assert_eq!(
         api.put_blob(READER_SUBJECT, &SECOND_WRAPPED_BLOB)
@@ -797,6 +868,354 @@ async fn the_upload_is_create_if_absent_and_capped_per_subject() {
         (common::error_code(&refused.body).as_deref(), refused.status),
         (Some("EA-VAULT-BLOB-LIMIT"), 413),
         "a released device cannot fill the table under a subjectId without bound"
+    );
+
+    api.cleanup().await;
+}
+
+/// Die Decke haelt auch unter NEBENLAEUFIGKEIT.
+///
+/// Eine Zaehlung als Unterabfrage der Einfuegung reichte nicht: unter
+/// `READ COMMITTED` liest sie einen Schnappschuss und nimmt keine Sperre, also
+/// kaemen mehrere gleichzeitige Ablagen an derselben Decke vorbei. Ein Bestand
+/// ueber der Decke waere nicht mehr reparierbar — diese Stufe hat keinen
+/// Loeschpfad —, und die Abrufantwort liesse sich nicht mehr rahmen.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cap_holds_under_concurrent_uploads() {
+    let api = Api::stand_up().await;
+
+    // Sieben von acht Plaetzen belegen.
+    for filler in 0..(MAX_VAULT_BLOBS_PER_SUBJECT_V1 - 1) {
+        let mut blob = WRAPPED_BLOB;
+        blob[0] = u8::try_from(filler).expect("the cap is small");
+        assert_eq!(api.put_blob(READER_SUBJECT, &blob).await.status, 201);
+    }
+    assert_eq!(
+        api.stored_blob_count(READER_SUBJECT).await,
+        i64::try_from(MAX_VAULT_BLOBS_PER_SUBJECT_V1 - 1).expect("the cap is small")
+    );
+
+    // Vier verschiedene Chiffrate GLEICHZEITIG auf den letzten Platz.
+    //
+    // Gemessen wird am PORT und nicht ueber HTTP: ein TLS-Handschlag je
+    // Verbindung streut die Ankunftszeiten so weit, dass die Anweisungen sich
+    // auch OHNE jede Sperre nicht mehr ueberlappen — ein Zeuge, der die Ablage
+    // nur ueber den Endpunkt treibt, wird gruen, ohne das Rennen je ausgeloest
+    // zu haben (gemessen: mit entfernter Sperre blieb er gruen). Die Sperre
+    // gehoert dem Adapter, also wird sie dort gemessen; die Barriere laesst
+    // alle vier im selben Augenblick los.
+    let blobs: Arc<dyn ea_sync_server::VaultBlobStore> = Arc::new(
+        einsatzarchiv_server::adapters::postgres::PostgresRepository::new(
+            api.database.pool().clone(),
+        ),
+    );
+    let capacity = u64::try_from(MAX_VAULT_BLOBS_PER_SUBJECT_V1).expect("the cap is small");
+    let gate = Arc::new(tokio::sync::Barrier::new(4));
+    let mut running = Vec::new();
+    for marker in 0..4_u8 {
+        let mut bytes = WRAPPED_BLOB;
+        bytes[1] = 0xe0_u8.wrapping_add(marker);
+        let blob = ea_sync_server::ReaderVaultBlobV1 {
+            organization_id: api.organization_id,
+            subject_id: subject(READER_SUBJECT),
+            blob_hash: ea_types::Hash32::try_from(&Sha256::digest(bytes)[..]).expect("32 bytes"),
+            ciphertext: bytes.to_vec(),
+            stored_at: UnixMillis::new(SERVER_NOW_MILLIS),
+        };
+        let store = blobs.clone();
+        let gate = gate.clone();
+        running.push(tokio::spawn(async move {
+            gate.wait().await;
+            store.store(blob, capacity).await
+        }));
+    }
+    let mut created = 0;
+    let mut refused = 0;
+    for handle in running {
+        match handle
+            .await
+            .expect("the concurrent store must not panic")
+            .expect("the store port must not fail")
+        {
+            ea_sync_server::VaultBlobOutcome::Stored => created += 1,
+            ea_sync_server::VaultBlobOutcome::LimitReached => refused += 1,
+            ea_sync_server::VaultBlobOutcome::AlreadyStored => {
+                panic!("four distinct ciphertexts cannot be idempotent replays")
+            }
+        }
+    }
+    assert_eq!(
+        (created, refused),
+        (1, 3),
+        "exactly one of the four wins the last slot"
+    );
+    assert_eq!(
+        api.stored_blob_count(READER_SUBJECT).await,
+        i64::try_from(MAX_VAULT_BLOBS_PER_SUBJECT_V1).expect("the cap is small"),
+        "the table lands at exactly the cap, never above it"
+    );
+
+    // Und ueber den ENDPUNKT bleibt die Decke ebenfalls die Decke.
+    let mut over = WRAPPED_BLOB;
+    over[2] = 0xef;
+    let refused_over_http = api.put_blob(READER_SUBJECT, &over).await;
+    assert_eq!(
+        (
+            common::error_code(&refused_over_http.body).as_deref(),
+            refused_over_http.status
+        ),
+        (Some("EA-VAULT-BLOB-LIMIT"), 413)
+    );
+
+    // Und der Abruf funktioniert an der Decke weiterhin.
+    let released = api
+        .retrieve_blobs(
+            Assertion::of(
+                READER_AUTHENTICATOR_SEED,
+                READER_CREDENTIAL_ID,
+                READER_SUBJECT,
+            )
+            .with_challenge(api.fresh_challenge().await),
+        )
+        .await;
+    assert_eq!(
+        released.status, 200,
+        "a subject at the cap can still retrieve — an over-cap state would lock it out forever"
+    );
+    assert_eq!(
+        released_ciphertexts(&released.body).len(),
+        MAX_VAULT_BLOBS_PER_SUBJECT_V1
+    );
+
+    api.cleanup().await;
+}
+
+/// Ein regelkonformer Browser darf hinter `crossOrigin` weitere Glieder
+/// anhaengen (WebAuthn Level 2 §5.8.1.1; Level 3 tut es mit `topOrigin`
+/// selbst). Der Server prueft deshalb nach dem Limited Verification Algorithm
+/// (§5.8.1.2) auf ein PRAEFIX und nicht auf Bytegleichheit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_data_json_with_a_trailing_member_is_accepted() {
+    let api = Api::stand_up().await;
+    api.put_blob(READER_SUBJECT, &WRAPPED_BLOB).await;
+
+    let released = api
+        .retrieve_blobs(
+            Assertion::of(
+                READER_AUTHENTICATOR_SEED,
+                READER_CREDENTIAL_ID,
+                READER_SUBJECT,
+            )
+            .with_challenge(api.fresh_challenge().await)
+            .with_trailing_client_data_member(
+                "\"topOrigin\":\"https://reader.einsatzarchiv.test\"",
+            ),
+        )
+        .await;
+    assert_eq!(
+        released.status,
+        200,
+        "an appended member is conforming and must not lock the reader out; the server answered \
+         {:?}",
+        common::error_code(&released.body)
+    );
+    assert_eq!(
+        released_ciphertexts(&released.body),
+        vec![WRAPPED_BLOB.to_vec()]
+    );
+
+    // Ein Praefix ist trotzdem kein Freibrief: die Pflichtglieder selbst
+    // muessen stimmen.
+    let tampered = api
+        .retrieve_blobs(
+            Assertion::of(
+                READER_AUTHENTICATOR_SEED,
+                READER_CREDENTIAL_ID,
+                READER_SUBJECT,
+            )
+            .with_challenge(api.fresh_challenge().await)
+            .with_origin("https://not-listed.example"),
+        )
+        .await;
+    assert_eq!(
+        (
+            common::error_code(&tampered.body).as_deref(),
+            tampered.status
+        ),
+        (Some("EA-WEBAUTHN-ASSERTION-INVALID"), 401),
+        "a foreign origin in the clientDataJSON releases nothing"
+    );
+
+    api.cleanup().await;
+}
+
+/// Die drei Bindungen der `authenticatorData` einzeln.
+///
+/// Ohne `rpIdHash` waere eine Assertion gueltig, die der Leser auf einer
+/// FREMDEN Seite erzeugt hat; ohne `UP` eine, bei der niemand anwesend war.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_authenticator_data_must_bind_this_relying_party_and_a_present_user() {
+    let api = Api::stand_up().await;
+    api.put_blob(READER_SUBJECT, &WRAPPED_BLOB).await;
+
+    let base = || {
+        Assertion::of(
+            READER_AUTHENTICATOR_SEED,
+            READER_CREDENTIAL_ID,
+            READER_SUBJECT,
+        )
+    };
+
+    let foreign_relying_party = api
+        .retrieve_blobs(
+            base()
+                .with_challenge(api.fresh_challenge().await)
+                .with_relying_party("angreifer.example"),
+        )
+        .await;
+    let without_user_present = api
+        .retrieve_blobs(
+            base()
+                .with_challenge(api.fresh_challenge().await)
+                .with_flags(0x04),
+        )
+        .await;
+    let foreign_origin = api
+        .retrieve_blobs(
+            base()
+                .with_challenge(api.fresh_challenge().await)
+                .with_origin("https://angreifer.example"),
+        )
+        .await;
+
+    for (name, response) in [
+        ("a foreign rpIdHash", &foreign_relying_party),
+        ("a missing UP flag", &without_user_present),
+        ("a foreign origin", &foreign_origin),
+    ] {
+        assert_eq!(
+            (
+                common::error_code(&response.body).as_deref(),
+                response.status
+            ),
+            (Some("EA-WEBAUTHN-ASSERTION-INVALID"), 401),
+            "{name} must release nothing"
+        );
+    }
+
+    // Alle drei sind vom unbekannten Credential nicht zu unterscheiden.
+    let unknown = api
+        .retrieve_blobs(
+            Assertion::of(
+                NEVER_ENROLLED_AUTHENTICATOR_SEED,
+                NEVER_ENROLLED_CREDENTIAL_ID,
+                NEVER_ENROLLED_SUBJECT,
+            )
+            .with_challenge(api.fresh_challenge().await),
+        )
+        .await;
+    for response in [
+        &foreign_relying_party,
+        &without_user_present,
+        &foreign_origin,
+    ] {
+        assert_eq!(
+            masked_error_body(&response.body),
+            masked_error_body(&unknown.body),
+            "every refusal carries the same bytes modulo the request-id"
+        );
+    }
+
+    api.cleanup().await;
+}
+
+/// Die Herausgabe ist ORGANISATIONSGEBUNDEN.
+///
+/// Die `subjectId` liefert der Aufrufer, also traegt erst die Organisation die
+/// Grenze, die §6.4.1 fuer die Herausgabe verlangt: der Server gibt „die zu
+/// dieser `subjectId` gehoerenden opaken Chiffrate" heraus — und nicht die
+/// einer fremden Organisation, die dieselbe `subjectId` fuehrt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_organization_neither_resolves_nor_is_released_to() {
+    let api = Api::stand_up().await;
+    api.put_blob(READER_SUBJECT, &WRAPPED_BLOB).await;
+
+    // Eine zweite Organisation mit einer Zeile unter DERSELBEN `subjectId`.
+    const FOREIGN_ORGANIZATION: [u8; 16] = [0x5f; 16];
+    const FOREIGN_BLOB: [u8; 96] = [0xdf; 96];
+    sqlx::query(
+        "INSERT INTO organizations (organization_id, root_key_thumbprint, created_at_millis) \
+         VALUES ($1, $2, 0)",
+    )
+    .bind(&FOREIGN_ORGANIZATION[..])
+    .bind(&[0x5e_u8; 32][..])
+    .execute(api.database.pool())
+    .await
+    .expect("the second organization row is technical and must insert");
+    sqlx::query(
+        "INSERT INTO reader_vault_blobs (organization_id, subject_id, blob_hash, ciphertext, \
+         stored_at_millis) VALUES ($1, $2, $3, $4, 0)",
+    )
+    .bind(&FOREIGN_ORGANIZATION[..])
+    .bind(&READER_SUBJECT[..])
+    .bind(&[0xaf_u8; 32][..])
+    .bind(&FOREIGN_BLOB[..])
+    .execute(api.database.pool())
+    .await
+    .expect("the foreign row must insert");
+
+    // Der echte Abruf sieht die fremde Zeile NICHT.
+    let released = api
+        .retrieve_blobs(
+            Assertion::of(
+                READER_AUTHENTICATOR_SEED,
+                READER_CREDENTIAL_ID,
+                READER_SUBJECT,
+            )
+            .with_challenge(api.fresh_challenge().await),
+        )
+        .await;
+    assert_eq!(released.status, 200);
+    assert_eq!(
+        released_ciphertexts(&released.body),
+        vec![WRAPPED_BLOB.to_vec()],
+        "only the ciphertexts of the resolved credential's organization (§6.4.1)"
+    );
+
+    // Und dasselbe Credential unter einer FREMD behaupteten Organisation loest
+    // gar nicht erst auf — mit derselben Antwort wie ein unbekanntes.
+    let claimed_foreign = api
+        .retrieve_blobs(
+            Assertion::of(
+                READER_AUTHENTICATOR_SEED,
+                READER_CREDENTIAL_ID,
+                READER_SUBJECT,
+            )
+            .with_challenge(api.fresh_challenge().await)
+            .claiming_organization(FOREIGN_ORGANIZATION),
+        )
+        .await;
+    let unknown = api
+        .retrieve_blobs(
+            Assertion::of(
+                NEVER_ENROLLED_AUTHENTICATOR_SEED,
+                NEVER_ENROLLED_CREDENTIAL_ID,
+                NEVER_ENROLLED_SUBJECT,
+            )
+            .with_challenge(api.fresh_challenge().await),
+        )
+        .await;
+    assert_eq!(
+        (
+            common::error_code(&claimed_foreign.body).as_deref(),
+            claimed_foreign.status
+        ),
+        (Some("EA-WEBAUTHN-ASSERTION-INVALID"), 401)
+    );
+    assert_eq!(
+        masked_error_body(&claimed_foreign.body),
+        masked_error_body(&unknown.body),
+        "a foreign organization is indistinguishable from an unknown credential"
     );
 
     api.cleanup().await;

@@ -68,9 +68,15 @@ pub async fn put_vault_blob(State(state): State<Arc<AppState>>, request: Request
         }
     };
     let ports = state.auth_ports();
-    if let Err(error) = authenticate(endpoint, &state.authority, &signed, &ports, None).await {
-        return auth_error_response(error, request_id);
-    }
+    // Die Organisation kommt aus der GEPRUEFTEN Identitaet des Aufrufers. Die
+    // `subjectId` darf er waehlen, die Organisation nicht — sonst legte ein
+    // freigegebenes Geraet der Organisation A unter einer in Organisation B
+    // belegten `subjectId` ab.
+    let authenticated = match authenticate(endpoint, &state.authority, &signed, &ports, None).await
+    {
+        Ok(authenticated) => authenticated,
+        Err(error) => return auth_error_response(error, request_id),
+    };
 
     let upload = match VaultBlobUploadV1::decode(&body) {
         Ok(upload) => upload,
@@ -83,7 +89,14 @@ pub async fn put_vault_blob(State(state): State<Arc<AppState>>, request: Request
             );
         }
     };
-    match store_vault_blob(&upload, state.clock.as_ref(), state.repository.as_ref()).await {
+    match store_vault_blob(
+        &upload,
+        authenticated.organization_id,
+        state.clock.as_ref(),
+        state.repository.as_ref(),
+    )
+    .await
+    {
         Ok(_) => StatusCode::CREATED.into_response(),
         Err(error) => vault_error_response(error, request_id),
     }

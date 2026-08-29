@@ -46,7 +46,7 @@ use ea_sync_protocol::{
     MAX_VAULT_BLOBS_PER_SUBJECT_V1, MIN_AUTHENTICATOR_DATA_BYTES_V1, SyncProtocolError,
     VaultBlobRetrievalRequestV1, VaultBlobRetrievalResponseV1, VaultBlobUploadV1, body_digest,
 };
-use ea_types::{Hash32, SubjectId};
+use ea_types::{Hash32, OrganizationId, SubjectId};
 
 use crate::{
     RepositoryError, ServerClock,
@@ -221,6 +221,10 @@ pub struct VaultPorts<'a> {
 /// nicht lesen kann, und kennt weder Vault-Key noch PRF-Ausgabe
 /// (`web-reader-design.md` §6.4, :206-207).
 ///
+/// Die `organizationId` kommt aus der GEPRUEFTEN RFC-9421-Identitaet des
+/// Aufrufers und nicht aus dem Koerper: die `subjectId` darf der Aufrufer
+/// waehlen, die Organisation nicht.
+///
 /// # Errors
 ///
 /// [`VaultServiceError::BlobLimit`], wenn diese `subjectId` ihre Decke
@@ -228,18 +232,18 @@ pub struct VaultPorts<'a> {
 /// Datenbankausfall.
 pub async fn store_vault_blob(
     upload: &VaultBlobUploadV1,
+    organization_id: OrganizationId,
     clock: &dyn ServerClock,
     blobs: &dyn VaultBlobStore,
 ) -> Result<VaultBlobOutcome, VaultServiceError> {
     let blob = ReaderVaultBlobV1 {
+        organization_id,
         subject_id: upload.subject_id(),
         blob_hash: hash32(body_digest(upload.ciphertext())),
         ciphertext: upload.ciphertext().to_vec(),
         stored_at: clock.now(),
     };
-    let capacity =
-        u64::try_from(MAX_VAULT_BLOBS_PER_SUBJECT_V1).map_err(|_| VaultServiceError::Internal)?;
-    match blobs.store(blob, capacity).await? {
+    match blobs.store(blob, blob_capacity()?).await? {
         VaultBlobOutcome::LimitReached => Err(VaultServiceError::BlobLimit),
         accepted => Ok(accepted),
     }
@@ -293,8 +297,10 @@ pub async fn release_vault_blobs(
     let mut accepted = resolved.is_some();
     accepted &= matches!(spend, ChallengeSpendOutcome::Spent);
     accepted &= reference.subject_id == request.subject_id();
-    accepted &= request.client_data_json()
-        == expected_client_data_json(request.challenge(), relying_party.origin()).as_slice();
+    accepted &= client_data_begins_with_required_members(
+        request.client_data_json(),
+        &expected_client_data_json(request.challenge(), relying_party.origin()),
+    );
     accepted &= authenticator_data_binds(request.authenticator_data(), relying_party);
     accepted &= counter_advances(reference.signature_counter, delivered_counter);
     accepted &= assertion_signature_verifies(&reference, request);
@@ -319,8 +325,27 @@ pub async fn release_vault_blobs(
         return Err(VaultServiceError::AssertionInvalid);
     }
 
-    let ciphertexts = ports.blobs.list_for_subject(request.subject_id()).await?;
-    VaultBlobRetrievalResponseV1::new(ciphertexts).map_err(VaultServiceError::from)
+    let capacity = blob_capacity()?;
+    let ciphertexts = ports
+        .blobs
+        .list_for_subject(organization_id, request.subject_id(), capacity)
+        .await?;
+    // Der Rahmenfehler wird zu `AssertionInvalid` und NICHT durchgereicht.
+    // Nach der Decke in `store` und dem `limit` oben kann er nicht eintreten;
+    // traete er doch ein, waere ein eigener Code an dieser Stelle genau die
+    // Unterscheidbarkeit, die §6.4.1 (:228) verbietet — eine `subjectId` ueber
+    // der Decke waere an ihrem Fehlercode erkennbar.
+    VaultBlobRetrievalResponseV1::new(ciphertexts).map_err(|_| VaultServiceError::AssertionInvalid)
+}
+
+/// Die Decke je `subjectId` als `u64`.
+///
+/// # Errors
+///
+/// Nie auf einer Zielplattform dieses Servers: `usize` ist dort hoechstens
+/// 64 Bit.
+fn blob_capacity() -> Result<u64, VaultServiceError> {
+    u64::try_from(MAX_VAULT_BLOBS_PER_SUBJECT_V1).map_err(|_| VaultServiceError::Internal)
 }
 
 /// Das Ersatzcredential des Nicht-Treffers.
@@ -337,18 +362,37 @@ fn placeholder_credential() -> StoredWebauthnCredentialV1 {
     }
 }
 
-/// Die `CollectedClientData`, wie WebAuthn Level 2 §5.8.1 sie serialisiert.
+/// Die PFLICHTGLIEDER der `CollectedClientData` in der Serialisierung von
+/// WebAuthn Level 2 §5.8.1.1 — OHNE die schliessende Klammer.
 ///
-/// Der Server BAUT sie und vergleicht byteweise; er parst nichts. Damit sind
-/// `type`, `challenge`, `origin` und `crossOrigin` in einem Zug gepinnt.
+/// Der Server BAUT sie und parst nichts. Damit sind `type`, `challenge`,
+/// `origin` und `crossOrigin` in einem Zug gepinnt.
 fn expected_client_data_json(challenge: &[u8; 32], origin: &str) -> Vec<u8> {
     let mut json = String::with_capacity(160);
     json.push_str("{\"type\":\"webauthn.get\",\"challenge\":\"");
     json.push_str(&base64url_no_pad(challenge));
     json.push_str("\",\"origin\":\"");
     json.push_str(origin);
-    json.push_str("\",\"crossOrigin\":false}");
+    json.push_str("\",\"crossOrigin\":false");
     json.into_bytes()
+}
+
+/// Der Vergleich nach dem Limited Verification Algorithm, WebAuthn Level 2
+/// §5.8.1.2.
+///
+/// Die Spezifikation verlangt AUSDRUECKLICH ein Praefix und keine
+/// Bytegleichheit: §5.8.1.1 haengt hinter `crossOrigin` jedes weitere Glied an
+/// („Other members …"), und Level 3 ergaenzt `topOrigin`. Ein Gleichheitstest
+/// wiese einen regelkonformen Browser ab, der irgendetwas anhaengt — und weil
+/// diese Flaeche fail-closed genau EINEN Fehlercode fuehrt, waere das ein
+/// Endpunkt, der stumm gar nicht funktioniert.
+///
+/// Strenger als die Spezifikation an genau einer Stelle: hinter dem Praefix
+/// MUSS `}` oder `,` stehen. Beides sind die einzigen Fortsetzungen, die
+/// §5.8.1.1 erzeugt; ohne diese Zeile ginge auch ein angehaengtes `…falsex`
+/// durch.
+fn client_data_begins_with_required_members(delivered: &[u8], expected: &[u8]) -> bool {
+    delivered.starts_with(expected) && matches!(delivered.get(expected.len()), Some(b'}' | b','))
 }
 
 /// Base64url ohne Fuellzeichen (RFC 4648 §5) — die Kodierung, in der WebAuthn

@@ -298,6 +298,30 @@ impl WebauthnCredentialStore for PostgresRepository {
     }
 }
 
+/// Der Klassenteil des Advisory Locks der Blobtabelle.
+///
+/// PostgreSQL fuehrt die Zwei-Integer-Form von `pg_advisory_xact_lock` in
+/// einem ANDEREN Schluesselraum als die Bigint-Form; der Migrator von `sqlx`
+/// nimmt die Bigint-Form, eine Kollision ist damit ausgeschlossen. Der Wert
+/// ist ASCII `EAVB` und traegt keine fachliche Bedeutung.
+const VAULT_BLOB_LOCK_CLASS_V1: i32 = 0x4541_5642;
+
+/// Der Objektteil des Advisory Locks: die ersten vier Bytes des SHA-256 ueber
+/// Organisation und `subjectId`.
+///
+/// Ein Digest und nicht die Kennungen selbst — der Schluessel ist vier Byte
+/// breit, also muss er ohnehin verdichtet werden, und ein Digest verteilt
+/// gleichmaessiger als ein Praefix. Eine Kollision zweier `subjectId` kostet
+/// nur wechselseitiges Warten und niemals Korrektheit: die Zaehlung hinter der
+/// Sperre ist je Organisation und `subjectId` gefiltert.
+fn vault_blob_lock_key(organization_id: OrganizationId, subject_id: SubjectId) -> i32 {
+    let mut material = [0_u8; 32];
+    material[..16].copy_from_slice(organization_id.as_bytes());
+    material[16..].copy_from_slice(subject_id.as_bytes());
+    let digest = ea_sync_protocol::body_digest(&material);
+    i32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
+}
+
 #[async_trait]
 impl VaultBlobStore for PostgresRepository {
     async fn store(
@@ -305,63 +329,94 @@ impl VaultBlobStore for PostgresRepository {
         blob: ReaderVaultBlobV1,
         max_per_subject: u64,
     ) -> Result<VaultBlobOutcome, RepositoryError> {
-        // Decke und Einfuegung in EINER Anweisung. Getrennt gefuehrt liessen
-        // zwei gleichzeitige Ablagen die Decke gemeinsam ueberschreiten, weil
-        // beide dieselbe Zaehlung laesen.
-        let inserted = sqlx::query(
-            "INSERT INTO reader_vault_blobs (subject_id, blob_hash, ciphertext, stored_at_millis) \
-             SELECT $1, $2, $3, $4 \
-             WHERE (SELECT count(*) FROM reader_vault_blobs WHERE subject_id = $1) < $5 \
-             ON CONFLICT DO NOTHING",
+        let capacity = i64::try_from(max_per_subject).map_err(|_| RepositoryError::Unavailable)?;
+        let mut transaction = self.pool().begin().await.map_err(|e| unavailable(&e))?;
+
+        // Die Decke braucht GEGENSEITIGEN AUSSCHLUSS und nicht bloss eine
+        // Anweisung. Eine Zaehlung als Unterabfrage der Einfuegung liest unter
+        // `READ COMMITTED` einen Schnappschuss und nimmt KEINE Sperre auf die
+        // gezaehlten Zeilen: zwei gleichzeitige Ablagen saehen beide sieben,
+        // beide kaemen an `7 < 8` vorbei, und weil ihre Blobhashes verschieden
+        // sind, greift auch `ON CONFLICT` nicht — der Bestand landete bei neun.
+        // Diese Stufe hat keinen Loeschpfad, der Bestand waere also dauerhaft
+        // ueber der Decke.
+        //
+        // Das Advisory Lock haengt an (`organizationId`, `subjectId`) und
+        // nicht an der Tabelle: zwei verschiedene Leser blockieren einander
+        // nicht. Es ist ein `xact`-Lock, faellt also mit der Transaktion — auch
+        // mit einer abgebrochenen.
+        sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+            .bind(VAULT_BLOB_LOCK_CLASS_V1)
+            .bind(vault_blob_lock_key(blob.organization_id, blob.subject_id))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        // Hinter der Sperre. Jede Anweisung einer `READ COMMITTED`-Transaktion
+        // nimmt ihren eigenen Schnappschuss, also sieht diese Zaehlung, was der
+        // Vorgaenger committet hat, bevor er die Sperre freigab.
+        let existing = sqlx::query(
+            "SELECT count(*) FILTER (WHERE blob_hash = $3) AS same, count(*) AS held \
+             FROM reader_vault_blobs WHERE organization_id = $1 AND subject_id = $2",
         )
+        .bind(&blob.organization_id.as_bytes()[..])
+        .bind(&blob.subject_id.as_bytes()[..])
+        .bind(&blob.blob_hash.as_bytes()[..])
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let same: i64 = existing.get("same");
+        let held: i64 = existing.get("held");
+
+        // Der idempotente Wiederholer zuerst: er darf auch AN der Decke noch
+        // durch, sonst spiegelte eine volle `subjectId` eine Ablehnung fuer
+        // Bytes vor, die laengst liegen. Der Blobhash ist SHA-256 ueber die
+        // Bytes, also traegt dieselbe Adresse immer dieselben Bytes.
+        if same > 0 {
+            transaction.commit().await.map_err(|e| unavailable(&e))?;
+            return Ok(VaultBlobOutcome::AlreadyStored);
+        }
+        if held >= capacity {
+            transaction.commit().await.map_err(|e| unavailable(&e))?;
+            return Ok(VaultBlobOutcome::LimitReached);
+        }
+
+        sqlx::query(
+            "INSERT INTO reader_vault_blobs (organization_id, subject_id, blob_hash, ciphertext, \
+             stored_at_millis) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&blob.organization_id.as_bytes()[..])
         .bind(&blob.subject_id.as_bytes()[..])
         .bind(&blob.blob_hash.as_bytes()[..])
         .bind(&blob.ciphertext[..])
         .bind(blob.stored_at.get())
-        .bind(i64::try_from(max_per_subject).map_err(|_| RepositoryError::Unavailable)?)
-        .execute(self.pool())
+        .execute(&mut *transaction)
         .await
         .map_err(|e| unavailable(&e))?;
-        if inserted.rows_affected() == 1 {
-            return Ok(VaultBlobOutcome::Stored);
-        }
-
-        // Nichts eingefuegt: entweder lag die Adresse schon da — der
-        // idempotente Wiederholer — oder die Decke ist erreicht. Der Blobhash
-        // ist SHA-256 ueber die Bytes, also traegt dieselbe Adresse immer
-        // dieselben Bytes; ein Bytekonflikt kann hier nicht entstehen.
-        let existing = sqlx::query(
-            "SELECT 1 AS present FROM reader_vault_blobs WHERE subject_id = $1 AND blob_hash = $2",
-        )
-        .bind(&blob.subject_id.as_bytes()[..])
-        .bind(&blob.blob_hash.as_bytes()[..])
-        .fetch_optional(self.pool())
-        .await
-        .map_err(|e| unavailable(&e))?;
-        if existing.is_some() {
-            Ok(VaultBlobOutcome::AlreadyStored)
-        } else {
-            Ok(VaultBlobOutcome::LimitReached)
-        }
+        transaction.commit().await.map_err(|e| unavailable(&e))?;
+        Ok(VaultBlobOutcome::Stored)
     }
 
     async fn list_for_subject(
         &self,
+        organization_id: OrganizationId,
         subject_id: SubjectId,
+        limit: u64,
     ) -> Result<Vec<Vec<u8>>, RepositoryError> {
         // Nach dem Blobhash geordnet: die Antwort soll fuer denselben Bestand
         // dieselbe sein, und eine Einfuegereihenfolge ist keine Ordnung.
         //
-        // BEWUSST ohne `LIMIT`: die Decke steht in `store` und im Rahmen
-        // (`VaultBlobRetrievalResponseV1::new` weist mehr als
-        // `MAX_VAULT_BLOBS_PER_SUBJECT_V1` ab). Ein `LIMIT` hier schnitte
-        // einen Bestand, der die Decke doch gerissen hat, stillschweigend zu
-        // und lieferte eine unvollstaendige Antwort aus; der Rahmenfehler ist
-        // die fail-closed Antwort darauf.
+        // Das `LIMIT` ist Tiefenverteidigung hinter der Decke aus `store`.
+        // Ohne es koennte ein Bestand ueber der Decke gar nicht mehr gerahmt
+        // werden, und diese `subjectId` waere dauerhaft ausgesperrt — es gibt
+        // keinen Loeschpfad, der das wieder aufloeste.
         let rows = sqlx::query(
-            "SELECT ciphertext FROM reader_vault_blobs WHERE subject_id = $1 ORDER BY blob_hash",
+            "SELECT ciphertext FROM reader_vault_blobs \
+             WHERE organization_id = $1 AND subject_id = $2 ORDER BY blob_hash LIMIT $3",
         )
+        .bind(&organization_id.as_bytes()[..])
         .bind(&subject_id.as_bytes()[..])
+        .bind(i64::try_from(limit).map_err(|_| RepositoryError::Unavailable)?)
         .fetch_all(self.pool())
         .await
         .map_err(|e| unavailable(&e))?;
