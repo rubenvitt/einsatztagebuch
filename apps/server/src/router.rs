@@ -6,8 +6,8 @@
 //! [`crate::config`] steht. Ein Klartext-Lauscher existiert nicht — auch nicht
 //! hinter einem Schalter, weil ein Schalter irgendwann umgelegt wird.
 //!
-//! Die Routentafel traegt GENAU die fuenf Endpunkte, die es heute gibt. Die
-//! uebrigen zwoelf der siebzehn aus `design.md` §13.2 sind NICHT gemountet —
+//! Die Routentafel traegt GENAU die sechs Endpunkte, die es heute gibt. Die
+//! uebrigen elf der siebzehn aus `design.md` §13.2 sind NICHT gemountet —
 //! ein nicht gemounteter Endpunkt antwortet mit `404` und kann nicht
 //! versehentlich halb fertig erreichbar sein.
 
@@ -23,7 +23,9 @@ use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
-use crate::http::{AppState, challenges, device_registrations, trust, webauthn_credentials};
+use crate::http::{
+    AppState, challenges, device_registrations, entry_commits, trust, webauthn_credentials,
+};
 
 /// Die Routentafel des Servers.
 ///
@@ -54,6 +56,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             EndpointV1::TrustEvents.path_template(),
             post(trust::upload_trust_event),
+        )
+        .route(
+            EndpointV1::EntryCommits.path_template(),
+            post(entry_commits::create_entry_commit),
         )
         .with_state(state)
 }

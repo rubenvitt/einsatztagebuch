@@ -19,20 +19,24 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod commit;
 pub mod models;
 pub mod ports;
+pub mod receipt;
+pub mod reconcile;
 pub mod trust;
+pub mod validation;
 
 pub use models::{
-    CommitDbCommand, CommitIdentityV1, CommittedDbState, CredentialRegistrationOutcome,
-    IndexedObjectV1, PENDING_REGISTRATION_STATE_V1, PendingDeviceRequestV1,
-    PendingRegistrationOutcome, RegistryLineEntryV1, RepositoryError, SecurityEventKindV1,
-    SecurityEventV1, StagedObject, StoreError, StoredObject, TrustEventCommandV1,
-    TrustIndexOutcome, WebauthnCredentialV1, object_key, object_type_segment,
+    ChainHeadStateV1, CommitDbCommand, CommitIdentityV1, CommittedDbState,
+    CredentialRegistrationOutcome, IndexedObjectV1, PENDING_REGISTRATION_STATE_V1,
+    PendingDeviceRequestV1, PendingRegistrationOutcome, RegistryLineEntryV1, RepositoryError,
+    SecurityEventKindV1, SecurityEventV1, StagedObject, StoreError, StoredObject,
+    TrustEventCommandV1, TrustIndexOutcome, WebauthnCredentialV1, object_key, object_type_segment,
 };
 pub use ports::{
-    AuthorityError, ChallengeSpendOutcome, ChallengeStore, CommitRepository,
+    ActiveRegistryHeadV1, AuthorityError, ChallengeSpendOutcome, ChallengeStore, CommitRepository,
     DeviceAuthorityDirectory, DeviceRegistrationStore, ObjectStore, ObjectTypeDirectory,
-    RequestIdStore, SecurityEventSink, ServerClock, ServerSigner, TrustEventStore,
-    WebauthnCredentialStore,
+    RegistryHeadDirectory, RegistryHeadSelectionV1, RequestIdStore, SecurityEventSink, ServerClock,
+    ServerSigner, TrustEventStore, WebauthnCredentialStore,
 };

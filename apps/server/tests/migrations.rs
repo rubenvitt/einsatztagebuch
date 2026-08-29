@@ -769,7 +769,7 @@ mod commit {
                 },
                 receipt_object_hash: self.receipt,
                 accepted_at_server: UnixMillis::new(self.accepted_at),
-                evidence_due_at: UnixMillis::new(self.accepted_at + 600_000),
+                evidence_due_at: Some(UnixMillis::new(self.accepted_at + 600_000)),
                 registry_version: RegistryVersion::new(1),
                 registry_head_hash: object(0x70),
                 indexed_objects: indexed,

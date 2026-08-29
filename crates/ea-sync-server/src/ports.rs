@@ -62,10 +62,138 @@ pub trait ObjectTypeDirectory: Send + Sync {
 /// Die gesperrte Kettenkopf-Transaktion (`design.md` §13.3, Schritte 4 bis 8).
 #[async_trait]
 pub trait CommitRepository: Send + Sync {
+    /// Der aktuelle Kettenkopf MIT seiner Annahmezeit — ohne Sperre.
+    ///
+    /// Schritt 5 bildet `acceptedAtServer` als Maximum aus Serverzeit und der
+    /// Annahmezeit des DIREKTEN Vorgaengers, und die Quittung entsteht aus
+    /// dieser Zahl. Beides passiert VOR [`Self::commit_locked_head`], das den
+    /// fertigen Auftrag entgegennimmt; also braucht es diesen Lesezugriff.
+    ///
+    /// Er ist ausdruecklich NICHT die Entscheidung: bewegt sich der Kopf
+    /// zwischen diesem Lesen und der Sperre, weist die Transaktion mit
+    /// [`RepositoryError::HeadConflict`] ab. Der Lesezugriff beschleunigt die
+    /// Bildung, er ersetzt sie nicht.
+    async fn head_state(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<crate::models::ChainHeadStateV1>, RepositoryError>;
+
     async fn commit_locked_head(
         &self,
         command: CommitDbCommand,
     ) -> Result<CommittedDbState, RepositoryError>;
+}
+
+/// Der zur EINTRAGSSEQUENZ gewaehlte Registry-Head.
+///
+/// Ein eigener Port neben [`DeviceAuthorityDirectory`], weil die beiden
+/// verschiedene Fragen stellen. Jener loest einen Schluesselabdruck auf und
+/// gibt ein Geraet heraus; dieser gibt den KOPF heraus, und zwar den fuer
+/// GENAU DIESE Sequenz gewaehlten. Der Unterschied ist keine Formsache:
+/// [`ea_trust::SelectedRegistryHead::active_certificates`] antwortet ueber die
+/// vorgeschlagene Sequenz, mit der der Kopf gewaehlt wurde. Wer den Kopf der
+/// Authentisierung wiederverwendete, bekaeme die zur Sequenz der
+/// Trust-Endpunkte aktive Menge — und damit die falsche Empfaengermenge.
+#[async_trait]
+pub trait RegistryHeadDirectory: Send + Sync {
+    /// Der hoechste dem Server bekannte anwendbare Kopf fuer diese Zeit und
+    /// diese Sequenz (`design.md` §13.3, Schritt 5).
+    async fn select_head_for_sequence(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        proposed_sequence: ea_types::ChainSequence,
+        now: ea_types::UnixMillis,
+    ) -> Result<RegistryHeadSelectionV1, AuthorityError>;
+}
+
+/// Wie die Kopfauswahl auf eine Sequenz antwortet.
+///
+/// DREI Ausgaenge und kein `Option`: „kein anwendbarer Kopf" und „der naechste
+/// Kopf gilt erst spaeter" sind verschiedene Antworten mit verschiedenen
+/// Status. Der zweite traegt die Version, die der Aufrufer zuerst holen muss,
+/// und der Nachtrag fuehrt sie als `required-registry-version` im
+/// Fehlerkoerper.
+pub enum RegistryHeadSelectionV1 {
+    /// `RegistrySelectionOutcome::Selected` — der operative Kopf.
+    ///
+    /// Als `Arc<dyn ActiveRegistryHeadV1>` und nicht als
+    /// [`ea_trust::SelectedRegistryHead`], damit der Dienst gegen einen Port
+    /// prueft statt gegen einen Typ, den nur `ea-trust` bauen kann. Die
+    /// PRODUKTION reicht ausschliesslich den echten Kopf herein — die
+    /// Implementierung fuer ihn steht in dieser Crate und leitet Feld fuer
+    /// Feld weiter.
+    Selected(std::sync::Arc<dyn ActiveRegistryHeadV1>),
+    /// `RegistrySelectionOutcome::PendingFuture` — der naechste Kopf gilt
+    /// erst spaeter. `409` mit `required-registry-version`.
+    PendingFuture {
+        required_registry_version: ea_types::RegistryVersion,
+        required_registry_head_hash: ObjectHash,
+    },
+    /// Kein anwendbarer Kopf: kein Anker, keine Kopflinie, oder der vorhandene
+    /// Kopf deckt diese Sequenz nicht. Das ist eine Antwort und kein Ausfall.
+    NoApplicableHead,
+}
+
+/// Der gewaehlte Registry-Head, so wie der Commit-Pfad ihn liest.
+///
+/// Der Port beschreibt AUSSCHLIESSLICH Weiterleitungen an
+/// [`ea_trust::SelectedRegistryHead`]; er trifft keine eigene Aussage und
+/// leitet insbesondere keine Empfaengermenge aus Datenbankzeilen ab. Er
+/// existiert, weil `SelectedRegistryHead` bewusst undurchsichtig ist und sich
+/// ausserhalb von `ea-trust` nicht bauen laesst: ohne ihn koennte der
+/// Commit-Dienst gegen keine Attrappe geprueft werden, und die Nebenlaeufigkeits-
+/// und Ausfallmatrix brauchte fuer jeden Fall einen vollstaendigen
+/// Vertrauensabschluss.
+///
+/// [`ea_crypto::SignerCertificateResolver`] ist Obertrait und keine Kopie:
+/// [`ea_crypto::verify_cose_sign1`] loest den Signierer ueber genau diese
+/// Kante auf, und `SelectedRegistryHead` implementiert sie bereits
+/// (`crates/ea-trust/src/resolver.rs`:333).
+pub trait ActiveRegistryHeadV1: ea_crypto::SignerCertificateResolver + Send + Sync {
+    fn registry_version(&self) -> ea_types::RegistryVersion;
+    fn registry_head_hash(&self) -> ObjectHash;
+    /// Die Kettenkennung des Ankers — die Autoritaet fuer „in welche Kette
+    /// schreibe ich hier".
+    fn chain_id(&self) -> ea_types::ChainId;
+    fn policy_object_hash(&self) -> ObjectHash;
+    fn policy_fields(&self) -> &ea_format::PolicyFieldsV1;
+    /// Jedes zur vorgeschlagenen Sequenz aktive Zertifikat, aufsteigend nach
+    /// `CertificateHash`.
+    ///
+    /// Die EINZIGE Quelle der aktiven Empfaengermenge. Ein `Vec` und kein
+    /// `impl Iterator`, weil der Port objektsicher bleiben muss.
+    fn active_certificates(&self) -> Vec<(CertificateHash, &ea_format::DeviceCertificateFieldsV1)>;
+}
+
+/// Der echte Kopf ist die eine Produktionsimplementierung.
+///
+/// Jede Methode leitet unveraendert weiter; es gibt hier keine Zeile, die eine
+/// eigene Aussage traefe.
+impl ActiveRegistryHeadV1 for ea_trust::SelectedRegistryHead {
+    fn registry_version(&self) -> ea_types::RegistryVersion {
+        Self::registry_version(self)
+    }
+
+    fn registry_head_hash(&self) -> ObjectHash {
+        Self::registry_head_hash(self)
+    }
+
+    fn chain_id(&self) -> ea_types::ChainId {
+        Self::chain_id(self)
+    }
+
+    fn policy_object_hash(&self) -> ObjectHash {
+        Self::policy_object_hash(self)
+    }
+
+    fn policy_fields(&self) -> &ea_format::PolicyFieldsV1 {
+        Self::policy_fields(self)
+    }
+
+    fn active_certificates(&self) -> Vec<(CertificateHash, &ea_format::DeviceCertificateFieldsV1)> {
+        Self::active_certificates(self).collect()
+    }
 }
 
 /// Die Append-only-Ablage der Security Events (`design.md` §13.4).
@@ -86,6 +214,14 @@ pub trait SecurityEventSink: Send + Sync {
 pub trait ServerSigner: TechnicalCursorSigner + TechnicalCursorVerifier + Send + Sync {
     /// Das Serverzertifikat, unter dem signiert wird.
     fn certificate_hash(&self) -> CertificateHash;
+
+    /// Der Abdruck des Schluessels, mit dem signiert wird.
+    ///
+    /// `receipt-core-v1` fuehrt ihn an einer Pflichtposition, und der Kern
+    /// muss VOR der Signatur fertig sein — die Signatur laeuft ja ueber ihn.
+    /// Er aus der fertigen Signatur zurueckzulesen waere ein Zirkel; also
+    /// nennt ihn der Schluesselhalter, der ihn ohnehin kennt.
+    fn key_thumbprint(&self) -> ea_types::KeyThumbprint;
 
     /// Die laufende Schluesselgeneration.
     ///

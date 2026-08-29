@@ -14,8 +14,8 @@
 use async_trait::async_trait;
 use ea_format::ObjectTypeV1;
 use ea_sync_server::{
-    CommitDbCommand, CommitRepository, CommittedDbState, ObjectTypeDirectory, RepositoryError,
-    SecurityEventSink, SecurityEventV1,
+    ChainHeadStateV1, CommitDbCommand, CommitRepository, CommittedDbState, ObjectTypeDirectory,
+    RepositoryError, SecurityEventSink, SecurityEventV1,
 };
 use ea_types::{ChainSequence, EntryHash, ObjectHash, UnixMillis};
 use sqlx::{PgPool, Row};
@@ -48,6 +48,43 @@ const fn unavailable(_error: &sqlx::Error) -> RepositoryError {
 
 #[async_trait]
 impl CommitRepository for PostgresRepository {
+    /// Der Kopf MIT seiner Annahmezeit, OHNE Sperre.
+    ///
+    /// Er wird gelesen, damit Schritt 5 `acceptedAtServer` als Maximum aus
+    /// Serverzeit und Vorgaengerzeit bilden kann — die Quittung entsteht aus
+    /// dieser Zahl und muss fertig sein, bevor die Transaktion sie nennt.
+    /// Bewegt sich der Kopf danach, weist [`Self::commit_locked_head`] unter
+    /// `FOR UPDATE` ab; dieser Lesezugriff entscheidet nichts.
+    async fn head_state(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<ChainHeadStateV1>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT head_sequence, head_entry_hash, head_accepted_at_server_millis \
+             FROM chain_heads WHERE organization_id = $1 AND chain_id = $2",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&chain_id.as_bytes()[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let sequence: i64 = row.get("head_sequence");
+        let entry_hash: Vec<u8> = row.get("head_entry_hash");
+        let accepted: i64 = row.get("head_accepted_at_server_millis");
+        Ok(Some(ChainHeadStateV1 {
+            sequence: ChainSequence::new(
+                u64::try_from(sequence).map_err(|_| RepositoryError::Unavailable)?,
+            ),
+            entry_hash: EntryHash::try_from(entry_hash.as_slice())
+                .map_err(|_| RepositoryError::Unavailable)?,
+            accepted_at_server: UnixMillis::new(accepted),
+        }))
+    }
+
     async fn commit_locked_head(
         &self,
         command: CommitDbCommand,
@@ -173,7 +210,7 @@ impl CommitRepository for PostgresRepository {
         .bind(&command.receipt_object_hash.as_bytes()[..])
         .bind(&command.device_id.as_bytes()[..])
         .bind(command.accepted_at_server.get())
-        .bind(command.evidence_due_at.get())
+        .bind(command.evidence_due_at.map(UnixMillis::get))
         .bind(
             i64::try_from(command.registry_version.get())
                 .map_err(|_| RepositoryError::Unavailable)?,
@@ -209,7 +246,7 @@ impl CommitRepository for PostgresRepository {
         .bind(&command.organization_id.as_bytes()[..])
         .bind(&command.identity.entry_hash.as_bytes()[..])
         .bind(command.accepted_at_server.get())
-        .bind(command.evidence_due_at.get())
+        .bind(command.evidence_due_at.map(UnixMillis::get))
         .execute(&mut *transaction)
         .await
         .map_err(map_commit_error)?;

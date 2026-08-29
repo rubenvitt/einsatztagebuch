@@ -66,6 +66,15 @@ impl ServerSigner for ServerKeyStore {
         self.certificate_hash
     }
 
+    /// Der Abdruck der AKTUELLEN Generation.
+    ///
+    /// `receipt-core-v1` fuehrt ihn an einer Pflichtposition, und der Kern
+    /// steht fest, bevor er signiert wird. Der Speicher haelt den
+    /// oeffentlichen Schluessel ohnehin; er nennt hier nur dessen Abdruck.
+    fn key_thumbprint(&self) -> ea_types::KeyThumbprint {
+        self.public_key.thumbprint()
+    }
+
     fn key_generation(&self) -> u32 {
         self.generation
     }

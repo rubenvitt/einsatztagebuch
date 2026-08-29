@@ -216,11 +216,43 @@ pub struct CommitDbCommand {
     pub identity: CommitIdentityV1,
     pub receipt_object_hash: ObjectHash,
     pub accepted_at_server: UnixMillis,
-    pub evidence_due_at: UnixMillis,
+    /// `None` GENAU im Standardprofil.
+    ///
+    /// `design.md`:929 schreibt einem Standardprofil-Receipt
+    /// `evidence-due-at = null` vor, und `design.md`:1699 haelt fest, dass ein
+    /// solcher Receipt ohne getrennte Richtlinienaenderung KEINE
+    /// Evidence-Grade-Konformitaet erzeugt. Eine hier hilfsweise gerechnete
+    /// Zahl waere deshalb kein Ersatzwert, sondern ein Evidence-Auftrag, den
+    /// es nicht geben darf — und eine zweite Quelle neben der EINEN, die
+    /// `design.md`:1690 benennt: dem signierten `evidence-due-at` des
+    /// Receipts.
+    pub evidence_due_at: Option<UnixMillis>,
     pub registry_version: RegistryVersion,
     pub registry_head_hash: ObjectHash,
     /// Der Objektindex des Commits: Entry, initiale Grants und Receipt.
     pub indexed_objects: Vec<IndexedObjectV1>,
+}
+
+/// Der aktuelle Kettenkopf, wie Schritt 5 ihn liest.
+///
+/// Er traegt die Annahmezeit MIT, weil `acceptedAtServer` das Maximum aus
+/// Serverzeit und der Annahmezeit des direkten Vorgaengers ist. Ein Kopf ohne
+/// diese Zahl beantwortete die Frage nicht, die Schritt 5 stellt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ChainHeadStateV1 {
+    pub sequence: ChainSequence,
+    pub entry_hash: EntryHash,
+    pub accepted_at_server: UnixMillis,
+}
+
+impl fmt::Debug for ChainHeadStateV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "ChainHeadStateV1(sequence={})",
+            self.sequence.get()
+        )
+    }
 }
 
 /// Was nach dem Commit sichtbar ist.

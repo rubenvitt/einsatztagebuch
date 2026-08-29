@@ -1935,8 +1935,11 @@ dependencies = [
  "ea-crypto",
  "ea-format",
  "ea-sync-protocol",
+ "ea-testkit",
+ "ea-trust",
  "ea-types",
  "hex",
+ "tokio",
 ]
 
 [[package]]

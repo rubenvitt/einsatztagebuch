@@ -53,7 +53,7 @@ use ea_crypto::{CanonicalPublicCoseKey, CertificateCapability};
 use ea_format::{DecodedTrustPayloadV1, ParsedArchiveObject, TrustSubtypeV1};
 use ea_sync_protocol::RegisteredDevice;
 use ea_sync_server::{
-    AuthorityError, ObjectStore, RepositoryError,
+    AuthorityError, ObjectStore, RegistryHeadSelectionV1, RepositoryError,
     trust::{TrustEventValidator, TrustPublishError, TrustServiceError},
 };
 use ea_trust::{
@@ -62,7 +62,9 @@ use ea_trust::{
     bootstrap_active_certificates, decode_trust_anchor, load_trust_state, prepare_local_time,
     select_registry_head, verify_catalogue_admission, verify_registry_candidate, verify_trust,
 };
-use ea_types::{ChainSequence, DeviceId, KeyThumbprint, ObjectHash, OrganizationId, UnixMillis};
+use ea_types::{
+    ChainSequence, DeviceId, KeyThumbprint, ObjectHash, OrganizationId, RegistryVersion, UnixMillis,
+};
 use ea_verify::{EphemeralTrustStateStore, verification_state_key};
 use sqlx::{PgPool, Row};
 
@@ -449,6 +451,97 @@ impl TrustEventValidator for PostgresTrustAuthority {
         .map(|_| ())
         .map_err(|error| TrustPublishError::from(map_walk_error(error)))
     }
+}
+
+/// Die Kopfauswahl fuer GENAU EINE Eintragssequenz (`design.md` §13.3,
+/// Schritt 5).
+///
+/// Sie laeuft ueber denselben `walk_to_selected_head` wie die
+/// Autoritaetsaufloesung und ueber denselben fluechtigen Speicher — LESEND,
+/// ohne Zeile, ohne Rennen. Der Unterschied ist die VORGESCHLAGENE SEQUENZ:
+/// die Autoritaetsaufloesung nimmt die groesste bekannte
+/// `effective-from-sequence`, weil die Trust-Endpunkte in keine Kette
+/// schreiben; der Commit nimmt die Sequenz SEINES Eintrags, weil
+/// [`SelectedRegistryHead::active_certificates`] genau ueber sie antwortet.
+/// Denselben Kopf fuer beides zu nehmen ergaebe die falsche Empfaengermenge.
+#[async_trait]
+impl ea_sync_server::RegistryHeadDirectory for PostgresTrustAuthority {
+    async fn select_head_for_sequence(
+        &self,
+        organization_id: OrganizationId,
+        proposed_sequence: ChainSequence,
+        now: UnixMillis,
+    ) -> Result<RegistryHeadSelectionV1, AuthorityError> {
+        let Some(prepared) = self
+            .prepare(organization_id, None)
+            .await
+            .map_err(|_| AuthorityError::Unavailable)?
+        else {
+            // Ohne Anker gibt es keine Wurzel und damit keinen Kopf. Eine
+            // Antwort, kein Ausfall.
+            return Ok(RegistryHeadSelectionV1::NoApplicableHead);
+        };
+        let key = verification_state_key(organization_id);
+        let mut store =
+            EphemeralTrustStateStore::new(key, UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS));
+        match walk_to_selected_head(
+            &prepared.anchor,
+            &prepared.source,
+            &mut store,
+            key,
+            proposed_sequence,
+            now,
+            prepared.head_count,
+        ) {
+            Ok((_, Some(head))) => Ok(RegistryHeadSelectionV1::Selected(Arc::new(head))),
+            // Kein gewaehlter Kopf. WELCHE der beiden Antworten es ist, sagt
+            // der Bestand: gibt es ueberhaupt einen Registry-Kopf, dann ist
+            // dieser Lauf an seinem Zeitfenster oder seiner Sequenzleihe
+            // stehen geblieben, und der Aufrufer braucht den naechsten.
+            //
+            // Die geforderte Version wird aus dem KATALOG gelesen und nicht
+            // aus `PendingFutureSuccessor`: `ea-trust` gibt aus diesem Beweis
+            // nichts heraus (`crates/ea-trust/src/registry.rs`), und die Crate
+            // wird dafuer nicht aufgebohrt — dieselbe Zurueckhaltung, die
+            // `crates/ea-verify/src/entry.rs` beim Schreiberwechsel begruendet.
+            Ok((_, None)) => Ok(highest_known_head(&prepared.source).map_or(
+                RegistryHeadSelectionV1::NoApplicableHead,
+                |(version, head_hash)| RegistryHeadSelectionV1::PendingFuture {
+                    required_registry_version: version,
+                    required_registry_head_hash: head_hash,
+                },
+            )),
+            Err(HeadWalkError::Unavailable) => Err(AuthorityError::Unavailable),
+            Err(HeadWalkError::StateConflict) => Err(AuthorityError::StateConflict),
+            Err(HeadWalkError::NotApplicable | HeadWalkError::Invalid) => {
+                Ok(RegistryHeadSelectionV1::NoApplicableHead)
+            }
+        }
+    }
+}
+
+/// Die hoechste bekannte Registry-Version dieser Organisation und ihr
+/// Objekthash.
+///
+/// Gelesen aus den SIGNIERTEN Ereignissen des Katalogs und nicht aus
+/// `registry_events`: eine Zeile ist keine Signatur, und diese Antwort steht
+/// in einem Fehlerkoerper, den ein Aufrufer als Anweisung liest.
+fn highest_known_head(source: &CatalogSource) -> Option<(RegistryVersion, ObjectHash)> {
+    let mut highest: Option<(RegistryVersion, ObjectHash)> = None;
+    for (object_hash, bytes) in &source.0 {
+        let Ok(ParsedArchiveObject::Trust(parsed)) = ea_format::decode_exact_object(bytes) else {
+            continue;
+        };
+        let Ok(DecodedTrustPayloadV1::RegistryEvent(core)) = parsed.value().decoded_payload()
+        else {
+            continue;
+        };
+        let version = core.fields().registry_version;
+        if highest.is_none_or(|(known, _)| version.get() > known.get()) {
+            highest = Some((version, *object_hash));
+        }
+    }
+    highest
 }
 
 /// Was ein Lauf braucht: Anker, Katalog und die daraus gelesenen Kennzahlen.

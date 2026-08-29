@@ -140,7 +140,14 @@ CREATE TABLE entries (
     receipt_object_hash BYTEA NOT NULL CHECK (octet_length(receipt_object_hash) = 32),
     device_id BYTEA NOT NULL CHECK (octet_length(device_id) = 16),
     accepted_at_server_millis BIGINT NOT NULL,
-    evidence_due_at_millis BIGINT NOT NULL,
+    -- NULLABLE, und das ist eine Sicherheitsaussage: `design.md`:929 schreibt
+    -- einem Standardprofil-Receipt `evidence-due-at = null` vor, und
+    -- `design.md`:1699 haelt fest, dass ein solcher Receipt ohne getrennte
+    -- Richtlinienaenderung KEINE Evidence-Grade-Konformitaet erzeugt. Eine
+    -- hilfsweise gerechnete Zahl in dieser Spalte waere ein
+    -- Evidence-Auftrag, den es nicht geben darf, und zugleich eine zweite
+    -- Quelle neben der EINEN, die `design.md`:1690 benennt.
+    evidence_due_at_millis BIGINT,
     registry_version BIGINT NOT NULL CHECK (registry_version >= 0),
     registry_head_hash BYTEA NOT NULL CHECK (octet_length(registry_head_hash) = 32),
     UNIQUE (chain_id, sequence_number)
@@ -173,7 +180,10 @@ CREATE TABLE receipts (
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     entry_hash BYTEA NOT NULL UNIQUE REFERENCES entries (entry_hash),
     accepted_at_server_millis BIGINT NOT NULL,
-    evidence_due_at_millis BIGINT NOT NULL
+    -- Nullable aus demselben Grund wie in `entries`: die Spalte gibt genau
+    -- das wieder, was im signierten Receipt steht, und im Standardprofil
+    -- steht dort `null`.
+    evidence_due_at_millis BIGINT
 );
 
 -- Checkpoints. `technical_index` ist die Blaetterposition, auf die sich der

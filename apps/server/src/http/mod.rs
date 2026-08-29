@@ -20,6 +20,7 @@
 
 pub mod challenges;
 pub mod device_registrations;
+pub mod entry_commits;
 pub mod trust;
 pub mod webauthn_credentials;
 
@@ -38,6 +39,7 @@ use ea_sync_protocol::{
 use ea_sync_server::{
     ObjectStore, ServerClock, ServerSigner,
     auth::{AuthPorts, AuthServiceError},
+    commit::CommitPorts,
     trust::TrustPorts,
 };
 
@@ -76,6 +78,18 @@ impl AppState {
             challenges: self.repository.as_ref(),
             request_ids: self.repository.as_ref(),
             directory: self.trust_authority.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn commit_ports(&self) -> CommitPorts<'_> {
+        CommitPorts {
+            clock: self.clock.as_ref(),
+            signer: self.signer.as_ref(),
+            objects: self.objects.as_ref(),
+            commits: self.repository.as_ref(),
+            heads: self.trust_authority.as_ref(),
+            security: self.repository.as_ref(),
         }
     }
 
