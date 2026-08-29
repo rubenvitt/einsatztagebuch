@@ -1252,25 +1252,20 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     }
     validate_cddl_document("combined archive CDDL", &archive_bundle)?;
 
-    let protocol_path = "schemas/protocol/v1/signed-protocol.cddl";
-    let protocol = fs::read_to_string(root.join(protocol_path))
-        .map_err(|error| format!("failed to read {protocol_path}: {error}"))?;
-    validate_cddl_document(protocol_path, &protocol)?;
-
-    // Die beiden Sync-Protokolldokumente. Sie stehen HIER und nicht in einem
-    // Verzeichnisscanner, weil `validate_schemas` eine HARTE Pfadliste ist:
-    // eine nicht registrierte `.cddl`-Datei waere wirkungslos. Beide sind
-    // eigenstaendig und referenzieren nichts ausserhalb ihrer selbst, werden
-    // also EINZELN validiert.
-    let entry_commit_path = "schemas/protocol/v1/entry-commit.cddl";
-    let entry_commit = fs::read_to_string(root.join(entry_commit_path))
-        .map_err(|error| format!("failed to read {entry_commit_path}: {error}"))?;
-    validate_cddl_document(entry_commit_path, &entry_commit)?;
-
-    let reader_batch_path = "schemas/protocol/v1/reader-batch.cddl";
-    let reader_batch = fs::read_to_string(root.join(reader_batch_path))
-        .map_err(|error| format!("failed to read {reader_batch_path}: {error}"))?;
-    validate_cddl_document(reader_batch_path, &reader_batch)?;
+    // Die drei Protokolldokumente. Die Liste bleibt eine HARTE Pfadliste und
+    // ist ausdruecklich KEIN Verzeichnisscanner: eine nicht aufgefuehrte
+    // `.cddl`-Datei waere wirkungslos, und genau das soll auffallen. Jedes
+    // Dokument genuegt sich selbst und wird deshalb EINZELN validiert; die
+    // Schleife spart die abgeschriebenen Bloecke, nicht die Aufzaehlung.
+    for relative in [
+        "schemas/protocol/v1/signed-protocol.cddl",
+        "schemas/protocol/v1/entry-commit.cddl",
+        "schemas/protocol/v1/reader-batch.cddl",
+    ] {
+        let document = fs::read_to_string(root.join(relative))
+            .map_err(|error| format!("failed to read {relative}: {error}"))?;
+        validate_cddl_document(relative, &document)?;
+    }
 
     let identity_path = "schemas/identity/v1/os-account.cddl";
     let identity = fs::read_to_string(root.join(identity_path))

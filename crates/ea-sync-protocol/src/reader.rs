@@ -65,16 +65,27 @@ fn check_object_records(
     if records.len() > max_records {
         return Err(SyncProtocolError::ItemLimit);
     }
+    check_page_bytes(records.iter().map(|record| record.exact_object_bytes.len()))?;
+    check_hash_order(records.iter().map(|record| record.object_hash))
+}
+
+/// Die Bytedecke JEDER Seite dieser Version.
+///
+/// Sie steht getrennt von der Satzzahl, weil beide Grenzen getrennt reissen
+/// koennen: 1 000 Saetze zu je 4 MiB waeren zaehlbar zulaessig und trotzdem
+/// vier Gigabyte. Der Addendumssatz „der Server setzt SOWOHL die Zaehl- ALS
+/// AUCH die gestreamte Bytegrenze durch“ ist genau diese zweite Haelfte.
+fn check_page_bytes(lengths: impl Iterator<Item = usize>) -> Result<(), SyncProtocolError> {
     let mut total = 0usize;
-    for record in records {
+    for length in lengths {
         total = total
-            .checked_add(record.exact_object_bytes.len())
+            .checked_add(length)
             .ok_or(SyncProtocolError::BodyLimit)?;
         if total > MAX_READER_PAGE_BYTES_V1 {
             return Err(SyncProtocolError::BodyLimit);
         }
     }
-    check_hash_order(records.iter().map(|record| record.object_hash))
+    Ok(())
 }
 
 fn check_hash_order(hashes: impl Iterator<Item = ObjectHash>) -> Result<(), SyncProtocolError> {
@@ -324,6 +335,7 @@ impl TrustRegistryResponseV1 {
         if events.len() > MAX_TRUST_PAGE_EVENTS_V1 {
             return Err(SyncProtocolError::ItemLimit);
         }
+        check_page_bytes(events.iter().map(|event| event.exact_etb_bytes.len()))?;
         for pair in events.windows(2) {
             match pair[0]
                 .registry_version
@@ -359,6 +371,9 @@ impl TrustRegistryResponseV1 {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SyncProtocolError> {
+        if bytes.len() > MAX_READER_PAGE_BYTES_V1 {
+            return Err(SyncProtocolError::BodyLimit);
+        }
         ea_cbor::validate(bytes, PROTOCOL_PARSER_LIMITS_V1)?;
         let mut decoder = Decoder::new(bytes);
         cbor_read::expect_array(&mut decoder, 4)?;
@@ -440,6 +455,9 @@ impl GrantListResponseV1 {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SyncProtocolError> {
+        if bytes.len() > MAX_READER_PAGE_BYTES_V1 {
+            return Err(SyncProtocolError::BodyLimit);
+        }
         ea_cbor::validate(bytes, PROTOCOL_PARSER_LIMITS_V1)?;
         let mut decoder = Decoder::new(bytes);
         cbor_read::expect_array(&mut decoder, 4)?;
@@ -510,6 +528,9 @@ impl CheckpointListResponseV1 {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SyncProtocolError> {
+        if bytes.len() > MAX_READER_PAGE_BYTES_V1 {
+            return Err(SyncProtocolError::BodyLimit);
+        }
         ea_cbor::validate(bytes, PROTOCOL_PARSER_LIMITS_V1)?;
         let mut decoder = Decoder::new(bytes);
         cbor_read::expect_array(&mut decoder, 5)?;
@@ -647,6 +668,9 @@ impl ArchiveExportManifestV1 {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SyncProtocolError> {
+        if bytes.len() > MAX_READER_PAGE_BYTES_V1 {
+            return Err(SyncProtocolError::BodyLimit);
+        }
         ea_cbor::validate(bytes, PROTOCOL_PARSER_LIMITS_V1)?;
         let mut decoder = Decoder::new(bytes);
         cbor_read::expect_array(&mut decoder, 5)?;
@@ -767,6 +791,26 @@ impl fmt::Debug for TechnicalCursorFieldsV1 {
     }
 }
 
+/// Die Bindung, gegen die ein technischer Cursor geoeffnet wird.
+///
+/// Sie traegt GENAU die Felder des Cursors, die nicht seine Blaetterposition
+/// sind. `chain_id` und `start_head_entry_hash` sind `None`, wo der Endpunkt
+/// keine Kette und keinen Startkopf kennt; ein Cursor mit einem gesetzten Wert
+/// passt dann nicht mehr, und das ist die Absicht.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct TechnicalCursorScopeV1 {
+    pub organization_id: OrganizationId,
+    pub endpoint: EndpointV1,
+    pub chain_id: Option<ChainId>,
+    pub start_head_entry_hash: Option<EntryHash>,
+}
+
+impl fmt::Debug for TechnicalCursorScopeV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TechnicalCursorScopeV1(<bound>)")
+    }
+}
+
 /// Ein ausgestellter oder geoeffneter technischer Cursor.
 #[derive(Clone, Eq, PartialEq)]
 pub struct TechnicalCursorV1 {
@@ -796,12 +840,16 @@ impl TechnicalCursorV1 {
     /// Oeffnet einen Cursor: Form, Signatur, Gueltigkeitsfenster und Bindung —
     /// in dieser Reihenfolge, damit ein fremder Cursor nicht ueber sein
     /// Ablaufdatum verraten wird.
+    ///
+    /// Geprueft wird die VOLLSTAENDIGE Bindung des Tokens, nicht nur Endpunkt
+    /// und Organisation: ein Cursor, der auf einer anderen Kette oder von einem
+    /// anderen Kettenkopf aus ausgestellt wurde, blaetterte sonst mitten in
+    /// einer fremden Lesestrecke weiter, obwohl er authentisch ist.
     pub fn open(
         token: &[u8],
         verifier: &dyn TechnicalCursorVerifier,
         now: UnixMillis,
-        endpoint: EndpointV1,
-        organization_id: OrganizationId,
+        scope: &TechnicalCursorScopeV1,
     ) -> Result<Self, SyncProtocolError> {
         let (fields, core, signature) = decode_cursor(token)?;
         verifier
@@ -810,7 +858,11 @@ impl TechnicalCursorV1 {
         if now.get() > fields.expires_at.get() {
             return Err(SyncProtocolError::CursorExpired);
         }
-        if fields.endpoint != endpoint || fields.organization_id != organization_id {
+        if fields.endpoint != scope.endpoint
+            || fields.organization_id != scope.organization_id
+            || fields.chain_id != scope.chain_id
+            || fields.start_head_entry_hash != scope.start_head_entry_hash
+        {
             return Err(SyncProtocolError::CursorScope);
         }
         Ok(Self {
@@ -975,6 +1027,9 @@ impl DestructionStatusResponseV1 {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SyncProtocolError> {
+        if bytes.len() > MAX_READER_PAGE_BYTES_V1 {
+            return Err(SyncProtocolError::BodyLimit);
+        }
         ea_cbor::validate(bytes, PROTOCOL_PARSER_LIMITS_V1)?;
         let mut decoder = Decoder::new(bytes);
         cbor_read::expect_array(&mut decoder, 7)?;

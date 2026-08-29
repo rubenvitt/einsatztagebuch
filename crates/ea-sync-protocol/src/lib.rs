@@ -39,9 +39,9 @@ pub use http_signature::{
 pub use reader::{
     ArchiveExportManifestV1, CheckpointListResponseV1, DestructionStatusResponseV1,
     ExportObjectRecordV1, GrantListResponseV1, MAX_DESTRUCTION_STATE_V1, ObjectRecordV1,
-    ReaderBatchV1, TECHNICAL_CURSOR_DOMAIN_V1, TechnicalCursorFieldsV1, TechnicalCursorSigner,
-    TechnicalCursorV1, TechnicalCursorVerifier, TrustEventRecordV1, TrustRegistryResponseV1,
-    technical_cursor_digest,
+    ReaderBatchV1, TECHNICAL_CURSOR_DOMAIN_V1, TechnicalCursorFieldsV1, TechnicalCursorScopeV1,
+    TechnicalCursorSigner, TechnicalCursorV1, TechnicalCursorVerifier, TrustEventRecordV1,
+    TrustRegistryResponseV1, technical_cursor_digest,
 };
 
 /// Der Medientyp jedes strukturierten Rahmens dieser Version.

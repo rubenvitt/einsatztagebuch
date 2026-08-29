@@ -74,6 +74,9 @@ pub enum SyncProtocolError {
     DuplicateObject,
     /// Eine Objektliste ist nicht bytweise sortiert.
     UnsortedObjects,
+    /// Das gelieferte Objekt gehoert nicht zu der Objektfamilie, die dieser
+    /// Endpunkt annimmt.
+    ObjectTypeMismatch,
     /// Der technische Cursor ist nicht lesbar oder nicht authentisch.
     CursorInvalid,
     /// Der technische Cursor ist abgelaufen.
@@ -106,7 +109,7 @@ impl SyncProtocolError {
     /// Die durchgereichten Befunde von `ea-format`, `ea-crypto` und `ea-cbor`
     /// stehen NICHT darin: ihre Codes und ihre Eindeutigkeit gehoeren den
     /// Crates, die sie erzeugen.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::SignatureCoverage,
         Self::SignatureDuplicateComponent,
         Self::SignatureMalformed,
@@ -132,6 +135,7 @@ impl SyncProtocolError {
         Self::GrantLimit,
         Self::DuplicateObject,
         Self::UnsortedObjects,
+        Self::ObjectTypeMismatch,
         Self::CursorInvalid,
         Self::CursorExpired,
         Self::CursorScope,
@@ -170,6 +174,7 @@ impl SyncProtocolError {
             Self::GrantLimit => "EA-SYNC-GRANT-LIMIT",
             Self::DuplicateObject => "EA-SYNC-DUPLICATE-OBJECT",
             Self::UnsortedObjects => "EA-SYNC-UNSORTED-OBJECTS",
+            Self::ObjectTypeMismatch => "EA-SYNC-OBJECT-TYPE",
             Self::CursorInvalid => "EA-SYNC-CURSOR-INVALID",
             Self::CursorExpired => "EA-SYNC-CURSOR-EXPIRED",
             Self::CursorScope => "EA-SYNC-CURSOR-SCOPE",
@@ -213,13 +218,13 @@ impl SyncProtocolError {
             Self::NotFound => 404,
             Self::Conflict => 409,
             Self::BodyLimit | Self::ItemLimit | Self::GrantLimit => 413,
-            Self::DuplicateObject | Self::UnsortedObjects => 422,
+            Self::DuplicateObject | Self::UnsortedObjects | Self::ObjectTypeMismatch => 422,
             Self::RateLimited => 429,
             Self::Internal => 500,
             Self::DependencyUnavailable => 503,
             Self::Format(error) => format_status(error),
             Self::Crypto(_) => 422,
-            Self::Cbor(_) => 400,
+            Self::Cbor(error) => cbor_status(error),
         }
     }
 
@@ -234,7 +239,7 @@ impl SyncProtocolError {
 
 /// Eine gerissene Rohgrenze ist ein Byte-Limit (413), jede andere
 /// Formatabweichung ein wohlgeformter, aber unzulaessiger Inhalt (422); ein
-/// CBOR-Befund bleibt fehlerhafte Rahmung (400).
+/// CBOR-Befund wird wie unten getrennt.
 const fn format_status(error: FormatError) -> u16 {
     match error {
         FormatError::GlobalRawLimit
@@ -244,8 +249,24 @@ const fn format_status(error: FormatError) -> u16 {
         | FormatError::EcpRawLimit
         | FormatError::EtbRawLimit
         | FormatError::EdsRawLimit => 413,
-        FormatError::Cbor(_) => 400,
+        FormatError::Cbor(error) => cbor_status(error),
         _ => 422,
+    }
+}
+
+/// Ein CBOR-Befund ist entweder eine gerissene PARSERGRENZE oder eine
+/// fehlerhafte Rahmung, und die Trennung ist nicht kosmetisch: die
+/// HTTP-Abbildung des Addendums bindet Byte-, Zaehl- UND Parsergrenzen auf
+/// `413`, waehrend `400` der fehlerhaften Rahmung vorbehalten bleibt. Ein
+/// gerissenes Tiefen-, Element-, Container- oder Tokenbudget als `400`
+/// auszugeben, verschoebe genau diese Zeile der Abbildung.
+const fn cbor_status(error: CborError) -> u16 {
+    match error {
+        CborError::ItemLimit
+        | CborError::DepthLimit
+        | CborError::ContainerLimit
+        | CborError::TokenLimit => 413,
+        _ => 400,
     }
 }
 

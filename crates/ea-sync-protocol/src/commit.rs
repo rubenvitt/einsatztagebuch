@@ -8,7 +8,9 @@
 
 use core::fmt;
 
-use ea_format::{GrantPlanV1, ParsedArchiveObject, decode_exact_object, decode_grant_plan};
+use ea_format::{
+    GrantPlanV1, ObjectTypeV1, ParsedArchiveObject, decode_exact_object, decode_grant_plan,
+};
 use ea_types::{EntryHash, Hash32, ObjectHash};
 use minicbor::Decoder;
 
@@ -326,24 +328,61 @@ impl fmt::Debug for EntryCommitResponseV1 {
     }
 }
 
+/// Der Rahmenaufschlag eines Einzelobjekt-Uploads.
+///
+/// `[1, bstr, []]` kostet einen Arraykopf, die Versionszahl, den `bstr`-Kopf
+/// und das leere Erweiterungsarray. Sechzehn Byte decken das fuer jede
+/// Objektlaenge dieser Version mit Reserve ab. Die Konstante existiert, damit
+/// Erzeugung und Dekodierung dieselbe Grenze auf dasselbe MESSEN: die
+/// Objektdecke gilt fuer die Objektbytes, der Rahmen wird getrennt begrenzt.
+const SINGLE_OBJECT_FRAME_OVERHEAD_V1: usize = 16;
+
 /// Ein Upload, der aus genau EINEM exakten Archivobjekt besteht.
 ///
 /// Drei Endpunkte teilen sich diese Form — `POST /v1/trust/events`,
 /// `POST /v1/entries/{entryHash}/historical-grants` und
 /// `POST /v1/destructions`. Sie unterscheiden sich in der erwarteten
-/// Objektart, und genau die traegt der Typparameter der drei Huellen unten.
+/// Objektart und in ihrer Objektdecke; beides gibt die Huelle unten als
+/// Argument herein.
+///
+/// Geprueft wird hier das Exact-Object-PRAEFIX, nicht das ganze Objekt: die
+/// Rahmenschicht entscheidet, ob ueberhaupt die richtige Objektfamilie
+/// geliefert wurde, und die vollstaendige Pruefung von Signatur, Trust und
+/// Autorisierung bleibt beim Dienst. Ohne diesen Schritt liefe ein `.eip` durch
+/// den Rahmen von `POST /v1/trust/events`.
 #[derive(Clone, Eq, PartialEq)]
 struct SingleObjectUploadV1 {
     exact_object_bytes: Vec<u8>,
     exact: Vec<u8>,
 }
 
+/// Das Neun-Byte-Praefix der Objektfamilie.
+const fn exact_object_prefix(object_type: ObjectTypeV1) -> [u8; 9] {
+    match object_type {
+        ObjectTypeV1::Entry => ea_format::EIP_PREFIX_V1,
+        ObjectTypeV1::Grant => ea_format::EAG_PREFIX_V1,
+        ObjectTypeV1::Receipt => ea_format::ESR_PREFIX_V1,
+        ObjectTypeV1::Evidence => ea_format::ECP_PREFIX_V1,
+        ObjectTypeV1::Trust => ea_format::ETB_PREFIX_V1,
+        ObjectTypeV1::Destroyed => ea_format::EDS_PREFIX_V1,
+    }
+}
+
 impl SingleObjectUploadV1 {
-    fn new(exact_object_bytes: Vec<u8>, limit: usize) -> Result<Self, SyncProtocolError> {
-        if exact_object_bytes.len() > limit {
-            return Err(SyncProtocolError::BodyLimit);
+    fn new(
+        exact_object_bytes: Vec<u8>,
+        object_type: ObjectTypeV1,
+        object_limit: usize,
+        limit_error: SyncProtocolError,
+    ) -> Result<Self, SyncProtocolError> {
+        if exact_object_bytes.len() > object_limit {
+            return Err(limit_error);
         }
-        let mut exact = Vec::with_capacity(exact_object_bytes.len() + 16);
+        if !exact_object_bytes.starts_with(&exact_object_prefix(object_type)) {
+            return Err(SyncProtocolError::ObjectTypeMismatch);
+        }
+        let mut exact =
+            Vec::with_capacity(exact_object_bytes.len() + SINGLE_OBJECT_FRAME_OVERHEAD_V1);
         cbor::array(&mut exact, 3);
         cbor::uint(&mut exact, 1);
         cbor::bytes(&mut exact, &exact_object_bytes);
@@ -354,8 +393,16 @@ impl SingleObjectUploadV1 {
         })
     }
 
-    fn decode(bytes: &[u8], limit: usize) -> Result<Self, SyncProtocolError> {
-        if bytes.len() > limit {
+    fn decode(
+        bytes: &[u8],
+        object_type: ObjectTypeV1,
+        object_limit: usize,
+        limit_error: SyncProtocolError,
+    ) -> Result<Self, SyncProtocolError> {
+        // Der Koerper darf genau die Objektdecke PLUS den Rahmenaufschlag
+        // wiegen. Waere hier dieselbe Zahl wie fuer das Objekt gepruefft, wiese
+        // `decode` genau die Rahmen zurueck, die `new` gerade erzeugt hat.
+        if bytes.len() > object_limit.saturating_add(SINGLE_OBJECT_FRAME_OVERHEAD_V1) {
             return Err(SyncProtocolError::BodyLimit);
         }
         ea_cbor::validate(bytes, PROTOCOL_PARSER_LIMITS_V1)?;
@@ -365,7 +412,7 @@ impl SingleObjectUploadV1 {
         let exact_object_bytes = cbor_read::bytes(&mut decoder)?.to_vec();
         cbor_read::expect_empty_extension(&mut decoder)?;
         cbor_read::finish(&decoder, bytes)?;
-        let upload = Self::new(exact_object_bytes, limit)?;
+        let upload = Self::new(exact_object_bytes, object_type, object_limit, limit_error)?;
         if upload.exact != bytes {
             return Err(SyncProtocolError::FrameShape);
         }
@@ -374,18 +421,19 @@ impl SingleObjectUploadV1 {
 }
 
 macro_rules! single_object_upload {
-    ($name:ident, $limit:expr, $accessor:ident, $doc:literal) => {
+    ($name:ident, $object_type:expr, $limit:expr, $limit_error:expr, $accessor:ident, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Eq, PartialEq)]
         pub struct $name(SingleObjectUploadV1);
 
         impl $name {
             pub fn new(exact_object_bytes: Vec<u8>) -> Result<Self, SyncProtocolError> {
-                SingleObjectUploadV1::new(exact_object_bytes, $limit).map(Self)
+                SingleObjectUploadV1::new(exact_object_bytes, $object_type, $limit, $limit_error)
+                    .map(Self)
             }
 
             pub fn decode(bytes: &[u8]) -> Result<Self, SyncProtocolError> {
-                SingleObjectUploadV1::decode(bytes, $limit).map(Self)
+                SingleObjectUploadV1::decode(bytes, $object_type, $limit, $limit_error).map(Self)
             }
 
             #[must_use]
@@ -409,19 +457,25 @@ macro_rules! single_object_upload {
 
 single_object_upload!(
     TrustEventUploadV1,
+    ObjectTypeV1::Trust,
     ea_format::ETB_MAX_RAW_BYTES_V1,
+    SyncProtocolError::BodyLimit,
     exact_etb_bytes,
     "`trust-event-upload-v1` — genau ein exaktes `.etb`."
 );
 single_object_upload!(
     HistoricalGrantUploadV1,
+    ObjectTypeV1::Grant,
     MAX_GRANT_OBJECT_BYTES_V1,
+    SyncProtocolError::GrantLimit,
     exact_eag_bytes,
     "`historical-grant-upload-v1` — genau ein exaktes `.eag`."
 );
 single_object_upload!(
     DestructionRequestV1,
+    ObjectTypeV1::Trust,
     ea_format::ETB_MAX_RAW_BYTES_V1,
+    SyncProtocolError::BodyLimit,
     exact_authorization_etb_bytes,
     "`destruction-request-v1` — genau eine exakte `DestructionAuthorization` als `.etb`."
 );

@@ -4,7 +4,8 @@
 use ea_sync_protocol::{
     EndpointAuthentication, EndpointV1, EntryCommitRequestV1, MAX_ENTRY_COMMIT_BODY_BYTES_V1,
     MAX_GRANT_OBJECT_BYTES_V1, MAX_READER_PAGE_OBJECTS_V1, ObjectRecordV1, ProtocolErrorV1,
-    ReaderBatchV1, SyncProtocolError, TechnicalCursorFieldsV1, TechnicalCursorV1,
+    ReaderBatchV1, SyncProtocolError, TechnicalCursorFieldsV1, TechnicalCursorScopeV1,
+    TechnicalCursorV1,
 };
 use ea_types::{
     ChainId, EntryHash, Hash32, ObjectHash, OrganizationId, RegistryVersion, UnixMillis,
@@ -47,6 +48,12 @@ mod fixtures {
     #[must_use]
     pub fn historical_reader_grant() -> Vec<u8> {
         vector("vectors/grants/v1/grant/accepted-historical-reader.bin")
+    }
+
+    /// Die eingefrorenen `.etb`-Bytes der Stufe 1.
+    #[must_use]
+    pub fn trust_object() -> Vec<u8> {
+        vector("vectors/format/v1/valid/etb/valid.bin")
     }
 
     #[must_use]
@@ -298,15 +305,15 @@ fn a_technical_cursor_is_opaque_bound_to_its_endpoint_and_expiring() {
         nonce: [0x64; 16],
     };
     let cursor = TechnicalCursorV1::issue(&fields, &key).unwrap();
+    let scope = TechnicalCursorScopeV1 {
+        organization_id: fixtures::organization(),
+        endpoint: EndpointV1::ChainEntries,
+        chain_id: fields.chain_id,
+        start_head_entry_hash: fields.start_head_entry_hash,
+    };
+    let valid = UnixMillis::new(1_799_999_999_000);
 
-    let opened = TechnicalCursorV1::open(
-        cursor.token_bytes(),
-        &key,
-        UnixMillis::new(1_799_999_999_000),
-        EndpointV1::ChainEntries,
-        fixtures::organization(),
-    )
-    .unwrap();
+    let opened = TechnicalCursorV1::open(cursor.token_bytes(), &key, valid, &scope).unwrap();
     assert_eq!(opened.last_technical_index(), 42);
 
     assert_eq!(
@@ -314,48 +321,77 @@ fn a_technical_cursor_is_opaque_bound_to_its_endpoint_and_expiring() {
             cursor.token_bytes(),
             &key,
             UnixMillis::new(1_800_000_001_000),
-            EndpointV1::ChainEntries,
-            fixtures::organization(),
+            &scope,
         )
         .unwrap_err()
         .code(),
         "EA-SYNC-CURSOR-EXPIRED"
     );
-    assert_eq!(
-        TechnicalCursorV1::open(
-            cursor.token_bytes(),
-            &key,
-            UnixMillis::new(1_799_999_999_000),
-            EndpointV1::Checkpoints,
-            fixtures::organization(),
-        )
-        .unwrap_err()
-        .code(),
-        "EA-SYNC-CURSOR-SCOPE"
-    );
-    assert_eq!(
-        TechnicalCursorV1::open(
-            cursor.token_bytes(),
-            &key,
-            UnixMillis::new(1_799_999_999_000),
-            EndpointV1::ChainEntries,
-            OrganizationId::try_from([0x99; 16].as_slice()).unwrap(),
-        )
-        .unwrap_err()
-        .code(),
-        "EA-SYNC-CURSOR-SCOPE"
-    );
+
+    // Jede der vier Bindungspositionen muss einzeln greifen: ein authentischer
+    // Cursor eines anderen Endpunkts, einer anderen Organisation, einer anderen
+    // Kette oder eines anderen Startkopfes blaetterte sonst in einer fremden
+    // Lesestrecke weiter.
+    for (label, other) in [
+        (
+            "endpoint",
+            TechnicalCursorScopeV1 {
+                endpoint: EndpointV1::Checkpoints,
+                ..scope
+            },
+        ),
+        (
+            "organization",
+            TechnicalCursorScopeV1 {
+                organization_id: OrganizationId::try_from([0x99; 16].as_slice()).unwrap(),
+                ..scope
+            },
+        ),
+        (
+            "chain",
+            TechnicalCursorScopeV1 {
+                chain_id: Some(ChainId::try_from([0x9a; 16].as_slice()).unwrap()),
+                ..scope
+            },
+        ),
+        (
+            "chain absent",
+            TechnicalCursorScopeV1 {
+                chain_id: None,
+                ..scope
+            },
+        ),
+        (
+            "start head",
+            TechnicalCursorScopeV1 {
+                start_head_entry_hash: Some(EntryHash::from(
+                    Hash32::try_from([0x9b; 32].as_slice()).unwrap(),
+                )),
+                ..scope
+            },
+        ),
+        (
+            "start head absent",
+            TechnicalCursorScopeV1 {
+                start_head_entry_hash: None,
+                ..scope
+            },
+        ),
+    ] {
+        assert_eq!(
+            TechnicalCursorV1::open(cursor.token_bytes(), &key, valid, &other)
+                .unwrap_err()
+                .code(),
+            "EA-SYNC-CURSOR-SCOPE",
+            "{label}"
+        );
+    }
+
     let foreign = fixtures::ServerKey::new([0x65; 32]);
     assert_eq!(
-        TechnicalCursorV1::open(
-            cursor.token_bytes(),
-            &foreign,
-            UnixMillis::new(1_799_999_999_000),
-            EndpointV1::ChainEntries,
-            fixtures::organization(),
-        )
-        .unwrap_err()
-        .code(),
+        TechnicalCursorV1::open(cursor.token_bytes(), &foreign, valid, &scope)
+            .unwrap_err()
+            .code(),
         "EA-SYNC-CURSOR-INVALID"
     );
 }
@@ -522,7 +558,7 @@ fn every_structured_frame_round_trips_through_its_exact_bytes() {
     );
     assert_round_trip!(
         TrustEventUploadV1,
-        TrustEventUploadV1::new(b"etb".to_vec()).unwrap()
+        TrustEventUploadV1::new(fixtures::trust_object()).unwrap()
     );
     assert_round_trip!(
         HistoricalGrantUploadV1,
@@ -530,7 +566,7 @@ fn every_structured_frame_round_trips_through_its_exact_bytes() {
     );
     assert_round_trip!(
         DestructionRequestV1,
-        DestructionRequestV1::new(b"authorization".to_vec()).unwrap()
+        DestructionRequestV1::new(fixtures::trust_object()).unwrap()
     );
     assert_round_trip!(
         TrustRegistryResponseV1,
@@ -659,5 +695,181 @@ fn the_three_signed_protocol_bodies_round_trip_through_their_exact_bytes() {
             .unwrap()
             .exact_bytes(),
         ack.exact_bytes()
+    );
+}
+
+#[test]
+fn a_broken_cbor_parser_budget_is_a_413_and_a_broken_frame_stays_a_400() {
+    use ea_cbor::CborError;
+
+    // Tiefen-, Element-, Container- und Tokenbudget sind PARSERGRENZEN. Das
+    // Addendum bindet Byte-, Zaehl- und Parsergrenzen gleichermassen auf 413;
+    // ein 400 verschoebe genau diese Zeile der Abbildung.
+    for error in [
+        CborError::ItemLimit,
+        CborError::DepthLimit,
+        CborError::ContainerLimit,
+        CborError::TokenLimit,
+    ] {
+        assert_eq!(
+            SyncProtocolError::Cbor(error).http_status(),
+            413,
+            "{}",
+            error.code()
+        );
+        assert!(!SyncProtocolError::Cbor(error).retryable());
+    }
+    // Alles Uebrige bleibt fehlerhafte Rahmung.
+    for error in [
+        CborError::Indefinite,
+        CborError::TrailingBytes,
+        CborError::NonMinimal,
+        CborError::Float,
+        CborError::InvalidUtf8,
+        CborError::NonNfc,
+        CborError::MapOrder,
+        CborError::DuplicateKey,
+        CborError::Invalid,
+        CborError::Encode,
+    ] {
+        assert_eq!(
+            SyncProtocolError::Cbor(error).http_status(),
+            400,
+            "{}",
+            error.code()
+        );
+    }
+    // Derselbe Schnitt gilt fuer den durchgereichten Formatbefund.
+    assert_eq!(
+        SyncProtocolError::Format(ea_format::FormatError::Cbor(CborError::DepthLimit))
+            .http_status(),
+        413
+    );
+    assert_eq!(
+        SyncProtocolError::Format(ea_format::FormatError::Cbor(CborError::TrailingBytes))
+            .http_status(),
+        400
+    );
+}
+
+#[test]
+fn a_trust_page_is_bounded_by_its_count_and_by_its_bytes() {
+    use ea_sync_protocol::{
+        MAX_READER_PAGE_BYTES_V1, MAX_TRUST_PAGE_EVENTS_V1, TrustEventRecordV1,
+        TrustRegistryResponseV1,
+    };
+
+    // Zaehldecke.
+    let too_many = (0..=MAX_TRUST_PAGE_EVENTS_V1)
+        .map(|index| {
+            TrustEventRecordV1::new(
+                RegistryVersion::new(index as u64),
+                record_hash(u8::try_from(index % 251).unwrap()),
+                vec![1],
+            )
+        })
+        .collect();
+    assert_eq!(
+        TrustRegistryResponseV1::new(RegistryVersion::new(0), too_many)
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-ITEM-LIMIT"
+    );
+
+    // Bytedecke: zwei Saetze, die zusammen ueber der Seitendecke liegen. Ohne
+    // sie waeren 1 000 `.etb` zu je 4 MiB zaehlbar zulaessig und trotzdem vier
+    // Gigabyte.
+    let half = MAX_READER_PAGE_BYTES_V1 / 2 + 1;
+    let heavy = vec![
+        TrustEventRecordV1::new(RegistryVersion::new(1), record_hash(1), vec![0; half]),
+        TrustEventRecordV1::new(RegistryVersion::new(2), record_hash(2), vec![0; half]),
+    ];
+    assert_eq!(
+        TrustRegistryResponseV1::new(RegistryVersion::new(0), heavy)
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-BODY-LIMIT"
+    );
+
+    // Und dieselbe Decke greift VOR dem Parser.
+    assert_eq!(
+        TrustRegistryResponseV1::decode(&vec![0u8; MAX_READER_PAGE_BYTES_V1 + 1])
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-BODY-LIMIT"
+    );
+}
+
+#[test]
+fn a_single_object_upload_rejects_every_foreign_object_family() {
+    use ea_sync_protocol::{DestructionRequestV1, HistoricalGrantUploadV1, TrustEventUploadV1};
+
+    // Ein `.eip` auf dem Trust-Endpunkt ist wohlgeformt und trotzdem falsch.
+    assert_eq!(
+        TrustEventUploadV1::new(fixtures::entry())
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-OBJECT-TYPE"
+    );
+    assert_eq!(
+        DestructionRequestV1::new(fixtures::entry())
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-OBJECT-TYPE"
+    );
+    assert_eq!(
+        HistoricalGrantUploadV1::new(fixtures::trust_object())
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-OBJECT-TYPE"
+    );
+    assert_eq!(
+        TrustEventUploadV1::new(fixtures::initial_reader_grant())
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-OBJECT-TYPE"
+    );
+    // Der Befund ist 422: wohlgeformt, aber unzulaessig.
+    assert_eq!(SyncProtocolError::ObjectTypeMismatch.http_status(), 422);
+    // Die richtige Familie laeuft durch.
+    assert!(TrustEventUploadV1::new(fixtures::trust_object()).is_ok());
+    assert!(HistoricalGrantUploadV1::new(fixtures::historical_reader_grant()).is_ok());
+}
+
+#[test]
+fn the_upload_ceiling_measures_the_object_and_not_the_frame() {
+    use ea_sync_protocol::HistoricalGrantUploadV1;
+
+    // Ein `.eag` GENAU auf der Decke muss durch seinen eigenen Rahmen wieder
+    // hereinkommen. Waere die Decke einmal auf das Objekt und einmal auf den
+    // Rahmen gemessen, wiese `decode` genau die Bytes zurueck, die `new`
+    // erzeugt hat.
+    let mut at_the_ceiling = ea_format::EAG_PREFIX_V1.to_vec();
+    at_the_ceiling.resize(MAX_GRANT_OBJECT_BYTES_V1, 0);
+    let upload = HistoricalGrantUploadV1::new(at_the_ceiling.clone()).unwrap();
+    assert_eq!(
+        HistoricalGrantUploadV1::decode(upload.exact_bytes())
+            .unwrap()
+            .exact_eag_bytes(),
+        at_the_ceiling.as_slice()
+    );
+
+    // Ein Byte darueber ist die `.eag`-Decke des Commitpfades, nicht eine
+    // allgemeine Koerpergrenze.
+    let mut over_the_ceiling = ea_format::EAG_PREFIX_V1.to_vec();
+    over_the_ceiling.resize(MAX_GRANT_OBJECT_BYTES_V1 + 1, 0);
+    assert_eq!(
+        HistoricalGrantUploadV1::new(over_the_ceiling)
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-GRANT-LIMIT"
+    );
+
+    // Und ein Koerper jenseits von Decke plus Rahmen faellt vor dem Parser.
+    assert_eq!(
+        HistoricalGrantUploadV1::decode(&vec![0u8; MAX_GRANT_OBJECT_BYTES_V1 * 2])
+            .unwrap_err()
+            .code(),
+        "EA-SYNC-BODY-LIMIT"
     );
 }

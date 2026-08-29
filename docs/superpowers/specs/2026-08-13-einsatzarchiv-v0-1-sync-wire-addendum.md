@@ -129,22 +129,49 @@ Zwei Werte sind angehoben, und zwar begründet: die größte Zeichen- oder
 Bytefolge trägt ein vollständiges Archivobjekt als **einen** `bstr` und ist
 deshalb `MAX_ARCHIVE_OBJECT_BYTES_V1`, und die Gesamtzahl der Elemente trägt
 eine volle Seite aus Containerbreite mal Satzbreite und ist deshalb 100 000.
-Beide Anhebungen weiten die Stufe-1-Grenzen **nicht**: eingebettete
-Archivobjekte und der eingebettete `grant-plan-v1` werden zusätzlich von
-`ea-format` unter `ea_cbor::ParserLimits::V1` geprüft, und die engere Grenze
-gewinnt. Ein Plan mit 10 000 Elementen erreicht diese engere Grenze also, bevor
-er die Protokolldecke erreicht; das ist fail-closed und nicht umgekehrt.
+Beide Anhebungen weiten die Stufe-1-Grenzen **nicht**. Wo ein eingebettetes
+Archivobjekt tatsächlich geparst wird, greift zusätzlich `ea-format` unter
+`ea_cbor::ParserLimits::V1`, und die engere Grenze gewinnt. Welcher Rahmen das
+ist, steht hier ausgeschrieben, damit die Aussage nicht mehr verspricht, als sie
+hält:
+
+- **Erneut geparst** wird auf dem Schreibpfad: `entry-bytes` und jedes Element
+  von `initial-grant-bytes` in `entry-commit-request-v1` laufen durch
+  `decode_exact_object`, der eingebettete `grant-plan-v1` durch
+  `decode_grant_plan`, und beide arbeiten unter `ParserLimits::V1`. Ein Plan mit
+  10 000 Elementen erreicht diese engere Grenze also, bevor er die
+  Protokolldecke erreicht; das ist fail-closed und nicht umgekehrt.
+- **Nur auf ihre Objektfamilie geprüft**, nicht vollständig geparst, werden die
+  drei Einzelobjekt-Uploads `trust-event-upload-v1`,
+  `historical-grant-upload-v1` und `destruction-request-v1`: die Rahmenschicht
+  weist ein Objekt der falschen Familie an seinem Exact-Object-Präfix ab, die
+  vollständige Prüfung von Signatur, Trust und Autorisierung bleibt beim Dienst.
+- **Opak durchgereicht** werden die exakten Objektbytes jeder Leseantwort —
+  `reader-batch-v1`, `trust-registry-response-v1`, `grant-list-response-v1`,
+  `checkpoint-list-response-v1` und `destruction-status-response-v1`. Der
+  Empfänger prüft die Objekte selbst (Design §13.2: technische Listen sind nicht
+  autoritativ). Ihre Sicherheitsgrenze ist deshalb **keine** Parsergrenze,
+  sondern die Satz- und die Bytedecke ihrer Seite.
+
+Die Decken der Version 1:
 
 - Entry-Commit: genau ein `.eip`, höchstens 10 000 Grant-Plan- beziehungsweise
   Grant-Elemente, höchstens 2 KiB je `.eag`, Körper insgesamt höchstens 24 MiB.
+  Die 2-KiB-Decke gilt für die **Objektbytes**; der Rahmenaufschlag eines
+  Einzelobjekt-Uploads wird getrennt begrenzt, damit derselbe Wert nicht einmal
+  auf das Objekt und einmal auf den Rahmen gemessen wird.
 - Lesestapel und Exportstrom: höchstens 1 000 Objektsätze je Seite und
   höchstens 64 MiB Bytes.
-- Trust-Seiten: höchstens 1 000 `.etb`.
+- Trust-Seiten: höchstens 1 000 `.etb` **und** dieselbe Bytedecke von 64 MiB je
+  Seite.
 - Grant-Seiten: höchstens 10 000 Objekte. Checkpoint-Seiten: höchstens 1 000.
+  Beide tragen dieselbe Bytedecke von 64 MiB je Seite.
 - Challenge-, Registrierungs- und Fehlerkörper: höchstens 64 KiB.
 
 Der Server setzt **sowohl** die Zähl- **als auch** die gestreamte Bytegrenze
-durch, bevor er akkumuliert.
+durch, bevor er akkumuliert. Jede Seitenantwort prüft die Bytedecke zweimal: vor
+dem Parsen an der Länge des empfangenen Körpers und danach an der Summe der
+gelieferten Objektbytes.
 
 Die Herleitung der `.eag`-Decke steht hier, damit die Zahl nicht erneut
 abdriftet: `grant-body-v1` ist nach `schemas/archive/v1/archive.cddl` ein
