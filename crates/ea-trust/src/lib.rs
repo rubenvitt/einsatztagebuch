@@ -429,6 +429,7 @@ extern crate self as ea_trust;
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod admin_authorization;
+mod admission;
 mod anchor;
 #[cfg_attr(not(test), allow(dead_code))]
 mod certificate;
@@ -448,6 +449,7 @@ mod state;
 mod time;
 
 pub use admin_authorization::VerifiedAdminAuthorization;
+pub use admission::{bootstrap_active_certificates, verify_catalogue_admission};
 pub use anchor::{TrustAnchorV1, VerifiedTrust, decode_trust_anchor, verify_trust};
 pub use clock_release::{VerifiedClockRelease, verify_clock_release};
 pub use error::{ClockReleaseError, RegistryError, TrustError, TrustSourceError};

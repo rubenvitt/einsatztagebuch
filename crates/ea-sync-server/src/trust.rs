@@ -53,8 +53,14 @@ pub enum TrustServiceError {
     OrganizationMismatch,
     /// Dieselbe Registry-Version traegt bereits ein ANDERES Objekt.
     Conflict,
-    /// Das Objekt traegt, gilt aber jetzt nicht: veraltet, in der Zukunft oder
-    /// ausserhalb seiner Sequenzleihe.
+    /// Das Objekt traegt, gilt aber JETZT nicht: veraltet, in der Zukunft
+    /// oder ausserhalb seiner Sequenzleihe. Ein Wiederholen aendert daran
+    /// nichts, also 422 und nicht 409.
+    EventNotYetOrNoLongerValid,
+    /// Ein `registryEvent`, das NICHT der naechste Kopf ist. Der Aufrufer
+    /// braucht einen neueren Registry-Head, und der Fehlerkoerper nennt ihn:
+    /// die Abbildung des Nachtrags fuehrt „erforderlicher neuerer
+    /// Registry-Head“ ausdruecklich unter 409.
     EventNotApplicable,
     /// Die geteilte Pruefung kann ueber dieses Objekt heute NICHTS beweisen.
     /// Fail-closed abgewiesen, statt es ungeprueft in den Bestand zu nehmen.
@@ -74,11 +80,12 @@ pub enum TrustServiceError {
 }
 
 impl TrustServiceError {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::ObjectFamily,
         Self::EventInvalid,
         Self::OrganizationMismatch,
         Self::Conflict,
+        Self::EventNotYetOrNoLongerValid,
         Self::EventNotApplicable,
         Self::EventUnverifiable,
         Self::StateConflict,
@@ -94,6 +101,7 @@ impl TrustServiceError {
             Self::EventInvalid => "EA-TRUST-EVENT-INVALID",
             Self::OrganizationMismatch => "EA-TRUST-EVENT-ORGANIZATION",
             Self::Conflict => "EA-TRUST-EVENT-CONFLICT",
+            Self::EventNotYetOrNoLongerValid => "EA-TRUST-EVENT-NOT-VALID-NOW",
             Self::EventNotApplicable => "EA-TRUST-EVENT-NOT-APPLICABLE",
             Self::EventUnverifiable => "EA-TRUST-EVENT-UNVERIFIABLE",
             Self::StateConflict => "EA-TRUST-STATE-CONFLICT",
@@ -110,11 +118,13 @@ impl TrustServiceError {
             // Wohlgeformt, aber ungueltig in Trust oder Format.
             Self::ObjectFamily
             | Self::EventInvalid
-            | Self::EventNotApplicable
+            | Self::EventNotYetOrNoLongerValid
             | Self::EventUnverifiable
             | Self::AnchorMissing => 422,
             Self::OrganizationMismatch => 403,
-            Self::Conflict => 409,
+            // „Fork, Kopfabweichung … oder erforderlicher neuerer
+            // Registry-Head“ — dieselbe Zeile der Abbildung.
+            Self::Conflict | Self::EventNotApplicable => 409,
             Self::Internal => 500,
             // Wiederholbar: ein verlorenes Rennen ist keine Aussage ueber das
             // gelieferte Objekt.
@@ -174,6 +184,51 @@ impl fmt::Debug for TrustServiceError {
 
 impl std::error::Error for TrustServiceError {}
 
+/// Ein Befund des Annahmepfads MIT dem, was der Fehlerkoerper sonst nicht
+/// tragen koennte.
+///
+/// `protocol-error-v1` fuehrt `required-registry-version` und
+/// `required-registry-head-hash` an eigenen Pflichtpositionen, und die
+/// 409-Zeile der Abbildung nennt „erforderlicher neuerer Registry-Head“
+/// ausdruecklich. Ein `Copy`-Enum kann diese beiden Werte nicht tragen, ohne
+/// seine `ALL`-Liste zu verlieren — also traegt sie diese Huelle, und der
+/// Befund selbst bleibt eine geschlossene Aufzaehlung.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct TrustPublishError {
+    pub error: TrustServiceError,
+    pub required_registry_version: Option<RegistryVersion>,
+    pub required_registry_head_hash: Option<ObjectHash>,
+}
+
+impl TrustPublishError {
+    /// Der erforderliche Kopf, den der Aufrufer holen muss, bevor er es
+    /// erneut versucht.
+    #[must_use]
+    pub const fn requiring_head(version: RegistryVersion, head_hash: ObjectHash) -> Self {
+        Self {
+            error: TrustServiceError::EventNotApplicable,
+            required_registry_version: Some(version),
+            required_registry_head_hash: Some(head_hash),
+        }
+    }
+}
+
+impl<E: Into<TrustServiceError>> From<E> for TrustPublishError {
+    fn from(value: E) -> Self {
+        Self {
+            error: value.into(),
+            required_registry_version: None,
+            required_registry_head_hash: None,
+        }
+    }
+}
+
+impl fmt::Debug for TrustPublishError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.error, formatter)
+    }
+}
+
 /// Die geteilte Trust-Pruefung, wie der Serverpfad sie ruft.
 ///
 /// Ein Port und keine Funktion, weil die Pruefung Anker, Objektkatalog und
@@ -202,7 +257,21 @@ pub trait TrustEventValidator: Send + Sync {
         object_hash: ObjectHash,
         exact_etb_bytes: &[u8],
         now: UnixMillis,
-    ) -> Result<(), TrustServiceError>;
+    ) -> Result<(), TrustPublishError>;
+
+    /// Rueckt den PERSISTENTEN Registrierungskopf nach.
+    ///
+    /// Getrennt von der Pruefung und ausdruecklich DANACH: der Pin darf dem
+    /// Katalog nicht vorauseilen. Ein Pin auf einen Kopf, dessen Objekt nie
+    /// abgelegt oder nie indiziert wurde, laesst sich spaeter nicht mehr
+    /// nachspielen — jeder weitere Upload dieser Organisation scheiterte dann
+    /// dauerhaft. Ein Pin, der HINTERHERHINKT, ist dagegen harmlos: der
+    /// naechste Lauf holt ihn ein.
+    async fn advance_pinned_head(
+        &self,
+        organization_id: OrganizationId,
+        now: UnixMillis,
+    ) -> Result<(), TrustPublishError>;
 }
 
 /// Was der Annahmepfad an Ports braucht.
@@ -219,23 +288,25 @@ pub struct TrustPorts<'a> {
 ///
 /// 1. Objektfamilie und Subtyp aus den EXAKTEN Bytes lesen — `ea-format`,
 /// 2. Organisationsbindung des Objekts gegen die des Aufrufers stellen,
-/// 3. die GETEILTE Trust-Pruefung fuehren,
+/// 3. die GETEILTE Trust-Pruefung fuehren — LESEND,
 /// 4. die Bytes content-addressed ablegen,
-/// 5. erst danach transaktional indizieren.
+/// 5. transaktional indizieren,
+/// 6. und ganz zuletzt den persistenten Kopf nachruecken.
 ///
 /// Ein ungeprueftes Objekt wird nie abgelegt. Faellt Schritt 5, bleibt
 /// hoechstens ein content-addressed Orphan zurueck — genau das, was
 /// `design.md` §13.3 als zulaessig benennt, und weniger gefaehrlich als ein
-/// Index, der auf ein ungeprueftes Objekt zeigt.
+/// Index, der auf ein ungeprueftes Objekt zeigt. Schritt 6 steht am Ende und
+/// nicht in Schritt 3, damit der Pin dem Katalog nie vorauseilt.
 pub async fn publish_trust_event(
     exact_etb_bytes: &[u8],
     organization_id: OrganizationId,
     ports: &TrustPorts<'_>,
-) -> Result<TrustIndexOutcome, TrustServiceError> {
+) -> Result<TrustIndexOutcome, TrustPublishError> {
     let ParsedArchiveObject::Trust(parsed) = ea_format::decode_exact_object(exact_etb_bytes)
         .map_err(|_| TrustServiceError::EventInvalid)?
     else {
-        return Err(TrustServiceError::ObjectFamily);
+        return Err(TrustServiceError::ObjectFamily.into());
     };
     let subtype = parsed.value().subtype();
     let payload = parsed
@@ -246,7 +317,7 @@ pub async fn publish_trust_event(
     if let Some(embedded) = organization_of(&payload)
         && embedded != organization_id
     {
-        return Err(TrustServiceError::OrganizationMismatch);
+        return Err(TrustServiceError::OrganizationMismatch.into());
     }
 
     let now = ports.clock.now();
@@ -282,10 +353,19 @@ pub async fn publish_trust_event(
             received_at: now,
         })
         .await?;
-    match outcome {
-        TrustIndexOutcome::Conflict => Err(TrustServiceError::Conflict),
-        accepted => Ok(accepted),
+    if outcome == TrustIndexOutcome::Conflict {
+        return Err(TrustServiceError::Conflict.into());
     }
+
+    // Erst JETZT — die Bytes liegen, die Zeile steht. Ein Fehlschlag hier
+    // laesst den Pin zurueckhaengen, und das holt der naechste Lauf ein; der
+    // Aufrufer bekommt deshalb trotzdem seine Annahme und keinen Fehler ueber
+    // etwas, das gelungen ist.
+    let _ = ports
+        .validator
+        .advance_pinned_head(organization_id, now)
+        .await;
+    Ok(outcome)
 }
 
 /// `GET /v1/trust/registry?afterVersion={n}` — exakte Objekte, nichts sonst.

@@ -568,6 +568,19 @@ pub struct TrustFixture {
 /// Kennungen in `object_index` und `trust_events`, und ein `registryEvent`
 /// zusaetzlich in die Registry-Linie.
 pub async fn seed_trust_fixture(pool: &PgPool, case: &str, withhold: &[&str]) -> TrustFixture {
+    seed_trust_fixture_named(pool, case, withhold).await.0
+}
+
+/// Dieselbe Einspielung, aber sie gibt die zurueckgehaltenen Objekte MIT
+/// ihrem Dateinamen heraus.
+///
+/// Der Bootstrap-Fall reicht sie in Abhaengigkeitsreihenfolge ueber den
+/// Endpunkt nach, und die Reihenfolge steht in den Namen.
+pub async fn seed_trust_fixture_named(
+    pool: &PgPool,
+    case: &str,
+    withhold: &[&str],
+) -> (TrustFixture, Vec<(String, Vec<u8>)>) {
     use ea_format::{DecodedTrustPayloadV1, ObjectTypeV1, ParsedArchiveObject};
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -605,7 +618,7 @@ pub async fn seed_trust_fixture(pool: &PgPool, case: &str, withhold: &[&str]) ->
         }
         let bytes = std::fs::read(root.join(&name)).expect("a frozen object must read");
         if withhold.contains(&name.as_str()) {
-            withheld.push(bytes);
+            withheld.push((name.clone(), bytes));
             continue;
         }
         let hash = ea_crypto::object_hash(&bytes);
@@ -665,8 +678,11 @@ pub async fn seed_trust_fixture(pool: &PgPool, case: &str, withhold: &[&str]) ->
         }
     }
 
-    TrustFixture {
-        organization_id,
+    (
+        TrustFixture {
+            organization_id,
+            withheld: withheld.iter().map(|(_, bytes)| bytes.clone()).collect(),
+        },
         withheld,
-    }
+    )
 }

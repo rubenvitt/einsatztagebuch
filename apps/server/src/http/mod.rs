@@ -126,7 +126,33 @@ pub fn error_response(
     retryable: bool,
     request_id: RequestIdV1,
 ) -> Response {
-    let body = ProtocolErrorV1::with_code(code, request_id, retryable, None, None);
+    error_response_requiring(code, status, retryable, request_id, None, None)
+}
+
+/// Derselbe Koerper, aber mit dem erforderlichen Registry-Head.
+///
+/// `protocol-error-v1` fuehrt beide Positionen; die 409-Zeile der Abbildung
+/// nennt „erforderlicher neuerer Registry-Head“ ausdruecklich. Ohne diese
+/// Angabe wuesste ein Aufrufer nur, DASS er zu alt ist, nicht wohin.
+#[must_use]
+pub fn error_response_requiring(
+    code: &str,
+    status: u16,
+    retryable: bool,
+    request_id: RequestIdV1,
+    required_registry_version: Option<ea_types::RegistryVersion>,
+    required_registry_head_hash: Option<ea_types::ObjectHash>,
+) -> Response {
+    let body = ProtocolErrorV1::with_code(
+        code,
+        request_id,
+        retryable,
+        required_registry_version,
+        required_registry_head_hash.map(|hash| {
+            ea_types::Hash32::try_from(&hash.as_bytes()[..])
+                .unwrap_or_else(|_| unreachable!("an object hash is 32 bytes"))
+        }),
+    );
     (
         StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         [(header::CONTENT_TYPE, STRUCTURED_MEDIA_TYPE_V1)],

@@ -12,7 +12,7 @@ use ea_sync_protocol::{
     EndpointV1, ProtocolErrorV1, RequestSigner, STRUCTURED_MEDIA_TYPE_V1, TrustEventUploadV1,
     TrustRegistryResponseV1, organization_tag,
 };
-use ea_types::{CertificateHash, DeviceId, OrganizationId, UnixMillis};
+use ea_types::{CertificateHash, DeviceId, OrganizationId, RegistryVersion, UnixMillis};
 use sqlx::{PgPool, Row};
 
 /// Innerhalb des `notBefore`/`notAfter`-Fensters der eingefrorenen Koepfe.
@@ -840,4 +840,192 @@ async fn indexed_trust_objects(pool: &PgPool) -> i64 {
         .await
         .expect("counting trust events must succeed")
         .get("n")
+}
+
+/// Eine Organisation wird VOLLSTAENDIG ueber den Endpunkt hochgezogen.
+///
+/// Nichts ausser dem Anker und den drei vom Anker BENANNTEN
+/// Bootstrap-Objekten liegt vorher im Bestand — Policy, Autorisierungen und
+/// beide Registrierungskoepfe kommen ueber `POST /v1/trust/events` herein, in
+/// Abhaengigkeitsreihenfolge. Vorher war genau das unmoeglich: jedes dieser
+/// Objekte war „nicht beweisbar“, und der Kopf, der sie braucht, fand sie
+/// nicht.
+///
+/// Der erste Aufrufer authentisiert sich dabei gegen die vom ANKER benannten
+/// Administratorzertifikate — es gibt noch keinen Kopf, gegen den er sich
+/// sonst ausweisen koennte.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_organization_bootstraps_its_whole_registry_line_through_the_endpoint() {
+    // Alles ausser den drei ankerbenannten Objekten wird zurueckgehalten.
+    const WITHHELD: [&str; 7] = [
+        "policy-authorization.bin",
+        "policy.bin",
+        "head-authorization.bin",
+        "head-event.bin",
+        "rotation-authorization.bin",
+        "admin-certificate-rotated.bin",
+        "second-head-event.bin",
+    ];
+    // …und in GENAU dieser Reihenfolge nachgereicht: erst die Autorisierung,
+    // dann ihr Ziel, dann der Kopf, der beide nennt.
+    const ORDER: [&str; 8] = [
+        "policy-authorization.bin",
+        "policy.bin",
+        "head-authorization.bin",
+        "head-event.bin",
+        "rotation-authorization.bin",
+        "admin-certificate-rotated.bin",
+        "second-head-authorization.bin",
+        "second-head-event.bin",
+    ];
+
+    let database = common::fresh_database().await;
+    let (fixture, withheld) = common::seed_trust_fixture_named(
+        database.pool(),
+        ROTATION_CASE,
+        &[WITHHELD.as_slice(), &["second-head-authorization.bin"]].concat(),
+    )
+    .await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+
+    let heads_before: i64 = sqlx::query("SELECT count(*) AS n FROM registry_events")
+        .fetch_one(database.pool())
+        .await
+        .expect("counting registry heads must succeed")
+        .get("n");
+    assert_eq!(heads_before, 0, "the organization starts without a head");
+
+    for (index, name) in ORDER.iter().enumerate() {
+        let bytes = withheld
+            .iter()
+            .find(|(withheld_name, _)| withheld_name == name)
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap_or_else(|| panic!("{name} must be among the withheld objects"));
+        let upload = TrustEventUploadV1::new(bytes).expect("the upload frame must build");
+        let nonce = fresh_challenge(&server, fixture.organization_id).await;
+        let mut request_id = [0x40_u8; 16];
+        request_id[15] = u8::try_from(index).expect("eight objects fit in a byte");
+        let headers = common::signed_headers(&common::SignedCall {
+            signer: &signer(ADMIN_SEED),
+            endpoint: EndpointV1::TrustEvents,
+            authority: &server.authority,
+            target: EndpointV1::TrustEvents.path_template(),
+            body: Some(upload.exact_bytes()),
+            organization_id: fixture.organization_id,
+            request_id,
+            nonce,
+            created: 0,
+        });
+        let response = post_trust_event(&server, &headers, upload.exact_bytes()).await;
+        assert_eq!(
+            response.status,
+            201,
+            "step {index} ({name}) must be accepted; it answered {:?}",
+            error_code(&response.body)
+        );
+    }
+
+    // Beide Koepfe stehen jetzt auf der Linie, und die Antwort traegt die
+    // EXAKTEN Bytes.
+    let nonce = fresh_challenge(&server, fixture.organization_id).await;
+    let target = format!(
+        "{}?afterVersion=0",
+        EndpointV1::TrustRegistry.path_template()
+    );
+    let headers = common::signed_headers(&common::SignedCall {
+        signer: &signer(ADMIN_SEED),
+        endpoint: EndpointV1::TrustRegistry,
+        authority: &server.authority,
+        target: &target,
+        body: None,
+        organization_id: fixture.organization_id,
+        request_id: [0x41; 16],
+        nonce,
+        created: 0,
+    });
+    let page = common::https_request(
+        server.address,
+        &server.authority,
+        "GET",
+        &target,
+        &headers,
+        &[],
+    )
+    .await;
+    assert_eq!(page.status, 200, "{:?}", error_code(&page.body));
+    let page = TrustRegistryResponseV1::decode(&page.body).expect("the registry page decodes");
+    assert_eq!(
+        page.events().len(),
+        2,
+        "both heads arrived through the endpoint"
+    );
+
+    database.cleanup().await;
+}
+
+/// Ein `registryEvent`, das nicht der naechste Kopf ist, nennt den, der es
+/// waere.
+///
+/// Die Abbildung des Nachtrags fuehrt „erforderlicher neuerer Registry-Head“
+/// unter `409`, und `protocol-error-v1` traegt Version und Hash an eigenen
+/// Positionen. Ein Aufrufer, der nur `409` bekaeme, wuesste nicht, wohin.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registry_event_that_is_not_the_next_head_names_the_head_that_is() {
+    let database = common::fresh_database().await;
+    // Beide Koepfe liegen; der zweite ist also nicht mehr „der naechste“.
+    let fixture = common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[]).await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+
+    // Der ERSTE Kopf, noch einmal eingereicht: gueltig, aber laengst ueberholt.
+    let first_head = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vectors/trust/v1/registry/accepted-admin-rotation/head-event.bin"),
+    )
+    .expect("the frozen head must read");
+    let upload = TrustEventUploadV1::new(first_head).expect("the upload frame must build");
+    let nonce = fresh_challenge(&server, fixture.organization_id).await;
+    let headers = common::signed_headers(&common::SignedCall {
+        signer: &signer(ADMIN_SEED),
+        endpoint: EndpointV1::TrustEvents,
+        authority: &server.authority,
+        target: EndpointV1::TrustEvents.path_template(),
+        body: Some(upload.exact_bytes()),
+        organization_id: fixture.organization_id,
+        request_id: [0x50; 16],
+        nonce,
+        created: 0,
+    });
+    let response = post_trust_event(&server, &headers, upload.exact_bytes()).await;
+    assert_eq!(
+        error_code(&response.body).as_deref(),
+        Some("EA-TRUST-EVENT-NOT-APPLICABLE")
+    );
+    assert_eq!(response.status, 409);
+    let body = ProtocolErrorV1::decode(&response.body).expect("the error body decodes");
+    assert_eq!(
+        body.required_registry_version().map(RegistryVersion::get),
+        Some(2),
+        "the caller must be told WHICH head it needs first"
+    );
+    assert!(
+        body.required_registry_head_hash().is_some(),
+        "and under which hash"
+    );
+    assert!(!body.retryable(), "409 is not a technical failure");
+
+    database.cleanup().await;
 }

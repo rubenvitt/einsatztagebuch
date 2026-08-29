@@ -26,8 +26,8 @@ use ea_sync_server::trust::{publish_trust_event, registry_page};
 use ea_types::RegistryVersion;
 
 use crate::http::{
-    AppState, auth_error_response, error_response, request_id_or_zero, signed_request,
-    split_request,
+    AppState, auth_error_response, error_response, error_response_requiring, request_id_or_zero,
+    signed_request, split_request,
 };
 
 /// Die Koerperdecke dieses Endpunkts: ein `.etb` plus Rahmenaufschlag.
@@ -84,11 +84,13 @@ pub async fn upload_trust_event(State(state): State<Arc<AppState>>, request: Req
     .await
     {
         Ok(_) => StatusCode::CREATED.into_response(),
-        Err(error) => error_response(
-            error.code(),
-            error.http_status(),
-            error.retryable(),
+        Err(failure) => error_response_requiring(
+            failure.error.code(),
+            failure.error.http_status(),
+            failure.error.retryable(),
             request_id,
+            failure.required_registry_version,
+            failure.required_registry_head_hash,
         ),
     }
 }

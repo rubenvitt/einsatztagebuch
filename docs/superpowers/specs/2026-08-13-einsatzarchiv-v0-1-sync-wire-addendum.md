@@ -202,8 +202,41 @@ v1-Rahmen und unter derselben 64-KiB-Decke.
 `challenge-request-v1` trägt die `organizationId`, weil der Challenge-Endpunkt
 die eine Signaturausnahme ohne WebAuthn-Assertion ist und es dort kein
 `tag` gibt, aus dem die Organisation käme, `challenge-response-core-v1` sie aber
-an Position 2 führt. Dieselbe `organizationId` ist die nicht-inhaltliche
-technische Identität, an der die Ratenbegrenzung hängt.
+an Position 2 führt.
+
+## Die Identität der Ratenbegrenzung
+
+Der ratenbegrenzte Challenge-Endpunkt zählt je **Gegenstellenadresse** des
+Aufrufers, als SHA-256 über die Adressbytes **ohne Port**. Er zählt
+ausdrücklich **nicht** je `organizationId`.
+
+Die Begründung ist eine Sicherheitsaussage und keine Geschmacksfrage: die
+`organizationId` steht bei genau diesem Endpunkt im **unsignierten** Körper.
+Ein Wert, den der Aufrufer frei behauptet, ist keine Identität. Wäre die
+Begrenzung darauf gestützt, könnte jeder Fremde eine Organisation mit deren
+eigener, in jedem `tag` öffentlich mitgereister Kennung aussperren — und weil
+die `nonce` jedes signierten Requests eine Nonce dieses Endpunkts ist, wäre das
+der Totalausfall dieser Organisation. Die Adresse dagegen entsteht aus dem
+TCP-Handschlag und ist das Einzige, was ein unsignierter Request mitbringt,
+ohne es behaupten zu können. Der Port bleibt außen vor: er wechselt mit jeder
+Verbindung.
+
+Gespeichert wird nur der **Digest**; eine Adresse steht damit nirgends im
+Klartext im Bestand.
+
+Diese Identität ist genau so gut, wie die Verbindung sie hergibt, und das steht
+hier ausgeschrieben statt in einer Fußnote:
+
+- Der Server terminiert TLS **selbst und im Prozess** (§13.1, Design `:1497`),
+  also ist die gesehene Adresse die des tatsächlichen Gegenübers.
+- Steht später ein Reverse Proxy oder ein NAT davor, kollabieren alle Aufrufer
+  dahinter auf **eine** Identität und teilen sich ein Fenster.
+- Stufe 3 wertet **kein** `Forwarded` und kein `X-Forwarded-For` aus. Ein
+  Header ist wieder eine Behauptung des Aufrufers, und ihn ungeprüft zur
+  Identität zu erheben, holte genau die Lücke zurück, die diese Festlegung
+  schließt. Wer hinter einem Proxy betreibt, muss dessen Adressweitergabe
+  vertrauenswürdig anbinden; das ist eine Betriebs- und keine Protokollfrage
+  und ist hier bewusst nicht offengelassen, sondern benannt.
 
 ## HTTP-Abbildung
 
@@ -223,6 +256,15 @@ technische Identität, an der die Ratenbegrenzung hängt.
 Fehlerantworten verwenden immer `protocol-error-v1`, enthalten **kein** Fragment
 der gelieferten Nutzdaten und setzen `retryable=true` ausschließlich bei den
 technischen Fehlern 429, 500 und 503.
+
+Die Codes der Trust-Annahme, mit ihrer Abbildung:
+
+| Code | Status | Bedeutung |
+| --- | --- | --- |
+| `EA-TRUST-EVENT-UNVERIFIABLE` | 422 | Über diese Objektart trifft die geteilte `ea-trust`-Prüfung heute keine Aussage; fail-closed abgewiesen statt ungeprüft aufgenommen |
+| `EA-TRUST-EVENT-NOT-VALID-NOW` | 422 | Das Objekt trägt, gilt aber jetzt nicht: veraltet, in der Zukunft oder außerhalb seiner Sequenzleihe |
+| `EA-TRUST-EVENT-NOT-APPLICABLE` | 409 | Ein `registryEvent`, das nicht der nächste Kopf ist — die Zeile „erforderlicher neuerer Registry-Head“. Der Körper führt `required-registry-version` und `required-registry-head-hash` |
+| `EA-TRUST-STATE-CONFLICT` | 503 | Der persistente Vertrauenszustand hat sich unter dem Aufrufer bewegt; `retryable=true`, und ausdrücklich keine Aussage über seine Autorität |
 
 Antworten ohne Inhalt: `POST /v1/reader-acks` antwortet mit `204` und ohne
 Körper; `POST /v1/webauthn-credentials`, `PUT /v1/vault-blobs`,
@@ -292,6 +334,7 @@ Stelle ist damit benannt und nicht stillschweigend offen.
 | `POST /v1/destructions` — Aufrufer: destructionApprove; Request: destruction-request-v1; Response: destruction-status-response-v1; Status: 202; 400, 401, 403, 404, 409, 413, 422, 500, 503 | §13.3, §16 | bestätigt |
 | `GET /v1/destructions/{destructionId}` — Aufrufer: jedes freigegebene Gerät der Organisation; Request: kein Körper; Response: destruction-status-response-v1; Status: 200; 400, 401, 403, 404, 500, 503 | §16 | bestätigt |
 | `challenge-request-v1` / organization-id | §13.1, ratenbegrenzter Challenge-Endpunkt ohne `tag` | bestätigt |
+| Ratenbegrenzung / Zählschlüssel = SHA-256 der Gegenstellenadresse ohne Port | §13.1, ratenbegrenzter Challenge-Endpunkt | bestätigt |
 | `webauthn-credential-registration-v1` / subject-id, credential-id, credential-public-cose-key | web-reader-design.md §6.4.1 | bestätigt |
 | grant-plan-v1 / recipient-key-thumbprint | encode_plan_items in crates/ea-format/src/eag.rs | bestätigt |
 | grant-plan-v1 / recipient-certificate-hash | encode_plan_items in crates/ea-format/src/eag.rs | bestätigt |

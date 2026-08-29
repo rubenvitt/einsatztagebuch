@@ -54,13 +54,13 @@ use ea_format::{DecodedTrustPayloadV1, ParsedArchiveObject, TrustSubtypeV1};
 use ea_sync_protocol::RegisteredDevice;
 use ea_sync_server::{
     AuthorityError, ObjectStore, RepositoryError,
-    trust::{TrustEventValidator, TrustServiceError},
+    trust::{TrustEventValidator, TrustPublishError, TrustServiceError},
 };
 use ea_trust::{
     RegistryError, RegistrySelectionOutcome, SelectedRegistryHead, StateStoreError, TrustAnchorV1,
-    TrustError, TrustObjectSource, TrustSourceError, TrustStateKey, TrustStateStore,
-    decode_trust_anchor, load_trust_state, prepare_local_time, select_registry_head,
-    verify_registry_candidate, verify_trust,
+    TrustError, TrustObjectSource, TrustSourceError, TrustStateKey, TrustStateStore, VerifiedTrust,
+    bootstrap_active_certificates, decode_trust_anchor, load_trust_state, prepare_local_time,
+    select_registry_head, verify_catalogue_admission, verify_registry_candidate, verify_trust,
 };
 use ea_types::{ChainSequence, DeviceId, KeyThumbprint, ObjectHash, OrganizationId, UnixMillis};
 use ea_verify::{EphemeralTrustStateStore, verification_state_key};
@@ -208,6 +208,15 @@ impl PostgresTrustAuthority {
 /// geschafft, es gibt noch mehr“, `Selected` heisst „das ist der aktuelle“.
 /// Die Schleifenschranke ist die Zahl der bekannten Registry-Ereignisse plus
 /// eins; sie kann nicht laenger laufen, als es Koepfe gibt.
+///
+/// Zurueck kommt AUCH die geprüfte Vertrauenslage, nicht nur der Kopf: die
+/// Aufnahme eines einzelnen Objekts braucht sie, und vor dem ersten Kopf ist
+/// sie das Einzige, was es gibt.
+///
+/// `Rollback` in der ERSTEN Runde heisst „diese Organisation hat noch keinen
+/// Kopf“ — kein Angriff, sondern der Bootstrap-Stand. Ab der zweiten Runde
+/// gibt es einen Pin, und dann ist derselbe Befund genau das, wonach er
+/// aussieht.
 fn walk_to_selected_head(
     anchor: &TrustAnchorV1,
     source: &dyn TrustObjectSource,
@@ -216,25 +225,29 @@ fn walk_to_selected_head(
     proposed_sequence: ChainSequence,
     now: UnixMillis,
     head_count: usize,
-) -> Result<Option<SelectedRegistryHead>, HeadWalkError> {
-    for _ in 0..head_count.saturating_add(1) {
+) -> Result<(VerifiedTrust, Option<SelectedRegistryHead>), HeadWalkError> {
+    let mut carried = None;
+    for round in 0..head_count.saturating_add(1) {
         let snapshot = load_trust_state(store, key).map_err(HeadWalkError::from)?;
         let trust = verify_trust(anchor, source, snapshot).map_err(HeadWalkError::from)?;
-        let candidate =
-            verify_registry_candidate(&trust, proposed_sequence).map_err(HeadWalkError::from)?;
+        let candidate = match verify_registry_candidate(&trust, proposed_sequence) {
+            Ok(candidate) => candidate,
+            Err(RegistryError::Rollback) if round == 0 => return Ok((trust, None)),
+            Err(error) => return Err(HeadWalkError::from(error)),
+        };
         let local_time =
             prepare_local_time(store, &candidate, now, &[]).map_err(HeadWalkError::from)?;
         match select_registry_head(candidate, local_time, None).map_err(HeadWalkError::from)? {
-            RegistrySelectionOutcome::Selected(selected) => return Ok(Some(selected)),
+            RegistrySelectionOutcome::Selected(selected) => return Ok((trust, Some(selected))),
             // Ein Uebergang ist geschafft; der naechste Durchlauf liest den
             // fortgeschriebenen Stand.
-            RegistrySelectionOutcome::Advanced(_) => {}
+            RegistrySelectionOutcome::Advanced(_) => carried = Some(trust),
             // Der naechste Kopf gilt erst spaeter. Das ist eine Antwort, kein
             // Fehler — und sie traegt keine Autoritaet.
-            RegistrySelectionOutcome::PendingFuture(_) => return Ok(None),
+            RegistrySelectionOutcome::PendingFuture(_) => return Ok((trust, None)),
         }
     }
-    Ok(None)
+    carried.map_or(Err(HeadWalkError::Invalid), |trust| Ok((trust, None)))
 }
 
 #[async_trait]
@@ -270,7 +283,7 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
         let key = verification_state_key(organization_id);
         let mut store =
             EphemeralTrustStateStore::new(key, UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS));
-        let head = match walk_to_selected_head(
+        let (trust, head) = match walk_to_selected_head(
             &anchor,
             &source,
             &mut store,
@@ -279,8 +292,7 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
             now,
             head_count,
         ) {
-            Ok(Some(head)) => head,
-            Ok(None) => return Ok(None),
+            Ok(pair) => pair,
             Err(HeadWalkError::Unavailable) => return Err(AuthorityError::Unavailable),
             Err(HeadWalkError::StateConflict) => return Err(AuthorityError::StateConflict),
             // Kein anwendbarer Kopf heisst: keine Autoritaet. Das ist eine
@@ -288,7 +300,25 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
             Err(HeadWalkError::NotApplicable | HeadWalkError::Invalid) => return Ok(None),
         };
 
-        for (certificate_hash, fields) in head.active_certificates() {
+        // Ohne Kopf gelten die vom ANKER benannten Administratorzertifikate.
+        // Sonst koennte eine frische Organisation ihren ersten Kopf nie
+        // einreichen: dazu braucht es `organizationAdminApprove`, und die
+        // steht genau in diesen Zertifikaten — von `verify_trust` ueber
+        // `require_exact_anchor_sets` bereits bewiesen.
+        let active: Vec<_> = head.as_ref().map_or_else(
+            || {
+                bootstrap_active_certificates(&trust, proposed_sequence)
+                    .map(|(hash, fields)| (hash, fields.clone()))
+                    .collect()
+            },
+            |head| {
+                head.active_certificates()
+                    .map(|(hash, fields)| (hash, fields.clone()))
+                    .collect()
+            },
+        );
+
+        for (certificate_hash, fields) in active {
             if fields.signing_key_thumbprint != Some(key_thumbprint) {
                 continue;
             }
@@ -322,113 +352,172 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
 impl TrustEventValidator for PostgresTrustAuthority {
     /// Prueft das GELIEFERTE OBJEKT, nicht nur die Organisation.
     ///
-    /// Die geteilte Pruefung beweist heute genau zwei Dinge ueber ein einzelnes
-    /// `.etb`:
+    /// Zwei Wege, und beide gehoeren der geteilten Pruefung:
     ///
-    /// 1. `verify_trust` beweist die Bootstrap-Menge, die der Anker NAMENTLICH
-    ///    nennt — `require_exact_anchor_sets` laesst ein zusaetzliches
-    ///    Root-Zertifikat, Admin-Zertifikat oder Operator-Binding scheitern.
-    /// 2. `verify_registry_candidate` plus `select_registry_head` beweisen
-    ///    GENAU EINEN Registry-Uebergang: Signatur, Autorisierung, Policy,
-    ///    Kettenposition und — ueber `prepare_local_time` — das
-    ///    `notBefore`/`notAfter`-Fenster.
+    /// 1. Ein `registryEvent` ist gueltig, wenn es der NAECHSTE Kopf wird —
+    ///    `verify_registry_candidate` plus `select_registry_head` pruefen
+    ///    dafuer Signatur, Autorisierung, Policy, Kettenposition und, ueber
+    ///    `prepare_local_time`, das `notBefore`/`notAfter`-Fenster. Wird ein
+    ///    anderer Kopf gewaehlt, braucht der Aufrufer erst den — und der
+    ///    Fehlerkoerper nennt ihn.
+    /// 2. Jedes andere `.etb` laeuft durch
+    ///    [`ea_trust::verify_catalogue_admission`]: Organisationsbindung,
+    ///    die Signiererregel SEINER Objektart im aktuellen Abschluss, und sein
+    ///    Zeitfenster. Aufnahme ist keine Autoritaet — sie legt das Objekt in
+    ///    den Katalog, damit der Kopf, der es spaeter nennt, es ueberhaupt
+    ///    finden kann.
     ///
-    /// Alles andere kann diese Stufe nicht beweisen, und was sie nicht
-    /// beweisen kann, nimmt sie nicht an: `EA-TRUST-EVENT-UNVERIFIABLE`. Das
-    /// ist die fail-closed Antwort und ausdruecklich KEINE zweite
-    /// Trust-Umsetzung — die Menge waechst von selbst mit, sobald die geteilte
-    /// Pruefung mehr beweist.
+    /// LESEND: der Lauf laeuft auf einem Speicher, der nach der Antwort fort
+    /// ist. Der persistente Pin rueckt erst in [`Self::advance_pinned_head`]
+    /// nach, also nachdem das Objekt liegt und indiziert ist.
     async fn validate_exact_etb(
         &self,
         organization_id: OrganizationId,
         object_hash: ObjectHash,
         exact_etb_bytes: &[u8],
         now: UnixMillis,
-    ) -> Result<(), TrustServiceError> {
-        let anchor_bytes = self
+    ) -> Result<(), TrustPublishError> {
+        let prepared = self
+            .prepare(organization_id, Some(exact_etb_bytes))
+            .await?
+            .ok_or(TrustServiceError::AnchorMissing)?;
+        let key = verification_state_key(organization_id);
+        let mut store =
+            EphemeralTrustStateStore::new(key, UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS));
+        let (trust, head) = walk_to_selected_head(
+            &prepared.anchor,
+            &prepared.source,
+            &mut store,
+            key,
+            prepared.proposed_sequence,
+            now,
+            prepared.head_count,
+        )
+        .map_err(|error| TrustPublishError::from(map_walk_error(error)))?;
+
+        if subtype_of(exact_etb_bytes) == Some(TrustSubtypeV1::RegistryEvent) {
+            return match head {
+                Some(head) if head.registry_head_hash() == object_hash => Ok(()),
+                // „erforderlicher neuerer Registry-Head“ — 409 mit genau der
+                // Version und dem Hash, die der Aufrufer zuerst holen muss.
+                Some(head) => Err(TrustPublishError::requiring_head(
+                    head.registry_version(),
+                    head.registry_head_hash(),
+                )),
+                None => Err(TrustServiceError::EventNotApplicable.into()),
+            };
+        }
+
+        verify_catalogue_admission(
+            &trust,
+            head.as_ref(),
+            exact_etb_bytes,
+            now,
+            prepared.proposed_sequence,
+        )
+        .map(|_| ())
+        .map_err(|error| TrustPublishError::from(map_admission_error(error)))
+    }
+
+    /// Rueckt den persistenten Kopf nach — der EINE schreibende Weg.
+    async fn advance_pinned_head(
+        &self,
+        organization_id: OrganizationId,
+        now: UnixMillis,
+    ) -> Result<(), TrustPublishError> {
+        let Some(prepared) = self.prepare(organization_id, None).await? else {
+            return Ok(());
+        };
+        let key = TrustStateKey {
+            organization_id,
+            device_id: DeviceId::try_from(&SERVER_TRUST_DEVICE_ID_V1[..])
+                .map_err(|_| TrustServiceError::Internal)?,
+        };
+        let mut store = super::trust_state::PostgresTrustStateStore::new(
+            self.pool.clone(),
+            UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS),
+        );
+        walk_to_selected_head(
+            &prepared.anchor,
+            &prepared.source,
+            &mut store,
+            key,
+            prepared.proposed_sequence,
+            now,
+            prepared.head_count,
+        )
+        .map(|_| ())
+        .map_err(|error| TrustPublishError::from(map_walk_error(error)))
+    }
+}
+
+/// Was ein Lauf braucht: Anker, Katalog und die daraus gelesenen Kennzahlen.
+struct PreparedClosure {
+    anchor: TrustAnchorV1,
+    source: CatalogSource,
+    proposed_sequence: ChainSequence,
+    head_count: usize,
+}
+
+impl PostgresTrustAuthority {
+    /// Sammelt Anker und Katalog — wahlweise samt einem noch nicht abgelegten
+    /// Objekt, damit die Pruefung genau die Menge sieht, die ein Reader spaeter
+    /// saehe.
+    async fn prepare(
+        &self,
+        organization_id: OrganizationId,
+        additional: Option<&[u8]>,
+    ) -> Result<Option<PreparedClosure>, TrustServiceError> {
+        let Some(anchor_bytes) = self
             .anchor_bytes(organization_id)
             .await
             .map_err(|_| TrustServiceError::DependencyUnavailable)?
-            .ok_or(TrustServiceError::AnchorMissing)?;
+        else {
+            return Ok(None);
+        };
         let anchor =
             decode_trust_anchor(&anchor_bytes).map_err(|_| TrustServiceError::AnchorMissing)?;
-
         let mut catalog = self
             .trust_catalog(organization_id)
             .await
             .map_err(|_| TrustServiceError::DependencyUnavailable)?;
-        catalog.insert(object_hash, Arc::<[u8]>::from(exact_etb_bytes.to_vec()));
+        if let Some(bytes) = additional {
+            catalog.insert(
+                ea_crypto::object_hash(bytes),
+                Arc::<[u8]>::from(bytes.to_vec()),
+            );
+        }
         let proposed_sequence = highest_effective_from_sequence(&catalog);
         let head_count = registry_event_count(&catalog);
-        let is_registry_event = subtype_of(exact_etb_bytes) == Some(TrustSubtypeV1::RegistryEvent);
-        let source = CatalogSource(catalog);
-
-        // Fall 1: der Anker NENNT dieses Objekt. Dann beweist `verify_trust`
-        // es — `require_exact_anchor_sets` laesst jede Abweichung von der
-        // benannten Menge scheitern. Ein Kopf wird dafuer nicht gebraucht, und
-        // es wird deshalb auch nichts gepinnt.
-        if anchor_names(&anchor, object_hash) {
-            let key = verification_state_key(organization_id);
-            let mut store =
-                EphemeralTrustStateStore::new(key, UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS));
-            let snapshot = load_trust_state(&mut store, key)
-                .map_err(|error| map_walk_error(HeadWalkError::from(error)))?;
-            verify_trust(&anchor, &source, snapshot)
-                .map_err(|error| map_walk_error(HeadWalkError::from(error)))?;
-            return Ok(());
-        }
-
-        // Fall 2: das Objekt IST der neue Kopf. Nur hier rueckt die
-        // Registry-Linie wirklich vor, also ist DIES der eine schreibende Weg
-        // und der persistente Speicher gehoert hierhin.
-        if is_registry_event {
-            let key = TrustStateKey {
-                organization_id,
-                device_id: DeviceId::try_from(&SERVER_TRUST_DEVICE_ID_V1[..])
-                    .map_err(|_| TrustServiceError::Internal)?,
-            };
-            let mut store = super::trust_state::PostgresTrustStateStore::new(
-                self.pool.clone(),
-                UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS),
-            );
-            let head = walk_to_selected_head(
-                &anchor,
-                &source,
-                &mut store,
-                key,
-                proposed_sequence,
-                now,
-                head_count,
-            )
-            .map_err(map_walk_error)?;
-            return match head {
-                Some(head) if head.registry_head_hash() == object_hash => Ok(()),
-                Some(_) | None => Err(TrustServiceError::EventNotApplicable),
-            };
-        }
-
-        // Fall 3: die geteilte Pruefung kann ueber dieses Objekt heute nichts
-        // beweisen. Fail-closed.
-        Err(TrustServiceError::EventUnverifiable)
+        Ok(Some(PreparedClosure {
+            anchor,
+            source: CatalogSource(catalog),
+            proposed_sequence,
+            head_count,
+        }))
     }
 }
 
-/// Nennt der Anker dieses Objekt namentlich?
-fn anchor_names(anchor: &TrustAnchorV1, object_hash: ObjectHash) -> bool {
-    anchor.root_certificate_object_hash() == object_hash
-        || anchor
-            .initial_admin_certificate_object_hashes()
-            .contains(&object_hash)
-        || anchor
-            .initial_admin_operator_binding_object_hashes()
-            .contains(&object_hash)
+/// Die Befunde der Einzelobjektaufnahme in der Sprache des Protokolls.
+const fn map_admission_error(error: TrustError) -> TrustServiceError {
+    match error {
+        // „Ueber diese Objektart kann die geteilte Pruefung heute nichts
+        // sagen“ — und was sie nicht beweisen kann, nimmt der Server nicht an.
+        TrustError::ActionMismatch => TrustServiceError::EventUnverifiable,
+        TrustError::AuthNotYetValid | TrustError::AuthExpired => {
+            TrustServiceError::EventNotYetOrNoLongerValid
+        }
+        TrustError::StateConflict => TrustServiceError::StateConflict,
+        TrustError::StateUnavailable => TrustServiceError::DependencyUnavailable,
+        _ => TrustServiceError::EventInvalid,
+    }
 }
 
 const fn map_walk_error(error: HeadWalkError) -> TrustServiceError {
     match error {
         HeadWalkError::Unavailable => TrustServiceError::DependencyUnavailable,
         HeadWalkError::StateConflict => TrustServiceError::StateConflict,
-        HeadWalkError::NotApplicable => TrustServiceError::EventNotApplicable,
+        HeadWalkError::NotApplicable => TrustServiceError::EventNotYetOrNoLongerValid,
         HeadWalkError::Invalid => TrustServiceError::EventInvalid,
     }
 }
