@@ -1,0 +1,49 @@
+; Einsatzarchiv v0.1 sync protocol: schreibende Rahmen und Fehlerkoerper.
+; Bestandteil des Sync-Wire-Addendums und normativ.
+;
+; Symbolische Namen dokumentieren Arraypositionen; sie werden nicht als
+; CBOR-Map-Keys serialisiert. Alle Objekte sind deterministisch nach Design
+; §10.1 kodiert. Die letzte Position jedes Rahmens ist ein leeres Array als
+; geschlossener Erweiterungsplatz.
+;
+; challenge-response-core-v1, challenge-response-v1,
+; device-registration-request-core-v1, device-registration-request-v1,
+; reader-ack-core-v1 und reader-ack-v1 werden unveraendert aus
+; schemas/protocol/v1/signed-protocol.cddl uebernommen und hier nicht wiederholt.
+
+; Der initiale Grant-Plan in genau der Form, die encode_plan_items in
+; crates/ea-format/src/eag.rs erzeugt: ein Array aus Vierertupeln mit dem
+; 32-Byte-Empfaengerschluessel-Thumbprint, dem 32-Byte-Empfaengerzertifikatshash,
+; der Suite-Zeichenkette und dem Ein-Byte-Zweck (0 Recovery, 1 Reader). Der
+; initialGrantPlanHash steht ueber genau diesen Bytes.
+grant-plan-item-v1 = [
+  recipient-key-thumbprint: bstr .size 32,
+  recipient-certificate-hash: bstr .size 32,
+  "EINSATZARCHIV-HPKE-1", grant-purpose: 0..1
+]
+grant-plan-v1 = [* grant-plan-item-v1]
+
+entry-commit-request-v1 = [
+  1, entry-bytes: bstr, grant-plan: grant-plan-v1,
+  initial-grant-bytes: [+ bstr], []
+]
+
+entry-commit-response-v1 = [
+  1, outcome: 0..1, ; 0 accepted, 1 idempotent replay
+  receipt-bytes: bstr, checkpoint-bytes: bstr / null, []
+]
+
+trust-event-upload-v1 = [1, exact-etb-bytes: bstr, []]
+
+historical-grant-upload-v1 = [1, exact-eag-bytes: bstr, []]
+
+destruction-request-v1 = [1, exact-destruction-authorization-etb-bytes: bstr, []]
+
+; Der einzige Fehlerkoerper des Protokolls. request-id ist global eindeutig und
+; bleibt an dieser Position; sie ist die einzige Stelle, an der sich zwei
+; Antworten auf denselben Befund unterscheiden duerfen.
+protocol-error-v1 = [
+  1, error-code: tstr, request-id: bstr .size 16,
+  retryable: bool, required-registry-version: uint / null,
+  required-registry-head-hash: (bstr .size 32) / null, []
+]

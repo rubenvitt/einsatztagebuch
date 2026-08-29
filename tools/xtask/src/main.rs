@@ -242,6 +242,17 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          object at all.",
     ),
     (
+        "ea-sync-protocol",
+        "carries the RFC-9421 request verification against a server-side nonce and \
+         request-ID store plus the streamed body limits of the sync protocol; Stage 3 \
+         ships no browser path that loads this crate, so it need not compile for \
+         wasm32-unknown-unknown. The browser access of web-reader-design.md §12 is \
+         built in Stage 4 with apps/web/ea-reader; the collision between \
+         web-reader-design.md:469 and the frozen sentence in tools/xtask/src/main.rs \
+         („wird nicht erweitert“) is noted there as a Stage 4 Vorbehalt and is not \
+         resolved here.",
+    ),
+    (
         "ea-ui-contracts",
         "carries a file-writing binary in `src/bin/emit-ts.rs`, and \
          `cargo check --target wasm32-unknown-unknown -p ...` checks binaries \
@@ -989,7 +1000,29 @@ fn validate_json_schema_document(name: &str, input: &str) -> Result<(), String> 
     validate_json_schema_document_for_profile(name, input, JsonSchemaProfile::DeterministicReport)
 }
 
-fn validate_addendum_review(input: &str) -> Result<(), String> {
+/// Die geprueften Addenda samt ihrem EIGENEN Abnahmesatz.
+///
+/// Der Abnahmesatz haengt PRO DATEI, nicht global: „vor Task 3 Step 3
+/// akzeptiert“ enthaelt „vor Task 3 akzeptiert“ NICHT als Teilzeichenkette,
+/// eine gemeinsame Menge liesse also beide Dateien zugleich scheitern. Gemeinsam
+/// bleiben nur „normativ für v0.1“ und „darf kein dort bereits festgelegtes
+/// Feld“.
+///
+/// `docs/superpowers/specs/2026-08-14-einsatzarchiv-v0-1-payload-wire-addendum.md`
+/// ist hier BEWUSST nicht aufgefuehrt; die Zuordnung ist so gebaut, dass ein
+/// spaeterer Task die Datei mit ihrem eigenen Abnahmesatz aufnehmen kann.
+const REVIEWED_ADDENDA: [(&str, &str); 2] = [
+    (
+        "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md",
+        "vor Task 3 akzeptiert",
+    ),
+    (
+        "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-sync-wire-addendum.md",
+        "vor Task 3 Step 3 akzeptiert",
+    ),
+];
+
+fn validate_addendum_review(input: &str, acceptance_sentence: &str) -> Result<(), String> {
     let normalized = input
         .replace('*', "")
         .split_whitespace()
@@ -998,7 +1031,7 @@ fn validate_addendum_review(input: &str) -> Result<(), String> {
     for requirement in [
         "normativ für v0.1",
         "darf kein dort bereits festgelegtes Feld",
-        "vor Task 3 akzeptiert",
+        acceptance_sentence,
     ] {
         if !normalized.contains(requirement) {
             return Err(format!("wire-format addendum is missing: {requirement}"));
@@ -1224,6 +1257,21 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to read {protocol_path}: {error}"))?;
     validate_cddl_document(protocol_path, &protocol)?;
 
+    // Die beiden Sync-Protokolldokumente. Sie stehen HIER und nicht in einem
+    // Verzeichnisscanner, weil `validate_schemas` eine HARTE Pfadliste ist:
+    // eine nicht registrierte `.cddl`-Datei waere wirkungslos. Beide sind
+    // eigenstaendig und referenzieren nichts ausserhalb ihrer selbst, werden
+    // also EINZELN validiert.
+    let entry_commit_path = "schemas/protocol/v1/entry-commit.cddl";
+    let entry_commit = fs::read_to_string(root.join(entry_commit_path))
+        .map_err(|error| format!("failed to read {entry_commit_path}: {error}"))?;
+    validate_cddl_document(entry_commit_path, &entry_commit)?;
+
+    let reader_batch_path = "schemas/protocol/v1/reader-batch.cddl";
+    let reader_batch = fs::read_to_string(root.join(reader_batch_path))
+        .map_err(|error| format!("failed to read {reader_batch_path}: {error}"))?;
+    validate_cddl_document(reader_batch_path, &reader_batch)?;
+
     let identity_path = "schemas/identity/v1/os-account.cddl";
     let identity = fs::read_to_string(root.join(identity_path))
         .map_err(|error| format!("failed to read {identity_path}: {error}"))?;
@@ -1309,18 +1357,20 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     if compatibility != expected_compatibility {
         return Err("compatibility matrix differs from the ea-schema registry".to_owned());
     }
-    let addendum_path =
-        root.join("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md");
-    let addendum = fs::read_to_string(&addendum_path)
-        .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
-    validate_addendum_review(&addendum)?;
+    for (relative, acceptance_sentence) in REVIEWED_ADDENDA {
+        let addendum_path = root.join(relative);
+        let addendum = fs::read_to_string(&addendum_path)
+            .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
+        validate_addendum_review(&addendum, acceptance_sentence)
+            .map_err(|error| format!("{relative}: {error}"))?;
+    }
     let report_vector_noun = if report_vectors == 1 {
         "report vector"
     } else {
         "report vectors"
     };
     println!(
-        "validated 10 CDDL, 7 JSON schemas, 5 payload vectors, \
+        "validated 12 CDDL, 7 JSON schemas, 5 payload vectors, \
          {report_vectors} {report_vector_noun}, and compatibility matrix"
     );
     Ok(())
@@ -3336,7 +3386,7 @@ vor Task 3 akzeptiert
 **Review-Ergebnis:** keine ungelöste Zeile
 "#;
 
-        let error = super::validate_addendum_review(addendum)
+        let error = super::validate_addendum_review(addendum, "vor Task 3 akzeptiert")
             .expect_err("unresolved review rows must fail closed");
         assert!(error.contains("unresolved review row"));
     }

@@ -1,0 +1,53 @@
+; Einsatzarchiv v0.1 sync protocol: lesende Rahmen und Seitenantworten.
+; Bestandteil des Sync-Wire-Addendums und normativ.
+;
+; Symbolische Namen dokumentieren Arraypositionen; sie werden nicht als
+; CBOR-Map-Keys serialisiert. Alle Objekte sind deterministisch nach Design
+; §10.1 kodiert. Jede Objektliste ist bytweise nach object-hash sortiert und
+; duplikatfrei; next-cursor und export-cursor sind opake, servergebundene
+; technische Cursor, die ein Klient nie deutet.
+;
+; GET /v1/objects/{objectHash} traegt KEINEN Rahmen dieses Dokuments: die
+; Antwort ist der rohe, exakt archivierte Bytestrom mit dem Medientyp
+; application/einsatzarchiv-object.
+
+object-record-v1 = [object-hash: bstr .size 32, exact-object-bytes: bstr]
+
+reader-batch-v1 = [
+  1, chain-id: bstr .size 16, requested-after-sequence: uint,
+  requested-after-entry-hash: bstr .size 32,
+  start-head-entry-hash: bstr .size 32,
+  objects: [* object-record-v1],
+  next-cursor: bstr / null, covered-through-sequence: uint, []
+]
+
+trust-registry-response-v1 = [
+  1, requested-after-version: uint,
+  events: [* [registry-version: uint, object-hash: bstr .size 32, exact-etb-bytes: bstr]], []
+]
+
+grant-list-response-v1 = [
+  1, entry-hash: bstr .size 32,
+  grants: [* [object-hash: bstr .size 32, exact-eag-bytes: bstr]], []
+]
+
+checkpoint-list-response-v1 = [
+  1, requested-cursor: bstr / null,
+  checkpoints: [* [object-hash: bstr .size 32, exact-ecp-bytes: bstr]],
+  next-cursor: bstr / null, []
+]
+
+; object-type deckt genau die sechs Archivobjektarten von archive-object-v1 ab.
+archive-export-manifest-v1 = [
+  1, organization-id: bstr .size 16,
+  sorted-objects: [* [object-type: 1..6, object-hash: bstr .size 32, byte-length: uint]],
+  export-cursor: bstr / null, []
+]
+
+; state deckt genau die fuenf Werte von destruction-state-v1 ab.
+destruction-status-response-v1 = [
+  1, destruction-id: bstr .size 16, state: 0..4,
+  authorization-object-hash: bstr .size 32,
+  transitions: [* [object-hash: bstr .size 32, exact-etb-bytes: bstr]],
+  attestations: [* [object-hash: bstr .size 32, exact-etb-bytes: bstr]], []
+]

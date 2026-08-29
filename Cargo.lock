@@ -1454,6 +1454,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-sync-protocol"
+version = "0.1.0"
+dependencies = [
+ "ea-cbor",
+ "ea-crypto",
+ "ea-format",
+ "ea-types",
+ "ed25519-dalek",
+ "hex",
+ "minicbor",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "ea-system-tests"
 version = "0.1.0"
 dependencies = [
