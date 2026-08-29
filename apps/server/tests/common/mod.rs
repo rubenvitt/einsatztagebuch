@@ -383,6 +383,30 @@ fn parse_http_response(raw: &[u8]) -> HttpResponse {
     }
 }
 
+/// Der ECHTE Writer-Sync-Transport gegen diesen Lauscher.
+///
+/// Er baut `hyper` auf `tokio-rustls` genau so, wie ein Geraet es tut, und
+/// vertraut GENAU der Test-CA — dieselbe Wurzel, gegen die auch
+/// [`https_request`] prueft. Der kleine handgeschriebene Klient daneben bleibt,
+/// was er ist: die Testhilfe der uebrigen Ziele. Dieses eine Ziel misst den
+/// PRODUKTIONSPFAD, und dafuer muss der Produktionstransport laufen.
+///
+/// # Panics
+///
+/// Wenn die Test-CA nicht parst.
+#[must_use]
+pub fn hyper_transport(server: &TestServer) -> ea_sync_client::HyperTlsTransport {
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(TEST_TLS_CA_PEM.as_bytes())
+    {
+        roots
+            .add(certificate.expect("the test CA must parse"))
+            .expect("the test CA must be addable");
+    }
+    ea_sync_client::HyperTlsTransport::new(server.address, "localhost".to_owned(), roots)
+        .expect("the production transport must stand up")
+}
+
 /// Der Kryptographieanbieter dieses Prozesses, genau einmal gesetzt.
 pub fn install_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();

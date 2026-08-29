@@ -472,13 +472,24 @@ impl TrustStateStore for ModelStore {
     }
 }
 
-fn select_head(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead {
+/// Waehlt den Head der Fixture FUER EINE Sequenz.
+///
+/// Die vorgeschlagene Sequenz steckt IM gewaehlten Head: Schritt 3 der
+/// Finalisierung vergleicht sie gegen den aus committeten Bytes gerechneten
+/// Kettenkopf und haelt bei Abweichung mit
+/// `EA-WRITER-HEAD-RECONCILIATION-REQUIRED` an. Ein zweiter Eintrag braucht
+/// deshalb einen fuer SEINE Sequenz gewaehlten Head und nicht den des ersten.
+fn select_head_for_sequence(
+    line: &RegistryLineBuilder,
+    now_ms: i64,
+    proposed: u64,
+) -> SelectedRegistryHead {
     let head_index = line.heads().len() - 1;
     let head = line.heads()[head_index];
     let key = trust_support::state_key();
     let trusted_time = TrustedTimeState::initial(UnixMillis::new(now_ms));
     let trust = line.verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
-    let candidate = verify_registry_candidate(&trust, ChainSequence::new(PROPOSED_SEQUENCE))
+    let candidate = verify_registry_candidate(&trust, ChainSequence::new(proposed))
         .expect("der Kandidat der Fixture muss verifizieren");
     let mut store = ModelStore {
         key,
@@ -495,6 +506,10 @@ fn select_head(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead 
         panic!("die Fixture muss ihren eigenen aktuellen Head waehlen");
     };
     selected
+}
+
+fn select_head(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead {
+    select_head_for_sequence(line, now_ms, PROPOSED_SEQUENCE)
 }
 
 struct FakeAccount {
@@ -891,6 +906,60 @@ impl WriterHarness {
         Arc::clone(&self.backend)
     }
 
+    /// Finalisiert einen ZWEITEN Eintrag auf derselben Kette.
+    ///
+    /// Er braucht zweierlei, was der erste nicht braucht: eine ANDERE
+    /// Einsatznummer — die Nummernvergabe laesst keine zweite Belegung zu —
+    /// und eine Checkpoint-Aussage ueber den bereits committeten Kopf. Ohne
+    /// die zweite bleibt Schritt 2 mit `EA-WRITER-HEAD-RECONCILIATION-REQUIRED`
+    /// stehen: ohne Serveraussage ist der Rueckbau NICHT bewertbar, und
+    /// fail-closed heisst dann anhalten.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der zweite Abschluss nicht traegt.
+    pub fn finalize_a_second_entry(
+        &self,
+        first: &ea_writer::FinalizeOutcome,
+    ) -> ea_writer::FinalizeOutcome {
+        let source = self.source();
+        let claims = [ea_chain::CheckpointClaim {
+            chain_id: self.head.chain_id(),
+            covered_from_sequence: ChainSequence::new(0),
+            covered_through_sequence: first.sequence,
+            head_entry_hash: first.entry_hash,
+            checkpoint_object_hash: ObjectHash::try_from([0xc7_u8; 32].as_slice())
+                .expect("32 Byte sind ein Objekthash"),
+        }];
+        let head = select_head_for_sequence(
+            &self.line,
+            FIXTURE_NOW_MS,
+            first.sequence.get().saturating_add(1),
+        );
+        let service = WriterService::new(
+            Arc::clone(&self.store().repository),
+            Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
+            self.backend.as_ref(),
+            &source,
+            &head,
+            &claims,
+            IncidentNumberRegister::new(Arc::clone(&self.store().database)),
+            OperatorProfileRepository::new(Arc::clone(&self.store().database)),
+            self.binding,
+        );
+        let proof = issue_proof(
+            &head,
+            self.binding.binding_object_hash,
+            ReauthPurpose::Finalize,
+        );
+        let preview = service
+            .preview(&proof, other_incident(), self.observed_now())
+            .expect("die zweite Vorschau muss tragen");
+        service
+            .finalize(&proof, other_incident(), &preview, self.observed_now())
+            .expect("der zweite Abschluss muss tragen")
+    }
+
     /// Legt JEDES Trust-Objekt der Linie in den Bestand.
     ///
     /// Ohne diesen Schritt traegt der Bestand der Fixture zwar Eintraege und
@@ -963,6 +1032,7 @@ impl WriterHarness {
     /// # Panics
     ///
     /// Wenn die Finalisierung nicht traegt.
+    #[must_use]
     pub fn finalize_once(&self) -> ea_writer::FinalizeOutcome {
         let source = self.source();
         let service = self.service(&source);

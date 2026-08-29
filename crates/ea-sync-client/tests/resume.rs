@@ -216,3 +216,76 @@ async fn a_confirmed_cursor_survives_a_restart() {
         "der bestaetigte Cursor ueberlebt den frisch gebauten Klienten"
     );
 }
+
+/// Ein WARTENDER Eintrag haelt die ganze Kette an — keiner ueberholt ihn.
+///
+/// Die Reihenfolgezusage von `design.md` §9.4 („Nach dem `.eip`-Rename ist das
+/// Archivpaket die Wahrheit. Ein Neustart rekonstruiert Kettenkopf, Queue und
+/// UI daraus"), zusammen mit der Kettenpruefung des Dienstes.
+///
+/// Der Fehler, den dieser Zeuge faengt, war ein `continue` statt eines `break`
+/// in der Backoff-Verzweigung, und seine Folge war dauerhaft: Sequenz n faellt
+/// nach einem VORUEBERGEHENDEN Leitungsfehler auf ihren Backoff, Sequenz n+1
+/// geht vor ihr auf die Leitung, der Dienst prueft die Kettenposition und
+/// antwortet mit einem Fork — und ein Fork wird zu Recht nicht automatisch
+/// wiederholt. Aus einem Netzaussetzer auf einem Eintrag waere eine harte
+/// Ablehnung des naechsten geworden.
+///
+/// Mit nur EINEM anstehenden Eintrag ist das nicht messbar: Abbrechen und
+/// Ueberspringen sind dann dasselbe. Deshalb traegt diese Kulisse zwei.
+#[tokio::test]
+async fn a_waiting_entry_stops_the_chain_instead_of_being_overtaken() {
+    let mut harness = SyncHarness::with_two_pending_entries().await;
+    assert_eq!(
+        harness.pending_count().await,
+        2,
+        "ohne zwei anstehende Eintraege misst dieser Zeuge nichts"
+    );
+
+    // Der erste Lauf: die Leitung reisst beim ERSTEN Eintrag ab. Genau ein
+    // Commit ist versucht worden — der zweite Eintrag wird gar nicht erst
+    // angefasst, weil der erste die Kette anhaelt.
+    harness.server.script(vec![CommitReplyV1::Unreachable]);
+    let first = harness.push_pending().await.expect("der Lauf muss tragen");
+    assert_eq!(harness.server.commit_calls(), 1);
+    assert_eq!(first.pushed(), 0);
+    assert_eq!(first.status(), SyncStatus::UploadPending);
+
+    // Der zweite Lauf, OHNE die Uhr vorzustellen: der erste Eintrag liegt auf
+    // seinem Backoff. Jetzt darf KEIN Commit laufen — und ausdruecklich auch
+    // nicht der des zweiten Eintrags.
+    let second = harness.push_pending().await.expect("der Lauf muss tragen");
+    assert_eq!(
+        harness.server.commit_calls(),
+        1,
+        "ein wartender Eintrag laesst den NAECHSTEN nicht vor"
+    );
+    assert_eq!(second.pushed(), 0);
+    assert_eq!(second.outstanding(), 2, "beide Eintraege stehen weiter an");
+    assert_ne!(second.status(), SyncStatus::Synchronized);
+
+    // Und der Wiederaufnahmezustand des ERSTEN ist dauerhaft gebucht: genau er
+    // ist der Grund, aus dem der zweite Lauf nichts tat.
+    let entry = harness
+        .pending_entry()
+        .await
+        .expect("die Warteschlange traegt ihren ersten Eintrag");
+    let schedule = harness.retry_schedule(entry.entry_object_hash());
+    assert_eq!(schedule.failed_attempts, 1);
+    assert!(
+        !schedule.is_due(harness.observed_now()),
+        "der erste Eintrag ist noch nicht faellig"
+    );
+
+    // Nach dem Backoff laeuft die Kette in IHRER Reihenfolge weiter: der erste
+    // Eintrag zuerst.
+    harness.advance(60_000);
+    harness.server.script(vec![CommitReplyV1::Unreachable]);
+    let _ = harness.push_pending().await;
+    assert_eq!(harness.server.commit_calls(), 2);
+    let bodies = harness.server.seen_commit_bodies();
+    assert_eq!(
+        bodies[0], bodies[1],
+        "wieder aufgenommen wird DERSELBE Eintrag, byteidentisch"
+    );
+}

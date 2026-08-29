@@ -380,6 +380,9 @@ pub struct SyncHarness {
     /// der zwei Versuche messen will, muss die Uhr also vorstellen — und tut
     /// das ausdruecklich, statt zu schlafen.
     clock_offset_ms: i64,
+    /// Der Ausgang des ersten Abschlusses — die Checkpoint-Aussage, die ein
+    /// zweiter Eintrag braucht, haengt an ihm.
+    first: ea_writer::FinalizeOutcome,
 }
 
 impl SyncHarness {
@@ -413,6 +416,17 @@ impl SyncHarness {
 
     async fn build(network: Option<bool>) -> Self {
         Self::build_with(network, false).await
+    }
+
+    /// Ein Bestand mit ZWEI committeten, noch nicht hochgeladenen Eintraegen.
+    ///
+    /// Die einzige Kulisse, in der sich die Reihenfolgezusage von
+    /// `push_pending` ueberhaupt messen laesst: mit genau einem anstehenden
+    /// Eintrag sind Abbrechen und Ueberspringen nicht zu unterscheiden.
+    pub async fn with_two_pending_entries() -> Self {
+        let harness = Self::build(None).await;
+        harness.writer.finalize_a_second_entry(&harness.first);
+        harness
     }
 
     /// Ein Netzprofil, dessen Queuegrenze der Plan eines Eintrags ueberschreitet.
@@ -456,7 +470,7 @@ impl SyncHarness {
             with_server_receipt_certificate: server_receipt_certificate,
             ..writer_support::LineVariantV1::default()
         });
-        writer.finalize_once();
+        let first = writer.finalize_once();
         if server_receipt_certificate {
             // Der Bestand bekommt seine VERTRAUENSABLAGE. Ohne sie waehlt der
             // volle Verifizierer keinen Registrierungskopf, meldet null
@@ -483,6 +497,7 @@ impl SyncHarness {
             queue,
             last: None,
             clock_offset_ms: 0,
+            first,
         }
     }
 
@@ -663,6 +678,23 @@ impl SyncHarness {
         })
         .await
         .expect("der Blockierthread darf nicht verlorengehen")
+    }
+
+    /// Der dauerhafte Wiederaufnahmezustand eines Eintrags.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die lokale Ablage ihn nicht hergibt.
+    #[must_use]
+    pub fn retry_schedule(&self, entry: ea_types::ObjectHash) -> ea_sync_client::RetryScheduleV1 {
+        ea_sync_client::RetryStore::open(
+            self.writer.database(),
+            ea_types::RetryConfig::new(3, 10, 100).expect("die Schranken sind nicht null"),
+            3,
+        )
+        .expect("die Wiederaufnahmeablage muss stehen")
+        .load(entry)
+        .expect("der Wiederaufnahmezustand muss lesbar sein")
     }
 
     /// Der bestaetigte Cursor, gelesen von einem FRISCH gebauten Klienten.
