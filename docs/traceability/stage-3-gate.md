@@ -549,4 +549,4 @@ Arbeitsbereichsmitglied ist.
   Stufe bereits umgesetzt, Abschnitt 4) und ein prozessinterner Cache der
   geprueften Schliessung, geschluesselt auf den Registry-Kopf und die
   Katalog-Hashmenge, den `advance_pinned_head` entwertet. Folgeticket:
-  **DRK-247**.
+  **DRK-248** (<https://app.clickup.com/t/123zgebztur>).
