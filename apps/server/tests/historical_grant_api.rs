@@ -32,6 +32,20 @@ struct Prepared {
     upload: ea_sync_protocol::HistoricalGrantUploadV1,
 }
 
+/// Wie die `grantAuthorization` in den Bestand kommt.
+#[derive(Clone, Copy)]
+enum Ingestion {
+    /// Direkt in den Object Store. Der Weg der Faelle, deren Autorisierung den
+    /// Aufnahmeweg absichtlich gar nicht bestehen soll (zwei gleiche
+    /// Approver), und der Faelle, die den OBJEKTINDEX beobachten: der echte
+    /// Aufnahmeweg legt dort eine Zeile an, und die waere dann nicht mehr die
+    /// Zeile, ueber die jene Faelle etwas aussagen.
+    Seed,
+    /// Der ECHTE Aufnahmeweg: `POST /v1/trust/events`. Er ist es, der den
+    /// Endpunkt gegen einen produktiven Server ueberhaupt erreichbar macht.
+    TrustEndpoint { request_id: [u8; 16] },
+}
+
 /// Baut die Kulisse: ein Eintrag, eine Autorisierung, ein `.eag`.
 ///
 /// `signers` sind die Approver. Zwei UNTERSCHIEDLICHE sind der Normalfall;
@@ -41,6 +55,16 @@ async fn prepare(
     expires_at: i64,
     marker: u8,
     signers: &[(ea_types::CertificateHash, [u8; 32])],
+) -> Prepared {
+    prepare_with(ready, expires_at, marker, signers, Ingestion::Seed).await
+}
+
+async fn prepare_with(
+    ready: &common::ReadyServer,
+    expires_at: i64,
+    marker: u8,
+    signers: &[(ea_types::CertificateHash, [u8; 32])],
+    ingestion: Ingestion,
 ) -> Prepared {
     let seeded = EntryHash::try_from(&common::READ_SEEDED_HEAD_ENTRY_HASH[..]).expect("32 bytes");
     let entry = common::commit_one_entry(
@@ -59,7 +83,20 @@ async fn prepare(
         marker,
         signers,
     );
-    let authorization_hash = common::seed_trust_object_bytes(&authorization).await;
+    let authorization_hash = match ingestion {
+        Ingestion::Seed => common::seed_trust_object_bytes(&authorization).await,
+        Ingestion::TrustEndpoint { request_id } => {
+            let response = publish_authorization(ready, &authorization, request_id).await;
+            assert_eq!(
+                response.status,
+                201,
+                "a grant authorization must reach the catalogue over its real path; \
+                 the server answered {:?}",
+                common::error_code(&response.body)
+            );
+            ea_crypto::object_hash(&authorization)
+        }
+    };
 
     let grant_bytes = archive_objects::historical_grant_bytes(
         &ready.closure,
@@ -95,6 +132,31 @@ async fn post_grant(
             request_id,
         },
         now_millis,
+    )
+    .await
+}
+
+/// Legt EIN exaktes `.etb` ueber `POST /v1/trust/events` in den Katalog.
+///
+/// Der Endpunkt verlangt `organizationAdminApprove`; der Administrator der
+/// Kulisse traegt sie.
+async fn publish_authorization(
+    ready: &common::ReadyServer,
+    exact_etb_bytes: &[u8],
+    request_id: [u8; 16],
+) -> common::HttpResponse {
+    let upload = ea_sync_protocol::TrustEventUploadV1::new(exact_etb_bytes.to_vec())
+        .expect("the upload frame must build");
+    common::call_at(
+        &common::ApiCall {
+            ready,
+            signer_seed: trust_closure::ADMIN_SEED,
+            endpoint: EndpointV1::TrustEvents,
+            target: EndpointV1::TrustEvents.path_template(),
+            body: Some(upload.exact_bytes()),
+            request_id,
+        },
+        common::READ_SERVER_NOW_MILLIS,
     )
     .await
 }
@@ -569,6 +631,119 @@ async fn an_expired_historical_grant_is_refused_by_the_object_endpoint_too() {
         common::error_code(&after.body).as_deref(),
         Some("EA-READER-GRANT-EXPIRED")
     );
+
+    database.cleanup().await;
+}
+
+/// Die `grantAuthorization` reist ueber IHREN ECHTEN Aufnahmeweg.
+///
+/// `POST /v1/trust/events` nimmt sie als KATALOGSTOFF an — geprueft ueber die
+/// geteilten Bausteine (Organisationsbindung, gebundener Registry-Kopf,
+/// Frist und ZWEI unterschiedliche `historicalGrantApprove`-Approver), und
+/// ohne dass sie damit irgendeine Autoritaet traegt. Erst danach loest
+/// `POST /v1/entries/{entryHash}/historical-grants` sie content-addressed auf.
+///
+/// Ohne diesen Fall belegte die ganze Datei nur, dass der Grant-Endpunkt gegen
+/// eine von Hand in den Object Store gelegte Autorisierung funktioniert — und
+/// gegen einen produktiven Server waere er unerreichbar.
+#[tokio::test]
+async fn a_grant_authorization_reaches_the_catalogue_over_the_trust_endpoint() {
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, true).await;
+    let approvers = archive_objects::approvers(&ready.closure);
+    let prepared = prepare_with(
+        &ready,
+        AUTHORIZATION_EXPIRES_AT,
+        0x59,
+        &approvers,
+        Ingestion::TrustEndpoint {
+            request_id: [0x71; 16],
+        },
+    )
+    .await;
+
+    // Sie steht als Trust-Ereignis im Bestand — und NICHT auf der
+    // Registry-Linie: nur ein `registryEvent` traegt eine Registry-Version.
+    let indexed: (String,) = sqlx::query_as(
+        "SELECT event_code FROM trust_events WHERE organization_id = $1 AND object_hash = $2",
+    )
+    .bind(&ready.closure.organization_id.as_bytes()[..])
+    .bind(&prepared.authorization_hash.as_bytes()[..])
+    .fetch_one(database.pool())
+    .await
+    .expect("the uploaded authorization must be indexed");
+    assert_eq!(indexed.0, "grantAuthorization");
+
+    // Und NICHT auf der Registry-Linie: nur ein `registryEvent` traegt eine
+    // Registry-Version, und Katalogstoff traegt keine.
+    let on_the_line: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM registry_events WHERE organization_id = $1 \
+         AND registry_head_hash = $2",
+    )
+    .bind(&ready.closure.organization_id.as_bytes()[..])
+    .bind(&prepared.authorization_hash.as_bytes()[..])
+    .fetch_one(database.pool())
+    .await
+    .expect("counting the registry line must succeed");
+    assert_eq!(
+        on_the_line.0, 0,
+        "catalogue material never joins the registry line"
+    );
+
+    // Und der Grant-Endpunkt loest genau sie auf.
+    let accepted = post_grant(
+        &ready,
+        &prepared,
+        [0x72; 16],
+        common::READ_SERVER_NOW_MILLIS,
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        201,
+        "the historical grant must be accepted against an uploaded authorization; \
+         the server answered {:?}",
+        common::error_code(&accepted.body)
+    );
+
+    database.cleanup().await;
+}
+
+/// Zweimal derselbe Approver kommt gar nicht erst in den Katalog.
+///
+/// Die Mehr-Augen-Regel gilt schon bei der AUFNAHME und nicht erst, wenn ein
+/// `.eag` die Autorisierung nennt. Sonst laege eine Autorisierung im Katalog,
+/// die keine ist.
+#[tokio::test]
+async fn a_grant_authorization_with_one_approver_twice_is_refused_at_the_trust_endpoint() {
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, true).await;
+    let approvers = archive_objects::approvers(&ready.closure);
+    let doubled = [approvers[0], approvers[0]];
+    let authorization = archive_objects::grant_authorization(
+        &ready.closure,
+        vec![EntryHash::try_from(&common::READ_SEEDED_HEAD_ENTRY_HASH[..]).expect("32 bytes")],
+        archive_objects::Recipient::reader(&ready.closure),
+        AUTHORIZATION_EXPIRES_AT,
+        0x5a,
+        &doubled,
+    );
+
+    let response = publish_authorization(&ready, &authorization, [0x73; 16]).await;
+    assert_eq!(response.status, 422);
+    assert_eq!(
+        common::error_code(&response.body).as_deref(),
+        Some("EA-TRUST-EVENT-INVALID"),
+        "one approver signing twice is not a two-eyes authorization"
+    );
+
+    let indexed: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM trust_events WHERE object_hash = $1")
+            .bind(&ea_crypto::object_hash(&authorization).as_bytes()[..])
+            .fetch_one(database.pool())
+            .await
+            .expect("counting the trust events must succeed");
+    assert_eq!(indexed.0, 0, "a refused object is never indexed");
 
     database.cleanup().await;
 }

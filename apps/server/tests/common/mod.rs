@@ -1155,15 +1155,21 @@ pub async fn call(request: &ApiCall<'_>) -> HttpResponse {
 
 /// Legt exakte `.etb`-Bytes DIREKT in den Object Store.
 ///
-/// Bewusst NICHT ueber `POST /v1/trust/events`: die Aufnahme weist
-/// `grantAuthorization` und `destructionAuthorization` fail-closed als
+/// Bewusst NICHT ueber `POST /v1/trust/events`. Der Aufnahmeweg weist
+/// `destructionAuthorization`, `destructionTransition`, `deletionAttestation`,
+/// `webBundleRelease` und `webBundleRevocation` fail-closed als
 /// `EA-TRUST-EVENT-UNVERIFIABLE` ab, weil `ea-trust` fuer sie im
-/// Registrierungsabschluss keine Signiererregel fuehrt. Sie erreichen den
-/// Server auf ihrem eigenen Weg — die Vernichtung ueber `POST /v1/destructions`,
-/// die Grant-Autorisierung als das Objekt, das ein historisches `.eag` NENNT
-/// und das der Server content-addressed aufloest. Fuer das zweite gibt es in
-/// dieser Stufe noch keinen Aufnahmeendpunkt; die Kulisse legt es deshalb
-/// dorthin, wo Stufe 5 es hinlegen wird.
+/// Registrierungsabschluss keine Signiererregel fuehrt; die Vernichtungsarten
+/// reisen ueber `POST /v1/destructions`, die Bundle-Arten haben in dieser
+/// Stufe gar keinen Endpunkt.
+///
+/// Die `grantAuthorization` DAGEGEN hat seit dieser Stufe ihren echten
+/// Aufnahmeweg an `POST /v1/trust/events` (siehe
+/// `crates/ea-trust/src/admission.rs`), und
+/// `apps/server/tests/historical_grant_api.rs` geht ihn. Diese Abkuerzung
+/// bleibt fuer die Faelle, die eine Autorisierung brauchen, die den
+/// Aufnahmeweg absichtlich NICHT besteht, und fuer die, die den Objektindex
+/// beobachten.
 ///
 /// # Panics
 ///

@@ -26,6 +26,11 @@
 //!    aktuellen Abschluss zustaendig ist?
 //! 3. Liegt der Zeitpunkt im Gueltigkeitsfenster, das es selbst nennt?
 //!
+//! Bei der `grantAuthorization` gehoert zu Frage 2 auch die Mehr-Augen-Zahl:
+//! ZWEI UNTERSCHIEDLICHE Approver. Sie ist die einzige Aussage, die `ea-crypto`
+//! je Signatur nicht treffen kann, und sie steht deshalb hier — die Rolle und
+//! die Capability selbst kommen unveraendert aus dem geteilten Kontext.
+//!
 //! # Warum das Paar nicht in einem Zug geht
 //!
 //! Ein Zielobjekt und seine Autorisierung referenzieren EINANDER: die
@@ -54,8 +59,17 @@ use crate::{
     admin_authorization::{
         AdminAuthorizationReplay, verify_admin_authorization, verify_authorization_signer,
     },
-    resolver::PreviousHeadState,
+    resolver::{PreviousHeadResolver, PreviousHeadState},
 };
+
+/// Wie viele UNTERSCHIEDLICHE Approver eine `grantAuthorization` tragen muss.
+///
+/// Das Mehr-Augen-Prinzip aus `design.md` §16.3 in einer Zahl. Sie steht hier
+/// UND in `ea-sync-server`, weil beide Seiten dieselbe Aussage an
+/// verschiedenen Stellen brauchen: die Aufnahme in den Katalog und die
+/// spaetere Aufloesung am Grant-Endpunkt. Ein `ea-trust`, das auf
+/// `ea-sync-server` zeigt, waere die falsche Richtung.
+pub const REQUIRED_DISTINCT_GRANT_APPROVERS_V1: usize = 2;
 
 /// Prueft EIN exaktes `.etb` fuer die Aufnahme in den Katalog.
 ///
@@ -180,17 +194,44 @@ pub fn verify_catalogue_admission(
         // Der Kopf selbst wird NICHT aufgenommen: er ist der Uebergang, und
         // ueber ihn entscheidet `select_registry_head`.
         DecodedTrustPayloadV1::RegistryEvent(_) => return Err(TrustError::ActionMismatch),
-        // Vernichtung und Grant-Autorisierung gehoeren nicht in den
-        // Registrierungsabschluss: `ea-trust` fuehrt fuer sie heute keine
-        // Signiererregel, und eine hier zu erfinden waere genau die zweite
-        // Umsetzung, die es nicht geben darf.
+        // Die Mehr-Augen-Autorisierung eines historischen Grants ist
+        // KATALOGSTOFF und keine Autoritaet: sie aktiviert nichts, hebt
+        // nichts und verschiebt keinen Kopf. Sie liegt im Katalog, damit
+        // `POST /v1/entries/{entryHash}/historical-grants` sie spaeter
+        // content-addressed aufloesen kann — ohne diesen Weg waere jener
+        // Endpunkt gegen einen echten Server unerreichbar.
+        //
+        // Erfunden wird hier KEINE Signiererregel: Rolle
+        // (`SignerRole::KeyApprover`) und Capability
+        // (`historicalGrantApprove`) stecken im geteilten `ea-crypto`-Kontext
+        // `historical_grant_approval_trust_digest`, und die Aktivitaet des
+        // Zertifikats loest derselbe `PreviousHeadResolver` auf, den auch die
+        // Admin-Autorisierung nutzt. Die EINE Aussage, die `ea-crypto` je
+        // Signatur nicht treffen kann — dass es ZWEI UNTERSCHIEDLICHE
+        // Approver waren —, steht in [`require_distinct_approvers`].
+        DecodedTrustPayloadV1::GrantAuthorization(fields) => {
+            require_organization(state, fields.organization_id)?;
+            if fields.registry_version != state.registry_version
+                || fields.registry_head_hash != state.registry_head_hash
+            {
+                return Err(TrustError::ActionMismatch);
+            }
+            if now > fields.expires_at {
+                return Err(TrustError::AuthExpired);
+            }
+            require_distinct_approvers(state, object)?;
+        }
+        // Vernichtung gehoert nicht in den Registrierungsabschluss:
+        // `ea-trust` fuehrt fuer sie heute keine Signiererregel, und eine hier
+        // zu erfinden waere genau die zweite Umsetzung, die es nicht geben
+        // darf. Sie reist ueber `POST /v1/destructions`.
         //
         // Die Bundle-Freigabe und ihr Widerruf stehen aus demselben Grund
         // hier: sie tragen die DIREKTE, wurzelsignierte Gestalt, sind kein
         // zulaessiges Ziel einer Admin-Autorisierung und deshalb auch kein
-        // Gegenstand des Registrierungsabschlusses.
-        DecodedTrustPayloadV1::GrantAuthorization(_)
-        | DecodedTrustPayloadV1::DestructionAuthorization(_)
+        // Gegenstand des Registrierungsabschlusses. Einen Stufe-3-Endpunkt
+        // haben sie nicht.
+        DecodedTrustPayloadV1::DestructionAuthorization(_)
         | DecodedTrustPayloadV1::DestructionTransition(_)
         | DecodedTrustPayloadV1::DeletionAttestation(_)
         | DecodedTrustPayloadV1::WebBundleRelease(_)
@@ -225,6 +266,45 @@ pub fn bootstrap_active_certificates(
         .previous_head()
         .active_certificates(at_sequence)
         .map(|(hash, certificate)| (hash, &certificate.fields))
+}
+
+/// Zaehlt die UNTERSCHIEDLICHEN Zertifikate, die diese `grantAuthorization`
+/// gueltig unterschrieben haben, und verlangt
+/// [`REQUIRED_DISTINCT_GRANT_APPROVERS_V1`] davon.
+///
+/// Jede Signatur laeuft durch die GETEILTE Kante `verify_cose_sign1` mit
+/// [`ea_crypto::VerificationContext::historical_grant_approval_trust_digest`];
+/// der Kontext bindet Rolle und Capability, der Zertifikatshash kommt aus dem
+/// GESCHUETZTEN COSE-Kopf der Signatur selbst, und
+/// [`PreviousHeadResolver`] entscheidet ueber Aktivitaet und Widerruf zu der
+/// Sequenz, die die Autorisierung SELBST nennt. Eine Signatur, die nicht
+/// traegt, weist die ganze Autorisierung ab — sie halb zu zaehlen waere eine
+/// Mehrheit aus Fehlern.
+fn require_distinct_approvers(
+    state: &PreviousHeadState,
+    authorization: &ea_format::TrustObjectV1,
+) -> Result<(), TrustError> {
+    let resolver = PreviousHeadResolver::new(state);
+    let digest_input = authorization.exact_digest_input();
+    let mut seen = std::collections::BTreeSet::new();
+    for signature in authorization.signatures() {
+        let certificate_hash = ea_crypto::parse_cose_sign1(signature, &[])
+            .map_err(|_| TrustError::Signature)?
+            .certificate_hash()
+            .ok_or(TrustError::Signature)?;
+        let context = ea_crypto::VerificationContext::historical_grant_approval_trust_digest(
+            digest_input,
+            certificate_hash,
+        )
+        .map_err(|_| TrustError::Signature)?;
+        let verified = ea_crypto::verify_cose_sign1(signature, &resolver, &context)
+            .map_err(|_| TrustError::Signature)?;
+        seen.insert(*verified.certificate_hash().as_bytes());
+    }
+    if seen.len() < REQUIRED_DISTINCT_GRANT_APPROVERS_V1 {
+        return Err(TrustError::Signature);
+    }
+    Ok(())
 }
 
 fn admit_authorized_target(
