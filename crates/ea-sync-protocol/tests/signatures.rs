@@ -292,6 +292,40 @@ mod fixtures {
             .unwrap()
     }
 
+    /// `created` liegt DICHT VOR der Toleranzgrenze — eine leicht vorgehende
+    /// Geraeteuhr, die der Pruefer noch annimmt.
+    #[must_use]
+    pub fn commit_created_just_inside_the_skew() -> SignedRequestV1 {
+        writer()
+            .sign(
+                &parts(EndpointV1::EntryCommits, 30),
+                &SignatureParametersV1::new(
+                    NOW + 59,
+                    NOW + 59 + ea_sync_protocol::MAX_SIGNATURE_WINDOW_SECONDS_V1,
+                    [30; 32],
+                    organization_tag(organization()),
+                ),
+            )
+            .unwrap()
+    }
+
+    /// `created` liegt JENSEITS der Toleranzgrenze — eine Uhr, der der
+    /// Pruefer nicht mehr folgt.
+    #[must_use]
+    pub fn commit_created_beyond_the_skew() -> SignedRequestV1 {
+        writer()
+            .sign(
+                &parts(EndpointV1::EntryCommits, 31),
+                &SignatureParametersV1::new(
+                    NOW + 61,
+                    NOW + 61 + ea_sync_protocol::MAX_SIGNATURE_WINDOW_SECONDS_V1,
+                    [31; 32],
+                    organization_tag(organization()),
+                ),
+            )
+            .unwrap()
+    }
+
     /// `expires` liegt jenseits des festgeschriebenen Fensters.
     #[must_use]
     pub fn commit_with_unbounded_window() -> SignedRequestV1 {
@@ -560,6 +594,37 @@ fn an_expired_request_and_an_unbounded_window_fail_with_distinct_codes() {
             .code(),
         "EA-HTTP-WINDOW-INVALID"
     );
+}
+
+/// Der Pruefer toleriert eine begrenzt vorgehende Uhr — und nur die.
+///
+/// Ohne Toleranz faellt ein Schreiber, dessen Uhr eine Sekunde vorgeht, mit
+/// JEDEM signierten Request auf `401`, und der Klient fuehrt `401` als nicht
+/// automatisch wiederholbar: aus einer Sekunde Drift wuerde ein harter
+/// Betriebsausfall. Beide Seiten der Grenze stehen hier, weil eine Toleranz
+/// ohne obere Kante keine Toleranz mehr waere, sondern ein offenes Fenster.
+#[test]
+fn a_bounded_forward_clock_skew_is_tolerated_and_anything_beyond_it_is_not() {
+    let directory = fixtures::directory();
+    fixtures::verifier(EndpointV1::EntryCommits, &directory)
+        .verify(
+            &fixtures::commit_created_just_inside_the_skew(),
+            &mut fixtures::nonce_store(),
+        )
+        .expect("a clock 59 seconds ahead is a running device, not an attack");
+    assert_eq!(
+        fixtures::verifier(EndpointV1::EntryCommits, &directory)
+            .verify(
+                &fixtures::commit_created_beyond_the_skew(),
+                &mut fixtures::nonce_store()
+            )
+            .unwrap_err()
+            .code(),
+        "EA-HTTP-WINDOW-INVALID"
+    );
+    // Die Toleranz ist in MILLISEKUNDEN geschrieben und wird in SEKUNDEN
+    // verglichen; ohne diese Zeile faenge kein Zeuge den Einheitenfehler.
+    assert_eq!(ea_sync_protocol::MAX_CLOCK_SKEW_MS_V1, 60_000);
 }
 
 #[test]

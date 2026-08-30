@@ -37,10 +37,11 @@ pub use enrollment::{
 };
 pub use error::{ProtocolErrorV1, SyncProtocolError};
 pub use http_signature::{
-    AuthenticatedDevice, DeviceDirectory, HttpMethod, MAX_SIGNATURE_WINDOW_SECONDS_V1,
-    REQUEST_ID_HEADER_V1, ReceivedRequestV1, RegisteredDevice, ReplayStore, RequestIdV1,
-    RequestParts, RequestSigner, RequestVerifier, SIGNATURE_ALGORITHM_V1, SIGNATURE_LABEL_V1,
-    SignatureComponent, SignatureParametersV1, SignedRequestV1, body_digest, organization_tag,
+    AuthenticatedDevice, DeviceDirectory, HttpMethod, MAX_CLOCK_SKEW_MS_V1,
+    MAX_SIGNATURE_WINDOW_SECONDS_V1, REQUEST_ID_HEADER_V1, ReceivedRequestV1, RegisteredDevice,
+    ReplayStore, RequestIdV1, RequestParts, RequestSigner, RequestVerifier, SIGNATURE_ALGORITHM_V1,
+    SIGNATURE_LABEL_V1, SignatureComponent, SignatureParametersV1, SignedRequestV1, body_digest,
+    organization_tag,
 };
 pub use reader::{
     ArchiveExportManifestV1, CheckpointListResponseV1, DestructionStatusResponseV1,

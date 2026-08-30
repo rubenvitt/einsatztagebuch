@@ -38,6 +38,28 @@ pub const SIGNATURE_ALGORITHM_V1: &str = "ed25519";
 /// Obergrenze, nicht die Voreinstellung eines Klienten.
 pub const MAX_SIGNATURE_WINDOW_SECONDS_V1: i64 = 300;
 
+/// Der Vorlauf, den der Pruefer einer FREMDEN Uhr zugesteht — in
+/// Millisekunden.
+///
+/// RFC 9421 §3.2.1 ueberlaesst die „leeway" ausdruecklich dem Pruefer, und
+/// ohne sie faellt ein Schreiber, dessen Uhr eine Sekunde vorgeht, mit JEDEM
+/// signierten Request auf `401` — den der Klient als nicht automatisch
+/// wiederholbar fuehrt. Eine Minute deckt die uebliche Drift einer
+/// ungepflegten Geraeteuhr und bleibt weit unter dem Fenster von
+/// [`MAX_SIGNATURE_WINDOW_SECONDS_V1`].
+///
+/// Sie gilt NUR nach vorn, und sie verlaengert nichts: `expires` bleibt
+/// unveraendert die harte Grenze, und die Fensterbreite wird weiterhin gegen
+/// [`MAX_SIGNATURE_WINDOW_SECONDS_V1`] gestellt.
+pub const MAX_CLOCK_SKEW_MS_V1: i64 = 60_000;
+
+/// Derselbe Vorlauf in der Einheit, in der `created` auf dem Draht steht.
+///
+/// Er steht als eigene Konstante da, weil `created` SEKUNDEN traegt und die
+/// Millisekundenzahl gegen sie gestellt ein Fenster von siebzehn Stunden
+/// waere — ein Einheitenfehler, den kein Zeuge mit plausiblen Werten faengt.
+const MAX_CLOCK_SKEW_SECONDS_V1: i64 = MAX_CLOCK_SKEW_MS_V1 / 1_000;
+
 /// SHA-256 ueber die uebertragenen Koerperbytes — das Urbild des
 /// RFC-9530-`content-digest`.
 #[must_use]
@@ -722,7 +744,10 @@ impl<'a> RequestVerifier<'a> {
         if self.now_seconds > parameters.expires {
             return Err(SyncProtocolError::RequestExpired);
         }
-        if self.now_seconds < parameters.created {
+        // Nach vorn mit Toleranz: eine leicht vorgehende Uhr ist ein
+        // Betriebszustand und kein Angriff. Jenseits der Toleranz bleibt es
+        // fail-closed.
+        if self.now_seconds.saturating_add(MAX_CLOCK_SKEW_SECONDS_V1) < parameters.created {
             return Err(SyncProtocolError::WindowInvalid);
         }
         Ok(())
