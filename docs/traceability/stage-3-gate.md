@@ -188,8 +188,22 @@ damit eine spaetere Stufe sie wiederfindet statt sie neu zu treffen.
 - **WebAuthn-Credentials sind EdDSA-only.** Weder §6.4.1 noch der
   Sync-Wire-Nachtrag nennen einen Algorithmus; die Registrierung weist andere
   mit einem stabilen Code ab. Ein Stufe-4-Vorbehalt steht im Nachtrag.
-- **`grantAuthorization`, `destruction*` und `deletionAttestation` werden an
-  `POST /v1/trust/events` abgewiesen.** Sie tragen ihre eigenen Endpunkte.
+- **Die `grantAuthorization` wird an `POST /v1/trust/events` ANGENOMMEN** —
+  als Katalogstoff, der keine Autoritaet traegt: geprueft werden
+  Organisationsbindung, der gebundene Registry-Kopf, die Frist und ZWEI
+  UNTERSCHIEDLICHE `historicalGrantApprove`-Approver, alles ueber die geteilten
+  `ea-crypto`-Kontexte (`crates/ea-trust/src/admission.rs`). Ohne diesen Weg
+  waere `POST /v1/entries/{entryHash}/historical-grants` gegen einen echten
+  Server unerreichbar: der Endpunkt loest die Autorisierung content-addressed
+  auf und nimmt sie nicht entgegen.
+- **Fuenf Trust-Subtypen bleiben an `POST /v1/trust/events` abgewiesen**
+  (`EA-TRUST-EVENT-UNVERIFIABLE`), weil `ea-trust` fuer sie im
+  Registrierungsabschluss keine Signiererregel fuehrt:
+  `destructionAuthorization`, `destructionTransition`, `deletionAttestation`,
+  `webBundleRelease` und `webBundleRevocation`. Die drei Vernichtungsarten
+  reisen ueber `POST /v1/destructions`; die beiden Bundle-Arten haben in dieser
+  Stufe ueberhaupt keinen Aufnahmeendpunkt — sie sind hier NUR als Format
+  definiert (Abschnitt „Serverhaelften fremder Stufen").
 - **Der Registry-Kopf eines Commits ist verpflichtend, wenn der Server einen
   neueren kennt** — `EA-COMMIT-REGISTRY-HEAD-REQUIRED`. Ein gebundener
   aelterer Kopf zeigt nie rueckwaerts.
@@ -248,6 +262,18 @@ schliessenden Gleichheit: `ServerAdminConfig::schema_capabilities()` ist
 Varianten geschlossen (`initialGrant`, `historicalGrant`,
 `organizationAdminApprove`, `historicalGrantApprove`, `destructionApprove`,
 `serverReceipt`, `deletionAttest`), und keine achte entsteht.
+
+Dazu kommt eine vierte Grenze, und sie ist eine Einschraenkung und kein
+Verbot: **der Server nimmt keinen Eintrag NACH einem Schreiberwechsel an.**
+`crates/ea-sync-server/src/validation.rs` weist einen Commit, dessen Manifest
+einen `writerTransitionEventHash` nennt, fail-closed mit
+`EA-COMMIT-WRITER-TRANSITION` (422) ab. Der Grund ist Zurueckhaltung und nicht
+Nachlaessigkeit: `ea-trust` gibt die wirksamen Schreiberwechsel heute nicht
+heraus, `crates/ea-verify/src/entry.rs` zieht an derselben Stelle dieselbe
+Grenze, und eine hier erfundene zweite Aufloesung waere genau die zweite
+Umsetzung, die es nicht geben darf. Eine Kette, deren Schreiber gewechselt
+hat, laesst sich in Stufe 3 also nicht fortschreiben. Gehoben wird das mit der
+Administration und der Schreiberrotation in **Stufe 5**.
 
 ### 5.2 Das privilegierte Administrationsaudit
 
@@ -505,3 +531,22 @@ Arbeitsbereichsmitglied ist.
   Wiederanlaufzeit und Object Lock gegen den Betreiber selbst bleiben Stufe 7.
 - Das Releasebild wurde NICHT gebaut (Abschnitt 2.2); gemessen ist der
   Baueingabevertrag.
+- **Der Schreiberwechsel bleibt unbedienbar.** `EA-COMMIT-WRITER-TRANSITION`
+  (422) weist jeden Eintrag ab, dessen Manifest einen
+  `writerTransitionEventHash` nennt (Abschnitt 5.1). Die Ledgerzeile FR-082
+  fuehrt die Einschraenkung mit; gehoben wird sie in Stufe 5 (Administration,
+  Schreiberrotation).
+- **Die Vertrauensschliessung wird je signiertem Request neu geladen.**
+  `apps/server/src/adapters/trust_authority.rs::trust_catalog` holt fuer JEDEN
+  `/v1`-Request mit Signatur den VOLLSTAENDIGEN `.etb`-Katalog der
+  Organisation aus dem Object Store — ein `get_object` je indiziertem
+  Trust-Objekt — und laeuft danach `verify_trust` samt Kopfkette auf einem
+  fluechtigen Zustandsspeicher. Gemessene Kosten sind damit O(Zahl der
+  Trust-Objekte) S3-Umlaeufe plus eine volle Trust-Pruefung PRO REQUEST. Die
+  Stufe-3-Zusagen bleiben davon unberuehrt — die Aufloesung ist korrekt, nur
+  teuer —, aber jenseits einer Handvoll Geraete ist das nicht betreibbar. Die
+  vorgesehene Abhilfe ist zweiteilig: der persistente Pin als BODEN (in dieser
+  Stufe bereits umgesetzt, Abschnitt 4) und ein prozessinterner Cache der
+  geprueften Schliessung, geschluesselt auf den Registry-Kopf und die
+  Katalog-Hashmenge, den `advance_pinned_head` entwertet. Folgeticket:
+  **DRK-247**.

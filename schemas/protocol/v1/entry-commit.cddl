@@ -74,8 +74,13 @@ vault-blob-upload-v1 = [1, subject-id: bstr .size 16, ciphertext: bstr .size (1.
 ; subject-id nur als BEHAUPTUNG: der Server prueft sie gegen den userHandle des
 ; aufgeloesten Credentials. Die client-data-json steht auf dem Draht, weil die
 ; Assertion ueber genau diese Bytes signiert; der Server PARST sie nicht,
-; sondern serialisiert die erwartete CollectedClientData aus challenge und
-; Bundle-Origin und vergleicht byteweise (ADR 0004: kein zweiter Dekodierweg).
+; sondern serialisiert die erwarteten Pflichtglieder der CollectedClientData
+; aus challenge und Bundle-Origin und stellt sie als PRAEFIX (WebAuthn Level 2
+; §5.8.1.2, Limited Verification Algorithm; ADR 0004: kein zweiter
+; Dekodierweg). Kein Bytegleichheitstest: §5.8.1.1 laesst hinter `crossOrigin`
+; jedes weitere Glied zu, und ein Gleichheitstest wiese einen regelkonformen
+; Browser ab. Strenger als die Spezifikation an genau einer Stelle: hinter dem
+; Praefix MUSS `}` oder `,` stehen.
 vault-blob-retrieval-request-v1 = [
   1, organization-id: bstr .size 16, subject-id: bstr .size 16,
   credential-id: bstr .size (16..1023),

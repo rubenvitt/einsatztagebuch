@@ -91,6 +91,18 @@ Das Gültigkeitsfenster ist begrenzt: `created < expires` und
 `expires - created <= 300` Sekunden. Design §13.1 verlangt, dass eine falsche
 Gerätezeit nicht durch ein unbegrenzt großes Replay-Fenster kompensiert wird.
 
+**Uhrenversatz.** Der Prüfer toleriert `created` bis **60 Sekunden** in der
+Zukunft: er weist ab, sobald `created > now + 60 s` ist, und akzeptiert
+darunter. RFC 9421 §3.2.1 überlässt diese Leeway ausdrücklich dem Prüfer, und
+ohne sie fällt ein Schreiber, dessen Uhr auch nur eine Sekunde vorgeht, mit
+**jedem** signierten Request auf `401` — den der Klient als nicht automatisch
+wiederholbar führt. Die Toleranz gilt **nur nach vorn**: `expires` bleibt die
+harte Grenze (`now > expires` ⇒ `EA-HTTP-REQUEST-EXPIRED`), und die
+Fensterbreite wird unverändert gegen die 300 Sekunden gestellt. Ein `created`
+jenseits der Toleranz ist `EA-HTTP-WINDOW-INVALID`. Der klientenseitige
+Signierer setzt weiterhin `created = now`; die Toleranz ist eine Zusage des
+Prüfers und keine Erlaubnis, in die Zukunft zu signieren.
+
 Der Prüfer arbeitet in dieser Reihenfolge: Signaturabdeckung und Doppelnennung,
 Autorität, Ziel-URI, `tag` und Medientyp, Gültigkeitsfenster, Requestdigest,
 Zertifikats- beziehungsweise Schlüsselidentität, Signatur, Einmalverbrauch von
@@ -381,6 +393,22 @@ Die Codes der Trust-Annahme, mit ihrer Abbildung:
 | `EA-TRUST-EVENT-NOT-VALID-NOW` | 422 | Das Objekt trägt, gilt aber jetzt nicht: veraltet, in der Zukunft oder außerhalb seiner Sequenzleihe |
 | `EA-TRUST-EVENT-NOT-APPLICABLE` | 409 | Ein `registryEvent`, das nicht der nächste Kopf ist — die Zeile „erforderlicher neuerer Registry-Head“. Der Körper führt `required-registry-version` und `required-registry-head-hash` |
 | `EA-TRUST-STATE-CONFLICT` | 503 | Der persistente Vertrauenszustand hat sich unter dem Aufrufer bewegt; `retryable=true`, und ausdrücklich keine Aussage über seine Autorität |
+
+`EA-TRUST-EVENT-UNVERIFIABLE` trifft **genau fünf** Trust-Subtypen, und die
+Menge ist abschließend: `destructionAuthorization`, `destructionTransition`,
+`deletionAttestation`, `webBundleRelease` und `webBundleRevocation`. Die drei
+Vernichtungsarten reisen über `POST /v1/destructions`; die beiden Bundle-Arten
+haben in Stufe 3 **keinen** Aufnahmeendpunkt und sind nur als Format
+definiert.
+
+Die `grantAuthorization` gehört ausdrücklich **nicht** dazu: sie wird an
+`POST /v1/trust/events` als **Katalogstoff** angenommen. Angenommen heißt
+nicht autorisiert — sie aktiviert kein Zertifikat, hebt keine Policy und
+verschiebt keinen Kopf. Geprüft werden Organisationsbindung, der gebundene
+Registry-Kopf, die Frist und **zwei unterschiedliche** Approver-Signaturen
+über den geteilten `historicalGrantApprove`-Kontext. Ohne diesen Weg wäre
+`POST /v1/entries/{entryHash}/historical-grants` unerreichbar: dieser Endpunkt
+**löst** die Autorisierung content-addressed auf und nimmt sie nicht entgegen.
 
 Die Codes der Vault-Blob-Fläche, mit ihrer Abbildung:
 
