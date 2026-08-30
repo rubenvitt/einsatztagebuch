@@ -560,6 +560,11 @@ async fn a_divergent_checkpoint_predecessor_is_refused_by_the_locked_transaction
                 ObjectHash::try_from(&[0xa3_u8; 32][..]).expect("thirty two bytes"),
             ],
         },
+        grant_recipients: vec![ea_sync_server::GrantRecipientV1 {
+            object_hash: ObjectHash::try_from(&[0xa3_u8; 32][..]).expect("thirty two bytes"),
+            recipient_key_thumbprint: ea_types::KeyThumbprint::try_from(&[0xa5_u8; 32][..])
+                .expect("thirty two bytes"),
+        }],
         receipt_object_hash: ObjectHash::try_from(&[0xa4_u8; 32][..]).expect("thirty two bytes"),
         accepted_at_server: UnixMillis::new(SERVER_NOW_MILLIS),
         evidence_due_at: None,

@@ -229,6 +229,38 @@ async fn a_complete_commit_is_accepted_and_becomes_visible_together() {
         u64::try_from(row.get::<i64, _>("head")).expect("a sequence is not negative"),
         trust_closure::ExtendedClosure::commit_sequence()
     );
+    // Die Grant-Zeilen tragen den ECHTEN Empfaengerabdruck aus dem geprueften
+    // Grant-Objekt. Ein Nullabdruck waere keine Leerstelle, sondern die
+    // Behauptung, der Empfaenger habe genau diesen Abdruck.
+    let mut stored: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT recipient_key_thumbprint FROM grants ORDER BY recipient_key_thumbprint",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("reading the grant recipients must succeed");
+    let mut expected: Vec<Vec<u8>> = vec![
+        trust_closure::kem_key(trust_closure::READER_KEM_SEED)
+            .thumbprint()
+            .as_bytes()
+            .to_vec(),
+        trust_closure::kem_key(trust_closure::RECOVERY_KEM_SEED)
+            .thumbprint()
+            .as_bytes()
+            .to_vec(),
+    ];
+    stored.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(
+        stored, expected,
+        "the commit path must carry the recipient thumbprints of the verified grants"
+    );
+    assert!(
+        !stored
+            .iter()
+            .any(|thumbprint| thumbprint == &vec![0_u8; 32]),
+        "a zero thumbprint IS a claim"
+    );
+
     // Kein Security Event auf dem glueklichen Pfad.
     let events: i64 = sqlx::query_scalar("SELECT count(*) FROM security_events")
         .fetch_one(database.pool())

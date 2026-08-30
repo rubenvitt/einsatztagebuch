@@ -679,6 +679,7 @@ pub async fn commit_entry(
             sequence: validated.chain_sequence,
             previous_entry_hash: validated.previous_entry_hash,
             identity: db_identity(request.identity()),
+            grant_recipients: validated.grant_recipients.clone(),
             receipt_object_hash,
             accepted_at_server,
             evidence_due_at,

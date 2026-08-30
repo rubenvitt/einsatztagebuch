@@ -133,27 +133,12 @@ pub async fn read_object(State(state): State<Arc<AppState>>, request: Request) -
 /// `sha-256=:<base64>:` — RFC 9530 mit GENAU einem Digest, genau `sha-256`
 /// und ohne Parameter.
 ///
-/// Der Base64-Kodierer steht hier von Hand, weil dieser Arbeitsbereich keinen
-/// pinnt und einen dafuer zu pinnen eine Abhaengigkeitsklasse fuer sechzehn
-/// Zeilen oeffnete (ADR 0004). Die Eingabe ist IMMER 32 Byte, also gibt es
-/// genau einen Fuellfall.
+/// Der Kodierer ist DER des Protokollrahmens
+/// ([`ea_sync_protocol::content_digest_header`]) und nicht ein zweiter: hier
+/// stand einmal eine eigene Base64-Abbildung, und zwei Umsetzungen derselben
+/// RFC-Zeile sind zwei Stellen, an denen sie auseinanderlaufen koennen. Der
+/// Server signiert und der Klient prueft ueber DENSELBEN Kodierer.
 #[must_use]
 fn content_digest_header(digest: ea_types::Hash32) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = digest.as_bytes();
-    let mut encoded = String::with_capacity(44);
-    for chunk in bytes.chunks(3) {
-        let block = u32::from(chunk[0]) << 16
-            | u32::from(chunk.get(1).copied().unwrap_or(0)) << 8
-            | u32::from(chunk.get(2).copied().unwrap_or(0));
-        for position in 0..4 {
-            if position <= chunk.len() {
-                let index = (block >> (18 - 6 * position)) & 0x3f;
-                encoded.push(char::from(ALPHABET[index as usize]));
-            } else {
-                encoded.push('=');
-            }
-        }
-    }
-    format!("sha-256=:{encoded}:")
+    ea_sync_protocol::content_digest_header(digest.as_bytes())
 }

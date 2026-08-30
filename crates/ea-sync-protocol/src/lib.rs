@@ -41,7 +41,7 @@ pub use http_signature::{
     MAX_SIGNATURE_WINDOW_SECONDS_V1, REQUEST_ID_HEADER_V1, ReceivedRequestV1, RegisteredDevice,
     ReplayStore, RequestIdV1, RequestParts, RequestSigner, RequestVerifier, SIGNATURE_ALGORITHM_V1,
     SIGNATURE_LABEL_V1, SignatureComponent, SignatureParametersV1, SignedRequestV1, body_digest,
-    organization_tag,
+    content_digest_header, organization_tag,
 };
 pub use reader::{
     ArchiveExportManifestV1, CheckpointListResponseV1, DestructionStatusResponseV1,

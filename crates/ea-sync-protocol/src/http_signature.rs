@@ -810,7 +810,13 @@ struct ResolvedKey {
 /// Genau EIN Digest, genau `sha-256`, keine Parameter. Die Pruefung vergleicht
 /// die ZEICHENKETTE gegen den neu gebildeten Wert; damit deckt sie exakt das
 /// ab, was RFC 9421 signiert, und braucht keinen Base64-Dekodierer.
-fn content_digest_header(digest: &[u8; 32]) -> String {
+///
+/// OEFFENTLICH, weil die Objektauslieferung des Servers denselben Header
+/// bildet. Sie tat es einmal mit einem ZWEITEN, von Hand geschriebenen
+/// Base64-Kodierer — zwei Umsetzungen derselben RFC-Abbildung, von denen eine
+/// irgendwann die falsche gewesen waere.
+#[must_use]
+pub fn content_digest_header(digest: &[u8; 32]) -> String {
     format!("sha-256=:{}:", base64_encode(digest))
 }
 

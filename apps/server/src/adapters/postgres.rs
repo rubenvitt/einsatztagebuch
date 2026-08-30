@@ -311,6 +311,16 @@ impl CommitRepository for PostgresRepository {
         .map_err(map_commit_error)?;
 
         for grant in &command.identity.initial_grant_object_hashes {
+            // Der Empfaengerabdruck kommt aus dem GEPRUEFTEN Grant-Objekt
+            // (`validate_commit`), nicht aus der Leitung und nicht aus einer
+            // Null. Fehlt er, wird nichts geschrieben: eine Zeile mit
+            // Nullabdruck ist keine Leerstelle, sondern die Behauptung, der
+            // Empfaenger habe diesen Abdruck.
+            let recipient = command
+                .grant_recipients
+                .iter()
+                .find(|recipient| recipient.object_hash == *grant)
+                .ok_or(RepositoryError::Unavailable)?;
             sqlx::query(
                 "INSERT INTO grants (object_hash, organization_id, entry_hash, \
                  recipient_key_thumbprint, grant_kind_code, expires_at_millis) \
@@ -319,10 +329,7 @@ impl CommitRepository for PostgresRepository {
             .bind(&grant.as_bytes()[..])
             .bind(&command.organization_id.as_bytes()[..])
             .bind(&command.identity.entry_hash.as_bytes()[..])
-            // Der Empfaengerabdruck steht im Grant selbst; der Datenbanksatz
-            // fuehrt ihn erst, wenn die Grant-Pruefung ihn liefert. Bis dahin
-            // traegt die Zeile den Nullabdruck und KEINE Behauptung.
-            .bind(&[0_u8; 32][..])
+            .bind(&recipient.recipient_key_thumbprint.as_bytes()[..])
             .execute(&mut *transaction)
             .await
             .map_err(map_commit_error)?;

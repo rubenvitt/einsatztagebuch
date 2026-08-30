@@ -188,6 +188,21 @@ pub struct IndexedObjectV1 {
     pub size_bytes: u64,
 }
 
+/// Der Empfaengerabdruck EINES initialen Grants.
+///
+/// Er reist NEBEN [`CommitIdentityV1`] und nicht darin: die Identitaet ist die
+/// Wiedergabeidentitaet aus `design.md` §13.3 und traegt genau vier
+/// Bestandteile — ein fuenfter machte aus einem wiederholten Commit einen
+/// anderen. Der Abdruck steht trotzdem hier, weil `validate_commit` ihn
+/// ohnehin aus dem geprueften Grant liest und die Zeile in `grants` sonst
+/// einen NULLABDRUCK traegt. Ein Nullabdruck ist keine Leerstelle, sondern
+/// eine Behauptung.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct GrantRecipientV1 {
+    pub object_hash: ObjectHash,
+    pub recipient_key_thumbprint: KeyThumbprint,
+}
+
 /// Die Commit-Identitaet nach `design.md` §13.3.
 ///
 /// Nur DIESE vier Bestandteile machen aus einem zweiten Commit denselben
@@ -214,6 +229,11 @@ pub struct CommitDbCommand {
     /// `None` genau fuer die erste Sequenz einer Kette.
     pub previous_entry_hash: Option<EntryHash>,
     pub identity: CommitIdentityV1,
+    /// Die Empfaengerabdruecke der initialen Grants, aus den GEPRUEFTEN
+    /// Grant-Objekten gelesen. Genau einer je Hash in
+    /// [`CommitIdentityV1::initial_grant_object_hashes`]; fehlt einer, weist
+    /// die Ablage fail-closed ab, statt eine Null zu schreiben.
+    pub grant_recipients: Vec<GrantRecipientV1>,
     pub receipt_object_hash: ObjectHash,
     pub accepted_at_server: UnixMillis,
     /// `None` GENAU im Standardprofil.

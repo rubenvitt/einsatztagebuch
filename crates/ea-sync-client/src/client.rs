@@ -709,6 +709,39 @@ pub struct HyperTlsTransport {
     tls: Arc<rustls::ClientConfig>,
 }
 
+/// Wie lange der Transport auf TCP-Verbindung, TLS-Aufbau und Handshake
+/// wartet.
+///
+/// Ohne Deckel haengt der Aufbau am Zeitgeber des Betriebssystems — bei einer
+/// stillen Gegenstelle sind das Minuten, und der Anwender sieht in dieser Zeit
+/// einen Push, der nichts tut. Zehn Sekunden reichen fuer jedes Netz, in dem
+/// ein Einsatz laeuft.
+pub const CONNECT_TIMEOUT_MS_V1: u64 = 10_000;
+
+/// Wie lange der Transport auf Antwortkopf UND Antwortkoerper wartet.
+///
+/// Er umschliesst BEIDES, weil ein Server, der den Kopf schickt und den
+/// Koerper nie beendet, sonst genau so lange haengt wie einer, der gar nicht
+/// antwortet. Sechzig Sekunden liegen weit ueber jeder gemessenen Commit-Dauer
+/// und weit unter „nie".
+pub const REQUEST_TIMEOUT_MS_V1: u64 = 60_000;
+
+/// Setzt einen Deckel auf eine Transportphase.
+///
+/// Laeuft er ab, ist der Befund [`TransportErrorV1::Timeout`] — und genau
+/// darum gibt es die Variante: sie war ohne diese Funktion unerreichbar.
+async fn within<T, E>(
+    millis: u64,
+    work: impl core::future::Future<Output = Result<T, E>>,
+    on_error: TransportErrorV1,
+) -> Result<T, TransportErrorV1> {
+    match tokio::time::timeout(core::time::Duration::from_millis(millis), work).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => Err(on_error),
+        Err(_) => Err(TransportErrorV1::Timeout),
+    }
+}
+
 impl HyperTlsTransport {
     /// Baut den Transport gegen genau diese Wurzeln.
     ///
@@ -748,20 +781,29 @@ impl SyncTransportV1 for HyperTlsTransport {
     ) -> Result<TransportResponseV1, TransportErrorV1> {
         use http_body_util::{BodyExt as _, Full};
 
-        let stream = tokio::net::TcpStream::connect(self.address)
-            .await
-            .map_err(|_| TransportErrorV1::Unreachable)?;
+        // Jede Phase unter einem Deckel: eine stille Gegenstelle haengt sonst
+        // den ganzen Push, und `TransportErrorV1::Timeout` waere unerreichbar.
+        let stream = within(
+            CONNECT_TIMEOUT_MS_V1,
+            tokio::net::TcpStream::connect(self.address),
+            TransportErrorV1::Unreachable,
+        )
+        .await?;
         let server_name = rustls::pki_types::ServerName::try_from(self.server_name.clone())
             .map_err(|_| TransportErrorV1::Tls)?;
-        let stream = tokio_rustls::TlsConnector::from(Arc::clone(&self.tls))
-            .connect(server_name, stream)
-            .await
-            .map_err(|_| TransportErrorV1::Tls)?;
+        let stream = within(
+            CONNECT_TIMEOUT_MS_V1,
+            tokio_rustls::TlsConnector::from(Arc::clone(&self.tls)).connect(server_name, stream),
+            TransportErrorV1::Tls,
+        )
+        .await?;
 
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-                .await
-                .map_err(|_| TransportErrorV1::Unreachable)?;
+        let (mut sender, connection) = within(
+            CONNECT_TIMEOUT_MS_V1,
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)),
+            TransportErrorV1::Unreachable,
+        )
+        .await?;
         // Die Verbindung wird GETRIEBEN, solange der Request laeuft. Ohne
         // diesen Treiber blieben Bytes im Puffer liegen und der Request
         // haengte, bis der Zeitgeber der Gegenstelle zuschlaegt.
@@ -785,19 +827,22 @@ impl SyncTransportV1 for HyperTlsTransport {
             .body(Full::new(hyper::body::Bytes::from(request.body)))
             .map_err(|_| TransportErrorV1::Unreachable)?;
 
-        let response = sender
-            .send_request(outgoing)
-            .await
-            .map_err(|_| TransportErrorV1::Timeout)?;
-        let status = response.status().as_u16();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(|_| TransportErrorV1::Timeout)?
-            .to_bytes()
-            .to_vec();
+        // Kopf UND Koerper unter EINEM Deckel: ein Server, der den Kopf
+        // schickt und den Koerper nie beendet, haengt sonst genau so lange wie
+        // einer, der gar nicht antwortet.
+        let read = within(
+            REQUEST_TIMEOUT_MS_V1,
+            async {
+                let response = sender.send_request(outgoing).await?;
+                let status = response.status().as_u16();
+                let body = response.into_body().collect().await?.to_bytes().to_vec();
+                Ok::<_, hyper::Error>((status, body))
+            },
+            TransportErrorV1::Timeout,
+        )
+        .await;
         driver.abort();
+        let (status, body) = read?;
         Ok(TransportResponseV1 { status, body })
     }
 }

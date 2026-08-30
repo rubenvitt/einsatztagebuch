@@ -39,7 +39,10 @@ use ea_types::{
     CertificateHash, ChainId, ChainSequence, DeviceId, EntryHash, ObjectHash, OrganizationId,
 };
 
-use crate::{models::IndexedObjectV1, ports::ActiveRegistryHeadV1};
+use crate::{
+    models::{GrantRecipientV1, IndexedObjectV1},
+    ports::ActiveRegistryHeadV1,
+};
 
 /// Die Formatversion, die diese Stufe schreibt und annimmt.
 const FORMAT_VERSION_V1: u64 = 1;
@@ -193,6 +196,10 @@ pub struct ValidatedCommitV1 {
     /// Die Grant-Objekthashes in Lieferreihenfolge, also bereits bytweise
     /// sortiert (`EntryCommitRequestV1`).
     pub grant_object_hashes: Vec<ObjectHash>,
+    /// Dieselben Grants MIT ihrem Empfaengerabdruck, gelesen aus dem
+    /// geprueften Objekt. Die Ablage schreibt ihn; ohne ihn traege die Zeile
+    /// einen Nullabdruck, und der ist eine Behauptung.
+    pub grant_recipients: Vec<GrantRecipientV1>,
 }
 
 impl fmt::Debug for ValidatedCommitV1 {
@@ -325,6 +332,17 @@ pub fn validate_commit(
         device_id: writer,
         indexed_objects,
         grant_object_hashes: grants.iter().map(Parsed::object_hash).collect(),
+        grant_recipients: grants
+            .iter()
+            .map(|grant| GrantRecipientV1 {
+                object_hash: grant.object_hash(),
+                recipient_key_thumbprint: grant
+                    .value()
+                    .grant_body()
+                    .fields()
+                    .recipient_key_thumbprint,
+            })
+            .collect(),
     })
 }
 

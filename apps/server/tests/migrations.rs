@@ -798,8 +798,21 @@ mod commit {
                     entry_hash: self.entry_hash,
                     entry_object_hash: self.entry_object,
                     initial_grant_plan_hash: self.grant_plan,
-                    initial_grant_object_hashes: grants,
+                    initial_grant_object_hashes: grants.clone(),
                 },
+                grant_recipients: grants
+                    .iter()
+                    .enumerate()
+                    .map(|(index, hash)| ea_sync_server::GrantRecipientV1 {
+                        object_hash: *hash,
+                        recipient_key_thumbprint: ea_types::KeyThumbprint::try_from(
+                            &[0xb0_u8.wrapping_add(
+                                u8::try_from(index).expect("a fixture has few grants"),
+                            ); 32][..],
+                        )
+                        .expect("thirty two bytes"),
+                    })
+                    .collect(),
                 receipt_object_hash: self.receipt,
                 accepted_at_server: UnixMillis::new(self.accepted_at),
                 evidence_due_at: Some(UnixMillis::new(self.accepted_at + 600_000)),
