@@ -324,16 +324,59 @@ mod tests {
                     UnixMillis::new(1_700_000_000_000),
                 );
                 let key = record.subject_key();
-                assert!(
-                    key.contains(expected),
-                    "die Kennung MUSS ihr Ergebnis nennen: {key}"
+
+                // STRUKTURELL und nicht ueber eine Zeichenklasse. Eine
+                // Zeichenklasse muesste `s` und `u` zulassen, weil
+                // `succeeded` sie traegt — und liesse damit jedes Wort aus
+                // Kleinbuchstaben durch, also genau das, was hier NICHT
+                // stehen darf. Geprueft wird deshalb die Form: drei Felder,
+                // Hex, geschlossenes Literal, Hex oder `-`.
+                let fields: Vec<&str> = key.split('/').collect();
+                assert_eq!(
+                    fields.len(),
+                    3,
+                    "die Kennung traegt genau drei durch `/` getrennte Felder: {key}"
+                );
+                assert_eq!(
+                    fields[0].len(),
+                    32,
+                    "das Geraetepseudonym sind 16 Byte hexadezimal: {key}"
                 );
                 assert!(
-                    key.chars().all(|c| c.is_ascii_hexdigit()
-                        || c.is_ascii_lowercase()
-                        || matches!(c, '/' | '-')),
-                    "die Kennung traegt ein Zeichen ausserhalb des technischen Alphabets: {key}"
+                    fields[0].chars().all(|c| c.is_ascii_hexdigit()),
+                    "das Geraetepseudonym traegt nur Hexziffern: {key}"
                 );
+                assert_eq!(
+                    fields[1], expected,
+                    "das mittlere Feld ist GENAU eines der drei Ergebnisliterale: {key}"
+                );
+                if object.is_some() {
+                    assert_eq!(
+                        fields[2].len(),
+                        64,
+                        "der Objekthash sind 32 Byte hexadezimal: {key}"
+                    );
+                    assert!(
+                        fields[2].chars().all(|c| c.is_ascii_hexdigit()),
+                        "der Objekthash traegt nur Hexziffern: {key}"
+                    );
+                } else {
+                    assert_eq!(
+                        fields[2], "-",
+                        "ein fehlender Objekthash steht als `-`, nie als leeres Feld: {key}"
+                    );
+                }
+
+                // Die NEGATIVE Probe: kein Marker aus dem Kanarienalphabet
+                // kann in dieser Kennung stehen. Sie ist der Grund, aus dem
+                // die Formpruefung oben ueberhaupt zaehlt — ohne sie bliebe
+                // offen, wovor die Form schuetzen soll.
+                for forbidden in ["KANARIE", "Stichwort", "stichwort", " ", "\n", "succeededX"] {
+                    assert!(
+                        !key.contains(forbidden),
+                        "die Kennung darf {forbidden:?} nicht tragen: {key}"
+                    );
+                }
                 assert!(record.actor() == actor);
                 assert!(record.organization() == organization);
                 assert_eq!(record.action(), AdminActionCodeV1::ServerKeyRotation);

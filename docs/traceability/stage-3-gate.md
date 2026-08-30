@@ -27,7 +27,7 @@ genau die Scheinzusage, die dieser Bericht ausschliesst, und
 | AK 13 | Server kompromittiert | `apps/server/tests/privacy_canaries_server.rs`; `apps/server/tests/vault_blob_api.rs`; der Server haelt weder Reader- noch Recovery-Schluessel, und die wrapped Vault-Blobs sind ohne WebAuthn-Assertion und ohne PRF-Ausgabe wertlos | Der Nachweis gegen ein Releasepaket mit abgeschalteter Telemetrie bleibt Stufe 7; die Lesesicht eines berechtigten Readers entsteht in Stufe 4 |
 | AK 33 | Unteilbarer Entry-Commit | `apps/server/tests/entry_commit_api.rs::a_complete_commit_is_accepted_and_becomes_visible_together`; `crates/ea-sync-server/tests/commit_service.rs::exact_active_recipient_set_is_atomic`; `apps/server/tests/commit_failures.rs::an_incomplete_recipient_set_is_refused_atomically` | Die Wahl des hoechsten serverbekannten anwendbaren Registry-Kopfes (AK 35, AK 49) wird hier GEBAUT, aber von Stufe 5 beansprucht; siehe `## Serverhaelften fremder Stufen` |
 | AK 36 | Server-Teilfehler | `crates/ea-sync-server/tests/commit_service.rs::a_database_abort_leaves_nothing_visible`; `::an_object_store_fault_before_the_commit_leaves_nothing_visible`; `::an_object_store_fault_after_the_commit_withholds_the_receipt`; `::a_receipt_that_does_not_read_back_is_never_delivered`; die vier Szenarien des Abschnitts `commit` in `docs/traceability/stage-3-fault-points.json` | Der Nachweis auf echter Hardware und gegen eine andere als die hier gemessene Auflegung bleibt Stufe 7 |
-| AK 45 | Sync-Server-Administration | `apps/server/src/admin_audit.rs::server_admin_configuration_has_no_content_or_grant_authority` (`ServerAdminConfig::schema_capabilities()` ist GENAU `serverReceipt`); `::the_subject_key_carries_only_technical_characters`; `ops/container/Dockerfile`; `ops/monitoring/metrics.md`; `apps/server/tests/backup_restore_server_restore.rs` | Die Administrationsflaeche selbst — Anmeldung, Konfigurationsdialog, Rollenverwaltung — ist Stufe 5. Die produktionsreife Sicherung, das signierte Bild und der Plattformnachweis sind Stufe 7. `ops/monitoring/metrics.md` ist eine VORABFESTLEGUNG des Labelsatzes; eine laufende Metrikflaeche gibt es in dieser Stufe nicht |
+| AK 45 | Sync-Server-Administration | `apps/server/src/admin_audit.rs::server_admin_configuration_has_no_content_or_grant_authority` (`ServerAdminConfig::schema_capabilities()` ist GENAU `serverReceipt`); `::the_subject_key_carries_only_technical_characters`; `ops/container/Dockerfile`; `ops/monitoring/metrics.md`; `apps/server/tests/backup_restore_server_restore.rs` | Die Administrationsflaeche selbst — Anmeldung, Konfigurationsdialog, Rollenverwaltung — ist Stufe 5. Die produktionsreife Sicherung, das signierte Bild und der Plattformnachweis sind Stufe 7. `ops/monitoring/metrics.md` ist eine VORABFESTLEGUNG des Labelsatzes; eine laufende Metrikflaeche gibt es in dieser Stufe nicht. UND: das Auditmodul hat in dieser Stufe KEINEN Schreiber — nichts konstruiert `AdminAuditRecordV1`, nichts schreibt in `technical_admin_audit`; die Schreiber entstehen mit den Stufe-5-Administrationsflaechen (Abschnitt 5.2). Die Zeile steht deshalb auf `implemented`, nicht auf `integrated` |
 | AK 50 | Receipt-Fristanker | `crates/ea-sync-server/tests/receipt_golden.rs::evidence_due_time_is_signed_once_from_receipt_policy`; `::the_built_receipt_is_byte_identical_to_the_frozen_vector`; `::an_overflowing_evidence_delay_is_rejected_instead_of_saturated` | Die Einloesung der Frist — der Evidence-Grade-Nachweis selbst — ist Stufe 6 |
 
 ### 1.1 Teilbelege dieser Stufe
@@ -256,6 +256,17 @@ typisierte Flaeche: pseudonymer Handelnder, pseudonymes Geraet, geschlossener
 Handlungscode (acht `EA-ADMIN-`-Codes), geschlossenes technisches Ergebnis,
 Zeit und HOECHSTENS ein Objekthash. Ein Freitextfeld gibt es nicht, und es
 gibt keinen Konstruktor, der eines annehmen koennte.
+
+OFFENLEGUNG, in derselben Form wie die zu `ops/monitoring/metrics.md` in
+Abschnitt 5.3: Modul und Tabelle EXISTIEREN und sind bezeugt, aber KEIN
+privilegierter Pfad der Stufe 3 schreibt eine Zeile. Nichts konstruiert
+`AdminAuditRecordV1`, und nichts schreibt in `technical_admin_audit`. Der
+Grund ist keine Luecke, sondern die Stufenteilung: die schreibenden Flaechen —
+privilegierte Anmeldung, Konfigurationsdialog, Rollenverwaltung,
+Schluesselrotation — sind Stufe 5, die Sicherung ist Stufe 7. Was diese Stufe
+belegt, ist die FORM, in der spaeter geschrieben wird, und die Grenze, die
+dabei nicht ueberschritten werden kann. Genau deshalb steht die Ledgerzeile
+`AK-45` auf `implemented` und NICHT auf `integrated`.
 
 ### 5.3 Der Labelsatz
 

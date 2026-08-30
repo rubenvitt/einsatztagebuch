@@ -557,10 +557,10 @@ fn every_named_field_carries_its_own_marker() {
 #[test]
 fn the_declared_metric_labels_carry_no_unbounded_identity() {
     let declaration = metric_label_declaration();
-    let (_, forbidden) = declaration
-        .split_once("## Verbotene Labels")
-        .expect("metrics.md must carry the forbidden label section");
-    let (allowed, _) = declaration
+    // EIN Schnitt an der Grenze, dann der Kopf des vorderen Teils weg: die
+    // erlaubte Tabelle steht zwischen den beiden Ueberschriften, die
+    // verbotene dahinter.
+    let (allowed, forbidden) = declaration
         .split_once("## Verbotene Labels")
         .expect("metrics.md must carry the forbidden label section");
     let (_, allowed) = allowed

@@ -2580,11 +2580,19 @@ fn stage_three_gate_report_records_the_measured_full_gate_run() {
         );
     }
 
-    // Und die Reichweitenklausel der Auflegung A, woertlich aus der
-    // Gate-Quelle. Der Gate prueft sie selbst; hier steht die Zusicherung,
-    // dass sie im GEMESSENEN Abschnitt und nicht irgendwo im Bericht steht.
+    // Und die Auflegung, gegen die gemessen wurde, IM Abschnitt des
+    // gemessenen Laufs — samt seiner Unterabschnitte, denn dort steht sie.
+    //
+    // Die Zusicherung ist bewusst auf den Abschnitt GESCHNITTEN und nicht auf
+    // den ganzen Bericht: die woertliche Reichweitenklausel prueft der Gate
+    // selbst in Abschnitt 2, und eine zweite Suche ueber das ganze Dokument
+    // waere davon bedient und belegte nichts. Was hier zaehlt, ist, dass der
+    // GEMESSENE Lauf seine Auflegung benennt.
+    let measured_section_end = report[heading_at..]
+        .find("\n## ")
+        .map_or(report.len(), |offset| heading_at + offset);
     assert!(
-        report.contains("Auflegung A"),
-        "the stage 3 gate report must name the measured deployment"
+        report[heading_at..measured_section_end].contains("Auflegung A"),
+        "the measured run section of stage-3-gate.md must name the deployment it ran against"
     );
 }
