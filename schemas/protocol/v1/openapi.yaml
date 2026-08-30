@@ -1,0 +1,526 @@
+openapi: 3.1.0
+info:
+  title: Einsatzarchiv Sync-Protokoll v1
+  version: "1.0.0"
+  summary: Beschreibende Uebersicht der siebzehn v1-Endpunkte.
+  description: >-
+    Dieses Dokument ist BESCHREIBEND und nicht normativ. Normativ sind
+    docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-sync-wire-addendum.md,
+    schemas/protocol/v1/entry-commit.cddl, schemas/protocol/v1/reader-batch.cddl
+    und schemas/protocol/v1/signed-protocol.cddl. Bei einer Abweichung gilt das
+    Addendum. Stufe 3 fuehrt bewusst kein YAML- oder OpenAPI-Pruefwerkzeug ein:
+    eine gepinnte Werkzeugklasse fuer ein Artefakt ohne Byteversprechen waere
+    Aufwand ohne Gate-Wert.
+  license:
+    name: Apache-2.0 OR MIT
+servers:
+  - url: https://{syncAuthority}
+    description: >-
+      Der Sync-Server der Organisation. TLS 1.3 ist Pflicht; die Autoritaet
+      dieser URL ist genau die Autoritaet, die die RFC-9421-Signatur ueber
+      "@authority" und "@target-uri" abdeckt.
+    variables:
+      syncAuthority:
+        default: sync.example.org
+tags:
+  - name: auth
+    description: Challenges und Geraeteregistrierung.
+  - name: web
+    description: WebAuthn-Credentials und Wrapped-Vault-Blobs des Web-Readers.
+  - name: trust
+    description: Trust-Registry und Trust-Ereignisse.
+  - name: chain
+    description: Entry-Commit, Kettenlesen und Objektabruf.
+  - name: grants
+    description: Historische Grants und Grant-Listen.
+  - name: evidence
+    description: Reader-Acknowledgements, Checkpoints und Archivexport.
+  - name: destruction
+    description: Autorisierte Vernichtung und ihr Zustand.
+
+paths:
+  /v1/auth/challenges:
+    post:
+      tags: [auth]
+      operationId: createChallenge
+      summary: Fordert eine Single-Use-Nonce und die Serverzeit an.
+      description: >-
+        Ohne RFC-9421-Signatur und ratenbegrenzt (design.md §13.1). Die Antwort
+        ist challenge-response-v1 aus signed-protocol.cddl.
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "200":
+          description: challenge-response-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "429": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/device-registrations:
+    post:
+      tags: [auth]
+      operationId: createDeviceRegistration
+      summary: Beantragt ein Geraetezertifikat.
+      description: >-
+        RFC-9421-signiert mit dem BEANTRAGTEN, noch nicht freigegebenen
+        Geraeteschluessel als Proof of Possession. Keine Zertifikatskette, keine
+        Capability, keine Organisationsautoritaet. Der Koerper ist
+        device-registration-request-v1 aus signed-protocol.cddl.
+      security: [{ proofOfPossession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "202": { description: Antrag angenommen, ohne Inhalt. }
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "429": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/webauthn-credentials:
+    post:
+      tags: [web]
+      operationId: registerWebauthnCredential
+      summary: Registriert ein auffindbares WebAuthn-Credential des Lesers.
+      description: >-
+        Regulaer RFC-9421-signiert: der Leser besitzt seinen Schluessel zum
+        Zeitpunkt der Registrierung. Die pseudonyme subjectId ist der
+        userHandle (web-reader-design.md §6.4.1); die Registrierung verschafft
+        dem Server keine Rolle, Capability oder Geraeteautoritaet.
+      security: [{ httpSignature: [] }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "201": { description: Credential angelegt, ohne Inhalt. }
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/vault-blobs:
+    put:
+      tags: [web]
+      operationId: putVaultBlob
+      summary: Legt genau ein opakes Wrapped-Vault-Chiffrat ab.
+      description: >-
+        Create-if-absent ueber (subjectId, Blobhash), ohne Aenderungs- und ohne
+        Loeschpfad in dieser Stufe. Der Server kennt weder Vault-Schluessel noch
+        PRF-Ausgabe (web-reader-design.md §6.4).
+      security: [{ httpSignature: [] }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "201": { description: Blob abgelegt, ohne Inhalt. }
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/vault-blobs/retrievals:
+    post:
+      tags: [web]
+      operationId: retrieveVaultBlobs
+      summary: Gibt die Chiffrate genau einer subjectId gegen eine WebAuthn-Assertion heraus.
+      description: >-
+        Die zweite und letzte Signaturausnahme neben dem Challenge-Endpunkt
+        (design.md §13.1, Reader-Vorbehalt). Alleinige Autoritaet ist eine
+        WebAuthn-Assertion ueber ein auffindbares Credential dieses Lesers; der
+        Server verlangt einen streng steigenden Signaturzaehler und eine noch
+        nicht verbrauchte Challenge aus POST /v1/auth/challenges.
+      responses:
+        "200":
+          description: Die opaken Chiffrate dieser subjectId.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "429": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/trust/registry:
+    get:
+      tags: [trust]
+      operationId: listTrustRegistry
+      summary: Liefert Trust-Ereignisse ab einer Registry-Version.
+      security: [{ httpSignature: [] }]
+      parameters:
+        - name: afterVersion
+          in: query
+          required: true
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: trust-registry-response-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/trust/events:
+    post:
+      tags: [trust]
+      operationId: uploadTrustEvent
+      summary: Nimmt genau ein exaktes .etb entgegen.
+      description: Verlangt die Capability organizationAdminApprove.
+      security: [{ httpSignature: [] }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "201": { description: Trust-Ereignis uebernommen, ohne Inhalt. }
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/chains/{chainId}/entry-commits:
+    post:
+      tags: [chain]
+      operationId: commitEntry
+      summary: Nimmt Entry, Grant-Plan und alle initialen Grants als eine Transaktion an.
+      description: >-
+        Verlangt die Capability initialGrant. Der Koerper ist
+        entry-commit-request-v1, die Antwort entry-commit-response-v1. Ein
+        idempotenter Replay derselben Commit-Identitaet liefert 200 mit
+        outcome=1 und denselben gespeicherten Receipt.
+      security: [{ httpSignature: [] }]
+      parameters: [{ $ref: "#/components/parameters/ChainId" }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "200":
+          description: entry-commit-response-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/chains/{chainId}/entries:
+    get:
+      tags: [chain]
+      operationId: listChainEntries
+      summary: Liefert eine Seite exakter Objektbytes einer Kette.
+      security: [{ httpSignature: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/ChainId" }
+        - name: afterSequence
+          in: query
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: afterEntryHash
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/LowerHex32" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: reader-batch-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/objects/{objectHash}:
+    get:
+      tags: [chain]
+      operationId: getObject
+      summary: Liefert die exakt archivierten Bytes eines Objekts.
+      description: >-
+        Ohne CBOR-Rahmen. Die Antwort traegt Content-Type
+        application/einsatzarchiv-object, Content-Length und einen
+        RFC-9530-content-digest ueber genau diese Bytes (design.md §13.2).
+      security: [{ httpSignature: [] }]
+      parameters: [{ $ref: "#/components/parameters/ObjectHash" }]
+      responses:
+        "200":
+          description: Die exakten Objektbytes.
+          headers:
+            Content-Digest:
+              description: sha-256=:<base64>: ueber genau die gelieferten Bytes.
+              schema: { type: string }
+          content:
+            application/einsatzarchiv-object:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/entries/{entryHash}/historical-grants:
+    post:
+      tags: [grants]
+      operationId: uploadHistoricalGrant
+      summary: Nimmt genau ein exaktes historisches .eag entgegen.
+      description: >-
+        Verlangt die Capability historicalGrant. Der Endpunkt veraendert weder
+        .eip noch initialen Grant-Plan noch Kettenkopf (design.md §13.3).
+      security: [{ httpSignature: [] }]
+      parameters: [{ $ref: "#/components/parameters/EntryHash" }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "201": { description: Historischer Grant uebernommen, ohne Inhalt. }
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/entries/{entryHash}/grants:
+    get:
+      tags: [grants]
+      operationId: listEntryGrants
+      summary: Liefert alle gueltigen Grants eines Eintrags.
+      security: [{ httpSignature: [] }]
+      parameters: [{ $ref: "#/components/parameters/EntryHash" }]
+      responses:
+        "200":
+          description: grant-list-response-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/reader-acks:
+    post:
+      tags: [evidence]
+      operationId: acknowledgeAsReader
+      summary: Nimmt ein signiertes Reader-Acknowledgement entgegen.
+      description: Der Koerper ist reader-ack-v1 aus signed-protocol.cddl.
+      security: [{ httpSignature: [] }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "204": { description: Acknowledgement uebernommen, ohne Inhalt. }
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/checkpoints:
+    get:
+      tags: [evidence]
+      operationId: listCheckpoints
+      summary: Liefert eine Seite exakter .ecp-Bytes.
+      security: [{ httpSignature: [] }]
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/TechnicalCursor" }
+      responses:
+        "200":
+          description: checkpoint-list-response-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/archive-exports/current:
+    get:
+      tags: [evidence]
+      operationId: exportArchive
+      summary: Streamt alle Objekte einer Seite und schliesst mit dem Exportmanifest.
+      description: >-
+        Der Strom besteht aus einer Folge exakter Objektbytes und endet mit
+        genau einem archive-export-manifest-v1. Keine Klartexttransformation.
+      security: [{ httpSignature: [] }]
+      parameters: [{ $ref: "#/components/parameters/Cursor" }]
+      responses:
+        "200":
+          description: Objektfolge plus abschliessendes archive-export-manifest-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/destructions:
+    post:
+      tags: [destruction]
+      operationId: requestDestruction
+      summary: Nimmt eine Mehr-Augen-DestructionAuthorization entgegen.
+      description: Verlangt die Capability destructionApprove.
+      security: [{ httpSignature: [] }]
+      requestBody:
+        required: true
+        content:
+          application/einsatzarchiv+cbor;v=1: {}
+      responses:
+        "202":
+          description: destruction-status-response-v1 mit dem erreichten Zustand.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "409": { $ref: "#/components/responses/ProtocolError" }
+        "413": { $ref: "#/components/responses/ProtocolError" }
+        "422": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+  /v1/destructions/{destructionId}:
+    get:
+      tags: [destruction]
+      operationId: getDestructionStatus
+      summary: Liefert Zustand, Uebergaenge und Attestierungen eines Vorgangs.
+      security: [{ httpSignature: [] }]
+      parameters:
+        - name: destructionId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/LowerHex16" }
+      responses:
+        "200":
+          description: destruction-status-response-v1.
+          content:
+            application/einsatzarchiv+cbor;v=1: {}
+        "400": { $ref: "#/components/responses/ProtocolError" }
+        "401": { $ref: "#/components/responses/ProtocolError" }
+        "403": { $ref: "#/components/responses/ProtocolError" }
+        "404": { $ref: "#/components/responses/ProtocolError" }
+        "500": { $ref: "#/components/responses/ProtocolError" }
+        "503": { $ref: "#/components/responses/ProtocolError" }
+
+components:
+  securitySchemes:
+    httpSignature:
+      type: http
+      scheme: signature
+      description: >-
+        RFC-9421-Signatur des Einsatzarchiv-Profils mit einem freigegebenen
+        Geraete-, Server- oder Root-Schluessel. Abgedeckt sind "@method",
+        "@authority", "@target-uri", bei vorhandenem Koerper "content-type" und
+        "content-digest", dazu "ea-request-id" sowie die Parameter created,
+        expires, nonce, keyid, alg="ed25519" und ein organisationsgebundenes
+        tag.
+    proofOfPossession:
+      type: http
+      scheme: signature
+      description: >-
+        Dieselbe Signaturabdeckung, aber mit dem beantragten, noch nicht
+        freigegebenen Geraeteschluessel. Ausschliesslich fuer
+        POST /v1/device-registrations.
+  parameters:
+    ChainId:
+      name: chainId
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/LowerHex16" }
+    EntryHash:
+      name: entryHash
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/LowerHex32" }
+    ObjectHash:
+      name: objectHash
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/LowerHex32" }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { $ref: "#/components/schemas/TechnicalCursor" }
+  schemas:
+    LowerHex16:
+      type: string
+      pattern: "^[0-9a-f]{32}$"
+      description: 16 Byte als 32 Kleinbuchstaben-Hexziffern.
+    LowerHex32:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+      description: 32 Byte als 64 Kleinbuchstaben-Hexziffern.
+    TechnicalCursor:
+      type: string
+      description: >-
+        Ein opaker, ablaufender, servergebundener technischer Cursor. Klienten
+        deuten ihn nicht und vertrauen ihm nicht; er traegt keine fachliche
+        Angabe.
+  responses:
+    ProtocolError:
+      description: >-
+        protocol-error-v1. Der Koerper enthaelt kein Fragment der gelieferten
+        Nutzdaten und setzt retryable nur bei 429, 500 und 503.
+      content:
+        application/einsatzarchiv+cbor;v=1: {}

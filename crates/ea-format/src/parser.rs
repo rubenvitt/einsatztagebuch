@@ -25,26 +25,82 @@ pub const ECP_PREFIX_V1: [u8; 9] = [0x85, 0x44, b'E', b'A', b'1', 0, 4, 1, 0x80]
 pub const ETB_PREFIX_V1: [u8; 9] = [0x85, 0x44, b'E', b'A', b'1', 0, 5, 1, 0x80];
 pub const EDS_PREFIX_V1: [u8; 9] = [0x85, 0x44, b'E', b'A', b'1', 0, 6, 1, 0x80];
 
+/// Die sechs Objektarten des Exact-Object-Praefixes.
+///
+/// Die Zahlenwerte sind die Typbytes der Praefixkonstanten dieses Moduls und
+/// zugleich der Wertebereich von `objectResult.objectType` (1..6) im
+/// Berichtsschema. Der Typ wohnt DESHALB hier, neben den Konstanten, und nicht
+/// beim Bericht: die geschlossene Menge hat genau eine Quelle, und
+/// `crates/ea-verify` reicht sie mit `pub use ea_format::ObjectTypeV1;` nur
+/// durch.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ObjectTypeV1 {
+    /// `.eip` — signiertes Eintragspaket.
+    Entry,
+    /// `.eag` — Freigabe.
+    Grant,
+    /// `.esr` — Serverquittung.
+    Receipt,
+    /// `.ecp` — Evidence- beziehungsweise Checkpoint-Objekt.
+    Evidence,
+    /// `.etb` — Trust-Objekt.
+    Trust,
+    /// `.eds` — Stummel eines autorisiert vernichteten Eintrags.
+    Destroyed,
+}
+
+impl ObjectTypeV1 {
+    /// Das Typbyte, wie es im Praefix und im Bericht steht.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::Entry => 1,
+            Self::Grant => 2,
+            Self::Receipt => 3,
+            Self::Evidence => 4,
+            Self::Trust => 5,
+            Self::Destroyed => 6,
+        }
+    }
+}
+
+/// Das gepruefte Typbyte als Aufzaehlungswert.
+///
+/// `preflight` hat den Bereich 1..6 bereits durchgesetzt; dieser Schritt macht
+/// aus der Zahl den TYP, damit der Verzweigungsbaum von
+/// [`decode_exact_object`] ueber die geschlossene Menge laeuft statt ueber eine
+/// Zahl mit Auffangzweig.
+fn object_type_of(code: u8) -> Result<ObjectTypeV1, FormatError> {
+    match code {
+        1 => Ok(ObjectTypeV1::Entry),
+        2 => Ok(ObjectTypeV1::Grant),
+        3 => Ok(ObjectTypeV1::Receipt),
+        4 => Ok(ObjectTypeV1::Evidence),
+        5 => Ok(ObjectTypeV1::Trust),
+        6 => Ok(ObjectTypeV1::Destroyed),
+        _ => Err(FormatError::Prefix),
+    }
+}
+
 pub fn decode_exact_object(bytes: &[u8]) -> Result<ParsedArchiveObject, FormatError> {
     let object_type = preflight(bytes)?;
     ea_cbor::validate(bytes, ea_cbor::ParserLimits::V1)?;
     let body = validate_outer(bytes, object_type)?;
     let hash = object_hash(bytes);
     let exact = bytes.to_vec();
-    match object_type {
-        1 => crate::eip::parse_body(body)
+    match object_type_of(object_type)? {
+        ObjectTypeV1::Entry => crate::eip::parse_body(body)
             .map(|value| ParsedArchiveObject::Entry(Parsed::new(value, exact, hash))),
-        2 => crate::eag::parse_body(body)
+        ObjectTypeV1::Grant => crate::eag::parse_body(body)
             .map(|value| ParsedArchiveObject::Grant(Parsed::new(value, exact, hash))),
-        3 => crate::esr::parse_body(body)
+        ObjectTypeV1::Receipt => crate::esr::parse_body(body)
             .map(|value| ParsedArchiveObject::Receipt(Parsed::new(value, exact, hash))),
-        4 => crate::ecp::parse_body(body)
+        ObjectTypeV1::Evidence => crate::ecp::parse_body(body)
             .map(|value| ParsedArchiveObject::Evidence(Parsed::new(value, exact, hash))),
-        5 => crate::etb::parse_body(body)
+        ObjectTypeV1::Trust => crate::etb::parse_body(body)
             .map(|value| ParsedArchiveObject::Trust(Parsed::new(value, exact, hash))),
-        6 => crate::eds::parse_body(body)
+        ObjectTypeV1::Destroyed => crate::eds::parse_body(body)
             .map(|value| ParsedArchiveObject::Destroyed(Parsed::new(value, exact, hash))),
-        _ => Err(FormatError::Prefix),
     }
 }
 

@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use ea_crypto::{CoseVerifier, VerificationContext, authorized_trust_digest, parse_cose_sign1};
 use ea_format::{
-    CertificateKindV1, DecodedTrustPayloadV1, OperatorRoleV1, RegistryChangeV1, TrustObjectV1,
-    TrustSubtypeV1,
+    CertificateKindV1, DecodedTrustPayloadV1, OperatorRoleV1,
+    OrganizationAdminAuthorizationFieldsV1, RegistryChangeV1, TrustObjectV1, TrustSubtypeV1,
 };
 use ea_types::{
     AuthorizationId, CertificateHash, ChainSequence, Hash32, ObjectHash, OrganizationId,
@@ -117,6 +117,74 @@ pub(crate) fn verify_admin_authorization(
         return Err(TrustError::ActionMismatch);
     }
 
+    let signer_subject = verify_authorization_signer(
+        state,
+        authorization,
+        &authorization_fields,
+        pre_transition_sequence,
+    )?;
+
+    if descriptor.admin_target_subject == Some(signer_subject) {
+        return Err(TrustError::SelfAuthorization);
+    }
+    if authorization_use_time < authorization_fields.issued_at {
+        return Err(TrustError::AuthNotYetValid);
+    }
+    if authorization_use_time > authorization_fields.expires_at {
+        return Err(TrustError::AuthExpired);
+    }
+
+    verify_target_root_signatures(state, target, authorization_record.exact_bytes().as_bytes())?;
+
+    if replay
+        .authorization_ids
+        .contains(&authorization_fields.authorization_id)
+        || replay.nonces.contains(&authorization_fields.nonce)
+    {
+        return Err(TrustError::AuthReplay);
+    }
+    replay
+        .authorization_ids
+        .insert(authorization_fields.authorization_id);
+    replay.nonces.insert(authorization_fields.nonce);
+
+    Ok(VerifiedAdminAuthorization {
+        inner: VerifiedAuthorizationInner {
+            authorization_object_hash,
+            target_object_hash,
+            previous_registry_version: state.registry_version,
+            previous_registry_head_hash: state.registry_head_hash,
+            signer_authority_subject_id: signer_subject,
+        },
+    })
+}
+
+/// Die ZIELFREIE Haelfte der Autorisierungspruefung.
+///
+/// Sie beantwortet genau eine Frage: „Hat ein zur Sequenz aktiver
+/// Organisationsadministrator dieser Organisation, gebunden an diesen
+/// Registrierungskopf, diese Autorisierung wirklich unterschrieben?“ Sie sagt
+/// NICHTS ueber das Ziel — weder ueber dessen Kernhash noch ueber dessen
+/// Wurzelsignatur —, denn beides braucht das Zielobjekt.
+///
+/// Die Aufteilung existiert, weil ein Zielobjekt und seine Autorisierung
+/// EINANDER referenzieren: die Wurzelsignatur des Ziels deckt ueber
+/// `VerificationContext::root_trust_digest` die exakten Autorisierungsbytes ab,
+/// und die Autorisierung nennt den Kernhash des Ziels. Keins von beiden kann
+/// also zuerst vollstaendig geprueft werden. Die Aufnahme eines einzelnen
+/// Objekts in den Katalog laeuft deshalb ueber diese Haelfte; die VOLLE
+/// Pruefung des Paares bleibt beim Kopfuebergang, der als Einziger Autoritaet
+/// verleiht.
+///
+/// Die Reihenfolge der Befunde ist unveraendert die von
+/// [`verify_admin_authorization`]; diese Funktion ist ein Ausschnitt und keine
+/// zweite Regel.
+pub(crate) fn verify_authorization_signer(
+    state: &PreviousHeadState,
+    authorization: &TrustObjectV1,
+    authorization_fields: &OrganizationAdminAuthorizationFieldsV1,
+    pre_transition_sequence: ChainSequence,
+) -> Result<SubjectId, TrustError> {
     let certificate = state
         .admin_certificates
         .get(&authorization_fields.admin_certificate_hash)
@@ -174,40 +242,7 @@ pub(crate) fn verify_admin_authorization(
         binding.fields.revoked_from_sequence,
         pre_transition_sequence,
     )?;
-
-    if descriptor.admin_target_subject == Some(signer_subject) {
-        return Err(TrustError::SelfAuthorization);
-    }
-    if authorization_use_time < authorization_fields.issued_at {
-        return Err(TrustError::AuthNotYetValid);
-    }
-    if authorization_use_time > authorization_fields.expires_at {
-        return Err(TrustError::AuthExpired);
-    }
-
-    verify_target_root_signatures(state, target, authorization_record.exact_bytes().as_bytes())?;
-
-    if replay
-        .authorization_ids
-        .contains(&authorization_fields.authorization_id)
-        || replay.nonces.contains(&authorization_fields.nonce)
-    {
-        return Err(TrustError::AuthReplay);
-    }
-    replay
-        .authorization_ids
-        .insert(authorization_fields.authorization_id);
-    replay.nonces.insert(authorization_fields.nonce);
-
-    Ok(VerifiedAdminAuthorization {
-        inner: VerifiedAuthorizationInner {
-            authorization_object_hash,
-            target_object_hash,
-            previous_registry_version: state.registry_version,
-            previous_registry_head_hash: state.registry_head_hash,
-            signer_authority_subject_id: signer_subject,
-        },
-    })
+    Ok(signer_subject)
 }
 
 fn describe_target(

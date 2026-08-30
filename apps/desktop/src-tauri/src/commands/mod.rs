@@ -7,6 +7,7 @@
 
 pub mod master_data;
 pub mod session;
+pub mod sync;
 pub mod writer;
 
 use serde::Serialize;
@@ -66,6 +67,8 @@ pub const PREVIEW_MISMATCH: &str = "EA-DESKTOP-PREVIEW-MISMATCH";
 pub const BUNDLE_EXPORT_UNAVAILABLE: &str = "EA-DESKTOP-BUNDLE-EXPORT-UNAVAILABLE";
 /// Der Blockierthread ist verlorengegangen.
 pub const BLOCKING_WORK_LOST: &str = "EA-DESKTOP-BLOCKING-WORK-LOST";
+/// Kein aufgeloester Sync-Zustandsport auf diesem Geraet.
+pub const SYNC_STATE_UNAVAILABLE: &str = "EA-DESKTOP-SYNC-STATE-UNAVAILABLE";
 
 /// Jeder Name, den [`crate::run`] registriert — in Registrierungsreihenfolge.
 pub const COMMAND_NAMES: &[&str] = &[
@@ -86,6 +89,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "archive_health_report",
     "device_posture_report",
     "archive_export_bundle_file",
+    "sync_state",
 ];
 
 /// Fuehrt die SYNCHRONE Kernoperation auf einem Blockierthread aus.

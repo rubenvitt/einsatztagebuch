@@ -1,0 +1,71 @@
+# Die zwei Integrationsdienste der Stufe 3.
+#
+# `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md`:120-121 nennt
+# PostgreSQL für technische Indizes und transaktionale Serverzustände und einen
+# S3-kompatiblen Object Store für content-addressed Binärobjekte. Beide Bilder
+# stehen mit Tag UND Digest: ein Tag allein wird stromaufwärts überschrieben,
+# und ein `integration up`, das morgen ein anderes PostgreSQL startet als heute,
+# belegt nichts. Die Auswahl und beide Digests sind in
+# `docs/adr/0004-server-runtime-and-dependency-class.md` begründet.
+#
+# Gefahren wird die Datei ausschließlich über
+# `cargo run --locked -p xtask -- integration up|down`; der Verteiler legt den
+# Bucket an, schaltet die Bucket-Versionierung ein und druckt `DATABASE_URL`
+# und `EA_OBJECT_STORE_ENDPOINT`.
+#
+# Der Zustand beider Dienste liegt in benannten Volumes, die
+# `integration down` mit `--volumes` wieder entfernt: es sind Testdienste, ihr
+# Zustand überlebt das Abräumen nicht. `tmpfs` wäre die noch strengere Wahl,
+# scheidet aber aus — das PostgreSQL-18-Bild legt sein Datenverzeichnis unter
+# `/var/lib/postgresql/18/docker` an und braucht das übergeordnete
+# Einhängeziel mit der UID des `postgres`-Benutzers, was die Kurzform von
+# `tmpfs:` in Compose nicht ausdrückt.
+name: einsatzarchiv-integration
+
+services:
+  postgres:
+    image: postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+    environment:
+      POSTGRES_USER: einsatzarchiv
+      POSTGRES_PASSWORD: einsatzarchiv
+      POSTGRES_DB: einsatzarchiv
+      # Ohne diese Zeile legt das Bild sein Datenverzeichnis mit
+      # `trust`-Authentifizierung an; `scram-sha-256` erzwingt, dass der
+      # Verbindungsaufbau dasselbe Passwort braucht wie in der Produktion.
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+    # Nur an die Loopback-Adresse gebunden: ein Integrationsdienst gehört nicht
+    # ins Netz des Rechners.
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=einsatzarchiv --dbname=einsatzarchiv"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+      start_period: 5s
+
+  objectstore:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: ["server", "/data", "--address", ":9000"]
+    environment:
+      MINIO_ROOT_USER: einsatzarchiv
+      MINIO_ROOT_PASSWORD: einsatzarchiv
+    ports:
+      - "127.0.0.1:59000:9000"
+    volumes:
+      - objectstore-data:/data
+    # `mc` liegt im selben Bild (`/usr/bin/mc`) und legt den Alias `local`
+    # selbst an, deshalb braucht die Bereitschaftsprüfung weder `curl` noch
+    # einen zweiten Container.
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  objectstore-data:

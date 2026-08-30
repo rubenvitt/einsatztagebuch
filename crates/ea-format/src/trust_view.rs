@@ -4,12 +4,14 @@ use crate::{
     DeletionAttestationFieldsV1, DestructionAuthorizationFieldsV1, DestructionTransitionFieldsV1,
     DeviceCertificateFieldsV1, FormatError, GrantAuthorizationFieldsV1, OperatorBindingFieldsV1,
     OrganizationAdminAuthorizationFieldsV1, PolicyFieldsV1, RegistryEventFieldsV1,
-    RootCertificateFieldsV1, TrustObjectV1, TrustSubtypeV1, WriterTransitionFieldsV1,
+    RootCertificateFieldsV1, TrustObjectV1, TrustSubtypeV1, WebBundleReleaseCoreV1,
+    WebBundleRevocationCoreV1, WriterTransitionFieldsV1,
     etb::{
         decode_admin_authorization, decode_authorized_parts, decode_deletion_attestation,
         decode_destruction_authorization, decode_destruction_transition, decode_device_core,
         decode_grant_authorization, decode_operator_core, decode_policy, decode_registry_event,
-        decode_root_core, decode_writer_transition, payload_wraps_core,
+        decode_root_core, decode_web_bundle_release, decode_web_bundle_revocation,
+        decode_writer_transition, payload_wraps_core,
     },
 };
 
@@ -57,6 +59,8 @@ pub enum DecodedTrustPayloadV1 {
     DestructionAuthorization(DestructionAuthorizationFieldsV1),
     DestructionTransition(DestructionTransitionFieldsV1),
     DeletionAttestation(DeletionAttestationFieldsV1),
+    WebBundleRelease(WebBundleReleaseCoreV1),
+    WebBundleRevocation(WebBundleRevocationCoreV1),
 }
 
 impl TrustObjectV1 {
@@ -134,6 +138,12 @@ fn decode_payload(
         )),
         TrustSubtypeV1::DeletionAttestation => Ok(DecodedTrustPayloadV1::DeletionAttestation(
             decode_deletion_attestation(exact_payload)?,
+        )),
+        TrustSubtypeV1::WebBundleRelease => Ok(DecodedTrustPayloadV1::WebBundleRelease(
+            decode_web_bundle_release(exact_payload)?,
+        )),
+        TrustSubtypeV1::WebBundleRevocation => Ok(DecodedTrustPayloadV1::WebBundleRevocation(
+            decode_web_bundle_revocation(exact_payload)?,
         )),
     }
 }

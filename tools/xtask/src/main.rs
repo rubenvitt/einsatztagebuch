@@ -1,9 +1,11 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{self, Read},
+    io::{self, Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{self, Command},
+    time::Duration,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -240,6 +242,31 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          object at all.",
     ),
     (
+        "ea-sync-protocol",
+        "carries the RFC-9421 request verification against a server-side nonce and \
+         request-ID store plus the streamed body limits of the sync protocol; Stage 3 \
+         ships no browser path that loads this crate, so it need not compile for \
+         wasm32-unknown-unknown. The browser access of web-reader-design.md §12 is \
+         built in Stage 4 with apps/web/ea-reader; the collision between \
+         web-reader-design.md:469 and the frozen sentence in tools/xtask/src/main.rs \
+         („wird nicht erweitert“) is noted there as a Stage 4 Vorbehalt and is not \
+         resolved here.",
+    ),
+    (
+        "ea-sync-server",
+        "binds Axum, Tokio, sqlx and the S3 client and therefore reaches past \
+         `ea-verify` into the host operating system, the network stack and the \
+         process environment; web-reader-design.md §9 makes only the verification \
+         pipeline shared browser code, and that pipeline ends at `ea-verify`.",
+    ),
+    (
+        "ea-sync-client",
+        "drives a signed HTTP client with Tokio, bounded retry timers and \
+         persisted queue state on top of the local archive directory, so it \
+         reaches past `ea-verify` into the host operating system and the \
+         network stack.",
+    ),
+    (
         "ea-ui-contracts",
         "carries a file-writing binary in `src/bin/emit-ts.rs`, and \
          `cargo check --target wasm32-unknown-unknown -p ...` checks binaries \
@@ -336,6 +363,218 @@ fn ensure_wasm32_target_available() -> Result<(), String> {
          Note: RUSTUP_TOOLCHAIN in the environment overrides rust-toolchain.toml, \
          including its targets declaration.",
     ))
+}
+
+/// Die Compose-Datei der beiden Integrationsdienste, relativ zur Wurzel.
+const INTEGRATION_COMPOSE_FILE: &str = "ops/compose/integration.yaml";
+
+/// Die EINE Fehlerzeile der Argumentgrammatik von `integration`.
+///
+/// Sie folgt dem Muster `{gate} does not accept arguments` der Arme darueber:
+/// der Verteiler nennt die erlaubte Eingabe, statt sie stillschweigend zu
+/// erweitern.
+const INTEGRATION_ARGUMENT_ERROR: &str = "integration accepts exactly one of: up, down";
+
+/// Der Bucket, den `integration up` versioniert anlegt.
+const INTEGRATION_BUCKET: &str = "einsatzarchiv-objects";
+
+/// Die Wurzeldaten des Testdienstes, wortgleich zu
+/// `ops/compose/integration.yaml`. Sie oeffnen ausschliesslich einen an
+/// `127.0.0.1` gebundenen Container ohne einen einzigen fachlichen Inhalt.
+const INTEGRATION_OBJECT_STORE_ROOT_USER: &str = "einsatzarchiv";
+const INTEGRATION_OBJECT_STORE_ROOT_PASSWORD: &str = "einsatzarchiv";
+
+/// Die beiden Endpunkte, EINMAL im Baum.
+///
+/// `integration up` druckt sie, und `verify-quick` prueft genau sie. Das ist
+/// bewusst KEINE Auswertung von `DATABASE_URL` aus der Umgebung: eine
+/// Erreichbarkeitspruefung, die ihre eigene Adresse aus einer setzbaren
+/// Variablen liest, laesst sich durch das Setzen derselben Variablen umgehen,
+/// und der Gate waere fail-open.
+const INTEGRATION_DATABASE_URL: &str =
+    "postgres://einsatzarchiv:einsatzarchiv@127.0.0.1:55432/einsatzarchiv";
+const INTEGRATION_POSTGRES_AUTHORITY: &str = "127.0.0.1:55432";
+const INTEGRATION_OBJECT_STORE_URL: &str = "http://127.0.0.1:59000";
+const INTEGRATION_OBJECT_STORE_AUTHORITY: &str = "127.0.0.1:59000";
+
+/// Frist jeder einzelnen Erreichbarkeitsstufe.
+const INTEGRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Ruft `docker compose` und haelt stdout FREI.
+///
+/// `integration up` druckt zwei `export`-Zeilen, die der Aufrufer mit `eval`
+/// uebernimmt; jede Zeile, die Compose selbst nach stdout schreibt, landete
+/// sonst in derselben Auswertung. Deshalb wird die Ausgabe eingesammelt und
+/// nach stderr weitergereicht.
+fn run_compose(root: &Path, arguments: &[&str]) -> Result<(), String> {
+    let mut args = vec!["compose", "--file", INTEGRATION_COMPOSE_FILE];
+    args.extend_from_slice(arguments);
+    let output = Command::new("docker")
+        .args(&args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to invoke docker: {error}. \
+                 The integration services need a running Docker engine; \
+                 mise.toml pins EA_CONTAINER_RUNTIME."
+            )
+        })?;
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(format!("docker {} failed", args.join(" ")));
+    }
+    Ok(())
+}
+
+/// Oeffnet eine TCP-Verbindung mit Frist zu `host:port`.
+fn connect_with_timeout(authority: &str) -> Option<TcpStream> {
+    let address = authority.to_socket_addrs().ok()?.next()?;
+    let stream = TcpStream::connect_timeout(&address, INTEGRATION_PROBE_TIMEOUT).ok()?;
+    stream
+        .set_read_timeout(Some(INTEGRATION_PROBE_TIMEOUT))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(INTEGRATION_PROBE_TIMEOUT))
+        .ok()?;
+    Some(stream)
+}
+
+/// Belegt, dass am Port wirklich PostgreSQL antwortet.
+///
+/// Ein offener Port belegt nichts: Docker bindet die Weiterleitung, bevor der
+/// Server bereit ist. Der SSLRequest des Frontend-Protokolls (Laenge 8, Code
+/// 80877103) ist die kuerzeste Anfrage, die ein echter Server beantwortet —
+/// mit genau einem Byte, `S` oder `N`.
+fn postgres_answers() -> bool {
+    let Some(mut stream) = connect_with_timeout(INTEGRATION_POSTGRES_AUTHORITY) else {
+        return false;
+    };
+    let mut request = [0u8; 8];
+    request[..4].copy_from_slice(&8u32.to_be_bytes());
+    request[4..].copy_from_slice(&80_877_103u32.to_be_bytes());
+    if stream.write_all(&request).is_err() {
+        return false;
+    }
+    let mut answer = [0u8; 1];
+    stream.read_exact(&mut answer).is_ok() && matches!(answer[0], b'S' | b'N')
+}
+
+/// Belegt, dass der Object Store seine Bereitschaft selbst bestaetigt.
+fn object_store_answers() -> bool {
+    let Some(mut stream) = connect_with_timeout(INTEGRATION_OBJECT_STORE_AUTHORITY) else {
+        return false;
+    };
+    let request = format!(
+        "GET /minio/health/live HTTP/1.1\r\nHost: {INTEGRATION_OBJECT_STORE_AUTHORITY}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut answer = Vec::new();
+    if stream.read_to_end(&mut answer).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200")
+}
+
+/// Faellt geschlossen aus, solange einer der beiden Dienste nicht antwortet.
+///
+/// Gebaut wie [`ensure_wasm32_target_available`]: sie laeuft VOR den
+/// betroffenen Kommandos und nennt die Abhilfe. Ein Unterschied ist Absicht —
+/// `ensure_wasm32_target_available` gibt `Ok(())` zurueck, wenn `rustup` gar
+/// nicht startet, und ist an dieser Stelle fail-OPEN. Hier gibt es diesen Zweig
+/// nicht: ein nicht durchfuehrbarer Test ist ein nicht bestandener Test, und
+/// eine Umgehung ueber eine Umgebungsvariable existiert nicht.
+fn ensure_integration_services_available() -> Result<(), String> {
+    let mut missing = Vec::new();
+    if !postgres_answers() {
+        missing.push(format!("PostgreSQL at {INTEGRATION_POSTGRES_AUTHORITY}"));
+    }
+    if !object_store_answers() {
+        missing.push(format!(
+            "the object store at {INTEGRATION_OBJECT_STORE_AUTHORITY}"
+        ));
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} did not answer. \
+         Run `cargo run --locked -p xtask -- integration up` first; it starts both services \
+         from {INTEGRATION_COMPOSE_FILE} and exports DATABASE_URL and EA_OBJECT_STORE_ENDPOINT. \
+         There is no environment variable that skips this check.",
+        missing.join(" and ")
+    ))
+}
+
+/// Startet beide Dienste und druckt die zwei Verbindungswerte.
+///
+/// Wiederholbar: `docker compose up --wait` laesst laufende, gesunde Container
+/// stehen, `mc mb --ignore-existing` und `mc version enable` sind auf einem
+/// bereits versionierten Bucket wirkungslos, und die gedruckten Zeilen haengen
+/// an Konstanten statt an Laufzeitzustand.
+fn run_integration_up(root: &Path) -> Result<(), String> {
+    run_compose(root, &["up", "--detach", "--wait"])?;
+    // Der Alias, den das Bild von sich aus fuehrt, traegt keine Anmeldedaten —
+    // er reicht fuer `mc ready local` in der Bereitschaftspruefung, nicht fuer
+    // eine Bucket-Operation. Deshalb wird er hier mit den Wurzeldaten aus
+    // `ops/compose/integration.yaml` neu gesetzt; das ist wiederholbar.
+    run_compose(
+        root,
+        &[
+            "exec",
+            "-T",
+            "objectstore",
+            "mc",
+            "alias",
+            "set",
+            "local",
+            "http://127.0.0.1:9000",
+            INTEGRATION_OBJECT_STORE_ROOT_USER,
+            INTEGRATION_OBJECT_STORE_ROOT_PASSWORD,
+        ],
+    )?;
+    // Die Bucket-Versionierung ist eine Anforderung dieser Stufe und keine
+    // Voreinstellung: MinIO legt Buckets unversioniert an.
+    run_compose(
+        root,
+        &[
+            "exec",
+            "-T",
+            "objectstore",
+            "mc",
+            "mb",
+            "--ignore-existing",
+            &format!("local/{INTEGRATION_BUCKET}"),
+        ],
+    )?;
+    run_compose(
+        root,
+        &[
+            "exec",
+            "-T",
+            "objectstore",
+            "mc",
+            "version",
+            "enable",
+            &format!("local/{INTEGRATION_BUCKET}"),
+        ],
+    )?;
+    ensure_integration_services_available()?;
+    println!("export DATABASE_URL={INTEGRATION_DATABASE_URL}");
+    println!("export EA_OBJECT_STORE_ENDPOINT={INTEGRATION_OBJECT_STORE_URL}");
+    Ok(())
+}
+
+/// Haelt beide Dienste an und raeumt ihre Volumes ab.
+///
+/// Wiederholbar: `docker compose down` auf einem bereits abgeraeumten Projekt
+/// ist erfolgreich und ohne Wirkung.
+fn run_integration_down(root: &Path) -> Result<(), String> {
+    run_compose(root, &["down", "--volumes", "--remove-orphans"])
 }
 
 fn parse_fuzz_settings(input: &str) -> Result<FuzzSettings, String> {
@@ -775,7 +1014,29 @@ fn validate_json_schema_document(name: &str, input: &str) -> Result<(), String> 
     validate_json_schema_document_for_profile(name, input, JsonSchemaProfile::DeterministicReport)
 }
 
-fn validate_addendum_review(input: &str) -> Result<(), String> {
+/// Die geprueften Addenda samt ihrem EIGENEN Abnahmesatz.
+///
+/// Der Abnahmesatz haengt PRO DATEI, nicht global: „vor Task 3 Step 3
+/// akzeptiert“ enthaelt „vor Task 3 akzeptiert“ NICHT als Teilzeichenkette,
+/// eine gemeinsame Menge liesse also beide Dateien zugleich scheitern. Gemeinsam
+/// bleiben nur „normativ für v0.1“ und „darf kein dort bereits festgelegtes
+/// Feld“.
+///
+/// `docs/superpowers/specs/2026-08-14-einsatzarchiv-v0-1-payload-wire-addendum.md`
+/// ist hier BEWUSST nicht aufgefuehrt; die Zuordnung ist so gebaut, dass ein
+/// spaeterer Task die Datei mit ihrem eigenen Abnahmesatz aufnehmen kann.
+const REVIEWED_ADDENDA: [(&str, &str); 2] = [
+    (
+        "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md",
+        "vor Task 3 akzeptiert",
+    ),
+    (
+        "docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-sync-wire-addendum.md",
+        "vor Task 3 Step 3 akzeptiert",
+    ),
+];
+
+fn validate_addendum_review(input: &str, acceptance_sentence: &str) -> Result<(), String> {
     let normalized = input
         .replace('*', "")
         .split_whitespace()
@@ -784,7 +1045,7 @@ fn validate_addendum_review(input: &str) -> Result<(), String> {
     for requirement in [
         "normativ für v0.1",
         "darf kein dort bereits festgelegtes Feld",
-        "vor Task 3 akzeptiert",
+        acceptance_sentence,
     ] {
         if !normalized.contains(requirement) {
             return Err(format!("wire-format addendum is missing: {requirement}"));
@@ -1005,10 +1266,20 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     }
     validate_cddl_document("combined archive CDDL", &archive_bundle)?;
 
-    let protocol_path = "schemas/protocol/v1/signed-protocol.cddl";
-    let protocol = fs::read_to_string(root.join(protocol_path))
-        .map_err(|error| format!("failed to read {protocol_path}: {error}"))?;
-    validate_cddl_document(protocol_path, &protocol)?;
+    // Die drei Protokolldokumente. Die Liste bleibt eine HARTE Pfadliste und
+    // ist ausdruecklich KEIN Verzeichnisscanner: eine nicht aufgefuehrte
+    // `.cddl`-Datei waere wirkungslos, und genau das soll auffallen. Jedes
+    // Dokument genuegt sich selbst und wird deshalb EINZELN validiert; die
+    // Schleife spart die abgeschriebenen Bloecke, nicht die Aufzaehlung.
+    for relative in [
+        "schemas/protocol/v1/signed-protocol.cddl",
+        "schemas/protocol/v1/entry-commit.cddl",
+        "schemas/protocol/v1/reader-batch.cddl",
+    ] {
+        let document = fs::read_to_string(root.join(relative))
+            .map_err(|error| format!("failed to read {relative}: {error}"))?;
+        validate_cddl_document(relative, &document)?;
+    }
 
     let identity_path = "schemas/identity/v1/os-account.cddl";
     let identity = fs::read_to_string(root.join(identity_path))
@@ -1095,18 +1366,20 @@ fn validate_schemas(root: &Path) -> Result<(), String> {
     if compatibility != expected_compatibility {
         return Err("compatibility matrix differs from the ea-schema registry".to_owned());
     }
-    let addendum_path =
-        root.join("docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md");
-    let addendum = fs::read_to_string(&addendum_path)
-        .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
-    validate_addendum_review(&addendum)?;
+    for (relative, acceptance_sentence) in REVIEWED_ADDENDA {
+        let addendum_path = root.join(relative);
+        let addendum = fs::read_to_string(&addendum_path)
+            .map_err(|error| format!("failed to read {}: {error}", addendum_path.display()))?;
+        validate_addendum_review(&addendum, acceptance_sentence)
+            .map_err(|error| format!("{relative}: {error}"))?;
+    }
     let report_vector_noun = if report_vectors == 1 {
         "report vector"
     } else {
         "report vectors"
     };
     println!(
-        "validated 10 CDDL, 7 JSON schemas, 5 payload vectors, \
+        "validated 12 CDDL, 7 JSON schemas, 5 payload vectors, \
          {report_vectors} {report_vector_noun}, and compatibility matrix"
     );
     Ok(())
@@ -1429,6 +1702,146 @@ const STAGE_TWO_HOST_SCOPE_CLAUSE: &str = concat!(
     "x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin, ",
     "x86_64-apple-darwin werden von Task 18 namentlich als offene ",
     "Stufe-7-Ledgerzeilen eingetragen statt lokal behauptet."
+);
+
+// ---------------------------------------------------------------------------
+// Stufe 3 — „Blind Sync". Jede Konstante steht neben ihrem
+// Stufe-2-Gegenstueck und folgt seiner Sortierregel: lexikografisch oder in
+// Dokumentreihenfolge, damit Bericht und Fehlerzeile byteidentisch
+// reproduzierbar sind.
+// ---------------------------------------------------------------------------
+
+/// Die Vektorfamilie, die Stufe 3 additiv anlegt.
+///
+/// GENAU EINE: `web-bundle`, die Familie, die die Trust-Objektfamilie
+/// `webBundleRelease` dauerhaft unter `vectors/web-bundle/v1/` einfriert.
+/// Ausdruecklich NICHT `trust`: `vectors/trust/v1/` ist eine eingefrorene
+/// Stufe-1-Familie, deren Bytes diese Stufe nur LIEST. Quittungs- und
+/// Nachweisvektoren stehen aus demselben Grund nicht hier — Stufe 3 friert
+/// keinen von beiden ein, sie verbraucht sie, und ein Eintrag behauptete ein
+/// Einfrieren, das es nicht gibt.
+const STAGE_THREE_VECTOR_FAMILIES: [&str; 1] = ["web-bundle"];
+
+/// Die primaeren Abnahmekriterien der Stufe 3 nach `design.md` Abschnitt 23.
+const STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 7] = [7, 8, 13, 33, 36, 45, 50];
+
+/// Der Stufe-3-Gate-Bericht, relativ zur Gate-Wurzel.
+const STAGE_THREE_GATE_REPORT_PATH: &str = "docs/traceability/stage-3-gate.md";
+
+/// Das Manifest der deklarierten Szenarien, relativ zur Gate-Wurzel.
+///
+/// Dieselbe Form wie `docs/traceability/stage-2-fault-points.json` und
+/// dieselbe Begruendung: der Gate liest die DEKLARATION und braucht dafuer
+/// keine Kante auf `apps/server` oder eine der `ea-sync-*`-Crates.
+const STAGE_THREE_FAULT_POINT_MANIFEST_PATH: &str = "docs/traceability/stage-3-fault-points.json";
+
+/// Die vier Abschnitte, die das Szenarienmanifest fuehren MUSS, in
+/// Dokumentreihenfolge.
+///
+/// `commit` traegt `db-before-commit`, `db-after-object-put`, `s3-stage` und
+/// `response-loss`; `replay` traegt `parallel-fork` und `nonce-replay`;
+/// `transport` traegt `tls-downgrade` und `cursor-key-rotation`; `restore`
+/// traegt das einzelne Szenario `restore`. EIN Abschnitt mit genau einem
+/// Eintrag ist Absicht und kein Versehen: der Rueckspielnachweis hat in dieser
+/// Stufe kein Geschwister.
+const STAGE_THREE_FAULT_POINT_SECTIONS: [&str; 4] = ["commit", "replay", "transport", "restore"];
+
+/// Die Skripte, die die Wurzel-`package.json` fuehren MUSS.
+///
+/// GENAU die vier, die der gemessene Stufe-3-Lauf (Schritt 4 des Plans) selbst
+/// aufruft — lexikografisch. Die Auswahlregel ist bewusst diese und nicht „die
+/// zwei neuen Schluessel": ein Gate, der nur die neuen Schluessel verlangte,
+/// liesse `pnpm supply-chain` und `pnpm verify:quick` aus der Wurzel
+/// verschwinden, obwohl der protokollierte Lauf beide fuehrt, und die
+/// Belegzeilen des Berichts zeigten danach auf Skripte, die es nicht mehr gibt.
+/// Die drei Frontend-Skripte der Stufe 2 stehen NICHT hier: sie sind bereits
+/// von [`STAGE_TWO_REQUIRED_SCRIPTS`] gehalten, und ein zweites Mal geprueft
+/// belegen sie nichts.
+const STAGE_THREE_REQUIRED_SCRIPTS: [&str; 4] = [
+    "stage-gate:3",
+    "supply-chain",
+    "test:server",
+    "verify:quick",
+];
+
+/// Die Pflichtabschnitte des Stufe-3-Gate-Berichts, in Dokumentreihenfolge.
+///
+/// ACHT und nicht fuenf. Die ersten fuenf folgen dem Stufe-2-Muster; die drei
+/// letzten halten die drei GEPRUEFTEN NEGATIVE, deren Schweigen sonst als
+/// „nicht geprueft" gelesen wuerde. Sie stehen getrennt und werden hier
+/// mitgeprueft, weil eine Zusage, die kein Gate haelt, in der naechsten Stufe
+/// still verschwindet.
+///
+/// Umlautfrei, wie beide bereits geschlossenen Gate-Berichte: `stage-1-gate.md`
+/// und `stage-2-gate.md` fuehren zusammen NULL Umlaute (gemessen), und der
+/// Gate vergleicht Literale — eine Ueberschrift mit Umlaut hier und ohne
+/// Umlaut dort waere ein Mangel ohne Sache.
+const STAGE_THREE_GATE_REPORT_SECTIONS: [&str; 8] = [
+    "## 1. Primaere Abnahmekriterien und ihre Belege",
+    "## 2. Reichweite der Stufe-3-Abnahme",
+    "## 3. Fehlermatrix und deklarierte Szenarien",
+    "## 4. Entscheidungen dieser Stufe",
+    "## 5. Blindheit des Servers, Administrationstrennung und Kanarienvoegel",
+    "## Endpunkt- und Signaturabdeckung",
+    "## Serverhaelften fremder Stufen",
+    "## Nicht beruehrte Nachbarzeilen",
+];
+
+/// Die Literale, die der Stufe-3-Gate-Bericht nennen MUSS.
+///
+/// Der Gate prueft Literale, keine Prosa: ein Abnahmebericht, der den
+/// fail-closed-Ausgang der Cursorrotation, den gepinnten Basisdigest, die
+/// beiden neuen Nachweisziele oder die neue Ledgerzeile verschweigt, belegt
+/// die Stufe nicht. Die zwei Integrationsdienste stehen hier NICHT: sie stehen
+/// bereits in der woertlich verlangten Reichweitenklausel
+/// ([`STAGE_THREE_HOST_SCOPE_CLAUSE`]), und ein zweites Mal geprueft belegen
+/// sie nichts.
+///
+/// Der sechzehnte Eintrag ist die Offenlegungspflicht dieser Stufe, und er
+/// steht hier aus demselben Grund wie der sechzehnte Eintrag der Stufe 2: ein
+/// gruener Stufe-3-Gate ohne diesen Satz liest sich als Betriebsnachweis, den
+/// die Stufe nicht erbringt. Der Satz und nicht ein Stichwort: ein Stichwort
+/// waere von einer beilaeufigen Erwaehnung irgendwo im Bericht bedient, dieser
+/// Satz nicht.
+const STAGE_THREE_GATE_REPORT_LITERALS: [&str; 16] = [
+    "EA-SYNC-CURSOR-INVALID",
+    "EA-AUTH-NONCE-REPLAY",
+    "EA-COMMIT-REGISTRY-HEAD-REQUIRED",
+    "EA-WEBAUTHN-ASSERTION-INVALID",
+    "TechnicalCursorV1",
+    "serverReceipt",
+    "webBundleRelease",
+    "WR-042D",
+    "vectors/web-bundle/v1/",
+    "docs/traceability/stage-3-fault-points.json",
+    "ops/container/Dockerfile",
+    "ops/monitoring/metrics.md",
+    "gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+    "apps/server/tests/privacy_canaries_server.rs",
+    "apps/server/tests/backup_restore_server_restore.rs",
+    "Ein gruener Stufe-3-Gate ist ausdruecklich kein Beleg fuer eine produktionsreife Sicherung, \
+     ein signiertes Bild oder einen Plattformnachweis",
+];
+
+/// Die Reichweitenklausel der Stufe 3: die Auflegung A, Wort fuer Wort, in der
+/// umlaut- und auszeichnungsfreien Umschrift, die diese Datei durchgehend
+/// verwendet (Muster: [`STAGE_TWO_HOST_SCOPE_CLAUSE`]).
+///
+/// Der Gate-Bericht MUSS sie woertlich tragen. Ohne sie liest sich ein gruener
+/// Stufe-3-Gate als Betriebsnachweis gegen eine beliebige PostgreSQL- und
+/// S3-Auflegung, den er nicht erbringt: gemessen ist GENAU EINE, und sie steht
+/// mit Tag und Digest in `ops/compose/integration.yaml`.
+const STAGE_THREE_HOST_SCOPE_CLAUSE: &str = concat!(
+    "Stufe 3 belegt ihre Serverabnahme ausschliesslich gegen die zwei ",
+    "Integrationsdienste der Auflegung A, gestartet ueber ",
+    "cargo run --locked -p xtask -- integration up: ",
+    "postgres:18.6-bookworm@sha256:",
+    "1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af und ",
+    "minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:",
+    "14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e. ",
+    "Ein Betrieb gegen ein anderes PostgreSQL, einen anderen S3-kompatiblen ",
+    "Dienst oder eine verwaltete Auflegung ist damit NICHT belegt und bleibt ",
+    "Stufe 7."
 );
 
 /// Der Spaltenvertrag des Ledgers. Spaetere Stufen ergaenzen nur Zeilen.
@@ -1960,10 +2373,27 @@ fn stage_one_documents(gate_root: &Path) -> Result<Vec<u32>, String> {
 /// Manifest: `AfterKeystoreDelete`, `AfterAbsenceConfirmation` und
 /// `BackupRestoreAfterKeyDeletion` sind dasselbe Absturzfenster in der
 /// Verwerfens- UND in der Abschlussmatrix, und das ist die Aussage des
-/// Manifests, kein Fehler. [`DISCARD_PRECEDENCE_FAULT_POINT`] wird davon
-/// unabhaengig genau einmal ueber das ganze Manifest verlangt.
-fn stage_two_fault_points(gate_root: &Path, problems: &mut Vec<String>) -> Vec<String> {
-    let path = gate_root.join(STAGE_TWO_FAULT_POINT_MANIFEST_PATH);
+/// Manifests, kein Fehler.
+///
+/// # Ueber die Stufen hinweg
+///
+/// Die Mechanik ist fuer Stufe 2 und Stufe 3 dieselbe und steht deshalb EINMAL
+/// hier, parametrisiert statt abgeschrieben: `manifest_path` und
+/// `required_sections`
+/// kommen von der aufrufenden Stufe, und `required_exactly_once` traegt den
+/// Punkt, den GENAU diese Stufe genau einmal ueber das ganze Manifest
+/// verlangt. Stufe 2 uebergibt dort [`DISCARD_PRECEDENCE_FAULT_POINT`]; Stufe 3
+/// uebergibt `None`, weil ihre vier Abschnitte keinen Vorrangpunkt kennen —
+/// jedes ihrer neun Szenarien steht genau einmal in genau einem Abschnitt, und
+/// die Zusicherung darueber traegt der Abschnittsvertrag selbst.
+fn declared_fault_points(
+    gate_root: &Path,
+    manifest_path: &str,
+    required_sections: &[&str],
+    required_exactly_once: Option<&str>,
+    problems: &mut Vec<String>,
+) -> Vec<String> {
+    let path = gate_root.join(manifest_path);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) => {
@@ -1984,8 +2414,8 @@ fn stage_two_fault_points(gate_root: &Path, problems: &mut Vec<String>) -> Vec<S
     };
 
     let mut declared = BTreeSet::new();
-    let mut precedence_occurrences = 0_usize;
-    for section in STAGE_TWO_FAULT_POINT_SECTIONS {
+    let mut required_occurrences = 0_usize;
+    for section in required_sections.iter().copied() {
         let entries = match sections.get(section) {
             Some(serde_json::Value::Array(entries)) => entries,
             Some(serde_json::Value::Object(nested)) => {
@@ -2029,8 +2459,8 @@ fn stage_two_fault_points(gate_root: &Path, problems: &mut Vec<String>) -> Vec<S
                 ));
                 continue;
             };
-            if name == DISCARD_PRECEDENCE_FAULT_POINT {
-                precedence_occurrences += 1;
+            if Some(name) == required_exactly_once {
+                required_occurrences += 1;
             }
             let bracketed = entry
                 .get("brackets")
@@ -2051,14 +2481,135 @@ fn stage_two_fault_points(gate_root: &Path, problems: &mut Vec<String>) -> Vec<S
             declared.insert(name.to_owned());
         }
     }
-    if precedence_occurrences != 1 {
+    if let Some(required) = required_exactly_once
+        && required_occurrences != 1
+    {
         problems.push(format!(
-            "{} must declare {DISCARD_PRECEDENCE_FAULT_POINT} exactly once, found \
-             {precedence_occurrences}",
+            "{} must declare {required} exactly once, found {required_occurrences}",
             path.display()
         ));
     }
     declared.into_iter().collect()
+}
+
+/// Loest JEDEN `witness` des Stufe-3-Szenarienmanifests auf eine wirklich
+/// vorhandene Testfunktion auf.
+///
+/// Ohne diesen Schritt war `witness` ein Feld, das NICHTS liest: die neun
+/// Szenarien waren im Manifest benannt, ihre Zeugen aber nur behauptet, und
+/// eine umbenannte oder geloeschte Testfunktion liess die Fehlermatrix
+/// stillschweigend zu einem Dokument werden. Der Gate loest sie jetzt selbst
+/// auf — Datei UND Funktionsname —, und ein `#[test]`/`#[tokio::test]` vor der
+/// Funktion gehoert dazu: ein Hilfsfunktionsname derselben Schreibweise waere
+/// kein Zeuge.
+///
+/// Die Form ist `<pfad relativ zur Wurzel>::<funktionsname>`. Zurueck kommt
+/// die aufgeloeste Liste, damit ein gruener Lauf sie AUSWEIST statt zu
+/// schweigen.
+fn resolved_fault_point_witnesses(
+    gate_root: &Path,
+    manifest_path: &str,
+    required_sections: &[&str],
+    problems: &mut Vec<String>,
+) -> Vec<String> {
+    let path = gate_root.join(manifest_path);
+    let Ok(text) = fs::read_to_string(&path) else {
+        // Die fehlende Datei hat `declared_fault_points` bereits gemeldet; ein
+        // zweites Mal gemeldet stuende sie doppelt in der Sammelmeldung.
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(sections) = manifest.as_object() else {
+        return Vec::new();
+    };
+
+    let mut resolved = BTreeSet::new();
+    for section in required_sections.iter().copied() {
+        let entries = match sections.get(section) {
+            Some(serde_json::Value::Array(entries)) => entries.clone(),
+            Some(serde_json::Value::Object(nested)) => nested
+                .get("points")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            _ => continue,
+        };
+        for entry in &entries {
+            let name = entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unnamed>");
+            let witness = entry
+                .get("witness")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|witness| !witness.is_empty());
+            let Some(witness) = witness else {
+                problems.push(format!(
+                    "{}: {name} in the {section} section carries no witness",
+                    path.display()
+                ));
+                continue;
+            };
+            match witness_resolves(gate_root, witness) {
+                Ok(()) => {
+                    resolved.insert(witness.to_owned());
+                }
+                Err(reason) => problems.push(format!(
+                    "{}: the witness of {name} in the {section} section does not resolve: \
+                     {witness} — {reason}",
+                    path.display()
+                )),
+            }
+        }
+    }
+    resolved.into_iter().collect()
+}
+
+/// `<pfad>::<funktionsname>` — aufgeloest oder mit dem Grund abgewiesen.
+fn witness_resolves(gate_root: &Path, witness: &str) -> Result<(), String> {
+    let Some((relative, function)) = witness.split_once("::") else {
+        return Err("the shape is <path>::<function>".to_owned());
+    };
+    if relative.is_empty() || function.is_empty() || function.contains("::") {
+        return Err("the shape is <path>::<function>".to_owned());
+    }
+    let source_path = gate_root.join(relative);
+    let source = fs::read_to_string(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+
+    let lines: Vec<&str> = source.lines().collect();
+    let signature = format!("fn {function}(");
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let is_definition = trimmed.starts_with(&signature)
+            || trimmed.starts_with(&format!("async {signature}"))
+            || trimmed.starts_with(&format!("pub {signature}"))
+            || trimmed.starts_with(&format!("pub async {signature}"));
+        if !is_definition {
+            continue;
+        }
+        // Rueckwaerts durch Attribute und Kommentare: der Zeuge ist erst
+        // einer, wenn ein Testattribut unmittelbar davor steht.
+        let mut cursor = index;
+        while cursor > 0 {
+            let previous = lines[cursor - 1].trim_start();
+            if previous.starts_with("#[test]") || previous.starts_with("#[tokio::test") {
+                return Ok(());
+            }
+            if previous.is_empty() || previous.starts_with("//") || previous.starts_with('#') {
+                cursor -= 1;
+                continue;
+            }
+            break;
+        }
+        return Err(format!(
+            "{function} exists in {relative} but carries no #[test] or #[tokio::test]"
+        ));
+    }
+    Err(format!("{relative} declares no function {function}"))
 }
 
 /// Prueft die Deklarationen der Stufe 2 und schreibt den Bericht nach stdout.
@@ -2075,6 +2626,60 @@ fn stage_two_fault_points(gate_root: &Path, problems: &mut Vec<String>) -> Vec<S
 /// wird hier absichtlich NICHT geprueft, sondern von einem benannten Test der
 /// Stufenabnahme: ein Gate, der seine eigene Messzeile verlangte, koennte auf
 /// dem Lauf, der sie erzeugt, nie gruen sein.
+/// Die Zeilen der eigenen Stufe, die noch auf `planned` stehen.
+///
+/// Der Filter ist UNBEDINGT und wird fuer keine Zeile gelockert: eine Stufe,
+/// die ihre eigenen Zeilen offen laesst, ist nicht abgenommen. Er steht hier
+/// einmal und nach Stufe parametrisiert, weil Stufe 2 und Stufe 3 dieselbe
+/// Zusage machen und die Fehlerzeile sich nur in der Stufennummer
+/// unterscheidet — zwei Abschriften waeren zwei Orte, an denen sie sich
+/// auseinanderentwickeln koennten.
+///
+/// Die Rueckgabe ist die Liste selbst und nicht nur der Mangel: der
+/// Gate-Bericht auf stdout fuehrt sie als eigenes Feld, damit ein gruener Lauf
+/// die LEERE Liste ausweist statt zu schweigen.
+fn rows_still_planned(rows: &[LedgerRow], stage: &str, problems: &mut Vec<String>) -> Vec<String> {
+    let still_planned = rows
+        .iter()
+        .filter(|row| row.values[7] == stage && row.values[8] == "planned")
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    if !still_planned.is_empty() {
+        problems.push(format!(
+            "stage {stage} requirement ledger rows still on planned: {}",
+            still_planned.join(", ")
+        ));
+    }
+    still_planned
+}
+
+/// Prueft ein Dokument gegen seinen Abschnitts- UND seinen Literalvertrag.
+///
+/// Die beiden Pruefungen gehoeren zusammen und stehen ueberall im Baum als
+/// dasselbe Paar: erst die Pflichtabschnitte, dann die Pflichtliterale, beide
+/// ueber [`require_document_literals`] und beide als GESAMMELTER Mangel. Sie
+/// stehen hier einmal, weil das Formatpaket, der Stufe-2-Bericht und der
+/// Stufe-3-Bericht sie identisch brauchen; abgeschrieben waere die dritte
+/// Kopie die, die beim naechsten Vertrag vergessen wird.
+///
+/// Die Reihenfolge ist Teil des Vertrags: `section` vor `literal`. Ein Bericht,
+/// dem ein ganzer Abschnitt fehlt, soll das zuerst gemeldet bekommen und nicht
+/// eine Liste von Literalen, die alle in demselben fehlenden Abschnitt
+/// staenden.
+fn collect_document_contract(
+    path: &Path,
+    text: &str,
+    sections: &[&str],
+    literals: &[&str],
+    problems: &mut Vec<String>,
+) {
+    for (expected, kind) in [(sections, "section"), (literals, "literal")] {
+        if let Err(error) = require_document_literals(path, text, expected, kind) {
+            problems.push(error);
+        }
+    }
+}
+
 fn run_stage_two_gate(root: &Path) -> Result<(), String> {
     let gate_root = stage_gate_root(root);
     let mut problems = Vec::new();
@@ -2130,17 +2735,7 @@ fn run_stage_two_gate(root: &Path) -> Result<(), String> {
         }
         Err(error) => problems.push(error),
     }
-    let still_planned = rows
-        .iter()
-        .filter(|row| row.values[7] == "2" && row.values[8] == "planned")
-        .map(|row| row.requirement_id.clone())
-        .collect::<Vec<_>>();
-    if !still_planned.is_empty() {
-        problems.push(format!(
-            "stage 2 requirement ledger rows still on planned: {}",
-            still_planned.join(", ")
-        ));
-    }
+    let still_planned = rows_still_planned(&rows, "2", &mut problems);
 
     // 3. Host-Nachweis. Die Fehlerzeile nennt genau das unbenannte Ziel und
     // NIE die Belegspalte einer Zeile: eine Zeile zitieren hiesse, die drei
@@ -2163,7 +2758,13 @@ fn run_stage_two_gate(root: &Path) -> Result<(), String> {
     }
 
     // 4. Abbruchpunkte.
-    let declared_fault_points = stage_two_fault_points(&gate_root, &mut problems);
+    let declared_fault_points = declared_fault_points(
+        &gate_root,
+        STAGE_TWO_FAULT_POINT_MANIFEST_PATH,
+        &STAGE_TWO_FAULT_POINT_SECTIONS,
+        Some(DISCARD_PRECEDENCE_FAULT_POINT),
+        &mut problems,
+    );
 
     // 5. Skripte. Sie verankern die Frontendspur und die Lieferkettenspur im
     // Gate; `cargo deny` selbst ruft der Gate nie auf und bleibt damit ohne
@@ -2204,16 +2805,13 @@ fn run_stage_two_gate(root: &Path) -> Result<(), String> {
     let format_path = gate_root.join(FORMAT_PACKAGE_PATH);
     match fs::read_to_string(&format_path) {
         Ok(package) => {
-            for (literals, kind) in [
-                (FORMAT_PACKAGE_SECTIONS.as_slice(), "section"),
-                (FORMAT_PACKAGE_LITERALS.as_slice(), "literal"),
-            ] {
-                if let Err(error) =
-                    require_document_literals(&format_path, &package, literals, kind)
-                {
-                    problems.push(error);
-                }
-            }
+            collect_document_contract(
+                &format_path,
+                &package,
+                &FORMAT_PACKAGE_SECTIONS,
+                &FORMAT_PACKAGE_LITERALS,
+                &mut problems,
+            );
             if let Err(error) = reject_legal_overclaim(&format_path, &package) {
                 problems.push(error);
             }
@@ -2226,15 +2824,13 @@ fn run_stage_two_gate(root: &Path) -> Result<(), String> {
     let mut gate_report_criteria = Vec::new();
     match fs::read_to_string(&report_path) {
         Ok(report) => {
-            for (literals, kind) in [
-                (STAGE_TWO_GATE_REPORT_SECTIONS.as_slice(), "section"),
-                (STAGE_TWO_GATE_REPORT_LITERALS.as_slice(), "literal"),
-            ] {
-                if let Err(error) = require_document_literals(&report_path, &report, literals, kind)
-                {
-                    problems.push(error);
-                }
-            }
+            collect_document_contract(
+                &report_path,
+                &report,
+                &STAGE_TWO_GATE_REPORT_SECTIONS,
+                &STAGE_TWO_GATE_REPORT_LITERALS,
+                &mut problems,
+            );
             if !report.contains(STAGE_TWO_HOST_SCOPE_CLAUSE) {
                 // Bewusst OHNE die Klausel im Text: sie nennt alle vier
                 // Zielarchitekturen, und eine Fehlerzeile, die sie zitiert,
@@ -2295,6 +2891,203 @@ fn run_stage_two_gate(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Prueft die Deklarationen der Stufe 3 und schreibt den Bericht nach stdout.
+///
+/// Derselbe Bau wie [`run_stage_two_gate`] und aus demselben Grund: der Zweig
+/// sammelt JEDEN unerfuellten Punkt und meldet sie gemeinsam, getrennt durch
+/// `"; "`. Die Mechanik, die beide Stufen teilen, steht EINMAL im Baum und
+/// nach Stufe parametrisiert — [`rows_still_planned`],
+/// [`declared_fault_points`] und [`collect_document_contract`] —, damit die
+/// dritte Stufe sie nicht ein drittes Mal abschreibt.
+///
+/// Was Stufe 3 NICHT wiederholt: den Host-Zielnachweis. Er ist eine
+/// Stufe-2-Zusage ueber vier Zielarchitekturen und wird von
+/// [`STAGE_TWO_HOST_TARGETS`] gehalten; Stufe 3 macht ueber sie keine neue
+/// Aussage. An seiner Stelle steht die Reichweitenklausel der Auflegung A.
+///
+/// Der gemessene Lauf wird hier absichtlich NICHT geprueft, sondern von einem
+/// benannten Test der Stufenabnahme: ein Gate, der seine eigene Messzeile
+/// verlangte, koennte auf dem Lauf, der sie erzeugt, nie gruen sein.
+fn run_stage_three_gate(root: &Path) -> Result<(), String> {
+    let gate_root = stage_gate_root(root);
+    let mut problems = Vec::new();
+
+    // 1. Vektorfamilien.
+    let vectors = gate_root.join("vectors");
+    let mut families = Vec::new();
+    for family in STAGE_THREE_VECTOR_FAMILIES {
+        if family_carries_a_manifest(&vectors, family) {
+            families.push(family);
+        } else {
+            problems.push(format!(
+                "stage 3 vector family without a readable manifest under {}: {family}",
+                vectors.display()
+            ));
+        }
+    }
+
+    // 2. Ledger: Wohlgeformtheit, Abdeckung der Pflichtzeilenmenge und die
+    // Zeilen, die die Stufe noch offen fuehrt.
+    let ledger_path = gate_root.join(REQUIREMENT_LEDGER_PATH);
+    let rows = match read_requirement_ledger(&ledger_path) {
+        Ok(rows) => rows,
+        Err(error) => {
+            problems.push(error);
+            Vec::new()
+        }
+    };
+    let design_path = gate_root.join(DESIGN_DOCUMENT_PATH);
+    match fs::read_to_string(&design_path)
+        .map_err(|error| format!("failed to read {}: {error}", design_path.display()))
+        .and_then(|design| required_requirement_identifiers(&design))
+    {
+        Ok(required) => {
+            let covered = rows
+                .iter()
+                .map(|row| row.requirement_id.clone())
+                .collect::<BTreeSet<_>>();
+            let uncovered = required
+                .difference(&covered)
+                .cloned()
+                .collect::<Vec<String>>();
+            if !uncovered.is_empty() {
+                problems.push(format!(
+                    "the requirement ledger {} does not cover: {}",
+                    ledger_path.display(),
+                    uncovered.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+    let still_planned = rows_still_planned(&rows, "3", &mut problems);
+
+    // 3. Szenarien. Ohne Vorrangpunkt: die vier Abschnitte der Stufe 3 kennen
+    // keinen, und `None` sagt das aus, statt einen zu erfinden.
+    let declared_fault_points = declared_fault_points(
+        &gate_root,
+        STAGE_THREE_FAULT_POINT_MANIFEST_PATH,
+        &STAGE_THREE_FAULT_POINT_SECTIONS,
+        None,
+        &mut problems,
+    );
+    // Und die Zeugen dazu: ein Szenarienname ohne aufloesbare Testfunktion
+    // ist eine Behauptung, keine Abdeckung.
+    let fault_point_witnesses = resolved_fault_point_witnesses(
+        &gate_root,
+        STAGE_THREE_FAULT_POINT_MANIFEST_PATH,
+        &STAGE_THREE_FAULT_POINT_SECTIONS,
+        &mut problems,
+    );
+
+    // 4. Skripte. Sie verankern die Serverspur und die Lieferkettenspur im
+    // Gate; `cargo deny` und `cargo test` ruft der Gate nie selbst auf und
+    // bleibt damit ohne laufende Integrationsdienste lauffaehig.
+    let package_path = gate_root.join(PACKAGE_MANIFEST_PATH);
+    match fs::read_to_string(&package_path)
+        .map_err(|error| format!("failed to read {}: {error}", package_path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|error| format!("invalid {}: {error}", package_path.display()))
+        }) {
+        Ok(manifest) => {
+            let missing = STAGE_THREE_REQUIRED_SCRIPTS
+                .iter()
+                .filter(|script| {
+                    manifest
+                        .get("scripts")
+                        .and_then(|scripts| scripts.get(*script))
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|command| command.trim().is_empty())
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "{} does not declare the required scripts: {}",
+                    package_path.display(),
+                    missing.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+
+    // 5. Der Gate-Bericht.
+    let report_path = gate_root.join(STAGE_THREE_GATE_REPORT_PATH);
+    let mut gate_report_criteria = Vec::new();
+    match fs::read_to_string(&report_path) {
+        Ok(report) => {
+            collect_document_contract(
+                &report_path,
+                &report,
+                &STAGE_THREE_GATE_REPORT_SECTIONS,
+                &STAGE_THREE_GATE_REPORT_LITERALS,
+                &mut problems,
+            );
+            if !report.contains(STAGE_THREE_HOST_SCOPE_CLAUSE) {
+                // Bewusst OHNE die Klausel im Text: sie nennt beide
+                // Bilddigests, und eine Fehlerzeile, die sie zitiert, waere
+                // laenger als der Rest der gesammelten Meldung zusammen.
+                problems.push(format!(
+                    "{} does not carry the stage 3 host scope clause verbatim",
+                    report_path.display()
+                ));
+            }
+            match gate_report_acceptance_criteria(
+                &report_path,
+                &report,
+                &STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA,
+            ) {
+                Ok(found) => gate_report_criteria = found,
+                Err(error) => problems.push(error),
+            }
+        }
+        Err(error) => problems.push(format!("failed to read {}: {error}", report_path.display())),
+    }
+
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
+
+    let row_identifiers = rows
+        .iter()
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    let evidenced = rows
+        .iter()
+        .filter(|row| {
+            matches!(row.values[8].as_str(), "implemented" | "integrated")
+                && !row.primary_acceptance_criterion.is_empty()
+        })
+        .filter_map(|row| row.primary_acceptance_criterion.parse::<u32>().ok())
+        .collect::<BTreeSet<_>>();
+    let report = serde_json::json!({
+        "stage": 3,
+        "vector_families": families,
+        "primary_acceptance_criteria": STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA,
+        "evidenced_acceptance_criteria": evidenced,
+        "rows": row_identifiers,
+        "gate_report": STAGE_THREE_GATE_REPORT_PATH,
+        "gate_report_acceptance_criteria": gate_report_criteria,
+        // Derselbe Schluessel wie in Stufe 2 und NICHT `scenarios`: das
+        // Berichtsschema wird ergaenzt, nie umbenannt, und der Inhalt ist
+        // derselbe — die deklarierten Namen des Manifests.
+        "declared_fault_points": declared_fault_points,
+        // Ergaenzt, nicht umbenannt: die AUFGELOESTEN Zeugen der neun
+        // Szenarien, jeder als `<pfad>::<funktion>`.
+        "stage_three_fault_point_witnesses": fault_point_witnesses,
+        "stage_three_primary_acceptance_criteria": STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA,
+        "stage_three_rows_still_planned": still_planned,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&report)
+            .map_err(|error| format!("failed to render the stage gate report: {error}"))?
+    );
+    Ok(())
+}
+
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
 ///
 /// Eine Familie zaehlt erst als vorhanden, wenn [`family_carries_a_manifest`]
@@ -2319,9 +3112,12 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
     if stage == 2 {
         return run_stage_two_gate(root);
     }
+    if stage == 3 {
+        return run_stage_three_gate(root);
+    }
     if stage != 1 {
         return Err(format!(
-            "stage-gate is only defined for stages 1 and 2 so far, not {stage}"
+            "stage-gate is only defined for stages 1, 2 and 3 so far, not {stage}"
         ));
     }
     let vectors = stage_gate_root(root).join("vectors");
@@ -2416,6 +3212,11 @@ fn run() -> Result<(), String> {
                 eprintln!("{warning}");
             }
             ensure_wasm32_target_available()?;
+            // Vor den Cargo-Kommandos, weil `#[sqlx::test]` seine Datenbank
+            // erst zur Laufzeit sucht: ohne diese Zeile scheitert der
+            // Schnelllauf ab Stufe 3 mit einer Verbindungsmeldung tief im
+            // Testprotokoll statt hier mit einer Anweisung.
+            ensure_integration_services_available()?;
             for (program, command_args) in verify_quick_commands() {
                 run_process(&root, program, &command_args)
                     .map_err(|error| format!("failed to invoke {program}: {error}"))?;
@@ -2441,6 +3242,19 @@ fn run() -> Result<(), String> {
                 .parse::<u32>()
                 .map_err(|error| format!("stage-gate stage must be a number: {stage}: {error}"))?;
             run_stage_gate(&root, stage)
+        }
+        "integration" => {
+            let action = args
+                .next()
+                .ok_or_else(|| INTEGRATION_ARGUMENT_ERROR.to_owned())?;
+            if args.next().is_some() {
+                return Err(INTEGRATION_ARGUMENT_ERROR.to_owned());
+            }
+            match action.as_str() {
+                "up" => run_integration_up(&root),
+                "down" => run_integration_down(&root),
+                _ => Err(INTEGRATION_ARGUMENT_ERROR.to_owned()),
+            }
         }
         "validate-schemas" => {
             if args.next().is_some() {
@@ -3104,7 +3918,7 @@ vor Task 3 akzeptiert
 **Review-Ergebnis:** keine ungelöste Zeile
 "#;
 
-        let error = super::validate_addendum_review(addendum)
+        let error = super::validate_addendum_review(addendum, "vor Task 3 akzeptiert")
             .expect_err("unresolved review rows must fail closed");
         assert!(error.contains("unresolved review row"));
     }

@@ -47,6 +47,57 @@ pub trait ArchiveBackend: Send + Sync {
         bytes: &[u8],
     ) -> Result<(), ArchiveBackendError>;
 
+    /// Die ADRESSEN der liegengebliebenen Staging-Dateien — und nichts sonst.
+    ///
+    /// # Warum der SCHREIBPORT eine Leseprimitive bekommt
+    ///
+    /// Weil die Lesesicht sie nicht liefern kann und ausdruecklich nicht
+    /// liefern soll: [`ArchiveSource`](crate::ArchiveSource) blendet jede
+    /// Staging-Adresse aus (`ea_archive::is_staging_path`), damit eine
+    /// vorbereitete Datei nie als Kettenknoten zaehlt. Genau diese
+    /// ausgeblendeten Adressen sind aber das, was die Bereinigung nach einem
+    /// nachgewiesenen Ausgang entfernen MUSS.
+    ///
+    /// Sie ist so eng wie moeglich geschnitten: sie gibt ADRESSEN heraus und
+    /// kein einziges Byte, und sie nennt ausschliesslich Staging-Adressen. Ein
+    /// allgemeiner Verzeichnisleser am Schreibport waere ein zweiter Weg in den
+    /// Bestand hinein, neben der Lesesicht, die ihre Filter aus gutem Grund
+    /// hat.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Wirtdateisystems.
+    fn staged_paths(&self) -> Result<Vec<String>, ArchiveBackendError>;
+
+    /// Entfernt ein Archivobjekt, wenn es dort liegt.
+    ///
+    /// Die NAMENSSYMMETRIE zu [`Self::create_if_absent`] ist Absicht: dort
+    /// entsteht eine Adresse nur, wenn sie frei ist, hier verschwindet sie nur,
+    /// wenn sie belegt ist. Beide sind idempotent, und keine von beiden
+    /// UEBERSCHREIBT je ein Byte.
+    ///
+    /// # Warum der Port sie bis Stufe 3 NICHT hatte
+    ///
+    /// Bis hierher konnte kein Aufrufer einen NACHGEWIESENEN Ausgang
+    /// vorweisen. `design.md` §9.4 erlaubt das Bereinigen an genau zwei
+    /// Stellen — Staging nach VOLLSTAENDIGER Reconciliation (§9.3 Schritt 13)
+    /// und vorab veroeffentlichte Grants ohne committetes `.eip` nach
+    /// NACHGEWIESENEM Abbruch —, und beide Nachweise entstehen erst mit dieser
+    /// Stufe: die verifizierte Quittung und die aufgeloeste Abschlussmarke.
+    /// Eine Loeschprimitive ohne diese Nachweise waere ein Weg gewesen, einen
+    /// Bestand zu verkleinern, ohne dass irgendetwas den Ausgang belegt.
+    ///
+    /// Sie ist DAUERHAFT: der entfernte Name lebt im Elternverzeichnis, und
+    /// eine Wirtimplementierung flusht es deshalb, wie
+    /// [`Self::sync_directory`] es fuer den entstandenen Namen tut.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::FlushFailed`], wenn der Wirt die Dauerhaftigkeit
+    /// nicht bestaetigt; sonst der Fehler des Wirtdateisystems. Eine FEHLENDE
+    /// Adresse ist ein Erfolg und kein Fehler.
+    fn remove_if_present(&self, relative: &ArchivePath) -> Result<(), ArchiveBackendError>;
+
     /// Macht die Bytes dieser Datei dauerhaft.
     ///
     /// # Errors

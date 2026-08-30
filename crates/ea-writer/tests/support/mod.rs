@@ -95,6 +95,7 @@ const RECOVERY_MARKER: u8 = 0x62;
 const READER_ONE_MARKER: u8 = 0x63;
 const READER_TWO_MARKER: u8 = 0x64;
 const SECOND_RECOVERY_MARKER: u8 = 0x65;
+const SERVER_RECEIPT_MARKER: u8 = 0x66;
 
 /// Der Ausstellungszeitpunkt jedes Head-Ereignisses und der Bezugspunkt des
 /// Vertrauensalters — 2026-01-01T00:00:00Z.
@@ -224,6 +225,9 @@ struct BuiltLine {
     line: RegistryLineBuilder,
     binding_object_hash: ObjectHash,
     writer_certificate_hash: ObjectHash,
+    /// Der Objekthash des Serverquittungszertifikats — `None`, solange die
+    /// Variante es nicht anfordert.
+    server_receipt_certificate_hash: Option<ObjectHash>,
 }
 
 /// Wie eine Fixture von der glatten Linie abweicht.
@@ -254,6 +258,20 @@ pub struct LineVariantV1 {
     /// Fixture tun sie das per Konstruktion —, ist der Waechter eine Zeile, die
     /// kein Test je ausfuehrt.
     pub foreign_operator_profile_commitment: bool,
+    /// Die Linie traegt ein Zertifikat der Art
+    /// [`CertificateKindV1::ServerReceipt`].
+    ///
+    /// ADDITIV und per Vorgabe AUS: eingeschaltet schiebt es einen weiteren
+    /// Registrierungskopf in die Linie und verschiebt damit jeden Kopfhash
+    /// dahinter. Jede bestehende Fixture laesst es deshalb aus und sieht
+    /// dieselbe Linie wie zuvor.
+    ///
+    /// Es existiert, weil Gate `receipt` ohne dieses Zertifikat gar nicht
+    /// durchlaufen werden kann: `VerificationContext::receipt` verlangt die
+    /// Capability `serverReceipt`, und ohne einen Bestand, in dem eine
+    /// Serverquittung wirklich BESTAETIGT wird, bliebe die annehmende Haelfte
+    /// des Quittungspfades ungetestet.
+    pub with_server_receipt_certificate: bool,
     /// KEIN Recovery-Empfaenger ist aktiv.
     ///
     /// Das NULL-Bein der dritten Produktinvariante. Die beiden anderen Beine
@@ -347,6 +365,18 @@ fn build_line(
             },
         );
     }
+    let server_receipt_certificate_hash = variant.with_server_receipt_certificate.then(|| {
+        line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::ServerReceipt,
+                marker: SERVER_RECEIPT_MARKER,
+                effective_from: Some(0),
+            },
+            head_options(0, 70),
+        )
+        .direct_object_hash
+        .expect("das Serverquittungszertifikat ist ein direktes Ziel")
+    });
     let writer_certificate_hash = writer
         .direct_object_hash
         .expect("das Writer-Zertifikat ist ein direktes Ziel");
@@ -382,6 +412,7 @@ fn build_line(
             .direct_object_hash
             .expect("die Bedienerbindung ist ein direktes Ziel"),
         writer_certificate_hash,
+        server_receipt_certificate_hash,
         line,
     }
 }
@@ -441,13 +472,24 @@ impl TrustStateStore for ModelStore {
     }
 }
 
-fn select_head(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead {
+/// Waehlt den Head der Fixture FUER EINE Sequenz.
+///
+/// Die vorgeschlagene Sequenz steckt IM gewaehlten Head: Schritt 3 der
+/// Finalisierung vergleicht sie gegen den aus committeten Bytes gerechneten
+/// Kettenkopf und haelt bei Abweichung mit
+/// `EA-WRITER-HEAD-RECONCILIATION-REQUIRED` an. Ein zweiter Eintrag braucht
+/// deshalb einen fuer SEINE Sequenz gewaehlten Head und nicht den des ersten.
+fn select_head_for_sequence(
+    line: &RegistryLineBuilder,
+    now_ms: i64,
+    proposed: u64,
+) -> SelectedRegistryHead {
     let head_index = line.heads().len() - 1;
     let head = line.heads()[head_index];
     let key = trust_support::state_key();
     let trusted_time = TrustedTimeState::initial(UnixMillis::new(now_ms));
     let trust = line.verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
-    let candidate = verify_registry_candidate(&trust, ChainSequence::new(PROPOSED_SEQUENCE))
+    let candidate = verify_registry_candidate(&trust, ChainSequence::new(proposed))
         .expect("der Kandidat der Fixture muss verifizieren");
     let mut store = ModelStore {
         key,
@@ -464,6 +506,10 @@ fn select_head(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead 
         panic!("die Fixture muss ihren eigenen aktuellen Head waehlen");
     };
     selected
+}
+
+fn select_head(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead {
+    select_head_for_sequence(line, now_ms, PROPOSED_SEQUENCE)
 }
 
 struct FakeAccount {
@@ -538,7 +584,8 @@ pub struct WriterHarness {
     /// Speichern des Entwurfs dalagen — an der GESCHLOSSENEN Datenbank
     /// genommen.
     backup: Vec<(String, Vec<u8>)>,
-    backend: LocalPathBackend,
+    backend: Arc<LocalPathBackend>,
+    server_receipt_certificate_hash: Option<ObjectHash>,
     head: SelectedRegistryHead,
     binding: WriterBindingV1,
     line: RegistryLineBuilder,
@@ -690,7 +737,8 @@ impl WriterHarness {
             draft_dek_handle,
             open: Some(open),
             backup,
-            backend,
+            server_receipt_certificate_hash: built.server_receipt_certificate_hash,
+            backend: Arc::new(backend),
             head,
             binding,
             line: built.line,
@@ -741,7 +789,7 @@ impl WriterHarness {
         WriterService::new(
             Arc::clone(&self.store().repository),
             Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
-            &self.backend,
+            self.backend.as_ref(),
             source,
             &self.head,
             &[],
@@ -765,7 +813,7 @@ impl WriterHarness {
         WriterService::new(
             Arc::clone(&self.store().repository),
             Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
-            &self.backend,
+            self.backend.as_ref(),
             source,
             &self.head,
             &[],
@@ -791,7 +839,7 @@ impl WriterHarness {
         WriterService::new(
             Arc::clone(&self.store().repository),
             Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
-            &self.backend,
+            self.backend.as_ref(),
             source,
             &self.head,
             checkpoint_claims,
@@ -822,7 +870,7 @@ impl WriterHarness {
         let service = WriterService::new(
             Arc::clone(&self.store().repository),
             deaf,
-            &self.backend,
+            self.backend.as_ref(),
             &source,
             &self.head,
             &[],
@@ -842,8 +890,159 @@ impl WriterHarness {
     }
 
     #[must_use]
-    pub const fn backend(&self) -> &LocalPathBackend {
+    pub fn backend(&self) -> &LocalPathBackend {
         &self.backend
+    }
+
+    /// Der GETEILTE Griff auf denselben Bestand.
+    ///
+    /// Er existiert fuer die Schale vor dem Kern: `ea-sync-client` reicht jeden
+    /// synchronen Aufruf durch `spawn_blocking`, und das verlangt einen
+    /// besitzenden `'static`-Wert. Ein zweiter, daneben geoeffneter Bestand
+    /// waere ein zweiter Griff auf dieselben Bytes — und damit eine zweite
+    /// Gelegenheit, sie verschieden zu sehen.
+    #[must_use]
+    pub fn backend_handle(&self) -> Arc<LocalPathBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    /// Finalisiert einen ZWEITEN Eintrag auf derselben Kette.
+    ///
+    /// Er braucht zweierlei, was der erste nicht braucht: eine ANDERE
+    /// Einsatznummer — die Nummernvergabe laesst keine zweite Belegung zu —
+    /// und eine Checkpoint-Aussage ueber den bereits committeten Kopf. Ohne
+    /// die zweite bleibt Schritt 2 mit `EA-WRITER-HEAD-RECONCILIATION-REQUIRED`
+    /// stehen: ohne Serveraussage ist der Rueckbau NICHT bewertbar, und
+    /// fail-closed heisst dann anhalten.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der zweite Abschluss nicht traegt.
+    pub fn finalize_a_second_entry(
+        &self,
+        first: &ea_writer::FinalizeOutcome,
+    ) -> ea_writer::FinalizeOutcome {
+        let source = self.source();
+        let claims = [ea_chain::CheckpointClaim {
+            chain_id: self.head.chain_id(),
+            covered_from_sequence: ChainSequence::new(0),
+            covered_through_sequence: first.sequence,
+            head_entry_hash: first.entry_hash,
+            checkpoint_object_hash: ObjectHash::try_from([0xc7_u8; 32].as_slice())
+                .expect("32 Byte sind ein Objekthash"),
+        }];
+        let head = select_head_for_sequence(
+            &self.line,
+            FIXTURE_NOW_MS,
+            first.sequence.get().saturating_add(1),
+        );
+        let service = WriterService::new(
+            Arc::clone(&self.store().repository),
+            Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
+            self.backend.as_ref(),
+            &source,
+            &head,
+            &claims,
+            IncidentNumberRegister::new(Arc::clone(&self.store().database)),
+            OperatorProfileRepository::new(Arc::clone(&self.store().database)),
+            self.binding,
+        );
+        let proof = issue_proof(
+            &head,
+            self.binding.binding_object_hash,
+            ReauthPurpose::Finalize,
+        );
+        let preview = service
+            .preview(&proof, other_incident(), self.observed_now())
+            .expect("die zweite Vorschau muss tragen");
+        service
+            .finalize(&proof, other_incident(), &preview, self.observed_now())
+            .expect("der zweite Abschluss muss tragen")
+    }
+
+    /// Legt JEDES Trust-Objekt der Linie in den Bestand.
+    ///
+    /// Ohne diesen Schritt traegt der Bestand der Fixture zwar Eintraege und
+    /// Grants, aber keine Vertrauensablage — und ein
+    /// [`ea_verify::verify_archive`] darueber waehlt dann gar keinen
+    /// Registrierungskopf, meldet null Objektergebnisse und kann folglich auch
+    /// keine Serverquittung bestaetigen. Der Pfadhinweis ist ein HINWEIS;
+    /// klassifiziert wird am Exact-Object-Praefix
+    /// (`crates/ea-archive/src/source.rs`).
+    ///
+    /// Sie wird AUSDRUECKLICH nicht beim Aufbau gerufen: die Finalisierungs-
+    /// und Wiederherstellungstests messen Bestandsgroessen und
+    /// Gesundheitsbefunde ueber einem Bestand, der nur enthaelt, was der
+    /// Writer selbst geschrieben hat.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Linie nicht aufzaehlbar oder der Bestand nicht beschreibbar ist.
+    pub fn materialize_trust_objects(&self) {
+        let source = self.line.source();
+        let mut hashes = Vec::new();
+        ea_trust::TrustObjectSource::visit_trust_object_hashes(&source, &mut |hash| {
+            hashes.push(hash);
+            Ok(())
+        })
+        .expect("die Linie muss aufzaehlen");
+        for hash in hashes {
+            let bytes = ea_trust::TrustObjectSource::read_exact_trust_object(&source, hash)
+                .expect("die Linie muss lesen")
+                .expect("ein aufgezaehltes Trust-Objekt muss lesbar sein");
+            let name: String = hash
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            self.backend.materialize_for_test(
+                &format!("{}{name}.etb", ea_archive::REGISTRY_EVENTS_DIR_V1),
+                &bytes,
+            );
+        }
+    }
+
+    /// Der Objekthash des Serverquittungszertifikats dieser Linie.
+    ///
+    /// `None`, solange die Variante es nicht angefordert hat — und dann kann
+    /// ueber dieser Linie auch keine Quittung bestaetigt werden, weil Gate
+    /// `receipt` die Capability `serverReceipt` verlangt.
+    #[must_use]
+    pub const fn server_receipt_certificate_hash(&self) -> Option<ObjectHash> {
+        self.server_receipt_certificate_hash
+    }
+
+    /// Die EXAKTEN Ankerbytes dieser Linie.
+    ///
+    /// Neben [`Self::anchor`], weil ein Verifikationslauf hinter einer
+    /// `spawn_blocking`-Grenze den Anker nicht ausleihen kann und
+    /// `TrustAnchorV1` nicht `Clone` ist; die Bytes reisen, der Anker entsteht
+    /// drueben aus GENAU ihnen.
+    #[must_use]
+    pub fn anchor_bytes(&self) -> Vec<u8> {
+        self.line.exact_anchor_bytes().to_vec()
+    }
+
+    /// Finalisiert GENAU EINEN Eintrag und laesst ihn committet liegen.
+    ///
+    /// Die Kulisse jedes Sync-Tests: eine Warteschlange entsteht nur aus
+    /// committeten Archivbytes, also muss vorher wirklich einer committet
+    /// worden sein.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Finalisierung nicht traegt.
+    #[must_use]
+    pub fn finalize_once(&self) -> ea_writer::FinalizeOutcome {
+        let source = self.source();
+        let service = self.service(&source);
+        let proof = self.proof_for(ReauthPurpose::Finalize);
+        let preview = service
+            .preview(&proof, valid_incident(), self.observed_now())
+            .expect("die Vorschau der Fixture muss tragen");
+        service
+            .finalize(&proof, valid_incident(), &preview, self.observed_now())
+            .expect("die Finalisierung der Fixture muss tragen")
     }
 
     #[must_use]
@@ -1504,5 +1703,140 @@ fn incident_numbered(number: &str) -> FinalizationInputV1 {
         patient_count: PatientCount::Known(0),
         notes: None,
         external_organizations: Vec::new(),
+    }
+}
+
+/// Die Kulisse der BEREINIGUNG.
+///
+/// Sie steht neben [`WriterHarness`] und nicht darin, weil sie eine andere
+/// Frage stellt: nicht „wie loest ein Neustart eine liegende Marke auf", sondern
+/// „wann genau duerfen die Reste fallen". Sie besitzt eine `WriterHarness` und
+/// erfindet keine zweite Linie.
+pub struct RecoveryHarness {
+    inner: WriterHarness,
+}
+
+impl RecoveryHarness {
+    /// Ein Bestand mit UNTERBROCHENER Finalisierung, VOR der unwiderruflichen
+    /// Grenze.
+    ///
+    /// [`FinalizationFaultPoint::AfterPreparedMarkerCommit`] ist der letzte
+    /// Punkt vor der Grenze: die Abschlussmarke liegt, der `draftDEK` liegt
+    /// auch, und das Staging ist vollstaendig geschrieben. Genau hier muss
+    /// sichtbar werden, dass vor der Grenze nichts entfernt wird.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Abbruch nicht erreichbar ist.
+    #[must_use]
+    pub fn prepared_finalization_interrupted() -> Self {
+        let mut inner = WriterHarness::with_incident();
+        inner
+            .finalize_with_fault(FinalizationFaultPoint::AfterPreparedMarkerCommit)
+            .expect("der Abbruch an der Marke muss erreichbar sein");
+        Self { inner }
+    }
+
+    /// Alle wurzelrelativen Pfade des Bestands.
+    ///
+    /// Ueber die OEFFENTLICHE Adressliste von `LocalPathBackend` — dieselbe,
+    /// die der Gesundheitscheck und der Sync-Klient lesen. Ein eigener
+    /// Verzeichnisdurchlauf hier waere ein zweiter Blick auf denselben Bestand.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler des Ports.
+    pub fn relative_paths(&self) -> Result<Vec<String>, ea_archive::ArchiveBackendError> {
+        self.inner.backend().relative_paths()
+    }
+
+    /// Loest eine liegende Abschlussmarke auf.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Wiederherstellung.
+    pub fn recover_pending(&self) -> Result<ea_writer::RecoveryOutcome, WriterError> {
+        let source = self.inner.source();
+        self.inner.service(&source).recover_pending()
+    }
+
+    /// Bereinigt hinter einem NACHGEWIESENEN Ausgang.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Bereinigung.
+    pub fn reconcile_to_completion(
+        &self,
+    ) -> Result<ea_writer::ReconciliationOutcomeV1, WriterError> {
+        let source = self.inner.source();
+        self.inner.service(&source).reconcile_to_completion()
+    }
+
+    /// Traegt der Bestand noch eine Staging-Datei?
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Bestand nicht lesbar ist.
+    #[must_use]
+    pub fn has_staging(&self) -> bool {
+        self.relative_paths()
+            .expect("der Bestand muss lesbar sein")
+            .iter()
+            .any(|path| ea_archive::is_staging_path(path))
+    }
+
+    /// Der Befund `OrphanGrantOrTemporaryFile` des Gesundheitschecks.
+    ///
+    /// Er laeuft ueber den ECHTEN [`ea_archive_fs::ArchiveHealthCheckV1`] und
+    /// nicht ueber eine nachgebaute Regel: die Frage lautet, ob der Bestand
+    /// nach der Bereinigung noch einen temporaeren Rest MELDET, und das
+    /// entscheidet der Check und nicht dieser Test.
+    ///
+    /// # Panics
+    ///
+    /// Wenn der Check nicht laeuft.
+    #[must_use]
+    pub fn raises_orphan_or_temporary_finding(&self) -> bool {
+        // Ein LEERES Erwartungsinventar. Es macht den Befund nur
+        // WAHRSCHEINLICHER und nie unwahrscheinlicher: Erkenner 7 meldet jeden
+        // Grant, den das Inventar nicht fuehrt, und ein leeres fuehrt keinen.
+        // Eine gruene Zusicherung darueber ist damit die staerkere Aussage.
+        let inventory = ea_format::ArchiveInventoryListV1::new(Vec::new())
+            .expect("ein leeres Inventar ist gueltig");
+        let capabilities = self
+            .inner
+            .backend()
+            .run_capability_test(&capability_test_vector())
+            .expect("der Capability-Test muss laufen");
+        // Der ECHTE Bericht ueber den ECHTEN Bestand. Ein leerer waere hier
+        // nicht baubar — `VerificationReportV1::empty` ist crate-intern —, und
+        // er waere auch falsch: fuenf der zehn Erkenner lesen ausschliesslich
+        // ihn.
+        let source = self.inner.source();
+        let anchor = self.inner.anchor();
+        let verification = ea_verify::verify_archive(
+            &source,
+            &anchor,
+            ea_verify::VerifyOptions::new(self.inner.observed_now()),
+        )
+        .expect("der Verifikationslauf muss ein Ergebnis liefern");
+        ea_archive_fs::ArchiveHealthCheckV1::new(
+            self.inner.backend(),
+            &inventory,
+            ea_archive_fs::FreeSpaceV1 {
+                required_bytes: 0,
+                available_bytes: u64::MAX,
+            },
+            &capabilities,
+            &verification,
+        )
+        .run()
+        .expect("der Gesundheitscheck muss laufen")
+        .contains(ea_archive_fs::HealthFinding::OrphanGrantOrTemporaryFile)
+    }
+
+    #[must_use]
+    pub const fn inner(&self) -> &WriterHarness {
+        &self.inner
     }
 }

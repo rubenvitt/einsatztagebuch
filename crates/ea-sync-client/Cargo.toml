@@ -1,0 +1,78 @@
+[package]
+name = "ea-sync-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Die object-sichere asynchrone Transportkante. Native `async fn` in Traits ist
+# in Rust 1.95 stabil, aber NICHT dyn-tauglich, und der Transport ist genau die
+# Naht, an der ein Testdoppel den echten Klienten ersetzt.
+async-trait.workspace = true
+# `ArchivePath`, `ArchiveSource`, `ArchiveBackend`, die Layoutpfade und
+# `ArchiveInventory` — die Warteschlange entsteht AUSSCHLIESSLICH aus
+# committed Archivbytes.
+ea-archive.workspace = true
+# `SyncStatus`, `DetailCause`, `PublicationQueue`, `LocalPathBackend`. Die vier
+# Zustaende werden hier RE-EXPORTIERT und nie neu erklaert.
+ea-archive-fs.workspace = true
+# `object_hash` und die Geheimnistraeger des Requestsignierers.
+ea-crypto.workspace = true
+# `decode_exact_object`, `GrantPlanV1`, `ReceiptV1`, `encode_receipt` — kein
+# Byte eines Archivobjekts entsteht in dieser Crate neu.
+ea-format.workspace = true
+# Zaehler und `nextAttemptAt` der begrenzten Wiederaufnahme liegen in der
+# verschluesselten lokalen Ablage.
+ea-local-store.workspace = true
+# `RequestSigner`, `EntryCommitRequestV1`, `EntryCommitResponseV1`,
+# `TechnicalCursorV1` und die Protokollfehler.
+ea-sync-protocol.workspace = true
+# Der Vertrauensanker, gegen den die Quittung VOLLSTAENDIG verifiziert wird.
+ea-trust.workspace = true
+ea-types.workspace = true
+# Der VOLLSTAENDIGE Verifizierer. Eine Quittung gilt erst als bestaetigt, wenn
+# `verify_archive` sie ueber Gate `receipt` bestaetigt hat.
+ea-verify.workspace = true
+# Der Zufall des Jitters. Die BEGRENZUNG selbst — exponentiell, gedeckelt,
+# abzaehlbar — liegt in `ea_types::RetryPolicy`; diese Kante liefert nur die
+# eine Zahl, die eine deterministische Verzoegerung zu einer gejitterten macht.
+getrandom.workspace = true
+# `http::Request`, `http::Response` und die Kopfzeilennamen — die Typen, auf
+# denen `hyper` seine Klientenverbindung fuehrt.
+http.workspace = true
+# `Full` als Requestrumpf und `BodyExt::collect` als Antwortleser.
+http-body-util.workspace = true
+# Die HTTP/1.1-Klientenverbindung. Kein zweiter HTTP-Baum: `hyper` liegt ueber
+# `axum` ohnehin im Graphen.
+hyper.workspace = true
+# `TokioIo` — die Bruecke zwischen `tokio`s I/O-Traits und denen von `hyper`.
+hyper-util.workspace = true
+# Der TLS-1.3-Klientenstapel mit `ring`. Dieselbe Auswahl wie auf der
+# Serverseite; ein zweiter Anbieter waere ein zweiter Zertifikatsparser.
+rustls.workspace = true
+# Die Laufzeit der Warteschlange und `spawn_blocking` fuer JEDEN synchronen
+# Aufruf in `ea-archive-fs`.
+tokio.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+# Die Beobachtungsflaeche von `LocalPathBackend` — sie liegt hinter
+# `test-support`, und die Lib-Kante oben schaltet das Merkmal ausdruecklich AB.
+ea-archive-fs = { workspace = true, features = ["test-support"] }
+# Die restlichen Kanten tragen GENAU EINE Sache: die per `#[path]`
+# eingebundene `WriterHarness` aus `crates/ea-writer/tests/support/mod.rs`. Sie
+# baut den Bestand dieser Tests aus ECHTEN `.eip`- und `.eag`-Bytes einer
+# echten Registrierungslinie. Eine ZWEITE Fixture waere eine zweite Quelle
+# derselben Linie, desselben Profils und desselben Bedienernachweises — und
+# eine von beiden waere zufaellig die falsche.
+ea-chain.workspace = true
+ea-draft = { workspace = true, features = ["test-support"] }
+ea-key-provider = { workspace = true, features = ["test-support"] }
+ea-operator.workspace = true
+ea-schema.workspace = true
+ea-time.workspace = true
+ea-writer = { workspace = true, features = ["test-support"] }
+ed25519-dalek.workspace = true
+minicbor.workspace = true

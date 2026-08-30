@@ -1,0 +1,51 @@
+[package]
+name = "einsatzarchiv-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+aws-sdk-s3.workspace = true
+aws-smithy-http-client.workspace = true
+axum.workspace = true
+ea-crypto.workspace = true
+ea-format.workspace = true
+ea-sync-protocol.workspace = true
+ea-sync-server.workspace = true
+ea-time.workspace = true
+ea-trust.workspace = true
+ea-types.workspace = true
+ea-verify.workspace = true
+hex.workspace = true
+rustls.workspace = true
+sqlx.workspace = true
+sqlx-core.workspace = true
+sqlx-postgres.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+# Der WRITER-SYNC-KLIENT, gegen den echten Server. `writer_sync_e2e.rs` ist das
+# einzige Ziel dieses Pakets, das ihn zieht: die annehmende Haelfte des
+# Quittungspfades verlangt einen Bestand, den der VOLLE Verifizierer wirklich
+# bestaetigt, und eine solche Registrierungslinie steht in diesem Arbeitsbereich
+# nur hier — die Stufe-2-Writer-Fixture ist auf den Genesis-Eintrag der Sequenz
+# null gebaut und traegt an dem Kopf, den `verify_archive` fuer sie waehlt, kein
+# Schreiberzertifikat.
+ea-sync-client.workspace = true
+# Der lokale Bestand, aus dem der Klient seine Warteschlange ableitet: Profil,
+# Policy und Adresse (`ea-archive`), das Wirtbackend samt der
+# Beobachtungsflaeche, mit der der Testaufbau Bytes hineinlegt
+# (`ea-archive-fs`).
+ea-archive.workspace = true
+ea-archive-fs = { workspace = true, features = ["test-support"] }
+# Die verschluesselte lokale Ablage, in der der begrenzte
+# Wiederaufnahmezustand liegt, und der Schluesselport, ohne den sie sich nicht
+# oeffnen laesst.
+ea-key-provider = { workspace = true, features = ["test-support"] }
+ea-local-store.workspace = true
+ea-testkit.workspace = true
+sha2.workspace = true

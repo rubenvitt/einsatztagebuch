@@ -18,9 +18,35 @@ fn cddl_registers_every_v1_wire_type() {
         "destruction-authorization-core-v1",
         "destruction-transition-core-v1",
         "deletion-attestation-core-v1",
+        "web-bundle-release-core-v1",
+        "web-bundle-revocation-core-v1",
     ] {
         assert!(trust.contains(subtype), "missing {subtype}");
     }
+    // Die beiden Bundle-Subtypen sind KEIN zulaessiges Ziel einer
+    // Admin-Autorisierung und tragen keinen achten Arm in
+    // `registry-change-v1`. Jedes Literal steht deshalb GENAU ZWEIMAL im
+    // Dokument: in `trust-subtype-v1` und in seinem Arm von `etb-body-v1`.
+    // Ein dritter Fundort waere genau die Aufweichung, die dieser Test
+    // ausschliesst.
+    for literal in ["\"webBundleRelease\"", "\"webBundleRevocation\""] {
+        assert_eq!(
+            trust.matches(literal).count(),
+            2,
+            "{literal} belongs into trust-subtype-v1 and its etb-body-v1 arm, nowhere else"
+        );
+    }
+    assert!(
+        trust.contains(concat!(
+            "  target-trust-subtype: \"deviceCertificate\" / \"operatorBinding\" /\n",
+            "    \"registryEvent\" / \"policy\" / \"writerTransition\" / \"rootCertificate\","
+        )),
+        "the administrative target union must stay character-identical"
+    );
+    assert!(
+        !trust.contains("[7,"),
+        "registry-change-v1 must stay a closed seven arm union"
+    );
     for name in [
         "checkpoint-core-v1",
         "timestamp-evidence-v1",
@@ -3480,5 +3506,62 @@ fn archive_profile_cddl_enforces_the_exact_fifteen_positions_of_the_profile_core
             "active-profile-hash: bstr .size 32",
             "generation: uint",
         ],
+    );
+}
+
+fn sync_reader_batch_cddl() -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schemas/protocol/v1/reader-batch.cddl"),
+    )
+    .expect("normative reader-batch CDDL must exist")
+}
+
+/// Liest die rechte Seite einer CDDL-Regel, ueber ihren NAMEN gefunden.
+///
+/// Bewusst ohne Zeilennummer: eine Zeilenangabe in einem Test ist genau die
+/// Driftklasse, die dieses Repository schon mehrfach gesehen hat.
+fn cddl_rule_body(source: &str, rule: &str) -> String {
+    source
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(rule)
+                .and_then(|rest| rest.trim_start().strip_prefix('='))
+                .map(|value| value.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("CDDL rule {rule} must exist"))
+}
+
+/// Bindet die beiden Wertebereiche des Sync-Wire-Addendums an ihre Quellregeln.
+///
+/// Beide Aussagen sind ASSERTIONS und keine Kommentare: `object-type` in
+/// `archive-export-manifest-v1` deckt genau die sechs Archivobjektarten von
+/// `archive-object-v1` ab, und `state` in `destruction-status-response-v1`
+/// deckt genau die fuenf Werte von `destruction-state-v1` ab. Beide Quellen
+/// sind ausschliesslich ueber ihren REGELNAMEN gebunden.
+#[test]
+fn sync_response_ranges_match_their_archive_and_trust_source_rules() {
+    let reader_batch = sync_reader_batch_cddl();
+
+    let archive = include_str!("../../../schemas/archive/v1/archive.cddl");
+    let archive_object = cddl_rule_body(archive, "archive-object-v1");
+    assert!(
+        archive_object.contains("1..6"),
+        "archive-object-v1 must carry the six archive object types: {archive_object}"
+    );
+    assert!(
+        reader_batch.contains("object-type: 1..6"),
+        "archive-export-manifest-v1 must cover exactly the object types of archive-object-v1"
+    );
+
+    let trust = include_str!("../../../schemas/archive/v1/trust.cddl");
+    let destruction_state = cddl_rule_body(trust, "destruction-state-v1");
+    assert_eq!(
+        destruction_state, "0..4",
+        "destruction-state-v1 must carry exactly five values"
+    );
+    assert!(
+        reader_batch.contains(&format!("state: {destruction_state}")),
+        "destruction-status-response-v1 must cover exactly the values of destruction-state-v1"
     );
 }

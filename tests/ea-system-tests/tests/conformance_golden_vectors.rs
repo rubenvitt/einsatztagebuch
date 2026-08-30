@@ -48,7 +48,7 @@ use ea_crypto::{
 use ea_format::{
     DecodedEvidencePayloadV1, DecodedTrustPayloadV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1,
     GrantPurposeV1, GrantV1, ParsedArchiveObject, ReceiptV1, Rfc3161EvidenceFieldsV1,
-    decode_exact_object, decode_local_audit_event,
+    TrustSubtypeV1, decode_exact_object, decode_local_audit_event,
 };
 use ea_schema::{CommonHeaderV1, NativeSourceV1, OperatorSnapshotV1, SchemaRegistry};
 use ea_system_tests::workspace_root;
@@ -2015,6 +2015,7 @@ fn trust_v1_vectors_cover_every_negative_named_in_design_22_1() {
         .unwrap_or_else(|error| panic!("failed to parse {TRUST_MANIFEST_PATH}: {error}"));
     assert_eq!(manifest.family, "trust");
     assert_eq!(manifest.version, "v1");
+    assert_eq!(manifest.entries.len(), TRUST_EXPECTED_ENTRY_COUNT);
 
     // Das Manifest darf seiner Platte nicht widersprechen.
     let report = verify_manifest_at(&root.join(TRUST_VECTOR_ROOT))
@@ -2652,6 +2653,10 @@ const RECEIPTS_EXPECTED_ENTRY_COUNT: usize = 7;
 
 /// Die Zahl der Evidence-Eintraege.
 const EVIDENCE_EXPECTED_ENTRY_COUNT: usize = 8;
+
+/// Die Zahl der Trust-Eintraege. Ohne diese Schranke liefe ein truncatiertes
+/// oder still neu erzeugtes Manifest durch.
+const TRUST_EXPECTED_ENTRY_COUNT: usize = 130;
 
 /// Der Grant-Suite-Identifikator, EINGEFROREN.
 const GRANTS_FROZEN_SUITE_ID: &str = "EINSATZARCHIV-HPKE-1";
@@ -3963,4 +3968,248 @@ fn check_local_audit_vectors(entries: &[VectorEntry]) -> usize {
          a manifest entry"
     );
     executed.len()
+}
+
+// ---------------------------------------------------------------------------
+// web-bundle/v1
+// ---------------------------------------------------------------------------
+
+/// Der Manifestpfad der Familie, relativ zur Arbeitsbaumwurzel.
+const WEB_BUNDLE_MANIFEST_PATH: &str = "vectors/web-bundle/v1/manifest.json";
+
+/// Die Wurzel der Familie, relativ zur Arbeitsbaumwurzel.
+const WEB_BUNDLE_VECTOR_ROOT: &str = "vectors/web-bundle/v1";
+
+/// Die Zahl der Eintraege: zwei angenommene, einer je Subtype, und vier
+/// abgelehnte. Ohne diese Schranke liefe ein truncatiertes Manifest still
+/// durch.
+const WEB_BUNDLE_EXPECTED_ENTRY_COUNT: usize = 6;
+
+/// Der angenommene Vektor der Freigabe.
+const WEB_BUNDLE_RELEASE_VECTOR: &str = "object/accepted-release";
+
+/// Der angenommene Vektor des Widerrufs.
+const WEB_BUNDLE_REVOCATION_VECTOR: &str = "object/accepted-revocation";
+
+/// Die sechs Eintraege, mit denen STUFE 3 diese Familie einfriert — je Eintrag
+/// der Name UND der `fileSha256` seiner Bytes.
+///
+/// Die Werte stammen aus dem Manifest, das der Erzeugungslauf DIESES Commits
+/// geschrieben hat; ab hier werden sie nicht neu erzeugt, nicht umsortiert und
+/// nicht umformatiert. Eine spaetere Verhaltensaenderung legt
+/// `vectors/web-bundle/v2/` DANEBEN, nie an ihre Stelle
+/// (`docs/traceability/stage-1-gate.md`).
+///
+/// Der `fileSha256` und nicht bloss der Name, nach dem Vorbild von
+/// [`STAGE_ONE_SUITE_ONE_ENTRIES`]: `VectorEntry::from_value` verlangt, dass er
+/// die `objectBytes` desselben Eintrags hasht, und `verify_manifest_at` hasht
+/// zusaetzlich die Datei auf der Platte. Diese sechs Zeilen binden damit die
+/// exakten BYTES, nicht nur die Namensmenge.
+const STAGE_THREE_WEB_BUNDLE_ENTRIES: [(&str, &str); 6] = [
+    (
+        "object/accepted-release",
+        "cd5116668007433450ccccb82d4d777a8ea364cdaf3639dcdb2c8a3ac6dc5031",
+    ),
+    (
+        "object/accepted-revocation",
+        "72a41f6d145fa060c8bf3c4acd7263dd5fb18c1971c58e6f9ef4f217400fd1fd",
+    ),
+    (
+        "object/rejected-release-core-without-extension-array",
+        "ed8b30649e52200fa38c2787f32f1a7dbd484052054abf55912ff93d7e40caf1",
+    ),
+    (
+        "object/rejected-release-with-two-signatures",
+        "3223a10749a53917856d58e0de87406e549147f8608b6602a84bcb8fb4e56807",
+    ),
+    (
+        "object/rejected-release-without-signature",
+        "ec0400f7775d5f65f796b3aa6c72a8d19eac588d4bceaae433587b6309719253",
+    ),
+    (
+        "object/rejected-unknown-bundle-subtype",
+        "1c0d3129e2909b8b30db1aa367066422b50bb8e6e0f50138ca4a1ec89b550174",
+    ),
+];
+
+/// Die Eintraege, die eine SPAETERE Stufe additiv hinzugefuegt hat.
+///
+/// Ausgeschrieben und am Ende dieser Stufe LEER, nach dem Vorbild von
+/// [`STAGE_TWO_SUITE_ONE_ADDITIONS`]: mit dem blossen Anheben der Summe waere
+/// der Waechter der Unveraenderlichkeit ersatzlos entfallen, denn sechs
+/// bleiben sechs, wenn ein eingefrorener Eintrag geaendert und ein neuer
+/// hinzugefuegt wird.
+const STAGE_FOUR_WEB_BUNDLE_ADDITIONS: [&str; 0] = [];
+
+/// Haelt fest, dass die sechs Stufe-3-Vektoren dieser Familie UNVERAENDERT
+/// sind und keine spaetere Stufe still einen siebten dazugelegt hat.
+#[test]
+fn the_six_stage_three_web_bundle_vectors_are_frozen_and_nothing_was_added() {
+    let root = workspace_root();
+    let text = fs::read_to_string(root.join(WEB_BUNDLE_MANIFEST_PATH))
+        .unwrap_or_else(|error| panic!("failed to read {WEB_BUNDLE_MANIFEST_PATH}: {error}"));
+    let manifest = VectorManifest::from_json(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {WEB_BUNDLE_MANIFEST_PATH}: {error}"));
+
+    assert_eq!(
+        STAGE_THREE_WEB_BUNDLE_ENTRIES.len() + STAGE_FOUR_WEB_BUNDLE_ADDITIONS.len(),
+        WEB_BUNDLE_EXPECTED_ENTRY_COUNT,
+        "six frozen plus zero later entries are the sum"
+    );
+
+    let present = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.file_sha256()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        present.len(),
+        manifest.entries.len(),
+        "Eintragsnamen sind eindeutig"
+    );
+
+    for (name, digest) in STAGE_THREE_WEB_BUNDLE_ENTRIES {
+        let recorded = present.get(name).unwrap_or_else(|| {
+            panic!(
+                "der eingefrorene Stufe-3-Vektor {name} fehlt in {WEB_BUNDLE_MANIFEST_PATH}; \
+                 diese Bytes werden nicht entfernt"
+            )
+        });
+        assert_eq!(
+            recorded, digest,
+            "der eingefrorene Stufe-3-Vektor {name} hat andere Bytes als am Einfriercommit"
+        );
+    }
+
+    let frozen = STAGE_THREE_WEB_BUNDLE_ENTRIES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<BTreeSet<_>>();
+    let added = present
+        .keys()
+        .copied()
+        .filter(|name| !frozen.contains(name))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        added,
+        STAGE_FOUR_WEB_BUNDLE_ADDITIONS.into_iter().collect(),
+        "ueber die sechs eingefrorenen Eintraege hinaus traegt die Familie nichts"
+    );
+
+    // Die Vektorhygiene, die die eigene Familie ueberhaupt begruendet: die
+    // Subtype-Literale stehen ausschliesslich in den hexkodierten
+    // Objektbytes, nie in einem Eintragsnamen und nie in einer Notiz.
+    assert!(
+        !text.contains("webBundle"),
+        "the subtype literals must live in the hex recorded object bytes only"
+    );
+}
+
+/// Fuehrt jeden Vektor der Familie gegen den ECHTEN Codec aus.
+///
+/// Kein Selbstabgleich: der Test dekodiert die eingefrorenen Bytes ueber
+/// `decode_exact_object`, rechnet den Trust-Digest nach und stellt Urteil und
+/// Felder gegen das Manifest.
+#[test]
+fn web_bundle_v1_vectors_execute_against_the_real_codec() {
+    let root = workspace_root();
+    let text = fs::read_to_string(root.join(WEB_BUNDLE_MANIFEST_PATH))
+        .unwrap_or_else(|error| panic!("failed to read {WEB_BUNDLE_MANIFEST_PATH}: {error}"));
+    let manifest = VectorManifest::from_json(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {WEB_BUNDLE_MANIFEST_PATH}: {error}"));
+    assert_eq!(manifest.family, "web-bundle");
+    assert_eq!(manifest.version, "v1");
+    assert_eq!(
+        manifest.entries.len(),
+        WEB_BUNDLE_EXPECTED_ENTRY_COUNT,
+        "a truncated manifest must not pass"
+    );
+
+    // Das Manifest darf seiner Platte nicht widersprechen.
+    let report = verify_manifest_at(&root.join(WEB_BUNDLE_VECTOR_ROOT))
+        .unwrap_or_else(|error| panic!("failed to verify {WEB_BUNDLE_VECTOR_ROOT}: {error}"));
+    assert_eq!(report.entries_checked, WEB_BUNDLE_EXPECTED_ENTRY_COUNT);
+    assert!(
+        report.is_clean(),
+        "the frozen files contradict their manifest: {:?}",
+        report.mismatches
+    );
+
+    let entries = &manifest.entries;
+    let mut executed = BTreeSet::new();
+    for vector in entries {
+        assert_eq!(vector.schema_id, "etb-v1");
+        match &vector.expected_outcome {
+            ExpectedOutcome::Accepted => check_web_bundle_accepted(vector),
+            ExpectedOutcome::Rejected { error_code } => {
+                let measured = decode_exact_object(&vector.object_bytes)
+                    .err()
+                    .unwrap_or_else(|| panic!("{} must be rejected", vector.name))
+                    .code();
+                assert_eq!(
+                    measured, error_code,
+                    "{} must be rejected with its recorded code",
+                    vector.name
+                );
+            }
+        }
+        assert!(
+            executed.insert(vector.name.clone()),
+            "{} was executed twice",
+            vector.name
+        );
+    }
+    assert_eq!(executed.len(), WEB_BUNDLE_EXPECTED_ENTRY_COUNT);
+
+    check_web_bundle_binding(entries);
+}
+
+/// Ein angenommener Vektor: er parst, traegt seinen Subtype und seinen
+/// nachgerechneten Trust-Digest, und er traegt GENAU EINE Signatur.
+fn check_web_bundle_accepted(vector: &VectorEntry) {
+    let ParsedArchiveObject::Trust(parsed) = decode_exact_object(&vector.object_bytes)
+        .unwrap_or_else(|error| panic!("{} must parse: {}", vector.name, error.code()))
+    else {
+        panic!("{} is a trust object", vector.name)
+    };
+    let object = parsed.value();
+    let expected_subtype = if vector.name == WEB_BUNDLE_RELEASE_VECTOR {
+        TrustSubtypeV1::WebBundleRelease
+    } else {
+        TrustSubtypeV1::WebBundleRevocation
+    };
+    assert_eq!(object.subtype(), expected_subtype);
+    assert_eq!(
+        object.signatures().len(),
+        1,
+        "{} carries exactly one root signature",
+        vector.name
+    );
+    assert_eq!(
+        intermediate(vector, "trust-digest"),
+        hex::encode(trust_digest(object.exact_digest_input()).as_bytes()),
+        "{} must record the trust digest it actually binds",
+        vector.name
+    );
+}
+
+/// Der Widerruf nennt GENAU die eingefrorene Freigabe.
+fn check_web_bundle_binding(entries: &[VectorEntry]) {
+    let release = entry(entries, WEB_BUNDLE_RELEASE_VECTOR);
+    let revocation = entry(entries, WEB_BUNDLE_REVOCATION_VECTOR);
+    let ParsedArchiveObject::Trust(parsed) = decode_exact_object(&revocation.object_bytes).unwrap()
+    else {
+        panic!("the revocation is a trust object")
+    };
+    let DecodedTrustPayloadV1::WebBundleRevocation(fields) =
+        parsed.value().decoded_payload().unwrap()
+    else {
+        panic!("a webBundleRevocation decodes into its own variant")
+    };
+    assert_eq!(
+        hex::encode(fields.release_object_hash.as_bytes()),
+        hex::encode(object_hash(&release.object_bytes).as_bytes()),
+        "the revocation must bind the object hash of the frozen release"
+    );
+    assert_eq!(fields.effective_from_registry_version.get(), 7);
 }

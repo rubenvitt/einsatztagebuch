@@ -442,6 +442,14 @@ fn closed_content_type_registry_rejects_runtime_values() {
             ContentType::RecoveryTestDigest,
             "application/vnd.einsatzarchiv.recovery-test-digest",
         ),
+        // Der zwoelfte Wert. Er kam mit dem Serverschluessel-Port hinzu, weil
+        // der technische Cursor eine COSE-Sign1 ueber den Serverschluessel ist
+        // und ohne eigenen Content-Type den eines fremden Zwecks truege
+        // (Sync-Wire-Nachtrag, „Vorbehalt fuer den Serverschluessel-Port“).
+        (
+            ContentType::TechnicalCursorDigest,
+            "application/vnd.einsatzarchiv.technical-cursor-digest",
+        ),
     ];
     for (content_type, wire) in registry {
         assert_eq!(content_type.as_str(), wire);

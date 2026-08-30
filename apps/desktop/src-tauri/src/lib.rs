@@ -100,7 +100,8 @@ pub fn run() {
             commands::writer::writer_finalize,
             commands::writer::archive_health_report,
             commands::writer::device_posture_report,
-            commands::writer::archive_export_bundle_file
+            commands::writer::archive_export_bundle_file,
+            commands::sync::sync_state
         ])
         .run(tauri::generate_context!())
         .expect("der Wirt der Writer-Oberflaeche liess sich nicht starten");
@@ -111,12 +112,13 @@ mod tests {
     use super::{COMMAND_NAMES, registered_command_names};
 
     /// Die Quellen der Kommandomodule, wie sie uebersetzt wurden.
-    const COMMAND_SOURCES: [(&str, &str); 3] = [
+    const COMMAND_SOURCES: [(&str, &str); 4] = [
         ("commands/session.rs", include_str!("commands/session.rs")),
         (
             "commands/master_data.rs",
             include_str!("commands/master_data.rs"),
         ),
+        ("commands/sync.rs", include_str!("commands/sync.rs")),
         ("commands/writer.rs", include_str!("commands/writer.rs")),
     ];
 

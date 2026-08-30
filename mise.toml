@@ -1,0 +1,28 @@
+# Werkzeugfestlegung des Arbeitsbaums.
+#
+# Die Datei war bis zu diesem Task über `.gitignore` ausgeschlossen und trug
+# damit auf jedem Rechner einen anderen Inhalt. Ein nicht versioniertes
+# `pnpm = "latest"` steht gegen
+# `docs/adr/0001-toolchain-and-cryptography-dependencies.md`:28 und gegen
+# `package.json`:4 (`"packageManager": "pnpm@11.20.0"`), also steht hier die
+# exakte Fassung.
+#
+# Rust steht bewusst NICHT hier: `rust-toolchain.toml` ist die eine Quelle des
+# Compilerpins, und zwei Quellen driften. Node.js steht ebenso wenig hier —
+# `.node-version` trägt `26.7.0`, und mise liest diese Datei von sich aus.
+[tools]
+pnpm = "11.20.0"
+
+# Die Container-Laufzeit der Integrationsdienste
+# (`ops/compose/integration.yaml`).
+#
+# mise hat kein Backend, das einen Container-Daemon installiert oder startet,
+# deshalb steht die Festlegung als Umgebungswert und nicht unter `[tools]`;
+# derselbe Pin wird im Abschnitt `Container runtime` von
+# `docs/adr/0004-server-runtime-and-dependency-class.md` genannt und begründet.
+# Gemessen auf dem Entwicklungshost: CLI `Docker version 29.7.2`, Engine
+# (`docker info`, ServerVersion) `29.4.0`. Gepinnt wird die ENGINE, weil sie
+# die Container ausführt; die CLI ist austauschbar. Podman und colima sind auf
+# diesem Host nicht installiert und in ADR 0004 als Alternativen abgelehnt.
+[env]
+EA_CONTAINER_RUNTIME = "docker@29.4.0"

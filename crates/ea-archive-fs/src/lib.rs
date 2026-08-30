@@ -50,6 +50,6 @@ pub use profile_migration::{
     ProfileMigrator,
 };
 pub use publication_queue::{
-    DetailCause, PlannedPublicationV1, PublicationQueue, PublicationStateV1, PublicationTargetV1,
-    SyncStatus,
+    DetailCause, PlannedPublicationV1, PublicationOutcomeV1, PublicationQueue, PublicationStateV1,
+    PublicationTargetV1, SyncStatus,
 };

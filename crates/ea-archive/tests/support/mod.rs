@@ -701,6 +701,32 @@ impl ea_archive::ArchiveBackend for InMemoryArchiveBackend {
         self.insert_if_absent(relative.as_str(), bytes)
     }
 
+    fn staged_paths(&self) -> Result<Vec<String>, ea_archive::ArchiveBackendError> {
+        Ok(self
+            .files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .filter(|relative| ea_archive::is_staging_path(relative))
+            .cloned()
+            .collect())
+    }
+
+    /// Entfernt eine Adresse, wenn sie belegt ist.
+    ///
+    /// Die Spiegelseite von `create_if_absent` in dieser Attrappe: eine
+    /// fehlende Adresse ist ein Erfolg, eine belegte verschwindet ganz.
+    fn remove_if_present(
+        &self,
+        relative: &ea_archive::ArchivePath,
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        self.files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(relative.as_str());
+        Ok(())
+    }
+
     fn sync_file(
         &self,
         relative: &ea_archive::ArchivePath,

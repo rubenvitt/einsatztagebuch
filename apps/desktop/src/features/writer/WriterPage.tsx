@@ -64,6 +64,17 @@ export const WRITER_COMMANDS = {
   archiveHealth: 'archive_health_report',
   devicePosture: 'device_posture_report',
   exportBundle: 'archive_export_bundle_file',
+  /**
+   * Der Sync-Zustand dieses Geraets.
+   *
+   * Der Name steht hier, weil der Wirt ihn registriert und seine ACL ihn
+   * freigibt; die Antwort laeuft durch dasselbe `validateSyncState` wie die
+   * des Startpfads, also entsteht keine zweite Pruefung. Diese Flaeche RUFT
+   * ihn noch nicht von sich aus ab: der angezeigte Zustand kommt bis auf
+   * Weiteres aus dem Abschlussergebnis, und ein eigener Abrufzyklus gehoert
+   * zu der Stufe, die den Hintergrundlauf des Klienten verdrahtet.
+   */
+  syncState: 'sync_state',
 } as const
 
 /**

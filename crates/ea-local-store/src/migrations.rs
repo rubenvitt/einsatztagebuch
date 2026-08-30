@@ -40,6 +40,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0003_master_data.sql",
         sql: include_str!("../migrations/0003_master_data.sql"),
     },
+    Migration {
+        version: SYNC_RETRY_MIGRATION_VERSION,
+        name: "0004_sync_retry.sql",
+        sql: include_str!("../migrations/0004_sync_retry.sql"),
+    },
 ];
 
 /// Die Fassung, in der die Uebergangstabelle des Verwerfens entsteht.
@@ -61,6 +66,17 @@ pub const DISCARD_MIGRATION_VERSION: u32 = 2;
 /// NICHT nachtraeglich an: eine registrierte Migration wird nie mehr
 /// geaendert.
 pub const MASTER_DATA_MIGRATION_VERSION: u32 = 3;
+
+/// Die Fassung, in der die Tabelle des begrenzten Wiederaufnahmezustands des
+/// Writer-Sync entsteht.
+///
+/// Sie wird HIER benannt und nicht in `ea-sync-client`, weil dieses Modul die
+/// Registratur besitzt — dieselbe Begruendung wie bei
+/// [`DISCARD_MIGRATION_VERSION`] und [`MASTER_DATA_MIGRATION_VERSION`]. Der
+/// Klient fragt sie POSITIV ab, statt an einem rohen SQL-Fehler zu scheitern:
+/// „die Tabelle gibt es noch nicht" ist eine andere Aussage als „die Datenbank
+/// ist beschaedigt", und nur die zweite ist ein Abbruch.
+pub const SYNC_RETRY_MIGRATION_VERSION: u32 = 4;
 
 const CREATE_REGISTRY: &str = "CREATE TABLE IF NOT EXISTS schema_migration (\
      version INTEGER PRIMARY KEY, \

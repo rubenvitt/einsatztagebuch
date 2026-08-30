@@ -123,6 +123,18 @@ pub const FORMAT_PACKAGE_FILES_V1: &[(&str, &[u8])] = &[
         include_bytes!("../../../schemas/payload/v1/payload.cddl"),
     ),
     (
+        "format/schemas/protocol/v1/entry-commit.cddl",
+        include_bytes!("../../../schemas/protocol/v1/entry-commit.cddl"),
+    ),
+    (
+        "format/schemas/protocol/v1/openapi.yaml",
+        include_bytes!("../../../schemas/protocol/v1/openapi.yaml"),
+    ),
+    (
+        "format/schemas/protocol/v1/reader-batch.cddl",
+        include_bytes!("../../../schemas/protocol/v1/reader-batch.cddl"),
+    ),
+    (
         "format/schemas/protocol/v1/signed-protocol.cddl",
         include_bytes!("../../../schemas/protocol/v1/signed-protocol.cddl"),
     ),

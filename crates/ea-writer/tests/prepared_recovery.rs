@@ -14,8 +14,80 @@
 
 mod support;
 
-use ea_writer::{FinalizationFaultPoint, FinalizationStep, RecoveryOutcome};
-use support::{FIXTURE_INCIDENT_NUMBER, WriterHarness, valid_incident};
+use ea_writer::{
+    FinalizationFaultPoint, FinalizationStep, ReconciliationOutcomeV1, RecoveryOutcome,
+};
+use support::{FIXTURE_INCIDENT_NUMBER, RecoveryHarness, WriterHarness, valid_incident};
+
+/// Staging und vorab veroeffentlichte Grants fallen NUR hinter einem
+/// nachgewiesenen Ausgang.
+///
+/// Der Zeuge misst DREI Zeitpunkte, und der mittlere ist der eigentliche: vor
+/// der unwiderruflichen Grenze wird nichts entfernt, auch nicht von einem Lauf,
+/// der die Marke gerade aufloest. Erst die ausdrueckliche Bereinigung hinter
+/// dem Nachweis raeumt — und dann meldet der Gesundheitscheck den temporaeren
+/// Rest auch nicht mehr.
+#[test]
+fn staging_and_grant_leftovers_fall_only_after_a_proven_outcome() {
+    let harness = RecoveryHarness::prepared_finalization_interrupted();
+    assert!(
+        harness.has_staging(),
+        "ohne liegengebliebenes Staging misst dieser Test nichts"
+    );
+    assert!(
+        harness.raises_orphan_or_temporary_finding(),
+        "ein liegengebliebenes Staging IST ein Gesundheitsbefund"
+    );
+
+    // Die Bereinigung VOR der Aufloesung der Marke ruehrt kein Byte an: der
+    // Ausgang ist nicht nachgewiesen, solange dieselbe vorbereitete
+    // Transaktion die Reste noch uebernehmen koennte.
+    assert_eq!(
+        harness
+            .reconcile_to_completion()
+            .expect("die Bereinigung muss tragen"),
+        ReconciliationOutcomeV1::NotProven
+    );
+    assert!(
+        harness.has_staging(),
+        "eine liegende Marke schuetzt die Reste"
+    );
+
+    harness
+        .recover_pending()
+        .expect("die Wiederherstellung muss tragen");
+    assert!(
+        harness.has_staging(),
+        "vor der unwiderruflichen Grenze wird NIEMALS etwas entfernt"
+    );
+
+    let outcome = harness
+        .reconcile_to_completion()
+        .expect("die Bereinigung muss tragen");
+    let ReconciliationOutcomeV1::Reconciled {
+        removed_staging, ..
+    } = outcome
+    else {
+        panic!("hinter dem Nachweis MUSS bereinigt werden: {outcome:?}");
+    };
+    assert!(removed_staging > 0, "es lag etwas zu bereinigen");
+    assert!(!harness.has_staging());
+    assert!(
+        !harness.raises_orphan_or_temporary_finding(),
+        "ein bereinigter Rest wird NICHT mehr gemeldet"
+    );
+
+    // Idempotent: ein zweiter Lauf findet nichts mehr.
+    assert_eq!(
+        harness
+            .reconcile_to_completion()
+            .expect("die zweite Bereinigung muss tragen"),
+        ReconciliationOutcomeV1::Reconciled {
+            removed_staging: 0,
+            removed_orphan_grants: 0,
+        }
+    );
+}
 
 #[test]
 fn every_fault_recovers_the_draft_or_completes_the_same_prepared_transaction() {
@@ -335,9 +407,12 @@ fn leftover_staging_objects_do_not_consume_the_sequence() {
             .recover_pending()
             .unwrap_or_else(|error| panic!("{point:?}: recover muss tragen: {error:?}"));
 
-        // Die Staging-Datei liegt WEITERHIN da. Der Port hat keine
-        // Loeschprimitive, und der Zeuge misst deshalb den Filter und nicht
-        // eine Bereinigung.
+        // Die Staging-Datei liegt WEITERHIN da, und das ist seit Stufe 3 eine
+        // ENTSCHEIDUNG und nicht mehr eine fehlende Faehigkeit: der Port hat
+        // mit `ArchiveBackend::remove_if_present` eine Loeschprimitive, aber
+        // `recover_pending` benutzt sie NICHT — bereinigt wird ausschliesslich
+        // in `reconcile_to_completion`, hinter dem nachgewiesenen Ausgang. Der
+        // Zeuge misst deshalb weiter den Filter und nicht eine Bereinigung.
         assert!(
             harness.staged_object_count() > 0,
             "{point:?}: ohne liegengebliebenes Staging messe dieser Test nichts"

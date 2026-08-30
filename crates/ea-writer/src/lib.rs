@@ -75,4 +75,4 @@ pub use finalize::{
 pub use grant_plan::build_grant_plan;
 pub use incident::FinalizationInputV1;
 pub use preview::{FinalizationPreview, StaleDecision};
-pub use recover::RecoveryOutcome;
+pub use recover::{ReconciliationOutcomeV1, RecoveryOutcome};

@@ -63,6 +63,20 @@ confidence-threshold = 0.8
 # einer stillschweigenden Erweiterung. Jede Zeile nennt die Crate, ihre Lizenz
 # und den Weg, ueber den sie in den Graphen kommt; die Entscheidung steht im
 # Abschnitt `Gemessener Gate-Lauf` von `docs/traceability/stage-2-gate.md`.
+#
+# Fuer die vier Eintraege der Stufe-3-Serverklasse am Ende der Liste ist der
+# normativ gleichlautende Ort der Abschnitt `Gemessener Gate-Lauf` von
+# `docs/traceability/stage-3-gate.md`; dieses Dokument entsteht mit dem
+# Stufengate am Ende dieser Stufe, die Begruendung je Crate steht bis dahin im
+# Abschnitt `Licenses of the crates the pinned tree adds` von
+# `docs/adr/0004-server-runtime-and-dependency-class.md`. Ihr LEDGERANKER ist
+# die `v1.2`-Zeile `GATE-25` auf Stufe 7 in
+# `docs/traceability/v0.1-requirements.csv`.
+#
+# Solange kein Mitglied dieses Workspace die Serverklasse erbt, stehen diese
+# vier Crates NICHT im Graphen; `cargo deny` meldet sie dann als
+# `license-exception-not-encountered` — eine WARNUNG, kein Fehler. Der Task,
+# der `apps/server` anlegt, loest die Warnung auf.
 exceptions = [
   # CC0-1.0 — Public-Domain-Widmung, keine Copyleft-Wirkung.
   { crate = "base16", allow = ["CC0-1.0"] },
@@ -82,6 +96,21 @@ exceptions = [
   { crate = "dtoa-short", allow = ["MPL-2.0"] },
   { crate = "option-ext", allow = ["MPL-2.0"] },
   { crate = "selectors", allow = ["MPL-2.0"] },
+  # ISC — permissiv, ohne Copyleft und ohne Namensnennungspflicht ueber die
+  # MIT-Bedingungen hinaus. Alle drei kommen ausschliesslich ueber den
+  # TLS-Teilbaum der Stufe-3-Serverklasse in den Graphen, den
+  # `docs/adr/0004-server-runtime-and-dependency-class.md` ratifiziert:
+  # `rustls`/`ring` -> `untrusted`, und `rustls`/`sqlx` -> `rustls-webpki` ->
+  # `untrusted`. `ring` traegt `Apache-2.0 AND ISC`, also reicht die erlaubte
+  # `Apache-2.0` allein nicht — eine UND-Verknuepfung verlangt beide.
+  { crate = "ring", allow = ["ISC"] },
+  { crate = "rustls-webpki", allow = ["ISC"] },
+  { crate = "untrusted", allow = ["ISC"] },
+  # CDLA-Permissive-2.0 — eine permissive DATENlizenz (Community Data License
+  # Agreement) ueber den gebuendelten Mozilla-Wurzelzertifikatssatz, kein
+  # Quellcode. Weg in den Graphen: `sqlx` mit
+  # `tls-rustls-ring-webpki` -> `webpki-roots`.
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [sources]

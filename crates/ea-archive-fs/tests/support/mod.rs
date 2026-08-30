@@ -971,8 +971,8 @@ pub fn queue_with_a_reconnected_but_failing_target() -> (PublicationQueue, Arc<H
         .publish(two_grants_and_one_entry())
         .expect("die Warteschlange nimmt den Plan an");
     assert_eq!(
-        state.sync_status(),
-        ea_archive_fs::SyncStatus::UploadPending,
+        state.outcome(),
+        ea_archive_fs::PublicationOutcomeV1::Deferred,
         "die Fixture MUSS eine WARTENDE Publikation hinterlassen"
     );
     let _ = queue.reconnect();
@@ -1125,8 +1125,8 @@ impl MigrationHarness {
             .publish(two_grants_and_one_entry())
             .expect("die Warteschlange nimmt den Plan an");
         assert_eq!(
-            state.sync_status(),
-            ea_archive_fs::SyncStatus::UploadPending,
+            state.outcome(),
+            ea_archive_fs::PublicationOutcomeV1::Deferred,
             "die Fixture MUSS eine WARTENDE Publikation hinterlassen"
         );
         self.pending.push(queue);

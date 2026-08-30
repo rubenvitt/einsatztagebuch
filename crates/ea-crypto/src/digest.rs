@@ -89,6 +89,47 @@ pub fn object_hash(exact_object_bytes: &[u8]) -> ObjectHash {
     ObjectHash::from(sha256_parts(&[OBJECT_DOMAIN, exact_object_bytes]))
 }
 
+/// Derselbe Objekthash, aber STUECKWEISE.
+///
+/// Der Sync-Server nimmt Objektbytes als Strom entgegen und muss sie
+/// groessenbegrenzt hashen, ohne den vollen Koerper zu halten
+/// (`design.md` §13.3, Schritt 1). Ohne diesen Typ muesste er dafuer entweder
+/// puffern oder `OBJECT_DOMAIN` abschreiben — und eine zweite Kopie einer
+/// Domaenenkonstante ist genau die Art Duplikat, die spaeter auseinanderlaeuft.
+/// Deshalb steht der Streamer HIER, neben der Konstante, die er verwendet.
+///
+/// [`Self::finish`] liefert bitgleich das, was [`object_hash`] ueber die
+/// aneinandergehaengten Stuecke liefert; `crates/ea-crypto/tests/suite_v1.rs`
+/// pinnt genau diese Gleichheit.
+pub struct StreamingObjectHasher(Sha256);
+
+impl StreamingObjectHasher {
+    #[must_use]
+    pub fn new() -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(OBJECT_DOMAIN);
+        Self(hasher)
+    }
+
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.0.update(chunk);
+    }
+
+    #[must_use]
+    pub fn finish(self) -> ObjectHash {
+        let digest: [u8; 32] = self.0.finalize().into();
+        ObjectHash::from(
+            Hash32::try_from(digest.as_slice()).expect("SHA-256 always emits exactly 32 bytes"),
+        )
+    }
+}
+
+impl Default for StreamingObjectHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// SHA-256 ueber die kanonischen Bytes eines Verifikationsberichts.
 ///
 /// BEWUSST OHNE Domain-Trennung — als einzige Hashfunktion dieses Moduls. Die

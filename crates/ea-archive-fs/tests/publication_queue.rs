@@ -1,15 +1,24 @@
-//! Die vier normativen Sync-Zustaende und die Detailursache DANEBEN.
+//! Der Publikationsausgang, die vier normativen Sync-Zustaende und die
+//! Detailursache DANEBEN.
+//!
+//! Seit Task 10 sagt die Warteschlange, WAS mit den Bytes geschah, und nicht
+//! mehr, in welchem oeffentlichen Zustand der Eintrag ist; die Zusicherungen
+//! unten sind auf `PublicationOutcomeV1` umgeschrieben. Die eine Zusicherung,
+//! die dabei ZURUECKGENOMMEN wurde, fragte einen leeren Platz nach
+//! `synchronisiert` — genau diese Verwechslung ist gefallen. Ihre Aussage
+//! steht unveraendert weiter da: ein leerer Platz ist
+//! [`PublicationOutcomeV1::NothingPending`].
 
 mod support;
 
-use ea_archive_fs::{DetailCause, SyncStatus};
+use ea_archive_fs::{DetailCause, PublicationOutcomeV1, SyncStatus};
 
 #[test]
 fn a_lost_network_capability_keeps_upload_pending_with_its_own_detail_cause() {
     let (_guard, _root) = support::temp_root("queue-pending");
     let queue = support::queue_with_disconnecting_adapter();
     let state = queue.publish(support::two_grants_and_one_entry()).unwrap();
-    assert_eq!(state.sync_status(), SyncStatus::UploadPending);
+    assert_eq!(state.outcome(), PublicationOutcomeV1::Deferred);
     assert_eq!(
         state.detail_cause(),
         Some(DetailCause::NetworkArchiveWaiting)
@@ -26,7 +35,7 @@ fn resumption_publishes_byte_identical_objects_in_the_same_order() {
     let resumed = queue.reconnect().resume().unwrap();
     assert_eq!(resumed.published_bytes(), planned.exact_bytes());
     assert_eq!(resumed.published_order(), planned.order());
-    assert_eq!(resumed.sync_status(), SyncStatus::Synchronized);
+    assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
     assert_eq!(resumed.detail_cause(), None);
     assert!(!resumed.fell_back_to_another_target());
 }
@@ -64,14 +73,14 @@ fn a_hard_target_failure_keeps_the_whole_plan_pending() {
     // erscheint wieder, weil der ganze Plan aufbewahrt wurde.
     target.repair();
     let resumed = queue.resume().unwrap();
-    assert_eq!(resumed.sync_status(), SyncStatus::Synchronized);
+    assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
     assert_eq!(resumed.published_bytes(), planned.exact_bytes());
     assert_eq!(resumed.published_order(), planned.order());
     assert_eq!(target.published_order(), planned.order());
 
     // Und jetzt, und erst jetzt, ist die Warteschlange leer.
     let empty = queue.resume().unwrap();
-    assert_eq!(empty.sync_status(), SyncStatus::Synchronized);
+    assert_eq!(empty.outcome(), PublicationOutcomeV1::NothingPending);
     assert!(empty.published_order().is_empty());
 }
 
@@ -97,7 +106,7 @@ fn a_hard_target_failure_keeps_a_freshly_accepted_plan_pending() {
 
     target.repair();
     let resumed = queue.resume().unwrap();
-    assert_eq!(resumed.sync_status(), SyncStatus::Synchronized);
+    assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
     assert_eq!(resumed.published_bytes(), planned.exact_bytes());
     assert_eq!(resumed.published_order(), planned.order());
     assert_eq!(target.published_order(), planned.order());
@@ -141,7 +150,7 @@ fn a_queue_bound_that_is_exceeded_fails_instead_of_falling_back() {
     let state = queue
         .publish(support::planned_publication_beyond_the_queue_bound())
         .unwrap();
-    assert_eq!(state.sync_status(), SyncStatus::Failed);
+    assert_eq!(state.outcome(), PublicationOutcomeV1::QueueLimitReached);
     assert_eq!(state.detail_cause(), Some(DetailCause::QueueLimitReached));
     assert!(
         !state.fell_back_to_another_target(),

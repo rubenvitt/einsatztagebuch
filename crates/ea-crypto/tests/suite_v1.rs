@@ -1,4 +1,6 @@
-use ea_crypto::{CoseSigner, SecretBytes, entry_hash, recovery_test_digest};
+use ea_crypto::{
+    CoseSigner, SecretBytes, StreamingObjectHasher, entry_hash, object_hash, recovery_test_digest,
+};
 use ea_types::{CertificateHash, Hash32, KeyThumbprint};
 
 const WRITER_COSE_HEX: &str = "d284589aa50132028303046f63657274696669636174654861736803782b6170706c69636174696f6e2f766e642e65696e7361747a6172636869762e7265636f72642d646967657374045820be5de2f4bcdc383add3fc9827d345f1a37c6a06026b38696fb3229c003b35f496f6365727469666963617465486173685820d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeefa05820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f5840a1163c544a30406de46b5c3ce22c3ff0fd2ad5b0d698d44b2a3f3b1b47fbadebf202109dfebe2ec5a7e942102aab6f95ccb28d970fb3803869969912e7005200";
@@ -131,4 +133,41 @@ fn package_and_recovery_constructions_are_field_mutation_sensitive() {
             original_recovery.as_bytes()
         );
     }
+}
+
+/// Der stueckweise Objekthash ist bitgleich zum einteiligen.
+///
+/// Der Sync-Server hasht Objektbytes waehrend des Stroms, ohne den vollen
+/// Koerper zu halten (`design.md` §13.3, Schritt 1). Diese Gleichheit ist die
+/// Bedingung dafuer, dass der so gebildete Hash derselbe content-addressed
+/// Schluessel ist wie der, den jeder andere Aufrufer mit `object_hash` rechnet
+/// — waere sie verletzt, laege dasselbe Objekt unter zwei Schluesseln.
+#[test]
+fn the_streaming_object_hasher_matches_the_one_shot_object_hash() {
+    let payload: Vec<u8> = (0..4096_u32).map(|index| (index % 251) as u8).collect();
+
+    // Jede Stueckelung, die es geben kann: eine, die genau aufgeht, eine mit
+    // Rest, eine mit einem einzigen Byte je Stueck und der leere Fall.
+    for chunk_size in [1_usize, 7, 512, 4096] {
+        let mut hasher = StreamingObjectHasher::new();
+        for chunk in payload.chunks(chunk_size) {
+            hasher.update(chunk);
+        }
+        assert_eq!(
+            hasher.finish().as_bytes(),
+            object_hash(&payload).as_bytes(),
+            "chunking at {chunk_size} bytes must not change the object hash"
+        );
+    }
+
+    let empty = StreamingObjectHasher::new();
+    assert_eq!(empty.finish().as_bytes(), object_hash(&[]).as_bytes());
+
+    // Positivkontrolle: ein geaenderter Koerper ergibt einen anderen Hash, also
+    // misst der Vergleich oben ueberhaupt etwas.
+    let mut different = payload.clone();
+    different[0] ^= 1;
+    let mut hasher = StreamingObjectHasher::new();
+    hasher.update(&different);
+    assert_ne!(hasher.finish().as_bytes(), object_hash(&payload).as_bytes());
 }
