@@ -1,0 +1,13 @@
+# Der Bauausschluss zu `ops/container/Dockerfile`.
+#
+# BuildKit liest `<dockerfile>.dockerignore` vorrangig vor einem
+# `.dockerignore` an der Kontextwurzel. Die Datei liegt deshalb NEBEN dem
+# Dockerfile: der Bauausschluss gehoert zu diesem einen Bau und nicht in die
+# Wurzel des Arbeitsbereichs, wo er jeden anderen Kontext mit veraenderte.
+target/
+node_modules/
+**/node_modules/
+.git/
+.claude/
+apps/desktop/src-tauri/target/
+fuzz/target/

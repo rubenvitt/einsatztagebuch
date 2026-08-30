@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod admin_audit;
 pub mod config;
 pub mod cors;
 pub mod http;

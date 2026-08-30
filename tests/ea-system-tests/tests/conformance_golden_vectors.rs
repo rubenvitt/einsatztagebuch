@@ -2015,6 +2015,7 @@ fn trust_v1_vectors_cover_every_negative_named_in_design_22_1() {
         .unwrap_or_else(|error| panic!("failed to parse {TRUST_MANIFEST_PATH}: {error}"));
     assert_eq!(manifest.family, "trust");
     assert_eq!(manifest.version, "v1");
+    assert_eq!(manifest.entries.len(), TRUST_EXPECTED_ENTRY_COUNT);
 
     // Das Manifest darf seiner Platte nicht widersprechen.
     let report = verify_manifest_at(&root.join(TRUST_VECTOR_ROOT))
@@ -2652,6 +2653,10 @@ const RECEIPTS_EXPECTED_ENTRY_COUNT: usize = 7;
 
 /// Die Zahl der Evidence-Eintraege.
 const EVIDENCE_EXPECTED_ENTRY_COUNT: usize = 8;
+
+/// Die Zahl der Trust-Eintraege. Ohne diese Schranke liefe ein truncatiertes
+/// oder still neu erzeugtes Manifest durch.
+const TRUST_EXPECTED_ENTRY_COUNT: usize = 130;
 
 /// Der Grant-Suite-Identifikator, EINGEFROREN.
 const GRANTS_FROZEN_SUITE_ID: &str = "EINSATZARCHIV-HPKE-1";

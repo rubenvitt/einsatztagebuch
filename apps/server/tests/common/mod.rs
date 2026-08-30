@@ -446,6 +446,32 @@ pub async fn spawn_server(
     server_secret: [u8; 32],
     server_certificate_hash: ea_types::CertificateHash,
 ) -> TestServer {
+    spawn_server_in_bucket(
+        pool,
+        now,
+        organization_id,
+        server_secret,
+        server_certificate_hash,
+        INTEGRATION_BUCKET,
+    )
+    .await
+}
+
+/// Derselbe Server, aber gegen einen BENANNTEN Bucket.
+///
+/// Der Rueckspielnachweis der Stufe 3 braucht einen ZWEITEN Namensraum —
+/// eigene Datenbank UND eigener Bucket —, damit die Rueckspielung nicht in den
+/// Bestand zurueckschreibt, aus dem sie stammt. `spawn_server` bleibt der
+/// Normalfall und ruft hier mit [`INTEGRATION_BUCKET`] hinein; kein
+/// bestehender Aufrufer aendert sich.
+pub async fn spawn_server_in_bucket(
+    pool: PgPool,
+    now: ea_types::UnixMillis,
+    organization_id: ea_types::OrganizationId,
+    server_secret: [u8; 32],
+    server_certificate_hash: ea_types::CertificateHash,
+    bucket: &str,
+) -> TestServer {
     use std::sync::Arc;
 
     use einsatzarchiv_server::{
@@ -481,7 +507,7 @@ pub async fn spawn_server(
     );
     let objects = Arc::new(S3ObjectStore::new(
         object_store_client().await,
-        INTEGRATION_BUCKET.to_owned(),
+        bucket.to_owned(),
         organization_id,
         repository.clone(),
         repository.clone(),
@@ -508,6 +534,44 @@ pub async fn spawn_server(
         let _ = serve(listener, router(state, web_origins)).await;
     });
     TestServer { address, authority }
+}
+
+/// Ein eindeutiger, S3-GUELTIGER Bucketname mit dem gegebenen Praefix.
+///
+/// [`unique_suffix`] traegt Unterstriche; S3-Bucketnamen duerfen nur
+/// Kleinbuchstaben, Ziffern, Punkte und Bindestriche fuehren, und MinIO weist
+/// alles andere mit `InvalidBucketName` ab (gemessen). Der Ersatz steht hier
+/// und nicht an den zwei Aufrufstellen, damit die dritte ihn nicht vergisst.
+pub fn unique_bucket_name(prefix: &str) -> String {
+    format!("{prefix}-{}", unique_suffix().replace('_', "-"))
+}
+
+/// Legt einen Bucket an, falls er fehlt, und schaltet seine Versionierung ein.
+///
+/// Zwei Ziele dieses Pakets brauchen einen EIGENEN Bucket: die Gegenkontrolle
+/// der Kanariensuche, deren gepflanztes Tag sonst im gemeinsamen Bucket von
+/// einem NEBENLAEUFIGEN Testfall gefunden wuerde (gemessen — genau dieser Fund
+/// ist einmal aufgetreten), und der Rueckspielnachweis, der in einen zweiten
+/// Namensraum zurueckspielt. Die Versionierung folgt
+/// `xtask integration up`: der Integrationsbucket traegt sie, also traegt ein
+/// zweiter Bucket sie auch, sonst pruefte der Rueckspielnachweis eine andere
+/// Ablage als die gemessene.
+///
+/// Wiederholbar: ein bereits vorhandener Bucket ist kein Fehler.
+pub async fn ensure_bucket(name: &str) {
+    let client = object_store_client().await;
+    let _ = client.create_bucket().bucket(name).send().await;
+    client
+        .put_bucket_versioning()
+        .bucket(name)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("enabling versioning on the fixture bucket must succeed");
 }
 
 /// Der S3-Klient gegen den Integrationsdienst.

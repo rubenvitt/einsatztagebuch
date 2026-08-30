@@ -486,10 +486,32 @@ fn stage_one_gate_requires_a_complete_requirement_ledger() {
 /// AUSGESCHRIEBEN dasteht statt die Zusicherung fuer alle sieben aufzuweichen.
 /// Der geschlossene Stufe-1-Gate-Bericht (`docs/traceability/stage-1-gate.md`)
 /// wird dafuer NICHT angefasst: er haelt den Stand am Stufe-1-Gate fest.
-const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 8] = [
-    ("WR-041", "4.1", "3", "planned"),
-    ("WR-042", "4.2", "3", "planned"),
-    ("WR-043", "4.3", "3", "planned"),
+///
+/// Die Stufe-3-Abnahme (Task 12) VERSCHIEBT drei dieser Zeilen und ergaenzt
+/// eine vierte, und beides steht hier AUSGESCHRIEBEN, nach dem Muster, das
+/// D-HE2 darueber schon verwendet:
+///
+/// `WR-041`, `WR-042` und `WR-043` wandern von Stufe `3` auf Stufe `4` und
+/// behalten `planned`. Alle drei sind BROWSERseitig — getrennter
+/// Auslieferungsursprung (web-reader-design.md:72), Service-Worker-Aktivierung
+/// gegen ein gepinntes Release (:84), erzwungener Fingerprint-Vergleich
+/// (:117) — und ihr Bauartefakt `apps/web` fuehrt web-reader-design.md
+/// Abschnitt 12 (:467-469) ein, dessen Stufe-4-Eintrag (:454-457) die
+/// Reader-Tasks schreibt. Die FAMILIENDEFINITION dagegen liefert Stufe 3.
+///
+/// Genau dafuer kommt EINE Zeile hinzu: `WR-042D`, Stufe `3`, `implemented`.
+/// Das Schema `WR-0<Abschnitt>` kann fuer Abschnitt 4.2 keine zweite Zeile
+/// ausdruecken, deshalb traegt sie ausdruecklich einen Identifikator
+/// AUSSERHALB des Schemas. Die Stelligkeit geht damit von ACHT auf NEUN.
+///
+/// Die geschlossenen Gate-Berichte der Stufen 1 und 2 werden dafuer NICHT
+/// angefasst; `docs/traceability/stage-2-gate.md:348` traegt diesen
+/// Mechanismus als Praezedenz.
+const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 9] = [
+    ("WR-041", "4.1", "4", "planned"),
+    ("WR-042", "4.2", "4", "planned"),
+    ("WR-042D", "4.2", "3", "implemented"),
+    ("WR-043", "4.3", "4", "planned"),
     ("WR-052", "5.2", "2", "integrated"),
     ("WR-063", "6.3", "4", "planned"),
     ("WR-064", "6.4", "3", "implemented"),
@@ -659,15 +681,19 @@ fn web_reader_must_requirements_are_recorded_as_v1_1_rows() {
         );
     }
 
-    // D2 traegt WR-042: das Traegerfeld existiert bereits, der positive Vektor
-    // folgt in Task 10 dieses Plans.
+    // D2 traegt WR-042: das Traegerfeld existiert bereits, und sein positiver
+    // Vektor ist seit Stufe 1 EINGEFROREN — nicht mehr angekuendigt. Der Pin
+    // wandert deshalb mit der Ledgerverschiebung der Stufe-3-Abnahme in
+    // DEMSELBEN Commit von der Ankuendigung auf den Vektornamen (Ruling R-75),
+    // damit Belegspalte und Zusicherung nicht auseinanderdriften koennen.
     let refresh = rows
         .iter()
         .find(|row| row[0] == "WR-042")
         .expect("WR-042 must exist");
     assert!(
-        refresh[6].contains("reader-trust-refresh-ms") && refresh[6].contains("Task 10"),
-        "WR-042 evidence must name the policy field and the vector task; evidence: {}",
+        refresh[6].contains("reader-trust-refresh-ms")
+            && refresh[6].contains("accepted-policy-core-reader-trust-refresh"),
+        "WR-042 evidence must name the policy field and the frozen vectors; evidence: {}",
         refresh[6]
     );
 
@@ -1943,12 +1969,17 @@ fn the_stage_two_gate_report_must_carry_its_content_contract() {
 
 #[test]
 fn the_stage_switch_still_refuses_an_undefined_stage() {
-    let root = stage_two_fixture("stage-three");
-    let output = run_stage_gate(&root, "3");
+    // Stufe 4 und nicht mehr Stufe 3: die Stufe-3-Abnahme oeffnet den
+    // Schalter fuer 3, und die Zusicherung dieses Tests ist die UNVERAENDERTE
+    // — eine undefinierte Stufe wird abgewiesen, und die Fehlerzeile nennt
+    // die definierten. Sie wandert mit dem Schalter, statt aufgeweicht zu
+    // werden.
+    let root = stage_two_fixture("stage-four");
+    let output = run_stage_gate(&root, "4");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr.contains("stages 1 and 2"),
+        stderr.contains("stages 1, 2 and 3"),
         "the switch must name the stages it defines; stderr: {stderr}"
     );
 }
@@ -2203,4 +2234,357 @@ fn verify_quick_subcommand_count() -> usize {
         }
     }
     panic!("the pin of verify_quick_commands() must be closed with `]`");
+}
+
+// ---------------------------------------------------------------------------
+// Stufe 3 — „Blind Sync".
+//
+// Der ZIELzustandstest liest den ECHTEN Arbeitsbaum; die Mangelphasen laufen
+// gegen ein Fixture und halten je EINEN Fehlerzustand fest. Beide Formen sind
+// die der Stufe 2, und der Grund ist derselbe: ein Zielzustandstest kann durch
+// einen spaeteren Task nicht invertieren, und ein Fehlerzustand bleibt gegen
+// ein Fixture stabil.
+// ---------------------------------------------------------------------------
+
+/// Die Vektorfamilie, die Stufe 3 additiv anlegt.
+const STAGE_THREE_FAMILIES: [&str; 1] = ["web-bundle"];
+
+/// Die sieben primaeren Abnahmekriterien der Stufe 3.
+const STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 7] = [7, 8, 13, 33, 36, 45, 50];
+
+/// Die vier Skripte, die die Wurzel-`package.json` fuer Stufe 3 fuehren MUSS.
+const STAGE_THREE_SCRIPTS: [&str; 4] = [
+    "stage-gate:3",
+    "supply-chain",
+    "test:server",
+    "verify:quick",
+];
+
+/// Der Stufe-3-Gate-Bericht und das Szenarienmanifest, relativ zur Gate-Wurzel.
+const STAGE_THREE_GATE_REPORT_PATH: &str = "docs/traceability/stage-3-gate.md";
+const STAGE_THREE_FAULT_POINTS_PATH: &str = "docs/traceability/stage-3-fault-points.json";
+
+/// Die NEUN Szenarien, die das Manifest deklarieren MUSS — als LITERALE.
+///
+/// Sie stehen hier ausgeschrieben und nicht aus dem Manifest gelesen: gegen
+/// sich selbst verglichen koennte ein Manifest mit einem einzigen Szenario
+/// beide Zusagen erfuellen und gruen melden.
+const STAGE_THREE_SCENARIOS: [&str; 9] = [
+    "cursor-key-rotation",
+    "db-after-object-put",
+    "db-before-commit",
+    "nonce-replay",
+    "parallel-fork",
+    "response-loss",
+    "restore",
+    "s3-stage",
+    "tls-downgrade",
+];
+
+/// Schreibt das Requirement-Ledger des Stufe-3-Fixtures.
+///
+/// Grundlage ist das ECHTE eingecheckte Ledger — nur so bleibt die aus
+/// `design.md` abgeleitete Pflichtzeilenmenge abgedeckt, ohne sie hier
+/// abzuschreiben. `reopened` stellt GENAU EINE Stufe-3-Zeile zurueck auf
+/// `planned`, damit die Mangelphase den Filter an einer benannten Zeile misst.
+fn write_stage_three_ledger(root: &Path, reopened: Option<&str>) {
+    let source = fs::read_to_string(workspace_root().join(REQUIREMENT_LEDGER_RELATIVE))
+        .expect("the requirement ledger must be readable");
+    let mut lines = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        if index == 0 || line.is_empty() {
+            lines.push(line.to_owned());
+            continue;
+        }
+        let mut fields = ledger_fields(line);
+        if Some(fields[0].as_str()) == reopened && fields[7] == "3" {
+            fields[8] = "planned".to_owned();
+        }
+        lines.push(format!("\"{}\"", fields.join("\",\"")));
+    }
+    let path = root.join(REQUIREMENT_LEDGER_RELATIVE);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+}
+
+/// Baut eine gruene Stufe-3-Grundlage.
+///
+/// Nach dem Muster von [`stage_two_fixture`]: die additive Vektorfamilie, das
+/// kopierte Entwurfsdokument und dann jedes der vier Stufe-3-Artefakte in
+/// seiner mangelfreien Fassung. Szenarienmanifest und Gate-Bericht kommen aus
+/// dem Arbeitsbaum — das Fixture soll den Vertrag ERFUELLEN, nicht ihn
+/// abschreiben; dieselbe Entscheidung liegt schon
+/// [`string_array_from_the_gate_source`] zugrunde.
+fn stage_three_fixture(label: &str) -> PathBuf {
+    let root = fixture_root(label);
+    for family in STAGE_THREE_FAMILIES {
+        write_family_manifest(&root, family);
+    }
+    copy_from_the_workspace(&root, DESIGN_DOCUMENT_RELATIVE);
+    copy_from_the_workspace(&root, STAGE_THREE_FAULT_POINTS_PATH);
+    copy_from_the_workspace(&root, STAGE_THREE_GATE_REPORT_PATH);
+    write_stage_three_ledger(&root, None);
+    write_package_manifest(&root, &STAGE_THREE_SCRIPTS);
+    root
+}
+
+/// Haelt fest, dass `stage-gate 3` die echten Dienstfehler, die neun Szenarien
+/// und die sieben primaeren Abnahmekriterien verlangt.
+///
+/// Phase 1 laeuft gegen den ECHTEN Arbeitsbaum und haelt den ZIELzustand fest.
+/// Jede weitere Phase laeuft gegen ein Fixture und haelt einen FEHLERzustand
+/// an genau einer Stelle fest.
+///
+/// KEINE Phase braucht die zwei Integrationsdienste. Der Stufe-3-Gate liest
+/// Dokumente, das Ledger und ein Manifest — er oeffnet weder Datenbank noch
+/// Object Store. Gemessen: mit abgeraeumten Containern enden `stage-gate 1`,
+/// `stage-gate 2` und `stage-gate 3` weiterhin mit Exitcode 0, und dieses
+/// Testziel bleibt gruen. Das ist die Eigenschaft, die diesen Test in
+/// `pnpm verify:quick` auch auf einem Rechner ohne Docker lauffaehig haelt.
+#[test]
+fn stage_three_gate_requires_real_service_failures_and_primary_ak() {
+    // Phase 1: der echte Arbeitsbaum.
+    let output = run_stage_gate_in_the_workspace("3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "stage-gate 3 must accept the checked-in tree; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout must be JSON: {error}; stdout: {stdout}"));
+    assert_eq!(report["stage"], serde_json::json!(3));
+    assert_eq!(
+        report["vector_families"],
+        serde_json::json!(STAGE_THREE_FAMILIES)
+    );
+    assert_eq!(
+        report["stage_three_primary_acceptance_criteria"],
+        serde_json::json!(STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA)
+    );
+    // Der Schluessel heisst `declared_fault_points` wie in Stufe 2: das
+    // Berichtsschema wird ERGAENZT, nie umbenannt, und der Inhalt ist derselbe.
+    let declared = report["declared_fault_points"]
+        .as_array()
+        .expect("the gate must report the declared scenarios");
+    for scenario in STAGE_THREE_SCENARIOS {
+        assert!(
+            declared.iter().any(|value| value == scenario),
+            "the declared scenarios must carry {scenario}; stdout: {stdout}"
+        );
+    }
+    assert_eq!(
+        declared.len(),
+        STAGE_THREE_SCENARIOS.len(),
+        "the manifest declares exactly the nine scenarios; stdout: {stdout}"
+    );
+    assert!(
+        report["stage_three_rows_still_planned"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "no stage 3 ledger row may still be planned; stdout: {stdout}"
+    );
+
+    // Phase 2: der Gate-Bericht fehlt UND eine Stufe-3-Zeile steht wieder auf
+    // `planned`. Der Gate nennt BEIDE in EINER Fehlermeldung — sonst
+    // begruendete der RED-Schritt der Stufenabnahme nur den ersten Mangel.
+    let root = stage_three_fixture("stage-three-two-gaps");
+    fs::remove_file(root.join(STAGE_THREE_GATE_REPORT_PATH)).unwrap();
+    write_stage_three_ledger(&root, Some("FR-081"));
+    let output = run_stage_gate(&root, "3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    for expected in [
+        STAGE_THREE_GATE_REPORT_PATH,
+        "stage 3 requirement ledger rows still on planned: FR-081",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "stage-gate 3 must name {expected} in the same failure; stderr: {stderr}"
+        );
+    }
+
+    // Phase 3: das Szenarienmanifest verliert seinen Rueckspielabschnitt. Der
+    // Abschnitt traegt GENAU EINEN Eintrag, und genau deshalb muss er benannt
+    // werden koennen: ein einzelner Eintrag verschwindet sonst lautlos.
+    let root = stage_three_fixture("stage-three-manifest");
+    let manifest = fs::read_to_string(root.join(STAGE_THREE_FAULT_POINTS_PATH)).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    value.as_object_mut().unwrap().remove("restore");
+    fs::write(
+        root.join(STAGE_THREE_FAULT_POINTS_PATH),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    let output = run_stage_gate(&root, "3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("restore"),
+        "stage-gate 3 must name the missing manifest section; stderr: {stderr}"
+    );
+
+    // Phase 4: die Serverspur fehlt in der Wurzel-`package.json`. Ohne
+    // `test:server` haette die Stufe keine ausfuehrbare Serverspur, und jede
+    // Serverzusage waere danach unbelegt.
+    let root = stage_three_fixture("stage-three-scripts");
+    write_package_manifest(&root, &["stage-gate:3", "supply-chain", "verify:quick"]);
+    let output = run_stage_gate(&root, "3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("test:server"),
+        "stage-gate 3 must name the missing server script; stderr: {stderr}"
+    );
+
+    // Phase 5: die additive Vektorfamilie fehlt.
+    let root = stage_three_fixture("stage-three-family");
+    fs::remove_dir_all(root.join("vectors/web-bundle")).unwrap();
+    let output = run_stage_gate(&root, "3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("web-bundle"),
+        "stage-gate 3 must name the missing vector family; stderr: {stderr}"
+    );
+}
+
+/// Die ACHT Kommandos der Schritt-4-Folge dieses Plans, in genau der
+/// Reihenfolge, in der der Plan sie vorschreibt.
+///
+/// `integration up` steht zuerst und `integration down` zuletzt: dieser Task
+/// ist der einzige der Stufe, der die Dienste wieder abraeumt, und die
+/// Belegzeile haelt beides fest.
+const STAGE_THREE_STEP_SIX_COMMANDS: [&str; 8] = [
+    "cargo run --locked -p xtask -- integration up",
+    "pnpm test:server",
+    "cargo test --locked -p einsatzarchiv-server --test privacy_canaries_server",
+    "cargo test --locked -p einsatzarchiv-server --test backup_restore_server_restore",
+    "pnpm supply-chain",
+    "pnpm stage-gate:3",
+    "pnpm verify:quick",
+    "cargo run --locked -p xtask -- integration down",
+];
+
+/// Zaehlt die Pakete der wasm32-Positivliste an demselben zeichengenauen Pin,
+/// an dem [`verify_quick_subcommand_count`] die Teilkommandos zaehlt.
+///
+/// Gezaehlt wird am PIN und nicht am Rumpf, aus dem Grund, den
+/// [`verify_quick_subcommand_count`] ausschreibt. Ein Paket ist ein `"-p"` im
+/// Pin: die Positivliste ist die einzige Stelle der Liste, die `-p` fuehrt, und
+/// `verify_quick_uses_the_required_locked_commands` haelt den Pin
+/// zeichengenau gegen die Funktion — wer die Funktion aendert und den Pin
+/// nicht, wird DORT rot und nicht hier.
+fn wasm32_positive_list_count() -> usize {
+    const CALL: &str = "super::verify_quick_commands(),";
+
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("the xtask source must be readable");
+    let at = source
+        .find(CALL)
+        .unwrap_or_else(|| panic!("the xtask source must pin the commands with `{CALL}`"));
+    let list_at = at
+        + source[at..]
+            .find("vec![")
+            .unwrap_or_else(|| panic!("`{CALL}` must be pinned against a `vec![` literal"))
+        + "vec![".len();
+    let end = source[list_at..]
+        .find("\n            ]\n        );")
+        .unwrap_or_else(|| panic!("the pin of verify_quick_commands() must be closed"));
+    let count = source[list_at..list_at + end].matches("\"-p\"").count();
+    assert!(
+        count > 0,
+        "the pin must carry the wasm32 positive list, or this counter measures nothing"
+    );
+    count
+}
+
+/// Haelt fest, dass der Stufe-3-Gate-Bericht den vorgeschriebenen vollen Lauf
+/// GEMESSEN protokolliert statt ihn zu behaupten.
+///
+/// Er lebt hier und nicht im Gate, aus dem Grund, den Stufe 1 schon
+/// entschieden hat: der protokollierte Lauf enthaelt `pnpm stage-gate:3` und
+/// `pnpm verify:quick` selbst, und ein Gate, der seine eigene Messzeile
+/// verlangte, koennte auf dem Lauf, der sie erzeugt, nie gruen sein.
+#[test]
+fn stage_three_gate_report_records_the_measured_full_gate_run() {
+    let report = fs::read_to_string(workspace_root().join(STAGE_THREE_GATE_REPORT_PATH))
+        .expect("the stage 3 gate report must be readable");
+    // NUR die Belegtabelle, nicht die Untertabellen des Abschnitts.
+    //
+    // `measured_run_rows` liest bis zur naechsten `## `-Ueberschrift, und der
+    // Stufe-3-Abschnitt fuehrt darunter die `### `-Unterabschnitte (a) bis (f)
+    // — darin die Lizenztabelle mit ihren vierzehn Zeilen. Ohne diesen Schnitt
+    // zaehlte die Stelligkeitszusicherung unten 24 statt 9 (gemessen). Der
+    // Schnitt steht HIER und nicht in `measured_run_rows`: die Stufen 1 und 2
+    // fuehren unter ihrer Belegtabelle keine Untertabelle, und ihre beiden
+    // Tests sollen sich durch diesen Task nicht aendern.
+    let heading_at = report
+        .find(MEASURED_RUN_HEADING)
+        .expect("the stage 3 gate report must carry the measured run section");
+    let section_end = report[heading_at..]
+        .find("\n### ")
+        .map_or(report.len(), |offset| heading_at + offset);
+    let rows = measured_run_rows(&report[heading_at..section_end]);
+    for command in STAGE_THREE_STEP_SIX_COMMANDS {
+        let matching: Vec<&Vec<String>> =
+            rows.iter().filter(|row| row[0].contains(command)).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "stage-3-gate.md must record the measured run for `{command}` exactly once"
+        );
+        let row = matching[0];
+        assert!(row.len() >= 4, "{row:?}");
+        assert_eq!(
+            row[1], "0",
+            "`{command}` must have ended with exit code 0: {row:?}"
+        );
+        assert!(!row[2].is_empty(), "{row:?}");
+        assert!(
+            !row[2].contains("0 passed"),
+            "`0 passed; N filtered out` is a broken filter, not a result: {row:?}"
+        );
+        // Die vierte Spalte ist die gemessene LAUFZEIT. Sie ist der Grund, aus
+        // dem diese Tabelle „gemessen" heisst, und eine leere Zelle machte die
+        // Zeile zu einer Behauptung.
+        assert!(
+            !row[3].is_empty(),
+            "`{command}` must carry a measured runtime: {row:?}"
+        );
+    }
+    assert_eq!(rows.len(), STAGE_THREE_STEP_SIX_COMMANDS.len() + 1);
+
+    // Die Belegzeile von `pnpm verify:quick` traegt ZWEI Zahlen gegen ihre
+    // Quelle: die Zahl der Teilkommandos und die Zahl der Pakete auf der
+    // wasm32-Positivliste. Beide stehen ausgeschrieben, beide werden am Pin
+    // gezaehlt, und keine wird hier abgeschrieben.
+    let verify_quick: Vec<&Vec<String>> = rows
+        .iter()
+        .filter(|row| row[0].contains("pnpm verify:quick"))
+        .collect();
+    assert_eq!(verify_quick.len(), 1);
+    let cell = &verify_quick[0][2];
+    for (count, what) in [
+        (verify_quick_subcommand_count(), "subcommands"),
+        (wasm32_positive_list_count(), "wasm32 packages"),
+    ] {
+        let expected = GERMAN_COUNT_WORDS.get(count).unwrap_or_else(|| {
+            panic!("{what}: {count} is covered by no spelled-out number in GERMAN_COUNT_WORDS")
+        });
+        assert!(
+            cell.contains(expected),
+            "the verify:quick evidence cell must spell out the number of {what} that the source \
+             actually carries ({count} = {expected}); cell: {cell}"
+        );
+    }
+
+    // Und die Reichweitenklausel der Auflegung A, woertlich aus der
+    // Gate-Quelle. Der Gate prueft sie selbst; hier steht die Zusicherung,
+    // dass sie im GEMESSENEN Abschnitt und nicht irgendwo im Bericht steht.
+    assert!(
+        report.contains("Auflegung A"),
+        "the stage 3 gate report must name the measured deployment"
+    );
 }

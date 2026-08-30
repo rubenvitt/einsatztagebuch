@@ -1,0 +1,56 @@
+{
+  "stage": 3,
+  "commit": [
+    {
+      "name": "db-before-commit",
+      "brackets": "vor dem Buchen der Commit-Transaktion: nichts wird sichtbar, und der Abbruch ist keine Aussage ueber den Aufrufer",
+      "witness": "crates/ea-sync-server/tests/commit_service.rs::a_database_abort_leaves_nothing_visible"
+    },
+    {
+      "name": "db-after-object-put",
+      "brackets": "nach dem Ablegen eines Objekts unter seiner content-addressed Adresse und vor dem Sichtbarwerden der Transaktion: das Objekt bleibt ein unsichtbarer Waise",
+      "witness": "apps/server/tests/entry_commit_api.rs::the_receipt_discarded_by_a_replay_stays_an_invisible_orphan"
+    },
+    {
+      "name": "s3-stage",
+      "brackets": "waehrend des Stagings der Objekte, vor der Commit-Transaktion",
+      "witness": "crates/ea-sync-server/tests/commit_service.rs::an_object_store_fault_before_the_commit_leaves_nothing_visible"
+    },
+    {
+      "name": "response-loss",
+      "brackets": "nach dem sichtbaren Commit und vor dem Eintreffen der Quittung beim Klienten: der Wiederholversuch liefert BYTEGLEICH dieselbe Quittung",
+      "witness": "apps/server/tests/entry_commit_api.rs::identical_replay_returns_byte_identical_receipt_bytes"
+    }
+  ],
+  "replay": [
+    {
+      "name": "parallel-fork",
+      "brackets": "zwei Commits auf derselben Sequenz derselben Kette: der zweite wird abgewiesen und als Security Event gebucht",
+      "witness": "apps/server/tests/commit_failures.rs::a_fork_on_the_same_sequence_is_refused_and_recorded"
+    },
+    {
+      "name": "nonce-replay",
+      "brackets": "derselbe Antrag mit derselben verbrauchten Challenge ein zweites Mal: EA-AUTH-NONCE-REPLAY und 401",
+      "witness": "apps/server/tests/auth_trust_api.rs::challenge_is_single_use_and_registration_remains_pending"
+    }
+  ],
+  "transport": [
+    {
+      "name": "tls-downgrade",
+      "brackets": "ein ClientHello, der ausschliesslich TLS 1.2 anbietet: der Lauscher weist ab und handelt NIE herunter",
+      "witness": "apps/server/tests/fault_scenarios.rs::a_tls12_only_client_handshake_is_rejected"
+    },
+    {
+      "name": "cursor-key-rotation",
+      "brackets": "ein technischer Cursor der VORIGEN Serverschluesselgeneration nach der Rotation: FAIL-CLOSED mit EA-SYNC-CURSOR-INVALID, keine ueberlappende Annahme",
+      "witness": "apps/server/tests/fault_scenarios.rs::a_cursor_signed_under_the_previous_key_generation_fails_to_open"
+    }
+  ],
+  "restore": [
+    {
+      "name": "restore",
+      "brackets": "PostgreSQL und Bucket in einen getrennten Integrationsnamensraum zurueckgespielt: exakte Objektmenge und exakter Kopf gegen einen bekannten Checkpoint",
+      "witness": "apps/server/tests/backup_restore_server_restore.rs"
+    }
+  ]
+}

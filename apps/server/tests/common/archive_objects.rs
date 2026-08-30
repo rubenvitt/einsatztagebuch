@@ -152,7 +152,29 @@ pub fn plan(recipients: &[Recipient]) -> GrantPlanV1 {
 /// Wenn Manifest, Signatur oder Kodierung fehlschlagen.
 #[must_use]
 pub fn entry_bytes(spec: &CommitSpec<'_>, plan: &GrantPlanV1) -> Vec<u8> {
-    let ciphertext = vec![spec.marker; 48];
+    entry_bytes_with_ciphertext(spec, plan, &[spec.marker; 48])
+}
+
+/// Dieselben `.eip`-Bytes, aber mit einem VORGEGEBENEN Ciphertext.
+///
+/// Der Ciphertext ist in dieser Kulisse ein Fuellmuster, weil ihn keine
+/// Zusicherung des Commit-Pfades liest — er ist ueber `ciphertext_hash` an das
+/// Manifest gebunden, und genau diese Bindung prueft `ea-format` beim Parsen.
+/// Der Kanarientest der Stufe 3 braucht ihn dennoch unter seiner Kontrolle:
+/// er legt die fachlichen Marker HINEIN, damit die Suche danach den
+/// SCHLIMMSTMOEGLICHEN Fall misst — der Server bekommt die Marker wirklich
+/// geliefert, und keine seiner beobachtbaren Flaechen darf sie wiedergeben.
+///
+/// # Panics
+///
+/// Wenn Manifest, Signatur oder Kodierung fehlschlagen.
+#[must_use]
+pub fn entry_bytes_with_ciphertext(
+    spec: &CommitSpec<'_>,
+    plan: &GrantPlanV1,
+    ciphertext: &[u8],
+) -> Vec<u8> {
+    let ciphertext = ciphertext.to_vec();
     let manifest = ManifestCoreV1::new(
         ManifestCoreFieldsV1 {
             organization_id: spec.closure.organization_id,
@@ -275,8 +297,21 @@ pub fn grant_bytes_with(
 /// Wenn der Rahmen eine seiner Grenzen reisst.
 #[must_use]
 pub fn commit_request(spec: &CommitSpec<'_>) -> EntryCommitRequestV1 {
+    commit_request_with_ciphertext(spec, &[spec.marker; 48])
+}
+
+/// Derselbe Commit-Request, aber mit einem VORGEGEBENEN Ciphertext.
+///
+/// # Panics
+///
+/// Wenn Manifest, Signatur oder Kodierung fehlschlagen.
+#[must_use]
+pub fn commit_request_with_ciphertext(
+    spec: &CommitSpec<'_>,
+    ciphertext: &[u8],
+) -> EntryCommitRequestV1 {
     let plan = plan(spec.recipients);
-    let entry = entry_bytes(spec, &plan);
+    let entry = entry_bytes_with_ciphertext(spec, &plan, ciphertext);
     let entry_hash = entry_hash_of(&entry);
     let grants = spec
         .recipients
