@@ -336,6 +336,112 @@ async fn no_column_of_the_schema_carries_a_domain_value() {
     database.cleanup().await;
 }
 
+/// Die beiden `subject_key`-Spalten nehmen NUR ihre technische Form an.
+///
+/// Der Kommentar ueber `security_events` sagte immer schon „ausschliesslich
+/// eine technische Kennung"; die Spalte war trotzdem freier `TEXT`, und der
+/// Kanarienvogel `no_column_of_the_schema_carries_a_domain_value` sieht nur
+/// SPALTENNAMEN, nie Werte. Die Zusage stand damit nirgends ausfuehrbar. Sie
+/// steht jetzt als CHECK in der Migration, und dieser Fall misst BEIDE
+/// Richtungen — sonst bewiese ein durchgelassener Wert nichts ueber einen
+/// abgewiesenen.
+#[tokio::test]
+async fn the_subject_key_columns_admit_only_their_technical_shape() {
+    let database = common::fresh_database().await;
+    let organization = [0x71_u8; 16];
+    insert_organization(database.pool(), &organization).await;
+
+    let hex_hash = "a".repeat(64);
+    let hex_device = "b".repeat(32);
+
+    // Die beiden Formen, die der Server WIRKLICH schreibt.
+    for accepted in [hex_hash.clone(), format!("eip/{hex_hash}")] {
+        plant_security_event(database.pool(), &organization, &accepted)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("the shape the server writes must be admitted: {accepted} ({error})")
+            });
+    }
+    // Und die Formen, die es nicht gibt: ein fachlicher Wert, ein unbekanntes
+    // Typsegment, ein Grossbuchstabe, ein Anhang hinter der gueltigen Form.
+    for refused in [
+        "Einsatz 7, Melder Mueller".to_owned(),
+        format!("xyz/{hex_hash}"),
+        "A".repeat(64),
+        format!("{hex_hash} und noch etwas"),
+    ] {
+        assert!(
+            plant_security_event(database.pool(), &organization, &refused)
+                .await
+                .is_err(),
+            "a free text must not reach security_events.subject_key: {refused}"
+        );
+    }
+
+    // Dasselbe fuer das Administrationsaudit, dessen Form
+    // `apps/server/src/admin_audit.rs::subject_key` zusammensetzt.
+    for accepted in [
+        format!("{hex_device}/succeeded/{hex_hash}"),
+        format!("{hex_device}/refused/-"),
+        format!("{hex_device}/failed/{hex_hash}"),
+    ] {
+        plant_admin_audit(database.pool(), &organization, &accepted)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("the shape admin_audit.rs builds must be admitted: {accepted} ({error})")
+            });
+    }
+    for refused in [
+        format!("{hex_device}/geloescht/{hex_hash}"),
+        format!("{hex_device}/succeeded"),
+        format!("{hex_hash}/succeeded/{hex_hash}"),
+        "Bediener Mueller/succeeded/-".to_owned(),
+    ] {
+        assert!(
+            plant_admin_audit(database.pool(), &organization, &refused)
+                .await
+                .is_err(),
+            "a free text must not reach technical_admin_audit.subject_key: {refused}"
+        );
+    }
+
+    database.cleanup().await;
+}
+
+async fn plant_security_event(
+    pool: &PgPool,
+    organization: &[u8; 16],
+    subject_key: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO security_events (organization_id, event_code, subject_key, \
+         observed_at_millis) VALUES ($1, 'sequence-fork', $2, 1)",
+    )
+    .bind(&organization[..])
+    .bind(subject_key)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+async fn plant_admin_audit(
+    pool: &PgPool,
+    organization: &[u8; 16],
+    subject_key: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO technical_admin_audit (organization_id, operator_subject_id, \
+         action_code, subject_key, recorded_at_millis) VALUES ($1, $2, 'server-key-rotation', \
+         $3, 1)",
+    )
+    .bind(&organization[..])
+    .bind(&[0x72_u8; 16][..])
+    .bind(subject_key)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
 /// Alle sechsundzwanzig Tabellen der Stufe 3 sind da, und es ist bei EINER
 /// Migration geblieben.
 #[tokio::test]

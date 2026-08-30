@@ -50,7 +50,7 @@
     {
       "name": "restore",
       "brackets": "PostgreSQL und Bucket in einen getrennten Integrationsnamensraum zurueckgespielt: exakte Objektmenge und exakter Kopf gegen einen bekannten Checkpoint",
-      "witness": "apps/server/tests/backup_restore_server_restore.rs"
+      "witness": "apps/server/tests/backup_restore_server_restore.rs::a_restore_into_a_separate_namespace_returns_the_exact_objects_and_head"
     }
   ]
 }

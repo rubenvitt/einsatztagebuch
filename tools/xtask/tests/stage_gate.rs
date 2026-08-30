@@ -2323,9 +2323,44 @@ fn stage_three_fixture(label: &str) -> PathBuf {
     copy_from_the_workspace(&root, DESIGN_DOCUMENT_RELATIVE);
     copy_from_the_workspace(&root, STAGE_THREE_FAULT_POINTS_PATH);
     copy_from_the_workspace(&root, STAGE_THREE_GATE_REPORT_PATH);
+    // Die Zeugendateien gehoeren ZUM Fixture, seit der Gate jeden `witness`
+    // auf eine wirklich vorhandene Testfunktion aufloest. Kopiert wird genau,
+    // was das Manifest nennt — ein von Hand gefuehrter zweiter Dateiname waere
+    // die Liste, die auseinanderlaeuft.
+    for witness in fault_point_witness_files(&root) {
+        copy_from_the_workspace(&root, &witness);
+    }
     write_stage_three_ledger(&root, None);
     write_package_manifest(&root, &STAGE_THREE_SCRIPTS);
     root
+}
+
+/// Die Dateien, auf die die `witness`-Felder des Szenarienmanifests zeigen.
+fn fault_point_witness_files(root: &Path) -> Vec<String> {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(STAGE_THREE_FAULT_POINTS_PATH)).unwrap(),
+    )
+    .unwrap();
+    let mut files = Vec::new();
+    for (section, value) in manifest.as_object().unwrap() {
+        if section == "stage" {
+            continue;
+        }
+        for entry in value.as_array().into_iter().flatten() {
+            let witness = entry["witness"].as_str().unwrap();
+            let (file, _) = witness.split_once("::").unwrap_or_else(|| {
+                panic!("every witness carries <path>::<function>; found {witness}")
+            });
+            if !files.iter().any(|known: &String| known == file) {
+                files.push(file.to_owned());
+            }
+        }
+    }
+    assert!(
+        !files.is_empty(),
+        "the manifest must name witness files, or the fixture copies nothing"
+    );
+    files
 }
 
 /// Haelt fest, dass `stage-gate 3` die echten Dienstfehler, die neun Szenarien
@@ -2385,6 +2420,16 @@ fn stage_three_gate_requires_real_service_failures_and_primary_ak() {
             .is_empty(),
         "no stage 3 ledger row may still be planned; stdout: {stdout}"
     );
+    // Und jeder der neun Zeugen ist AUFGELOEST — Datei und Funktionsname.
+    // Ohne diese Zeile bliebe `witness` ein Feld, das nichts liest.
+    let witnesses = report["stage_three_fault_point_witnesses"]
+        .as_array()
+        .expect("the gate must report the resolved witnesses");
+    assert_eq!(
+        witnesses.len(),
+        STAGE_THREE_SCENARIOS.len(),
+        "every declared scenario resolves to exactly one witness; stdout: {stdout}"
+    );
 
     // Phase 2: der Gate-Bericht fehlt UND eine Stufe-3-Zeile steht wieder auf
     // `planned`. Der Gate nennt BEIDE in EINER Fehlermeldung — sonst
@@ -2423,6 +2468,52 @@ fn stage_three_gate_requires_real_service_failures_and_primary_ak() {
     assert!(
         stderr.contains("restore"),
         "stage-gate 3 must name the missing manifest section; stderr: {stderr}"
+    );
+
+    // Phase 3b: ein Zeuge wird umbenannt. GENAU der Fall, den es vorher nicht
+    // gab: das Manifest bleibt formal vollstaendig, die Testfunktion heisst
+    // aber nicht mehr so — und die Fehlermatrix waere ohne diese Pruefung ein
+    // Dokument statt eines Gates.
+    let root = stage_three_fixture("stage-three-renamed-witness");
+    let manifest = fs::read_to_string(root.join(STAGE_THREE_FAULT_POINTS_PATH)).unwrap();
+    let renamed = manifest.replace(
+        "::a_tls12_only_client_handshake_is_rejected",
+        "::a_tls12_only_client_handshake_is_rejected_renamed",
+    );
+    assert_ne!(
+        manifest, renamed,
+        "the fixture must really rename a witness"
+    );
+    fs::write(root.join(STAGE_THREE_FAULT_POINTS_PATH), renamed).unwrap();
+    let output = run_stage_gate(&root, "3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("a_tls12_only_client_handshake_is_rejected_renamed"),
+        "stage-gate 3 must name the witness that no longer resolves; stderr: {stderr}"
+    );
+
+    // Phase 3c: ein Zeuge zeigt auf eine Funktion, die es gibt — aber ohne
+    // Testattribut. Ein Hilfsfunktionsname ist kein Zeuge.
+    let root = stage_three_fixture("stage-three-witness-without-attribute");
+    let manifest = fs::read_to_string(root.join(STAGE_THREE_FAULT_POINTS_PATH)).unwrap();
+    let helper = manifest.replace(
+        "apps/server/tests/fault_scenarios.rs::a_tls12_only_client_handshake_is_rejected",
+        "apps/server/tests/fault_scenarios.rs::main",
+    );
+    assert_ne!(manifest, helper, "the fixture must really point elsewhere");
+    fs::write(root.join(STAGE_THREE_FAULT_POINTS_PATH), helper).unwrap();
+    fs::write(
+        root.join("apps/server/tests/fault_scenarios.rs"),
+        "fn main() {}\n",
+    )
+    .unwrap();
+    let output = run_stage_gate(&root, "3");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("#[test]"),
+        "stage-gate 3 must say why a plain function is no witness; stderr: {stderr}"
     );
 
     // Phase 4: die Serverspur fehlt in der Wurzel-`package.json`. Ohne

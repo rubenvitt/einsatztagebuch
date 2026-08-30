@@ -1029,3 +1029,128 @@ async fn a_registry_event_that_is_not_the_next_head_names_the_head_that_is() {
 
     database.cleanup().await;
 }
+
+/// Der PERSISTENTE Registrierungspin ist der BODEN der Authentisierung.
+///
+/// Die Autoritaetsaufloesung laeuft auf einem fluechtigen Speicher — bewusst,
+/// damit kein signierter Request eine Zeile schreibt. Genau deshalb sah sie
+/// den Pin bisher gar nicht: waere der Katalog auf einen aelteren Stand
+/// zurueckgefallen, haette sie die Zertifikate JENES Standes wieder als aktiv
+/// gemeldet. Der Pin sagt, wie weit der Bestand nachweislich schon war; ein
+/// Lauf dahinter ist ein Rueckfall.
+///
+/// Die Antwort ist ein ZUSTANDSBEFUND und kein Autorisierungsbefund: `503`
+/// mit `EA-TRUST-STATE-CONFLICT`, wiederholbar. Ein `401` behauptete, mit dem
+/// Schluessel des Aufrufers sei etwas nicht in Ordnung.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_selected_head_behind_the_persisted_pin_is_refused() {
+    let database = common::fresh_database().await;
+    let fixture = common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[]).await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+
+    // Ohne Pin traegt der Administrator seine Autoritaet.
+    assert_eq!(
+        read_registry(&server, fixture.organization_id, [0x28; 16])
+            .await
+            .status,
+        200,
+        "the baseline must authenticate, otherwise the case proves nothing"
+    );
+
+    // Ein Pin, der VOR dem gewaehlten Kopf liegt (die Linie steht auf 2),
+    // aendert daran nichts.
+    set_pin(database.pool(), fixture.organization_id, 1, [0x00; 32]).await;
+    assert_eq!(
+        read_registry(&server, fixture.organization_id, [0x29; 16])
+            .await
+            .status,
+        200,
+        "a pin below the selected head is no downgrade"
+    );
+
+    // Ein Pin JENSEITS jedes bekannten Kopfes ist der Rueckfall.
+    set_pin(database.pool(), fixture.organization_id, 9_999, [0xd0; 32]).await;
+    let response = read_registry(&server, fixture.organization_id, [0x2a; 16]).await;
+    assert_eq!(
+        response.status, 503,
+        "a downgrade is a state finding and stays retryable"
+    );
+    assert_eq!(
+        error_code(&response.body).as_deref(),
+        Some("EA-TRUST-STATE-CONFLICT")
+    );
+
+    database.cleanup().await;
+}
+
+/// Ein signierter Registry-Lesezugriff mit GENAU dieser Request-ID.
+///
+/// Eine eigene Funktion und nicht [`device_is_authorized`]: jene fuehrt eine
+/// feste Request-ID, und ein zweiter Aufruf waere ein Einmalwertverbrauch und
+/// damit ein `401`, das nichts ueber den Pin sagt.
+async fn read_registry(
+    server: &common::TestServer,
+    organization_id: OrganizationId,
+    request_id: [u8; 16],
+) -> common::HttpResponse {
+    let nonce = fresh_challenge(server, organization_id).await;
+    let target = format!(
+        "{}?afterVersion=0",
+        EndpointV1::TrustRegistry.path_template()
+    );
+    let headers = common::signed_headers(&common::SignedCall {
+        signer: &signer(ADMIN_SEED),
+        endpoint: EndpointV1::TrustRegistry,
+        authority: &server.authority,
+        target: &target,
+        body: None,
+        organization_id,
+        request_id,
+        nonce,
+        created: 0,
+    });
+    common::https_request(
+        server.address,
+        &server.authority,
+        "GET",
+        &target,
+        &headers,
+        &[],
+    )
+    .await
+}
+
+/// Setzt den persistenten Pin des SERVERS von Hand.
+///
+/// Von Hand, weil der einzige schreibende Weg ihn nur VORWAERTS ruecken kann:
+/// den Rueckfall, den dieser Fall braucht, kann der Server selbst gar nicht
+/// erzeugen — genau darum muss er ihn erkennen.
+async fn set_pin(
+    pool: &PgPool,
+    organization_id: OrganizationId,
+    version: i64,
+    head_hash: [u8; 32],
+) {
+    sqlx::query(
+        "INSERT INTO trust_state (organization_id, device_id, revision, \
+         trusted_floor_millis, pinned_registry_version, pinned_registry_head_hash) \
+         VALUES ($1, $2, 1, 0, $3, $4) \
+         ON CONFLICT (organization_id, device_id) DO UPDATE SET \
+         pinned_registry_version = EXCLUDED.pinned_registry_version, \
+         pinned_registry_head_hash = EXCLUDED.pinned_registry_head_hash",
+    )
+    .bind(&organization_id.as_bytes()[..])
+    .bind(&einsatzarchiv_server::adapters::trust_authority::SERVER_TRUST_DEVICE_ID_V1[..])
+    .bind(version)
+    .bind(&head_hash[..])
+    .execute(pool)
+    .await
+    .expect("writing the fixture pin must succeed");
+}

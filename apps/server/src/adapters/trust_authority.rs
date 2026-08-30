@@ -164,6 +164,46 @@ impl PostgresTrustAuthority {
         Ok(row.and_then(|row| row.get::<Option<Vec<u8>>, _>("trust_anchor_bytes")))
     }
 
+    /// Der PERSISTENTE Registrierungspin des Servers.
+    ///
+    /// Er ist der BODEN der Autoritaetsaufloesung und nicht ihre Quelle: die
+    /// Auswahl selbst laeuft unveraendert auf dem fluechtigen Speicher, also
+    /// lesend und ohne Rennen. Gelesen wird nur, WIE WEIT der Bestand schon
+    /// einmal nachweislich war — ein Lauf, der dahinter zurueckfaellt, sieht
+    /// einen aelteren Katalog, als es einmal gab, und das ist ein Rueckfall
+    /// und keine Antwort.
+    ///
+    /// Gepinnt wird weiterhin AUSSCHLIESSLICH in
+    /// [`TrustEventValidator::advance_pinned_head`]. Dieser Weg SCHREIBT
+    /// nicht.
+    async fn pinned_head(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Option<(RegistryVersion, ObjectHash)>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT pinned_registry_version, pinned_registry_head_hash FROM trust_state \
+             WHERE organization_id = $1 AND device_id = $2",
+        )
+        .bind(&organization_id.as_bytes()[..])
+        .bind(&SERVER_TRUST_DEVICE_ID_V1[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| RepositoryError::Unavailable)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let (Some(version), Some(hash)) = (
+            row.get::<Option<i64>, _>("pinned_registry_version"),
+            row.get::<Option<Vec<u8>>, _>("pinned_registry_head_hash"),
+        ) else {
+            return Ok(None);
+        };
+        let version = u64::try_from(version).map_err(|_| RepositoryError::Unavailable)?;
+        let head_hash =
+            ObjectHash::try_from(hash.as_slice()).map_err(|_| RepositoryError::Unavailable)?;
+        Ok(Some((RegistryVersion::new(version), head_hash)))
+    }
+
     /// Alle indizierten `.etb` dieser Organisation, mit ihren EXAKTEN Bytes.
     ///
     /// Vorher geholt und nicht waehrend der Pruefung: `TrustObjectSource` ist
@@ -301,6 +341,26 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
             // Antwort und kein Ausfall.
             Err(HeadWalkError::NotApplicable | HeadWalkError::Invalid) => return Ok(None),
         };
+
+        // Der PERSISTENTE Pin ist der BODEN. Ein hier gewaehlter Kopf, der
+        // hinter ihn zurueckfaellt, ist ein Rueckfall auf einen Katalogstand,
+        // den es nachweislich schon einmal nicht mehr gab — und ein
+        // Rueckfall ist kein Autorisierungsbefund, sondern ein Zustandsbefund:
+        // `EA-TRUST-STATE-CONFLICT`, 503, wiederholbar. Ein `401` waere die
+        // Behauptung, mit dem SCHLUESSEL sei etwas nicht in Ordnung.
+        //
+        // Ohne Pin (frische Organisation) ist das ein reiner Durchlauf.
+        if let Some((pinned_version, pinned_head_hash)) = self
+            .pinned_head(organization_id)
+            .await
+            .map_err(|_| AuthorityError::Unavailable)?
+            && let Some(selected) = head.as_ref()
+            && (selected.registry_version().get() < pinned_version.get()
+                || (selected.registry_version() == pinned_version
+                    && selected.registry_head_hash() != pinned_head_hash))
+        {
+            return Err(AuthorityError::StateConflict);
+        }
 
         // Ohne Kopf gelten die vom ANKER benannten Administratorzertifikate.
         // Sonst koennte eine frische Organisation ihren ersten Kopf nie

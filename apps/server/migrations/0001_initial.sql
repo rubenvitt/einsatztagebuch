@@ -326,26 +326,49 @@ CREATE TABLE request_ids (
 );
 
 -- Security Events, append-only. `subject_key` traegt AUSSCHLIESSLICH eine
--- technische Kennung — einen Objektschluessel, einen Hex-Hash oder eine
--- Sequenz. Eine freie Beschreibung gibt es bewusst nicht: sie waere der Kanal,
--- ueber den ein fachlicher Wert doch noch in die Datenbank kaeme.
+-- technische Kennung — einen Objektschluessel oder einen Hex-Hash. Eine freie
+-- Beschreibung gibt es bewusst nicht: sie waere der Kanal, ueber den ein
+-- fachlicher Wert doch noch in die Datenbank kaeme.
+--
+-- Der CHECK ist die AUSFUEHRBARE Fassung dieses Satzes. Ohne ihn war die
+-- Spalte freier Text, und die Zusage stand nur im Kommentar. Zugelassen sind
+-- GENAU die beiden Formen, die der Server schreibt:
+--
+--   * der Eintragshash allein (`crates/ea-sync-server/src/commit.rs::record`),
+--   * der Objektschluessel `<typ>/<hex objectHash>`
+--     (`crates/ea-sync-server/src/models.rs::object_key`, geschrieben von
+--     `reconcile.rs` und dem S3-Adapter).
+--
+-- Die Typsegmente sind die sechs aus `object_type_segment`. Eine siebte
+-- Objektart faellt hier auf — und das ist der Zweck.
 CREATE TABLE security_events (
     security_event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     organization_id BYTEA NOT NULL CHECK (octet_length(organization_id) = 16),
     event_code TEXT NOT NULL,
-    subject_key TEXT NOT NULL,
+    subject_key TEXT NOT NULL CHECK (
+        subject_key ~ '^([0-9a-f]{64}|(eip|eag|esr|ecp|etb|eds)/[0-9a-f]{64})$'
+    ),
     observed_at_millis BIGINT NOT NULL
 );
 
 -- Technisches Administrationsaudit. Es protokolliert Verwaltungshandlungen am
 -- Server, nicht Einsaetze; der Handelnde steht als pseudonyme
 -- Operator-Kennung da.
+--
+-- `subject_key` traegt die drei Felder, die
+-- `apps/server/src/admin_audit.rs::subject_key` zusammensetzt:
+-- Geraetepseudonym hexadezimal, das Ergebnisliteral, und der Objekthash
+-- hexadezimal oder `-`. Der CHECK ist dieselbe Form, nur in der Datenbank —
+-- damit sie auch dann gilt, wenn eine spaetere Stufe die Zeile auf einem
+-- anderen Weg schreibt.
 CREATE TABLE technical_admin_audit (
     admin_audit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     operator_subject_id BYTEA NOT NULL CHECK (octet_length(operator_subject_id) = 16),
     action_code TEXT NOT NULL,
-    subject_key TEXT NOT NULL,
+    subject_key TEXT NOT NULL CHECK (
+        subject_key ~ '^[0-9a-f]{32}/(succeeded|refused|failed)/([0-9a-f]{64}|-)$'
+    ),
     recorded_at_millis BIGINT NOT NULL
 );
 

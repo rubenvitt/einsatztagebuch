@@ -2492,6 +2492,126 @@ fn declared_fault_points(
     declared.into_iter().collect()
 }
 
+/// Loest JEDEN `witness` des Stufe-3-Szenarienmanifests auf eine wirklich
+/// vorhandene Testfunktion auf.
+///
+/// Ohne diesen Schritt war `witness` ein Feld, das NICHTS liest: die neun
+/// Szenarien waren im Manifest benannt, ihre Zeugen aber nur behauptet, und
+/// eine umbenannte oder geloeschte Testfunktion liess die Fehlermatrix
+/// stillschweigend zu einem Dokument werden. Der Gate loest sie jetzt selbst
+/// auf — Datei UND Funktionsname —, und ein `#[test]`/`#[tokio::test]` vor der
+/// Funktion gehoert dazu: ein Hilfsfunktionsname derselben Schreibweise waere
+/// kein Zeuge.
+///
+/// Die Form ist `<pfad relativ zur Wurzel>::<funktionsname>`. Zurueck kommt
+/// die aufgeloeste Liste, damit ein gruener Lauf sie AUSWEIST statt zu
+/// schweigen.
+fn resolved_fault_point_witnesses(
+    gate_root: &Path,
+    manifest_path: &str,
+    required_sections: &[&str],
+    problems: &mut Vec<String>,
+) -> Vec<String> {
+    let path = gate_root.join(manifest_path);
+    let Ok(text) = fs::read_to_string(&path) else {
+        // Die fehlende Datei hat `declared_fault_points` bereits gemeldet; ein
+        // zweites Mal gemeldet stuende sie doppelt in der Sammelmeldung.
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(sections) = manifest.as_object() else {
+        return Vec::new();
+    };
+
+    let mut resolved = BTreeSet::new();
+    for section in required_sections.iter().copied() {
+        let entries = match sections.get(section) {
+            Some(serde_json::Value::Array(entries)) => entries.clone(),
+            Some(serde_json::Value::Object(nested)) => nested
+                .get("points")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            _ => continue,
+        };
+        for entry in &entries {
+            let name = entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unnamed>");
+            let witness = entry
+                .get("witness")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|witness| !witness.is_empty());
+            let Some(witness) = witness else {
+                problems.push(format!(
+                    "{}: {name} in the {section} section carries no witness",
+                    path.display()
+                ));
+                continue;
+            };
+            match witness_resolves(gate_root, witness) {
+                Ok(()) => {
+                    resolved.insert(witness.to_owned());
+                }
+                Err(reason) => problems.push(format!(
+                    "{}: the witness of {name} in the {section} section does not resolve: \
+                     {witness} — {reason}",
+                    path.display()
+                )),
+            }
+        }
+    }
+    resolved.into_iter().collect()
+}
+
+/// `<pfad>::<funktionsname>` — aufgeloest oder mit dem Grund abgewiesen.
+fn witness_resolves(gate_root: &Path, witness: &str) -> Result<(), String> {
+    let Some((relative, function)) = witness.split_once("::") else {
+        return Err("the shape is <path>::<function>".to_owned());
+    };
+    if relative.is_empty() || function.is_empty() || function.contains("::") {
+        return Err("the shape is <path>::<function>".to_owned());
+    }
+    let source_path = gate_root.join(relative);
+    let source = fs::read_to_string(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+
+    let lines: Vec<&str> = source.lines().collect();
+    let signature = format!("fn {function}(");
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let is_definition = trimmed.starts_with(&signature)
+            || trimmed.starts_with(&format!("async {signature}"))
+            || trimmed.starts_with(&format!("pub {signature}"))
+            || trimmed.starts_with(&format!("pub async {signature}"));
+        if !is_definition {
+            continue;
+        }
+        // Rueckwaerts durch Attribute und Kommentare: der Zeuge ist erst
+        // einer, wenn ein Testattribut unmittelbar davor steht.
+        let mut cursor = index;
+        while cursor > 0 {
+            let previous = lines[cursor - 1].trim_start();
+            if previous.starts_with("#[test]") || previous.starts_with("#[tokio::test") {
+                return Ok(());
+            }
+            if previous.is_empty() || previous.starts_with("//") || previous.starts_with('#') {
+                cursor -= 1;
+                continue;
+            }
+            break;
+        }
+        return Err(format!(
+            "{function} exists in {relative} but carries no #[test] or #[tokio::test]"
+        ));
+    }
+    Err(format!("{relative} declares no function {function}"))
+}
+
 /// Prueft die Deklarationen der Stufe 2 und schreibt den Bericht nach stdout.
 ///
 /// Der Zweig sammelt JEDEN unerfuellten Punkt und meldet sie gemeinsam,
@@ -2851,6 +2971,14 @@ fn run_stage_three_gate(root: &Path) -> Result<(), String> {
         None,
         &mut problems,
     );
+    // Und die Zeugen dazu: ein Szenarienname ohne aufloesbare Testfunktion
+    // ist eine Behauptung, keine Abdeckung.
+    let fault_point_witnesses = resolved_fault_point_witnesses(
+        &gate_root,
+        STAGE_THREE_FAULT_POINT_MANIFEST_PATH,
+        &STAGE_THREE_FAULT_POINT_SECTIONS,
+        &mut problems,
+    );
 
     // 4. Skripte. Sie verankern die Serverspur und die Lieferkettenspur im
     // Gate; `cargo deny` und `cargo test` ruft der Gate nie selbst auf und
@@ -2946,6 +3074,9 @@ fn run_stage_three_gate(root: &Path) -> Result<(), String> {
         // Berichtsschema wird ergaenzt, nie umbenannt, und der Inhalt ist
         // derselbe — die deklarierten Namen des Manifests.
         "declared_fault_points": declared_fault_points,
+        // Ergaenzt, nicht umbenannt: die AUFGELOESTEN Zeugen der neun
+        // Szenarien, jeder als `<pfad>::<funktion>`.
+        "stage_three_fault_point_witnesses": fault_point_witnesses,
         "stage_three_primary_acceptance_criteria": STAGE_THREE_PRIMARY_ACCEPTANCE_CRITERIA,
         "stage_three_rows_still_planned": still_planned,
     });

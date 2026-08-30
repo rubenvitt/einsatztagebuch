@@ -463,8 +463,14 @@ async fn the_search_finds_a_marker_that_really_lies_on_a_searched_surface() {
          observed_at_millis) VALUES ($1, $2, $3, $4)",
     )
     .bind(&closure.organization_id.as_bytes()[..])
-    .bind("EA-TEST-PLANTED")
+    // Der Marker steht im `event_code` und nicht mehr im `subject_key`: jene
+    // Spalte traegt seit dem CHECK in `0001_initial.sql` nur noch die beiden
+    // technischen Formen, und ein fachlicher Marker kaeme dort gar nicht
+    // hinein. Die Gegenkontrolle bleibt dieselbe — sie fragt, ob die
+    // Datenbanksuche einen WIRKLICH gepflanzten Marker findet, und dafuer ist
+    // eine freie Textspalte so gut wie die andere.
     .bind(canary("notes"))
+    .bind("a".repeat(64))
     .bind(SERVER_NOW_MILLIS)
     .execute(database.pool())
     .await
