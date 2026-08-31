@@ -19,6 +19,33 @@ use std::{
 use ea_reader::{GATE_ORDER_V1, ReaderMode};
 use ea_reader_wasm::bridge_echo;
 
+/// Sammelt JEDE `.rs`-Datei unter `directory`, REKURSIV.
+///
+/// Rekursiv und nicht flach, und das ist keine Vorsorge, sondern die
+/// Voraussetzung dafuer, dass der Zeuge weiter misst, was sein Name sagt: ein
+/// `fs::read_dir` ueber `src/` allein saehe `src/bridge/opfs.rs` NICHT, und
+/// `assert!(exports > 0)` bliebe an `lib.rs` trotzdem gruen. Der Zeuge meldete
+/// dann nichts und schwiege dabei laut. Nach der Messung im Doc-Kommentar
+/// unten ist er die einzige Instanz, die ein fehlendes cfg faengt; er darf
+/// keinen Winkel dieser Crate auslassen. Angelegt, solange die Crate EINE
+/// Quelle hat und es nichts kostet.
+fn collect_rust_sources(directory: &Path, into: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(directory).unwrap_or_else(|error| {
+        panic!(
+            "{} must be a readable directory: {error}",
+            directory.display()
+        )
+    });
+    for entry in entries {
+        let path = entry.expect("readable directory entry").path();
+        if path.is_dir() {
+            collect_rust_sources(&path, into);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            into.push(path);
+        }
+    }
+}
+
 /// Der Rundlauf in BEIDE Richtungen: ein Argument geht hinein, ein anderer
 /// Wert kommt heraus. Ein Export, der nur einen Rueckgabewert liefert, belegt
 /// nicht, dass Argumente die Grenze ueberhaupt erreichen — genau die Luecke,
@@ -33,6 +60,14 @@ fn the_bridge_returns_what_its_caller_hands_it() {
 /// deshalb nur die LAGE des Exports, und die wird als Text gelesen — dieselbe
 /// Bauform, mit der `every_crates_member_is_classified_for_the_wasm32_gate`
 /// den wasm32-Block aus `tools/xtask/src/main.rs` liest.
+///
+/// # Die verlangte Bauform ist das cfg AM ITEM
+///
+/// Das `#[cfg(target_arch = "wasm32")]` steht unmittelbar ueber dem Attribut
+/// jeder einzelnen Ausfuhr, nicht am umschliessenden `mod`. Ein Modultor waere
+/// fuer die Uebersetzung gleichwertig, fuer diesen Zeugen aber unsichtbar: er
+/// liest Text und folgt keinem `mod`. Die Regel ist deshalb die engere von
+/// beiden — je Ausfuhr ein cfg —, und die Fehlermeldung unten sagt es.
 ///
 /// # Dieser Zeuge ist die EINZIGE Instanz, und das ist GEMESSEN
 ///
@@ -55,18 +90,19 @@ fn the_bridge_returns_what_its_caller_hands_it() {
 /// oder gar nicht, und die Ausfuhr wandert unbemerkt in die Wirtsbibliothek.
 #[test]
 fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
-    // Der Zeuge laeuft ueber JEDE Quelle der Bruecke und ueber BEIDE
+    // Der Zeuge laeuft ueber JEDE Quelle der Bruecke — rekursiv, siehe
+    // `collect_rust_sources` — und ueber BEIDE
     // Schreibweisen des Attributs. Acht spaetere Module — `bridge.rs`,
     // `opfs_worker.rs`, `vault_bridge.rs`, `webauthn.rs`, `fetch.rs`,
     // `file_access.rs`, `visibility.rs`, `view.rs` — legen Ausfuhren an, und
     // sie schreiben `#[wasm_bindgen(js_name = …)]` nach einem
     // `use wasm_bindgen::prelude::*;`. Ein Zeuge, der nur `src/lib.rs` liest
     // und nur die voll qualifizierte Form kennt, saehe keine davon.
-    let mut sources: Vec<PathBuf> = fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
-        .expect("the bridge crate must have a src directory")
-        .map(|entry| entry.expect("readable directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .collect();
+    let mut sources: Vec<PathBuf> = Vec::new();
+    collect_rust_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
     sources.sort();
     assert!(
         !sources.is_empty(),
@@ -90,9 +126,13 @@ fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
                 source[..index]
                     .trim_end()
                     .ends_with("#[cfg(target_arch = \"wasm32\")]"),
-                "a wasm_bindgen export without the wasm32 cfg is compiled into the HOST \
-                 library as well, and NOTHING ELSE reports it: on exactly this mutation \
-                 `cargo build --lib`, `cargo test --all-targets --no-run` and \
+                "every wasm_bindgen export must carry `#[cfg(target_arch = \"wasm32\")]` on \
+                 the ITEM ITSELF, on the line directly above the attribute. A cfg on the \
+                 enclosing `mod` instead does not satisfy this witness and is not the \
+                 required shape: the witness reads text and cannot follow a module gate. \
+                 Without a per-item cfg the export is compiled into the HOST library as well, \
+                 and NOTHING ELSE reports it — on exactly that mutation `cargo build --lib`, \
+                 `cargo test --all-targets --no-run` and \
                  `cargo clippy --all-targets -- -D warnings` were all measured to end with 0. \
                  This witness is the only instance that catches it: {}",
                 path.display()
@@ -102,9 +142,21 @@ fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
     assert!(exports > 0, "the bridge must export at least once");
 }
 
-/// `ea-reader` traegt in diesem Task KEINE Rechnung. Die zwei Zusicherungen
-/// sind: der Modus ist geschlossen und zweiwertig, und die Gate-Reihenfolge
-/// kommt aus `ea-verify` und wird hier nicht ein zweites Mal geschrieben.
+/// `ea-reader` traegt in diesem Task KEINE Rechnung. Was hier steht, sind
+/// WERTPINS und keine Struktursicherungen, und das gehoert dazugesagt.
+///
+/// `assert_eq!(GATE_ORDER_V1, ea_verify::GATE_ORDER_V1)` vergleicht DURCH den
+/// Re-Export hindurch und ist heute tautologisch: die zwei Namen bezeichnen
+/// dasselbe Element. Eine handkopierte Liste gleichen Inhalts bliebe hier
+/// gruen. Dass es keine zweite Liste GIBT, sagt das `pub use` in
+/// `crates/ea-reader/src/lib.rs` und nicht dieser Test; die Zusicherung faengt
+/// erst dann etwas, wenn `ea-reader` je eine eigene Konstante deklarierte —
+/// dann misst sie deren Inhaltsgleichheit.
+///
+/// `ReaderMode::ALL.len()` pinnt ebenso einen WERT und keine Vollstaendigkeit.
+/// Die Geschlossenheit erzwingt der erschoepfende `match` in
+/// `ReaderMode::code`; aufgeschrieben und gemessen ist das an
+/// `crates/ea-reader/src/mode.rs`.
 #[test]
 fn the_reader_crate_reexports_the_gate_order_instead_of_redeclaring_it() {
     assert_eq!(GATE_ORDER_V1, ea_verify::GATE_ORDER_V1);

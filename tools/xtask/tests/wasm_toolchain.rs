@@ -107,8 +107,13 @@ fn mise_cargo_tool_pin(root: &Path, tool: &str) -> String {
 /// `tools/xtask/src/main.rs`.
 ///
 /// `build_wasm_builds_without_inherited_rustflags` prueft eine SOURCE-Aussage
-/// (`env_remove("RUSTFLAGS")`) und keine Laufzeitaussage: das Verhalten selbst
-/// ist unbeobachtbar, solange `crates/ea-reader-wasm` nicht existiert. Sowohl
+/// (`env_remove("RUSTFLAGS")`) und keine Laufzeitaussage. Bis zur Aufgabe
+/// „wasm32-Reichweite" war das Verhalten unbeobachtbar, weil
+/// `crates/ea-reader-wasm` nicht existierte; seither waere es beobachtbar, aber
+/// nur um den Preis, den `build_wasm_rejects_every_argument_and_finds_the_bridge_crate`
+/// aufschreibt — ein echter wasm-Bau samt Generatorlauf aus einem gewoehnlichen
+/// `cargo test` heraus, der Dateien einer kuenftigen Aufgabe anlegt. Die
+/// SOURCE-Aussage bleibt deshalb die richtige Form. Sowohl
 /// `run_process` als auch `run_process_without_rustflags` delegieren an
 /// `run_process_impl`, und NUR dessen Koerper traegt das
 /// `Command::env_remove("RUSTFLAGS")`. Ein Lauf ueber die GANZE Datei bestuende
@@ -145,8 +150,48 @@ fn the_wasm_bindgen_cli_pin_equals_the_locked_crate_version() {
     );
 }
 
+/// Die Argumentgrammatik von `build-wasm` und dass seine Vorbedingung erfuellt
+/// ist — OHNE einen Bau anzustossen.
+///
+/// # Die dritte Zusicherung war eine ABWESENHEIT und ist jetzt eine ANWESENHEIT
+///
+/// Bis zur Aufgabe „wasm32-Reichweite: `ea-reader`, die Bruecken-Crate und die
+/// geteilten Browserkerne" gab es `crates/ea-reader-wasm` nicht, und dieser
+/// Zeuge hielt fest, dass `build-wasm` das FEHLENDE Artefakt mit einer
+/// Anweisung meldet statt einen cargo-Fehler durchzureichen. Genau jene Aufgabe
+/// legt die Crate an. Eine Zusicherung, die eine Abwesenheit misst, ist damit
+/// unerfuellbar geworden — und sie wird in DEMSELBEN Commit ersetzt, der den
+/// Zustand beendet, statt rot liegenzubleiben.
+///
+/// # Warum hier KEIN echter Bau steht
+///
+/// Der naheliegende Ersatz waere, `run_gate(["build-wasm"])` jetzt gelingen zu
+/// lassen. Das ist GEMESSEN die falsche Wahl. Mit vorhandener Crate laeuft
+/// `run_build_wasm` durch bis `cargo build --target wasm32-unknown-unknown -p
+/// ea-reader-wasm --lib` und den `wasm-bindgen`-Generatorlauf und LEGT DABEI
+/// `apps/web/src/bridge/pkg/` mit vier Dateien an: `ea_reader_wasm.js`,
+/// `ea_reader_wasm.d.ts`, `ea_reader_wasm_bg.wasm` und
+/// `ea_reader_wasm_bg.wasm.d.ts`. `apps/web/` gehoert der Aufgabe „`apps/web`,
+/// die wasm-bindgen-Bruecke, der OPFS-Bytespeicher und der Laufzeitnachweis im
+/// Gate" und trug am Ausgangsstand dieses Zweiges keine einzige Datei
+/// (`git ls-tree -r <base> -- apps/web` ist leer). Ein gewoehnlicher
+/// `cargo test`-Lauf legte also einen Teil einer KUENFTIGEN Aufgabe an, und nur
+/// die generische `pkg/`-Regel in `.gitignore` haelt das aus `git status`
+/// heraus — ein Seiteneffekt, den niemand sieht, ist der schlechtere.
+///
+/// Er machte ausserdem ein bereitgestelltes `wasm32-unknown-unknown` und eine
+/// zeichengleich installierte `wasm-bindgen-cli` zu harten Vorbedingungen der
+/// schlichten Testsuite. Genau dafuer trug die alte Fassung zwei
+/// HOST-NOT-PROVISIONED-Zweige; sie entfallen mit dieser, weil kein Wirt mehr
+/// bereitgestellt sein muss.
+///
+/// Geprueft wird deshalb die Vorbedingung selbst: `ensure_bridge_crate_exists`
+/// liest `WASM_BRIDGE_CRATE_MANIFEST`, und dass dieses Manifest liegt, ist die
+/// ganze Aussage, die ohne Bau belegbar ist. Der Bau ist Gegenstand des
+/// Gate-Kommandos `xtask build-wasm` und der genannten Aufgabe, nicht dieses
+/// Testziels.
 #[test]
-fn build_wasm_rejects_every_argument_and_reports_the_missing_bridge_crate() {
+fn build_wasm_rejects_every_argument_and_finds_the_bridge_crate() {
     assert_eq!(
         run_gate(["build-wasm", "reader"]).unwrap_err(),
         "build-wasm does not accept arguments"
@@ -155,40 +200,14 @@ fn build_wasm_rejects_every_argument_and_reports_the_missing_bridge_crate() {
         run_gate(["build-wasmm"]).unwrap_err(),
         "unknown gate: build-wasmm"
     );
-    // Solange `crates/ea-reader-wasm/Cargo.toml` fehlt, meldet der Vorlauf das
-    // FEHLENDE ARTEFAKT mit einer Anweisung statt einen cargo-Fehler
-    // durchzureichen. Kein Ueberspringen ueber eine Umgebungsvariable.
-    //
-    // `ensure_wasm32_target_available()` und
-    // `ensure_wasm_bindgen_cli_matches_lockfile()` laufen davor, in genau der
-    // Reihenfolge, die `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`
-    // vorschreibt, und werden hier NICHT umgangen. Auf einem unprovisionierten
-    // Wirt — Zielziel `wasm32-unknown-unknown` fehlt, oder die installierte
-    // `wasm-bindgen-cli` fehlt oder weicht vom gepinnten Lockfile-Stand ab —
-    // faellt der Aufruf deshalb an einer FRUEHEREN Stelle als der
-    // Bruecken-Crate-Pruefung. Das ist ein Befund ueber den WIRT und keiner
-    // ueber `build-wasm`; die beiden Zweige unten machen genau diesen
-    // Unterschied laut, statt den generischen Assertion-Fehlschlag der dritten
-    // Pruefung stehen zu lassen.
-    let error = run_gate(["build-wasm"]).unwrap_err();
-    if error.contains("wasm32-unknown-unknown is not installed") {
-        panic!(
-            "HOST NOT PROVISIONED, not a build-wasm defect: wasm32-unknown-unknown is not \
-             installed for the active toolchain. Run `rustup target add wasm32-unknown-unknown` \
-             and re-run this test. Reported error: {error}"
-        );
-    }
-    if error.contains("wasm-bindgen-cli") {
-        panic!(
-            "HOST NOT PROVISIONED, not a build-wasm defect: the installed wasm-bindgen-cli is \
-             missing or does not match the version Cargo.lock resolves for wasm-bindgen. \
-             Install the version mise.toml pins under cargo:wasm-bindgen-cli and re-run this \
-             test. Reported error: {error}"
-        );
-    }
+    // Zeichengleich der Pfad, den `ensure_bridge_crate_exists` in
+    // `tools/xtask/src/main.rs` als `WASM_BRIDGE_CRATE_MANIFEST` liest.
     assert!(
-        error.contains("crates/ea-reader-wasm"),
-        "build-wasm must name the missing bridge crate; got: {error}"
+        workspace_root()
+            .join("crates/ea-reader-wasm/Cargo.toml")
+            .is_file(),
+        "ensure_bridge_crate_exists reads crates/ea-reader-wasm/Cargo.toml; without that \
+         manifest `xtask build-wasm` has nothing to build"
     );
 }
 

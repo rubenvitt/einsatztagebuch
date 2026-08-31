@@ -59,6 +59,11 @@ fn a_hand_built_container_hands_out_its_blobs_without_touching_the_filesystem() 
             Ok(())
         })
         .unwrap();
+    assert_eq!(
+        seen.len(),
+        2,
+        "beide Blobs muessen herauskommen, nicht einer"
+    );
     assert_eq!(seen[0].0, "trust/root.etb");
     assert_eq!(seen[1].1, b"BB".to_vec());
 }

@@ -996,8 +996,11 @@ const MEASURED_RUN_HEADING: &str = "## Gemessener Gate-Lauf";
 /// in genau der Reihenfolge, in der der Plan sie vorschreibt.
 ///
 /// Der wasm32-Check steht mit seinem Praefix, nicht mit seiner vollen
-/// Positivliste: die Belegzeile MUSS ihn nennen, soll die Liste der zehn Crates
-/// aber nicht ein zweites Mal woertlich abschreiben.
+/// Positivliste: die Belegzeile MUSS ihn nennen, soll die Liste der Crates aber
+/// nicht ein zweites Mal woertlich abschreiben. Wie lang die Liste WAR, als der
+/// Stufe-1-Lauf sie fuhr, steht im Stufe-1-Bericht und nicht hier; sie ist
+/// seither gewachsen, und dieser Pin misst die Kommandofolge und nicht ihre
+/// Laenge.
 const STEP_FOUR_COMMANDS: [&str; 8] = [
     "pnpm test:core",
     "pnpm test:golden",

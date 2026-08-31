@@ -1,9 +1,13 @@
 #![forbid(unsafe_code)]
 //! Die WIRTIMPLEMENTIERUNGEN der Archivports.
 //!
-//! `crates/ea-archive` traegt ausschliesslich zielunabhaengige Ports und
-//! beruehrt kein `std::fs`; es bleibt damit auf der wasm32-Positivliste, deren
-//! Text der geschlossene Stufe-1-Gate einfriert. Alles, was dahinter das
+//! `crates/ea-archive` traegt die zielunabhaengigen Ports UND — seit Stufe 4 —
+//! den host-freien Leser des Ein-Datei-Containers; es beruehrt kein `std::fs`
+//! und bleibt damit auf der wasm32-Positivliste. Eingefroren ist an dieser
+//! Liste die REICHWEITENKLAUSEL des Stufe-1-Gate-Berichts und nicht ihr
+//! Bestand: sie waechst, wenn Browsercode dazukommt, und zwar in genau dem
+//! Task, der ihn anlegt (der Kommentar ueber dem wasm32-Block in
+//! `tools/xtask/src/main.rs` schreibt die Regel auf). Alles, was dahinter das
 //! Wirtbetriebssystem braucht — Create-if-absent, Datei- und
 //! Verzeichnis-Flush, dateisysteminterner Rename, exklusive Sperre,
 //! Publikationswarteschlange, Gesundheitscheck und der auditierte

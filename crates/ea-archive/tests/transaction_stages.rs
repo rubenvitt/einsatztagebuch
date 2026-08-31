@@ -1,8 +1,8 @@
 //! Der Staging-Vertrag der Archivtransaktion, OHNE Dateisystem.
 //!
-//! `crates/ea-archive` traegt nur zielunabhaengige Ports; die Attrappe im
-//! Supportmodul haelt Bytes, Flushes und Sperre im Speicher. Damit ist die
-//! Zusage „nach einem fehlgeschlagenen Flush existiert keine Zieladresse"
+//! `crates/ea-archive` traegt fuer den Backend-Port keine Implementierung; die
+//! Attrappe im Supportmodul haelt Bytes, Flushes und Sperre im Speicher. Damit
+//! ist die Zusage „nach einem fehlgeschlagenen Flush existiert keine Zieladresse"
 //! nachweisbar, ohne dass diese Crate `std::fs` beruehrt.
 
 mod support;
