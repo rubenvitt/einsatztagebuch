@@ -5,7 +5,7 @@ use std::sync::Arc;
 ///
 /// Der Wirt liefert die Implementierung; diese Crate kennt sie nicht. Genau
 /// deshalb kann [`WriterLock`] hier leben, obwohl das Freigeben eine
-/// Dateisystemoperation ist: `ea-archive` traegt nur Ports und kein `std::fs`
+/// Dateisystemoperation ist: `ea-archive` beruehrt kein `std::fs`
 /// (`crates/ea-archive/src/source.rs`) und bleibt damit auf der
 /// wasm32-Positivliste.
 pub trait WriterLockRelease: Send + Sync {

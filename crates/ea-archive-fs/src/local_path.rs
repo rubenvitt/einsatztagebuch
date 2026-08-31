@@ -2,8 +2,9 @@
 //! `std::fs`.
 //!
 //! Diese Datei ist der Grund, aus dem `ea-archive-fs` ueberhaupt existiert.
-//! `ea-archive` traegt nur zielunabhaengige Ports und darf `std::fs` nicht
-//! beruehren, sonst faellt es von der wasm32-Positivliste. Hier steht das
+//! `ea-archive` darf `std::fs` nicht beruehren, sonst faellt es von der
+//! wasm32-Positivliste — es traegt die zielunabhaengigen Ports und den
+//! host-freien Containerleser, aber keine Wirtimplementierung. Hier steht das
 //! Gegenstueck.
 
 use std::{

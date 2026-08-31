@@ -250,10 +250,11 @@ Repo-`Cargo.lock` bleiben unberuehrt (`git status --porcelain` zeigt nur `?? spi
 
 Folge davon: der Spike liegt ausserhalb von `cargo xtask`, `deny.toml` und dem
 wasm32-Gate. Er gehoert **nicht** auf die Positivliste in
-`tools/xtask/src/main.rs` (dort steht „wird nicht erweitert", und
-`tools/xtask/tests/workspace.rs:160` bindet die Liste zeichengleich an den
-Stufe-1-Plan) und liegt bewusst nicht unter `crates/`, wo derselbe Test eine
-Klassifikation erzwingen wuerde.
+`tools/xtask/src/main.rs`: die Liste waechst nur um Mitglieder unter
+`crates/`, und `tools/xtask/tests/workspace.rs:160` haelt sie als MENGE gegen
+die Kommandozeile des Stufe-1-Plans. Der Spike ist kein Workspace-Mitglied und
+liegt bewusst nicht unter `crates/`, wo derselbe Test eine Klassifikation
+erzwingen wuerde.
 
 ### e) Kein `RUSTFLAGS`, kein `.cargo/config.toml` im Spike
 

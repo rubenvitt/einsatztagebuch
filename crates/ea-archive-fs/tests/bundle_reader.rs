@@ -18,7 +18,7 @@ mod support;
 use ea_archive::{MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1};
 use ea_archive_fs::{
     ArchiveBundleSource, BUNDLE_HEADER_BYTES_V1, BUNDLE_MAGIC_V1, BundleError,
-    FORMAT_PACKAGE_FILES_V1, write_archive_bundle,
+    FORMAT_PACKAGE_FILES_V1, open_archive_bundle, write_archive_bundle,
 };
 
 use support::{BundleHarness, path_hints_of};
@@ -238,7 +238,7 @@ fn the_bundle_carries_the_format_package_and_every_non_object_file() {
         &harness.bundle_path(),
     )
     .unwrap();
-    let bundle = ArchiveBundleSource::open(&harness.bundle_path()).unwrap();
+    let bundle = open_archive_bundle(&harness.bundle_path()).unwrap();
     let paths = path_hints_of(&bundle);
     for (expected, _) in FORMAT_PACKAGE_FILES_V1 {
         assert!(

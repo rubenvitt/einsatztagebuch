@@ -22,6 +22,8 @@ const WORKSPACE_MEMBERS: &[&str] = &[
     "crates/ea-archive-fs",
     "crates/ea-chain",
     "crates/ea-verify",
+    "crates/ea-reader",
+    "crates/ea-reader-wasm",
     "crates/ea-recovery",
     "crates/ea-testkit",
     "crates/ea-key-provider",

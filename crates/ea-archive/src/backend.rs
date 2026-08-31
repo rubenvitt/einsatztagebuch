@@ -11,9 +11,8 @@ use crate::{ArchiveBackendError, ArchivePath, WriterLock};
 /// verbirgt, liesse sich nicht getrennt nachweisen.
 ///
 /// Alle Methoden sind SYNCHRON, wie der ganze Rust-Kern. Diese Crate enthaelt
-/// bewusst KEINE Implementierung: `ea-archive` traegt nur
-/// zielunabhaengige Ports und kein `std::fs`. Jede Wirtimplementierung lebt in
-/// `ea-archive-fs`.
+/// bewusst KEINE Implementierung DIESES Ports: `ea-archive` beruehrt kein
+/// `std::fs`. Jede Wirtimplementierung lebt in `ea-archive-fs`.
 pub trait ArchiveBackend: Send + Sync {
     /// Legt ein Archivobjekt an, wenn der Pfad frei ist.
     ///

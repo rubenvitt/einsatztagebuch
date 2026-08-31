@@ -11,7 +11,7 @@ mod support;
 
 use std::fs;
 
-use ea_archive_fs::{ArchiveBundleSource, BUNDLE_MAGIC_V1, BundleError, write_archive_bundle};
+use ea_archive_fs::{BUNDLE_MAGIC_V1, BundleError, open_archive_bundle, write_archive_bundle};
 
 use support::{BundleHarness, digest_map_of};
 
@@ -28,7 +28,7 @@ fn bundle_is_byte_preserving_under_the_same_relative_paths() {
     )
     .expect("der Export muss gelingen");
 
-    let reopened = ArchiveBundleSource::open(&harness.bundle_path()).unwrap();
+    let reopened = open_archive_bundle(&harness.bundle_path()).unwrap();
     assert_eq!(digest_map_of(&reopened), before);
     assert_eq!(harness.digest_map(), before, "die Quelle wird nur gelesen");
     assert_eq!(report.blob_count(), before.len());
@@ -51,7 +51,7 @@ fn bundle_verifies_to_the_same_report_as_the_directory() {
         harness.options(),
     )
     .unwrap();
-    let bundle = ArchiveBundleSource::open(&harness.bundle_path()).unwrap();
+    let bundle = open_archive_bundle(&harness.bundle_path()).unwrap();
     let from_bundle =
         ea_verify::verify_archive(&bundle, harness.anchor(), harness.options()).unwrap();
 

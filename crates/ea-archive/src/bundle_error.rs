@@ -1,4 +1,4 @@
-//! Der Fehler des Ein-Datei-Buendelexports.
+//! Der Fehler des Ein-Datei-Buendels.
 
 use core::fmt;
 
@@ -6,14 +6,21 @@ use core::fmt;
 ///
 /// # Er erreicht die Traitgrenze NICHT
 ///
-/// [`ArchiveSource::visit_blobs`](ea_archive::ArchiveSource::visit_blobs)
-/// bleibt auf `Result<(), ArchiveError>` festgelegt
-/// (`crates/ea-archive/src/source.rs:68-72`); jeder Fall dieses Typs entsteht
-/// in [`write_archive_bundle`](crate::write_archive_bundle),
-/// [`ArchiveBundleSource::open`](crate::ArchiveBundleSource::open) oder
+/// [`ArchiveSource::visit_blobs`](crate::ArchiveSource::visit_blobs) bleibt auf
+/// `Result<(), ArchiveError>` festgelegt (`crates/ea-archive/src/source.rs`);
+/// jeder Fall dieses Typs entsteht in
 /// [`ArchiveBundleSource::from_bytes`](crate::ArchiveBundleSource::from_bytes)
-/// und endet dort. Der Container ist eine Transportschale und veraendert
-/// keinen bestehenden Port.
+/// oder in den Wirtswegen `ea_archive_fs::open_archive_bundle` und
+/// `ea_archive_fs::write_archive_bundle` und endet dort. Der Container ist eine
+/// Transportschale und veraendert keinen bestehenden Port.
+///
+/// # Die Liste bleibt GESCHLOSSEN, auch ueber die Crategrenze
+///
+/// `Io` steht hier, obwohl diese Crate kein `std::fs` beruehrt: die Variante
+/// wird ausschliesslich in `crates/ea-archive-fs` konstruiert, und eine zweite
+/// Fehleraufzaehlung dort waere der Weg, auf dem zwei Codes fuer denselben
+/// Befund entstehen. Der Fehler des Containers gehoert zum Container, und der
+/// Wirtsteil borgt ihn sich, statt ihn zu spiegeln.
 ///
 /// # Kein Byte und kein Wirtpfad in der Ausgabe
 ///
@@ -44,10 +51,10 @@ pub enum BundleError {
     /// abgeschnittene Nutzlast.
     Malformed,
     /// Der Container fuehrt mehr Bytesequenzen als
-    /// [`MAX_ARCHIVE_BLOBS_V1`](ea_archive::MAX_ARCHIVE_BLOBS_V1).
+    /// [`MAX_ARCHIVE_BLOBS_V1`](crate::MAX_ARCHIVE_BLOBS_V1).
     BlobLimit,
     /// Die Nutzlast ueberschreitet
-    /// [`MAX_TOTAL_ARCHIVE_BYTES_V1`](ea_archive::MAX_TOTAL_ARCHIVE_BYTES_V1).
+    /// [`MAX_TOTAL_ARCHIVE_BYTES_V1`](crate::MAX_TOTAL_ARCHIVE_BYTES_V1).
     TotalByteLimit,
     /// Das Wirtdateisystem hat die Operation abgelehnt.
     Io,

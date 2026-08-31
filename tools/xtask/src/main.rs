@@ -97,11 +97,17 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
         // Positivliste, nicht --workspace: xtask zieht jsonschema/cddl und
         // std::process::Command und ist nicht wasm-tauglich. Nicht --all-targets:
         // das zoege Dev-Dependencies und Integrationstests in den wasm-Graph.
-        // Diese Positivliste ist zeichengleich an die Kommandozeile des
-        // abgeschlossenen Stufe-1-Plans gebunden (tools/xtask/tests/workspace.rs:259-287)
-        // und wird nicht erweitert. Jede neue Crate unter crates/ gehoert mit
-        // nicht-leerer Begruendung in WASM32_EXEMPT_CRATES; workspace.rs erzwingt
-        // genau eine Zuordnung je Mitglied unter crates/.
+        // Diese Positivliste bleibt an die Kommandozeile des Stufe-1-Plans
+        // gebunden, und die Bindung ist eine MENGENGLEICHHEIT: was hier steht,
+        // steht dort, durchgesetzt von
+        // every_crates_member_is_classified_for_the_wasm32_gate in
+        // tools/xtask/tests/workspace.rs. Die Liste WAECHST, wenn Browsercode
+        // dazukommt — web-reader-design.md §12 macht ea-reader wasm32-faehig —,
+        // und sie waechst in genau dem Task, der die Crate anlegt, nie spaeter.
+        // Was NICHT waechst, ist die Ausnahmeliste um eine Crate des Browsers:
+        // ihr Kriterium steht in ihrem eigenen Doc-Kommentar und ist der Griff
+        // ueber ea-verify hinaus in das Wirtbetriebssystem. workspace.rs
+        // erzwingt genau EINE Zuordnung je Mitglied unter crates/.
         (
             "cargo",
             vec![
@@ -129,6 +135,12 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
                 "ea-chain",
                 "-p",
                 "ea-verify",
+                "-p",
+                "ea-sync-protocol",
+                "-p",
+                "ea-reader",
+                "-p",
+                "ea-reader-wasm",
             ],
         ),
     ]
@@ -227,8 +239,9 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          system and is not shared browser code: `web-reader-design.md` §9 makes \
          only the verification pipeline shared Rust, and that pipeline ends at \
          `ea-verify`, which stays on the positive list. `ea-archive` itself \
-         keeps only target-independent ports and therefore stays there too; \
-         this crate depends on both, never the other way round.",
+         carries the target-independent ports AND the host-free bundle \
+         container, touches no `std::fs`, and therefore stays there too; this \
+         crate depends on both, never the other way round.",
     ),
     (
         "ea-writer",
@@ -240,17 +253,6 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          Rust, and that pipeline ends at `ea-verify`, which stays on the \
          positive list. The Reader is a browser PWA and never writes an archive \
          object at all.",
-    ),
-    (
-        "ea-sync-protocol",
-        "carries the RFC-9421 request verification against a server-side nonce and \
-         request-ID store plus the streamed body limits of the sync protocol; Stage 3 \
-         ships no browser path that loads this crate, so it need not compile for \
-         wasm32-unknown-unknown. The browser access of web-reader-design.md §12 is \
-         built in Stage 4 with apps/web/ea-reader; the collision between \
-         web-reader-design.md:469 and the frozen sentence in tools/xtask/src/main.rs \
-         („wird nicht erweitert“) is noted there as a Stage 4 Vorbehalt and is not \
-         resolved here.",
     ),
     (
         "ea-sync-server",
@@ -424,11 +426,16 @@ fn ensure_wasm_bindgen_cli_matches_lockfile(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Die Bruecken-Crate, die die Aufgabe „wasm32-Reichweite: `ea-reader`, die
-/// Bruecken-Crate und die geteilten Browserkerne" anlegt. Bis dahin ist
-/// `build-wasm` ein vollstaendig gebautes, vollstaendig getestetes Kommando
-/// ohne Artefakt — das Kommando entsteht VOR seinem Gegenstand, wie
-/// `integration up` in Stufe 3 vor `apps/server` entstand.
+/// Das Manifest der Bruecken-Crate, die `build-wasm` baut.
+///
+/// Angelegt hat sie die Aufgabe „wasm32-Reichweite: `ea-reader`, die
+/// Bruecken-Crate und die geteilten Browserkerne". Bis dahin WAR `build-wasm`
+/// ein vollstaendig gebautes, vollstaendig getestetes Kommando ohne
+/// Gegenstand — es entstand VOR ihm, wie `integration up` in Stufe 3 vor
+/// `apps/server`. Seither hat es einen. Die Pruefung bleibt trotzdem stehen:
+/// ein geloeschtes oder verschobenes Manifest meldet sie mit einer klaren
+/// Anweisung, statt einen cargo-Fehler ueber ein unbekanntes Paket
+/// durchzureichen.
 const WASM_BRIDGE_CRATE_MANIFEST: &str = "crates/ea-reader-wasm/Cargo.toml";
 
 fn ensure_bridge_crate_exists(root: &Path) -> Result<(), String> {
@@ -436,9 +443,9 @@ fn ensure_bridge_crate_exists(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "{WASM_BRIDGE_CRATE_MANIFEST} does not exist yet. It is created by the task \
-         \"wasm32-Reichweite: `ea-reader`, die Bruecken-Crate und die geteilten \
-         Browserkerne\"; build-wasm has nothing to build until then."
+        "{WASM_BRIDGE_CRATE_MANIFEST} does not exist. It carries the wasm-bindgen bridge \
+         that build-wasm compiles and the generator then processes; without that manifest \
+         there is nothing to build."
     ))
 }
 
@@ -4139,6 +4146,12 @@ vor Task 3 akzeptiert
                         "ea-chain",
                         "-p",
                         "ea-verify",
+                        "-p",
+                        "ea-sync-protocol",
+                        "-p",
+                        "ea-reader",
+                        "-p",
+                        "ea-reader-wasm",
                     ],
                 ),
             ]

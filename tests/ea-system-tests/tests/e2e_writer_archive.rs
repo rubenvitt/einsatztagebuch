@@ -21,7 +21,7 @@
 
 mod support;
 
-use ea_archive_fs::{ArchiveBundleSource, BundleError, write_archive_bundle};
+use ea_archive_fs::{BundleError, open_archive_bundle, write_archive_bundle};
 use ea_operator::ReauthPurpose;
 
 use support::{WriterMatrixHarness, writer_support};
@@ -185,7 +185,7 @@ fn the_single_file_bundle_refuses_a_committed_archive_that_does_not_fully_verify
         "ein abgewiesener Export legt keine Zieldatei an"
     );
     assert!(
-        ArchiveBundleSource::open(&target).is_err(),
+        open_archive_bundle(&target).is_err(),
         "es gibt kein Buendel zu oeffnen"
     );
 }

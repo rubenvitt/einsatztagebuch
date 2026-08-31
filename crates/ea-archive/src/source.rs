@@ -64,6 +64,10 @@ impl fmt::Debug for ArchiveBlob<'_> {
 ///
 /// Diese Crate enthaelt bewusst KEINE dateisystemgestuetzte Implementierung
 /// und kein `std::fs`; eine solche entsteht ausserhalb.
+/// [`ArchiveBundleSource`](crate::ArchiveBundleSource) ist keine Ausnahme
+/// davon, sondern die zweite Lesart derselben Zusage: der Containerleser nimmt
+/// Bytes entgegen und gibt Bytes heraus, und das Oeffnen einer Datei liegt
+/// weiterhin ausserhalb, in `ea_archive_fs::open_archive_bundle`.
 pub trait ArchiveSource {
     fn visit_blobs(
         &self,
