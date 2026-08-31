@@ -297,7 +297,10 @@ fn browser_runtime_dependency_class_is_ratified_before_use() {
         assert!(adr.contains(section), "ADR 0005 is missing {section}");
     }
     for literal in BROWSER_ADR_LITERALS {
-        assert!(adr.contains(literal), "ADR 0005 is missing the literal {literal}");
+        assert!(
+            adr.contains(literal),
+            "ADR 0005 is missing the literal {literal}"
+        );
     }
     let shared = shared_dependencies();
     for name in BROWSER_RUNTIME_DEPENDENCIES {

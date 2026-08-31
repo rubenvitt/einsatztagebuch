@@ -78,7 +78,9 @@ fn shared_dependency_pin(root: &Path, name: &str) -> String {
         .unwrap_or_else(|| panic!("{name} must be a shared workspace dependency"))
         .get("version")
         .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("{name} must carry an explicit version in [workspace.dependencies]"));
+        .unwrap_or_else(|| {
+            panic!("{name} must carry an explicit version in [workspace.dependencies]")
+        });
     version
         .strip_prefix('=')
         .unwrap_or_else(|| panic!("{name} must be pinned exactly (= prefix), found {version}"))
@@ -149,7 +151,10 @@ fn build_wasm_rejects_every_argument_and_reports_the_missing_bridge_crate() {
         run_gate(["build-wasm", "reader"]).unwrap_err(),
         "build-wasm does not accept arguments"
     );
-    assert_eq!(run_gate(["build-wasmm"]).unwrap_err(), "unknown gate: build-wasmm");
+    assert_eq!(
+        run_gate(["build-wasmm"]).unwrap_err(),
+        "unknown gate: build-wasmm"
+    );
     // Solange `crates/ea-reader-wasm/Cargo.toml` fehlt, meldet der Vorlauf das
     // FEHLENDE ARTEFAKT mit einer Anweisung statt einen cargo-Fehler
     // durchzureichen. Kein Ueberspringen ueber eine Umgebungsvariable.
