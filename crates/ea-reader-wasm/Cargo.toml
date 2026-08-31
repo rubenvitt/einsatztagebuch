@@ -1,0 +1,34 @@
+[package]
+name = "ea-reader-wasm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# `cdylib` fuer das wasm-Modul, das `wasm-bindgen` weiterverarbeitet, `rlib`
+# fuer den Wirtsbau: ohne `rlib` uebersetzte `cargo test --workspace
+# --all-targets --locked` das Ziel `tests/bridge_boundary.rs` nicht mehr, weil
+# ein reines `cdylib` von keinem Rust-Ziel verlinkt werden kann.
+#
+# KEIN Binaerziel, und das ist die Voraussetzung fuer die Positivliste:
+# `cargo check --target wasm32-unknown-unknown -p ...` prueft Binaerziele mit,
+# und genau daran scheitert `ea-ui-contracts` mit seinem `src/bin/emit-ts.rs`.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Der einzige Grund dieser Kante ist der cfg-getorte Export unten in
+# `src/lib.rs`. Die Kante steht in `[dependencies]` und NICHT in einer
+# `[target.'cfg(...)'.dependencies]`-Tabelle: der Manifestdurchlauf in
+# `tools/xtask/tests/workspace.rs` iteriert nur ueber `dependencies`,
+# `dev-dependencies` und `build-dependencies`, eine target-Tabelle bliebe fuer
+# die Pin- und die `workspace = true`-Pflicht unsichtbar.
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+# Nur fuer `tests/bridge_boundary.rs`. Dev-Kanten sind hier unbedenklich: die
+# wasm32-Zeile des Gates faehrt ohne `--all-targets` und zieht sie nie in den
+# Graphen.
+ea-reader.workspace = true
+ea-verify.workspace = true

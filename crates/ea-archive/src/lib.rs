@@ -37,9 +37,19 @@
 //!
 //! Invariante: `archiveObjectCount + nonObjectFileCount` ist die Gesamtzahl der
 //! von [`ArchiveSource`] gelieferten Bytesequenzen.
+//!
+//! # Der Ein-Datei-Container
+//!
+//! [`ArchiveBundleSource`] implementiert [`ArchiveSource`] ueber die Bytes
+//! EINER exportierten Datei und liegt hier, weil er geteilter Browsercode ist:
+//! der Datei-Modus des Web-Readers liest ihn im wasm32-Ziel. Er beruehrt kein
+//! `std::fs` — das Format steht in `bundle.rs`, das Oeffnen einer Datei in
+//! `ea_archive_fs::open_archive_bundle`.
 
 mod backend;
 mod backend_error;
+mod bundle;
+mod bundle_error;
 mod error;
 mod inventory;
 mod layout;
@@ -51,6 +61,11 @@ mod transaction;
 
 pub use backend::ArchiveBackend;
 pub use backend_error::ArchiveBackendError;
+pub use bundle::{
+    ArchiveBundleSource, BUNDLE_FILE_EXTENSION_V1, BUNDLE_HEADER_BYTES_V1, BUNDLE_MAGIC_V1,
+    INDEX_RECORD_FIXED_BYTES,
+};
+pub use bundle_error::BundleError;
 pub use error::ArchiveError;
 pub use inventory::{ArchiveInventory, FormatErrorEntry, QuarantineReason, QuarantinedObject};
 pub use layout::{

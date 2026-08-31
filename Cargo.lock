@@ -1884,6 +1884,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-reader"
+version = "0.1.0"
+dependencies = [
+ "ea-verify",
+]
+
+[[package]]
+name = "ea-reader-wasm"
+version = "0.1.0"
+dependencies = [
+ "ea-reader",
+ "ea-verify",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "ea-recovery"
 version = "0.1.0"
 dependencies = [

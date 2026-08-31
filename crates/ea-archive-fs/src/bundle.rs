@@ -1,29 +1,20 @@
-//! Der Ein-Datei-Buendelexport und sein Leser.
+//! Der Ein-Datei-Buendelexport und der Dateizugriff auf seinen Container.
 //!
-//! # Warum dieser Container existiert
+//! # Was hier liegt und was nicht
 //!
-//! Der Datei-Modus des Web-Readers hat zwei Wege hinein, und nur einer davon
-//! funktioniert ueberall: `showDirectoryPicker` fehlt in Safari und Firefox,
-//! also MUSS der universelle Weg — EINE exportierte Datei durch den gewoehnlichen
-//! Dateidialog — immer angeboten werden
-//! (`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md:139-145`,
-//! §12 auf `:441-442`).
+//! Der Container selbst — Magie, Kopf, Index, die strengen Strukturregeln und
+//! [`ArchiveBundleSource`] — liegt in `crates/ea-archive/src/bundle.rs`. Er ist
+//! geteilter Browsercode: der Datei-Modus des Web-Readers liest ihn im
+//! wasm32-Ziel, und ein Leser, der Bytes entgegennimmt, braucht dafuer kein
+//! Dateisystem (`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md`
+//! §9 und §12).
 //!
-//! # Es entsteht KEINE siebte Objektfamilie
-//!
-//! Der Container traegt UEBERHAUPT KEIN Exact-Object-Praefix. Die sechs
-//! Praefixe und ihre Kodierer (`crates/ea-format/src/lib.rs:39-45`), der Pin
-//! gegen die Grammatik (`tools/xtask/tests/spec_completeness.rs:6-8`) und
-//! `schemas/archive/v1/archive.cddl:19-62` bleiben byteweise unberuehrt; es
-//! entsteht keine CDDL, keine Vektorfamilie und keine `TrustSubtypeV1`-Variante.
-//! Die Magie beginnt mit `0x45` (`b'E'`) und kann deshalb nie mit einem
-//! Exact-Object-Praefix verwechselt werden, dessen erste zwei Bytes `0x85 0x44`
-//! sind (`crates/ea-format/src/parser.rs:21-26`). Faellt ein Buendel je in ein
-//! Bestandsverzeichnis, klassifiziert das Inventar es am Praefix und zaehlt es
-//! unter `nonObjectFileCount` (`crates/ea-archive/src/lib.rs:22-38`) — die
-//! Klasse ist nicht durch Umbenennen waehlbar, und genau diese Eigenschaft
-//! erlaubt diesem Container, NEBEN dem eingefrorenen Format zu existieren statt
-//! darin.
+//! Hier bleibt GENAU das, was den Wirt anfasst: [`open_archive_bundle`] mit
+//! seiner Laengenpruefung VOR dem Lesen, [`write_archive_bundle`] mit
+//! `O_CREAT|O_EXCL`, Datei- und Verzeichnisflush, und die Kodierung, die den
+//! Bestand in Containerbytes ueberfuehrt. `std::fs` kommt in dieser Datei vor
+//! und in `crates/ea-archive` nicht — das ist die Trennlinie und zugleich der
+//! Grund, aus dem diese Crate auf `WASM32_EXEMPT_CRATES` steht.
 //!
 //! # Es wird nichts signiert und nichts entschluesselt
 //!
@@ -34,34 +25,6 @@
 //! kein Vertrauen (`design.md` des Web-Readers, `:147-156`). Es gibt hier kein
 //! `--key`, keinen Empfaengerschluessel und keinen Klartext; ein Buendel ist
 //! verschluesselt, WEIL seine Objekte es sind.
-//!
-//! # Das Containerformat
-//!
-//! ```text
-//! [0 ..32)        BUNDLE_MAGIC_V1                     (32 ASCII-Bytes)
-//! [32..40)        u64 big-endian: Blobzahl
-//! [40..48)        u64 big-endian: Bytelaenge n der Indexregion
-//! [48..48+n)      Indexregion: ein Satz je Blob, in Indexreihenfolge
-//!                   u16 big-endian: Bytelaenge p der Adresse
-//!                   p Bytes:        die relative Adresse als NFC-UTF-8
-//!                   u64 big-endian: Offset in die Nutzlastregion
-//!                   u64 big-endian: Bytelaenge des Blobs
-//! [48+n.. )       Nutzlastregion: die Blobs, wortwoertlich, in Indexreihenfolge
-//! ```
-//!
-//! Jedes Kopf- und Indexfeld ist eine vorzeichenlose Big-Endian-Ganzzahl fester
-//! Breite. Es gibt kein CBOR, keine Laengenpraefix-Ambiguitaet und keine
-//! selbstbeschreibende Typschicht — und deshalb KEINE neue Abhaengigkeit:
-//! `ea-archive-fs` behaelt genau die sechs Workspace-Kanten aus Task 9,
-//! `Cargo.lock` bleibt wie er ist.
-//!
-//! Indexsaetze sind STRENG aufsteigend ueber die Adressbytes sortiert, keine
-//! Adresse kommt zweimal vor, und die Offsets sind zusammenhaengend ab null:
-//! der erste Blob beginnt bei `0`, jeder folgende genau dort, wo sein Vorgaenger
-//! endete, und die Nutzlastregion endet genau am Dateiende. Es gibt keine
-//! Fuellung, keine Ausrichtung und keinen freien Platz — deshalb sind zwei
-//! Exporte desselben Bestands dieselbe Datei, und jedes eingeschobene Byte ist
-//! eine Abweisung und keine still geduldete Differenz.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -70,31 +33,17 @@ use std::{
 };
 
 use ea_archive::{
-    ArchiveBlob, ArchiveError, ArchiveSource, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
+    ArchiveBundleSource, BUNDLE_HEADER_BYTES_V1, BUNDLE_MAGIC_V1, BundleError,
+    INDEX_RECORD_FIXED_BYTES, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
 };
 use ea_trust::TrustAnchorV1;
 use ea_types::UnixMillis;
 use ea_verify::{VerifyOptions, verify_archive};
 
-use crate::{BundleError, LocalPathBackend, format_package::materialize_format_package_reporting};
+use crate::{LocalPathBackend, format_package::materialize_format_package_reporting};
 
-/// Die Magie am Dateianfang.
-///
-/// 32 ASCII-Bytes, beginnend mit `b'E'` — nie mit `0x85`. Das erste Byte IST
-/// die Zusage, dass dieser Container kein Archivobjekt vorgibt zu sein.
-pub const BUNDLE_MAGIC_V1: [u8; 32] = *b"EINSATZARCHIV-ARCHIVE-BUNDLE-v1\n";
-
-/// Die Bytelaenge des Kopfes: Magie, Blobzahl, Indexlaenge.
-pub const BUNDLE_HEADER_BYTES_V1: usize = 48;
-
-/// Die Dateiendung eines Archivbuendels, ohne Punkt.
-pub const BUNDLE_FILE_EXTENSION_V1: &str = "eabundle";
-
-/// Die Bytelaenge eines Indexsatzes ohne seine Adresse.
-const INDEX_RECORD_FIXED_BYTES: usize = 2 + 8 + 8;
-
-/// Die groesste Dateilaenge, die [`ArchiveBundleSource::open`] ueberhaupt in
-/// den Speicher holt.
+/// Die groesste Dateilaenge, die [`open_archive_bundle`] ueberhaupt in den
+/// Speicher holt.
 ///
 /// # Es ist eine WIRTsschranke und KEINE Strukturregel
 ///
@@ -111,11 +60,13 @@ const INDEX_RECORD_FIXED_BYTES: usize = 2 + 8 + 8;
 /// Kopf, plus die groesste Indexregion, die die zwei bestehenden Deckel
 /// ueberhaupt zulassen — [`MAX_ARCHIVE_BLOBS_V1`] Saetze mit ihren festen
 /// Bytes und einer Adresse, deren Laenge ein `u16` traegt —, plus
-/// [`MAX_TOTAL_ARCHIVE_BYTES_V1`] Nutzlast. Die Schranke ist damit LOSE
-/// (Groessenordnung 71 GB): sie ist bewusst so gewaehlt, dass sie keine Datei
-/// abweist, die `from_bytes` annehmen wuerde, und trotzdem das tut, was sie
-/// tun muss — eine Datei jenseits jeder moeglichen Containergroesse wird
-/// abgewiesen, BEVOR ein Byte allokiert ist.
+/// [`MAX_TOTAL_ARCHIVE_BYTES_V1`] Nutzlast. Alle vier Zahlen kommen aus
+/// `ea-archive`, also aus dem Container selbst; hier wird keine davon
+/// nachgeschrieben. Die Schranke ist damit LOSE (Groessenordnung 71 GB): sie
+/// ist bewusst so gewaehlt, dass sie keine Datei abweist, die `from_bytes`
+/// annehmen wuerde, und trotzdem das tut, was sie tun muss — eine Datei
+/// jenseits jeder moeglichen Containergroesse wird abgewiesen, BEVOR ein Byte
+/// allokiert ist.
 const MAX_BUNDLE_FILE_BYTES_V1: u64 = BUNDLE_HEADER_BYTES_V1 as u64
     + (MAX_ARCHIVE_BLOBS_V1 as u64) * (INDEX_RECORD_FIXED_BYTES as u64 + u16::MAX as u64)
     + MAX_TOTAL_ARCHIVE_BYTES_V1 as u64;
@@ -137,250 +88,49 @@ impl BundleExportReport {
     }
 }
 
-/// Ein Indexsatz des Containers, geprueft.
-struct BundleIndexEntry {
-    path: String,
-    offset: usize,
-    length: usize,
-}
-
-/// Ein Archivbestand, der als EINE Datei vorliegt.
+/// Liest ein Buendel von der Platte.
 ///
-/// Die Lesequelle des Containers. Sie ist STRENG: Magie, Indexlaenge und Index
-/// werden vollstaendig geprueft — sortiert, duplikatfrei, zusammenhaengend, in
-/// den Grenzen, innerhalb beider Deckel — und erst danach ueberhaupt ein Blob
-/// herausgegeben. Eine Strukturverletzung ist ein Fehler und NIE ein
-/// uebersprungener Eintrag: einen Blob stillschweigend fallenzulassen hiesse,
-/// Archivbytes zu verlieren, ohne es zu sagen.
+/// Eine freie Funktion und keine inhaerente Methode: [`ArchiveBundleSource`]
+/// gehoert seit dem Umzug `ea-archive`, und eine fremde Crate kann einem
+/// fremden Typ keine inhaerente Methode anhaengen. Ein Erweiterungstrait waere
+/// die Alternative und ist die schlechtere — er machte aus einer Funktion einen
+/// Import, den jeder Aufrufer zusaetzlich fuehren muesste, ohne eine einzige
+/// Zusage hinzuzufuegen.
 ///
-/// # Kein `Debug`
+/// Die Datei ist UNVERTRAUT: sie kommt durch den gewoehnlichen
+/// Dateidialog. Deshalb wird ZUERST ihre angekuendigte Laenge gegen
+/// [`MAX_BUNDLE_FILE_BYTES_V1`] geprueft und DANN gelesen — dieselbe
+/// Reihenfolge, die `crates/ea-recovery/src/source.rs:170-178` fuer den
+/// Verzeichnisleser aufschreibt. Andersherum legte eine uebergrosse Datei
+/// ihren Puffer vollstaendig an, bevor eine Regel sie je abgewiesen haette.
 ///
-/// Bewusst nicht abgeleitet. Der Typ haelt den vollstaendigen Bestand im
-/// Speicher; ein abgeleitetes `Debug` gaebe jedes Byte heraus.
-pub struct ArchiveBundleSource {
-    bytes: Vec<u8>,
-    index: Vec<BundleIndexEntry>,
-    payload_start: usize,
-}
-
-impl ArchiveBundleSource {
-    /// Liest ein Buendel von der Platte.
-    ///
-    /// Die Datei ist UNVERTRAUT: sie kommt durch den gewoehnlichen
-    /// Dateidialog. Deshalb wird ZUERST ihre angekuendigte Laenge gegen
-    /// [`MAX_BUNDLE_FILE_BYTES_V1`] geprueft und DANN gelesen — dieselbe
-    /// Reihenfolge, die `crates/ea-recovery/src/source.rs:170-178` fuer den
-    /// Verzeichnisleser aufschreibt. Andersherum legte eine uebergrosse Datei
-    /// ihren Puffer vollstaendig an, bevor eine Regel sie je abgewiesen haette.
-    ///
-    /// # Errors
-    ///
-    /// [`BundleError::Io`], wenn die Datei nicht lesbar ist,
-    /// [`BundleError::TotalByteLimit`], wenn sie jenseits jeder moeglichen
-    /// Containergroesse liegt; sonst der Befund von [`Self::from_bytes`].
-    pub fn open(path: &Path) -> Result<Self, BundleError> {
-        Self::open_capped(path, MAX_BUNDLE_FILE_BYTES_V1)
-    }
-
-    /// [`Self::open`] mit einstellbarer Wirtsschranke.
-    ///
-    /// Die Schranke ist ein Parameter, damit die Reihenfolge MESSBAR ist: mit
-    /// einem Deckel unterhalb der Dateilaenge muss der Befund
-    /// [`BundleError::TotalByteLimit`] sein und nicht der Strukturbefund der
-    /// Bytes, die sonst gelesen wuerden. Ein Zeuge mit der echten Schranke
-    /// braeuchte eine Datei von zig Gigabyte, und das ist kein Test.
-    ///
-    /// `fs::metadata` und NICHT `symlink_metadata`: `fs::read` folgt einem
-    /// Symlink, also muss gemessen werden, was tatsaechlich gelesen wird.
-    fn open_capped(path: &Path, cap: u64) -> Result<Self, BundleError> {
-        let declared = fs::metadata(path).map_err(|_| BundleError::Io)?.len();
-        if declared > cap {
-            return Err(BundleError::TotalByteLimit);
-        }
-        let bytes = fs::read(path).map_err(|_| BundleError::Io)?;
-        Self::from_bytes(bytes)
-    }
-
-    /// Prueft Containerbytes vollstaendig und uebernimmt sie.
-    ///
-    /// # Die Reihenfolge der Pruefungen ist die Zusage
-    ///
-    /// Die Blobgrenze wird aus dem KOPF durchgesetzt, bevor ein Indexsatz
-    /// angefasst wird: sonst muesste ein Angreifer erst
-    /// [`MAX_ARCHIVE_BLOBS_V1`] Saetze mitliefern, um die Grenze zu erreichen,
-    /// und die Grenze schuetzte nichts. Der Bytedeckel wird beim Aufsummieren
-    /// der Blobs durchgesetzt, also ebenfalls bevor er ueberschritten sein kann.
-    /// Beide sind dieselben Werte und dieselben INKLUSIVEN Grenzen, die der
-    /// Verzeichnisleser benutzt (`crates/ea-recovery/src/source.rs:30-41`) —
-    /// nie ein zweiter Satz Zahlen.
-    ///
-    /// # Errors
-    ///
-    /// [`BundleError::Malformed`] fuer jede Strukturverletzung,
-    /// [`BundleError::BlobLimit`] und [`BundleError::TotalByteLimit`] fuer die
-    /// zwei Deckel.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, BundleError> {
-        if bytes.len() < BUNDLE_HEADER_BYTES_V1 {
-            return Err(BundleError::Malformed);
-        }
-        if bytes[..BUNDLE_MAGIC_V1.len()] != BUNDLE_MAGIC_V1 {
-            return Err(BundleError::Malformed);
-        }
-        // Eine Blobzahl, die nicht in `usize` passt, IST eine Ueberschreitung des
-        // Deckels und keine Formverletzung: [`MAX_ARCHIVE_BLOBS_V1`] passt in
-        // 32 Bit, also liegt jeder nicht wandelbare Wert darueber. Ohne diese
-        // Unterscheidung truege derselbe Container auf wasm32 (`usize` = 32 Bit)
-        // einen anderen Befund als auf einem 64-Bit-Wirt.
-        let blob_count = match usize::try_from(read_u64_raw(&bytes, 32)?) {
-            Ok(count) if count <= MAX_ARCHIVE_BLOBS_V1 => count,
-            _ => return Err(BundleError::BlobLimit),
-        };
-        let index_length = read_u64(&bytes, 40)?;
-        let payload_start = BUNDLE_HEADER_BYTES_V1
-            .checked_add(index_length)
-            .ok_or(BundleError::Malformed)?;
-        if payload_start > bytes.len() {
-            return Err(BundleError::Malformed);
-        }
-
-        let mut index: Vec<BundleIndexEntry> = Vec::new();
-        let mut at = BUNDLE_HEADER_BYTES_V1;
-        let mut consumed: usize = 0;
-        while at < payload_start {
-            let path_length = usize::from(u16::from_be_bytes(
-                bytes
-                    .get(at..at + 2)
-                    .ok_or(BundleError::Malformed)?
-                    .try_into()
-                    .map_err(|_| BundleError::Malformed)?,
-            ));
-            let record_end = at
-                .checked_add(INDEX_RECORD_FIXED_BYTES)
-                .and_then(|end| end.checked_add(path_length))
-                .ok_or(BundleError::Malformed)?;
-            if record_end > payload_start {
-                return Err(BundleError::Malformed);
-            }
-            let path = core::str::from_utf8(&bytes[at + 2..at + 2 + path_length])
-                .map_err(|_| BundleError::Malformed)?
-                .to_owned();
-            validate_bundle_path(&path)?;
-            // STRENG aufsteigend — das ist zugleich die Duplikatpruefung: eine
-            // Adresse, die zweimal vorkommt, ist nicht mehr streng aufsteigend.
-            if let Some(previous) = index.last()
-                && previous.path.as_bytes() >= path.as_bytes()
-            {
-                return Err(BundleError::Malformed);
-            }
-            let offset = read_u64(&bytes, at + 2 + path_length)?;
-            let length = read_u64(&bytes, at + 2 + path_length + 8)?;
-            // ZUSAMMENHAENGEND ab null: der erste Blob beginnt bei 0, jeder
-            // folgende genau dort, wo sein Vorgaenger endete. Damit gibt es
-            // weder eine Luecke noch eine Ueberlappung, und ein eingeschobenes
-            // Byte kann nicht als Fuellung durchgehen.
-            if offset != consumed {
-                return Err(BundleError::Malformed);
-            }
-            consumed = consumed
-                .checked_add(length)
-                .ok_or(BundleError::TotalByteLimit)?;
-            if consumed > MAX_TOTAL_ARCHIVE_BYTES_V1 {
-                return Err(BundleError::TotalByteLimit);
-            }
-            index.push(BundleIndexEntry {
-                path,
-                offset,
-                length,
-            });
-            at = record_end;
-        }
-        // Der Index geht GENAU auf: genau so viele Saetze, wie der Kopf
-        // behauptet. Dass die Indexregion dabei exakt endet, erzwingt schon
-        // `record_end > payload_start` oben — ein angeschnittener letzter Satz
-        // ist dort bereits abgewiesen, und eine zweite Bedingung dafuer koennte
-        // nie feuern.
-        if index.len() != blob_count {
-            return Err(BundleError::Malformed);
-        }
-        // Die Nutzlastregion endet GENAU am Dateiende.
-        if bytes.len() - payload_start != consumed {
-            return Err(BundleError::Malformed);
-        }
-        Ok(Self {
-            bytes,
-            index,
-            payload_start,
-        })
-    }
-
-    /// Die rohen Containerbytes.
-    ///
-    /// Crate-intern: [`write_archive_bundle`] verifiziert die kodierten Bytes
-    /// durch diesen Typ hindurch und schreibt danach GENAU sie. Ein zweiter
-    /// Puffer daneben waere bei einem Bestand an der Obergrenze ein zweites
-    /// Gigabyte, und — schlimmer — er koennte abweichen.
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl ArchiveSource for ArchiveBundleSource {
-    fn visit_blobs(
-        &self,
-        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
-    ) -> Result<(), ArchiveError> {
-        for entry in &self.index {
-            let start = self.payload_start + entry.offset;
-            visitor(ArchiveBlob::new(
-                &entry.path,
-                &self.bytes[start..start + entry.length],
-            ))?;
-        }
-        Ok(())
-    }
-}
-
-/// Liest acht Big-Endian-Bytes ab `at` als `usize`.
+/// # Errors
 ///
-/// `usize` und nicht `u64`, weil jeder Leser dieses Wertes indexiert. Auf
-/// wasm32 ist `usize` 32 Bit breit; ein Wert, der dort nicht passt, ist genau
-/// deshalb eine Strukturverletzung und keine stille Verkuerzung.
-fn read_u64(bytes: &[u8], at: usize) -> Result<usize, BundleError> {
-    usize::try_from(read_u64_raw(bytes, at)?).map_err(|_| BundleError::Malformed)
+/// [`BundleError::Io`], wenn die Datei nicht lesbar ist,
+/// [`BundleError::TotalByteLimit`], wenn sie jenseits jeder moeglichen
+/// Containergroesse liegt; sonst der Befund von
+/// [`ArchiveBundleSource::from_bytes`].
+pub fn open_archive_bundle(path: &Path) -> Result<ArchiveBundleSource, BundleError> {
+    open_archive_bundle_capped(path, MAX_BUNDLE_FILE_BYTES_V1)
 }
 
-/// Liest acht Big-Endian-Bytes ab `at`, ohne sie zu verengen.
-fn read_u64_raw(bytes: &[u8], at: usize) -> Result<u64, BundleError> {
-    let slice = bytes.get(at..at + 8).ok_or(BundleError::Malformed)?;
-    Ok(u64::from_be_bytes(
-        slice.try_into().map_err(|_| BundleError::Malformed)?,
-    ))
-}
-
-/// Die Adressregeln eines Indexsatzes.
+/// [`open_archive_bundle`] mit einstellbarer Wirtsschranke.
 ///
-/// Dieselben Regeln, die `validate_inventory_path`
-/// (`crates/ea-format/src/archive_profile.rs:295-317`) an einen
-/// Inventarpfad stellt, mit einer benannten Ausnahme: die NFC-Pruefung
-/// braucht `unicode_normalization`, und dieser Task darf keine neue
-/// Abhaengigkeitskante ziehen. NFC bleibt damit eine Zusage der ERZEUGENDEN
-/// Seite — die Adressen eines Exports kommen aus dem Bestand, dessen Inventar
-/// die volle Regel schon durchsetzt.
-fn validate_bundle_path(path: &str) -> Result<(), BundleError> {
-    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
-        return Err(BundleError::Malformed);
+/// Die Schranke ist ein Parameter, damit die Reihenfolge MESSBAR ist: mit
+/// einem Deckel unterhalb der Dateilaenge muss der Befund
+/// [`BundleError::TotalByteLimit`] sein und nicht der Strukturbefund der
+/// Bytes, die sonst gelesen wuerden. Ein Zeuge mit der echten Schranke
+/// braeuchte eine Datei von zig Gigabyte, und das ist kein Test.
+///
+/// `fs::metadata` und NICHT `symlink_metadata`: `fs::read` folgt einem
+/// Symlink, also muss gemessen werden, was tatsaechlich gelesen wird.
+fn open_archive_bundle_capped(path: &Path, cap: u64) -> Result<ArchiveBundleSource, BundleError> {
+    let declared = fs::metadata(path).map_err(|_| BundleError::Io)?.len();
+    if declared > cap {
+        return Err(BundleError::TotalByteLimit);
     }
-    // Ein Windows-Laufwerksbuchstabe ist ebenso eine absolute Wurzel wie ein
-    // fuehrender Schraegstrich.
-    if path.len() >= 2 && path.as_bytes()[1] == b':' {
-        return Err(BundleError::Malformed);
-    }
-    for segment in path.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." {
-            return Err(BundleError::Malformed);
-        }
-    }
-    Ok(())
+    let bytes = fs::read(path).map_err(|_| BundleError::Io)?;
+    ArchiveBundleSource::from_bytes(bytes)
 }
 
 /// Exportiert einen Bestand als EIN verifizierbares Buendel.
@@ -503,7 +253,7 @@ pub fn write_archive_bundle(
             std::io::ErrorKind::AlreadyExists => BundleError::TargetOccupied,
             _ => BundleError::Io,
         })?;
-    file.write_all(bundle.bytes())
+    file.write_all(bundle.container_bytes())
         .map_err(|_| BundleError::Io)?;
     file.sync_all().map_err(|_| BundleError::Io)?;
     drop(file);
@@ -618,7 +368,8 @@ fn parent_for_sync(target: &Path) -> Option<&Path> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArchiveBundleSource, BundleError, MAX_BUNDLE_FILE_BYTES_V1, Path, fs, parent_for_sync,
+        BundleError, MAX_BUNDLE_FILE_BYTES_V1, Path, fs, open_archive_bundle_capped,
+        parent_for_sync,
     };
 
     /// Die Laengenpruefung liegt VOR dem Lesen, und ihre Grenze ist inklusiv.
@@ -640,12 +391,12 @@ mod tests {
         fs::write(&path, &bytes).expect("die Kratzdatei muss schreibbar sein");
 
         assert_eq!(
-            ArchiveBundleSource::open_capped(&path, 99).err(),
+            open_archive_bundle_capped(&path, 99).err(),
             Some(BundleError::TotalByteLimit),
             "unterhalb der Laenge darf NICHTS gelesen werden"
         );
         assert_eq!(
-            ArchiveBundleSource::open_capped(&path, 100).err(),
+            open_archive_bundle_capped(&path, 100).err(),
             Some(BundleError::Malformed),
             "genau auf der Laenge wird gelesen und die Struktur entscheidet"
         );
