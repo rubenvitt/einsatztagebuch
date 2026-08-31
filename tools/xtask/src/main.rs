@@ -402,8 +402,14 @@ fn ensure_wasm_bindgen_cli_matches_lockfile(root: &Path) -> Result<(), String> {
     if !output.status.success() {
         return Err(format!("wasm-bindgen-cli is not installed. {instruction}"));
     }
-    // `wasm-bindgen --version` prints `wasm-bindgen A.B.C`.
+    // `wasm-bindgen --version` prints `wasm-bindgen A.B.C` on its first line.
+    // `lines().next()` is taken BEFORE `rsplit(' ')` so that any trailing
+    // output on a second line cannot ride along into the user-facing
+    // mismatch message below.
     let installed = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
         .trim()
         .rsplit(' ')
         .next()
@@ -442,23 +448,17 @@ fn ensure_bridge_crate_exists(root: &Path) -> Result<(), String> {
 /// `wasm_js`; ein aus der Umgebung geerbtes `--cfg getrandom_backend=...`
 /// wuerde dieses Feature ueberstimmen, und in 0.4.3 steht `"wasm_js"` nicht
 /// einmal mehr in der erlaubten Werteliste von
-/// `cfg(getrandom_backend, values(...))`. `Command::env_remove("RUSTFLAGS")`
-/// ist die einzige Abweichung von `run_process` und traegt die Messung aus
-/// `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`.
+/// `cfg(getrandom_backend, values(...))`. Delegiert an
+/// [`run_process_impl`] mit `strip_rustflags = true`; das
+/// `Command::env_remove("RUSTFLAGS")`, das diese Abweichung von
+/// `run_process` tatsaechlich traegt, steht dort GENAU EINMAL und traegt die
+/// Messung aus `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`.
 fn run_process_without_rustflags(
     root: &Path,
     program: &str,
     args: &[impl AsRef<std::ffi::OsStr>],
 ) -> io::Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(root)
-        .env_remove("RUSTFLAGS")
-        .status()?;
-    if !status.success() {
-        process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+    run_process_impl(root, program, args, true)
 }
 
 /// Der Bauablauf von `build-wasm`, vier fail-closed Schritte in dieser
@@ -836,15 +836,34 @@ fn fuzz_lock_validation_args() -> Vec<&'static str> {
     ]
 }
 
-fn run_process(root: &Path, program: &str, args: &[impl AsRef<std::ffi::OsStr>]) -> io::Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(root)
-        .status()?;
+/// Shared body of [`run_process`] and [`run_process_without_rustflags`].
+///
+/// Both start a child process the same way — same working directory, same
+/// fail-closed `process::exit(status.code()...)` once it fails — and differ
+/// in exactly one respect: whether an inherited `RUSTFLAGS` is stripped
+/// before the child starts. The two callers are thin wrappers over this one
+/// body so that a future change to exit handling or stderr capture cannot
+/// reach one copy and silently miss the other.
+fn run_process_impl(
+    root: &Path,
+    program: &str,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    strip_rustflags: bool,
+) -> io::Result<()> {
+    let mut command = Command::new(program);
+    command.args(args).current_dir(root);
+    if strip_rustflags {
+        command.env_remove("RUSTFLAGS");
+    }
+    let status = command.status()?;
     if !status.success() {
         process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+fn run_process(root: &Path, program: &str, args: &[impl AsRef<std::ffi::OsStr>]) -> io::Result<()> {
+    run_process_impl(root, program, args, false)
 }
 
 fn run_fuzz(root: &Path, args: impl IntoIterator<Item = String>) -> Result<(), String> {

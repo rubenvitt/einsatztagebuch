@@ -120,7 +120,7 @@ names the decision by reference and is not a second source for it.
   class has no call site for; leaving it disabled keeps the feature surface
   matched to actual use rather than to the crate's own convenience default.
 - **A `web-sys` pin without an explicit feature list (or with `--all-features`)**,
-  rejected because the crate is merchandise-generated over the entire Web
+  rejected because the crate is procedurally generated over the entire Web
   platform: with defaults off and no explicit list, the compiled surface would
   be zero; with every feature on, it would be unbounded and unreviewed. Both
   extremes are equally unaudited. *Enumerated web-sys features* names the

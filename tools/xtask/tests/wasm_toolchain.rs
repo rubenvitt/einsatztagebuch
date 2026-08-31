@@ -101,14 +101,30 @@ fn mise_cargo_tool_pin(root: &Path, tool: &str) -> String {
         .to_owned()
 }
 
-/// Liest den Quelltext von `tools/xtask/src/main.rs`.
+/// Liest NUR den Funktionskoerper von `run_process_impl` aus
+/// `tools/xtask/src/main.rs`.
 ///
 /// `build_wasm_builds_without_inherited_rustflags` prueft eine SOURCE-Aussage
 /// (`env_remove("RUSTFLAGS")`) und keine Laufzeitaussage: das Verhalten selbst
-/// ist unbeobachtbar, solange `crates/ea-reader-wasm` nicht existiert.
-fn build_wasm_command_source() -> String {
-    fs::read_to_string(workspace_root().join("tools/xtask/src/main.rs"))
-        .expect("tools/xtask/src/main.rs must be readable")
+/// ist unbeobachtbar, solange `crates/ea-reader-wasm` nicht existiert. Sowohl
+/// `run_process` als auch `run_process_without_rustflags` delegieren an
+/// `run_process_impl`, und NUR dessen Koerper traegt das
+/// `Command::env_remove("RUSTFLAGS")`. Ein Lauf ueber die GANZE Datei bestuende
+/// bereits, sobald die Zeichenkette irgendwo sonst auftaucht — auch in einem
+/// spaeteren, unverwandten Kommando —, und der Zeuge wuerde dann nicht mehr
+/// pruefen, was sein Name verspricht. Die Grenze auf genau diese
+/// Funktionsdefinition macht ihn wieder scharf.
+fn run_process_impl_source() -> String {
+    let source = fs::read_to_string(workspace_root().join("tools/xtask/src/main.rs"))
+        .expect("tools/xtask/src/main.rs must be readable");
+    let start = source
+        .find("fn run_process_impl(")
+        .expect("tools/xtask/src/main.rs must declare run_process_impl");
+    let end = start
+        + source[start..]
+            .find("\nfn run_process(")
+            .expect("run_process_impl must be declared directly above run_process");
+    source[start..end].to_owned()
 }
 
 #[test]
@@ -137,11 +153,37 @@ fn build_wasm_rejects_every_argument_and_reports_the_missing_bridge_crate() {
     // Solange `crates/ea-reader-wasm/Cargo.toml` fehlt, meldet der Vorlauf das
     // FEHLENDE ARTEFAKT mit einer Anweisung statt einen cargo-Fehler
     // durchzureichen. Kein Ueberspringen ueber eine Umgebungsvariable.
+    //
+    // `ensure_wasm32_target_available()` und
+    // `ensure_wasm_bindgen_cli_matches_lockfile()` laufen davor, in genau der
+    // Reihenfolge, die `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`
+    // vorschreibt, und werden hier NICHT umgangen. Auf einem unprovisionierten
+    // Wirt — Zielziel `wasm32-unknown-unknown` fehlt, oder die installierte
+    // `wasm-bindgen-cli` fehlt oder weicht vom gepinnten Lockfile-Stand ab —
+    // faellt der Aufruf deshalb an einer FRUEHEREN Stelle als der
+    // Bruecken-Crate-Pruefung. Das ist ein Befund ueber den WIRT und keiner
+    // ueber `build-wasm`; die beiden Zweige unten machen genau diesen
+    // Unterschied laut, statt den generischen Assertion-Fehlschlag der dritten
+    // Pruefung stehen zu lassen.
+    let error = run_gate(["build-wasm"]).unwrap_err();
+    if error.contains("wasm32-unknown-unknown is not installed") {
+        panic!(
+            "HOST NOT PROVISIONED, not a build-wasm defect: wasm32-unknown-unknown is not \
+             installed for the active toolchain. Run `rustup target add wasm32-unknown-unknown` \
+             and re-run this test. Reported error: {error}"
+        );
+    }
+    if error.contains("wasm-bindgen-cli") {
+        panic!(
+            "HOST NOT PROVISIONED, not a build-wasm defect: the installed wasm-bindgen-cli is \
+             missing or does not match the version Cargo.lock resolves for wasm-bindgen. \
+             Install the version mise.toml pins under cargo:wasm-bindgen-cli and re-run this \
+             test. Reported error: {error}"
+        );
+    }
     assert!(
-        run_gate(["build-wasm"])
-            .unwrap_err()
-            .contains("crates/ea-reader-wasm"),
-        "build-wasm must name the missing bridge crate"
+        error.contains("crates/ea-reader-wasm"),
+        "build-wasm must name the missing bridge crate; got: {error}"
     );
 }
 
@@ -149,9 +191,11 @@ fn build_wasm_rejects_every_argument_and_reports_the_missing_bridge_crate() {
 fn build_wasm_builds_without_inherited_rustflags() {
     // getrandom 0.4.3 waehlt sein wasm-Backend ueber das Cargo-Feature
     // `wasm_js`; ein geerbtes `--cfg getrandom_backend=...` aus 0.3 wuerde das
-    // Feature ueberstimmen. Der Bau laeuft deshalb mit entferntem RUSTFLAGS.
+    // Feature ueberstimmen. Der Bau laeuft deshalb mit entferntem RUSTFLAGS,
+    // getragen von `run_process_impl`, an das sowohl `run_process` als auch
+    // `run_process_without_rustflags` delegieren.
     assert!(
-        build_wasm_command_source().contains("env_remove(\"RUSTFLAGS\")"),
-        "build-wasm must strip RUSTFLAGS before it invokes cargo"
+        run_process_impl_source().contains("env_remove(\"RUSTFLAGS\")"),
+        "run_process_impl must strip RUSTFLAGS before it invokes a child process"
     );
 }
