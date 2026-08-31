@@ -604,3 +604,160 @@ fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
         "the resolved feature graph of the host must not contain {CRATE}/{SURFACE}:\n{tree}"
     );
 }
+
+/// Pins that NO non-test edge carries the `ea-reader` test surface — the same
+/// construction as `no_non_test_edge_carries_the_ea_archive_fs_test_surface`
+/// above, for the second crate that ships one.
+///
+/// It exists as a SECOND test and not as a second call of the first, because
+/// the first hard-wires `const CRATE: &str = "ea-archive-fs"` and one of its
+/// assertions does not carry over: `ea-archive-fs` has dev edges that ask for
+/// the feature by name, `ea-reader` has none — its own integration tests get it
+/// through the crate's own default. Copying `dev_edges > 0` would fail on the
+/// first run.
+///
+/// The stake is the same and it is browser-facing:
+/// `SealedVaultV1::flip_one_wrapped_key_byte_for_test` corrupts a wrapped vault
+/// key, `SealedVaultV1::replace_sealed_anchor_bytes_for_test` unseals the vault
+/// body, swaps the pinned anchor bytes and re-seals. Without the switch on the
+/// shared edge, both sit in `crates/ea-reader-wasm` and therefore in the
+/// shipped wasm module — an exported surface that damages ciphertext on demand.
+///
+/// Four assertions. The last pair replaces the `dev_edges` positive control of
+/// the neighbouring test: the same `cargo tree` invocation runs a SECOND time
+/// with `-F ea-reader/test-support` and must then CONTAIN the feature. That is
+/// what makes the absence in the first tree a finding instead of an artefact of
+/// an empty tree, a mistyped package name or a failed command.
+#[test]
+fn no_non_test_edge_carries_the_ea_reader_test_surface() {
+    const CRATE: &str = "ea-reader";
+    const SURFACE: &str = "test-support";
+    const HOST: &str = "ea-reader-wasm";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    let root_manifest: Value = fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let shared = root_manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(|dependencies| dependencies.get(CRATE))
+        .unwrap_or_else(|| panic!("the workspace must declare the shared {CRATE} edge"));
+    assert_eq!(
+        shared.get("default-features").and_then(Value::as_bool),
+        Some(false),
+        "the shared {CRATE} edge must disable its default features; otherwise {HOST} — and with \
+         it the shipped wasm module — inherits the two ciphertext-damaging test methods"
+    );
+
+    for member in WORKSPACE_MEMBERS {
+        let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        for table in ["dependencies", "build-dependencies"] {
+            let Some(edge) = manifest.get(table).and_then(|deps| deps.get(CRATE)) else {
+                continue;
+            };
+            let asks_for_the_surface =
+                edge.get("features")
+                    .and_then(Value::as_array)
+                    .is_some_and(|features| {
+                        features
+                            .iter()
+                            .any(|feature| feature.as_str() == Some(SURFACE))
+                    });
+            assert!(
+                !asks_for_the_surface,
+                "{member} {table} re-enables {CRATE}/{SURFACE}; the two damaging methods would be \
+                 back in a non-test build"
+            );
+        }
+    }
+
+    // Der aufgeloeste Baum des BROWSER-Wirts, einmal ohne und einmal mit dem
+    // Merkmal. Der zweite Lauf ist die Positivkontrolle des ersten.
+    let resolve = |extra: &[&str]| {
+        let mut arguments = vec![
+            "tree", "--locked", "-p", HOST, "-e", "features", "-i", CRATE,
+        ];
+        arguments.extend_from_slice(extra);
+        let resolved = Command::new("cargo")
+            .args(&arguments)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            resolved.status.success(),
+            "cargo tree must resolve the browser graph: {}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        String::from_utf8(resolved.stdout).unwrap()
+    };
+
+    let shipped = resolve(&[]);
+    assert!(
+        shipped.contains(HOST),
+        "{HOST} must appear as a consumer of {CRATE} in the resolved tree; without the edge the \
+         assertion below cannot fail:\n{shipped}"
+    );
+    assert!(
+        !shipped.contains(SURFACE),
+        "the resolved feature graph of {HOST} must not contain {CRATE}/{SURFACE}:\n{shipped}"
+    );
+    let forced = resolve(&["-F", "ea-reader/test-support"]);
+    assert!(
+        forced.contains(SURFACE),
+        "forcing {CRATE}/{SURFACE} must make it appear; otherwise its absence above says nothing \
+         about the feature and only something about the command:\n{forced}"
+    );
+
+    // Und dieselbe Manifest- und `cfg`-Zusicherung wie beim Nachbarn: der
+    // Schalter an der Wurzelkante wirkt nur, solange `test-support` das EINZIGE
+    // Default-Merkmal ist und beide Methoden hinter dem Tor stehen.
+    let manifest_text = fs::read_to_string(root.join("crates/ea-reader/Cargo.toml")).unwrap();
+    let manifest: Value = manifest_text.parse().unwrap();
+    assert_eq!(
+        manifest["features"]["default"].as_array().map(Vec::len),
+        Some(1),
+        "test-support stays the single default feature of {CRATE}; a second one would widen the \
+         release surface silently"
+    );
+    assert_eq!(
+        manifest["features"]["default"][0].as_str(),
+        Some(SURFACE),
+        "the one default feature of {CRATE} must be {SURFACE} itself"
+    );
+    const DAMAGERS: [&str; 2] = [
+        "flip_one_wrapped_key_byte_for_test",
+        "replace_sealed_anchor_bytes_for_test",
+    ];
+    for damager in DAMAGERS {
+        assert!(
+            manifest_text.contains(damager),
+            "{damager} damages ciphertext and must be named in the manifest as a release \
+             exclusion, so a release build cannot forget it"
+        );
+    }
+    for source_path in [
+        "crates/ea-reader/src/vault.rs",
+        "crates/ea-reader/src/envelope.rs",
+    ] {
+        let source = fs::read_to_string(root.join(source_path)).unwrap();
+        let Some(gate) = source.find("#[cfg(any(test, feature = \"test-support\"))]") else {
+            continue;
+        };
+        for (index, _) in source.match_indices("fn ") {
+            let tail = &source[index..];
+            let name_end = tail.find('(').expect("a declaration carries parentheses");
+            if tail[..name_end].contains("_for_test") {
+                assert!(
+                    index > gate,
+                    "every *_for_test declaration in {source_path} must sit behind the gate: {}",
+                    &tail[..name_end]
+                );
+            }
+        }
+    }
+}

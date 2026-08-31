@@ -1887,7 +1887,20 @@ dependencies = [
 name = "ea-reader"
 version = "0.1.0"
 dependencies = [
+ "ea-cbor",
+ "ea-crypto",
+ "ea-format",
+ "ea-testkit",
+ "ea-trust",
+ "ea-types",
  "ea-verify",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "hex",
+ "hkdf",
+ "minicbor",
+ "sha2 0.11.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -1905,6 +1918,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+ "zeroize",
 ]
 
 [[package]]

@@ -7,7 +7,10 @@
 //! Reichweite belegen konnte: EINE reine Funktion und EIN duenner Export
 //! darueber. Der echte Uebergang steht jetzt daneben — [`bridge`] traegt den
 //! Laufzeitzeugen nach `web-reader-design.md` §14.1 und die zwei
-//! Bytespeicher-Ausfuhren, [`opfs_worker`] den OPFS-Wirt dahinter.
+//! Bytespeicher-Ausfuhren, [`opfs_worker`] den OPFS-Wirt dahinter, und
+//! [`vault_bridge`] seit der Aufgabe „Browser-Vault: PRF-Envelopes,
+//! Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel" die zwei
+//! Tresorausfuhren.
 //!
 //! # Was hier NICHT liegt
 //!
@@ -59,6 +62,17 @@ pub mod bridge;
 /// an genau dieser Zeile.
 #[cfg(target_arch = "wasm32")]
 pub mod opfs_worker;
+
+/// Die Tresorbruecke: die zwei Ausfuhren des Browser-Tresors.
+///
+/// Das Modul steht OHNE cfg an der `mod`-Zeile, weil es Ausfuhren traegt und
+/// die Regel „cfg am Item" dann fuer jede einzelne von ihnen gilt — dieselbe
+/// Lage wie bei [`bridge`] und ausdruecklich nicht die von `opfs_worker`.
+///
+/// Hier ueberquert die PRF-Ausgabe die Grenze, und zwar NUR in dieser
+/// Richtung: `web-reader-design.md` §9 laesst nach JavaScript Sitzungskennung,
+/// Fingerabdruecke und Statuswerte, nie Schluesselmaterial.
+pub mod vault_bridge;
 
 /// Der Rundlauf ueber die Bruecke, ohne eine einzige Zusage darueber hinaus.
 ///

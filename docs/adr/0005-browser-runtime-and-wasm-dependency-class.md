@@ -86,6 +86,33 @@ not through a compiler flag, and are enforced by
 against each other the moment either one is refreshed alone; this document
 names the decision by reference and is not a second source for it.
 
+### The sixth pin: `hkdf`, key derivation for the browser vault
+
+The five crates above are one family. `hkdf` is not a sixth member of it, and
+this section says so rather than folding it into a sentence that would then be
+false: every claim above about *five* crates, one upstream project, one release
+train and one publication day is a claim about `wasm-bindgen` and its four
+satellites, and stays true unchanged. `hkdf` is cryptography, and it is entered
+here for one reason — `tools/xtask/tests/adr_gate.rs` gates browser-facing pins
+through this document, and the browser Reader is the only consumer.
+
+The consumer is `crates/ea-reader`. The specification
+`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §6.2
+prescribes the vault wrapping key as
+`KEK_i = HKDF(PRF_i(fixed app salt), info = "ea-reader-vault-v1")` and forbids
+the raw PRF output from being the encryption key. Three alternatives were
+weighed and rejected. Writing HMAC-SHA-256 extract/expand by hand inside
+`ea-crypto` would put a second, unreviewed KDF implementation next to the one
+`hpke` already carries. Reusing `hpke::kdf::Kdf::extract_and_expand` fails on
+its own terms: the method is `#[doc(hidden)]`, and its output is labelled with
+`HPKE-v1` and a suite id, so it is not the HKDF §6.2 names. Deriving the key
+from `SubtleCrypto` in JavaScript would move a security decision out of shared
+Rust, which `web-reader-design.md` §9 does not permit.
+
+| Dependency | Exact pin and enabled features | Role, maintenance, and security rationale |
+| --- | --- | --- |
+| [`hkdf`](https://crates.io/crates/hkdf/0.13.0) | `=0.13.0`; `default-features = false` | The [RustCrypto KDFs project](https://github.com/RustCrypto/KDFs) supplies RFC 5869 HKDF over any `hmac` implementation; `crates/ea-reader/src/envelope.rs` uses `Hkdf::<Sha256>` for the vault wrapping key and for the cache, entry-state and index keys derived from the vault key. The release declares **no** Cargo features at all — the crates.io record's `features` field is the empty object, and the only optional dependency (`kdf 0.1`) is not reachable as a feature of this release — so `default-features = false` is a no-op that records the intent, and its reviewed selection below is the empty ledger line. The crate is already in `Cargo.lock` at exactly this version, pulled by `hpke 0.14.0` (through `ea-crypto`) and by `sqlx-postgres 0.9.0`: the lockfile delta of adding it is an **edge**, not a package, so no new licence and no new `deny.toml` entry arises. It shares `hmac 0.13`/`digest 0.11.3` with the already-pinned `sha2 =0.11.0`, so no second hash tree enters either. |
+
 ## Rejected alternatives
 
 - **A second, independently resolved `getrandom` pin inside this ADR**,
@@ -214,9 +241,12 @@ The reviewed selection is recorded once more in the exact form
 that enabling, removing or reordering a feature cannot reach the gate without
 passing through this review — a bare mention of a feature name is not enough,
 because this ADR also names features that stay *disabled* (`unsafe-eval`,
-`serde-serialize`, `futures-core-03-stream`):
+`serde-serialize`, `futures-core-03-stream`). The sixth line belongs to `hkdf`,
+whose own review is *The sixth pin* above and *6. The sixth pin reviewed* below;
+it is the empty ledger line because the release declares no features:
 
 ```
+hkdf = []
 js-sys = ["std"]
 wasm-bindgen = ["std"]
 wasm-bindgen-futures = []
@@ -272,6 +302,42 @@ warning either — unlike the four named exceptions
 `docs/adr/0004-server-runtime-and-dependency-class.md` introduces for its own
 class, this class needs none, and `deny.toml` records that absence as a
 comment rather than as a new exception entry.
+
+### 6. The sixth pin reviewed: `hkdf` 0.13.0
+
+Carried out on 2026-08-31 with the same steps as the five above, and recorded
+separately because `hkdf` is not part of the `wasm-bindgen` release train.
+
+| Crate | Pinned release | Published | Declared SPDX | Yanked | crates.io record | Upstream project |
+| --- | --- | --- | --- | --- | --- | --- |
+| `hkdf` | `=0.13.0` | 2026-03-30 | `MIT OR Apache-2.0` | no | <https://crates.io/crates/hkdf/0.13.0> | <https://github.com/RustCrypto/KDFs> |
+
+Read from the official crates.io API record of the pinned release. That record
+reports `"features": {}` — the release declares no Cargo feature at all — and
+`"rust_version": "1.85"`, which the pinned compiler 1.95.0 admits with room to
+spare. The vendored manifest in the local registry cache agrees on all three
+facts, so the ledger line `hkdf = []` above is what
+`reviewed_feature_ledger_line` rebuilds and not a guess.
+
+RustSec advisory review, queried on 2026-08-31:
+
+| Crate | Advisories found | Verdict for the pinned tree |
+| --- | --- | --- |
+| `hkdf` | none — `crates/hkdf/` does not exist in the database (HTTP 404) | An empty result, recorded as the finding it is. |
+| `hmac` | none — `crates/hmac/` does not exist in the database (HTTP 404) | An empty result. `hmac 0.13.0` is the one dependency `hkdf 0.13.0` declares, and it is already in the resolved tree. |
+
+Cross-checked mechanically over the whole resolved graph rather than crate by
+crate: `cargo deny check advisories` reports `advisories ok` against the
+advisory database clone at commit `ba9db2a77a6a0fe93bc63a3d9b730e08b145aff5`
+(2026-08-31), whose `crates/` directory holds 912 entries and none named
+`hkdf`. As with the five empty rows above, this is an absence of *recorded*
+advisories on 2026-08-31 and not a statement about the crate's future.
+
+Licences: `MIT OR Apache-2.0`, both already in the five-entry allowlist of
+`deny.toml`. `cargo deny check licenses` reports `licenses ok`. No SPDX
+identifier and no exception entry is added, and no `GATE-*` ledger anchor is
+created — for the same reason as the class above: no package is new to the
+resolved graph.
 
 ## wasm-bindgen crate and CLI parity
 
@@ -427,6 +493,17 @@ Stage 4 gate report, and an image does not make either one true.
   workspace, beyond the compilability-only claim
   `docs/adr/0001-toolchain-and-cryptography-dependencies.md`'s delivery
   ledger already records for `ea-verify` and its neighbours.
+- The sixth pin, `hkdf`, discharges its own lockfile obligation in the task
+  that enters it: `crates/ea-reader` inherits it with `workspace = true`, and
+  the measured `Cargo.lock` delta is the `ea-reader` edge list alone — no new
+  `[[package]]`, because `hpke 0.14.0` and `sqlx-postgres 0.9.0` already
+  resolved `hkdf 0.13.0`. An `hkdf` upgrade independent of `hpke` is a new
+  reviewed decision under
+  `docs/adr/0001-toolchain-and-cryptography-dependencies.md`:152-154, because
+  `hkdf`, `hmac` and `sha2` sharing one `digest 0.11.3` today is a measured
+  fact and not a guarantee. Removing the last `Hkdf` call from
+  `crates/ea-reader` removes the pin: this document admits no pin no member
+  consumes.
 - `deny.toml`'s five-entry license allowlist and its four named per-crate
   exceptions are both unchanged by this decision: all five crates of this
   class declare `MIT OR Apache-2.0`, already allowed, and none of the five is

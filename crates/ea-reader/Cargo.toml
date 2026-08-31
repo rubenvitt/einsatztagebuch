@@ -7,8 +7,88 @@ license.workspace = true
 publish = false
 
 [dependencies]
-# Die einzige Kante dieser Crate, und sie ist der Grund fuer ihre Existenz:
-# `GATE_ORDER_V1` wird RE-EXPORTIERT und nie ein zweites Mal geschrieben.
-# `ea-verify` steht selbst auf der wasm32-Positivliste, `web-reader-design.md`
-# §9 endet genau dort.
+# Der deterministische CBOR-Waechter. Tresorkoerper, versiegelter Tresor und
+# Eintragszustand werden VOR dem Parsen durch `validate(..., ParserLimits::V1)`
+# geschickt — dieselbe Reihenfolge, die
+# `CanonicalPublicCoseKey::from_deterministic_cbor` vorgibt: erst die
+# Formgrenzen, dann der Inhalt.
+ea-cbor.workspace = true
+# Die EINZIGE Kryptografie dieser Crate. `aead_seal`/`aead_open` verschluesseln
+# Tresorkoerper, Envelopes, Cache und Zustandsspeicher; `chacha20poly1305`
+# steht deshalb weiterhin in genau EINEM Manifest, naemlich in
+# `crates/ea-crypto/Cargo.toml`.
+ea-crypto.workspace = true
+# `DeviceCertificateFieldsV1` und `CertificateKindV1` sind die EINGABE von
+# `ReaderKeyProfile::validate`.
+ea-format.workspace = true
+# `decode_trust_anchor` rechnet den Bootstrap-Hash beim Entsperren NEU. Der
+# gepinnte Anker gilt nicht, weil er im Tresor lag, sondern weil er sich selbst
+# traegt; `RegistryHeadPin` haelt den zuletzt verifizierten Registry-Stand.
+ea-trust.workspace = true
+# Die Hash- und Statusbegriffe. `web-reader-design.md` §17.4 bekommt in dieser
+# Crate KEINE zweite Sprache: `VerificationStatus` und `EntryStatus` werden
+# importiert und nicht nachgebaut.
+ea-types.workspace = true
+# `GATE_ORDER_V1` wird RE-EXPORTIERT und nie ein zweites Mal geschrieben;
+# `ServerConfirmationV1` ist die EIGENE Spalte neben dem Verifikationsstatus.
 ea-verify.workspace = true
+# Der Auditschluessel signiert einen 32-Byte-Digest zu einer ROHEN
+# Ed25519-Signatur. `ea_crypto::CoseSigner` kann das nicht: es signiert
+# ausschliesslich COSE_Sign1 und gibt `Vec<u8>` zurueck. `ea-crypto` zieht
+# dieselbe Kante fuer wasm32 heute schon.
+ed25519-dalek.workspace = true
+# Der Tresor zieht seinen Schluessel und jeden Nonce SELBST. `ea-crypto` gibt
+# keine Zufallsquelle heraus (`hpke_seal_with_random_source` ist bewusst
+# privat), und `getrandom::fill` ist derselbe Weg, den `ea-audit`, `ea-draft`
+# und `ea-writer` bereits nehmen.
+getrandom.workspace = true
+# Der Adressraum des Bytespeichers ist HEXADEZIMAL und nie ein fachliches
+# Zeichen: `ReaderBlobStore::keys()` gibt die Schluessel im Klartext heraus.
+hex.workspace = true
+# Die Schluesselableitung aus `web-reader-design.md` §6.2, ratifiziert in
+# `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`. Die PRF-Ausgabe
+# DARF NICHT selbst der Wrapping-Schluessel sein; `derive_key` ist der EINE
+# Ort, an dem HKDF-SHA-256 in dieser Crate vorkommt.
+hkdf.workspace = true
+# Der handgeschriebene CBOR-Weg fuer Tresorkoerper, Envelopes und
+# Eintragszustand. Kein `derive`: das Repositorium kodiert ueberall von Hand
+# und prueft mit einer Rueckprobe gegen die eigenen Bytes.
+minicbor.workspace = true
+# Die Hashfunktion unter `Hkdf`. Der Arbeitsbereich pinnt `sha2` ohne `std`;
+# das genuegt `hkdf`/`hmac` 0.13.
+sha2.workspace = true
+# `derive_key` schreibt seine Ausgabe in ein Stackarray, bevor `SecretBytes`
+# sie uebernimmt. Das Array traegt danach denselben Schluessel und wird
+# ausdruecklich geloescht — `SecretBytes` kann das fuer eine Kopie, die es nie
+# gesehen hat, nicht tun.
+zeroize.workspace = true
+
+[features]
+# Die zwei BESCHAEDIGENDEN Zeugenhilfen des Tresors.
+#
+# RELEASEAUSSCHLUSS, namentlich:
+# `SealedVaultV1::flip_one_wrapped_key_byte_for_test` kippt ein Byte im
+# umschlossenen Tresorschluessel, und
+# `SealedVaultV1::replace_sealed_anchor_bytes_for_test` entsiegelt den
+# Tresorkoerper, tauscht die gepinnten Ankerbytes und versiegelt neu. Beide
+# existieren ausschliesslich, damit
+# `a_flipped_envelope_byte_and_a_substituted_anchor_both_refuse` zwei
+# VERSCHIEDENE Weigerungen misst statt zweimal derselben.
+#
+# Es ist trotzdem ein DEFAULT-Feature, und zwar aus einem Cargo-Grund: ein
+# Integrationstest kann das Feature SEINER EIGENEN Crate nicht einschalten, und
+# `cargo test --workspace --all-targets --locked` faehrt ohne `--all-features`.
+# Abgeschaltet wird an der GETEILTEN Wurzelkante
+# (`ea-reader = { path = "crates/ea-reader", default-features = false }`), weil
+# `--no-default-features` am ausgewaehlten Paket nicht auf Default-Features
+# seiner Abhaengigkeiten wirkt — `crates/ea-reader-wasm` sieht die beiden
+# Methoden damit NICHT, und das ausgelieferte wasm-Modul traegt sie nicht.
+default = ["test-support"]
+test-support = []
+
+[dev-dependencies]
+# `contains_canary` fuer die Kanarienzeugen und `ed25519_public_key` fuer die
+# Fixture-Zertifikate. NUR als Zeugenkante: die Crate steht wegen ihrer
+# `std::fs`-Vektorausgabe auf `WASM32_EXEMPT_CRATES`, und die wasm32-Zeile des
+# Gates faehrt ohne `--all-targets`.
+ea-testkit.workspace = true
