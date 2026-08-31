@@ -11,11 +11,20 @@ import { expect, it } from 'vitest'
 const bridgeDirectory = path.dirname(fileURLToPath(import.meta.url))
 const sourceRoot = path.resolve(bridgeDirectory, '..')
 const generatedContracts = path.join(bridgeDirectory, 'generated-contracts.ts')
+// Der Ausgang von `xtask build-wasm`. Er liegt UNTER `src`, ist ueber die
+// generische `pkg/`-Regel in `.gitignore` gehalten und traegt die von
+// wasm-bindgen erzeugte Glue. Ohne diese Grenze kann sich der Zeuge an einer
+// Datei rot faerben, die NIEMAND geschrieben hat und die es in einem frischen
+// Checkout gar nicht gibt — die Meldung „duplicates the security literal"
+// wiese dann auf einen Generatorausgang statt auf eine Handkopie, und wer sie
+// liest, schaltet die Zusicherung ab, statt ihr zu folgen.
+const generatedWasmGlue = path.join(bridgeDirectory, 'pkg')
 
 /**
- * Jede Quelle unter `src`, ausser der generierten Datei selbst und ausser den
- * Testdateien — deren Zusicherungen MUESSEN die gerenderte Zeichenkette
- * benennen duerfen.
+ * Jede HANDGESCHRIEBENE Quelle unter `src`: ohne die beiden Generatorausgaenge
+ * (`generated-contracts.ts` und die wasm-bindgen-Glue unter `bridge/pkg/`) und
+ * ohne die Testdateien — deren Zusicherungen MUESSEN die gerenderte
+ * Zeichenkette benennen duerfen.
  */
 async function handWrittenSources(): Promise<[string, string][]> {
   const entries = await readdir(sourceRoot, { recursive: true, withFileTypes: true })
@@ -24,6 +33,7 @@ async function handWrittenSources(): Promise<[string, string][]> {
     .map(entry => path.join(entry.parentPath, entry.name))
     .filter(file => /\.tsx?$/.test(file))
     .filter(file => file !== generatedContracts)
+    .filter(file => !file.startsWith(`${generatedWasmGlue}${path.sep}`))
     .filter(file => !/\.test\.tsx?$/.test(file))
     .sort()
   return Promise.all(

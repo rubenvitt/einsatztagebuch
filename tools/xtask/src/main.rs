@@ -61,10 +61,26 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
         ("pnpm", vec!["desktop:test"]),
         // Die vier Arme von `apps/web`, und ihre Reihenfolge IST die Begruendung:
         // `build-wasm` steht zuerst, weil `apps/web/src/bridge/pkg/` sein Ausgang
-        // ist und sowohl der Vite-Bau als auch `wasm-runtime.test.ts` daraus
-        // importieren. Ohne den Vorlauf bricht der Bau an einem nicht
-        // aufloesbaren Modul ab, statt zu pruefen - dieselbe Ordnungsentscheidung,
-        // die den Desktop-Bau schon vor die Cargo-Kommandos setzt.
+        // ist und die beiden PRUEFENDEN Arme darunter ihn brauchen. GEMESSEN am
+        // 2026-08-31, indem `pkg/` beiseitegelegt und jeder Arm einzeln gefahren
+        // wurde: `pnpm web:typecheck` faellt mit Exit 1 und zweimal TS2307
+        // (`opfs-worker.ts:11` und `wasm-runtime.test.ts:59`), weil `tsc` GANZ
+        // `src` liest; `pnpm web:test` faellt mit Exit 1, weil
+        // `wasm-runtime.test.ts` die Glue importiert und `ea_reader_wasm_bg.wasm`
+        // als Bytes einliest. Beide bruechen also am fehlenden Vorlauf ab, statt
+        // zu pruefen - dieselbe Ordnungsentscheidung, die den Desktop-Bau schon
+        // vor die Cargo-Kommandos setzt.
+        //
+        // Der Vite-Bau gehoert AUSDRUECKLICH NICHT dazu, und das ist der Punkt,
+        // an dem die urspruengliche Begruendung falsch war: derselbe Lauf ohne
+        // `pkg/` gibt `pnpm --dir apps/web build` mit Exit 0 zurueck. Sein
+        // Einstiegsgraph ist `index.html` -> `src/main.tsx`, und der EINZIGE
+        // Nichttest, der aus `pkg/` importiert, ist `src/bridge/opfs-worker.ts` —
+        // den montiert heute niemand, also sieht ihn der Buendler nie. Die Zeile
+        // steht trotzdem an dieser Stelle: der Plan schreibt `build-wasm` zuerst
+        // woertlich vor, und sobald die Schale den Worker startet, ist der
+        // Vorlauf auch fuer den Bau bindend. Eine Begruendung, die nicht stimmt,
+        // ist schlimmer als keine - deshalb steht hier die gemessene.
         //
         // `web:browser-test` und das spaeter entstehende `web:e2e` stehen hier
         // AUSDRUECKLICH NICHT: der wasm-bindgen-test-runner setzt einen

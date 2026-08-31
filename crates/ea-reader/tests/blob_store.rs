@@ -30,6 +30,16 @@ fn a_blob_key_is_a_bounded_ascii_path_and_never_a_traversal() {
         "vault/../../etc",
         "vault/\u{00e9}",
         &"a".repeat(129),
+        // Der fuehrende `/`, und er steht hier als EIGENER Fall, weil ihn keiner
+        // der anderen faengt: `/vault/envelope-0` ist nicht leer, rein ASCII,
+        // weit unter 128 Byte und ohne `..`-Segment — abgewiesen wird er allein
+        // von `starts_with('/')`. Ohne diese Zeile laesst sich die Schranke
+        // ersatzlos loeschen, ohne dass ein Zeuge faellt; die Doku von
+        // `ReaderBlobKey::new` verspricht sie aber ausdruecklich. Im Browser
+        // waere ein absoluter Schluessel kein Schoenheitsfehler: OPFS loest
+        // Namen relativ zum Verzeichnisknoten auf, und was hier durchginge,
+        // fiele erst im dedizierten Worker auf.
+        "/vault/envelope-0",
     ] {
         assert!(
             ReaderBlobKey::new(rejected).is_err(),

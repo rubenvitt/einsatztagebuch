@@ -340,11 +340,65 @@ EINE ein:
 
 | Grenze | Stand nach dem Abloesen |
 |---|---|
-| 1 — kein Browser, nur Node | **FAELLT.** `pnpm web:browser-test` faehrt `crates/ea-reader-wasm/tests/opfs_browser.rs` in Headless-Chromium ueber den `wasm-bindgen-test-runner`. |
+| 1 — kein Browser, nur Node | **FAELLT — GEMESSEN am 2026-08-31.** `pnpm web:browser-test` faehrt `crates/ea-reader-wasm/tests/opfs_browser.rs` mit ZWEI bestandenen Faellen in Headless-Chromium ueber den `wasm-bindgen-test-runner`. Der Lauf steht mit Kommando, Exitcode und woertlicher Ausgabe unter [Der Lauf, der Grenze 1 einloest](#der-lauf-der-grenze-1-einloest); ohne ihn waere diese Zeile eine Zusicherung ohne Beleg. |
 | 2 — nur `debug`, kein `--release`, kein `wasm-opt` | **BLEIBT OFFEN.** Nicht gemessen, gehoert Stufe 7. |
 | 3 — nur `ea-crypto` wird AUSGEFUEHRT | **FAELLT NICHT, VERSCHIEBT SICH.** Ab dem abloesenden Task fuehrt neben `ea-crypto` auch `crates/ea-reader-wasm` selbst etwas aus — die Bruecke und der OPFS-Zeuge laufen. `ea-verify`, `ea-archive`, `ea-chain`, `ea-format` und `ea-trust` UEBERSETZEN weiterhin nur und laufen nirgends. Der Satz „ausser `ea-crypto` fuehrt keine Crate etwas aus" ist ab dort FALSCH; der Satz „der Reader-Pfad als Ganzes ist nicht ausgefuehrt" bleibt WAHR. |
 | 4 — keine COSE-Kette | **BLEIBT OFFEN.** `parse_cose_sign1` laeuft erst im Task „Verifikation vor Entschluesselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert" gegen ein echtes Archiv. |
 | 5 — keine RNG-Statistik, nur Anwesenheitsproben | **BLEIBT OFFEN.** `wasm-runtime.test.ts` wiederholt die Lebendigkeitsproben und fuegt keinen statistischen Test hinzu. |
+
+### Der Lauf, der Grenze 1 einloest
+
+Diese Zeile ist eine AUSFUEHRUNGSAUFZEICHNUNG und keine Absicht. Grenze 1 ist
+die einzige der fuenf, die der abloesende Task ueberhaupt einloesen kann, und
+sie steht und faellt mit einem Lauf, der wirklich einen Browser startet — ein
+uebersprungenes oder auf null Faelle geschmolzenes Ziel meldet ebenfalls
+`ok`. Deshalb stehen hier die Fallzahl und die Zeile des Testlaeufers.
+
+Gefahren am 2026-08-31 auf `Linux 6.8.0-138-generic x86_64`, in der benannten
+Klammer und mit uebernommener `export`-Zeile — ohne das `eval` findet der
+`wasm-bindgen-test-runner` keinen Treiber und das Ziel liefe gar nicht:
+
+```bash
+eval "$(cargo run --locked -p xtask -- browsers up | grep '^export ')"
+pnpm web:browser-test
+cargo run --locked -p xtask -- browsers down
+```
+
+| Kommando | Exitcode | Gemessenes Ergebnis |
+|---|---|---|
+| `cargo run --locked -p xtask -- browsers up` | 0 | `einsatzarchiv-browsers-browsers-1` angelegt, gestartet und `Healthy`; gedruckt wurde GENAU EINE Zeile: `export CHROMEDRIVER_REMOTE=http://127.0.0.1:59515` |
+| `pnpm web:browser-test` | 0 | `tests/opfs_browser.rs`: `Running headless tests in Chrome on http://127.0.0.1:59515/`, ZWEI Faelle, `2 passed; 0 failed; 0 ignored; 0 filtered out` |
+| `cargo run --locked -p xtask -- browsers down` | 0 | Container angehalten und entfernt |
+
+Die Ausgabe des mittleren Kommandos, woertlich und ungekuerzt fuer das
+Browserziel:
+
+```
+     Running tests/opfs_browser.rs (target/wasm32-unknown-unknown/debug/deps/opfs_browser-9e83fa3c45745b51.wasm)
+Running headless tests in Chrome on `http://127.0.0.1:59515/`
+Try find `webdriver.json` for configure browser's capabilities:
+Not found
+Loading Wasm module...
+running 2 tests
+test opfs_round_trips_the_same_bytes_the_in_memory_double_does ... ok
+test bytes_survive_a_store_that_is_dropped_and_opened_again ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.11s
+```
+
+Zwei Dinge, die derselbe Lauf zeigt und die hier nicht verschwiegen werden:
+`src/lib.rs` und `tests/bridge_boundary.rs` melden unter
+`--target wasm32-unknown-unknown` beide `no tests to run!`. Das ist kein
+Ausfall, sondern die Arbeitsteilung — `bridge_boundary.rs` ist ein WIRTSZEUGE,
+der den Quelltext liest, und er laeuft auf dem Wirt:
+`cargo test --locked -p ea-reader-wasm --test bridge_boundary` endet am selben
+Tag und auf demselben Baum mit Exitcode 0 und DREI Faellen, darunter
+`every_wasm_bindgen_export_sits_behind_the_wasm32_cfg`. Diese Gegenprobe steht
+hier, weil das Ziel zwischenzeitlich DUNKEL war: bis zur Merkmalswahl
+`wasm-bindgen-test = { …, features = ["std"] }` brach es mit `E0152`
+(`duplicate lang item panic_impl`) ab, und drei Stellen der Prosa in
+`crates/ea-reader-wasm/` berufen sich auf genau diesen Zeugen. Ein Beleg fuer
+Grenze 1 waere wertlos, wenn der Zeuge daneben nicht uebersetzte.
 
 Die SECHSTE Tatsache — die LAGE des Nachweises, der Spike lag ausserhalb jedes
 Gates — aendert sich SEPARAT: das ausgefuehrte Modul steht jetzt unter
