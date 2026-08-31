@@ -31,6 +31,26 @@ fn the_bridge_returns_what_its_caller_hands_it() {
 /// deshalb nur die LAGE des Exports, und die wird als Text gelesen — dieselbe
 /// Bauform, mit der `every_crates_member_is_classified_for_the_wasm32_gate`
 /// den wasm32-Block aus `tools/xtask/src/main.rs` liest.
+///
+/// # Dieser Zeuge ist die EINZIGE Instanz, und das ist GEMESSEN
+///
+/// Der Stufe-4-Plan nahm an, eine Ausfuhr ohne ihr cfg falle ohnehin am
+/// Wirtsbau auf — „spaeter und unklarer", aber sie falle. Das ist falsch.
+/// Gemessen in der Aufgabe „wasm32-Reichweite" mit entferntem
+/// `#[cfg(target_arch = "wasm32")]` ueber `bridge_echo_js` und sonst
+/// unveraendertem Baum: `cargo build --locked -p ea-reader-wasm --lib`,
+/// `cargo test --locked -p ea-reader-wasm --all-targets --no-run` und
+/// `cargo clippy --locked -p ea-reader-wasm --all-targets --all-features --
+/// -D warnings` enden ALLE DREI mit 0 und ohne eine einzige Diagnose;
+/// `wasm-bindgen 0.2.126` uebersetzt sein Attribut auf einem Nicht-wasm-Ziel
+/// klaglos, sogar unter `#![forbid(unsafe_code)]`. Nur dieser Zeuge fiel
+/// (Exitcode 101).
+///
+/// Es gibt also KEIN zweites Netz. Fuer die acht Bruecken-Module, die nach
+/// diesem Task entstehen — `bridge.rs`, `opfs_worker.rs`, `vault_bridge.rs`,
+/// `webauthn.rs`, `fetch.rs`, `file_access.rs`, `visibility.rs`, `view.rs` —,
+/// heisst das: der Compiler warnt NICHT mit. Ein vergessenes cfg faellt hier
+/// oder gar nicht, und die Ausfuhr wandert unbemerkt in die Wirtsbibliothek.
 #[test]
 fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
     // Der Zeuge laeuft ueber JEDE Quelle der Bruecke und ueber BEIDE
@@ -68,8 +88,11 @@ fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
                 source[..index]
                     .trim_end()
                     .ends_with("#[cfg(target_arch = \"wasm32\")]"),
-                "a wasm_bindgen export without the wasm32 cfg breaks the host build of \
-                 `cargo test --workspace --all-targets --locked`: {}",
+                "a wasm_bindgen export without the wasm32 cfg is compiled into the HOST \
+                 library as well, and NOTHING ELSE reports it: on exactly this mutation \
+                 `cargo build --lib`, `cargo test --all-targets --no-run` and \
+                 `cargo clippy --all-targets -- -D warnings` were all measured to end with 0. \
+                 This witness is the only instance that catches it: {}",
                 path.display()
             );
         }
