@@ -254,3 +254,73 @@ fn server_runtime_dependency_class_is_ratified_before_use() {
         );
     }
 }
+
+// tools/xtask/tests/adr_gate.rs — dritte Instanz desselben Gates, keine
+// Verallgemeinerung der ersten beiden: ADR 0002, 0004 und 0005 ratifizieren
+// verschiedene Klassen und muessen trennbar bleiben.
+const BROWSER_ADR_PATH: &str = "docs/adr/0005-browser-runtime-and-wasm-dependency-class.md";
+
+const BROWSER_ADR_SECTIONS: [&str; 8] = [
+    "## Context",
+    "## Decision",
+    "## Rejected alternatives",
+    "## Primary-source and RustSec review",
+    "## wasm-bindgen crate and CLI parity",
+    "## Enumerated web-sys features",
+    "## Browser provisioning",
+    "## Consequences",
+];
+
+const BROWSER_ADR_LITERALS: [&str; 7] = [
+    "docs/adr/0001-toolchain-and-cryptography-dependencies.md",
+    "docs/adr/0004-server-runtime-and-dependency-class.md",
+    "RustSec advisory database",
+    "getrandom 0.4.3 selects its wasm backend through the Cargo feature `wasm_js`",
+    "--cfg getrandom_backend",
+    "spikes/wasm-runtime-proof/spike.sh",
+    "no member of this stage consumes",
+];
+
+const BROWSER_RUNTIME_DEPENDENCIES: [&str; 5] = [
+    "js-sys",
+    "wasm-bindgen",
+    "wasm-bindgen-futures",
+    "wasm-bindgen-test",
+    "web-sys",
+];
+
+#[test]
+fn browser_runtime_dependency_class_is_ratified_before_use() {
+    let adr = fs::read_to_string(workspace_root().join(BROWSER_ADR_PATH))
+        .expect("ADR 0005 must exist before any browser dependency is pinned");
+    for section in BROWSER_ADR_SECTIONS {
+        assert!(adr.contains(section), "ADR 0005 is missing {section}");
+    }
+    for literal in BROWSER_ADR_LITERALS {
+        assert!(
+            adr.contains(literal),
+            "ADR 0005 is missing the literal {literal}"
+        );
+    }
+    let shared = shared_dependencies();
+    for name in BROWSER_RUNTIME_DEPENDENCIES {
+        let spec = shared
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} must be a shared workspace dependency"));
+        let version = spec
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{name} must carry an explicit version"));
+        assert!(version.starts_with('='), "{name} must be pinned exactly");
+        assert!(
+            adr.lines()
+                .any(|line| line.contains(&format!("`{name}`")) && line.contains(version)),
+            "ADR 0005 must carry {name} and its pin {version} on one line"
+        );
+        let ledger = reviewed_feature_ledger_line(name, spec);
+        assert!(
+            adr.contains(&ledger),
+            "ADR 0005 must carry the reviewed feature selection verbatim: {ledger}"
+        );
+    }
+}

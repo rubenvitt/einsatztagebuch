@@ -507,12 +507,24 @@ fn stage_one_gate_requires_a_complete_requirement_ledger() {
 /// Die geschlossenen Gate-Berichte der Stufen 1 und 2 werden dafuer NICHT
 /// angefasst; `docs/traceability/stage-2-gate.md:348` traegt diesen
 /// Mechanismus als Praezedenz.
-const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 9] = [
+///
+/// Der Stufe-4-Vorlauf (dieser Task) ergaenzt ZWEI weitere Zeilen,
+/// `WR-053` und `WR-054`, beide Stufe `4` und `planned`: der gepinnte
+/// Root-Anchor als einzige Vertrauensquelle im Datei-Modus (§5.3) und die
+/// sichtbare "nicht server-bestaetigt"-Kennzeichnung ohne Cursor im
+/// Datei-Modus (§5.4). Beide Zeilen entstehen HIER und nicht in der
+/// Datei-Modus-Aufgabe selbst, weil `web_reader_must_requirements_are_recorded_as_v1_1_rows`
+/// je Tupel eine vorhandene Ledgerzeile verlangt und die gewachsene Konstante
+/// sonst rot stuende, bevor die Aufgabe laeuft, die sie einloest. Die
+/// Stelligkeit geht damit von NEUN auf ELF.
+const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 11] = [
     ("WR-041", "4.1", "4", "planned"),
     ("WR-042", "4.2", "4", "planned"),
     ("WR-042D", "4.2", "3", "implemented"),
     ("WR-043", "4.3", "4", "planned"),
     ("WR-052", "5.2", "2", "integrated"),
+    ("WR-053", "5.3", "4", "planned"),
+    ("WR-054", "5.4", "4", "planned"),
     ("WR-063", "6.3", "4", "planned"),
     ("WR-064", "6.4", "3", "implemented"),
     ("WR-075", "7.5", "5", "planned"),

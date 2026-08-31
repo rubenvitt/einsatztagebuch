@@ -365,6 +365,140 @@ fn ensure_wasm32_target_available() -> Result<(), String> {
     ))
 }
 
+/// Liest die von Cargo AUFGELOESTE Fassung eines Pakets aus `Cargo.lock`.
+fn locked_package_version(lock: &toml::Value, name: &str) -> Option<String> {
+    lock.get("package")?
+        .as_array()?
+        .iter()
+        .find(|package| package.get("name").and_then(toml::Value::as_str) == Some(name))?
+        .get("version")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Prueft VOR jedem Bau, dass die installierte `wasm-bindgen-cli` und die von
+/// `Cargo.lock` aufgeloeste `wasm-bindgen`-Crate zeichengleich sind.
+///
+/// Begruendet in `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`:
+/// der Laufzeitnachweis unter `spikes/wasm-runtime-proof/` hat gemessen, dass
+/// ein frei aufgeloestes Lockfile auf `wasm-bindgen 0.2.127` lief, waehrend
+/// die installierte CLI `0.2.126` war — der Generatorlauf bricht dann mit
+/// einem Schema-Mismatch tief im Protokoll ab statt mit einer Codeaussage.
+/// Diese Pruefung meldet die benoetigte Fassung VORHER, mit derselben
+/// Anweisung, ob die CLI abweicht oder ganz fehlt.
+fn ensure_wasm_bindgen_cli_matches_lockfile(root: &Path) -> Result<(), String> {
+    let lock: toml::Value = fs::read_to_string(root.join("Cargo.lock"))
+        .map_err(|error| format!("failed to read Cargo.lock: {error}"))?
+        .parse()
+        .map_err(|error| format!("invalid Cargo.lock: {error}"))?;
+    let required = locked_package_version(&lock, "wasm-bindgen")
+        .ok_or_else(|| "Cargo.lock does not lock wasm-bindgen".to_owned())?;
+    let instruction = format!(
+        "Install wasm-bindgen-cli {required} (mise.toml pins it as cargo:wasm-bindgen-cli)."
+    );
+    let Ok(output) = Command::new("wasm-bindgen").arg("--version").output() else {
+        return Err(format!("wasm-bindgen-cli is not installed. {instruction}"));
+    };
+    if !output.status.success() {
+        return Err(format!("wasm-bindgen-cli is not installed. {instruction}"));
+    }
+    // `wasm-bindgen --version` prints `wasm-bindgen A.B.C` on its first line.
+    // `lines().next()` is taken BEFORE `rsplit(' ')` so that any trailing
+    // output on a second line cannot ride along into the user-facing
+    // mismatch message below.
+    let installed = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .rsplit(' ')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if installed != required {
+        return Err(format!(
+            "wasm-bindgen-cli {installed} does not match the locked wasm-bindgen crate \
+             {required}. {instruction}"
+        ));
+    }
+    Ok(())
+}
+
+/// Die Bruecken-Crate, die die Aufgabe „wasm32-Reichweite: `ea-reader`, die
+/// Bruecken-Crate und die geteilten Browserkerne" anlegt. Bis dahin ist
+/// `build-wasm` ein vollstaendig gebautes, vollstaendig getestetes Kommando
+/// ohne Artefakt — das Kommando entsteht VOR seinem Gegenstand, wie
+/// `integration up` in Stufe 3 vor `apps/server` entstand.
+const WASM_BRIDGE_CRATE_MANIFEST: &str = "crates/ea-reader-wasm/Cargo.toml";
+
+fn ensure_bridge_crate_exists(root: &Path) -> Result<(), String> {
+    if root.join(WASM_BRIDGE_CRATE_MANIFEST).is_file() {
+        return Ok(());
+    }
+    Err(format!(
+        "{WASM_BRIDGE_CRATE_MANIFEST} does not exist yet. It is created by the task \
+         \"wasm32-Reichweite: `ea-reader`, die Bruecken-Crate und die geteilten \
+         Browserkerne\"; build-wasm has nothing to build until then."
+    ))
+}
+
+/// Wie [`run_process`], aber mit entferntem `RUSTFLAGS`.
+///
+/// `getrandom` 0.4.3 waehlt sein wasm-Backend ueber das Cargo-Feature
+/// `wasm_js`; ein aus der Umgebung geerbtes `--cfg getrandom_backend=...`
+/// wuerde dieses Feature ueberstimmen, und in 0.4.3 steht `"wasm_js"` nicht
+/// einmal mehr in der erlaubten Werteliste von
+/// `cfg(getrandom_backend, values(...))`. Delegiert an
+/// [`run_process_impl`] mit `strip_rustflags = true`; das
+/// `Command::env_remove("RUSTFLAGS")`, das diese Abweichung von
+/// `run_process` tatsaechlich traegt, steht dort GENAU EINMAL und traegt die
+/// Messung aus `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`.
+fn run_process_without_rustflags(
+    root: &Path,
+    program: &str,
+    args: &[impl AsRef<std::ffi::OsStr>],
+) -> io::Result<()> {
+    run_process_impl(root, program, args, true)
+}
+
+/// Der Bauablauf von `build-wasm`, vier fail-closed Schritte in dieser
+/// Reihenfolge, keiner ueber eine Umgebungsvariable ueberspringbar:
+/// installiertes Ziel, zeichengleiche CLI, vorhandene Bruecken-Crate, und erst
+/// dann der eigentliche Bau plus Generatorlauf — beide ohne geerbtes
+/// `RUSTFLAGS`.
+fn run_build_wasm(root: &Path) -> Result<(), String> {
+    ensure_wasm32_target_available()?;
+    ensure_wasm_bindgen_cli_matches_lockfile(root)?;
+    ensure_bridge_crate_exists(root)?;
+    run_process_without_rustflags(
+        root,
+        "cargo",
+        &[
+            "build",
+            "--locked",
+            "--target",
+            "wasm32-unknown-unknown",
+            "-p",
+            "ea-reader-wasm",
+            "--lib",
+        ],
+    )
+    .map_err(|error| format!("failed to invoke cargo: {error}"))?;
+    run_process_without_rustflags(
+        root,
+        "wasm-bindgen",
+        &[
+            "--target",
+            "web",
+            "--out-dir",
+            "apps/web/src/bridge/pkg",
+            "target/wasm32-unknown-unknown/debug/ea_reader_wasm.wasm",
+        ],
+    )
+    .map_err(|error| format!("failed to invoke wasm-bindgen: {error}"))?;
+    Ok(())
+}
+
 /// Die Compose-Datei der beiden Integrationsdienste, relativ zur Wurzel.
 const INTEGRATION_COMPOSE_FILE: &str = "ops/compose/integration.yaml";
 
@@ -702,15 +836,34 @@ fn fuzz_lock_validation_args() -> Vec<&'static str> {
     ]
 }
 
-fn run_process(root: &Path, program: &str, args: &[impl AsRef<std::ffi::OsStr>]) -> io::Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(root)
-        .status()?;
+/// Shared body of [`run_process`] and [`run_process_without_rustflags`].
+///
+/// Both start a child process the same way — same working directory, same
+/// fail-closed `process::exit(status.code()...)` once it fails — and differ
+/// in exactly one respect: whether an inherited `RUSTFLAGS` is stripped
+/// before the child starts. The two callers are thin wrappers over this one
+/// body so that a future change to exit handling or stderr capture cannot
+/// reach one copy and silently miss the other.
+fn run_process_impl(
+    root: &Path,
+    program: &str,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    strip_rustflags: bool,
+) -> io::Result<()> {
+    let mut command = Command::new(program);
+    command.args(args).current_dir(root);
+    if strip_rustflags {
+        command.env_remove("RUSTFLAGS");
+    }
+    let status = command.status()?;
     if !status.success() {
         process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+fn run_process(root: &Path, program: &str, args: &[impl AsRef<std::ffi::OsStr>]) -> io::Result<()> {
+    run_process_impl(root, program, args, false)
 }
 
 fn run_fuzz(root: &Path, args: impl IntoIterator<Item = String>) -> Result<(), String> {
@@ -3261,6 +3414,12 @@ fn run() -> Result<(), String> {
                 return Err("validate-schemas does not accept arguments".to_owned());
             }
             validate_schemas(&root)
+        }
+        "build-wasm" => {
+            if args.next().is_some() {
+                return Err("build-wasm does not accept arguments".to_owned());
+            }
+            run_build_wasm(&root)
         }
         _ => Err(format!("unknown gate: {gate}")),
     }
