@@ -65,9 +65,16 @@ fn the_bridge_returns_what_its_caller_hands_it() {
 ///
 /// Das `#[cfg(target_arch = "wasm32")]` steht unmittelbar ueber dem Attribut
 /// jeder einzelnen Ausfuhr, nicht am umschliessenden `mod`. Ein Modultor waere
-/// fuer die Uebersetzung gleichwertig, fuer diesen Zeugen aber unsichtbar: er
-/// liest Text und folgt keinem `mod`. Die Regel ist deshalb die engere von
-/// beiden — je Ausfuhr ein cfg —, und die Fehlermeldung unten sagt es.
+/// fuer die Uebersetzung gleichwertig — ein weggetortes Modul uebersetzt gar
+/// nichts, die Ausfuhr laege also auch dann nicht in der Wirtsbibliothek —,
+/// fuer diesen Zeugen aber unsichtbar: er liest Text und folgt keinem `mod`.
+/// Die Regel ist deshalb die engere von beiden — je Ausfuhr ein cfg —, und die
+/// Fehlermeldung unten haelt die zwei Faelle auseinander.
+///
+/// Die Messung im naechsten Abschnitt betrifft AUSSCHLIESSLICH den anderen
+/// Fall, das GANZ fehlende cfg. Ueber das Modultor sagt sie nichts, und sie
+/// muss es auch nicht: dort ist der Befund kein Uebersetzungsschaden, sondern
+/// eine Bauform, die dieser Zeuge nicht lesen kann.
 ///
 /// # Dieser Zeuge ist die EINZIGE Instanz, und das ist GEMESSEN
 ///
@@ -86,8 +93,9 @@ fn the_bridge_returns_what_its_caller_hands_it() {
 /// Es gibt also KEIN zweites Netz. Fuer die acht Bruecken-Module, die nach
 /// diesem Task entstehen — `bridge.rs`, `opfs_worker.rs`, `vault_bridge.rs`,
 /// `webauthn.rs`, `fetch.rs`, `file_access.rs`, `visibility.rs`, `view.rs` —,
-/// heisst das: der Compiler warnt NICHT mit. Ein vergessenes cfg faellt hier
-/// oder gar nicht, und die Ausfuhr wandert unbemerkt in die Wirtsbibliothek.
+/// heisst das: der Compiler warnt NICHT mit. Ein GANZ vergessenes cfg faellt
+/// hier oder gar nicht, und die Ausfuhr wandert unbemerkt in die
+/// Wirtsbibliothek.
 #[test]
 fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
     // Der Zeuge laeuft ueber JEDE Quelle der Bruecke — rekursiv, siehe
@@ -127,14 +135,17 @@ fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
                     .trim_end()
                     .ends_with("#[cfg(target_arch = \"wasm32\")]"),
                 "every wasm_bindgen export must carry `#[cfg(target_arch = \"wasm32\")]` on \
-                 the ITEM ITSELF, on the line directly above the attribute. A cfg on the \
-                 enclosing `mod` instead does not satisfy this witness and is not the \
-                 required shape: the witness reads text and cannot follow a module gate. \
-                 Without a per-item cfg the export is compiled into the HOST library as well, \
-                 and NOTHING ELSE reports it — on exactly that mutation `cargo build --lib`, \
+                 the ITEM ITSELF, on the line directly above the attribute. Two different \
+                 mistakes land here, and they have different consequences. (1) NO cfg at \
+                 all: the export is then compiled into the HOST library as well, and NOTHING \
+                 ELSE reports it — on exactly that mutation `cargo build --lib`, \
                  `cargo test --all-targets --no-run` and \
-                 `cargo clippy --all-targets -- -D warnings` were all measured to end with 0. \
-                 This witness is the only instance that catches it: {}",
+                 `cargo clippy --all-targets -- -D warnings` were all measured to end with 0, \
+                 so for that case this witness is the only instance that catches it. (2) A \
+                 cfg on the enclosing `mod` instead: that COMPILES correctly and puts nothing \
+                 into the host library, but it does not satisfy this witness, which reads \
+                 text and cannot follow a `mod`. The per-item cfg is the required shape, \
+                 deliberately the narrower of the two. Offending file: {}",
                 path.display()
             );
         }
