@@ -570,6 +570,16 @@ pub fn reader_runtime_witness() -> String {
 /// die der Speicher verlangt, und sie passt: der Worker kennt seinen Schluessel
 /// je Nachricht.
 ///
+/// # Zwei ueberlappende Aufrufe weisen einander NICHT ab
+///
+/// Der Worker-Einstieg haengt je `message`-Ereignis ein eigenes
+/// `ready.then(...)` an, ohne Kette zum vorigen; zwei Aufrufe auf denselben
+/// Schluessel koennen sich also verschraenken. Diese Ausfuhr braucht dafuer
+/// nichts eigenes: `OpfsBlobStore::open` nimmt je Schluessel einen Platz in
+/// einer Warteschlange, bevor es ein Handle oeffnet, und der zweite Aufruf
+/// WARTET statt `EA-READER-BLOB-HOST` zu bekommen. Die Begruendung samt
+/// Messung steht im Kopf von `crate::opfs_worker`.
+///
 /// # Errors
 /// Der stabile Code des Fehlschlags als JS-Zeichenkette: `EA-READER-BLOB-KEY`
 /// fuer einen abgewiesenen Schluessel, `EA-READER-BLOB-HOST` fuer jeden

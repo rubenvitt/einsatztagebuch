@@ -340,7 +340,7 @@ EINE ein:
 
 | Grenze | Stand nach dem Abloesen |
 |---|---|
-| 1 — kein Browser, nur Node | **FAELLT — GEMESSEN am 2026-08-31.** `pnpm web:browser-test` faehrt `crates/ea-reader-wasm/tests/opfs_browser.rs` mit ZWEI bestandenen Faellen in Headless-Chromium ueber den `wasm-bindgen-test-runner`. Der Lauf steht mit Kommando, Exitcode und woertlicher Ausgabe unter [Der Lauf, der Grenze 1 einloest](#der-lauf-der-grenze-1-einloest); ohne ihn waere diese Zeile eine Zusicherung ohne Beleg. |
+| 1 — kein Browser, nur Node | **FAELLT — GEMESSEN am 2026-08-31.** `pnpm web:browser-test` faehrt `crates/ea-reader-wasm/tests/opfs_browser.rs` mit ZWEI bestandenen Faellen in Headless-Chromium ueber den `wasm-bindgen-test-runner`. Der Lauf steht mit Kommando, Exitcode und woertlicher Ausgabe unter [Der Lauf, der Grenze 1 einloest](#der-lauf-der-grenze-1-einloest); ohne ihn waere diese Zeile eine Zusicherung ohne Beleg. Der Zeuge traegt seither FUENF Faelle — der Nachtrag unter derselben Ueberschrift haelt den zweiten Lauf fest. |
 | 2 — nur `debug`, kein `--release`, kein `wasm-opt` | **BLEIBT OFFEN.** Nicht gemessen, gehoert Stufe 7. |
 | 3 — nur `ea-crypto` wird AUSGEFUEHRT | **FAELLT NICHT, VERSCHIEBT SICH.** Ab dem abloesenden Task fuehrt neben `ea-crypto` auch `crates/ea-reader-wasm` selbst etwas aus — die Bruecke und der OPFS-Zeuge laufen. `ea-verify`, `ea-archive`, `ea-chain`, `ea-format` und `ea-trust` UEBERSETZEN weiterhin nur und laufen nirgends. Der Satz „ausser `ea-crypto` fuehrt keine Crate etwas aus" ist ab dort FALSCH; der Satz „der Reader-Pfad als Ganzes ist nicht ausgefuehrt" bleibt WAHR. |
 | 4 — keine COSE-Kette | **BLEIBT OFFEN.** `parse_cose_sign1` laeuft erst im Task „Verifikation vor Entschluesselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert" gegen ein echtes Archiv. |
@@ -399,6 +399,65 @@ hier, weil das Ziel zwischenzeitlich DUNKEL war: bis zur Merkmalswahl
 (`duplicate lang item panic_impl`) ab, und drei Stellen der Prosa in
 `crates/ea-reader-wasm/` berufen sich auf genau diesen Zeugen. Ein Beleg fuer
 Grenze 1 waere wertlos, wenn der Zeuge daneben nicht uebersetzte.
+
+### Nachtrag zum selben Tag: der Zeuge traegt jetzt FUENF Faelle
+
+Der Lauf oben bleibt zeichengleich stehen — er ist die Aufzeichnung DES Laufs,
+der Grenze 1 eingeloest hat, und wird nicht nachgeschrieben. Was sich seither
+geaendert hat, steht hier daneben statt an seiner Stelle: `opfs_browser.rs`
+hat drei Faelle dazubekommen — zwei, die UEBERLAPPENDE Anfragen ueber die
+echten Ausfuhren `blobPut`/`blobGet` fahren, und einen gegen das Leck in der
+Warteschlangenablage. Der Grund steht im Kopf von
+`crates/ea-reader-wasm/src/opfs_worker.rs`, Abschnitt „Warum ein zweiter
+Zugriff auf DENSELBEN Schluessel WARTET".
+
+Derselbe Baum, dieselbe Klammer, dieselbe Maschine, `pnpm web:browser-test`,
+Exitcode 0:
+
+```
+     Running tests/opfs_browser.rs (target/wasm32-unknown-unknown/debug/deps/opfs_browser-9e83fa3c45745b51.wasm)
+Running headless tests in Chrome on `http://127.0.0.1:59515/`
+Try find `webdriver.json` for configure browser's capabilities:
+Not found
+Loading Wasm module...
+running 5 tests
+test overlapping_writes_on_distinct_keys_both_succeed ... ok
+test opfs_round_trips_the_same_bytes_the_in_memory_double_does ... ok
+test bytes_survive_a_store_that_is_dropped_and_opened_again ... ok
+test a_second_request_on_the_same_key_waits_instead_of_being_refused ... ok
+test a_closed_store_leaves_no_queue_entry_behind ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.15s
+```
+
+Der Gegenbeweis gehoert dazu, sonst waeren die neuen Faelle wertlos. Mit
+ZURUECKGENOMMENER Korrektur — die Schleife, die in `OpfsBlobStore::open` die
+Plaetze nimmt, entfernt, der Teststand unveraendert — faellt GENAU das, was
+die Korrektur traegt, woertlich:
+
+```
+running 5 tests
+test overlapping_writes_on_distinct_keys_both_succeed ... ok
+test opfs_round_trips_the_same_bytes_the_in_memory_double_does ... ok
+test bytes_survive_a_store_that_is_dropped_and_opened_again ... ok
+test a_second_request_on_the_same_key_waits_instead_of_being_refused ... FAIL
+test a_closed_store_leaves_no_queue_entry_behind ... FAIL
+
+---- a_second_request_on_the_same_key_waits_instead_of_being_refused output ----
+    error output:
+        panicked at crates/ea-reader-wasm/tests/opfs_browser.rs:180:5:
+        assertion `left == right` failed: get outcome: Err(JsValue("EA-READER-BLOB-HOST"))
+---- a_closed_store_leaves_no_queue_entry_behind output ----
+    error output:
+        panicked at crates/ea-reader-wasm/tests/opfs_browser.rs:243:5:
+        an open store must hold its turn
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 filtered out; finished in 0.14s
+```
+
+Dass `overlapping_writes_on_distinct_keys_both_succeed` in BEIDEN Laeufen gruen
+ist, ist keine Schwaeche des Zeugen, sondern die Messung, aus der die Sperre je
+Schluessel und nicht global gewaehlt wurde: ein `FileSystemSyncAccessHandle`
+sperrt PRO DATEI.
 
 Die SECHSTE Tatsache — die LAGE des Nachweises, der Spike lag ausserhalb jedes
 Gates — aendert sich SEPARAT: das ausgefuehrte Modul steht jetzt unter

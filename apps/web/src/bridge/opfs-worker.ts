@@ -66,11 +66,32 @@ function failureCode(error: unknown): string {
  * `async`, weil `blobPut` und `blobGet` seit dem OPFS-Vorlauf ein `Promise`
  * zurueckgeben: ein `FileSystemSyncAccessHandle` liest und schreibt synchron,
  * sein OEFFNEN tut es nicht — die Begruendung steht vollstaendig in
- * `crates/ea-reader-wasm/src/opfs_worker.rs`. Das Protokoll zwischen
- * Hauptthread und Worker bleibt davon Zeile fuer Zeile unberuehrt: dieselben
- * drei Nachrichten, dieselbe eine Antwort je Nachricht, KEIN zusaetzlicher
- * Schritt. Abgewartet wird nur der Aufruf dahinter, und auch das ist weiterhin
- * keine Entscheidung, sondern Zustellung.
+ * `crates/ea-reader-wasm/src/opfs_worker.rs`.
+ *
+ * Ueber die FORM des Protokolls aendert das nichts: dieselben drei
+ * Nachrichten, dieselbe eine Antwort je Nachricht, KEIN zusaetzlicher Schritt.
+ *
+ * Ueber die NEBENLAEUFIGKEIT aendert es alles, und das steht hier, weil eine
+ * Zusicherung, die nicht stimmt, schlimmer ist als keine. Der Rumpf ist
+ * `async`: jedes `message`-Ereignis haengt ein EIGENES `ready.then(...)` an,
+ * ohne Kette zum vorigen. Zwei Nachrichten KOENNEN sich deshalb verschraenken
+ * — die zweite laeuft an, waehrend die erste noch in ihrem OPFS-Vorlauf
+ * steht. Vor dem `async`-Umbau war der Rumpf hinter `ready.then(...)`
+ * vollstaendig synchron und Ueberlappung strukturell ausgeschlossen.
+ *
+ * Die Ordnung JE SCHLUESSEL liegt darum nicht hier, sondern in Rust:
+ * `OpfsBlobStore::open` in `crates/ea-reader-wasm/src/opfs_worker.rs` nimmt
+ * je Schluessel einen Platz in einer Warteschlange (`take_turn`, Abschnitt
+ * „Warum ein zweiter Zugriff auf DENSELBEN Schluessel WARTET"), bevor es ein
+ * Handle oeffnet. Zwei ueberlappende Nachrichten auf denselben Schluessel
+ * weisen einander deshalb nicht ab — die zweite WARTET. Der gegatete Zeuge
+ * dafuer ist `crates/ea-reader-wasm/tests/opfs_browser.rs`,
+ * `a_second_request_on_the_same_key_waits_instead_of_being_refused`.
+ *
+ * Dass die Regel dort und nicht hier steht, ist die Auflage des Plans: dieser
+ * Einstieg „enthaelt keine Entscheidung, nur Zustellung", und eine
+ * Serialisierungsregel IST eine Entscheidung. Eine Kette in dieser Datei
+ * faenge ausserdem kein Zeuge dieser Stufe.
  */
 scope.addEventListener('message', (event) => {
   const request = event.data

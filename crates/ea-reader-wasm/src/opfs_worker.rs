@@ -58,16 +58,61 @@
 //! hebt hier auf den Slotvorrat — die Traitmethoden bleiben davon unberuehrt,
 //! weil sie schon heute nur auf offenen Handles rechnen.
 //!
+//! # Warum ein zweiter Zugriff auf DENSELBEN Schluessel WARTET
+//!
+//! Dass `createSyncAccessHandle()` seine Datei EXKLUSIV sperrt, steht unten
+//! schon zweimal — an [`OpfsBlobStore::open`] und an seinem [`Drop`] —, dort
+//! aber nur fuer den NACHEINANDER laufenden Fall. Der Fall, den dieser
+//! Abschnitt loest, ist der UEBERLAPPENDE: `crates/ea-reader-wasm/src/bridge.rs`
+//! oeffnet je Aufruf von `blobPut`/`blobGet` einen eigenen Speicher, und der
+//! Worker-Einstieg `apps/web/src/bridge/opfs-worker.ts` haengt je
+//! `message`-Ereignis ein eigenes `ready.then(...)` an, ohne Kette zum vorigen.
+//! Zwei Nachrichten auf denselben Schluessel SETZEN dann beide ihr
+//! `createSyncAccessHandle()` ab, bevor eines der zwei Promises erfuellt ist.
+//! Niemand haelt dabei einen lebenden Speicher ueber ein `await` — es genuegt,
+//! dass die zwei Anfragen abgesetzt sind —, und der Verlierer bekam
+//! `EA-READER-BLOB-HOST`: eine GUELTIGE Anfrage, mit einem Wirtsfehler
+//! beantwortet. GEMESSEN in Headless-Chromium, zwei Anfragen auf einen
+//! Schluessel, die zweite eine Makrotask spaeter:
+//! `get outcome: Err(JsValue("EA-READER-BLOB-HOST"))`.
+//!
+//! [`OpfsBlobStore::open`] nimmt deshalb je Schluessel einen PLATZ IN EINER
+//! WARTESCHLANGE, bevor es irgendein Handle oeffnet, und gibt ihn erst frei,
+//! wenn `Drop` die Handles geschlossen hat. Der Verlierer WARTET damit, statt
+//! abgewiesen zu werden.
+//!
+//! Drei Entscheidungen daran sind gemessen und keine Geschmacksfragen:
+//!
+//! 1. **Die Regel steht in Rust und nicht im TypeScript-Worker.** Der Plan
+//!    sagt ueber `opfs-worker.ts` woertlich: „er enthaelt keine Entscheidung,
+//!    nur Zustellung", und die Global Constraints lassen TypeScript „no
+//!    security decision" ausfuehren. Eine Serialisierungsregel IST eine
+//!    Entscheidung. Sie steht hier ausserdem dort, wo ein Zeuge dieser Stufe
+//!    sie ERREICHT: `crates/ea-reader-wasm/tests/opfs_browser.rs` faehrt sie
+//!    im Browser. Eine Kette im Worker faenge kein Zeuge dieser Stufe — genau
+//!    die Luecke, in der der Fehler entstanden ist.
+//! 2. **Je Schluessel und NICHT global.** Ein `FileSystemSyncAccessHandle`
+//!    sperrt PRO DATEI. GEMESSEN: derselbe ueberlappende Aufbau auf ZWEI
+//!    verschiedenen Schluesseln lief schon OHNE jede Warteschlange gruen
+//!    durch. Eine globale Sperre serialisierte also Zugriffe, die der Wirt
+//!    nebeneinander erlaubt; die schwaechere Sperre traegt.
+//! 3. **Eine asynchrone Warteschlange und KEIN `std::sync::Mutex`.** Der
+//!    Worker ist einfaedig, und die Futures laufen auf EINER Ereignisschleife.
+//!    Ein blockierendes Schloss hielte genau den Faden an, dessen
+//!    Ereignisschleife das Promise des Vorgaengers erfuellen muss — derselbe
+//!    Stillstand, den dieser Modulkopf oben fuer `Atomics.wait` beschreibt.
+//!
 //! Ein Rueckfall in den Arbeitsspeicher ist AUSGESCHLOSSEN, und zwar an jeder
 //! einzelnen Stelle: es gibt in diesem Modul keine Bytefolge, die einen
 //! Aufruf ueberlebt. Was nicht durch ein `FileSystemSyncAccessHandle` geht,
 //! geht gar nicht — ein Speicher, der heimlich im Arbeitsspeicher landet, sieht
 //! in jedem Test gruen aus und verliert im Browser Daten.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use ea_reader::{ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
-use js_sys::{Promise, Reflect};
+use js_sys::{Function, Promise, Reflect};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
@@ -216,6 +261,158 @@ fn length(value: f64) -> Result<usize, ReaderBlobError> {
     Ok(value as usize)
 }
 
+// ---------------------------------------------------------------------------
+// Die Warteschlange je Schluessel. Begruendet im Modulkopf, Abschnitt
+// „Warum ein zweiter Zugriff auf DENSELBEN Schluessel WARTET".
+// ---------------------------------------------------------------------------
+
+/// Das Ende der Warteschlange EINES Schluessels.
+#[derive(Debug)]
+struct KeyQueue {
+    /// Das Promise, auf das der NAECHSTE Ankoemmling wartet.
+    ///
+    /// Es wird erfuellt, sobald der aktuelle Halter seinen [`KeyTurn`] fallen
+    /// laesst. Ein `js_sys::Promise` und kein Rust-Kanal: die Crate haelt keine
+    /// Kanalkante, und der Warteschritt ist ohnehin ein `JsFuture` — die
+    /// Ereignisschleife, die ihn weckt, ist dieselbe, die auch die
+    /// OPFS-Promises erfuellt.
+    tail: Promise,
+    /// Wie viele Aufrufer zwischen Einreihung und Freigabe stehen.
+    ///
+    /// Der Zaehler ist die AUFRAEUMBEDINGUNG und keine Statistik: bei 0 faellt
+    /// der Eintrag. Ohne ihn bliebe je jemals beruehrtem Schluessel ein
+    /// Promise in der Ablage stehen — ein Leck, das in jedem Test gruen
+    /// aussieht und in einem lange laufenden Worker mitwaechst.
+    waiting: usize,
+}
+
+thread_local! {
+    /// Die Warteschlangen, EINE je Schluessel.
+    ///
+    /// `thread_local!` und kein `static` hinter einem Schloss: der Worker ist
+    /// einfaedig, `Promise` ist nicht `Send`, und zwischen zwei Futures
+    /// DERSELBEN Ereignisschleife gibt es nichts zu synchronisieren — nur zu
+    /// ordnen.
+    ///
+    /// Der Schluessel ist eine `String`-Kopie und kein `ReaderBlobKey`: die
+    /// Ablage ueberlebt jeden einzelnen Speicher, und ein geliehener
+    /// Schluessel koennte das nicht.
+    ///
+    /// Der `const`-Block ist keine Zierde: `cargo clippy --target
+    /// wasm32-unknown-unknown --locked -p ea-reader-wasm --all-targets --
+    /// -D warnings` faellt ohne ihn mit
+    /// `clippy::missing_const_for_thread_local` — GEMESSEN.
+    static BLOB_KEY_QUEUES: RefCell<BTreeMap<String, KeyQueue>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+/// Der Platz EINES Halters in der Warteschlange EINES Schluessels.
+///
+/// Der Typ ist nur ueber [`Drop`] zu verlassen: solange er lebt, wartet jeder
+/// weitere Aufrufer desselben Schluessels.
+#[derive(Debug)]
+struct KeyTurn {
+    /// Der Schluessel, dessen Warteschlange dieser Platz gehoert.
+    key: String,
+    /// Die `resolve`-Funktion des Promises, auf das der Nachfolger wartet.
+    release: Function,
+}
+
+impl Drop for KeyTurn {
+    /// Raeumt den Platz ab und weckt den Nachfolger.
+    fn drop(&mut self) {
+        // `take` und nicht `clone`: der Platz ist am Ende, sein Schluessel wird
+        // danach nicht mehr gelesen, und `entry` will ihn besitzen.
+        let key = std::mem::take(&mut self.key);
+        BLOB_KEY_QUEUES.with_borrow_mut(|queues| {
+            if let Entry::Occupied(mut occupied) = queues.entry(key) {
+                let queue = occupied.get_mut();
+                // Kein Unterlauf moeglich: ein `KeyTurn` entsteht
+                // ausschliesslich in `enqueue`, wo derselbe Zaehler um genau
+                // eins waechst, und faellt genau einmal.
+                queue.waiting -= 1;
+                if queue.waiting == 0 {
+                    occupied.remove();
+                }
+            }
+        });
+        // NACH dem Abraeumen und ausserhalb der Ausleihe: `call0` geht nach
+        // JavaScript, und eine offene `RefCell`-Ausleihe ueber einen
+        // JS-Aufruf hinweg waere die Sorte Panik, die erst im Browser faellt.
+        // Der Rueckgabewert ist gleichgueltig — `resolve` gibt `undefined`.
+        let _ = self.release.call0(&JsValue::NULL);
+    }
+}
+
+/// Reiht den Aufrufer in die Warteschlange EINES Schluessels ein.
+///
+/// Platz und Vorgaenger kommen GETRENNT zurueck, weil der Platz VOR dem Warten
+/// entstehen muss: faellt der wartende Future weg, gibt sein `Drop` den
+/// Nachfolger frei, statt die Warteschlange fuer immer anzuhalten.
+fn enqueue(key: &ReaderBlobKey) -> (KeyTurn, Option<Promise>) {
+    let mut release = None;
+    // Der Executor von `new Promise` laeuft SYNCHRON (ECMA-262 27.2.3.1);
+    // `release` ist unmittelbar nach dem Aufruf besetzt.
+    let successor = Promise::new(&mut |resolve, _reject| release = Some(resolve));
+    let release = release.expect("the promise executor runs synchronously");
+    let predecessor = BLOB_KEY_QUEUES.with_borrow_mut(|queues| {
+        match queues.entry(key.as_str().to_owned()) {
+            Entry::Occupied(mut occupied) => {
+                let queue = occupied.get_mut();
+                queue.waiting += 1;
+                // Der neue Schwanz ist das Promise DIESES Platzes; abgewartet
+                // wird der bisherige.
+                Some(std::mem::replace(&mut queue.tail, successor))
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(KeyQueue {
+                    tail: successor,
+                    waiting: 1,
+                });
+                None
+            }
+        }
+    });
+    (
+        KeyTurn {
+            key: key.as_str().to_owned(),
+            release,
+        },
+        predecessor,
+    )
+}
+
+/// Ob dieser Schluessel GERADE eine Warteschlange in der Ablage hat.
+///
+/// Der einzige Zweck ist der Zeuge gegen das LECK: ein Eintrag je Schluessel,
+/// der nie entfernt wird, waechst in einem lange laufenden Worker mit und
+/// sieht dabei in jedem Test gruen aus. Ohne diesen Blick waere die
+/// Aufraeumregel von [`KeyTurn::drop`] eine Behauptung; mit ihm faehrt
+/// `a_closed_store_leaves_no_queue_entry_behind` in
+/// `crates/ea-reader-wasm/tests/opfs_browser.rs` sie im Browser.
+///
+/// Die Frage geht ueber EINEN Schluessel und nicht ueber die Groesse der
+/// Ablage, und das ist keine Umstaendlichkeit: `wasm-bindgen-test` faehrt
+/// seine Faelle NEBENLAEUFIG — GEMESSEN an der Ergebnisreihenfolge, die von
+/// der Deklarationsreihenfolge abweicht —, und eine Gesamtzahl saehe die
+/// Plaetze der gleichzeitig laufenden Faelle mit.
+#[must_use]
+pub fn blob_key_queue_is_open(key: &ReaderBlobKey) -> bool {
+    BLOB_KEY_QUEUES.with_borrow(|queues| queues.contains_key(key.as_str()))
+}
+
+/// Wartet, bis der Schluessel frei ist, und liefert den Platz.
+async fn take_turn(key: &ReaderBlobKey) -> KeyTurn {
+    let (turn, predecessor) = enqueue(key);
+    if let Some(predecessor) = predecessor {
+        // Der AUSGANG des Vorgaengers ist gleichgueltig: die Warteschlange
+        // ordnet Zugriffe, sie reicht keinen Fehlschlag weiter. Das Promise
+        // wird ohnehin nur erfuellt und nie abgewiesen.
+        let _ = JsFuture::from(predecessor).await;
+    }
+    turn
+}
+
 /// Der Speicher des Readers auf OPFS.
 ///
 /// Er haelt je Schluessel des Vorlaufs ein OFFENES `FileSystemSyncAccessHandle`
@@ -230,6 +427,15 @@ fn length(value: f64) -> Result<usize, ReaderBlobError> {
 #[derive(Debug)]
 pub struct OpfsBlobStore {
     handles: BTreeMap<ReaderBlobKey, FileSystemSyncAccessHandle>,
+    /// Die Plaetze in den Warteschlangen der Schluessel DIESES Speichers.
+    ///
+    /// Das Feld steht NACH `handles`, und die Reihenfolge ist tragend: `Drop`
+    /// schliesst im Rumpf die Handles, danach fallen die Felder in
+    /// DEKLARATIONSREIHENFOLGE. Der Nachfolger wird also erst geweckt, wenn die
+    /// Dateien schon freigegeben sind — anders herum faende er sie noch
+    /// gesperrt und bekaeme genau den `EA-READER-BLOB-HOST`, den die
+    /// Warteschlange verhindern soll.
+    turns: Vec<KeyTurn>,
 }
 
 impl OpfsBlobStore {
@@ -247,10 +453,47 @@ impl OpfsBlobStore {
     /// wird LEER angelegt und liest sich als abwesend (Groesse 0) — nach aussen
     /// ist das kein Unterschied.
     ///
+    /// # Der Aufruf WARTET, statt an einem fremden Speicher zu scheitern
+    ///
+    /// Lebt zu einem der Schluessel noch ein anderer `OpfsBlobStore` — auch
+    /// einer, der erst in einem anderen, gleichzeitig laufenden Future
+    /// entsteht —, haelt dieser Aufruf an, bis jener geschlossen ist. Die
+    /// Begruendung samt Messung steht im Modulkopf. Die Kehrseite ist
+    /// benannt und nicht versteckt: wer im SELBEN Ablauf einen zweiten
+    /// Speicher ueber einen Schluessel oeffnet, den er noch haelt, wartet auf
+    /// sich selbst. Vorher bekam er dafuer `EA-READER-BLOB-HOST`; beides ist
+    /// ein Programmierfehler, und der einzige Aufrufer, den es gibt
+    /// (`crates/ea-reader-wasm/src/bridge.rs`), oeffnet und schliesst je
+    /// Nachricht genau einen Speicher.
+    ///
     /// # Errors
     /// `EA-READER-BLOB-HOST`, wenn der Aufruf nicht in einem dedizierten
     /// Worker steht oder der Wirtspeicher nicht antwortet.
     pub async fn open(directory: &str, keys: &[ReaderBlobKey]) -> Result<Self, ReaderBlobError> {
+        // SORTIERT und ohne Doppel, und beides ist tragend. Die Sortierung
+        // gibt allen Aufrufern EINE globale Ordnung, in der sie ihre Plaetze
+        // nehmen: zwei Speicher ueber {a, b} und ueber {b, a} warteten sonst
+        // ueberkreuz aufeinander, und der Worker stuende still. Das Entdoppeln
+        // ersetzt den frueheren `contains_key`-Sprung in der Oeffnungsschleife
+        // und verhindert zusaetzlich, dass ein doppelt genannter Schluessel
+        // sich selbst in der Warteschlange blockiert.
+        let mut ordered = keys.to_vec();
+        ordered.sort_unstable();
+        ordered.dedup();
+
+        // Der Speicher entsteht VOR dem ersten Warten und waechst in sich:
+        // bricht etwas ab, gibt sein `Drop` die schon genommenen Plaetze
+        // zurueck. Eine Zwischensammlung liesse den Nachfolger haengen.
+        let mut store = Self {
+            handles: BTreeMap::new(),
+            turns: Vec::with_capacity(ordered.len()),
+        };
+        // Die Plaetze VOR jeder OPFS-Beruehrung: ab hier liegt der ganze
+        // Zugriff dieses Speichers innerhalb seiner Warteschlangenplaetze.
+        for key in &ordered {
+            store.turns.push(take_turn(key).await);
+        }
+
         let scope = js_sys::global()
             .dyn_into::<DedicatedWorkerGlobalScope>()
             .map_err(|_| {
@@ -264,18 +507,13 @@ impl OpfsBlobStore {
             .dyn_into::<FileSystemDirectoryHandle>()
             .map_err(|_| host("navigator.storage.getDirectory() did not yield a directory"))?;
         let namespace = directory_child(&root, directory).await?;
-        // Der Speicher waechst IN SICH und nicht in einer freien Sammlung, die
-        // erst am Ende hineinwandert: faellt das dritte `open_handle`, schliesst
-        // das `?` ueber `Drop` die zwei bereits offenen Handles. Eine
-        // Zwischensammlung liesse sie als Dateisperren zurueck, und der
+        // Die Handles wachsen IN den Speicher und nicht in eine freie
+        // Sammlung, die erst am Ende hineinwandert: faellt das dritte
+        // `open_handle`, schliesst das `?` ueber `Drop` die zwei bereits
+        // offenen Handles UND gibt die Warteschlangenplaetze zurueck. Eine
+        // Zwischensammlung liesse die Handles als Dateisperren zurueck, und der
         // naechste Versuch faende `NoModificationAllowedError` vor.
-        let mut store = Self {
-            handles: BTreeMap::new(),
-        };
-        for key in keys {
-            if store.handles.contains_key(key) {
-                continue;
-            }
+        for key in &ordered {
             let handle = open_handle(&namespace, key).await?;
             store.handles.insert(key.clone(), handle);
         }
@@ -300,6 +538,11 @@ impl Drop for OpfsBlobStore {
     /// weiteren Zugriff derselben Herkunft — auch fuer den naechsten
     /// `OpfsBlobStore::open` im selben Worker. Ohne dieses `Drop` bestuende der
     /// erste Zeuge und der zweite faende `NoModificationAllowedError`.
+    ///
+    /// Die Warteschlangenplaetze gibt der Rumpf NICHT zurueck, und das ist
+    /// Absicht: `turns` faellt als Feld unmittelbar danach, also GARANTIERT
+    /// nach diesen `close()`-Aufrufen. Ein Freigeben im Rumpf brauchte
+    /// dieselbe Ordnung von Hand und verloere sie beim naechsten Umbau.
     fn drop(&mut self) {
         for handle in self.handles.values() {
             handle.close();
