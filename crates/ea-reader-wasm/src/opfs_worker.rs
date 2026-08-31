@@ -26,28 +26,64 @@
 //! `src/bridge.rs`. Das Attribut steht hier ohne seine Klammern, weil der
 //! Zeuge Text liest und eine Erwaehnung nicht von einer Ausfuhr unterscheidet.
 //!
-//! # Die offene Naht: SYNCHRONER Port, ASYNCHRONE Flaeche
+//! # SYNCHRONER Port, ASYNCHRONE Flaeche — und wie die Naht geschlossen ist
 //!
-//! [`settle`] traegt die Begruendung. Kurz: `getDirectory()`,
-//! `getFileHandle()` und `createSyncAccessHandle()` liefern alle drei ein
-//! Promise, waehrend `ea_reader::ReaderBlobStore` synchron ist. Ein dedizierter
-//! Worker kann darauf nicht blockierend warten.
+//! `ea_reader::ReaderBlobStore` ist SYNCHRON: `put`, `get`, `delete` und
+//! `keys` geben ein `Result` und keinen Future zurueck. Die OPFS-Flaeche ist es
+//! an jedem EINSTIEG nicht — GEMESSEN an `web-sys 0.3.103`:
+//! `StorageManager::get_directory`, `FileSystemDirectoryHandle::
+//! get_directory_handle_with_options`, `get_file_handle_with_options` und
+//! `FileSystemFileHandle::create_sync_access_handle` liefern alle vier ein
+//! `js_sys::Promise`. Blockierend warten geht nicht: `Atomics.wait` haelt genau
+//! den Faden an, dessen Ereignisschleife das Promise erfuellen muesste — der
+//! Worker liefe in seinen eigenen Stillstand.
+//!
+//! Die Aufloesung ist die von SQLites `opfs-sahpool`: EIN asynchroner Vorlauf
+//! ([`OpfsBlobStore::open`]) oeffnet die Zugriffshandles, danach bedient der
+//! Speicher synchron. Ein einmal geoeffnetes `FileSystemSyncAccessHandle` kann
+//! `read`, `write`, `truncate`, `getSize` und `flush` vollstaendig ohne
+//! Promise; ab da liegt kein asynchroner Aufruf mehr im Weg.
+//!
+//! # Die Einschraenkung, die daraus folgt — ausgeschrieben statt versteckt
+//!
+//! Der Vorlauf braucht die Schluessel, BEVOR er laeuft. `OpfsBlobStore::open`
+//! nimmt sie deshalb als Argument, und die vier Traitmethoden bedienen
+//! ausschliesslich diese Menge; ein Zugriff auf einen nicht vorgelaufenen
+//! Schluessel faellt mit `EA-READER-BLOB-HOST` statt still etwas anderes zu
+//! tun. Die volle `opfs-sahpool`-Form — ein Vorrat anonymer, vorab geoeffneter
+//! Slots samt Schluesselzuordnung im Dateikopf — braucht diese Stufe nicht:
+//! „Dieser Task legt das Fundament und keine Reader-Funktion." Der Aufrufer,
+//! der heute existiert, ist `src/bridge.rs`, und der kennt seinen Schluessel je
+//! Nachricht. Wer spaeter ueber einen unbekannten Schluessel schreiben will,
+//! hebt hier auf den Slotvorrat — die Traitmethoden bleiben davon unberuehrt,
+//! weil sie schon heute nur auf offenen Handles rechnen.
+//!
+//! Ein Rueckfall in den Arbeitsspeicher ist AUSGESCHLOSSEN, und zwar an jeder
+//! einzelnen Stelle: es gibt in diesem Modul keine Bytefolge, die einen
+//! Aufruf ueberlebt. Was nicht durch ein `FileSystemSyncAccessHandle` geht,
+//! geht gar nicht — ein Speicher, der heimlich im Arbeitsspeicher landet, sieht
+//! in jedem Test gruen aus und verliert im Browser Daten.
+
+use std::collections::BTreeMap;
 
 use ea_reader::{ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
-use js_sys::{Array, Promise, Reflect};
+use js_sys::{Promise, Reflect};
 use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     DedicatedWorkerGlobalScope, FileSystemDirectoryHandle, FileSystemFileHandle,
-    FileSystemGetDirectoryOptions, FileSystemGetFileOptions, FileSystemSyncAccessHandle,
+    FileSystemGetDirectoryOptions, FileSystemGetFileOptions, FileSystemReadWriteOptions,
+    FileSystemSyncAccessHandle,
 };
 
-/// Der DOMException-Name, den OPFS fuer einen fehlenden Eintrag benutzt.
+/// Das erste Byte jeder BELEGTEN Blobdatei.
 ///
-/// Er wird gelesen und nicht der ganze Fehler verworfen: ein fehlender Blob ist
-/// `Ok(None)`, eine verweigerte Berechtigung oder eine volle Platte ist ein
-/// Fehlschlag. Wer beides zusammenwirft, meldet einen leeren Speicher, wo der
-/// Speicher nur nicht antwortet.
-const NOT_FOUND_ERROR: &str = "NotFoundError";
+/// Die Anwesenheit eines Blobs steht damit AUF DER PLATTE und nicht in einer
+/// Nebenbuchhaltung im Arbeitsspeicher. Ohne dieses Byte waere die Groesse 0
+/// zweideutig — ein geloeschter Blob und ein abgelegter LEERER Blob saehen
+/// gleich aus —, und `get` muesste raten. Mit ihm gilt: Groesse 0 heisst
+/// abwesend, Groesse >= 1 heisst vorhanden mit `len - 1` Nutzbyte.
+const PRESENT_MARKER: u8 = 0x01;
 
 /// Baut einen Wirtsfehler mit einem Text, der KEINEN Schluessel nennt.
 ///
@@ -58,66 +94,163 @@ fn host(reason: &str) -> ReaderBlobError {
     ReaderBlobError::Host(reason.to_owned())
 }
 
-/// Wartet auf ein Promise — und kann es nicht.
-///
-/// # Hier gehen Port und Flaeche auseinander, und das steht offen statt versteckt
-///
-/// `ea_reader::ReaderBlobStore` ist SYNCHRON: `put`, `get`, `delete` und `keys`
-/// geben ein `Result` und keinen Future zurueck. Die OPFS-Flaeche ist es an
-/// jedem Einstieg NICHT — GEMESSEN an `web-sys 0.3.103`:
-/// `StorageManager::get_directory`, `FileSystemDirectoryHandle::get_file_handle`
-/// und `FileSystemFileHandle::create_sync_access_handle` liefern alle drei
-/// `js_sys::Promise`. Synchron ist erst, was das fertige
-/// `FileSystemSyncAccessHandle` kann.
-///
-/// Blockierend warten geht nicht: `Atomics.wait` haelt genau den Faden an,
-/// dessen Ereignisschleife das Promise erfuellen muesste — der Worker liefe in
-/// seinen eigenen Stillstand.
-///
-/// Die bekannte Aufloesung ist die von SQLites `opfs-sahpool`: EIN
-/// asynchroner Vorlauf oeffnet die Zugriffshandles, danach bedient der Speicher
-/// synchron. Sie verlangt ein `async fn open`, und die gehoert dem Task, der
-/// den Browserlauf besitzt — dieser hier baut die Flaeche und faehrt sie nicht.
-/// Bis dahin schlaegt der Zugriff FEHL statt still etwas anderes zu tun: ein
-/// Speicher, der heimlich im Arbeitsspeicher landet, sieht in jedem Test gruen
-/// aus und verliert im Browser Daten.
-fn settle(promise: &Promise) -> Result<JsValue, ReaderBlobError> {
-    let _ = promise;
-    Err(host(
-        "the synchronous ReaderBlobStore cannot await an OPFS promise; \
-         an asynchronous open() must pre-open the sync access handles first",
-    ))
-}
-
 /// Liest den Namen einer DOMException, ohne ihren Text zu uebernehmen.
+///
+/// Der Name („NotFoundError", „NoModificationAllowedError", …) sagt, WAS der
+/// Wirt abgewiesen hat, und traegt anders als `message` keinen Pfad.
 fn error_name(error: &JsValue) -> Option<String> {
     Reflect::get(error, &JsValue::from_str("name"))
         .ok()
         .and_then(|name| name.as_string())
 }
 
+/// Uebersetzt einen JS-Fehlschlag in einen Speicherfehler.
+fn from_js(error: &JsValue) -> ReaderBlobError {
+    match error_name(error) {
+        Some(name) => ReaderBlobError::Host(name),
+        None => host("the host storage rejected the access without naming a reason"),
+    }
+}
+
+/// Wartet ein OPFS-Promise ab — der EINE Ort, an dem dieses Modul asynchron ist.
+///
+/// `JsFuture` kommt aus `wasm-bindgen-futures`, der Crate der in ADR 0005
+/// ratifizierten Browser-Laufzeitklasse. Die Kante kostet nichts Zusaetzliches:
+/// `crates/ea-reader-wasm/Cargo.toml` muss sie ohnehin fuehren, weil das
+/// Attributmakro `wasm_bindgen` die asynchronen Ausfuhren in `src/bridge.rs`
+/// ueber `wasm_bindgen_futures::future_to_promise` uebersetzt. Der Makroname
+/// steht hier OHNE seine Attributklammern, aus demselben Grund wie oben: der
+/// Zeuge `every_wasm_bindgen_export_sits_behind_the_wasm32_cfg` liest Text und
+/// unterscheidet eine Erwaehnung nicht von einer Ausfuhr — GEMESSEN, die
+/// ausgeschriebene Form faerbte ihn an genau dieser Zeile rot.
+async fn settle(promise: Promise) -> Result<JsValue, ReaderBlobError> {
+    JsFuture::from(promise)
+        .await
+        .map_err(|error| from_js(&error))
+}
+
+/// Ein Kindverzeichnis, angelegt oder geoeffnet.
+///
+/// Immer mit `create`: der Vorlauf legt den Namensraum an, wenn es ihn noch
+/// nicht gibt. Ein leeres Verzeichnis ist beobachtbar dasselbe wie keines —
+/// `get` antwortet in beiden Faellen `Ok(None)`, weil die Anwesenheit am
+/// Marker und nicht am Verzeichniseintrag haengt.
+async fn directory_child(
+    parent: &FileSystemDirectoryHandle,
+    name: &str,
+) -> Result<FileSystemDirectoryHandle, ReaderBlobError> {
+    let options = FileSystemGetDirectoryOptions::new();
+    options.set_create(true);
+    settle(parent.get_directory_handle_with_options(name, &options))
+        .await?
+        .dyn_into::<FileSystemDirectoryHandle>()
+        .map_err(|_| host("getDirectoryHandle() did not yield a directory handle"))
+}
+
+/// Oeffnet den SYNCHRONEN Zugriff auf die Datei EINES Schluessels.
+///
+/// Die Segmente eines Schluessels sind Verzeichnisse: OPFS-Dateinamen duerfen
+/// kein `/` tragen, und `ea_reader::ReaderBlobKey` laesst genau diesen einen
+/// Trenner zu.
+async fn open_handle(
+    namespace: &FileSystemDirectoryHandle,
+    key: &ReaderBlobKey,
+) -> Result<FileSystemSyncAccessHandle, ReaderBlobError> {
+    let mut segments: Vec<&str> = key.as_str().split('/').collect();
+    let file = segments
+        .pop()
+        .ok_or_else(|| host("a blob key must end in a file segment"))?;
+    let mut current = namespace.clone();
+    for segment in segments {
+        current = directory_child(&current, segment).await?;
+    }
+    let options = FileSystemGetFileOptions::new();
+    options.set_create(true);
+    let file_handle = settle(current.get_file_handle_with_options(file, &options))
+        .await?
+        .dyn_into::<FileSystemFileHandle>()
+        .map_err(|_| host("getFileHandle() did not yield a file handle"))?;
+    settle(file_handle.create_sync_access_handle())
+        .await?
+        .dyn_into::<FileSystemSyncAccessHandle>()
+        .map_err(|_| host("createSyncAccessHandle() did not yield a sync access handle"))
+}
+
+/// Ein Lese-/Schreiboffset als `FileSystemReadWriteOptions`.
+///
+/// Der Offset steht AUSGESCHRIEBEN an jedem Zugriff und wird nicht dem
+/// Dateizeiger ueberlassen: `FileSystemSyncAccessHandle` fuehrt einen solchen
+/// Zeiger, und `write` ohne `at` schriebe dorthin, wo der letzte Zugriff
+/// aufgehoert hat. Ein Speicher, dessen Ablageort vom vorigen Aufruf abhaengt,
+/// ist nicht pruefbar.
+fn at(offset: f64) -> FileSystemReadWriteOptions {
+    // `f64` und nicht `u64`: `set_at` nimmt genau das, was JS kennt, und ein
+    // Cast an dieser Stelle waere eine Umrechnung ohne Gegenwert.
+    let options = FileSystemReadWriteOptions::new();
+    options.set_at(offset);
+    options
+}
+
+/// Uebersetzt eine JS-Zahl in eine Laenge.
+///
+/// `getSize`, `read` und `write` geben `f64` zurueck, weil JS keine andere Zahl
+/// kennt. Die Schranke steht hier und nicht als blosses `as usize`: ein
+/// negativer oder gebrochener Wert waere ein Fehlschlag des Wirts, und ein
+/// stiller Cast machte daraus eine falsche Laenge.
+fn length(value: f64) -> Result<usize, ReaderBlobError> {
+    // Die Obergrenze steht als Literal und nicht als `usize::MAX as f64`: auf
+    // `wasm32-unknown-unknown` ist `usize` 32 Bit, und ein Cast der Schranke
+    // waere eine zweite, ziel-abhaengige Zahl an derselben Stelle.
+    const MAX_LENGTH: f64 = u32::MAX as f64;
+    // `contains` und nicht zwei Vergleiche: `cargo clippy --target
+    // wasm32-unknown-unknown -p ea-reader-wasm --all-targets -- -D warnings`
+    // faellt sonst mit `clippy::manual_range_contains` — GEMESSEN, und die
+    // wasm32-Zeile ist die einzige, die diese Datei ueberhaupt sieht.
+    if !(0.0..=MAX_LENGTH).contains(&value) || value.fract() != 0.0 {
+        return Err(host(
+            "the sync access handle reported an implausible length",
+        ));
+    }
+    // Nach den drei Schranken ist der Wert eine ganze Zahl in [0, u32::MAX];
+    // der Cast kann weder abschneiden noch das Vorzeichen verlieren.
+    Ok(value as usize)
+}
+
 /// Der Speicher des Readers auf OPFS.
 ///
-/// Er haelt das Wurzelverzeichnis seines Namensraums. Alles Weitere wird je
-/// Zugriff aufgeloest: ein Schluessel ist ein Pfad, und seine Segmente sind
-/// Verzeichnisse — OPFS-Dateinamen duerfen kein `/` tragen.
+/// Er haelt je Schluessel des Vorlaufs ein OFFENES `FileSystemSyncAccessHandle`
+/// — das ist der ganze Zustand. Die Bytes selbst liegen in keiner Sammlung
+/// dieses Typs, sondern ausschliesslich in den Dateien dahinter.
+///
+/// Die Ablage ist eine `BTreeMap` und keine `HashMap`: [`ReaderBlobStore::keys`]
+/// sagt die Schluesselordnung zu, und eine Streuordnung faellt in Unit-Tests
+/// nicht auf und kippt spaeter den Wiederaufbau des Index sporadisch —
+/// dieselbe Begruendung, die `crates/ea-reader/src/blob_store.rs` fuer das
+/// Doppel ausschreibt.
 #[derive(Debug)]
 pub struct OpfsBlobStore {
-    directory: FileSystemDirectoryHandle,
+    handles: BTreeMap<ReaderBlobKey, FileSystemSyncAccessHandle>,
 }
 
 impl OpfsBlobStore {
-    /// Oeffnet — bzw. legt an — den Namensraum `directory` unterhalb der
-    /// OPFS-Wurzel.
+    /// Der ASYNCHRONE Vorlauf: Namensraum oeffnen, Zugriffshandles oeffnen.
     ///
-    /// Der Namensraum ist ein Verzeichnis und nicht die Wurzel selbst: der
-    /// Reader teilt OPFS mit allem anderen, was dieselbe Herkunft ablegt, und
-    /// ein Zeuge, der die Wurzel leerraeumte, traefe Fremdes.
+    /// Danach ist der Speicher synchron. `directory` ist ein Verzeichnis
+    /// unterhalb der OPFS-Wurzel und nicht die Wurzel selbst: der Reader teilt
+    /// OPFS mit allem anderen, was dieselbe Herkunft ablegt, und ein Zeuge, der
+    /// die Wurzel leerraeumte, traefe Fremdes.
+    ///
+    /// `keys` ist die VOLLSTAENDIGE Menge, die der entstehende Speicher
+    /// bedienen kann; ein doppelt genannter Schluessel wird einmal geoeffnet,
+    /// weil ein zweites `createSyncAccessHandle` auf dieselbe Datei mit
+    /// `NoModificationAllowedError` faellt. Eine noch nicht vorhandene Datei
+    /// wird LEER angelegt und liest sich als abwesend (Groesse 0) — nach aussen
+    /// ist das kein Unterschied.
     ///
     /// # Errors
     /// `EA-READER-BLOB-HOST`, wenn der Aufruf nicht in einem dedizierten
     /// Worker steht oder der Wirtspeicher nicht antwortet.
-    pub fn open(directory: &str) -> Result<Self, ReaderBlobError> {
+    pub async fn open(directory: &str, keys: &[ReaderBlobKey]) -> Result<Self, ReaderBlobError> {
         let scope = js_sys::global()
             .dyn_into::<DedicatedWorkerGlobalScope>()
             .map_err(|_| {
@@ -126,198 +259,125 @@ impl OpfsBlobStore {
                      this call did not run in one",
                 )
             })?;
-        let root = settle(&scope.navigator().storage().get_directory())?
+        let root = settle(scope.navigator().storage().get_directory())
+            .await?
             .dyn_into::<FileSystemDirectoryHandle>()
             .map_err(|_| host("navigator.storage.getDirectory() did not yield a directory"))?;
-        let directory = directory_child(&root, directory, true)?
-            .ok_or_else(|| host("the reader namespace directory was not created"))?;
-        Ok(Self { directory })
-    }
-
-    /// Loest die Verzeichnissegmente eines Schluessels auf und gibt zusaetzlich
-    /// den Dateinamen zurueck.
-    fn resolve(
-        &self,
-        key: &ReaderBlobKey,
-        create: bool,
-    ) -> Result<Option<(FileSystemDirectoryHandle, String)>, ReaderBlobError> {
-        let mut segments: Vec<&str> = key.as_str().split('/').collect();
-        let file = segments
-            .pop()
-            .ok_or_else(|| host("a blob key must end in a file segment"))?
-            .to_owned();
-        let mut current = self.directory.clone();
-        for segment in segments {
-            match directory_child(&current, segment, create)? {
-                Some(child) => current = child,
-                None => return Ok(None),
+        let namespace = directory_child(&root, directory).await?;
+        // Der Speicher waechst IN SICH und nicht in einer freien Sammlung, die
+        // erst am Ende hineinwandert: faellt das dritte `open_handle`, schliesst
+        // das `?` ueber `Drop` die zwei bereits offenen Handles. Eine
+        // Zwischensammlung liesse sie als Dateisperren zurueck, und der
+        // naechste Versuch faende `NoModificationAllowedError` vor.
+        let mut store = Self {
+            handles: BTreeMap::new(),
+        };
+        for key in keys {
+            if store.handles.contains_key(key) {
+                continue;
             }
+            let handle = open_handle(&namespace, key).await?;
+            store.handles.insert(key.clone(), handle);
         }
-        Ok(Some((current, file)))
+        Ok(store)
     }
 
-    /// Oeffnet den SYNCHRONEN Zugriff auf eine Datei des Namensraums.
-    fn access(
-        &self,
-        key: &ReaderBlobKey,
-        create: bool,
-    ) -> Result<Option<FileSystemSyncAccessHandle>, ReaderBlobError> {
-        let Some((directory, name)) = self.resolve(key, create)? else {
-            return Ok(None);
-        };
-        let options = FileSystemGetFileOptions::new();
-        options.set_create(create);
-        let handle = match settle(&directory.get_file_handle_with_options(&name, &options)) {
-            Ok(value) => value,
-            Err(error) => return absent_or(error, create),
-        };
-        let handle = handle
-            .dyn_into::<FileSystemFileHandle>()
-            .map_err(|_| host("getFileHandle() did not yield a file handle"))?;
-        settle(&handle.create_sync_access_handle())?
-            .dyn_into::<FileSystemSyncAccessHandle>()
-            .map(Some)
-            .map_err(|_| host("createSyncAccessHandle() did not yield a sync access handle"))
+    /// Das offene Handle eines Schluessels — oder der benannte Fehlschlag.
+    fn handle(&self, key: &ReaderBlobKey) -> Result<&FileSystemSyncAccessHandle, ReaderBlobError> {
+        self.handles.get(key).ok_or_else(|| {
+            host(
+                "this key was not part of the asynchronous open(); a synchronous store \
+                 cannot open a sync access handle after the fact",
+            )
+        })
     }
 }
 
-/// Ein Kindverzeichnis, angelegt oder gesucht.
-///
-/// `Ok(None)` heisst „gibt es nicht" und ist nur ohne `create` moeglich.
-fn directory_child(
-    parent: &FileSystemDirectoryHandle,
-    name: &str,
-    create: bool,
-) -> Result<Option<FileSystemDirectoryHandle>, ReaderBlobError> {
-    let options = FileSystemGetDirectoryOptions::new();
-    options.set_create(create);
-    let child = match settle(&parent.get_directory_handle_with_options(name, &options)) {
-        Ok(value) => value,
-        Err(error) => return absent_or(error, create),
-    };
-    child
-        .dyn_into::<FileSystemDirectoryHandle>()
-        .map(Some)
-        .map_err(|_| host("getDirectoryHandle() did not yield a directory handle"))
-}
-
-/// Uebersetzt einen Fehlschlag in „nicht vorhanden", WENN er das sagt.
-///
-/// Mit `create` kann ein fehlender Eintrag nicht die Ursache sein; dann bleibt
-/// jeder Fehlschlag ein Fehlschlag.
-fn absent_or<T>(error: ReaderBlobError, create: bool) -> Result<Option<T>, ReaderBlobError> {
-    let absent = !create
-        && match &error {
-            ReaderBlobError::Host(reason) => reason == NOT_FOUND_ERROR,
-            ReaderBlobError::Key => false,
-        };
-    if absent { Ok(None) } else { Err(error) }
-}
-
-/// Uebersetzt einen JS-Fehlschlag in einen Speicherfehler und behaelt den
-/// DOMException-Namen — er ist das einzige, was [`absent_or`] auswerten kann.
-fn from_js(error: &JsValue) -> ReaderBlobError {
-    match error_name(error) {
-        Some(name) => ReaderBlobError::Host(name),
-        None => host("the host storage rejected the access without naming a reason"),
+impl Drop for OpfsBlobStore {
+    /// Schliesst JEDES Handle.
+    ///
+    /// Ein offenes `FileSystemSyncAccessHandle` sperrt seine Datei fuer jeden
+    /// weiteren Zugriff derselben Herkunft — auch fuer den naechsten
+    /// `OpfsBlobStore::open` im selben Worker. Ohne dieses `Drop` bestuende der
+    /// erste Zeuge und der zweite faende `NoModificationAllowedError`.
+    fn drop(&mut self) {
+        for handle in self.handles.values() {
+            handle.close();
+        }
     }
 }
 
 impl ReaderBlobStore for OpfsBlobStore {
     fn put(&mut self, key: &ReaderBlobKey, bytes: &[u8]) -> Result<(), ReaderBlobError> {
-        let handle = self
-            .access(key, true)?
-            .ok_or_else(|| host("the blob file was not created"))?;
-        // Kuerzen VOR dem Schreiben: `write` ueberschreibt ab Offset 0, laesst
-        // einen laengeren Vorgaengerinhalt aber stehen, und der Rest waere
-        // danach fremdes Chiffrat am Ende desselben Blobs.
-        let outcome = handle
+        let handle = self.handle(key)?;
+        let mut framed = Vec::with_capacity(bytes.len() + 1);
+        framed.push(PRESENT_MARKER);
+        framed.extend_from_slice(bytes);
+        // Kuerzen VOR dem Schreiben: `write` ueberschreibt ab dem gegebenen
+        // Offset, laesst einen laengeren Vorgaengerinhalt aber stehen, und der
+        // Rest waere danach fremdes Chiffrat am Ende desselben Blobs.
+        handle
             .truncate_with_u32(0)
-            .map_err(|error| from_js(&error))
-            .and_then(|()| {
-                handle
-                    .write_with_u8_array(bytes)
-                    .map_err(|error| from_js(&error))
-            })
-            .and_then(|_| handle.flush().map_err(|error| from_js(&error)));
-        // `close()` in JEDEM Fall: ein offener Zugriffshandle sperrt die Datei
-        // fuer jeden weiteren Zugriff derselben Herkunft.
-        handle.close();
-        outcome
+            .map_err(|error| from_js(&error))?;
+        let written = handle
+            .write_with_u8_array_and_options(&framed, &at(0.0))
+            .map_err(|error| from_js(&error))?;
+        if length(written)? != framed.len() {
+            return Err(host(
+                "the sync access handle accepted only part of the blob",
+            ));
+        }
+        // `flush` und nicht „irgendwann": erst danach steht der Blob so auf der
+        // Platte, dass ihn ein neu geoeffnetes Handle liest.
+        handle.flush().map_err(|error| from_js(&error))
     }
 
     fn get(&self, key: &ReaderBlobKey) -> Result<Option<Vec<u8>>, ReaderBlobError> {
-        let Some(handle) = self.access(key, false)? else {
+        let handle = self.handle(key)?;
+        let size = length(handle.get_size().map_err(|error| from_js(&error))?)?;
+        if size == 0 {
             return Ok(None);
-        };
-        let outcome = handle
-            .get_size()
-            .map_err(|error| from_js(&error))
-            .and_then(|size| {
-                let mut bytes = vec![0_u8; size as usize];
-                handle
-                    .read_with_u8_array(&mut bytes)
-                    .map_err(|error| from_js(&error))?;
-                Ok(bytes)
-            });
-        handle.close();
-        outcome.map(Some)
+        }
+        let mut framed = vec![0_u8; size];
+        let read = handle
+            .read_with_u8_array_and_options(&mut framed, &at(0.0))
+            .map_err(|error| from_js(&error))?;
+        if length(read)? != size {
+            return Err(host("the sync access handle returned a short read"));
+        }
+        match framed.split_first() {
+            Some((&PRESENT_MARKER, payload)) => Ok(Some(payload.to_vec())),
+            _ => Err(host("the blob file did not carry the presence marker")),
+        }
     }
 
     fn delete(&mut self, key: &ReaderBlobKey) -> Result<(), ReaderBlobError> {
-        let Some((directory, name)) = self.resolve(key, false)? else {
-            return Ok(());
-        };
-        match settle(&directory.remove_entry(&name)) {
-            Ok(_) => Ok(()),
-            Err(error) => absent_or::<()>(error, false).map(|_| ()),
-        }
+        let handle = self.handle(key)?;
+        // Kuerzen auf 0 und NICHT `removeEntry`: das Entfernen des
+        // Verzeichniseintrags ist wieder ein Promise, und der Port ist synchron.
+        // Die Loeschung ist darum trotzdem echt und ueberlebt einen Neustart —
+        // die Datei traegt danach kein Byte, und ohne Marker ist sie abwesend.
+        // Was zurueckbleibt, ist ein LEERER Verzeichniseintrag; ihn abzuraeumen
+        // gehoert dem Task, der einen asynchronen Aufraeumlauf besitzt.
+        handle
+            .truncate_with_u32(0)
+            .map_err(|error| from_js(&error))?;
+        handle.flush().map_err(|error| from_js(&error))
     }
 
     fn keys(&self) -> Result<Vec<ReaderBlobKey>, ReaderBlobError> {
+        // Der Umfang ist die Menge des Vorlaufs — und die Anwesenheit wird je
+        // Schluessel AUF DER PLATTE nachgesehen. Ein Verzeichnisdurchlauf waere
+        // die vollstaendigere Antwort, ist aber ausgeschlossen: `entries()`
+        // liefert einen ASYNCHRONEN Iterator, dessen `next()` ein Promise ist.
         let mut found = Vec::new();
-        collect_keys(&self.directory, "", &mut found)?;
-        found.sort();
+        for (key, handle) in &self.handles {
+            if length(handle.get_size().map_err(|error| from_js(&error))?)? > 0 {
+                found.push(key.clone());
+            }
+        }
+        // `BTreeMap` laeuft bereits in Schluesselordnung; die Zusage von
+        // `keys()` haengt damit an der Sammlung und nicht an einem Sortierruf.
         Ok(found)
-    }
-}
-
-/// Laeuft den Verzeichnisbaum ab und sammelt die Schluessel der Dateien.
-///
-/// Rekursiv, weil ein Schluessel Segmente tragen darf; `prefix` traegt den
-/// bisher gelaufenen Pfad, damit der zurueckgegebene Schluessel derselbe ist,
-/// mit dem abgelegt wurde.
-fn collect_keys(
-    directory: &FileSystemDirectoryHandle,
-    prefix: &str,
-    into: &mut Vec<ReaderBlobKey>,
-) -> Result<(), ReaderBlobError> {
-    let iterator = directory.entries();
-    loop {
-        let step = settle(&iterator.next().map_err(|error| from_js(&error))?)?;
-        let done = Reflect::get(&step, &JsValue::from_str("done"))
-            .map_err(|error| from_js(&error))?
-            .as_bool()
-            .unwrap_or(true);
-        if done {
-            return Ok(());
-        }
-        let entry = Array::from(
-            &Reflect::get(&step, &JsValue::from_str("value")).map_err(|error| from_js(&error))?,
-        );
-        let name = entry
-            .get(0)
-            .as_string()
-            .ok_or_else(|| host("a directory entry carried no name"))?;
-        let path = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
-        let handle = entry.get(1);
-        match handle.dyn_into::<FileSystemDirectoryHandle>() {
-            Ok(child) => collect_keys(&child, &path, into)?,
-            Err(_) => into.push(ReaderBlobKey::new(&path)?),
-        }
     }
 }

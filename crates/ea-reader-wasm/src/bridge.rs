@@ -555,28 +555,51 @@ pub fn reader_runtime_witness() -> String {
 
 /// Legt einen OPAKEN Blob ab. Wird ausschliesslich aus dem Worker gerufen.
 ///
+/// # Warum die Ausfuhr ASYNCHRON ist und was das fuer JavaScript heisst
+///
+/// `OpfsBlobStore::open` ist der asynchrone Vorlauf, der die Zugriffshandles
+/// oeffnet — anders geht es nicht, jeder OPFS-Einstieg liefert ein Promise
+/// (die Begruendung steht vollstaendig in `crate::opfs_worker`). Die Ausfuhr
+/// gibt darum auf der JS-Seite ein `Promise` zurueck, und
+/// `apps/web/src/bridge/opfs-worker.ts` wartet es ab. Die Argumente sind
+/// BESITZEND (`String`, `Vec<u8>`) und keine Referenzen: eine asynchrone
+/// `wasm_bindgen`-Ausfuhr ueberlebt ihren Aufruf, geliehene Argumente koennen
+/// das nicht.
+///
+/// Der Vorlauf laeuft ueber GENAU DIESEN EINEN Schluessel. Das ist die Form,
+/// die der Speicher verlangt, und sie passt: der Worker kennt seinen Schluessel
+/// je Nachricht.
+///
 /// # Errors
 /// Der stabile Code des Fehlschlags als JS-Zeichenkette: `EA-READER-BLOB-KEY`
 /// fuer einen abgewiesenen Schluessel, `EA-READER-BLOB-HOST` fuer jeden
 /// Fehlschlag des Wirtspeichers.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "blobPut")]
-pub fn blob_put(key: &str, bytes: &[u8]) -> Result<(), JsValue> {
-    let key = ReaderBlobKey::new(key).map_err(|error| blob_failure(&error))?;
-    let mut store =
-        OpfsBlobStore::open(BRIDGE_BLOB_DIRECTORY).map_err(|error| blob_failure(&error))?;
-    store.put(&key, bytes).map_err(|error| blob_failure(&error))
+pub async fn blob_put(key: String, bytes: Vec<u8>) -> Result<(), JsValue> {
+    let key = ReaderBlobKey::new(&key).map_err(|error| blob_failure(&error))?;
+    let mut store = OpfsBlobStore::open(BRIDGE_BLOB_DIRECTORY, std::slice::from_ref(&key))
+        .await
+        .map_err(|error| blob_failure(&error))?;
+    store
+        .put(&key, &bytes)
+        .map_err(|error| blob_failure(&error))
 }
 
 /// Holt einen OPAKEN Blob. Ein fehlender Blob ist `undefined` und kein Fehler.
+///
+/// Asynchron aus demselben Grund wie [`blob_put`]: der Vorlauf oeffnet das
+/// Zugriffshandle, das anschliessende Lesen ist synchron.
 ///
 /// # Errors
 /// Wie [`blob_put`].
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "blobGet")]
-pub fn blob_get(key: &str) -> Result<Option<Box<[u8]>>, JsValue> {
-    let key = ReaderBlobKey::new(key).map_err(|error| blob_failure(&error))?;
-    let store = OpfsBlobStore::open(BRIDGE_BLOB_DIRECTORY).map_err(|error| blob_failure(&error))?;
+pub async fn blob_get(key: String) -> Result<Option<Box<[u8]>>, JsValue> {
+    let key = ReaderBlobKey::new(&key).map_err(|error| blob_failure(&error))?;
+    let store = OpfsBlobStore::open(BRIDGE_BLOB_DIRECTORY, std::slice::from_ref(&key))
+        .await
+        .map_err(|error| blob_failure(&error))?;
     let found = store.get(&key).map_err(|error| blob_failure(&error))?;
     Ok(found.map(Vec::into_boxed_slice))
 }

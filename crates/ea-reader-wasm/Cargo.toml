@@ -35,6 +35,16 @@ hex.workspace = true
 js-sys.workspace = true
 sha2.workspace = true
 wasm-bindgen.workspace = true
+# Die Kante ist keine Bequemlichkeit, sondern GEMESSEN erzwungen: `blobPut` und
+# `blobGet` sind asynchron, weil `OpfsBlobStore::open` den asynchronen Vorlauf
+# der OPFS-Handles braucht, und das Makro `#[wasm_bindgen]` uebersetzt eine
+# `async fn` in Code, der `wasm_bindgen_futures::future_to_promise` ruft. Ohne
+# diese Zeile bricht `cargo check --target wasm32-unknown-unknown -p
+# ea-reader-wasm` mit `E0433: cannot find module or crate
+# wasm_bindgen_futures` an genau diesen zwei Ausfuhren ab. Die Crate gehoert
+# zur in ADR 0005 ratifizierten Browser-Laufzeitklasse und liegt ueber den
+# Tauri-Teilbaum ohnehin im Lockfile.
+wasm-bindgen-futures.workspace = true
 web-sys.workspace = true
 
 [dev-dependencies]

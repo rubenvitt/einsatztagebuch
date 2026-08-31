@@ -1902,6 +1902,7 @@ dependencies = [
  "js-sys",
  "sha2 0.11.0",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
 ]

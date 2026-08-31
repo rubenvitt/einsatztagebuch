@@ -60,37 +60,48 @@ function failureCode(error: unknown): string {
   return typeof error === 'string' ? error : 'EA-READER-BLOB-HOST'
 }
 
+/**
+ * Die Zustellung je Nachricht.
+ *
+ * `async`, weil `blobPut` und `blobGet` seit dem OPFS-Vorlauf ein `Promise`
+ * zurueckgeben: ein `FileSystemSyncAccessHandle` liest und schreibt synchron,
+ * sein OEFFNEN tut es nicht — die Begruendung steht vollstaendig in
+ * `crates/ea-reader-wasm/src/opfs_worker.rs`. Das Protokoll zwischen
+ * Hauptthread und Worker bleibt davon Zeile fuer Zeile unberuehrt: dieselben
+ * drei Nachrichten, dieselbe eine Antwort je Nachricht, KEIN zusaetzlicher
+ * Schritt. Abgewartet wird nur der Aufruf dahinter, und auch das ist weiterhin
+ * keine Entscheidung, sondern Zustellung.
+ */
 scope.addEventListener('message', (event) => {
   const request = event.data
-  void ready.then(
-    () => {
-      try {
-        switch (request.kind) {
-          case 'put':
-            blobPut(request.key, request.bytes)
-            scope.postMessage({ id: request.id, ok: true })
-            return
-          case 'get':
-            scope.postMessage({ id: request.id, ok: true, bytes: blobGet(request.key) })
-            return
-          case 'delete':
-            // BEFUND, hier sichtbar statt still geglaettet: die Bruecke fuehrt
-            // heute `blobPut` und `blobGet` und KEIN `blobDelete` — der
-            // Planblock von `crates/ea-reader-wasm/src/bridge.rs` zaehlt genau
-            // zwei Ausfuhren auf, waehrend seine Prosa drei Nachrichten nennt.
-            // Die Nachricht steht deshalb im Protokoll, ihre Zustellung fehlt,
-            // und sie faellt geschlossen, statt einen Blob liegen zu lassen und
-            // Erfolg zu melden. Der Task, dem die Bruecke gehoert, ersetzt
-            // diese Zeile durch den Aufruf.
-            scope.postMessage({ id: request.id, ok: false, code: 'EA-READER-BLOB-HOST' })
-            return
-        }
-      } catch (error: unknown) {
-        scope.postMessage({ id: request.id, ok: false, code: failureCode(error) })
+  void ready
+    .then(async () => {
+      switch (request.kind) {
+        case 'put':
+          await blobPut(request.key, request.bytes)
+          scope.postMessage({ id: request.id, ok: true })
+          return
+        case 'get':
+          scope.postMessage({ id: request.id, ok: true, bytes: await blobGet(request.key) })
+          return
+        case 'delete':
+          // BEFUND, hier sichtbar statt still geglaettet: die Bruecke fuehrt
+          // heute `blobPut` und `blobGet` und KEIN `blobDelete` — der
+          // Planblock von `crates/ea-reader-wasm/src/bridge.rs` zaehlt genau
+          // zwei Ausfuhren auf, waehrend seine Prosa drei Nachrichten nennt.
+          // Die Nachricht steht deshalb im Protokoll, ihre Zustellung fehlt,
+          // und sie faellt geschlossen, statt einen Blob liegen zu lassen und
+          // Erfolg zu melden. Der Task, dem die Bruecke gehoert, ersetzt
+          // diese Zeile durch den Aufruf.
+          scope.postMessage({ id: request.id, ok: false, code: 'EA-READER-BLOB-HOST' })
+          return
       }
-    },
-    () => {
-      scope.postMessage({ id: request.id, ok: false, code: 'EA-READER-BLOB-HOST' })
-    },
-  )
+    })
+    // EIN Auffangarm statt der frueheren zwei: mit `await` in der Zustellung
+    // faellt ein abgewiesenes Promise der Bruecke in denselben Zweig wie ein
+    // geworfener Fehler, und ein `try`/`catch` um den Rumpf faenge das
+    // abgewiesene Promise nicht.
+    .catch((error: unknown) => {
+      scope.postMessage({ id: request.id, ok: false, code: failureCode(error) })
+    })
 })
