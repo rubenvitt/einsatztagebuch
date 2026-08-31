@@ -4,9 +4,11 @@
 // `cargo test --locked -p ea-reader-wasm --target wasm32-unknown-unknown`
 // dieses Ziel mit, uebersetzte es fuer wasm32 und uebergaebe es dem
 // `wasm-bindgen-test-runner` — der findet in einem Ziel ohne
-// `#[wasm_bindgen_test]` keinen einzigen Fall. Das Spiegelbild steht ueber
-// `crates/ea-reader-wasm/tests/opfs_browser.rs`, das aus dem umgekehrten Grund
-// `#![cfg(target_arch = "wasm32")]` traegt.
+// `#[wasm_bindgen_test]` keinen einzigen Fall. Das Spiegelbild WIRD ueber
+// `crates/ea-reader-wasm/tests/opfs_browser.rs` stehen und aus dem umgekehrten
+// Grund `#![cfg(target_arch = "wasm32")]` tragen; die Datei gibt es heute noch
+// nicht, sie entsteht mit der Aufgabe „`apps/web`, die wasm-bindgen-Bruecke,
+// der OPFS-Bytespeicher und der Laufzeitnachweis im Gate".
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::{

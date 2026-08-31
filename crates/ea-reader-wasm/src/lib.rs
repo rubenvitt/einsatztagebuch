@@ -22,6 +22,14 @@
 //! Wirtstest erreichbar. `crates/ea-reader-wasm/tests/bridge_boundary.rs` liest
 //! diese Lage als Text und wird rot, sobald ein Export ohne sein cfg
 //! danebensteht.
+//!
+//! **Dieser Zeuge ist die EINZIGE Instanz, die das merkt, und das ist
+//! GEMESSEN.** Mit entferntem cfg enden Uebersetzung, Testbau und Clippy-Gate
+//! alle drei mit 0 und ohne eine einzige Diagnose; nur der Zeuge faellt. Der
+//! Compiler ist hier also KEIN zweites Netz — wer ein weiteres Modul mit einer
+//! Ausfuhr anlegt und ihr cfg vergisst, wird nirgends sonst gewarnt. Die
+//! Messung samt ihren vier Kommandos steht im Doc-Kommentar von
+//! `every_wasm_bindgen_export_sits_behind_the_wasm32_cfg`.
 
 /// Der Rundlauf ueber die Bruecke, ohne eine einzige Zusage darueber hinaus.
 ///

@@ -23,10 +23,20 @@ pub enum ReaderMode {
 impl ReaderMode {
     /// Beide Modi, in der Reihenfolge von §5.1 und §5.2.
     ///
-    /// Die Liste ist die ausfuehrbare Fassung der Geschlossenheit: wer eine
-    /// dritte Variante ergaenzt, muss sie hier eintragen, und der Zeuge in
-    /// `crates/ea-reader-wasm/tests/bridge_boundary.rs` wird rot, bevor
-    /// irgendein Aufrufer die neue Variante uebersieht.
+    /// Diese Liste erzwingt die Geschlossenheit NICHT. Was einen Autor zwingt,
+    /// eine dritte Variante ueberall nachzutragen, ist der erschoepfende
+    /// `match self` in [`Self::code`]: er ist ein UEBERSETZUNGSFEHLER, sobald
+    /// eine Variante dazukommt. `ALL` bleibt davon unberuehrt — eine dritte
+    /// Variante ohne Eintrag hier uebersetzt anstandslos, und
+    /// `assert_eq!(ReaderMode::ALL.len(), 2)` in
+    /// `crates/ea-reader-wasm/tests/bridge_boundary.rs` bleibt dabei GRUEN.
+    /// Der Zeuge pinnt einen WERT und keine Vollstaendigkeit.
+    ///
+    /// Die Arity `[Self; 2]` faengt den halb getanen Zug: sie faellt erst,
+    /// NACHDEM der Inhalt hier gewachsen ist, und nicht, wenn er es nicht ist.
+    /// Die Liste ist damit genau das, was sie ist — die aufzaehlbare Fassung
+    /// der zwei Modi fuer Aufrufer, die ueber beide laufen wollen. In dieser
+    /// Stufe benutzt sie nur der Zeuge.
     pub const ALL: [Self; 2] = [Self::Server, Self::File];
 
     /// Der stabile Code des Modus.

@@ -163,7 +163,7 @@ impl<T: DraftRepository + ?Sized> DraftPayloadPort for T {
 /// hier also nicht einmal HINSCHREIBBAR. Diese Grenze erfindet ihn deshalb
 /// nicht; sie zieht die Naht so eng an den Kern, wie es ohne diese Kante geht:
 /// der Fehlerausgang IST [`BundleError`], und der Code einer Abweisung kommt
-/// damit woertlich aus `ea-archive-fs/src/bundle_error.rs` und nicht aus einer
+/// damit woertlich aus `crates/ea-archive/src/bundle_error.rs` und nicht aus einer
 /// zweiten Liste. Ein Bestand, der nicht vollstaendig verifiziert, kommt als
 /// [`BundleError::SourceNotFullyVerified`] an und wird abgewiesen.
 ///

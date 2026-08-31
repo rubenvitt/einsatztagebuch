@@ -29,7 +29,7 @@
 //!    fehlenden Zeile.
 //!    [`archive_export_bundle_file`] ruft den Buendelport
 //!    (`crate::state::ArchiveBundleExportPort`) und reicht jede Abweisung mit
-//!    dem Code aus `ea-archive-fs/src/bundle_error.rs` weiter.
+//!    dem Code aus `crates/ea-archive/src/bundle_error.rs` weiter.
 //! 3. **Benannte Abwesenheit.** [`session_reauthenticate`] und
 //!    [`writer_acknowledge_stale_registry`] antworten mit einem stabilen Code.
 //!    Jeder dieser Codes benennt eine Voraussetzung, die in diesem Bauzustand
@@ -1209,7 +1209,7 @@ pub async fn device_posture_report() -> Result<DevicePostureDto, CommandError> {
 /// benannt unverfuegbar — nicht bedingt versteckt.
 ///
 /// Sonst der stabile Code des Buendelschreibers, unveraendert
-/// (`ea-archive-fs/src/bundle_error.rs`): ein Bestand, der nicht VOLLSTAENDIG
+/// (`crates/ea-archive/src/bundle_error.rs`): ein Bestand, der nicht VOLLSTAENDIG
 /// verifiziert, ist `EA-BUNDLE-SOURCE-NOT-FULLY-VERIFIED` und wird niemals
 /// still exportiert; eine belegte Zieladresse ist
 /// `EA-BUNDLE-TARGET-OCCUPIED`, und es wird nichts ueberschrieben.
