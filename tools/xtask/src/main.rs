@@ -59,6 +59,26 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
         // dafuer eine gemessene Belegzeile im Stufe-2-Gate-Bericht.
         ("pnpm", vec!["desktop:typecheck"]),
         ("pnpm", vec!["desktop:test"]),
+        // Die vier Arme von `apps/web`, und ihre Reihenfolge IST die Begruendung:
+        // `build-wasm` steht zuerst, weil `apps/web/src/bridge/pkg/` sein Ausgang
+        // ist und sowohl der Vite-Bau als auch `wasm-runtime.test.ts` daraus
+        // importieren. Ohne den Vorlauf bricht der Bau an einem nicht
+        // aufloesbaren Modul ab, statt zu pruefen - dieselbe Ordnungsentscheidung,
+        // die den Desktop-Bau schon vor die Cargo-Kommandos setzt.
+        //
+        // `web:browser-test` und das spaeter entstehende `web:e2e` stehen hier
+        // AUSDRUECKLICH NICHT: der wasm-bindgen-test-runner setzt einen
+        // chromedriver voraus und Playwright installierte Engine-Baus, beides
+        // waere eine neue Containervoraussetzung fuer JEDEN Schnelllauf. Ihre
+        // benannte Klammer ist `browsers up` ... `browsers down`, aus demselben
+        // Grund, aus dem `desktop:e2e` seit Stufe 2 draussen steht.
+        (
+            "cargo",
+            vec!["run", "--locked", "-p", "xtask", "--", "build-wasm"],
+        ),
+        ("pnpm", vec!["--dir", "apps/web", "build"]),
+        ("pnpm", vec!["web:typecheck"]),
+        ("pnpm", vec!["web:test"]),
         (
             "cargo",
             vec![
@@ -541,14 +561,18 @@ const INTEGRATION_OBJECT_STORE_AUTHORITY: &str = "127.0.0.1:59000";
 /// Frist jeder einzelnen Erreichbarkeitsstufe.
 const INTEGRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Ruft `docker compose` und haelt stdout FREI.
+/// Ruft `docker compose` auf `compose_file` und haelt stdout FREI.
 ///
-/// `integration up` druckt zwei `export`-Zeilen, die der Aufrufer mit `eval`
-/// uebernimmt; jede Zeile, die Compose selbst nach stdout schreibt, landete
-/// sonst in derselben Auswertung. Deshalb wird die Ausgabe eingesammelt und
-/// nach stderr weitergereicht.
-fn run_compose(root: &Path, arguments: &[&str]) -> Result<(), String> {
-    let mut args = vec!["compose", "--file", INTEGRATION_COMPOSE_FILE];
+/// `integration up` und `browsers up` drucken `export`-Zeilen, die der
+/// Aufrufer mit `eval` uebernimmt; jede Zeile, die Compose selbst nach stdout
+/// schreibt, landete sonst in derselben Auswertung. Deshalb wird die Ausgabe
+/// eingesammelt und nach stderr weitergereicht.
+///
+/// Die Compose-Datei ist ein PARAMETER und keine Konstante im Rumpf: seit
+/// Stufe 4 gibt es eine zweite (`ops/compose/browsers.yaml`), und eine zweite
+/// Kopie dieser Funktion waere dieselbe Entscheidung ein zweites Mal.
+fn run_compose(root: &Path, compose_file: &str, arguments: &[&str]) -> Result<(), String> {
+    let mut args = vec!["compose", "--file", compose_file];
     args.extend_from_slice(arguments);
     let output = Command::new("docker")
         .args(&args)
@@ -557,7 +581,7 @@ fn run_compose(root: &Path, arguments: &[&str]) -> Result<(), String> {
         .map_err(|error| {
             format!(
                 "failed to invoke docker: {error}. \
-                 The integration services need a running Docker engine; \
+                 The services in {compose_file} need a running Docker engine; \
                  mise.toml pins EA_CONTAINER_RUNTIME."
             )
         })?;
@@ -658,13 +682,18 @@ fn ensure_integration_services_available() -> Result<(), String> {
 /// bereits versionierten Bucket wirkungslos, und die gedruckten Zeilen haengen
 /// an Konstanten statt an Laufzeitzustand.
 fn run_integration_up(root: &Path) -> Result<(), String> {
-    run_compose(root, &["up", "--detach", "--wait"])?;
+    run_compose(
+        root,
+        INTEGRATION_COMPOSE_FILE,
+        &["up", "--detach", "--wait"],
+    )?;
     // Der Alias, den das Bild von sich aus fuehrt, traegt keine Anmeldedaten —
     // er reicht fuer `mc ready local` in der Bereitschaftspruefung, nicht fuer
     // eine Bucket-Operation. Deshalb wird er hier mit den Wurzeldaten aus
     // `ops/compose/integration.yaml` neu gesetzt; das ist wiederholbar.
     run_compose(
         root,
+        INTEGRATION_COMPOSE_FILE,
         &[
             "exec",
             "-T",
@@ -682,6 +711,7 @@ fn run_integration_up(root: &Path) -> Result<(), String> {
     // Voreinstellung: MinIO legt Buckets unversioniert an.
     run_compose(
         root,
+        INTEGRATION_COMPOSE_FILE,
         &[
             "exec",
             "-T",
@@ -694,6 +724,7 @@ fn run_integration_up(root: &Path) -> Result<(), String> {
     )?;
     run_compose(
         root,
+        INTEGRATION_COMPOSE_FILE,
         &[
             "exec",
             "-T",
@@ -715,7 +746,122 @@ fn run_integration_up(root: &Path) -> Result<(), String> {
 /// Wiederholbar: `docker compose down` auf einem bereits abgeraeumten Projekt
 /// ist erfolgreich und ohne Wirkung.
 fn run_integration_down(root: &Path) -> Result<(), String> {
-    run_compose(root, &["down", "--volumes", "--remove-orphans"])
+    run_compose(
+        root,
+        INTEGRATION_COMPOSE_FILE,
+        &["down", "--volumes", "--remove-orphans"],
+    )
+}
+
+/// Die Compose-Datei des Browserdienstes, relativ zur Wurzel.
+const BROWSERS_COMPOSE_FILE: &str = "ops/compose/browsers.yaml";
+
+/// Die EINE Fehlerzeile der Argumentgrammatik von `browsers`.
+const BROWSERS_ARGUMENT_ERROR: &str = "browsers accepts exactly one of: up, down";
+
+/// Der EINE Endpunkt des WebDrivers, wortgleich zu
+/// `ops/compose/browsers.yaml`.
+///
+/// Wie bei den Integrationsdiensten ist das bewusst KEINE Auswertung von
+/// `CHROMEDRIVER_REMOTE` aus der Umgebung: eine Erreichbarkeitspruefung, die
+/// ihre eigene Adresse aus einer setzbaren Variablen liest, laesst sich durch
+/// das Setzen derselben Variablen umgehen, und der Gate waere fail-open.
+const BROWSERS_WEBDRIVER_AUTHORITY: &str = "127.0.0.1:59515";
+const BROWSERS_WEBDRIVER_URL: &str = "http://127.0.0.1:59515";
+
+/// Belegt, dass am Port wirklich ein WebDriver antwortet UND bereit ist.
+///
+/// Gebaut wie [`object_store_answers`]. Ein offener Port belegt nichts, und
+/// hier auch ein `HTTP/1.1 200` allein nicht: `chromedriver` beantwortet
+/// `GET /status` bereits, waehrend er noch keine Sitzung annimmt. Die
+/// staerkere Zusage ist das Feld `ready` seines eigenen Rumpfes.
+fn webdriver_answers() -> bool {
+    /// Die Bereitschaftszusage aus dem Rumpf von `GET /status`.
+    const READY: &str = "\"ready\":true";
+    let Some(mut stream) = connect_with_timeout(BROWSERS_WEBDRIVER_AUTHORITY) else {
+        return false;
+    };
+    let request = format!(
+        "GET /status HTTP/1.1\r\nHost: {BROWSERS_WEBDRIVER_AUTHORITY}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    // KEIN `read_to_end` wie bei [`object_store_answers`], und das ist GEMESSEN:
+    // `chromedriver` kuendigt `Connection: close` im Kopf an, schliesst den
+    // Socket danach aber NICHT. `read_to_end` liefe damit in die Lesefrist und
+    // gaebe `Err` zurueck — samt Verwerfen der laengst gelesenen Antwort, also
+    // fail-closed am gesunden Dienst. Deshalb wird gelesen, bis die Zusage im
+    // Rumpf steht, und dann abgebrochen.
+    let mut answer = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                answer.extend_from_slice(&chunk[..read]);
+                if answer.len() > 8192 || String::from_utf8_lossy(&answer).contains(READY) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let answer = String::from_utf8_lossy(&answer);
+    answer.starts_with("HTTP/1.1 200") && answer.contains(READY)
+}
+
+/// Faellt geschlossen aus, solange der WebDriver nicht antwortet.
+///
+/// Gebaut wie [`ensure_integration_services_available`] und aus demselben
+/// Grund NICHT wie [`ensure_wasm32_target_available`]: dort gibt es einen
+/// fail-OPEN-Zweig, wenn `rustup` gar nicht startet, hier gibt es keinen. Ein
+/// nicht durchfuehrbarer Browserlauf ist ein nicht bestandener Browserlauf,
+/// und eine Umgehung ueber eine Umgebungsvariable existiert nicht. Ohne diese
+/// Pruefung meldete der `wasm-bindgen-test-runner` stattdessen einen
+/// Folgefehler tief im Treiberprotokoll, der die Abhilfe nicht nennt.
+fn ensure_browser_services_available() -> Result<(), String> {
+    if webdriver_answers() {
+        return Ok(());
+    }
+    Err(format!(
+        "the WebDriver at {BROWSERS_WEBDRIVER_AUTHORITY} did not answer. \
+         Run `cargo run --locked -p xtask -- browsers up` first; it starts the browser \
+         service from {BROWSERS_COMPOSE_FILE} and exports CHROMEDRIVER_REMOTE. \
+         There is no environment variable that skips this check."
+    ))
+}
+
+/// Startet den Browserdienst und druckt den einen Verbindungswert.
+///
+/// Wiederholbar aus denselben Gruenden wie [`run_integration_up`]:
+/// `docker compose up --wait` laesst einen laufenden, gesunden Container
+/// stehen, und die gedruckte Zeile haengt an einer Konstanten statt an
+/// Laufzeitzustand. Der erste Lauf baut das Abbild und dauert entsprechend.
+fn run_browsers_up(root: &Path) -> Result<(), String> {
+    run_compose(root, BROWSERS_COMPOSE_FILE, &["up", "--detach", "--wait"])?;
+    ensure_browser_services_available()?;
+    // `CHROMEDRIVER_REMOTE` und nicht `CHROMEDRIVER`: der erste Name nennt dem
+    // `wasm-bindgen-test-runner` einen BEREITS laufenden, entfernten Treiber,
+    // der zweite einen Binaerpfad auf dem Wirt, den dieses Repositorium
+    // ausdruecklich nicht voraussetzt.
+    println!("export CHROMEDRIVER_REMOTE={BROWSERS_WEBDRIVER_URL}");
+    Ok(())
+}
+
+/// Haelt den Browserdienst an.
+///
+/// Wiederholbar: `docker compose down` auf einem bereits abgeraeumten Projekt
+/// ist erfolgreich und ohne Wirkung. `--volumes` steht mit, obwohl der Dienst
+/// heute keines fuehrt: die Form bleibt die von [`run_integration_down`], und
+/// ein spaeter ergaenztes Volume ueberlebt das Abraeumen dann nicht.
+fn run_browsers_down(root: &Path) -> Result<(), String> {
+    run_compose(
+        root,
+        BROWSERS_COMPOSE_FILE,
+        &["down", "--volumes", "--remove-orphans"],
+    )
 }
 
 fn parse_fuzz_settings(input: &str) -> Result<FuzzSettings, String> {
@@ -3416,6 +3562,19 @@ fn run() -> Result<(), String> {
                 _ => Err(INTEGRATION_ARGUMENT_ERROR.to_owned()),
             }
         }
+        "browsers" => {
+            let action = args
+                .next()
+                .ok_or_else(|| BROWSERS_ARGUMENT_ERROR.to_owned())?;
+            if args.next().is_some() {
+                return Err(BROWSERS_ARGUMENT_ERROR.to_owned());
+            }
+            match action.as_str() {
+                "up" => run_browsers_up(&root),
+                "down" => run_browsers_down(&root),
+                _ => Err(BROWSERS_ARGUMENT_ERROR.to_owned()),
+            }
+        }
         "validate-schemas" => {
             if args.next().is_some() {
                 return Err("validate-schemas does not accept arguments".to_owned());
@@ -4098,6 +4257,13 @@ vor Task 3 akzeptiert
                 ("pnpm", vec!["--dir", "apps/desktop", "build"]),
                 ("pnpm", vec!["desktop:typecheck"]),
                 ("pnpm", vec!["desktop:test"]),
+                (
+                    "cargo",
+                    vec!["run", "--locked", "-p", "xtask", "--", "build-wasm"]
+                ),
+                ("pnpm", vec!["--dir", "apps/web", "build"]),
+                ("pnpm", vec!["web:typecheck"]),
+                ("pnpm", vec!["web:test"]),
                 (
                     "cargo",
                     vec![

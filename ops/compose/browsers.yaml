@@ -1,0 +1,93 @@
+# Der Browserdienst der Stufe 4.
+#
+# `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md` verlangt
+# EINEN Dienst, der BEIDE Träger führt: die Playwright-Engine-Baus für das
+# später entstehende `pnpm web:e2e` und einen `chromedriver` für den
+# `wasm-bindgen-test-runner` hinter `pnpm web:browser-test`. Es gibt GEMESSEN
+# kein Registry-Abbild, das beides trägt — `mcr.microsoft.com/playwright`
+# liefert die fünf Engine-Baus und keinen Treiber (`which chromedriver` leer,
+# `find / -name 'chromedriver*' -type f` ohne Treffer), und
+# `selenium/standalone-chrome` liefert Chrome samt Treiber und keine
+# Engine-Baus. Deshalb ist das Abbild dieses Dienstes LOKAL gebaut, und der
+# gemessene Digest steht am `FROM`, nicht an einer `image:`-Zeile: dieselbe
+# Zusage wie in `ops/compose/integration.yaml`, nur eine Ebene tiefer.
+#
+# Die Abbildfassung ist an `@playwright/test` aus `apps/web/package.json`
+# gebunden (1.62.1). Playwright weist Engine-Baus fremder Fassung zurück, und
+# zwei Fassungen derselben Sache sind die erste, die still driftet — dieselbe
+# Begründung, aus der `wasm-bindgen` als Crate UND als CLI zeichengleich
+# gepinnt ist.
+#
+# Gefahren wird die Datei ausschließlich über
+# `cargo run --locked -p xtask -- browsers up|down`; der Verteiler prüft die
+# Bereitschaft des WebDrivers fail-closed und druckt `CHROMEDRIVER_REMOTE`.
+# Die Laufzeit ist über `EA_CONTAINER_RUNTIME` in `mise.toml` gepinnt.
+#
+# Der Dienst führt KEINEN Zustand: er hat keine Volumes. `browsers down`
+# entfernt trotzdem mit `--volumes`, damit die Form die von
+# `integration down` bleibt und ein später ergänztes Volume nicht überlebt.
+name: einsatzarchiv-browsers
+
+services:
+  browsers:
+    # Der Bauzusammenhang ist `ops/compose` und nicht die Wurzel: das Rezept
+    # unten braucht keine einzige Datei aus dem Baum, und ein Zusammenhang
+    # über der Wurzel schickte `target/` und `node_modules/` an den Daemon.
+    build:
+      context: .
+      # Inline, weil der Files-Block dieses Tasks genau EINE Datei führt
+      # (`ops/compose/browsers.yaml`) und das Rezept vier Zeilen lang ist.
+      # Beide Bezüge sind GEMESSEN und nicht behauptet: der Digest stammt aus
+      # `docker image inspect mcr.microsoft.com/playwright:v1.62.1-noble`, die
+      # Prüfsumme des Treiberarchivs aus `sha256sum` über die geladene Datei.
+      # Die Treiberfassung 151.0.7922.34 ist zeichengleich zu
+      # `/ms-playwright/chromium-1234/chrome-linux64/chrome --version` des
+      # Abbilds; ein Treiber anderer Hauptfassung lehnt die Sitzung ab.
+      #
+      # `unzip` liegt nicht im Abbild, `python3` schon — deshalb entpackt das
+      # Rezept mit `python3 -m zipfile` und installiert kein Paket nach.
+      # Der Symlink ist nötig, weil `chromedriver` seinen Browser über die
+      # Namen `google-chrome`/`chrome` im PATH sucht, das Abbild ihn aber
+      # ausschließlich unter `/ms-playwright/` ablegt.
+      dockerfile_inline: |
+        FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+        RUN curl --fail --silent --show-error --location \
+              --output /tmp/chromedriver.zip \
+              https://storage.googleapis.com/chrome-for-testing-public/151.0.7922.34/linux64/chromedriver-linux64.zip \
+         && echo "3c2b6780156f44f3a26db5bee4a3b193d608eda55644de5287e6edf4aef2f4ac  /tmp/chromedriver.zip" \
+            | sha256sum --check --strict - \
+         && python3 -m zipfile -e /tmp/chromedriver.zip /tmp/chromedriver \
+         && install -m 0755 /tmp/chromedriver/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
+         && rm -rf /tmp/chromedriver /tmp/chromedriver.zip \
+         && ln -s /ms-playwright/chromium-1234/chrome-linux64/chrome /usr/local/bin/google-chrome \
+         && chromedriver --version \
+         && google-chrome --version
+    image: einsatzarchiv-browsers:local
+    # Das Wirtsnetz ist eine MESSUNG und keine Bequemlichkeit: der
+    # `wasm-bindgen-test-runner` läuft auf dem WIRT, bindet seinen HTTP-Server
+    # an `127.0.0.1:0` und übergibt dem Browser GENAU DIESE Adresse — der
+    # Verbindungsweg läuft also in BEIDE Richtungen, und eine veröffentlichte
+    # Portweiterleitung deckt nur die eine ab. Gemessen mit einem
+    # Wirts-HTTP-Server auf `127.0.0.1:38999`: `docker run` mit dem
+    # Vorgabenetz meldet `curl: (7) Failed to connect to 127.0.0.1 port
+    # 38999`, `docker run --network host` meldet `200`. Im eigenen Netz zeigt
+    # `127.0.0.1` also auf den Container selbst, und Chrome holte das
+    # Testbündel nirgends ab. Folge: `ports:` entfällt (Compose ignoriert
+    # Veröffentlichungen im Wirtsnetz), und der Treiber bindet den Port
+    # selbst, den `BROWSERS_WEBDRIVER_AUTHORITY` in
+    # `tools/xtask/src/main.rs` nennt.
+    #
+    # Preis dieser Wahl, ausgewiesen statt verschwiegen: `network_mode: host`
+    # ist auf Linux die natürliche Form und auf macOS/Windows eine
+    # Sonderoption. Die Drei-Betriebssystem-Matrix ist Stufe 7.
+    network_mode: host
+    # Ohne `--allowed-ips`: die Voreinstellung von `chromedriver` lässt
+    # ausschließlich den Loopback zu, und mehr braucht der Wirtslauf nicht.
+    # Ein leerer Wert öffnete den Treiber für jede Adresse des Rechners.
+    command: ["chromedriver", "--port=59515"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:59515/status"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+      start_period: 5s

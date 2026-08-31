@@ -28,15 +28,19 @@
 //!    `ea-archive` oder `ea-archive-fs` eine Variante hinzu, wird der `match`
 //!    unvollstaendig und DIESE Crate uebersetzt nicht mehr. Wer eine Variante
 //!    hinzufuegt, MUSS hier vorbeikommen.
-//! 2. **Artefaktseite, zur Testzeit.** Der eingecheckte Emitterausdruck
-//!    `apps/desktop/src/bridge/generated-contracts.ts` wird byteweise gegen
-//!    einen frischen Emitterlauf verglichen. Aendert sich ein Literal in seiner
+//! 2. **Artefaktseite, zur Testzeit.** Die eingecheckten Emitterausdruecke
+//!    werden byteweise gegen einen frischen Emitterlauf verglichen. Es sind
+//!    ZWEI: [`emit_typescript`] schreibt
+//!    `apps/desktop/src/bridge/generated-contracts.ts`,
+//!    [`emit_reader_typescript`] schreibt
+//!    `apps/web/src/bridge/generated-contracts.ts`, und die zwei Mengen von
+//!    Vereinigungen sind DISJUNKT. Aendert sich ein Literal in seiner
 //!    definierenden Crate, faellt dieser Vergleich, bis der Emitter erneut
 //!    gelaufen und sein Ergebnis committet ist.
 
 mod emit;
 
-pub use emit::emit_typescript;
+pub use emit::{emit_reader_typescript, emit_typescript};
 
 // Die Sicherheitsaufzaehlungen bleiben, wo sie definiert wurden. Hier steht
 // ausschliesslich die Weitergabe.
@@ -44,6 +48,8 @@ pub use ea_archive::QuarantineReason;
 pub use ea_archive_fs::{DetailCause, HealthFinding, SyncStatus};
 pub use ea_crypto::SignerRole;
 pub use ea_format::{KeyProtectionProfileV1, LocalAuditOutcomeV1, OperatorRoleV1};
+pub use ea_types::{EntryStatus, EvidenceStatus, VerificationStatus};
+pub use ea_verify::ServerConfirmationV1;
 pub use ea_writer::{FinalizationPhase, StaleDecision};
 
 use ea_archive::QuarantinedObject;
@@ -80,6 +86,22 @@ pub const WRITER_ENUMS_V1: &[(&str, &[&str])] = &[
     ("StaleDecision", STALE_DECISION_LITERALS),
     ("HealthFinding", HEALTH_FINDING_LITERALS),
     ("PatientCountStatus", PATIENT_COUNT_STATUS_LITERALS),
+];
+
+/// Die Statusaufzaehlungen der READER-Flaeche, in Emitterreihenfolge.
+///
+/// Sie stehen bewusst NICHT in [`SECURITY_ENUMS_V1`]: `emit_typescript`
+/// schreibt die Desktop-Datei, und
+/// `apps/desktop/src/bridge/no-hand-written-contracts.test.ts` verbannt jedes
+/// Literal JEDER dort emittierten Vereinigung aus jeder handgeschriebenen
+/// Desktop-Quelle. `ungueltig`, `vorhanden` oder `ausstehend` dort
+/// einzutragen verengte die Writer-Flaeche, ohne dass eine
+/// Reader-Entscheidung dahinterstuende.
+pub const READER_ENUMS_V1: &[(&str, &[&str])] = &[
+    ("VerificationStatus", VERIFICATION_STATUS_LITERALS),
+    ("EntryStatus", ENTRY_STATUS_LITERALS),
+    ("EvidenceStatus", EVIDENCE_STATUS_LITERALS),
+    ("ServerConfirmationV1", SERVER_CONFIRMATION_V1_LITERALS),
 ];
 
 /// Die woertliche Oberflaechenkopie der vier Sync-Zustaende.
@@ -328,6 +350,77 @@ const HEALTH_FINDING_LITERALS: &[&str] = &[
     health_finding_literal(HealthFinding::UnexpectedSequenceForkOrRollback),
     health_finding_literal(HealthFinding::InsufficientFreeSpace),
     health_finding_literal(HealthFinding::UnsuitableFilesystemSemantics),
+];
+
+/// Die woertliche Oberflaechenkopie der sechs Verifikationszustaende.
+///
+/// Der Arm ist eine Oder-Verzweigung ueber ALLE Varianten und ruft dann
+/// [`VerificationStatus::label`]: das Literal bleibt damit in `ea-types`, und
+/// der fehlende Sammelarm faengt trotzdem jede neue Variante ab.
+const fn verification_status_literal(value: VerificationStatus) -> &'static str {
+    match value {
+        VerificationStatus::Verified
+        | VerificationStatus::Gap
+        | VerificationStatus::MissingGrant
+        | VerificationStatus::UnknownKey
+        | VerificationStatus::UnsupportedSchema
+        | VerificationStatus::Invalid => value.label(),
+    }
+}
+
+const VERIFICATION_STATUS_LITERALS: &[&str] = &[
+    verification_status_literal(VerificationStatus::Verified),
+    verification_status_literal(VerificationStatus::Gap),
+    verification_status_literal(VerificationStatus::MissingGrant),
+    verification_status_literal(VerificationStatus::UnknownKey),
+    verification_status_literal(VerificationStatus::UnsupportedSchema),
+    verification_status_literal(VerificationStatus::Invalid),
+];
+
+/// Der Zustand EINES Eintrags — nie mit dem Verifikationsergebnis vermischt.
+const fn entry_status_literal(value: EntryStatus) -> &'static str {
+    match value {
+        EntryStatus::Present | EntryStatus::AuthorizedDestroyed | EntryStatus::UnexplainedGap => {
+            value.label()
+        }
+    }
+}
+
+const ENTRY_STATUS_LITERALS: &[&str] = &[
+    entry_status_literal(EntryStatus::Present),
+    entry_status_literal(EntryStatus::AuthorizedDestroyed),
+    entry_status_literal(EntryStatus::UnexplainedGap),
+];
+
+/// Der Stand der geforderten Evidence.
+const fn evidence_status_literal(value: EvidenceStatus) -> &'static str {
+    match value {
+        EvidenceStatus::Complete
+        | EvidenceStatus::Pending
+        | EvidenceStatus::Overdue
+        | EvidenceStatus::Invalid => value.label(),
+    }
+}
+
+const EVIDENCE_STATUS_LITERALS: &[&str] = &[
+    evidence_status_literal(EvidenceStatus::Complete),
+    evidence_status_literal(EvidenceStatus::Pending),
+    evidence_status_literal(EvidenceStatus::Overdue),
+    evidence_status_literal(EvidenceStatus::Invalid),
+];
+
+/// Die Bestaetigungsdimension — orthogonal zur Verifikation, kein Mangel.
+const fn server_confirmation_literal(value: ServerConfirmationV1) -> &'static str {
+    match value {
+        ServerConfirmationV1::ServerConfirmed | ServerConfirmationV1::NotServerConfirmed => {
+            value.label()
+        }
+    }
+}
+
+const SERVER_CONFIRMATION_V1_LITERALS: &[&str] = &[
+    server_confirmation_literal(ServerConfirmationV1::ServerConfirmed),
+    server_confirmation_literal(ServerConfirmationV1::NotServerConfirmed),
 ];
 
 /// Das Literal des Patientenzahlzustands aus seiner DRAHTFORM — fail-closed.

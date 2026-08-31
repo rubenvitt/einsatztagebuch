@@ -92,6 +92,19 @@ impl ServerConfirmationV1 {
             Self::NotServerConfirmed => "notServerConfirmed",
         }
     }
+
+    /// Die woertliche Oberflaechenkopie aus `design.md` §17.4.
+    ///
+    /// `nicht server-bestätigt` ist KEIN Mangel und DARF NICHT als `Lücke`
+    /// oder `ungültig` dargestellt werden; im Datei-Modus des Web-Readers ist
+    /// es der Regelfall.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ServerConfirmed => "server-bestätigt",
+            Self::NotServerConfirmed => "nicht server-bestätigt",
+        }
+    }
 }
 
 /// Der Stand eines Vernichtungsvorgangs.

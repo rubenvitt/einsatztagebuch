@@ -18,17 +18,33 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Der einzige Grund dieser Kante ist der cfg-getorte Export unten in
-# `src/lib.rs`. Die Kante steht in `[dependencies]` und NICHT in einer
+# JEDE Kante steht in `[dependencies]` und NICHT in einer
 # `[target.'cfg(...)'.dependencies]`-Tabelle: der Manifestdurchlauf in
 # `tools/xtask/tests/workspace.rs` iteriert nur ueber `dependencies`,
 # `dev-dependencies` und `build-dependencies`, eine target-Tabelle bliebe fuer
-# die Pin- und die `workspace = true`-Pflicht unsichtbar.
+# die Pin- und die `workspace = true`-Pflicht unsichtbar. Dass `js-sys` und
+# `web-sys` damit auch auf einem Wirtsziel im Graphen liegen, kostet nichts:
+# `src/opfs_worker.rs` ist dort weggetort und zieht keinen ihrer Typen.
+ea-crypto.workspace = true
+# `ea-reader` ist mit dieser Aufgabe aus `[dev-dependencies]` hierher
+# gewandert: `src/opfs_worker.rs` implementiert den Port
+# `ea_reader::ReaderBlobStore` und ist keine Testquelle mehr.
+ea-reader.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+js-sys.workspace = true
+sha2.workspace = true
 wasm-bindgen.workspace = true
+web-sys.workspace = true
 
 [dev-dependencies]
 # Nur fuer `tests/bridge_boundary.rs`. Dev-Kanten sind hier unbedenklich: die
 # wasm32-Zeile des Gates faehrt ohne `--all-targets` und zieht sie nie in den
 # Graphen.
-ea-reader.workspace = true
 ea-verify.workspace = true
+# Der Laeufer von `tests/opfs_browser.rs`. Er steht als
+# ENTWICKLUNGSabhaengigkeit exakt in `[workspace.dependencies]` der Wurzel und
+# ist in ADR 0005 ratifiziert; `workspace_declares_exact_planned_members_and_
+# shared_dependencies` durchlaeuft `dev-dependencies` mit derselben Strenge wie
+# `dependencies`.
+wasm-bindgen-test.workspace = true

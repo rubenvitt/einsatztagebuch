@@ -15,6 +15,11 @@ ist seit Stufe 1 bewiesen und reicht ausdruecklich nicht.
 
 Hier laufen die vier Elemente wirklich — in `wasm32-unknown-unknown`, in Node.
 
+**Dieser Spike ist seit dem Task „`apps/web`, die wasm-bindgen-Bruecke, der
+OPFS-Bytespeicher und der Laufzeitnachweis im Gate" ABGELOEST.** Was das heisst
+und was es ausdruecklich NICHT heisst, steht unten unter
+[Abgeloest](#abgeloest).
+
 ## Ausfuehren
 
 ```bash
@@ -304,3 +309,45 @@ schreibt direkt in den linearen Speicher und braucht kein `js-sys`.
 - **Keine Aussage zur RNG-Qualitaet.** „Zwei Ziehungen unterscheiden sich" und
   „≥ 40 verschiedene Bytewerte" sind Anwesenheitsproben, keine statistischen
   Tests.
+
+## Abgeloest
+
+Der Nachweis lebt ab dem Task „`apps/web`, die wasm-bindgen-Bruecke, der
+OPFS-Bytespeicher und der Laufzeitnachweis im Gate" nicht mehr hier, sondern in
+
+- `crates/ea-reader-wasm/src/bridge.rs` — der Rechenkern dieses Spikes, Funktion
+  fuer Funktion gehoben; `runtime_proof_json` heisst dort
+  `runtime_witness_json()` und tritt ueber `readerRuntimeWitness` durch die
+  Bruecke, und
+- den ZWEI gegateten Zeugen `apps/web/src/bridge/wasm-runtime.test.ts` (Node,
+  ueber `pnpm web:test`) und `crates/ea-reader-wasm/tests/opfs_browser.rs`
+  (Headless-Chromium, ueber `pnpm web:browser-test` in der Klammer
+  `cargo run --locked -p xtask -- browsers up` … `browsers down`).
+
+`spike.sh` und alles, was daran haengt, bleibt STEHEN und wird NICHT geloescht.
+Es ist der historische Beleg des Laufs vom 2026-08-30, auf den sich die
+Aufhebung der Blockade in
+`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md` beruft, und
+`ADR_REFERENCED_PATHS` in `tools/xtask/tests/adr_gate.rs` sowie
+`tools/xtask/tests/spec_completeness.rs` nennen die Datei namentlich. Ein
+Ausfuehrungsprotokoll wird hier nicht nachtraeglich entfernt.
+
+### Die Bilanz der fuenf Grenzen, exakt
+
+Die fuenf Grenzen stehen oben unter [Was dieser Spike NICHT
+beweist](#was-dieser-spike-nicht-beweist). Der abloesende Task loest davon GENAU
+EINE ein:
+
+| Grenze | Stand nach dem Abloesen |
+|---|---|
+| 1 — kein Browser, nur Node | **FAELLT.** `pnpm web:browser-test` faehrt `crates/ea-reader-wasm/tests/opfs_browser.rs` in Headless-Chromium ueber den `wasm-bindgen-test-runner`. |
+| 2 — nur `debug`, kein `--release`, kein `wasm-opt` | **BLEIBT OFFEN.** Nicht gemessen, gehoert Stufe 7. |
+| 3 — nur `ea-crypto` wird AUSGEFUEHRT | **FAELLT NICHT, VERSCHIEBT SICH.** Ab dem abloesenden Task fuehrt neben `ea-crypto` auch `crates/ea-reader-wasm` selbst etwas aus — die Bruecke und der OPFS-Zeuge laufen. `ea-verify`, `ea-archive`, `ea-chain`, `ea-format` und `ea-trust` UEBERSETZEN weiterhin nur und laufen nirgends. Der Satz „ausser `ea-crypto` fuehrt keine Crate etwas aus" ist ab dort FALSCH; der Satz „der Reader-Pfad als Ganzes ist nicht ausgefuehrt" bleibt WAHR. |
+| 4 — keine COSE-Kette | **BLEIBT OFFEN.** `parse_cose_sign1` laeuft erst im Task „Verifikation vor Entschluesselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert" gegen ein echtes Archiv. |
+| 5 — keine RNG-Statistik, nur Anwesenheitsproben | **BLEIBT OFFEN.** `wasm-runtime.test.ts` wiederholt die Lebendigkeitsproben und fuegt keinen statistischen Test hinzu. |
+
+Die SECHSTE Tatsache — die LAGE des Nachweises, der Spike lag ausserhalb jedes
+Gates — aendert sich SEPARAT: das ausgefuehrte Modul steht jetzt unter
+`crates/`, wird von `cargo deny` erfasst und von
+`tools/xtask/tests/workspace.rs` klassifiziert. Das ist keine der fuenf Grenzen
+und wird nicht als eingeloeste gezaehlt.

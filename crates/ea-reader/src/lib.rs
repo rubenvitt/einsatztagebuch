@@ -8,13 +8,24 @@
 //! `ea-verify` hinaus in das Wirtbetriebssystem, und geteilter Browsercode ist
 //! genau das Gegenteil davon.
 //!
-//! # In dieser Stufe ein Skelett
+//! # In dieser Stufe fast ein Skelett
 //!
-//! Sie traegt hier KEINE Rechnung: zwei Betriebsarten und den Re-Export der
-//! Gate-Reihenfolge. Der Reader selbst — Verifikationsdurchlauf, Datei-Modus,
-//! Tresor — entsteht in den folgenden Aufgaben der Stufe 4. Die Crate entsteht
-//! VOR ihrem Inhalt, weil die wasm32-Reichweite in dem Task belegt sein muss,
-//! der sie eroeffnet, und nicht in dem, der sie benutzt.
+//! Sie traegt hier KEINE Verifikationsrechnung: zwei Betriebsarten, den
+//! Re-Export der Gate-Reihenfolge und seit dem Task
+//! „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der
+//! Laufzeitnachweis im Gate" den Port ueber OPAKE Bytes samt seinem Doppel. Der
+//! Reader selbst — Verifikationsdurchlauf, Datei-Modus, Tresor — entsteht in
+//! den folgenden Aufgaben der Stufe 4. Die Crate entsteht VOR ihrem Inhalt,
+//! weil die wasm32-Reichweite in dem Task belegt sein muss, der sie eroeffnet,
+//! und nicht in dem, der sie benutzt.
+//!
+//! # Der Bytespeicher ist ein PORT und kein Wirt
+//!
+//! [`ReaderBlobStore`] beschreibt das Ablegen und Holen von Bytefolgen und
+//! sonst nichts; [`InMemoryReaderBlobStore`] ist das Doppel, mit dem jeder
+//! Wirtstest ohne Browser laeuft. Die OPFS-Implementierung liegt in
+//! `crates/ea-reader-wasm`, weil sie synchrone Zugriffshandles braucht und die
+//! es nur im dedizierten Worker gibt.
 //!
 //! # Die Gate-Reihenfolge wird RE-EXPORTIERT
 //!
@@ -24,7 +35,9 @@
 //! gegen `design.md` §14.1; eine zweite Liste daneben waere die Stelle, an der
 //! die Reihenfolge des Browsers von der des Wirts abweichen koennte.
 
+mod blob_store;
 mod mode;
 
+pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
 pub use ea_verify::GATE_ORDER_V1;
 pub use mode::ReaderMode;

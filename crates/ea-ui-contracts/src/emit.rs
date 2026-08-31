@@ -243,6 +243,37 @@ pub fn emit_typescript() -> String {
     emitted
 }
 
+/// Die vollstaendige TypeScript-Kontraktdatei des READERS als Zeichenkette.
+///
+/// Derselbe Kopf, dieselbe Determinismuszusage, dieselben Formregeln — eine
+/// ANDERE Menge Vereinigungen. ZWEI Ausdruecke statt einer Datei mit beidem,
+/// weil `apps/desktop/src/bridge/no-hand-written-contracts.test.ts` jedes
+/// Literal JEDER emittierten Vereinigung aus jeder handgeschriebenen
+/// Desktop-Quelle verbannt: `ungueltig`, `vorhanden` oder `ausstehend` dort
+/// einzutragen verengte die Writer-Flaeche ohne Reader-Grund.
+///
+/// Zwei Aufrufe liefern byteidentische Ergebnisse; das ist zugesichert und
+/// nicht bloss beobachtet (`tests/generated_ts_is_current.rs`).
+#[must_use]
+pub fn emit_reader_typescript() -> String {
+    let mut emitted = String::from(HEADER);
+
+    emitted.push_str("\n// The closed unions of the contract surface.\n");
+    for (name, literals) in crate::READER_ENUMS_V1 {
+        push_union(&mut emitted, name, literals);
+    }
+
+    // Kein Abschnitt fuer Ansichtsmodelle: die Reader-Flaeche fuehrt in
+    // dieser Aufgabe ausschliesslich Statusvereinigungen. Ein leerer
+    // Abschnittskommentar waere eine Ankuendigung und kein Kontrakt.
+    emitted.push_str("\n// The value arrays, so that no consumer repeats a literal.\n");
+    for (name, literals) in crate::READER_ENUMS_V1 {
+        push_values(&mut emitted, name, literals);
+    }
+
+    emitted
+}
+
 /// Jede emittierte Vereinigung, in fester Reihenfolge: erst die
 /// Sicherheitsaufzaehlungen, dann die uebrigen geschlossenen Mengen.
 fn closed_unions() -> impl Iterator<Item = &'static (&'static str, &'static [&'static str])> {
