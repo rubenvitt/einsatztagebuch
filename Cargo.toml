@@ -104,7 +104,15 @@ unicode-normalization = "=0.1.25"
 # Tauri-Teilbaum), das Pinnen fuegt keine Crate hinzu.
 wasm-bindgen = { version = "=0.2.126", default-features = false, features = ["std"] }
 wasm-bindgen-futures = { version = "=0.4.76", default-features = false }
-wasm-bindgen-test = { version = "=0.3.76", default-features = false }
+# `std` ist hier keine Bequemlichkeit, sondern die Bedingung dafuer, dass der
+# Arbeitsbereich ueberhaupt noch auf dem WIRTSZIEL uebersetzt: ohne dieses
+# Merkmal stellt `wasm-bindgen-test` in `src/rt/mod.rs` einen eigenen
+# `#[panic_handler]` hinter `cfg(not(feature = "std"))` bereit, und der
+# kollidiert auf x86_64 mit dem der Standardbibliothek (`E0152`, doppeltes
+# Sprachelement `panic_impl`). Mit `std` setzt die Crate stattdessen einen
+# gewoehnlichen `std::panic::set_hook`. Es ist zugleich das einzige Merkmal,
+# das die Crate ueberhaupt kennt.
+wasm-bindgen-test = { version = "=0.3.76", default-features = false, features = ["std"] }
 web-sys = { version = "=0.3.103", default-features = false, features = [
   "Blob", "Crypto", "DedicatedWorkerGlobalScope", "Document", "Event",
   "File", "FileSystemDirectoryHandle", "FileSystemFileHandle",
