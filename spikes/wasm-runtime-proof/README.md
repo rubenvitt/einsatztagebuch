@@ -59,6 +59,50 @@ Gemessen am 2026-08-30 auf `Linux 6.8.0-138-generic x86_64`:
 | `getrandom` | `0.4.3`, Feature `wasm_js` |
 | Krypto-Kanten | `hpke 0.14.0`, `ed25519-dalek 3.0.0`, `x25519-dalek 3.0.0`, `chacha20poly1305 0.11.0`, `curve25519-dalek 5.0.0`, `sha2 0.11.0` — alle zeichengleich mit dem Repo-Lockfile |
 
+## Wiederholung unter dem gepinnten Node 26.7.0
+
+Der obige Lauf protokolliert `node v26.8.1`, waehrend `.node-version` und die
+`engines.node`-Zeile von `package.json` auf `26.7.0` stehen — der Vorlauf
+DRK-253 (Stufe-4-Vorlauf, `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md`)
+behandelt gemessene Werkzeugstaende als vertraglich und wiederholt den Nachweis
+deshalb ausdruecklich unter dem GEPINNTEN Node, statt den Pin anzuheben, um die
+Abweichung verschwinden zu lassen. Gefahren am 2026-08-31 mit:
+
+```bash
+NODE_BIN=/home/rubeen/.local/share/mise/installs/node/26.7.0/bin/node spikes/wasm-runtime-proof/spike.sh
+```
+
+`spike.sh` liest `NODE_BIN` direkt (Zeile 20, Standardwert `/usr/bin/node`
+sofern die Variable fehlt); der obenstehende Aufruf erzwingt die gepinnte
+Fassung, ohne den Skripttext zu aendern. Gemessenes Ergebnis:
+
+- **Exitcode: 0.**
+- **Vom Lauf selbst gemeldete Node-Fassung:** `node v26.7.0 on linux/x64`
+  (Treiberausgabe von Schritt 7) — zeichengleich mit `.node-version` und
+  `package.json`s `engines.node`.
+- **Alle vier Elemente aus §14.1 erneut AUSGEFUEHRT:** die wasm-bindgen-Schicht
+  (Glue exportiert `run_runtime_proof`/`echo_from_js`, ein Zeichenkettenargument
+  ueberquert die Bruecke in beiden Richtungen); `getrandom` mit `wasm_js` in
+  einer echten JS-Umgebung (zwei 32-Byte-Ziehungen, die sich unterscheiden und
+  nicht null sind, ≥ 40 verschiedene Bytewerte auf 64 Byte — gemessen 56 —,
+  eine 100000-Byte-Ziehung ueber die 65536-Byte-Chunkgrenze, zwei echte
+  `ea_crypto::hpke_seal`-Aufrufe mit je frischer ephemerer Entropie); eine
+  HPKE-Entkapselung (der eingefrorene Empfaenger- und HPKE-Vektor, der
+  RFC-7748-6.1-abgeleitete Public Key, die Entkapselung liefert `c0×32`, beide
+  manipulierten Vektoren mit `EA-CRYPTO-HPKE-OPEN` abgewiesen); eine
+  Signaturpruefung (der RFC-8032-§7.1-TEST-1-Vektor wird angenommen,
+  `flipped-signature.bin` mit `EA-TRUST-SIGNATURE-INVALID` abgewiesen).
+- **Gegenkontrolle ohne `globalThis.crypto` hielt erneut:** `getrandom:
+  getrandom::fill failed: Web Crypto API is unavailable`.
+
+**Keine Abweichung vom Lauf unter Node v26.8.1**: derselbe Exitcode, dieselben
+vier ausgefuehrten Elemente, dieselben Fehlercodes an beiden Negativfaellen.
+Der einzige Unterschied ist die Node-Fassung selbst — genau die Variable, die
+dieser Wiederholungslauf pruefen sollte. `distinctByteValuesAcross64Bytes` maß
+in diesem Lauf 56 (zuvor 55 bzw. 58 fuer die beiden Ziehungen); das ist eine
+Anwesenheitsprobe und keine Statistik (siehe *Was dieser Spike NICHT beweist*)
+und schwankt erwartungsgemaess zwischen Laeufen, ohne die Aussage zu aendern.
+
 ## Was bewiesen ist
 
 ### 1. wasm-bindgen-Schicht — AUSGEFUEHRT

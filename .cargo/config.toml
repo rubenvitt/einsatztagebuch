@@ -3,3 +3,13 @@ xtask = "run --locked -p xtask --"
 
 [env]
 CARGO_TERM_QUIET = "true"
+
+# Der Laeufer der wasm-bindgen-Testziele (`cargo test --locked -p
+# ea-reader-wasm --target wasm32-unknown-unknown`), begruendet in
+# `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`. AUSDRUECKLICH
+# KEIN `rustflags`: `getrandom` 0.4.3 waehlt sein wasm-Backend ueber das
+# Cargo-Feature `wasm_js` und nicht ueber `--cfg getrandom_backend`, das zu
+# `getrandom` 0.3 gehoert und in 0.4.3 nicht mehr in der erlaubten
+# Werteliste von `cfg(getrandom_backend, values(...))` steht.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

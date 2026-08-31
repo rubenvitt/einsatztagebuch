@@ -8,6 +8,7 @@
   },
   "scripts": {
     "verify:quick": "cargo run --locked -p xtask -- verify-quick",
+    "build:wasm": "cargo run --locked -p xtask -- build-wasm",
     "test:core": "cargo run --locked -p xtask -- test-core",
     "test:golden": "cargo run --locked -p xtask -- test-golden",
     "test:property": "cargo run --locked -p xtask -- test-property",

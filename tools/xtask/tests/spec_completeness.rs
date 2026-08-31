@@ -2752,6 +2752,25 @@ fn stage_one_vector_hygiene_reserves_out_of_band_negative_literals() {
     );
 }
 
+// tools/xtask/tests/spec_completeness.rs — Erweiterung von
+// `later_stage_plans_reference_the_web_reader_spec`. Der Blockadesatz bleibt
+// als AUFZEICHNUNG stehen; zusaetzlich verlangt der Test den Auflösungsmarker,
+// den Spikepfad und jede der fuenf benannten Grenzen. Damit erzwingt das Gate
+// den BELEG und nicht mehr die Sperre.
+const STAGE_FOUR_SPIKE_MARKERS: [&str; 3] = [
+    "BLOCKIERT — Laufzeitnachweis nach `web-reader-design.md` §14.1",
+    "AUFGEHOBEN am 2026-08-30 — Laufzeitnachweis nach `web-reader-design.md` §14.1 erbracht",
+    "spikes/wasm-runtime-proof/spike.sh",
+];
+
+const STAGE_FOUR_SPIKE_LIMITS: [&str; 5] = [
+    "Node v26.8.1 ist eine echte JS-Umgebung, aber kein Browser",
+    "nur `debug`, kein `--release` und kein `wasm-opt`",
+    "nur `ea-crypto` wird AUSGEFÜHRT",
+    "keine COSE-Kette",
+    "keine RNG-Statistik, nur Anwesenheitsproben",
+];
+
 #[test]
 fn later_stage_plans_reference_the_web_reader_spec() {
     for (name, plan) in [
@@ -2804,6 +2823,15 @@ fn later_stage_plans_reference_the_web_reader_spec() {
         stage_four.contains("BLOCKIERT — Laufzeitnachweis nach `web-reader-design.md` §14.1"),
         "stage 4 must be blocked on the runtime spike"
     );
+    for marker in STAGE_FOUR_SPIKE_MARKERS {
+        assert!(stage_four.contains(marker), "stage 4 is missing: {marker}");
+    }
+    for limit in STAGE_FOUR_SPIKE_LIMITS {
+        assert!(
+            stage_four.contains(limit),
+            "the lifted blockade must reproduce the named limit: {limit}"
+        );
+    }
 
     // Ausfuehrbare Anweisungen zeigen auf existierende Pfade. Historische
     // Tatsachenbehauptungen ueber Worktrees bleiben unangetastet.

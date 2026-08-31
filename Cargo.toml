@@ -67,6 +67,7 @@ getrandom = { version = "=0.4.3", features = ["wasm_js"] }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 jiff = { version = "=0.2.35", default-features = false, features = ["std", "tzdb-bundle-always"] }
 jiff-tzdb = "=0.1.8"
+js-sys = { version = "=0.3.103", default-features = false, features = ["std"] }
 jsonschema = { version = "=0.49.9", default-features = false, features = ["arbitrary-precision"] }
 libfuzzer-sys = "=0.4.13"
 libsqlite3-sys = { version = "=0.38.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
@@ -93,6 +94,22 @@ tokio = { version = "=1.53.1", default-features = false, features = ["macros", "
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["logging", "ring"] }
 toml = "=0.8.23"
 unicode-normalization = "=0.1.25"
+# Die Browser-Laufzeitklasse aus ADR 0005: alle fuenf Crates liegen bereits
+# transitiv im Graphen (ueber `cddl` fuer wasm32 und ueber `reqwest` im
+# Tauri-Teilbaum), das Pinnen fuegt keine Crate hinzu.
+wasm-bindgen = { version = "=0.2.126", default-features = false, features = ["std"] }
+wasm-bindgen-futures = { version = "=0.4.76", default-features = false }
+wasm-bindgen-test = { version = "=0.3.76", default-features = false }
+web-sys = { version = "=0.3.103", default-features = false, features = [
+  "Blob", "Crypto", "DedicatedWorkerGlobalScope", "Document", "Event",
+  "File", "FileSystemDirectoryHandle", "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions", "FileSystemGetFileOptions",
+  "FileSystemReadWriteOptions", "FileSystemSyncAccessHandle", "Headers",
+  "MessageEvent", "Navigator", "Request", "RequestInit", "Response",
+  "ServiceWorkerGlobalScope", "StorageManager", "SubtleCrypto",
+  "VisibilityState", "Window", "Worker", "WorkerGlobalScope",
+  "WorkerNavigator",
+] }
 zeroize = { version = "=1.9.0", features = ["derive"] }
 x25519-dalek = { version = "=3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 x509-tsp = "=0.1.0"

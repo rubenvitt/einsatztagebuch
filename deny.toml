@@ -112,6 +112,13 @@ exceptions = [
   # `tls-rustls-ring-webpki` -> `webpki-roots`.
   { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
+# Die Browser-Laufzeitklasse aus
+# `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md` (js-sys,
+# wasm-bindgen, wasm-bindgen-futures, wasm-bindgen-test, web-sys) bekommt
+# HIER KEINE neue Zeile: alle fuenf Crates sind MIT OR Apache-2.0 lizenziert,
+# beides bereits in der Allowlist oben, und keine der fuenf Crates fuegt dem
+# aufgeloesten Baum eine neue Lizenz hinzu. Die Abwesenheit einer Ausnahme ist
+# hier eine gemessene Aussage und kein Versehen.
 
 [sources]
 unknown-registry = "deny"

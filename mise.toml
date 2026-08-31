@@ -12,6 +12,16 @@
 # `.node-version` trägt `26.7.0`, und mise liest diese Datei von sich aus.
 [tools]
 pnpm = "11.20.0"
+# Der wasm-Werkzeugpin aus
+# `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`. Dasselbe Paket
+# liefert BEIDE Programme, die diese Stufe braucht — `wasm-bindgen` fuer
+# `xtask build-wasm` und `wasm-bindgen-test-runner` fuer den Browserlauf —,
+# deshalb reicht EIN Pin. Die Fassung MUSS zeichengleich mit der in
+# `[workspace.dependencies]` aufgeloesten `wasm-bindgen`-Crate sein: ein
+# `wasm-bindgen-cli`, das von diesem Pin abweicht, bricht den Generatorlauf
+# mit einem Schema-Mismatch ab statt mit einer Codeaussage — genau das hat der
+# Laufzeitnachweis in `spikes/wasm-runtime-proof/` gemessen.
+"cargo:wasm-bindgen-cli" = "0.2.126"
 
 # Die Container-Laufzeit der Integrationsdienste
 # (`ops/compose/integration.yaml`).
