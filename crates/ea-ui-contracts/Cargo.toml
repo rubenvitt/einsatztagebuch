@@ -34,6 +34,12 @@ ea-schema.workspace = true
 # `Id16`, `ChainSequence`, `UnixMillis`, `OrganizationId` — kein neuer
 # Bezeichnertyp.
 ea-types.workspace = true
+# `ServerConfirmationV1` — die EIGENE Dimension neben dem Verifikationsergebnis
+# (`design.md` §17.4). Sie wird RE-EXPORTIERT und nie neu erklaert; eine
+# zweite Bestaetigungsmenge waere genau die Vermischung, die §17.4 verbietet.
+# Die Kante ist einseitig: `ea-verify` steht auf der wasm32-Positivliste,
+# diese Crate in `WASM32_EXEMPT_CRATES`, und kein Weg laeuft zurueck.
+ea-verify.workspace = true
 # `FinalizationPreview`, `FinalizeOutcome`, `FinalizationPhase` und
 # `RecoveryOutcome`. Die Ansichtsmodelle entstehen AUS diesen Werten; ohne
 # diese Kante waeren sie eine daneben laufende zweite Beschreibung derselben

@@ -1894,9 +1894,17 @@ dependencies = [
 name = "ea-reader-wasm"
 version = "0.1.0"
 dependencies = [
+ "ea-crypto",
  "ea-reader",
  "ea-verify",
+ "getrandom 0.4.3",
+ "hex",
+ "js-sys",
+ "sha2 0.11.0",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]
@@ -2070,6 +2078,7 @@ dependencies = [
  "ea-format",
  "ea-schema",
  "ea-types",
+ "ea-verify",
  "ea-writer",
 ]
 

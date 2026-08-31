@@ -1,6 +1,11 @@
-//! Die Driftschranke ueber der EINGECHECKTEN Emitterausgabe.
+//! Die Driftschranke ueber den EINGECHECKTEN Emitterausgaben.
 //!
-//! Vier Zusagen, und jede deckt eine Luecke, die die andere offen laesst:
+//! Vier Zusagen, und jede deckt eine Luecke, die die andere offen laesst. Seit
+//! der Reader dazugekommen ist, gelten sie ueber ZWEI eingecheckten Dateien —
+//! `apps/desktop/src/bridge/generated-contracts.ts` aus `emit_typescript()` und
+//! `apps/web/src/bridge/generated-contracts.ts` aus `emit_reader_typescript()`.
+//! Jede Zusage steht deshalb zweimal hier: eine Haelfte, die nur fuer eine der
+//! beiden Dateien gilt, waere genau die stille Haelfte, die niemand bemerkt.
 //!
 //! 1. Die eingecheckte Datei IST das, was der Emitter schreibt. Ohne diese
 //!    Zusicherung ist ein generiertes Artefakt eine Datei, die jeder von Hand
@@ -22,6 +27,11 @@ use std::{fs, path::PathBuf};
 fn generated_contracts_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../apps/desktop/src/bridge/generated-contracts.ts")
+}
+
+fn reader_contracts_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/web/src/bridge/generated-contracts.ts")
 }
 
 /// Die Zeilen der Deklaration `export type NAME =`, den Kopf eingeschlossen.
@@ -192,6 +202,100 @@ fn the_emitted_file_declares_types_and_computes_nothing() {
             !masked.contains("sign"),
             "the generated contracts must contain no sign outside the SignerRole \
              declaration: {line}"
+        );
+    }
+    for line in emitted.lines().filter(|line| !line.trim().is_empty()) {
+        assert!(
+            line.starts_with("//")
+                || line.starts_with("export type")
+                || line.starts_with("export const")
+                || line.starts_with(' ')
+                || line == "}"
+                || line == "] as const",
+            "unexpected construct in a generated declaration file: {line}"
+        );
+    }
+}
+
+#[test]
+fn the_checked_in_reader_file_is_exactly_what_the_reader_emitter_writes() {
+    let generated = ea_ui_contracts::emit_reader_typescript();
+    let checked_in = fs::read_to_string(reader_contracts_path()).unwrap();
+    assert_eq!(
+        generated, checked_in,
+        "run `cargo run --locked -p ea-ui-contracts --bin emit-ts` and commit the result"
+    );
+}
+
+#[test]
+fn two_reader_emitter_runs_are_byte_identical() {
+    assert_eq!(
+        ea_ui_contracts::emit_reader_typescript().into_bytes(),
+        ea_ui_contracts::emit_reader_typescript().into_bytes()
+    );
+}
+
+#[test]
+fn every_reader_enum_is_derived_from_its_rust_definition() {
+    let emitted = ea_ui_contracts::emit_reader_typescript();
+    assert!(
+        !ea_ui_contracts::READER_ENUMS_V1.is_empty(),
+        "READER_ENUMS_V1 must carry every status enum of the Reader surface"
+    );
+    for (name, variants) in ea_ui_contracts::READER_ENUMS_V1 {
+        let block = named_union_block(&emitted, name);
+        assert_eq!(
+            union_members(&block),
+            variants.to_vec(),
+            "{name} must be emitted from its Rust definition, in declaration order"
+        );
+    }
+    // Keine der vier definierenden Aufzaehlungen fuehrt ein `ALL`; die Zahlen
+    // stehen deshalb HIER und machen ein Entfernen einer Variante zu einer
+    // sichtbaren Aenderung. Eine HINZUGEKOMMENE Variante bricht schon den
+    // `match` ohne Sammelarm in `lib.rs`.
+    for (name, expected) in [
+        ("VerificationStatus", 6),
+        ("EntryStatus", 3),
+        ("EvidenceStatus", 4),
+        ("ServerConfirmationV1", 2),
+    ] {
+        assert_eq!(
+            union_members(&named_union_block(&emitted, name)).len(),
+            expected,
+            "{name} must emit EVERY variant of its Rust definition"
+        );
+    }
+    // Der EINE nicht zirkulaere Anker der Reader-Haelfte: die sechs
+    // Verifikationsbegriffe aus `design.md` §17.4, hier als Text gepinnt.
+    // Alles darueber vergleicht zwei Ableitungen derselben Rustdefinition;
+    // DIESE Zeile faellt auch, wenn die Oberflaechenkopie selbst wandert.
+    assert_eq!(
+        union_members(&named_union_block(&emitted, "VerificationStatus")),
+        vec![
+            "verifiziert",
+            "Lücke",
+            "fehlender Grant",
+            "unbekannter Schlüssel",
+            "nicht darstellbares Schema",
+            "ungültig"
+        ]
+    );
+}
+
+#[test]
+fn the_emitted_reader_file_declares_types_and_computes_nothing() {
+    let emitted = ea_ui_contracts::emit_reader_typescript();
+    let lowercase = emitted.to_ascii_lowercase();
+    // Neun verbotene Zeichenfolgen und keine Maskierung: die Reader-Datei
+    // traegt weder `SignerRole` noch den Gesundheitscode, an denen die
+    // Desktop-Haelfte maskieren muss.
+    for forbidden in [
+        "function", "=>", "class", "import(", "require(", "crypto", "subtle", "sha", "sign",
+    ] {
+        assert!(
+            !lowercase.contains(forbidden),
+            "the generated reader contracts must contain no {forbidden}"
         );
     }
     for line in emitted.lines().filter(|line| !line.trim().is_empty()) {

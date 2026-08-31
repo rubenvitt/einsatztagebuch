@@ -1,15 +1,22 @@
 #![forbid(unsafe_code)]
 //! Die Bruecke zwischen dem geteilten Rust-Kern und der Browser-Umgebung.
 //!
-//! # In dieser Stufe ein Skelett
+//! # Kein Skelett mehr
 //!
-//! Der echte Uebergang — OPFS-Bytespeicher, wasm-bindgen-Generatorlauf,
-//! Vektorzeugen im Gate und headless-Chromium — gehoert der Aufgabe
-//! „`apps/web`, die wasm-bindgen-Bruecke, der OPFS-Bytespeicher und der
-//! Laufzeitnachweis im Gate". Hier steht genau so viel, wie die
-//! wasm32-Reichweite belegen kann: EINE reine Funktion und EIN duenner Export
-//! darueber. `xtask build-wasm` existiert seit dem Vorlauf-Task und hatte bis
-//! jetzt nichts zu bauen; ab hier hat es das.
+//! Bis zur Aufgabe „wasm32-Reichweite" stand hier genau so viel, wie diese
+//! Reichweite belegen konnte: EINE reine Funktion und EIN duenner Export
+//! darueber. Der echte Uebergang steht jetzt daneben — [`bridge`] traegt den
+//! Laufzeitzeugen nach `web-reader-design.md` §14.1 und die zwei
+//! Bytespeicher-Ausfuhren, [`opfs_worker`] den OPFS-Wirt dahinter.
+//!
+//! # Was hier NICHT liegt
+//!
+//! Die Rechnung selbst gehoert den geteilten Crates. `bridge.rs` ruft
+//! `ea_crypto` und `ea_reader` und entscheidet nichts; `opfs_worker.rs` legt
+//! OPAKE Bytes ab und weiss nicht, was in ihnen steht. Waere es anders, gaebe
+//! es eine zweite Stelle, an der ueber Klartext entschieden wird — und
+//! `web-reader-design.md` §9 laesst Kryptographie ausschliesslich in geteiltem
+//! Rust zu.
 //!
 //! # Die Bauform: reine Funktion, duenner Export
 //!
@@ -30,6 +37,28 @@
 //! Ausfuhr anlegt und ihr cfg vergisst, wird nirgends sonst gewarnt. Die
 //! Messung samt ihren vier Kommandos steht im Doc-Kommentar von
 //! `every_wasm_bindgen_export_sits_behind_the_wasm32_cfg`.
+
+/// Die Ausfuhren nach JavaScript und der Laufzeitzeuge.
+///
+/// Das Modul ist auf JEDEM Ziel uebersetzbar; nur seine Ausfuhren stehen
+/// hinter `cfg(target_arch = "wasm32")`. Das ist dieselbe Bauform wie unten:
+/// die Rechnung bleibt fuer einen gewoehnlichen Wirtstest erreichbar.
+pub mod bridge;
+
+/// Der OPFS-Bytespeicher — NUR auf `wasm32-unknown-unknown`.
+///
+/// Das Tor steht hier an der `mod`-Zeile und nicht an jedem Item, und das ist
+/// zulaessig, weil das Modul KEINE `wasm_bindgen`-Ausfuhr traegt: die Regel
+/// „cfg am Item" von `every_wasm_bindgen_export_sits_behind_the_wasm32_cfg`
+/// gilt genau den Ausfuhren, und die stehen in [`bridge`]. Auf einem Wirtsziel
+/// gaebe es fuer `FileSystemSyncAccessHandle` ohnehin keinen Wirt.
+///
+/// Die Attributschreibweise steht hier bewusst OHNE ihre Klammern: der Zeuge
+/// liest Text und unterscheidet eine Ausfuhr nicht von einer Erwaehnung. Ein
+/// ausgeschriebenes Attribut in einem Fliesstext faerbte ihn rot — GEMESSEN
+/// an genau dieser Zeile.
+#[cfg(target_arch = "wasm32")]
+pub mod opfs_worker;
 
 /// Der Rundlauf ueber die Bruecke, ohne eine einzige Zusage darueber hinaus.
 ///

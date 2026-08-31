@@ -1,0 +1,41 @@
+/* Die extrahierten Ant-Design-Regeln in IHRER Kaskadenschicht. Eine Regel in
+   einer benannten Schicht verliert gegen jede unlayered Regel, unabhaengig von
+   ihrer Spezifitaet — deshalb koennen die Regeln unter diesem Import die
+   Anwendungsregeln darunter nicht ueberstimmen. `vite build` loest den Import
+   auf und erzeugt daraus `@layer antd{…}` (gemessen). */
+@import url(static-antd.css) layer(antd);
+
+/* Die Prosaschrift ist der NATIVE UI-Sans-Serif-Stapel und kein Webfont: unter
+   `font-src 'self'` gaebe es fuer einen entfernten Font keinen Weg, und ein
+   mitgeliefertes Schriftbeiwerk waere ein Beiwerk ohne Zweck. Der
+   Monospace-Stapel bleibt `eaTokens.fontFamilyCode` und gilt nur fuer Hashes,
+   Fingerabdruecke und technische Kennungen. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  color: var(--ea-ink);
+  background: var(--ea-surface);
+}
+
+/* Sichtbarer Tastaturfokus auf JEDEM interaktiven Bedienelement. Die Regel
+   steht unlayered und ueberstimmt damit jede herabgestufte Ant-Regel, die den
+   Umriss entfernen wuerde. */
+:focus-visible {
+  outline: 2px solid var(--ea-action);
+  outline-offset: 2px;
+}
+
+/* Nicht wesentliche Uebergaenge aus, wenn das Betriebssystem es verlangt. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
