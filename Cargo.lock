@@ -2091,6 +2091,7 @@ dependencies = [
  "ea-archive-fs",
  "ea-crypto",
  "ea-format",
+ "ea-reader",
  "ea-schema",
  "ea-types",
  "ea-verify",

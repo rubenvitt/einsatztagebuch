@@ -65,8 +65,16 @@
 //! `ea-types`: die Bruecke rechnet nicht, sie reicht Bytes weiter, und die
 //! Begriffe, mit denen sie das tut, kommen aus DER Crate, deren Signatur sie
 //! bedient.
+//!
+//! Dieselbe Regel zieht [`ReaderBundlePin::from_trust_objects`] und
+//! [`reader_trust_age_view`] nach: die eine nimmt eine [`RegistryVersion`], die
+//! andere zwei [`UnixMillis`], und beide werden von der Bruecke gerufen. Die
+//! zwei Namen stehen deshalb ebenfalls in der oeffentlichen Flaeche, statt
+//! `crates/ea-reader-wasm` eine Kante nach `ea-types` zu geben, die es bis
+//! heute nicht hat.
 
 mod blob_store;
+mod bundle_release;
 mod cache;
 mod enrollment;
 mod enrollment_endpoints;
@@ -74,12 +82,16 @@ mod entry_state;
 mod envelope;
 mod key_profile;
 mod mode;
+mod trust_state;
 mod vault;
 
 pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
+pub use bundle_release::{
+    BundleActivationDecisionV1, BundleRejectionCodeV1, ReaderBundleError, ReaderBundlePin,
+};
 pub use cache::ReaderObjectCache;
 pub use ea_trust::decode_trust_anchor;
-pub use ea_types::{Hash32, OrganizationId, SubjectId};
+pub use ea_types::{Hash32, OrganizationId, RegistryVersion, SubjectId, UnixMillis};
 pub use ea_verify::GATE_ORDER_V1;
 pub use enrollment::{
     AttestedAuthenticatorV1, AuthenticatorRecordV1, AuthenticatorTransportProfileV1,
@@ -98,4 +110,7 @@ pub use envelope::{
 };
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
+pub use trust_state::{
+    ReaderTrustAgeV1, ReaderTrustStateStore, ReaderTrustStateV1, reader_trust_age_view,
+};
 pub use vault::{ReaderVault, ReaderVaultError, SealedVaultV1, UnlockedVault, VaultContentsV1};

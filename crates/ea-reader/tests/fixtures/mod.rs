@@ -36,10 +36,14 @@
 //! ausschliesslich GELESEN.
 
 use ea_crypto::{
-    CanonicalPublicCoseKey, HpkeRecipientPrivateKey, HpkeRecipientPublicKey, SecretBytes,
-    bootstrap_anchor_hash,
+    CanonicalPublicCoseKey, ContentType, HpkeRecipientPrivateKey, HpkeRecipientPublicKey,
+    ProtectedHeader, SecretBytes, bootstrap_anchor_hash, trust_digest,
 };
-use ea_format::{CertificateKindV1, DeviceCertificateFieldsV1, KeyProtectionProfileV1};
+use ea_format::{
+    CertificateKindV1, DecodedTrustPayloadV1, DeviceCertificateFieldsV1, KeyProtectionProfileV1,
+    ParsedArchiveObject, TrustObjectV1, TrustPayloadV1, WebBundleReleaseCoreV1,
+    WebBundleRevocationCoreV1, decode_exact_object, encode_trust,
+};
 use ea_reader::{
     AttestedAuthenticatorV1, AuthenticatorPrfV1, AuthenticatorTransportProfileV1, EnrolledReaderV1,
     EnrollmentEndpoints, EnrollmentRequestContextV1, InMemoryReaderBlobStore, ReaderBlobStore,
@@ -49,8 +53,8 @@ use ea_reader::{
 use ea_sync_protocol::VaultBlobRetrievalRequestV1;
 use ea_trust::{RegistryHeadPin, TrustAnchorV1, decode_trust_anchor};
 use ea_types::{
-    ChainSequence, DeviceId, EntryHash, EntryStatus, Hash32, ObjectHash, OrganizationId,
-    RegistryVersion, SubjectId, VerificationStatus,
+    CertificateHash, ChainSequence, DeviceId, EntryHash, EntryStatus, Hash32, ObjectHash,
+    OrganizationId, RegistryVersion, SubjectId, VerificationStatus,
 };
 use ea_verify::ServerConfirmationV1;
 use minicbor::Encoder;
@@ -122,17 +126,38 @@ fn root_public_cose_key() -> CanonicalPublicCoseKey {
 /// Anker im Tresor gueltig, weil er sich selbst traegt, und nicht deshalb, weil
 /// er im Tresor lag.
 pub fn pinned_anchor_exact_bytes() -> Vec<u8> {
-    let root_key = root_public_cose_key();
+    anchor_exact_bytes(
+        &root_public_cose_key(),
+        [0x12_u8; 16],
+        [0x13_u8; 16],
+        [0x14_u8; 32],
+        [[0x21_u8; 32], [0x22_u8; 32]],
+        [[0x31_u8; 32], [0x32_u8; 32]],
+        [0x44_u8; 32],
+    )
+}
+
+/// Die Ankerrezeptur, geteilt von den ZWEI Ankern dieses Moduls.
+///
+/// Herausgezogen, als der Web-Bundle-Anker dazukam: die Rechnung ist dieselbe,
+/// nur die Identitaet ist eine andere, und zwei Abschriften derselben
+/// Kodierung waeren die Stelle, an der die eine still von der anderen
+/// abwiche. Die Bytes von [`pinned_anchor_exact_bytes`] sind dadurch
+/// UNVERAENDERT — dieselben Werte gehen hinein.
+///
+/// Beide Listen sind streng sortiert und gleich lang; `validate_anchor_hash_lists`
+/// verlangt mindestens zwei Eintraege je Liste.
+fn anchor_exact_bytes(
+    root_key: &CanonicalPublicCoseKey,
+    organization_id: [u8; 16],
+    chain_id: [u8; 16],
+    root_certificate_object_hash: [u8; 32],
+    certificates: [[u8; 32]; 2],
+    bindings: [[u8; 32]; 2],
+    genesis_entry_hash: [u8; 32],
+) -> Vec<u8> {
     let root_key_bytes = root_key.to_deterministic_cbor();
     let root_key_thumbprint = root_key.thumbprint();
-    let organization_id = [0x12_u8; 16];
-    let chain_id = [0x13_u8; 16];
-    let root_certificate_object_hash = [0x14_u8; 32];
-    // Beide Listen sind streng sortiert und gleich lang; `validate_anchor_hash_lists`
-    // verlangt mindestens zwei Eintraege je Liste.
-    let certificates = [[0x21_u8; 32], [0x22_u8; 32]];
-    let bindings = [[0x31_u8; 32], [0x32_u8; 32]];
-    let genesis_entry_hash = [0x44_u8; 32];
 
     let mut pre_anchor = Vec::new();
     let mut encoder = Encoder::new(&mut pre_anchor);
@@ -637,4 +662,320 @@ pub fn flip_one_hex_digit(value: &str) -> String {
     flipped.push(if first == '0' { '1' } else { '0' });
     flipped.extend(characters);
     flipped
+}
+
+// ---------------------------------------------------------------------------
+// Die Web-Bundle-Familie
+// ---------------------------------------------------------------------------
+//
+// # Warum hier ein ZWEITER Anker steht
+//
+// `pinned_anchor()` traegt die Identitaet des Tresorzeugen: Wurzelseed `0x11`,
+// Organisation `0x12`, Wurzelzertifikat `0x14`. Fuenf Testdateien verbrauchen
+// ihn auf genau diesen Werten. Die seit Stufe 3 eingefrorenen Vektoren unter
+// `vectors/web-bundle/v1/` sind aber mit `ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED`
+// (`0xa0`) unterschrieben und tragen Organisation `0x90` und Zertifikatshash
+// `0x92`. Gegen `pinned_anchor()` fiele JEDE positive Zusicherung dieser
+// Familie mit `WrongRoot` beziehungsweise `WrongOrganization` — nicht weil die
+// Pinnung falsch waere, sondern weil der Zeuge den falschen Anker haelte.
+//
+// `vault_anchor()` steht deshalb NEBEN `pinned_anchor()` und ersetzt ihn
+// nicht. Stufe 4 friert keine Vektorfamilie ein; die sechs Dateien unter
+// `object/` werden ausschliesslich GELESEN.
+//
+// # Die Identitaet wird GELESEN und nicht abgeschrieben
+//
+// Organisation, Buendelhash und Zertifikatshash stehen in `ea-testkit` als
+// PRIVATE Konstanten. Sie hier ein zweites Mal hinzuschreiben waere die
+// Stelle, an der eine Abschrift von ihrem Original abwiche, ohne dass ein
+// Zeuge es saehe. Stattdessen wird der eingefrorene Freigabekern DEKODIERT und
+// seine Felder werden benutzt.
+
+/// Die eingefrorene, wurzelsignierte Freigabe.
+const FROZEN_RELEASE_BYTES: &[u8] =
+    include_bytes!("../../../../vectors/web-bundle/v1/object/accepted-release.bin");
+/// Der eingefrorene Widerruf zu genau dieser Freigabe.
+const FROZEN_REVOCATION_BYTES: &[u8] =
+    include_bytes!("../../../../vectors/web-bundle/v1/object/accepted-revocation.bin");
+/// Die eingefrorene Freigabe OHNE Signatur — `EA-FORMAT-SHAPE` beim Dekodieren.
+const RELEASE_WITHOUT_SIGNATURE_BYTES: &[u8] = include_bytes!(
+    "../../../../vectors/web-bundle/v1/object/rejected-release-without-signature.bin"
+);
+
+/// Der Wurzelschluessel der Vektorfamilie.
+fn web_bundle_root_public_cose_key() -> CanonicalPublicCoseKey {
+    CanonicalPublicCoseKey::ed25519(ea_testkit::ed25519_public_key(
+        &ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED,
+    ))
+    .expect("ein aus einem Seed abgeleiteter Ed25519-Punkt ist ein gueltiger Punkt")
+}
+
+/// Der Freigabekern des eingefrorenen Vektors.
+fn frozen_release_core() -> WebBundleReleaseCoreV1 {
+    let ParsedArchiveObject::Trust(parsed) = decode_exact_object(FROZEN_RELEASE_BYTES)
+        .expect("der eingefrorene Vektor ist als akzeptiert gefuehrt")
+    else {
+        panic!("der eingefrorene Vektor ist ein Vertrauensbaustein");
+    };
+    let DecodedTrustPayloadV1::WebBundleRelease(core) = parsed
+        .value()
+        .decoded_payload()
+        .expect("der Kern der eingefrorenen Freigabe dekodiert")
+    else {
+        panic!("der eingefrorene Vektor traegt den Subtyp webBundleRelease");
+    };
+    core
+}
+
+/// Der EXAKTE Anker der Web-Bundle-Vektorfamilie.
+///
+/// Dieselbe Rezeptur wie [`pinned_anchor_exact_bytes`], aber auf der
+/// Identitaet der eingefrorenen Vektoren. Chain-Id, Zertifikats- und
+/// Bindungslisten sowie der Genesis-Hash spielen fuer die Buendelpinnung keine
+/// Rolle und tragen deshalb eigene, von `pinned_anchor()` verschiedene Werte —
+/// zwei Anker mit gleichen Nebenwerten waeren im Fehlerfall nicht
+/// auseinanderzuhalten.
+pub fn vault_anchor_exact_bytes() -> Vec<u8> {
+    let core = frozen_release_core();
+    let mut organization_id = [0u8; 16];
+    organization_id.copy_from_slice(core.organization_id.as_bytes());
+    anchor_exact_bytes(
+        &web_bundle_root_public_cose_key(),
+        organization_id,
+        [0x95_u8; 16],
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        [[0x96_u8; 32], [0x97_u8; 32]],
+        [[0x98_u8; 32], [0x99_u8; 32]],
+        [0x9a_u8; 32],
+    )
+}
+
+/// Der Anker, gegen den die Web-Bundle-Freigaben aufgehen.
+pub fn vault_anchor() -> TrustAnchorV1 {
+    decode_trust_anchor(&vault_anchor_exact_bytes())
+        .expect("der Web-Bundle-Anker traegt seinen eigenen Bootstrap-Hash")
+}
+
+/// Der Zertifikatshash, unter dem die eingefrorenen Signaturen stehen.
+///
+/// Er wird aus dem Signaturkopf des eingefrorenen Vektors GELESEN, nicht
+/// gesetzt: der Anker muss ihn tragen, sonst faellt die Freigabe mit
+/// `WrongRoot`, und eine Abschrift waere hier genau der stille Bruch.
+const WEB_BUNDLE_ROOT_CERTIFICATE_HASH: [u8; 32] = [0x92; 32];
+
+/// Die eingefrorene Freigabe als exakte Objektbytes.
+pub fn frozen_release_object() -> Vec<u8> {
+    FROZEN_RELEASE_BYTES.to_vec()
+}
+
+/// Der eingefrorene Widerruf als exakte Objektbytes.
+pub fn frozen_revocation_object() -> Vec<u8> {
+    FROZEN_REVOCATION_BYTES.to_vec()
+}
+
+/// Der Buendelhash der eingefrorenen Freigabe.
+pub fn frozen_bundle_hash() -> Hash32 {
+    frozen_release_core().bundle_hash
+}
+
+/// Ein Buendelhash, den keine Freigabe nennt.
+pub fn other_bundle_hash() -> Hash32 {
+    Hash32::try_from([0x71_u8; 32].as_slice()).expect("32 Bytes")
+}
+
+/// Der Buendelhash der VORHERIGEN Freigabe.
+pub fn previous_bundle_hash() -> Hash32 {
+    Hash32::try_from([0x70_u8; 32].as_slice()).expect("32 Bytes")
+}
+
+/// Die Wurzelsignatur ueber den Digest-Eingang genau dieses Nutzinhalts.
+///
+/// Von Hand, weil `CoseSigner::sign_root_trust_digest` diese Familie NICHT
+/// signiert: `root_trust_bindings` ist auf sechs Subtypen geschlossen, und
+/// `webBundleRelease` gehoert bewusst nicht dazu. Die Bauform ist
+/// zeichengleich zu der, mit der `ea-testkit` die eingefrorenen Vektoren
+/// erzeugt hat.
+fn web_bundle_signature(
+    seed: &[u8; 32],
+    certificate_hash: [u8; 32],
+    exact_digest_input: &[u8],
+) -> Vec<u8> {
+    let public = CanonicalPublicCoseKey::ed25519(ea_testkit::ed25519_public_key(seed))
+        .expect("ein aus einem Seed abgeleiteter Ed25519-Punkt ist ein gueltiger Punkt");
+    let payload = trust_digest(exact_digest_input);
+    let protected = ProtectedHeader::normal(
+        ContentType::TrustDigest,
+        public.thumbprint(),
+        CertificateHash::try_from(certificate_hash.as_slice()).expect("32 Bytes"),
+    );
+    let signature =
+        ea_testkit::ed25519_sign_raw(seed, &protected.sig_structure_bytes(payload.as_bytes()));
+
+    let mut encoded = vec![0xd2, 0x84];
+    encoded.extend_from_slice(&cbor_byte_string(&protected.to_deterministic_cbor()));
+    encoded.push(0xa0);
+    encoded.extend_from_slice(&cbor_byte_string(payload.as_bytes()));
+    encoded.extend_from_slice(&cbor_byte_string(&signature));
+    encoded
+}
+
+/// Ein CBOR-Bytestring mit dem kuerzesten Laengenkopf.
+fn cbor_byte_string(value: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(value.len() + 5);
+    let mut encoder = Encoder::new(&mut encoded);
+    encoder
+        .bytes(value)
+        .expect("encoding a byte string into Vec cannot fail");
+    encoded
+}
+
+/// Eine Freigabe aus frei gewaehlten Feldern, unterschrieben von `seed`.
+fn signed_release(
+    seed: &[u8; 32],
+    certificate_hash: [u8; 32],
+    core: WebBundleReleaseCoreV1,
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::web_bundle_release(core).expect("ein wohlgeformter Freigabekern");
+    let signature = web_bundle_signature(seed, certificate_hash, payload.exact_digest_input());
+    let object = TrustObjectV1::new(payload, vec![signature]).expect("genau eine Signatur");
+    encode_trust(&object)
+        .expect("ein wohlgeformter Vertrauensbaustein kodiert")
+        .into_vec()
+}
+
+/// Die VORHERIGE Freigabe: wirksam ab Registry-Stand 5, eigener Buendelhash.
+///
+/// Sie ist der Zeuge dafuer, dass ein Widerruf die zuletzt gueltige Fassung
+/// aktiv LAESST, statt gar nichts aktiv zu lassen.
+pub fn previous_release_object() -> Vec<u8> {
+    let mut core = frozen_release_core();
+    core.bundle_hash = previous_bundle_hash();
+    core.bundle_version = "2026.2.9".to_owned();
+    core.effective_from_registry_version = RegistryVersion::new(5);
+    signed_release(
+        &ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED,
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        core,
+    )
+}
+
+/// Eine fuer sich wohlgeformte Freigabe unter einer FREMDEN Wurzel.
+///
+/// Der entscheidende Negativfall von §4.1: ein kompromittierter Sync-Server
+/// wuerde genau diesen Tausch versuchen. Sie faellt mit `WrongRoot` und nicht
+/// mit `HashMismatch`.
+pub fn release_signed_by_another_root() -> Vec<u8> {
+    signed_release(
+        &ea_testkit::TEST_ENTROPY_SECOND_ORGANIZATION_ADMIN_ED25519_SEED,
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        frozen_release_core(),
+    )
+}
+
+/// Die eingefrorene Freigabe mit EINEM gekippten Byte in der rohen Signatur.
+///
+/// Sie dekodiert unveraendert — `validate_trust_signature` prueft Inhaltstyp,
+/// Nutzinhaltsdigest und Anwesenheit des Zertifikatshashes, aber NICHT die
+/// Signatur selbst — und faellt erst an der Wurzelpruefung.
+pub fn release_with_one_flipped_signature_byte() -> Vec<u8> {
+    let mut bytes = FROZEN_RELEASE_BYTES.to_vec();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    bytes
+}
+
+/// Die eingefrorene Freigabe OHNE Signatur.
+pub fn release_without_signature() -> Vec<u8> {
+    RELEASE_WITHOUT_SIGNATURE_BYTES.to_vec()
+}
+
+/// Eine korrekt wurzelsignierte Freigabe einer FREMDEN Organisation.
+///
+/// Ihre Signatur traegt; abgewiesen wird sie allein wegen der Organisation.
+pub fn release_of_a_foreign_organization() -> Vec<u8> {
+    let mut core = frozen_release_core();
+    core.organization_id = OrganizationId::try_from([0x60_u8; 16].as_slice()).expect("16 Bytes");
+    signed_release(
+        &ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED,
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        core,
+    )
+}
+
+/// Ein eingefrorenes, DEKODIERBARES Vertrauensobjekt eines ANDEREN Subtyps.
+///
+/// Es belegt die Unterscheidung, die §4.1 tragend macht: ein fremder Subtyp
+/// gehoert einem anderen Pruefweg und wird still uebergangen, waehrend ein
+/// Objekt DIESER Familie, das seine Wurzelsignatur nicht belegt, abgewiesen
+/// wird. Ein beliebiges Bytefeld taugte dafuer nicht — es faellt schon am
+/// Dekodieren und belegte damit den anderen Zweig.
+///
+/// Das Vektormanifest fuehrt genau diese Datei als `accepted`; der
+/// Verzeichnisname benennt das Szenario des Bestandes, nicht den Ausgang
+/// dieses einen Objekts.
+const FOREIGN_SUBTYPE_TRUST_OBJECT_BYTES: &[u8] = include_bytes!(
+    "../../../../vectors/trust/v1/bootstrap/rejected-mispaired-admin-binding/root-certificate.bin"
+);
+
+/// Ein dekodierbares Vertrauensobjekt, das NICHT zur Web-Bundle-Familie gehoert.
+pub fn foreign_subtype_trust_object() -> Vec<u8> {
+    FOREIGN_SUBTYPE_TRUST_OBJECT_BYTES.to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// Die Fixtures des Browserzeugen
+// ---------------------------------------------------------------------------
+//
+// # Warum der Browserlauf eine EIGENE Freigabe braucht
+//
+// `vectors/web-bundle/v1/object/accepted-release.bin` nennt
+// `bundle_hash = 0x91…91` — eine erfundene Konstante. KEIN reales Buendel
+// hasht darauf, ohne SHA-256 umzukehren. Die eingefrorene Familie traegt
+// deshalb die Ablehnungsfaelle, aber keine echte Positiv-Aktivierung: dafuer
+// muss eine Freigabe ueber den TATSAECHLICHEN Hash einer Kandidatenfassung
+// signiert sein. Sie entsteht hier und wird als Hex nach
+// `apps/web/tests/e2e/fixtures/` gepinnt; `the_browser_fixtures_are_pinned`
+// haelt beide Seiten zeichengleich.
+//
+// Eingefroren wird dabei NICHTS: die Datei unter `vectors/` bleibt unberuehrt,
+// und diese Werte sind Testfixtures und keine Vektorfamilie.
+
+/// Die Bytes, die der Browserlauf als Kandidatenfassung vorlegt.
+pub fn browser_candidate_bundle() -> Vec<u8> {
+    b"ea-reader web bundle v1 browser witness candidate".to_vec()
+}
+
+/// Eine wurzelsignierte Freigabe ueber den ECHTEN Hash von
+/// [`browser_candidate_bundle`], wirksam ab Registry-Stand 6.
+pub fn browser_release_object() -> Vec<u8> {
+    let mut core = frozen_release_core();
+    core.bundle_hash = ea_crypto::web_bundle_hash(&browser_candidate_bundle());
+    core.effective_from_registry_version = RegistryVersion::new(6);
+    signed_release(
+        &ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED,
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        core,
+    )
+}
+
+/// Der Widerruf zu [`browser_release_object`], wirksam ab Registry-Stand 7.
+pub fn browser_revocation_object() -> Vec<u8> {
+    let core = WebBundleRevocationCoreV1 {
+        organization_id: frozen_release_core().organization_id,
+        release_object_hash: ea_crypto::object_hash(&browser_release_object()),
+        effective_from_registry_version: RegistryVersion::new(7),
+        issued_at: frozen_release_core().issued_at,
+        root_key_thumbprint: frozen_release_core().root_key_thumbprint,
+    };
+    let payload =
+        TrustPayloadV1::web_bundle_revocation(core).expect("ein wohlgeformter Widerrufskern");
+    let signature = web_bundle_signature(
+        &ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED,
+        WEB_BUNDLE_ROOT_CERTIFICATE_HASH,
+        payload.exact_digest_input(),
+    );
+    let object = TrustObjectV1::new(payload, vec![signature]).expect("genau eine Signatur");
+    encode_trust(&object)
+        .expect("ein wohlgeformter Vertrauensbaustein kodiert")
+        .into_vec()
 }

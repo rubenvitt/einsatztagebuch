@@ -5,6 +5,23 @@ import { expect, it } from 'vitest'
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
+/**
+ * Die Herkunft des Sync-Servers, die `connect-src` neben `'self'` zulaesst.
+ *
+ * Ein RESERVIERTER Name nach RFC 2606: `.invalid` kann nie aufloesen. Das ist
+ * Absicht und kein Platzhalter aus Bequemlichkeit — `web-reader-design.md` §14
+ * offener Punkt 4 erklaert Wahl und Betrieb des Hosts ausdruecklich fuer
+ * OFFEN, und dieser Task baut die Trennung selbst, nicht ihren Betrieb. Ein
+ * erfundener echter Name behauptete eine betriebliche Entscheidung, die
+ * niemand getroffen hat; ein aufloesbarer waere schlimmer, weil ein
+ * Fehlkonfigurationsfall dann still Netzverkehr erzeugte statt zu scheitern.
+ *
+ * Der BUNDLE-Origin steht hier ausdruecklich NICHT: §4.1 haelt den
+ * Sync-Server aus dem Vertrauenspfad fuer ausgefuehrten Code heraus, und der
+ * Code kommt ueber `script-src 'self'` von seinem eigenen Origin.
+ */
+export const SYNC_SERVER_ORIGIN = 'https://sync.einsatzarchiv.invalid'
+
 // Die Zielrichtlinie, Position fuer Position. Sie steht hier als LITERAL und
 // nicht abgeleitet: dieser Test IST der Pin, und eine abgeleitete Erwartung
 // koennte mit der Richtlinie gemeinsam wandern.
@@ -16,7 +33,7 @@ const EXPECTED_DIRECTIVES = [
   "style-src-attr 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self'",
-  "connect-src 'self'",
+  `connect-src 'self' ${SYNC_SERVER_ORIGIN}`,
   "worker-src 'self'",
   "frame-src 'none'",
   "object-src 'none'",
@@ -78,10 +95,22 @@ it('adds exactly one directive value beyond the desktop policy, and it is wasm-u
 
 // Die Rolle, die beim Desktop der IPC-Kanal hatte: `worker-src 'self'` ist
 // keine Erweiterung, sondern die Voraussetzung des OPFS-Workers — unter
-// `default-src 'none'` gaebe es sonst keinen dedizierten Worker. Das
-// `not.toMatch(/https?:/)` ist zugleich der Beleg, dass die VERENGUNG von
-// `connect-src` vollzogen ist: `http://ipc.localhost` faerbte es rot.
-it('keeps the OPFS worker reachable and admits no remote origin', () => {
+// `default-src 'none'` gaebe es sonst keinen dedizierten Worker.
+//
+// Die frueher hier stehende Zusicherung `not.toMatch(/https?:/)` ist von der
+// SCHAERFEREN abgeloest, die dieser Task wirklich meint. Sie war richtig,
+// solange `connect-src` auf `'self'` stand; mit der Herkunft des Sync-Servers
+// waere sie es nicht mehr, und ein blosses Streichen liesse die Aussage
+// ungeprueft: GENAU EINE entfernte Herkunft steht in der ganzen Richtlinie,
+// sie steht in `connect-src`, und sie ist NICHT der Bundle-Origin.
+it('keeps the OPFS worker reachable and admits exactly one remote origin', () => {
   expect(directives()).toContain("worker-src 'self'")
-  expect(directives().join('; ')).not.toMatch(/https?:/)
+
+  const remotes = directives()
+    .flatMap((directive) => directive.split(/\s+/))
+    .filter((value) => /^https?:\/\//.test(value))
+  expect(remotes).toEqual([SYNC_SERVER_ORIGIN])
+
+  const connect = directives().find((directive) => directive.startsWith('connect-src '))
+  expect(connect).toBe(`connect-src 'self' ${SYNC_SERVER_ORIGIN}`)
 })

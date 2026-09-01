@@ -1474,6 +1474,55 @@ pub fn verify_technical_cursor(
     parsed.verify_with_key(server_public_key)
 }
 
+/// Prueft die EINE Wurzelsignatur einer Bundle-Freigabe oder ihres Widerrufs
+/// gegen den gepinnten Anker.
+///
+/// Bewusst ohne [`VerificationContext`] und ohne Katalog: die Familie ist kein
+/// Gegenstand des Registrierungsabschlusses (`verify_catalogue_admission`
+/// antwortet fuer sie `TrustError::ActionMismatch`), und der Datei-Modus hat
+/// keinen Registrierungskopf, gegen den ein Zertifikat aufloesbar waere. Die
+/// Bauform ist die von [`verify_technical_cursor`]: eine Signatur, ein
+/// gepinnter Schluessel, keine Kettenaufloesung.
+///
+/// Der Digest-Eingang traegt das Subtyp-Literal VOR dem Nutzinhalt
+/// (`trust_digest_input` in `crates/ea-format/src/etb.rs` setzt es davor), also
+/// traegt eine Signatur ueber die Freigabe den Widerruf NICHT und die beiden
+/// Domaenen trennen sich ohne eine neue Konstante.
+///
+/// # Errors
+///
+/// [`CryptoError::InvalidCose`] fuer ein fehlerhaftes Profil oder einen
+/// falschen Inhaltstyp, [`CryptoError::SignerMismatch`] fuer einen fremden
+/// Nutzinhaltsdigest, Zertifikatshash oder Schluesselabdruck, und
+/// [`CryptoError::SignatureInvalid`], wenn die Signatur selbst nicht traegt.
+pub fn verify_web_bundle_trust_signature(
+    bytes: &[u8],
+    root_public_key: &CanonicalPublicCoseKey,
+    expected_certificate_hash: CertificateHash,
+    exact_trust_digest_input: &[u8],
+) -> Result<(), CryptoError> {
+    let parsed = parse_cose_sign1(bytes, &[])?;
+    if parsed.protected.profile != ProtectedProfile::Normal
+        || parsed.protected.content_type != ContentType::TrustDigest
+    {
+        return Err(CryptoError::InvalidCose);
+    }
+    // Absichtliche Doppelpruefung: `ea_format::validate_trust_signature` hat
+    // Inhaltstyp und Nutzinhaltsdigest beim Dekodieren bereits gesehen. Diese
+    // Funktion ist aber auch ohne vorheriges Dekodieren aufrufbar, und ein
+    // Prueweg, der eine Vorbedingung nur VORAUSSETZT, statt sie zu pruefen,
+    // ist beim naechsten Aufrufer keiner mehr.
+    if parsed.payload != trust_digest(exact_trust_digest_input).as_bytes() {
+        return Err(CryptoError::SignerMismatch);
+    }
+    if parsed.protected.certificate_hash != Some(expected_certificate_hash)
+        || parsed.protected.key_thumbprint != root_public_key.thumbprint()
+    {
+        return Err(CryptoError::SignerMismatch);
+    }
+    parsed.verify_with_key(root_public_key)
+}
+
 pub fn verify_cose_sign1(
     bytes: &[u8],
     resolver: &impl SignerCertificateResolver,

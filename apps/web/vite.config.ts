@@ -5,17 +5,52 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  base: './',
   plugins: [react()],
   build: {
     // Die Zielflaeche ist der BROWSER und keine Webview des Wirts; `es2022` ist
     // in den unterstuetzten Staenden von Chromium, Firefox und WebKit
     // abgedeckt und deckt sich mit dem Ziel des Desktop-Paketes.
     target: 'es2022',
+    // Relative Beiwerkspfade, und das ist die Auslieferungstrennung nach §4.1
+    // selbst: ein absoluter Pfad baende das Buendel an genau EINEN Origin und
+    // machte die Trennung vom Sync-Server unbenutzbar.
     // Gehashte Beiwerke: `static-antd.css` erreicht das Buendel als
     // `assets/index-<hash>.css` und damit als lokale, wiedererkennbare
     // Ressource. Unter `style-src 'self'` gibt es keinen anderen Weg.
     assetsInlineLimit: 0,
     sourcemap: false,
+    rollupOptions: {
+      // ZWEI Einstiege in EINEM Durchgang. Der Service Worker ist ein
+      // MODULWORKER, weil die von `wasm-bindgen` erzeugte Glue ein ES-Modul
+      // ist: ein klassischer Worker koennte sie nicht importieren und muesste
+      // die Entscheidung von aussen entgegennehmen — dann erzwaenge er nichts
+      // mehr. `web-reader-design.md` §4.2 verlangt aber, dass ER die
+      // Aktivierung prueft.
+      //
+      // GEMESSEN gegen diese Werkzeugkette (Vite 8.2.1 auf rolldown 1.2.5):
+      // ein IIFE-Ausgang ist hier ohnehin NICHT waehlbar — zwei Einstiege
+      // brechen mit `multiple inputs are not supported when
+      // "output.codeSplitting" is false` ab, und mit `codeSplitting: true`
+      // mit `UMD and IIFE are not supported for code-splitting builds`. Der
+      // Zeuge in `src/sw/service-worker.test.ts` haelt genau das fest.
+      // RELATIVE Einstiege und keine URL-Aufloesung: `src/e2e-config.test.ts`
+      // importiert diese Datei, und dort ist `import.meta.url` kein
+      // Dateipfad — `fileURLToPath` faellt dann mit „The URL must be of
+      // scheme file". Vite loest beide gegen `root` auf.
+      input: {
+        index: 'index.html',
+        'service-worker': 'src/sw/service-worker.ts',
+      },
+      output: {
+        // Der Workername bleibt UNGEHASHT, jedes andere Beiwerk behaelt
+        // seinen Hash: ein gehashter Workername waere bei jedem Bau ein
+        // anderer Registrierungspfad und damit ein Aktivierungspfad, den die
+        // Pinnung nicht sieht.
+        entryFileNames: chunk =>
+          chunk.name === 'service-worker' ? 'service-worker.js' : 'assets/[name]-[hash].js',
+      },
+    },
   },
   test: {
     environment: 'jsdom',

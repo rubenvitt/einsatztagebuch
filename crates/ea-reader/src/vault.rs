@@ -56,7 +56,7 @@ use zeroize::Zeroize;
 use crate::blob_store::ReaderBlobError;
 use crate::envelope::{
     AuthenticatorPrfV1, VAULT_BLOB_AAD_V1, VaultEnvelopeV1, derive_cache_key_v1,
-    derive_entry_state_key_v1, derive_index_key_v1, derive_kek_v1,
+    derive_entry_state_key_v1, derive_index_key_v1, derive_kek_v1, derive_trust_state_key_v1,
 };
 
 /// Der Fehlschlag des Tresors und der Speicher ueber ihm.
@@ -658,6 +658,11 @@ impl UnlockedVault {
     }
 
     /// Der Schluessel des Zustandsspeichers dieser Sitzung.
+    pub(crate) fn trust_state_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+        derive_trust_state_key_v1(&self.vault_key)
+    }
+
+    /// Der Schluessel des Eintragszustandsspeichers.
     pub(crate) fn entry_state_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
         derive_entry_state_key_v1(&self.vault_key)
     }

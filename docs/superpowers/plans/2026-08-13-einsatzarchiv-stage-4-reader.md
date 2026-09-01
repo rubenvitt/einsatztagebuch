@@ -2355,11 +2355,18 @@ git commit -m "feat(reader): enroll two authenticators behind an unskippable fin
 **Files:**
 - Create: `crates/ea-reader/src/bundle_release.rs`
 - Create: `crates/ea-reader/tests/bundle_release_pinning.rs`
+- Create: `crates/ea-reader/src/trust_state.rs` — der Speicher des Trust-Standes; siehe Entscheidung 6
+- Create: `crates/ea-reader/tests/trust_age.rs`
+- Modify: `crates/ea-reader/src/envelope.rs` — der FUENFTE abgeleitete Schluessel
+- Modify: `crates/ea-reader/src/vault.rs` — sein Zugang; der Tresorkoerper bleibt UNVERAENDERT
+- Modify: `crates/ea-crypto/src/digest.rs` — `web_bundle_hash`; siehe Entscheidung 7
+- Modify: `crates/ea-crypto/tests/suite_v1.rs` — sein Zeuge
 - Create: `apps/web/src/sw/service-worker.ts`
 - Create: `apps/web/src/sw/bundle-pinning.ts`
 - Create: `apps/web/src/sw/service-worker.test.ts`
 - Create: `apps/web/src/features/trust-age/TrustAgeBanner.tsx`
 - Create: `apps/web/tests/e2e/bundle-activation.spec.ts`
+- Create: `apps/web/tests/e2e/fixtures/*.hex` — die vier gepinnten Browserfixtures; siehe Entscheidung 9
 - Create: `docs/traceability/stage-4-fault-points.json`
 - Modify: `apps/web/vite.config.ts`
 - Modify: `apps/web/index.html`
@@ -2395,17 +2402,22 @@ Die Korrekturen stehen unten im Text und werden hier aufgezaehlt, damit keine st
    Leerfall ueber `is_none()`. Derselbe Verzicht auf `Debug` steht in diesem Plan bereits zweimal
    ausgeschrieben; Task 6 hat ihn gebrochen. `crates/ea-types` wird NICHT angefasst: das fehlende
    `Debug` ist eine Datensparsamkeitsentscheidung und kein Versehen.
-2. **`format: 'iife'` ist im SELBEN Bau-Durchgang nicht erreichbar.** Gemessen gegen die
-   installierte Werkzeugkette (Vite 8.2.1 auf rolldown 1.2.5), ueber die JS-API mit
-   `build.write: false`: zwei Einstiege mit `output.format: 'iife'` brechen mit
+2. **`format: 'iife'` ist gar nicht waehlbar, und der Worker ist ein MODULWORKER.** Gemessen
+   gegen die installierte Werkzeugkette (Vite 8.2.1 auf rolldown 1.2.5): zwei Einstiege mit
+   `output.format: 'iife'` brechen mit
    `[INVALID_OPTION] ... multiple inputs are not supported when "output.codeSplitting" is false` ab,
    und mit erzwungenem `codeSplitting: true` mit `UMD and IIFE are not supported for code-splitting
-   builds`. Der Worker entsteht deshalb in einem ZWEITEN, einlaeufigen Durchgang als
-   `closeBundle`-Haken in `apps/web/vite.config.ts`. Beide Textpins auf `vite.config.ts` bleiben
-   damit WAHR — die Literale stehen in den Optionen des zweiten Durchgangs —, ein dritter Pin
-   kommt hinzu. Der Modulworker wurde ABGELEHNT: er waere eine Engine-Wette, die erst die Aufgabe
-   „Reader-Interoperabilitaet, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate"
-   einloest, und der klassische Worker ist die konservative Wahl.
+   builds`. Der ENTSCHEIDENDE Grund ist aber ein anderer und wurde erst beim Bau des Browserzeugen
+   sichtbar: die von `wasm-bindgen` erzeugte Glue ist ein ES-MODUL. Ein klassischer Worker koennte
+   sie nicht importieren, muesste die fertige Entscheidung entgegennehmen — und erzwaenge dann
+   nichts mehr, sondern gehorchte. §4.2 sagt aber, dass DER SERVICE WORKER die Aktivierung prueft.
+   Er wird deshalb als eigener Einstieg IM SELBEN Durchgang gebaut, mit `type: 'module'`
+   registriert, und `entryFileNames` haelt allein SEINEN Namen ungehasht, waehrend jedes andere
+   Beiwerk seinen Hash behaelt. Ueber `postMessage` gehen ausschliesslich BYTES: Anker,
+   Trust-Bestand, Registry-Stand und Kandidatenbytes sind strukturiert klonbar, eine Funktion
+   waere es nicht. Die Textpins auf `vite.config.ts` ziehen entsprechend mit — `'service-worker'`
+   als Einstieg und `'service-worker.js'` als Name, dazu die Zusicherung, dass KEIN
+   iife-Ausgang konfiguriert ist.
 3. **Die Zeichenfolge `sign` ist im Reader-Ausdruck verboten.**
    `the_emitted_reader_file_declares_types_and_computes_nothing` verbietet neun Zeichenfolgen
    ungemaskiert, darunter `sign`; `Unsigned` enthaelt sie, also faerbte
@@ -2428,6 +2440,56 @@ Die Korrekturen stehen unten im Text und werden hier aufgezaehlt, damit keine st
    `the_checked_in_reader_file_is_exactly_what_the_reader_emitter_writes`. Die Verwechslung waere
    teuer geworden, weil `docs/traceability/stage-4-fault-points.json` jeden `witness` bei Namen
    nennt und der Stufengate ihn aufloest.
+
+**VIER LUECKEN, die dieser Abschnitt offen liess und die hier geschlossen werden.** Sie sind
+keine Abweichung vom ausgelieferten Stand, sondern Stellen, an denen der Plan eine Quelle nannte,
+die es nicht gibt:
+
+6. **Das Trust-Alter hatte keine Laufzeitquelle.** Der Abschnitt liest die Frist ueber
+   `SelectedRegistryHead::policy_fields()` — aber KEIN Readercode baut einen
+   `SelectedRegistryHead`, und `VaultContentsV1` speichert keinen Zeitpunkt. Beide Eingaben von
+   `trust_age_ms` fehlten. `reader_trust_age_view` ist deshalb eine REINE Funktion ueber drei
+   Eingaben, und der Zeitpunkt liegt in einem EIGENEN, unter dem Tresorschluessel
+   verschluesselten OPFS-Speicher — dem dritten seiner Bauform neben `ReaderObjectCache` und
+   `ReaderEntryStateStore`, mit einem FUENFTEN Ableitungskontext. Der TRESORKOERPER wird
+   ausdruecklich NICHT erweitert: `web-reader-design.md` §6.1 zaehlt seine vier Werte normativ
+   auf, und ein fuenfter zwaenge jeden versiegelten Tresor zum Neuversiegeln.
+   `at_registry_version` dagegen war schon da und wird auch so bezogen:
+   `RegistryHeadPin::registry_version()` aus dem entsperrten Tresor.
+7. **Der Hash eines Kandidatenbuendels hatte keine Rechnung.** `bundle_hash` ist an JEDER Stelle
+   des Repositoriums eine Konstante, `ea-crypto` fuehrt siebzehn Digest-Domaenen und keine fuer
+   Buendel, und §4.2 sagt nur, dass der Hash aufgenommen wird. Der Hash MUSS aber ueber die
+   tatsaechlichen Kandidatenbytes gerechnet werden — gaebe ihn der Kandidat mit, waere die
+   Pruefung wertlos. `ea_crypto::web_bundle_hash` ist deshalb NACKTES SHA-256. Eine eigene
+   Domaene ist GEMESSEN nicht baubar:
+   `crypto_suite_one_vectors_reproduce_every_primitive_and_domain_string` faellt mit 26 gegen 25
+   und verlangt fuer jede `EINSATZARCHIV-`-Zeichenkette dieser Crate einen eingefrorenen Vektor
+   unter `vectors/crypto/suite-1/` — und Stufe 4 friert keine Vektorfamilie ein. Der Verzicht ist
+   ausserdem sachlich richtig: der Wert muss von einem Releaseprozess AUSSERHALB dieses
+   Repositoriums reproduzierbar sein, und er wird an genau einer Stelle gelesen.
+8. **Die Bruecke braucht zwei Namen mehr.** `crates/ea-reader-wasm` traegt bewusst keine Kante
+   nach `ea-types`. `ReaderBundlePin::from_trust_objects` nimmt eine `RegistryVersion` und
+   `reader_trust_age_view` zwei `UnixMillis`, also RE-EXPORTIERT `ea-reader` beide — dieselbe
+   Regel, die es in seinem Kopfkommentar fuer `OrganizationId`, `SubjectId` und `Hash32` bereits
+   ausschreibt.
+
+9. **Die eingefrorene Freigabe taugt fuer keine echte Aktivierung.**
+   `vectors/web-bundle/v1/object/accepted-release.bin` nennt `bundle_hash = 0x91…91` — eine
+   erfundene Konstante. KEIN reales Buendel hasht darauf, ohne SHA-256 umzukehren. Die Familie
+   traegt damit die Ablehnungsfaelle, aber keinen Positivfall, der Bytes und Hash verbindet. Der
+   Browserzeuge bekommt deshalb eine EIGENE, wurzelsignierte Freigabe ueber den TATSAECHLICHEN
+   Hash seiner Kandidatenfassung; sie entsteht in `crates/ea-reader/tests/fixtures/mod.rs` und
+   liegt als Hex unter `apps/web/tests/e2e/fixtures/`.
+   `the_browser_fixtures_are_pinned_to_what_the_rust_witnesses_run` haelt beide Seiten
+   zeichengleich — ohne diesen Pin maesse der Browserlauf still etwas anderes als die Rust-Zeugen,
+   und beide blieben fuer sich gruen. Eingefroren wird dabei nichts: die Dateien unter `vectors/`
+   bleiben unberuehrt.
+
+Zwei kleinere Folgen stehen in den Zeugen selbst: die Schleife ueber die abgewiesenen Freigaben
+zerfaellt in ZWEI benannte Tests, weil `unsigned-candidate` und `foreign-root-candidate` zwei
+Abschnitte von `docs/traceability/stage-4-fault-points.json` sind und der Stufengate je einen
+aufloesbaren Zeugennamen braucht; und `unwrap_err()` ist unbenutzbar, weil es `Debug` auf dem
+ERFOLGSTYP verlangt — aus demselben Grund, aus dem Korrektur 1 steht.
 
 - [ ] **Step 1: Write the pinning, revocation and activation witnesses**
 

@@ -29,7 +29,11 @@
 
 use ea_crypto::{
     CanonicalPublicCoseKey, CryptoError, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_WRAPPED_CEK_SIZE,
-    HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, hpke_open, hpke_seal,
+    HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, hpke_open, hpke_seal, web_bundle_hash,
+};
+use ea_reader::{
+    BundleActivationDecisionV1, BundleRejectionCodeV1, ReaderBundlePin, RegistryVersion,
+    UnixMillis, decode_trust_anchor, reader_trust_age_view,
 };
 use sha2::{Digest, Sha256};
 
@@ -514,6 +518,108 @@ pub fn runtime_witness_json() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Die Aktivierungsentscheidung des Web-Bundles.
+// ---------------------------------------------------------------------------
+
+/// Rechnet die Aktivierungsentscheidung und gibt sie als `BundleActivationView`.
+///
+/// Die REINE Haelfte der Ausfuhr: sie uebersetzt auf jedem Ziel und ist damit
+/// aus einem gewoehnlichen Wirtstest erreichbar.
+///
+/// Hier faellt KEINE Entscheidung — sie faellt in `ea_reader::ReaderBundlePin`.
+/// Diese Funktion reicht Bytes hinein und formt das DTO heraus. Der HASH des
+/// Kandidaten entsteht dabei in Rust ueber `ea_crypto::web_bundle_hash`: gaebe
+/// ihn der Aufrufer mit, koennte ein untergeschobenes Buendel einfach den
+/// passenden Hash beilegen, und die Pruefung von §4.2 waere wertlos.
+///
+/// Eine abgewiesene Freigabe im Bestand ist KEIN Fehler dieser Funktion,
+/// sondern ihr Ergebnis: `activated: false` mit dem Code. Nur ein Anker, der
+/// sich nicht selbst traegt, ist ein Fehler — das ist eine Aussage ueber den
+/// Tresor und nicht ueber das Buendel.
+///
+/// # Errors
+/// Der stabile Code von `decode_trust_anchor`.
+pub fn bundle_activation_json(
+    anchor_exact_bytes: &[u8],
+    exact_trust_objects: &[Vec<u8>],
+    at_registry_version: u64,
+    exact_candidate_bundle: &[u8],
+) -> Result<String, &'static str> {
+    let anchor = decode_trust_anchor(anchor_exact_bytes).map_err(|error| error.code())?;
+    let borrowed: Vec<&[u8]> = exact_trust_objects.iter().map(Vec::as_slice).collect();
+
+    let mut json = Json::object();
+    match ReaderBundlePin::from_trust_objects(
+        &anchor,
+        &borrowed,
+        RegistryVersion::new(at_registry_version),
+    ) {
+        Err(error) => {
+            json.bool("activated", false);
+            json.raw("bundleVersion", "null");
+            json.string("rejectionCode", rejection_code_literal(error.code()));
+        }
+        Ok(pin) => match pin.evaluate(web_bundle_hash(exact_candidate_bundle)) {
+            BundleActivationDecisionV1::Activate { bundle_version } => {
+                json.bool("activated", true);
+                json.string("bundleVersion", &bundle_version);
+                json.raw("rejectionCode", "null");
+            }
+            BundleActivationDecisionV1::KeepActive { code } => {
+                json.bool("activated", false);
+                json.raw("bundleVersion", "null");
+                json.string("rejectionCode", rejection_code_literal(code));
+            }
+        },
+    }
+    Ok(json.finish())
+}
+
+/// Das Literal, das `ea-ui-contracts` fuer diesen Code emittiert.
+///
+/// Eine Zuordnung OHNE Sammelarm: eine neue Variante in `ea-reader` bricht
+/// hier die Uebersetzung, statt still als unbekannte Zeichenkette ueber die
+/// Bruecke zu gehen. Die Zeichenketten sind dieselben, die
+/// `BUNDLE_REJECTION_CODE_V1_LITERALS` erzeugt — und `generated-contracts.ts`
+/// ist der EINZIGE Ort, an dem TypeScript sie liest.
+pub(crate) const fn rejection_code_literal(code: BundleRejectionCodeV1) -> &'static str {
+    match code {
+        BundleRejectionCodeV1::NoPinnedRelease => "NoPinnedRelease",
+        BundleRejectionCodeV1::Unsigned => "Unsigned",
+        BundleRejectionCodeV1::WrongRoot => "WrongRoot",
+        BundleRejectionCodeV1::WrongOrganization => "WrongOrganization",
+        BundleRejectionCodeV1::Revoked => "Revoked",
+        BundleRejectionCodeV1::NotYetEffective => "NotYetEffective",
+        BundleRejectionCodeV1::HashMismatch => "HashMismatch",
+    }
+}
+
+/// Rechnet das Alter des Trust-Standes und gibt es als `ReaderTrustAgeView`.
+///
+/// Rein und ohne Uhr: die wirksame Zeit kommt aus dem verifizierten Bestand
+/// und nie aus `Date.now()`.
+#[must_use]
+pub fn reader_trust_age_json(
+    last_trust_refresh_at_ms: i64,
+    effective_now_ms: i64,
+    reader_trust_refresh_ms: u64,
+) -> String {
+    let view = reader_trust_age_view(
+        UnixMillis::new(last_trust_refresh_at_ms),
+        UnixMillis::new(effective_now_ms),
+        reader_trust_refresh_ms,
+    );
+    let mut json = Json::object();
+    json.raw("trustAgeMs", &view.trust_age_ms().to_string());
+    json.raw(
+        "readerTrustRefreshMs",
+        &view.reader_trust_refresh_ms().to_string(),
+    );
+    json.bool("trustRefreshOverdue", view.trust_refresh_overdue());
+    json.finish()
+}
+
+// ---------------------------------------------------------------------------
 // Die Ausfuhren. JEDE traegt ihr eigenes `#[cfg(target_arch = "wasm32")]`
 // unmittelbar ueber dem Attribut — `every_wasm_bindgen_export_sits_behind_the
 // _wasm32_cfg` liest das als Text und folgt keinem `mod`.
@@ -596,6 +702,51 @@ pub async fn blob_put(key: String, bytes: Vec<u8>) -> Result<(), JsValue> {
         .map_err(|error| blob_failure(&error))
 }
 
+/// Die Aktivierungsentscheidung ueber genau eine Kandidatenfassung.
+///
+/// Der Service Worker reicht die KANDIDATENBYTES herein und bekommt das DTO
+/// heraus. Er rechnet keinen Hash und prueft keine Signatur; beides geschieht
+/// in geteiltem Rust, so wie `web-reader-design.md` §9 es verlangt.
+///
+/// # Errors
+/// Der stabile Code eines Ankers, der sich nicht selbst traegt.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "evaluateBundleCandidate")]
+pub fn evaluate_bundle_candidate(
+    anchor_exact_bytes: Vec<u8>,
+    exact_trust_objects: js_sys::Array,
+    at_registry_version: u64,
+    exact_candidate_bundle: Vec<u8>,
+) -> Result<String, JsValue> {
+    let objects: Vec<Vec<u8>> = exact_trust_objects
+        .iter()
+        .map(|value| js_sys::Uint8Array::new(&value).to_vec())
+        .collect();
+    bundle_activation_json(
+        &anchor_exact_bytes,
+        &objects,
+        at_registry_version,
+        &exact_candidate_bundle,
+    )
+    .map_err(JsValue::from_str)
+}
+
+/// Das Alter des zuletzt bezogenen Trust-Standes als Ansichts-DTO.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerTrustAge")]
+#[must_use]
+pub fn reader_trust_age(
+    last_trust_refresh_at_ms: i64,
+    effective_now_ms: i64,
+    reader_trust_refresh_ms: u64,
+) -> String {
+    reader_trust_age_json(
+        last_trust_refresh_at_ms,
+        effective_now_ms,
+        reader_trust_refresh_ms,
+    )
+}
+
 /// Holt einen OPAKEN Blob. Ein fehlender Blob ist `undefined` und kein Fehler.
 ///
 /// Asynchron aus demselben Grund wie [`blob_put`]: der Vorlauf oeffnet das
@@ -612,4 +763,41 @@ pub async fn blob_get(key: String) -> Result<Option<Box<[u8]>>, JsValue> {
         .map_err(|error| blob_failure(&error))?;
     let found = store.get(&key).map_err(|error| blob_failure(&error))?;
     Ok(found.map(Vec::into_boxed_slice))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bundle_activation_json, reader_trust_age_json};
+
+    /// Die Entscheidungslogik selbst bezeugt
+    /// `crates/ea-reader/tests/bundle_release_pinning.rs` mit acht Zeugen.
+    /// HIER wird die Kante geprueft: dass ein unbrauchbarer Anker ein FEHLER
+    /// ist und keine Ablehnung — er ist eine Aussage ueber den Tresor und
+    /// nicht ueber das Buendel.
+    #[test]
+    fn an_anchor_that_does_not_carry_itself_is_an_error_and_not_a_rejection() {
+        let error = bundle_activation_json(b"not an anchor at all", &[], 6, b"candidate")
+            .expect_err("ein unbrauchbarer Anker ist ein Fehler");
+        assert!(
+            error.starts_with("EA-"),
+            "die Bruecke gibt einen stabilen Code heraus und nie einen Wirtstext: {error}"
+        );
+    }
+
+    /// Das DTO traegt genau die drei Felder von `ReaderTrustAgeView` und
+    /// rechnet `0 = unset` mit.
+    #[test]
+    fn the_trust_age_dto_carries_the_three_declared_fields() {
+        let json = reader_trust_age_json(1_000, 1_000 + 86_400_001, 86_400_000);
+        assert_eq!(
+            json,
+            "{\"trustAgeMs\":86400001,\"readerTrustRefreshMs\":86400000,\"trustRefreshOverdue\":true}"
+        );
+
+        let unset = reader_trust_age_json(0, 999_999_999, 0);
+        assert!(
+            unset.ends_with("\"trustRefreshOverdue\":false}"),
+            "ohne gesetzte Frist gibt es nichts zu ueberschreiten: {unset}"
+        );
+    }
 }

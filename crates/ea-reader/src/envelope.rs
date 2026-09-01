@@ -73,7 +73,14 @@ const VAULT_CACHE_INFO_V1: &[u8] = b"ea-reader-cache-v1";
 /// Der Ableitungskontext des Eintragszustandsspeichers.
 const VAULT_STATE_INFO_V1: &[u8] = b"ea-reader-entry-state-v1";
 
-/// Der Ableitungskontext des Indexblobs. Er entsteht HIER, damit alle vier
+/// Der Ableitungskontext des Trust-Standspeichers.
+///
+/// Modulprivat wie Cache und Zustandsspeicher: `crates/ea-reader/src/trust_state.rs`
+/// bekommt seinen Schluessel ueber [`derive_trust_state_key_v1`] und leitet
+/// nichts selbst ab.
+const VAULT_TRUST_STATE_INFO_V1: &[u8] = b"ea-reader-trust-state-v1";
+
+/// Der Ableitungskontext des Indexblobs. Er entsteht HIER, damit alle fuenf
 /// abgeleiteten Schluessel EINEN Ort haben.
 ///
 /// OEFFENTLICH, anders als die Kontexte von Cache und Zustandsspeicher: die
@@ -321,6 +328,13 @@ pub(crate) fn derive_entry_state_key_v1(
     vault_key: &SecretBytes<CEK_SIZE>,
 ) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
     derive_key(vault_key, VAULT_STATE_INFO_V1)
+}
+
+/// Der Schluessel des Trust-Standspeichers.
+pub(crate) fn derive_trust_state_key_v1(
+    vault_key: &SecretBytes<CEK_SIZE>,
+) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+    derive_key(vault_key, VAULT_TRUST_STATE_INFO_V1)
 }
 
 /// Der Indexschluessel.

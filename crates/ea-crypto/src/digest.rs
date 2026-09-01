@@ -84,6 +84,46 @@ digest_fn!(active_profile_pointer_digest, ACTIVE_PROFILE_POINTER_DOMAIN);
 // fuer Byte nachrechnen kann. Der Wert wandert nie in Archivbytes.
 digest_fn!(finalization_preview_digest, FINALIZATION_PREVIEW_DOMAIN);
 
+/// Der Hash eines Web-Bundle-Artefakts: NACKTES SHA-256 ueber die Bytes.
+///
+/// # Warum diese eine Funktion KEINE Domaenentrennung traegt
+///
+/// Jeder andere Digest dieser Crate trennt seine Domaene, und das bleibt die
+/// Regel. Diese Funktion ist die begruendete Ausnahme, und die Begruendung ist
+/// nicht Bequemlichkeit:
+///
+/// 1. **Der Erzeuger steht ausserhalb dieses Repositoriums.**
+///    `web-reader-design.md` §4.2 verlangt ein REPRODUZIERBARES Buendel, und
+///    §14 offener Punkt 4 erklaert Wahl und Betrieb des Bundle-Hosts
+///    ausdruecklich fuer offen. Ein Releaseprozess, der den Hash mit
+///    `sha256sum` oder als Subresource-Integrity-Wert ausgibt, muss auf
+///    denselben 32 Byte landen wie der Reader. Ein Praefix, das nur dieses
+///    Repositorium kennt, machte den Wert ausserhalb unreproduzierbar.
+/// 2. **Es gibt keinen zweiten Kontext, mit dem er kollidieren koennte.**
+///    Domaenentrennung schuetzt davor, dass derselbe Digest in zwei
+///    Bedeutungen gelesen wird. Dieser hier wird an GENAU EINER Stelle
+///    gelesen: gegen `WebBundleReleaseCoreV1::bundle_hash` aus einem
+///    wurzelsignierten Trust-Objekt. Ein Angreifer, der eine Kollision
+///    faende, braeuchte dafuer keine Domaenenverwechslung, sondern SHA-256.
+/// 3. **Eine Domaene waere hier nicht baubar, ohne Stufe-1-Vektoren zu
+///    bewegen.** `crypto_suite_one_vectors_reproduce_every_primitive_and_domain_string`
+///    verlangt fuer JEDE Domaenenzeichenkette dieser Crate einen
+///    eingefrorenen Vektor unter `vectors/crypto/suite-1/`. GEMESSEN: mit
+///    einer zusaetzlichen Domaene faellt der Zeuge mit 26 gegen 25. Stufe 4
+///    friert keine Vektorfamilie ein.
+///
+///    Der Scanner liest dabei den ROHTEXT dieser Datei und unterscheidet
+///    nicht zwischen Code und Kommentar — auch dieser Absatz darf das
+///    Praefix deshalb nicht ausschreiben. GEMESSEN: er tat es, und der
+///    Zeuge fand eine 26. „Domaene", die nur ein Wort in einer Erklaerung war.
+///
+/// Der Wert ist damit ein Artefakthash und kein Archivbegriff — er steht
+/// bewusst neben [`object_hash`] und nicht in seiner Familie.
+#[must_use]
+pub fn web_bundle_hash(exact_bundle_bytes: &[u8]) -> Hash32 {
+    sha256_parts(&[exact_bundle_bytes])
+}
+
 #[must_use]
 pub fn object_hash(exact_object_bytes: &[u8]) -> ObjectHash {
     ObjectHash::from(sha256_parts(&[OBJECT_DOMAIN, exact_object_bytes]))

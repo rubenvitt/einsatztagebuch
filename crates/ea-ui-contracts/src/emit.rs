@@ -28,6 +28,49 @@ const HEADER: &str = "\
 /// eine zweite Sprache im Kontrakt. Wer ein Feld einer Ansichtsstruktur
 /// aendert, aendert dieselbe Zeile hier — und die Driftschranke ueber der
 /// eingecheckten Datei macht sichtbar, dass er es getan hat.
+/// Die Ansichtsmodelle der READER-Flaeche, in Emitterreihenfolge.
+///
+/// Getrennt von [`VIEW_MODELS_V1`], weil die zwei Dateien zwei Flaechen
+/// bedienen: ein Eintrag hier erscheint in `apps/web`, einer dort in
+/// `apps/desktop`, und `no-hand-written-contracts.test.ts` verbannt die
+/// Literale jeweils NUR aus seiner eigenen Haelfte.
+///
+/// # Warum `BundleActivationView` keine zweite geschlossene Union traegt
+///
+/// Die Entscheidung koennte als `'Activate' | 'KeepActive'` stehen. Dann aber
+/// verbannte `no-hand-written-contracts.test.ts` genau diese zwei Literale aus
+/// jeder handgeschriebenen Web-Quelle — und der Service Worker, der auf die
+/// Entscheidung verzweigen MUSS, koennte sie nicht mehr nennen, ohne ein
+/// Werte-Array zu importieren, das es fuer eine Zweiwertmenge nicht braucht.
+/// `activated` ist ein `boolean` und traegt denselben Unterschied ohne diesen
+/// Preis; der GRUND steht daneben und bleibt eine geschlossene Union, weil er
+/// sieben Werte hat und jeder einzelne benannt gehoert.
+const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
+    (
+        "BundleActivationView",
+        &[
+            ("activated", "boolean"),
+            // Nur gesetzt, wenn aktiviert wurde: der Cache wird unter dieser
+            // Fassung gefuehrt.
+            ("bundleVersion", "string | null"),
+            // Nur gesetzt, wenn NICHT aktiviert wurde.
+            ("rejectionCode", "BundleRejectionCodeV1 | null"),
+        ],
+    ),
+    (
+        // Dieselben drei Feldnamen wie in `FinalizationPreviewView`: es ist
+        // dieselbe Policy-Rechnung, nur auf der anderen Flaeche, und zwei
+        // Namen fuer dieselbe Groesse waeren die Drift, gegen die es diese
+        // Crate gibt.
+        "ReaderTrustAgeView",
+        &[
+            ("trustAgeMs", "number"),
+            ("readerTrustRefreshMs", "number"),
+            ("trustRefreshOverdue", "boolean"),
+        ],
+    ),
+];
+
 const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
     (
         "SyncStateView",
@@ -263,9 +306,11 @@ pub fn emit_reader_typescript() -> String {
         push_union(&mut emitted, name, literals);
     }
 
-    // Kein Abschnitt fuer Ansichtsmodelle: die Reader-Flaeche fuehrt in
-    // dieser Aufgabe ausschliesslich Statusvereinigungen. Ein leerer
-    // Abschnittskommentar waere eine Ankuendigung und kein Kontrakt.
+    emitted.push_str("\n// The view models of the reader surface.\n");
+    for (name, fields) in READER_VIEW_MODELS_V1 {
+        push_object(&mut emitted, name, fields);
+    }
+
     emitted.push_str("\n// The value arrays, so that no consumer repeats a literal.\n");
     for (name, literals) in crate::READER_ENUMS_V1 {
         push_values(&mut emitted, name, literals);

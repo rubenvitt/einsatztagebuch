@@ -171,3 +171,33 @@ fn the_streaming_object_hasher_matches_the_one_shot_object_hash() {
     hasher.update(&different);
     assert_ne!(hasher.finish().as_bytes(), object_hash(&payload).as_bytes());
 }
+
+/// Der Web-Bundle-Hash MUSS ausserhalb dieses Repositoriums reproduzierbar
+/// sein.
+///
+/// Der Zeuge vergleicht deshalb gegen den bekanntesten SHA-256-Wert
+/// ueberhaupt — den der LEEREN Nachricht aus FIPS 180-4 — und nicht gegen eine
+/// zweite Rechnung dieser Crate. Genau das ist die Aussage: wer den Wert mit
+/// `sha256sum` oder als Subresource-Integrity-Wert erzeugt, landet auf
+/// denselben 32 Byte. Ein Domaenenpraefix wuerde diesen Test rot faerben, und
+/// das ist beabsichtigt.
+#[test]
+fn the_web_bundle_hash_is_bare_sha256_and_reproducible_outside_the_repository() {
+    const SHA256_OF_THE_EMPTY_MESSAGE: [u8; 32] = [
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9,
+        0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52,
+        0xb8, 0x55,
+    ];
+
+    assert_eq!(
+        ea_crypto::web_bundle_hash(&[]).as_bytes(),
+        &SHA256_OF_THE_EMPTY_MESSAGE
+    );
+
+    // Und er ist NICHT der Objekthash derselben Bytes: die beiden Begriffe
+    // stehen nebeneinander und duerfen nie verwechselt werden.
+    assert_ne!(
+        ea_crypto::web_bundle_hash(b"bundle").as_bytes(),
+        ea_crypto::object_hash(b"bundle").as_bytes()
+    );
+}

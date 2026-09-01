@@ -27,6 +27,29 @@ export type ServerConfirmationV1 =
   | 'server-bestätigt'
   | 'nicht server-bestätigt'
 
+export type BundleRejectionCodeV1 =
+  | 'NoPinnedRelease'
+  | 'Unsigned'
+  | 'WrongRoot'
+  | 'WrongOrganization'
+  | 'Revoked'
+  | 'NotYetEffective'
+  | 'HashMismatch'
+
+// The view models of the reader surface.
+
+export type BundleActivationView = {
+  readonly activated: boolean
+  readonly bundleVersion: string | null
+  readonly rejectionCode: BundleRejectionCodeV1 | null
+}
+
+export type ReaderTrustAgeView = {
+  readonly trustAgeMs: number
+  readonly readerTrustRefreshMs: number
+  readonly trustRefreshOverdue: boolean
+}
+
 // The value arrays, so that no consumer repeats a literal.
 
 export const VERIFICATION_STATUS_VALUES = [
@@ -54,4 +77,14 @@ export const EVIDENCE_STATUS_VALUES = [
 export const SERVER_CONFIRMATION_V1_VALUES = [
   'server-bestätigt',
   'nicht server-bestätigt',
+] as const
+
+export const BUNDLE_REJECTION_CODE_V1_VALUES = [
+  'NoPinnedRelease',
+  'Unsigned',
+  'WrongRoot',
+  'WrongOrganization',
+  'Revoked',
+  'NotYetEffective',
+  'HashMismatch',
 ] as const
