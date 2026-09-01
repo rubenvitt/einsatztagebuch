@@ -31,6 +31,14 @@ ea-format.workspace = true
 # Vorgangs. `IncidentUniquenessKey` ist die Identitaet EINES Vorgangs, und die
 # Bestaetigungsansicht muss benennen, welchen Vorgang sie abschliesst.
 ea-schema.workspace = true
+# `BundleRejectionCodeV1` — der Grund, aus dem eine Kandidatenfassung des
+# Web-Bundles NICHT aktiviert wurde. Er wird RE-EXPORTIERT und nie neu
+# erklaert; eine zweite Gruendemenge waere genau die Drift, gegen die diese
+# Crate steht. Die Kante ist einseitig wie die zu `ea-verify`: `ea-reader`
+# steht auf der wasm32-Positivliste, diese Crate in `WASM32_EXEMPT_CRATES`,
+# und kein Weg laeuft zurueck. OHNE Default-Features, damit das Merkmal
+# `test-support` von `ea-reader` AUS bleibt.
+ea-reader.workspace = true
 # `Id16`, `ChainSequence`, `UnixMillis`, `OrganizationId` — kein neuer
 # Bezeichnertyp.
 ea-types.workspace = true

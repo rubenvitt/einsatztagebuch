@@ -10,9 +10,11 @@ import { StrictMode, useState } from 'react'
 import type { ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 
+import type { ReaderTrustAgeView } from './bridge/generated-contracts'
 import { DecorativeIcon } from './design/icons'
 import { eaRuntimeTheme } from './design/tokens'
 import { EnrollmentPage } from './features/enrollment/EnrollmentPage'
+import { TrustAgeBanner } from './features/trust-age/TrustAgeBanner'
 
 /**
  * Ein Eintrag der Routentabelle: der Pfad, sein Wortlaut im Verweis und — seit
@@ -63,9 +65,20 @@ export const EA_WEB_ROUTES: readonly EaWebRoute[] = [
 export function EaWebApp({
   routes = EA_WEB_ROUTES,
   initialPath = '/',
+  trustAge,
 }: {
   readonly routes?: readonly EaWebRoute[]
   readonly initialPath?: string
+  /**
+   * Das Alter des zuletzt bezogenen Trust-Standes.
+   *
+   * OPTIONAL, und das ist der Umfang dieser Aufgabe: der Wert entsteht in
+   * `ea_reader::reader_trust_age_view` und kommt ueber die Bruecke, sobald ein
+   * Bezug stattgefunden hat. Ein Geraet, das nie bezogen hat, zeigt KEINEN
+   * Streifen — `undefined` heisst „nie bezogen" und ist nicht dasselbe wie ein
+   * Alter von null.
+   */
+  readonly trustAge?: ReaderTrustAgeView
 } = {}): ReactElement {
   const [path, setPath] = useState(initialPath)
   const active = routes.find((route) => route.path === path) ?? routes[0]
@@ -78,6 +91,7 @@ export function EaWebApp({
             <Typography.Text strong>Einsatzarchiv — Reader</Typography.Text>
           </Layout.Header>
           <Layout.Content>
+            {trustAge === undefined ? null : <TrustAgeBanner view={trustAge} />}
             <nav aria-label="Hauptbereiche">
               {routes.map((route) => (
                 <a
@@ -124,3 +138,25 @@ createRoot(container).render(
     <EaWebApp initialPath={window.location.pathname} />
   </StrictMode>,
 )
+
+// Der Service Worker, RELATIV adressiert und als MODUL.
+//
+// `./service-worker.js` und nicht `/service-worker.js`: `vite.config.ts` setzt
+// `base: './'`, weil ein absoluter Pfad das Buendel an genau einen Origin
+// baende und die Auslieferungstrennung nach §4.1 unbenutzbar machte. Der Name
+// ist ungehasht, damit der Registrierungspfad ueber Baeue hinweg derselbe
+// bleibt — ein gehashter waere ein Aktivierungspfad, den die Pinnung nicht
+// sieht.
+//
+// `type: 'module'`, weil der Worker die wasm-bindgen-Glue importiert — sie ist
+// ein ES-Modul, und nur so kann er die Aktivierung SELBST pruefen, statt eine
+// fertige Entscheidung entgegenzunehmen.
+//
+// Die Registrierung ist bewusst folgenlos, wenn sie fehlschlaegt: der Reader
+// ist ohne Service Worker benutzbar, und ein harter Abbruch hier naehme einem
+// Leser den Zugriff wegen einer Cachefrage.
+if ('serviceWorker' in navigator) {
+  void navigator.serviceWorker.register('./service-worker.js', { type: 'module' }).catch(() => {
+    // Ausdruecklich still: siehe oben.
+  })
+}

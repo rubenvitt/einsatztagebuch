@@ -259,6 +259,7 @@ fn every_reader_enum_is_derived_from_its_rust_definition() {
         ("EntryStatus", 3),
         ("EvidenceStatus", 4),
         ("ServerConfirmationV1", 2),
+        ("BundleRejectionCodeV1", 7),
     ] {
         assert_eq!(
             union_members(&named_union_block(&emitted, name)).len(),
@@ -287,15 +288,29 @@ fn every_reader_enum_is_derived_from_its_rust_definition() {
 fn the_emitted_reader_file_declares_types_and_computes_nothing() {
     let emitted = ea_ui_contracts::emit_reader_typescript();
     let lowercase = emitted.to_ascii_lowercase();
-    // Neun verbotene Zeichenfolgen und keine Maskierung: die Reader-Datei
-    // traegt weder `SignerRole` noch den Gesundheitscode, an denen die
-    // Desktop-Haelfte maskieren muss.
+    // Acht der neun verbotenen Zeichenfolgen ohne Maskierung.
     for forbidden in [
-        "function", "=>", "class", "import(", "require(", "crypto", "subtle", "sha", "sign",
+        "function", "=>", "class", "import(", "require(", "crypto", "subtle", "sha",
     ] {
         assert!(
             !lowercase.contains(forbidden),
             "the generated reader contracts must contain no {forbidden}"
+        );
+    }
+    // Die neunte ist "sign", und `BundleRejectionCodeV1::Unsigned` traegt sie
+    // im WERT. Umbenannt wird der Wert NICHT: `web-reader-design.md` §4.2 sagt
+    // „nicht signiert", und die deutschen Ausweichnamen tragen dieselbe
+    // Zeichenfolge. Maskiert wird deshalb GENAU dieser eine Wert, zeilenweise
+    // und mit der Fundstelle im Text — dieselbe Bauform, mit der die
+    // Desktop-Haelfte `SignerRole` und den Gesundheitscode maskiert.
+    // `signature`, `signed`, `assign` und jedes andere Vorkommen faellt
+    // weiterhin auf.
+    for line in emitted.lines() {
+        let masked = line.to_ascii_lowercase().replace("unsigned", "");
+        assert!(
+            !masked.contains("sign"),
+            "the generated reader contracts must contain no sign outside the \
+             Unsigned rejection code: {line}"
         );
     }
     for line in emitted.lines().filter(|line| !line.trim().is_empty()) {

@@ -23,6 +23,7 @@ pub use cose::{
     encode_reader_ack_core, encode_signed_protocol_wrapper, parse_cose_sign1,
     validate_signer_certificate, validate_unsigned_protocol_core, verify_cose_sign1,
     verify_enrollment_pop, verify_initial_root_pop, verify_recovery_test, verify_technical_cursor,
+    verify_web_bundle_trust_signature,
 };
 pub use digest::{
     GRANT_SUITE_ID, SUITE_ID, StreamingObjectHasher, SuiteV1, active_profile_pointer_digest,
@@ -30,7 +31,7 @@ pub use digest::{
     bootstrap_anchor_hash, ciphertext_digest, entry_hash, finalization_preview_digest,
     grant_digest, grant_plan_digest, hpke_aad, hpke_info, object_hash, operator_profile_digest,
     payload_aad, receipt_digest, record_digest, recovery_test_digest, renewal_input_digest,
-    trust_anchor_hash, trust_digest, verification_report_hash,
+    trust_anchor_hash, trust_digest, verification_report_hash, web_bundle_hash,
 };
 pub use error::CryptoError;
 pub use hpke::{

@@ -48,6 +48,7 @@ pub use ea_archive::QuarantineReason;
 pub use ea_archive_fs::{DetailCause, HealthFinding, SyncStatus};
 pub use ea_crypto::SignerRole;
 pub use ea_format::{KeyProtectionProfileV1, LocalAuditOutcomeV1, OperatorRoleV1};
+pub use ea_reader::BundleRejectionCodeV1;
 pub use ea_types::{EntryStatus, EvidenceStatus, VerificationStatus};
 pub use ea_verify::ServerConfirmationV1;
 pub use ea_writer::{FinalizationPhase, StaleDecision};
@@ -102,6 +103,35 @@ pub const READER_ENUMS_V1: &[(&str, &[&str])] = &[
     ("EntryStatus", ENTRY_STATUS_LITERALS),
     ("EvidenceStatus", EVIDENCE_STATUS_LITERALS),
     ("ServerConfirmationV1", SERVER_CONFIRMATION_V1_LITERALS),
+    ("BundleRejectionCodeV1", BUNDLE_REJECTION_CODE_V1_LITERALS),
+];
+
+/// Der Grund, aus dem eine Kandidatenfassung des Web-Bundles NICHT aktiviert
+/// wurde.
+///
+/// Der Arm ist eine Zuordnung OHNE Sammelarm: kommt in `ea-reader` eine
+/// Variante hinzu, uebersetzt diese Crate nicht mehr, und niemand kann einen
+/// Ablehnungsgrund einfuehren, den die Oberflaeche nicht benennen kann.
+const fn bundle_rejection_code_literal(value: BundleRejectionCodeV1) -> &'static str {
+    match value {
+        BundleRejectionCodeV1::NoPinnedRelease => "NoPinnedRelease",
+        BundleRejectionCodeV1::Unsigned => "Unsigned",
+        BundleRejectionCodeV1::WrongRoot => "WrongRoot",
+        BundleRejectionCodeV1::WrongOrganization => "WrongOrganization",
+        BundleRejectionCodeV1::Revoked => "Revoked",
+        BundleRejectionCodeV1::NotYetEffective => "NotYetEffective",
+        BundleRejectionCodeV1::HashMismatch => "HashMismatch",
+    }
+}
+
+const BUNDLE_REJECTION_CODE_V1_LITERALS: &[&str] = &[
+    bundle_rejection_code_literal(BundleRejectionCodeV1::NoPinnedRelease),
+    bundle_rejection_code_literal(BundleRejectionCodeV1::Unsigned),
+    bundle_rejection_code_literal(BundleRejectionCodeV1::WrongRoot),
+    bundle_rejection_code_literal(BundleRejectionCodeV1::WrongOrganization),
+    bundle_rejection_code_literal(BundleRejectionCodeV1::Revoked),
+    bundle_rejection_code_literal(BundleRejectionCodeV1::NotYetEffective),
+    bundle_rejection_code_literal(BundleRejectionCodeV1::HashMismatch),
 ];
 
 /// Die woertliche Oberflaechenkopie der vier Sync-Zustaende.

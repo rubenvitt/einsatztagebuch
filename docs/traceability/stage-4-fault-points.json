@@ -1,0 +1,25 @@
+{
+  "stage": 4,
+  "bundle-activation": [
+    {
+      "name": "unsigned-candidate",
+      "brackets": "eine Freigabe, die keine tragende Wurzelsignatur belegt — sei es, dass sie gar keine traegt, sei es ein gekipptes Byte in der rohen Signatur: sie wird ABGEWIESEN und nicht uebergangen, und die zuletzt gueltige Fassung bleibt aktiv",
+      "witness": "crates/ea-reader/tests/bundle_release_pinning.rs::an_unsigned_release_never_pins_anything"
+    },
+    {
+      "name": "foreign-root-candidate",
+      "brackets": "eine fuer sich wohlgeformte Freigabe unter einer FREMDEN Wurzel: der Tausch, den ein kompromittierter Sync-Server versuchte. Sie faellt mit WrongRoot und ausdruecklich nicht als blosse Hashabweichung",
+      "witness": "crates/ea-reader/tests/bundle_release_pinning.rs::a_release_under_a_foreign_root_never_pins_anything"
+    },
+    {
+      "name": "revoked-release",
+      "brackets": "ein wirksamer Widerruf entzieht genau die Freigabe, deren Objekthash er nennt: die VORHERIGE Fassung bleibt aktiv, statt dass gar nichts aktiv bleibt, und vor seiner eigenen Registry-Version wirkt er nicht",
+      "witness": "crates/ea-reader/tests/bundle_release_pinning.rs::a_revocation_withdraws_its_release_and_the_last_valid_version_stays_active"
+    },
+    {
+      "name": "stale-trust-state",
+      "brackets": "ein dauerhaft im Datei-Modus betriebenes Geraet sieht einen Widerruf erst beim naechsten Bezug des Trust-Bestandes: das Alter wird ausgewiesen und die Ueberschreitung der Frist ist eine AUFFORDERUNG, nie eine Sperre",
+      "witness": "crates/ea-reader/tests/trust_age.rs::an_exceeded_deadline_asks_for_a_refresh"
+    }
+  ]
+}
