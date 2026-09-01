@@ -3087,12 +3087,15 @@ git commit -m "feat(reader): verify incremental sync before the OPFS cursor adva
 - Create: `crates/ea-reader/src/verify.rs`
 - Create: `crates/ea-reader/src/grant.rs`
 - Create: `crates/ea-reader/src/decrypt.rs`
+- Create: `crates/ea-reader/tests/verify_fixtures/mod.rs`
+- Create: `crates/ea-reader/tests/verify_fixtures/fixtures.rs`
 - Modify: `crates/ea-reader/src/lib.rs`
 - Modify: `crates/ea-reader/Cargo.toml`
 - Modify: `crates/ea-reader-wasm/Cargo.toml`
-- Modify: `Cargo.toml`
+- Modify: `crates/ea-verify/tests/support/mod.rs`
 - Modify: `Cargo.lock`
 - Modify: `docs/traceability/stage-4-fault-points.json`
+- Modify: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md`
 - Test: `crates/ea-reader/tests/verification_order.rs`
 - Test: `crates/ea-reader/tests/missing_grant.rs`
 - Test: `crates/ea-reader/tests/historical_expiry.rs`
@@ -3101,12 +3104,24 @@ git commit -m "feat(reader): verify incremental sync before the OPFS cursor adva
 - Test: `crates/ea-reader-wasm/tests/verify_browser.rs`
 
 **Interfaces:**
-- Consumes: `ea_verify::{verify_archive_observed, VerifyOptions, RecipientKeyV1, GATE_ORDER_V1, DECAPSULATION_EVENT_V1, GateObserver, RecordingObserver, VerificationReportV1, ObjectResultKindV1, ServerConfirmationV1, ObjectErrorV1}`; `ea_trust::{TrustAnchorV1, decode_trust_anchor}`; `ea_archive::ArchiveSource`; `ea_crypto::{HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, SecretVec, CEK_SIZE, AEAD_NONCE_SIZE, hpke_open, aead_open, hpke_info, hpke_aad, payload_aad}`; `ea_format::{decode_exact_object, ParsedArchiveObject, EntryPackageV1, GrantV1, GrantKindV1}`; `ea_schema::SchemaRegistry`; `ea_types::{VerificationStatus, EntryStatus, EntryHash, ChainSequence, KeyThumbprint, UnixMillis}`; `ReaderMode` aus dem Task „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne"; die entsperrte Sitzung des Tasks „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel".
-- Produces: `PinnedTrustAnchor`, `ReaderVerifier::classify`, `ReaderClassification`, die gefuellten `ReaderEntryStateV1`-Werte (der Typ selbst wird im Vault-Task deklariert), `VerifiedEncryptedEntry`, `VerifiedGrantForRecipient`, `decrypt_verified`, `VerifiedDecryptedRecord` samt seiner VOLLSTAENDIGEN, ausschliesslich AUSLEIHENDEN Klartextflaeche `with_plaintext`/`with_payload` und den Abschnitt `verification` in `docs/traceability/stage-4-fault-points.json`.
+- Consumes: `ea_verify::{verify_archive_observed, VerifyOptions, GATE_ORDER_V1, DECAPSULATION_EVENT_V1, Gate, GateObserver, RecordingObserver, SilentObserver, VerificationReportV1, ObjectResultV1, ObjectResultKindV1, ObjectErrorV1, ChainGapV1, QuarantinedObjectV1, AuthorizedDestructionV1, DestructionStateV1, ServerConfirmationV1, VerifyError}`; `ea_trust::{TrustAnchorV1, TrustError}`; `ea_archive::{ArchiveSource, ArchiveInventory, QuarantineReason}`; `ea_crypto::{HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, SecretVec, CEK_SIZE, AEAD_NONCE_SIZE, hpke_open, aead_open, hpke_info, hpke_aad, payload_aad}`; `ea_format::{decode_exact_object, EntryPackageV1, GrantV1, GrantKindV1, DestroyedEntryStubV1}`; `ea_schema::{SchemaRegistry, SchemaDescriptor, DerivedView, PayloadV1, SchemaError}`; `ea_types::{VerificationStatus, EntryStatus, EntryHash, ObjectHash, ChainSequence, KeyThumbprint, DestructionId, UnixMillis}`; `ReaderMode` aus dem Task „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne"; die entsperrte Sitzung des Tasks „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel".
+- Produces: `ReaderError` samt seinem `code()`, `PinnedTrustAnchor<'a>`, `ReaderVerifier::classify`, `ReaderClassification` mit `report`, `inventory`, `states`, `state_of`, `gaps`, `verified_entry`, `verified_grant`, die gefüllten `ReaderEntryStateV1`-Werte (der Typ selbst wird im Vault-Task deklariert), `VerifiedEncryptedEntry`, `VerifiedGrantForRecipient`, `decrypt_verified`, `VerifiedDecryptedRecord` samt seiner VOLLSTÄNDIGEN, ausschliesslich AUSLEIHENDEN Klartextfläche `with_plaintext`/`with_payload` und den Abschnitt `verification` in `docs/traceability/stage-4-fault-points.json`.
+
+**`RecipientKeyV1` steht NICHT mehr in der Consumes-Liste, und das ist gemessen.** `crates/ea-verify/src/archive.rs` exportiert den Typ zwar über `pub use archive::{EvidenceRequirementV1, RecipientKeyV1, VerifyOptions, …}`, gibt aber KEINEN öffentlichen Konstruktor heraus: der einzige Weg zu einem Wert führt über `VerifyOptions::with_recipient`, und `VerifyOptions::recipient()` gibt ihn nur als `Option<RecipientKeyV1<'a>>` zurück. Dieser Task nennt den Namen an keiner Stelle einer Signatur, und ein `use ea_verify::RecipientKeyV1` wäre unter `-D warnings` ein unbenutzter Import, also ein roter Clippy-Lauf.
+
+**Die WURZEL-`Cargo.toml` steht NICHT im Files-Block, und die frühere Fassung dieses Blocks irrte darin.** `ea-schema = { path = "crates/ea-schema" }` steht bereits in `[workspace.dependencies]`; die Kante, die dieser Task zieht, ist ausschliesslich `ea-schema.workspace = true` in `crates/ea-reader/Cargo.toml`, und sie schreibt `Cargo.lock` fort. `crates/ea-reader-wasm/Cargo.toml` bekommt dagegen KEINE `ea-schema`-Kante: die Brücke benennt in keiner Signatur einen `ea_schema`-Typ. Was es dort braucht, sind die ENTWICKLUNGSkanten des Browserzeugen — `ea-archive`, `ea-format`, `ea-trust`, `ea-types`, `ea-time`, `ed25519-dalek`, `hex`, `minicbor` —, weil die per `#[path]` eingebundene Fixturekette diese Namen selbst nennt und `crates/ea-reader-wasm/Cargo.toml` heute unter `[dev-dependencies]` nur `ea-verify`, `serde_json` und `wasm-bindgen-test` führt. Jede der acht Zeilen trägt `workspace = true` und eine Begründungszeile, weil `workspace_declares_exact_planned_members_and_shared_dependencies` in `tools/xtask/tests/workspace.rs` die `dev-dependencies` mit derselben Strenge durchläuft wie die `dependencies`. Die wasm32-Positivliste in `verify_quick_commands()` bleibt unberührt: sie führt `ea-schema` in ihrer gemessenen Reihenfolge (`ea-types ea-cbor ea-crypto ea-format ea-schema ea-time ea-trust ea-archive ea-chain ea-verify ea-sync-protocol ea-reader ea-reader-wasm`) bereits, und `every_crates_member_is_classified_for_the_wasm32_gate` vergleicht Mengen und keine Kanten. `tools/xtask/src/main.rs` wird deshalb in diesem Task nicht angefasst.
+
+**`crates/ea-verify/tests/support/mod.rs` steht im Files-Block, und die Änderung ist REIN ADDITIV.** Zwei Ausgänge dieses Tasks sind ohne sie nicht formulierbar. Erstens der Stummel mit auflösbarer Autorisierung: `push_destroyed_stub_for` verdrahtet heute `DestructionId::try_from(&[0x43_u8; 16][..])` und `ObjectHash::try_from(&[0x44_u8; 32][..])` FEST, während `push_destruction` seine Kennung aus `REPORT_DESTRUCTION_MARKER_V1` (`0x91`) ableitet — der Join Stummel → `authorizedDestructions` trifft in `complete_report_archive()` also NICHT, und der Ausgang `autorisiert vernichtet` fiele ersatzlos aus dem Task. Zweitens der Erfolgspfad von `decrypt_verified`: `build_complete_entry` verschlüsselt `COMPLETE_PLAINTEXT_V1 = b"einsatzarchiv-fixture-payload"`, und darauf scheitert `SchemaRegistry` in jedem Fall. Beide Funktionen sind MODULPRIVAT — `push_destroyed_stub_for` hat zwei Aufrufstellen in derselben Datei, `build_complete_entry` vier, `complete_archive_for` drei —, sodass ein zusätzlicher Parameter samt einem neuen öffentlichen Bauer daneben (`report_archive_with_a_resolvable_stub()`, `complete_valid_archive_with_plaintext(&[u8])`) keine einzige bestehende öffentliche Signatur bewegt. Der Zeuge dafür, dass es additiv blieb, sind drei grüne Läufe: `cargo test --locked -p ea-verify`, `-p ea-recovery` und `-p ea-archive-fs` — die drei anderen Crates, die dieselbe Datei per `#[path]` einbinden. Eine geteilte TESTHILFE additiv zu erweitern ist kein Anfassen einer abgeschlossenen Produktionscrate; die Grenze, die dieser Task sich selbst zieht, verläuft an `crates/ea-verify/src/`.
+
+**Die Fixtures dieses Tasks liegen in einem EIGENEN Verzeichnis.** `crates/ea-reader/tests/fixtures/mod.rs` wird NICHT angefasst: sieben Testziele hängen daran, sein Anker steht bewusst auf dem Wurzelseed `[0x11; 32]` und sein `entry_hash()` ist mit einem anderen Wert belegt. `crates/ea-reader/tests/verify_fixtures/mod.rs` bindet stattdessen `#[path = "../../../ea-verify/tests/support/mod.rs"] pub mod verify_support;` ein, in der Bauform, die `crates/ea-reader/tests/sync_support/mod.rs` bereits hält. Jede Fixture-Funktion, deren Rückgabe zweimal gegen denselben Objekthash gehalten wird, läuft über ein `static OnceLock` — der gemessene Grund steht im Kopf von `crates/ea-reader/tests/sync_support/fixtures.rs`: `hpke_seal` zieht seinen ephemeren Schlüssel je Aufruf neu, zwei Aufrufe derselben Fixture liefern verschiedene Grantbytes unter verschiedenen Objekthashes.
 
 Der Rustkern des frueheren Tasks bleibt unveraendert; `web-reader-design.md` §12 fordert fuer ihn ausdruecklich nur neue BINDUNGEN. Die zwei Bindungen sind: der Entkapseler nimmt den X25519-Schluessel aus der Vault-Sitzung statt aus einem nativen `KemDecapsulator`, und der `TrustAnchorV1`, der an `verify_archive_observed` geht, kommt ausschliesslich aus dem Vault und nie aus Trust-Objekten, die in einer geoeffneten Datei mitliegen. **Dieser Task implementiert kein Gate neu.** `crates/ea-verify` besitzt alle neun, `GATE_ORDER_V1` ist ihre einzige Quelle, und kein Gate-Bezeichner wird hier ein zweites Mal als Literal geschrieben. Er faehrt kein OPFS-I/O, keinen Netzaufruf und keine Indizierung.
 
+**`ReaderError` existiert im Arbeitsbaum NICHT und wird hier angelegt.** `grep -rn ReaderError crates/` trifft ausschliesslich `crates/ea-sync-server/src/reader_sync.rs`; `crates/ea-reader` führt heute sechs modulweise Fehlertypen (`ReaderVaultError`, `ReaderBlobError`, `ReaderBundleError`, `EnrollmentError`, `ReaderKeyProfileError`, `ReaderSyncError`), alle in derselben Bauform. `crates/ea-reader/src/verify.rs` legt `ReaderError` in genau dieser Bauform an: `#[derive(Clone, Eq, PartialEq)]`, flaches Enum, `pub const fn code(&self) -> &'static str`, Fremdcodes DURCHGEREICHT, `Display` schreibt AUSSCHLIESSLICH den Code, `Debug` delegiert an `Display`, `impl std::error::Error`, dazu `From` für `VerifyError`, `ea_trust::TrustError` und `ea_schema::SchemaError`. Zwei eigene Codes kommen dazu und sonst keiner: `EA-READER-WITNESS-STALE` und `EA-READER-SCHEMA-UNSUPPORTED`. `EA-READER-VERIFICATION` ist AUSGESCHLOSSEN — `ReaderSyncError::Verification` belegt ihn bereits (`crates/ea-reader/src/sync.rs`), und ein zweiter Träger desselben Codes wäre genau die Doppelschreibung, die dieses Repositorium verbietet. Der Name kollidiert mit `ea_sync_server::ReaderError`; jede Datei, die beide sieht, aliast, und keine der beiden Crates hängt an der anderen.
+
 - [ ] **Step 1: Write the order, missing-grant, expiry, stub, and pinned-anchor tests**
+
+**Jeder Vergleich über `Hash32`, `EntryHash`, `ObjectHash` oder `KeyThumbprint` läuft als `assert!(a == b)` und niemals als `assert_eq!`/`assert_ne!`.** `hash_newtype!` in `crates/ea-types/src/ids.rs` leitet `Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash` ab — KEIN `Debug` —, und `assert_eq!` verlangt `Debug`, übersetzt also gar nicht erst. Aus demselben Grund sind `fixtures::entry_hash(..)` und `fixtures::pinned_anchor_hash()` FUNKTIONEN und keine Konstanten: es gibt für diese Typen kein `const fn new`. `ChainSequence` ist der Gegenfall und darf `assert_eq!` tragen — `integer_newtype!` leitet `Debug` ab und gibt `pub const fn new` heraus.
 
 ```rust
 // crates/ea-reader/tests/verification_order.rs
@@ -3123,6 +3138,11 @@ fn the_protocol_is_a_prefix_of_the_nine_gates_and_then_at_most_one_decapsulation
         .position(|event| *event == DECAPSULATION_EVENT_V1)
         .unwrap_or(events.len());
     assert_eq!(events[..split], GATE_ORDER_V1[..split]);
+    // MISST DIE FORM DES PROTOKOLLS, NICHT DIE ZAHL DER ENTKAPSELUNGEN:
+    // `protocol.decapsulated()` laeuft je Lauf hoechstens einmal, unabhaengig
+    // davon, wie viele Eintraege geoeffnet wurden. Die Zusicherung ist damit
+    // trivial wahr und steht nur da, damit ein spaeteres zehntes Ereignis
+    // hinter dem neunten Gate auffaellt.
     assert!(events[split..].len() <= 1);
     assert!(classification.report().is_fully_verified());
 }
@@ -3141,9 +3161,8 @@ fn no_decapsulation_event_precedes_any_public_gate_failure() {
 }
 
 // Der Modusparameter aendert an der Reihenfolge NICHTS: web-reader-design.md
-// §5.4 sagt „wortgleich in beiden Modi". Er aendert genau zwei Dinge, und beide
-// stehen woanders — kein Netzaufruf im Datei-Modus, und `nicht server-bestaetigt`
-// als Regelfall statt als Ausnahme.
+// §5.4 sagt „wortgleich in beiden Modi". `classify` LIEST den Modus gar nicht;
+// dieser Zeuge pinnt genau diese Nicht-Abhaengigkeit.
 #[test]
 fn both_reader_modes_produce_the_same_gate_protocol_over_the_same_bytes() {
     let vault = fixtures::unlocked_vault_with_pinned_anchor();
@@ -3158,40 +3177,63 @@ fn both_reader_modes_produce_the_same_gate_protocol_over_the_same_bytes() {
 }
 ```
 
+`each_public_verification_failure()` liefert ausschliesslich Bestände OHNE öffenbaren eigenen Grant, und das ist eine gemessene Auswahl und keine Bequemlichkeit: `archive_with_one_mutated_entry(MUTATED_EIP_SIGNATURE_OFFSET_V1)`, `archive_with_one_mutated_entry(MUTATED_EIP_KEY_THUMBPRINT_OFFSET_V1)`, `archive_with_swapped_predecessors()`, `archive_with_a_missing_middle_entry()`, `archive_with_an_orphan_grant()`, `archive_with_a_mismatched_grant_plan_hash()`, `archive_without_a_recovery_grant()`, `archive_with_one_unknown_writer()` und `eip_with_one_mutated_body_byte()` aus der Fixturekette von `ea-archive`. Die Grants dieser Familie adressieren `recovery_recipient_key_thumbprint()` und können den Tresorabdruck nie treffen, es gibt also garantiert kein `hpke-open`. AUSDRÜCKLICH NICHT dabei ist `isolation_archive(..)`: dieser Bestand trägt drei Einträge, von denen zwei unversehrt bleiben und mit eigenem Grant erfolgreich öffnen — die Abwesenheitszusage würde dort aus einem unbeteiligten Eintrag heraus rot.
+
 ```rust
 // crates/ea-reader/tests/missing_grant.rs
 #[test]
 fn a_valid_entry_without_an_own_grant_is_exactly_missing_grant() {
     let vault = fixtures::unlocked_vault_with_pinned_anchor();
-    let classification = fixtures::classify(&fixtures::entry_without_own_grant(), &vault);
-    let state = classification.state_of(fixtures::ENTRY_HASH).expect("the entry stays visible");
+    let source = fixtures::entry_without_own_grant();
+    let classification = fixtures::classify(&source, &vault);
+    let entry_hash = fixtures::entry_hash(&source);
+    let state = classification.state_of(entry_hash).expect("the entry stays visible");
     assert_eq!(state.verification(), VerificationStatus::MissingGrant);
     assert_eq!(state.entry_state(), EntryStatus::Present);
-    assert_eq!(state.sequence(), ChainSequence::new(12));
+    // GEMESSEN, nicht gewaehlt: `archive_without_the_own_grant()` ruft
+    // `complete_archive_for(.., 1)` auf der Linie mit
+    // COMPLETE_GENESIS_SEQUENCE_V1 == 0. Der Bestand hat GENAU EINEN Eintrag.
+    assert_eq!(
+        state.sequence(),
+        ChainSequence::new(verify_support::COMPLETE_GENESIS_SEQUENCE_V1),
+    );
     // Kein Befund: fehlender Grant ist KEINE Beschaedigung.
     assert_eq!(classification.report().decryption_errors().len(), 0);
     assert_eq!(classification.report().gaps().len(), 0);
     assert!(classification.report().is_fully_verified());
     // Und kein Zeuge, also ist die Entschluesselung nicht formulierbar.
-    assert!(classification.verified_grant(fixtures::ENTRY_HASH, &vault).is_none());
+    assert!(classification.verified_grant(entry_hash).is_none());
 }
 
-// Die vier Zustaende, die design.md §17.4 auseinanderhaelt, an vier Bestaenden.
+// Die fuenf Zustaende, die design.md §17.4 auseinanderhaelt, an fuenf
+// Bestaenden. `Gap` steht hier ueber einem `.eds`-STUMMEL, weil eine Luecke
+// ohne Traeger keinen EntryHash hat — siehe die getrennte Lueckenliste unten.
 #[test]
-fn missing_grant_gap_unknown_key_and_invalid_never_collapse() {
+fn missing_grant_gap_unknown_key_unsupported_schema_and_invalid_never_collapse() {
     let vault = fixtures::unlocked_vault_with_pinned_anchor();
-    for (label, source, expected, expected_code) in [
-        ("fehlender Grant", fixtures::entry_without_own_grant(), VerificationStatus::MissingGrant, None),
-        ("Luecke", fixtures::archive_with_a_sequence_gap(), VerificationStatus::Gap, None),
-        ("unbekannter Schluessel", fixtures::grant_on_own_thumbprint_wrong_material(),
-         VerificationStatus::UnknownKey, Some("EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED")),
-        ("ungueltig", fixtures::entry_with_a_flipped_manifest_byte(), VerificationStatus::Invalid, None),
-    ] {
+    for (label, source, key, expected, expected_code) in fixtures::the_five_states() {
         let classification = fixtures::classify(&source, &vault);
-        let state = classification.state_of(fixtures::ENTRY_HASH).expect(label);
+        let state = classification.state_of(key).expect(label);
         assert_eq!(state.verification(), expected, "{label}");
         assert_eq!(state.detail_code(), expected_code, "{label}");
     }
+}
+
+// Eine Luecke OHNE Traeger ist KEINE Zustandszeile, sondern eine
+// SEQUENZadressierte Zeile. `archive_with_a_missing_middle_entry()` laesst
+// MISSING_MIDDLE_SEQUENCE_V1 aus; zu dieser Sequenz existiert per Definition
+// kein Objekt und damit weder EntryHash noch ObjectHash.
+#[test]
+fn a_gap_without_a_stub_is_reported_by_sequence_and_never_as_an_entry_row() {
+    let vault = fixtures::unlocked_vault_with_pinned_anchor();
+    let source = fixtures::archive_with_a_gap_without_a_stub();
+    let classification = fixtures::classify(&source, &vault);
+    let gaps: Vec<_> = classification.gaps().collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(
+        gaps[0].from_sequence(),
+        ChainSequence::new(verify_support::MISSING_MIDDLE_SEQUENCE_V1),
+    );
 }
 ```
 
@@ -3199,25 +3241,75 @@ fn missing_grant_gap_unknown_key_and_invalid_never_collapse() {
 // crates/ea-reader/tests/pinned_anchor.rs
 #[test]
 fn a_substituted_archive_with_its_own_complete_trust_chain_fails_here() {
-    let vault = fixtures::unlocked_vault_with_pinned_anchor();
     // Der Bestand ist in sich vollstaendig: eigener Root, eigene Registry,
     // eigene Writer-Zertifikate, eigene Signaturen. Er ist nur nicht UNSERER.
-    let classification = fixtures::classify(&fixtures::foreign_but_self_consistent_archive(), &vault);
+    // INVERTIERT gebaut: nicht der Bestand ist fremd, sondern der TRESOR --
+    // `RegistryLineBuilder` haelt ROOT_SECRET, organization() und chain_id()
+    // als Konstanten, ein zweiter eigenstaendiger Anker ist aus der geteilten
+    // Kette nicht zu bekommen.
+    let vault = fixtures::foreign_pinned_vault();
+    let classification = fixtures::classify(&fixtures::complete_archive(), &vault);
     assert!(!classification.report().is_fully_verified());
     assert_eq!(classification.report().object_results().len(), 0);
     assert!(classification.states().is_empty());
+    // ACHTUNG, GEMESSEN: alle sechs Mangelfelder sind LEER. Der Lauf steigt
+    // nach `protocol.enter(Gate::Trust)` mit `return report.seal()` aus, das
+    // Protokoll ist exakt ["format", "trust"], und `pipeline_completed` ist
+    // falsch. Eine Zusicherung auf ein NICHT leeres Fehlerfeld waere rot.
+    assert_eq!(classification.report().signature_errors().len(), 0);
 }
 
 #[test]
 fn the_anchor_used_is_the_vault_anchor_and_not_the_one_in_the_archive() {
     let vault = fixtures::unlocked_vault_with_pinned_anchor();
-    let anchor = PinnedTrustAnchor::from_vault(&vault).unwrap();
-    assert_eq!(anchor.as_trust_anchor().trust_anchor_hash(), fixtures::PINNED_ANCHOR_HASH);
-    assert_ne!(fixtures::foreign_archive_anchor_hash(), fixtures::PINNED_ANCHOR_HASH);
+    let anchor = PinnedTrustAnchor::from_vault(&vault);
+    assert!(anchor.as_trust_anchor().trust_anchor_hash() == fixtures::pinned_anchor_hash());
+    assert!(fixtures::foreign_anchor_hash() != fixtures::pinned_anchor_hash());
 }
 ```
 
-`historical_expiry.rs` haelt zwei Zusagen fest: ein Zeuge ist an den Zeitpunkt gebunden, an dem er entstand, und ein historischer Grant bleibt bis Stufe 5 unbenutzbar. `destroyed_stub.rs` haelt fest, dass ein `.eds` niemals HPKE ruft — weder als `autorisiert vernichtet` noch als `ungeklaerte Luecke`.
+`historical_expiry.rs` hält zwei Zusagen fest: ein Zeuge ist an den Lauf gebunden, in dem er entstand, und ein historischer Grant bleibt bis Stufe 5 unbenutzbar — LETZTERES ÜBER SEINE ABWESENHEIT und nicht über einen Code, aus dem unten belegten Grund. `destroyed_stub.rs` hält fest, dass ein `.eds` niemals HPKE ruft — weder als `autorisiert vernichtet` noch als `ungeklaerte Luecke`.
+
+```rust
+// crates/ea-reader/tests/historical_expiry.rs
+#[test]
+fn a_forged_historical_grant_leaves_no_trace_at_all() {
+    let vault = fixtures::unlocked_vault_with_pinned_anchor();
+    let source = fixtures::archive_with_a_forged_historical_grant();
+    let mut observer = RecordingObserver::new();
+    let classification = ReaderVerifier::new(ReaderMode::Server, fixtures::EFFECTIVE_NOW)
+        .classify(&source, &vault, &mut observer).unwrap();
+    let state = classification.state_of(fixtures::entry_hash(&source)).unwrap();
+    // KEIN Code, KEIN Befund, KEIN Ereignis: `own_grant` filtert auf
+    // GrantKindV1::Initial und sieht den historischen Grant nie.
+    assert_eq!(state.verification(), VerificationStatus::MissingGrant);
+    assert_eq!(state.detail_code(), None);
+    assert!(!observer.events().contains(&DECAPSULATION_EVENT_V1));
+    assert_eq!(classification.report().decryption_errors().len(), 0);
+    assert_eq!(classification.report().signature_errors().len(), 0);
+}
+
+#[test]
+fn a_witness_from_an_earlier_run_is_refused() {
+    let vault = fixtures::unlocked_vault_with_pinned_anchor();
+    let source = fixtures::complete_archive();
+    let first = fixtures::classify_at(&source, &vault, fixtures::EFFECTIVE_NOW);
+    let entry_hash = fixtures::entry_hash(&source);
+    let entry = first.verified_entry(entry_hash).expect("der Bestand traegt einen Zeugen");
+    let grant = first.verified_grant(entry_hash).expect("und einen eigenen Grant");
+    let refused = decrypt_verified(
+        entry,
+        grant,
+        &vault,
+        &SchemaRegistry::v1(),
+        fixtures::LATER_EFFECTIVE_NOW,
+        &mut SilentObserver,
+    )
+    .err()
+    .expect("ein Zeuge gilt fuer den Lauf, in dem er entstand");
+    assert_eq!(refused.code(), "EA-READER-WITNESS-STALE");
+}
+```
 
 ```rust
 // crates/ea-reader/tests/destroyed_stub.rs
@@ -3233,10 +3325,15 @@ fn a_stub_never_calls_hpke_in_either_outcome() {
         let mut observer = RecordingObserver::new();
         let classification = ReaderVerifier::new(ReaderMode::Server, fixtures::EFFECTIVE_NOW)
             .classify(&source, &vault, &mut observer).unwrap();
+        let key = fixtures::stub_entry_hash(&source);
         assert!(!observer.events().contains(&DECAPSULATION_EVENT_V1), "{label}");
-        assert_eq!(classification.state_of(fixtures::ENTRY_HASH).unwrap().entry_state(),
-                   entry_state, "{label}");
-        assert!(classification.verified_entry(fixtures::ENTRY_HASH).is_none(), "{label}");
+        let state = classification.state_of(key).unwrap();
+        assert_eq!(state.entry_state(), entry_state, "{label}");
+        // BEIDE Dimensionen bleiben getrennt (design.md §17.4): auch der
+        // autorisiert vernichtete Stummel hat KEIN objectResult und steht in
+        // einem gaps-Intervall, ist in der Verifikationsdimension also `Gap`.
+        assert_eq!(state.verification(), VerificationStatus::Gap, "{label}");
+        assert!(classification.verified_entry(key).is_none(), "{label}");
     }
 }
 ```
@@ -3245,11 +3342,11 @@ fn a_stub_never_calls_hpke_in_either_outcome() {
 
 Run: `cargo test --locked -p ea-reader --test verification_order --test missing_grant --test historical_expiry --test destroyed_stub --test pinned_anchor`
 
-Expected: FAIL. `crates/ea-reader` traegt nach dem Task „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne" ausschliesslich `ReaderMode` und den Re-Export von `ea_verify::GATE_ORDER_V1` und nach dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel" die Vault-Flaeche; `PinnedTrustAnchor`, `ReaderVerifier`, `ReaderClassification`, `VerifiedEncryptedEntry`, `VerifiedGrantForRecipient` und `decrypt_verified` existieren nicht. Das ist ein roter Uebersetzungslauf und keine fehlende Crate — die Crate steht seit dem Reichweiten-Task im Arbeitsbereich, weshalb dieser Task hier und nicht davor liegt.
+Expected: FAIL. `crates/ea-reader` traegt nach dem Task „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne" ausschliesslich `ReaderMode` und den Re-Export von `ea_verify::GATE_ORDER_V1` und nach dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel" die Vault-Flaeche; `ReaderError`, `PinnedTrustAnchor`, `ReaderVerifier`, `ReaderClassification`, `VerifiedEncryptedEntry`, `VerifiedGrantForRecipient` und `decrypt_verified` existieren nicht. Das ist ein roter Uebersetzungslauf und keine fehlende Crate — die Crate steht seit dem Reichweiten-Task im Arbeitsbereich, weshalb dieser Task hier und nicht davor liegt.
 
 - [ ] **Step 3: Bind the vault anchor, the vault key, and the typed decryption witnesses**
 
-**Der Anker ist ein Typ und keine Uebergabe.** `crates/ea-reader/src/anchor.rs` traegt genau einen Wert, der nur EINEN Weg in die Welt hat:
+**Der Anker ist ein Typ und keine Uebergabe — und er FEHLT NIE.** `crates/ea-reader/src/anchor.rs` traegt genau einen Wert, der nur EINEN Weg in die Welt hat:
 
 ```rust
 /// Der beim Enrollment im Vault gepinnte Root-Anchor.
@@ -3259,21 +3356,28 @@ Expected: FAIL. `crates/ea-reader` traegt nach dem Task „wasm32-Reichweite: `e
 /// `web-reader-design.md` §5.3: Trust-Objekte, die in der geoeffneten Datei
 /// mitgeliefert werden, begruenden fuer sich kein Vertrauen. Waere hier ein
 /// `from_bytes`, waere §5.3 eine Bitte statt einer Schranke.
-pub struct PinnedTrustAnchor(TrustAnchorV1);
+///
+/// AUSLEIHEND und INFALLIBEL, beides gemessen: [`UnlockedVault`] fuehrt
+/// `pinned_anchor` als PFLICHTFELD, `ReaderVault::unlock` baut es unbedingt
+/// aus `decode_trust_anchor(&contents.pinned_anchor_exact_bytes)?`. Eine
+/// entsperrte Sitzung ohne Anker ist nicht konstruierbar. Und
+/// [`ea_trust::TrustAnchorV1`] traegt kein einziges `derive`; ein besitzender
+/// Wert waere nur ueber einen ZWEITEN vollstaendigen Dekodierlauf je
+/// `classify` zu haben — Kosten ohne Gegenwert.
+pub struct PinnedTrustAnchor<'a>(&'a TrustAnchorV1);
 
-impl PinnedTrustAnchor {
-    /// # Errors
-    /// `EA-READER-ANCHOR-MISSING`, wenn die Sitzung keinen Anker fuehrt, und
-    /// der Code von [`ea_trust::decode_trust_anchor`], wenn die verwahrten
-    /// Bytes nicht mehr die eines Ankers sind.
-    pub fn from_vault(session: &UnlockedVault) -> Result<Self, ReaderError>;
+impl<'a> PinnedTrustAnchor<'a> {
+    #[must_use]
+    pub const fn from_vault(session: &'a UnlockedVault) -> Self;
 
     #[must_use]
-    pub const fn as_trust_anchor(&self) -> &TrustAnchorV1;
+    pub const fn as_trust_anchor(&self) -> &'a TrustAnchorV1;
 }
 ```
 
-Die Bytes kommen aus der Vault-Sitzung und laufen durch `ea_trust::decode_trust_anchor` — kein zweiter Parser, keine zweite Ankerform. Der Beweis, dass es keinen anderen Weg gibt, ist ein `compile_fail`-Doctest an der Struktur, in derselben Bauform, in der `crates/ea-key-provider/src/lib.rs` und `crates/ea-crypto/src/secret.rs` ihre Nichtexportierbarkeit belegen; er faehrt in `cargo test --workspace --doc --all-features --locked`, dem einzigen Kommando aus `verify_quick_commands()`, das Doctests ueberhaupt anfasst.
+**`EA-READER-ANCHOR-MISSING` entfällt ersatzlos, und die frühere Fassung dieses Tasks irrte darin.** Sie schrieb `from_vault` als `Result` mit zwei Fehlerarmen — „die Sitzung führt keinen Anker" und „der durchgereichte Code von `decode_trust_anchor`" —, und beide sind DURCH KONSTRUKTION unerreichbar: `crates/ea-reader/src/vault.rs` deklariert `pinned_anchor: TrustAnchorV1` ohne `Option`, und `pinned_anchor_bytes()` gibt die `exact_bytes()` eines bereits ERFOLGREICH dekodierten Ankers zurück. Ein Fehlerarm, den kein Zeuge färben kann, ist kein fail-closed-Verhalten, sondern ein unbelegter Zweig, den die Oberfläche später behandeln müsste, ohne ihn je zu sehen. Der Lebensdauerparameter bleibt lokal in `classify` und erscheint in KEINER anderen öffentlichen Signatur — `ReaderClassification` trägt keinen. Fällt die Ausleihform später, ist ein besitzender Typ über `decode_trust_anchor(session.pinned_anchor_bytes())?` jederzeit nachrüstbar, und die `compile_fail`-Zusage ändert sich dabei nicht.
+
+Der Beweis, dass es keinen anderen Weg gibt, ist ein `compile_fail`-Doctest an der Struktur, in derselben Bauform, in der `crates/ea-key-provider/src/lib.rs` und `crates/ea-crypto/src/secret.rs` ihre Nichtexportierbarkeit belegen; er faehrt in `cargo test --workspace --doc --all-features --locked`, dem einzigen Kommando aus `verify_quick_commands()`, das Doctests ueberhaupt anfasst. **Daneben steht EIN positiver ```-Doctest, der jeden dort benutzten Pfad einmal erfolgreich auflöst.** Ohne ihn belegen die drei Negativblöcke (`from_bytes`, `from_source`, `Clone`) nur, dass ein Import kaputt ist — ein `compile_fail`, der aus dem falschen Grund nicht übersetzt, ist der Musterfall des Zeugen, der grün ist, weil er nichts misst.
 
 **Die Klassifikation ruft die Pipeline und baut sie nicht nach.**
 
@@ -3288,8 +3392,9 @@ impl ReaderVerifier {
     /// und uebersetzt den Bericht in die Zustandssprache aus §17.4.
     ///
     /// # Errors
-    /// Nur der Fehler von [`ea_verify::verify_archive_observed`]. Ein Befund
-    /// ueber ein EINZELNES Objekt ist nie ein `Err` — dieselbe Regel, die
+    /// Der Fehler von [`ea_verify::verify_archive_observed`] und der von
+    /// `ea_archive::ArchiveInventory::build`. Ein Befund ueber ein EINZELNES
+    /// Objekt ist nie ein `Err` — dieselbe Regel, die
     /// `crates/ea-verify/src/lib.rs` ausschreibt.
     pub fn classify(
         &self,
@@ -3300,7 +3405,9 @@ impl ReaderVerifier {
 }
 ```
 
-`classify` baut `VerifyOptions::new(self.effective_now).with_recipient(session.kem_key_thumbprint(), session.kem_private_key())` — und das ist die erste der zwei geforderten Bindungen. `session.kem_private_key()` liefert `&HpkeRecipientPrivateKey` aus dem WASM-Speicher der entsperrten Sitzung; es gibt keinen `KemDecapsulator`-Trait und keinen nativen Schluesselspeicher mehr, weil `web-reader-design.md` §11.3 den nativen Reader-Key-Provider ersatzlos streicht. Der Anker ist `PinnedTrustAnchor::from_vault(session)?.as_trust_anchor()` — die zweite Bindung.
+`classify` baut `VerifyOptions::new(self.effective_now).with_recipient(session.kem_key_thumbprint(), session.kem_private_key())` — und das ist die erste der zwei geforderten Bindungen. `session.kem_private_key()` liefert `&HpkeRecipientPrivateKey` aus dem WASM-Speicher der entsperrten Sitzung; es gibt keinen `KemDecapsulator`-Trait und keinen nativen Schluesselspeicher mehr, weil `web-reader-design.md` §11.3 den nativen Reader-Key-Provider ersatzlos streicht. Der Anker ist `PinnedTrustAnchor::from_vault(session).as_trust_anchor()` — die zweite Bindung.
+
+**`ReaderClassification` BESITZT ein eigenes `ArchiveInventory`, und das ist eine benannte Kosten­entscheidung.** Der Bericht kennt über Objekte NUR den `ObjectHash`: `ObjectResultV1` hat genau vier Zugriffe — `object_hash`, `object_type`, `result`, `server_confirmation` — und weder `entry_hash` noch `chain_sequence`; `ObjectErrorV1` trägt `object_hash` und `code`; `ChainGapV1` trägt `chain_id` und ein Sequenzintervall. Es gibt in `crates/ea-verify` keinen Accessor, der einen `ObjectHash` auf einen `EntryHash` abbildet. `classify` baut deshalb selbst `ea_archive::ArchiveInventory::build(source)` — öffentlich, aus `ea-reader` erreichbar, weil `ea-archive` seit dem Sync-Task in `crates/ea-reader/Cargo.toml` steht — und behält es. Daraus entstehen drei Dinge auf einmal: der Join `ObjectHash → (EntryHash, ChainSequence)` je `.eip` und je `.eds`, der Join eigener Grant → Eintrag, und die EXAKTEN Bytes für `verified_entry`/`verified_grant`, also ohne eine dritte Kopie. Der Preis ist ein zweiter voller Parserlauf über denselben Bestand je `classify` — Rechenzeit und Spitzenspeicher, die in der 50.000-Paket-Messung des Tasks „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle" sichtbar werden. Die billigere Alternative wäre, `ea-verify` sein Inventar herausgeben zu lassen; das ist eine Erweiterung einer abgeschlossenen Stufe-1-Crate und hier ausgeschlossen. Weil `ReaderClassification` das Inventar BESITZT, trägt es keinen Lebensdauerparameter und ist an `source` nicht gebunden.
 
 **Die Zustandssprache ist eine TOTALE Abbildung und keine Kette von `if`.** `ReaderEntryStateV1` ist im Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel" in `crates/ea-reader/src/entry_state.rs` DEKLARIERT worden, weil der Zustandsspeicher seinen Werttyp vor dem Klassifizierer braucht; dieser Task deklariert ihn NICHT ein zweites Mal, er FUELLT ihn. Der Typ steht hier nur zur Ansicht, mit seinen drei orthogonalen Dimensionen und nie einer zusammengefalteten:
 
@@ -3316,9 +3423,25 @@ pub struct ReaderEntryStateV1 {
 }
 ```
 
-Kein Literal dieser drei Aufzaehlungen wird hier geschrieben: `VerificationStatus` und `EntryStatus` stehen seit Stufe 1 in `crates/ea-types/src/status.rs` mit genau den sechs beziehungsweise drei Begriffen des §17.4, `ServerConfirmationV1` in `crates/ea-verify/src/report.rs`. `detail_code` traegt ausschliesslich `ObjectErrorV1::code()`-Werte, also `EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED`, `EA-VERIFY-GRANT-ISSUER-UNVERIFIABLE` und ihresgleichen; ein Prosafeld waere eine zweite Statussprache neben §17.4.
+Kein Literal dieser drei Aufzaehlungen wird hier geschrieben: `VerificationStatus` und `EntryStatus` stehen seit Stufe 1 in `crates/ea-types/src/status.rs` mit genau den sechs beziehungsweise drei Begriffen des §17.4, `ServerConfirmationV1` in `crates/ea-verify/src/report.rs`.
 
-Die Abbildung liest den Bericht in fester Vorrangordnung und ist damit nachvollziehbar statt geraten: ein Objekt in `format_errors`, `quarantined_objects`, `signature_errors` oder `evidence_errors` ist `Invalid`; ein `gaps`-Eintrag ueber seiner Sequenz ist `Gap`; ein `decryption_errors`-Eintrag auf seinem Grant ist `UnknownKey`; ein `ObjectResultV1` mit `ObjectResultKindV1::Valid`, zu dem kein eigener Grant gehoert, ist `MissingGrant`; alles uebrige ist `Verified`. Die Vorrangordnung ist erzwingbar, weil `ea-verify` seinerseits zusichert, dass ein Objekt in GENAU EINEM Feld erscheint — ohne diese Zusage waere die Abbildung mehrdeutig, und sie ist im Kopfkommentar von `crates/ea-verify/src/lib.rs` ausgeschrieben. `ObjectResultKindV1::AuthorizedDestroyed` setzt `EntryStatus::AuthorizedDestroyed`; ein `.eds` ohne aufloesbare `destructionAuthorization` erreicht diesen Zweig NICHT, sondern erscheint als `gaps`-Eintrag und damit als `EntryStatus::UnexplainedGap` — genau das, was `design.md`:1597 fordert und was `crates/ea-verify/src/archive.rs` fail-closed erzwingt, weil `ea-trust` fuer diese Aufloesung nichts exportiert. Der Reader schreibt diese Grenze auf und verschiebt sie nicht; die Aufloesung ist Stufe 5.
+**Die Vorrangordnung trennt nach OBJEKTART, und das ist die wichtigste Korrektur dieses Tasks.** Die frühere Fassung schrieb: „ein Objekt in `format_errors`, `quarantined_objects`, `signature_errors` oder `evidence_errors` ist `Invalid`". Das ist über `signature_errors` und `decryption_errors` FALSCH, und zwar gemessen: `claim_own_grants` in `crates/ea-verify/src/archive.rs` schreibt `report.signature_errors.insert(ObjectErrorV1::new(grant.object_hash(), error.code()))`, und `record_decapsulation` in `crates/ea-verify/src/recipient.rs` schreibt `report.decryption_errors.insert(ObjectErrorV1::new(grant.object_hash(), error.code()))` — beide unter dem Objekthash des GRANTS, während der Eintrag selbst sein `ObjectResultKindV1::Valid` behält. Ein gültiger Eintrag mit unbrauchbarem eigenem Grant erschiene unter der alten Regel als `ungültig`; das verbietet `design.md` §17.4 ausdrücklich (`fehlender Grant` und `unbekannter Schlüssel` sind eigene Begriffe NEBEN `ungültig`) und `web-reader-design.md` §9 wörtlich: „Fehlender eigener Grant bleibt exakt `fehlender Grant` und wird nicht als Beschädigung dargestellt". `signature_errors` hat allein in `crates/ea-verify` sieben Einfügestellen über Einträge, Grants, Quittungen und Vernichtungen — die Objektart ist ohne den Join über das Inventar aus dem Feld nicht ablesbar.
+
+Die Abbildung wertet deshalb ZWEI Adressräume getrennt aus, in dieser Ordnung:
+
+1. Über dem EINTRAGS-Objekthash: `format_errors` → `Invalid`; `quarantined_objects` → `Invalid`; `signature_errors` → `Invalid`; `evidence_errors` → `Invalid`.
+2. Über dem GRANT-Objekthash des EIGENEN Grants: `decryption_errors` → `UnknownKey` mit `detail_code = code()`; `signature_errors` → `MissingGrant` mit `detail_code = code()` — der Eintrag ist gültig, nur der Grant unbrauchbar.
+3. Danach erst: `.eds`-Stummel, dessen Sequenz in einem `gaps`-Intervall liegt → `Gap`; ein `ObjectResultV1` mit `ObjectResultKindV1::Valid` ohne eigenen Grant → `MissingGrant` mit `detail_code = None`; ein Eintrag ganz ohne `ObjectResultV1` → `Invalid` mit `detail_code = None`; ein Eintrag, dessen Klartext keine der fünf Schemabestimmungen trägt → `UnsupportedSchema`; alles Übrige → `Verified`.
+
+`server_confirmation` kommt in JEDEM Zweig aus `object_results[..].server_confirmation()`, ersatzweise `NotServerConfirmed`. Die Zusage, auf der die Ordnung steht, ist SCHWÄCHER als die frühere Fassung behauptete: der Kopfkommentar von `crates/ea-verify/src/lib.rs` sagt „Ein Objekt erscheint ENTWEDER in `objectResults` ODER in genau einem Fehler-/Quarantänearray, niemals in beidem" — für den malformed-Fall stehen `format_errors` UND `quarantined_objects` paarweise über demselben Hash, wie der Doc-Kommentar von `VerificationReportV1::format_errors` selbst ausschreibt. Praktisch folgenlos, weil ein `format_errors`-Objekt gar keinen `EntryHash` trägt und deshalb überhaupt keine Zustandszeile erzeugt — aber die Ordnung darf sich nicht auf die stärkere Fassung berufen.
+
+**`detail_code` trägt ausschliesslich Werte der persistierbaren Tabelle.** `crates/ea-reader/src/entry_state.rs` führt `const PERSISTED_DETAIL_CODES_V1: [&str; 25]` mit fester Stelligkeit und ausschliesslich `EA-VERIFY-*`-Codes, und `put_entry_state` weist jeden anderen Code mit `ReaderVaultError::Contents` / `EA-READER-VAULT-CONTENTS` ab. Daraus folgen zwei Schranken, die hier und nicht erst im Persistenz-Task fallen: für `quarantined_objects` bleibt `detail_code == None`, weil `QuarantinedObjectV1` einen `QuarantineReason` trägt und keinen Code — `QuarantineReason::as_str()` liefert `"malformed"|"duplicate"|"conflicting"|"unattributable"`, ein Schemaliteral und KEIN EA-Code. Und kein `EA-READER-*`-Code gelangt je in `detail_code`; `EA-READER-SCHEMA-UNSUPPORTED` ist der Rückgabecode von `decrypt_verified` und die Begründung für `VerificationStatus::UnsupportedSchema`, nicht dessen Detailgrund. Ein Zustand, den die Tasks „Verschlüsselter invertierter Index in OPFS …" und „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit" nicht ablegen könnten, wäre wertlos.
+
+**`ObjectResultKindV1::AuthorizedDestroyed` ist ein TOTER Zweig, und die frühere Fassung stützte sich darauf.** Sie schrieb: „`ObjectResultKindV1::AuthorizedDestroyed` setzt `EntryStatus::AuthorizedDestroyed`". Gemessen wird diese Variante workspaceweit NIRGENDS konstruiert: `confirm_entries` in `crates/ea-verify/src/archive.rs` ist der einzige Erzeuger von `report.object_results` — sein eigener Doc-Kommentar sagt „HIER UND NUR HIER entstehen die `objectResults`" — und setzt ausnahmslos `ObjectResultKindV1::Valid`; der einzige LESER der Variante ist ein Filter in `crates/ea-archive-fs/src/health.rs`. Ein `.eds` wird ausserdem gar kein Kettenknoten, was der Kommentarblock vor `protocol.enter(Gate::ChainPosition)` fail-closed ausschreibt.
+
+Die Abbildung leitet `EntryStatus::AuthorizedDestroyed` deshalb aus einem JOIN ab und nicht aus dem Ergebnisfeld: `DestroyedEntryStubV1::destruction_id()` gegen `report.authorized_destructions()`, das als `impl ExactSizeIterator<Item = &AuthorizedDestructionV1>` läuft und je Element ein `destruction_id()` trägt. Trifft der Join, ist der Zustand `AuthorizedDestroyed`; trifft er nicht, `UnexplainedGap`. Dass `report.authorized_destructions` überhaupt befüllbar ist, ist ebenfalls gemessen: `record_destructions` aus `crates/ea-verify/src/destruction.rs` wird aus `archive.rs` gerufen und schreibt mit `report.authorized_destructions.insert(destruction_id, entry)` hinein. Der Join ist damit der einzige gangbare Weg, und er verletzt die Zusage dieses Tasks nicht, kein Gate neu zu bauen — er liest zwei Felder desselben Berichts gegeneinander. Wäre er falsch, erschiene jeder Stummel als `ungeklärte Lücke`: sichtbar falsch in der Oberfläche des Tasks „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop", aber ohne Sicherheitswirkung, weil fail-closed in die strengere Richtung. Die Auflösung der `destructionAuthorization` selbst bleibt Stufe 5; `ea-trust` exportiert dafür nichts.
+
+**`VerificationStatus::Gap` ist an einem `EntryHash` nur über einen `.eds`-Stummel formulierbar.** `crates/ea-chain/src/chain.rs` definiert `ChainGap` als Intervall FEHLENDER Sequenzen; zu einer solchen Sequenz existiert per Definition kein Objekt und damit weder ein `EntryHash` noch ein `ObjectHash`. `ReaderEntryStateV1::new` verlangt aber `entry_hash`, `object_hash` UND `sequence` — eine Lücke ohne Träger ist als Zustandszeile schlicht nicht schreibbar. `Gap` wird deshalb ausschliesslich für Zeilen gesetzt, deren Träger ein `.eds`-Stummel ist: `DestroyedEntryStubV1` führt `entry_hash()` und über sein `signed_manifest()` die `chain_sequence` selbst, und weil `ea-verify` ihn ausdrücklich NICHT als Kettenknoten führt, liegt seine Sequenz garantiert in einem `gaps`-Intervall — in der Fixture gemessen als `REPORT_GAP_FROM_V1 == REPORT_GAP_THROUGH_V1 == REPORT_DESTROYED_STUB_SEQUENCE_V1`. Für eine Lücke OHNE Stummel gibt `ReaderClassification` eine getrennte, SEQUENZadressierte Liste `gaps()` heraus und KEINE `ReaderEntryStateV1`-Zeile. Diese zweite Zugriffsform ist keine Zugabe: die Oberfläche des Tasks „Integritätszentrierte Reader-Oberfläche …" muss trägerlose Lücken anzeigen, und fiele sie hier weg, wanderte sie unverändert dorthin.
 
 **Die zwei Zeugen sind nirgendwo sonst konstruierbar.** `crates/ea-reader/src/grant.rs`:
 
@@ -3333,6 +3456,7 @@ Die Abbildung liest den Bericht in fester Vorrangordnung und ist damit nachvollz
 pub struct VerifiedEncryptedEntry {
     exact_entry_bytes: Vec<u8>,
     entry_hash: EntryHash,
+    object_hash: ObjectHash,
     sequence: ChainSequence,
     minted_at: UnixMillis,
 }
@@ -3346,19 +3470,18 @@ pub struct VerifiedGrantForRecipient {
 }
 ```
 
-`verified_entry` und `verified_grant` geben einen Zeugen NUR heraus, wenn der Bericht fuer dieses Objekt `ObjectResultKindV1::Valid` fuehrt, kein Fehlerfeld es nennt und `decryption_errors` seinen Grant nicht traegt. Damit ist die Aussage „nur `VerifiedEncryptedEntry` zusammen mit `VerifiedGrantForRecipient` erreicht den HPKE-Entkapseler" aus `web-reader-design.md` §9 eine TYPZUSAGE und keine Disziplin.
+`verified_entry` und `verified_grant` geben einen Zeugen NUR heraus, wenn der Bericht fuer dieses Objekt `ObjectResultKindV1::Valid` fuehrt, kein Fehlerfeld es nennt und `decryption_errors` seinen Grant nicht traegt. Damit ist die Aussage „nur `VerifiedEncryptedEntry` zusammen mit `VerifiedGrantForRecipient` erreicht den HPKE-Entkapseler" aus `web-reader-design.md` §9 eine TYPZUSAGE und keine Disziplin. Die Grantauswahl baut das Prädikat von `ea_verify::own_grant` ZEICHENGLEICH nach — `fields.kind == GrantKindV1::Initial && fields.entry_hash == entry_hash && fields.recipient_key_thumbprint == key_thumbprint`, als `find` über `inventory.grants()` in aufsteigender Objekthashordnung —, weil `own_grant` `pub(crate)` ist und aus `ea-reader` nicht gerufen werden kann. Läuft die Auswahl hier anders als dort, gäbe `classify` einen Zeugen über einen Grant heraus, den die Pipeline gar nicht geprüft hat.
 
-**`effectiveNow` wird vor jeder Entkapselung neu berechnet, und das ist mechanisch.** `minted_at` ist der `effective_now` des Laufs, der den Zeugen erzeugt hat. `decrypt_verified` nimmt einen FRISCHEN Wert und verweigert bei jeder Abweichung:
+**`effectiveNow` ist der Wert DES LAUFS, und die frühere Begründung dieser Prüfung trug nicht.** Sie schrieb, eine Toleranz „wäre eine zweite, schwächere Frist neben der des Registrierungskopfes". Das kehrt das Verhältnis um: `ea_trust::select_registry_head` misst gegen ein not-before/not-after-INTERVALL und ist damit selbst eine Toleranz. Die tragende Begründung ist eine andere und steht ab jetzt dort: ein Zeuge gilt für den Lauf, in dem er entstand, weil Gate `recipient-grant` seine Nutzungsfrist gegen genau diesen Wert gemessen hat. Der Wert existiert genau einmal je Lauf — `VerifyOptions::effective_now()` ist wortgleich `os_wall_clock()`, mit dem Doc-Kommentar „GLEICH der uebergebenen Uhr, und das ist der einzige erreichbare Wert" —, und die Sitzung reicht denselben Wert an `decrypt_verified` weiter, statt ihn je Entkapselung neu aus der Wirtsuhr zu lesen. Ein je Entkapselung frisch gelesener Wert wäre in Millisekundenauflösung praktisch nie gleich und machte die Entschlüsselung unmöglich. Der Zeuge ist folglich der LAUFÜBERGREIFENDE Fall: `classify` mit T1, `classify` mit T2, Zeuge aus T1 gegen T2 → `EA-READER-WITNESS-STALE`. Die Kehrseite ist benannt und gehört woanders hin: friert eine lange Sitzung ihren `effective_now` ein, bemerkt sie das Ablaufen eines Registrierungskopfes nicht; die Neuklassifikation bei Sitzungsalter besitzt der Task „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop".
 
 ```rust
 /// Oeffnet GENAU EINEN Eintrag.
 ///
 /// # Errors
-/// `EA-READER-WITNESS-STALE`, wenn `effective_now` von dem Zeitpunkt abweicht,
-/// an dem die Zeugen entstanden. Eine Toleranz gaebe es hier NICHT: sie waere
-/// eine zweite, schwaechere Frist neben der des Registrierungskopfes, den
-/// `ea_trust::select_registry_head` gegen genau diesen Wert misst.
-/// Ausserdem `EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED` und
+/// `EA-READER-WITNESS-STALE`, wenn `effective_now` von dem Lauf abweicht, in
+/// dem die Zeugen entstanden. `EA-READER-SCHEMA-UNSUPPORTED`, wenn keine der
+/// Schemabestimmungen den Klartext traegt. Ausserdem
+/// `EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED` und
 /// `EA-VERIFY-DECRYPT-PAYLOAD-OPEN-FAILED` als durchgereichte Codes.
 pub fn decrypt_verified(
     entry: &VerifiedEncryptedEntry,
@@ -3370,11 +3493,13 @@ pub fn decrypt_verified(
 ) -> Result<VerifiedDecryptedRecord, ReaderError>;
 ```
 
-Die Rechnung ist die von `crates/ea-verify/src/recipient.rs::open_entry`, Schritt fuer Schritt: `HpkeSealed::from_parts(fields.encapsulated_key, fields.wrapped_cek)`, `hpke_open(session.kem_private_key(), &sealed, &hpke_info(context), &hpke_aad(context))`, dann `aead_open(&cek, &nonce, entry.ciphertext(), &payload_aad(manifest.exact_bytes()))`. Der Unterschied zu `open_entry` ist der EINZIGE, den der Reader braucht: `open_entry` verwirft den Klartext beim Verlassen des Rahmens, weil `ea-verify` ihn nie herausgeben darf, und der Reader muss ihn anzeigen. Danach ruft `observer.on_decapsulation()` — genau einmal, hinter Gate `recipient-grant` und ausdruecklich als kein zehntes Gate.
+Die Rechnung ist die von `crates/ea-verify/src/recipient.rs::open_entry`, Schritt fuer Schritt — einschliesslich des ERSTEN Schrittes, den die frühere Fassung übersprang: `body.exact_grant_context().ok_or(CekUnwrapFailed)?`, dann `HpkeSealed::from_parts(fields.encapsulated_key, fields.wrapped_cek)`, `hpke_open(session.kem_private_key(), &sealed, &hpke_info(context), &hpke_aad(context))`, dann `aead_open(&cek, &nonce, entry.ciphertext(), &payload_aad(manifest.exact_bytes()))`. Vier Einzelheiten sind gemessen und nicht wählbar: `hpke_info` und `hpke_aad` laufen über DIESELBEN Kontextbytes; `payload_aad` läuft über `manifest().exact_bytes()`, also über den Manifest-KERN und nicht über `signed_manifest()`; der Nonce kommt aus `manifest().fields().nonce`; und es entsteht KEIN drittes Duplikat der Kontextrekonstruktion — das private in `crates/ea-recovery/src/decrypt.rs` ist veraltet, und `ea-format` gibt `exact_grant_context` öffentlich heraus. Der Unterschied zu `open_entry` ist der EINZIGE, den der Reader braucht: `open_entry` verwirft den Klartext mit `drop(plaintext)`, weil `ea-verify` ihn nie herausgeben darf, und der Reader muss ihn anzeigen. Danach ruft `observer.on_decapsulation()` direkt auf dem Trait — genau einmal, hinter Gate `recipient-grant` und ausdruecklich als kein zehntes Gate; ein frischer `RecordingObserver` enthält danach NUR `["hpke-open"]` ohne Gate-Präfix.
 
-**Zwei Entkapselungen je ANGEZEIGTEM Eintrag, gemessen und benannt.** Weil `verify_archive_observed` mit Empfaengerschluessel laeuft, oeffnet `ea-verify` seinerseits jeden Eintrag, fuer den ein eigener Grant vorliegt, und verwirft das Ergebnis. Der Reader oeffnet danach nur den EINEN Eintrag, den die Oberflaeche anfordert. Die Verdopplung ist damit nicht archivweit, sondern je angezeigtem Eintrag, und sie ist der Preis dafuer, dass der Klartext die Grenze von `ea-verify` nicht ueberschreitet. Die billigere Alternative — `ea-verify` den Klartext herausgeben zu lassen — waere eine Erweiterung einer abgeschlossenen Stufe-1-Crate um genau die Faehigkeit, deren Fehlen ihr Sicherheitsargument ist, und wird hier ausdruecklich nicht gewaehlt.
+**Die Schemabestimmung läuft durch PROBIEREN, weil `ea-schema` keinen Schnüffelweg herausgibt.** `SchemaRegistry::validate` und `::derive_view` nehmen `schema_id: &str, schema_version: u64` als EINGABE; `decode_common_header` in `crates/ea-schema/src/decode.rs` ist `pub(crate)`, `DerivedView::identity` ebenfalls, und weder `ManifestCoreFieldsV1` noch `GrantBodyFieldsV1` trägt ein Schemafeld. `decrypt_verified` läuft deshalb `SchemaRegistry::schemas()` in der gelieferten Reihenfolge durch und ruft je Deskriptor `derive_view(descriptor.schema_id(), descriptor.schema_version(), plaintext)`; der erste Erfolg gewinnt. Das ist deterministisch, weil `schemas()` ein `&'static [SchemaDescriptor]` fester Reihenfolge liefert, und es kostet bis zu fünf verworfene Validierungsläufe je geöffnetem Eintrag. Eine `sniff`-Funktion in `ea-schema` wäre billiger, hiesse aber eine abgeschlossene Stufe-1-Crate anzufassen — das verbietet dieser Task sich selbst. Es entsteht KEIN zweiter CBOR-Parser in `ea-reader`. Scheitern alle fünf, liefert `decrypt_verified` `EA-READER-SCHEMA-UNSUPPORTED`, und die Zustandsabbildung setzt für diesen Eintrag `VerificationStatus::UnsupportedSchema` — die sechste Variante aus `crates/ea-types/src/status.rs`, die die frühere Vorrangordnung unbelegt liess.
 
-**Der historische Grant bleibt Stufe 5, und das steht im Test statt im Kopf.** `ea_verify::own_grant` waehlt ausschliesslich `GrantKindV1::Initial`; ein historischer Grant fuehrt in `verify_own_grant` zu `RecipientGrantErrorV1::AuthorizationUnverifiable` mit dem Code `EA-VERIFY-GRANT-AUTHORIZATION-UNVERIFIABLE`, weil `ea-trust` die Aufloesung einer `grantAuthorization` nicht exportiert. Der Reader stellt den betroffenen Eintrag deshalb als `MissingGrant` dar und NICHT als `Invalid` — der Eintrag ist gueltig, es fehlt nur ein benutzbarer eigener Grant — und `historical_expiry.rs` haelt genau diesen Code und das Ausbleiben des Entkapselungsereignisses fest. FR-145 loest das in Stufe 5.
+**N Entkapselungen ARCHIVWEIT plus eine je angezeigtem Eintrag — die frühere Kostenaussage untertrieb.** Sie schrieb, die Verdopplung sei „nicht archivweit, sondern je angezeigtem Eintrag". Gemessen läuft `claim_own_grants` über ALLE platzierten Einträge mit `objectResult` und ruft für jeden mit eigenem Grant `open_entry`; bei N eigenen Grants fährt allein `classify` also N HPKE-Entkapselungen und N AEAD-Öffnungen, deren Klartext mit `drop(plaintext)` verworfen wird. Dazu kommt eine je angezeigtem Eintrag. Das ist der Preis dafür, dass der Klartext die Grenze von `ea-verify` nicht überschreitet. Die billigere Alternative — `ea-verify` den Klartext herausgeben zu lassen — wäre eine Erweiterung einer abgeschlossenen Stufe-1-Crate um genau die Fähigkeit, deren Fehlen ihr Sicherheitsargument ist, und wird hier ausdrücklich nicht gewählt. Der Task „Verschlüsselter invertierter Index in OPFS …" erbt diese Zahl und muss sie in seiner 50.000-Paket-Messung mitführen.
+
+**Der historische Grant bleibt Stufe 5, und der Zeuge misst seine ABWESENHEIT statt eines Codes.** Die frühere Fassung schrieb: „ein historischer Grant führt in `verify_own_grant` zu `RecipientGrantErrorV1::AuthorizationUnverifiable` mit dem Code `EA-VERIFY-GRANT-AUTHORIZATION-UNVERIFIABLE`". Über die Pipeline ist dieser Code unerreichbar: `own_grant` filtert auf `fields.kind == GrantKindV1::Initial`, und der `GrantKindV1::Historical`-Arm in `verify_own_grant` trägt wörtlich den Quelltextkommentar „UNERREICHBAR DURCH KONSTRUKTION: [`own_grant`] gibt nur initiale Grants heraus, und das ist der einzige Weg hierher". Beide Funktionen sind `pub(crate)` und stehen nicht im `pub use recipient::{DecryptionErrorV1, RecipientGrantErrorV1}` von `crates/ea-verify/src/lib.rs`; ein direkter Aufruf aus `ea-reader` ist ausgeschlossen. Die Fixture `complete_archive_with_a_forged_historical_grant()` erzeugt genau diesen Zustand, und sie erzeugt ihn als NICHTS: kein Befund, `is_fully_verified()` bleibt wahr. `historical_expiry.rs` hält deshalb `VerificationStatus::MissingGrant`, `detail_code() == None`, kein `DECAPSULATION_EVENT_V1` im Protokoll und leere `decryption_errors` wie `signature_errors` fest — eine schwächere Aussage als die frühere Fassung behauptete, aber die einzige, die der ausgelieferte Code trägt. Der Reader stellt den betroffenen Eintrag als `MissingGrant` dar und NICHT als `Invalid`: der Eintrag ist gültig, es fehlt nur ein benutzbarer eigener Grant. Nachzuschärfen ist der Zeuge erst, wenn Stufe 5 (FR-145) die `grantAuthorization` auflöst; der Fehlerpunkt heisst deshalb `historical-grant-unresolvable` und beschreibt eine Abwesenheit.
 
 **Der Klartext liegt in `SecretVec`, und die VOLLSTAENDIGE Zugriffsflaeche steht HIER.** `VerifiedDecryptedRecord` haelt den entschluesselten Payload in `ea_crypto::SecretVec`, der beim Verlassen ueberschreibt. Diese Aufgabe deklariert den Typ, und sie deklariert damit auch, WIE an seinen Klartext heranzukommen ist — abschliessend, fuer jede spaetere Aufgabe dieses Plans:
 
@@ -3386,12 +3511,14 @@ impl VerifiedDecryptedRecord {
     #[must_use] pub const fn entry_hash(&self) -> EntryHash;
     #[must_use] pub const fn chain_sequence(&self) -> ChainSequence;
     #[must_use] pub const fn object_hash(&self) -> ObjectHash;
-    /// Der Zeitpunkt, an dem die Zeugen entstanden — die Frischepruefung von
+    /// Der Lauf, in dem die Zeugen entstanden — die Frischepruefung von
     /// `decrypt_verified` misst gegen genau diesen Wert.
     #[must_use] pub const fn minted_at(&self) -> UnixMillis;
-    /// Schema-Kennung und -Fassung des QUELLDATENSATZES.
+    /// Schema-Kennung und -Fassung des QUELLDATENSATZES, aus
+    /// `DerivedView::source_schema_id`/`::source_schema_version`.
     #[must_use] pub fn source_schema(&self) -> (&'static str, u64);
-    /// Schema-Kennung und -Fassung der ABGELEITETEN Ansicht. In v1 ist die
+    /// Schema-Kennung und -Fassung der ABGELEITETEN Ansicht, aus
+    /// `DerivedView::target_schema_id`/`::target_schema_version`. In v1 ist die
     /// Ableitung die Identitaet, und beide Paare sind gleich; die Spalte steht
     /// trotzdem getrennt, weil sie es ab v2 nicht mehr ist.
     #[must_use] pub fn target_schema(&self) -> (&'static str, u64);
@@ -3409,11 +3536,17 @@ impl VerifiedDecryptedRecord {
 
 Es gibt AUSDRUECKLICH KEIN `exact_plaintext_bytes() -> &[u8]` und KEIN `payload() -> &PayloadV1`. Ein Zugriff, der eine Ausleihe auf die Bytes ODER auf die geparste Nutzlast HERAUSGIBT, ist ein Klartext-Fluchtweg aus einem `SecretVec`: der Aufrufer kann ihn beliebig lange halten, kopieren, in ein `Vec` heben und in eine Ablage schreiben, und `ZeroizeOnDrop` greift auf die Kopie nie. Genau das verbieten `WR-082` (keine Zwischenablage-, Log- oder Telemetriewege fuer entschluesselte Inhalte), `FR-105` (Einzelexport mit bewusster Zielwahl statt beliebiger Herausgabe) und die Produktinvariante „no decrypted content enters OPFS bytes in the clear". Die Ausleihform macht die Reichweite des Klartexts zu einer TYPAUSSAGE: er lebt genau so lange wie der Aufruf. Es gibt aus demselben Grund weder `Deref` noch `Clone` noch ein abgeleitetes `Debug` auf diesem Typ; `Debug` gibt den Eintragshash und die Schemaspalten aus und nie eine Nutzlast. Jede spaetere Aufgabe dieses Plans — „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle", „Nachtragsreferenzen und Original/Nachtrag-Projektion", „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit" — benutzt AUSSCHLIESSLICH diese acht Zugriffe.
 
-`SchemaRegistry::validate` laeuft INNERHALB von `decrypt_verified` ueber eine Ausleihe, und der dabei entstehende `ValidatedPayload` faellt dort. **Benannte Restfrage:** `ea_schema::ValidatedPayload` und `ea_schema::DerivedView` besitzen einen gewoehnlichen `Vec<u8>` und ueberschreiben ihn beim Fallen nicht; sie zeroize-faehig zu machen hiesse, eine abgeschlossene Stufe-1-Crate anzufassen. Dieser Task tut das nicht, er schreibt die Luecke auf, und der Task „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit" besitzt die Zeroize-Zusage der Sitzung und entscheidet dort, ob die Luecke geschlossen oder als dokumentierte SOLL-Abweichung gefuehrt wird.
+**Der Erfolgspfad wird BEZEUGT, und zwar zweimal getrennt.** Die acht Zugriffe wären sonst eine unbefahrene Fläche. Der ERSTE Zeuge fährt `decrypt_verified` über die vorhandene Fixture VOLLSTÄNDIG durch die HPKE-Entkapselung UND die AEAD-Öffnung und endet erwartungsgemäss an der Schemabestimmung mit `EA-READER-SCHEMA-UNSUPPORTED`, weil der Klartext von `complete_valid_archive()` `b"einsatzarchiv-fixture-payload"` ist. Genau dieser Ausgang beweist, dass die aus `open_entry` nachgebaute Kryptorechnung stimmt: wäre sie falsch, fiele der Lauf FRÜHER mit `EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED` oder `EA-VERIFY-DECRYPT-PAYLOAD-OPEN-FAILED`. Derselbe Zeuge beobachtet `observer.on_decapsulation()` genau einmal auf einem frischen `RecordingObserver`. Der ZWEITE Zeuge fährt den vollen Weg bis `with_plaintext`, `with_payload`, `source_schema` und `target_schema`, und er ist gemessen baubar: `ea_schema::encode_payload` ist öffentlich exportiert (`crates/ea-schema/src/lib.rs`, `pub use v1::{…, encode_payload}`), `GenesisV1::new` ebenso, und `vectors/format/payload-v1/genesis.hex` liegt als eingefrorener Vektor daneben. Die Fixture dafür entsteht durch dieselbe rein additive Erweiterung wie in der Stummelfrage: ein `plaintext: &[u8]`-Parameter an den MODULPRIVATEN `build_complete_entry` und `complete_archive_for` (vier beziehungsweise drei Aufrufstellen in derselben Datei, alle reichen `COMPLETE_PLAINTEXT_V1` durch) und ein neues öffentliches `complete_valid_archive_with_plaintext(&[u8])` neben dem unveränderten `complete_valid_archive()`. **Gemessene Nebenbedingung:** die Offsetkonstanten `SIGNED_EIP_LENGTH_V1 = 535`, `MUTATED_EIP_SIGNATURE_OFFSET_V1` und `MUTATED_EIP_KEY_THUMBPRINT_OFFSET_V1` hängen an der LÄNGE des Klartexts. Sie bleiben nur deshalb gültig, weil der Vorgabepfad `COMPLETE_PLAINTEXT_V1` behält; ein Bestand mit schemagültigem Klartext darf in keiner der Mutationsfixturen auftauchen.
 
-**Der Modusparameter.** `ReaderMode` aendert die Gate-Reihenfolge nicht — `web-reader-design.md` §5.4 sagt „wortgleich in beiden Modi" — und aendert an Gate `receipt` nichts: `ea-verify` bestimmt `ServerConfirmationV1` ohnehin aus den VORHANDENEN Quittungen, also ist der Datei-Modus fuer die Pipeline schlicht ein Bestand ohne `.esr`. Der Parameter traegt zwei Zusagen und sonst nichts: `ReaderMode::File` verbietet jeden Netzaufruf dieses Laufs, und `NotServerConfirmed` ist dort der Regelfall statt der Ausnahme. Die Oberflaechenwirkung besitzt der Task „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`"; hier wird nur festgehalten, dass beide Modi dasselbe Protokoll erzeugen.
+`SchemaRegistry::validate` laeuft INNERHALB von `decrypt_verified` ueber eine Ausleihe, und der dabei entstehende `ValidatedPayload` faellt dort. **Benannte Restfrage, gegen den Arbeitsbaum nachgemessen und anders formuliert als zuvor:** die frühere Fassung schrieb, `ea_schema::ValidatedPayload` UND `ea_schema::DerivedView` besässen je einen gewöhnlichen `Vec<u8>`. `DerivedView` besitzt keinen eigenen Puffer — er hält ein `ValidatedPayload`. Betroffen sind tatsächlich `ValidatedPayload.exact_bytes: Vec<u8>`, die Rückprobe-Kopie in `SchemaRegistry::validate` und die dekodierten Zeichenketten in `PayloadV1`; keines davon wird beim Fallen überschrieben. Sie zeroize-fähig zu machen hiesse, eine abgeschlossene Stufe-1-Crate anzufassen. Dieser Task tut das nicht, er schreibt die Lücke auf, und der Task „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit" besitzt die Zeroize-Zusage der Sitzung und entscheidet dort, ob die Lücke geschlossen oder als dokumentierte SOLL-Abweichung geführt wird.
 
-`docs/traceability/stage-4-fault-points.json` — vom Task „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes" angelegt — bekommt den Abschnitt `verification` mit einem benannten Zeugen je Fehlerpunkt, in der Form von `docs/traceability/stage-3-fault-points.json`: `substituted-archive-own-trust-chain` → `pinned_anchor.rs`, `missing-own-grant` → `missing_grant.rs`, `own-thumbprint-wrong-material` → `missing_grant.rs`, `stub-without-authorization` → `destroyed_stub.rs`, `stale-witness` → `historical_expiry.rs`, `historical-grant-unresolvable` → `historical_expiry.rs`.
+**Der Modusparameter wird von `classify` NICHT GELESEN.** `ReaderVerifier` trägt ihn, faltet ihn aber nirgends in `VerifyOptions`; `both_reader_modes_produce_the_same_gate_protocol_over_the_same_bytes` pinnt genau das. `web-reader-design.md` §5.4 lautet wörtlich „Die Reihenfolge aus Design §14.1 gilt in beiden Modi wortgleich", `verify_archive_observed` kennt keinen Modusparameter, und `confirm_entries` bestimmt `ServerConfirmationV1` ohnehin aus den VORHANDENEN Quittungen — der Datei-Modus ist für die Pipeline schlicht ein Bestand ohne `.esr`. Der Satz der früheren Fassung, „`ReaderMode::File` verbietet jeden Netzaufruf dieses Laufs", ist hier GESTRICHEN: `crates/ea-reader` hat gar keine Netzfähigkeit — sein Manifest führt keinen HTTP-Klienten, und `src/http.rs` baut ausschliesslich das DTO `ReaderRequestV1` —, die Quelle stellt der Aufrufer, und die Zusage gehört in den Task „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`" beziehungsweise an `crates/ea-reader-wasm/src/fetch.rs`. Es bleibt die eine Zusage, die hier gemessen wird: beide Modi erzeugen dasselbe Protokoll. Dass dieser Zeuge damit per Konstruktion grün ist, ist gewollt — er pinnt eine NICHT-Abhängigkeit und schützt gegen ein späteres Einfalten des Modus in die Pipeline.
+
+**Die Re-Exporte in `crates/ea-reader/src/lib.rs` wachsen mit den Signaturen.** Der Modulkopf dieser Datei schreibt die Regel aus: was in einer SIGNATUR steht, wird ebenfalls RE-EXPORTIERT — sonst kann `crates/ea-reader-wasm` die Fläche nicht bedienen, ohne eigene Kanten zu ziehen, und ein zweiter Weg an dieselben Typen wäre genau das, was die Tasks 9 und 13 dann fortschrieben. Heute re-exportiert `ea-reader` aus `ea_verify` NUR `GATE_ORDER_V1` und aus `ea_types` nur `Hash32, OrganizationId, RegistryVersion, SubjectId, UnixMillis`. Dazu kommen: aus `ea_verify` `DECAPSULATION_EVENT_V1`, `Gate`, `GateObserver`, `RecordingObserver`, `SilentObserver`, `VerificationReportV1`, `ObjectResultKindV1`, `ObjectResultV1`, `ObjectErrorV1`, `ChainGapV1`, `QuarantinedObjectV1`, `AuthorizedDestructionV1`, `DestructionStateV1`, `ServerConfirmationV1`, `VerifyError`; aus `ea_types` `ChainSequence`, `EntryHash`, `ObjectHash`, `KeyThumbprint`, `DestructionId`, `VerificationStatus`, `EntryStatus`; aus `ea_archive` `ArchiveSource`; aus `ea_trust` `TrustAnchorV1`; aus `ea_schema` `SchemaRegistry` und `PayloadV1`; aus `ea_crypto` `HpkeRecipientPrivateKey`. Die `mod`- und `pub use`-Listen bleiben je alphabetisch sortiert: `anchor` vor `batch`, `decrypt` zwischen `cursor` und `enrollment`, `grant` zwischen `envelope` und `http`, `verify` zwischen `trust_state` und `vault`.
+
+`docs/traceability/stage-4-fault-points.json` — vom Task „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes" angelegt — bekommt den Abschnitt `verification` in derselben Dreifeldform `{name, brackets, witness}` wie `docs/traceability/stage-3-fault-points.json`, mit `witness` als `pfad::testname` und EINEM eigenen `#[test]` je Fehlerpunkt: `substituted-archive-own-trust-chain` → `pinned_anchor.rs`, `missing-own-grant` → `missing_grant.rs`, `own-thumbprint-wrong-material` → `missing_grant.rs`, `stub-without-authorization` → `destroyed_stub.rs`, `stale-witness` → `historical_expiry.rs`, `historical-grant-unresolvable` → `historical_expiry.rs`. **Kein Gate liest dieses Manifest für Stufe 4**: `tools/xtask/src/main.rs` pinnt nur `STAGE_TWO_…` und `STAGE_THREE_FAULT_POINT_MANIFEST_PATH`, und `run_stage_gate` fällt für Stufe 4 mit „stage-gate is only defined for stages 1, 2 and 3 so far". Die Stufe-2/3-Regeln — nichtleere `name`/`brackets`, kein Name doppelt, auflösbarer Zeuge mit `#[test]` unmittelbar davor — werden trotzdem eingehalten, weil ein späteres Stufe-4-Gate dieselben Funktionen wiederverwenden wird.
+
+**Die Testquelle kommt aus der Fixturekette und nicht aus einer neuen Produktionsfläche.** `ReaderCacheSourceV1` in `crates/ea-reader/src/batch.rs` bleibt `pub(crate)`: `crates/ea-archive/tests/support/mod.rs` trägt `impl ArchiveSource for ArchiveFixture`, die Zeugen bringen ihre `ArchiveSource` also selbst mit, ein Testdouble ist überflüssig, und die Produktionsfläche wächst nicht. Die Frage einer öffentlichen Reader-Quelle gehört zum Task „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`".
 
 - [ ] **Step 4: Run the classification, the browser witness, and the frozen surfaces**
 
@@ -3423,19 +3556,27 @@ Run:
 cargo metadata --format-version 1
 cargo test --locked -p ea-reader
 cargo test --locked -p ea-reader --doc
+cargo test --locked -p ea-verify
+cargo test --locked -p ea-recovery
+cargo test --locked -p ea-archive-fs
+cargo check --target wasm32-unknown-unknown --locked -p ea-reader-wasm --tests
 pnpm web:browser-test
 cargo run --locked -p xtask -- test-golden
 ```
 
-`cargo metadata --format-version 1` steht als ERSTE Zeile und ist das GENAU EINE Kommando dieses Tasks ohne `--locked`: Schritt 3 gibt `crates/ea-reader` und `crates/ea-reader-wasm` die Kante auf `ea-schema`, und `Cargo.toml` sowie `Cargo.lock` stehen aus genau diesem Grund im Files-Block. `ea-archive` steht seit dem Task „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS" in `crates/ea-reader/Cargo.toml` — `ea_verify::verify_archive_observed` nimmt dort bereits `&dyn ArchiveSource` —, `ea-format` seit dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel", der `DeviceCertificateFieldsV1` benennt; beide werden hier geerbt und nicht neu gezogen. Es steht NACH der Registrierung und VOR jedem `--locked`-Kommando.
+`cargo metadata --format-version 1` steht als ERSTE Zeile und ist das GENAU EINE Kommando dieses Tasks ohne `--locked`: Schritt 3 gibt `crates/ea-reader` die Kante auf `ea-schema` und `crates/ea-reader-wasm` acht Entwicklungskanten, und `Cargo.lock` steht aus genau diesem Grund im Files-Block. Die WURZEL-`Cargo.toml` steht dort NICHT, weil `ea-schema` bereits in `[workspace.dependencies]` deklariert ist. `ea-archive` steht seit dem Task „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS" in `crates/ea-reader/Cargo.toml` — `ea_verify::verify_archive_observed` nimmt dort bereits `&dyn ArchiveSource` —, `ea-format` seit dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel", der `DeviceCertificateFieldsV1` benennt; beide werden hier geerbt und nicht neu gezogen. Es steht NACH der Registrierung und VOR jedem `--locked`-Kommando.
+
+Die drei Zeilen `-p ea-verify`, `-p ea-recovery` und `-p ea-archive-fs` sind der ZEUGE DAFÜR, dass die Erweiterung von `crates/ea-verify/tests/support/mod.rs` additiv blieb: das sind genau die drei anderen Crates, die dieselbe Datei per `#[path]` einbinden. Bewegte sich eine bestehende Signatur, fiele mindestens eine von ihnen. `cargo check --target wasm32-unknown-unknown --locked -p ea-reader-wasm --tests` steht daneben, weil `pnpm web:browser-test` wörtlich `cargo test --locked -p ea-reader-wasm --target wasm32-unknown-unknown` ist — ein rohes cargo-Kommando OHNE xtask-Vorschaltung, dessen Übersetzungsfehler erst nach dem Browserstart aufträten. Die fail-closed-Prüfung des WebDrivers läuft ausschliesslich in `cargo run --locked -p xtask -- browsers up`, und die Umgebungsvariable heisst `CHROMEDRIVER_REMOTE`.
+
+`crates/ea-reader-wasm/tests/verify_browser.rs` trägt `#![cfg(target_arch = "wasm32")]` in ZEILE 1 — sonst zöge `cargo test --workspace --all-targets --locked` das Ziel auf den Wirt — und `wasm_bindgen_test_configure!(run_in_browser);`: ohne diese Zeile führe der Läufer in Node, und der Zeuge schlösse die Spike-Grenze zur COSE-Kette gerade NICHT. Kein `run_in_dedicated_worker`, weil kein OPFS im Spiel ist. Der Bestand kommt über dieselbe `#[path]`-Kette, `ArchiveFixture` implementiert `ArchiveSource` selbst, `getrandom` trägt workspaceweit `wasm_js`, und `ReaderVault::seal`/`unlock` ist reines Rust. Ein einträgiger Bestand genügt.
 
 Expected: PASS. Das Protokoll ist in beiden Modi ein Praefix von `GATE_ORDER_V1` gefolgt von hoechstens einem `hpke-open`; ein vollstaendiger Bestand ist `is_fully_verified()`; `crates/ea-reader-wasm/tests/verify_browser.rs` fuehrt dieselbe Klassifikation in Headless-Chromium ueber eine `ArchiveSource` im Speicher und schliesst damit eine der fuenf benannten Grenzen des Spikes — hier laeuft `parse_cose_sign1` zum ersten Mal gegen eine ECHTE COSE-Kette im Browser statt gegen einen rohen RFC-8032-Vektor. Die adversariellen Faelle, die rot werden MUESSEN und einzeln zu pruefen sind: ein untergeschobener, in sich vollstaendiger Fremdbestand faellt an Gate `trust` und liefert NULL `objectResults` statt einer stillen Teilverifikation; ein `PinnedTrustAnchor`, der aus Archivbytes gebaut werden soll, uebersetzt nicht (`compile_fail`-Doctest); ein `decrypt_verified` mit einem Zeugen aus einem frueheren `classify` bricht mit `EA-READER-WITNESS-STALE` ab; ein `.eds` erzeugt in keinem seiner beiden Ausgaenge ein `hpke-open`; ein Eintrag ohne eigenen Grant erzeugt weder einen `decryptionErrors`-Eintrag noch eine `gaps`-Zeile und senkt `is_fully_verified()` nicht; und ein Grant auf den eigenen Abdruck mit falschem Material erzeugt `EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED` und wird als `unbekannter Schluessel` und nie als `fehlender Grant` gefuehrt. `test-golden` belegt, dass kein eingefrorener Vektor und keine Golden-Erwartung sich bewegt hat: dieser Task erzeugt kein Archivbyte.
 
 - [ ] **Step 5: Commit the verification binding**
 
 ```bash
-git add crates/ea-reader crates/ea-reader-wasm docs/traceability/stage-4-fault-points.json \
-        Cargo.toml Cargo.lock
+git add crates/ea-reader crates/ea-reader-wasm crates/ea-verify/tests/support/mod.rs \
+        docs/traceability/stage-4-fault-points.json Cargo.lock
 git commit -m "feat(reader): decrypt only fully verified entries against the vault-pinned anchor"
 ```
 
