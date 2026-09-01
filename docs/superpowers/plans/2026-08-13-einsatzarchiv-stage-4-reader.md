@@ -2372,6 +2372,8 @@ git commit -m "feat(reader): enroll two authenticators behind an unskippable fin
 - Modify: `crates/ea-ui-contracts/src/lib.rs`
 - Modify: `crates/ea-ui-contracts/src/emit.rs`
 - Modify: `crates/ea-ui-contracts/Cargo.toml`
+- Modify: `crates/ea-ui-contracts/tests/generated_ts_is_current.rs` — der Maskierungshaken der Reader-Haelfte; siehe Korrektur 3
+- Modify: `crates/ea-reader/tests/fixtures/mod.rs` — der ZWEITE Anker der Web-Bundle-Vektorfamilie; siehe Korrektur 4
 - Modify: `Cargo.lock`
 - Modify: `apps/web/src/bridge/generated-contracts.ts` — Emitterausdruck, von Hand unangetastet
 
@@ -2380,6 +2382,52 @@ git commit -m "feat(reader): enroll two authenticators behind an unskippable fin
 - Produces: `ea_crypto::verify_web_bundle_trust_signature`, `ReaderBundlePin::{from_trust_objects, evaluate, active_bundle_hash}`, `BundleActivationDecisionV1`, `BundleRejectionCodeV1`, `ReaderTrustAgeView`, `BundleActivationView`, der Service Worker von `apps/web` mit seiner Aktivierungsentscheidung, der Abschnitt `bundle-activation` in `docs/traceability/stage-4-fault-points.json`.
 
 Diese Aufgabe wählt und betreibt den getrennten Bundle-Host NICHT — Zielorigin und Betriebsverantwortung sind in `web-reader-design.md` §14, offener Punkt 4, selbst als offen erklärt; sie baut ausschließlich die Trennung selbst und die Positivliste, gegen die sie geprüft wird. Sie behauptet keine PWA-Installation und kein Gate über die Ablehnung eines nicht Root-signierten Bundles: beides weist §12 der Stufe 7 zu. Sie friert keinen Vektor ein und legt keinen neuen an; die Familie ist seit Stufe 3 permanent eingefroren.
+
+**GEMESSEN am 2026-09-01 und in diesem Abschnitt korrigiert — fuenf Aussagen gingen gegen den
+AUSGELIEFERTEN Stand nicht auf.** Dieser Abschnitt entstand, bevor die ersten fuenf Aufgaben der
+Stufe 4 auslieferten; dieselbe Nachbesserung hat die Aufgabe „Browser-Enrollment: zwei
+Pflicht-Authenticators und das nicht ueberspringbare Fingerprint-Gate" vor ihrer Umsetzung gefahren.
+Die Korrekturen stehen unten im Text und werden hier aufgezaehlt, damit keine still bleibt:
+
+1. **`Hash32` traegt kein `Debug`.** `assert_eq!` auf `Option<Hash32>` UEBERSETZT NICHT — der Fehler
+   waere ein Kompilierfehler in der Zusicherungsmaschinerie und keine Aussage ueber
+   `ReaderBundlePin`. Die vier betroffenen Zusicherungen vergleichen jetzt ueber `as_bytes()`, der
+   Leerfall ueber `is_none()`. Derselbe Verzicht auf `Debug` steht in diesem Plan bereits zweimal
+   ausgeschrieben; Task 6 hat ihn gebrochen. `crates/ea-types` wird NICHT angefasst: das fehlende
+   `Debug` ist eine Datensparsamkeitsentscheidung und kein Versehen.
+2. **`format: 'iife'` ist im SELBEN Bau-Durchgang nicht erreichbar.** Gemessen gegen die
+   installierte Werkzeugkette (Vite 8.2.1 auf rolldown 1.2.5), ueber die JS-API mit
+   `build.write: false`: zwei Einstiege mit `output.format: 'iife'` brechen mit
+   `[INVALID_OPTION] ... multiple inputs are not supported when "output.codeSplitting" is false` ab,
+   und mit erzwungenem `codeSplitting: true` mit `UMD and IIFE are not supported for code-splitting
+   builds`. Der Worker entsteht deshalb in einem ZWEITEN, einlaeufigen Durchgang als
+   `closeBundle`-Haken in `apps/web/vite.config.ts`. Beide Textpins auf `vite.config.ts` bleiben
+   damit WAHR — die Literale stehen in den Optionen des zweiten Durchgangs —, ein dritter Pin
+   kommt hinzu. Der Modulworker wurde ABGELEHNT: er waere eine Engine-Wette, die erst die Aufgabe
+   „Reader-Interoperabilitaet, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate"
+   einloest, und der klassische Worker ist die konservative Wahl.
+3. **Die Zeichenfolge `sign` ist im Reader-Ausdruck verboten.**
+   `the_emitted_reader_file_declares_types_and_computes_nothing` verbietet neun Zeichenfolgen
+   ungemaskiert, darunter `sign`; `Unsigned` enthaelt sie, also faerbte
+   `cargo test --locked -p ea-ui-contracts` in Schritt 4 rot, obwohl dort „Expected: PASS" steht.
+   Die Aufzaehlung wird NICHT umbenannt — §4.2 sagt „nicht signiert", und die Domaenensprache
+   gegen einen Kunstnamen zu tauschen waere der schlechtere Handel. Stattdessen bekommt die
+   Reader-Haelfte denselben Maskierungshaken, den die Desktop-Haelfte fuer `signerrole` und den
+   Gesundheitscode bereits fuehrt.
+4. **`fixtures::vault_anchor()` ist ein ZWEITER Anker und nicht der vorhandene.**
+   `fixtures::pinned_anchor()` traegt Wurzelseed `0x11`, `organization_id` `0x12` und
+   Zertifikatshash `0x14` und wird von fuenf bestehenden Testdateien auf genau dieser Identitaet
+   verbraucht. Die eingefrorenen Vektoren unter `vectors/web-bundle/v1/object/` sind mit Seed
+   `0xa0` unterschrieben und tragen `organization_id` `0x90` und Zertifikatshash `0x92` — gegen
+   `pinned_anchor()` fiele JEDE positive Zusicherung mit `WrongRoot` beziehungsweise
+   `WrongOrganization`. `vault_anchor()` entsteht deshalb NEBEN `pinned_anchor()` in derselben
+   Datei und ersetzt ihn nicht. `crates/ea-testkit` wird dafuer NICHT geoeffnet.
+5. **Der in Schritt 3 genannte Zeuge haelt die falsche Datei.**
+   `the_checked_in_file_is_exactly_what_the_emitter_writes` vergleicht gegen
+   `apps/desktop/src/bridge/generated-contracts.ts`. Den Web-Ausdruck haelt
+   `the_checked_in_reader_file_is_exactly_what_the_reader_emitter_writes`. Die Verwechslung waere
+   teuer geworden, weil `docs/traceability/stage-4-fault-points.json` jeden `witness` bei Namen
+   nennt und der Stufengate ihn aufloest.
 
 - [ ] **Step 1: Write the pinning, revocation and activation witnesses**
 
@@ -2390,6 +2438,13 @@ Diese Aufgabe wählt und betreibt den getrennten Bundle-Host NICHT — Zielorigi
 // Test baut KEINE neuen Vektoren: die Familie ist seit Stufe 3 eingefroren,
 // und die Negativfaelle entstehen im Test, indem einzelne Bytes des positiven
 // Vektors gekippt oder Anker ausgetauscht werden.
+//
+// Der aktive Buendelhash wird ueber `as_bytes()` verglichen und nie direkt:
+// `Hash32` traegt bewusst KEIN `Debug` (`crates/ea-types/src/ids.rs`), also
+// uebersetzt `assert_eq!` auf `Option<Hash32>` nicht. Dieselbe Regel steht in
+// den Aufgaben „Browser-Enrollment: zwei Pflicht-Authenticators und das nicht
+// ueberspringbare Fingerprint-Gate" und „Inkrementeller Reader-Sync und
+// verifizierter Cursor-Fortschritt in OPFS" bereits ausgeschrieben.
 
 #[test]
 fn a_root_signed_release_pins_its_bundle_hash_against_the_vault_anchor() {
@@ -2399,7 +2454,10 @@ fn a_root_signed_release_pins_its_bundle_hash_against_the_vault_anchor() {
         RegistryVersion::new(6),
     )
     .unwrap();
-    assert_eq!(pin.active_bundle_hash(), Some(fixtures::frozen_bundle_hash()));
+    assert_eq!(
+        pin.active_bundle_hash().map(|hash| *hash.as_bytes()),
+        Some(*fixtures::frozen_bundle_hash().as_bytes())
+    );
     assert!(matches!(
         pin.evaluate(fixtures::frozen_bundle_hash()),
         BundleActivationDecisionV1::Activate { .. }
@@ -2444,7 +2502,10 @@ fn a_revocation_withdraws_its_release_and_the_last_valid_version_stays_active() 
     // Der Widerruf nennt die Freigabe ausschliesslich ueber ihren Objekthash
     // und schreibt sie nie um; wirksam wird er ab seiner eigenen
     // Registry-Version.
-    assert_eq!(pin.active_bundle_hash(), Some(fixtures::previous_bundle_hash()));
+    assert_eq!(
+        pin.active_bundle_hash().map(|hash| *hash.as_bytes()),
+        Some(*fixtures::previous_bundle_hash().as_bytes())
+    );
     assert_eq!(
         pin.evaluate(fixtures::frozen_bundle_hash()),
         BundleActivationDecisionV1::KeepActive {
@@ -2458,7 +2519,10 @@ fn a_revocation_withdraws_its_release_and_the_last_valid_version_stays_active() 
         RegistryVersion::new(6),
     )
     .unwrap();
-    assert_eq!(earlier.active_bundle_hash(), Some(fixtures::frozen_bundle_hash()));
+    assert_eq!(
+        earlier.active_bundle_hash().map(|hash| *hash.as_bytes()),
+        Some(*fixtures::frozen_bundle_hash().as_bytes())
+    );
 }
 
 #[test]
@@ -2469,7 +2533,7 @@ fn an_empty_trust_store_activates_nothing_and_says_so() {
         RegistryVersion::new(6),
     )
     .unwrap();
-    assert_eq!(pin.active_bundle_hash(), None);
+    assert!(pin.active_bundle_hash().is_none());
     assert_eq!(
         pin.evaluate(fixtures::frozen_bundle_hash()),
         BundleActivationDecisionV1::KeepActive {
@@ -2574,6 +2638,10 @@ it('pins the vite configuration that makes the separation possible', () => {
   expect(config).toContain("base: './'")
   expect(config).toMatch(/format:\s*'iife'/)
   expect(config).toMatch(/entryFileNames:\s*'service-worker\.js'/)
+  // Der Worker entsteht in einem ZWEITEN, einlaeufigen Durchgang: unter
+  // rolldown-Vite schliessen sich `iife` und mehrere Einstiege aus, und ein
+  // Modulworker waere eine Engine-Wette, die erst die Browser-Matrix einloest.
+  expect(config).toMatch(/closeBundle/)
 })
 ```
 
@@ -2663,6 +2731,8 @@ impl ReaderBundlePin {
 }
 ```
 
+`crates/ea-reader/tests/fixtures/mod.rs` bekommt dafür `vault_anchor()` als ZWEITEN Anker NEBEN dem bestehenden `pinned_anchor()`, gebaut mit derselben Pre-Anchor-Rezeptur, aber auf der Identität der eingefrorenen Vektorfamilie: Wurzelseed `0xa0`, `organization_id` `0x90`, Zertifikatshash `0x92`. `pinned_anchor()` bleibt unverändert — fünf bestehende Testdateien verbrauchen ihn auf `0x11`/`0x12`/`0x14`, und ihn umzuschreiben hieße, fremde Zeugen für die Bequemlichkeit dieses Tasks zu bewegen. Die beiden Anker tragen je einen Doc-Kommentar, der ihre Identität und ihren Verbraucherkreis nennt, damit der nächste Task nicht rät.
+
 `from_trust_objects` dekodiert jedes Objekt über `ea_format::decode_exact_object` und den Arm `ParsedArchiveObject::Trust`, nimmt ausschließlich die Subtypen `WebBundleRelease` und `WebBundleRevocation` (alles andere ist kein Fehler, sondern gehört einem anderen Prüfweg), verlangt je Objekt GENAU EINE Signatur — die Kardinalität steht seit Stufe 3 in `validate_signature_count` und wird hier nicht ein zweites Mal erfunden, sondern als bereits geprüft vorausgesetzt und dennoch bezeugt —, prüft sie mit `verify_web_bundle_trust_signature` gegen `anchor.root_public_cose_key()` und `CertificateHash::from(anchor.root_certificate_object_hash())`, und WEIST AB — mit `Err(ReaderBundleError)` und nicht durch Überspringen —, was diese Prüfung nicht besteht oder eine fremde `organization_id` trägt. Der Unterschied ist normativ: ein Objekt eines anderen Subtyps gehört einem anderen Prüfweg und wird still übergangen, ein Objekt DIESER Familie, das seine Wurzelsignatur nicht belegt, ist der Angriff, gegen den §4.1 gebaut ist, und darf nicht als abwesend gelten. Danach gilt: eine Freigabe ist wirksam, wenn `effective_from_registry_version <= at_registry_version`; ein Widerruf ist wirksam unter derselben Bedingung und entfernt die Freigabe, deren `object_hash` — gerechnet mit `ea_crypto::object_hash` über die exakten Objektbytes — seinem `release_object_hash` gleicht. Aktiv bleibt unter den verbleibenden wirksamen Freigaben die mit der höchsten `effective_from_registry_version`; bei Gleichstand die mit dem höheren `issued_at`, und bei erneutem Gleichstand keine, weil zwei gleichzeitig wirksame Freigaben desselben Standes eine Aussage der Wurzel wären, die niemand auflösen darf. Der Verzicht auf ein Widerrufsfeld IM Release ist die Append-only-Entscheidung der Stufe 3 und wird hier ausgenutzt statt umgangen.
 
 `evaluate` ist rein und trifft die Aussage von §4.2 wörtlich: der Service Worker DARF eine neue Bundle-Version nur aktivieren, wenn deren Hash gegen eine gepinnte, Root-signierte `webBundleRelease` aufgeht. Jeder andere Ausgang ist `KeepActive` mit Code, und die zuletzt gültige Version bleibt aktiv. Es gibt keinen Rückgabewert, der „aktivieren, aber mit Warnung" bedeutet.
@@ -2671,7 +2741,9 @@ Ein Punkt bleibt hier ausdrücklich OFFEN und wird nicht stillschweigend entschi
 
 Die Alterung des Trust-Standes wird nicht erfunden, sondern über das bereits eingefrorene Feld ausgewiesen. `reader_trust_age_view` rechnet `trust_age_ms` als Differenz zwischen dem Zeitpunkt des letzten bezogenen Trust-Standes und dem geprüften `EffectiveNow`, liest die Frist als `PolicyFieldsV1::reader_trust_refresh_ms` aus `SelectedRegistryHead::policy_fields()` und setzt `trust_refresh_overdue` genau dann, wenn die Frist ungleich null ist UND überschritten wurde — `0` heißt „unset", so steht es im Kommentar des CDDL-Felds `reader-trust-refresh-ms`. Die Überschreitung ist eine AUFFORDERUNG zur Aktualisierung und keine Sperre; §4.2 nennt genau diesen Unterschied, weil ein dauerhaft im Datei-Modus betriebenes Gerät einen Widerruf erst beim nächsten Bezug des Trust-Bestandes sieht.
 
-Die beiden Kontrakttypen entstehen in `crates/ea-ui-contracts`, und zwar AUSSCHLIESSLICH im Reader-Ausdruck: `BundleRejectionCodeV1` tritt in `READER_ENUMS_V1` ein, `BundleActivationView` und `ReaderTrustAgeView` bilden den ersten Eintrag der hier angelegten Liste `READER_VIEW_MODELS_V1` (`crates/ea-ui-contracts/src/emit.rs`), die der Task „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop" später erweitert. `SECURITY_ENUMS_V1`, `WRITER_ENUMS_V1` und `VIEW_MODELS_V1` bleiben UNVERÄNDERT, und `apps/desktop/src/bridge/generated-contracts.ts` ändert sich in diesem Task nicht — ein neues Literal dort färbte `apps/desktop/src/bridge/no-hand-written-contracts.test.ts` rot, ohne dass eine Desktop-Entscheidung dahinterstünde; und `crates/ea-ui-contracts/src/lib.rs` re-exportiert die Aufzählung aus der Crate, in der sie definiert ist, statt sie ein zweites Mal zu erklären — dieselbe Regel, die dort für `QuarantineReason`, `SignerRole` und `LocalAuditOutcomeV1` gilt. `BundleRejectionCodeV1` ist in `crates/ea-reader/src/bundle_release.rs` definiert, also bekommt `crates/ea-ui-contracts/Cargo.toml` dafür die Kante `ea-reader.workspace = true`; sie steht mit `Cargo.lock` im Files-Block, weil eine neue Kante zwischen zwei Mitgliedern das Lockfile fortschreibt. Die Richtung ist dieselbe einseitige wie bei `ea-verify` im Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate": `ea-ui-contracts` steht in `WASM32_EXEMPT_CRATES`, weil `src/bin/emit-ts.rs` Dateien schreibt, `ea-reader` steht auf der Positivliste, und keine Kante läuft zurück. Die Wurzelkante trägt `default-features = false`, das Merkmal `test-support` von `crates/ea-reader` bleibt damit AUS. Danach läuft `cargo run --locked -p ea-ui-contracts --bin emit-ts` und schreibt `apps/web/src/bridge/generated-contracts.ts` neu; `the_checked_in_file_is_exactly_what_the_emitter_writes` hält den Ausdruck. `apps/web/src/sw/bundle-pinning.ts` und `service-worker.ts` importieren die Literale ausschließlich von dort und wiederholen keines als Zeichenkette, sonst schlägt der aus `apps/desktop` portierte `no-hand-written-contracts.test.ts` an.
+Die beiden Kontrakttypen entstehen in `crates/ea-ui-contracts`, und zwar AUSSCHLIESSLICH im Reader-Ausdruck: `BundleRejectionCodeV1` tritt in `READER_ENUMS_V1` ein, `BundleActivationView` und `ReaderTrustAgeView` bilden den ersten Eintrag der hier angelegten Liste `READER_VIEW_MODELS_V1` (`crates/ea-ui-contracts/src/emit.rs`), die der Task „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop" später erweitert. `SECURITY_ENUMS_V1`, `WRITER_ENUMS_V1` und `VIEW_MODELS_V1` bleiben UNVERÄNDERT, und `apps/desktop/src/bridge/generated-contracts.ts` ändert sich in diesem Task nicht — ein neues Literal dort färbte `apps/desktop/src/bridge/no-hand-written-contracts.test.ts` rot, ohne dass eine Desktop-Entscheidung dahinterstünde; und `crates/ea-ui-contracts/src/lib.rs` re-exportiert die Aufzählung aus der Crate, in der sie definiert ist, statt sie ein zweites Mal zu erklären — dieselbe Regel, die dort für `QuarantineReason`, `SignerRole` und `LocalAuditOutcomeV1` gilt. `BundleRejectionCodeV1` ist in `crates/ea-reader/src/bundle_release.rs` definiert, also bekommt `crates/ea-ui-contracts/Cargo.toml` dafür die Kante `ea-reader.workspace = true`; sie steht mit `Cargo.lock` im Files-Block, weil eine neue Kante zwischen zwei Mitgliedern das Lockfile fortschreibt. Die Richtung ist dieselbe einseitige wie bei `ea-verify` im Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate": `ea-ui-contracts` steht in `WASM32_EXEMPT_CRATES`, weil `src/bin/emit-ts.rs` Dateien schreibt, `ea-reader` steht auf der Positivliste, und keine Kante läuft zurück. Die Wurzelkante trägt `default-features = false`, das Merkmal `test-support` von `crates/ea-reader` bleibt damit AUS. Danach läuft `cargo run --locked -p ea-ui-contracts --bin emit-ts` und schreibt `apps/web/src/bridge/generated-contracts.ts` neu; `the_checked_in_reader_file_is_exactly_what_the_reader_emitter_writes` hält den Ausdruck — NICHT `the_checked_in_file_is_exactly_what_the_emitter_writes`, der über `generated_contracts_path()` die DESKTOP-Datei hält und von einer Handänderung an der Web-Datei nichts merkte. `apps/web/src/sw/bundle-pinning.ts` und `service-worker.ts` importieren die Literale ausschließlich von dort und wiederholen keines als Zeichenkette, sonst schlägt der aus `apps/desktop` portierte `no-hand-written-contracts.test.ts` an.
+
+Eine Zeile von `crates/ea-ui-contracts/tests/generated_ts_is_current.rs` zieht dabei mit, und sie steht deshalb im Files-Block: `the_emitted_reader_file_declares_types_and_computes_nothing` verbietet neun Zeichenfolgen im GANZEN Reader-Ausdruck, darunter `sign`, und die Variante `Unsigned` enthält sie. Die Reader-Hälfte bekommt denselben Maskierungshaken, den die Desktop-Hälfte für `signerrole` und `ea-archive-health-hash-signature-chain` bereits führt, und maskiert damit genau `unsigned` — nicht `sign` selbst, sonst verlöre das Verbot seinen Zweck. Der Kommentar über der Reader-Hälfte, der heute „keine Maskierung" behauptet, wird im selben Zug richtiggestellt: er beschrieb einen Stand, keine Regel. Umbenannt wird NICHTS — `web-reader-design.md` §4.2 sagt „nicht signiert", und die deutschen Ausweichnamen tragen dieselbe Zeichenfolge.
 
 Der Worker selbst enthält KEINE Sicherheitslogik. `bundle-pinning.ts` exportiert `activateCandidate(port, candidate)`, reicht die Kandidatenbytes über die wasm-bindgen-Brücke (`crates/ea-reader-wasm/src/bridge.rs`, neue Ausfuhr `evaluate_bundle_candidate` unter `cfg(target_arch = "wasm32")`) an `ReaderBundlePin::evaluate` und wendet auf die Antwort genau zwei Wirkungen an: bei `Activate` `skipWaiting`/`clients.claim` und das Umschalten des Cache-Namens auf die neue `bundleVersion`, bei `KeepActive` das Verwerfen des Kandidaten und das Behalten des bestehenden Caches. Hash und Signatur werden in Rust gerechnet; TypeScript sieht das DTO. Der Quelltextscan im ersten Schritt ist der Wächter dieser Grenze und keine Stilregel.
 
@@ -2679,7 +2751,7 @@ Der Worker selbst enthält KEINE Sicherheitslogik. `bundle-pinning.ts` exportier
 
 `apps/web/src/main.tsx` steht aus dem zweiten Grund im Files-Block: der Trust-Alter-Streifen `TrustAgeBanner.tsx` und die Registrierung des Service Workers werden an die Routentabelle und die Schale gehängt, die dieselbe Aufgabe von Anfang an ausliefert. `apps/web/tests/e2e/bundle-activation.spec.ts` fährt genau diese montierte Schale an.
 
-`apps/web/vite.config.ts` trägt die Trennung des Auslieferungswegs nach §4.1: `base: './'` erzwingt ausschließlich relative Beiwerkspfade — ein absoluter Pfad bände das Bündel an genau einen Origin und machte die Trennung unbenutzbar —, der Service Worker wird als eigener Rollup-Einstieg mit `format: 'iife'` und `entryFileNames: 'service-worker.js'`, also stabilem Dateinamen ohne Hash, gebaut — ein gehashter Workername wäre bei jedem Bau ein anderer Registrierungspfad und damit ein Aktivierungspfad, den die Pinnung nicht sieht —, und die CSP-Grundlinie ergänzt gegenüber dem Desktop genau zwei Positionen: `script-src 'self' 'wasm-unsafe-eval'`, weil `WebAssembly.instantiate` ohne dieses Schlüsselwort blockiert, und `worker-src 'self'`. `connect-src` nennt den Sync-Server-Origin als konfigurierten Wert und den Bundle-Origin NICHT; das ist die Umkehrung derselben Aussage, die serverseitig als Origin-Positivliste in Stufe 3 steht. Der Sync-Server ist damit kein Bestandteil des Vertrauenspfades für ausgeführten Code.
+`apps/web/vite.config.ts` trägt die Trennung des Auslieferungswegs nach §4.1: `base: './'` erzwingt ausschließlich relative Beiwerkspfade — ein absoluter Pfad bände das Bündel an genau einen Origin und machte die Trennung unbenutzbar —, der Service Worker wird in einem ZWEITEN, einläufigen Bau-Durchgang mit `format: 'iife'` und `entryFileNames: 'service-worker.js'`, also stabilem Dateinamen ohne Hash, gebaut — ein gehashter Workername wäre bei jedem Bau ein anderer Registrierungspfad und damit ein Aktivierungspfad, den die Pinnung nicht sieht —, und dieser zweite Durchgang läuft als `closeBundle`-Haken INNERHALB von `apps/web/vite.config.ts`, damit `pnpm --dir apps/web build` ein einziges Kommando bleibt und `apps/web/package.json` unangetastet, und die CSP-Grundlinie ergänzt gegenüber dem Desktop genau zwei Positionen: `script-src 'self' 'wasm-unsafe-eval'`, weil `WebAssembly.instantiate` ohne dieses Schlüsselwort blockiert, und `worker-src 'self'`. `connect-src` nennt den Sync-Server-Origin als konfigurierten Wert und den Bundle-Origin NICHT; das ist die Umkehrung derselben Aussage, die serverseitig als Origin-Positivliste in Stufe 3 steht. Der Sync-Server ist damit kein Bestandteil des Vertrauenspfades für ausgeführten Code.
 
 `docs/traceability/stage-4-fault-points.json` entsteht hier — diese Aufgabe ist in der Reihenfolge dieses Plans die erste, die das Manifest anfasst — mit `"stage": 4` und genau dem Abschnitt `bundle-activation`, in der Gestalt von `docs/traceability/stage-3-fault-points.json`: je Punkt `name`, `brackets` und `witness`, und jeder `witness` nennt einen Test, der existiert und läuft. Die vier Punkte sind `unsigned-candidate`, `foreign-root-candidate`, `revoked-release` und `stale-trust-state`. Die Aufgabe „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS" ERGÄNZT dieselbe Datei um ihren Abschnitt `sync-cursor` und schreibt sie nicht neu; die Aufgabe „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate" schließt sie, indem sie jeden Zeugen auflöst.
 
