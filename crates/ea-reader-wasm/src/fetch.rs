@@ -16,8 +16,12 @@
 //!
 //! # Die Rechnung ist vom Export GETRENNT, und das ist eine Lehre
 //!
-//! [`request_json`] und [`accepted_json`] uebersetzen auf JEDEM Ziel und
-//! stehen deshalb nicht hinter `cfg(target_arch = "wasm32")`. Der Grund ist
+//! `request_json` und `accepted_json` uebersetzen auf JEDEM Ziel und
+//! stehen deshalb nicht hinter `cfg(target_arch = "wasm32")`. (OHNE
+//! Verweisklammern: dieser Modulkopf wird ueber die `///`-Zeile an `pub mod
+//! fetch` in `crate`s Wurzelgeltungsbereich gerendert, und dort gibt es die
+//! zwei Namen nicht — dieselbe Lage, aus der `ReaderSyncError` weiter unten
+//! ebenfalls unverlinkt steht.) Der Grund ist
 //! gemessen und nicht stilistisch: die erste Fassung baute das
 //! Kopfzeilen-Array mit `format!` und stand vollstaendig hinter dem cfg. Der
 //! `signature-input`-Wert traegt nach RFC 9421 Anfuehrungszeichen — die Ausgabe
@@ -106,9 +110,11 @@ pub(crate) fn is_host_token(authority: &str) -> bool {
 
 /// Der Request als DTO — dieselbe Form, die `ReaderRequestV1` traegt.
 ///
-/// Die Kopfzeilen gehen durch [`Json::string_pairs`] und damit durch das
+/// Die Kopfzeilen gehen durch `Json::string_pairs` und damit durch das
 /// Escaping; ein `format!` daneben waere wieder der Fehler, den der Modulkopf
-/// beschreibt.
+/// beschreibt. Der Bauer ist `pub(crate)`, also steht sein Name hier ohne
+/// Verweisklammern — eine oeffentliche Dokumentation, die auf ein privates
+/// Glied verweist, ist eine Warnung und kein Verweis.
 #[must_use]
 pub fn request_json(request: &ReaderRequestV1) -> String {
     let headers: Vec<(&str, &str)> = request
