@@ -1473,6 +1473,7 @@ git commit -m "feat(reader): unlock the browser vault through prf envelopes"
 
 **Files:**
 - Create: `crates/ea-reader/src/enrollment.rs`
+- Create: `crates/ea-reader/src/enrollment_endpoints.rs`
 - Create: `crates/ea-reader-wasm/src/webauthn.rs`
 - Create: `apps/web/src/vault/webauthn-prf.ts`
 - Create: `apps/web/src/features/enrollment/EnrollmentPage.tsx`
@@ -1481,93 +1482,283 @@ git commit -m "feat(reader): unlock the browser vault through prf envelopes"
 - Create: `apps/web/playwright.config.ts`
 - Modify: `crates/ea-reader/src/lib.rs`
 - Modify: `crates/ea-reader/Cargo.toml`
+- Modify: `crates/ea-reader/tests/fixtures/mod.rs`
 - Modify: `crates/ea-reader-wasm/src/lib.rs`
+- Modify: `apps/web/src/bridge/opfs-worker.ts`
 - Modify: `apps/web/src/main.tsx`
+- Modify: `apps/web/tsconfig.json`
 - Modify: `package.json`
 - Modify: `.gitignore`
+- Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
+- Modify: `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`
+- Modify: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md`
 - Test: `crates/ea-reader/tests/enrollment_two_authenticators.rs`
 - Test: `crates/ea-reader/tests/fingerprint_gate.rs`
 - Test: `apps/web/src/features/enrollment/EnrollmentPage.test.tsx`
+- Test: `apps/web/src/e2e-config.test.ts`
 - Test: `apps/web/tests/e2e/enrollment.spec.ts`
 
 **Interfaces:**
-- Consumes: `ReaderVault`, `VaultEnvelopeV1::{wrap, unwrap}`, `derive_kek_v1` und die Konstante `VAULT_KEK_INFO_V1` aus dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel"; `ReaderBlobStore` und seine In-Memory-Doppelung aus dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate"; `ea_sync_protocol::{ChallengeRequestV1, WebauthnCredentialRegistrationV1, VaultBlobUploadV1, VaultBlobRetrievalRequestV1, VaultBlobRetrievalResponseV1, RequestSigner, SIGNATURE_ALGORITHM_V1}`; `ea_crypto::{CanonicalPublicCoseKey, HpkeRecipientPrivateKey, SecretBytes, SecretVec, CEK_SIZE, AEAD_NONCE_SIZE}`; `ea_trust::{TrustAnchorV1, decode_trust_anchor}`; `ea_types::{KeyThumbprint, OrganizationId, SubjectId}`.
-- Produces: `ReaderEnrollment::{begin, register_authenticator, fingerprints, confirm_fingerprints, finish}`, `EnrolledReaderV1`, `AuthenticatorRecordV1`, `EnrollmentFingerprintsV1`, `FingerprintConfirmationV1`, `EnrollmentError`, die Brückenexporte `ea_reader_wasm::webauthn::{prf_kek_bytes, enrollment_fingerprints, register_authenticator}` und die drei Aufrufe der Stufe-3-Endpunkte `POST /v1/webauthn-credentials`, `PUT /v1/vault-blobs`, `POST /v1/vault-blobs/retrievals`.
+- Consumes: `ReaderVault::{seal, unlock}`, `ReaderVaultError`, `SealedVaultV1::{envelopes, without_credential, to_deterministic_cbor, from_deterministic_cbor}`, `VaultContentsV1::new`, `UnlockedVault::{kem_private_key, kem_key_thumbprint, pinned_anchor}`, `AuthenticatorPrfV1::new`, `VaultEnvelopeV1::{unwrap, credential_id, wrapped_vault_key}`, `derive_kek_v1` und `VAULT_KEK_INFO_V1` aus dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel"; `ReaderBlobStore` mit `put`/`get`/`delete`/`keys`, `ReaderBlobKey::new`, `ReaderBlobError` und `InMemoryReaderBlobStore` aus dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate"; `ea_reader_wasm::vault_bridge::register_vault_contents` aus demselben Task; `ea_sync_protocol::{WebauthnCredentialRegistrationV1, VaultBlobUploadV1, VaultBlobRetrievalRequestV1, VaultBlobRetrievalResponseV1, RequestSigner, RequestParts, SignatureParametersV1, RequestIdV1, HttpMethod, SignatureComponent, body_digest, content_digest_header, organization_tag, SIGNATURE_ALGORITHM_V1, MAX_SIGNATURE_WINDOW_SECONDS_V1, MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1, MAX_WEBAUTHN_CREDENTIAL_ID_BYTES_V1, MAX_VAULT_BLOB_CIPHERTEXT_BYTES_V1, MAX_VAULT_BLOBS_PER_SUBJECT_V1, SyncProtocolError}`; `ea_crypto::{CanonicalPublicCoseKey, HpkeRecipientPrivateKey, SecretBytes, SecretBytes::with_exposed, CryptoError, CEK_SIZE}`; `ea_trust::{TrustAnchorV1, decode_trust_anchor}`; `ea_types::{Hash32, KeyThumbprint, OrganizationId, SubjectId}`.
+- Produces: `ReaderEnrollment::{begin, register_authenticator, registered_authenticator_count, fingerprints, confirm_fingerprints, finish, device_state, fingerprint_gate_required}`, `recover_and_unlock_vault`, `EnrolledReaderV1::{envelopes, unlock_with, without_authenticator, blob_key}`, `AttestedAuthenticatorV1::new`, `AuthenticatorTransportProfileV1`, `AuthenticatorRecordV1`, `EnrollmentFingerprintsV1::{key_fingerprint, bundle_fingerprint, key_fingerprint_hex, bundle_fingerprint_hex}`, `FingerprintConfirmationV1`, `DeviceTrustStateV1`, `EnrollmentError::code`, `EnrollmentRequestContextV1::new`, `VAULT_PRF_SALT_V1`, `MIN_ENROLLED_AUTHENTICATORS_V1`, `ENROLLMENT_SIGNATURE_WINDOW_SECONDS_V1`, `READER_VAULT_BLOB_KEY_V1`; der Port `EnrollmentEndpoints` mit `EnrollmentRequestV1`, `EnrollmentCallV1`, `EnrollmentEndpointError` und der In-Memory-Doppelung `InMemoryEnrollmentEndpoints`; die fünf Brückenexporte `ea_reader_wasm::webauthn::{enrollment_begin, enrollment_register_authenticator, enrollment_fingerprints, enrollment_confirm_fingerprints, enrollment_finish}` — die Rust-Namen; auf der JS-Seite heissen sie über `js_name` `enrollmentBegin`, `enrollmentRegisterAuthenticator`, `enrollmentFingerprints`, `enrollmentConfirmFingerprints` und `enrollmentFinish`, wie `bridge_echo_js`/`bridgeEcho` und `reader_vault_unlock`/`readerVaultUnlock` es in dieser Crate schon halten; der TypeScript-Typ `EnrollmentBridge` in `apps/web/src/vault/webauthn-prf.ts`, der genau diese fünf Aufrufe samt ihrer Status-DTOs beschreibt; und die drei Stufe-3-Endpunkte `POST /v1/webauthn-credentials`, `PUT /v1/vault-blobs`, `POST /v1/vault-blobs/retrievals`.
 
-`crates/ea-reader/Cargo.toml` und `Cargo.lock` stehen im Files-Block, weil DIESE Aufgabe die Kante `ea-sync-protocol.workspace = true` von `crates/ea-reader` aus zieht: `EnrollmentError::Protocol(ea_sync_protocol::SyncProtocolError)` steht in `crates/ea-reader/src/enrollment.rs`, und die drei Stufe-3-Endpunkte reisen ueber `WebauthnCredentialRegistrationV1`, `VaultBlobUploadV1`, `VaultBlobRetrievalRequestV1`, `VaultBlobRetrievalResponseV1` und `RequestSigner`. Es ist die ERSTE Aufgabe dieses Plans, die diese Kante braucht — die Aufgabe „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS" findet sie bereits vor —, und eine neue Kante zwischen zwei Mitgliedern schreibt `Cargo.lock` fort. Deshalb faehrt Schritt 4 GENAU EIN Kommando ohne `--locked`, und `crates/ea-reader/src/lib.rs` nimmt im selben Zug `mod enrollment;` samt seinem `pub use`-Block auf, wie `crates/ea-reader-wasm/src/lib.rs` `mod webauthn;` — ohne diese zwei Zeilen uebersetzt der Commit nicht, und der Zeuge, der `ea_reader::enrollment::VAULT_PRF_SALT_V1` nennt, faende das Modul nicht.
+`crates/ea-reader/Cargo.toml` und `Cargo.lock` stehen im Files-Block, weil DIESE Aufgabe die Kante `ea-sync-protocol.workspace = true` von `crates/ea-reader` aus zieht: `EnrollmentError::Protocol(ea_sync_protocol::SyncProtocolError)` steht in `crates/ea-reader/src/enrollment.rs`, und die drei Stufe-3-Endpunkte reisen über `WebauthnCredentialRegistrationV1`, `VaultBlobUploadV1`, `VaultBlobRetrievalRequestV1`, `VaultBlobRetrievalResponseV1` und `RequestSigner`. Es ist die ERSTE Aufgabe dieses Plans, die diese Kante braucht — die Aufgabe „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS" findet sie bereits vor —, und eine neue Kante zwischen zwei Mitgliedern schreibt `Cargo.lock` fort. Deshalb fährt diese Aufgabe GENAU EIN Kommando ohne `--locked`, und es steht am ENDE des Implementierungsschritts und nicht am Anfang des Prüfschritts; die Begründung dieser Stelle steht dort. `crates/ea-reader/src/lib.rs` nimmt im selben Zug `mod enrollment;` und `mod enrollment_endpoints;` samt ihren `pub use`-Blöcken auf, wie `crates/ea-reader-wasm/src/lib.rs` `pub mod webauthn;` — ohne diese Zeilen übersetzt der Commit nicht. Die WURZEL-`Cargo.toml` steht aus einem anderen Grund daneben: sie trägt die aufgezählte `web-sys`-Merkmalsliste, und die Browserfassung des Endpunktports braucht dort `XmlHttpRequest`; `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md` zieht die wortgleiche Ledgerzeile im selben Commit nach, sonst fällt `browser_runtime_dependency_class_is_ratified_before_use`. Die Begründung dieser beiden Einträge steht zwei Absätze weiter unten, beim Transport. Eine Merkmalsänderung schreibt `Cargo.lock` NICHT fort — dort stehen Pakete und Versionen, keine Merkmale —, das GENAU EINE Kommando ohne `--locked` hängt also allein an der neuen Mitgliedskante und nicht hieran.
 
-`apps/web/src/main.tsx` steht ebenfalls im Files-Block: die Route `/enrollment`, die `apps/web/tests/e2e/enrollment.spec.ts` mit `page.goto('/enrollment')` anfaehrt, wird an die Routentabelle angehaengt, die die Aufgabe „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate" von Anfang an ausliefert. Ohne den Eintrag laeuft der Playwright-Lauf gegen eine nicht montierte Route und faellt aus dem falschen Grund.
+**Die Module bleiben PRIVAT, die Namen kommen über den flachen `pub use`.** `crates/ea-reader/src/lib.rs` deklariert heute jedes Modul privat (`mod blob_store; mod cache; mod entry_state; mod envelope; mod key_profile; mod mode; mod vault;`) und stellt einen flachen `pub use`-Block darunter; kein einziger Name dieser Crate ist über einen Modulpfad erreichbar. `mod enrollment;` und `mod enrollment_endpoints;` fügen sich alphabetisch zwischen `cache` und `entry_state` ein — `enrollment` < `enrollment_endpoints` < `entry_state`, das dritte Zeichen entscheidet (`r` vor `t`) —, und ihre `pub use`-Zeilen zwischen der `ea_verify`- und der `entry_state`-Zeile desselben Blocks. Folge für jeden Zeugen dieser Aufgabe: seine Einfuhr lautet `use ea_reader::{DeviceTrustStateV1, EnrollmentCallV1, InMemoryEnrollmentEndpoints, ReaderEnrollment, recover_and_unlock_vault, …}` und niemals `use ea_reader::enrollment::{…}`. Ein `pub mod enrollment;` wäre die einzige Ausnahme in einer sonst durchgehaltenen Anordnung, und eine Ausnahme, die nur entsteht, weil ein Testschnipsel einen Pfad falsch geschrieben hat, ist die schlechteste Art, eine Anordnung zu brechen.
 
-Diese Aufgabe baut `web-reader-design.md` §6.3, §6.6 und §4.3 und sonst nichts. Ausdrücklich NICHT hier: das Objekt `readerKeyEscrow` und die Zwei-Approver-Öffnungszeremonie (§7.3/§7.5, Stufe 5, Ledgerzeile `WR-075`), die Administrationshälfte des Enrollments, die den erwarteten Fingerprint in der Desktop-Anwendung anzeigt und die Root-Signatur des Reader-Zertifikats auslöst (§6.6 Schritt 4, Stufe 5), und der Historical Re-grant für Einträge vor dem Enrollment (§6.6 Schritt 6, `design.md` §6.5). Der Cross-Device-QR-Flow wird hier als Entsperrpfad ABGEWIESEN und nicht implementiert: `web-reader-design.md` §6.4.1 letzter Absatz und §13 letzter Spiegelstrich nennen ihn beide, weil Safari in diesem Flow keine PRF-Ausgabe liefert.
+**Der Transport ist ein SYNCHRONER Port in `ea-reader` und keine HTTP-Bibliothek.** `crates/ea-reader/Cargo.toml` trägt keine Wirtsabhängigkeit, und das ist keine Zufälligkeit: `ea-reader` steht auf der wasm32-Positivliste in `tools/xtask/src/main.rs`, und `tokio`, `hyper` oder `reqwest` nähmen es von dort herunter. `ea-sync-client` scheidet aus demselben Grund aus — es steht in `WASM32_EXEMPT_CRATES`. `crates/ea-reader/src/enrollment_endpoints.rs` baut deshalb dieselbe Bauform wie `crates/ea-reader/src/blob_store.rs`: EIN Trait mit `&mut self`, EINE In-Memory-Doppelung daneben, EIN Fehlertyp mit stabilem `code()`. Rust BAUT und SIGNIERT die drei Anfragen und gibt sie als fertige Bytes samt Kopfzeilen heraus; der Aufrufer — im Browser die Brücke, im Wirtstest die Doppelung — FÜHRT sie aus. Damit hält §9 wörtlich: TypeScript trifft keine Sicherheitsentscheidung, es trägt Bytes.
 
-- [ ] **Step 1: Write the two-authenticator, fixture-parity, and unskippable-fingerprint witnesses**
+**Was dieser synchrone Port im Browser kostet, ausgeschrieben statt vorausgesetzt.** Die Analogie zu `blob_store.rs` trägt bei der BAUFORM und nicht von selbst bei der Ausführung, und `crates/ea-reader-wasm/src/opfs_worker.rs` schreibt in seinem eigenen Kopf aus, warum: OPFS hat nach EINEM asynchronen Vorlauf ein wirklich synchrones Handle (`FileSystemSyncAccessHandle`), HTTP hat kein Gegenstück — `fetch` gibt ein Promise, und blockierend darauf warten hielte genau den Faden an, dessen Ereignisschleife es erfüllen müsste. Die einzige synchrone Transportfläche, die ein Browser überhaupt anbietet, ist ein synchrones `XMLHttpRequest`, und die gibt es ausschliesslich in einem DEDIZIERTEN Worker. Die Browserfassung von `EnrollmentEndpoints` steht deshalb genau dort, wo `OpfsBlobStore` schon steht, und aus demselben Grund. Das kostet zwei Einträge, und beide stehen im Files-Block dieser Aufgabe: `XmlHttpRequest` tritt in die aufgezählte `web-sys`-Merkmalsliste der Wurzel-`Cargo.toml` ein, und weil `BROWSER_RUNTIME_DEPENDENCIES` in `tools/xtask/tests/adr_gate.rs` `web-sys` führt und `browser_runtime_dependency_class_is_ratified_before_use` die geprüfte Merkmalsauswahl als EINE wortgleiche Ledgerzeile in `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md` verlangt, zieht diese Zeile im selben Commit nach. Ohne sie fällt `adr_gate` rot, und die Meldung nennt die ADR statt den Transport.
 
-`crates/ea-reader/tests/enrollment_two_authenticators.rs` hält die Kardinalität und die Envelope-Konstruktion. Der erste Test ist der WICHTIGSTE dieser Aufgabe und steht deshalb zuerst: er stellt die Rust-Fixture, mit der die Tasks „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel", „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS", „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert", „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`" und „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle" ihre entsperrte Sitzung bauen, gegen die ECHTE PRF-Auswertung desselben Authenticators. Ohne ihn ist die Fixture eine Annahme, und jeder Test, der auf ihr steht, misst am Ende nur sich selbst.
+**Daraus folgt die zweite Hälfte, die genauso wenig vorausgesetzt werden darf: `enrollmentFinish` ist ASYNCHRON.** `finish` schreibt am Ende über denselben synchronen `ReaderBlobStore`, und `OpfsBlobStore::open` verlangt die Schlüssel VOR dem Vorlauf — ein Zugriff auf einen nicht vorgelaufenen Schlüssel fällt mit `EA-READER-BLOB-HOST`. Der Export macht deshalb, was `blob_put` und `blob_get` schon machen: EIN asynchroner Vorlauf öffnet `READER_VAULT_BLOB_KEY_V1`, danach läuft `finish` vollständig synchron durch, Endpunkte eingeschlossen. Die vier übrigen Ausfuhren berühren keinen Wirtsspeicher und bleiben synchron.
+
+**Und die dritte Folge, die aus den ersten beiden zwingend fällt: die fünf Ausfuhren laufen IM WORKER, `webauthn-prf.ts` auf dem Hauptthread.** Der Enrollment-Zustand liegt in einem `thread_local!`, also müssen alle fünf Aufrufe denselben Faden sehen; OPFS und das synchrone `XMLHttpRequest` gibt es nur im dedizierten Worker; und `navigator.credentials` gibt es nur auf dem Hauptthread. Die Naht dazwischen ist die, die `apps/web/src/bridge/opfs-worker.ts` schon führt: eine schmale, ausgeschriebene Nachrichtenform mit `id` und Antwort-Code, KEINE Fallunterscheidung über Bytes. `webauthn-prf.ts` führt die WebAuthn-Zeremonien und schickt ihre Ergebnisse als Bytes hinüber; der Worker trifft die Entscheidungen, weil dort Rust liegt. **Deshalb steht `apps/web/src/bridge/opfs-worker.ts` im Files-Block:** seine `EaOpfsRequest`/`EaOpfsResponse`-Vereinigung wächst um die fünf Enrollment-Nachrichten, und ein zweiter, eigener Worker wäre die falsche Antwort — zwei Worker öffneten dieselbe OPFS-Datei mit zwei `FileSystemSyncAccessHandle`s, und der zweite bekäme sie gar nicht. Wer die fünf Ausfuhren stattdessen auf dem Hauptthread aufriefe, bekäme eine Fassung, die JEDEN Wirtstest besteht und erst im Browser an OPFS scheitert — dieselbe Warnung, die der Kopf von `crates/ea-reader-wasm/src/opfs_worker.rs` für seinen eigenen Fall schon ausschreibt.
+
+**Und die GRENZE des Browserzeugen, benannt statt geglättet: er läuft SAME-ORIGIN.** `apps/web/index.html` trägt `connect-src 'self'`, `EXPECTED_DIRECTIVES` in `apps/web/src/app/csp.test.ts` pinnt den Wert Position für Position, und der Task „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes" ist der EINZIGE, der ihn bewegt — beide Dateien stehen in SEINEM Files-Block und dürfen hier nicht angefasst werden, sonst gäbe es zwei Aufgaben mit demselben Richtlinienwert und die zweite färbte den Vitest-Lauf der ersten rot. Chromium setzt `connect-src` im Renderer durch, BEVOR die Anfrage den Prozess verlässt; ein `page.route`-Abfangjäger auf eine fremde Herkunft käme also nie zum Zug. `stubEnrollmentEndpoints` fängt deshalb den PFAD aus `EnrollmentRequestV1::target_uri` auf dem Bundle-Origin ab. Gemessen ist damit die Zeremonie und die REIHENFOLGE der drei Aufrufe, NICHT der echte herkunftsübergreifende Transport. Die signierte `@authority` bleibt davon unberührt: sie kommt aus `EnrollmentRequestContextV1` und nennt den Sync-Server, weshalb `EnrollmentRequestV1` neben `target_uri()` auch `authority()` herausgibt — der Aufrufer, der die Herkunft später wirklich adressiert, findet sie dort und muss sie nicht erraten. Dass Bundle-Origin und signierte Autorität in DIESEM Lauf auseinanderfallen, ist die benannte Lücke; sie schliesst der Bundle-Task, wenn `connect-src` die Herkunft des Sync-Servers aufnimmt.
+
+`apps/web/src/main.tsx` steht im Files-Block, und die Änderung dort ist GRÖSSER als ein Tabelleneintrag. `EA_WEB_ROUTES` trägt heute `[{ path: '/', label: 'Reader' }]`, `EaWebRoute` hat genau die zwei Felder `path` und `label`, `EaWebApp` rendert für JEDE Route denselben Platzhalterkörper, und `initialPath` steht fest auf `'/'` — nichts liest `window.location.pathname`. Ein `page.goto('/enrollment')` fände also die Route nicht montiert, selbst wenn sie in der Tabelle stünde. Zwei Änderungen fallen deshalb hier: `EaWebRoute` bekommt einen dritten, OPTIONALEN Platz `render?: () => ReactElement` — der Typ ist exportiert, das ist eine öffentliche Formänderung und wird als solche benannt —, und der Montagepunkt am Dateiende übergibt `initialPath={window.location.pathname}`. Der Vorgabewert im Bauteil bleibt `'/'`: nur die Montage liest die Adresse, das Bauteil selbst bleibt für `vitest` deterministisch und ohne Wirtsbezug.
+
+`apps/web/tsconfig.json` steht im Files-Block, weil sein `include` heute `["src", "index.html", "vite.config.ts"]` ist. `apps/web/playwright.config.ts` und `apps/web/tests/e2e/enrollment.spec.ts` entstehen in diesem Task und lägen damit AUSSERHALB von `pnpm web:typecheck` — keine Typprüfung, kein Gate, kein Signal. Der Desktop schliesst genau diese Lücke halb, und zwar in seiner `apps/desktop/tsconfig.json`: deren `include` führt `"playwright.config.ts"` ausdrücklich mit auf, weshalb die Konfiguration dort im Programm liegt; `apps/desktop/src/e2e-config.test.ts` zieht sie daneben über `await import('../playwright.config')` und behauptet ihre tragenden Schlüssel, was ein zweiter, unabhängiger Grund ist. Ungeprüft bleiben auf dem Desktop allein die Spezifikationen unter `tests`. Diese Aufgabe schliesst BEIDE Hälften und ist damit die erste, die `"tests"` überhaupt einträgt: `apps/web/src/e2e-config.test.ts` spiegelt den Desktop-Zeugen, und `include` wächst um `"playwright.config.ts"` und `"tests"`. Der zweite Teil kostet zwei Einträge in einem Feld und ist jetzt billig; nach vier weiteren E2E-Suiten dieses Plans wäre er eine Nachrüstung über vier Dateien, die jemand dann nicht mehr macht. `apps/web/vite.config.ts` bleibt UNBERÜHRT: sein `include: ['src/**/*.test.{ts,tsx}']` hält `tests/e2e` schon heute aus dem Vitest-Lauf heraus.
+
+Diese Aufgabe baut `web-reader-design.md` §6.3, §6.6 und §4.3 und sonst nichts. Ausdrücklich NICHT hier: das Objekt `readerKeyEscrow` und die Zwei-Approver-Öffnungszeremonie (§7.3/§7.5, Stufe 5, Ledgerzeile `WR-075`), die Administrationshälfte des Enrollments, die den erwarteten Fingerprint in der Desktop-Anwendung anzeigt und die Root-Signatur des Reader-Zertifikats auslöst (§6.6 Schritt 4, Stufe 5), und der Historical Re-grant für Einträge vor dem Enrollment (§6.6 Schritt 6, `design.md` §6.5). Der Cross-Device-QR-Flow wird hier als Entsperrpfad ABGEWIESEN und nicht implementiert: `web-reader-design.md` §6.4.1 und §13 nennen ihn beide, weil Safari in diesem Flow keine PRF-Ausgabe liefert.
+
+- [ ] **Step 1: Build the wasm bridge output the web suite imports**
+
+Run: `cargo run --locked -p xtask -- build-wasm`
+
+`apps/web/src/bridge/pkg/` ist über die generische Zeile `pkg/` in `.gitignore` gehalten und liegt in einem frischen Checkout NICHT vor. `apps/web/src/bridge/wasm-runtime.test.ts` und `apps/web/src/bridge/opfs-worker.ts` führen beide `./pkg/ea_reader_wasm.js`; ohne das Verzeichnis fallen `pnpm web:test` und `pnpm web:typecheck` aus einem Grund, der mit dieser Aufgabe nichts zu tun hat, und wer den roten Punkt für den eigenen sieht, sucht ihn eine Stunde lang an der falschen Stelle. Der Schritt steht deshalb VOR dem Schreiben der Zeugen und nicht als Fussnote daneben. `build-wasm` nimmt ausdrücklich kein Argument (`tools/xtask/src/main.rs`, Zweig `"build-wasm"`), und der Lauf ist idempotent; wer ihn in seinem Arbeitsbaum schon gefahren hat, fährt ihn hier folgenlos erneut.
+
+Expected: Exit 0, und `apps/web/src/bridge/pkg/ea_reader_wasm.d.ts` führt danach die SECHS heutigen Ausfuhren `blobGet`, `blobPut`, `bridgeEcho`, `readerRuntimeWitness`, `readerVaultSeal`, `readerVaultUnlock`. Die fünf Ausfuhren dieser Aufgabe kommen erst im Implementierungsschritt dazu; wer sie hier schon sucht, hat den Schritt falsch gelesen.
+
+- [ ] **Step 2: Write the cardinality, transport-order, and unskippable-fingerprint witnesses**
+
+`crates/ea-reader/tests/enrollment_two_authenticators.rs` und `crates/ea-reader/tests/fingerprint_gate.rs` beginnen beide mit `mod fixtures;` — die Anordnung jedes bestehenden Integrationstestziels dieser Crate, siehe `crates/ea-reader/tests/vault_envelope.rs`.
+
+`crates/ea-reader/tests/fixtures/mod.rs` steht mit einer `Modify:`-Zeile im Files-Block, weil die Zeugen dieser Aufgabe DREIZEHN neue Posten dort brauchen und die Datei sie heute nicht hat. Vorhanden sind `credential_id(index)`, `prf_output(index)`, `authenticator(index)`, `pinned_anchor()`, `pinned_anchor_exact_bytes()`, `foreign_anchor_exact_bytes()`, `reader_kem_public_key()`, die fünf Zertifikatsbauer, `last_registry_pin()`, `vault_contents()`, `sealed_vault()`, `unlocked_vault()`, `second_unlocked_vault()`, `entry_hash()`, `entry_package_bytes_carrying(marker)` und `missing_grant_state()`. Neu kommen dazu, und keiner davon existiert heute: `organization() -> OrganizationId`, `subject() -> SubjectId`, `bundle_fingerprint() -> Hash32`, `credential_public_cose_key(index: u8) -> Vec<u8>`, `attested(index: u8) -> AttestedAuthenticatorV1`, `attested_with_short_credential_id() -> AttestedAuthenticatorV1`, `cross_device_attested() -> AttestedAuthenticatorV1`, `request_context() -> EnrollmentRequestContextV1`, `retrieval_request() -> VaultBlobRetrievalRequestV1`, `enrollment_with_two_authenticators() -> ReaderEnrollment`, `two_authenticator_enrollment_into(endpoints: &mut dyn EnrollmentEndpoints, store: &mut dyn ReaderBlobStore) -> EnrolledReaderV1`, `seven_foreign_ciphertexts_and(stored: Vec<u8>) -> Vec<Vec<u8>>` und `flip_one_hex_digit(value: &str) -> String`. Fünf Dinge sind dabei GEMESSEN und nicht angenommen: `credential_id(index)` liefert `b"ea-reader-passkey-"` plus eine Ziffer, also 19 Byte, und liegt damit über `MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1` von 16 — die bestehenden Fixture-Kennungen sind für `WebauthnCredentialRegistrationV1::new` bereits gültig und werden NICHT geändert, während `attested_with_short_credential_id()` mit acht Byte bewusst DARUNTER liegt und den einzigen Zweck hat, `CredentialIdLength` auszulösen; `credential_public_cose_key(index)` entsteht über `CanonicalPublicCoseKey::ed25519(ea_testkit::ed25519_public_key(&seed))` und `to_deterministic_cbor()`, damit die Kartenform genau die ist, die `WebauthnCredentialRegistrationV1::new` beim Bauen der Anfrage ein zweites Mal parst; `seven_foreign_ciphertexts_and(stored)` liefert ACHT Elemente und damit genau `MAX_VAULT_BLOBS_PER_SUBJECT_V1`, jedes nichtleer und unter den 4 KB aus `MAX_VAULT_BLOB_CIPHERTEXT_BYTES_V1`, die `VaultBlobRetrievalResponseV1::new` durchlässt; `two_authenticator_enrollment_into` nimmt den ENDPUNKTPORT UND den Bytespeicher, weil `finish` beide braucht und ein intern gebautes Doppel die Aufrufe an einer Stelle aufzeichnete, an der kein Zeuge sie sieht — eine store-only Fassung wäre genau der Fehler, den `finish_calls_three_endpoints_in_order_and_only_then_writes_locally` messen soll; und `AUTHENTICATOR_ONE`/`AUTHENTICATOR_TWO` gibt es NICHT als `const`, weil eine `credentialId` ein `Vec<u8>` ist und eine Heapallokation nicht `const`-auswertbar ist — die Zeugen nennen `fixtures::credential_id(1)` und `fixtures::authenticator(1)`, also die Funktionen, die die Datei heute schon führt. `retrieval_request()` schliesslich baut eine `VaultBlobRetrievalRequestV1` mit `organization()`, `subject()`, `credential_id(2)`, einer festen 32-Byte-Challenge, `authenticatorData`, `clientDataJSON` und einer 64-Byte-Signatur; die Assertion ist auf dem Wirt GESTELLT und nicht echt, und das ist zulässig, weil `recover_and_unlock_vault` sie nicht prüft — sie ist die Autorität des SERVERS, und den misst `pnpm test:server`.
+
+`crates/ea-reader/tests/enrollment_two_authenticators.rs` hält die Kardinalität, die Envelope-Konstruktion und die REIHENFOLGE der drei Endpunktaufrufe. **Eine Weigerung, deren OK-Typ kein `Debug` trägt, wird über `.err().expect("…")` geprüft und NICHT über `.unwrap_err()`, und das ist keine Geschmacksfrage:** `Result::unwrap_err` ist auf `T: Debug` beschränkt, und drei OK-Typen dieser Aufgabe haben es nicht — `&AuthenticatorRecordV1` (er hält eine `SecretBytes<32>`), `EnrolledReaderV1` und `FingerprintConfirmationV1`, das es ausdrücklich nicht bekommt. Dieselbe Schreibweise steht aus demselben Grund schon in `crates/ea-reader/tests/vault_envelope.rs`. Wo der OK-Typ ein `Debug` HAT — `UnlockedVault` etwa, mit seiner handgeschriebenen Ausgabe in `crates/ea-reader/src/vault.rs` —, bleibt `.unwrap_err()` stehen, und wo nur der Fehlertyp zählt, `.unwrap()`: das verlangt `Debug` allein auf dem FEHLER, und `EnrollmentError` leitet es ab.
 
 ```rust
 #[test]
-fn the_rust_fixture_and_the_live_prf_ceremony_derive_the_same_kek() {
-    let salt = ea_reader::enrollment::VAULT_PRF_SALT_V1;
-    let fixture = ea_reader::enrollment::fixture_prf_output(fixtures::AUTHENTICATOR_ONE, &salt);
-    let ceremony = fixtures::recorded_prf_output(fixtures::AUTHENTICATOR_ONE, &salt);
-    assert!(fixture.with_exposed(|bytes| ceremony.matches(bytes)),
-        "the fixture must reproduce the recorded PRF output byte for byte");
-    let from_fixture = derive_kek_v1(&fixture);
-    let from_ceremony = derive_kek_v1(&ceremony);
-    let vault_key = SecretBytes::new([0x11; CEK_SIZE]);
-    let envelope = VaultEnvelopeV1::wrap(&from_fixture, &vault_key, &fixtures::nonce(1)).unwrap();
-    assert!(envelope.unwrap(&from_ceremony).unwrap().matches(&[0x11; CEK_SIZE]));
+fn a_single_authenticator_is_a_refusal_and_writes_no_blob() {
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    let mut enrollment = ReaderEnrollment::begin(
+        fixtures::organization(),
+        fixtures::subject(),
+        fixtures::pinned_anchor(),
+        fixtures::bundle_fingerprint(),
+    )
+    .unwrap();
+    enrollment.register_authenticator(fixtures::attested(1)).unwrap();
+    let shown = enrollment.fingerprints();
+    let confirmation = enrollment
+        .confirm_fingerprints(&shown.key_fingerprint_hex(), &shown.bundle_fingerprint_hex())
+        .unwrap();
+    let refused = enrollment
+        .finish(confirmation, fixtures::request_context(), &mut endpoints, &mut store)
+        .err()
+        .expect("ein einzelner Authenticator ist eine Weigerung");
+    assert_eq!(refused.code(), "EA-READER-ENROLLMENT-SINGLE-AUTHENTICATOR");
+    assert!(
+        store.keys().unwrap().is_empty(),
+        "a refused enrollment must leave no vault blob behind"
+    );
+    assert!(
+        endpoints.calls().is_empty(),
+        "a refused enrollment must not reach a single endpoint"
+    );
 }
 
 #[test]
-fn a_single_authenticator_is_a_refusal_and_writes_no_blob() {
-    let store = InMemoryReaderBlobStore::new();
-    let mut enrollment = ReaderEnrollment::begin(fixtures::organization(), fixtures::subject(),
-        fixtures::pinned_anchor(), &store).unwrap();
-    enrollment.register_authenticator(fixtures::authenticator_one()).unwrap();
-    let confirmation = fixtures::confirm(&enrollment);
-    let refused = enrollment.finish(confirmation).unwrap_err();
-    assert_eq!(refused.code(), "EA-READER-ENROLLMENT-SINGLE-AUTHENTICATOR");
-    assert!(store.is_empty(), "a refused enrollment must leave no vault blob behind");
+fn finish_calls_three_endpoints_in_order_and_only_then_writes_locally() {
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    let enrolled = fixtures::two_authenticator_enrollment_into(&mut endpoints, &mut store);
+    // Die Reihenfolge IST die Zusage, deshalb steht sie als ganze Liste da und
+    // nicht als drei Einzelproben.
+    assert_eq!(
+        endpoints.calls(),
+        &[
+            EnrollmentCallV1 { method: HttpMethod::Post, target_uri: "/v1/webauthn-credentials".to_owned(), signed: true },
+            EnrollmentCallV1 { method: HttpMethod::Post, target_uri: "/v1/webauthn-credentials".to_owned(), signed: true },
+            EnrollmentCallV1 { method: HttpMethod::Put, target_uri: "/v1/vault-blobs".to_owned(), signed: true },
+        ]
+    );
+    assert_eq!(store.keys().unwrap(), vec![enrolled.blob_key().clone()]);
+}
+
+#[test]
+fn a_failing_upload_leaves_nothing_written_at_all() {
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    // Der DRITTE Aufruf ist das `PUT /v1/vault-blobs`; er faellt, nachdem beide
+    // Credentials schon angelegt sind. Genau dieser Zeitpunkt ist der Punkt,
+    // an dem ein nicht fail-closed gebautes `finish` lokal schriebe.
+    endpoints.fail_call(3, EnrollmentEndpointError::Status(503));
+    let enrollment = fixtures::enrollment_with_two_authenticators();
+    let shown = enrollment.fingerprints();
+    let confirmation = enrollment
+        .confirm_fingerprints(&shown.key_fingerprint_hex(), &shown.bundle_fingerprint_hex())
+        .unwrap();
+    let refused = enrollment
+        .finish(confirmation, fixtures::request_context(), &mut endpoints, &mut store)
+        .err()
+        .expect("ein gefallener Upload ist eine Weigerung");
+    assert_eq!(refused.code(), "EA-READER-ENROLLMENT-ENDPOINT-STATUS");
+    assert!(store.keys().unwrap().is_empty());
 }
 
 #[test]
 fn each_authenticator_yields_one_envelope_over_the_same_vault_key() {
-    let enrolled = fixtures::two_authenticator_enrollment();
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    let enrolled = fixtures::two_authenticator_enrollment_into(&mut endpoints, &mut store);
     assert_eq!(enrolled.envelopes().len(), 2);
-    for envelope in enrolled.envelopes() {
-        assert_ne!(envelope.wrapped_bytes(), enrolled.vault_key_probe_bytes());
-    }
-    let first = enrolled.unlock_with(fixtures::AUTHENTICATOR_ONE).unwrap();
-    let second = enrolled.unlock_with(fixtures::AUTHENTICATOR_TWO).unwrap();
-    assert_eq!(first.kem_public_key().as_bytes(), second.kem_public_key().as_bytes());
-    assert_eq!(first.pinned_anchor().trust_anchor_hash(),
-               fixtures::pinned_anchor().trust_anchor_hash());
+    let first = enrolled.unlock_with(&fixtures::authenticator(1)).unwrap();
+    let second = enrolled.unlock_with(&fixtures::authenticator(2)).unwrap();
+    // Ueber `as_bytes()`, weil `KeyThumbprint` und `Hash32` kein `Debug`
+    // ableiten (`crates/ea-types/src/ids.rs`, `hash_newtype!`) — dieselbe
+    // Schreibweise wie in `crates/ea-reader/tests/vault_envelope.rs`.
+    assert_eq!(
+        first.kem_key_thumbprint().as_bytes(),
+        second.kem_key_thumbprint().as_bytes()
+    );
+    assert_eq!(
+        first.pinned_anchor().trust_anchor_hash().as_bytes(),
+        fixtures::pinned_anchor().trust_anchor_hash().as_bytes()
+    );
 }
 
 #[test]
 fn the_prf_output_is_never_the_wrapping_key_and_deleting_one_passkey_keeps_the_vault_open() {
-    let enrolled = fixtures::two_authenticator_enrollment();
-    let raw = fixtures::recorded_prf_output(fixtures::AUTHENTICATOR_ONE, &VAULT_PRF_SALT_V1);
-    let direct = VaultEnvelopeV1::from_wrapped(enrolled.envelopes()[0].wrapped_bytes().to_vec())
-        .unwrap()
-        .unwrap(&fixtures::kek_from_raw_prf(&raw));
-    assert_eq!(direct.unwrap_err().code(), "EA-CRYPTO-AEAD-OPEN");
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    let enrolled = fixtures::two_authenticator_enrollment_into(&mut endpoints, &mut store);
+    // Die ROHE PRF-Ausgabe DIREKT als Wrapping-Schluessel vorgelegt. `unwrap_err`
+    // scheidet aus: sein Ok-Typ ist `SecretBytes<CEK_SIZE>`, und `SecretBytes`
+    // traegt bewusst kein `Debug`.
+    let refused = enrolled.envelopes()[0]
+        .unwrap(&SecretBytes::new(fixtures::prf_output(1)))
+        .err()
+        .expect("die rohe PRF-Ausgabe ist nicht der Wrapping-Schluessel");
+    assert_eq!(refused.code(), "EA-CRYPTO-AEAD-OPEN");
     // `without_authenticator` reicht auf `SealedVaultV1::without_credential`
-    // durch und legt keine zweite Envelope-Verwaltung daneben.
-    let surviving = enrolled.without_authenticator(fixtures::AUTHENTICATOR_ONE);
-    assert!(surviving.unlock_with(fixtures::AUTHENTICATOR_TWO).is_ok());
+    // durch — und das gibt ein `Result` zurueck, weil das Entfernen des LETZTEN
+    // Entsperrweges `EA-READER-VAULT-NO-AUTHENTICATOR` ist.
+    let surviving = enrolled
+        .without_authenticator(fixtures::credential_id(1))
+        .unwrap();
+    assert_eq!(surviving.envelopes().len(), 1);
+    assert!(surviving.unlock_with(&fixtures::authenticator(2)).is_ok());
+    let closed = surviving.unlock_with(&fixtures::authenticator(1)).unwrap_err();
+    assert_eq!(closed.code(), "EA-READER-VAULT-NO-ENVELOPE");
+}
+
+#[test]
+fn a_duplicate_credential_id_does_not_count_twice() {
+    let mut enrollment = ReaderEnrollment::begin(
+        fixtures::organization(),
+        fixtures::subject(),
+        fixtures::pinned_anchor(),
+        fixtures::bundle_fingerprint(),
+    )
+    .unwrap();
+    enrollment.register_authenticator(fixtures::attested(1)).unwrap();
+    let refused = enrollment
+        .register_authenticator(fixtures::attested(1))
+        .err()
+        .expect("dieselbe credentialId zaehlt kein zweites Mal");
+    assert_eq!(refused.code(), "EA-READER-ENROLLMENT-DUPLICATE-AUTHENTICATOR");
+    assert_eq!(enrollment.registered_authenticator_count(), 1);
+}
+
+#[test]
+fn a_credential_id_below_the_protocol_minimum_is_refused_here_and_not_at_the_endpoint() {
+    let mut enrollment = ReaderEnrollment::begin(
+        fixtures::organization(),
+        fixtures::subject(),
+        fixtures::pinned_anchor(),
+        fixtures::bundle_fingerprint(),
+    )
+    .unwrap();
+    let refused = enrollment
+        .register_authenticator(fixtures::attested_with_short_credential_id())
+        .err()
+        .expect("acht Byte liegen unter MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1");
+    assert_eq!(refused.code(), "EA-READER-ENROLLMENT-CREDENTIAL-ID-LENGTH");
+    assert_eq!(enrollment.registered_authenticator_count(), 0);
 }
 
 #[test]
 fn the_cross_device_qr_flow_is_not_an_unlock_path() {
-    let refused = ReaderEnrollment::begin(fixtures::organization(), fixtures::subject(),
-        fixtures::pinned_anchor(), &InMemoryReaderBlobStore::new())
-        .unwrap()
-        .register_authenticator(fixtures::cross_device_authenticator())
-        .unwrap_err();
+    let mut enrollment = ReaderEnrollment::begin(
+        fixtures::organization(),
+        fixtures::subject(),
+        fixtures::pinned_anchor(),
+        fixtures::bundle_fingerprint(),
+    )
+    .unwrap();
+    let refused = enrollment
+        .register_authenticator(fixtures::cross_device_attested())
+        .err()
+        .expect("der QR-Flow ist kein Entsperrpfad");
     assert_eq!(refused.code(), "EA-READER-ENROLLMENT-TRANSPORT-REFUSED");
+}
+
+#[test]
+fn the_retrieval_carries_no_signature_and_exactly_one_ciphertext_opens() {
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut enrolling = InMemoryEnrollmentEndpoints::new();
+    let enrolled = fixtures::two_authenticator_enrollment_into(&mut enrolling, &mut store);
+    let stored = store.get(enrolled.blob_key()).unwrap().unwrap();
+    // Acht Chiffrate, wie `MAX_VAULT_BLOBS_PER_SUBJECT_V1` sie zulaesst, und
+    // GENAU EINES gehoert diesem Reader. Die sieben anderen sind Rauschen.
+    // Ein FRISCHES Doppel, damit `calls()` nur den Abruf zeigt und nicht die
+    // drei Aufrufe, mit denen das Enrollment vorher fertig wurde.
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    endpoints.answer_retrieval_with(fixtures::seven_foreign_ciphertexts_and(stored));
+    let unlocked = recover_and_unlock_vault(
+        &fixtures::retrieval_request(),
+        &fixtures::authenticator(2),
+        &mut endpoints,
+    )
+    .unwrap();
+    assert_eq!(
+        unlocked.pinned_anchor().trust_anchor_hash().as_bytes(),
+        fixtures::pinned_anchor().trust_anchor_hash().as_bytes()
+    );
+    assert_eq!(
+        endpoints.calls(),
+        &[EnrollmentCallV1 {
+            method: HttpMethod::Post,
+            target_uri: "/v1/vault-blobs/retrievals".to_owned(),
+            signed: false,
+        }]
+    );
+}
+
+#[test]
+fn a_reader_without_an_envelope_in_any_ciphertext_gets_no_vault_for_credential() {
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut enrolling = InMemoryEnrollmentEndpoints::new();
+    let enrolled = fixtures::two_authenticator_enrollment_into(&mut enrolling, &mut store);
+    let stored = store.get(enrolled.blob_key()).unwrap().unwrap();
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    endpoints.answer_retrieval_with(fixtures::seven_foreign_ciphertexts_and(stored));
+    // Derselbe Antwortsatz, aber ein dritter Authenticator, fuer den in KEINEM
+    // der acht Chiffrate ein Envelope liegt. Der Unterschied zu
+    // `EA-READER-VAULT-NO-ENVELOPE` ist die Reichweite: dort scheitert EIN
+    // bekannter Tresor, hier scheitert der ganze Abruf.
+    let refused = recover_and_unlock_vault(
+        &fixtures::retrieval_request(),
+        &fixtures::authenticator(3),
+        &mut endpoints,
+    )
+    .unwrap_err();
+    assert_eq!(refused.code(), "EA-READER-ENROLLMENT-NO-VAULT");
+    assert_eq!(endpoints.calls().len(), 1);
 }
 ```
 
@@ -1576,106 +1767,233 @@ fn the_cross_device_qr_flow_is_not_an_unlock_path() {
 ```rust
 #[test]
 fn a_diverging_fingerprint_aborts_the_enrollment() {
-    let mut enrollment = fixtures::enrollment_with_two_authenticators();
+    let enrollment = fixtures::enrollment_with_two_authenticators();
     let shown = enrollment.fingerprints();
-    let wrong = fixtures::flip_one_hex_digit(shown.bundle_fingerprint());
-    let refused = enrollment.confirm_fingerprints(shown.key_fingerprint(), &wrong).unwrap_err();
+    // Beide Seiten sind HEXZEICHENKETTEN, und das ist die entschiedene Form:
+    // die ANGEZEIGTEN Werte sind typisiert (`KeyThumbprint`, `Hash32`), die
+    // ERWARTETEN kommen aus einer Tastatur.
+    let wrong_bundle = fixtures::flip_one_hex_digit(&shown.bundle_fingerprint_hex());
+    // `.err().expect(…)` und nicht `.unwrap_err()`: der OK-Typ ist
+    // `FingerprintConfirmationV1`, und der traegt bewusst kein `Debug`.
+    let refused = enrollment
+        .confirm_fingerprints(&shown.key_fingerprint_hex(), &wrong_bundle)
+        .err()
+        .expect("ein abweichender Bundle-Fingerprint bestaetigt nichts");
     assert_eq!(refused.code(), "EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH");
+    let wrong_key = fixtures::flip_one_hex_digit(&shown.key_fingerprint_hex());
     let refused_key = enrollment
-        .confirm_fingerprints(&fixtures::flip_one_hex_digit(shown.key_fingerprint()),
-                              shown.bundle_fingerprint())
-        .unwrap_err();
+        .confirm_fingerprints(&wrong_key, &shown.bundle_fingerprint_hex())
+        .err()
+        .expect("ein abweichender Schluessel-Fingerprint bestaetigt nichts");
     assert_eq!(refused_key.code(), "EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH");
+    let malformed = enrollment
+        .confirm_fingerprints("nicht hexadezimal", &shown.bundle_fingerprint_hex())
+        .err()
+        .expect("eine nicht-hexadezimale Eingabe bestaetigt nichts");
+    assert_eq!(malformed.code(), "EA-READER-ENROLLMENT-FINGERPRINT-ENCODING");
+}
+
+#[test]
+fn the_shown_values_are_the_kem_thumbprint_and_the_bundle_hash() {
+    let enrollment = fixtures::enrollment_with_two_authenticators();
+    let shown = enrollment.fingerprints();
+    assert_eq!(
+        shown.bundle_fingerprint().as_bytes(),
+        fixtures::bundle_fingerprint().as_bytes()
+    );
+    assert_eq!(shown.key_fingerprint_hex(), hex::encode(shown.key_fingerprint().as_bytes()));
+    assert_eq!(shown.key_fingerprint_hex().len(), 64);
 }
 
 #[test]
 fn the_confirmation_has_no_construction_path_outside_a_match() {
     // Der Beweis ist die ABWESENHEIT einer Konstruktion, nicht ihr Ergebnis.
+    // Die Arithmetik steht ausgeschrieben da, weil eine nackte Zahl hier nicht
+    // pruefbar waere: die DEKLARATION enthaelt dieselbe Zeichenfolge wie eine
+    // Konstruktion, und ein `impl`-Kopf ebenfalls.
     let source = include_str!("../src/enrollment.rs");
-    assert_eq!(source.matches("FingerprintConfirmationV1 {").count(), 1,
-        "FingerprintConfirmationV1 must be constructed in exactly one place");
+    assert_eq!(
+        source.matches("pub struct FingerprintConfirmationV1 {").count(),
+        1,
+        "genau eine Deklaration"
+    );
+    assert_eq!(
+        source.matches("FingerprintConfirmationV1 {").count(),
+        2,
+        "die Deklaration und GENAU EIN Strukturausdruck in confirm_fingerprints"
+    );
+    assert_eq!(
+        source.matches("impl FingerprintConfirmationV1").count(),
+        0,
+        "kein inhaerenter impl-Block: er koennte eine zweite Konstruktionsstelle \
+         hinter einer assoziierten Funktion verstecken, und sein Kopf zaehlte \
+         oben mit"
+    );
     assert!(!source.contains("pub fn skip"), "no skip path may exist");
     assert!(!source.contains("Default for FingerprintConfirmationV1"));
+    assert!(!source.contains("Clone for FingerprintConfirmationV1"));
+    assert!(
+        !source.contains("AnchorUnpinned"),
+        "der fehlende Anker ist im Typ ausgeschlossen und braucht keinen Laufzeitfall"
+    );
 }
 
 #[test]
 fn the_gate_fires_on_every_first_call_without_a_pinned_trust_store() {
-    let store = InMemoryReaderBlobStore::new();
-    let known = ReaderEnrollment::device_state(&store);
+    let mut store = InMemoryReaderBlobStore::new();
+    let mut endpoints = InMemoryEnrollmentEndpoints::new();
+    let known = ReaderEnrollment::device_state(&store).unwrap();
     assert!(matches!(known, DeviceTrustStateV1::NoPinnedAnchor));
     assert!(ReaderEnrollment::fingerprint_gate_required(&known));
-    let enrolled = fixtures::two_authenticator_enrollment_into(&store);
-    assert!(!ReaderEnrollment::fingerprint_gate_required(
-        &ReaderEnrollment::device_state(&store)));
+    let enrolled = fixtures::two_authenticator_enrollment_into(&mut endpoints, &mut store);
+    let after = ReaderEnrollment::device_state(&store).unwrap();
+    assert!(matches!(after, DeviceTrustStateV1::Pinned));
+    assert!(!ReaderEnrollment::fingerprint_gate_required(&after));
     drop(enrolled);
 }
 ```
 
-`apps/web/src/features/enrollment/EnrollmentPage.test.tsx` prüft dieselben zwei Zusagen auf der Oberfläche und NICHTS darüber hinaus: das Abschlusselement bleibt gesperrt, solange ein Authenticator fehlt oder der Fingerprintvergleich nicht bestätigt ist, und die Bestätigung ist kein Häkchen, sondern die Eingabe der unabhängig verteilten Referenz.
+`apps/web/src/features/enrollment/EnrollmentPage.test.tsx` prüft dieselben zwei Zusagen auf der Oberfläche und NICHTS darüber hinaus: das Abschlusselement bleibt gesperrt, solange ein Authenticator fehlt oder der Fingerprintvergleich nicht bestätigt ist, und die Bestätigung ist kein Häkchen, sondern die Eingabe der unabhängig verteilten Referenz. `stubBridge`, `SHOWN` und `WRONG` stehen im KOPF DIESER DATEI und in keinem gemeinsamen Hilfsmodul: eine Testdatei ist von beiden Quelltextscans des Pakets ausgenommen (`apps/web/src/bridge/no-hand-written-contracts.test.ts` und `apps/web/src/design/static-css.test.ts` filtern `.test.tsx?` heraus), ein Hilfsmodul daneben wäre es nicht und schleppte die Fingerprint-Literale in den gescannten Bestand. Der Typ `EnrollmentBridge`, gegen den beide Zeugen geschrieben sind, steht dagegen NICHT hier, sondern in `apps/web/src/vault/webauthn-prf.ts` neben den fünf Aufrufen, die er beschreibt — er ist die Form der Brücke und keine Testhilfe. **Sein Bestätigungs-DTO schreibt `code?: string | undefined` und nicht `code?: string`,** und das ist gemessen: `apps/web/tsconfig.json` setzt `exactOptionalPropertyTypes: true`, unter dem ein ausgeschriebenes `code: … ? undefined : '…'` mit TS2322 an einem `code?: string` scheitert. `EaOpfsResponse` in `apps/web/src/bridge/opfs-worker.ts` schreibt `bytes?: Uint8Array | undefined` aus genau diesem Grund; die Schreibweise ist die des Hauses und keine Erfindung dieser Aufgabe.
 
 ```tsx
+const user = userEvent.setup()
+
+const SHOWN = { keyFingerprint: 'a'.repeat(64), bundleFingerprint: 'b'.repeat(64) }
+const WRONG = 'c'.repeat(64)
+
+function stubBridge(overrides: Partial<EnrollmentBridge> = {}): EnrollmentBridge {
+  // Der Zaehler ist ZUSTAND und keine Konstante: die Seite nimmt die Zahl der
+  // registrierten Authenticators aus der Bruecke und zaehlt keine Klicks selbst
+  // (§9). Ein Doppel, das immer `registered: 1` meldet, liesse das
+  // Abschlusselement fuer immer gesperrt und der Zeuge waere rot.
+  let registered = 0
+  return {
+    begin: vi.fn(async () => ({ handle: 1, prfSalt: new Uint8Array(0), publicKeyAlgorithms: [-8] })),
+    registerAuthenticator: vi.fn(async () => ({ registered: (registered += 1), required: 2 })),
+    fingerprints: vi.fn(async () => SHOWN),
+    confirmFingerprints: vi.fn(async ({ expectedBundleFingerprint }) => ({
+      confirmed: expectedBundleFingerprint === SHOWN.bundleFingerprint,
+      code: expectedBundleFingerprint === SHOWN.bundleFingerprint
+        ? undefined
+        : 'EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH',
+    })),
+    finish: vi.fn(async () => ({ finished: true })),
+    ...overrides,
+  }
+}
+
 it('keeps the enrollment closed until two authenticators and both fingerprints agree', async () => {
-  render(<EnrollmentPage bridge={stubBridge({ fingerprints: SHOWN })} />)
+  render(<EnrollmentPage bridge={stubBridge()} />)
   expect(screen.getByRole('button', { name: 'Enrollment abschließen' })).toBeDisabled()
   await user.click(screen.getByRole('button', { name: 'Authenticator registrieren' }))
   expect(screen.getByText('Ein zweiter Authenticator ist erforderlich.')).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Authenticator registrieren' }))
+  expect(screen.getByText('2 von 2 Authenticators registriert.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Enrollment abschließen' })).toBeDisabled()
   await user.type(screen.getByLabelText('Erwarteter Bundle-Fingerprint'), WRONG)
+  await user.type(screen.getByLabelText('Erwarteter Schlüssel-Fingerprint'), SHOWN.keyFingerprint)
   expect(screen.getByRole('alert')).toHaveTextContent('EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH')
   expect(screen.getByRole('button', { name: 'Enrollment abschließen' })).toBeDisabled()
   await user.clear(screen.getByLabelText('Erwarteter Bundle-Fingerprint'))
   await user.type(screen.getByLabelText('Erwarteter Bundle-Fingerprint'), SHOWN.bundleFingerprint)
-  await user.type(screen.getByLabelText('Erwarteter Schlüssel-Fingerprint'), SHOWN.keyFingerprint)
   expect(screen.getByRole('button', { name: 'Enrollment abschließen' })).toBeEnabled()
 })
 
 it('derives no key and compares no fingerprint in TypeScript', async () => {
-  const bridge = stubBridge({ fingerprints: SHOWN })
+  const bridge = stubBridge()
   render(<EnrollmentPage bridge={bridge} />)
   await user.type(screen.getByLabelText('Erwarteter Bundle-Fingerprint'), SHOWN.bundleFingerprint)
   await user.type(screen.getByLabelText('Erwarteter Schlüssel-Fingerprint'), SHOWN.keyFingerprint)
   expect(bridge.confirmFingerprints).toHaveBeenCalledWith({
+    handle: 1,
     expectedKeyFingerprint: SHOWN.keyFingerprint,
     expectedBundleFingerprint: SHOWN.bundleFingerprint,
   })
 })
 ```
 
-`apps/web/playwright.config.ts` entsteht in DIESEM Task, weil er der erste ist, der Playwright fährt; die späteren E2E-Läufe der Tasks „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes", „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`", „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit" und „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop" benutzen sie unverändert. Die Konfiguration folgt der Desktop-Vorlage: `testDir: 'tests/e2e'`, `webServer` mit `pnpm exec vite build && pnpm exec vite preview --host 127.0.0.1 --port 4174 --strictPort` — ein ANDERER Port als die 4173 des Desktops, damit beide Suiten nebeneinander laufen —, `use.baseURL` auf dieselbe IPv4-Schleife und `use.offline: false`, weil `offline: true` auf Kontextebene in Chromium den GESAMTEN Netzstapel einschließlich `127.0.0.1` abschneidet und die Anwendung dann nie lädt. Sie trägt in diesem Task GENAU EIN `projects`-Element, `chromium`; die Matrix aus `chromium`, `firefox` und `webkit` entsteht im Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate". `package.json` der Wurzel bekommt dazu das Skript `"web:e2e": "pnpm --dir apps/web e2e"`; es steht wie `desktop:e2e` AUSDRÜCKLICH NICHT in `verify_quick_commands()`, weil Playwright installierte Browser voraussetzt.
+`apps/web/playwright.config.ts` entsteht in DIESEM Task, weil er der erste ist, der Playwright fährt; die späteren E2E-Läufe der Tasks „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes", „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`", „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit" und „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop" benutzen sie unverändert. Die Konfiguration folgt der Desktop-Vorlage einschliesslich ihrer Ausdrucksform: der Default-Export steht unter `satisfies PlaywrightTestConfig` und nicht unter `defineConfig`, weil `defineConfig` `webServer` zu `TestConfigWebServer | TestConfigWebServer[]` weitet und `config.webServer?.command` im Zeugen dann mit TS2339 fällt — der Desktop schreibt genau diese Messung in seinen eigenen Kopf. Inhalt: `testDir: 'tests/e2e'`, `webServer` mit `pnpm exec vite build && pnpm exec vite preview --host 127.0.0.1 --port 4174 --strictPort` — ein ANDERER Port als die 4173 des Desktops, damit beide Suiten nebeneinander laufen —, `webServer.timeout: 180_000` wie dort, weil ein kalter Vite-Bau samt Ant Design die Vorgabe von 60 s nicht zuverlässig deckt, `webServer.url: 'http://127.0.0.1:4174'`, `use.baseURL` auf denselben Wert und `use.offline: false`, weil `offline: true` auf Kontextebene in Chromium den GESAMTEN Netzstapel einschliesslich `127.0.0.1` abschneidet und die Anwendung dann nie lädt. Sie trägt in diesem Task GENAU EIN `projects`-Element, `chromium` — der Desktop hat gar keinen `projects`-Schlüssel, das ist hier also die erste Fassung und keine Kopie —; die Matrix aus `chromium`, `firefox` und `webkit` entsteht im Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate". `package.json` der Wurzel bekommt dazu das Skript `"web:e2e": "pnpm --dir apps/web e2e"` — `apps/web/package.json` führt `"e2e": "playwright test"` bereits —; es steht wie `desktop:e2e` AUSDRÜCKLICH NICHT in `verify_quick_commands()`, weil Playwright installierte Browser voraussetzt. Ein `cargo run --locked -p xtask -- browsers up` ist NICHT nötig: dieses Compose-File bedient `web:browser-test` und chromedriver, während Playwright seinen eigenen Browser aus `~/.cache/ms-playwright` nimmt.
 
-`.gitignore` bekommt im selben Zug die zwei Zeilen `apps/web/test-results/` und `apps/web/playwright-report/`. Sie sind das Spiegelbild der bereits vorhandenen `apps/desktop/test-results/` und `apps/desktop/playwright-report/` und fallen in DIESEM Task, weil er der erste ist, der Playwright fährt und damit als erster diese Verzeichnisse erzeugt. Ohne sie zögen die späteren `git add apps/web` der Tasks „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes", „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`" und „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop" den kompletten Lauf-Ausgang samt Traces und Screenshots in das Repositorium — genau der Grund, aus dem die Desktop-Zeilen dort stehen.
+`apps/web/src/e2e-config.test.ts` spiegelt `apps/desktop/src/e2e-config.test.ts`: es zieht die Konfiguration über `await import('../playwright.config')` — womit `tsc` sie überhaupt erst sieht — und behauptet `testDir`, die Reihenfolge `vite build` vor `vite preview`, `--host 127.0.0.1`, `webServer.url === 'http://127.0.0.1:4174'`, `use.baseURL === webServer.url`, `use.offline === false` und dass genau ein `projects`-Eintrag mit dem Namen `chromium` darin steht. Der letzte Punkt hat einen eigenen Zweck: der Gate-Task stellt zwei weitere Projekte daneben, und dieser Zeuge macht die Erweiterung zu einer bewussten Änderung statt zu einem Nebeneffekt.
 
-`apps/web/tests/e2e/enrollment.spec.ts` fährt denselben Ablauf gegen einen virtuellen Authenticator. Der Lauf ist AUSDRÜCKLICH auf das Playwright-Projekt `chromium` beschränkt und trägt das dazu: `WebAuthn.addVirtualAuthenticator` ist eine CDP-Methode, Firefox und WebKit bieten kein Gegenstück, und die Browser-Matrix des Tasks „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate" führt diese Einschränkung als benannte Lücke statt sie zu verschweigen. Die Beschränkung braucht einen MECHANISMUS und nicht nur einen Satz: solange `apps/web/playwright.config.ts` ein einziges `projects`-Element trägt, ist sie folgenlos, aber der Gate-Task stellt drei Projekte daneben und fährt `pnpm web:e2e` über alle Spezifikationen. Deshalb steht in der ersten Zeile jeder CDP-benutzenden Spezifikation dieses Plans `test.skip(({ browserName }) => browserName !== 'chromium')`, und `enrollment.spec.ts` ist die erste, die sie trägt. Ohne diese Zeile stirbt der Enrollment-Lauf im Matrixlauf des Gates an `WebAuthn.enable` — an der spätestmöglichen Stelle und mit der unklarsten Meldung.
+`.gitignore` bekommt im selben Zug die zwei Zeilen `apps/web/test-results/` und `apps/web/playwright-report/`, eingefügt hinter `apps/desktop/playwright-report/`. Sie sind das Spiegelbild der bereits vorhandenen Desktop-Zeilen und fallen in DIESEM Task, weil er der erste ist, der Playwright fährt und damit als erster diese Verzeichnisse erzeugt. Ohne sie zögen die späteren `git add apps/web` der Tasks „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes", „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`" und „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop" den kompletten Lauf-Ausgang samt Traces und Screenshots in das Repositorium — genau der Grund, aus dem die Desktop-Zeilen dort stehen.
+
+`apps/web/tests/e2e/enrollment.spec.ts` fährt denselben Ablauf gegen einen virtuellen Authenticator UND ist der einzige Zeuge dieses Plans, der eine ECHTE PRF-Ausgabe berührt. Der Lauf ist AUSDRÜCKLICH auf das Playwright-Projekt `chromium` beschränkt und trägt das dazu: `WebAuthn.addVirtualAuthenticator` ist eine CDP-Methode, Firefox und WebKit bieten kein Gegenstück, und die Browser-Matrix des Tasks „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate" führt diese Einschränkung als benannte Lücke statt sie zu verschweigen. Die Beschränkung braucht einen MECHANISMUS und nicht nur einen Satz: solange `apps/web/playwright.config.ts` ein einziges `projects`-Element trägt, ist sie folgenlos, aber der Gate-Task stellt zwei Projekte daneben und fährt `pnpm web:e2e` über alle Spezifikationen. Deshalb steht in der ersten Zeile jeder CDP-benutzenden Spezifikation dieses Plans `test.skip(({ browserName }) => browserName !== 'chromium')`, und `enrollment.spec.ts` ist die erste, die sie trägt.
+
+Der virtuelle Authenticator wird mit `hasPrf: true` erzeugt. Das ist GEMESSEN und keine Hoffnung: `node_modules/.pnpm/playwright-core@1.62.1/…/types/protocol.d.ts` führt `hasPrf?: boolean` in `WebAuthn.VirtualAuthenticatorOptions` mit dem Kommentar „If set to true, the authenticator will support the prf extension." Der Server wird nicht gebraucht und nicht gestartet: `stubEnrollmentEndpoints(page)` — es steht im KOPF von `enrollment.spec.ts` und in keinem gemeinsamen Hilfsmodul, aus demselben Grund wie `stubBridge` in der vitest-Datei — setzt `page.route('**/v1/**', …)` und beantwortet damit die drei Endpunkte auf dem Bundle-Origin; was der Server mit ihnen macht, misst `pnpm test:server` mit `--test webauthn_credential_api --test vault_blob_api`. Dieser Lauf misst die BROWSERHÄLFTE.
+
+Der letzte Abschnitt des Zeugen, die lebende Paritätsprüfung, hängt an einem Bedienelement „Tresor entsperren", das `EnrollmentPage.tsx` nach dem Abschluss zeigt. Es ruft KEINE sechste Ausfuhr aus `webauthn.rs` auf, sondern den Weg, den diese Crate schon hat: `webauthn-prf.ts` holt über ein zweites `navigator.credentials.get` mit der `prf`-Erweiterung eine frische PRF-Ausgabe, `blobGet` liest den versiegelten Tresor unter `READER_VAULT_BLOB_KEY_V1` aus OPFS, und `readerVaultUnlock` aus `crate::vault_bridge` öffnet ihn. Damit bleibt „genau fünf Ausfuhren und keine sechste" wahr, und die Parität misst genau das, was sie messen soll — dass der Tresor, den dieser Lauf gebaut hat, sich mit dem öffnet, was derselbe Authenticator ein zweites Mal liefert.
 
 ```ts
-test('a second authenticator is required and a wrong fingerprint aborts', async ({ page }) => {
+test.skip(({ browserName }) => browserName !== 'chromium')
+
+const VIRTUAL = {
+  protocol: 'ctap2',
+  transport: 'internal',
+  hasResidentKey: true,
+  hasUserVerification: true,
+  hasPrf: true,
+  isUserVerified: true,
+  automaticPresenceSimulation: true,
+} as const
+
+test('two authenticators are required, a wrong fingerprint aborts, and a real PRF output opens the vault this run built', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page)
   await cdp.send('WebAuthn.enable')
-  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
-    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true },
-  })
+  const first = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: VIRTUAL })
+  const second = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: VIRTUAL })
+  await stubEnrollmentEndpoints(page)
+
   await page.goto('/enrollment')
   await page.getByRole('button', { name: 'Authenticator registrieren' }).click()
+  await expect(page.getByText('Ein zweiter Authenticator ist erforderlich.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Enrollment abschließen' })).toBeDisabled()
-  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true } })
   await page.getByRole('button', { name: 'Authenticator registrieren' }).click()
+  await expect(page.getByText('2 von 2 Authenticators registriert.')).toBeVisible()
+
+  const shownKey = await page.getByTestId('schluessel-fingerprint').innerText()
+  await page.getByLabel('Erwarteter Schlüssel-Fingerprint').fill(shownKey)
   await page.getByLabel('Erwarteter Bundle-Fingerprint').fill('0'.repeat(64))
   await expect(page.getByRole('alert')).toContainText('EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH')
   await expect(page.getByRole('button', { name: 'Enrollment abschließen' })).toBeDisabled()
-  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId })
+
+  const shownBundle = await page.getByTestId('bundle-fingerprint').innerText()
+  await page.getByLabel('Erwarteter Bundle-Fingerprint').fill(shownBundle)
+  await page.getByRole('button', { name: 'Enrollment abschließen' }).click()
+  await expect(page.getByText('Enrollment abgeschlossen.')).toBeVisible()
+
+  // DIE LEBENDE PARITAET. Bis hierher ist der Tresor mit PRF-Ausgaben gebaut,
+  // die der virtuelle Authenticator SELBST gezogen hat und die niemand kennt.
+  // Jetzt wird derselbe Authenticator ein zweites Mal befragt, und der Tresor
+  // muss sich mit dem oeffnen, was dabei herauskommt.
+  await page.getByRole('button', { name: 'Tresor entsperren' }).click()
+  await expect(page.getByText('Tresor entsperrt.')).toBeVisible()
+
+  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: first.authenticatorId })
+  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: second.authenticatorId })
 })
 ```
 
-- [ ] **Step 2: Run the witnesses and confirm no enrollment surface exists**
+**W22, ausgeschrieben: was dieser Lauf beweist und was er NICHT beweist — und warum die Vorfassung dieses Tasks es nicht beweisen konnte.** Die Vorfassung stellte `ea_reader::enrollment::fixture_prf_output` gegen `fixtures::recorded_prf_output` und nannte das den wichtigsten Zeugen der Aufgabe. Beide Seiten wären im selben Commit geschrieben worden, und NICHTS in dieser Aufgabe zeichnet je eine echte PRF-Ausgabe auf; der Zeuge hätte sich selbst gemessen — genau das Versagen, vor dem der Absatz darüber warnte. Aufzeichnen ginge auch gar nicht: `WebAuthn.VirtualAuthenticatorOptions` kennt `hasPrf`, `hasHmacSecret` und `hasHmacSecretMc`, aber KEIN Feld für den CredRandom des Authenticators. Der wird beim Anlegen des Credentials in Chromium gezogen, ist über CDP weder setzbar noch auslesbar, und eine „aufgezeichnete" PRF-Ausgabe wäre in keinem zweiten Lauf reproduzierbar. Ein eingefrorener Byteweg dafür ist ausserdem ausgeschlossen: Stufe 4 friert KEINE Vektorfamilie ein, `vectors/…` wird ausschliesslich gelesen. `fixture_prf_output` und `recorded_prf_output` entfallen deshalb ersatzlos — ein Funktionsname, der eine Aufzeichnung behauptet, die es nicht gibt, ist schlimmer als keine Funktion.
 
-Run: `cargo test --locked -p ea-reader --test enrollment_two_authenticators --test fingerprint_gate && pnpm --dir apps/web test --run src/features/enrollment`
+An ihre Stelle tritt die LEBENDE Paritätsprüfung oben, und ihre Aussage ist präzise: gemessen wird die volle Kette aus echter WebAuthn-`prf`-Erweiterung, echten 32 Byte aus dem Authenticator, `derive_kek_v1`, `VaultEnvelopeV1::wrap`, `SealedVaultV1::to_deterministic_cbor`, OPFS und `ReaderVault::unlock`. NICHT gemessen wird irgendein Byte-WERT: welche 32 Byte der Authenticator liefert, weiss der Test nicht und darf er nicht wissen. Daraus folgt die zweite Ehrlichkeit, und sie betrifft alle Folgeaufgaben: `fixtures::prf_output(index)` mit seinen Werten `[0xa1; 32]` und `[0xb2; 32]` ist ein FREI GEWÄHLTER Stellvertreter und kein gemessener. Seine einzige tragende Eigenschaft ist, dass er 32 Byte lang und innerhalb eines Laufs stabil ist. Die Sicherheitsaussage von §6.2 hängt nicht an ihm, sondern an der Ableitung, und die misst `the_prf_output_never_wraps_the_vault_and_each_authenticator_opens_it_alone` in `crates/ea-reader/tests/vault_envelope.rs` bereits DIREKT gegen `Hkdf::<Sha256>::new(None, prf).expand(VAULT_KEK_INFO_V1, …)`. Jede Aufgabe dieses Plans, die auf `fixtures::unlocked_vault()` steht, steht also auf einer geprüften ABLEITUNG und einem beliebigen EINGABEWERT — und das ist genug, solange es dasteht und nicht zu „gemessen" umgeschrieben wird.
 
-Beide Kommandos tragen `--locked`, und das ist in diesem Schritt richtig: die Kante auf `ea-sync-protocol` ist noch nicht eingetragen, `Cargo.lock` steht also unveraendert. Das GENAU EINE Kommando dieses Tasks ohne `--locked` steht als erste Zeile von Schritt 4.
+Zwei weitere Grenzen dieses Laufs, benannt statt geglättet. **Erstens:** zwei virtuelle Authenticators belegen nicht ihre UNABHÄNGIGKEIT. CDP bietet keinen Weg, einen bestimmten Authenticator für einen `create`-Aufruf zu erzwingen; beide Credentials könnten auf demselben virtuellen Gerät entstehen. Gemessen ist damit der KARDINALITÄTSPFAD — zwei verschiedene `credentialId`s, zwei Envelopes, `finish` erst danach —, nicht die physische Unabhängigkeit, die §6.3 meint. **Zweitens:** liefert Chromiums virtueller Authenticator wider Erwarten keine PRF-Ausgabe, MUSS der Lauf laut fallen. `apps/web/src/vault/webauthn-prf.ts` prüft deshalb die Länge der Ausgabe und wirft; ein Rückfall auf einen erzeugten Puffer ist AUSGESCHLOSSEN, weil er den Test grün färbte, ohne die Kette gemessen zu haben.
 
-Expected: FAIL. `crates/ea-reader/src/enrollment.rs` existiert nicht, also fehlen `ReaderEnrollment`, `EnrollmentFingerprintsV1`, `FingerprintConfirmationV1` und `VAULT_PRF_SALT_V1`, und der `include_str!("../src/enrollment.rs")` des Konstruktions-Zeugen bricht bereits beim Übersetzen ab — das ist der beabsichtigte erste rote Punkt und keine Panne, denn ein Zeuge, der eine Abwesenheit über eine Datei behauptet, muss an der fehlenden Datei scheitern und nicht still bestehen. Auf der Webseite fehlen alle drei Komponenten; `pnpm --dir apps/web test` selbst LÄUFT, weil das Paket, sein Vitest-Runner und `src/bridge/generated-contracts.ts` seit dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate" existieren. Ein Paketmanagerabbruch wäre hier kein roter Test, sondern eine falsche Reihenfolge.
+- [ ] **Step 3: Run the witnesses and confirm no enrollment surface exists**
 
-- [ ] **Step 3: Implement browser key generation, two mandatory authenticators, blob transport, and the fingerprint gate**
+Run, als ZWEI Kommandos und nicht als `&&`-Kette:
+
+```bash
+cargo test --locked -p ea-reader --test enrollment_two_authenticators --test fingerprint_gate
+pnpm --dir apps/web test --run src/features/enrollment
+```
+
+Die Trennung ist keine Formsache. Das cargo-Kommando fällt beim ÜBERSETZEN, weil `crates/ea-reader/src/enrollment.rs` noch nicht existiert; eine `&&`-Kette kürzte danach ab und der vitest-Lauf, dessen roter Punkt dieser Schritt zeigen soll, liefe nie. Beide Kommandos tragen `--locked` beziehungsweise brauchen keins, und das ist hier richtig: die Kante auf `ea-sync-protocol` ist noch nicht eingetragen, `Cargo.lock` steht also unverändert. Das GENAU EINE Kommando dieses Tasks ohne `--locked` steht am Ende von Schritt 4.
+
+Expected: FAIL, und zwar zweimal getrennt sichtbar. Auf der Rust-Seite fehlen `ReaderEnrollment`, `EnrollmentFingerprintsV1`, `FingerprintConfirmationV1`, `DeviceTrustStateV1`, `InMemoryEnrollmentEndpoints`, `EnrollmentCallV1`, `EnrollmentEndpointError` und `recover_and_unlock_vault`, und der `include_str!("../src/enrollment.rs")` des Konstruktions-Zeugen bricht bereits beim Übersetzen ab — das ist der beabsichtigte erste rote Punkt und keine Panne, denn ein Zeuge, der eine Abwesenheit über eine Datei behauptet, muss an der fehlenden Datei scheitern und nicht still bestehen. Auf der Webseite fehlen alle drei Komponenten; `pnpm --dir apps/web test` selbst LÄUFT, weil das Paket, sein Vitest-Runner, `src/bridge/generated-contracts.ts` und — nach Schritt 1 — `src/bridge/pkg/` vorhanden sind. Ein Paketmanagerabbruch oder ein Fehlschlag in `wasm-runtime.test.ts` wäre hier kein roter Test, sondern eine falsche Reihenfolge.
+
+- [ ] **Step 4: Implement browser key generation, two mandatory authenticators, the endpoint port, and the fingerprint gate**
 
 ```rust
 /// Das FESTE App-Salt der PRF-Auswertung (`web-reader-design.md` §6.2).
@@ -1689,90 +2007,315 @@ pub const VAULT_PRF_SALT_V1: [u8; 32] = *b"EINSATZARCHIV-READER-VAULT-PRF-1";
 /// Die zwingende Untergrenze aus `web-reader-design.md` §6.3.
 pub const MIN_ENROLLED_AUTHENTICATORS_V1: usize = 2;
 
+/// Die Gültigkeitsspanne der drei signierten Anfragen, in Sekunden.
+///
+/// Sie liegt UNTER `ea_sync_protocol::MAX_SIGNATURE_WINDOW_SECONDS_V1` (300)
+/// und wird nicht daraus abgeleitet: der Server nennt seine Obergrenze, der
+/// Klient wählt darunter.
+pub const ENROLLMENT_SIGNATURE_WINDOW_SECONDS_V1: i64 = 60;
+
+/// Der Schlüssel, unter dem der versiegelte Tresor lokal liegt.
+pub const READER_VAULT_BLOB_KEY_V1: &str = "vault/reader-vault-v1";
+
+/// Das Transportprofil eines Credentials, so wie der Browser es meldet.
+///
+/// ZWEI Werte und nicht die volle `AuthenticatorTransport`-Liste: die einzige
+/// Unterscheidung, die diese Aufgabe trifft, ist „Cross-Device-Flow oder
+/// nicht". Eine getreue Nachbildung der Browserliste legte vier weitere Werte
+/// an, über die niemand entscheidet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatorTransportProfileV1 {
+    /// `internal`, `usb`, `nfc`, `ble` — ein Authenticator an diesem Gerät.
+    ClientDevice,
+    /// `hybrid`/`cable` — der QR-Flow, in Safari ohne PRF-Ausgabe (§6.4.1).
+    CrossDevice,
+}
+
+#[derive(Debug)]
 pub enum EnrollmentError {
     SingleAuthenticator,
     DuplicateAuthenticator,
+    CredentialIdLength,
     TransportRefused,
+    FingerprintEncoding,
     FingerprintMismatch,
-    AnchorUnpinned,
-    Protocol(ea_sync_protocol::SyncProtocolError),
-    Crypto(ea_crypto::CryptoError),
+    NoVaultForCredential,
+    Endpoint(EnrollmentEndpointError),
+    Blob(ReaderBlobError),
+    Vault(ReaderVaultError),
+    Crypto(CryptoError),
+    Protocol(SyncProtocolError),
 }
 
-pub struct ReaderEnrollment<'store, S: ReaderBlobStore> { /* private */ }
+impl EnrollmentError {
+    /// Der stabile Code des Fehlschlags — dieselbe Regel wie bei
+    /// [`ReaderVaultError::code`]: Zusicherungen stehen gegen ihn und nie gegen
+    /// eine Formatierung. Die eigenen Varianten tragen ihren Code
+    /// ausgeschrieben — `EA-READER-ENROLLMENT-SINGLE-AUTHENTICATOR`,
+    /// `-DUPLICATE-AUTHENTICATOR`, `-CREDENTIAL-ID-LENGTH`,
+    /// `-TRANSPORT-REFUSED`, `-FINGERPRINT-ENCODING`, `-FINGERPRINT-MISMATCH`
+    /// und `-NO-VAULT` —, die fünf durchreichenden Varianten geben den Code
+    /// ihrer Quelle DURCH und erfinden keinen zweiten Namen für einen fremden
+    /// Befund.
+    #[must_use]
+    pub const fn code(&self) -> &'static str;
+}
 
-impl<'store, S: ReaderBlobStore> ReaderEnrollment<'store, S> {
-    pub fn begin(organization_id: OrganizationId, subject_id: SubjectId,
-                 pinned_anchor: TrustAnchorV1, store: &'store S)
-        -> Result<Self, EnrollmentError>;
+pub struct ReaderEnrollment { /* private */ }
+
+impl ReaderEnrollment {
+    /// # Errors
+    /// `EA-LOCAL-CRYPTO-RNG` über [`EnrollmentError::Vault`], wenn der Wirt
+    /// keine Entropie liefert, und `EA-CRYPTO-INVALID-PUBLIC-KEY` über
+    /// [`EnrollmentError::Crypto`], wenn der gezogene KEM-Punkt keinen
+    /// Thumbprint hergibt — der wird HIER einmal gerechnet und festgehalten,
+    /// nicht bei jedem `fingerprints`.
+    pub fn begin(
+        organization_id: OrganizationId,
+        subject_id: SubjectId,
+        pinned_anchor: TrustAnchorV1,
+        bundle_fingerprint: Hash32,
+    ) -> Result<Self, EnrollmentError>;
 
     pub fn register_authenticator(&mut self, attested: AttestedAuthenticatorV1)
         -> Result<&AuthenticatorRecordV1, EnrollmentError>;
 
+    #[must_use]
+    pub fn registered_authenticator_count(&self) -> usize;
+
+    /// Gibt den in `begin` GERECHNETEN Thumbprint und den dort übergebenen
+    /// `Hash32` heraus und rechnet selbst nichts — deshalb `-> …V1` und kein
+    /// `Result`.
     #[must_use]
     pub fn fingerprints(&self) -> EnrollmentFingerprintsV1;
 
     pub fn confirm_fingerprints(&self, expected_key: &str, expected_bundle: &str)
         -> Result<FingerprintConfirmationV1, EnrollmentError>;
 
-    pub fn finish(self, confirmation: FingerprintConfirmationV1)
-        -> Result<EnrolledReaderV1, EnrollmentError>;
+    pub fn finish(
+        self,
+        confirmation: FingerprintConfirmationV1,
+        context: EnrollmentRequestContextV1,
+        endpoints: &mut dyn EnrollmentEndpoints,
+        store: &mut dyn ReaderBlobStore,
+    ) -> Result<EnrolledReaderV1, EnrollmentError>;
+
+    /// # Errors
+    /// Die durchgereichten Codes des Bytespeichers.
+    pub fn device_state(store: &dyn ReaderBlobStore)
+        -> Result<DeviceTrustStateV1, EnrollmentError>;
+
+    #[must_use]
+    pub const fn fingerprint_gate_required(state: &DeviceTrustStateV1) -> bool;
 }
+
+/// Holt den versiegelten Tresor auf einem Gerät OHNE lokalen Vault zurück und
+/// öffnet ihn mit dem vorgelegten Authenticator.
+///
+/// Der Name sagt beides, weil die Funktion beides tut: sie schickt den EINEN
+/// signaturfreien Abruf über den Port und gibt einen [`UnlockedVault`] heraus.
+///
+/// # Errors
+/// `EA-READER-ENROLLMENT-NO-VAULT`, wenn KEINES der zurückgegebenen Chiffrate
+/// einen Envelope für diesen Authenticator trägt; daneben die durchgereichten
+/// Codes des Ports und des Tresors.
+pub fn recover_and_unlock_vault(
+    request: &VaultBlobRetrievalRequestV1,
+    authenticator: &AuthenticatorPrfV1,
+    endpoints: &mut dyn EnrollmentEndpoints,
+) -> Result<UnlockedVault, EnrollmentError>;
 
 pub struct EnrollmentFingerprintsV1 {
     key_fingerprint: KeyThumbprint,
     bundle_fingerprint: Hash32,
 }
 
+impl EnrollmentFingerprintsV1 {
+    #[must_use] pub const fn key_fingerprint(&self) -> KeyThumbprint;
+    #[must_use] pub const fn bundle_fingerprint(&self) -> Hash32;
+    #[must_use] pub fn key_fingerprint_hex(&self) -> String;
+    #[must_use] pub fn bundle_fingerprint_hex(&self) -> String;
+}
+
 /// Konstruierbar AUSSCHLIESSLICH in `confirm_fingerprints`, und dort nur nach
-/// einem konstantzeitigen Vergleich BEIDER Werte.
-pub struct FingerprintConfirmationV1 { /* private, kein Default, kein Clone */ }
+/// einem konstantzeitigen Vergleich BEIDER Werte. Kein `Default`, kein `Clone`,
+/// kein `Debug`, und ausdrücklich kein inhärenter `impl`-Block.
+pub struct FingerprintConfirmationV1 {
+    confirmed_key: KeyThumbprint,
+    confirmed_bundle: Hash32,
+}
 ```
 
-Die Schlüsselerzeugung läuft im Browser und die privaten Schlüssel verlassen ihn nie (§6.6 Schritt 1). `begin` zieht 64 Byte Entropie über `getrandom::fill` — im Browser `globalThis.crypto.getRandomValues` über das Feature `wasm_js`, ausführbar nachgewiesen in `spikes/wasm-runtime-proof/spike.sh` — und baut daraus den X25519-KEM-Schlüssel über `HpkeRecipientPrivateKey::from_bytes` und den Ed25519-Geräte- und Audit-Schlüssel. Beide liegen als `SecretBytes<32>` und damit unter `ZeroizeOnDrop`. Der gepinnte Root-Anchor kommt als PARAMETER aus `decode_trust_anchor` und niemals aus einer Serverantwort; ohne ihn gibt `begin` `AnchorUnpinned` zurück, denn ein Vault ohne Anchor wäre im Datei-Modus wertlos (§5.3).
+**W11 entschieden: die ANGEZEIGTEN Werte sind typisiert, die ERWARTETEN sind Zeichenketten.** `EnrollmentFingerprintsV1` behält `KeyThumbprint` und `Hash32` als Felder — beide sind `Copy` und beide bieten `as_bytes() -> &[u8; 32]` —, und daneben stehen zwei Hex-Zugriffe, die eine `String` bauen. `confirm_fingerprints` nimmt zwei `&str`, weil sein Argument aus einer TASTATUR kommt und nicht aus dem Programm: die Referenz ist unabhängig verteilt, ein Mensch tippt sie ab. Die Asymmetrie ist die Aussage, keine Unsauberkeit. Sie ist ausserdem die einzige Form, die überhaupt übersetzt: `KeyThumbprint` und `Hash32` haben kein `Display`, kein `Debug` und kein `to_hex`, ein `&str`-Zugriff auf ein typisiertes Feld verlangte also ein `String`-Feld daneben — zwei Quellen derselben Wahrheit. `hex` ist bereits reguläre Abhängigkeit von `ea-reader` und braucht keine Manifestzeile.
 
-`register_authenticator` nimmt eine `AttestedAuthenticatorV1` — `credentialId`, der auf `CanonicalPublicCoseKey::Ed25519` normalisierte `credentialPublicKey`, das Transportprofil und die 32 PRF-Bytes zu `VAULT_PRF_SALT_V1`. Vier Prüfungen laufen hier und nirgends sonst: der öffentliche Schlüssel muss `CanonicalPublicCoseKey::from_deterministic_cbor` als Ed25519-Arm überstehen (dieselbe Prüfung, die `WebauthnCredentialRegistrationV1::new` serverseitig ein zweites Mal fährt, weshalb ein hier akzeptierter Schlüssel dort nie scheitert); die `credentialId` muss zwischen `MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1` und `MAX_WEBAUTHN_CREDENTIAL_ID_BYTES_V1` liegen; eine bereits registrierte `credentialId` ist `DuplicateAuthenticator`, weil zwei Envelopes desselben Authenticators die Zwei-aus-§6.3 vortäuschten, ohne sie zu erfüllen; und ein Credential, dessen Transport der Cross-Device-Flow ist, ist `TransportRefused`. Danach entsteht der Envelope: `KEK_i = derive_kek_v1(PRF_i)` — HKDF-SHA256 mit `info = VAULT_KEK_INFO_V1` aus dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel" —, und mit `KEK_i` wird der 32-Byte-Vault-Key gewrappt, NIE mit der PRF-Ausgabe selbst. Die Begründung steht in §6.2 und ist betrieblich: mit direkter Verwendung machte das Löschen eines Passkeys die Daten dauerhaft unerreichbar, weil jeder Authenticator dann sein EIGENES Chiffrat trüge statt eines Umschlags um denselben Vault-Key.
+**W10 entschieden: `FingerprintConfirmationV1` ist eine geklammerte Struktur OHNE inhärenten `impl`-Block, und der Anti-Konstruktions-Zeuge rechnet ausgeschrieben.** Der Grund ist textlicher Natur und deshalb erklärungsbedürftig. In Rust teilt jede Konstruktion den Präfix mit ihrer Deklaration, und `impl FingerprintConfirmationV1 {` teilt ihn ebenfalls; die Vorfassung suchte `"FingerprintConfirmationV1 {"` und verlangte GENAU EINS, was schon die Deklaration allein erfüllt und die Konstruktion daneben unmöglich macht — der Zeuge wäre in jeder korrekten Implementierung rot gewesen. Die gewählte Form macht die Zahl nachrechenbar statt magisch: eine Deklaration (`pub struct …`), ein Strukturausdruck in `confirm_fingerprints`, zusammen zwei, und NULL `impl`-Köpfe. Der dritte Zähler trägt die eigentliche Last: ohne inhärenten `impl`-Block kann niemand eine zweite Konstruktionsstelle hinter `FingerprintConfirmationV1::new` verstecken, und `Default` und `Clone` bleiben ebenfalls draussen. Der Doc-Kommentar über dem Typ schreibt aus demselben Grund „kein `Default`" und NICHT „`Default for FingerprintConfirmationV1`": der Zeuge liest Text und unterschiede eine Erklärung nicht von einer Implementierung — dieselbe Falle, die `crates/ea-reader-wasm/src/lib.rs` für sein `#[cfg(target_arch = "wasm32")]` im Fliesstext bereits ausgeschrieben hat.
 
-`fingerprints` gibt den Schlüssel-Fingerprint als `CanonicalPublicCoseKey::thumbprint()` über den X25519-KEM-Schlüssel und den Bundle-Fingerprint als den Hash des geladenen Bundles zurück, den die Brücke aus dem Bauartefakt des Tasks „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate" bekommt. `confirm_fingerprints` vergleicht BEIDE gegen die eingegebene, unabhängig verteilte Referenz und gibt nur bei Übereinstimmung eine `FingerprintConfirmationV1` zurück. Der Vergleich läuft byteweise konstantzeitig über die dekodierten Hex-Werte und nicht über die Zeichenketten, damit Groß-/Kleinschreibung und Trennzeichen der Anzeige keine falsche Abweichung erzeugen. `finish` nimmt diesen Typ als Parameter und prüft ZUSÄTZLICH `MIN_ENROLLED_AUTHENTICATORS_V1`. Es gibt keinen `skip`, kein `force`, kein `Default` und keine zweite Konstruktionsstelle — genau das misst der Zeuge `the_confirmation_has_no_construction_path_outside_a_match`, und genau deshalb ist der Vergleich „bei jedem Erstaufruf auf einem Gerät ohne gepinnten Trust-Store erzwungen und nicht überspringbar" (§4.3 letzter Absatz) eine Typaussage und keine Bildschirmaussage.
+**W12 entschieden: `EnrollmentError::AnchorUnpinned` entfällt, der Anchor bleibt ein nicht-optionaler Parameter.** Die Vorfassung nahm `pinned_anchor: TrustAnchorV1` besitzend und ohne `Option` und behauptete daneben, `begin` gebe „ohne ihn `AnchorUnpinned` zurück" — die Variante war aus der eigenen Signatur unerreichbar. Aufgelöst wird zugunsten des Typs: ein Enrollment ohne gepinnten Anker ist nach §5.3 nicht ein Fehlerfall, sondern ein Zustand, den es nicht geben darf, und ein nicht darstellbarer Zustand ist stärker als eine Laufzeitweigerung — dieselbe Entscheidung wie beim Fingerprint-Gate zwei Absätze weiter oben. Die Variante wird deshalb ersatzlos gestrichen, und `the_confirmation_has_no_construction_path_outside_a_match` deckt sie mit `assert!(!source.contains("AnchorUnpinned"))` ab: ein Wiederauftauchen färbt rot. Nicht verwechseln mit `DeviceTrustStateV1::NoPinnedAnchor` — das beschreibt ein GERÄT, dessen Bytespeicher noch keinen Tresor trägt, und ist die Bedingung des §4.3-Gates. Zwei verschiedene Sachen dürfen nicht denselben Namen tragen; die überflüssige der beiden geht.
 
-`finish` schreibt danach in dieser Reihenfolge und nicht anders: erst je Authenticator ein `WebauthnCredentialRegistrationV1` über `POST /v1/webauthn-credentials` mit der pseudonymen `subjectId` als `userHandle` (§6.4.1), dann je Envelope ein `VaultBlobUploadV1` über `PUT /v1/vault-blobs`, beide RFC-9421-signiert mit dem gerade erzeugten Ed25519-Schlüssel über `RequestSigner` — der Schlüssel ist in diesem Moment im Klartext im WASM-Speicher, was diese beiden Endpunkte gerade NICHT zur Signaturausnahme macht (Stufe-3-Task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS", zweiter Absatz seines Schritts 3) —, und erst danach lokal in OPFS über `ReaderBlobStore`. Die Reihenfolge ist fail-closed: ein lokal geschriebener Vault ohne serverseitige Kopie überstünde kein geräumtes Browserprofil, und §6.4 verlangt genau, dass dieser Fall ohne Administrationsvorgang gelöst wird. Bricht ein Upload ab, bleibt gar nichts geschrieben; der Zeuge `a_single_authenticator_is_a_refusal_and_writes_no_blob` misst dieselbe Eigenschaft am anderen Ende.
+**W13 entschieden: ein handgeschriebener byteweiser Vergleich in `ea-reader`, KEIN `subtle`.** Im ganzen Arbeitsbereich gibt es heute keine konstantzeitige Vergleichsfunktion — `SecretBytes::matches` ist ein gewöhnliches `==`, und `subtle` steht nur transitiv im `Cargo.lock`. Drei Gründe entscheiden gegen die Crate. Erstens die Sache selbst: verglichen werden zwei ÖFFENTLICHE 32-Byte-Fingerabdrücke, kein Schlüsselmaterial; die Konstantzeitigkeit schützt hier nicht ein Geheimnis, sondern verhindert ein Orakel, das einem Angreifer verriete, wie viele führende Stellen seiner untergeschobenen Referenz schon stimmen. Zweitens die Kosten: `subtle` in `[workspace.dependencies]` wäre eine NEUE Abhängigkeitsklasse und verlangte in `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md` einen eigenen Abschnitt samt Pin und Begründung — nicht dasselbe wie die eine Merkmalszeile, um die dieselbe Datei in dieser Aufgabe für `web-sys` ohnehin wächst. Ein Merkmal an einer schon ratifizierten Crate ist eine Fortschreibung; eine zusätzliche Crate ist eine Entscheidung über die Angriffsfläche des Browserbündels, und die gehört nicht als Nebenwirkung in eine Enrollment-Aufgabe. Drittens die Lage: `ea-reader` steht auf der wasm32-Positivliste, und jede zusätzliche Crate ist zusätzliche wasm32-Fläche. Die Funktion heisst `fingerprints_match(expected: &[u8; 32], shown: &[u8; 32]) -> bool`, verodert die XOR-Differenz über ALLE 32 Byte und vergleicht den Akkumulator erst danach mit null, mit `core::hint::black_box` auf dem Akkumulator gegen ein Kurzschliessen des Optimierers. **Und die GRENZE dazu, benannt statt geglättet: das ist eine QUELLTEXTAUSSAGE über Konstantzeitigkeit und keine gemessene.** Weder `cargo test` noch `cargo clippy` prüfen die erzeugten Instruktionen, `black_box` ist ausdrücklich keine Garantie des Compilers, und die vorgeschaltete `hex::decode` der Eingabe ist ohnehin nicht konstantzeitig. Was hier steht, ist der Verzicht auf einen frühen Ausstieg im Vergleich selbst — nicht mehr, und der Plan behauptet nicht mehr.
 
-Der Abruf auf einem Gerät ohne Vault läuft über `POST /v1/vault-blobs/retrievals` und trägt als einziger Aufruf dieses Tasks KEINE RFC-9421-Signatur, weil der Signaturschlüssel im noch verschlossenen Vault liegt (§6.4.1, `design.md` §13.1). Alleinige Autorität ist die WebAuthn-Assertion über ein auffindbares Credential dieses Readers; `VaultBlobRetrievalRequestV1::new` nimmt `organizationId`, den behaupteten `userHandle`, `credentialId`, Challenge, `authenticatorData`, `clientDataJSON` und Signatur, und die Antwort `VaultBlobRetrievalResponseV1` liefert bis zu `MAX_VAULT_BLOBS_PER_SUBJECT_V1` opake Chiffrate. Der Reader probiert sie der Reihe nach gegen seinen `KEK_i`; genau eines öffnet. Die beiden Verwendungen desselben Authenticators bleiben getrennt: die Assertion authentisiert den Transport, die PRF-Ausgabe entsperrt den Vault, und keine der beiden verleiht dem Server Autorität (§6.4.1 vorletzter Absatz).
+Die Schlüsselerzeugung läuft im Browser und die privaten Schlüssel verlassen ihn nie (§6.6 Schritt 1). `begin` zieht 64 Byte Entropie über `getrandom::fill` — im Browser `globalThis.crypto.getRandomValues` über das Feature `wasm_js`, ausführbar nachgewiesen in `spikes/wasm-runtime-proof/spike.sh` — und baut daraus den X25519-KEM-Schlüssel über `HpkeRecipientPrivateKey::from_bytes` und den Ed25519-Geräte- und Auditschlüssel. Beide liegen als `SecretBytes<32>` und damit unter `ZeroizeOnDrop`.
 
-`crates/ea-reader-wasm/src/webauthn.rs` exportiert unter `cfg(target_arch = "wasm32")` genau drei Funktionen und keine vierte: `register_authenticator` nimmt die vom Browser gelieferten Bytes und gibt eine Status-DTO zurück, `enrollment_fingerprints` gibt die beiden Hex-Zeichenketten zur ANZEIGE zurück, und `prf_kek_bytes` existiert nur `cfg(test)` als Prüfpunkt der Fixture-Parität. Die PRF-Ausgabe überquert die Grenze als `Uint8Array` und wird in Rust sofort in `SecretBytes<32>` überführt; sie wird auf der TypeScript-Seite in keiner Variablen gehalten, die einen Namen überlebt, und niemals geloggt.
+**Und genau daraus folgt eine Stelle, die nicht übersehen werden darf: `SecretBytes` hat KEIN `Clone`, und beide Schlüssel haben ZWEI Abnehmer.** `HpkeRecipientPrivateKey::from_bytes(bytes: SecretBytes<32>)`, `RequestSigner::from_secret(secret: SecretBytes<32>)` und `VaultContentsV1::new(kem_private_key: SecretBytes<32>, audit_private_key: SecretBytes<32>, …)` nehmen alle drei BESITZEND, und `HpkeRecipientPrivateKey` gibt nichts zurück ausser `public_key()`. Der KEM-Schlüssel wird deshalb in `begin` genau EINMAL für den Thumbprint benutzt — `CanonicalPublicCoseKey::x25519(*private.public_key().as_bytes())?.thumbprint()`, das Ergebnis wird als `KeyThumbprint` festgehalten —, und die 32 Byte selbst wandern über `SecretBytes::with_exposed(|bytes| SecretBytes::new(*bytes))` in die Kopie, die `finish` später an `VaultContentsV1::new` gibt. Der Ed25519-Schlüssel geht denselben Weg: eine Kopie an `RequestSigner::from_secret`, das Original an `VaultContentsV1::new`. `with_exposed` ist der einzige Weg an die Bytes, den die Crate anbietet, und er hält den Zeroize-Vertrag: die Kopie ist selbst wieder ein `SecretBytes` und löscht sich beim Fallen. Ohne diesen Schritt sind es zwei `E0382` — und `typecheck` findet sie nicht, weil sie in Rust liegen.
 
-`apps/web/src/vault/webauthn-prf.ts` ist die einzige Datei, die `navigator.credentials.create` und `navigator.credentials.get` mit der Erweiterung `prf` aufruft. Sie enthält KEINE Sicherheitslogik: sie leitet keinen Schlüssel ab, vergleicht keinen Fingerprint, kodiert kein Chiffrat und trifft keine Entscheidung — sie reicht Bytes an die Brücke und bekommt Status-DTOs zurück (§9). `authenticatorSelection` verlangt `residentKey: 'required'` und `userVerification: 'required'`, weil §6.4.1 die Auflösung über ein AUFFINDBARES Credential voraussetzt. `hints: ['client-device']` und der abgewiesene Cross-Device-Transport stehen hier, damit der QR-Flow gar nicht erst angeboten wird; die harte Abweisung bleibt trotzdem in Rust, weil eine UI-Auswahl kein Gate ist.
+Der gepinnte Root-Anchor kommt als PARAMETER und niemals aus einer Serverantwort; die Brücke reicht ihn über `decode_trust_anchor` herein, und das ist der ganze Punkt: der Anker gilt nicht, weil er im Tresor lag, sondern weil `decode_trust_anchor` seinen Bootstrap-Hash beim Dekodieren NEU rechnet — die Begründung steht wörtlich im Abhängigkeitskommentar von `crates/ea-reader/Cargo.toml`. Der Bundle-Fingerprint kommt aus demselben Grund als PARAMETER: `ea-reader` hat keinen Weg, das geladene Bündel zu lesen, und die Brücke bekommt den Hash aus dem Bauartefakt des Tasks „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate".
 
-`EnrollmentPage.tsx` führt die drei Schritte in einer Ant-Design-6-Oberfläche mit deutschem `ConfigProvider` und statisch extrahiertem lokalem gehashtem CSS, `zeroRuntime: true`, direkten CSR-Importen aus `@phosphor-icons/react`, sichtbarem Fokus und `prefers-reduced-motion`. `AuthenticatorRegistration.tsx` zählt registrierte Authenticators als Text und nicht nur als Symbol und nennt die fehlende Zahl beim Namen. `FingerprintGate.tsx` zeigt beide Fingerprints im Monospace-Block nach dem Muster von `apps/desktop/src/components/integrity/FingerprintBlock.tsx` und verlangt die Eingabe der Referenz; das Abschlusselement ist gesperrt, solange die Brücke keine Bestätigung geliefert hat.
+`register_authenticator` nimmt eine `AttestedAuthenticatorV1`, die `AttestedAuthenticatorV1::new` aus vier Bestandteilen baut — `credential_id: Vec<u8>`, `credential_public_cose_key: Vec<u8>`, `transport_profile: AuthenticatorTransportProfileV1` und `prf_output: SecretBytes<32>`. Weil dieser vierte Bestandteil ein `SecretBytes` ist, tragen weder `AttestedAuthenticatorV1` noch der daraus entstehende `AuthenticatorRecordV1` ein `Debug` oder ein `Clone`; die Regel ist dieselbe, die `AuthenticatorPrfV1` in `crates/ea-reader/src/envelope.rs` in seinem eigenen Doc-Kommentar schon ausschreibt, und sie ist der Grund für die `.err().expect(…)`-Schreibweise der Zeugen. `EnrolledReaderV1` bekommt aus demselben Grund ebenfalls kein `Debug` — nicht weil es ein Geheimnis trüge, sondern weil kein Zeuge eines braucht und ein abgeleitetes `Debug` auf einem Tresortyp eine Einladung ist. Vier Prüfungen laufen hier und nirgends sonst: die `credentialId` muss zwischen `MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1` und `MAX_WEBAUTHN_CREDENTIAL_ID_BYTES_V1` liegen, sonst `CredentialIdLength`; der öffentliche Schlüssel muss `CanonicalPublicCoseKey::from_deterministic_cbor` als `Ed25519`-Arm überstehen — dieselbe Prüfung, die `WebauthnCredentialRegistrationV1::new` beim Bauen der Anfrage ein zweites Mal fährt, weshalb ein hier akzeptierter Schlüssel dort nie scheitert; eine bereits registrierte `credentialId` ist `DuplicateAuthenticator`, weil zwei Envelopes desselben Authenticators die Zwei-aus-§6.3 vortäuschten, ohne sie zu erfüllen; und `AuthenticatorTransportProfileV1::CrossDevice` ist `TransportRefused`. Der Envelope entsteht NICHT hier, sondern erst in `finish` über `ReaderVault::seal`, das seinen Tresorschlüssel selbst zieht, je Authenticator einmal `derive_kek_v1` ruft und `VaultEnvelopeV1::wrap(kek, vault_key, nonce, credential_id)` mit allen VIER Argumenten aufruft — das vierte ist das zusätzliche authentifizierte Datum und macht ein Envelope auf einen fremden Authenticator unumhängbar. Die PRF-Ausgabe ist NIE selbst der Wrapping-Schlüssel; die Begründung steht in §6.2 und ist betrieblich: mit direkter Verwendung machte das Löschen eines Passkeys die Daten dauerhaft unerreichbar, weil jeder Authenticator dann sein EIGENES Chiffrat trüge statt eines Umschlags um denselben Vault-Key.
+
+`fingerprints` gibt den in `begin` gerechneten Schlüssel-Thumbprint und den dort übergebenen Bundle-`Hash32` heraus und rechnet selbst nichts — `CanonicalPublicCoseKey::x25519` gibt ein `Result`, es gibt kein `thumbprint()` auf einem `Result`, und ein fallibles `fingerprints` wäre ein zweiter Fehlerpfad an einer Stelle, an der nichts mehr fehlschlagen kann. Der Vorbildaufruf steht in `crates/ea-reader/src/vault.rs`, wo derselbe Ausdruck mit `?` in einer falliblen Funktion steht. `confirm_fingerprints` dekodiert beide eingegebenen Hexzeichenketten — `FingerprintEncoding`, wenn das misslingt — und vergleicht die 32 Byte gegen `as_bytes()` über `fingerprints_match`; der Vergleich läuft über die DEKODIERTEN Werte und nicht über die Zeichenketten, damit Gross-/Kleinschreibung der Anzeige keine falsche Abweichung erzeugt. **Trennzeichen deckt das ausdrücklich NICHT ab**: `hex::decode` weist jedes Leer- und Bindezeichen mit `InvalidHexCharacter` ab, eine gruppierte Anzeige liefe also in `FINGERPRINT-ENCODING` statt in eine Übereinstimmung — und sie bräche zusätzlich das `fill(shownKey)` des Browserzeugen, das wörtlich einsetzt, was `innerText()` gelesen hat. Die Anzeige ist deshalb UNGRUPPIERT, genau wie `apps/desktop/src/components/integrity/FingerprintBlock.tsx` sie heute setzt. Nur bei Übereinstimmung entsteht die `FingerprintConfirmationV1`. `finish` nimmt diesen Typ als Parameter und prüft ZUSÄTZLICH `MIN_ENROLLED_AUTHENTICATORS_V1`. Es gibt keinen `skip`, kein `force`, kein `Default` und keine zweite Konstruktionsstelle — genau das misst `the_confirmation_has_no_construction_path_outside_a_match`, und genau deshalb ist der Vergleich „bei jedem Erstaufruf auf einem Gerät ohne gepinnten Trust-Store erzwungen und nicht überspringbar" (§4.3) eine Typaussage und keine Bildschirmaussage.
+
+`crates/ea-reader/src/enrollment_endpoints.rs` trägt den Port und seine Doppelung, gebaut nach `crates/ea-reader/src/blob_store.rs`:
+
+```rust
+/// Ein fertig gebauter Aufruf: Bytes und Kopfzeilen, sonst nichts.
+///
+/// Der Port kennt WEDER Struktur NOCH Bedeutung des Körpers — dieselbe Regel
+/// wie bei [`crate::ReaderBlobStore`]. Wer hier typisiert zugriffe, hätte eine
+/// zweite Stelle, an der über Protokollform entschieden wird.
+pub struct EnrollmentRequestV1 { /* private */ }
+
+impl EnrollmentRequestV1 {
+    #[must_use] pub const fn method(&self) -> HttpMethod;
+    #[must_use] pub fn target_uri(&self) -> &str;
+    /// Die Herkunft, die die Signatur als `@authority` BINDET.
+    ///
+    /// Sie steht hier, weil der Aufrufer sonst raten müsste, wohin die Bytes
+    /// gehören: `target_uri` ist ein Pfad, und ein Pfad allein adressiert
+    /// nichts. Sie kommt aus [`EnrollmentRequestContextV1`].
+    #[must_use] pub fn authority(&self) -> &str;
+    #[must_use] pub fn body(&self) -> &[u8];
+    /// `content-type`, `content-digest`, `ea-request-id`, `signature-input`,
+    /// `signature` — je nach Aufruf. Der Abruf trägt die letzten beiden nicht.
+    #[must_use] pub fn headers(&self) -> &[(String, String)];
+    #[must_use] pub const fn is_signed(&self) -> bool;
+}
+
+/// Der AUFGEZEICHNETE Aufruf, den die Doppelung herausgibt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnrollmentCallV1 {
+    pub method: HttpMethod,
+    pub target_uri: String,
+    pub signed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EnrollmentEndpointError {
+    /// Der Wirt kam nicht durch; der Text kommt von ihm.
+    Host(String),
+    /// Der Server hat geantwortet, aber nicht mit 2xx.
+    Status(u16),
+    /// Die Antwort ist keine gültige `VaultBlobRetrievalResponseV1`.
+    ResponseShape,
+}
+
+impl EnrollmentEndpointError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Host(_) => "EA-READER-ENROLLMENT-ENDPOINT-HOST",
+            Self::Status(_) => "EA-READER-ENROLLMENT-ENDPOINT-STATUS",
+            Self::ResponseShape => "EA-READER-ENROLLMENT-ENDPOINT-RESPONSE",
+        }
+    }
+}
+
+/// Der Port über FERTIGE Anfragen.
+///
+/// EINE Methode und nicht drei: die REIHENFOLGE der drei Endpunkte ist eine
+/// Eigenschaft von `finish` und keine des Ports, und drei benannte Methoden
+/// verschöben sie in eine Schnittstelle, in der kein Zeuge sie sieht.
+pub trait EnrollmentEndpoints {
+    /// # Errors
+    /// Jeder Fehlschlag des Wirts, ohne den Körper zu nennen.
+    fn send(&mut self, request: &EnrollmentRequestV1) -> Result<Vec<u8>, EnrollmentEndpointError>;
+}
+
+/// Das Doppel, mit dem jeder `cargo test -p ea-reader` ohne Netz läuft.
+///
+/// Bewusst NICHT hinter `cfg(test)` — dieselbe Entscheidung wie bei
+/// [`crate::InMemoryReaderBlobStore`]: die Integrationstests von `ea-reader`
+/// und die Systemtests unter `tests/ea-system-tests` greifen darauf zu.
+#[derive(Debug, Default)]
+pub struct InMemoryEnrollmentEndpoints { /* private */ }
+
+impl InMemoryEnrollmentEndpoints {
+    #[must_use] pub fn new() -> Self;
+    /// Die aufgezeichneten Aufrufe in der Reihenfolge, in der sie kamen.
+    #[must_use] pub fn calls(&self) -> &[EnrollmentCallV1];
+    /// Lässt den `ordinal`-ten Aufruf (1-basiert) mit DIESEM Fehler fallen.
+    ///
+    /// Der Fehler und nicht sein Code: `code()` ist einwegig — es gibt keine
+    /// Abbildung von `"EA-READER-ENROLLMENT-ENDPOINT-STATUS"` zurück auf ein
+    /// `Status(u16)`, und eine Doppelung, die aus einer Zeichenkette eine
+    /// Variante raten müsste, wäre eine zweite Stelle mit Protokollwissen.
+    pub fn fail_call(&mut self, ordinal: usize, error: EnrollmentEndpointError);
+    /// Die Chiffrate, die `POST /v1/vault-blobs/retrievals` zurückgibt.
+    pub fn answer_retrieval_with(&mut self, ciphertexts: Vec<Vec<u8>>);
+}
+```
+
+`finish` baut und schickt danach in dieser Reihenfolge und nicht anders: je Authenticator ein `WebauthnCredentialRegistrationV1` über `POST /v1/webauthn-credentials` mit der pseudonymen `subjectId` als `userHandle` (§6.4.1), dann GENAU EIN `VaultBlobUploadV1` über `PUT /v1/vault-blobs`, und erst danach der lokale `store.put` unter `READER_VAULT_BLOB_KEY_V1`. **Ein PUT und nicht eines je Envelope**, und das ist eine BENANNTE ABWEICHUNG von der Wortwahl in §6.2 („Es entsteht ein Wrapped-Blob je Authenticator") und §6.4 („Die Wrapped-Blobs liegen … zusätzlich als opake Chiffrate beim Sync-Server") — sie steht hier als Abweichung, damit ein späterer Leser der Spezifikation sie findet und nicht für ein Versehen hält. Die Begründung ist sicherheitlich und betrieblich zugleich: `SealedVaultV1::to_deterministic_cbor` ist EIN Objekt, das Körperchiffrat, Nonces und ALLE Envelopes trägt; `MAX_VAULT_BLOBS_PER_SUBJECT_V1` zählt Tresore je Subjekt und nicht Entsperrwege, und ein Upload je Envelope verriete dem Server nebenbei die Zahl der Authenticators. Die 4 KB aus `MAX_VAULT_BLOB_CIPHERTEXT_BYTES_V1` genügen mit Abstand: zwei 32-Byte-Schlüssel, die Ankerbytes, der Registry-Pin und zwei Envelopes zu je `credentialId` plus 12 Byte Nonce plus 48 Byte umschlossener Schlüssel. Beide signierten Aufrufe entstehen über `RequestSigner::from_secret` mit dem gerade erzeugten Ed25519-Schlüssel — der liegt in diesem Moment im Klartext im WASM-Speicher, was diese beiden Endpunkte gerade NICHT zur Signaturausnahme macht (Stufe-3-Task „Web-Serverfläche: Vault-Blobs, WebAuthn-Assertion und CORS", zweiter Absatz seines Schritts 3). Die Reihenfolge ist fail-closed: ein lokal geschriebener Vault ohne serverseitige Kopie überstünde kein geräumtes Browserprofil, und §6.4 verlangt genau, dass dieser Fall ohne Administrationsvorgang gelöst wird. Bricht ein Aufruf ab, bleibt gar nichts geschrieben; `a_failing_upload_leaves_nothing_written_at_all` misst genau diesen Punkt, und `a_single_authenticator_is_a_refusal_and_writes_no_blob` misst dieselbe Eigenschaft am anderen Ende.
+
+**Uhr und Einmalwerte treten als WERTE ein und werden nicht beschafft.** `RequestSigner::sign(&self, parts: &RequestParts, parameters: &SignatureParametersV1)` nimmt `created`, `expires`, `nonce` und die `RequestIdV1` von aussen — der Modulkopf von `crates/ea-sync-protocol/src/http_signature.rs` schreibt das als Absicht aus („der Schluessel kommt herein, die Zeit und die Einmalwerte kommen herein, und nichts davon wird hier beschafft"). `ea-reader` erbt diese Lage aus einem harten Grund: auf `wasm32-unknown-unknown` gibt es für `std::time::SystemTime::now()` keinen Wirt. `EnrollmentRequestContextV1::new(authority: String, created_unix_seconds: i64)` trägt deshalb beides herein; `expires` ist `created + ENROLLMENT_SIGNATURE_WINDOW_SECONDS_V1`, der 32-Byte-Nonce und die 16 Byte der `RequestIdV1` kommen aus `getrandom::fill`, und `tag` aus `ea_sync_protocol::organization_tag`.
+
+**Die `authority` ist dabei die eine GRENZE dieses Absatzes, und sie ist keine Uhrfrage.** Die Zeit kommt von aussen, weil `wasm32-unknown-unknown` keinen Wirt für `SystemTime::now()` hat — das ist eine Unmöglichkeit. Die Herkunft des Sync-Servers kommt von aussen, weil `ea-reader` keine Konfiguration liest, und das ist eine ENTSCHEIDUNG: TypeScript wählt damit, an welche Autorität die RFC-9421-Signatur bindet. Das bleibt innerhalb von §9 — die Herkunft ist eine Betriebskonfiguration und kein kryptografischer Schritt, Rust rechnet die Signatur weiterhin allein —, aber es ist der einzige Wert dieses Tasks, den die Brücke bestimmt statt zu tragen, und deshalb steht er hier. Wer ihn später festnageln will, tut das im Bundle-Task zusammen mit `connect-src`: dieselbe Herkunft, dieselbe Konfigurationsquelle, ein Ort.
+
+Der Abruf auf einem Gerät ohne Vault läuft über `recover_and_unlock_vault` und `POST /v1/vault-blobs/retrievals` und trägt als einziger Aufruf dieses Tasks KEINE RFC-9421-Signatur, weil der Signaturschlüssel im noch verschlossenen Vault liegt (§6.4.1, `design.md` §13.1). Alleinige Autorität ist die WebAuthn-Assertion über ein auffindbares Credential dieses Readers; `VaultBlobRetrievalRequestV1::new` nimmt `organizationId`, `subjectId`, `credentialId`, eine 32-Byte-Challenge, `authenticatorData`, `clientDataJSON` und die 64-Byte-Signatur, und die Antwort `VaultBlobRetrievalResponseV1` liefert bis zu `MAX_VAULT_BLOBS_PER_SUBJECT_V1` opake Chiffrate. `recover_and_unlock_vault` probiert sie der Reihe nach: `SealedVaultV1::from_deterministic_cbor` und dann `ReaderVault::unlock` mit dem vorgelegten Authenticator; genau eines öffnet, keines ist `NoVaultForCredential` mit dem Code `EA-READER-ENROLLMENT-NO-VAULT`. Die beiden Verwendungen desselben Authenticators bleiben getrennt: die Assertion authentisiert den Transport, die PRF-Ausgabe entsperrt den Vault, und keine der beiden verleiht dem Server Autorität (§6.4.1).
+
+**Die Challenge dieses Abrufs kommt NICHT aus dieser Aufgabe, und das steht hier, damit sie nicht stillschweigend verschwindet.** §11 Punkt 7 der Spezifikation zählt sie als ZWEITE Signaturausnahme neben dem rate-limitierten Challenge-Endpunkt aus `design.md` §13.1; wer die Challenge holt und die Assertion darüber zieht, ist der Browser, und in dieser Aufgabe hat er keinen Weg dorthin: `recover_and_unlock_vault` bekommt eine FERTIGE `VaultBlobRetrievalRequestV1` samt Challenge, `authenticatorData` und Signatur herein, und keine der fünf Brückenausfuhren ruft sie auf. Der Abrufpfad ist in diesem Task also RUST-SEITIG gebaut und wirtsseitig bezeugt, aber nicht verdrahtet. `ea_sync_protocol::ChallengeRequestV1` steht deshalb bewusst NICHT im Consumes-Block — kein Aufruf dieser Aufgabe holt eine Challenge —, und die Verdrahtung samt Challenge-Abruf gehört in die Aufgabe, die den Wiederherstellungsweg auf einem leeren Gerät als OBERFLÄCHE baut. Das ist eine benannte Lücke und kein Versehen; sie stillschweigend in TypeScript zu schliessen, wäre der Fall, den §9 verbietet.
+
+`crates/ea-reader-wasm/src/webauthn.rs` exportiert unter `cfg(target_arch = "wasm32")` **genau fünf Funktionen und keine sechste**. Sie tragen ZWEI Namen, wie jede Ausfuhr dieser Crate: `enrollment_begin` in Rust unter `#[wasm_bindgen(js_name = "enrollmentBegin")]`, und ebenso `enrollment_register_authenticator`/`enrollmentRegisterAuthenticator`, `enrollment_fingerprints`/`enrollmentFingerprints`, `enrollment_confirm_fingerprints`/`enrollmentConfirmFingerprints` und `enrollment_finish`/`enrollmentFinish`. `crates/ea-reader-wasm/src/lib.rs` schreibt die Regel über `bridge_echo_js` bereits aus — „`js_name` in lowerCamelCase, weil der Name auf der JS-Seite gelesen wird" —, und `vault_bridge.rs` hält sie mit `reader_vault_unlock`/`readerVaultUnlock` durch. Ein Zeuge, der einen der beiden Namen nennt, meint immer die Seite, auf der er steht. Die Zahl ist gegenüber der Vorfassung von drei auf fünf korrigiert, und beide Korrekturen sind belegt. `prf_kek_bytes` ENTFÄLLT: es war als Brückenexport UND als `cfg(test)`-Prüfpunkt zugleich beschrieben, und ein `cfg(test)`-Item exportiert an keinen JS-Aufrufer irgendetwas; sein Zweck, die Fixture-Parität, ist mit W22 ohnehin entfallen. Dafür kommen `enrollmentBegin` — jemand muss das Enrollment anlegen und seine Kennung herausgeben — und `enrollmentFinish` dazu, und `enrollmentConfirmFingerprints` ist der Export, den der vitest-Zeuge als `bridge.confirmFingerprints` aufruft; die Vorfassung deckelte bei drei und rief daneben eine vierte, was so nicht beides wahr sein konnte. Der Zustand liegt wie bei `crate::vault_bridge` in einem `thread_local!` mit `RefCell<BTreeMap<u32, ReaderEnrollment>>` und einer monoton wachsenden Kennung; `ReaderEnrollment` trägt dafür WEDER Lebenszeit- NOCH Typparameter, weil Bytespeicher und Endpunktport erst an `finish` übergeben werden — dieselbe Anordnung wie `ReaderObjectCache::put_exact_object(&self, store: &mut dyn ReaderBlobStore, …)`, die den Speicher je Aufruf nimmt und nicht festhält. **Jede der fünf Ausfuhren trägt `#[cfg(target_arch = "wasm32")]` UNMITTELBAR über ihrem `#[wasm_bindgen…]`-Attribut, auf der Zeile direkt darüber**; `every_wasm_bindgen_export_sits_behind_the_wasm32_cfg` in `crates/ea-reader-wasm/tests/bridge_boundary.rs` liest das als Text, folgt keinem `mod` und nennt `webauthn.rs` in seinem eigenen Doc-Kommentar bereits als eines der acht erwarteten Module. Ein cfg an der `mod`-Zeile übersetzt korrekt und fällt trotzdem durch. Die PRF-Ausgabe überquert die Grenze als besitzender `Vec<u8>` und wird nach der Übernahme in `SecretBytes<32>` in BEIDEN Klartextkopien gelöscht — dem `Vec<u8>` von der Grenze und dem `[u8; 32]`, über das `SecretBytes::new` gebaut wird —, wortgleich zu `take_authenticators` in `crate::vault_bridge`. **Auf der TypeScript-Seite wird sie in KEINER Variablen gehalten, die einen Namensraum überlebt, und NIEMALS geloggt** — `webauthn-prf.ts` reicht das `ArrayBuffer` aus dem `prf`-Ergebnis unmittelbar an die Brücke weiter, hält keine Kopie und schreibt es an keine Konsole; die Globale Randbedingung dieses Plans nennt Protokolle und Telemetrie ausdrücklich neben OPFS und dem Service-Worker-Cache, und diese Datei ist die EINZIGE Stelle des Web-Bündels, an der ein Klartextschlüsselbaustein überhaupt durch JavaScript läuft. `enrollmentRegisterAuthenticator` bekommt ausserdem den rohen `attestationObject`, hebt daraus `authData` und die attestierten Credentialdaten und reicht die COSE-Schlüsselbytes an `CanonicalPublicCoseKey::from_deterministic_cbor`; eine nicht-kanonische Karte scheitert dort an der Rückprobe gegen die eigenen Bytes und wird laut abgewiesen statt still übernommen. Eine Attestation-AUSSAGE wird NICHT geprüft — §6.6 verlangt sie nicht, und sie hier zu behaupten wäre eine Überzusage.
+
+**Eine RISIKOLAGE, hier benannt und in dieser Aufgabe NICHT aufgelöst: der Credential-Schlüssel MUSS Ed25519 sein.** `WebauthnCredentialRegistrationV1::new` in `crates/ea-sync-protocol/src/enrollment.rs` weist jeden öffentlichen Schlüssel ab, den `CanonicalPublicCoseKey::from_deterministic_cbor` nicht als `Ed25519`-Arm zurückgibt; die Prüfung ist auf Stufe 3 eingefroren und wird hier nicht angefasst. Daraus folgt zwingend, dass `publicKeyAlgorithms` aus `enrollmentBegin` genau `[-8]` trägt und `webauthn-prf.ts` nichts anderes anbietet. GEMESSEN ist das nicht: ob Chromiums virtueller Authenticator unter `protocol: 'ctap2'` ein Ed25519-Credential erzeugt, steht in `WebAuthn.VirtualAuthenticatorOptions` nirgends, und ein Authenticator, der nur ES256 kann, liefert für `[-8]` gar kein Credential. Der erste Lauf des Browserzeugen entscheidet diese Frage. Fällt er daran, ist das ein Befund über die Stufe-3-Fläche und kein Fehler dieser Aufgabe: die Antwort wäre dann eine Erweiterung von `WebauthnCredentialRegistrationV1` um einen zweiten COSE-Arm, und die gehört in einen eigenen Vorgang mit eigenem Ledgereintrag. Was hier ausdrücklich NICHT passieren darf, ist ein stiller Rückfall auf ES256 im Browser, denn der liefe in `EA-SYNC-PROTOCOL-FRAME-SHAPE` an einer Stelle auf, an der niemand die Ursache sucht.
+
+`apps/web/src/vault/webauthn-prf.ts` ist die einzige Datei, die `navigator.credentials.create` und `navigator.credentials.get` mit der Erweiterung `prf` aufruft. Sie enthält KEINE Sicherheitslogik: sie leitet keinen Schlüssel ab, vergleicht keinen Fingerprint, kodiert kein Chiffrat und trifft keine Entscheidung — sie reicht Bytes an die Brücke und bekommt Status-DTOs zurück (§9). `authenticatorSelection` verlangt `residentKey: 'required'` und `userVerification: 'required'`, weil §6.4.1 die Auflösung über ein AUFFINDBARES Credential voraussetzt. `hints: ['client-device']` steht daneben, damit der QR-Flow gar nicht erst angeboten wird; die harte Abweisung bleibt trotzdem in Rust, weil eine UI-Auswahl kein Gate ist. Die PRF-Ausgabe wird über `credentials.get` geholt und nicht über `credentials.create`: `hmac-secret` bei der Erzeugung ist als `hmac-secret-mc` ein eigenes, optionales Authenticator-Merkmal, und der Weg über `get` ist derselbe, den §6.4 für jeden späteren Zugriff ohnehin beschreibt. Genau deshalb bedient dieselbe Datei auch das Entsperren nach dem Abschluss: ein ZWEITES `credentials.get` mit derselben Erweiterung, dessen Ausgabe zusammen mit dem über `blobGet` gelesenen versiegelten Tresor an `readerVaultUnlock` aus `crate::vault_bridge` geht. Hier steht ausserdem der exportierte Typ `EnrollmentBridge`: die fünf Aufrufe und ihre Status-DTOs, `code?: string | undefined` in der Bestätigung, und sonst nichts. Er gehört hierher und nicht in eine Testdatei, weil er die FORM der Brücke ist; `EnrollmentPage.tsx` nimmt ihn als Eigenschaft `bridge`, deren Vorgabewert die echte Umsetzung aus dieser Datei ist — sonst montierte `page.goto('/enrollment')` eine Seite ohne Brücke.
+
+**W18 aufgelöst — die Datei bleibt INNERHALB der Regel, und der Wächter wird NICHT angepasst.** `apps/web/src/bridge/no-hand-written-contracts.test.ts` scannt jede nicht-Test-`.ts(x)` unter `apps/web/src` ausser den zwei Generatorausgängen und weist `/crypto\.subtle|createHash|Ed25519|X25519|ChaCha20|new Uint8Array\(32\)/` zurück; `webauthn-prf.ts` fällt in diesen Kreis. Zwei Dinge müssten dort normalerweise stehen und stehen deshalb hier NICHT. Das PRF-Salt und die Liste der COSE-Algorithmen kommen als DATEN aus `enrollmentBegin` zurück — `{ handle, prfSalt, publicKeyAlgorithms }` —, also aus `VAULT_PRF_SALT_V1` in geteiltem Rust; die Datei schreibt keine einzige kryptografische Konstante hin. Und die Challenge kommt vom Server über den Challenge-Endpunkt (`apps/server/src/http/challenges.rs`) und nicht aus einem lokal erzeugten Puffer, weshalb `new Uint8Array(32)` nirgends vorkommt. Das ist keine Umgehung des Zeugen, sondern genau seine Aussage: eine Datei, die keine Sicherheitsentscheidung trifft, braucht keinen dieser Ausdrücke. Ein Tiefenimport, eine andere Schreibweise des Literals oder eine erweiterte Ausnahme im Zeugen wären alle drei die falsche Antwort — einen Wächter zu lockern ist eine Entscheidung, die man begründen muss, und hier gibt es nichts zu begründen, weil es nichts zu lockern gibt. Dasselbe gilt für die fünf neuen Nachrichten in `apps/web/src/bridge/opfs-worker.ts`: sie tragen Bytes und Kennungen, keinen Algorithmennamen und keine 32-Byte-Konstante, und die Datei bleibt damit ebenfalls innerhalb der Regel.
+
+`EnrollmentPage.tsx` führt die drei Schritte in einer Ant-Design-6-Oberfläche mit deutschem `ConfigProvider` und statisch extrahiertem lokalem gehashtem CSS, `zeroRuntime: true`, direkten CSR-Importen aus `@phosphor-icons/react`, sichtbarem Fokus und `prefers-reduced-motion`. **Die Fläche benutzt AUSSCHLIESSLICH Ant-Komponenten, die `EXTRACTED_COMPONENTS` in `apps/web/src/design/extract-static-css.tsx` bereits führt: `Alert`, `Button`, `Descriptions`, `Input`, `Space`, `Tag` und `Typography`.** Das ist eine bewusste Wahl und der Grund, warum `extract-static-css.tsx` und `apps/web/src/design/static-antd.css` NICHT im Files-Block stehen. `Form` und `Steps` stehen NICHT auf der Liste der siebzehn extrahierten Namen; `extracts every Ant component the hand written sources import` in `apps/web/src/design/static-css.test.ts` fiele bei ihrem Import rot, und die Reparatur zöge eine Erweiterung der Liste plus ein neu erzeugtes `static-antd.css` (`pnpm --dir apps/web test --run -u`) in eine Aufgabe, deren Gegenstand das Enrollment ist. Die drei Schritte werden als `Typography.Title`/`Typography.Text` und `Tag` ausgezeichnet, die zwei Eingaben sind `Input` mit einem echten `<label htmlFor>` — was der `getByLabelText`-Zugriff beider Zeugen ohnehin verlangt —, und die Weigerung ist ein `Alert` mit `role="alert"`. `AuthenticatorRegistration.tsx` zählt registrierte Authenticators als TEXT und nicht nur als Symbol und nennt die fehlende Zahl beim Namen. `FingerprintGate.tsx` zeigt beide Fingerprints im Monospace-Block nach dem Muster von `apps/desktop/src/components/integrity/FingerprintBlock.tsx` — UNGRUPPIERT und ohne Trennzeichen, siehe oben — und verlangt die Eingabe der Referenz; das Abschlusselement ist gesperrt, solange die Brücke keine Bestätigung geliefert hat. **Die zwei Wertknoten tragen `data-testid="schluessel-fingerprint"` und `data-testid="bundle-fingerprint"`, und zwar der WERT und nicht seine Umhüllung.** Das ist die einzige Stelle, an der der Browserzeuge einen Wert liest, den der Lauf selbst erzeugt hat; sässe die Kennung auf einem Kasten, der die Beschriftung mitträgt, käme sie über `innerText()` mit in die Zeichenkette, das anschliessende `fill` schriebe Beschriftung plus Wert in das Feld, und das Enrollment antwortete mit `FINGERPRINT-ENCODING` an einer Stelle, an der niemand einen Testaufbaufehler vermutet. Nach dem Abschluss zeigt `EnrollmentPage.tsx` ausserdem das Bedienelement „Tresor entsperren" samt der Rückmeldung „Tresor entsperrt." — es fährt den oben beschriebenen Weg über `credentials.get`, `blobGet` und `readerVaultUnlock` und ist der sichtbare Teil der lebenden Paritätsprüfung.
+
+`apps/web/src/main.tsx` wird HIER angefasst und nicht nur oben begründet: `EaWebRoute` bekommt den dritten, optionalen Platz `render?: () => ReactElement`, `EA_WEB_ROUTES` den Eintrag für `/enrollment`, und der Montagepunkt am Dateiende übergibt `initialPath={window.location.pathname}`. Die Begründung samt der Feststellung, dass `EaWebRoute` exportiert ist und die Erweiterung deshalb eine öffentliche Formänderung ist, steht im Kopf dieser Aufgabe.
 
 **Offener Punkt, hier benannt und nicht aufgelöst:** `web-reader-design.md` §14 Punkt 5 erklärt Referenzquelle und Verteilweg der Fingerprint-Bekanntgabe ausdrücklich für OFFEN. Dieser Task baut deshalb den VERGLEICH und seine Unumgehbarkeit, nicht den Bezugsweg der Referenz: die erwarteten Werte werden eingegeben. Die Administrationshälfte, die den erwarteten Fingerprint in der Desktop-Anwendung anzeigt (§6.6 Schritt 4), liegt in Stufe 5 und wird hier weder gebaut noch behauptet.
 
-- [ ] **Step 4: Run the enrollment, fingerprint, and browser witnesses**
+Zum Abschluss dieses Schrittes, als LETZTE Zeile und nicht als erste des nächsten:
+
+Run: `cargo metadata --format-version 1`
+
+Das ist das GENAU EINE Kommando dieses Tasks ohne `--locked`. Dieser Schritt gibt `crates/ea-reader/Cargo.toml` die Kante `ea-sync-protocol.workspace = true` — alphabetisch zwischen `ea-format` und `ea-trust`, mit dem einen erklärenden Kommentar je Abhängigkeit, den die Datei durchhält —, und eine neue Kante zwischen zwei Mitgliedern schreibt `Cargo.lock` fort: der `ea-reader`-Eintrag muss `"ea-sync-protocol"` gewinnen. **Es steht am ENDE der Implementierung und nicht am Anfang der Prüfung, und die Verschiebung ist strikt sicherer.** Die bindende Bedingung lautet „nach der Manifeständerung, vor JEDEM `--locked`-Kommando"; steht das Kommando erst im Prüfschritt, fällt jedes `cargo check` und jedes `cargo clippy`, das jemand mitten in der Implementierung fährt, vorher an einem überholten Lockfile — und die Meldung weist dann auf das Lockfile statt auf den Code, an dem gerade gearbeitet wird. Sechs `--locked`-Läufe hängen daran, und ZWEI davon stehen INNERHALB von Tests, beide in `tools/xtask/tests/workspace.rs`: `no_non_test_edge_carries_the_ea_reader_test_surface` ruft zweimal `cargo tree --locked -p ea-reader-wasm`, und `workspace_declares_exact_planned_members_and_shared_dependencies` fährt selbst ein `cargo metadata --locked --no-deps` — es ist der Zeuge, der genau die Manifestzeile liest, die dieser Schritt einträgt, und deshalb der wahrscheinlichste, der zuerst rot wird. Die Regel steht wörtlich in seinem eigenen Kommentar.
+
+- [ ] **Step 5: Run the enrollment, fingerprint, and browser witnesses**
 
 Run:
 
 ```bash
-cargo metadata --format-version 1
 cargo test --locked -p ea-reader --test enrollment_two_authenticators --test fingerprint_gate
-pnpm --dir apps/web test --run src/features/enrollment
+cargo test --locked -p ea-reader-wasm --test bridge_boundary
+pnpm --dir apps/web test --run src/features/enrollment src/e2e-config.test.ts
+pnpm --dir apps/web typecheck
 pnpm --dir apps/web exec playwright test tests/e2e/enrollment.spec.ts --project=chromium
 ```
 
-`cargo metadata --format-version 1` steht als ERSTE Zeile und ist das GENAU EINE Kommando dieses Tasks ohne `--locked`: Schritt 3 gibt `crates/ea-reader/Cargo.toml` die Kante `ea-sync-protocol.workspace = true`, und eine neue Kante zwischen zwei Mitgliedern schreibt `Cargo.lock` fort. Es steht NACH der Registrierung und VOR jedem `--locked`-Kommando; stuende es in Schritt 2, schriebe es nichts fort und die `--locked`-Laeufe danach fielen an einem ueberholten Lockfile. Die Regel steht woertlich in `workspace_declares_exact_planned_members_and_shared_dependencies` (`tools/xtask/tests/workspace.rs`).
+Alle Kommandos tragen jetzt `--locked` beziehungsweise brauchen keins: `cargo metadata --format-version 1` ist am Ende von Schritt 4 gelaufen und `Cargo.lock` steht wieder. `bridge_boundary` läuft ausdrücklich mit, weil die fünf neuen Ausfuhren dort und NUR dort geprüft werden — mit fehlendem cfg enden Übersetzung, Testbau und Clippy-Gate alle drei mit 0 und ohne eine einzige Diagnose. `pnpm --dir apps/web typecheck` läuft, weil `apps/web/tsconfig.json` in diesem Task um `playwright.config.ts` und `tests` gewachsen ist und diese beiden Flächen sonst von nichts geprüft würden. Ein Lauf von `pnpm verify:quick` ist hier NICHT vorgesehen und wäre auch nicht harmlos: er zieht `cargo test --workspace --all-targets --locked` mit, und dessen Integrationsziele lesen `DATABASE_URL` — er stünde also in `cargo run --locked -p xtask -- integration up` … `integration down`, wie jedes `verify:quick` dieses Plans.
 
-Expected: PASS. Belegt sind fünf Negative und zwei Positive. Die Negative: ein einzelner Authenticator ist `EA-READER-ENROLLMENT-SINGLE-AUTHENTICATOR` und hinterlässt keinen Blob; dieselbe `credentialId` zweimal ist `EA-READER-ENROLLMENT-DUPLICATE-AUTHENTICATOR`; ein Cross-Device-Credential ist `EA-READER-ENROLLMENT-TRANSPORT-REFUSED`; ein abweichender Bundle- ODER Schlüssel-Fingerprint ist `EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH` und liefert keine `FingerprintConfirmationV1`, weshalb `finish` nicht einmal aufrufbar ist; und ein Envelope, der direkt mit der rohen PRF-Ausgabe statt mit `KEK_i` geöffnet wird, ist `EA-CRYPTO-AEAD-OPEN`. Die Positive: beide Envelopes öffnen denselben Vault-Key und liefern denselben KEM-Public-Key und denselben gepinnten Anchor, und das Entfernen eines Authenticators lässt den Vault über den zweiten offen — genau die Eigenschaft, die §6.2 als Zweck der Envelope-Konstruktion nennt. Die Fixture-Parität ist der Zeuge, der alle folgenden Tasks trägt: `fixture_prf_output` reproduziert die aufgezeichnete PRF-Ausgabe byteweise, also ist die entsperrte Sitzung, mit der die Tasks „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel", „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS", „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert", „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`" und „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle" arbeiten, ein GEMESSENER Stellvertreter und keine Annahme.
+Expected: PASS. Belegt sind NEUN Negative und SIEBEN Positive. Die Negative: ein einzelner Authenticator ist `EA-READER-ENROLLMENT-SINGLE-AUTHENTICATOR`, hinterlässt keinen Blob UND erreicht keinen Endpunkt; dieselbe `credentialId` zweimal ist `EA-READER-ENROLLMENT-DUPLICATE-AUTHENTICATOR` und erhöht den Zähler nicht; eine `credentialId` unter `MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1` ist `EA-READER-ENROLLMENT-CREDENTIAL-ID-LENGTH` und wird HIER abgewiesen und nicht erst am Endpunkt; ein Cross-Device-Credential ist `EA-READER-ENROLLMENT-TRANSPORT-REFUSED`; ein abweichender Bundle- ODER Schlüssel-Fingerprint ist `EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH` und liefert keine `FingerprintConfirmationV1`, weshalb `finish` nicht einmal aufrufbar ist; eine nicht-hexadezimale Eingabe ist `EA-READER-ENROLLMENT-FINGERPRINT-ENCODING` und nicht dasselbe wie eine Abweichung; ein gefallener dritter Aufruf ist `EA-READER-ENROLLMENT-ENDPOINT-STATUS` und lässt den Bytespeicher leer; ein Abruf, in dessen acht Chiffraten kein Envelope für den vorgelegten Authenticator liegt, ist `EA-READER-ENROLLMENT-NO-VAULT`; und ein Envelope, der direkt mit der rohen PRF-Ausgabe statt mit `KEK_i` geöffnet wird, ist `EA-CRYPTO-AEAD-OPEN` — ein durchgereichter Code aus `ea_crypto::aead_open` und kein eigener zweiter. Die Positive: beide Envelopes öffnen denselben Vault-Key und liefern denselben KEM-Thumbprint und denselben gepinnten Anchor; das Entfernen eines Authenticators lässt den Vault über den zweiten offen, während das entfernte Credential `EA-READER-VAULT-NO-ENVELOPE` bekommt; `finish` fährt GENAU DREI Endpunktaufrufe in der Reihenfolge `POST /v1/webauthn-credentials`, `POST /v1/webauthn-credentials`, `PUT /v1/vault-blobs`, alle drei signiert, und schreibt erst danach lokal; `recover_and_unlock_vault` fährt GENAU EINEN Aufruf, `POST /v1/vault-blobs/retrievals`, OHNE Signatur, und öffnet aus acht Chiffraten genau das eine, das diesem Reader gehört; die angezeigten Werte SIND der KEM-Thumbprint und der Bundle-Hash, und ihre Hexform ist 64 Zeichen lang; `FingerprintConfirmationV1` hat genau eine Konstruktionsstelle, keinen inhärenten `impl`-Block, kein `Default`, kein `Clone` und keine wiederauferstandene `AnchorUnpinned`-Variante; und das §4.3-Gate schlägt auf einem Gerät ohne gepinnten Tresor an (`DeviceTrustStateV1::NoPinnedAnchor` → `fingerprint_gate_required` wahr) und danach nicht mehr (`Pinned` → falsch). NICHT belegt sind `EA-READER-ENROLLMENT-ENDPOINT-HOST` und `EA-READER-ENROLLMENT-ENDPOINT-RESPONSE`: beide entstehen in diesem Task, beide werden von keinem Zeugen ausgelöst, und das steht hier, weil eine unbezeugte Fehlerform, die niemand nennt, später als bezeugt gilt. Ihr erster Zeuge fällt an, sobald ein Task die Browserfassung des Ports gegen einen echten Server fährt.
 
-Nicht belegt und hier benannt: der E2E-Lauf deckt ausschließlich das Projekt `chromium` ab, weil `WebAuthn.addVirtualAuthenticator` eine CDP-Methode ist und Firefox und WebKit kein Gegenstück anbieten. Die Rust-Zeugen laufen plattformunabhängig auf dem Host und sind der Träger jeder normativen Aussage dieses Tasks; der Browserlauf ist der zusätzliche Beleg, dass die Kette aus echtem Authenticator, echter PRF-Auswertung und der Brücke zusammenpasst. Der Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate" trägt diese Einschränkung in die Spalte `offen in späterer Stufe` seines Berichts.
+**Was der Browserlauf beweist und was er ausdrücklich nicht beweist.** Bewiesen ist die volle lebende Kette: ein echter virtueller CTAP2-Authenticator mit `hasPrf`, eine echte `navigator.credentials.get`-Zeremonie mit der `prf`-Erweiterung, 32 Byte, die der Test nicht kennt und nicht setzen kann, ihr Weg über die Brücke nach Rust, `derive_kek_v1`, der Envelope, den derselbe Lauf gebaut hat, und ein `ReaderVault::unlock`, das ihn öffnet. NICHT bewiesen ist irgendein Byte-WERT: Chromiums virtueller Authenticator zieht seinen CredRandom selbst, `WebAuthn.VirtualAuthenticatorOptions` hat kein Feld dafür, und eine „aufgezeichnete" PRF-Ausgabe ist deshalb in keinem zweiten Lauf reproduzierbar — Stufe 4 friert dafür auch nichts unter `vectors/` ein. NICHT bewiesen ist die UNABHÄNGIGKEIT der zwei Authenticators: CDP erzwingt kein Zielgerät für einen `create`-Aufruf, gemessen ist der Kardinalitätspfad. NICHT bewiesen ist die Serverhälfte: die drei Endpunkte beantwortet `page.route`, und was `apps/server` mit ihnen macht, misst `pnpm test:server` mit `--test webauthn_credential_api --test vault_blob_api`. Und NICHT bewiesen ist irgendetwas ausserhalb von Chromium: `WebAuthn.addVirtualAuthenticator` ist eine CDP-Methode, Firefox und WebKit bieten kein Gegenstück, und der Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate" trägt diese Einschränkung in die Spalte `offen in späterer Stufe` seines Berichts. Die Rust-Zeugen laufen plattformunabhängig auf dem Wirt und sind der Träger jeder normativen Aussage dieses Tasks. **Und eine letzte Grenze, die zur Ehrlichkeit dieses Absatzes gehört: die lebende Parität läuft in KEINEM Tor dieses Repositoriums.** `web:e2e` steht wie `desktop:e2e` ausdrücklich nicht in `verify_quick_commands()`, weil Playwright installierte Browser voraussetzt, und eine CI, die es unabhängig davon führte, gibt es hier nicht. Mit dem Wegfall von `fixture_prf_output`/`recorded_prf_output` (W22) ist damit KEIN durchgesetzter Zeuge übrig, der die echte PRF-Kette anfasst — sie wird gefahren, wenn jemand sie fährt, wie `spikes/wasm-runtime-proof/spike.sh`. Das ist der Preis dafür, keinen Zeugen zu behalten, der sich selbst misst, und er wird hier genannt und nicht weggeschrieben.
 
-Die Ledgerzeilen `WR-063` (Enrollment registriert mindestens zwei unabhängige Authenticators) und `WR-043` (erzwungener, nicht überspringbarer Fingerprint-Vergleich beim Erstaufruf) bekommen hier ihre Belege, werden aber NICHT hier umgestellt: der gepinnte Konstantenblock `WEB_READER_MUST_ROWS` in `tools/xtask/tests/stage_gate.rs` und die Statusspalte in `docs/traceability/v0.1-requirements.csv` werden ausschließlich im Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate" angefasst, damit die Stelligkeit dieser Konstante in dieser Stufe genau einmal wandert.
+Die Ledgerzeilen `WR-063` (Enrollment registriert mindestens zwei unabhängige Authenticators) und `WR-043` (erzwungener, nicht überspringbarer Fingerprint-Vergleich beim Erstaufruf) bekommen hier ihre Belege, werden aber NICHT hier umgestellt: der gepinnte Konstantenblock `WEB_READER_MUST_ROWS` in `tools/xtask/tests/stage_gate.rs` und die Statusspalte in `docs/traceability/v0.1-requirements.csv` werden ausschliesslich im Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate" angefasst, damit die Stelligkeit dieser Konstante in dieser Stufe genau einmal wandert.
 
-- [ ] **Step 5: Commit browser enrollment**
+- [ ] **Step 6: Commit browser enrollment**
 
 ```bash
-git add .gitignore
-git add crates/ea-reader/src/enrollment.rs crates/ea-reader/src/lib.rs crates/ea-reader/Cargo.toml crates/ea-reader/tests/enrollment_two_authenticators.rs crates/ea-reader/tests/fingerprint_gate.rs crates/ea-reader-wasm/src/webauthn.rs crates/ea-reader-wasm/src/lib.rs apps/web/src/vault apps/web/src/features/enrollment apps/web/src/main.tsx apps/web/tests/e2e/enrollment.spec.ts apps/web/playwright.config.ts package.json Cargo.lock
+git add .gitignore package.json Cargo.toml Cargo.lock docs/adr/0005-browser-runtime-and-wasm-dependency-class.md
+git add crates/ea-reader/src/enrollment.rs crates/ea-reader/src/enrollment_endpoints.rs crates/ea-reader/src/lib.rs crates/ea-reader/Cargo.toml crates/ea-reader/tests/enrollment_two_authenticators.rs crates/ea-reader/tests/fingerprint_gate.rs crates/ea-reader/tests/fixtures/mod.rs
+git add crates/ea-reader-wasm/src/webauthn.rs crates/ea-reader-wasm/src/lib.rs
+git add apps/web/src/vault apps/web/src/features/enrollment apps/web/src/bridge/opfs-worker.ts apps/web/src/main.tsx apps/web/src/e2e-config.test.ts apps/web/tests/e2e/enrollment.spec.ts apps/web/playwright.config.ts apps/web/tsconfig.json
+git add docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md
 git commit -m "feat(reader): enroll two authenticators behind an unskippable fingerprint gate"
 ```
+
+`crates/ea-reader/tests/fixtures/mod.rs` und `apps/web/tsconfig.json` stehen ausdrücklich in der Liste — beide werden geändert und beide fehlten in der Vorfassung, und eine nicht mitkommittierte Fixture lässt den Commit auf jedem anderen Rechner nicht übersetzen. Die Wurzel-`Cargo.toml` und ADR 0005 stehen aus demselben Grund zusammen in einer Zeile: die Merkmalszeile und ihre Ledgerzeile müssen sich zeichengleich decken, und getrennt kommittiert fällt `adr_gate` zwischen den beiden Commits. Der Planfile-Eintrag reitet im SELBEN Commit mit, weil die sechs Checkboxen dieses Tasks dort umschlagen; das ist die Anordnung des DRK-256-Vorläufers und keine Ausnahme. `apps/web/src/bridge/pkg/` wird NICHT hinzugefügt: es ist ein Generatorausgang und über `pkg/` in `.gitignore` gehalten.
 
 ### Task 6: Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes
 
