@@ -441,6 +441,18 @@ gate task needs all three. Third, WebKit on Linux needs system libraries that
 `playwright install-deps` pulls in under root — a host mutation a test run
 must not perform.
 
+**Addendum 2026-09-01 — the first of those three reasons no longer holds, and
+the decision stands anyway.** `.github/workflows/ci.yml` now exists and drives
+`integration up` … `pnpm verify:quick` … `integration down` on a hosted
+`ubuntu-24.04` runner. The sentence above is left in place as the measured
+state at the time this section was written; what changed is only that the gate
+is no longer bound to one machine. Reasons two and three are untouched, and the
+paragraph itself says each of the three is sufficient alone. The workflow runs
+the quick gate and **nothing besides**: `pnpm web:browser-test` and `pnpm
+web:e2e` stay outside it, in the `browsers up`/`down` bracket this section
+decides, for the same reason they stay outside `verify_quick_commands()`. A
+workflow that added them would be a second, competing command list.
+
 The shape is the one this repository already carries for services, and
 explicitly **not** a `.devcontainer/`: a compose file beside
 `ops/compose/integration.yaml`, an `xtask` subcommand in the shape of

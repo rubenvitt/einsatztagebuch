@@ -1,0 +1,337 @@
+# Der Gate-Lauf dieses Repositoriums auf einem gehosteten Läufer.
+#
+# Was hier läuft, ist NICHT eine für CI zusammengestellte Auswahl, sondern die
+# EINE Durchsetzungsinstanz, die der Baum selbst führt:
+#
+#     cargo run --locked -p xtask -- integration up
+#     pnpm verify:quick
+#     cargo run --locked -p xtask -- integration down
+#
+# `pnpm verify:quick` ist `cargo run --locked -p xtask -- verify-quick`, und die
+# Kommandoliste steht in `verify_quick_commands()` in `tools/xtask/src/main.rs`.
+# Ihre REIHENFOLGE ist tragend und deshalb steht sie dort und nicht hier: der
+# Desktop-Frontendbau muss vor die Cargo-Kommandos, weil
+# `tauri::generate_context!` ohne `apps/desktop/dist` mit einem Proc-Macro-Panic
+# abbricht, und `xtask build-wasm` muss vor die `apps/web`-Arme, weil es
+# `apps/web/src/bridge/pkg/` erzeugt. Eine zweite Liste in dieser Datei wäre
+# eine zweite Wahrheit — ein grüner Haken für etwas, das der Baum nicht als
+# geprüft ansieht, ist schlimmer als gar kein Haken.
+#
+# Genau EIN Auftrag, und das ist keine Sparsamkeit: die Liste ist eine geordnete
+# Folge, und jede Aufteilung auf parallele Aufträge müsste sie entweder
+# zerschneiden (dann prüft kein Auftrag mehr den Gate) oder die vollständige
+# Einrichtung mehrfach bezahlen.
+#
+# Was hier AUSDRÜCKLICH NICHT läuft: `pnpm desktop:e2e`, `pnpm web:e2e` und
+# `pnpm web:browser-test`. Sie stehen aus benannten Gründen nicht in
+# `verify_quick_commands()` (Playwright-Engine-Baus, chromedriver), ihre Klammer
+# ist `xtask browsers up`/`down` mit `ops/compose/browsers.yaml`, und ein
+# Workflow, der den Schnelllauf um eigene Schritte ergänzt, fährt wieder eine
+# zweite Liste. Ebenso wenig läuft `cargo deny check` (`pnpm supply-chain`) oder
+# ein `stage-gate` — beides sind eigene Tore, nicht dieses.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Nur Lesen. Der Auftrag baut, prüft und schreibt nichts zurück.
+permissions:
+  contents: read
+
+# Ein laufender Gate zu einem überholten Stand einer Verzweigung ist verworfene
+# Rechenzeit; auf `main` läuft jeder Stand zu Ende.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    name: verify:quick
+    # FESTGELEGT und nicht `ubuntu-latest`, aus zwei gemessenen Gründen. Erstens
+    # ist der Entwicklungswirt Ubuntu 24.04.4 mit WebKitGTK 2.52.3 und libsoup
+    # 3.4.4 — derselbe Stand, auf dem die Befunde dieses Baums gemessen sind.
+    # Zweitens ist der Paketname der Webview releaseabhängig:
+    # `libwebkit2gtk-4.1-dev` heisst so seit Noble, ältere Ausgaben führen 4.0
+    # als Hauptpaket. `ubuntu-latest` wandert stromaufwärts auf eine neue
+    # Ausgabe, und dieses Repositorium pinnt jede andere Werkzeugfassung auch.
+    runs-on: ubuntu-24.04
+    # Gemessen auf dem Entwicklungswirt mit warmem Cargo-Cache und warmem
+    # pnpm-Store: siehe Bericht. Der gehostete Läufer ist langsamer und startet
+    # den ersten Lauf kalt; die Frist steht deshalb grosszügig, aber endlich —
+    # ein hängender Auftrag soll nach einer Stunde abbrechen und nicht nach
+    # sechs.
+    timeout-minutes: 120
+
+    steps:
+      - name: Auschecken
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Platz, und das ist eine MESSUNG und keine Vorsichtsgeste: nach EINEM
+      # vollständigen `pnpm verify:quick` auf dem Entwicklungswirt trägt
+      # `target/` 22 GB (davon `target/debug` 21 GB, `target/wasm32-unknown-unknown`
+      # 346 MB) — `--all-targets --all-features` über den ganzen Arbeitsbereich
+      # samt `ea-desktop`, dazu Doctests und der wasm32-Zweig. Der gehostete
+      # Läufer bringt auf `/` deutlich weniger frei mit, als diese Zahl
+      # braucht, und ein Auftrag, der auf ENOSPC stirbt, sagt nichts über den
+      # Baum aus.
+      #
+      # Entfernt werden ausschliesslich vorinstallierte Fremdtoolchains, die
+      # dieser Baum nachweislich nicht anfasst. NICHT entfernt wird
+      # `/opt/hostedtoolcache/node` — daraus bedient sich der Node-Schritt
+      # weiter unten. `|| true`, weil die Bestückung des Abbilds stromaufwärts
+      # wechselt und ein fehlendes Verzeichnis kein Fehler ist.
+      - name: Platz auf dem Läufer schaffen
+        run: |
+          set -uo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/share/swift || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      # Die Systembibliotheken des Tauri-Wirts. Sie sind NICHT Beiwerk:
+      # `cargo clippy --workspace` und `cargo test --workspace` übersetzen
+      # `apps/desktop/src-tauri` (`ea-desktop`, tauri 2.11.5 laut `Cargo.lock`),
+      # und dessen Baugraph zieht auf Linux `webkit2gtk-sys`, `soup3-sys`,
+      # `javascriptcore-rs-sys`, `gtk-sys`, `gdkx11-sys` und `libdbus-sys`.
+      #
+      # Die Liste ist ABGELEITET und nicht abgeschrieben. Aus
+      # `cargo tree --locked -p ea-desktop -e normal --target x86_64-unknown-linux-gnu`
+      # kommen die `-sys`-Crates, aus deren
+      # `[package.metadata.system-deps]` die pkg-config-Namen, und `dpkg -S`
+      # über die `.pc`-Dateien des Entwicklungswirts liefert das Debianpaket:
+      #
+      #   webkit2gtk-4.1        -> libwebkit2gtk-4.1-dev
+      #   javascriptcoregtk-4.1 -> libjavascriptcoregtk-4.1-dev
+      #   libsoup-3.0           -> libsoup-3.0-dev
+      #   gtk+-3.0              -> libgtk-3-dev
+      #   gdk-x11-3.0           -> libgtk-3-dev
+      #   dbus-1                -> libdbus-1-dev   (build.rs von libdbus-sys)
+      #
+      # Was die Tauri-Dokumentation zusätzlich nennt und dieser Baum GEMESSEN
+      # NICHT braucht: `libayatana-appindicator3-dev` und `libxdo-dev`.
+      # `cargo tree --workspace --all-features` führt weder `tray-icon` noch
+      # `libappindicator` im aufgelösten Graphen — die Merkmalsauswahl von
+      # `tauri` in `apps/desktop/src-tauri/Cargo.toml` schreibt `tray-icon`
+      # nicht ein —, und `pkg-config xdo` ist auf dem Entwicklungswirt nicht
+      # installiert, während der Gate dort grün läuft. `librsvg2-dev` steht
+      # ebenso wenig hier: keine `rsvg`-Crate im Lockfile.
+      #
+      # Perl und `make` für das gevendorte OpenSSL von
+      # `libsqlite3-sys` (`bundled-sqlcipher-vendored-openssl`, ADR 0002) liegen
+      # im Läuferabbild und stehen deshalb nicht in dieser Liste.
+      - name: Systembibliotheken des Tauri-Wirts
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libdbus-1-dev
+
+      # Rust kommt AUSSCHLIESSLICH aus `rust-toolchain.toml`. Keine zweite
+      # Fassungsangabe in dieser Datei — `mise.toml` schreibt genau das
+      # ausdrücklich fest ("Rust steht bewusst NICHT hier: `rust-toolchain.toml`
+      # ist die eine Quelle des Compilerpins, und zwei Quellen driften"), und
+      # eine Fassung im Workflow wäre die zweite Quelle.
+      #
+      # `rustup toolchain install` ohne Argument installiert die AKTIVE
+      # Toolchain, also die aus der Datei — samt `components` (clippy, rustfmt)
+      # und `targets` (wasm32-unknown-unknown). Ohne diese Zeile beschafft
+      # rustup 1.28+ die Toolchain nicht mehr von selbst.
+      - name: Rust aus rust-toolchain.toml
+        run: |
+          set -euxo pipefail
+          rustup --version
+          rustup toolchain install
+          rustup show active-toolchain
+          rustup component list --installed
+          rustup target list --installed
+
+      # Die Werkzeuge, die `mise.toml` pinnt: pnpm 11.20.0 und
+      # wasm-bindgen-cli 0.2.126. Sie kommen aus der eingecheckten Pindatei und
+      # nicht aus wiederholten Fassungsangaben in diesem Workflow — dieselbe
+      # Begründung, aus der Rust aus `rust-toolchain.toml` kommt.
+      #
+      # `wasm-bindgen-cli` MUSS zeichengleich zur aufgelösten `wasm-bindgen`-
+      # Crate in `Cargo.lock` sein (dort 0.2.126); eine Abweichung bricht den
+      # Generatorlauf von `xtask build-wasm` mit einem Schema-Mismatch ab statt
+      # mit einer Codeaussage. Die Prüfung selbst liegt fail-closed in
+      # `ensure_wasm_bindgen_cli_matches_lockfile()` und läuft im Gate mit.
+      - name: Werkzeugpins aus mise.toml
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          # Die Fassung von mise SELBST, nicht die eines Projektwerkzeugs: die
+          # stehen in `mise.toml` und werden hier nicht wiederholt. Festgelegt,
+          # weil ein wanderndes Installationswerkzeug denselben Baum morgen
+          # anders einrichtet.
+          version: 2026.9.0
+          install: true
+          cache: true
+
+      # Node kommt AUSSCHLIESSLICH aus `.node-version` (26.7.0). `package.json`
+      # führt dieselbe Fassung unter `engines`, und `.npmrc` setzt
+      # `engine-strict=true` — pnpm bricht also von sich aus ab, wenn dieser
+      # Schritt eine andere Fassung stellt. Das ist der fail-closed Wächter
+      # dieses Pins, und deshalb steht hier keine dritte Fassungsangabe.
+      - name: Node aus .node-version
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # FAIL-CLOSED, und das ist der wichtigste Schritt dieser Datei.
+      #
+      # `RUSTUP_TOOLCHAIN` in der Umgebung überstimmt `rust-toolchain.toml`
+      # VOLLSTÄNDIG, einschliesslich seiner `targets`-Zeile. Das letzte Kommando
+      # in `verify_quick_commands()` ist
+      # `cargo check --target wasm32-unknown-unknown`, und es stirbt dann mit
+      # "wasm32-unknown-unknown is not installed for the active toolchain"
+      # (Exit 2), obwohl das Ziel für 1.95.0 installiert ist — auf dem
+      # Entwicklungswirt genau so gemessen, dort gesetzt durch mise.
+      #
+      # `RUSTFLAGS` steht aus dem zweiten gemessenen Grund daneben:
+      # `--cfg getrandom_backend="wasm_js"` gehört zu getrandom 0.3, ist für die
+      # 0.4.x dieses Baums falsch und überstimmt das `wasm_js`-Merkmal.
+      # `run_process_without_rustflags()` entfernt es für `build-wasm`, aber ein
+      # gesetztes `RUSTFLAGS` änderte die Cargo-Fingerabdrücke aller übrigen
+      # Kommandos — es hat in diesem Auftrag nichts zu suchen.
+      #
+      # Geprüft wird auf GESETZT, nicht auf nichtleer: ein gesetzt-leeres
+      # `RUSTFLAGS` verdeckte ein `[build] rustflags` aus `.cargo/config.toml`,
+      # und dass diese Datei heute keines trägt, ist eine bewusste Entscheidung
+      # mit eigenem Kommentar — kein Zustand, auf den sich ein Wächter stützt.
+      #
+      # Abbruch statt stiller Reparatur: ein Gate, der seine eigene Umgebung
+      # heimlich zurechtrückt, verbirgt genau die Drift, die er belegen soll.
+      - name: Umgebungswächter (RUSTUP_TOOLCHAIN, RUSTFLAGS)
+        run: |
+          set -uo pipefail
+          fail=0
+          for name in RUSTUP_TOOLCHAIN RUSTFLAGS; do
+            if [ -n "${!name+set}" ]; then
+              echo "::error::${name} ist gesetzt (\"${!name}\"). Es überstimmt rust-toolchain.toml"
+              echo "::error::bzw. die Merkmalswahl von getrandom. Der Gate läuft so nicht."
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
+      # Die tatsächlich gestellten Fassungen, gegen die Pindateien geprüft.
+      # Eine Protokollzeile allein belegt nichts; deshalb vergleicht dieser
+      # Schritt und bricht ab.
+      - name: Werkzeugstand belegen
+        run: |
+          set -euo pipefail
+          expect() {
+            if [ "$2" != "$3" ]; then
+              echo "::error::$1: erwartet $2, gestellt $3"
+              exit 1
+            fi
+            echo "$1: $3"
+          }
+          expect "rustc (rust-toolchain.toml)" \
+            "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" \
+            "$(rustc --version | cut -d' ' -f2)"
+          expect "node (.node-version)" \
+            "$(cat .node-version)" \
+            "$(node --version | tr -d v)"
+          expect "pnpm (package.json packageManager)" \
+            "$(sed -n 's/.*"packageManager": "pnpm@\(.*\)".*/\1/p' package.json)" \
+            "$(pnpm --version)"
+          expect "wasm-bindgen-cli (mise.toml)" \
+            "$(sed -n 's/^"cargo:wasm-bindgen-cli" = "\(.*\)"$/\1/p' mise.toml)" \
+            "$(wasm-bindgen --version | cut -d' ' -f2)"
+          rustup target list --installed | grep -qx wasm32-unknown-unknown
+          # Nur zur Ansicht, nicht als Zusage: `mise.toml` pinnt
+          # `EA_CONTAINER_RUNTIME = "docker@29.4.0"`, und kein Code erzwingt
+          # diesen Pin zur Laufzeit — `tools/xtask/src/main.rs` nennt ihn
+          # ausschliesslich in einer Fehlerzeile. Der gehostete Läufer bringt
+          # seine eigene Engine mit; diese Zeile schreibt sie ins Protokoll,
+          # damit die Abweichung sichtbar ist statt vermutet.
+          docker version --format 'docker client {{.Client.Version}} / engine {{.Server.Version}}'
+
+      - name: pnpm-Store-Pfad
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: pnpm-Store aus dem Cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      # Cargo-Registry und `target/` aus dem Cache. Der Schlüssel hängt an
+      # `Cargo.lock` und an der Toolchain; die Crates des Arbeitsbereichs selbst
+      # legt diese Aktion bewusst nicht ab, sie werden also jedes Mal neu
+      # übersetzt — das ist die richtige Aufteilung, denn genau sie sind der
+      # Gegenstand der Prüfung.
+      - name: Cargo-Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Ein Auftrag, ein Cache. Der Schlüssel unterscheidet zusätzlich nach
+          # Ziel, weil der Gate für zwei baut (Wirt und wasm32).
+          key: gate-wasm32
+
+      # `pnpm install` ist Voraussetzung des Checkouts und ausdrücklich KEIN
+      # Teil von `verify_quick_commands()` — der Kommentar dort sagt das so.
+      # `--frozen-lockfile` ist die CI-Form: ein Lauf, der das Lockfile
+      # fortschreibt, prüft einen anderen Baum als den eingecheckten.
+      - name: Abhängigkeiten der Arbeitsbereiche
+        run: pnpm install --frozen-lockfile
+
+      # Die beiden Integrationsdienste aus `ops/compose/integration.yaml`.
+      #
+      # `ensure_integration_services_available()` prüft PostgreSQL und den
+      # Object Store FAIL-CLOSED, bevor `cargo test --workspace --all-targets`
+      # läuft, und es gibt absichtlich KEINE Umgebungsvariable, die das
+      # überspringt. Der Schritt startet beide Dienste, legt über `mc` den
+      # versionierten Bucket an und druckt zwei `export`-Zeilen nach stdout —
+      # er setzt sie NICHT in der Umgebung des Aufrufers, und ein
+      # `run:`-Schritt gibt seine Umgebung ohnehin nicht an den nächsten weiter.
+      #
+      # Die Übergabe geschieht deshalb über `$GITHUB_ENV`, und zwar mit den
+      # GEDRUCKTEN Werten: `export ` wird abgeschnitten, der Rest wandert
+      # unverändert in die Datei. Die Adressen und Ports stehen damit weiterhin
+      # nur an einer Stelle im Baum (`INTEGRATION_DATABASE_URL` und
+      # `INTEGRATION_OBJECT_STORE_URL` in `tools/xtask/src/main.rs`); eine
+      # Wiederholung hier wäre eine zweite Quelle, die still driftet.
+      #
+      # `run_compose()` hält stdout dafür frei und schiebt jede Compose-Ausgabe
+      # nach stderr — genau darauf beruht dieser Schnitt. Die Zeilenzahl wird
+      # geprüft: ein Schritt, der stillschweigend nichts übergibt, liefe in
+      # einen Verbindungsfehler tief im Testprotokoll.
+      - name: Integrationsdienste starten
+        run: |
+          set -euo pipefail
+          cargo run --locked -p xtask -- integration up | tee /tmp/integration-up.stdout
+          grep -E '^export (DATABASE_URL|EA_OBJECT_STORE_ENDPOINT)=' /tmp/integration-up.stdout \
+            | sed 's/^export //' > /tmp/integration.env
+          if [ "$(wc -l < /tmp/integration.env)" -ne 2 ]; then
+            echo "::error::integration up hat nicht beide export-Zeilen gedruckt"
+            cat /tmp/integration-up.stdout
+            exit 1
+          fi
+          cat /tmp/integration.env >> "$GITHUB_ENV"
+          cat /tmp/integration.env
+
+      # DER Gate. Eine Zeile, weil die Liste in `verify_quick_commands()` steht
+      # und nicht hier.
+      - name: pnpm verify:quick
+        run: pnpm verify:quick
+
+      # `always()`, damit ein roter Gate die Dienste trotzdem abräumt. Auf einem
+      # gehosteten Läufer ist der Rechner nach dem Auftrag ohnehin weg; der
+      # Schritt steht für den Fall eines selbstgehosteten Läufers und weil die
+      # Klammer `up` … `down` die vom Baum benannte Form ist.
+      - name: Integrationsdienste abräumen
+        if: always()
+        run: cargo run --locked -p xtask -- integration down
