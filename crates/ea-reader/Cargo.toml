@@ -21,6 +21,15 @@ ea-crypto.workspace = true
 # `DeviceCertificateFieldsV1` und `CertificateKindV1` sind die EINGABE von
 # `ReaderKeyProfile::validate`.
 ea-format.workspace = true
+# Die drei Stufe-3-Endpunkte des Enrollments reisen ueber
+# `WebauthnCredentialRegistrationV1`, `VaultBlobUploadV1`,
+# `VaultBlobRetrievalRequestV1` und `VaultBlobRetrievalResponseV1`, und
+# `RequestSigner` rechnet die RFC-9421-Signatur. Die Rahmen werden IMPORTIERT
+# und nie nachgebaut: eine zweite Kodierung derselben Produktion waere die
+# Stelle, an der Browser und Server auseinanderlaufen, ohne dass ein Tor es
+# sieht. Die Crate traegt selbst keine Wirtsabhaengigkeit und nimmt `ea-reader`
+# damit nicht von der wasm32-Positivliste herunter.
+ea-sync-protocol.workspace = true
 # `decode_trust_anchor` rechnet den Bootstrap-Hash beim Entsperren NEU. Der
 # gepinnte Anker gilt nicht, weil er im Tresor lag, sondern weil er sich selbst
 # traegt; `RegistryHeadPin` haelt den zuletzt verifizierten Registry-Stand.

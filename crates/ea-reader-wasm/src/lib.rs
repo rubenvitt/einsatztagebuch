@@ -10,7 +10,10 @@
 //! Bytespeicher-Ausfuhren, [`opfs_worker`] den OPFS-Wirt dahinter, und
 //! [`vault_bridge`] seit der Aufgabe „Browser-Vault: PRF-Envelopes,
 //! Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel" die zwei
-//! Tresorausfuhren.
+//! Tresorausfuhren. [`webauthn`] kommt mit der Aufgabe „Browser-Enrollment:
+//! zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate"
+//! dazu und trägt die fünf Enrollment-Ausfuhren samt der Browserfassung des
+//! Endpunktports.
 //!
 //! # Was hier NICHT liegt
 //!
@@ -73,6 +76,22 @@ pub mod opfs_worker;
 /// Richtung: `web-reader-design.md` §9 laesst nach JavaScript Sitzungskennung,
 /// Fingerabdruecke und Statuswerte, nie Schluesselmaterial.
 pub mod vault_bridge;
+
+/// Das Browser-Enrollment: die fuenf Ausfuhren und der Endpunktport dahinter.
+///
+/// Das Modul steht OHNE cfg an der `mod`-Zeile, weil es Ausfuhren traegt und
+/// die Regel „cfg am Item" dann fuer jede einzelne von ihnen gilt — dieselbe
+/// Lage wie bei [`bridge`] und [`vault_bridge`] und ausdruecklich nicht die
+/// von `opfs_worker`. Ein `pub mod` und kein `mod`, weil der Zeuge
+/// `crates/ea-reader-wasm/tests/bridge_boundary.rs` und die Aufgabe selbst die
+/// Ausfuhren unter `ea_reader_wasm::webauthn` benennen.
+///
+/// Alle fuenf Ausfuhren laufen IM DEDIZIERTEN WORKER: der Zustand liegt in
+/// einem `thread_local!`, OPFS und das synchrone `XMLHttpRequest` gibt es nur
+/// dort. `navigator.credentials` gibt es umgekehrt nur auf dem Hauptthread —
+/// die Naht dazwischen ist die Nachrichtenform von
+/// `apps/web/src/bridge/opfs-worker.ts`.
+pub mod webauthn;
 
 /// Der Rundlauf ueber die Bruecke, ohne eine einzige Zusage darueber hinaus.
 ///

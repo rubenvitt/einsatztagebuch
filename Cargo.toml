@@ -142,7 +142,7 @@ web-sys = { version = "=0.3.103", default-features = false, features = [
   "MessageEvent", "Navigator", "Request", "RequestInit", "Response",
   "ServiceWorkerGlobalScope", "StorageManager", "SubtleCrypto",
   "VisibilityState", "Window", "Worker", "WorkerGlobalScope",
-  "WorkerNavigator",
+  "WorkerNavigator", "XmlHttpRequest", "XmlHttpRequestResponseType",
 ] }
 zeroize = { version = "=1.9.0", features = ["derive"] }
 x25519-dalek = { version = "=3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }

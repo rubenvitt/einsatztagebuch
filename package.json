@@ -19,6 +19,7 @@
     "desktop:e2e": "pnpm --dir apps/desktop e2e",
     "web:typecheck": "pnpm --dir apps/web typecheck",
     "web:test": "pnpm --dir apps/web test --run",
+    "web:e2e": "pnpm --dir apps/web e2e",
     "web:browser-test": "cargo test --locked -p ea-reader-wasm --target wasm32-unknown-unknown",
     "stage-gate:2": "cargo run --locked -p xtask -- stage-gate 2",
     "supply-chain": "cargo deny check",

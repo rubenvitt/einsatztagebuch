@@ -12,11 +12,21 @@ import { createRoot } from 'react-dom/client'
 
 import { DecorativeIcon } from './design/icons'
 import { eaRuntimeTheme } from './design/tokens'
+import { EnrollmentPage } from './features/enrollment/EnrollmentPage'
 
-/** Ein Eintrag der Routentabelle: der Pfad und sein Wortlaut im Verweis. */
+/**
+ * Ein Eintrag der Routentabelle: der Pfad, sein Wortlaut im Verweis und — seit
+ * dem Browser-Enrollment — die Flaeche, die er montiert.
+ *
+ * `render` ist OPTIONAL, und der dritte Platz ist eine oeffentliche
+ * Formaenderung: der Typ ist exportiert. Ohne ihn rendert die Schale fuer jede
+ * Route denselben Platzhalterkoerper, und ein Aufruf von `/enrollment` faende
+ * eine Route, die niemand montiert hat.
+ */
 export type EaWebRoute = {
   readonly path: string
   readonly label: string
+  readonly render?: () => ReactElement
 }
 
 /**
@@ -32,7 +42,10 @@ export type EaWebRoute = {
  * eine Liste, genau wie in der Desktop-Schale; eine Bibliothek dafuer waere
  * eine Abhaengigkeit mehr fuer einen `find`-Aufruf.
  */
-export const EA_WEB_ROUTES: readonly EaWebRoute[] = [{ path: '/', label: 'Reader' }]
+export const EA_WEB_ROUTES: readonly EaWebRoute[] = [
+  { path: '/', label: 'Reader' },
+  { path: '/enrollment', label: 'Enrollment', render: () => <EnrollmentPage /> },
+]
 
 /**
  * Die Schale, die die Tabelle montiert.
@@ -82,8 +95,14 @@ export function EaWebApp({
             </nav>
             {active === undefined ? null : (
               <section aria-label={active.label}>
-                <DecorativeIcon name="locked" />
-                <Typography.Title level={2}>{active.label}</Typography.Title>
+                {active.render === undefined ? (
+                  <>
+                    <DecorativeIcon name="locked" />
+                    <Typography.Title level={2}>{active.label}</Typography.Title>
+                  </>
+                ) : (
+                  active.render()
+                )}
               </section>
             )}
           </Layout.Content>
@@ -98,8 +117,10 @@ if (container === null) {
   throw new Error('Der Wurzelknoten der Anwendung fehlt.')
 }
 
+// NUR die Montage liest die Adresse. Der Vorgabewert im Bauteil bleibt `'/'`,
+// damit es fuer `vitest` deterministisch und ohne Wirtsbezug bleibt.
 createRoot(container).render(
   <StrictMode>
-    <EaWebApp />
+    <EaWebApp initialPath={window.location.pathname} />
   </StrictMode>,
 )
