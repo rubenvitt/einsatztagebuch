@@ -19,9 +19,18 @@
 //! die zwei verschluesselten Speicher [`ReaderObjectCache`] und
 //! [`ReaderEntryStateStore`] darueber.
 //!
-//! Was sie weiterhin NICHT traegt, ist ein URTEIL: der Verifikationsdurchlauf,
-//! die Klassifikation eines Eintrags und der Datei-Modus entstehen in den
-//! folgenden Aufgaben der Stufe 4. Hier entsteht der SPEICHER des Zustands.
+//! Seit der Aufgabe „Inkrementeller Reader-Sync und verifizierter
+//! Cursor-Fortschritt in OPFS" kommt der SERVER-MODUS dazu:
+//! [`ReaderSyncService`] gibt einen fertig signierten Lesestapel-Request
+//! heraus, nimmt die Antwortbytes zurueck und bewegt [`ConfirmedCursor`] erst,
+//! wenn jedes Objektbyte dauerhaft ist UND die Kette bis zum Batchende
+//! verifiziert.
+//!
+//! Was sie weiterhin NICHT traegt, ist ein URTEIL UEBER EINEN EINTRAG: der
+//! Lesestapel laeuft `verify_archive_observed` ausdruecklich OHNE
+//! Empfaengerschluessel und entschluesselt nichts. Die Klassifikation nach
+//! `design.md` §17.4 und der Datei-Modus entstehen in den folgenden Aufgaben
+//! der Stufe 4.
 //!
 //! # Die Reihenfolge ist Absicht
 //!
@@ -66,6 +75,11 @@
 //! Begriffe, mit denen sie das tut, kommen aus DER Crate, deren Signatur sie
 //! bedient.
 //!
+//! Dieselbe Regel traegt [`HttpMethod`]: es steht als Feld in
+//! [`ReaderRequestV1`], und wer den Request liest — die Bruecke tut es —, muss
+//! die Methode benennen koennen, ohne eine eigene Kante nach `ea-sync-protocol`
+//! zu ziehen.
+//!
 //! Dieselbe Regel zieht [`ReaderBundlePin::from_trust_objects`] und
 //! [`reader_trust_age_view`] nach: die eine nimmt eine [`RegistryVersion`], die
 //! andere zwei [`UnixMillis`], und beide werden von der Bruecke gerufen. Die
@@ -73,23 +87,33 @@
 //! `crates/ea-reader-wasm` eine Kante nach `ea-types` zu geben, die es bis
 //! heute nicht hat.
 
+mod batch;
 mod blob_store;
 mod bundle_release;
 mod cache;
+mod cursor;
 mod enrollment;
 mod enrollment_endpoints;
 mod entry_state;
 mod envelope;
+mod http;
 mod key_profile;
 mod mode;
+mod sync;
 mod trust_state;
 mod vault;
 
+pub use batch::VerifiedSyncBatch;
 pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
 pub use bundle_release::{
     BundleActivationDecisionV1, BundleRejectionCodeV1, ReaderBundleError, ReaderBundlePin,
 };
-pub use cache::ReaderObjectCache;
+pub use cache::{ExactObjectVisitor, ReaderObjectCache};
+pub use cursor::{
+    ConfirmedCursor, MAX_CACHED_OBJECTS_V1, READER_SYNC_CURSOR_BLOB_KEY_V1,
+    READER_SYNC_OBJECTS_BLOB_KEY_V1,
+};
+pub use ea_sync_protocol::HttpMethod;
 pub use ea_trust::decode_trust_anchor;
 pub use ea_types::{Hash32, OrganizationId, RegistryVersion, SubjectId, UnixMillis};
 pub use ea_verify::GATE_ORDER_V1;
@@ -108,8 +132,13 @@ pub use entry_state::{ReaderEntryStateStore, ReaderEntryStateV1};
 pub use envelope::{
     AuthenticatorPrfV1, VAULT_INDEX_INFO_V1, VAULT_KEK_INFO_V1, VaultEnvelopeV1, derive_kek_v1,
 };
+pub use http::ReaderRequestV1;
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
+pub use sync::{
+    READER_SYNC_SIGNATURE_WINDOW_SECONDS_V1, ReaderSyncError, ReaderSyncFaultPoint,
+    ReaderSyncService,
+};
 pub use trust_state::{
     ReaderTrustAgeV1, ReaderTrustStateStore, ReaderTrustStateV1, reader_trust_age_view,
 };

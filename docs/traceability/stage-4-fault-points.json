@@ -21,5 +21,82 @@
       "brackets": "ein dauerhaft im Datei-Modus betriebenes Geraet sieht einen Widerruf erst beim naechsten Bezug des Trust-Bestandes: das Alter wird ausgewiesen und die Ueberschreitung der Frist ist eine AUFFORDERUNG, nie eine Sperre",
       "witness": "crates/ea-reader/tests/trust_age.rs::an_exceeded_deadline_asks_for_a_refresh"
     }
+  ],
+  "sync-cursor": [
+    {
+      "name": "before-batch-request",
+      "brackets": "vor dem Bilden und Signieren der Stapelanfrage: es entsteht kein Request, der Cursor steht",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "after-batch-request",
+      "brackets": "nach dem Signieren und vor dem Absenden: der Request hat den Wirt nie verlassen, und der naechste Lauf bildet ihn neu",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "before-start-head-check",
+      "brackets": "vor dem Vergleich des Startkopfs mit dem EIGENEN bestaetigten Cursor: kein Objektbyte hat den Speicher erreicht",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "after-start-head-check",
+      "brackets": "nach dem Startkopfvergleich und vor dem ersten Schreibvorgang",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "before-object-write",
+      "brackets": "vor dem ersten Objektbyte im verschluesselten Objektcache",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "after-first-object-write",
+      "brackets": "nach dem ERSTEN und vor dem zweiten Objekt: der Batch liegt halb im Cache, und weil er inhaltsadressiert ist, kostet die Wiederholung kein zweites Byte",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "before-blob-store-flush",
+      "brackets": "vor der Rueckleseprobe, mit der die Dauerhaftigkeit GEMESSEN statt angeordnet wird — der Port kennt kein flush",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "after-blob-store-flush",
+      "brackets": "jedes angekuendigte Objekt ist aus dem Speicher zurueckgekommen, die Kette ist noch ungeprueft: ein hier gesetzter Cursor traege eine nie verifizierte Kette",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "before-chain-verification",
+      "brackets": "vor dem Verifikationslauf ueber den GESAMTEN lokalen Bestand gegen den Vault-gepinnten Anchor",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "after-chain-verification",
+      "brackets": "der Bericht liegt vor, der Cursor steht noch: erst das Schreiben macht die Aussage dauerhaft",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "before-cursor-persist",
+      "brackets": "vor dem Schreiben des naechsten Cursors — die letzte Stelle, an der ein Abbruch gar nichts kostet",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "after-cursor-persist",
+      "brackets": "hinter der einzigen dauerhaften Wirkung von confirm: der Schreibvorgang wird ZURUECKGENOMMEN, damit auch dieser Punkt den Cursor stehen laesst",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
+    },
+    {
+      "name": "tab-closed-mid-batch",
+      "brackets": "browser-eigen und auf dem Desktop unbekannt: ein Tab schliesst zwischen after-first-object-write und before-cursor-persist, der Dienst wird fallen gelassen und confirm laeuft nie — der Cursor steht, und der naechste Lauf holt den Batch erneut",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::a_tab_that_closes_mid_batch_leaves_the_cursor_where_it_was"
+    },
+    {
+      "name": "opfs-write-aborted-by-storage-pressure",
+      "brackets": "browser-eigen und auf dem Desktop unbekannt: die Speicherbereinigung bricht einen OPFS-Schreibvorgang ab, der Speicher liefert ab dem n-ten Objekt QuotaExceeded — EA-READER-STORE, und der Cursor DIESES Speichers steht danach dort, wo er vorher stand",
+      "witness": "crates/ea-reader/tests/sync_resume.rs::an_opfs_write_the_browser_aborts_leaves_the_cursor_where_it_was"
+    },
+    {
+      "name": "refusal-leaves-the-cursor",
+      "brackets": "keiner der vier Abweisungsgruende — falscher Startkopf, fehlendes Objekt, Luecke, Fork — bewegt Zustand, und jeder traegt seinen EIGENEN Code statt eines Sammelcodes",
+      "witness": "crates/ea-reader/tests/sync_attacks.rs::every_refusal_carries_its_own_code_and_leaves_the_cursor_where_it_was"
+    }
   ]
 }

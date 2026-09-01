@@ -1887,11 +1887,13 @@ dependencies = [
 name = "ea-reader"
 version = "0.1.0"
 dependencies = [
+ "ea-archive",
  "ea-cbor",
  "ea-crypto",
  "ea-format",
  "ea-sync-protocol",
  "ea-testkit",
+ "ea-time",
  "ea-trust",
  "ea-types",
  "ea-verify",
@@ -1914,6 +1916,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "js-sys",
+ "serde_json",
  "sha2 0.11.0",
  "wasm-bindgen",
  "wasm-bindgen-futures",

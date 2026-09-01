@@ -58,6 +58,13 @@ zeroize.workspace = true
 # wasm32-Zeile des Gates faehrt ohne `--all-targets` und zieht sie nie in den
 # Graphen.
 ea-verify.workspace = true
+# Der JSON-Parser der Bruecken-DTO-Zeugen. Er steht hier, weil „das DTO ist
+# gueltiges JSON" nur ein echter Parser belegen kann: die Fassung davor baute
+# die Kopfzeilenliste mit `format!`, erzeugte an jedem `signature-input`
+# unparsbares JSON, und keine handgeschriebene Zusicherung haette das gesehen.
+# ENTWICKLUNGSabhaengigkeit — die wasm32-Zeile des Gates faehrt ohne
+# `--all-targets` und zieht sie nie in den Lib-Graphen.
+serde_json.workspace = true
 # Der Laeufer von `tests/opfs_browser.rs`. Er steht als
 # ENTWICKLUNGSabhaengigkeit exakt in `[workspace.dependencies]` der Wurzel und
 # ist in ADR 0005 ratifiziert; `workspace_declares_exact_planned_members_and_

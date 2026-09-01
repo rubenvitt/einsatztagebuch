@@ -33,13 +33,14 @@
 //! `a_blob_moved_to_a_foreign_address_refuses` in
 //! `crates/ea-reader/tests/cache_canaries.rs` das Vertauschen zweier Blobs.
 //!
-//! # Vier abgeleitete Schluessel, EIN Ort
+//! # Sechs abgeleitete Schluessel, EIN Ort
 //!
 //! Aus dem Tresorschluessel entstehen der Cacheschluessel, der Schluessel des
-//! Zustandsspeichers und der Indexschluessel; aus der PRF-Ausgabe entsteht der
-//! Wrapping-Schluessel. Alle vier gehen durch [`derive_key`], und die vier
+//! Eintragszustands, der des Trust-Standes, der des bestaetigten Sync-Cursors
+//! und der Indexschluessel; aus der PRF-Ausgabe entsteht der
+//! Wrapping-Schluessel. Alle sechs gehen durch [`derive_key`], und die sechs
 //! Info-Zeichenketten stehen nebeneinander in diesem Modul. Waeren sie verteilt,
-//! haette eine Schluesselrotation vier Orte statt einem, und zwei Kontexte
+//! haette eine Schluesselrotation sechs Orte statt einem, und zwei Kontexte
 //! koennten unbemerkt gleich werden — was zwei getrennte Speicher zu einem
 //! machte.
 //!
@@ -80,7 +81,16 @@ const VAULT_STATE_INFO_V1: &[u8] = b"ea-reader-entry-state-v1";
 /// nichts selbst ab.
 const VAULT_TRUST_STATE_INFO_V1: &[u8] = b"ea-reader-trust-state-v1";
 
-/// Der Ableitungskontext des Indexblobs. Er entsteht HIER, damit alle fuenf
+/// Der Ableitungskontext des bestaetigten Sync-Cursors.
+///
+/// Modulprivat wie Cache und Zustandsspeicher: `crates/ea-reader/src/cursor.rs`
+/// bekommt seinen Schluessel ueber [`derive_sync_cursor_key_v1`] und leitet
+/// nichts selbst ab. Er steht HIER und nicht dort, weil dieses Modul der EINE
+/// Ort jeder Ableitung ist — ein sechster Kontext neben den fuenf und nicht ein
+/// sechster ORT.
+const VAULT_SYNC_CURSOR_INFO_V1: &[u8] = b"ea-reader-sync-cursor-v1";
+
+/// Der Ableitungskontext des Indexblobs. Er entsteht HIER, damit alle sechs
 /// abgeleiteten Schluessel EINEN Ort haben.
 ///
 /// OEFFENTLICH, anders als die Kontexte von Cache und Zustandsspeicher: die
@@ -335,6 +345,13 @@ pub(crate) fn derive_trust_state_key_v1(
     vault_key: &SecretBytes<CEK_SIZE>,
 ) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
     derive_key(vault_key, VAULT_TRUST_STATE_INFO_V1)
+}
+
+/// Der Schluessel des bestaetigten Sync-Cursors.
+pub(crate) fn derive_sync_cursor_key_v1(
+    vault_key: &SecretBytes<CEK_SIZE>,
+) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+    derive_key(vault_key, VAULT_SYNC_CURSOR_INFO_V1)
 }
 
 /// Der Indexschluessel.
