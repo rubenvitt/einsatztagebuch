@@ -49,9 +49,27 @@
 //! die Reihenfolge des Browsers von der des Wirts abweichen koennte. Dieselbe
 //! Regel gilt fuer die Statusbegriffe: `VerificationStatus`, `EntryStatus` und
 //! `ServerConfirmationV1` werden importiert und nie nachgebaut.
+//!
+//! # Was in der SIGNATUR steht, wird ebenfalls RE-EXPORTIERT
+//!
+//! [`ReaderEnrollment::begin`] nimmt einen [`ReaderBlobStore`] — den
+//! Geraetezustand, gegen den es sich weigert —, dazu [`OrganizationId`],
+//! [`SubjectId`], einen
+//! `TrustAnchorV1` und [`Hash32`], und der gepinnte Anker gilt nicht, weil er
+//! irgendwo lag, sondern weil [`decode_trust_anchor`] seinen Bootstrap-Hash
+//! beim Dekodieren NEU rechnet. Diese vier Namen gehoeren damit zur
+//! OEFFENTLICHEN Flaeche dieser Crate: wer `begin` ruft, muss sie benennen
+//! koennen, und `decode_trust_anchor` ist ueberdies eine FUNKTION — ohne
+//! diesen Re-Export gaebe es fuer sie keinen zweiten Weg. `ea-reader-wasm`
+//! ruft `begin` und traegt deshalb KEINE eigene Kante nach `ea-trust` oder
+//! `ea-types`: die Bruecke rechnet nicht, sie reicht Bytes weiter, und die
+//! Begriffe, mit denen sie das tut, kommen aus DER Crate, deren Signatur sie
+//! bedient.
 
 mod blob_store;
 mod cache;
+mod enrollment;
+mod enrollment_endpoints;
 mod entry_state;
 mod envelope;
 mod key_profile;
@@ -60,7 +78,20 @@ mod vault;
 
 pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
 pub use cache::ReaderObjectCache;
+pub use ea_trust::decode_trust_anchor;
+pub use ea_types::{Hash32, OrganizationId, SubjectId};
 pub use ea_verify::GATE_ORDER_V1;
+pub use enrollment::{
+    AttestedAuthenticatorV1, AuthenticatorRecordV1, AuthenticatorTransportProfileV1,
+    DeviceTrustStateV1, ENROLLMENT_SIGNATURE_WINDOW_SECONDS_V1, EnrolledReaderV1, EnrollmentError,
+    EnrollmentFingerprintsV1, EnrollmentRequestContextV1, FingerprintConfirmationV1,
+    MIN_ENROLLED_AUTHENTICATORS_V1, READER_VAULT_BLOB_KEY_V1, ReaderEnrollment, VAULT_PRF_SALT_V1,
+    recover_and_unlock_vault,
+};
+pub use enrollment_endpoints::{
+    EnrollmentCallV1, EnrollmentEndpointError, EnrollmentEndpoints, EnrollmentRequestV1,
+    InMemoryEnrollmentEndpoints,
+};
 pub use entry_state::{ReaderEntryStateStore, ReaderEntryStateV1};
 pub use envelope::{
     AuthenticatorPrfV1, VAULT_INDEX_INFO_V1, VAULT_KEK_INFO_V1, VaultEnvelopeV1, derive_kek_v1,

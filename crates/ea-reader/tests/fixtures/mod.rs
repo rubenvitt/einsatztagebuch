@@ -41,13 +41,16 @@ use ea_crypto::{
 };
 use ea_format::{CertificateKindV1, DeviceCertificateFieldsV1, KeyProtectionProfileV1};
 use ea_reader::{
-    AuthenticatorPrfV1, ReaderEntryStateV1, ReaderVault, SealedVaultV1, UnlockedVault,
+    AttestedAuthenticatorV1, AuthenticatorPrfV1, AuthenticatorTransportProfileV1, EnrolledReaderV1,
+    EnrollmentEndpoints, EnrollmentRequestContextV1, InMemoryReaderBlobStore, ReaderBlobStore,
+    ReaderEnrollment, ReaderEntryStateV1, ReaderVault, SealedVaultV1, UnlockedVault,
     VaultContentsV1,
 };
+use ea_sync_protocol::VaultBlobRetrievalRequestV1;
 use ea_trust::{RegistryHeadPin, TrustAnchorV1, decode_trust_anchor};
 use ea_types::{
-    ChainSequence, DeviceId, EntryHash, EntryStatus, ObjectHash, OrganizationId, RegistryVersion,
-    VerificationStatus,
+    ChainSequence, DeviceId, EntryHash, EntryStatus, Hash32, ObjectHash, OrganizationId,
+    RegistryVersion, SubjectId, VerificationStatus,
 };
 use ea_verify::ServerConfirmationV1;
 use minicbor::Encoder;
@@ -417,4 +420,221 @@ pub fn missing_grant_state() -> ReaderEntryStateV1 {
         ServerConfirmationV1::NotServerConfirmed,
         None,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Enrollment
+// ---------------------------------------------------------------------------
+
+/// Die Organisation dieses Readers.
+///
+/// DIESELBEN 16 Byte, die `pinned_anchor_exact_bytes` in die Ankervorstufe
+/// schreibt und die `device_certificate` fuehrt. Eine zweite Kennung daneben
+/// waere ein Enrollment gegen einen fremden Anker, und der Zeuge merkte es
+/// nicht — `ea-reader` prueft die Zugehoerigkeit nicht, sie ist die Autoritaet
+/// des Servers.
+pub fn organization() -> OrganizationId {
+    OrganizationId::try_from(&[0x12_u8; 16][..]).expect("16 Byte sind eine Organisationskennung")
+}
+
+/// Die pseudonyme `subjectId` dieses Readers — der `userHandle` aus
+/// `web-reader-design.md` §6.4.1.
+pub fn subject() -> SubjectId {
+    SubjectId::try_from(&[0x5b_u8; 16][..]).expect("16 Byte sind eine Subjektkennung")
+}
+
+/// Der Fingerprint des geladenen Bundles.
+///
+/// Er tritt in `ReaderEnrollment::begin` als PARAMETER ein: `ea-reader` hat
+/// keinen Weg, das geladene Bundle zu lesen, und der Wert kommt im Browser aus
+/// dem Bauartefakt.
+pub fn bundle_fingerprint() -> Hash32 {
+    Hash32::try_from(&[0x7e_u8; 32][..]).expect("32 Byte sind ein Hash32")
+}
+
+/// Der Seed des `index`-ten Credential-Schluessels.
+fn credential_seed(index: u8) -> [u8; 32] {
+    let mut seed = [0x5f_u8; 32];
+    seed[31] = index;
+    seed
+}
+
+/// Die kanonische COSE-Karte des oeffentlichen Schluessels des `index`-ten
+/// Credentials.
+///
+/// Ueber `CanonicalPublicCoseKey::ed25519(..).to_deterministic_cbor()` und
+/// nicht von Hand: `WebauthnCredentialRegistrationV1::new` parst genau diese
+/// Bytes ein ZWEITES Mal und verlangt den `Ed25519`-Arm. Eine gebastelte Karte
+/// fiele dort mit `EA-SYNC-PROTOCOL-FRAME-SHAPE`, und der Zeuge maesse den
+/// Rahmen statt das Enrollment.
+pub fn credential_public_cose_key(index: u8) -> Vec<u8> {
+    CanonicalPublicCoseKey::ed25519(ea_testkit::ed25519_public_key(&credential_seed(index)))
+        .expect("ein aus einem Seed abgeleiteter Ed25519-Punkt ist ein gueltiger Punkt")
+        .to_deterministic_cbor()
+}
+
+/// Der `index`-te Authenticator, so wie der Browser ihn nach der Zeremonie
+/// meldet.
+///
+/// Er traegt DIESELBE `credentialId` und DIESELBE PRF-Ausgabe wie
+/// [`authenticator`]: der Envelope, den ein Enrollment ueber `attested(index)`
+/// baut, muss sich spaeter mit `authenticator(index)` oeffnen lassen.
+pub fn attested(index: u8) -> AttestedAuthenticatorV1 {
+    AttestedAuthenticatorV1::new(
+        credential_id(index),
+        credential_public_cose_key(index),
+        AuthenticatorTransportProfileV1::ClientDevice,
+        SecretBytes::new(prf_output(index)),
+    )
+}
+
+/// Ein Authenticator mit ACHT Byte `credentialId`.
+///
+/// Acht liegen unter `MIN_WEBAUTHN_CREDENTIAL_ID_BYTES_V1` (16); die regulaeren
+/// Fixture-Kennungen aus [`credential_id`] messen 19 Byte und liegen darueber.
+/// Der einzige Zweck dieses Werts ist `EA-READER-ENROLLMENT-CREDENTIAL-ID-LENGTH`.
+pub fn attested_with_short_credential_id() -> AttestedAuthenticatorV1 {
+    AttestedAuthenticatorV1::new(
+        b"kurz-idx".to_vec(),
+        credential_public_cose_key(1),
+        AuthenticatorTransportProfileV1::ClientDevice,
+        SecretBytes::new(prf_output(1)),
+    )
+}
+
+/// Ein Authenticator aus dem Cross-Device-QR-Flow.
+///
+/// Vollstaendig gueltig bis auf sein Transportprofil — der Zeuge misst damit
+/// die Abweisung des Profils und nicht die einer Kennung.
+pub fn cross_device_attested() -> AttestedAuthenticatorV1 {
+    AttestedAuthenticatorV1::new(
+        credential_id(4),
+        credential_public_cose_key(4),
+        AuthenticatorTransportProfileV1::CrossDevice,
+        SecretBytes::new(prf_output(4)),
+    )
+}
+
+/// Herkunft und Uhrzeit der drei signierten Anfragen.
+///
+/// Beide treten als WERTE ein und werden nicht beschafft: auf
+/// `wasm32-unknown-unknown` gibt es fuer `SystemTime::now()` keinen Wirt.
+pub fn request_context() -> EnrollmentRequestContextV1 {
+    EnrollmentRequestContextV1::new("sync.einsatzarchiv.invalid".to_owned(), 1_800_000_000)
+}
+
+/// Der fertige Abrufkoerper fuer `POST /v1/vault-blobs/retrievals`.
+///
+/// Die Assertion ist auf dem Wirt GESTELLT und nicht echt. Das ist zulaessig,
+/// weil `recover_and_unlock_vault` sie nicht prueft — sie ist die Autoritaet des
+/// SERVERS, und den misst `pnpm test:server`.
+pub fn retrieval_request() -> VaultBlobRetrievalRequestV1 {
+    VaultBlobRetrievalRequestV1::new(
+        organization(),
+        subject(),
+        credential_id(2),
+        [0x9a_u8; 32],
+        vec![0x33_u8; 37],
+        br#"{"type":"webauthn.get","challenge":"","origin":"https://reader.invalid"}"#.to_vec(),
+        [0x5a_u8; 64],
+    )
+    .expect("der gestellte Abrufkoerper haelt jede Formgrenze des Rahmens ein")
+}
+
+/// Ein Enrollment mit zwei registrierten Authenticators, VOR dem Abschluss.
+///
+/// Der Bytespeicher, gegen den `begin` seine Weigerung stellt, entsteht HIER
+/// und ist LEER — ein frisches Geraet ist die Vorbedingung, unter der ein
+/// Enrollment ueberhaupt beginnen darf. Wer die Weigerung auf einem Geraet MIT
+/// Tresor messen will, ruft `begin` selbst; der Zeuge dafuer ist
+/// `begin_refuses_on_a_device_that_already_carries_a_sealed_vault`.
+pub fn enrollment_with_two_authenticators() -> ReaderEnrollment {
+    enrollment_with_two_authenticators_on(&InMemoryReaderBlobStore::new())
+}
+
+/// Dasselbe Enrollment, begonnen gegen DIESEN Bytespeicher.
+///
+/// Der Speicher tritt als Parameter ein, weil `begin` ihn liest: ein intern
+/// gebautes, immer leeres Doppel liesse jeden Zeugen an der Weigerung aus
+/// `begin` vorbeilaufen, auch wenn der Speicher, den er selbst fuehrt, laengst
+/// einen Tresor traegt.
+pub fn enrollment_with_two_authenticators_on(store: &dyn ReaderBlobStore) -> ReaderEnrollment {
+    let mut enrollment = ReaderEnrollment::begin(
+        store,
+        organization(),
+        subject(),
+        pinned_anchor(),
+        bundle_fingerprint(),
+    )
+    .expect("ein frisches Geraet und eine verfuegbare Zufallsquelle beginnen ein Enrollment");
+    enrollment
+        .register_authenticator(attested(1))
+        .expect("der erste Authenticator ist vollstaendig gueltig");
+    enrollment
+        .register_authenticator(attested(2))
+        .expect("der zweite Authenticator ist vollstaendig gueltig");
+    enrollment
+}
+
+/// Dasselbe Enrollment, ABGESCHLOSSEN ueber DIESEN Endpunktport und DIESEN
+/// Bytespeicher.
+///
+/// Beide treten als Parameter ein und werden nicht intern gebaut: `finish`
+/// braucht beide, und ein intern gebautes Doppel zeichnete die drei Aufrufe an
+/// einer Stelle auf, an der kein Zeuge sie sieht — genau die Eigenschaft, die
+/// `finish_calls_three_endpoints_in_order_and_only_then_writes_locally` messen
+/// soll.
+pub fn two_authenticator_enrollment_into(
+    endpoints: &mut dyn EnrollmentEndpoints,
+    store: &mut dyn ReaderBlobStore,
+) -> EnrolledReaderV1 {
+    // Gegen DEN Speicher, in den `finish` gleich schreibt, und nicht gegen ein
+    // internes Doppel: sonst saehe `begin` einen anderen Geraetezustand als
+    // `finish`.
+    let enrollment = enrollment_with_two_authenticators_on(&*store);
+    let shown = enrollment.fingerprints();
+    let confirmation = enrollment
+        .confirm_fingerprints(
+            &shown.key_fingerprint_hex(),
+            &shown.bundle_fingerprint_hex(),
+        )
+        .expect("die angezeigten Werte stimmen mit sich selbst ueberein");
+    enrollment
+        .finish(confirmation, request_context(), endpoints, store)
+        .expect("zwei Authenticators und ein bestaetigter Vergleich schliessen ab")
+}
+
+/// ACHT Chiffrate — `MAX_VAULT_BLOBS_PER_SUBJECT_V1` — von denen GENAU EINES
+/// diesem Reader gehoert.
+///
+/// Das eigene steht bewusst NICHT an erster Stelle: ein Abruf, der nur das
+/// erste Element probierte, waere sonst gruen ohne Aussage. Die sieben fremden
+/// sind nichtleer und liegen weit unter `MAX_VAULT_BLOB_CIPHERTEXT_BYTES_V1`,
+/// tragen aber keine Form, die `SealedVaultV1::from_deterministic_cbor` annimmt.
+pub fn seven_foreign_ciphertexts_and(stored: Vec<u8>) -> Vec<Vec<u8>> {
+    let mut ciphertexts: Vec<Vec<u8>> = (0..7_u8)
+        .map(|index| {
+            let mut foreign = b"EINSATZARCHIV-FREMDES-CHIFFRAT-".to_vec();
+            foreign.push(b'0' + index);
+            foreign.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+            foreign
+        })
+        .collect();
+    ciphertexts.insert(5, stored);
+    ciphertexts
+}
+
+/// Kippt GENAU EINE Hexziffer.
+///
+/// Der Vergleich laeuft ueber die DEKODIERTEN Werte, eine gekippte Ziffer ist
+/// also eine echte Byteabweichung und keine Schreibweisenabweichung.
+pub fn flip_one_hex_digit(value: &str) -> String {
+    let mut characters = value.chars();
+    let first = characters
+        .next()
+        .expect("ein angezeigter Fingerprint ist nicht leer");
+    let mut flipped = String::with_capacity(value.len());
+    flipped.push(if first == '0' { '1' } else { '0' });
+    flipped.extend(characters);
+    flipped
 }

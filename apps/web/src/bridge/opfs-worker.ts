@@ -8,13 +8,76 @@
 // Klartext entschieden wird — und `web-reader-design.md` §9 laesst
 // Kryptographie ausschliesslich in geteiltem Rust zu.
 
-import init, { blobGet, blobPut } from './pkg/ea_reader_wasm.js'
+import init, {
+  blobGet,
+  blobPut,
+  enrollmentBegin,
+  enrollmentConfirmFingerprints,
+  enrollmentFingerprints,
+  enrollmentFinish,
+  enrollmentRegisterAuthenticator,
+  readerVaultUnlock,
+} from './pkg/ea_reader_wasm.js'
 
-/** Die drei Nachrichten, die der Speicher kennt. */
+/**
+ * Die Nachrichten, die dieser Worker kennt.
+ *
+ * Die drei ersten sind der Bytespeicher. Die fuenf Enrollment-Nachrichten
+ * darunter stehen HIER und nicht in einem zweiten Worker: der
+ * Enrollment-Zustand liegt in Rust in einem `thread_local!`, alle fuenf
+ * Aufrufe muessen also denselben Faden sehen, und zwei Worker oeffneten
+ * dieselbe OPFS-Datei mit zwei `FileSystemSyncAccessHandle`s — der zweite
+ * bekaeme sie gar nicht.
+ *
+ * `vault-unlock` ist die einzige Nachricht, die WEDER Speicher NOCH Enrollment
+ * ist. Sie traegt die lebende Paritaetsprobe der Oberflaeche: sie oeffnet
+ * einen bereits versiegelten Tresor mit einer frisch gezogenen PRF-Ausgabe
+ * ueber `readerVaultUnlock` aus `crate::vault_bridge` — eine Ausfuhr, die
+ * diese Bruecke laengst fuehrt. Sie ist deshalb KEINE sechste
+ * Enrollment-Ausfuhr; sie liegt nur, wie alles wasm-Gebundene, im Worker.
+ */
 export type EaOpfsRequest =
   | { readonly id: number; readonly kind: 'put'; readonly key: string; readonly bytes: Uint8Array }
   | { readonly id: number; readonly kind: 'get'; readonly key: string }
   | { readonly id: number; readonly kind: 'delete'; readonly key: string }
+  | {
+      readonly id: number
+      readonly kind: 'enrollment-begin'
+      readonly organizationId: Uint8Array
+      readonly subjectId: Uint8Array
+      readonly pinnedAnchor: Uint8Array
+      readonly bundleFingerprint: Uint8Array
+    }
+  | {
+      readonly id: number
+      readonly kind: 'enrollment-register-authenticator'
+      readonly handle: number
+      readonly attestationObject: Uint8Array
+      readonly transport: string
+      readonly prfOutput: Uint8Array
+    }
+  | { readonly id: number; readonly kind: 'enrollment-fingerprints'; readonly handle: number }
+  | {
+      readonly id: number
+      readonly kind: 'enrollment-confirm-fingerprints'
+      readonly handle: number
+      readonly expectedKeyFingerprint: string
+      readonly expectedBundleFingerprint: string
+    }
+  | {
+      readonly id: number
+      readonly kind: 'enrollment-finish'
+      readonly handle: number
+      readonly authority: string
+      readonly createdUnixSeconds: bigint
+    }
+  | {
+      readonly id: number
+      readonly kind: 'vault-unlock'
+      readonly sealed: Uint8Array
+      readonly credentialId: Uint8Array
+      readonly prfOutput: Uint8Array
+    }
 
 /**
  * Die Antwort — der Wert oder der STABILE CODE des Fehlschlags.
@@ -23,7 +86,12 @@ export type EaOpfsRequest =
  * Wirtstext naennte womoeglich einen Ablagepfad.
  */
 export type EaOpfsResponse =
-  | { readonly id: number; readonly ok: true; readonly bytes?: Uint8Array | undefined }
+  | {
+      readonly id: number
+      readonly ok: true
+      readonly bytes?: Uint8Array | undefined
+      readonly status?: string | undefined
+    }
   | { readonly id: number; readonly ok: false; readonly code: string }
 
 /**
@@ -115,6 +183,80 @@ scope.addEventListener('message', (event) => {
           // Erfolg zu melden. Der Task, dem die Bruecke gehoert, ersetzt
           // diese Zeile durch den Aufruf.
           scope.postMessage({ id: request.id, ok: false, code: 'EA-READER-BLOB-HOST' })
+          return
+        // Die fuenf Enrollment-Nachrichten reichen ihr Status-DTO UNVERAENDERT
+        // durch: die Bruecke gibt eine JSON-Zeichenkette heraus, und wer sie
+        // hier zerlegte, traefe eine Entscheidung ueber ihre Form. Zerlegt
+        // wird sie auf dem Hauptthread, in `../vault/webauthn-prf.ts`.
+        case 'enrollment-begin':
+          // ASYNCHRON wie `enrollment-finish`, und aus demselben Grund: das Tor
+          // in `ReaderEnrollment::begin` liest den lokalen Tresorplatz, und
+          // `OpfsBlobStore::open` verlangt seinen Schluessel VOR dem Vorlauf.
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: await enrollmentBegin(
+              request.organizationId,
+              request.subjectId,
+              request.pinnedAnchor,
+              request.bundleFingerprint,
+            ),
+          })
+          return
+        case 'enrollment-register-authenticator':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: enrollmentRegisterAuthenticator(
+              request.handle,
+              request.attestationObject,
+              request.transport,
+              request.prfOutput,
+            ),
+          })
+          return
+        case 'enrollment-fingerprints':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: enrollmentFingerprints(request.handle),
+          })
+          return
+        case 'enrollment-confirm-fingerprints':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: enrollmentConfirmFingerprints(
+              request.handle,
+              request.expectedKeyFingerprint,
+              request.expectedBundleFingerprint,
+            ),
+          })
+          return
+        case 'enrollment-finish':
+          // Die zweite asynchrone Enrollment-Ausfuhr neben `enrollment-begin`:
+          // `finish` schreibt am Ende ueber den synchronen `ReaderBlobStore`,
+          // und `OpfsBlobStore::open` verlangt die Schluessel VOR dem Vorlauf.
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: await enrollmentFinish(
+              request.handle,
+              request.authority,
+              request.createdUnixSeconds,
+            ),
+          })
+          return
+        case 'vault-unlock':
+          // Die Sitzungskennung ist eine ZAHL und kein DTO; sie reist als Text
+          // im selben Feld, damit die Antwortform eine bleibt. Die
+          // Oberflaeche liest sie nicht — sie braucht nur, DASS der Tresor
+          // aufging.
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: String(readerVaultUnlock(request.sealed, request.credentialId, request.prfOutput)),
+          })
           return
       }
     })

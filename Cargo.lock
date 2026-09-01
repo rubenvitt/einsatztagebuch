@@ -1890,6 +1890,7 @@ dependencies = [
  "ea-cbor",
  "ea-crypto",
  "ea-format",
+ "ea-sync-protocol",
  "ea-testkit",
  "ea-trust",
  "ea-types",

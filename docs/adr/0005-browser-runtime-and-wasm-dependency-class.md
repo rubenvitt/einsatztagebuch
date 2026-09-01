@@ -74,7 +74,7 @@ own compatible releases `0.4.76`/`0.3.76`).
 | [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen/0.2.126) | `=0.2.126`; `default-features = false`, `std` | The [upstream project](https://github.com/wasm-bindgen/wasm-bindgen) is the code generator and runtime glue the design names by name: it produces the JS module that loads the compiled `.wasm` and marshals calls across the boundary. `std` is enabled because the browser Reader's shared core already depends on the standard library; `serde-serialize`, `gg-alloc` (a non-default global allocator swap) and the two debug-only features stay off, none of them load-bearing for this class. |
 | [`wasm-bindgen-futures`](https://crates.io/crates/wasm-bindgen-futures/0.4.76) | `=0.4.76`; `default-features = false` | The [upstream project](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures) bridges Rust `Future`s and JS `Promise`s — the shape every OPFS handle, `SubtleCrypto` operation and `fetch` call in the browser Reader returns as. It declares no feature beyond its own `default = ["std"]`/`futures-core-03-stream` pair, and this class needs neither; `default-features = false` keeps that explicit rather than inherited, which is why its reviewed selection below is the empty ledger line. |
 | [`wasm-bindgen-test`](https://crates.io/crates/wasm-bindgen-test/0.3.76) | `=0.3.76`; `default-features = false`, `std` | The [upstream project](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/test) supplies `#[wasm_bindgen_test]` and the harness `wasm-bindgen-test-runner` drives, which `.cargo/config.toml`'s `[target.wasm32-unknown-unknown]` runner selects for every `cargo test --target wasm32-unknown-unknown` of this class. `std` is its only feature at all, and it is load-bearing rather than optional: under `cfg(not(feature = "std"))` the crate defines its own `#[panic_handler]` in `src/rt/mod.rs`, which on the host target collides with the one the standard library already provides. The measured consequence of leaving it off is `E0152` — duplicate lang item `panic_impl` — for the whole workspace as soon as one member declares the dependency, because `cargo test --workspace --all-targets` builds that member's test targets for the host. With `std` the crate installs a plain `std::panic::set_hook` instead. |
-| [`web-sys`](https://crates.io/crates/web-sys/0.3.103) | `=0.3.103`; `default-features = false`, twenty-six named features | The [wasm-bindgen upstream](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys) is a procedurally generated binding crate over the whole WebIDL surface of the Web platform: over 1700 features exist, one per interface, and enabling none of them by default is the crate's own design. *Enumerated web-sys features* below names each of the twenty-six this class turns on and the specification clause it exists for; nothing wider is admitted, and a twenty-seventh feature must pass through this gate. |
+| [`web-sys`](https://crates.io/crates/web-sys/0.3.103) | `=0.3.103`; `default-features = false`, twenty-eight named features | The [wasm-bindgen upstream](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys) is a procedurally generated binding crate over the whole WebIDL surface of the Web platform: over 1700 features exist, one per interface, and enabling none of them by default is the crate's own design. *Enumerated web-sys features* below names each of the twenty-eight this class turns on and the specification clause it exists for; nothing wider is admitted, and a twenty-ninth feature must pass through this gate. |
 
 `getrandom` is **deliberately absent** from the class above. Its `=0.4.3` pin
 and `wasm_js` feature are already ratified in
@@ -151,7 +151,7 @@ Rust, which `web-reader-design.md` §9 does not permit.
   platform: with defaults off and no explicit list, the compiled surface would
   be zero; with every feature on, it would be unbounded and unreviewed. Both
   extremes are equally unaudited. *Enumerated web-sys features* names the
-  twenty-six admitted APIs and the specification clause each exists to serve.
+  twenty-eight admitted APIs and the specification clause each exists to serve.
 - **Registering a workspace member in this task**, rejected because a
   `members` entry pointing at a directory without a manifest fails `cargo
   metadata` and with it every test in the repository — the same reason
@@ -234,7 +234,7 @@ std = ["wasm-bindgen/std", "js-sys/std", "wasm-bindgen-futures/std"]
 
 `web-sys` 0.3.103 declares one Cargo feature per WebIDL interface — 1707 of
 them — every one of them off by default; *Enumerated web-sys features* below
-names the twenty-six this class turns on.
+names the twenty-eight this class turns on.
 
 The reviewed selection is recorded once more in the exact form
 `tools/xtask/tests/adr_gate.rs` rebuilds from `[workspace.dependencies]`, so
@@ -251,7 +251,7 @@ js-sys = ["std"]
 wasm-bindgen = ["std"]
 wasm-bindgen-futures = []
 wasm-bindgen-test = ["std"]
-web-sys = ["Blob", "Crypto", "DedicatedWorkerGlobalScope", "Document", "Event", "File", "FileSystemDirectoryHandle", "FileSystemFileHandle", "FileSystemGetDirectoryOptions", "FileSystemGetFileOptions", "FileSystemReadWriteOptions", "FileSystemSyncAccessHandle", "Headers", "MessageEvent", "Navigator", "Request", "RequestInit", "Response", "ServiceWorkerGlobalScope", "StorageManager", "SubtleCrypto", "VisibilityState", "Window", "Worker", "WorkerGlobalScope", "WorkerNavigator"]
+web-sys = ["Blob", "Crypto", "DedicatedWorkerGlobalScope", "Document", "Event", "File", "FileSystemDirectoryHandle", "FileSystemFileHandle", "FileSystemGetDirectoryOptions", "FileSystemGetFileOptions", "FileSystemReadWriteOptions", "FileSystemSyncAccessHandle", "Headers", "MessageEvent", "Navigator", "Request", "RequestInit", "Response", "ServiceWorkerGlobalScope", "StorageManager", "SubtleCrypto", "VisibilityState", "Window", "Worker", "WorkerGlobalScope", "WorkerNavigator", "XmlHttpRequest", "XmlHttpRequestResponseType"]
 ```
 
 ### 3. Reported MSRV
@@ -395,7 +395,7 @@ relying on the environment being clean by convention.
 ## Enumerated web-sys features
 
 Each `web-sys` feature gates one generated Rust binding for one WebIDL
-interface; leaving it unlisted leaves that binding uncompiled. The twenty-six
+interface; leaving it unlisted leaves that binding uncompiled. The twenty-eight
 below are grouped by the specification clause of
 `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` each
 one serves.
@@ -410,8 +410,9 @@ one serves.
 | `Request`, `RequestInit`, `Response`, `Headers` | The Fetch API's request/response types | §5.1, the server-reachable mode of the Reader |
 | `Document`, `VisibilityState`, `Event` | `document.visibilityState` and the `visibilitychange` event | §6.5, the shortened lock period once a tab moves to the background |
 | `Window` | `web_sys::window()`, the main-thread global object every one of the bindings above that is not itself a worker-side API resolves through | Prerequisite for `Crypto`, `Document` and the main-thread half of the OPFS path above |
+| `XmlHttpRequest`, `XmlHttpRequestResponseType` | A **synchronous** `XMLHttpRequest` and the `responseType` enum that makes its response body readable as an `ArrayBuffer` rather than as text | §6.6 and §9, the three enrollment endpoints: `ea-reader` builds and signs the requests synchronously and carries no host dependency, so the transport has to be synchronous too — and the only synchronous transport a browser offers exists solely inside a dedicated worker. `fetch` returns a promise, and blocking on it would stall the very event loop that has to settle it. The second feature is not decorative: without it `response()` yields a string and a CBOR body would not survive the trip, while `set_response_type` is gated on the WebIDL enum type |
 
-Twenty-six admitted features and no others: a twenty-seventh must be justified
+Twenty-eight admitted features and no others: a twenty-ninth must be justified
 against a spec clause and pass through `browser_runtime_dependency_class_is_ratified_before_use`
 in `tools/xtask/tests/adr_gate.rs` the same way these did, because the
 reviewed ledger line it rebuilds from `[workspace.dependencies]` is exact and
