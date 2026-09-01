@@ -89,6 +89,48 @@ impl ReaderBlobStore for QuotaExceededStore {
     }
 }
 
+/// Ein Bytespeicher, der einen Schreibvorgang ANNIMMT und ihn dann vergisst.
+///
+/// Das Modell des Wirts, der `put` mit `Ok` quittiert und den Blob trotzdem
+/// nicht dauerhaft macht — bei OPFS etwa ein Handle, dessen `flush` ins Leere
+/// lief. Er ist der einzige Weg, die Rueckleseprobe von `confirm` und
+/// `rebuild_from_genesis` von aussen zu treffen: ein Speicher, der ehrlich
+/// scheitert, kaeme dort nie an.
+///
+/// Vergessen wird GENAU EINE Adresse, damit der Zeuge misst, was er misst.
+pub struct AmnesiacStore {
+    inner: InMemoryReaderBlobStore,
+    forgets: &'static str,
+}
+
+impl AmnesiacStore {
+    #[must_use]
+    pub fn new(inner: InMemoryReaderBlobStore, forgets: &'static str) -> Self {
+        Self { inner, forgets }
+    }
+}
+
+impl ReaderBlobStore for AmnesiacStore {
+    fn put(&mut self, key: &ReaderBlobKey, bytes: &[u8]) -> Result<(), ReaderBlobError> {
+        if key.as_str() == self.forgets {
+            return Ok(());
+        }
+        self.inner.put(key, bytes)
+    }
+
+    fn get(&self, key: &ReaderBlobKey) -> Result<Option<Vec<u8>>, ReaderBlobError> {
+        self.inner.get(key)
+    }
+
+    fn delete(&mut self, key: &ReaderBlobKey) -> Result<(), ReaderBlobError> {
+        self.inner.delete(key)
+    }
+
+    fn keys(&self) -> Result<Vec<ReaderBlobKey>, ReaderBlobError> {
+        self.inner.keys()
+    }
+}
+
 /// Der Server dieser Kulisse: zwei Seiten und eine leere Antwort.
 ///
 /// Er entscheidet AUS DEM REQUEST und nicht aus einem Zaehler: der Reader
@@ -254,7 +296,26 @@ impl ReaderSyncHarness {
         &mut self,
         fault: ReaderSyncFaultPoint,
     ) -> Result<ConfirmedCursor, ReaderSyncError> {
-        let service = self.service_with(Some(fault));
+        self.one_cycle(Some(fault))
+    }
+
+    /// GENAU EINE Seite, ohne Abbruchpunkt.
+    ///
+    /// Der Unterschied zu [`Self::pull`] ist die Absicht: wer eine Kulisse
+    /// braucht, die MITTEN in einer Lesestrecke steht — mit gecachten Objekten
+    /// und einem Blaetterschein im Cursor —, bekommt sie nur so. Ein voller
+    /// Sync liesse den Reader am Ende stehen, und die naechste Antwort waere
+    /// eine leere Seite ohne einen einzigen Schreibvorgang.
+    pub fn pull_one_page(&mut self) -> Result<ConfirmedCursor, ReaderSyncError> {
+        self.one_cycle(None)
+    }
+
+    /// Anfragen, ausliefern, annehmen, bestaetigen — genau einmal.
+    fn one_cycle(
+        &self,
+        fault: Option<ReaderSyncFaultPoint>,
+    ) -> Result<ConfirmedCursor, ReaderSyncError> {
+        let service = self.service_with(fault);
         let cursor = self.confirmed_cursor();
         let request = service.next_request(&cursor)?;
         let response = self.serve(&request);
@@ -362,6 +423,54 @@ impl ReaderSyncHarness {
                     .map_or(0, |bytes| bytes.len())
             })
             .sum()
+    }
+
+    /// Eine Kopie des Speichers mit NUR den zwei Adressen des Sync-Zustands.
+    ///
+    /// Genau der Speicher, den der erste OPFS-Vorlauf im Browser oeffnen kann:
+    /// mehr weiss er zu diesem Zeitpunkt nicht. Was `required_blob_keys`
+    /// daraus macht, muss also allein aus Cursor und Objektliste stammen.
+    #[must_use]
+    pub fn sync_state_store(&self) -> InMemoryReaderBlobStore {
+        let source = self.store.borrow();
+        let mut state = InMemoryReaderBlobStore::new();
+        for key in ReaderSyncService::sync_state_blob_keys()
+            .expect("die zwei Zustandsadressen sind gueltige Schluessel")
+        {
+            if let Some(bytes) = source
+                .get(&key)
+                .expect("das Doppel gibt seine Blobs heraus")
+            {
+                state
+                    .put(&key, &bytes)
+                    .expect("ein frisches Doppel nimmt jeden Schluessel an");
+            }
+        }
+        state
+    }
+
+    /// Alle `cache/`-Adressen, die der Speicher tatsaechlich fuehrt.
+    #[must_use]
+    pub fn cached_blob_keys(&self) -> Vec<String> {
+        let store = self.store.borrow();
+        let mut keys: Vec<String> = store
+            .keys()
+            .expect("das Doppel gibt seine Schluessel heraus")
+            .iter()
+            .map(|key| key.as_str().to_owned())
+            .filter(|key| key.starts_with("cache/"))
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Eine Kopie des Speichers, die den Cursorblob still vergisst.
+    #[must_use]
+    pub fn blob_store_that_forgets_the_cursor(&self) -> AmnesiacStore {
+        AmnesiacStore::new(
+            copy_of(&*self.store.borrow()),
+            ea_reader::READER_SYNC_CURSOR_BLOB_KEY_V1,
+        )
     }
 
     /// Eine Kopie des Speichers, die nach EINEM Schreibvorgang aufhoert.

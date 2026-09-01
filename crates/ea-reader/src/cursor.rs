@@ -21,6 +21,22 @@
 //! `the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies`
 //! an den Punkten `AfterBlobStoreFlush` und `AfterChainVerification`.
 //!
+//! # Neben dem Cursor liegt die ADRESSLISTE, auf der er steht
+//!
+//! [`ReaderCursorStore`] fuehrt ZWEI Blobs, und der zweite ist kein Beiwerk:
+//! `OpfsBlobStore::open` verlangt die vollstaendige Schluesselmenge, BEVOR es
+//! ein einziges synchrones Zugriffshandle oeffnet, und ein Schluessel, der
+//! dort fehlte, ist danach unerreichbar. Ohne eine dauerhafte, RUSTEIGENE
+//! Liste der gecachten Objekte muesste der Wirt sie nennen — und dann
+//! entschiede JavaScript, welchen Bestand `verify_archive_observed` ueberhaupt
+//! zu sehen bekommt. Genau das verbietet `web-reader-design.md` §9.
+//!
+//! Die Liste ist absichtlich in die SICHERE Richtung fehlbar: nennt sie ein
+//! Objekt, das nicht mehr da ist, liest sich dessen Blob als abwesend und der
+//! Durchlauf ueberspringt ihn; fehlt ihr eines, das da ist, sieht die
+//! Verifikation es nicht und meldet eine Luecke. Das erste ist folgenlos, das
+//! zweite fail-closed — deshalb wird sie VOR dem Cursor geschrieben.
+//!
 //! # Der Blob ist Chiffrat, wie jeder andere auch
 //!
 //! `ReaderBlobStore::keys()` gibt die Schluessel im Klartext heraus, den INHALT
@@ -31,7 +47,7 @@
 use ea_cbor::{ParserLimits, validate};
 use ea_crypto::{AEAD_NONCE_SIZE, CEK_SIZE, SecretBytes, SecretVec, aead_open, aead_seal};
 use ea_trust::TrustAnchorV1;
-use ea_types::{ChainId, ChainSequence, EntryHash, Hash32};
+use ea_types::{ChainId, ChainSequence, EntryHash, Hash32, ObjectHash};
 use minicbor::{Decoder, Encoder};
 
 use crate::blob_store::{ReaderBlobKey, ReaderBlobStore};
@@ -46,6 +62,30 @@ use crate::vault::{ReaderVaultError, UnlockedVault};
 /// diese Adresse deshalb benennen koennen, ohne sie ein zweites Mal zu
 /// schreiben.
 pub const READER_SYNC_CURSOR_BLOB_KEY_V1: &str = "sync/cursor-v1";
+
+/// Die Adresse der Objektliste im Bytespeicher.
+///
+/// OEFFENTLICH aus demselben Grund wie [`READER_SYNC_CURSOR_BLOB_KEY_V1`]:
+/// `crates/ea-reader-wasm` muss beide Adressen im asynchronen Vorlauf nennen
+/// koennen, ohne sie ein zweites Mal zu schreiben.
+pub const READER_SYNC_OBJECTS_BLOB_KEY_V1: &str = "sync/objects-v1";
+
+/// Hoechstzahl der Objekte, die die dauerhafte Adressliste fuehren kann.
+///
+/// GERECHNET und nicht gewaehlt: die Liste reist als EIN `bstr` durch
+/// `ea_cbor::validate(.., ParserLimits::V1)`, und dessen `max_text_or_bytes`
+/// misst 1_048_592 Byte. Bei 32 Byte je Objekthash sind das 32_768 Eintraege.
+///
+/// # Das ist eine GRENZE und keine Vorgabe
+///
+/// Sie liegt DEUTLICH unter `ea_archive::MAX_ARCHIVE_BLOBS_V1` (1_048_576),
+/// der Schranke, die der Verifizierer selbst an einen Bestand anlegt. Ein
+/// Reader, der mehr als 32_768 Objekte dauerhaft haelt, laeuft hier auf eine
+/// Weigerung und nicht auf eine stille Kuerzung — eine gekuerzte Liste waere
+/// genau der Fall, den dieses Modul verhindern soll. Sie zu heben verlangt
+/// eine geblaetterte Liste oder eine Verzeichnisaufzaehlung im OPFS-Wirt;
+/// beides gehoert nicht in diese Aufgabe.
+pub const MAX_CACHED_OBJECTS_V1: usize = 1_048_592 / 32;
 
 /// Der bestaetigte Cursor EINER Kette.
 #[derive(Clone, Eq, PartialEq)]
@@ -153,10 +193,18 @@ impl core::fmt::Debug for ConfirmedCursor {
     }
 }
 
-/// Der verschluesselte Cursorspeicher EINER entsperrten Sitzung.
+/// Der verschluesselte Sync-Zustand EINER entsperrten Sitzung: Cursor UND
+/// Adressliste.
 ///
 /// Dieselbe Bauform wie [`crate::ReaderObjectCache`]: der Schluessel haengt am
 /// Tresor, der Bytespeicher wird je Aufruf gereicht und nie gehalten.
+///
+/// EIN abgeleiteter Schluessel fuer beide Blobs, und das ist kein Sparen: die
+/// zwei gehoeren zu EINER Aussage — der Cursor behauptet einen verifizierten
+/// Stand, die Liste nennt die Adressen, auf denen diese Behauptung ruht. Sie
+/// bleiben trotzdem unverwechselbar, weil das zusaetzliche authentifizierte
+/// Datum jeden Blob an SEINE Adresse bindet (`blob_aad`); ein vertauschtes
+/// Paar oeffnet nicht.
 pub(crate) struct ReaderCursorStore {
     cursor_key: SecretBytes<CEK_SIZE>,
 }
@@ -175,27 +223,107 @@ impl ReaderCursorStore {
         }
     }
 
-    /// Schreibt den bestaetigten Cursor.
-    pub(crate) fn put_cursor(
+    /// Versiegelt einen Klartext unter DIESER Adresse und legt ihn ab.
+    ///
+    /// Der Nonce wird je Schreibvorgang frisch gezogen, und die Adresse geht
+    /// als zusaetzliches authentifiziertes Datum ein — deshalb laesst sich der
+    /// Cursorblob nicht als Objektliste ausgeben und umgekehrt.
+    fn put_sealed(
         &self,
         store: &mut dyn ReaderBlobStore,
-        cursor: &ConfirmedCursor,
+        key: &ReaderBlobKey,
+        plaintext: SecretVec,
     ) -> Result<(), ReaderVaultError> {
-        let key = cursor_key()?;
         let mut nonce = [0_u8; AEAD_NONCE_SIZE];
         getrandom::fill(&mut nonce)
             .map_err(|_| ReaderVaultError::Crypto(ea_crypto::CryptoError::LocalRng))?;
         let ciphertext = aead_seal(
             &self.cursor_key,
             &SecretBytes::new(nonce),
-            encode_cursor(cursor),
+            plaintext,
             &blob_aad(key.as_str().as_bytes()),
         )?;
         let mut blob = Vec::with_capacity(AEAD_NONCE_SIZE + ciphertext.len());
         blob.extend_from_slice(&nonce);
         blob.extend_from_slice(&ciphertext);
-        store.put(&key, &blob)?;
+        store.put(key, &blob)?;
         Ok(())
+    }
+
+    /// Oeffnet den Blob unter DIESER Adresse. Ein fehlender ist `Ok(None)`.
+    fn get_sealed<T>(
+        &self,
+        store: &dyn ReaderBlobStore,
+        key: &ReaderBlobKey,
+        decode: impl FnOnce(&[u8]) -> Result<T, ReaderVaultError>,
+    ) -> Result<Option<T>, ReaderVaultError> {
+        let Some(blob) = store.get(key)? else {
+            return Ok(None);
+        };
+        if blob.len() < AEAD_NONCE_SIZE {
+            return Err(ReaderVaultError::Contents);
+        }
+        let (nonce, ciphertext) = blob.split_at(AEAD_NONCE_SIZE);
+        let nonce: [u8; AEAD_NONCE_SIZE] =
+            nonce.try_into().map_err(|_| ReaderVaultError::Contents)?;
+        let opened = aead_open(
+            &self.cursor_key,
+            &SecretBytes::new(nonce),
+            ciphertext,
+            &blob_aad(key.as_str().as_bytes()),
+        )?;
+        opened.with_exposed(decode).map(Some)
+    }
+
+    /// Schreibt den bestaetigten Cursor.
+    pub(crate) fn put_cursor(
+        &self,
+        store: &mut dyn ReaderBlobStore,
+        cursor: &ConfirmedCursor,
+    ) -> Result<(), ReaderVaultError> {
+        self.put_sealed(store, &cursor_key()?, encode_cursor(cursor))
+    }
+
+    /// Schreibt die Adressliste der dauerhaft gecachten Objekte.
+    ///
+    /// SORTIERT und duplikatfrei, und beides ist tragend: die Liste ist eine
+    /// MENGE, und zwei Laeufe ueber denselben Bestand muessen dieselben Bytes
+    /// ergeben, sonst waere jeder Vergleich darauf wertlos.
+    ///
+    /// # Errors
+    /// `EA-READER-VAULT-CONTENTS` oberhalb von [`MAX_CACHED_OBJECTS_V1`] — eine
+    /// gekuerzte Liste waere eine Verifikation ueber einen Bestand, den niemand
+    /// mehr benennen kann, und damit genau der stille Fehlschlag, den diese
+    /// Liste verhindert.
+    pub(crate) fn put_object_manifest(
+        &self,
+        store: &mut dyn ReaderBlobStore,
+        hashes: &[ObjectHash],
+    ) -> Result<(), ReaderVaultError> {
+        let mut sorted = hashes.to_vec();
+        sorted.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        sorted.dedup_by(|left, right| left.as_bytes() == right.as_bytes());
+        if sorted.len() > MAX_CACHED_OBJECTS_V1 {
+            return Err(ReaderVaultError::Contents);
+        }
+        self.put_sealed(store, &objects_key()?, encode_object_manifest(&sorted))
+    }
+
+    /// Liest die Adressliste. Ein fehlender Blob ist eine LEERE Liste.
+    ///
+    /// Leer und nicht `None`: ein frisches Geraet hat noch nichts gecacht, und
+    /// das ist kein Sonderfall, ueber den ein Aufrufer entscheiden muesste.
+    ///
+    /// # Errors
+    /// `EA-CRYPTO-AEAD-OPEN` fuer einen fremden oder verfaelschten Blob,
+    /// `EA-READER-VAULT-CONTENTS` fuer eine verfehlte Form.
+    pub(crate) fn get_object_manifest(
+        &self,
+        store: &dyn ReaderBlobStore,
+    ) -> Result<Vec<ObjectHash>, ReaderVaultError> {
+        Ok(self
+            .get_sealed(store, &objects_key()?, decode_object_manifest)?
+            .unwrap_or_default())
     }
 
     /// Die ROHEN Blobbytes des Cursors, ohne sie zu deuten.
@@ -233,29 +361,70 @@ impl ReaderCursorStore {
         &self,
         store: &dyn ReaderBlobStore,
     ) -> Result<Option<ConfirmedCursor>, ReaderVaultError> {
-        let key = cursor_key()?;
-        let Some(blob) = store.get(&key)? else {
-            return Ok(None);
-        };
-        if blob.len() < AEAD_NONCE_SIZE {
-            return Err(ReaderVaultError::Contents);
-        }
-        let (nonce, ciphertext) = blob.split_at(AEAD_NONCE_SIZE);
-        let nonce: [u8; AEAD_NONCE_SIZE] =
-            nonce.try_into().map_err(|_| ReaderVaultError::Contents)?;
-        let opened = aead_open(
-            &self.cursor_key,
-            &SecretBytes::new(nonce),
-            ciphertext,
-            &blob_aad(key.as_str().as_bytes()),
-        )?;
-        opened.with_exposed(decode_cursor).map(Some)
+        self.get_sealed(store, &cursor_key()?, decode_cursor)
     }
 }
 
 /// Die Adresse des Cursorblobs, aus der EINEN Konstante.
 fn cursor_key() -> Result<ReaderBlobKey, ReaderVaultError> {
     Ok(ReaderBlobKey::new(READER_SYNC_CURSOR_BLOB_KEY_V1)?)
+}
+
+/// Die Adresse der Objektliste, aus der EINEN Konstante.
+fn objects_key() -> Result<ReaderBlobKey, ReaderVaultError> {
+    Ok(ReaderBlobKey::new(READER_SYNC_OBJECTS_BLOB_KEY_V1)?)
+}
+
+/// Die Objektliste als deterministisches CBOR, in einem Geheimnistraeger.
+///
+/// EIN `bstr` und kein Array aus 32-Byte-Elementen. Der Unterschied ist die
+/// Grenze: ein Array liefe gegen `ParserLimits::V1.max_container_items`
+/// (10_000), ein einzelner `bstr` gegen `max_text_or_bytes` (1_048_592 Byte)
+/// — also gegen [`MAX_CACHED_OBJECTS_V1`] und damit gegen die dreifache Zahl
+/// von Objekten. Die Elemente sind fest 32 Byte breit, die Laenge ist damit
+/// selbstbeschreibend, und es gibt keine Struktur, ueber die ein Angreifer den
+/// Parser fuehren koennte.
+fn encode_object_manifest(hashes: &[ObjectHash]) -> SecretVec {
+    let mut flat = Vec::with_capacity(hashes.len() * 32);
+    for hash in hashes {
+        flat.extend_from_slice(hash.as_bytes());
+    }
+    let mut bytes = Vec::with_capacity(flat.len() + 16);
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(2)
+        .and_then(|encoder| encoder.u64(1))
+        .and_then(|encoder| encoder.bytes(&flat))
+        .expect("encoding a fixed-shape object manifest into Vec cannot fail");
+    debug_assert!(validate(&bytes, ParserLimits::V1).is_ok());
+    SecretVec::new(bytes)
+}
+
+/// Die Objektliste aus deterministischem CBOR.
+///
+/// Dieselbe Reihenfolge wie ueberall: `validate`, feldweise, Trailing-Sperre,
+/// Rueckprobe gegen die eigenen Bytes.
+fn decode_object_manifest(bytes: &[u8]) -> Result<Vec<ObjectHash>, ReaderVaultError> {
+    validate(bytes, ParserLimits::V1).map_err(|_| ReaderVaultError::Contents)?;
+    let mut decoder = Decoder::new(bytes);
+    if decoder.array().map_err(|_| ReaderVaultError::Contents)? != Some(2) {
+        return Err(ReaderVaultError::Contents);
+    }
+    if decoder.u64().map_err(|_| ReaderVaultError::Contents)? != 1 {
+        return Err(ReaderVaultError::Contents);
+    }
+    let flat = decoder.bytes().map_err(|_| ReaderVaultError::Contents)?;
+    if decoder.position() != bytes.len() || flat.len() % 32 != 0 {
+        return Err(ReaderVaultError::Contents);
+    }
+    let hashes = flat
+        .chunks_exact(32)
+        .map(|chunk| ObjectHash::try_from(chunk).map_err(|_| ReaderVaultError::Contents))
+        .collect::<Result<Vec<ObjectHash>, ReaderVaultError>>()?;
+    if !encode_object_manifest(&hashes).matches(bytes) {
+        return Err(ReaderVaultError::Contents);
+    }
+    Ok(hashes)
 }
 
 /// Der Cursor als deterministisches CBOR, in einem Geheimnistraeger.

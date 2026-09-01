@@ -141,9 +141,21 @@ const MANIFEST_ED25519_FILE_SHA256: &str =
 /// Ein zweiter JSON-Bauer daneben waere die zweite Schreibweise derselben
 /// Ausgabe — und die erste, die sich aendert, machte die zweite still falsch.
 ///
-/// Er ESCAPT NICHT. Jeder Wert, der hier hineingeht, stammt aus einem
-/// eingeschraenkten Alphabet — Hex, Base64, stabile Codes —, und die Aufrufer
-/// pruefen das, wo eine Eingabe von aussen kommt (`crate::fetch::host_token`).
+/// # Er ESCAPT, und der Grund ist gemessen
+///
+/// Frueher stand hier „er escapt nicht, jeder Wert stammt aus einem
+/// eingeschraenkten Alphabet". Das hielt genau so lange, bis der erste Aufrufer
+/// einen Wert einspeiste, der NICHT aus einem solchen Alphabet stammt:
+/// `SignedRequestV1::signature_input_header` liefert
+/// `ea1=("@method" "@authority" …);keyid="…";alg="ed25519"` — RFC 9421 schreibt
+/// die Anfuehrungszeichen VOR. Ein unescapter Einbau davon ergab JSON, an dem
+/// jedes `JSON.parse` scheiterte, und weil im Repositorium nichts wasm32
+/// ausfuehrt, sah es kein Zeuge.
+///
+/// Die Lehre steht in der Bauform und nicht in einer Bitte an den naechsten
+/// Aufrufer: [`Json::string`] escapt jetzt selbst. Fuer Hex, Base64 und stabile
+/// Codes ist das eine Kopie ohne Wirkung; fuer alles andere ist es der
+/// Unterschied zwischen gueltigem und unbrauchbarem JSON.
 pub(crate) struct Json(String);
 
 impl Json {
@@ -159,8 +171,22 @@ impl Json {
 
     pub(crate) fn string(&mut self, key: &str, value: &str) -> &mut Self {
         self.comma();
-        self.0.push_str(&format!("\"{key}\":\"{value}\""));
+        self.0.push_str(&format!("\"{key}\":{}", quoted(value)));
         self
+    }
+
+    /// Ein Array aus Paaren — die Kopfzeilenliste eines Requests.
+    ///
+    /// Es steht HIER und nicht als `format!` beim Aufrufer, weil genau dort der
+    /// Fehler entstand, den der Modulkopf beschreibt: wer ein Array von Hand
+    /// zusammensetzt, umgeht das Escaping der einzigen Stelle, die es kann.
+    pub(crate) fn string_pairs(&mut self, key: &str, pairs: &[(&str, &str)]) -> &mut Self {
+        let rendered = pairs
+            .iter()
+            .map(|(name, value)| format!("[{},{}]", quoted(name), quoted(value)))
+            .collect::<Vec<String>>()
+            .join(",");
+        self.raw(key, &format!("[{rendered}]"))
     }
 
     pub(crate) fn bool(&mut self, key: &str, value: bool) -> &mut Self {
@@ -185,6 +211,33 @@ impl Json {
         self.0.push('}');
         self.0
     }
+}
+
+/// Eine JSON-Zeichenkette samt Anfuehrungszeichen, nach RFC 8259 §7.
+///
+/// Escapt wird die Pflichtmenge und nur sie: `"`, `\\` und alles unterhalb
+/// `0x20`. Die zwei erlaubten Kuerzel `\\n` und `\\t` stehen ausgeschrieben,
+/// weil sie in einer Wirtsmeldung vorkommen koennen und `\\u000a` dort nur
+/// schwerer zu lesen waere; jedes andere Steuerzeichen geht als `\\u00XX`.
+/// Nicht escapt werden `/` und Zeichen oberhalb ASCII — beides ist nach RFC
+/// 8259 zulaessig, und die Ausgabe ist UTF-8.
+pub(crate) fn quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            control if control < '\u{20}' => {
+                out.push_str(&format!("\\u{:04x}", control as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

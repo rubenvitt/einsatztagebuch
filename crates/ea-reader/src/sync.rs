@@ -71,7 +71,10 @@ use ea_verify::{
 use crate::batch::{ReaderCacheSourceV1, VerifiedSyncBatch};
 use crate::blob_store::{ReaderBlobKey, ReaderBlobStore};
 use crate::cache::{ReaderObjectCache, cache_key};
-use crate::cursor::{ConfirmedCursor, READER_SYNC_CURSOR_BLOB_KEY_V1, ReaderCursorStore};
+use crate::cursor::{
+    ConfirmedCursor, READER_SYNC_CURSOR_BLOB_KEY_V1, READER_SYNC_OBJECTS_BLOB_KEY_V1,
+    ReaderCursorStore,
+};
 use crate::http::ReaderRequestV1;
 use crate::vault::{ReaderVaultError, UnlockedVault};
 
@@ -367,8 +370,8 @@ impl<'a> ReaderSyncService<'a> {
     }
 
     /// Die VOLLSTAENDIGE Schluesselmenge, die ein Speicher fuer diesen Batch
-    /// offen haben MUSS: der Cursorblob, alles schon Ansaessige und jede
-    /// Adresse, die der Rahmen neu belegt.
+    /// offen haben MUSS: der Sync-Zustand, jede Adresse aus der dauerhaften
+    /// Objektliste und jede, die der Rahmen neu belegt.
     ///
     /// # Warum das ein eigener Schritt ist
     ///
@@ -384,30 +387,54 @@ impl<'a> ReaderSyncService<'a> {
     /// objectHash>` ist die Abbildung von `crates/ea-reader/src/cache.rs`, und
     /// eine zweite Abschrift davon in JavaScript oder in `ea-reader-wasm` waere
     /// genau die Stelle, an der Schreiben und Oeffnen auseinanderliefen.
-    /// `resident` sind die Schluessel, die der Wirt schon fuehrt; sie werden
-    /// unveraendert durchgereicht, weil der Verifikationslauf ueber den
-    /// GESAMTEN Bestand geht und nicht nur ueber die neue Seite.
+    /// # Der ansaessige Bestand kommt aus RUST und nie vom Wirt
+    ///
+    /// `state_store` ist ein Speicher, der NUR die zwei Adressen aus
+    /// [`Self::sync_state_blob_keys`] offen hat; daraus wird die dauerhafte
+    /// Objektliste gelesen. Frueher nahm diese Funktion die ansaessigen
+    /// Schluessel als Argument entgegen, und im Browser fuellte JavaScript es:
+    /// damit entschied der Wirt, welchen Bestand `verify_archive_observed`
+    /// ueberhaupt zu sehen bekommt. Die Wirkung war fail-closed — ein
+    /// ausgelassener Schluessel endet als Luecke oder Fork —, aber die
+    /// Zustaendigkeit war falsch herum, und `web-reader-design.md` §9 laesst
+    /// keine Sicherheitsentscheidung in TypeScript zu.
     ///
     /// # Errors
-    /// `EA-READER-STORE` bei gesperrtem Tresor, `EA-READER-PROTOCOL` fuer
-    /// Bytes, die kein `reader-batch-v1` sind.
+    /// `EA-READER-STORE` bei gesperrtem Tresor oder unlesbarer Objektliste,
+    /// `EA-READER-PROTOCOL` fuer Bytes, die kein `reader-batch-v1` sind.
     pub fn required_blob_keys(
         &self,
+        state_store: &dyn ReaderBlobStore,
         response_body: &[u8],
-        resident: &[ReaderBlobKey],
     ) -> Result<Vec<ReaderBlobKey>, ReaderSyncError> {
-        self.session()?;
+        let session = self.session()?;
         let batch = ReaderBatchV1::decode(response_body).map_err(|_| ReaderSyncError::Protocol)?;
-        let mut keys = resident.to_vec();
-        keys.push(
-            ReaderBlobKey::new(READER_SYNC_CURSOR_BLOB_KEY_V1).map_err(ReaderVaultError::from)?,
-        );
+        let mut keys = Self::sync_state_blob_keys()?;
+        for hash in session.cursors.get_object_manifest(state_store)? {
+            keys.push(cache_key(hash)?);
+        }
         for record in batch.objects() {
             keys.push(cache_key(record.object_hash())?);
         }
         keys.sort_unstable();
         keys.dedup();
         Ok(keys)
+    }
+
+    /// Die zwei Adressen des dauerhaften Sync-Zustands: Cursor und Objektliste.
+    ///
+    /// Der ERSTE Vorlauf eines Browserlaufs oeffnet genau sie — mehr kann er
+    /// nicht, weil erst die Objektliste sagt, was sonst noch zu oeffnen ist.
+    /// Danach folgt der zweite Vorlauf ueber [`Self::required_blob_keys`].
+    ///
+    /// # Errors
+    /// Die Codes des Bytespeichers; fuer zwei konstante Adressen unerreichbar,
+    /// aber nicht wegdiskutiert.
+    pub fn sync_state_blob_keys() -> Result<Vec<ReaderBlobKey>, ReaderSyncError> {
+        Ok(vec![
+            ReaderBlobKey::new(READER_SYNC_CURSOR_BLOB_KEY_V1).map_err(ReaderVaultError::from)?,
+            ReaderBlobKey::new(READER_SYNC_OBJECTS_BLOB_KEY_V1).map_err(ReaderVaultError::from)?,
+        ])
     }
 
     /// Der naechste Lesestapel-Request, FERTIG signiert.
@@ -581,6 +608,15 @@ impl<'a> ReaderSyncService<'a> {
             head.entry_hash(),
             batch.next_cursor().map(<[u8]>::to_vec),
         );
+        // Die Adressliste ZUERST und ausserhalb der Ruecknahme. Sie darf dem
+        // Cursor vorauslaufen: nennt sie ein Objekt, das nicht da ist, liest
+        // sich dessen Blob als abwesend und der Durchlauf ueberspringt ihn.
+        // Umgekehrt waere es fail-closed, aber teuer — ein Objekt, das da ist
+        // und nicht in der Liste steht, sieht die naechste Verifikation nicht.
+        let mut cached = session.cursors.get_object_manifest(&*store)?;
+        cached.extend_from_slice(batch.object_hashes());
+        session.cursors.put_object_manifest(store, &cached)?;
+
         let previous = session.cursors.raw_blob(&*store)?;
         session.cursors.put_cursor(store, &next)?;
         match self.committed_cursor(session, &*store, &next) {
@@ -624,8 +660,23 @@ impl<'a> ReaderSyncService<'a> {
                 None,
             )
         };
+        // DIESELBE Rueckleseprobe wie in `confirm`, und aus demselben Grund:
+        // ein Speicher, der einen Schreibvorgang annimmt und den Blob danach
+        // nicht mehr herausgibt, hat den Aufsetzpunkt NICHT dauerhaft gemacht.
+        // Ein Reader, der das nicht merkt, glaubte an einen lokal
+        // verifizierten Checkpoint, den er nicht mehr vorzeigen kann. Der
+        // Ruecknahmepfad ist hier derselbe wie dort.
+        let previous = session.cursors.raw_blob(&*store)?;
         session.cursors.put_cursor(store, &restart)?;
-        Ok(restart)
+        match self.committed_cursor(session, &*store, &restart) {
+            Ok(()) => Ok(restart),
+            Err(error) => {
+                session
+                    .cursors
+                    .restore_raw_blob(store, previous.as_deref())?;
+                Err(error)
+            }
+        }
     }
 
     /// Die entsperrte Sitzung — oder die Weigerung.

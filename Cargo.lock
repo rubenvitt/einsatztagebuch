@@ -1916,6 +1916,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "js-sys",
+ "serde_json",
  "sha2 0.11.0",
  "wasm-bindgen",
  "wasm-bindgen-futures",
