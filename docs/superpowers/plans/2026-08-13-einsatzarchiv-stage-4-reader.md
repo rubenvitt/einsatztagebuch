@@ -1099,6 +1099,7 @@ git commit -m "feat(web): add the apps/web package, the wasm-bindgen bridge, and
 - Modify: `Cargo.lock`
 - Modify: `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`
 - Modify: `tools/xtask/tests/adr_gate.rs`
+- Modify: `tools/xtask/tests/workspace.rs`
 
 **Interfaces:**
 - Consumes: der opake Byteport `ReaderBlobStore` mit `ReaderBlobKey`, `ReaderBlobError` und dem Doppel `InMemoryReaderBlobStore` aus der Aufgabe „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate"; `ea_crypto::{aead_seal, aead_open, SecretBytes, SecretVec, CEK_SIZE, AEAD_NONCE_SIZE, AEAD_OVERHEAD, CanonicalPublicCoseKey, HpkeRecipientPrivateKey, CryptoError}`; `ea_trust::{TrustAnchorV1, decode_trust_anchor, RegistryHeadPin, TrustError}`; `ea_format::{DeviceCertificateFieldsV1, CertificateKindV1}`; `ea_types::{ObjectHash, EntryHash, ChainSequence, KeyThumbprint, RegistryVersion, VerificationStatus, EntryStatus}`; `ea_verify::ServerConfirmationV1`; ADR 0005 und sein `ratified before use`-Gate aus der Aufgabe „Stufe-4-Vorlauf: ADR 0005, wasm-Werkzeugpins und die aufgehobene Blockade".
@@ -1110,7 +1111,7 @@ Diese Aufgabe steht VOR jeder Verifikation, und das ist eine Reihenfolge, keine 
 
 Nicht Gegenstand: WebAuthn selbst (die PRF-Zeremonie und die Zwei-Authenticator-Pflicht aus §6.3 gehoeren der Aufgabe „Browser-Enrollment: zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate"), Sperrfristen und `zeroize`-Zeitpunkte (Aufgabe „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit"), und die Klassifikation eines Eintrags (Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert"). Hier entsteht der SPEICHER des Zustands, nicht sein Urteil.
 
-- [ ] **Step 1: Write the role-collision, envelope, and cache-canary witnesses**
+- [x] **Step 1: Write the role-collision, envelope, and cache-canary witnesses**
 
 ```rust
 // crates/ea-reader/tests/key_profile.rs
@@ -1279,7 +1280,7 @@ fn exact_objects_and_entry_states_are_never_plaintext_in_the_blob_store() {
 
 Die Kanarienzeile `b"missingGrant"` steht neben `b"fehlender Grant"` und ist kein Doppel: die erste ist das Schemaliteral, das `ea_types::VerificationStatus::code()` gemessen ausgibt, und faende jede Serde- oder Debug-Darstellung des Zustands; die zweite ist die Oberflaechenschreibweise aus `design.md` §17.4. Beide DUERFEN im Bytespeicher nicht auftauchen, und ein einziger Marker liesse offen, welche der beiden geleckt hat — dieselbe Regel, die `tests/ea-system-tests/tests/privacy_canaries_writer.rs` mit einem Marker JE FELD schon durchsetzt.
 
-- [ ] **Step 2: Run the witnesses and confirm the vault does not exist**
+- [x] **Step 2: Run the witnesses and confirm the vault does not exist**
 
 Run: `cargo test --locked -p ea-reader --test key_profile --test vault_envelope --test cache_canaries && cargo test --locked -p xtask --test adr_gate`
 
@@ -1287,7 +1288,7 @@ Beide Kommandos tragen `--locked`, und das ist in diesem Schritt richtig: `hkdf`
 
 Expected: FAIL because `crates/ea-reader` carries only `ReaderMode` and the re-export of `ea_verify::GATE_ORDER_V1` from the task „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne"; there is no vault, no envelope, no key profile, no cache and no entry-state store, and `hkdf` is not yet a shared dependency, so `adr_gate` reports the unratified pin.
 
-- [ ] **Step 3: Implement the vault, its envelopes, the key profile, and the encrypted stores**
+- [x] **Step 3: Implement the vault, its envelopes, the key profile, and the encrypted stores**
 
 ```rust
 // crates/ea-reader/src/envelope.rs
@@ -1442,7 +1443,7 @@ KEIN Literal der drei Aufzaehlungen entsteht hier. `VerificationStatus` traegt s
 
 Die Zwei-Authenticator-Pflicht aus §6.3 wird hier NICHT ein zweites Mal gewacht. `seal` weist ausschliesslich die leere Liste ab (`EA-READER-VAULT-NO-AUTHENTICATOR`), weil ein Tresor ohne Envelope unoeffenbar waere; die Zaehlung „mindestens zwei" gehoert an die Enrollmentgrenze und steht dort als harte Ablehnung. Zwei Waechter fuer dieselbe Zusage waeren zwei Wahrheiten, und die zweite verschiebt sich beim naechsten Umbau still.
 
-- [ ] **Step 4: Run the profile, envelope, cache, and ratification checks**
+- [x] **Step 4: Run the profile, envelope, cache, and ratification checks**
 
 Run:
 
@@ -1452,13 +1453,16 @@ cargo test --locked -p ea-reader --test key_profile --test vault_envelope --test
 cargo test --locked -p xtask --test adr_gate
 cargo test --locked -p ea-reader --doc
 cargo run --locked -p xtask -- build-wasm
+cargo test --locked -p xtask --test workspace
 ```
 
 `cargo metadata --format-version 1` steht als ERSTE Zeile und ist das GENAU EINE Kommando dieses Tasks ohne `--locked`: Schritt 3 hat `hkdf` in `[workspace.dependencies]` eingetragen UND in `crates/ea-reader/Cargo.toml` mit `workspace = true` geerbt, und erst dieses Erben laesst die Kante in den Aufloesungsgraphen treten und `Cargo.lock` fortschreiben. Es steht VOR den `--locked`-Kommandos, sonst faellt das erste von ihnen an einem ueberholten Lockfile.
 
 Expected: PASS. Adversarisch gedeckt sind fuenf Faelle, jeder mit seinem eigenen Zeugen: dieselben 32 Bytes in beiden Rollen fallen mit `EA-KEY-ROLE-COLLISION` und nicht mit einem Abdruckvergleich; die rohe PRF-Ausgabe erscheint in KEINEM Envelope; das Entfernen eines Envelopes kostet einen Entsperrweg und nie die Daten, waehrend das entfernte Credential `EA-READER-VAULT-NO-ENVELOPE` bekommt; ein gekipptes Byte im umschlossenen Tresorschluessel liefert `EA-CRYPTO-AEAD-OPEN` aus `ea_crypto::aead_open` und keinen eigenen zweiten Code; und ein im Tresor UNTERGESCHOBENER Anker faellt mit `EA-TRUST-ANCHOR-HASH`, weil `unlock` die Ankerbytes durch `ea_trust::decode_trust_anchor` schickt und diese Funktion `bootstrap_anchor_hash` ueber die Vorstufenbytes und den finalen Ankerhash ueber das Ganze NEU rechnet — der Anker gilt also nicht, weil er im Tresor lag, sondern weil er sich selbst traegt. Dazu die Kanarienzeile: weder die Objektbytes noch `CANARY-PERSON` noch die beiden Zustandsschreibweisen stehen im Bytespeicher, und die Positivkontrolle liest beides ueber den Tresor zurueck. `build-wasm` belegt, dass der neue Code samt `hkdf` fuer `wasm32-unknown-unknown` uebersetzt; es laeuft unter `env -u RUSTFLAGS`, weil `--cfg getrandom_backend` zu `getrandom 0.3` gehoert und fuer `0.4.3` das Merkmal `wasm_js` allein genuegt.
 
-- [ ] **Step 5: Commit the browser vault**
+`cargo test --locked -p xtask --test workspace` steht dazu, weil der Releaseausschluss der zwei beschaedigenden Zeugenhilfen sonst an EINEM Schalter ohne Waechter haengt: `ea-reader = { path = "crates/ea-reader", default-features = false }` schaltet das Default-Merkmal `test-support` ab, und ohne Zeugen liefe ein spaeterer Commit, der den Schalter streicht, durch jede andere Zeile dieser Liste gruen — waehrend `SealedVaultV1::flip_one_wrapped_key_byte_for_test` und `SealedVaultV1::replace_sealed_anchor_bytes_for_test` im ausgelieferten wasm-Modul laegen. `no_non_test_edge_carries_the_ea_reader_test_surface` pinnt die Wurzelkante genauso, wie `no_non_test_edge_carries_the_ea_archive_fs_test_surface` die von `ea-archive-fs` pinnt, und liest den AUFGELOESTEN Merkmalsgraphen von `ea-reader-wasm` statt Manifestprosa. Seine Positivkontrolle ist NICHT die des Vorbilds: keine Dev-Kante fordert `ea-reader/test-support` an, `dev_edges > 0` waere sofort rot. Stattdessen faehrt derselbe `cargo tree`-Aufruf ein zweites Mal mit `-F ea-reader/test-support` und MUSS das Merkmal dann enthalten — erst damit ist die Abwesenheit im ersten Baum ein Befund und kein Artefakt eines leeren Baums.
+
+- [x] **Step 5: Commit the browser vault**
 
 ```bash
 git add crates/ea-reader crates/ea-reader-wasm docs/adr/0005-browser-runtime-and-wasm-dependency-class.md tools/xtask/tests/adr_gate.rs Cargo.toml Cargo.lock

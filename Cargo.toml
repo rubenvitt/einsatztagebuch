@@ -41,7 +41,17 @@ ea-format = { path = "crates/ea-format" }
 ea-key-provider = { path = "crates/ea-key-provider" }
 ea-local-store = { path = "crates/ea-local-store" }
 ea-operator = { path = "crates/ea-operator" }
-ea-reader = { path = "crates/ea-reader" }
+# `default-features = false` aus demselben Grund wie bei `ea-archive-fs` oben,
+# und Cargo laesst den Schalter nur HIER zu. Das Default-Feature
+# `test-support` von `ea-reader` traegt die zwei BESCHAEDIGENDEN Zeugenhilfen
+# `SealedVaultV1::flip_one_wrapped_key_byte_for_test` (kippt ein Byte im
+# umschlossenen Tresorschluessel) und
+# `SealedVaultV1::replace_sealed_anchor_bytes_for_test` (entsiegelt den
+# Tresorkoerper, tauscht die Ankerbytes und versiegelt neu). Ohne diesen
+# Schalter laege eine Flaeche, die ein Chiffrat gezielt beschaedigt, in jedem
+# Wirt, der die Crate zieht — insbesondere in `crates/ea-reader-wasm` und
+# damit im ausgelieferten wasm-Modul.
+ea-reader = { path = "crates/ea-reader", default-features = false }
 ea-reader-wasm = { path = "crates/ea-reader-wasm" }
 ea-recovery = { path = "crates/ea-recovery" }
 ea-schema = { path = "crates/ea-schema" }
@@ -66,6 +76,17 @@ http-body-util = { version = "=0.1.5", default-features = false }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 getrandom = { version = "=0.4.3", features = ["wasm_js"] }
+# Die HKDF-Kante des BROWSER-TRESORS, ratifiziert in
+# `docs/adr/0005-browser-runtime-and-wasm-dependency-class.md`.
+# `web-reader-design.md` §6.2 schreibt
+# `KEK_i = HKDF(PRF_i(festes App-Salt), info = "ea-reader-vault-v1")` vor, und
+# `hpke::kdf::Kdf::extract_and_expand` ist dafuer NICHT einsetzbar: die Methode
+# ist `#[doc(hidden)]` und labelt ihre Ausgabe mit `HPKE-v1` und einer
+# Suite-ID. `hkdf 0.13.0` liegt bereits im Lockfile (gezogen von `hpke` und
+# `sqlx-postgres`); der Delta ist eine KANTE, kein Paket. Die Crate kennt keine
+# Default-Merkmale — `default-features = false` ist ein No-op und steht als
+# ausgeschriebene Absicht, aus der die Ledgerzeile `hkdf = []` entsteht.
+hkdf = { version = "=0.13.0", default-features = false }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 jiff = { version = "=0.2.35", default-features = false, features = ["std", "tzdb-bundle-always"] }
 jiff-tzdb = "=0.1.8"

@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Die Index-Crate des Web-Readers.
+//! Die Reader-Crate des Web-Readers.
 //!
 //! `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md` §12
 //! macht `ea-reader` wasm32-faehig; die Crate steht deshalb auf der
@@ -8,16 +8,27 @@
 //! `ea-verify` hinaus in das Wirtbetriebssystem, und geteilter Browsercode ist
 //! genau das Gegenteil davon.
 //!
-//! # In dieser Stufe fast ein Skelett
+//! # Kein Skelett mehr: hier liegt der Tresor
 //!
-//! Sie traegt hier KEINE Verifikationsrechnung: zwei Betriebsarten, den
-//! Re-Export der Gate-Reihenfolge und seit dem Task
-//! „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der
-//! Laufzeitnachweis im Gate" den Port ueber OPAKE Bytes samt seinem Doppel. Der
-//! Reader selbst — Verifikationsdurchlauf, Datei-Modus, Tresor — entsteht in
-//! den folgenden Aufgaben der Stufe 4. Die Crate entsteht VOR ihrem Inhalt,
-//! weil die wasm32-Reichweite in dem Task belegt sein muss, der sie eroeffnet,
-//! und nicht in dem, der sie benutzt.
+//! Bis zur Aufgabe „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die
+//! Verwahrung von Anchor und KEM-Schlüssel" trug die Crate zwei Betriebsarten,
+//! den Re-Export der Gate-Reihenfolge und den Byteport. Seither traegt sie den
+//! Speicher, den §11.3 an die Stelle des ERSATZLOS gestrichenen nativen
+//! Reader-Key-Providers setzt: [`ReaderVault`] mit seinen PRF-Envelopes,
+//! [`ReaderKeyProfile`] als fail-closed-Pruefung des Reader-Zertifikats und
+//! die zwei verschluesselten Speicher [`ReaderObjectCache`] und
+//! [`ReaderEntryStateStore`] darueber.
+//!
+//! Was sie weiterhin NICHT traegt, ist ein URTEIL: der Verifikationsdurchlauf,
+//! die Klassifikation eines Eintrags und der Datei-Modus entstehen in den
+//! folgenden Aufgaben der Stufe 4. Hier entsteht der SPEICHER des Zustands.
+//!
+//! # Die Reihenfolge ist Absicht
+//!
+//! Der Tresor steht VOR jeder Verifikation, weil er ihre EINGABEN besitzt: den
+//! gepinnten Anker fuer Gate `trust` und den privaten X25519-Empfaengerschluessel
+//! samt seinem Abdruck fuer Gate `recipient-grant` und die nachfolgende
+//! Entkapselung. Beide Werte entstehen ausschliesslich in [`UnlockedVault`].
 //!
 //! # Der Bytespeicher ist ein PORT und kein Wirt
 //!
@@ -25,7 +36,9 @@
 //! sonst nichts; [`InMemoryReaderBlobStore`] ist das Doppel, mit dem jeder
 //! Wirtstest ohne Browser laeuft. Die OPFS-Implementierung liegt in
 //! `crates/ea-reader-wasm`, weil sie synchrone Zugriffshandles braucht und die
-//! es nur im dedizierten Worker gibt.
+//! es nur im dedizierten Worker gibt. Cache und Zustandsspeicher legen
+//! ausschliesslich Chiffrat darin ab und adressieren hexadezimal — die
+//! Schluesselliste verlaesst den Port im Klartext.
 //!
 //! # Die Gate-Reihenfolge wird RE-EXPORTIERT
 //!
@@ -33,11 +46,25 @@
 //! geschrieben. `crates/ea-verify/src/gates.rs` ist die EINZIGE Quelle dieser
 //! neun Zeichenketten, und `tools/xtask/tests/spec_completeness.rs` haelt sie
 //! gegen `design.md` §14.1; eine zweite Liste daneben waere die Stelle, an der
-//! die Reihenfolge des Browsers von der des Wirts abweichen koennte.
+//! die Reihenfolge des Browsers von der des Wirts abweichen koennte. Dieselbe
+//! Regel gilt fuer die Statusbegriffe: `VerificationStatus`, `EntryStatus` und
+//! `ServerConfirmationV1` werden importiert und nie nachgebaut.
 
 mod blob_store;
+mod cache;
+mod entry_state;
+mod envelope;
+mod key_profile;
 mod mode;
+mod vault;
 
 pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
+pub use cache::ReaderObjectCache;
 pub use ea_verify::GATE_ORDER_V1;
+pub use entry_state::{ReaderEntryStateStore, ReaderEntryStateV1};
+pub use envelope::{
+    AuthenticatorPrfV1, VAULT_INDEX_INFO_V1, VAULT_KEK_INFO_V1, VaultEnvelopeV1, derive_kek_v1,
+};
+pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
+pub use vault::{ReaderVault, ReaderVaultError, SealedVaultV1, UnlockedVault, VaultContentsV1};

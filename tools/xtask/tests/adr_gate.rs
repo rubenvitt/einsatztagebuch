@@ -281,7 +281,22 @@ const BROWSER_ADR_LITERALS: [&str; 7] = [
     "no member of this stage consumes",
 ];
 
-const BROWSER_RUNTIME_DEPENDENCIES: [&str; 5] = [
+/// The pins ADR 0005 ratifies for the browser Reader.
+///
+/// Five of the six are the `wasm-bindgen` family. The sixth, `hkdf`, is not:
+/// it is cryptography, and it entered this list with the task „Browser-Vault:
+/// PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und
+/// KEM-Schlüssel", which raised the arity from five to six in the same commit
+/// as the ADR row it then requires. It is gated HERE and not in ADR 0001
+/// because its only consumer is `crates/ea-reader` in the browser path, and a
+/// second gate over the same pin would drift against this one.
+///
+/// The arity is deliberate: an entry without raising it does not compile. The
+/// shape follows `SERVER_RUNTIME_DEPENDENCIES` above — exact `=` pin on the
+/// same line as the crate name, and the reviewed feature selection as a
+/// verbatim ledger line.
+const BROWSER_RUNTIME_DEPENDENCIES: [&str; 6] = [
+    "hkdf",
     "js-sys",
     "wasm-bindgen",
     "wasm-bindgen-futures",

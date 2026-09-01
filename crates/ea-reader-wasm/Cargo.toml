@@ -46,6 +46,12 @@ wasm-bindgen.workspace = true
 # Tauri-Teilbaum ohnehin im Lockfile.
 wasm-bindgen-futures.workspace = true
 web-sys.workspace = true
+# Die PRF-Ausgabe kommt als BESITZENDER `Vec<u8>` ueber die Grenze, damit
+# `src/vault_bridge.rs` ihre Kopie im linearen Speicher unmittelbar nach der
+# Ableitung loeschen kann. `SecretBytes` steht zwar unter `ZeroizeOnDrop`, aber
+# fuer den Puffer, aus dem es gebaut wurde, kann es nichts tun — dafuer braucht
+# es `Zeroize` an genau dieser Stelle.
+zeroize.workspace = true
 
 [dev-dependencies]
 # Nur fuer `tests/bridge_boundary.rs`. Dev-Kanten sind hier unbedenklich: die
