@@ -452,11 +452,13 @@ on the development host, Ubuntu 24.04.4, under Rust 1.95.0, Node 26.7.0,
 pnpm 11.20.0 and wasm-bindgen-cli 0.2.126: green, `real 15m22.9s`, 207 result
 lines, 1441 passed, 0 failed, 7 ignored. The sentence above stays as the
 measured state of its own time. Reasons two and three are untouched, and the
-paragraph itself says each of the three is sufficient alone. The workflow runs
-the quick gate and **nothing besides**: `pnpm web:browser-test` and `pnpm
-web:e2e` stay outside it, in the `browsers up`/`down` bracket this section
-decides, for the same reason they stay outside `verify_quick_commands()`. A
-workflow that added them would be a second, competing command list.
+paragraph itself says each of the three is sufficient alone. The workflow
+declares the quick gate and **nothing besides** — one register for the whole
+addendum, since nothing here has executed on a hosted runner:
+`pnpm web:browser-test` and `pnpm web:e2e` stay outside it, in the
+`browsers up`/`down` bracket this section decides, for the same reason they stay
+outside `verify_quick_commands()`. A workflow that added them would be a second,
+competing command list.
 
 The shape is the one this repository already carries for services, and
 explicitly **not** a `.devcontainer/`: a compose file beside

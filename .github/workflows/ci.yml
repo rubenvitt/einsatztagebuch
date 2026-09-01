@@ -72,12 +72,24 @@ jobs:
     # kalt und 25–45 min mit warmen Caches.
     runs-on: ubuntu-24.04
     # Die Frist, und sie stimmt mit ihrem Kommentar überein: ein hängender
-    # Auftrag soll nach EINER Stunde abbrechen. Die Zahl steht gegen die
-    # Schätzung darüber — 45–75 min kalt heisst, dass ein kalter erster Lauf
-    # diese Frist reissen KANN. Das ist beabsichtigt: dann ist die Schätzung
-    # falsch und gehört gemessen und hier korrigiert, statt von einer
-    # grosszügigen Frist verdeckt zu werden.
-    timeout-minutes: 60
+    # Auftrag soll nach ANDERTHALB Stunden abbrechen. Neunzig Minuten liegen
+    # ÜBER dem schlechtesten Fall der Schätzung darüber (75 min kalt) und weit
+    # unter allem, was ein wirklich hängender Auftrag erreichte.
+    #
+    # Die Frist knapper zu ziehen wäre falsch, und zwar aus drei Gründen. Der
+    # ERSTE Lauf ist notwendig kalt; eine Frist unterhalb von 75 min brächte
+    # ihn nach den Zahlen dieser Datei in Reichweite des Abbruchs. Ein
+    # Fristabbruch ist aber ein roter Auftrag, der NICHTS über den Baum sagt —
+    # dieselbe Ablehnung, die elf Zeilen weiter unten schon für ENOSPC steht.
+    # Und beim Fristabbruch fällt der `if: always()`-Schritt am Ende mit weg,
+    # der die Integrationsdienste abräumt; die Container blieben stehen.
+    #
+    # Das übliche Argument für eine knappe Frist ist die Abrechnung, und die
+    # ist hier gegenstandslos: die Minuten sind auf diesem öffentlichen
+    # Repositorium kostenlos. Die Messung, die eine knappe Frist erzwingen
+    # sollte, liefert der Lauf ohnehin — seine eigene Dauer steht im Protokoll,
+    # nur eben mit einem eindeutigen Ausgang daneben.
+    timeout-minutes: 90
 
     steps:
       - name: Auschecken
@@ -249,11 +261,13 @@ jobs:
       # die die Einrichtung hinterlassen hat, und meldet einen Fehlstand
       # innerhalb von Sekunden statt nach einer halben Stunde Bau. Er deckt
       # NICHT die Umgebung, in der der Gate am Ende läuft — zwischen ihm und
-      # `pnpm verify:quick` liegen vier Schritte, und mindestens zwei davon
-      # schreiben nach `$GITHUB_ENV` (`Swatinem/rust-cache` exportiert
-      # dokumentiert `CARGO_INCREMENTAL=0`). Deshalb steht dieselbe Prüfung ein
-      # zweites Mal als erste Zeilen IM Gate-Schritt; erst die dortige ist
-      # tragend.
+      # `pnpm verify:quick` liegen SECHS Schritte (`Werkzeugstand belegen`,
+      # `pnpm-Store-Pfad`, `pnpm-Store aus dem Cache`, `Cargo-Cache`,
+      # `Abhängigkeiten der Arbeitsbereiche`, `Integrationsdienste starten`),
+      # und mindestens einer davon schreibt nach `$GITHUB_ENV`
+      # (`Swatinem/rust-cache` exportiert dokumentiert `CARGO_INCREMENTAL=0`).
+      # Deshalb steht dieselbe Prüfung ein zweites Mal als erste Zeilen IM
+      # Gate-Schritt; erst die dortige ist tragend.
       - name: Umgebungswächter (RUSTUP_TOOLCHAIN, RUSTFLAGS)
         run: |
           # `-e` ausgeschrieben, aus demselben Grund wie im Platz-Schritt.
@@ -383,12 +397,16 @@ jobs:
       # `verify_quick_commands()` steht und nicht hier.
       #
       # Davor steht der SPAETE Wächter, und er ist der tragende: er prüft die
-      # Umgebung, in der der Gate wirklich läuft, nicht die von vor vier
-      # Schritten. Zwischen dem frühen Wächter und dieser Zeile liegen
-      # `Swatinem/rust-cache`, `actions/cache`, `pnpm install` und
-      # `integration up`; `Swatinem/rust-cache` schreibt dokumentiert
-      # `CARGO_INCREMENTAL=0` nach `$GITHUB_ENV`, und damit ist BELEGT, dass
-      # Schritte nach dem frühen Wächter die Bauumgebung noch verändern.
+      # Umgebung, in der der Gate wirklich läuft, nicht die von vor SECHS
+      # Schritten. Gezählt, nicht geschätzt — zwischen dem frühen Wächter und
+      # dieser Zeile liegen `Werkzeugstand belegen`, `pnpm-Store-Pfad`,
+      # `pnpm-Store aus dem Cache`, `Cargo-Cache`,
+      # `Abhängigkeiten der Arbeitsbereiche` und `Integrationsdienste starten`,
+      # getragen von den vier Aktionen `Swatinem/rust-cache`, `actions/cache`,
+      # `pnpm install` und `integration up`. `Swatinem/rust-cache` schreibt
+      # dokumentiert `CARGO_INCREMENTAL=0` nach `$GITHUB_ENV`, und damit ist
+      # BELEGT, dass Schritte nach dem frühen Wächter die Bauumgebung noch
+      # verändern.
       # Exportierte eine künftige Aktion, ein neues Läuferabbild oder ein
       # mise-Wechsel dort `RUSTUP_TOOLCHAIN`, liefe der frühe Wächter grün
       # durch und der wasm32-Check stürbe mit genau der Meldung, gegen die er
@@ -401,13 +419,19 @@ jobs:
       - name: pnpm verify:quick
         run: |
           set -euo pipefail
+          # Sammelnd und nicht beim ersten Treffer abbrechend, in der Form des
+          # frühen Wächters: sind BEIDE Variablen gesetzt, nennt die Meldung
+          # auch beide. Der tragende Wächter ist der schlechteste Ort für eine
+          # halbe Diagnose.
+          fail=0
           for name in RUSTUP_TOOLCHAIN RUSTFLAGS; do
             if [ -n "${!name+set}" ]; then
               echo "::error::${name} ist unmittelbar vor dem Gate gesetzt (\"${!name}\")."
               echo "::error::Ein Schritt nach dem frühen Wächter hat die Umgebung verändert."
-              exit 1
+              fail=1
             fi
           done
+          [ "$fail" -eq 0 ]
           rustup target list --installed | grep -qx wasm32-unknown-unknown
           pnpm verify:quick
 
