@@ -55,6 +55,26 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],
+    // GEMESSEN am 2026-09-01, nachdem der erste CI-Lauf ueberhaupt
+    // (`.github/workflows/ci.yml`, Lauf 33541706571) an dieser Vorgabe fiel.
+    //
+    // Vitests Vorgabe ist 5000 ms je Test. Auf dem Entwicklungsrechner
+    // brauchen die schwersten `userEvent`-Ketten dieses Pakets 1645 ms — der langsamste Test
+    // dieses Pakets, also innerhalb des Faktors 3 zur Vorgabe, ohne dass es je jemand sah, weil es bis heute KEINE CI gab. Der
+    // vierkernige GitHub-Laeufer ist rund doppelt so langsam; in `apps/desktop` fiel deshalb ein Test.
+    // HIER ist bisher keiner gefallen: der CI-Lauf endete vorher. Die Frist
+    // steht trotzdem, und zwar VORSORGLICH und ausgewiesen — 1645 ms mal zwei
+    // liegt noch unter 5000 ms, aber der Abstand ist derselbe Faktor, der
+    // drueben nicht reichte, und eine zweite rote Runde nur zum Nachziehen
+    // waere verschenkt.
+    //
+    // Fuenfzehn Sekunden sind deshalb kein Zudecken, sondern die Frist, unter
+    // der die gemessene Kette auch auf langsamerer Hardware sicher bleibt:
+    // rund sechsfacher Abstand zum lokalen Maximum, rund dreifacher zum
+    // beobachteten CI-Wert. Ein echtes Haengen faellt weiterhin auf, denn die
+    // GANZE Datei laeuft in 24 s durch — ein einzelner Test, der 15 s zieht,
+    // steht sofort allein an der Spitze der `--reporter=verbose`-Liste.
+    testTimeout: 15_000,
     // NUR die Einheitentests des Pakets. Die Vitest-4-Vorgaben sind
     // `include = ["**/*.{test,spec}.?(c|m)[jt]s?(x)"]` und
     // `exclude = ["**/node_modules/**", "**/.git/**"]` — also KEINE
