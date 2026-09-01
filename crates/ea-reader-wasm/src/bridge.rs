@@ -137,10 +137,17 @@ const MANIFEST_ED25519_FILE_SHA256: &str =
 // so wenig Graph wie moeglich liegen.
 // ---------------------------------------------------------------------------
 
-struct Json(String);
+/// `pub(crate)`, seit `crate::fetch` sein Ergebnis-DTO ebenfalls hier formt.
+/// Ein zweiter JSON-Bauer daneben waere die zweite Schreibweise derselben
+/// Ausgabe — und die erste, die sich aendert, machte die zweite still falsch.
+///
+/// Er ESCAPT NICHT. Jeder Wert, der hier hineingeht, stammt aus einem
+/// eingeschraenkten Alphabet — Hex, Base64, stabile Codes —, und die Aufrufer
+/// pruefen das, wo eine Eingabe von aussen kommt (`crate::fetch::host_token`).
+pub(crate) struct Json(String);
 
 impl Json {
-    fn object() -> Self {
+    pub(crate) fn object() -> Self {
         Self(String::from("{"))
     }
 
@@ -150,13 +157,13 @@ impl Json {
         }
     }
 
-    fn string(&mut self, key: &str, value: &str) -> &mut Self {
+    pub(crate) fn string(&mut self, key: &str, value: &str) -> &mut Self {
         self.comma();
         self.0.push_str(&format!("\"{key}\":\"{value}\""));
         self
     }
 
-    fn bool(&mut self, key: &str, value: bool) -> &mut Self {
+    pub(crate) fn bool(&mut self, key: &str, value: bool) -> &mut Self {
         self.comma();
         self.0.push_str(&format!("\"{key}\":{value}"));
         self
@@ -168,13 +175,13 @@ impl Json {
         self
     }
 
-    fn raw(&mut self, key: &str, value: &str) -> &mut Self {
+    pub(crate) fn raw(&mut self, key: &str, value: &str) -> &mut Self {
         self.comma();
         self.0.push_str(&format!("\"{key}\":{value}"));
         self
     }
 
-    fn finish(mut self) -> String {
+    pub(crate) fn finish(mut self) -> String {
         self.0.push('}');
         self.0
     }

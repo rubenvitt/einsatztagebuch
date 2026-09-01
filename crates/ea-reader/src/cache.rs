@@ -50,6 +50,16 @@ use crate::vault::{ReaderVaultError, UnlockedVault};
 /// Rumpf, damit Schreiben und Lesen dieselbe Adresse bilden.
 const CACHE_KEY_PREFIX: &str = "cache/";
 
+/// Der Besucher, dem [`ReaderObjectCache::visit_exact_objects`] jedes
+/// entschluesselte Objekt reicht.
+///
+/// Ein eigener Aliastyp und keine ausgeschriebene Schranke: `dyn FnMut` mit
+/// zwei Argumenten und einem `Result` faellt sonst unter
+/// `clippy::type_complexity`, und die Bedeutung — Objekthash und exakte Bytes
+/// hinein, ein abbrechbarer Befund heraus — steht so an EINER Stelle statt an
+/// jeder Aufrufstelle.
+pub type ExactObjectVisitor<'a> = dyn FnMut(ObjectHash, &[u8]) -> Result<(), ReaderVaultError> + 'a;
+
 /// Der verschluesselte Objektcache EINER entsperrten Sitzung.
 pub struct ReaderObjectCache {
     cache_key: SecretBytes<CEK_SIZE>,
@@ -132,10 +142,62 @@ impl ReaderObjectCache {
         )?;
         Ok(Some(opened.with_exposed(<[u8]>::to_vec)))
     }
+
+    /// Laeuft ueber JEDES gecachte Objekt und reicht seine EXAKTEN Bytes weiter.
+    ///
+    /// # Warum die Aufzaehlung HIER steht und nicht beim Verifizierer
+    ///
+    /// Weil dieses Modul den Adressraum besitzt. Wer `cache/<hex objectHash>`
+    /// an einer zweiten Stelle wieder auseinandernaehme, haette eine zweite
+    /// Abschrift derselben Abbildung — und die erste, die sich aendert, macht
+    /// die zweite still falsch. Der Aufrufer bekommt deshalb den Objekthash
+    /// FERTIG und nie den Schluessel, aus dem er stammt.
+    ///
+    /// Der Besucher wird beim Durchlaufen unmittelbar gerufen; es entsteht kein
+    /// zwischenzeitlicher Puffer ueber dem ganzen Bestand. Liefert er einen
+    /// Fehler, haelt der Durchlauf VOR dem naechsten Objekt an — dieselbe Zusage
+    /// wie `ea_archive::ArchiveSource::visit_blobs`, die darauf aufsetzt.
+    ///
+    /// # Errors
+    /// Die Codes des Bytespeichers, `EA-CRYPTO-AEAD-OPEN` fuer einen fremden
+    /// oder verfaelschten Blob und `EA-READER-VAULT-CONTENTS` fuer einen Blob,
+    /// der nicht einmal seinen Nonce traegt — dazu jeden Fehler des Besuchers.
+    pub fn visit_exact_objects(
+        &self,
+        store: &dyn ReaderBlobStore,
+        visit: &mut ExactObjectVisitor<'_>,
+    ) -> Result<(), ReaderVaultError> {
+        for key in store.keys()? {
+            let Some(hash) = object_hash_of(&key) else {
+                continue;
+            };
+            let Some(bytes) = self.get_exact_object(store, hash)? else {
+                continue;
+            };
+            visit(hash, &bytes)?;
+        }
+        Ok(())
+    }
+}
+
+/// Der Objekthash einer Cacheadresse — oder `None` fuer eine fremde Adresse.
+///
+/// Der Bytespeicher traegt auch den versiegelten Tresor, die Eintragszustaende
+/// und den Sync-Cursor. Ein Schluessel ohne das Cachepraefix ist deshalb kein
+/// Fehler, sondern schlicht kein Objekt.
+fn object_hash_of(key: &ReaderBlobKey) -> Option<ObjectHash> {
+    let hex_digits = key.as_str().strip_prefix(CACHE_KEY_PREFIX)?;
+    let bytes = hex::decode(hex_digits).ok()?;
+    ObjectHash::try_from(bytes.as_slice()).ok()
 }
 
 /// Die Adresse eines gecachten Objekts.
-fn cache_key(object_hash: ObjectHash) -> Result<ReaderBlobKey, ReaderVaultError> {
+///
+/// `pub(crate)`, damit `crates/ea-reader/src/sync.rs` die Schluesselmenge
+/// nennen kann, die ein OPFS-Speicher VOR seinem ersten Zugriffshandle offen
+/// haben muss (`OpfsBlobStore::open`) — ohne die Abbildung
+/// `cache/<hex objectHash>` ein zweites Mal zu schreiben.
+pub(crate) fn cache_key(object_hash: ObjectHash) -> Result<ReaderBlobKey, ReaderVaultError> {
     Ok(ReaderBlobKey::new(&format!(
         "{CACHE_KEY_PREFIX}{}",
         hex::encode(object_hash.as_bytes())

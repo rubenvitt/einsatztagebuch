@@ -7,6 +7,15 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# Der breite Port ueber ALLE Bytes eines Bestands. `ea_verify::verify_archive_observed`
+# nimmt als erstes Argument `&dyn ArchiveSource` (`crates/ea-verify/src/archive.rs`),
+# und `crates/ea-verify/src/lib.rs` re-exportiert aus `ea-archive` NICHTS — sein
+# `pub use archive::{..}` meint das GLEICHNAMIGE eigene Modul. Der Objektcache
+# dieser Crate muss den Typ deshalb SELBST benennen, um dem Verifizierer die
+# dauerhaft abgelegten exakten Bytes als Quelle zu reichen. Die Crate steht
+# bereits auf der wasm32-Positivliste von `verify_quick_commands()`; die Kante
+# nimmt `ea-reader` also nicht davon herunter.
+ea-archive.workspace = true
 # Der deterministische CBOR-Waechter. Tresorkoerper, versiegelter Tresor und
 # Eintragszustand werden VOR dem Parsen durch `validate(..., ParserLimits::V1)`
 # geschickt — dieselbe Reihenfolge, die
@@ -101,3 +110,9 @@ test-support = []
 # `std::fs`-Vektorausgabe auf `WASM32_EXEMPT_CRATES`, und die wasm32-Zeile des
 # Gates faehrt ohne `--all-targets`.
 ea-testkit.workspace = true
+# Nur fuer die per `#[path]` eingebundene Fixture-Kette von `ea-verify`,
+# `ea-archive`, `ea-trust` und `ea-format`, die `crates/ea-reader/tests/sync_support`
+# fuer den Lesestapel braucht. Dieselbe Zeile mit derselben Begruendung tragen
+# `crates/ea-recovery/Cargo.toml` und `crates/ea-archive-fs/Cargo.toml`.
+# Dev-Dependency, also nie im wasm32-Lib-Graphen.
+ea-time.workspace = true

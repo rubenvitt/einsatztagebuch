@@ -13,7 +13,10 @@
 //! Tresorausfuhren. [`webauthn`] kommt mit der Aufgabe „Browser-Enrollment:
 //! zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate"
 //! dazu und trägt die fünf Enrollment-Ausfuhren samt der Browserfassung des
-//! Endpunktports.
+//! Endpunktports. [`fetch`] kommt mit der Aufgabe „Inkrementeller Reader-Sync
+//! und verifizierter Cursor-Fortschritt in OPFS" dazu und traegt GENAU ZWEI
+//! Ausfuhren: den fertig signierten Lesestapel-Request hinaus und die
+//! Antwortbytes hinein.
 //!
 //! # Was hier NICHT liegt
 //!
@@ -50,6 +53,20 @@
 /// hinter `cfg(target_arch = "wasm32")`. Das ist dieselbe Bauform wie unten:
 /// die Rechnung bleibt fuer einen gewoehnlichen Wirtstest erreichbar.
 pub mod bridge;
+
+/// Die Bruecke des inkrementellen Lesestapels: GENAU ZWEI Ausfuhren.
+///
+/// Das Modul steht OHNE cfg an der `mod`-Zeile, weil es Ausfuhren traegt und
+/// die Regel „cfg am Item" dann fuer jede einzelne von ihnen gilt — dieselbe
+/// Lage wie bei [`bridge`] und [`vault_bridge`] und ausdruecklich nicht die von
+/// `opfs_worker`.
+///
+/// Beide Ausfuhren laufen IM DEDIZIERTEN WORKER: sie oeffnen OPFS-Speicher, und
+/// synchrone Zugriffshandles gibt es nur dort. Der eigentliche `fetch` liegt
+/// dagegen NICHT hier — er liegt in `apps/web/src/sync/transport.ts`, und die
+/// Naht dazwischen ist der Sinn dieses Moduls: geteiltes Rust signiert und
+/// entscheidet, JavaScript bewegt Bytes.
+pub mod fetch;
 
 /// Der OPFS-Bytespeicher — NUR auf `wasm32-unknown-unknown`.
 ///
