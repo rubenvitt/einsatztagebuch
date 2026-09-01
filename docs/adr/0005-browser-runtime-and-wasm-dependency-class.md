@@ -441,6 +441,25 @@ gate task needs all three. Third, WebKit on Linux needs system libraries that
 `playwright install-deps` pulls in under root — a host mutation a test run
 must not perform.
 
+**Addendum 2026-09-01 — the first of those three reasons is no longer the
+measured state, and the decision stands anyway.** `.github/workflows/ci.yml` is
+now checked in. It *declares* the bracket `integration up` … `pnpm verify:quick`
+… `integration down` for a hosted `ubuntu-24.04` runner; **it has not yet
+executed on GitHub Actions**, so no sentence here reports a hosted-runner
+measurement, and the runner's system packages, its Docker engine version and
+its cache behaviour remain unverified. What *was* measured is the same bracket
+on the development host, Ubuntu 24.04.4, under Rust 1.95.0, Node 26.7.0,
+pnpm 11.20.0 and wasm-bindgen-cli 0.2.126: green, `real 15m22.9s`, 207 result
+lines, 1441 passed, 0 failed, 7 ignored. The sentence above stays as the
+measured state of its own time. Reasons two and three are untouched, and the
+paragraph itself says each of the three is sufficient alone. The workflow
+declares the quick gate and **nothing besides** — one register for the whole
+addendum, since nothing here has executed on a hosted runner:
+`pnpm web:browser-test` and `pnpm web:e2e` stay outside it, in the
+`browsers up`/`down` bracket this section decides, for the same reason they stay
+outside `verify_quick_commands()`. A workflow that added them would be a second,
+competing command list.
+
 The shape is the one this repository already carries for services, and
 explicitly **not** a `.devcontainer/`: a compose file beside
 `ops/compose/integration.yaml`, an `xtask` subcommand in the shape of

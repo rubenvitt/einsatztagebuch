@@ -39,6 +39,27 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],
+    // GEMESSEN am 2026-09-01, nachdem der erste CI-Lauf ueberhaupt
+    // (`.github/workflows/ci.yml`, Lauf 33541706571) an dieser Vorgabe fiel.
+    //
+    // Vitests Vorgabe ist 5000 ms je Test. Auf dem Entwicklungsrechner
+    // brauchen die schwersten `userEvent`-Ketten dieses Pakets 2577 / 2219 /
+    // 1708 / 1575 / 1520 ms — fuenf Tests innerhalb des Faktors 3,3 zur
+    // Vorgabe, ohne dass es je jemand sah, weil es bis heute KEINE CI gab. Der
+    // vierkernige GitHub-Laeufer ist rund doppelt so langsam; damit kippte
+    // `distinguishes known zero from unknown and blocks finalize before review
+    // confirmation` bei > 5000 ms, waehrend dieselbe Datei lokal in 17,2 s
+    // vollstaendig gruen laeuft. Der Test HAENGT nicht — er ist die laengste
+    // Interaktionskette des Pakets (neun `user`-Aktionen samt Tastatureingabe,
+    // jede mit React-Neuzeichnung unter jsdom).
+    //
+    // Fuenfzehn Sekunden sind deshalb kein Zudecken, sondern die Frist, unter
+    // der die gemessene Kette auch auf langsamerer Hardware sicher bleibt:
+    // rund sechsfacher Abstand zum lokalen Maximum, rund dreifacher zum
+    // beobachteten CI-Wert. Ein echtes Haengen faellt weiterhin auf, denn die
+    // GANZE Datei laeuft in 24 s durch — ein einzelner Test, der 15 s zieht,
+    // steht sofort allein an der Spitze der `--reporter=verbose`-Liste.
+    testTimeout: 15_000,
     // NUR die Einheitentests des Pakets. Die Vitest-4-Vorgaben sind
     // `include = ["**/*.{test,spec}.?(c|m)[jt]s?(x)"]` und
     // `exclude = ["**/node_modules/**", "**/.git/**"]` — also KEINE E2E-Ausnahme
