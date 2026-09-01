@@ -441,12 +441,17 @@ gate task needs all three. Third, WebKit on Linux needs system libraries that
 `playwright install-deps` pulls in under root — a host mutation a test run
 must not perform.
 
-**Addendum 2026-09-01 — the first of those three reasons no longer holds, and
-the decision stands anyway.** `.github/workflows/ci.yml` now exists and drives
-`integration up` … `pnpm verify:quick` … `integration down` on a hosted
-`ubuntu-24.04` runner. The sentence above is left in place as the measured
-state at the time this section was written; what changed is only that the gate
-is no longer bound to one machine. Reasons two and three are untouched, and the
+**Addendum 2026-09-01 — the first of those three reasons is no longer the
+measured state, and the decision stands anyway.** `.github/workflows/ci.yml` is
+now checked in. It *declares* the bracket `integration up` … `pnpm verify:quick`
+… `integration down` for a hosted `ubuntu-24.04` runner; **it has not yet
+executed on GitHub Actions**, so no sentence here reports a hosted-runner
+measurement, and the runner's system packages, its Docker engine version and
+its cache behaviour remain unverified. What *was* measured is the same bracket
+on the development host, Ubuntu 24.04.4, under Rust 1.95.0, Node 26.7.0,
+pnpm 11.20.0 and wasm-bindgen-cli 0.2.126: green, `real 15m22.9s`, 207 result
+lines, 1441 passed, 0 failed, 7 ignored. The sentence above stays as the
+measured state of its own time. Reasons two and three are untouched, and the
 paragraph itself says each of the three is sufficient alone. The workflow runs
 the quick gate and **nothing besides**: `pnpm web:browser-test` and `pnpm
 web:e2e` stay outside it, in the `browsers up`/`down` bracket this section
