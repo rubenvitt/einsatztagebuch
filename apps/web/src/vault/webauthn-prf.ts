@@ -326,6 +326,15 @@ function worker(): Worker {
 /** Eine Nachricht ohne ihre Kennung — die vergibt der Aufruf. */
 type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never
 
+/**
+ * Eine Nachricht an den EINEN Worker dieses Buendels, von aussen gestellt.
+ *
+ * Der Typ ist verteilend (`T extends unknown ? …`) und nicht `Omit` ueber der
+ * ganzen Vereinigung: `Omit` verschmilzt die Arme zu einem Gemeinsamen, und
+ * `kind` waere danach keine Weiche mehr.
+ */
+export type ReaderWorkerMessage = WithoutId<EaOpfsRequest>
+
 async function call(request: WithoutId<EaOpfsRequest>): Promise<EaOpfsResponse> {
   nextRequestId += 1
   const id = nextRequestId
@@ -333,6 +342,20 @@ async function call(request: WithoutId<EaOpfsRequest>): Promise<EaOpfsResponse> 
     pending.set(id, { settle, fail })
     worker().postMessage({ ...request, id })
   })
+}
+
+/**
+ * Derselbe Aufruf, fuer Module ausserhalb des Tresors.
+ *
+ * Er steht HIER und nicht in einer eigenen Transportdatei, weil der Worker
+ * selbst hier liegt — und es darf GENAU EINEN geben: die entsperrten
+ * Tresorsitzungen und die angefangenen Verzeichnisquellen liegen in Rust in
+ * `thread_local!`-Tabellen, ein zweiter Worker saehe keine von beiden. Wer
+ * eine zweite Instanz erzeugte, bekaeme fuer jede Sitzungskennung
+ * `EA-READER-FILE-MODE-BRIDGE-ARGUMENT` und wuesste nicht, warum.
+ */
+export async function callReaderWorker(request: ReaderWorkerMessage): Promise<EaOpfsResponse> {
+  return call(request)
 }
 
 /**
@@ -683,6 +706,25 @@ export const enrollmentBridge: EnrollmentBridge = {
  * Beide Schritte laufen im Worker, weil dort das wasm-Modul und OPFS liegen.
  */
 export async function unlockReaderVault(): Promise<void> {
+  await unlockReaderVaultSession()
+}
+
+/**
+ * Derselbe Weg, aber mit der SITZUNGSKENNUNG als Ergebnis.
+ *
+ * Sie wird gebraucht, sobald ein Aufrufer nach dem Entsperren noch etwas mit
+ * dem Tresor tut — der Datei-Modus etwa, dessen Brueckenausfuhren alle einen
+ * entsperrten Tresor verlangen. Die Kennung ist ein `u32` ohne Bedeutung
+ * ausserhalb der Bruecke; sie ist KEIN Schluesselmaterial und ihre Herausgabe
+ * ist genau die, die `web-reader-design.md` §9 vorsieht.
+ *
+ * BENANNTE GRENZE, und sie gehoert nicht diesem Modus: der Weg fuehrt ueber
+ * [`beganEnrollment`], also ueber ein Enrollment, das in DIESEM Seitenlauf
+ * begonnen wurde. Nach einem Neuladen der Seite ist das Salz fort, und dieser
+ * Aufruf faellt laut. Der Weg dafuer ist `recover_and_unlock_vault` in
+ * `ea-reader`, und der ist in diesem Stand an keine Ausfuhr verdrahtet.
+ */
+export async function unlockReaderVaultSession(): Promise<number> {
   const { credentialId, prfOutput } = await evaluatePrf(beganEnrollment().prfSalt, [])
   const stored = await call({ kind: 'get', key: READER_VAULT_BLOB_KEY })
   if (!stored.ok) {
@@ -700,4 +742,8 @@ export async function unlockReaderVault(): Promise<void> {
   if (!response.ok) {
     throw new Error(response.code)
   }
+  if (response.status === undefined) {
+    throw new Error('Der Worker hat auf die Entsperrung keine Sitzungskennung geliefert.')
+  }
+  return Number(response.status)
 }

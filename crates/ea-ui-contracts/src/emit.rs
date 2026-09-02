@@ -58,6 +58,35 @@ const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        // Das Ergebnis EINES Oeffnens im Datei-Modus, und ausdruecklich keine
+        // Zeile je Eintrag: die zeilenweise Darstellung gehoert der
+        // Reader-Oberflaeche, diese Flaeche zeigt einen Bestand.
+        //
+        // Es traegt KEINE Modus-Vereinigung. Eine Union `'server' | 'file'`
+        // verbaenne ihre zwei Literale aus jeder handgeschriebenen Web-Quelle
+        // — und `<input type="file">` in `OpenArchivePanel.tsx` ist genau
+        // `"file"`. Dieselbe Ueberlegung wie bei `BundleActivationView` oben,
+        // dort zugunsten eines `boolean` entschieden; hier braucht es gar
+        // nichts: die Route sagt, wo man ist, und `OpenedArchiveV1::mode()`
+        // bleibt ein reiner Rust-Begriff.
+        "FileModeArchiveView",
+        &[
+            ("archiveObjectCount", "number"),
+            ("entryPackageCount", "number"),
+            ("fullyVerified", "boolean"),
+            ("gapCount", "number"),
+            ("serverConfirmedCount", "number"),
+            ("notServerConfirmedCount", "number"),
+            // Der ARCHIVWEITE Wert, gefaltet in Rust: `server-bestätigt` nur,
+            // wenn es mindestens ein Objektergebnis gibt UND jedes einzelne
+            // ihn traegt. Die Flaeche bekommt den Wortlaut damit aus
+            // `ServerConfirmationV1::label` und schreibt ihn nie selbst — sie
+            // DARF ihn nach `no-hand-written-contracts.test.ts` auch gar nicht
+            // schreiben.
+            ("serverConfirmation", "ServerConfirmationV1"),
+        ],
+    ),
+    (
         // Dieselben drei Feldnamen wie in `FinalizationPreviewView`: es ist
         // dieselbe Policy-Rechnung, nur auf der anderen Flaeche, und zwei
         // Namen fuer dieselbe Groesse waeren die Drift, gegen die es diese

@@ -16,6 +16,12 @@ import init, {
   enrollmentFingerprints,
   enrollmentFinish,
   enrollmentRegisterAuthenticator,
+  fileModeBeginDirectory,
+  fileModeBundleExtension,
+  fileModeDirectoryUnavailable,
+  fileModeOpenBundle,
+  fileModeOpenDirectory,
+  fileModePushBlob,
   readerVaultUnlock,
 } from './pkg/ea_reader_wasm.js'
 
@@ -77,6 +83,37 @@ export type EaOpfsRequest =
       readonly sealed: Uint8Array
       readonly credentialId: Uint8Array
       readonly prfOutput: Uint8Array
+    }
+  // Die sechs Nachrichten des Datei-Modus. Sie stehen HIER und nicht in einem
+  // eigenen Worker, und der Grund ist derselbe wie beim Enrollment: die
+  // entsperrten Tresorsitzungen liegen in Rust in einem `thread_local!`, also
+  // muss der Aufruf, der eine Sitzung nennt, denselben Faden sehen wie der
+  // Aufruf, der sie geoeffnet hat. Der `FileSystemDirectoryHandle` selbst
+  // wird auf dem Hauptthread abgelaufen — er ist ein Objekt der Seite, und
+  // jede Bytefolge reist einzeln hierher.
+  | { readonly id: number; readonly kind: 'file-mode-bundle-extension' }
+  | {
+      readonly id: number
+      readonly kind: 'file-mode-open-bundle'
+      readonly session: number
+      readonly bytes: Uint8Array
+      readonly effectiveNowMs: bigint
+    }
+  | { readonly id: number; readonly kind: 'file-mode-begin-directory' }
+  | {
+      readonly id: number
+      readonly kind: 'file-mode-push-blob'
+      readonly handle: number
+      readonly pathHint: string
+      readonly bytes: Uint8Array
+    }
+  | { readonly id: number; readonly kind: 'file-mode-directory-unavailable'; readonly handle: number }
+  | {
+      readonly id: number
+      readonly kind: 'file-mode-open-directory'
+      readonly session: number
+      readonly handle: number
+      readonly effectiveNowMs: bigint
     }
 
 /**
@@ -256,6 +293,48 @@ scope.addEventListener('message', (event) => {
             id: request.id,
             ok: true,
             status: String(readerVaultUnlock(request.sealed, request.credentialId, request.prfOutput)),
+          })
+          return
+        // Die sechs Datei-Modus-Nachrichten reichen ihr Ergebnis UNVERAENDERT
+        // durch. Zerlegt wird das DTO auf dem Hauptthread, in
+        // `../features/file-mode/DirectoryHandle.ts`; wer es hier zerlegte,
+        // traefe eine Entscheidung ueber seine Form.
+        case 'file-mode-bundle-extension':
+          scope.postMessage({ id: request.id, ok: true, status: fileModeBundleExtension() })
+          return
+        case 'file-mode-open-bundle':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: fileModeOpenBundle(request.session, request.bytes, request.effectiveNowMs),
+          })
+          return
+        case 'file-mode-begin-directory':
+          // Die Ordnerkennung ist eine ZAHL und kein DTO; sie reist als Text im
+          // selben Feld, damit die Antwortform eine bleibt — dieselbe
+          // Ueberlegung wie bei `vault-unlock`.
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: String(fileModeBeginDirectory()),
+          })
+          return
+        case 'file-mode-push-blob':
+          // EINE Bytefolge je Nachricht. Die zwei Deckel fallen in Rust, in
+          // `DirectoryHandleSource::push_blob`; hier wird nichts gezaehlt und
+          // nichts verglichen.
+          fileModePushBlob(request.handle, request.pathHint, request.bytes)
+          scope.postMessage({ id: request.id, ok: true })
+          return
+        case 'file-mode-directory-unavailable':
+          fileModeDirectoryUnavailable(request.handle)
+          scope.postMessage({ id: request.id, ok: true })
+          return
+        case 'file-mode-open-directory':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: fileModeOpenDirectory(request.session, request.handle, request.effectiveNowMs),
           })
           return
       }

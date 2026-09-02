@@ -14,6 +14,8 @@ import type { ReaderTrustAgeView } from './bridge/generated-contracts'
 import { DecorativeIcon } from './design/icons'
 import { eaRuntimeTheme } from './design/tokens'
 import { EnrollmentPage } from './features/enrollment/EnrollmentPage'
+import { fileModeBridge } from './features/file-mode/DirectoryHandle'
+import { OpenArchivePanel } from './features/file-mode/OpenArchivePanel'
 import { TrustAgeBanner } from './features/trust-age/TrustAgeBanner'
 
 /**
@@ -47,6 +49,15 @@ export type EaWebRoute = {
 export const EA_WEB_ROUTES: readonly EaWebRoute[] = [
   { path: '/', label: 'Reader' },
   { path: '/enrollment', label: 'Enrollment', render: () => <EnrollmentPage /> },
+  // ANGEHAENGT und keine zweite Tabelle. `host` ist das echte Fenster, weil
+  // die Faehigkeitsabfrage der Flaeche genau hier ihren Wirt bekommt; `bridge`
+  // wird ausdruecklich GESTELLT und ist kein Vorgabewert der Flaeche, damit
+  // ein Zeuge sie rendern kann, ohne den dedizierten Worker zu erzeugen.
+  {
+    path: '/datei',
+    label: 'Datei-Modus',
+    render: () => <OpenArchivePanel host={window} bridge={fileModeBridge} />,
+  },
 ]
 
 /**

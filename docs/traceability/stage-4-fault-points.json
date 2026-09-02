@@ -130,5 +130,22 @@
       "brackets": "ein gefaelschter historischer Grant neben dem initialen eigenen: er hinterlaesst NICHTS — keinen signatureErrors- und keinen decryptionErrors-Eintrag, keinen Detailgrund, ein wortgleiches Protokoll —, weil own_grant nur initiale Grants sieht und EA-VERIFY-GRANT-AUTHORIZATION-UNVERIFIABLE ueber die Pipeline unerreichbar ist; der Zeuge misst diese Abwesenheit und ist erst nachzuschaerfen, wenn Stufe 5 die grantAuthorization aufloest",
       "witness": "crates/ea-reader/tests/historical_expiry.rs::a_forged_historical_grant_leaves_no_trace_at_all"
     }
+  ],
+  "file-mode": [
+    {
+      "name": "bundle-truncated",
+      "brackets": "eine im Transport abgeschnittene oder umbenannte Containerdatei: EA-BUNDLE-MALFORMED, und es entsteht KEIN Teilbericht — die Endung ist ein HINWEIS, entschieden wird an BUNDLE_MAGIC_V1",
+      "witness": "crates/ea-reader/tests/file_mode.rs::a_truncated_or_wrongly_magicked_container_reports_the_bundle_code_and_no_report"
+    },
+    {
+      "name": "directory-permission-revoked",
+      "brackets": "ein dauerhaft angebundener Ordner verliert zwischen zwei Oeffnungen seine Berechtigung: der Oeffnungsversuch bricht mit EA-ARCHIVE-UNAVAILABLE ab, es entsteht kein Teilbericht, und der universelle Weg ueber den gewoehnlichen Dateidialog bleibt angeboten — derselbe Bestand als EINE Datei oeffnet weiterhin vollstaendig",
+      "witness": "crates/ea-reader/tests/file_mode.rs::a_directory_whose_permission_was_revoked_reports_the_archive_code_and_no_report"
+    },
+    {
+      "name": "substituted-archive",
+      "brackets": "ein untergeschobenes Archiv mit vollstaendiger EIGENER Vertrauenskette, byteweise dasselbe Buendel: gegen den fremden Anker endet der Lauf fail-closed an Gate trust und sagt ueber keinen Eintrag etwas aus, gegen den eigenen gepinnten Anker traegt es vollstaendig — der Datei-Modus oeffnet keinen zweiten Weg zu einem Anker",
+      "witness": "crates/ea-reader/tests/file_mode_anchor.rs::a_substituted_archive_says_nothing_about_any_entry_in_file_mode"
+    }
   ]
 }

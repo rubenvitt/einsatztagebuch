@@ -46,13 +46,15 @@ use ea_reader::{
 };
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
-use verify_fixtures::fixtures;
+// `ENTRIES_IN_THE_COMPLETE_ARCHIVE_V1` kommt aus der KULISSE und stand frueher
+// als eigenes Literal in dieser Datei. Es ist eine Tatsache ueber
+// `complete_valid_archive` — genau EIN Eintrag, und nur so sagt das archivweite
+// Protokoll etwas ueber IHN aus — und nicht ueber diesen Zeugen; seit
+// `crates/ea-reader/tests/file_mode.rs` sie ebenfalls braucht, waere ein
+// zweites Literal daneben der zweite Satz Zahlen fuer dieselbe Tatsache.
+use verify_fixtures::fixtures::{self, ENTRIES_IN_THE_COMPLETE_ARCHIVE_V1};
 
 wasm_bindgen_test_configure!(run_in_browser);
-
-/// Der eine Eintrag des Bestands: [`fixtures::complete_archive`] traegt genau
-/// einen, und nur so sagt das archivweite Protokoll etwas ueber IHN aus.
-const ENTRIES_IN_THE_COMPLETE_ARCHIVE_V1: usize = 1;
 
 /// Grenze 4: die vollstaendige Kette, alle neun Gates, im Browser.
 ///
