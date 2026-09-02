@@ -91,6 +91,24 @@ const PERSISTED_DETAIL_CODES_V1: [&str; 25] = [
     "EA-VERIFY-RECEIPT-UNTRUSTED-TIME",
 ];
 
+/// Derselbe Code, wenn er persistierbar ist — sonst `None`.
+///
+/// Die Schranke faellt HIER und nicht erst in [`ReaderEntryStateStore::put_entry_state`],
+/// weil ein Zustand, den der Speicher abwiese, wertlos waere. Der Klassifizierer
+/// in `crate::verify` schickt jeden `ObjectErrorV1::code()` durch diese Stelle
+/// und laesst einen unbekannten Code fallen, statt ihn mitzufuehren: der
+/// ZUSTAND bleibt dann stehen, nur sein Detailgrund faellt weg.
+///
+/// Gemessener Anlass: `archive_without_a_recovery_grant()` erzeugt in Gate
+/// `grant-plan` den Code `EA-GRANT-MISSING-RECOVERY`, der unveraendert aus
+/// `ea-format` stammt und deshalb NICHT in [`PERSISTED_DETAIL_CODES_V1`] steht.
+/// Die Tabelle waechst in demselben Commit, der einen neuen Code in einen
+/// Eintragszustand schreibt — und nicht dadurch, dass hier still etwas anderes
+/// durchgelassen wird.
+pub(crate) fn persistable_detail_code(code: &'static str) -> Option<&'static str> {
+    PERSISTED_DETAIL_CODES_V1.contains(&code).then_some(code)
+}
+
 /// Der technische Zustand GENAU EINES Eintrags, drei orthogonale Dimensionen.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ReaderEntryStateV1 {

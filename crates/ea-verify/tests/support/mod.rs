@@ -1986,24 +1986,71 @@ fn push_destroyed_stub(fixture: &mut ArchiveFixture, built: &BuiltEntry) -> Obje
     )
 }
 
+/// Das Fuellbyte der Vorgangskennung eines Stummels, dessen Vernichtung im
+/// Bestand auf NICHTS zeigt.
+///
+/// Der Wert ist bewusst KEIN Marker eines abgelegten Vorgangs: `push_destruction`
+/// leitet seine [`DestructionId`] aus `DestructionSpec::marker` ab, und solange
+/// kein Vorgang mit diesem Marker im Bestand liegt, laeuft der Join
+/// `DestroyedEntryStubV1::destruction_id()` gegen `authorizedDestructions` ins
+/// Leere. Genau das ist der Ausgang `ungeklaerte Luecke`.
+pub const UNRESOLVABLE_STUB_DESTRUCTION_MARKER_V1: u8 = 0x43;
+/// Das Fuellbyte des Autorisierungshashes desselben Stummels.
+///
+/// Getrennt vom Kennungsmarker, weil `ea-format` beide Felder getrennt bindet
+/// und ein einziges Fuellbyte fuer zwei Rollen die Verwechslung erst moeglich
+/// machte, die dieser Stummel ausschliessen soll.
+pub const UNRESOLVABLE_STUB_AUTHORIZATION_MARKER_V1: u8 = 0x44;
+
 /// Dasselbe fuer ein beliebiges Eintragspaket auf einer beliebigen Sequenz.
 ///
 /// `original_eip_object_hash` kommt als PARAMETER und wird nicht aus dem Paket
 /// hergeleitet: der Stummel bezeugt die Bytes, die ABGELEGT waren, und die
 /// kennt nur der Erbauer des Bestands.
+///
+/// Die Vernichtung, auf die dieser Stummel zeigt, liegt NICHT im Bestand — der
+/// aufloesbare Gegenfall laeuft ueber [`push_destroyed_stub_authorized_by`].
 fn push_destroyed_stub_for(
     fixture: &mut ArchiveFixture,
     chain_sequence: u64,
     entry: &EntryPackageV1,
     original_eip_object_hash: ObjectHash,
 ) -> ObjectHash {
+    push_destroyed_stub_authorized_by(
+        fixture,
+        chain_sequence,
+        entry,
+        original_eip_object_hash,
+        DestructionId::try_from(&[UNRESOLVABLE_STUB_DESTRUCTION_MARKER_V1; 16][..])
+            .expect("16 Bytes sind eine Vernichtungskennung"),
+        ObjectHash::try_from(&[UNRESOLVABLE_STUB_AUTHORIZATION_MARKER_V1; 32][..])
+            .expect("32 Bytes sind ein Objekthash"),
+    )
+}
+
+/// Derselbe Stummel unter einer BENANNTEN Vernichtung.
+///
+/// Die zwei Felder, die den Stummel mit einem Vorgang verbinden, kommen als
+/// Parameter, weil nur der Erbauer des Bestands weiss, ob der Vorgang darin
+/// ueberhaupt liegt. Ein `.eds` wird nie ein Kettenknoten (siehe den
+/// Kommentarblock vor `protocol.enter(Gate::ChainPosition)`), und `ea-verify`
+/// prueft die beiden Felder an keiner Stelle — sie tragen allein den Join, den
+/// ein Leser ueber `authorizedDestructions` selbst zieht. Genau deshalb sind
+/// BEIDE Ausgaenge nur ueber diesen Parameter erreichbar.
+fn push_destroyed_stub_authorized_by(
+    fixture: &mut ArchiveFixture,
+    chain_sequence: u64,
+    entry: &EntryPackageV1,
+    original_eip_object_hash: ObjectHash,
+    destruction_id: DestructionId,
+    destruction_authorization_object_hash: ObjectHash,
+) -> ObjectHash {
     let stub = DestroyedEntryStubV1::new(
         entry.signed_manifest().clone(),
         entry.writer_signature().to_vec(),
         original_eip_object_hash,
-        DestructionId::try_from(&[0x43_u8; 16][..])
-            .expect("16 Bytes sind eine Vernichtungskennung"),
-        ObjectHash::try_from(&[0x44_u8; 32][..]).expect("32 Bytes sind ein Objekthash"),
+        destruction_id,
+        destruction_authorization_object_hash,
     )
     .expect("der Fixture-Stummel muss binden");
     let bytes = encode_destroyed_entry_stub(&stub)
@@ -3566,13 +3613,82 @@ fn report_line() -> ReportLine {
     }
 }
 
+/// Wie der `.eds` des Gesamtbestands mit dessen Vernichtung verbunden ist.
+///
+/// Die beiden Ausgaenge sind NICHT zwei Sichten auf denselben Bestand, sondern
+/// zwei Bestaende: der Stummel bindet Kennung und Autorisierungshash in seine
+/// Bytes ein, und damit haengt sein Objekthash daran.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StubAuthorizationV1 {
+    /// Der Stummel nennt eine Kennung, die im Bestand auf nichts zeigt.
+    Unresolvable,
+    /// Der Stummel nennt die Kennung und den Autorisierungshash des Vorgangs,
+    /// der tatsaechlich im Bestand liegt.
+    Resolvable,
+}
+
+/// Der Vernichtungsvorgang des Gesamtbestands.
+///
+/// Herausgezogen, weil der aufloesbare Stummel seine Kennung und seinen
+/// Autorisierungshash NENNEN muss, bevor der Vorgang abgelegt ist; beide
+/// entstehen erst in [`push_destruction`].
+fn report_destruction_spec() -> DestructionSpec {
+    DestructionSpec::new(
+        REPORT_DESTRUCTION_MARKER_V1,
+        &[
+            DESTRUCTION_STATE_REQUESTED_V1,
+            DESTRUCTION_STATE_IN_PROGRESS_V1,
+            DESTRUCTION_STATE_COMPLETE_MANAGED_SCOPE_V1,
+        ],
+    )
+    .with_attestation()
+}
+
+/// Kennung und Autorisierungshash dieses Vorgangs, VORAB gerechnet.
+///
+/// Der Vorgang wird dafuer in einen Wegwerf-Bestand gelegt und dieser
+/// verworfen. Das kostet einen zweiten Bau und haelt dafuer die Ablagestelle
+/// der echten Vernichtung unveraendert am Ende des Bestands — aus dem Grund,
+/// der dort steht. Zulaessig ist das, weil [`push_destruction`] deterministisch
+/// ist: die Kennung kommt aus dem Marker, und Ed25519 signiert nach RFC 8032
+/// ohne Zufall.
+fn report_destruction_join(authority: DestructionAuthority) -> (DestructionId, ObjectHash) {
+    let mut scratch = ArchiveFixture::new();
+    let built = push_destruction(&mut scratch, authority, &report_destruction_spec());
+    (built.destruction_id, built.authorization_object_hash)
+}
+
 /// Baut den Gesamtbestand.
+///
+/// Sein `.eds` nennt eine Vernichtung, die im Bestand auf NICHTS zeigt — der
+/// Ausgang `ungeklaerte Luecke`. Den Gegenfall baut
+/// [`report_archive_with_a_resolvable_stub`].
 ///
 /// # Panics
 ///
 /// Wenn eines der Fixture-Objekte sich nicht bauen oder kodieren laesst.
 #[must_use]
 pub fn complete_report_archive() -> ReportArchive {
+    report_archive(StubAuthorizationV1::Unresolvable)
+}
+
+/// Derselbe Bestand, dessen `.eds` die Vernichtung darin AUFLOEST.
+///
+/// Der Stummel traegt `DestructionId([REPORT_DESTRUCTION_MARKER_V1; 16])` und
+/// den Autorisierungshash des abgelegten Vorgangs; der Join gegen
+/// `VerificationReportV1::authorized_destructions` trifft damit. Alles Uebrige
+/// ist byteweise der Bestand von [`complete_report_archive`] — bis auf den
+/// Stummel selbst, dessen Objekthash sich mit seinen Feldern aendert.
+///
+/// # Panics
+///
+/// Wie [`complete_report_archive`].
+#[must_use]
+pub fn report_archive_with_a_resolvable_stub() -> ReportArchive {
+    report_archive(StubAuthorizationV1::Resolvable)
+}
+
+fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
     let line = report_line();
     let anchor = line.anchor();
     let chain_id = anchor.chain_id();
@@ -3631,12 +3747,23 @@ pub fn complete_report_archive() -> ReportArchive {
         // ausdruecklich NICHT abgelegt. Genau so sieht ein autorisiert
         // vernichteter Eintrag aus, und genau so entsteht die Luecke.
         if sequence == REPORT_DESTROYED_STUB_SEQUENCE_V1 {
-            destroyed_stub_object_hash = Some(push_destroyed_stub_for(
-                &mut fixture,
-                sequence,
-                &entry,
-                entry_object_hash,
-            ));
+            destroyed_stub_object_hash = Some(match stub_authorization {
+                StubAuthorizationV1::Unresolvable => {
+                    push_destroyed_stub_for(&mut fixture, sequence, &entry, entry_object_hash)
+                }
+                StubAuthorizationV1::Resolvable => {
+                    let (destruction_id, authorization_object_hash) =
+                        report_destruction_join(line.authority);
+                    push_destroyed_stub_authorized_by(
+                        &mut fixture,
+                        sequence,
+                        &entry,
+                        entry_object_hash,
+                        destruction_id,
+                        authorization_object_hash,
+                    )
+                }
+            });
             continue;
         }
 
@@ -3785,15 +3912,7 @@ pub fn complete_report_archive() -> ReportArchive {
     let destructions = vec![push_destruction(
         &mut fixture,
         line.authority,
-        &DestructionSpec::new(
-            REPORT_DESTRUCTION_MARKER_V1,
-            &[
-                DESTRUCTION_STATE_REQUESTED_V1,
-                DESTRUCTION_STATE_IN_PROGRESS_V1,
-                DESTRUCTION_STATE_COMPLETE_MANAGED_SCOPE_V1,
-            ],
-        )
-        .with_attestation(),
+        &report_destruction_spec(),
     )];
 
     // DAS NICHT-ARCHIVOBJEKT: Bytes OHNE Exact-Object-Praefix. Sie sind kein

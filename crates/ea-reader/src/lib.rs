@@ -26,11 +26,15 @@
 //! wenn jedes Objektbyte dauerhaft ist UND die Kette bis zum Batchende
 //! verifiziert.
 //!
-//! Was sie weiterhin NICHT traegt, ist ein URTEIL UEBER EINEN EINTRAG: der
-//! Lesestapel laeuft `verify_archive_observed` ausdruecklich OHNE
-//! Empfaengerschluessel und entschluesselt nichts. Die Klassifikation nach
-//! `design.md` §17.4 und der Datei-Modus entstehen in den folgenden Aufgaben
-//! der Stufe 4.
+//! Der Lesestapel laeuft `verify_archive_observed` weiterhin OHNE
+//! Empfaengerschluessel und entschluesselt nichts. Das URTEIL UEBER EINEN
+//! EINTRAG kommt seit der Aufgabe „Verifikation vor Entschluesselung" aus
+//! [`ReaderVerifier::classify`]: es faehrt dieselben neun Gates MIT dem
+//! Schluessel der Sitzung, uebersetzt den Bericht in die Zustandssprache aus
+//! `design.md` §17.4 und gibt je Eintrag hoechstens ein Zeugenpaar
+//! [`VerifiedEncryptedEntry`]/[`VerifiedGrantForRecipient`] heraus — die
+//! einzigen Werte, mit denen [`decrypt_verified`] ueberhaupt formulierbar ist.
+//! Der Datei-Modus entsteht in der folgenden Aufgabe der Stufe 4.
 //!
 //! # Die Reihenfolge ist Absicht
 //!
@@ -80,6 +84,16 @@
 //! die Methode benennen koennen, ohne eine eigene Kante nach `ea-sync-protocol`
 //! zu ziehen.
 //!
+//! Dieselbe Regel traegt die Flaeche von [`ReaderVerifier::classify`] und
+//! [`decrypt_verified`]: [`ArchiveSource`], [`GateObserver`] samt seinen zwei
+//! Doppeln, [`VerificationReportV1`] mit den Typen seiner Accessoren, die
+//! Statusbegriffe [`VerificationStatus`] und [`EntryStatus`], die Hashtypen
+//! [`EntryHash`], [`ObjectHash`] und [`KeyThumbprint`], [`TrustAnchorV1`] als
+//! Rueckgabe von [`PinnedTrustAnchor::as_trust_anchor`] sowie
+//! [`SchemaRegistry`] und [`PayloadV1`] stehen in einer dieser Signaturen und
+//! werden deshalb hier re-exportiert, statt der Bruecke vier weitere Kanten
+//! zu geben.
+//!
 //! Dieselbe Regel zieht [`ReaderBundlePin::from_trust_objects`] und
 //! [`reader_trust_age_view`] nach: die eine nimmt eine [`RegistryVersion`], die
 //! andere zwei [`UnixMillis`], und beide werden von der Bruecke gerufen. Die
@@ -87,22 +101,27 @@
 //! `crates/ea-reader-wasm` eine Kante nach `ea-types` zu geben, die es bis
 //! heute nicht hat.
 
+mod anchor;
 mod batch;
 mod blob_store;
 mod bundle_release;
 mod cache;
 mod cursor;
+mod decrypt;
 mod enrollment;
 mod enrollment_endpoints;
 mod entry_state;
 mod envelope;
+mod grant;
 mod http;
 mod key_profile;
 mod mode;
 mod sync;
 mod trust_state;
 mod vault;
+mod verify;
 
+pub use anchor::PinnedTrustAnchor;
 pub use batch::VerifiedSyncBatch;
 pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
 pub use bundle_release::{
@@ -113,10 +132,21 @@ pub use cursor::{
     ConfirmedCursor, MAX_CACHED_OBJECTS_V1, READER_SYNC_CURSOR_BLOB_KEY_V1,
     READER_SYNC_OBJECTS_BLOB_KEY_V1,
 };
+pub use decrypt::{VerifiedDecryptedRecord, decrypt_verified};
+pub use ea_archive::ArchiveSource;
+pub use ea_crypto::HpkeRecipientPrivateKey;
+pub use ea_schema::{PayloadV1, SchemaRegistry};
 pub use ea_sync_protocol::HttpMethod;
-pub use ea_trust::decode_trust_anchor;
-pub use ea_types::{Hash32, OrganizationId, RegistryVersion, SubjectId, UnixMillis};
-pub use ea_verify::GATE_ORDER_V1;
+pub use ea_trust::{TrustAnchorV1, decode_trust_anchor};
+pub use ea_types::{
+    ChainSequence, DestructionId, EntryHash, EntryStatus, Hash32, KeyThumbprint, ObjectHash,
+    OrganizationId, RegistryVersion, SubjectId, UnixMillis, VerificationStatus,
+};
+pub use ea_verify::{
+    AuthorizedDestructionV1, ChainGapV1, DECAPSULATION_EVENT_V1, DestructionStateV1, GATE_ORDER_V1,
+    Gate, GateObserver, ObjectErrorV1, ObjectResultKindV1, ObjectResultV1, QuarantinedObjectV1,
+    RecordingObserver, ServerConfirmationV1, SilentObserver, VerificationReportV1, VerifyError,
+};
 pub use enrollment::{
     AttestedAuthenticatorV1, AuthenticatorRecordV1, AuthenticatorTransportProfileV1,
     DeviceTrustStateV1, ENROLLMENT_SIGNATURE_WINDOW_SECONDS_V1, EnrolledReaderV1, EnrollmentError,
@@ -132,6 +162,7 @@ pub use entry_state::{ReaderEntryStateStore, ReaderEntryStateV1};
 pub use envelope::{
     AuthenticatorPrfV1, VAULT_INDEX_INFO_V1, VAULT_KEK_INFO_V1, VaultEnvelopeV1, derive_kek_v1,
 };
+pub use grant::{VerifiedEncryptedEntry, VerifiedGrantForRecipient};
 pub use http::ReaderRequestV1;
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
@@ -143,3 +174,4 @@ pub use trust_state::{
     ReaderTrustAgeV1, ReaderTrustStateStore, ReaderTrustStateV1, reader_trust_age_view,
 };
 pub use vault::{ReaderVault, ReaderVaultError, SealedVaultV1, UnlockedVault, VaultContentsV1};
+pub use verify::{ReaderClassification, ReaderError, ReaderVerifier};

@@ -1891,6 +1891,7 @@ dependencies = [
  "ea-cbor",
  "ea-crypto",
  "ea-format",
+ "ea-schema",
  "ea-sync-protocol",
  "ea-testkit",
  "ea-time",
@@ -1910,12 +1911,19 @@ dependencies = [
 name = "ea-reader-wasm"
 version = "0.1.0"
 dependencies = [
+ "ea-archive",
  "ea-crypto",
+ "ea-format",
  "ea-reader",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
  "ea-verify",
+ "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
  "js-sys",
+ "minicbor",
  "serde_json",
  "sha2 0.11.0",
  "wasm-bindgen",
