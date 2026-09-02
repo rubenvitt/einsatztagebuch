@@ -117,7 +117,7 @@
     },
     {
       "name": "stub-without-authorization",
-      "brackets": "ein .eds-Stummel, dessen destructionId auf keine autorisierte Vernichtung des Bestands zeigt: ungeklaerte Luecke in der Eintragsdimension, Gap in der Verifikationsdimension, kein objectResult, kein Grant nennt seinen entryHash, kein Zeugenpaar — und der aufloesbare Zwilling ist autorisiert vernichtet bei sonst gleichem Ausgang; die Entkapselung, die der Bestand ueber seine anderen Eintraege erreicht, ist fuer den Stummel in keinem der beiden Ausgaenge formulierbar",
+      "brackets": "ein .eds-Stummel, dessen Pruefkette an EINEM Glied bricht — destructionId auf keine autorisierte Vernichtung des Bestands, destructionAuthorizationObjectHash ungleich dem von den Transitionen authentifizierten Hash, oder Autorisierung ohne den entryHash und die Sequenz des Stummels unter targets —: ungeklaerte Luecke in der Eintragsdimension, Gap in der Verifikationsdimension, kein objectResult, kein Grant nennt seinen entryHash, kein Zeugenpaar, und der Bericht traegt ueber keinen der drei Brueche einen zusaetzlichen Befund; nur der Zwilling mit geschlossener Kette ist autorisiert vernichtet bei sonst gleichem Ausgang; die Entkapselung, die der Bestand ueber seine anderen Eintraege erreicht, ist fuer den Stummel in keinem der beiden Ausgaenge formulierbar",
       "witness": "crates/ea-reader/tests/destroyed_stub.rs::a_stub_reaches_no_decapsulation_in_either_outcome"
     },
     {

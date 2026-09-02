@@ -38,15 +38,18 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ea_archive::{ArchiveInventory, ArchiveSource};
-use ea_format::{DestroyedEntryStubV1, EntryPackageV1, FormatError, GrantKindV1, GrantV1, Parsed};
+use ea_format::{
+    DecodedTrustPayloadV1, DestroyedEntryStubV1, EntryPackageV1, FormatError, GrantKindV1, GrantV1,
+    Parsed,
+};
 use ea_types::{
     ChainSequence, DestructionId, EntryHash, EntryStatus, KeyThumbprint, ObjectHash, UnixMillis,
     VerificationStatus,
 };
 use ea_verify::{
-    AuthorizedDestructionV1, ChainGapV1, DecryptionErrorV1, GateObserver, ObjectErrorV1,
-    ObjectResultKindV1, QuarantinedObjectV1, ServerConfirmationV1, VerificationReportV1,
-    VerifyError, VerifyOptions, verify_archive_observed,
+    ChainGapV1, DecryptionErrorV1, GateObserver, ObjectErrorV1, ObjectResultKindV1,
+    QuarantinedObjectV1, ServerConfirmationV1, VerificationReportV1, VerifyError, VerifyOptions,
+    verify_archive_observed,
 };
 
 use crate::anchor::PinnedTrustAnchor;
@@ -265,7 +268,7 @@ impl ReaderVerifier {
                 rows.insert(row.state.entry_hash(), row.state);
             }
             for stub in inventory.destroyed() {
-                if let Some(state) = classify_stub(&findings, stub, &rows) {
+                if let Some(state) = classify_stub(&findings, &inventory, stub, &rows) {
                     rows.insert(state.entry_hash(), state);
                 }
             }
@@ -408,7 +411,9 @@ struct ReportFindingsV1 {
     evidence_errors: BTreeMap<ObjectHash, &'static str>,
     decryption_errors: BTreeMap<ObjectHash, &'static str>,
     gaps: Vec<(ChainSequence, ChainSequence)>,
-    authorized_destructions: BTreeSet<DestructionId>,
+    /// Je Vorgang der Autorisierungshash, den die TRANSITIONEN authentifiziert
+    /// haben — nicht der, den ein Stummel behauptet.
+    authorized_destructions: BTreeMap<DestructionId, ObjectHash>,
 }
 
 impl ReportFindingsV1 {
@@ -449,7 +454,12 @@ impl ReportFindingsV1 {
                 .collect(),
             authorized_destructions: report
                 .authorized_destructions()
-                .map(AuthorizedDestructionV1::destruction_id)
+                .map(|destruction| {
+                    (
+                        destruction.destruction_id(),
+                        destruction.authorization_object_hash(),
+                    )
+                })
                 .collect(),
         }
     }
@@ -598,12 +608,11 @@ fn classify_entry(
 /// eigener Doc-Kommentar sagt „HIER UND NUR HIER entstehen die
 /// `objectResults`" — und setzt ausnahmslos `Valid`; die Variante
 /// `AuthorizedDestroyed` wird workspaceweit nirgends konstruiert. Der
-/// Eintragszustand kommt deshalb aus einem JOIN: die `destructionId`, die der
-/// Stummel NENNT, gegen die `authorizedDestructions`, die der Bericht
-/// FUEHRT. Trifft er, ist der Zustand `autorisiert vernichtet`; trifft er
-/// nicht, `ungeklaerte Luecke`. Fail-closed in die strengere Richtung — die
-/// Aufloesung der `destructionAuthorization` selbst gehoert Stufe 5, `ea-trust`
-/// exportiert dafuer nichts.
+/// Eintragszustand kommt deshalb aus einer PRUEFKETTE, die
+/// [`stub_destruction_is_authorized`] zieht. Schliesst sie sich, ist der
+/// Zustand `autorisiert vernichtet`; sonst `ungeklaerte Luecke`.
+/// `web-reader-design.md` §14.1: „Ein Stub ohne vollstaendige Pruefkette bleibt
+/// eine Luecke."
 ///
 /// # Die VERIFIKATIONSdimension bleibt davon unberuehrt
 ///
@@ -614,6 +623,7 @@ fn classify_entry(
 /// auseinander.
 fn classify_stub(
     findings: &ReportFindingsV1,
+    inventory: &ArchiveInventory,
     stub: &Parsed<DestroyedEntryStubV1>,
     placed: &BTreeMap<EntryHash, ReaderEntryStateV1>,
 ) -> Option<ReaderEntryStateV1> {
@@ -639,9 +649,7 @@ fn classify_stub(
         .manifest()
         .fields()
         .chain_sequence;
-    let entry_state = if findings
-        .authorized_destructions
-        .contains(&stub.value().destruction_id())
+    let entry_state = if stub_destruction_is_authorized(findings, inventory, stub.value(), sequence)
     {
         EntryStatus::AuthorizedDestroyed
     } else {
@@ -665,6 +673,65 @@ fn classify_stub(
         findings.server_confirmation(object_hash),
         None,
     ))
+}
+
+/// Ob sich die Pruefkette eines Stummels bis zur Autorisierung SCHLIESST.
+///
+/// DREI GLIEDER, und jedes traegt allein: (1) die `destructionId`, die der
+/// Stummel nennt, fuehrt der Bericht unter `authorizedDestructions`; (2) der
+/// `destructionAuthorizationObjectHash`, den der Stummel nennt, ist GENAU der
+/// Hash, den die signierten Transitionen dieses Vorgangs authentifiziert haben
+/// — `ea_verify::destruction` uebernimmt ihn aus der Kette, nie aus einem
+/// Stummel; (3) die Autorisierung unter diesem Hash nennt unter `targets` den
+/// `entryHash` UND die Sequenz des Stummels.
+///
+/// Ein Join allein ueber die Kennung liesse jedes kopierte, signierte Manifest
+/// unter einer im Bestand liegenden Kennung als `autorisiert vernichtet`
+/// erscheinen — GEMESSEN am Bestand
+/// `report_archive_with_a_stub_naming_a_forged_authorization_hash`, ohne einen
+/// einzigen neuen Befund im Bericht, weil `ea-verify` die beiden Stummelfelder
+/// an keiner Stelle prueft. Die Ziele der Autorisierung liest `ea-verify`
+/// ebenfalls nicht; deshalb stehen beide Glieder HIER. Was die Vier-Augen-
+/// Signaturen der Autorisierung selbst angeht, gilt weiter das Wort von
+/// `ea_verify::destruction`: die Transitionen binden ihren Objekthash
+/// kryptografisch, aus unauthentischen Bytes stammt hier keine Sachaussage.
+///
+/// Der Zustand des Vorgangs (`beantragt` … `vollstaendig`) bleibt ohne
+/// Gewicht: der Bericht fuehrt ihn, und `autorisiert` ist er in jedem davon.
+///
+/// `inventory.trust()` liegt aufsteigend nach Objekthash — die dokumentierte
+/// Invariante, auf der auch `ArchiveInventory::read_exact_trust_object`
+/// binaer sucht.
+fn stub_destruction_is_authorized(
+    findings: &ReportFindingsV1,
+    inventory: &ArchiveInventory,
+    stub: &DestroyedEntryStubV1,
+    sequence: ChainSequence,
+) -> bool {
+    let Some(authorization_object_hash) =
+        findings.authorized_destructions.get(&stub.destruction_id())
+    else {
+        return false;
+    };
+    if *authorization_object_hash != stub.destruction_authorization_object_hash() {
+        return false;
+    }
+    let Ok(index) = inventory
+        .trust()
+        .binary_search_by_key(authorization_object_hash, Parsed::object_hash)
+    else {
+        return false;
+    };
+    let Ok(DecodedTrustPayloadV1::DestructionAuthorization(fields)) =
+        inventory.trust()[index].value().decoded_payload()
+    else {
+        return false;
+    };
+    fields.destruction_id == stub.destruction_id()
+        && fields.targets.iter().any(|target| {
+            target.entry_hash() == stub.entry_hash().as_bytes()
+                && target.chain_sequence() == sequence.get()
+        })
 }
 
 /// Der eigene INITIALE Grant auf `entry_hash`.

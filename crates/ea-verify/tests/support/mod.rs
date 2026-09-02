@@ -2136,7 +2136,10 @@ fn complete_nonce(chain_sequence: u64) -> [u8; 12] {
 ///
 /// Beliebige Bytes: kein Gate liest ihn, und der Bericht enthaelt ihn NIE.
 /// Er ist ausschliesslich da, damit die Entschluesselung etwas zu pruefen hat.
-const COMPLETE_PLAINTEXT_V1: &[u8] = b"einsatzarchiv-fixture-payload";
+/// Oeffentlich, weil ein Leser ihn nach der Entkapselung gegen KEINE der
+/// fuenf Schemabestimmungen bringt und ein Zeuge das an genau diesen Bytes
+/// festmacht.
+pub const COMPLETE_PLAINTEXT_V1: &[u8] = b"einsatzarchiv-fixture-payload";
 
 /// Der private Empfaengerschluessel, fuer den der Grant gebaut ist.
 #[must_use]
@@ -2332,11 +2335,24 @@ fn complete_line() -> CompleteLine {
 /// [`complete_recipient_key_thumbprint`] geht.
 #[must_use]
 pub fn complete_valid_archive() -> CompleteArchive {
+    complete_valid_archive_with_plaintext(COMPLETE_PLAINTEXT_V1)
+}
+
+/// Derselbe Bestand ueber einem GEWAEHLTEN Klartext.
+///
+/// Fuer den einen Zeugen, der den Klartext nach der Entkapselung auch LIEST
+/// und dafuer eine der fuenf Schemabestimmungen treffen muss; alle uebrigen
+/// Bestaende tragen [`COMPLETE_PLAINTEXT_V1`], und die Mutationsfixtures mit
+/// festen Byteversaetzen haengen an DESSEN Laenge — ein schemagueltiger
+/// Klartext gehoert dort nie hinein.
+#[must_use]
+pub fn complete_valid_archive_with_plaintext(plaintext: &[u8]) -> CompleteArchive {
     complete_archive_for(
         complete_recipient_key_thumbprint(),
         complete_recipient_certificate_hash(),
         &complete_recipient_private_key().public_key(),
         1,
+        plaintext,
     )
 }
 
@@ -2354,6 +2370,7 @@ pub fn complete_valid_archive_with_two_entries() -> CompleteArchive {
         complete_recipient_certificate_hash(),
         &complete_recipient_private_key().public_key(),
         2,
+        COMPLETE_PLAINTEXT_V1,
     )
 }
 
@@ -2368,6 +2385,7 @@ pub fn archive_without_the_own_grant() -> CompleteArchive {
         other_recipient_certificate_hash(),
         &other_recipient_private_key().public_key(),
         1,
+        COMPLETE_PLAINTEXT_V1,
     )
 }
 
@@ -2408,6 +2426,7 @@ pub fn complete_archive_with_a_forged_historical_grant() -> ForgedHistoricalGran
         ),
         COMPLETE_GENESIS_SEQUENCE_V1,
         None,
+        COMPLETE_PLAINTEXT_V1,
     );
     assert!(
         object_hash(
@@ -2508,6 +2527,7 @@ fn complete_archive_for(
     recipient_certificate_hash: CertificateHash,
     recipient_public_key: &HpkeRecipientPublicKey,
     entry_count: u64,
+    plaintext: &[u8],
 ) -> CompleteArchive {
     complete_archive_with(
         recipient_key_thumbprint,
@@ -2515,6 +2535,7 @@ fn complete_archive_for(
         recipient_public_key,
         entry_count,
         IsolationDefectV1::None,
+        plaintext,
     )
 }
 
@@ -2569,6 +2590,7 @@ pub fn isolation_archive(defect: IsolationDefectV1) -> CompleteArchive {
         &complete_recipient_private_key().public_key(),
         ISOLATION_ENTRY_COUNT_V1,
         defect,
+        COMPLETE_PLAINTEXT_V1,
     )
 }
 
@@ -2588,6 +2610,7 @@ fn complete_archive_with(
     recipient_public_key: &HpkeRecipientPublicKey,
     entry_count: u64,
     defect: IsolationDefectV1,
+    plaintext: &[u8],
 ) -> CompleteArchive {
     let line = complete_line();
     let anchor = line.anchor();
@@ -2610,6 +2633,7 @@ fn complete_archive_with(
             plan_hash,
             sequence,
             previous_entry_hash,
+            plaintext,
         );
         let mut entry_bytes = encode_entry_package(&entry)
             .expect("das Fixture-Eintragspaket muss kodieren")
@@ -2692,6 +2716,10 @@ fn complete_archive_with(
 /// die als AAD in die Verschluesselung gehen; der zweite baut denselben Kern
 /// ueber den echten Ciphertext. Beide Kerne sind byteidentisch — die
 /// Zusicherung unten misst das, statt es zu glauben.
+///
+/// `plaintext` kommt als Parameter, weil ein Leser den Klartext AUCH liest:
+/// [`complete_valid_archive_with_plaintext`] legt einen schemagueltigen ab,
+/// alle uebrigen Bestaende [`COMPLETE_PLAINTEXT_V1`].
 fn build_complete_entry(
     head: HeadRefV1,
     writer_certificate_hash: CertificateHash,
@@ -2699,6 +2727,7 @@ fn build_complete_entry(
     plan_hash: Hash32,
     chain_sequence: u64,
     previous_entry_hash: Option<EntryHash>,
+    plaintext: &[u8],
 ) -> EntryPackageV1 {
     let fields = || ManifestCoreFieldsV1 {
         organization_id: trust_support::organization(),
@@ -2712,14 +2741,14 @@ fn build_complete_entry(
         initial_grant_plan_hash: *plan_hash.as_bytes(),
         nonce: complete_nonce(chain_sequence),
     };
-    let placeholder = vec![0x00; COMPLETE_PLAINTEXT_V1.len() + ea_crypto::AEAD_OVERHEAD];
+    let placeholder = vec![0x00; plaintext.len() + ea_crypto::AEAD_OVERHEAD];
     let draft =
         ManifestCoreV1::new(fields(), &placeholder).expect("das Fixture-Manifest muss kodieren");
     let aad = ea_crypto::payload_aad(draft.exact_bytes());
     let ciphertext = ea_crypto::aead_seal(
         &SecretBytes::new(complete_cek(chain_sequence)),
         &SecretBytes::new(complete_nonce(chain_sequence)),
-        ea_crypto::SecretVec::new(COMPLETE_PLAINTEXT_V1.to_vec()),
+        ea_crypto::SecretVec::new(plaintext.to_vec()),
         &aad,
     )
     .expect("der Fixture-Klartext muss sich verschluesseln lassen");
@@ -2888,6 +2917,14 @@ pub struct DestructionSpec {
     pub duplicate_event_id: bool,
     /// Ob der Vorgang in der ZWEITEN Loeschzeugen-Lease autorisiert ist.
     pub second_lease: bool,
+    /// WELCHE Eintraege die Autorisierung nennt.
+    ///
+    /// `None` steht fuer das Pseudoziel `[marker; 32]` auf der
+    /// `authorizationSequence` — genug fuer `ea-verify`, das die Ziele nie
+    /// liest. Ein Leser, der einen `.eds` ueber die Ziele der Autorisierung
+    /// aufloest, braucht dagegen den ECHTEN Eintragshash darin; dafuer setzt
+    /// [`DestructionSpec::targeting`] das Feld.
+    pub targets: Option<Vec<DestructionTargetV1>>,
 }
 
 impl DestructionSpec {
@@ -2901,7 +2938,18 @@ impl DestructionSpec {
             attestation: false,
             duplicate_event_id: false,
             second_lease: false,
+            targets: None,
         }
+    }
+
+    /// Derselbe Vorgang, dessen Autorisierung GENAU diesen Eintrag nennt.
+    #[must_use]
+    pub fn targeting(mut self, entry_hash: EntryHash, chain_sequence: u64) -> Self {
+        self.targets = Some(vec![DestructionTargetV1::new(
+            *entry_hash.as_bytes(),
+            chain_sequence,
+        )]);
+        self
     }
 
     /// Derselbe Vorgang, autorisiert in der ZWEITEN Loeschzeugen-Lease.
@@ -3124,8 +3172,13 @@ fn push_destruction(
     let destruction_id = DestructionId::try_from(&[spec.marker; 16][..])
         .expect("16 Bytes sind eine Vorgangskennung");
     let lease = authority.lease(spec);
-    let authorization =
-        destruction_authorization_bytes(authority, lease, destruction_id, spec.marker);
+    let targets = spec.targets.clone().unwrap_or_else(|| {
+        vec![DestructionTargetV1::new(
+            [spec.marker; 32],
+            lease.authorization_sequence,
+        )]
+    });
+    let authorization = destruction_authorization_bytes(authority, lease, destruction_id, targets);
     let authorization_object_hash = object_hash(&authorization);
     fixture.push_exact_bytes(
         &format!(
@@ -3224,11 +3277,15 @@ fn push_destruction(
 /// Die Signaturen sind darueber hinaus STRUKTURELL gueltig und werden von
 /// dieser Pipeline nie geprueft: `ea-verify` prueft die Transitionen, und die
 /// binden den Objekthash der Autorisierung kryptografisch mit ein.
+///
+/// Die `targets` kommen als Parameter, weil `ea-verify` sie nie liest, ein
+/// Leser sie aber gegen den `entryHash` eines `.eds` haelt — siehe
+/// [`DestructionSpec::targets`].
 fn destruction_authorization_bytes(
     authority: DestructionAuthority,
     lease: DestructionLease,
     destruction_id: DestructionId,
-    marker: u8,
+    targets: Vec<DestructionTargetV1>,
 ) -> Vec<u8> {
     let payload = TrustPayloadV1::destruction_authorization(DestructionAuthorizationFieldsV1 {
         destruction_id,
@@ -3236,10 +3293,7 @@ fn destruction_authorization_bytes(
         registry_version: lease.head.version,
         registry_head_hash: lease.head_hash(),
         authorization_sequence: lease.authorization_sequence,
-        targets: vec![DestructionTargetV1::new(
-            [marker; 32],
-            lease.authorization_sequence,
-        )],
+        targets,
         scope_code: 0,
         legal_reason_code: 0,
     })
@@ -3425,6 +3479,14 @@ const REPORT_FORK_NONCE_MARKERS_V1: [u8; 2] = [0xa1, 0xa2];
 
 /// Der Marker des Vernichtungsvorgangs des Gesamtbestands.
 pub const REPORT_DESTRUCTION_MARKER_V1: u8 = 0x91;
+
+/// Das Fuellbyte des Autorisierungshashes eines GEFAELSCHTEN Stummels.
+///
+/// Er nennt die echte Kennung des abgelegten Vorgangs, aber einen
+/// Autorisierungshash, unter dem im Bestand nichts liegt. Bewusst weder
+/// [`UNRESOLVABLE_STUB_AUTHORIZATION_MARKER_V1`] noch ein Marker eines
+/// abgelegten Objekts, damit die Faelschung an genau EINEM Feld haengt.
+pub const FORGED_STUB_AUTHORIZATION_MARKER_V1: u8 = 0xee;
 
 /// Ein Bestand, der JEDES Pflichtfeld des Berichts fuellt.
 pub struct ReportArchive {
@@ -3615,16 +3677,27 @@ fn report_line() -> ReportLine {
 
 /// Wie der `.eds` des Gesamtbestands mit dessen Vernichtung verbunden ist.
 ///
-/// Die beiden Ausgaenge sind NICHT zwei Sichten auf denselben Bestand, sondern
-/// zwei Bestaende: der Stummel bindet Kennung und Autorisierungshash in seine
+/// Die Ausgaenge sind NICHT Sichten auf denselben Bestand, sondern eigene
+/// Bestaende: der Stummel bindet Kennung und Autorisierungshash in seine
 /// Bytes ein, und damit haengt sein Objekthash daran.
+///
+/// Die drei Glieder der Pruefkette eines Lesers — Kennung, Autorisierungshash,
+/// Ziel der Autorisierung — werden hier EINZELN gebrochen, damit ein Zeuge
+/// jedes Glied fuer sich messen kann und keine zwei Brueche einander decken.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StubAuthorizationV1 {
     /// Der Stummel nennt eine Kennung, die im Bestand auf nichts zeigt.
     Unresolvable,
     /// Der Stummel nennt die Kennung und den Autorisierungshash des Vorgangs,
-    /// der tatsaechlich im Bestand liegt.
+    /// der tatsaechlich im Bestand liegt, und dessen Autorisierung nennt den
+    /// Eintrag des Stummels.
     Resolvable,
+    /// Der Stummel nennt die echte Kennung, aber einen Autorisierungshash,
+    /// unter dem nichts liegt — ein kopiertes Manifest unter fremdem Siegel.
+    ForgedAuthorizationHash,
+    /// Kennung und Autorisierungshash treffen, aber die Autorisierung nennt
+    /// einen ANDEREN Eintrag als den des Stummels.
+    AuthorizationTargetingAnotherEntry,
 }
 
 /// Der Vernichtungsvorgang des Gesamtbestands.
@@ -3632,8 +3705,12 @@ enum StubAuthorizationV1 {
 /// Herausgezogen, weil der aufloesbare Stummel seine Kennung und seinen
 /// Autorisierungshash NENNEN muss, bevor der Vorgang abgelegt ist; beide
 /// entstehen erst in [`push_destruction`].
-fn report_destruction_spec() -> DestructionSpec {
-    DestructionSpec::new(
+///
+/// `target` ist der Eintrag, den die Autorisierung nennt — der des Stummels,
+/// sofern der Bestand nicht gerade das Gegenteil zeigen soll. `None` laesst
+/// das Pseudoziel aus [`DestructionSpec::new`] stehen.
+fn report_destruction_spec(target: Option<(EntryHash, u64)>) -> DestructionSpec {
+    let spec = DestructionSpec::new(
         REPORT_DESTRUCTION_MARKER_V1,
         &[
             DESTRUCTION_STATE_REQUESTED_V1,
@@ -3641,7 +3718,11 @@ fn report_destruction_spec() -> DestructionSpec {
             DESTRUCTION_STATE_COMPLETE_MANAGED_SCOPE_V1,
         ],
     )
-    .with_attestation()
+    .with_attestation();
+    match target {
+        Some((entry_hash, chain_sequence)) => spec.targeting(entry_hash, chain_sequence),
+        None => spec,
+    }
 }
 
 /// Kennung und Autorisierungshash dieses Vorgangs, VORAB gerechnet.
@@ -3651,10 +3732,14 @@ fn report_destruction_spec() -> DestructionSpec {
 /// der echten Vernichtung unveraendert am Ende des Bestands — aus dem Grund,
 /// der dort steht. Zulaessig ist das, weil [`push_destruction`] deterministisch
 /// ist: die Kennung kommt aus dem Marker, und Ed25519 signiert nach RFC 8032
-/// ohne Zufall.
-fn report_destruction_join(authority: DestructionAuthority) -> (DestructionId, ObjectHash) {
+/// ohne Zufall. Der Aufrufer reicht DENSELBEN Spec, den er spaeter ablegt —
+/// sonst rechnete der Join einen Hash vor, der im Bestand nie erscheint.
+fn report_destruction_join(
+    authority: DestructionAuthority,
+    spec: &DestructionSpec,
+) -> (DestructionId, ObjectHash) {
     let mut scratch = ArchiveFixture::new();
-    let built = push_destruction(&mut scratch, authority, &report_destruction_spec());
+    let built = push_destruction(&mut scratch, authority, spec);
     (built.destruction_id, built.authorization_object_hash)
 }
 
@@ -3675,10 +3760,14 @@ pub fn complete_report_archive() -> ReportArchive {
 /// Derselbe Bestand, dessen `.eds` die Vernichtung darin AUFLOEST.
 ///
 /// Der Stummel traegt `DestructionId([REPORT_DESTRUCTION_MARKER_V1; 16])` und
-/// den Autorisierungshash des abgelegten Vorgangs; der Join gegen
-/// `VerificationReportV1::authorized_destructions` trifft damit. Alles Uebrige
-/// ist byteweise der Bestand von [`complete_report_archive`] — bis auf den
-/// Stummel selbst, dessen Objekthash sich mit seinen Feldern aendert.
+/// den Autorisierungshash des abgelegten Vorgangs, und dessen Autorisierung
+/// nennt unter `targets` den Eintragshash und die Sequenz des Stummels. Die
+/// Pruefkette eines Lesers — Kennung gegen
+/// `VerificationReportV1::authorized_destructions`, Hash gegen den Hash des
+/// Berichts, Eintrag gegen die Ziele der Autorisierung — schliesst sich damit
+/// an jedem Glied. Alles Uebrige ist byteweise der Bestand von
+/// [`complete_report_archive`] — bis auf den Stummel selbst, dessen Objekthash
+/// sich mit seinen Feldern aendert.
 ///
 /// # Panics
 ///
@@ -3686,6 +3775,38 @@ pub fn complete_report_archive() -> ReportArchive {
 #[must_use]
 pub fn report_archive_with_a_resolvable_stub() -> ReportArchive {
     report_archive(StubAuthorizationV1::Resolvable)
+}
+
+/// Derselbe Bestand mit einem GEFAELSCHTEN `.eds`.
+///
+/// Der Stummel nennt die echte Kennung des abgelegten Vorgangs, aber als
+/// Autorisierungshash `[FORGED_STUB_AUTHORIZATION_MARKER_V1; 32]`. Ein Join,
+/// der allein ueber die Kennung laeuft, hielte ihn fuer aufgeloest; die
+/// Pruefkette bricht am zweiten Glied.
+///
+/// # Panics
+///
+/// Wie [`complete_report_archive`].
+#[must_use]
+pub fn report_archive_with_a_stub_naming_a_forged_authorization_hash() -> ReportArchive {
+    report_archive(StubAuthorizationV1::ForgedAuthorizationHash)
+}
+
+/// Derselbe Bestand, dessen Vernichtung einen ANDEREN Eintrag nennt.
+///
+/// Kennung und Autorisierungshash des Stummels treffen den abgelegten
+/// Vorgang; dessen Autorisierung nennt aber das Pseudoziel
+/// `[REPORT_DESTRUCTION_MARKER_V1; 32]` statt des Stummel-Eintrags. Die
+/// Pruefkette bricht am dritten Glied. Dieser Bestand unterscheidet sich von
+/// [`report_archive_with_a_resolvable_stub`] also in Autorisierung UND Stummel,
+/// weil der Stummel den Hash der anderen Autorisierung traegt.
+///
+/// # Panics
+///
+/// Wie [`complete_report_archive`].
+#[must_use]
+pub fn report_archive_with_a_stub_of_an_authorization_targeting_another_entry() -> ReportArchive {
+    report_archive(StubAuthorizationV1::AuthorizationTargetingAnotherEntry)
 }
 
 fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
@@ -3712,6 +3833,7 @@ fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
     let mut previous_entry_hash: Option<EntryHash> = None;
     let mut head_entry_hash = None;
     let mut destroyed_stub_object_hash = None;
+    let mut destruction_spec = None;
 
     // Die Sequenzen bis oberhalb der Luecke, in AUFSTEIGENDER Ordnung: nur
     // vorwaerts laesst sich eine Registrierungslinie nachziehen.
@@ -3730,6 +3852,7 @@ fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
             plan_hash,
             sequence,
             previous_entry_hash,
+            COMPLETE_PLAINTEXT_V1,
         );
         let entry_bytes = encode_entry_package(&entry)
             .expect("das Fixture-Eintragspaket muss kodieren")
@@ -3747,13 +3870,21 @@ fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
         // ausdruecklich NICHT abgelegt. Genau so sieht ein autorisiert
         // vernichteter Eintrag aus, und genau so entsteht die Luecke.
         if sequence == REPORT_DESTROYED_STUB_SEQUENCE_V1 {
+            // Die Autorisierung nennt den Eintrag des Stummels — ausser der
+            // Bestand soll gerade zeigen, was geschieht, wenn sie es nicht tut.
+            let spec = report_destruction_spec(match stub_authorization {
+                StubAuthorizationV1::AuthorizationTargetingAnotherEntry => None,
+                _ => Some((entry_hash, sequence)),
+            });
+            let (destruction_id, authorization_object_hash) =
+                report_destruction_join(line.authority, &spec);
+            destruction_spec = Some(spec);
             destroyed_stub_object_hash = Some(match stub_authorization {
                 StubAuthorizationV1::Unresolvable => {
                     push_destroyed_stub_for(&mut fixture, sequence, &entry, entry_object_hash)
                 }
-                StubAuthorizationV1::Resolvable => {
-                    let (destruction_id, authorization_object_hash) =
-                        report_destruction_join(line.authority);
+                StubAuthorizationV1::Resolvable
+                | StubAuthorizationV1::AuthorizationTargetingAnotherEntry => {
                     push_destroyed_stub_authorized_by(
                         &mut fixture,
                         sequence,
@@ -3763,6 +3894,15 @@ fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
                         authorization_object_hash,
                     )
                 }
+                StubAuthorizationV1::ForgedAuthorizationHash => push_destroyed_stub_authorized_by(
+                    &mut fixture,
+                    sequence,
+                    &entry,
+                    entry_object_hash,
+                    destruction_id,
+                    ObjectHash::try_from(&[FORGED_STUB_AUTHORIZATION_MARKER_V1; 32][..])
+                        .expect("32 Bytes sind ein Objekthash"),
+                ),
             });
             continue;
         }
@@ -3845,6 +3985,7 @@ fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
             own_plan_hash,
             REPORT_DUPLICATE_SEQUENCE_V1,
             previous_entry_hash,
+            COMPLETE_PLAINTEXT_V1,
         );
         let bytes = encode_entry_package(&entry)
             .expect("das Fixture-Eintragspaket muss kodieren")
@@ -3912,7 +4053,7 @@ fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
     let destructions = vec![push_destruction(
         &mut fixture,
         line.authority,
-        &report_destruction_spec(),
+        &destruction_spec.expect("der Stummel hat den Vorgang festgelegt"),
     )];
 
     // DAS NICHT-ARCHIVOBJEKT: Bytes OHNE Exact-Object-Praefix. Sie sind kein

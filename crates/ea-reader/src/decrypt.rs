@@ -179,9 +179,18 @@ struct SchemaColumnsV1 {
 /// bewusster Zielwahl statt beliebiger Herausgabe) und die Produktinvariante
 /// „no decrypted content enters OPFS bytes in the clear".
 ///
-/// Die Ausleihform macht die Reichweite des Klartexts zu einer TYPAUSSAGE: er
-/// lebt genau so lange wie der Aufruf. ACHT Zugriffe, davon zwei ausleihend,
-/// und jede spaetere Aufgabe dieses Plans benutzt AUSSCHLIESSLICH sie.
+/// Was die Ausleihform ZUSAGT, ist genau das, was [`ea_crypto::SecretVec::with_exposed`]
+/// zusagt, und nicht mehr: die AUSLEIHE endet mit dem Aufruf, und niemand
+/// bekommt aus Versehen einen Puffer in die Hand. Sie macht Kopien NICHT
+/// unmoeglich — `with_plaintext(<[u8]>::to_vec)` uebersetzt und liefert einen
+/// gewoehnlichen `Vec<u8>`, den kein `ZeroizeOnDrop` mehr schuetzt. Eine
+/// solche Kopie ist eine BEWUSSTE Entscheidung des Aufrufers, sichtbar an der
+/// Aufrufstelle; sie gehoert ihm, und mit ihr die Pflicht, sie selbst zu
+/// ueberschreiben oder gar nicht erst anzulegen. Die Aufgabe „Sitzungssperre,
+/// Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales
+/// Audit" ist die einzige, die eine solche Kopie braucht. ACHT Zugriffe,
+/// davon zwei ausleihend, und jede spaetere Aufgabe dieses Plans benutzt
+/// AUSSCHLIESSLICH sie.
 ///
 /// # Benannte Restfrage: `ea_schema::ValidatedPayload` loescht sich nicht
 ///

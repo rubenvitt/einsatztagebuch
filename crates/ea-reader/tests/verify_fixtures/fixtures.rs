@@ -39,7 +39,7 @@ use ea_reader::{
     SilentObserver, UnlockedVault, VaultContentsV1,
 };
 use ea_trust::decode_trust_anchor;
-use ea_types::{EntryHash, Hash32, UnixMillis, VerificationStatus};
+use ea_types::{EntryHash, Hash32, ObjectHash, UnixMillis, VerificationStatus};
 use ea_verify::{DecryptionErrorV1, ManifestSignatureErrorV1};
 
 use super::verify_support::{self, archive_support::ArchiveFixture};
@@ -158,6 +158,10 @@ static NO_RECOVERY_GRANT_ARCHIVE_V1: OnceLock<verify_support::ChainArchive> = On
 static UNKNOWN_WRITER_ARCHIVE_V1: OnceLock<verify_support::WriterArchive> = OnceLock::new();
 static UNRESOLVABLE_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
 static RESOLVABLE_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
+static FORGED_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
+static FOREIGN_TARGET_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
+static GENESIS_PLAINTEXT_ARCHIVE_V1: OnceLock<verify_support::CompleteArchive> = OnceLock::new();
+static GENESIS_PLAINTEXT_V1: OnceLock<Vec<u8>> = OnceLock::new();
 
 /// Der lueckenlose Bestand: GENAU EIN Eintrag auf
 /// [`verify_support::COMPLETE_GENESIS_SEQUENCE_V1`], mit echter HPKE-Kapselung
@@ -173,6 +177,37 @@ pub fn complete_archive() -> &'static ArchiveFixture {
 
 fn complete() -> &'static verify_support::CompleteArchive {
     COMPLETE_ARCHIVE_V1.get_or_init(verify_support::complete_valid_archive)
+}
+
+/// Der lueckenlose Bestand, dessen einziger Eintrag den EINGEFRORENEN
+/// Genesis-Klartext traegt.
+///
+/// Das ist der EINZIGE Bestand dieses Moduls mit schemagueltigem Klartext, und
+/// er ist der Traeger des vollen Erfolgspfads von `decrypt_verified`: alle
+/// anderen Bestaende tragen `verify_support::COMPLETE_PLAINTEXT_V1`, an dem
+/// die Schemabestimmung erwartungsgemaess scheitert. Er entsteht ueber
+/// `complete_valid_archive_with_plaintext` und damit ueber DENSELBEN Bau wie
+/// [`complete_archive`]; nur der Klartext ist ein anderer. Derselbe Anker,
+/// derselbe Tresor.
+#[must_use]
+pub fn complete_archive_with_a_genesis_plaintext() -> &'static ArchiveFixture {
+    &GENESIS_PLAINTEXT_ARCHIVE_V1
+        .get_or_init(|| verify_support::complete_valid_archive_with_plaintext(genesis_plaintext()))
+        .fixture
+}
+
+/// Der eingefrorene Genesis-Vektor aus `vectors/format/payload-v1/genesis.hex`
+/// — dieselbe Quelle, gegen die `crates/ea-schema/tests/v1_validation.rs`
+/// seine Bestimmung misst.
+///
+/// Aus dem Vektor und nicht aus `ea_schema::encode_payload`: der Zeuge soll
+/// den Klartext gegen etwas messen, das NICHT der Reader selbst erzeugt hat.
+#[must_use]
+pub fn genesis_plaintext() -> &'static [u8] {
+    GENESIS_PLAINTEXT_V1.get_or_init(|| {
+        hex::decode(include_str!("../../../../vectors/format/payload-v1/genesis.hex").trim_end())
+            .expect("der eingefrorene Genesis-Vektor ist gueltiges Hex")
+    })
 }
 
 /// Die EXAKTEN Ankerbytes der Fixture-Registrierungslinie.
@@ -217,6 +252,18 @@ pub fn entry_without_own_grant() -> &'static ArchiveFixture {
 #[must_use]
 pub fn archive_with_a_forged_historical_grant() -> &'static ArchiveFixture {
     &forged_historical().archive.fixture
+}
+
+/// Der Objekthash des gefaelschten historischen Grants in
+/// [`archive_with_a_forged_historical_grant`].
+///
+/// Er liegt UNTER dem des initialen eigenen Grants — die Fixture mahlt ihn so
+/// —, und `inventory.grants()` liegt aufsteigend nach Objekthash. Ein
+/// `own_grant`, das die Art nicht filtert, faende deshalb ZUERST die
+/// Faelschung; genau diese Ordnung macht den Zeugen ueberhaupt scharf.
+#[must_use]
+pub fn forged_historical_grant_object_hash() -> ObjectHash {
+    forged_historical().forged_grant_object_hash
 }
 
 fn forged_historical() -> &'static verify_support::ForgedHistoricalGrantArchive {
@@ -280,11 +327,40 @@ pub fn stub_without_resolvable_authorization() -> &'static ArchiveFixture {
 /// Derselbe Bestand, dessen `.eds` die Vernichtung darin AUFLOEST.
 ///
 /// Der Stummel nennt die Kennung und den Autorisierungshash des Vorgangs, der
-/// tatsaechlich abgelegt ist: `autorisiert vernichtet`.
+/// tatsaechlich abgelegt ist, und dessen Autorisierung nennt den Eintrag des
+/// Stummels: `autorisiert vernichtet`.
 #[must_use]
 pub fn stub_with_resolvable_authorization() -> &'static ArchiveFixture {
     &RESOLVABLE_STUB_ARCHIVE_V1
         .get_or_init(verify_support::report_archive_with_a_resolvable_stub)
+        .fixture
+}
+
+/// Derselbe Bestand mit einem GEFAELSCHTEN `.eds`.
+///
+/// Ein kopiertes, korrekt signiertes Manifest unter der ECHTEN Kennung des
+/// abgelegten Vorgangs, aber mit einem Autorisierungshash, unter dem im
+/// Bestand nichts liegt. Der Bericht traegt dazu keinen einzigen Befund —
+/// `ea-verify` prueft die beiden Stummelfelder nicht —, und genau deshalb muss
+/// der Reader sie pruefen: `ungeklaerte Luecke`.
+#[must_use]
+pub fn stub_naming_a_forged_authorization_hash() -> &'static ArchiveFixture {
+    &FORGED_STUB_ARCHIVE_V1
+        .get_or_init(verify_support::report_archive_with_a_stub_naming_a_forged_authorization_hash)
+        .fixture
+}
+
+/// Derselbe Bestand, dessen Vernichtung einen ANDEREN Eintrag nennt.
+///
+/// Kennung und Autorisierungshash des Stummels treffen; die Autorisierung
+/// selbst nennt unter `targets` aber nicht den Eintrag des Stummels. Die
+/// Pruefkette bricht am letzten Glied: `ungeklaerte Luecke`.
+#[must_use]
+pub fn stub_of_an_authorization_targeting_another_entry() -> &'static ArchiveFixture {
+    &FOREIGN_TARGET_STUB_ARCHIVE_V1
+        .get_or_init(
+            verify_support::report_archive_with_a_stub_of_an_authorization_targeting_another_entry,
+        )
         .fixture
 }
 

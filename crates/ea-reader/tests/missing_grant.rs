@@ -53,6 +53,23 @@ fn missing_grant_gap_unknown_key_and_invalid_never_collapse() {
         let state = classification.state_of(case.key).expect(case.label);
         assert_eq!(state.verification(), case.expected, "{}", case.label);
         assert_eq!(state.detail_code(), case.expected_code, "{}", case.label);
+        // DAS ZEUGENPAAR GIBT ES GENAU FUER `verifiziert`. Jede andere Zeile —
+        // auch `unbekannter Schluessel`, dessen Eintrag sein `objectResult`
+        // behaelt — bekommt keins: `decrypt_verified` darf fuer sie gar nicht
+        // erst formulierbar sein (`web-reader-design.md` §9).
+        let witnessed = case.expected == VerificationStatus::Verified;
+        assert_eq!(
+            classification.verified_entry(case.key).is_some(),
+            witnessed,
+            "{}",
+            case.label
+        );
+        assert_eq!(
+            classification.verified_grant(case.key).is_some(),
+            witnessed,
+            "{}",
+            case.label
+        );
     }
 }
 
