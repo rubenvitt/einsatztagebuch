@@ -174,14 +174,29 @@ async function stillDelivers(handle: FileModeDirectoryHandleV1): Promise<boolean
   return (await handle.queryPermission({ mode: 'read' })) === 'granted'
 }
 
+/**
+ * Der Weg EINER Nachricht zum Worker und zurück.
+ *
+ * Er steht als eigener Typ aus demselben Grund wie [`FileModePushPort`]: das
+ * ZUSAMMENSETZEN unten — anfangen, durchlaufen, den Ausfall vermerken, öffnen
+ * — ist die einzige Entscheidungsfolge dieser Datei, und ohne einen Port wäre
+ * sie nur über einem echten Worker samt wasm-Modul zu fahren und damit von
+ * keinem Zeugen erreichbar. Der Port ist der Aufruf und nicht die Brücke: er
+ * kennt weder Sitzung noch Ordnerkennung.
+ */
+export type FileModeWorkerPort = (request: ReaderWorkerMessage) => Promise<EaOpfsResponse>
+
 /** Eine Nachricht ohne Antwortwert; ein Fehlschlag reist als stabiler Code. */
-async function callVoid(request: ReaderWorkerMessage): Promise<void> {
-  raise(await callReaderWorker(request))
+async function callVoid(call: FileModeWorkerPort, request: ReaderWorkerMessage): Promise<void> {
+  raise(await call(request))
 }
 
 /** Eine Nachricht, deren Antwort einen Text trägt — DTO, Kennung oder Endung. */
-async function callForText(request: ReaderWorkerMessage): Promise<string> {
-  const response = raise(await callReaderWorker(request))
+async function callForText(
+  call: FileModeWorkerPort,
+  request: ReaderWorkerMessage,
+): Promise<string> {
+  const response = raise(await call(request))
   if (response.status === undefined) {
     throw new Error('Der Worker hat auf eine Datei-Modus-Nachricht keinen Wert geliefert.')
   }
@@ -201,6 +216,59 @@ function raise(response: EaOpfsResponse): Extract<EaOpfsResponse, { ok: true }> 
     throw new Error(response.code)
   }
   return response
+}
+
+/**
+ * Der Komfortweg als GANZER Zug: anfangen, durchlaufen, den Ausfall vermerken,
+ * öffnen.
+ *
+ * Die Reihenfolge ist die ganze Aussage dieser Funktion, und jeder ihrer vier
+ * Schritte trägt seinen Grund:
+ *
+ * - Gefragt wird VOR und NACH dem Durchlauf, weil ein `FileSystemDirectoryHandle`
+ *   eine entzogene Berechtigung erst beim nächsten Zugriff meldet — also mitten
+ *   im Durchlauf und nicht an seinem Anfang. Ohne die zweite Frage klassifizierte
+ *   Rust einen TEILbestand, und weil eine Abschneidung am Kettenende keine Lücke
+ *   erzeugt, stünde über einem halben Archiv „vollständig geprüft".
+ * - Der Ausfall wird VERMERKT und nicht übersetzt: den stabilen Code
+ *   (`EA-ARCHIVE-UNAVAILABLE`) gibt danach das Öffnen heraus, in Rust.
+ * - Der Griff wird auch nach einem Abbruch EINGELÖST, denn das Öffnen ist der
+ *   einzige Zug, der die angefangene Quelle aus der Tabelle des Workers nimmt;
+ *   ohne ihn bliebe ein Teilbestand dort liegen. Sein Ergebnis interessiert
+ *   dann niemanden — geworfen wird der ursprüngliche Code, unverändert.
+ */
+export async function openDirectoryOverPort(
+  handle: FileModeDirectoryHandleV1,
+  session: number,
+  call: FileModeWorkerPort,
+): Promise<FileModeArchiveView> {
+  const directory = Number(await callForText(call, { kind: 'file-mode-begin-directory' }))
+  const open = async (): Promise<string> =>
+    callForText(call, {
+      kind: 'file-mode-open-directory',
+      session,
+      handle: directory,
+      effectiveNowMs: BigInt(Date.now()),
+    })
+
+  try {
+    if (await stillDelivers(handle)) {
+      await walkDirectoryHandle(handle, async (pathHint, bytes) => {
+        await callVoid(call, { kind: 'file-mode-push-blob', handle: directory, pathHint, bytes })
+      })
+    }
+    if (!(await stillDelivers(handle))) {
+      await callVoid(call, { kind: 'file-mode-directory-unavailable', handle: directory })
+    }
+  } catch (reason) {
+    await callVoid(call, { kind: 'file-mode-directory-unavailable', handle: directory }).catch(
+      () => undefined,
+    )
+    await open().catch(() => undefined)
+    throw reason
+  }
+
+  return JSON.parse(await open()) as FileModeArchiveView
 }
 
 /**
@@ -238,14 +306,16 @@ let extensionRequest: Promise<void> | undefined
 /** Die echte Brücke: drei Glieder, jedes eine Nachricht an den EINEN Worker. */
 export const fileModeBridge: FileModeBridge = {
   bundleExtension: () => {
-    extensionRequest ??= callForText({ kind: 'file-mode-bundle-extension' }).then(extension => {
-      knownBundleExtension = extension
-    })
+    extensionRequest ??= callForText(callReaderWorker, { kind: 'file-mode-bundle-extension' }).then(
+      extension => {
+        knownBundleExtension = extension
+      },
+    )
     return knownBundleExtension
   },
 
   openBundle: async bytes => {
-    const status = await callForText({
+    const status = await callForText(callReaderWorker, {
       kind: 'file-mode-open-bundle',
       session: await readerSession(),
       bytes,
@@ -259,39 +329,6 @@ export const fileModeBridge: FileModeBridge = {
     return JSON.parse(status) as FileModeArchiveView
   },
 
-  openDirectory: async handle => {
-    const session = await readerSession()
-    const directory = Number(await callForText({ kind: 'file-mode-begin-directory' }))
-    const open = async (): Promise<string> =>
-      callForText({
-        kind: 'file-mode-open-directory',
-        session,
-        handle: directory,
-        effectiveNowMs: BigInt(Date.now()),
-      })
-
-    try {
-      if (await stillDelivers(handle)) {
-        await walkDirectoryHandle(handle, async (pathHint, bytes) => {
-          await callVoid({ kind: 'file-mode-push-blob', handle: directory, pathHint, bytes })
-        })
-      }
-      if (!(await stillDelivers(handle))) {
-        await callVoid({ kind: 'file-mode-directory-unavailable', handle: directory })
-      }
-    } catch (reason) {
-      // Der Griff wird auch nach einem Abbruch EINGELÖST, denn das Öffnen ist
-      // der einzige Zug, der die angefangene Quelle aus der Tabelle des
-      // Workers nimmt; ohne ihn bliebe ein Teilbestand dort liegen. Sein
-      // Ergebnis interessiert hier niemanden — geworfen wird der
-      // ursprüngliche Code, unverändert.
-      await callVoid({ kind: 'file-mode-directory-unavailable', handle: directory }).catch(
-        () => undefined,
-      )
-      await open().catch(() => undefined)
-      throw reason
-    }
-
-    return JSON.parse(await open()) as FileModeArchiveView
-  },
+  openDirectory: async handle =>
+    openDirectoryOverPort(handle, await readerSession(), callReaderWorker),
 }
