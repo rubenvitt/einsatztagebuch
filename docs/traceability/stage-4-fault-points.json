@@ -98,5 +98,37 @@
       "brackets": "keiner der vier Abweisungsgruende — falscher Startkopf, fehlendes Objekt, Luecke, Fork — bewegt Zustand, und jeder traegt seinen EIGENEN Code statt eines Sammelcodes",
       "witness": "crates/ea-reader/tests/sync_attacks.rs::every_refusal_carries_its_own_code_and_leaves_the_cursor_where_it_was"
     }
+  ],
+  "verification": [
+    {
+      "name": "substituted-archive-own-trust-chain",
+      "brackets": "ein untergeschobener, in sich VOLLSTAENDIGER Fremdbestand — eigener Root, eigene Registry, eigene Schreiberzertifikate, eigene Signaturen — gegen den Anker, den nur der Tresor liefert: der Lauf faellt an Gate trust mit NULL objectResults und ohne eine einzige Zustandszeile, statt still teilzuverifizieren; derselbe Bestand gegen den eigenen Anker ist vollstaendig verifiziert",
+      "witness": "crates/ea-reader/tests/pinned_anchor.rs::a_substituted_archive_with_its_own_complete_trust_chain_fails_here"
+    },
+    {
+      "name": "missing-own-grant",
+      "brackets": "ein gueltiger Eintrag, dessen einziger Grant einen fremden Empfaenger nennt: exakt fehlender Grant, Present, ohne Detailgrund, ohne decryptionErrors-Eintrag, ohne gaps-Zeile, is_fully_verified bleibt wahr — und ohne Zeugenpaar, sodass decrypt_verified gar nicht erst formulierbar ist",
+      "witness": "crates/ea-reader/tests/missing_grant.rs::a_valid_entry_without_an_own_grant_is_exactly_missing_grant"
+    },
+    {
+      "name": "own-thumbprint-wrong-material",
+      "brackets": "ein Grant auf den EIGENEN Abdruck, gekapselt auf fremdes Material: EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED unter dem Objekthash des GRANTS, und der Eintrag wird als unbekannter Schluessel gefuehrt — nie als fehlender Grant und nie als ungueltig, weil die Vorrangordnung nach Objektart trennt",
+      "witness": "crates/ea-reader/tests/missing_grant.rs::missing_grant_gap_unknown_key_and_invalid_never_collapse"
+    },
+    {
+      "name": "stub-without-authorization",
+      "brackets": "ein .eds-Stummel, dessen Pruefkette an EINEM Glied bricht — destructionId auf keine autorisierte Vernichtung des Bestands, destructionAuthorizationObjectHash ungleich dem von den Transitionen authentifizierten Hash, oder Autorisierung ohne den entryHash und die Sequenz des Stummels unter targets —: ungeklaerte Luecke in der Eintragsdimension, Gap in der Verifikationsdimension, kein objectResult, kein Grant nennt seinen entryHash, kein Zeugenpaar, und der Bericht traegt ueber keinen der drei Brueche einen zusaetzlichen Befund; nur der Zwilling mit geschlossener Kette ist autorisiert vernichtet bei sonst gleichem Ausgang; die Entkapselung, die der Bestand ueber seine anderen Eintraege erreicht, ist fuer den Stummel in keinem der beiden Ausgaenge formulierbar",
+      "witness": "crates/ea-reader/tests/destroyed_stub.rs::a_stub_reaches_no_decapsulation_in_either_outcome"
+    },
+    {
+      "name": "stale-witness",
+      "brackets": "ein Zeugenpaar aus einem FRUEHEREN classify-Lauf an decrypt_verified mit dem effectiveNow eines spaeteren: EA-READER-WITNESS-STALE vor jeder Entkapselung, weil Gate recipient-grant die Nutzungsfrist gegen genau den Wert des Laufs gemessen hat, in dem der Zeuge entstand — exakt und ohne Toleranz",
+      "witness": "crates/ea-reader/tests/historical_expiry.rs::a_witness_from_an_earlier_run_is_refused"
+    },
+    {
+      "name": "historical-grant-unresolvable",
+      "brackets": "ein gefaelschter historischer Grant neben dem initialen eigenen: er hinterlaesst NICHTS — keinen signatureErrors- und keinen decryptionErrors-Eintrag, keinen Detailgrund, ein wortgleiches Protokoll —, weil own_grant nur initiale Grants sieht und EA-VERIFY-GRANT-AUTHORIZATION-UNVERIFIABLE ueber die Pipeline unerreichbar ist; der Zeuge misst diese Abwesenheit und ist erst nachzuschaerfen, wenn Stufe 5 die grantAuthorization aufloest",
+      "witness": "crates/ea-reader/tests/historical_expiry.rs::a_forged_historical_grant_leaves_no_trace_at_all"
+    }
   ]
 }

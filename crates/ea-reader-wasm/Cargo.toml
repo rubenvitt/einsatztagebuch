@@ -54,6 +54,33 @@ web-sys.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Die sieben Kanten der per `#[path]` eingebundenen Fixturekette, die
+# `tests/verify_browser.rs` mitbringt. Sie stehen NICHT deshalb hier, weil die
+# Bruecke sie benennt — ihre eigene Flaeche kennt keinen dieser Typen —,
+# sondern weil `crates/ea-verify/tests/support/mod.rs` und die drei Module, die
+# es seinerseits einbindet, sie im Quelltext nennen. `hex` und `ea-crypto`
+# fehlen in dieser Aufzaehlung mit Absicht: beide stehen bereits in
+# `[dependencies]` und sind einem Testziel damit ohnehin sichtbar.
+#
+# `ArchiveFixture` implementiert `ArchiveSource` selbst; der Bestand des
+# Browserzeugen kommt also aus derselben Registrierungslinie wie der des
+# Wirtszeugen und nicht aus einem zweiten, hier gebastelten.
+ea-archive.workspace = true
+# `encode_entry_package`, `encode_trust` und die Manifest-Kernfelder der
+# Fixturekette.
+ea-format.workspace = true
+# `TrustedTimeState` in der Trust- und der Archivkulisse.
+ea-time.workspace = true
+# `decode_trust_anchor` und `TrustObjectSource` — der Anker, den der Tresor des
+# Zeugen pinnt, kommt aus der Linie und nie aus dem Bestand.
+ea-trust.workspace = true
+# Hash-, Sequenz- und Statusbegriffe der Fixturekette.
+ea-types.workspace = true
+# `SigningKey`: die Fixturelinie signiert echt, damit ein gruenes Gate im
+# Browser dieselbe Rechnung bezeugt wie auf dem Wirt.
+ed25519-dalek.workspace = true
+# Der handgeschriebene CBOR-Weg der Trust- und Formatkulisse.
+minicbor.workspace = true
 # Nur fuer `tests/bridge_boundary.rs`. Dev-Kanten sind hier unbedenklich: die
 # wasm32-Zeile des Gates faehrt ohne `--all-targets` und zieht sie nie in den
 # Graphen.

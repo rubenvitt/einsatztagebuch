@@ -30,6 +30,17 @@ ea-crypto.workspace = true
 # `DeviceCertificateFieldsV1` und `CertificateKindV1` sind die EINGABE von
 # `ReaderKeyProfile::validate`.
 ea-format.workspace = true
+# Die Schemabestimmung des geoeffneten Eintrags. `SchemaRegistry::schemas()` ist
+# die einzige Quelle der fuenf Kennungen, und `derive_view` der einzige Erzeuger
+# einer `DerivedView`; `decrypt_verified` probiert die Deskriptoren in der
+# gelieferten Reihenfolge durch, weil `decode_common_header` `pub(crate)` ist und
+# `ea-schema` keinen Weg herausgibt, die Kennung aus Klartextbytes zu lesen. Ein
+# zweiter CBOR-Parser fuer denselben Kopf entsteht in dieser Crate deshalb
+# ausdruecklich NICHT. Die Kante steht bereits in `[workspace.dependencies]` der
+# Wurzel, und `ea-schema` fuehrt die wasm32-Positivliste von
+# `verify_quick_commands()` schon selbst; sie nimmt `ea-reader` also nicht davon
+# herunter.
+ea-schema.workspace = true
 # Die drei Stufe-3-Endpunkte des Enrollments reisen ueber
 # `WebauthnCredentialRegistrationV1`, `VaultBlobUploadV1`,
 # `VaultBlobRetrievalRequestV1` und `VaultBlobRetrievalResponseV1`, und
