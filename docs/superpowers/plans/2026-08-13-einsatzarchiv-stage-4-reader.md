@@ -3657,61 +3657,169 @@ git commit -m "feat(reader): decrypt only fully verified entries against the vau
 - Test: `crates/ea-reader/tests/file_mode.rs`
 - Test: `crates/ea-reader/tests/file_mode_anchor.rs`
 - Test: `apps/web/src/features/file-mode/OpenArchivePanel.test.tsx`
+- Test: `apps/web/src/features/file-mode/DirectoryHandle.test.ts`
 - Test: `apps/web/tests/e2e/file-mode.spec.ts`
 - Modify: `crates/ea-reader/src/lib.rs`
+- Modify: `crates/ea-reader/tests/verify_fixtures/fixtures.rs`
 - Modify: `crates/ea-reader-wasm/src/lib.rs`
+- Modify: `crates/ea-ui-contracts/src/emit.rs`
+- Modify: `apps/web/src/bridge/generated-contracts.ts` (GENERIERT — geschrieben von `cargo run --locked -p ea-ui-contracts --bin emit-ts`, nie von Hand)
 - Modify: `apps/web/src/main.tsx`
 - Modify: `docs/traceability/stage-4-fault-points.json`
+- Modify: `docs/traceability/v0.1-requirements.csv`
+
+**Der Files-Block der ersten Fassung war an fünf Stellen falsch, und jede ist gemessen.** `crates/ea-ui-contracts/src/emit.rs` und `apps/web/src/bridge/generated-contracts.ts` fehlten, obwohl die Aufgabe ein Status-DTO über die Brücke schickt: `crates/ea-ui-contracts/src/bin/emit-ts.rs` ist der EINZIGE Schreiber der zwei Kontraktdateien, `apps/web/src/bridge/no-hand-written-contracts.test.ts` verbannt jedes Literal jeder emittierten Vereinigung aus jeder handgeschriebenen Web-Quelle, und `crates/ea-ui-contracts/tests/generated_ts_is_current.rs::the_checked_in_reader_file_is_exactly_what_the_reader_emitter_writes` vergleicht die eingecheckte Datei zeichengleich mit dem Emitterausgang. `docs/traceability/v0.1-requirements.csv` fehlte, obwohl der Task in seinem eigenen Ledgerabsatz zusagt, zwei Belegspalten zu füllen. `crates/ea-reader/tests/verify_fixtures/fixtures.rs` fehlte, obwohl jede der drei neuen Kulissen dort entsteht. `apps/web/src/features/file-mode/DirectoryHandle.test.ts` fehlte, obwohl der Verzeichnisdurchlauf die einzige Stelle ist, an der TypeScript in dieser Aufgabe überhaupt etwas ausrechnet. Und `crates/ea-reader/Cargo.toml` steht AUSDRÜCKLICH NICHT hier: `ea-archive.workspace = true` liegt bereits in `[dependencies]` von `crates/ea-reader/Cargo.toml`, und Cargo stellt die `dependencies` eines Pakets seinen Integrationstestzielen ohnehin bereit — `crates/ea-reader/tests/verify_fixtures/fixtures.rs` benennt `ea_archive::{ArchiveInventory, ArchiveSource}` heute schon.
 
 **Interfaces:**
-- Consumes: `ea_archive::{ArchiveBundleSource, ArchiveBlob, ArchiveError, ArchiveSource, BundleError, BUNDLE_FILE_EXTENSION_V1, BUNDLE_MAGIC_V1, BUNDLE_HEADER_BYTES_V1, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1}` — der reine Buendelleser, den die Aufgabe „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne" aus dem wirtsgebundenen `ea-archive-fs` nach `ea-archive` bewegt; `ea_verify::{verify_archive_observed, VerifyOptions, RecordingObserver, VerificationReportV1, ObjectResultKindV1, ServerConfirmationV1, GATE_ORDER_V1}`; `UnlockedVault` aus der Aufgabe „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel"; `ReaderVerifier::classify`, `ReaderClassification`, `ReaderEntryStateV1` und `PinnedTrustAnchor::from_vault` aus der Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert"; `ReaderMode::File` aus der Aufgabe „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne"; `docs/traceability/stage-4-fault-points.json` aus der Aufgabe „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes".
-- Produces: `ReaderFileMode::{open_bundle, open_bundle_observed, open_directory}`, `ReaderArchiveSourceV1`, `DirectoryHandleSource::{push_blob, blob_count}`, `OpenedArchiveV1::{classification, report, mode}`, der Abschnitt `file-mode` des Szenarienmanifests, und die Belegspalten der Ledgerzeilen `WR-053` und `WR-054`.
+- Consumes: `ea_archive::{ArchiveBlob, ArchiveBundleSource, ArchiveError, ArchiveSource, BundleError, BUNDLE_FILE_EXTENSION_V1, BUNDLE_HEADER_BYTES_V1, BUNDLE_MAGIC_V1, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1}` — der reine Bündelleser, den die Aufgabe „wasm32-Reichweite: `ea-reader`, die Brücken-Crate und die geteilten Browserkerne" aus dem wirtsgebundenen `ea-archive-fs` nach `ea-archive` bewegt hat; `ea_verify::{ObjectResultKindV1, ServerConfirmationV1, GateObserver, RecordingObserver, SilentObserver, VerificationReportV1, GATE_ORDER_V1}` — ALLE über die vorhandenen Re-Exporte von `crates/ea-reader/src/lib.rs` und keine einzige über eine neue Kante; `UnlockedVault` aus der Aufgabe „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel"; `ReaderVerifier::classify`, `ReaderClassification`, `ReaderError` und `PinnedTrustAnchor::from_vault` aus der Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert"; `ReaderMode::File` aus der Aufgabe „wasm32-Reichweite"; `docs/traceability/stage-4-fault-points.json` aus der Aufgabe „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes".
+- Produces: `ReaderFileMode::{open_bundle, open_bundle_observed, open_directory, open_directory_observed}`, `ReaderArchiveSourceV1`, `DirectoryHandleSource::{new, push_blob, blob_count, total_bytes, mark_unavailable}`, `ReaderFileModeError`, `OpenedArchiveV1::{classification, report, mode}`, `file_mode_archive_json`, die sechs Brückenausfuhren von `crates/ea-reader-wasm/src/file_access.rs`, das View-Modell `FileModeArchiveView` in `READER_VIEW_MODELS_V1`, der Abschnitt `file-mode` des Szenarienmanifests, und die Belegspalten der Ledgerzeilen `WR-053` und `WR-054`.
 
-`crates/ea-reader/src/lib.rs` nimmt `mod file_mode;` und `mod archive_source;` samt ihren `pub use`-Bloecken auf, `crates/ea-reader-wasm/src/lib.rs` nimmt `mod file_access;` auf; ohne diese Zeilen uebersetzt der Commit nicht. `apps/web/src/main.tsx` bekommt die Route `/datei`, angehaengt an die Routentabelle aus der Aufgabe „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate"; `apps/web/tests/e2e/file-mode.spec.ts` faehrt genau diese Route an.
+`crates/ea-reader/src/lib.rs` nimmt `mod file_mode;` und `mod archive_source;` samt ihren `pub use`-Blöcken auf, `crates/ea-reader-wasm/src/lib.rs` nimmt `pub mod file_access;` auf; ohne diese Zeilen übersetzt der Commit nicht. `apps/web/src/main.tsx` bekommt die Route `/datei`, angehängt an `EA_WEB_ROUTES` aus der Aufgabe „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate" — die Tabelle führt heute `{ path: '/', label: 'Reader' }` und `{ path: '/enrollment', label: 'Enrollment', render: () => <EnrollmentPage /> }`, und der dritte Eintrag trägt sein `render` genauso; `apps/web/tests/e2e/file-mode.spec.ts` fährt genau diese Route an.
 
-Dies ist der zweite Betriebsmodus aus `web-reader-design.md` §5.2 bis §5.4: die Anwendung oeffnet Archivobjekte direkt aus dem Dateisystem, OHNE jede Serverbeteiligung. Zwei Wege hinein, und nur einer davon funktioniert ueberall. Der universelle Weg nimmt die EINE exportierte Datei durch den gewoehnlichen Dateidialog; er MUSS immer angeboten werden, weil `showDirectoryPicker` in Safari und Firefox fehlt. Der Chromium-Komfortweg bindet ueber `showDirectoryPicker` einen Archivordner oder ein profiliertes Netzlaufwerk dauerhaft an.
+Dies ist der zweite Betriebsmodus aus `web-reader-design.md` §5.2 bis §5.4: die Anwendung öffnet Archivobjekte direkt aus dem Dateisystem, OHNE jede Serverbeteiligung. Zwei Wege hinein, und nur einer davon funktioniert überall. Der universelle Weg nimmt die EINE exportierte Datei durch den gewöhnlichen Dateidialog; er MUSS immer angeboten werden, weil `showDirectoryPicker` in Safari und Firefox fehlt. Der Chromium-Komfortweg bindet über `showDirectoryPicker` einen Archivordner oder ein profiliertes Netzlaufwerk dauerhaft an.
 
-Drei Nicht-Ziele, jedes mit seinem Grund. Es entsteht KEIN zweiter Archivparser: beide Wege muenden in `ea_archive::ArchiveSource`, und die Klassifikation entscheidet weiterhin ausschliesslich das 9-Byte-Exact-Object-Praefix, nie ein Dateiname. Es entsteht KEIN Serveraufruf irgendeiner Art — der Modus ist definiert durch seine Abwesenheit. Und die Ankerbindung wird NICHT neu implementiert: sie kommt fertig aus der Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert", die sie mit ihrem eigenen Zeugen traegt; hier wird belegt, dass der EINSTIEGSPUNKT dieses Modus keinen zweiten Weg zu einem Anker oeffnet.
+Drei Nicht-Ziele, jedes mit seinem Grund. Es entsteht KEIN zweiter Archivparser: beide Wege münden in `ea_archive::ArchiveSource`, und die Klassifikation entscheidet weiterhin ausschliesslich das 9-Byte-Exact-Object-Präfix, nie ein Dateiname. Es entsteht KEIN Serveraufruf irgendeiner Art — der Modus ist definiert durch seine Abwesenheit. Und die Ankerbindung wird NICHT neu implementiert: sie kommt fertig aus der Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert", die sie mit ihrem eigenen Zeugen trägt; hier wird belegt, dass der EINSTIEGSPUNKT dieses Modus keinen zweiten Weg zu einem Anker öffnet.
+
+#### Die zwölf Stellen, an denen die erste Fassung dieses Tasks gegen den Arbeitsbaum falsch war
+
+**1. `PinnedTrustAnchor::from_vault` gibt KEIN `Result`.** `crates/ea-reader/src/anchor.rs` deklariert `pub const fn from_vault(session: &'a UnlockedVault) -> Self` als seinen EINZIGEN Konstruktor; `UnlockedVault.pinned_anchor` ist ein Pflichtfeld, `EA-READER-ANCHOR-MISSING` ist in der Aufgabe davor ersatzlos entfallen. Die Zeile `PinnedTrustAnchor::from_vault(&vault).unwrap()` aus der ersten Fassung übersetzt nicht. Sie steht unten ohne `unwrap`, wie `crates/ea-reader/tests/pinned_anchor.rs::the_anchor_used_is_the_vault_anchor_and_not_the_one_in_the_archive` sie bereits schreibt.
+
+**2. Acht der neun benutzten Kulissenfunktionen existieren nicht.** GEMESSEN in `crates/ea-reader/tests/verify_fixtures/fixtures.rs`: es gibt `unlocked_vault_with_pinned_anchor()`, `vault_pinning(Vec<u8>)`, `complete_archive()`, `complete_archive_anchor_bytes()`, `pinned_anchor_hash()`, `classify()`, `classify_at()`, `EFFECTIVE_NOW` und den Rest der in der Aufgabe davor angelegten Familie. Es gibt NICHT `unlocked_vault()`, `os_wall_clock()`, `exported_bundle_bytes()`, `directory_blobs()`, `bundle_without_receipts()`, `foreign_root_bundle_bytes()`, `vault_pinned_to()` und `foreign_anchor()`. Welche davon ersatzlos entfallen und welche drei neu entstehen, steht in den Punkten 3, 4 und 7.
+
+**3. Die Bündelbytes entstehen VON HAND in der Kulisse, und `ea-archive-fs` wird KEINE Entwicklungskante.** Das ist die teuerste Messung dieses Tasks, und sie hat zwei Hälften. Erstens: `crates/ea-archive` besitzt KEINEN Kodierer. `encode_bundle` liegt modulprivat in `crates/ea-archive-fs/src/bundle.rs`, und der einzige öffentliche Weg zu Containerbytes ist `write_archive_bundle`, das einen `LocalPathBackend` und eine Zieladresse auf der Platte verlangt. Zweitens, und das entscheidet: `crates/ea-reader-wasm/tests/verify_browser.rs` bindet `crates/ea-reader/tests/verify_fixtures/mod.rs` per `#[path]` ein und übersetzt sie für wasm32; jeder Name, den die Kulisse nennt, muss in `[dev-dependencies]` von `crates/ea-reader-wasm/Cargo.toml` stehen, und dort stehen genau `ea-archive`, `ea-format`, `ea-time`, `ea-trust`, `ea-types`, `ed25519-dalek`, `minicbor`, `ea-verify`, `serde_json` und `wasm-bindgen-test`. `ea-archive-fs` steht auf `WASM32_EXEMPT_CRATES` in `tools/xtask/src/main.rs` — sein Eintrag begründet das mit `std::fs`, Verzeichnis-Flush, Rename und Schreibsperren —, und `every_crates_member_is_classified_for_the_wasm32_gate` in `tools/xtask/tests/workspace.rs` erzwingt genau EINE Zuordnung je Mitglied. Eine Dev-Kante von `ea-reader` auf `ea-archive-fs` wäre auf dem Wirt zulässig und im Browserzeugen unübersetzbar.
+
+Der Weg ist deshalb der, den `crates/ea-archive/tests/bundle_reader.rs` schon geht: seine Funktion `hand_built_container(entries: &[(&str, &[u8])]) -> Vec<u8>` baut den Container nach der Moduldoku von `crates/ea-archive/src/bundle.rs` und nach nichts sonst, und ihr Doc-Kommentar schreibt die Begründung bereits aus — ein zweiter Kodierer NEBEN dem Leser wäre ohnehin der schwächere Zeuge, weil beide dieselbe Abweichung trügen und beide grün blieben. Die Kulisse dieses Tasks baut denselben Container über denselben `core`-Mitteln und `ea_archive::BUNDLE_MAGIC_V1`.
+
+EINE Regel kommt dabei hinzu, die `hand_built_container` bewusst dem Aufrufer überlässt: der Index MUSS STRENG aufsteigend über die Adressbytes sortiert sein, sonst weist `ArchiveBundleSource::from_bytes` mit `BundleError::Malformed` ab. `ArchiveFixture` legt seine Blobs in BAUREIHENFOLGE ab (`push_trust_objects` zuerst, dann `.eip`, dann `.eag`), und die Trust-Adressen tragen einen Objekthash im Namen — die Reihenfolge ist also weder sortiert noch vorhersagbar. `exported_bundle_bytes()` sortiert deshalb selbst und behauptet die Duplikatfreiheit mit einer eigenen Zusicherung; ohne diese zwei Zeilen wäre die Kulisse an einem Tag grün und am nächsten rot, je nachdem, welche Hashes die Linie zieht.
+
+**4. Es gibt keine Kulisse „ohne Quittungen", weil es keine MIT gibt — jedenfalls nicht auf dieser Linie.** `fixtures::complete_archive()` ruft `verify_support::complete_valid_archive()`, und `complete_archive_with` legt Trust-Objekte, `.eip` und `.eag` ab und KEINE einzige `.esr`. Der lückenlose Bestand IST also der Bestand ohne Quittungen; `bundle_without_receipts()` entfällt ersatzlos, und die Zusagen über `notServerConfirmed`, `gaps().len() == 0` und `is_fully_verified()` stehen über `complete_archive()`.
+
+Die Gegenkontrolle MIT Quittungen ist `verify_support::receipt_archive(verify_support::ReceiptArchiveSpec::bare().with_receipts())`, und sie trägt eine gemessene Fussangel: JEDER Bestand der Quittungslinie hat die Lücke `0..=1`. Der Grund steht im Doc-Kommentar von `RECEIPT_PRE_ENTRY_GAP_THROUGH_V1` — die Linie braucht drei Köpfe (Policy, Serverzertifikat, Schreiberzertifikat), die ersten beiden verbrauchen die Sequenzfächer null und eins, ein `.eip` darauf ist nicht herstellbar, und `ea_chain::build_chain` meldet das Fehlen zu Recht als Lücke. `is_fully_verified()` prüft `gaps.is_empty()` mit (`crates/ea-verify/src/report.rs`), also ist dieser Bestand NICHT vollständig verifiziert. Eine Zusicherung, die `serverConfirmed` UND `is_fully_verified()` am selben Bestand verlangte, wäre rot — und zwar aus einem Grund, der mit dem Datei-Modus nichts zu tun hat.
+
+Die Gegenkontrolle misst deshalb GENAU EINE Grösse: dass `ServerConfirmationV1::ServerConfirmed` über denselben Weg überhaupt erreichbar ist. `crates/ea-verify/tests/receipt_checkpoint.rs::receipts_confirm_checkpoints_bound_rollback_and_a_stub_stays_a_gap` hält beide Hälften bereits gegeneinander; der Zeuge dieses Tasks ist die Wiederholung dieser einen Spalte durch den DATEI-Eingang, nicht eine zweite Messung von Gate `receipt`.
+
+Und woher der Wert kommt, ist gemessen und keine Vermutung: `confirm_entries` in `crates/ea-verify/src/archive.rs` ist der EINZIGE Erzeuger von `objectResults` — sein Doc-Kommentar sagt „HIER UND NUR HIER" —, es setzt `let mut confirmation = ServerConfirmationV1::NotServerConfirmed;` und hebt den Wert ausschliesslich dann auf `ServerConfirmed`, wenn `receipt_for` eine nicht isolierte `.esr` findet UND `confirm_receipt` sie trägt. Fehlt die Quittung, entsteht kein Eintrag in einem der sechs Mangelfelder. Diese Aufgabe fügt dafür nichts hinzu; sie belegt es und trägt es in die Oberfläche.
+
+**5. Der Bericht ist ordnungsUNabhängig, und das ist der Grund, warum der Buendel- und der Verzeichnisweg denselben `reportHash` liefern KOENNEN.** GEMESSEN an den Feldern von `VerificationReportV1` in `crates/ea-verify/src/report.rs`: `object_results`, `authorized_destructions`, `gaps`, `format_errors` und `quarantined_objects` sind `BTreeMap` über Objekthash beziehungsweise Sequenz, `registry_versions`, `signature_errors`, `evidence_errors`, `decryption_errors` und `public_key_thumbprints` sind `BTreeSet`, und die fünf Zählfelder sind Summen. Die Reihenfolge, in der `visit_blobs` seine Blobs herausgibt, geht in KEINES dieser Felder ein; `crates/ea-verify/src/archive.rs` sortiert seine Eintragsschleife ohnehin selbst nach `(chain_sequence, object_hash)` und schreibt den Grund daneben.
+
+Das ist wichtig, weil der Container sortiert IST und der Verzeichnisdurchlauf es nicht sein kann: `apps/web/src/features/file-mode/DirectoryHandle.ts` läuft rekursiv und je Ebene lexikografisch, und eine ebenenweise Ordnung ist nicht dieselbe wie die globale Ordnung über die vollen Adressbytes — `a-b.txt` steht global vor `a/z.txt` (`0x2D` < `0x2F`), ebenenweise aber dahinter. Wäre der Bericht ordnungsabhängig, wäre die Gleichheit der zwei Wege eine Zufallsaussage über Dateinamen. `DirectoryHandleSource` sortiert deshalb AUSDRÜCKLICH NICHT: eine Sortierung dort wäre eine Regel, die nichts durchsetzt, und sie verstellte den Blick auf die Eigenschaft, die die Gleichheit wirklich trägt.
+
+Was der gleiche `reportHash` damit belegt und was nicht, gehört daneben: er belegt, dass beide Wege DIESELBEN Objektbytes tragen. Er belegt NICHT, dass sie unter denselben Adressen liegen — Pfadhinweise stehen in keinem Berichtsfeld. Der Zeuge sagt das in seinem Namen und nicht nur in einem Kommentar.
+
+**6. `OpenedArchiveV1` trägt die Quelle NICHT und hat keinen Lebensdauerparameter.** `ReaderClassification` (`crates/ea-reader/src/verify.rs`) besitzt `VerificationReportV1`, `ArchiveInventory`, die Zustandszeilen und die Zeugenkarte und hat AUSDRÜCKLICH keinen Lebensdauerparameter — der Typkommentar begründet es mit dem Besitz des Inventars. Nach `classify` borgt also nichts mehr von der Quelle. Sie zu halten kostete an der Obergrenze ein zweites Mal 2 GiB, denn `ArchiveBundleSource` hält den vollständigen Container in `bytes` und das Inventar hält die geparsten Objekte daneben; es ist dasselbe Argument, mit dem `write_archive_bundle` in `crates/ea-archive-fs/src/bundle.rs` sein `drop(blobs)` begründet. Die Quelle FÄLLT am Ende des Aufrufs, und `OpenedArchiveV1` hält genau zwei Werte: die Klassifikation und den Modus.
+
+**7. Der untergeschobene Bestand wird INVERTIERT gebaut, weil ein zweiter Anker aus der geteilten Kette nicht zu bekommen ist.** `trust_support::RegistryLineBuilder::new()` hält `ROOT_SECRET`, `organization()` und `chain_id()` als Konstanten, und `exact_anchor_bytes()` hängt allein an dieser Wurzel — der Modulkopf von `crates/ea-reader/tests/verify_fixtures/fixtures.rs` schreibt es aus, und `crates/ea-reader/tests/pinned_anchor.rs` zieht daraus bereits die Konsequenz: nicht der BESTAND ist fremd, sondern der TRESOR. Der fremde Anker kommt aus der Nachbarkulisse `crates/ea-reader/tests/fixtures/mod.rs::pinned_anchor_exact_bytes()` (Wurzelseed `[0x11; 32]`, Organisation `[0x12; 16]`), und der Einschluss steht IM TESTZIEL und nicht in `verify_fixtures/mod.rs`, weil `crates/ea-reader-wasm` dieselbe `#[path]`-Kette benutzt und die Kanten der Nachbarkulisse (`ea-testkit`, `ea-sync-protocol`) dort nicht liegen. `foreign_root_bundle_bytes()`, `vault_pinned_to()` und `foreign_anchor()` entfallen damit ersatzlos.
+
+**8. `FileModeError` heisst `ReaderFileModeError`, weil der kürzere Name doppelt belegt wäre.** `crates/ea-reader/src/bundle_release.rs` führt bereits `ReaderBundleError` — über das WEB-Bundle und seine Freigabe, mit dem Archivbündel dieses Tasks hat er nichts zu tun. Die Crate führt heute sieben modulweise Fehlertypen (`ReaderVaultError`, `ReaderBlobError`, `ReaderBundleError`, `EnrollmentError`, `ReaderKeyProfileError`, `ReaderSyncError`, `ReaderError`) in derselben Bauform: flaches Enum, `pub const fn code(&self) -> &'static str`, Fremdcodes DURCHGEREICHT, `Display` schreibt ausschliesslich den Code, `Debug` delegiert an `Display`. `ReaderFileModeError` erbt diese Form und führt KEINEN eigenen Code: `Bundle(BundleError)` reicht `EA-BUNDLE-MALFORMED`, `EA-BUNDLE-BLOB-LIMIT` und `EA-BUNDLE-TOTAL-BYTE-LIMIT` durch, `Archive(ArchiveError)` reicht `EA-ARCHIVE-UNAVAILABLE`, `EA-ARCHIVE-BLOB-LIMIT` und `EA-ARCHIVE-TOTAL-BYTE-LIMIT` durch, und `Classification(ReaderError)` reicht durch, was die Aufgabe davor schon stabilisiert hat.
+
+**9. `ea-reader` re-exportiert heute aus `ea-archive` NUR `ArchiveSource`, und die Brücke kommt damit nicht aus.** GEMESSEN am `pub use`-Block von `crates/ea-reader/src/lib.rs`: `ArchiveBundleSource`, `ArchiveBlob`, `ArchiveError`, `BundleError`, `BUNDLE_FILE_EXTENSION_V1`, `BUNDLE_MAGIC_V1` und die zwei Deckel stehen dort NICHT. Für `crates/ea-reader/tests/` ist das folgenlos — die Tests sehen die `[dependencies]` ihres eigenen Pakets. Für `crates/ea-reader-wasm/src/file_access.rs` ist es entscheidend: `ea-archive` steht dort ausschliesslich in `[dev-dependencies]`, eine Produktionsquelle der Brücke kann `ea_archive::` also gar nicht schreiben. Dieser Task erweitert deshalb den `pub use ea_archive::{..}`-Block von `ea-reader` um genau die acht Namen und zieht KEINE neue Kante in `crates/ea-reader-wasm/Cargo.toml`. Das ist auch die billigere Hälfte: eine Kante ginge in den wasm32-Lib-Graphen, ein Re-Export nicht.
+
+**10. Beide Deckel sind zu gross, um sie mit ihrem echten Wert zu bezeugen.** GEMESSEN in `crates/ea-archive/src/layout.rs`: `MAX_ARCHIVE_BLOBS_V1 = 1_048_576` und `MAX_TOTAL_ARCHIVE_BYTES_V1 = 2_147_483_648`. Ein `vec![0; MAX_TOTAL_ARCHIVE_BYTES_V1 + 1]` ist eine Zuteilung von zwei Gibibyte in einem Wirtstest, und der Zeuge liest davon kein einziges Byte. Der Ausweg ist der, den `crates/ea-archive-fs/src/bundle.rs` bereits aufschreibt: `open_archive_bundle_capped` nimmt seine Schranke als Parameter, und sein Doc-Kommentar sagt warum — „Ein Zeuge mit der echten Schranke bräuchte eine Datei von zig Gigabyte, und das ist kein Test."
+
+`DirectoryHandleSource` bekommt deshalb `with_caps_for_test(max_blobs: usize, max_total_bytes: usize)` hinter dem VORHANDENEN Merkmalstor `test-support` von `crates/ea-reader/Cargo.toml` — demselben Tor, hinter dem `SealedVaultV1::flip_one_wrapped_key_byte_for_test` und `::replace_sealed_anchor_bytes_for_test` stehen, und aus demselben Grund: `default = ["test-support"]`, weil ein Integrationstest das Merkmal SEINER EIGENEN Crate nicht einschalten kann, und abgeschaltet an der geteilten Wurzelkante `ea-reader = { path = "crates/ea-reader", default-features = false }`, sodass `crates/ea-reader-wasm` und das ausgelieferte wasm-Modul die Funktion NICHT sehen. `no_non_test_edge_carries_the_ea_reader_test_surface` in `tools/xtask/tests/workspace.rs` bewacht genau diese Kante und läuft ohne Änderung mit.
+
+Der BLOB-Deckel wird zusätzlich mit seinem ECHTEN Wert bezeugt, und das ist bezahlbar: eine Million `push_blob` mit leerem `Vec` kostet eine Million Adress-`String`s und keine einzige Nutzlastzuteilung. Ohne diesen zweiten Zeugen bewiese die Kappenprüfung nur, dass `with_caps_for_test` funktioniert, und nichts darüber, welche Zahlen `new()` verdrahtet.
+
+**11. `push_blob` prüft VOR der Kopie, aber nicht vor der Zuteilung des Aufrufers — und die erste Fassung behauptete das Falsche.** Die Zusage „beide Deckel fallen am `push_blob`, das den Puffer noch nicht angelegt hat" ist mit der Signatur `push_blob(&mut self, path_hint: String, bytes: Vec<u8>)` unhaltbar: wer ein `Vec<u8>` übergibt, hat es bereits zugeteilt. Die Signatur wird deshalb `push_blob(&mut self, path_hint: &str, bytes: &[u8]) -> Result<(), ArchiveError>`, und die richtige, kleinere Zusage lautet: die Quelle legt IHRE Kopie erst an, wenn beide Deckel geprüft sind. Über den Puffer des Aufrufers sagt sie nichts, und über den Browser sagt sie es erst recht nicht — `wasm_bindgen` kopiert ein `&[u8]` ohnehin in den linearen Speicher, bevor die Funktion beginnt.
+
+`DirectoryHandleSource` braucht ausserdem `impl Default`, weil `clippy::new_without_default` unter `-D warnings` sonst bricht; `ArchiveFixture` in `crates/ea-archive/tests/support/mod.rs` trägt aus demselben Grund `#[derive(Default)]` neben seinem `new()`.
+
+**12. Drei Zusicherungsformen der ersten Fassung übersetzen nicht.** Erstens: `hash_newtype!` in `crates/ea-types/src/ids.rs` leitet KEIN `Debug` ab, also läuft jeder Vergleich über `Hash32`, `EntryHash`, `ObjectHash` und `KeyThumbprint` als `assert!(a == b)` und niemals als `assert_eq!`/`assert_ne!`. Zweitens: `Result::unwrap_err` verlangt `T: Debug`, und `ReaderClassification` — und damit `OpenedArchiveV1` — trägt keines; die Fehlerprüfungen laufen über `.err().expect(..)`. Drittens: `assert!(report.object_results().len() > 0)` ist ein Zeuge, der nichts über die ERWARTETE Zahl sagt; `complete_archive()` trägt genau einen Eintrag (`crates/ea-reader-wasm/tests/verify_browser.rs` pinnt das als `ENTRIES_IN_THE_COMPLETE_ARCHIVE_V1`), also steht dort eine Gleichheit.
 
 - [ ] **Step 1: Write the two-way, no-cursor, and not-server-confirmed witnesses**
+
+Zuerst die drei neuen Kulissenfunktionen. Sie stehen in `crates/ea-reader/tests/verify_fixtures/fixtures.rs`, weil sie über die `#[path]`-Kette auch der Browserzeuge braucht, und sie nennen ausschliesslich `core`, `ea_archive` und `verify_support`:
+
+```rust
+// crates/ea-reader/tests/verify_fixtures/fixtures.rs — Ergaenzung
+
+/// Die Blobs eines Bestands als Paare, in der Reihenfolge, in der die Kulisse
+/// sie abgelegt hat.
+///
+/// Sie ist AUSDRUECKLICH nicht sortiert: der Verzeichnisdurchlauf des Browsers
+/// ist es auch nicht, und die Gleichheit der zwei Wege haengt nach der Messung
+/// oben nicht an der Reihenfolge, sondern an den Bytes.
+#[must_use]
+pub fn directory_blobs(source: &ArchiveFixture) -> &[(String, Vec<u8>)];
+
+/// Dieselben Blobs als EIN Container, von Hand kodiert.
+///
+/// Von Hand, weil `encode_bundle` modulprivat in `crates/ea-archive-fs` liegt
+/// und diese Kette per `#[path]` auch fuer wasm32 uebersetzt; die Form ist die
+/// von `crates/ea-archive/tests/bundle_reader.rs::hand_built_container`. Die
+/// Saetze werden VOR dem Kodieren streng aufsteigend ueber die Adressbytes
+/// sortiert und auf Duplikatfreiheit geprueft — `ArchiveFixture` legt in
+/// Baureihenfolge ab, und `ArchiveBundleSource::from_bytes` weist alles andere
+/// mit `BundleError::Malformed` ab.
+///
+/// # Panics
+///
+/// Wenn zwei Blobs dieselbe Adresse tragen. Dann ist die Kulisse kaputt und
+/// muss es laut sagen, statt einen Container zu bauen, den niemand liest.
+#[must_use]
+pub fn exported_bundle_bytes(source: &ArchiveFixture) -> Vec<u8>;
+
+/// Der lueckenlose Bestand MIT gueltigen Serverquittungen.
+///
+/// Die Gegenkontrolle zu `complete_archive()`, und NUR fuer die eine Spalte
+/// `serverConfirmation`. Der Bestand traegt die Vorlauf-Luecke `0..=1` der
+/// Quittungslinie (`verify_support::RECEIPT_PRE_ENTRY_GAP_THROUGH_V1`) und ist
+/// deshalb NICHT `is_fully_verified()`; wer hier eine Zusage ueber Maengel
+/// aufschreibt, misst die Quittungslinie und nicht den Datei-Modus.
+#[must_use]
+pub fn archive_with_receipts() -> &'static ArchiveFixture;
+```
 
 ```rust
 // crates/ea-reader/tests/file_mode.rs
 #[test]
-fn the_bundle_and_the_same_directory_produce_byte_identical_reports() {
-    let vault = fixtures::unlocked_vault();
-    let clock = fixtures::os_wall_clock();
+fn the_bundle_and_the_same_blobs_produce_byte_identical_reports() {
+    let vault = fixtures::unlocked_vault_with_pinned_anchor();
+    let archive = fixtures::complete_archive();
 
-    let from_file = ReaderFileMode::open_bundle(fixtures::exported_bundle_bytes(), &vault, clock)
-        .unwrap();
+    let from_file = ReaderFileMode::open_bundle(
+        fixtures::exported_bundle_bytes(archive),
+        &vault,
+        fixtures::EFFECTIVE_NOW,
+    )
+    .expect("das Buendel der Kulisse muss oeffnen");
+
     let mut directory = DirectoryHandleSource::new();
-    for (path_hint, bytes) in fixtures::directory_blobs() {
-        directory.push_blob(path_hint, bytes).unwrap();
+    for (path_hint, bytes) in fixtures::directory_blobs(archive) {
+        directory.push_blob(path_hint, bytes).expect("beide Deckel liegen weit darueber");
     }
-    let from_directory = ReaderFileMode::open_directory(directory, &vault, clock).unwrap();
+    // ANTI-LEERLAUF: ein leerer Ordner verifizierte ebenfalls, und beide
+    // Berichte waeren dann aus dem falschen Grund gleich.
+    assert_eq!(directory.blob_count(), fixtures::directory_blobs(archive).len());
+    assert!(directory.blob_count() > 0);
 
-    assert_eq!(
-        from_file.report().report_hash(),
-        from_directory.report().report_hash()
-    );
+    let from_directory = ReaderFileMode::open_directory(directory, &vault, fixtures::EFFECTIVE_NOW)
+        .expect("dieselben Blobs muessen dasselbe ergeben");
+
+    // KEIN `assert_eq!`: `Hash32` leitet kein `Debug` ab.
+    assert!(from_file.report().report_hash() == from_directory.report().report_hash());
     assert!(from_file.report().is_fully_verified());
     assert_eq!(
         from_file.report().archive_object_count(),
-        from_directory.report().archive_object_count()
+        from_directory.report().archive_object_count(),
     );
+    assert_eq!(from_file.mode(), ReaderMode::File);
+    assert_eq!(from_directory.mode(), ReaderMode::File);
 }
 
 #[test]
 fn every_object_without_a_receipt_is_not_server_confirmed_and_never_a_gap() {
     let opened = ReaderFileMode::open_bundle(
-        fixtures::bundle_without_receipts(),
-        &fixtures::unlocked_vault(),
-        fixtures::os_wall_clock(),
+        fixtures::exported_bundle_bytes(fixtures::complete_archive()),
+        &fixtures::unlocked_vault_with_pinned_anchor(),
+        fixtures::EFFECTIVE_NOW,
     )
-    .unwrap();
+    .expect("der lueckenlose Bestand muss oeffnen");
     let report = opened.report();
 
-    assert!(report.object_results().len() > 0);
+    // GEMESSEN und nicht gewaehlt: `complete_valid_archive` legt GENAU EINEN
+    // Eintrag ab, und `confirm_entries` gibt genau den Eintraegen ein Ergebnis.
+    assert_eq!(report.object_results().len(), ENTRIES_IN_THE_COMPLETE_ARCHIVE_V1);
     assert!(
         report
             .object_results()
@@ -3720,7 +3828,7 @@ fn every_object_without_a_receipt_is_not_server_confirmed_and_never_a_gap() {
     assert!(
         report
             .object_results()
-            .any(|result| result.result() == ObjectResultKindV1::Valid)
+            .all(|result| result.result() == ObjectResultKindV1::Valid)
     );
     assert_eq!(report.gaps().len(), 0);
     assert_eq!(report.quarantined_objects().len(), 0);
@@ -3729,48 +3837,131 @@ fn every_object_without_a_receipt_is_not_server_confirmed_and_never_a_gap() {
     assert!(report.is_fully_verified());
 }
 
+/// Die Gegenkontrolle, und NUR ueber der einen Spalte.
+///
+/// Ohne sie waere die Zusicherung darueber auch dann gruen, wenn
+/// `serverConfirmation` gar keinen zweiten Wert annehmen koennte. Ueber
+/// Maengel sagt dieser Bestand ausdruecklich nichts: er traegt die
+/// Vorlauf-Luecke der Quittungslinie.
 #[test]
-fn the_directory_source_enforces_both_caps_before_the_buffer_exists() {
+fn the_same_entry_point_reports_server_confirmed_when_the_receipts_travel_along() {
+    let opened = ReaderFileMode::open_bundle(
+        fixtures::exported_bundle_bytes(fixtures::archive_with_receipts()),
+        &fixtures::unlocked_vault_with_pinned_anchor(),
+        fixtures::EFFECTIVE_NOW,
+    )
+    .expect("auch der Quittungsbestand muss oeffnen");
+    let report = opened.report();
+
+    assert!(report.object_results().len() > 0);
+    assert!(
+        report
+            .object_results()
+            .all(|result| result.server_confirmation() == ServerConfirmationV1::ServerConfirmed)
+    );
+}
+
+#[test]
+fn the_directory_source_enforces_the_blob_cap_it_was_built_with() {
+    // Der ECHTE Deckel, mit leeren Nutzlasten: er belegt, welche Zahl `new()`
+    // verdrahtet, und kostet keine einzige Nutzlastzuteilung.
     let mut source = DirectoryHandleSource::new();
     for index in 0..MAX_ARCHIVE_BLOBS_V1 {
-        source.push_blob(format!("entries/{index}.eip"), Vec::new()).unwrap();
+        source
+            .push_blob(&format!("entries/{index}.eip"), &[])
+            .expect("bis zur inklusiven Grenze traegt die Quelle");
     }
+    assert_eq!(source.blob_count(), MAX_ARCHIVE_BLOBS_V1);
     assert_eq!(
-        source.push_blob("entries/one-too-many.eip".to_owned(), Vec::new()),
-        Err(ArchiveError::BlobLimit)
+        source.push_blob("entries/one-too-many.eip", &[]),
+        Err(ArchiveError::BlobLimit),
     );
+    // Und die Quelle hat den abgewiesenen Blob NICHT uebernommen.
+    assert_eq!(source.blob_count(), MAX_ARCHIVE_BLOBS_V1);
+}
 
-    let mut wide = DirectoryHandleSource::new();
+/// Der Bytedeckel gegen eine EINSTELLBARE Schranke.
+///
+/// Dieselbe Bauform und derselbe Grund wie `open_archive_bundle_capped` in
+/// `crates/ea-archive-fs/src/bundle.rs`: mit dem echten Wert braeuchte der
+/// Zeuge zwei Gibibyte, die er nie liest. Gemessen wird die REIHENFOLGE — die
+/// Summe faellt, bevor die Quelle ihre Kopie anlegt.
+#[test]
+fn the_directory_source_enforces_the_byte_cap_before_it_copies() {
+    let mut source = DirectoryHandleSource::with_caps_for_test(8, 4);
+    source.push_blob("entries/a.eip", &[0; 4]).expect("genau die Grenze traegt");
+    assert_eq!(source.total_bytes(), 4);
     assert_eq!(
-        wide.push_blob("entries/a.eip".to_owned(), vec![0; MAX_TOTAL_ARCHIVE_BYTES_V1 + 1]),
-        Err(ArchiveError::TotalByteLimit)
+        source.push_blob("entries/b.eip", &[0]),
+        Err(ArchiveError::TotalByteLimit),
     );
+    assert_eq!(source.blob_count(), 1);
+    assert_eq!(source.total_bytes(), 4);
 }
 
 #[test]
 fn a_truncated_or_wrongly_magicked_container_reports_the_bundle_code_and_no_report() {
-    let mut truncated = fixtures::exported_bundle_bytes();
+    let vault = fixtures::unlocked_vault_with_pinned_anchor();
+
+    let mut truncated = fixtures::exported_bundle_bytes(fixtures::complete_archive());
     truncated.truncate(truncated.len() - 1);
+    // `.err()` und nicht `.unwrap_err()`: `OpenedArchiveV1` traegt kein `Debug`.
     assert_eq!(
-        ReaderFileMode::open_bundle(truncated, &fixtures::unlocked_vault(), fixtures::os_wall_clock())
-            .unwrap_err()
+        ReaderFileMode::open_bundle(truncated, &vault, fixtures::EFFECTIVE_NOW)
+            .err()
+            .expect("ein angeschnittener Container ist kein Bestand")
             .code(),
-        "EA-BUNDLE-MALFORMED"
+        "EA-BUNDLE-MALFORMED",
     );
 
-    let mut foreign = fixtures::exported_bundle_bytes();
-    foreign[0] ^= 0x01;
-    assert_ne!(&foreign[..BUNDLE_MAGIC_V1.len()], &BUNDLE_MAGIC_V1[..]);
+    let mut renamed = fixtures::exported_bundle_bytes(fixtures::complete_archive());
+    renamed[0] ^= 0x01;
+    assert_ne!(&renamed[..BUNDLE_MAGIC_V1.len()], &BUNDLE_MAGIC_V1[..]);
     assert_eq!(
-        ReaderFileMode::open_bundle(foreign, &fixtures::unlocked_vault(), fixtures::os_wall_clock())
-            .unwrap_err()
+        ReaderFileMode::open_bundle(renamed, &vault, fixtures::EFFECTIVE_NOW)
+            .err()
+            .expect("eine umbenannte Datei ist kein Bestand")
             .code(),
-        "EA-BUNDLE-MALFORMED"
+        "EA-BUNDLE-MALFORMED",
+    );
+}
+
+/// Der dauerhaft angebundene Ordner verliert zwischen zwei Oeffnungen seine
+/// Berechtigung.
+///
+/// Der Zeuge braucht dafuer [`DirectoryHandleSource::mark_unavailable`], und
+/// die Methode ist keine Testhilfe, sondern die einzige ehrliche Abbildung
+/// eines gemessenen Browserverhaltens: `FileSystemDirectoryHandle` gibt eine
+/// entzogene Berechtigung beim NAECHSTEN Zugriff heraus, mitten im Durchlauf.
+/// `apps/web/src/features/file-mode/DirectoryHandle.ts` ruft sie ueber
+/// `fileModeDirectoryUnavailable`, sobald `queryPermission`/`requestPermission`
+/// nicht mehr `granted` liefert. Ohne sie waere `ArchiveError::Unavailable`
+/// ueber diesen Eingang gar nicht erreichbar — eine Quelle aus besessenen
+/// Bytes kann das Liefern nicht verweigern.
+#[test]
+fn a_directory_whose_permission_was_revoked_reports_the_archive_code_and_no_report() {
+    let archive = fixtures::complete_archive();
+    let mut source = DirectoryHandleSource::new();
+    for (path_hint, bytes) in fixtures::directory_blobs(archive) {
+        source.push_blob(path_hint, bytes).expect("der Vorlauf traegt");
+    }
+    source.mark_unavailable();
+
+    assert_eq!(
+        ReaderFileMode::open_directory(
+            source,
+            &fixtures::unlocked_vault_with_pinned_anchor(),
+            fixtures::EFFECTIVE_NOW,
+        )
+        .err()
+        .expect("ein Ordner ohne Berechtigung ist kein Bestand")
+        .code(),
+        "EA-ARCHIVE-UNAVAILABLE",
     );
 }
 ```
 
-Der Beleg fuer „der Cursor entfaellt ersatzlos" ist eine UEBERSETZUNGSGRENZE und keine Zusicherung ueber einen Namen. Die Form ist die, die `crates/ea-key-provider/src/lib.rs` und `crates/ea-crypto/src/secret.rs` fuer ihre API-Flaechenverbote schon fuehren, und `verify_quick_commands()` faehrt sie mit `cargo test --workspace --doc --all-features --locked`:
+Der Beleg für „der Cursor entfällt ersatzlos" ist eine ÜBERSETZUNGSGRENZE und keine Zusicherung über einen Namen. Die Form ist die, die `crates/ea-key-provider/src/lib.rs` und `crates/ea-crypto/src/secret.rs` für ihre API-Flächenverbote schon führen, und `verify_quick_commands()` fährt sie mit `cargo test --workspace --doc --all-features --locked`:
 
 ```rust
 // crates/ea-reader/src/file_mode.rs — Modul-Doc
@@ -3788,48 +3979,60 @@ Der Beleg fuer „der Cursor entfaellt ersatzlos" ist eine UEBERSETZUNGSGRENZE u
 //! ```
 ```
 
+`ReaderSyncService<'a>` trägt seinen Lebensdauerparameter wirklich (`crates/ea-reader/src/sync.rs`), das `<'_>` im zweiten Doctest ist also kein Schmuck; ohne ihn schlüge der Doctest aus dem falschen Grund fehl.
+
 ```rust
 // crates/ea-reader/tests/file_mode_anchor.rs
-#[test]
-fn a_substituted_archive_with_its_own_trust_chain_says_nothing_about_any_entry() {
-    let vault = fixtures::unlocked_vault();
-    let clock = fixtures::os_wall_clock();
 
-    // Positivkontrolle: DASSELBE Buendel gegen SEINEN eigenen Anker traegt.
-    let own = ReaderFileMode::open_bundle_observed(
-        fixtures::foreign_root_bundle_bytes(),
-        &fixtures::vault_pinned_to(fixtures::foreign_anchor()),
-        clock,
-        &mut RecordingObserver::new(),
-    )
-    .unwrap();
+// INVERTIERT gebaut, wie `crates/ea-reader/tests/pinned_anchor.rs`: nicht der
+// Bestand ist fremd, sondern der TRESOR. Der Einschluss der Nachbarkulisse
+// steht HIER und nicht in `verify_fixtures/mod.rs`, weil `crates/ea-reader-wasm`
+// dieselbe `#[path]`-Kette benutzt und deren Kanten dort nicht liegen.
+#[path = "fixtures/mod.rs"]
+mod reader_fixtures;
+
+#[test]
+fn a_substituted_archive_says_nothing_about_any_entry_in_file_mode() {
+    let bundle = fixtures::exported_bundle_bytes(fixtures::complete_archive());
+
+    // Positivkontrolle ZUERST: DASSELBE Buendel gegen SEINEN eigenen Anker
+    // traegt vollstaendig. Ohne sie waere der Fehlschlag unten von einer
+    // kaputten Kulisse nicht zu unterscheiden.
+    let own_vault = fixtures::unlocked_vault_with_pinned_anchor();
+    let own = ReaderFileMode::open_bundle(bundle.clone(), &own_vault, fixtures::EFFECTIVE_NOW)
+        .expect("der eigene Bestand muss oeffnen");
     assert!(own.report().is_fully_verified());
 
-    // Und gegen den im Tresor GEPINNTEN Anker faellt es durch.
+    // Und gegen einen FREMDEN gepinnten Anker faellt es.
+    let foreign_vault = fixtures::vault_pinning(reader_fixtures::pinned_anchor_exact_bytes());
     let mut observer = RecordingObserver::new();
     let opened = ReaderFileMode::open_bundle_observed(
-        fixtures::foreign_root_bundle_bytes(),
-        &vault,
-        clock,
+        bundle,
+        &foreign_vault,
+        fixtures::EFFECTIVE_NOW,
         &mut observer,
     )
-    .unwrap();
+    .expect("ein Befund ueber die Vertrauenskette ist nie ein Err");
     let report = opened.report();
 
-    let anchor = PinnedTrustAnchor::from_vault(&vault).unwrap();
+    // KEIN `unwrap`: `PinnedTrustAnchor::from_vault` ist infallibel.
+    let anchor = PinnedTrustAnchor::from_vault(&foreign_vault);
     assert_eq!(observer.events(), &GATE_ORDER_V1[..2]);
     assert!(!report.is_fully_verified());
     assert_eq!(report.object_results().len(), 0);
     assert_eq!(report.public_key_thumbprints().len(), 0);
+    // GEMESSEN: alle sechs Mangelfelder bleiben LEER — der Lauf steigt nach
+    // `protocol.enter(Gate::Trust)` mit `return report.seal()` aus. Eine
+    // Zusicherung auf ein NICHT leeres Fehlerfeld waere rot.
+    assert_eq!(report.gaps().len(), 0);
+    assert_eq!(report.signature_errors().len(), 0);
+    // Der Kopf ist das Sentinel aus `ChainHeadV1::sentinel(anchor.chain_id())`
+    // (`crates/ea-verify/src/archive.rs`): Sequenz null, Nullhash, und die
+    // Kettenkennung des GEPINNTEN Ankers.
     assert_eq!(report.chain_head().sequence(), ChainSequence::new(0));
-    assert_ne!(
-        report.chain_head().entry_hash(),
-        anchor.as_trust_anchor().genesis_entry_hash()
-    );
-    assert_eq!(
-        report.chain_head().chain_id(),
-        anchor.as_trust_anchor().chain_id()
-    );
+    // `assert!` und nicht `assert_ne!`: `EntryHash` leitet kein `Debug` ab.
+    assert!(report.chain_head().entry_hash() != anchor.as_trust_anchor().genesis_entry_hash());
+    assert!(report.chain_head().chain_id() == anchor.as_trust_anchor().chain_id());
 }
 ```
 
@@ -3842,12 +4045,18 @@ it('offers the universal file path even when showDirectoryPicker is absent', asy
   expect(screen.queryByRole('button', { name: 'Archivordner verbinden' })).not.toBeInTheDocument()
 })
 
-it('marks every object as nicht server-bestätigt without calling it a defect', async () => {
+// Die zwei Dimensionen aus design.md 17.4, an ZWEI getrennten Traegern und
+// nicht an einem: `toHaveTextContent` auf einem gemeinsamen Knoten waere auch
+// dann gruen, wenn die Flaeche die Begriffe zusammenzoege.
+it('marks every object as not server confirmed without calling it a defect', async () => {
   render(<OpenArchivePanel host={windowDouble()} bridge={bridgeWithoutReceipts()} />)
   await user.click(screen.getByRole('button', { name: 'Archivdatei öffnen' }))
-  const status = await screen.findByTestId('server-confirmation')
-  expect(status).toHaveTextContent('nicht server-bestätigt')
-  expect(status).toHaveTextContent('verifiziert')
+  // Der Wortlaut kommt aus SERVER_CONFIRMATION_V1_VALUES der generierten
+  // Kontraktdatei — der TEST darf ihn nennen, die Flaeche nicht (siehe unten).
+  expect(await screen.findByTestId('server-confirmation')).toHaveTextContent(
+    SERVER_CONFIRMATION_V1_VALUES[1],
+  )
+  expect(screen.getByTestId('verification-summary')).toHaveTextContent('Alle Objekte geprüft')
   expect(screen.queryByText('Lücke')).not.toBeInTheDocument()
   expect(screen.queryByText('ungültig')).not.toBeInTheDocument()
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
@@ -3858,7 +4067,7 @@ it('marks every object as nicht server-bestätigt without calling it a defect', 
 
 Run: `cargo test --locked -p ea-reader --test file_mode --test file_mode_anchor && cargo test --locked -p ea-reader --doc && pnpm --dir apps/web test --run OpenArchivePanel`
 
-Expected: FAIL because `ReaderFileMode`, `ReaderArchiveSourceV1` and `DirectoryHandleSource` do not exist, the two `compile_fail` doctests pass vacuously against absent types instead of against an absent METHOD, and `apps/web/src/features/file-mode/` is empty. Die zwei Doctests sind in diesem Schritt AUSDRUECKLICH kein Beleg: ein `compile_fail` gegen einen nicht existierenden Typ ist gruen aus dem falschen Grund und wird erst in Schritt 4 aussagekraeftig, wenn `OpenedArchiveV1` und `ReaderFileMode` da sind und die verlangten Methoden trotzdem fehlen.
+Expected: FAIL, weil `ReaderFileMode`, `ReaderArchiveSourceV1`, `DirectoryHandleSource`, `OpenedArchiveV1` und `ReaderFileModeError` nicht existieren, weil die drei neuen Kulissenfunktionen nicht existieren, und weil `apps/web/src/features/file-mode/` leer ist. Die zwei `compile_fail`-Doctests sind in diesem Schritt AUSDRÜCKLICH kein Beleg: ein `compile_fail` gegen einen nicht existierenden Typ ist grün aus dem falschen Grund und wird erst in Schritt 4 aussagekräftig, wenn `OpenedArchiveV1` und `ReaderFileMode` da sind und die verlangten Methoden trotzdem fehlen.
 
 - [ ] **Step 3: Implement one port over both ways, verified against the pinned anchor**
 
@@ -3878,10 +4087,28 @@ impl ArchiveSource for ReaderArchiveSourceV1 {
 
 pub struct DirectoryHandleSource { /* private */ }
 
+impl Default for DirectoryHandleSource { /* clippy::new_without_default */ }
+
 impl DirectoryHandleSource {
+    #[must_use]
     pub const fn new() -> Self;
-    pub fn push_blob(&mut self, path_hint: String, bytes: Vec<u8>) -> Result<(), ArchiveError>;
-    pub fn blob_count(&self) -> usize;
+
+    /// Dieselbe Quelle mit EINSTELLBAREN Deckeln, hinter `test-support`.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn with_caps_for_test(max_blobs: usize, max_total_bytes: usize) -> Self;
+
+    /// Uebernimmt eine Bytefolge, NACHDEM beide Deckel getragen haben.
+    pub fn push_blob(&mut self, path_hint: &str, bytes: &[u8]) -> Result<(), ArchiveError>;
+
+    /// Der Ordner liefert keine Bytes mehr — die Berechtigung wurde entzogen.
+    pub const fn mark_unavailable(&mut self);
+
+    #[must_use]
+    pub const fn blob_count(&self) -> usize;
+
+    #[must_use]
+    pub const fn total_bytes(&self) -> usize;
 }
 ```
 
@@ -3893,68 +4120,130 @@ impl ReaderFileMode {
     pub fn open_bundle(
         bytes: Vec<u8>,
         vault: &UnlockedVault,
-        os_wall_clock: UnixMillis,
-    ) -> Result<OpenedArchiveV1, FileModeError>;
+        effective_now: UnixMillis,
+    ) -> Result<OpenedArchiveV1, ReaderFileModeError>;
 
     pub fn open_bundle_observed(
         bytes: Vec<u8>,
         vault: &UnlockedVault,
-        os_wall_clock: UnixMillis,
+        effective_now: UnixMillis,
         observer: &mut dyn GateObserver,
-    ) -> Result<OpenedArchiveV1, FileModeError>;
+    ) -> Result<OpenedArchiveV1, ReaderFileModeError>;
 
     pub fn open_directory(
         source: DirectoryHandleSource,
         vault: &UnlockedVault,
-        os_wall_clock: UnixMillis,
-    ) -> Result<OpenedArchiveV1, FileModeError>;
+        effective_now: UnixMillis,
+    ) -> Result<OpenedArchiveV1, ReaderFileModeError>;
+
+    pub fn open_directory_observed(
+        source: DirectoryHandleSource,
+        vault: &UnlockedVault,
+        effective_now: UnixMillis,
+        observer: &mut dyn GateObserver,
+    ) -> Result<OpenedArchiveV1, ReaderFileModeError>;
 }
 
-pub struct OpenedArchiveV1 { /* private */ }
+/// OHNE Lebensdauerparameter und OHNE die Quelle: `ReaderClassification`
+/// besitzt Bericht und Inventar, nach `classify` borgt nichts mehr.
+pub struct OpenedArchiveV1 { /* private: classification, mode */ }
 
 impl OpenedArchiveV1 {
     pub const fn classification(&self) -> &ReaderClassification;
     pub const fn report(&self) -> &VerificationReportV1;
     pub const fn mode(&self) -> ReaderMode;
 }
+
+/// Das Status-DTO als JSON — die REINE Funktion, ueber der die Bruecke liegt.
+///
+/// Sie steht hier und nicht in `crates/ea-reader-wasm`, damit ein gewoehnlicher
+/// Wirtstest sie fahren kann; dieselbe Bauform wie `bundle_activation_json`.
+pub fn file_mode_archive_json(opened: &OpenedArchiveV1) -> Result<String, ReaderFileModeError>;
 ```
 
-KEINER der drei Eingaenge nimmt einen `TrustAnchorV1` oder einen `PinnedTrustAnchor`. Das ist der eigene Zeuge dieser Aufgabe fuer §5.3: der Anker entsteht INNERHALB des Aufrufs aus `PinnedTrustAnchor::from_vault(vault)` und sonst nirgendher, und Trust-Objekte, die IN der geoeffneten Datei liegen, begruenden von sich aus kein Vertrauen. Ein Aufrufer kann keinen zweiten Anker anbieten, weil die Signatur keinen Platz dafuer hat — das ist dieselbe Konstruktionsregel, mit der `ea_trust` seine Beweistypen schuetzt. Die BINDUNG selbst, also dass die Sitzung ihren Anker ausschliesslich aus dem Tresor bezieht, gehoert der Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert" und wird hier weder wiederholt noch neu gerechnet.
+**Vier Eingänge und nicht drei, und der vierte ist kein Komfort.** `open_directory_observed` fehlte in der ersten Fassung, obwohl der Ankerzeuge für den Verzeichnisweg dasselbe Protokoll braucht wie für den Bündelweg; ohne ihn wäre `GATE_ORDER_V1[..2]` nur über eine Datei messbar und der Komfortweg bliebe an dieser Stelle unbezeugt. Alle vier sind dünn über EINEM privaten Weg, der `ReaderArchiveSourceV1` baut und `ReaderVerifier::new(ReaderMode::File, effective_now).classify(&source, vault, observer)` ruft.
 
-Verifiziert wird ueber `ReaderVerifier::new(ReaderMode::File, os_wall_clock).classify(&source, vault, observer)` aus der Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert". Damit gibt es GENAU EINEN Weg in die Pipeline, und der Modusparameter ist das einzige, was dieser Task daran setzt: `ReaderVerifier` baut selbst `VerifyOptions::new(effective_now).with_recipient(session.kem_key_thumbprint(), session.kem_private_key())` und nimmt den Anker aus `PinnedTrustAnchor::from_vault(session)`. Diese Aufgabe ruft `ea_verify::verify_archive_observed` NICHT direkt und implementiert kein Gate ein zweites Mal; die Gate-Reihenfolge aus `design.md` §14.1 gilt in beiden Modi WORTGLEICH. Der einzige Unterschied ist Schritt 7: geprueft werden nur die im Buendel beziehungsweise Ordner enthaltenen Receipts und Checkpoints. Genau das tut `ea-verify` bereits von sich aus — es liest ausschliesslich, was der Port liefert —, und es setzt fuer jedes Objekt ohne passende Quittung `ServerConfirmationV1::NotServerConfirmed`, ohne `is_fully_verified()` zu senken. Diese Aufgabe FUEGT dafuer nichts hinzu; sie belegt es und traegt es in die Oberflaeche.
+**Der Zeitparameter heisst `effective_now` und nicht `os_wall_clock`.** Beide Namen existieren im Arbeitsbaum und meinen denselben `UnixMillis`-Wert: `ReaderSyncService` führt das Feld `os_wall_clock` (`crates/ea-reader/src/sync.rs`), `ea_verify::VerifyOptions::new` und `write_archive_bundle` nennen ihn ebenso, `ReaderVerifier::new(mode, effective_now)` nennt ihn anders (`crates/ea-reader/src/verify.rs`), und die Kulisse verdrahtet beide über `pub const EFFECTIVE_NOW: UnixMillis = UnixMillis::new(verify_support::FIXTURE_OS_WALL_CLOCK_V1);`. Für DIESE Aufgabe entscheidet der einzige Verbraucher: der Wert wird wortwörtlich an `ReaderVerifier::new` durchgereicht und an nichts sonst. Ein zweiter Name an einer Ein-Sprung-Durchreichung wäre der zweite Name für dieselbe Tatsache. `fixtures::os_wall_clock()` gibt es nicht und entsteht auch nicht; die Zeugen nennen `fixtures::EFFECTIVE_NOW`.
 
-`ArchiveBundleSource::from_bytes` prueft den Container vollstaendig, BEVOR ein einziger Blob herausgegeben wird — Magie, Blobzahl aus dem Kopf, sortierter und duplikatfreier Index ohne Luecke und ohne Ueberlappung, beide Deckel. Die Datei ist unvertraut, weil sie durch den gewoehnlichen Dateidialog kommt; deshalb wird sie AUSSCHLIESSLICH ueber `from_bytes` gelesen und nie ueber `ea_archive_fs::open_archive_bundle`/`open_archive_bundle_capped`, die auf `std::fs` sitzen und in `ea-archive-fs` zurueckbleiben. `FileModeError::Bundle(BundleError)` reicht den bereits stabilen Code durch — `EA-BUNDLE-MALFORMED`, `EA-BUNDLE-BLOB-LIMIT`, `EA-BUNDLE-TOTAL-BYTE-LIMIT` —, und `DirectoryHandleSource::push_blob` gibt `ea_archive::ArchiveError` unveraendert zurueck: `EA-ARCHIVE-BLOB-LIMIT` und `EA-ARCHIVE-TOTAL-BYTE-LIMIT`. Kein zweiter Satz Zahlen und kein zweiter Satz Codes fuer dieselbe Tatsache.
+KEINER der vier Eingänge nimmt einen `TrustAnchorV1` oder einen `PinnedTrustAnchor`. Das ist der eigene Zeuge dieser Aufgabe für §5.3: der Anker entsteht INNERHALB des Aufrufs aus `PinnedTrustAnchor::from_vault(vault)` und sonst nirgendher, und Trust-Objekte, die IN der geöffneten Datei liegen, begründen von sich aus kein Vertrauen. Ein Aufrufer kann keinen zweiten Anker anbieten, weil die Signatur keinen Platz dafür hat — dieselbe Konstruktionsregel, mit der `ea_trust` seine Beweistypen schützt. Die BINDUNG selbst gehört der Aufgabe „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert" und wird hier weder wiederholt noch neu gerechnet.
 
-Die Deckel werden in RUST durchgesetzt und nicht in TypeScript, und das ist der Grund fuer die Push-Form von `DirectoryHandleSource`: `apps/web/src/features/file-mode/DirectoryHandle.ts` laeuft den `FileSystemDirectoryHandle` rekursiv ab, je Ebene lexikografisch aufsteigend nach Namen sortiert — `entries()` gibt keine Ordnung, und ohne eine festgelegte haengen `nonObjectFileCount`, die Fehlerreihenfolge und damit jeder Berichtsvergleich am Zufall der Browserimplementierung —, und reicht jede Bytesequenz EINZELN ueber die Bruecke. Die Grenze faellt damit an derselben inklusiven Schranke wie beim Verzeichnisleser der Wiederherstellung, und TypeScript entscheidet nichts: es zaehlt nicht, es vergleicht nicht, es bricht auf den durchgereichten Fehlercode ab.
+Verifiziert wird über `ReaderVerifier::new(ReaderMode::File, effective_now).classify(&source, vault, observer)`. Damit gibt es GENAU EINEN Weg in die Pipeline. `ReaderVerifier` baut selbst `VerifyOptions::new(effective_now).with_recipient(session.kem_key_thumbprint(), session.kem_private_key())` und nimmt den Anker aus `PinnedTrustAnchor::from_vault(session)`. Diese Aufgabe ruft `ea_verify::verify_archive_observed` NICHT direkt und implementiert kein Gate ein zweites Mal; die Gate-Reihenfolge aus `design.md` §14.1 gilt in beiden Modi WORTGLEICH — `classify` LIEST den Modus ohnehin nicht, und `both_reader_modes_produce_the_same_gate_protocol_over_the_same_bytes` in `crates/ea-reader/tests/verification_order.rs` pinnt genau diese Nicht-Abhängigkeit bereits. Der einzige Unterschied ist Schritt 7: geprüft werden nur die im Bündel beziehungsweise Ordner enthaltenen Receipts und Checkpoints. Genau das tut `ea-verify` bereits von sich aus.
 
-`crates/ea-reader-wasm/src/file_access.rs` traegt unter `cfg(target_arch = "wasm32")` genau drei Ausfuhren: `file_mode_open_bundle(bytes: &[u8]) -> u32`, `file_mode_begin_directory() -> u32` und `file_mode_push_blob(handle: u32, path_hint: &str, bytes: &[u8]) -> Result<(), JsValue>`. Ueber die Bruecke gehen Bytes und Pfadhinweise hinein und ein Sitzungsgriff plus die generierten Status-DTOs heraus — nie ein Bericht als freier Text, nie Schluesselmaterial, nie ein entschluesselter Wert.
+`ArchiveBundleSource::from_bytes` prüft den Container vollständig, BEVOR ein einziger Blob herausgegeben wird — Magie, Blobzahl aus dem Kopf, sortierter und duplikatfreier Index ohne Lücke und ohne Überlappung, beide Deckel. Die Datei ist unvertraut, weil sie durch den gewöhnlichen Dateidialog kommt; deshalb wird sie AUSSCHLIESSLICH über `from_bytes` gelesen und nie über `ea_archive_fs::open_archive_bundle`, das auf `std::fs` sitzt und in `ea-archive-fs` zurückbleibt. Kein zweiter Satz Zahlen und kein zweiter Satz Codes für dieselbe Tatsache: `ReaderFileModeError` führt keinen eigenen Code.
 
-`apps/web/src/features/file-mode/OpenArchivePanel.tsx` bietet BEIDE Wege an, und der universelle IMMER. Die Erkennung ist eine Faehigkeitsabfrage auf dem uebergebenen Wirtsobjekt (`'showDirectoryPicker' in host`) und keine Browserkennung: eine Kennungsliste veraltet still, eine Faehigkeitsabfrage nicht. Fehlt `showDirectoryPicker` — Safari und Firefox —, erscheint der Komfortweg gar nicht erst, statt als abgeblendete Schaltflaeche eine Faehigkeit zu behaupten, die es nicht gibt. Der Dateidialog filtert auf `BUNDLE_FILE_EXTENSION_V1` (`eabundle`), aber die Endung ist ein HINWEIS: die Klassifikation entscheidet `BUNDLE_MAGIC_V1`, und eine umbenannte Datei faellt am Magiebyte und nicht am Namen.
+Die Deckel werden in RUST durchgesetzt und nicht in TypeScript, und das ist der Grund für die Push-Form von `DirectoryHandleSource`: `apps/web/src/features/file-mode/DirectoryHandle.ts` läuft den `FileSystemDirectoryHandle` rekursiv ab, je Ebene lexikografisch aufsteigend nach Namen sortiert — `entries()` gibt keine Ordnung, und eine unbestimmte Reihenfolge machte den Ablauf des Durchlaufs und damit jede Fehlermeldung vom Zufall der Browserimplementierung abhängig —, und reicht jede Bytesequenz EINZELN über die Brücke. Die Grenze fällt damit an derselben inklusiven Schranke wie beim Verzeichnisleser der Wiederherstellung, und TypeScript entscheidet nichts: es zählt nicht, es vergleicht nicht, es bricht auf den durchgereichten Fehlercode ab. Was der Durchlauf ausdrücklich NICHT herstellt, ist die globale Sortierung des Containers — die Messung oben zeigt, dass der Bericht sie nicht braucht.
 
-Die Oberflaeche haelt die zwei orthogonalen Dimensionen aus `design.md` §17.4 auseinander. Jedes Objekt traegt gleichzeitig einen Verifikationsbegriff und einen Server-Bestaetigungsbegriff; im Datei-Modus ist `nicht server-bestätigt` der REGELFALL. Die Begriffe DUERFEN NICHT zusammengefasst werden, und `nicht server-bestätigt` DARF NICHT als `Lücke` oder `ungültig` dargestellt werden und ebenso wenig als vollstaendig bestaetigt. Praktisch heisst das: kein `alert`-Rollenelement, keine Fehlerfarbe, kein Ausrufezeichen-Icon; der Status steht als TEXT neben dem Verifikationsstatus, mit einem erklaerenden Zusatz, dass im Datei-Modus keine Serverquittungen bezogen werden. Ant Design 6 bleibt mit deutschem `ConfigProvider`, statisch extrahiertem lokalem gehashtem CSS, `zeroRuntime: true`, direkten CSR-Importen aus `@phosphor-icons/react`, sichtbarem Fokus und Reduced-Motion-Unterstuetzung; es entsteht kein neues Token und keine Laufzeit-CSS.
+`crates/ea-reader-wasm/src/file_access.rs` trägt SECHS Ausfuhren und nicht drei. Die erste Fassung nannte drei, und die Liste war in sich unvollständig: `file_mode_push_blob` allein öffnet nichts, `file_mode_open_bundle(bytes) -> u32` nannte keine Tresorsitzung, obwohl `ReaderFileMode::open_bundle` einen `&UnlockedVault` verlangt, und ein `u32` als Rückgabe wäre ein Griff auf ein Ergebnis, das niemand abholt. Die gemessene Form steht in `crates/ea-reader-wasm/src/vault_bridge.rs`: eine Sitzungskennung ist ein `u32` ohne Bedeutung ausserhalb ihres Moduls, die Tabelle ist ein `thread_local!` mit `RefCell<BTreeMap<..>>` und `Cell<u32>` für den Zähler, und `with_unlocked_vault(session, |vault| ..)` ist der einzige Zugriff. Die sechs Ausfuhren, jede mit `#[cfg(target_arch = "wasm32")]` am ITEM und nicht an der `mod`-Zeile — `every_wasm_bindgen_export_sits_behind_the_wasm32_cfg` in `crates/ea-reader-wasm/tests/bridge_boundary.rs` ist die EINZIGE Instanz, die das bemerkt:
 
-`docs/traceability/stage-4-fault-points.json` bekommt seinen Abschnitt `file-mode` in genau der Form, die `docs/traceability/stage-3-fault-points.json` vorgibt — ein Array aus `{"name", "brackets", "witness"}`, jeder `witness` als `<pfad>::<funktion>`, weil der Gate ihn spaeter auf eine wirklich vorhandene Testfunktion aufloest.
+| Ausfuhr | Signatur | Wofür |
+|---|---|---|
+| `fileModeBundleExtension` | `() -> String` | `BUNDLE_FILE_EXTENSION_V1`, damit `eabundle` nirgends in TypeScript steht |
+| `fileModeOpenBundle` | `(session: u32, bytes: &[u8]) -> Result<String, JsValue>` | der universelle Weg, DTO als JSON |
+| `fileModeBeginDirectory` | `() -> u32` | eine leere `DirectoryHandleSource` in der Tabelle |
+| `fileModePushBlob` | `(handle: u32, path_hint: &str, bytes: &[u8]) -> Result<(), JsValue>` | eine Bytefolge, beide Deckel in Rust |
+| `fileModeDirectoryUnavailable` | `(handle: u32) -> Result<(), JsValue>` | die entzogene Berechtigung |
+| `fileModeOpenDirectory` | `(session: u32, handle: u32) -> Result<String, JsValue>` | der Komfortweg, DTO als JSON |
 
-**Jeder `witness` dieses Manifests MUSS eine RUST-Testfunktion sein, und das ist eine gemessene Auflage und kein Stil.** `witness_resolves` in `tools/xtask/src/main.rs` — derselbe Aufloeser, den der Gate-Task Punkt fuer Punkt wiederverwendet — sucht die Zeichenkette `fn <name>(` und akzeptiert sie erst, wenn unmittelbar davor `#[test]` oder `#[tokio::test` steht. Ein Playwright-Zeuge in einer `.spec.ts` traegt weder das eine noch das andere; er wuerde mit „declares no function" abgewiesen und liesse den Stufe-4-Gate rot stehen, ohne dass ein Reader-Fehler vorlaege. Alle neun Zeugen von `docs/traceability/stage-3-fault-points.json` sind aus demselben Grund Rust-Testfunktionen. Browserlaeufe bleiben als ZUSAETZLICHER Beleg willkommen — sie stehen in der Prosa des jeweiligen Schritts, nie in der Spalte `witness`:
+Über die Brücke gehen Bytes und Pfadhinweise hinein und ein Sitzungsgriff plus das generierte Status-DTO heraus — nie ein Bericht als freier Text, nie Schlüsselmaterial, nie ein entschlüsselter Wert. Der Fehlerweg ist der der Nachbarausfuhren: `JsValue::from_str(error.code())` und sonst nichts.
+
+**Das Status-DTO entsteht in `crates/ea-ui-contracts` und trägt AUSDRÜCKLICH keine Modus-Vereinigung.** Der gemessene Weg ist: ein Eintrag in `READER_VIEW_MODELS_V1` in `crates/ea-ui-contracts/src/emit.rs`, dann `cargo run --locked -p ea-ui-contracts --bin emit-ts` — der EINZIGE Schreiber beider Kontraktdateien —, und `crates/ea-ui-contracts/tests/generated_ts_is_current.rs` hält die eingecheckte Datei danach zeichengleich gegen den Emitterausgang. Handgeschriebene Verträge sind durch `apps/web/src/bridge/no-hand-written-contracts.test.ts` verboten.
+
+```rust
+// crates/ea-ui-contracts/src/emit.rs — Ergaenzung von READER_VIEW_MODELS_V1
+(
+    "FileModeArchiveView",
+    &[
+        ("archiveObjectCount", "number"),
+        ("entryPackageCount", "number"),
+        ("fullyVerified", "boolean"),
+        ("gapCount", "number"),
+        ("serverConfirmedCount", "number"),
+        ("notServerConfirmedCount", "number"),
+        // Der archivweite Wert: `ServerConfirmed` NUR, wenn JEDES Objektergebnis
+        // ihn traegt. Die Flaeche bekommt den Wortlaut damit aus Rust und
+        // schreibt ihn nie selbst.
+        ("serverConfirmation", "ServerConfirmationV1"),
+    ],
+),
+```
+
+`ServerConfirmationV1` steht in `READER_ENUMS_V1` bereits und wird NICHT ein zweites Mal deklariert; seine zwei Literale `server-bestätigt` und `nicht server-bestätigt` kommen aus `ServerConfirmationV1::label()` in `crates/ea-verify/src/report.rs` und aus keiner zweiten Quelle.
+
+Eine Modus-Vereinigung `'server' | 'file'` wäre dagegen ein Fehler, und der Grund ist gemessen und im Emitter schon aufgeschrieben: `no-hand-written-contracts.test.ts` verbannt JEDES Literal JEDER emittierten Vereinigung aus jeder handgeschriebenen Web-Quelle, in den drei zitierten Formen — und `<input type="file">` in `OpenArchivePanel.tsx` ist genau `"file"`. Die Datei würde mit „duplicates the security literal file" rot, und zwar an einer Stelle, an der nichts falsch ist. `crates/ea-ui-contracts/src/emit.rs` trägt dieselbe Überlegung bereits für `'Activate' | 'KeepActive'` aus und hat sie dort zugunsten eines `boolean` entschieden. Der Modus bleibt deshalb ein reiner Rust-Begriff: `OpenedArchiveV1::mode()` gibt ihn heraus, das DTO nennt ihn nicht, und die Route `/datei` sagt ohnehin, wo man ist.
+
+Aus derselben Schranke folgt die Wortwahl der Fläche. `apps/web/src/features/file-mode/OpenArchivePanel.tsx` DARF `nicht server-bestätigt` nicht schreiben — es rendert `view.serverConfirmation`. Es darf aus demselben Grund auch `verifiziert`, `Lücke`, `ungültig`, `vorhanden` und `vollständig` nicht schreiben — alle fünf sind Literale emittierter Vereinigungen, und die naheliegende Formulierung `vollständig geprüft` fiele an `vollständig` aus `EVIDENCE_STATUS_VALUES`. Der Wortlaut der Verifikationszusammenfassung lautet deshalb `Alle Objekte geprüft` beziehungsweise `Nicht alle Objekte geprüft`, und `OpenArchivePanel.test.tsx` prüft ihn über `data-testid="verification-summary"`. Wer hier einen anderen deutschen Satz wählt, prüft ihn vorher gegen `SERVER_CONFIRMATION_V1_VALUES`, `VERIFICATION_STATUS_VALUES`, `ENTRY_STATUS_VALUES` und `EVIDENCE_STATUS_VALUES` der generierten Datei.
+
+`apps/web/src/features/file-mode/OpenArchivePanel.tsx` bietet BEIDE Wege an, und den universellen IMMER. Die Erkennung ist eine Fähigkeitsabfrage auf dem übergebenen Wirtsobjekt (`'showDirectoryPicker' in host`) und keine Browserkennung: eine Kennungsliste veraltet still, eine Fähigkeitsabfrage nicht. Fehlt `showDirectoryPicker` — Safari und Firefox —, erscheint der Komfortweg gar nicht erst, statt als abgeblendete Schaltfläche eine Fähigkeit zu behaupten, die es nicht gibt. Der Dateidialog filtert auf die Endung aus `fileModeBundleExtension()`, aber die Endung ist ein HINWEIS: die Klassifikation entscheidet `BUNDLE_MAGIC_V1`, und eine umbenannte Datei fällt am Magiebyte und nicht am Namen.
+
+Die Oberfläche hält die zwei orthogonalen Dimensionen aus `design.md` §17.4 auseinander. Jedes Objekt trägt gleichzeitig einen Verifikationsbegriff und einen Server-Bestätigungsbegriff; im Datei-Modus ist `nicht server-bestätigt` der REGELFALL. Die Begriffe DÜRFEN NICHT zusammengefasst werden, und `nicht server-bestätigt` DARF NICHT als `Lücke` oder `ungültig` dargestellt werden und ebenso wenig als vollständig bestätigt. Praktisch heisst das: kein `alert`-Rollenelement, keine Fehlerfarbe, kein Ausrufezeichen-Icon; der Status steht als TEXT neben dem Verifikationsstatus, mit einem erklärenden Zusatz, dass im Datei-Modus keine Serverquittungen bezogen werden. Die ZEILENWEISE Darstellung je Eintrag entsteht hier ausdrücklich NICHT — sie gehört der Aufgabe „Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop"; diese Aufgabe zeigt das Ergebnis EINES Öffnens. Ant Design 6 bleibt mit deutschem `ConfigProvider`, statisch extrahiertem lokalem gehashtem CSS, `zeroRuntime: true`, direkten CSR-Importen aus `@phosphor-icons/react`, sichtbarem Fokus und Reduced-Motion-Unterstützung; es entsteht kein neues Token und keine Laufzeit-CSS.
+
+`docs/traceability/stage-4-fault-points.json` bekommt seinen Abschnitt `file-mode` in genau der Form, die die drei vorhandenen Abschnitte `bundle-activation`, `sync-cursor` und `verification` derselben Datei bereits tragen — ein Array aus `{"name", "brackets", "witness"}`, jeder `witness` als `<pfad>::<funktion>`.
+
+**Jeder `witness` dieses Manifests MUSS eine RUST-Testfunktion sein, und das ist eine gemessene Auflage und kein Stil.** `witness_resolves` in `tools/xtask/src/main.rs` sucht die Zeichenkette `fn <name>(` und akzeptiert sie erst, wenn — durch Attribute, Kommentare und Leerzeilen hindurch rückwärts — `#[test]` oder `#[tokio::test` unmittelbar davor steht. Ein Playwright-Zeuge in einer `.spec.ts` trägt weder das eine noch das andere; er würde mit „declares no function" abgewiesen. Browserläufe bleiben als ZUSÄTZLICHER Beleg willkommen — sie stehen in der Prosa des jeweiligen Schritts, nie in der Spalte `witness`. Ergänzend gemessen: `docs/traceability/stage-4-fault-points.json` wird von `tools/xtask/src/main.rs` heute noch von KEINEM Gate-Arm gelesen — der Auflöser läuft dort über `STAGE_THREE_FAULT_POINT_MANIFEST_PATH`. Der Stufe-4-Arm entsteht in der Aufgabe „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate"; wer die Zeugennamen hier falsch schreibt, merkt es erst dort. Deshalb stehen sie unten zeichengleich zu den Testfunktionen aus Schritt 1.
 
 | Szenario | Klammer | Zeuge |
 |---|---|---|
 | `bundle-truncated` | eine im Transport abgeschnittene oder umbenannte Containerdatei: `EA-BUNDLE-MALFORMED`, und es entsteht KEIN Teilbericht | `crates/ea-reader/tests/file_mode.rs::a_truncated_or_wrongly_magicked_container_reports_the_bundle_code_and_no_report` |
-| `directory-permission-revoked` | ein dauerhaft angebundener Ordner verliert zwischen zwei Oeffnungen seine Berechtigung: der Oeffnungsversuch bricht ab und der universelle Weg bleibt angeboten | `crates/ea-reader/tests/file_mode.rs::a_directory_source_that_stops_yielding_blobs_leaves_the_universal_path_available` |
-| `substituted-archive` | ein untergeschobenes Archiv mit vollstaendiger EIGENER Vertrauenskette: der Lauf endet fail-closed an Gate `trust` und sagt ueber keinen Eintrag etwas aus | `crates/ea-reader/tests/file_mode_anchor.rs::a_substituted_archive_with_its_own_trust_chain_says_nothing_about_any_entry` |
+| `directory-permission-revoked` | ein dauerhaft angebundener Ordner verliert zwischen zwei Öffnungen seine Berechtigung: der Öffnungsversuch bricht mit `EA-ARCHIVE-UNAVAILABLE` ab und der universelle Weg bleibt angeboten | `crates/ea-reader/tests/file_mode.rs::a_directory_whose_permission_was_revoked_reports_the_archive_code_and_no_report` |
+| `substituted-archive` | ein untergeschobenes Archiv mit vollständiger EIGENER Vertrauenskette: der Lauf endet fail-closed an Gate `trust` und sagt über keinen Eintrag etwas aus | `crates/ea-reader/tests/file_mode_anchor.rs::a_substituted_archive_says_nothing_about_any_entry_in_file_mode` |
 
-Ledger. `WR-053` und `WR-054` sind die zwei `v1.1`-Zeilen, die die Aufgabe „Stufe-4-Vorlauf: ADR 0005, wasm-Werkzeugpins und die aufgehobene Blockade" bereits als `planned` angelegt hat, damit `WEB_READER_MUST_ROWS` in `tools/xtask/tests/stage_gate.rs` sie von Anfang an haelt; diese Aufgabe fuellt ihre Belegspalte mit den Testpfaden oben, den Statuswechsel vollzieht die Stufenabnahme. Zwei Formregeln sind dabei bindend, weil `web_reader_must_requirements_are_recorded_as_v1_1_rows` sie exakt vergleicht: die Quellspalte MUSS auf `5.3` beziehungsweise `5.4` ENDEN — die Zusicherung benutzt `ends_with` —, und die Version bleibt `v1.1`. `WR-052` bleibt unberuehrt auf Stufe `2` und Status `integrated`: der Ein-Datei-Buendelexport ist Stufe-2-Arbeit (Entscheidung D-HE2), diese Aufgabe VERBRAUCHT ihn und beansprucht ihn nicht ein zweites Mal.
+Ledger. `WR-053` und `WR-054` liegen als Zeilen in `docs/traceability/v0.1-requirements.csv` und sind von der Aufgabe „Stufe-4-Vorlauf: ADR 0005, wasm-Werkzeugpins und die aufgehobene Blockade" bereits als `planned` angelegt worden, damit `WEB_READER_MUST_ROWS` in `tools/xtask/tests/stage_gate.rs` sie von Anfang an hält. Diese Aufgabe füllt ihre BELEGSPALTE mit den Testpfaden oben; den Statuswechsel vollzieht die Stufenabnahme. Gemessen an `web_reader_must_requirements_are_recorded_as_v1_1_rows`: `ledger_fields` zerlegt jede Zeile in GENAU NEUN gequotete Felder und weist ein Anführungszeichen im Freitext laut zurück; verglichen werden `row[1] == "v1.1"`, `row[2]` enthält `2026-08-15-einsatzarchiv-web-reader-design.md` UND endet mit `5.3` beziehungsweise `5.4` (`ends_with`, nicht `contains`), `row[3]` ist nicht leer, `row[7] == "4"` und `row[8] == "planned"`. Die BELEGSPALTE ist `row[6]`, und sie wird für diese zwei Zeilen von KEINER Zusicherung geprüft — nur `WR-042` hat eine eigene Belegprüfung. Das ist kein Freibrief, sondern die Begründung dafür, die Zeugennamen dort zeichengleich zu den Funktionen zu schreiben: kein Gate fängt einen Tippfehler. `row[7]` und `row[8]` bleiben unberührt; wer hier den Status auf `implemented` zöge, machte `stage_gate` rot. `WR-052` bleibt unberührt auf Stufe `2` und Status `integrated`: der Ein-Datei-Bündelexport ist Stufe-2-Arbeit (Entscheidung D-HE2), diese Aufgabe VERBRAUCHT ihn und beansprucht ihn nicht ein zweites Mal.
 
 - [ ] **Step 4: Run both ways, both caps, and the substituted archive**
 
-Run: `cargo test --locked -p ea-reader --test file_mode --test file_mode_anchor && cargo test --locked -p ea-reader --doc && pnpm --dir apps/web test --run && pnpm --dir apps/web exec playwright test tests/e2e/file-mode.spec.ts && cargo run --locked -p xtask -- build-wasm`
+Run: `cargo run --locked -p ea-ui-contracts --bin emit-ts && cargo test --locked -p ea-ui-contracts && cargo test --locked -p ea-reader --test file_mode --test file_mode_anchor && cargo test --locked -p ea-reader --doc && cargo run --locked -p xtask -- build-wasm && pnpm --dir apps/web test --run && pnpm --dir apps/web exec playwright test tests/e2e/file-mode.spec.ts`
 
-Expected: PASS. Beleg fuer Beleg: Buendel und Verzeichnis liefern denselben `reportHash`, also ist der Komfortweg wirklich derselbe Bestand und keine zweite Lesart; jedes Objekt ohne Quittung steht auf `notServerConfirmed` UND `valid`, `gaps()` ist leer und `is_fully_verified()` bleibt wahr — die orthogonale Dimension senkt nichts; beide Deckel fallen am `push_blob`, das den Puffer noch nicht angelegt hat; die abgeschnittene und die umbenannte Datei liefern denselben stabilen `EA-BUNDLE-MALFORMED` und keinen Teilbericht. Die zwei `compile_fail`-Doctests belegen jetzt, was sie behaupten: `OpenedArchiveV1` und `ReaderFileMode` EXISTIEREN, und weder `confirmed_cursor()` noch `sync_service()` laesst sich an ihnen aufrufen — der Cursor entfaellt ersatzlos, jedes Objekt wird bei jedem Oeffnen vollstaendig geprueft. Der untergeschobene Bestand ist adversarisch gepaart: gegen SEINEN eigenen Anker traegt dasselbe Byte-fuer-Byte gleiche Buendel vollstaendig, gegen den gepinnten faellt es — das Protokoll endet nach `["format", "trust"]`, `objectResults` ist leer, `publicKeyThumbprints` ist leer, weil `ea-verify` diesen Nachweis erst HINTER dem fail-closed-Ausstieg eintraegt, und `chainHead` ist das Sentinel mit Sequenz null und ausdruecklich NICHT der `genesisEntryHash` des Ankers, der einen verifizierten Genesis-Eintrag behaupten wuerde. Ohne die Positivkontrolle waere der Fehlschlag von einer kaputten Fixture nicht zu unterscheiden.
+**Die Reihenfolge dieses Kommandos ist gemessen und nicht kosmetisch.** Der Emitter läuft ZUERST, weil `generated_ts_is_current.rs` sonst gegen eine veraltete eingecheckte Datei vergleicht und `pnpm --dir apps/web test --run` gegen ein DTO läuft, das es noch nicht gibt. `xtask build-wasm` steht VOR den zwei `pnpm`-Armen, weil `apps/web/src/bridge/pkg/` sein Ausgang ist und `web:typecheck` und `web:test` ohne ihn mit TS2307 abbrechen — dieselbe Ordnungsmessung, die `verify_quick_commands()` in `tools/xtask/src/main.rs` bereits ausschreibt.
+
+Expected: PASS. Beleg für Beleg: Bündel und Verzeichnis liefern denselben `reportHash`, also trägt der Komfortweg wirklich denselben Bestand und keine zweite Lesart — und der Zeuge sagt in seinem Namen, dass er die BYTES vergleicht und nicht die Adressen; jedes Objekt ohne Quittung steht auf `notServerConfirmed` UND `valid`, `gaps()` ist leer und `is_fully_verified()` bleibt wahr — die orthogonale Dimension senkt nichts —, und die Gegenkontrolle mit Quittungen belegt, dass die Spalte überhaupt zwei Werte annehmen kann; der Blob-Deckel fällt an seinem ECHTEN Wert und der Byte-Deckel an einer einstellbaren Schranke, beide bevor die Quelle ihre Kopie anlegt; die abgeschnittene und die umbenannte Datei liefern denselben stabilen `EA-BUNDLE-MALFORMED` und keinen Teilbericht; der Ordner ohne Berechtigung liefert `EA-ARCHIVE-UNAVAILABLE` und ebenfalls keinen. Die zwei `compile_fail`-Doctests belegen jetzt, was sie behaupten: `OpenedArchiveV1` und `ReaderFileMode` EXISTIEREN, und weder `confirmed_cursor()` noch `sync_service()` lässt sich an ihnen aufrufen — der Cursor entfällt ersatzlos, jedes Objekt wird bei jedem Öffnen vollständig geprüft. Der untergeschobene Bestand ist adversarisch gepaart: DASSELBE Byte-für-Byte gleiche Bündel trägt gegen den eigenen gepinnten Anker vollständig und fällt gegen den fremden — das Protokoll endet nach `["format", "trust"]`, `objectResults` ist leer, `publicKeyThumbprints` ist leer, weil `ea-verify` diesen Nachweis erst HINTER dem fail-closed-Ausstieg einträgt, und `chainHead` ist das Sentinel mit Sequenz null und ausdrücklich NICHT der `genesisEntryHash` des Ankers. Ohne die Positivkontrolle wäre der Fehlschlag von einer kaputten Kulisse nicht zu unterscheiden.
+
+**Der Browserlauf deckt genau EINE Engine ab, und das ist eine benannte Grenze.** `apps/web/playwright.config.ts` existiert seit der Enrollment-Aufgabe, `apps/web/tests/e2e/` trägt bereits `enrollment.spec.ts` und `bundle-activation.spec.ts`, und `apps/web/src/e2e-config.test.ts` pinnt `config.projects.length === 1` mit dem Namen `chromium`. In diesem Task entsteht also KEIN Playwright-Gerüst, sondern eine dritte Spec darin — und ausgerechnet die Eigenschaft, die den universellen Weg überhaupt nötig macht (`showDirectoryPicker` fehlt in Safari und Firefox), lässt sich in Chromium nicht bezeugen. Sie hängt an zwei anderen Zeugen: an der Fähigkeitsabfrage in `OpenArchivePanel.test.tsx`, die den Wirt ohne `showDirectoryPicker` doubelt, und an der Browsermatrix der Aufgabe „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate", die `projects` erweitert und dabei `e2e-config.test.ts` mitzieht. `web:e2e` bleibt weiterhin AUSSERHALB von `verify:quick`, aus dem Grund, den `verify_quick_commands()` bereits notiert: Playwright verlangt installierte Engine-Baus und der wasm-bindgen-test-runner einen chromedriver, beides wäre eine neue Containervoraussetzung für JEDEN Schnelllauf; die benannte Klammer ist `browsers up` … `browsers down`.
 
 - [ ] **Step 5: Commit the file mode**
 
 ```bash
-git add crates/ea-reader crates/ea-reader-wasm apps/web docs/traceability/stage-4-fault-points.json
+git add crates/ea-reader crates/ea-reader-wasm crates/ea-ui-contracts apps/web \
+        docs/traceability/stage-4-fault-points.json docs/traceability/v0.1-requirements.csv
 git commit -m "feat(reader): open archives from files against the pinned anchor"
 ```
 
