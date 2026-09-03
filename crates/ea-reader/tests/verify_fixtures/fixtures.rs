@@ -32,7 +32,7 @@
 
 use std::sync::OnceLock;
 
-use ea_archive::{ArchiveInventory, ArchiveSource};
+use ea_archive::{ArchiveInventory, ArchiveSource, BUNDLE_MAGIC_V1};
 use ea_crypto::SecretBytes;
 use ea_reader::{
     AuthenticatorPrfV1, ReaderClassification, ReaderMode, ReaderVault, ReaderVerifier,
@@ -162,6 +162,17 @@ static FORGED_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLoc
 static FOREIGN_TARGET_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
 static GENESIS_PLAINTEXT_ARCHIVE_V1: OnceLock<verify_support::CompleteArchive> = OnceLock::new();
 static GENESIS_PLAINTEXT_V1: OnceLock<Vec<u8>> = OnceLock::new();
+static RECEIPT_ARCHIVE_V1: OnceLock<verify_support::ReceiptArchive> = OnceLock::new();
+
+/// Wie viele Eintraege [`complete_archive`] traegt: GENAU EINEN.
+///
+/// Die Zahl steht HIER und nicht im jeweiligen Zeugen, weil sie eine Tatsache
+/// UEBER DIE KULISSE ist und nicht ueber den Zeugen: `complete_valid_archive`
+/// legt einen einzigen Eintrag ab, und `confirm_entries` gibt genau den
+/// Eintraegen ein Objektergebnis. Ein `assert!(.. > 0)` daneben waere eine
+/// Zusicherung, die auch ueber einem dreientraegigen Bestand haelt und damit
+/// nichts ueber DIESEN sagt.
+pub const ENTRIES_IN_THE_COMPLETE_ARCHIVE_V1: usize = 1;
 
 /// Der lueckenlose Bestand: GENAU EIN Eintrag auf
 /// [`verify_support::COMPLETE_GENESIS_SEQUENCE_V1`], mit echter HPKE-Kapselung
@@ -377,6 +388,126 @@ pub fn archive_with_a_gap_without_a_stub() -> &'static ArchiveFixture {
 
 fn missing_middle() -> &'static verify_support::ChainArchive {
     MISSING_MIDDLE_ARCHIVE_V1.get_or_init(verify_support::archive_with_a_missing_middle_entry)
+}
+
+/// Der Bestand MIT gueltigen Serverquittungen zu JEDEM Eintrag.
+///
+/// Die Gegenkontrolle zu [`complete_archive`], und ausschliesslich fuer die
+/// EINE Spalte `serverConfirmation`: `confirm_entries` setzt
+/// `NotServerConfirmed` als Ausgangswert und hebt ihn nur ueber eine getragene,
+/// nicht isolierte `.esr` an. Ohne einen Bestand, der den zweiten Wert
+/// wirklich erreicht, waere jede Zusage ueber den ersten auch dann gruen, wenn
+/// die Spalte gar nicht zwei Werte annehmen koennte.
+///
+/// UEBER MAENGEL SAGT DIESER BESTAND NICHTS. Er traegt die Vorlauf-Luecke
+/// `0..=1` der Quittungslinie ([`verify_support::RECEIPT_PRE_ENTRY_GAP_THROUGH_V1`]),
+/// weil ihre drei Koepfe die Sequenzfaecher null und eins verbrauchen, bevor
+/// das Schreiberzertifikat aktiv ist; `is_fully_verified()` prueft
+/// `gaps.is_empty()` mit und ist hier deshalb FALSCH. Wer daneben eine Zusage
+/// ueber Luecken aufschreibt, misst die Quittungslinie und nicht den
+/// Datei-Modus.
+#[must_use]
+pub fn archive_with_receipts() -> &'static ArchiveFixture {
+    &RECEIPT_ARCHIVE_V1
+        .get_or_init(|| {
+            verify_support::receipt_archive(
+                verify_support::ReceiptArchiveSpec::bare().with_receipts(),
+            )
+        })
+        .fixture
+}
+
+// ---------------------------------------------------------------------------
+// Dieselben Bytes auf den zwei Wegen des Datei-Modus
+// ---------------------------------------------------------------------------
+
+/// Die Blobs eines Bestands als Paare, in der Reihenfolge seiner ABLAGE.
+///
+/// AUSDRUECKLICH unsortiert. `ArchiveFixture` legt in Baureihenfolge ab —
+/// Trust-Objekte, dann `.eip`, dann `.eag` —, und der Verzeichnisdurchlauf des
+/// Browsers ist ebenfalls nicht global sortiert: er laeuft rekursiv und je
+/// Ebene, und eine ebenenweise Ordnung ist nicht die Ordnung ueber die vollen
+/// Adressbytes. Eine Sortierung hier verstellte den Blick auf die Eigenschaft,
+/// die die Gleichheit der zwei Wege wirklich traegt: jedes Sammelfeld von
+/// `VerificationReportV1` ist eine `BTreeMap` oder ein `BTreeSet` ueber Hashes,
+/// und kein Berichtsfeld nennt einen Pfadhinweis.
+#[must_use]
+pub fn directory_blobs(source: &ArchiveFixture) -> &[(String, Vec<u8>)] {
+    source.blobs()
+}
+
+/// Dieselben Blobs als EIN Container — von Hand kodiert.
+///
+/// Von Hand, und das ist kein Sparzwang: `encode_bundle` liegt modulprivat in
+/// `crates/ea-archive-fs`, der einzige oeffentliche Weg dorthin
+/// (`write_archive_bundle`) verlangt einen Wirtspfad, und diese Kulisse
+/// uebersetzt ueber die `#[path]`-Kette von `crates/ea-reader-wasm` auch fuer
+/// wasm32 — `ea-archive-fs` steht auf `WASM32_EXEMPT_CRATES` und darf hier
+/// keine Kante werden. Die Form ist die von
+/// `crates/ea-archive/tests/bundle_reader.rs::hand_built_container`, und die
+/// Begruendung dort gilt hier weiter: ein zweiter Kodierer NEBEN dem Leser
+/// truege dieselbe Abweichung wie der Leser und bliebe gruen.
+///
+/// Was `hand_built_container` bewusst dem Aufrufer laesst, tut diese Funktion
+/// selbst: `ArchiveBundleSource::from_bytes` verlangt einen STRENG aufsteigend
+/// ueber die Adressbytes sortierten Index und weist alles andere mit
+/// `BundleError::Malformed` ab. Die Adressen der Trust-Objekte tragen
+/// Objekthashes, ihre Baureihenfolge ist also weder sortiert noch vorhersagbar
+/// — ohne diese zwei Zeilen waere die Kulisse an einem Tag gruen und am
+/// naechsten rot, je nachdem, welche Hashes die Linie zieht.
+///
+/// # Panics
+///
+/// Wenn zwei Blobs dieselbe Adresse tragen, oder wenn eine Adresse oder eine
+/// Nutzlast nicht in ihr Laengenfeld passt. Dann ist die Kulisse kaputt und
+/// muss es laut sagen, statt einen Container zu bauen, den niemand liest.
+#[must_use]
+pub fn exported_bundle_bytes(source: &ArchiveFixture) -> Vec<u8> {
+    let mut entries: Vec<(&str, &[u8])> = directory_blobs(source)
+        .iter()
+        .map(|(path_hint, bytes)| (path_hint.as_str(), bytes.as_slice()))
+        .collect();
+    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for pair in entries.windows(2) {
+        assert!(
+            pair[0].0 != pair[1].0,
+            "zwei Blobs unter derselben Adresse: {}",
+            pair[0].0
+        );
+    }
+
+    let mut index = Vec::new();
+    let mut offset: u64 = 0;
+    for (path, bytes) in &entries {
+        let length = u64::try_from(bytes.len()).expect("eine Fixture-Nutzlast passt in 64 Bit");
+        index.extend_from_slice(
+            &u16::try_from(path.len())
+                .expect("eine Fixture-Adresse passt in 16 Bit")
+                .to_be_bytes(),
+        );
+        index.extend_from_slice(path.as_bytes());
+        index.extend_from_slice(&offset.to_be_bytes());
+        index.extend_from_slice(&length.to_be_bytes());
+        offset += length;
+    }
+
+    let mut container = Vec::new();
+    container.extend_from_slice(&BUNDLE_MAGIC_V1);
+    container.extend_from_slice(
+        &u64::try_from(entries.len())
+            .expect("die Blobzahl einer Fixture passt in 64 Bit")
+            .to_be_bytes(),
+    );
+    container.extend_from_slice(
+        &u64::try_from(index.len())
+            .expect("die Indexlaenge einer Fixture passt in 64 Bit")
+            .to_be_bytes(),
+    );
+    container.extend_from_slice(&index);
+    for (_, bytes) in &entries {
+        container.extend_from_slice(bytes);
+    }
+    container
 }
 
 // ---------------------------------------------------------------------------

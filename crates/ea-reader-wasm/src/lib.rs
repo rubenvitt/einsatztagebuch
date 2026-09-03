@@ -68,6 +68,26 @@ pub mod bridge;
 /// entscheidet, JavaScript bewegt Bytes.
 pub mod fetch;
 
+/// Der Datei-Modus: die SECHS Ausfuhren der zwei Wege aus dem Dateisystem.
+///
+/// Das Modul steht OHNE cfg an der `mod`-Zeile, weil es Ausfuhren traegt und
+/// die Regel „cfg am Item" dann fuer jede einzelne von ihnen gilt — dieselbe
+/// Lage wie bei [`bridge`], [`fetch`] und [`vault_bridge`] und ausdruecklich
+/// nicht die von `opfs_worker`.
+///
+/// Alle sechs Ausfuhren laufen IM DEDIZIERTEN WORKER, und der Grund ist nicht
+/// OPFS: `ea_reader::ReaderFileMode` verlangt einen entsperrten Tresor, und die
+/// Sitzungstabelle dafuer liegt in einem `thread_local!` in [`vault_bridge`].
+/// Der `FileSystemDirectoryHandle` selbst wird auf dem Hauptthread abgelaufen —
+/// die Naht dazwischen ist wieder die Nachrichtenform von
+/// `apps/web/src/bridge/opfs-worker.ts`.
+///
+/// Hier faellt KEINE Entscheidung: die zwei Deckel setzt
+/// `ea_reader::DirectoryHandleSource` durch, die Klassifikation faehrt
+/// `ea_reader::ReaderVerifier`, und der Modus verlaesst die Crate nicht einmal
+/// als DTO-Feld.
+pub mod file_access;
+
 /// Der OPFS-Bytespeicher — NUR auf `wasm32-unknown-unknown`.
 ///
 /// Das Tor steht hier an der `mod`-Zeile und nicht an jedem Item, und das ist

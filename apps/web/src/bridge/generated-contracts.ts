@@ -44,6 +44,16 @@ export type BundleActivationView = {
   readonly rejectionCode: BundleRejectionCodeV1 | null
 }
 
+export type FileModeArchiveView = {
+  readonly archiveObjectCount: number
+  readonly entryPackageCount: number
+  readonly fullyVerified: boolean
+  readonly gapCount: number
+  readonly serverConfirmedCount: number
+  readonly notServerConfirmedCount: number
+  readonly serverConfirmation: ServerConfirmationV1
+}
+
 export type ReaderTrustAgeView = {
   readonly trustAgeMs: number
   readonly readerTrustRefreshMs: number

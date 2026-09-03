@@ -34,7 +34,14 @@
 //! `design.md` §17.4 und gibt je Eintrag hoechstens ein Zeugenpaar
 //! [`VerifiedEncryptedEntry`]/[`VerifiedGrantForRecipient`] heraus — die
 //! einzigen Werte, mit denen [`decrypt_verified`] ueberhaupt formulierbar ist.
-//! Der Datei-Modus entsteht in der folgenden Aufgabe der Stufe 4.
+//!
+//! Seit der Aufgabe „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein
+//! Cursor" steht der ZWEITE Betriebsmodus daneben, und er ist durch seine
+//! ABWESENHEIT definiert: [`ReaderFileMode`] oeffnet EINE exportierte Datei
+//! oder einen angebundenen Ordner, ohne jeden Serveraufruf, ohne OPFS-I/O und
+//! ohne Cursor. Beide Wege muenden ueber [`ReaderArchiveSourceV1`] in
+//! denselben Byteport und in denselben [`ReaderVerifier::classify`]; es
+//! entsteht weder ein zweiter Archivparser noch ein zweites Gate.
 //!
 //! # Die Reihenfolge ist Absicht
 //!
@@ -100,8 +107,24 @@
 //! zwei Namen stehen deshalb ebenfalls in der oeffentlichen Flaeche, statt
 //! `crates/ea-reader-wasm` eine Kante nach `ea-types` zu geben, die es bis
 //! heute nicht hat.
+//!
+//! Und dieselbe Regel weitet den Re-Export aus `ea-archive` von
+//! [`ArchiveSource`] auf acht weitere Namen aus. [`ArchiveBundleSource`] und
+//! [`DirectoryHandleSource`] sind die zwei Arme von [`ReaderArchiveSourceV1`],
+//! [`BundleError`] ist ein Arm von [`ReaderFileModeError`], [`ArchiveError`]
+//! ist die Rueckgabe von [`DirectoryHandleSource::push_blob`] und
+//! [`ArchiveBlob`] steht in der Signatur, die [`ReaderArchiveSourceV1`]
+//! erfuellt; [`MAX_ARCHIVE_BLOBS_V1`] und [`MAX_TOTAL_ARCHIVE_BYTES_V1`] sind
+//! die zwei Deckel, die `push_blob` durchsetzt, und
+//! [`BUNDLE_FILE_EXTENSION_V1`] samt [`BUNDLE_MAGIC_V1`] sind der
+//! Dialogfilter und das, was ihn ueberstimmt. `ea-archive` steht in
+//! `crates/ea-reader-wasm/Cargo.toml` ausschliesslich unter
+//! `[dev-dependencies]`; ohne diese Re-Exporte koennte eine Produktionsquelle
+//! der Bruecke `ea_archive::` gar nicht schreiben, und eine neue Kante ginge
+//! in den wasm32-Lib-Graphen, wo ein Re-Export nichts kostet.
 
 mod anchor;
+mod archive_source;
 mod batch;
 mod blob_store;
 mod bundle_release;
@@ -112,6 +135,7 @@ mod enrollment;
 mod enrollment_endpoints;
 mod entry_state;
 mod envelope;
+mod file_mode;
 mod grant;
 mod http;
 mod key_profile;
@@ -122,6 +146,7 @@ mod vault;
 mod verify;
 
 pub use anchor::PinnedTrustAnchor;
+pub use archive_source::{DirectoryHandleSource, ReaderArchiveSourceV1};
 pub use batch::VerifiedSyncBatch;
 pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
 pub use bundle_release::{
@@ -133,7 +158,10 @@ pub use cursor::{
     READER_SYNC_OBJECTS_BLOB_KEY_V1,
 };
 pub use decrypt::{VerifiedDecryptedRecord, decrypt_verified};
-pub use ea_archive::ArchiveSource;
+pub use ea_archive::{
+    ArchiveBlob, ArchiveBundleSource, ArchiveError, ArchiveSource, BUNDLE_FILE_EXTENSION_V1,
+    BUNDLE_MAGIC_V1, BundleError, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
+};
 pub use ea_crypto::HpkeRecipientPrivateKey;
 pub use ea_schema::{PayloadV1, SchemaRegistry};
 pub use ea_sync_protocol::HttpMethod;
@@ -162,6 +190,7 @@ pub use entry_state::{ReaderEntryStateStore, ReaderEntryStateV1};
 pub use envelope::{
     AuthenticatorPrfV1, VAULT_INDEX_INFO_V1, VAULT_KEK_INFO_V1, VaultEnvelopeV1, derive_kek_v1,
 };
+pub use file_mode::{OpenedArchiveV1, ReaderFileMode, ReaderFileModeError};
 pub use grant::{VerifiedEncryptedEntry, VerifiedGrantForRecipient};
 pub use http::ReaderRequestV1;
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
