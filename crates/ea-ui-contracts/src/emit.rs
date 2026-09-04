@@ -98,6 +98,129 @@ const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ("trustRefreshOverdue", "boolean"),
         ],
     ),
+    // ------------------------------------------------------------------
+    // Die Reader-Ansichten der Aufgabe „Integritätszentrierte
+    // Reader-Oberfläche". Die Felder folgen `design.md` §17.2 — und dem, was
+    // der Arbeitsbaum ERZEUGEN kann. Drei Felder der Vorfassung haben keinen
+    // Erzeuger und stehen deshalb nicht im Vertrag: `writerKeyThumbprint`
+    // (das Manifest traegt `writer_certificate_hash`, und der ist der
+    // „Writer-Key" der technischen Ansicht), `evidence: EvidenceStatus`
+    // (`ea-verify` konstruiert `EvidenceStatus` nirgends; ein `vollstaendig`
+    // ohne Erzeuger waere der Ueberanspruch, den §17.4 verbietet) und
+    // `occurredAtLocal` (der einzige Ortszeit-Formatierer in `ea-schema` ist
+    // privat; die Bruecke gibt UTC-Millisekunden und die IANA-Zeitzone
+    // heraus, die Darstellung formatiert mit `Intl.DateTimeFormat`).
+    // ------------------------------------------------------------------
+    (
+        // Der TECHNISCHE Zustand eines Eintrags — er existiert auch dann,
+        // wenn nichts entschluesselt wurde. Die drei Dimensionen stehen
+        // NEBENEINANDER; eine zusammengefaltete waere §17.4 zuwider.
+        "ReaderEntryStateView",
+        &[
+            ("entryHash", "string"),
+            ("objectHash", "string"),
+            ("sequence", "number"),
+            ("verification", "VerificationStatus"),
+            ("entryState", "EntryStatus"),
+            ("serverConfirmation", "ServerConfirmationV1"),
+            ("detailCode", "string | null"),
+        ],
+    ),
+    (
+        // Der FACHLICHE Inhalt — und der entsteht ausschliesslich aus einem
+        // entschluesselten Datensatz. `null` ist hier kein leerer Einsatz,
+        // sondern die Aussage, dass nicht entschluesselt wurde.
+        "ReaderIncidentView",
+        &[
+            ("incidentNumber", "string"),
+            ("occurredAtStartMs", "number"),
+            ("timezone", "string"),
+            ("keyword", "string"),
+        ],
+    ),
+    (
+        "ReaderEntryView",
+        &[
+            ("state", "ReaderEntryStateView"),
+            ("incident", "ReaderIncidentView | null"),
+        ],
+    ),
+    (
+        // Die technische Ansicht aus §17.2, Feld fuer Feld aus Manifest und
+        // Bericht: Sequenz, Hashes, Writer-Zertifikat, Registry, Receipt,
+        // Evidence.
+        "ReaderTechnicalView",
+        &[
+            ("sequence", "number"),
+            ("previousEntryHash", "string | null"),
+            ("entryHash", "string"),
+            ("ciphertextHash", "string"),
+            ("writerCertificateHash", "string"),
+            ("registryVersion", "number"),
+            ("registryHeadHash", "string"),
+            ("serverConfirmation", "ServerConfirmationV1"),
+            ("evidenceDetailCode", "string | null"),
+        ],
+    ),
+    (
+        // Ein Knoten der Integritaetsleiste. Er entsteht nur fuer ein Tor,
+        // ueber das der Bericht eine Aussage TRAGEN kann; `null` ist „nicht
+        // geprueft" — der Baustein bleibt dreiwertig, und ein `boolean`
+        // koennte den dritten Wert nicht tragen.
+        "ChainIntegrityNodeView",
+        &[
+            ("label", "string"),
+            ("verified", "boolean | null"),
+            ("detail", "string | null"),
+        ],
+    ),
+    (
+        "VerificationProblemView",
+        &[
+            ("objectHash", "string"),
+            ("verification", "VerificationStatus"),
+            ("detailCode", "string | null"),
+        ],
+    ),
+    (
+        // Der geoeffnete Bestand als Ganzes: die Liste, die `ReaderPage`
+        // rendert.
+        "ReaderStandView",
+        &[
+            ("entries", "readonly ReaderEntryView[]"),
+            ("problems", "readonly VerificationProblemView[]"),
+            ("chain", "readonly ChainIntegrityNodeView[]"),
+            ("fullyVerified", "boolean"),
+            ("serverConfirmation", "ServerConfirmationV1"),
+        ],
+    ),
+    (
+        // Original und Nachtraege als GETRENNTE Ansichten desselben
+        // Zusammenhangs; nichts ist zusammengefuehrt, nichts ueberholt.
+        "ReaderRejectedAmendmentView",
+        &[
+            ("entryHash", "string"),
+            ("sequence", "number"),
+            ("reason", "string"),
+        ],
+    ),
+    (
+        "ReaderAmendmentThreadView",
+        &[
+            ("original", "ReaderEntryView"),
+            ("amendments", "readonly ReaderEntryView[]"),
+            ("rejected", "readonly ReaderRejectedAmendmentView[]"),
+        ],
+    ),
+    (
+        "ReaderSearchHitView",
+        &[
+            ("entryHash", "string"),
+            ("sequence", "number"),
+            ("incidentNumber", "string"),
+            ("occurredAtStartMs", "number"),
+        ],
+    ),
 ];
 
 const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[

@@ -5410,7 +5410,7 @@ Dazu ein zweiter, kleinerer Befund derselben Herkunft: `required_blob_keys` leit
 
 Der frueher hier stehende Tauri-Kommandoblock wird nicht portiert. `apps/desktop/src-tauri/src/commands/` fuehrt heute `writer.rs`, `master_data.rs`, `session.rs` und `sync.rs` und KEIN `reader.rs`: die Datei ist nie entstanden, weil die Stufe blockiert war. „Geloescht statt portiert" heisst hier deshalb nicht ein `git rm`, sondern eine erzwungene Abwesenheit — `apps/desktop/src/app/RoleGate.test.tsx` liest den Kommandobaum und die Routentabelle und faellt, sobald eine Reader-Flaeche dort einzieht. Dieser Task enthaelt KEINE Sicherheitslogik in TypeScript: nur erzeugte Ansichts- und Status-DTOs ueberqueren die Grenze.
 
-- [ ] **Step 1: Write the state-separation, orthogonality, and role-boundary tests**
+- [x] **Step 1: Write the state-separation, orthogonality, and role-boundary tests**
 
 ```tsx
 // apps/web/src/features/reader/ReaderPage.test.tsx
@@ -5490,7 +5490,7 @@ it('exposes no writer or administration surface in apps/web', async () => {
 })
 ```
 
-- [ ] **Step 2: Run the UI tests and verify the Reader surface is absent**
+- [x] **Step 2: Run the UI tests and verify the Reader surface is absent**
 
 Run:
 
@@ -5501,7 +5501,7 @@ pnpm --dir apps/desktop test --run RoleGate
 
 Expected: FAIL. `apps/web/src` traegt nach dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate" die Schale, die Gestaltungsgrundlage und die Bruecke, aber keine `features/reader`-Quelle und keinen Integritaetsbaustein; `ReaderPage` ist kein Modul, und `VERIFICATION_STATUS_VALUES` steht noch nicht in `apps/web/src/bridge/generated-contracts.ts`, weil dieser Task die Ansichtsmodelle erst emittiert. `RoleGate.test.tsx` faellt an seinem eigenen Fehlen, nicht am Desktop: die drei Zusagen sind heute inhaltlich wahr — `role-gate.ts` fuehrt genau zwei Routen und `src-tauri/src/commands/` genau fuenf Dateien. GEMESSEN: die Routenzusage haelt `apps/desktop/src/app/AppShell.test.tsx` (`offers no Reader and no Administration surface at all`) bereits wortgleich fest; neu sind nur der Kommandobaum-Zeuge und der Quellenscan von `apps/web`.
 
-- [ ] **Step 3: Emit the view models, then build the presentation over them**
+- [x] **Step 3: Emit the view models, then build the presentation over them**
 
 **Die Ansichtsmodelle entstehen in Rust.** `crates/ea-ui-contracts/src/emit.rs` ERWEITERT `READER_VIEW_MODELS_V1` — angelegt im Task „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes" mit `BundleActivationView` und `ReaderTrustAgeView`, seit dem Datei-Modus-Task auch `FileModeArchiveView` — um die Reader-Ansichten; `VIEW_MODELS_V1` des Writers bleibt unangetastet, und `emit_reader_typescript()` gibt beide Gruppen in derselben Form aus: fester Kopfkommentar, `export type`-Vereinigungen, `export type`-Objekttypen, `export const … as const`-Arrays, keine Funktion, kein Pfeil, kein Import. Die Felder folgen `design.md` §17.2 — und dem, was der Arbeitsbaum ERZEUGEN kann. GEMESSEN am 2026-09-04, drei Felder der Vorfassung haben keinen Erzeuger und stehen deshalb nicht mehr im Vertrag: `writerKeyThumbprint` (existiert nur in `crates/ea-writer/src/finalize.rs`; das Manifest traegt `writer_certificate_hash`, und der ist der „Writer-Key" der technischen Ansicht), `evidence: EvidenceStatus` (`ea-verify` konstruiert `EvidenceStatus` nirgends; der Bericht kennt nur `evidence_errors()` — ein `vollständig` ohne Erzeuger waere der Ueberanspruch, den §17.4 verbietet, deshalb `evidenceDetailCode: string | null`) und `occurredAtLocal: string` (der einzige Ortszeit-Formatierer `local_civil_year` in `ea-schema` ist privat, `jiff` keine Reader-Kante; die Bruecke gibt UTC-Millisekunden und die IANA-Zeitzone heraus, die Darstellung formatiert mit `Intl.DateTimeFormat` — Darstellung, keine Sicherheitsentscheidung). `ChainIntegrityNodeView.verified` ist `boolean | null`, weil der Baustein dreiwertig bleibt und ein `boolean` den dritten Wert nicht tragen koennte.
 
@@ -5644,7 +5644,7 @@ Die Suche braucht `ReaderQueryV1` und `ReaderSearchHitV1` aus `ea-index` — GEM
 
 **Playwright.** `apps/web/playwright.config.ts` und das Wurzelskript `web:e2e` bestehen seit dem Task „Browser-Enrollment: zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate" — `testDir: 'tests/e2e'`, `webServer` ueber `vite preview` auf 127.0.0.1:4174, `use.offline: false`, ein einziges `projects`-Element `chromium`. Dieser Task legt `apps/web/tests/e2e/reader.spec.ts` darunter und aendert an der Konfiguration NICHTS. GEMESSEN: `apps/web` traegt keinen Sync-Treiber — `transport.ts` stellt `sendReaderSyncRequest` bereit, `main.tsx` ruft es nirgends; der Treiber gehoert dem Gate-Task. Der „simulierte Sync" dieser Spezifikation ist deshalb eine simulierte Brueckenlatenz: `page.route` haelt das wasm-Modul des Workers zurueck, waehrend der Zeuge die Reiter per Tastatur bedient und den sichtbaren Fokus misst; der Matrix-Eintrag mit `chromium`, `firefox` und `webkit` entsteht im Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate", und dieser Task behauptet keine Matrix.
 
-- [ ] **Step 4: Run the component, keyboard, contract, and end-to-end surfaces**
+- [x] **Step 4: Run the component, keyboard, contract, and end-to-end surfaces**
 
 Run:
 
@@ -5661,7 +5661,7 @@ pnpm web:e2e
 
 Expected: PASS. Die adversariellen Faelle, die rot werden MUESSEN und einzeln zu pruefen sind: ein Eintrag mit `fehlender Grant`, der eine Einsatzmaske rendert, faellt am Fehlen von `Einsatznummer`; ein `ungültig`, das ausserhalb von `Prüfprobleme` erscheint, faellt am ersten `queryByText`; ein `nicht server-bestätigt`, das als `Lücke` oder `ungültig` gerendert wird, faellt an der Orthogonalitaetszusicherung; eine Integritaetsleiste, die einen nicht gemeldeten Knoten erfindet, faellt an der Knotenzahl; ein handgeschriebenes deutsches Statuswort in einer `apps/web`-Quelle faellt in `no-hand-written-contracts.test.ts`, weil dieselbe Zeichenkette in `generated-contracts.ts` steht; ein von Hand editiertes `apps/web/src/bridge/generated-contracts.ts` faellt in `generated_ts_is_current.rs`; eine Reader-Route in `apps/desktop/src/app/role-gate.ts` und eine `reader.rs` unter `src-tauri/src/commands/` fallen beide in `RoleGate.test.tsx`; und eine `apps/web`-Quelle, die `crypto.subtle`, `createHash`, `Ed25519`, `X25519` oder `ChaCha20` nennt, faellt an der dritten Zusicherung von `apps/web/src/bridge/no-hand-written-contracts.test.ts` — die besteht seit dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate", und dieser Task schreibt sie nicht ein zweites Mal. `pnpm web:e2e` faehrt die gebaute Anwendung und belegt, dass die Oberflaeche waehrend eines simulierten Sync bedienbar bleibt und dass jede Bedienung per Tastatur mit sichtbarem Fokus erreichbar ist. NICHT behauptet und ausdruecklich offen: Mindestversionen je Engine (`web-reader-design.md` §14 Punkt 3, Stufe 7), PWA-Installation und das Gate ueber die Ablehnung eines nicht Root-signierten Bundles (`web-reader-design.md` §12, Stufe 7).
 
-- [ ] **Step 5: Commit the Reader presentation and the role boundary**
+- [x] **Step 5: Commit the Reader presentation and the role boundary**
 
 ```bash
 git add apps/web crates/ea-reader crates/ea-reader-wasm crates/ea-ui-contracts \

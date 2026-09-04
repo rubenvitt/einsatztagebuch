@@ -39,6 +39,8 @@
 use ea_reader::{ObjectResultV1, OpenedArchiveV1, ServerConfirmationV1};
 
 use crate::bridge::Json;
+#[cfg(target_arch = "wasm32")]
+use crate::view;
 
 // Jede Einfuhr, die nur der Browserpfad braucht, traegt ihr eigenes cfg: auf
 // einem Wirtsziel waere sie unbenutzt, und das Clippy-Gate faellt an einer
@@ -49,7 +51,9 @@ use core::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 #[cfg(target_arch = "wasm32")]
-use ea_reader::{BUNDLE_FILE_EXTENSION_V1, DirectoryHandleSource, ReaderFileMode, UnixMillis};
+use ea_reader::{
+    BUNDLE_FILE_EXTENSION_V1, DirectoryHandleSource, ReaderFileMode, RecordingObserver, UnixMillis,
+};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -110,10 +114,14 @@ fn with_directory_source<R>(
 /// Er steht als eigener Typ und nicht als drei lose Ausdruecke im DTO-Bauer,
 /// damit die Faltungsregel unten einen Zeugen bekommen kann. Sie ist die
 /// einzige Rechnung dieses Moduls.
-struct ConfirmationTally {
+///
+/// `pub(crate)`, seit `crate::view` den archivweiten Wert fuer
+/// `ReaderStandView` braucht: die Faltungsregel hat GENAU EINE Schreibweise,
+/// und die steht hier.
+pub(crate) struct ConfirmationTally {
     server_confirmed: usize,
     not_server_confirmed: usize,
-    archive_wide: ServerConfirmationV1,
+    pub(crate) archive_wide: ServerConfirmationV1,
 }
 
 impl ConfirmationTally {
@@ -130,7 +138,7 @@ impl ConfirmationTally {
     /// Ueber MAENGEL sagt diese Faltung nichts. `notServerConfirmed` ist eine
     /// eigene Dimension neben dem Verifikationsbegriff (`design.md` §17.4) und
     /// senkt `is_fully_verified()` nicht; im Datei-Modus ist es der Regelfall.
-    fn over(confirmations: impl Iterator<Item = ServerConfirmationV1>) -> Self {
+    pub(crate) fn over(confirmations: impl Iterator<Item = ServerConfirmationV1>) -> Self {
         let mut server_confirmed = 0_usize;
         let mut not_server_confirmed = 0_usize;
         for confirmation in confirmations {
@@ -223,6 +231,12 @@ pub fn file_mode_bundle_extension() -> String {
 /// den Container, und eine zweite Kopie waere an der Obergrenze ein zweites
 /// Gibibyte.
 ///
+/// Der geoeffnete Bestand wird NACH dem Rendern an [`crate::view`]
+/// weitergereicht und ueberlebt den Aufruf dort; das Rueckgabe-DTO bleibt
+/// `FileModeArchiveView`, byteidentisch. Geoeffnet wird UNTER einem
+/// `RecordingObserver`, weil die Integritaetsleiste aus dessen Protokoll
+/// entsteht.
+///
 /// # Errors
 /// `EA-READER-FILE-MODE-BRIDGE-ARGUMENT` fuer eine Sitzungskennung, die kein
 /// entsperrter Tresor ist, und sonst der stabile Code des Befunds:
@@ -236,12 +250,17 @@ pub fn file_mode_open_bundle(
     bytes: Vec<u8>,
     effective_now_ms: i64,
 ) -> Result<String, JsValue> {
-    let opened = with_unlocked_vault(session, move |vault| {
-        ReaderFileMode::open_bundle(bytes, vault, UnixMillis::new(effective_now_ms))
+    let stand = with_unlocked_vault(session, move |vault| {
+        let effective_now = UnixMillis::new(effective_now_ms);
+        let mut observer = RecordingObserver::new();
+        ReaderFileMode::open_bundle_observed(bytes, vault, effective_now, &mut observer)
+            .map(|opened| view::build_stand(opened, vault, effective_now, observer.events()))
     })
     .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?
     .map_err(|error| JsValue::from_str(error.code()))?;
-    Ok(file_mode_archive_json(&opened))
+    let rendered = file_mode_archive_json(stand.opened());
+    view::install_stand(stand);
+    Ok(rendered)
 }
 
 /// Legt eine leere Verzeichnisquelle an und gibt ihre Kennung zurueck.
@@ -321,12 +340,17 @@ pub fn file_mode_open_directory(
     let source = DIRECTORY_SOURCES
         .with(|table| table.borrow_mut().remove(&handle))
         .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?;
-    let opened = with_unlocked_vault(session, move |vault| {
-        ReaderFileMode::open_directory(source, vault, UnixMillis::new(effective_now_ms))
+    let stand = with_unlocked_vault(session, move |vault| {
+        let effective_now = UnixMillis::new(effective_now_ms);
+        let mut observer = RecordingObserver::new();
+        ReaderFileMode::open_directory_observed(source, vault, effective_now, &mut observer)
+            .map(|opened| view::build_stand(opened, vault, effective_now, observer.events()))
     })
     .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?
     .map_err(|error| JsValue::from_str(error.code()))?;
-    Ok(file_mode_archive_json(&opened))
+    let rendered = file_mode_archive_json(stand.opened());
+    view::install_stand(stand);
+    Ok(rendered)
 }
 
 #[cfg(test)]

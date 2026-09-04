@@ -22,6 +22,12 @@ import init, {
   fileModeOpenBundle,
   fileModeOpenDirectory,
   fileModePushBlob,
+  readerAmendmentThread,
+  readerEntryView,
+  readerSearch,
+  readerStandClose,
+  readerStandView,
+  readerTechnicalView,
   readerVaultUnlock,
 } from './pkg/ea_reader_wasm.js'
 
@@ -115,6 +121,27 @@ export type EaOpfsRequest =
       readonly handle: number
       readonly effectiveNowMs: bigint
     }
+  // Die sechs Nachrichten der Reader-Ansicht. Wieder derselbe Grund fuer
+  // denselben Worker: der geoeffnete Bestand liegt in Rust in einem
+  // `thread_local!` (`crates/ea-reader-wasm/src/view.rs`), und die zwei
+  // Oeffnungsausfuhren des Datei-Modus installieren ihn dort — eine Ansicht
+  // aus einem zweiten Worker saehe keinen Bestand. Die zwei Zeitgrenzen der
+  // Suche reisen als `bigint`, weil `wasm_bindgen` `Option<i64>` so abbildet;
+  // `null` ist „keine Grenze".
+  | { readonly id: number; readonly kind: 'reader-stand-view' }
+  | { readonly id: number; readonly kind: 'reader-entry-view'; readonly entryHash: string }
+  | { readonly id: number; readonly kind: 'reader-technical-view'; readonly entryHash: string }
+  | { readonly id: number; readonly kind: 'reader-amendment-thread'; readonly entryHash: string }
+  | {
+      readonly id: number
+      readonly kind: 'reader-search'
+      readonly fromMs: bigint | null
+      readonly toMs: bigint | null
+      readonly keyword: string
+      readonly vehicle: string
+      readonly person: string
+    }
+  | { readonly id: number; readonly kind: 'reader-stand-close' }
 
 /**
  * Die Antwort — der Wert oder der STABILE CODE des Fehlschlags.
@@ -336,6 +363,48 @@ scope.addEventListener('message', (event) => {
             ok: true,
             status: fileModeOpenDirectory(request.session, request.handle, request.effectiveNowMs),
           })
+          return
+        // Die sechs Reader-Nachrichten reichen ihr JSON UNVERAENDERT durch —
+        // auch das `null` eines fehlenden Bestandes. Zerlegt wird auf dem
+        // Hauptthread, in `./reader-bridge.ts`, und nur dort; ein Fehlschlag
+        // (`EA-READER-VIEW-NO-STAND`, `-UNKNOWN-ENTRY`, `-NO-THREAD`,
+        // `-NO-MANIFEST`) faellt in den Auffangarm und reist als Code.
+        case 'reader-stand-view':
+          scope.postMessage({ id: request.id, ok: true, status: readerStandView() })
+          return
+        case 'reader-entry-view':
+          scope.postMessage({ id: request.id, ok: true, status: readerEntryView(request.entryHash) })
+          return
+        case 'reader-technical-view':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerTechnicalView(request.entryHash),
+          })
+          return
+        case 'reader-amendment-thread':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerAmendmentThread(request.entryHash),
+          })
+          return
+        case 'reader-search':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerSearch(
+              request.fromMs,
+              request.toMs,
+              request.keyword,
+              request.vehicle,
+              request.person,
+            ),
+          })
+          return
+        case 'reader-stand-close':
+          readerStandClose()
+          scope.postMessage({ id: request.id, ok: true })
           return
       }
     })

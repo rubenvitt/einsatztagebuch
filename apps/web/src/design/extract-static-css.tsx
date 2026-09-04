@@ -42,6 +42,7 @@ export const EXTRACTED_COMPONENTS: readonly string[] = [
   'Result',
   'Space',
   'Spin',
+  'Tabs',
   'Tag',
   'Tooltip',
   'Typography',

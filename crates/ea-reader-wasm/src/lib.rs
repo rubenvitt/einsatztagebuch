@@ -16,7 +16,9 @@
 //! Endpunktports. [`fetch`] kommt mit der Aufgabe „Inkrementeller Reader-Sync
 //! und verifizierter Cursor-Fortschritt in OPFS" dazu und traegt GENAU ZWEI
 //! Ausfuhren: den fertig signierten Lesestapel-Request hinaus und die
-//! Antwortbytes hinein.
+//! Antwortbytes hinein. [`view`] kommt mit der Aufgabe „Integritätszentrierte
+//! Reader-Oberfläche" dazu: der EINE geoeffnete Bestand des Workers und die
+//! sechs Ansichtsausfuhren, die ihn als generierte DTOs herausgeben.
 //!
 //! # Was hier NICHT liegt
 //!
@@ -129,6 +131,23 @@ pub mod vault_bridge;
 /// die Naht dazwischen ist die Nachrichtenform von
 /// `apps/web/src/bridge/opfs-worker.ts`.
 pub mod webauthn;
+
+/// Die Reader-Ansichten: der EINE geoeffnete Bestand und seine SECHS Ausfuhren.
+///
+/// Das Modul steht OHNE cfg an der `mod`-Zeile, weil es Ausfuhren traegt und
+/// die Regel „cfg am Item" dann fuer jede einzelne von ihnen gilt — dieselbe
+/// Lage wie bei [`bridge`], [`fetch`], [`file_access`] und [`vault_bridge`]
+/// und ausdruecklich nicht die von `opfs_worker`. Ein `pub mod`, weil
+/// `tests/view_dto.rs` die reine Haelfte unter `ea_reader_wasm::view` misst.
+///
+/// Alle sechs Ausfuhren laufen IM DEDIZIERTEN WORKER: der Bestand liegt in
+/// einem `thread_local!` neben den Tresorsitzungen, und die zwei
+/// Oeffnungsausfuhren von [`file_access`] fuellen ihn dort. Hier faellt KEINE
+/// Entscheidung: die Klassifikation kommt aus `ea_reader::ReaderVerifier`, die
+/// Entschluesselung aus `ea_reader::decrypt_verified`, der Faden aus
+/// `ea_reader::ReaderEntryThread`, die Suche aus `ea_reader::ReaderSearch` —
+/// das Modul formt DTOs und rechnet nichts nach.
+pub mod view;
 
 /// Der Rundlauf ueber die Bruecke, ohne eine einzige Zusage darueber hinaus.
 ///
