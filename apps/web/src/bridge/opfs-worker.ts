@@ -24,7 +24,11 @@ import init, {
   fileModePushBlob,
   readerAmendmentThread,
   readerEntryView,
+  readerExportOne,
+  readerNoteActivity,
+  readerNoteVisibility,
   readerSearch,
+  readerSessionStateAt,
   readerStandClose,
   readerStandView,
   readerTechnicalView,
@@ -41,8 +45,9 @@ import init, {
  * dieselbe OPFS-Datei mit zwei `FileSystemSyncAccessHandle`s — der zweite
  * bekaeme sie gar nicht.
  *
- * `vault-unlock` ist die einzige Nachricht, die WEDER Speicher NOCH Enrollment
- * ist. Sie traegt die lebende Paritaetsprobe der Oberflaeche: sie oeffnet
+ * `vault-unlock` war die erste Nachricht, die WEDER Speicher NOCH Enrollment
+ * ist; die Sitzungs- und Exportnachrichten unten stehen seit der
+ * Sitzungssperre daneben. Sie traegt die lebende Paritaetsprobe der Oberflaeche: sie oeffnet
  * einen bereits versiegelten Tresor mit einer frisch gezogenen PRF-Ausgabe
  * ueber `readerVaultUnlock` aus `crate::vault_bridge` — eine Ausfuhr, die
  * diese Bruecke laengst fuehrt. Sie ist deshalb KEINE sechste
@@ -89,6 +94,45 @@ export type EaOpfsRequest =
       readonly sealed: Uint8Array
       readonly credentialId: Uint8Array
       readonly prfOutput: Uint8Array
+      // Die Uhr der Seite, als WERT: sie eroeffnet die Sitzung und setzt die
+      // monotone Untergrenze, gegen die `ReaderSession::state_at` von da an
+      // rechnet. Rust liest keine eigene Uhr.
+      readonly nowMs: number
+    }
+  // Die vier Nachrichten der Sitzungssperre und des Einzelexports
+  // (`web-reader-design.md` §6.5 und §8.2). Sie stehen HIER, weil die
+  // Sitzung, die sie nennen, in Rust in demselben `thread_local!` liegt wie
+  // die des Datei-Modus. Alle vier tragen `nowMs`, und keine entscheidet
+  // hier etwas: die Fristen rechnet `ReaderSession::state_at` nach, und der
+  // Worker reicht nur den Zeitwert durch, den der Hauptthread gelesen hat.
+  | {
+      readonly id: number
+      readonly kind: 'session-note-visibility'
+      readonly session: number
+      readonly hidden: boolean
+      readonly nowMs: number
+    }
+  | {
+      readonly id: number
+      readonly kind: 'session-note-activity'
+      readonly session: number
+      readonly nowMs: number
+    }
+  | { readonly id: number; readonly kind: 'session-state'; readonly session: number; readonly nowMs: number }
+  | {
+      readonly id: number
+      readonly kind: 'export-one'
+      readonly session: number
+      readonly nowMs: number
+      readonly sealed: Uint8Array
+      readonly credentialId: Uint8Array
+      readonly prfOutput: Uint8Array
+      readonly entryHash: Uint8Array
+      readonly targetKind: number
+      readonly targetOccupied: boolean
+      readonly organizationId: Uint8Array
+      readonly deviceId: Uint8Array
+      readonly signerCertificateObjectHash: Uint8Array
     }
   // Die sechs Nachrichten des Datei-Modus. Sie stehen HIER und nicht in einem
   // eigenen Worker, und der Grund ist derselbe wie beim Enrollment: die
@@ -319,9 +363,71 @@ scope.addEventListener('message', (event) => {
           scope.postMessage({
             id: request.id,
             ok: true,
-            status: String(readerVaultUnlock(request.sealed, request.credentialId, request.prfOutput)),
+            status: String(
+              readerVaultUnlock(
+                request.sealed,
+                request.credentialId,
+                request.prfOutput,
+                request.nowMs,
+              ),
+            ),
           })
           return
+        case 'session-note-visibility':
+          readerNoteVisibility(request.session, request.hidden, request.nowMs)
+          scope.postMessage({ id: request.id, ok: true })
+          return
+        case 'session-note-activity':
+          readerNoteActivity(request.session, request.nowMs)
+          scope.postMessage({ id: request.id, ok: true })
+          return
+        case 'session-state':
+          // Der Aufruf IST die Sperrentscheidung — `state_at` rechnet die
+          // Frist nach und sperrt, wenn sie erreicht ist. Das DTO reist
+          // UNVERAENDERT; zerlegt wird es auf dem Hauptthread, in
+          // `../features/session/reader-session.ts`.
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerSessionStateAt(request.session, request.nowMs),
+          })
+          return
+        case 'export-one': {
+          // Die Senke, die Rust GENAU EINMAL mit dem Klartext ruft. Sie
+          // kopiert die Bytes und sagt `true` — mehr nicht. Dass die Bytes
+          // danach zum Hauptthread reisen, ist keine Entscheidung dieser
+          // Datei, sondern die Lage des Wirts: `showSaveFilePicker` und ein
+          // Download gibt es nur dort. Die Grenze, die die `Accepted`-Zeile
+          // bezeugt, ist der Aufruf dieser Senke hier im Worker; was der
+          // Wirt danach tut, bezeugt die `Completed`-Zeile NICHT — die Zeile
+          // bezeugt die Uebergabe, nicht die Platte
+          // (`crates/ea-reader-wasm/src/export_bridge.rs`).
+          //
+          // KOPIERT und nicht referenziert: das `Uint8Array`, das Rust
+          // herueberreicht, entsteht mit `Uint8Array::from` bereits im
+          // JS-Heap, aber die Kopie macht die Uebergabe unabhaengig davon,
+          // ob wasm-bindgen den Puffer nach dem Aufruf wiederverwendet.
+          let plaintext: Uint8Array | undefined
+          const report = await readerExportOne(
+            request.session,
+            request.nowMs,
+            request.sealed,
+            request.credentialId,
+            request.prfOutput,
+            request.entryHash,
+            request.targetKind,
+            request.targetOccupied,
+            request.organizationId,
+            request.deviceId,
+            request.signerCertificateObjectHash,
+            (bytes: Uint8Array): boolean => {
+              plaintext = new Uint8Array(bytes)
+              return true
+            },
+          )
+          scope.postMessage({ id: request.id, ok: true, status: report, bytes: plaintext })
+          return
+        }
         // Die sechs Datei-Modus-Nachrichten reichen ihr Ergebnis UNVERAENDERT
         // durch. Zerlegt wird das DTO auf dem Hauptthread, in
         // `../features/file-mode/DirectoryHandle.ts`; wer es hier zerlegte,
