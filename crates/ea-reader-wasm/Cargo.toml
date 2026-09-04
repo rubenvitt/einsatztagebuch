@@ -54,6 +54,17 @@ web-sys.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Der Indexblob, den `tests/index_browser.rs` versiegelt, in OPFS schreibt und
+# wieder oeffnet. DEV und keine Bibliothekskante: ein Re-Export durch
+# `ea-reader` machte aus einer Testkante eine BIBLIOTHEKSflaeche, die jeder
+# Wirt der Bruecke mittraegt, und stellte neben `crates/ea-index` eine zweite
+# Nennung derselben Typen. Die wasm32-Zeile des Gates faehrt ohne
+# `--all-targets` und zieht die Kante nie in den Lib-Graphen.
+ea-index.workspace = true
+# `SCHEMA_VERSION_V1` fuer die Beschriftungsspalten der drei Kulissenzeilen von
+# `tests/index_browser.rs`. `ea-reader` re-exportiert die Konstante nicht, und
+# ein Literal `1` daneben waere der zweite Satz Zahlen fuer dieselbe Tatsache.
+ea-schema.workspace = true
 # Die sieben Kanten der per `#[path]` eingebundenen Fixturekette, die
 # `tests/verify_browser.rs` mitbringt. Sie stehen NICHT deshalb hier, weil die
 # Bruecke sie benennt — ihre eigene Flaeche kennt keinen dieser Typen —,

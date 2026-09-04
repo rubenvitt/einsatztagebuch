@@ -15,6 +15,7 @@ const WORKSPACE_MEMBERS: &[&str] = &[
     "crates/ea-cbor",
     "crates/ea-crypto",
     "crates/ea-format",
+    "crates/ea-index",
     "crates/ea-schema",
     "crates/ea-time",
     "crates/ea-trust",

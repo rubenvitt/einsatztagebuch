@@ -177,6 +177,8 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
                 "ea-reader",
                 "-p",
                 "ea-reader-wasm",
+                "-p",
+                "ea-index",
             ],
         ),
     ]
@@ -1100,6 +1102,66 @@ fn run_workspace_tests(root: &Path) -> io::Result<()> {
         "cargo",
         &["test", "--workspace", "--all-targets", "--locked"],
     )
+}
+
+/// Die EINE Paketzahl, die der Arm `index-scale` messen kann.
+///
+/// Sie ist die Kopie von `ea_index::MONOLITHIC_INDEX_MAX_PACKAGES_V1`, und die
+/// Kopie ist bewusst: `xtask` zieht keine Kante auf eine Bibliotheks-Crate, die
+/// es nur fuer eine Zahl braeuchte.
+///
+/// Gegen die Drift steht deshalb ein TEXTPIN,
+/// `the_index_scale_package_count_matches_the_threshold_of_the_index_crate` in
+/// der `mod tests` dieser Datei, der die Deklaration in
+/// `crates/ea-index/src/inverted.rs` liest. Er und nicht der Zeuge der Messung:
+/// der traegt `#[ignore]`, und `cargo test --workspace --all-targets --locked`
+/// laesst ignorierte Faelle aus — eine Sicherung, die nur beim manuellen
+/// `pnpm index:scale` griffe, ist im Gate keine.
+const INDEX_SCALE_PACKAGES_V1: usize = 50_000;
+
+/// Die EINE Fehlerzeile der Argumentgrammatik von `index-scale`.
+const INDEX_SCALE_ARGUMENT_ERROR: &str = "index-scale accepts exactly one numeric argument";
+
+/// Das Kommando, das den GEMESSENEN Zeugen der Schwelle faehrt.
+///
+/// `--ignored`, weil der Zeuge `#[ignore]` traegt: 50 000 Pakete sind kein
+/// Schnelllaufbudget, und `verify_quick_commands()` bekommt dieses Kommando
+/// ausdruecklich NICHT. `--nocapture`, weil die gemessene Zeile GENAU von
+/// diesem Zeugen kommt — Blobgroesse, Versiegelungs- und Entsperrdauer,
+/// Suchdauer und Spitzenspeicher stehen dort, wo sie gemessen werden, und
+/// nicht in einer zweiten Rechnung dieses Werkzeugs.
+fn index_scale_command_args() -> Vec<&'static str> {
+    vec![
+        "test",
+        "--locked",
+        "-p",
+        "ea-index",
+        "--test",
+        "scale_50000",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]
+}
+
+/// Faehrt den Schwellenzeugen und reicht seine Ausgabe unveraendert durch.
+///
+/// Das Argument ist eine ZUSICHERUNG des Aufrufers und kein Parameter — es
+/// erreicht das Kommando nicht, denn der Zeuge misst die Schwelle, die er
+/// selbst zusichert, und keine frei gewaehlte Zahl. Es steht trotzdem, weil es
+/// genau eine Drift faengt, die sonst still bliebe: bewegt sich die Schwelle,
+/// ohne dass `package.json` mitzieht, meldet dieser Arm es laut, statt eine
+/// Messung unter falscher Ueberschrift auszugeben. Die Gegenrichtung — die
+/// Konstante hier gegen die der Crate — haelt der Textpin in `mod tests`.
+fn run_index_scale(root: &Path, packages: usize) -> Result<(), String> {
+    if packages != INDEX_SCALE_PACKAGES_V1 {
+        return Err(format!(
+            "index-scale measures exactly {INDEX_SCALE_PACKAGES_V1} packages; \
+             {packages} would report a number that no witness has measured"
+        ));
+    }
+    run_process(root, "cargo", &index_scale_command_args())
+        .map_err(|error| format!("failed to invoke cargo: {error}"))
 }
 
 fn validate_cddl_document(name: &str, input: &str) -> Result<(), String> {
@@ -3553,6 +3615,18 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("failed to invoke workspace tests: {error}"))
         }
         "test-fuzz" => run_fuzz(&root, args),
+        "index-scale" => {
+            let packages = args
+                .next()
+                .ok_or_else(|| INDEX_SCALE_ARGUMENT_ERROR.to_owned())?;
+            if args.next().is_some() {
+                return Err(INDEX_SCALE_ARGUMENT_ERROR.to_owned());
+            }
+            let packages = packages
+                .parse::<usize>()
+                .map_err(|error| format!("{INDEX_SCALE_ARGUMENT_ERROR}: {packages}: {error}"))?;
+            run_index_scale(&root, packages)
+        }
         "stage-gate" => {
             let stage = args
                 .next()
@@ -4334,6 +4408,8 @@ vor Task 3 akzeptiert
                         "ea-reader",
                         "-p",
                         "ea-reader-wasm",
+                        "-p",
+                        "ea-index",
                     ],
                 ),
             ]
@@ -4449,6 +4525,46 @@ path = "fuzz_targets/signed_object.rs"
                 "cbor_object",
                 "--",
                 "-max_total_time=30",
+            ]
+        );
+    }
+
+    /// Die Schwelle steht an EINER Stelle, und dieser Pin haelt die Kopie daran.
+    ///
+    /// Gelesen wird die Deklaration als TEXT — dieselbe Bauform, mit der
+    /// `tools/xtask/tests/workspace.rs` die Positivliste an `main.rs` bindet —,
+    /// weil `xtask` sonst eine Kante auf `ea-index` braeuchte, die es allein
+    /// fuer eine Zahl zoege.
+    #[test]
+    fn the_index_scale_package_count_matches_the_threshold_of_the_index_crate() {
+        let root = super::workspace_root();
+        let source = std::fs::read_to_string(root.join("crates/ea-index/src/inverted.rs")).unwrap();
+        let declaration = format!(
+            "pub const MONOLITHIC_INDEX_MAX_PACKAGES_V1: usize = {}_{:03};",
+            super::INDEX_SCALE_PACKAGES_V1 / 1000,
+            super::INDEX_SCALE_PACKAGES_V1 % 1000
+        );
+        assert!(
+            source.contains(&declaration),
+            "crates/ea-index must declare {declaration}; xtask carries the same number and \
+             nothing else binds the two"
+        );
+    }
+
+    #[test]
+    fn index_scale_runs_the_ignored_witness_with_its_output_uncaptured() {
+        assert_eq!(
+            super::index_scale_command_args(),
+            vec![
+                "test",
+                "--locked",
+                "-p",
+                "ea-index",
+                "--test",
+                "scale_50000",
+                "--",
+                "--ignored",
+                "--nocapture",
             ]
         );
     }

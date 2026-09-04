@@ -1,0 +1,45 @@
+[package]
+name = "ea-index"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Wie jedes Mitglied dieses Arbeitsbereichs. Die Zeile ist nicht bloss
+# Hygiene: `deny.toml` nimmt Pfadkanten ohne Versionsangabe ueber
+# `allow-wildcard-paths = true` von `wildcards = "deny"` aus, und diese Ausnahme
+# greift AUSSCHLIESSLICH fuer Crates mit `publish = false`. Ohne sie liest
+# `cargo deny` die Kante `ea-reader -> ea-index` als echte Wildcard.
+publish = false
+
+[dependencies]
+# Der deterministische CBOR-Waechter. Der Indexkoerper geht VOR dem Parsen durch
+# `validate(.., INDEX_PARSER_LIMITS_V1)` — dieselbe Reihenfolge, die
+# `crates/ea-reader/src/cursor.rs` fuer Tresorkoerper und Objektmanifest fuehrt:
+# erst die Formgrenzen, dann der Inhalt. `ParserLimits::V1` ist dafuer
+# AUSDRUECKLICH nicht brauchbar; die Begruendung steht in `src/blob.rs` an der
+# Konstanten.
+ea-cbor.workspace = true
+# Die EINZIGE Kryptografie dieser Crate, und sie wird ausschliesslich GERUFEN:
+# `aead_seal`/`aead_open` versiegeln und oeffnen den Indexblob. Diese Crate baut
+# keine zweite AEAD-Bindung, leitet keinen Schluessel ab und zieht keine
+# Entropie — Schluessel und Nonce sind Parameter.
+ea-crypto.workspace = true
+# GENAU zwei Dinge: `SCHEMA_VERSION_V1` und die eine Fehlerform
+# `SchemaError::Unsupported` samt ihrem bereits stabilen Code
+# `EA-SCHEMA-UNSUPPORTED`. Ein zweiter Code fuer dieselbe Tatsache waere eine
+# zweite Wahrheit. `SchemaRegistry::schemas()` liefert zusaetzlich die
+# geschlossene Menge der Quellkennungen; ein `PayloadV1` betritt diese Crate
+# nicht.
+ea-schema.workspace = true
+# Die Herkunftsbegriffe an jeder Indexzeile. Sie werden IMPORTIERT und nie
+# nachgebaut; `EntryHash` ist zugleich der Ordnungsschluessel, der die
+# Einfuegereihenfolge aus den versiegelten Bytes haelt.
+ea-types.workspace = true
+# Der handgeschriebene CBOR-Weg des Indexkoerpers. Kein `derive`: das
+# Repositorium kodiert ueberall von Hand und prueft mit einer Rueckprobe gegen
+# die eigenen Bytes.
+minicbor.workspace = true
+# Die NFC-Halbe der Termnormalisierung. Dieselbe Kante, die `ea-cbor`,
+# `ea-schema`, `ea-format` und `ea-draft` bereits fuehren; eine neue
+# Abhaengigkeit entsteht dadurch nicht.
+unicode-normalization.workspace = true

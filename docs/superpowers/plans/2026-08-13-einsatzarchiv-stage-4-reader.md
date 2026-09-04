@@ -4263,6 +4263,7 @@ git commit -m "feat(reader): open archives from files against the pinned anchor"
 - Create: `crates/ea-index/src/blob.rs`
 - Create: `crates/ea-index/src/schema_view.rs`
 - Create: `crates/ea-reader/src/search.rs`
+- Create: `crates/ea-index/tests/fixtures/mod.rs`
 - Test: `crates/ea-index/tests/search.rs`
 - Test: `crates/ea-index/tests/schema_compatibility.rs`
 - Test: `crates/ea-index/tests/reindex.rs`
@@ -4270,8 +4271,8 @@ git commit -m "feat(reader): open archives from files against the pinned anchor"
 - Test: `crates/ea-reader-wasm/tests/index_browser.rs`
 - Modify: `crates/ea-reader/src/lib.rs`
 - Modify: `crates/ea-reader/Cargo.toml`
-- Modify: `crates/ea-reader-wasm/Cargo.toml`
-- Modify: `tools/xtask/src/main.rs`
+- Modify: `crates/ea-reader-wasm/Cargo.toml` — ZWEI Dev-Kanten, `ea-index` und `ea-schema`
+- Modify: `tools/xtask/src/main.rs` — DREI Stellen: der wasm32-Argumentvektor in `verify_quick_commands()`, der zeichengenaue Pin `verify_quick_uses_the_required_locked_commands` in seiner `mod tests`, und der neue Arm `index-scale` samt Helfer und Pin
 - Modify: `tools/xtask/tests/workspace.rs`
 - Test: `tools/xtask/tests/spec_completeness.rs` — NUR gefahren, nicht geaendert; seine zwei Praefixe ueberleben das angehaengte `-p ea-index`, siehe Schritt 4
 - Modify: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md`
@@ -4284,6 +4285,267 @@ git commit -m "feat(reader): open archives from files against the pinned anchor"
 - Produces: `crates/ea-index` mit `IndexableRecordV1`, `InvertedIndexV1`, `IndexBlobV1`, `ReaderQueryV1`, `ReaderSearchHitV1`, `SchemaViewV1`, `IndexPressureV1`, `IndexError`, den Konstanten `INDEX_BLOB_MAGIC_V1`, `INDEX_BLOB_HEADER_BYTES_V1`, `INDEX_FORMAT_VERSION_V1` und `MONOLITHIC_INDEX_MAX_PACKAGES_V1`; `ea_reader::search::{ReaderSearch, indexable_record}` als die EINE Umwandlung von `VerifiedDecryptedRecord` nach `IndexableRecordV1`; das Unterkommando `cargo run --locked -p xtask -- index-scale <n>` und das Wurzelskript `index:scale`; den vierzehnten Eintrag der wasm32-Positivliste.
 
 Diese Aufgabe ersetzt den SQLCipher-Index des ursprünglichen Tasks 4 durch die Index-Crate, die `web-reader-design.md` §12 verlangt („Neu sind eine `wasm-bindgen`-Brücke und ein Index-Crate"). Was §8.1 widerlegt, wird ersetzt; was der ursprüngliche Task richtig hatte, bleibt WÖRTLICH: indiziert wird ausschließlich, was aus einem `VerifiedDecryptedRecord` hervorgegangen ist, Quell-Entry-Hash, Sequenz und Quellschema stehen an jeder Zeile, technische Einträge ohne Grant, ungültige Objekte, Stubs und nicht unterstützte Schemata erzeugen NIE eine erfundene Einsatzzeile, und ein Rebuild löscht ausschließlich abgeleitete Zeilen und rechnet aus den exakt zwischengespeicherten Archivbytes neu. Nicht gebaut werden hier: ein segmentierter Index, ein verschlüsselndes SQLite-VFS im Browser und ein zweiter Index in TypeScript (§8.1 zweiter Absatz verbietet die letzten beiden ausdrücklich).
+
+#### Die zwanzig Stellen, an denen die erste Fassung dieses Tasks gegen den Arbeitsbaum falsch war
+
+GEMESSEN am Stand `10f561b` (`origin/main` am 2026-09-04), im Worktree
+`.worktrees/drk-262-encrypted-index`. Die Punkte 1 bis 3 sind die teuren; sie
+bewegen eine Blockade, eine Formgrenze und die Gestalt des versiegelten
+Koerpers.
+
+**1. Die GEERBTE GRENZE blockiert diese Aufgabe NICHT.** Der Satz des folgenden
+Blocks, `crates/ea-index/tests/scale_50000.rs` laufe „in eine Weigerung, bevor
+es irgendetwas misst", ist am Arbeitsbaum falsch. Der Zeuge baut
+`IndexableRecordV1`-Werte und versiegelt einen Blob; er konstruiert keinen
+`ConfirmedCursor`, ruft keinen `ReaderBlobStore` und erreicht
+`ReaderCursorStore::put_object_manifest` nie — die EINZIGE Stelle, an der
+`MAX_CACHED_OBJECTS_V1` sich weigert, und erreichbar allein aus
+`ReaderSyncService::confirm`. Der Zeuge hat GEMESSEN: 50 000 Pakete,
+`blob_bytes=7566455`, unter `--release` `seal_ms=230 unlock_ms=574 search_us=13
+broad_search_us=17007 peak_rss_kib=356592`, im Debug-Profil, das
+`pnpm index:scale` faehrt, `seal_ms=4414 unlock_ms=6172 search_us=49
+broad_search_us=84788 peak_rss_kib=357324`. Beide Profile stehen hier, weil das
+Kommando das Debug-Profil faehrt und keine der beiden Zahlenreihen als die
+andere ausgegeben werden darf. Und BEIDE Suchdauern stehen, weil sie
+verschiedene Dinge messen: `search_us` trifft genau ein Paket ueber einen
+eindeutigen Term, `broad_search_us` den ganzen Bestand ueber einen geteilten —
+drei Groessenordnungen dazwischen, und die erste allein auszuweisen unterboete
+die Suchdauer eines echten Archivs um genau diesen Faktor.
+
+Was die Grenze sehr wohl blockiert, ist der Reader ALS GANZES bei 50 000
+Paketen, also das Stufe-7-Gate. Sie hier zu heben ist aber kein lokaler
+Eingriff und steht in KEINER Zeile des Files-Blocks dieser Aufgabe:
+`OpfsBlobStore::open` nimmt die VOLLSTAENDIGE Schluesselmenge im Voraus
+entgegen, eine geblaetterte Adressliste kann ihre eigene Seitenzahl also nicht
+durch Lesen der ersten Seite erfahren — das Oeffnen der ersten Seite setzt die
+Schluesselmenge bereits voraus. Entweder tritt eine feste Hoechstseitenzahl in
+die Schluesselmenge, oder `OpfsBlobStore::open` bekommt eine
+Verzeichnisaufzaehlung; das ist genau die „groessere Vertragsaenderung", die
+der folgende Block selbst benennt, und sie bewegt zusaetzlich
+`ReaderSyncService::{required_blob_keys, confirm}` und
+`ReaderCursorStore::put_object_manifest`. Die Grenze bleibt deshalb stehen —
+fail-closed und sichtbar als `EA-READER-VAULT-CONTENTS` — und ist die ERSTE
+Aufgabe der vorab genehmigten Segmentierung. Diese Aufgabe loest sie nicht; sie
+weist sie als UEBERGABE aus, mit dem gemessenen Grund am Symbol.
+
+**2. `ParserLimits::V1` traegt diesen Koerper nicht.** Seine
+`max_container_items` und `max_total_items` stehen bei je 10 000
+(`crates/ea-cbor/src/limits.rs`), und ein Index ueber 50 000 Pakete uebersteigt
+beide um Groessenordnungen — ein Koerper unter diesen Grenzen liesse sich weder
+versiegeln noch oeffnen. `crates/ea-index/src/blob.rs` deklariert deshalb
+`INDEX_PARSER_LIMITS_V1`, nach dem Vorbild von `PROTOCOL_PARSER_LIMITS_V1` in
+`crates/ea-sync-protocol`. Der Plan nannte die Grenzenmenge gar nicht.
+
+**3. Der Koerper traegt PAKETE und keine Trefferlisten.** Der Plan skizzierte
+`BTreeMap<TermKey, BTreeSet<PackageOrdinal>>, Vec<IndexedPackageV1>`. Ordinale
+ueber einem `Vec` in Einfuegereihenfolge erreichen die versiegelten Bytes und
+brechen `a_rebuild_from_the_exact_cached_bytes_is_byte_identical`; und ein
+Koerper, der Pakete UND Listen truege, koennte einen Term nennen, zu dem es
+kein Paket gibt — eine Inkonsistenz, die keine Zusicherung sehen wuerde, weil
+beide Seiten aus denselben Bytes kaemen. Der Bestand liegt deshalb in
+`BTreeMap<EntryHash, IndexedPackageV1>` plus drei abgeleiteten
+`BTreeMap<String, BTreeSet<EntryHash>>`, und `IndexBlobV1::open` ist
+buchstaeblich `InvertedIndexV1::rebuild_from` ueber die dekodierten Zeilen. Das
+ist zugleich die staerkere Lesart der Zusage „der Rebuild ist die
+Rekonstruktion": es gibt nur EINEN Weg in den Bestand.
+
+**4. Der Koerper ist eine LISTE und keine Abbildung.** `ea-cbor` ordnet
+Abbildungsschluessel bytweise ueber ihre KODIERTE Form — bei Textschluesseln
+also erst nach Laenge, dann nach Inhalt —, waehrend `BTreeMap<String, _>` rein
+lexikographisch ordnet. Beides gleichzeitig einzuhalten waeren zwei Ordnungen
+fuer dieselbe Menge; die Liste hat nur eine.
+
+**5. `INDEX_BLOB_MAX_PACKAGES_V1` ist eine ZWEITE Zahl und keine zweite
+Wahrheit.** `MONOLITHIC_INDEX_MAX_PACKAGES_V1` ist das SIGNAL, ab dem
+segmentiert werden MUSS und ab dem die Aufnahme ausdruecklich NICHT verweigert.
+Die Formgrenze eines einzelnen Blobs ist etwas anderes und muss oberhalb davon
+liegen, sonst waere sie genau die Verweigerung, die die Schwelle vermeidet. Der
+Faktor vier ist der Spielraum; die Versiegelung prueft ihren eigenen Koerper
+gegen dieselbe Grenze, es entsteht also nie ein Blob, den die Oeffnung danach
+nicht mehr annimmt.
+
+**6. `VerifiedDecryptedRecord` hat keinen `record_id()`-Zugriff.**
+`crates/ea-reader/src/decrypt.rs` deklariert ACHT Zugriffe und schreibt
+ausdruecklich, dass jede spaetere Aufgabe dieses Plans ausschliesslich sie
+benutzt. `ea_reader::search::indexable_record` holt die Kennung deshalb
+INNERHALB der Ausleihe aus `CommonHeaderV1::record_id()`; ein neunter Zugriff
+auf dem Zeugentyp entsteht nicht.
+
+**7. `RecordId` wird von `ea-reader` nicht re-exportiert.** Der Interfaces-Block
+fuehrt es unter den konsumierten `ea_types`-Typen; `crates/ea-reader/src/lib.rs`
+nennt es in seinem `pub use ea_types::{..}` nicht. `crates/ea-index` benennt
+`ea-types` direkt — was es ohnehin tut.
+
+**8. `crates/ea-index/src/blob.rs` NENNT einen `SecretVec`, und muss es.**
+`ea_crypto::aead_seal` nimmt seinen Klartext BESITZEND als `SecretVec`. Der
+Quelltextzeuge des Plans liest `../src/inverted.rs` und nur diese Datei, ist
+also mit dem gebauten Stand vereinbar; seine PROSA („`crates/ea-index` DARF
+deshalb einen `SecretVec` gar nicht anfassen") ist zu stark und wird auf ihre
+tragende Fassung zurueckgenommen: kein Geheimniswrapper ueberquert die
+Crategrenze, keiner wird ueber eine Versiegelung hinaus gehalten, und die
+Aufnahmeflaeche kennt ihn nicht.
+
+**9. `IndexError` leitet nichts ab.** `SchemaError` traegt in
+`crates/ea-schema/src/error.rs` KEIN einziges `derive` und eine besitzende
+`Unsupported`-Variante; damit sind `Clone`, `Copy` und `PartialEq` auf
+`IndexError` unmoeglich und `code()` nimmt `&self`. Folge fuer die
+Readerseite: `ReaderError` bekommt KEINEN neuen Arm — er waere nicht ableitbar,
+weil `ReaderError` `Clone, Eq, PartialEq` fuehrt. `ReaderSearch` traegt deshalb
+ZWEI Fehlerarten: Aufnehmen scheitert als `ReaderError`, Versiegeln und Oeffnen
+reichen `IndexError` mit seinen bereits stabilen Codes DURCH.
+
+**10. Vier Typen schreiben ihr `Debug` von Hand.** Der Zeuge des Plans
+formatiert `query {query:?}` in seiner Fehlermeldung. Ein abgeleitetes `Debug`
+truege damit Suchbegriffe — aus entschluesseltem Inhalt abgeleitete Werte — in
+jede Zusicherungsmeldung, jedes Testprotokoll und jede spaetere Fehlerausgabe,
+also genau dorthin, wohin `WR-082` und die Produktinvariante sie nicht lassen.
+`ReaderQueryV1` weist die GESETZTEN Achsen aus und keinen Wert;
+`ReaderSearchHitV1`, `InvertedIndexV1` und `SchemaViewV1` weisen Herkunft
+beziehungsweise Groesse aus. Der Zeuge dazu ist
+`the_debug_form_of_a_query_names_its_axes_and_never_its_terms`.
+
+**11. Die Normalisierung gehoert dem Index und nicht seinem Aufrufer.** Der
+Feldkommentar des Plans sagt, `IndexableRecordV1` trage „bereits
+NFC-normalisierte und klein gefaltete" Werte. Dann gaebe es zwei Normalisierer
+— einen auf der Readerseite und einen implizit in der Anfrage —, und zwei
+Normalisierer, die auseinanderlaufen, liefern eine Suche, die ihren eigenen
+Bestand nicht mehr findet. Der Termschluessel entsteht deshalb an GENAU EINER
+Stelle, beim Aufnehmen UND beim Suchen ueber denselben Weg.
+
+**12. Die Faltung ist DREISCHRITTIG: NFC, klein, NFC.** Im ganzen Arbeitsbaum
+gibt es heute keine Fallfaltung; `unicode-normalization` liefert nur NFC, und
+die Faltung kommt aus `str::to_lowercase`. Die Reihenfolge ist gerechnet: die
+Faltung allein genuegt nicht, weil `o` mit kombinierendem Trema und `ö` vor der
+Zusammensetzung verschieden sind; die Zusammensetzung allein genuegt nicht,
+weil `ÖLSPUR` und `Ölspur` vor der Faltung verschieden sind; und die ZWEITE
+Zusammensetzung steht, weil `str::to_lowercase` nicht zusicherungsgemaess
+NFC-erhaltend ist und `ea_cbor::validate` einen nicht zusammengesetzten
+Termschluessel mit `EA-CBOR-NON-NFC` abwiese — an der VERSIEGELUNG, nicht beim
+Suchen.
+
+**13. `SchemaViewV1::derive` projiziert GENAU `ea.incident` in `v1`.** Der Plan
+laesst das Zielschema offen. Die fachliche Indexzeile dieser Stufe ist der
+Einsatz; Nachtragsreferenzen und die Original/Nachtrag-Projektion sind die
+Aufgabe „Nachtragsreferenzen und Original/Nachtrag-Projektion", und eine halbe
+Nachtragszeile waere schlechter als keine. Ein Paket eines anderen Schemas wird
+ISOLIERT: `ea_reader::search::indexable_record` weist es mit dem bereits
+ausgelieferten `ReaderError::UnsupportedSchema` ab, `SchemaViewV1::derive` mit
+`EA-SCHEMA-UNSUPPORTED`.
+
+**14. Die Quellkennung kommt aus der REGISTRIERUNG.** `SchemaViewV1` gibt
+`&'static str` aus `SchemaRegistry::v1().schemas()` zurueck und nicht die
+uebergebene Zeichenkette. Damit kann der versiegelte Koerper keine Kennung
+tragen, die es nicht gibt, und eine zweite Liste der fuenf Kennungen entsteht
+in dieser Crate nicht.
+
+**15. Der zeichengenaue Pin in `mod tests` waechst im SELBEN Commit.** Der Plan
+nennt `--bins` als den Laeufer von
+`verify_quick_uses_the_required_locked_commands`, aber nicht, dass dessen
+Literal die neue `-p ea-index`-Zeile selbst mittragen muss. Dazu eine
+PLATZIERUNGSAUFLAGE, die der Plan ebenfalls nicht nennt:
+`every_crates_member_is_classified_for_the_wasm32_gate` verankert die
+Positivliste am ERSTEN zitierten `"wasm32-unknown-unknown"` von
+`tools/xtask/src/main.rs`. Der neue Arm `index-scale` und sein Helfer duerfen
+dieses Literal deshalb nicht oberhalb von `verify_quick_commands()` einfuehren.
+
+**16. `crates/ea-index/Cargo.toml` braucht `publish = false`.** `deny.toml`
+nimmt Pfadkanten ohne Versionsangabe ueber `allow-wildcard-paths = true` von
+`wildcards = "deny"` aus, und diese Ausnahme greift AUSSCHLIESSLICH fuer Crates
+mit `publish = false`. Ohne die Zeile liest `cargo deny` die Kante
+`ea-reader → ea-index` als echte Wildcard.
+
+**17. Die Zeugen brauchen eine Kulissendatei.** Die Testrumpfe des Plans rufen
+`fixtures::indexable_incident`, `fixtures::three_records`,
+`fixtures::index_over`, `fixtures::synthetic_package` und
+`fixtures::contains_subslice`; der Files-Block fuehrte keine Datei, die sie
+deklariert. `crates/ea-index/tests/fixtures/mod.rs` steht oben nachgetragen.
+
+**18. `xtask` rechnet die Messwerte NICHT selbst.** Der Plan schreibt, der Arm
+`index-scale` „schreibt die gemessenen Werte … als eine Zeile auf `stdout`".
+Gemessen werden sie im Zeugen, und `run_process` startet sein Kind mit
+`.status()` — es ERBT also stdout, und die eine Zeile ist die des Zeugen. Eine
+zweite Rechnung im Werkzeug waere eine zweite Messung derselben Sache. Der Arm
+weist ausserdem jede Zahl ausser 50 000 ab: eine andere Zahl meldete ein
+Ergebnis, das kein Zeuge gemessen hat.
+
+**19. `crates/ea-reader-wasm` braucht ZWEI Dev-Kanten.** Neben `ea-index` auch
+`ea-schema`, fuer `SCHEMA_VERSION_V1` in den Beschriftungsspalten der drei
+Kulissenzeilen des Browserzeugen; `ea-reader` re-exportiert die Konstante
+nicht. Und der Browserzeuge kann seinen Bestand NICHT aus der Kulissenkette
+gewinnen: deren Klartext traegt keine Schemakennung, `decrypt_verified` endet
+auf ihm mit `EA-READER-SCHEMA-UNSUPPORTED` — bezeugt von
+`the_session_key_decapsulates_in_the_browser_only_behind_the_nine_gates` in
+`crates/ea-reader-wasm/tests/verify_browser.rs` —, es entsteht dort also gar
+kein Zeugentyp, aus dem sich eine Indexzeile projizieren liesse. Er baut drei
+`IndexableRecordV1` von Hand und bezieht den Schluessel aus
+`UnlockedVault::index_key()`, damit die ABLEITUNG ebenfalls im Browser laeuft.
+
+**20. Der Browserzeuge raeumt ueber DENSELBEN Speicher auf.**
+`OpfsBlobStore::open` nimmt je Schluessel einen Warteschlangenplatz, bevor es
+OPFS ueberhaupt beruehrt, und `Drop` gibt ihn zurueck. Ein dritter Speicher auf
+einem Schluessel, den der laufende Fall noch haelt, wartet damit auf sich
+selbst. GEMESSEN gegen die erste Fassung dieses Zeugen, woertlich: `Failed to
+detect test as having been run. It might have timed out.` Der Fall loescht
+deshalb ueber den Speicher, den er ohnehin haelt.
+
+#### Fuenf Vertragspunkte, die erst das Review festgelegt hat
+
+Drei unabhaengige Linsen liefen ueber den Branchdiff — Kryptografie und
+Byteformat, Arbeitsbereich und Gates, Klartextdisziplin und Zeugenguete —, und
+jeder schwere Fund wurde adversariell zu widerlegen versucht. Was daraus als
+VERTRAG haengenbleibt und nicht bloss als Korrektur eines Commits, steht hier;
+die vollstaendige Fundliste steht in der Zusammenfassung des Branches.
+
+**21. Der versiegelte Koerper ist KANONISCH, und `open` erzwingt es.** Zeilen
+reisen streng aufsteigend nach Entry-Hash, Terme streng aufsteigend je Achse.
+Ohne diese Zusicherung nahm die Oeffnung zwei Zeilen unter derselben Herkunft
+an und lieferte einen Bestand mit weniger Paketen, als der Koerper Zeilen
+deklarierte — GEMESSEN: „declares 2, yields 1", und ohne ein Wort darueber. Ein
+Koerper, der die Oeffnung besteht, ist damit genau ein Koerper, den der
+Kodierer schreiben koennte. NICHT erzwungen wird, dass jeder Term schon ein
+Termschluessel ist: das hiesse, beim Oeffnen ein zweites Mal zu normalisieren,
+und die Entsperrdauer ist der gemessene Engpass.
+
+**22. Eine Missbildung des Koerpers ist `EA-INDEX-BLOB-FORMAT` und nie
+`EA-CBOR-*`.** GEMESSEN: fuer eine Zeile mit vierzehn Positionen, einen 31 Byte
+langen Entry-Hash, eine 15 Byte lange Datensatzkennung und einen
+Optionsbehaelter der Laenge zwei gibt `ea_cbor::validate` unter
+`INDEX_PARSER_LIMITS_V1` jeweils `Ok(())` zurueck — es sind wohlgeformte,
+kanonische, grenzenkonforme CBOR-Werte. Ein `EA-CBOR-INVALID` daneben
+behauptete einen Befund, den `ea-cbor` nie erhoben hat, und stellte damit genau
+die zweite Wahrheit auf, die die Ledgerregel dieses Bestands verbietet. Der
+Code ist der des ARTEFAKTS, nach dem Vorbild von
+`ea_archive::BundleError::Malformed`.
+
+**23. Der Kopf bindet keine FRISCHE.** Er authentisiert Magic, Formatversion
+und Nonce, und ein aelteres Chiffrat unter neuem Kopf faellt. Ein
+VOLLSTAENDIGER aelterer Blob — Kopf und Chiffrat, beide echt — geht dagegen
+unter demselben Schluessel sauber wieder auf; GEMESSEN und angenommen. Wer den
+Bytespeicher beschreiben kann, dreht die Suche damit still zurueck. Das ist
+kein Datenverlust, weil der Index die ableitbare Projektion der exakten
+Archivbytes ist, aber es ist eine Grenze, und sie steht hier statt in einer
+Zusage, die staerker klingt, als sie ist. Eine Frischebindung —
+Generationszaehler im Kopf oder Bindung an die bestaetigte Cursorstellung —
+gehoert zu der Aufgabe, die den Blob segmentiert.
+
+**24. Kleinschreibung ist kein Case Folding, und das ist eine
+Rueckrufgrenze.** Unicode §3.13 verlangt fuer schreibungsunabhaengiges
+Vergleichen `toCaseFold`; die Standardbibliothek kennt es nicht, und der
+Arbeitsbereich fuehrt keine Crate, die es rechnete. GEMESSEN heisst das: `ΣΣ`
+wird als `σς` abgelegt und von `σσ` nicht gefunden, `STRASSE` nicht von
+`straße`, `ﬁre` nicht von `fire`. Die Ablage bleibt deterministisch, der
+Rebuild bytegleich, kein Datensatz geht verloren — es fehlt Rueckruf, nicht
+Korrektheit. Eine Faltungstabelle waere eine Abhaengigkeitsentscheidung mit
+eigenem ADR und gehoert nicht in diese Aufgabe.
+
+**25. Die Nonce-Pflicht steht am Aufrufer, ausgeschrieben.**
+`UnlockedVault::index_key()` liefert ueber die Lebensdauer eines Tresors
+DENSELBEN Schluessel; zwei Versiegelungen unter einer Nonce gaeben das XOR
+beider Koerper und den Poly1305-Schluessel preis. Die Index-Crate kann das
+nicht verhindern — sie zieht keine Entropie —, und beide Zeugen pinnen ihre
+Nonce, weil die Bytegleichheit sonst nicht beobachtbar waere. Genau deshalb
+steht an `IndexBlobV1::seal` jetzt die Auflage, frisch zu ziehen, samt dem
+Satz, dass die Zeugen hier NICHT das Muster sind.
 
 **GEERBTE GRENZE aus dem Task „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS": das dauerhafte Objektmanifest traegt 32 768 Objekte, und diese Aufgabe MUSS 50 000 Pakete messen.** `MAX_CACHED_OBJECTS_V1` in `crates/ea-reader/src/cursor.rs` ist GERECHNET und nicht gewaehlt: die Adressliste des Objektcaches reist als EIN `bstr` durch `ea_cbor::validate(.., ParserLimits::V1)`, dessen `max_text_or_bytes` 1 048 592 Byte misst, und bei 32 Byte je Objekthash sind das 32 768 Eintraege. Ein Paket ist MINDESTENS ein Objekt, also traegt ein Reader unter dieser Grenze keine 50 000 Pakete — die Schwelle dieser Aufgabe ist mit dem heutigen Manifest nicht erreichbar, und `crates/ea-index/tests/scale_50000.rs` laeuft in eine Weigerung, bevor es irgendetwas misst.
 

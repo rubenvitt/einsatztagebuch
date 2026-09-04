@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-reader", "crates/ea-reader-wasm", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "crates/ea-sync-server", "crates/ea-sync-client", "apps/server", "apps/cli", "apps/desktop/src-tauri"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-index", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-reader", "crates/ea-reader-wasm", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "crates/ea-sync-server", "crates/ea-sync-client", "apps/server", "apps/cli", "apps/desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -38,6 +38,7 @@ ea-chain = { path = "crates/ea-chain" }
 ea-crypto = { path = "crates/ea-crypto" }
 ea-draft = { path = "crates/ea-draft" }
 ea-format = { path = "crates/ea-format" }
+ea-index = { path = "crates/ea-index" }
 ea-key-provider = { path = "crates/ea-key-provider" }
 ea-local-store = { path = "crates/ea-local-store" }
 ea-operator = { path = "crates/ea-operator" }

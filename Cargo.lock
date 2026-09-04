@@ -1845,6 +1845,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-index"
+version = "0.1.0"
+dependencies = [
+ "ea-cbor",
+ "ea-crypto",
+ "ea-schema",
+ "ea-types",
+ "minicbor",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "ea-key-provider"
 version = "0.1.0"
 dependencies = [
@@ -1891,6 +1903,7 @@ dependencies = [
  "ea-cbor",
  "ea-crypto",
  "ea-format",
+ "ea-index",
  "ea-schema",
  "ea-sync-protocol",
  "ea-testkit",
@@ -1914,7 +1927,9 @@ dependencies = [
  "ea-archive",
  "ea-crypto",
  "ea-format",
+ "ea-index",
  "ea-reader",
+ "ea-schema",
  "ea-time",
  "ea-trust",
  "ea-types",
