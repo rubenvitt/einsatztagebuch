@@ -221,6 +221,28 @@ const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ("occurredAtStartMs", "number"),
         ],
     ),
+    (
+        // Der Zustand der Reader-Sitzung zu einem Zeitpunkt, aus
+        // `ReaderSession::state_at` — und ausdruecklich ein `boolean` statt
+        // einer Union `'unlocked' | 'locked'`: die zwei Literale waeren aus
+        // jeder handgeschriebenen Web-Quelle verbannt, und die Haken in
+        // `main.tsx` muessen auf die Sperre verzweigen koennen. Die offenen
+        // Datensaetze stehen als Eintragshashes (hex) und nie als Inhalt.
+        "ReaderSessionView",
+        &[
+            ("locked", "boolean"),
+            ("openEntryHashes", "readonly string[]"),
+        ],
+    ),
+    (
+        // Der Bericht EINES Einzelexports: Entry-Hash und Zielart — nie der
+        // Pfad, nie der Inhalt. `targetKind` ist die eingefrorene Zahl der
+        // Position `target-kind` aus `export-context-v1` (`1` gewaehlte Datei,
+        // `2` Download), damit kein Wortlaut in `apps/web` gegen
+        // `ReaderExportTargetKindV1::label` driften kann.
+        "SingleExportReportView",
+        &[("entryHash", "string"), ("targetKind", "number")],
+    ),
 ];
 
 const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[

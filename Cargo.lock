@@ -1904,6 +1904,7 @@ dependencies = [
  "ea-crypto",
  "ea-format",
  "ea-index",
+ "ea-operator",
  "ea-schema",
  "ea-sync-protocol",
  "ea-testkit",

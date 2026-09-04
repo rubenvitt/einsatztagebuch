@@ -152,10 +152,22 @@
 //! `crates/ea-reader-wasm/Cargo.toml` nur unter `[dev-dependencies]`, und
 //! ohne diesen Re-Export koennte die Bruecke keine Anfrage formulieren, ohne
 //! eine neue Kante zu ziehen und `Cargo.lock` zu bewegen.
+//!
+//! Und dieselbe Regel holt mit der Sitzungssperre und dem Einzelexport
+//! [`DeviceId`], [`EventId`], [`LocalAuditActionV1`], [`LocalAuditOutcomeV1`],
+//! [`ExportContextV1`] und [`decode_local_audit_event`] nach.
+//! [`ReaderAuditIdentityV1::new`] nimmt eine `DeviceId`,
+//! [`ReaderAuditWriter::record`] eine Aktion und einen Ausgang, und wer eine
+//! signierte Zeile PRUEFT — der Zeuge, die Bruecke —, muss sie ueber
+//! `decode_local_audit_event` lesen koennen, ohne `ea-format` selbst zu
+//! nennen. `ea-format` steht in `crates/ea-reader-wasm/Cargo.toml` allein
+//! unter `[dev-dependencies]`, und dieselbe Begruendung wie bei `ea-archive`
+//! gilt.
 
 mod amendment;
 mod anchor;
 mod archive_source;
+mod audit;
 mod batch;
 mod blob_store;
 mod bundle_release;
@@ -166,12 +178,14 @@ mod enrollment;
 mod enrollment_endpoints;
 mod entry_state;
 mod envelope;
+mod export;
 mod file_mode;
 mod grant;
 mod http;
 mod key_profile;
 mod mode;
 mod search;
+mod session;
 mod sync;
 mod trust_state;
 mod vault;
@@ -182,6 +196,11 @@ pub use amendment::{
 };
 pub use anchor::PinnedTrustAnchor;
 pub use archive_source::{DirectoryHandleSource, ReaderArchiveSourceV1};
+pub use audit::{
+    InMemoryReaderAuditSink, MAX_READER_AUDIT_LOG_EVENTS_V1, READER_AUDIT_LOG_BLOB_KEY_V1,
+    ReaderAuditError, ReaderAuditIdentityV1, ReaderAuditLogSink, ReaderAuditLogStore,
+    ReaderAuditSink, ReaderAuditWriter,
+};
 pub use batch::VerifiedSyncBatch;
 pub use blob_store::{InMemoryReaderBlobStore, ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
 pub use bundle_release::{
@@ -198,13 +217,17 @@ pub use ea_archive::{
     BUNDLE_MAGIC_V1, BundleError, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
 };
 pub use ea_crypto::HpkeRecipientPrivateKey;
+pub use ea_format::{
+    ExportContextV1, LocalAuditActionV1, LocalAuditOutcomeV1, decode_local_audit_event,
+};
 pub use ea_index::{IndexError, IndexPressureV1, ReaderQueryV1, ReaderSearchHitV1};
 pub use ea_schema::{PayloadV1, SchemaRegistry};
 pub use ea_sync_protocol::HttpMethod;
 pub use ea_trust::{TrustAnchorV1, decode_trust_anchor};
 pub use ea_types::{
-    ChainSequence, DestructionId, EntryHash, EntryStatus, Hash32, KeyThumbprint, ObjectHash,
-    OrganizationId, RecordId, RegistryVersion, SubjectId, UnixMillis, VerificationStatus,
+    ChainSequence, DestructionId, DeviceId, EntryHash, EntryStatus, EventId, Hash32, KeyThumbprint,
+    ObjectHash, OrganizationId, RecordId, RegistryVersion, SubjectId, UnixMillis,
+    VerificationStatus,
 };
 pub use ea_verify::{
     AuthorizedDestructionV1, ChainGapV1, DECAPSULATION_EVENT_V1, DestructionStateV1, GATE_ORDER_V1,
@@ -226,12 +249,21 @@ pub use entry_state::{ReaderEntryStateStore, ReaderEntryStateV1};
 pub use envelope::{
     AuthenticatorPrfV1, VAULT_INDEX_INFO_V1, VAULT_KEK_INFO_V1, VaultEnvelopeV1, derive_kek_v1,
 };
+pub use export::{
+    ReaderExportError, ReaderExportReport, ReaderExportService, ReaderExportTarget,
+    ReaderExportTargetError, ReaderExportTargetKindV1,
+};
 pub use file_mode::{OpenedArchiveV1, ReaderFileMode, ReaderFileModeError};
 pub use grant::{VerifiedEncryptedEntry, VerifiedGrantForRecipient};
 pub use http::ReaderRequestV1;
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
 pub use search::{ReaderSearch, indexable_record};
+pub use session::{
+    READER_BACKGROUND_INACTIVITY_MS_V1, READER_CONFIRMATION_VALIDITY_MS_V1,
+    READER_INACTIVITY_MS_V1, ReaderAuthenticatorConfirmation, ReaderConfirmationPurpose,
+    ReaderSession, ReaderSessionError, ReaderSessionState, TabVisibility,
+};
 pub use sync::{
     READER_SYNC_SIGNATURE_WINDOW_SECONDS_V1, ReaderSyncError, ReaderSyncFaultPoint,
     ReaderSyncService,

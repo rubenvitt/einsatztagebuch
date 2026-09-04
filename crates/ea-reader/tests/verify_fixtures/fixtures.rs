@@ -35,11 +35,15 @@ use std::sync::OnceLock;
 use ea_archive::{ArchiveInventory, ArchiveSource, BUNDLE_MAGIC_V1};
 use ea_crypto::SecretBytes;
 use ea_reader::{
-    AuthenticatorPrfV1, ReaderClassification, ReaderMode, ReaderVault, ReaderVerifier,
-    SilentObserver, UnlockedVault, VaultContentsV1,
+    AuthenticatorPrfV1, ReaderAuditIdentityV1, ReaderAuthenticatorConfirmation,
+    ReaderClassification, ReaderConfirmationPurpose, ReaderMode, ReaderVault, ReaderVerifier,
+    SchemaRegistry, SealedVaultV1, SilentObserver, UnlockedVault, VaultContentsV1,
+    VerifiedDecryptedRecord, decrypt_verified,
 };
 use ea_trust::decode_trust_anchor;
-use ea_types::{EntryHash, Hash32, ObjectHash, UnixMillis, VerificationStatus};
+use ea_types::{
+    DeviceId, EntryHash, Hash32, ObjectHash, OrganizationId, UnixMillis, VerificationStatus,
+};
 use ea_verify::{DecryptionErrorV1, ManifestSignatureErrorV1};
 
 use super::verify_support::{self, archive_support::ArchiveFixture};
@@ -73,9 +77,14 @@ pub const LATER_EFFECTIVE_NOW: UnixMillis =
 /// Der Ed25519-Audit- und Geraeteschluessel des Kulissen-Tresors.
 const VAULT_AUDIT_SEED_V1: [u8; 32] = [0x52; 32];
 /// Die `credentialId` des einen Entsperrwegs.
-const VAULT_CREDENTIAL_ID_V1: &[u8] = b"ea-reader-verify-passkey";
-/// Die rohe PRF-Ausgabe dieses Entsperrwegs.
-const VAULT_PRF_OUTPUT_V1: [u8; 32] = [0xa1; 32];
+///
+/// OEFFENTLICH seit dem Browserzeugen des Einzelexports: `readerVaultUnlock`
+/// und `readerExportOne` nehmen Kennung und PRF-Ausgabe als ROHE Bytes ueber
+/// die Bruecke, so wie JavaScript sie reicht, und der Zeuge muss genau die
+/// Bytes nennen, die [`authenticator`] traegt.
+pub const VAULT_CREDENTIAL_ID_V1: &[u8] = b"ea-reader-verify-passkey";
+/// Die rohe PRF-Ausgabe dieses Entsperrwegs — oeffentlich aus demselben Grund.
+pub const VAULT_PRF_OUTPUT_V1: [u8; 32] = [0xa1; 32];
 
 /// Eine entsperrte Sitzung, die den Anker der Fixturelinie PINNT und deren
 /// KEM-Schluessel den eigenen Grants dieser Linie gehoert.
@@ -113,16 +122,36 @@ pub fn unlocked_vault_with_pinned_anchor() -> UnlockedVault {
 /// Wenn Versiegeln oder Entsperren scheitert.
 #[must_use]
 pub fn vault_pinning(pinned_anchor_exact_bytes: Vec<u8>) -> UnlockedVault {
+    let sealed = sealed_vault_pinning(pinned_anchor_exact_bytes);
+    ReaderVault::unlock(&sealed, &authenticator())
+        .expect("derselbe Authenticator muss ihn wieder oeffnen")
+}
+
+/// Der VERSIEGELTE Kulissen-Tresor ueber dem Anker der Fixturelinie.
+///
+/// Herausgezogen fuer die Sitzungs- und Exportzeugen: die
+/// Authenticator-Bestaetigung nach `web-reader-design.md` §6.5 und §8.2
+/// wird gegen den versiegelten Tresor BELEGT, nicht gegen den entsperrten.
+#[must_use]
+pub fn sealed_vault_with_pinned_anchor() -> SealedVaultV1 {
+    sealed_vault_pinning(complete_archive_anchor_bytes().to_vec())
+}
+
+/// Derselbe versiegelte Tresor ueber BELIEBIGEN Ankerbytes.
+///
+/// # Panics
+///
+/// Wenn das Versiegeln scheitert.
+#[must_use]
+pub fn sealed_vault_pinning(pinned_anchor_exact_bytes: Vec<u8>) -> SealedVaultV1 {
     let contents = VaultContentsV1::new(
         SecretBytes::new(verify_support::complete_recipient_secret_bytes()),
         SecretBytes::new(VAULT_AUDIT_SEED_V1),
         pinned_anchor_exact_bytes,
         None,
     );
-    let sealed = ReaderVault::seal(contents, &[authenticator()])
-        .expect("der Kulissen-Tresor muss sich versiegeln lassen");
-    ReaderVault::unlock(&sealed, &authenticator())
-        .expect("derselbe Authenticator muss ihn wieder oeffnen")
+    ReaderVault::seal(contents, &[authenticator()])
+        .expect("der Kulissen-Tresor muss sich versiegeln lassen")
 }
 
 /// Der eine Entsperrweg dieser Kulisse.
@@ -130,11 +159,97 @@ pub fn vault_pinning(pinned_anchor_exact_bytes: Vec<u8>) -> UnlockedVault {
 /// Bei jedem Aufruf neu gebaut, weil `AuthenticatorPrfV1` kein `Clone` traegt:
 /// es haelt eine PRF-Ausgabe, und eine zweite Kopie davon ist genau das, was
 /// `web-reader-design.md` §6.5 nicht will.
-fn authenticator() -> AuthenticatorPrfV1 {
+#[must_use]
+pub fn authenticator() -> AuthenticatorPrfV1 {
     AuthenticatorPrfV1::new(
         VAULT_CREDENTIAL_ID_V1.to_vec(),
         SecretBytes::new(VAULT_PRF_OUTPUT_V1),
     )
+}
+
+/// Ein Authenticator mit DERSELBEN `credentialId`, aber einer PRF-Ausgabe, die
+/// zu keinem Envelope dieses Tresors gehoert — die abgebrochene oder
+/// untergeschobene Zeremonie, aus der KEINE Bestaetigung entstehen darf.
+#[must_use]
+pub fn authenticator_with_a_foreign_prf_output() -> AuthenticatorPrfV1 {
+    AuthenticatorPrfV1::new(
+        VAULT_CREDENTIAL_ID_V1.to_vec(),
+        SecretBytes::new([0xa2; 32]),
+    )
+}
+
+/// Die pseudonyme Bedienerbindung, die eine Bestaetigung dieses Entsperrwegs
+/// traegt: SHA-256 ueber die `credentialId` — nachgerechnet, nicht aus dem
+/// Typ gelesen, damit der Zeuge die Ableitung selbst festhaelt.
+#[must_use]
+pub fn credential_id_hash() -> Hash32 {
+    use sha2::{Digest, Sha256};
+    let digest: [u8; 32] = Sha256::digest(VAULT_CREDENTIAL_ID_V1).into();
+    Hash32::try_from(digest.as_slice()).expect("32 Byte")
+}
+
+/// Eine FRISCHE Authenticator-Bestaetigung ueber den echten Nachweispfad:
+/// gegen den versiegelten Tresor, mit dem einen Entsperrweg dieser Kulisse.
+///
+/// # Panics
+///
+/// Wenn der Nachweis scheitert — er darf es fuer DIESEN Authenticator nicht.
+#[must_use]
+pub fn confirmation(
+    purpose: ReaderConfirmationPurpose,
+    now: UnixMillis,
+) -> ReaderAuthenticatorConfirmation {
+    ReaderAuthenticatorConfirmation::prove(
+        &sealed_vault_with_pinned_anchor(),
+        &authenticator(),
+        purpose,
+        now,
+    )
+    .expect("der eigene Authenticator belegt sich gegen den eigenen Tresor")
+}
+
+/// Die drei Identitaetsfelder der Auditzeile, wie ein Reader-Zertifikat sie
+/// truege. FESTE Fuellbytes, weil kein Reader-Zertifikat in dieser Kulisse
+/// existiert: die Identitaet ist im Reader ein Parameter und keine Ableitung.
+#[must_use]
+pub fn audit_identity() -> ReaderAuditIdentityV1 {
+    ReaderAuditIdentityV1::new(
+        OrganizationId::try_from(&[0x61_u8; 16][..]).expect("16 Byte"),
+        DeviceId::try_from(&[0x62_u8; 16][..]).expect("16 Byte"),
+        ObjectHash::try_from(&[0x63_u8; 32][..]).expect("32 Byte"),
+    )
+}
+
+/// GENAU EIN vollstaendig verifizierter und entschluesselter Datensatz: der
+/// Genesis-Eintrag aus [`complete_archive_with_a_genesis_plaintext`], ueber
+/// denselben Tresor und denselben Weg, den `index_projection.rs` und
+/// `historical_expiry.rs` fahren. Es gibt keinen anderen Weg zu diesem Typ,
+/// und das ist Absicht: `VerifiedDecryptedRecord` hat keinen Konstruktor.
+///
+/// # Panics
+///
+/// Wenn Klassifikation oder Entschluesselung scheitern.
+#[must_use]
+pub fn decrypted_genesis_record() -> VerifiedDecryptedRecord {
+    let vault = unlocked_vault_with_pinned_anchor();
+    let source = complete_archive_with_a_genesis_plaintext();
+    let classification = classify(source, &vault);
+    let entry_hash = entry_hash(source);
+    let entry = classification
+        .verified_entry(entry_hash)
+        .expect("der Bestand traegt einen Zeugen");
+    let grant = classification
+        .verified_grant(entry_hash)
+        .expect("und einen eigenen Grant");
+    decrypt_verified(
+        entry,
+        grant,
+        &vault,
+        &SchemaRegistry::v1(),
+        EFFECTIVE_NOW,
+        &mut SilentObserver,
+    )
+    .expect("der Genesis-Klartext traegt die erste Schemabestimmung")
 }
 
 // ---------------------------------------------------------------------------

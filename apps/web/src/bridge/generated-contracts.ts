@@ -133,6 +133,16 @@ export type ReaderSearchHitView = {
   readonly occurredAtStartMs: number
 }
 
+export type ReaderSessionView = {
+  readonly locked: boolean
+  readonly openEntryHashes: readonly string[]
+}
+
+export type SingleExportReportView = {
+  readonly entryHash: string
+  readonly targetKind: number
+}
+
 // The value arrays, so that no consumer repeats a literal.
 
 export const VERIFICATION_STATUS_VALUES = [

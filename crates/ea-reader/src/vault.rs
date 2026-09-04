@@ -44,8 +44,8 @@ use core::fmt;
 
 use ea_cbor::{ParserLimits, validate};
 use ea_crypto::{
-    AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, CryptoError, HpkeRecipientPrivateKey,
-    SecretBytes, SecretVec, aead_open, aead_seal,
+    AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, CoseSigner, CryptoError,
+    HpkeRecipientPrivateKey, SecretBytes, SecretVec, aead_open, aead_seal,
 };
 use ea_trust::{RegistryHeadPin, TrustAnchorV1, TrustError, decode_trust_anchor};
 use ea_types::{KeyThumbprint, ObjectHash, RegistryVersion};
@@ -55,9 +55,9 @@ use zeroize::Zeroize;
 
 use crate::blob_store::ReaderBlobError;
 use crate::envelope::{
-    AuthenticatorPrfV1, VAULT_BLOB_AAD_V1, VaultEnvelopeV1, derive_cache_key_v1,
-    derive_entry_state_key_v1, derive_index_key_v1, derive_kek_v1, derive_sync_cursor_key_v1,
-    derive_trust_state_key_v1,
+    AuthenticatorPrfV1, VAULT_BLOB_AAD_V1, VaultEnvelopeV1, derive_audit_log_key_v1,
+    derive_cache_key_v1, derive_entry_state_key_v1, derive_index_key_v1, derive_kek_v1,
+    derive_sync_cursor_key_v1, derive_trust_state_key_v1,
 };
 
 /// Der Fehlschlag des Tresors und der Speicher ueber ihm.
@@ -510,6 +510,28 @@ impl SealedVaultV1 {
         self.nonce = nonce;
     }
 
+    /// Belegt, dass ein Authenticator DIESEN Tresor oeffnen kann — ohne ihn zu
+    /// oeffnen.
+    ///
+    /// Der Weg der Authenticator-Bestaetigung aus `web-reader-design.md` §6.5
+    /// und §8.2: eine frische PRF-Ausgabe ist nur nach einer Zeremonie mit
+    /// Nutzerverifikation zu haben, und ob sie ECHT ist, entscheidet nicht der
+    /// Aufrufer, sondern die AEAD-Umschliessung des Envelopes. Der
+    /// umschlossene Tresorschluessel wird dafuer ausgepackt und sofort
+    /// fallengelassen — unter `ZeroizeOnDrop`, ohne den Tresorkoerper zu
+    /// entsiegeln und ohne dass ein zweiter [`UnlockedVault`] entsteht.
+    ///
+    /// # Errors
+    /// `EA-READER-VAULT-NO-ENVELOPE`, wenn kein Envelope diese `credentialId`
+    /// traegt, `EA-CRYPTO-AEAD-OPEN`, wenn die PRF-Ausgabe nicht zu ihm
+    /// passt.
+    pub(crate) fn prove_authenticator(
+        &self,
+        authenticator: &AuthenticatorPrfV1,
+    ) -> Result<(), ReaderVaultError> {
+        self.unwrap_vault_key(authenticator).map(drop)
+    }
+
     /// Der Tresorschluessel, geholt ueber genau EINEN Entsperrweg.
     fn unwrap_vault_key(
         &self,
@@ -609,6 +631,20 @@ impl UnlockedVault {
             .with_exposed(|seed| SigningKey::from_bytes(seed).sign(digest).to_bytes())
     }
 
+    /// Der COSE-Signierer des lokalen Audits, aus DEMSELBEN Ed25519-Schluessel.
+    ///
+    /// `ea_crypto::CoseSigner::from_secret` nimmt den Seed BESITZEND; die Kopie
+    /// entsteht innerhalb von `with_exposed` und faellt mit dem Signierer unter
+    /// dessen Zeroize — dieselbe Bauform, mit der `ReaderEnrollment::finish`
+    /// seinen `RequestSigner` baut. Der Signierer wird je Auditzeile NEU
+    /// gebaut und nirgends zwischengehalten: die Sperre der Sitzung laesst den
+    /// Tresor fallen, und mit ihm jeden Weg zu diesem Schluessel.
+    #[must_use]
+    pub fn audit_signer(&self) -> CoseSigner {
+        self.audit_signing_key
+            .with_exposed(|seed| CoseSigner::from_secret(SecretBytes::new(*seed)))
+    }
+
     /// Der gepinnte Root-Anker.
     ///
     /// Im Datei-Modus die EINZIGE Vertrauensquelle (§5.3): Trust-Objekte, die
@@ -666,6 +702,11 @@ impl UnlockedVault {
     /// Der Schluessel des Eintragszustandsspeichers.
     pub(crate) fn entry_state_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
         derive_entry_state_key_v1(&self.vault_key)
+    }
+
+    /// Der Schluessel des signierten lokalen Auditprotokolls.
+    pub(crate) fn audit_log_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+        derive_audit_log_key_v1(&self.vault_key)
     }
 
     /// Der Schluessel des bestaetigten Sync-Cursors.

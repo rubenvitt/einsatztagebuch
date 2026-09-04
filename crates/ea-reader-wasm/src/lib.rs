@@ -19,6 +19,15 @@
 //! Antwortbytes hinein. [`view`] kommt mit der Aufgabe „Integritätszentrierte
 //! Reader-Oberfläche" dazu: der EINE geoeffnete Bestand des Workers und die
 //! sechs Ansichtsausfuhren, die ihn als generierte DTOs herausgeben.
+//! [`visibility`] und [`export_bridge`] kommen mit der Aufgabe
+//! „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und
+//! signiertes lokales Audit" dazu: drei Sitzungsausfuhren, an die `apps/web`
+//! seine Sichtbarkeits- und Eingabehaken haengt, und GENAU EINE Exportausfuhr,
+//! die GENAU EINEN Eintragshash nimmt. Seit derselben Aufgabe haelt
+//! [`vault_bridge`] je Kennung eine `ReaderSession` statt eines nackten
+//! Tresors, und jede Ausfuhr, die den Tresor braucht, reicht ihre Uhr an
+//! `ReaderSession::vault` durch — die Sperre faellt beim Zugriff, nicht im
+//! Timer.
 //!
 //! # Was hier NICHT liegt
 //!
@@ -55,6 +64,13 @@
 /// hinter `cfg(target_arch = "wasm32")`. Das ist dieselbe Bauform wie unten:
 /// die Rechnung bleibt fuer einen gewoehnlichen Wirtstest erreichbar.
 pub mod bridge;
+
+/// Die Bruecke des Einzelexports: GENAU EINE Ausfuhr, GENAU EIN Eintragshash.
+///
+/// Ohne cfg an der `mod`-Zeile, weil das Modul eine Ausfuhr traegt und die
+/// reine Haelfte — das Bericht-DTO und die Zielart aus ihrer Zahl — auf dem
+/// Wirt bezeugt wird.
+pub mod export_bridge;
 
 /// Die Bruecke des inkrementellen Lesestapels: GENAU ZWEI Ausfuhren.
 ///
@@ -115,6 +131,12 @@ pub mod opfs_worker;
 /// Richtung: `web-reader-design.md` §9 laesst nach JavaScript Sitzungskennung,
 /// Fingerabdruecke und Statuswerte, nie Schluesselmaterial.
 pub mod vault_bridge;
+
+/// Die Bruecke der Sitzungssperre: DREI Ausfuhren, keine entscheidet.
+///
+/// Ohne cfg an der `mod`-Zeile, aus demselben Grund wie bei [`fetch`]; die
+/// reine Haelfte — das Sitzungs-DTO — wird auf dem Wirt bezeugt.
+pub mod visibility;
 
 /// Das Browser-Enrollment: die fuenf Ausfuhren und der Endpunktport dahinter.
 ///

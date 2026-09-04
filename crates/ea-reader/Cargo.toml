@@ -125,6 +125,14 @@ default = ["test-support"]
 test-support = []
 
 [dev-dependencies]
+# GENAU EINE Messung: `the_reader_inactivity_default_is_the_same_five_minutes_as_the_desktop`
+# in `tests/session_lock.rs` haelt `READER_INACTIVITY_MS_V1` gegen
+# `ea_operator::MAX_INACTIVITY_MS`. Der Fuenfminutenwert steht in `src/session.rs`
+# ein zweites Mal als Literal, weil `ea-operator` in `WASM32_EXEMPT_CRATES`
+# steht und keine Bibliothekskante des Readers werden darf; die Gleichheit wird
+# deshalb HIER gemessen statt abgeschrieben. ENTWICKLUNGSkante: die wasm32-Zeile
+# des Gates faehrt ohne `--all-targets` und zieht sie nie in den Graphen.
+ea-operator.workspace = true
 # `contains_canary` fuer die Kanarienzeugen und `ed25519_public_key` fuer die
 # Fixture-Zertifikate. NUR als Zeugenkante: die Crate steht wegen ihrer
 # `std::fs`-Vektorausgabe auf `WASM32_EXEMPT_CRATES`, und die wasm32-Zeile des
