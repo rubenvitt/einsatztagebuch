@@ -177,6 +177,8 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
                 "ea-reader",
                 "-p",
                 "ea-reader-wasm",
+                "-p",
+                "ea-index",
             ],
         ),
     ]
@@ -1100,6 +1102,54 @@ fn run_workspace_tests(root: &Path) -> io::Result<()> {
         "cargo",
         &["test", "--workspace", "--all-targets", "--locked"],
     )
+}
+
+/// Die EINE Paketzahl, die der Arm `index-scale` messen kann.
+///
+/// Sie ist die Kopie von `ea_index::MONOLITHIC_INDEX_MAX_PACKAGES_V1`, und die
+/// Kopie ist bewusst: `xtask` zieht keine Kante auf eine Bibliotheks-Crate, die
+/// es nur fuer eine Zahl braeuchte. Eine DRIFT bleibt trotzdem nicht
+/// unbemerkt — der gefahrene Zeuge
+/// `crates/ea-index/tests/scale_50000.rs::fifty_thousand_packages_fit_the_monolithic_blob_and_report_their_cost`
+/// beginnt mit `assert_eq!(MONOLITHIC_INDEX_MAX_PACKAGES_V1, 50_000)` und
+/// faerbt rot, sobald die Schwelle sich bewegt.
+const INDEX_SCALE_PACKAGES_V1: usize = 50_000;
+
+/// Die EINE Fehlerzeile der Argumentgrammatik von `index-scale`.
+const INDEX_SCALE_ARGUMENT_ERROR: &str = "index-scale accepts exactly one numeric argument";
+
+/// Das Kommando, das den GEMESSENEN Zeugen der Schwelle faehrt.
+///
+/// `--ignored`, weil der Zeuge `#[ignore]` traegt: 50 000 Pakete sind kein
+/// Schnelllaufbudget, und `verify_quick_commands()` bekommt dieses Kommando
+/// ausdruecklich NICHT. `--nocapture`, weil die gemessene Zeile GENAU von
+/// diesem Zeugen kommt — Blobgroesse, Versiegelungs- und Entsperrdauer,
+/// Suchdauer und Spitzenspeicher stehen dort, wo sie gemessen werden, und
+/// nicht in einer zweiten Rechnung dieses Werkzeugs.
+fn index_scale_command_args() -> Vec<&'static str> {
+    vec![
+        "test",
+        "--locked",
+        "-p",
+        "ea-index",
+        "--test",
+        "scale_50000",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]
+}
+
+/// Faehrt den Schwellenzeugen und reicht seine Ausgabe unveraendert durch.
+fn run_index_scale(root: &Path, packages: usize) -> Result<(), String> {
+    if packages != INDEX_SCALE_PACKAGES_V1 {
+        return Err(format!(
+            "index-scale measures exactly {INDEX_SCALE_PACKAGES_V1} packages; \
+             {packages} would report a number that no witness has measured"
+        ));
+    }
+    run_process(root, "cargo", &index_scale_command_args())
+        .map_err(|error| format!("failed to invoke cargo: {error}"))
 }
 
 fn validate_cddl_document(name: &str, input: &str) -> Result<(), String> {
@@ -3553,6 +3603,18 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("failed to invoke workspace tests: {error}"))
         }
         "test-fuzz" => run_fuzz(&root, args),
+        "index-scale" => {
+            let packages = args
+                .next()
+                .ok_or_else(|| INDEX_SCALE_ARGUMENT_ERROR.to_owned())?;
+            if args.next().is_some() {
+                return Err(INDEX_SCALE_ARGUMENT_ERROR.to_owned());
+            }
+            let packages = packages
+                .parse::<usize>()
+                .map_err(|error| format!("{INDEX_SCALE_ARGUMENT_ERROR}: {packages}: {error}"))?;
+            run_index_scale(&root, packages)
+        }
         "stage-gate" => {
             let stage = args
                 .next()
@@ -4334,6 +4396,8 @@ vor Task 3 akzeptiert
                         "ea-reader",
                         "-p",
                         "ea-reader-wasm",
+                        "-p",
+                        "ea-index",
                     ],
                 ),
             ]
@@ -4449,6 +4513,24 @@ path = "fuzz_targets/signed_object.rs"
                 "cbor_object",
                 "--",
                 "-max_total_time=30",
+            ]
+        );
+    }
+
+    #[test]
+    fn index_scale_runs_the_ignored_witness_with_its_output_uncaptured() {
+        assert_eq!(
+            super::index_scale_command_args(),
+            vec![
+                "test",
+                "--locked",
+                "-p",
+                "ea-index",
+                "--test",
+                "scale_50000",
+                "--",
+                "--ignored",
+                "--nocapture",
             ]
         );
     }

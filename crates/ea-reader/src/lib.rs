@@ -140,6 +140,7 @@ mod grant;
 mod http;
 mod key_profile;
 mod mode;
+mod search;
 mod sync;
 mod trust_state;
 mod vault;
@@ -195,6 +196,7 @@ pub use grant::{VerifiedEncryptedEntry, VerifiedGrantForRecipient};
 pub use http::ReaderRequestV1;
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
+pub use search::{ReaderSearch, indexable_record};
 pub use sync::{
     READER_SYNC_SIGNATURE_WINDOW_SECONDS_V1, ReaderSyncError, ReaderSyncFaultPoint,
     ReaderSyncService,

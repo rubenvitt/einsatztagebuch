@@ -30,6 +30,15 @@ ea-crypto.workspace = true
 # `DeviceCertificateFieldsV1` und `CertificateKindV1` sind die EINGABE von
 # `ReaderKeyProfile::validate`.
 ea-format.workspace = true
+# Der lokale Index nach `web-reader-design.md` §8.1. Die Kante laeuft
+# EINSEITIG: `crates/ea-index` deklariert seine eigene Eingabe und nennt keinen
+# Typ dieser Crate, weil `cargo metadata` einen Kreis abwiese und mit ihm der
+# ganze Arbeitsbereich fiele. Die Umwandlung aus dem Zeugentyp besitzt
+# `src/search.rs` und laeuft INNERHALB der ausleihenden Klartextzugriffe. Die
+# Crate greift auf nichts zu — kein Dateisystem, keine Uhr, keine Entropie,
+# kein Netz — und steht deshalb selbst auf der wasm32-Positivliste; sie nimmt
+# `ea-reader` also nicht davon herunter.
+ea-index.workspace = true
 # Die Schemabestimmung des geoeffneten Eintrags. `SchemaRegistry::schemas()` ist
 # die einzige Quelle der fuenf Kennungen, und `derive_view` der einzige Erzeuger
 # einer `DerivedView`; `decrypt_verified` probiert die Deskriptoren in der

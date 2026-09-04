@@ -1779,7 +1779,7 @@ pnpm test:property
 pnpm test:fuzz --smoke-seconds 60
 pnpm test:recovery
 cargo run --locked -p xtask -- stage-gate 1
-cargo check --target wasm32-unknown-unknown --locked -p ea-types -p ea-cbor -p ea-crypto -p ea-format -p ea-schema -p ea-time -p ea-trust -p ea-archive -p ea-chain -p ea-verify -p ea-sync-protocol -p ea-reader -p ea-reader-wasm
+cargo check --target wasm32-unknown-unknown --locked -p ea-types -p ea-cbor -p ea-crypto -p ea-format -p ea-schema -p ea-time -p ea-trust -p ea-archive -p ea-chain -p ea-verify -p ea-sync-protocol -p ea-reader -p ea-reader-wasm -p ea-index
 pnpm verify:quick
 ```
 
