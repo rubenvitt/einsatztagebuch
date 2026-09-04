@@ -26,8 +26,33 @@
 //!
 //! Dieselbe Regel wie ueberall im Kern: kein `SystemTime::now()`. Weil der
 //! Aufrufer im Browser sitzt, haelt die Sitzung den hoechsten je gesehenen
-//! Zeitwert als Untergrenze; ein `now` darunter verlaengert nichts. Eine
+//! Zeitwert als Untergrenze; ein `now` darunter verlaengert nichts — eine
+//! Eingabe oder ein Wechsel, der mit einer zurueckgesprungenen Uhr gemeldet
+//! wird, zaehlt zur Untergrenze und nicht zu einer frueheren Zeit. Eine
 //! vorwaerts luegende Uhr sperrt frueher und ist deshalb kein Angriff.
+//!
+//! Die BENANNTE Kehrseite der Untergrenze, gemessen im Review: springt die
+//! Uhr EINMAL vor und danach ehrlich zurueck, steht die Sitzungszeit bis zum
+//! Aufholen still, und eine Eingabe in dieser Zeit wird an der Untergrenze
+//! verbucht. Die Sitzung lebt dann laengstens um den Betrag des Sprungs
+//! laenger als ab der ehrlichen Eingabe — und ein Sprung ueber die Frist
+//! hinaus sperrt sofort, die Verlaengerung bleibt also stets unter fuenf
+//! Minuten. Ohne Untergrenze hiesse dieselbe Uhr: jeder Rueckwaertswert
+//! setzt die verstrichene Zeit zurueck, unbeschraenkt oft. Der Kern kann
+//! eine vor- und wieder zurueckspringende Uhr nicht von einer
+//! zurueckspringenden unterscheiden; er waehlt die beschraenkte Seite.
+//!
+//! # Die Bestaetigung gehoert zu GENAU EINEM Tresor
+//!
+//! [`ReaderAuthenticatorConfirmation::prove`] belegt eine PRF-Ausgabe gegen
+//! das Envelope eines versiegelten Tresors — und wer einen Tresor SELBST
+//! versiegelt, kennt dessen PRF-Ausgabe. Damit eine so belegte Bestaetigung
+//! nicht eine Sitzung ueber einem ANDEREN Tresor eroeffnet oder exportiert,
+//! traegt sie die Tresorbindung aus dem ausgepackten Tresorschluessel, und
+//! [`ReaderSession::unlock`], [`ReaderSession::reopen`] und der Export
+//! vergleichen sie mit `UnlockedVault::confirmation_binding`. Die Luecke hat
+//! das Review gemessen; `a_confirmation_proven_against_a_foreign_vault_opens_nothing_here`
+//! haelt sie geschlossen.
 //!
 //! # Was die Sitzung offen haelt, und was NICHT
 //!
@@ -156,6 +181,8 @@ pub enum ReaderSessionError {
     ConfirmationPurpose,
     /// Die Bestaetigung ist abgelaufen oder liegt in der Zukunft.
     ConfirmationStale,
+    /// Die Bestaetigung gehoert zu einem anderen Tresor als die Sitzung.
+    ConfirmationVault,
     /// Die Sitzung ist gesperrt.
     Locked,
     /// Ein Fehlschlag des Tresors beim Nachweis des Authenticators.
@@ -170,6 +197,7 @@ impl ReaderSessionError {
         match self {
             Self::ConfirmationPurpose => "EA-READER-SESSION-CONFIRMATION-PURPOSE",
             Self::ConfirmationStale => "EA-READER-SESSION-CONFIRMATION-STALE",
+            Self::ConfirmationVault => "EA-READER-SESSION-CONFIRMATION-VAULT",
             Self::Locked => "EA-READER-SESSION-LOCKED",
             Self::Vault(error) => error.code(),
         }
@@ -215,6 +243,7 @@ pub struct ReaderAuthenticatorConfirmation {
     issued_at: UnixMillis,
     expires_at: UnixMillis,
     credential_id_hash: Hash32,
+    vault_binding: Hash32,
 }
 
 impl ReaderAuthenticatorConfirmation {
@@ -236,7 +265,7 @@ impl ReaderAuthenticatorConfirmation {
         purpose: ReaderConfirmationPurpose,
         now: UnixMillis,
     ) -> Result<Self, ReaderSessionError> {
-        sealed.prove_authenticator(authenticator)?;
+        let vault_binding = sealed.prove_authenticator(authenticator)?;
         let expires_at = now
             .get()
             .checked_add(READER_CONFIRMATION_VALIDITY_MS_V1)
@@ -249,7 +278,31 @@ impl ReaderAuthenticatorConfirmation {
             expires_at,
             credential_id_hash: Hash32::try_from(digest.as_slice())
                 .expect("SHA-256 liefert 32 Byte"),
+            vault_binding,
         })
+    }
+
+    /// Ob die Bestaetigung zu DIESEM Tresor gehoert.
+    ///
+    /// Konstantzeitig ueber alle 32 Byte: der Vergleichswert ist kein
+    /// Geheimnis, aber ein Vergleich, der beim ersten Unterschied abbricht,
+    /// waere die eine Stelle, an der ein Zeitkanal ueber den Tresor spraeche.
+    pub(crate) fn check_vault(&self, vault: &UnlockedVault) -> Result<(), ReaderSessionError> {
+        let expected = vault.confirmation_binding();
+        let mut difference = 0_u8;
+        for (mine, theirs) in self
+            .vault_binding
+            .as_bytes()
+            .iter()
+            .zip(expected.as_bytes().iter())
+        {
+            difference |= mine ^ theirs;
+        }
+        if difference == 0 {
+            Ok(())
+        } else {
+            Err(ReaderSessionError::ConfirmationVault)
+        }
     }
 
     /// Der Zweck, fuer den die Bestaetigung ausgestellt wurde.
@@ -341,13 +394,16 @@ impl ReaderSession {
     /// # Errors
     /// `EA-READER-SESSION-CONFIRMATION-PURPOSE` fuer eine Bestaetigung mit
     /// anderem Zweck, `EA-READER-SESSION-CONFIRMATION-STALE` fuer eine
-    /// abgelaufene. In beiden Faellen faellt der hereingereichte Tresor sofort.
+    /// abgelaufene, `EA-READER-SESSION-CONFIRMATION-VAULT` fuer eine, die
+    /// gegen einen anderen Tresor belegt wurde. In allen Faellen faellt der
+    /// hereingereichte Tresor sofort.
     pub fn unlock(
         vault: UnlockedVault,
         confirmation: ReaderAuthenticatorConfirmation,
         now: UnixMillis,
     ) -> Result<Self, ReaderSessionError> {
         confirmation.check(ReaderConfirmationPurpose::Unlock, now)?;
+        confirmation.check_vault(&vault)?;
         Ok(Self {
             vault: Some(vault),
             open_records: Vec::new(),
@@ -379,6 +435,7 @@ impl ReaderSession {
     ) -> Result<(), ReaderSessionError> {
         let now = self.observe(now);
         confirmation.check(ReaderConfirmationPurpose::Unlock, now)?;
+        confirmation.check_vault(&vault)?;
         if self.state_at(now) == ReaderSessionState::Unlocked {
             return Ok(());
         }
@@ -499,6 +556,15 @@ impl ReaderSession {
     #[must_use]
     pub const fn operator_binding_hash(&self) -> Hash32 {
         self.operator_binding_hash
+    }
+
+    /// Die Sitzungszeit zu `now`: `now` selbst, oder die monotone Untergrenze,
+    /// wenn `now` dahinter zurueckfaellt. Der Export rechnet Frische und
+    /// Auditzeit gegen DIESEN Wert und nicht gegen die rohe Uhr — sonst
+    /// verlaengerte eine zurueckgesprungene Uhr die Frist der Bestaetigung,
+    /// die die Sitzung selbst laengst als abgelaufen saehe.
+    pub(crate) fn observed_now(&mut self, now: UnixMillis) -> UnixMillis {
+        self.observe(now)
     }
 
     /// Hebt `now` auf die monotone Untergrenze und schreibt sie fort.

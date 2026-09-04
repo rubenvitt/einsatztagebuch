@@ -32,7 +32,7 @@ fn t(offset_ms: i64) -> UnixMillis {
 
 fn unlocked_at(now: UnixMillis) -> ReaderSession {
     ReaderSession::unlock(
-        fixtures::unlocked_vault_with_pinned_anchor(),
+        fixtures::session_vault(),
         fixtures::confirmation(ReaderConfirmationPurpose::Unlock, now),
         now,
     )

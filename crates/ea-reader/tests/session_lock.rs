@@ -26,7 +26,7 @@ fn t(offset_ms: i64) -> UnixMillis {
 
 fn unlocked_at(now: UnixMillis) -> ReaderSession {
     ReaderSession::unlock(
-        fixtures::unlocked_vault_with_pinned_anchor(),
+        fixtures::session_vault(),
         fixtures::confirmation(ReaderConfirmationPurpose::Unlock, now),
         now,
     )
@@ -219,11 +219,7 @@ fn a_reused_or_wrongly_purposed_confirmation_does_not_reopen_a_locked_session() 
 
     let export_purposed = fixtures::confirmation(ReaderConfirmationPurpose::SingleExport, t(3));
     let refused = session
-        .reopen(
-            fixtures::unlocked_vault_with_pinned_anchor(),
-            export_purposed,
-            t(3),
-        )
+        .reopen(fixtures::session_vault(), export_purposed, t(3))
         .expect_err("eine Exportbestaetigung eroeffnet keine Sitzung");
     assert_eq!(refused.code(), "EA-READER-SESSION-CONFIRMATION-PURPOSE");
     assert_eq!(session.state_at(t(4)), ReaderSessionState::Locked);
@@ -232,7 +228,7 @@ fn a_reused_or_wrongly_purposed_confirmation_does_not_reopen_a_locked_session() 
     let stale = fixtures::confirmation(ReaderConfirmationPurpose::Unlock, t(0));
     let refused = session
         .reopen(
-            fixtures::unlocked_vault_with_pinned_anchor(),
+            fixtures::session_vault(),
             stale,
             t(READER_CONFIRMATION_VALIDITY_MS_V1 + 1),
         )
@@ -246,13 +242,13 @@ fn a_reused_or_wrongly_purposed_confirmation_does_not_reopen_a_locked_session() 
         UnixMillis::new(now.get() + 1),
     );
     let refused = session
-        .reopen(fixtures::unlocked_vault_with_pinned_anchor(), future, now)
+        .reopen(fixtures::session_vault(), future, now)
         .expect_err("eine Bestaetigung aus der Zukunft eroeffnet keine Sitzung");
     assert_eq!(refused.code(), "EA-READER-SESSION-CONFIRMATION-STALE");
 
     let fresh = fixtures::confirmation(ReaderConfirmationPurpose::Unlock, now);
     session
-        .reopen(fixtures::unlocked_vault_with_pinned_anchor(), fresh, now)
+        .reopen(fixtures::session_vault(), fresh, now)
         .expect("eine frische Entsperrbestaetigung eroeffnet die Sitzung neu");
     assert_eq!(session.state_at(now), ReaderSessionState::Unlocked);
     assert!(session.vault(now).is_some());
@@ -273,7 +269,7 @@ fn a_reused_or_wrongly_purposed_confirmation_does_not_reopen_a_locked_session() 
 #[test]
 fn an_export_confirmation_opens_no_session_at_all() {
     let refused = ReaderSession::unlock(
-        fixtures::unlocked_vault_with_pinned_anchor(),
+        fixtures::session_vault(),
         fixtures::confirmation(ReaderConfirmationPurpose::SingleExport, t(0)),
         t(0),
     )
@@ -379,4 +375,121 @@ fn the_session_debug_output_carries_no_plaintext() {
         b"plaintext"
     ));
     assert!(!ea_testkit::contains_canary(rendered.as_bytes(), b"vault:"));
+}
+
+/// Die monotone Untergrenze ist beobachtbar, und der Zeuge kann sie
+/// unterscheiden: eine Eingabe, die mit einer ZURUECKGESPRUNGENEN Uhr gemeldet
+/// wird, zaehlt zur Untergrenze — nicht zu der frueheren Zeit, die die Uhr
+/// nennt. Ohne Untergrenze staende die Eingabe bei 50 s, und die Sitzung
+/// waere bei 350 s gesperrt; der Mutant „`observe` gibt `now` unveraendert
+/// zurueck" faellt genau hier.
+#[test]
+fn an_input_reported_with_a_clock_that_fell_back_counts_at_the_floor() {
+    let mut session = unlocked_at(t(0));
+    assert_eq!(session.state_at(t(200_000)), ReaderSessionState::Unlocked);
+    session.note_activity(t(50_000));
+    assert_eq!(
+        session.state_at(t(200_000 + READER_INACTIVITY_MS_V1 - 1)),
+        ReaderSessionState::Unlocked
+    );
+    assert_eq!(
+        session.state_at(t(200_000 + READER_INACTIVITY_MS_V1)),
+        ReaderSessionState::Locked
+    );
+    // Dasselbe fuer den Wechsel in den Hintergrund: er startet die verkuerzte
+    // Frist an der Untergrenze, nicht in der Vergangenheit.
+    let mut session = unlocked_at(t(0));
+    assert_eq!(session.state_at(t(100_000)), ReaderSessionState::Unlocked);
+    session.note_visibility(TabVisibility::Hidden, t(20_000));
+    assert_eq!(
+        session.state_at(t(100_000 + READER_BACKGROUND_INACTIVITY_MS_V1 - 1)),
+        ReaderSessionState::Unlocked
+    );
+    assert_eq!(
+        session.state_at(t(100_000 + READER_BACKGROUND_INACTIVITY_MS_V1)),
+        ReaderSessionState::Locked
+    );
+}
+
+/// Die BENANNTE Kehrseite der Untergrenze, als Zahl: ein einmaliger
+/// Vorwaertssprung der Uhr verlaengert die Sitzung hoechstens um seinen
+/// eigenen Betrag, und ein Sprung ueber die Frist hinaus sperrt sofort. Der
+/// Zeuge misst die Grenze, er behauptet nicht, dass es sie nicht gibt.
+#[test]
+fn a_forward_clock_glitch_extends_at_most_by_its_own_size() {
+    let glitch = READER_INACTIVITY_MS_V1 - 1;
+    let mut session = unlocked_at(t(0));
+    assert_eq!(session.state_at(t(glitch)), ReaderSessionState::Unlocked);
+    // Die ehrliche Uhr kehrt zurueck; die Eingabe wird an der Untergrenze
+    // verbucht.
+    session.note_activity(t(1_000));
+    // Spaetestens fuenf Minuten NACH dem Sprung ist Schluss — nie spaeter.
+    assert_eq!(
+        session.state_at(t(glitch + READER_INACTIVITY_MS_V1)),
+        ReaderSessionState::Locked
+    );
+
+    // Ein Sprung ueber die Frist hinaus sperrt sofort, Eingabe hin oder her.
+    let mut session = unlocked_at(t(0));
+    assert_eq!(
+        session.state_at(t(READER_INACTIVITY_MS_V1)),
+        ReaderSessionState::Locked
+    );
+    session.note_activity(t(1_000));
+    assert_eq!(session.state_at(t(1_000)), ReaderSessionState::Locked);
+}
+
+/// Eine Bestaetigung gehoert zu GENAU EINEM Tresor. Wer einen Tresor SELBST
+/// versiegelt, kennt dessen PRF-Ausgabe und kann sich gegen ihn „belegen" —
+/// mit derselben `credentialId`. Diese Bestaetigung eroeffnet die Sitzung
+/// ueber dem echten Tresor NICHT, weder beim ersten Mal noch nach einer
+/// Sperre; die Positivkontrolle daneben ist der eigene Tresor.
+#[test]
+fn a_confirmation_proven_against_a_foreign_vault_opens_nothing_here() {
+    let foreign_sealed = fixtures::sealed_vault_pinning(vec![0xee; 40]);
+    let foreign = ReaderAuthenticatorConfirmation::prove(
+        &foreign_sealed,
+        &fixtures::authenticator(),
+        ReaderConfirmationPurpose::Unlock,
+        t(0),
+    )
+    .expect("gegen den eigenen, fremden Tresor belegt sich der Authenticator");
+    assert!(foreign.is_fresh_for(ReaderConfirmationPurpose::Unlock, t(0)));
+
+    let refused = ReaderSession::unlock(fixtures::session_vault(), foreign, t(0))
+        .expect_err("eine fremde Bindung eroeffnet keine Sitzung");
+    assert_eq!(refused.code(), "EA-READER-SESSION-CONFIRMATION-VAULT");
+
+    let mut session = unlocked_at(t(0));
+    session.lock();
+    let foreign = ReaderAuthenticatorConfirmation::prove(
+        &foreign_sealed,
+        &fixtures::authenticator(),
+        ReaderConfirmationPurpose::Unlock,
+        t(1),
+    )
+    .expect("belegt");
+    let refused = session
+        .reopen(fixtures::session_vault(), foreign, t(1))
+        .expect_err("eine fremde Bindung eroeffnet auch keine gesperrte Sitzung neu");
+    assert_eq!(refused.code(), "EA-READER-SESSION-CONFIRMATION-VAULT");
+    assert_eq!(session.state_at(t(1)), ReaderSessionState::Locked);
+
+    // Positivkontrolle: derselbe Weg gegen den EIGENEN versiegelten Tresor —
+    // jede Versiegelung zieht einen frischen Tresorschluessel, also muss die
+    // Bindung aus GENAU dem Tresor kommen, der entsperrt wurde.
+    let sealed = fixtures::sealed_vault_with_pinned_anchor();
+    let vault =
+        ea_reader::ReaderVault::unlock(&sealed, &fixtures::authenticator()).expect("oeffnet");
+    let own = ReaderAuthenticatorConfirmation::prove(
+        &sealed,
+        &fixtures::authenticator(),
+        ReaderConfirmationPurpose::Unlock,
+        t(2),
+    )
+    .expect("belegt");
+    session
+        .reopen(vault, own, t(2))
+        .expect("die Bindung des eigenen Tresors eroeffnet neu");
+    assert_eq!(session.state_at(t(2)), ReaderSessionState::Unlocked);
 }

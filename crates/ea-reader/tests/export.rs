@@ -27,7 +27,7 @@ fn t(offset_ms: i64) -> UnixMillis {
 
 fn unlocked_at(now: UnixMillis) -> ReaderSession {
     ReaderSession::unlock(
-        fixtures::unlocked_vault_with_pinned_anchor(),
+        fixtures::session_vault(),
         fixtures::confirmation(ReaderConfirmationPurpose::Unlock, now),
         now,
     )
@@ -482,4 +482,89 @@ fn the_target_kinds_carry_the_frozen_numbers_and_round_trip_their_labels() {
         format!("{}", ReaderExportError::NoTarget),
         "EA-READER-EXPORT-NO-TARGET"
     );
+}
+
+/// Die Frische der Bestaetigung wird gegen die SITZUNGSZEIT gemessen, nicht
+/// gegen die rohe Uhr des Dienstes: eine Uhr, die hinter die monotone
+/// Untergrenze zurueckfaellt, verlaengert die Minute der Bestaetigung so wenig
+/// wie die Frist der Sitzung. Gemessen im Review — vorher nahm der Dienst
+/// mit einer Uhr bei 10 ms eine Bestaetigung an, die die Sitzung laengst als
+/// abgelaufen sah, und stempelte die alte Zeit in die Auditzeile.
+#[test]
+fn a_service_clock_behind_the_session_floor_does_not_revive_a_stale_confirmation() {
+    let mut session = unlocked_at(t(0));
+    session.note_activity(t(200_000));
+    let stale = fixtures::confirmation(ReaderConfirmationPurpose::SingleExport, t(0));
+    let mut sink = InMemoryReaderAuditSink::new();
+    let mut service =
+        ReaderExportService::open(&mut session, fixtures::audit_identity(), &mut sink, t(10));
+    let mut target = MemoryTarget::new(ReaderExportTargetKindV1::UserChosenFile);
+    let refused = service
+        .export_one(
+            fixtures::decrypted_genesis_record(),
+            Some(&mut target),
+            stale,
+        )
+        .expect_err("die Untergrenze der Sitzung gilt auch fuer die Bestaetigung");
+    assert_eq!(refused.code(), "EA-READER-EXPORT-CONFIRMATION-STALE");
+    assert!(target.received.is_none());
+    assert!(sink.events().is_empty());
+
+    // Und die Auditzeit ist die Sitzungszeit: ein Export mit frischer
+    // Bestaetigung und zurueckgefallener Dienstuhr traegt die Untergrenze.
+    let mut session = unlocked_at(t(0));
+    session.note_activity(t(200_000));
+    let fresh = fixtures::confirmation(ReaderConfirmationPurpose::SingleExport, t(200_000));
+    let mut sink = InMemoryReaderAuditSink::new();
+    let mut service =
+        ReaderExportService::open(&mut session, fixtures::audit_identity(), &mut sink, t(10));
+    let mut target = MemoryTarget::new(ReaderExportTargetKindV1::UserChosenFile);
+    service
+        .export_one(
+            fixtures::decrypted_genesis_record(),
+            Some(&mut target),
+            fresh,
+        )
+        .expect("frisch an der Untergrenze");
+    for event in sink.events() {
+        assert_eq!(
+            decode_local_audit_event(event)
+                .expect("Zeile")
+                .effective_now(),
+            t(200_000)
+        );
+    }
+}
+
+/// Eine Bestaetigung, die gegen einen FREMDEN Tresor belegt wurde, exportiert
+/// nichts — und die Weigerung faellt VOR der Grenze: keine Zeile, kein Byte.
+#[test]
+fn a_confirmation_from_a_foreign_vault_exports_nothing_and_leaves_no_line() {
+    let mut session = unlocked_at(t(0));
+    let foreign = ea_reader::ReaderAuthenticatorConfirmation::prove(
+        &fixtures::sealed_vault_pinning(vec![0xee; 40]),
+        &fixtures::authenticator(),
+        ReaderConfirmationPurpose::SingleExport,
+        t(500),
+    )
+    .expect("gegen den fremden Tresor belegt");
+    let mut sink = InMemoryReaderAuditSink::new();
+    let mut service = ReaderExportService::open(
+        &mut session,
+        fixtures::audit_identity(),
+        &mut sink,
+        t(1_000),
+    );
+    let mut target = MemoryTarget::new(ReaderExportTargetKindV1::UserInitiatedDownload);
+    let refused = service
+        .export_one(
+            fixtures::decrypted_genesis_record(),
+            Some(&mut target),
+            foreign,
+        )
+        .expect_err("eine fremde Bindung exportiert nicht");
+    assert_eq!(refused.code(), "EA-READER-EXPORT-CONFIRMATION-VAULT");
+    assert!(!refused.plaintext_left());
+    assert!(target.received.is_none());
+    assert!(sink.events().is_empty());
 }

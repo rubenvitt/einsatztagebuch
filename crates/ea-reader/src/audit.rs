@@ -66,10 +66,15 @@ pub const READER_AUDIT_LOG_BLOB_KEY_V1: &str = "audit-log";
 ///
 /// Das Protokoll ist ein EINZELNER versiegelter Blob, der bei jedem Anhaengen
 /// neu versiegelt wird; ohne Grenze wuechse er aus angreiferkontrollierten
-/// Bytes unbeschraenkt. Zehntausend Exportzeilen sind fuenftausend Exporte —
-/// weit jenseits dessen, was ein Reader je auditiert, und weit unterhalb
-/// dessen, was `ParserLimits::V1` an Behaeltern traegt.
-pub const MAX_READER_AUDIT_LOG_EVENTS_V1: usize = 10_000;
+/// Bytes unbeschraenkt. Fuenftausend Exportzeilen sind zweieinhalbtausend
+/// Exporte — weit jenseits dessen, was ein Reader je auditiert. Die Zahl
+/// liegt bewusst UNTER `ParserLimits::V1`: dessen `max_total_items` zaehlt
+/// das Array und seine Eintraege zusammen und steht bei 10 000, und ein
+/// Protokoll, das an der Grenze des Dekodierers gebaut wuerde, ginge nach
+/// der letzten zulaessigen Zeile nicht mehr auf. GEMESSEN: mit 10 000 fiel
+/// `a_log_one_line_over_the_limit_is_refused_and_one_at_the_limit_is_not`
+/// bereits an der Grenze selbst.
+pub const MAX_READER_AUDIT_LOG_EVENTS_V1: usize = 5_000;
 
 /// Der Fehlschlag des Auditschreibers.
 #[derive(Clone, Eq, PartialEq)]
@@ -379,9 +384,7 @@ impl ReaderAuditLogStore {
         signed_event: &[u8],
     ) -> Result<(), ReaderAuditError> {
         let mut events = self.events(store)?;
-        if events.len() >= MAX_READER_AUDIT_LOG_EVENTS_V1 {
-            return Err(ReaderAuditError::LogFull);
-        }
+        ensure_room_for_one_more(&events)?;
         events.push(signed_event.to_vec());
         let key = audit_log_key()?;
         let mut nonce = [0_u8; AEAD_NONCE_SIZE];
@@ -432,6 +435,16 @@ impl fmt::Debug for ReaderAuditLogSink<'_> {
     }
 }
 
+/// Die Obergrenze VOR dem Anhaengen: ein volles Protokoll nimmt keine Zeile
+/// mehr an, statt eines zu schreiben, das beim naechsten Lesen nicht mehr
+/// aufgeht.
+fn ensure_room_for_one_more(events: &[Vec<u8>]) -> Result<(), ReaderAuditError> {
+    if events.len() >= MAX_READER_AUDIT_LOG_EVENTS_V1 {
+        return Err(ReaderAuditError::LogFull);
+    }
+    Ok(())
+}
+
 /// Die Adresse des Protokolls.
 fn audit_log_key() -> Result<ReaderBlobKey, ReaderAuditError> {
     Ok(ReaderBlobKey::new(READER_AUDIT_LOG_BLOB_KEY_V1)?)
@@ -473,4 +486,63 @@ fn decode_audit_log(bytes: &[u8]) -> Result<Vec<Vec<u8>>, ReaderAuditError> {
         return Err(ReaderVaultError::Contents.into());
     }
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_READER_AUDIT_LOG_EVENTS_V1, ReaderAuditError, decode_audit_log, encode_audit_log,
+        ensure_room_for_one_more,
+    };
+    use crate::vault::ReaderVaultError;
+
+    /// Die Obergrenze ist eine WEIGERUNG des Dekodierers und keine Zahl im
+    /// Kommentar: ein Protokoll mit einer Zeile mehr, als die Grenze zulaesst,
+    /// geht nicht auf — gemessen an den Bytes, die `encode_audit_log` selbst
+    /// erzeugt, damit die Grenze nicht am Kodierer vorbeiwaechst.
+    #[test]
+    fn a_log_one_line_over_the_limit_is_refused_and_one_at_the_limit_is_not() {
+        let at_limit = vec![Vec::new(); MAX_READER_AUDIT_LOG_EVENTS_V1];
+        let encoded = encode_audit_log(&at_limit);
+        assert_eq!(
+            encoded
+                .with_exposed(decode_audit_log)
+                .expect("die Grenze selbst ist zulaessig")
+                .len(),
+            MAX_READER_AUDIT_LOG_EVENTS_V1
+        );
+
+        let over = vec![Vec::new(); MAX_READER_AUDIT_LOG_EVENTS_V1 + 1];
+        let refused = encode_audit_log(&over)
+            .with_exposed(decode_audit_log)
+            .expect_err("eine Zeile ueber der Grenze geht nicht auf");
+        assert_eq!(refused, ReaderAuditError::Vault(ReaderVaultError::Contents));
+    }
+
+    /// Das Anhaengen weist VOR dem Schreiben ab: ein Protokoll an der Grenze
+    /// nimmt keine Zeile mehr, eines darunter genau noch eine.
+    #[test]
+    fn a_full_log_takes_no_further_line_and_one_below_the_limit_takes_exactly_one() {
+        let below = vec![Vec::new(); MAX_READER_AUDIT_LOG_EVENTS_V1 - 1];
+        assert!(ensure_room_for_one_more(&below).is_ok());
+        let full = vec![Vec::new(); MAX_READER_AUDIT_LOG_EVENTS_V1];
+        assert_eq!(
+            ensure_room_for_one_more(&full).expect_err("voll"),
+            ReaderAuditError::LogFull
+        );
+    }
+
+    /// Nachgestellte Bytes hinter dem Array sind eine verfehlte Form und keine
+    /// stille Toleranz.
+    #[test]
+    fn trailing_bytes_behind_the_log_are_refused() {
+        let mut bytes = Vec::new();
+        encode_audit_log(&[b"zeile".to_vec()]).with_exposed(|exact| bytes.extend_from_slice(exact));
+        assert!(decode_audit_log(&bytes).is_ok());
+        bytes.push(0x00);
+        assert_eq!(
+            decode_audit_log(&bytes).expect_err("nachgestellte Bytes"),
+            ReaderAuditError::Vault(ReaderVaultError::Contents)
+        );
+    }
 }

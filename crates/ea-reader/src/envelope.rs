@@ -33,16 +33,17 @@
 //! `a_blob_moved_to_a_foreign_address_refuses` in
 //! `crates/ea-reader/tests/cache_canaries.rs` das Vertauschen zweier Blobs.
 //!
-//! # Sieben abgeleitete Schluessel, EIN Ort
+//! # Acht abgeleitete Schluessel, EIN Ort
 //!
 //! Aus dem Tresorschluessel entstehen der Cacheschluessel, der Schluessel des
 //! Eintragszustands, der des Trust-Standes, der des bestaetigten Sync-Cursors,
 //! der Indexschluessel und — seit der Aufgabe „Sitzungssperre, Zeroize,
 //! authenticator-bestätigter Einzelexport und signiertes lokales Audit" — der
-//! des signierten Auditprotokolls; aus der PRF-Ausgabe entsteht der
-//! Wrapping-Schluessel. Alle sieben gehen durch [`derive_key`], und die sieben
+//! des signierten Auditprotokolls und die Tresorbindung der
+//! Authenticator-Bestaetigung; aus der PRF-Ausgabe entsteht der
+//! Wrapping-Schluessel. Alle acht gehen durch [`derive_key`], und die acht
 //! Info-Zeichenketten stehen nebeneinander in diesem Modul. Waeren sie verteilt,
-//! haette eine Schluesselrotation sieben Orte statt einem, und zwei Kontexte
+//! haette eine Schluesselrotation acht Orte statt einem, und zwei Kontexte
 //! koennten unbemerkt gleich werden — was zwei getrennte Speicher zu einem
 //! machte.
 //!
@@ -101,7 +102,22 @@ const VAULT_SYNC_CURSOR_INFO_V1: &[u8] = b"ea-reader-sync-cursor-v1";
 /// Bedienerbindung, und was OPFS erreicht, ist auch hier Chiffrat.
 const VAULT_AUDIT_LOG_INFO_V1: &[u8] = b"ea-reader-audit-log-v1";
 
-/// Der Ableitungskontext des Indexblobs. Er entsteht HIER, damit alle sieben
+/// Der Ableitungskontext der Tresorbindung einer Authenticator-Bestaetigung.
+///
+/// Eine Bestaetigung belegt, dass eine PRF-Ausgabe das Envelope EINES
+/// versiegelten Tresors oeffnet. Damit sie nur DIESEN Tresor eroeffnet oder
+/// exportiert — und nicht eine Sitzung ueber einem anderen, der zufaellig
+/// oder absichtlich dieselbe `credentialId` traegt —, traegt sie
+/// `HKDF-SHA-256(vault_key, info = VAULT_CONFIRMATION_INFO_V1)` als Bindung,
+/// und `UnlockedVault::confirmation_binding` rechnet denselben Wert aus dem
+/// Tresorschluessel der Sitzung. Der Wert verraet den Tresorschluessel nicht;
+/// wer ihn faelschen will, braucht den Schluessel, und der verlaesst den
+/// entsperrten Tresor nie. Das Review dieser Aufgabe hat die Luecke gemessen:
+/// ohne Bindung eroeffnete eine gegen einen SELBST versiegelten Tresor
+/// belegte Bestaetigung jede Sitzung mit derselben Kennung.
+const VAULT_CONFIRMATION_INFO_V1: &[u8] = b"ea-reader-confirmation-v1";
+
+/// Der Ableitungskontext des Indexblobs. Er entsteht HIER, damit alle acht
 /// abgeleiteten Schluessel EINEN Ort haben.
 ///
 /// OEFFENTLICH, anders als die Kontexte von Cache und Zustandsspeicher: die
@@ -370,6 +386,13 @@ pub(crate) fn derive_audit_log_key_v1(
     vault_key: &SecretBytes<CEK_SIZE>,
 ) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
     derive_key(vault_key, VAULT_AUDIT_LOG_INFO_V1)
+}
+
+/// Die Tresorbindung einer Authenticator-Bestaetigung.
+pub(crate) fn derive_confirmation_binding_v1(
+    vault_key: &SecretBytes<CEK_SIZE>,
+) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+    derive_key(vault_key, VAULT_CONFIRMATION_INFO_V1)
 }
 
 /// Der Indexschluessel.

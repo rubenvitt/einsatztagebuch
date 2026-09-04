@@ -178,6 +178,35 @@ pub fn authenticator_with_a_foreign_prf_output() -> AuthenticatorPrfV1 {
     )
 }
 
+/// Der EINE versiegelte Tresor der Sitzungs- und Exportzeugen.
+///
+/// GENAU EINMAL versiegelt und danach geteilt, und das ist seit dem Review
+/// tragend: `ReaderVault::seal` zieht je Aufruf einen frischen
+/// Tresorschluessel, und eine Authenticator-Bestaetigung traegt die Bindung
+/// aus GENAU dem Tresor, gegen den sie belegt wurde. Eine Sitzung ueber
+/// [`session_vault`] nimmt deshalb nur Bestaetigungen aus [`confirmation`] an
+/// — beide kommen von hier —, und ein Tresor aus [`sealed_vault_pinning`]
+/// daneben ist der FREMDE.
+static SESSION_SEALED_VAULT_V1: OnceLock<SealedVaultV1> = OnceLock::new();
+
+/// Der geteilte versiegelte Tresor, siehe oben.
+#[must_use]
+pub fn session_sealed_vault() -> &'static SealedVaultV1 {
+    SESSION_SEALED_VAULT_V1.get_or_init(sealed_vault_with_pinned_anchor)
+}
+
+/// Der entsperrte Tresor DIESES geteilten versiegelten Tresors — der einzige,
+/// zu dem [`confirmation`] passt.
+///
+/// # Panics
+///
+/// Wenn das Entsperren scheitert.
+#[must_use]
+pub fn session_vault() -> UnlockedVault {
+    ReaderVault::unlock(session_sealed_vault(), &authenticator())
+        .expect("der eigene Authenticator oeffnet den geteilten Tresor")
+}
+
 /// Die pseudonyme Bedienerbindung, die eine Bestaetigung dieses Entsperrwegs
 /// traegt: SHA-256 ueber die `credentialId` — nachgerechnet, nicht aus dem
 /// Typ gelesen, damit der Zeuge die Ableitung selbst festhaelt.
@@ -189,7 +218,8 @@ pub fn credential_id_hash() -> Hash32 {
 }
 
 /// Eine FRISCHE Authenticator-Bestaetigung ueber den echten Nachweispfad:
-/// gegen den versiegelten Tresor, mit dem einen Entsperrweg dieser Kulisse.
+/// gegen den GETEILTEN versiegelten Tresor, mit dem einen Entsperrweg dieser
+/// Kulisse — und damit gebunden an [`session_vault`].
 ///
 /// # Panics
 ///
@@ -199,13 +229,8 @@ pub fn confirmation(
     purpose: ReaderConfirmationPurpose,
     now: UnixMillis,
 ) -> ReaderAuthenticatorConfirmation {
-    ReaderAuthenticatorConfirmation::prove(
-        &sealed_vault_with_pinned_anchor(),
-        &authenticator(),
-        purpose,
-        now,
-    )
-    .expect("der eigene Authenticator belegt sich gegen den eigenen Tresor")
+    ReaderAuthenticatorConfirmation::prove(session_sealed_vault(), &authenticator(), purpose, now)
+        .expect("der eigene Authenticator belegt sich gegen den eigenen Tresor")
 }
 
 /// Die drei Identitaetsfelder der Auditzeile, wie ein Reader-Zertifikat sie

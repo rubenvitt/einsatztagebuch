@@ -26,8 +26,10 @@
 //!
 //! # Die Reihenfolge im Inneren ist die Zusage
 //!
-//! Zweck und Frische der Bestaetigung pruefen, das Ziel als gewaehlt und frei
-//! pruefen, die Sitzung als offen pruefen, dann die Auditzeile mit
+//! Zweck und Frische der Bestaetigung pruefen — gegen die SITZUNGSZEIT, also
+//! die monotone Untergrenze der Sitzung —, das Ziel als gewaehlt und frei
+//! pruefen, die Sitzung als offen und die Bestaetigung als zu ihrem Tresor
+//! gehoerig pruefen, dann die Auditzeile mit
 //! `LocalAuditOutcomeV1::Accepted` schreiben — sie steht an der
 //! UNWIDERRUFLICHEN Grenze, unmittelbar bevor Klartext den WASM-Speicher
 //! verlaesst —, dann die Bytes an das Ziel geben, dann `Completed` oder
@@ -149,6 +151,9 @@ pub enum ReaderExportError {
     ConfirmationStale,
     /// Die Bestaetigung traegt einen anderen Zweck als den Einzelexport.
     ConfirmationPurpose,
+    /// Die Bestaetigung wurde gegen einen anderen Tresor belegt als den der
+    /// Sitzung.
+    ConfirmationVault,
     /// Die Sitzung ist gesperrt; kein Tresor, keine Auditsignatur, kein
     /// Export.
     SessionLocked,
@@ -173,6 +178,7 @@ impl ReaderExportError {
             Self::TargetOccupied => "EA-READER-EXPORT-TARGET-OCCUPIED",
             Self::ConfirmationStale => "EA-READER-EXPORT-CONFIRMATION-STALE",
             Self::ConfirmationPurpose => "EA-READER-EXPORT-CONFIRMATION-PURPOSE",
+            Self::ConfirmationVault => "EA-READER-EXPORT-CONFIRMATION-VAULT",
             Self::SessionLocked => "EA-READER-EXPORT-SESSION-LOCKED",
             Self::AuditBeforeWrite(_) => "EA-READER-EXPORT-AUDIT-BEFORE-WRITE",
             Self::TargetWrite => "EA-READER-EXPORT-TARGET-WRITE",
@@ -306,7 +312,9 @@ impl<'a> ReaderExportService<'a> {
     /// `EA-READER-EXPORT-CONFIRMATION-PURPOSE`,
     /// `EA-READER-EXPORT-CONFIRMATION-STALE`, `EA-READER-EXPORT-NO-TARGET`,
     /// `EA-READER-EXPORT-TARGET-OCCUPIED` — dazu
-    /// `EA-READER-EXPORT-SESSION-LOCKED` und die drei Lagen der Grenze:
+    /// `EA-READER-EXPORT-SESSION-LOCKED`, `EA-READER-EXPORT-CONFIRMATION-VAULT`
+    /// fuer eine Bestaetigung, die gegen einen anderen Tresor belegt wurde,
+    /// und die drei Lagen der Grenze:
     /// `EA-READER-EXPORT-AUDIT-BEFORE-WRITE` (nichts ist draussen),
     /// `EA-READER-EXPORT-TARGET-WRITE` (das Ziel hat abgewiesen, die
     /// `Failed`-Zeile steht) und `EA-READER-EXPORT-AUDIT-AFTER-WRITE` (die
@@ -317,7 +325,10 @@ impl<'a> ReaderExportService<'a> {
         target: Option<&mut dyn ReaderExportTarget>,
         confirmation: ReaderAuthenticatorConfirmation,
     ) -> Result<ReaderExportReport, ReaderExportError> {
-        let now = self.effective_now;
+        // Die SITZUNGSZEIT und nicht die rohe Uhr des Dienstes: eine Uhr, die
+        // hinter die monotone Untergrenze zurueckfaellt, darf die Frist der
+        // Bestaetigung so wenig verlaengern wie die der Sitzung.
+        let now = self.session.observed_now(self.effective_now);
         confirmation
             .check(ReaderConfirmationPurpose::SingleExport, now)
             .map_err(|error| match error {
@@ -333,6 +344,9 @@ impl<'a> ReaderExportService<'a> {
             .session
             .vault(now)
             .ok_or(ReaderExportError::SessionLocked)?;
+        confirmation
+            .check_vault(vault)
+            .map_err(|_| ReaderExportError::ConfirmationVault)?;
         let mut writer =
             ReaderAuditWriter::open(vault, self.identity, operator_binding_hash, &mut *self.sink);
         let entry_hash = record.entry_hash();

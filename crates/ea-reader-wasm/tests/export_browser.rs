@@ -54,8 +54,15 @@ fn t(offset_ms: i64) -> f64 {
     (fixtures::EFFECTIVE_NOW.get() + offset_ms) as f64
 }
 
+/// Die Bytes des GETEILTEN versiegelten Tresors der Kulisse.
+///
+/// Geteilt und nicht je Aufruf frisch versiegelt: seit dem Review traegt eine
+/// Bestaetigung die Bindung aus dem Tresorschluessel, gegen den sie belegt
+/// wurde, und `readerExportOne` weist eine Bestaetigung gegen einen ANDEREN
+/// Tresor als den der Sitzung mit `EA-READER-EXPORT-CONFIRMATION-VAULT` ab —
+/// genau das, was ein zweiter `seal`-Aufruf hier erzeugte.
 fn sealed_bytes() -> Vec<u8> {
-    fixtures::sealed_vault_with_pinned_anchor().to_deterministic_cbor()
+    fixtures::session_sealed_vault().to_deterministic_cbor()
 }
 
 /// Eine Senke, die den Klartext festhaelt und `true` zurueckgibt.

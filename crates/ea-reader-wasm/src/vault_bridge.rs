@@ -105,8 +105,11 @@ thread_local! {
     /// nackter [`UnlockedVault`]: JEDER Zugriff auf den Tresor laeuft ueber
     /// `ReaderSession::vault(now)`, das die Frist nachrechnet und sperrt,
     /// bevor es etwas herausgibt. Eine gesperrte Sitzung bleibt in der
-    /// Tabelle — mit ihrer Kennung, ohne Tresor —, damit `reopen` sie mit
-    /// einer frischen Bestaetigung wieder eroeffnen kann.
+    /// Tabelle — mit ihrer Kennung, ohne Tresor —, damit `readerSessionStateAt`
+    /// die Sperre ausweisen kann statt eine unbekannte Kennung zu melden.
+    /// `ReaderSession::reopen` ist der Weg des Kerns und in `session_lock.rs`
+    /// bezeugt; `apps/web` eroeffnet nach einer Sperre eine NEUE Kennung ueber
+    /// `readerVaultUnlock` und schliesst die alte ueber `readerSessionLock`.
     static VAULT_SESSIONS: RefCell<BTreeMap<u32, ReaderSession>> =
         const { RefCell::new(BTreeMap::new()) };
     /// Die noch nicht versiegelten Tresorinhalte des Enrollments.

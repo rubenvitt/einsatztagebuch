@@ -5258,6 +5258,45 @@ bezeugt, mit Kulissenidentitaet ueber die echten Ausfuhren. Die Ledgerzeilen
 `FR-104`, `FR-105`, `FR-106` und `WR-082` bleiben auf `planned`: der Plan
 weist die Statusbewegung der Aufgabe des Stufe-4-Gates zu.
 
+#### Drei Vertragspunkte, die erst das Review festgelegt hat
+
+Zwei Linsen liefen ueber den Branchdiff — Korrektheit des Kerns mit
+Mutationsproben, Klartextdisziplin und Zeugenguete der Web-Seite —, dazu
+adversariale Sonden gegen die Sitzung. Was daraus als VERTRAG haengenbleibt:
+
+**14. Die Bestaetigung gehoert zu GENAU EINEM Tresor.** Die Sonde war ein
+selbst versiegelter Tresor mit derselben `credentialId`: wer ihn baut, kennt
+seine PRF-Ausgabe, belegt sich gegen ihn — und eroeffnete damit die Sitzung
+ueber dem ECHTEN Tresor neu. Seitdem traegt `ReaderAuthenticatorConfirmation`
+die Tresorbindung `HKDF-SHA-256(vault_key, ea-reader-confirmation-v1)`, der
+ACHTE Ableitungskontext in `envelope.rs`; `SealedVaultV1::prove_authenticator`
+leitet sie aus dem ausgepackten Tresorschluessel ab, `UnlockedVault::confirmation_binding`
+rechnet sie aus der Sitzung, und `unlock`, `reopen` und `export_one`
+vergleichen konstantzeitig. Zwei Codes: `EA-READER-SESSION-CONFIRMATION-VAULT`,
+`EA-READER-EXPORT-CONFIRMATION-VAULT`. Folge fuer die Kulisse: die Sitzungs-
+und Exportzeugen teilen EINEN versiegelten Tresor (`session_sealed_vault`),
+weil `ReaderVault::seal` je Aufruf einen frischen Tresorschluessel zieht.
+
+**15. Der Export misst Frische und Auditzeit gegen die SITZUNGSZEIT.** Die
+Sonde: ein Dienst mit einer Uhr bei 10 ms ueber einer Sitzung, deren
+Untergrenze bei 200 s stand, nahm eine bei 0 ausgestellte Bestaetigung an
+und stempelte die alte Zeit in die Auditzeile. `export_one` holt seine Zeit
+seither ueber `ReaderSession::observed_now`, also die monotone Untergrenze.
+
+**16. Die Untergrenze hat eine BENANNTE Kehrseite, und sie ist beschraenkt.**
+Springt die Uhr einmal vor und danach ehrlich zurueck, steht die Sitzungszeit
+bis zum Aufholen still; eine Eingabe in dieser Zeit wird an der Untergrenze
+verbucht, und die Sitzung lebt hoechstens um den Betrag des Sprungs laenger —
+ein Sprung ueber die Frist sperrt sofort. Der Kern kann diese Uhr von einer
+zurueckspringenden nicht unterscheiden und waehlt die beschraenkte Seite
+(ohne Untergrenze setzte jeder Rueckwaertswert die Frist unbeschraenkt oft
+zurueck). `a_forward_clock_glitch_extends_at_most_by_its_own_size` misst die
+Grenze. Zwei Mutanten ueberlebten die erste Fassung — die Untergrenze ohne
+Wirkung und die Protokollobergrenze ohne Pruefung —, beide haben jetzt Zeugen;
+die Obergrenze steht bei 5 000, weil `ParserLimits::V1` Array und Eintraege
+zusammen bei 10 000 deckelt und 10 000 Zeilen schon an der Grenze selbst
+nicht mehr aufgingen.
+
 Was der Plan RICHTIG hatte und unveraendert steht: der Fuenfminutenwert wird
 gegen `ea_operator::MAX_INACTIVITY_MS` ueber eine DEV-Kante gemessen; die
 verkuerzte Frist ist 30 000 ms; die Sperre faellt in `state_at` und an keinem
@@ -5275,7 +5314,7 @@ Bestaetigung; die vier Abbruchpunkte mit Rust-Zeugen.
 
 Was aus der frueheren Fassung UNVERAENDERT bleibt: es existiert keine Methode, die „alle Datensaetze" oder ein Suchergebnis nimmt; ein Einzelexport verlangt bewusste Zielwahl; der signierte Auditabzug traegt pseudonymen Bedienerbindungshash, Entry-Hash, Zielart (nicht den Pfad), `EffectiveNow`, Aktionscode und Ausgang und niemals Nutzlast oder Klartextdateinamen. Ersetzt werden genau zwei Dinge, beide von der Spezifikation erzwungen: „OS-Lock beendet die Sitzung" faellt ersatzlos weg — §11.2 fuehrt das als dokumentierte SOLL-Abweichung mit sicherheitstechnischer Begruendung, weil der Browser keine Entsprechung hat, und §6.5 setzt an seine Stelle Zeroize beim Sperren, den Fuenfminutenvorgabewert, die VERKUERZTE Frist im Hintergrundtab und die erneute Authenticator-Bestaetigung nach jeder Sperrung —, und die native Re-Authentisierung des Einzelexports wird nach §8.2 durch eine Authenticator-Bestaetigung ersetzt.
 
-- [ ] **Step 1: Write lock, zeroize, export-authorization and redaction tests**
+- [x] **Step 1: Write lock, zeroize, export-authorization and redaction tests**
 
 ```rust
 // crates/ea-reader/tests/session_lock.rs
@@ -5455,13 +5494,13 @@ fn no_cleartext_and_no_filename_reaches_the_signed_audit_bytes() {
 }
 ```
 
-- [ ] **Step 2: Run session, export and redaction tests and verify the controls are absent**
+- [x] **Step 2: Run session, export and redaction tests and verify the controls are absent**
 
 Run: `cargo test --locked -p ea-reader --test session_lock --test export --test audit_redaction && cargo test --locked -p ea-reader --doc`
 
 Expected: FAIL. `ReaderSession`, `ReaderExportService` und `ReaderAuditWriter` existieren nicht; die Sitzungssteuerung des Desktops ist kein Ersatz, weil `ea-operator` als Bibliothekskante ausgeschlossen ist und `ea-audit` durch den Wirtschluesselspeicher signiert. Der `--doc`-Lauf faellt zusaetzlich, weil ein `compile_fail`-Doctest an einem nicht existierenden Typ nicht als bestanden zaehlt, sondern als fehlendes Ziel.
 
-- [ ] **Step 3: Implement lock-on-inactivity, authenticator-confirmed single export and the signed Reader audit**
+- [x] **Step 3: Implement lock-on-inactivity, authenticator-confirmed single export and the signed Reader audit**
 
 ```rust
 // crates/ea-reader/src/session.rs
@@ -5539,7 +5578,7 @@ Die Verbote aus WR-082 stehen als Code und nicht als Vorsatz: `apps/web/src/feat
 
 Der Abschnitt `session-and-export` in `docs/traceability/stage-4-fault-points.json` wird ERGAENZT, nicht neu angelegt — die Datei entsteht im Task „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes". Er traegt vier Punkte in der Form von `docs/traceability/stage-3-fault-points.json` (`name`, `brackets`, `witness`): die Sperre waehrend der offenen Zielwahl, der Wechsel in den Hintergrundtab zwischen `Accepted` und dem Schreiben, die abgebrochene Authenticator-Bestaetigung, und der Fehlschlag der zweiten Auditzeile nach bereits geschriebenen Bytes. Jeder der vier `witness`-Eintraege benennt eine RUST-Testfunktion aus `crates/ea-reader/tests/` und KEINE `.spec.ts`, aus dem Grund, den die Aufgabe „Datei-Modus: Einzeldatei-Bündel, Verzeichnis-Handle, kein Cursor, `nicht server-bestätigt`" ausschreibt: `witness_resolves` loest nur `fn`-Definitionen mit `#[test]` oder `#[tokio::test]` auf. Die ersten zwei Punkte lesen sich wie Playwright-Szenarien und sind es auch — der Browserlauf `lock-and-export.spec.ts` belegt sie ZUSAETZLICH —, aber die Spalte `witness` traegt in beiden Faellen den Rust-Zeugen ueber `ReaderSession::state_at`. Der letzte ist der unangenehme und deshalb der wichtigste: die Bytes sind draussen, also MUSS die Zeile `Failed` entstehen und darf nicht verschluckt werden.
 
-- [ ] **Step 4: Run the lock, export, redaction and surface witnesses**
+- [x] **Step 4: Run the lock, export, redaction and surface witnesses**
 
 Run:
 
@@ -5571,7 +5610,7 @@ in der `lock-and-export.spec.ts` seine Engine bezieht.
 
 Expected: PASS. Der Fuenfminutenwert ist gegen `ea_operator::MAX_INACTIVITY_MS` gemessen und nicht abgeschrieben, die verkuerzte Frist greift ohne Timer, ein Ruecksprung der Uhr verlaengert nichts, und die zwoelf eingefrorenen Aktionskodierer sind unveraendert gruen. Die adversarialen Faelle, die JEDER rot werden muss: (1) `READER_BACKGROUND_INACTIVITY_MS_V1` auf `READER_INACTIVITY_MS_V1` heben — `a_backgrounded_tab_locks_on_the_shortened_deadline_without_any_timer` faellt, und die SOLL-Abweichung aus §11.2 waere unbelegt; (2) die Sperrpruefung aus `state_at` in einen Timer verlegen — der Playwright-Lauf `lock-and-export.spec.ts` faellt, weil er den Tab tatsaechlich in den Hintergrund schickt, waehrend der reine Rusttest gruen bliebe; genau deshalb steht der zweite Zeuge im Browser; (3) `export_one` eine `Vec<VerifiedDecryptedRecord>`-Ueberladung danebenstellen — der `compile_fail`-Doctest wird bestanden statt zu scheitern und meldet das; (4) den Zielpfad in `ExportContextV1` schmuggeln wollen — es gibt keine Position dafuer, und `encode_local_audit_core` weist ueber `validate_unsigned_protocol_core` ab, bevor eine Zeile entsteht; (5) die `Accepted`-Zeile hinter das Schreiben verlegen — `an_export_records_accepted_at_the_boundary_and_then_completed_or_failed` faellt an der Reihenfolge, und der Abbruchpunkt „Bytes draussen, Audit fehlt" waere unbezeugt; (6) `ReaderSession` einen `ValidatedPayload` in einem Feld halten lassen und ihn herausgeben — der `compile_fail`-Doctest an `the_session_holds_no_schema_payload_beyond_a_single_decryption` wird bestanden statt zu scheitern, und die Schranke der weitergereichten Restfrage waere still gefallen.
 
-- [ ] **Step 5: Commit the Reader session and export controls**
+- [x] **Step 5: Commit the Reader session and export controls**
 
 ```bash
 git add crates/ea-reader crates/ea-reader-wasm crates/ea-ui-contracts apps/web docs/traceability/stage-4-fault-points.json Cargo.lock

@@ -1,7 +1,10 @@
-//! Die Bruecke der Sitzungssperre: DREI Ausfuhren, und keine entscheidet.
+//! Die Bruecke der Sitzungssperre: VIER Ausfuhren, und keine entscheidet.
 //!
 //! `apps/web` haengt `visibilitychange`, `pointerdown` und `keydown` an diese
-//! Ausfuhren und reicht dabei die Uhr der Seite als Wert herein. Ob eine
+//! Ausfuhren und reicht dabei die Uhr der Seite als Wert herein; die vierte,
+//! `readerSessionLock`, sperrt eine Sitzung SOFORT — der Weg, auf dem der
+//! Hauptthread eine Kennung schliesst, die er nicht mehr haelt, statt sie mit
+//! ihrem Schluesselmaterial im Worker liegen zu lassen. Ob eine
 //! Frist erreicht ist, rechnet `ea_reader::ReaderSession::state_at` — bei
 //! JEDEM Aufruf, ohne Timer. Ein `setTimeout` im Wirt darf zusaetzlich
 //! sperren; die Zusage steht in Rust, weil Hintergrundtabs gedrosselt und auf
@@ -108,4 +111,21 @@ pub fn reader_session_state_at(session: u32, now_ms: f64) -> Result<String, JsVa
         session_view_json(locked, &hashes)
     })
     .ok_or_else(|| JsValue::from_str(SESSION_UNKNOWN_CODE))
+}
+
+/// Sperrt eine Sitzung SOFORT: Tresor und offene Datensaetze fallen.
+///
+/// Fuer den Hauptthread, wenn er eine Kennung aufgibt — etwa weil eine
+/// frische Bestaetigung eine neue eroeffnet hat. Eine Sitzung, an die
+/// niemand mehr Sichtbarkeit und Eingaben meldet, liefe sonst in die volle
+/// Fuenfminutenfrist statt in die verkuerzte des Hintergrundtabs. Ein
+/// zweiter Aufruf auf eine gesperrte Sitzung ist wirkungslos und kein Fehler.
+///
+/// # Errors
+/// `EA-READER-SESSION-UNKNOWN` fuer eine Kennung, die es nicht gibt.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerSessionLock")]
+pub fn reader_session_lock(session: u32) -> Result<(), JsValue> {
+    with_session(session, ea_reader::ReaderSession::lock)
+        .ok_or_else(|| JsValue::from_str(SESSION_UNKNOWN_CODE))
 }
