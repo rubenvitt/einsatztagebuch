@@ -1,5 +1,5 @@
 import { render, screen, within } from '@testing-library/react'
-import { expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 
 import type { ChainIntegrityNodeView } from '../../bridge/generated-contracts'
 import { ChainIntegrityRail } from './ChainIntegrityRail'
@@ -110,4 +110,21 @@ it('renders fingerprint entries as a definition list of label and value', () => 
   expect(values).toEqual(['0123456789abcdef', '12'])
   // Ein Fingerabdruck ist kein Zustand: der Block traegt keinen Statustraeger.
   expect(screen.queryAllByRole('status')).toHaveLength(0)
+})
+
+// Die Leiste nutzt dieselbe Ant-Flaeche wie jede andere Oberflaeche hier:
+// `orientation`, nicht das veraltete `direction`. antd 6 meldet die veraltete
+// Form ueber `console.error` — und im Testlauf jedes Mal, weil `warning.js`
+// unter `NODE_ENV=test` seine Merkliste nach jeder Meldung leert.
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+it('renders the rail without a deprecated-prop warning from antd', () => {
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  render(<ChainIntegrityRail nodes={[{ label: 'Manifestformat', verified: true, detail: null }]} />)
+  const deprecations = error.mock.calls
+    .map((call) => call.map(String).join(' '))
+    .filter((line) => /deprecated/.test(line))
+  expect(deprecations).toEqual([])
 })

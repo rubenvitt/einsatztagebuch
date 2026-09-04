@@ -33,17 +33,21 @@
 #[path = "../../ea-reader/tests/amendment_fixtures/mod.rs"]
 mod amendment_fixtures;
 
+use ea_crypto::SecretBytes;
 use ea_reader::{
-    EntryHash, GATE_ORDER_V1, OpenedArchiveV1, ReaderFileMode, ReaderQueryV1, RecordingObserver,
-    ServerConfirmationV1, UnixMillis, UnlockedVault, VerificationStatus,
+    AuthenticatorPrfV1, EntryHash, GATE_ORDER_V1, OpenedArchiveV1, ReaderFileMode, ReaderQueryV1,
+    ReaderVault, RecordingObserver, ServerConfirmationV1, UnixMillis, UnlockedVault,
+    VaultContentsV1, VerificationStatus,
 };
 use ea_reader_wasm::view::{
     self, EA_READER_VIEW_NO_THREAD, EA_READER_VIEW_UNKNOWN_ENTRY, ReaderStand,
 };
+use ea_verify::DecryptionErrorV1;
 use serde_json::Value;
 
 use amendment_fixtures::fixtures as amendments;
 use amendment_fixtures::verify_fixtures::fixtures as verify;
+use amendment_fixtures::verify_fixtures::verify_support;
 use amendment_fixtures::verify_fixtures::verify_support::archive_support::ArchiveFixture;
 
 /// Oeffnet einen Kulissenbestand als EINE Datei und baut den Bestand darueber.
@@ -61,6 +65,50 @@ fn stand_over(fixture: &ArchiveFixture, vault: &UnlockedVault) -> ReaderStand {
     )
     .expect("der Bestand der Kulisse muss oeffnen");
     view::build_stand(opened, vault, verify::EFFECTIVE_NOW, observer.events())
+}
+
+/// Die Folge der zwei Oeffnungsausfuhren in `file_access.rs`, an der reinen
+/// Haelfte nachgestellt: ERST faellt der vorherige Bestand, DANN wird
+/// geoeffnet, und erst ein gelungenes Oeffnen installiert einen neuen.
+///
+/// Der Zeuge darueber misst die Folge, nicht die Ausfuhr — die steht hinter
+/// ihrem `cfg(target_arch = "wasm32")` und ist auf dem Wirt nicht aufrufbar.
+fn open_like_the_exports(bytes: Vec<u8>, vault: &UnlockedVault) -> Result<(), &'static str> {
+    view::close_stand();
+    let mut observer = RecordingObserver::new();
+    let opened =
+        ReaderFileMode::open_bundle_observed(bytes, vault, verify::EFFECTIVE_NOW, &mut observer)
+            .map_err(|error| error.code())?;
+    view::install_stand(view::build_stand(
+        opened,
+        vault,
+        verify::EFFECTIVE_NOW,
+        observer.events(),
+    ));
+    Ok(())
+}
+
+/// Ein Tresor mit dem ZWEITEN, falschen Empfaengergeheimnis ueber demselben
+/// Anker.
+///
+/// Er kann keinen Bestand oeffnen — sein Abdruck trifft keinen Grant —, aber
+/// er kann einem FERTIG klassifizierten Bestand als Entschluesselungstresor
+/// untergeschoben werden. Das ist die eine Lage, in der der Bericht sauber ist
+/// und die HPKE-Oeffnung in `build_stand` trotzdem faellt: Gate
+/// `recipient-grant` hat den Grant getragen, der gekapselte CEK oeffnet sich
+/// nur nicht mit diesem Schluessel.
+fn vault_with_the_other_recipient_secret() -> UnlockedVault {
+    let contents = VaultContentsV1::new(
+        SecretBytes::new(verify_support::other_recipient_secret_bytes()),
+        SecretBytes::new([0x5a; 32]),
+        verify::complete_archive_anchor_bytes().to_vec(),
+        None,
+    );
+    let authenticator = || AuthenticatorPrfV1::new(vec![0x01; 16], SecretBytes::new([0x6b; 32]));
+    let sealed = ReaderVault::seal(contents, &[authenticator()])
+        .expect("der zweite Kulissen-Tresor muss sich versiegeln lassen");
+    ReaderVault::unlock(&sealed, &authenticator())
+        .expect("derselbe Authenticator muss ihn wieder oeffnen")
 }
 
 fn parsed(rendered: &str) -> Value {
@@ -154,6 +202,12 @@ fn a_fully_verified_amendment_stand_lists_every_state_and_threads_the_original()
         original["state"]["sequence"],
         amendments::ORIGINAL_SEQUENCE_V1
     );
+    // Die zweite Dimension aus §17.4 folgt NICHT der ersten: ein
+    // verifizierter Eintrag des Datei-Modus ist nicht server-bestaetigt.
+    assert_eq!(
+        original["state"]["serverConfirmation"],
+        ServerConfirmationV1::NotServerConfirmed.label()
+    );
 
     let thread = view::thread_json(&stand, amendments::original_entry_hash())
         .expect("das Original traegt einen Faden");
@@ -197,6 +251,24 @@ fn a_fully_verified_amendment_stand_lists_every_state_and_threads_the_original()
     assert_eq!(
         view::thread_json(&stand, amendment_a).expect("ein Nachtrag fuehrt zu seinem Faden"),
         thread
+    );
+    // Und derselbe Faden ueber den Hash eines ABGEWIESENEN Kandidaten: er
+    // steht dort unter `rejected`, und ein Pruefproblem, das seinen Faden
+    // nicht wiederfindet, waere von einer Luecke nicht zu unterscheiden.
+    let rejected_hash = verify::entry_hash_at(
+        amendments::amendment_archive(),
+        amendments::FOREIGN_RECORD_ID_SEQUENCE_V1,
+    );
+    assert_eq!(
+        view::thread_json(&stand, rejected_hash)
+            .expect("ein abgewiesener Kandidat fuehrt zu dem Faden, der ihn abwies"),
+        thread
+    );
+    let rejected_entry = parsed(&view::entry_json(&stand, rejected_hash).expect("bekannt"));
+    assert_eq!(
+        rejected_entry["incident"],
+        Value::Null,
+        "ein abgewiesener Kandidat traegt keinen Einsatz"
     );
     // Ein Einsatz OHNE Nachtraege ist ein Faden ohne Nachtraege — der fremde
     // Einsatz auf Sequenz eins. Genesis ist kein Einsatz und traegt keinen.
@@ -264,11 +336,119 @@ fn a_missing_grant_stays_in_entries_with_a_null_incident() {
         entry["state"]["verification"],
         VerificationStatus::MissingGrant.label()
     );
+    // Die Spalte folgt NICHT dem Verifikationsbegriff: Datei-Modus heisst
+    // nicht server-bestaetigt, ganz gleich, was die erste Dimension sagt.
+    assert_eq!(
+        entry["state"]["serverConfirmation"],
+        ServerConfirmationV1::NotServerConfirmed.label()
+    );
     assert_eq!(stand_view["problems"].as_array().map(Vec::len), Some(0));
     // Kein Mangel: der Bestand bleibt vollstaendig verifiziert, und die Leiste
     // traegt alle neun Tore.
     assert_eq!(stand_view["fullyVerified"], true);
     assert_eq!(stand_view["chain"].as_array().map(Vec::len), Some(9));
+}
+
+/// Ein SAUBERER Bericht und ein Zeugenpaar, dessen gekapselter CEK sich nicht
+/// oeffnet: `fullyVerified` ist falsch, die Leiste faellt am Tor
+/// `recipient-grant` mit dem Code, und der Eintrag lebt allein in `problems`.
+///
+/// Die Lage entsteht, wenn die Klassifikation unter dem einen Tresor laeuft
+/// und `build_stand` einen anderen bekommt — Gate `recipient-grant` hat den
+/// Grant getragen, `decrypt_verified` faellt danach mit
+/// `EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED`. GEMESSEN vor dieser Aenderung:
+/// `fullyVerified: true`, neun gruene Knoten und daneben ein `ungueltig` in
+/// `problems` — drei Aussagen, die einander widersprachen.
+#[test]
+fn a_failed_decryption_behind_a_clean_report_lowers_fully_verified_and_the_rail() {
+    let vault = verify::unlocked_vault_with_pinned_anchor();
+    let mut observer = RecordingObserver::new();
+    let opened = ReaderFileMode::open_bundle_observed(
+        verify::exported_bundle_bytes(verify::complete_archive()),
+        &vault,
+        verify::EFFECTIVE_NOW,
+        &mut observer,
+    )
+    .expect("der lueckenlose Bestand muss oeffnen");
+    assert!(
+        opened.report().is_fully_verified(),
+        "Vorbedingung: der Bericht selbst ist sauber"
+    );
+    let entry_hash = verify::entry_hash(verify::complete_archive());
+    let object_hash = hex::encode(
+        opened
+            .classification()
+            .state_of(entry_hash)
+            .expect("der eine Eintrag")
+            .object_hash()
+            .as_bytes(),
+    );
+    let expected_code = DecryptionErrorV1::CekUnwrapFailed.code();
+
+    let stand = view::build_stand(
+        opened,
+        &vault_with_the_other_recipient_secret(),
+        verify::EFFECTIVE_NOW,
+        observer.events(),
+    );
+    let stand_view = parsed(&view::stand_json(&stand));
+    assert_eq!(stand_view["fullyVerified"], false);
+    assert_eq!(
+        stand_view["entries"].as_array().map(Vec::len),
+        Some(0),
+        "der eine Eintrag ist ungueltig und steht nicht in entries"
+    );
+    let problems = stand_view["problems"]
+        .as_array()
+        .expect("problems ist ein Array");
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0]["objectHash"], object_hash);
+    assert_eq!(
+        problems[0]["verification"],
+        VerificationStatus::Invalid.label()
+    );
+    assert_eq!(problems[0]["detailCode"], expected_code);
+
+    let chain = stand_view["chain"].as_array().expect("chain ist ein Array");
+    assert_eq!(
+        chain.len(),
+        GATE_ORDER_V1.len(),
+        "alle neun Tore wurden betreten"
+    );
+    let last = chain.last().expect("neun Knoten");
+    assert_eq!(last["label"], "recipient-grant");
+    assert_eq!(last["verified"], false);
+    assert_eq!(last["detail"], expected_code);
+    for node in &chain[..chain.len() - 1] {
+        assert_eq!(node["verified"], true);
+        assert_eq!(node["detail"], Value::Null);
+    }
+}
+
+/// Ein fehlgeschlagenes Oeffnen laesst KEINEN vorherigen Bestand stehen.
+///
+/// Die Folge der zwei Ausfuhren ist: erst schliessen, dann oeffnen. Ein
+/// Bestand, der ein fehlgeschlagenes Oeffnen ueberlebte, hielte den Klartext
+/// eines ANDEREN Archivs lesbar, waehrend die Oberflaeche einen Fehler zeigt.
+#[test]
+fn a_failed_open_leaves_no_previous_stand_behind() {
+    let vault = verify::unlocked_vault_with_pinned_anchor();
+    view::install_stand(stand_over(verify::complete_archive(), &vault));
+    assert_ne!(view::current_stand_json(), "null");
+
+    let failed = open_like_the_exports(vec![0_u8; 8], &vault);
+    assert!(failed.is_err(), "acht Nullbytes sind kein Bundle");
+    assert_eq!(view::current_stand_json(), "null");
+
+    // Gegenkontrolle: dieselbe Folge mit einem oeffenbaren Bestand
+    // installiert ihn.
+    open_like_the_exports(
+        verify::exported_bundle_bytes(verify::complete_archive()),
+        &vault,
+    )
+    .expect("der lueckenlose Bestand oeffnet");
+    assert_ne!(view::current_stand_json(), "null");
+    view::close_stand();
 }
 
 /// Ein ungueltiges Objekt lebt AUSSCHLIESSLICH in `problems` — mit seinem
@@ -435,7 +615,30 @@ fn the_search_hands_the_filters_to_the_index_and_renders_every_hit() {
     );
     assert_eq!(none, Value::Array(vec![]));
 
+    // Fahrzeug- und Personenfilter ueber den OEFFENTLICHEN Weg der Ausfuhr:
+    // die Kulisse traegt weder Fahrzeuge noch Personal, ein gesetzter Filter
+    // trifft also nichts — und ein Filter, den `query_from` fallen liesse,
+    // traefe alles.
+    for (vehicle, person) in [("RTW", ""), ("", "Ada")] {
+        let filtered = parsed(
+            &view::search_json(&stand, &view::query_from(None, None, "", vehicle, person))
+                .expect("Suche"),
+        );
+        assert_eq!(
+            filtered,
+            Value::Array(vec![]),
+            "vehicle={vehicle:?} person={person:?}"
+        );
+    }
+
     let all = parsed(&view::search_json(&stand, &ReaderQueryV1::default()).expect("Suche"));
+    assert_eq!(
+        all,
+        parsed(
+            &view::search_json(&stand, &view::query_from(None, None, "", "", "")).expect("Suche")
+        ),
+        "fuenf leere Argumente sind die leere Anfrage"
+    );
     let stand_view = parsed(&view::stand_json(&stand));
     let with_incident = stand_view["entries"]
         .as_array()

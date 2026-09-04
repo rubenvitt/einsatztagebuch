@@ -237,6 +237,17 @@ pub fn file_mode_bundle_extension() -> String {
 /// `RecordingObserver`, weil die Integritaetsleiste aus dessen Protokoll
 /// entsteht.
 ///
+/// # Der vorherige Bestand faellt ZUERST
+///
+/// Die erste Anweisung ist `view::close_stand()`, VOR dem Oeffnen und nicht
+/// erst beim Installieren. Ein Oeffnen, das mit einem Code faellt, laesst
+/// damit keinen Bestand zurueck: die Oberflaeche meldete sonst einen Fehler,
+/// waehrend `readerEntryView` weiter den Klartext eines ANDEREN Archivs
+/// herausgaebe (GEMESSEN vor dieser Aenderung: das `?` kehrte vor
+/// `install_stand` zurueck, und der alte Bestand blieb stehen). Der Preis ist,
+/// dass ein Tippfehler in der Sitzungskennung den offenen Bestand schliesst —
+/// fail-closed, und der richtige Preis.
+///
 /// # Errors
 /// `EA-READER-FILE-MODE-BRIDGE-ARGUMENT` fuer eine Sitzungskennung, die kein
 /// entsperrter Tresor ist, und sonst der stabile Code des Befunds:
@@ -250,6 +261,7 @@ pub fn file_mode_open_bundle(
     bytes: Vec<u8>,
     effective_now_ms: i64,
 ) -> Result<String, JsValue> {
+    view::close_stand();
     let stand = with_unlocked_vault(session, move |vault| {
         let effective_now = UnixMillis::new(effective_now_ms);
         let mut observer = RecordingObserver::new();
@@ -325,6 +337,10 @@ pub fn file_mode_directory_unavailable(handle: u32) -> Result<(), JsValue> {
 /// der schon einmal an einem Tresor vorbeigelaufen ist, den es nicht gibt,
 /// wird nicht aufgehoben, sondern neu eingereicht.
 ///
+/// Der vorherige Bestand faellt ZUERST — dieselbe Entscheidung und derselbe
+/// Grund wie bei [`file_mode_open_bundle`]: ein fehlgeschlagenes Oeffnen darf
+/// keinen fremden Klartext lesbar zuruecklassen.
+///
 /// # Errors
 /// Wie [`file_mode_open_bundle`], ohne dessen Containercodes: eine unbekannte
 /// Sitzungs- oder Ordnerkennung ist
@@ -337,6 +353,7 @@ pub fn file_mode_open_directory(
     handle: u32,
     effective_now_ms: i64,
 ) -> Result<String, JsValue> {
+    view::close_stand();
     let source = DIRECTORY_SOURCES
         .with(|table| table.borrow_mut().remove(&handle))
         .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?;

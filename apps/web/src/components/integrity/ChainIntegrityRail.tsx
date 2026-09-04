@@ -28,7 +28,7 @@ export function ChainIntegrityRail({
 }): ReactElement {
   return (
     <section aria-label="Integritätskette">
-      <Space direction="vertical" size="small">
+      <Space orientation="vertical" size="small">
         <Typography.Text strong>Integritätskette</Typography.Text>
         <ol>
           {nodes.map((node) => (

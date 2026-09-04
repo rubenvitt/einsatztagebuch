@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
+import { Tag } from 'antd'
 import { expect, it, vi } from 'vitest'
 
 import type {
@@ -16,6 +17,7 @@ import {
 } from '../../bridge/generated-contracts'
 import type { ReaderBridge } from '../../bridge/reader-bridge'
 import { userEvent } from '../../test-setup'
+import { formatOccurredAt } from './EntryView'
 import { ReaderPage } from './ReaderPage'
 
 // Jeder Statuswortlaut wird aus der GENERIERTEN Kontraktdatei gelesen und
@@ -91,7 +93,7 @@ function stand(overrides: Partial<ReaderStandView> = {}): ReaderStandView {
   }
 }
 
-function technical(): ReaderTechnicalView {
+function technical(overrides: Partial<ReaderTechnicalView> = {}): ReaderTechnicalView {
   return {
     sequence: 7,
     previousEntryHash: hash('e'),
@@ -102,7 +104,20 @@ function technical(): ReaderTechnicalView {
     registryHeadHash: hash('2'),
     serverConfirmation: NOT_SERVER_CONFIRMED,
     evidenceDetailCode: null,
+    ...overrides,
   }
+}
+
+/**
+ * Die Klasse, die antd 6 fuer EINE Farbklasse der Marke wirklich ausgibt —
+ * gemessen und nicht angenommen, damit ein `not.toMatch` unten nicht gruen
+ * laeuft, weil es nach einer Klasse fragt, die es gar nicht gibt.
+ */
+function tagClassFor(color: 'success' | 'error'): string {
+  const { container, unmount } = render(<Tag color={color}>Sonde</Tag>)
+  const className = container.querySelector('.ant-tag')?.className ?? ''
+  unmount()
+  return className
 }
 
 /**
@@ -194,6 +209,8 @@ it('keeps invalid objects in Prüfprobleme and opens none of them as an incident
 it('renders verification and server confirmation as two independent dimensions', async () => {
   render(<ReaderPage bridge={bridgeInFileMode()} />)
   const entry = await screen.findByRole('article', { name: /Einsatz 2026-0007/ })
+  // Der Reiter, in dem der Eintrag steht, ist benannt und nicht nur da.
+  expect(screen.getByRole('tab', { name: 'Einsätze' })).toBeVisible()
   expect(within(entry).getByText(VERIFIED)).toBeVisible()
   expect(within(entry).getByText(NOT_SERVER_CONFIRMED)).toBeVisible()
   for (const defect of [GAP, INVALID]) {
@@ -202,6 +219,11 @@ it('renders verification and server confirmation as two independent dimensions',
   const confirmation = within(entry).getByRole('status', { name: 'Server-Bestätigung' })
   expect(confirmation).toHaveTextContent(NOT_SERVER_CONFIRMED)
   expect(confirmation).toHaveAccessibleDescription(expect.stringContaining('kein Mangel'))
+  // design.md §17.4: „nicht server-bestätigt" ist NIE als Fehler gestaltet.
+  // Erst die Sonde — antd 6 gibt fuer `color="error"` wirklich `ant-tag-error`
+  // aus —, dann die Zusicherung gegen genau diese Klasse.
+  expect(tagClassFor('error')).toMatch(/\bant-tag-error\b/)
+  expect(confirmation.className).not.toMatch(/\bant-tag-error\b/)
   // Der Verifikationstraeger ist ein ANDERES Element und traegt den anderen Wert.
   const verification = within(entry).getByRole('status', { name: 'Verifikation' })
   expect(verification).not.toBe(confirmation)
@@ -240,6 +262,13 @@ it('hands the four filters unchanged to the bridge and lists only what it return
   render(<ReaderPage bridge={bridge} />)
   await screen.findByRole('article', { name: /Einsatz 2026-0007/ })
 
+  // Die Zeitgrenzen werden in der Zone des LESEGERAETS getippt — und die
+  // Flaeche sagt das, statt es den Nutzer raten zu lassen.
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  expect(screen.getByLabelText('Von')).toHaveAccessibleDescription(expect.stringContaining(zone))
+  expect(screen.getByLabelText('Bis')).toHaveAccessibleDescription(expect.stringContaining(zone))
+  expect(screen.getByText(/Zeitzone dieses Geräts/)).toBeVisible()
+
   const from = '2026-03-01T08:00'
   const to = '2026-03-02T20:15'
   fireEvent.change(screen.getByLabelText('Von'), { target: { value: from } })
@@ -269,6 +298,11 @@ it('hands the four filters unchanged to the bridge and lists only what it return
 it('names the missing stand technically and renders no incident at all', async () => {
   render(<ReaderPage bridge={fakeBridge(null)} />)
   expect(await screen.findByText('Kein Bestand geöffnet')).toBeVisible()
+  // Der Satz steht IM Pruefstand, und der Pruefstand meldet seinen Wechsel
+  // von „wird gelesen" zu dieser Aussage — hoeflich, ohne zu unterbrechen.
+  const region = screen.getByRole('region', { name: 'Prüfstand' })
+  expect(region).toHaveTextContent('Kein Bestand geöffnet')
+  expect(region).toHaveAttribute('aria-live', 'polite')
   expect(screen.getByRole('link', { name: /Datei-Modus/ })).toHaveAttribute('href', '/datei')
   expect(screen.queryByRole('article')).not.toBeInTheDocument()
   expect(screen.queryByRole('heading', { name: /Einsatznummer/ })).not.toBeInTheDocument()
@@ -322,6 +356,94 @@ it('explains every technical field from the DTO in the Technik tab', async () =>
   expect(within(view).getByRole('status', { name: 'Server-Bestätigung' })).toHaveTextContent(
     NOT_SERVER_CONFIRMED,
   )
-  expect(within(view).getByText('nicht gemeldet')).toBeVisible()
+  // Ohne Evidence-Befund steht das auch so da: keine Beanstandung — und keine
+  // Stufe, denn eine Stufe hat niemand festgestellt.
+  const evidence = within(view).getByRole('status', { name: 'Evidence-Prüfung' })
+  expect(evidence).toHaveTextContent('keine Beanstandung im Verifikationslauf')
+  expect(evidence.className).not.toMatch(/\bant-tag-success\b/)
+  expect(within(view).queryByText(/Evidenzstufe/)).not.toBeInTheDocument()
+  expect(within(view).queryByText('nicht gemeldet')).not.toBeInTheDocument()
   expect(within(view).queryByText(SERVER_CONFIRMED)).not.toBeInTheDocument()
+})
+
+// Ein Evidence-BEFUNDCODE ist ein Befund und keine Stufe. Vor dieser
+// Zusicherung landete der Code in `EvidenceStatus`, dessen nicht-`null`-Zweig
+// eine gruene Marke mit „verified"-Zeichen unter „Evidenzstufe" rendert — ein
+// Befund der Pruefung als bestandene Stufe.
+it('shows an evidence finding code as a finding and never as a passed grade', async () => {
+  const user = userEvent.setup()
+  const code = 'EA-VERIFY-EVIDENCE-SUBJECT-MISMATCH'
+  const bridge = fakeBridge(stand(), {
+    technicalView: vi.fn(async () => technical({ evidenceDetailCode: code })),
+  })
+  render(<ReaderPage bridge={bridge} />)
+  await user.click(await screen.findByRole('tab', { name: 'Technik' }))
+  await user.click(screen.getByRole('button', { name: /Sequenz 7/ }))
+
+  const view = await screen.findByRole('region', { name: 'Technische Ansicht' })
+  const evidence = within(view).getByRole('status', { name: 'Evidence-Prüfung' })
+  expect(evidence).toHaveTextContent(code)
+  expect(evidence).toHaveAccessibleDescription(expect.stringContaining('Befund'))
+  // Erst die Sonde, dann die Zusicherung: keine Erfolgsmarke in dieser Zeile.
+  expect(tagClassFor('success')).toMatch(/\bant-tag-success\b/)
+  expect(evidence.className).not.toMatch(/\bant-tag-success\b/)
+  const row = evidence.parentElement
+  expect(row).not.toBeNull()
+  expect(row?.querySelector('.ant-tag-success')).toBeNull()
+  expect(within(view).queryByText(/Evidenzstufe/)).not.toBeInTheDocument()
+  expect(within(view).queryByText(/keine Beanstandung/)).not.toBeInTheDocument()
+})
+
+// Der permanente Pruefstand traegt sein Urteil als STATUS — bisher stand es
+// als blosser Text da, und wer die Zusammenfassung entfernte, liess jeden
+// Zeugen gruen.
+it('carries the stand judgement and its server confirmation as statuses in the live Prüfstand', async () => {
+  render(<ReaderPage bridge={bridgeInFileMode()} />)
+  const region = screen.getByRole('region', { name: 'Prüfstand' })
+  expect(region).toHaveAttribute('aria-live', 'polite')
+  const judgement = await within(region).findByRole('status', { name: 'Prüfstand' })
+  expect(judgement).toHaveTextContent('Alle Prüfungen bestanden')
+  expect(within(region).getByRole('status', { name: 'Server-Bestätigung' })).toHaveTextContent(
+    NOT_SERVER_CONFIRMED,
+  )
+  expect(within(region).getByText(/1 Einträge, 0 Prüfprobleme/)).toBeVisible()
+})
+
+it('names a stand with a finding as such in the Prüfstand status', async () => {
+  render(<ReaderPage bridge={bridgeWithInvalidObject()} />)
+  const region = screen.getByRole('region', { name: 'Prüfstand' })
+  const judgement = await within(region).findByRole('status', { name: 'Prüfstand' })
+  expect(judgement).toHaveTextContent('Prüfung mit Befund')
+  expect(judgement).not.toHaveTextContent('Alle Prüfungen bestanden')
+})
+
+// Eine Abweisung beim Montieren ist eine ANTWORT. Bisher blieb „Der Bestand
+// wird gelesen." neben dem Alarm stehen — die Flaeche behauptete Lesen und
+// Fehlschlag zugleich.
+it('replaces the loading sentence with the rejection when the bridge refuses the stand', async () => {
+  const bridge = fakeBridge(null, {
+    standView: vi.fn(async () => {
+      throw new Error('EA-READER-VIEW-NO-STAND')
+    }),
+  })
+  render(<ReaderPage bridge={bridge} />)
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent('EA-READER-VIEW-NO-STAND')
+  expect(screen.queryByText('Der Bestand wird gelesen.')).not.toBeInTheDocument()
+  // Und keine Behauptung, die die Bruecke nicht gemacht hat: weder ein
+  // Bestand noch „kein Bestand".
+  expect(screen.queryByRole('article')).not.toBeInTheDocument()
+  expect(screen.queryByText('Kein Bestand geöffnet')).not.toBeInTheDocument()
+  const region = screen.getByRole('region', { name: 'Prüfstand' })
+  expect(region.textContent?.trim().length ?? 0).toBeGreaterThan(0)
+})
+
+// Ein Zeitpunkt, den `Date` nicht tragen kann, ist kein `RangeError` auf der
+// Flaeche, sondern ein Satz.
+it('renders an unrepresentable occurredAt as plain text instead of throwing', () => {
+  for (const ms of [Number.NaN, Number.POSITIVE_INFINITY, 1e20]) {
+    expect(formatOccurredAt(ms, 'Europe/Berlin')).toBe('Zeitpunkt nicht darstellbar')
+  }
+  // Und ein tragbarer Zeitpunkt bleibt, was er war.
+  expect(formatOccurredAt(Date.UTC(2026, 2, 1, 7, 30), 'Europe/Berlin')).toContain('Europe/Berlin')
 })

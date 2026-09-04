@@ -38,8 +38,15 @@ function verificationColor(verification: ReaderEntryStateView['verification']): 
  * die Zone nicht, wirft `Intl` einen `RangeError` — dann steht die Zeit in UTC
  * und der Satz daneben sagt, warum. Eine still auf die Zone des Lesers
  * zurueckfallende Anzeige waere eine falsche Ortszeit ohne Hinweis.
+ *
+ * Ein Wert, den `Date` nicht tragen kann — `NaN`, unendlich oder jenseits
+ * von ±8,64·10¹⁵ ms —, wuerde `Intl` auch im UTC-Zweig mit einem `RangeError`
+ * verlassen. Er wird deshalb VOR beiden Zweigen zu einem Satz.
  */
 export function formatOccurredAt(ms: number, timezone: string): string {
+  if (!Number.isFinite(ms) || Number.isNaN(new Date(ms).getTime())) {
+    return 'Zeitpunkt nicht darstellbar'
+  }
   const style = { dateStyle: 'medium', timeStyle: 'short' } as const
   try {
     return `${new Intl.DateTimeFormat('de-DE', { ...style, timeZone: timezone }).format(ms)} (${timezone})`

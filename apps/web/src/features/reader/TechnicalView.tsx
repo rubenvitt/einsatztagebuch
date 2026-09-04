@@ -2,9 +2,8 @@ import { Space, Typography } from 'antd'
 import type { ReactElement } from 'react'
 
 import type { ReaderTechnicalView } from '../../bridge/generated-contracts'
-import { EvidenceStatus } from '../../components/integrity/EvidenceStatus'
 import { FingerprintBlock } from '../../components/integrity/FingerprintBlock'
-import { ServerConfirmationStatus } from './StatusDimension'
+import { ServerConfirmationStatus, StatusDimension } from './StatusDimension'
 
 /**
  * Die technische Ansicht EINES Eintrags aus `design.md` §17.2 — jeder Wert aus
@@ -17,8 +16,12 @@ import { ServerConfirmationStatus } from './StatusDimension'
  * Der Writer-Key dieser Ansicht ist der Hash des Writer-Zertifikats aus dem
  * Manifest — einen eigenen Thumbprint des Writer-Schluessels traegt der
  * Vertrag nicht, weil kein Erzeuger ihn liefert. Und die Evidence ist ein
- * BEFUNDCODE oder `null`: eine Stufe, die niemand festgestellt hat, wird hier
- * nicht behauptet.
+ * BEFUNDCODE oder `null` — `report.evidence_errors()` unter dem Objekthash
+ * dieses Eintrags. Sie steht deshalb an einem eigenen `StatusDimension` und
+ * NICHT in `EvidenceStatus`: dessen nicht-`null`-Zweig rendert eine gruene
+ * Erfolgsmarke unter „Evidenzstufe", und ein Befund der Pruefung als
+ * bestandene Stufe waere die falsche Aussage. Eine Stufe, die niemand
+ * festgestellt hat, wird hier nicht behauptet.
  */
 export function TechnicalView({ view }: { readonly view: ReaderTechnicalView }): ReactElement {
   return (
@@ -86,11 +89,24 @@ export function TechnicalView({ view }: { readonly view: ReaderTechnicalView }):
         </Space>
 
         <Space orientation="vertical" size="small">
-          <EvidenceStatus grade={view.evidenceDetailCode} />
+          {view.evidenceDetailCode === null ? (
+            <StatusDimension
+              label="Evidence-Prüfung"
+              value="keine Beanstandung im Verifikationslauf"
+              color="default"
+            />
+          ) : (
+            <StatusDimension
+              label="Evidence-Prüfung"
+              value={view.evidenceDetailCode}
+              color="warning"
+              description="Befundcode der Evidence-Prüfung"
+            />
+          )}
           <Typography.Text type="secondary">
-            Ein gemeldeter Wert ist der Befundcode der Evidence-Prüfung aus dem Bericht.
-            „Nicht gemeldet" heißt: der Bericht trägt keinen Evidence-Befund zu diesem Eintrag —
-            eine Evidenzstufe wird daraus nicht abgeleitet.
+            Trägt der Bericht zu diesem Eintrag einen Evidence-Befund, steht hier sein Code; sonst
+            steht hier, dass es keinen gibt. Eine Stufe der Evidenz stellt der Reader nicht fest und
+            behauptet deshalb keine.
           </Typography.Text>
         </Space>
       </Space>

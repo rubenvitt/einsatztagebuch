@@ -16,7 +16,7 @@ import { eaRuntimeTheme } from '../../design/tokens'
 import { AmendmentThread } from './AmendmentThread'
 import { EntryView } from './EntryView'
 import { SearchPanel } from './SearchPanel'
-import { ServerConfirmationStatus } from './StatusDimension'
+import { ServerConfirmationStatus, StatusDimension } from './StatusDimension'
 import { TechnicalView } from './TechnicalView'
 import { VerificationProblems } from './VerificationProblems'
 
@@ -46,7 +46,9 @@ function failureText(reason: unknown): string {
  * Er steht ausserhalb der Reiter, weil er die Aussage ueber den GANZEN
  * Bestand ist und kein Reiter ihn verdecken darf. Der Wortlaut ist eigener:
  * das Urteil des Berichts kommt als `fullyVerified` und traegt keinen
- * Statusbegriff — und die Zusammenfassung schreibt keinen. Die
+ * Statusbegriff — und die Zusammenfassung schreibt keinen. Das Urteil steht
+ * an einem `role="status"`-Traeger mit dem Namen „Prüfstand", damit ein Zeuge
+ * es findet und ein Screenreader es als Zustand liest; die
  * Server-Bestaetigung des Bestandes steht daneben an ihrem eigenen Traeger.
  */
 function VerificationSummary({ stand }: { readonly stand: ReaderStandView }): ReactElement {
@@ -57,9 +59,11 @@ function VerificationSummary({ stand }: { readonly stand: ReaderStandView }): Re
           name={stand.fullyVerified ? 'verified' : 'warning'}
           state={stand.fullyVerified ? 'confirmed' : 'default'}
         />
-        <Typography.Text strong>
-          {stand.fullyVerified ? 'Alle Prüfungen bestanden' : 'Prüfung mit Befund'}
-        </Typography.Text>
+        <StatusDimension
+          label="Prüfstand"
+          value={stand.fullyVerified ? 'Alle Prüfungen bestanden' : 'Prüfung mit Befund'}
+          color={stand.fullyVerified ? 'success' : 'warning'}
+        />
       </Space>
       <Typography.Text type="secondary">
         {stand.entries.length} Einträge, {stand.problems.length} Prüfprobleme.
@@ -144,9 +148,20 @@ export function ReaderPage({ bridge }: { readonly bridge: ReaderBridge }): React
   return (
     <ConfigProvider locale={deDE} theme={eaRuntimeTheme}>
       <Space orientation="vertical" size="middle">
-        <section aria-label="Prüfstand">
+        {/*
+          `aria-live="polite"`: der Wechsel von „wird gelesen" zur Antwort der
+          Bruecke wird angesagt, ohne zu unterbrechen. Eine Abweisung beim
+          Montieren ist eine ANTWORT — der Lesesatz bleibt dann nicht neben
+          dem Alarm stehen, und „kein Bestand" wird nicht behauptet, weil die
+          Bruecke es nicht gesagt hat.
+        */}
+        <section aria-label="Prüfstand" aria-live="polite">
           {loaded === undefined ? (
-            <Typography.Text>Der Bestand wird gelesen.</Typography.Text>
+            failure === undefined ? (
+              <Typography.Text>Der Bestand wird gelesen.</Typography.Text>
+            ) : (
+              <Typography.Text>Der Bestand ließ sich nicht lesen.</Typography.Text>
+            )
           ) : loaded.stand === null ? (
             <Space orientation="vertical" size="small">
               <Space size="small">

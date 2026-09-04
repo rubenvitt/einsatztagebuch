@@ -22,12 +22,34 @@
 //! # Was die Grenze ueberquert
 //!
 //! JSON, hand-gebaut ueber [`crate::bridge::Json`] wie jede Ausfuhr dieser
-//! Crate. Die Klartexte liegen ausschliesslich in `SecretVec` innerhalb der
+//! Crate. Die Klartextbytes liegen in `SecretVec` innerhalb der
 //! [`ea_reader::VerifiedDecryptedRecord`]-Werte, die Faeden und Karte hier
 //! BESITZEN, und verlassen das Modul nur als die vier Felder von
 //! `ReaderIncidentView` — Einsatznummer, Startzeit, Zeitzone, Stichwort — und
 //! als die vier Felder eines Suchtreffers. Kein `Debug` gibt sie heraus;
 //! [`ReaderStand`] traegt keines.
+//!
+//! ZWEI Ausnahmen davon stehen NICHT unter `SecretVec`, und die
+//! Sitzungssperre erbt diese Aussage, also steht sie genau:
+//!
+//! 1. Der Suchindex. [`ea_reader::ReaderSearch`] haelt einen
+//!    `InvertedIndexV1` mit der Einsatznummer als `String` und den
+//!    normalisierten Stichwort-, Fahrzeug- und Personenbegriffen als
+//!    gewoehnliche Zeichenketten — nicht zeroisierend, nach dem dokumentierten
+//!    Entwurf von `crates/ea-index` (dessen Klartextdisziplin endet an der
+//!    Crategrenze: hinein gehen fertige Begriffe, kein Wrapper). Er lebt
+//!    AUSSCHLIESSLICH im Speicher dieses Bestands, wird von diesem Modul nie
+//!    versiegelt oder persistiert und faellt mit dem Bestand — als
+//!    gewoehnlicher `drop`, ohne Ueberschreiben.
+//! 2. Die Nutzlast je Aufruf. `with_payload` dekodiert die Bytes bei JEDEM
+//!    Aufruf innerhalb der Ausleihe zu einem `PayloadV1`; diese Kopie ist eine
+//!    nicht ueberschriebene `Vec<u8>` (die benannte Restfrage an
+//!    `ValidatedPayload` in `crates/ea-reader/src/decrypt.rs`) und faellt mit
+//!    dem Aufruf. Sie entsteht in `kind_of`, `incident_record_id` und
+//!    `incident_json` und in keinem gehaltenen Feld.
+//!
+//! Was beim Sperren also zuverlaessig zeroisiert wird, sind die Klartextbytes
+//! der Datensaetze; Index und Aufrufkopien werden freigegeben.
 //!
 //! # `incident: null` ist eine Aussage und kein leerer Einsatz
 //!
@@ -152,6 +174,12 @@ enum RecordLocation {
     Original(usize),
     /// Der Nachtrag `amendment` im Faden `thread`.
     Amendment { thread: usize, amendment: usize },
+    /// Ein Kandidat, den `ReaderEntryThread::build` fuer den Faden `thread`
+    /// ABGEWIESEN hat. Der Faden hat seinen Datensatz fallen lassen und fuehrt
+    /// nur noch die Adresse unter `rejected`; die Zeile ist damit ein Eintrag
+    /// OHNE Datensatz, aber MIT Faden — sonst waere ein Pruefproblem ueber den
+    /// eigenen Hash nicht von einem Eintrag ohne Zusammenhang zu unterscheiden.
+    Rejected(usize),
     /// Ein Datensatz ohne Faden: Genesis, Schluesseluebergang,
     /// Vernichtungsnachweis, oder ein Nachtrag, dessen Original nicht
     /// entschluesselt wurde.
@@ -189,6 +217,18 @@ pub struct ReaderStand {
     /// faellt fail-closed auf `ungueltig`. Beide tragen ihren Code.
     decryption_verdicts: BTreeMap<EntryHash, (VerificationStatus, &'static str)>,
     chain: Vec<ChainNode>,
+    /// `is_fully_verified()` des Berichts UND kein Entschluesselungsurteil
+    /// `ungueltig`.
+    ///
+    /// Der Bericht endet hinter Tor neun; die HPKE-Oeffnung dieses Moduls
+    /// laeuft danach und kann ein Objekt `ungueltig` sprechen, von dem der
+    /// Bericht nichts weiss. Ein `fullyVerified: true` neben einem
+    /// `ungueltig` in `problems` waere ein Widerspruch im selben DTO
+    /// (GEMESSEN vor dieser Aenderung, mit einem untergeschobenen
+    /// Entschluesselungstresor). `FileModeArchiveView.fullyVerified` bleibt
+    /// dagegen der reine Berichtswert — dieses DTO fuehrt keine `problems` und
+    /// ist byteidentisch zur Fassung vor dem Bestand.
+    fully_verified: bool,
     server_confirmation: ServerConfirmationV1,
 }
 
@@ -224,16 +264,18 @@ impl ReaderStand {
                 .threads
                 .get(thread)
                 .and_then(|thread| thread.amendments().get(amendment)),
+            RecordLocation::Rejected(_) => None,
             RecordLocation::Other => self.others.get(&entry_hash),
         }
     }
 
-    /// Der Faden, dem ein Eintrag angehoert — als Original oder als Nachtrag.
+    /// Der Faden, dem ein Eintrag angehoert — als Original, als Nachtrag oder
+    /// als abgewiesener Kandidat.
     fn thread_of(&self, entry_hash: EntryHash) -> Option<&ReaderEntryThread> {
         match *self.located.get(&entry_hash)? {
-            RecordLocation::Original(thread) | RecordLocation::Amendment { thread, .. } => {
-                self.threads.get(thread)
-            }
+            RecordLocation::Original(thread)
+            | RecordLocation::Amendment { thread, .. }
+            | RecordLocation::Rejected(thread) => self.threads.get(thread),
             RecordLocation::Other => None,
         }
     }
@@ -404,6 +446,9 @@ pub fn build_stand(
                     },
                 );
             }
+            for rejected in thread.rejected() {
+                located.insert(rejected.entry_hash, RecordLocation::Rejected(index));
+            }
             threads.push(thread);
         }
     }
@@ -417,7 +462,9 @@ pub fn build_stand(
     }
 
     let report = classification.report();
-    let chain = chain_nodes(classification, observer_events);
+    let decryption_failure = invalid_decryption_code(&decryption_verdicts);
+    let fully_verified = report.is_fully_verified() && decryption_failure.is_none();
+    let chain = chain_nodes(classification, observer_events, decryption_failure);
     let server_confirmation = ConfirmationTally::over(
         report
             .object_results()
@@ -433,8 +480,26 @@ pub fn build_stand(
         search,
         decryption_verdicts,
         chain,
+        fully_verified,
         server_confirmation,
     }
+}
+
+/// Der Code des ERSTEN Entschluesselungsurteils `ungueltig`, in
+/// Eintragshash-Ordnung — oder `None`.
+///
+/// `nicht darstellbares Schema` zaehlt NICHT: es ist die Aussage „kein
+/// Einsatz" ueber einen authentischen Klartext und kein Objekt, das seine
+/// Zusage bricht. Die reine Haelfte von `fully_verified` und des Tors
+/// `recipient-grant` in [`chain_nodes`]; beide lesen dieselbe Funktion, damit
+/// `fullyVerified` und die Leiste nie auseinanderlaufen.
+fn invalid_decryption_code(
+    verdicts: &BTreeMap<EntryHash, (VerificationStatus, &'static str)>,
+) -> Option<&'static str> {
+    verdicts
+        .values()
+        .find(|(status, _)| *status == VerificationStatus::Invalid)
+        .map(|(_, code)| *code)
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +527,8 @@ enum Verdict {
 /// nie betreten.
 ///
 /// Die Regel:
-/// - `is_fully_verified()` ⇒ alle neun Tore `true`.
+/// - `is_fully_verified()` UND kein Entschluesselungsurteil `ungueltig`
+///   (`decryption_failure` ist `None`) ⇒ alle neun Tore `true`.
 /// - sonst, in Torreihenfolge: jedes betretene Tor VOR dem ersten belegten
 ///   Fehler `true`; das fehlgeschlagene `false` mit seinem Code als `detail`
 ///   (oder `null`, wo der Bericht keinen Code kennt: `trust` und
@@ -479,14 +545,19 @@ enum Verdict {
 /// → `grant-plan`; `gaps` → `chain-position`; `signatureErrors` ueber einem
 /// Objekt, das weder Eintrag noch Grant ist → `receipt`; `evidenceErrors` →
 /// `evidence`; `decryptionErrors` und `signatureErrors` ueber einem Granthash
-/// → `recipient-grant`.
+/// → `recipient-grant`. `decryption_failure` — das Urteil der HPKE-Oeffnung
+/// DIESES Moduls, das der Bericht nicht kennt — faellt ebenfalls auf
+/// `recipient-grant`: es ist ein Grant, der getragen hat und dessen CEK sich
+/// trotzdem nicht oeffnet, oder ein Zeuge, der veraltet ist; der Bericht wird
+/// zuerst gelesen, damit ein Berichtscode Vorrang hat.
 fn chain_nodes(
     classification: &ReaderClassification,
     observer_events: &[&'static str],
+    decryption_failure: Option<&'static str>,
 ) -> Vec<ChainNode> {
     let report: &VerificationReportV1 = classification.report();
     let inventory = classification.inventory();
-    if report.is_fully_verified() {
+    if report.is_fully_verified() && decryption_failure.is_none() {
         return Gate::ALL
             .into_iter()
             .map(|gate| ChainNode {
@@ -574,6 +645,7 @@ fn chain_nodes(
                 .next()
                 .map(ea_reader::ObjectErrorV1::code)
                 .or_else(|| signature_error(&|hash, _| grant_hashes.contains(&hash)))
+                .or(decryption_failure)
                 .map_or(Verdict::Passed, |code| Verdict::Failed(Some(code))),
         };
         match verdict {
@@ -761,8 +833,9 @@ pub fn technical_json(stand: &ReaderStand, entry_hash: EntryHash) -> Result<Stri
 
 /// `ReaderAmendmentThreadView` ueber dem Faden, dem ein Eintrag angehoert.
 ///
-/// Der Hash darf der des Originals oder der eines beigetretenen Nachtrags
-/// sein; beide fuehren zu demselben Faden, byteidentisch.
+/// Der Hash darf der des Originals, der eines beigetretenen Nachtrags oder
+/// der eines ABGEWIESENEN Kandidaten sein; alle drei fuehren zu demselben
+/// Faden, byteidentisch — der abgewiesene steht darin unter `rejected`.
 ///
 /// # Errors
 /// [`EA_READER_VIEW_UNKNOWN_ENTRY`] fuer einen unbekannten Hash,
@@ -830,6 +903,10 @@ pub fn search_json(stand: &ReaderStand, query: &ReaderQueryV1) -> Result<String,
 /// nennt den Wortlaut, und wo sie keinen Detailcode traegt, der Bericht aber
 /// einen fuehrt, steht der des Berichts — ein Code ist eine Aussage mehr,
 /// nicht eine andere.
+///
+/// `fullyVerified` ist der Berichtswert UND die Abwesenheit eines
+/// Entschluesselungsurteils `ungueltig` (siehe `ReaderStand::fully_verified`):
+/// ein Objekt in `problems` und ein `true` daneben schliessen einander aus.
 #[must_use]
 pub fn stand_json(stand: &ReaderStand) -> String {
     let classification = stand.opened.classification();
@@ -893,7 +970,7 @@ pub fn stand_json(stand: &ReaderStand) -> String {
     json.raw("entries", &entries);
     json.raw("problems", &problems);
     json.raw("chain", &chain);
-    json.bool("fullyVerified", report.is_fully_verified());
+    json.bool("fullyVerified", stand.fully_verified);
     json.string("serverConfirmation", stand.server_confirmation.label());
     json.finish()
 }
@@ -1083,9 +1160,43 @@ pub fn reader_stand_close() {
 
 #[cfg(test)]
 mod tests {
-    use ea_reader::{ReaderQueryV1, UnixMillis};
+    use std::collections::BTreeMap;
 
-    use super::query_from;
+    use ea_reader::{EntryHash, ReaderQueryV1, UnixMillis, VerificationStatus};
+
+    use super::{invalid_decryption_code, query_from};
+
+    /// `nicht darstellbares Schema` senkt nichts; erst ein `ungueltig` traegt
+    /// seinen Code heraus — und zwar den ERSTEN in Eintragshash-Ordnung.
+    #[test]
+    fn only_an_invalid_verdict_carries_a_code_and_the_first_by_hash_wins() {
+        let hash = |byte: u8| EntryHash::try_from(&[byte; 32][..]).expect("32 Bytes");
+        let mut verdicts: BTreeMap<EntryHash, (VerificationStatus, &'static str)> = BTreeMap::new();
+        assert_eq!(invalid_decryption_code(&verdicts), None);
+        verdicts.insert(
+            hash(0x02),
+            (
+                VerificationStatus::UnsupportedSchema,
+                "EA-READER-SCHEMA-UNSUPPORTED",
+            ),
+        );
+        assert_eq!(invalid_decryption_code(&verdicts), None);
+        verdicts.insert(
+            hash(0x03),
+            (VerificationStatus::Invalid, "EA-READER-WITNESS-STALE"),
+        );
+        verdicts.insert(
+            hash(0x01),
+            (
+                VerificationStatus::Invalid,
+                "EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED",
+            ),
+        );
+        assert_eq!(
+            invalid_decryption_code(&verdicts),
+            Some("EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED")
+        );
+    }
 
     /// Leere Zeichenketten und fehlende Grenzen sind KEIN Filter; eine halbe
     /// Zeitgrenze ist ein halboffener Zeitraum und kein fallengelassener.

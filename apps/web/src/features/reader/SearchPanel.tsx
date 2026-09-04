@@ -55,6 +55,11 @@ export function SearchPanel({
   const keywordId = useId()
   const vehicleId = useId()
   const personId = useId()
+  const zoneId = useId()
+  // Die Zone, in der `datetime-local` gelesen wird: die des Lesegeraets. Das
+  // ist Darstellung — der Browser rechnet die Eingabe in UTC-Millisekunden um,
+  // und der Satz unten sagt nur, welche Zone er dabei annimmt.
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const [keyword, setKeyword] = useState('')
@@ -102,6 +107,7 @@ export function SearchPanel({
               id={fromId}
               type="datetime-local"
               value={from}
+              aria-describedby={zoneId}
               onChange={event => setFrom(event.target.value)}
             />
             <label htmlFor={toId}>Bis</label>
@@ -109,9 +115,13 @@ export function SearchPanel({
               id={toId}
               type="datetime-local"
               value={to}
+              aria-describedby={zoneId}
               onChange={event => setTo(event.target.value)}
             />
           </Space>
+          <Typography.Text id={zoneId} type="secondary">
+            Von und Bis gelten in der Zeitzone dieses Geräts ({zone}).
+          </Typography.Text>
           <Space size="small" wrap>
             <label htmlFor={keywordId}>Stichwort</label>
             <Input id={keywordId} value={keyword} onChange={event => setKeyword(event.target.value)} />
