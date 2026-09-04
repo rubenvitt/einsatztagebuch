@@ -5054,22 +5054,220 @@ git commit -m "feat(reader): link originals and amendments without replacing eit
 - Create: `crates/ea-reader/src/export.rs`
 - Create: `crates/ea-reader/src/audit.rs`
 - Create: `crates/ea-reader-wasm/src/visibility.rs`
+- Create: `crates/ea-reader-wasm/src/export_bridge.rs` — die Exportausfuhr, siehe Punkt 8
+- Create: `apps/web/src/features/session/reader-session.ts` — der EINE Halter der Sitzungskennung auf dem Hauptthread, siehe Punkt 9
 - Create: `apps/web/src/features/export/SingleExport.tsx`
+- Create: `apps/web/tests/e2e/support/enrollment.ts` — die aus `enrollment.spec.ts` herausgezogenen Helfer, verhaltensgleich
 - Test: `crates/ea-reader/tests/session_lock.rs`
 - Test: `crates/ea-reader/tests/export.rs`
 - Test: `crates/ea-reader/tests/audit_redaction.rs`
+- Test: `crates/ea-reader-wasm/tests/session_dto.rs` — der Wirtszeuge der zwei DTOs
+- Test: `crates/ea-reader-wasm/tests/export_browser.rs` — der Browserzeuge der Exportausfuhr und der Sperre ueber die Bruecke
 - Test: `apps/web/src/features/export/SingleExport.test.tsx`
 - Test: `apps/web/tests/e2e/lock-and-export.spec.ts`
 - Modify: `crates/ea-reader/src/lib.rs`
+- Modify: `crates/ea-reader/src/vault.rs` — `prove_authenticator`, `audit_signer`, `audit_log_key`, siehe Punkte 2 und 3
+- Modify: `crates/ea-reader/src/envelope.rs` — der siebte Ableitungskontext, siehe Punkt 4
 - Modify: `crates/ea-reader/Cargo.toml`
+- Modify: `crates/ea-reader/tests/verify_fixtures/fixtures.rs` — Tresor, Authenticator, Bestaetigung, Identitaet und der eine Datensatz, siehe Punkt 11
 - Modify: `crates/ea-reader-wasm/src/lib.rs`
+- Modify: `crates/ea-reader-wasm/src/vault_bridge.rs` — die Sitzungstabelle haelt `ReaderSession`, siehe Punkt 7
+- Modify: `crates/ea-reader-wasm/src/fetch.rs`, `crates/ea-reader-wasm/src/file_access.rs` — die Uhr geht in die Tresorausleihe, siehe Punkt 7
+- Modify: `crates/ea-reader-wasm/tests/bridge_boundary.rs` — nur die Prosa zaehlt neun statt acht Module
+- Modify: `crates/ea-ui-contracts/src/emit.rs`, `apps/web/src/bridge/generated-contracts.ts` — zwei DTOs, siehe Punkt 10
+- Modify: `apps/web/src/bridge/opfs-worker.ts`, `apps/web/src/vault/webauthn-prf.ts` — fuenf Nachrichten, die Uhr am Entsperren
 - Modify: `apps/web/src/main.tsx`
+- Modify: `apps/web/tests/e2e/enrollment.spec.ts` — importiert seine Helfer aus `support/`
 - Modify: `Cargo.lock`
 - Modify: `docs/traceability/stage-4-fault-points.json`
 
 `crates/ea-reader/Cargo.toml` und `Cargo.lock` stehen zusammen im Files-Block: dieser Task zieht `ea-operator` als DEV-Kante von `crates/ea-reader` aus — `the_reader_inactivity_default_is_the_same_five_minutes_as_the_desktop` misst `READER_INACTIVITY_MS_V1` gegen `ea_operator::MAX_INACTIVITY_MS` —, und eine neue Kante zwischen zwei Mitgliedern schreibt `Cargo.lock` fort. Deshalb faehrt Schritt 4 GENAU EIN Kommando ohne `--locked`. Die Kante ist ausdruecklich eine ENTWICKLUNGSkante und keine Bibliothekskante: `ea-operator` steht in `WASM32_EXEMPT_CRATES`, und die wasm32-Zeile faehrt ohne `--all-targets` und zieht Dev-Dependencies deshalb nie in den Graphen. `apps/web/src/main.tsx` bekommt die Sichtbarkeits- und Eingabehaken (`visibilitychange`, `pointerdown`, `keydown`) und die Einhaengung der Einzelexportflaeche, angehaengt an die Routentabelle aus der Aufgabe „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate"; `apps/web/tests/e2e/lock-and-export.spec.ts` faehrt genau diese montierte Schale an.
 
 `crates/ea-audit` wird AUSDRUECKLICH NICHT angefasst. Die Crate steht in `WASM32_EXEMPT_CRATES`, und ihre Begruendung nennt beide Gruende namentlich: sie signiert jede Zeile durch den Wirtschluesselspeicher und haengt sie an die verschluesselte Wirtdatenbank an. Ihr `AuditActorProof` traegt ausserdem einen `&OperatorSessionProof` und zieht damit `ea-operator` mit, das ebenfalls ausgenommen ist — und dessen Eintrag woertlich sagt, der Browser habe „neither a native key provider (§11.3) nor an OS-lock event (§11.2)". Der Reader-Auditschreiber lebt deshalb in `crates/ea-reader` ueber den bereits eingefrorenen Kodierern von `crates/ea-format/src/local_audit.rs`.
+
+#### Die dreizehn Stellen, an denen die erste Fassung dieses Tasks gegen den Arbeitsbaum falsch war
+
+GEMESSEN am Stand `015ab05` (`origin/main` am 2026-09-04), im Worktree der
+Verzweigung `drk-264-session-lock`. Die Punkte 1 bis 3 sind die teuren: sie
+bewegen, WER den Tresor haelt, WO ein Nachweis entsteht und WOHER eine
+Auditzeile ihre Identitaet bekommt.
+
+**1. `ReaderSession::unlock(confirmation, now)` kann den Tresor nicht
+halten, den es nie bekommen hat.** Die Skizze in Schritt 3 nennt `vault` als
+Feld und nicht als Parameter. `UnlockedVault` hat keinen Konstruktor ausser
+`ReaderVault::unlock`, ist nicht `Clone`, und die Sperre laesst ihn FALLEN —
+danach fuehrt kein Weg zurueck als der Authenticator. Beide Signaturen tragen
+den Tresor deshalb BESITZEND: `ReaderSession::unlock(vault, confirmation,
+now)` und `ReaderSession::reopen(&mut self, vault, confirmation, now)`. Ein
+`reopen` ohne frischen Tresor waere ein `reopen`, das den alten irgendwo
+aufgehoben haette, und genau das schliesst §6.5 aus.
+
+**2. Es gibt keinen „geprueften Assertion-Pfad des Enrollments".** `grep
+credential_id_hash|CredentialIdHash` ueber `crates/` und `schemas/` liefert
+nichts, und `recover_and_unlock_vault` sagt es selbst: die WebAuthn-Assertion
+„wird HIER nicht geprueft, sie ist die Autoritaet des SERVERS". Was der Browser
+in Rust PRUEFT, ist die AEAD-Umschliessung des Envelopes: eine PRF-Ausgabe
+oeffnet den umschlossenen Tresorschluessel oder nicht, und eine PRF-Ausgabe ist
+nur nach einer Zeremonie mit Nutzerverifikation zu haben. Der Nachweis
+entsteht deshalb in `ReaderAuthenticatorConfirmation::prove(&sealed,
+&authenticator, purpose, now)` ueber `SealedVaultV1::prove_authenticator`,
+das den Tresorschluessel auspackt und sofort fallen laesst — ohne den Koerper
+zu entsiegeln, ohne zweiten `UnlockedVault`. Der Konstruktor ist `pub` und
+nicht `pub(crate)`: die Bruecke liegt in einer ANDEREN Crate und muss ihn
+rufen; versiegelt bleibt er trotzdem, weil er ohne den Beleg nichts
+herausgibt. Die pseudonyme Bedienerbindung ist SHA-256 der `credentialId`
+(`Hash32`), und `ReaderSession::operator_binding_hash` traegt sie in die
+Position `operator-binding-object-hash` der Auditzeile.
+
+**3. `ReaderAuditWriter<'a> { signer: &'a CoseSigner }` hat keine Quelle, und
+`record(&self, fields)` hat keine Identitaet.** `UnlockedVault` haelt KEINEN
+`CoseSigner` — es gibt `sign_audit_digest` (roh, 64 Byte) und
+`audit_signing_key` (`&SecretBytes<32>`) —, und `CoseSigner::from_secret`
+nimmt den Seed BESITZEND; `UnlockedVault::audit_signer()` baut ihn deshalb je
+Aufruf, nach der Bauform von `ReaderEnrollment::finish`. Ereigniskennung und
+Nonce zieht der Schreiber selbst, wie `ea_audit::SignedLocalAuditService`;
+`record(&mut self, action, outcome, effective_now)` nimmt deshalb keine
+fertigen `LocalAuditEventCoreFieldsV1`. Und die drei Identitaetsfelder
+`organization_id`, `device_id`, `signer_certificate_object_hash` — die
+`sign_local_audit` aus dem Kern liest, um den Zertifikatshash in den
+geschuetzten COSE-Kopf zu binden — liegen NIRGENDS im Tresor: `VaultContentsV1`
+traegt zwei Schluessel, Ankerbytes und einen Registry-Stand, und ein
+Reader-Zertifikat stellt erst die Administrationsstufe aus.
+`ReaderAuditIdentityV1` ist deshalb ein PARAMETER; ein aus dem Schluessel
+erfundener Zertifikatshash waere die Aussage ueber eine Ausstellung, die nie
+stattgefunden hat. Die Folge fuer diesen Stand steht in Punkt 13.
+
+**4. Ein signiertes Audit, das nirgends hingeht, ist keines.** Der Plan nennt
+weder Senke noch Ablage. `ReaderAuditSink` ist der Port, `InMemoryReaderAuditSink`
+das Doppel fuer Zeugen, und `ReaderAuditLogStore` das versiegelte Protokoll in
+OPFS nach der Bauform von `ReaderTrustStateStore`: EIN Blob unter
+`audit-log`, ChaCha20-Poly1305 unter dem SIEBTEN abgeleiteten Schluessel
+(`ea-reader-audit-log-v1`, in `envelope.rs` neben den sechs anderen), Adresse
+im AAD, `MAX_READER_AUDIT_LOG_EVENTS_V1 = 10 000` gegen unbeschraenktes
+Wachstum aus angreiferkontrollierten Bytes. Jede Zeile darin ist fuer sich
+signiert; die Versiegelung schuetzt Vertraulichkeit und macht stilles Kuerzen
+sichtbar, sie ersetzt die Signatur nicht.
+
+**5. `export_one(record, target, confirmation)` braucht Sitzung, Zeit und
+einen fuenften Code.** „Kein Ziel" ist `Option::None` am Zielparameter
+(`Option<&mut dyn ReaderExportTarget>`) — die Person hat den Dialog
+abgebrochen, und das ist eine andere Aussage als ein besetztes Ziel. Der
+Dienst leiht die Sitzung VERAENDERLICH, weil der Export die Frist nachrechnet
+und eine faellige Sperre ausloest: `EA-READER-EXPORT-SESSION-LOCKED` ist der
+fuenfte Code vor der Grenze, und `ReaderExportService::open(&mut session,
+identity, &mut sink, effective_now)` traegt die Zeit FEST je Dienst wie
+`SignedLocalAuditService`. Hinter der Grenze gibt es drei Lagen statt einer:
+`AUDIT-BEFORE-WRITE` (nichts ist draussen), `TARGET-WRITE` (das Ziel hat
+abgewiesen, die `Failed`-Zeile steht) und `AUDIT-AFTER-WRITE` (die Bytes sind
+draussen, die zweite Zeile fehlt) — `plaintext_left()` sagt, welche.
+`ReaderExportTarget` ist ein Port mit Zielart, Besetztheit und GENAU EINEM
+`write`; `ReaderExportTargetError` ist feldlos, weil jedes Feld einen
+Wirtstext und damit einen Pfad truege.
+
+**6. `#[repr(u64)]` hat im Arbeitsbereich keinen Vorgaenger.** Alle
+eingefrorenen Aufzaehlungen tragen `#[repr(u8)]`; `ReaderExportTargetKindV1`
+ebenso, mit `target_kind(self) -> u64` fuer die Position. Dazu `label` und
+`from_label`, weil die Bruecke die Zielart als ZAHL nimmt (Punkt 10) und der
+Bericht sie als Wortlaut ausgibt.
+
+**7. Die zwei Ausfuhren des Plans kennen keine Sitzungskennung, und die
+Tresorausleihe kennt keine Uhr.** `readerNoteVisibility(hidden, nowMs)` und
+`readerSessionStateAt(nowMs)` nennen keine Sitzung, aber `VAULT_SESSIONS`
+schluesselt seit dem Browser-Vault nach `u32`. Beide bekommen `session` als
+erstes Argument, und `readerNoteActivity(session, nowMs)` tritt als DRITTE
+Ausfuhr dazu — `pointerdown` und `keydown` sind Eingaben, keine Sichtbarkeit.
+`readerSessionStateAt` gibt das generierte `ReaderSessionView` zurueck und
+nicht einen nackten Wortlaut: die Flaeche braucht neben der Sperre die
+offenen Eintragshashes. Die Tabelle haelt eine `ReaderSession` je Kennung
+statt eines nackten `UnlockedVault`, `readerVaultUnlock` bekommt `nowMs` als
+viertes Argument und stellt dabei die Entsperrbestaetigung aus, und
+`with_unlocked_vault(session, now, ..)` reicht die Uhr an
+`ReaderSession::vault` durch — `fetch.rs` und `file_access.rs` TRAGEN diese
+Uhr bereits (`os_wall_clock_ms`, `effective_now_ms`), sie geben sie nur
+weiter. Zwei Weigerungen, zwei Codes: `EA-READER-SESSION-UNKNOWN` und
+`EA-READER-SESSION-LOCKED`; die frueheren Argumentcodes der Nachbarmodule fuer
+eine unbekannte Kennung sind damit falsch benannt gewesen.
+
+**8. Der Plan hat keine Exportausfuhr.** `SingleExport.tsx` „ruft die
+Bestaetigung" — ueber was? `crates/ea-reader-wasm/src/export_bridge.rs` traegt
+`readerExportOne(session, nowMs, sealed, credentialId, prfOutput, entryHash,
+targetKind, targetOccupied, organizationId, deviceId,
+signerCertificateObjectHash, sink)`: die frische PRF-Ausgabe der
+Bestaetigungszeremonie wird gegen den versiegelten Tresor belegt (Punkt 2), der
+Datensatz der Sitzung ENTNOMMEN (`take_open_record`; ein Versuch verbraucht
+die offene Kopie, auch ein abgewiesener), und die Bytes gehen in eine
+`js_sys::Function` — das ist die Grenze. `showSaveFilePicker` und Downloads
+sind Hauptthread-Sache, die Sitzungstabelle liegt im Worker; die Bytes
+reisen deshalb vom Worker zur Seite, und die `Completed`-Zeile bezeugt die
+UEBERGABE, nicht die Platte. Der Browserzeuge `export_browser.rs` faehrt
+genau diesen Weg: Sitzung, offener Datensatz, Klartext in die Senke, zwei
+Zeilen versiegelt in OPFS, `EA-READER-EXPORT-NO-RECORD` beim zweiten Versuch,
+Sperre nach `Hidden` + 30 s ohne Timer.
+
+**9. `apps/web` hat keinen Halter der Sitzungskennung.** `unlockReaderVaultSession`
+gibt eine Zahl zurueck, die niemand aufhebt. `features/session/reader-session.ts`
+ist der EINE Halter auf dem Hauptthread und die Bruecke, die
+`SingleExport.tsx` als Pflicht-Prop bekommt; die drei Haken in `main.tsx`
+MELDEN ueber ihn und entscheiden nichts. Die Eingabemeldung ist auf einmal je
+Sekunde gedrosselt: eine Nachricht je `pointermove` waere der Worker als
+Tastenlogger.
+
+**10. Zwei DTOs, und beide ohne Union.** `ReaderSessionView { locked: boolean,
+openEntryHashes: readonly string[] }` und `SingleExportReportView { entryHash:
+string, targetKind: number }` treten in `READER_VIEW_MODELS_V1`. `locked` ist
+ein `boolean` und keine Union `'unlocked' | 'locked'`, `targetKind` die
+eingefrorene ZAHL der Position und kein Wortlaut — aus dem Grund, den
+`BundleActivationView` ausschreibt: `no-hand-written-contracts.test.ts`
+verbannt jedes Unionsliteral aus jeder handgeschriebenen Web-Quelle, und die
+Haken in `main.tsx` muessen auf die Sperre verzweigen koennen.
+
+**11. Die Fixtures des Plans existieren nicht, und eine davon KANN nicht
+existieren.** `fixtures::confirmation(purpose)` braucht `now`;
+`fixtures::record()` ist `decrypted_genesis_record()` ueber den EINZIGEN Weg zu
+einem `VerifiedDecryptedRecord` — `decrypt_verified` ueber
+`complete_archive_with_a_genesis_plaintext()` —, denn der Typ hat keinen
+Konstruktor; `fixtures::export_service()` haelt geliehene Sitzung und Senke
+und ist deshalb ein Dreizeiler je Zeuge. `export_audit_bytes_for("CANARY-PERSON",
+"Einsatz-2026-08-30.json")` ist unerreichbar: keine Kulisse des Arbeitsbaums
+verschluesselt eine Nutzlast mit einem Marker in einen Bestand (dieselbe Lage,
+die die Index-Projektion ausschreibt). Der Kanarienvogel von
+`audit_redaction.rs` ist deshalb, was der Genesis-Klartext OHNEHIN traegt —
+die Schemakennung `ea.genesis` als Text, Positivkontrolle inklusive —, der
+Dateiname ist die Attrappe des Ziels, und dazu prueft der Zeuge jedes
+33-Byte-Fenster des Klartexts gegen die Auditbytes. `VAULT_CREDENTIAL_ID_V1`
+und `VAULT_PRF_OUTPUT_V1` werden `pub`, weil der Browserzeuge die ROHEN Bytes
+ueber die Bruecke reicht, wie JavaScript es tut.
+
+**12. `.err().expect(..)` faellt unter `-D clippy::err-expect`, sobald der
+Erfolgstyp `Debug` traegt.** `ReaderExportReport`, `ReaderSession` und `()`
+tun das; die Zeugen schreiben `expect_err`. Konstantenvergleiche stehen in
+`const { assert!(..) }`, sonst faellt `assertions_on_constants`.
+
+**13. In DIESEM Stand kann der Browser keinen Export vollenden, und das ist
+benannt.** Zwei Dinge fehlen, keines davon gehoert dieser Aufgabe: ein
+Reader-Zertifikat (Punkt 3 — `auditIdentity()` der Flaeche gibt `undefined`
+zurueck, und `SingleExport.tsx` sagt es mit einem Hinweis statt Bytes zu
+erfinden) und ein Weg, einen `VerifiedDecryptedRecord` in die Sitzung zu
+OEFFNEN — die Reader-Oberflaeche der Aufgabe „Integritätszentrierte
+Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop". Der
+Playwright-Lauf `lock-and-export.spec.ts` bezeugt deshalb die SPERRE ueber die
+montierte Schale (echte Engine, echtes `visibilitychange`, gefaelschte
+Seitenuhr ueber `page.clock`, kein Timer in Rust) und die abgewiesene
+Exportflaeche; der Export selbst ist im Browser durch `export_browser.rs`
+bezeugt, mit Kulissenidentitaet ueber die echten Ausfuhren. Die Ledgerzeilen
+`FR-104`, `FR-105`, `FR-106` und `WR-082` bleiben auf `planned`: der Plan
+weist die Statusbewegung der Aufgabe des Stufe-4-Gates zu.
+
+Was der Plan RICHTIG hatte und unveraendert steht: der Fuenfminutenwert wird
+gegen `ea_operator::MAX_INACTIVITY_MS` ueber eine DEV-Kante gemessen; die
+verkuerzte Frist ist 30 000 ms; die Sperre faellt in `state_at` und an keinem
+Timer; die monotone Untergrenze; `lock()` als einzige Stelle, an der
+Schluesselmaterial faellt, ueber `ZeroizeOnDrop`; die Schranke gegen
+`ValidatedPayload` und `DerivedView` als `compile_fail`-Doctest; `export_one`
+ueber GENAU EINEN Datensatz mit `compile_fail`-Doctest gegen `Vec`; Code 5,
+Kontext-Tag 3, `UserChosenFile = 1` gegen den eingefrorenen Vektor;
+`Accepted` an der Grenze, dann `Completed` oder `Failed`; die verbrauchte
+Bestaetigung; die vier Abbruchpunkte mit Rust-Zeugen.
 
 **Interfaces:**
 - Consumes: `ea_format::{LocalAuditActionV1, LocalAuditEventCoreFieldsV1, LocalAuditOutcomeV1, ExportContextV1, encode_local_audit_core, encode_local_audit_event, decode_local_audit_event}`; `ea_crypto::{CoseSigner, ContentType, SecretBytes, SecretVec}`; `ea_types::{DeviceId, EntryHash, EventId, ObjectHash, OrganizationId, UnixMillis}`; die entsperrte Vault-Sitzung mit ihrem Ed25519-Geraete- und Auditschluessel und ihrem X25519-KEM-Schluessel aus dem Task „Browser-Vault: PRF-Envelopes, Schlüsselprofil und die Verwahrung von Anchor und KEM-Schlüssel"; die verifizierte WebAuthn-Assertion aus dem Task „Browser-Enrollment: zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate"; `VerifiedDecryptedRecord` aus dem Task „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert".
@@ -5350,9 +5548,24 @@ cargo metadata --format-version 1
 cargo test --locked -p ea-reader --test session_lock --test export --test audit_redaction
 cargo test --locked -p ea-reader --doc
 cargo test --locked -p ea-format --test local_audit_encoder
+cargo run --locked -p ea-ui-contracts --bin emit-ts
+cargo test --locked -p ea-ui-contracts -p ea-reader-wasm
+cargo test --locked -p xtask --test workspace
+cargo check --locked --target wasm32-unknown-unknown -p ea-reader -p ea-reader-wasm
+cargo run --locked -p xtask -- build-wasm
 pnpm --dir apps/web test --run SingleExport
+cargo run --locked -p xtask -- browsers up
+pnpm web:browser-test
 pnpm --dir apps/web exec playwright test tests/e2e/lock-and-export.spec.ts
+cargo run --locked -p xtask -- browsers down
 ```
+
+Die Erweiterung gegenueber der ersten Fassung folgt aus den Punkten 7, 8 und
+10 der Messung oben: die zwei DTOs werden EMITTIERT und ihr Abbild im Wirt
+bezeugt (`session_dto.rs`), die Bruecke wird auf wasm32 GEPRUEFT, und
+`export_browser.rs` faehrt in der Klammer `browsers up` … `browsers down`, weil
+der `wasm-bindgen-test-runner` einen chromedriver braucht — dieselbe Klammer,
+in der `lock-and-export.spec.ts` seine Engine bezieht.
 
 `cargo metadata --format-version 1` steht als ERSTE Zeile und ist das GENAU EINE Kommando dieses Tasks ohne `--locked`: Schritt 3 traegt die Dev-Kante `ea-operator` in `crates/ea-reader/Cargo.toml` ein, und `Cargo.lock` schreibt darauf fort. Es steht NACH der Registrierung und VOR jedem `--locked`-Kommando; `cargo test --locked -p ea-format --test local_audit_encoder` faehrt die zwoelf eingefrorenen Aktionskodierer NUR mit und aendert an dieser Crate nichts.
 
@@ -5361,9 +5574,13 @@ Expected: PASS. Der Fuenfminutenwert ist gegen `ea_operator::MAX_INACTIVITY_MS` 
 - [ ] **Step 5: Commit the Reader session and export controls**
 
 ```bash
-git add crates/ea-reader crates/ea-reader-wasm apps/web/src/features/export apps/web/src/main.tsx apps/web/tests/e2e/lock-and-export.spec.ts docs/traceability/stage-4-fault-points.json Cargo.lock
+git add crates/ea-reader crates/ea-reader-wasm crates/ea-ui-contracts apps/web docs/traceability/stage-4-fault-points.json Cargo.lock
 git commit -m "feat(reader): lock on inactivity and audit authenticator-confirmed single exports"
 ```
+
+`git add apps/web` statt der drei einzelnen Pfade: die Messung oben zaehlt
+sieben Web-Dateien, und ein Commit, der `opfs-worker.ts` oder das generierte
+`generated-contracts.ts` zuruecklaesst, uebersetzte nicht.
 
 ### Task 13: Integritätszentrierte Reader-Oberfläche in `apps/web` und die Rollengrenze zum Desktop (formerly Task 7)
 
