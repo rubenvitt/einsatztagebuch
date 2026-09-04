@@ -1108,11 +1108,15 @@ fn run_workspace_tests(root: &Path) -> io::Result<()> {
 ///
 /// Sie ist die Kopie von `ea_index::MONOLITHIC_INDEX_MAX_PACKAGES_V1`, und die
 /// Kopie ist bewusst: `xtask` zieht keine Kante auf eine Bibliotheks-Crate, die
-/// es nur fuer eine Zahl braeuchte. Eine DRIFT bleibt trotzdem nicht
-/// unbemerkt — der gefahrene Zeuge
-/// `crates/ea-index/tests/scale_50000.rs::fifty_thousand_packages_fit_the_monolithic_blob_and_report_their_cost`
-/// beginnt mit `assert_eq!(MONOLITHIC_INDEX_MAX_PACKAGES_V1, 50_000)` und
-/// faerbt rot, sobald die Schwelle sich bewegt.
+/// es nur fuer eine Zahl braeuchte.
+///
+/// Gegen die Drift steht deshalb ein TEXTPIN,
+/// `the_index_scale_package_count_matches_the_threshold_of_the_index_crate` in
+/// der `mod tests` dieser Datei, der die Deklaration in
+/// `crates/ea-index/src/inverted.rs` liest. Er und nicht der Zeuge der Messung:
+/// der traegt `#[ignore]`, und `cargo test --workspace --all-targets --locked`
+/// laesst ignorierte Faelle aus — eine Sicherung, die nur beim manuellen
+/// `pnpm index:scale` griffe, ist im Gate keine.
 const INDEX_SCALE_PACKAGES_V1: usize = 50_000;
 
 /// Die EINE Fehlerzeile der Argumentgrammatik von `index-scale`.
@@ -1141,6 +1145,14 @@ fn index_scale_command_args() -> Vec<&'static str> {
 }
 
 /// Faehrt den Schwellenzeugen und reicht seine Ausgabe unveraendert durch.
+///
+/// Das Argument ist eine ZUSICHERUNG des Aufrufers und kein Parameter — es
+/// erreicht das Kommando nicht, denn der Zeuge misst die Schwelle, die er
+/// selbst zusichert, und keine frei gewaehlte Zahl. Es steht trotzdem, weil es
+/// genau eine Drift faengt, die sonst still bliebe: bewegt sich die Schwelle,
+/// ohne dass `package.json` mitzieht, meldet dieser Arm es laut, statt eine
+/// Messung unter falscher Ueberschrift auszugeben. Die Gegenrichtung — die
+/// Konstante hier gegen die der Crate — haelt der Textpin in `mod tests`.
 fn run_index_scale(root: &Path, packages: usize) -> Result<(), String> {
     if packages != INDEX_SCALE_PACKAGES_V1 {
         return Err(format!(
@@ -4514,6 +4526,28 @@ path = "fuzz_targets/signed_object.rs"
                 "--",
                 "-max_total_time=30",
             ]
+        );
+    }
+
+    /// Die Schwelle steht an EINER Stelle, und dieser Pin haelt die Kopie daran.
+    ///
+    /// Gelesen wird die Deklaration als TEXT — dieselbe Bauform, mit der
+    /// `tools/xtask/tests/workspace.rs` die Positivliste an `main.rs` bindet —,
+    /// weil `xtask` sonst eine Kante auf `ea-index` braeuchte, die es allein
+    /// fuer eine Zahl zoege.
+    #[test]
+    fn the_index_scale_package_count_matches_the_threshold_of_the_index_crate() {
+        let root = super::workspace_root();
+        let source = std::fs::read_to_string(root.join("crates/ea-index/src/inverted.rs")).unwrap();
+        let declaration = format!(
+            "pub const MONOLITHIC_INDEX_MAX_PACKAGES_V1: usize = {}_{:03};",
+            super::INDEX_SCALE_PACKAGES_V1 / 1000,
+            super::INDEX_SCALE_PACKAGES_V1 % 1000
+        );
+        assert!(
+            source.contains(&declaration),
+            "crates/ea-index must declare {declaration}; xtask carries the same number and \
+             nothing else binds the two"
         );
     }
 

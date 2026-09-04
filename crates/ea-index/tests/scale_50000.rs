@@ -42,6 +42,13 @@ fn fifty_thousand_packages_fit_the_monolithic_blob_and_report_their_cost() {
     let unlock_at = Instant::now();
     let reopened = IndexBlobV1::open(blob.bytes(), &key).unwrap();
     let unlock_ms = unlock_at.elapsed().as_millis();
+    // ZWEI Suchdauern, und sie messen verschiedene Dinge. Die erste trifft
+    // GENAU EIN Paket ueber einen eindeutigen Term: das ist der billigste Pfad
+    // und die untere Schranke. Die zweite trifft den GANZEN Bestand ueber einen
+    // geteilten Term und traegt damit, was ein echtes Archiv erzeugt, in dem ein
+    // Stichwort ueber viele Einsaetze laeuft — Trefferliste klonen, je Treffer
+    // eine Zeile nachschlagen, sortieren und kopieren. Nur die erste allein
+    // auszuweisen hiesse, die Suchdauer um Groessenordnungen zu unterbieten.
     let search_at = Instant::now();
     let hits = reopened
         .search(&ReaderQueryV1::vehicle("LF 49999"))
@@ -49,14 +56,23 @@ fn fifty_thousand_packages_fit_the_monolithic_blob_and_report_their_cost() {
     let search_us = search_at.elapsed().as_micros();
     assert_eq!(hits.len(), 1);
 
+    let broad_search_at = Instant::now();
+    let broad_hits = reopened
+        .search(&ReaderQueryV1::keyword(fixtures::SHARED_KEYWORD_TERM_V1))
+        .unwrap();
+    let broad_search_us = broad_search_at.elapsed().as_micros();
+    assert_eq!(broad_hits.len(), MONOLITHIC_INDEX_MAX_PACKAGES_V1);
+
     // Gemessen, nicht behauptet. Die Zahlen gehen in den Stufe-4-Gate-Bericht.
     println!(
-        "ea-index scale packages={} blob_bytes={} seal_ms={} unlock_ms={} search_us={} peak_rss_kib={}",
+        "ea-index scale packages={} blob_bytes={} seal_ms={} unlock_ms={} search_us={} \
+         broad_search_us={} peak_rss_kib={}",
         MONOLITHIC_INDEX_MAX_PACKAGES_V1,
         blob.bytes().len(),
         seal_ms,
         unlock_ms,
         search_us,
+        broad_search_us,
         peak_resident_kib()
     );
 

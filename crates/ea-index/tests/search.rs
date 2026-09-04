@@ -8,7 +8,7 @@
 
 mod fixtures;
 
-use ea_index::{InvertedIndexV1, ReaderQueryV1};
+use ea_index::{InvertedIndexV1, ReaderQueryV1, SchemaViewV1};
 use ea_schema::SCHEMA_VERSION_V1;
 use ea_types::UnixMillis;
 
@@ -62,6 +62,32 @@ fn the_four_filters_run_locally_over_decrypted_field_values() {
         combined.is_empty(),
         "filters combine conjunctively, not disjunctively"
     );
+
+    // Und die ZEITRAUMachse ebenso, in beide Richtungen. Sie muss eigens
+    // bezeugt werden, weil sie ueber einen anderen Mechanismus laeuft als die
+    // drei Textachsen: die schneiden Trefferlisten, der Zeitraum siebt danach
+    // ueber die aufgenommenen Zeilen. Ein Zeuge, der nur Stichwort und
+    // Fahrzeug kreuzt, laesst das stille Fallenlassen des Zeitraums bei
+    // gesetztem Termfilter unbemerkt.
+    let period_over_2026_0002 = ReaderQueryV1::period(
+        UnixMillis::new(1_771_500_000_000),
+        UnixMillis::new(1_773_000_000_000),
+    );
+    assert!(
+        index
+            .search(&period_over_2026_0002.clone().and_vehicle("LF 10"))
+            .unwrap()
+            .is_empty(),
+        "der Zeitraum trifft 2026-0002, das Fahrzeug 2026-0001; konjunktiv bleibt nichts"
+    );
+    assert_eq!(
+        index
+            .search(&period_over_2026_0002.and_vehicle("RTW 1"))
+            .unwrap()
+            .len(),
+        1,
+        "und beide zusammen auf demselben Datensatz treffen ihn"
+    );
 }
 
 /// Der Debug-Text einer Anfrage nennt die GESETZTEN Achsen und keinen Wert.
@@ -94,6 +120,53 @@ fn the_debug_form_of_a_query_names_its_axes_and_never_its_terms() {
     }
 }
 
+/// Treffer, Bestand und Schemaansicht redigieren ebenso.
+///
+/// Alle drei tragen abgeleitete Werte aus entschluesseltem Inhalt, und alle
+/// drei koennen in einer Fehlermeldung oder einem Protokoll landen. Geprueft
+/// wird zusaetzlich `{:#?}`: eine Formatierung, die nur in der einzeiligen Form
+/// redigiert, laesse den Wert in der mehrzeiligen stehen.
+#[test]
+fn hit_index_and_schema_view_redact_their_decrypted_values_too() {
+    let records = fixtures::three_records();
+    let index = fixtures::index_over(&records);
+    let hit = index
+        .hit_for(records[0].source_entry_hash)
+        .expect("die Kulisse hat den Datensatz aufgenommen");
+    let view = SchemaViewV1::derive(&records[0]).unwrap();
+
+    for rendered in [
+        format!("{hit:?}"),
+        format!("{hit:#?}"),
+        format!("{index:?}"),
+        format!("{index:#?}"),
+        format!("{view:?}"),
+        format!("{view:#?}"),
+    ] {
+        for secret in [
+            "2026-0001",
+            "CANARY-PERSON",
+            "canary-person",
+            "brand",
+            "lf 10",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "{secret} must not reach a debug form: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("redacted"),
+            "the redaction must be visible as such: {rendered}"
+        );
+    }
+    // Die Positivkontrolle: die Herkunft steht sehr wohl da, sonst redigierte
+    // die Form alles und saegte damit ihren eigenen Nutzen ab.
+    assert!(format!("{hit:?}").contains("chain_sequence"));
+    assert!(format!("{index:?}").contains("indexed_packages: 3"));
+    assert!(format!("{view:?}").contains("ea.incident"));
+}
+
 #[test]
 fn exactly_one_ingestion_method_exists_and_it_never_names_a_reader_type() {
     let source = include_str!("../src/inverted.rs");
@@ -122,7 +195,9 @@ fn exactly_one_ingestion_method_exists_and_it_never_names_a_reader_type() {
     for name in ["VerifiedDecryptedRecord", "SecretVec", "ea_reader"] {
         assert!(
             !source.contains(name),
-            "{name} must not appear in ea-index: the edge runs ea-reader -> ea-index only"
+            "{name} must not appear in src/inverted.rs, the ingestion surface: the edge runs \
+             ea-reader -> ea-index only. (src/blob.rs does name SecretVec, and must: aead_seal \
+             takes its plaintext by value.)"
         );
     }
 }

@@ -8,8 +8,8 @@ mod fixtures;
 
 use ea_crypto::{AEAD_NONCE_SIZE, CEK_SIZE, SecretBytes};
 use ea_index::{
-    INDEX_BLOB_HEADER_BYTES_V1, INDEX_BLOB_MAGIC_V1, INDEX_FORMAT_VERSION_V1, IndexBlobV1,
-    InvertedIndexV1, ReaderQueryV1,
+    INDEX_BLOB_HEADER_BYTES_V1, INDEX_BLOB_MAGIC_V1, INDEX_FORMAT_VERSION_V1,
+    INDEX_PARSER_LIMITS_V1, IndexBlobV1, InvertedIndexV1, ReaderQueryV1,
 };
 
 #[test]
@@ -21,14 +21,24 @@ fn the_blob_round_trips_through_chacha20poly1305_and_carries_no_plaintext() {
         &blob.bytes()[..INDEX_BLOB_MAGIC_V1.len()],
         &INDEX_BLOB_MAGIC_V1
     );
+    // BEIDE Formen, und das ist der Punkt: Termschluessel liegen im Koerper
+    // KLEIN GEFALTET, die Einsatznummer in ihrer Anzeigeform. Ein Kanarienvogel
+    // allein in Grossschreibung schlaege selbst dann nicht an, wenn der Koerper
+    // unverschluesselt danebenlaege — gemessen am Klartextkoerper dieser
+    // Kulisse, der `canary-person` und `lf 10` traegt und `CANARY-PERSON` und
+    // `LF 10` nie.
     for canary in [
         b"CANARY-PERSON".as_slice(),
+        b"canary-person".as_slice(),
         b"2026-0001".as_slice(),
         b"LF 10".as_slice(),
+        b"lf 10".as_slice(),
+        b"verkehrsunfall".as_slice(),
     ] {
         assert!(
             !fixtures::contains_subslice(blob.bytes(), canary),
-            "no decrypted field value may appear in the sealed index blob"
+            "no decrypted field value may appear in the sealed index blob: {}",
+            String::from_utf8_lossy(canary)
         );
     }
     let reopened = IndexBlobV1::open(blob.bytes(), &key).unwrap();
@@ -54,14 +64,19 @@ fn the_blob_round_trips_through_chacha20poly1305_and_carries_no_plaintext() {
     );
 }
 
-/// Der KOPF ist mitauthentisiert und nicht bloss vorangestellt.
+/// Jede Kopfmutation faellt, und JEDE an ihrer eigenen Schicht.
 ///
-/// Ohne den Kopf als AAD liesse sich ein aelterer Blob unter einer neuen
-/// Formatversion zurueckspielen: dieselben Chiffratbytes, ein anderer Kopf, und
-/// die Oeffnung gaebe nach. Beide Mutationen liegen AUSSERHALB des Chiffrats,
-/// also faellt hier ausschliesslich die AAD-Bindung durch.
+/// Der Zeuge hiess frueher `the_plaintext_header_is_bound_into_the_ciphertext_as_aad`
+/// und behauptete damit mehr, als er misst: GEMESSEN bleibt er gruen, wenn man
+/// beiden `aead_*`-Aufrufen ein leeres AAD gibt. Das ist kein Fehler des
+/// Codes, sondern eine Tatsache ueber den heutigen Kopf — Magic und
+/// Formatversion prueft `IndexBlobV1::open` ausdruecklich VOR jeder Kryptografie,
+/// und die Kopf-Nonce IST die AEAD-Nonce. Was er wirklich haelt, ist die
+/// SCHICHTUNG: Formfehler fallen an der Form, Schluesselfehler an der
+/// Kryptografie. Die AAD-Bindung selbst bezeugt
+/// `the_header_is_passed_as_aad_and_a_body_sealed_without_it_never_opens`.
 #[test]
-fn the_plaintext_header_is_bound_into_the_ciphertext_as_aad() {
+fn every_header_mutation_is_refused_at_its_own_layer() {
     let index = fixtures::index_over(&fixtures::three_records());
     let key = SecretBytes::new([0x33; CEK_SIZE]);
     let blob = IndexBlobV1::seal(&index, &key, &SecretBytes::new([0x07; AEAD_NONCE_SIZE])).unwrap();
@@ -120,4 +135,103 @@ fn a_rebuild_from_the_exact_cached_bytes_is_byte_identical() {
         second.bytes(),
         "insertion order must not reach the sealed bytes; the index is a BTreeMap"
     );
+}
+
+/// Die AAD-Bindung, direkt bezeugt.
+///
+/// Der einzige Weg dahin fuehrt an `IndexBlobV1::seal` vorbei: die Kulisse
+/// versiegelt denselben Koerper unter demselben Schluessel und derselben Nonce
+/// einmal MIT und einmal OHNE den Kopf als AAD. Der erste geht auf — das ist
+/// die Positivkontrolle, ohne die die zweite Zeile auch dann gruen bliebe, wenn
+/// der handgebaute Blob aus einem ganz anderen Grund nicht traegt. Der zweite
+/// DARF sich nicht oeffnen lassen; gaebe `open` ein leeres AAD weiter, oeffnete
+/// er sich klaglos und lieferte einen leeren Bestand.
+#[test]
+fn the_header_is_passed_as_aad_and_a_body_sealed_without_it_never_opens() {
+    let key = SecretBytes::new([0x33; CEK_SIZE]);
+    let nonce = SecretBytes::new([0x07; AEAD_NONCE_SIZE]);
+    let body = fixtures::hand_built_body(&[]);
+
+    let bound = fixtures::hand_sealed_blob(&body, &key, &nonce, true);
+    assert_eq!(
+        IndexBlobV1::open(&bound, &key)
+            .expect("mit gebundenem Kopf geht derselbe Weg auf")
+            .indexed_packages(),
+        0
+    );
+
+    let unbound = fixtures::hand_sealed_blob(&body, &key, &nonce, false);
+    assert_eq!(
+        IndexBlobV1::open(&unbound, &key).unwrap_err().code(),
+        "EA-CRYPTO-AEAD-OPEN",
+        "ein Chiffrat ohne den Kopf als AAD darf sich nicht oeffnen lassen"
+    );
+}
+
+/// Ein Koerper, den dieser Kodierer nie schriebe, ist ein ARTEFAKTfehler.
+///
+/// Jede der fuenf Missbildungen ist wohlgeformtes, kanonisches,
+/// grenzenkonformes CBOR — der Zeuge weist das je Fall NACH, indem er
+/// `ea_cbor::validate` mit denselben Grenzen darueberlaufen laesst. Ein
+/// `EA-CBOR-*` als Befund behauptete deshalb einen Fehler, den `ea-cbor` nie
+/// erhoben hat.
+#[test]
+fn a_body_this_encoder_could_not_have_written_is_refused_as_a_blob_format() {
+    let key = SecretBytes::new([0x33; CEK_SIZE]);
+    let nonce = SecretBytes::new([0x07; AEAD_NONCE_SIZE]);
+
+    let short_entry_hash = {
+        let mut row = fixtures::HandBuiltRowV1::valid(1);
+        row.entry_hash.truncate(31);
+        vec![row]
+    };
+    let short_record_id = {
+        let mut row = fixtures::HandBuiltRowV1::valid(1);
+        row.record_id.truncate(15);
+        vec![row]
+    };
+    let fourteen_positions = {
+        let mut row = fixtures::HandBuiltRowV1::valid(1);
+        row.positions = 14;
+        vec![row]
+    };
+    let two_valued_option = {
+        let mut row = fixtures::HandBuiltRowV1::valid(1);
+        row.option_positions = 2;
+        vec![row]
+    };
+    let duplicate_rows = vec![
+        fixtures::HandBuiltRowV1::valid(1),
+        fixtures::HandBuiltRowV1::valid(1),
+    ];
+    let descending_rows = vec![
+        fixtures::HandBuiltRowV1::valid(2),
+        fixtures::HandBuiltRowV1::valid(1),
+    ];
+    let unsorted_terms = {
+        let mut row = fixtures::HandBuiltRowV1::valid(1);
+        row.keyword_terms = vec!["brand".to_owned(), "arbeitsunfall".to_owned()];
+        vec![row]
+    };
+
+    for (name, rows) in [
+        ("31-byte entry hash", short_entry_hash),
+        ("15-byte record id", short_record_id),
+        ("fourteen positions", fourteen_positions),
+        ("two-valued option container", two_valued_option),
+        ("two rows under one entry hash", duplicate_rows),
+        ("descending rows", descending_rows),
+        ("descending terms", unsorted_terms),
+    ] {
+        let body = fixtures::hand_built_body(&rows);
+        ea_cbor::validate(&body, INDEX_PARSER_LIMITS_V1).unwrap_or_else(|error| {
+            panic!("{name} must be well-formed canonical CBOR, ea-cbor said {error}")
+        });
+        let blob = fixtures::hand_sealed_blob(&body, &key, &nonce, true);
+        assert_eq!(
+            IndexBlobV1::open(&blob, &key).unwrap_err().code(),
+            "EA-INDEX-BLOB-FORMAT",
+            "{name}"
+        );
+    }
 }

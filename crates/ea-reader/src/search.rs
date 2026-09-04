@@ -120,10 +120,21 @@ impl ReaderSearch {
         record: &VerifiedDecryptedRecord,
     ) -> Result<IndexPressureV1, ReaderError> {
         let indexable = indexable_record(record)?;
-        self.pressure = self
-            .index
-            .upsert(&indexable)
-            .map_err(|_| ReaderError::UnsupportedSchema)?;
+        self.pressure = self.index.upsert(&indexable).map_err(|error| {
+            // Die Einebnung ist HEUTE vollstaendig: die Aufnahme des Index kann
+            // ausschliesslich an der Schemaprojektion scheitern. Sie ist
+            // trotzdem eine Einebnung, und die Zusicherung haelt sie ehrlich —
+            // bekaeme die Aufnahme je einen zweiten Fehlschlag (eine
+            // Kapazitaets- oder Kodiertatsache), erschiene er hier sonst still
+            // als Schemaweigerung, und `EA-READER-SCHEMA-UNSUPPORTED` sagte
+            // etwas Falsches ueber das Paket.
+            debug_assert!(
+                matches!(error, IndexError::Schema(_)),
+                "die Aufnahme des Index kennt nur die Schemaweigerung, hier war es {}",
+                error.code()
+            );
+            ReaderError::UnsupportedSchema
+        })?;
         Ok(self.pressure)
     }
 
@@ -224,4 +235,175 @@ fn person_terms(incident: &IncidentV1) -> Vec<String> {
         .iter()
         .map(|person| person.display_name().to_owned())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Die Projektion der drei Textachsen, ueber von Hand gebaute Einsaetze.
+    //!
+    //! Sie steht HIER und nicht in `tests/`, weil die drei Projektionen
+    //! modulprivat sind und bleiben sollen: sie sind Teile EINER Umwandlung und
+    //! keine zweite oeffentliche Flaeche. Der Weg vom Zeugentyp in sie hinein
+    //! ist ueber `tests/index_projection.rs` bezeugt.
+
+    use ea_schema::{
+        CommonHeaderV1, IncidentV1, KeywordV1, LocationV1, NativeSourceV1, OccurredAtV1,
+        OperatorSnapshotV1, PatientCount, PersonnelSnapshotV1, VehicleSnapshotV1,
+    };
+    use ea_types::{
+        ObjectHash, OperatorSubjectId, OrganizationId, RecordId, RegistryVersion, UnixMillis,
+    };
+
+    use super::{keyword_terms, person_terms, vehicle_terms};
+
+    /// Eine Datensatzkennung in der Form, die `ea-schema` verlangt: UUIDv7.
+    ///
+    /// Zeichengleich zu `crates/ea-schema/tests/v1_validation.rs`; eine
+    /// beliebige 16-Byte-Folge weist `IncidentV1::new` mit
+    /// `EA-SCHEMA-UUID-V7` ab.
+    fn record_id(seed: u8) -> RecordId {
+        let mut bytes = [seed; 16];
+        bytes[6] = 0x70 | (seed & 0x0f);
+        bytes[8] = 0x80 | (seed & 0x3f);
+        RecordId::try_from(bytes.as_slice()).unwrap()
+    }
+
+    fn header() -> CommonHeaderV1 {
+        CommonHeaderV1::new(
+            record_id(0x01),
+            UnixMillis::new(1_771_000_000_000),
+            "Europe/Berlin",
+            OperatorSnapshotV1::new(
+                OrganizationId::try_from(&[0x10_u8; 16][..]).unwrap(),
+                OperatorSubjectId::try_from(&[0x20_u8; 16][..]).unwrap(),
+                "Erika Beispiel",
+                "Einsatzleitung",
+                [0x30; 32],
+                ObjectHash::try_from(&[0x40_u8; 32][..]).unwrap(),
+            )
+            .unwrap(),
+            NativeSourceV1::new("writer-native", 1).unwrap(),
+            RegistryVersion::new(7),
+        )
+        .unwrap()
+    }
+
+    fn incident(
+        keyword: KeywordV1,
+        vehicles: Vec<VehicleSnapshotV1>,
+        personnel: Vec<PersonnelSnapshotV1>,
+    ) -> IncidentV1 {
+        let vehicles_empty_reason = vehicles.is_empty().then(|| "Keine Fahrzeuge".to_owned());
+        let personnel_empty_reason = personnel.is_empty().then(|| "Keine Kräfte".to_owned());
+        IncidentV1::new(
+            header(),
+            "2026-0001",
+            OccurredAtV1::new(UnixMillis::new(1_771_000_000_000), None).unwrap(),
+            keyword,
+            LocationV1::free_text("Hauptstraße", None).unwrap(),
+            personnel,
+            personnel_empty_reason,
+            vehicles,
+            vehicles_empty_reason,
+            PatientCount::Known(0),
+            None,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    /// Der freie Text ist der Term; die Referenz gibt ihren ANZEIGETEXT her und
+    /// NIE ihre Kennung.
+    ///
+    /// Die Kennung ist ein technischer Schluessel eines Stammdatensatzes. Truege
+    /// der Index sie, faende eine Suche nach ihr Einsaetze — und die Kennung
+    /// steht in keiner Oberflaeche, nach der jemand suchen koennte.
+    #[test]
+    fn a_keyword_projects_its_free_text_or_the_display_text_of_its_reference() {
+        assert_eq!(
+            keyword_terms(&incident(
+                KeywordV1::free_text("Brand").unwrap(),
+                vec![],
+                vec![]
+            )),
+            vec!["Brand".to_owned()]
+        );
+
+        let referenced = incident(
+            KeywordV1::reference("KW-42", "Verkehrsunfall").unwrap(),
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            keyword_terms(&referenced),
+            vec!["Verkehrsunfall".to_owned()]
+        );
+        assert!(
+            !keyword_terms(&referenced)
+                .iter()
+                .any(|term| term == "KW-42"),
+            "die Referenzkennung ist kein Suchbegriff"
+        );
+    }
+
+    /// Ein Fahrzeug projiziert ALLE DREI Bezeichner, und die beiden optionalen
+    /// verschwinden, wenn sie fehlen.
+    #[test]
+    fn a_vehicle_projects_display_name_radio_call_sign_and_licence_plate() {
+        let full = VehicleSnapshotV1::AdHoc {
+            display_name: "Löschfahrzeug".to_owned(),
+            radio_call_sign: Some("LF 10".to_owned()),
+            license_plate: Some("B-FW 1234".to_owned()),
+        };
+        let bare = VehicleSnapshotV1::AdHoc {
+            display_name: "MTW".to_owned(),
+            radio_call_sign: None,
+            license_plate: None,
+        };
+        assert_eq!(
+            vehicle_terms(&incident(
+                KeywordV1::free_text("Brand").unwrap(),
+                vec![full, bare],
+                vec![]
+            )),
+            vec![
+                "Löschfahrzeug".to_owned(),
+                "LF 10".to_owned(),
+                "B-FW 1234".to_owned(),
+                "MTW".to_owned(),
+            ]
+        );
+    }
+
+    /// Jede eingesetzte Person projiziert ihren Anzeigenamen — und ein Einsatz
+    /// ohne Kraefte traegt keine erfundene Zeile.
+    #[test]
+    fn every_person_projects_its_display_name_and_an_empty_crew_projects_nothing() {
+        let crew = vec![
+            PersonnelSnapshotV1::AdHoc {
+                display_name: "Ada Lovelace".to_owned(),
+                role_or_function: Some("Gruppenführerin".to_owned()),
+            },
+            PersonnelSnapshotV1::AdHoc {
+                display_name: "Grace Hopper".to_owned(),
+                role_or_function: None,
+            },
+        ];
+        assert_eq!(
+            person_terms(&incident(
+                KeywordV1::free_text("Brand").unwrap(),
+                vec![],
+                crew
+            )),
+            vec!["Ada Lovelace".to_owned(), "Grace Hopper".to_owned()]
+        );
+        assert!(
+            person_terms(&incident(
+                KeywordV1::free_text("Brand").unwrap(),
+                vec![],
+                vec![]
+            ))
+            .is_empty()
+        );
+    }
 }

@@ -13,7 +13,8 @@
 //! dieselbe Nummer. Damit ist jede Kulisse dieses Verzeichnisses reproduzierbar
 //! und der bytegleiche Rebuild ueberhaupt pruefbar.
 
-use ea_index::{IndexableRecordV1, InvertedIndexV1};
+use ea_crypto::{AEAD_NONCE_SIZE, CEK_SIZE, SecretBytes, SecretVec, aead_seal};
+use ea_index::{INDEX_BLOB_MAGIC_V1, INDEX_FORMAT_VERSION_V1, IndexableRecordV1, InvertedIndexV1};
 use ea_schema::SCHEMA_VERSION_V1;
 use ea_types::{ChainSequence, EntryHash, RecordId, UnixMillis};
 
@@ -133,23 +134,34 @@ pub fn index_over(records: &[IndexableRecordV1]) -> InvertedIndexV1 {
     index
 }
 
+/// Der Stichworttext, den JEDES synthetische Paket traegt.
+///
+/// Er steht neben dem eindeutigen Term und ist die zweite Haelfte der Messung:
+/// ohne ihn haette jede Trefferliste genau einen Eintrag, und die gemessene
+/// Suchdauer beschriebe den billigstmoeglichen Pfad statt eines echten
+/// Bestands, in dem ein Stichwort ueber viele Einsaetze laeuft.
+pub const SHARED_KEYWORD_TERM_V1: &str = "Einsatz";
+
 /// Das `package`-te synthetische Paket der Schwellenmessung.
 ///
-/// Jedes Paket traegt GENAU EINEN Term je Filterachse, und jeder dieser Terme
-/// ist ueber die laufende Nummer eindeutig: damit misst
-/// `scale_50000.rs` den Fall mit der GROESSTEN Zahl verschiedener
-/// Termschluessel und nicht den bequemen Fall weniger, dafuer langer
-/// Trefferlisten.
+/// Jedes Paket traegt einen EINDEUTIGEN Term je Filterachse — damit misst
+/// `scale_50000.rs` den Fall mit der groessten Zahl verschiedener
+/// Termschluessel, also die teuerste Aufnahme, den groessten Blob und den
+/// hoechsten Speicher — UND zusaetzlich [`SHARED_KEYWORD_TERM_V1`], damit
+/// derselbe Lauf auch die andere Seite messen kann: eine Trefferliste, die den
+/// ganzen Bestand nennt.
 #[must_use]
 pub fn synthetic_package(package: usize) -> IndexableRecordV1 {
     let ordinal = u32::try_from(package).expect("die Schwelle liegt weit unter u32::MAX");
-    indexable_incident(
+    let mut record = indexable_incident(
         &format!("2026-{package:06}"),
         &format!("Stichwort {package}"),
         &format!("LF {package}"),
         &format!("Person {package}"),
         UnixMillis::new(1_771_000_000_000 + i64::from(ordinal)),
-    )
+    );
+    record.keyword_terms.push(SHARED_KEYWORD_TERM_V1.to_owned());
+    record
 }
 
 /// Ob `haystack` die Bytefolge `needle` an irgendeiner Stelle traegt.
@@ -174,4 +186,103 @@ fn ordinal_of(human_incident_number: &str) -> u32 {
         .next()
         .and_then(|tail| tail.parse::<u32>().ok())
         .expect("jede Kulissen-Einsatznummer endet auf eine Zahl")
+}
+
+/// Eine Paketzeile des versiegelten Koerpers, VON HAND und mit Stellschrauben.
+///
+/// Sie existiert, damit die Zeugen Koerper bauen koennen, die
+/// `crates/ea-index/src/blob.rs` selbst nie schriebe — wohlgeformtes,
+/// kanonisches, grenzenkonformes CBOR, das trotzdem keine Indexzeile ist.
+#[derive(Clone)]
+pub struct HandBuiltRowV1 {
+    /// Die Bytes an der Herkunftsposition. 32 ist die einzige gueltige Laenge.
+    pub entry_hash: Vec<u8>,
+    /// Die Bytes an der Datensatzposition. 16 ist die einzige gueltige Laenge.
+    pub record_id: Vec<u8>,
+    /// Die Stelligkeit der Zeile. 13 ist die einzige gueltige.
+    pub positions: u64,
+    /// Die Stelligkeit des Optionsbehaelters. 0 und 1 sind die gueltigen.
+    pub option_positions: u64,
+    /// Die Stichworttermliste, unveraendert uebernommen.
+    pub keyword_terms: Vec<String>,
+}
+
+impl HandBuiltRowV1 {
+    /// Die WOHLGEFORMTE Zeile der laufenden Nummer `ordinal`.
+    #[must_use]
+    pub fn valid(ordinal: u32) -> Self {
+        let mut entry_hash = vec![0_u8; 32];
+        entry_hash[..4].copy_from_slice(&ordinal.to_be_bytes());
+        let mut record_id = vec![0_u8; 16];
+        record_id[..4].copy_from_slice(&ordinal.to_be_bytes());
+        Self {
+            entry_hash,
+            record_id,
+            positions: 13,
+            option_positions: 0,
+            keyword_terms: vec!["brand".to_owned()],
+        }
+    }
+}
+
+/// Kodiert einen Koerper aus handgebauten Zeilen.
+#[must_use]
+pub fn hand_built_body(rows: &[HandBuiltRowV1]) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(rows.len() as u64).unwrap();
+    for row in rows {
+        encoder.array(row.positions).unwrap();
+        encoder.bytes(&row.entry_hash).unwrap();
+        encoder.u64(0).unwrap();
+        encoder.bytes(&row.record_id).unwrap();
+        encoder.str(INCIDENT_SCHEMA_ID).unwrap();
+        encoder.u64(SCHEMA_VERSION_V1).unwrap();
+        encoder.str(INCIDENT_SCHEMA_ID).unwrap();
+        encoder.u64(SCHEMA_VERSION_V1).unwrap();
+        encoder.str("2026-0001").unwrap();
+        encoder.i64(1_771_000_000_000).unwrap();
+        encoder.array(row.option_positions).unwrap();
+        for _ in 0..row.option_positions {
+            encoder.i64(1_771_000_000_001).unwrap();
+        }
+        for terms in [&row.keyword_terms, &Vec::new(), &Vec::new()] {
+            encoder.array(terms.len() as u64).unwrap();
+            for term in terms {
+                encoder.str(term).unwrap();
+            }
+        }
+        // Eine ueberzaehlige Stelligkeit will auch ueberzaehlige Marken, sonst
+        // waere der Koerper gar kein wohlgeformtes CBOR und faellt schon an
+        // `ea_cbor::validate` statt an der Stelligkeitszusicherung.
+        for _ in 13..row.positions {
+            encoder.u64(0).unwrap();
+        }
+    }
+    encoder.into_writer()
+}
+
+/// Versiegelt einen Koerper von Hand, wahlweise MIT oder OHNE den Kopf als AAD.
+///
+/// Die zweite Fassung ist die einzige Art, die AAD-Bindung ueberhaupt zu
+/// bezeugen: Magic und Formatversion prueft `IndexBlobV1::open` ohnehin
+/// ausdruecklich, und die Kopf-Nonce IST die AEAD-Nonce — kein Byte des
+/// heutigen Kopfes faellt also allein am AAD auf. Ein Chiffrat, das ohne den
+/// Kopf versiegelt wurde, faellt genau daran und an nichts sonst.
+#[must_use]
+pub fn hand_sealed_blob(
+    body: &[u8],
+    key: &SecretBytes<CEK_SIZE>,
+    nonce: &SecretBytes<AEAD_NONCE_SIZE>,
+    bind_header_as_aad: bool,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&INDEX_BLOB_MAGIC_V1);
+    bytes.extend_from_slice(&INDEX_FORMAT_VERSION_V1.to_be_bytes());
+    nonce.with_exposed(|exposed| bytes.extend_from_slice(exposed));
+    let header = bytes.clone();
+    let aad: &[u8] = if bind_header_as_aad { &header } else { &[] };
+    let ciphertext = aead_seal(key, nonce, SecretVec::new(body.to_vec()), aad)
+        .expect("die Kulisse versiegelt einen kurzen Koerper");
+    bytes.extend_from_slice(&ciphertext);
+    bytes
 }

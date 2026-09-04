@@ -105,12 +105,20 @@ pub use schema_view::SchemaViewV1;
 /// `crates/ea-reader/src/vault.rs` fuer seine `Host(String)`-Variante
 /// ausschreibt.
 pub enum IndexError {
-    /// Der Kopf des Blobs ist keiner: falsche Laenge, fremdes Magic oder eine
-    /// Formatversion, die diese Fassung nicht kennt.
+    /// Das ARTEFAKT ist keines dieses Formats — Kopf oder Koerper.
     ///
-    /// Er faellt VOR jeder Beruehrung des Schluessels. Ein Kopf, der erst am
-    /// AEAD-Tag scheiterte, gaebe „das ist kein Indexblob" und „der Schluessel
-    /// passt nicht" denselben Code, und die zwei sind verschiedene Befunde.
+    /// Am Kopf: falsche Laenge, fremdes Magic, eine Formatversion, die diese
+    /// Fassung nicht kennt. Das faellt VOR jeder Beruehrung des Schluessels;
+    /// ein Kopf, der erst am AEAD-Tag scheiterte, gaebe „das ist kein
+    /// Indexblob" und „der Schluessel passt nicht" denselben Code, und die zwei
+    /// sind verschiedene Befunde.
+    ///
+    /// Am Koerper: eine Zeile falscher Stelligkeit, ein Entry-Hash, der keine
+    /// 32 Byte hat, ein Optionsbehaelter der Laenge zwei, zwei Zeilen unter
+    /// derselben Herkunft, absteigende Zeilen oder Terme. Alle diese Koerper
+    /// sind wohlgeformtes, kanonisches, grenzenkonformes CBOR —
+    /// `ea_cbor::validate` gibt ueber sie `Ok(())` —, und ein `EA-CBOR-*`
+    /// daneben behauptete einen Befund, den `ea-cbor` nie erhoben hat.
     BlobFormat,
     /// Die Versiegelung oder die Oeffnung hat nicht getragen.
     Crypto(CryptoError),

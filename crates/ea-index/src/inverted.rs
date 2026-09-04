@@ -387,7 +387,18 @@ impl InvertedIndexV1 {
         let mut hits: Vec<&IndexedPackageV1> = match &candidates {
             Some(entry_hashes) => entry_hashes
                 .iter()
-                .filter_map(|entry_hash| self.packages.get(entry_hash))
+                .filter_map(|entry_hash| {
+                    // Die Invariante, auf der die Gestalt des versiegelten
+                    // Koerpers ruht: jede Herkunft einer Trefferliste hat ein
+                    // Paket. Ohne diese Zusicherung meldete eine verwaiste
+                    // Trefferliste sich nie — die Suche zaehlte still zu wenig,
+                    // und genau das ist der Fehlschlag, den kein Zeuge saehe.
+                    debug_assert!(
+                        self.packages.contains_key(entry_hash),
+                        "a posting list may only name packages that exist"
+                    );
+                    self.packages.get(entry_hash)
+                })
                 .collect(),
             None => self.packages.values().collect(),
         };
@@ -519,6 +530,22 @@ fn term_keys(values: &[String]) -> BTreeSet<String> {
 /// Gefaltet wird ueber `str::to_lowercase` der Standardbibliothek: sie rechnet
 /// die volle, sprachunabhaengige Kleinschreibung des Unicode-Standards. Eine
 /// eigene Tabelle waere eine zweite Wahrheit ueber dieselbe Abbildung.
+///
+/// # Die BENANNTE Grenze: Kleinschreibung ist kein Case Folding
+///
+/// Unicode §3.13 schreibt fuer schreibungsunabhaengiges Vergleichen
+/// `toCaseFold` vor; `toLowerCase` ist eine Anzeigeabbildung und traegt die
+/// kontextabhaengige Schluss-Sigma-Regel. Die Standardbibliothek kennt kein
+/// Case Folding, und der Arbeitsbereich fuehrt keine Crate, die es rechnete.
+/// GEMESSEN heisst das: `ΣΣ` wird als `σς` abgelegt und von der Anfrage `σσ`
+/// NICHT gefunden, `STRASSE` nicht von `straße`, und die Ligatur `ﬁre` nicht
+/// von `fire` — letzteres eine Folge davon, dass NFC und nicht NFKC gilt, und
+/// NFC ist durch den Waechter von `ea-cbor` erzwungen.
+///
+/// Das ist ein RUECKRUFmangel und kein Korrektheitsmangel: die Ablage bleibt
+/// deterministisch, der Rebuild bytegleich, und kein Datensatz geht verloren.
+/// Es steht hier, statt in einer Zusage ueber „schreibungsunabhaengige Suche"
+/// unterzugehen.
 fn normalize_term(value: &str) -> String {
     value
         .nfc()

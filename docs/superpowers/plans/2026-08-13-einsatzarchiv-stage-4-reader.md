@@ -4301,11 +4301,16 @@ es irgendetwas misst", ist am Arbeitsbaum falsch. Der Zeuge baut
 `ReaderCursorStore::put_object_manifest` nie — die EINZIGE Stelle, an der
 `MAX_CACHED_OBJECTS_V1` sich weigert, und erreichbar allein aus
 `ReaderSyncService::confirm`. Der Zeuge hat GEMESSEN: 50 000 Pakete,
-`blob_bytes=7166455`, unter `--release` `seal_ms=224 unlock_ms=523 search_us=12
-peak_rss_kib=343068`, im Debug-Profil, das `pnpm index:scale` faehrt,
-`seal_ms=4152 unlock_ms=5590 search_us=46 peak_rss_kib=343880`. Beide Zahlen
-stehen hier, weil das Kommando das Debug-Profil faehrt und keine der beiden als
-die andere ausgegeben werden darf.
+`blob_bytes=7566455`, unter `--release` `seal_ms=230 unlock_ms=574 search_us=13
+broad_search_us=17007 peak_rss_kib=356592`, im Debug-Profil, das
+`pnpm index:scale` faehrt, `seal_ms=4414 unlock_ms=6172 search_us=49
+broad_search_us=84788 peak_rss_kib=357324`. Beide Profile stehen hier, weil das
+Kommando das Debug-Profil faehrt und keine der beiden Zahlenreihen als die
+andere ausgegeben werden darf. Und BEIDE Suchdauern stehen, weil sie
+verschiedene Dinge messen: `search_us` trifft genau ein Paket ueber einen
+eindeutigen Term, `broad_search_us` den ganzen Bestand ueber einen geteilten —
+drei Groessenordnungen dazwischen, und die erste allein auszuweisen unterboete
+die Suchdauer eines echten Archivs um genau diesen Faktor.
 
 Was die Grenze sehr wohl blockiert, ist der Reader ALS GANZES bei 50 000
 Paketen, also das Stufe-7-Gate. Sie hier zu heben ist aber kein lokaler
@@ -4482,6 +4487,65 @@ einem Schluessel, den der laufende Fall noch haelt, wartet damit auf sich
 selbst. GEMESSEN gegen die erste Fassung dieses Zeugen, woertlich: `Failed to
 detect test as having been run. It might have timed out.` Der Fall loescht
 deshalb ueber den Speicher, den er ohnehin haelt.
+
+#### Fuenf Vertragspunkte, die erst das Review festgelegt hat
+
+Drei unabhaengige Linsen liefen ueber den Branchdiff — Kryptografie und
+Byteformat, Arbeitsbereich und Gates, Klartextdisziplin und Zeugenguete —, und
+jeder schwere Fund wurde adversariell zu widerlegen versucht. Was daraus als
+VERTRAG haengenbleibt und nicht bloss als Korrektur eines Commits, steht hier;
+die vollstaendige Fundliste steht in der Zusammenfassung des Branches.
+
+**21. Der versiegelte Koerper ist KANONISCH, und `open` erzwingt es.** Zeilen
+reisen streng aufsteigend nach Entry-Hash, Terme streng aufsteigend je Achse.
+Ohne diese Zusicherung nahm die Oeffnung zwei Zeilen unter derselben Herkunft
+an und lieferte einen Bestand mit weniger Paketen, als der Koerper Zeilen
+deklarierte — GEMESSEN: „declares 2, yields 1", und ohne ein Wort darueber. Ein
+Koerper, der die Oeffnung besteht, ist damit genau ein Koerper, den der
+Kodierer schreiben koennte. NICHT erzwungen wird, dass jeder Term schon ein
+Termschluessel ist: das hiesse, beim Oeffnen ein zweites Mal zu normalisieren,
+und die Entsperrdauer ist der gemessene Engpass.
+
+**22. Eine Missbildung des Koerpers ist `EA-INDEX-BLOB-FORMAT` und nie
+`EA-CBOR-*`.** GEMESSEN: fuer eine Zeile mit vierzehn Positionen, einen 31 Byte
+langen Entry-Hash, eine 15 Byte lange Datensatzkennung und einen
+Optionsbehaelter der Laenge zwei gibt `ea_cbor::validate` unter
+`INDEX_PARSER_LIMITS_V1` jeweils `Ok(())` zurueck — es sind wohlgeformte,
+kanonische, grenzenkonforme CBOR-Werte. Ein `EA-CBOR-INVALID` daneben
+behauptete einen Befund, den `ea-cbor` nie erhoben hat, und stellte damit genau
+die zweite Wahrheit auf, die die Ledgerregel dieses Bestands verbietet. Der
+Code ist der des ARTEFAKTS, nach dem Vorbild von
+`ea_archive::BundleError::Malformed`.
+
+**23. Der Kopf bindet keine FRISCHE.** Er authentisiert Magic, Formatversion
+und Nonce, und ein aelteres Chiffrat unter neuem Kopf faellt. Ein
+VOLLSTAENDIGER aelterer Blob — Kopf und Chiffrat, beide echt — geht dagegen
+unter demselben Schluessel sauber wieder auf; GEMESSEN und angenommen. Wer den
+Bytespeicher beschreiben kann, dreht die Suche damit still zurueck. Das ist
+kein Datenverlust, weil der Index die ableitbare Projektion der exakten
+Archivbytes ist, aber es ist eine Grenze, und sie steht hier statt in einer
+Zusage, die staerker klingt, als sie ist. Eine Frischebindung —
+Generationszaehler im Kopf oder Bindung an die bestaetigte Cursorstellung —
+gehoert zu der Aufgabe, die den Blob segmentiert.
+
+**24. Kleinschreibung ist kein Case Folding, und das ist eine
+Rueckrufgrenze.** Unicode §3.13 verlangt fuer schreibungsunabhaengiges
+Vergleichen `toCaseFold`; die Standardbibliothek kennt es nicht, und der
+Arbeitsbereich fuehrt keine Crate, die es rechnete. GEMESSEN heisst das: `ΣΣ`
+wird als `σς` abgelegt und von `σσ` nicht gefunden, `STRASSE` nicht von
+`straße`, `ﬁre` nicht von `fire`. Die Ablage bleibt deterministisch, der
+Rebuild bytegleich, kein Datensatz geht verloren — es fehlt Rueckruf, nicht
+Korrektheit. Eine Faltungstabelle waere eine Abhaengigkeitsentscheidung mit
+eigenem ADR und gehoert nicht in diese Aufgabe.
+
+**25. Die Nonce-Pflicht steht am Aufrufer, ausgeschrieben.**
+`UnlockedVault::index_key()` liefert ueber die Lebensdauer eines Tresors
+DENSELBEN Schluessel; zwei Versiegelungen unter einer Nonce gaeben das XOR
+beider Koerper und den Poly1305-Schluessel preis. Die Index-Crate kann das
+nicht verhindern — sie zieht keine Entropie —, und beide Zeugen pinnen ihre
+Nonce, weil die Bytegleichheit sonst nicht beobachtbar waere. Genau deshalb
+steht an `IndexBlobV1::seal` jetzt die Auflage, frisch zu ziehen, samt dem
+Satz, dass die Zeugen hier NICHT das Muster sind.
 
 **GEERBTE GRENZE aus dem Task „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS": das dauerhafte Objektmanifest traegt 32 768 Objekte, und diese Aufgabe MUSS 50 000 Pakete messen.** `MAX_CACHED_OBJECTS_V1` in `crates/ea-reader/src/cursor.rs` ist GERECHNET und nicht gewaehlt: die Adressliste des Objektcaches reist als EIN `bstr` durch `ea_cbor::validate(.., ParserLimits::V1)`, dessen `max_text_or_bytes` 1 048 592 Byte misst, und bei 32 Byte je Objekthash sind das 32 768 Eintraege. Ein Paket ist MINDESTENS ein Objekt, also traegt ein Reader unter dieser Grenze keine 50 000 Pakete — die Schwelle dieser Aufgabe ist mit dem heutigen Manifest nicht erreichbar, und `crates/ea-index/tests/scale_50000.rs` laeuft in eine Weigerung, bevor es irgendetwas misst.
 
