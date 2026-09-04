@@ -199,21 +199,47 @@ fn the_thread_refuses_an_original_that_is_not_an_incident_and_a_duplicate_sequen
     .expect("dieselben Datensaetze in der Gegenrichtung");
     assert!(reversed.amendments()[0].entry_hash() == kept);
     assert!(reversed.rejected()[0].entry_hash == dropped);
+
+    // Und auch dieser Fall nimmt dem Original nichts. Der Plan sagt den
+    // Rueckhalt fuer JEDEN Abweisungsfall zu, und die doppelte Sequenz ist der
+    // einzige, in dem die Abweisung nicht aus der Referenz des Kandidaten
+    // folgt, sondern aus einem Widerspruch ZWISCHEN zwei Kandidaten - genau
+    // der Fall, in dem eine Projektion in Versuchung geraete, den Faden neu zu
+    // rechnen.
+    assert!(thread.original().entry_hash() == fixtures::original_entry_hash());
+    thread
+        .original()
+        .with_plaintext(|bytes| assert_eq!(bytes, fixtures::original_plaintext()));
+    thread.original().with_payload(|payload| {
+        let PayloadV1::Incident(incident) = payload else {
+            panic!("a duplicate amendment never turns the original into something else")
+        };
+        assert_eq!(incident.human_incident_number(), "2026-0001");
+    });
 }
 
 /// Die Eingabereihenfolge erreicht die Ausgabe NICHT.
 ///
 /// Der erste Zeuge faehrt `[b, a]` und misst die Sortierung gegen eine feste
-/// Erwartung; das allein sagt noch nicht, dass `[a, b]` dasselbe liefert — eine
-/// Projektion, die die Eingabe stabil sortiert, aber bei Gleichstand die
-/// Eingabereihenfolge durchreicht, bestuende ihn ebenfalls. Dieser Lauf haelt
-/// deshalb ZWEI Faeden derselben Datensaetze in beiden Richtungen
-/// gegeneinander: Eintragshashe, Sequenzen, Abweisungen und die
-/// Korrekturreferenz muessen Wert fuer Wert uebereinstimmen.
+/// Erwartung; das allein sagt noch nicht, dass `[a, b]` dasselbe liefert.
+/// Dieser Lauf haelt deshalb ZWEI Faeden derselben Datensaetze in beiden
+/// Richtungen gegeneinander: Eintragshashe, Sequenzen, Abweisungen und die
+/// Korrekturreferenz muessen Wert fuer Wert uebereinstimmen. Er deckt den
+/// KOLLISIONSFREIEN Fall ab; den Gleichstand auf EINER Sequenz misst
+/// `the_thread_refuses_an_original_that_is_not_an_incident_and_a_duplicate_sequence`,
+/// der dieselben zwei Richtungen ueber die Zwillinge faehrt.
 ///
 /// Der Abrufweg entscheidet die Eingabereihenfolge — Cache, Sync-Batch und
 /// Dateimodus liefern in verschiedenen Ordnungen —, und eine Anzeige, die
 /// davon abhaengt, waere fuer denselben Bestand zweimal verschieden.
+///
+/// # ANTI-LEERLAUF
+///
+/// Die Laengenzusicherung steht gegen die feste ZWEI und nicht gegen die
+/// jeweils andere Ausgabe: zwei LEERE Faeden stimmen ebenfalls Wert fuer Wert
+/// ueberein, und die Schleife darunter liefe dann null Mal. Eine Projektion,
+/// die jeden Kandidaten still verwuerfe, bestuende diesen Zeugen sonst —
+/// GEMESSEN, nicht vermutet.
 #[test]
 fn the_input_order_of_the_amendments_never_reaches_the_output() {
     let forward = ReaderEntryThread::build(
@@ -227,7 +253,8 @@ fn the_input_order_of_the_amendments_never_reaches_the_output() {
     )
     .expect("dieselben Datensaetze in der Gegenrichtung");
 
-    assert_eq!(forward.amendments().len(), reversed.amendments().len());
+    assert_eq!(forward.amendments().len(), 2);
+    assert_eq!(reversed.amendments().len(), 2);
     for (left, right) in forward.amendments().iter().zip(reversed.amendments()) {
         assert!(left.entry_hash() == right.entry_hash());
         assert_eq!(left.chain_sequence(), right.chain_sequence());
