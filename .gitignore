@@ -12,3 +12,5 @@ apps/web/test-results/
 apps/web/playwright-report/
 fuzz/corpus/
 pkg/
+.claude/*
+!.claude/skills/
