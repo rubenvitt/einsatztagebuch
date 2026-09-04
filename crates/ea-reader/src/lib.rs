@@ -60,6 +60,21 @@
 //! ausschliesslich Chiffrat darin ab und adressieren hexadezimal — die
 //! Schluesselliste verlaesst den Port im Klartext.
 //!
+//! Seit der Aufgabe „Nachtragsreferenzen und Original/Nachtrag-Projektion"
+//! steht ueber [`decrypt_verified`] die eine Projektion, die zwei Datensaetze
+//! zueinander in Beziehung setzt: [`ReaderEntryThread`] verbindet ein Original
+//! mit seinen Nachtraegen und ERSETZT dabei nichts. Sie rechnet keine
+//! Kryptografie, oeffnet keine Datei und macht keinen Netzaufruf; sie
+//! vergleicht vier Referenzfelder jedes Kandidaten gegen das VERIFIZIERTE
+//! Original und ordnet nach `(chain_sequence, entry_hash)`. Eine Abweichung
+//! ist ein PRUEFPROBLEM und kein Fehlschlag: der Kandidat wandert mit seiner
+//! Adresse nach [`ReaderEntryThread::rejected`], und das Original behaelt
+//! Bytes, Eintragshash und Sichtbarkeit. Es gibt AUSDRUECKLICH keine Methode,
+//! die ein Original als „ueberholt" kennzeichnet oder einen
+//! zusammengefuehrten „aktuellen Stand" berechnet — §12 und die
+//! Produktinvariante „amendment-only corrections" lassen dazu keinen zweiten
+//! Weg zu.
+//!
 //! # Die Gate-Reihenfolge wird RE-EXPORTIERT
 //!
 //! [`GATE_ORDER_V1`] kommt aus `ea-verify` und wird hier nicht ein zweites Mal
@@ -108,6 +123,12 @@
 //! `crates/ea-reader-wasm` eine Kante nach `ea-types` zu geben, die es bis
 //! heute nicht hat.
 //!
+//! Und dieselbe Regel holt [`RecordId`] nach. Der Typ stand bis zur
+//! Original/Nachtrag-Projektion in KEINER Signatur dieser Crate;
+//! [`CorrectionReference`] traegt ihn als oeffentliches Feld, und wer die
+//! Korrekturreferenz an den Writer-Import der Stufe 5 weiterreicht, muss ihn
+//! benennen koennen.
+//!
 //! Und dieselbe Regel weitet den Re-Export aus `ea-archive` von
 //! [`ArchiveSource`] auf acht weitere Namen aus. [`ArchiveBundleSource`] und
 //! [`DirectoryHandleSource`] sind die zwei Arme von [`ReaderArchiveSourceV1`],
@@ -123,6 +144,7 @@
 //! der Bruecke `ea_archive::` gar nicht schreiben, und eine neue Kante ginge
 //! in den wasm32-Lib-Graphen, wo ein Re-Export nichts kostet.
 
+mod amendment;
 mod anchor;
 mod archive_source;
 mod batch;
@@ -146,6 +168,9 @@ mod trust_state;
 mod vault;
 mod verify;
 
+pub use amendment::{
+    AmendmentJoinErrorV1, CorrectionReference, ReaderEntryThread, RejectedAmendment,
+};
 pub use anchor::PinnedTrustAnchor;
 pub use archive_source::{DirectoryHandleSource, ReaderArchiveSourceV1};
 pub use batch::VerifiedSyncBatch;
@@ -169,7 +194,7 @@ pub use ea_sync_protocol::HttpMethod;
 pub use ea_trust::{TrustAnchorV1, decode_trust_anchor};
 pub use ea_types::{
     ChainSequence, DestructionId, EntryHash, EntryStatus, Hash32, KeyThumbprint, ObjectHash,
-    OrganizationId, RegistryVersion, SubjectId, UnixMillis, VerificationStatus,
+    OrganizationId, RecordId, RegistryVersion, SubjectId, UnixMillis, VerificationStatus,
 };
 pub use ea_verify::{
     AuthorizedDestructionV1, ChainGapV1, DECAPSULATION_EVENT_V1, DestructionStateV1, GATE_ORDER_V1,

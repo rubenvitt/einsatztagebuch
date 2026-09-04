@@ -2356,6 +2356,51 @@ pub fn complete_valid_archive_with_plaintext(plaintext: &[u8]) -> CompleteArchiv
     )
 }
 
+/// Derselbe Bestand ueber JE EINTRAG EIGENEM Klartext.
+///
+/// # Warum es diese Funktion gibt
+///
+/// [`complete_valid_archive_with_plaintext`] traegt EINEN Klartext, und
+/// [`complete_archive_with`] reicht ihn an JEDEN Eintrag der Kette weiter.
+/// Damit ist jeder mehrentraegige Bestand dieses Moduls ein Bestand, in dem
+/// alle Eintraege DASSELBE sagen — und genau das taugt fuer die
+/// Original/Nachtrag-Projektion des Readers nicht: ein Nachtrag ist per
+/// Definition ein ANDERER Datensatz als sein Original, er nennt dessen
+/// `recordId`, dessen `entryHash` und dessen Sequenz, und ein Faden, dessen
+/// Original und dessen Nachtrag byteweise gleich sind, kann keine einzige
+/// dieser vier Referenzen falsifizieren.
+///
+/// Die Alternative waere ein ZWEITER Bestandsbau neben diesem gewesen. Der
+/// haette die Registrierungslinie, die Kettenbindung, die HPKE-Kapselung und
+/// die Grantplaene ein zweites Mal ausgeschrieben — vier Dinge, an denen die
+/// Gates `trust`, `chain-position`, `grant-plan` und `recipient-grant`
+/// haengen, und jede Abweichung darin waere ein Fixture-Fehler, der wie ein
+/// Reader-Fehler aussieht. Deshalb wird hier der EINE Bau um eine Achse
+/// erweitert, statt ihn zu verdoppeln.
+///
+/// Die Zahl der Eintraege ist `plaintexts.len()`; die Sequenzen laufen
+/// weiterhin lueckenlos ab [`COMPLETE_GENESIS_SEQUENCE_V1`]. Die bestehenden
+/// Aufrufer sind unberuehrt: sie geben ueber [`complete_archive_for`]
+/// denselben Klartext fuer alle Eintraege.
+///
+/// # Panics
+///
+/// Wenn `plaintexts` leer ist — ein Bestand ohne Eintrag ist keiner.
+#[must_use]
+pub fn complete_valid_archive_with_plaintexts(plaintexts: &[&[u8]]) -> CompleteArchive {
+    assert!(
+        !plaintexts.is_empty(),
+        "ein lueckenloser Bestand traegt mindestens einen Eintrag"
+    );
+    complete_archive_with(
+        complete_recipient_key_thumbprint(),
+        complete_recipient_certificate_hash(),
+        &complete_recipient_private_key().public_key(),
+        IsolationDefectV1::None,
+        plaintexts,
+    )
+}
+
 /// Derselbe Bestand mit ZWEI verketteten Eintraegen und je einem Grant.
 ///
 /// Misst, was ein einzelner Eintrag nicht messen kann: dass Gate
@@ -2529,13 +2574,14 @@ fn complete_archive_for(
     entry_count: u64,
     plaintext: &[u8],
 ) -> CompleteArchive {
+    let plaintexts =
+        vec![plaintext; usize::try_from(entry_count).expect("die Eintragszahl passt in usize")];
     complete_archive_with(
         recipient_key_thumbprint,
         recipient_certificate_hash,
         recipient_public_key,
-        entry_count,
         IsolationDefectV1::None,
-        plaintext,
+        &plaintexts,
     )
 }
 
@@ -2584,13 +2630,17 @@ pub const ISOLATION_DEFECT_SEQUENCE_V1: u64 =
 /// Drei verkettete Eintraege, von denen hoechstens EINER `defect` traegt.
 #[must_use]
 pub fn isolation_archive(defect: IsolationDefectV1) -> CompleteArchive {
+    let plaintexts = vec![
+        COMPLETE_PLAINTEXT_V1;
+        usize::try_from(ISOLATION_ENTRY_COUNT_V1)
+            .expect("die Eintragszahl passt in usize")
+    ];
     complete_archive_with(
         complete_recipient_key_thumbprint(),
         complete_recipient_certificate_hash(),
         &complete_recipient_private_key().public_key(),
-        ISOLATION_ENTRY_COUNT_V1,
         defect,
-        COMPLETE_PLAINTEXT_V1,
+        &plaintexts,
     )
 }
 
@@ -2608,10 +2658,10 @@ fn complete_archive_with(
     recipient_key_thumbprint: KeyThumbprint,
     recipient_certificate_hash: CertificateHash,
     recipient_public_key: &HpkeRecipientPublicKey,
-    entry_count: u64,
     defect: IsolationDefectV1,
-    plaintext: &[u8],
+    plaintexts: &[&[u8]],
 ) -> CompleteArchive {
+    let entry_count = u64::try_from(plaintexts.len()).expect("die Eintragszahl passt in u64");
     let line = complete_line();
     let anchor = line.anchor();
     let mut fixture = ArchiveFixture::new();
@@ -2633,7 +2683,7 @@ fn complete_archive_with(
             plan_hash,
             sequence,
             previous_entry_hash,
-            plaintext,
+            plaintexts[index],
         );
         let mut entry_bytes = encode_entry_package(&entry)
             .expect("das Fixture-Eintragspaket muss kodieren")
@@ -2719,7 +2769,8 @@ fn complete_archive_with(
 ///
 /// `plaintext` kommt als Parameter, weil ein Leser den Klartext AUCH liest:
 /// [`complete_valid_archive_with_plaintext`] legt einen schemagueltigen ab,
-/// alle uebrigen Bestaende [`COMPLETE_PLAINTEXT_V1`].
+/// [`complete_valid_archive_with_plaintexts`] je Eintrag einen eigenen, alle
+/// uebrigen Bestaende [`COMPLETE_PLAINTEXT_V1`].
 fn build_complete_entry(
     head: HeadRefV1,
     writer_certificate_hash: CertificateHash,
