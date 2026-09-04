@@ -589,8 +589,9 @@ async function createAuthenticator(
  * Der zuletzt von `enrollmentBegin` herausgegebene Stand.
  *
  * Er liegt hier, weil die Zeremonien Salz und Algorithmenliste brauchen und
- * die Oberflaeche beides nicht anfassen soll, und weil `unlockReaderVault`
- * dasselbe Salz fuer die zweite PRF-Auswertung braucht — keine Ausfuhr gibt es
+ * die Oberflaeche beides nicht anfassen soll, und weil
+ * [`unlockReaderVaultSession`] dasselbe Salz fuer die zweite PRF-Auswertung
+ * braucht — keine Ausfuhr gibt es
  * ein zweites Mal heraus. Nach einem Neuladen der Seite ist er fort; der Weg
  * dafuer ist `recover_and_unlock_vault`, und der ist in diesem Stand nicht
  * verdrahtet.
@@ -705,18 +706,6 @@ export const enrollmentBridge: EnrollmentBridge = {
 
 
 /**
- * Die LEBENDE Paritaetsprobe: derselbe Authenticator ein zweites Mal.
- *
- * Keine sechste Ausfuhr aus `webauthn.rs`, sondern der Weg, den die Crate
- * schon hat — eine frische PRF-Auswertung ueber `credentials.get`, der
- * versiegelte Tresor aus OPFS und `readerVaultUnlock` aus `vault_bridge`.
- * Beide Schritte laufen im Worker, weil dort das wasm-Modul und OPFS liegen.
- */
-export async function unlockReaderVault(): Promise<void> {
-  await unlockReaderVaultSession(Date.now())
-}
-
-/**
  * Eine FRISCHE PRF-Auswertung fuer eine Bestaetigung — Entsperren oder
  * Einzelexport.
  *
@@ -758,13 +747,23 @@ export async function readSealedReaderVault(): Promise<Uint8Array> {
 }
 
 /**
- * Derselbe Weg, aber mit der SITZUNGSKENNUNG als Ergebnis.
+ * Das Entsperren: derselbe Authenticator ein zweites Mal, und die
+ * SITZUNGSKENNUNG als Ergebnis.
  *
- * Sie wird gebraucht, sobald ein Aufrufer nach dem Entsperren noch etwas mit
- * dem Tresor tut — der Datei-Modus etwa, dessen Brueckenausfuhren alle einen
- * entsperrten Tresor verlangen. Die Kennung ist ein `u32` ohne Bedeutung
+ * Keine sechste Ausfuhr aus `webauthn.rs`, sondern der Weg, den die Crate
+ * schon hat — eine frische PRF-Auswertung ueber `credentials.get`, der
+ * versiegelte Tresor aus OPFS und `readerVaultUnlock` aus `vault_bridge`.
+ * Die Kennung wird gebraucht, sobald ein Aufrufer nach dem Entsperren noch
+ * etwas mit dem Tresor tut — der Datei-Modus etwa, dessen Brueckenausfuhren
+ * alle einen entsperrten Tresor verlangen. Sie ist ein `u32` ohne Bedeutung
  * ausserhalb der Bruecke; sie ist KEIN Schluesselmaterial und ihre Herausgabe
  * ist genau die, die `web-reader-design.md` §9 vorsieht.
+ *
+ * GEHALTEN wird sie NICHT hier, sondern in
+ * `../features/session/reader-session.ts`, dem einen Halter der Kennung; wer
+ * eine Sitzung will, geht dorthin und ruft diese Funktion nicht selbst — eine
+ * hier eroeffnete und fallengelassene Kennung waere eine entsperrte Sitzung,
+ * an die niemand meldet.
  *
  * `nowMs` ist die Uhr der Seite und tritt als WERT ein: Rust liest keine Uhr
  * (`wasm32-unknown-unknown` hat keinen Wirt dafuer), und die Sitzung rechnet

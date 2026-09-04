@@ -16,7 +16,16 @@
 // Sitzung, die gerade offen ist. Hielte der Datei-Modus daneben eine eigene,
 // bekaeme sie keine Meldung, liefe fuenf Minuten nach ihrem Entsperren in die
 // Untaetigkeitsfrist und sperrte, waehrend der Leser tippt. Deshalb holt auch
-// `DirectoryHandle.ts` seine Kennung ueber [`ensureReaderSession`] von hier.
+// `DirectoryHandle.ts` seine Kennung ueber [`ensureReaderSession`] von hier,
+// und deshalb entsperrt auch die Enrollment-Flaeche ueber
+// [`readerSessionBridge.unlock`] statt ueber einen eigenen Weg.
+//
+// Aus demselben Grund gibt es hier zu jeder Zeit HOECHSTENS EINE entsperrte
+// Sitzung in Rust: zwei sich ueberlappende Entsperrungen teilen sich eine
+// Zeremonie ([`unlocking`]), und wer eine bestehende Kennung durch eine neue
+// ersetzt, sperrt die alte VORHER ueber `session-lock`. Eine entsperrte
+// Sitzung, deren Kennung niemand mehr haelt, bekaeme keine Meldung — und
+// waere genau die Sitzung, die §6.5 nicht dulden will.
 //
 // # Der Zielpfad kommt hier NICHT vor
 //
@@ -49,7 +58,7 @@ declare global {
 }
 
 /** Die von dieser Datei benutzten Optionen von `showSaveFilePicker`. */
-export type SaveFilePickerOptionsV1 = {
+type SaveFilePickerOptionsV1 = {
   readonly suggestedName?: string
 }
 
@@ -61,12 +70,19 @@ export type SaveFilePickerOptionsV1 = {
  * Ausschnitt benennt genau, was angefasst wird — `getFile` fuer die Frage, ob
  * das Ziel besetzt ist, `createWritable` fuer das Schreiben. Den Namen des
  * Handles nennt der Typ AUSDRUECKLICH nicht.
+ *
+ * `abort` ist OPTIONAL, weil der Typ ein Ausschnitt ist und ein Doppel im
+ * Zeugen ihn nicht fuehren muss; im Browser traegt jeder
+ * `FileSystemWritableFileStream` ihn, und `write` unten ruft ihn, wenn das
+ * Schreiben faellt — sonst bliebe die Swap-Datei des Streams liegen und ein
+ * `close` schriebe halbe Bytes an den gewaehlten Ort (§8.2).
  */
 export type ExportFileHandleV1 = {
   readonly getFile: () => Promise<{ readonly size: number }>
   readonly createWritable: () => Promise<{
     readonly write: (data: Uint8Array) => Promise<void>
     readonly close: () => Promise<void>
+    readonly abort?: () => Promise<void>
   }>
 }
 
@@ -115,10 +131,12 @@ export type ExportTargetChoice = {
  * soll wie die Sitzung.
  */
 export type ReaderSessionBridge = {
-  /** Eine frische Bestaetigung; die Kennung der neuen Sitzung wird gemerkt. */
+  /**
+   * Eine frische Bestaetigung, wenn keine Sitzung offen ist; die Kennung der
+   * neuen Sitzung wird gemerkt. Ist die Sitzung zu `nowMs` noch offen, ein
+   * Leerlauf — siehe die Umsetzung.
+   */
   readonly unlock: (nowMs: number) => Promise<void>
-  /** Ob in diesem Seitenlauf je eine Sitzung eroeffnet wurde. */
-  readonly hasSession: () => boolean
   /**
    * Der Zustand zu `nowMs`, oder `undefined`, wenn nie eine Sitzung eroeffnet
    * wurde. Der Aufruf IST die Sperrentscheidung — in Rust.
@@ -184,6 +202,17 @@ function raise(response: EaOpfsResponse): Extract<EaOpfsResponse, { ok: true }> 
 let sessionHandle: number | undefined
 
 /**
+ * Die Zeremonie, die gerade LAEUFT — oder `undefined`.
+ *
+ * Zwei Aufrufer, die sich ueberlappen — der Datei-Modus ueber
+ * [`ensureReaderSession`] und die Flaeche ueber [`readerSessionBridge.unlock`],
+ * oder ein Doppelklick —, starteten sonst zwei Zeremonien und liessen zwei
+ * Sitzungen aufgehen, von denen nur eine gehalten und gemeldet wuerde. Sie
+ * teilen sich stattdessen die eine laufende und bekommen dieselbe Kennung.
+ */
+let unlocking: Promise<number> | undefined
+
+/**
  * Die Kennung, ohne Sitzung ein Fehlschlag mit dem Code, den Rust fuer eine
  * Kennung gibt, die es nicht gibt — eine nie eroeffnete ist genau das.
  */
@@ -195,6 +224,48 @@ function requireSession(): number {
 }
 
 /**
+ * Sperrt eine Sitzung SOFORT, deren Kennung gleich ersetzt wird.
+ *
+ * `EA-READER-SESSION-UNKNOWN` ist hier kein Fehlschlag: eine Sitzung, die es
+ * nicht mehr gibt, ist bereits das, was die Sperre herstellen soll. Jeder
+ * andere Code reist unveraendert.
+ */
+async function lockSession(session: number): Promise<void> {
+  const response = await callReaderWorker({ kind: 'session-lock', session })
+  if (!response.ok && response.code !== 'EA-READER-SESSION-UNKNOWN') {
+    throw new Error(response.code)
+  }
+}
+
+/**
+ * EINE Zeremonie, geteilt von allen, die sie gleichzeitig verlangen.
+ *
+ * Reihenfolge: erst die alte Sitzung sperren, dann die Zeremonie, dann die
+ * Kennung ersetzen. Die alte VORHER, weil so zu keinem Zeitpunkt zwei
+ * entsperrte Sitzungen nebeneinander stehen — faellt die Zeremonie, ist die
+ * alte gesperrt, und das war sie nach der Vorbedingung von `unlock` ohnehin;
+ * faellt die Sperre, entsteht gar keine neue.
+ */
+function openSession(nowMs: number): Promise<number> {
+  if (unlocking !== undefined) {
+    return unlocking
+  }
+  const ceremony = (async () => {
+    const previous = sessionHandle
+    if (previous !== undefined) {
+      await lockSession(previous)
+    }
+    const created = await unlockReaderVaultSession(nowMs)
+    sessionHandle = created
+    return created
+  })()
+  unlocking = ceremony
+  return ceremony.finally(() => {
+    unlocking = undefined
+  })
+}
+
+/**
  * Die Sitzung dieses Seitenlaufs, EINMAL entsperrt und danach wiederverwendet.
  *
  * Der Weg des Datei-Modus: er braucht eine Kennung und keine frische
@@ -202,11 +273,14 @@ function requireSession(): number {
  * TROTZDEM zurueck und laeuft in `EA-READER-SESSION-LOCKED` — die erneute
  * Bestaetigung nach §6.5 ist eine Handlung des Lesers ueber
  * [`readerSessionBridge.unlock`], nicht ein stiller Nebeneffekt eines
- * Dateidialogs.
+ * Dateidialogs. Laeuft gerade eine Zeremonie, wartet er auf DEREN Kennung
+ * statt eine zweite Sitzung daneben zu eroeffnen.
  */
 export async function ensureReaderSession(nowMs: number): Promise<number> {
-  sessionHandle ??= await unlockReaderVaultSession(nowMs)
-  return sessionHandle
+  if (unlocking !== undefined) {
+    return unlocking
+  }
+  return sessionHandle ?? openSession(nowMs)
 }
 
 /**
@@ -238,8 +312,16 @@ export async function chooseExportTarget(host: ExportHost): Promise<ExportTarget
       occupied,
       write: async bytes => {
         const writable = await handle.createWritable()
-        await writable.write(bytes)
-        await writable.close()
+        try {
+          await writable.write(bytes)
+          await writable.close()
+        } catch (reason) {
+          // Abbrechen statt schliessen: `close` schriebe den Teilstand der
+          // Swap-Datei an den gewaehlten Ort, `abort` verwirft ihn. Der
+          // Grund des Fehlschlags reist danach unveraendert weiter.
+          await writable.abort?.()
+          throw reason
+        }
       },
     }
   }
@@ -278,13 +360,20 @@ export async function chooseExportTarget(host: ExportHost): Promise<ExportTarget
 /** Die echte Bruecke: jeder Aufruf eine Nachricht an den EINEN Worker. */
 export const readerSessionBridge: ReaderSessionBridge = {
   unlock: async nowMs => {
-    // IMMER eine frische Zeremonie und eine neue Kennung: §6.5 verlangt nach
-    // jeder Sperre eine erneute Bestaetigung, und eine gesperrte Sitzung geht
-    // in Rust nicht wieder auf — ihr Schluesselmaterial ist genullt.
-    sessionHandle = await unlockReaderVaultSession(nowMs)
+    // Nach einer SPERRE eine frische Zeremonie und eine neue Kennung: §6.5
+    // verlangt nach jeder Sperre eine erneute Bestaetigung, und eine
+    // gesperrte Sitzung geht in Rust nicht wieder auf — ihr
+    // Schluesselmaterial ist genullt. Aber §6.5 verlangt die Bestaetigung
+    // nach einer SPERRE und keine zweite Sitzung neben einer offenen: ist
+    // die Sitzung zu `nowMs` noch offen, geschieht nichts. Der Aufruf von
+    // `stateAt` ist dabei selbst die Sperrentscheidung — meldet er
+    // `locked: false`, ist die Frist zu genau diesem Zeitwert nicht erreicht.
+    const current = await readerSessionBridge.stateAt(nowMs)
+    if (current !== undefined && !current.locked) {
+      return
+    }
+    await openSession(nowMs)
   },
-
-  hasSession: () => sessionHandle !== undefined,
 
   stateAt: async nowMs => {
     if (sessionHandle === undefined) {
@@ -343,11 +432,20 @@ export const readerSessionBridge: ReaderSessionBridge = {
     // `Completed`-Zeile bezeugt die Uebergabe an die Senke im Worker, nicht
     // die Platte. Faellt das Schreiben hier, sagt der Fehlschlag genau das
     // und erfindet keinen Rust-Code dafuer.
-    await target.write(response.bytes).catch(() => {
-      throw new Error(
-        'Das gewählte Ziel hat die Bytes nicht angenommen. Das Audit führt die Übergabe bereits als abgeschlossen.',
-      )
-    })
+    //
+    // GENULLT danach, ob das Schreiben gelang oder nicht (WR-082): Rust nullt
+    // seine eigenen Kopien, und der Worker hat seine abgegeben statt kopiert
+    // — dieser Puffer ist die eine Kopie des Hauptthreads, und sie soll nach
+    // der Uebergabe an das Ziel nirgends mehr lesbar liegen.
+    try {
+      await target.write(response.bytes).catch(() => {
+        throw new Error(
+          'Das gewählte Ziel hat die Bytes nicht angenommen. Das Audit führt die Übergabe bereits als abgeschlossen.',
+        )
+      })
+    } finally {
+      response.bytes.fill(0)
+    }
     return JSON.parse(response.status) as SingleExportReportView
   },
 

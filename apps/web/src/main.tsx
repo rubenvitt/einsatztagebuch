@@ -188,8 +188,14 @@ createRoot(container).render(
 // Tastenwiederholung sind hundert davon. Die Drossel verkuerzt keine Frist —
 // eine Eingabe innerhalb der Sekunde nach der letzten ist fuer eine
 // Fuenfminutenfrist dieselbe Eingabe.
+//
+// Ein Fehlschlag des Workers wird FALLENGELASSEN und nicht gemeldet: WR-082
+// laesst keinen Fehlerbericht zu, der etwas traegt, und eine unbehandelte
+// Abweisung in der Konsole waere genau so ein Bericht.
 document.addEventListener('visibilitychange', () => {
-  void readerSessionBridge.noteVisibility(document.visibilityState === 'hidden', Date.now())
+  readerSessionBridge
+    .noteVisibility(document.visibilityState === 'hidden', Date.now())
+    .catch(() => {})
 })
 
 let lastActivityNotedAt = Number.NEGATIVE_INFINITY
@@ -200,7 +206,8 @@ function noteActivity(): void {
     return
   }
   lastActivityNotedAt = now
-  void readerSessionBridge.noteActivity(now)
+  // Fallengelassen, nicht gemeldet — siehe oben.
+  readerSessionBridge.noteActivity(now).catch(() => {})
 }
 
 document.addEventListener('pointerdown', noteActivity, { passive: true })

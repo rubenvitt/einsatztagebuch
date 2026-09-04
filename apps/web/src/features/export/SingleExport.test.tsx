@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 
 import type { ReaderSessionView, SingleExportReportView } from '../../bridge/generated-contracts'
@@ -64,7 +64,6 @@ function bridgeWith(options: {
 }): ReaderSessionBridge {
   return {
     unlock: vi.fn(async () => undefined),
-    hasSession: vi.fn(() => options.view !== undefined),
     stateAt: vi.fn(async () => options.view),
     noteVisibility: vi.fn(async () => undefined),
     noteActivity: vi.fn(async () => undefined),
@@ -79,6 +78,10 @@ function bridgeWith(options: {
 
 function exportButton(): HTMLElement {
   return screen.getByRole('button', { name: 'Export bestätigen' })
+}
+
+function unlockButton(): HTMLElement {
+  return screen.getByRole('button', { name: 'Sitzung entsperren' })
 }
 
 /**
@@ -113,6 +116,9 @@ it('renders one radio option per open record and enables the export only after r
   render(<SingleExport bridge={bridge} host={hostWithSavePicker()} pollIntervalMs={POLL_MS} />)
 
   expect(await screen.findByTestId('session-state')).toHaveTextContent('Sitzung entsperrt')
+  // Offen heisst: keine zweite Zeremonie neben der offenen Sitzung (§6.5
+  // verlangt sie nach einer SPERRE), also ist das Entsperren gesperrt.
+  expect(unlockButton()).toBeDisabled()
   const first = await screen.findByRole('radio', { name: FIRST_HASH })
   expect(screen.getByRole('radio', { name: SECOND_HASH })).toBeInTheDocument()
   expect(exportButton()).toBeDisabled()
@@ -162,6 +168,113 @@ it('reports a locked session with no records and keeps the confirmation disabled
   expect(screen.getByText('Kein Datensatz geöffnet.')).toBeInTheDocument()
   expect(screen.queryByRole('radio')).not.toBeInTheDocument()
   expect(exportButton()).toBeDisabled()
+  // Nach der Sperre ist die erneute Bestaetigung die Handlung des Lesers.
+  expect(unlockButton()).toBeEnabled()
+})
+
+// Zwei feste Zeitwerte der Seitenuhr, dreissig Sekunden auseinander. Feste
+// Werte und kein `Date.now()` des Zeugen, damit der erwartete Wortlaut eine
+// Konstante ist und nicht dieselbe Rechnung wie in der Flaeche.
+const FIRST_READ_MS = Date.UTC(2026, 8, 4, 10, 0, 0)
+const SECOND_READ_MS = FIRST_READ_MS + 30_000
+
+/**
+ * Der Stand des letzten gelungenen Lesens ist die UHR DER SEITE zum Zeitpunkt
+ * des Lesens — nicht der Zeitpunkt des Renderns und nicht ein Anfangswert.
+ *
+ * Nur `Date` wird gefaelscht, die Timer bleiben echt: der Poll soll wirklich
+ * laufen und mit der gesprungenen Uhr lesen. ANTI-LEERLAUF in zwei Formen:
+ * die zwei Wortlaute sind verschieden, und die Bruecke bekam BEIDE Zeitwerte
+ * als Argument — der Text ist also das Echo des Lesens und keine zweite Uhr.
+ */
+it('renders the page clock of the last successful state read and follows it when the clock jumps', async () => {
+  vi.useFakeTimers({ now: FIRST_READ_MS, toFake: ['Date'] })
+  try {
+    const bridge = bridgeWith({ view: unlockedWith([FIRST_HASH]), identity: someIdentity() })
+    render(<SingleExport bridge={bridge} host={hostWithSavePicker()} pollIntervalMs={POLL_MS} />)
+
+    const readAt = await screen.findByTestId('session-read-at')
+    expect(readAt).toHaveTextContent(`Stand: ${new Date(FIRST_READ_MS).toISOString()}`)
+    expect(bridge.stateAt).toHaveBeenCalledWith(FIRST_READ_MS)
+
+    vi.setSystemTime(SECOND_READ_MS)
+    await waitFor(() => {
+      expect(readAt).toHaveTextContent(`Stand: ${new Date(SECOND_READ_MS).toISOString()}`)
+    })
+    expect(bridge.stateAt).toHaveBeenCalledWith(SECOND_READ_MS)
+    expect(new Date(FIRST_READ_MS).toISOString()).not.toBe(new Date(SECOND_READ_MS).toISOString())
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+/**
+ * Ein Fehlschlag des Polls wird vom naechsten gelungenen Lesen aufgehoben;
+ * eine Weigerung des Exports bleibt daneben stehen.
+ *
+ * Zwei Felder und nicht eines: der Poll liest jede Sekunde, und ein
+ * gemeinsames Feld wischte den Code der Weigerung nach einem Zyklus weg.
+ */
+it('clears a failed state read on the next successful poll and keeps an export refusal standing', async () => {
+  let reads = 0
+  const stateAt = vi.fn(async (): Promise<ReaderSessionView> => {
+    reads += 1
+    if (reads === 1) {
+      throw new Error('EA-READER-BLOB-HOST')
+    }
+    return unlockedWith([FIRST_HASH])
+  })
+  const bridge = {
+    ...bridgeWith({
+      view: undefined,
+      identity: someIdentity(),
+      exportOne: vi.fn(async () => {
+        throw new Error('EA-READER-EXPORT-TARGET-OCCUPIED')
+      }),
+    }),
+    stateAt,
+  }
+  render(<SingleExport bridge={bridge} host={hostWithSavePicker()} pollIntervalMs={POLL_MS} />)
+
+  expect(await screen.findByText('EA-READER-BLOB-HOST')).toBeInTheDocument()
+  await waitFor(() => {
+    expect(screen.queryByText('EA-READER-BLOB-HOST')).not.toBeInTheDocument()
+  })
+  expect(stateAt.mock.calls.length).toBeGreaterThan(1)
+
+  await user.click(await screen.findByRole('radio', { name: FIRST_HASH }))
+  await user.click(screen.getByRole('button', { name: 'Ziel wählen' }))
+  await screen.findByText('Ziel: Datei')
+  await user.click(exportButton())
+  const refusal = await screen.findByText('EA-READER-EXPORT-TARGET-OCCUPIED')
+  // Mehrere Polls spaeter steht die Weigerung noch.
+  const readsAtRefusal = stateAt.mock.calls.length
+  await waitFor(() => {
+    expect(stateAt.mock.calls.length).toBeGreaterThan(readsAtRefusal + 2)
+  })
+  expect(refusal).toBeInTheDocument()
+})
+
+/**
+ * Eine Zielart, die das DTO nicht kennt, heisst „unbekannt" — und nicht
+ * „Download", nur weil sie nicht die Datei ist.
+ */
+it('renders an unknown target kind as unknown instead of as a download', async () => {
+  const bridge = bridgeWith({
+    view: unlockedWith([FIRST_HASH]),
+    identity: someIdentity(),
+    exportOne: vi.fn(async (): Promise<SingleExportReportView> => ({ entryHash: FIRST_HASH, targetKind: 7 })),
+  })
+  render(<SingleExport bridge={bridge} host={hostWithSavePicker()} pollIntervalMs={POLL_MS} />)
+
+  await user.click(await screen.findByRole('radio', { name: FIRST_HASH }))
+  await user.click(screen.getByRole('button', { name: 'Ziel wählen' }))
+  await screen.findByText('Ziel: Datei')
+  await user.click(exportButton())
+
+  const reportNode = await screen.findByTestId('export-report')
+  expect(reportNode).toHaveTextContent('Zielart: unbekannt')
+  expect(reportNode).not.toHaveTextContent('Download')
 })
 
 /**
@@ -260,6 +373,56 @@ it('falls back to the download target without a save picker and treats a cancell
     })),
   }
   expect((await chooseExportTarget(occupied))?.occupied).toBe(true)
+})
+
+/**
+ * Das Dateiziel schreibt und schliesst in dieser Reihenfolge — und bricht den
+ * Stream ab, wenn das Schreiben faellt, statt ihn zu schliessen.
+ *
+ * `close` nach einem gefallenen `write` schriebe den Teilstand der Swap-Datei
+ * an den gewaehlten Ort; `abort` verwirft ihn (§8.2). Der Grund des
+ * Fehlschlags reist unveraendert weiter.
+ */
+it('writes then closes the chosen file and aborts the writable instead of closing it when the write fails', async () => {
+  const order: string[] = []
+  const succeeding: ExportHost = {
+    showSaveFilePicker: vi.fn(async () => ({
+      getFile: async () => ({ size: 0 }),
+      createWritable: async () => ({
+        write: async () => {
+          order.push('write')
+        },
+        close: async () => {
+          order.push('close')
+        },
+        abort: async () => {
+          order.push('abort')
+        },
+      }),
+    })),
+  }
+  const target = await chooseExportTarget(succeeding)
+  await target?.write(new Uint8Array([1, 2, 3]))
+  expect(order).toEqual(['write', 'close'])
+
+  const abort = vi.fn(async () => undefined)
+  const close = vi.fn(async () => undefined)
+  const failing: ExportHost = {
+    showSaveFilePicker: vi.fn(async () => ({
+      getFile: async () => ({ size: 0 }),
+      createWritable: async () => ({
+        write: async () => {
+          throw new Error('kein Platz')
+        },
+        close,
+        abort,
+      }),
+    })),
+  }
+  const failingTarget = await chooseExportTarget(failing)
+  await expect(failingTarget?.write(new Uint8Array([1, 2, 3]))).rejects.toThrow('kein Platz')
+  expect(abort).toHaveBeenCalledTimes(1)
+  expect(close).not.toHaveBeenCalled()
 })
 
 // ---------------------------------------------------------------------------

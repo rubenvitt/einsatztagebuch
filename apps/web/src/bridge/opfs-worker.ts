@@ -28,6 +28,7 @@ import init, {
   readerNoteActivity,
   readerNoteVisibility,
   readerSearch,
+  readerSessionLock,
   readerSessionStateAt,
   readerStandClose,
   readerStandView,
@@ -99,12 +100,15 @@ export type EaOpfsRequest =
       // rechnet. Rust liest keine eigene Uhr.
       readonly nowMs: number
     }
-  // Die vier Nachrichten der Sitzungssperre und des Einzelexports
+  // Die fuenf Nachrichten der Sitzungssperre und des Einzelexports
   // (`web-reader-design.md` §6.5 und §8.2). Sie stehen HIER, weil die
   // Sitzung, die sie nennen, in Rust in demselben `thread_local!` liegt wie
-  // die des Datei-Modus. Alle vier tragen `nowMs`, und keine entscheidet
-  // hier etwas: die Fristen rechnet `ReaderSession::state_at` nach, und der
+  // die des Datei-Modus. Vier tragen `nowMs`, und keine entscheidet hier
+  // etwas: die Fristen rechnet `ReaderSession::state_at` nach, und der
   // Worker reicht nur den Zeitwert durch, den der Hauptthread gelesen hat.
+  // `session-lock` traegt keine Uhr, weil es keine Frist prueft: es sperrt
+  // SOFORT — die eine Stelle, die die Kennung haelt, ersetzt eine Sitzung
+  // durch eine neue und laesst die alte nicht ohne Melder offen stehen.
   | {
       readonly id: number
       readonly kind: 'session-note-visibility'
@@ -119,6 +123,7 @@ export type EaOpfsRequest =
       readonly nowMs: number
     }
   | { readonly id: number; readonly kind: 'session-state'; readonly session: number; readonly nowMs: number }
+  | { readonly id: number; readonly kind: 'session-lock'; readonly session: number }
   | {
       readonly id: number
       readonly kind: 'export-one'
@@ -214,7 +219,10 @@ type EaWorkerScope = {
     type: 'message',
     listener: (event: MessageEvent<EaOpfsRequest>) => void,
   ) => void
-  postMessage: (message: EaOpfsResponse) => void
+  // Die Uebertragungsliste ist OPTIONAL und wird an genau einer Stelle
+  // benutzt: `export-one` reicht den Klartextpuffer ab, statt ihn zu
+  // kopieren, damit im Worker keine Kopie zurueckbleibt (WR-082).
+  postMessage: (message: EaOpfsResponse, transfer?: readonly Transferable[]) => void
 }
 
 const scope = globalThis as unknown as EaWorkerScope
@@ -392,6 +400,14 @@ scope.addEventListener('message', (event) => {
             status: readerSessionStateAt(request.session, request.nowMs),
           })
           return
+        case 'session-lock':
+          // Sperrt SOFORT und ohne Frist; eine unbekannte Kennung faellt mit
+          // `EA-READER-SESSION-UNKNOWN`, und ob das ein Fehler ist,
+          // entscheidet der Aufrufer — fuer den einen Halter der Kennung ist
+          // eine Sitzung, die es nicht mehr gibt, bereits das Ziel.
+          readerSessionLock(request.session)
+          scope.postMessage({ id: request.id, ok: true })
+          return
         case 'export-one': {
           // Die Senke, die Rust GENAU EINMAL mit dem Klartext ruft. Sie
           // kopiert die Bytes und sagt `true` — mehr nicht. Dass die Bytes
@@ -407,7 +423,13 @@ scope.addEventListener('message', (event) => {
           // herueberreicht, entsteht mit `Uint8Array::from` bereits im
           // JS-Heap, aber die Kopie macht die Uebergabe unabhaengig davon,
           // ob wasm-bindgen den Puffer nach dem Aufruf wiederverwendet.
-          let plaintext: Uint8Array | undefined
+          //
+          // NULL KLARTEXTKOPIEN im Worker (WR-082): das Original wird nach
+          // der Kopie genullt — Rust nullt seine eigenen Puffer, dieses
+          // `Uint8Array` ist der Puffer des WIRTS —, und die Kopie reist
+          // unten mit einer Uebertragungsliste, also als ABGABE des Puffers
+          // und nicht als zweite Kopie, die hier liegen bliebe.
+          let plaintext: Uint8Array<ArrayBuffer> | undefined
           const report = await readerExportOne(
             request.session,
             request.nowMs,
@@ -422,10 +444,18 @@ scope.addEventListener('message', (event) => {
             request.signerCertificateObjectHash,
             (bytes: Uint8Array): boolean => {
               plaintext = new Uint8Array(bytes)
+              bytes.fill(0)
               return true
             },
           )
-          scope.postMessage({ id: request.id, ok: true, status: report, bytes: plaintext })
+          if (plaintext === undefined) {
+            scope.postMessage({ id: request.id, ok: true, status: report })
+            return
+          }
+          scope.postMessage(
+            { id: request.id, ok: true, status: report, bytes: plaintext },
+            [plaintext.buffer],
+          )
           return
         }
         // Die sechs Datei-Modus-Nachrichten reichen ihr Ergebnis UNVERAENDERT

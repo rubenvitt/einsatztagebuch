@@ -13,18 +13,37 @@
 // Sperre faellt, OHNE dass irgendwo ein Timer laeuft. Genau das ist der
 // adversariale Fall (2) aus dem Plan: verlegt jemand die Sperrpruefung aus
 // `state_at` in einen `setTimeout`, bleibt der reine Rusttest gruen — und
-// dieser Lauf faellt, weil `page.clock` die Seitenuhr springen laesst und ein
-// Timer im Hintergrundtab diesen Sprung nicht sieht.
+// dieser Lauf faellt.
 //
-// # Die gefaelschte Seitenuhr erreicht Rust als WERT
+// # Was GENAU gemessen wird, und wie
 //
-// `page.clock.install()` faelscht `Date.now()` und die Timer der SEITE, nicht
-// des Workers und nicht des wasm-Moduls. Dass die Sperre trotzdem faellt, ist
-// die Zusage selbst: Rust liest keine Uhr, die Seite reicht ihre als Argument,
-// und der lesende Poll der Flaeche ist der Beschleuniger der Anzeige und nicht
-// der Mechanismus. `fastForward` feuert faellige Timer HOECHSTENS EINMAL —
-// der Poll liest also nach dem Sprung genau einmal mit der gesprungenen Uhr,
-// und das muss reichen.
+// Die Seitenuhr wird installiert und nach dem Enrollment ANGEHALTEN
+// (`page.clock.pauseAt`): von da an ist `Date.now()` der Seite eine bekannte
+// Zahl, die nur die Spruenge dieses Zeugen bewegen. Die Flaeche rendert neben
+// dem Zustand den Zeitwert, mit dem sie ihn zuletzt GELESEN hat
+// (`session-read-at`), und der Zeuge prueft nach JEDEM Sprung zuerst diesen
+// Stempel und erst dann den Zustand. Ohne den Stempel waere „Sitzung
+// entsperrt" nach einem Sprung nicht vom Text VOR dem Sprung zu unterscheiden
+// — die Zusicherung traefe den alten Wortlaut, bevor der Worker geantwortet
+// hat, und saehe gruen aus, ohne etwas gemessen zu haben.
+//
+// Zwei Arten von Sprung, und der Unterschied ist die Aussage:
+//
+// - `fastForward` bewegt die Uhr UND feuert faellige Timer der Seite
+//   hoechstens einmal — der lesende Poll der Flaeche liest also genau einmal
+//   mit der gesprungenen Uhr. Das misst, dass die Sperre an der UHR haengt,
+//   sagt aber nichts darueber, ob nicht auch ein Timer sie getragen haette.
+// - `setSystemTime` bewegt NUR die Uhr und feuert KEINEN Timer. Danach loest
+//   der Zeuge ein Lesen ohne Timer aus: er wechselt ueber die Verweise der
+//   Schale nach „Datei-Modus" und zurueck nach „Einzelexport" (clientseitig,
+//   ohne Neuladen), die Flaeche wird neu montiert und liest beim Montieren.
+//   Faellt die Sperre HIER, dann ohne dass irgendein Timer der Seite gelaufen
+//   ist — das ist der Hintergrundtab-Fall, und so ist „kein Timer" gemessen
+//   und nicht behauptet.
+//
+// `page.clock` faelscht die Uhr und die Timer der SEITE, nicht des Workers und
+// nicht des wasm-Moduls. Dass die Sperre trotzdem faellt, ist die Zusage
+// selbst: Rust liest keine Uhr, die Seite reicht ihre als Argument.
 //
 // # Der Lauf ist SAME-ORIGIN und braucht ein Enrollment DIESES Seitenlaufs
 //
@@ -67,6 +86,14 @@ test.skip(({ browserName }) => browserName !== 'chromium')
 const BACKGROUND_DEADLINE_MS = 30_000
 const INACTIVITY_DEADLINE_MS = 5 * 60_000
 
+// Feste Zeitwerte, damit jeder erwartete Stempel eine Konstante ist. Die Uhr
+// wird bei `INSTALLED_AT` installiert und laeuft waehrend des Enrollments in
+// Echtzeit weiter; `PAUSED_AT` liegt zehn Minuten spaeter, damit `pauseAt`
+// auch auf einem langsamen Rechner in die Zukunft springt und nie „in die
+// Vergangenheit" faellt.
+const INSTALLED_AT = '2026-09-04T10:00:00.000Z'
+const PAUSED_AT_MS = Date.parse(INSTALLED_AT) + 10 * 60_000
+
 /**
  * Schickt den Tab in den Hintergrund, wie die Engine es meldet: die
  * Eigenschaft sagt `hidden`, und das Ereignis heisst `visibilitychange`.
@@ -97,13 +124,26 @@ async function bringTabToForeground(page: Page): Promise<void> {
   })
 }
 
-test('a backgrounded tab and five idle minutes lock the session through the worker with a faked page clock and no timer', async ({
+/**
+ * Der Stempel des letzten Lesens muss GENAU die gesprungene Uhr nennen.
+ *
+ * Diese Zusicherung steht vor jeder Zusicherung ueber den Zustand: erst wenn
+ * sie gruen ist, ist der Zustand daneben das Ergebnis eines Lesens zu dieser
+ * Uhr und nicht der Text von vorhin.
+ */
+async function expectReadAt(page: Page, nowMs: number): Promise<void> {
+  await expect(page.getByTestId('session-read-at')).toHaveText(
+    `Stand: ${new Date(nowMs).toISOString()}`,
+  )
+}
+
+test('a backgrounded tab and five idle minutes lock the session through the worker with a paused page clock and no timer', async ({
   page,
 }) => {
   // VOR der Navigation: die Faelschung wird als Init-Skript installiert, und
-  // der Poll der Flaeche muss auf der gefaelschten Uhr entstehen, sonst
-  // saehe `fastForward` ihn nicht.
-  await page.clock.install()
+  // die Timer der Flaeche muessen auf der gefaelschten Uhr entstehen, sonst
+  // saehe `fastForward` sie nicht.
+  await page.clock.install({ time: INSTALLED_AT })
 
   const cdp = await page.context().newCDPSession(page)
   await cdp.send('WebAuthn.enable')
@@ -126,46 +166,74 @@ test('a backgrounded tab and five idle minutes lock the session through the work
     second.authenticatorId,
   ])
 
+  // AB HIER steht die Uhr, und `now` ist die Zahl, die die Seite sieht.
+  await page.clock.pauseAt(PAUSED_AT_MS)
+  let now = PAUSED_AT_MS
+
   // CLIENTSEITIG zur Exportflaeche — kein Neuladen, siehe Kopf.
   await page.getByRole('link', { name: 'Einzelexport' }).click()
   const state = page.getByTestId('session-state')
+  await expectReadAt(page, now)
   await expect(state).toHaveText('Keine Sitzung')
   const confirm = page.getByRole('button', { name: 'Export bestätigen' })
   await expect(confirm).toBeDisabled()
 
-  await page.getByRole('button', { name: 'Sitzung entsperren' }).click()
+  const unlock = page.getByRole('button', { name: 'Sitzung entsperren' })
+  await unlock.click()
+  await expectReadAt(page, now)
   await expect(state).toHaveText('Sitzung entsperrt')
+  // Offen heisst: keine zweite Zeremonie neben der offenen Sitzung.
+  await expect(unlock).toBeDisabled()
 
   // ANTI-LEERLAUF: kurz VOR der kurzen Frist, im Vordergrund, bleibt die
-  // Sitzung offen. Ohne diese Zeile bliebe offen, ob die Sperre unten die
-  // Frist misst oder jeden Sprung.
+  // Sitzung offen — GELESEN mit der gesprungenen Uhr, wie der Stempel
+  // belegt. Ohne diese Zeile bliebe offen, ob die Sperre unten die Frist
+  // misst oder jeden Sprung.
   await page.clock.fastForward(BACKGROUND_DEADLINE_MS - 1_000)
+  now += BACKGROUND_DEADLINE_MS - 1_000
+  await expectReadAt(page, now)
   await expect(state).toHaveText('Sitzung entsperrt')
 
-  // DER HINTERGRUNDTAB. Das Ereignis traegt die Uhr der Seite nach Rust, der
-  // Sprung darueber laesst die kurze Frist faellig werden, und der naechste
-  // lesende Zugriff — der Poll — bringt die Sperre. Kein Timer in Rust, und
-  // der Sprung ist gross genug, dass ein Timer der Seite, der die Sperre
-  // truege, hier ebenso gefeuert haette: die Zusage ist, dass es ihn nicht
-  // BRAUCHT, und die faellt beim adversarialen Fall (2) des Plans, weil ein
-  // gedrosselter Hintergrundtimer den echten Sprung nicht sieht.
+  // DER HINTERGRUNDTAB. Das Ereignis traegt die Uhr der Seite nach Rust.
+  // Dann springt NUR die Uhr (`setSystemTime`), kein Timer feuert, und das
+  // naechste Lesen loest kein Timer aus, sondern die Neumontage der Flaeche
+  // ueber zwei Verweise der Schale. Faellt die Sperre hier, dann ohne Timer
+  // — und ein `setTimeout`, der die Sperre truege, haette diesen Sprung nie
+  // gesehen.
   await sendTabToBackground(page)
-  await page.clock.fastForward(BACKGROUND_DEADLINE_MS)
+  await page.clock.setSystemTime(now + BACKGROUND_DEADLINE_MS)
+  now += BACKGROUND_DEADLINE_MS
+  await page.getByRole('link', { name: 'Datei-Modus' }).click()
+  await expect(page.getByRole('link', { name: 'Datei-Modus' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+  await page.getByRole('link', { name: 'Einzelexport' }).click()
+  await expectReadAt(page, now)
   await expect(state).toHaveText('Sitzung gesperrt')
   await expect(confirm).toBeDisabled()
   await expect(page.getByText('Kein Datensatz geöffnet.')).toBeVisible()
+  await expect(unlock).toBeEnabled()
 
   // ZWEITES SZENARIO: dieselbe Seite, eine NEUE Sitzung nach erneuter
   // Bestaetigung (§6.5: nach jeder Sperre), im Vordergrund, und fuenf Minuten
   // ohne Eingabe. Der Klick selbst ist die letzte Eingabe; ab da schweigt die
-  // Seite.
+  // Seite. Hier springt die Uhr mit `fastForward`, der Poll liest also genau
+  // einmal je Sprung — und der Stempel belegt, dass er es getan hat.
   await bringTabToForeground(page)
-  await page.getByRole('button', { name: 'Sitzung entsperren' }).click()
+  await unlock.click()
   await expect(state).toHaveText('Sitzung entsperrt')
+  await expectReadAt(page, now)
+  await expect(unlock).toBeDisabled()
 
   await page.clock.fastForward(INACTIVITY_DEADLINE_MS - 60_000)
+  now += INACTIVITY_DEADLINE_MS - 60_000
+  await expectReadAt(page, now)
   await expect(state).toHaveText('Sitzung entsperrt')
+
   await page.clock.fastForward(60_000)
+  now += 60_000
+  await expectReadAt(page, now)
   await expect(state).toHaveText('Sitzung gesperrt')
   await expect(confirm).toBeDisabled()
 

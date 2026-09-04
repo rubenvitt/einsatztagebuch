@@ -72,9 +72,22 @@ function sessionStateText(view: ReaderSessionView | undefined): string {
   return view.locked ? 'Sitzung gesperrt' : 'Sitzung entsperrt'
 }
 
-/** Der Wortlaut der Zielart aus `ReaderExportTargetKindV1`. */
+/**
+ * Der Wortlaut der Zielart aus `ReaderExportTargetKindV1`.
+ *
+ * GENAU die zwei Werte des DTOs; ein unbekannter Wert heisst „unbekannt" und
+ * wird nicht auf den Download abgebildet — die Fläche würde sonst eine
+ * Zielart behaupten, die das DTO nicht genannt hat.
+ */
 function targetKindText(kind: number): string {
-  return kind === 1 ? 'Datei' : 'Download'
+  switch (kind) {
+    case 1:
+      return 'Datei'
+    case 2:
+      return 'Download'
+    default:
+      return 'unbekannt'
+  }
 }
 
 /**
@@ -87,6 +100,17 @@ function targetKindText(kind: number): string {
  */
 export function SingleExport({ bridge, host, pollIntervalMs = 1_000 }: SingleExportProps): ReactElement {
   const [view, setView] = useState<ReaderSessionView | undefined>(undefined)
+  // Der Zeitwert der Seite, mit dem der letzte GELUNGENE Zustand gelesen
+  // wurde. Er steht neben dem Zustand, damit „Sitzung entsperrt" nicht der
+  // Text von vorhin ist, sondern nachweislich das Ergebnis eines Lesens zu
+  // genau dieser Uhr — ein Zeuge mit gefälschter Seitenuhr prüft ihn ZUERST.
+  const [readAt, setReadAt] = useState<number | undefined>(undefined)
+  // Zwei Fehlschläge, getrennt gehalten: der des Polls wird vom nächsten
+  // gelungenen Lesen aufgehoben, der einer Handlung — Entsperren, Zielwahl,
+  // Export — bleibt stehen, bis die nächste Handlung ihn ersetzt. Ein
+  // gemeinsames Feld liesse den Poll eine Weigerung des Exports nach einer
+  // Sekunde wegwischen.
+  const [readFailure, setReadFailure] = useState<string | undefined>(undefined)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [chosenHash, setChosenHash] = useState<string | undefined>(undefined)
   const [target, setTarget] = useState<ExportTargetChoice | undefined>(undefined)
@@ -94,10 +118,14 @@ export function SingleExport({ bridge, host, pollIntervalMs = 1_000 }: SingleExp
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(async () => {
+    const nowMs = Date.now()
     try {
-      setView(await bridge.stateAt(Date.now()))
+      const next = await bridge.stateAt(nowMs)
+      setView(next)
+      setReadAt(nowMs)
+      setReadFailure(undefined)
     } catch (reason) {
-      setFailure(failureText(reason))
+      setReadFailure(failureText(reason))
     }
   }, [bridge])
 
@@ -132,7 +160,20 @@ export function SingleExport({ bridge, host, pollIntervalMs = 1_000 }: SingleExp
 
           <Space orientation="vertical" size="small">
             <Typography.Text data-testid="session-state">{sessionStateText(view)}</Typography.Text>
+            {readAt === undefined ? null : (
+              <Typography.Text type="secondary" data-testid="session-read-at">
+                Stand: {new Date(readAt).toISOString()}
+              </Typography.Text>
+            )}
+            {/*
+              Gesperrt, solange die Sitzung offen ist: §6.5 verlangt die
+              Bestätigung nach einer SPERRE, und eine zweite Zeremonie neben
+              einer offenen Sitzung eröffnete eine zweite Sitzung. Und
+              gesperrt während eines Exports, weil der Export die Sitzung
+              braucht, die gerade steht.
+            */}
             <Button
+              disabled={busy || unlocked}
               onClick={() => {
                 void (async () => {
                   try {
@@ -238,6 +279,10 @@ export function SingleExport({ bridge, host, pollIntervalMs = 1_000 }: SingleExp
           >
             Export bestätigen
           </Button>
+
+          {readFailure === undefined ? null : (
+            <Alert type="error" showIcon title={readFailure} />
+          )}
 
           {failure === undefined ? null : (
             <Alert type="error" showIcon title={failure} />
