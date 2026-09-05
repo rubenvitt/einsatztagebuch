@@ -746,6 +746,75 @@ impl RegistryLineBuilder {
         head.direct_object_hash.expect("direct target hash")
     }
 
+    /// Legt die Autorisierung eines direkten Ziels in den Katalog und gibt die
+    /// UNSIGNIERTE Nutzlast des Ziels zurueck — der Stand VOR der
+    /// Wurzelsignatur.
+    ///
+    /// Das ist der Unterschied zu [`Self::add_prepared`], das BEIDE Objekte
+    /// ablegt: hier existiert das Ziel noch gar nicht. Genau diesen Stand hat
+    /// ein Zeremoniendienst in der Hand, der eine Wurzelaenderung erst noch
+    /// unterschreiben laesst. Die Linie ruecht dabei nicht vor; die
+    /// Autorisierung ist an den AKTUELLEN Kopf gebunden.
+    pub fn prepare_unsigned(
+        &mut self,
+        action: ActionSpec,
+        options: HeadOptions,
+    ) -> (ObjectHash, TrustPayloadV1) {
+        assert!(action.has_direct_target());
+        let previous = self.state.clone();
+        let version = RegistryVersion::new(previous.version.get().saturating_add(1));
+        let effective_from = ChainSequence::new(if previous.version == RegistryVersion::new(0) {
+            1
+        } else {
+            previous.valid_through.get().saturating_add(1)
+        });
+        let marker = self.transition_count;
+        self.transition_count = self.transition_count.wrapping_add(1);
+        let direct_id = options
+            .direct_authorization_id
+            .unwrap_or(0x20_u8.wrapping_add(marker.wrapping_mul(2)));
+        let direct_nonce = options.direct_nonce.unwrap_or(direct_id.wrapping_add(0x40));
+        let provisional = direct_payload(
+            &action,
+            ObjectHash::from(Hash32::ZERO),
+            effective_from,
+            version,
+            &previous,
+            &options,
+        );
+        let (basis_version, basis_hash) = options
+            .direct_authorization_basis
+            .unwrap_or((previous.version, previous.head_hash));
+        let authorization = exact_authorization(
+            &provisional,
+            options
+                .direct_authorization_action
+                .unwrap_or(action.action_code()),
+            options
+                .direct_authorization_subtype
+                .unwrap_or(provisional.subtype()),
+            direct_id,
+            direct_nonce,
+            basis_version,
+            basis_hash,
+            options.issued_at,
+            ADMIN_ONE_SECRET,
+            self.admin_hash,
+            self.admin_binding_hash,
+        );
+        let authorization_hash = object_hash(&authorization);
+        let payload = direct_payload(
+            &action,
+            authorization_hash,
+            effective_from,
+            version,
+            &previous,
+            &options,
+        );
+        self.objects.push(authorization);
+        (authorization_hash, payload)
+    }
+
     pub fn remove_object(&mut self, target: ObjectHash) {
         self.objects.retain(|bytes| object_hash(bytes) != target);
     }

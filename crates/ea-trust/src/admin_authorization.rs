@@ -5,7 +5,8 @@ use ea_crypto::{
 };
 use ea_format::{
     CertificateKindV1, DecodedTrustPayloadV1, OperatorRoleV1,
-    OrganizationAdminAuthorizationFieldsV1, RegistryChangeV1, TrustObjectV1, TrustSubtypeV1,
+    OrganizationAdminAuthorizationFieldsV1, RegistryChangeV1, TrustObjectV1, TrustPayloadV1,
+    TrustSubtypeV1,
 };
 use ea_types::{
     AuthorizationId, CertificateHash, ChainSequence, Hash32, ObjectHash, OrganizationId,
@@ -36,7 +37,7 @@ struct VerifiedAuthorizationInner {
     previous_registry_version: RegistryVersion,
     previous_registry_head_hash: Hash32,
     signer_authority_subject_id: SubjectId,
-    replay_key: AdminAuthorizationReplayKey,
+    replay_keys: [AdminAuthorizationReplayKey; 2],
 }
 
 impl VerifiedAdminAuthorization {
@@ -65,14 +66,108 @@ impl VerifiedAdminAuthorization {
         self.inner.signer_authority_subject_id
     }
 
-    /// Der ORGANISATIONSWEITE Einmal-Schluessel dieser Autorisierung.
+    /// Die BEIDEN organisationsweiten Einmal-Schluessel dieser Autorisierung
+    /// — `authorizationId` und `nonce`, getrennt.
     ///
-    /// Er kommt NUR hier heraus. `AdminAuthorizationReplayKey` hat einen
+    /// Sie kommen NUR hier heraus. `AdminAuthorizationReplayKey` hat einen
     /// crate-privaten Konstruktor, also ist der gepruefte Zustand die einzige
     /// Quelle: wer sperren will, muss vorher bewiesen haben.
     #[must_use]
-    pub const fn replay_key(&self) -> &AdminAuthorizationReplayKey {
-        &self.inner.replay_key
+    pub const fn replay_keys(&self) -> &[AdminAuthorizationReplayKey; 2] {
+        &self.inner.replay_keys
+    }
+}
+
+/// Der Beweiszustand fuer ein Ziel, das es noch NICHT gibt.
+///
+/// Er sagt dasselbe wie [`VerifiedAdminAuthorization`] — mit genau einer
+/// Ausnahme: er nennt keinen Ziel-Objekthash, denn der entsteht erst mit der
+/// Wurzelsignatur. An seiner Stelle nennt er den Subtyp und den
+/// `authorizedTrustCoreHash`, und die beiden zusammen legen den INHALT des
+/// Ziels fest; ein anderer Inhalt hat einen anderen Kernhash.
+pub struct VerifiedAdminAuthorizationIntent {
+    inner: VerifiedIntentInner,
+}
+
+struct VerifiedIntentInner {
+    authorization_object_hash: ObjectHash,
+    target_trust_subtype: TrustSubtypeV1,
+    authorized_target_core_hash: Hash32,
+    previous_registry_version: RegistryVersion,
+    previous_registry_head_hash: Hash32,
+    signer_authority_subject_id: SubjectId,
+    replay_keys: [AdminAuthorizationReplayKey; 2],
+}
+
+impl VerifiedAdminAuthorizationIntent {
+    #[must_use]
+    pub const fn authorization_object_hash(&self) -> ObjectHash {
+        self.inner.authorization_object_hash
+    }
+
+    #[must_use]
+    pub const fn target_trust_subtype(&self) -> TrustSubtypeV1 {
+        self.inner.target_trust_subtype
+    }
+
+    /// Der Kernhash, den die Autorisierung deckt — der Inhalt, der
+    /// unterschrieben werden darf, und kein anderer.
+    #[must_use]
+    pub const fn authorized_target_core_hash(&self) -> Hash32 {
+        self.inner.authorized_target_core_hash
+    }
+
+    #[must_use]
+    pub const fn previous_registry_version(&self) -> RegistryVersion {
+        self.inner.previous_registry_version
+    }
+
+    #[must_use]
+    pub const fn previous_registry_head_hash(&self) -> Hash32 {
+        self.inner.previous_registry_head_hash
+    }
+
+    #[must_use]
+    pub const fn signer_authority_subject_id(&self) -> SubjectId {
+        self.inner.signer_authority_subject_id
+    }
+
+    /// Die BEIDEN organisationsweiten Einmal-Schluessel — wie beim
+    /// veroeffentlichten Ziel, denn die Autorisierung ist dieselbe.
+    #[must_use]
+    pub const fn replay_keys(&self) -> &[AdminAuthorizationReplayKey; 2] {
+        &self.inner.replay_keys
+    }
+}
+
+/// Ein Ziel — entweder VEROEFFENTLICHT oder erst BEABSICHTIGT.
+///
+/// Die Autorisierungspruefung sieht ein Ziel ausschliesslich durch diese zwei
+/// Fenster: seinen Subtyp und seine gedeutete Nutzlast. Beides traegt eine
+/// unsignierte [`TrustPayloadV1`] genauso wie ein fertiges
+/// [`TrustObjectV1`] — die Bedeutung einer Nutzlast haengt nicht an ihren
+/// Signaturen. Nur die WURZELSIGNATUR des Ziels unterscheidet die beiden
+/// Staende, und sie wird ausserhalb dieser Sicht geprueft.
+#[derive(Clone, Copy)]
+enum TargetSource<'a> {
+    Published(&'a TrustObjectV1),
+    Intended(&'a TrustPayloadV1),
+}
+
+impl TargetSource<'_> {
+    const fn subtype(self) -> TrustSubtypeV1 {
+        match self {
+            Self::Published(object) => object.subtype(),
+            Self::Intended(payload) => payload.subtype(),
+        }
+    }
+
+    fn decoded_payload(self) -> Result<DecodedTrustPayloadV1, TrustError> {
+        match self {
+            Self::Published(object) => object.decoded_payload(),
+            Self::Intended(payload) => payload.decoded_payload(),
+        }
+        .map_err(|_| TrustError::Source)
     }
 }
 
@@ -141,8 +236,12 @@ pub fn verify_authorized_trust_target(
     }
     // Die Autorisierung kommt aus dem Ziel und aus der EINEN Aktionstabelle
     // (`describe_target`); eine zweite Zuordnung waere eine zweite Wahrheit.
-    let authorization_object_hash =
-        describe_target(state, target_record.value(), at_sequence)?.authorization_object_hash;
+    let authorization_object_hash = describe_target(
+        state,
+        TargetSource::Published(target_record.value()),
+        at_sequence,
+    )?
+    .authorization_object_hash;
     let mut replay = AdminAuthorizationReplay::default();
     verify_admin_authorization(
         state,
@@ -154,6 +253,90 @@ pub fn verify_authorized_trust_target(
     )
 }
 
+/// Prueft eine Autorisierung gegen ein BEABSICHTIGTES Ziel — die Zeit VOR der
+/// Wurzelsignatur.
+///
+/// [`verify_authorized_trust_target`] ist die Laufzeitrichtung: sie prueft ein
+/// PAAR, das es schon gibt. Sie taugt fuer eine Zeremonie nicht, denn sie
+/// verlangt ein Katalogobjekt und dessen bestehende Wurzelsignatur — ein Wirt,
+/// der eine Wurzelaenderung erst noch veroeffentlichen will, hat beides nicht
+/// und bekaeme [`TrustError::Source`]. Diese Funktion ist die Spiegelhaelfte.
+///
+/// # Was sie GENAUSO prueft
+///
+/// Alles, was die Autorisierung selbst betrifft, und zwar durch Aufruf
+/// derselben Regel wie die Laufzeitrichtung
+/// (`verify_authorization_binds_target`): den unterschreibenden
+/// Administrator samt Zertifikat, Capability `organizationAdminApprove`,
+/// Bindung und Aktivitaet zur Sequenz; die Organisation; den gebundenen
+/// Registrierungskopf; die geschlossene Aktionstabelle ueber
+/// `describe_target`; den `authorizedTrustCoreHash` gegen die exakten
+/// Kernbytes des beabsichtigten Ziels; die Selbstautorisierung; und das
+/// Gueltigkeitsfenster. Die Reihenfolge der Befunde ist dieselbe.
+///
+/// # Was sie NICHT prueft — und nicht pruefen kann
+///
+/// Die WURZELSIGNATUR des Ziels. Sie existiert zu diesem Zeitpunkt nicht: der
+/// Zeremoniendienst erzeugt sie erst nach dieser Pruefung, und ihr Kontext
+/// (`VerificationContext::root_trust_digest`) deckt genau die
+/// Autorisierungsbytes, die hier bewiesen werden. Wer diesen Beweiszustand
+/// fuehrt, hat also die Erlaubnis belegt, aber noch keine Urkunde; die
+/// Vollstaendigkeit des Paares stellt erst der Kopfuebergang fest, der als
+/// Einziger Autoritaet verleiht.
+///
+/// Aus demselben Grund nennt der Beweiszustand keinen Ziel-Objekthash,
+/// sondern Subtyp und Kernhash.
+///
+/// # Errors
+///
+/// [`TrustError::Source`], wenn die Nutzlast ihre eigene Grammatik nicht
+/// erfuellt oder die genannte Autorisierung nicht im Katalog liegt,
+/// [`TrustError::ActionMismatch`] fuer eine Objektart ohne Autorisierung und
+/// fuer jede Abweichung zwischen Ziel und Autorisierung, sowie jeden Befund
+/// der geteilten Pruefung.
+pub fn verify_intended_trust_target(
+    trust: &VerifiedTrust,
+    head: Option<&SelectedRegistryHead>,
+    intended_target: &TrustPayloadV1,
+    now: UnixMillis,
+    at_sequence: ChainSequence,
+) -> Result<VerifiedAdminAuthorizationIntent, TrustError> {
+    let state = head.map_or_else(
+        || trust.previous_head(),
+        SelectedRegistryHead::candidate_state,
+    );
+    let target = TargetSource::Intended(intended_target);
+    // Die Autorisierung kommt aus dem Ziel und aus der EINEN Aktionstabelle;
+    // der Aufrufer waehlt sie nicht aus, sonst koennte er sich die passende
+    // suchen.
+    let authorization_object_hash =
+        describe_target(state, target, at_sequence)?.authorization_object_hash;
+    let (authorization_fields, signer_subject) = verify_authorization_binds_target(
+        state,
+        authorization_object_hash,
+        target,
+        now,
+        at_sequence,
+    )?;
+    Ok(VerifiedAdminAuthorizationIntent {
+        inner: VerifiedIntentInner {
+            authorization_object_hash,
+            // Beide Werte sind hier BEWIESEN gleich denen des Ziels: die
+            // geteilte Regel hat `descriptor.subtype` und
+            // `descriptor.authorized_core_hash` gegen genau diese Felder
+            // gestellt.
+            target_trust_subtype: authorization_fields.target_trust_subtype,
+            authorized_target_core_hash: authorization_fields.authorized_trust_core_hash,
+            previous_registry_version: state.registry_version,
+            previous_registry_head_hash: state.registry_head_hash,
+            signer_authority_subject_id: signer_subject,
+            replay_keys: AdminAuthorizationReplayKey::pair_from_verified_authorization(
+                &authorization_fields,
+            ),
+        },
+    })
+}
+
 /// Verbraucht eine gepruefte Autorisierung EIN Mal, organisationsweit und
 /// laufuebergreifend.
 ///
@@ -162,10 +345,16 @@ pub fn verify_authorized_trust_target(
 /// `verify_admin_authorization` NICHT geben kann: jenes entsteht je Prueflauf
 /// leer und faellt mit ihm.
 ///
+/// Verbraucht werden BEIDE Dimensionen: `authorizationId` und `nonce` sind
+/// nach `design.md` §16.3 je fuer sich organisationsweit einmalig. Eine
+/// gemeinsame Sperrzeile aus beiden Werten waere schwaecher als das
+/// prozesslokale `AdminAuthorizationReplay`, das seit Stufe 1 zwei getrennte
+/// Mengen fuehrt.
+///
 /// # Errors
 ///
-/// [`TrustError::AuthReplay`], wenn diese `authorizationId`/`nonce` schon
-/// einmal gewirkt hat — auch dann, wenn der Speicher den Befund als
+/// [`TrustError::AuthReplay`], wenn diese `authorizationId` ODER diese `nonce`
+/// schon einmal gewirkt hat — auch dann, wenn der Speicher den Befund als
 /// [`StateStoreError::ReplayAlreadyConsumed`] meldet. Jener Wert traegt im
 /// Uhrfreigabe-Pfad den Code `EA-TRUST-CLOCK-RELEASE-REPLAY`; hier ist er die
 /// ADMIN-Wiedereinspielung, und eine Auditzeile mit dem Uhrfreigabecode waere
@@ -176,11 +365,35 @@ pub fn consume_admin_authorization(
     store: &mut dyn TrustStateStore,
     authorization: &VerifiedAdminAuthorization,
 ) -> Result<(), TrustError> {
-    let already_consumed = store
-        .admin_authorization_consumed(authorization.replay_key())
-        .map_err(map_admin_replay_store_error)?;
-    if already_consumed {
-        return Err(TrustError::AuthReplay);
+    consume_replay_keys(store, authorization.replay_keys())
+}
+
+/// Verbraucht die Autorisierung eines BEABSICHTIGTEN Ziels EIN Mal.
+///
+/// Dieselbe Sperre wie [`consume_admin_authorization`] — die Autorisierung ist
+/// dieselbe, nur der Beweiszustand ist der der Zeit vor der Signatur.
+///
+/// # Errors
+///
+/// Wortgleich die von [`consume_admin_authorization`].
+pub fn consume_admin_authorization_intent(
+    store: &mut dyn TrustStateStore,
+    intent: &VerifiedAdminAuthorizationIntent,
+) -> Result<(), TrustError> {
+    consume_replay_keys(store, intent.replay_keys())
+}
+
+fn consume_replay_keys(
+    store: &mut dyn TrustStateStore,
+    keys: &[AdminAuthorizationReplayKey; 2],
+) -> Result<(), TrustError> {
+    for key in keys {
+        if store
+            .admin_authorization_consumed(key)
+            .map_err(map_admin_replay_store_error)?
+        {
+            return Err(TrustError::AuthReplay);
+        }
     }
     Ok(())
 }
@@ -192,26 +405,26 @@ const fn map_admin_replay_store_error(error: StateStoreError) -> TrustError {
     }
 }
 
-pub(crate) fn verify_admin_authorization(
+/// Die ZIELGEBUNDENE Autorisierungspruefung — alles ausser der Wurzelsignatur.
+///
+/// Sie ist die EINE Regel, aus der beide oeffentlichen Richtungen leben: die
+/// veroeffentlichte ([`verify_authorized_trust_target`]) und die beabsichtigte
+/// ([`verify_intended_trust_target`]). Die Reihenfolge der Befunde ist
+/// unveraendert die von [`verify_admin_authorization`] seit Stufe 1; diese
+/// Funktion ist ein Ausschnitt und keine zweite Regel.
+fn verify_authorization_binds_target(
     state: &PreviousHeadState,
     authorization_object_hash: ObjectHash,
-    target_object_hash: ObjectHash,
+    target: TargetSource<'_>,
     authorization_use_time: UnixMillis,
     pre_transition_sequence: ChainSequence,
-    replay: &mut AdminAuthorizationReplay,
-) -> Result<VerifiedAdminAuthorization, TrustError> {
+) -> Result<(OrganizationAdminAuthorizationFieldsV1, SubjectId), TrustError> {
     let authorization_record = state
         .catalog_object(authorization_object_hash)
         .ok_or(TrustError::Source)?;
-    let target_record = state
-        .catalog_object(target_object_hash)
-        .ok_or(TrustError::Source)?;
-    if authorization_record.object_hash() != authorization_object_hash
-        || target_record.object_hash() != target_object_hash
-    {
+    if authorization_record.object_hash() != authorization_object_hash {
         return Err(TrustError::Source);
     }
-
     let authorization = authorization_record.value();
     let authorization_fields = match authorization
         .decoded_payload()
@@ -220,7 +433,6 @@ pub(crate) fn verify_admin_authorization(
         DecodedTrustPayloadV1::OrganizationAdminAuthorization(fields) => fields,
         _ => return Err(TrustError::ActionMismatch),
     };
-    let target = target_record.value();
     let descriptor = describe_target(state, target, pre_transition_sequence)?;
 
     if descriptor.authorization_object_hash != authorization_object_hash
@@ -254,6 +466,37 @@ pub(crate) fn verify_admin_authorization(
     if authorization_use_time > authorization_fields.expires_at {
         return Err(TrustError::AuthExpired);
     }
+    Ok((authorization_fields, signer_subject))
+}
+
+pub(crate) fn verify_admin_authorization(
+    state: &PreviousHeadState,
+    authorization_object_hash: ObjectHash,
+    target_object_hash: ObjectHash,
+    authorization_use_time: UnixMillis,
+    pre_transition_sequence: ChainSequence,
+    replay: &mut AdminAuthorizationReplay,
+) -> Result<VerifiedAdminAuthorization, TrustError> {
+    let authorization_record = state
+        .catalog_object(authorization_object_hash)
+        .ok_or(TrustError::Source)?;
+    let target_record = state
+        .catalog_object(target_object_hash)
+        .ok_or(TrustError::Source)?;
+    if authorization_record.object_hash() != authorization_object_hash
+        || target_record.object_hash() != target_object_hash
+    {
+        return Err(TrustError::Source);
+    }
+
+    let target = target_record.value();
+    let (authorization_fields, signer_subject) = verify_authorization_binds_target(
+        state,
+        authorization_object_hash,
+        TargetSource::Published(target),
+        authorization_use_time,
+        pre_transition_sequence,
+    )?;
 
     verify_target_root_signatures(state, target, authorization_record.exact_bytes().as_bytes())?;
 
@@ -276,7 +519,7 @@ pub(crate) fn verify_admin_authorization(
             previous_registry_version: state.registry_version,
             previous_registry_head_hash: state.registry_head_hash,
             signer_authority_subject_id: signer_subject,
-            replay_key: AdminAuthorizationReplayKey::from_verified_authorization(
+            replay_keys: AdminAuthorizationReplayKey::pair_from_verified_authorization(
                 &authorization_fields,
             ),
         },
@@ -371,10 +614,10 @@ pub(crate) fn verify_authorization_signer(
 
 fn describe_target(
     state: &PreviousHeadState,
-    target: &TrustObjectV1,
+    target: TargetSource<'_>,
     at_sequence: ChainSequence,
 ) -> Result<TargetDescriptor, TrustError> {
-    match target.decoded_payload().map_err(|_| TrustError::Source)? {
+    match target.decoded_payload()? {
         DecodedTrustPayloadV1::AuthorizedRoot(core) => descriptor(
             target.subtype(),
             core.authorization_object_hash(),

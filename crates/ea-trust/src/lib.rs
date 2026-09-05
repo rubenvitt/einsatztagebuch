@@ -17,6 +17,14 @@
 //! let _ = VerifiedAdminAuthorization { inner: panic!() };
 //! ```
 //!
+//! `VerifiedAdminAuthorizationIntent` — the proof state for the time before
+//! the Root signature — is no more constructible than the published one:
+//!
+//! ```compile_fail
+//! use ea_trust::VerifiedAdminAuthorizationIntent;
+//! let _ = VerifiedAdminAuthorizationIntent { inner: panic!() };
+//! ```
+//!
 //! `AdminAuthorizationReplayKey` cannot be assembled from raw identifiers, so
 //! no caller can mark a foreign authorization as consumed:
 //!
@@ -24,8 +32,7 @@
 //! use ea_trust::AdminAuthorizationReplayKey;
 //! let _ = AdminAuthorizationReplayKey {
 //!     organization_id: panic!(),
-//!     authorization_id: panic!(),
-//!     nonce: panic!(),
+//!     dimension: panic!(),
 //! };
 //! ```
 //!
@@ -120,6 +127,16 @@
 //! use ea_trust::AdminAuthorizationReplayKey;
 //! use ea_types::{AuthorizationId, Id16};
 //! let _: AdminAuthorizationReplayKey = AuthorizationId::from(Id16::ZERO).into();
+//! ```
+//!
+//! An intent is not a published target: the two proof states do not convert
+//! into one another.
+//!
+//! ```compile_fail
+//! use ea_trust::{VerifiedAdminAuthorization, VerifiedAdminAuthorizationIntent};
+//! fn reject(intent: VerifiedAdminAuthorizationIntent) -> VerifiedAdminAuthorization {
+//!     intent.into()
+//! }
 //! ```
 //!
 //! ```compile_fail
@@ -349,6 +366,11 @@
 //! ```
 //!
 //! ```compile_fail
+//! use ea_trust::VerifiedAdminAuthorizationIntent;
+//! let _: VerifiedAdminAuthorizationIntent = Default::default();
+//! ```
+//!
+//! ```compile_fail
 //! use ea_trust::PendingFutureSuccessor;
 //! let _: PendingFutureSuccessor = Default::default();
 //! ```
@@ -409,6 +431,11 @@
 //! ```compile_fail
 //! use ea_trust::AdminAuthorizationReplayKey;
 //! let _: AdminAuthorizationReplayKey = minicbor::decode(&[]).unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! use ea_trust::VerifiedAdminAuthorizationIntent;
+//! let _: VerifiedAdminAuthorizationIntent = minicbor::decode(&[]).unwrap();
 //! ```
 //!
 //! ```compile_fail
@@ -477,7 +504,9 @@ mod state;
 mod time;
 
 pub use admin_authorization::{
-    VerifiedAdminAuthorization, consume_admin_authorization, verify_authorized_trust_target,
+    VerifiedAdminAuthorization, VerifiedAdminAuthorizationIntent, consume_admin_authorization,
+    consume_admin_authorization_intent, verify_authorized_trust_target,
+    verify_intended_trust_target,
 };
 pub use admission::{bootstrap_active_certificates, verify_catalogue_admission};
 pub use anchor::{TrustAnchorV1, VerifiedTrust, decode_trust_anchor, verify_trust};
@@ -491,9 +520,9 @@ pub use registry::{
 };
 pub use source::{MAX_TOTAL_TRUST_OBJECT_BYTES_V1, MAX_TRUST_OBJECTS_V1, TrustObjectSource};
 pub use state::{
-    AdminAuthorizationReplayKey, ClockReleaseReplayKey, IndependentTimeCommit,
-    PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit, StateStoreError, TrustStateKey,
-    TrustStateSnapshot, TrustStateStore, load_trust_state,
+    AdminAuthorizationReplayDimension, AdminAuthorizationReplayKey, ClockReleaseReplayKey,
+    IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit,
+    StateStoreError, TrustStateKey, TrustStateSnapshot, TrustStateStore, load_trust_state,
 };
 pub use time::{
     LocalTimeBlock, VerifiedSignedTime, prepare_local_time, verify_checkpoint_time,
