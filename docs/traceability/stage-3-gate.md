@@ -536,17 +536,36 @@ Arbeitsbereichsmitglied ist.
   `writerTransitionEventHash` nennt (Abschnitt 5.1). Die Ledgerzeile FR-082
   fuehrt die Einschraenkung mit; gehoben wird sie in Stufe 5 (Administration,
   Schreiberrotation).
-- **Die Vertrauensschliessung wird je signiertem Request neu geladen.**
-  `apps/server/src/adapters/trust_authority.rs::trust_catalog` holt fuer JEDEN
-  `/v1`-Request mit Signatur den VOLLSTAENDIGEN `.etb`-Katalog der
-  Organisation aus dem Object Store — ein `get_object` je indiziertem
-  Trust-Objekt — und laeuft danach `verify_trust` samt Kopfkette auf einem
-  fluechtigen Zustandsspeicher. Gemessene Kosten sind damit O(Zahl der
-  Trust-Objekte) S3-Umlaeufe plus eine volle Trust-Pruefung PRO REQUEST. Die
-  Stufe-3-Zusagen bleiben davon unberuehrt — die Aufloesung ist korrekt, nur
-  teuer —, aber jenseits einer Handvoll Geraete ist das nicht betreibbar. Die
-  vorgesehene Abhilfe ist zweiteilig: der persistente Pin als BODEN (in dieser
-  Stufe bereits umgesetzt, Abschnitt 4) und ein prozessinterner Cache der
-  geprueften Schliessung, geschluesselt auf den Registry-Kopf und die
-  Katalog-Hashmenge, den `advance_pinned_head` entwertet. Folgeticket:
+- **Nacharbeit DRK-248: Cache der geprueften Vertrauensschliessung.**
+  Der oben dokumentierte Stufe-3-Lauf lud noch fuer jede signierte Anfrage
+  den vollstaendigen `.etb`-Katalog. Die Nacharbeit vom 2026-09-05 in
+  `apps/server/src/adapters/trust_authority.rs` behaelt pro Organisation die
+  geteilte, kryptografisch verifizierte Autoritaet samt Registry-Version und
+  Head-Hash im Speicher. Bei unveraendertem Anker und Katalogstand sowie
+  gueltigem Zeitfenster benoetigt eine weitere Anfrage einen indizierten
+  Datenbankzugriff und eine Schluesselsuche: keine S3-Lesezugriffe und keine
+  erneute Trust-Pruefung. Diese Kosten sind gegenueber der Kataloggroesse
+  konstant; ein Neubau bleibt O(Zahl der Trust-Objekte).
+
+  `0002_trust_authority_cache.sql` ergaenzt eine rein technische Revision,
+  die in derselben Transaktion wie jede Aenderung an `trust_events`
+  fortgeschrieben wird. Sie invalidiert auch Caches anderer Serverinstanzen;
+  die Originalmigration bleibt unveraendert. Die Revision liefert KEINE
+  Autoritaet. Ein waehrend des Neubaus geaenderter Katalog wird vor Rueckgabe
+  abgewiesen. Jeder Aufruf liest den persistenten Pin nach dem Warten auf
+  seinen Cache-Slot erneut: ein erfolgreicher Bootstrap-Abschluss ohne Head
+  hinter einem Pin und dieselbe Version mit anderem Head-Hash ergeben
+  `EA-TRUST-STATE-CONFLICT` (503, wiederholbar). Ablauf oder ungueltige
+  Trust-Objekte bleiben fehlende Autorisierung.
+
+  Cache-Grenzen: Zeitruecksprung und Head-Ablauf erzwingen einen Neubau.
+  Ein headloser Abschluss mit vorhandenen Registry-Ereignissen wird wegen
+  moeglicher zukuenftiger Heads nicht behalten. Die Map traegt hoechstens
+  128 Organisationen; gleichzeitige Neubauten teilen einen vorhandenen Slot.
+  Sind alle Slots belegt und in Benutzung, arbeiten weitere Organisationen
+  ungecacht. Sequenzabhaengige Commit-Pruefungen bleiben unveraendert.
+  Zeugen: `apps/server/tests/trust_authority_cache.rs`, die Pin-Faelle in
+  `apps/server/tests/auth_trust_api.rs` und der Upgrade-Test
+  `the_trust_cache_migration_upgrades_the_original_schema_without_replacing_it`
+  in `apps/server/tests/migrations.rs`. Ticket:
   **DRK-248** (<https://app.clickup.com/t/123zgebztur>).

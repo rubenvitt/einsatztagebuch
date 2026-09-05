@@ -29,8 +29,10 @@
 //! Deshalb laeuft die Authentisierung ueber
 //! [`ea_verify::EphemeralTrustStateStore`] — denselben Speicher, mit dem der
 //! Reader ein Archiv verifiziert. Er startet leer, die Kopfkette wird aus dem
-//! Anker heraus nachgelaufen, und nach der Antwort ist er fort. Es gibt keinen
-//! Schreibzugriff, kein Rennen und keine Serialisierung.
+//! Anker heraus nachgelaufen. Der bewiesene Abschluss wird je Kopf gecacht;
+//! weitere Aufrufe pruefen nur Katalogstand, Anker, Pin und Zeitfenster und
+//! schlagen den Schluessel in der daraus abgeleiteten Autoritaetsmenge nach.
+//! Weder Cache-Aufbau noch Cache-Treffer schreiben den persistenten Zustand.
 //!
 //! Gepinnt wird ausschliesslich dort, wo der Kopf WIRKLICH vorrueckt: beim
 //! Indizieren eines Trust-Ereignisses ([`TrustEventValidator`]). Verliert
@@ -46,7 +48,10 @@
 //! ab der der juengste Kopf gilt, gelesen aus dem signierten Ereignis selbst
 //! und nicht aus einer Zeile.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ea_crypto::{CanonicalPublicCoseKey, CertificateCapability};
@@ -67,6 +72,7 @@ use ea_types::{
 };
 use ea_verify::{EphemeralTrustStateStore, verification_state_key};
 use sqlx::{PgPool, Row};
+use tokio::sync::Mutex;
 
 /// Die technische Geraetekennung, unter der der SERVER seinen PERSISTENTEN
 /// Vertrauenszustand fuehrt.
@@ -82,6 +88,61 @@ pub const SERVER_TRUST_DEVICE_ID_V1: [u8; 16] = [0x5e; 16];
 /// Null und nicht „jetzt“: der Boden ist streng monoton, und ein zu hoch
 /// gesetzter Startwert liesse sich nie mehr senken.
 const INITIAL_TRUSTED_FLOOR_MILLIS: i64 = 0;
+
+/// Nur fertige oder gerade aufgebaute Organisationsabschluesse, keine
+/// Eintraege je angefragtem Schluessel. Verdraengung aendert keine Autoritaet.
+const AUTHORITY_CACHE_CAPACITY: usize = 128;
+
+type AuthorityCacheSlot = Arc<Mutex<Option<CachedAuthority>>>;
+
+#[derive(Eq, PartialEq)]
+struct CatalogIdentity {
+    anchor_bytes: Option<Vec<u8>>,
+    revision: i64,
+}
+
+struct AuthoritySnapshot {
+    catalog: CatalogIdentity,
+    pinned_head: Option<(RegistryVersion, ObjectHash)>,
+}
+
+struct CachedAuthority {
+    catalog: CatalogIdentity,
+    /// Identitaet des SIGNIERT und GETEILT gewaehlten Kopfes. Die Datenbank
+    /// liefert nur Invalidierung und Rueckfallboden, nie diese Autoritaet.
+    head: Option<(RegistryVersion, ObjectHash)>,
+    verified_at: UnixMillis,
+    not_after: Option<UnixMillis>,
+    /// Ein nicht anwendbarer Kopf ist kein zeitloser Bootstrap-Stand.
+    cacheable: bool,
+    devices: HashMap<KeyThumbprint, Option<RegisteredDevice>>,
+}
+
+impl CachedAuthority {
+    fn reusable(&self, catalog: &CatalogIdentity, now: UnixMillis) -> bool {
+        self.catalog == *catalog
+            && now >= self.verified_at
+            && self.not_after.is_none_or(|not_after| now <= not_after)
+    }
+
+    fn resolve(&self, key: KeyThumbprint) -> Option<RegisteredDevice> {
+        self.devices.get(&key).cloned().flatten()
+    }
+}
+
+fn require_pin_floor(
+    selected: Option<(RegistryVersion, ObjectHash)>,
+    pinned: Option<(RegistryVersion, ObjectHash)>,
+) -> Result<(), AuthorityError> {
+    if let Some((pinned_version, pinned_hash)) = pinned
+        && selected.is_none_or(|(version, hash)| {
+            version < pinned_version || (version == pinned_version && hash != pinned_hash)
+        })
+    {
+        return Err(AuthorityError::StateConflict);
+    }
+    Ok(())
+}
 
 /// Warum ein Kopflauf nicht bei einem gewaehlten Kopf endete.
 ///
@@ -143,12 +204,40 @@ impl From<RegistryError> for HeadWalkError {
 pub struct PostgresTrustAuthority {
     pool: PgPool,
     objects: Arc<dyn ObjectStore>,
+    cache: Mutex<HashMap<OrganizationId, AuthorityCacheSlot>>,
 }
 
 impl PostgresTrustAuthority {
     #[must_use]
-    pub const fn new(pool: PgPool, objects: Arc<dyn ObjectStore>) -> Self {
-        Self { pool, objects }
+    pub fn new(pool: PgPool, objects: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            pool,
+            objects,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn cache_slot(&self, organization_id: OrganizationId) -> AuthorityCacheSlot {
+        let mut cache = self.cache.lock().await;
+        if let Some(slot) = cache.get(&organization_id) {
+            return Arc::clone(slot);
+        }
+        let slot = Arc::new(Mutex::new(None));
+        if cache.len() == AUTHORITY_CACHE_CAPACITY {
+            // Einen laufenden Aufbau nicht verdraengen: seine Mitleser
+            // sollen weiter denselben Slot finden. Sind alle belegt, laeuft
+            // dieser Aufruf ungecacht; die Map bleibt trotzdem begrenzt.
+            let idle = cache
+                .iter()
+                .find(|(_, slot)| Arc::strong_count(slot) == 1)
+                .map(|(organization, _)| *organization);
+            let Some(idle) = idle else {
+                return slot;
+            };
+            cache.remove(&idle);
+        }
+        cache.insert(organization_id, Arc::clone(&slot));
+        slot
     }
 
     async fn anchor_bytes(
@@ -164,44 +253,48 @@ impl PostgresTrustAuthority {
         Ok(row.and_then(|row| row.get::<Option<Vec<u8>>, _>("trust_anchor_bytes")))
     }
 
-    /// Der PERSISTENTE Registrierungspin des Servers.
-    ///
-    /// Er ist der BODEN der Autoritaetsaufloesung und nicht ihre Quelle: die
-    /// Auswahl selbst laeuft unveraendert auf dem fluechtigen Speicher, also
-    /// lesend und ohne Rennen. Gelesen wird nur, WIE WEIT der Bestand schon
-    /// einmal nachweislich war — ein Lauf, der dahinter zurueckfaellt, sieht
-    /// einen aelteren Katalog, als es einmal gab, und das ist ein Rueckfall
-    /// und keine Antwort.
-    ///
-    /// Gepinnt wird weiterhin AUSSCHLIESSLICH in
-    /// [`TrustEventValidator::advance_pinned_head`]. Dieser Weg SCHREIBT
-    /// nicht.
-    async fn pinned_head(
+    /// Ein indizierter Punktzugriff: Anker, technischer Katalogstand und
+    /// persistenter Rueckfallboden im selben Datenbanksnapshot. Die Revision
+    /// aendert sich atomar beim Indizieren, auch auf ANDEREN Serverinstanzen.
+    async fn authority_snapshot(
         &self,
         organization_id: OrganizationId,
-    ) -> Result<Option<(RegistryVersion, ObjectHash)>, RepositoryError> {
+    ) -> Result<Option<AuthoritySnapshot>, AuthorityError> {
         let row = sqlx::query(
-            "SELECT pinned_registry_version, pinned_registry_head_hash FROM trust_state \
-             WHERE organization_id = $1 AND device_id = $2",
+            "SELECT o.trust_anchor_bytes, o.trust_catalog_revision, \
+             t.pinned_registry_version, t.pinned_registry_head_hash \
+             FROM organizations o LEFT JOIN trust_state t \
+             ON t.organization_id = o.organization_id AND t.device_id = $2 \
+             WHERE o.organization_id = $1",
         )
         .bind(&organization_id.as_bytes()[..])
         .bind(&SERVER_TRUST_DEVICE_ID_V1[..])
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| RepositoryError::Unavailable)?;
+        .map_err(|_| AuthorityError::Unavailable)?;
         let Some(row) = row else {
             return Ok(None);
         };
-        let (Some(version), Some(hash)) = (
+        let pinned_head = match (
             row.get::<Option<i64>, _>("pinned_registry_version"),
             row.get::<Option<Vec<u8>>, _>("pinned_registry_head_hash"),
-        ) else {
-            return Ok(None);
+        ) {
+            (None, None) => None,
+            (Some(version), Some(hash)) => Some((
+                RegistryVersion::new(
+                    u64::try_from(version).map_err(|_| AuthorityError::Unavailable)?,
+                ),
+                ObjectHash::try_from(hash.as_slice()).map_err(|_| AuthorityError::Unavailable)?,
+            )),
+            _ => return Err(AuthorityError::Unavailable),
         };
-        let version = u64::try_from(version).map_err(|_| RepositoryError::Unavailable)?;
-        let head_hash =
-            ObjectHash::try_from(hash.as_slice()).map_err(|_| RepositoryError::Unavailable)?;
-        Ok(Some((RegistryVersion::new(version), head_hash)))
+        Ok(Some(AuthoritySnapshot {
+            catalog: CatalogIdentity {
+                anchor_bytes: row.get("trust_anchor_bytes"),
+                revision: row.get("trust_catalog_revision"),
+            },
+            pinned_head,
+        }))
     }
 
     /// Alle indizierten `.etb` dieser Organisation, mit ihren EXAKTEN Bytes.
@@ -300,16 +393,59 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
         key_thumbprint: KeyThumbprint,
         now: UnixMillis,
     ) -> Result<Option<RegisteredDevice>, AuthorityError> {
-        let Some(anchor_bytes) = self
-            .anchor_bytes(organization_id)
-            .await
-            .map_err(|_| AuthorityError::Unavailable)?
-        else {
-            // Ohne Anker gibt es keine Wurzel und damit keine Autoritaet. Das
-            // ist eine Antwort, kein Ausfall.
+        let slot = self.cache_slot(organization_id).await;
+        let mut cached = slot.lock().await;
+        // NACH dem Warten lesen: ein anderer Aufruf kann unterdessen einen
+        // Abschluss aufgebaut haben, waehrend die Indexierung den Pin hebt.
+        let Some(snapshot) = self.authority_snapshot(organization_id).await? else {
+            *cached = None;
             return Ok(None);
         };
-        let Ok(anchor) = decode_trust_anchor(&anchor_bytes) else {
+        if let Some(authority) = cached.as_ref()
+            && authority.reusable(&snapshot.catalog, now)
+        {
+            require_pin_floor(authority.head, snapshot.pinned_head)?;
+            return Ok(authority.resolve(key_thumbprint));
+        }
+        *cached = None;
+        let built = self
+            .build_authority(organization_id, &snapshot.catalog, now)
+            .await?;
+        // Der Object Store liegt ausserhalb des DB-Snapshots. Ein waehrend
+        // des Aufbaus geaenderter Katalog darf weder antworten noch cachen.
+        let current = self
+            .authority_snapshot(organization_id)
+            .await?
+            .ok_or(AuthorityError::StateConflict)?;
+        if current.catalog != snapshot.catalog {
+            return Err(AuthorityError::StateConflict);
+        }
+        if let Some(authority) = built.as_ref() {
+            require_pin_floor(authority.head, current.pinned_head)?;
+        }
+        let result = built
+            .as_ref()
+            .and_then(|value| value.resolve(key_thumbprint));
+        if let Some(authority) = built
+            && authority.cacheable
+        {
+            *cached = Some(authority);
+        }
+        Ok(result)
+    }
+}
+
+impl PostgresTrustAuthority {
+    async fn build_authority(
+        &self,
+        organization_id: OrganizationId,
+        identity: &CatalogIdentity,
+        now: UnixMillis,
+    ) -> Result<Option<CachedAuthority>, AuthorityError> {
+        let Some(anchor_bytes) = identity.anchor_bytes.as_ref() else {
+            return Ok(None);
+        };
+        let Ok(anchor) = decode_trust_anchor(anchor_bytes) else {
             return Ok(None);
         };
         let catalog = self
@@ -319,9 +455,6 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
         let proposed_sequence = highest_effective_from_sequence(&catalog);
         let head_count = registry_event_count(&catalog);
         let source = CatalogSource(catalog);
-
-        // LESEND: der Stand dieses Laufs lebt im Speicher und ist nach der
-        // Antwort fort. Keine Zeile, kein Rennen, kein Serialisierungspunkt.
         let key = verification_state_key(organization_id);
         let mut store =
             EphemeralTrustStateStore::new(key, UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS));
@@ -337,77 +470,86 @@ impl ea_sync_server::DeviceAuthorityDirectory for PostgresTrustAuthority {
             Ok(pair) => pair,
             Err(HeadWalkError::Unavailable) => return Err(AuthorityError::Unavailable),
             Err(HeadWalkError::StateConflict) => return Err(AuthorityError::StateConflict),
-            // Kein anwendbarer Kopf heisst: keine Autoritaet. Das ist eine
-            // Antwort und kein Ausfall.
             Err(HeadWalkError::NotApplicable | HeadWalkError::Invalid) => return Ok(None),
         };
-
-        // Der PERSISTENTE Pin ist der BODEN. Ein hier gewaehlter Kopf, der
-        // hinter ihn zurueckfaellt, ist ein Rueckfall auf einen Katalogstand,
-        // den es nachweislich schon einmal nicht mehr gab — und ein
-        // Rueckfall ist kein Autorisierungsbefund, sondern ein Zustandsbefund:
-        // `EA-TRUST-STATE-CONFLICT`, 503, wiederholbar. Ein `401` waere die
-        // Behauptung, mit dem SCHLUESSEL sei etwas nicht in Ordnung.
-        //
-        // Ohne Pin (frische Organisation) ist das ein reiner Durchlauf.
-        if let Some((pinned_version, pinned_head_hash)) = self
-            .pinned_head(organization_id)
-            .await
-            .map_err(|_| AuthorityError::Unavailable)?
-            && let Some(selected) = head.as_ref()
-            && (selected.registry_version().get() < pinned_version.get()
-                || (selected.registry_version() == pinned_version
-                    && selected.registry_head_hash() != pinned_head_hash))
-        {
-            return Err(AuthorityError::StateConflict);
-        }
-
-        // Ohne Kopf gelten die vom ANKER benannten Administratorzertifikate.
-        // Sonst koennte eine frische Organisation ihren ersten Kopf nie
-        // einreichen: dazu braucht es `organizationAdminApprove`, und die
-        // steht genau in diesen Zertifikaten — von `verify_trust` ueber
-        // `require_exact_anchor_sets` bereits bewiesen.
-        let active: Vec<_> = head.as_ref().map_or_else(
-            || {
-                bootstrap_active_certificates(&trust, proposed_sequence)
-                    .map(|(hash, fields)| (hash, fields.clone()))
-                    .collect()
+        let devices = verified_devices(organization_id, &trust, head.as_ref(), proposed_sequence);
+        Ok(Some(CachedAuthority {
+            catalog: CatalogIdentity {
+                anchor_bytes: identity.anchor_bytes.clone(),
+                revision: identity.revision,
             },
-            |head| {
-                head.active_certificates()
-                    .map(|(hash, fields)| (hash, fields.clone()))
-                    .collect()
-            },
-        );
+            head: head
+                .as_ref()
+                .map(|head| (head.registry_version(), head.registry_head_hash())),
+            // Die Auswahl benutzt KEINE unabhaengigen Zeitquellen. Nach
+            // einem erfolgreichen Lauf bleiben seine Uebergaenge bis zum
+            // notAfter des gewaehlten Kopfes anwendbar; Autorisierungen
+            // pruefen gegen das SIGNIERTE issuedAt ihres Ereignisses.
+            // Ein Ruecksprung vor die verifizierte Zeit laeuft erneut durch
+            // die geteilte Auswahl, ebenso ein Zeitpunkt nach dem Ablaufende.
+            verified_at: now,
+            not_after: head.as_ref().map(SelectedRegistryHead::not_after),
+            // None kann auch PendingFuture bedeuten. Ohne gewaehlten Kopf
+            // wird nur ein Katalog OHNE Registry-Ereignisse gecacht.
+            cacheable: head.is_some() || head_count == 0,
+            devices,
+        }))
+    }
+}
 
-        for (certificate_hash, fields) in active {
-            if fields.signing_key_thumbprint != Some(key_thumbprint) {
-                continue;
-            }
-            let Some(exact_key) = fields.signing_public_cose_key.as_ref() else {
-                continue;
-            };
-            let Ok(public_key) = CanonicalPublicCoseKey::from_deterministic_cbor(exact_key) else {
-                continue;
-            };
-            // Ein unbekanntes Capability-Literal ist ein Zertifikatsbefund und
-            // KEIN ignorierbarer Zusatz: das ganze Zertifikat faellt aus.
-            let mut capabilities = Vec::with_capacity(fields.capabilities.len());
-            for literal in &fields.capabilities {
-                let Ok(capability) = CertificateCapability::try_from(literal.as_str()) else {
-                    return Ok(None);
-                };
-                capabilities.push(capability);
-            }
-            return Ok(Some(RegisteredDevice::new(
+fn verified_devices(
+    organization_id: OrganizationId,
+    trust: &VerifiedTrust,
+    head: Option<&SelectedRegistryHead>,
+    proposed_sequence: ChainSequence,
+) -> HashMap<KeyThumbprint, Option<RegisteredDevice>> {
+    // Ohne Kopf gelten die vom ANKER benannten Administratorzertifikate.
+    // Erst der Aufrufer stellt sicher, dass kein persistenter Pin diesen
+    // Bootstrap-Stand verbietet. Die Reihenfolge bleibt CertificateHash-
+    // aufsteigend: mehrere Zertifikate fuer denselben Schluessel behalten
+    // exakt die bisherige erste anwendbare Antwort.
+    let active: Vec<_> = head.map_or_else(
+        || {
+            bootstrap_active_certificates(trust, proposed_sequence)
+                .map(|(hash, fields)| (hash, fields.clone()))
+                .collect()
+        },
+        |head| {
+            head.active_certificates()
+                .map(|(hash, fields)| (hash, fields.clone()))
+                .collect()
+        },
+    );
+    let mut devices = HashMap::new();
+    for (certificate_hash, fields) in active {
+        let Some(thumbprint) = fields.signing_key_thumbprint else {
+            continue;
+        };
+        let Some(exact_key) = fields.signing_public_cose_key.as_ref() else {
+            continue;
+        };
+        let Ok(public_key) = CanonicalPublicCoseKey::from_deterministic_cbor(exact_key) else {
+            continue;
+        };
+        // Ein unbekanntes Literal verweigert diesen Schluessel. Auch diese
+        // erste Antwort bleibt stehen, statt ein spaeteres Zertifikat unter
+        // demselben Schluessel unbemerkt vorzuziehen.
+        devices.entry(thumbprint).or_insert_with(|| {
+            let capabilities = fields
+                .capabilities
+                .iter()
+                .map(|literal| CertificateCapability::try_from(literal.as_str()))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            Some(RegisteredDevice::new(
                 organization_id,
                 certificate_hash,
                 public_key,
                 capabilities,
-            )));
-        }
-        Ok(None)
+            ))
+        });
     }
+    devices
 }
 
 #[async_trait]

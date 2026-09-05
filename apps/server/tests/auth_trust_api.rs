@@ -1090,6 +1090,75 @@ async fn a_selected_head_behind_the_persisted_pin_is_refused() {
     database.cleanup().await;
 }
 
+/// Auch der Bootstrap-Zweig liegt UNTER einem bereits gespeicherten Kopf.
+/// Der lesende Aufruf darf weder auf Ankerautoritaet zurueckfallen noch den
+/// persistenten Stand umschreiben.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_headless_catalog_behind_the_persisted_pin_is_refused() {
+    let database = common::fresh_database().await;
+    let fixture = common::seed_trust_fixture(
+        database.pool(),
+        ROTATION_CASE,
+        &["head-event.bin", WITHHELD_HEAD],
+    )
+    .await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+    assert_eq!(
+        read_registry(&server, fixture.organization_id, [0x60; 16])
+            .await
+            .status,
+        200,
+        "the unpinned bootstrap authority must authenticate"
+    );
+
+    set_pin(database.pool(), fixture.organization_id, 1, [0xd1; 32]).await;
+    let response = read_registry(&server, fixture.organization_id, [0x61; 16]).await;
+    assert_eq!(response.status, 503);
+    let error = ProtocolErrorV1::decode(&response.body).expect("the conflict body decodes");
+    assert_eq!(error.error_code(), "EA-TRUST-STATE-CONFLICT");
+    assert!(error.retryable());
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM trust_state")
+        .fetch_one(database.pool())
+        .await
+        .expect("the fixture pin remains readable");
+    assert_eq!(revision, 1, "authentication must not rewrite its pin floor");
+    database.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_same_version_pin_with_a_different_head_hash_is_refused_after_warming() {
+    let database = common::fresh_database().await;
+    let fixture = common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[]).await;
+    let server = common::spawn_server(
+        database.pool().clone(),
+        UnixMillis::new(SERVER_NOW_MILLIS),
+        fixture.organization_id,
+        SERVER_SECRET,
+        CertificateHash::try_from(&SERVER_CERTIFICATE_HASH[..]).expect("32 bytes"),
+    )
+    .await;
+    assert_eq!(
+        read_registry(&server, fixture.organization_id, [0x62; 16])
+            .await
+            .status,
+        200
+    );
+    set_pin(database.pool(), fixture.organization_id, 2, [0xd2; 32]).await;
+    let response = read_registry(&server, fixture.organization_id, [0x63; 16]).await;
+    assert_eq!(response.status, 503);
+    let error = ProtocolErrorV1::decode(&response.body).expect("the conflict body decodes");
+    assert_eq!(error.error_code(), "EA-TRUST-STATE-CONFLICT");
+    assert!(error.retryable());
+    database.cleanup().await;
+}
+
 /// Ein signierter Registry-Lesezugriff mit GENAU dieser Request-ID.
 ///
 /// Eine eigene Funktion und nicht [`device_is_authorized`]: jene fuehrt eine
