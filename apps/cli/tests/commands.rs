@@ -20,13 +20,14 @@ mod support;
 
 use std::process::{Command, Output};
 
-/// Die fuenf Zeilen der Grammatik, wie sie das Werkzeug auf stdout druckt.
-const GRAMMAR_V1: [&str; 5] = [
+/// Die sechs Zeilen der Grammatik, wie sie das Werkzeug auf stdout druckt.
+const GRAMMAR_V1: [&str; 6] = [
     "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
     "einsatzarchiv --trust-anchor <file> list    <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
     "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
     "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
+    "einsatzarchiv --trust-anchor <new-file> organization init",
 ];
 
 /// Startet das Werkzeug mit `tokens` und liefert seinen vollstaendigen Ausgang.

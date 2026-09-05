@@ -1635,3 +1635,42 @@ fn backup(class: BackedUpKeyClass, byte: u8) -> KeyBackupRecordV1 {
         media: vec![BACKUP_MEDIUM_A, BACKUP_MEDIUM_B],
     }
 }
+
+/// Ein Temporaerverzeichnis, das sich beim Fallenlassen selbst raeumt.
+///
+/// Von Hand und ausdruecklich ohne `tempfile`: `ea-admin` nimmt fuer einen
+/// Pfadnamen keine neue externe Kiste auf. Die gleichnamige Bauart in
+/// `crates/ea-recovery/tests/support/mod.rs` waere die Alternative, liegt aber
+/// hinter einer Kante, die diese Crate nicht traegt und wegen eines
+/// Verzeichnisnamens auch nicht aufnehmen soll.
+pub struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    /// Der Pfad des Verzeichnisses.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Legt ein frisches Temporaerverzeichnis an.
+///
+/// Prozess-IDs werden vom Betriebssystem wiederverwendet; ein Rest aus einem
+/// abgebrochenen frueheren Lauf wuerde sonst als Zeremoniezustand gelesen.
+#[must_use]
+pub fn temp_dir(tag: &str) -> TempDir {
+    static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
+    let index = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("ea-admin-{tag}-{}-{index}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("das Temporaerverzeichnis muss anlegbar sein");
+    TempDir { path }
+}

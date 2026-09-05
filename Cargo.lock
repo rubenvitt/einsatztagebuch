@@ -2217,6 +2217,7 @@ dependencies = [
 name = "einsatzarchiv-cli"
 version = "0.1.0"
 dependencies = [
+ "ea-admin",
  "ea-archive",
  "ea-crypto",
  "ea-format",

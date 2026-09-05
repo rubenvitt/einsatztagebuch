@@ -37,6 +37,7 @@
 
 use std::io::{self, Write};
 
+use ea_admin::{AdminError, BootstrapStep, ProductionState};
 use ea_recovery::RecoveryError;
 use ea_verify::VerificationReportV1;
 
@@ -44,15 +45,41 @@ use crate::args::UsageError;
 
 /// Die geschlossene Grammatik, Zeile fuer Zeile.
 ///
-/// Genau fuenf Zeilen, weil es genau fuenf Kommandos gibt. Der Text ist Teil
+/// Genau sechs Zeilen, weil es genau sechs Kommandos gibt. Der Text ist Teil
 /// des beobachtbaren Verhaltens und wird als solcher gemessen.
-const GRAMMAR_V1: [&str; 5] = [
+///
+/// # Warum die sechste Zeile `<new-file>` sagt
+///
+/// Bei den fuenf ersten ist der Anker eine gepruefte EINGABE. Bei
+/// `organization init` ist er das, was die Zeremonie am Ende bildet — der Pfad
+/// benennt also einen Platz, der noch frei sein muss. Die Begruendung steht in
+/// `crate::commands::organization`; hier steht sie in einem Wort, damit ein
+/// Aufrufer sie schon in der Grammatik sieht.
+const GRAMMAR_V1: [&str; 6] = [
     "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
     "einsatzarchiv --trust-anchor <file> list    <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
     "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
     "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
+    "einsatzarchiv --trust-anchor <new-file> organization init",
 ];
+
+/// Was `organization init` TUT — und was ausdruecklich nicht.
+///
+/// # Warum diese Zeile ueberhaupt gedruckt wird
+///
+/// Die uebrigen fuenf Kommandos tun, was ihr Name sagt. Das sechste tut
+/// WENIGER, als sein Name vermuten laesst: es beginnt oder setzt die Zeremonie
+/// fort und berichtet ihren Schritt, aber es fuehrt keinen Schritt aus, der
+/// eine Offline-Schluesselquelle braucht — `ea_key_provider::SecretPurpose`
+/// kennt vier lokale Writer-Zwecke und ausdruecklich keinen Wurzelzweck
+/// (`crates/ea-key-provider/src/contract.rs:32-51`), und ein CLI-Prozess kann
+/// die aeusseren Schluessel nicht herbeireden. Wer das erst an einem
+/// ausbleibenden Schritt bemerkt, hat die Zeremonie bereits begonnen.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const ORGANIZATION_SCOPE_NOTE_V1: &str = "organization init begins or resumes the ceremony and \
+     reports its step; it drives no step that needs offline key sources";
 
 /// Druckt die Grammatik auf stdout.
 ///
@@ -63,6 +90,7 @@ pub fn print_grammar() {
     for line in GRAMMAR_V1 {
         println!("{line}");
     }
+    println!("{ORGANIZATION_SCOPE_NOTE_V1}");
 }
 
 /// Druckt einen Aufruffehler auf stderr.
@@ -80,6 +108,101 @@ pub fn print_usage_error(error: &UsageError) {
 /// assertieren; ein Betreiber soll daran erkennen, was gescheitert ist.
 pub fn print_recovery_error(error: &RecoveryError) {
     eprintln!("einsatzarchiv: {error}");
+}
+
+/// Druckt einen Zeremoniefehler auf stderr.
+///
+/// Dieselbe Form wie [`print_recovery_error`] und aus demselben Grund:
+/// [`AdminError`] zeigt ausschliesslich seinen STABILEN Code an
+/// (`crates/ea-admin/src/error.rs`), traegt weder Pfad noch Bytes, und ein
+/// Test darf darauf assertieren.
+pub fn print_admin_error(error: &AdminError) {
+    eprintln!("einsatzarchiv: {error}");
+}
+
+/// Die Ablehnung einer belegten Ankerdatei, Wort fuer Wort.
+///
+/// # Sie NENNT den Grund, statt auf eine Option zu verweisen
+///
+/// Die Datei an diesem Pfad kann eine lebende Vertrauensquelle sein.
+/// `design.md`:1782 laesst dieses Werkzeug keinen Anker erfinden und keinen aus
+/// dem geprueften Bestand nehmen; eine bestehende Datei ersatzweise zu
+/// ueberschreiben naehme einer Organisation ihre Wurzel. Der Exitcode ist 2 und
+/// nicht 20: es ist nichts misslungen, und der Lauf ist mit einem freien Pfad
+/// unveraendert wiederholbar.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const ANCHOR_PATH_OCCUPIED_REFUSAL_V1: &str = "the --trust-anchor path of organization init names \
+     the place this ceremony's anchor will occupy, and a file already exists there: this tool \
+     never overwrites a trust source, so choose a free path";
+
+/// Druckt die Ablehnung einer belegten Ankerdatei auf stderr.
+///
+/// stdout bleibt LEER: es ist keine Zeremonie entstanden, ueber die etwas zu
+/// sagen waere.
+pub fn print_anchor_path_occupied_refusal() {
+    eprintln!("einsatzarchiv: {ANCHOR_PATH_OCCUPIED_REFUSAL_V1}");
+}
+
+/// Die Ablehnung der JSON-Form fuer den Zeremoniestatus, Wort fuer Wort.
+///
+/// # Warum es kein `organization init --format json` gibt
+///
+/// `schemas/` ist geschlossen, und die einzige JSON-Ausgabe dieses Werkzeugs
+/// ist `ea.verification-report/v1`. Ein Zeremoniestatus ist kein
+/// Verifikationsbericht; ein hier erfundenes Dokument waere eine
+/// Schemaaenderung durch die Hintertuer — dieselbe Ueberlegung, die oben schon
+/// `list` kein eigenes JSON gibt. Der Exitcode ist 21: es ist nichts
+/// misslungen, es ist etwas nicht vorhanden.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const ORGANIZATION_JSON_REFUSAL_V1: &str = "organization init has a text form only: schemas/ is \
+     closed, ea.verification-report/v1 is the only report document of this tool, and a ceremony \
+     status is not a verification report";
+
+/// Druckt die Ablehnung der JSON-Form auf stderr.
+pub fn print_organization_json_refusal() {
+    eprintln!("einsatzarchiv: {ORGANIZATION_JSON_REFUSAL_V1}");
+}
+
+/// Schreibt den Zeremoniestatus als geschlossene Zeilenfolge auf stdout.
+///
+/// # Die Form ist GELIEHEN, nicht erfunden
+///
+/// Dieselben Regeln wie [`print_report_text`]: stabile Schluessel-Wert-Paare,
+/// eine Zeile je Angabe, gepunktete Schluessel fuer zusammengehoerige Felder
+/// wie bei `chainHead.sequence`, Bytefolgen als Kleinbuchstaben-Hex. Keine
+/// Uhrzeit, kein Hostpfad, keine Laufzeitangabe — die Regel dieses Moduls gilt
+/// hier unveraendert.
+///
+/// `bootstrapStep.count` steht dabei ausdruecklich in der Ausgabe: ohne die
+/// Zwoelf sagt eine Nummer allein nicht, wie weit die Zeremonie noch ist.
+///
+/// # Errors
+///
+/// [`RecoveryError::Io`], wenn stdout nicht schreibbar ist.
+pub fn print_bootstrap_status_text(
+    step: BootstrapStep,
+    organization: &[u8; 16],
+    chain: &[u8; 16],
+    production_state: ProductionState,
+) -> Result<(), RecoveryError> {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    writeln!(out, "bootstrapStep.number {}", step.number())?;
+    writeln!(out, "bootstrapStep.name {}", step.name())?;
+    writeln!(out, "bootstrapStep.count {}", BootstrapStep::ALL.len())?;
+    write!(out, "organizationId ")?;
+    write_hex(&mut out, organization)?;
+    writeln!(out)?;
+    write!(out, "chainId ")?;
+    write_hex(&mut out, chain)?;
+    writeln!(out)?;
+    writeln!(out, "productionState {production_state:?}")?;
+
+    out.flush()?;
+    Ok(())
 }
 
 /// Die Verweigerung der Berichtssignatur, Wort fuer Wort.

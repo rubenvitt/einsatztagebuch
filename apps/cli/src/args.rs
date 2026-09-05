@@ -2,7 +2,7 @@
 //!
 //! # Warum von Hand und nicht mit `clap`
 //!
-//! Die Grammatik ist mit fuenf Kommandos, vier wertnehmenden Schaltern und
+//! Die Grammatik ist mit sechs Kommandos, vier wertnehmenden Schaltern und
 //! einem Flag abgeschlossen und klein. Das Repo ist dependency-diszipliniert:
 //! jede externe Kiste traegt eine begruendete Zeile in
 //! `docs/adr/0001-toolchain-and-cryptography-dependencies.md`. Eine
@@ -36,9 +36,27 @@
 //! Wiederherstellungswerkzeug, das einen Bestand wegen der Kodierung seines
 //! Verzeichnisnamens nicht oeffnet, versagt genau dann, wenn es gebraucht wird.
 
-use std::{ffi::OsString, fmt, path::PathBuf};
+use std::{
+    ffi::OsString,
+    fmt,
+    path::{Path, PathBuf},
+};
 
-/// `--trust-anchor <file>`, PFLICHT bei allen fuenf Kommandos.
+/// Das EINZIGE Unterkommando von `organization`.
+pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
+
+/// `--trust-anchor <file>`, PFLICHT bei allen sechs Kommandos.
+///
+/// # Bei `organization init` bedeutet er etwas ANDERES
+///
+/// Bei den fuenf Wiederherstellungskommandos ist der Anker eine gepruefte
+/// EINGABE: `ea_recovery::load_trust_anchor` liest ihn, und `design.md`:1782
+/// verbietet jede andere Herkunft. Waehrend der Ersteinrichtung gibt es ihn
+/// noch gar nicht — er ist das, was die Zeremonie am Ende BILDET. Der Schalter
+/// bleibt trotzdem Pflicht, damit die Grammatik ueber alle sechs Kommandos
+/// dieselbe ist, und benennt dort den PLATZ, den der Anker dieser Zeremonie
+/// einnehmen wird. Die Folge steht in `crate::commands::organization`: eine
+/// belegte Datei an diesem Platz ist ein Aufruffehler und kein Ziel.
 pub const TRUST_ANCHOR_SWITCH: &str = "--trust-anchor";
 /// `--format text|json`, Vorgabe `text`.
 pub const FORMAT_SWITCH: &str = "--format";
@@ -111,6 +129,14 @@ pub enum Command {
         /// Neues oder leeres Zielverzeichnis.
         output: PathBuf,
     },
+    /// Die Ersteinrichtung einer Organisation beginnen oder fortsetzen.
+    ///
+    /// Traegt KEINEN Pfad: das einzige Positionsargument ist das Wort `init`,
+    /// und der Ort, an dem gearbeitet wird, steht in
+    /// [`Invocation::anchor`]. Ein zweites Unterkommando gibt es nicht — was
+    /// hier stuende, muesste einen Schritt fuehren, und die dafuer noetigen
+    /// Schluesselports gibt es in dieser Scheibe nicht.
+    OrganizationInit,
 }
 
 /// Ein vollstaendig geparster Aufruf.
@@ -171,6 +197,17 @@ pub enum UsageError {
         /// Das Kommando, das ihn verlangt.
         command: &'static str,
     },
+    /// Das Kommando kennt dieses Unterkommando nicht.
+    ///
+    /// Ein eigener Arm neben [`Self::UnknownCommand`], weil er eine andere
+    /// Frage beantwortet: das Kommando wurde erkannt, seine zweite Haelfte
+    /// nicht.
+    UnknownSubcommand {
+        /// Das erkannte Kommando.
+        command: &'static str,
+        /// Was statt eines Unterkommandos dastand, woertlich.
+        value: String,
+    },
     /// Der Schalter existiert, gehoert aber nicht zu diesem Kommando.
     SwitchNotAllowed {
         /// Der abgelehnte Schalter.
@@ -195,10 +232,12 @@ impl fmt::Display for UsageError {
             ),
             Self::UnknownCommand(command) => write!(
                 formatter,
-                "unknown command {command}; expected verify, list, decrypt, report or export"
+                "unknown command {command}; expected verify, list, decrypt, report, export or \
+                 organization"
             ),
             Self::MissingCommand => formatter.write_str(
-                "no command was given; expected verify, list, decrypt, report or export",
+                "no command was given; expected verify, list, decrypt, report, export or \
+                 organization",
             ),
             Self::MissingTrustAnchor => write!(
                 formatter,
@@ -212,6 +251,10 @@ impl fmt::Display for UsageError {
                 formatter,
                 "{command} takes exactly one positional argument, more were given"
             ),
+            Self::UnknownSubcommand { command, value } => write!(
+                formatter,
+                "unknown {command} subcommand {value}; expected init"
+            ),
             Self::MissingSwitch { switch, command } => {
                 write!(formatter, "{command} requires {switch}")
             }
@@ -224,7 +267,7 @@ impl fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// Welches der fuenf Kommandos gemeint ist.
+/// Welches der sechs Kommandos gemeint ist.
 ///
 /// Eine eigene Aufzaehlung statt einer Zeichenkette, damit die Auswertung unten
 /// VOLLSTAENDIG ist und kein `unreachable!()` braucht. Ein `unreachable!()`
@@ -236,6 +279,7 @@ enum CommandKind {
     Decrypt,
     Report,
     Export,
+    Organization,
 }
 
 impl CommandKind {
@@ -247,6 +291,7 @@ impl CommandKind {
             Self::Decrypt => "decrypt",
             Self::Report => "report",
             Self::Export => "export",
+            Self::Organization => "organization",
         }
     }
 
@@ -258,6 +303,7 @@ impl CommandKind {
             "decrypt" => Some(Self::Decrypt),
             "report" => Some(Self::Report),
             "export" => Some(Self::Export),
+            "organization" => Some(Self::Organization),
             _ => None,
         }
     }
@@ -414,7 +460,12 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
-    if output.is_some() && matches!(command_kind, CommandKind::Verify | CommandKind::List) {
+    if output.is_some()
+        && matches!(
+            command_kind,
+            CommandKind::Verify | CommandKind::List | CommandKind::Organization
+        )
+    {
         return Err(UsageError::SwitchNotAllowed {
             switch: OUTPUT_SWITCH,
             command: command_name,
@@ -437,7 +488,10 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
         });
     }
 
-    // 5 — genau ein Positionsargument, bei allen fuenf Kommandos.
+    // 5 — genau ein Positionsargument, bei allen sechs Kommandos. Bei den
+    // fuenf Wiederherstellungskommandos ist es ein PFAD, bei `organization`
+    // das Wort `init`; die ANZAHL ist dieselbe, und deshalb steht sie hier
+    // einmal.
     let mut positionals = positionals.into_iter();
     let path = positionals
         .next()
@@ -475,6 +529,15 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 command: command_name,
             })?,
         },
+        CommandKind::Organization => {
+            if path != Path::new(ORGANIZATION_INIT_SUBCOMMAND) {
+                return Err(UsageError::UnknownSubcommand {
+                    command: command_name,
+                    value: path.to_string_lossy().into_owned(),
+                });
+            }
+            Command::OrganizationInit
+        }
     };
 
     Ok(Invocation {
@@ -490,7 +553,8 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
 mod tests {
     use super::{
         Command, FORMAT_SWITCH, Format, INCLUDE_RUNTIME_METADATA_SWITCH, Invocation, KEY_SWITCH,
-        OUTPUT_SWITCH, REPORT_SIGNING_KEY_SWITCH, TRUST_ANCHOR_SWITCH, UsageError, parse,
+        ORGANIZATION_INIT_SUBCOMMAND, OUTPUT_SWITCH, REPORT_SIGNING_KEY_SWITCH,
+        TRUST_ANCHOR_SWITCH, UsageError, parse,
     };
     use std::{ffi::OsString, path::PathBuf};
 
@@ -608,7 +672,45 @@ mod tests {
         );
     }
 
-    /// Der Anker ist bei ALLEN FUENF Kommandos Pflicht, nicht nur bei `verify`.
+    /// `organization` traegt als Positionsargument ein WORT und keinen Pfad.
+    ///
+    /// Die Anzahl ist dieselbe wie bei den fuenf anderen — genau eines —, die
+    /// Bedeutung nicht: hier steht das Unterkommando. Der Anker bleibt
+    /// trotzdem Pflicht; was er bei diesem Kommando bedeutet, steht an
+    /// [`TRUST_ANCHOR_SWITCH`].
+    #[test]
+    fn organization_init_parses_in_its_full_form() {
+        assert_eq!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "organization",
+                ORGANIZATION_INIT_SUBCOMMAND
+            ])
+            .expect("organization init muss parsen"),
+            Invocation {
+                anchor: PathBuf::from("anchor.etb"),
+                format: Format::Text,
+                include_runtime_metadata: false,
+                report_signing_key: None,
+                command: Command::OrganizationInit,
+            }
+        );
+    }
+
+    /// Ein anderes Wort ist kein Unterkommando und wird woertlich genannt.
+    #[test]
+    fn an_unknown_organization_subcommand_is_rejected_verbatim() {
+        assert_eq!(
+            rejected(&[TRUST_ANCHOR_SWITCH, "anchor.etb", "organization", "iniit"]),
+            UsageError::UnknownSubcommand {
+                command: "organization",
+                value: "iniit".to_owned(),
+            }
+        );
+    }
+
+    /// Der Anker ist bei ALLEN SECHS Kommandos Pflicht, nicht nur bei `verify`.
     #[test]
     fn every_command_requires_the_trust_anchor() {
         for tokens in [
@@ -617,6 +719,7 @@ mod tests {
             vec!["decrypt", "archive", KEY_SWITCH, "k", OUTPUT_SWITCH, "t"],
             vec!["report", "archive", OUTPUT_SWITCH, "r.json"],
             vec!["export", "archive", OUTPUT_SWITCH, "t"],
+            vec!["organization", ORGANIZATION_INIT_SUBCOMMAND],
         ] {
             assert_eq!(
                 rejected(&tokens),
