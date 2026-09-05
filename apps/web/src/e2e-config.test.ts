@@ -2,8 +2,8 @@
 // Schluessel, ohne einen Browser zu starten: das Suchverzeichnis, das die
 // E2E-Suite im PAKET verankert, den `webServer`, der das Buendel BAUT und dann
 // die gebauten Bytes ausliefert, den eigenen Port neben dem des Desktops, die
-// Herkunft, unter der eine WebAuthn-Zeremonie ueberhaupt laufen darf, und das
-// EINE Browserprojekt dieses Standes. Dazu die Grenze zwischen den zwei
+// Herkunft, unter der eine WebAuthn-Zeremonie ueberhaupt laufen darf, und die
+// DREI Engine-Projekte der Browsermatrix. Dazu die Grenze zwischen den zwei
 // Runnern: Vitest darf `tests/e2e/enrollment.spec.ts` nicht einsammeln.
 //
 // Der Zeuge ist das Spiegelbild von `apps/desktop/src/e2e-config.test.ts` und
@@ -55,14 +55,22 @@ it('offers the same preview under a hostname, because WebAuthn refuses an IP rel
   expect(new URL(WEBAUTHN_PREVIEW_ORIGIN).port).toBe(new URL(config.webServer.url).port)
 })
 
-it('carries exactly one browser project, and it is chromium', async () => {
+it('carries exactly the three engine projects of the browser matrix, in this order', async () => {
   const config = (await import('../playwright.config')).default
-  // `WebAuthn.addVirtualAuthenticator` ist eine CDP-Methode; Firefox und
-  // WebKit bieten kein Gegenstueck. Der Gate-Task stellt zwei weitere Projekte
-  // daneben — dieser Zeuge macht die Erweiterung zu einer bewussten Aenderung
-  // statt zu einem Nebeneffekt.
-  expect(config.projects.length).toBe(1)
-  expect(config.projects[0]?.name).toBe('chromium')
+  // `web-reader-design.md` §11.4 ersetzt fuer den Reader die Achsen
+  // Architektur, Installerformat und Key-Provider durch Engine, Version und
+  // Plattform. Die drei Playwright-Engines sind die Engine-Achse; GENAU drei,
+  // in GENAU dieser Reihenfolge, damit die Matrix eine bewusste Aenderung
+  // bleibt und kein Nebeneffekt — dieselbe Rolle, die dieser Zeuge vorher fuer
+  // das eine Projekt `chromium` hatte.
+  expect(config.projects.map(project => project.name)).toEqual(['chromium', 'firefox', 'webkit'])
+  // Jedes Projekt faehrt seine eigene Engine und keine Kopie einer anderen:
+  // `defaultBrowserType` ist der Wert, aus dem Playwright den Start ableitet.
+  expect(config.projects.map(project => project.use.defaultBrowserType)).toEqual([
+    'chromium',
+    'firefox',
+    'webkit',
+  ])
 })
 
 it('keeps the Playwright spec out of the Vitest run', async () => {

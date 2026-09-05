@@ -2056,6 +2056,7 @@ dependencies = [
  "ea-key-provider",
  "ea-local-store",
  "ea-operator",
+ "ea-reader",
  "ea-schema",
  "ea-testkit",
  "ea-time",

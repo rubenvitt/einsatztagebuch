@@ -3,14 +3,15 @@
 // # Was dieser Lauf NICHT bezeugen kann, und das gehoert hierher
 //
 // Die Eigenschaft, die den universellen Weg ueberhaupt noetig macht, ist die
-// ABWESENHEIT von `showDirectoryPicker` in Safari und Firefox — und
-// `apps/web/playwright.config.ts` traegt genau EIN Projekt, `chromium`,
-// gepinnt von `apps/web/src/e2e-config.test.ts`. In Chromium IST die
-// Faehigkeit da. Die Abwesenheit haengt deshalb an zwei anderen Zeugen: an der
-// Faehigkeitsabfrage in `src/features/file-mode/OpenArchivePanel.test.tsx`,
-// die den Wirt ohne `showDirectoryPicker` doubelt, und an der Browsermatrix
-// der Aufgabe „Reader-Interoperabilitaet, Browser-Matrix, Datei-Modus,
-// Privatheit und das Stufe-4-Gate", die `projects` erweitert.
+// ABWESENHEIT von `showDirectoryPicker` in Safari und Firefox — und dieser
+// Zeuge laeuft ausschliesslich im Projekt `chromium`, wo die Faehigkeit DA
+// ist (die Anti-Leerlauf-Zeile unten misst genau das). Die Abwesenheit haengt
+// deshalb an zwei anderen Zeugen: an der Faehigkeitsabfrage in
+// `src/features/file-mode/OpenArchivePanel.test.tsx`, die den Wirt ohne
+// `showDirectoryPicker` doubelt, und an `browser-matrix.spec.ts`, das dieselbe
+// Route in allen drei Engines faehrt und die Faehigkeit je Engine als
+// gemessene Tabelle traegt (gemessen: Firefox 153 und WebKit 26.5 liefern
+// `false`, dieser Lauf fiele dort an seiner Anti-Leerlauf-Zeile).
 //
 // In diesem Task entsteht KEIN Playwright-Geruest, sondern eine dritte Spec
 // darin. Gemessen wird, was nur ein echter Browser messen kann: dass die Route

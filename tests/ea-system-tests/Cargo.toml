@@ -50,6 +50,13 @@ ea-key-provider = { workspace = true, features = ["test-support"] }
 # Die verschluesselte lokale Ablage, in der Entwurf und Abschlussmarke liegen.
 ea-local-store.workspace = true
 ea-operator.workspace = true
+# Der Stufe-4-Reader als Gegenstand der vier Stufe-4-Systemzeugen
+# (`cross_platform_two_readers`, `e2e_reader_sync_interruptions`,
+# `reader_file_mode_interop`, `privacy_canaries_reader`). Ueber die
+# Wurzeltabelle mit `default-features = false`: das Vorgabemerkmal
+# `test-support` von `crates/ea-reader` bleibt AUS, die Zeugen bringen ihre
+# Fixtures selbst mit.
+ea-reader.workspace = true
 ea-schema.workspace = true
 # Die eingefrorenen Vektoren und ihr Manifestmodell. `ea-testkit` haelt
 # `jsonschema` von sich fern: die Schemavalidierung findet ausschliesslich in
