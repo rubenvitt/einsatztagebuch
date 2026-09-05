@@ -460,12 +460,57 @@ git commit -m "feat(admin): bootstrap independently anchored organizations"
 
 ### Task 3: Operator Provisioning, Session Verification, and Revocation
 
+**Abgleich DRK-271 gegen `origin/main` (`523df5e`, 2026-09-05):**
+
+- Der Kern ist synchron. Die Beispiele unten beschreiben das Verhalten; die
+  realen Zeugen verwenden `#[test]`, keine Tokio-Laufzeit und kein `.await`.
+- `RootCeremonyService::publish_authorized_target` ist ausgeliefert und nimmt
+  `VerifiedAdminAuthorizationIntent`, `TrustPayloadV1`, exakte Autorisierungsbytes,
+  `TrustStateStore` und einen frischen `OperatorSessionProof` entgegen. T03 nutzt
+  diesen Dienst und `verify_intended_trust_target`; es baut weder eine zweite
+  Admin-Prüfung noch einen zweiten Root-Signierer.
+- `BoundOperator::resolve` und `OperatorAuthenticator::reauthenticate` existieren.
+  Neu ist die erneute Prüfung einer Sitzung am aktuellen `SelectedRegistryHead`
+  samt erwarteter Rolle/Gerätezertifikat und aktuellem Konto/Instanzschlüssel.
+  Die obere Grenze des Fünf-Minuten-Fensters ist exklusiv.
+- Das vorhandene Profil liegt in der SQLCipher-Tabelle `operator_profile`;
+  `ea-draft::OperatorProfileRepository` liest es nur. Der administrative
+  Schreibpfad gehört in `ea-admin`, benutzt dieselbe verschlüsselte Datenbank
+  und darf keine parallele Klartext-Profildatei anlegen.
+- Windows/macOS/Linux stellen bislang OS-Konto- und Präsenz-Ports bereit,
+  keine nativen API-Implementierungen. Der neue Provisionierungsport verlangt
+  extern geprüfte Identität und einen frischen, nicht roamingfähigen,
+  nicht synchronisierten, vom Backup ausgeschlossenen Instanzschlüssel.
+  Vertragstests mit echten Signaturen laufen auf jedem Testhost, einschließlich
+  der Ubuntu-UID-Wiederverwendung. Sie ersetzen keine native Plattformabnahme.
+  Solange dem CLI die nativen/offline Provider fehlen, muss ein
+  `operator provision|verify-session|revoke`-Aufruf dies ohne Mutation mit
+  `Unsupported` melden; weder Identitätstext noch Schlüsseldateien ersetzen sie.
+- Widerruf hat kein direktes Trust-Ziel: Bindungen werden durch
+  `RegistryChangeV1::Target { target_kind: 1, object_hash }` (Action 1)
+  widerrufen; ein Admin-Zertifikat durch `AdminCertificate { effect: 1, .. }`
+  (Action 5). Eine freie `revocation`-Objektfamilie entsteht nicht.
+- Root-signierte Binding-Bytes sind noch keine aktive Bindung. Die Aktivierung
+  braucht ein separat autorisiertes Registry-Ereignis (Action 4) mit eigenem
+  Bezeichner/Nonce gegen denselben Previous Head. Vorbereitung und aktive
+  Bereitstellung sind verschiedene Zustände; Profil-/Schlüsselfehler dürfen
+  keinen teilweise eingerichteten Operator freischalten.
+- Das eingefrorene Login-/Reauth-Audit trägt nur einen optionalen öffentlichen
+  Objekthash und den Ausgang. Technische Fehlercodes werden als geschlossene
+  lokale Fehler zurückgegeben, nicht in ein erfundenes Audit-Freitextfeld
+  geschrieben. Binding-Änderung/Widerruf verwenden
+  `BindingLifecycleContextV1`; `record_signed` persistiert vor der Rückgabe.
+
 **Files:**
 - Create: `crates/ea-admin/src/operator.rs`
-- Modify: `crates/ea-operator/src/session.rs`
+- Modify: `crates/ea-operator/src/session.rs`, `account.rs`, `lib.rs`
+- Create: `crates/ea-admin/src/operator_profile.rs`
+- Modify: `crates/ea-admin/src/lib.rs`, `crates/ea-admin/Cargo.toml`, `Cargo.lock`
 - Create: `apps/cli/src/commands/operator.rs`
+- Modify: `apps/cli/src/args.rs`, `commands/mod.rs`, `output.rs`
 - Test: `crates/ea-admin/tests/operator_binding.rs`
 - Test: `crates/ea-operator/tests/account_recreation.rs`
+- Test: `apps/cli/tests/operator.rs`
 
 **Interfaces:**
 - Consumes: Admin authorization, Root signer, native account/instance-key provider, encrypted local profile, and `LocalAuditService`.
@@ -474,20 +519,19 @@ git commit -m "feat(admin): bootstrap independently anchored organizations"
 - [ ] **Step 1: Write commitment, wrong-account, and Ubuntu UID-reuse tests**
 
 ```rust
-#[tokio::test]
-async fn profile_commitment_must_match_decrypted_snapshot() {
-    let binding = service.provision(fixtures::profile(), fixtures::account(), fixtures::auth()).await.unwrap();
+#[test]
+fn profile_commitment_must_match_decrypted_snapshot() {
+    let binding = service.provision(fixtures::profile(), fixtures::account(), fixtures::auth()).unwrap();
     assert!(verify_operator_snapshot(fixtures::profile(), &binding).is_ok());
     assert_eq!(verify_operator_snapshot(fixtures::renamed_profile(), &binding).unwrap_err().code(),
                "EA-OPERATOR-PROFILE-COMMITMENT");
 }
 
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn recreated_same_uid_and_home_cannot_reuse_binding() {
-    let old = harness.provision_linux_account(1001, "instance-a").await;
-    harness.delete_and_recreate_account(1001, "instance-b", true).await;
-    assert!(harness.verify(old).await.is_err());
+#[test]
+fn recreated_same_uid_and_home_cannot_reuse_binding() {
+    let old = harness.provision_linux_account(1001, "instance-a");
+    harness.delete_and_recreate_account(1001, "instance-b", true);
+    assert!(harness.verify(old).is_err());
 }
 ```
 
@@ -495,17 +539,17 @@ async fn recreated_same_uid_and_home_cannot_reuse_binding() {
 
 Run: `cargo test --locked -p ea-admin --test operator_binding && cargo test --locked -p ea-operator --test account_recreation`
 
-Expected: FAIL because provisioning/revocation and account recreation rules are absent.
+Expected: FAIL because provisioning/replacement orchestration and native account-recreation evidence are absent; existing session contract checks already cover wrong accounts, missing/replaced instance keys, challenge verification, lock invalidation and expiry.
 
 - [ ] **Step 3: Implement external identity-check to signed binding flow**
 
 Generate fresh 32-byte `profileCommitmentSalt`, keep display name/function/salt only in encrypted profile, compute the exact operator-profile commitment, generate a new non-roaming installation key, derive OS account binding hash through Stage 2 provider, obtain Admin authorization with action 4, and Root-sign the fixed binding core. Verify device certificate, role, effective/revoked sequence, account hash, fresh instance challenge, profile commitment, native presence, and five-minute session expiry on every action. Revocation is Root-signed from its effective sequence. Account deletion/recreation, UID reuse, restored home/app backup, lost Secret Service collection, or missing instance key always requires external re-identification, new key/auth/binding, and revocation of old binding.
 
-Write signed, cleartext-free local audit events for every login attempt, failed re-authentication, binding replacement, and revocation. Login success binds only the pseudonymous binding/device hashes; failure uses an allowlisted technical reason code and no entered credential/account/display value. Binding change and revocation bind old/new public object hashes and effective sequence. Audit persistence failure blocks privileged action completion and is surfaced as a local resource error.
+Write signed, cleartext-free local audit events for every login attempt, failed re-authentication, binding replacement, and revocation. Login success binds only the pseudonymous binding/device hashes; failure returns an allowlisted technical reason code locally and persists only the frozen generic audit context and outcome, with no entered credential/account/display value. Binding change and revocation bind old/new public object hashes and effective sequence. Audit persistence failure blocks privileged action completion and is surfaced as a local resource error.
 
 - [ ] **Step 4: Run cross-platform contract and negative binding tests**
 
-Run: `cargo test --locked -p ea-admin -p ea-operator operator`
+Run: `cargo test --locked -p ea-admin -p ea-operator` and `cargo test --locked -p einsatzarchiv-cli --test operator`
 
 Expected: PASS; free operator text, wrong device/account/role, revoked binding, stale session, and restored old instance fail.
 
