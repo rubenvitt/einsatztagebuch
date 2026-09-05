@@ -277,10 +277,10 @@ Gemessen am 2026-09-05 auf diesem Wirt ueber `pnpm index:scale`:
 |---|---|
 | Pakete | 50000 |
 | `blob_bytes` | 7566455 |
-| `seal_ms` | 4419 |
-| `unlock_ms` | 6114 |
-| `search_us` | 48 |
-| `broad_search_us` | 84667 |
+| `seal_ms` | 4447 |
+| `unlock_ms` | 6173 |
+| `search_us` | 49 |
+| `broad_search_us` | 84628 |
 | `peak_rss_kib` | 357484 |
 
 **Profil und Zustand, ausdruecklich:** das Messwerkzeug lief im
@@ -551,11 +551,12 @@ dort vorgeschriebenen Reihenfolge, mit `cargo metadata --format-version 1` an
 erster, `cargo run --locked -p xtask -- integration up` an zweiter und
 `cargo run --locked -p xtask -- integration down` an letzter Stelle. Die
 siebzehn Zeilen mit Exitcode, gemessenem Ergebnis und gemessener Laufzeit
-stehen unten und sind EINGETRAGEN: sechzehn davon tragen die Zahlen des
-Bootstraplaufs, die siebzehnte — die Zeile `pnpm verify:quick` — die des
-Bestaetigungslaufs. Warum der Lauf zweipassig ist und warum trotzdem keine
-Zeile geschaetzt wurde, schreibt der Unterabschnitt „Warum dieser Lauf
-zweipassig ist" unten aus.
+stehen unten und stammen ALLE aus EINEM Lauf ueber den ausgelieferten Stand:
+siebzehn Kommandos, siebzehnmal Exitcode 0. Dass dieser Lauf in einem
+Durchgang gruen sein KONNTE, ist selbst ein Ergebnis — der erste Anlauf
+konnte es nicht, und der Unterabschnitt „Warum dieser Lauf zweipassig ist"
+unten schreibt aus, warum das an der Gestalt dieses Vertrags liegt und keine
+Nachlaessigkeit war.
 
 Zwei Angaben sind dabei gebunden und nicht frei: die Belegzeile von
 `pnpm verify:quick` MUSS die Zahl ihrer Teilkommandos und die Zahl der Pakete
@@ -569,22 +570,22 @@ und werden nicht umgeschrieben.
 
 | Kommando | Exitcode | Gemessenes Ergebnis | Laufzeit |
 |---|---|---|---|
-| `cargo metadata --format-version 1` | 0 | 3 586 479 Byte JSON auf stdout; `Cargo.lock` bleibt unveraendert — dieser Teil zieht keine neue Arbeitsbereichskante, und das eine Kommando ohne `--locked` belegt es, statt es anzunehmen | 0 s |
-| `cargo run --locked -p xtask -- integration up` | 0 | beide Dienste gesund; die zwei Zeilen `export DATABASE_URL=postgres://…@127.0.0.1:55432/einsatzarchiv` und `export EA_OBJECT_STORE_ENDPOINT=http://127.0.0.1:59000` gedruckt und per `eval` uebernommen | 7 s |
+| `cargo metadata --format-version 1` | 0 | 3 586 479 Byte JSON auf stdout; `Cargo.lock` bleibt unveraendert — dieser Teil zieht keine neue Arbeitsbereichskante, und das eine Kommando ohne `--locked` belegt es, statt es anzunehmen | 1 s |
+| `cargo run --locked -p xtask -- integration up` | 0 | beide Dienste gesund; die zwei Zeilen `export DATABASE_URL=postgres://…@127.0.0.1:55432/einsatzarchiv` und `export EA_OBJECT_STORE_ENDPOINT=http://127.0.0.1:59000` gedruckt und per `eval` uebernommen | 1 s |
 | `cargo run --locked -p xtask -- browsers up` | 0 | Dienst gesund; gedruckt wird GENAU EINE Zeile, `export CHROMEDRIVER_REMOTE=http://127.0.0.1:59515` — kein Pfad zu Engine-Baus, siehe Abschnitt 2.1 | 6 s |
-| `pnpm build:wasm` | 0 | `apps/web/src/bridge/pkg/ea_reader_wasm.js` erzeugt. Ohne diesen Schritt faellt `pnpm web:e2e` — in der Liste OHNE `build:wasm`, und die ist der Gegenfall, das ELFTE Kommando; in der Liste unten das zwoelfte — mit `[UNRESOLVED_IMPORT] Could not resolve './pkg/ea_reader_wasm.js'`, bevor ein Browser startet — gemessen im Bootstraplauf ohne diese Zeile, Exit 1 nach 3 s | 2 s |
-| `pnpm test:reader` | 0 | `ea-reader` und `ea-index` zusammen: 31 Ergebniszeilen, 145 bestanden, 0 fehlgeschlagen, 1 ignoriert — der ignorierte ist der Skalenlauf, den das Kommando darunter faehrt | 59 s |
-| `pnpm index:scale` | 0 | `ea-index scale packages=50000 blob_bytes=7566455 seal_ms=4419 unlock_ms=6114 search_us=48 broad_search_us=84667 peak_rss_kib=357484`; ausgewertet in Abschnitt 5 | 13 s |
+| `pnpm build:wasm` | 0 | `apps/web/src/bridge/pkg/ea_reader_wasm.js` erzeugt. Ohne diesen Schritt faellt `pnpm web:e2e` — in der Liste OHNE `build:wasm`, und die ist der Gegenfall, das ELFTE Kommando; in der Liste unten das zwoelfte — mit `[UNRESOLVED_IMPORT] Could not resolve './pkg/ea_reader_wasm.js'`, bevor ein Browser startet — gemessen im Bootstraplauf ohne diese Zeile, Exit 1 nach 3 s | 3 s |
+| `pnpm test:reader` | 0 | `ea-reader` und `ea-index` zusammen: 31 Ergebniszeilen, 145 bestanden, 0 fehlgeschlagen, 1 ignoriert — der ignorierte ist der Skalenlauf, den das Kommando darunter faehrt | 61 s |
+| `pnpm index:scale` | 0 | `ea-index scale packages=50000 blob_bytes=7566455 seal_ms=4447 unlock_ms=6173 search_us=49 broad_search_us=84628 peak_rss_kib=357484`; ausgewertet in Abschnitt 5 | 14 s |
 | `pnpm web:browser-test` | 0 | die `wasm-bindgen-test`-Ziele von `crates/ea-reader-wasm` in headless Chromium ueber den `chromedriver` aus Kommando drei: VIER Ziele tragen Tests — `export_browser` 2, `index_browser` 1, `opfs_browser` 5, `verify_browser` 2 —, zusammen 10 bestanden, 0 fehlgeschlagen; die uebrigen fuenf Ziele melden `no tests to run!` | 25 s |
-| `cargo test --locked -p ea-system-tests --test cross_platform_two_readers` | 0 | 2 bestanden: ein Chiffrat unter zwei Reader-KEM-Schluesseln, und der entfernte Grant als Planabgleichsfehler fuer beide | 3 s |
+| `cargo test --locked -p ea-system-tests --test cross_platform_two_readers` | 0 | 2 bestanden: ein Chiffrat unter zwei Reader-KEM-Schluesseln, und der entfernte Grant als Planabgleichsfehler fuer beide | 4 s |
 | `cargo test --locked -p ea-system-tests --test e2e_reader_sync_interruptions` | 0 | 3 bestanden: Mengengleichheit von Manifest und `ReaderSyncFaultPoint`, Cursor nach jedem der fuenfzehn Abbrueche unveraendert, Wiederholversuch idempotent | 22 s |
-| `cargo test --locked -p ea-system-tests --test reader_file_mode_interop` | 0 | 5 bestanden: (a) und (b) bytegleich samt `serverConfirmation`, (c) zweifach, das untergeschobene Archiv an Gate `trust` | 5 s |
-| `cargo test --locked -p ea-system-tests --test privacy_canaries_reader` | 0 | 9 bestanden: kein Marker in einem der sieben Stroeme, und die Positivkontrolle findet denselben Marker dort, wo er liegen soll; DREI der sieben Stroeme — Service-Worker-Cache, Zwischenablage und Telemetrie — sind QUELLENSCANS und keine Laufzeitmessung | 1 s |
-| `pnpm web:e2e` | 0 | 36 Tests ueber `chromium`, `firefox` und `webkit`: 27 bestanden, 9 uebersprungen, 0 fehlgeschlagen; WebKit ueber den `run-server` im gepinnten Abbild (Abschnitt 2.1) | 18 s |
+| `cargo test --locked -p ea-system-tests --test reader_file_mode_interop` | 0 | 5 bestanden: (a) und (b) bytegleich samt `serverConfirmation`, (c) zweifach, das untergeschobene Archiv an Gate `trust` | 6 s |
+| `cargo test --locked -p ea-system-tests --test privacy_canaries_reader` | 0 | 10 bestanden: kein Marker in einem der sieben Stroeme, und die Positivkontrolle findet denselben Marker dort, wo er liegen soll; DREI der sieben Stroeme — Service-Worker-Cache, Zwischenablage und Telemetrie — sind QUELLENSCANS und keine Laufzeitmessung | 2 s |
+| `pnpm web:e2e` | 0 | 36 Tests ueber `chromium`, `firefox` und `webkit`: 27 bestanden, 9 uebersprungen, 0 fehlgeschlagen; WebKit ueber den `run-server` im gepinnten Abbild (Abschnitt 2.1) | 17 s |
 | `pnpm supply-chain` | 0 | advisories ok, bans ok, licenses ok, sources ok; der `wasm-bindgen`-Teilbaum hat KEINE neue benannte Ausnahme in `deny.toml` erzeugt, die Datei fuehrt weiterhin keinen `name =`-Schluessel | 2 s |
-| `pnpm stage-gate:4` | 0 | JSON auf stdout: `stage` 4, `vector_families` LEER, `stage_four_primary_acceptance_criteria` `[10, 42, 43]`, 32 deklarierte Szenarien, 21 aufgeloeste Zeugen (zwoelf `sync-cursor`-Punkte teilen einen), `stage_four_rows_still_planned` LEER, 158 Ledgerzeilen | 0 s |
-| `pnpm verify:quick` | 0 | ZWOELF Teilkommandos gruen, darunter `cargo run --locked -p xtask -- build-wasm`, der `apps/web`-Bau und der wasm32-Check ueber die VIERZEHN Pakete der Positivliste, deren Zahl `verify_quick_commands()` in `tools/xtask/src/main.rs` haelt. Ueber beide `cargo test`-Teilkommandos zusammengezaehlt: 238 Ergebniszeilen, 1586 bestanden, 0 fehlgeschlagen, 8 ignoriert. Gemessen auf WARMEM `target/` — der Lauf folgt unmittelbar auf die vierzehn Kommandos darueber, die denselben Baum uebersetzt haben; ein kalter `target/` liegt deutlich darueber und ist hier NICHT gemessen. Diese Zeile allein stammt aus dem BESTAETIGUNGSLAUF und nicht aus dem Bootstraplauf, aus dem Grund, den der Unterabschnitt darunter ausschreibt | 1004 s |
-| `cargo run --locked -p xtask -- browsers down` | 0 | Dienst und Netz entfernt, mit `--volumes` wie `integration down`, obwohl der Dienst keinen Zustand fuehrt | 11 s |
+| `pnpm stage-gate:4` | 0 | JSON auf stdout: `stage` 4, `vector_families` LEER, `stage_four_primary_acceptance_criteria` `[10, 42, 43]`, 32 deklarierte Szenarien, 21 aufgeloeste Zeugen (zwoelf `sync-cursor`-Punkte teilen einen), `stage_four_rows_still_planned` LEER, 158 Ledgerzeilen | 1 s |
+| `pnpm verify:quick` | 0 | ZWOELF Teilkommandos gruen, darunter `cargo run --locked -p xtask -- build-wasm`, der `apps/web`-Bau und der wasm32-Check ueber die VIERZEHN Pakete der Positivliste, deren Zahl `verify_quick_commands()` in `tools/xtask/src/main.rs` haelt. Ueber beide `cargo test`-Teilkommandos zusammengezaehlt: 238 Ergebniszeilen, 1587 bestanden, 0 fehlgeschlagen, 8 ignoriert. Gemessen auf WARMEM `target/` — der Lauf folgt unmittelbar auf die vierzehn Kommandos darueber, die denselben Baum uebersetzt haben; ein kalter `target/` liegt deutlich darueber und ist hier NICHT gemessen. | 1037 s |
+| `cargo run --locked -p xtask -- browsers down` | 0 | Dienst und Netz entfernt, mit `--volumes` wie `integration down`, obwohl der Dienst keinen Zustand fuehrt | 12 s |
 | `cargo run --locked -p xtask -- integration down` | 0 | beide Dienste entfernt, beide Volumes (`postgres-data`, `objectstore-data`) geloescht | 2 s |
 
 ### Warum dieser Lauf zweipassig ist
@@ -607,12 +608,24 @@ stage-4-gate.md must record the measured run for `cargo metadata --format-versio
 
 Danach wurden die sechzehn Zeilen eingetragen und `pnpm verify:quick` in
 derselben `integration up` … `down`-Klammer wiederholt: Exitcode 0 nach 1004 s,
-238 Ergebniszeilen, 1586 bestanden. Die sechzehn uebrigen Zeilen dieser Tabelle
-tragen die Zahlen des Bootstraplaufs, die siebzehnte die des
-Bestaetigungslaufs. Die Zahl der Ergebniszeilen unterscheidet sich zwischen
-beiden Laeufen aus einem gemessenen Grund: `cargo test --workspace` bricht nach
-dem ersten roten Testbinary ab, der Bootstraplauf kam also gar nicht bis zum
-Ende der Liste.
+238 Ergebniszeilen, 1586 bestanden. Die Zahl der Ergebniszeilen unterscheidet
+sich zwischen den beiden Laeufen aus einem gemessenen Grund:
+`cargo test --workspace` bricht nach dem ersten roten Testbinary ab, der
+Bootstraplauf kam also gar nicht bis zum Ende der Liste.
+
+Die Tabelle oben protokolliert allerdings WEDER den einen NOCH den anderen
+dieser zwei Laeufe. Die Review-Befunde haben den Baum danach noch bewegt — der
+Kanarienzeuge traegt seither zehn Zeugen statt neun —, also waere jede Zahl von
+vorher eine Aussage ueber einen Stand, den dieser Bericht nicht ausliefert. Die
+ganze Folge ist deshalb ein DRITTES Mal gefahren, ueber den ausgelieferten
+Stand und mit bereits vollstaendiger Tabelle: siebzehn Kommandos, siebzehnmal
+Exitcode 0, `pnpm verify:quick` nach 1037 s. Das ist der Lauf, den die Tabelle
+traegt.
+
+Die Zweipassigkeit bleibt trotzdem eine Eigenschaft dieses Vertrags und keine
+Anekdote: wer diesen Bericht neu aufsetzt oder seine Messtabelle leert, faellt
+an genau derselben Stelle wieder, und diese Aufzeichnung sagt ihm, dass das die
+erwartete Vorstufe ist und kein Mangel.
 
 Eine Zeile, die den Bootstraplauf als gruen ausgaebe, waere die Faelschung, die
 dieses Repositorium nicht schreibt — und ein Bericht, der die zwei Paesse
