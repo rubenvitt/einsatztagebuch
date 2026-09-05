@@ -1,0 +1,47 @@
+[package]
+name = "ea-admin"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Die Zeremonie schreibt die `adminRootCeremony`-Zeile, BEVOR sie die Zielbytes
+# herausgibt. `LocalAuditService::record_signed` ist der einzige Weg dorthin.
+# Diese Kante ist der Grund, warum der Dienst hier liegt und nicht in
+# `ea-trust`: `ea-audit` traegt bewusst KEINE `ea-trust`-Kante
+# (`crates/ea-audit/src/repository.rs`), eine Audit-Anbindung innerhalb von
+# `ea-trust` kehrte die Schichtung um.
+ea-audit.workspace = true
+# `VerificationContext::root_trust_digest` — die EINE Stelle, an der die
+# Bindung zwischen Zielkern und Administrationsautorisierung an der
+# Signaturgrenze durchgesetzt wird —, `trust_digest` und `object_hash`. Diese
+# Crate rechnet keinen Digest selbst nach.
+ea-crypto.workspace = true
+# `TrustPayloadV1`, `TrustObjectV1`, `encode_trust` und die Auditgrammatik.
+# `ExactObjectBytes::new` ist `pub(crate)` in `ea-format`; `encode_trust` ist
+# der einzige Weg zu den exakten Objektbytes.
+ea-format.workspace = true
+# Der PRODUKTIVE Signierport. `ea_crypto::CoseSigner` ist hier ausdruecklich
+# verboten (`crates/ea-key-provider/src/contract.rs`): sein einziger
+# Konstruktor verlangt den privaten Schluessel.
+ea-key-provider.workspace = true
+# Eine Zeremonie verlangt einen FRISCHEN Bedienernachweis mit genau dem Zweck
+# `ReauthPurpose::AdminRootCeremony`. Der Nachweistyp lebt dort.
+ea-operator.workspace = true
+# Der Beweiszustand `VerifiedAdminAuthorization` und der laufuebergreifende
+# Verbrauch `consume_admin_authorization`. `ea-trust` waechst durch diese Crate
+# um KEINE Abhaengigkeit; die Richtung zeigt ausschliesslich hierher.
+ea-trust.workspace = true
+ea-types.workspace = true
+
+[dev-dependencies]
+# Die Zeugen bauen eine ECHTE Registrierungslinie und waehlen einen ECHTEN
+# Kopf; sie binden `crates/ea-trust/tests/support/mod.rs` per `#[path]` ein,
+# wie `crates/ea-operator/tests/session_contract.rs` es bereits tut. Diese drei
+# Eintraege sind genau die Importe jenes Moduls, die nicht schon oben stehen,
+# und alle bereits `=`-gepinnte Familien des Workspace.
+ea-time.workspace = true
+ed25519-dalek.workspace = true
+minicbor.workspace = true

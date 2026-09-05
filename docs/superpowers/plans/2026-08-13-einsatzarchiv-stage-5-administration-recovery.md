@@ -192,7 +192,7 @@ innerhalb von `ea-trust` kehrte die Schichtung um. `crates/ea-admin` liegt desha
 bemühen. Die Zielbytes entstehen ausschließlich über
 `ea_format::encode_trust` (`crates/ea-format/src/parser.rs:123`).
 
-- [ ] **Step 1: Write Root-only/Admin-only/core/action/replay tests**
+- [x] **Step 1: Write Root-only/Admin-only/core/action/replay tests**
 
 ```rust
 #[test]
@@ -228,14 +228,14 @@ Auditzeilen. Zusicherungen laufen über den Dreifachvergleich
 `code()`/`to_string()`/`{:?}` nach dem Muster
 `crates/ea-trust/tests/registry_transitions.rs:17-26`.
 
-- [ ] **Step 2: Run tests and verify the public entry point and the ceremony are absent**
+- [x] **Step 2: Run tests and verify the public entry point and the ceremony are absent**
 
 Run: `cargo test --locked -p ea-admin --test authorization --test root_ceremony`
 
 Expected: FAIL — `ea-admin` existiert nicht, `verify_authorized_trust_target` ist
 nicht öffentlich, und der Einmal-Speicher überlebt keinen Prozess.
 
-- [ ] **Step 3: Implement the public proof entry, the persistent store, and the ceremony**
+- [x] **Step 3: Implement the public proof entry, the persistent store, and the ceremony**
 
 ```rust
 // ea-trust: der oeffentliche, zielgebundene Einstieg. Keine neue Regel — er
@@ -290,7 +290,7 @@ unterschieden per `payload_wraps_core`) und werden im signierten
 Bootstrap-Transkript festgehalten, statt eine lokale Auditidentität vorzutäuschen,
 die es vor dem Bootstrap nicht gab.
 
-- [ ] **Step 4: Run the full authorization attack matrix**
+- [x] **Step 4: Run the full authorization attack matrix**
 
 Run: `cargo test --locked -p ea-admin --test authorization --test root_ceremony`
 und `cargo test --locked -p ea-trust`
@@ -301,7 +301,7 @@ context, expired auth (`EA-TRUST-AUTH-EXPIRED`), not-yet-valid
 self-rotation (`EA-TRUST-SELF-AUTHORIZATION`) und capability mismatch scheitern. Die
 bestehenden Zeugen in `crates/ea-trust/tests/registry_attacks.rs` bleiben grün.
 
-- [ ] **Step 5: Commit Admin/Root proof boundary**
+- [x] **Step 5: Commit Admin/Root proof boundary**
 
 ```bash
 git add crates/ea-admin crates/ea-trust Cargo.toml Cargo.lock tools/xtask
