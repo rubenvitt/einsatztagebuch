@@ -143,6 +143,15 @@
 //! `[dev-dependencies]`; ohne diese Re-Exporte koennte eine Produktionsquelle
 //! der Bruecke `ea_archive::` gar nicht schreiben, und eine neue Kante ginge
 //! in den wasm32-Lib-Graphen, wo ein Re-Export nichts kostet.
+//!
+//! Und dieselbe Regel holt die vier Namen aus `ea-index` nach, die in der
+//! oeffentlichen Flaeche von [`ReaderSearch`] stehen: [`ReaderQueryV1`] und
+//! [`ReaderSearchHitV1`] in der Signatur von [`ReaderSearch::search`],
+//! [`IndexError`] als deren Fehler und [`IndexPressureV1`] als Rueckgabe von
+//! [`ReaderSearch::index`]. GEMESSEN: `ea-index` steht in
+//! `crates/ea-reader-wasm/Cargo.toml` nur unter `[dev-dependencies]`, und
+//! ohne diesen Re-Export koennte die Bruecke keine Anfrage formulieren, ohne
+//! eine neue Kante zu ziehen und `Cargo.lock` zu bewegen.
 
 mod amendment;
 mod anchor;
@@ -189,6 +198,7 @@ pub use ea_archive::{
     BUNDLE_MAGIC_V1, BundleError, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
 };
 pub use ea_crypto::HpkeRecipientPrivateKey;
+pub use ea_index::{IndexError, IndexPressureV1, ReaderQueryV1, ReaderSearchHitV1};
 pub use ea_schema::{PayloadV1, SchemaRegistry};
 pub use ea_sync_protocol::HttpMethod;
 pub use ea_trust::{TrustAnchorV1, decode_trust_anchor};

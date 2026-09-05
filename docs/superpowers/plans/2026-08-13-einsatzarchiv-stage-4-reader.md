@@ -5381,32 +5381,36 @@ git commit -m "feat(reader): lock on inactivity and audit authenticator-confirme
 - Create: `apps/web/src/bridge/reader-bridge.ts`
 - Create: `crates/ea-reader-wasm/src/view.rs`
 - Modify: `crates/ea-reader-wasm/src/lib.rs`
-- Modify: `crates/ea-ui-contracts/src/lib.rs`
-- Modify: `crates/ea-ui-contracts/src/emit.rs`
-- Modify: `apps/web/src/bridge/generated-contracts.ts`
-- Modify: `apps/web/src/main.tsx`
+- Modify: `crates/ea-reader-wasm/src/file_access.rs` (die zwei Oeffnungsausfuhren reichen den Bestand an `view` weiter)
+- Modify: `crates/ea-reader/src/lib.rs` (Re-Export der `ea-index`-Typen, die in der oeffentlichen Signatur von `ReaderSearch::search` stehen)
+- Modify: `crates/ea-ui-contracts/src/emit.rs` (`READER_VIEW_MODELS_V1` liegt HIER, nicht in `lib.rs`; die Aufzaehlungstabellen in `lib.rs` bleiben unberuehrt)
+- Modify: `apps/web/src/bridge/generated-contracts.ts` (erzeugt ueber `cargo run --locked -p ea-ui-contracts --bin emit-ts`, nie von Hand)
+- Modify: `apps/web/src/bridge/opfs-worker.ts` (die Nachrichtenarten der Reader-Ausfuhren; das wasm-Modul lebt im Worker)
+- Modify: `apps/web/src/design/extract-static-css.tsx` (`EXTRACTED_COMPONENTS`) und `apps/web/src/design/static-antd.css` (regeneriert)
+- Modify: `apps/web/src/main.tsx` (fuellt `render` der bereits vorhandenen Zeile `/` in `EA_WEB_ROUTES`; keine neue Route)
+- Test: `crates/ea-reader-wasm/tests/view_dto.rs` (nativ, `cfg(not(target_arch = "wasm32"))`, ueber die Kulisse `amendment_fixtures`)
 - Test: `apps/web/src/features/reader/ReaderPage.test.tsx`
 - Test: `apps/web/tests/e2e/reader.spec.ts`
 - Test: `apps/desktop/src/app/RoleGate.test.tsx`
 - Test: `crates/ea-ui-contracts/tests/generated_ts_is_current.rs`
 
 **Interfaces:**
-- Consumes: die vier Reader-Statusaufzaehlungen und den zweiten Emitterausdruck aus dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate"; `ReaderEntryStateV1` aus dem Task „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert"; `ReaderEntryThread` aus dem Task „Nachtragsreferenzen und Original/Nachtrag-Projektion"; die Suche aus dem Task „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle"; die Einzelexportflaeche aus dem Task „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit".
+- Consumes: die fuenf Reader-Statusaufzaehlungen (`READER_ENUMS_V1` in `crates/ea-ui-contracts/src/lib.rs`: `VerificationStatus`, `EntryStatus`, `EvidenceStatus`, `ServerConfirmationV1`, `BundleRejectionCodeV1`) und den zweiten Emitterausdruck aus dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate"; `ReaderEntryStateV1` aus dem Task „Verifikation vor Entschlüsselung, fehlender Grant, Modusparameter und der Anchor, den nur der Vault liefert"; `ReaderEntryThread` aus dem Task „Nachtragsreferenzen und Original/Nachtrag-Projektion"; die Suche aus dem Task „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle"; die Einzelexportflaeche aus dem Task „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales Audit" — GEMESSEN am 2026-09-04: dieser Task ist als PR #10 offen und nicht in `main`; diese Aufgabe bindet die Exportflaeche deshalb NICHT ein und legt ihren Bestand so, dass die Sitzungssperre ihn beim Zusammenfuehren mit EINEM Aufruf (`view::close_stand`) fallen lassen kann.
 - Produces: die Reader-Ansichtsmodelle in `ea-ui-contracts`, die Brueckenausfuhr `readerView` in `crates/ea-reader-wasm/src/view.rs`, `apps/web/src/bridge/reader-bridge.ts` als einzige Brueckenanbindung der Oberflaeche, die sechs Reader-Flaechen, die vier Integritaetsbausteine und den Rollengrenz-Zeugen im Desktop.
 
 **TEILVERLUST des OPFS-Bestandes: heute ein DAUERHAFTES Feststecken, und der Ausweg hat keinen Browsereinstieg.** Der Task „Inkrementeller Reader-Sync und verifizierter Cursor-Fortschritt in OPFS“ weist mit `EA-READER-CHAIN-FORK` ab, sobald der verifizierte Kopf UNTER der bestaetigten Sequenz liegt. Diese Bedingung erreicht nicht nur ein gabelnder Server, sondern JEDE lokale Schrumpfung des Bestandes: ein verdraengter oder abgeschnittener `cache/`-Blob, oder ein verlorenes `sync/objects-v1` bei ueberlebendem `sync/cursor-v1` — es sind zwei UNABHAENGIGE Blobs, und nichts zwingt sie, zusammen zu verschwinden. Der VOLLSTAENDIGE Cacheverlust ist harmlos: der fehlende Cursor liest sich als Genesis und der gewoehnliche Pfad baut neu auf. Der TEILVERLUST hat keinen Ausgang — jeder weitere `readerSyncAcceptBatch` schreibt die Seite erneut und weist erneut ab.
 
-Das steht gegen den Satz, den derselbe Task zwei Bildschirme weiter oben selbst aufstellt („Wer einen Abbruch als Luecke oder Fork ausgaebe, machte aus einem geschlossenen Tab einen Angriffsverdacht“): ein verlorener Blob wird hier eines gabelnden Servers beschuldigt. Das Mittel EXISTIERT und ist bezeugt — `ReaderSyncService::rebuild_from_genesis` —, aber `crates/ea-reader-wasm/src/fetch.rs` ist dort auf GENAU ZWEI Ausfuhren gepinnt, und keine davon ist diese. Ueberschreiben von `sync/cursor-v1` ueber die allgemeine `blobPut`-Ausfuhr hilft nicht: ein kurzer oder fremder Blob faellt in `get_sealed` durch und liefert `EA-READER-STORE`.
+Das steht gegen den Satz, den derselbe Task zwei Bildschirme weiter oben selbst aufstellt („Wer einen Abbruch als Luecke oder Fork ausgaebe, machte aus einem geschlossenen Tab einen Angriffsverdacht“): ein verlorener Blob wird hier eines gabelnden Servers beschuldigt. Das Mittel EXISTIERT und ist bezeugt — `ReaderSyncService::rebuild_from_genesis` —, aber `crates/ea-reader-wasm/src/fetch.rs` traegt heute genau zwei Ausfuhren, und keine davon ist diese. GEMESSEN: die „GENAU ZWEI" stehen nur im Modulkommentar von `lib.rs` und `fetch.rs`; `every_wasm_bindgen_export_sits_behind_the_wasm32_cfg` in `tests/bridge_boundary.rs` prueft Lage, nicht Zahl. Eine dritte Ausfuhr bricht mechanisch nichts — die Zusage ist Prosa. Ueberschreiben von `sync/cursor-v1` ueber die allgemeine `blobPut`-Ausfuhr hilft nicht: ein kurzer oder fremder Blob faellt in `get_sealed` durch und liefert `EA-READER-STORE`.
 
 Wer hier die dritte Bruecken-Ausfuhr anlegt oder eine Wiederherstellungsflaeche baut, MUSS beides zusammen aufloesen: den Einstieg in `rebuild_from_genesis` UND die Anzeige, die den Teilverlust als das benennt, was er ist — ein lokaler Bestandsschaden und kein Angriffsbefund. Ein Fork und ein verdraengter Blob duerfen dem Betreiber nicht denselben Satz zeigen.
 
 Dazu ein zweiter, kleinerer Befund derselben Herkunft: `required_blob_keys` leitet die Cache-Adressen aus dem NOCH UNGEPRUEFTEN Antwortkoerper ab, bevor der Startkopfvergleich laeuft, und `OpfsBlobStore::open` legt je Schluessel eine Datei an. Ein boesartiger oder fehlerhafter Server kann damit je Antwort bis zu `MAX_READER_PAGE_OBJECTS_V1` = 1 000 LEERE Verzeichniseintraege unter `ea-reader/cache/` entstehen lassen, fuer eine Seite, die danach abgewiesen wird. Fuer die Korrektheit sind sie folgenlos — Groesse 0 liest sich als abwesend, und `keys()` ueberspringt sie —, aber NICHTS raeumt sie je weg; `delete` laesst den leeren Eintrag ausdruecklich stehen. Der Aufraeumlauf gehoert in dieselbe Hand wie der Wiederherstellungseinstieg. `apps/web/playwright.config.ts` und das Wurzelskript `web:e2e` bestehen seit dem Task „Browser-Enrollment: zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate" und werden hier nur BENUTZT.
 
-`crates/ea-reader-wasm/src/lib.rs` nimmt `mod view;` auf — ohne diese Zeile uebersetzt der Commit nicht. `crates/ea-ui-contracts/Cargo.toml` steht dagegen NICHT im Files-Block: `READER_VIEW_MODELS_V1` ist eine Tabelle aus Zeichenketten, sie zieht keinen Typ und keine Kante, und die eine Kante, die die Reader-Haelfte des Emitters braucht — `ea-reader` fuer `BundleRejectionCodeV1` —, traegt das Manifest seit der Aufgabe „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes". Dieser Task bewegt `Cargo.lock` deshalb nicht und faehrt jedes Kommando mit `--locked`.
+`crates/ea-reader-wasm/src/lib.rs` nimmt `pub mod view;` auf (jedes Geschwistermodul mit Ausfuhren ist `pub mod`, und `bridge_boundary.rs` nennt `view.rs` bereits als erwartetes Modul) — ohne diese Zeile uebersetzt der Commit nicht. `crates/ea-ui-contracts/Cargo.toml` steht dagegen NICHT im Files-Block: `READER_VIEW_MODELS_V1` ist eine Tabelle aus Zeichenketten, sie zieht keinen Typ und keine Kante, und die eine Kante, die die Reader-Haelfte des Emitters braucht — `ea-reader` fuer `BundleRejectionCodeV1` —, traegt das Manifest seit der Aufgabe „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes". Dieser Task bewegt `Cargo.lock` deshalb nicht und faehrt jedes Kommando mit `--locked`.
 
 Der frueher hier stehende Tauri-Kommandoblock wird nicht portiert. `apps/desktop/src-tauri/src/commands/` fuehrt heute `writer.rs`, `master_data.rs`, `session.rs` und `sync.rs` und KEIN `reader.rs`: die Datei ist nie entstanden, weil die Stufe blockiert war. „Geloescht statt portiert" heisst hier deshalb nicht ein `git rm`, sondern eine erzwungene Abwesenheit — `apps/desktop/src/app/RoleGate.test.tsx` liest den Kommandobaum und die Routentabelle und faellt, sobald eine Reader-Flaeche dort einzieht. Dieser Task enthaelt KEINE Sicherheitslogik in TypeScript: nur erzeugte Ansichts- und Status-DTOs ueberqueren die Grenze.
 
-- [ ] **Step 1: Write the state-separation, orthogonality, and role-boundary tests**
+- [x] **Step 1: Write the state-separation, orthogonality, and role-boundary tests**
 
 ```tsx
 // apps/web/src/features/reader/ReaderPage.test.tsx
@@ -5486,7 +5490,7 @@ it('exposes no writer or administration surface in apps/web', async () => {
 })
 ```
 
-- [ ] **Step 2: Run the UI tests and verify the Reader surface is absent**
+- [x] **Step 2: Run the UI tests and verify the Reader surface is absent**
 
 Run:
 
@@ -5495,14 +5499,15 @@ pnpm --dir apps/web test --run
 pnpm --dir apps/desktop test --run RoleGate
 ```
 
-Expected: FAIL. `apps/web/src` traegt nach dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate" die Schale, die Gestaltungsgrundlage und die Bruecke, aber keine `features/reader`-Quelle und keinen Integritaetsbaustein; `ReaderPage` ist kein Modul, und `VERIFICATION_STATUS_VALUES` steht noch nicht in `apps/web/src/bridge/generated-contracts.ts`, weil dieser Task die Ansichtsmodelle erst emittiert. `RoleGate.test.tsx` faellt an seinem eigenen Fehlen, nicht am Desktop: die drei Zusagen sind heute inhaltlich wahr — `role-gate.ts` fuehrt genau zwei Routen und `src-tauri/src/commands/` genau fuenf Dateien —, aber nichts haelt sie fest.
+Expected: FAIL. `apps/web/src` traegt nach dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate" die Schale, die Gestaltungsgrundlage und die Bruecke, aber keine `features/reader`-Quelle und keinen Integritaetsbaustein; `ReaderPage` ist kein Modul, und `VERIFICATION_STATUS_VALUES` steht noch nicht in `apps/web/src/bridge/generated-contracts.ts`, weil dieser Task die Ansichtsmodelle erst emittiert. `RoleGate.test.tsx` faellt an seinem eigenen Fehlen, nicht am Desktop: die drei Zusagen sind heute inhaltlich wahr — `role-gate.ts` fuehrt genau zwei Routen und `src-tauri/src/commands/` genau fuenf Dateien. GEMESSEN: die Routenzusage haelt `apps/desktop/src/app/AppShell.test.tsx` (`offers no Reader and no Administration surface at all`) bereits wortgleich fest; neu sind nur der Kommandobaum-Zeuge und der Quellenscan von `apps/web`.
 
-- [ ] **Step 3: Emit the view models, then build the presentation over them**
+- [x] **Step 3: Emit the view models, then build the presentation over them**
 
-**Die Ansichtsmodelle entstehen in Rust.** `crates/ea-ui-contracts/src/lib.rs` ERWEITERT `READER_VIEW_MODELS_V1` — angelegt im Task „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes" mit `BundleActivationView` und `ReaderTrustAgeView` — um die sechs Reader-Ansichten; `VIEW_MODELS_V1` des Writers bleibt unangetastet, und `emit_reader_typescript()` gibt beide Gruppen in derselben Form aus: fester Kopfkommentar, `export type`-Vereinigungen, `export type`-Objekttypen, `export const … as const`-Arrays, keine Funktion, kein Pfeil, kein Import. Die Felder sind exakt die, die `design.md` §17.2 fordert, und keines mehr:
+**Die Ansichtsmodelle entstehen in Rust.** `crates/ea-ui-contracts/src/emit.rs` ERWEITERT `READER_VIEW_MODELS_V1` — angelegt im Task „Web-Bundle: getrennter Origin, Service Worker, gepinnte `webBundleRelease` und das Alter des Trust-Standes" mit `BundleActivationView` und `ReaderTrustAgeView`, seit dem Datei-Modus-Task auch `FileModeArchiveView` — um die Reader-Ansichten; `VIEW_MODELS_V1` des Writers bleibt unangetastet, und `emit_reader_typescript()` gibt beide Gruppen in derselben Form aus: fester Kopfkommentar, `export type`-Vereinigungen, `export type`-Objekttypen, `export const … as const`-Arrays, keine Funktion, kein Pfeil, kein Import. Die Felder folgen `design.md` §17.2 — und dem, was der Arbeitsbaum ERZEUGEN kann. GEMESSEN am 2026-09-04, drei Felder der Vorfassung haben keinen Erzeuger und stehen deshalb nicht mehr im Vertrag: `writerKeyThumbprint` (existiert nur in `crates/ea-writer/src/finalize.rs`; das Manifest traegt `writer_certificate_hash`, und der ist der „Writer-Key" der technischen Ansicht), `evidence: EvidenceStatus` (`ea-verify` konstruiert `EvidenceStatus` nirgends; der Bericht kennt nur `evidence_errors()` — ein `vollständig` ohne Erzeuger waere der Ueberanspruch, den §17.4 verbietet, deshalb `evidenceDetailCode: string | null`) und `occurredAtLocal: string` (der einzige Ortszeit-Formatierer `local_civil_year` in `ea-schema` ist privat, `jiff` keine Reader-Kante; die Bruecke gibt UTC-Millisekunden und die IANA-Zeitzone heraus, die Darstellung formatiert mit `Intl.DateTimeFormat` — Darstellung, keine Sicherheitsentscheidung). `ChainIntegrityNodeView.verified` ist `boolean | null`, weil der Baustein dreiwertig bleibt und ein `boolean` den dritten Wert nicht tragen koennte.
 
 ```rust
 const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
+    // … BundleActivationView, FileModeArchiveView, ReaderTrustAgeView bleiben …
     // Der TECHNISCHE Zustand eines Eintrags — er existiert auch dann, wenn
     // nichts entschluesselt wurde. Die drei Dimensionen stehen NEBENEINANDER;
     // eine zusammengefaltete waere §17.4 zuwider.
@@ -5520,7 +5525,7 @@ const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
     // die Aussage, dass nicht entschluesselt wurde.
     ("ReaderIncidentView", &[
         ("incidentNumber", "string"),
-        ("occurredAtLocal", "string"),
+        ("occurredAtStartMs", "number"),
         ("timezone", "string"),
         ("keyword", "string"),
     ]),
@@ -5528,38 +5533,70 @@ const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
         ("state", "ReaderEntryStateView"),
         ("incident", "ReaderIncidentView | null"),
     ]),
-    // Die technische Ansicht aus §17.2, Feld fuer Feld: Sequenz, Hash,
-    // Writer-Key, Registry, Receipt und Evidence.
+    // Die technische Ansicht aus §17.2, Feld fuer Feld aus Manifest und
+    // Bericht: Sequenz, Hashes, Writer-Zertifikat, Registry, Receipt, Evidence.
     ("ReaderTechnicalView", &[
         ("sequence", "number"),
         ("previousEntryHash", "string | null"),
         ("entryHash", "string"),
         ("ciphertextHash", "string"),
         ("writerCertificateHash", "string"),
-        ("writerKeyThumbprint", "string"),
         ("registryVersion", "number"),
         ("registryHeadHash", "string"),
         ("serverConfirmation", "ServerConfirmationV1"),
-        ("evidence", "EvidenceStatus"),
+        ("evidenceDetailCode", "string | null"),
     ]),
-    // Ein Knoten der Integritaetsleiste. Er entsteht nur fuer eine Aussage, die
-    // tatsaechlich geprueft wurde.
+    // Ein Knoten der Integritaetsleiste. Er entsteht nur fuer ein Tor, ueber
+    // das der Bericht eine Aussage TRAGEN kann; `null` ist „nicht geprüft".
     ("ChainIntegrityNodeView", &[
         ("label", "string"),
-        ("verified", "boolean"),
+        ("verified", "boolean | null"),
         ("detail", "string | null"),
     ]),
     ("VerificationProblemView", &[
         ("objectHash", "string"),
         ("verification", "VerificationStatus"),
-        ("detailCode", "string"),
+        ("detailCode", "string | null"),
+    ]),
+    // Der geoeffnete Bestand als Ganzes: die Liste, die `ReaderPage` rendert.
+    ("ReaderStandView", &[
+        ("entries", "readonly ReaderEntryView[]"),
+        ("problems", "readonly VerificationProblemView[]"),
+        ("chain", "readonly ChainIntegrityNodeView[]"),
+        ("fullyVerified", "boolean"),
+        ("serverConfirmation", "ServerConfirmationV1"),
+    ]),
+    // Original und Nachtraege als GETRENNTE Ansichten desselben
+    // Zusammenhangs; nichts ist zusammengefuehrt, nichts ueberholt.
+    ("ReaderRejectedAmendmentView", &[
+        ("entryHash", "string"),
+        ("sequence", "number"),
+        ("reason", "string"),
+    ]),
+    ("ReaderAmendmentThreadView", &[
+        ("original", "ReaderEntryView"),
+        ("amendments", "readonly ReaderEntryView[]"),
+        ("rejected", "readonly ReaderRejectedAmendmentView[]"),
+    ]),
+    ("ReaderSearchHitView", &[
+        ("entryHash", "string"),
+        ("sequence", "number"),
+        ("incidentNumber", "string"),
+        ("occurredAtStartMs", "number"),
     ]),
 ];
 ```
 
-`crates/ea-reader-wasm/src/view.rs` ist der einzige Ort, an dem ein `ReaderEntryStateV1` in diese DTOs faellt, und die Ausfuhr gibt JSON heraus:
+**Der Bestand muss das Oeffnen ueberleben.** GEMESSEN: `file_mode_open_bundle` und `file_mode_open_directory` in `crates/ea-reader-wasm/src/file_access.rs` rendern `file_mode_archive_json(&opened)` und lassen den `OpenedArchiveV1` fallen; im wasm-Crate gibt es keinen sitzungsgebundenen Bestand, aus dem `readerEntryView` je lesen koennte. `crates/ea-reader-wasm/src/view.rs` fuehrt deshalb den EINEN geoeffneten Bestand in einem `thread_local!` (dieselbe Bauform wie `VAULT_SESSIONS`): `ReaderClassification` aus `OpenedArchiveV1::classification()`, dazu je verifiziertem Eintrag mit eigenem Grant der `VerifiedDecryptedRecord` aus `decrypt_verified` (Tor 9 und HPKE laufen ERST hier, NACH der vollstaendigen Klassifikation — die Reihenfolge aus `design.md` §14.1 bleibt wortgleich), die `ReaderSearch` ueber genau diesen Datensaetzen, und die `ReaderEntryThread`s, die aus Original und den Nachtraegen mit passender `original_record_id` gebaut sind. Die zwei Oeffnungsausfuhren reichen den Bestand nach erfolgreichem Oeffnen an `view::install_stand` weiter; ihr Rueckgabe-DTO `FileModeArchiveView` aendert sich nicht. Ein zweites Oeffnen ersetzt den Bestand, `readerStandClose` laesst ihn fallen; die Klartexte liegen ausschliesslich in `SecretVec` und verlassen das Modul nur als die vier Felder von `ReaderIncidentView`. BENANNTE GRENZE: im Server-Modus fuellt diese Aufgabe den Bestand NICHT aus dem OPFS-Cache — `ReaderCacheSourceV1` in `crates/ea-reader/src/batch.rs` ist `pub(crate)`, und der Cache-Einstieg gehoert in dieselbe Hand wie der Wiederherstellungseinstieg oben; `ReaderPage` zeigt ohne Bestand den technischen Zustand „kein Bestand geoeffnet" und nie einen leeren Einsatz.
+
+`view.rs` ist der einzige Ort, an dem ein `ReaderEntryStateV1` in diese DTOs faellt, und die Ausfuhren geben JSON heraus, hand-gebaut ueber `bridge::Json` wie jede Ausfuhr dieses Crates (`serde_json` ist Entwicklungsabhaengigkeit):
 
 ```rust
+/// Der ganze Bestand als `ReaderStandView`, oder `null`, wenn keiner offen ist.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerStandView")]
+pub fn reader_stand_view() -> String;
+
 /// Die Ansicht EINES Eintrags als JSON-DTO.
 ///
 /// `incident` ist `null`, solange nichts entschluesselt wurde — und das ist die
@@ -5569,28 +5606,52 @@ const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "readerEntryView")]
 pub fn reader_entry_view(entry_hash: &str) -> Result<String, JsValue>;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerTechnicalView")]
+pub fn reader_technical_view(entry_hash: &str) -> Result<String, JsValue>;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerAmendmentThread")]
+pub fn reader_amendment_thread(entry_hash: &str) -> Result<String, JsValue>;
+
+/// Die vier Filter, unveraendert an `ReaderSearch::search`; leere Zeichenketten
+/// und fehlende Grenzen sind „kein Filter".
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerSearch")]
+pub fn reader_search(from_ms: Option<i64>, to_ms: Option<i64>, keyword: &str, vehicle: &str, person: &str) -> Result<String, JsValue>;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerStandClose")]
+pub fn reader_stand_close();
 ```
 
-`apps/web/src/bridge/reader-bridge.ts` ist die EINZIGE Datei, die diese Ausfuhren importiert; sie parst das JSON in die generierten Typen und rechnet nichts. `ReaderPage` bekommt die Bruecke als Eigenschaft, damit `ReaderPage.test.tsx` sie ohne WASM ersetzen kann — dieselbe Bauform, in der `WriterPage.test.tsx` seine Bruecke stellt.
+Die Integritaetsleiste ist eine Aussage ueber den BESTAND, nicht ueber einen Eintrag, und sie erfindet keinen Knoten: `VerificationReportV1` traegt kein Tor-Feld, und drei der neun Tore (`registry`, `grant-plan`, `receipt`) haben keinen eigenen Fehlerkanal im Bericht. `view.rs` leitet die Knoten aus zwei Signalen ab — dem `RecordingObserver` ueber `open_bundle_observed`/`open_directory_observed` (welche Tore BETRETEN wurden) und den Fehlerkanaelen des Berichts (`format_errors`, `public_key_thumbprints`, `signature_errors`, `gaps`, `evidence_errors`, `decryption_errors`) — und gibt nur Knoten heraus, deren Urteil eines der Signale traegt: bei `is_fully_verified()` alle neun mit `true`, sonst die betretenen Tore vor dem ersten belegten Fehler mit `true`, das fehlgeschlagene mit `false` und seinem Code als `detail`, und KEIN Knoten dahinter. Ein Zeuge in `view_dto.rs` legt einen Bestand mit Signaturfehler vor und misst, dass hinter `manifest-signature` kein Knoten steht.
 
-**Die sechs Flaechen.** `ReaderPage` traegt drei Reiter — Einsaetze, Prueferprobleme, Technik — und den permanent sichtbaren Verifikationsstatus. `EntryView` rendert Einsatznummer, Einsatzzeit und Stichwort AUSSCHLIESSLICH aus `state.incident`, das nur ein entschluesselter Datensatz fuellt; ist es `null`, zeigt die Flaeche den technischen Zustand und keine leere Einsatzmaske. `SearchPanel` fuehrt die vier Filter Zeitraum, Stichwort, Fahrzeug und Person und gibt sie unveraendert an die Suche des Tasks „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle"; es filtert nichts selbst, sortiert nichts selbst und kennt keinen Feldwert, den es nicht angezeigt bekommen hat. `TechnicalView` erklaert Sequenz, Hashes, Writer-Key, Registry, Receipt und Evidence in verstaendlicher Sprache und liest jeden Wert aus `ReaderTechnicalView`. `VerificationProblems` ist der EINZIGE Ort, an dem ein Objekt mit `VerificationStatus` `ungültig` erscheint; es oeffnet keines davon als Einsatz. `AmendmentThread` zeigt Original und Nachtraege als getrennte Ansichten desselben Zusammenhangs, gespeist aus dem Task „Nachtragsreferenzen und Original/Nachtrag-Projektion"; kein Original wird als ueberholt markiert oder ausgeblendet.
+Die Suche braucht `ReaderQueryV1` und `ReaderSearchHitV1` aus `ea-index` — GEMESSEN steht `ea-index` in `crates/ea-reader-wasm/Cargo.toml` nur unter `[dev-dependencies]`, und `ea-reader` re-exportiert die beiden nicht, obwohl sie in der oeffentlichen Signatur von `ReaderSearch::search` stehen. Der Weg ohne neue Kante und ohne `Cargo.lock`-Bewegung ist der Re-Export in `crates/ea-reader/src/lib.rs`, den die Moduldoku dort fuer genau diesen Fall verlangt.
 
-**Die vier Integritaetsbausteine** sind die Portierung der gleichnamigen Desktop-Dateien und keine zweite Erfindung: `VerificationBadge` bleibt dreiwertig mit `nicht geprüft` als eigenem Wert, weil eine ungepruefte Aussage kein Nein ist; `ChainIntegrityRail` rendert AUS der uebergebenen Knotenliste und hat keine feste Laenge, also kann sie nur so lang sein, wie es gepruefte Aussagen gibt; `EvidenceStatus` und `FingerprintBlock` uebernehmen Wortlaut und ARIA-Struktur ihrer Desktop-Vorlagen. Jeder Zustand steht als TEXT neben Zeichen und Farbe — `design.md` §17.5 laesst Farbe als alleinigen Traeger eines Sicherheitszustands nicht zu.
+`apps/web/src/bridge/reader-bridge.ts` ist die EINZIGE Datei, die diese Ausfuhren anspricht — ueber die Nachrichtenarten in `apps/web/src/bridge/opfs-worker.ts`, weil das wasm-Modul im Worker lebt (dieselbe Bauform wie `fileModeBridge` in `DirectoryHandle.ts`); sie parst das JSON in die generierten Typen und rechnet nichts. `ReaderPage` bekommt die Bruecke als Eigenschaft, damit `ReaderPage.test.tsx` sie ohne WASM ersetzen kann — dieselbe Bauform, in der `WriterPage.test.tsx` seine Bruecke stellt.
+
+**Die sechs Flaechen.** `ReaderPage` traegt drei Reiter — Einsaetze, Prüfprobleme, Technik — und den permanent sichtbaren Verifikationsstatus. `EntryView` rendert Einsatznummer, Einsatzzeit und Stichwort AUSSCHLIESSLICH aus `entry.incident` (Geschwister von `entry.state`, nicht dessen Feld), das nur ein entschluesselter Datensatz fuellt; ist es `null`, zeigt die Flaeche den technischen Zustand und keine leere Einsatzmaske. `SearchPanel` fuehrt die vier Filter Zeitraum, Stichwort, Fahrzeug und Person und gibt sie unveraendert an die Suche des Tasks „Verschlüsselter invertierter Index in OPFS, Suche, Schemakompatibilität und die GEMESSENE 50.000-Paket-Schwelle"; es filtert nichts selbst, sortiert nichts selbst und kennt keinen Feldwert, den es nicht angezeigt bekommen hat. `TechnicalView` erklaert Sequenz, Hashes, Writer-Key, Registry, Receipt und Evidence in verstaendlicher Sprache und liest jeden Wert aus `ReaderTechnicalView`. `VerificationProblems` ist der EINZIGE Ort, an dem ein Objekt mit `VerificationStatus` `ungültig` erscheint; es oeffnet keines davon als Einsatz. `AmendmentThread` zeigt Original und Nachtraege als getrennte Ansichten desselben Zusammenhangs, gespeist aus `ReaderAmendmentThreadView` — der Projektion des `ReaderEntryThread` aus dem Task „Nachtragsreferenzen und Original/Nachtrag-Projektion", der selbst keine Serialisierungsflaeche traegt und Klartext haelt; kein Original wird als ueberholt markiert oder ausgeblendet.
+
+**Die vier Integritaetsbausteine** sind die Portierung der gleichnamigen Desktop-Dateien und keine zweite Erfindung: `VerificationBadge` bleibt dreiwertig mit `nicht geprüft` als eigenem Wert, weil eine ungepruefte Aussage kein Nein ist; `ChainIntegrityRail` rendert AUS der uebergebenen Knotenliste und hat keine feste Laenge, also kann sie nur so lang sein, wie es gepruefte Aussagen gibt; `EvidenceStatus` und `FingerprintBlock` uebernehmen Wortlaut und ARIA-Struktur ihrer Desktop-Vorlagen. GEMESSEN: keine der vier Desktop-Vorlagen traegt `role="status"` und keine einen Zeugen — die Portierung FUEGT `role="status"` an jedem Statustraeger HINZU, weil die Zeugen in Step 1 darauf lesen, und `ReaderPage.test.tsx` ist die erste Abdeckung dieser Bausteine ueberhaupt. Jeder Zustand steht als TEXT neben Zeichen und Farbe — `design.md` §17.5 laesst Farbe als alleinigen Traeger eines Sicherheitszustands nicht zu.
 
 **Die zwei Dimensionen bleiben getrennt.** `nicht server-bestätigt` wird als eigener `role="status"` mit der zugaenglichen Beschreibung „kein Mangel" gerendert und nie in dasselbe Zeichen wie der Verifikationsstatus gefaltet. Im Datei-Modus ist das der Regelfall (`web-reader-design.md` §5.4), im Server-Modus die Ausnahme; die Darstellung unterscheidet die beiden Modi nicht, weil der Zustand derselbe ist.
 
-**Die Gestaltung bleibt die der Stufe 2.** Ant Design 6 mit deutschem `ConfigProvider`, den sechs eingefrorenen Farben aus `apps/web/src/design/tokens.ts`, `zeroRuntime: true`, statisch extrahiertem lokal gehashtem CSS und der CSP ohne Laufzeit- und Fremdstile. Jede neu importierte Ant-Komponente wird in `EXTRACTED_COMPONENTS` eingetragen, sonst hat sie unter `zeroRuntime: true` keine einzige Regel und `static-css.test.ts` faellt. Icons kommen als direkte CSR-Importe aus `@phosphor-icons/react`. Fokus ist sichtbar, `prefers-reduced-motion` wird respektiert, jede Bedienung ist per Tastatur erreichbar.
+**Die Gestaltung bleibt die der Stufe 2.** Ant Design 6 mit deutschem `ConfigProvider`, den sechs eingefrorenen Farben aus `apps/web/src/design/tokens.ts`, `zeroRuntime: true`, statisch extrahiertem lokal gehashtem CSS und der CSP ohne Laufzeit- und Fremdstile. Jede neu importierte Ant-Komponente wird in `EXTRACTED_COMPONENTS` eingetragen (`Tabs` fehlt heute), sonst hat sie unter `zeroRuntime: true` keine einzige Regel und `static-css.test.ts` faellt; danach wird `apps/web/src/design/static-antd.css` mit `pnpm --dir apps/web test --run -u` regeneriert und eingecheckt, weil `static-css.test.ts` sie byteweise gegen den Dateischnappschuss haelt. Icons kommen als direkte CSR-Importe aus `@phosphor-icons/react`. Fokus ist sichtbar, `prefers-reduced-motion` wird respektiert, jede Bedienung ist per Tastatur erreichbar.
 
 **Die Rollengrenze in beide Richtungen.** `apps/web` enthaelt keinen Code fuer Writer-Finalisierung, Root-Zeremonien, Operator-Provisionierung, Historical Re-grant oder Vernichtungsausfuehrung — `web-reader-design.md` §3 verbietet ihn, und der dritte Zeuge in `RoleGate.test.tsx` liest die Quellen und nicht die Absicht. `apps/desktop` bekommt keine Reader-Route und kein `reader.rs`; die rollengebundene Schale schaltet weiterhin ausschliesslich anhand gueltiger signierter Geraetezertifikate frei, und `isRouteEnabled` in `apps/desktop/src/app/role-gate.ts` bleibt unveraendert.
 
-**Playwright.** `apps/web/playwright.config.ts` und das Wurzelskript `web:e2e` bestehen seit dem Task „Browser-Enrollment: zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate" — `testDir: 'tests/e2e'`, `webServer` ueber `vite preview` auf 127.0.0.1:4174, `use.offline: false`, ein einziges `projects`-Element `chromium`. Dieser Task legt `apps/web/tests/e2e/reader.spec.ts` darunter und aendert an der Konfiguration NICHTS; der Matrix-Eintrag mit `chromium`, `firefox` und `webkit` entsteht im Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate", und dieser Task behauptet keine Matrix.
+**Playwright.** `apps/web/playwright.config.ts` und das Wurzelskript `web:e2e` bestehen seit dem Task „Browser-Enrollment: zwei Pflicht-Authenticators und das nicht überspringbare Fingerprint-Gate" — `testDir: 'tests/e2e'`, `webServer` ueber `vite preview` auf 127.0.0.1:4174, `use.offline: false`, ein einziges `projects`-Element `chromium`. Dieser Task legt `apps/web/tests/e2e/reader.spec.ts` darunter und aendert an der Konfiguration NICHTS. GEMESSEN: `apps/web` traegt keinen Sync-Treiber — `transport.ts` stellt `sendReaderSyncRequest` bereit, `main.tsx` ruft es nirgends; der Treiber gehoert dem Gate-Task. Der „simulierte Sync" dieser Spezifikation ist deshalb eine simulierte Brueckenlatenz: `page.route` haelt das wasm-Modul des Workers zurueck, waehrend der Zeuge die Reiter per Tastatur bedient und den sichtbaren Fokus misst; der Matrix-Eintrag mit `chromium`, `firefox` und `webkit` entsteht im Task „Reader-Interoperabilität, Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate", und dieser Task behauptet keine Matrix.
 
-- [ ] **Step 4: Run the component, keyboard, contract, and end-to-end surfaces**
+- [x] **Step 4: Run the component, keyboard, contract, and end-to-end surfaces**
 
 Run:
 
 ```bash
 cargo test --locked -p ea-ui-contracts --test generated_ts_is_current
+cargo test --locked -p ea-reader-wasm --test view_dto --test bridge_boundary --test file_mode_dto
+cargo check --locked -p ea-reader-wasm --target wasm32-unknown-unknown
 pnpm --dir apps/web typecheck
 pnpm --dir apps/web test --run
 pnpm --dir apps/desktop test --run
@@ -5598,12 +5659,12 @@ pnpm --dir apps/web build
 pnpm web:e2e
 ```
 
-Expected: PASS. Die adversariellen Faelle, die rot werden MUESSEN und einzeln zu pruefen sind: ein Eintrag mit `fehlender Grant`, der eine Einsatzmaske rendert, faellt am Fehlen von `Einsatznummer`; ein `ungültig`, das ausserhalb von `Prüfprobleme` erscheint, faellt am ersten `queryByText`; ein `nicht server-bestätigt`, das als `Lücke` oder `ungültig` gerendert wird, faellt an der Orthogonalitaetszusicherung; eine Integritaetsleiste, die einen nicht gemeldeten Knoten erfindet, faellt an der Knotenzahl; ein handgeschriebenes deutsches Statuswort in einer `apps/web`-Quelle faellt in `no-hand-written-contracts.test.ts`, weil dieselbe Zeichenkette in `generated-contracts.ts` steht; ein von Hand editiertes `apps/web/src/bridge/generated-contracts.ts` faellt in `generated_ts_is_current.rs`; eine Reader-Route in `apps/desktop/src/app/role-gate.ts` und eine `reader.rs` unter `src-tauri/src/commands/` fallen beide in `RoleGate.test.tsx`; und eine `apps/web`-Quelle, die `crypto.subtle`, `createHash`, `Ed25519`, `X25519` oder `ChaCha20` nennt, faellt an der dritten Zusicherung derselben Datei. `pnpm web:e2e` faehrt die gebaute Anwendung und belegt, dass die Oberflaeche waehrend eines simulierten Sync bedienbar bleibt und dass jede Bedienung per Tastatur mit sichtbarem Fokus erreichbar ist. NICHT behauptet und ausdruecklich offen: Mindestversionen je Engine (`web-reader-design.md` §14 Punkt 3, Stufe 7), PWA-Installation und das Gate ueber die Ablehnung eines nicht Root-signierten Bundles (`web-reader-design.md` §12, Stufe 7).
+Expected: PASS. Die adversariellen Faelle, die rot werden MUESSEN und einzeln zu pruefen sind: ein Eintrag mit `fehlender Grant`, der eine Einsatzmaske rendert, faellt am Fehlen von `Einsatznummer`; ein `ungültig`, das ausserhalb von `Prüfprobleme` erscheint, faellt am ersten `queryByText`; ein `nicht server-bestätigt`, das als `Lücke` oder `ungültig` gerendert wird, faellt an der Orthogonalitaetszusicherung; eine Integritaetsleiste, die einen nicht gemeldeten Knoten erfindet, faellt an der Knotenzahl; ein handgeschriebenes deutsches Statuswort in einer `apps/web`-Quelle faellt in `no-hand-written-contracts.test.ts`, weil dieselbe Zeichenkette in `generated-contracts.ts` steht; ein von Hand editiertes `apps/web/src/bridge/generated-contracts.ts` faellt in `generated_ts_is_current.rs`; eine Reader-Route in `apps/desktop/src/app/role-gate.ts` und eine `reader.rs` unter `src-tauri/src/commands/` fallen beide in `RoleGate.test.tsx`; und eine `apps/web`-Quelle, die `crypto.subtle`, `createHash`, `Ed25519`, `X25519` oder `ChaCha20` nennt, faellt an der dritten Zusicherung von `apps/web/src/bridge/no-hand-written-contracts.test.ts` — die besteht seit dem Task „`apps/web`, die wasm-bindgen-Brücke, der OPFS-Bytespeicher und der Laufzeitnachweis im Gate", und dieser Task schreibt sie nicht ein zweites Mal. `pnpm web:e2e` faehrt die gebaute Anwendung und belegt, dass die Oberflaeche waehrend eines simulierten Sync bedienbar bleibt und dass jede Bedienung per Tastatur mit sichtbarem Fokus erreichbar ist. NICHT behauptet und ausdruecklich offen: Mindestversionen je Engine (`web-reader-design.md` §14 Punkt 3, Stufe 7), PWA-Installation und das Gate ueber die Ablehnung eines nicht Root-signierten Bundles (`web-reader-design.md` §12, Stufe 7).
 
-- [ ] **Step 5: Commit the Reader presentation and the role boundary**
+- [x] **Step 5: Commit the Reader presentation and the role boundary**
 
 ```bash
-git add apps/web crates/ea-reader-wasm crates/ea-ui-contracts \
+git add apps/web crates/ea-reader crates/ea-reader-wasm crates/ea-ui-contracts \
         apps/desktop/src/app/RoleGate.test.tsx
 git commit -m "feat(web): deliver the integrity-centered Reader surface and pin the role boundary"
 ```

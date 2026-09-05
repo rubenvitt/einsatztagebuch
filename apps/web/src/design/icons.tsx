@@ -1,4 +1,5 @@
 import { LockKeyIcon } from '@phosphor-icons/react/dist/csr/LockKey'
+import { MagnifyingGlassIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlass'
 import { ShieldCheckIcon } from '@phosphor-icons/react/dist/csr/ShieldCheck'
 import { WarningIcon } from '@phosphor-icons/react/dist/csr/Warning'
 import type { ReactElement } from 'react'
@@ -11,15 +12,16 @@ import type { ReactElement } from 'react'
  * dynamischer Import; die vom Plan ausgeschlossene zweite Symbolbibliothek ist
  * keine Abhaengigkeit dieses Pakets und wird deshalb hier auch nicht genannt.
  *
- * DREI und nicht fuenf: `capture` und `resuming` des Desktops sind
- * Writer-Begriffe — der Reader erfasst nichts und nimmt keine Finalisierung
- * wieder auf. Jede spaetere Reader-Flaeche haengt ihren Eintrag hier an, so wie
- * die Writer-Flaechen es beim Desktop taten.
+ * VIER und nicht sechs: `capture` und `resuming` des Desktops sind
+ * Writer-Begriffe — der Reader erfasst nichts und nimmt keinen Abschluss
+ * wieder auf. `search` kam mit der Reader-Flaeche dazu, so wie jede spaetere
+ * Flaeche ihren Eintrag hier anhaengt.
  */
 export const eaIcons = {
   verified: ShieldCheckIcon,
   warning: WarningIcon,
   locked: LockKeyIcon,
+  search: MagnifyingGlassIcon,
 } as const
 
 export type EaIconName = keyof typeof eaIcons

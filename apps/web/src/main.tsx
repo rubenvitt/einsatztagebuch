@@ -11,11 +11,13 @@ import type { ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 
 import type { ReaderTrustAgeView } from './bridge/generated-contracts'
+import { readerBridge } from './bridge/reader-bridge'
 import { DecorativeIcon } from './design/icons'
 import { eaRuntimeTheme } from './design/tokens'
 import { EnrollmentPage } from './features/enrollment/EnrollmentPage'
 import { fileModeBridge } from './features/file-mode/DirectoryHandle'
 import { OpenArchivePanel } from './features/file-mode/OpenArchivePanel'
+import { ReaderPage } from './features/reader/ReaderPage'
 import { TrustAgeBanner } from './features/trust-age/TrustAgeBanner'
 
 /**
@@ -47,7 +49,12 @@ export type EaWebRoute = {
  * eine Abhaengigkeit mehr fuer einen `find`-Aufruf.
  */
 export const EA_WEB_ROUTES: readonly EaWebRoute[] = [
-  { path: '/', label: 'Reader' },
+  // Die volle Reader-Flaeche unter `/` — die Zeile bestand seit der Schale,
+  // ihr `render` kam mit der Flaeche. `bridge` wird GESTELLT und ist kein
+  // Vorgabewert, aus demselben Grund wie beim Datei-Modus darunter: die echte
+  // Bruecke spricht mit dem dedizierten Worker, und ein Zeuge rendert die
+  // Flaeche mit einem Doppel.
+  { path: '/', label: 'Reader', render: () => <ReaderPage bridge={readerBridge} /> },
   { path: '/enrollment', label: 'Enrollment', render: () => <EnrollmentPage /> },
   // ANGEHAENGT und keine zweite Tabelle. `host` ist das echte Fenster, weil
   // die Faehigkeitsabfrage der Flaeche genau hier ihren Wirt bekommt; `bridge`

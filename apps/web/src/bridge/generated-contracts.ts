@@ -60,6 +60,79 @@ export type ReaderTrustAgeView = {
   readonly trustRefreshOverdue: boolean
 }
 
+export type ReaderEntryStateView = {
+  readonly entryHash: string
+  readonly objectHash: string
+  readonly sequence: number
+  readonly verification: VerificationStatus
+  readonly entryState: EntryStatus
+  readonly serverConfirmation: ServerConfirmationV1
+  readonly detailCode: string | null
+}
+
+export type ReaderIncidentView = {
+  readonly incidentNumber: string
+  readonly occurredAtStartMs: number
+  readonly timezone: string
+  readonly keyword: string
+}
+
+export type ReaderEntryView = {
+  readonly state: ReaderEntryStateView
+  readonly incident: ReaderIncidentView | null
+}
+
+export type ReaderTechnicalView = {
+  readonly sequence: number
+  readonly previousEntryHash: string | null
+  readonly entryHash: string
+  readonly ciphertextHash: string
+  readonly writerCertificateHash: string
+  readonly registryVersion: number
+  readonly registryHeadHash: string
+  readonly serverConfirmation: ServerConfirmationV1
+  readonly evidenceDetailCode: string | null
+}
+
+export type ChainIntegrityNodeView = {
+  readonly label: string
+  readonly verified: boolean | null
+  readonly detail: string | null
+}
+
+export type VerificationProblemView = {
+  readonly objectHash: string
+  readonly verification: VerificationStatus
+  readonly detailCode: string | null
+}
+
+export type ReaderStandView = {
+  readonly entries: readonly ReaderEntryView[]
+  readonly problems: readonly VerificationProblemView[]
+  readonly chain: readonly ChainIntegrityNodeView[]
+  readonly fullyVerified: boolean
+  readonly serverConfirmation: ServerConfirmationV1
+}
+
+export type ReaderRejectedAmendmentView = {
+  readonly entryHash: string
+  readonly sequence: number
+  readonly reason: string
+}
+
+export type ReaderAmendmentThreadView = {
+  readonly original: ReaderEntryView
+  readonly amendments: readonly ReaderEntryView[]
+  readonly rejected: readonly ReaderRejectedAmendmentView[]
+}
+
+export type ReaderSearchHitView = {
+  readonly entryHash: string
+  readonly sequence: number
+  readonly incidentNumber: string
+  readonly occurredAtStartMs: number
+}
+
 // The value arrays, so that no consumer repeats a literal.
 
 export const VERIFICATION_STATUS_VALUES = [
