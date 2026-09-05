@@ -60,18 +60,137 @@ Head. Destruction states are only `requested`, `inProgress`,
 
 ### Task 1: Typed Admin Authorization and Root-Signed Target Service
 
+> **Korrektur 2026-09-05 (DRK-269), gemessen gegen `e0fc423`.** Der ursprüngliche
+> Abschnitt verlangte eine Autorisierungsprüfung, die die Stufen 1–3 bereits
+> ausgeliefert haben. Was wirklich fehlt, sind drei Dinge: ein **öffentlicher**
+> Einstieg, der einen geprüften Autorisierungszustand herausgibt, ein
+> **persistenter organisationsweiter** Einmal-Speicher statt des heutigen
+> prozesslokalen, und der **erste Produktionsschreiber** der
+> `adminRootCeremony`-Auditzeile. Die Nachweise stehen unter „Bereits
+> ausgeliefert" und „Die reale Lücke".
+
 **Files:**
+- Modify: `crates/ea-trust/src/admin_authorization.rs`
+- Modify: `crates/ea-trust/src/lib.rs`
+- Modify: `crates/ea-trust/src/state.rs`
 - Create: `crates/ea-admin/Cargo.toml`
 - Create: `crates/ea-admin/src/lib.rs`
-- Create: `crates/ea-admin/src/authorization.rs`
 - Create: `crates/ea-admin/src/root_ceremony.rs`
-- Create: `crates/ea-admin/src/action.rs`
+- Create: `crates/ea-admin/src/store.rs`
 - Test: `crates/ea-admin/tests/authorization.rs`
 - Test: `crates/ea-admin/tests/root_ceremony.rs`
+- Modify: `Cargo.toml` (`members`, `[workspace.dependencies]`)
+- Modify: `tools/xtask/tests/workspace.rs` (`WORKSPACE_MEMBERS`, wasm32-Klassifizierung)
 
 **Interfaces:**
-- Consumes: Stage 1 Trust verifier, Admin signer, Root signer, verified Registry/time, fresh `ReauthPurpose::AdminRootCeremony` operator proof, and Stage 2 `LocalAuditService`.
-- Produces: `verify_admin_authorization`, `VerifiedAdminAuthorization<T>`, `sign_authorized_trust_target`, and one-time authorization store.
+- Consumes: `ea_trust::{VerifiedTrust, SelectedRegistryHead, VerifiedAdminAuthorization}`,
+  `ea_key_provider::KeyProvider`, `ea_crypto::VerificationContext::root_trust_digest`,
+  `ea_format::encode_trust`, `ea_audit::LocalAuditService`, und einen frischen
+  `ea_operator::OperatorSessionProof` mit `ReauthPurpose::AdminRootCeremony`.
+- Produces: `ea_trust::verify_authorized_trust_target` (neuer öffentlicher Einstieg),
+  `ea_trust::TrustStateStore::admin_authorization_consumed` (persistenter Einmal-Speicher),
+  und `ea_admin::RootCeremonyService::publish_authorized_target`.
+
+#### Bereits ausgeliefert — dieser Task baut es NICHT neu
+
+- **Die Autorisierungsprüfung.** `verify_admin_authorization`
+  (`crates/ea-trust/src/admin_authorization.rs:74`) ist gebaut, aber `pub(crate)`.
+  Sie nimmt **Objekthashes**, keine `Parsed<…>`-Werte, und löst sie über
+  `state.catalog_object(hash)` auf:
+
+```rust
+pub(crate) fn verify_admin_authorization(
+    state: &PreviousHeadState,
+    authorization_object_hash: ObjectHash,
+    target_object_hash: ObjectHash,
+    authorization_use_time: UnixMillis,
+    pre_transition_sequence: ChainSequence,
+    replay: &mut AdminAuthorizationReplay,
+) -> Result<VerifiedAdminAuthorization, TrustError>;
+```
+
+- **Der Beweiszustand ist nicht generisch.** `VerifiedAdminAuthorization`
+  (`crates/ea-trust/src/admin_authorization.rs:25`) hat ein privates Feld und fünf
+  `pub const fn`-Leser. Ein Trait `AuthorizedTrustCore` existiert nirgends; die
+  Typisierung leistet die geschlossene Aufzählung `DecodedTrustPayloadV1` über
+  `AuthorizedTrustCoreV1<T>` (`crates/ea-format/src/trust_view.rs:18,50`). Die
+  `compile_fail`-Doctests in `crates/ea-trust/src/lib.rs:12,103,319,377` pinnen, dass
+  der Zustand nicht frei konstruierbar ist. Die generische Klammer `<T>` entfällt
+  ersatzlos.
+- **Der Kernhash.** `ea_crypto::authorized_trust_digest`
+  (`crates/ea-crypto/src/digest.rs:26,61`) trägt die Domäne
+  `EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1`; das CBOR-Präfix
+  `[targetTrustSubtype, authorizedTrustCore]` baut
+  `exact_authorized_core_hash` (`crates/ea-trust/src/admin_authorization.rs:374`).
+- **Die geschlossene Aktionstabelle.** Zweifach kodiert und an der Signaturgrenze
+  durchgesetzt: `crates/ea-crypto/src/cose.rs:2498-2524`
+  (`admin_action_permits_registry_change`, `…_device_certificate`, `…_target`) und die
+  Umkehrrichtung `describe_target` (`crates/ea-trust/src/admin_authorization.rs:248`),
+  samt `require_non_admin_revocation_target` (`:444`) und `admin_change_target_subject`
+  (`:398`). Eine dritte Kopie wird **nicht** angelegt.
+- **Die historisch-inklusive Laufzeitprüfung** beim Kopfübergang:
+  `verify_bound_authorization` (`crates/ea-trust/src/registry.rs:1399`), öffentlich
+  erreichbar über `verify_registry_candidate` (`:516`) und
+  `verify_catalogue_admission` (`crates/ea-trust/src/admission.rs:90`).
+- **`ReauthPurpose::AdminRootCeremony`** (`crates/ea-operator/src/session.rs:38`).
+  Beachte: `OperatorSessionProof::is_valid_for` (`:158`) prüft die Bindung **nicht** —
+  der Konsument vergleicht `binding_object_hash()` (`:196`) selbst.
+- **Die Auditgrammatik.** `LocalAuditActionV1::AdminRootCeremony(AdminRootContextV1)`
+  existiert seit Stufe 2 (`crates/ea-format/src/local_audit.rs:536,776`, Aktionscode 7,
+  Kontextmarke 5). Der Kontext trägt genau drei Felder — Autorisierungs-Objekthash,
+  Ziel-Objekthash, Aktionscode. Pseudonyme Bindung und Ausgang liegen eine Ebene höher
+  in `LocalAuditEventCoreFieldsV1::operator_binding_object_hash`
+  (`local_audit.rs:833`) und `TypedLocalAuditEvent::outcome`
+  (`crates/ea-audit/src/event.rs:172`).
+
+#### Die reale Lücke
+
+1. **`VerifiedAdminAuthorization` ist von außen unerreichbar.** Der Typ ist exportiert
+   (`crates/ea-trust/src/lib.rs:451`), aber **keine** öffentliche Funktion gibt ihn
+   zurück: `RegistryCandidate` (`crates/ea-trust/src/registry.rs:346`) bietet nur
+   `registry_version`, `registry_head_hash` und `preexisting_authority`. Ohne einen
+   öffentlichen Einstieg kann kein Dienst oberhalb von `ea-trust` den Beweiszustand
+   führen — der Kern der Zusicherung „nur dieser Zustand kommt in die Signierseite"
+   ist damit heute nicht durchsetzbar.
+2. **Der Einmal-Speicher ist prozesslokal und pro Prüflauf frisch.**
+   `AdminAuthorizationReplay` (`crates/ea-trust/src/admin_authorization.rs:19`) ist ein
+   `BTreeSet`-Paar, das in `registry.rs:529` und `admission.rs:317` jeweils leer neu
+   entsteht — in `admission.rs` ist die Replay-Prüfung dadurch wirkungslos. Organisationsweit
+   und laufübergreifend existiert der Speicher **nicht**. Vorlage ist der einzige gebaute
+   Einmalspeicher, die Uhrfreigabe: Port `TrustStateStore::clock_release_consumed`
+   (`crates/ea-trust/src/state.rs:231`), Schlüsseltyp `ClockReleaseReplayKey` (`:104`),
+   Tabelle `clock_release_replays` (`apps/server/migrations/0001_initial.sql:437`,
+   „Der Primaerschluessel IST die Sperre"). Die reservierte Tabelle `replay_nonces`
+   (`0001_initial.sql:304-316`) wartet ausdrücklich auf genau diesen Gebrauch: „RESERVIERT
+   … sie wird derzeit von keinem Pfad beschrieben."
+3. **Es gibt keinen Produktionsschreiber für `adminRootCeremony`.** Außerhalb von
+   `ea-format` konstruieren nur zwei Stellen überhaupt eine `LocalAuditActionV1`:
+   `crates/ea-archive-fs/src/profile_migration.rs:624,667` und
+   `crates/ea-audit/src/event.rs:186` (`Login`). `AdminRootCeremony` erscheint nur in
+   Testvektoren (`crates/ea-testkit/src/lib.rs:6506`). Dieser Task liefert den ersten
+   Schreiber und schließt damit den Teilbeleg AK-45 aus Stufe-3-Gate §5.2 **für die
+   lokale Zeremonienzeile** — nicht für `AdminAuditRecordV1`
+   (`apps/server/src/admin_audit.rs:163`), das Serververwaltungsaudit der Tabelle
+   `technical_admin_audit` ist eine getrennte, hier **nicht** geschlossene Lücke.
+
+#### Schichtung: warum eine neue Crate und nicht `ea-trust`
+
+Der Zeremoniendienst braucht `ea-audit`. `ea-audit` trägt bewusst **keine**
+`ea-trust`-Kante (`crates/ea-audit/src/repository.rs:93-95`); eine Audit-Anbindung
+innerhalb von `ea-trust` kehrte die Schichtung um. `crates/ea-admin` liegt deshalb
+**oberhalb** von `ea-trust`, `ea-crypto`, `ea-format`, `ea-key-provider`, `ea-audit` und
+`ea-operator`. `ea-trust` selbst wächst nur um öffentliche Fläche, nicht um Abhängigkeiten.
+
+#### Signieren: der reale Port
+
+`DigestSigner` existiert nicht, `ExactObjectBytes::new` ist `pub(crate)`
+(`crates/ea-format/src/object.rs:92`), und `async` gibt es in dieser Schicht nicht
+(`crates/ea-key-provider/src/contract.rs:340-344`: Async lebt nur in
+`apps/desktop/src-tauri` über `spawn_blocking`). Der produktive Signierport nimmt
+**inhaltstypisierte Nutzlastbytes, keinen Digest** (`contract.rs:351-374`), und
+`contract.rs:235` verbietet ausdrücklich, in Produktion `ea_crypto::CoseSigner` zu
+bemühen. Die Zielbytes entstehen ausschließlich über
+`ea_format::encode_trust` (`crates/ea-format/src/parser.rs:123`).
 
 - [ ] **Step 1: Write Root-only/Admin-only/core/action/replay tests**
 
@@ -86,51 +205,115 @@ fn target_requires_matching_admin_authorization_and_root_signature() {
 }
 
 #[test]
-fn authorization_id_and_nonce_are_organization_wide_single_use() {
-    let first = verifier.verify(fixtures::authorization()).unwrap();
-    usage.commit(first).unwrap();
-    assert_eq!(verifier.verify(fixtures::authorization()).unwrap_err().code(), "EA-ADMIN-AUTH-REPLAY");
+fn authorization_id_and_nonce_are_organization_wide_single_use_across_runs() {
+    let mut store = fixtures::persistent_store();
+    let first = verify_authorized_trust_target(fixtures::valid_target(), fixtures::trust()).unwrap();
+    service.publish_authorized_target(first, &mut store).unwrap();
+
+    // Zweiter Lauf, frischer Prozesszustand, DERSELBE Speicher.
+    let replayed = verify_authorized_trust_target(fixtures::valid_target(), fixtures::trust()).unwrap();
+    let error = service.publish_authorized_target(replayed, &mut store).unwrap_err();
+    assert_eq!(error.code(), "EA-TRUST-AUTH-REPLAY");
+    assert_eq!(error.to_string(), "EA-TRUST-AUTH-REPLAY");
+    assert_eq!(format!("{error:?}"), "EA-TRUST-AUTH-REPLAY");
 }
 ```
 
-- [ ] **Step 2: Run tests and verify service is absent**
+Der Fehlercode heißt **`EA-TRUST-AUTH-REPLAY`** (`TrustError::AuthReplay`,
+`crates/ea-trust/src/error.rs:16,43`), nicht `EA-ADMIN-AUTH-REPLAY`: das Präfix
+`EA-ADMIN-` ist bereits als **Aktionscode**-Namensraum der acht Serverzeilen vergeben
+(`apps/server/src/admin_audit.rs:112-119`, `docs/traceability/stage-3-gate.md:282`);
+ein Fehlercode desselben Präfixes vermischte zwei Familien in ausgelieferten
+Auditzeilen. Zusicherungen laufen über den Dreifachvergleich
+`code()`/`to_string()`/`{:?}` nach dem Muster
+`crates/ea-trust/tests/registry_transitions.rs:17-26`.
+
+- [ ] **Step 2: Run tests and verify the public entry point and the ceremony are absent**
 
 Run: `cargo test --locked -p ea-admin --test authorization --test root_ceremony`
 
-Expected: FAIL because Admin authorization and Root target proof states do not exist.
+Expected: FAIL — `ea-admin` existiert nicht, `verify_authorized_trust_target` ist
+nicht öffentlich, und der Einmal-Speicher überlebt keinen Prozess.
 
-- [ ] **Step 3: Implement exact action-to-target and core hashing rules**
+- [ ] **Step 3: Implement the public proof entry, the persistent store, and the ceremony**
 
 ```rust
-pub fn verify_admin_authorization<T: AuthorizedTrustCore>(
-    context: &AdminContext,
-    authorization: &Parsed<OrganizationAdminAuthorizationV1>,
-    target: &T,
-) -> Result<VerifiedAdminAuthorization<T>, AdminError>;
+// ea-trust: der oeffentliche, zielgebundene Einstieg. Keine neue Regel — er
+// bezeugt die vorhandene Pruefung und gibt den Beweiszustand heraus.
+pub fn verify_authorized_trust_target(
+    trust: &VerifiedTrust,
+    head: &SelectedRegistryHead,
+    exact_target_object_bytes: &[u8],
+    now: UnixMillis,
+    at_sequence: ChainSequence,
+) -> Result<VerifiedAdminAuthorization, TrustError>;
 
-pub async fn sign_authorized_trust_target<T: AuthorizedTrustCore>(
-    authorization: VerifiedAdminAuthorization<T>,
-    target: T,
-    root_signer: &dyn DigestSigner,
-) -> Result<ExactObjectBytes, AdminError>;
+// ea-trust: der persistente, organisationsweite Einmal-Speicher, nach dem
+// Muster von `clock_release_consumed`.
+pub struct AdminAuthorizationReplayKey { /* organization_id, authorization_id, nonce */ }
+trait TrustStateStore {
+    fn admin_authorization_consumed(
+        &mut self,
+        key: &AdminAuthorizationReplayKey,
+    ) -> Result<bool, StateStoreError>;
+}
+
+// ea-admin: die Zeremonie. Synchron, ueber den produktiven Port.
+impl RootCeremonyService<'_> {
+    pub fn publish_authorized_target(
+        &self,
+        authorization: VerifiedAdminAuthorization,
+        target: &TrustObjectV1,
+        store: &mut dyn TrustStateStore,
+        actor: AuditActorProof<'_>,
+    ) -> Result<ExactObjectBytes, AdminError>;
+}
 ```
 
-Hash exactly `SHA-256("EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1" || deterministicCbor([targetTrustSubtype, authorizedTrustCore]))`. Enforce the closed action/direct-target/change table, `issuedAt < expiresAt`, live creation-time `effectiveNow` within the interval, organization, Previous Registry Head, Admin certificate/thumbprint/binding/role/OS/instance challenge, capability `organizationAdminApprove`, and one-time UUID/nonce. Consume usage atomically with signed target publication. The target has exactly `[authorizedTrustCore, organizationAdminAuthorizationObjectHash]` except the fixed bootstrap exceptions. Runtime verification later checks both the target and activation-event authorizations historically and inclusively at the signed activation `event.issuedAt`; it never substitutes current wall time or an invented Root-signature time.
+Die Reihenfolge in `publish_authorized_target` ist die Zusicherung: Einmal-Nutzung
+verbrauchen, Root-Signatur über `VerificationContext::root_trust_digest`
+(`crates/ea-crypto/src/cose.rs:979`) und `KeyProvider::sign(…, ContentType::TrustDigest, …)`
+erzeugen, Zielbytes über `encode_trust` kodieren, dann die
+`adminRootCeremony`-Zeile über `LocalAuditService::record_signed`
+(`crates/ea-audit/src/event.rs:229`) schreiben — und die Bytes **erst danach**
+herausgeben. Ein separates `flush` gibt es nicht: `record_signed` kodiert, signiert,
+prüft die COSE gegen den Kern zurück und bucht in **einer** Transaktion, bevor es
+zurückkehrt (`crates/ea-audit/src/repository.rs:48-67,128-183`). Scheitert das Audit,
+wird nach dem Muster `profile_migration.rs:641-676` eine Zeile mit
+`LocalAuditOutcomeV1::Failed` gebucht, und die Zielbytes werden **nicht** freigegeben.
+Der Audit-Dienst wird je Kopfauswahl gebaut, weil `SignedLocalAuditService::new`
+die `effective_now` beim Bauen bindet (`repository.rs:102-118`).
 
-After bootstrap, every Admin/Root ceremony records and flushes a signed `adminRootCeremony` audit event binding only the authorization and resulting target object hashes, action code, pseudonymous operator binding, and outcome. Do not release or publish the target bytes if audit verification or persistence fails. Initial Root and the two anchor-pinned Admin pairs are recorded in the signed bootstrap transcript instead of pretending a pre-bootstrap local audit identity already existed.
+Initialer Root und die zwei ankergepinnten Admin-Paare laufen über die
+`Initial*`-Arme von `DecodedTrustPayloadV1` (`crates/ea-format/src/trust_view.rs:51-53`,
+unterschieden per `payload_wraps_core`) und werden im signierten
+Bootstrap-Transkript festgehalten, statt eine lokale Auditidentität vorzutäuschen,
+die es vor dem Bootstrap nicht gab.
 
 - [ ] **Step 4: Run the full authorization attack matrix**
 
 Run: `cargo test --locked -p ea-admin --test authorization --test root_ceremony`
+und `cargo test --locked -p ea-trust`
 
-Expected: PASS; mixed action effects, wrong signer context, expired auth, reused nonce, same-person self-rotation, and capability mismatch fail.
+Expected: PASS; mixed action effects (`EA-TRUST-ACTION-MISMATCH`), wrong signer
+context, expired auth (`EA-TRUST-AUTH-EXPIRED`), not-yet-valid
+(`EA-TRUST-AUTH-NOT-YET-VALID`), reused nonce (`EA-TRUST-AUTH-REPLAY`), same-person
+self-rotation (`EA-TRUST-SELF-AUTHORIZATION`) und capability mismatch scheitern. Die
+bestehenden Zeugen in `crates/ea-trust/tests/registry_attacks.rs` bleiben grün.
 
 - [ ] **Step 5: Commit Admin/Root proof boundary**
 
 ```bash
-git add crates/ea-admin Cargo.toml Cargo.lock
+git add crates/ea-admin crates/ea-trust Cargo.toml Cargo.lock tools/xtask
 git commit -m "feat(admin): bind Root changes to Admin authorization"
 ```
+
+Die neue Crate lebt an fünf Pflichtstellen: `Cargo.toml` `members`, `Cargo.toml`
+`[workspace.dependencies]`, `tools/xtask/tests/workspace.rs` `WORKSPACE_MEMBERS`, die
+wasm32-Klassifizierung (Positivliste in `verify_quick_commands()` **oder**
+`WASM32_EXEMPT_CRATES` mit Begründung — nie beides, nie keins,
+`tools/xtask/tests/workspace.rs:163`), und `Cargo.lock`. In genau diesem Task ist
+`cargo metadata --format-version 1` das eine Kommando ohne `--locked`.
 
 ### Task 2: Twelve-Step Organization Bootstrap and Independent Anchors
 
