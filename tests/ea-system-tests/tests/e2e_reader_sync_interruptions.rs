@@ -348,10 +348,11 @@ fn every_retry_after_an_interruption_lands_idempotently_on_the_same_head() {
 /// Der EINE gemessene Befund, an dem der Wiederholversuch NICHT auf denselben
 /// Kopf laeuft: der abgewiesene Fork.
 ///
-/// Das Bracket von `refusal-leaves-the-cursor` sagt, keiner der vier
-/// Abweisungsgruende „bewegt Zustand". Fuer den CURSOR stimmt das, und
-/// `every_declared_interruption_leaves_the_confirmed_cursor_where_it_was`
-/// misst es. Fuer den CACHE stimmt es nicht: `accept_batch`
+/// Das Bracket von `refusal-leaves-the-cursor` sagte in seiner Erstfassung,
+/// keiner der vier Abweisungsgruende „bewegt Zustand". Fuer den CURSOR stimmt
+/// das, und `every_declared_interruption_leaves_the_confirmed_cursor_where_it_was`
+/// misst es. Fuer den CACHE stimmt es nicht, und seit dem 2026-09-05 sagt das
+/// Bracket beides: `accept_batch`
 /// (`crates/ea-reader/src/sync.rs`, Objektschleife vor `classify`) legt jedes
 /// Objekt ab, dessen Bytes seine Adresse tragen — und der konkurrierende
 /// Genesis-Eintrag traegt sie, er ist vollstaendig gueltig signiert. Erst der

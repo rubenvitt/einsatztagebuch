@@ -49,7 +49,15 @@
 // - `fixtures/complete-archive-stand-view.json`: `view::stand_json` ueber
 //   genau diesem Bestand, auf dem WIRT gerechnet (nativ, nicht wasm). Der
 //   Literalwert unten ist sein SHA-256; jede Engine muss ihn treffen, und
-//   damit trifft sie auch die native Rechnung.
+//   damit trifft sie auch die native Rechnung. Sein `incident: null` ist eine
+//   Aussage ueber DIESEN Bestand: `file-mode-open-bundle` entschluesselt
+//   zwar (`view::build_stand`), aber der eine Eintrag traegt den
+//   Genesis-Klartext und keine Einsatznutzlast, also gibt es nichts
+//   Fachliches auszuweisen (`crates/ea-reader-wasm/src/view.rs`,
+//   „`incident: null` ist eine Aussage"). Eine Neuerzeugung ueber einem
+//   Bestand MIT Einsatznutzlast froere Einsatznummer, Stichwort und Zeit als
+//   fachlichen Klartext in eine eingecheckte Datei ein und DARF NICHT
+//   committet werden.
 //
 // Die wirksame Zeit ist `fixtures::EFFECTIVE_NOW` =
 // `verify_support::FIXTURE_OS_WALL_CLOCK_V1` = 800 ms — NICHT frei waehlbar,
@@ -59,7 +67,7 @@
 //
 // Kein Enrollment und kein Fingerprintnachweis auf Firefox und WebKit — CDP,
 // siehe `enrollment.spec.ts`. Keine Mindestversionen je Plattform
-// (`web-reader-design.md` §14.3, Stufe 7).
+// (`web-reader-design.md` §14, offener Punkt 3, Stufe 7).
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'

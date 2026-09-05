@@ -3,7 +3,7 @@
 //! untergeschobene Archiv gegen den gepinnten Anker.
 //!
 //! Plan: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md`,
-//! Task 14, Absatz *Datei-Modus* (Zeilen 5833-5835). Lauf (a) und (b) belegen
+//! Absatz *Datei-Modus* des Task-14-Abschnitts. Lauf (a) und (b) belegen
 //! die INTEROPERABILITAET, NUR Lauf (c) traegt die Ledgerzeilen `WR-053` und
 //! `WR-054`; der Negativfall ist die systemweite Wiederholung von
 //! `crates/ea-reader/tests/file_mode_anchor.rs` und `pinned_anchor.rs`, deren
@@ -143,11 +143,12 @@ fn the_bundle_reports_identically_to_the_server_mode_run_including_server_confir
 /// Verglichen wird gegen Lauf (a) ueber dem vollen Bestand: dieselben
 /// Eintraege bekommen dieselben Objektergebnisse (`Valid`), die Lueckenliste
 /// ist DIESELBE, und die einzige Spalte, die kippt, ist `serverConfirmation`.
-/// `is_fully_verified()` ist in BEIDEN Laeufen dasselbe — und zwar GEMESSEN
-/// falsch, wegen der Vorlauf-Luecke der Quittungslinie und aus keinem Grund,
-/// der mit dem Datei-Modus zu tun hat; die Zusage „`gaps()` leer und
-/// `is_fully_verified()` wahr" traegt der Zeuge darunter ueber dem
-/// lueckenlosen Bestand.
+/// `is_fully_verified()` ist in BEIDEN Laeufen GEMESSEN falsch — wegen der
+/// Vorlauf-Luecke der Quittungslinie und aus keinem Grund, der mit dem
+/// Datei-Modus zu tun hat; gepinnt wird der Wert je Lauf und nicht die
+/// Gleichheit, damit ein Bestand, der auf beiden Seiten still wahr wuerde,
+/// rot bleibt. Die Zusage „`gaps()` leer und `is_fully_verified()` wahr"
+/// traegt der Zeuge darunter ueber dem lueckenlosen Bestand.
 #[test]
 fn withholding_the_receipts_from_the_same_archive_flips_only_the_server_confirmation_column() {
     let archive = fixtures::archive_with_receipts();
@@ -206,7 +207,10 @@ fn withholding_the_receipts_from_the_same_archive_flips_only_the_server_confirma
     assert_eq!(c.quarantined_objects().len(), 0);
     assert_eq!(c.format_errors().len(), 0);
     assert_eq!(c.signature_errors().len(), 0);
-    assert_eq!(a.is_fully_verified(), c.is_fully_verified());
+    // Je Lauf der gemessene Wert, nicht die Gleichheit der beiden: die
+    // Vorlauf-Luecke steht in (a) UND in (c).
+    assert!(!a.is_fully_verified());
+    assert!(!c.is_fully_verified());
 }
 
 /// Lauf (c), zweite Haelfte und Traeger von `WR-053`/`WR-054`: ein Buendel

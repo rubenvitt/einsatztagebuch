@@ -10,7 +10,7 @@
 // zugleich der Grund, aus dem `playwright.config.ts` ueberhaupt im Programm von
 // `tsc` liegt: `apps/web/tsconfig.json` fuehrt die Datei in `include`, und der
 // `await import(...)` hier zieht sie ein zweites Mal, unabhaengig davon.
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 
 it('runs the e2e suite from the package, against the built bundle, without a context-wide offline switch', async () => {
   const config = (await import('../playwright.config')).default
@@ -71,6 +71,39 @@ it('carries exactly the three engine projects of the browser matrix, in this ord
     'firefox',
     'webkit',
   ])
+})
+
+it('binds webkit to a remote Playwright server only when EA_WEBKIT_WS_ENDPOINT is set', async () => {
+  // `playwright.config.ts` liest die Variable beim LADEN des Moduls; ein
+  // zweiter `import` bekaeme das gecachte Modul, deshalb `vi.resetModules()`
+  // vor jedem der beiden Laeufe.
+  const previous = process.env['EA_WEBKIT_WS_ENDPOINT']
+  const webkitOf = async () => {
+    vi.resetModules()
+    const config = (await import('../playwright.config')).default
+    const project = config.projects.find(candidate => candidate.name === 'webkit')
+    expect(project).toBeDefined()
+    const use: { connectOptions?: { wsEndpoint?: string } } = project?.use ?? {}
+    return use
+  }
+  try {
+    // OHNE die Variable — die Form, die CI faehrt — startet das Projekt die
+    // Engine lokal: kein `connectOptions`, nicht einmal ein leeres.
+    delete process.env['EA_WEBKIT_WS_ENDPOINT']
+    expect(await webkitOf()).not.toHaveProperty('connectOptions')
+    // MIT der Variable haengt das Projekt an genau diesem Endpunkt; die
+    // Adresse ist absichtlich einer, auf der nichts lauscht — gelesen wird
+    // nur die Konfiguration, kein Browser startet.
+    process.env['EA_WEBKIT_WS_ENDPOINT'] = 'ws://127.0.0.1:1/'
+    expect((await webkitOf()).connectOptions?.wsEndpoint).toBe('ws://127.0.0.1:1/')
+  } finally {
+    if (previous === undefined) {
+      delete process.env['EA_WEBKIT_WS_ENDPOINT']
+    } else {
+      process.env['EA_WEBKIT_WS_ENDPOINT'] = previous
+    }
+    vi.resetModules()
+  }
 })
 
 it('keeps the Playwright spec out of the Vitest run', async () => {

@@ -9,7 +9,8 @@
 //! Warum der Bestand nicht vom Writer stammt und warum „sein Grant genommen"
 //! ein zweiter Bau und kein Loeschen ist, steht im Modulkommentar von
 //! `two_reader_support`. Der Klartext verlaesst `with_plaintext` nur HIER, im
-//! Test, und nur fuer den Gleichheitsvergleich.
+//! Test, und nur fuer den Gleichheitsvergleich — der ueber `assert!` laeuft,
+//! damit ein Fehlschlag keine Klartextbytes in das Testprotokoll druckt.
 
 mod two_reader_support;
 
@@ -91,13 +92,14 @@ fn one_ciphertext_opens_under_two_distinct_reader_kem_keys_through_separate_gran
         opened.push(open_with(&archive, reader));
     }
 
-    assert_eq!(
-        opened[0], opened[1],
+    // `assert!` statt `assert_eq!`: ein fehlgeschlagener Vergleich druckte den
+    // Klartext sonst als `Debug`-Ausgabe in das Testprotokoll.
+    assert!(
+        opened[0] == opened[1],
         "derselbe Klartext aus zwei verschiedenen Grants"
     );
-    assert_eq!(
-        opened[0],
-        fixtures::genesis_plaintext(),
+    assert!(
+        opened[0] == fixtures::genesis_plaintext(),
         "und es ist der Klartext, der hineingelegt wurde"
     );
 
@@ -141,10 +143,11 @@ fn one_ciphertext_opens_under_two_distinct_reader_kem_keys_through_separate_gran
     assert_eq!(for_b.report().gaps().len(), 0);
     assert_eq!(for_b.report().decryption_errors().len(), 0);
     assert!(for_b.report().is_fully_verified());
-    // A oeffnet diesen Bestand weiterhin — derselbe Klartext.
-    assert_eq!(
-        open_with(&without_b, &reader_a),
-        fixtures::genesis_plaintext()
+    // A oeffnet diesen Bestand weiterhin — derselbe Klartext, und wieder ohne
+    // Bytes in der Meldung.
+    assert!(
+        open_with(&without_b, &reader_a) == fixtures::genesis_plaintext(),
+        "A oeffnet den Ein-Reader-Bestand auf den Genesis-Vektor"
     );
     // Der Eintrag des Zwei-Reader-Bestands und der des Ein-Reader-Bestands
     // sind VERSCHIEDENE Eintraege: der Planhash steht im signierten Manifest.
@@ -214,6 +217,15 @@ fn removing_one_grant_object_is_a_plan_mismatch_for_both_readers_and_never_a_mis
 fn open_with(archive: &fixtures::TwoReaderArchive, reader: &Reader) -> Vec<u8> {
     let entry_hash = archive.entry_hash();
     let vault = reader.vault_pinning(archive.anchor_bytes());
+    // Die Sitzung, mit der klassifiziert UND entschluesselt wird, traegt den
+    // KEM-Schluessel DIESES Readers. Ohne die Zusicherung oeffnete ein B, dem
+    // die Kulisse As Seed unterschiebt, still ueber As Grant — und „zwei
+    // Reader" waere ein Reader mit zwei Namen.
+    assert!(
+        vault.kem_key_thumbprint() == reader.key_thumbprint(),
+        "{}: die Sitzung traegt den eigenen KEM-Schluessel",
+        reader.label()
+    );
     let classification = ReaderVerifier::new(ReaderMode::Server, fixtures::OS_WALL_CLOCK)
         .classify(archive.source(), &vault, &mut SilentObserver)
         .expect("ein Fixture-Bestand laesst sich klassifizieren");
@@ -232,6 +244,11 @@ fn open_with(archive: &fixtures::TwoReaderArchive, reader: &Reader) -> Vec<u8> {
     let grant = classification
         .verified_grant(entry_hash)
         .unwrap_or_else(|| panic!("{}: und einen eigenen Grant", reader.label()));
+    assert!(
+        grant.recipient_key_thumbprint() == reader.key_thumbprint(),
+        "{}: der Zeuge ist der EIGENE Grant",
+        reader.label()
+    );
     let mut observer = RecordingObserver::new();
     let record = decrypt_verified(
         entry,

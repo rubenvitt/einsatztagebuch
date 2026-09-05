@@ -45,7 +45,10 @@
 pub mod verify_support;
 
 use ea_archive::{ArchiveInventory, ArchiveSource};
-use ea_crypto::{HpkeRecipientPrivateKey, HpkeRecipientPublicKey, SecretBytes, object_hash};
+use ea_crypto::{
+    CanonicalPublicCoseKey, HpkeRecipientPrivateKey, HpkeRecipientPublicKey, SecretBytes,
+    object_hash,
+};
 use ea_format::GrantPurposeV1;
 use ea_reader::{AuthenticatorPrfV1, ReaderVault, UnlockedVault, VaultContentsV1};
 use ea_trust::TrustAnchorV1;
@@ -62,15 +65,19 @@ use verify_support::{CompleteArchive, PlannedRecipientV1, archive_support::Archi
 /// Zeugen entstanden.
 pub const OS_WALL_CLOCK: UnixMillis = UnixMillis::new(verify_support::FIXTURE_OS_WALL_CLOCK_V1);
 
-/// Der private X25519-Schluessel des Recovery-Empfaengers.
+/// Der OEFFENTLICHE X25519-Punkt des Recovery-Empfaengers.
 ///
 /// Ein DRITTER Schluessel neben den beiden Readern: `GrantPlanV1::new`
 /// verlangt genau EINEN Recovery-Grant, und der gehoert im Regelfall des
 /// Writers weder dem einen noch dem anderen Reader. Sein Geheimnis haelt kein
-/// Test — es reicht, dass die Kapselung auf einen echten Punkt geht.
-const RECOVERY_RECIPIENT_SECRET_V1: [u8; 32] = [
-    0x2e, 0x63, 0xa8, 0x17, 0xf4, 0x5b, 0x90, 0x0c, 0xd9, 0x36, 0x71, 0xbe, 0x45, 0x8a, 0xe7, 0x12,
-    0x6d, 0xc3, 0x0f, 0x58, 0x9e, 0x24, 0xab, 0x77, 0x31, 0xf0, 0x4c, 0x85, 0xda, 0x69, 0x1b, 0xc6,
+/// Test — die Datei traegt nur den oeffentlichen Punkt, und mehr braucht die
+/// Kapselung nicht. Der Punkt wurde am 2026-09-05 EINMAL aus einem seither
+/// verworfenen Seed abgeleitet (`HpkeRecipientPrivateKey::from_bytes(..)
+/// .public_key()`) und steht seitdem als Literal hier; Abdruck und Archivbytes
+/// sind dieselben wie zuvor.
+const RECOVERY_RECIPIENT_PUBLIC_KEY_V1: [u8; 32] = [
+    0x4e, 0x4d, 0x21, 0x4c, 0x7b, 0x7b, 0x6a, 0xc8, 0x83, 0x68, 0x7a, 0x4b, 0xd5, 0xf6, 0x48, 0x4e,
+    0x09, 0xf9, 0xef, 0xd4, 0x28, 0xe5, 0x60, 0xcb, 0x6d, 0xec, 0x6a, 0xe6, 0xa2, 0x22, 0x6a, 0x16,
 ];
 
 /// Das Zertifikat des Recovery-Empfaengers.
@@ -218,15 +225,20 @@ pub fn reader_b() -> Reader {
     )
 }
 
+/// Der Recovery-Empfaenger als Planeintrag — allein aus dem oeffentlichen
+/// Punkt: der Abdruck ist derselbe, den `verify_support::key_thumbprint_of`
+/// ueber dem privaten Schluessel rechnet (`CanonicalPublicCoseKey::x25519`
+/// ueber den Punktbytes).
 fn recovery_recipient() -> PlannedRecipientV1 {
-    let private_key =
-        HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(RECOVERY_RECIPIENT_SECRET_V1))
-            .expect("der Recovery-Seed muss ein X25519-Schluessel sein");
+    let public_key = HpkeRecipientPublicKey::from_bytes(RECOVERY_RECIPIENT_PUBLIC_KEY_V1)
+        .expect("der Recovery-Punkt muss ein X25519-Schluessel sein");
     PlannedRecipientV1 {
-        key_thumbprint: verify_support::key_thumbprint_of(&private_key),
+        key_thumbprint: CanonicalPublicCoseKey::x25519(*public_key.as_bytes())
+            .expect("ein X25519-Punkt muss ein COSE-Schluessel sein")
+            .thumbprint(),
         certificate_hash: CertificateHash::try_from(&RECOVERY_RECIPIENT_CERTIFICATE_V1[..])
             .expect("32 Bytes sind ein Zertifikatshash"),
-        public_key: private_key.public_key(),
+        public_key,
         purpose: GrantPurposeV1::Recovery,
     }
 }

@@ -95,7 +95,7 @@
     },
     {
       "name": "refusal-leaves-the-cursor",
-      "brackets": "keiner der vier Abweisungsgruende — falscher Startkopf, fehlendes Objekt, Luecke, Fork — bewegt Zustand, und jeder traegt seinen EIGENEN Code statt eines Sammelcodes",
+      "brackets": "keiner der vier Abweisungsgruende — falscher Startkopf, fehlendes Objekt, Luecke, Fork — bewegt den CURSOR, und jeder traegt seinen EIGENEN Code statt eines Sammelcodes; der CACHE dagegen wird nicht geraeumt: accept_batch legt jedes hashkonsistente Objekt VOR classify ab und ReaderObjectCache kennt kein Entfernen, also bleibt nach dem abgewiesenen Fork der konkurrierende, gueltig signierte Eintrag liegen, und jeder ehrliche Wiederholversuch endet erneut in EA-READER-CHAIN-FORK, bis der Cache geraeumt ist (gemessen von tests/ea-system-tests/tests/e2e_reader_sync_interruptions.rs::every_retry_after_an_interruption_lands_idempotently_on_the_same_head)",
       "witness": "crates/ea-reader/tests/sync_attacks.rs::every_refusal_carries_its_own_code_and_leaves_the_cursor_where_it_was"
     }
   ],
