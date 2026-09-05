@@ -11,7 +11,20 @@ name = "einsatzarchiv"
 path = "src/main.rs"
 
 [dependencies]
-# Die gesamte Fachlogik. Dieses Paket traegt nur Argumentgrammatik,
+# Die Fachlogik des SECHSTEN Kommandos, und ausschliesslich sie:
+# `BootstrapCoordinator` fuehrt den Zwoelfschrittablauf aus `§12.1`
+# (`design.md`:1336-1349), `FileBootstrapStore` persistiert ihn, `AdminError`
+# traegt die stabilen Codes, die `organization.rs` auf die Exitcodetabelle
+# abbildet. Die Richtung ist dieselbe wie zu `ea-recovery` und ebenso
+# einseitig: `ea-admin` kennt weder dieses Paket noch den Begriff eines
+# Exitcodes — die normative Tabelle (`design.md`:1800-1815) ist eine Zusage des
+# PROZESSES und wohnt deshalb hier. `apps/cli` bleibt damit bei
+# Argumentgrammatik, Ausgabeform und process::exit; die Zeremonie selbst
+# entsteht Zeile fuer Zeile in `crates/ea-admin`. Das Kommando stammt aus dem
+# Umsetzungsplan der Stufe 5, Task 2 — die Spec-Grammatik
+# (`design.md`:1787-1793) fuehrt es nicht.
+ea-admin.workspace = true
+# Die gesamte uebrige Fachlogik. Dieses Paket traegt nur Argumentgrammatik,
 # Ausgabeform und process::exit.
 ea-recovery.workspace = true
 ea-types.workspace = true

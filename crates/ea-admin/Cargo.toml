@@ -30,11 +30,29 @@ ea-key-provider.workspace = true
 # Eine Zeremonie verlangt einen FRISCHEN Bedienernachweis mit genau dem Zweck
 # `ReauthPurpose::AdminRootCeremony`. Der Nachweistyp lebt dort.
 ea-operator.workspace = true
+# [`ea_schema::GenesisV1`] IST der Genesis-Koerper aus dem Nutzlastnachtrag
+# `:90-101`, samt eigener Pruefung und dem einen Kodierer
+# (`crates/ea-schema/src/encode.rs:462-478`). `crates/ea-admin/src/genesis.rs`
+# baut ihn deshalb NICHT nach — eine zweite Kodierung waere eine zweite
+# Wahrheit —, sondern nimmt den fertigen Datensatz entgegen und bindet ihn an
+# Sequenz, Kennungen und Registrierungskopf dieser Zeremonie. `ea-schema` haengt
+# selbst nur an `ea-cbor`, `ea-types`, `jiff`, `jiff-tzdb`, `minicbor` und
+# `unicode-normalization` (`crates/ea-schema/Cargo.toml:10-15`); der Graph
+# waechst dadurch nicht in Richtung Writer, Recovery, Chain oder Archiv.
+ea-schema.workspace = true
 # Der Beweiszustand `VerifiedAdminAuthorization` und der laufuebergreifende
 # Verbrauch `consume_admin_authorization`. `ea-trust` waechst durch diese Crate
 # um KEINE Abhaengigkeit; die Richtung zeigt ausschliesslich hierher.
 ea-trust.workspace = true
 ea-types.workspace = true
+# Schritt 1 erzeugt „zufaellige Organisations- und Ketten-ID" (`:1336`). Der
+# Baum kennt keinen gemeinsamen Zufallsport: `getrandom::fill` wird an 18
+# Stellen in acht Kisten DIREKT gerufen — `ea-audit`, `ea-crypto`, `ea-draft`,
+# `ea-operator`, `ea-reader`, `ea-reader-wasm`, `ea-sync-client`, `ea-writer` —,
+# und `CryptoRandomSource` (`crates/ea-crypto/src/hpke.rs:24`) ist crate-privat.
+# `SystemRandomSource` ruft dasselbe `getrandom::fill` wie jene Stellen; der
+# Port darueber existiert nur, damit ein Zeuge die Kennungen vorhersagen kann.
+getrandom.workspace = true
 
 [dev-dependencies]
 # Die Zeugen bauen eine ECHTE Registrierungslinie und waehlen einen ECHTEN

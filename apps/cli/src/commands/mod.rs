@@ -1,4 +1,4 @@
-//! Die fuenf Kommandopfade.
+//! Die sechs Kommandopfade.
 //!
 //! # Was hier NICHT stehen darf
 //!
@@ -18,10 +18,21 @@
 //! `ea_recovery::export_directory`, die ihrerseits ausschliesslich durch
 //! dieselbe Verifikationsfassade laufen. Auch hier ruft kein Kommandopfad
 //! `verify_archive`.
+//!
+//! # `organization init` geht durch KEINE von beiden
+//!
+//! Und das ist kein Sonderweg, sondern die Folge seines Gegenstands: es prueft
+//! keinen Bestand. Es gibt in diesem Lauf kein Archiv, ueber das ein Urteil zu
+//! bilden waere — es gibt eine Zeremonie, die beginnt oder fortgesetzt wird.
+//! Seine Fachlogik wohnt vollstaendig in `ea-admin`
+//! (`ea_admin::BootstrapCoordinator`), genau wie die der fuenf anderen in
+//! `ea-recovery`; `organization.rs` parst nicht, rechnet nicht und entscheidet
+//! keinen Schritt, sondern ruft, druckt und ordnet einen Exitcode zu.
 
 pub mod decrypt;
 pub mod export;
 pub mod list;
+pub mod organization;
 pub mod report;
 pub mod verify;
 
@@ -51,6 +62,9 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         } => decrypt::run(invocation, archive, key, output, now),
         Command::Report { archive, output } => report::run(invocation, archive, output, now),
         Command::Export { source, output } => export::run(invocation, source, output, now),
+        // OHNE `now`: dieser Pfad verifiziert nichts und datiert nichts. Die
+        // Begruendung steht an `organization::run`.
+        Command::OrganizationInit => organization::run(invocation),
     }
 }
 

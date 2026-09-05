@@ -57,8 +57,30 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod anchor_media;
+pub mod bootstrap;
+pub mod bootstrap_store;
+pub mod genesis;
+pub mod production_state;
+
 mod error;
 mod root_ceremony;
 
+pub use anchor_media::{
+    AnchorMedia, AnchorMediumId, MediaConfirmation, SecondChannelConfirmation,
+    confirm_final_anchor_fingerprint, confirm_on_media, confirm_pre_anchor_fingerprint,
+    verify_anchor_transition,
+};
+pub use bootstrap::{
+    AdminBootstrapPairV1, BackedUpKeyClass, BootstrapCoordinator, BootstrapStateV1, BootstrapStep,
+    BootstrapStore, BootstrapTranscriptV1, CeremonyRandomSource, ComponentBindingV1,
+    KeyBackupRecordV1, OuterKeyRecordV1, RootKeyMaterialV1, SystemRandomSource,
+};
+pub use bootstrap_store::FileBootstrapStore;
 pub use error::AdminError;
+pub use genesis::{GenesisBinding, GenesisEnvelopeV1, bind_genesis};
+pub use production_state::{
+    FreshMachineRecoveryProof, ProductionState, RecoveryTestObservation, machine_fingerprint,
+    verify_fresh_machine_recovery_test,
+};
 pub use root_ceremony::RootCeremonyService;

@@ -40,12 +40,22 @@ use std::{
     },
 };
 
-use ea_admin::RootCeremonyService;
+use ea_admin::{
+    AdminBootstrapPairV1, AdminError, AnchorMedia, AnchorMediumId, BackedUpKeyClass,
+    BootstrapCoordinator, BootstrapStateV1, BootstrapStep, BootstrapStore, BootstrapTranscriptV1,
+    CeremonyRandomSource, ComponentBindingV1, GenesisEnvelopeV1, KeyBackupRecordV1,
+    OuterKeyRecordV1, ProductionState, RecoveryTestObservation, RootCeremonyService,
+    RootKeyMaterialV1, bind_genesis, confirm_pre_anchor_fingerprint, machine_fingerprint,
+    verify_fresh_machine_recovery_test,
+};
 use ea_audit::{
     AuditError, LocalAuditRepository, LocalAuditService, SignedLocalAuditEvent,
     SignedLocalAuditService,
 };
-use ea_crypto::{CanonicalPublicCoseKey, ContentType, ProtectedHeader, SecretBytes, SecretVec};
+use ea_crypto::{
+    CanonicalPublicCoseKey, ContentType, ProtectedHeader, SecretBytes, SecretVec,
+    bootstrap_anchor_hash,
+};
 use ea_format::{CertificateKindV1, KeyProtectionProfileV1, OperatorRoleV1, TrustPayloadV1};
 use ea_key_provider::{
     CoseSign1Bytes, KeyError, KeyHandle, KeyProvider, KeystoreProvider, SecretPurpose,
@@ -54,17 +64,19 @@ use ea_operator::{
     BoundOperator, OperatorAuthenticator, OperatorError, OperatorSessionProof, OsAccountProvider,
     ReauthPurpose,
 };
+use ea_schema::{CommonHeaderV1, GenesisV1, NativeSourceV1, OperatorSnapshotV1};
 use ea_time::TrustedTimeState;
 use ea_trust::{
     AdminAuthorizationReplayDimension, AdminAuthorizationReplayKey, ClockReleaseReplayKey,
     IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit,
     RegistrySelectionOutcome, SelectedRegistryHead, StateStoreError, TrustStateKey,
-    TrustStateStore, VerifiedAdminAuthorizationIntent, VerifiedTrust, prepare_local_time,
-    select_registry_head, verify_intended_trust_target, verify_registry_candidate,
+    TrustStateStore, VerifiedAdminAuthorizationIntent, VerifiedTrust, decode_trust_anchor,
+    prepare_local_time, select_registry_head, verify_intended_trust_target,
+    verify_registry_candidate,
 };
 use ea_types::{
-    CertificateHash, ChainSequence, DeviceId, EventId, Hash32, KeyThumbprint, ObjectHash,
-    OrganizationId, UnixMillis,
+    CertificateHash, ChainId, ChainSequence, DeviceId, EntryHash, EventId, Hash32, KeyThumbprint,
+    ObjectHash, OperatorSubjectId, OrganizationId, RecordId, RegistryVersion, UnixMillis,
 };
 use ed25519_dalek::{Signer as _, SigningKey};
 
@@ -1020,4 +1032,1330 @@ pub fn ceremony_service_under_root<'a>(
         audit.service(),
         ceremony.binding_object_hash,
     )
+}
+
+// ===========================================================================
+// Die Kulisse des Zwoelfschrittablaufs (DRK-270)
+// ===========================================================================
+
+/// Das erste schreibgeschuetzte Recovery-Medium.
+pub const FIRST_MEDIUM: AnchorMediumId = AnchorMediumId::new([0x01; 16]);
+/// Das zweite — `:1780` verlangt „mindestens zwei".
+pub const SECOND_MEDIUM: AnchorMediumId = AnchorMediumId::new([0x02; 16]);
+/// Zwei getrennte Sicherungsmedien fuer Schritt 7.
+pub const BACKUP_MEDIUM_A: AnchorMediumId = AnchorMediumId::new([0x0a; 16]);
+/// Das zweite Sicherungsmedium.
+pub const BACKUP_MEDIUM_B: AnchorMediumId = AnchorMediumId::new([0x0b; 16]);
+
+/// Der Genesis-Eintragshash der Kulisse.
+///
+/// Er kommt vom Wirt: `ea_crypto::entry_hash` verlangt eine echte
+/// Writer-Finalisierung, und die lebt in `ea-writer`.
+const GENESIS_ENTRY_HASH: [u8; 32] = [0x44; 32];
+
+/// Die Registrierungsfassung, die der Genesis der Kulisse bindet (`:1145`).
+const GENESIS_REGISTRY_VERSION: u64 = 7;
+
+/// Der Rechner, auf dem die Zeremonie der Kulisse laeuft.
+///
+/// Ueber `ea_admin::machine_fingerprint` und nicht als ausgedachter Hash: der
+/// Vergleich in Schritt 12 misst genau diese Bildungsvorschrift.
+#[must_use]
+pub fn ceremony_machine() -> Hash32 {
+    machine_fingerprint(b"ea-admin-fixture-ceremony-machine")
+}
+
+/// Der FRISCHE Rechner aus Schritt 12 — ein anderer.
+#[must_use]
+pub fn fresh_machine() -> Hash32 {
+    machine_fingerprint(b"ea-admin-fixture-fresh-machine")
+}
+
+fn hash32_of(byte: u8) -> Hash32 {
+    Hash32::try_from(&[byte; 32][..]).expect("ein Hash32 ist 32 Byte")
+}
+
+fn thumbprint_of(byte: u8) -> KeyThumbprint {
+    KeyThumbprint::from(hash32_of(byte))
+}
+
+fn object_hash_of(byte: u8) -> ObjectHash {
+    ObjectHash::try_from(&[byte; 32][..]).expect("ein ObjectHash ist 32 Byte")
+}
+
+fn outer_handle(byte: u8) -> KeyHandle {
+    KeyHandle::new(
+        KeystoreProvider::InMemory,
+        trust_support::hash32(byte),
+        SecretPurpose::OperatorInstanceKey,
+    )
+}
+
+/// Ein Stapel benannter Medien im Speicher.
+///
+/// Er liest zurueck, was er geschrieben hat — ausser fuer die Kennungen in
+/// `corrupting`, die beim Lesen andere Bytes liefern.
+#[derive(Default)]
+pub struct MediaStack {
+    written: BTreeMap<AnchorMediumId, Vec<u8>>,
+    corrupting: Vec<AnchorMediumId>,
+}
+
+impl MediaStack {
+    /// Ein Stapel, auf dem die genannten Medien beim Lesen luegen.
+    #[must_use]
+    pub fn corrupting(ids: &[AnchorMediumId]) -> Self {
+        Self {
+            written: BTreeMap::new(),
+            corrupting: ids.to_vec(),
+        }
+    }
+
+    /// Ab jetzt luegt `medium` beim Lesen.
+    ///
+    /// Der Datentraeger, der die Vorstufe noch bytegleich zurueckgab und die
+    /// finalen Ankerbytes nicht mehr — ein alterndes Medium sieht genau so
+    /// aus.
+    pub fn start_corrupting(&mut self, medium: AnchorMediumId) {
+        self.corrupting.push(medium);
+    }
+}
+
+impl AnchorMedia for MediaStack {
+    fn write_exact_bytes(
+        &mut self,
+        medium: AnchorMediumId,
+        exact_bytes: &[u8],
+    ) -> Result<(), AdminError> {
+        self.written.insert(medium, exact_bytes.to_vec());
+        Ok(())
+    }
+
+    fn read_exact_bytes(&self, medium: AnchorMediumId) -> Result<Vec<u8>, AdminError> {
+        let stored = self
+            .written
+            .get(&medium)
+            .cloned()
+            .ok_or(AdminError::MediaUnavailable)?;
+        if self.corrupting.contains(&medium) {
+            let mut corrupted = stored;
+            corrupted[0] ^= 0xff;
+            return Ok(corrupted);
+        }
+        Ok(stored)
+    }
+}
+
+/// Die Zufallsquelle DER Kulisse.
+///
+/// Sie zieht als erstes die Organisations-ID der `ea-trust`-Fixture und danach
+/// vorhersagbare, aber andere Bytes. Zwei Gruende, und sie ziehen in
+/// verschiedene Richtungen:
+///
+/// 1. **Dieselbe Organisation.** Schritt 10 laeuft gegen die ECHTE
+///    Registrierungslinie jener Fixture, und ein Ziel, dessen Autorisierung
+///    eine ANDERE Organisation nennt als die Zeremonie, ist keines dieser
+///    Zeremonie. Eine Kulisse, die beides auseinanderlaufen liesse, koennte
+///    die Bindung gar nicht messen.
+/// 2. **Eine andere Kette.** Die Vorstufe dieser Zeremonie darf NICHT
+///    bytegleich mit der Vorstufe der Fixture werden — sonst waere der
+///    „fremde" Anker aus
+///    `a_self_consistent_foreign_archive_fails_at_this_ceremonys_anchor`
+///    derselbe Anker, und der teuerste Zeuge dieser Datei maesse nichts. Die
+///    Ketten-ID kommt deshalb aus der Reihe.
+///
+/// Der spaetere Lauf — [`BootstrapCoordinator::restart_with_new_ids`] — zieht
+/// weiter und bekommt damit NEUE Kennungen, wie `:1349` es verlangt.
+#[derive(Default)]
+pub struct CeremonyRandom {
+    drawn: usize,
+    spare: u8,
+}
+
+impl CeremonyRandomSource for CeremonyRandom {
+    fn fill_random(&mut self, destination: &mut [u8]) -> Result<(), AdminError> {
+        self.drawn += 1;
+        match (self.drawn, destination.len()) {
+            (1, 16) => destination.copy_from_slice(fixture_anchor().organization_id().as_bytes()),
+            _ => {
+                self.spare = self.spare.wrapping_add(1);
+                destination.fill(self.spare);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Eine VORHERSAGBARE Zufallsquelle.
+///
+/// Jeder Aufruf fuellt mit einem anderen Byte. Damit unterscheiden sich
+/// Organisations- und Ketten-ID voneinander UND von denen jeder spaeteren
+/// Zeremonie — genau das, was `:1349` fuer den Neuanfang verlangt und was ein
+/// Zeuge messen koennen muss.
+pub struct SequentialRandom {
+    counter: u8,
+}
+
+impl Default for SequentialRandom {
+    fn default() -> Self {
+        Self { counter: 0x20 }
+    }
+}
+
+impl CeremonyRandomSource for SequentialRandom {
+    fn fill_random(&mut self, destination: &mut [u8]) -> Result<(), AdminError> {
+        self.counter = self.counter.wrapping_add(1);
+        destination.fill(self.counter);
+        Ok(())
+    }
+}
+
+/// Die Ablage des Zeremoniezustands im Speicher.
+///
+/// Sie haelt BEIDES: den getippten Zustand fuer [`BootstrapStore::load`] und
+/// das Byteabbild, das [`BootstrapStateV1::persisted_image`] herausgibt. Das
+/// Abbild ist das, was ein Zeuge nach Schluesselmaterial durchsucht — der
+/// Vertrag des Ports lautet, dass genau dieses Abbild persistiert wird.
+#[derive(Default)]
+pub struct MemoryBootstrapStore {
+    state: Option<BootstrapStateV1>,
+    image: Vec<u8>,
+    failing: bool,
+}
+
+impl MemoryBootstrapStore {
+    /// Das zuletzt geschriebene Byteabbild.
+    #[must_use]
+    pub fn image(&self) -> &[u8] {
+        &self.image
+    }
+
+    /// Ab jetzt nimmt diese Ablage nichts mehr an.
+    ///
+    /// Kein konstruierter Sonderfall: ein voller Datentraeger, ein
+    /// ausgehaengtes Verzeichnis oder ein entzogenes Recht sehen fuer den
+    /// Koordinator genau so aus.
+    pub const fn start_failing(&mut self) {
+        self.failing = true;
+    }
+}
+
+impl BootstrapStore for MemoryBootstrapStore {
+    fn load(&self) -> Result<Option<BootstrapStateV1>, AdminError> {
+        Ok(self.state.clone())
+    }
+
+    fn store(&mut self, state: &BootstrapStateV1) -> Result<(), AdminError> {
+        if self.failing {
+            return Err(AdminError::BootstrapStoreUnavailable);
+        }
+        self.image = state.persisted_image();
+        self.state = Some(state.clone());
+        Ok(())
+    }
+}
+
+/// Der Anker der `ea-trust`-Fixture — eine ECHTE Linie, kein Bytehaufen.
+fn fixture_anchor() -> ea_trust::TrustAnchorV1 {
+    decode_trust_anchor(RegistryLineBuilder::new().exact_anchor_bytes())
+        .expect("die Fixture traegt einen gueltigen Anker")
+}
+
+/// Das oeffentliche Wurzelmaterial, wie der Wirt es der Zeremonie gibt.
+///
+/// Der Griff ist der des [`FixtureKeyProvider`]; der oeffentliche Schluessel,
+/// sein Abdruck und der Urkundenhash kommen aus der Linie, damit
+/// `encode_pre_anchor_v1` seine RFC-9679-Pruefung besteht.
+#[must_use]
+pub fn fixture_root_material() -> RootKeyMaterialV1 {
+    let anchor = fixture_anchor();
+    RootKeyMaterialV1 {
+        signing_handle: FixtureKeyProvider::root().handle(),
+        exact_public_cose_key: anchor.root_public_cose_key_bytes().to_vec(),
+        key_thumbprint: anchor.root_key_thumbprint(),
+        certificate_object_hash: anchor.root_certificate_object_hash(),
+    }
+}
+
+/// Dasselbe Wurzelmaterial mit einer ANDEREN Urkunde.
+///
+/// Der Griff bleibt der des Fixture-Providers; geaendert ist genau das Feld,
+/// das in die Vorstufe eingeht.
+#[must_use]
+pub fn foreign_root_material() -> RootKeyMaterialV1 {
+    RootKeyMaterialV1 {
+        certificate_object_hash: object_hash_of(0xfd),
+        ..fixture_root_material()
+    }
+}
+
+/// Die zwei ankergepinnten Admin-Paare der Fixture.
+#[must_use]
+pub fn bootstrap_admin_pairs() -> Vec<AdminBootstrapPairV1> {
+    let anchor = fixture_anchor();
+    anchor
+        .initial_admin_certificate_object_hashes()
+        .iter()
+        .zip(anchor.initial_admin_operator_binding_object_hashes())
+        .map(|(certificate, binding)| AdminBootstrapPairV1 {
+            certificate_object_hash: *certificate,
+            operator_binding_object_hash: *binding,
+        })
+        .collect()
+}
+
+/// Dieselben Paare mit EINER geaenderten Bindung.
+///
+/// Der GROESSTE Wert, damit die Liste sortiert bleibt: die Aenderung soll an
+/// der Versiegelung scheitern und nicht schon an der Form.
+#[must_use]
+pub fn changed_admin_pairs() -> Vec<AdminBootstrapPairV1> {
+    let mut pairs = bootstrap_admin_pairs();
+    let last = pairs.len() - 1;
+    pairs[last].operator_binding_object_hash = object_hash_of(0xfe);
+    pairs
+}
+
+/// Der volle Fingerprint einer Bytefolge, wie ihn der zweite Kanal meldet.
+///
+/// Ueber `ea_crypto::bootstrap_anchor_hash` und nicht nachgebaut: es ist
+/// derselbe Wert, den `confirm_on_media` rechnet.
+#[must_use]
+pub fn fingerprint_of_bytes(exact_bytes: &[u8]) -> Hash32 {
+    bootstrap_anchor_hash(exact_bytes)
+}
+
+/// Der volle Fingerprint des FINALEN Ankers.
+///
+/// `:1774-1777` rechnet ihn ueber eine ANDERE Domaene als den der Vorstufe:
+/// `trustAnchorHash` ueber `EINSATZARCHIV-TRUST-ANCHOR-v1`. Der Wert, den ein
+/// Mensch in Schritt 11 ueber den zweiten Kanal vorliest, ist dieser.
+#[must_use]
+pub fn final_fingerprint_of_bytes(exact_bytes: &[u8]) -> Hash32 {
+    ea_crypto::trust_anchor_hash(exact_bytes)
+}
+
+/// Ein aeusserer Schluessel mit AUSDRUECKLICH genanntem Abdruck.
+#[must_use]
+pub fn keyed_record(handle_byte: u8, key_thumbprint: KeyThumbprint) -> OuterKeyRecordV1 {
+    OuterKeyRecordV1 {
+        handle: outer_handle(handle_byte),
+        key_thumbprint,
+    }
+}
+
+/// Ein Abdruck, der zu keinem Schluessel dieser Zeremonie gehoert.
+#[must_use]
+pub fn unrelated_thumbprint() -> KeyThumbprint {
+    thumbprint_of(0x51)
+}
+
+/// Paarmengen, die die Eins-zu-eins-Paarung aus `:1780` nicht tragen koennen.
+///
+/// Drei Formen, und alle drei sind an den Objekthashes allein erkennbar: zwei
+/// Paare teilen sich ein Zertifikat, zwei Paare teilen sich eine Bindung, oder
+/// ein Paar nennt zweimal denselben Hash.
+#[must_use]
+pub fn admin_pairs_sharing_a_hash() -> Vec<Vec<AdminBootstrapPairV1>> {
+    let shared_certificate = {
+        let mut pairs = bootstrap_admin_pairs();
+        pairs[1].certificate_object_hash = pairs[0].certificate_object_hash;
+        pairs
+    };
+    let shared_binding = {
+        let mut pairs = bootstrap_admin_pairs();
+        pairs[1].operator_binding_object_hash = pairs[0].operator_binding_object_hash;
+        pairs
+    };
+    let certificate_is_its_own_binding = {
+        let mut pairs = bootstrap_admin_pairs();
+        pairs[0].operator_binding_object_hash = pairs[0].certificate_object_hash;
+        pairs
+    };
+    vec![
+        shared_certificate,
+        shared_binding,
+        certificate_is_its_own_binding,
+    ]
+}
+
+/// Der Recovery-KEM-Schluessel aus Schritt 5 — Griff und Abdruck, sonst
+/// nichts.
+#[must_use]
+pub fn recovery_kem_record() -> OuterKeyRecordV1 {
+    OuterKeyRecordV1 {
+        handle: outer_handle(0x31),
+        key_thumbprint: thumbprint_of(0x31),
+    }
+}
+
+/// Der HGA-Signaturschluessel aus Schritt 5.
+#[must_use]
+pub fn hga_record() -> OuterKeyRecordV1 {
+    OuterKeyRecordV1 {
+        handle: outer_handle(0x32),
+        key_thumbprint: thumbprint_of(0x32),
+    }
+}
+
+/// Jedes ECHTE Geheimnis dieser Kulisse.
+///
+/// Es sind wirkliche private Ed25519-Schluessel und nicht ausgedachte Muster;
+/// ein Zeuge, der nach Mustern suchte, die nirgends vorkommen, bewiese nichts.
+#[must_use]
+pub fn every_fixture_secret() -> Vec<Vec<u8>> {
+    vec![
+        trust_support::root_signing_secret().to_vec(),
+        INSTANCE_SECRET.to_vec(),
+        FOREIGN_ROOT_SECRET.to_vec(),
+    ]
+}
+
+/// Baut die finalen Ankerbytes AUS einer Vorstufe (`:1346`, `:1750-1763`).
+///
+/// Finale Domaene, `bootstrap-anchor-hash` und `genesis-entry-hash` kommen
+/// hinzu, alles andere wird bytegleich uebernommen.
+#[must_use]
+pub fn final_anchor_bytes(pre: &ea_trust::PreAnchorV1, genesis_entry_hash: &[u8; 32]) -> Vec<u8> {
+    let certificates = pre.initial_admin_certificate_object_hashes();
+    let bindings = pre.initial_admin_operator_binding_object_hashes();
+    let mut bytes = Vec::new();
+    let mut encoder = minicbor::Encoder::new(&mut bytes);
+    encoder
+        .array(12)
+        .and_then(|encoder| encoder.str("EINSATZARCHIV-TRUST-ANCHOR-v1"))
+        .and_then(|encoder| encoder.u64(1))
+        .and_then(|encoder| encoder.bytes(pre.bootstrap_anchor_hash().as_bytes()))
+        .and_then(|encoder| encoder.bytes(pre.organization_id().as_bytes()))
+        .and_then(|encoder| encoder.bytes(pre.chain_id().as_bytes()))
+        .and_then(|encoder| encoder.bytes(pre.root_public_cose_key_bytes()))
+        .and_then(|encoder| encoder.bytes(pre.root_key_thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.bytes(pre.root_certificate_object_hash().as_bytes()))
+        .and_then(|encoder| {
+            encoder.array(u64::try_from(certificates.len()).expect("zwei Paare passen in u64"))
+        })
+        .expect("der Zeuge kodiert in einen Vec");
+    for hash in certificates {
+        encoder.bytes(hash.as_bytes()).expect("Hash kodiert");
+    }
+    encoder
+        .array(u64::try_from(bindings.len()).expect("zwei Paare passen in u64"))
+        .expect("Bindungsliste kodiert");
+    for hash in bindings {
+        encoder.bytes(hash.as_bytes()).expect("Hash kodiert");
+    }
+    encoder
+        .bytes(genesis_entry_hash)
+        .and_then(|encoder| encoder.array(0))
+        .expect("Genesis und leere kritische Erweiterungen kodieren");
+    bytes
+}
+
+/// Der Genesis-Datensatz der Kulisse — gebaut von `ea-schema`, nicht hier.
+fn genesis_record(organization_id: OrganizationId, chain_id: ChainId) -> GenesisV1 {
+    let mut record_id_bytes = [0x51_u8; 16];
+    record_id_bytes[6] = 0x71;
+    record_id_bytes[8] = 0x91;
+    GenesisV1::new(
+        CommonHeaderV1::new(
+            RecordId::try_from(record_id_bytes.as_slice()).expect("eine UUIDv7 der Kulisse"),
+            UnixMillis::new(1_700_000_000_000),
+            "Europe/Berlin",
+            OperatorSnapshotV1::new(
+                organization_id,
+                OperatorSubjectId::try_from(&[0x20; 16][..]).expect("16 Byte"),
+                "Erika Beispiel",
+                "Einsatzleitung",
+                [0x30; 32],
+                object_hash_of(0x40),
+            )
+            .expect("der Bedienerabzug der Kulisse ist gueltig"),
+            NativeSourceV1::new("writer-native", 1).expect("die Quelle der Kulisse ist gueltig"),
+            RegistryVersion::new(GENESIS_REGISTRY_VERSION),
+        )
+        .expect("der Kopf der Kulisse ist gueltig"),
+        organization_id,
+        chain_id,
+        object_hash_of(0x12),
+        1,
+        object_hash_of(0x13),
+    )
+    .expect("der Genesis der Kulisse ist gueltig")
+}
+
+/// Die Kulisse des Zwoelfschrittablaufs.
+///
+/// Sie haelt Ablage, Zufallsquelle und Medien und baut je Bewegung einen
+/// frischen [`BootstrapCoordinator`] aus der Ablage — genau so, wie ein Wirt
+/// nach einem Neustart weitermacht.
+pub struct BootstrapHarness {
+    store: MemoryBootstrapStore,
+    random: CeremonyRandom,
+    media: MediaStack,
+}
+
+impl Default for BootstrapHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BootstrapHarness {
+    /// Eine leere Kulisse; die Zeremonie beginnt beim ersten Schritt.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            store: MemoryBootstrapStore::default(),
+            random: CeremonyRandom::default(),
+            media: MediaStack::default(),
+        }
+    }
+
+    /// Dieselbe Kulisse, aber mit Kennungen, die NICHT die der
+    /// Registrierungslinie sind.
+    ///
+    /// Genau der Fall, den Schritt 10 abweisen muss: eine
+    /// Administrationsautorisierung, die eine andere Organisation nennt als
+    /// die, deren Zeremonie hier laeuft.
+    #[must_use]
+    pub fn with_unrelated_identifiers() -> Self {
+        Self {
+            store: MemoryBootstrapStore::default(),
+            random: CeremonyRandom {
+                // Die erste Ziehung uebersprungen, und ein Startwert, der die
+                // Organisations-ID der Fixture (`[0x21; 16]`) sicher
+                // verfehlt.
+                drawn: 1,
+                spare: 0x8f,
+            },
+            media: MediaStack::default(),
+        }
+    }
+
+    /// Ab jetzt liest das zweite Medium andere Bytes zurueck.
+    pub fn corrupt_second_medium(&mut self) {
+        self.media.start_corrupting(SECOND_MEDIUM);
+    }
+
+    /// Schritte 1 bis 10, und die finalen Ankerbytes, die Schritt 11 annehmen
+    /// wuerde.
+    ///
+    /// # Errors
+    /// Jeden Befund der Schritte 1 bis 10.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Kulisse ihre eigene Vorstufe nicht dekodiert.
+    pub fn prepare_final_anchor(&mut self) -> Result<Vec<u8>, AdminError> {
+        self.complete_through_root_signed_targets()?;
+        let pre_bytes = self.sealed_pre_anchor_bytes();
+        let pre = ea_trust::decode_pre_anchor(&pre_bytes).expect("die Vorstufe ist gueltig");
+        Ok(final_anchor_bytes(&pre, &GENESIS_ENTRY_HASH))
+    }
+
+    /// Schritt 5 mit AUSDRUECKLICH genannten Schluesseln.
+    ///
+    /// # Errors
+    /// Jeden Befund des fuenften Schrittes.
+    pub fn generate_recovery_and_hga_keys_from(
+        &mut self,
+        recovery_kem: OuterKeyRecordV1,
+        hga_signing: OuterKeyRecordV1,
+    ) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.generate_recovery_and_hga_keys(recovery_kem, hga_signing)
+    }
+
+    fn state(&self) -> BootstrapStateV1 {
+        self.store
+            .load()
+            .expect("die Ablage der Kulisse antwortet")
+            .expect("die Kulisse hat begonnen")
+    }
+
+    /// Der zuletzt abgeschlossene Schritt.
+    #[must_use]
+    pub fn step(&self) -> BootstrapStep {
+        self.state().step()
+    }
+
+    /// Der Freigabezustand.
+    #[must_use]
+    pub fn production_state(&self) -> ProductionState {
+        self.state().production_state()
+    }
+
+    /// Organisations- und Ketten-ID der laufenden Zeremonie.
+    #[must_use]
+    pub fn current_ids(&self) -> (OrganizationId, ChainId) {
+        let state = self.state();
+        (state.organization_id(), state.chain_id())
+    }
+
+    /// Das persistierte Byteabbild.
+    #[must_use]
+    pub fn persisted_image(&self) -> Vec<u8> {
+        self.store.image().to_vec()
+    }
+
+    /// Die versiegelten Vorstufenbytes.
+    #[must_use]
+    pub fn sealed_pre_anchor_bytes(&self) -> Vec<u8> {
+        self.state()
+            .exact_pre_anchor_bytes()
+            .expect("Schritt 3 hat die Vorstufe gebaut")
+            .to_vec()
+    }
+
+    /// Das Wurzel-signierte Transkript.
+    #[must_use]
+    pub fn transcript(&self) -> BootstrapTranscriptV1 {
+        self.state()
+            .transcript()
+            .expect("Schritt 11 hat das Transkript gebildet")
+            .clone()
+    }
+
+    /// Schritte 1 bis 4: bis zur VERSIEGELTEN Vorstufe.
+    ///
+    /// # Errors
+    /// Jeder Befund der Schritte 1 bis 4.
+    pub fn complete_through_pre_anchor_seal(&mut self) -> Result<(), AdminError> {
+        let mut coordinator = BootstrapCoordinator::resume_or_begin(
+            &mut self.store,
+            &mut self.random,
+            Some(ceremony_machine()),
+        )?;
+        coordinator.generate_offline_root(fixture_root_material())?;
+        let fingerprint = coordinator.create_admin_pairs(&bootstrap_admin_pairs())?;
+        let confirmation = confirm_pre_anchor_fingerprint(
+            coordinator
+                .pre_anchor()
+                .expect("Schritt 3 baut die Vorstufe"),
+            fingerprint,
+        )?;
+        coordinator.pin_pre_anchor_on_media(
+            &mut self.media,
+            &[FIRST_MEDIUM, SECOND_MEDIUM],
+            confirmation,
+        )
+    }
+
+    /// Genau EINEN Schritt gegen die laufende Zeremonie, mit tauglichen
+    /// Argumenten.
+    ///
+    /// # Errors
+    /// Den Befund dieses Schrittes.
+    pub fn invoke(&mut self, step: BootstrapStep) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        invoke_step(&mut coordinator, step)
+    }
+
+    /// Schritt 5 mit den Schluesseln der Kulisse.
+    ///
+    /// # Errors
+    /// Jeden Befund des fuenften Schrittes.
+    pub fn generate_recovery_and_hga_keys(&mut self) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.generate_recovery_and_hga_keys(recovery_kem_record(), hga_record())
+    }
+
+    /// Schritt 6 mit AUSDRUECKLICH genannten Approvern.
+    ///
+    /// # Errors
+    /// Jeden Befund des sechsten Schrittes.
+    pub fn enroll_key_approvers(
+        &mut self,
+        approvers: &[OuterKeyRecordV1],
+    ) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.enroll_key_approvers(approvers)
+    }
+
+    /// Schritt 7 mit AUSDRUECKLICH genannten Sicherungen.
+    ///
+    /// # Errors
+    /// Jeden Befund des siebten Schrittes.
+    pub fn verify_key_backups(&mut self, backups: &[KeyBackupRecordV1]) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.verify_key_backups(backups)
+    }
+
+    /// Schritt 8 mit AUSDRUECKLICH genannten Komponentenpaaren.
+    ///
+    /// # Errors
+    /// Jeden Befund des achten Schrittes.
+    pub fn provision_component_keys(
+        &mut self,
+        components: &[ComponentBindingV1],
+    ) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.provision_component_keys(components)
+    }
+
+    /// Schritte 1 bis 6.
+    ///
+    /// # Errors
+    /// Jeden Befund der Schritte 1 bis 6.
+    pub fn complete_through_key_approvers(&mut self) -> Result<(), AdminError> {
+        self.complete_through_pre_anchor_seal()?;
+        self.generate_recovery_and_hga_keys()?;
+        self.enroll_key_approvers(&approver_records())
+    }
+
+    /// Schritte 1 bis 7.
+    ///
+    /// # Errors
+    /// Jeden Befund der Schritte 1 bis 7.
+    pub fn complete_through_key_backups(&mut self) -> Result<(), AdminError> {
+        self.complete_through_key_approvers()?;
+        self.verify_key_backups(&ceremony_backups())
+    }
+
+    /// Der Neuanfang mit einer Quelle, die die ALTEN Kennungen liefert.
+    ///
+    /// # Errors
+    /// `EA-LOCAL-CRYPTO-RNG`, weil die geforderte Neuheit nicht erreicht ist.
+    pub fn restart_with_repeating_random(&mut self) -> Result<(), AdminError> {
+        BootstrapCoordinator::restart_with_new_ids(
+            &mut self.store,
+            &mut RepeatingRandom,
+            Some(ceremony_machine()),
+        )?;
+        Ok(())
+    }
+
+    /// Schritte 1 bis 10: bis zum ersten Wurzel-signierten Bootstrap-Ziel.
+    ///
+    /// Schritt 10 laeuft ueber den ECHTEN
+    /// [`RootCeremonyService::publish_authorized_target`] gegen eine echte
+    /// Registrierungslinie; der Koordinator signiert nichts selbst.
+    ///
+    /// # Errors
+    /// Jeder Befund der Schritte 1 bis 10.
+    pub fn complete_through_root_signed_targets(&mut self) -> Result<(), AdminError> {
+        self.complete_through_pre_anchor_seal()?;
+
+        let ceremony = ceremony_line();
+        let head = selected_head(&ceremony.line);
+        let intent = ceremony.intent(&head);
+        let provider = FixtureKeyProvider::root();
+        let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+        let service = ceremony_service(&head, &provider, &audit, &ceremony);
+        let proof = ceremony_proof(&ceremony, &head, ReauthPurpose::AdminRootCeremony);
+        let table = Arc::new(Mutex::new(ReplayTable::default()));
+        let mut trust_store = PersistentStore::open(&table);
+        let authorization = ceremony.authorization_bytes().to_vec();
+
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.generate_recovery_and_hga_keys(recovery_kem_record(), hga_record())?;
+        coordinator.enroll_key_approvers(&approver_records())?;
+        coordinator.verify_key_backups(&ceremony_backups())?;
+        coordinator.provision_component_keys(&component_bindings())?;
+        let pre_bytes = coordinator
+            .state()
+            .exact_pre_anchor_bytes()
+            .expect("die Vorstufe steht")
+            .to_vec();
+        let pre = ea_trust::decode_pre_anchor(&pre_bytes).expect("die Vorstufe ist gueltig");
+        let confirmation = confirm_pre_anchor_fingerprint(&pre, pre.bootstrap_anchor_hash())?;
+        coordinator.compare_fingerprints(confirmation)?;
+        coordinator.root_sign_bootstrap_target(
+            &service,
+            &intent,
+            ceremony.target_payload(),
+            &authorization,
+            &mut trust_store,
+            &proof,
+        )?;
+        Ok(())
+    }
+
+    /// Schritte 1 bis 11: bis zu Genesis und finalem Anker.
+    ///
+    /// # Errors
+    /// Jeder Befund der Schritte 1 bis 11.
+    pub fn complete_through_genesis(&mut self) -> Result<(), AdminError> {
+        let anchor_bytes = self.prepare_final_anchor()?;
+        self.adopt_final_anchor(&anchor_bytes)
+    }
+
+    /// Schritt 11 mit AUSDRUECKLICH genannten finalen Ankerbytes.
+    ///
+    /// # Errors
+    /// Jeder Befund des elften Schrittes — insbesondere
+    /// `EA-ANCHOR-PRE-FIELD-CHANGED` fuer einen fremden Anker.
+    pub fn adopt_final_anchor(&mut self, exact_bytes: &[u8]) -> Result<(), AdminError> {
+        self.adopt_final_anchor_on(
+            exact_bytes,
+            &[FIRST_MEDIUM, SECOND_MEDIUM],
+            final_fingerprint_of_bytes(exact_bytes),
+        )
+    }
+
+    /// Schritt 11, aber unter einem AUSDRUECKLICH genannten Schluesselport.
+    ///
+    /// # Errors
+    /// Jeden Befund des elften Schrittes.
+    pub fn adopt_final_anchor_signed_by(
+        &mut self,
+        exact_bytes: &[u8],
+        provider: &FixtureKeyProvider,
+    ) -> Result<(), AdminError> {
+        self.adopt_final_anchor_with(
+            exact_bytes,
+            &[FIRST_MEDIUM, SECOND_MEDIUM],
+            final_fingerprint_of_bytes(exact_bytes),
+            provider,
+        )
+    }
+
+    /// Schritt 11 mit AUSDRUECKLICH genannten Medien und einem ausdruecklich
+    /// genannten, ueber den zweiten Kanal zurueckgemeldeten Fingerprint.
+    ///
+    /// # Errors
+    /// Jeden Befund des elften Schrittes.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Kulisse ihren eigenen Genesis nicht bindet.
+    pub fn adopt_final_anchor_on(
+        &mut self,
+        exact_bytes: &[u8],
+        media_ids: &[AnchorMediumId],
+        reported_fingerprint: Hash32,
+    ) -> Result<(), AdminError> {
+        self.adopt_final_anchor_with(
+            exact_bytes,
+            media_ids,
+            reported_fingerprint,
+            &FixtureKeyProvider::root(),
+        )
+    }
+
+    /// Schritt 11 mit Medien, Fingerprint UND Schluesselport aus der Hand des
+    /// Zeugen.
+    ///
+    /// # Errors
+    /// Jeden Befund des elften Schrittes.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Kulisse ihren eigenen Genesis nicht bindet.
+    pub fn adopt_final_anchor_with(
+        &mut self,
+        exact_bytes: &[u8],
+        media_ids: &[AnchorMediumId],
+        reported_fingerprint: Hash32,
+        provider: &FixtureKeyProvider,
+    ) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        let organization_id = coordinator.organization_id();
+        let chain_id = coordinator.chain_id();
+        let genesis = genesis_record(organization_id, chain_id);
+        let binding = bind_genesis(
+            &genesis,
+            organization_id,
+            chain_id,
+            object_hash_of(0x13),
+            RegistryVersion::new(GENESIS_REGISTRY_VERSION),
+            &GenesisEnvelopeV1 {
+                chain_sequence: ChainSequence::new(0),
+                previous_entry_hash: None,
+                genesis_entry_hash: EntryHash::try_from(&GENESIS_ENTRY_HASH[..]).expect("32 Byte"),
+            },
+        )?;
+        coordinator.create_genesis_and_final_anchor(
+            provider,
+            &binding,
+            exact_bytes,
+            &mut self.media,
+            media_ids,
+            reported_fingerprint,
+        )?;
+        Ok(())
+    }
+
+    /// Schritt 2 mit einem ANDEREN Wurzelschluessel.
+    ///
+    /// Nach der Versiegelung ist das dieselbe verbotene Bewegung wie
+    /// [`Self::rewrite_admin_pairs`] — `:1349` unterscheidet die Felder nicht.
+    ///
+    /// # Errors
+    /// `EA-ANCHOR-PRE-FIELD-CHANGED`, sobald die Vorstufe versiegelt ist.
+    pub fn rewrite_root(&mut self) -> Result<(), AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.generate_offline_root(foreign_root_material())
+    }
+
+    /// Schritte 1 bis 11 mit einem Anker, der einen ANDEREN Genesis nennt.
+    ///
+    /// # Errors
+    /// `EA-CEREMONY-GENESIS-CONTEXT-MISMATCH`.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Kulisse ihre eigene Vorstufe nicht dekodiert.
+    pub fn adopt_anchor_of_another_genesis(&mut self) -> Result<(), AdminError> {
+        self.complete_through_root_signed_targets()?;
+        let pre_bytes = self.sealed_pre_anchor_bytes();
+        let pre = ea_trust::decode_pre_anchor(&pre_bytes).expect("die Vorstufe ist gueltig");
+        let anchor_bytes = final_anchor_bytes(&pre, &[0x45; 32]);
+        self.adopt_final_anchor(&anchor_bytes)
+    }
+
+    /// Schritt 12 gegen eine Ablage, die nichts mehr annimmt.
+    ///
+    /// Gibt zurueck, was der KOORDINATOR nach dem Fehlschlag meldet — nicht,
+    /// was in der Ablage steht. Genau dort liegt der Unterschied: ein
+    /// Koordinator, der nach einem gescheiterten Schreiben
+    /// [`ProductionState::Ready`] meldete, spraeche eine Freigabe aus, von der
+    /// nichts persistiert ist.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Kulisse ihren eigenen Recovery-Nachweis nicht bildet.
+    #[must_use]
+    pub fn run_recovery_against_a_failing_store(&mut self) -> (AdminError, ProductionState) {
+        let observation = self.observation(fresh_machine(), 2, true);
+        let proof = verify_fresh_machine_recovery_test(ceremony_machine(), &observation)
+            .expect("der Lauf der Kulisse besteht");
+        self.store.start_failing();
+        let mut coordinator = BootstrapCoordinator::resume(&mut self.store)
+            .expect("die Ablage liest noch")
+            .expect("die Zeremonie laeuft bereits");
+        let error = coordinator
+            .record_fresh_machine_recovery_test(proof)
+            .expect_err("eine Ablage, die nicht schreibt, gibt keine Freigabe");
+        (error, coordinator.production_state())
+    }
+
+    /// Schritt 12 mit einer Beobachtung, die der Aufrufer selbst zuschneidet.
+    ///
+    /// # Errors
+    /// Jeden Befund des zwoelften Schrittes.
+    pub fn record_recovery_observation(
+        &mut self,
+        ceremony_machine_named_by_the_caller: Hash32,
+        observation: &RecoveryTestObservation,
+    ) -> Result<(), AdminError> {
+        let proof =
+            verify_fresh_machine_recovery_test(ceremony_machine_named_by_the_caller, observation)?;
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.record_fresh_machine_recovery_test(proof)?;
+        Ok(())
+    }
+
+    /// Die Beobachtung eines vollstaendig gelungenen Laufs auf `machine`.
+    #[must_use]
+    pub fn passing_observation(&self, machine: Hash32) -> RecoveryTestObservation {
+        self.observation(machine, 2, true)
+    }
+
+    /// Schritt 3 mit ANDEREN Paaren — die Bewegung, die `:1349` verbietet.
+    ///
+    /// # Errors
+    /// `EA-ANCHOR-PRE-FIELD-CHANGED`, sobald die Vorstufe versiegelt ist.
+    pub fn rewrite_admin_pairs(
+        &mut self,
+        pairs: &[AdminBootstrapPairV1],
+    ) -> Result<Hash32, AdminError> {
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.create_admin_pairs(pairs)
+    }
+
+    /// Der Neuanfang mit NEUEN Kennungen (`:1349`).
+    ///
+    /// # Errors
+    /// `EA-CEREMONY-BOOTSTRAP-STEP-REGRESSION`, wenn die Zeremonie gar nicht
+    /// abgebrochen ist.
+    pub fn restart_with_new_ids(&mut self) -> Result<(), AdminError> {
+        BootstrapCoordinator::restart_with_new_ids(
+            &mut self.store,
+            &mut self.random,
+            Some(ceremony_machine()),
+        )?;
+        Ok(())
+    }
+
+    /// Schritt 12 auf einem FRISCHEN Rechner, vollstaendig.
+    ///
+    /// # Errors
+    /// Jeder Befund des zwoelften Schrittes.
+    pub fn run_fresh_machine_recovery(&mut self) -> Result<(), AdminError> {
+        self.record_recovery(self.observation(fresh_machine(), 2, true))
+    }
+
+    /// Derselbe Lauf, aber EIN Medium fehlt (`:1897`).
+    ///
+    /// # Errors
+    /// `EA-CEREMONY-RECOVERY-TEST-FAILED`.
+    pub fn run_fresh_machine_recovery_missing_one_medium(&mut self) -> Result<(), AdminError> {
+        self.record_recovery(self.observation(fresh_machine(), 1, true))
+    }
+
+    /// Derselbe Lauf, aber auf der ZEREMONIENMASCHINE (`:1347`).
+    ///
+    /// # Errors
+    /// `EA-CEREMONY-RECOVERY-TEST-SAME-MACHINE`.
+    pub fn run_recovery_on_the_ceremony_machine(&mut self) -> Result<(), AdminError> {
+        self.record_recovery(self.observation(ceremony_machine(), 2, true))
+    }
+
+    fn observation(
+        &self,
+        machine: Hash32,
+        media_present: usize,
+        entry_readable: bool,
+    ) -> RecoveryTestObservation {
+        let state = self.state();
+        let anchor = decode_trust_anchor(
+            state
+                .exact_final_anchor_bytes()
+                .expect("Schritt 11 hat den Anker angenommen"),
+        )
+        .expect("der angenommene Anker ist gueltig");
+        RecoveryTestObservation {
+            machine_fingerprint: machine,
+            media_expected: 2,
+            media_present,
+            expected_trust_anchor_hash: anchor.trust_anchor_hash(),
+            observed_trust_anchor_hash: anchor.trust_anchor_hash(),
+            expected_key_thumbprint: thumbprint_of(0x31),
+            observed_key_thumbprint: thumbprint_of(0x31),
+            test_entry_readable: entry_readable,
+            sample_entries_expected: 1,
+            sample_entries_decrypted: 1,
+        }
+    }
+
+    fn record_recovery(&mut self, observation: RecoveryTestObservation) -> Result<(), AdminError> {
+        let proof = verify_fresh_machine_recovery_test(ceremony_machine(), &observation)?;
+        let mut coordinator =
+            BootstrapCoordinator::resume(&mut self.store)?.expect("die Zeremonie laeuft bereits");
+        coordinator.record_fresh_machine_recovery_test(proof)?;
+        Ok(())
+    }
+}
+
+/// Eine verifizierte Sicherung auf ZWEI getrennten Medien (`:1342`).
+///
+/// Der Abdruck ist ausdruecklich ein Parameter und keine erfundene Marke: eine
+/// Sicherung, die einen unbeteiligten Schluessel nennt, ist keine Sicherung
+/// DIESER Zeremonie — die Kulisse reicht deshalb die Abdruecke durch, die die
+/// Schritte 2 und 5 tatsaechlich festgehalten haben.
+fn backup(class: BackedUpKeyClass, key_thumbprint: KeyThumbprint) -> KeyBackupRecordV1 {
+    KeyBackupRecordV1 {
+        class,
+        key_thumbprint,
+        media: vec![BACKUP_MEDIUM_A, BACKUP_MEDIUM_B],
+    }
+}
+
+/// Ein Temporaerverzeichnis, das sich beim Fallenlassen selbst raeumt.
+///
+/// Von Hand und ausdruecklich ohne `tempfile`: `ea-admin` nimmt fuer einen
+/// Pfadnamen keine neue externe Kiste auf. Die gleichnamige Bauart in
+/// `crates/ea-recovery/tests/support/mod.rs` waere die Alternative, liegt aber
+/// hinter einer Kante, die diese Crate nicht traegt und wegen eines
+/// Verzeichnisnamens auch nicht aufnehmen soll.
+pub struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    /// Der Pfad des Verzeichnisses.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Legt ein frisches Temporaerverzeichnis an.
+///
+/// Prozess-IDs werden vom Betriebssystem wiederverwendet; ein Rest aus einem
+/// abgebrochenen frueheren Lauf wuerde sonst als Zeremoniezustand gelesen.
+#[must_use]
+pub fn temp_dir(tag: &str) -> TempDir {
+    static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
+    let index = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("ea-admin-{tag}-{}-{index}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("das Temporaerverzeichnis muss anlegbar sein");
+    TempDir { path }
+}
+
+// ---------------------------------------------------------------------------
+// Ablagen und Zufallsquellen, die AUSFALLEN
+// ---------------------------------------------------------------------------
+
+/// Eine Ablage, die beim ERSTEN Lesen eine Zeremonie meldet und danach keine
+/// mehr.
+///
+/// Kein konstruierter Sonderfall: eine zweite Ablageinstanz desselben Pfades,
+/// ein nebenlaeufiger Lauf oder eine von Hand geloeschte Zustandsdatei
+/// erzeugen genau diese Folge. Ein Koordinator, der zweimal laedt und das
+/// zweite Ergebnis fuer selbstverstaendlich haelt, bricht hier ab.
+pub struct StoreThatStopsAnswering {
+    state: BootstrapStateV1,
+    loads: std::cell::Cell<usize>,
+}
+
+impl StoreThatStopsAnswering {
+    /// Die Ablage ueber dem zuletzt persistierten Zustand von `store`.
+    ///
+    /// # Panics
+    ///
+    /// Wenn `store` gar keine Zeremonie fuehrt.
+    #[must_use]
+    pub fn over(store: &MemoryBootstrapStore) -> Self {
+        Self {
+            state: store
+                .load()
+                .expect("die Ablage antwortet")
+                .expect("die Kulisse hat begonnen"),
+            loads: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl BootstrapStore for StoreThatStopsAnswering {
+    fn load(&self) -> Result<Option<BootstrapStateV1>, AdminError> {
+        let seen = self.loads.get();
+        self.loads.set(seen + 1);
+        if seen == 0 {
+            Ok(Some(self.state.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn store(&mut self, _state: &BootstrapStateV1) -> Result<(), AdminError> {
+        Ok(())
+    }
+}
+
+/// Eine Zufallsquelle, die IMMER dieselben Bytes liefert.
+///
+/// `restart_with_new_ids` verlangt NEUE Kennungen; eine Quelle, die die alten
+/// noch einmal ausgibt, hat die geforderte Neuheit nicht erreicht.
+#[derive(Default)]
+pub struct RepeatingRandom;
+
+impl CeremonyRandomSource for RepeatingRandom {
+    fn fill_random(&mut self, destination: &mut [u8]) -> Result<(), AdminError> {
+        if destination.len() == 16 {
+            destination.copy_from_slice(fixture_anchor().organization_id().as_bytes());
+        } else {
+            destination.fill(0x21);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ein Aufruf je Schritt — die Tabelle der Torwaechter
+// ---------------------------------------------------------------------------
+
+/// Ruft GENAU den Schritt `step` mit ansonsten tauglichen Argumenten auf.
+///
+/// Der Zweck ist der Torwaechter und nicht die Fachlogik: jeder Schritt prueft
+/// seinen Vorgaenger, BEVOR er ein Argument ansieht. Ein Zeuge kann damit
+/// tabellengetrieben messen, dass Schritt `n` ohne Schritt `n-1` nicht laeuft —
+/// ohne fuer jeden der elf Schritte eine eigene Kulisse zu bauen.
+///
+/// # Errors
+/// Den Befund des aufgerufenen Schrittes.
+///
+/// # Panics
+///
+/// Wenn die Kulisse ihre eigenen Argumente nicht bauen kann.
+pub fn invoke_step(
+    coordinator: &mut BootstrapCoordinator<'_>,
+    step: BootstrapStep,
+) -> Result<(), AdminError> {
+    match step {
+        BootstrapStep::GenerateIds => Ok(()),
+        BootstrapStep::GenerateOfflineRoot => {
+            coordinator.generate_offline_root(fixture_root_material())
+        }
+        BootstrapStep::CreateAdminPairs => coordinator
+            .create_admin_pairs(&bootstrap_admin_pairs())
+            .map(|_| ()),
+        BootstrapStep::PinPreAnchorOnMedia => {
+            let mut media = MediaStack::default();
+            coordinator.pin_pre_anchor_on_media(
+                &mut media,
+                &[FIRST_MEDIUM, SECOND_MEDIUM],
+                fixture_pre_anchor_confirmation(),
+            )
+        }
+        BootstrapStep::GenerateRecoveryAndHgaKeys => {
+            coordinator.generate_recovery_and_hga_keys(recovery_kem_record(), hga_record())
+        }
+        BootstrapStep::EnrollKeyApprovers => coordinator.enroll_key_approvers(&approver_records()),
+        BootstrapStep::VerifyKeyBackups => coordinator.verify_key_backups(&ceremony_backups()),
+        BootstrapStep::ProvisionComponentKeys => {
+            coordinator.provision_component_keys(&component_bindings())
+        }
+        BootstrapStep::CompareFingerprints => {
+            coordinator.compare_fingerprints(fixture_pre_anchor_confirmation())
+        }
+        BootstrapStep::RootSignBootstrapTargets => {
+            let ceremony = ceremony_line();
+            let head = selected_head(&ceremony.line);
+            let intent = ceremony.intent(&head);
+            let provider = FixtureKeyProvider::root();
+            let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+            let service = ceremony_service(&head, &provider, &audit, &ceremony);
+            let proof = ceremony_proof(&ceremony, &head, ReauthPurpose::AdminRootCeremony);
+            let table = Arc::new(Mutex::new(ReplayTable::default()));
+            let mut trust_store = PersistentStore::open(&table);
+            let authorization = ceremony.authorization_bytes().to_vec();
+            coordinator
+                .root_sign_bootstrap_target(
+                    &service,
+                    &intent,
+                    ceremony.target_payload(),
+                    &authorization,
+                    &mut trust_store,
+                    &proof,
+                )
+                .map(|_| ())
+        }
+        BootstrapStep::CreateGenesisAndFinalAnchor => {
+            let provider = FixtureKeyProvider::root();
+            let organization_id = coordinator.organization_id();
+            let chain_id = coordinator.chain_id();
+            let genesis = genesis_record(organization_id, chain_id);
+            let binding = bind_genesis(
+                &genesis,
+                organization_id,
+                chain_id,
+                object_hash_of(0x13),
+                RegistryVersion::new(GENESIS_REGISTRY_VERSION),
+                &GenesisEnvelopeV1 {
+                    chain_sequence: ChainSequence::new(0),
+                    previous_entry_hash: None,
+                    genesis_entry_hash: EntryHash::try_from(&GENESIS_ENTRY_HASH[..])
+                        .expect("32 Byte"),
+                },
+            )?;
+            let mut media = MediaStack::default();
+            coordinator
+                .create_genesis_and_final_anchor(
+                    &provider,
+                    &binding,
+                    &[0x00; 4],
+                    &mut media,
+                    &[FIRST_MEDIUM, SECOND_MEDIUM],
+                    bootstrap_anchor_hash(&[0x00; 4]),
+                )
+                .map(|_| ())
+        }
+        BootstrapStep::RunFreshMachineRecoveryTest => {
+            let proof = verify_fresh_machine_recovery_test(
+                ceremony_machine(),
+                &RecoveryTestObservation {
+                    machine_fingerprint: fresh_machine(),
+                    media_expected: 2,
+                    media_present: 2,
+                    expected_trust_anchor_hash: hash32_of(0x77),
+                    observed_trust_anchor_hash: hash32_of(0x77),
+                    expected_key_thumbprint: thumbprint_of(0x31),
+                    observed_key_thumbprint: thumbprint_of(0x31),
+                    test_entry_readable: true,
+                    sample_entries_expected: 1,
+                    sample_entries_decrypted: 1,
+                },
+            )?;
+            coordinator
+                .record_fresh_machine_recovery_test(proof)
+                .map(|_| ())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Eine Bestaetigung des zweiten Kanals ueber die Vorstufe der Fixture.
+///
+/// # Panics
+///
+/// Wenn die Fixture ihre eigene Vorstufe nicht dekodiert.
+#[must_use]
+pub fn fixture_pre_anchor_confirmation() -> ea_admin::SecondChannelConfirmation {
+    let pre = ea_trust::decode_pre_anchor(fixture_anchor().exact_pre_anchor_bytes())
+        .expect("die Vorstufe der Fixture ist gueltig");
+    let fingerprint = pre.bootstrap_anchor_hash();
+    confirm_pre_anchor_fingerprint(&pre, fingerprint)
+        .expect("die Fixture bestaetigt ihren eigenen Fingerprint")
+}
+
+/// Die zwei Key Approver der Kulisse (`:1341`).
+#[must_use]
+pub fn approver_records() -> Vec<OuterKeyRecordV1> {
+    vec![
+        OuterKeyRecordV1 {
+            handle: outer_handle(0x41),
+            key_thumbprint: thumbprint_of(0x41),
+        },
+        OuterKeyRecordV1 {
+            handle: outer_handle(0x42),
+            key_thumbprint: thumbprint_of(0x42),
+        },
+    ]
+}
+
+/// Die vier verifizierten Sicherungen der Kulisse (`:1342`).
+#[must_use]
+pub fn ceremony_backups() -> Vec<KeyBackupRecordV1> {
+    vec![
+        backup(
+            BackedUpKeyClass::Root,
+            fixture_root_material().key_thumbprint,
+        ),
+        backup(BackedUpKeyClass::Admin, thumbprint_of(0x52)),
+        backup(
+            BackedUpKeyClass::RecoveryKem,
+            recovery_kem_record().key_thumbprint,
+        ),
+        backup(
+            BackedUpKeyClass::HistoricalGrantAuthority,
+            hga_record().key_thumbprint,
+        ),
+    ]
+}
+
+/// Die zwei provisionierten Komponentenpaare der Kulisse (`:1343`).
+#[must_use]
+pub fn component_bindings() -> Vec<ComponentBindingV1> {
+    vec![
+        ComponentBindingV1 {
+            role: OperatorRoleV1::Writer,
+            certificate_object_hash: object_hash_of(0x61),
+            operator_binding_object_hash: object_hash_of(0x62),
+        },
+        ComponentBindingV1 {
+            role: OperatorRoleV1::Reader,
+            certificate_object_hash: object_hash_of(0x63),
+            operator_binding_object_hash: object_hash_of(0x64),
+        },
+    ]
 }
