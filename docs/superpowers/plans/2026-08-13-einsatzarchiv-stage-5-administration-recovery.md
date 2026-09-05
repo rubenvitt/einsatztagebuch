@@ -349,10 +349,18 @@ wasm32-Klassifizierung (Positivliste in `verify_quick_commands()` **oder**
 - Create: `crates/ea-admin/src/production_state.rs`
 - Create: `apps/cli/src/commands/organization.rs`
 - Modify: `crates/ea-trust/src/anchor.rs` — der Vorstufen-Kodierer `encode_pre_anchor`
-  (`crates/ea-trust/src/anchor.rs:691`) ist heute privat, und `decode_trust_anchor`
-  (`:544`) kennt nur den FINALEN Anker. Diese Aufgabe muss exakte Vorstufenbytes
-  ERZEUGEN und von den Medien zurueckLESEN. Der eine vorhandene Kodierer wird
-  deshalb oeffentlich gemacht; eine zweite Kodierung waere eine zweite Wahrheit.
+  (`crates/ea-trust/src/anchor.rs:691`) war privat, und `decode_trust_anchor`
+  (`:544`) kannte nur den FINALEN Anker. Diese Aufgabe muss exakte Vorstufenbytes
+  ERZEUGEN und von den Medien zurueckLESEN. Eine zweite Kodierung waere eine
+  zweite Wahrheit: schon ein Byte Abweichung liesse den `bootstrapAnchorHash`
+  des finalen Ankers dauerhaft nicht mehr auf die festgeschriebene Vorstufe
+  passen. Der eine vorhandene Kodierer BLEIBT deshalb privat; oeffentlich sind
+  zwei Funktionen darueber geworden: `encode_pre_anchor_v1`
+  (`crates/ea-trust/src/anchor.rs:715`), das Hashlisten und Wurzelschluessel
+  prueft und danach genau `encode_pre_anchor` ruft, und `decode_pre_anchor`
+  (`:769`), das die Bytes der Medien wieder einliest. Der Umweg ueber den
+  Wrapper haelt die eine Quelle der Kodierung und gibt trotzdem einen
+  geprueften Typ heraus statt eines nackten `Vec<u8>`.
 - Modify: `crates/ea-admin/src/error.rs`, `crates/ea-admin/src/lib.rs`,
   `crates/ea-admin/Cargo.toml`
 - Modify: `apps/cli/src/args.rs`, `apps/cli/src/commands/mod.rs`, `apps/cli/src/output.rs`
