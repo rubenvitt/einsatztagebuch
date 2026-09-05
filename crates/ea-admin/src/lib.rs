@@ -57,7 +57,11 @@
 //! ```
 #![forbid(unsafe_code)]
 
-mod anchor_media;
+pub mod anchor_media;
+pub mod bootstrap;
+pub mod genesis;
+pub mod production_state;
+
 mod error;
 mod root_ceremony;
 
@@ -65,5 +69,15 @@ pub use anchor_media::{
     AnchorMedia, AnchorMediumId, MediaConfirmation, SecondChannelConfirmation, confirm_on_media,
     confirm_pre_anchor_fingerprint, verify_anchor_transition,
 };
+pub use bootstrap::{
+    AdminBootstrapPairV1, BackedUpKeyClass, BootstrapCoordinator, BootstrapStateV1, BootstrapStep,
+    BootstrapStore, BootstrapTranscriptV1, CeremonyRandomSource, ComponentBindingV1,
+    KeyBackupRecordV1, OuterKeyRecordV1, RootKeyMaterialV1, SystemRandomSource,
+};
 pub use error::AdminError;
+pub use genesis::{GenesisBinding, GenesisEnvelopeV1, bind_genesis};
+pub use production_state::{
+    FreshMachineRecoveryProof, ProductionState, RecoveryTestObservation,
+    verify_fresh_machine_recovery_test,
+};
 pub use root_ceremony::RootCeremonyService;

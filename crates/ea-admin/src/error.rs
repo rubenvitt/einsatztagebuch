@@ -113,6 +113,57 @@ pub enum AdminError {
     MediaReadbackMismatch,
     /// Ein Medium hat auf Schreiben oder Lesen nicht geantwortet.
     MediaUnavailable,
+    /// Ein Schritt HINTER dem persistierten wurde betreten.
+    ///
+    /// Die Zeremonie ist ausschliesslich vorwaerts gerichtet. Auch der Versuch,
+    /// eine zweite Zeremonie neben einer bereits persistierten zu beginnen,
+    /// faellt hierher: das waeren zwei Wahrheiten ueber dieselbe Organisation.
+    BootstrapStepRegression,
+    /// Ein Schritt VOR seinem Vorgaenger wurde betreten.
+    ///
+    /// Ein eigener Arm neben [`Self::BootstrapStepRegression`], weil sich die
+    /// Abhilfe unterscheidet: nach vorn fehlt Arbeit, nach hinten ist Arbeit
+    /// bereits getan.
+    BootstrapStepOutOfOrder,
+    /// Die Vorstufe ist noch nicht auf den Medien festgeschrieben und ueber
+    /// den zweiten Kanal bestaetigt.
+    ///
+    /// `:1339` sagt „VOR der ersten Admin-Autorisierung"; jeder Schritt nach
+    /// dem vierten laeuft ohne diese Bestaetigung ins Leere, denn er baute auf
+    /// einer Vorstufe auf, die sich noch aendern koennte.
+    BootstrapPreAnchorUnconfirmed,
+    /// Eine der Mindestzahlen aus `:1338`, `:1341`, `:1342` oder `:1343` ist
+    /// nicht erreicht.
+    ///
+    /// Ein Arm fuer alle vier, weil die Folge dieselbe ist: der Schritt hat
+    /// nicht stattgefunden. WELCHE Zahl fehlt, gehoert in die Oberflaeche, die
+    /// den Schritt fuehrt.
+    BootstrapQuorumMissing,
+    /// Die Ablage des Zeremoniezustands hat nicht geantwortet.
+    BootstrapStoreUnavailable,
+    /// Der persistierte Zeremoniezustand ist nicht mehr deutbar.
+    BootstrapStateShape,
+    /// Genesis ist nicht Sequenz 0 ohne Vorgaengerbindung.
+    ///
+    /// `design.md:927`: „Fuer Genesis ist `previous-entry-hash = null`; danach
+    /// sind exakt 32 Bytes erforderlich."
+    GenesisSequence,
+    /// Genesis nennt eine andere Organisation, Kette, Richtlinie oder einen
+    /// anderen Registrierungskopf als diese Zeremonie (`:1145`).
+    GenesisContextMismatch,
+    /// Der Recovery-Test ist als GANZES fehlgeschlagen.
+    ///
+    /// `:1897`: „Ein fehlendes Medium, falscher Key, abweichender Anchor,
+    /// nicht lesbarer Testeintrag oder unvollstaendiges Sample macht den
+    /// Gesamttest fehlgeschlagen; Teilerfolg darf nicht als erfolgreicher
+    /// Recovery-Test erscheinen." Ein Arm fuer alle fuenf, weil die Folge in
+    /// allen fuenf dieselbe ist.
+    RecoveryTestFailed,
+    /// Der Recovery-Test lief auf der ZEREMONIENMASCHINE.
+    ///
+    /// `:1347` verlangt „einen frischen Rechner". Das ist kein Teilerfolg des
+    /// Tests aus `:1897`, sondern ein anderer Test — deshalb ein eigener Arm.
+    RecoveryTestSameMachine,
     /// Der ueber den ZWEITEN Kanal zurueckgemeldete Fingerprint ist nicht der,
     /// den diese Maschine ueber diese Bytes rechnet.
     ///
@@ -148,6 +199,16 @@ impl AdminError {
             Self::MediaQuorumMissing => "EA-CEREMONY-MEDIA-QUORUM-MISSING",
             Self::MediaReadbackMismatch => "EA-CEREMONY-MEDIA-READBACK-MISMATCH",
             Self::MediaUnavailable => "EA-CEREMONY-MEDIA-UNAVAILABLE",
+            Self::BootstrapStepRegression => "EA-CEREMONY-BOOTSTRAP-STEP-REGRESSION",
+            Self::BootstrapStepOutOfOrder => "EA-CEREMONY-BOOTSTRAP-STEP-OUT-OF-ORDER",
+            Self::BootstrapPreAnchorUnconfirmed => "EA-CEREMONY-PRE-ANCHOR-UNCONFIRMED",
+            Self::BootstrapQuorumMissing => "EA-CEREMONY-BOOTSTRAP-QUORUM-MISSING",
+            Self::BootstrapStoreUnavailable => "EA-CEREMONY-BOOTSTRAP-STORE-UNAVAILABLE",
+            Self::BootstrapStateShape => "EA-CEREMONY-BOOTSTRAP-STATE-SHAPE",
+            Self::GenesisSequence => "EA-CEREMONY-GENESIS-SEQUENCE",
+            Self::GenesisContextMismatch => "EA-CEREMONY-GENESIS-CONTEXT-MISMATCH",
+            Self::RecoveryTestFailed => "EA-CEREMONY-RECOVERY-TEST-FAILED",
+            Self::RecoveryTestSameMachine => "EA-CEREMONY-RECOVERY-TEST-SAME-MACHINE",
             Self::SecondChannelMismatch => "EA-CEREMONY-SECOND-CHANNEL-MISMATCH",
             Self::Trust(error) => error.code(),
             Self::Crypto(error) => error.code(),
