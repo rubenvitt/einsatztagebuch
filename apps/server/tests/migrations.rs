@@ -442,10 +442,10 @@ async fn plant_admin_audit(
     .map(|_| ())
 }
 
-/// Alle sechsundzwanzig Tabellen der Stufe 3 sind da, und es ist bei EINER
-/// Migration geblieben.
+/// Alle sechsundzwanzig Tabellen der Stufe 3 sind da, samt den additiven
+/// Migrationen fuer bestehende Installationen.
 #[tokio::test]
-async fn the_single_migration_creates_every_planned_table() {
+async fn the_migrations_create_every_planned_table() {
     let database = common::fresh_database().await;
 
     let expected = [
@@ -494,11 +494,101 @@ async fn the_single_migration_creates_every_planned_table() {
             .expect("the migration bookkeeping table must exist");
     assert_eq!(
         applied,
-        vec![(1_i64,)],
-        "Stage 3 delivers EXACTLY one migration; evolution against a delivered installation is \
-         the subject of Stage 7"
+        vec![(1_i64,), (2_i64,)],
+        "the original schema and the additive trust cache migration must both apply"
     );
 
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_trust_cache_migration_upgrades_the_original_schema_without_replacing_it() {
+    let original = std::env::temp_dir().join(format!("ea-original-{}", common::unique_suffix()));
+    std::fs::create_dir(&original).expect("the original migration directory must be creatable");
+    std::fs::copy(
+        "migrations/0001_initial.sql",
+        original.join("0001_initial.sql"),
+    )
+    .expect("the released migration must copy unchanged");
+    let database = common::fresh_database_with_migrations(&original).await;
+    std::fs::remove_dir_all(&original).expect("the disposable migration copy must be removable");
+    insert_organization(database.pool(), &ORGANIZATION_ID).await;
+    sqlx::query(
+        "INSERT INTO trust_events (organization_id, event_id, object_hash, event_code, \
+         received_at_millis) VALUES ($1, $2, $3, 'deviceCertificate', 17)",
+    )
+    .bind(&ORGANIZATION_ID[..])
+    .bind(&[0x81_u8; 16][..])
+    .bind(&[0x82_u8; 32][..])
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    sqlx_core::migrate::Migrator::new(std::path::Path::new("migrations"))
+        .await
+        .unwrap()
+        .run(database.pool())
+        .await
+        .expect("upgrade must validate the original migration checksum and preserve its rows");
+    let has_revision: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'organizations' \
+         AND column_name = 'trust_catalog_revision')",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert!(
+        has_revision,
+        "upgrading an existing schema must install cache invalidation"
+    );
+    let first: i64 = sqlx::query_scalar("SELECT trust_catalog_revision FROM organizations")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    let received: i64 = sqlx::query_scalar("SELECT received_at_millis FROM trust_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        received, 17,
+        "the pre-upgrade trust object must survive unchanged"
+    );
+
+    sqlx::query("UPDATE trust_events SET received_at_millis = 18")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let updated: i64 = sqlx::query_scalar("SELECT trust_catalog_revision FROM organizations")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        updated > first,
+        "upgraded rows must participate in invalidation"
+    );
+    sqlx::query("DELETE FROM trust_events")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let deleted: i64 = sqlx::query_scalar("SELECT trust_catalog_revision FROM organizations")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert!(deleted > updated);
+    sqlx::query("DELETE FROM organizations")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    insert_organization(database.pool(), &ORGANIZATION_ID).await;
+    let recreated: i64 = sqlx::query_scalar("SELECT trust_catalog_revision FROM organizations")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        recreated > deleted,
+        "recreating an organization must not reuse a cache generation"
+    );
     database.cleanup().await;
 }
 

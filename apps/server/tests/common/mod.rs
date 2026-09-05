@@ -139,9 +139,15 @@ async fn connect_admin() -> PgConnection {
         .expect("the integration PostgreSQL must be reachable")
 }
 
-/// Legt eine frische Datenbank an, wendet `migrations/0001_initial.sql` an und
-/// gibt einen Pool darauf heraus.
+/// Legt eine frische Datenbank an, wendet die Migrationen an und gibt einen
+/// Pool darauf heraus.
 pub async fn fresh_database() -> TestDatabase {
+    fresh_database_with_migrations(Path::new("migrations")).await
+}
+
+/// Eine frische Datenbank mit genau dem angegebenen Migrationsstand, damit
+/// Upgrades auch von einer bereits angewandten Originalmigration ausgehen.
+pub async fn fresh_database_with_migrations(migrations: &Path) -> TestDatabase {
     let mut admin = connect_admin().await;
     sweep_stale_databases(&mut admin).await;
 
@@ -158,12 +164,12 @@ pub async fn fresh_database() -> TestDatabase {
         .await
         .expect("connecting to the disposable test database must succeed");
 
-    Migrator::new(Path::new("migrations"))
+    Migrator::new(migrations)
         .await
         .expect("the migrations directory must resolve")
         .run(&pool)
         .await
-        .expect("the single Stage 3 migration must apply");
+        .expect("the server migrations must apply");
 
     TestDatabase { name, pool }
 }

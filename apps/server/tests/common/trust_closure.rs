@@ -541,6 +541,67 @@ pub fn build(with_second_reader: bool) -> ExtendedClosure {
     build_with(with_second_reader, false)
 }
 
+/// Ein Kopf nach Ablauf der eingefrorenen Linie, der erst bei 20_000 gilt.
+/// Seine Leihe ueberlappt Kopf zwei: zwischen dessen Ablauf und dem neuen
+/// issuedAt liefert die geteilte Auswahl PendingFuture. Das ist KEIN
+/// zeitloser Bootstrap-Abschluss.
+pub fn future_admin_revocation() -> Vec<Vec<u8>> {
+    let context = frozen_context();
+    let second_admin_seed = ea_testkit::TEST_ENTROPY_SECOND_ORGANIZATION_ADMIN_ED25519_SEED;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vectors/trust/v1")
+        .join(ROTATION_CASE);
+    let second_certificate =
+        object_hash(&std::fs::read(root.join("admin-certificate-b.bin")).unwrap());
+    let second_binding = object_hash(&std::fs::read(root.join("admin-binding-b.bin")).unwrap());
+    let fields = RegistryEventFieldsV1 {
+        organization_id: context.organization_id,
+        registry_version: RegistryVersion::new(3),
+        previous_registry_hash: Some(hash32(context.head_two_hash)),
+        effective_from_sequence: ChainSequence::new(150),
+        valid_through_sequence: ChainSequence::new(200),
+        issued_at: UnixMillis::new(20_000),
+        not_before: UnixMillis::new(19_990),
+        not_after: UnixMillis::new(30_000),
+        policy_object_hash: context.policy_object_hash,
+        change: RegistryChangeV1::AdminCertificate {
+            object_hash: context.admin_certificate_hash,
+            effect: 1,
+        },
+        root_key_thumbprint: signing_key(ROOT_SEED).thumbprint(),
+    };
+    let provisional =
+        TrustPayloadV1::registry_event(fields.clone(), ObjectHash::from(Hash32::ZERO))
+            .expect("the future head payload must be well formed");
+    let authorization =
+        TrustPayloadV1::organization_admin_authorization(OrganizationAdminAuthorizationFieldsV1 {
+            authorization_id: AuthorizationId::try_from(&[0xb1_u8; 16][..]).expect("16 bytes"),
+            organization_id: context.organization_id,
+            registry_version: RegistryVersion::new(2),
+            registry_head_hash: hash32(context.head_two_hash),
+            admin_key_thumbprint: signing_key(second_admin_seed).thumbprint(),
+            admin_certificate_hash: CertificateHash::from(second_certificate),
+            admin_operator_binding_object_hash: second_binding,
+            action_code: 5,
+            target_trust_subtype: TrustSubtypeV1::RegistryEvent,
+            authorized_trust_core_hash: authorized_trust_digest(&authorized_core_input(
+                &provisional,
+            )),
+            issued_at: UnixMillis::new(19_900),
+            expires_at: UnixMillis::new(20_100),
+            nonce: [0xb2; 32],
+        })
+        .expect("the future authorization must be well formed");
+    let signature = signer(second_admin_seed)
+        .sign_organization_admin_trust_digest(authorization.exact_digest_input())
+        .expect("the future authorization must carry the admin signature");
+    let authorization = exact_object(authorization, vec![signature]);
+    let payload = TrustPayloadV1::registry_event(fields, object_hash(&authorization))
+        .expect("the future head must bind its exact authorization");
+    let head = root_signed(payload, &authorization, context.root_certificate_hash);
+    vec![authorization, head]
+}
+
 /// Der Objekthash des Serverquittungszertifikats.
 ///
 /// Er ist ueber ALLE Varianten des Abschlusses derselbe, und das ist keine
