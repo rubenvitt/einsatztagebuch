@@ -15,6 +15,13 @@
 //! unabhaengig bestaetigte Vorstufe faengt sie. Genau dafuer gibt es
 //! [`ea_admin::verify_anchor_transition`].
 //!
+//! Zwei weitere Flaechen haengen an derselben Invariante und stehen deshalb
+//! hier: die ABWEHRSCHICHTEN von [`ea_trust::decode_pre_anchor`] — was von den
+//! Medien zurueckgelesen wird, ist unvertraute Drahtform und muss Lage fuer
+//! Lage scheitern koennen — und die Genesisbindung
+//! [`ea_admin::bind_genesis`], die Schritt 11 an die Kennungen und den
+//! Registrierungskopf DIESER Zeremonie haengt.
+//!
 //! Alles hier ist `#[test]` und synchron; diese Crate kennt kein Tokio.
 
 mod support;
@@ -22,14 +29,20 @@ mod support;
 use std::collections::BTreeMap;
 
 use ea_admin::{
-    AdminError, AnchorMedia, AnchorMediumId, MediaConfirmation, SecondChannelConfirmation,
-    confirm_on_media, confirm_pre_anchor_fingerprint, verify_anchor_transition,
+    AdminError, AnchorMedia, AnchorMediumId, GenesisEnvelopeV1, MediaConfirmation,
+    SecondChannelConfirmation, bind_genesis, confirm_on_media, confirm_pre_anchor_fingerprint,
+    verify_anchor_transition,
 };
+use ea_crypto::CanonicalPublicCoseKey;
+use ea_schema::{CommonHeaderV1, GenesisV1, NativeSourceV1, OperatorSnapshotV1};
 use ea_trust::{
     PreAnchorV1, TrustAnchorV1, TrustError, decode_pre_anchor, decode_trust_anchor,
     encode_pre_anchor_v1,
 };
-use ea_types::{ChainId, Hash32, ObjectHash, OrganizationId};
+use ea_types::{
+    ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, OperatorSubjectId, OrganizationId,
+    RecordId, RegistryVersion, UnixMillis,
+};
 use minicbor::Encoder;
 
 use support::trust_support;
@@ -296,6 +309,64 @@ fn a_consistently_rewritten_final_anchor_decodes_but_still_fails_the_transition(
 }
 
 #[test]
+fn the_transition_compares_the_pre_anchor_image_byte_for_byte() {
+    let confirmed_pre = fixture_pre_anchor();
+
+    // Der annehmende Fall haelt genau eine Zusage: die beiden Vorstufenbilder
+    // sind BYTEGLEICH und nicht bloss gleichwertig (`:1780`).
+    let matching = decode_trust_anchor(&final_anchor_bytes(&confirmed_pre, &GENESIS))
+        .expect("ein aus der Vorstufe gebauter finaler Anker dekodiert");
+    assert_eq!(
+        confirmed_pre.exact_bytes(),
+        matching.exact_pre_anchor_bytes()
+    );
+    verify_anchor_transition(&confirmed_pre, &matching).expect("bytegleich traegt den Uebergang");
+
+    // Und ein EINZIGES abweichendes Byte reicht zum Abbruch. Das ist der
+    // Unterschied, den ein feldweiser Vergleich nicht schaerfer machen
+    // koennte: kleiner als ein Byte wird eine Abweichung nicht.
+    let mut bindings = confirmed_pre
+        .initial_admin_operator_binding_object_hashes()
+        .to_vec();
+    let last = bindings.len() - 1;
+    let mut flipped = *bindings[last].as_bytes();
+    flipped[31] ^= 0x01;
+    bindings[last] = ObjectHash::try_from(&flipped[..]).unwrap();
+    let changed_pre = encode_pre_anchor_v1(
+        confirmed_pre.organization_id(),
+        confirmed_pre.chain_id(),
+        confirmed_pre.root_public_cose_key_bytes(),
+        confirmed_pre.root_key_thumbprint(),
+        confirmed_pre.root_certificate_object_hash(),
+        confirmed_pre.initial_admin_certificate_object_hashes(),
+        &bindings,
+    )
+    .expect("die Liste bleibt sortiert und die Vorstufe formal gueltig");
+    let differing = decode_trust_anchor(&final_anchor_bytes(&changed_pre, &GENESIS))
+        .expect("auch dieser Anker ist in sich stimmig");
+
+    assert_eq!(
+        confirmed_pre.exact_bytes().len(),
+        differing.exact_pre_anchor_bytes().len()
+    );
+    let differing_positions = confirmed_pre
+        .exact_bytes()
+        .iter()
+        .zip(differing.exact_pre_anchor_bytes())
+        .filter(|(confirmed, offered)| confirmed != offered)
+        .count();
+    assert_eq!(
+        differing_positions, 1,
+        "die beiden Bilder unterscheiden sich in genau einem Byte"
+    );
+
+    let Err(error) = verify_anchor_transition(&confirmed_pre, &differing) else {
+        panic!("`:1780` sagt bytegleich und nicht gleichwertig");
+    };
+    expect_admin_code(error, "EA-ANCHOR-PRE-FIELD-CHANGED");
+}
+
+#[test]
 fn the_genesis_entry_hash_is_not_a_pre_anchor_field_and_does_not_break_the_transition() {
     let pre = fixture_pre_anchor();
     let other_genesis = [0x99_u8; 32];
@@ -336,6 +407,30 @@ fn two_names_for_one_medium_do_not_make_a_second_medium() {
         panic!("dieselbe Kennung zweimal ist ein Medium und nicht zwei");
     };
     expect_admin_code(error, "EA-CEREMONY-MEDIA-QUORUM-MISSING");
+}
+
+#[test]
+fn a_repeated_name_among_three_media_is_still_not_a_quorum() {
+    let pre = fixture_pre_anchor();
+    let mut media = MediaStack::default();
+
+    // ZWEI unterscheidbare Kennungen unter DREI Namen: das Quorum aus `:1339`
+    // ist erreicht, und trotzdem ist der Bestand nicht der, den der Aufrufer
+    // benannt hat. Genau diese Luecke schliesst der Vergleich der Anzahlen —
+    // die Untergrenze allein sieht sie nicht.
+    let Err(error) = confirm_on_media(
+        &mut media,
+        &[FIRST, SECOND, FIRST],
+        pre.exact_bytes(),
+        confirmed(&pre),
+    ) else {
+        panic!("ein doppelt genannter Datentraeger ist kein dritter");
+    };
+    expect_admin_code(error, "EA-CEREMONY-MEDIA-QUORUM-MISSING");
+    assert!(
+        media.written.is_empty(),
+        "fail-closed: vor dem Quorum wird nichts geschrieben"
+    );
 }
 
 #[test]
@@ -635,4 +730,385 @@ fn hand_rolled_pre_anchor(
         .array(0)
         .expect("leere kritische Erweiterungen kodieren");
     bytes
+}
+
+/// Baut Vorstufenbytes VON HAND mit einem BELIEBIGEN Wurzelschluessel.
+///
+/// [`encode_pre_anchor_v1`] gibt genau die Schluessel nicht heraus, die die
+/// Abwehrschichten des Dekodierers pruefen sollen: eine Bytekette, die keine
+/// 40 Bytes lang ist, und einen kanonischen COSE_Key, der nicht Ed25519 ist.
+fn hand_rolled_pre_anchor_with_root_key(
+    pre: &PreAnchorV1,
+    exact_root_public_cose_key: &[u8],
+    root_key_thumbprint: &[u8; 32],
+) -> Vec<u8> {
+    let certificates = pre.initial_admin_certificate_object_hashes();
+    let bindings = pre.initial_admin_operator_binding_object_hashes();
+    let mut bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(10)
+        .and_then(|encoder| encoder.str(PRE_ANCHOR_DOMAIN))
+        .and_then(|encoder| encoder.u64(1))
+        .and_then(|encoder| encoder.bytes(pre.organization_id().as_bytes()))
+        .and_then(|encoder| encoder.bytes(pre.chain_id().as_bytes()))
+        .and_then(|encoder| encoder.bytes(exact_root_public_cose_key))
+        .and_then(|encoder| encoder.bytes(root_key_thumbprint))
+        .and_then(|encoder| encoder.bytes(pre.root_certificate_object_hash().as_bytes()))
+        .and_then(|encoder| encoder.array(u64::try_from(certificates.len()).unwrap()))
+        .expect("der Zeuge kodiert in einen Vec");
+    for hash in certificates {
+        encoder.bytes(hash.as_bytes()).expect("Hash kodiert");
+    }
+    encoder
+        .array(u64::try_from(bindings.len()).unwrap())
+        .expect("Bindungsliste kodiert");
+    for hash in bindings {
+        encoder.bytes(hash.as_bytes()).expect("Hash kodiert");
+    }
+    encoder
+        .array(0)
+        .expect("leere kritische Erweiterungen kodieren");
+    bytes
+}
+
+/// Die Stelle der Fassungsnummer in den Vorstufenbytes.
+///
+/// Die Form ist fest: `array(10)` als ein Byte, die Domain als Textkette mit
+/// zweibytigem Kopf (33 Zeichen), dann die Fassung `1`. Jeder Zeuge, der hier
+/// hineinschreibt, prueft die Umgebung vorher nach.
+const PRE_ANCHOR_VERSION_OFFSET: usize = 1 + 2 + PRE_ANCHOR_DOMAIN.len();
+
+fn assert_pre_anchor_prologue(bytes: &[u8]) {
+    assert_eq!(bytes[0], 0x8a, "array(10) als ein Byte");
+    assert_eq!(bytes[1], 0x78, "Textkette mit einbytiger Laengenangabe");
+    assert_eq!(bytes[2], 0x21, "33 Zeichen Domain");
+    assert_eq!(
+        &bytes[3..PRE_ANCHOR_VERSION_OFFSET],
+        PRE_ANCHOR_DOMAIN.as_bytes()
+    );
+    assert_eq!(bytes[PRE_ANCHOR_VERSION_OFFSET], 0x01, "Fassung 1, minimal");
+}
+
+// ---------------------------------------------------------------------------
+// Die Abwehrschichten des Vorstufendekodierers
+//
+// `decode_pre_anchor` spiegelt `decode_trust_anchor`: geliehener Vorlauf ueber
+// die flache Drahtform, `ea_cbor::validate` mit `ParserLimits::V1`, besitzende
+// Dekodierung, Listenpruefung, Schluesselbindung. Jede dieser Lagen faengt
+// etwas, das die naechste durchliesse — die Zeugen unten benennen fuer jede
+// genau so eine Eingabe.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_indefinite_length_container_is_not_a_pre_anchor() {
+    let pre = fixture_pre_anchor();
+    let mut bytes = pre.exact_bytes().to_vec();
+    assert_pre_anchor_prologue(&bytes);
+    // `0x9f` ist ein Array unbestimmter Laenge; deterministisches CBOR kennt
+    // das nicht.
+    bytes[0] = 0x9f;
+    bytes.push(0xff);
+
+    let Err(error) = decode_pre_anchor(&bytes) else {
+        panic!("eine Huelle unbestimmter Laenge ist keine Vorstufe");
+    };
+    expect_trust_code(error, "EA-TRUST-ANCHOR-SHAPE");
+}
+
+#[test]
+fn a_non_minimal_integer_encoding_is_not_a_pre_anchor() {
+    let pre = fixture_pre_anchor();
+    let mut bytes = pre.exact_bytes().to_vec();
+    assert_pre_anchor_prologue(&bytes);
+    // `0x18 0x01` ist dieselbe Zahl 1 in zwei Bytes. Der geliehene Vorlauf
+    // liest sie klaglos; erst `ea_cbor::validate` mit `ParserLimits::V1`
+    // besteht auf der kuerzesten Form.
+    bytes.splice(
+        PRE_ANCHOR_VERSION_OFFSET..=PRE_ANCHOR_VERSION_OFFSET,
+        [0x18, 0x01],
+    );
+
+    let Err(error) = decode_pre_anchor(&bytes) else {
+        panic!("eine nicht minimale Zahlkodierung ist kein deterministisches CBOR");
+    };
+    expect_trust_code(error, "EA-TRUST-ANCHOR-SHAPE");
+}
+
+#[test]
+fn a_root_key_that_is_not_forty_bytes_fails_the_flat_preflight() {
+    let pre = fixture_pre_anchor();
+    let mut oversized_key = pre.root_public_cose_key_bytes().to_vec();
+    assert_eq!(oversized_key.len(), 40);
+    oversized_key.push(0x00);
+    let bytes = hand_rolled_pre_anchor_with_root_key(
+        &pre,
+        &oversized_key,
+        pre.root_key_thumbprint().as_bytes(),
+    );
+
+    // Der Befund ist der Punkt dieses Zeugen: die Laengenschranke des
+    // Vorlaufs meldet einen FORMFEHLER. Ohne sie kaeme derselbe Schluessel
+    // erst an der Schluesselbindung zu Fall und meldete `EA-TRUST-ANCHOR-PIN`
+    // — eine andere Aussage ueber dieselben Bytes.
+    let Err(error) = decode_pre_anchor(&bytes) else {
+        panic!("ein Wurzelschluessel hat genau 40 Bytes");
+    };
+    expect_trust_code(error, "EA-TRUST-ANCHOR-SHAPE");
+}
+
+#[test]
+fn a_non_ed25519_root_key_is_rejected_by_the_pre_anchor_decoder() {
+    let pre = fixture_pre_anchor();
+    let kem_key = CanonicalPublicCoseKey::x25519([0x44; 32]).expect("X25519 ist ein COSE_Key");
+    let exact_kem_key = kem_key.to_deterministic_cbor();
+    assert_eq!(
+        exact_kem_key.len(),
+        40,
+        "der Vorlauf laesst diesen Schluessel passieren; die Bindung faengt ihn"
+    );
+    let bytes =
+        hand_rolled_pre_anchor_with_root_key(&pre, &exact_kem_key, kem_key.thumbprint().as_bytes());
+
+    let Err(error) = decode_pre_anchor(&bytes) else {
+        panic!("eine Organisationswurzel signiert und schluesselt nicht ein");
+    };
+    expect_trust_code(error, "EA-TRUST-ANCHOR-PIN");
+}
+
+#[test]
+fn a_root_key_that_does_not_match_its_thumbprint_is_rejected_by_the_decoder() {
+    let pre = fixture_pre_anchor();
+    let bytes =
+        hand_rolled_pre_anchor_with_root_key(&pre, pre.root_public_cose_key_bytes(), &[0x00; 32]);
+
+    let Err(error) = decode_pre_anchor(&bytes) else {
+        panic!("der Abdruck wird nach RFC 9679 neu gerechnet und nicht geglaubt");
+    };
+    expect_trust_code(error, "EA-TRUST-ANCHOR-PIN");
+}
+
+#[test]
+fn a_duplicate_admin_hash_is_rejected_by_the_decoder() {
+    let pre = fixture_pre_anchor();
+    let certificates = pre.initial_admin_certificate_object_hashes();
+    let duplicated = vec![certificates[0]; certificates.len()];
+    let bytes = hand_rolled_pre_anchor(
+        &pre,
+        PRE_ANCHOR_DOMAIN,
+        &duplicated,
+        pre.initial_admin_operator_binding_object_hashes(),
+    );
+
+    // Anzahl und Groesse stimmen, der Vorlauf sieht nichts. Nur die
+    // Listenpruefung besteht auf STRENGER Sortierung und damit auf
+    // Duplikatfreiheit.
+    let Err(error) = decode_pre_anchor(&bytes) else {
+        panic!("zwei gleiche Hashes sind ein Administrator und nicht zwei");
+    };
+    expect_trust_code(error, "EA-TRUST-ANCHOR-SHAPE");
+}
+
+#[test]
+fn an_unsorted_admin_hash_list_is_rejected_by_the_decoder() {
+    let pre = fixture_pre_anchor();
+    let mut certificates = pre.initial_admin_certificate_object_hashes().to_vec();
+    certificates.reverse();
+    let bytes = hand_rolled_pre_anchor(
+        &pre,
+        PRE_ANCHOR_DOMAIN,
+        &certificates,
+        pre.initial_admin_operator_binding_object_hashes(),
+    );
+
+    let Err(error) = decode_pre_anchor(&bytes) else {
+        panic!("die Reihenfolge der Liste ist Teil der festgeschriebenen Bytes");
+    };
+    expect_trust_code(error, "EA-TRUST-ANCHOR-SHAPE");
+}
+
+// ---------------------------------------------------------------------------
+// Genesis: Schritt 11, erste Haelfte
+// ---------------------------------------------------------------------------
+
+/// Die Kennungen der Zeremonie, in der die Genesiszeugen spielen.
+const CEREMONY_ORGANIZATION: [u8; 16] = [0x10; 16];
+const CEREMONY_CHAIN: [u8; 16] = [0x11; 16];
+const CEREMONY_POLICY: [u8; 32] = [0x13; 32];
+const CEREMONY_REGISTRY_VERSION: u64 = 7;
+const GENESIS_ENTRY: [u8; 32] = [0x91; 32];
+
+fn ceremony_organization() -> OrganizationId {
+    OrganizationId::try_from(&CEREMONY_ORGANIZATION[..]).unwrap()
+}
+
+fn ceremony_chain() -> ChainId {
+    ChainId::try_from(&CEREMONY_CHAIN[..]).unwrap()
+}
+
+fn ceremony_policy() -> ObjectHash {
+    ObjectHash::try_from(&CEREMONY_POLICY[..]).unwrap()
+}
+
+/// Ein fertiger, von `ea-schema` bereits gepruefter Genesis-Koerper.
+///
+/// Er entsteht LOKAL in dieser Datei: `bind_genesis` prueft nichts, was
+/// `ea-schema` schon prueft, und die Zeugen sollen genau die drei Aussagen der
+/// Zeremonie treffen.
+fn ceremony_genesis(
+    organization_id: OrganizationId,
+    chain_id: ChainId,
+    initial_policy_object_hash: ObjectHash,
+    registry_version: u64,
+) -> GenesisV1 {
+    // UUIDv7: Fassung in Byte 6, Variante in Byte 8 (`CommonHeaderV1::new`).
+    let mut record = [0x21_u8; 16];
+    record[6] = 0x71;
+    record[8] = 0x81;
+    let header = CommonHeaderV1::new(
+        RecordId::try_from(&record[..]).unwrap(),
+        UnixMillis::new(1_700_000_000_000),
+        "Europe/Berlin",
+        OperatorSnapshotV1::new(
+            organization_id,
+            OperatorSubjectId::try_from(&[0x20; 16][..]).unwrap(),
+            "Erika Beispiel",
+            "Einsatzleitung",
+            [0x30; 32],
+            ObjectHash::try_from(&[0x40; 32][..]).unwrap(),
+        )
+        .unwrap(),
+        NativeSourceV1::new("writer-native", 1).unwrap(),
+        RegistryVersion::new(registry_version),
+    )
+    .unwrap();
+    GenesisV1::new(
+        header,
+        organization_id,
+        chain_id,
+        ObjectHash::try_from(&[0x12; 32][..]).unwrap(),
+        1,
+        initial_policy_object_hash,
+    )
+    .expect("der Genesis-Koerper ist gegen den Nutzlastnachtrag gueltig")
+}
+
+fn genesis_of_this_ceremony() -> GenesisV1 {
+    ceremony_genesis(
+        ceremony_organization(),
+        ceremony_chain(),
+        ceremony_policy(),
+        CEREMONY_REGISTRY_VERSION,
+    )
+}
+
+fn genesis_envelope(sequence: u64, previous: Option<EntryHash>) -> GenesisEnvelopeV1 {
+    GenesisEnvelopeV1 {
+        chain_sequence: ChainSequence::new(sequence),
+        previous_entry_hash: previous,
+        genesis_entry_hash: EntryHash::try_from(&GENESIS_ENTRY[..]).unwrap(),
+    }
+}
+
+fn bind_ceremony_genesis(
+    genesis: &GenesisV1,
+    envelope: &GenesisEnvelopeV1,
+) -> Result<ea_admin::GenesisBinding, AdminError> {
+    bind_genesis(
+        genesis,
+        ceremony_organization(),
+        ceremony_chain(),
+        ceremony_policy(),
+        RegistryVersion::new(CEREMONY_REGISTRY_VERSION),
+        envelope,
+    )
+}
+
+#[test]
+fn a_genesis_of_this_ceremony_binds_its_entry_hash_and_registry_head() {
+    let genesis = genesis_of_this_ceremony();
+    let binding = bind_ceremony_genesis(&genesis, &genesis_envelope(0, None))
+        .expect("Sequenz 0 ohne Vorgaenger, und die Kennungen sind die dieser Zeremonie");
+
+    assert_eq!(binding.genesis_entry_hash().as_bytes(), &GENESIS_ENTRY);
+    assert_eq!(
+        binding.registry_version().get(),
+        CEREMONY_REGISTRY_VERSION,
+        "gebunden wird der Kopf aus Schritt 10 (`:1145`)"
+    );
+}
+
+#[test]
+fn a_genesis_at_a_nonzero_chain_sequence_is_refused() {
+    let genesis = genesis_of_this_ceremony();
+
+    let Err(error) = bind_ceremony_genesis(&genesis, &genesis_envelope(1, None)) else {
+        panic!("Genesis ist der ERSTE Eintrag der Kette");
+    };
+    expect_admin_code(error, "EA-CEREMONY-GENESIS-SEQUENCE");
+}
+
+#[test]
+fn a_genesis_carrying_a_previous_entry_hash_is_refused() {
+    let genesis = genesis_of_this_ceremony();
+    let previous = EntryHash::try_from(&[0x77_u8; 32][..]).unwrap();
+
+    // `design.md:927`: „Fuer Genesis ist `previous-entry-hash = null`".
+    let Err(error) = bind_ceremony_genesis(&genesis, &genesis_envelope(0, Some(previous))) else {
+        panic!("vor dem ersten Eintrag steht kein Eintrag");
+    };
+    expect_admin_code(error, "EA-CEREMONY-GENESIS-SEQUENCE");
+}
+
+#[test]
+fn a_genesis_from_another_organization_chain_policy_or_head_is_refused() {
+    let other_organization = OrganizationId::try_from(&[0x5a_u8; 16][..]).unwrap();
+    let other_chain = ChainId::try_from(&[0x6b_u8; 16][..]).unwrap();
+    let other_policy = ObjectHash::try_from(&[0x7c_u8; 32][..]).unwrap();
+
+    let mismatches = [
+        (
+            "Organisation",
+            ceremony_genesis(
+                other_organization,
+                ceremony_chain(),
+                ceremony_policy(),
+                CEREMONY_REGISTRY_VERSION,
+            ),
+        ),
+        (
+            "Kette",
+            ceremony_genesis(
+                ceremony_organization(),
+                other_chain,
+                ceremony_policy(),
+                CEREMONY_REGISTRY_VERSION,
+            ),
+        ),
+        (
+            "Richtlinie",
+            ceremony_genesis(
+                ceremony_organization(),
+                ceremony_chain(),
+                other_policy,
+                CEREMONY_REGISTRY_VERSION,
+            ),
+        ),
+        (
+            "Registrierungskopf",
+            ceremony_genesis(
+                ceremony_organization(),
+                ceremony_chain(),
+                ceremony_policy(),
+                CEREMONY_REGISTRY_VERSION - 1,
+            ),
+        ),
+    ];
+
+    for (label, genesis) in mismatches {
+        let Err(error) = bind_ceremony_genesis(&genesis, &genesis_envelope(0, None)) else {
+            panic!("{label} gehoert nicht zu dieser Zeremonie");
+        };
+        expect_admin_code(error, "EA-CEREMONY-GENESIS-CONTEXT-MISMATCH");
+    }
 }

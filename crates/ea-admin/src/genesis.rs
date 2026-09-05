@@ -31,6 +31,18 @@
 //!    letzten Head" (`:1145`). Der Kopf entsteht in Schritt 10; Genesis muss
 //!    ihn nennen und nicht einen frueheren.
 //!
+//! # Was ein `GenesisBinding` NICHT beweist
+//!
+//! [`bind_genesis`] bekommt Organisation, Kette, Richtlinienhash und den
+//! letzten Registrierungskopf VOM AUFRUFER — die Funktion erzeugt keinen
+//! dieser vier Werte und kann keinen von ihnen gegen eine Quelle halten.
+//! Ein [`GenesisBinding`] belegt deshalb genau eine Sache: dass der
+//! Genesis-Koerper und die GENANNTEN Werte in sich stimmen. Es belegt NICHT,
+//! dass diese Werte die einer bestimmten Zeremonie sind; wer die vier frei
+//! waehlt, bekommt eine Bindung auf genau diese Wahl. Woher die Kennungen aus
+//! Schritt 1 und der Kopf aus Schritt 10 kommen, weiss nur die Stelle, die sie
+//! erzeugt hat — der Koordinator des Zwoelfschrittablaufs, nicht diese Datei.
+//!
 //! # Was hier NICHT entsteht
 //!
 //! Der `genesisEntryHash` selbst. Er ist
@@ -102,8 +114,9 @@ impl GenesisBinding {
 /// die Sequenz nicht 0 ist oder ein Vorgaengerhash anliegt (`design.md:927`);
 /// [`AdminError::GenesisContextMismatch`] mit
 /// `EA-CEREMONY-GENESIS-CONTEXT-MISMATCH`, wenn Organisation, Kette, initiale
-/// Richtlinie oder der gebundene Registrierungskopf nicht die dieser Zeremonie
-/// sind.
+/// Richtlinie oder der gebundene Registrierungskopf des Genesis nicht die
+/// hier UEBERGEBENEN sind. Dass die uebergebenen die der laufenden Zeremonie
+/// sind, kann diese Funktion nicht wissen (siehe Moduldokumentation).
 pub fn bind_genesis(
     genesis: &GenesisV1,
     organization_id: OrganizationId,

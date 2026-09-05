@@ -75,9 +75,48 @@
 
 use core::fmt;
 
+use ea_crypto::object_hash;
 use ea_types::{Hash32, KeyThumbprint};
 
 use crate::AdminError;
+
+/// Die Domaene des Rechnerabdrucks.
+///
+/// Er steht als erstes Element IN den gehashten Bytes und trennt ihn damit von
+/// jedem anderen Digest dieses Produkts — dieselbe Bauart wie die zwei
+/// Domaenen in [`crate::bootstrap`].
+const MACHINE_DOMAIN: &[u8] = b"EINSATZARCHIV-CEREMONY-MACHINE-v1";
+
+/// Der Abdruck EINES Rechners aus dem, was der Wirt ueber ihn weiss.
+///
+/// # Warum diese Funktion existiert
+///
+/// Schritt 12 vergleicht zwei Rechner: den, auf dem die Zeremonie lief, und
+/// den, auf dem der Recovery-Test lief (`:1347`). Ein Vergleich zweier Werte
+/// ist nur dann eine Aussage, wenn beide auf DIESELBE Weise entstanden sind —
+/// zwei Bildungsvorschriften waeren zwei Wahrheiten darueber, was „derselbe
+/// Rechner" heisst, und der Vergleich faende dann nie eine Gleichheit.
+///
+/// WAS der Wirt hineingibt, entscheidet er: unter Linux ueblicherweise der
+/// Inhalt von `/etc/machine-id`, unter macOS die Hardware-UUID. Diese Crate
+/// liest kein Betriebssystem — genau wie `ea_operator::linux::account_inputs`
+/// die geernteten Bytes entgegennimmt und nicht selbst erntet
+/// (`crates/ea-operator/src/linux.rs:32-40`).
+///
+/// Der Wert ist ein Bindungshash und kein Geheimnis; er steht so auch im
+/// persistierten Zeremoniezustand.
+#[must_use]
+pub fn machine_fingerprint(host_machine_identity: &[u8]) -> Hash32 {
+    let mut bytes = Vec::with_capacity(MACHINE_DOMAIN.len() + host_machine_identity.len());
+    bytes.extend_from_slice(MACHINE_DOMAIN);
+    bytes.extend_from_slice(host_machine_identity);
+    // Ein `ObjectHash` IST 32 Byte; der zweite Zweig ist unerreichbar. Er
+    // traegt trotzdem keinen `expect`: ein Abdruck, der die Zeremonie
+    // begleitet, soll den Prozess unter keinen Umstaenden beenden, und
+    // [`Hash32::ZERO`] ist der konservative Wert — er gleicht keinem Rechner,
+    // den ein Wirt je meldet, und laesst Schritt 12 damit fail-closed.
+    Hash32::try_from(object_hash(&bytes).as_bytes().as_slice()).unwrap_or(Hash32::ZERO)
+}
 
 /// Der Freigabezustand einer Organisation.
 ///
@@ -167,6 +206,8 @@ pub struct RecoveryTestObservation {
 /// [`BootstrapCoordinator::record_fresh_machine_recovery_test`]: crate::BootstrapCoordinator::record_fresh_machine_recovery_test
 pub struct FreshMachineRecoveryProof {
     machine_fingerprint: Hash32,
+    expected_trust_anchor_hash: Hash32,
+    media_expected: usize,
 }
 
 /// Faellt das Urteil ueber einen Recovery-Testlauf.
@@ -216,6 +257,8 @@ pub fn verify_fresh_machine_recovery_test(
     }
     Ok(FreshMachineRecoveryProof {
         machine_fingerprint: observation.machine_fingerprint,
+        expected_trust_anchor_hash: observation.expected_trust_anchor_hash,
+        media_expected: observation.media_expected,
     })
 }
 
@@ -228,5 +271,33 @@ impl FreshMachineRecoveryProof {
     #[must_use]
     pub const fn machine_fingerprint(&self) -> Hash32 {
         self.machine_fingerprint
+    }
+
+    /// Der Anker, gegen den der Test geprueft hat.
+    ///
+    /// `:1347` verlangt den Test „mit explizitem finalem Trust Anchor". WELCHER
+    /// Anker das war, entscheidet, ob dieser Nachweis ueberhaupt von der
+    /// Zeremonie handelt, die ihn verbraucht: ein in sich vollkommen
+    /// stimmiger Lauf gegen den Anker einer FREMDEN Organisation ist ein
+    /// bestandener Test — nur nicht dieser. Der Wert wandert deshalb aus der
+    /// Beobachtung in den Nachweis und wird von
+    /// [`BootstrapCoordinator::record_fresh_machine_recovery_test`] gegen die
+    /// Ankerbytes gehalten, die Schritt 11 angenommen hat.
+    ///
+    /// [`BootstrapCoordinator::record_fresh_machine_recovery_test`]: crate::BootstrapCoordinator::record_fresh_machine_recovery_test
+    #[must_use]
+    pub const fn expected_trust_anchor_hash(&self) -> Hash32 {
+        self.expected_trust_anchor_hash
+    }
+
+    /// Wie viele Recovery-Medien der Test erwartet hat.
+    ///
+    /// Ein Lauf, der weniger Medien erwartet hat, als Schritt 4 versiegelt
+    /// hat, hat den Bestand nicht vollstaendig geprueft — `:1897` nennt „ein
+    /// fehlendes Medium" als Grund fuer den Fehlschlag des GESAMTEN Tests, und
+    /// ein Medium, nach dem gar nicht gefragt wurde, fehlt genauso.
+    #[must_use]
+    pub const fn media_expected(&self) -> usize {
+        self.media_expected
     }
 }

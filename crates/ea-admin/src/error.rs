@@ -139,6 +139,16 @@ pub enum AdminError {
     /// nicht stattgefunden. WELCHE Zahl fehlt, gehoert in die Oberflaeche, die
     /// den Schritt fuehrt.
     BootstrapQuorumMissing,
+    /// Ein Schritt legt etwas vor, das zu einer ANDEREN Zeremonie gehoert.
+    ///
+    /// Die zwoelf Schritte reichen Objekte durch, die anderswo entstanden
+    /// sind — eine Administrationsautorisierung aus `ea-trust`, eine
+    /// Beobachtung aus `ea-recovery`. Jedes davon nennt eine Organisation,
+    /// eine Kette oder einen Anker, und keines davon gehoert automatisch zu
+    /// der Zeremonie, die es vorgelegt bekommt. Dieser Arm ist der Befund
+    /// „gehoert nicht hierher"; er unterscheidet sich von
+    /// [`Self::GenesisContextMismatch`] nur im Gegenstand, nicht in der Folge.
+    BootstrapContextMismatch,
     /// Die Ablage des Zeremoniezustands hat nicht geantwortet.
     BootstrapStoreUnavailable,
     /// Der persistierte Zeremoniezustand ist nicht mehr deutbar.
@@ -203,6 +213,7 @@ impl AdminError {
             Self::BootstrapStepOutOfOrder => "EA-CEREMONY-BOOTSTRAP-STEP-OUT-OF-ORDER",
             Self::BootstrapPreAnchorUnconfirmed => "EA-CEREMONY-PRE-ANCHOR-UNCONFIRMED",
             Self::BootstrapQuorumMissing => "EA-CEREMONY-BOOTSTRAP-QUORUM-MISSING",
+            Self::BootstrapContextMismatch => "EA-CEREMONY-BOOTSTRAP-CONTEXT-MISMATCH",
             Self::BootstrapStoreUnavailable => "EA-CEREMONY-BOOTSTRAP-STORE-UNAVAILABLE",
             Self::BootstrapStateShape => "EA-CEREMONY-BOOTSTRAP-STATE-SHAPE",
             Self::GenesisSequence => "EA-CEREMONY-GENESIS-SEQUENCE",

@@ -36,8 +36,9 @@ ea-operator.workspace = true
 # baut ihn deshalb NICHT nach — eine zweite Kodierung waere eine zweite
 # Wahrheit —, sondern nimmt den fertigen Datensatz entgegen und bindet ihn an
 # Sequenz, Kennungen und Registrierungskopf dieser Zeremonie. `ea-schema` haengt
-# selbst nur an `ea-cbor`, `ea-types`, `jiff` und `minicbor`; der Graph waechst
-# dadurch nicht in Richtung Writer, Recovery, Chain oder Archiv.
+# selbst nur an `ea-cbor`, `ea-types`, `jiff`, `jiff-tzdb`, `minicbor` und
+# `unicode-normalization` (`crates/ea-schema/Cargo.toml:10-15`); der Graph
+# waechst dadurch nicht in Richtung Writer, Recovery, Chain oder Archiv.
 ea-schema.workspace = true
 # Der Beweiszustand `VerifiedAdminAuthorization` und der laufuebergreifende
 # Verbrauch `consume_admin_authorization`. `ea-trust` waechst durch diese Crate
@@ -45,9 +46,10 @@ ea-schema.workspace = true
 ea-trust.workspace = true
 ea-types.workspace = true
 # Schritt 1 erzeugt „zufaellige Organisations- und Ketten-ID" (`:1336`). Der
-# Baum kennt keinen gemeinsamen Zufallsport — `getrandom::fill` wird in
-# `ea-audit`, `ea-operator`, `ea-reader` und `ea-crypto` DIREKT gerufen, und
-# `CryptoRandomSource` (`crates/ea-crypto/src/hpke.rs:24`) ist crate-privat.
+# Baum kennt keinen gemeinsamen Zufallsport: `getrandom::fill` wird an 18
+# Stellen in acht Kisten DIREKT gerufen — `ea-audit`, `ea-crypto`, `ea-draft`,
+# `ea-operator`, `ea-reader`, `ea-reader-wasm`, `ea-sync-client`, `ea-writer` —,
+# und `CryptoRandomSource` (`crates/ea-crypto/src/hpke.rs:24`) ist crate-privat.
 # `SystemRandomSource` ruft dasselbe `getrandom::fill` wie jene Stellen; der
 # Port darueber existiert nur, damit ein Zeuge die Kennungen vorhersagen kann.
 getrandom.workspace = true

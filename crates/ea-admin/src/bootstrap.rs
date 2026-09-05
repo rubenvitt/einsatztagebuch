@@ -57,12 +57,17 @@
 //!
 //! # Das signierte Bootstrap-Transkript
 //!
-//! Vor dem Bootstrap gibt es keine Bedienerbindung und damit keine lokale
-//! Auditidentitaet. Der uebliche Weg
-//! `LocalAuditService::record_signed(AuditActorProof::OperatorSession(..), ..)`
-//! verlangt aber genau eine (`crates/ea-audit/src/event.rs:229`) — ihn hier zu
-//! gehen hiesse, eine Identitaet zu behaupten, die es zu diesem Zeitpunkt noch
-//! gar nicht gab, und die Auditzeile waere falsch zugerechnet. Der Koordinator
+//! Vor dem Bootstrap gibt es weder eine Bedienerbindung noch ein
+//! registriertes Geraet und damit keine lokale Auditidentitaet.
+//! `LocalAuditService::record_signed` (`crates/ea-audit/src/event.rs:237`)
+//! verlangt dafuer einen `AuditActorProof`, und der ist GESCHLOSSEN: drei
+//! Arme, mehr gibt es nicht (`event.rs:157-166`). Keiner von ihnen passt
+//! hierher — `OperatorSession` verlangt eine Bedienerbindung,
+//! `AuthenticatedDevice` ein bereits geprueftes Geraet, und beides entsteht
+//! erst in den Schritten 3 und 8; `Expired` ist der Zustand, in den ein
+//! entwerteter Nachweis zusammenfaellt, und keine Identitaet. Einen davon hier
+//! zu waehlen hiesse, eine Identitaet zu behaupten, die es zu diesem Zeitpunkt
+//! noch gar nicht gab, und die Auditzeile waere falsch zugerechnet. Der Koordinator
 //! schreibt deshalb KEINE Auditzeile, sondern haelt den initialen Root und die
 //! zwei ankergepinnten Admin-Zertifikat-/Bindungs-PAARE in einem
 //! Wurzel-signierten [`BootstrapTranscriptV1`] fest. Ab Schritt 10 uebernimmt
@@ -71,9 +76,11 @@
 
 use std::collections::BTreeSet;
 
-use ea_crypto::{ContentType, object_hash};
+use ea_crypto::{
+    CanonicalPublicCoseKey, ContentType, ProtectedHeader, object_hash, parse_cose_sign1,
+};
 use ea_format::{ExactObjectBytes, OperatorRoleV1, TrustPayloadV1};
-use ea_key_provider::{KeyHandle, KeyProvider};
+use ea_key_provider::{KeyHandle, KeyProvider, KeystoreProvider, SecretPurpose};
 use ea_operator::OperatorSessionProof;
 use ea_trust::{
     PreAnchorV1, TrustAnchorV1, TrustStateStore, VerifiedAdminAuthorizationIntent,
@@ -85,8 +92,8 @@ use ea_types::{
 
 use crate::{
     AdminError, AnchorMedia, AnchorMediumId, FreshMachineRecoveryProof, GenesisBinding,
-    MediaConfirmation, ProductionState, RootCeremonyService, SecondChannelConfirmation,
-    confirm_on_media, verify_anchor_transition,
+    ProductionState, RootCeremonyService, SecondChannelConfirmation,
+    confirm_final_anchor_fingerprint, confirm_on_media, verify_anchor_transition,
 };
 
 /// Die Domaene des Transkripts.
@@ -190,6 +197,18 @@ impl BootstrapStep {
         }
     }
 
+    /// Der Schritt zu einer Nummer aus [`Self::number`].
+    ///
+    /// Die Umkehrung von [`Self::number`], und sie steht daneben, damit beide
+    /// Richtungen an derselben Stelle nachlesbar sind. Sie wird von
+    /// [`BootstrapStateV1::from_persisted_image`] gebraucht: eine Nummer aus
+    /// einer Datei ist eine BEHAUPTUNG, und eine, die keinen der zwoelf
+    /// Schritte nennt, ist keine.
+    #[must_use]
+    pub fn from_number(number: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|step| step.number() == number)
+    }
+
     /// Der STABILE Aussenname dieses Schritts.
     ///
     /// # Warum eine Tabelle und kein `Debug`
@@ -226,9 +245,11 @@ impl BootstrapStep {
 ///
 /// # Warum ein eigener Port und kein vorhandener
 ///
-/// Es gibt im Baum keinen. `getrandom::fill` wird an sieben Stellen DIREKT
-/// gerufen (`ea-audit`, `ea-operator`, `ea-reader`, `ea-crypto`), und der
-/// einzige Trait dieser Art — `CryptoRandomSource` in
+/// Es gibt im Baum keinen. `getrandom::fill` wird an 18 Stellen in ACHT Kisten
+/// DIREKT gerufen — `ea-audit` (1), `ea-crypto` (1), `ea-draft` (1),
+/// `ea-operator` (1), `ea-reader` (9), `ea-reader-wasm` (3), `ea-sync-client`
+/// (1) und `ea-writer` (1) — und keine dieser Stellen liegt hinter einem
+/// gemeinsamen Port. Der einzige Trait dieser Art — `CryptoRandomSource` in
 /// `crates/ea-crypto/src/hpke.rs:24` — ist crate-privat und dient dort dem
 /// HPKE-Seal. Ein Port muss hier trotzdem sein: Schritt 1 erzeugt die beiden
 /// Kennungen, an denen die ganze Zeremonie haengt, und ein Zeuge muss sie
@@ -236,7 +257,7 @@ impl BootstrapStep {
 /// messen zu koennen.
 ///
 /// [`SystemRandomSource`] ist die produktive Umsetzung und ruft dasselbe
-/// `getrandom::fill` wie die sieben anderen Stellen.
+/// `getrandom::fill` wie jene 18 Stellen.
 pub trait CeremonyRandomSource {
     /// Fuellt `destination` mit kryptografisch zufaelligen Bytes.
     ///
@@ -324,6 +345,11 @@ impl BackedUpKeyClass {
             Self::RecoveryKem => 2,
             Self::HistoricalGrantAuthority => 3,
         }
+    }
+
+    /// Die Umkehrung von [`Self::code`] fuer das persistierte Abbild.
+    fn from_code(code: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.code() == code)
     }
 }
 
@@ -441,7 +467,14 @@ pub struct BootstrapStateV1 {
     admin_pairs: Vec<AdminBootstrapPairV1>,
     exact_pre_anchor_bytes: Option<Vec<u8>>,
     sealed_pre_anchor_fingerprint: Option<Hash32>,
-    sealed_medium_count: usize,
+    /// Die Medien, auf denen Schritt 4 die Vorstufe festgeschrieben hat —
+    /// WELCHE und nicht nur wie viele.
+    ///
+    /// `:1346` verlangt die finalen Ankerbytes „auf beiden Medien", also auf
+    /// denselben. Eine blosse Zahl liesse Schritt 11 zwei beliebige andere
+    /// Datentraeger annehmen; [`KeyBackupRecordV1::media`] fuehrt aus
+    /// demselben Grund Kennungen und keine Anzahl.
+    sealed_media: Vec<AnchorMediumId>,
     recovery_kem: Option<OuterKeyRecordV1>,
     hga_signing: Option<OuterKeyRecordV1>,
     approvers: Vec<OuterKeyRecordV1>,
@@ -453,6 +486,18 @@ pub struct BootstrapStateV1 {
     exact_final_anchor_bytes: Option<Vec<u8>>,
     transcript: Option<BootstrapTranscriptV1>,
     recovery_test_machine: Option<Hash32>,
+    /// Der Rechner, auf dem DIESE Zeremonie laeuft — festgehalten in Schritt 1.
+    ///
+    /// `:1347` verlangt fuer Schritt 12 „einen frischen Rechner". Woran sich
+    /// „frisch" misst, darf nicht der Aufrufer von Schritt 12 bestimmen: er
+    /// ist die Partei, die [`ProductionState::Ready`] will. Der Wirt benennt
+    /// seinen Rechner deshalb EINMAL, beim Beginn, und der Vergleich laeuft
+    /// gegen diesen festgehaltenen Wert.
+    ///
+    /// `None` heisst „dieser Wirt hat seinen Rechner nicht benannt" — und ist
+    /// fail-closed: eine solche Zeremonie erreicht Schritt 12 nicht, weil sich
+    /// „nicht derselbe Rechner" ueber nichts messen liesse.
+    ceremony_machine: Option<Hash32>,
 }
 
 impl BootstrapStateV1 {
@@ -463,7 +508,11 @@ impl BootstrapStateV1 {
     /// [`Self::from_persisted_image`]. Zwei Stellen waeren zwei Wahrheiten
     /// darueber, wie eine leere Zeremonie aussieht, und der Wiedereinleser
     /// verglaeche gegen die falsche.
-    fn fresh(organization_id: OrganizationId, chain_id: ChainId) -> Self {
+    fn fresh(
+        organization_id: OrganizationId,
+        chain_id: ChainId,
+        ceremony_machine: Option<Hash32>,
+    ) -> Self {
         Self {
             step: BootstrapStep::GenerateIds,
             aborted: false,
@@ -474,7 +523,7 @@ impl BootstrapStateV1 {
             admin_pairs: Vec::new(),
             exact_pre_anchor_bytes: None,
             sealed_pre_anchor_fingerprint: None,
-            sealed_medium_count: 0,
+            sealed_media: Vec::new(),
             recovery_kem: None,
             hga_signing: None,
             approvers: Vec::new(),
@@ -486,55 +535,201 @@ impl BootstrapStateV1 {
             exact_final_anchor_bytes: None,
             transcript: None,
             recovery_test_machine: None,
+            ceremony_machine,
         }
     }
 
-    /// Liest ein Byteabbild aus [`Self::persisted_image`] zurueck — SOWEIT das
-    /// bytegetreu moeglich ist.
+    /// Liest ein Byteabbild aus [`Self::persisted_image`] zurueck.
     ///
-    /// # Die Grenze, und warum sie hier steht und nicht in einer Ablage
+    /// # Warum das VOLLSTAENDIG geht — und warum es das muss
     ///
-    /// Wiederhergestellt wird ausschliesslich eine Zeremonie BEI SCHRITT 1.
-    /// Das ist keine Bequemlichkeit, sondern die Grenze des Abbilds selbst:
-    /// [`push_handle`] gibt von einem [`KeyHandle`] Anwendung, Kontoinstanz
-    /// und Zweck preis, aber weder seinen `KeystoreProvider` noch seine
-    /// `KeyEntryPolicy` (`crates/ea-key-provider/src/contract.rs:129-160`).
-    /// Ein Zustand, der einen Griff traegt — also jeder ab Schritt 2 —, kaeme
-    /// aus dem Abbild nur GERATEN zurueck, und ein geratener Zeremoniezustand
-    /// ist schlimmer als keiner: er behauptete eine Adresse, unter der der
-    /// Wirt nichts findet.
+    /// Die Zusage der Moduldokumentation lautet „Ein Neustart nimmt denselben
+    /// Schritt wieder auf". Sie ist nur wahr, wenn jeder Zustand zurueckkommt,
+    /// den [`BootstrapStore::store`] hinausschreibt — und geschrieben werden
+    /// alle zwoelf. Ein Wiedereinleser, der nur Schritt 1 annaehme, machte aus
+    /// jeder Zeremonie ab Schritt 2 eine Sackgasse: `resume`,
+    /// `resume_or_begin`, `begin` und `restart_with_new_ids` faenden dann
+    /// gemeinsam denselben unlesbaren Zustand vor, und das einzige Heilmittel
+    /// waere, die Datei von Hand zu loeschen.
     ///
-    /// Geprueft wird deshalb nicht Feld fuer Feld, sondern in EINEM Zug: aus
-    /// Kennungen und Kopf entsteht [`Self::fresh`], und dessen Abbild muss dem
-    /// vorgelegten BYTEGLEICH sein. Damit faellt jedes Abbild jenseits von
-    /// Schritt 1, jedes abgeschnittene und jedes veraenderte auf denselben
-    /// Befund — und die Pruefung kann nicht hinter das Abbild zurueckfallen,
-    /// weil sie dasselbe [`Self::persisted_image`] benutzt, das sie prueft.
+    /// Ein [`KeyHandle`] steht dem nicht im Weg. Er traegt fuenf Stuecke, und
+    /// alle fuenf sind entweder im Abbild oder eine Konstante:
+    /// `KeystoreProvider` und `SecretPurpose` sind geschlossene Aufzaehlungen
+    /// und stehen als Kennziffer darin, die Kontoinstanz als Bindungshash, die
+    /// Anwendung ist `APPLICATION_NAMESPACE`, und `KeyEntryPolicy` hat GENAU
+    /// EINEN Wert und keinen zweiten Konstruktor
+    /// (`crates/ea-key-provider/src/contract.rs:83-112`, `:146-159`). Ein
+    /// Griff ist damit vollstaendig durch `(Speicher, Kontoinstanz, Zweck)`
+    /// bestimmt — geraten wird nichts.
     ///
-    /// Eine Oberflaeche, die spaetere Schritte fuehrt, braucht eine Ablage,
-    /// die den GETIPPTEN Zustand haelt — so wie `MemoryBootstrapStore` in den
-    /// Zeugen. Das ist Sache jener Oberflaeche und ihrer Ports (Plan Task 7),
-    /// nicht dieses Abbilds.
+    /// # Die Pruefung ist EIN Zug und keine Feldliste
+    ///
+    /// Gelesen wird Feld fuer Feld, und danach wird das Ergebnis mit
+    /// demselben [`Self::persisted_image`] neu kodiert, das es hervorgebracht
+    /// hat; die beiden Bytefolgen muessen gleich sein. Damit faellt jedes
+    /// abgeschnittene, jedes veraenderte und jedes um ein Feld reichere Abbild
+    /// auf denselben Befund — und die Pruefung kann nicht hinter das Abbild
+    /// zurueckfallen, weil sie dasselbe benutzt, das sie prueft.
     ///
     /// # Errors
     /// [`AdminError::BootstrapStateShape`] fuer jedes Abbild, das nicht
-    /// bytegleich eine begonnene Zeremonie beschreibt.
+    /// bytegleich eine Zeremonie dieses Bauwerks beschreibt.
     pub fn from_persisted_image(image: &[u8]) -> Result<Self, AdminError> {
-        let head = STATE_DOMAIN.len() + 3;
-        if image.len() < head + 32 || !image.starts_with(STATE_DOMAIN) {
-            return Err(AdminError::BootstrapStateShape);
-        }
-        let organization_id = OrganizationId::try_from(&image[head..head + 16])
-            .map_err(|_| AdminError::BootstrapStateShape)?;
-        let chain_id = ChainId::try_from(&image[head + 16..head + 32])
-            .map_err(|_| AdminError::BootstrapStateShape)?;
-
-        let candidate = Self::fresh(organization_id, chain_id);
-        if candidate.persisted_image() == image {
-            Ok(candidate)
+        let state = Self::decode_image(image)?;
+        if state.persisted_image() == image {
+            Ok(state)
         } else {
             Err(AdminError::BootstrapStateShape)
         }
+    }
+
+    /// Liest die Felder — ohne den Byteabgleich, der in
+    /// [`Self::from_persisted_image`] darueber liegt.
+    fn decode_image(image: &[u8]) -> Result<Self, AdminError> {
+        let mut reader = ImageReader::new(image);
+        if reader.take(STATE_DOMAIN.len())? != STATE_DOMAIN {
+            return Err(AdminError::BootstrapStateShape);
+        }
+        let step =
+            BootstrapStep::from_number(reader.byte()?).ok_or(AdminError::BootstrapStateShape)?;
+        let aborted = reader.flag()?;
+        let production_state = match reader.byte()? {
+            0 => ProductionState::BlockedRecoveryTest,
+            1 => ProductionState::Ready,
+            _ => return Err(AdminError::BootstrapStateShape),
+        };
+        let organization_id = OrganizationId::try_from(reader.take(16)?)
+            .map_err(|_| AdminError::BootstrapStateShape)?;
+        let chain_id =
+            ChainId::try_from(reader.take(16)?).map_err(|_| AdminError::BootstrapStateShape)?;
+        let ceremony_machine = reader.optional_hash()?;
+        let root = if reader.flag()? {
+            Some(RootKeyMaterialV1 {
+                signing_handle: reader.handle()?,
+                exact_public_cose_key: reader.slice()?.to_vec(),
+                key_thumbprint: KeyThumbprint::from(reader.hash32()?),
+                certificate_object_hash: reader.object_hash()?,
+            })
+        } else {
+            None
+        };
+        let mut admin_pairs = Vec::new();
+        for _ in 0..reader.count()? {
+            admin_pairs.push(AdminBootstrapPairV1 {
+                certificate_object_hash: reader.object_hash()?,
+                operator_binding_object_hash: reader.object_hash()?,
+            });
+        }
+        let exact_pre_anchor_bytes = reader.optional_slice()?;
+        let sealed_pre_anchor_fingerprint = reader.optional_hash()?;
+        let mut sealed_media = Vec::new();
+        for _ in 0..reader.count()? {
+            sealed_media.push(reader.medium()?);
+        }
+        let recovery_kem = reader.optional_outer_key()?;
+        let hga_signing = reader.optional_outer_key()?;
+        let mut approvers = Vec::new();
+        for _ in 0..reader.count()? {
+            approvers.push(OuterKeyRecordV1 {
+                handle: reader.handle()?,
+                key_thumbprint: KeyThumbprint::from(reader.hash32()?),
+            });
+        }
+        let mut backups = Vec::new();
+        for _ in 0..reader.count()? {
+            let class = BackedUpKeyClass::from_code(reader.byte()?)
+                .ok_or(AdminError::BootstrapStateShape)?;
+            let key_thumbprint = KeyThumbprint::from(reader.hash32()?);
+            let mut media = Vec::new();
+            for _ in 0..reader.count()? {
+                media.push(reader.medium()?);
+            }
+            backups.push(KeyBackupRecordV1 {
+                class,
+                key_thumbprint,
+                media,
+            });
+        }
+        let mut components = Vec::new();
+        for _ in 0..reader.count()? {
+            components.push(ComponentBindingV1 {
+                role: operator_role_from_code(reader.byte()?)?,
+                certificate_object_hash: reader.object_hash()?,
+                operator_binding_object_hash: reader.object_hash()?,
+            });
+        }
+        let fingerprints_compared = reader.flag()?;
+        let mut published_target_object_hashes = Vec::new();
+        for _ in 0..reader.count()? {
+            published_target_object_hashes.push(reader.object_hash()?);
+        }
+        let genesis_entry_hash = if reader.flag()? {
+            Some(
+                EntryHash::try_from(reader.take(32)?)
+                    .map_err(|_| AdminError::BootstrapStateShape)?,
+            )
+        } else {
+            None
+        };
+        let exact_final_anchor_bytes = reader.optional_slice()?;
+        let signed_transcript = if reader.flag()? {
+            Some((reader.slice()?.to_vec(), reader.slice()?.to_vec()))
+        } else {
+            None
+        };
+        let recovery_test_machine = reader.optional_hash()?;
+        if !reader.is_exhausted() {
+            return Err(AdminError::BootstrapStateShape);
+        }
+
+        let mut state = Self {
+            step,
+            aborted,
+            production_state,
+            organization_id,
+            chain_id,
+            root,
+            admin_pairs,
+            exact_pre_anchor_bytes,
+            sealed_pre_anchor_fingerprint,
+            sealed_media,
+            recovery_kem,
+            hga_signing,
+            approvers,
+            backups,
+            components,
+            fingerprints_compared,
+            published_target_object_hashes,
+            genesis_entry_hash,
+            exact_final_anchor_bytes,
+            transcript: None,
+            recovery_test_machine,
+            ceremony_machine,
+        };
+        if let Some((exact_bytes, root_signature)) = signed_transcript {
+            // Das Abbild traegt vom Transkript nur, was NICHT schon woanders
+            // darin steht: seine Bytes und die Signatur. Alles andere wird aus
+            // dem Zustand rekonstruiert — und dass diese Rekonstruktion
+            // stimmt, sagt hier kein Kommentar, sondern der Vergleich mit den
+            // gespeicherten Bytes.
+            let root = state.root.as_ref().ok_or(AdminError::BootstrapStateShape)?;
+            let pre_anchor_fingerprint = state
+                .sealed_pre_anchor_fingerprint
+                .ok_or(AdminError::BootstrapStateShape)?;
+            if transcript_exact_bytes(&state, root, pre_anchor_fingerprint) != exact_bytes {
+                return Err(AdminError::BootstrapStateShape);
+            }
+            state.transcript = Some(BootstrapTranscriptV1 {
+                organization_id: state.organization_id,
+                chain_id: state.chain_id,
+                root_certificate_object_hash: root.certificate_object_hash,
+                admin_pairs: state.admin_pairs.clone(),
+                pre_anchor_fingerprint,
+                exact_bytes,
+                root_signature,
+            });
+        }
+        Ok(state)
     }
 
     /// Der zuletzt ABGESCHLOSSENE Schritt.
@@ -616,6 +811,7 @@ impl BootstrapStateV1 {
         });
         image.extend_from_slice(self.organization_id.as_bytes());
         image.extend_from_slice(self.chain_id.as_bytes());
+        push_optional_hash(&mut image, self.ceremony_machine);
         match &self.root {
             None => image.push(0),
             Some(root) => {
@@ -631,12 +827,12 @@ impl BootstrapStateV1 {
             image.extend_from_slice(pair.certificate_object_hash.as_bytes());
             image.extend_from_slice(pair.operator_binding_object_hash.as_bytes());
         }
-        push_slice(
-            &mut image,
-            self.exact_pre_anchor_bytes.as_deref().unwrap_or(&[]),
-        );
+        push_optional_slice(&mut image, self.exact_pre_anchor_bytes.as_deref());
         push_optional_hash(&mut image, self.sealed_pre_anchor_fingerprint);
-        push_count(&mut image, self.sealed_medium_count);
+        push_count(&mut image, self.sealed_media.len());
+        for medium in &self.sealed_media {
+            image.extend_from_slice(medium.as_bytes());
+        }
         push_optional_outer_key(&mut image, self.recovery_kem.as_ref());
         push_optional_outer_key(&mut image, self.hga_signing.as_ref());
         push_count(&mut image, self.approvers.len());
@@ -671,10 +867,7 @@ impl BootstrapStateV1 {
                 image.extend_from_slice(hash.as_bytes());
             }
         }
-        push_slice(
-            &mut image,
-            self.exact_final_anchor_bytes.as_deref().unwrap_or(&[]),
-        );
+        push_optional_slice(&mut image, self.exact_final_anchor_bytes.as_deref());
         match &self.transcript {
             None => image.push(0),
             Some(transcript) => {
@@ -698,13 +891,182 @@ fn push_slice(image: &mut Vec<u8>, bytes: &[u8]) {
     image.extend_from_slice(bytes);
 }
 
-/// Ein Griff ist eine ADRESSE: Anwendung, Kontoinstanz-Bindungshash und
-/// Zweck. Kein Byte davon ist geheim
+/// Ein Griff ist eine ADRESSE: Speicher, Anwendung, Kontoinstanz-Bindungshash,
+/// Zweck und Verbreitungspolitik. Kein Byte davon ist geheim
 /// (`crates/ea-key-provider/src/contract.rs:170-183`).
+///
+/// Alle fuenf stehen hier — auch die Politik, die heute genau einen Wert hat.
+/// Sie steht nicht, weil sie sich aendern koennte, sondern damit ein Griff mit
+/// einer ANDEREN Politik am Byteabgleich in
+/// [`BootstrapStateV1::from_persisted_image`] auffiele, statt still auf
+/// `DEVICE_LOCAL` zurueckgelesen zu werden.
 fn push_handle(image: &mut Vec<u8>, handle: KeyHandle) {
+    image.push(keystore_provider_code(handle.keystore_provider()));
     push_slice(image, handle.application().as_bytes());
     image.extend_from_slice(handle.account_instance().as_bytes());
-    push_slice(image, format!("{:?}", handle.purpose()).as_bytes());
+    image.push(secret_purpose_code(handle.purpose()));
+    let policy = handle.entry_policy();
+    image.push(u8::from(policy.is_roaming()));
+    image.push(u8::from(policy.is_cloud_synchronised()));
+    image.push(u8::from(policy.is_included_in_ordinary_backup()));
+}
+
+const fn keystore_provider_code(provider: KeystoreProvider) -> u8 {
+    match provider {
+        KeystoreProvider::OperatingSystem => 0,
+        KeystoreProvider::InMemory => 1,
+    }
+}
+
+fn keystore_provider_from_code(code: u8) -> Result<KeystoreProvider, AdminError> {
+    match code {
+        0 => Ok(KeystoreProvider::OperatingSystem),
+        1 => Ok(KeystoreProvider::InMemory),
+        _ => Err(AdminError::BootstrapStateShape),
+    }
+}
+
+const fn secret_purpose_code(purpose: SecretPurpose) -> u8 {
+    match purpose {
+        SecretPurpose::WriterSigningKey => 0,
+        SecretPurpose::OperatorInstanceKey => 1,
+        SecretPurpose::DraftDek => 2,
+        SecretPurpose::LocalDatabaseKey => 3,
+    }
+}
+
+fn secret_purpose_from_code(code: u8) -> Result<SecretPurpose, AdminError> {
+    match code {
+        0 => Ok(SecretPurpose::WriterSigningKey),
+        1 => Ok(SecretPurpose::OperatorInstanceKey),
+        2 => Ok(SecretPurpose::DraftDek),
+        3 => Ok(SecretPurpose::LocalDatabaseKey),
+        _ => Err(AdminError::BootstrapStateShape),
+    }
+}
+
+fn operator_role_from_code(code: u8) -> Result<OperatorRoleV1, AdminError> {
+    match code {
+        0 => Ok(OperatorRoleV1::Writer),
+        1 => Ok(OperatorRoleV1::Reader),
+        2 => Ok(OperatorRoleV1::OrganizationAdmin),
+        _ => Err(AdminError::BootstrapStateShape),
+    }
+}
+
+fn push_optional_slice(image: &mut Vec<u8>, bytes: Option<&[u8]>) {
+    match bytes {
+        None => image.push(0),
+        Some(value) => {
+            image.push(1);
+            push_slice(image, value);
+        }
+    }
+}
+
+/// Der Leser des Abbilds — laengengepruefte Bewegungen, kein `unwrap`.
+///
+/// Jede Bewegung, die ueber das Ende hinausliefe, endet auf
+/// [`AdminError::BootstrapStateShape`]; ein abgeschnittenes Abbild ist kein
+/// halber Zustand, sondern keiner.
+struct ImageReader<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> ImageReader<'a> {
+    const fn new(image: &'a [u8]) -> Self {
+        Self { rest: image }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], AdminError> {
+        if self.rest.len() < length {
+            return Err(AdminError::BootstrapStateShape);
+        }
+        let (head, tail) = self.rest.split_at(length);
+        self.rest = tail;
+        Ok(head)
+    }
+
+    fn byte(&mut self) -> Result<u8, AdminError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn flag(&mut self) -> Result<bool, AdminError> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(AdminError::BootstrapStateShape),
+        }
+    }
+
+    fn count(&mut self) -> Result<usize, AdminError> {
+        let raw = self.take(4)?;
+        let value = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        usize::try_from(value).map_err(|_| AdminError::BootstrapStateShape)
+    }
+
+    fn slice(&mut self) -> Result<&'a [u8], AdminError> {
+        let length = self.count()?;
+        self.take(length)
+    }
+
+    fn optional_slice(&mut self) -> Result<Option<Vec<u8>>, AdminError> {
+        if self.flag()? {
+            self.slice().map(<[u8]>::to_vec).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn hash32(&mut self) -> Result<Hash32, AdminError> {
+        Hash32::try_from(self.take(32)?).map_err(|_| AdminError::BootstrapStateShape)
+    }
+
+    fn optional_hash(&mut self) -> Result<Option<Hash32>, AdminError> {
+        if self.flag()? {
+            self.hash32().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn object_hash(&mut self) -> Result<ObjectHash, AdminError> {
+        ObjectHash::try_from(self.take(32)?).map_err(|_| AdminError::BootstrapStateShape)
+    }
+
+    fn medium(&mut self) -> Result<AnchorMediumId, AdminError> {
+        let raw: [u8; 16] = self
+            .take(16)?
+            .try_into()
+            .map_err(|_| AdminError::BootstrapStateShape)?;
+        Ok(AnchorMediumId::new(raw))
+    }
+
+    fn handle(&mut self) -> Result<KeyHandle, AdminError> {
+        let provider = keystore_provider_from_code(self.byte()?)?;
+        // Die Anwendung ist eine Konstante des Griffkonstruktors; sie steht im
+        // Abbild, damit ein fremder Wert am Byteabgleich auffaellt, und wird
+        // hier nicht in den Griff zurueckgetragen.
+        let _application = self.slice()?;
+        let account_instance = self.hash32()?;
+        let purpose = secret_purpose_from_code(self.byte()?)?;
+        let _policy = self.take(3)?;
+        Ok(KeyHandle::new(provider, account_instance, purpose))
+    }
+
+    fn optional_outer_key(&mut self) -> Result<Option<OuterKeyRecordV1>, AdminError> {
+        if !self.flag()? {
+            return Ok(None);
+        }
+        Ok(Some(OuterKeyRecordV1 {
+            handle: self.handle()?,
+            key_thumbprint: KeyThumbprint::from(self.hash32()?),
+        }))
+    }
+
+    const fn is_exhausted(&self) -> bool {
+        self.rest.is_empty()
+    }
 }
 
 fn push_optional_hash(image: &mut Vec<u8>, hash: Option<Hash32>) {
@@ -776,12 +1138,13 @@ impl<'a> BootstrapCoordinator<'a> {
     pub fn begin(
         store: &'a mut dyn BootstrapStore,
         random: &mut dyn CeremonyRandomSource,
+        ceremony_machine: Option<Hash32>,
     ) -> Result<Self, AdminError> {
         if store.load()?.is_some() {
             return Err(AdminError::BootstrapStepRegression);
         }
         let (organization_id, chain_id) = fresh_ids(random)?;
-        Self::start(store, organization_id, chain_id)
+        Self::start(store, organization_id, chain_id, ceremony_machine)
     }
 
     /// Setzt eine persistierte Zeremonie fort — beim SELBEN Schritt.
@@ -794,31 +1157,55 @@ impl<'a> BootstrapCoordinator<'a> {
         let Some(state) = store.load()? else {
             return Ok(None);
         };
-        let pre_anchor = match state.exact_pre_anchor_bytes.as_deref() {
-            None => None,
-            Some(bytes) => {
-                Some(decode_pre_anchor(bytes).map_err(|_| AdminError::BootstrapStateShape)?)
-            }
-        };
-        Ok(Some(Self {
-            store,
-            state,
-            pre_anchor,
-        }))
+        Self::over(store, state).map(Some)
     }
 
     /// Fortsetzen, wenn es etwas fortzusetzen gibt, sonst beginnen.
+    ///
+    /// # Warum hier GENAU EINMAL geladen wird
+    ///
+    /// Zwei Ladevorgaenge sind zwei Fragen an eine Ablage, die sich zwischen
+    /// ihnen aendern darf: ein nebenlaeufiger Lauf, eine zweite Instanz
+    /// desselben Pfades oder eine von Hand geloeschte Zustandsdatei liefern
+    /// erst `Some` und dann `None`. Wer aus dem ersten Ergebnis auf das zweite
+    /// schliesst, hat die Ablage nicht gefragt, sondern geraten — und dieser
+    /// Pfad ist der EINZIGE, ueber den `apps/cli` in die Zeremonie kommt
+    /// (`apps/cli/src/commands/organization.rs`). Der Zustand wird deshalb
+    /// einmal geholt und danach benutzt.
     ///
     /// # Errors
     /// Wie [`Self::begin`] und [`Self::resume`].
     pub fn resume_or_begin(
         store: &'a mut dyn BootstrapStore,
         random: &mut dyn CeremonyRandomSource,
+        ceremony_machine: Option<Hash32>,
     ) -> Result<Self, AdminError> {
-        if store.load()?.is_some() {
-            return Ok(Self::resume(store)?.expect("gerade eben noch vorhanden"));
-        }
-        Self::begin(store, random)
+        let Some(state) = store.load()? else {
+            return Self::begin(store, random, ceremony_machine);
+        };
+        Self::over(store, state)
+    }
+
+    /// Der Koordinator ueber einem BEREITS gelesenen Zustand.
+    ///
+    /// Eine Stelle fuer beide Wiederaufnahmewege, damit „was aus der Ablage
+    /// kommt, wird so und nicht anders gedeutet" eine einzige Wahrheit
+    /// bleibt.
+    fn over(
+        store: &'a mut dyn BootstrapStore,
+        state: BootstrapStateV1,
+    ) -> Result<Self, AdminError> {
+        let pre_anchor = match state.exact_pre_anchor_bytes.as_deref() {
+            None => None,
+            Some(bytes) => {
+                Some(decode_pre_anchor(bytes).map_err(|_| AdminError::BootstrapStateShape)?)
+            }
+        };
+        Ok(Self {
+            store,
+            state,
+            pre_anchor,
+        })
     }
 
     /// Beginnt nach einem Abbruch mit NEUEN Kennungen von vorn (`:1349`).
@@ -837,6 +1224,7 @@ impl<'a> BootstrapCoordinator<'a> {
     pub fn restart_with_new_ids(
         store: &'a mut dyn BootstrapStore,
         random: &mut dyn CeremonyRandomSource,
+        ceremony_machine: Option<Hash32>,
     ) -> Result<Self, AdminError> {
         let previous = store.load()?;
         if !previous.as_ref().is_some_and(BootstrapStateV1::is_aborted) {
@@ -848,15 +1236,16 @@ impl<'a> BootstrapCoordinator<'a> {
         {
             return Err(AdminError::Crypto(ea_crypto::CryptoError::LocalRng));
         }
-        Self::start(store, organization_id, chain_id)
+        Self::start(store, organization_id, chain_id, ceremony_machine)
     }
 
     fn start(
         store: &'a mut dyn BootstrapStore,
         organization_id: OrganizationId,
         chain_id: ChainId,
+        ceremony_machine: Option<Hash32>,
     ) -> Result<Self, AdminError> {
-        let state = BootstrapStateV1::fresh(organization_id, chain_id);
+        let state = BootstrapStateV1::fresh(organization_id, chain_id, ceremony_machine);
         store.store(&state)?;
         Ok(Self {
             store,
@@ -938,10 +1327,27 @@ impl<'a> BootstrapCoordinator<'a> {
         {
             return Ok(());
         }
-        self.require_unsealed()?;
+        // Dieselbe Bewegung wie in [`Self::create_admin_pairs`], und aus
+        // demselben Grund: `:1349` unterscheidet die festgeschriebenen Felder
+        // nicht, also darf sich auch die FOLGE nicht danach unterscheiden,
+        // welches von ihnen sich geaendert hat. Ein Pfad, der nur abwiese,
+        // liesse eine nicht abgebrochene Zeremonie stehen — und
+        // [`Self::restart_with_new_ids`], das einzige Heilmittel der
+        // Spezifikation, verlangt genau den Abbruch.
+        if let Err(error) = self.require_unsealed() {
+            self.abort()?;
+            return Err(error);
+        }
+        let snapshot = self.state.clone();
         self.state.root = Some(root);
-        self.rebuild_pre_anchor()?;
-        self.advance(BootstrapStep::GenerateOfflineRoot)
+        if let Err(error) = self.rebuild_pre_anchor() {
+            self.restore(snapshot);
+            if error == AdminError::AnchorPreFieldChanged {
+                self.abort()?;
+            }
+            return Err(error);
+        }
+        self.commit(snapshot, BootstrapStep::GenerateOfflineRoot)
     }
 
     /// Schritt 3: die mindestens zwei ankergepinnten Admin-Paare (`:1338`) —
@@ -952,7 +1358,9 @@ impl<'a> BootstrapCoordinator<'a> {
     ///
     /// # Errors
     /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 2 fehlt;
-    /// [`AdminError::BootstrapQuorumMissing`] fuer weniger als zwei Paare;
+    /// [`AdminError::BootstrapQuorumMissing`] fuer weniger als zwei Paare und
+    /// fuer eine Paarmenge, die die Eins-zu-eins-Paarung aus `:1780` gar nicht
+    /// tragen kann (siehe [`require_distinct_pairing`]);
     /// [`AdminError::AnchorPreFieldChanged`], wenn die Vorstufe bereits
     /// versiegelt ist und diese Paare sie aendern — die Zeremonie ist danach
     /// ABGEBROCHEN und nur ueber [`Self::restart_with_new_ids`] fortsetzbar;
@@ -966,7 +1374,8 @@ impl<'a> BootstrapCoordinator<'a> {
         if pairs.len() < 2 {
             return Err(AdminError::BootstrapQuorumMissing);
         }
-        let previous = self.state.admin_pairs.clone();
+        require_distinct_pairing(pairs)?;
+        let snapshot = self.state.clone();
         self.state.admin_pairs = pairs.to_vec();
         if let Err(error) = self.rebuild_pre_anchor() {
             // Der abgebrochene Zustand darf nicht die ZURUECKGEWIESENEN Paare
@@ -974,7 +1383,7 @@ impl<'a> BootstrapCoordinator<'a> {
             // vergleicht seine Kennungen — und ein Zustand, dessen Paare nicht
             // zu seinen versiegelten Vorstufenbytes passen, waere in sich
             // widerspruechlich. Erst zuruecksetzen, dann abbrechen.
-            self.state.admin_pairs = previous;
+            self.restore(snapshot);
             if error == AdminError::AnchorPreFieldChanged {
                 self.abort()?;
             }
@@ -990,7 +1399,7 @@ impl<'a> BootstrapCoordinator<'a> {
             // nichts und faellt auch nicht zurueck.
             return Ok(fingerprint);
         }
-        self.advance(BootstrapStep::CreateAdminPairs)?;
+        self.commit(snapshot, BootstrapStep::CreateAdminPairs)?;
         Ok(fingerprint)
     }
 
@@ -1020,7 +1429,18 @@ impl<'a> BootstrapCoordinator<'a> {
             .clone()
             .ok_or(AdminError::BootstrapStepOutOfOrder)?;
         let confirmation = confirm_on_media(media, ids, &exact_bytes, fingerprint_confirmed)?;
-        self.seal(&confirmation)
+        let snapshot = self.state.clone();
+        self.state.sealed_pre_anchor_fingerprint = Some(confirmation.fingerprint());
+        // WELCHE Medien und nicht nur wie viele: `:1346` verlangt die finalen
+        // Ankerbytes „auf beiden Medien", und „beide" meint dieselben.
+        // `confirm_on_media` hat die Kennungen bereits auf Unterscheidbarkeit
+        // geprueft und ihre Zahl gemeldet — die Liste steht sortiert, damit
+        // das Abbild nicht von der Aufrufreihenfolge abhaengt.
+        let mut sealed: Vec<AnchorMediumId> = ids.to_vec();
+        sealed.sort_unstable();
+        debug_assert_eq!(sealed.len(), confirmation.medium_count());
+        self.state.sealed_media = sealed;
+        self.commit(snapshot, BootstrapStep::PinPreAnchorOnMedia)
     }
 
     /// Schritt 5: Recovery-KEM und Historical Grant Authority (`:1340`).
@@ -1028,16 +1448,38 @@ impl<'a> BootstrapCoordinator<'a> {
     /// # Errors
     /// [`AdminError::BootstrapPreAnchorUnconfirmed`] mit
     /// `EA-CEREMONY-PRE-ANCHOR-UNCONFIRMED`, solange Schritt 4 nicht
-    /// abgeschlossen ist; jeder Befund des Ports.
+    /// abgeschlossen ist; [`AdminError::BootstrapQuorumMissing`], wenn die
+    /// beiden Schluessel nicht GETRENNT sind — voneinander oder von der
+    /// Wurzel (`:1340`); jeder Befund des Ports.
     pub fn generate_recovery_and_hga_keys(
         &mut self,
         recovery_kem: OuterKeyRecordV1,
         hga_signing: OuterKeyRecordV1,
     ) -> Result<(), AdminError> {
         self.require_sealed()?;
+        // `:1340` sagt „getrennten Recovery-KEM-Schluessel UND
+        // Historical-Grant-Authority-Signaturschluessel". Zwei Namen fuer
+        // denselben Abdruck sind ein Schluessel, und ein Recovery-Schluessel,
+        // der die Wurzel IST, macht aus der Wiederherstellung eine zweite
+        // Verwendung des Schluessels, gegen dessen Verlust sie versichert.
+        let mut distinct = BTreeSet::new();
+        for thumbprint in [
+            recovery_kem.key_thumbprint,
+            hga_signing.key_thumbprint,
+            self.state
+                .root
+                .as_ref()
+                .ok_or(AdminError::BootstrapStepOutOfOrder)?
+                .key_thumbprint,
+        ] {
+            if !distinct.insert(*thumbprint.as_bytes()) {
+                return Err(AdminError::BootstrapQuorumMissing);
+            }
+        }
+        let snapshot = self.state.clone();
         self.state.recovery_kem = Some(recovery_kem);
         self.state.hga_signing = Some(hga_signing);
-        self.advance(BootstrapStep::GenerateRecoveryAndHgaKeys)
+        self.commit(snapshot, BootstrapStep::GenerateRecoveryAndHgaKeys)
     }
 
     /// Schritt 6: mindestens zwei Key Approver (`:1341`).
@@ -1046,7 +1488,9 @@ impl<'a> BootstrapCoordinator<'a> {
     /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 5 fehlt;
     /// [`AdminError::BootstrapQuorumMissing`] fuer weniger als zwei
     /// UNTERSCHIEDLICHE Abdruecke — zwei Eintraege desselben Schluessels sind
-    /// ein Approver; jeder Befund des Ports.
+    /// ein Approver — und fuer einen Approver, der die Wurzel, der
+    /// Recovery-KEM- oder der HGA-Schluessel dieser Zeremonie ist; jeder
+    /// Befund des Ports.
     pub fn enroll_key_approvers(
         &mut self,
         approvers: &[OuterKeyRecordV1],
@@ -1059,8 +1503,18 @@ impl<'a> BootstrapCoordinator<'a> {
         if distinct.len() < 2 {
             return Err(AdminError::BootstrapQuorumMissing);
         }
+        // Ein Approver ist ein WEITERER Schluessel. Waere er die Wurzel, der
+        // Recovery- oder der HGA-Schluessel, genehmigte in `:1341` eine Partei
+        // sich selbst — und die Trennung, um deretwillen `:1340` zwei getrennte
+        // Schluessel verlangt, waere im naechsten Schritt wieder aufgehoben.
+        for own in self.own_key_thumbprints() {
+            if distinct.contains(own.as_bytes()) {
+                return Err(AdminError::BootstrapQuorumMissing);
+            }
+        }
+        let snapshot = self.state.clone();
         self.state.approvers = approvers.to_vec();
-        self.advance(BootstrapStep::EnrollKeyApprovers)
+        self.commit(snapshot, BootstrapStep::EnrollKeyApprovers)
     }
 
     /// Schritt 7: je mindestens zwei getrennte, VERIFIZIERTE Sicherungen fuer
@@ -1069,8 +1523,10 @@ impl<'a> BootstrapCoordinator<'a> {
     /// # Errors
     /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 6 fehlt;
     /// [`AdminError::BootstrapQuorumMissing`], wenn eine der vier Klassen
-    /// fehlt oder eine Sicherung auf weniger als zwei UNTERSCHEIDBAREN Medien
-    /// verifiziert wurde; jeder Befund des Ports.
+    /// fehlt, eine Sicherung auf weniger als zwei UNTERSCHEIDBAREN Medien
+    /// verifiziert wurde oder eine Sicherung einen anderen Schluessel nennt
+    /// als den, den diese Zeremonie unter dieser Klasse fuehrt; jeder Befund
+    /// des Ports.
     pub fn verify_key_backups(&mut self, backups: &[KeyBackupRecordV1]) -> Result<(), AdminError> {
         self.require_completed(BootstrapStep::EnrollKeyApprovers)?;
         let classes: BTreeSet<BackedUpKeyClass> =
@@ -1086,9 +1542,55 @@ impl<'a> BootstrapCoordinator<'a> {
             if distinct.len() < 2 {
                 return Err(AdminError::BootstrapQuorumMissing);
             }
+            // Gesichert werden muss der Schluessel DIESER Zeremonie. Ohne
+            // diesen Vergleich erfuellten vier unbeteiligte Abdruecke `:1342`
+            // vollstaendig — und die Sicherung, auf die es ankommt, gaebe es
+            // trotzdem nicht.
+            let expected = match backup.class {
+                BackedUpKeyClass::Root => Some(
+                    self.state
+                        .root
+                        .as_ref()
+                        .ok_or(AdminError::BootstrapStepOutOfOrder)?
+                        .key_thumbprint,
+                ),
+                BackedUpKeyClass::RecoveryKem => Some(
+                    self.state
+                        .recovery_kem
+                        .as_ref()
+                        .ok_or(AdminError::BootstrapStepOutOfOrder)?
+                        .key_thumbprint,
+                ),
+                BackedUpKeyClass::HistoricalGrantAuthority => Some(
+                    self.state
+                        .hga_signing
+                        .as_ref()
+                        .ok_or(AdminError::BootstrapStepOutOfOrder)?
+                        .key_thumbprint,
+                ),
+                // Die Admin-Schluessel: Schritt 3 haelt von ihnen die
+                // Objekthashes von Zertifikat und Bindung fest, nicht ihre
+                // RFC-9679-Abdruecke — die stehen in den Zertifikaten, und die
+                // liegen dieser Scheibe nicht vor. Geprueft wird deshalb, was
+                // sich hier pruefen laesst: dass die Admin-Sicherung nicht eine
+                // der DREI anderen Klassen noch einmal ist.
+                BackedUpKeyClass::Admin => None,
+            };
+            match expected {
+                Some(expected) if expected != backup.key_thumbprint => {
+                    return Err(AdminError::BootstrapQuorumMissing);
+                }
+                Some(_) => {}
+                None => {
+                    if self.own_key_thumbprints().contains(&backup.key_thumbprint) {
+                        return Err(AdminError::BootstrapQuorumMissing);
+                    }
+                }
+            }
         }
+        let snapshot = self.state.clone();
         self.state.backups = backups.to_vec();
-        self.advance(BootstrapStep::VerifyKeyBackups)
+        self.commit(snapshot, BootstrapStep::VerifyKeyBackups)
     }
 
     /// Schritt 8: Writer-, Server- und erste Reader-Schluessel samt ihren
@@ -1109,8 +1611,9 @@ impl<'a> BootstrapCoordinator<'a> {
         if components.is_empty() {
             return Err(AdminError::BootstrapQuorumMissing);
         }
+        let snapshot = self.state.clone();
         self.state.components = components.to_vec();
-        self.advance(BootstrapStep::ProvisionComponentKeys)
+        self.commit(snapshot, BootstrapStep::ProvisionComponentKeys)
     }
 
     /// Schritt 9: Fingerprints ueber QR-Code oder zweiten Kanal vergleichen
@@ -1152,8 +1655,9 @@ impl<'a> BootstrapCoordinator<'a> {
         if confirmation.fingerprint() != sealed {
             return Err(AdminError::SecondChannelMismatch);
         }
+        let snapshot = self.state.clone();
         self.state.fingerprints_compared = true;
-        self.advance(BootstrapStep::CompareFingerprints)
+        self.commit(snapshot, BootstrapStep::CompareFingerprints)
     }
 
     /// Schritt 10: ein admin-autorisiertes, Wurzel-signiertes Trust-Objekt
@@ -1161,15 +1665,31 @@ impl<'a> BootstrapCoordinator<'a> {
     ///
     /// Der Koordinator SIGNIERT NICHT selbst — er reicht unveraendert an
     /// [`RootCeremonyService::publish_authorized_target`] durch und haelt
-    /// danach den `objectHash` des entstandenen Objekts fest. Im
-    /// Pre-Registry-Nullkontext sind dabei ausschliesslich die im Anker
-    /// gepinnten Admin-Paare aktiv (`:1124-1145`); durchgesetzt wird das in
-    /// `ea-trust`, wo der Beweiszustand entsteht.
+    /// danach den `objectHash` des entstandenen Objekts fest.
+    ///
+    /// # Was hier geprueft wird, und was NICHT
+    ///
+    /// Geprueft wird die ORGANISATION: beide Sperrschluessel der
+    /// Administrationsautorisierung nennen sie
+    /// (`crates/ea-trust/src/admin_authorization.rs:138`,
+    /// `crates/ea-trust/src/state.rs:194-197`), und ein Ziel einer anderen
+    /// gehoert nicht in diese Zeremonie.
+    ///
+    /// NICHT geprueft wird der Pre-Registry-Nullkontext aus `:1124-1145` — die
+    /// Regel, dass vor der ersten Registrierungsfassung ausschliesslich die im
+    /// Anker gepinnten Admin-Paare autorisieren duerfen. Der Beweiszustand,
+    /// den dieser Schritt entgegennimmt, entsteht in `ea-trust`, und ob jene
+    /// Regel dort auf DIESEM Weg durchgesetzt wird, sagt dieser Koordinator
+    /// nicht — er kann es an einem [`VerifiedAdminAuthorizationIntent`] auch
+    /// nicht ablesen. Die Ketten-ID kann er ebenfalls nicht vergleichen: die
+    /// Autorisierung nennt keine.
     ///
     /// # Errors
-    /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 9 fehlt; jeder
-    /// Befund von [`RootCeremonyService::publish_authorized_target`]; jeder
-    /// Befund des Ports.
+    /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 9 fehlt;
+    /// [`AdminError::BootstrapContextMismatch`], wenn die Autorisierung eine
+    /// andere Organisation nennt; jeder Befund von
+    /// [`RootCeremonyService::publish_authorized_target`]; jeder Befund des
+    /// Ports.
     pub fn root_sign_bootstrap_target(
         &mut self,
         service: &RootCeremonyService<'_>,
@@ -1180,6 +1700,18 @@ impl<'a> BootstrapCoordinator<'a> {
         proof: &OperatorSessionProof,
     ) -> Result<ExactObjectBytes, AdminError> {
         self.require_completed(BootstrapStep::CompareFingerprints)?;
+        // Die Autorisierung nennt ihre Organisation in beiden Sperrschluesseln
+        // (`crates/ea-trust/src/admin_authorization.rs:138`). Ein Ziel einer
+        // ANDEREN Organisation gehoert nicht in diese Zeremonie — der
+        // Koordinator haelt danach seinen Objekthash fest, und ein Transkript,
+        // das ueber zwei Organisationen spraeche, waere keines.
+        if intent
+            .replay_keys()
+            .iter()
+            .any(|key| key.organization_id() != self.state.organization_id)
+        {
+            return Err(AdminError::BootstrapContextMismatch);
+        }
         let published = service.publish_authorized_target(
             intent,
             target,
@@ -1187,10 +1719,11 @@ impl<'a> BootstrapCoordinator<'a> {
             trust_store,
             proof,
         )?;
+        let snapshot = self.state.clone();
         self.state
             .published_target_object_hashes
             .push(object_hash(published.as_bytes()));
-        self.advance(BootstrapStep::RootSignBootstrapTargets)?;
+        self.commit(snapshot, BootstrapStep::RootSignBootstrapTargets)?;
         Ok(published)
     }
 
@@ -1199,7 +1732,27 @@ impl<'a> BootstrapCoordinator<'a> {
     /// Der finale Anker wird dekodiert, gegen die in Schritt 4 VERSIEGELTE
     /// Vorstufe gehalten ([`verify_anchor_transition`]) und muss genau den
     /// Genesis-Eintragshash nennen, den [`GenesisBinding`] traegt. Danach
-    /// entsteht das Wurzel-signierte [`BootstrapTranscriptV1`].
+    /// gehen seine EXAKTEN Bytes auf dieselben Medien, die Schritt 4
+    /// festgeschrieben hat, und ihr voller Fingerprint muss ueber den zweiten
+    /// Kanal zurueckgemeldet worden sein — `:1346`: „die finalen Anchor-Bytes
+    /// auf beiden Medien sowie ihr voller Fingerprint werden erneut ueber den
+    /// zweiten Kanal bestaetigt", `:1780`: „Mindestens zwei schreibgeschuetzte
+    /// Recovery-Medien erhalten zuerst die exakten Vorstufen- und vor Go-live
+    /// die finalen Anchor-Bytes". Erst danach entsteht das Wurzel-signierte
+    /// [`BootstrapTranscriptV1`].
+    ///
+    /// # Warum der Fingerprint hier ein [`Hash32`] ist und keine
+    /// [`SecondChannelConfirmation`]
+    ///
+    /// Weil es fuer die finalen Ankerbytes keine gibt: der einzige
+    /// Konstruktor, [`crate::confirm_pre_anchor_fingerprint`], bindet an eine
+    /// [`PreAnchorV1`] und damit an die VORSTUFENbytes
+    /// (`crates/ea-admin/src/anchor_media.rs:164-174`). Eine Bestaetigung
+    /// ueber die Vorstufe deckt den finalen Anker nicht — sie wird hier
+    /// folgerichtig mit `EA-CEREMONY-SECOND-CHANNEL-MISMATCH` abgewiesen.
+    /// Der Vergleich ist derselbe, den [`confirm_on_media`] fuer Schritt 4
+    /// fuehrt: der gemeldete Wert gegen den, den diese Maschine ueber genau
+    /// diese Bytes rechnet.
     ///
     /// # Errors
     /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 10 fehlt;
@@ -1209,13 +1762,21 @@ impl<'a> BootstrapCoordinator<'a> {
     /// `EA-ANCHOR-PRE-FIELD-CHANGED`, wenn der Anker eine ANDERE Vorstufe
     /// fortsetzt — die Zeremonie ist danach ABGEBROCHEN;
     /// [`AdminError::GenesisContextMismatch`], wenn der Anker einen anderen
-    /// Genesis nennt; [`AdminError::Key`] fuer die Wurzelsignatur des
-    /// Transkripts; jeder Befund des Ports.
+    /// Genesis nennt; [`AdminError::SecondChannelMismatch`],
+    /// [`AdminError::MediaQuorumMissing`] und
+    /// [`AdminError::MediaReadbackMismatch`] fuer die Bestaetigung der finalen
+    /// Ankerbytes auf den versiegelten Medien; [`AdminError::Key`] fuer die
+    /// Wurzelsignatur des Transkripts und
+    /// [`AdminError::RootSignatureMismatch`], wenn diese Signatur der Wurzel
+    /// nicht zuschreibbar ist; jeder Befund des Ports.
     pub fn create_genesis_and_final_anchor(
         &mut self,
         key_provider: &dyn KeyProvider,
         genesis: &GenesisBinding,
         exact_final_anchor_bytes: &[u8],
+        media: &mut dyn AnchorMedia,
+        media_ids: &[AnchorMediumId],
+        reported_final_anchor_fingerprint: Hash32,
     ) -> Result<TrustAnchorV1, AdminError> {
         self.require_completed(BootstrapStep::RootSignBootstrapTargets)?;
         let sealed = self
@@ -1234,11 +1795,23 @@ impl<'a> BootstrapCoordinator<'a> {
         if final_anchor.genesis_entry_hash() != genesis.genesis_entry_hash() {
             return Err(AdminError::GenesisContextMismatch);
         }
+        // Erst NACH dem Uebergangsurteil: ein Anker, der eine fremde Vorstufe
+        // fortsetzt, darf gar nicht erst auf ein schreibgeschuetztes Medium
+        // gelangen.
+        confirm_final_anchor_on_media(
+            media,
+            media_ids,
+            &self.state.sealed_media,
+            &final_anchor,
+            exact_final_anchor_bytes,
+            reported_final_anchor_fingerprint,
+        )?;
         let transcript = self.sign_transcript(key_provider)?;
+        let snapshot = self.state.clone();
         self.state.genesis_entry_hash = Some(genesis.genesis_entry_hash());
         self.state.exact_final_anchor_bytes = Some(exact_final_anchor_bytes.to_vec());
         self.state.transcript = Some(transcript);
-        self.advance(BootstrapStep::CreateGenesisAndFinalAnchor)?;
+        self.commit(snapshot, BootstrapStep::CreateGenesisAndFinalAnchor)?;
         Ok(final_anchor)
     }
 
@@ -1247,21 +1820,86 @@ impl<'a> BootstrapCoordinator<'a> {
     ///
     /// Der Nachweis wird VERBRAUCHT.
     ///
+    /// # Was hier NOCH einmal geprueft wird — und warum
+    ///
+    /// [`crate::verify_fresh_machine_recovery_test`] faellt sein Urteil ueber
+    /// EINE Beobachtung; es kennt die Zeremonie nicht und bekommt den
+    /// Zeremonienrechner vom Aufrufer genannt. Der Aufrufer ist aber die
+    /// Partei, die [`ProductionState::Ready`] will. Drei Bindungen fallen
+    /// deshalb hier, wo die Zeremonie steht:
+    ///
+    /// 1. **Der Rechner.** Verglichen wird gegen den, den Schritt 1
+    ///    festgehalten hat, nicht gegen den, den Schritt 12 nennt. Hat diese
+    ///    Zeremonie keinen Rechner festgehalten, laesst sich „nicht derselbe"
+    ///    ueber nichts messen — und dann gibt es keine Freigabe.
+    /// 2. **Der Anker.** `:1347` verlangt den Test „mit explizitem finalem
+    ///    Trust Anchor"; gemeint ist der aus Schritt 11 dieser Zeremonie. Ein
+    ///    vollstaendig gelungener Lauf gegen den Anker einer FREMDEN
+    ///    Organisation ist ein bestandener Test — nur nicht dieser.
+    /// 3. **Die Medien.** Ein Lauf, der weniger Medien erwartet hat, als
+    ///    Schritt 4 versiegelt hat, hat den Bestand nicht vollstaendig
+    ///    geprueft.
+    ///
     /// # Errors
-    /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 11 fehlt; jeder
-    /// Befund des Ports.
+    /// [`AdminError::BootstrapStepOutOfOrder`], wenn Schritt 11 fehlt;
+    /// [`AdminError::RecoveryTestSameMachine`], wenn der Test auf der
+    /// Zeremonienmaschine lief oder diese Zeremonie keine benannt hat;
+    /// [`AdminError::RecoveryTestFailed`], wenn der Lauf einen anderen Anker
+    /// oder zu wenige Medien geprueft hat; [`AdminError::Trust`] fuer
+    /// Ankerbytes, die sich nicht mehr dekodieren lassen; jeder Befund des
+    /// Ports.
     pub fn record_fresh_machine_recovery_test(
         &mut self,
         proof: FreshMachineRecoveryProof,
     ) -> Result<ProductionState, AdminError> {
         self.require_completed(BootstrapStep::CreateGenesisAndFinalAnchor)?;
+        let ceremony_machine = self
+            .state
+            .ceremony_machine
+            .ok_or(AdminError::RecoveryTestSameMachine)?;
+        if proof.machine_fingerprint() == ceremony_machine {
+            return Err(AdminError::RecoveryTestSameMachine);
+        }
+        let exact_final_anchor_bytes = self
+            .state
+            .exact_final_anchor_bytes
+            .as_deref()
+            .ok_or(AdminError::BootstrapStepOutOfOrder)?;
+        let final_anchor =
+            decode_trust_anchor(exact_final_anchor_bytes).map_err(AdminError::Trust)?;
+        if proof.expected_trust_anchor_hash() != final_anchor.trust_anchor_hash()
+            || proof.media_expected() < self.state.sealed_media.len()
+        {
+            return Err(AdminError::RecoveryTestFailed);
+        }
+        let snapshot = self.state.clone();
         self.state.recovery_test_machine = Some(proof.machine_fingerprint());
         self.state.production_state = ProductionState::Ready;
-        self.advance(BootstrapStep::RunFreshMachineRecoveryTest)?;
+        self.commit(snapshot, BootstrapStep::RunFreshMachineRecoveryTest)?;
         Ok(self.state.production_state)
     }
 
     // -- innere Bewegungen -------------------------------------------------
+
+    /// Die Abdruecke der Schluessel, die DIESE Zeremonie selbst fuehrt.
+    ///
+    /// Wurzel, Recovery-KEM und Historical Grant Authority — die drei, deren
+    /// Abdruecke der Zeremoniezustand kennt. Die Admin-Schluessel stehen nicht
+    /// darin: von ihnen haelt Schritt 3 Objekthashes und keine
+    /// RFC-9679-Abdruecke fest.
+    fn own_key_thumbprints(&self) -> Vec<KeyThumbprint> {
+        let mut thumbprints = Vec::new();
+        if let Some(root) = self.state.root.as_ref() {
+            thumbprints.push(root.key_thumbprint);
+        }
+        if let Some(recovery) = self.state.recovery_kem.as_ref() {
+            thumbprints.push(recovery.key_thumbprint);
+        }
+        if let Some(hga) = self.state.hga_signing.as_ref() {
+            thumbprints.push(hga.key_thumbprint);
+        }
+        thumbprints
+    }
 
     fn require_completed(&self, step: BootstrapStep) -> Result<(), AdminError> {
         if self.state.aborted {
@@ -1342,25 +1980,62 @@ impl<'a> BootstrapCoordinator<'a> {
         Ok(())
     }
 
-    fn seal(&mut self, confirmation: &MediaConfirmation) -> Result<(), AdminError> {
-        self.state.sealed_pre_anchor_fingerprint = Some(confirmation.fingerprint());
-        self.state.sealed_medium_count = confirmation.medium_count();
-        self.advance(BootstrapStep::PinPreAnchorOnMedia)
-    }
-
     fn abort(&mut self) -> Result<(), AdminError> {
+        let snapshot = self.state.clone();
         self.state.aborted = true;
-        self.store.store(&self.state)
+        if let Err(error) = self.store.store(&self.state) {
+            self.restore(snapshot);
+            return Err(error);
+        }
+        Ok(())
     }
 
-    /// Persistiert den naechsten Schritt — und weist einen RUECKWAERTS
-    /// gerichteten ab.
-    fn advance(&mut self, step: BootstrapStep) -> Result<(), AdminError> {
+    /// Der Zustand, wie er VOR der laufenden Bewegung war.
+    ///
+    /// [`PreAnchorV1`] traegt kein `Clone`; die Vorstufe wird deshalb aus den
+    /// zurueckgelegten Bytes neu gelesen. Das ist keine Naeherung: dieselben
+    /// Bytes ergeben dieselbe Vorstufe, und `ea-trust` bleibt die einzige
+    /// Stelle, die sie deutet.
+    fn restore(&mut self, snapshot: BootstrapStateV1) {
+        self.pre_anchor = snapshot
+            .exact_pre_anchor_bytes
+            .as_deref()
+            .and_then(|bytes| decode_pre_anchor(bytes).ok());
+        self.state = snapshot;
+    }
+
+    /// Persistiert den erreichten Schritt — und laesst den Zustand im Speicher
+    /// nur dann stehen, wenn die Ablage ihn AUCH hat.
+    ///
+    /// # Warum der Rueckfall vollstaendig ist und nicht nur der Schritt
+    ///
+    /// Der Aufrufer hat vor diesem Aufruf Felder gesetzt; `snapshot` ist der
+    /// Zustand von VOR jenen Feldern. Scheitert die Ablage, meldet der
+    /// Aufrufer einen Fehlschlag — und ein Koordinator, der danach trotzdem
+    /// die neuen Felder truege, widerspraeche seiner eigenen Meldung. Am
+    /// teuersten waere das in Schritt 12: [`Self::production_state`] meldete
+    /// [`ProductionState::Ready`] fuer eine Zeremonie, von der nichts
+    /// persistiert ist.
+    ///
+    /// Ein RUECKWAERTS gerichteter Schritt wird abgewiesen, bevor irgendetwas
+    /// geschrieben wird — die Zeremonie ist ausschliesslich vorwaerts
+    /// gerichtet, und ihre Ablage prueft dasselbe noch einmal
+    /// ([`crate::FileBootstrapStore`]).
+    fn commit(
+        &mut self,
+        snapshot: BootstrapStateV1,
+        step: BootstrapStep,
+    ) -> Result<(), AdminError> {
         if step < self.state.step {
+            self.restore(snapshot);
             return Err(AdminError::BootstrapStepRegression);
         }
         self.state.step = step;
-        self.store.store(&self.state)
+        if let Err(error) = self.store.store(&self.state) {
+            self.restore(snapshot);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn sign_transcript(
@@ -1376,28 +2051,18 @@ impl<'a> BootstrapCoordinator<'a> {
             .state
             .sealed_pre_anchor_fingerprint
             .ok_or(AdminError::BootstrapPreAnchorUnconfirmed)?;
-        let mut exact_bytes = Vec::new();
-        exact_bytes.extend_from_slice(TRANSCRIPT_DOMAIN);
-        exact_bytes.extend_from_slice(self.state.organization_id.as_bytes());
-        exact_bytes.extend_from_slice(self.state.chain_id.as_bytes());
-        exact_bytes.extend_from_slice(root.certificate_object_hash.as_bytes());
-        exact_bytes.extend_from_slice(root.key_thumbprint.as_bytes());
-        push_slice(&mut exact_bytes, &root.exact_public_cose_key);
-        push_count(&mut exact_bytes, self.state.admin_pairs.len());
-        for pair in &self.state.admin_pairs {
-            exact_bytes.extend_from_slice(pair.certificate_object_hash.as_bytes());
-            exact_bytes.extend_from_slice(pair.operator_binding_object_hash.as_bytes());
-        }
-        exact_bytes.extend_from_slice(fingerprint.as_bytes());
+        let exact_bytes = transcript_exact_bytes(&self.state, root, fingerprint);
         let digest = object_hash(&exact_bytes);
+        let certificate_hash = CertificateHash::from(root.certificate_object_hash);
         let signature = key_provider
             .sign(
                 &root.signing_handle,
                 ContentType::TrustDigest,
-                CertificateHash::from(root.certificate_object_hash),
+                certificate_hash,
                 digest.as_bytes(),
             )
             .map_err(AdminError::Key)?;
+        require_root_attribution(root, signature.as_bytes(), digest.as_bytes())?;
         Ok(BootstrapTranscriptV1 {
             organization_id: self.state.organization_id,
             chain_id: self.state.chain_id,
@@ -1408,6 +2073,155 @@ impl<'a> BootstrapCoordinator<'a> {
             root_signature: signature.as_bytes().to_vec(),
         })
     }
+}
+
+/// Prueft, dass die eben erzeugte COSE der WURZEL dieser Zeremonie
+/// zuschreibbar ist.
+///
+/// # Warum das Transkript diese Pruefung braucht
+///
+/// Es ist der einzige Wurzel-signierte Gegenstand, den dieser Koordinator
+/// SELBST hervorbringt — und er wird persistiert und weitergereicht, ohne dass
+/// irgendwo im Baum jemand ihn nachprueft. Ein Schluesselport, der im
+/// geschuetzten Kopf den Abdruck der Wurzel NENNT und mit einem anderen
+/// Schluessel unterschreibt, kaeme sonst durch: `CoseSign1Bytes::compose` liest
+/// seine Bytes nur gegen `parse_cose_sign1` zurueck, und das prueft keine
+/// Signatur.
+///
+/// Dieselbe Bewegung und derselbe Grund wie
+/// [`RootCeremonyService::require_root_attribution`]
+/// (`crates/ea-admin/src/root_ceremony.rs:329-360`); der Unterschied ist
+/// allein, woher die zwei oeffentlichen Werte der Wurzel kommen — dort aus dem
+/// gewaehlten Registrierungskopf, hier aus dem Wurzelmaterial, das Schritt 2
+/// festgehalten hat. Vor Schritt 10 gibt es keinen Kopf.
+fn require_root_attribution(
+    root: &RootKeyMaterialV1,
+    exact_cose: &[u8],
+    expected_payload: &[u8],
+) -> Result<(), AdminError> {
+    let certificate_hash = CertificateHash::from(root.certificate_object_hash);
+    let parsed = parse_cose_sign1(exact_cose, &[]).map_err(AdminError::Crypto)?;
+    if parsed.content_type() != ContentType::TrustDigest
+        || parsed.certificate_hash() != Some(certificate_hash)
+        || parsed.payload() != expected_payload
+        || parsed.key_thumbprint() != root.key_thumbprint
+    {
+        return Err(AdminError::RootSignatureMismatch);
+    }
+    let key = CanonicalPublicCoseKey::from_deterministic_cbor(&root.exact_public_cose_key)
+        .map_err(AdminError::Crypto)?;
+    let protected = ProtectedHeader::normal(
+        ContentType::TrustDigest,
+        parsed.key_thumbprint(),
+        certificate_hash,
+    );
+    key.verify_ed25519_strict(
+        &protected.sig_structure_bytes(expected_payload),
+        parsed.signature_bytes(),
+    )
+    .map_err(|_| AdminError::RootSignatureMismatch)
+}
+
+/// Schreibt die finalen Ankerbytes auf DIESELBEN Medien, die Schritt 4
+/// festgeschrieben hat, und liest sie von jedem zurueck (`:1346`, `:1780`).
+///
+/// Die Reihenfolge ist die von [`confirm_on_media`], und aus denselben
+/// Gruenden: erst die Bindung an den zweiten Kanal, dann das Medienquorum,
+/// dann alle Schreibvorgaenge, erst danach die Lesevorgaenge — sonst
+/// bestaetigte das erste Medium sich selbst, waehrend das zweite noch die
+/// Vorstufe truege.
+///
+/// Verlangt werden GENAU die versiegelten Medien. „Auf beiden Medien" (`:1346`)
+/// meint dieselben beiden: zwei frische Datentraeger truegen den finalen Anker
+/// zwar, aber die zwei, auf denen die Vorstufe steht, blieben mit einem
+/// Bestand zurueck, der vor Go-live stehen geblieben ist.
+fn confirm_final_anchor_on_media(
+    media: &mut dyn AnchorMedia,
+    ids: &[AnchorMediumId],
+    sealed_media: &[AnchorMediumId],
+    final_anchor: &TrustAnchorV1,
+    exact_bytes: &[u8],
+    reported_fingerprint: Hash32,
+) -> Result<(), AdminError> {
+    // GENAU die versiegelten Medien. „Auf beiden Medien" (`:1346`) meint
+    // dieselben beiden: zwei frische Datentraeger truegen den finalen Anker
+    // zwar, aber die zwei, auf denen die Vorstufe steht, blieben mit einem
+    // Bestand zurueck, der vor Go-live stehen geblieben ist. Diese Frage
+    // gehoert hierher, weil nur die Zeremonie weiss, was sie versiegelt hat.
+    let distinct: Vec<AnchorMediumId> = ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<AnchorMediumId>>()
+        .into_iter()
+        .collect();
+    if distinct.len() != ids.len() || distinct != sealed_media {
+        return Err(AdminError::MediaQuorumMissing);
+    }
+
+    // Alles Weitere — die Bindung an die Bytes, das Quorum, erst alle
+    // Schreib-, dann alle Lesevorgaenge — ist WORTGLEICH das, was Schritt 4
+    // tut. Es steht deshalb genau einmal, in `confirm_on_media`. Der
+    // Unterschied liegt allein in der Domaene des Fingerprints, und die reist
+    // in der Bestaetigung mit: `confirm_final_anchor_fingerprint` stellt sie
+    // ueber `trustAnchorHash` aus (`:1774-1777`), nicht ueber
+    // `bootstrapAnchorHash`.
+    let confirmation = confirm_final_anchor_fingerprint(final_anchor, reported_fingerprint)?;
+    confirm_on_media(media, ids, exact_bytes, confirmation)?;
+    Ok(())
+}
+
+/// Weist eine Admin-Paarmenge zurueck, die die Eins-zu-eins-Paarung aus
+/// `:1780` gar nicht tragen KANN.
+///
+/// # Was hier geprueft wird — und was ausdruecklich nicht
+///
+/// `:1766` bindet Zertifikat und Bindung ueber
+/// `operatorBinding.deviceCertificateHash` aneinander. Diese Gleichung steht
+/// IM Bindungsobjekt, und dieser Scheibe liegen von beiden nur die
+/// Objekthashes vor — sie kann die Paarung also nicht nachrechnen. Was sie
+/// sehen kann, ist der Fall, in dem gar keine Eins-zu-eins-Paarung existieren
+/// kann: zwei Paare, die sich ein Zertifikat oder eine Bindung teilen, und ein
+/// Paar, das zweimal denselben Objekthash nennt. Der Befund faellt damit hier,
+/// wo die Zeremonie laeuft, und nicht beim ersten `verify_trust`, wenn die
+/// Vorstufe laengst auf schreibgeschuetzten Medien steht und das einzige
+/// Heilmittel eine ganz neue Zeremonie ist.
+fn require_distinct_pairing(pairs: &[AdminBootstrapPairV1]) -> Result<(), AdminError> {
+    let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
+    for pair in pairs {
+        if !seen.insert(*pair.certificate_object_hash.as_bytes())
+            || !seen.insert(*pair.operator_binding_object_hash.as_bytes())
+        {
+            return Err(AdminError::BootstrapQuorumMissing);
+        }
+    }
+    Ok(())
+}
+
+/// Die exakten Transkriptbytes zu einem Zeremoniezustand.
+///
+/// EINE Stelle fuer zwei Aufrufer — [`BootstrapCoordinator::sign_transcript`]
+/// baut sie, [`BootstrapStateV1::decode_image`] rechnet sie nach. Zwei Stellen
+/// waeren zwei Wahrheiten darueber, worueber die Wurzel unterschrieben hat,
+/// und der Wiedereinleser verglaeche gegen die falsche.
+fn transcript_exact_bytes(
+    state: &BootstrapStateV1,
+    root: &RootKeyMaterialV1,
+    pre_anchor_fingerprint: Hash32,
+) -> Vec<u8> {
+    let mut exact_bytes = Vec::new();
+    exact_bytes.extend_from_slice(TRANSCRIPT_DOMAIN);
+    exact_bytes.extend_from_slice(state.organization_id.as_bytes());
+    exact_bytes.extend_from_slice(state.chain_id.as_bytes());
+    exact_bytes.extend_from_slice(root.certificate_object_hash.as_bytes());
+    exact_bytes.extend_from_slice(root.key_thumbprint.as_bytes());
+    push_slice(&mut exact_bytes, &root.exact_public_cose_key);
+    push_count(&mut exact_bytes, state.admin_pairs.len());
+    for pair in &state.admin_pairs {
+        exact_bytes.extend_from_slice(pair.certificate_object_hash.as_bytes());
+        exact_bytes.extend_from_slice(pair.operator_binding_object_hash.as_bytes());
+    }
+    exact_bytes.extend_from_slice(pre_anchor_fingerprint.as_bytes());
+    exact_bytes
 }
 
 fn same_root(left: &RootKeyMaterialV1, right: &RootKeyMaterialV1) -> bool {

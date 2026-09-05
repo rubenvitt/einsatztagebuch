@@ -26,7 +26,7 @@
 
 use std::collections::BTreeSet;
 
-use ea_crypto::bootstrap_anchor_hash;
+use ea_crypto::{bootstrap_anchor_hash, trust_anchor_hash};
 use ea_trust::{PreAnchorV1, TrustAnchorV1};
 use ea_types::Hash32;
 
@@ -54,9 +54,18 @@ use crate::AdminError;
 /// vergleicht diese Funktion — byteweise, nicht feldweise, denn `:1780` sagt
 /// „bytegleich" und nicht „gleichwertig".
 ///
-/// Der Hashvergleich daneben ist bewusst redundant: er ist bei gleichen Bytes
-/// nie verletzbar und steht als geschlossener Riegel fuer den Fall, dass diese
-/// Funktion je auf einen feldweisen Vergleich umgebaut wuerde.
+/// Ein zweiter Vergleich ueber den `bootstrapAnchorHash` steht hier bewusst
+/// NICHT daneben, und der Grund ist kein Geschmack: er waere kein Riegel,
+/// sondern dieselbe Aussage in blass. [`PreAnchorV1`] fuehrt seinen
+/// Fingerprint als `H(exact_bytes)`, und [`ea_trust::decode_trust_anchor`]
+/// pinnt den eingebetteten `bootstrapAnchorHash` des finalen Ankers gegen
+/// `H(exact_pre_anchor_bytes)` (`crates/ea-trust/src/anchor.rs:665-676`).
+/// Beide Werte sind damit selbst schon Hashes GENAU DER Bytes, die hier
+/// verglichen werden — ein Hashvergleich kann nichts fangen, was der
+/// Bytevergleich durchliesse, und liesse sich auch nicht als Rueckfall fuer
+/// einen spaeteren feldweisen Umbau lesen: er ist bereits heute so byteweise
+/// wie der Vergleich, neben dem er stuende. Eine Pruefung, die nie entscheidet,
+/// behauptet nur eine Sicherheit, die schon woanders liegt.
 ///
 /// `genesisEntryHash` gehoert NICHT zur Vorstufe (`:1737-1748`) und geht in
 /// diesen Vergleich folgerichtig nicht ein — er entsteht erst in Schritt 11.
@@ -72,9 +81,6 @@ pub fn verify_anchor_transition(
     final_anchor: &TrustAnchorV1,
 ) -> Result<(), AdminError> {
     if pre.exact_bytes() != final_anchor.exact_pre_anchor_bytes() {
-        return Err(AdminError::AnchorPreFieldChanged);
-    }
-    if pre.bootstrap_anchor_hash() != final_anchor.bootstrap_anchor_hash() {
         return Err(AdminError::AnchorPreFieldChanged);
     }
     Ok(())
@@ -145,6 +151,36 @@ pub trait AnchorMedia {
 /// Bestaetigung deckt genau EINEN Schreibvorgang.
 pub struct SecondChannelConfirmation {
     confirmed_fingerprint: Hash32,
+    image: AnchorImage,
+}
+
+/// WELCHES der beiden Ankerbilder eine Bestaetigung deckt.
+///
+/// Die Spezifikation rechnet zwei verschiedene Fingerprints ueber zwei
+/// verschiedene Domaenen: `bootstrapAnchorHash` ueber
+/// `EINSATZARCHIV-TRUST-ANCHOR-PRE-v1` und `trustAnchorHash` ueber
+/// `EINSATZARCHIV-TRUST-ANCHOR-v1` (`:1769-1777`). Der Wert, den ein Mensch
+/// ueber den zweiten Kanal vorliest, ist je nach Schritt der eine ODER der
+/// andere.
+///
+/// Ohne diese Marke muesste [`confirm_on_media`] raten, gegen welche Domaene es
+/// die uebergebenen Bytes nachrechnet — und eine Bestaetigung ueber die
+/// Vorstufe koennte den finalen Anker decken. Die Marke reist deshalb IN der
+/// Bestaetigung mit, von ihrer Ausstellung bis zu ihrem Verbrauch.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AnchorImage {
+    Pre,
+    Final,
+}
+
+impl AnchorImage {
+    /// Der Fingerprint dieser Domaene ueber genau diese Bytes.
+    fn fingerprint(self, exact_bytes: &[u8]) -> Hash32 {
+        match self {
+            Self::Pre => bootstrap_anchor_hash(exact_bytes),
+            Self::Final => trust_anchor_hash(exact_bytes),
+        }
+    }
 }
 
 /// Vergleicht den ueber den ZWEITEN Kanal zurueckgemeldeten Fingerprint gegen
@@ -170,6 +206,37 @@ pub fn confirm_pre_anchor_fingerprint(
     }
     Ok(SecondChannelConfirmation {
         confirmed_fingerprint: reported_fingerprint,
+        image: AnchorImage::Pre,
+    })
+}
+
+/// Vergleicht den ueber den ZWEITEN Kanal zurueckgemeldeten Fingerprint des
+/// FINALEN Ankers gegen den, den diese Maschine rechnet (`:1346`).
+///
+/// # Warum das eine zweite Funktion ist und kein Argument
+///
+/// Schritt 11 bestaetigt einen ANDEREN Wert als Schritt 4:
+/// `trustAnchorHash` ueber die Domaene `EINSATZARCHIV-TRUST-ANCHOR-v1`
+/// (`:1774-1777`), nicht `bootstrapAnchorHash`. Beides durch dieselbe Funktion
+/// mit einem Schalter zu fuehren hiesse, dass ein Aufrufer den Schalter falsch
+/// stellen kann; hier waehlt die AUSSTELLUNG die Domaene, und
+/// [`confirm_on_media`] rechnet nach, was die Bestaetigung mitbringt.
+///
+/// [`TrustAnchorV1::trust_anchor_hash`] ist der Wert, den `decode_trust_anchor`
+/// beim Einlesen ohnehin gebildet hat; diese Funktion rechnet ihn nicht neu.
+///
+/// # Errors
+/// [`AdminError::SecondChannelMismatch`], wenn die Rueckmeldung abweicht.
+pub fn confirm_final_anchor_fingerprint(
+    final_anchor: &TrustAnchorV1,
+    reported_fingerprint: Hash32,
+) -> Result<SecondChannelConfirmation, AdminError> {
+    if final_anchor.trust_anchor_hash() != reported_fingerprint {
+        return Err(AdminError::SecondChannelMismatch);
+    }
+    Ok(SecondChannelConfirmation {
+        confirmed_fingerprint: reported_fingerprint,
+        image: AnchorImage::Final,
     })
 }
 
@@ -229,7 +296,9 @@ pub fn confirm_on_media(
     exact_bytes: &[u8],
     fingerprint_confirmed: SecondChannelConfirmation,
 ) -> Result<MediaConfirmation, AdminError> {
-    if bootstrap_anchor_hash(exact_bytes) != fingerprint_confirmed.confirmed_fingerprint {
+    if fingerprint_confirmed.image.fingerprint(exact_bytes)
+        != fingerprint_confirmed.confirmed_fingerprint
+    {
         return Err(AdminError::SecondChannelMismatch);
     }
 

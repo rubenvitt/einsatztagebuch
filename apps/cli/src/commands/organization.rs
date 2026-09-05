@@ -63,7 +63,9 @@
 
 use std::path::PathBuf;
 
-use ea_admin::{AdminError, BootstrapCoordinator, FileBootstrapStore, SystemRandomSource};
+use ea_admin::{
+    AdminError, BootstrapCoordinator, FileBootstrapStore, SystemRandomSource, machine_fingerprint,
+};
 use ea_recovery::{ExitCode, RecoveryError, exit_code_for_error};
 
 use crate::{
@@ -119,14 +121,17 @@ pub fn run(invocation: &Invocation) -> ExitCode {
     // beginnen; welcher der beiden Faelle eintrat, ist keine Frage dieses
     // Pfades, sondern des persistierten Zustands.
     let mut store = FileBootstrapStore::new(state_path(&invocation.anchor));
-    let coordinator =
-        match BootstrapCoordinator::resume_or_begin(&mut store, &mut SystemRandomSource) {
-            Ok(coordinator) => coordinator,
-            Err(error) => {
-                output::print_admin_error(&error);
-                return exit_code_for_admin_error(error);
-            }
-        };
+    let coordinator = match BootstrapCoordinator::resume_or_begin(
+        &mut store,
+        &mut SystemRandomSource,
+        ceremony_machine(),
+    ) {
+        Ok(coordinator) => coordinator,
+        Err(error) => {
+            output::print_admin_error(&error);
+            return exit_code_for_admin_error(error);
+        }
+    };
 
     // 4 — der Bericht. Ein gescheitertes SCHREIBEN ueberstimmt den Erfolg: wer
     // die Ausgabe nicht bekommen hat, darf nicht erfahren, dass alles in
@@ -143,6 +148,45 @@ pub fn run(invocation: &Invocation) -> ExitCode {
 
     ExitCode::Success
 }
+
+/// Der Rechner, auf dem DIESE Zeremonie laeuft — soweit dieses Werkzeug ihn
+/// benennen kann.
+///
+/// Schritt 12 verlangt „einen frischen Rechner" (`design.md`:1347), und
+/// „frisch" ist ein Vergleich gegen den Rechner der Zeremonie. Wer diesen Wert
+/// erst BEIM Vergleich nennte, waere die Partei, die den Produktivzustand
+/// will; er wird deshalb in Schritt 1 festgehalten.
+///
+/// Geerntet wird ausschliesslich, was das Betriebssystem ohnehin als seine
+/// Identitaet fuehrt und was `ea-operator` fuer die Kontobindung derselben
+/// Maschine liest (`crates/ea-operator/src/linux.rs:4-40`). Gehasht wird das
+/// in `ea-admin` — dieses Paket traegt bewusst keine `ea-crypto`-Kante, siehe
+/// [`LOCAL_RANDOM_SOURCE_CODE`].
+///
+/// `None`, wo sich der Rechner nicht benennen laesst. Das ist kein
+/// Fehlschlag dieses Kommandos: Schritt 1 gelingt, und Schritt 12 ist danach
+/// fail-closed unerreichbar — eine Zeremonie ohne benannten Rechner kann
+/// „nicht derselbe Rechner" nicht messen. Ein Abbruch hier waere die
+/// schlechtere Wahl: er verhinderte auch die elf Schritte, die es nicht
+/// betrifft.
+fn ceremony_machine() -> Option<ea_types::Hash32> {
+    for source in MACHINE_IDENTITY_SOURCES {
+        if let Ok(identity) = std::fs::read(source) {
+            let trimmed = identity.trim_ascii();
+            if !trimmed.is_empty() {
+                return Some(machine_fingerprint(trimmed));
+            }
+        }
+    }
+    None
+}
+
+/// Die Orte, an denen ein Wirt seine Maschinenidentitaet fuehrt.
+///
+/// In der Reihenfolge, in der `systemd` sie selbst liest: `/etc/machine-id`
+/// zuerst, der D-Bus-Ort als Rueckfall auf aelteren Installationen. Auf einem
+/// Wirt ohne beide bleibt es bei `None`.
+const MACHINE_IDENTITY_SOURCES: [&str; 2] = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
 
 /// Der Pfad der Zustandsdatei neben `anchor`.
 ///
@@ -210,6 +254,11 @@ fn exit_code_for_admin_error(error: AdminError) -> ExitCode {
         | AdminError::TargetMismatch
         | AdminError::RootCertificateMismatch
         | AdminError::RootSignatureMismatch
+        // Ein Gegenstand, der zu einer anderen Organisation, Kette oder einem
+        // anderen Anker gehoert, ist ein Vertrauensbefund und kein Tippfehler
+        // im Aufruf: `:1782` laesst fuer einen abweichenden Anker keinen
+        // Spielraum.
+        | AdminError::BootstrapContextMismatch
         | AdminError::Trust(_) => ExitCode::Trust,
         // „Schluessel fehlt oder Entschluesselung fehlgeschlagen" — der Port
         // des Schluesselspeichers hat den Eintrag nicht hergegeben.
