@@ -34,7 +34,7 @@ pub enum RecoveryError {
     ArchiveTooLarge,
     /// Die gelesenen Ankerbytes sind kein gueltiger Trust Anchor.
     ///
-    /// AUSDRUECKLICH KEIN Aufruffehler. `design.md`:1765 laesst dazu keinen
+    /// AUSDRUECKLICH KEIN Aufruffehler. `design.md`:1782 laesst dazu keinen
     /// Spielraum: „Jede Abweichung endet mit Exitcode 12." Ein untergeschobener
     /// oder verstuemmelter Anker ist ein VERTRAUENSBEFUND, und ihn als
     /// Bedienfehler zu melden verwischte genau die Grenze, die der Anker zieht.
@@ -107,7 +107,7 @@ pub enum RecoveryError {
     /// „nicht unterstuetzte Plattformfaehigkeit".
     ///
     /// `export` faellt unter dieselbe Zusicherung. Seine Bytes sind zwar
-    /// verschluesselt, aber `design.md`:1779 nennt beide Kommandos in EINEM
+    /// verschluesselt, aber `design.md`:1796 nennt beide Kommandos in EINEM
     /// Satz, und die Dateinamen eines Exports geben die Kettensequenzen des
     /// Bestands preis.
     RestrictivePermissionsUnsupported,

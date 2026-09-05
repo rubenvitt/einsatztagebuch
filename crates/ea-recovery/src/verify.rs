@@ -93,7 +93,7 @@ pub(crate) fn verify_source(
 /// # Der Anker kommt NIE aus dem Bestand
 ///
 /// Diese Funktion nimmt einen Pfad und keine [`ea_archive::ArchiveSource`].
-/// `design.md`:1765 schliesst Trust-on-first-use ebenso aus wie einen Anker aus
+/// `design.md`:1782 schliesst Trust-on-first-use ebenso aus wie einen Anker aus
 /// dem zu pruefenden Archiv; die Signatur macht den zweiten Fall unmoeglich,
 /// statt ihn zu verbieten.
 ///

@@ -1,8 +1,8 @@
 //! Gate `evidence`: Evidence-Objekte und Zeitstempel, sofern gefordert.
 //!
 //! ENG BEGRENZT, und die Grenze ist normativ. `design.md` §14.1 Schritt 7
-//! (:1581) gibt „Server-Receipt und Checkpoints" an Gate `receipt`; Schritt 8
-//! (:1582) nennt ausschliesslich „Evidence-Objekte und Zeitstempel, sofern
+//! (:1598) gibt „Server-Receipt und Checkpoints" an Gate `receipt`; Schritt 8
+//! (:1599) nennt ausschliesslich „Evidence-Objekte und Zeitstempel, sofern
 //! gefordert". Der Checkpoint-KERN ist damit bereits geprueft, wenn dieses Gate
 //! laeuft. Hier bleiben genau zwei Dinge:
 //!
@@ -14,7 +14,7 @@
 //!
 //! # Was hier NICHT geprueft wird, und warum nicht
 //!
-//! `design.md`:1668 verlangt vom Validator „mindestens COSE-Signatur, Imprint,
+//! `design.md`:1688 verlangt vom Validator „mindestens COSE-Signatur, Imprint,
 //! TSA-Zertifikatskette, `timeStamping`-EKU, Policy, Nonce, `genTime` und
 //! Zertifikatsstatus". Davon ist von `ea-verify` aus NICHTS erreichbar, was in
 //! das DER-Token hineinsieht — und das ist gemessen, nicht vermutet:
@@ -59,31 +59,31 @@ pub enum EvidenceGateErrorV1 {
     /// Die archivierte RFC-3161-Antwort ist nicht die, die im bezeugten
     /// COSE-Objekt steht.
     ///
-    /// `design.md`:1666 setzt das Token als `3161-ctt`-Unprotected-Header IN
+    /// `design.md`:1686 setzt das Token als `3161-ctt`-Unprotected-Header IN
     /// das COSE-Objekt; die Felder des `.ecp` archivieren dieselbe Antwort
     /// daneben. Weichen beide voneinander ab, bezeugt das archivierte Token
     /// etwas anderes als das signierte Objekt — und eine nachtraeglich
-    /// entfernte oder ausgetauschte CTT-Struktur ist nach :1683 ein Security
+    /// entfernte oder ausgetauschte CTT-Struktur ist nach :1701 ein Security
     /// Event.
     TokenNotBound,
     /// Ein Renewal beansprucht ein Vorobjekt, das der Bestand nicht enthaelt.
     ///
     /// `renewalInputHash[i]` bindet die EXAKTEN Bytes des erneuerten
-    /// Evidence-Objekts (`design.md`:1691). Laesst sich ein Wert im Bestand
+    /// Evidence-Objekts (`design.md`:1705-1711). Laesst sich ein Wert im Bestand
     /// nicht wiederfinden, erneuert dieses Renewal etwas, das hier niemand
     /// nachrechnen kann.
     RenewalInputUnknown,
     /// Gefordert, Frist gesetzt, kein qualifizierendes Token — und die Frist
     /// laeuft noch.
     ///
-    /// `design.md`:1673 nennt diesen Zustand `ausstehend`. Er wird NUR dann zu
+    /// `design.md`:1694 nennt diesen Zustand `ausstehend`. Er wird NUR dann zu
     /// einem Befund, wenn der Aufrufer mit
     /// [`EvidenceRequirementV1::Required`] ausdruecklich einen
     /// VOLLSTAENDIGEN Evidence-Stand verlangt hat.
     Missing,
     /// Gefordert, Frist gesetzt, kein qualifizierendes Token, Frist abgelaufen.
     ///
-    /// `design.md`:1675: ueberfaellig bleibt ueberfaellig — ein spaeteres Token
+    /// `design.md`:1699: ueberfaellig bleibt ueberfaellig — ein spaeteres Token
     /// aendert diesen Zustand dauerhaft nicht mehr.
     Overdue,
 }
@@ -157,7 +157,7 @@ pub(crate) fn run_evidence_gate(
     if options.evidence_requirement() == EvidenceRequirementV1::NotRequired {
         // Ohne Forderung ist eine Frist kein Mangel: ein Standardprofil-Receipt
         // erzeugt ohne separate Richtlinienaenderung gar keine
-        // Evidence-Grade-Konformitaet (`design.md`:1679).
+        // Evidence-Grade-Konformitaet (`design.md`:1699).
         return;
     }
     let effective_now = options.effective_now();
@@ -241,7 +241,7 @@ fn token_finding(
             renewal_inputs_resolve(inventory, core.fields().renewal_input_hashes.as_slice())?;
             // Ein Renewal erneuert Evidence, bezeugt aber keine Sequenzspanne:
             // `renewal-core-v1` traegt den Kettenkopf, kein Intervall
-            // (`design.md`:1696). Es qualifiziert deshalb fuer KEINE Frist.
+            // (`design.md`:1713-1720). Es qualifiziert deshalb fuer KEINE Frist.
             Ok(None)
         }
     }
@@ -276,7 +276,7 @@ fn token_is_bound(
 
 /// Loesen sich alle `renewalInputHash` im Bestand auf?
 ///
-/// Gerechnet wird ueber die EXAKTEN Objektbytes, wie `design.md`:1691 es
+/// Gerechnet wird ueber die EXAKTEN Objektbytes, wie `design.md`:1705-1711 es
 /// vorschreibt, und mit `ea_crypto::renewal_input_digest` — die Domain wird
 /// hier nicht nachgebaut.
 fn renewal_inputs_resolve(

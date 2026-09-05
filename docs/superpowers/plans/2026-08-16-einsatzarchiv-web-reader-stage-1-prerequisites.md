@@ -44,7 +44,7 @@ Die Global Constraints des Stage-1-Plans (`docs/superpowers/plans/2026-08-13-ein
 - **RED-Beweisregel.** Ein RED-Protokoll zählt nur, wenn die Ausgabe `1 failed` (bzw. den exakt erwarteten Compile-Fehler) zeigt. `0 passed; N filtered out` ist **kein** RED, sondern ein defekter Testfilter. Das gilt spiegelbildlich für GREEN: `0 passed; N filtered out` ist kein Grünnachweis.
 - **RED-Protokollpfad.** `rtk` ersetzt die libtest-Ausgabe durch eine Zusammenfassung (gemessen: `cargo test: 1 passed, 33 filtered out`). Exit-Codes propagiert `rtk` korrekt (gemessen: 101). Gates laufen daher über `rtk`; **RED-/GREEN-Protokolle für die Berichtspflicht werden mit `rtk proxy cargo test …` oder rohem `cargo` erzeugt.**
 - **Toolchain-Nachweis.** Vor jedem als Nachweis geltenden Gate-Lauf MUSS `rustup show active-toolchain` `1.95.0` melden. Ist `RUSTUP_TOOLCHAIN` in der Shell gesetzt, übersteuert es `rust-toolchain.toml` vollständig — dann gilt der Lauf nicht als Nachweis. `rust-toolchain.toml` DARF dafür NICHT geändert werden; die Shell ist zu bereinigen (`env -u RUSTUP_TOOLCHAIN …` als Minimallösung).
-- **Reichweite.** Dieser Plan sichert ausschließlich **Übersetzbarkeit** für `wasm32-unknown-unknown`, nicht Lauffähigkeit. Der Laufzeitnachweis nach Spec §14.1 (`:460-464`) steht aus und ist nicht Gegenstand dieses Plans.
+- **Reichweite.** Dieser Plan sichert ausschließlich **Übersetzbarkeit** für `wasm32-unknown-unknown`, nicht Lauffähigkeit. Der Laufzeitnachweis nach Spec §14.1 (`:495-499`) steht aus und ist nicht Gegenstand dieses Plans.
 - **Ein Commit.** Zwischenzeitliche Commits sind verboten. Zwischen Task 3 und Task 4 fordert das Manifest ein Ziel ein, das das Gate noch nicht prüft; kein Zwischenstand beschreibt einen gültigen Zustand.
 
 ---
@@ -293,10 +293,10 @@ Trage im Ledger ein: `Task 1: complete — vier RED protokolliert (Exit 101, je 
 ---
 
 ### Task 2: Normativprosa angleichen
-
+Die Zeilenangaben in diesem Task nennen die heutigen Zielstellen; die Korrekturschritte dokumentieren den Ausgangsstand vom 2026-08-16.
 **Files:**
-- Modify: `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md:20-24`, `:387-405`, `:425-426`
-- Modify: `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md:102`, `:113`, `:122-126` (§5.2), `:128-135` (§5.3), `:248`, `:1573`, `:1889`, `:1916`
+- Modify: `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md:19-27`, `:403-425`, `:453-461`
+- Modify: `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md:102`, `:115-116`, `:125-133` (§5.2), `:135-143` (§5.3), `:256-258`, `:1618-1620`, `:1936-1937`, `:1966-1970`
 - Modify: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-1-trust-core-format.md:23-24`
 - Modify: `docs/superpowers/plans/2026-08-13-einsatzarchiv-v0-1.md`
 
@@ -306,23 +306,23 @@ Trage im Ledger ein: `Task 1: complete — vier RED protokolliert (Exit 101, je 
 
 - [ ] **Step 1: Den Selbstwiderspruch des Specs auflösen**
 
-In `2026-08-15-einsatzarchiv-web-reader-design.md` §1 den Satz in `:20-24` ersetzen:
+In `2026-08-15-einsatzarchiv-web-reader-design.md` §1 den Satz in `:19-27` ersetzen:
 
 > Diese Spezifikation legt fest, wie der Reader im Browser betrieben wird, ohne die kryptografischen Invarianten der v0.1 zu schwächen. Sie ändert keine bestehenden Wireformate, keine Verifikationsreihenfolge und keine Signaturregeln bestehender Objekte. Sie führt zwei neue Trust-Objektfamilien ein — `webBundleRelease` (§4.2) und das Reader-Key-Escrow (§7) —; beide sind ausdrücklich eine **v1.1-Erweiterung außerhalb Stage 1** und werden nach §12 in Stage 3 beziehungsweise Stage 5 gebaut. Sie ändert die Ausführungsumgebung des Readers, die Verwahrung der Reader-Schlüssel, die Auslieferung des Reader-Codes und die Wiederherstellung nach Schlüsselverlust.
 
 - [ ] **Step 2: Die zwei empirisch widerlegten Spec-Aussagen korrigieren**
 
-In §10 (`:394-395`) entfällt die Forderung nach dem cfg-Flag. Neue Fassung des Aufzählungspunktes:
+In §10 (`:410-415`) entfällt die Forderung nach dem cfg-Flag. Neue Fassung des Aufzählungspunktes:
 
 > - Einzige erforderliche Anpassung: `getrandom 0.4.3` benötigt das Feature `wasm_js`. Das aus `getrandom 0.3` stammende `--cfg getrandom_backend="wasm_js"` ist für 0.4.3 **nicht** erforderlich; gemessen am 2026-08-16 genügt das Feature allein.
 
-In §12 (`:425-426`) den Stage-1-Punkt präzisieren:
+In §12 (`:453-461`) den Stage-1-Punkt präzisieren:
 
 > - **Stage 1:** `wasm32-unknown-unknown` als vierter Eintrag in `verify_quick_commands()` (`tools/xtask/src/main.rs`), als Positivliste über die sieben Bibliotheks-Crates; `targets` in `rust-toolchain.toml`; `getrandom`-Feature `wasm_js`. Das Gate belegt ausschließlich Übersetzbarkeit, nicht Lauffähigkeit. Sonst unverändert.
 
 - [ ] **Step 3: design.md §5.3 um die Browser-Zone ergänzen**
 
-`design.md:131` verliert den Reader, und nach `:133` kommt Punkt 5 im Wortlaut von Spec §3 (`:60-63`):
+`design.md:138` verliert den Reader, und nach `:140` kommt Punkt 5 im Wortlaut von Spec §3 (`:63-66`):
 
 ```markdown
 2. **Desktop-/Archivzone:** Writer, Admin, verschlüsselte lokale Datenbanken und lokales Archiv.
@@ -333,7 +333,7 @@ In §12 (`:425-426`) den Stage-1-Punkt präzisieren:
 
 - [ ] **Step 4: design.md §17.4 um den Status aus Spec §5.4 ergänzen**
 
-Spec §5.4 (`:157-160`) fordert einen sichtbaren Zustand *nicht server-bestätigt*; `design.md:1889` friert die Verifikations-Statussprache ohne ihn ein, und Stage-1-Plan `:27` macht daraus eine Stage-1-Invariante. `design.md:1889` wird zu:
+Spec §5.4 (`:159-163`) fordert einen sichtbaren Zustand *nicht server-bestätigt*. Die Verifikationsbegriffe stehen heute in `design.md:1936`, die getrennte Server-Bestätigung in `:1937`; Stage-1-Plan `:27` hält die Statussprache als Stage-1-Invariante fest. Die für diesen Task vorgesehene Ergänzung lautet:
 
 ```markdown
 - Verifikation: `verifiziert`, `Lücke`, `fehlender Grant`, `unbekannter Schlüssel`, `nicht darstellbares Schema`, `ungültig`
@@ -348,14 +348,14 @@ Ergänze unmittelbar darunter:
 
 - [ ] **Step 5: Die fünf weiteren widerlegten design.md-Fundstellen korrigieren**
 
-| Zeile | Heute | Korrektur |
+| Heutige Zielstelle | Ausgangswortlaut (2026-08-16) | Korrektur |
 |---|---|---|
 | `:102` | `support-matrix.json` pinnt je Kombination „Architektur, Installerformat, Key-Provider" | Reader-Vorbehalt: für den Reader treten nach `web-reader-design.md` §11.4 Engine, Version und Plattform an deren Stelle |
-| `:113` | „**Tauri-2-Desktopanwendung:** gemeinsame Binär- und UI-Basis für Writer, Reader und Administration." | Aufteilen: „**Tauri-2-Desktopanwendung (`apps/desktop/`):** gemeinsame Binär- und UI-Basis für Writer und Administration." plus neuer Punkt „**Installierbare Web-Anwendung (`apps/web/`):** Reader als PWA mit `wasm32`-fähigem Rust-Kern; siehe `web-reader-design.md` §3." |
-| `:122-126` (§5.2) | Rollenzuordnung der gemeinsamen Desktopanwendung | Ersetzen durch die Rollenzuordnung aus Spec §3 (`:46-56`), inklusive des Satzes, dass die Web-Anwendung keinen Code für Writer-Finalisierung, Root-Zeremonien, Operator-Provisionierung, Historical Re-grant oder Vernichtungsausführung enthält |
-| `:248` | „nach fünf Minuten Inaktivität oder OS-Sperre endet die Sitzung" | Vermerk anfügen: für den Web-Reader hat die OS-Sperre keine Entsprechung; es gilt die dokumentierte SOLL-Abweichung nach `web-reader-design.md` §11.2 mit Ersatz nach §6.5 |
-| `:1573` (§14.2) | „Reader-Cache und Suchindex liegen in einer verschlüsselten SQLite-Datenbank. Der Datenbankschlüssel wird durch den Plattform-Key-Provider geschützt." | Reader-Vorbehalt: im Web-Reader entfällt SQLCipher; der Index ist ein invertierter Rust-Index, als Ganzes mit ChaCha20-Poly1305 verschlüsselt in OPFS (`web-reader-design.md` §8.1). Der native Reader-Key-Provider entfällt (§11.3) |
-| `:1916` (§18.3) | nennt Reader-Cache und Suchindex unter SQLCipher | Denselben Vorbehalt setzen |
+| `:115-116` | „**Tauri-2-Desktopanwendung:** gemeinsame Binär- und UI-Basis für Writer, Reader und Administration." | Aufteilen: „**Tauri-2-Desktopanwendung (`apps/desktop/`):** gemeinsame Binär- und UI-Basis für Writer und Administration." plus neuer Punkt „**Installierbare Web-Anwendung (`apps/web/`):** Reader als PWA mit `wasm32`-fähigem Rust-Kern; siehe `web-reader-design.md` §3." |
+| `:125-133` (§5.2) | Rollenzuordnung der gemeinsamen Desktopanwendung | Ersetzen durch die Rollenzuordnung aus Spec §3 (`:51-59`), inklusive des Satzes, dass die Web-Anwendung keinen Code für Writer-Finalisierung, Root-Zeremonien, Operator-Provisionierung, Historical Re-grant oder Vernichtungsausführung enthält |
+| `:256-258` | „nach fünf Minuten Inaktivität oder OS-Sperre endet die Sitzung" | Vermerk anfügen: für den Web-Reader hat die OS-Sperre keine Entsprechung; es gilt die dokumentierte SOLL-Abweichung nach `web-reader-design.md` §11.2 mit Ersatz nach §6.5 |
+| `:1618-1620` (§14.2) | „Reader-Cache und Suchindex liegen in einer verschlüsselten SQLite-Datenbank. Der Datenbankschlüssel wird durch den Plattform-Key-Provider geschützt." | Reader-Vorbehalt: im Web-Reader entfällt SQLCipher; der Index ist ein invertierter Rust-Index, als Ganzes mit ChaCha20-Poly1305 verschlüsselt in OPFS (`web-reader-design.md` §8.1). Der native Reader-Key-Provider entfällt (§11.3) |
+| `:1966-1970` (§18.3) | nennt Reader-Cache und Suchindex unter SQLCipher | Denselben Vorbehalt setzen |
 
 - [ ] **Step 6: Die zwei kollidierenden Global-Constraint-Zeilen des Stage-1-Plans korrigieren**
 
@@ -675,8 +675,8 @@ DARF dieser Task keine Vektoren für `organizationAdminAuthorization` einfrieren
 **BLOCKIERT — Zuordnung der Policy-Frist nach `web-reader-design.md` §4.2.** Spec
 §4.2 fordert eine in der Policy konfigurierte Aktualisierungsfrist für das Alter des
 zuletzt bezogenen Trust-Standes. Weder `max_registry_age_ms` (Ausstellungsschranke,
-`design.md:1347`) noch `registry_expiry_behavior` (an die Finalisierung gebunden,
-`design.md:1426`) deckt das. Ist eine eigene Frist erforderlich, ist `policy-core-v1`
+`design.md:1368`) noch `registry_expiry_behavior` (an die Finalisierung gebunden,
+`design.md:1447`) deckt das. Ist eine eigene Frist erforderlich, ist `policy-core-v1`
 betroffen (`trust.cddl:127-141`, `crates/ea-format/src/etb.rs:210-229`). Solange das
 offen ist, DARF dieser Task keine Positivvektoren für `policy-core-v1` einfrieren.
 
@@ -686,8 +686,8 @@ freigegebene Normativquelle mit eigenen MUSS-Anforderungen (§4.1 getrennter Ori
 §4.2 Aktivierung nur gegen gepinnte `webBundleRelease`, §4.3 nicht überspringbarer
 Fingerprint-Vergleich, §5.2 universeller Weg immer angeboten, §6.3 zwei
 Authenticators, §7.5 Verweigerung bei abweichendem Transport-Fingerprint, §8.2 kein
-Klartext in Telemetrie). Zusätzlich sind `design.md:2240` (FR-100) und `:2243`
-(FR-103) inhaltlich überholt. Vor dem Einfrieren ist zu entscheiden, ob diese
+Klartext in Telemetrie). Zusätzlich waren FR-100 und FR-103 zum ursprünglichen
+Planungsstand inhaltlich überholt (heutige Fassungen: `design.md:2292`, `:2295`). Vor dem Einfrieren ist zu entscheiden, ob diese
 Anforderungen als v1.1-Zeilen aufgenommen oder ausdrücklich zurückgestellt werden.
 Schweigen ist die einzige Variante, die nach dem Einfrieren teuer wird.
 
@@ -825,19 +825,19 @@ In jeden der sechs Stage-Pläne unter *Global Constraints* eine Zeile mit dem Sp
 
 | Plan | Merker |
 |---|---|
-| Stage 2 | `web-reader-design.md` §12 (`:427-428`): Task 8 schaltet nur noch Writer und Administration frei; neuer Task für den Export eines Archiv-Bündels als Einzeldatei nach §5.2 (`:136-138`). |
-| Stage 3 | §12 (`:429-431`): neue Fläche für Bundle-Auslieferung und -Pinning, Ablage der Wrapped-Blobs, CORS und RFC-9421-Request-Signatur aus dem Browser; zusätzlich §6.4.1 (`:215-221`), WebAuthn-Credentials am Sync-Server mit pseudonymer `subjectId` als `userHandle`. Die acht bestehenden Tasks und die API-Flächen aus Task 6 bleiben. |
-| Stage 4 | §12 (`:432-435`): Tasks 1, 2, 4 und 7 werden neu geschrieben, Task 3 behält den Rust-Kern, Task 5 bleibt, Task 6 wird angepasst, Task 8 wird um Browser-Matrix und Datei-Modus erweitert. **Achtung:** `:9` und `:88` dieses Plans schreiben heute noch SQLCipher, Tauri 2 und den nativen Key-Provider fest — beides ist durch §8.1 und §11.3 widerlegt. |
-| Stage 5 | §12 (`:436-438`): die 14 bestehenden Tasks bleiben; zwei neue Tasks für Escrow-Erzeugung beim Enrollment und die Zwei-Approver-Öffnungszeremonie mit Re-Encryption. Blockiert auf Pre-flight-Konflikte 2 und 3. |
-| Stage 6 | §12 (`:439`): unverändert; Merker nur zur Nachweisbarkeit, dass der Spec geprüft wurde. |
-| Stage 7 | §12 (`:440-443`) und §11.4 (`:416-419`): Support-Matrix bekommt für den Reader eine Browser-Achse aus Engine, Version und Plattform; Architektur, Installerformat und Key-Provider entfallen für den Reader. Reader-Installer und native Key-Provider-Smokes entfallen. Neu: PWA-Installation, Service-Worker-Update unter Pinning, und ein Gate, das die Ablehnung eines nicht Root-signierten Bundles nachweist. Browser-Mindestversionen nach §14.3 pinnen. |
+| Stage 2 | `web-reader-design.md` §12 (`:462-463`): Task 8 schaltet nur noch Writer und Administration frei; neuer Task für den Export eines Archiv-Bündels als Einzeldatei nach §5.2 (`:139-145`). |
+| Stage 3 | §12 (`:464-466`): neue Fläche für Bundle-Auslieferung und -Pinning, Ablage der Wrapped-Blobs, CORS und RFC-9421-Request-Signatur aus dem Browser; zusätzlich §6.4.1 (`:218-224`), WebAuthn-Credentials am Sync-Server mit pseudonymer `subjectId` als `userHandle`. Die acht bestehenden Tasks und die API-Flächen aus Task 6 bleiben. |
+| Stage 4 | §12 (`:467-470`): Tasks 1, 2, 4 und 7 werden neu geschrieben, Task 3 behält den Rust-Kern, Task 5 bleibt, Task 6 wird angepasst, Task 8 wird um Browser-Matrix und Datei-Modus erweitert. **Achtung:** `:9` und `:88` dieses Plans schreiben heute noch SQLCipher, Tauri 2 und den nativen Key-Provider fest — beides ist durch §8.1 und §11.3 widerlegt. |
+| Stage 5 | §12 (`:471-473`): die 14 bestehenden Tasks bleiben; zwei neue Tasks für Escrow-Erzeugung beim Enrollment und die Zwei-Approver-Öffnungszeremonie mit Re-Encryption. Blockiert auf Pre-flight-Konflikte 2 und 3. |
+| Stage 6 | §12 (`:474`): unverändert; Merker nur zur Nachweisbarkeit, dass der Spec geprüft wurde. |
+| Stage 7 | §12 (`:475-478`) und §11.4 (`:436-439`): Support-Matrix bekommt für den Reader eine Browser-Achse aus Engine, Version und Plattform; Architektur, Installerformat und Key-Provider entfallen für den Reader. Reader-Installer und native Key-Provider-Smokes entfallen. Neu: PWA-Installation, Service-Worker-Update unter Pinning, und ein Gate, das die Ablehnung eines nicht Root-signierten Bundles nachweist. Browser-Mindestversionen nach §14.3 pinnen. |
 
 - [ ] **Step 2: Die Stage-4-Blockade setzen**
 
 Zusätzlich zur Merker-Zeile in `stage-4-reader.md` eine Blockade — analog zu den Task-11-Blockaden aus Task 5:
 
 ```markdown
-**BLOCKIERT — Laufzeitnachweis nach `web-reader-design.md` §14.1 (`:460-464`).** Die
+**BLOCKIERT — Laufzeitnachweis nach `web-reader-design.md` §14.1 (`:495-499`).** Die
 Überarbeitung dieses Plans darf erst beginnen, wenn ein ausführbarer Spike vorliegt:
 `wasm-bindgen`-Schicht, `getrandom` mit `wasm_js` in einer echten JS-Umgebung, eine
 HPKE-Entkapselung und eine Signaturprüfung gegen einen bestehenden Testvektor.

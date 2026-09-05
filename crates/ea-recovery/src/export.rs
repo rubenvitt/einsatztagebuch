@@ -4,7 +4,7 @@
 //!
 //! Es wird nichts neu kodiert, nichts umsortiert und nichts ausgelassen. Jede
 //! Bytesequenz des Bestands geht unveraendert unter DEMSELBEN relativen Pfad
-//! hinaus — die Nicht-Objekt-Dateien eingeschlossen. `design.md`:1779 verlangt
+//! hinaus — die Nicht-Objekt-Dateien eingeschlossen. `design.md`:1796 verlangt
 //! ein zur Offlinepruefung ausreichendes Bundle, und `nonObjectFileCount`
 //! gehoert zum Bestand: ein Export ohne `README-FORMAT.txt` und ohne alles
 //! unter `format/` waere ein anderer Bestand, dessen Bericht schon in den
@@ -39,7 +39,7 @@
 //! Plattformpruefung bereits getroffen hat: eine Quellart oder eine Faehigkeit,
 //! die dieses Bauwerk nicht traegt, ist keine Aussage ueber die Form des
 //! Aufrufs, sondern ueber das Werkzeug. Der kleinste zutreffende spezifische
-//! Code aus `design.md`:1795 ordnet die BEFUNDE eines Berichts; er macht aus
+//! Code aus `design.md`:1815 ordnet die BEFUNDE eines Berichts; er macht aus
 //! einer fehlenden Faehigkeit keinen Bedienfehler.
 //!
 //! # WAS EIN EXPORT NICHT TRAEGT

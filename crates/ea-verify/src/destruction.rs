@@ -148,7 +148,7 @@ impl DestructionStateV1 {
 
     /// Darf dieser Zustand in `next` uebergehen?
     ///
-    /// Die Tabelle aus `design.md`:1826-1841, vollstaendig und geschlossen.
+    /// Die Tabelle aus `design.md`:1843-1856, vollstaendig und geschlossen.
     /// NACH `InProgress` GIBT ES KEIN ABBRECHEN, und `CompleteManagedScope`
     /// ist der einzige erfolgreiche Endzustand: er hat gar keine ausgehende
     /// Kante.
