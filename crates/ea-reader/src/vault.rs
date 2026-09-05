@@ -44,20 +44,20 @@ use core::fmt;
 
 use ea_cbor::{ParserLimits, validate};
 use ea_crypto::{
-    AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, CryptoError, HpkeRecipientPrivateKey,
-    SecretBytes, SecretVec, aead_open, aead_seal,
+    AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, CoseSigner, CryptoError,
+    HpkeRecipientPrivateKey, SecretBytes, SecretVec, aead_open, aead_seal,
 };
 use ea_trust::{RegistryHeadPin, TrustAnchorV1, TrustError, decode_trust_anchor};
-use ea_types::{KeyThumbprint, ObjectHash, RegistryVersion};
+use ea_types::{Hash32, KeyThumbprint, ObjectHash, RegistryVersion};
 use ed25519_dalek::{Signer, SigningKey};
 use minicbor::{Decoder, Encoder};
 use zeroize::Zeroize;
 
 use crate::blob_store::ReaderBlobError;
 use crate::envelope::{
-    AuthenticatorPrfV1, VAULT_BLOB_AAD_V1, VaultEnvelopeV1, derive_cache_key_v1,
-    derive_entry_state_key_v1, derive_index_key_v1, derive_kek_v1, derive_sync_cursor_key_v1,
-    derive_trust_state_key_v1,
+    AuthenticatorPrfV1, VAULT_BLOB_AAD_V1, VaultEnvelopeV1, derive_audit_log_key_v1,
+    derive_cache_key_v1, derive_confirmation_binding_v1, derive_entry_state_key_v1,
+    derive_index_key_v1, derive_kek_v1, derive_sync_cursor_key_v1, derive_trust_state_key_v1,
 };
 
 /// Der Fehlschlag des Tresors und der Speicher ueber ihm.
@@ -510,6 +510,32 @@ impl SealedVaultV1 {
         self.nonce = nonce;
     }
 
+    /// Belegt, dass ein Authenticator DIESEN Tresor oeffnen kann — ohne ihn zu
+    /// oeffnen — und gibt die Tresorbindung der Bestaetigung heraus.
+    ///
+    /// Der Weg der Authenticator-Bestaetigung aus `web-reader-design.md` §6.5
+    /// und §8.2: eine frische PRF-Ausgabe ist nur nach einer Zeremonie mit
+    /// Nutzerverifikation zu haben, und ob sie ECHT ist, entscheidet nicht der
+    /// Aufrufer, sondern die AEAD-Umschliessung des Envelopes. Der
+    /// umschlossene Tresorschluessel wird dafuer ausgepackt, zur Bindung
+    /// abgeleitet und sofort fallengelassen — unter `ZeroizeOnDrop`, ohne den
+    /// Tresorkoerper zu entsiegeln und ohne dass ein zweiter [`UnlockedVault`]
+    /// entsteht. Die Bindung ist `HKDF-SHA-256(vault_key, ea-reader-confirmation-v1)`;
+    /// [`UnlockedVault::confirmation_binding`] rechnet denselben Wert, und nur
+    /// bei Gleichheit eroeffnet oder exportiert die Bestaetigung.
+    ///
+    /// # Errors
+    /// `EA-READER-VAULT-NO-ENVELOPE`, wenn kein Envelope diese `credentialId`
+    /// traegt, `EA-CRYPTO-AEAD-OPEN`, wenn die PRF-Ausgabe nicht zu ihm
+    /// passt, `EA-READER-VAULT-KEK-DERIVATION`, wenn HKDF abweist.
+    pub(crate) fn prove_authenticator(
+        &self,
+        authenticator: &AuthenticatorPrfV1,
+    ) -> Result<Hash32, ReaderVaultError> {
+        let vault_key = self.unwrap_vault_key(authenticator)?;
+        confirmation_binding_of(&vault_key)
+    }
+
     /// Der Tresorschluessel, geholt ueber genau EINEN Entsperrweg.
     fn unwrap_vault_key(
         &self,
@@ -609,6 +635,33 @@ impl UnlockedVault {
             .with_exposed(|seed| SigningKey::from_bytes(seed).sign(digest).to_bytes())
     }
 
+    /// Die Tresorbindung, gegen die eine Authenticator-Bestaetigung geprueft
+    /// wird — derselbe Wert, den `SealedVaultV1::prove_authenticator` aus dem
+    /// ausgepackten Tresorschluessel ableitet.
+    ///
+    /// # Panics
+    /// Nie erreichbar: HKDF-SHA-256 weist eine Ausgabelaenge erst oberhalb von
+    /// 255 · 32 Byte ab, und hier sind es 32.
+    #[must_use]
+    pub fn confirmation_binding(&self) -> Hash32 {
+        confirmation_binding_of(&self.vault_key)
+            .expect("HKDF-SHA-256 liefert 32 Byte ohne Laengenbeschraenkung")
+    }
+
+    /// Der COSE-Signierer des lokalen Audits, aus DEMSELBEN Ed25519-Schluessel.
+    ///
+    /// `ea_crypto::CoseSigner::from_secret` nimmt den Seed BESITZEND; die Kopie
+    /// entsteht innerhalb von `with_exposed` und faellt mit dem Signierer unter
+    /// dessen Zeroize — dieselbe Bauform, mit der `ReaderEnrollment::finish`
+    /// seinen `RequestSigner` baut. Der Signierer wird je Auditzeile NEU
+    /// gebaut und nirgends zwischengehalten: die Sperre der Sitzung laesst den
+    /// Tresor fallen, und mit ihm jeden Weg zu diesem Schluessel.
+    #[must_use]
+    pub fn audit_signer(&self) -> CoseSigner {
+        self.audit_signing_key
+            .with_exposed(|seed| CoseSigner::from_secret(SecretBytes::new(*seed)))
+    }
+
     /// Der gepinnte Root-Anker.
     ///
     /// Im Datei-Modus die EINZIGE Vertrauensquelle (§5.3): Trust-Objekte, die
@@ -668,6 +721,11 @@ impl UnlockedVault {
         derive_entry_state_key_v1(&self.vault_key)
     }
 
+    /// Der Schluessel des signierten lokalen Auditprotokolls.
+    pub(crate) fn audit_log_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+        derive_audit_log_key_v1(&self.vault_key)
+    }
+
     /// Der Schluessel des bestaetigten Sync-Cursors.
     ///
     /// Der Cursor liegt im selben Bytespeicher wie Cache und Zustaende und
@@ -678,6 +736,14 @@ impl UnlockedVault {
     pub(crate) fn sync_cursor_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
         derive_sync_cursor_key_v1(&self.vault_key)
     }
+}
+
+/// Die Tresorbindung aus einem Tresorschluessel, als `Hash32`: der
+/// abgeleitete Wert ist KEIN Geheimnis mehr — er kann den Schluessel nicht
+/// verraten —, und die Bestaetigung traegt ihn als gewoehnlichen Vergleichswert.
+fn confirmation_binding_of(vault_key: &SecretBytes<CEK_SIZE>) -> Result<Hash32, ReaderVaultError> {
+    let derived = derive_confirmation_binding_v1(vault_key)?;
+    Ok(derived.with_exposed(|bytes| Hash32::try_from(bytes.as_slice()).expect("32 Byte")))
 }
 
 impl fmt::Debug for UnlockedVault {

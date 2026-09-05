@@ -77,6 +77,14 @@ hex.workspace = true
 jsonschema.workspace = true
 minicbor.workspace = true
 serde_json.workspace = true
+# Die pseudonyme Bedienerbindung der geteilten Reader-Kulisse rechnet ihren
+# SHA-256 ueber die `credentialId` NACH, statt ihn aus dem Typ zu lesen
+# (`crates/ea-reader/tests/verify_fixtures/fixtures.rs::credential_id_hash`).
+# Dieses Ziel bindet dieselbe Datei per `#[path]` ein, also braucht es
+# dieselbe Kante wie `crates/ea-reader`; `ea-crypto` fuehrt fuer diesen einen
+# Zweck keinen domaenenfreien Digest, und `web_bundle_hash` waere der
+# falsche Begriff.
+sha2.workspace = true
 toml.workspace = true
 
 [build-dependencies]

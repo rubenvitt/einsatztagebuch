@@ -43,7 +43,8 @@
 import type { FileModeArchiveView } from '../../bridge/generated-contracts'
 import type { EaOpfsResponse } from '../../bridge/opfs-worker'
 import type { ReaderWorkerMessage } from '../../vault/webauthn-prf'
-import { callReaderWorker, unlockReaderVaultSession } from '../../vault/webauthn-prf'
+import { callReaderWorker } from '../../vault/webauthn-prf'
+import { ensureReaderSession } from '../session/reader-session'
 
 declare global {
   // `showDirectoryPicker` steht in der File-System-Access-Fassung des
@@ -278,12 +279,18 @@ export async function openDirectoryOverPort(
  * Tresor liegt und nirgendwo sonst — das ist §5.3 als Konstruktionsregel.
  * Zwischengehalten wird sie, damit nicht jedes Öffnen eine neue
  * Authenticator-Zeremonie auslöst.
+ *
+ * Gehalten wird sie NICHT hier, sondern in `../session/reader-session`: die
+ * Sichtbarkeits- und Eingabehaken aus `src/main.tsx` melden an die EINE
+ * Sitzung des Seitenlaufs, und eine zweite, hier gehaltene bekäme keine
+ * Meldung und liefe fünf Minuten nach dem Entsperren in die Sperre
+ * (`web-reader-design.md` §6.5). Ist die Sitzung gesperrt, liefert das Öffnen
+ * `EA-READER-SESSION-LOCKED`; die erneute Bestätigung ist eine Handlung des
+ * Lesers und kein Nebeneffekt eines Dateidialogs.
  */
-let openSession: number | undefined
-
 async function readerSession(): Promise<number> {
-  openSession ??= await unlockReaderVaultSession()
-  return openSession
+  // Die Uhr tritt als WERT ein — dieselbe Regel wie bei `effectiveNowMs`.
+  return ensureReaderSession(Date.now())
 }
 
 /**

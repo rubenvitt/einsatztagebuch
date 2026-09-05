@@ -352,7 +352,8 @@ async function call(request: WithoutId<EaOpfsRequest>): Promise<EaOpfsResponse> 
  * Tresorsitzungen und die angefangenen Verzeichnisquellen liegen in Rust in
  * `thread_local!`-Tabellen, ein zweiter Worker saehe keine von beiden. Wer
  * eine zweite Instanz erzeugte, bekaeme fuer jede Sitzungskennung
- * `EA-READER-FILE-MODE-BRIDGE-ARGUMENT` und wuesste nicht, warum.
+ * `EA-READER-SESSION-UNKNOWN` (und fuer jede Ordnerkennung
+ * `EA-READER-FILE-MODE-BRIDGE-ARGUMENT`) und wuesste nicht, warum.
  */
 export async function callReaderWorker(request: ReaderWorkerMessage): Promise<EaOpfsResponse> {
   return call(request)
@@ -375,8 +376,14 @@ async function callForStatus<T>(request: WithoutId<EaOpfsRequest>): Promise<T> {
   return JSON.parse(response.status) as T
 }
 
-/** Hex nach Bytes — die Transportform der Bruecke, keine Entscheidung. */
-function bytesFromHex(value: string): EnrollmentBytes {
+/**
+ * Hex nach Bytes — die Transportform der Bruecke, keine Entscheidung.
+ *
+ * Exportiert, weil der Einzelexport den Eintragshash aus dem
+ * `ReaderSessionView` in derselben Schreibweise zurueckreicht; eine zweite
+ * Umrechnung in `features/session` waere dieselbe Zeile ein zweites Mal.
+ */
+export function bytesFromHex(value: string): EnrollmentBytes {
   const bytes = new Uint8Array(value.length / 2)
   for (let index = 0; index < bytes.length; index += 1) {
     bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16)
@@ -582,8 +589,9 @@ async function createAuthenticator(
  * Der zuletzt von `enrollmentBegin` herausgegebene Stand.
  *
  * Er liegt hier, weil die Zeremonien Salz und Algorithmenliste brauchen und
- * die Oberflaeche beides nicht anfassen soll, und weil `unlockReaderVault`
- * dasselbe Salz fuer die zweite PRF-Auswertung braucht — keine Ausfuhr gibt es
+ * die Oberflaeche beides nicht anfassen soll, und weil
+ * [`unlockReaderVaultSession`] dasselbe Salz fuer die zweite PRF-Auswertung
+ * braucht — keine Ausfuhr gibt es
  * ein zweites Mal heraus. Nach einem Neuladen der Seite ist er fort; der Weg
  * dafuer ist `recover_and_unlock_vault`, und der ist in diesem Stand nicht
  * verdrahtet.
@@ -698,34 +706,36 @@ export const enrollmentBridge: EnrollmentBridge = {
 
 
 /**
- * Die LEBENDE Paritaetsprobe: derselbe Authenticator ein zweites Mal.
+ * Eine FRISCHE PRF-Auswertung fuer eine Bestaetigung — Entsperren oder
+ * Einzelexport.
  *
- * Keine sechste Ausfuhr aus `webauthn.rs`, sondern der Weg, den die Crate
- * schon hat — eine frische PRF-Auswertung ueber `credentials.get`, der
- * versiegelte Tresor aus OPFS und `readerVaultUnlock` aus `vault_bridge`.
- * Beide Schritte laufen im Worker, weil dort das wasm-Modul und OPFS liegen.
+ * Derselbe Aufruf wie beim Entsperren, ausdruecklich KEIN zwischengehaltener
+ * Wert: `web-reader-design.md` §6.5 verlangt nach jeder Sperre eine erneute
+ * Authenticator-Bestaetigung, und §8.2 eine je Export. Eine PRF-Ausgabe, die
+ * diese Datei fuer den naechsten Aufruf aufhoebe, waere genau die
+ * Klartextstelle, die der Kopf dieser Datei ausschliesst. Rust belegt mit der
+ * Ausgabe die Bestaetigung gegen den versiegelten Tresor
+ * (`ReaderAuthenticatorConfirmation::prove`) und loescht sie danach.
+ *
+ * BENANNTE GRENZE, dieselbe wie bei [`unlockReaderVaultSession`]: das Salz
+ * kommt aus [`beganEnrollment`], also aus einem Enrollment DIESES Seitenlaufs.
  */
-export async function unlockReaderVault(): Promise<void> {
-  await unlockReaderVaultSession()
+export async function freshPrfForConfirmation(): Promise<{
+  readonly credentialId: Uint8Array
+  readonly prfOutput: Uint8Array
+}> {
+  return evaluatePrf(beganEnrollment().prfSalt, [])
 }
 
 /**
- * Derselbe Weg, aber mit der SITZUNGSKENNUNG als Ergebnis.
+ * Der versiegelte Tresor, wie er lokal unter [`READER_VAULT_BLOB_KEY`] liegt.
  *
- * Sie wird gebraucht, sobald ein Aufrufer nach dem Entsperren noch etwas mit
- * dem Tresor tut — der Datei-Modus etwa, dessen Brueckenausfuhren alle einen
- * entsperrten Tresor verlangen. Die Kennung ist ein `u32` ohne Bedeutung
- * ausserhalb der Bruecke; sie ist KEIN Schluesselmaterial und ihre Herausgabe
- * ist genau die, die `web-reader-design.md` §9 vorsieht.
- *
- * BENANNTE GRENZE, und sie gehoert nicht diesem Modus: der Weg fuehrt ueber
- * [`beganEnrollment`], also ueber ein Enrollment, das in DIESEM Seitenlauf
- * begonnen wurde. Nach einem Neuladen der Seite ist das Salz fort, und dieser
- * Aufruf faellt laut. Der Weg dafuer ist `recover_and_unlock_vault` in
- * `ea-reader`, und der ist in diesem Stand an keine Ausfuhr verdrahtet.
+ * Er ist Chiffrat samt Envelopes und kein Klartext — deshalb darf er ueber
+ * den Hauptthread reisen. Gebraucht wird er von JEDEM Aufruf, der eine
+ * Bestaetigung belegt: `readerVaultUnlock` und `readerExportOne` nehmen ihn
+ * beide als Argument, weil die Bruecke keinen Tresor haelt, nur Sitzungen.
  */
-export async function unlockReaderVaultSession(): Promise<number> {
-  const { credentialId, prfOutput } = await evaluatePrf(beganEnrollment().prfSalt, [])
+export async function readSealedReaderVault(): Promise<Uint8Array> {
   const stored = await call({ kind: 'get', key: READER_VAULT_BLOB_KEY })
   if (!stored.ok) {
     throw new Error(stored.code)
@@ -733,11 +743,49 @@ export async function unlockReaderVaultSession(): Promise<number> {
   if (stored.bytes === undefined) {
     throw new Error('Unter dem Tresorschluessel liegt lokal nichts.')
   }
+  return stored.bytes
+}
+
+/**
+ * Das Entsperren: derselbe Authenticator ein zweites Mal, und die
+ * SITZUNGSKENNUNG als Ergebnis.
+ *
+ * Keine sechste Ausfuhr aus `webauthn.rs`, sondern der Weg, den die Crate
+ * schon hat — eine frische PRF-Auswertung ueber `credentials.get`, der
+ * versiegelte Tresor aus OPFS und `readerVaultUnlock` aus `vault_bridge`.
+ * Die Kennung wird gebraucht, sobald ein Aufrufer nach dem Entsperren noch
+ * etwas mit dem Tresor tut — der Datei-Modus etwa, dessen Brueckenausfuhren
+ * alle einen entsperrten Tresor verlangen. Sie ist ein `u32` ohne Bedeutung
+ * ausserhalb der Bruecke; sie ist KEIN Schluesselmaterial und ihre Herausgabe
+ * ist genau die, die `web-reader-design.md` §9 vorsieht.
+ *
+ * GEHALTEN wird sie NICHT hier, sondern in
+ * `../features/session/reader-session.ts`, dem einen Halter der Kennung; wer
+ * eine Sitzung will, geht dorthin und ruft diese Funktion nicht selbst — eine
+ * hier eroeffnete und fallengelassene Kennung waere eine entsperrte Sitzung,
+ * an die niemand meldet.
+ *
+ * `nowMs` ist die Uhr der Seite und tritt als WERT ein: Rust liest keine Uhr
+ * (`wasm32-unknown-unknown` hat keinen Wirt dafuer), und die Sitzung rechnet
+ * ihre Fristen von hier an gegen genau diesen Wert. Der Aufrufer liest sie,
+ * damit ein Zeuge mit gefaelschter Seitenuhr dieselbe Zahl sieht wie die
+ * Sitzung.
+ *
+ * BENANNTE GRENZE, und sie gehoert nicht diesem Modus: der Weg fuehrt ueber
+ * [`beganEnrollment`], also ueber ein Enrollment, das in DIESEM Seitenlauf
+ * begonnen wurde. Nach einem Neuladen der Seite ist das Salz fort, und dieser
+ * Aufruf faellt laut. Der Weg dafuer ist `recover_and_unlock_vault` in
+ * `ea-reader`, und der ist in diesem Stand an keine Ausfuhr verdrahtet.
+ */
+export async function unlockReaderVaultSession(nowMs: number): Promise<number> {
+  const { credentialId, prfOutput } = await freshPrfForConfirmation()
+  const sealed = await readSealedReaderVault()
   const response = await call({
     kind: 'vault-unlock',
-    sealed: stored.bytes,
+    sealed,
     credentialId,
     prfOutput,
+    nowMs,
   })
   if (!response.ok) {
     throw new Error(response.code)

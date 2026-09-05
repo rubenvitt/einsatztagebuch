@@ -154,8 +154,15 @@ test('stays operable while the bridge is slow', async ({ page }) => {
   // Und sie ist BEDIENBAR, per Tastatur: die Hauptbereiche sind erreichbar und
   // ein Wechsel laeuft, ohne auf die Bruecke zu warten. `Tab` ×3 landet auf
   // dem dritten Verweis der Navigation, `Enter` aktiviert ihn.
+  //
+  // VIER Verweise, nicht mehr drei: die Sitzungssperre bringt `/export` als
+  // vierten Hauptbereich mit, und er steht in der Routentabelle HINTER
+  // `/datei` — die Tab-Folge darunter bleibt damit unveraendert. Die Zahl
+  // steht hier trotzdem ausgeschrieben und nicht als `routes.length`: sie ist
+  // der Zeuge dafuer, dass ein fuenfter Bereich eine bewusste Aenderung ist
+  // und kein Nebeneffekt.
   const nav = page.getByRole('navigation', { name: 'Hauptbereiche' })
-  await expect(nav.getByRole('link')).toHaveCount(3)
+  await expect(nav.getByRole('link')).toHaveCount(4)
   await page.locator('body').press('Tab')
   await page.keyboard.press('Tab')
   await page.keyboard.press('Tab')

@@ -10,7 +10,8 @@ import type {
   EnrollmentFingerprintsStatusV1,
   FingerprintConfirmationStatusV1,
 } from '../../vault/webauthn-prf'
-import { enrollmentBridge, unlockReaderVault } from '../../vault/webauthn-prf'
+import { enrollmentBridge } from '../../vault/webauthn-prf'
+import { readerSessionBridge } from '../session/reader-session'
 import { AuthenticatorRegistration } from './AuthenticatorRegistration'
 import { FingerprintGate } from './FingerprintGate'
 
@@ -244,13 +245,16 @@ export function EnrollmentPage({ bridge = enrollmentBridge }: EnrollmentPageProp
                     zweites Mal befragt, und der Tresor, den dieser Lauf gebaut
                     hat, muss sich mit dem öffnen, was dabei herauskommt. Keine
                     sechste Brückenausfuhr, sondern der Weg, den die Crate
-                    schon hat.
+                    schon hat — und zwar über den EINEN Halter der
+                    Sitzungskennung: eine hier eröffnete und fallengelassene
+                    Sitzung bekäme keine Meldung der Haken aus `main.tsx`
+                    (§6.5). Die Uhr der Seite tritt als WERT ein, wie überall.
                   */}
                   <Button
                     onClick={() => {
                       void (async () => {
                         try {
-                          await unlockReaderVault()
+                          await readerSessionBridge.unlock(Date.now())
                           setUnlocked(true)
                         } catch (error) {
                           setFailure(failureText(error))

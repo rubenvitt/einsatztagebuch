@@ -147,5 +147,27 @@
       "brackets": "ein untergeschobenes Archiv mit vollstaendiger EIGENER Vertrauenskette, byteweise dasselbe Buendel: gegen den fremden Anker endet der Lauf fail-closed an Gate trust und sagt ueber keinen Eintrag etwas aus, gegen den eigenen gepinnten Anker traegt es vollstaendig — der Datei-Modus oeffnet keinen zweiten Weg zu einem Anker",
       "witness": "crates/ea-reader/tests/file_mode_anchor.rs::a_substituted_archive_says_nothing_about_any_entry_in_file_mode"
     }
+  ],
+  "session-and-export": [
+    {
+      "name": "lock-during-target-choice",
+      "brackets": "die Sitzung laeuft ab, waehrend der Dateidialog offen steht: der Export wird mit EA-READER-EXPORT-SESSION-LOCKED abgewiesen, es entsteht KEINE Auditzeile — es gibt keinen Tresor mehr, der sie signieren koennte —, das Ziel sieht kein Byte, und die offenen Datensaetze sind mit der Sperre gefallen",
+      "witness": "crates/ea-reader/tests/export.rs::a_session_that_locked_while_the_target_was_being_chosen_refuses_without_an_audit_line"
+    },
+    {
+      "name": "background-tab-before-write",
+      "brackets": "der Tab geht zwischen Bestaetigung und Schreiben in den Hintergrund und bleibt dort laenger als die verkuerzte Frist: die Bestaetigung ist noch frisch, die Sperre gewinnt trotzdem — ohne Timer, beim naechsten Zugriff —, kein Byte verlaesst den Speicher, keine Zeile entsteht; eine Millisekunde vor der Frist gelingt derselbe Export",
+      "witness": "crates/ea-reader/tests/export.rs::a_tab_hidden_past_the_shortened_deadline_locks_before_the_bytes_leave"
+    },
+    {
+      "name": "aborted-authenticator-confirmation",
+      "brackets": "die Zeremonie liefert keine oder eine fremde PRF-Ausgabe: der Nachweis faellt an der AEAD-Umschliessung des Envelopes (EA-CRYPTO-AEAD-OPEN beziehungsweise EA-READER-VAULT-NO-ENVELOPE), eine Bestaetigung ENTSTEHT nicht, und ohne den per Wert genommenen Typ gibt es weder Sitzung noch Export",
+      "witness": "crates/ea-reader/tests/session_lock.rs::a_confirmation_that_the_authenticator_did_not_prove_never_exists"
+    },
+    {
+      "name": "audit-failure-after-bytes-left",
+      "brackets": "die Bytes sind draussen und die zweite Zeile laesst sich nicht schreiben: der Fehler MUSS entstehen und darf nicht verschluckt werden — EA-READER-EXPORT-AUDIT-AFTER-WRITE mit erreichbarem Auditbefund, plaintext_left() wahr, die Accepted-Zeile steht; weist die Senke schon die ERSTE Zeile ab, verlaesst kein Byte den Speicher",
+      "witness": "crates/ea-reader/tests/export.rs::a_failing_completed_line_after_the_bytes_left_surfaces_instead_of_being_swallowed"
+    }
   ]
 }

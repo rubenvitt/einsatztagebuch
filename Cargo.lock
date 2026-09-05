@@ -1904,6 +1904,7 @@ dependencies = [
  "ea-crypto",
  "ea-format",
  "ea-index",
+ "ea-operator",
  "ea-schema",
  "ea-sync-protocol",
  "ea-testkit",
@@ -2069,6 +2070,7 @@ dependencies = [
  "jsonschema",
  "minicbor",
  "serde_json",
+ "sha2 0.11.0",
  "toml 0.8.23",
 ]
 

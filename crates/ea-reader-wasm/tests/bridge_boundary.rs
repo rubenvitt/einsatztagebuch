@@ -90,19 +90,20 @@ fn the_bridge_returns_what_its_caller_hands_it() {
 /// klaglos, sogar unter `#![forbid(unsafe_code)]`. Nur dieser Zeuge fiel
 /// (Exitcode 101).
 ///
-/// Es gibt also KEIN zweites Netz. Fuer die acht Bruecken-Module, die nach
+/// Es gibt also KEIN zweites Netz. Fuer die neun Bruecken-Module, die nach
 /// diesem Task entstehen — `bridge.rs`, `opfs_worker.rs`, `vault_bridge.rs`,
-/// `webauthn.rs`, `fetch.rs`, `file_access.rs`, `visibility.rs`, `view.rs` —,
-/// heisst das: der Compiler warnt NICHT mit. Ein GANZ vergessenes cfg faellt
+/// `webauthn.rs`, `fetch.rs`, `file_access.rs`, `visibility.rs`,
+/// `export_bridge.rs`, `view.rs` —, heisst das: der Compiler warnt NICHT mit. Ein GANZ vergessenes cfg faellt
 /// hier oder gar nicht, und die Ausfuhr wandert unbemerkt in die
 /// Wirtsbibliothek.
 #[test]
 fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
     // Der Zeuge laeuft ueber JEDE Quelle der Bruecke — rekursiv, siehe
     // `collect_rust_sources` — und ueber BEIDE
-    // Schreibweisen des Attributs. Acht spaetere Module — `bridge.rs`,
+    // Schreibweisen des Attributs. Neun spaetere Module — `bridge.rs`,
     // `opfs_worker.rs`, `vault_bridge.rs`, `webauthn.rs`, `fetch.rs`,
-    // `file_access.rs`, `visibility.rs`, `view.rs` — legen Ausfuhren an, und
+    // `file_access.rs`, `visibility.rs`, `export_bridge.rs`, `view.rs` —
+    // legen Ausfuhren an, und
     // sie schreiben `#[wasm_bindgen(js_name = …)]` nach einem
     // `use wasm_bindgen::prelude::*;`. Ein Zeuge, der nur `src/lib.rs` liest
     // und nur die voll qualifizierte Form kennt, saehe keine davon.

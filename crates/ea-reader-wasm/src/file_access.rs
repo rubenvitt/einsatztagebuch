@@ -249,8 +249,10 @@ pub fn file_mode_bundle_extension() -> String {
 /// fail-closed, und der richtige Preis.
 ///
 /// # Errors
-/// `EA-READER-FILE-MODE-BRIDGE-ARGUMENT` fuer eine Sitzungskennung, die kein
-/// entsperrter Tresor ist, und sonst der stabile Code des Befunds:
+/// `EA-READER-SESSION-UNKNOWN` fuer eine Sitzungskennung, die es nicht gibt,
+/// `EA-READER-SESSION-LOCKED` fuer eine, deren Frist zu `effective_now_ms`
+/// abgelaufen ist — derselbe Zeitwert, gegen den Gate `recipient-grant`
+/// misst, rechnet auch die Sperre —, und sonst der stabile Code des Befunds:
 /// `EA-BUNDLE-MALFORMED` fuer eine abgeschnittene oder umbenannte Datei, die
 /// Codes von `ea-archive` fuer einen Bestand, der sich nicht durchlaufen
 /// laesst, und die des Klassifizierers.
@@ -262,13 +264,12 @@ pub fn file_mode_open_bundle(
     effective_now_ms: i64,
 ) -> Result<String, JsValue> {
     view::close_stand();
-    let stand = with_unlocked_vault(session, move |vault| {
-        let effective_now = UnixMillis::new(effective_now_ms);
+    let effective_now = UnixMillis::new(effective_now_ms);
+    let stand = with_unlocked_vault(session, effective_now, move |vault| {
         let mut observer = RecordingObserver::new();
         ReaderFileMode::open_bundle_observed(bytes, vault, effective_now, &mut observer)
             .map(|opened| view::build_stand(opened, vault, effective_now, observer.events()))
-    })
-    .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?
+    })?
     .map_err(|error| JsValue::from_str(error.code()))?;
     let rendered = file_mode_archive_json(stand.opened());
     view::install_stand(stand);
@@ -343,9 +344,9 @@ pub fn file_mode_directory_unavailable(handle: u32) -> Result<(), JsValue> {
 ///
 /// # Errors
 /// Wie [`file_mode_open_bundle`], ohne dessen Containercodes: eine unbekannte
-/// Sitzungs- oder Ordnerkennung ist
-/// `EA-READER-FILE-MODE-BRIDGE-ARGUMENT`, ein Ordner ohne Berechtigung ist
-/// `EA-ARCHIVE-UNAVAILABLE`.
+/// Ordnerkennung ist `EA-READER-FILE-MODE-BRIDGE-ARGUMENT`, eine unbekannte
+/// oder gesperrte Sitzung traegt ihren Sitzungscode, ein Ordner ohne
+/// Berechtigung ist `EA-ARCHIVE-UNAVAILABLE`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "fileModeOpenDirectory")]
 pub fn file_mode_open_directory(
@@ -357,13 +358,12 @@ pub fn file_mode_open_directory(
     let source = DIRECTORY_SOURCES
         .with(|table| table.borrow_mut().remove(&handle))
         .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?;
-    let stand = with_unlocked_vault(session, move |vault| {
-        let effective_now = UnixMillis::new(effective_now_ms);
+    let effective_now = UnixMillis::new(effective_now_ms);
+    let stand = with_unlocked_vault(session, effective_now, move |vault| {
         let mut observer = RecordingObserver::new();
         ReaderFileMode::open_directory_observed(source, vault, effective_now, &mut observer)
             .map(|opened| view::build_stand(opened, vault, effective_now, observer.events()))
-    })
-    .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?
+    })?
     .map_err(|error| JsValue::from_str(error.code()))?;
     let rendered = file_mode_archive_json(stand.opened());
     view::install_stand(stand);

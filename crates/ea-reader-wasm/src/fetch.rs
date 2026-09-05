@@ -161,12 +161,15 @@ pub fn accepted_json(confirmed: &ConfirmedCursor, object_count: usize) -> String
 ///
 /// Der bestaetigte Cursor kommt aus OPFS und nie aus JavaScript: ein von aussen
 /// gereichter Cursor waere genau der Weg, den Startkopfvergleich zu umgehen.
-/// Ist der Tresor gesperrt, entsteht GAR KEIN Request — `EA-READER-STORE`.
+/// Ist die Sitzung gesperrt, entsteht GAR KEIN Request —
+/// `EA-READER-SESSION-LOCKED`; `os_wall_clock_ms` ist zugleich der Zeitwert,
+/// gegen den `ReaderSession::vault` die Frist nachrechnet.
 ///
 /// # Errors
 /// `EA-READER-SYNC-BRIDGE-ARGUMENT` fuer eine Herkunft, die keine ist,
-/// `EA-READER-BLOB-HOST` fuer den OPFS-Wirt und die stabilen Codes von
-/// `ReaderSyncError`.
+/// `EA-READER-SESSION-UNKNOWN` und `EA-READER-SESSION-LOCKED` fuer die
+/// Sitzung, `EA-READER-BLOB-HOST` fuer den OPFS-Wirt und die stabilen Codes
+/// von `ReaderSyncError`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "readerSyncNextRequest")]
 pub async fn reader_sync_next_request(
@@ -182,13 +185,12 @@ pub async fn reader_sync_next_request(
     let store = OpfsBlobStore::open(SYNC_BLOB_DIRECTORY, &state_keys)
         .await
         .map_err(|error| JsValue::from_str(error.code()))?;
-    with_unlocked_vault(session, |vault| {
+    with_unlocked_vault(session, clock, |vault| {
         let service = ReaderSyncService::open(vault, authority, clock);
         let cursor = service.confirmed_cursor(&store).map_err(sync_failure)?;
         let request = service.next_request(&cursor).map_err(sync_failure)?;
         Ok(request_json(&request))
-    })
-    .ok_or_else(|| JsValue::from_str(ReaderSyncError::Store.code()))?
+    })?
 }
 
 /// Nimmt die Antwortbytes an, verifiziert und bewegt den Cursor.
@@ -225,17 +227,16 @@ pub async fn reader_sync_accept_batch(
         let state_store = OpfsBlobStore::open(SYNC_BLOB_DIRECTORY, &state_keys)
             .await
             .map_err(|error| JsValue::from_str(error.code()))?;
-        with_unlocked_vault(session, |vault| {
+        with_unlocked_vault(session, clock, |vault| {
             ReaderSyncService::open(vault, authority.clone(), clock)
                 .required_blob_keys(&state_store, &response_body)
                 .map_err(sync_failure)
-        })
-        .ok_or_else(|| JsValue::from_str(ReaderSyncError::Store.code()))??
+        })??
     };
     let mut store = OpfsBlobStore::open(SYNC_BLOB_DIRECTORY, &required)
         .await
         .map_err(|error| JsValue::from_str(error.code()))?;
-    with_unlocked_vault(session, |vault| {
+    with_unlocked_vault(session, clock, |vault| {
         let service = ReaderSyncService::open(vault, authority, clock);
         let cursor = service.confirmed_cursor(&store).map_err(sync_failure)?;
         let batch = service
@@ -244,8 +245,7 @@ pub async fn reader_sync_accept_batch(
         let object_count = batch.object_hashes().len();
         let confirmed = service.confirm(&mut store, batch).map_err(sync_failure)?;
         Ok(accepted_json(&confirmed, object_count))
-    })
-    .ok_or_else(|| JsValue::from_str(ReaderSyncError::Store.code()))?
+    })?
 }
 
 #[cfg(test)]

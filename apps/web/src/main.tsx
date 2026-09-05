@@ -15,9 +15,11 @@ import { readerBridge } from './bridge/reader-bridge'
 import { DecorativeIcon } from './design/icons'
 import { eaRuntimeTheme } from './design/tokens'
 import { EnrollmentPage } from './features/enrollment/EnrollmentPage'
+import { SingleExport } from './features/export/SingleExport'
 import { fileModeBridge } from './features/file-mode/DirectoryHandle'
 import { OpenArchivePanel } from './features/file-mode/OpenArchivePanel'
 import { ReaderPage } from './features/reader/ReaderPage'
+import { readerSessionBridge } from './features/session/reader-session'
 import { TrustAgeBanner } from './features/trust-age/TrustAgeBanner'
 
 /**
@@ -64,6 +66,15 @@ export const EA_WEB_ROUTES: readonly EaWebRoute[] = [
     path: '/datei',
     label: 'Datei-Modus',
     render: () => <OpenArchivePanel host={window} bridge={fileModeBridge} />,
+  },
+  // ANGEHAENGT, aus demselben Grund und in derselben Form wie `/datei`: der
+  // Wirt ist das echte Fenster, weil die Zielwahl dort `showSaveFilePicker`
+  // erfragt, und die Sitzungsbruecke wird GESTELLT, damit ein Zeuge die
+  // Flaeche ohne den dedizierten Worker rendern kann.
+  {
+    path: '/export',
+    label: 'Einzelexport',
+    render: () => <SingleExport bridge={readerSessionBridge} host={window} />,
   },
 ]
 
@@ -156,6 +167,51 @@ createRoot(container).render(
     <EaWebApp initialPath={window.location.pathname} />
   </StrictMode>,
 )
+
+// Die drei Haken der Sitzungssperre nach `web-reader-design.md` §6.5.
+//
+// Sie MELDEN und entscheiden nichts: `visibilitychange` traegt den Wechsel in
+// den Hintergrund samt der Uhr der Seite zur Sitzung, `pointerdown` und
+// `keydown` tragen eine Eingabe. Die Fristen — fuenf Minuten ohne Eingabe,
+// dreissig Sekunden nach dem Wechsel in den Hintergrund — rechnet
+// `ReaderSession::state_at` in Rust bei JEDEM Zugriff nach.
+//
+// Ein TIMER ist ausdruecklich NICHT der Mechanismus, und das ist gemessen,
+// nicht Vorliebe: Hintergrundtabs werden gedrosselt und schlafen gelegt, ein
+// `setTimeout` auf dreissig Sekunden feuert dort irgendwann oder nie, und die
+// Sperre hinge damit an dem Tab, den §6.5 gerade als gefaehrdet ansieht. Der
+// Zeitwert kommt deshalb als Argument mit — Rust liest keine Uhr —, und die
+// Sperre faellt beim naechsten Zugriff, egal wann der stattfindet.
+//
+// `pointerdown` und `keydown` sind gedrosselt, hoechstens eine Meldung je
+// Sekunde: jede Meldung ist eine Nachricht an den Worker, und eine
+// Tastenwiederholung sind hundert davon. Die Drossel verkuerzt keine Frist —
+// eine Eingabe innerhalb der Sekunde nach der letzten ist fuer eine
+// Fuenfminutenfrist dieselbe Eingabe.
+//
+// Ein Fehlschlag des Workers wird FALLENGELASSEN und nicht gemeldet: WR-082
+// laesst keinen Fehlerbericht zu, der etwas traegt, und eine unbehandelte
+// Abweisung in der Konsole waere genau so ein Bericht.
+document.addEventListener('visibilitychange', () => {
+  readerSessionBridge
+    .noteVisibility(document.visibilityState === 'hidden', Date.now())
+    .catch(() => {})
+})
+
+let lastActivityNotedAt = Number.NEGATIVE_INFINITY
+
+function noteActivity(): void {
+  const now = Date.now()
+  if (now - lastActivityNotedAt < 1_000) {
+    return
+  }
+  lastActivityNotedAt = now
+  // Fallengelassen, nicht gemeldet — siehe oben.
+  readerSessionBridge.noteActivity(now).catch(() => {})
+}
+
+document.addEventListener('pointerdown', noteActivity, { passive: true })
+document.addEventListener('keydown', noteActivity, { passive: true })
 
 // Der Service Worker, RELATIV adressiert und als MODUL.
 //

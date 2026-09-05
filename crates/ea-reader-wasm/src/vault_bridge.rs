@@ -59,7 +59,10 @@ use std::collections::BTreeMap;
 #[cfg(target_arch = "wasm32")]
 use ea_crypto::SecretBytes;
 #[cfg(target_arch = "wasm32")]
-use ea_reader::{AuthenticatorPrfV1, ReaderVault, SealedVaultV1, UnlockedVault, VaultContentsV1};
+use ea_reader::{
+    AuthenticatorPrfV1, ReaderAuthenticatorConfirmation, ReaderConfirmationPurpose, ReaderSession,
+    ReaderSessionState, ReaderVault, SealedVaultV1, UnixMillis, UnlockedVault, VaultContentsV1,
+};
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Array, Uint8Array};
 #[cfg(target_arch = "wasm32")]
@@ -86,10 +89,28 @@ const PRF_OUTPUT_SIZE: usize = 32;
 #[cfg(target_arch = "wasm32")]
 const BRIDGE_ARGUMENT_CODE: &str = "EA-READER-VAULT-BRIDGE-ARGUMENT";
 
+/// Der Code fuer eine Sitzungskennung, die diese Tabelle nicht kennt.
+///
+/// Seit der Aufgabe „Sitzungssperre, Zeroize, authenticator-bestätigter
+/// Einzelexport und signiertes lokales Audit" ist „unbekannt" von „gesperrt"
+/// unterscheidbar, und beide sind Aussagen ueber die SITZUNG, nicht ueber das
+/// Argument: die Kennung war einmal gueltig, oder sie war es nie.
+pub const SESSION_UNKNOWN_CODE: &str = "EA-READER-SESSION-UNKNOWN";
+
 #[cfg(target_arch = "wasm32")]
 thread_local! {
-    /// Die entsperrten Sitzungen dieses Workers.
-    static VAULT_SESSIONS: RefCell<BTreeMap<u32, UnlockedVault>> =
+    /// Die Sitzungen dieses Workers — entsperrt oder gesperrt.
+    ///
+    /// Seit der Sitzungssperre liegt hier eine [`ReaderSession`] und kein
+    /// nackter [`UnlockedVault`]: JEDER Zugriff auf den Tresor laeuft ueber
+    /// `ReaderSession::vault(now)`, das die Frist nachrechnet und sperrt,
+    /// bevor es etwas herausgibt. Eine gesperrte Sitzung bleibt in der
+    /// Tabelle — mit ihrer Kennung, ohne Tresor —, damit `readerSessionStateAt`
+    /// die Sperre ausweisen kann statt eine unbekannte Kennung zu melden.
+    /// `ReaderSession::reopen` ist der Weg des Kerns und in `session_lock.rs`
+    /// bezeugt; `apps/web` eroeffnet nach einer Sperre eine NEUE Kennung ueber
+    /// `readerVaultUnlock` und schliesst die alte ueber `readerSessionLock`.
+    static VAULT_SESSIONS: RefCell<BTreeMap<u32, ReaderSession>> =
         const { RefCell::new(BTreeMap::new()) };
     /// Die noch nicht versiegelten Tresorinhalte des Enrollments.
     static PENDING_CONTENTS: RefCell<BTreeMap<u32, VaultContentsV1>> =
@@ -122,26 +143,55 @@ pub fn register_vault_contents(contents: VaultContentsV1) -> u32 {
     handle
 }
 
-/// Ob eine Sitzungskennung offen ist.
+/// Ob eine Sitzungskennung zu `now` ENTSPERRT ist.
 ///
 /// Das Beobachtungsfenster fuer den Zeugen der Aufgabe „Sitzungssperre,
 /// Zeroize, authenticator-bestätigter Einzelexport und signiertes lokales
-/// Audit": eine Sperrung soll BELEGBAR sein und nicht behauptet.
+/// Audit": eine Sperrung soll BELEGBAR sein und nicht behauptet. Der Aufruf
+/// rechnet die Frist nach — eine faellige Sperre faellt HIER.
 #[cfg(target_arch = "wasm32")]
 #[must_use]
-pub fn vault_session_is_open(session: u32) -> bool {
-    VAULT_SESSIONS.with(|sessions| sessions.borrow().contains_key(&session))
+pub fn vault_session_is_open(session: u32, now: UnixMillis) -> bool {
+    with_session(session, |session| {
+        session.state_at(now) == ReaderSessionState::Unlocked
+    })
+    .unwrap_or(false)
 }
 
-/// Fuehrt eine Rechnung auf einer entsperrten Sitzung aus.
+/// Fuehrt eine Rechnung auf einer Sitzung aus — gesperrt oder nicht.
 ///
 /// Die Ausleihe wird NIE ueber einen JS-Aufruf hinweg gehalten — dieselbe Regel
 /// wie bei den Warteschlangen in `crate::opfs_worker`: eine `RefCell`, die
 /// waehrend eines Promise offen steht, faellt beim naechsten Ereignis mit einer
-/// Doppelausleihe um.
+/// Doppelausleihe um. `None` heisst: diese Kennung gibt es nicht.
 #[cfg(target_arch = "wasm32")]
-pub fn with_unlocked_vault<R>(session: u32, use_it: impl FnOnce(&UnlockedVault) -> R) -> Option<R> {
-    VAULT_SESSIONS.with(|sessions| sessions.borrow().get(&session).map(use_it))
+pub fn with_session<R>(session: u32, use_it: impl FnOnce(&mut ReaderSession) -> R) -> Option<R> {
+    VAULT_SESSIONS.with(|sessions| sessions.borrow_mut().get_mut(&session).map(use_it))
+}
+
+/// Fuehrt eine Rechnung auf dem Tresor einer zu `now` ENTSPERRTEN Sitzung aus.
+///
+/// Der Tresor kommt ueber `ReaderSession::vault(now)` und nie direkt: die
+/// Frist wird bei JEDEM Zugriff nachgerechnet, und eine faellige Sperre
+/// faellt, bevor die Rechnung den Tresor sieht. Zwei Weigerungen, zwei Codes:
+/// [`SESSION_UNKNOWN_CODE`] fuer eine Kennung, die es nicht gibt, und
+/// `EA-READER-SESSION-LOCKED` fuer eine, deren Tresor gefallen ist.
+///
+/// # Errors
+/// Die zwei genannten Codes als JS-Zeichenkette.
+#[cfg(target_arch = "wasm32")]
+pub fn with_unlocked_vault<R>(
+    session: u32,
+    now: UnixMillis,
+    use_it: impl FnOnce(&UnlockedVault) -> R,
+) -> Result<R, JsValue> {
+    with_session(session, |session| {
+        session
+            .vault(now)
+            .map(use_it)
+            .ok_or_else(|| JsValue::from_str(ea_reader::ReaderSessionError::Locked.code()))
+    })
+    .ok_or_else(|| JsValue::from_str(SESSION_UNKNOWN_CODE))?
 }
 
 /// Liest eine Bytefolge aus einem JS-Array-Platz.
@@ -231,6 +281,14 @@ pub fn reader_vault_seal(
 /// Schluessels ist da laengst geschehen. Mit einem geliehenen `&[u8]` gehoerte
 /// der Puffer dem Aufrufer, und die Zusage waere nicht einloesbar.
 ///
+/// # Die Zeit tritt als WERT ein
+///
+/// `now_ms` ist die Uhr der Seite, als `f64`, weil JavaScript Zahlen so
+/// traegt. Sie eroeffnet die Sitzung, stellt die Entsperrbestaetigung aus und
+/// setzt die monotone Untergrenze; von hier an rechnet
+/// `ReaderSession::state_at` gegen sie. Die Bruecke liest KEINE eigene Uhr —
+/// dieselbe Regel wie bei `readerTrustAge` und den Datei-Modus-Ausfuhren.
+///
 /// # Errors
 /// `EA-READER-VAULT-BRIDGE-ARGUMENT` fuer eine PRF-Ausgabe falscher Laenge und
 /// die stabilen Codes des Tresors: `EA-READER-VAULT-NO-ENVELOPE` fuer einen
@@ -242,6 +300,7 @@ pub fn reader_vault_unlock(
     sealed: Vec<u8>,
     credential_id: Vec<u8>,
     mut prf_output: Vec<u8>,
+    now_ms: f64,
 ) -> Result<u32, JsValue> {
     let mut prf: [u8; PRF_OUTPUT_SIZE] = prf_output
         .as_slice()
@@ -250,13 +309,25 @@ pub fn reader_vault_unlock(
     prf_output.zeroize();
     let authenticator = AuthenticatorPrfV1::new(credential_id, SecretBytes::new(prf));
     prf.zeroize();
+    let now = UnixMillis::new(now_ms as i64);
     let sealed = SealedVaultV1::from_deterministic_cbor(&sealed)
         .map_err(|error| JsValue::from_str(error.code()))?;
+    // Die Bestaetigung ZUERST: sie belegt den Authenticator gegen das Envelope
+    // und ist die Voraussetzung der Sitzung, nicht ihre Folge.
+    let confirmation = ReaderAuthenticatorConfirmation::prove(
+        &sealed,
+        &authenticator,
+        ReaderConfirmationPurpose::Unlock,
+        now,
+    )
+    .map_err(|error| JsValue::from_str(error.code()))?;
     let unlocked = ReaderVault::unlock(&sealed, &authenticator)
+        .map_err(|error| JsValue::from_str(error.code()))?;
+    let opened = ReaderSession::unlock(unlocked, confirmation, now)
         .map_err(|error| JsValue::from_str(error.code()))?;
     let session = next_handle();
     VAULT_SESSIONS.with(|sessions| {
-        sessions.borrow_mut().insert(session, unlocked);
+        sessions.borrow_mut().insert(session, opened);
     });
     Ok(session)
 }

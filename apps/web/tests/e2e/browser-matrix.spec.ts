@@ -262,6 +262,13 @@ async function runKernel(
             sealed,
             credentialId: new TextEncoder().encode(credentialId),
             prfOutput,
+            // Dieselbe Uhr wie das Oeffnen darunter: seit der Sitzungssperre
+            // eroeffnet `vault-unlock` eine `ReaderSession` und setzt damit
+            // die Untaetigkeitsfrist, die `ReaderSession::state_at` bei jedem
+            // Zugriff nachrechnet. Ein Entsperren zur Wirtszeit und ein
+            // Oeffnen zu `effectiveNowMs` lagen fuenf Minuten auseinander und
+            // faenden eine gesperrte Sitzung.
+            nowMs: effectiveNowMs,
           }),
           'vault-unlock',
         ),
