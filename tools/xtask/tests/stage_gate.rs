@@ -2936,10 +2936,11 @@ fn stage_four_gate_requires_two_readers_the_browser_matrix_and_the_file_mode() {
 /// `integration down` an letzter Stelle; `browsers up` … `browsers down` aus
 /// ADR 0005 klammern die zwei Kommandos, die Engine-Baus und einen
 /// `chromedriver` voraussetzen.
-const STAGE_FOUR_STEP_SIX_COMMANDS: [&str; 16] = [
+const STAGE_FOUR_STEP_SIX_COMMANDS: [&str; 17] = [
     "cargo metadata --format-version 1",
     "cargo run --locked -p xtask -- integration up",
     "cargo run --locked -p xtask -- browsers up",
+    "pnpm build:wasm",
     "pnpm test:reader",
     "pnpm index:scale",
     "pnpm web:browser-test",

@@ -273,11 +273,11 @@ Gemessen am 2026-09-05 auf diesem Wirt ueber `pnpm index:scale`:
 |---|---|
 | Pakete | 50000 |
 | `blob_bytes` | 7566455 |
-| `seal_ms` | 4429 |
-| `unlock_ms` | 6144 |
+| `seal_ms` | 4419 |
+| `unlock_ms` | 6114 |
 | `search_us` | 46 |
 | `broad_search_us` | 84852 |
-| `peak_rss_kib` | 357396 |
+| `peak_rss_kib` | 357484 |
 
 **Profil und Zustand, ausdruecklich:** das Messwerkzeug lief im
 DEBUG-Profil — nicht `--release` — und auf WARMEM `target/`. Ein
@@ -480,3 +480,51 @@ und werden nicht umgeschrieben.
 
 | Kommando | Exitcode | Gemessenes Ergebnis | Laufzeit |
 |---|---|---|---|
+| `cargo metadata --format-version 1` | 0 | 3 586 479 Byte JSON auf stdout; `Cargo.lock` bleibt unveraendert — dieser Teil zieht keine neue Arbeitsbereichskante, und das eine Kommando ohne `--locked` belegt es, statt es anzunehmen | 0 s |
+| `cargo run --locked -p xtask -- integration up` | 0 | beide Dienste gesund; die zwei Zeilen `export DATABASE_URL=postgres://…@127.0.0.1:55432/einsatzarchiv` und `export EA_OBJECT_STORE_ENDPOINT=http://127.0.0.1:59000` gedruckt und per `eval` uebernommen | 7 s |
+| `cargo run --locked -p xtask -- browsers up` | 0 | Dienst gesund; gedruckt wird GENAU EINE Zeile, `export CHROMEDRIVER_REMOTE=http://127.0.0.1:59515` — kein Pfad zu Engine-Baus, siehe Abschnitt 2.1 | 6 s |
+| `pnpm build:wasm` | 0 | `apps/web/src/bridge/pkg/ea_reader_wasm.js` erzeugt. Ohne diesen Schritt faellt Kommando zwoelf mit `[UNRESOLVED_IMPORT] Could not resolve './pkg/ea_reader_wasm.js'`, bevor ein Browser startet — gemessen im Bootstraplauf ohne diese Zeile, Exit 1 nach 3 s | 2 s |
+| `pnpm test:reader` | 0 | `ea-reader` und `ea-index` zusammen: 31 Ergebniszeilen, 145 bestanden, 0 fehlgeschlagen, 1 ignoriert — der ignorierte ist der Skalenlauf, den das Kommando darunter faehrt | 59 s |
+| `pnpm index:scale` | 0 | `ea-index scale packages=50000 blob_bytes=7566455 seal_ms=4419 unlock_ms=6114 search_us=48 broad_search_us=84667 peak_rss_kib=357484`; ausgewertet in Abschnitt 5 | 13 s |
+| `pnpm web:browser-test` | 0 | die `wasm-bindgen-test`-Ziele von `crates/ea-reader-wasm` in headless Chromium ueber den `chromedriver` aus Kommando drei: 7 bestanden, 0 fehlgeschlagen | 25 s |
+| `cargo test --locked -p ea-system-tests --test cross_platform_two_readers` | 0 | 2 bestanden: ein Chiffrat unter zwei Reader-KEM-Schluesseln, und der entfernte Grant als Planabgleichsfehler fuer beide | 3 s |
+| `cargo test --locked -p ea-system-tests --test e2e_reader_sync_interruptions` | 0 | 3 bestanden: Mengengleichheit von Manifest und `ReaderSyncFaultPoint`, Cursor nach jedem der fuenfzehn Abbrueche unveraendert, Wiederholversuch idempotent | 22 s |
+| `cargo test --locked -p ea-system-tests --test reader_file_mode_interop` | 0 | 5 bestanden: (a) und (b) bytegleich samt `serverConfirmation`, (c) zweifach, das untergeschobene Archiv an Gate `trust` | 5 s |
+| `cargo test --locked -p ea-system-tests --test privacy_canaries_reader` | 0 | 9 bestanden: kein Marker in einem der sieben Stroeme, und die Positivkontrolle findet denselben Marker dort, wo er liegen soll | 1 s |
+| `pnpm web:e2e` | 0 | 36 Tests ueber `chromium`, `firefox` und `webkit`: 27 bestanden, 9 uebersprungen, 0 fehlgeschlagen; WebKit ueber den `run-server` im gepinnten Abbild (Abschnitt 2.1) | 18 s |
+| `pnpm supply-chain` | 0 | advisories ok, bans ok, licenses ok, sources ok; der `wasm-bindgen`-Teilbaum hat KEINE neue benannte Ausnahme in `deny.toml` erzeugt, die Datei fuehrt weiterhin keinen `name =`-Schluessel | 2 s |
+| `pnpm stage-gate:4` | 0 | JSON auf stdout: `stage` 4, `vector_families` LEER, `stage_four_primary_acceptance_criteria` `[10, 42, 43]`, 32 deklarierte Szenarien, 21 aufgeloeste Zeugen (zwoelf `sync-cursor`-Punkte teilen einen), `stage_four_rows_still_planned` LEER, 158 Ledgerzeilen | 0 s |
+| `pnpm verify:quick` | 0 | ZWOELF Teilkommandos gruen, darunter `cargo run --locked -p xtask -- build-wasm`, der `apps/web`-Bau und der wasm32-Check ueber die VIERZEHN Pakete der Positivliste, deren Zahl `verify_quick_commands()` in `tools/xtask/src/main.rs` haelt. Ueber beide `cargo test`-Teilkommandos zusammengezaehlt: 238 Ergebniszeilen, 1586 bestanden, 0 fehlgeschlagen, 8 ignoriert. Gemessen auf WARMEM `target/` — der Lauf folgt unmittelbar auf die vierzehn Kommandos darueber, die denselben Baum uebersetzt haben; ein kalter `target/` liegt deutlich darueber und ist hier NICHT gemessen. Diese Zeile allein stammt aus dem BESTAETIGUNGSLAUF und nicht aus dem Bootstraplauf, aus dem Grund, den der Unterabschnitt darunter ausschreibt | 1004 s |
+| `cargo run --locked -p xtask -- browsers down` | 0 | Dienst und Netz entfernt, mit `--volumes` wie `integration down`, obwohl der Dienst keinen Zustand fuehrt | 11 s |
+| `cargo run --locked -p xtask -- integration down` | 0 | beide Dienste entfernt, beide Volumes (`postgres-data`, `objectstore-data`) geloescht | 2 s |
+
+### Warum dieser Lauf zweipassig ist
+
+Die Zeile `pnpm verify:quick` oben stammt als EINZIGE aus einem zweiten Lauf,
+und der Grund ist eine Selbstbezueglichkeit des Vertrags, keine Nachlaessigkeit.
+`pnpm verify:quick` faehrt `cargo test --workspace --all-targets --locked`, und
+darin liegt `stage_four_gate_report_records_the_measured_full_gate_run` — der
+Test, der GENAU DIESE Tabelle liest. Solange sie leer ist, ist `verify:quick`
+rot.
+
+GEMESSEN, und deshalb hier ausgeschrieben statt geglaettet: der Bootstraplauf
+vom 2026-09-05 fuhr die siebzehn Kommandos mit leerer Tabelle. Sechzehn endeten
+mit Exitcode 0; `pnpm verify:quick` endete nach 990 s mit Exitcode 101, und der
+einzige Fehlschlag im gesamten Arbeitsbereich war
+
+```text
+stage-4-gate.md must record the measured run for `cargo metadata --format-version 1` exactly once
+```
+
+Danach wurden die sechzehn Zeilen eingetragen und `pnpm verify:quick` in
+derselben `integration up` … `down`-Klammer wiederholt: Exitcode 0 nach 1004 s,
+238 Ergebniszeilen, 1586 bestanden. Die sechzehn uebrigen Zeilen dieser Tabelle
+tragen die Zahlen des Bootstraplaufs, die siebzehnte die des
+Bestaetigungslaufs. Die Zahl der Ergebniszeilen unterscheidet sich zwischen
+beiden Laeufen aus einem gemessenen Grund: `cargo test --workspace` bricht nach
+dem ersten roten Testbinary ab, der Bootstraplauf kam also gar nicht bis zum
+Ende der Liste.
+
+Eine Zeile, die den Bootstraplauf als gruen ausgaebe, waere die Faelschung, die
+dieses Repositorium nicht schreibt — und ein Bericht, der die zwei Paesse
+verschwiege, waere dieselbe Faelschung, nur leiser.
