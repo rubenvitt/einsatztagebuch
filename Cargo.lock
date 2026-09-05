@@ -1703,8 +1703,10 @@ version = "0.1.0"
 dependencies = [
  "ea-audit",
  "ea-crypto",
+ "ea-draft",
  "ea-format",
  "ea-key-provider",
+ "ea-local-store",
  "ea-operator",
  "ea-schema",
  "ea-time",

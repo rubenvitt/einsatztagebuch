@@ -95,5 +95,5 @@ pub mod windows;
 pub use account::{BoundOperator, OperatorError, OsAccountInputs, OsAccountProvider};
 pub use session::{
     MAX_INACTIVITY_MS, OperatorAuthenticator, OperatorSessionProof, REAUTH_CHALLENGE_DOMAIN,
-    ReauthPurpose,
+    ReauthPurpose, verify_current_session,
 };

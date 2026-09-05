@@ -14,6 +14,9 @@ publish = false
 # (`crates/ea-audit/src/repository.rs`), eine Audit-Anbindung innerhalb von
 # `ea-trust` kehrte die Schichtung um.
 ea-audit.workspace = true
+ea-draft.workspace = true
+ea-local-store.workspace = true
+minicbor.workspace = true
 # `VerificationContext::root_trust_digest` — die EINE Stelle, an der die
 # Bindung zwischen Zielkern und Administrationsautorisierung an der
 # Signaturgrenze durchgesetzt wird —, `trust_digest` und `object_hash`. Diese
@@ -55,6 +58,7 @@ ea-types.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+ea-key-provider = { workspace = true, features = ["test-support"] }
 # Die Zeugen bauen eine ECHTE Registrierungslinie und waehlen einen ECHTEN
 # Kopf; sie binden `crates/ea-trust/tests/support/mod.rs` per `#[path]` ein,
 # wie `crates/ea-operator/tests/session_contract.rs` es bereits tut. Diese drei
@@ -62,4 +66,3 @@ getrandom.workspace = true
 # und alle bereits `=`-gepinnte Familien des Workspace.
 ea-time.workspace = true
 ed25519-dalek.workspace = true
-minicbor.workspace = true

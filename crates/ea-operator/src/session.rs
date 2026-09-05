@@ -7,6 +7,47 @@ use ea_types::{DeviceId, ObjectHash, OrganizationId, UnixMillis};
 
 use crate::account::{BoundOperator, OperatorError, OsAccountProvider};
 
+/// Prueft einen zuvor mit frischer Praesenzsignatur ausgestellten Nachweis
+/// fuer eine Aktion am aktuell gewaehlten Registry-Head.
+///
+/// Binding und Geraetezertifikat werden bei JEDEM Aufruf neu aufgeloest;
+/// Konto und oeffentlicher Instanzschluessel werden erneut vom Provider gelesen.
+/// Ein noch zeitlich gueltiger Nachweis ersetzt weder Widerrufs- noch
+/// Kontoinstanzpruefung. Erwartetes Zertifikat und erwartete Rolle stammen aus
+/// dem Aktionskontext des Aufrufers, nicht aus dem Nachweis.
+///
+/// Dies ist keine Wiederanmeldung: die bereits gepruefte Ed25519-Signatur ist
+/// Voraussetzung des undurchsichtigen [`OperatorSessionProof`]. Es wird keine
+/// neue Praesenz angefordert und der Ablauf wird nicht verlaengert. Der Aufrufer
+/// muss einen aktuellen Head liefern und OS-Sperrereignisse durch
+/// [`OperatorSessionProof::invalidate_on_lock`] weitergeben. Profil-Commitment
+/// und Audit bleiben Aufgaben des konsumierenden Dienstes.
+pub fn verify_current_session(
+    head: &ea_trust::SelectedRegistryHead,
+    expected_device_certificate_hash: ea_types::CertificateHash,
+    expected_role: ea_format::OperatorRoleV1,
+    proof: &OperatorSessionProof,
+    purpose: ReauthPurpose,
+    account: &dyn OsAccountProvider,
+) -> Result<(), OperatorError> {
+    let bound = BoundOperator::resolve(head, proof.binding_object_hash())?;
+    if bound.device_certificate_hash() != expected_device_certificate_hash {
+        return Err(OperatorError::DeviceMismatch);
+    }
+    if bound.operator_role() != expected_role {
+        return Err(OperatorError::RoleMismatch);
+    }
+    if proof.organization_id() != bound.organization_id()
+        || proof.device_id() != bound.device_id()
+        || proof.binding_object_hash() != bound.binding_object_hash()
+        || !proof.is_valid_for(purpose, head.preexisting_effective_now())
+    {
+        return Err(OperatorError::ProofMismatch);
+    }
+    bound.verify_account(account)?;
+    Ok(())
+}
+
 /// Die Domaintrennung der lokalen Praesenz-Challenge.
 ///
 /// Sie gehoert DIESER Crate und ist ausdruecklich keine Stufe-1-Konstante: die
@@ -140,27 +181,22 @@ impl OperatorSessionProof {
     ///
     /// Vier Bedingungen, alle notwendig: der Zweck stimmt, der Nachweis ist
     /// nicht durch ein Sperr- oder Sitzungsereignis entwertet, die Zeit liegt
-    /// nicht vor der Ausstellung und nicht hinter dem Ablauf.
+    /// nicht vor der Ausstellung und strikt vor dem Ablauf. Nach genau fuenf
+    /// Minuten ist der Nachweis bereits abgelaufen.
     ///
     /// Die Zeit kommt als [`PreexistingEffectiveNow`] und nie als freier Wert:
     /// nur so traegt die Aussage die Zeitstatusbewertung des gewaehlten Head.
     ///
-    /// Diese Methode prueft ausdruecklich NICHT die Bindung: ein Verbraucher, der
-    /// fuer einen bestimmten Bediener handelt, vergleicht zusaetzlich
-    /// [`Self::binding_object_hash`] mit dem [`BoundOperator`], gegen den er
-    /// handelt — sonst akzeptiert er jeden Nachweis desselben Zwecks, auch einen
-    /// fuer eine andere Bindung. Die Zweiteilung ist nicht Bequemlichkeit,
-    /// sondern die woertlich vorgegebene Signatur dieser Methode; der
-    /// Bindungsabgleich hat mit den drei Lesern seinen Ort, aber nicht seinen
-    /// Zwang. Wer einen Nachweis annimmt, ohne die Bindung zu vergleichen, hat
-    /// einen Fehler gemacht, und dieser Satz steht hier, damit er nachlesbar ist.
+    /// Diese Methode prueft weder Bindung noch aktuelles Konto oder
+    /// Instanzschluessel. Verbraucher verwenden [`verify_current_session`] fuer
+    /// die vollstaendige Pruefung am aktuellen Head.
     #[must_use]
     pub fn is_valid_for(&self, purpose: ReauthPurpose, now: &PreexistingEffectiveNow) -> bool {
         let now = now.value().get();
         self.purpose == purpose
             && !self.invalidated
             && now >= self.issued_at.get()
-            && now <= self.expires_at.get()
+            && now < self.expires_at.get()
     }
 
     /// Entwertet den Nachweis wegen eines nativen Sperr- oder
@@ -207,7 +243,7 @@ impl OperatorSessionProof {
         self.organization_id
     }
 
-    /// Das Geraet, das das Writer-Zertifikat der Bindung nennt.
+    /// Das Geraet, das das Geraetezertifikat der Bindung nennt.
     ///
     /// Ebenfalls oeffentlich und aus dem Zertifikat aufgeloest, nicht aus einem
     /// Parameter uebernommen (siehe [`BoundOperator::resolve`]).
@@ -284,18 +320,7 @@ pub trait OperatorAuthenticator {
     ) -> Result<OperatorSessionProof, OperatorError> {
         let bound = self.bound_operator();
 
-        let reported =
-            account.os_account_binding_hash(bound.organization_id(), bound.device_id())?;
-        if reported != bound.os_account_binding_hash() {
-            return Err(OperatorError::AccountMismatch);
-        }
-
-        let instance_key = account
-            .operator_instance_public_key()?
-            .ok_or(OperatorError::InstanceKeyMissing)?;
-        if instance_key.thumbprint() != bound.operator_instance_key_thumbprint() {
-            return Err(OperatorError::InstanceKeyMismatch);
-        }
+        let instance_key = bound.verify_account(account.as_ref())?;
 
         let mut nonce = [0_u8; 32];
         getrandom::fill(&mut nonce).map_err(|_| OperatorError::LocalRng)?;

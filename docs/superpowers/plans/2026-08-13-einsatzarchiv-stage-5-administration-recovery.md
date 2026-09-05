@@ -516,7 +516,7 @@ git commit -m "feat(admin): bootstrap independently anchored organizations"
 - Consumes: Admin authorization, Root signer, native account/instance-key provider, encrypted local profile, and `LocalAuditService`.
 - Produces: `OperatorBindingService::{provision,verify_session,revoke}`, profile commitment, and new binding requirement after account/install/key loss.
 
-- [ ] **Step 1: Write commitment, wrong-account, and Ubuntu UID-reuse tests**
+- [x] **Step 1: Write commitment, wrong-account, and Ubuntu UID-reuse tests**
 
 ```rust
 #[test]
@@ -535,25 +535,30 @@ fn recreated_same_uid_and_home_cannot_reuse_binding() {
 }
 ```
 
-- [ ] **Step 2: Run operator tests and verify lifecycle is incomplete**
+- [x] **Step 2: Run operator tests and verify lifecycle is incomplete**
 
 Run: `cargo test --locked -p ea-admin --test operator_binding && cargo test --locked -p ea-operator --test account_recreation`
 
 Expected: FAIL because provisioning/replacement orchestration and native account-recreation evidence are absent; existing session contract checks already cover wrong accounts, missing/replaced instance keys, challenge verification, lock invalidation and expiry.
 
-- [ ] **Step 3: Implement external identity-check to signed binding flow**
+- [x] **Step 3: Implement external identity-check to signed binding flow**
+
+Implemented as the synchronous core behind explicit trusted native and external
+identity ports. Signed binding and activation objects are durably staged before
+the encrypted profile is committed; Registry selection activates them separately.
+Native adapter composition and native platform acceptance remain outstanding.
 
 Generate fresh 32-byte `profileCommitmentSalt`, keep display name/function/salt only in encrypted profile, compute the exact operator-profile commitment, generate a new non-roaming installation key, derive OS account binding hash through Stage 2 provider, obtain Admin authorization with action 4, and Root-sign the fixed binding core. Verify device certificate, role, effective/revoked sequence, account hash, fresh instance challenge, profile commitment, native presence, and five-minute session expiry on every action. Revocation is Root-signed from its effective sequence. Account deletion/recreation, UID reuse, restored home/app backup, lost Secret Service collection, or missing instance key always requires external re-identification, new key/auth/binding, and revocation of old binding.
 
 Write signed, cleartext-free local audit events for every login attempt, failed re-authentication, binding replacement, and revocation. Login success binds only the pseudonymous binding/device hashes; failure returns an allowlisted technical reason code locally and persists only the frozen generic audit context and outcome, with no entered credential/account/display value. Binding change and revocation bind old/new public object hashes and effective sequence. Audit persistence failure blocks privileged action completion and is surfaced as a local resource error.
 
-- [ ] **Step 4: Run cross-platform contract and negative binding tests**
+- [x] **Step 4: Run cross-platform contract and negative binding tests**
 
 Run: `cargo test --locked -p ea-admin -p ea-operator` and `cargo test --locked -p einsatzarchiv-cli --test operator`
 
 Expected: PASS; free operator text, wrong device/account/role, revoked binding, stale session, and restored old instance fail.
 
-- [ ] **Step 5: Commit operator lifecycle**
+- [x] **Step 5: Commit operator lifecycle**
 
 ```bash
 git add crates/ea-admin crates/ea-operator apps/cli

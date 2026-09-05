@@ -64,7 +64,11 @@ pub mod genesis;
 pub mod production_state;
 
 mod error;
+pub mod operator;
+pub mod operator_profile;
 mod root_ceremony;
+pub use operator::*;
+pub use operator_profile::verify_operator_snapshot;
 
 pub use anchor_media::{
     AnchorMedia, AnchorMediumId, MediaConfirmation, SecondChannelConfirmation,
