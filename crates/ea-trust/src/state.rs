@@ -1,8 +1,8 @@
 use core::fmt;
 
-use ea_format::ClockReleaseAuditV1;
+use ea_format::{ClockReleaseAuditV1, OrganizationAdminAuthorizationFieldsV1};
 use ea_time::TrustedTimeState;
-use ea_types::{DeviceId, ObjectHash, OrganizationId, RegistryVersion};
+use ea_types::{AuthorizationId, DeviceId, ObjectHash, OrganizationId, RegistryVersion};
 
 use crate::TrustError;
 
@@ -132,6 +132,53 @@ impl ClockReleaseReplayKey {
     }
 }
 
+/// Der ORGANISATIONSWEITE, laufuebergreifende Einmal-Schluessel einer
+/// Administrationsautorisierung.
+///
+/// Er traegt genau die drei Werte, ueber die `design.md` §16.3 die
+/// Einmal-Nutzung zusagt: die Organisation, die `authorizationId` und die
+/// `nonce`. Zwei getrennte Mengen — wie im prozesslokalen
+/// `AdminAuthorizationReplay` — waeren hier falsch: eine Tabelle hat EINEN
+/// Primaerschluessel, und der ist die Sperre.
+///
+/// Wie [`ClockReleaseReplayKey`] ist er NACHWEISEND und nicht frei baubar. Er
+/// entsteht ausschliesslich in der geprueften Autorisierung und wird ueber
+/// [`VerifiedAdminAuthorization::replay_key`](crate::VerifiedAdminAuthorization::replay_key)
+/// herausgegeben. Ein Aufrufer, der ihn selbst zusammensetzen koennte, koennte
+/// eine fremde Autorisierung als verbraucht markieren.
+pub struct AdminAuthorizationReplayKey {
+    organization_id: OrganizationId,
+    authorization_id: AuthorizationId,
+    nonce: [u8; 32],
+}
+
+impl AdminAuthorizationReplayKey {
+    pub(crate) const fn from_verified_authorization(
+        fields: &OrganizationAdminAuthorizationFieldsV1,
+    ) -> Self {
+        Self {
+            organization_id: fields.organization_id,
+            authorization_id: fields.authorization_id,
+            nonce: fields.nonce,
+        }
+    }
+
+    #[must_use]
+    pub const fn organization_id(&self) -> OrganizationId {
+        self.organization_id
+    }
+
+    #[must_use]
+    pub const fn authorization_id(&self) -> AuthorizationId {
+        self.authorization_id
+    }
+
+    #[must_use]
+    pub const fn nonce(&self) -> &[u8; 32] {
+        &self.nonce
+    }
+}
+
 pub struct IndependentTimeCommit {
     next_trusted_time: TrustedTimeState,
 }
@@ -242,6 +289,34 @@ pub trait TrustStateStore {
         &mut self,
         key: &ClockReleaseReplayKey,
     ) -> Result<bool, StateStoreError>;
+
+    /// Verbraucht diese Administrationsautorisierung EIN Mal und meldet, ob
+    /// sie SCHON verbraucht war.
+    ///
+    /// Anders als [`Self::clock_release_consumed`] ist dieser Port
+    /// SCHREIBEND. Die Uhrfreigabe fragt nur; ihre Sperre wird eine Ebene
+    /// hoeher in `commit_registry_selection` gesetzt, das ohnehin schreibt.
+    /// Die Administrationsautorisierung hat keinen solchen Commit — sie wird
+    /// oberhalb von `ea-trust` verbraucht —, also MUSS das Pruefen und das
+    /// Setzen hier in einem Zug geschehen. Ein Speicher, der bloss liest,
+    /// laesst zwei gleichzeitige Verbraucher durch; die Umsetzung ist ein
+    /// Einfuegen, dessen Primaerschluessel die Sperre IST.
+    ///
+    /// Die Vorgabe antwortet mit [`StateStoreError::Unavailable`] und NICHT
+    /// mit `Ok(false)`. Ein Speicher, der die Sperre nicht fuehrt, weiss
+    /// nicht, dass die Autorisierung frisch ist — er darf es also auch nicht
+    /// behaupten. Das ist die einzige Vorgabe, die keine stille Luecke oeffnet.
+    ///
+    /// # Errors
+    ///
+    /// [`StateStoreError::Unavailable`], solange der Speicher die Sperre nicht
+    /// fuehrt, sowie jeden Befund der Ablage.
+    fn admin_authorization_consumed(
+        &mut self,
+        _key: &AdminAuthorizationReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
 
     fn commit_registry_selection(
         &mut self,

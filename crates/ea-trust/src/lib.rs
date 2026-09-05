@@ -17,6 +17,18 @@
 //! let _ = VerifiedAdminAuthorization { inner: panic!() };
 //! ```
 //!
+//! `AdminAuthorizationReplayKey` cannot be assembled from raw identifiers, so
+//! no caller can mark a foreign authorization as consumed:
+//!
+//! ```compile_fail
+//! use ea_trust::AdminAuthorizationReplayKey;
+//! let _ = AdminAuthorizationReplayKey {
+//!     organization_id: panic!(),
+//!     authorization_id: panic!(),
+//!     nonce: panic!(),
+//! };
+//! ```
+//!
 //! `PreexistingRegistryAuthority` cannot be assembled from a caller-selected
 //! resolver state:
 //!
@@ -102,6 +114,12 @@
 //! use ea_format::OperatorRoleV1;
 //! use ea_trust::VerifiedAdminAuthorization;
 //! let _: VerifiedAdminAuthorization = OperatorRoleV1::Reader.into();
+//! ```
+//!
+//! ```compile_fail
+//! use ea_trust::AdminAuthorizationReplayKey;
+//! use ea_types::{AuthorizationId, Id16};
+//! let _: AdminAuthorizationReplayKey = AuthorizationId::from(Id16::ZERO).into();
 //! ```
 //!
 //! ```compile_fail
@@ -326,6 +344,11 @@
 //! ```
 //!
 //! ```compile_fail
+//! use ea_trust::AdminAuthorizationReplayKey;
+//! let _: AdminAuthorizationReplayKey = Default::default();
+//! ```
+//!
+//! ```compile_fail
 //! use ea_trust::PendingFutureSuccessor;
 //! let _: PendingFutureSuccessor = Default::default();
 //! ```
@@ -381,6 +404,11 @@
 //! ```compile_fail
 //! use ea_trust::PreexistingRegistryAuthority;
 //! let _: PreexistingRegistryAuthority = minicbor::decode(&[]).unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! use ea_trust::AdminAuthorizationReplayKey;
+//! let _: AdminAuthorizationReplayKey = minicbor::decode(&[]).unwrap();
 //! ```
 //!
 //! ```compile_fail
@@ -448,7 +476,9 @@ mod source;
 mod state;
 mod time;
 
-pub use admin_authorization::VerifiedAdminAuthorization;
+pub use admin_authorization::{
+    VerifiedAdminAuthorization, consume_admin_authorization, verify_authorized_trust_target,
+};
 pub use admission::{bootstrap_active_certificates, verify_catalogue_admission};
 pub use anchor::{TrustAnchorV1, VerifiedTrust, decode_trust_anchor, verify_trust};
 pub use clock_release::{VerifiedClockRelease, verify_clock_release};
@@ -461,9 +491,9 @@ pub use registry::{
 };
 pub use source::{MAX_TOTAL_TRUST_OBJECT_BYTES_V1, MAX_TRUST_OBJECTS_V1, TrustObjectSource};
 pub use state::{
-    ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin,
-    RegistrySelectionCommit, StateStoreError, TrustStateKey, TrustStateSnapshot, TrustStateStore,
-    load_trust_state,
+    AdminAuthorizationReplayKey, ClockReleaseReplayKey, IndependentTimeCommit,
+    PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit, StateStoreError, TrustStateKey,
+    TrustStateSnapshot, TrustStateStore, load_trust_state,
 };
 pub use time::{
     LocalTimeBlock, VerifiedSignedTime, prepare_local_time, verify_checkpoint_time,

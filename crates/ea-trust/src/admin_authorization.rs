@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use ea_crypto::{CoseVerifier, VerificationContext, authorized_trust_digest, parse_cose_sign1};
+use ea_crypto::{
+    CoseVerifier, VerificationContext, authorized_trust_digest, object_hash, parse_cose_sign1,
+};
 use ea_format::{
     CertificateKindV1, DecodedTrustPayloadV1, OperatorRoleV1,
     OrganizationAdminAuthorizationFieldsV1, RegistryChangeV1, TrustObjectV1, TrustSubtypeV1,
@@ -12,8 +14,10 @@ use ea_types::{
 use minicbor::Encoder;
 
 use crate::{
-    TrustError,
+    AdminAuthorizationReplayKey, SelectedRegistryHead, StateStoreError, TrustError,
+    TrustStateStore, VerifiedTrust,
     resolver::{PreviousHeadResolver, PreviousHeadState},
+    state::map_store_error,
 };
 
 #[derive(Default)]
@@ -32,6 +36,7 @@ struct VerifiedAuthorizationInner {
     previous_registry_version: RegistryVersion,
     previous_registry_head_hash: Hash32,
     signer_authority_subject_id: SubjectId,
+    replay_key: AdminAuthorizationReplayKey,
 }
 
 impl VerifiedAdminAuthorization {
@@ -59,6 +64,16 @@ impl VerifiedAdminAuthorization {
     pub const fn signer_authority_subject_id(&self) -> SubjectId {
         self.inner.signer_authority_subject_id
     }
+
+    /// Der ORGANISATIONSWEITE Einmal-Schluessel dieser Autorisierung.
+    ///
+    /// Er kommt NUR hier heraus. `AdminAuthorizationReplayKey` hat einen
+    /// crate-privaten Konstruktor, also ist der gepruefte Zustand die einzige
+    /// Quelle: wer sperren will, muss vorher bewiesen haben.
+    #[must_use]
+    pub const fn replay_key(&self) -> &AdminAuthorizationReplayKey {
+        &self.inner.replay_key
+    }
 }
 
 struct TargetDescriptor {
@@ -69,6 +84,112 @@ struct TargetDescriptor {
     required_action: u8,
     event_issued_at: Option<UnixMillis>,
     admin_target_subject: Option<SubjectId>,
+}
+
+/// Prueft das PAAR aus einem Root-signierten Ziel und seiner
+/// Administrationsautorisierung und gibt den Beweiszustand heraus.
+///
+/// Das ist KEINE neue Regel. Die Pruefung ist unveraendert
+/// [`verify_admin_authorization`] — dieselbe, die der Kopfuebergang
+/// (`verify_registry_candidate`) und die Katalogaufnahme
+/// ([`verify_catalogue_admission`](crate::verify_catalogue_admission)) fahren.
+/// Neu ist allein, dass ihr Ergebnis nach aussen kommt: ohne diesen Einstieg
+/// gibt KEINE oeffentliche Funktion einen [`VerifiedAdminAuthorization`]
+/// heraus, und ein Dienst oberhalb von `ea-trust` kann die Zusage „nur dieser
+/// Zustand kommt in die Signierseite“ nicht fuehren.
+///
+/// `head` ist der aktuell gewaehlte Registrierungskopf, oder `None`, solange
+/// die Organisation noch keinen hat — dann gilt der aus dem Anker bewiesene
+/// Bootstrap-Stand. Die Bedeutung ist wortgleich die von
+/// [`verify_catalogue_admission`](crate::verify_catalogue_admission).
+///
+/// `exact_target_object_bytes` MUSS im Katalog liegen, aus dem `trust`
+/// entstanden ist; die Autorisierung ebenso. Das ZIEL nennt seine
+/// Autorisierung selbst — der Aufrufer waehlt sie nicht aus, sonst koennte er
+/// sich die passende suchen.
+///
+/// # Die Einmal-Nutzung sitzt NICHT hier
+///
+/// Diese Funktion fuehrt eine frische, weggeworfene Sperre, genau wie die
+/// Katalogaufnahme. Sie ist eine PRUEFUNG und kein Verbrauch: derselbe Aufruf
+/// muss beliebig oft dieselbe Antwort geben, sonst waere die zweite Sicht auf
+/// denselben Bestand eine andere. Verbraucht wird ueber
+/// [`consume_admin_authorization`] gegen einen laufuebergreifenden Speicher.
+///
+/// # Errors
+///
+/// [`TrustError::Source`], wenn die Bytes kein Katalogobjekt dieses Bestands
+/// sind, [`TrustError::ActionMismatch`] fuer eine Objektart, die keine
+/// Autorisierung traegt, sowie jeden Befund der geteilten Pruefung.
+pub fn verify_authorized_trust_target(
+    trust: &VerifiedTrust,
+    head: Option<&SelectedRegistryHead>,
+    exact_target_object_bytes: &[u8],
+    now: UnixMillis,
+    at_sequence: ChainSequence,
+) -> Result<VerifiedAdminAuthorization, TrustError> {
+    let state = head.map_or_else(
+        || trust.previous_head(),
+        SelectedRegistryHead::candidate_state,
+    );
+    let target_object_hash = object_hash(exact_target_object_bytes);
+    let target_record = state
+        .catalog_object(target_object_hash)
+        .ok_or(TrustError::Source)?;
+    if target_record.object_hash() != target_object_hash {
+        return Err(TrustError::Source);
+    }
+    // Die Autorisierung kommt aus dem Ziel und aus der EINEN Aktionstabelle
+    // (`describe_target`); eine zweite Zuordnung waere eine zweite Wahrheit.
+    let authorization_object_hash =
+        describe_target(state, target_record.value(), at_sequence)?.authorization_object_hash;
+    let mut replay = AdminAuthorizationReplay::default();
+    verify_admin_authorization(
+        state,
+        authorization_object_hash,
+        target_object_hash,
+        now,
+        at_sequence,
+        &mut replay,
+    )
+}
+
+/// Verbraucht eine gepruefte Autorisierung EIN Mal, organisationsweit und
+/// laufuebergreifend.
+///
+/// Der Beweiszustand liefert den Schluessel, der Speicher die Sperre. Beides
+/// zusammen ist die Zusage, die das prozesslokale `BTreeSet`-Paar in
+/// `verify_admin_authorization` NICHT geben kann: jenes entsteht je Prueflauf
+/// leer und faellt mit ihm.
+///
+/// # Errors
+///
+/// [`TrustError::AuthReplay`], wenn diese `authorizationId`/`nonce` schon
+/// einmal gewirkt hat — auch dann, wenn der Speicher den Befund als
+/// [`StateStoreError::ReplayAlreadyConsumed`] meldet. Jener Wert traegt im
+/// Uhrfreigabe-Pfad den Code `EA-TRUST-CLOCK-RELEASE-REPLAY`; hier ist er die
+/// ADMIN-Wiedereinspielung, und eine Auditzeile mit dem Uhrfreigabecode waere
+/// eine Unwahrheit ueber die Familie. Sonst jeden Befund der Ablage —
+/// insbesondere [`TrustError::StateUnavailable`] fuer einen Speicher, der die
+/// Sperre gar nicht fuehrt.
+pub fn consume_admin_authorization(
+    store: &mut dyn TrustStateStore,
+    authorization: &VerifiedAdminAuthorization,
+) -> Result<(), TrustError> {
+    let already_consumed = store
+        .admin_authorization_consumed(authorization.replay_key())
+        .map_err(map_admin_replay_store_error)?;
+    if already_consumed {
+        return Err(TrustError::AuthReplay);
+    }
+    Ok(())
+}
+
+const fn map_admin_replay_store_error(error: StateStoreError) -> TrustError {
+    match error {
+        StateStoreError::ReplayAlreadyConsumed => TrustError::AuthReplay,
+        other => map_store_error(other),
+    }
 }
 
 pub(crate) fn verify_admin_authorization(
@@ -155,6 +276,9 @@ pub(crate) fn verify_admin_authorization(
             previous_registry_version: state.registry_version,
             previous_registry_head_hash: state.registry_head_hash,
             signer_authority_subject_id: signer_subject,
+            replay_key: AdminAuthorizationReplayKey::from_verified_authorization(
+                &authorization_fields,
+            ),
         },
     })
 }
