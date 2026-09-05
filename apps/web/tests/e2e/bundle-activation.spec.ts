@@ -27,17 +27,16 @@
 //    relative Beiwerkspfade, genau eine entfernte Herkunft, ungehashter
 //    Workereinstieg. Den ECHTEN herkunftsuebergreifenden Transport schliesst
 //    die Aufgabe „Inkrementeller Reader-Sync", die seine erste Nutzerin ist.
-// 2. **Nur Chromium.** Die Matrix aus Chromium, Firefox und WebKit entsteht in
-//    der Aufgabe „Reader-Interoperabilitaet, Browser-Matrix, Datei-Modus,
-//    Privatheit und das Stufe-4-Gate" — dort gehoert auch die Frage hin, ob
-//    Modul-Service-Worker in allen drei Engines tragen.
+// 2. **Alle drei Engines.** Der Lauf braucht weder WebAuthn noch CDP und
+//    faehrt in `chromium`, `firefox` und `webkit` — gemessen im Gate-Task:
+//    Modul-Service-Worker samt wasm-Instanz tragen in allen drei Engines
+//    (Chromium 151, Firefox 153, Playwrights WebKit 26.5).
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
 
-test.skip(({ browserName }) => browserName !== 'chromium')
 
 const fixtureRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
 

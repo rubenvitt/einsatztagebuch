@@ -27,14 +27,18 @@
 // damit ein spaeterer Lauf ueber einem Bestand die Reiter-Tastatur als
 // bewusste Erweiterung nachtraegt und nicht als Nebeneffekt.
 //
-// # Nur Chromium
+// # Alle drei Engines — mit EINER gemessenen Ausnahme
 //
-// `apps/web/playwright.config.ts` traegt genau EIN Projekt, gepinnt von
-// `src/e2e-config.test.ts`; die Matrix entsteht im Gate-Task.
+// Die Zeugen dieser Datei brauchen weder WebAuthn noch CDP und laufen in
+// `chromium`, `firefox` und `webkit`. Ausnahme ist der Tastaturlauf: in
+// Headless-Firefox verlaesst der Fokus das Dokument nach dem letzten
+// fokussierbaren Element NICHT (gemessen: `Tab` springt wieder auf den ersten
+// Verweis, der Lauf zaehlt fuenf Treffer bei vier Elementen), waehrend
+// Chromium und WebKit den Fokus an den Browser abgeben und der Zyklus dort
+// endet. Der Lauf ist deshalb dort uebersprungen, mit diesem Grund.
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 
-test.skip(({ browserName }) => browserName !== 'chromium')
 
 /** Der permanente Pruefstand — `<section aria-label="Prüfstand">`. */
 function verificationStatus(page: Page) {
@@ -183,7 +187,11 @@ test('stays operable while the bridge is slow', async ({ page }) => {
   expect(errors, `Unbehandelte Ausnahmen: ${errors.join(' | ')}`).toEqual([])
 })
 
-test('reaches every control by keyboard with a visible focus ring', async ({ page }) => {
+test('reaches every control by keyboard with a visible focus ring', async ({ page, browserName }) => {
+  test.skip(
+    browserName === 'firefox',
+    'Headless-Firefox laesst den Fokus nicht aus dem Dokument; der Zyklus endet nie (gemessen, siehe Kopf).',
+  )
   await page.goto('/')
   // Erst die RUHE: der Verweis im Pruefstand steht erst, wenn die Bruecke
   // „kein Bestand" gemeldet hat.

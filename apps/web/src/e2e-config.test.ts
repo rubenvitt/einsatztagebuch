@@ -2,15 +2,15 @@
 // Schluessel, ohne einen Browser zu starten: das Suchverzeichnis, das die
 // E2E-Suite im PAKET verankert, den `webServer`, der das Buendel BAUT und dann
 // die gebauten Bytes ausliefert, den eigenen Port neben dem des Desktops, die
-// Herkunft, unter der eine WebAuthn-Zeremonie ueberhaupt laufen darf, und das
-// EINE Browserprojekt dieses Standes. Dazu die Grenze zwischen den zwei
+// Herkunft, unter der eine WebAuthn-Zeremonie ueberhaupt laufen darf, und die
+// DREI Engine-Projekte der Browsermatrix. Dazu die Grenze zwischen den zwei
 // Runnern: Vitest darf `tests/e2e/enrollment.spec.ts` nicht einsammeln.
 //
 // Der Zeuge ist das Spiegelbild von `apps/desktop/src/e2e-config.test.ts` und
 // zugleich der Grund, aus dem `playwright.config.ts` ueberhaupt im Programm von
 // `tsc` liegt: `apps/web/tsconfig.json` fuehrt die Datei in `include`, und der
 // `await import(...)` hier zieht sie ein zweites Mal, unabhaengig davon.
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 
 it('runs the e2e suite from the package, against the built bundle, without a context-wide offline switch', async () => {
   const config = (await import('../playwright.config')).default
@@ -55,14 +55,55 @@ it('offers the same preview under a hostname, because WebAuthn refuses an IP rel
   expect(new URL(WEBAUTHN_PREVIEW_ORIGIN).port).toBe(new URL(config.webServer.url).port)
 })
 
-it('carries exactly one browser project, and it is chromium', async () => {
+it('carries exactly the three engine projects of the browser matrix, in this order', async () => {
   const config = (await import('../playwright.config')).default
-  // `WebAuthn.addVirtualAuthenticator` ist eine CDP-Methode; Firefox und
-  // WebKit bieten kein Gegenstueck. Der Gate-Task stellt zwei weitere Projekte
-  // daneben — dieser Zeuge macht die Erweiterung zu einer bewussten Aenderung
-  // statt zu einem Nebeneffekt.
-  expect(config.projects.length).toBe(1)
-  expect(config.projects[0]?.name).toBe('chromium')
+  // `web-reader-design.md` §11.4 ersetzt fuer den Reader die Achsen
+  // Architektur, Installerformat und Key-Provider durch Engine, Version und
+  // Plattform. Die drei Playwright-Engines sind die Engine-Achse; GENAU drei,
+  // in GENAU dieser Reihenfolge, damit die Matrix eine bewusste Aenderung
+  // bleibt und kein Nebeneffekt — dieselbe Rolle, die dieser Zeuge vorher fuer
+  // das eine Projekt `chromium` hatte.
+  expect(config.projects.map(project => project.name)).toEqual(['chromium', 'firefox', 'webkit'])
+  // Jedes Projekt faehrt seine eigene Engine und keine Kopie einer anderen:
+  // `defaultBrowserType` ist der Wert, aus dem Playwright den Start ableitet.
+  expect(config.projects.map(project => project.use.defaultBrowserType)).toEqual([
+    'chromium',
+    'firefox',
+    'webkit',
+  ])
+})
+
+it('binds webkit to a remote Playwright server only when EA_WEBKIT_WS_ENDPOINT is set', async () => {
+  // `playwright.config.ts` liest die Variable beim LADEN des Moduls; ein
+  // zweiter `import` bekaeme das gecachte Modul, deshalb `vi.resetModules()`
+  // vor jedem der beiden Laeufe.
+  const previous = process.env['EA_WEBKIT_WS_ENDPOINT']
+  const webkitOf = async () => {
+    vi.resetModules()
+    const config = (await import('../playwright.config')).default
+    const project = config.projects.find(candidate => candidate.name === 'webkit')
+    expect(project).toBeDefined()
+    const use: { connectOptions?: { wsEndpoint?: string } } = project?.use ?? {}
+    return use
+  }
+  try {
+    // OHNE die Variable — die Form, die CI faehrt — startet das Projekt die
+    // Engine lokal: kein `connectOptions`, nicht einmal ein leeres.
+    delete process.env['EA_WEBKIT_WS_ENDPOINT']
+    expect(await webkitOf()).not.toHaveProperty('connectOptions')
+    // MIT der Variable haengt das Projekt an genau diesem Endpunkt; die
+    // Adresse ist absichtlich einer, auf der nichts lauscht — gelesen wird
+    // nur die Konfiguration, kein Browser startet.
+    process.env['EA_WEBKIT_WS_ENDPOINT'] = 'ws://127.0.0.1:1/'
+    expect((await webkitOf()).connectOptions?.wsEndpoint).toBe('ws://127.0.0.1:1/')
+  } finally {
+    if (previous === undefined) {
+      delete process.env['EA_WEBKIT_WS_ENDPOINT']
+    } else {
+      process.env['EA_WEBKIT_WS_ENDPOINT'] = previous
+    }
+    vi.resetModules()
+  }
 })
 
 it('keeps the Playwright spec out of the Vitest run', async () => {

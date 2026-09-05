@@ -77,12 +77,43 @@ export default {
     // will, tut sie es ueber ein Anfragepraedikat und nicht hier.
     offline: false,
   },
-  // GENAU EIN Projekt in diesem Task, und das ist eine benannte Grenze und
-  // kein Versehen: `WebAuthn.addVirtualAuthenticator` ist eine CDP-Methode,
-  // Firefox und WebKit bieten kein Gegenstueck. Die Matrix aus `chromium`,
-  // `firefox` und `webkit` entsteht im Task „Reader-Interoperabilitaet,
-  // Browser-Matrix, Datei-Modus, Privatheit und das Stufe-4-Gate"; bis dahin
-  // haelt `src/e2e-config.test.ts` fest, dass hier genau ein Projekt steht,
-  // damit die Erweiterung eine bewusste Aenderung ist und kein Nebeneffekt.
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  // DREI Projekte — die Engine-Achse der Browsermatrix nach
+  // `web-reader-design.md` §11.4 (Engine, Version, Plattform statt
+  // Architektur, Installerformat, Key-Provider). `src/e2e-config.test.ts`
+  // pinnt die drei Namen in dieser Reihenfolge, damit ein viertes Projekt oder
+  // ein fehlendes eine bewusste Aenderung bleibt und kein Nebeneffekt.
+  //
+  // `webkit` ist Playwrights WebKit-Bau und NICHT Safari; der Gate-Bericht
+  // nennt den Unterschied, weil der Lauf sonst als Safari-Nachweis gelesen
+  // wuerde. Was je Engine ueberhaupt laeuft, entscheidet jede Spec selbst
+  // ueber `test.skip(({ browserName }) => ...)`: `enrollment.spec.ts` bleibt
+  // auf `chromium`, weil `WebAuthn.addVirtualAuthenticator` eine CDP-Methode
+  // ist, die Firefox und WebKit nicht anbieten.
+  //
+  // Der Engine-Bau von WebKit laeuft NUR auf einem Wirt mit seinen
+  // Systembibliotheken (gemessen auf dem Entwicklungsrechner:
+  // `MiniBrowser: error while loading shared libraries: libevent-2.1.so.7`).
+  // Deshalb kann das Projekt `webkit` ueber `EA_WEBKIT_WS_ENDPOINT` an einen
+  // Playwright-Server angebunden werden, der die Engine in dem Abbild
+  // faehrt, auf dem auch `ops/compose/browsers.yaml` baut — gemessen:
+  //   docker run --rm --network host mcr.microsoft.com/playwright:v1.62.1-noble \
+  //     npx -y playwright@1.62.1 run-server --port 3001 --host 127.0.0.1
+  //   EA_WEBKIT_WS_ENDPOINT=ws://127.0.0.1:3001/ pnpm --dir apps/web exec playwright test --project=webkit
+  // `--network host` ist dieselbe Messung wie im Browserdienst: der WebKit im
+  // Container muss `vite preview` auf `127.0.0.1:4174` des WIRTS erreichen.
+  // Ohne die Variable startet das Projekt die Engine lokal — die Form, die CI
+  // und ein Wirt mit Systemabhaengigkeiten fahren.
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    {
+      name: 'webkit',
+      use: {
+        ...devices['Desktop Safari'],
+        ...(process.env['EA_WEBKIT_WS_ENDPOINT'] === undefined
+          ? {}
+          : { connectOptions: { wsEndpoint: process.env['EA_WEBKIT_WS_ENDPOINT'] } }),
+      },
+    },
+  ],
 } satisfies PlaywrightTestConfig

@@ -2189,7 +2189,14 @@ pub fn other_recipient_key_thumbprint() -> KeyThumbprint {
     key_thumbprint_of(&other_recipient_private_key())
 }
 
-fn key_thumbprint_of(key: &HpkeRecipientPrivateKey) -> KeyThumbprint {
+/// Der Abdruck eines BELIEBIGEN X25519-Empfaengerschluessels.
+///
+/// Zeichengleich zu dem, den `ReaderVault::unlock` fuer die Sitzung rechnet.
+/// Oeffentlich, damit ein Zeuge mit eigenem Schluesselmaterial
+/// (`tests/ea-system-tests/tests/two_reader_support`) denselben Abdruck
+/// bildet, den die Grants dieser Linie adressieren, statt ihn nachzubauen.
+#[must_use]
+pub fn key_thumbprint_of(key: &HpkeRecipientPrivateKey) -> KeyThumbprint {
     CanonicalPublicCoseKey::x25519(*key.public_key().as_bytes())
         .expect("ein X25519-Punkt muss ein COSE-Schluessel sein")
         .thumbprint()
@@ -2723,6 +2730,7 @@ fn complete_archive_with(
                 anchor.chain_id(),
                 entry.entry_hash(),
                 sequence,
+                GrantPurposeV1::Recovery,
                 recipient_key_thumbprint,
                 recipient_certificate_hash,
                 sealed_to,
@@ -2817,7 +2825,7 @@ fn build_complete_entry(
         .expect("das Fixture-Eintragspaket muss sich zusammensetzen")
 }
 
-/// Baut den initialen Recovery-Grant mit ECHTER Kapselung.
+/// Baut einen initialen Grant mit dem Zweck `purpose` und ECHTER Kapselung.
 ///
 /// Auch hier zwei Durchgaenge, und auch hier ohne Zirkel:
 /// `grant-context-v1` traegt WEDER den Kapselungswert NOCH den umschlossenen
@@ -2825,6 +2833,11 @@ fn build_complete_entry(
 /// endgueltigen Kontextbytes, aus denen `hpkeInfo` und `hpkeAad` entstehen;
 /// der zweite setzt die Kapselung ein. Die Zusicherung unten misst, dass der
 /// Kontext dabei unveraendert bleibt.
+///
+/// `purpose` ist ein Parameter, weil Gate `grant-plan` den Plan aus den
+/// Grants REKONSTRUIERT und der Zweck darin mitzaehlt: ein `Reader`-Grant,
+/// der sich als `Recovery` ausgibt, liesse den Plan an `DuplicateRecovery`
+/// scheitern. Alle einempfaengrigen Bestaende geben `Recovery`.
 #[allow(clippy::too_many_arguments)]
 fn complete_grant_bytes(
     head: HeadRefV1,
@@ -2832,6 +2845,7 @@ fn complete_grant_bytes(
     chain_id: ChainId,
     entry_hash: EntryHash,
     chain_sequence: u64,
+    purpose: GrantPurposeV1,
     recipient_key_thumbprint: KeyThumbprint,
     recipient_certificate_hash: CertificateHash,
     recipient_public_key: &HpkeRecipientPublicKey,
@@ -2841,7 +2855,7 @@ fn complete_grant_bytes(
         chain_id,
         entry_hash,
         kind: GrantKindV1::Initial,
-        purpose: GrantPurposeV1::Recovery,
+        purpose,
         recipient_key_thumbprint,
         recipient_certificate_hash,
         issuer_key_thumbprint: writer_device_key_thumbprint(),
@@ -2880,6 +2894,117 @@ fn complete_grant_bytes(
     encode_grant(&grant)
         .expect("der Fixture-Grant muss kodieren")
         .into_vec()
+}
+
+/// Ein Empfaenger im initialen Grantplan eines Eintrags, samt dem
+/// oeffentlichen Schluessel, auf den sein Grant GEKAPSELT wird.
+///
+/// Fuer [`complete_archive_for_recipients`]: dort ist ein Empfaenger mehr als
+/// das Tripel aus Abdruck, Zertifikat und Schluessel, weil der Plan seinen
+/// ZWECK mitkodiert und `GrantPlanV1::new` genau einen `Recovery` verlangt.
+pub struct PlannedRecipientV1 {
+    pub key_thumbprint: KeyThumbprint,
+    pub certificate_hash: CertificateHash,
+    pub public_key: HpkeRecipientPublicKey,
+    pub purpose: GrantPurposeV1,
+}
+
+/// EIN Eintrag auf [`COMPLETE_GENESIS_SEQUENCE_V1`], dessen initialer Plan
+/// MEHRERE Empfaenger nennt — und je Empfaenger ein echter, auf SEINEN
+/// Schluessel gekapselter Grant.
+///
+/// # Warum es diese Funktion gibt
+///
+/// [`complete_archive_with`] traegt GENAU EINEN Empfaenger; jeder Bestand
+/// dieses Moduls ist damit einer, in dem ein Chiffrat genau einen Grant hat.
+/// Der Stufe-4-Systemzeuge `cross_platform_two_readers` braucht das
+/// Gegenteil: ein Chiffrat, das ZWEI Reader ueber zwei verschiedene Grants
+/// oeffnen. Dieselbe Abwaegung wie bei
+/// [`complete_valid_archive_with_plaintexts`]: der EINE Bau wird um eine
+/// Achse erweitert, statt ihn anderswo zu verdoppeln — Registrierungslinie,
+/// Kettenbindung, Kapselung und Planhash bleiben dieselben Rechnungen, an
+/// denen die Gates `trust`, `chain-position`, `grant-plan` und
+/// `recipient-grant` haengen.
+///
+/// `grant_object_hashes` liegt in der Reihenfolge von `recipients`. Die
+/// Pfadhinweise tragen den Index, weil mehrere Grants auf derselben Sequenz
+/// sonst denselben Hinweis truegen; klassifiziert wird ohnehin am Praefix.
+///
+/// # Panics
+///
+/// Wenn `recipients` keinen Plan bildet: kein oder mehr als ein `Recovery`,
+/// ein doppelter Schluessel oder ein doppeltes Zertifikat.
+#[must_use]
+pub fn complete_archive_for_recipients(
+    recipients: &[PlannedRecipientV1],
+    plaintext: &[u8],
+) -> CompleteArchive {
+    let plan = GrantPlanV1::new(
+        recipients
+            .iter()
+            .map(|recipient| {
+                GrantPlanItemV1::new(
+                    recipient.key_thumbprint,
+                    recipient.certificate_hash,
+                    recipient.purpose,
+                )
+            })
+            .collect(),
+    )
+    .expect("die Empfaenger muessen einen gueltigen initialen Grantplan bilden");
+    let line = complete_line();
+    let anchor = line.anchor();
+    let mut fixture = ArchiveFixture::new();
+    push_trust_objects(&mut fixture, &line.line);
+
+    let sequence = COMPLETE_GENESIS_SEQUENCE_V1;
+    let entry = build_complete_entry(
+        line.head_ref(),
+        line.writer_certificate_hash,
+        anchor.chain_id(),
+        plan.hash(),
+        sequence,
+        None,
+        plaintext,
+    );
+    let entry_bytes = encode_entry_package(&entry)
+        .expect("das Fixture-Eintragspaket muss kodieren")
+        .into_vec();
+    let entry_object_hashes = vec![object_hash(&entry_bytes)];
+
+    let mut grant_object_hashes = Vec::with_capacity(recipients.len());
+    for (index, recipient) in recipients.iter().enumerate() {
+        let grant_bytes = complete_grant_bytes(
+            line.head_ref(),
+            line.writer_certificate_hash,
+            anchor.chain_id(),
+            entry.entry_hash(),
+            sequence,
+            recipient.purpose,
+            recipient.key_thumbprint,
+            recipient.certificate_hash,
+            &recipient.public_key,
+        );
+        grant_object_hashes.push(object_hash(&grant_bytes));
+        fixture.push_exact_bytes(
+            &format!(
+                "{}{sequence:012}_grant_{index}.eag",
+                ea_archive::GRANTS_DIR_V1
+            ),
+            grant_bytes,
+        );
+    }
+    fixture.push_exact_bytes(
+        &format!("{}{sequence:012}_entry.eip", ea_archive::ENTRIES_DIR_V1),
+        entry_bytes,
+    );
+
+    CompleteArchive {
+        fixture,
+        anchor_bytes: line.anchor_bytes,
+        entry_object_hashes,
+        grant_object_hashes,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3970,6 +4095,7 @@ fn report_archive(stub_authorization: StubAuthorizationV1) -> ReportArchive {
             chain_id,
             entry_hash,
             sequence,
+            GrantPurposeV1::Recovery,
             if own {
                 complete_recipient_key_thumbprint()
             } else {
