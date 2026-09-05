@@ -1,0 +1,818 @@
+//! Operator lifecycle orchestration. Prepared objects acquire authority only through Registry selection.
+use crate::operator_profile::{self, PendingProfile, verify_operator_snapshot};
+use crate::{AdminError, RootCeremonyService};
+use ea_audit::{AuditActorProof, AuthenticatedDevice, LocalAuditService, TypedLocalAuditEvent};
+use ea_crypto::{CanonicalPublicCoseKey, object_hash};
+use ea_draft::OperatorProfile;
+use ea_format::{
+    BindingLifecycleContextV1, CertificateKindV1, ExactObjectBytes, GenericAuditContextV1,
+    LocalAuditActionV1, LocalAuditOutcomeV1, OperatorBindingFieldsV1, OperatorRoleV1,
+    RegistryChangeV1, RegistryEventFieldsV1, TrustPayloadV1,
+};
+use ea_local_store::{EncryptedDatabase, StoreError};
+use ea_operator::{
+    BoundOperator, OperatorAuthenticator, OperatorError, OperatorSessionProof, OsAccountProvider,
+    ReauthPurpose, verify_current_session,
+};
+use ea_trust::{
+    SelectedRegistryHead, TrustError, TrustStateStore, VerifiedAdminAuthorizationIntent,
+};
+use ea_types::{
+    CertificateHash, ChainSequence, DeviceId, Hash32, ObjectHash, OperatorSubjectId,
+    OrganizationId, RegistryVersion, UnixMillis,
+};
+use std::{fmt, sync::Arc};
+
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub enum OperatorLifecycleError {
+    Unsupported,
+    IdentityVerification,
+    ProfileCommitment,
+    ProfileMissing,
+    ProfileConflict,
+    ReplacementRequiresRevocation,
+    FreshInstanceRequired,
+    RegistryWindow,
+    TargetMismatch,
+    AuditFailed,
+    Operator(OperatorError),
+    Trust(TrustError),
+    Ceremony(AdminError),
+    Store(StoreError),
+    Format(ea_format::FormatError),
+}
+impl OperatorLifecycleError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Unsupported => "EA-OPERATOR-UNSUPPORTED",
+            Self::IdentityVerification => "EA-OPERATOR-IDENTITY-VERIFICATION",
+            Self::ProfileCommitment => "EA-OPERATOR-PROFILE-COMMITMENT",
+            Self::ProfileMissing => "EA-OPERATOR-PROFILE-MISSING",
+            Self::ProfileConflict => "EA-OPERATOR-PROFILE-CONFLICT",
+            Self::ReplacementRequiresRevocation => "EA-OPERATOR-REPLACEMENT-REQUIRES-REVOCATION",
+            Self::FreshInstanceRequired => "EA-OPERATOR-FRESH-INSTANCE-REQUIRED",
+            Self::RegistryWindow => "EA-OPERATOR-REGISTRY-WINDOW",
+            Self::TargetMismatch => "EA-OPERATOR-TARGET-MISMATCH",
+            Self::AuditFailed => "EA-OPERATOR-AUDIT-FAILED",
+            Self::Operator(e) => e.code(),
+            Self::Trust(e) => e.code(),
+            Self::Ceremony(e) => e.code(),
+            Self::Store(e) => e.code(),
+            Self::Format(e) => e.code(),
+        }
+    }
+}
+impl fmt::Debug for OperatorLifecycleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl fmt::Display for OperatorLifecycleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl std::error::Error for OperatorLifecycleError {}
+impl From<StoreError> for OperatorLifecycleError {
+    fn from(e: StoreError) -> Self {
+        Self::Store(e)
+    }
+}
+impl From<OperatorError> for OperatorLifecycleError {
+    fn from(e: OperatorError) -> Self {
+        Self::Operator(e)
+    }
+}
+impl From<ea_format::FormatError> for OperatorLifecycleError {
+    fn from(e: ea_format::FormatError) -> Self {
+        Self::Format(e)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstanceKeyPolicy {
+    InstallationBoundNonRoamingBackupExcluded,
+}
+
+/// Trusted native boundary: atomically read this account and create a NEW Ed25519 key.
+/// Private keys must never roam, sync, or enter backups; Linux requires a fresh
+/// account instance in a PAM-unlocked Secret Service collection. No file adapter.
+pub trait NativeOperatorProvisioning: OsAccountProvider {
+    fn create_fresh_instance(
+        &self,
+        policy: InstanceKeyPolicy,
+    ) -> Result<CanonicalPublicCoseKey, OperatorLifecycleError>;
+    fn prove_presence_and_sign(&self, challenge: &[u8])
+    -> Result<[u8; 64], OperatorLifecycleError>;
+}
+
+pub struct ExternalIdentityRequest {
+    pub organization_id: OrganizationId,
+    pub device_id: DeviceId,
+    pub role: OperatorRoleV1,
+    pub previous_subject_id: Option<OperatorSubjectId>,
+    pub previous_binding_object_hash: Option<ObjectHash>,
+    pub challenge: [u8; 32],
+}
+/// Returned exclusively by the trusted external identity-verification adapter.
+/// The adapter assigns stable person IDs; a caller-entered name is no evidence.
+/// It must independently identify any previous binding, even after local profile
+/// loss. `None` attests first enrollment, not merely an empty local database.
+pub struct ExternalOperatorIdentity {
+    pub organization_id: OrganizationId,
+    pub operator_subject_id: OperatorSubjectId,
+    pub display_name: String,
+    pub function_label: String,
+    pub previous_binding_object_hash: Option<ObjectHash>,
+    pub challenge: [u8; 32],
+}
+pub trait ExternalOperatorIdentityVerifier {
+    fn verify_identity(
+        &self,
+        request: &ExternalIdentityRequest,
+    ) -> Result<ExternalOperatorIdentity, OperatorLifecycleError>;
+}
+
+pub enum OperatorTrustTarget {
+    Binding(OperatorBindingFieldsV1),
+    Registry(RegistryEventFieldsV1),
+}
+impl OperatorTrustTarget {
+    pub fn payload(
+        &self,
+        authorization: ObjectHash,
+    ) -> Result<TrustPayloadV1, OperatorLifecycleError> {
+        Ok(match self {
+            Self::Binding(f) => {
+                TrustPayloadV1::authorized_operator_binding(f.clone(), authorization)?
+            }
+            Self::Registry(f) => TrustPayloadV1::registry_event(f.clone(), authorization)?,
+        })
+    }
+}
+pub struct AuthorizedOperatorIntent {
+    pub intent: VerifiedAdminAuthorizationIntent,
+    pub exact_authorization: Vec<u8>,
+}
+/// Offline authorization adapter. It obtains fresh Admin authorization and calls
+/// `ea_trust::verify_intended_trust_target` against this unchanged selected head.
+pub trait OperatorAuthorizationPort {
+    fn authorize(
+        &mut self,
+        head: &SelectedRegistryHead,
+        target: &OperatorTrustTarget,
+    ) -> Result<AuthorizedOperatorIntent, OperatorLifecycleError>;
+    /// Durably stage the exact public objects for restart/transport, without
+    /// selecting a Registry head. Called only after successful audit persistence.
+    fn stage_signed_objects(&mut self, objects: &[&[u8]]) -> Result<(), OperatorLifecycleError>;
+}
+pub struct OperatorMutationPorts<'a> {
+    pub authorization: &'a mut dyn OperatorAuthorizationPort,
+    pub ceremony: &'a RootCeremonyService<'a>,
+    pub store: &'a mut dyn TrustStateStore,
+}
+pub struct VerifySessionRequest<'a> {
+    pub database: &'a Arc<EncryptedDatabase>,
+    pub binding_object_hash: ObjectHash,
+    pub device_certificate_hash: CertificateHash,
+    pub role: OperatorRoleV1,
+    pub purpose: ReauthPurpose,
+    pub account: Arc<dyn OsAccountProvider>,
+    pub authenticator: &'a dyn OperatorAuthenticator,
+}
+pub struct VerifiedOperatorSession {
+    profile: OperatorProfile,
+    proof: OperatorSessionProof,
+}
+impl VerifiedOperatorSession {
+    pub fn profile(&self) -> &OperatorProfile {
+        &self.profile
+    }
+    pub fn proof(&self) -> &OperatorSessionProof {
+        &self.proof
+    }
+    pub fn into_parts(self) -> (OperatorProfile, OperatorSessionProof) {
+        (self.profile, self.proof)
+    }
+}
+#[derive(Clone, Copy)]
+pub struct RegistryWindow {
+    pub valid_through_sequence: ChainSequence,
+    pub not_after: UnixMillis,
+}
+pub struct ProvisionOperatorRequest<'a> {
+    pub database: &'a Arc<EncryptedDatabase>,
+    pub device_certificate_hash: CertificateHash,
+    pub role: OperatorRoleV1,
+    pub window: RegistryWindow,
+    pub replacement: Option<&'a RevokedOperatorBinding>,
+}
+pub struct RevokedOperatorBinding {
+    old_hash: ObjectHash,
+    old_fields: OperatorBindingFieldsV1,
+    revocation_head: ObjectHash,
+}
+impl RevokedOperatorBinding {
+    /// Seals evidence for replacement at the directly selected revocation head.
+    /// Mere absence from a head (including a pending/unknown object) proves nothing.
+    pub fn verify(
+        previous: &SelectedRegistryHead,
+        current: &SelectedRegistryHead,
+        exact_registry_event: &[u8],
+        old_hash: ObjectHash,
+    ) -> Result<Self, OperatorLifecycleError> {
+        use ea_format::{DecodedTrustPayloadV1, decode_exact_object};
+        let old_fields = previous
+            .active_operator_binding_fields(old_hash)
+            .ok_or(OperatorLifecycleError::ReplacementRequiresRevocation)?;
+        let ea_format::ParsedArchiveObject::Trust(parsed) =
+            decode_exact_object(exact_registry_event)?
+        else {
+            return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
+        };
+        let DecodedTrustPayloadV1::RegistryEvent(event) = parsed.value().decoded_payload()? else {
+            return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
+        };
+        let fields = event.fields();
+        if object_hash(exact_registry_event) != current.registry_head_hash()
+            || previous.chain_id() != current.chain_id()
+            || fields.organization_id != old_fields.organization_id
+            || fields
+                .previous_registry_hash
+                .is_none_or(|h| h.as_bytes() != previous.registry_head_hash().as_bytes())
+            || previous.registry_version().get().checked_add(1)
+                != Some(current.registry_version().get())
+            || current.proposed_sequence() < fields.effective_from_sequence
+            || current.active_operator_binding_fields(old_hash).is_some()
+            || !matches!(fields.change,RegistryChangeV1::Target{target_kind:1,object_hash} if object_hash==old_hash)
+        {
+            return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
+        }
+        Ok(Self {
+            old_hash,
+            old_fields: old_fields.clone(),
+            revocation_head: current.registry_head_hash(),
+        })
+    }
+}
+pub struct RevokeOperatorRequest {
+    pub binding_object_hash: ObjectHash,
+    pub window: RegistryWindow,
+}
+pub struct PreparedOperatorRevocation {
+    registry: ExactObjectBytes,
+    authorization: Vec<u8>,
+}
+impl PreparedOperatorRevocation {
+    pub fn registry_bytes(&self) -> &[u8] {
+        self.registry.as_bytes()
+    }
+    pub fn authorization_bytes(&self) -> &[u8] {
+        &self.authorization
+    }
+}
+pub struct PreparedOperatorBinding {
+    binding: ExactObjectBytes,
+    activation: ExactObjectBytes,
+    binding_authorization: Vec<u8>,
+    activation_authorization: Vec<u8>,
+}
+impl PreparedOperatorBinding {
+    pub fn binding_bytes(&self) -> &[u8] {
+        self.binding.as_bytes()
+    }
+    pub fn activation_bytes(&self) -> &[u8] {
+        self.activation.as_bytes()
+    }
+    pub fn binding_object_hash(&self) -> ObjectHash {
+        ea_crypto::object_hash(self.binding.as_bytes())
+    }
+    pub fn binding_authorization_bytes(&self) -> &[u8] {
+        &self.binding_authorization
+    }
+    pub fn activation_authorization_bytes(&self) -> &[u8] {
+        &self.activation_authorization
+    }
+}
+pub struct OperatorBindingService<'a> {
+    head: &'a SelectedRegistryHead,
+    audit: &'a dyn LocalAuditService,
+}
+impl<'a> OperatorBindingService<'a> {
+    pub const fn new(head: &'a SelectedRegistryHead, audit: &'a dyn LocalAuditService) -> Self {
+        Self { head, audit }
+    }
+    /// Revokes a binding using wire target-kind 1/action 1. Admin certificate
+    /// revocation (action 5) belongs to the separate certificate lifecycle.
+    pub fn revoke(
+        &self,
+        request: RevokeOperatorRequest,
+        ports: &mut OperatorMutationPorts<'_>,
+        reauth: VerifySessionRequest<'_>,
+    ) -> Result<PreparedOperatorRevocation, OperatorLifecycleError> {
+        if reauth.purpose != ReauthPurpose::AdminRootCeremony {
+            return Err(OperatorLifecycleError::TargetMismatch);
+        }
+        let actor = self.verify_session(reauth)?;
+        let event = self.registry_event(
+            request.window,
+            RegistryChangeV1::Target {
+                target_kind: 1,
+                object_hash: request.binding_object_hash,
+            },
+        )?;
+        let signed = (|| {
+            self.head
+                .active_operator_binding_fields(request.binding_object_hash)
+                .ok_or(OperatorError::BindingNotActive)?;
+            self.sign(
+                &OperatorTrustTarget::Registry(event.clone()),
+                ports,
+                actor.proof(),
+                None,
+            )
+        })();
+        let outcome = if signed.is_ok() {
+            LocalAuditOutcomeV1::Accepted
+        } else {
+            LocalAuditOutcomeV1::Failed
+        };
+        self.audit
+            .record_signed(
+                AuditActorProof::OperatorSession(actor.proof()),
+                TypedLocalAuditEvent {
+                    action: LocalAuditActionV1::Revocation(BindingLifecycleContextV1::new(
+                        Some(request.binding_object_hash),
+                        None,
+                        event.effective_from_sequence,
+                    )),
+                    outcome,
+                },
+            )
+            .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+        let (registry, authorization) = signed?;
+        if let Err(error) = ports
+            .authorization
+            .stage_signed_objects(&[&authorization, registry.as_bytes()])
+        {
+            self.audit
+                .record_signed(
+                    AuditActorProof::OperatorSession(actor.proof()),
+                    TypedLocalAuditEvent {
+                        action: LocalAuditActionV1::Revocation(BindingLifecycleContextV1::new(
+                            Some(request.binding_object_hash),
+                            None,
+                            event.effective_from_sequence,
+                        )),
+                        outcome: LocalAuditOutcomeV1::Failed,
+                    },
+                )
+                .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+            return Err(error);
+        }
+        Ok(PreparedOperatorRevocation {
+            registry,
+            authorization,
+        })
+    }
+    /// Performs fresh native presence, current-head verification, and exact decrypted
+    /// profile comparison. Neither profile nor proof escapes before the Login audit.
+    pub fn verify_session(
+        &self,
+        request: VerifySessionRequest<'_>,
+    ) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
+        let certificate = self
+            .head
+            .active_certificate_fields(request.device_certificate_hash)
+            .ok_or(OperatorError::DeviceCertificateNotActive)?;
+        let known = self
+            .head
+            .active_operator_binding_fields(request.binding_object_hash)
+            .filter(|b| b.device_certificate_hash == request.device_certificate_hash)
+            .map(|_| request.binding_object_hash);
+        let device = AuthenticatedDevice::new(
+            certificate.organization_id,
+            certificate.device_id,
+            ObjectHash::try_from(request.device_certificate_hash.as_bytes().as_slice())
+                .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
+            known,
+        );
+        let result = (|| {
+            let bound = BoundOperator::resolve(self.head, request.binding_object_hash)?;
+            let authenticator = FreshAuthenticator {
+                bound,
+                native: request.authenticator,
+            };
+            let proof = authenticator.reauthenticate(
+                Box::new(SharedAccount(request.account.clone())),
+                request.purpose,
+            )?;
+            verify_current_session(
+                self.head,
+                request.device_certificate_hash,
+                request.role,
+                &proof,
+                request.purpose,
+                request.account.as_ref(),
+            )?;
+            let profile = operator_profile::load(request.database)?
+                .ok_or(OperatorLifecycleError::ProfileMissing)?;
+            if profile.operator_binding_object_hash() != request.binding_object_hash {
+                return Err(OperatorLifecycleError::ProfileCommitment);
+            }
+            let fields = self
+                .head
+                .active_operator_binding_fields(request.binding_object_hash)
+                .ok_or(OperatorError::BindingNotActive)?;
+            verify_operator_snapshot(&profile, fields)?;
+            Ok(VerifiedOperatorSession { profile, proof })
+        })();
+        let outcome = if result.is_ok() {
+            LocalAuditOutcomeV1::Completed
+        } else {
+            LocalAuditOutcomeV1::Failed
+        };
+        self.audit
+            .record_signed(
+                AuditActorProof::AuthenticatedDevice(&device),
+                TypedLocalAuditEvent {
+                    action: LocalAuditActionV1::Login(GenericAuditContextV1::new(known)),
+                    outcome,
+                },
+            )
+            .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+        if result.is_err() {
+            self.audit
+                .record_signed(
+                    AuditActorProof::AuthenticatedDevice(&device),
+                    TypedLocalAuditEvent {
+                        action: LocalAuditActionV1::ReauthFailure(GenericAuditContextV1::new(
+                            known,
+                        )),
+                        outcome: LocalAuditOutcomeV1::Failed,
+                    },
+                )
+                .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+        }
+        result
+    }
+
+    /// Prepares a binding and its separately authorized activation event against
+    /// the same head. The encrypted row is pending until selected-head verification.
+    pub fn provision(
+        &self,
+        request: ProvisionOperatorRequest<'_>,
+        native: &dyn NativeOperatorProvisioning,
+        identity: &dyn ExternalOperatorIdentityVerifier,
+        ports: &mut OperatorMutationPorts<'_>,
+        reauth: VerifySessionRequest<'_>,
+    ) -> Result<PreparedOperatorBinding, OperatorLifecycleError> {
+        if reauth.purpose != ReauthPurpose::AdminRootCeremony {
+            return Err(OperatorLifecycleError::TargetMismatch);
+        }
+        let actor = self.verify_session(reauth)?;
+        let mut event = self.registry_event(
+            request.window,
+            RegistryChangeV1::OperatorBinding {
+                object_hash: ObjectHash::from(Hash32::ZERO),
+            },
+        )?;
+        let old_hash = request.replacement.map(|r| r.old_hash);
+        let mut attempted_new = None;
+        let preparation = (|| {
+            let certificate = self
+                .head
+                .active_certificate_fields(request.device_certificate_hash)
+                .ok_or(OperatorError::DeviceCertificateNotActive)?;
+            if !matches!(
+                (certificate.certificate_kind, request.role),
+                (CertificateKindV1::Writer, OperatorRoleV1::Writer)
+                    | (CertificateKindV1::Reader, OperatorRoleV1::Reader)
+                    | (
+                        CertificateKindV1::OrganizationAdmin,
+                        OperatorRoleV1::OrganizationAdmin
+                    )
+            ) || certificate
+                .revoked_from_sequence
+                .is_some_and(|s| s <= event.effective_from_sequence)
+            {
+                return Err(OperatorLifecycleError::TargetMismatch);
+            }
+            let old = operator_profile::load(request.database)?;
+            if let Some(replacement) = request.replacement {
+                if replacement.revocation_head != self.head.registry_head_hash()
+                    || replacement.old_fields.organization_id != certificate.organization_id
+                {
+                    return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
+                }
+                if let Some(old) = old.as_ref() {
+                    if old.operator_binding_object_hash() != replacement.old_hash {
+                        return Err(OperatorLifecycleError::ProfileConflict);
+                    }
+                    verify_operator_snapshot(old, &replacement.old_fields)?;
+                }
+            } else if old.is_some() {
+                return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
+            }
+            let identity_request = ExternalIdentityRequest {
+                organization_id: certificate.organization_id,
+                device_id: certificate.device_id,
+                role: request.role,
+                previous_subject_id: request
+                    .replacement
+                    .map(|r| r.old_fields.operator_subject_id),
+                previous_binding_object_hash: old_hash,
+                challenge: fresh()?,
+            };
+            let verified = identity.verify_identity(&identity_request)?;
+            if verified.previous_binding_object_hash != old_hash {
+                return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
+            }
+            if verified.organization_id != identity_request.organization_id
+                || verified.challenge != identity_request.challenge
+                || identity_request
+                    .previous_subject_id
+                    .is_some_and(|s| s != verified.operator_subject_id)
+            {
+                return Err(OperatorLifecycleError::IdentityVerification);
+            }
+            if request.role == OperatorRoleV1::OrganizationAdmin
+                && certificate
+                    .authority_subject_id
+                    .is_none_or(|s| s.as_bytes() != verified.operator_subject_id.as_bytes())
+            {
+                return Err(OperatorLifecycleError::IdentityVerification);
+            }
+            let normalized = ea_schema::OperatorSnapshotV1::new(
+                verified.organization_id,
+                verified.operator_subject_id,
+                verified.display_name,
+                verified.function_label,
+                fresh()?,
+                ObjectHash::from(Hash32::ZERO),
+            )
+            .map_err(|_| OperatorLifecycleError::ProfileCommitment)?;
+            let pending = PendingProfile {
+                organization: normalized.organization_id(),
+                subject: normalized.operator_subject_id(),
+                name: normalized.display_name().to_owned(),
+                function: normalized.function_label().to_owned(),
+                salt: *normalized.salt(),
+            };
+            let before = native.operator_instance_public_key()?;
+            let account_hash = native
+                .os_account_binding_hash(certificate.organization_id, certificate.device_id)?;
+            let instance = native.create_fresh_instance(
+                InstanceKeyPolicy::InstallationBoundNonRoamingBackupExcluded,
+            )?;
+            if !matches!(instance, CanonicalPublicCoseKey::Ed25519(_))
+                || before.is_some_and(|k| k.thumbprint() == instance.thumbprint())
+                || certificate.signing_key_thumbprint == Some(instance.thumbprint())
+                || request.replacement.is_some_and(|r| {
+                    r.old_fields.operator_instance_key_thumbprint == instance.thumbprint()
+                })
+            {
+                return Err(OperatorLifecycleError::FreshInstanceRequired);
+            }
+            let mut challenge = b"EINSATZARCHIV-OPERATOR-PROVISION-v1".to_vec();
+            challenge.extend_from_slice(certificate.organization_id.as_bytes());
+            challenge.extend_from_slice(certificate.device_id.as_bytes());
+            challenge.extend_from_slice(&identity_request.challenge);
+            instance
+                .verify_ed25519_strict(&challenge, &native.prove_presence_and_sign(&challenge)?)
+                .map_err(|_| OperatorError::PresenceProofInvalid)?;
+            let fields = OperatorBindingFieldsV1 {
+                organization_id: pending.organization,
+                operator_subject_id: pending.subject,
+                operator_profile_commitment: pending.commitment()?,
+                device_certificate_hash: request.device_certificate_hash,
+                operator_role: request.role,
+                os_account_binding_hash: account_hash,
+                operator_instance_key_thumbprint: instance.thumbprint(),
+                effective_from_sequence: event.effective_from_sequence,
+                revoked_from_sequence: None,
+            };
+            let (binding, binding_authorization) = self.sign(
+                &OperatorTrustTarget::Binding(fields),
+                ports,
+                actor.proof(),
+                None,
+            )?;
+            let new_hash = object_hash(binding.as_bytes());
+            attempted_new = Some(new_hash);
+            event.change = RegistryChangeV1::OperatorBinding {
+                object_hash: new_hash,
+            };
+            let (activation, activation_authorization) = self.sign(
+                &OperatorTrustTarget::Registry(event.clone()),
+                ports,
+                actor.proof(),
+                Some(&binding_authorization),
+            )?;
+            if native.os_account_binding_hash(certificate.organization_id, certificate.device_id)?
+                != account_hash
+                || native
+                    .operator_instance_public_key()?
+                    .is_none_or(|k| k.thumbprint() != instance.thumbprint())
+            {
+                return Err(OperatorLifecycleError::FreshInstanceRequired);
+            }
+            Ok((
+                pending,
+                old,
+                PreparedOperatorBinding {
+                    binding,
+                    activation,
+                    binding_authorization,
+                    activation_authorization,
+                },
+            ))
+        })();
+        let outcome = if preparation.is_ok() {
+            LocalAuditOutcomeV1::Accepted
+        } else {
+            LocalAuditOutcomeV1::Failed
+        };
+        self.binding_audit(
+            actor.proof(),
+            old_hash,
+            attempted_new,
+            event.effective_from_sequence,
+            outcome,
+        )?;
+        let (pending, old, prepared) = preparation?;
+        let persist = (|| {
+            ports.authorization.stage_signed_objects(&[
+                prepared.binding_authorization_bytes(),
+                prepared.binding_bytes(),
+                prepared.activation_authorization_bytes(),
+                prepared.activation_bytes(),
+            ])?;
+            pending.persist(
+                request.database,
+                prepared.binding_object_hash(),
+                old.as_ref(),
+            )
+        })();
+        if let Err(error) = persist {
+            self.binding_audit(
+                actor.proof(),
+                old_hash,
+                attempted_new,
+                event.effective_from_sequence,
+                LocalAuditOutcomeV1::Failed,
+            )?;
+            return Err(error);
+        }
+        Ok(prepared)
+    }
+
+    fn sign(
+        &self,
+        target: &OperatorTrustTarget,
+        ports: &mut OperatorMutationPorts<'_>,
+        proof: &OperatorSessionProof,
+        previous_authorization: Option<&[u8]>,
+    ) -> Result<(ExactObjectBytes, Vec<u8>), OperatorLifecycleError> {
+        let auth = ports.authorization.authorize(self.head, target)?;
+        if let Some(previous) = previous_authorization {
+            require_distinct_authorizations(previous, &auth.exact_authorization)?;
+        }
+        let payload = target.payload(object_hash(&auth.exact_authorization))?;
+        let signed = ports
+            .ceremony
+            .publish_authorized_target(
+                &auth.intent,
+                payload,
+                &auth.exact_authorization,
+                ports.store,
+                proof,
+            )
+            .map_err(OperatorLifecycleError::Ceremony)?;
+        Ok((signed, auth.exact_authorization))
+    }
+    fn registry_event(
+        &self,
+        window: RegistryWindow,
+        change: RegistryChangeV1,
+    ) -> Result<RegistryEventFieldsV1, OperatorLifecycleError> {
+        let effective = ChainSequence::new(
+            self.head
+                .valid_through_sequence()
+                .get()
+                .checked_add(1)
+                .ok_or(OperatorLifecycleError::RegistryWindow)?,
+        );
+        let now = self.head.preexisting_effective_now().value();
+        if window.valid_through_sequence < effective
+            || window.not_after <= now
+            || (i128::from(window.not_after.get()) - i128::from(now.get()))
+                > i128::from(self.head.policy_fields().max_registry_age_ms)
+        {
+            return Err(OperatorLifecycleError::RegistryWindow);
+        }
+        Ok(RegistryEventFieldsV1 {
+            organization_id: self.head.root_certificate_fields().organization_id,
+            registry_version: RegistryVersion::new(
+                self.head
+                    .registry_version()
+                    .get()
+                    .checked_add(1)
+                    .ok_or(OperatorLifecycleError::RegistryWindow)?,
+            ),
+            previous_registry_hash: Some(
+                Hash32::try_from(self.head.registry_head_hash().as_bytes().as_slice())
+                    .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
+            ),
+            effective_from_sequence: effective,
+            valid_through_sequence: window.valid_through_sequence,
+            issued_at: now,
+            not_before: now,
+            not_after: window.not_after,
+            policy_object_hash: self.head.policy_object_hash(),
+            change,
+            root_key_thumbprint: self.head.root_certificate_fields().root_key_thumbprint,
+        })
+    }
+    fn binding_audit(
+        &self,
+        proof: &OperatorSessionProof,
+        old: Option<ObjectHash>,
+        new: Option<ObjectHash>,
+        sequence: ChainSequence,
+        outcome: LocalAuditOutcomeV1,
+    ) -> Result<(), OperatorLifecycleError> {
+        self.audit
+            .record_signed(
+                AuditActorProof::OperatorSession(proof),
+                TypedLocalAuditEvent {
+                    action: LocalAuditActionV1::BindingChange(BindingLifecycleContextV1::new(
+                        old, new, sequence,
+                    )),
+                    outcome,
+                },
+            )
+            .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+        Ok(())
+    }
+}
+
+struct SharedAccount(Arc<dyn OsAccountProvider>);
+impl OsAccountProvider for SharedAccount {
+    fn os_account_binding_hash(
+        &self,
+        o: OrganizationId,
+        d: DeviceId,
+    ) -> Result<Hash32, OperatorError> {
+        self.0.os_account_binding_hash(o, d)
+    }
+    fn operator_instance_public_key(
+        &self,
+    ) -> Result<Option<CanonicalPublicCoseKey>, OperatorError> {
+        self.0.operator_instance_public_key()
+    }
+}
+struct FreshAuthenticator<'a> {
+    bound: BoundOperator,
+    native: &'a dyn OperatorAuthenticator,
+}
+impl OperatorAuthenticator for FreshAuthenticator<'_> {
+    fn bound_operator(&self) -> &BoundOperator {
+        &self.bound
+    }
+    fn prove_presence_and_sign(&self, c: &[u8]) -> Result<[u8; 64], OperatorError> {
+        self.native.prove_presence_and_sign(c)
+    }
+}
+fn fresh() -> Result<[u8; 32], OperatorLifecycleError> {
+    let mut bytes = [0; 32];
+    getrandom::fill(&mut bytes).map_err(|_| OperatorError::LocalRng)?;
+    Ok(bytes)
+}
+
+fn require_distinct_authorizations(
+    first: &[u8],
+    second: &[u8],
+) -> Result<(), OperatorLifecycleError> {
+    fn fields(
+        bytes: &[u8],
+    ) -> Result<ea_format::OrganizationAdminAuthorizationFieldsV1, OperatorLifecycleError> {
+        let ea_format::ParsedArchiveObject::Trust(parsed) = ea_format::decode_exact_object(bytes)?
+        else {
+            return Err(OperatorLifecycleError::TargetMismatch);
+        };
+        let ea_format::DecodedTrustPayloadV1::OrganizationAdminAuthorization(fields) =
+            parsed.value().decoded_payload()?
+        else {
+            return Err(OperatorLifecycleError::TargetMismatch);
+        };
+        Ok(fields)
+    }
+    let first = fields(first)?;
+    let second = fields(second)?;
+    if first.authorization_id == second.authorization_id || first.nonce == second.nonce {
+        return Err(OperatorLifecycleError::Trust(TrustError::AuthReplay));
+    }
+    Ok(())
+}

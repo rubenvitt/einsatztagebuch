@@ -45,7 +45,7 @@ use crate::args::UsageError;
 
 /// Die geschlossene Grammatik, Zeile fuer Zeile.
 ///
-/// Genau sechs Zeilen, weil es genau sechs Kommandos gibt. Der Text ist Teil
+/// Die verfügbaren Aufrufformen. Der Text ist Teil
 /// des beobachtbaren Verhaltens und wird als solcher gemessen.
 ///
 /// # Warum die sechste Zeile `<new-file>` sagt
@@ -55,13 +55,14 @@ use crate::args::UsageError;
 /// benennt also einen Platz, der noch frei sein muss. Die Begruendung steht in
 /// `crate::commands::organization`; hier steht sie in einem Wort, damit ein
 /// Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 6] = [
+const GRAMMAR_V1: [&str; 7] = [
     "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
     "einsatzarchiv --trust-anchor <file> list    <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
     "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
     "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
+    "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke",
 ];
 
 /// Was `organization init` TUT — und was ausdruecklich nicht.
@@ -91,6 +92,16 @@ pub fn print_grammar() {
         println!("{line}");
     }
     println!("{ORGANIZATION_SCOPE_NOTE_V1}");
+    println!(
+        "operator actions require native account/presence and offline signing providers; this build returns unsupported"
+    );
+}
+
+/// Meldet die fehlende Host-Komposition ohne Konto-, Profil- oder Pfadangaben.
+pub fn print_operator_provider_refusal() {
+    eprintln!(
+        "einsatzarchiv: EA-OPERATOR-NATIVE-PROVIDER-UNAVAILABLE: native account/presence and offline signing providers are unavailable"
+    );
 }
 
 /// Druckt einen Aufruffehler auf stderr.

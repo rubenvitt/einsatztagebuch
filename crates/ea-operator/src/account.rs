@@ -4,8 +4,11 @@ use ea_crypto::{
     CanonicalPublicCoseKey, CryptoError, linux_os_account_binding_hash,
     macos_os_account_binding_hash, windows_os_account_binding_hash,
 };
+use ea_format::OperatorRoleV1;
 use ea_trust::SelectedRegistryHead;
-use ea_types::{DeviceId, Hash32, KeyThumbprint, ObjectHash, OrganizationId, UnixMillis};
+use ea_types::{
+    CertificateHash, DeviceId, Hash32, KeyThumbprint, ObjectHash, OrganizationId, UnixMillis,
+};
 
 /// Ein Fehlschlag an der Bedienergrenze.
 ///
@@ -16,8 +19,14 @@ use ea_types::{DeviceId, Hash32, KeyThumbprint, ObjectHash, OrganizationId, Unix
 pub enum OperatorError {
     /// Der gewaehlte Registry-Head fuehrt diese Bedienerbindung nicht als aktiv.
     BindingNotActive,
-    /// Das Writer-Zertifikat, das die Bindung nennt, ist nicht aktiv.
+    /// Das Geraetezertifikat, das die Bindung nennt, ist nicht aktiv.
     DeviceCertificateNotActive,
+    /// Die aktive Bindung nennt nicht das fuer die Aktion erwartete Zertifikat.
+    DeviceMismatch,
+    /// Die aktive Bindung erlaubt nicht die fuer die Aktion erwartete Rolle.
+    RoleMismatch,
+    /// Kontext, Zweck oder Gueltigkeit des Sitzungsnachweises passen nicht.
+    ProofMismatch,
     /// Das OS-Konto dieses Prozesses ist nicht das gebundene Konto.
     AccountMismatch,
     /// Auf diesem Konto liegt kein Bedienerinstanzschluessel.
@@ -50,6 +59,9 @@ impl OperatorError {
         match self {
             Self::BindingNotActive => "EA-OPERATOR-BINDING-NOT-ACTIVE",
             Self::DeviceCertificateNotActive => "EA-OPERATOR-DEVICE-CERTIFICATE-NOT-ACTIVE",
+            Self::DeviceMismatch => "EA-OPERATOR-DEVICE-MISMATCH",
+            Self::RoleMismatch => "EA-OPERATOR-ROLE-MISMATCH",
+            Self::ProofMismatch => "EA-OPERATOR-PROOF-MISMATCH",
             Self::AccountMismatch => "EA-OPERATOR-ACCOUNT-MISMATCH",
             Self::InstanceKeyMissing => "EA-OPERATOR-INSTANCE-KEY-MISSING",
             Self::InstanceKeyMismatch => "EA-OPERATOR-INSTANCE-KEY-MISMATCH",
@@ -166,6 +178,10 @@ impl OsAccountInputs {
 /// Beide Methoden LESEN; keine schreibt, legt an oder aendert. Der Port nimmt
 /// ausdruecklich KEINE Kontoidentitaet aus der Oberflaeche an: die Werte
 /// entstehen im Betriebssystem, und ein OS-Kennwort geht ihn nichts an.
+/// Die Implementierung muss das aktuelle Konto und dessen aktuellen,
+/// installationsgebundenen Schluessel melden. Ein Restore darf den alten
+/// privaten Schluessel nicht wiederbringen; dieser Port ersetzt keine native
+/// Durchsetzung des Backup-Ausschlusses.
 pub trait OsAccountProvider {
     /// Der Bindungshash des Kontos, unter dem dieser Prozess laeuft.
     fn os_account_binding_hash(
@@ -192,6 +208,8 @@ pub trait OsAccountProvider {
 pub struct BoundOperator {
     organization_id: OrganizationId,
     device_id: DeviceId,
+    device_certificate_hash: CertificateHash,
+    operator_role: OperatorRoleV1,
     binding_object_hash: ObjectHash,
     os_account_binding_hash: Hash32,
     operator_instance_key_thumbprint: KeyThumbprint,
@@ -202,7 +220,7 @@ impl BoundOperator {
     /// Loest die Bindung aus dem gewaehlten Head auf.
     ///
     /// Das Geraet kommt NICHT aus einem Parameter, sondern aus dem
-    /// Writer-Zertifikat, das die Bindung nennt — sonst koennte ein Aufrufer
+    /// Geraetezertifikat, das die Bindung nennt — sonst koennte ein Aufrufer
     /// eine Bindung gegen ein fremdes Geraet pruefen lassen.
     ///
     /// EINE AUFLOESUNG IST EINE MOMENTAUFNAHME. Sie nimmt die Zeit des
@@ -232,6 +250,8 @@ impl BoundOperator {
         Ok(Self {
             organization_id: binding.organization_id,
             device_id: certificate.device_id,
+            device_certificate_hash: binding.device_certificate_hash,
+            operator_role: binding.operator_role,
             binding_object_hash,
             os_account_binding_hash: binding.os_account_binding_hash,
             operator_instance_key_thumbprint: binding.operator_instance_key_thumbprint,
@@ -247,16 +267,35 @@ impl BoundOperator {
         self.device_id
     }
 
+    pub(crate) const fn device_certificate_hash(&self) -> CertificateHash {
+        self.device_certificate_hash
+    }
+
+    pub(crate) const fn operator_role(&self) -> OperatorRoleV1 {
+        self.operator_role
+    }
+
     pub(crate) const fn binding_object_hash(&self) -> ObjectHash {
         self.binding_object_hash
     }
 
-    pub(crate) const fn os_account_binding_hash(&self) -> Hash32 {
-        self.os_account_binding_hash
-    }
-
-    pub(crate) const fn operator_instance_key_thumbprint(&self) -> KeyThumbprint {
-        self.operator_instance_key_thumbprint
+    /// Liest Konto und Instanzschluessel fuer jede Pruefung erneut am Port.
+    /// Derselbe Abgleich gilt fuer Ausstellung und spaetere Verwendung.
+    pub(crate) fn verify_account(
+        &self,
+        account: &dyn OsAccountProvider,
+    ) -> Result<CanonicalPublicCoseKey, OperatorError> {
+        let reported = account.os_account_binding_hash(self.organization_id, self.device_id)?;
+        if reported != self.os_account_binding_hash {
+            return Err(OperatorError::AccountMismatch);
+        }
+        let instance_key = account
+            .operator_instance_public_key()?
+            .ok_or(OperatorError::InstanceKeyMissing)?;
+        if instance_key.thumbprint() != self.operator_instance_key_thumbprint {
+            return Err(OperatorError::InstanceKeyMismatch);
+        }
+        Ok(instance_key)
     }
 
     /// Die Zeit des Head, zu der diese Bindung aufgeloest wurde.

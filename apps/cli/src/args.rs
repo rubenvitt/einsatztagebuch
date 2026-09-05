@@ -2,7 +2,7 @@
 //!
 //! # Warum von Hand und nicht mit `clap`
 //!
-//! Die Grammatik ist mit sechs Kommandos, vier wertnehmenden Schaltern und
+//! Die Grammatik ist mit sieben Kommandos, vier wertnehmenden Schaltern und
 //! einem Flag abgeschlossen und klein. Das Repo ist dependency-diszipliniert:
 //! jede externe Kiste traegt eine begruendete Zeile in
 //! `docs/adr/0001-toolchain-and-cryptography-dependencies.md`. Eine
@@ -45,7 +45,7 @@ use std::{
 /// Das EINZIGE Unterkommando von `organization`.
 pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
 
-/// `--trust-anchor <file>`, PFLICHT bei allen sechs Kommandos.
+/// `--trust-anchor <file>`, PFLICHT bei allen Kommandos.
 ///
 /// # Bei `organization init` bedeutet er etwas ANDERES
 ///
@@ -53,7 +53,7 @@ pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
 /// EINGABE: `ea_recovery::load_trust_anchor` liest ihn, und `design.md`:1782
 /// verbietet jede andere Herkunft. Waehrend der Ersteinrichtung gibt es ihn
 /// noch gar nicht — er ist das, was die Zeremonie am Ende BILDET. Der Schalter
-/// bleibt trotzdem Pflicht, damit die Grammatik ueber alle sechs Kommandos
+/// bleibt trotzdem Pflicht, damit die Grammatik ueber alle Kommandos
 /// dieselbe ist, und benennt dort den PLATZ, den der Anker dieser Zeremonie
 /// einnehmen wird. Die Folge steht in `crate::commands::organization`: eine
 /// belegte Datei an diesem Platz ist ein Aufruffehler und kein Ziel.
@@ -91,6 +91,14 @@ pub enum Format {
     Text,
     /// Das Berichtsdokument `ea.verification-report/v1`.
     Json,
+}
+
+/// Die geschlossenen Operator-Aktionen; Identität kommt ausschließlich vom Provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperatorAction {
+    Provision,
+    VerifySession,
+    Revoke,
 }
 
 /// Das gewaehlte Kommando samt seinen Pfaden.
@@ -137,6 +145,8 @@ pub enum Command {
     /// hier stuende, muesste einen Schritt fuehren, und die dafuer noetigen
     /// Schluesselports gibt es in dieser Scheibe nicht.
     OrganizationInit,
+    /// Verwaltung des nativen, OS-kontogebundenen Operators.
+    Operator { action: OperatorAction },
 }
 
 /// Ein vollstaendig geparster Aufruf.
@@ -207,6 +217,8 @@ pub enum UsageError {
         command: &'static str,
         /// Was statt eines Unterkommandos dastand, woertlich.
         value: String,
+        /// Die erwarteten Unterkommandos dieses Kommandos.
+        expected: &'static str,
     },
     /// Der Schalter existiert, gehoert aber nicht zu diesem Kommando.
     SwitchNotAllowed {
@@ -232,12 +244,12 @@ impl fmt::Display for UsageError {
             ),
             Self::UnknownCommand(command) => write!(
                 formatter,
-                "unknown command {command}; expected verify, list, decrypt, report, export or \
-                 organization"
+                "unknown command {command}; expected verify, list, decrypt, report, export, \
+                 organization or operator"
             ),
             Self::MissingCommand => formatter.write_str(
-                "no command was given; expected verify, list, decrypt, report, export or \
-                 organization",
+                "no command was given; expected verify, list, decrypt, report, export, \
+                 organization or operator",
             ),
             Self::MissingTrustAnchor => write!(
                 formatter,
@@ -251,9 +263,13 @@ impl fmt::Display for UsageError {
                 formatter,
                 "{command} takes exactly one positional argument, more were given"
             ),
-            Self::UnknownSubcommand { command, value } => write!(
+            Self::UnknownSubcommand {
+                command,
+                value,
+                expected,
+            } => write!(
                 formatter,
-                "unknown {command} subcommand {value}; expected init"
+                "unknown {command} subcommand {value}; expected {expected}"
             ),
             Self::MissingSwitch { switch, command } => {
                 write!(formatter, "{command} requires {switch}")
@@ -267,7 +283,7 @@ impl fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// Welches der sechs Kommandos gemeint ist.
+/// Welches der sieben Kommandos gemeint ist.
 ///
 /// Eine eigene Aufzaehlung statt einer Zeichenkette, damit die Auswertung unten
 /// VOLLSTAENDIG ist und kein `unreachable!()` braucht. Ein `unreachable!()`
@@ -280,6 +296,7 @@ enum CommandKind {
     Report,
     Export,
     Organization,
+    Operator,
 }
 
 impl CommandKind {
@@ -292,6 +309,7 @@ impl CommandKind {
             Self::Report => "report",
             Self::Export => "export",
             Self::Organization => "organization",
+            Self::Operator => "operator",
         }
     }
 
@@ -304,6 +322,7 @@ impl CommandKind {
             "report" => Some(Self::Report),
             "export" => Some(Self::Export),
             "organization" => Some(Self::Organization),
+            "operator" => Some(Self::Operator),
             _ => None,
         }
     }
@@ -463,7 +482,10 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     if output.is_some()
         && matches!(
             command_kind,
-            CommandKind::Verify | CommandKind::List | CommandKind::Organization
+            CommandKind::Verify
+                | CommandKind::List
+                | CommandKind::Organization
+                | CommandKind::Operator
         )
     {
         return Err(UsageError::SwitchNotAllowed {
@@ -488,10 +510,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
         });
     }
 
-    // 5 — genau ein Positionsargument, bei allen sechs Kommandos. Bei den
-    // fuenf Wiederherstellungskommandos ist es ein PFAD, bei `organization`
-    // das Wort `init`; die ANZAHL ist dieselbe, und deshalb steht sie hier
-    // einmal.
+    // 5 — genau ein Positionsargument: ein Archivpfad oder ein Unterkommando.
     let mut positionals = positionals.into_iter();
     let path = positionals
         .next()
@@ -534,9 +553,25 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 return Err(UsageError::UnknownSubcommand {
                     command: command_name,
                     value: path.to_string_lossy().into_owned(),
+                    expected: ORGANIZATION_INIT_SUBCOMMAND,
                 });
             }
             Command::OrganizationInit
+        }
+        CommandKind::Operator => {
+            let action = match path.to_str() {
+                Some("provision") => OperatorAction::Provision,
+                Some("verify-session") => OperatorAction::VerifySession,
+                Some("revoke") => OperatorAction::Revoke,
+                _ => {
+                    return Err(UsageError::UnknownSubcommand {
+                        command: command_name,
+                        value: path.to_string_lossy().into_owned(),
+                        expected: "provision, verify-session or revoke",
+                    });
+                }
+            };
+            Command::Operator { action }
         }
     };
 
@@ -706,6 +741,7 @@ mod tests {
             UsageError::UnknownSubcommand {
                 command: "organization",
                 value: "iniit".to_owned(),
+                expected: ORGANIZATION_INIT_SUBCOMMAND,
             }
         );
     }

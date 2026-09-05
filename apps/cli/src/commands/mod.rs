@@ -1,4 +1,4 @@
-//! Die sechs Kommandopfade.
+//! Die Kommandopfade und ihre jeweilige Host-Grenze.
 //!
 //! # Was hier NICHT stehen darf
 //!
@@ -32,6 +32,7 @@
 pub mod decrypt;
 pub mod export;
 pub mod list;
+pub mod operator;
 pub mod organization;
 pub mod report;
 pub mod verify;
@@ -65,6 +66,7 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         // OHNE `now`: dieser Pfad verifiziert nichts und datiert nichts. Die
         // Begruendung steht an `organization::run`.
         Command::OrganizationInit => organization::run(invocation),
+        Command::Operator { action } => operator::run(*action),
     }
 }
 

@@ -8,7 +8,7 @@
 //! `PreexistingEffectiveNow` eines gewaehlten Head.
 
 #[path = "../../ea-trust/tests/support/mod.rs"]
-mod support;
+pub(crate) mod support;
 
 use ea_crypto::{
     linux_os_account_binding_hash, macos_os_account_binding_hash, windows_os_account_binding_hash,
@@ -24,19 +24,19 @@ use ea_types::{DeviceId, Hash32, OrganizationId};
 /// Ein echtes Ed25519-Schluesselpaar: die Fixture setzt seinen Thumbprint in die
 /// Bindung und signiert die Challenge damit, also prueft der Standardkoerper von
 /// `reauthenticate` eine echte Signatur und keine Attrappe.
-const INSTANCE_SECRET: [u8; 32] = [
+pub(crate) const INSTANCE_SECRET: [u8; 32] = [
     0x4a, 0x1c, 0x2e, 0x93, 0x77, 0x05, 0xbb, 0x61, 0x18, 0x8f, 0xd2, 0x40, 0x36, 0xa7, 0x5c, 0xe1,
     0x09, 0x94, 0x6d, 0x3b, 0xcf, 0x82, 0x17, 0x50, 0xe4, 0x2a, 0x68, 0xd9, 0x0b, 0x73, 0xf6, 0x84,
 ];
 
 /// Ein ANDERER Instanzschluessel: dasselbe gebundene Konto, aber nicht der
 /// Schluessel, den die Bindung nennt.
-const OTHER_INSTANCE_SECRET: [u8; 32] = [
+pub(crate) const OTHER_INSTANCE_SECRET: [u8; 32] = [
     0x1f, 0x3d, 0x55, 0x02, 0xa9, 0xc4, 0x6e, 0x17, 0x8b, 0x20, 0x74, 0xdd, 0x91, 0x0c, 0x38, 0xf2,
     0x46, 0xe7, 0xb1, 0x5a, 0x23, 0x9d, 0x60, 0xcc, 0x08, 0x71, 0x4f, 0xa3, 0xd6, 0x12, 0x89, 0x35,
 ];
 
-mod fixtures {
+pub(crate) mod fixtures {
     use std::cell::RefCell;
 
     use ea_crypto::CanonicalPublicCoseKey;
@@ -165,12 +165,12 @@ mod fixtures {
         SigningKey::from_bytes(&secret)
     }
 
-    fn public_key(secret: [u8; 32]) -> CanonicalPublicCoseKey {
+    pub(crate) fn public_key(secret: [u8; 32]) -> CanonicalPublicCoseKey {
         CanonicalPublicCoseKey::ed25519(signing_key(secret).verifying_key().to_bytes())
             .expect("the fixture instance key is a valid Ed25519 public key")
     }
 
-    fn head_options(effective_from: u64, valid_through: u64) -> HeadOptions {
+    pub(crate) fn head_options(effective_from: u64, valid_through: u64) -> HeadOptions {
         HeadOptions {
             effective_from: Some(effective_from),
             valid_through: Some(valid_through),
@@ -183,7 +183,15 @@ mod fixtures {
     ///
     /// Deterministisch: feste Geheimnisse, feste Marken, feste Fenster. Zwei
     /// Aufrufe liefern dieselbe Linie und denselben Bindungshash.
-    fn build_line() -> (RegistryLineBuilder, ObjectHash, ObjectHash) {
+    pub(crate) fn build_line() -> (RegistryLineBuilder, ObjectHash, ObjectHash) {
+        build_line_for(CertificateKindV1::Writer, OperatorRoleV1::Writer, 0x61)
+    }
+
+    pub(crate) fn build_line_for(
+        kind: CertificateKindV1,
+        role: OperatorRoleV1,
+        device_marker: u8,
+    ) -> (RegistryLineBuilder, ObjectHash, ObjectHash) {
         let mut line = RegistryLineBuilder::new();
         line.push(
             ActionSpec::Policy {
@@ -193,20 +201,25 @@ mod fixtures {
             },
             head_options(1, 10),
         );
-        let writer = line.push(
-            ActionSpec::Device {
-                kind: CertificateKindV1::Writer,
-                marker: 0x61,
+        let certificate_action = if kind == CertificateKindV1::OrganizationAdmin {
+            ActionSpec::AdminIssue {
+                marker: BINDING_MARKER,
                 effective_from: None,
-            },
-            head_options(11, 20),
-        );
+            }
+        } else {
+            ActionSpec::Device {
+                kind,
+                marker: device_marker,
+                effective_from: None,
+            }
+        };
+        let writer = line.push(certificate_action, head_options(11, 20));
         let binding = line.push(
             ActionSpec::OperatorBinding {
                 certificate_hash: writer
                     .direct_object_hash
                     .expect("the fixture Writer certificate is a direct target"),
-                role: OperatorRoleV1::Writer,
+                role,
                 marker: BINDING_MARKER,
                 effective_from: None,
             },
@@ -283,14 +296,22 @@ mod fixtures {
     /// Herausgezogen und nicht abgeschrieben: eine zweite Kopie des
     /// Auswahlpfads koennte still von diesem abweichen, und dann pruefte die
     /// Randlinie eine andere Auswahl als die Standardfixture.
-    fn select_head_of(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead {
+    pub(crate) fn select_head_of(line: &RegistryLineBuilder, now_ms: i64) -> SelectedRegistryHead {
+        select_head_at_sequence(line, now_ms, PROPOSED_SEQUENCE)
+    }
+
+    pub(crate) fn select_head_at_sequence(
+        line: &RegistryLineBuilder,
+        now_ms: i64,
+        proposed_sequence: u64,
+    ) -> SelectedRegistryHead {
         let head_index = line.heads().len() - 1;
         let head = line.heads()[head_index];
         let key = support::state_key();
         let trusted_time = TrustedTimeState::initial(UnixMillis::new(now_ms));
         let trust = line.verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
         let candidate =
-            verify_registry_candidate(&trust, ChainSequence::new(PROPOSED_SEQUENCE)).unwrap();
+            verify_registry_candidate(&trust, ChainSequence::new(proposed_sequence)).unwrap();
         let mut store = ModelStore {
             key,
             revision: 17,
@@ -690,17 +711,23 @@ fn an_os_lock_event_invalidates_the_proof() {
 /// ablaeuft. Die spaetere Zeit entsteht wieder als `PreexistingEffectiveNow`
 /// eines gewaehlten Head und nicht als frei gebauter Wert.
 #[test]
-fn a_proof_expires_after_the_five_minute_inactivity_default() {
+fn a_proof_expires_at_exactly_five_minutes() {
     let head = fixtures::selected_registry_head();
     let auth = FakeAuthenticator::new(fixtures::binding(&head));
     let proof = auth
         .reauthenticate(fixtures::valid_account(), ReauthPurpose::Finalize)
         .unwrap();
 
-    let inside = fixtures::selected_registry_head_at(fixtures::FIXTURE_NOW_MS + 299_000);
+    let inside = fixtures::selected_registry_head_at(fixtures::FIXTURE_NOW_MS + 299_999);
     assert!(proof.is_valid_for(ReauthPurpose::Finalize, inside.preexisting_effective_now()));
 
-    let outside = fixtures::selected_registry_head_at(fixtures::FIXTURE_NOW_MS + 301_000);
+    let boundary = fixtures::selected_registry_head_at(fixtures::FIXTURE_NOW_MS + 300_000);
+    assert!(!proof.is_valid_for(
+        ReauthPurpose::Finalize,
+        boundary.preexisting_effective_now()
+    ));
+
+    let outside = fixtures::selected_registry_head_at(fixtures::FIXTURE_NOW_MS + 300_001);
     assert!(!proof.is_valid_for(ReauthPurpose::Finalize, outside.preexisting_effective_now()));
 }
 
