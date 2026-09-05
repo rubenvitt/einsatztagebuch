@@ -547,6 +547,26 @@ pub struct FixtureKeyProvider {
 }
 
 impl FixtureKeyProvider {
+    /// The key named by the fixture builder's ordinary device certificate.
+    #[must_use]
+    pub const fn device() -> Self {
+        Self {
+            secret: trust_support::device_signing_secret(),
+            claimed_thumbprint: None,
+            signatures: AtomicUsize::new(0),
+        }
+    }
+
+    /// The key named by the fixture's second bootstrap Admin certificate.
+    #[must_use]
+    pub const fn second_admin() -> Self {
+        Self {
+            secret: trust_support::second_admin_signing_secret(),
+            claimed_thumbprint: None,
+            signatures: AtomicUsize::new(0),
+        }
+    }
+
     /// Der Provider, der den Wurzelschluessel DIESER Linie haelt.
     #[must_use]
     pub const fn root() -> Self {
@@ -742,8 +762,24 @@ impl AuditHarness {
         signer_certificate_object_hash: ObjectHash,
         failures: usize,
     ) -> Self {
+        Self::with_provider(
+            head,
+            signer_certificate_object_hash,
+            failures,
+            FixtureKeyProvider::root(),
+        )
+    }
+
+    /// Compose the audit signer explicitly so certificate attribution is testable.
+    #[must_use]
+    pub fn with_provider(
+        head: &SelectedRegistryHead,
+        signer_certificate_object_hash: ObjectHash,
+        failures: usize,
+        provider: FixtureKeyProvider,
+    ) -> Self {
         let repository = Arc::new(InMemoryAuditRepository::new(failures));
-        let provider = Arc::new(FixtureKeyProvider::root());
+        let provider = Arc::new(provider);
         let handle = provider.handle();
         let service = SignedLocalAuditService::new(
             Arc::clone(&repository) as Arc<dyn LocalAuditRepository>,

@@ -3,7 +3,10 @@ mod lifecycle;
 mod support;
 
 use ea_admin::RevokedOperatorBinding;
-use ea_admin::{OperatorBindingService, OperatorLifecycleError};
+use ea_admin::{
+    OperatorBindingService, OperatorLifecycleError, OperatorMutationPorts,
+    ProvisionOperatorRequest, RevokeOperatorRequest, RootCeremonyService,
+};
 use ea_draft::OperatorProfileRepository;
 use ea_format::{
     DecodedTrustPayloadV1, OperatorRoleV1, ParsedArchiveObject, RegistryChangeV1,
@@ -11,7 +14,467 @@ use ea_format::{
 };
 use ea_local_store::StoreValue;
 use lifecycle::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+#[test]
+fn lost_writer_key_is_revoked_and_replaced_at_next_entry_50_inside_lease_100() {
+    let mut h = Harness::new();
+    let admin = RecoveryAdmin::enroll(&mut h.line);
+    let head = support::selected_head_at(&h.line, 3, 50);
+    assert_eq!(head.proposed_sequence().get(), 50);
+    assert_eq!(head.valid_through_sequence().get(), 100);
+    let old = h.binding;
+    let original = OperatorProfileRepository::new(h.database.clone())
+        .load()
+        .unwrap()
+        .unwrap();
+    h.account.secret = None;
+    let lost_authenticator = h.authenticator(&head);
+    assert_eq!(
+        OperatorBindingService::new(&head, h.audit(&head, 0).service())
+            .verify_session(h.login(&lost_authenticator))
+            .err()
+            .unwrap()
+            .code(),
+        "EA-OPERATOR-INSTANCE-KEY-MISSING"
+    );
+
+    let mut authorization = h.authorization();
+    let provider = support::FixtureKeyProvider::root();
+    let table = Arc::new(Mutex::new(support::ReplayTable::default()));
+    let mut store = support::PersistentStore::open(&table);
+    let audit = admin.audit(&head);
+    let ceremony = RootCeremonyService::new(
+        &head,
+        &provider,
+        provider.handle(),
+        ea_types::CertificateHash::from(head.root_certificate_object_hash()),
+        audit.service(),
+        admin.binding,
+    );
+    let admin_authenticator = admin.authenticator(&head);
+    let revocation = OperatorBindingService::new(&head, audit.service())
+        .revoke(
+            RevokeOperatorRequest {
+                binding_object_hash: old,
+                window: window(50, 100),
+            },
+            &mut OperatorMutationPorts {
+                authorization: &mut authorization,
+                ceremony: &ceremony,
+                store: &mut store,
+            },
+            admin.login(&admin_authenticator),
+        )
+        .unwrap();
+    let revoke_event = registry_fields(revocation.registry_bytes());
+    assert_eq!(revoke_event.effective_from_sequence.get(), 50);
+    assert!(
+        matches!(revoke_event.change,RegistryChangeV1::Target{target_kind:1,object_hash} if object_hash==old)
+    );
+    let revoked = selected(&authorization.line, revocation.registry_bytes(), 50);
+    let evidence =
+        RevokedOperatorBinding::verify(&head, &revoked, revocation.registry_bytes(), old).unwrap();
+    let booked = audit.booked();
+    let row = ea_format::decode_local_audit_event(booked.last().unwrap()).unwrap();
+    let ea_format::LocalAuditActionV1::Revocation(context) = row.action() else {
+        panic!()
+    };
+    assert_eq!(context.effective_from_sequence().get(), 50);
+    assert!(context.old_binding_object_hash() == Some(old));
+    assert!(context.new_binding_object_hash().is_none());
+
+    let native = Native::new();
+    *native.account.borrow_mut() = h.account.clone();
+    let audit = admin.audit(&revoked);
+    let ceremony = RootCeremonyService::new(
+        &revoked,
+        &provider,
+        provider.handle(),
+        ea_types::CertificateHash::from(revoked.root_certificate_object_hash()),
+        audit.service(),
+        admin.binding,
+    );
+    let admin_authenticator = admin.authenticator(&revoked);
+    let request = ProvisionOperatorRequest {
+        database: &h.database,
+        device_certificate_hash: h.certificate,
+        role: OperatorRoleV1::Writer,
+        window: window(50, 100),
+        replacement: Some(&evidence),
+    };
+    let mut identity = Identity::valid();
+    identity.fail = true;
+    assert_eq!(
+        OperatorBindingService::new(&revoked, audit.service())
+            .provision(
+                request,
+                &native,
+                &identity,
+                &mut OperatorMutationPorts {
+                    authorization: &mut authorization,
+                    ceremony: &ceremony,
+                    store: &mut store
+                },
+                admin.login(&admin_authenticator)
+            )
+            .err()
+            .unwrap()
+            .code(),
+        "EA-OPERATOR-IDENTITY-VERIFICATION"
+    );
+    assert!(native.account.borrow().secret.is_none());
+    let replacement = OperatorBindingService::new(&revoked, audit.service())
+        .provision(
+            ProvisionOperatorRequest {
+                database: &h.database,
+                device_certificate_hash: h.certificate,
+                role: OperatorRoleV1::Writer,
+                window: window(50, 100),
+                replacement: Some(&evidence),
+            },
+            &native,
+            &Identity::valid(),
+            &mut OperatorMutationPorts {
+                authorization: &mut authorization,
+                ceremony: &ceremony,
+                store: &mut store,
+            },
+            admin.login(&admin_authenticator),
+        )
+        .unwrap();
+    assert_eq!(
+        registry_fields(replacement.activation_bytes())
+            .effective_from_sequence
+            .get(),
+        50
+    );
+    let active = selected(&authorization.line, replacement.activation_bytes(), 50);
+    assert_eq!(active.proposed_sequence().get(), 50);
+    assert!(active.active_operator_binding_fields(old).is_none());
+    let fields = active
+        .active_operator_binding_fields(replacement.binding_object_hash())
+        .unwrap();
+    assert_eq!(fields.effective_from_sequence.get(), 50);
+    assert!(
+        fields.operator_instance_key_thumbprint
+            != head
+                .active_operator_binding_fields(old)
+                .unwrap()
+                .operator_instance_key_thumbprint
+    );
+    let booked = audit.booked();
+    let row = ea_format::decode_local_audit_event(booked.last().unwrap()).unwrap();
+    let ea_format::LocalAuditActionV1::BindingChange(context) = row.action() else {
+        panic!()
+    };
+    assert_eq!(context.effective_from_sequence().get(), 50);
+    assert!(context.old_binding_object_hash() == Some(old));
+    assert!(context.new_binding_object_hash() == Some(replacement.binding_object_hash()));
+    let authenticator = native.authenticator(&active, replacement.binding_object_hash());
+    let audit = h.audit(&active, 0);
+    let mut login = native.login(
+        &h.database,
+        &authenticator,
+        replacement.binding_object_hash(),
+        h.certificate,
+    );
+    login.purpose = ea_operator::ReauthPurpose::Finalize;
+    let usable = OperatorBindingService::new(&active, audit.service())
+        .verify_session(login)
+        .unwrap();
+    assert!(usable.proof().binding_object_hash() == replacement.binding_object_hash());
+    assert!(usable.profile().operator_binding_object_hash() == replacement.binding_object_hash());
+    assert!(usable.profile().operator_subject_id() == original.operator_subject_id());
+    assert_ne!(
+        usable.profile().profile_commitment_salt(),
+        original.profile_commitment_salt()
+    );
+    assert!(usable.proof().is_valid_for(
+        ea_operator::ReauthPurpose::Finalize,
+        active.preexisting_effective_now()
+    ));
+}
+
+#[test]
+fn lifecycle_windows_reject_past_proposals_reversed_windows_and_registry_gaps() {
+    let h = Harness::new();
+    let head = h.head();
+    let provider = support::FixtureKeyProvider::root();
+    for (effective, through, not_after) in [
+        (49, 100, 10_000_000),
+        (20, 100, 10_000_000),
+        (50, 49, 10_000_000),
+        (102, 200, 10_000_000),
+        (50, 100, 1000),
+    ] {
+        let audit = h.audit(&head, 0);
+        let ceremony = RootCeremonyService::new(
+            &head,
+            &provider,
+            provider.handle(),
+            ea_types::CertificateHash::from(head.root_certificate_object_hash()),
+            audit.service(),
+            h.binding,
+        );
+        let authenticator = h.authenticator(&head);
+        let mut authorization = h.authorization();
+        let table = Arc::new(Mutex::new(support::ReplayTable::default()));
+        let mut store = support::PersistentStore::open(&table);
+        let mut ports = OperatorMutationPorts {
+            authorization: &mut authorization,
+            ceremony: &ceremony,
+            store: &mut store,
+        };
+        let mut requested = window(effective, through);
+        requested.not_after = ea_types::UnixMillis::new(not_after);
+        let service = OperatorBindingService::new(&head, audit.service());
+        assert_eq!(
+            service
+                .revoke(
+                    RevokeOperatorRequest {
+                        binding_object_hash: h.binding,
+                        window: requested
+                    },
+                    &mut ports,
+                    h.login(&authenticator)
+                )
+                .err()
+                .unwrap()
+                .code(),
+            "EA-OPERATOR-REGISTRY-WINDOW"
+        );
+        let target = database("invalid-window");
+        let native = Native::new();
+        assert_eq!(
+            service
+                .provision(
+                    ProvisionOperatorRequest {
+                        database: &target.database,
+                        device_certificate_hash: h.certificate,
+                        role: OperatorRoleV1::Writer,
+                        window: requested,
+                        replacement: None
+                    },
+                    &native,
+                    &Identity::valid(),
+                    &mut ports,
+                    h.login(&authenticator)
+                )
+                .err()
+                .unwrap()
+                .code(),
+            "EA-OPERATOR-REGISTRY-WINDOW"
+        );
+        assert!(native.account.borrow().secret.is_none());
+        assert!(
+            OperatorProfileRepository::new(target.database.clone())
+                .load()
+                .unwrap()
+                .is_none()
+        );
+        assert!(authorization.authorizations.is_empty());
+        assert!(authorization.staged.is_empty());
+    }
+}
+
+#[test]
+fn deliberate_future_revocation_is_preserved_inside_the_lease_and_at_its_next_boundary() {
+    let h = Harness::new();
+    let head = h.head();
+    let provider = support::FixtureKeyProvider::root();
+    for effective in [75, 101] {
+        let audit = h.audit(&head, 0);
+        let authenticator = h.authenticator(&head);
+        let mut authorization = h.authorization();
+        let ceremony = RootCeremonyService::new(
+            &head,
+            &provider,
+            provider.handle(),
+            ea_types::CertificateHash::from(head.root_certificate_object_hash()),
+            audit.service(),
+            h.binding,
+        );
+        let table = Arc::new(Mutex::new(support::ReplayTable::default()));
+        let mut store = support::PersistentStore::open(&table);
+        let prepared = OperatorBindingService::new(&head, audit.service())
+            .revoke(
+                RevokeOperatorRequest {
+                    binding_object_hash: h.binding,
+                    window: window(effective, 150),
+                },
+                &mut OperatorMutationPorts {
+                    authorization: &mut authorization,
+                    ceremony: &ceremony,
+                    store: &mut store,
+                },
+                h.login(&authenticator),
+            )
+            .unwrap();
+        assert_eq!(
+            registry_fields(prepared.registry_bytes())
+                .effective_from_sequence
+                .get(),
+            effective
+        );
+        let before = support::selected_head_at(&h.line, 2, effective - 1);
+        assert!(before.active_operator_binding_fields(h.binding).is_some());
+        let after = selected(&authorization.line, prepared.registry_bytes(), effective);
+        assert!(after.active_operator_binding_fields(h.binding).is_none());
+        assert!(
+            RevokedOperatorBinding::verify(&head, &after, prepared.registry_bytes(), h.binding)
+                .is_ok()
+        );
+    }
+}
+
+#[test]
+fn replacement_survives_an_intervening_authenticated_head() {
+    for reconstruct_evidence in [false, true] {
+        let mut fixture = RevokedEnrollment::new();
+        let later = fixture.advance();
+        assert_eq!(
+            later.registry_version().get(),
+            fixture.revoked.registry_version().get() + 1
+        );
+        assert!(later.registry_head_hash() != fixture.revoked.registry_head_hash());
+        let original = OperatorProfileRepository::new(fixture.target.database.clone())
+            .load()
+            .unwrap()
+            .unwrap();
+        fixture.native.account.borrow_mut().secret = None;
+        let reconstructed = reconstruct_evidence
+            .then(|| RevokedOperatorBinding::resolve(&later, fixture.binding).unwrap());
+        let evidence = reconstructed.as_ref().unwrap_or(&fixture.evidence);
+        let prepared = fixture
+            .harness
+            .provision_at(
+                &later,
+                fixture.harness.audit(&later, 0).service(),
+                &fixture.target.database,
+                &fixture.native,
+                &Identity::valid(),
+                &mut fixture.authorization,
+                Some(evidence),
+            )
+            .unwrap();
+        let active = fixture.authorization.activate(&prepared);
+        assert!(
+            active
+                .active_operator_binding_fields(fixture.binding)
+                .is_none()
+        );
+        let authenticator = fixture
+            .native
+            .authenticator(&active, prepared.binding_object_hash());
+        let audit = fixture.harness.audit(&active, 0);
+        let verified = OperatorBindingService::new(&active, audit.service())
+            .verify_session(fixture.native.login(
+                &fixture.target.database,
+                &authenticator,
+                prepared.binding_object_hash(),
+                fixture.harness.certificate,
+            ))
+            .unwrap();
+        assert!(verified.profile().operator_subject_id() == original.operator_subject_id());
+        assert_ne!(
+            verified.profile().profile_commitment_salt(),
+            original.profile_commitment_salt()
+        );
+    }
+}
+
+#[test]
+fn replacement_evidence_rejects_stale_absent_pending_and_unrelated_chain_heads() {
+    let mut fixture = RevokedEnrollment::new();
+    let initial = fixture.harness.head();
+    let pending = selected(
+        &fixture.authorization.line,
+        fixture
+            .harness
+            .line
+            .exact_object_bytes(initial.registry_head_hash()),
+        50,
+    );
+    let other_chain = selected_on_chain(
+        &fixture.authorization.line,
+        fixture.revocation.registry_bytes(),
+        201,
+        ea_types::ChainId::try_from(&[0x99; 16][..]).unwrap(),
+    );
+    assert!(other_chain.chain_id() != fixture.revoked.chain_id());
+    assert!(other_chain.registry_head_hash() == fixture.revoked.registry_head_hash());
+    assert!(
+        other_chain
+            .revoked_operator_binding_fields(fixture.binding)
+            .is_some()
+    );
+    assert!(
+        RevokedOperatorBinding::verify(
+            &fixture.active,
+            &other_chain,
+            fixture.revocation.registry_bytes(),
+            fixture.binding
+        )
+        .is_err()
+    );
+    for head in [&initial, &pending, &fixture.active] {
+        assert_eq!(
+            RevokedOperatorBinding::resolve(head, fixture.binding)
+                .err()
+                .unwrap()
+                .code(),
+            "EA-OPERATOR-REPLACEMENT-REQUIRES-REVOCATION"
+        );
+    }
+    assert!(
+        RevokedOperatorBinding::resolve(
+            &fixture.revoked,
+            ea_types::ObjectHash::from(ea_types::Hash32::ZERO)
+        )
+        .is_err()
+    );
+    let counts = (
+        fixture.authorization.authorizations.len(),
+        fixture.authorization.staged.len(),
+    );
+    let secret = fixture.native.account.borrow().secret;
+    for head in [&initial, &pending, &fixture.active, &other_chain] {
+        assert_eq!(
+            fixture
+                .harness
+                .provision_at(
+                    head,
+                    fixture.harness.audit(head, 0).service(),
+                    &fixture.target.database,
+                    &fixture.native,
+                    &Identity::valid(),
+                    &mut fixture.authorization,
+                    Some(&fixture.evidence)
+                )
+                .err()
+                .unwrap()
+                .code(),
+            "EA-OPERATOR-REPLACEMENT-REQUIRES-REVOCATION"
+        );
+        assert!(
+            OperatorProfileRepository::new(fixture.target.database.clone())
+                .load()
+                .unwrap()
+                .unwrap()
+                .operator_binding_object_hash()
+                == fixture.binding
+        );
+        assert_eq!(fixture.native.account.borrow().secret, secret);
+        assert_eq!(
+            (
+                fixture.authorization.authorizations.len(),
+                fixture.authorization.staged.len()
+            ),
+            counts
+        );
+    }
+}
 
 #[test]
 fn each_login_rechecks_account_instance_device_role_and_native_presence() {
@@ -147,6 +610,7 @@ fn lifecycle_audit_failure_withholds_provisioned_bytes_and_encrypted_profile() {
         .code(),
         "EA-OPERATOR-AUDIT-FAILED"
     );
+    assert!(auth.staged.is_empty());
     assert!(
         OperatorProfileRepository::new(target.database.clone())
             .load()

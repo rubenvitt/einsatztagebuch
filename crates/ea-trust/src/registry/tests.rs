@@ -629,6 +629,128 @@ fn selected_binding_view_rechecks_private_role_correlation() {
 }
 
 #[test]
+fn selected_revoked_binding_view_requires_activation_and_own_effective_revocation() {
+    let select = |line: &RegistryLineBuilder, index: usize, sequence: u64| {
+        let key = support::state_key();
+        let time = persisted_time(900, 850, 0xa1);
+        let trust =
+            line.verified_with_record(Pin::Head(index), INITIAL_REVISION, time.clone(), key);
+        let candidate = verify_registry_candidate(&trust, ChainSequence::new(sequence)).unwrap();
+        let mut store = TestStore::new(key, time, Some(pin(line.heads()[index])), 53);
+        let local = prepare_local_time(&mut store, &candidate, UnixMillis::new(900), &[]).unwrap();
+        let RegistrySelectionOutcome::Selected(head) =
+            select_registry_head(candidate, local, None).unwrap()
+        else {
+            panic!()
+        };
+        head
+    };
+    let mut line = RegistryLineBuilder::new();
+    line.push(
+        policy(),
+        HeadOptions {
+            effective_from: Some(1),
+            valid_through: Some(10),
+            ..HeadOptions::default()
+        },
+    );
+    let certificate = line
+        .push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::Reader,
+                marker: 0x63,
+                effective_from: None,
+            },
+            HeadOptions {
+                effective_from: Some(11),
+                valid_through: Some(20),
+                ..HeadOptions::default()
+            },
+        )
+        .direct_object_hash
+        .unwrap();
+    let binding = line
+        .push(
+            ActionSpec::OperatorBinding {
+                certificate_hash: certificate,
+                role: OperatorRoleV1::Reader,
+                marker: 0x71,
+                effective_from: None,
+            },
+            HeadOptions {
+                effective_from: Some(21),
+                valid_through: Some(100),
+                ..HeadOptions::default()
+            },
+        )
+        .direct_object_hash
+        .unwrap();
+    let pending = select(&line, 1, 15);
+    assert!(pending.active_operator_binding_fields(binding).is_none());
+    assert!(pending.revoked_operator_binding_fields(binding).is_none());
+    let active = select(&line, 2, 49);
+    assert!(active.active_operator_binding_fields(binding).is_some());
+    assert!(active.revoked_operator_binding_fields(binding).is_none());
+    assert!(
+        active
+            .revoked_operator_binding_fields(ObjectHash::from(support::hash32(0xee)))
+            .is_none()
+    );
+
+    let mut certificate_only = line.clone();
+    certificate_only.push(
+        ActionSpec::Revoke {
+            target_kind: 0,
+            object_hash: certificate,
+        },
+        HeadOptions {
+            effective_from: Some(50),
+            valid_through: Some(100),
+            ..HeadOptions::default()
+        },
+    );
+    let inactive = select(&certificate_only, 3, 50);
+    assert!(inactive.active_operator_binding_fields(binding).is_none());
+    assert!(inactive.revoked_operator_binding_fields(binding).is_none());
+
+    line.push(
+        ActionSpec::Revoke {
+            target_kind: 1,
+            object_hash: binding,
+        },
+        HeadOptions {
+            effective_from: Some(50),
+            valid_through: Some(100),
+            ..HeadOptions::default()
+        },
+    );
+    let revoked = select(&line, 3, 50);
+    let fields = revoked.revoked_operator_binding_fields(binding).unwrap();
+    let mut expected = active
+        .active_operator_binding_fields(binding)
+        .unwrap()
+        .clone();
+    expected.revoked_from_sequence = Some(ChainSequence::new(50));
+    assert!(fields == &expected);
+    assert!(revoked.active_operator_binding_fields(binding).is_none());
+
+    line.push(
+        ActionSpec::Policy {
+            policy_version: None,
+            previous_policy_hash: None,
+            effective_from: Some(50),
+        },
+        HeadOptions {
+            effective_from: Some(50),
+            valid_through: Some(100),
+            ..HeadOptions::default()
+        },
+    );
+    let later = select(&line, 4, 50);
+    assert!(later.revoked_operator_binding_fields(binding) == Some(fields));
+}
+
+#[test]
 fn consuming_proof_types_are_owned_and_not_zero_sized() {
     assert!(core::mem::needs_drop::<SelectedRegistryHead>());
     assert!(core::mem::needs_drop::<PendingFutureSuccessor>());

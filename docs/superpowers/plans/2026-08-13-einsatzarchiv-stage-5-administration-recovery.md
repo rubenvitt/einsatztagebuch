@@ -495,6 +495,20 @@ git commit -m "feat(admin): bootstrap independently anchored organizations"
   Bezeichner/Nonce gegen denselben Previous Head. Vorbereitung und aktive
   Bereitstellung sind verschiedene Zustände; Profil-/Schlüsselfehler dürfen
   keinen teilweise eingerichteten Operator freischalten.
+  Der Host muss vorbereitete öffentliche Objekte bis zur Prüfung des exakten
+  verschlüsselten Profils und nativen Schlüssels von der Veröffentlichung
+  zurückhalten; ein fehlgeschlagener Profil-Commit macht bereits signierte
+  Bytes nicht ungültig.
+- Wirksamkeit muss an der tatsächlichen nächsten Eintragssequenz möglich sein,
+  auch innerhalb eines länger gültigen Registry-Fensters. Ein verlorener
+  Writer-Schlüssel kann die Folgen bis zum Lease-Ende nicht mehr erzeugen.
+  Widerruf, Ersatz-Binding, Autorisierung und Audit müssen denselben gewählten
+  Wirksamkeitsbeginn verwenden; die lückenlose Archivfolge bleibt unverändert.
+- Ersatz muss auch nach weiteren verifizierten Registry-Änderungen möglich
+  bleiben. Maßgeblich ist der am aktuellen Kopf nachgewiesene eigene Widerruf
+  einer aktivierten Bindung samt Organisation und Kette. Bloße Abwesenheit,
+  ein nur vorbereiteter Katalogeintrag oder alleiniger Zertifikatswiderruf
+  reichen als Ersatznachweis nicht aus.
 - Das eingefrorene Login-/Reauth-Audit trägt nur einen optionalen öffentlichen
   Objekthash und den Ausgang. Technische Fehlercodes werden als geschlossene
   lokale Fehler zurückgegeben, nicht in ein erfundenes Audit-Freitextfeld
@@ -504,11 +518,15 @@ git commit -m "feat(admin): bootstrap independently anchored organizations"
 **Files:**
 - Create: `crates/ea-admin/src/operator.rs`
 - Modify: `crates/ea-operator/src/session.rs`, `account.rs`, `lib.rs`
+- Modify: `crates/ea-trust/src/registry.rs` (verified revoked-binding query)
 - Create: `crates/ea-admin/src/operator_profile.rs`
 - Modify: `crates/ea-admin/src/lib.rs`, `crates/ea-admin/Cargo.toml`, `Cargo.lock`
 - Create: `apps/cli/src/commands/operator.rs`
 - Modify: `apps/cli/src/args.rs`, `commands/mod.rs`, `output.rs`
 - Test: `crates/ea-admin/tests/operator_binding.rs`
+- Test: `crates/ea-admin/tests/operator_audit.rs`
+- Modify: lifecycle/audit fixtures in `crates/ea-admin/tests/support/` and
+  public test-key accessors in `crates/ea-trust/tests/support/mod.rs`
 - Test: `crates/ea-operator/tests/account_recreation.rs`
 - Test: `apps/cli/tests/operator.rs`
 
@@ -541,12 +559,13 @@ Run: `cargo test --locked -p ea-admin --test operator_binding && cargo test --lo
 
 Expected: FAIL because provisioning/replacement orchestration and native account-recreation evidence are absent; existing session contract checks already cover wrong accounts, missing/replaced instance keys, challenge verification, lock invalidation and expiry.
 
-- [x] **Step 3: Implement external identity-check to signed binding flow**
+- [ ] **Step 3: Implement external identity-check to signed binding flow**
 
-Implemented as the synchronous core behind explicit trusted native and external
-identity ports. Signed binding and activation objects are durably staged before
+The synchronous core behind explicit trusted native and external identity ports
+is implemented. Signed binding and activation objects are durably staged before
 the encrypted profile is committed; Registry selection activates them separately.
-Native adapter composition and native platform acceptance remain outstanding.
+This step remains open until native adapter composition, publication readiness
+and native platform acceptance are delivered; the contract tests do not close it.
 
 Generate fresh 32-byte `profileCommitmentSalt`, keep display name/function/salt only in encrypted profile, compute the exact operator-profile commitment, generate a new non-roaming installation key, derive OS account binding hash through Stage 2 provider, obtain Admin authorization with action 4, and Root-sign the fixed binding core. Verify device certificate, role, effective/revoked sequence, account hash, fresh instance challenge, profile commitment, native presence, and five-minute session expiry on every action. Revocation is Root-signed from its effective sequence. Account deletion/recreation, UID reuse, restored home/app backup, lost Secret Service collection, or missing instance key always requires external re-identification, new key/auth/binding, and revocation of old binding.
 

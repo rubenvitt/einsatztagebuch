@@ -18,7 +18,7 @@ use ea_trust::{
     SelectedRegistryHead, TrustError, TrustStateStore, VerifiedAdminAuthorizationIntent,
 };
 use ea_types::{
-    CertificateHash, ChainSequence, DeviceId, Hash32, ObjectHash, OperatorSubjectId,
+    CertificateHash, ChainId, ChainSequence, DeviceId, Hash32, ObjectHash, OperatorSubjectId,
     OrganizationId, RegistryVersion, UnixMillis,
 };
 use std::{fmt, sync::Arc};
@@ -165,6 +165,8 @@ pub trait OperatorAuthorizationPort {
     ) -> Result<AuthorizedOperatorIntent, OperatorLifecycleError>;
     /// Durably stage the exact public objects for restart/transport, without
     /// selecting a Registry head. Called only after successful audit persistence.
+    /// For provisioning, the host must confirm encrypted profile persistence and
+    /// native key readiness before publishing or selecting the staged activation.
     fn stage_signed_objects(&mut self, objects: &[&[u8]]) -> Result<(), OperatorLifecycleError>;
 }
 pub struct OperatorMutationPorts<'a> {
@@ -198,6 +200,8 @@ impl VerifiedOperatorSession {
 }
 #[derive(Clone, Copy)]
 pub struct RegistryWindow {
+    /// At or after the selected proposal, within its lease or at the next boundary.
+    pub effective_from_sequence: ChainSequence,
     pub valid_through_sequence: ChainSequence,
     pub not_after: UnixMillis,
 }
@@ -211,11 +215,29 @@ pub struct ProvisionOperatorRequest<'a> {
 pub struct RevokedOperatorBinding {
     old_hash: ObjectHash,
     old_fields: OperatorBindingFieldsV1,
-    revocation_head: ObjectHash,
+    chain_id: ChainId,
 }
 impl RevokedOperatorBinding {
-    /// Seals evidence for replacement at the directly selected revocation head.
-    /// Mere absence from a head (including a pending/unknown object) proves nothing.
+    /// Recover evidence from an activated-and-revoked binding in verified current
+    /// state. Replacement rechecks this state, including its chain and revocation.
+    pub fn resolve(
+        current: &SelectedRegistryHead,
+        old_hash: ObjectHash,
+    ) -> Result<Self, OperatorLifecycleError> {
+        let old_fields = current
+            .revoked_operator_binding_fields(old_hash)
+            .filter(|fields| {
+                fields.organization_id == current.root_certificate_fields().organization_id
+            })
+            .ok_or(OperatorLifecycleError::ReplacementRequiresRevocation)?;
+        Ok(Self {
+            old_hash,
+            old_fields: old_fields.clone(),
+            chain_id: current.chain_id(),
+        })
+    }
+
+    /// Also verifies the exact transition from an active binding to its revocation.
     pub fn verify(
         previous: &SelectedRegistryHead,
         current: &SelectedRegistryHead,
@@ -249,11 +271,13 @@ impl RevokedOperatorBinding {
         {
             return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
         }
-        Ok(Self {
-            old_hash,
-            old_fields: old_fields.clone(),
-            revocation_head: current.registry_head_hash(),
-        })
+        let evidence = Self::resolve(current, old_hash)?;
+        let mut expected = old_fields.clone();
+        expected.revoked_from_sequence = Some(fields.effective_from_sequence);
+        if evidence.old_fields != expected {
+            return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
+        }
+        Ok(evidence)
     }
 }
 pub struct RevokeOperatorRequest {
@@ -501,8 +525,12 @@ impl<'a> OperatorBindingService<'a> {
             }
             let old = operator_profile::load(request.database)?;
             if let Some(replacement) = request.replacement {
-                if replacement.revocation_head != self.head.registry_head_hash()
+                if replacement.chain_id != self.head.chain_id()
                     || replacement.old_fields.organization_id != certificate.organization_id
+                    || self
+                        .head
+                        .revoked_operator_binding_fields(replacement.old_hash)
+                        != Some(&replacement.old_fields)
                 {
                     return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
                 }
@@ -697,15 +725,12 @@ impl<'a> OperatorBindingService<'a> {
         window: RegistryWindow,
         change: RegistryChangeV1,
     ) -> Result<RegistryEventFieldsV1, OperatorLifecycleError> {
-        let effective = ChainSequence::new(
-            self.head
-                .valid_through_sequence()
-                .get()
-                .checked_add(1)
-                .ok_or(OperatorLifecycleError::RegistryWindow)?,
-        );
+        let effective = window.effective_from_sequence;
         let now = self.head.preexisting_effective_now().value();
-        if window.valid_through_sequence < effective
+        if effective < self.head.proposed_sequence()
+            || (effective > self.head.valid_through_sequence()
+                && self.head.valid_through_sequence().get().checked_add(1) != Some(effective.get()))
+            || window.valid_through_sequence < effective
             || window.not_after <= now
             || (i128::from(window.not_after.get()) - i128::from(now.get()))
                 > i128::from(self.head.policy_fields().max_registry_age_ms)

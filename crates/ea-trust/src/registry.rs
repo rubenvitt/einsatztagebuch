@@ -193,6 +193,27 @@ impl SelectedRegistryHead {
             .map(|binding| &binding.fields)
     }
 
+    /// A binding activated on this verified line whose own revocation is effective
+    /// at the proposed sequence. Catalog-only objects and certificate-only
+    /// revocations do not establish this state.
+    #[must_use]
+    pub fn revoked_operator_binding_fields(
+        &self,
+        object_hash: ObjectHash,
+    ) -> Option<&OperatorBindingFieldsV1> {
+        let fields = &self
+            .inner
+            .candidate_state
+            .admin_bindings
+            .get(&object_hash)?
+            .fields;
+        (fields.effective_from_sequence <= self.inner.proposed_sequence
+            && fields
+                .revoked_from_sequence
+                .is_some_and(|revoked| revoked <= self.inner.proposed_sequence))
+        .then_some(fields)
+    }
+
     /// `notAfter` des gebundenen Head — die Zeitgrenze, ab der er `stale` ist.
     ///
     /// Sie ist LESEND und aendert an der Auswahl nichts: `select_registry_head`
