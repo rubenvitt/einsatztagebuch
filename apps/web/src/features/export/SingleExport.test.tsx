@@ -236,7 +236,15 @@ it('clears a failed state read on the next successful poll and keeps an export r
   }
   render(<SingleExport bridge={bridge} host={hostWithSavePicker()} pollIntervalMs={POLL_MS} />)
 
-  expect(await screen.findByText('EA-READER-BLOB-HOST')).toBeInTheDocument()
+  // NUR `findByText`, ohne `expect(...).toBeInTheDocument()` darum: die Meldung
+  // ist per Bauart fluechtig — der naechste erfolgreiche Poll raeumt sie weg.
+  // GEMESSEN auf der CI (Lauf 33961562088 und 33972838668, beide Male genau
+  // hier): `findByText` loest mit dem Knoten auf, der Poll entfernt ihn, und
+  // erst DANN laeuft die Zusicherung — `element could not be found in the
+  // document`. Das Aufloesen SELBST ist der Beleg, dass die Meldung stand;
+  // eine zweite Zusicherung auf denselben Knoten fuegt nichts hinzu ausser dem
+  // Wettlauf.
+  await screen.findByText('EA-READER-BLOB-HOST')
   await waitFor(() => {
     expect(screen.queryByText('EA-READER-BLOB-HOST')).not.toBeInTheDocument()
   })
@@ -246,13 +254,17 @@ it('clears a failed state read on the next successful poll and keeps an export r
   await user.click(screen.getByRole('button', { name: 'Ziel wählen' }))
   await screen.findByText('Ziel: Datei')
   await user.click(exportButton())
-  const refusal = await screen.findByText('EA-READER-EXPORT-TARGET-OCCUPIED')
-  // Mehrere Polls spaeter steht die Weigerung noch.
+  await screen.findByText('EA-READER-EXPORT-TARGET-OCCUPIED')
+  // Mehrere Polls spaeter steht die Weigerung noch. NEU ABGEFRAGT und nicht
+  // ueber den festgehaltenen Knoten: die Aussage ist „die Weigerung steht
+  // weiterhin", nicht „React hat denselben Knoten wiederverwendet". Ein
+  // Re-Render, der den Knoten ersetzte, waere derselbe Fehlschlag wie oben,
+  // ohne dass die Flaeche etwas falsch gemacht haette.
   const readsAtRefusal = stateAt.mock.calls.length
   await waitFor(() => {
     expect(stateAt.mock.calls.length).toBeGreaterThan(readsAtRefusal + 2)
   })
-  expect(refusal).toBeInTheDocument()
+  expect(screen.getByText('EA-READER-EXPORT-TARGET-OCCUPIED')).toBeInTheDocument()
 })
 
 /**
