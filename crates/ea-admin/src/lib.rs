@@ -57,8 +57,13 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod anchor_media;
 mod error;
 mod root_ceremony;
 
+pub use anchor_media::{
+    AnchorMedia, AnchorMediumId, MediaConfirmation, SecondChannelConfirmation, confirm_on_media,
+    confirm_pre_anchor_fingerprint, verify_anchor_transition,
+};
 pub use error::AdminError;
 pub use root_ceremony::RootCeremonyService;

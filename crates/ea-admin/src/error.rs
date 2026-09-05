@@ -24,6 +24,28 @@ use ea_trust::TrustError;
 /// Zeremonie — und ist im ganzen Baum frei
 /// (`grep -o '"EA-[A-Z0-9]*-' crates apps` kennt 45 Familien, diese nicht).
 ///
+/// # Warum `EA-ANCHOR-` eine EIGENE Familie ist und kein `EA-TRUST-ANCHOR-`
+///
+/// `EA-TRUST-ANCHOR-{SHAPE,HASH,PIN}` (`crates/ea-trust/src/error.rs:35-37`)
+/// sind Aussagen ueber Bytes, die man BEREITS HAELT: hat dieses Feld die Form
+/// aus `:1737-1748`, ist es in sich stimmig, gehoert der Schluessel zu seinem
+/// Abdruck. Alle drei fallen beim Dekodieren.
+///
+/// `EA-ANCHOR-PRE-FIELD-CHANGED` faellt in einem anderen Moment und ueber einen
+/// anderen Gegenstand: waehrend die Zeremonie GEBAUT wird, und ueber das
+/// VERHAELTNIS zweier Anker — ein finaler Anker setzt eine ANDERE Vorstufe
+/// fort als die, die auf den Medien bestaetigt wurde.
+/// [`ea_trust::decode_trust_anchor`] kann das strukturell nicht sehen; es
+/// rechnet die Vorstufe aus den eigenen Feldern des finalen Ankers nach
+/// (`crates/ea-trust/src/anchor.rs:665-676`) und findet an einer
+/// nachtraeglich durchgaengig korrigierten Zeremonie nichts. Anderer Zeitpunkt,
+/// anderes Objekt, andere Familie. Das Praefix ist im Baum sonst nirgends
+/// vergeben (`grep -ro '"EA-ANCHOR-[A-Z-]*"' crates apps`).
+///
+/// Die Medien- und Kanalarme bleiben dagegen `EA-CEREMONY-`: sie melden, dass
+/// ein SCHRITT der Zeremonie nicht stattgefunden hat, und das ist genau der
+/// Gegenstand dieser Crate.
+///
 /// Die durchgereichten Arme behalten den Code ihrer Herkunft. Insbesondere ist
 /// die Wiedereinspielung einer Administrationsautorisierung weiterhin
 /// [`TrustError::AuthReplay`] mit `EA-TRUST-AUTH-REPLAY`: die Zusage gehoert
@@ -69,6 +91,35 @@ pub enum AdminError {
     /// Die Auditzeile konnte nicht gebucht werden — die Zielbytes bleiben
     /// zurueck.
     AuditFailed,
+    /// Der finale Anker setzt eine ANDERE Vorstufe fort als die, die in
+    /// Schritt 4 auf den Medien bestaetigt wurde.
+    ///
+    /// Die Spezifikation ist an dieser Stelle normativ: „Jede Aenderung eines
+    /// bereits in Schritt 4 festgeschriebenen Feldes bricht das Setup ab und
+    /// beginnt mit neuen Organisations-/Ketten-IDs"
+    /// (`docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md:1349`).
+    /// Dieser Arm IST dieser Abbruch.
+    AnchorPreFieldChanged,
+    /// Weniger als zwei UNTERSCHIEDLICHE Medien.
+    ///
+    /// `:1780` verlangt „mindestens zwei schreibgeschuetzte Recovery-Medien".
+    /// Zwei Kennungen fuer dasselbe Medium sind ein Medium; ein Bestand, der
+    /// mit einem Datentraeger untergeht, ist kein Bestand.
+    MediaQuorumMissing,
+    /// Ein Medium liest andere Bytes zurueck, als auf es geschrieben wurden.
+    ///
+    /// Festgeschrieben ist nur, was NACH dem Schreiben bytegleich wieder
+    /// herauskommt.
+    MediaReadbackMismatch,
+    /// Ein Medium hat auf Schreiben oder Lesen nicht geantwortet.
+    MediaUnavailable,
+    /// Der ueber den ZWEITEN Kanal zurueckgemeldete Fingerprint ist nicht der,
+    /// den diese Maschine ueber diese Bytes rechnet.
+    ///
+    /// Deckt beide Haelften desselben Befundes: die Rueckmeldung wich schon
+    /// beim Abgleich ab, ODER eine Bestaetigung wird fuer ANDERE Bytes
+    /// vorgelegt als die, ueber die sie ausgestellt wurde.
+    SecondChannelMismatch,
     /// Ein Befund der Vertrauensschicht, unveraendert durchgereicht.
     Trust(TrustError),
     /// Ein Befund der Kryptografieschicht, unveraendert durchgereicht.
@@ -93,6 +144,11 @@ impl AdminError {
             Self::RootCertificateMismatch => "EA-CEREMONY-ROOT-CERTIFICATE-MISMATCH",
             Self::RootSignatureMismatch => "EA-CEREMONY-ROOT-SIGNATURE-MISMATCH",
             Self::AuditFailed => "EA-CEREMONY-AUDIT-FAILED",
+            Self::AnchorPreFieldChanged => "EA-ANCHOR-PRE-FIELD-CHANGED",
+            Self::MediaQuorumMissing => "EA-CEREMONY-MEDIA-QUORUM-MISSING",
+            Self::MediaReadbackMismatch => "EA-CEREMONY-MEDIA-READBACK-MISMATCH",
+            Self::MediaUnavailable => "EA-CEREMONY-MEDIA-UNAVAILABLE",
+            Self::SecondChannelMismatch => "EA-CEREMONY-SECOND-CHANNEL-MISMATCH",
             Self::Trust(error) => error.code(),
             Self::Crypto(error) => error.code(),
             Self::Key(error) => error.code(),
