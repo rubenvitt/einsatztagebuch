@@ -22,7 +22,7 @@
 //!
 //! Schritt 5 steht VOR dem Anlegen des Ziels und HINTER seiner Pruefung. Das
 //! ist kein Zufall: ein Aufruf gegen ein belegtes Ziel ist ein AUFRUFFEHLER
-//! und traegt nach `design.md`:1783-1795 den kleineren Code 2, waehrend ein
+//! und traegt nach `design.md`:1802-1815 den kleineren Code 2, waehrend ein
 //! Lauf ohne eigenen Grant ein Verzeichnis hinterliesse, das beim naechsten
 //! Versuch selbst als belegt gaelte.
 //!
@@ -162,7 +162,7 @@ pub fn decrypt_directory(
 
     // 4 — die Zielpruefung, OHNE anzulegen. Sie steht vor Schritt 5, damit der
     // kleinere Aufrufcode 2 den groesseren Schluesselcode 14 ueberstimmt, so
-    // wie `design.md`:1795 es verlangt.
+    // wie `design.md`:1815 es verlangt.
     output_directory_is_free(output)?;
 
     // 5 — ohne eigenen Grant gibt es nichts zu schreiben, und ein leeres Ziel

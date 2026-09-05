@@ -1,4 +1,4 @@
-//! Die Exitcodetabelle aus `design.md`:1783-1795, verbatim.
+//! Die Exitcodetabelle aus `design.md`:1802-1815, verbatim.
 //!
 //! # „Der kleinste zutreffende spezifische Code"
 //!
@@ -166,7 +166,7 @@ pub const fn exit_code_for_error(error: &RecoveryError) -> ExitCode {
         // sondern ein Formatbefund, und deshalb 10 und nicht 20 — genau wie
         // die beiden Schranken des Inventars unten.
         RecoveryError::ArchiveTooLarge => ExitCode::Integrity,
-        // `design.md`:1765: „Jede Abweichung endet mit Exitcode 12."
+        // `design.md`:1782: „Jede Abweichung endet mit Exitcode 12."
         RecoveryError::TrustAnchor(_) => ExitCode::Trust,
         // Ein belegtes Ziel ist ein KONFIGURATIONSFEHLER und kein
         // Dateisystemfehler: geschrieben wurde nichts, gefunden wurde nichts,

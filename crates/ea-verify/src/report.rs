@@ -73,7 +73,7 @@ impl ObjectResultKindV1 {
 ///
 /// EIGENE DIMENSION neben [`ObjectResultKindV1`], nie hineingefaltet:
 /// `design.md` §17.4 verbietet die Vermischung, und `notServerConfirmed` ist
-/// KEIN Mangel (`design.md`:1591) — es senkt
+/// KEIN Mangel (`design.md`:1608) — es senkt
 /// [`VerificationReportV1::is_fully_verified`] nicht.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ServerConfirmationV1 {
@@ -732,7 +732,7 @@ impl VerificationReportV1 {
     /// `evidenceErrors`, `decryptionErrors` und `gaps` saemtlich leer sind.
     ///
     /// ZWEI AUSNAHMEN, die den Wert NIE senken: `notServerConfirmed` ist kein
-    /// Mangel (`design.md`:1591), und ein fehlender Empfaengerschluessel
+    /// Mangel (`design.md`:1608), und ein fehlender Empfaengerschluessel
     /// bedeutet keine versuchte Entschluesselung — beides erzeugt deshalb auch
     /// keinen Eintrag in einem der sechs Arrays.
     #[must_use]

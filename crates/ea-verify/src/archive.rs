@@ -14,7 +14,7 @@
 //! trifft.
 //!
 //! GATE `receipt` UMFASST QUITTUNG UND CHECKPOINT. `design.md` §14.1 Schritt 7
-//! (:1581) nennt „Server-Receipt und Checkpoints, sofern vorhanden"; Schritt 8
+//! (:1598) nennt „Server-Receipt und Checkpoints, sofern vorhanden"; Schritt 8
 //! ist auf Evidence-Objekte und Zeitstempel begrenzt. Die Verwechslung liegt
 //! nahe, weil beide Objektarten in `crates/ea-format/src/ecp.rs` wohnen —
 //! deshalb steht die Abgrenzung hier ausgeschrieben und nicht bloss im Kopf.
@@ -204,7 +204,7 @@ impl fmt::Debug for RecipientKeyV1<'_> {
 ///
 /// `NotRequired` ist der Standardprofilfall: ein Receipt ohne
 /// `evidence-due-at` erzeugt ohne separate Richtlinienaenderung gar keine
-/// Evidence-Grade-Konformitaet (`design.md`:1679), und wo nichts gefordert
+/// Evidence-Grade-Konformitaet (`design.md`:1699), und wo nichts gefordert
 /// ist, ist auch nichts ueberfaellig.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum EvidenceRequirementV1 {
@@ -419,7 +419,7 @@ pub fn verify_archive_observed(
     // KEINE Autorisierung, genau wie bei
     // [`claims_unverifiable_writer_transition`]. Wer den Stummel trotzdem als
     // Knoten fuehrte, liesse jeden, der ein `.eds` schreiben kann, einen
-    // Eintrag spurlos ersetzen. Also gilt `design.md`:1597: ein Stummel ohne
+    // Eintrag spurlos ersetzen. Also gilt `design.md`:1614: ein Stummel ohne
     // vollstaendige Pruefkette BLEIBT EINE LUECKE — das fehlende `.eip`
     // erscheint als `gaps`-Eintrag, `authorizedDestructions` bleibt leer, und
     // `destroyedEntryCount` zaehlt ihn weiterhin als blossen Zaehler.
@@ -434,7 +434,7 @@ pub fn verify_archive_observed(
 
     // Gate `grant-plan`: nur ueber Objekte, die Gate `chain-position`
     // ueberstanden haben. Ein Fehlschlag dort verhindert dieses Gate FUER
-    // DASSELBE OBJEKT und laesst die uebrigen unberuehrt (design.md:1585/1593)
+    // DASSELBE OBJEKT und laesst die uebrigen unberuehrt (design.md:1602/1610)
     // — und ein isoliertes Objekt bekaeme sonst einen zweiten Befund in einem
     // zweiten Array.
     protocol.enter(Gate::GrantPlan);
@@ -557,7 +557,7 @@ fn claim_own_grants(
             continue;
         }
         // FEHLENDER GRANT ist kein Befund: der Eintrag bleibt gueltig und
-        // sichtbar, er wird nur nicht geoeffnet (`design.md`:1595).
+        // sichtbar, er wird nur nicht geoeffnet (`design.md`:1612).
         let Some(grant) = own_grant(inventory, entry, recipient.key_thumbprint()) else {
             continue;
         };
@@ -619,7 +619,7 @@ fn claim_own_grants(
 /// `grant-plan` — dessen Befunde entstehen erst dort, und ein frueherer
 /// Durchlauf gaebe einem Objekt Ergebnis und Fehler zugleich.
 ///
-/// FEHLT DIE QUITTUNG, ist das KEIN Mangel (`design.md`:1591). Im Dateimodus
+/// FEHLT DIE QUITTUNG, ist das KEIN Mangel (`design.md`:1608). Im Dateimodus
 /// ist `notServerConfirmed` der Regelfall; der Eintrag bleibt `valid`, es
 /// entsteht kein Eintrag in einem der sechs Mangelfelder, und
 /// [`VerificationReportV1::is_fully_verified`] sinkt nicht. Eine Quittung, die
@@ -758,7 +758,7 @@ fn confirm_receipt(
 /// bewerten, Befunde abbilden.
 ///
 /// CHECKPOINTS GEHOEREN HIERHER UND NICHT ZU GATE `evidence`
-/// (`design.md`:1581 gegen :1583). Geprueft wird hier ausschliesslich die
+/// (`design.md`:1598 gegen :1599). Geprueft wird hier ausschliesslich die
 /// SERVERSIGNATUR des Checkpoints; die RFC-3161-Anteile bleiben Gate 8.
 ///
 /// Ein Checkpoint, der sich nicht als Serveraussage nachweisen laesst, wird

@@ -1,4 +1,4 @@
-//! Die normative Exitcodetabelle aus `design.md`:1783-1795, Zeile fuer Zeile.
+//! Die normative Exitcodetabelle aus `design.md`:1802-1815, Zeile fuer Zeile.
 //!
 //! # Warum jeder Fall SEINE ZAEHLER mitpinnt
 //!
@@ -376,7 +376,7 @@ fn an_empty_thumbprint_set_is_exactly_the_fail_closed_trust_exit() {
 /// Ein Anker, der sich nicht dekodieren laesst, ist ein TRUST-Befund (12) und
 /// ausdruecklich kein Aufruffehler (2).
 ///
-/// `design.md`:1765 laesst dazu keinen Spielraum: „Jede Abweichung endet mit
+/// `design.md`:1782 laesst dazu keinen Spielraum: „Jede Abweichung endet mit
 /// Exitcode 12."
 #[test]
 fn an_undecodable_trust_anchor_is_a_trust_error() {
@@ -412,7 +412,7 @@ fn an_undecodable_trust_anchor_is_a_trust_error() {
 /// Jede andere Zusicherung dieses Targets vergleicht Variante gegen Variante.
 /// Ohne diesen Fall liesse sich `Integrity = 10` zu `= 11` aendern, ohne dass
 /// irgendein Test des Workspace bricht — die normative Tabelle aus
-/// `design.md`:1783-1795 haette dann keinen einzigen Messpunkt.
+/// `design.md`:1802-1815 haette dann keinen einzigen Messpunkt.
 ///
 /// Zugleich der einzige Fall, der [`ExitCode::as_i32`] ueberhaupt anfasst. Das
 /// ist der Wert, der spaeter durch `process::exit` den Prozess verlaesst; er
@@ -433,7 +433,7 @@ fn every_exit_code_carries_its_normative_number() {
             ExitCode::Unsupported.as_i32(),
         ],
         [0, 2, 10, 11, 12, 13, 14, 15, 20, 21],
-        "die Exitcodes muessen exakt der Tabelle aus design.md:1783-1795 entsprechen"
+        "die Exitcodes muessen exakt der Tabelle aus design.md:1802-1815 entsprechen"
     );
 }
 
@@ -555,7 +555,7 @@ fn an_occupied_output_is_a_usage_error_and_leaves_the_file_untouched() {
 /// [`output_directory_is_free`] raet vor der Verifikation, und
 /// [`prepare_output_directory`] legt danach an. Sagte nur der zweite ab, endete
 /// ein `decrypt` auf einen verlinkten Pfad mit dem spezifischeren Code des
-/// naechsten Abbruchgrundes statt mit der 2 — `design.md`:1810 verlangt aber
+/// naechsten Abbruchgrundes statt mit der 2 — `design.md`:1815 verlangt aber
 /// den kleinsten zutreffenden spezifischen Code, und genau dafuer steht die
 /// Vorpruefung ueberhaupt.
 ///

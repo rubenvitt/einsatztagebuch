@@ -1,13 +1,13 @@
 //! Gate `recipient-grant` und die Entkapselung, die KEIN Gate ist.
 //!
-//! `design.md` §14.1 Schritt 9 (:1583): „eigenen Grant, dessen
+//! `design.md` §14.1 Schritt 9 (:1600): „eigenen Grant, dessen
 //! Aussteller-Capability, Authorization, Nutzungsfrist gemaess `effectiveNow`
 //! und `entryHash`". Danach — und ausdruecklich nicht als zehntes Gate — folgt
 //! `hpke-open`.
 //!
 //! # Drei Zustaende, die nie zusammenfallen duerfen
 //!
-//! `design.md`:1595 haelt sie auseinander, und dieses Modul auch:
+//! `design.md`:1612 haelt sie auseinander, und dieses Modul auch:
 //!
 //! - FEHLENDER GRANT: es gibt keinen Grant auf den eigenen Abdruck. Der
 //!   Eintrag bleibt `valid` und in der Kettenansicht sichtbar, er wird nicht
@@ -75,7 +75,7 @@ pub enum RecipientGrantErrorV1 {
     ///
     /// FAIL-CLOSED UND AUSDRUECKLICH KEINE PRUEFUNG, dieselbe Lage wie bei
     /// `crate::entry::claims_unverifiable_writer_transition`: ein historischer
-    /// Grant MUSS nach `design.md`:772 eine Authorization tragen, die Eintrag
+    /// Grant MUSS nach `design.md`:782 eine Authorization tragen, die Eintrag
     /// und Empfaenger exakt abdeckt, und diese Aufloesung ist von `ea-verify`
     /// aus nicht erreichbar — `ea-trust` exportiert dafuer keine Pruefung und
     /// haelt seinen Katalog `pub(crate)`. Ein solcher Grant wird deshalb NICHT
@@ -111,7 +111,7 @@ impl fmt::Display for RecipientGrantErrorV1 {
 pub enum DecryptionErrorV1 {
     /// Der umschlossene CEK liess sich mit diesem Schluessel nicht oeffnen.
     ///
-    /// Der Zustand UNBEKANNTER SCHLUESSEL aus `design.md`:1595: der Grant
+    /// Der Zustand UNBEKANNTER SCHLUESSEL aus `design.md`:1612: der Grant
     /// nennt den eigenen Abdruck, das vorgelegte Material passt aber nicht zu
     /// ihm.
     CekUnwrapFailed,
@@ -144,7 +144,7 @@ impl fmt::Display for DecryptionErrorV1 {
 /// Der eigene INITIALE Grant auf `entry`, sofern der Bestand einen enthaelt.
 ///
 /// DREI BINDUNGEN, UND SIE SIND ABGELEITET, NICHT ZITIERT. `design.md` §14.1
-/// Schritt 9 (`:1595`) nennt vier Verpflichtungen ausdruecklich — die
+/// Schritt 9 (`:1600`) nennt vier Verpflichtungen ausdruecklich — die
 /// Aussteller-Capability, die Authorization, die Nutzungsfrist gegen
 /// `effectiveNow` und den `entryHash` — und eine fuenfte steckt im Wort
 /// „eigenen": den eigenen Schluesselabdruck. DIESE Stelle traegt davon die

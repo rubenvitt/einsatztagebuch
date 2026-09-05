@@ -44,7 +44,7 @@ pub(crate) const fn restrictive_permissions_available() -> Result<(), RecoveryEr
 /// Deshalb wird hier verweigert statt abgeschwaecht.
 ///
 /// Der Zweig gilt fuer `decrypt` UND `export`. Beim Export sind die kopierten
-/// Bytes zwar verschluesselt, aber `design.md`:1779 stellt beide Kommandos in
+/// Bytes zwar verschluesselt, aber `design.md`:1796 stellt beide Kommandos in
 /// denselben Satz: sie schreiben „ausschliesslich in ein neu erzeugtes oder
 /// leeres Ziel mit restriktiven Rechten". Ein Export mit weltweit lesbaren
 /// Rechten legte ausserdem saemtliche Dateinamen und damit die Kettensequenzen
@@ -64,7 +64,7 @@ pub(crate) const fn restrictive_permissions_available() -> Result<(), RecoveryEr
 /// davor, hinterliesse dieser Ausgang ein Verzeichnis, das beim naechsten
 /// Versuch selbst als belegt gaelte. Stuende die PRUEFUNG dahinter, gaebe ein
 /// Aufruf mit belegtem Ziel UND falschem Schluessel die 14 statt der 2 —
-/// `design.md`:1795 verlangt aber den kleinsten zutreffenden spezifischen Code.
+/// `design.md`:1815 verlangt aber den kleinsten zutreffenden spezifischen Code.
 ///
 /// Diese Funktion ersetzt [`prepare_output_directory`] NICHT: zwischen beiden
 /// liegt ein Zeitfenster, und deshalb ist das Anlegen dort weiterhin selbst der
@@ -81,7 +81,7 @@ pub fn output_directory_is_free(output: &Path) -> Result<(), RecoveryError> {
     // ein leeres Verzeichnis gaelte hier sonst als freies Ziel — waehrend das
     // Anlegen ihn abweist. Diese Funktion steht aber genau deshalb VOR den
     // spezifischeren Abbruchgruenden, und ein Ziel, das nicht taugt, muss
-    // seinen Code 2 vor ihnen tragen (`design.md`:1810). Gemessen wird mit
+    // seinen Code 2 vor ihnen tragen (`design.md`:1815). Gemessen wird mit
     // [`fs::symlink_metadata`], nie mit [`fs::metadata`], denn letzteres folgt.
     match fs::symlink_metadata(output) {
         Ok(metadata) if metadata.is_symlink() => return Err(RecoveryError::OutputExists),
