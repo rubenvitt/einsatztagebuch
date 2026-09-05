@@ -42,11 +42,18 @@ pub enum AdminError {
     BindingMismatch,
     /// Die Bedienerbindung ist am gewaehlten Kopf nicht aktiv.
     BindingInactive,
+    /// Der Beweiszustand wurde gegen einen ANDEREN Registrierungsstand
+    /// gefuehrt als den, gegen den dieser Dienst handelt.
+    ///
+    /// Zeit, Bedienerbindung, Wurzelzertifikat und Auditdienst kommen aus dem
+    /// gewaehlten Kopf; ein Beweis aus einem veralteten Bestand duerfte unter
+    /// einem aktuellen Kopf nicht wirken.
+    HeadMismatch,
     /// Die vorgelegten Autorisierungsbytes sind nicht die, ueber die der
     /// Beweiszustand spricht.
     AuthorizationMismatch,
-    /// Die entstandenen Zielbytes sind nicht das Ziel, das der Beweiszustand
-    /// nennt.
+    /// Die vorgelegte Nutzlast traegt einen anderen Subtyp als den, den der
+    /// Beweiszustand deckt.
     TargetMismatch,
     /// Die Auditzeile konnte nicht gebucht werden — die Zielbytes bleiben
     /// zurueck.
@@ -69,6 +76,7 @@ impl AdminError {
             Self::ReauthMismatch => "EA-CEREMONY-REAUTH-MISMATCH",
             Self::BindingMismatch => "EA-CEREMONY-BINDING-MISMATCH",
             Self::BindingInactive => "EA-CEREMONY-BINDING-INACTIVE",
+            Self::HeadMismatch => "EA-CEREMONY-HEAD-MISMATCH",
             Self::AuthorizationMismatch => "EA-CEREMONY-AUTHORIZATION-MISMATCH",
             Self::TargetMismatch => "EA-CEREMONY-TARGET-MISMATCH",
             Self::AuditFailed => "EA-CEREMONY-AUDIT-FAILED",

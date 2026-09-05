@@ -290,7 +290,7 @@ unterschieden per `payload_wraps_core`) und werden im signierten
 Bootstrap-Transkript festgehalten, statt eine lokale Auditidentität vorzutäuschen,
 die es vor dem Bootstrap nicht gab.
 
-- [x] **Step 4: Run the full authorization attack matrix**
+- [ ] **Step 4: Run the full authorization attack matrix**
 
 Run: `cargo test --locked -p ea-admin --test authorization --test root_ceremony`
 und `cargo test --locked -p ea-trust`
@@ -300,6 +300,31 @@ context, expired auth (`EA-TRUST-AUTH-EXPIRED`), not-yet-valid
 (`EA-TRUST-AUTH-NOT-YET-VALID`), reused nonce (`EA-TRUST-AUTH-REPLAY`), same-person
 self-rotation (`EA-TRUST-SELF-AUTHORIZATION`) und capability mismatch scheitern. Die
 bestehenden Zeugen in `crates/ea-trust/tests/registry_attacks.rs` bleiben grün.
+
+> **Der Haken bleibt offen. Gemessen am 2026-09-05 gegen `b26e7f4`, Fix-Runde 1
+> zu DRK-269.** Vier der sieben genannten Angriffe haben einen Zeugen auf der
+> NEUEN öffentlichen Fläche (`verify_authorized_trust_target`,
+> `verify_intended_trust_target`, `RootCeremonyService::publish_authorized_target`),
+> drei nicht:
+>
+> | Angriff | Zeuge auf der neuen Fläche |
+> |---|---|
+> | mixed action effects | `crates/ea-admin/tests/authorization.rs::an_authorization_for_another_action_is_refused`, `crates/ea-trust/tests/admin_authorization_target.rs::an_intended_target_for_another_action_is_refused` |
+> | expired auth | `…::an_intended_target_outside_the_authorization_window_is_refused` |
+> | not-yet-valid | derselbe Zeuge |
+> | reused nonce | `crates/ea-admin/tests/root_ceremony.rs::the_second_publication_of_the_same_authorization_is_refused_across_runs` und `::the_lock_holds_both_dimensions_of_the_authorization` |
+> | **wrong signer context** | **keiner** |
+> | **same-person self-rotation** | **keiner** — es gibt nur den vorbestehenden `pub(crate)`-Unittest in `crates/ea-trust/src/admin_authorization.rs`, der die neue Fläche nicht durchläuft |
+> | **capability mismatch** | **keiner im ganzen Baum auf dem Autorisierungspfad** |
+>
+> Die drei fehlenden gehören nach `crates/ea-trust`: die Regeln liegen dort
+> (`verify_authorization_signer` prüft Signaturkontext, Capability
+> `organizationAdminApprove` und Subjektgleichheit), und ihre Fixtures
+> brauchen einen Bootstrap-Administrator OHNE diese Capability sowie eine
+> `AdminIssue`-Autorisierung, deren Zielsubjekt das des Unterzeichners ist —
+> beides baut `RegistryLineBuilder::new()` heute fest ein. Der Haken wird
+> gesetzt, wenn diese drei Zeugen stehen; bis dahin behauptet er nicht, was
+> nicht gemessen ist.
 
 - [x] **Step 5: Commit Admin/Root proof boundary**
 

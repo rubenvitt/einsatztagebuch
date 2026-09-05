@@ -1,4 +1,4 @@
-//! Der Zeremoniendienst: die Reihenfolge IST die Zusicherung.
+//! Der Zeremoniendienst: die Reihenfolge IST seine Zusicherung.
 
 use ea_audit::{AuditActorProof, LocalAuditService, TypedLocalAuditEvent};
 use ea_crypto::{ContentType, VerificationContext, object_hash, trust_digest};
@@ -10,7 +10,8 @@ use ea_format::{
 use ea_key_provider::{KeyHandle, KeyProvider};
 use ea_operator::{OperatorSessionProof, ReauthPurpose};
 use ea_trust::{
-    SelectedRegistryHead, TrustStateStore, VerifiedAdminAuthorization, consume_admin_authorization,
+    SelectedRegistryHead, TrustStateStore, VerifiedAdminAuthorizationIntent,
+    consume_admin_authorization_intent,
 };
 use ea_types::{CertificateHash, ObjectHash};
 
@@ -41,12 +42,12 @@ impl<'a> RootCeremonyService<'a> {
     /// Baut den Dienst gegen genau einen gewaehlten Kopf.
     ///
     /// `root_signing_handle` ist die ADRESSE des Wurzelschluessels in dem
-    /// Schluesselspeicher, den `key_provider` bedient — kein Schluesselmaterial.
-    /// `ea_key_provider::SecretPurpose` kennt bewusst keinen Wurzelzweck: die
-    /// vier lokalen Zwecke sind die eines WRITER-Geraets, und ein Wurzelschluessel
-    /// liegt dort nie. Diese Crate erfindet deshalb keinen fuenften Zweck; sie
-    /// nimmt den Griff entgegen, den der Wirt der Zeremonie — ein dediziertes
-    /// Offline-Geraet — ihr gibt.
+    /// Schluesselspeicher, den `key_provider` bedient — kein
+    /// Schluesselmaterial. `ea_key_provider::SecretPurpose` kennt bewusst
+    /// keinen Wurzelzweck: die vier lokalen Zwecke sind die eines
+    /// WRITER-Geraets, und ein Wurzelschluessel liegt dort nie. Diese Crate
+    /// erfindet deshalb keinen fuenften Zweck; sie nimmt den Griff entgegen,
+    /// den der Wirt der Zeremonie — ein dediziertes Offline-Geraet — ihr gibt.
     #[must_use]
     pub const fn new(
         head: &'a SelectedRegistryHead,
@@ -66,40 +67,61 @@ impl<'a> RootCeremonyService<'a> {
         }
     }
 
-    /// Verbraucht die Autorisierung, signiert das Ziel und gibt seine exakten
-    /// Objektbytes heraus — in genau dieser Reihenfolge.
+    /// Signiert das BEABSICHTIGTE Ziel, verbraucht seine Autorisierung und
+    /// gibt die exakten Objektbytes heraus — in genau dieser Reihenfolge.
+    ///
+    /// # Warum die ABSICHT und nicht das veroeffentlichte Ziel
+    ///
+    /// [`ea_trust::verify_authorized_trust_target`] ist die Laufzeitrichtung:
+    /// sie schlaegt ihr Ziel im Katalog nach und prueft daran die VORHANDENE
+    /// Wurzelsignatur. Ein Wirt, der eine Wurzelaenderung erst noch
+    /// veroeffentlichen will, hat weder das Katalogobjekt noch die Signatur
+    /// und bekaeme `EA-TRUST-SOURCE` — der Dienst koennte dann nur
+    /// nachsignieren, was ohnehin schon da ist, und waere fuer seinen eigenen
+    /// Zweck unbrauchbar. [`VerifiedAdminAuthorizationIntent`] ist die
+    /// Spiegelhaelfte fuer die Zeit VOR der Signatur.
     ///
     /// # Die Reihenfolge
     ///
-    /// 1. Der frische Bedienernachweis: Zweck, Gueltigkeit UND Bindung. Vor
-    ///    allem anderen, damit ein unbefugter Aufruf die Einmal-Nutzung nicht
-    ///    verbrennt.
-    /// 2. Die Einmal-Nutzung ueber [`consume_admin_authorization`] gegen einen
-    ///    laufuebergreifenden Speicher.
-    /// 3. Die Wurzelsignatur. [`VerificationContext::root_trust_digest`] setzt
-    ///    die Bindung zwischen Zielkern und Autorisierung an der
-    ///    Signaturgrenze durch, BEVOR der Schluesselport ueberhaupt gefragt
-    ///    wird; signiert wird der `trust-digest` unter
-    ///    [`ContentType::TrustDigest`], denn dieser Inhaltstyp ist ein
-    ///    Digesttyp (`ContentType::is_digest`) und der Port verlangt dann genau
-    ///    zweiunddreissig Nutzlastbytes.
-    /// 4. Die Kodierung ueber [`encode_trust`] — `ExactObjectBytes::new` ist
+    /// ZUERST jede reine Pruefung, DANN erst der Verbrauch:
+    ///
+    /// 1. Der frische Bedienernachweis: Zweck und Gueltigkeit, die Aktivitaet
+    ///    seiner Bindung am gewaehlten Kopf, und dass es die Bindung ist, fuer
+    ///    die dieser Dienst handelt.
+    /// 2. Die Bindung des Beweiszustands an DIESEN Kopf: Registrierungsfassung
+    ///    und Kopfhash.
+    /// 3. Die Autorisierungsbytes sind die, ueber die der Beweiszustand
+    ///    spricht, und der Subtyp der Nutzlast ist der bewiesene.
+    /// 4. Die Wurzelsignatur ueber [`VerificationContext::root_trust_digest`]
+    ///    und den Schluesselport.
+    /// 5. Die Kodierung ueber [`encode_trust`] — `ExactObjectBytes::new` ist
     ///    `pub(crate)` in `ea-format`, es gibt keinen zweiten Weg.
-    /// 5. Die `adminRootCeremony`-Auditzeile. Ein separates `flush` gibt es
+    /// 6. **Erst jetzt** die Einmal-Nutzung ueber
+    ///    [`consume_admin_authorization_intent`].
+    /// 7. Die `adminRootCeremony`-Auditzeile. Ein separates `flush` gibt es
     ///    nicht: `record_signed` kodiert, signiert, liest die COSE gegen den
     ///    Kern zurueck und bucht in EINER Transaktion, bevor es zurueckkehrt.
-    /// 6. Erst danach die Bytes.
+    /// 8. Erst danach die Bytes.
     ///
-    /// # Warum die entstandenen Bytes gegen den Beweiszustand geprueft werden
+    /// # Warum der Verbrauch NACH allen Pruefungen steht
     ///
-    /// [`VerifiedAdminAuthorization`] spricht ueber EIN Zielobjekt, das im
-    /// Katalog liegt und dessen Hash er nennt. Ed25519 signiert
-    /// deterministisch, also ergibt dieselbe Nutzlast unter demselben
-    /// Wurzelschluessel Byte fuer Byte dasselbe Objekt. Weicht der Hash ab, ist
-    /// das, was hier entstuende, NICHT das autorisierte Ziel — ein fremder
-    /// Schluessel, ein fremder Zertifikatshash oder eine fremde Nutzlast. Ohne
-    /// diese Pruefung naennte die Auditzeile ein anderes Objekt als das, was der
-    /// Aufrufer bekommt.
+    /// Eine Administrationsautorisierung ist organisationsweit EINMAL nutzbar
+    /// und wird von zwei Administratoren ausgestellt. Verbraucht der Dienst
+    /// sie, bevor er weiss, ob er ueberhaupt veroeffentlichen kann, dann macht
+    /// ein falsch konfigurierter Signaturgriff oder ein kurz nicht
+    /// erreichbarer Schluesselspeicher sie endgueltig unbrauchbar —
+    /// fail-closed, aber ein Verfuegbarkeitsloch, und ohne Auditspur nicht
+    /// einmal erklaerbar. Nach dieser Reihenfolge gibt es keinen Abbruch mehr,
+    /// der verbraucht und schweigt: was verbraucht, veroeffentlicht auch, oder
+    /// es hinterlaesst eine Zeile mit dem Ausgang `failed`.
+    ///
+    /// Die Zusicherung „der Verbrauch ist atomar mit der Veroeffentlichung"
+    /// bleibt erhalten. Zwischen Verbrauch und Auditzeile liegt keine
+    /// Pruefung mehr, die scheitern koennte; und die Sperre selbst ist die
+    /// Prueft-und-setzt-Bewegung des Speichers
+    /// (`TrustStateStore::admin_authorization_consumed`), also kann ein
+    /// zweiter, gleichzeitiger Verbraucher zwischen Signatur und Verbrauch
+    /// nicht durchschluepfen — er faende die Sperrzeile bereits gesetzt.
     ///
     /// # Fail-closed
     ///
@@ -109,20 +131,33 @@ impl<'a> RootCeremonyService<'a> {
     /// Scheitert auch sie, bleibt der urspruengliche Fehler der gemeldete: ein
     /// zweiter Fehler darf den ersten nicht verdecken.
     ///
+    /// # Was dieser Dienst NICHT feststellt
+    ///
+    /// Ob die erzeugte Wurzelsignatur gegen die Wurzelurkunde DIESES Bestands
+    /// verifiziert. Der Kontext dafuer — `ea_crypto::CoseVerifier` mit dem
+    /// `PreviousHeadResolver` von `ea-trust` — ist crate-privat, und die
+    /// Vollstaendigkeit des Paares stellt ohnehin erst der Kopfuebergang fest,
+    /// der als Einziger Autoritaet verleiht
+    /// (`ea_trust::verify_registry_candidate`). Ein Dienst mit einem falschen
+    /// Signaturgriff gibt hier also Bytes heraus, die der naechste
+    /// Kopfuebergang abweist — sichtbar, aber nicht hier.
+    ///
     /// # Errors
     ///
-    /// [`AdminError::ReauthMismatch`], [`AdminError::BindingMismatch`] und
-    /// [`AdminError::BindingInactive`] fuer den Nachweis,
-    /// [`AdminError::AuthorizationMismatch`] fuer Autorisierungsbytes, die der
-    /// Beweiszustand nicht nennt, [`AdminError::Trust`] fuer den Verbrauch —
-    /// insbesondere `EA-TRUST-AUTH-REPLAY` bei der zweiten Nutzung —,
-    /// [`AdminError::Crypto`] und [`AdminError::Key`] fuer die Signatur,
-    /// [`AdminError::Format`] fuer die Kodierung, [`AdminError::TargetMismatch`]
-    /// fuer ein anderes als das autorisierte Ziel und
+    /// [`AdminError::ReauthMismatch`], [`AdminError::BindingInactive`] und
+    /// [`AdminError::BindingMismatch`] fuer den Nachweis,
+    /// [`AdminError::HeadMismatch`] fuer einen Beweiszustand aus einem anderen
+    /// Registrierungsstand, [`AdminError::AuthorizationMismatch`] fuer
+    /// Autorisierungsbytes, die der Beweiszustand nicht nennt,
+    /// [`AdminError::TargetMismatch`] fuer eine Nutzlast eines anderen
+    /// Subtyps, [`AdminError::Crypto`] und [`AdminError::Key`] fuer die
+    /// Signatur, [`AdminError::Format`] fuer die Kodierung,
+    /// [`AdminError::Trust`] fuer den Verbrauch — insbesondere
+    /// `EA-TRUST-AUTH-REPLAY` bei der zweiten Nutzung — und
     /// [`AdminError::AuditFailed`] fuer die Auditzeile.
     pub fn publish_authorized_target(
         &self,
-        authorization: &VerifiedAdminAuthorization,
+        intent: &VerifiedAdminAuthorizationIntent,
         target: TrustPayloadV1,
         exact_admin_authorization_object: &[u8],
         store: &mut dyn TrustStateStore,
@@ -130,43 +165,62 @@ impl<'a> RootCeremonyService<'a> {
     ) -> Result<ExactObjectBytes, AdminError> {
         // 1. Der Nachweis. `is_valid_for` prueft die Bindung ausdruecklich
         //    NICHT (`crates/ea-operator/src/session.rs`), also prueft dieser
-        //    Dienst sie selbst — sonst ginge jeder Nachweis desselben Zwecks
-        //    durch, auch einer fuer einen anderen Bediener.
+        //    Dienst sie selbst — beides: dass die genannte Bindung am
+        //    gewaehlten Kopf ueberhaupt aktiv ist, und dass es die Bindung
+        //    ist, fuer die er handelt. Ohne den zweiten Vergleich ginge der
+        //    Nachweis JEDER gebundenen Bedienerin derselben Organisation
+        //    durch, und die Auditzeile rechnete die Zeremonie dem falschen
+        //    Bediener zu.
         if !proof.is_valid_for(
             ReauthPurpose::AdminRootCeremony,
             self.head.preexisting_effective_now(),
         ) {
             return Err(AdminError::ReauthMismatch);
         }
-        if proof.binding_object_hash() != self.operator_binding_object_hash {
-            return Err(AdminError::BindingMismatch);
-        }
         if self
             .head
-            .active_operator_binding_fields(self.operator_binding_object_hash)
+            .active_operator_binding_fields(proof.binding_object_hash())
             .is_none()
         {
             return Err(AdminError::BindingInactive);
         }
+        if proof.binding_object_hash() != self.operator_binding_object_hash {
+            return Err(AdminError::BindingMismatch);
+        }
 
-        // Die Autorisierungsbytes muessen die des Beweiszustands sein. Er nennt
-        // seinen Objekthash selbst; der Aufrufer waehlt sie nicht aus, sonst
-        // koennte er eine passendere unterschieben.
-        if object_hash(exact_admin_authorization_object)
-            != authorization.authorization_object_hash()
+        // 2. Der Beweiszustand gehoert an DIESEN Kopf. Zeit,
+        //    Bedienerbindung, Wurzelzertifikat und Auditdienst kommen aus
+        //    `self.head`; ein Beweis, der gegen einen anderen
+        //    Registrierungsstand gefuehrt wurde, darf hier nicht wirken.
+        if intent.previous_registry_version() != self.head.registry_version()
+            || intent.previous_registry_head_hash().as_bytes()
+                != self.head.registry_head_hash().as_bytes()
         {
+            return Err(AdminError::HeadMismatch);
+        }
+
+        // 3. Die Autorisierungsbytes muessen die des Beweiszustands sein. Er
+        //    nennt seinen Objekthash selbst; der Aufrufer waehlt sie nicht
+        //    aus, sonst koennte er eine passendere unterschieben.
+        if object_hash(exact_admin_authorization_object) != intent.authorization_object_hash() {
             return Err(AdminError::AuthorizationMismatch);
+        }
+        if target.subtype() != intent.target_trust_subtype() {
+            return Err(AdminError::TargetMismatch);
         }
         let action_code = admin_action_code(exact_admin_authorization_object)?;
 
-        // 2. Die Einmal-Nutzung, laufuebergreifend und organisationsweit.
-        consume_admin_authorization(store, authorization).map_err(AdminError::Trust)?;
-
-        // 3. Die Wurzelsignatur. Der Kontext ist hier die PRUEFUNG und nicht
+        // 4. Die Wurzelsignatur. Der Kontext ist hier die PRUEFUNG und nicht
         //    das Ergebnis: er bindet `[targetTrustSubtype, authorizedTrustCore]`
-        //    an `authorizedTrustCoreHash` der Autorisierung und laesst die
-        //    geschlossene Aktionstabelle entscheiden, ob diese Aktion diese
-        //    Objektart ueberhaupt traegt.
+        //    an `authorizedTrustCoreHash` der Autorisierung — also an genau
+        //    den Wert, den `intent.authorized_target_core_hash()` nennt, denn
+        //    die Autorisierungsbytes sind eine Zeile hoeher gegen den
+        //    Beweiszustand gestellt worden. Der Kernhash wird deshalb NICHT
+        //    ein zweites Mal in dieser Crate gebildet: das Praefix
+        //    `[targetTrustSubtype, authorizedTrustCore]` hat mit
+        //    `ea_trust::exact_authorized_core_hash` und
+        //    `ea_crypto::root_trust_bindings` bereits zwei Kodierer, und eine
+        //    dritte Kopie waere eine dritte Wahrheit.
         VerificationContext::root_trust_digest(
             target.exact_digest_input(),
             self.root_certificate_hash,
@@ -184,18 +238,18 @@ impl<'a> RootCeremonyService<'a> {
             )
             .map_err(AdminError::Key)?;
 
-        // 4. Die Kodierung.
+        // 5. Die Kodierung.
         let object = TrustObjectV1::new(target, vec![signature.as_bytes().to_vec()])
             .map_err(AdminError::Format)?;
         let published = encode_trust(&object).map_err(AdminError::Format)?;
         let target_object_hash = object_hash(published.as_bytes());
-        if target_object_hash != authorization.target_object_hash() {
-            return Err(AdminError::TargetMismatch);
-        }
 
-        // 5. Die Auditzeile, VOR der Herausgabe.
+        // 6. Erst jetzt der Verbrauch.
+        consume_admin_authorization_intent(store, intent).map_err(AdminError::Trust)?;
+
+        // 7. Die Auditzeile, VOR der Herausgabe.
         let context = AdminRootContextV1::new(
-            authorization.authorization_object_hash(),
+            intent.authorization_object_hash(),
             target_object_hash,
             action_code,
         );
@@ -214,11 +268,11 @@ impl<'a> RootCeremonyService<'a> {
             )
             .is_err()
         {
-            self.book_failure(proof, authorization, target_object_hash, action_code);
+            self.book_failure(proof, intent, target_object_hash, action_code);
             return Err(AdminError::AuditFailed);
         }
 
-        // 6. Erst jetzt.
+        // 8. Erst jetzt.
         Ok(published)
     }
 
@@ -230,7 +284,7 @@ impl<'a> RootCeremonyService<'a> {
     fn book_failure(
         &self,
         proof: &OperatorSessionProof,
-        authorization: &VerifiedAdminAuthorization,
+        intent: &VerifiedAdminAuthorizationIntent,
         target_object_hash: ObjectHash,
         action_code: u64,
     ) {
@@ -238,7 +292,7 @@ impl<'a> RootCeremonyService<'a> {
             AuditActorProof::OperatorSession(proof),
             TypedLocalAuditEvent {
                 action: LocalAuditActionV1::AdminRootCeremony(AdminRootContextV1::new(
-                    authorization.authorization_object_hash(),
+                    intent.authorization_object_hash(),
                     target_object_hash,
                     action_code,
                 )),
@@ -255,6 +309,18 @@ impl<'a> RootCeremonyService<'a> {
 /// `admin-root-context-v1` (`schemas/reports/v1/local-audit.cddl`) ist der
 /// `action-code` der Autorisierung, und eine Auditzeile, die ihn frei
 /// entgegennaehme, koennte eine Aktion behaupten, die nie autorisiert war.
+///
+/// # Warum das kein ZWEITER Leser ist
+///
+/// Es ist derselbe Leser, den die Autorisierungspruefung fuehrt:
+/// `ea_trust::verify_admin_authorization` deutet die Autorisierung ueber
+/// `decoded_payload`, also ueber `ea_format`, und stellt deren `action_code`
+/// gegen `descriptor.required_action` aus der geschlossenen Aktionstabelle.
+/// Wer einen [`VerifiedAdminAuthorizationIntent`] in der Hand haelt, weiss
+/// damit bereits, dass dieser Wert der von der Tabelle geforderte ist — diese
+/// Funktion liest ihn nur noch ab. `ea_crypto` liest denselben Wert an der
+/// Signaturgrenze ein weiteres Mal; dass alle Leser uebereinstimmen, pinnt
+/// `every_reachable_action_code_reaches_the_audit_line_unchanged`.
 fn admin_action_code(exact_admin_authorization_object: &[u8]) -> Result<u64, AdminError> {
     let ParsedArchiveObject::Trust(parsed) =
         decode_exact_object(exact_admin_authorization_object).map_err(AdminError::Format)?

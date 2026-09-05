@@ -34,7 +34,10 @@ pub mod trust_support;
 use std::{
     cell::RefCell,
     collections::BTreeMap,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use ea_admin::RootCeremonyService;
@@ -43,9 +46,7 @@ use ea_audit::{
     SignedLocalAuditService,
 };
 use ea_crypto::{CanonicalPublicCoseKey, ContentType, ProtectedHeader, SecretBytes, SecretVec};
-use ea_format::{
-    CertificateKindV1, KeyProtectionProfileV1, OperatorRoleV1, TrustPayloadV1, TrustSubtypeV1,
-};
+use ea_format::{CertificateKindV1, KeyProtectionProfileV1, OperatorRoleV1, TrustPayloadV1};
 use ea_key_provider::{
     CoseSign1Bytes, KeyError, KeyHandle, KeyProvider, KeystoreProvider, SecretPurpose,
 };
@@ -55,10 +56,11 @@ use ea_operator::{
 };
 use ea_time::TrustedTimeState;
 use ea_trust::{
-    AdminAuthorizationReplayKey, ClockReleaseReplayKey, IndependentTimeCommit,
-    PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit, RegistrySelectionOutcome,
-    SelectedRegistryHead, StateStoreError, TrustStateKey, TrustStateStore, VerifiedTrust,
-    prepare_local_time, select_registry_head, verify_registry_candidate,
+    AdminAuthorizationReplayDimension, AdminAuthorizationReplayKey, ClockReleaseReplayKey,
+    IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit,
+    RegistrySelectionOutcome, SelectedRegistryHead, StateStoreError, TrustStateKey,
+    TrustStateStore, VerifiedAdminAuthorizationIntent, VerifiedTrust, prepare_local_time,
+    select_registry_head, verify_intended_trust_target, verify_registry_candidate,
 };
 use ea_types::{
     CertificateHash, ChainSequence, DeviceId, EventId, Hash32, KeyThumbprint, ObjectHash,
@@ -81,7 +83,13 @@ const FOREIGN_ROOT_SECRET: [u8; 32] = [
     0x46, 0xe7, 0xb1, 0x5a, 0x23, 0x9d, 0x60, 0xcc, 0x08, 0x71, 0x4f, 0xa3, 0xd6, 0x12, 0x89, 0x35,
 ];
 
+/// Die Marke der Bindung, unter der die Zeremonie handelt.
 const BINDING_MARKER: u8 = 0x71;
+
+/// Die Marke einer ZWEITEN, ebenfalls gebundenen Bedienerin derselben
+/// Organisation. Ihr Nachweis ist frisch und tauglich — er gehoert nur nicht
+/// zu der Bindung, fuer die der Dienst handelt.
+const SECOND_BINDING_MARKER: u8 = 0x81;
 
 /// Die Betriebssystemuhr der Fixture.
 ///
@@ -92,21 +100,27 @@ const BINDING_MARKER: u8 = 0x71;
 /// hiessen zwei Zeitfenster, und eines von beiden waere zufaellig das falsche.
 pub const FIXTURE_NOW_MS: i64 = 1_000;
 
-/// Die Sequenz, an der die Fixture ihren Kopf waehlt — im Fenster des
-/// LETZTEN Uebergangs, der die Bedienerbindung traegt.
-const PROPOSED_SEQUENCE: u64 = 30;
+/// Der Index des letzten Kopfes der Linie.
+pub const LAST_HEAD: usize = 3;
+
+/// Der Index des VORLETZTEN Kopfes — eine andere Registrierungsfassung,
+/// gegen die derselbe Beweiszustand nicht gilt.
+pub const EARLIER_HEAD: usize = 2;
+
+/// Die Sequenz, an der die Fixture ihren Kopf waehlt — im Fenster des letzten
+/// Uebergangs (41..100) und VOR dem Widerruf der zweiten Bindung.
+pub const PROPOSED_SEQUENCE: u64 = 50;
+
+/// Die Sequenz, ab der die zweite Bindung widerrufen ist.
+const SECOND_BINDING_REVOKED_FROM: u64 = 60;
+
+/// Eine Sequenz HINTER dem Widerruf — noch im Fenster desselben Kopfes.
+pub const AFTER_REVOCATION_SEQUENCE: u64 = 70;
+
+/// Eine Sequenz im Fenster des VORLETZTEN Kopfes (21..40).
+pub const EARLIER_SEQUENCE: u64 = 30;
 
 const FIXTURE_NOT_AFTER_MS: i64 = 10_000_000;
-
-/// Die Sequenz, an der die Autorisierung des Ziels gebraucht wird.
-///
-/// Die Wirksamkeit des ERSTEN Uebergangs. Das Ziel der Zeremonie ist sein
-/// direktes Ziel, und das ist keine Bequemlichkeit: `VerifiedTrust::previous_head`
-/// ist der aus dem Anker bewiesene Bootstrap-Stand — Registrierung NULL —, und
-/// die Autorisierung eines Ziels nennt genau den Stand, auf dem sie beruht.
-/// Ein spaeterer Uebergang beruhte auf einem spaeteren Kopf und braeuchte
-/// dessen Auswahl als `head`-Argument.
-pub const TARGET_SEQUENCE: u64 = 1;
 
 fn signing_key(secret: [u8; 32]) -> SigningKey {
     SigningKey::from_bytes(&secret)
@@ -137,11 +151,17 @@ fn policy_action() -> ActionSpec {
 /// Alles, was ein Zeuge ueber die gebaute Linie wissen muss.
 pub struct CeremonyLine {
     pub line: RegistryLineBuilder,
-    /// Die Nutzlast des Ziels — genau die, die der letzte Uebergang
-    /// Wurzel-signiert hat.
+    /// Die UNSIGNIERTE Nutzlast des Ziels. Es liegt NICHT im Katalog: genau
+    /// diesen Stand hat ein Wirt in der Hand, der eine Wurzelaenderung erst
+    /// noch veroeffentlichen will.
     pub target_payload: TrustPayloadV1,
-    pub target_object_hash: ObjectHash,
+    /// Die Autorisierung des Ziels — sie liegt im Katalog, das Ziel nicht.
+    pub authorization_object_hash: ObjectHash,
+    /// Die Bindung, fuer die der Dienst handelt. Nie widerrufen.
     pub binding_object_hash: ObjectHash,
+    /// Die Bindung einer ZWEITEN Bedienerin, ab
+    /// [`SECOND_BINDING_REVOKED_FROM`] widerrufen.
+    pub second_binding_object_hash: ObjectHash,
     pub writer_certificate_object_hash: ObjectHash,
     pub root_certificate_hash: CertificateHash,
 }
@@ -149,25 +169,31 @@ pub struct CeremonyLine {
 /// Baut die Registrierungslinie der Zeremonie.
 ///
 /// Deterministisch: feste Geheimnisse, feste Marken, feste Fenster. Zwei
-/// Aufrufe liefern dieselbe Linie, denselben Zielhash und dieselbe Nutzlast.
+/// Aufrufe liefern dieselbe Linie und dieselbe Nutzlast.
 ///
-/// Drei Uebergaenge. Das direkte Ziel des ERSTEN ist das Objekt, das die
-/// Zeremonie veroeffentlicht; die beiden weiteren tragen das
-/// Writer-Zertifikat und die Bedienerbindung, gegen die der Praesenznachweis
-/// ausgestellt wird.
+/// Vier Uebergaenge — Policy, Writer-Zertifikat und ZWEI Bedienerbindungen —,
+/// und danach `prepare_unsigned`: die Autorisierung des Ziels wandert in den
+/// Katalog, das Ziel selbst entsteht erst im Dienst. Ein Zeuge, der ein
+/// bereits signiertes Objekt durchreichte, bezeugte den Fall nicht, fuer den
+/// dieser Dienst gebaut ist.
 ///
 /// # Panics
 ///
 /// Wenn die Fixture ihre eigenen direkten Ziele nicht baut.
 #[must_use]
 pub fn ceremony_line() -> CeremonyLine {
+    let instance_thumbprint = KeyThumbprint::from(
+        Hash32::try_from(
+            public_key(INSTANCE_SECRET)
+                .thumbprint()
+                .as_bytes()
+                .as_slice(),
+        )
+        .expect("ein Thumbprint ist 32 Byte"),
+    );
     let mut line = RegistryLineBuilder::new();
     let root_certificate_hash = CertificateHash::from(line.current_root_hash());
-    let (target_head, target_payload) =
-        line.push_returning_direct_payload(policy_action(), head_options(1, 10));
-    let target_object_hash = target_head
-        .direct_object_hash
-        .expect("ein Policy-Uebergang traegt ein direktes Ziel");
+    line.push(policy_action(), head_options(1, 10));
     let writer = line.push(
         ActionSpec::Device {
             kind: CertificateKindV1::Writer,
@@ -187,28 +213,67 @@ pub fn ceremony_line() -> CeremonyLine {
             effective_from: None,
         },
         HeadOptions {
-            binding_instance_key_thumbprint_override: Some(KeyThumbprint::from(
-                Hash32::try_from(
-                    public_key(INSTANCE_SECRET)
-                        .thumbprint()
-                        .as_bytes()
-                        .as_slice(),
-                )
-                .expect("ein Thumbprint ist 32 Byte"),
-            )),
-            ..head_options(21, 100)
+            binding_instance_key_thumbprint_override: Some(instance_thumbprint),
+            ..head_options(21, 40)
         },
     );
     let binding_object_hash = binding
         .direct_object_hash
         .expect("die Bedienerbindung der Fixture ist ein direktes Ziel");
+    let second = line.push(
+        ActionSpec::OperatorBinding {
+            certificate_hash: writer_certificate_object_hash,
+            role: OperatorRoleV1::Writer,
+            marker: SECOND_BINDING_MARKER,
+            effective_from: None,
+        },
+        HeadOptions {
+            binding_instance_key_thumbprint_override: Some(instance_thumbprint),
+            revoked_from_sequence: Some(ChainSequence::new(SECOND_BINDING_REVOKED_FROM)),
+            ..head_options(41, 100)
+        },
+    );
+    let second_binding_object_hash = second
+        .direct_object_hash
+        .expect("die zweite Bedienerbindung ist ein direktes Ziel");
+    // Erst JETZT: die Autorisierung des Ziels, gebunden an den aktuellen Kopf.
+    // Das Ziel selbst bleibt aus dem Katalog fort.
+    let (authorization_object_hash, target_payload) =
+        line.prepare_unsigned(policy_action(), HeadOptions::default());
     CeremonyLine {
-        target_object_hash,
-        target_payload: target_payload.expect("eine Policy traegt ein direktes Ziel"),
+        target_payload,
+        authorization_object_hash,
         binding_object_hash,
+        second_binding_object_hash,
         writer_certificate_object_hash,
         root_certificate_hash,
         line,
+    }
+}
+
+impl CeremonyLine {
+    /// Die exakten Bytes der Autorisierung dieses Ziels.
+    #[must_use]
+    pub fn authorization_bytes(&self) -> &[u8] {
+        self.line.exact_object_bytes(self.authorization_object_hash)
+    }
+
+    /// Der Beweiszustand VOR der Signatur, gegen `head`.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Autorisierung das beabsichtigte Ziel nicht deckt.
+    #[must_use]
+    pub fn intent(&self, head: &SelectedRegistryHead) -> VerifiedAdminAuthorizationIntent {
+        let trust = verified(&self.line);
+        verify_intended_trust_target(
+            &trust,
+            Some(head),
+            &self.target_payload,
+            UnixMillis::new(FIXTURE_NOW_MS),
+            head.proposed_sequence(),
+        )
+        .expect("die Autorisierung deckt das beabsichtigte Ziel")
     }
 }
 
@@ -281,12 +346,25 @@ impl TrustStateStore for ModelStore {
 /// Wenn die Fixture ihren eigenen aktuellen Kopf nicht waehlt.
 #[must_use]
 pub fn selected_head(line: &RegistryLineBuilder) -> SelectedRegistryHead {
-    let head_index = line.heads().len() - 1;
+    selected_head_at(line, LAST_HEAD, PROPOSED_SEQUENCE)
+}
+
+/// Waehlt den Kopf mit dem Index `head_index` an `proposed_sequence`.
+///
+/// # Panics
+///
+/// Wenn die Fixture diesen Kopf nicht waehlt.
+#[must_use]
+pub fn selected_head_at(
+    line: &RegistryLineBuilder,
+    head_index: usize,
+    proposed_sequence: u64,
+) -> SelectedRegistryHead {
     let head = line.heads()[head_index];
     let key = trust_support::state_key();
     let trusted_time = TrustedTimeState::initial(UnixMillis::new(FIXTURE_NOW_MS));
     let trust = line.verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
-    let candidate = verify_registry_candidate(&trust, ChainSequence::new(PROPOSED_SEQUENCE))
+    let candidate = verify_registry_candidate(&trust, ChainSequence::new(proposed_sequence))
         .expect("der Kandidat der Fixture muss verifizieren");
     let mut store = ModelStore {
         key,
@@ -346,6 +424,12 @@ impl OperatorAuthenticator for FakeAuthenticator {
 
 /// Ein ECHTER Praesenznachweis fuer `purpose`, gegen den gewaehlten Kopf.
 ///
+/// `marker` ist die Marke, unter der die Fixture die Bindung gebaut hat; ihr
+/// `os_account_binding_hash` ist `hash32(marker + 2)`
+/// (`crates/ea-trust/tests/support/mod.rs`, Zweig `ActionSpec::OperatorBinding`).
+/// Ohne sie meldete die Kontoattrappe das Konto einer fremden Bindung, und
+/// `reauthenticate` braeche mit `AccountMismatch` ab.
+///
 /// # Panics
 ///
 /// Wenn die Bindung an der gewaehlten Sequenz nicht aktiv ist oder die
@@ -354,6 +438,7 @@ impl OperatorAuthenticator for FakeAuthenticator {
 pub fn operator_proof(
     head: &SelectedRegistryHead,
     binding_object_hash: ObjectHash,
+    marker: u8,
     purpose: ReauthPurpose,
 ) -> OperatorSessionProof {
     let bound = BoundOperator::resolve(head, binding_object_hash)
@@ -364,12 +449,37 @@ pub fn operator_proof(
         challenges: RefCell::new(Vec::new()),
     };
     let account: Box<dyn OsAccountProvider> = Box::new(FakeAccount {
-        binding_hash: trust_support::hash32(BINDING_MARKER.wrapping_add(2)),
+        binding_hash: trust_support::hash32(marker.wrapping_add(2)),
         instance_public_key: Some(public_key(INSTANCE_SECRET)),
     });
     authenticator
         .reauthenticate(account, purpose)
         .expect("die Fixture meldet den gebundenen Bediener wieder an")
+}
+
+/// Der Nachweis der Bindung, fuer die der Dienst handelt.
+#[must_use]
+pub fn ceremony_proof(
+    ceremony: &CeremonyLine,
+    head: &SelectedRegistryHead,
+    purpose: ReauthPurpose,
+) -> OperatorSessionProof {
+    operator_proof(head, ceremony.binding_object_hash, BINDING_MARKER, purpose)
+}
+
+/// Der Nachweis der ZWEITEN Bedienerin — frisch, tauglich, fremde Bindung.
+#[must_use]
+pub fn second_operator_proof(
+    ceremony: &CeremonyLine,
+    head: &SelectedRegistryHead,
+    purpose: ReauthPurpose,
+) -> OperatorSessionProof {
+    operator_proof(
+        head,
+        ceremony.second_binding_object_hash,
+        SECOND_BINDING_MARKER,
+        purpose,
+    )
 }
 
 /// Der Schluesselport der Fixture: EIN Ed25519-Schluessel hinter der
@@ -383,6 +493,12 @@ pub fn operator_proof(
 /// aus einem Startwert ab und traefe ihn nie.
 pub struct FixtureKeyProvider {
     secret: [u8; 32],
+    /// Wie oft der Port um eine Signatur gebeten wurde.
+    ///
+    /// Ohne den Zaehler misst ein Zeuge namens „… erreicht den Schluesselport
+    /// nie" seinen eigenen Namen nicht: er saehe nur, dass der Aufruf
+    /// scheitert, nicht WO.
+    signatures: AtomicUsize,
 }
 
 impl FixtureKeyProvider {
@@ -391,6 +507,7 @@ impl FixtureKeyProvider {
     pub const fn root() -> Self {
         Self {
             secret: trust_support::root_signing_secret(),
+            signatures: AtomicUsize::new(0),
         }
     }
 
@@ -400,7 +517,14 @@ impl FixtureKeyProvider {
     pub const fn foreign() -> Self {
         Self {
             secret: FOREIGN_ROOT_SECRET,
+            signatures: AtomicUsize::new(0),
         }
+    }
+
+    /// Wie oft dieser Port bisher signiert hat.
+    #[must_use]
+    pub fn signatures_produced(&self) -> usize {
+        self.signatures.load(Ordering::SeqCst)
     }
 
     /// Die Adresse des Eintrags dieses Providers.
@@ -430,6 +554,7 @@ impl KeyProvider for FixtureKeyProvider {
         certificate_hash: CertificateHash,
         payload: &[u8],
     ) -> Result<CoseSign1Bytes, KeyError> {
+        self.signatures.fetch_add(1, Ordering::SeqCst);
         let key = signing_key(self.secret);
         let public = CanonicalPublicCoseKey::ed25519(key.verifying_key().to_bytes())
             .map_err(KeyError::Crypto)?;
@@ -582,14 +707,26 @@ impl AuditHarness {
 
 /// Eine Zeile, wie sie in einer Tabelle laege. Der Primaerschluessel IST die
 /// Sperre — genau wie bei `clock_release_replays`.
-type ReplayRow = ([u8; 16], [u8; 16], [u8; 32]);
+///
+/// Die Dimension gehoert in den Schluessel: `authorizationId` und `nonce` sind
+/// je fuer sich organisationsweit einmalig, und eine Ablage, die die Dimension
+/// wegwirft, verwechselte eine 16-Byte-Kennung mit einer 32-Byte-Nonce.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReplayDimensionRow {
+    AuthorizationId([u8; 16]),
+    Nonce([u8; 32]),
+}
+
+type ReplayRow = ([u8; 16], ReplayDimensionRow);
 
 fn replay_row(key: &AdminAuthorizationReplayKey) -> ReplayRow {
-    (
-        *key.organization_id().as_bytes(),
-        *key.authorization_id().as_bytes(),
-        *key.nonce(),
-    )
+    let dimension = match key.dimension() {
+        AdminAuthorizationReplayDimension::AuthorizationId(id) => {
+            ReplayDimensionRow::AuthorizationId(*id.as_bytes())
+        }
+        AdminAuthorizationReplayDimension::Nonce(nonce) => ReplayDimensionRow::Nonce(nonce),
+    };
+    (*key.organization_id().as_bytes(), dimension)
 }
 
 /// Der Speicher HINTER dem Speicherwert.
@@ -605,6 +742,12 @@ impl ReplayTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Wie viele Sperrzeilen die Tabelle fuehrt.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -702,7 +845,7 @@ impl TrustStateStore for StoreWithoutReplayLock {
     }
 }
 
-/// Der Dienst der Fixture ueber `provider`.
+/// Der Dienst der Fixture ueber `provider`, gebunden an `binding_object_hash`.
 #[must_use]
 pub fn ceremony_service<'a>(
     head: &'a SelectedRegistryHead,
@@ -710,18 +853,30 @@ pub fn ceremony_service<'a>(
     audit: &'a AuditHarness,
     ceremony: &CeremonyLine,
 ) -> RootCeremonyService<'a> {
+    ceremony_service_for(
+        head,
+        provider,
+        audit,
+        ceremony,
+        ceremony.binding_object_hash,
+    )
+}
+
+/// Derselbe Dienst, aber fuer eine ausdruecklich genannte Bindung.
+#[must_use]
+pub fn ceremony_service_for<'a>(
+    head: &'a SelectedRegistryHead,
+    provider: &'a FixtureKeyProvider,
+    audit: &'a AuditHarness,
+    ceremony: &CeremonyLine,
+    binding_object_hash: ObjectHash,
+) -> RootCeremonyService<'a> {
     RootCeremonyService::new(
         head,
         provider,
         provider.handle(),
         ceremony.root_certificate_hash,
         audit.service(),
-        ceremony.binding_object_hash,
+        binding_object_hash,
     )
-}
-
-/// Der Subtyp des Ziels dieser Fixture.
-#[must_use]
-pub const fn target_subtype() -> TrustSubtypeV1 {
-    TrustSubtypeV1::Policy
 }
