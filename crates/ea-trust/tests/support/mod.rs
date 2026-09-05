@@ -1462,6 +1462,18 @@ pub const fn root_signing_secret() -> [u8; 32] {
     ROOT_SECRET
 }
 
+/// Public fixture vector used by the builder's ordinary device certificates.
+#[must_use]
+pub const fn device_signing_secret() -> [u8; 32] {
+    NEW_ADMIN_SECRET
+}
+
+/// Public fixture vector for the second independently enrolled bootstrap Admin.
+#[must_use]
+pub const fn second_admin_signing_secret() -> [u8; 32] {
+    ADMIN_TWO_SECRET
+}
+
 pub fn organization() -> OrganizationId {
     OrganizationId::try_from(&[0x21; 16][..]).unwrap()
 }

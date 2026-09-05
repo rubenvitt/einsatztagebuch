@@ -195,10 +195,11 @@ impl Harness {
         support::selected_head_at(&self.line, 2, 50)
     }
     pub fn audit(&self, head: &SelectedRegistryHead, failures: usize) -> support::AuditHarness {
-        support::AuditHarness::new(
+        support::AuditHarness::with_provider(
             head,
             ObjectHash::try_from(self.certificate.as_bytes().as_slice()).unwrap(),
             failures,
+            support::FixtureKeyProvider::device(),
         )
     }
     pub fn authenticator(&self, head: &SelectedRegistryHead) -> Authenticator {
@@ -595,6 +596,76 @@ pub fn selected(line: &RegistryLineBuilder, event: &[u8], sequence: u64) -> Sele
     head
 }
 
+/// Same authenticated organizational Registry, pinned by a different chain anchor.
+pub fn selected_on_chain(
+    line: &RegistryLineBuilder,
+    event: &[u8],
+    sequence: u64,
+    chain: ChainId,
+) -> SelectedRegistryHead {
+    let original = decode_trust_anchor(line.exact_anchor_bytes()).unwrap();
+    let pre = encode_pre_anchor_v1(
+        original.organization_id(),
+        chain,
+        original.root_public_cose_key_bytes(),
+        original.root_key_thumbprint(),
+        original.root_certificate_object_hash(),
+        original.initial_admin_certificate_object_hashes(),
+        original.initial_admin_operator_binding_object_hashes(),
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    let mut encoder = minicbor::Encoder::new(&mut bytes);
+    encoder
+        .array(12)
+        .unwrap()
+        .str("EINSATZARCHIV-TRUST-ANCHOR-v1")
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .bytes(pre.bootstrap_anchor_hash().as_bytes())
+        .unwrap()
+        .bytes(original.organization_id().as_bytes())
+        .unwrap()
+        .bytes(chain.as_bytes())
+        .unwrap()
+        .bytes(original.root_public_cose_key_bytes())
+        .unwrap()
+        .bytes(original.root_key_thumbprint().as_bytes())
+        .unwrap()
+        .bytes(original.root_certificate_object_hash().as_bytes())
+        .unwrap();
+    for hashes in [
+        original.initial_admin_certificate_object_hashes(),
+        original.initial_admin_operator_binding_object_hashes(),
+    ] {
+        encoder.array(hashes.len().try_into().unwrap()).unwrap();
+        for hash in hashes {
+            encoder.bytes(hash.as_bytes()).unwrap();
+        }
+    }
+    encoder
+        .bytes(original.genesis_entry_hash().as_bytes())
+        .unwrap()
+        .array(0)
+        .unwrap();
+    let anchor = decode_trust_anchor(&bytes).unwrap();
+    let mut store = SelectionStore {
+        time: ea_time::TrustedTimeState::initial(UnixMillis::new(1000)),
+        pin: RegistryHeadPin::new(registry_fields(event).registry_version, object_hash(event)),
+    };
+    let snapshot = load_trust_state(&mut store, trust_support::state_key()).unwrap();
+    let trust = verify_trust(&anchor, &line.source(), snapshot).unwrap();
+    let candidate = verify_registry_candidate(&trust, ChainSequence::new(sequence)).unwrap();
+    let local = prepare_local_time(&mut store, &candidate, UnixMillis::new(1000), &[]).unwrap();
+    let RegistrySelectionOutcome::Selected(head) =
+        select_registry_head(candidate, local, None).unwrap()
+    else {
+        panic!()
+    };
+    head
+}
+
 impl Harness {
     pub fn authorization(&self) -> Authorization {
         Authorization {
@@ -662,7 +733,10 @@ impl Harness {
                 database,
                 device_certificate_hash: self.certificate,
                 role: OperatorRoleV1::Writer,
-                window: window(head.valid_through_sequence().get() + 100),
+                window: window(
+                    head.valid_through_sequence().get() + 1,
+                    head.valid_through_sequence().get() + 100,
+                ),
                 replacement,
             },
             native,
@@ -693,7 +767,10 @@ impl Harness {
         OperatorBindingService::new(head, audit).revoke(
             RevokeOperatorRequest {
                 binding_object_hash: binding,
-                window: window(head.valid_through_sequence().get() + 100),
+                window: window(
+                    head.valid_through_sequence().get() + 1,
+                    head.valid_through_sequence().get() + 100,
+                ),
             },
             &mut OperatorMutationPorts {
                 authorization,
@@ -704,18 +781,203 @@ impl Harness {
         )
     }
 }
-pub fn window(through: u64) -> RegistryWindow {
+pub fn window(effective: u64, through: u64) -> RegistryWindow {
     RegistryWindow {
+        effective_from_sequence: ChainSequence::new(effective),
         valid_through_sequence: ChainSequence::new(through),
         not_after: UnixMillis::new(10_000_000),
     }
 }
+
+/// A separate, usable Admin account on the same real trust line as the lost Writer.
+pub struct RecoveryAdmin {
+    pub database: Database,
+    pub binding: ObjectHash,
+    pub certificate: CertificateHash,
+    account: Account,
+}
+impl RecoveryAdmin {
+    pub fn enroll(line: &mut RegistryLineBuilder) -> Self {
+        let database = database("recovery-admin");
+        let secret = [0x68; 32];
+        let certificate = line.second_bootstrap_admin_hash();
+        let mut profile = Vec::new();
+        minicbor::Encoder::new(&mut profile)
+            .array(5)
+            .unwrap()
+            .bytes(trust_support::organization().as_bytes())
+            .unwrap()
+            .bytes(&[0x42; 16])
+            .unwrap()
+            .str("Admin")
+            .unwrap()
+            .str("Administration")
+            .unwrap()
+            .bytes(&SALT)
+            .unwrap();
+        let binding = line
+            .push(
+                ActionSpec::OperatorBinding {
+                    certificate_hash: certificate,
+                    role: OperatorRoleV1::OrganizationAdmin,
+                    marker: 0x42,
+                    effective_from: Some(21),
+                },
+                HeadOptions {
+                    effective_from: Some(21),
+                    valid_through: Some(100),
+                    not_after: UnixMillis::new(10_000_000),
+                    binding_operator_profile_commitment_override: Some(operator_profile_digest(
+                        &profile,
+                    )),
+                    binding_instance_key_thumbprint_override: Some(key(secret).thumbprint()),
+                    ..HeadOptions::default()
+                },
+            )
+            .direct_object_hash
+            .unwrap();
+        database
+            .database
+            .execute(
+                "INSERT INTO operator_profile VALUES (0, ?1, ?2, ?3, ?4, ?5, ?6)",
+                &[
+                    StoreValue::Blob(trust_support::organization().as_bytes().to_vec()),
+                    StoreValue::Blob(vec![0x42; 16]),
+                    StoreValue::Text("Admin".into()),
+                    StoreValue::Text("Administration".into()),
+                    StoreValue::Blob(SALT.to_vec()),
+                    StoreValue::Blob(binding.as_bytes().to_vec()),
+                ],
+            )
+            .unwrap();
+        Self {
+            database,
+            binding,
+            certificate: CertificateHash::from(certificate),
+            account: Account {
+                secret: Some(secret),
+                hash: trust_support::hash32(0x44),
+            },
+        }
+    }
+    pub fn authenticator(&self, head: &SelectedRegistryHead) -> Authenticator {
+        Authenticator {
+            bound: BoundOperator::resolve(head, self.binding).unwrap(),
+            secret: self.account.secret.unwrap(),
+            fail: false,
+        }
+    }
+    pub fn login<'a>(&'a self, authenticator: &'a Authenticator) -> VerifySessionRequest<'a> {
+        VerifySessionRequest {
+            database: &self.database.database,
+            binding_object_hash: self.binding,
+            device_certificate_hash: self.certificate,
+            role: OperatorRoleV1::OrganizationAdmin,
+            purpose: ReauthPurpose::AdminRootCeremony,
+            account: Arc::new(self.account.clone()),
+            authenticator,
+        }
+    }
+    pub fn audit(&self, head: &SelectedRegistryHead) -> support::AuditHarness {
+        support::AuditHarness::with_provider(
+            head,
+            ObjectHash::try_from(self.certificate.as_bytes().as_slice()).unwrap(),
+            0,
+            support::FixtureKeyProvider::second_admin(),
+        )
+    }
+}
+
+pub fn registry_fields(bytes: &[u8]) -> RegistryEventFieldsV1 {
+    let ParsedArchiveObject::Trust(parsed) = decode_exact_object(bytes).unwrap() else {
+        panic!()
+    };
+    let DecodedTrustPayloadV1::RegistryEvent(event) = parsed.value().decoded_payload().unwrap()
+    else {
+        panic!()
+    };
+    event.fields().clone()
+}
+
+pub struct RevokedEnrollment {
+    pub harness: Harness,
+    pub target: Database,
+    pub native: Native,
+    pub authorization: Authorization,
+    pub active: SelectedRegistryHead,
+    pub revoked: SelectedRegistryHead,
+    pub revocation: PreparedOperatorRevocation,
+    pub evidence: RevokedOperatorBinding,
+    pub binding: ObjectHash,
+}
+impl RevokedEnrollment {
+    pub fn new() -> Self {
+        let harness = Harness::new();
+        let head = harness.head();
+        let target = database("descendant-recovery");
+        let native = Native::new();
+        let mut authorization = harness.authorization();
+        let prepared = harness
+            .provision(
+                &head,
+                &harness.audit(&head, 0),
+                &target.database,
+                &native,
+                &Identity::valid(),
+                &mut authorization,
+            )
+            .unwrap();
+        let binding = prepared.binding_object_hash();
+        let active = authorization.activate(&prepared);
+        let revocation = harness
+            .revoke(
+                &active,
+                harness.audit(&active, 0).service(),
+                binding,
+                &mut authorization,
+            )
+            .unwrap();
+        let revoked = selected(&authorization.line, revocation.registry_bytes(), 201);
+        let evidence =
+            RevokedOperatorBinding::verify(&active, &revoked, revocation.registry_bytes(), binding)
+                .unwrap();
+        Self {
+            harness,
+            target,
+            native,
+            authorization,
+            active,
+            revoked,
+            revocation,
+            evidence,
+            binding,
+        }
+    }
+    pub fn advance(&mut self) -> SelectedRegistryHead {
+        let other = database("intervening-enrollment");
+        let mut identity = Identity::valid();
+        identity.wrong_subject = true;
+        let prepared = self
+            .harness
+            .provision(
+                &self.revoked,
+                &self.harness.audit(&self.revoked, 0),
+                &other.database,
+                &Native::new(),
+                &identity,
+                &mut self.authorization,
+            )
+            .unwrap();
+        self.authorization.activate(&prepared)
+    }
+}
+
 pub fn sql_audit(
     head: &SelectedRegistryHead,
     database: &Arc<EncryptedDatabase>,
     certificate: CertificateHash,
 ) -> ea_audit::SignedLocalAuditService {
-    let provider = Arc::new(support::FixtureKeyProvider::root());
+    let provider = Arc::new(support::FixtureKeyProvider::device());
     let handle = provider.handle();
     ea_audit::SignedLocalAuditService::new(
         Arc::new(ea_audit::SqliteLocalAuditRepository::new(database.clone())),
