@@ -10,7 +10,8 @@ mod support;
 
 use std::{cell::RefCell, rc::Rc};
 
-use ea_format::{TrustPayloadV1, TrustSubtypeV1};
+use ea_crypto::{CanonicalPublicCoseKey, ContentType, ProtectedHeader, trust_digest};
+use ea_format::{TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, encode_trust};
 use ea_time::TrustedTimeState;
 use ea_trust::{
     AdminAuthorizationReplayDimension, AdminAuthorizationReplayKey, ClockReleaseReplayKey,
@@ -20,7 +21,9 @@ use ea_trust::{
     prepare_local_time, select_registry_head, verify_authorized_trust_target,
     verify_intended_trust_target, verify_registry_candidate,
 };
-use ea_types::{ChainSequence, ObjectHash, UnixMillis};
+use ea_types::{CertificateHash, ChainSequence, ObjectHash, UnixMillis};
+use ed25519_dalek::{Signer as _, SigningKey};
+use minicbor::Encoder;
 
 use support::{ActionSpec, HeadOptions, Pin, RegistryLineBuilder};
 
@@ -573,24 +576,76 @@ fn intended_policy_target() -> (RegistryLineBuilder, TrustPayloadV1) {
     (line, payload)
 }
 
+/// Das fertige, Wurzel-signierte Objekt zu einer beabsichtigten Nutzlast.
+///
+/// Es wird gebaut und NICHT in den Katalog gelegt — genau das, was ein
+/// Zeremoniendienst herausgibt. Die Signatur entsteht ueber die oeffentliche
+/// COSE-Flaeche der Stufe 1 mit dem Wurzelschluessel der Fixture.
+fn root_signed_object(line: &RegistryLineBuilder, payload: &TrustPayloadV1) -> Vec<u8> {
+    let key = SigningKey::from_bytes(&support::root_signing_secret());
+    let public = CanonicalPublicCoseKey::ed25519(key.verifying_key().to_bytes())
+        .expect("der Wurzelschluessel der Fixture ist ein gueltiger Ed25519-Schluessel");
+    let certificate_hash = CertificateHash::from(line.current_root_hash());
+    let protected = ProtectedHeader::normal(
+        ContentType::TrustDigest,
+        public.thumbprint(),
+        certificate_hash,
+    );
+    let digest = trust_digest(payload.exact_digest_input());
+    let signature = key.sign(&protected.sig_structure_bytes(digest.as_bytes()));
+    let mut cose = Vec::new();
+    Encoder::new(&mut cose)
+        .tag(minicbor::data::Tag::new(18))
+        .and_then(|encoder| encoder.array(4))
+        .and_then(|encoder| encoder.bytes(&protected.to_deterministic_cbor()))
+        .and_then(|encoder| encoder.map(0))
+        .and_then(|encoder| encoder.bytes(digest.as_bytes()))
+        .and_then(|encoder| encoder.bytes(&signature.to_bytes()))
+        .expect("die COSE der Fixture kodiert");
+    encode_trust(
+        &TrustObjectV1::new(payload.clone(), vec![cose])
+            .expect("ein Ziel mit genau einer Wurzelsignatur"),
+    )
+    .expect("das Zielobjekt kodiert")
+    .into_vec()
+}
+
 #[test]
 fn an_intended_target_verifies_before_it_is_signed_or_published() {
     let (line, payload) = intended_policy_target();
     let trust = line.verified(Pin::None);
 
-    // Der Beleg, dass das Ziel WIRKLICH noch nicht existiert: die
-    // Laufzeitrichtung findet zu diesen exakten Nutzlastbytes kein
-    // Katalogobjekt.
-    let runtime =
-        verify_authorized_trust_target(&trust, None, payload.exact_payload(), USE_TIME, SEQUENCE)
-            .err()
-            .expect("ein unveroeffentlichtes Ziel ist kein Katalogobjekt");
-    expect_code(runtime, "EA-TRUST-SOURCE");
-
     let intent = verify_intended_trust_target(&trust, None, &payload, USE_TIME, SEQUENCE)
         .expect("die Autorisierung deckt das beabsichtigte Ziel, auch ohne dessen Signatur");
     assert!(intent.target_trust_subtype() == payload.subtype());
     assert_eq!(intent.previous_registry_version().get(), 0);
+
+    // Der Beleg, dass das Ziel WIRKLICH noch nicht existiert, und zwar ueber
+    // die OBJEKTBYTES: die Laufzeitrichtung findet zu genau ihnen kein
+    // Katalogobjekt. Ueber `payload.exact_payload()` gemessen waere die
+    // Aussage leer — Nutzlastbytes sind nie Objektbytes, der Aufruf meldete
+    // `EA-TRUST-SOURCE` auch fuer ein laengst veroeffentlichtes Ziel.
+    let published = root_signed_object(&line, &payload);
+    let runtime = verify_authorized_trust_target(&trust, None, &published, USE_TIME, SEQUENCE)
+        .err()
+        .expect("ein unveroeffentlichtes Ziel ist kein Katalogobjekt");
+    expect_code(runtime, "EA-TRUST-SOURCE");
+}
+
+/// Die Gegenprobe zum Zeugen darueber: liegt DASSELBE Objekt im Katalog, dann
+/// traegt die Laufzeitrichtung.
+///
+/// Ohne sie bewiese `EA-TRUST-SOURCE` oben nichts — er faellt auch fuer
+/// Bytes, die aus einem ganz anderen Grund nicht passen.
+#[test]
+fn the_same_object_bytes_verify_once_they_are_in_the_catalogue() {
+    let (mut line, payload) = intended_policy_target();
+    let published = root_signed_object(&line, &payload);
+    line.add_object(published.clone());
+    let trust = line.verified(Pin::None);
+
+    verify_authorized_trust_target(&trust, None, &published, USE_TIME, SEQUENCE)
+        .expect("dieselben Objektbytes tragen, sobald der Katalog sie fuehrt");
 }
 
 #[test]

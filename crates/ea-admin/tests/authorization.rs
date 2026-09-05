@@ -19,13 +19,13 @@ use ea_crypto::object_hash;
 use ea_format::{CertificateKindV1, OperatorRoleV1, ParsedArchiveObject, decode_exact_object};
 use ea_operator::ReauthPurpose;
 use ea_trust::{TrustError, verify_authorized_trust_target, verify_intended_trust_target};
-use ea_types::{ChainSequence, UnixMillis};
+use ea_types::{CertificateHash, ChainSequence, UnixMillis};
 
 use support::{
     AFTER_REVOCATION_SEQUENCE, AuditHarness, EARLIER_HEAD, EARLIER_SEQUENCE, FixtureKeyProvider,
     LAST_HEAD, PROPOSED_SEQUENCE, PersistentStore, ReplayTable, ceremony_line, ceremony_proof,
-    ceremony_service, ceremony_service_for, second_operator_proof, selected_head, selected_head_at,
-    trust_support, verified,
+    ceremony_service, ceremony_service_for, ceremony_service_under_root, second_operator_proof,
+    selected_head, selected_head_at, trust_support, verified,
 };
 use trust_support::{ActionSpec, HeadOptions, Pin, RegistryLineBuilder};
 
@@ -59,22 +59,7 @@ fn the_valid_pair_publishes_a_target_that_did_not_exist_before() {
     let head = selected_head(&ceremony.line);
     let intent = ceremony.intent(&head);
 
-    // Der Beleg, dass das Ziel WIRKLICH noch nicht existiert: die
-    // Laufzeitrichtung findet zu diesen exakten Nutzlastbytes kein
-    // Katalogobjekt. Ein Zeuge, der ein bereits signiertes Objekt
-    // durchreichte, bezeugte den Fall nicht, fuer den dieser Dienst gebaut ist.
     let trust = verified(&ceremony.line);
-    let absent = verify_authorized_trust_target(
-        &trust,
-        Some(&head),
-        ceremony.target_payload.exact_payload(),
-        USE_TIME,
-        ChainSequence::new(PROPOSED_SEQUENCE),
-    )
-    .err()
-    .expect("ein unveroeffentlichtes Ziel ist kein Katalogobjekt");
-    expect_trust_code(absent, "EA-TRUST-SOURCE");
-
     let provider = FixtureKeyProvider::root();
     let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
     let service = ceremony_service(&head, &provider, &audit, &ceremony);
@@ -109,6 +94,21 @@ fn the_valid_pair_publishes_a_target_that_did_not_exist_before() {
         1,
         "genau EINE Wurzelsignatur"
     );
+    // Der Beleg, dass die Zeremonie ein Objekt ERZEUGT hat, das es vorher
+    // nicht gab: die Laufzeitrichtung findet zu genau diesen OBJEKTBYTES kein
+    // Katalogobjekt. Ueber die Nutzlastbytes gemessen waere die Aussage leer —
+    // Nutzlastbytes sind nie Objektbytes, der Aufruf meldete
+    // `EA-TRUST-SOURCE` auch fuer ein laengst veroeffentlichtes Ziel.
+    let absent = verify_authorized_trust_target(
+        &trust,
+        Some(&head),
+        published.as_bytes(),
+        USE_TIME,
+        ChainSequence::new(PROPOSED_SEQUENCE),
+    )
+    .err()
+    .expect("das erzeugte Objekt lag in diesem Bestand nicht");
+    expect_trust_code(absent, "EA-TRUST-SOURCE");
     assert!(
         !table
             .lock()
@@ -503,5 +503,115 @@ fn an_authorization_object_that_is_not_the_proven_one_is_refused() {
         .expect("der Beweiszustand nennt seine Autorisierung selbst");
     expect_admin_code(error, "EA-CEREMONY-AUTHORIZATION-MISMATCH");
     assert_eq!(provider.signatures_produced(), 0);
+    assert_untouched(&table);
+}
+
+#[test]
+fn a_foreign_root_key_cannot_publish_and_leaves_no_completed_row() {
+    let ceremony = ceremony_line();
+    let head = selected_head(&ceremony.line);
+    let intent = ceremony.intent(&head);
+
+    // Derselbe Port, ein FREMDER Schluessel. Der Kopfuebergang wiese das
+    // fertige Objekt spaeter ab — aber bis dahin waere eine von zwei
+    // Administratoren ausgestellte Einmal-Autorisierung verbrannt und eine
+    // `completed`-Auditzeile ueber eine Vollendung gebucht, die keine ist.
+    let provider = FixtureKeyProvider::foreign();
+    let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+    let service = ceremony_service(&head, &provider, &audit, &ceremony);
+    let proof = ceremony_proof(&ceremony, &head, ReauthPurpose::AdminRootCeremony);
+    let table = Arc::new(Mutex::new(ReplayTable::default()));
+    let mut store = PersistentStore::open(&table);
+    let authorization_bytes = ceremony.authorization_bytes().to_vec();
+
+    let error = service
+        .publish_authorized_target(
+            &intent,
+            ceremony.target_payload,
+            &authorization_bytes,
+            &mut store,
+            &proof,
+        )
+        .err()
+        .expect("ein fremder Wurzelschluessel veroeffentlicht nicht");
+    expect_admin_code(error, "EA-CEREMONY-ROOT-SIGNATURE-MISMATCH");
+    assert_eq!(
+        provider.signatures_produced(),
+        1,
+        "der Port wurde gefragt — und seine Antwort wurde zurueckgelesen"
+    );
+    assert!(
+        audit.booked().is_empty(),
+        "keine Zeile ueber eine Vollendung, die keine ist"
+    );
+    assert_untouched(&table);
+}
+
+#[test]
+fn a_certificate_hash_that_is_not_the_heads_root_is_refused() {
+    let ceremony = ceremony_line();
+    let head = selected_head(&ceremony.line);
+    let intent = ceremony.intent(&head);
+
+    let provider = FixtureKeyProvider::root();
+    let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+    // Ein echtes, aktives Zertifikat der Linie — nur eben nicht die Wurzel.
+    let service = ceremony_service_under_root(
+        &head,
+        &provider,
+        &audit,
+        &ceremony,
+        CertificateHash::from(ceremony.writer_certificate_object_hash),
+    );
+    let proof = ceremony_proof(&ceremony, &head, ReauthPurpose::AdminRootCeremony);
+    let table = Arc::new(Mutex::new(ReplayTable::default()));
+    let mut store = PersistentStore::open(&table);
+    let authorization_bytes = ceremony.authorization_bytes().to_vec();
+
+    let error = service
+        .publish_authorized_target(
+            &intent,
+            ceremony.target_payload,
+            &authorization_bytes,
+            &mut store,
+            &proof,
+        )
+        .err()
+        .expect("der Dienst signiert nur unter der Wurzelurkunde SEINES Kopfes");
+    expect_admin_code(error, "EA-CEREMONY-ROOT-CERTIFICATE-MISMATCH");
+    assert!(audit.booked().is_empty());
+    assert_untouched(&table);
+}
+
+#[test]
+fn a_provider_that_claims_the_root_thumbprint_but_signs_with_another_key_is_refused() {
+    let ceremony = ceremony_line();
+    let head = selected_head(&ceremony.line);
+    let intent = ceremony.intent(&head);
+
+    // Der geschuetzte Kopf NENNT den Abdruck der Wurzel; unterschrieben hat
+    // ein anderer Schluessel. `CoseSign1Bytes::compose` liest seine Bytes nur
+    // gegen `parse_cose_sign1` zurueck, und das prueft keine Signatur — ein
+    // reiner Abdruckvergleich faellt auf diesen Provider herein.
+    let provider = FixtureKeyProvider::impersonating_root();
+    let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+    let service = ceremony_service(&head, &provider, &audit, &ceremony);
+    let proof = ceremony_proof(&ceremony, &head, ReauthPurpose::AdminRootCeremony);
+    let table = Arc::new(Mutex::new(ReplayTable::default()));
+    let mut store = PersistentStore::open(&table);
+    let authorization_bytes = ceremony.authorization_bytes().to_vec();
+
+    let error = service
+        .publish_authorized_target(
+            &intent,
+            ceremony.target_payload,
+            &authorization_bytes,
+            &mut store,
+            &proof,
+        )
+        .err()
+        .expect("ein behaupteter Abdruck ist keine Wurzelsignatur");
+    expect_admin_code(error, "EA-CEREMONY-ROOT-SIGNATURE-MISMATCH");
+    assert!(audit.booked().is_empty());
     assert_untouched(&table);
 }

@@ -1,7 +1,10 @@
 //! Der Zeremoniendienst: die Reihenfolge IST seine Zusicherung.
 
 use ea_audit::{AuditActorProof, LocalAuditService, TypedLocalAuditEvent};
-use ea_crypto::{ContentType, VerificationContext, object_hash, trust_digest};
+use ea_crypto::{
+    CanonicalPublicCoseKey, ContentType, ProtectedHeader, VerificationContext, object_hash,
+    parse_cose_sign1, trust_digest,
+};
 use ea_format::{
     AdminRootContextV1, DecodedTrustPayloadV1, ExactObjectBytes, LocalAuditActionV1,
     LocalAuditOutcomeV1, ParsedArchiveObject, TrustObjectV1, TrustPayloadV1, decode_exact_object,
@@ -93,11 +96,15 @@ impl<'a> RootCeremonyService<'a> {
     /// 3. Die Autorisierungsbytes sind die, ueber die der Beweiszustand
     ///    spricht, und der Subtyp der Nutzlast ist der bewiesene.
     /// 4. Die Wurzelsignatur ueber [`VerificationContext::root_trust_digest`]
-    ///    und den Schluesselport.
+    ///    und den Schluesselport — und unmittelbar danach ihre ZUSCHREIBUNG
+    ///    an die Wurzelurkunde des gewaehlten Kopfes.
     /// 5. Die Kodierung ueber [`encode_trust`] — `ExactObjectBytes::new` ist
     ///    `pub(crate)` in `ea-format`, es gibt keinen zweiten Weg.
     /// 6. **Erst jetzt** die Einmal-Nutzung ueber
-    ///    [`consume_admin_authorization_intent`].
+    ///    [`consume_admin_authorization_intent`]. Scheitert sie, wird eine
+    ///    Zeile mit dem Ausgang `failed` gebucht: der Verbrauch setzt seine
+    ///    beiden Sperrdimensionen NACHEINANDER, ein Ausfall dazwischen liesse
+    ///    die Autorisierung sonst ohne jede Auditspur tot zurueck.
     /// 7. Die `adminRootCeremony`-Auditzeile. Ein separates `flush` gibt es
     ///    nicht: `record_signed` kodiert, signiert, liest die COSE gegen den
     ///    Kern zurueck und bucht in EINER Transaktion, bevor es zurueckkehrt.
@@ -133,14 +140,13 @@ impl<'a> RootCeremonyService<'a> {
     ///
     /// # Was dieser Dienst NICHT feststellt
     ///
-    /// Ob die erzeugte Wurzelsignatur gegen die Wurzelurkunde DIESES Bestands
-    /// verifiziert. Der Kontext dafuer — `ea_crypto::CoseVerifier` mit dem
-    /// `PreviousHeadResolver` von `ea-trust` — ist crate-privat, und die
-    /// Vollstaendigkeit des Paares stellt ohnehin erst der Kopfuebergang fest,
-    /// der als Einziger Autoritaet verleiht
-    /// (`ea_trust::verify_registry_candidate`). Ein Dienst mit einem falschen
-    /// Signaturgriff gibt hier also Bytes heraus, die der naechste
-    /// Kopfuebergang abweist — sichtbar, aber nicht hier.
+    /// Die VOLLSTAENDIGKEIT des Paares — ob das erzeugte Objekt in einem
+    /// Kopfuebergang wirklich Autoritaet erlangt. Das stellt allein
+    /// `ea_trust::verify_registry_candidate` fest, und es haengt an Dingen,
+    /// die hier noch gar nicht entschieden sind (Sequenzfenster,
+    /// Kettenfortschreibung). Die ZUSCHREIBUNG der Signatur an die
+    /// Wurzelurkunde dieses Kopfes stellt er dagegen sehr wohl fest, siehe
+    /// Schritt 4.
     ///
     /// # Errors
     ///
@@ -151,7 +157,10 @@ impl<'a> RootCeremonyService<'a> {
     /// Autorisierungsbytes, die der Beweiszustand nicht nennt,
     /// [`AdminError::TargetMismatch`] fuer eine Nutzlast eines anderen
     /// Subtyps, [`AdminError::Crypto`] und [`AdminError::Key`] fuer die
-    /// Signatur, [`AdminError::Format`] fuer die Kodierung,
+    /// Signatur, [`AdminError::RootCertificateMismatch`] und
+    /// [`AdminError::RootSignatureMismatch`] fuer eine Signatur, die der
+    /// Wurzel dieses Kopfes nicht zuschreibbar ist,
+    /// [`AdminError::Format`] fuer die Kodierung,
     /// [`AdminError::Trust`] fuer den Verbrauch — insbesondere
     /// `EA-TRUST-AUTH-REPLAY` bei der zweiten Nutzung — und
     /// [`AdminError::AuditFailed`] fuer die Auditzeile.
@@ -238,14 +247,25 @@ impl<'a> RootCeremonyService<'a> {
             )
             .map_err(AdminError::Key)?;
 
+        // 4b. Die ZUSCHREIBUNG. Ohne sie gaebe der Dienst Bytes heraus, die
+        //     nie Autoritaet erlangen koennen — und verbrauchte dafuer eine
+        //     Einmal-Autorisierung und buchte eine `completed`-Zeile.
+        self.require_root_attribution(signature.as_bytes(), digest.as_bytes())?;
+
         // 5. Die Kodierung.
         let object = TrustObjectV1::new(target, vec![signature.as_bytes().to_vec()])
             .map_err(AdminError::Format)?;
         let published = encode_trust(&object).map_err(AdminError::Format)?;
         let target_object_hash = object_hash(published.as_bytes());
 
-        // 6. Erst jetzt der Verbrauch.
-        consume_admin_authorization_intent(store, intent).map_err(AdminError::Trust)?;
+        // 6. Erst jetzt der Verbrauch. Scheitert er, kann er die erste
+        //    Sperrdimension bereits gesetzt haben — `consume_replay_keys` setzt
+        //    sie nacheinander —, und die Autorisierung waere ohne Auditspur
+        //    tot. Deshalb bucht auch dieser Pfad eine `failed`-Zeile.
+        if let Err(error) = consume_admin_authorization_intent(store, intent) {
+            self.book_failure(proof, intent, target_object_hash, action_code);
+            return Err(AdminError::Trust(error));
+        }
 
         // 7. Die Auditzeile, VOR der Herausgabe.
         let context = AdminRootContextV1::new(
@@ -274,6 +294,68 @@ impl<'a> RootCeremonyService<'a> {
 
         // 8. Erst jetzt.
         Ok(published)
+    }
+
+    /// Stellt fest, dass die frisch erzeugte COSE der Wurzelurkunde DIESES
+    /// Kopfes zuschreibbar ist.
+    ///
+    /// Zwei Fragen, beide fail-closed:
+    ///
+    /// 1. Ist der Zertifikatshash, unter dem dieser Dienst signieren laesst,
+    ///    ueberhaupt der der Wurzelurkunde des gewaehlten Kopfes? Er ist ein
+    ///    Parameter des Aufrufers, und ein falsch konfigurierter waere sonst
+    ///    unsichtbar.
+    /// 2. Stammt die Signatur von dem Schluessel, den diese Urkunde nennt?
+    ///    Geprueft wird BEIDES: der Abdruck im geschuetzten Kopf gegen
+    ///    `rootKeyThumbprint`, und die Signatur selbst gegen den oeffentlichen
+    ///    Schluessel der Urkunde. Der Abdruck allein genuegte nicht — ein
+    ///    Provider, der ihn behauptet und mit einem anderen Schluessel
+    ///    unterschreibt, kaeme durch.
+    ///
+    /// Der geschuetzte Kopf wird dafuer aus den ZURUECKGELESENEN Werten neu
+    /// gebildet und nicht aus den eigenen:
+    /// `ProtectedHeader::to_deterministic_cbor` ist kanonisch, also ergibt
+    /// dieselbe Eingabe dieselben Bytes, und eine nicht rekonstruierbare
+    /// Kodierung scheitert hier — fail-closed.
+    ///
+    /// # Warum das nicht `ea_crypto::verify_cose_sign1` ist
+    ///
+    /// Jener Weg verlangt einen `ea_crypto::SignerCertificateResolver` ueber
+    /// die exakten Zertifikatsbytes; der einzige, der die Wurzellinie kennt,
+    /// ist `ea_trust::PreviousHeadResolver`, und der ist crate-privat. Diese
+    /// Crate liest stattdessen die zwei oeffentlichen Werte der Wurzelurkunde
+    /// und prueft dieselbe Gleichung.
+    fn require_root_attribution(
+        &self,
+        exact_cose: &[u8],
+        expected_payload: &[u8],
+    ) -> Result<(), AdminError> {
+        if self.root_certificate_hash
+            != CertificateHash::from(self.head.root_certificate_object_hash())
+        {
+            return Err(AdminError::RootCertificateMismatch);
+        }
+        let fields = self.head.root_certificate_fields();
+        let parsed = parse_cose_sign1(exact_cose, &[]).map_err(AdminError::Crypto)?;
+        if parsed.content_type() != ContentType::TrustDigest
+            || parsed.certificate_hash() != Some(self.root_certificate_hash)
+            || parsed.payload() != expected_payload
+            || parsed.key_thumbprint() != fields.root_key_thumbprint
+        {
+            return Err(AdminError::RootSignatureMismatch);
+        }
+        let key = CanonicalPublicCoseKey::from_deterministic_cbor(&fields.root_public_cose_key)
+            .map_err(AdminError::Crypto)?;
+        let protected = ProtectedHeader::normal(
+            ContentType::TrustDigest,
+            parsed.key_thumbprint(),
+            self.root_certificate_hash,
+        );
+        key.verify_ed25519_strict(
+            &protected.sig_structure_bytes(expected_payload),
+            parsed.signature_bytes(),
+        )
+        .map_err(|_| AdminError::RootSignatureMismatch)
     }
 
     /// Bucht die Zeile mit dem Ausgang `failed`.

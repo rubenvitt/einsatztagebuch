@@ -13,20 +13,20 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use ea_admin::AdminError;
-use ea_crypto::{VerificationContext, object_hash};
+use ea_crypto::object_hash;
 use ea_format::{
-    CertificateKindV1, DecodedTrustPayloadV1, LocalAuditActionV1, LocalAuditOutcomeV1,
-    OperatorRoleV1, ParsedArchiveObject, decode_exact_object, decode_local_audit_event,
+    CertificateKindV1, LocalAuditActionV1, LocalAuditOutcomeV1, OperatorRoleV1,
+    decode_local_audit_event,
 };
 use ea_operator::ReauthPurpose;
-use ea_trust::verify_intended_trust_target;
-use ea_types::{CertificateHash, ChainSequence, UnixMillis};
+use ea_types::ObjectHash;
 
 use support::{
-    AuditHarness, FixtureKeyProvider, PersistentStore, ReplayTable, StoreWithoutReplayLock,
-    ceremony_line, ceremony_proof, ceremony_service, selected_head, trust_support,
+    AuditHarness, FixtureKeyProvider, PersistentStore, ReplayTable,
+    StoreFailingOnTheSecondDimension, StoreWithoutReplayLock, ceremony_line, ceremony_line_for,
+    ceremony_proof, ceremony_service, selected_head, trust_support,
 };
-use trust_support::{ActionSpec, HeadOptions, Pin, RegistryLineBuilder};
+use trust_support::ActionSpec;
 
 fn expect_admin_code(error: AdminError, expected: &str) {
     assert_eq!(error.code(), expected);
@@ -131,9 +131,14 @@ fn the_second_publication_of_the_same_authorization_is_refused_across_runs() {
         .err()
         .expect("die laufuebergreifende Sperre weist die zweite Nutzung ab");
     expect_admin_code(error, "EA-TRUST-AUTH-REPLAY");
-    assert!(
-        audit.booked().is_empty(),
-        "eine abgewiesene Wiedereinspielung schreibt keine Zeremonienzeile"
+    let booked = audit.booked();
+    assert_eq!(booked.len(), 1, "auch die Abweisung ist eine Zeile wert");
+    assert_eq!(
+        decode_local_audit_event(&booked[0])
+            .expect("die Zeile ist wohlgeformt")
+            .outcome(),
+        LocalAuditOutcomeV1::Failed,
+        "eine abgewiesene Wiedereinspielung ist KEINE Vollendung"
     );
 }
 
@@ -197,9 +202,62 @@ fn a_store_without_the_replay_lock_fails_closed() {
         .err()
         .expect("ein Speicher ohne Sperre darf nicht 'frisch' antworten");
     expect_admin_code(error, "EA-TRUST-STATE-UNAVAILABLE");
-    assert!(
-        audit.booked().is_empty(),
-        "ohne Verbrauch keine Zeremonienzeile"
+    let booked = audit.booked();
+    assert_eq!(booked.len(), 1);
+    assert_eq!(
+        decode_local_audit_event(&booked[0])
+            .expect("die Zeile ist wohlgeformt")
+            .outcome(),
+        LocalAuditOutcomeV1::Failed
+    );
+}
+
+#[test]
+fn a_half_consumed_authorization_leaves_a_failed_row() {
+    let ceremony = ceremony_line();
+    let head = selected_head(&ceremony.line);
+    let intent = ceremony.intent(&head);
+    let provider = FixtureKeyProvider::root();
+    let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+    let service = ceremony_service(&head, &provider, &audit, &ceremony);
+    let proof = ceremony_proof(&ceremony, &head, ReauthPurpose::AdminRootCeremony);
+    let table = Arc::new(Mutex::new(ReplayTable::default()));
+    // Die erste Sperrdimension wird gesetzt, die zweite faellt aus. Danach ist
+    // die Autorisierung HALB verbraucht: ein zweiter Versuch meldet
+    // `EA-TRUST-AUTH-REPLAY`, obwohl nie etwas veroeffentlicht wurde.
+    let mut store = StoreFailingOnTheSecondDimension::open(&table);
+    let authorization_bytes = ceremony.authorization_bytes().to_vec();
+
+    let error = service
+        .publish_authorized_target(
+            &intent,
+            ceremony.target_payload,
+            &authorization_bytes,
+            &mut store,
+            &proof,
+        )
+        .err()
+        .expect("ein Speicher, der mitten im Verbrauch ausfaellt, veroeffentlicht nicht");
+    expect_admin_code(error, "EA-TRUST-STATE-UNAVAILABLE");
+    assert_eq!(
+        table
+            .lock()
+            .expect("die Tabelle der Fixture ist nicht vergiftet")
+            .len(),
+        1,
+        "die erste Sperrdimension steht — die Autorisierung ist halb verbraucht"
+    );
+    let booked = audit.booked();
+    assert_eq!(
+        booked.len(),
+        1,
+        "und genau darueber muss die Auditzeile Auskunft geben"
+    );
+    assert_eq!(
+        decode_local_audit_event(&booked[0])
+            .expect("die Zeile ist wohlgeformt")
+            .outcome(),
+        LocalAuditOutcomeV1::Failed
     );
 }
 
@@ -248,6 +306,10 @@ fn a_failing_audit_withholds_the_target_bytes_and_books_a_failed_row() {
     );
 }
 
+/// Die Objektart, die ein Aktionscode traegt — gebaut aus dem Objekthash des
+/// Writer-Zertifikats der Linie und dem der aktuellen Wurzelurkunde.
+type TargetOfCode = Box<dyn Fn(ObjectHash, ObjectHash) -> ActionSpec>;
+
 /// Die fuenf Aktionscodes, die als DIREKTES Ziel einer Zeremonie ueberhaupt
 /// erreichbar sind, samt der Objektart, die sie tragen.
 ///
@@ -257,55 +319,48 @@ fn a_failing_audit_withholds_the_target_bytes_and_books_a_failed_row() {
 /// Registrierungsereignisses. Es gibt also keine Nutzlast, die ein
 /// Zeremoniendienst dafuer unterschreiben koennte.
 ///
-/// Code 3 — Writer-Uebergang — fehlt aus demselben Grund NICHT, sondern weil
-/// er zwei bereits aktive Writer-Zertifikate nennt; die braeuchten zwei
-/// Uebergaenge, und dann laege die Autorisierung nicht mehr auf
-/// Registrierung null. Der Zeuge misst die UEBEREINSTIMMUNG DER LESER, und
-/// die haengt nicht an der Objektart.
-fn reachable_action_specs(line: &RegistryLineBuilder) -> Vec<(u64, ActionSpec)> {
+/// Code 3 — Writer-Uebergang — fehlt, weil er zwei Writer-Zertifikate nennt,
+/// die BEIDE bereits aktiv sein muessen; die Fixture fuehrt eines.
+fn reachable_action_codes() -> Vec<(u64, TargetOfCode)> {
     vec![
         (
             0,
-            ActionSpec::Device {
+            Box::new(|_, _| ActionSpec::Device {
                 kind: CertificateKindV1::Writer,
                 marker: 0x51,
                 effective_from: None,
-            },
+            }),
         ),
         (
             2,
-            ActionSpec::Policy {
+            Box::new(|_, _| ActionSpec::Policy {
                 policy_version: None,
                 previous_policy_hash: None,
                 effective_from: None,
-            },
+            }),
         ),
         (
             4,
-            ActionSpec::OperatorBinding {
-                // Das Bootstrap-Administratorzertifikat: ein Objekt, das es auf
-                // Registrierung null schon gibt. Ein frisch gepushtes
-                // Zertifikat ruecke die Linie vor, und die Autorisierung laege
-                // dann nicht mehr auf dem Stand, gegen den dieser Zeuge prueft.
-                certificate_hash: line.bootstrap_admin_hash(),
-                role: OperatorRoleV1::OrganizationAdmin,
+            Box::new(|writer, _| ActionSpec::OperatorBinding {
+                certificate_hash: writer,
+                role: OperatorRoleV1::Writer,
                 marker: 0x52,
                 effective_from: None,
-            },
+            }),
         ),
         (
             5,
-            ActionSpec::AdminIssue {
+            Box::new(|_, _| ActionSpec::AdminIssue {
                 marker: 0x54,
                 effective_from: None,
-            },
+            }),
         ),
         (
             6,
-            ActionSpec::RootRotate {
-                previous_root_hash: Some(line.current_root_hash()),
+            Box::new(|_, root| ActionSpec::RootRotate {
+                previous_root_hash: Some(root),
                 effective_version: None,
-            },
+            }),
         ),
     ]
 }
@@ -313,63 +368,45 @@ fn reachable_action_specs(line: &RegistryLineBuilder) -> Vec<(u64, ActionSpec)> 
 /// Der Aktionscode der Auditzeile ist der, den die geschlossene Aktionstabelle
 /// FORDERT — fuer jede Objektart, die eine Zeremonie unterschreiben kann.
 ///
-/// Drei Leser stehen ueber denselben Bytes: `ea-format` (den `ea-trust` und
-/// diese Crate benutzen), `ea-crypto` an der Signaturgrenze, und die
-/// geschlossene Aktionstabelle, die `ea-trust` gegen den gelesenen Wert
-/// stellt. Divergierten sie, naennte eine ausgelieferte
-/// `adminRootCeremony`-Zeile eine andere Aktion als die, die zugelassen wurde.
+/// Der Zeuge faehrt dafuer den PRODUKTIONSLESER: er veroeffentlicht wirklich
+/// und liest den Code aus der gebuchten Zeile. Ein Zeuge, der den Leser
+/// nachbaut, misst nur sich selbst — eine Mutation im Produktionsleser bliebe
+/// gruen.
 #[test]
 fn every_reachable_action_code_reaches_the_audit_line_unchanged() {
-    for (expected_code, action) in reachable_action_specs(&RegistryLineBuilder::new()) {
-        let mut line = RegistryLineBuilder::new();
-        let root_certificate_hash = CertificateHash::from(line.current_root_hash());
-        let (authorization_object_hash, payload) =
-            line.prepare_unsigned(action, HeadOptions::default());
-        let trust = line.verified(Pin::None);
+    for (expected_code, action) in reachable_action_codes() {
+        let ceremony = ceremony_line_for(action.as_ref());
+        let head = selected_head(&ceremony.line);
+        let intent = ceremony.intent(&head);
+        let provider = FixtureKeyProvider::root();
+        let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+        let service = ceremony_service(&head, &provider, &audit, &ceremony);
+        let proof = ceremony_proof(&ceremony, &head, ReauthPurpose::AdminRootCeremony);
+        let table = Arc::new(Mutex::new(ReplayTable::default()));
+        let mut store = PersistentStore::open(&table);
+        let authorization_bytes = ceremony.authorization_bytes().to_vec();
 
-        // 1. `ea-trust` stellt den gelesenen Aktionscode gegen
-        //    `descriptor.required_action` aus der geschlossenen Tabelle.
-        //    Gelingt der Beweis, IST der gelesene Wert der geforderte.
-        let intent = verify_intended_trust_target(
-            &trust,
-            None,
-            &payload,
-            UnixMillis::new(100),
-            ChainSequence::new(1),
-        )
-        .unwrap_or_else(|error| {
-            panic!("Aktionscode {expected_code}: der Beweis muss tragen, nicht {error:?}")
-        });
-        assert!(intent.target_trust_subtype() == payload.subtype());
+        service
+            .publish_authorized_target(
+                &intent,
+                ceremony.target_payload,
+                &authorization_bytes,
+                &mut store,
+                &proof,
+            )
+            .unwrap_or_else(|error| {
+                panic!("Aktionscode {expected_code}: die Zeremonie muss tragen, nicht {error:?}")
+            });
 
-        // 2. `ea-crypto` liest denselben Wert an der Signaturgrenze und stellt
-        //    ihn gegen `admin_action_permits_target`.
-        VerificationContext::root_trust_digest(
-            payload.exact_digest_input(),
-            root_certificate_hash,
-            Some(line.exact_object_bytes(authorization_object_hash)),
-        )
-        .unwrap_or_else(|error| {
-            panic!("Aktionscode {expected_code}: die Signaturgrenze muss tragen, nicht {error:?}")
-        });
-
-        // 3. Der Leser der Auditzeile — `ea_format::decode_exact_object`,
-        //    derselbe, den `ea_admin::admin_action_code` fuehrt.
-        let ParsedArchiveObject::Trust(parsed) =
-            decode_exact_object(line.exact_object_bytes(authorization_object_hash))
-                .expect("die Autorisierung ist ein wohlgeformtes Objekt")
-        else {
-            panic!("die Autorisierung ist ein Trust-Objekt");
-        };
-        let DecodedTrustPayloadV1::OrganizationAdminAuthorization(fields) = parsed
-            .value()
-            .decoded_payload()
-            .expect("die Autorisierung ist wohlgeformt")
-        else {
-            panic!("die Autorisierung ist eine Administrationsautorisierung");
+        let booked = audit.booked();
+        assert_eq!(booked.len(), 1);
+        let event =
+            decode_local_audit_event(&booked[0]).expect("die gebuchte Zeile ist wohlgeformt");
+        let LocalAuditActionV1::AdminRootCeremony(context) = event.action() else {
+            panic!("die Zeremonie schreibt die adminRootCeremony-Zeile");
         };
         assert_eq!(
-            u64::from(fields.action_code),
+            context.action_code(),
             expected_code,
             "der Leser der Auditzeile und die geschlossene Aktionstabelle muessen \
              denselben Aktionscode nennen"

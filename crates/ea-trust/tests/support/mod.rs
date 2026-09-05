@@ -815,6 +815,16 @@ impl RegistryLineBuilder {
         (authorization_hash, payload)
     }
 
+    /// Legt fertige Objektbytes in den Katalog.
+    ///
+    /// Die Gegenprobe zu [`Self::prepare_unsigned`]: erst fehlt das Ziel, dann
+    /// liegt es da. Ohne sie bewiese ein `EA-TRUST-SOURCE` ueber
+    /// unveroeffentlichte Objektbytes nichts — er faellt auch fuer Bytes, die
+    /// aus einem ganz anderen Grund nicht passen.
+    pub fn add_object(&mut self, exact_bytes: Vec<u8>) {
+        self.objects.push(exact_bytes);
+    }
+
     pub fn remove_object(&mut self, target: ObjectHash) {
         self.objects.retain(|bytes| object_hash(bytes) != target);
     }

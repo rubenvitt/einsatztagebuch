@@ -55,6 +55,17 @@ pub enum AdminError {
     /// Die vorgelegte Nutzlast traegt einen anderen Subtyp als den, den der
     /// Beweiszustand deckt.
     TargetMismatch,
+    /// Der Zertifikatshash, unter dem dieser Dienst signieren laesst, ist
+    /// nicht der der Wurzelurkunde des gewaehlten Kopfes.
+    RootCertificateMismatch,
+    /// Die erzeugte COSE ist der Wurzel dieses Kopfes NICHT zuschreibbar.
+    ///
+    /// Ein Arm fuer beide Haelften desselben Befundes: der Schluesselabdruck
+    /// im geschuetzten Kopf weicht vom `rootKeyThumbprint` der Wurzelurkunde
+    /// ab, ODER die Signatur verifiziert unter deren oeffentlichem Schluessel
+    /// nicht. Beides heisst „diese Bytes stammen nicht von der Wurzel", und
+    /// ein Aufrufer soll daran keine zwei Faelle unterscheiden muessen.
+    RootSignatureMismatch,
     /// Die Auditzeile konnte nicht gebucht werden — die Zielbytes bleiben
     /// zurueck.
     AuditFailed,
@@ -79,6 +90,8 @@ impl AdminError {
             Self::HeadMismatch => "EA-CEREMONY-HEAD-MISMATCH",
             Self::AuthorizationMismatch => "EA-CEREMONY-AUTHORIZATION-MISMATCH",
             Self::TargetMismatch => "EA-CEREMONY-TARGET-MISMATCH",
+            Self::RootCertificateMismatch => "EA-CEREMONY-ROOT-CERTIFICATE-MISMATCH",
+            Self::RootSignatureMismatch => "EA-CEREMONY-ROOT-SIGNATURE-MISMATCH",
             Self::AuditFailed => "EA-CEREMONY-AUDIT-FAILED",
             Self::Trust(error) => error.code(),
             Self::Crypto(error) => error.code(),

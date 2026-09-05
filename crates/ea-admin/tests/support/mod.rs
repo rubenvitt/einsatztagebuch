@@ -182,6 +182,20 @@ pub struct CeremonyLine {
 /// Wenn die Fixture ihre eigenen direkten Ziele nicht baut.
 #[must_use]
 pub fn ceremony_line() -> CeremonyLine {
+    ceremony_line_for(&|_, _| policy_action())
+}
+
+/// Dieselbe Linie, aber mit einer frei gewaehlten Objektart als Ziel.
+///
+/// `target` bekommt den Objekthash des Writer-Zertifikats der Linie und den
+/// der aktuellen Wurzelurkunde: eine Bedienerbindung muss ein Zertifikat
+/// nennen, eine Wurzelrotation ihre Vorgaengerin.
+///
+/// # Panics
+///
+/// Wenn die Fixture ihre eigenen direkten Ziele nicht baut.
+#[must_use]
+pub fn ceremony_line_for(target: &dyn Fn(ObjectHash, ObjectHash) -> ActionSpec) -> CeremonyLine {
     let instance_thumbprint = KeyThumbprint::from(
         Hash32::try_from(
             public_key(INSTANCE_SECRET)
@@ -192,7 +206,8 @@ pub fn ceremony_line() -> CeremonyLine {
         .expect("ein Thumbprint ist 32 Byte"),
     );
     let mut line = RegistryLineBuilder::new();
-    let root_certificate_hash = CertificateHash::from(line.current_root_hash());
+    let root_object_hash = line.current_root_hash();
+    let root_certificate_hash = CertificateHash::from(root_object_hash);
     line.push(policy_action(), head_options(1, 10));
     let writer = line.push(
         ActionSpec::Device {
@@ -238,8 +253,10 @@ pub fn ceremony_line() -> CeremonyLine {
         .expect("die zweite Bedienerbindung ist ein direktes Ziel");
     // Erst JETZT: die Autorisierung des Ziels, gebunden an den aktuellen Kopf.
     // Das Ziel selbst bleibt aus dem Katalog fort.
-    let (authorization_object_hash, target_payload) =
-        line.prepare_unsigned(policy_action(), HeadOptions::default());
+    let (authorization_object_hash, target_payload) = line.prepare_unsigned(
+        target(writer_certificate_object_hash, root_object_hash),
+        HeadOptions::default(),
+    );
     CeremonyLine {
         target_payload,
         authorization_object_hash,
@@ -252,6 +269,15 @@ pub fn ceremony_line() -> CeremonyLine {
 }
 
 impl CeremonyLine {
+    /// Eine Kopie der beabsichtigten Nutzlast.
+    ///
+    /// `publish_authorized_target` nimmt sie als Wert; ein Zeuge, der danach
+    /// noch etwas ueber sie sagen will, braucht deshalb eine zweite.
+    #[must_use]
+    pub fn target_payload(&self) -> TrustPayloadV1 {
+        self.target_payload.clone()
+    }
+
     /// Die exakten Bytes der Autorisierung dieses Ziels.
     #[must_use]
     pub fn authorization_bytes(&self) -> &[u8] {
@@ -493,6 +519,13 @@ pub fn second_operator_proof(
 /// aus einem Startwert ab und traefe ihn nie.
 pub struct FixtureKeyProvider {
     secret: [u8; 32],
+    /// Der Abdruck, den der geschuetzte Kopf NENNT — falls er nicht der des
+    /// Schluessels ist, mit dem unterschrieben wird.
+    ///
+    /// Die Attrappe eines Providers, der luegt. `CoseSign1Bytes::compose`
+    /// liest seine Bytes nur gegen `parse_cose_sign1` zurueck, und das prueft
+    /// keine Signatur — ein Abdruckvergleich allein faellt auf ihn herein.
+    claimed_thumbprint: Option<KeyThumbprint>,
     /// Wie oft der Port um eine Signatur gebeten wurde.
     ///
     /// Ohne den Zaehler misst ein Zeuge namens „… erreicht den Schluesselport
@@ -507,6 +540,7 @@ impl FixtureKeyProvider {
     pub const fn root() -> Self {
         Self {
             secret: trust_support::root_signing_secret(),
+            claimed_thumbprint: None,
             signatures: AtomicUsize::new(0),
         }
     }
@@ -517,6 +551,20 @@ impl FixtureKeyProvider {
     pub const fn foreign() -> Self {
         Self {
             secret: FOREIGN_ROOT_SECRET,
+            claimed_thumbprint: None,
+            signatures: AtomicUsize::new(0),
+        }
+    }
+
+    /// Ein Provider, der den Abdruck der WURZEL nennt und mit einem fremden
+    /// Schluessel unterschreibt.
+    ///
+    /// Der Fall, den ein reiner Abdruckvergleich nicht faengt.
+    #[must_use]
+    pub fn impersonating_root() -> Self {
+        Self {
+            secret: FOREIGN_ROOT_SECRET,
+            claimed_thumbprint: Some(public_key(trust_support::root_signing_secret()).thumbprint()),
             signatures: AtomicUsize::new(0),
         }
     }
@@ -558,8 +606,12 @@ impl KeyProvider for FixtureKeyProvider {
         let key = signing_key(self.secret);
         let public = CanonicalPublicCoseKey::ed25519(key.verifying_key().to_bytes())
             .map_err(KeyError::Crypto)?;
-        let protected =
-            ProtectedHeader::normal(content_type, public.thumbprint(), certificate_hash);
+        let protected = ProtectedHeader::normal(
+            content_type,
+            self.claimed_thumbprint
+                .unwrap_or_else(|| public.thumbprint()),
+            certificate_hash,
+        );
         let signature = key.sign(&protected.sig_structure_bytes(payload));
         CoseSign1Bytes::compose(&protected, payload, &signature.to_bytes())
     }
@@ -811,6 +863,75 @@ impl TrustStateStore for PersistentStore {
     }
 }
 
+/// Ein Speicher, der die ERSTE Sperrdimension setzt und bei der zweiten
+/// ausfaellt.
+///
+/// Kein konstruierter Sonderfall: `consume_replay_keys` setzt die beiden
+/// Dimensionen NACHEINANDER, und eine Ablage kann zwischen zwei Anweisungen
+/// wegbrechen. Danach ist die Autorisierung halb verbraucht — genau der
+/// Zustand, ueber den die Auditzeile Auskunft geben muss.
+pub struct StoreFailingOnTheSecondDimension {
+    table: Arc<Mutex<ReplayTable>>,
+    seen: usize,
+}
+
+impl StoreFailingOnTheSecondDimension {
+    #[must_use]
+    pub fn open(table: &Arc<Mutex<ReplayTable>>) -> Self {
+        Self {
+            table: Arc::clone(table),
+            seen: 0,
+        }
+    }
+}
+
+impl TrustStateStore for StoreFailingOnTheSecondDimension {
+    fn load(&mut self, _key: TrustStateKey) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn commit_independent_time(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &IndependentTimeCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn clock_release_consumed(
+        &mut self,
+        _key: &ClockReleaseReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn commit_registry_selection(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &RegistrySelectionCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn admin_authorization_consumed(
+        &mut self,
+        key: &AdminAuthorizationReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        self.seen += 1;
+        if self.seen > 1 {
+            return Err(StateStoreError::Unavailable);
+        }
+        self.table
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+            .push(replay_row(key));
+        Ok(false)
+    }
+}
+
 /// Ein Speicher, der die Sperre NICHT fuehrt.
 pub struct StoreWithoutReplayLock;
 
@@ -878,5 +999,25 @@ pub fn ceremony_service_for<'a>(
         ceremony.root_certificate_hash,
         audit.service(),
         binding_object_hash,
+    )
+}
+
+/// Derselbe Dienst, aber unter einem ausdruecklich genannten
+/// Wurzelzertifikatshash.
+#[must_use]
+pub fn ceremony_service_under_root<'a>(
+    head: &'a SelectedRegistryHead,
+    provider: &'a FixtureKeyProvider,
+    audit: &'a AuditHarness,
+    ceremony: &CeremonyLine,
+    root_certificate_hash: CertificateHash,
+) -> RootCeremonyService<'a> {
+    RootCeremonyService::new(
+        head,
+        provider,
+        provider.handle(),
+        root_certificate_hash,
+        audit.service(),
+        ceremony.binding_object_hash,
     )
 }
