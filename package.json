@@ -25,6 +25,8 @@
     "stage-gate:2": "cargo run --locked -p xtask -- stage-gate 2",
     "supply-chain": "cargo deny check",
     "test:server": "cargo test --locked -p einsatzarchiv-server --test migrations --test object_store --test fault_scenarios --test auth_trust_api --test webauthn_credential_api --test entry_commit_api --test commit_failures --test checkpoint_api --test read_apis --test historical_grant_api --test destruction_api --test export_api --test vault_blob_api --test writer_sync_e2e",
-    "stage-gate:3": "cargo run --locked -p xtask -- stage-gate 3"
+    "stage-gate:3": "cargo run --locked -p xtask -- stage-gate 3",
+    "test:reader": "cargo test --locked -p ea-reader -p ea-index",
+    "stage-gate:4": "cargo run --locked -p xtask -- stage-gate 4"
   }
 }

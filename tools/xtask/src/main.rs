@@ -2240,6 +2240,185 @@ const STAGE_THREE_HOST_SCOPE_CLAUSE: &str = concat!(
     "Stufe 7."
 );
 
+/// Die Vektorfamilien der Stufe 4 — KEINE.
+///
+/// LEER, und das ist die Aussage: Stufe 4 friert KEINE Vektorfamilie ein.
+/// `vectors/crypto/suite-1/`, `vectors/trust/v1/` und `vectors/web-bundle/v1/`
+/// werden ausschliesslich GELESEN — die ersten beiden sind Stufe-1-Familien,
+/// die dritte hat die Stufe 3 eingefroren —, und ein Eintrag behauptete ein
+/// Einfrieren, das es nicht gibt. Die Begruendung ist dieselbe, die
+/// [`STAGE_THREE_VECTOR_FAMILIES`] fuer Quittungs- und Nachweisvektoren
+/// aufschreibt.
+///
+/// Der Bericht weist den Schluessel `vector_families` trotzdem aus, mit einem
+/// LEEREN Array: ein weggelassener Schluessel waere von einem Bericht ohne
+/// Vektorabschnitt nicht zu unterscheiden.
+const STAGE_FOUR_VECTOR_FAMILIES: [&str; 0] = [];
+
+/// Die primaeren Abnahmekriterien der Stufe 4 nach `design.md` Abschnitt 23.
+const STAGE_FOUR_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 3] = [10, 42, 43];
+
+/// Der Stufe-4-Gate-Bericht, relativ zur Gate-Wurzel.
+const STAGE_FOUR_GATE_REPORT_PATH: &str = "docs/traceability/stage-4-gate.md";
+
+/// Das Manifest der deklarierten Szenarien, relativ zur Gate-Wurzel.
+///
+/// Dieselbe Form wie `docs/traceability/stage-3-fault-points.json` und
+/// dieselbe Begruendung: der Gate liest die DEKLARATION und braucht dafuer
+/// keine Kante auf `crates/ea-reader` oder `apps/web`.
+const STAGE_FOUR_FAULT_POINT_MANIFEST_PATH: &str = "docs/traceability/stage-4-fault-points.json";
+
+/// Die fuenf Abschnitte, die das Szenarienmanifest fuehren MUSS, in der
+/// Reihenfolge der Aufgaben, die sie schreiben.
+///
+/// `bundle-activation` traegt die vier Aktivierungspunkte des Service Workers;
+/// `sync-cursor` die fuenfzehn Abbruchpunkte des inkrementellen Syncs;
+/// `verification` die sechs Punkte vor der Entschluesselung; `file-mode` die
+/// drei Punkte des Datei-Modus; `session-and-export` die vier Punkte um
+/// Sitzungssperre und Einzelexport. Die Stelligkeit wird HIER einmal
+/// festgelegt, damit keine spaetere Aufgabe sie ein zweites Mal verschiebt.
+const STAGE_FOUR_FAULT_POINT_SECTIONS: [&str; 5] = [
+    "bundle-activation",
+    "sync-cursor",
+    "verification",
+    "file-mode",
+    "session-and-export",
+];
+
+/// Die Skripte, die die Wurzel-`package.json` fuehren MUSS.
+///
+/// GENAU die sechs, die der gemessene Stufe-4-Lauf (Schritt 4 des Plans) selbst
+/// aufruft — lexikografisch. Die Auswahlregel ist die der Stufe 3. Die Skripte
+/// frueherer Stufen stehen nicht hier: sie werden bereits von
+/// [`STAGE_TWO_REQUIRED_SCRIPTS`] und [`STAGE_THREE_REQUIRED_SCRIPTS`]
+/// gehalten, und ein zweites Mal geprueft belegen sie nichts.
+const STAGE_FOUR_REQUIRED_SCRIPTS: [&str; 6] = [
+    "stage-gate:4",
+    "supply-chain",
+    "test:reader",
+    "verify:quick",
+    "web:browser-test",
+    "web:e2e",
+];
+
+/// Die Pflichtabschnitte des Stufe-4-Gate-Berichts, in Dokumentreihenfolge.
+///
+/// Die ersten ACHT wie in Stufe 3: die ersten fuenf folgen dem Stufe-2-Muster,
+/// die drei danach halten die GEPRUEFTEN NEGATIVE, deren Schweigen sonst als
+/// „nicht geprueft" gelesen wuerde.
+///
+/// ZEHN und nicht acht, und die zwei letzten sind GEMESSEN dazugekommen: beide
+/// liessen sich am 2026-09-05 aus dem Bericht ganz herausschneiden
+/// (`## Ledgerpflege` 39 Zeilen, `## Offen in spaeterer Stufe` 21 Zeilen),
+/// ohne dass `pnpm stage-gate:4` etwas anderes als Exitcode 0 lieferte. Bei
+/// `## Offen in spaeterer Stufe` ist der Schnitt schaerfer als bei jedem
+/// anderen Abschnitt: der sechzehnte Eintrag von
+/// [`STAGE_FOUR_GATE_REPORT_LITERALS`] — die Offenlegungspflicht dieser
+/// Stufe — endet auf „Alle vier stehen unten in `## Offen in spaeterer Stufe`
+/// mit ihrer besitzenden Stufe", also ZEIGT der gepinnte Satz auf diesen
+/// Abschnitt. Ein Zeiger, dessen Ziel loeschbar ist, waehrend der Zeiger
+/// gepinnt bleibt, ist keine Offenlegung. `## Ledgerpflege` steht aus dem
+/// Grund daneben, aus dem die drei geprueften Negative oben stehen: der
+/// Bericht sagt dort, WELCHE Ledgerzeilen die Stufe fortschreibt, und sein
+/// Schweigen liest sich als „keine".
+///
+/// `## Gemessener Gate-Lauf` bleibt wie in Stufe 3 UNGEPINNT, und das ist
+/// keine Nachlaessigkeit: den Abschnitt liest der benannte Test der
+/// Stufenabnahme
+/// (`stage_four_gate_report_records_the_measured_full_gate_run`), und er
+/// entsteht ERST, nachdem der Gate gelaufen ist — ein Gate, der ihn
+/// verlangte, koennte auf dem Lauf, der ihn erzeugt, nie gruen sein.
+///
+/// Umlautfrei, wie alle drei bereits geschlossenen Gate-Berichte, weil der Gate
+/// Literale vergleicht.
+const STAGE_FOUR_GATE_REPORT_SECTIONS: [&str; 10] = [
+    "## 1. Primaere Abnahmekriterien und ihre Belege",
+    "## 2. Reichweite der Stufe-4-Abnahme",
+    "## 3. Fehlermatrix und deklarierte Szenarien",
+    "## 4. Entscheidungen dieser Stufe",
+    "## 5. Gemessene Indexschwelle",
+    "## Browsermatrix und Datei-Modus",
+    "## Rollengrenze",
+    "## Nicht beruehrte Nachbarzeilen",
+    "## Ledgerpflege",
+    "## Offen in spaeterer Stufe",
+];
+
+/// Die Literale, die der Stufe-4-Gate-Bericht nennen MUSS.
+///
+/// Der Gate prueft Literale, keine Prosa. Jedes hier ist GEMESSEN und
+/// tragend: ein Abnahmebericht, der die Sperrcodes der Sitzung, den
+/// abgewiesenen Fork, den Datei-Modus-Befund `notServerConfirmed`, den
+/// Wortlaut `fehlender Grant`, das Ziel `wasm32-unknown-unknown` oder eines
+/// der drei neuen Nachweisartefakte verschweigt, belegt die Stufe nicht.
+///
+/// `ReaderStandView` steht hier, weil der Browsermatrix-Zeuge GENAU diese
+/// Sicht bytegleich und ueber ihren SHA-256 gegen ein Literal misst — es gibt
+/// keinen zweiten „reportHash" im Kern.
+///
+/// Der Abbilddigest steht hier ZUSAETZLICH zur Reichweitenklausel, anders als
+/// die zwei Dienstdigests der Stufe 3: er ist die HERKUNFT der drei
+/// Engine-Baus, und der Abschnitt `## Browsermatrix und Datei-Modus` traegt
+/// ihn ein zweites Mal, weil dort die Engine-Aussage faellt.
+///
+/// Der sechzehnte Eintrag ist die Offenlegungspflicht dieser Stufe, in der
+/// Tradition des sechzehnten Eintrags der Stufen 2 und 3: ein gruener
+/// Stufe-4-Gate ohne diesen Satz liest sich als Betriebs- und
+/// Plattformnachweis, den die Stufe nicht erbringt. Der Satz und nicht ein
+/// Stichwort: ein Stichwort waere von einer beilaeufigen Erwaehnung irgendwo
+/// im Bericht bedient, dieser Satz nicht.
+const STAGE_FOUR_GATE_REPORT_LITERALS: [&str; 16] = [
+    "EA-READER-EXPORT-SESSION-LOCKED",
+    "EA-READER-SESSION-CONFIRMATION-STALE",
+    "EA-READER-CHAIN-FORK",
+    "EA-READER-WITNESS-STALE",
+    "EA-READER-ENROLLMENT-FINGERPRINT-MISMATCH",
+    "EA-BUNDLE-MALFORMED",
+    "EA-ARCHIVE-UNAVAILABLE",
+    "fehlender Grant",
+    "notServerConfirmed",
+    "ReaderStandView",
+    "wasm32-unknown-unknown",
+    "docs/traceability/stage-4-fault-points.json",
+    "apps/web/tests/e2e/browser-matrix.spec.ts",
+    "tests/ea-system-tests/tests/privacy_canaries_reader.rs",
+    concat!(
+        "mcr.microsoft.com/playwright:v1.62.1-noble@sha256:",
+        "dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e"
+    ),
+    "Ein gruener Stufe-4-Gate ist ausdruecklich kein Beleg fuer einen betriebenen getrennten \
+     Bundle-Host, fuer Safari, fuer eine gepinnte Browser-Mindestversion je Plattform und fuer \
+     die 50.000-Paket-Abnahme aus Abnahmekriterium 31",
+];
+
+/// Die Reichweitenklausel der Stufe 4, umlaut- und auszeichnungsfrei wie
+/// [`STAGE_THREE_HOST_SCOPE_CLAUSE`].
+///
+/// Der Gate-Bericht MUSS sie woertlich tragen. Sie nennt die HERKUNFT der
+/// Engines und nicht den Wirt: ohne sie liest sich ein gruener Stufe-4-Gate
+/// als Plattformnachweis gegen beliebige Browser, den er nicht erbringt.
+///
+/// Jede Zahl ist am 2026-09-05 auf diesem Wirt GEMESSEN und nicht behauptet:
+/// der Abbilddigest aus `ops/compose/browsers.yaml`, die Fassung aus
+/// `pnpm --dir apps/web exec playwright --version`, die drei Engine-Baus samt
+/// Revision aus `pnpm --dir apps/web exec playwright install --dry-run`, die
+/// Node-Fassung aus `.node-version` und der `wasm-bindgen`-Pin aus
+/// `Cargo.toml` (Crate) und `mise.toml` (CLI), die zeichengleich sind.
+const STAGE_FOUR_HOST_SCOPE_CLAUSE: &str = concat!(
+    "Stufe 4 belegt ihre Browserabnahme ausschliesslich gegen die drei ",
+    "Engine-Baus, deren Herkunft das gepinnte Abbild aus ",
+    "ops/compose/browsers.yaml ist: ",
+    "mcr.microsoft.com/playwright:v1.62.1-noble@sha256:",
+    "dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e, ",
+    "gefahren unter dem Pin @playwright/test 1.62.1 und den Baus ",
+    "chromium-1234 (Chrome for Testing 151.0.7922.34), ",
+    "firefox-1538 (Firefox 153.0) und webkit-2336 (WebKit 26.5), ",
+    "auf node 26.7.0 und mit wasm-bindgen 0.2.126 als Crate UND als CLI. ",
+    "Ein Betrieb gegen Safari, gegen eine andere Engine-Revision, gegen eine ",
+    "andere Node-Fassung oder gegen eine gepinnte Browser-Mindestversion je ",
+    "Plattform ist damit NICHT belegt und bleibt Stufe 7."
+);
+
 /// Der Spaltenvertrag des Ledgers. Spaetere Stufen ergaenzen nur Zeilen.
 const LEDGER_COLUMNS: [&str; 9] = [
     "requirement_id",
@@ -3049,14 +3228,44 @@ fn rows_still_planned(rows: &[LedgerRow], stage: &str, problems: &mut Vec<String
     still_planned
 }
 
+/// Prueft die Pflichtabschnitte eines Gate-Berichts — als ZEILE und nicht als
+/// Teilkette.
+///
+/// Der Unterschied ist gemessen und tragend. `## Offen in spaeterer Stufe`
+/// steht im Stufe-4-Bericht SIEBENMAL, sechsmal davon als Verweis mitten im
+/// Fliesstext — einer davon in der Offenlegungspflicht, die
+/// [`STAGE_FOUR_GATE_REPORT_LITERALS`] woertlich pinnt und die auf „Alle vier
+/// stehen unten in `## Offen in spaeterer Stufe` mit ihrer besitzenden Stufe"
+/// endet. Ueber `contains` geprueft haette dieser Zeiger seinen eigenen
+/// Pflichtabschnitt bedient: der Abschnitt liess sich am 2026-09-05 ganz
+/// herausschneiden, ohne dass `stage-gate 4` etwas anderes als Exitcode 0
+/// lieferte, obwohl er in der Liste stand. Ein Zeiger, dessen Ziel loeschbar
+/// ist, waehrend der Zeiger gepinnt bleibt, belegt nichts.
+///
+/// Pflichtliterale bleiben ABSICHTLICH Teilketten und laufen weiter ueber
+/// [`require_document_literals`]: sie sind Begriffe im Fliesstext und haben
+/// keine Zeile fuer sich.
+fn require_document_sections(path: &Path, text: &str, sections: &[&str]) -> Result<(), String> {
+    for section in sections {
+        if !text.lines().any(|line| line.trim_end() == *section) {
+            return Err(format!(
+                "{} does not carry the required section as a heading line of its own: {section}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Prueft ein Dokument gegen seinen Abschnitts- UND seinen Literalvertrag.
 ///
 /// Die beiden Pruefungen gehoeren zusammen und stehen ueberall im Baum als
-/// dasselbe Paar: erst die Pflichtabschnitte, dann die Pflichtliterale, beide
-/// ueber [`require_document_literals`] und beide als GESAMMELTER Mangel. Sie
-/// stehen hier einmal, weil das Formatpaket, der Stufe-2-Bericht und der
-/// Stufe-3-Bericht sie identisch brauchen; abgeschrieben waere die dritte
-/// Kopie die, die beim naechsten Vertrag vergessen wird.
+/// dasselbe Paar: erst die Pflichtabschnitte ueber
+/// [`require_document_sections`], dann die Pflichtliterale ueber
+/// [`require_document_literals`], beide als GESAMMELTER Mangel. Sie stehen
+/// hier einmal, weil der Stufe-2-, der Stufe-3- und der Stufe-4-Bericht sie
+/// identisch brauchen; abgeschrieben waere die dritte Kopie die, die beim
+/// naechsten Vertrag vergessen wird.
 ///
 /// Die Reihenfolge ist Teil des Vertrags: `section` vor `literal`. Ein Bericht,
 /// dem ein ganzer Abschnitt fehlt, soll das zuerst gemeldet bekommen und nicht
@@ -3069,10 +3278,11 @@ fn collect_document_contract(
     literals: &[&str],
     problems: &mut Vec<String>,
 ) {
-    for (expected, kind) in [(sections, "section"), (literals, "literal")] {
-        if let Err(error) = require_document_literals(path, text, expected, kind) {
-            problems.push(error);
-        }
+    if let Err(error) = require_document_sections(path, text, sections) {
+        problems.push(error);
+    }
+    if let Err(error) = require_document_literals(path, text, literals, "literal") {
+        problems.push(error);
     }
 }
 
@@ -3484,6 +3694,200 @@ fn run_stage_three_gate(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Prueft die Stufe-4-Abnahme und schreibt den Bericht nach stdout.
+///
+/// Entsteht NEBEN [`run_stage_three_gate`] und ersetzt es nicht; der Aufbau ist
+/// Punkt fuer Punkt derselbe. Die geteilten Pfade [`REQUIREMENT_LEDGER_PATH`],
+/// [`DESIGN_DOCUMENT_PATH`] und [`PACKAGE_MANIFEST_PATH`] werden
+/// WIEDERVERWENDET, nie dupliziert.
+///
+/// Der einzige Formunterschied liegt in Punkt 1: [`STAGE_FOUR_VECTOR_FAMILIES`]
+/// ist leer, die Schleife laeuft also nie, und `vector_families` steht als
+/// leeres Array im Bericht. Das ist die Aussage der Stufe und kein Vergessen.
+fn run_stage_four_gate(root: &Path) -> Result<(), String> {
+    let gate_root = stage_gate_root(root);
+    let mut problems = Vec::new();
+
+    // 1. Vektorfamilien — KEINE. Die Schleife bleibt trotzdem stehen: sie
+    // haelt die Form der drei frueheren Gates, und eine spaeter eingefrorene
+    // Familie traegt sich in die Konstante ein statt in eine neue Schleife.
+    let vectors = gate_root.join("vectors");
+    let mut families: Vec<&str> = Vec::new();
+    for family in STAGE_FOUR_VECTOR_FAMILIES {
+        if family_carries_a_manifest(&vectors, family) {
+            families.push(family);
+        } else {
+            problems.push(format!(
+                "stage 4 vector family without a readable manifest under {}: {family}",
+                vectors.display()
+            ));
+        }
+    }
+
+    // 2. Ledger: Wohlgeformtheit, Abdeckung der Pflichtzeilenmenge und die
+    // Zeilen, die die Stufe noch offen fuehrt.
+    let ledger_path = gate_root.join(REQUIREMENT_LEDGER_PATH);
+    let rows = match read_requirement_ledger(&ledger_path) {
+        Ok(rows) => rows,
+        Err(error) => {
+            problems.push(error);
+            Vec::new()
+        }
+    };
+    let design_path = gate_root.join(DESIGN_DOCUMENT_PATH);
+    match fs::read_to_string(&design_path)
+        .map_err(|error| format!("failed to read {}: {error}", design_path.display()))
+        .and_then(|design| required_requirement_identifiers(&design))
+    {
+        Ok(required) => {
+            let covered = rows
+                .iter()
+                .map(|row| row.requirement_id.clone())
+                .collect::<BTreeSet<_>>();
+            let uncovered = required
+                .difference(&covered)
+                .cloned()
+                .collect::<Vec<String>>();
+            if !uncovered.is_empty() {
+                problems.push(format!(
+                    "the requirement ledger {} does not cover: {}",
+                    ledger_path.display(),
+                    uncovered.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+    let still_planned = rows_still_planned(&rows, "4", &mut problems);
+
+    // 3. Szenarien. Ohne Vorrangpunkt, wie in Stufe 3: jedes der
+    // zweiunddreissig Szenarien steht genau einmal in genau einem der fuenf
+    // Abschnitte, und die Zusicherung darueber traegt der Abschnittsvertrag.
+    let declared_fault_points = declared_fault_points(
+        &gate_root,
+        STAGE_FOUR_FAULT_POINT_MANIFEST_PATH,
+        &STAGE_FOUR_FAULT_POINT_SECTIONS,
+        None,
+        &mut problems,
+    );
+    // Und die Zeugen dazu. Die Menge ist KLEINER als die der Szenarien, und
+    // das ist gemessen: zwoelf Abbruchpunkte des Abschnitts `sync-cursor`
+    // rahmen DENSELBEN Durchlauf und teilen deshalb einen Zeugen.
+    let fault_point_witnesses = resolved_fault_point_witnesses(
+        &gate_root,
+        STAGE_FOUR_FAULT_POINT_MANIFEST_PATH,
+        &STAGE_FOUR_FAULT_POINT_SECTIONS,
+        &mut problems,
+    );
+
+    // 4. Skripte. Sie verankern die Readerspur, die Browserspur und die
+    // Lieferkettenspur im Gate; `cargo deny`, `cargo test` und Playwright ruft
+    // der Gate nie selbst auf und bleibt damit ohne laufende Dienste, ohne
+    // Engine-Baus und ohne `chromedriver` lauffaehig.
+    let package_path = gate_root.join(PACKAGE_MANIFEST_PATH);
+    match fs::read_to_string(&package_path)
+        .map_err(|error| format!("failed to read {}: {error}", package_path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|error| format!("invalid {}: {error}", package_path.display()))
+        }) {
+        Ok(manifest) => {
+            let missing = STAGE_FOUR_REQUIRED_SCRIPTS
+                .iter()
+                .filter(|script| {
+                    manifest
+                        .get("scripts")
+                        .and_then(|scripts| scripts.get(*script))
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|command| command.trim().is_empty())
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "{} does not declare the required scripts: {}",
+                    package_path.display(),
+                    missing.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+
+    // 5. Der Gate-Bericht.
+    let report_path = gate_root.join(STAGE_FOUR_GATE_REPORT_PATH);
+    let mut gate_report_criteria = Vec::new();
+    match fs::read_to_string(&report_path) {
+        Ok(report) => {
+            collect_document_contract(
+                &report_path,
+                &report,
+                &STAGE_FOUR_GATE_REPORT_SECTIONS,
+                &STAGE_FOUR_GATE_REPORT_LITERALS,
+                &mut problems,
+            );
+            if !report.contains(STAGE_FOUR_HOST_SCOPE_CLAUSE) {
+                // Bewusst OHNE die Klausel im Text: sie nennt den Abbilddigest
+                // und drei Engine-Revisionen, und eine Fehlerzeile, die sie
+                // zitiert, waere laenger als der Rest der gesammelten Meldung.
+                problems.push(format!(
+                    "{} does not carry the stage 4 host scope clause verbatim",
+                    report_path.display()
+                ));
+            }
+            match gate_report_acceptance_criteria(
+                &report_path,
+                &report,
+                &STAGE_FOUR_PRIMARY_ACCEPTANCE_CRITERIA,
+            ) {
+                Ok(found) => gate_report_criteria = found,
+                Err(error) => problems.push(error),
+            }
+        }
+        Err(error) => problems.push(format!("failed to read {}: {error}", report_path.display())),
+    }
+
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
+
+    let row_identifiers = rows
+        .iter()
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    let evidenced = rows
+        .iter()
+        .filter(|row| {
+            matches!(row.values[8].as_str(), "implemented" | "integrated")
+                && !row.primary_acceptance_criterion.is_empty()
+        })
+        .filter_map(|row| row.primary_acceptance_criterion.parse::<u32>().ok())
+        .collect::<BTreeSet<_>>();
+    let report = serde_json::json!({
+        "stage": 4,
+        "vector_families": families,
+        "primary_acceptance_criteria": STAGE_FOUR_PRIMARY_ACCEPTANCE_CRITERIA,
+        "evidenced_acceptance_criteria": evidenced,
+        "rows": row_identifiers,
+        "gate_report": STAGE_FOUR_GATE_REPORT_PATH,
+        "gate_report_acceptance_criteria": gate_report_criteria,
+        // Derselbe Schluessel wie in den Stufen 2 und 3 und NICHT `scenarios`:
+        // das Berichtsschema wird ergaenzt, nie umbenannt.
+        "declared_fault_points": declared_fault_points,
+        // Die AUFGELOESTEN Zeugen, jeder als `<pfad>::<funktion>`, und
+        // ausdruecklich WENIGER als die Szenarien.
+        "stage_four_fault_point_witnesses": fault_point_witnesses,
+        "stage_four_primary_acceptance_criteria": STAGE_FOUR_PRIMARY_ACCEPTANCE_CRITERIA,
+        "stage_four_rows_still_planned": still_planned,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&report)
+            .map_err(|error| format!("failed to render the stage gate report: {error}"))?
+    );
+    Ok(())
+}
+
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
 ///
 /// Eine Familie zaehlt erst als vorhanden, wenn [`family_carries_a_manifest`]
@@ -3511,9 +3915,12 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
     if stage == 3 {
         return run_stage_three_gate(root);
     }
+    if stage == 4 {
+        return run_stage_four_gate(root);
+    }
     if stage != 1 {
         return Err(format!(
-            "stage-gate is only defined for stages 1, 2 and 3 so far, not {stage}"
+            "stage-gate is only defined for stages 1, 2, 3 and 4 so far, not {stage}"
         ));
     }
     let vectors = stage_gate_root(root).join("vectors");
