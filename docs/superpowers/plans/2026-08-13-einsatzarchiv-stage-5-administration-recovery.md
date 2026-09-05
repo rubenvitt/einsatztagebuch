@@ -376,7 +376,7 @@ wasm32-Klassifizierung (Positivliste in `verify_quick_commands()` **oder**
   den exakten finalen Anker, Genesis, und `ProductionState::Ready` erst nach dem
   Frischrechner-Recovery-Test.
 
-- [ ] **Step 1: Write bootstrap order and immutable-anchor tests**
+- [x] **Step 1: Write bootstrap order and immutable-anchor tests**
 
 Der Kern ist SYNCHRON. `ea-admin` traegt kein `tokio`
 (`crates/ea-admin/Cargo.toml:45-47`), und die Regel steht geschrieben:
@@ -416,13 +416,13 @@ Anker selbst zurueck (`crates/ea-trust/src/anchor.rs:590-602`), sodass eine
 nachtraeglich korrigierte Zeremonie einen vollkommen selbstkonsistenten Anker
 erzeugt. Genau diese Luecke schliesst dieser Zeuge.
 
-- [ ] **Step 2: Run bootstrap tests and verify orchestration is absent**
+- [x] **Step 2: Run bootstrap tests and verify orchestration is absent**
 
 Run: `cargo test --locked -p ea-admin --test bootstrap --test anchor_integrity && cargo test --locked -p einsatzarchiv-cli --test organization_init`
 
 Expected: FAIL because bootstrap coordinator and init command do not exist.
 
-- [ ] **Step 3: Implement a persisted, forward-only twelve-step ceremony**
+- [x] **Step 3: Implement a persisted, forward-only twelve-step ceremony**
 
 Implement exactly: random organization/chain IDs; offline Root; two separate Admin accounts with Admin and operator-instance keys plus direct Root-signed initial certificate/binding pairs; pre-anchor written to two write-protected media and full fingerprint confirmed over second channel; separate Recovery KEM and HGA signing keys; two Approvers; two verified backups for Root/Admin/Recovery/HGA; local Writer/server/Reader keys plus normally authorized bindings; QR/full fingerprint compare; Admin-authorized Root-signed device/operator/Approver/component certificates, initial policy and Registry; Genesis sequence 0; final anchor binding unchanged pre fields, `bootstrapAnchorHash`, and Genesis hash on both media with second-channel confirmation; fresh-machine test Entry verification and Recovery decryption. Expose this orchestration as `einsatzarchiv --trust-anchor <file> organization init ...`; Stage 1's required Recovery command grammar remains unchanged.
 
@@ -437,13 +437,13 @@ laengengepruefte Grammatik (`apps/cli/src/output.rs:50-54`,
 `organization init` NICHT; sie fuehrt `verify, list, decrypt, grant, report, export,
 recovery-test`. Das Kommando kommt aus diesem Plan, nicht aus der Spec.
 
-- [ ] **Step 4: Run happy-path, interruption, media mismatch, and foreign-Genesis tests**
+- [x] **Step 4: Run happy-path, interruption, media mismatch, and foreign-Genesis tests**
 
 Run: `cargo test --locked -p ea-admin --test bootstrap --test anchor_integrity && cargo test --locked -p einsatzarchiv-cli --test organization_init`
 
 Expected: PASS; restart resumes the same step, unconfirmed/mismatched media block, and a self-consistent foreign archive fails at the anchor.
 
-- [ ] **Step 5: Commit bootstrap and anchor creation**
+- [x] **Step 5: Commit bootstrap and anchor creation**
 
 ```bash
 git add crates/ea-admin apps/cli

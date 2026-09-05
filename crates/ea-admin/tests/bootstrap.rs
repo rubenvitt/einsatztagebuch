@@ -17,9 +17,11 @@
 
 mod support;
 
+use std::{collections::BTreeSet, fs, path::PathBuf};
+
 use ea_admin::{
-    AdminError, AnchorMediumId, BootstrapCoordinator, BootstrapStep, ProductionState,
-    confirm_pre_anchor_fingerprint,
+    AdminError, AnchorMediumId, BootstrapCoordinator, BootstrapStep, FileBootstrapStore,
+    ProductionState, confirm_pre_anchor_fingerprint,
 };
 use ea_trust::decode_trust_anchor;
 
@@ -28,6 +30,18 @@ use support::{
     SequentialRandom, bootstrap_admin_pairs, changed_admin_pairs, fixture_root_material,
     trust_support,
 };
+
+/// Der Befund eines Laufs, dessen ERFOLGSWERT kein `Debug` traegt.
+///
+/// `expect_err` verlangt es; [`BootstrapCoordinator`] traegt es
+/// ausdruecklich nicht — er haelt eine geliehene Ablage und einen Zustand, und
+/// beides gehoert in keine Diagnosezeile.
+fn expect_admin_error<T>(result: Result<T, AdminError>, expected: &str) {
+    match result {
+        Ok(_) => panic!("dieser Lauf muss mit {expected} scheitern"),
+        Err(error) => expect_admin_code(error, expected),
+    }
+}
 
 fn expect_admin_code(error: AdminError, expected: &str) {
     assert_eq!(error.code(), expected);
@@ -335,4 +349,158 @@ fn the_twelve_steps_are_ordered_and_complete() {
     assert_eq!(steps[0], BootstrapStep::GenerateIds);
     assert_eq!(steps[11], BootstrapStep::RunFreshMachineRecoveryTest);
     assert_eq!(AnchorMediumId::new([0x01; 16]), FIRST_MEDIUM);
+}
+
+// ---------------------------------------------------------------------------
+// Die dateigestuetzte Ablage
+// ---------------------------------------------------------------------------
+
+/// Der Pfad, unter dem eine Zeremonie neben ihrem kuenftigen Anker liegt.
+fn state_path(directory: &support::TempDir) -> PathBuf {
+    directory.path().join("anchor.etb.bootstrap-state")
+}
+
+/// DER tragende Zeuge der Ablage: eine Zeremonie ueberlebt den Prozess.
+///
+/// Der erste Block endet, der Koordinator und die Ablage werden fallen
+/// gelassen — es bleibt nichts als die Datei. Was danach fortsetzt, muss
+/// dieselbe Zeremonie sein und nicht eine zweite daneben: `:1349` laesst neue
+/// Kennungen ausschliesslich nach einem Abbruch zu.
+#[test]
+fn a_file_backed_ceremony_resumes_with_the_same_identifiers_after_the_process_ended() {
+    let directory = support::temp_dir("resume");
+    let path = state_path(&directory);
+
+    let (organization, chain) = {
+        let mut store = FileBootstrapStore::new(path.clone());
+        let coordinator =
+            BootstrapCoordinator::begin(&mut store, &mut SequentialRandom::default()).unwrap();
+        assert_eq!(coordinator.step(), BootstrapStep::GenerateIds);
+        (coordinator.organization_id(), coordinator.chain_id())
+    };
+
+    let mut store = FileBootstrapStore::new(path);
+    let resumed = BootstrapCoordinator::resume(&mut store)
+        .unwrap()
+        .expect("die persistierte Zeremonie laesst sich fortsetzen");
+    assert_eq!(resumed.step(), BootstrapStep::GenerateIds);
+    assert_eq!(
+        resumed.organization_id().as_bytes(),
+        organization.as_bytes()
+    );
+    assert_eq!(resumed.chain_id().as_bytes(), chain.as_bytes());
+    assert_eq!(
+        resumed.production_state(),
+        ProductionState::BlockedRecoveryTest
+    );
+}
+
+/// Eine fehlende Datei ist KEINE Zeremonie und kein Fehlschlag.
+#[test]
+fn an_absent_state_file_is_no_ceremony_and_no_failure() {
+    let directory = support::temp_dir("absent");
+    let mut store = FileBootstrapStore::new(state_path(&directory));
+    assert!(
+        BootstrapCoordinator::resume(&mut store).unwrap().is_none(),
+        "ohne Datei gibt es nichts fortzusetzen"
+    );
+}
+
+/// Die Datei traegt GENAU das Abbild des Ports und kein Byte darueber hinaus.
+#[test]
+fn the_state_file_carries_exactly_the_persisted_image() {
+    let directory = support::temp_dir("image");
+    let path = state_path(&directory);
+    let mut store = FileBootstrapStore::new(path.clone());
+    let coordinator =
+        BootstrapCoordinator::begin(&mut store, &mut SequentialRandom::default()).unwrap();
+    assert_eq!(
+        fs::read(&path).expect("die Zustandsdatei muss lesbar sein"),
+        coordinator.state().persisted_image()
+    );
+}
+
+/// Ein Abbild JENSEITS von Schritt 1 wird abgewiesen statt halb gelesen.
+///
+/// `BootstrapStateV1::persisted_image` ist bewusst verlustbehaftet: ein
+/// [`ea_key_provider::KeyHandle`] gibt darin Anwendung, Kontoinstanz und Zweck
+/// preis, aber weder seinen `KeystoreProvider` noch seine `KeyEntryPolicy`.
+/// Ein Zustand mit Schluesselgriffen ist daraus also nicht wiederherstellbar —
+/// und was nicht bytegetreu zurueckkommt, wird nicht geraten.
+#[test]
+fn a_state_image_beyond_the_first_step_is_refused_rather_than_half_read() {
+    let mut memory = MemoryBootstrapStore::default();
+    {
+        let mut coordinator =
+            BootstrapCoordinator::begin(&mut memory, &mut SequentialRandom::default()).unwrap();
+        coordinator
+            .generate_offline_root(fixture_root_material())
+            .unwrap();
+    }
+
+    let directory = support::temp_dir("beyond");
+    let path = state_path(&directory);
+    fs::write(&path, memory.image()).expect("das Abbild muss schreibbar sein");
+
+    let mut store = FileBootstrapStore::new(path);
+    expect_admin_error(
+        BootstrapCoordinator::resume(&mut store),
+        "EA-CEREMONY-BOOTSTRAP-STATE-SHAPE",
+    );
+}
+
+/// Eine abgeschnittene Datei ist kein halber Zustand, sondern keiner.
+#[test]
+fn a_truncated_state_file_is_refused() {
+    let directory = support::temp_dir("truncated");
+    let path = state_path(&directory);
+    let mut store = FileBootstrapStore::new(path.clone());
+    let image = BootstrapCoordinator::begin(&mut store, &mut SequentialRandom::default())
+        .unwrap()
+        .state()
+        .persisted_image();
+    fs::write(&path, &image[..image.len() / 2]).expect("das Abbild muss schreibbar sein");
+
+    let mut store = FileBootstrapStore::new(path);
+    expect_admin_error(
+        BootstrapCoordinator::resume(&mut store),
+        "EA-CEREMONY-BOOTSTRAP-STATE-SHAPE",
+    );
+}
+
+/// Eine Ablage, die nicht antwortet, meldet den Befund IHRES Ports.
+///
+/// Kein Zustandsbefund: die Bytes wurden gar nicht erst gelesen, es ist also
+/// nichts ueber ihre Gestalt gesagt.
+#[test]
+fn a_state_path_that_cannot_be_read_is_a_store_finding() {
+    let directory = support::temp_dir("unreadable");
+    let path = state_path(&directory);
+    fs::create_dir(&path).expect("das Verzeichnis muss anlegbar sein");
+
+    let mut store = FileBootstrapStore::new(path);
+    expect_admin_error(
+        BootstrapCoordinator::begin(&mut store, &mut SequentialRandom::default()),
+        "EA-CEREMONY-BOOTSTRAP-STORE-UNAVAILABLE",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Der Name eines Schritts
+// ---------------------------------------------------------------------------
+
+/// Jeder Schritt nennt sich selbst, und keine zwei teilen einen Namen.
+///
+/// Der Name ist beobachtbares Aussenverhalten — `apps/cli` druckt ihn. Er
+/// steht deshalb als Tabelle neben [`BootstrapStep::number`] und nicht als
+/// abgeleitetes `Debug` in einer Oberflaeche, die ihn nachbaut.
+#[test]
+fn every_step_names_itself_and_no_two_share_a_name() {
+    let mut names = BTreeSet::new();
+    for (index, step) in BootstrapStep::ALL.into_iter().enumerate() {
+        assert_eq!(usize::from(step.number()), index + 1);
+        assert_eq!(step.name(), format!("{step:?}"));
+        names.insert(step.name());
+    }
+    assert_eq!(names.len(), 12, "zwoelf Schritte, zwoelf Namen");
 }

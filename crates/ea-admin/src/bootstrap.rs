@@ -189,6 +189,37 @@ impl BootstrapStep {
             Self::RunFreshMachineRecoveryTest => 12,
         }
     }
+
+    /// Der STABILE Aussenname dieses Schritts.
+    ///
+    /// # Warum eine Tabelle und kein `Debug`
+    ///
+    /// Der Name verlaesst den Prozess: `apps/cli` druckt ihn in der
+    /// Statuszeile von `organization init`. Ein abgeleitetes `Debug` waere
+    /// dafuer eine Zusicherung, die niemand gegeben hat — es ist ein
+    /// Diagnosewerkzeug. Die Tabelle steht deshalb neben [`Self::number`],
+    /// damit beide Aussenangaben eines Schritts an derselben Stelle stehen und
+    /// ein Zeuge sie zusammen misst. Dass sie heute zeichengleich mit dem
+    /// Variantennamen ist, haelt `crates/ea-admin/tests/bootstrap.rs` fest;
+    /// dieselbe Entscheidung traegt [`ProductionState`] mit ihrem
+    /// handgeschriebenen `Debug`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::GenerateIds => "GenerateIds",
+            Self::GenerateOfflineRoot => "GenerateOfflineRoot",
+            Self::CreateAdminPairs => "CreateAdminPairs",
+            Self::PinPreAnchorOnMedia => "PinPreAnchorOnMedia",
+            Self::GenerateRecoveryAndHgaKeys => "GenerateRecoveryAndHgaKeys",
+            Self::EnrollKeyApprovers => "EnrollKeyApprovers",
+            Self::VerifyKeyBackups => "VerifyKeyBackups",
+            Self::ProvisionComponentKeys => "ProvisionComponentKeys",
+            Self::CompareFingerprints => "CompareFingerprints",
+            Self::RootSignBootstrapTargets => "RootSignBootstrapTargets",
+            Self::CreateGenesisAndFinalAnchor => "CreateGenesisAndFinalAnchor",
+            Self::RunFreshMachineRecoveryTest => "RunFreshMachineRecoveryTest",
+        }
+    }
 }
 
 /// Der Zufallsport fuer Schritt 1.
@@ -425,6 +456,87 @@ pub struct BootstrapStateV1 {
 }
 
 impl BootstrapStateV1 {
+    /// Der Zustand einer GERADE begonnenen Zeremonie: Schritt 1 und sonst
+    /// nichts (`:1336`).
+    ///
+    /// Eine Stelle fuer zwei Aufrufer — [`BootstrapCoordinator::start`] und
+    /// [`Self::from_persisted_image`]. Zwei Stellen waeren zwei Wahrheiten
+    /// darueber, wie eine leere Zeremonie aussieht, und der Wiedereinleser
+    /// verglaeche gegen die falsche.
+    fn fresh(organization_id: OrganizationId, chain_id: ChainId) -> Self {
+        Self {
+            step: BootstrapStep::GenerateIds,
+            aborted: false,
+            production_state: ProductionState::BlockedRecoveryTest,
+            organization_id,
+            chain_id,
+            root: None,
+            admin_pairs: Vec::new(),
+            exact_pre_anchor_bytes: None,
+            sealed_pre_anchor_fingerprint: None,
+            sealed_medium_count: 0,
+            recovery_kem: None,
+            hga_signing: None,
+            approvers: Vec::new(),
+            backups: Vec::new(),
+            components: Vec::new(),
+            fingerprints_compared: false,
+            published_target_object_hashes: Vec::new(),
+            genesis_entry_hash: None,
+            exact_final_anchor_bytes: None,
+            transcript: None,
+            recovery_test_machine: None,
+        }
+    }
+
+    /// Liest ein Byteabbild aus [`Self::persisted_image`] zurueck — SOWEIT das
+    /// bytegetreu moeglich ist.
+    ///
+    /// # Die Grenze, und warum sie hier steht und nicht in einer Ablage
+    ///
+    /// Wiederhergestellt wird ausschliesslich eine Zeremonie BEI SCHRITT 1.
+    /// Das ist keine Bequemlichkeit, sondern die Grenze des Abbilds selbst:
+    /// [`push_handle`] gibt von einem [`KeyHandle`] Anwendung, Kontoinstanz
+    /// und Zweck preis, aber weder seinen `KeystoreProvider` noch seine
+    /// `KeyEntryPolicy` (`crates/ea-key-provider/src/contract.rs:129-160`).
+    /// Ein Zustand, der einen Griff traegt — also jeder ab Schritt 2 —, kaeme
+    /// aus dem Abbild nur GERATEN zurueck, und ein geratener Zeremoniezustand
+    /// ist schlimmer als keiner: er behauptete eine Adresse, unter der der
+    /// Wirt nichts findet.
+    ///
+    /// Geprueft wird deshalb nicht Feld fuer Feld, sondern in EINEM Zug: aus
+    /// Kennungen und Kopf entsteht [`Self::fresh`], und dessen Abbild muss dem
+    /// vorgelegten BYTEGLEICH sein. Damit faellt jedes Abbild jenseits von
+    /// Schritt 1, jedes abgeschnittene und jedes veraenderte auf denselben
+    /// Befund — und die Pruefung kann nicht hinter das Abbild zurueckfallen,
+    /// weil sie dasselbe [`Self::persisted_image`] benutzt, das sie prueft.
+    ///
+    /// Eine Oberflaeche, die spaetere Schritte fuehrt, braucht eine Ablage,
+    /// die den GETIPPTEN Zustand haelt — so wie `MemoryBootstrapStore` in den
+    /// Zeugen. Das ist Sache jener Oberflaeche und ihrer Ports (Plan Task 7),
+    /// nicht dieses Abbilds.
+    ///
+    /// # Errors
+    /// [`AdminError::BootstrapStateShape`] fuer jedes Abbild, das nicht
+    /// bytegleich eine begonnene Zeremonie beschreibt.
+    pub fn from_persisted_image(image: &[u8]) -> Result<Self, AdminError> {
+        let head = STATE_DOMAIN.len() + 3;
+        if image.len() < head + 32 || !image.starts_with(STATE_DOMAIN) {
+            return Err(AdminError::BootstrapStateShape);
+        }
+        let organization_id = OrganizationId::try_from(&image[head..head + 16])
+            .map_err(|_| AdminError::BootstrapStateShape)?;
+        let chain_id = ChainId::try_from(&image[head + 16..head + 32])
+            .map_err(|_| AdminError::BootstrapStateShape)?;
+
+        let candidate = Self::fresh(organization_id, chain_id);
+        if candidate.persisted_image() == image {
+            Ok(candidate)
+        } else {
+            Err(AdminError::BootstrapStateShape)
+        }
+    }
+
     /// Der zuletzt ABGESCHLOSSENE Schritt.
     #[must_use]
     pub const fn step(&self) -> BootstrapStep {
@@ -744,29 +856,7 @@ impl<'a> BootstrapCoordinator<'a> {
         organization_id: OrganizationId,
         chain_id: ChainId,
     ) -> Result<Self, AdminError> {
-        let state = BootstrapStateV1 {
-            step: BootstrapStep::GenerateIds,
-            aborted: false,
-            production_state: ProductionState::BlockedRecoveryTest,
-            organization_id,
-            chain_id,
-            root: None,
-            admin_pairs: Vec::new(),
-            exact_pre_anchor_bytes: None,
-            sealed_pre_anchor_fingerprint: None,
-            sealed_medium_count: 0,
-            recovery_kem: None,
-            hga_signing: None,
-            approvers: Vec::new(),
-            backups: Vec::new(),
-            components: Vec::new(),
-            fingerprints_compared: false,
-            published_target_object_hashes: Vec::new(),
-            genesis_entry_hash: None,
-            exact_final_anchor_bytes: None,
-            transcript: None,
-            recovery_test_machine: None,
-        };
+        let state = BootstrapStateV1::fresh(organization_id, chain_id);
         store.store(&state)?;
         Ok(Self {
             store,

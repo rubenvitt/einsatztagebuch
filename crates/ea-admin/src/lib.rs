@@ -59,6 +59,7 @@
 
 pub mod anchor_media;
 pub mod bootstrap;
+pub mod bootstrap_store;
 pub mod genesis;
 pub mod production_state;
 
@@ -74,6 +75,7 @@ pub use bootstrap::{
     BootstrapStore, BootstrapTranscriptV1, CeremonyRandomSource, ComponentBindingV1,
     KeyBackupRecordV1, OuterKeyRecordV1, RootKeyMaterialV1, SystemRandomSource,
 };
+pub use bootstrap_store::FileBootstrapStore;
 pub use error::AdminError;
 pub use genesis::{GenesisBinding, GenesisEnvelopeV1, bind_genesis};
 pub use production_state::{
