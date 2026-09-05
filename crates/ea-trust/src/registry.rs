@@ -237,6 +237,40 @@ impl SelectedRegistryHead {
         &self.inner.preexisting_effective_now
     }
 
+    /// Der Objekthash der Wurzelurkunde, die dieser Kopf als aktiv fuehrt.
+    ///
+    /// Additiv und rein lesend. Er existiert, weil ein Dienst, der eine
+    /// Wurzelsignatur ERZEUGT, sonst nicht feststellen kann, ob der
+    /// Zertifikatshash, unter dem er signieren laesst, ueberhaupt der dieses
+    /// Kopfes ist: `CertificateHash` ist ein Parameter des Aufrufers, und ein
+    /// falsch konfigurierter waere ohne diesen Leser unsichtbar, bis der
+    /// naechste Kopfuebergang das fertige Objekt abweist.
+    ///
+    /// Er verraet nichts Neues: die Wurzelurkunde ist ein oeffentliches Objekt
+    /// des Trust Bundle, und ihr Hash steht in jedem Registrierungsereignis.
+    #[must_use]
+    pub fn root_certificate_object_hash(&self) -> ObjectHash {
+        self.inner.candidate_state.root.object_hash
+    }
+
+    /// Die Felder eben dieser Wurzelurkunde.
+    ///
+    /// Aus demselben Grund additiv: `root_key_thumbprint` und
+    /// `root_public_cose_key` sind das Einzige, woran ein Erzeuger seine
+    /// frisch gebildete COSE der Wurzel ZUSCHREIBEN kann. Ohne die Zuschreibung
+    /// verbraucht eine Zeremonie ihre Einmal-Autorisierung und bucht eine
+    /// `completed`-Auditzeile ueber ein Objekt, das nie Autoritaet erlangen
+    /// kann.
+    ///
+    /// [`RootCertificateFieldsV1`] ist ein bereits vollstaendig oeffentlicher
+    /// Typ aus `ea-format` mit oeffentlichen Feldern; dieser Leser oeffnet
+    /// keinen neuen Wert, sondern nur den Weg zu einem, den jeder Leser des
+    /// Bundles ohnehin hat.
+    #[must_use]
+    pub fn root_certificate_fields(&self) -> &RootCertificateFieldsV1 {
+        &self.inner.candidate_state.root.fields
+    }
+
     #[must_use]
     pub fn warnings(&self) -> &TimeWarnings {
         &self.inner.warnings

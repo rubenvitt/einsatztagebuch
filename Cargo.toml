@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-index", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-reader", "crates/ea-reader-wasm", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "crates/ea-sync-server", "crates/ea-sync-client", "apps/server", "apps/cli", "apps/desktop/src-tauri"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-index", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-reader", "crates/ea-reader-wasm", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "crates/ea-sync-server", "crates/ea-sync-client", "crates/ea-admin", "apps/server", "apps/cli", "apps/desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -19,6 +19,7 @@ cms = { version = "=0.2.3", features = ["std"] }
 coset = { version = "=0.4.2", features = ["std"] }
 der = { version = "=0.7.10", features = ["alloc", "oid"] }
 ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }
+ea-admin = { path = "crates/ea-admin" }
 ea-archive = { path = "crates/ea-archive" }
 # `default-features = false` an der GETEILTEN Kante, und zwar hier, weil Cargo
 # es am einzelnen Mitglied nicht zulaesst: `default-features = false` neben

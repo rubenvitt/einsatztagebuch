@@ -37,6 +37,7 @@ const WORKSPACE_MEMBERS: &[&str] = &[
     "crates/ea-sync-protocol",
     "crates/ea-sync-server",
     "crates/ea-sync-client",
+    "crates/ea-admin",
     "apps/server",
     "apps/cli",
     "apps/desktop/src-tauri",

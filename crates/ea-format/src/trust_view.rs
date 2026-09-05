@@ -4,7 +4,7 @@ use crate::{
     DeletionAttestationFieldsV1, DestructionAuthorizationFieldsV1, DestructionTransitionFieldsV1,
     DeviceCertificateFieldsV1, FormatError, GrantAuthorizationFieldsV1, OperatorBindingFieldsV1,
     OrganizationAdminAuthorizationFieldsV1, PolicyFieldsV1, RegistryEventFieldsV1,
-    RootCertificateFieldsV1, TrustObjectV1, TrustSubtypeV1, WebBundleReleaseCoreV1,
+    RootCertificateFieldsV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, WebBundleReleaseCoreV1,
     WebBundleRevocationCoreV1, WriterTransitionFieldsV1,
     etb::{
         decode_admin_authorization, decode_authorized_parts, decode_deletion_attestation,
@@ -61,6 +61,30 @@ pub enum DecodedTrustPayloadV1 {
     DeletionAttestation(DeletionAttestationFieldsV1),
     WebBundleRelease(WebBundleReleaseCoreV1),
     WebBundleRevocation(WebBundleRevocationCoreV1),
+}
+
+impl TrustPayloadV1 {
+    /// Dieselbe Deutung wie [`TrustObjectV1::decoded_payload`], aber VOR der
+    /// Signatur.
+    ///
+    /// Die Bedeutung einer Nutzlast haengt nicht an ihren Signaturen: beide
+    /// Wege rufen dieselbe Dekodierung ueber dieselben drei Eingaben. Ein
+    /// Verbraucher, der ein Zielobjekt erst noch unterschreiben laesst, hat
+    /// genau diesen Stand in der Hand — [`TrustObjectV1::new`] weist eine
+    /// leere Signaturliste fuer JEDEN Subtyp ab, ein unsigniertes
+    /// [`TrustObjectV1`] gibt es also nicht.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError`] fuer eine Nutzlast, die ihre eigene Grammatik nicht
+    /// erfuellt.
+    pub fn decoded_payload(&self) -> Result<DecodedTrustPayloadV1, FormatError> {
+        decode_payload(
+            self.subtype(),
+            self.exact_payload(),
+            self.exact_digest_input(),
+        )
+    }
 }
 
 impl TrustObjectV1 {

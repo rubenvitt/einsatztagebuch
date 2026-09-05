@@ -474,6 +474,26 @@ impl RegistryLineBuilder {
     }
 
     pub fn push(&mut self, action: ActionSpec, options: HeadOptions) -> BuiltHead {
+        self.push_returning_direct_payload(action, options).0
+    }
+
+    /// Wie [`Self::push`], gibt zusaetzlich die NUTZLAST des direkten Ziels
+    /// heraus — genau die, die dieser Aufruf Wurzel-signiert hat.
+    ///
+    /// Sie wird gebraucht, wo ein Zeuge das Zielobjekt nicht nur LESEN, sondern
+    /// noch einmal BAUEN muss: der Zeremoniendienst von `ea-admin` nimmt eine
+    /// `TrustPayloadV1` entgegen, signiert sie ueber den Schluesselport und
+    /// kodiert sie selbst. Aus einem fertigen `TrustObjectV1` fuehrt kein Weg
+    /// zurueck zur Nutzlast, und eine im Zeugen nachgebaute Nutzlast waere eine
+    /// zweite Wahrheit neben dieser Fixture.
+    ///
+    /// `direct_payload` ist eine reine Funktion ihrer Argumente; der zweite
+    /// Aufruf liefert deshalb Byte fuer Byte dieselbe Nutzlast wie der erste.
+    pub fn push_returning_direct_payload(
+        &mut self,
+        action: ActionSpec,
+        options: HeadOptions,
+    ) -> (BuiltHead, Option<TrustPayloadV1>) {
         let previous = self.state.clone();
         let next_default = previous.version.get().saturating_add(1);
         let version = RegistryVersion::new(options.registry_version.unwrap_or(next_default));
@@ -513,6 +533,7 @@ impl RegistryLineBuilder {
         let mut direct_bytes = None;
         let mut direct_authorization_bytes = None;
         let mut direct_hash = None;
+        let mut direct_payload_out = None;
         if action.has_direct_target() {
             let provisional = direct_payload(
                 &action,
@@ -565,6 +586,14 @@ impl RegistryLineBuilder {
                 let last = signature.len() - 1;
                 signature[last] ^= 1;
             }
+            direct_payload_out = Some(direct_payload(
+                &action,
+                authorization_hash,
+                effective_from,
+                version,
+                &previous,
+                &options,
+            ));
             let bytes = exact_object(payload, vec![signature]);
             direct_hash = Some(object_hash(&bytes));
             direct_bytes = Some(bytes);
@@ -693,7 +722,7 @@ impl RegistryLineBuilder {
                 object_hash: direct_hash.expect("Root rotation has a direct target"),
             };
         }
-        built
+        (built, direct_payload_out)
     }
 
     pub fn add_branch(&mut self, action: ActionSpec, options: HeadOptions) -> BuiltHead {
@@ -715,6 +744,85 @@ impl RegistryLineBuilder {
         self.objects
             .push(added.next().expect("prepared direct target object"));
         head.direct_object_hash.expect("direct target hash")
+    }
+
+    /// Legt die Autorisierung eines direkten Ziels in den Katalog und gibt die
+    /// UNSIGNIERTE Nutzlast des Ziels zurueck — der Stand VOR der
+    /// Wurzelsignatur.
+    ///
+    /// Das ist der Unterschied zu [`Self::add_prepared`], das BEIDE Objekte
+    /// ablegt: hier existiert das Ziel noch gar nicht. Genau diesen Stand hat
+    /// ein Zeremoniendienst in der Hand, der eine Wurzelaenderung erst noch
+    /// unterschreiben laesst. Die Linie ruecht dabei nicht vor; die
+    /// Autorisierung ist an den AKTUELLEN Kopf gebunden.
+    pub fn prepare_unsigned(
+        &mut self,
+        action: ActionSpec,
+        options: HeadOptions,
+    ) -> (ObjectHash, TrustPayloadV1) {
+        assert!(action.has_direct_target());
+        let previous = self.state.clone();
+        let version = RegistryVersion::new(previous.version.get().saturating_add(1));
+        let effective_from = ChainSequence::new(if previous.version == RegistryVersion::new(0) {
+            1
+        } else {
+            previous.valid_through.get().saturating_add(1)
+        });
+        let marker = self.transition_count;
+        self.transition_count = self.transition_count.wrapping_add(1);
+        let direct_id = options
+            .direct_authorization_id
+            .unwrap_or(0x20_u8.wrapping_add(marker.wrapping_mul(2)));
+        let direct_nonce = options.direct_nonce.unwrap_or(direct_id.wrapping_add(0x40));
+        let provisional = direct_payload(
+            &action,
+            ObjectHash::from(Hash32::ZERO),
+            effective_from,
+            version,
+            &previous,
+            &options,
+        );
+        let (basis_version, basis_hash) = options
+            .direct_authorization_basis
+            .unwrap_or((previous.version, previous.head_hash));
+        let authorization = exact_authorization(
+            &provisional,
+            options
+                .direct_authorization_action
+                .unwrap_or(action.action_code()),
+            options
+                .direct_authorization_subtype
+                .unwrap_or(provisional.subtype()),
+            direct_id,
+            direct_nonce,
+            basis_version,
+            basis_hash,
+            options.issued_at,
+            ADMIN_ONE_SECRET,
+            self.admin_hash,
+            self.admin_binding_hash,
+        );
+        let authorization_hash = object_hash(&authorization);
+        let payload = direct_payload(
+            &action,
+            authorization_hash,
+            effective_from,
+            version,
+            &previous,
+            &options,
+        );
+        self.objects.push(authorization);
+        (authorization_hash, payload)
+    }
+
+    /// Legt fertige Objektbytes in den Katalog.
+    ///
+    /// Die Gegenprobe zu [`Self::prepare_unsigned`]: erst fehlt das Ziel, dann
+    /// liegt es da. Ohne sie bewiese ein `EA-TRUST-SOURCE` ueber
+    /// unveroeffentlichte Objektbytes nichts — er faellt auch fuer Bytes, die
+    /// aus einem ganz anderen Grund nicht passen.
+    pub fn add_object(&mut self, exact_bytes: Vec<u8>) {
+        self.objects.push(exact_bytes);
     }
 
     pub fn remove_object(&mut self, target: ObjectHash) {
@@ -1335,6 +1443,23 @@ fn exact_anchor(
 fn key_from_secret(secret: [u8; 32]) -> CanonicalPublicCoseKey {
     CanonicalPublicCoseKey::ed25519(*SigningKey::from_bytes(&secret).verifying_key().as_bytes())
         .unwrap()
+}
+
+/// Der Wurzelschluessel dieser Fixture.
+///
+/// Er kommt heraus, weil ein Zeuge des Zeremoniendienstes die Wurzelsignatur
+/// ueber den PRODUKTIVEN Schluesselport (`ea_key_provider::KeyProvider`) noch
+/// einmal erzeugen muss. Ed25519 signiert deterministisch, also ergibt dieselbe
+/// Nutzlast unter demselben Schluessel Byte fuer Byte dasselbe Objekt — und
+/// genau darauf beruht die Zusage „die herausgegebenen Bytes SIND das
+/// autorisierte Ziel". Ohne diesen Zugriff muesste ein Zeuge die private
+/// Ableitung eines Providers nachbauen oder auf die Zusage verzichten.
+///
+/// Kein Geheimnis im Sinne des Produkts: es ist der Testvektorschluessel aus
+/// RFC 8032, und dieses Modul wird nur in Testzielen uebersetzt.
+#[must_use]
+pub const fn root_signing_secret() -> [u8; 32] {
+    ROOT_SECRET
 }
 
 pub fn organization() -> OrganizationId {

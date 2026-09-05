@@ -242,6 +242,18 @@ const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
          list. Test targets depend on this crate, never the other way round.",
     ),
     (
+        "ea-admin",
+        "drives the offline Admin/Root ceremony: it asks the native key \
+         provider for the Root signature and books the `adminRootCeremony` \
+         line through `ea-audit` into the encrypted host database, so it \
+         reaches past `ea-verify` into the operating system on two sides at \
+         once and is not shared browser code. `web-reader-design.md` §9 makes \
+         only the verification pipeline shared Rust, and that pipeline ends at \
+         `ea-verify`, which stays on the positive list. The Reader is a \
+         browser PWA, holds no Root key (§11.3) and publishes no trust object \
+         at all; nothing in the browser can depend on this crate.",
+    ),
+    (
         "ea-local-store",
         "binds a native SQLCipher build and opens files on the host filesystem \
          — the encrypted database, its write-ahead log and its temporary \

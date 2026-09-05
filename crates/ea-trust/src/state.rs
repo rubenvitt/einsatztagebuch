@@ -1,8 +1,8 @@
 use core::fmt;
 
-use ea_format::ClockReleaseAuditV1;
+use ea_format::{ClockReleaseAuditV1, OrganizationAdminAuthorizationFieldsV1};
 use ea_time::TrustedTimeState;
-use ea_types::{DeviceId, ObjectHash, OrganizationId, RegistryVersion};
+use ea_types::{AuthorizationId, DeviceId, ObjectHash, OrganizationId, RegistryVersion};
 
 use crate::TrustError;
 
@@ -132,6 +132,76 @@ impl ClockReleaseReplayKey {
     }
 }
 
+/// Die Dimension, in der ein Wert organisationsweit EINMAL nutzbar ist.
+///
+/// `design.md` §16.3 sagt „UUID **und** Nonce sind organisationsweit einmal
+/// nutzbar" — zwei Aussagen, nicht eine. Ein Tripel aus beiden waere schwaecher
+/// als das prozesslokale `AdminAuthorizationReplay`, das seit Stufe 1 zwei
+/// getrennte Mengen fuehrt: zwei Autorisierungen mit derselben Nonce und
+/// verschiedener `authorizationId` haetten verschiedene Tripel und kaemen beide
+/// durch.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AdminAuthorizationReplayDimension {
+    AuthorizationId(AuthorizationId),
+    Nonce([u8; 32]),
+}
+
+/// EINE organisationsweite, laufuebergreifende Sperrzeile einer
+/// Administrationsautorisierung.
+///
+/// Eine Autorisierung liefert deren ZWEI — je eine Dimension. Der Schluessel
+/// traegt die Dimension mit, weil eine Ablage sie unterscheiden muss: die
+/// reservierte Tabelle `replay_nonces` (`0001_initial.sql:304-316`) hat den
+/// Primaerschluessel `(organization_id, nonce)` und nimmt nur die
+/// Nonce-Dimension auf; die `authorizationId`-Dimension braucht ihren eigenen
+/// Geltungsbereich. Ein Speicher, der die Dimension wegwirft, verwechselt eine
+/// 16-Byte-Kennung mit einer 32-Byte-Nonce.
+///
+/// Wie [`ClockReleaseReplayKey`] ist er NACHWEISEND und nicht frei baubar. Er
+/// entsteht ausschliesslich in der geprueften Autorisierung und kommt ueber
+/// [`VerifiedAdminAuthorization::replay_keys`](crate::VerifiedAdminAuthorization::replay_keys)
+/// heraus. Ein Aufrufer, der ihn selbst zusammensetzen koennte, koennte eine
+/// fremde Autorisierung als verbraucht markieren.
+pub struct AdminAuthorizationReplayKey {
+    organization_id: OrganizationId,
+    dimension: AdminAuthorizationReplayDimension,
+}
+
+impl AdminAuthorizationReplayKey {
+    /// Die BEIDEN Sperrzeilen einer geprueften Autorisierung.
+    ///
+    /// Die Reihenfolge ist festgelegt und bedeutsam: die `authorizationId`
+    /// zuerst. Sie ist der Wert, den ein zweiter Versuch DERSELBEN
+    /// Autorisierung teilt, also faellt der haeufigste Wiedereinspielversuch
+    /// im ersten Zug, bevor irgendein Wert gesetzt wurde.
+    pub(crate) const fn pair_from_verified_authorization(
+        fields: &OrganizationAdminAuthorizationFieldsV1,
+    ) -> [Self; 2] {
+        [
+            Self {
+                organization_id: fields.organization_id,
+                dimension: AdminAuthorizationReplayDimension::AuthorizationId(
+                    fields.authorization_id,
+                ),
+            },
+            Self {
+                organization_id: fields.organization_id,
+                dimension: AdminAuthorizationReplayDimension::Nonce(fields.nonce),
+            },
+        ]
+    }
+
+    #[must_use]
+    pub const fn organization_id(&self) -> OrganizationId {
+        self.organization_id
+    }
+
+    #[must_use]
+    pub const fn dimension(&self) -> AdminAuthorizationReplayDimension {
+        self.dimension
+    }
+}
+
 pub struct IndependentTimeCommit {
     next_trusted_time: TrustedTimeState,
 }
@@ -242,6 +312,44 @@ pub trait TrustStateStore {
         &mut self,
         key: &ClockReleaseReplayKey,
     ) -> Result<bool, StateStoreError>;
+
+    /// Verbraucht EINE Sperrzeile einer Administrationsautorisierung und
+    /// meldet, ob sie SCHON verbraucht war.
+    ///
+    /// Anders als [`Self::clock_release_consumed`] ist dieser Port
+    /// SCHREIBEND. Die Uhrfreigabe fragt nur; ihre Sperre wird eine Ebene
+    /// hoeher in `commit_registry_selection` gesetzt, das ohnehin schreibt.
+    /// Die Administrationsautorisierung hat keinen solchen Commit — sie wird
+    /// oberhalb von `ea-trust` verbraucht —, also MUSS das Pruefen und das
+    /// Setzen hier in einem Zug geschehen. Ein Speicher, der bloss liest,
+    /// laesst zwei gleichzeitige Verbraucher durch; die Umsetzung ist ein
+    /// Einfuegen, dessen Primaerschluessel die Sperre IST.
+    ///
+    /// Der Port ist EINDIMENSIONAL. Die Regel, dass eine Autorisierung ZWEI
+    /// Zeilen setzt — `authorizationId` und `nonce` —, liegt in
+    /// [`consume_admin_authorization`](crate::consume_admin_authorization) und
+    /// damit in `ea-trust`; ein Speicher kann sie nicht vergessen. Die beiden
+    /// Zuege sind nicht in EINER Transaktion, und das ist tragbar: jede Zeile
+    /// fuer sich ist atomar, und ein Aufrufer, der die erste gewinnt und die
+    /// zweite verliert, wird abgewiesen. Es gibt keinen Verlauf, in dem zwei
+    /// Verbraucher derselben Nonce beide durchkommen — die Nonce-Zeile ist der
+    /// Serialisierungspunkt.
+    ///
+    /// Die Vorgabe antwortet mit [`StateStoreError::Unavailable`] und NICHT
+    /// mit `Ok(false)`. Ein Speicher, der die Sperre nicht fuehrt, weiss
+    /// nicht, dass die Autorisierung frisch ist — er darf es also auch nicht
+    /// behaupten. Das ist die einzige Vorgabe, die keine stille Luecke oeffnet.
+    ///
+    /// # Errors
+    ///
+    /// [`StateStoreError::Unavailable`], solange der Speicher die Sperre nicht
+    /// fuehrt, sowie jeden Befund der Ablage.
+    fn admin_authorization_consumed(
+        &mut self,
+        _key: &AdminAuthorizationReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
 
     fn commit_registry_selection(
         &mut self,
