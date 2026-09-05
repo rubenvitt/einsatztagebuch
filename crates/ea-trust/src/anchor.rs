@@ -111,6 +111,89 @@ impl TrustAnchorV1 {
     }
 }
 
+/// Die VORSTUFE des Trust Anchors — der Gegenstand des vierten
+/// Einrichtungsschrittes.
+///
+/// Sie traegt genau die acht Felder, die die Spezifikation in
+/// `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md:1737-1748`
+/// als `organization-trust-anchor-pre-v1` festlegt, und wird VOR der ersten
+/// Administrationsautorisierung auf mindestens zwei schreibgeschuetzte
+/// Recovery-Medien geschrieben (`:1339`, `:1780`). Der finale Anker uebernimmt
+/// diese Felder spaeter BYTEGLEICH; hinzu kommen nur die finale Domain,
+/// `bootstrap-anchor-hash` und `genesis-entry-hash` (`:1346`).
+///
+/// `exact_bytes` sind die Bytes, die auf dem Medium stehen — nicht eine
+/// Neukodierung derselben Felder. Der Unterschied ist der ganze Zweck: nur die
+/// festgeschriebenen Bytes belegen, worauf sich die Zeremonie WIRKLICH
+/// festgelegt hat.
+pub struct PreAnchorV1 {
+    organization_id: OrganizationId,
+    chain_id: ChainId,
+    root_public_cose_key: CanonicalPublicCoseKey,
+    exact_root_public_cose_key: Vec<u8>,
+    root_key_thumbprint: KeyThumbprint,
+    root_certificate_object_hash: ObjectHash,
+    initial_admin_certificate_object_hashes: Vec<ObjectHash>,
+    initial_admin_operator_binding_object_hashes: Vec<ObjectHash>,
+    exact_bytes: Vec<u8>,
+    bootstrap_anchor_hash: Hash32,
+}
+
+impl PreAnchorV1 {
+    #[must_use]
+    pub const fn organization_id(&self) -> OrganizationId {
+        self.organization_id
+    }
+
+    #[must_use]
+    pub const fn chain_id(&self) -> ChainId {
+        self.chain_id
+    }
+
+    #[must_use]
+    pub const fn root_public_cose_key(&self) -> &CanonicalPublicCoseKey {
+        &self.root_public_cose_key
+    }
+
+    #[must_use]
+    pub fn root_public_cose_key_bytes(&self) -> &[u8] {
+        &self.exact_root_public_cose_key
+    }
+
+    #[must_use]
+    pub const fn root_key_thumbprint(&self) -> KeyThumbprint {
+        self.root_key_thumbprint
+    }
+
+    #[must_use]
+    pub const fn root_certificate_object_hash(&self) -> ObjectHash {
+        self.root_certificate_object_hash
+    }
+
+    #[must_use]
+    pub fn initial_admin_certificate_object_hashes(&self) -> &[ObjectHash] {
+        &self.initial_admin_certificate_object_hashes
+    }
+
+    #[must_use]
+    pub fn initial_admin_operator_binding_object_hashes(&self) -> &[ObjectHash] {
+        &self.initial_admin_operator_binding_object_hashes
+    }
+
+    /// Die exakten Bytes, wie sie auf den Recovery-Medien stehen.
+    #[must_use]
+    pub fn exact_bytes(&self) -> &[u8] {
+        &self.exact_bytes
+    }
+
+    /// `bootstrapAnchorHash` ueber genau diese Bytes — der volle Fingerprint,
+    /// der ueber den zweiten Kanal bestaetigt wird (`:1780`).
+    #[must_use]
+    pub const fn bootstrap_anchor_hash(&self) -> Hash32 {
+        self.bootstrap_anchor_hash
+    }
+}
+
 pub struct VerifiedTrust {
     pub(crate) inner: Arc<VerifiedTrustInner>,
 }
@@ -577,14 +660,7 @@ pub fn decode_trust_anchor(exact_bytes: &[u8]) -> Result<TrustAnchorV1, TrustErr
     )?;
 
     let root_public_cose_key =
-        CanonicalPublicCoseKey::from_deterministic_cbor(&exact_root_public_cose_key)
-            .map_err(|_| TrustError::AnchorPin)?;
-    if !matches!(&root_public_cose_key, CanonicalPublicCoseKey::Ed25519(_)) {
-        return Err(TrustError::AnchorPin);
-    }
-    if root_public_cose_key.thumbprint() != root_key_thumbprint {
-        return Err(TrustError::AnchorPin);
-    }
+        pinned_root_public_key(&exact_root_public_cose_key, root_key_thumbprint)?;
 
     let exact_pre_anchor_bytes = encode_pre_anchor(
         organization_id,
@@ -614,6 +690,178 @@ pub fn decode_trust_anchor(exact_bytes: &[u8]) -> Result<TrustAnchorV1, TrustErr
         exact_bytes: exact_bytes.to_vec(),
         trust_anchor_hash: trust_anchor_hash(exact_bytes),
     })
+}
+
+/// Baut die Vorstufe aus ihren acht Feldern und gibt ihre EXAKTEN Bytes heraus.
+///
+/// Kodiert wird ausschliesslich ueber [`encode_pre_anchor`] — dieselbe private
+/// Funktion, die [`decode_trust_anchor`] benutzt, um die Vorstufe eines finalen
+/// Ankers nachzurechnen. Ein zweiter Kodierer waere eine zweite Wahrheit: schon
+/// ein Byte Abweichung zwischen beiden liesse den `bootstrapAnchorHash` des
+/// finalen Ankers dauerhaft nicht mehr auf die festgeschriebene Vorstufe
+/// passen.
+///
+/// Geprueft wird vor dem Kodieren dasselbe wie beim Dekodieren eines finalen
+/// Ankers: die beiden Admin-Hashlisten sind byteweise sortiert, duplikatfrei,
+/// gleich lang und enthalten mindestens zwei Werte
+/// (Spezifikation `:1780`), und der Wurzelschluessel ist ein kanonischer
+/// Ed25519-COSE_Key, dessen Abdruck nach RFC 9679 NEU GERECHNET wird statt
+/// geglaubt zu werden (vergleiche `decode_trust_anchor`, dieselbe Datei).
+///
+/// # Errors
+/// [`TrustError::AnchorShape`] fuer jede Listenverletzung,
+/// [`TrustError::AnchorPin`] fuer einen Schluessel, der nicht kanonisch,
+/// nicht Ed25519 oder nicht der des Abdrucks ist.
+pub fn encode_pre_anchor_v1(
+    organization_id: OrganizationId,
+    chain_id: ChainId,
+    exact_root_public_cose_key: &[u8],
+    root_key_thumbprint: KeyThumbprint,
+    root_certificate_object_hash: ObjectHash,
+    certificates: &[ObjectHash],
+    bindings: &[ObjectHash],
+) -> Result<PreAnchorV1, TrustError> {
+    validate_anchor_hash_lists(certificates, bindings)?;
+    let root_public_cose_key =
+        pinned_root_public_key(exact_root_public_cose_key, root_key_thumbprint)?;
+
+    let exact_bytes = encode_pre_anchor(
+        organization_id,
+        chain_id,
+        exact_root_public_cose_key,
+        root_key_thumbprint,
+        root_certificate_object_hash,
+        certificates,
+        bindings,
+    );
+
+    Ok(PreAnchorV1 {
+        organization_id,
+        chain_id,
+        root_public_cose_key,
+        exact_root_public_cose_key: exact_root_public_cose_key.to_vec(),
+        root_key_thumbprint,
+        root_certificate_object_hash,
+        initial_admin_certificate_object_hashes: certificates.to_vec(),
+        initial_admin_operator_binding_object_hashes: bindings.to_vec(),
+        bootstrap_anchor_hash: bootstrap_anchor_hash(&exact_bytes),
+        exact_bytes,
+    })
+}
+
+/// Liest die exakten Bytes, die auf einem Recovery-Medium stehen.
+///
+/// Der Aufbau spiegelt [`decode_trust_anchor`] Schritt fuer Schritt: erst ein
+/// Vorlauf ueber GELIEHENE Slices, der die vollstaendige flache Drahtform
+/// prueft, dann `ea_cbor::validate` mit [`ParserLimits::V1`], dann erst die
+/// besitzende Dekodierung und die inhaltlichen Pruefungen. Ueberzaehlige Bytes
+/// hinter dem Feld gelten als Formfehler.
+///
+/// Anders als der finale Anker traegt die Vorstufe keinen eingebetteten Hash
+/// ueber sich selbst; ihr Fingerprint wird hier gerechnet und ist genau der
+/// Wert, den Schritt 4 ueber den zweiten Kanal bestaetigt (`:1339`, `:1780`).
+///
+/// # Errors
+/// [`TrustError::AnchorShape`] fuer jede Abweichung von
+/// `organization-trust-anchor-pre-v1` (`:1737-1748`),
+/// [`TrustError::AnchorPin`] fuer einen Wurzelschluessel, der nicht zu seinem
+/// Abdruck gehoert.
+pub fn decode_pre_anchor(exact_bytes: &[u8]) -> Result<PreAnchorV1, TrustError> {
+    preflight_flat_pre_anchor(exact_bytes)?;
+    ea_cbor::validate(exact_bytes, ParserLimits::V1).map_err(|_| TrustError::AnchorShape)?;
+
+    let mut decoder = Decoder::new(exact_bytes);
+    expect_array(&mut decoder, 10)?;
+    expect_text(&mut decoder, PRE_ANCHOR_DOMAIN)?;
+    expect_u64(&mut decoder, 1)?;
+    let organization_id = OrganizationId::try_from(read_exact_bytes(&mut decoder, 16)?)
+        .map_err(|_| TrustError::AnchorShape)?;
+    let chain_id = ChainId::try_from(read_exact_bytes(&mut decoder, 16)?)
+        .map_err(|_| TrustError::AnchorShape)?;
+    let exact_root_public_cose_key = decoder
+        .bytes()
+        .map_err(|_| TrustError::AnchorShape)?
+        .to_vec();
+    let root_key_thumbprint = KeyThumbprint::try_from(read_exact_bytes(&mut decoder, 32)?)
+        .map_err(|_| TrustError::AnchorShape)?;
+    let root_certificate_object_hash = ObjectHash::try_from(read_exact_bytes(&mut decoder, 32)?)
+        .map_err(|_| TrustError::AnchorShape)?;
+    let initial_admin_certificate_object_hashes = read_hash_list(&mut decoder)?;
+    let initial_admin_operator_binding_object_hashes = read_hash_list(&mut decoder)?;
+    expect_array(&mut decoder, 0)?;
+    if decoder.position() != exact_bytes.len() {
+        return Err(TrustError::AnchorShape);
+    }
+
+    validate_anchor_hash_lists(
+        &initial_admin_certificate_object_hashes,
+        &initial_admin_operator_binding_object_hashes,
+    )?;
+    let root_public_cose_key =
+        pinned_root_public_key(&exact_root_public_cose_key, root_key_thumbprint)?;
+
+    Ok(PreAnchorV1 {
+        organization_id,
+        chain_id,
+        root_public_cose_key,
+        exact_root_public_cose_key,
+        root_key_thumbprint,
+        root_certificate_object_hash,
+        initial_admin_certificate_object_hashes,
+        initial_admin_operator_binding_object_hashes,
+        exact_bytes: exact_bytes.to_vec(),
+        bootstrap_anchor_hash: bootstrap_anchor_hash(exact_bytes),
+    })
+}
+
+fn preflight_flat_pre_anchor(exact_bytes: &[u8]) -> Result<(), TrustError> {
+    // Wie `preflight_flat_anchor`, nur ohne `bootstrap-anchor-hash` und
+    // `genesis-entry-hash`: geliehene Slices, keine Allokation, und erst hinter
+    // dieser Grenze wird etwas besessen.
+    let mut decoder = Decoder::new(exact_bytes);
+    expect_array(&mut decoder, 10)?;
+    expect_text(&mut decoder, PRE_ANCHOR_DOMAIN)?;
+    expect_u64(&mut decoder, 1)?;
+    read_exact_bytes(&mut decoder, 16)?;
+    read_exact_bytes(&mut decoder, 16)?;
+    let root_key = decoder.bytes().map_err(|_| TrustError::AnchorShape)?;
+    if root_key.len() != 40 {
+        return Err(TrustError::AnchorShape);
+    }
+    read_exact_bytes(&mut decoder, 32)?;
+    read_exact_bytes(&mut decoder, 32)?;
+    let certificate_count = preflight_hash_list(&mut decoder)?;
+    let binding_count = preflight_hash_list(&mut decoder)?;
+    if certificate_count != binding_count {
+        return Err(TrustError::AnchorShape);
+    }
+    expect_array(&mut decoder, 0)?;
+    if decoder.position() != exact_bytes.len() {
+        return Err(TrustError::AnchorShape);
+    }
+    Ok(())
+}
+
+/// Der Wurzelschluessel eines Ankers: kanonisch, Ed25519, und sein Abdruck
+/// NEU GERECHNET.
+///
+/// Eine Stelle fuer Vorstufe und finalen Anker. Zwei Kopien dieser drei Zeilen
+/// koennten auseinanderlaufen, und dann hinge an einem Anker ein Schluessel,
+/// den die jeweils andere Flaeche abgewiesen haette.
+fn pinned_root_public_key(
+    exact_root_public_cose_key: &[u8],
+    root_key_thumbprint: KeyThumbprint,
+) -> Result<CanonicalPublicCoseKey, TrustError> {
+    let root_public_cose_key =
+        CanonicalPublicCoseKey::from_deterministic_cbor(exact_root_public_cose_key)
+            .map_err(|_| TrustError::AnchorPin)?;
+    if !matches!(&root_public_cose_key, CanonicalPublicCoseKey::Ed25519(_)) {
+        return Err(TrustError::AnchorPin);
+    }
+    if root_public_cose_key.thumbprint() != root_key_thumbprint {
+        return Err(TrustError::AnchorPin);
+    }
+    Ok(root_public_cose_key)
 }
 
 fn preflight_flat_anchor(exact_bytes: &[u8]) -> Result<(), TrustError> {
