@@ -27,8 +27,24 @@
 //! Telemetrie sind Wirt-APIs, die niemand ruft. „Niemand ruft sie" ist eine
 //! Aussage ueber den QUELLTEXT, mechanisch pruefbar und staerker als eine
 //! Laufzeitstichprobe — aber sie ist nicht dieselbe Aussage, und dieser Zeuge
-//! behauptet die andere nicht. Der Nachweis darueber, dass der Service Worker
-//! sich zur LAUFZEIT so verhaelt, liegt in `apps/web/src/sw/service-worker.test.ts`.
+//! behauptet die andere nicht.
+//!
+//! # Die LAUFZEITHAELFTE des Service Workers ist UNBEZEUGT
+//!
+//! Eine fruehere Fassung dieses Kopfes verwies dafuer auf
+//! `apps/web/src/sw/service-worker.test.ts`. Der Verweis war falsch, GEMESSEN
+//! am 2026-09-05: diese Datei fuehrt acht Zeugen ueber der Buendelpinnung und
+//! nennt `fetch`, `addEventListener`, `respondWith` und `cache.put` KEIN
+//! einziges Mal. Es gibt in diesem Baum also keinen Zeugen dafuer, wie sich
+//! ein registrierter Service Worker zur Laufzeit gegenueber einer Antwort
+//! verhaelt — nur den Quellenscan darueber, dass keine Quelle einen solchen
+//! Haken schreibt.
+//!
+//! Was die Luecke schloesse, benannt statt umschrieben: ein Laufzeitzeuge im
+//! Service-Worker-Bereich, der eine `fetch`-Anfrage stellt und danach
+//! zusichert, dass KEIN Eintrag in irgendeinem `caches`-Namensraum liegt —
+//! also dass kein `fetch`-Haken eine Antwort zwischenspeichert. Er gehoerte
+//! nach `apps/web` und kann in dieser Rust-Testcrate nicht entstehen.
 //!
 //! # Der Reader liest den Bestand, den er misst
 //!
@@ -66,15 +82,42 @@ use std::collections::BTreeSet;
 
 use ea_format::{LocalAuditOutcomeV1, decode_local_audit_event};
 use reader_canary_support::{
-    ALLOWED_CACHE_CALLS_V1, CANARY_EXPORT_FILENAME_V1, CLIPBOARD_NEEDLES_V1, READER_CANARY_MARKERS,
-    ReaderCanaryHarness, SERVICE_WORKER_CACHE_NEEDLES_V1, TELEMETRY_NEEDLES_V1,
-    cache_api_call_sites, canary, canary_text, first_forbidden_call, hand_written_browser_sources,
+    ALLOWED_CACHE_CALLS_V1, CANARY_EXPORT_FILENAME_V1, CLIPBOARD_NEEDLES_V1, NON_SCHEMA_MARKERS_V1,
+    READER_CANARY_MARKERS, ReaderCanaryHarness, SERVICE_WORKER_CACHE_NEEDLES_V1,
+    TELEMETRY_NEEDLES_V1, UNMARKED_SCHEMA_FIELDS_V1, cache_api_call_sites, canary, canary_text,
+    first_forbidden_call, hand_written_browser_sources, incident_schema_surface,
     is_plaintext_export,
 };
 
 /// Wie viele Zeilen ein gelungener Einzelexport schreibt: `Accepted` vor der
 /// unwiderruflichen Grenze und `Completed` danach.
 const AUDIT_LINES_OF_ONE_EXPORT_V1: usize = 2;
+
+/// Die ACHT Abweisungen, die [`ReaderCanaryHarness::error_reports`] wirklich
+/// fuehrt — benannt und nicht gezaehlt.
+///
+/// Vier davon erzeugt EIN fremder Tresor: er oeffnet weder ein Cacheobjekt
+/// noch einen Eintragszustand noch das Protokoll noch den Index. Die vier
+/// uebrigen kommen aus vier verschiedenen Ursachen: ein Genesis-Paket traegt
+/// keine fachliche Indexzeile, ein Export ohne Ziel wird VOR der Grenze
+/// abgewiesen, ein fremder PRF-Ausgang oeffnet den Tresor nicht, und eine
+/// ausbrechende Blobadresse ist keine Adresse.
+///
+/// Jede der acht schreibt eine `Debug`-Zeile unter dem hier genannten Namen;
+/// DREI von ihnen zusaetzlich eine `Display`-Zeile (Cache-, Index- und
+/// Exportabweisung). Mit den drei `Debug`-Zeilen der GELUNGENEN Wege — Bericht,
+/// Suchtreffer, Schwellenzustand — und der des zweiten entschluesselten
+/// Datensatzes sind es fuenfzehn Berichte, gezaehlt am 2026-09-05.
+const ABGEWIESENE_WEGE_V1: [&str; 8] = [
+    "Cachefehler unter fremdem Tresor",
+    "Zustandsspeicherfehler unter fremdem Tresor",
+    "Protokollfehler unter fremdem Tresor",
+    "Indexfehler unter fremdem Tresor",
+    "Schemaweigerung des Index",
+    "Debug der Exportabweisung",
+    "Tresorfehler",
+    "Adressfehler des Byteports",
+];
 
 /// STROM 1 — die rohen OPFS-Bytes. ECHTE Bytes.
 ///
@@ -214,17 +257,33 @@ fn the_signed_local_audit_log_carries_binding_and_hashes_and_never_a_marker() {
 /// STROM 5 — die Fehlerberichte. ECHTE Bytes.
 ///
 /// Jede `Debug`- und `Display`-Ausgabe, die dieser Kern auf den gefahrenen
-/// Wegen ueberhaupt bilden kann, samt den sechs Abweisungen, die ein fremder
-/// Tresor, ein fremdes Schema, ein fehlendes Exportziel, ein fremder
-/// PRF-Ausgang und eine unzulaessige Blobadresse erzeugen.
+/// Wegen ueberhaupt bilden kann, samt den ACHT Abweisungen, die
+/// [`ABGEWIESENE_WEGE_V1`] aufzaehlt.
+///
+/// Die vorige Fassung sagte „sechs" und zaehlte darunter FUENF Ursachen auf,
+/// die acht Abweisungen erzeugen; die Zahl gehoerte zu keiner der beiden
+/// Mengen. Und eine der acht war gar keine: die Cacheabfrage lief gegen
+/// `object_hash(b"kanarie")`, eine Adresse, die im Byteport nicht existiert.
+/// Ein Cache-FEHLGRIFF meldet `Ok(None)`; der Eintrag trug damit die
+/// Zeichenkette „None" und zaehlte trotzdem gegen die Untergrenze. Er fragt
+/// jetzt nach einem Objekt, das WIRKLICH im Cache liegt, und bekommt eine
+/// echte Weigerung.
 #[test]
 fn no_error_report_of_the_reader_carries_a_fachlichen_marker() {
     let harness = ReaderCanaryHarness::run();
     let streams = harness.error_reports();
+    // ANTI-LEERLAUF, und zwar NAMENTLICH statt ueber einer Zahl: eine
+    // Untergrenze `>= 12` haelt auch ueber einer Sammlung, der ein ganzer
+    // Abweisungsweg fehlt, solange irgendwo zwei Debugzeilen nachwachsen.
+    for way in ABGEWIESENE_WEGE_V1 {
+        assert!(
+            streams.iter().any(|(place, _)| place == way),
+            "die Sammlung MUSS den Bericht `{way}` fuehren"
+        );
+    }
     assert!(
-        streams.len() >= 12,
-        "die Sammlung MUSS die Berichte, die vier fremden Tresorwege, die Schemaweigerung, die \
-         Exportabweisung, den Tresorfehler und den Adressfehler umfassen, es waren {}",
+        streams.len() >= ABGEWIESENE_WEGE_V1.len(),
+        "es waren {}",
         streams.len()
     );
     for (field, marker) in READER_CANARY_MARKERS {
@@ -299,11 +358,11 @@ fn no_production_source_writes_into_a_service_worker_cache() {
         "der Service Worker fuehrt Cache-Aufrufe; eine leere Menge hiesse, der Scan sieht die \
          Datei nicht"
     );
-    for (path, line) in &sites {
+    for (path, site) in &sites {
         assert!(
             ALLOWED_CACHE_CALLS_V1
                 .iter()
-                .any(|allowed| line.contains(allowed)),
+                .any(|allowed| site.ends_with(allowed)),
             "{path} fuehrt einen Cache-Aufruf ausserhalb von Anlegen, Listen und Abraeumen"
         );
     }
@@ -318,12 +377,46 @@ fn no_production_source_writes_into_a_service_worker_cache() {
         ),
         Some("cache.put(")
     );
-    assert_eq!(
-        first_forbidden_call(
-            "self.addEventListener('fetch', handler)",
-            &SERVICE_WORKER_CACHE_NEEDLES_V1
-        ),
-        Some("addEventListener('fetch'")
+
+    // Und zwar UNABHAENGIG vom Anfuehrungszeichen. Diese drei Zusicherungen
+    // sind der Kern des Befundes, der diese Fassung ausgeloest hat: die vorige
+    // Nadelliste kannte nur die einfache Schreibung, und der Baum fuehrt weder
+    // eslint noch biome noch prettier noch oxlint, die eine erzwaenge.
+    for registration in [
+        "self.addEventListener('fetch', handler)",
+        "self.addEventListener(\"fetch\", handler)",
+        "self.addEventListener(`fetch`, handler)",
+        "self.addEventListener(\n  'fetch',\n  handler,\n)",
+    ] {
+        assert_eq!(
+            first_forbidden_call(registration, &SERVICE_WORKER_CACHE_NEEDLES_V1),
+            Some("addEventListener('fetch'"),
+            "eine `fetch`-Registrierung MUSS unabhaengig von Anfuehrungszeichen und Umbruch \
+             auffallen"
+        );
+    }
+
+    // POSITIVKONTROLLE der ZWEITEN Haelfte: die Fundstellensuche kommt aus der
+    // BINDUNG und nicht aus dem Empfaengernamen. Genau dieser Fall — ein
+    // Handle aus `caches.open(`, unter einem anderen Namen beschrieben — war
+    // vor dieser Fassung gemessen gruen.
+    let leaking = vec![(
+        "apps/web/src/sw/service-worker.ts".to_owned(),
+        "const box = await caches.open('ea-reader-bundle-leak')\nawait box.put(request, response)"
+            .to_owned(),
+    )];
+    let leaking_sites = cache_api_call_sites(&leaking);
+    assert!(
+        leaking_sites
+            .iter()
+            .any(|(_, site)| site.ends_with("box.put(")),
+        "ein Cachehandle unter fremdem Namen MUSS eine Fundstelle sein, es waren {leaking_sites:?}"
+    );
+    assert!(
+        leaking_sites.iter().any(|(_, site)| !ALLOWED_CACHE_CALLS_V1
+            .iter()
+            .any(|allowed| site.ends_with(allowed))),
+        "und sie MUSS die Erlaubnisliste verfehlen"
     );
 }
 
@@ -400,7 +493,7 @@ fn no_production_source_ships_telemetry() {
 #[test]
 fn the_search_finds_a_marker_that_really_lies_in_the_raw_opfs_bytes() {
     let mut harness = ReaderCanaryHarness::run();
-    let marker = canary("keyword");
+    let marker = canary("IncidentBodyV1.keyword");
     assert!(
         !harness
             .raw_opfs_bytes()
@@ -456,7 +549,7 @@ fn every_named_field_carries_its_own_marker_and_the_vault_gives_it_back() {
         // nach dem Original faende ihn nicht. `timezone` ist die begruendete
         // Ausnahme: eine IANA-Zone schreibt ihre Grossbuchstaben vor, und
         // `indexable_record` projiziert die Zone in KEINEN Term.
-        if field == "timezone" {
+        if field == "CommonHeaderV1.timezone" {
             continue;
         }
         if let Ok(text) = core::str::from_utf8(marker) {
@@ -475,7 +568,7 @@ fn every_named_field_carries_its_own_marker_and_the_vault_gives_it_back() {
     for (field, present) in encoded {
         // Der Dateiname des Exportziels ist kein Feld der Nutzlast; er wird am
         // ZIEL gesaet und nicht im Einsatz.
-        if *field == "export_filename" {
+        if NON_SCHEMA_MARKERS_V1.contains(field) {
             assert!(
                 !present,
                 "der Dateiname des Ziels gehoert NICHT in die Nutzlast"
@@ -492,7 +585,7 @@ fn every_named_field_carries_its_own_marker_and_the_vault_gives_it_back() {
     let opened = harness.markers_readable_through_the_vault();
     assert_eq!(opened.len(), READER_CANARY_MARKERS.len());
     for (field, present) in opened {
-        if *field == "export_filename" {
+        if NON_SCHEMA_MARKERS_V1.contains(field) {
             continue;
         }
         assert!(
@@ -510,14 +603,14 @@ fn every_named_field_carries_its_own_marker_and_the_vault_gives_it_back() {
     assert_eq!(harness.indexed_packages(), 1);
     assert_eq!(
         harness.search_hit_incident_number(),
-        canary_text("human_incident_number"),
+        canary_text("IncidentBodyV1.human_incident_number"),
         "die Suche gibt die Einsatznummer des Kanarieneinsatzes zurueck"
     );
 
     // 4. Der EINE erlaubte Ausgang traegt die Marker. Ein Lauf, in dem sie
     //    nirgends ankommen, waere gruen und wertlos.
     for (field, marker) in READER_CANARY_MARKERS {
-        if field == "export_filename" {
+        if NON_SCHEMA_MARKERS_V1.contains(&field) {
             continue;
         }
         assert!(
@@ -536,4 +629,94 @@ fn every_named_field_carries_its_own_marker_and_the_vault_gives_it_back() {
     for (_, bytes) in harness.structured_log_lines() {
         let _ = decode_local_audit_event(&bytes);
     }
+}
+
+/// Die Markermenge ist VOLLSTAENDIG gegenueber der Schemaflaeche — und das
+/// wird an der Quelle gemessen, nicht an der eigenen Liste.
+///
+/// # Warum die vorige Fassung das nicht konnte
+///
+/// `every_named_field_carries_its_own_marker_and_the_vault_gives_it_back`
+/// zaehlt [`READER_CANARY_MARKERS`] ab. Eine Liste, die sich selbst abzaehlt,
+/// kann nichts vermissen: `personnelEmptyReason`, `vehiclesEmptyReason`,
+/// `roleOrFunction`, `radioCallSign`, `licensePlate`, die Koordinaten und
+/// `functionLabel` fehlten, und kein Zeuge dieses Baums sagte es.
+///
+/// Dieser Zeuge liest die Feldnamen aus `crates/ea-schema/src/model.rs` und
+/// verlangt eine LUECKENLOSE, UEBERSCHNEIDUNGSFREIE Aufteilung in „traegt
+/// einen Marker" und „traegt keinen, und hier ist der gemessene Grund". Ein
+/// neues Feld in `ea-schema` faellt damit rot auf, ohne dass jemand daran
+/// denken muss.
+#[test]
+fn every_schema_field_of_the_canary_incident_is_marked_or_named_with_a_reason() {
+    let surface = incident_schema_surface();
+    // ANTI-LEERLAUF: ein verschobener Pfad oder ein umbenannter Blockkopf
+    // liefert sonst eine leere Flaeche, und eine leere Flaeche teilt jede
+    // Liste luechenlos auf.
+    assert!(
+        surface.len() > 50,
+        "die Schemaflaeche des Kanarieneinsatzes hat mehr als 50 benannte Felder, es waren {}",
+        surface.len()
+    );
+    for named in ["IncidentBodyV1.notes", "VehicleSnapshotV1.license_plate"] {
+        assert!(
+            surface.contains(named),
+            "{named} MUSS in der gelesenen Schemaflaeche liegen"
+        );
+    }
+
+    let marked: BTreeSet<&str> = READER_CANARY_MARKERS
+        .iter()
+        .map(|(field, _)| *field)
+        .filter(|field| !NON_SCHEMA_MARKERS_V1.contains(field))
+        .collect();
+    let excused: BTreeSet<&str> = UNMARKED_SCHEMA_FIELDS_V1
+        .iter()
+        .map(|(field, _)| *field)
+        .collect();
+    assert_eq!(
+        excused.len(),
+        UNMARKED_SCHEMA_FIELDS_V1.len(),
+        "kein Feld steht zweimal in der Begruendungsliste"
+    );
+    for (field, reason) in UNMARKED_SCHEMA_FIELDS_V1 {
+        assert!(
+            !reason.is_empty(),
+            "{field} steht ohne Begruendung in der Liste"
+        );
+    }
+
+    // Jeder NICHT-Schemamarker MUSS wirklich einer der Marker sein; sonst
+    // schnitte die Ausnahmeliste ein Schemafeld still aus der Pruefung.
+    for exception in NON_SCHEMA_MARKERS_V1 {
+        assert!(
+            READER_CANARY_MARKERS
+                .iter()
+                .any(|(field, _)| *field == exception),
+            "{exception} ist als Nicht-Schemafeld gefuehrt, steht aber unter keinem Marker"
+        );
+        assert!(
+            !surface.contains(exception),
+            "{exception} ist als Nicht-Schemafeld gefuehrt und steht trotzdem in der Schemaflaeche"
+        );
+    }
+
+    let doubled: Vec<&&str> = marked.intersection(&excused).collect();
+    assert!(
+        doubled.is_empty(),
+        "ein Feld traegt einen Marker UND eine Begruendung: {doubled:?}"
+    );
+
+    let covered: BTreeSet<&str> = marked.union(&excused).copied().collect();
+    let surface_names: BTreeSet<&str> = surface.iter().map(String::as_str).collect();
+    let uncovered: Vec<&&str> = surface_names.difference(&covered).collect();
+    assert!(
+        uncovered.is_empty(),
+        "diese Schemafelder tragen weder Marker noch Begruendung: {uncovered:?}"
+    );
+    let phantom: Vec<&&str> = covered.difference(&surface_names).collect();
+    assert!(
+        phantom.is_empty(),
+        "diese Namen stehen in Marker- oder Begruendungsliste, aber in keinem Schema: {phantom:?}"
+    );
 }

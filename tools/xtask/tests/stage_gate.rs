@@ -2741,7 +2741,7 @@ const STAGE_FOUR_SCENARIOS: [&str; 32] = [
     "unsigned-candidate",
 ];
 
-/// Die Zahl der VERSCHIEDENEN Zeugen eines Szenarienmanifests.
+/// Die Zahl der VERSCHIEDENEN Zeugen, die das Stufe-4-Manifest fuehren MUSS.
 ///
 /// Sie ist NICHT die Zahl der Szenarien, und die Differenz ist gemessen:
 /// `resolved_fault_point_witnesses` in `tools/xtask/src/main.rs` sammelt in ein
@@ -2751,20 +2751,55 @@ const STAGE_FOUR_SCENARIOS: [&str; 32] = [
 /// zwoelfmal dieselbe Aussage. Das Stufe-4-Manifest deklariert deshalb
 /// 32 Szenarien und 21 verschiedene Zeugen.
 ///
-/// Abgeleitet und nicht abgeschrieben: eine hier eingebrannte 21 waere beim
-/// naechsten aufgeteilten Zeugen falsch, ohne dass ein Zeuge fehlte. Die
-/// Stelligkeitszusage ueber die Szenarien selbst traegt
-/// [`STAGE_FOUR_SCENARIOS`], das sehr wohl ausgeschrieben ist.
-fn distinct_witnesses_in(root: &Path, manifest_path: &str) -> usize {
+/// AUSGESCHRIEBEN und nicht abgeleitet, aus genau dem Grund, den
+/// [`STAGE_FOUR_SCENARIOS`] fuer die Szenarien ausschreibt: eine ABGELEITETE
+/// Zahl liest dasselbe Manifest, das auch der Gate liest, also kann die
+/// Gleichheit zwischen beiden eine falsche Zahl nie finden. GEMESSEN am
+/// 2026-09-05 durch Mutation: wer alle zweiunddreissig `witness`-Felder auf
+/// EINEN vorhandenen Test umschreibt, bekommt `pnpm stage-gate:4` mit
+/// Exitcode 0 und EINEM ausgewiesenen Zeugen, und alle achtzehn Tests dieser
+/// Datei bleiben gruen. Einunddreissig Szenarien waeren damit stillschweigend
+/// wieder ein Dokument — genau das, was `resolved_fault_point_witnesses`
+/// verhindern soll.
+///
+/// Wer einen Zeugen aufteilt oder zusammenlegt, hebt die Zahl HIER in
+/// DERSELBEN Aufgabe. Das ist kein Nachteil, sondern der Zweck: die Aenderung
+/// wird an einer Stelle sichtbar, die ein Mensch liest.
+const STAGE_FOUR_DISTINCT_WITNESSES: usize = 21;
+
+/// Die Zeugen eines Szenarienmanifests, je Abschnitt und in Manifestreihenfolge.
+///
+/// Getrennt nach Abschnitt und nicht als eine Menge, weil die schaerfere
+/// Zusage der Stufe 4 abschnittsweise faellt: GENAU EIN Abschnitt teilt Zeugen
+/// (`sync-cursor`), und in den uebrigen vieren steht je Szenario ein eigener.
+fn witnesses_by_section(root: &Path, manifest_path: &str) -> Vec<(String, Vec<String>)> {
     let manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(root.join(manifest_path)).unwrap()).unwrap();
-    let mut witnesses: Vec<String> = Vec::new();
+    let mut sections = Vec::new();
     for (section, value) in manifest.as_object().unwrap() {
         if section == "stage" {
             continue;
         }
-        for entry in value.as_array().into_iter().flatten() {
-            let witness = entry["witness"].as_str().unwrap().to_owned();
+        let witnesses = value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| entry["witness"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        sections.push((section.clone(), witnesses));
+    }
+    sections
+}
+
+/// Die Zahl der VERSCHIEDENEN Zeugen, wie sie im Manifest wirklich steht.
+///
+/// Sie belegt fuer sich genommen nichts — der Gate leitet seine eigene Zahl
+/// aus derselben Datei ab. Tragend wird sie erst gegen
+/// [`STAGE_FOUR_DISTINCT_WITNESSES`] gestellt.
+fn distinct_witnesses_in(root: &Path, manifest_path: &str) -> usize {
+    let mut witnesses: Vec<String> = Vec::new();
+    for (_, section_witnesses) in witnesses_by_section(root, manifest_path) {
+        for witness in section_witnesses {
             if !witnesses.contains(&witness) {
                 witnesses.push(witness);
             }
@@ -2872,21 +2907,63 @@ fn stage_four_gate_requires_two_readers_the_browser_matrix_and_the_file_mode() {
         STAGE_FOUR_SCENARIOS.len(),
         "the manifest declares exactly the thirty-two scenarios; stdout: {stdout}"
     );
-    // GEMESSEN gegen `resolved_fault_point_witnesses` in
-    // `tools/xtask/src/main.rs`: die Funktion sammelt in ein
-    // `BTreeSet<String>`, und ZWOELF Szenarien des Abschnitts `sync-cursor`
-    // teilen EINEN Zeugen. Die Zahl ist deshalb die der VERSCHIEDENEN Zeugen
-    // des Manifests und nicht die der Szenarien; eine Gleichheit mit
-    // `STAGE_FOUR_SCENARIOS.len()` waere auf dem eingecheckten Manifest rot,
-    // ohne dass ein Zeuge fehlte.
+    // Die Zeugen. Die Zahl ist die der VERSCHIEDENEN Zeugen und nicht die der
+    // Szenarien — ZWOELF Szenarien des Abschnitts `sync-cursor` teilen EINEN
+    // Zeugen —, und sie steht in [`STAGE_FOUR_DISTINCT_WITNESSES`]
+    // AUSGESCHRIEBEN. Beide Seiten werden gegen die Konstante gestellt und
+    // nicht gegeneinander: Manifest und Gate lesen dieselbe Datei, eine
+    // Gleichheit zwischen ihnen ginge auch dann durch, wenn alle
+    // zweiunddreissig Szenarien auf EINEN Zeugen zeigten.
+    assert_eq!(
+        distinct_witnesses_in(&workspace_root(), STAGE_FOUR_FAULT_POINTS_PATH),
+        STAGE_FOUR_DISTINCT_WITNESSES,
+        "{STAGE_FOUR_FAULT_POINTS_PATH} must name exactly \
+         {STAGE_FOUR_DISTINCT_WITNESSES} distinct witnesses"
+    );
     assert_eq!(
         report["stage_four_fault_point_witnesses"]
             .as_array()
             .expect("the gate must report the resolved witnesses")
             .len(),
-        distinct_witnesses_in(&workspace_root(), STAGE_FOUR_FAULT_POINTS_PATH),
-        "every distinct witness of the manifest resolves; stdout: {stdout}"
+        STAGE_FOUR_DISTINCT_WITNESSES,
+        "the gate must resolve all {STAGE_FOUR_DISTINCT_WITNESSES} distinct witnesses; \
+         stdout: {stdout}"
     );
+
+    // Die schaerfere Zusage, und sie ist GEMESSEN: geteilte Zeugen sind die
+    // Ausnahme EINES Abschnitts. `sync-cursor` fuehrt fuenfzehn Abbruchpunkte
+    // desselben Durchlaufs auf vier Zeugen; die uebrigen vier Abschnitte
+    // (`bundle-activation` 4, `verification` 6, `file-mode` 3,
+    // `session-and-export` 4) tragen je Szenario einen EIGENEN. Ohne diese
+    // Zusicherung deckte die Gesamtzahl 21 auch eine Verteilung, in der ein
+    // weiterer Abschnitt still zusammenfaellt, solange `sync-cursor` sich im
+    // Gegenzug aufteilt.
+    for (section, witnesses) in
+        witnesses_by_section(&workspace_root(), STAGE_FOUR_FAULT_POINTS_PATH)
+    {
+        let mut distinct = witnesses.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if section == "sync-cursor" {
+            assert!(
+                distinct.len() < witnesses.len(),
+                "the sync-cursor section is the ONE section that shares witnesses; if it stopped \
+                 sharing, this exception has to go instead of being carried along: \
+                 {} points, {} distinct",
+                witnesses.len(),
+                distinct.len()
+            );
+            continue;
+        }
+        assert_eq!(
+            distinct.len(),
+            witnesses.len(),
+            "outside sync-cursor every scenario must carry its OWN witness; the {section} section \
+             names {} points on {} distinct witnesses",
+            witnesses.len(),
+            distinct.len()
+        );
+    }
     assert!(
         report["stage_four_rows_still_planned"]
             .as_array()
@@ -3157,10 +3234,19 @@ fn stage_four_gate_report_records_the_measured_full_gate_run() {
         let expected = GERMAN_COUNT_WORDS.get(count).unwrap_or_else(|| {
             panic!("{what}: {count} is covered by no spelled-out number in GERMAN_COUNT_WORDS")
         });
+        // Auf WORTGRENZEN verglichen und nicht als Teilkette, und der
+        // Unterschied ist gemessen: `ZWOELF` enthaelt `ELF`, `VIERZEHN`
+        // enthaelt `ZEHN` UND `VIER`, `DREIZEHN` enthaelt `DREI` und `ZEHN`.
+        // Ein `contains` nahm deshalb einen UEBERTRIEBENEN Bericht an — mit
+        // elf Teilkommandos in der Quelle und `ZWOELF` in der Zelle blieb
+        // dieser Test gruen, obwohl das ehrliche Wort `ELF` gewesen waere.
+        // Zerlegt wird an allem, was kein Buchstabe ist, weil die Zelle die
+        // Zahl in Fliesstext traegt (`ZWOELF Teilkommandos gruen`).
         assert!(
-            cell.contains(expected),
+            cell.split(|character: char| !character.is_alphabetic())
+                .any(|word| word == *expected),
             "the verify:quick evidence cell must spell out the number of {what} that the source \
-             actually carries ({count} = {expected}); cell: {cell}"
+             actually carries ({count} = {expected}) as its own word; cell: {cell}"
         );
     }
 }

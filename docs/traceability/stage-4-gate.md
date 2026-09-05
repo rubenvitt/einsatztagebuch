@@ -40,7 +40,7 @@ braeche die Gleichheit gegen `STAGE_FOUR_PRIMARY_ACCEPTANCE_CRITERIA`.
 
 | Teilbeitrag | Gegenstand | Stufe-4-Anteil | Wo das Kriterium faellig wird |
 |---|---|---|---|
-| Teilbeleg AK 19 | Keine Klartextlogs (Reader) | `tests/ea-system-tests/tests/privacy_canaries_reader.rs` — je fachlichem Feld GENAU EIN Marker, gesucht in sieben Stroemen: den rohen OPFS-Bytes (Tresor, Objektcache, Zustandsspeicher, Indexblob), dem Service-Worker-Cache, den Zwischenablage-Haken, den strukturierten Logs, den Fehlerberichten, den Servermetadaten und der Telemetrie, samt Positivkontrolle ueber einen absichtlich unverschluesselt abgelegten Kontrollstrom | Stufe 7 — der Nachweis ueber ein Releasepaket mit abgeschalteten Absturzberichten und abgeschalteter Telemetrie |
+| Teilbeleg AK 19 | Keine Klartextlogs (Reader) | `tests/ea-system-tests/tests/privacy_canaries_reader.rs` — je fachlichem Feld GENAU EIN Marker, gesucht in sieben Stroemen: den rohen OPFS-Bytes (Tresor, Objektcache, Zustandsspeicher, Indexblob), dem Service-Worker-Cache, den Zwischenablage-Haken, den strukturierten Logs, den Fehlerberichten, den Servermetadaten und der Telemetrie, samt Positivkontrolle ueber einen absichtlich unverschluesselt abgelegten Kontrollstrom. DREI der sieben Stroeme sind dabei QUELLENSCANS und keine Laufzeitmessung — Service-Worker-Cache, Zwischenablage und Telemetrie —, weil sie in diesem Baum keine Rust-Darstellung haben; der Zeuge schreibt das in seinem eigenen Kopf aus und behauptet die andere Aussage nicht | Stufe 7 — der Nachweis ueber ein Releasepaket mit abgeschalteten Absturzberichten und abgeschalteter Telemetrie |
 | Teilbeleg AK 17 | Schema und Suite v1/v2 (Reader-Altansicht) | `crates/ea-index/tests/schema_compatibility.rs` — der Reader STELLT eine frueheres Schema tragende Altansicht dar, ohne sie zu schreiben | Stufe 7 — die Cross-Version-Matrix; die volle Zeile bleibt bei ihrer Stufe |
 
 ## 2. Reichweite der Stufe-4-Abnahme
@@ -98,10 +98,10 @@ verschiedenen Zeugen des Manifests statt gegen die Zahl der Szenarien.
 
 | Szenario | Geklammerter dauerhafter Schritt | Zeuge |
 |---|---|---|
-| `unsigned-candidate` | eine Freigabe, die keine tragende Wurzelsignatur belegt — sei es, dass sie gar keine traegt, sei es ein gekipptes Byte in der rohen Signatur: sie wird ABGEWIESEN und nicht uebergangen, und die zuletzt gueltige Fassung bleibt aktiv | `crates/ea-reader/tests/bundle_release_pinning.rs::an_unsigned_release_never_pins_anything` |
+| `unsigned-candidate` | eine Freigabe, die keine tragende Wurzelsignatur belegt — sei es, dass sie gar keine traegt, sei es ein gekipptes Byte in der rohen Signatur: `ReaderBundlePin::from_trust_objects` gibt fuer BEIDE Gestalten einen Fehler mit dem Code Unsigned zurueck und pinnt nichts. Mehr sagt dieser Zeuge nicht; dass an ihrer Stelle die zuletzt gueltige Fassung aktiv BLEIBT, misst der Nachbar `a_revocation_withdraws_its_release_and_the_last_valid_version_stays_active` in derselben Datei | `crates/ea-reader/tests/bundle_release_pinning.rs::an_unsigned_release_never_pins_anything` |
 | `foreign-root-candidate` | eine fuer sich wohlgeformte Freigabe unter einer FREMDEN Wurzel: der Tausch, den ein kompromittierter Sync-Server versuchte. Sie faellt mit WrongRoot und ausdruecklich nicht als blosse Hashabweichung | `crates/ea-reader/tests/bundle_release_pinning.rs::a_release_under_a_foreign_root_never_pins_anything` |
 | `revoked-release` | ein wirksamer Widerruf entzieht genau die Freigabe, deren Objekthash er nennt: die VORHERIGE Fassung bleibt aktiv, statt dass gar nichts aktiv bleibt, und vor seiner eigenen Registry-Version wirkt er nicht | `crates/ea-reader/tests/bundle_release_pinning.rs::a_revocation_withdraws_its_release_and_the_last_valid_version_stays_active` |
-| `stale-trust-state` | ein dauerhaft im Datei-Modus betriebenes Geraet sieht einen Widerruf erst beim naechsten Bezug des Trust-Bestandes: das Alter wird ausgewiesen und die Ueberschreitung der Frist ist eine AUFFORDERUNG, nie eine Sperre | `crates/ea-reader/tests/trust_age.rs::an_exceeded_deadline_asks_for_a_refresh` |
+| `stale-trust-state` | der Fall, den das Alter des Trust-Bestandes sichtbar machen soll: ein dauerhaft im Datei-Modus betriebenes Geraet sieht einen Widerruf erst beim naechsten Bezug. Was der Zeuge davon WIRKLICH misst, ist die Rechnung und nur sie — `reader_trust_age_view` weist ueber einer um einen Tag und eine Millisekunde zurueckliegenden Bezugszeit `trust_age_ms` genau so aus und setzt `trust_refresh_overdue`. Ein Widerruf, der Datei-Modus und eine Sperre kommen darin NICHT vor; dass die Ueberschreitung eine Aufforderung und nie eine Sperre ist, folgt aus der Gestalt der Sicht, die kein Sperrfeld fuehrt, und ist keine Zusicherung dieses Zeugen | `crates/ea-reader/tests/trust_age.rs::an_exceeded_deadline_asks_for_a_refresh` |
 
 ### 3.2 Abschnitt `sync-cursor` — fuenfzehn Szenarien
 
@@ -112,7 +112,7 @@ verschiedenen Zeugen des Manifests statt gegen die Zahl der Szenarien.
 | `before-start-head-check` | vor dem Vergleich des Startkopfs mit dem EIGENEN bestaetigten Cursor: kein Objektbyte hat den Speicher erreicht | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
 | `after-start-head-check` | nach dem Startkopfvergleich und vor dem ersten Schreibvorgang | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
 | `before-object-write` | vor dem ersten Objektbyte im verschluesselten Objektcache | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
-| `after-first-object-write` | nach dem ERSTEN und vor dem zweiten Objekt: der Batch liegt halb im Cache, und weil er inhaltsadressiert ist, kostet die Wiederholung kein zweites Byte | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
+| `after-first-object-write` | nach dem ERSTEN und vor dem zweiten Objekt: der Batch liegt halb im Cache, der bestaetigte Cursor steht auch nach dem Wiederoeffnen des Speichers, und der Wiederholversuch landet auf demselben Kopf. Dass die Wiederholung dabei kein zweites Byte kostet, misst dieser Zeuge NICHT — das ist die Aussage des Nachbarn `a_repeated_batch_writes_no_second_byte_and_moves_nothing` in derselben Datei | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
 | `before-blob-store-flush` | vor der Rueckleseprobe, mit der die Dauerhaftigkeit GEMESSEN statt angeordnet wird — der Port kennt kein flush | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
 | `after-blob-store-flush` | jedes angekuendigte Objekt ist aus dem Speicher zurueckgekommen, die Kette ist noch ungeprueft: ein hier gesetzter Cursor traege eine nie verifizierte Kette | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
 | `before-chain-verification` | vor dem Verifikationslauf ueber den GESAMTEN lokalen Bestand gegen den Vault-gepinnten Anchor | `crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies` |
@@ -127,10 +127,10 @@ verschiedenen Zeugen des Manifests statt gegen die Zahl der Szenarien.
 
 | Szenario | Geklammerter dauerhafter Schritt | Zeuge |
 |---|---|---|
-| `substituted-archive-own-trust-chain` | ein untergeschobener, in sich VOLLSTAENDIGER Fremdbestand — eigener Root, eigene Registry, eigene Schreiberzertifikate, eigene Signaturen — gegen den Anker, den nur der Tresor liefert: der Lauf faellt an Gate trust mit NULL objectResults und ohne eine einzige Zustandszeile, statt still teilzuverifizieren; derselbe Bestand gegen den eigenen Anker ist vollstaendig verifiziert | `crates/ea-reader/tests/pinned_anchor.rs::a_substituted_archive_with_its_own_complete_trust_chain_fails_here` |
+| `substituted-archive-own-trust-chain` | ein untergeschobener, in sich VOLLSTAENDIGER Fremdbestand — eigener Root, eigene Registry, eigene Schreiberzertifikate, eigene Signaturen — gegen den Anker, den nur der Tresor liefert: NULL objectResults, keine einzige Zustandszeile und alle sechs Mangelfelder leer, statt still teilzuverifizieren; derselbe Bestand gegen den eigenen Anker ist vollstaendig verifiziert. Dass der Lauf dabei wirklich an Gate trust stehenbleibt, steht hier nur als Kommentar und wird beobachtend zugesichert vom Nachbarn `crates/ea-reader/tests/file_mode_anchor.rs::a_substituted_archive_says_nothing_about_any_entry_in_file_mode`, der das Protokoll gegen GATE_ORDER_V1[..2] haelt | `crates/ea-reader/tests/pinned_anchor.rs::a_substituted_archive_with_its_own_complete_trust_chain_fails_here` |
 | `missing-own-grant` | ein gueltiger Eintrag, dessen einziger Grant einen fremden Empfaenger nennt: exakt fehlender Grant, Present, ohne Detailgrund, ohne decryptionErrors-Eintrag, ohne gaps-Zeile, is_fully_verified bleibt wahr — und ohne Zeugenpaar, sodass decrypt_verified gar nicht erst formulierbar ist | `crates/ea-reader/tests/missing_grant.rs::a_valid_entry_without_an_own_grant_is_exactly_missing_grant` |
 | `own-thumbprint-wrong-material` | ein Grant auf den EIGENEN Abdruck, gekapselt auf fremdes Material: EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED unter dem Objekthash des GRANTS, und der Eintrag wird als unbekannter Schluessel gefuehrt — nie als fehlender Grant und nie als ungueltig, weil die Vorrangordnung nach Objektart trennt | `crates/ea-reader/tests/missing_grant.rs::missing_grant_gap_unknown_key_and_invalid_never_collapse` |
-| `stub-without-authorization` | ein .eds-Stummel, dessen Pruefkette an EINEM Glied bricht — destructionId auf keine autorisierte Vernichtung des Bestands, destructionAuthorizationObjectHash ungleich dem von den Transitionen authentifizierten Hash, oder Autorisierung ohne den entryHash und die Sequenz des Stummels unter targets —: ungeklaerte Luecke in der Eintragsdimension, Gap in der Verifikationsdimension, kein objectResult, kein Grant nennt seinen entryHash, kein Zeugenpaar, und der Bericht traegt ueber keinen der drei Brueche einen zusaetzlichen Befund; nur der Zwilling mit geschlossener Kette ist autorisiert vernichtet bei sonst gleichem Ausgang; die Entkapselung, die der Bestand ueber seine anderen Eintraege erreicht, ist fuer den Stummel in keinem der beiden Ausgaenge formulierbar | `crates/ea-reader/tests/destroyed_stub.rs::a_stub_reaches_no_decapsulation_in_either_outcome` |
+| `stub-without-authorization` | ein .eds-Stummel, dessen Pruefkette an EINEM Glied bricht — destructionId auf keine autorisierte Vernichtung des Bestands, destructionAuthorizationObjectHash ungleich dem von den Transitionen authentifizierten Hash, oder Autorisierung ohne den entryHash und die Sequenz des Stummels unter targets —: ungeklaerte Luecke in der Eintragsdimension, Gap in der Verifikationsdimension, kein objectResult, kein Grant nennt seinen entryHash, kein Zeugenpaar; dass der Bericht ueber keinen der drei Brueche einen ZUSAETZLICHEN Befund traegt, misst dieser Zeuge nicht, sondern der Nachbar `the_authorized_destruction_is_reached_only_through_the_full_chain`, der die Befundzahlen aller vier Bestaende gegeneinander stellt; nur der Zwilling mit geschlossener Kette ist autorisiert vernichtet bei sonst gleichem Ausgang; die Entkapselung, die der Bestand ueber seine anderen Eintraege erreicht, ist fuer den Stummel in keinem der beiden Ausgaenge formulierbar | `crates/ea-reader/tests/destroyed_stub.rs::a_stub_reaches_no_decapsulation_in_either_outcome` |
 | `stale-witness` | ein Zeugenpaar aus einem FRUEHEREN classify-Lauf an decrypt_verified mit dem effectiveNow eines spaeteren: EA-READER-WITNESS-STALE vor jeder Entkapselung, weil Gate recipient-grant die Nutzungsfrist gegen genau den Wert des Laufs gemessen hat, in dem der Zeuge entstand — exakt und ohne Toleranz | `crates/ea-reader/tests/historical_expiry.rs::a_witness_from_an_earlier_run_is_refused` |
 | `historical-grant-unresolvable` | ein gefaelschter historischer Grant neben dem initialen eigenen: er hinterlaesst NICHTS — keinen signatureErrors- und keinen decryptionErrors-Eintrag, keinen Detailgrund, ein wortgleiches Protokoll —, weil own_grant nur initiale Grants sieht und EA-VERIFY-GRANT-AUTHORIZATION-UNVERIFIABLE ueber die Pipeline unerreichbar ist; der Zeuge misst diese Abwesenheit und ist erst nachzuschaerfen, wenn Stufe 5 die grantAuthorization aufloest | `crates/ea-reader/tests/historical_expiry.rs::a_forged_historical_grant_leaves_no_trace_at_all` |
 
@@ -148,7 +148,7 @@ verschiedenen Zeugen des Manifests statt gegen die Zahl der Szenarien.
 |---|---|---|
 | `lock-during-target-choice` | die Sitzung laeuft ab, waehrend der Dateidialog offen steht: der Export wird mit EA-READER-EXPORT-SESSION-LOCKED abgewiesen, es entsteht KEINE Auditzeile — es gibt keinen Tresor mehr, der sie signieren koennte —, das Ziel sieht kein Byte, und die offenen Datensaetze sind mit der Sperre gefallen | `crates/ea-reader/tests/export.rs::a_session_that_locked_while_the_target_was_being_chosen_refuses_without_an_audit_line` |
 | `background-tab-before-write` | der Tab geht zwischen Bestaetigung und Schreiben in den Hintergrund und bleibt dort laenger als die verkuerzte Frist: die Bestaetigung ist noch frisch, die Sperre gewinnt trotzdem — ohne Timer, beim naechsten Zugriff —, kein Byte verlaesst den Speicher, keine Zeile entsteht; eine Millisekunde vor der Frist gelingt derselbe Export | `crates/ea-reader/tests/export.rs::a_tab_hidden_past_the_shortened_deadline_locks_before_the_bytes_leave` |
-| `aborted-authenticator-confirmation` | die Zeremonie liefert keine oder eine fremde PRF-Ausgabe: der Nachweis faellt an der AEAD-Umschliessung des Envelopes (EA-CRYPTO-AEAD-OPEN beziehungsweise EA-READER-VAULT-NO-ENVELOPE), eine Bestaetigung ENTSTEHT nicht, und ohne den per Wert genommenen Typ gibt es weder Sitzung noch Export | `crates/ea-reader/tests/session_lock.rs::a_confirmation_that_the_authenticator_did_not_prove_never_exists` |
+| `aborted-authenticator-confirmation` | ZWEI Faelle mit zwei VERSCHIEDENEN Mechanismen, und der Zeuge trennt sie statt sie zu einem Satz zu glaetten: eine fremde PRF-Ausgabe zu einer BEKANNTEN credentialId faellt an der AEAD-Umschliessung des Envelopes mit EA-CRYPTO-AEAD-OPEN; eine UNBEKANNTE credentialId mit einwandfreiem PRF-Geheimnis faellt schon DAVOR mit EA-READER-VAULT-NO-ENVELOPE, weil es zu ihr gar kein Envelope gibt, das sich umschliessen liesse — es wird also keine AEAD geoeffnet und keine verworfen. In beiden Faellen ENTSTEHT keine Bestaetigung, und ohne den per Wert genommenen Typ gibt es weder Sitzung noch Export | `crates/ea-reader/tests/session_lock.rs::a_confirmation_that_the_authenticator_did_not_prove_never_exists` |
 | `audit-failure-after-bytes-left` | die Bytes sind draussen und die zweite Zeile laesst sich nicht schreiben: der Fehler MUSS entstehen und darf nicht verschluckt werden — EA-READER-EXPORT-AUDIT-AFTER-WRITE mit erreichbarem Auditbefund, plaintext_left() wahr, die Accepted-Zeile steht; weist die Senke schon die ERSTE Zeile ab, verlaesst kein Byte den Speicher | `crates/ea-reader/tests/export.rs::a_failing_completed_line_after_the_bytes_left_surfaces_instead_of_being_swallowed` |
 
 Zum Abschnitt `sync-cursor` gehoert EINE benannte Ausnahme, die dieser Bericht
@@ -263,9 +263,13 @@ damit eine spaetere Stufe sie wiederfindet statt sie neu zu treffen.
 verifiziert und indiziert mindestens 50.000 Pakete". Die Aufgabe, die den
 verschluesselten invertierten Index gebaut hat, hat das MESSWERKZEUG
 ausgeliefert (`crates/ea-index/tests/scale_50000.rs`, `#[ignore]`, gefahren
-ueber `xtask index-scale 50000`), aber KEINE Messung persistiert — gemessen am
-2026-09-05 nennt kein Dokument unter `docs/` einen Wert fuer `blob_bytes`,
-`unlock_ms` oder `peak_rss_kib`. Dieser Abschnitt schliesst die Luecke.
+ueber `xtask index-scale 50000`), aber KEINE Messung in den
+Traceability-Bestand persistiert — gemessen am 2026-09-05 nannte ausser diesem
+Bericht kein Dokument unter `docs/traceability/` einen Wert fuer `blob_bytes`, `unlock_ms` oder
+`peak_rss_kib`. AUSSERHALB der Traceability tut es eines, und das gehoert
+hierher statt in eine Fussnote: `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md`
+nennt in seinem Task-10-Abschnitt alle drei Werte, und zwar fuer BEIDE Profile.
+Dieser Abschnitt schliesst die Luecke im Traceability-Bestand.
 
 Gemessen am 2026-09-05 auf diesem Wirt ueber `pnpm index:scale`:
 
@@ -275,14 +279,19 @@ Gemessen am 2026-09-05 auf diesem Wirt ueber `pnpm index:scale`:
 | `blob_bytes` | 7566455 |
 | `seal_ms` | 4419 |
 | `unlock_ms` | 6114 |
-| `search_us` | 46 |
-| `broad_search_us` | 84852 |
+| `search_us` | 48 |
+| `broad_search_us` | 84667 |
 | `peak_rss_kib` | 357484 |
 
 **Profil und Zustand, ausdruecklich:** das Messwerkzeug lief im
 DEBUG-Profil — nicht `--release` — und auf WARMEM `target/`. Ein
-`--release`-Bau liegt deutlich darunter und ist hier NICHT gemessen; ein kalter
-`target/` aendert nur die Bauzeit und keine der Zahlen oben.
+`--release`-Bau liegt deutlich darunter und ist in DIESEM Lauf nicht gemessen
+— der Plan dagegen hat ihn gemessen und schreibt ihn aus
+(`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-4-reader.md`,
+Task-10-Abschnitt, Stand `10f561b`): bei denselben 50 000 Paketen und demselben
+`blob_bytes=7566455` ergab `--release` `seal_ms=230 unlock_ms=574 search_us=13
+broad_search_us=17007 peak_rss_kib=356592`. Ein kalter `target/` aendert nur die
+Bauzeit und keine der Zahlen oben.
 
 Der Bericht MISST und beansprucht nicht. Die Ledgerzeile `AK-31` behaelt
 ausdruecklich `stage=7` und `status=planned`: die ABNAHME dieser Schwelle
@@ -314,16 +323,63 @@ und nicht aus einem `playwright install` auf dem Wirt: der Bericht kann seine
 drei Engine-Revisionen nur dann als gemessen ausweisen, wenn ihre Herkunft
 selbst gepinnt ist.
 
+**Wie die drei Revisionen gemessen wurden, und was von ihnen wirklich gepinnt
+ist.** Sie sind nicht abgeschrieben: `pnpm --dir apps/web exec playwright
+--version` druckt auf diesem Wirt am 2026-09-05 `Version 1.62.1`, und
+`pnpm --dir apps/web exec playwright install --dry-run` druckt ebendort
+`Chrome for Testing 151.0.7922.34 (playwright chromium v1234)`,
+`Firefox 153.0 (playwright firefox v1538)` und
+`WebKit 26.5 (playwright webkit v2336)`. GEPINNT ist davon allerdings nur
+EINE: `chromium-1234` steht zusaetzlich in `ops/compose/browsers.yaml`
+(Symlink auf `/ms-playwright/chromium-1234/chrome-linux64/chrome`, und die
+Treiberfassung 151.0.7922.34 haengt zeichengleich daran). Fuer `firefox-1538`
+und `webkit-2336` gibt es im ganzen Baum KEINE Betriebs- oder
+Werkzeugdatei, die die Revision festhaelt — sie stehen ausserhalb dieses
+Berichts allein in der Reichweitenklausel, die der Gate von ihm verlangt, und
+in der Planaufgabe. Ihre Bindung ist also die Abbildfassung `v1.62.1-noble`
+und ihr Digest, nicht die Revisionsnummer selbst.
+
 **`webkit` ist NICHT Safari.** Es ist Playwrights WebKit-Bau. Die
 Unterscheidung steht hier, weil sie sonst als Safari-Nachweis gelesen wuerde.
 Ein Safari-Nachweis ist in dieser Stufe weder gebaut noch behauptet.
 
 **Die Matrix deckt AUSDRUECKLICH NICHT alle E2E-Laeufe dieser Stufe ab.**
-`apps/web/tests/e2e/enrollment.spec.ts` laeuft ausschliesslich im Projekt
-`chromium`, weil `WebAuthn.addVirtualAuthenticator` eine CDP-Methode ist und
-Firefox und WebKit kein Gegenstueck anbieten. Der Enrollment- und der
-Fingerprintnachweis auf `firefox` und `webkit` stehen deshalb unten in
-`## Offen in spaeterer Stufe`.
+DREI Specs tragen dasselbe dateiweite
+`test.skip(({ browserName }) => browserName !== 'chromium')`, und die Gruende
+sind GEMESSEN nicht dieselben — jeder steht im Kopf seiner eigenen Datei:
+
+- `apps/web/tests/e2e/enrollment.spec.ts` (Zeile 47), weil
+  `WebAuthn.addVirtualAuthenticator` eine CDP-Methode ist und Firefox und
+  WebKit kein Gegenstueck anbieten.
+- `apps/web/tests/e2e/lock-and-export.spec.ts` (Zeile 79), weil der Lauf ein
+  Enrollment DIESES Seitenlaufs voraussetzt und dafuer ueber
+  `apps/web/tests/e2e/support/enrollment.ts` denselben virtuellen
+  CTAP2-Authenticator aufsetzt. Die CDP-Abhaengigkeit gilt hier also MITTELBAR
+  und nicht, weil die Sitzungssperre selbst CDP braeuchte.
+- `apps/web/tests/e2e/file-mode.spec.ts` (Zeile 32) aus einem GANZ ANDEREN
+  Grund, und deshalb traegt die CDP-Begruendung ihn nicht: seine
+  Anti-Leerlauf-Zeile misst die ANWESENHEIT von `showDirectoryPicker`, die es
+  nur in Chromium gibt — auf `firefox` und `webkit` fiele der Lauf an genau
+  dieser Zeile. Die ABWESENHEIT der Faehigkeit bezeugen stattdessen
+  `apps/web/src/features/file-mode/OpenArchivePanel.test.tsx` und
+  `apps/web/tests/e2e/browser-matrix.spec.ts`.
+
+Gemessen im Lauf unten: 36 Tests, 27 bestanden, 9 uebersprungen — viermal
+`enrollment.spec.ts` (je zwei auf `firefox` und `webkit`), zweimal
+`lock-and-export.spec.ts`, zweimal `file-mode.spec.ts` und einmal der
+Tastaturlauf aus `reader.spec.ts` auf `firefox`.
+
+**Die Folge, ausgeschrieben statt verschwiegen:** die BROWSERHAELFTE der
+Sitzungssperre und des authenticator-bestaetigten Einzelexports (`FR-104` und
+`FR-105`, beide jetzt `implemented`) und die BROWSERHAELFTE des Datei-Modus
+(`WR-053` und `WR-054`, beide jetzt `integrated`) ruht damit allein auf
+`chromium`. Die normative Aussage tragen in allen vier Faellen die
+plattformunabhaengigen Rust-Zeugen — `crates/ea-reader/tests/session_lock.rs`,
+`crates/ea-reader/tests/export.rs`, `crates/ea-reader/tests/file_mode.rs` und
+`crates/ea-reader/tests/file_mode_anchor.rs` —, was fehlt, ist der
+Browserbeleg auf zwei weiteren Engines. Der Enrollment- und der
+Fingerprintnachweis auf `firefox` und `webkit` und die drei chromium-only
+gefahrenen Specs stehen deshalb unten in `## Offen in spaeterer Stufe`.
 
 **Die Gleichheit ist die Aussage.** Der Verifikationskern ist geteilter
 Rust-Code, uebersetzt nach `wasm32-unknown-unknown`; sein Bericht DARF sich
@@ -369,9 +425,34 @@ FR-100 ist.
 `apps/web` traegt KEINE Writer-, Administrations-, Root-Zeremonie-,
 Provisionierungs-, Re-Grant- und keine Vernichtungsflaeche. Die
 rollengeschaltete Huelle von `apps/desktop` gibt umgekehrt KEINE Reader-Route
-frei. Bezeugt ist beides von `apps/desktop/src/app/RoleGate.test.tsx` und
-`apps/web/src/features/reader/ReaderPage.test.tsx`; die Ledgerzeile FR-100
-steht deshalb auf `implemented`.
+frei. Bezeugt ist beides von `apps/desktop/src/app/RoleGate.test.tsx`, und
+zwar von ihm ALLEIN: GEMESSEN am 2026-09-05 fuehrt diese Datei GENAU DREI
+Zeugen, und alle drei messen die Grenze, waehrend
+`apps/web/src/features/reader/ReaderPage.test.tsx` VIERZEHN Zeugen fuehrt, von
+denen KEINER sie beruehrt. Eine fruehere Fassung dieses Abschnitts nannte
+beide; die zweite Nennung war falsch. Die Ledgerzeile FR-100 steht auf
+`implemented`.
+
+Was der Zeuge WIRKLICH misst, Haelfte fuer Haelfte. Die Desktophaelfte laeuft
+ueber `routeTable()` — genau `/` und `/einsatz`, und kein Label, auf das
+`reader` oder `lese` passt — und ueber die Dateiliste von
+`apps/desktop/src-tauri/src/commands`, die genau `master_data.rs`, `mod.rs`,
+`session.rs`, `sync.rs` und `writer.rs` fuehrt. Die Webhaelfte ist ein
+QUELLENSCAN und keine Laufzeitmessung: sie liest jede HANDGESCHRIEBENE
+`.ts`/`.tsx`-Datei unter `apps/web/src` — ohne die zwei Generatorausgaenge und
+ohne die Testdateien — und weist jede ab, auf die das Muster
+`/finaliz|Root-Zeremonie|rootCeremony|provision|historicalRegrant|destruction|Entwurf verwerfen/i`
+passt. Was dieses Muster nicht traegt, steht damit auch nicht unter
+Zusicherung, und das ist hier ausgeschrieben statt weggelassen: es gibt KEINE
+Nadel fuer eine allgemeine Schreiber- oder Administrationsflaeche, und
+„Re-Grant" ist ausschliesslich als camelCase-Bezeichner `historicalRegrant`
+abgedeckt.
+
+Eine Klausel gehoert daneben, weil sie sonst wie ein Widerspruch aussaehe:
+`apps/web` fuehrt GENAU EINE bewusste Datenausgangsroute, `/export`
+(`apps/web/src/main.tsx`, neben `/`, `/enrollment` und `/datei`). Sie ist die
+FR-105-Faehigkeit des Readers selbst — der Einzelexport hinter einer frischen
+Authenticator-Bestaetigung — und keine der sechs abgewiesenen Flaechen.
 
 Was die Rollengrenze NICHT belegt: die Administrationshaelfte des Enrollments —
 Anzeige des erwarteten Fingerprints und Root-Signatur des Reader-Zertifikats,
@@ -456,6 +537,11 @@ behauptet.
 | Referenzquelle und Verteilweg der Fingerprint-Bekanntgabe | `web-reader-design.md` §14 offener Punkt 5 | offen, betrieblich |
 | Raeumung `conflicting` quarantaenisierter Objekte aus dem `ReaderObjectCache` | Nach dem abgewiesenen Fork bleibt der konkurrierende Eintrag im inhaltsadressierten Cache liegen (Abschnitt 3.2); ob `ea-reader` ihn kuenftig entfernt, ist eine Entscheidung ausserhalb dieser Aufgabe | offen |
 | `browsers up` startet den WebKit-`run-server` und druckt `EA_WEBKIT_WS_ENDPOINT` | Heute exportiert `browsers up` allein `CHROMEDRIVER_REMOTE` (Abschnitt 2.1); der WebKit-Dienst wird von Hand gestartet | offen |
+| Safari als Engine | `webkit-2336` ist Playwrights WebKit-Bau und NICHT Safari — die Stufe faehrt keinen Safari, und der Abschnitt `## Browsermatrix und Datei-Modus` sagt das ausdruecklich. Der sechzehnte gepinnte Pflichtsatz dieses Berichts nennt Safari als eines der vier Dinge, die ein gruener Stufe-4-Gate nicht belegt, und verweist fuer alle vier auf diese Tabelle; ohne diese Zeile zeigte der Verweis ins Leere | 7 |
+| Browserbeleg fuer Sitzungssperre, Einzelexport und Datei-Modus auf `firefox` und `webkit` | `apps/web/tests/e2e/lock-and-export.spec.ts` (Zeile 79) und `apps/web/tests/e2e/file-mode.spec.ts` (Zeile 32) tragen dasselbe dateiweite `test.skip` wie `enrollment.spec.ts` und laufen deshalb nur im Projekt `chromium` — der erste MITTELBAR ueber die CDP-Zeremonie des Enrollments, der zweite aus einem ganz anderen Grund: seine Anti-Leerlauf-Zeile setzt `showDirectoryPicker` voraus. Die BROWSERHAELFTE von `FR-104`, `FR-105`, `WR-053` und `WR-054` ruht damit auf EINER Engine; die normative Aussage tragen die plattformunabhaengigen Rust-Zeugen (Abschnitt `## Browsermatrix und Datei-Modus`) | 7 |
+| Laufzeitzeuge fuer den Service-Worker-Cache in `apps/web` | Die Laufzeithaelfte des Stroms „Service-Worker-Cache" ist unbezeugt: `apps/web/src/sw/service-worker.test.ts` prueft ausschliesslich die Buendelpinnung (acht Zeugen, null Vorkommen von `fetch`, `addEventListener`, `respondWith`, `cache.put`, gemessen 2026-09-05), sodass nur der Quellenscan von `privacy_canaries_reader.rs` gilt — es fehlt ein Laufzeitzeuge in `apps/web`, der nach einer `fetch`-Anfrage zusichert, dass kein `caches`-Namensraum eine Antwort traegt | 7 |
+| Sperre und Verifikation lesen eine zurueckgesprungene Uhr VERSCHIEDEN | GEMESSEN im DRK-264-Rebase: `ReaderSession::observe` (`crates/ea-reader/src/session.rs`) hebt jeden `now` unterhalb des hoechsten je gesehenen Wertes auf diese monotone Untergrenze, und die Sitzungssperre rechnet gegen sie. Der Verifikationspfad nimmt denselben Zeitwert dagegen ROH: `ReaderVerifier::new(mode, effective_now)` haelt ihn unveraendert, und Gate `recipient-grant` misst die Nutzungsfrist gegen ihn. Dieselbe zurueckgestellte Uhr wird von den beiden Haelften also verschieden gelesen; welche Haelfte nachzieht, ist eine Entscheidung ausserhalb dieser Stufe | offen |
+| Das Auditpseudonym des Readers ist ungesalzen und ohne Domaenentrennung | GEMESSEN im DRK-264-Rebase: `ReaderAuthenticatorConfirmation::prove` bildet es als `Sha256(credential_id)` (`crates/ea-reader/src/session.rs:274`) — kein Salz, kein Domaenenpraefix —, waehrend `OperatorSnapshotV1::new` auf der Desktopseite (`crates/ea-schema/src/model.rs`) ein 32-Byte-Salz entgegennimmt. Wer die Liste der `credentialId` haelt, invertiert das Pseudonym durch Nachrechnen. Die Angleichung ist ein Formatschritt und keine Zeile dieser Stufe | offen |
 
 ## Gemessener Gate-Lauf
 
@@ -464,9 +550,12 @@ Der vollstaendige Lauf nach Schritt 4 des Stufe-4-Plans
 dort vorgeschriebenen Reihenfolge, mit `cargo metadata --format-version 1` an
 erster, `cargo run --locked -p xtask -- integration up` an zweiter und
 `cargo run --locked -p xtask -- integration down` an letzter Stelle. Die
-sechzehn Zeilen mit Exitcode, gemessenem Ergebnis und gemessener Laufzeit
-folgen; sie werden EINGETRAGEN, wenn der Lauf gefahren ist, und bis dahin steht
-hier bewusst keine Zeile statt einer geschaetzten.
+siebzehn Zeilen mit Exitcode, gemessenem Ergebnis und gemessener Laufzeit
+stehen unten und sind EINGETRAGEN: sechzehn davon tragen die Zahlen des
+Bootstraplaufs, die siebzehnte — die Zeile `pnpm verify:quick` — die des
+Bestaetigungslaufs. Warum der Lauf zweipassig ist und warum trotzdem keine
+Zeile geschaetzt wurde, schreibt der Unterabschnitt „Warum dieser Lauf
+zweipassig ist" unten aus.
 
 Zwei Angaben sind dabei gebunden und nicht frei: die Belegzeile von
 `pnpm verify:quick` MUSS die Zahl ihrer Teilkommandos und die Zahl der Pakete
@@ -483,14 +572,14 @@ und werden nicht umgeschrieben.
 | `cargo metadata --format-version 1` | 0 | 3 586 479 Byte JSON auf stdout; `Cargo.lock` bleibt unveraendert — dieser Teil zieht keine neue Arbeitsbereichskante, und das eine Kommando ohne `--locked` belegt es, statt es anzunehmen | 0 s |
 | `cargo run --locked -p xtask -- integration up` | 0 | beide Dienste gesund; die zwei Zeilen `export DATABASE_URL=postgres://…@127.0.0.1:55432/einsatzarchiv` und `export EA_OBJECT_STORE_ENDPOINT=http://127.0.0.1:59000` gedruckt und per `eval` uebernommen | 7 s |
 | `cargo run --locked -p xtask -- browsers up` | 0 | Dienst gesund; gedruckt wird GENAU EINE Zeile, `export CHROMEDRIVER_REMOTE=http://127.0.0.1:59515` — kein Pfad zu Engine-Baus, siehe Abschnitt 2.1 | 6 s |
-| `pnpm build:wasm` | 0 | `apps/web/src/bridge/pkg/ea_reader_wasm.js` erzeugt. Ohne diesen Schritt faellt Kommando zwoelf mit `[UNRESOLVED_IMPORT] Could not resolve './pkg/ea_reader_wasm.js'`, bevor ein Browser startet — gemessen im Bootstraplauf ohne diese Zeile, Exit 1 nach 3 s | 2 s |
+| `pnpm build:wasm` | 0 | `apps/web/src/bridge/pkg/ea_reader_wasm.js` erzeugt. Ohne diesen Schritt faellt `pnpm web:e2e` — in der Liste OHNE `build:wasm`, und die ist der Gegenfall, das ELFTE Kommando; in der Liste unten das zwoelfte — mit `[UNRESOLVED_IMPORT] Could not resolve './pkg/ea_reader_wasm.js'`, bevor ein Browser startet — gemessen im Bootstraplauf ohne diese Zeile, Exit 1 nach 3 s | 2 s |
 | `pnpm test:reader` | 0 | `ea-reader` und `ea-index` zusammen: 31 Ergebniszeilen, 145 bestanden, 0 fehlgeschlagen, 1 ignoriert — der ignorierte ist der Skalenlauf, den das Kommando darunter faehrt | 59 s |
 | `pnpm index:scale` | 0 | `ea-index scale packages=50000 blob_bytes=7566455 seal_ms=4419 unlock_ms=6114 search_us=48 broad_search_us=84667 peak_rss_kib=357484`; ausgewertet in Abschnitt 5 | 13 s |
-| `pnpm web:browser-test` | 0 | die `wasm-bindgen-test`-Ziele von `crates/ea-reader-wasm` in headless Chromium ueber den `chromedriver` aus Kommando drei: 7 bestanden, 0 fehlgeschlagen | 25 s |
+| `pnpm web:browser-test` | 0 | die `wasm-bindgen-test`-Ziele von `crates/ea-reader-wasm` in headless Chromium ueber den `chromedriver` aus Kommando drei: VIER Ziele tragen Tests — `export_browser` 2, `index_browser` 1, `opfs_browser` 5, `verify_browser` 2 —, zusammen 10 bestanden, 0 fehlgeschlagen; die uebrigen fuenf Ziele melden `no tests to run!` | 25 s |
 | `cargo test --locked -p ea-system-tests --test cross_platform_two_readers` | 0 | 2 bestanden: ein Chiffrat unter zwei Reader-KEM-Schluesseln, und der entfernte Grant als Planabgleichsfehler fuer beide | 3 s |
 | `cargo test --locked -p ea-system-tests --test e2e_reader_sync_interruptions` | 0 | 3 bestanden: Mengengleichheit von Manifest und `ReaderSyncFaultPoint`, Cursor nach jedem der fuenfzehn Abbrueche unveraendert, Wiederholversuch idempotent | 22 s |
 | `cargo test --locked -p ea-system-tests --test reader_file_mode_interop` | 0 | 5 bestanden: (a) und (b) bytegleich samt `serverConfirmation`, (c) zweifach, das untergeschobene Archiv an Gate `trust` | 5 s |
-| `cargo test --locked -p ea-system-tests --test privacy_canaries_reader` | 0 | 9 bestanden: kein Marker in einem der sieben Stroeme, und die Positivkontrolle findet denselben Marker dort, wo er liegen soll | 1 s |
+| `cargo test --locked -p ea-system-tests --test privacy_canaries_reader` | 0 | 9 bestanden: kein Marker in einem der sieben Stroeme, und die Positivkontrolle findet denselben Marker dort, wo er liegen soll; DREI der sieben Stroeme — Service-Worker-Cache, Zwischenablage und Telemetrie — sind QUELLENSCANS und keine Laufzeitmessung | 1 s |
 | `pnpm web:e2e` | 0 | 36 Tests ueber `chromium`, `firefox` und `webkit`: 27 bestanden, 9 uebersprungen, 0 fehlgeschlagen; WebKit ueber den `run-server` im gepinnten Abbild (Abschnitt 2.1) | 18 s |
 | `pnpm supply-chain` | 0 | advisories ok, bans ok, licenses ok, sources ok; der `wasm-bindgen`-Teilbaum hat KEINE neue benannte Ausnahme in `deny.toml` erzeugt, die Datei fuehrt weiterhin keinen `name =`-Schluessel | 2 s |
 | `pnpm stage-gate:4` | 0 | JSON auf stdout: `stage` 4, `vector_families` LEER, `stage_four_primary_acceptance_criteria` `[10, 42, 43]`, 32 deklarierte Szenarien, 21 aufgeloeste Zeugen (zwoelf `sync-cursor`-Punkte teilen einen), `stage_four_rows_still_planned` LEER, 158 Ledgerzeilen | 0 s |

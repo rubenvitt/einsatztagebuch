@@ -3,7 +3,7 @@
   "bundle-activation": [
     {
       "name": "unsigned-candidate",
-      "brackets": "eine Freigabe, die keine tragende Wurzelsignatur belegt — sei es, dass sie gar keine traegt, sei es ein gekipptes Byte in der rohen Signatur: sie wird ABGEWIESEN und nicht uebergangen, und die zuletzt gueltige Fassung bleibt aktiv",
+      "brackets": "eine Freigabe, die keine tragende Wurzelsignatur belegt — sei es, dass sie gar keine traegt, sei es ein gekipptes Byte in der rohen Signatur: `ReaderBundlePin::from_trust_objects` gibt fuer BEIDE Gestalten einen Fehler mit dem Code Unsigned zurueck und pinnt nichts. Mehr sagt dieser Zeuge nicht; dass an ihrer Stelle die zuletzt gueltige Fassung aktiv BLEIBT, misst der Nachbar `a_revocation_withdraws_its_release_and_the_last_valid_version_stays_active` in derselben Datei",
       "witness": "crates/ea-reader/tests/bundle_release_pinning.rs::an_unsigned_release_never_pins_anything"
     },
     {
@@ -18,7 +18,7 @@
     },
     {
       "name": "stale-trust-state",
-      "brackets": "ein dauerhaft im Datei-Modus betriebenes Geraet sieht einen Widerruf erst beim naechsten Bezug des Trust-Bestandes: das Alter wird ausgewiesen und die Ueberschreitung der Frist ist eine AUFFORDERUNG, nie eine Sperre",
+      "brackets": "der Fall, den das Alter des Trust-Bestandes sichtbar machen soll: ein dauerhaft im Datei-Modus betriebenes Geraet sieht einen Widerruf erst beim naechsten Bezug. Was der Zeuge davon WIRKLICH misst, ist die Rechnung und nur sie — `reader_trust_age_view` weist ueber einer um einen Tag und eine Millisekunde zurueckliegenden Bezugszeit `trust_age_ms` genau so aus und setzt `trust_refresh_overdue`. Ein Widerruf, der Datei-Modus und eine Sperre kommen darin NICHT vor; dass die Ueberschreitung eine Aufforderung und nie eine Sperre ist, folgt aus der Gestalt der Sicht, die kein Sperrfeld fuehrt, und ist keine Zusicherung dieses Zeugen",
       "witness": "crates/ea-reader/tests/trust_age.rs::an_exceeded_deadline_asks_for_a_refresh"
     }
   ],
@@ -50,7 +50,7 @@
     },
     {
       "name": "after-first-object-write",
-      "brackets": "nach dem ERSTEN und vor dem zweiten Objekt: der Batch liegt halb im Cache, und weil er inhaltsadressiert ist, kostet die Wiederholung kein zweites Byte",
+      "brackets": "nach dem ERSTEN und vor dem zweiten Objekt: der Batch liegt halb im Cache, der bestaetigte Cursor steht auch nach dem Wiederoeffnen des Speichers, und der Wiederholversuch landet auf demselben Kopf. Dass die Wiederholung dabei kein zweites Byte kostet, misst dieser Zeuge NICHT — das ist die Aussage des Nachbarn `a_repeated_batch_writes_no_second_byte_and_moves_nothing` in derselben Datei",
       "witness": "crates/ea-reader/tests/sync_resume.rs::the_cursor_moves_only_after_every_object_is_durable_and_the_chain_verifies"
     },
     {
@@ -102,7 +102,7 @@
   "verification": [
     {
       "name": "substituted-archive-own-trust-chain",
-      "brackets": "ein untergeschobener, in sich VOLLSTAENDIGER Fremdbestand — eigener Root, eigene Registry, eigene Schreiberzertifikate, eigene Signaturen — gegen den Anker, den nur der Tresor liefert: der Lauf faellt an Gate trust mit NULL objectResults und ohne eine einzige Zustandszeile, statt still teilzuverifizieren; derselbe Bestand gegen den eigenen Anker ist vollstaendig verifiziert",
+      "brackets": "ein untergeschobener, in sich VOLLSTAENDIGER Fremdbestand — eigener Root, eigene Registry, eigene Schreiberzertifikate, eigene Signaturen — gegen den Anker, den nur der Tresor liefert: NULL objectResults, keine einzige Zustandszeile und alle sechs Mangelfelder leer, statt still teilzuverifizieren; derselbe Bestand gegen den eigenen Anker ist vollstaendig verifiziert. Dass der Lauf dabei wirklich an Gate trust stehenbleibt, steht hier nur als Kommentar und wird beobachtend zugesichert vom Nachbarn `crates/ea-reader/tests/file_mode_anchor.rs::a_substituted_archive_says_nothing_about_any_entry_in_file_mode`, der das Protokoll gegen GATE_ORDER_V1[..2] haelt",
       "witness": "crates/ea-reader/tests/pinned_anchor.rs::a_substituted_archive_with_its_own_complete_trust_chain_fails_here"
     },
     {
@@ -117,7 +117,7 @@
     },
     {
       "name": "stub-without-authorization",
-      "brackets": "ein .eds-Stummel, dessen Pruefkette an EINEM Glied bricht — destructionId auf keine autorisierte Vernichtung des Bestands, destructionAuthorizationObjectHash ungleich dem von den Transitionen authentifizierten Hash, oder Autorisierung ohne den entryHash und die Sequenz des Stummels unter targets —: ungeklaerte Luecke in der Eintragsdimension, Gap in der Verifikationsdimension, kein objectResult, kein Grant nennt seinen entryHash, kein Zeugenpaar, und der Bericht traegt ueber keinen der drei Brueche einen zusaetzlichen Befund; nur der Zwilling mit geschlossener Kette ist autorisiert vernichtet bei sonst gleichem Ausgang; die Entkapselung, die der Bestand ueber seine anderen Eintraege erreicht, ist fuer den Stummel in keinem der beiden Ausgaenge formulierbar",
+      "brackets": "ein .eds-Stummel, dessen Pruefkette an EINEM Glied bricht — destructionId auf keine autorisierte Vernichtung des Bestands, destructionAuthorizationObjectHash ungleich dem von den Transitionen authentifizierten Hash, oder Autorisierung ohne den entryHash und die Sequenz des Stummels unter targets —: ungeklaerte Luecke in der Eintragsdimension, Gap in der Verifikationsdimension, kein objectResult, kein Grant nennt seinen entryHash, kein Zeugenpaar; dass der Bericht ueber keinen der drei Brueche einen ZUSAETZLICHEN Befund traegt, misst dieser Zeuge nicht, sondern der Nachbar `the_authorized_destruction_is_reached_only_through_the_full_chain`, der die Befundzahlen aller vier Bestaende gegeneinander stellt; nur der Zwilling mit geschlossener Kette ist autorisiert vernichtet bei sonst gleichem Ausgang; die Entkapselung, die der Bestand ueber seine anderen Eintraege erreicht, ist fuer den Stummel in keinem der beiden Ausgaenge formulierbar",
       "witness": "crates/ea-reader/tests/destroyed_stub.rs::a_stub_reaches_no_decapsulation_in_either_outcome"
     },
     {
@@ -161,7 +161,7 @@
     },
     {
       "name": "aborted-authenticator-confirmation",
-      "brackets": "die Zeremonie liefert keine oder eine fremde PRF-Ausgabe: der Nachweis faellt an der AEAD-Umschliessung des Envelopes (EA-CRYPTO-AEAD-OPEN beziehungsweise EA-READER-VAULT-NO-ENVELOPE), eine Bestaetigung ENTSTEHT nicht, und ohne den per Wert genommenen Typ gibt es weder Sitzung noch Export",
+      "brackets": "ZWEI Faelle mit zwei VERSCHIEDENEN Mechanismen, und der Zeuge trennt sie statt sie zu einem Satz zu glaetten: eine fremde PRF-Ausgabe zu einer BEKANNTEN credentialId faellt an der AEAD-Umschliessung des Envelopes mit EA-CRYPTO-AEAD-OPEN; eine UNBEKANNTE credentialId mit einwandfreiem PRF-Geheimnis faellt schon DAVOR mit EA-READER-VAULT-NO-ENVELOPE, weil es zu ihr gar kein Envelope gibt, das sich umschliessen liesse — es wird also keine AEAD geoeffnet und keine verworfen. In beiden Faellen ENTSTEHT keine Bestaetigung, und ohne den per Wert genommenen Typ gibt es weder Sitzung noch Export",
       "witness": "crates/ea-reader/tests/session_lock.rs::a_confirmation_that_the_authenticator_did_not_prove_never_exists"
     },
     {

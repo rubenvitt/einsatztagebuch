@@ -49,6 +49,7 @@
 //! `#[path]`-Includes werden je Testziel uebersetzt; daher `allow(dead_code)`.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,7 +66,7 @@ use ea_reader::{
     UnixMillis, VerificationStatus, decrypt_verified, indexable_record,
 };
 use ea_schema::{
-    CommonHeaderV1, IncidentV1, KeywordV1, LocationV1, NativeSourceV1, OccurredAtV1,
+    CommonHeaderV1, CoordinatesV1, IncidentV1, KeywordV1, LocationV1, NativeSourceV1, OccurredAtV1,
     OperatorSnapshotV1, PatientCount, PayloadV1, PersonnelSnapshotV1, VehicleSnapshotV1,
     encode_payload,
 };
@@ -85,16 +86,72 @@ pub use verify_fixtures::{fixtures, verify_support};
 
 /// Der Ereigniszeitpunkt des Kanarieneinsatzes.
 ///
-/// Er ist SELBST ein Marker, und zwar der einzige nichttextliche: `occurredAt`
-/// ist eine Millisekundenzahl, und ein Text ist dafuer nicht konstruierbar.
-/// Gesucht wird seine 8-Byte-Darstellung in Netzreihenfolge — genau die
-/// Bytefolge, die CBOR fuer eine Zahl dieser Groesse ausschreibt
-/// (Hauptkategorie 0, Argumentlaenge 8). Ein kleiner Zahlenwert waere in jedem
-/// Bytestrom zufaellig zu finden; acht Byte dieser Gestalt sind es nicht.
+/// Er ist SELBST ein Marker, und zwar einer der nichttextlichen:
+/// `occurredAt.start` ist eine Millisekundenzahl, und ein Text ist dafuer
+/// nicht konstruierbar. Gesucht wird seine 8-Byte-Darstellung in
+/// Netzreihenfolge — genau die Bytefolge, die CBOR fuer eine Zahl dieser
+/// Groesse ausschreibt (Hauptkategorie 0, Argumentlaenge 8). Ein kleiner
+/// Zahlenwert waere in jedem Bytestrom zufaellig zu finden; acht Byte dieser
+/// Gestalt sind es nicht.
 pub const CANARY_OCCURRED_AT_MS_V1: i64 = 1_771_022_600_999;
 
 /// Dieselbe Zahl als Bytemarker.
 pub const CANARY_OCCURRED_AT_BYTES_V1: [u8; 8] = CANARY_OCCURRED_AT_MS_V1.to_be_bytes();
+
+/// Das ENDE des Ereignisintervalls — ein EIGENER Marker.
+///
+/// `OccurredAtV1` fuehrt zwei Zeitpunkte, und ein gemeinsamer Marker liesse
+/// offen, welcher von beiden geleckt hat. Der Wert liegt hinter dem Beginn,
+/// sonst wiese `EA-SCHEMA-INTERVAL` den Einsatz ab.
+pub const CANARY_OCCURRED_AT_END_MS_V1: i64 = 1_771_022_755_777;
+
+/// Dieselbe Zahl als Bytemarker.
+pub const CANARY_OCCURRED_AT_END_BYTES_V1: [u8; 8] = CANARY_OCCURRED_AT_END_MS_V1.to_be_bytes();
+
+/// Der Geraetezeitpunkt der Fertigstellung — noch ein eigener Zeitmarker.
+///
+/// Er trug vor dieser Fassung DENSELBEN Wert wie `occurredAt.start`; damit
+/// deckten zwei Felder einen Marker, und ein Leck haette nicht mehr gesagt,
+/// welches der beiden es war.
+pub const CANARY_FINALIZED_AT_MS_V1: i64 = 1_771_022_811_333;
+
+/// Dieselbe Zahl als Bytemarker.
+pub const CANARY_FINALIZED_AT_BYTES_V1: [u8; 8] = CANARY_FINALIZED_AT_MS_V1.to_be_bytes();
+
+/// Die Breite des Kanarienorts in 1e-7 Grad.
+///
+/// Koordinaten sind der eine fachliche Ortsbestandteil, der KEINEN Text tragen
+/// kann: `CoordinatesV1::new` nimmt zwei `i32` und weist alles ausserhalb von
+/// ±90° bzw. ±180° mit `EA-SCHEMA-COORDINATES` ab. Der Marker ist deshalb ein
+/// Zahlenmarker wie der Zeitmarker — und WEIL vier Byte allein in einem langen
+/// Bytestrom zufaellig auftauchen koennten, wird die CBOR-Kopfbyte
+/// mitgesucht (Hauptkategorie 0, Argumentlaenge 4 → `0x1A`). Fuenf Byte dieser
+/// Gestalt sind kein Zufall.
+pub const CANARY_LAT_E7_V1: i32 = 723_456_781;
+
+/// Die Laenge des Kanarienorts in 1e-7 Grad.
+pub const CANARY_LON_E7_V1: i32 = 1_234_567_891;
+
+/// Das CBOR-Kopfbyte einer vorzeichenlosen Zahl mit 4-Byte-Argument.
+const CBOR_UNSIGNED_WITH_FOUR_BYTE_ARGUMENT_V1: u8 = 0x1A;
+
+/// Die Breite als Bytemarker: Kopfbyte und vier Byte in Netzreihenfolge.
+pub const CANARY_LAT_E7_BYTES_V1: [u8; 5] = cbor_u32_marker(CANARY_LAT_E7_V1);
+
+/// Die Laenge als Bytemarker.
+pub const CANARY_LON_E7_BYTES_V1: [u8; 5] = cbor_u32_marker(CANARY_LON_E7_V1);
+
+/// Die CBOR-Gestalt einer positiven `i32`-Zahl oberhalb von 65535.
+const fn cbor_u32_marker(value: i32) -> [u8; 5] {
+    let bytes = (value as u32).to_be_bytes();
+    [
+        CBOR_UNSIGNED_WITH_FOUR_BYTE_ARGUMENT_V1,
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+    ]
+}
 
 /// Die Zeitzone des Kanarieneinsatzes — ebenfalls ein Marker.
 ///
@@ -111,11 +168,29 @@ pub const CANARY_TIMEZONE_V1: &str = "Antarctica/Troll";
 /// Ziel waere sie nicht messbar.
 pub const CANARY_EXPORT_FILENAME_V1: &str = "kanarie-reader-dateiname-5e77.json";
 
+/// Die Marker, die KEIN Schemafeld benennen.
+///
+/// Heute genau einer: der Wirtspfad des Exportziels. Er steht in
+/// [`READER_CANARY_MARKERS`] wie jeder andere, gehoert aber nicht in die
+/// Aufteilung der Schemaflaeche — er ist ein Feld des WIRTS.
+pub const NON_SCHEMA_MARKERS_V1: [&str; 1] = ["das Exportziel (Wirtspfad, kein Schemafeld)"];
+
 /// Je fachlichem Feld GENAU EIN eigener Marker.
 ///
 /// Ein gemeinsamer Marker fuer zwei Felder liesse offen, welches von beiden
 /// geleckt hat — dieselbe Regel, die
 /// `tests/ea-system-tests/tests/privacy_canaries_writer.rs` durchsetzt.
+///
+/// # Die Namen sind die SCHEMANAMEN, `Typ.feld`
+///
+/// Und das ist der Angelpunkt der Vollstaendigkeit: dieselben Namen liefert
+/// [`incident_schema_surface`] aus `crates/ea-schema/src/model.rs`, und
+/// `every_schema_field_of_the_canary_incident_is_marked_or_named_with_a_reason`
+/// verlangt, dass die Marker und [`UNMARKED_SCHEMA_FIELDS_V1`] diese Flaeche
+/// LUECKENLOS und UEBERSCHNEIDUNGSFREI aufteilen. Ein neues Feld in
+/// `ea-schema` ist damit ein ROTER Zeuge und keine stille Luecke — vor dieser
+/// Fassung zaehlte der Zeuge nur seine eigene Liste ab und konnte deshalb
+/// nichts uebersehen, was er nicht ohnehin schon kannte.
 ///
 /// # Warum die Textmarker KLEINGESCHRIEBEN sind
 ///
@@ -124,37 +199,261 @@ pub const CANARY_EXPORT_FILENAME_V1: &str = "kanarie-reader-dateiname-5e77.json"
 /// `NFC → str::to_lowercase → NFC`. Ein GROSS geschriebener Marker stuende in
 /// einem leckenden Indexkoerper nur in seiner gefalteten Gestalt, und die
 /// Suche nach dem Originalmarker faende ihn NICHT — der Zeuge waere fuer
-/// Stichwort-, Personal- und Fahrzeugterme still blind. Kleingeschriebene
-/// ASCII-Marker sind unter dieser Faltung Fixpunkte;
+/// Stichwort-, Personal- und Fahrzeugterme still blind. Das betrifft
+/// ausdruecklich auch `radioCallSign` und `licensePlate`: `vehicle_terms`
+/// (`crates/ea-reader/src/search.rs`) projiziert beide in Terme, und ein
+/// Kennzeichen schreibt man im Betrieb gross. Kleingeschriebene ASCII-Marker
+/// sind unter dieser Faltung Fixpunkte;
 /// `every_named_field_carries_its_own_marker_and_the_vault_gives_it_back`
-/// haelt das fest. Der Zeitzonenmarker ist die eine Ausnahme — eine IANA-Zone
-/// schreibt ihre Grossbuchstaben vor —, und er ist zugleich das eine Feld, das
-/// `indexable_record` gar nicht in einen Term projiziert.
-///
-/// KEINEN Marker tragen, und das ist gemessen und nicht vergessen:
-/// * `patient_count` — `PatientCount::Known(u32) | Unknown`
-///   (`crates/ea-schema/src/model.rs`) fuehrt keinen Bedienertext, und eine
-///   kleine Zahl als Marker waere in jedem Strom zufaellig zu finden.
-/// * `record_id` — `RecordId` ist eine UUIDv7 (`EA-SCHEMA-UUID-V7`); die
-///   Gestalt laesst keinen Text zu.
-/// * `finalized_at_device` und `registry_version` — dieselbe Lage wie
-///   `occurredAt`, und EIN Zeitmarker genuegt: was einen 8-Byte-Zahlenmarker
-///   durchliesse, liesse jeden zweiten auch durch.
-pub const READER_CANARY_MARKERS: [(&str, &[u8]); 11] = [
+/// haelt das fest. Der Zeitzonenmarker ist die eine textliche Ausnahme — eine
+/// IANA-Zone schreibt ihre Grossbuchstaben vor —, und er ist zugleich das eine
+/// Feld, das `indexable_record` gar nicht in einen Term projiziert.
+pub const READER_CANARY_MARKERS: [(&str, &[u8]); 20] = [
     (
-        "human_incident_number",
+        "IncidentBodyV1.human_incident_number",
         b"kanarie-reader-einsatznummer-4a17",
     ),
-    ("keyword", b"kanarie-reader-stichwort-8b02"),
-    ("location", b"kanarie-reader-ort-3c9e"),
-    ("personnel", b"kanarie-reader-personal-7d41"),
-    ("vehicles", b"kanarie-reader-fahrzeug-2e6b"),
-    ("notes", b"kanarie-reader-freitext-9f55"),
-    ("external_organizations", b"kanarie-reader-fremdorg-1d08"),
-    ("operator", b"kanarie-reader-bediener-6a3c"),
-    ("timezone", CANARY_TIMEZONE_V1.as_bytes()),
-    ("occurred_at", &CANARY_OCCURRED_AT_BYTES_V1),
-    ("export_filename", CANARY_EXPORT_FILENAME_V1.as_bytes()),
+    ("IncidentBodyV1.keyword", b"kanarie-reader-stichwort-8b02"),
+    ("IncidentBodyV1.notes", b"kanarie-reader-freitext-9f55"),
+    ("LocationV1.free_text", b"kanarie-reader-ort-3c9e"),
+    ("CoordinatesV1.lat_e7", &CANARY_LAT_E7_BYTES_V1),
+    ("CoordinatesV1.lon_e7", &CANARY_LON_E7_BYTES_V1),
+    (
+        "PersonnelSnapshotV1.display_name",
+        b"kanarie-reader-personal-7d41",
+    ),
+    (
+        "PersonnelSnapshotV1.role_or_function",
+        b"kanarie-reader-personalfunktion-0c73",
+    ),
+    (
+        "VehicleSnapshotV1.display_name",
+        b"kanarie-reader-fahrzeug-2e6b",
+    ),
+    (
+        "VehicleSnapshotV1.radio_call_sign",
+        b"kanarie-reader-funkrufname-4b19",
+    ),
+    (
+        "VehicleSnapshotV1.license_plate",
+        b"kanarie-reader-kennzeichen-8e2a",
+    ),
+    (
+        "ExternalOrganizationV1.display_name",
+        b"kanarie-reader-fremdorg-1d08",
+    ),
+    (
+        "ExternalOrganizationV1.id",
+        b"kanarie-reader-fremdorgkennung-7a54",
+    ),
+    (
+        "OperatorSnapshotV1.display_name",
+        b"kanarie-reader-bediener-6a3c",
+    ),
+    (
+        "OperatorSnapshotV1.function_label",
+        b"kanarie-reader-bedienerfunktion-3f6d",
+    ),
+    ("CommonHeaderV1.timezone", CANARY_TIMEZONE_V1.as_bytes()),
+    (
+        "CommonHeaderV1.finalized_at_device",
+        &CANARY_FINALIZED_AT_BYTES_V1,
+    ),
+    ("OccurredAtV1.start", &CANARY_OCCURRED_AT_BYTES_V1),
+    ("OccurredAtV1.end", &CANARY_OCCURRED_AT_END_BYTES_V1),
+    (
+        "das Exportziel (Wirtspfad, kein Schemafeld)",
+        CANARY_EXPORT_FILENAME_V1.as_bytes(),
+    ),
+];
+
+/// Jedes Feld der Schemaflaeche des Kanarieneinsatzes, das KEINEN Marker
+/// traegt — mit der GEMESSENEN Begruendung, warum es keinen tragen kann.
+///
+/// Die Liste ist kein Kommentar, sondern die zweite Haelfte einer Aufteilung:
+/// zusammen mit [`READER_CANARY_MARKERS`] MUSS sie [`incident_schema_surface`]
+/// genau ausschoepfen. Eine Begruendung, die nur „vergessen" hiesse, faellt
+/// damit auf; ein neues Feld ohne Eintrag ebenso.
+///
+/// Vier Begruendungsarten kommen vor, und keine fuenfte:
+///
+/// * **Behaelter** — das Feld traegt selbst keinen Inhalt, sondern den Typ,
+///   dessen Felder ihre eigenen Marker haben.
+/// * **keine Bedienereingabe** — Kennung, Hash, Salz, Zaehler oder
+///   Formatfassung. Ein Text ist dort nicht konstruierbar, und eine kleine
+///   Zahl waere als Marker wertlos, weil sie in jedem Bytestrom vorkommt.
+/// * **andere Variante** — das Feld liegt in dem Zweig eines Entweder-Oder,
+///   den dieser EINE Kanarieneinsatz nicht baut. Ein Marker dort verlangte
+///   einen ZWEITEN Kanarieneinsatz durch die volle Kette.
+/// * **schemarechtlich unvereinbar** — die beiden `emptyReason`-Felder. Das
+///   ist die einzige Begruendung, die nicht am Feld selbst haengt, sondern an
+///   einer gemessenen Regel: `validate_empty_reason`
+///   (`crates/ea-schema/src/model.rs`) laesst einen Grund NUR zu, wenn die
+///   zugehoerige Liste LEER ist (`EA-SCHEMA-LIST-REASON`). In einem Einsatz mit
+///   markierter Personal- und Fahrzeugzeile ist das Feld also zwingend `None`.
+pub const UNMARKED_SCHEMA_FIELDS_V1: [(&str, &str); 39] = [
+    (
+        "IncidentV1.header",
+        "Behaelter: `CommonHeaderV1` traegt die Marker",
+    ),
+    (
+        "IncidentV1.body",
+        "Behaelter: `IncidentBodyV1` traegt die Marker",
+    ),
+    (
+        "IncidentBodyV1.occurred_at",
+        "Behaelter: `OccurredAtV1.start` und `.end` tragen die Marker",
+    ),
+    (
+        "IncidentBodyV1.location",
+        "Behaelter: `LocationV1` traegt die Marker",
+    ),
+    (
+        "IncidentBodyV1.personnel",
+        "Behaelter: `PersonnelSnapshotV1` traegt die Marker",
+    ),
+    (
+        "IncidentBodyV1.vehicles",
+        "Behaelter: `VehicleSnapshotV1` traegt die Marker",
+    ),
+    (
+        "IncidentBodyV1.external_organizations",
+        "Behaelter: `ExternalOrganizationV1` traegt die Marker",
+    ),
+    (
+        "IncidentBodyV1.patient_count",
+        "keine Bedienereingabe: `PatientCount::Known(u32) | Unknown` fuehrt keinen Text, und eine \
+         kleine Zahl waere in jedem Strom zufaellig zu finden",
+    ),
+    (
+        "IncidentBodyV1.personnel_empty_reason",
+        "schemarechtlich unvereinbar: `EA-SCHEMA-LIST-REASON` laesst den Grund nur ueber einer \
+         LEEREN Personalliste zu, und diese Kulisse traegt eine markierte Personalzeile",
+    ),
+    (
+        "IncidentBodyV1.vehicles_empty_reason",
+        "schemarechtlich unvereinbar: `EA-SCHEMA-LIST-REASON` laesst den Grund nur ueber einer \
+         LEEREN Fahrzeugliste zu, und diese Kulisse traegt eine markierte Fahrzeugzeile",
+    ),
+    (
+        "CommonHeaderV1.record_id",
+        "keine Bedienereingabe: `RecordId` ist eine UUIDv7 (`EA-SCHEMA-UUID-V7`), die Gestalt \
+         laesst keinen Text zu",
+    ),
+    (
+        "CommonHeaderV1.operator",
+        "Behaelter: `OperatorSnapshotV1` traegt die Marker",
+    ),
+    (
+        "CommonHeaderV1.source",
+        "Behaelter: `NativeSourceV1` traegt keinen Bedienertext",
+    ),
+    (
+        "CommonHeaderV1.registry_version",
+        "keine Bedienereingabe: der Registrierungsstand ist eine kleine Zahl",
+    ),
+    (
+        "OperatorSnapshotV1.organization_id",
+        "keine Bedienereingabe: 16-Byte-Kennung",
+    ),
+    (
+        "OperatorSnapshotV1.operator_subject_id",
+        "keine Bedienereingabe: 16-Byte-Kennung",
+    ),
+    (
+        "OperatorSnapshotV1.salt",
+        "keine Bedienereingabe: 32 Byte Zufall der Pseudonymisierung",
+    ),
+    (
+        "OperatorSnapshotV1.operator_binding_object_hash",
+        "keine Bedienereingabe: ein Objekthash",
+    ),
+    (
+        "NativeSourceV1.source_id",
+        "keine Bedienereingabe: benennt die SCHREIBENDE ANWENDUNG, nicht den Einsatz",
+    ),
+    (
+        "NativeSourceV1.source_format_version",
+        "keine Bedienereingabe: eine Formatfassung",
+    ),
+    (
+        "KeywordV1.reference_id",
+        "andere Variante: diese Kulisse baut `KeywordV1::FreeText`",
+    ),
+    (
+        "KeywordV1.display_text",
+        "andere Variante: diese Kulisse baut `KeywordV1::FreeText`",
+    ),
+    (
+        "LocationV1.coordinates",
+        "Behaelter: `CoordinatesV1.lat_e7` und `.lon_e7` tragen die Marker",
+    ),
+    (
+        "LocationV1.address",
+        "andere Variante: diese Kulisse baut `LocationV1::FreeText`",
+    ),
+    (
+        "StructuredAddressV1.street",
+        "andere Variante: nur ueber `LocationV1::Structured` erreichbar",
+    ),
+    (
+        "StructuredAddressV1.house_number",
+        "andere Variante: nur ueber `LocationV1::Structured` erreichbar",
+    ),
+    (
+        "StructuredAddressV1.postal_code",
+        "andere Variante: nur ueber `LocationV1::Structured` erreichbar",
+    ),
+    (
+        "StructuredAddressV1.locality",
+        "andere Variante: nur ueber `LocationV1::Structured` erreichbar",
+    ),
+    (
+        "StructuredAddressV1.admin_area",
+        "andere Variante: nur ueber `LocationV1::Structured` erreichbar",
+    ),
+    (
+        "StructuredAddressV1.country_code",
+        "andere Variante: nur ueber `LocationV1::Structured` erreichbar",
+    ),
+    (
+        "PersonnelSnapshotV1.master_personnel_id",
+        "andere Variante: diese Kulisse baut `PersonnelSnapshotV1::AdHoc`",
+    ),
+    (
+        "PersonnelSnapshotV1.revision",
+        "andere Variante: nur ueber `PersonnelSnapshotV1::Master` erreichbar, und \
+         `MasterDataRevisionV1` fuehrt nur Zahl oder Zeitpunkt",
+    ),
+    (
+        "PersonnelSnapshotV1.imported_provenance",
+        "andere Variante: nur ueber `PersonnelSnapshotV1::Master` erreichbar",
+    ),
+    (
+        "VehicleSnapshotV1.master_vehicle_id",
+        "andere Variante: diese Kulisse baut `VehicleSnapshotV1::AdHoc`",
+    ),
+    (
+        "VehicleSnapshotV1.revision",
+        "andere Variante: nur ueber `VehicleSnapshotV1::Master` erreichbar, und \
+         `MasterDataRevisionV1` fuehrt nur Zahl oder Zeitpunkt",
+    ),
+    (
+        "VehicleSnapshotV1.imported_provenance",
+        "andere Variante: nur ueber `VehicleSnapshotV1::Master` erreichbar",
+    ),
+    (
+        "ImportedProvenanceV1.source_id",
+        "andere Variante: nur ueber eine `Master`-Momentaufnahme erreichbar",
+    ),
+    (
+        "ImportedProvenanceV1.source_format_version",
+        "andere Variante: nur ueber eine `Master`-Momentaufnahme erreichbar",
+    ),
+    (
+        "ImportedProvenanceV1.import_protocol_hash",
+        "andere Variante: nur ueber eine `Master`-Momentaufnahme erreichbar",
+    ),
 ];
 
 /// Der Marker des Feldes `field`.
@@ -173,7 +472,7 @@ pub fn canary(field: &str) -> &'static [u8] {
 /// Der Marker des Feldes `field` als Text.
 ///
 /// # Panics
-/// Fuer `occurred_at`: der Zahlenmarker ist kein Text.
+/// Fuer die Zahlenmarker: sie sind kein Text.
 #[must_use]
 pub fn canary_text(field: &str) -> &'static str {
     core::str::from_utf8(canary(field)).expect("dieser Marker ist Text")
@@ -203,13 +502,13 @@ fn canary_record_id() -> RecordId {
 pub fn canary_incident() -> IncidentV1 {
     let header = CommonHeaderV1::new(
         canary_record_id(),
-        UnixMillis::new(CANARY_OCCURRED_AT_MS_V1),
+        UnixMillis::new(CANARY_FINALIZED_AT_MS_V1),
         CANARY_TIMEZONE_V1,
         OperatorSnapshotV1::new(
             OrganizationId::try_from(&[0x71_u8; 16][..]).expect("16 Byte"),
             OperatorSubjectId::try_from(&[0x72_u8; 16][..]).expect("16 Byte"),
-            canary_text("operator"),
-            "Einsatzleitung",
+            canary_text("OperatorSnapshotV1.display_name"),
+            canary_text("OperatorSnapshotV1.function_label"),
             [0x73; 32],
             TypesObjectHash::try_from(&[0x74_u8; 32][..]).expect("32 Byte"),
         )
@@ -220,27 +519,52 @@ pub fn canary_incident() -> IncidentV1 {
     .expect("der Kopf des Kanarieneinsatzes ist gueltig");
     IncidentV1::new(
         header,
-        canary_text("human_incident_number"),
-        OccurredAtV1::new(UnixMillis::new(CANARY_OCCURRED_AT_MS_V1), None)
-            .expect("das Intervall ist gueltig"),
-        KeywordV1::free_text(canary_text("keyword")).expect("das Stichwort ist gueltig"),
-        LocationV1::free_text(canary_text("location"), None).expect("der Ort ist gueltig"),
+        canary_text("IncidentBodyV1.human_incident_number"),
+        OccurredAtV1::new(
+            UnixMillis::new(CANARY_OCCURRED_AT_MS_V1),
+            Some(UnixMillis::new(CANARY_OCCURRED_AT_END_MS_V1)),
+        )
+        .expect("das Intervall ist gueltig"),
+        KeywordV1::free_text(canary_text("IncidentBodyV1.keyword"))
+            .expect("das Stichwort ist gueltig"),
+        LocationV1::free_text(
+            canary_text("LocationV1.free_text"),
+            Some(
+                CoordinatesV1::new(CANARY_LAT_E7_V1, CANARY_LON_E7_V1)
+                    .expect("die Koordinaten liegen im zulaessigen Bereich"),
+            ),
+        )
+        .expect("der Ort ist gueltig"),
         vec![
-            PersonnelSnapshotV1::ad_hoc(canary_text("personnel"), None)
-                .expect("die Personalzeile ist gueltig"),
+            PersonnelSnapshotV1::ad_hoc(
+                canary_text("PersonnelSnapshotV1.display_name"),
+                Some(canary_text("PersonnelSnapshotV1.role_or_function").to_owned()),
+            )
+            .expect("die Personalzeile ist gueltig"),
         ],
+        // `personnel_empty_reason` traegt keinen Marker, siehe
+        // [`UNMARKED_SCHEMA_FIELDS_V1`]: ueber einer NICHT leeren Liste weist
+        // `EA-SCHEMA-LIST-REASON` jeden Grund ab.
         None,
         vec![
-            VehicleSnapshotV1::ad_hoc(canary_text("vehicles"), None, None)
-                .expect("die Fahrzeugzeile ist gueltig"),
+            VehicleSnapshotV1::ad_hoc(
+                canary_text("VehicleSnapshotV1.display_name"),
+                Some(canary_text("VehicleSnapshotV1.radio_call_sign").to_owned()),
+                Some(canary_text("VehicleSnapshotV1.license_plate").to_owned()),
+            )
+            .expect("die Fahrzeugzeile ist gueltig"),
         ],
+        // `vehicles_empty_reason`: dieselbe Lage.
         None,
-        // `patient_count` traegt keinen Marker, siehe [`READER_CANARY_MARKERS`].
+        // `patient_count` traegt keinen Marker, siehe [`UNMARKED_SCHEMA_FIELDS_V1`].
         PatientCount::Unknown,
-        Some(canary_text("notes").to_owned()),
+        Some(canary_text("IncidentBodyV1.notes").to_owned()),
         vec![
-            ea_schema::ExternalOrganizationV1::new(None, canary_text("external_organizations"))
-                .expect("die Fremdorganisation ist gueltig"),
+            ea_schema::ExternalOrganizationV1::new(
+                Some(canary_text("ExternalOrganizationV1.id")),
+                canary_text("ExternalOrganizationV1.display_name"),
+            )
+            .expect("die Fremdorganisation ist gueltig"),
         ],
     )
     .expect("der Kanarieneinsatz ist schemagueltig")
@@ -443,7 +767,9 @@ impl ReaderCanaryHarness {
             .expect("ein Einsatzpaket bildet eine fachliche Indexzeile");
         let indexed_packages = search.indexed_packages();
         let hit = search
-            .search(&ReaderQueryV1::keyword(canary_text("keyword")))
+            .search(&ReaderQueryV1::keyword(canary_text(
+                "IncidentBodyV1.keyword",
+            )))
             .expect("die Suche ueber dem eigenen Marker laeuft");
         assert_eq!(
             hit.len(),
@@ -729,13 +1055,21 @@ fn collect_error_reports(
     // Ein FREMDER Tresor auf denselben Blobs: die drei Speicher weisen ab, und
     // ihre Fehlerzeilen sind genau das, was ein Bediener zu sehen bekaeme.
     let foreign = fixtures::vault_pinning(fixtures::complete_archive_anchor_bytes().to_vec());
+    // Gefragt wird nach einem Objekt, das WIRKLICH im Cache liegt: der Lauf hat
+    // den Klartext selbst als Objekt abgelegt. Die vorige Fassung fragte nach
+    // `object_hash(b"kanarie")` — eine Adresse, die es nicht gibt. Ein
+    // Cache-FEHLGRIFF ist aber keine Abweisung: `get_exact_object` meldet
+    // dafuer `Ok(None)`, `.err()` machte daraus `None`, und der Eintrag trug
+    // die Zeichenkette „None" und zaehlte trotzdem gegen die Untergrenze mit.
+    let cached_plaintext_hash = ea_crypto::object_hash(&canary_incident_plaintext());
     let cache_error = ReaderObjectCache::open(&foreign)
-        .get_exact_object(store, ea_crypto::object_hash(b"kanarie"))
-        .err();
+        .get_exact_object(store, cached_plaintext_hash)
+        .expect_err("ein fremder Tresor oeffnet ein VORHANDENES Cacheobjekt nicht");
     push(
         "Cachefehler unter fremdem Tresor",
         format!("{cache_error:?}"),
     );
+    push("Anzeige des Cachefehlers", format!("{cache_error}"));
     let state_error = ReaderEntryStateStore::open(&foreign)
         .get_entry_state(store, entry_hash)
         .err();
@@ -843,6 +1177,113 @@ pub fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
+// ---------------------------------------------------------------------------
+// Die Schemaflaeche, aus der Quelle gelesen
+// ---------------------------------------------------------------------------
+
+/// Die Typen, die die Nutzlast `ea.incident` aufspannt.
+///
+/// Sie stehen hier als NAMEN und nicht als Rust-Typen, weil die Flaeche aus
+/// `crates/ea-schema/src/model.rs` GELESEN wird: die Felder sind
+/// `pub(crate)`, eine Ableitung ueber `serde`-Introspektion oder ein
+/// Makro-Nachbau waere ein zweiter Wahrheitstraeger, und ein Nachbau von Hand
+/// waere genau die Liste, deren Unvollstaendigkeit dieser Zeuge messen soll.
+///
+/// Ein umbenannter oder entfernter Typ ist eine PANIK und keine stille Luecke:
+/// [`incident_schema_surface`] verlangt fuer jeden Namen einen Blockkopf.
+pub const INCIDENT_SCHEMA_TYPES_V1: [&str; 16] = [
+    "IncidentV1",
+    "IncidentBodyV1",
+    "CommonHeaderV1",
+    "OperatorSnapshotV1",
+    "NativeSourceV1",
+    "OccurredAtV1",
+    "KeywordV1",
+    "LocationV1",
+    "CoordinatesV1",
+    "StructuredAddressV1",
+    "PatientCount",
+    "MasterDataRevisionV1",
+    "ImportedProvenanceV1",
+    "PersonnelSnapshotV1",
+    "VehicleSnapshotV1",
+    "ExternalOrganizationV1",
+];
+
+/// Jedes BENANNTE Feld der Schemaflaeche des Kanarieneinsatzes, als `Typ.feld`.
+///
+/// # Was die Flaeche NICHT enthaelt, und warum das keine Luecke ist
+///
+/// Tupelvarianten (`KeywordV1::FreeText(String)`, `PatientCount::Known(u32)`,
+/// `MasterDataRevisionV1::RevisionNumber(u64)`) fuehren keinen Feldnamen. Ihr
+/// Inhalt haengt jeweils an dem BENANNTEN Feld, das die Variante traegt —
+/// `IncidentBodyV1.keyword`, `IncidentBodyV1.patient_count`,
+/// `PersonnelSnapshotV1.revision` —, und genau dort steht der Marker
+/// beziehungsweise die Begruendung.
+///
+/// Zwei Varianten desselben Typs, die dasselbe Feld fuehren (`display_name`
+/// steht in `Master` und in `AdHoc`), ergeben EINEN Eintrag: es ist EIN
+/// fachliches Feld, und die Regel lautet ein Marker je fachlichem Feld.
+///
+/// # Panics
+/// Wenn `crates/ea-schema/src/model.rs` nicht lesbar ist oder einer der
+/// Typen aus [`INCIDENT_SCHEMA_TYPES_V1`] dort keinen Blockkopf mehr hat.
+#[must_use]
+pub fn incident_schema_surface() -> BTreeSet<String> {
+    let path = repository_root().join("crates/ea-schema/src/model.rs");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} ist nicht lesbar: {error}", path.display()));
+    let lines: Vec<&str> = text.lines().collect();
+    let mut surface = BTreeSet::new();
+    for type_name in INCIDENT_SCHEMA_TYPES_V1 {
+        let opening = format!(" {type_name} {{");
+        let header = lines
+            .iter()
+            .position(|line| {
+                line.ends_with(&opening)
+                    && (line.starts_with("pub struct ")
+                        || line.starts_with("pub enum ")
+                        || line.starts_with("pub(crate) struct "))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{type_name} hat in {} keinen Blockkopf mehr",
+                    path.display()
+                )
+            });
+        for line in &lines[header + 1..] {
+            if *line == "}" {
+                break;
+            }
+            if let Some(field) = declared_field_name(line) {
+                surface.insert(format!("{type_name}.{field}"));
+            }
+        }
+    }
+    surface
+}
+
+/// Der Feldname einer Deklarationszeile, wenn die Zeile eine ist.
+fn declared_field_name(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("//") || trimmed.starts_with('#') {
+        return None;
+    }
+    let colon = trimmed.find(':')?;
+    let name = trimmed[..colon]
+        .trim_start_matches("pub(crate) ")
+        .trim_start_matches("pub ")
+        .trim();
+    let mut characters = name.chars();
+    let starts_lowercase = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase());
+    let rest_is_snake = characters.all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+    });
+    (starts_lowercase && rest_is_snake).then_some(name)
+}
+
 /// Jede HANDGESCHRIEBENE Quelle der Browseranwendung und der wasm-Bruecke.
 ///
 /// Ausgenommen sind die zwei Generatorausgaenge (`bridge/generated-contracts.ts`
@@ -919,13 +1360,23 @@ pub const CLIPBOARD_NEEDLES_V1: [&str; 5] = [
 
 /// Die Namen, mit denen etwas in einen Service-Worker-Cache geschrieben wuerde
 /// — oder mit denen der Worker sich ueberhaupt in eine Antwort einhaengte.
-pub const SERVICE_WORKER_CACHE_NEEDLES_V1: [&str; 6] = [
+///
+/// Die Nadeln stehen in der GEFALTETEN Gestalt (siehe [`folded_for_scan`]):
+/// ohne Leerraum und mit einfachen Anfuehrungszeichen. `addEventListener("fetch"`
+/// und ``addEventListener(`fetch` `` treffen deshalb dieselbe Nadel wie die
+/// einfach gequotete Schreibung — GEMESSEN und nicht vorsorglich: dieser Baum
+/// fuehrt weder eslint noch biome noch prettier noch oxlint, es gibt also
+/// nichts, was die Quotewahl erzwaenge, und die Nadelliste war vor dieser
+/// Fassung an `'` gebunden.
+pub const SERVICE_WORKER_CACHE_NEEDLES_V1: [&str; 8] = [
     "cache.put(",
     "cache.add(",
     "cache.addAll(",
     "caches.match(",
     "addEventListener('fetch'",
     "onfetch",
+    "respondWith",
+    "FetchEvent",
 ];
 
 /// Die Namen jeder Telemetrieform, die dieser Baum kennen koennte.
@@ -944,30 +1395,140 @@ pub const TELEMETRY_NEEDLES_V1: [&str; 8] = [
     "plausible(",
 ];
 
-/// Der erste Treffer aus `needles` in `text` — EINMAL geschrieben und zweimal
-/// benutzt: ueber jeder Quelle und ueber der Positivkontrolle.
+/// Der Quelltext in der Gestalt, in der JEDER Scan dieser Datei ihn liest.
+///
+/// Zwei Faltungen, beide gegen eine GEMESSENE Ausweichmoeglichkeit und nicht
+/// gegen einen Geschmack:
+///
+/// 1. **Anfuehrungszeichen werden vereinheitlicht** (`"` und `` ` `` → `'`).
+///    Ohne sie lief `self.addEventListener("fetch", …)` an der Nadelliste
+///    vorbei; der Baum hat kein Werkzeug, das die Quotewahl erzwingt.
+/// 2. **Leerraum faellt weg**, samt Zeilenumbruechen. Ohne das liefe
+///    `cache\n  .put(…)` oder `addEventListener(\n  'fetch',` vorbei.
+///
+/// Die zweite Faltung kann zwei benachbarte Woerter zu einer Nadel
+/// zusammenziehen (ein Kommentar, der auf `…on` endet und dessen naechste
+/// Zeile mit `fetch…` beginnt, ergaebe `onfetch`). Der Fehlgriff faellt damit
+/// auf die ROTE Seite — ein Zeuge, der lieber einmal zu viel anschlaegt, ist
+/// das Gegenteil der Luecke, die diese Faltung schliesst.
 #[must_use]
-pub fn first_forbidden_call(text: &str, needles: &[&'static str]) -> Option<&'static str> {
-    needles.iter().copied().find(|needle| text.contains(needle))
+pub fn folded_for_scan(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| match character {
+            '"' | '`' => '\'',
+            other => other,
+        })
+        .collect()
 }
 
-/// Jede Stelle, an der eine Quelle die Cache-API ueberhaupt anspricht.
+/// Der erste Treffer aus `needles` in `text` — EINMAL geschrieben und zweimal
+/// benutzt: ueber jeder Quelle und ueber der Positivkontrolle.
+///
+/// Gesucht wird ueber [`folded_for_scan`]; die Nadeln stehen deshalb selbst in
+/// gefalteter Gestalt.
+#[must_use]
+pub fn first_forbidden_call(text: &str, needles: &[&'static str]) -> Option<&'static str> {
+    let folded = folded_for_scan(text);
+    needles
+        .iter()
+        .copied()
+        .find(|needle| folded.contains(needle))
+}
+
+/// Die Methodenformen der Cache-API: die vier, mit denen Inhalt IN einen Cache
+/// geriete oder AUS ihm gelesen wuerde, und die drei Verwaltungsformen.
+///
+/// Die drei Verwaltungsformen stehen mit in der Liste, weil die Fundstellen
+/// sonst ueber einem sauberen Service Worker LEER liefen — und eine leere
+/// Menge ist von „der Scan sieht die Datei nicht" nicht zu unterscheiden.
+const CACHE_METHOD_SHAPES_V1: [&str; 7] = [
+    ".put(", ".add(", ".addAll(", ".match(", ".open(", ".keys()", ".delete(",
+];
+
+/// Woran eine Quelle als Anfasserin der Cache-API erkannt wird.
+///
+/// Die Einschraenkung ist noetig und gemessen: `.delete(` steht in diesem Baum
+/// auch auf einer `Map` (`apps/web/src/vault/webauthn-prf.ts`), `.put(` auf dem
+/// OPFS-Byteport (`crates/ea-reader-wasm/src/bridge.rs`) und `.keys()` auf einer
+/// Rust-Abbildung (`crates/ea-reader-wasm/src/view.rs`). Ueber ALLEN Quellen
+/// waere die Fundstellensuche deshalb Rauschen; ueber den Quellen, die die
+/// Cache-API ueberhaupt nennen, ist sie scharf.
+const CACHE_API_MARKS_V1: [&str; 4] = ["caches", "CacheStorage", ":Cache", "<Cache"];
+
+/// Jede Stelle, an der eine Quelle die Cache-API ueberhaupt anspricht — als
+/// `Empfaenger.methode(`.
+///
+/// # Warum die Fundstelle aus der BINDUNG kommt und nicht aus der Zeile
+///
+/// Die vorige Fassung sammelte Zeilen, die `caches.` enthalten. Damit war
+/// GEMESSEN Folgendes gruen:
+///
+/// ```text
+/// const box = await caches.open('ea-reader-bundle-leak')
+/// await box.put(event.request, response.clone())
+/// ```
+///
+/// Die zweite Zeile nennt `caches.` nicht, wurde also gar nicht erst
+/// eingesammelt, und `box.put(` traf auch keine Nadel — die Nadelliste kennt
+/// nur den Empfaengernamen `cache`. Ein Griff in den Cache ist aber der Griff,
+/// egal wie das Handle heisst.
+///
+/// Diese Fassung nimmt deshalb in jeder Cache-anfassenden Quelle JEDE
+/// Methodenform aus [`CACHE_METHOD_SHAPES_V1`] und stellt ihr den Bezeichner
+/// voran, der unmittelbar davor steht. `box.put(` ist damit eine Fundstelle,
+/// die die Erlaubnisliste nicht traegt.
 #[must_use]
 pub fn cache_api_call_sites(sources: &[(String, String)]) -> Vec<(String, String)> {
     let mut sites = Vec::new();
     for (path, text) in sources {
-        for line in text.lines() {
-            if line.contains("caches.") {
-                sites.push((path.clone(), line.trim().to_owned()));
+        let folded = folded_for_scan(text);
+        if !CACHE_API_MARKS_V1.iter().any(|mark| folded.contains(mark)) {
+            continue;
+        }
+        for shape in CACHE_METHOD_SHAPES_V1 {
+            let mut from = 0;
+            while let Some(offset) = folded[from..].find(shape) {
+                let start = from + offset;
+                sites.push((path.clone(), receiver_call_at(&folded, start, shape)));
+                from = start + shape.len();
             }
         }
     }
+    sites.sort();
     sites
+}
+
+/// `Empfaenger.methode(` an der Fundstelle `dot` des gefalteten Textes.
+///
+/// Der Empfaenger ist der laengste Bezeichnerlauf unmittelbar vor dem Punkt.
+/// Weil [`folded_for_scan`] den Leerraum entfernt, kann er ein
+/// vorangestelltes Schluesselwort mittragen (`await caches.open(` faltet zu
+/// `awaitcaches.open(`) — deshalb prueft die Erlaubnisliste auf ein ENDE und
+/// nicht auf Gleichheit.
+fn receiver_call_at(folded: &str, dot: usize, shape: &str) -> String {
+    let head = &folded[..dot];
+    let receiver_start = head
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| {
+            character.is_ascii_alphanumeric() || *character == '_' || *character == '$'
+        })
+        .last()
+        .map_or(head.len(), |(index, _)| index);
+    format!("{}{shape}", &head[receiver_start..])
 }
 
 /// Die drei Cache-Aufrufe, die der Service Worker fuehren DARF: er legt den
 /// Namensraum der neuen Fassung an, listet die alten und raeumt sie ab. Kein
 /// Schreiben, kein Lesen einer Antwort.
+///
+/// Geprueft wird mit `ends_with` ueber der Fundstelle aus
+/// [`cache_api_call_sites`]. Das ist keine Aufweichung: die Liste fuehrt
+/// ausschliesslich Formen, die nichts in einen Cache schreiben und nichts aus
+/// ihm lesen. Ein Handle, das aus `caches.open(` faellt, ist erst mit `.put(`,
+/// `.add(`, `.addAll(` oder `.match(` gefaehrlich — und keine dieser vier
+/// Formen steht hier.
 pub const ALLOWED_CACHE_CALLS_V1: [&str; 3] = ["caches.open(", "caches.keys()", "caches.delete("];
 
 /// Die eine Aktion, die eine Exportzeile traegt.

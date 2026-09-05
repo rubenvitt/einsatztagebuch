@@ -2291,17 +2291,35 @@ const STAGE_FOUR_REQUIRED_SCRIPTS: [&str; 6] = [
 
 /// Die Pflichtabschnitte des Stufe-4-Gate-Berichts, in Dokumentreihenfolge.
 ///
-/// ACHT wie in Stufe 3: die ersten fuenf folgen dem Stufe-2-Muster, die drei
-/// letzten halten die GEPRUEFTEN NEGATIVE, deren Schweigen sonst als „nicht
-/// geprueft" gelesen wuerde.
+/// Die ersten ACHT wie in Stufe 3: die ersten fuenf folgen dem Stufe-2-Muster,
+/// die drei danach halten die GEPRUEFTEN NEGATIVE, deren Schweigen sonst als
+/// „nicht geprueft" gelesen wuerde.
 ///
-/// `## Gemessener Gate-Lauf`, `## Ledgerpflege` und
-/// `## Offen in spaeterer Stufe` bleiben wie in Stufe 3 UNGEPINNT: den ersten
-/// liest der benannte Test der Stufenabnahme, nicht der Gate.
+/// ZEHN und nicht acht, und die zwei letzten sind GEMESSEN dazugekommen: beide
+/// liessen sich am 2026-09-05 aus dem Bericht ganz herausschneiden
+/// (`## Ledgerpflege` 39 Zeilen, `## Offen in spaeterer Stufe` 21 Zeilen),
+/// ohne dass `pnpm stage-gate:4` etwas anderes als Exitcode 0 lieferte. Bei
+/// `## Offen in spaeterer Stufe` ist der Schnitt schaerfer als bei jedem
+/// anderen Abschnitt: der sechzehnte Eintrag von
+/// [`STAGE_FOUR_GATE_REPORT_LITERALS`] — die Offenlegungspflicht dieser
+/// Stufe — endet auf „Alle vier stehen unten in `## Offen in spaeterer Stufe`
+/// mit ihrer besitzenden Stufe", also ZEIGT der gepinnte Satz auf diesen
+/// Abschnitt. Ein Zeiger, dessen Ziel loeschbar ist, waehrend der Zeiger
+/// gepinnt bleibt, ist keine Offenlegung. `## Ledgerpflege` steht aus dem
+/// Grund daneben, aus dem die drei geprueften Negative oben stehen: der
+/// Bericht sagt dort, WELCHE Ledgerzeilen die Stufe fortschreibt, und sein
+/// Schweigen liest sich als „keine".
+///
+/// `## Gemessener Gate-Lauf` bleibt wie in Stufe 3 UNGEPINNT, und das ist
+/// keine Nachlaessigkeit: den Abschnitt liest der benannte Test der
+/// Stufenabnahme
+/// (`stage_four_gate_report_records_the_measured_full_gate_run`), und er
+/// entsteht ERST, nachdem der Gate gelaufen ist — ein Gate, der ihn
+/// verlangte, koennte auf dem Lauf, der ihn erzeugt, nie gruen sein.
 ///
 /// Umlautfrei, wie alle drei bereits geschlossenen Gate-Berichte, weil der Gate
 /// Literale vergleicht.
-const STAGE_FOUR_GATE_REPORT_SECTIONS: [&str; 8] = [
+const STAGE_FOUR_GATE_REPORT_SECTIONS: [&str; 10] = [
     "## 1. Primaere Abnahmekriterien und ihre Belege",
     "## 2. Reichweite der Stufe-4-Abnahme",
     "## 3. Fehlermatrix und deklarierte Szenarien",
@@ -2310,6 +2328,8 @@ const STAGE_FOUR_GATE_REPORT_SECTIONS: [&str; 8] = [
     "## Browsermatrix und Datei-Modus",
     "## Rollengrenze",
     "## Nicht beruehrte Nachbarzeilen",
+    "## Ledgerpflege",
+    "## Offen in spaeterer Stufe",
 ];
 
 /// Die Literale, die der Stufe-4-Gate-Bericht nennen MUSS.
@@ -3196,14 +3216,44 @@ fn rows_still_planned(rows: &[LedgerRow], stage: &str, problems: &mut Vec<String
     still_planned
 }
 
+/// Prueft die Pflichtabschnitte eines Gate-Berichts — als ZEILE und nicht als
+/// Teilkette.
+///
+/// Der Unterschied ist gemessen und tragend. `## Offen in spaeterer Stufe`
+/// steht im Stufe-4-Bericht SIEBENMAL, sechsmal davon als Verweis mitten im
+/// Fliesstext — einer davon in der Offenlegungspflicht, die
+/// [`STAGE_FOUR_GATE_REPORT_LITERALS`] woertlich pinnt und die auf „Alle vier
+/// stehen unten in `## Offen in spaeterer Stufe` mit ihrer besitzenden Stufe"
+/// endet. Ueber `contains` geprueft haette dieser Zeiger seinen eigenen
+/// Pflichtabschnitt bedient: der Abschnitt liess sich am 2026-09-05 ganz
+/// herausschneiden, ohne dass `stage-gate 4` etwas anderes als Exitcode 0
+/// lieferte, obwohl er in der Liste stand. Ein Zeiger, dessen Ziel loeschbar
+/// ist, waehrend der Zeiger gepinnt bleibt, belegt nichts.
+///
+/// Pflichtliterale bleiben ABSICHTLICH Teilketten und laufen weiter ueber
+/// [`require_document_literals`]: sie sind Begriffe im Fliesstext und haben
+/// keine Zeile fuer sich.
+fn require_document_sections(path: &Path, text: &str, sections: &[&str]) -> Result<(), String> {
+    for section in sections {
+        if !text.lines().any(|line| line.trim_end() == *section) {
+            return Err(format!(
+                "{} does not carry the required section as a heading line of its own: {section}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Prueft ein Dokument gegen seinen Abschnitts- UND seinen Literalvertrag.
 ///
 /// Die beiden Pruefungen gehoeren zusammen und stehen ueberall im Baum als
-/// dasselbe Paar: erst die Pflichtabschnitte, dann die Pflichtliterale, beide
-/// ueber [`require_document_literals`] und beide als GESAMMELTER Mangel. Sie
-/// stehen hier einmal, weil das Formatpaket, der Stufe-2-Bericht und der
-/// Stufe-3-Bericht sie identisch brauchen; abgeschrieben waere die dritte
-/// Kopie die, die beim naechsten Vertrag vergessen wird.
+/// dasselbe Paar: erst die Pflichtabschnitte ueber
+/// [`require_document_sections`], dann die Pflichtliterale ueber
+/// [`require_document_literals`], beide als GESAMMELTER Mangel. Sie stehen
+/// hier einmal, weil der Stufe-2-, der Stufe-3- und der Stufe-4-Bericht sie
+/// identisch brauchen; abgeschrieben waere die dritte Kopie die, die beim
+/// naechsten Vertrag vergessen wird.
 ///
 /// Die Reihenfolge ist Teil des Vertrags: `section` vor `literal`. Ein Bericht,
 /// dem ein ganzer Abschnitt fehlt, soll das zuerst gemeldet bekommen und nicht
@@ -3216,10 +3266,11 @@ fn collect_document_contract(
     literals: &[&str],
     problems: &mut Vec<String>,
 ) {
-    for (expected, kind) in [(sections, "section"), (literals, "literal")] {
-        if let Err(error) = require_document_literals(path, text, expected, kind) {
-            problems.push(error);
-        }
+    if let Err(error) = require_document_sections(path, text, sections) {
+        problems.push(error);
+    }
+    if let Err(error) = require_document_literals(path, text, literals, "literal") {
+        problems.push(error);
     }
 }
 
