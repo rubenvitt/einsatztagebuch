@@ -348,23 +348,49 @@ wasm32-Klassifizierung (Positivliste in `verify_quick_commands()` **oder**
 - Create: `crates/ea-admin/src/genesis.rs`
 - Create: `crates/ea-admin/src/production_state.rs`
 - Create: `apps/cli/src/commands/organization.rs`
+- Modify: `crates/ea-trust/src/anchor.rs` — der Vorstufen-Kodierer `encode_pre_anchor`
+  (`crates/ea-trust/src/anchor.rs:691`) ist heute privat, und `decode_trust_anchor`
+  (`:544`) kennt nur den FINALEN Anker. Diese Aufgabe muss exakte Vorstufenbytes
+  ERZEUGEN und von den Medien zurueckLESEN. Der eine vorhandene Kodierer wird
+  deshalb oeffentlich gemacht; eine zweite Kodierung waere eine zweite Wahrheit.
+- Modify: `crates/ea-admin/src/error.rs`, `crates/ea-admin/src/lib.rs`,
+  `crates/ea-admin/Cargo.toml`
+- Modify: `apps/cli/src/args.rs`, `apps/cli/src/commands/mod.rs`, `apps/cli/src/output.rs`
 - Test: `crates/ea-admin/tests/bootstrap.rs`
 - Test: `crates/ea-admin/tests/anchor_integrity.rs`
 - Test: `apps/cli/tests/organization_init.rs`
 
 **Interfaces:**
-- Consumes: separate Root/Admin/Recovery/HGA/Approver/Writer/Server/Reader key providers, external fingerprint confirmer, Writer finalization, recovery verifier.
-- Produces: `BootstrapCoordinator`, exact `organization-trust-anchor-pre-v1`, exact final anchor, Genesis, and `ProductionState::Ready` only after fresh-machine recovery test.
+- Consumes: den EINEN Schluesselport `ea_key_provider::KeyProvider`
+  (`crates/ea-key-provider/src/contract.rs:351`). Getrennte Root-/Admin-/Recovery-/
+  HGA-/Approver-/Writer-/Server-/Reader-Ports gibt es NICHT: `SecretPurpose` kennt
+  genau vier LOKALE Zwecke eines Writer-Geraets (`contract.rs:32-51`), und ein
+  Wurzelzweck fehlt dort ausdruecklich (`contract.rs:340-350`). Wie schon
+  `RootCeremonyService::new` (`crates/ea-admin/src/root_ceremony.rs:55`) nimmt die
+  Zeremonie die Griffe und das oeffentliche Material der ausseren Schluessel vom
+  WIRT entgegen. Einen „external fingerprint confirmer" gibt es ebenfalls nicht;
+  das einzige Vorbild ist das readerspezifische
+  `ReaderEnrollment::confirm_fingerprints` (`crates/ea-reader/src/enrollment.rs:639`).
+  Ports fuer Medien, Zweitkanalbestaetigung und Frischrechnertest entstehen hier.
+- Produces: `BootstrapCoordinator`, exakte `organization-trust-anchor-pre-v1`-Bytes,
+  den exakten finalen Anker, Genesis, und `ProductionState::Ready` erst nach dem
+  Frischrechner-Recovery-Test.
 
 - [ ] **Step 1: Write bootstrap order and immutable-anchor tests**
 
+Der Kern ist SYNCHRON. `ea-admin` traegt kein `tokio`
+(`crates/ea-admin/Cargo.toml:45-47`), und die Regel steht geschrieben:
+`crates/ea-admin/src/root_ceremony.rs:31-33` und
+`crates/ea-key-provider/src/contract.rs:337-343` — Async lebt ausschliesslich in
+`apps/desktop/src-tauri` ueber `spawn_blocking`. Die Zeugen sind deshalb `#[test]`:
+
 ```rust
-#[tokio::test]
-async fn production_state_requires_all_twelve_steps_and_fresh_recovery() {
+#[test]
+fn production_state_requires_all_twelve_steps_and_fresh_recovery() {
     let mut setup = BootstrapHarness::new();
-    setup.complete_through_genesis().await.unwrap();
+    setup.complete_through_genesis().unwrap();
     assert_eq!(setup.production_state(), ProductionState::BlockedRecoveryTest);
-    setup.run_fresh_machine_recovery().await.unwrap();
+    setup.run_fresh_machine_recovery().unwrap();
     assert_eq!(setup.production_state(), ProductionState::Ready);
 }
 
@@ -372,9 +398,23 @@ async fn production_state_requires_all_twelve_steps_and_fresh_recovery() {
 fn changing_any_pre_anchor_field_requires_new_org_and_chain_ids() {
     let pre = fixtures::pre_anchor();
     let final_anchor = fixtures::final_anchor_with_changed_admin_hash();
-    assert_eq!(verify_anchor_transition(pre, final_anchor).unwrap_err().code(), "EA-ANCHOR-PRE-FIELD-CHANGED");
+    assert_eq!(
+        verify_anchor_transition(&pre, &final_anchor).unwrap_err().code(),
+        "EA-ANCHOR-PRE-FIELD-CHANGED"
+    );
 }
 ```
+
+`EA-ANCHOR-` eroeffnet eine 47. Codefamilie, und `crates/ea-admin/src/error.rs:12-25`
+verlangt dafuer eine geschriebene Begruendung. Sie lautet: `EA-TRUST-ANCHOR-{SHAPE,
+HASH,PIN}` (`crates/ea-trust/src/error.rs:35-37`) sprechen ueber Bytes, die man
+BEREITS HAELT — Gestalt, Selbstkonsistenz, Pinnung beim Dekodieren. Der hier
+gemeinte Befund ist ein anderer: die Zeremonie stellt beim BAUEN fest, dass ein
+finaler Anker eine ANDERE als die auf den Medien bestaetigte Vorstufe fortschreibt.
+`decode_trust_anchor` kann das nicht sehen — es rechnet die Vorstufe aus dem finalen
+Anker selbst zurueck (`crates/ea-trust/src/anchor.rs:590-602`), sodass eine
+nachtraeglich korrigierte Zeremonie einen vollkommen selbstkonsistenten Anker
+erzeugt. Genau diese Luecke schliesst dieser Zeuge.
 
 - [ ] **Step 2: Run bootstrap tests and verify orchestration is absent**
 
@@ -387,6 +427,15 @@ Expected: FAIL because bootstrap coordinator and init command do not exist.
 Implement exactly: random organization/chain IDs; offline Root; two separate Admin accounts with Admin and operator-instance keys plus direct Root-signed initial certificate/binding pairs; pre-anchor written to two write-protected media and full fingerprint confirmed over second channel; separate Recovery KEM and HGA signing keys; two Approvers; two verified backups for Root/Admin/Recovery/HGA; local Writer/server/Reader keys plus normally authorized bindings; QR/full fingerprint compare; Admin-authorized Root-signed device/operator/Approver/component certificates, initial policy and Registry; Genesis sequence 0; final anchor binding unchanged pre fields, `bootstrapAnchorHash`, and Genesis hash on both media with second-channel confirmation; fresh-machine test Entry verification and Recovery decryption. Expose this orchestration as `einsatzarchiv --trust-anchor <file> organization init ...`; Stage 1's required Recovery command grammar remains unchanged.
 
 Persist only public ceremony state and opaque key handles. Any changed pre-anchor field invalidates the setup and requires newly generated organization/chain IDs. Do not expose a skip-to-ready switch.
+
+Zwei Kanten, die der Abschnitt nicht nennt und die die Umsetzung braucht: `apps/cli`
+haengt heute NICHT an `ea-admin` und traegt ausdruecklich keine Logik
+(`apps/cli/src/main.rs:3-14`); ein sechstes Kommando bewegt ausserdem die
+laengengepruefte Grammatik (`apps/cli/src/output.rs:50-54`,
+`apps/cli/tests/commands.rs:24-25` mit `[&str; 5]`). Und die Spec-Grammatik
+(`docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md:1787-1793`) fuehrt
+`organization init` NICHT; sie fuehrt `verify, list, decrypt, grant, report, export,
+recovery-test`. Das Kommando kommt aus diesem Plan, nicht aus der Spec.
 
 - [ ] **Step 4: Run happy-path, interruption, media mismatch, and foreign-Genesis tests**
 
