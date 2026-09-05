@@ -509,7 +509,10 @@ pub use admin_authorization::{
     verify_intended_trust_target,
 };
 pub use admission::{bootstrap_active_certificates, verify_catalogue_admission};
-pub use anchor::{TrustAnchorV1, VerifiedTrust, decode_trust_anchor, verify_trust};
+pub use anchor::{
+    PreAnchorV1, TrustAnchorV1, VerifiedTrust, decode_pre_anchor, decode_trust_anchor,
+    encode_pre_anchor_v1, verify_trust,
+};
 pub use clock_release::{VerifiedClockRelease, verify_clock_release};
 pub use error::{ClockReleaseError, RegistryError, TrustError, TrustSourceError};
 pub use registry::{
