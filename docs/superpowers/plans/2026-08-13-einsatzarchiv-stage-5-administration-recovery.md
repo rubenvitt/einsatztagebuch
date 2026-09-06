@@ -637,7 +637,7 @@ und Zeit-Floor committen atomar über `RegistrySelectionCommit`
 ea-admin-Fassade über diesen Dreischritt, der Erzeuger der `exact_audit_bytes` für die
 Freigabe, der Aufnahmepunkt für `ReauthPurpose::ClockSkewRelease`, die CLI und der E2E-Zeuge.
 
-- [ ] **Step 1: Write highest-head, lease, and revocation-boundary tests**
+- [x] **Step 1: Write highest-head, lease, and revocation-boundary tests**
 
 Die Zeugen binden die Namen des Arbeitsbaums: der Fehlercode des erschöpften Lease heisst
 `EA-TRUST-SEQUENCE-LEASE` (`crates/ea-trust/src/error.rs:144`); der Code
@@ -704,13 +704,13 @@ fn clock_release_is_exact_expiring_one_use_and_never_lowers_floor() {
 }
 ```
 
-- [ ] **Step 2: Run workflow tests and verify missing administration**
+- [x] **Step 2: Run workflow tests and verify missing administration**
 
 Run: `cargo test --locked -p ea-admin --test registry_workflows --test clock_release && cargo test --locked -p ea-system-tests --test e2e_registry_effectiveness`
 
 Expected: FAIL because device/policy/Registry and clock-release workflows do not exist.
 
-- [ ] **Step 3: Implement one-action-per-event append-only administration**
+- [x] **Step 3: Implement one-action-per-event append-only administration**
 
 Require pending request plus external fingerprint confirmation. Admin authorization and Root signature prepare exactly one direct target; a distinct activation authorization creates exactly one matching Registry change. Both bind the same Previous Head and the event is its checked version `+1`. Head 1 uses Change 2 for the initial Policy; anchor-pinned Admin pairs are external basis state, not a second change. Initial policy explicitly fixes profile, Registry age/skew/stale behavior, sequence lease, Evidence window, Reader inactivity/history, archive profiles/network failure, backup/restore, retention/destruction, free text, suites/formats. Policy version/hash/effective sequence, direct-core effective sequence, Root effective Registry version, and `preTransitionSequence` follow the Task-8 closure exactly. Revocation explains that past grants/plaintext cannot be recalled and stops new grants only from `effectiveFromSequence`. Writer, server, Reader, Admin, and CLI consume the shared opaque `RegistryCandidate`/selection proof states; no duplicate grace period or clock calculation is allowed.
 
@@ -755,13 +755,13 @@ Kommandos rufen die ea-admin-Fassade, weil die Fachlogik nicht im Kommandopfad w
 `tests/ea-system-tests/tests/task8_trust_time.rs`, der Linie, Receipt, Checkpoint und
 signierte Freigabe bereits baut.
 
-- [ ] **Step 4: Run gaps/forks/future/stale/clock and server-known-newer-head E2E tests**
+- [x] **Step 4: Run gaps/forks/future/stale/clock and server-known-newer-head E2E tests**
 
 Run: `cargo test --locked -p ea-admin --test registry_workflows --test clock_release && cargo test --locked -p ea-system-tests --test e2e_registry_effectiveness`
 
 Expected: PASS; rollback, same-version fork, future-only, expired strict, consumed lease, clock rollback, invalid/replayed clock release, and server-known newer applicable head block correctly.
 
-- [ ] **Step 5: Commit Registry administration**
+- [x] **Step 5: Commit Registry administration**
 
 ```bash
 git add crates/ea-admin apps/cli tests/ea-system-tests

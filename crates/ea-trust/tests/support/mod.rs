@@ -185,6 +185,29 @@ pub struct HeadOptions {
     pub event_authorization_id: Option<u8>,
     pub direct_nonce: Option<u8>,
     pub event_nonce: Option<u8>,
+    /// Das Gueltigkeitsfenster `(issued_at, expires_at)` einer
+    /// Administrationsautorisierung.
+    ///
+    /// Ohne diese Ueberschreibung ist es `(HeadOptions::issued_at,
+    /// HeadOptions::issued_at + 1000)` und liegt damit IMMER um die
+    /// Benutzungszeit herum: `verify_authorization_binds_target` misst gegen
+    /// die `issued_at` des Registrierungsereignisses
+    /// (`crates/ea-trust/src/registry.rs`), und beide Werte speisen sich aus
+    /// derselben `HeadOptions::issued_at`. Ein Verbraucher, der
+    /// `EA-TRUST-AUTH-EXPIRED` belegen MUSS, kann die Lage sonst gar nicht
+    /// bauen — und zwar strukturell nicht: ein blosses Vorziehen des Endes
+    /// scheitert schon an der Formgrenze, weil
+    /// `OrganizationAdminAuthorizationFieldsV1` `issued_at < expires_at`
+    /// erzwingt. Das Fenster muss deshalb ALS GANZES vor die Benutzungszeit
+    /// gelegt werden. `None` laesst das bestehende Verhalten und damit jede
+    /// bestehende Fixture unveraendert.
+    ///
+    /// Der Schalter gilt fuer BEIDE Autorisierungen des Kopfes — die direkte
+    /// und die des Ereignisses. Beide werden gegen dieselbe Benutzungszeit
+    /// gemessen, der Befund lautet also in jedem Fall
+    /// `EA-TRUST-AUTH-EXPIRED`; WELCHE der beiden zuerst faellt, sagt dieser
+    /// Schalter nicht zu.
+    pub authorization_window_override: Option<(UnixMillis, UnixMillis)>,
     pub corrupt_direct_authorization_signature: bool,
     pub corrupt_direct_signature: bool,
     pub corrupt_event_authorization_signature: bool,
@@ -233,6 +256,7 @@ impl Default for HeadOptions {
             event_authorization_id: None,
             direct_nonce: None,
             event_nonce: None,
+            authorization_window_override: None,
             corrupt_direct_authorization_signature: false,
             corrupt_direct_signature: false,
             corrupt_event_authorization_signature: false,
@@ -562,6 +586,7 @@ impl RegistryLineBuilder {
                 basis_version,
                 basis_hash,
                 options.issued_at,
+                options.authorization_window_override,
                 authorization_secret,
                 authorization_admin_hash,
                 authorization_binding_hash,
@@ -654,6 +679,7 @@ impl RegistryLineBuilder {
             event_basis_version,
             event_basis_hash,
             options.issued_at,
+            options.authorization_window_override,
             authorization_secret,
             authorization_admin_hash,
             authorization_binding_hash,
@@ -801,6 +827,7 @@ impl RegistryLineBuilder {
             basis_version,
             basis_hash,
             options.issued_at,
+            options.authorization_window_override,
             ADMIN_ONE_SECRET,
             self.admin_hash,
             self.admin_binding_hash,
@@ -1170,6 +1197,8 @@ fn exact_authorization(
     registry_version: RegistryVersion,
     registry_head_hash: Hash32,
     issued_at: UnixMillis,
+    // `None` behaelt die Vorgabe `(issued_at, issued_at + 1000)`.
+    window: Option<(UnixMillis, UnixMillis)>,
     admin_secret: [u8; 32],
     admin_hash: ObjectHash,
     admin_binding_hash: ObjectHash,
@@ -1186,8 +1215,11 @@ fn exact_authorization(
             action_code,
             target_trust_subtype: target_subtype,
             authorized_trust_core_hash: authorized_trust_digest(&authorized_core_input(target)),
-            issued_at,
-            expires_at: UnixMillis::new(issued_at.get().checked_add(1_000).unwrap()),
+            issued_at: window.map_or(issued_at, |(issued_at, _)| issued_at),
+            expires_at: window.map_or_else(
+                || UnixMillis::new(issued_at.get().checked_add(1_000).unwrap()),
+                |(_, expires_at)| expires_at,
+            ),
             nonce: [nonce; 32],
         })
         .unwrap();

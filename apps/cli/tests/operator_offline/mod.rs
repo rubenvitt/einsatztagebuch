@@ -1,6 +1,7 @@
 // Included only below the cfg(test), Unix process fixture module.
 use super::*;
 use ea_admin::{
+    clock_release::ClockReleaseAvailability,
     native_provider::NativeOperatorProvider,
     operator_runtime::{OperatorRuntime, OperatorRuntimeConfig},
 };
@@ -1516,4 +1517,47 @@ fn actual_two_device_pty_provision_verify_replay_revoke_and_replacement() {
     assert!(!ceremony.target.calls().contains("root-signing"));
     assert!(ceremony.authority.calls().contains("sign root-signing"));
     assert!(!ceremony.authority.calls().contains("writer-signing"));
+}
+
+/// The narrow crate-boundary accessor is executed, and it maps nothing twice.
+///
+/// `OperatorRuntime::clock_release_availability` documents itself as the only
+/// entry point to `ClockReleaseService::availability` from outside `ea-admin`,
+/// and `apps/cli/src/commands/clock_release.rs` asks it before the three-step.
+/// That command's own process witness returns on a missing release file, long
+/// before a runtime exists, so the accessor is measured here — in the one
+/// fixture of this crate that holds a complete, natively bound runtime.
+///
+/// What this pins beyond the return value: the store clone reaches the live
+/// row, the `TrustStateKey` names this runtime's organization and device, the
+/// audit service binds, and only the three-variant enum crosses the boundary —
+/// no `ea-trust` and no `ea-time` type is nameable in the assertion.
+///
+/// This device holds no independent time reference, so `ea-time` answers
+/// `UnprovableWithoutIndependentReference` for EVERY observed wall clock. The
+/// loop pins exactly that: a value at the epoch, one far in the past, the live
+/// clock and one far in the future all get the same answer. A second reading of
+/// the clock at this call site — a local threshold, a re-classification of
+/// `FutureSkew` — would have to answer at least one of the four differently.
+#[test]
+fn the_runtime_forwards_the_clock_release_availability_without_a_second_clock() {
+    const FOUR_HUNDRED_DAYS_MS: i64 = 400 * 24 * 60 * 60 * 1_000;
+
+    let ceremony = Ceremony::new();
+    let runtime = ceremony.authority.runtime();
+    let live = support::live_clock();
+    for observed in [
+        UnixMillis::new(0),
+        UnixMillis::new(live.get() - FOUR_HUNDRED_DAYS_MS),
+        live,
+        UnixMillis::new(live.get() + FOUR_HUNDRED_DAYS_MS),
+    ] {
+        assert_eq!(
+            runtime
+                .clock_release_availability(observed)
+                .expect("the persisted trust state must be readable through the runtime"),
+            ClockReleaseAvailability::IndependentTimeUnavailable,
+            "without an independent reference no observed wall clock changes the answer"
+        );
+    }
 }

@@ -42,8 +42,34 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ea_types::{ChainSequence, UnixMillis};
+
 /// Das EINZIGE Unterkommando von `organization`.
 pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
+/// Das EINZIGE Unterkommando von `registry`.
+///
+/// Es heisst `revocation-plan` und nicht `revoke`, weil es GENAU DAS tut, was
+/// die Fassade leistet: `ea_admin::revocation::plan_revocation` BEREITET die
+/// Aenderung 1 vor und gibt ihre Reichweite heraus. Veroeffentlicht wird sie
+/// erst, wenn die Wurzel sie signiert hat — und die dafuer noetigen
+/// Offline-Schluesselquellen kann ein CLI-Prozess so wenig herbeireden wie bei
+/// `organization init`. Ein Kommando namens `revoke` verspraeche einen
+/// Vollzug, den dieser Lauf nicht hat.
+pub const REGISTRY_REVOCATION_PLAN_SUBCOMMAND: &str = "revocation-plan";
+/// Das EINZIGE Unterkommando von `clock-release`.
+///
+/// Ausdruecklich NUR `apply`. Das Ausstellen einer Freigabe
+/// (`ea_admin::clock_release::ClockReleaseService::issue`) ist von hier aus
+/// nicht erreichbar: es verlangt einen `ea_trust::RegistryCandidate` in seiner
+/// Signatur, und dieses Paket fuehrt keine Kante dorthin.
+///
+/// Die Verfuegbarkeit ist inzwischen sehr wohl erreichbar —
+/// `ea_admin::operator_runtime::OperatorRuntime::clock_release_availability`
+/// gibt sie heraus, ohne dass ein Fremdtyp die Paketgrenze ueberquert. Sie
+/// bekommt trotzdem KEIN eigenes Unterkommando: sie ist der Bedienhinweis zu
+/// einem gescheiterten `apply` und kein eigener Vollzug. Die Grammatik fuehrt
+/// deshalb weder `issue` noch `availability`.
+pub const CLOCK_RELEASE_APPLY_SUBCOMMAND: &str = "apply";
 
 /// `--trust-anchor <file>`, PFLICHT bei allen Kommandos.
 ///
@@ -65,7 +91,27 @@ pub const OUTPUT_SWITCH: &str = "--output";
 /// `--key <key-source>`, nur bei `decrypt`.
 pub const KEY_SWITCH: &str = "--key";
 /// Public operator configuration; required only by operator commands.
+///
+/// `registry` und `clock-release` verlangen dieselbe Datei und aus demselben
+/// Grund: sie ist der einzige oeffentliche Weg zu Bestand, Datenbank und
+/// Bindung. Bei `registry revocation-plan` benennt ihr Feld
+/// `target_certificate_hash` zusaetzlich das Widerrufsziel — dazu die
+/// Begruendung in `crate::commands::registry`.
 pub const OPERATOR_CONFIG_SWITCH: &str = "--operator-config";
+/// `--effective-from <sequence>`, nur bei `registry`.
+pub const EFFECTIVE_FROM_SWITCH: &str = "--effective-from";
+/// `--valid-through <sequence>`, nur bei `registry`.
+pub const VALID_THROUGH_SWITCH: &str = "--valid-through";
+/// `--not-after <unix-millis>`, nur bei `registry`.
+pub const NOT_AFTER_SWITCH: &str = "--not-after";
+/// `--release <file>`, nur bei `clock-release`.
+///
+/// Die Datei traegt die EXAKTEN Bytes einer signierten
+/// `local-audit-event-v1`-Zeile, wie
+/// `ea_admin::clock_release::IssuedClockRelease::exact_bytes` sie herausgibt.
+/// Sie wird unveraendert durchgereicht: dieses Paket dekodiert sie nicht, und
+/// es zeigt nichts aus ihr an — sie bindet eine Zufalls-Nonce.
+pub const RELEASE_SWITCH: &str = "--release";
 /// `--include-runtime-metadata`, nur bei `report`.
 pub const INCLUDE_RUNTIME_METADATA_SWITCH: &str = "--include-runtime-metadata";
 /// `--report-signing-key <source>`, nur bei `report` — und IMMER verweigert.
@@ -152,6 +198,29 @@ pub enum Command {
         action: OperatorAction,
         config: PathBuf,
     },
+    /// Eine Aenderung 1 fuer das in der Bedienerdatei benannte Ziel PLANEN.
+    ///
+    /// Die drei Fensterzahlen sind die Entscheidung des Betreibers und werden
+    /// hier nur ANGENOMMEN: `crate::commands::registry` rechnet keine
+    /// Sequenz und keine Frist aus, sondern legt sie unveraendert in
+    /// `ea_admin::RegistryWindow`.
+    RegistryRevocationPlan {
+        /// Die oeffentliche Bedienerdatei.
+        config: PathBuf,
+        /// Ab dieser Sequenz wirkt die geplante Aenderung.
+        effective_from_sequence: ChainSequence,
+        /// Bis zu dieser Sequenz reicht das Lease des Ereignisses.
+        valid_through_sequence: ChainSequence,
+        /// Die Zeitgrenze des Ereignisses.
+        not_after: UnixMillis,
+    },
+    /// Eine bereits ausgestellte Uhrfreigabe VERBRAUCHEN.
+    ClockReleaseApply {
+        /// Die oeffentliche Bedienerdatei.
+        config: PathBuf,
+        /// Die Datei mit den exakten Freigabebytes.
+        release: PathBuf,
+    },
 }
 
 /// Ein vollstaendig geparster Aufruf.
@@ -195,6 +264,17 @@ pub enum UsageError {
     DuplicateSwitch(&'static str),
     /// `--format` traegt etwas anderes als `text` oder `json`.
     UnknownFormat(String),
+    /// Ein zahlnehmender Schalter traegt keine Zahl seines Wertebereichs.
+    ///
+    /// Ein eigener Arm neben [`Self::UnknownFormat`], weil er dieselbe Frage
+    /// fuer einen OFFENEN Wertebereich beantwortet: bei `--format` gibt es
+    /// zwei erlaubte Woerter, hier eine Zahl, die nicht ueberlaufen darf.
+    UnknownNumber {
+        /// Der Schalter, dessen Wert keine Zahl ist.
+        switch: &'static str,
+        /// Was statt einer Zahl dastand, woertlich.
+        value: String,
+    },
     /// Das erste Positionsargument ist keines der fuenf Kommandos.
     UnknownCommand(String),
     /// Es wurde ein Schalter, aber kein Kommando angegeben.
@@ -247,14 +327,18 @@ impl fmt::Display for UsageError {
                 formatter,
                 "{FORMAT_SWITCH} accepts only text or json, not {value}"
             ),
+            Self::UnknownNumber { switch, value } => write!(
+                formatter,
+                "{switch} accepts only a decimal number within its range, not {value}"
+            ),
             Self::UnknownCommand(command) => write!(
                 formatter,
                 "unknown command {command}; expected verify, list, decrypt, report, export, \
-                 organization or operator"
+                 organization, operator, registry or clock-release"
             ),
             Self::MissingCommand => formatter.write_str(
                 "no command was given; expected verify, list, decrypt, report, export, \
-                 organization or operator",
+                 organization, operator, registry or clock-release",
             ),
             Self::MissingTrustAnchor => write!(
                 formatter,
@@ -302,6 +386,8 @@ enum CommandKind {
     Export,
     Organization,
     Operator,
+    Registry,
+    ClockRelease,
 }
 
 impl CommandKind {
@@ -315,6 +401,8 @@ impl CommandKind {
             Self::Export => "export",
             Self::Organization => "organization",
             Self::Operator => "operator",
+            Self::Registry => "registry",
+            Self::ClockRelease => "clock-release",
         }
     }
 
@@ -328,6 +416,8 @@ impl CommandKind {
             "export" => Some(Self::Export),
             "organization" => Some(Self::Organization),
             "operator" => Some(Self::Operator),
+            "registry" => Some(Self::Registry),
+            "clock-release" => Some(Self::ClockRelease),
             _ => None,
         }
     }
@@ -359,6 +449,39 @@ fn take_path_value(
         return Err(UsageError::MissingValue(switch));
     }
     *slot = Some(PathBuf::from(value));
+    Ok(())
+}
+
+/// Liest den ZAHLWERT eines Schalters in `slot`.
+///
+/// Dieselben zwei Konventionen wie [`take_path_value`]: der Wert steht als
+/// eigenes Argument, und was mit `-` beginnt, ist ein Schalter und kein Wert.
+/// Anders als bei einem Pfad muss der Wert UTF-8 sein — er wird gegen eine
+/// Zahl verglichen, und was sich damit nicht vergleichen laesst, ist keine.
+///
+/// Gelesen wird IMMER als `u64`. Eine negative Sequenz gibt es nicht, und eine
+/// Unixzeit vor der Epoche ist in diesem Bauwerk keine Lage; der Aufrufer
+/// verengt danach auf seinen eigenen Bereich.
+fn take_number_value(
+    slot: &mut Option<u64>,
+    switch: &'static str,
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<(), UsageError> {
+    if slot.is_some() {
+        return Err(UsageError::DuplicateSwitch(switch));
+    }
+    let value = arguments.next().ok_or(UsageError::MissingValue(switch))?;
+    if looks_like_switch(&value) {
+        return Err(UsageError::MissingValue(switch));
+    }
+    let parsed = value
+        .to_str()
+        .and_then(|text| text.parse::<u64>().ok())
+        .ok_or_else(|| UsageError::UnknownNumber {
+            switch,
+            value: value.to_string_lossy().into_owned(),
+        })?;
+    *slot = Some(parsed);
     Ok(())
 }
 
@@ -395,6 +518,10 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut key: Option<PathBuf> = None;
     let mut report_signing_key: Option<PathBuf> = None;
     let mut operator_config: Option<PathBuf> = None;
+    let mut release: Option<PathBuf> = None;
+    let mut effective_from: Option<u64> = None;
+    let mut valid_through: Option<u64> = None;
+    let mut not_after: Option<u64> = None;
     let mut format: Option<Format> = None;
     let mut include_runtime_metadata: Option<bool> = None;
     let mut command_kind: Option<CommandKind> = None;
@@ -421,6 +548,16 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 KEY_SWITCH => take_path_value(&mut key, KEY_SWITCH, &mut arguments)?,
                 OPERATOR_CONFIG_SWITCH => {
                     take_path_value(&mut operator_config, OPERATOR_CONFIG_SWITCH, &mut arguments)?
+                }
+                RELEASE_SWITCH => take_path_value(&mut release, RELEASE_SWITCH, &mut arguments)?,
+                EFFECTIVE_FROM_SWITCH => {
+                    take_number_value(&mut effective_from, EFFECTIVE_FROM_SWITCH, &mut arguments)?
+                }
+                VALID_THROUGH_SWITCH => {
+                    take_number_value(&mut valid_through, VALID_THROUGH_SWITCH, &mut arguments)?
+                }
+                NOT_AFTER_SWITCH => {
+                    take_number_value(&mut not_after, NOT_AFTER_SWITCH, &mut arguments)?
                 }
                 REPORT_SIGNING_KEY_SWITCH => take_path_value(
                     &mut report_signing_key,
@@ -488,11 +625,34 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
-    if operator_config.is_some() && command_kind != CommandKind::Operator {
+    if operator_config.is_some()
+        && !matches!(
+            command_kind,
+            CommandKind::Operator | CommandKind::Registry | CommandKind::ClockRelease
+        )
+    {
         return Err(UsageError::SwitchNotAllowed {
             switch: OPERATOR_CONFIG_SWITCH,
             command: command_name,
         });
+    }
+    if release.is_some() && command_kind != CommandKind::ClockRelease {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: RELEASE_SWITCH,
+            command: command_name,
+        });
+    }
+    for (present, switch) in [
+        (effective_from.is_some(), EFFECTIVE_FROM_SWITCH),
+        (valid_through.is_some(), VALID_THROUGH_SWITCH),
+        (not_after.is_some(), NOT_AFTER_SWITCH),
+    ] {
+        if present && command_kind != CommandKind::Registry {
+            return Err(UsageError::SwitchNotAllowed {
+                switch,
+                command: command_name,
+            });
+        }
     }
     if output.is_some()
         && matches!(
@@ -501,6 +661,8 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 | CommandKind::List
                 | CommandKind::Organization
                 | CommandKind::Operator
+                | CommandKind::Registry
+                | CommandKind::ClockRelease
         )
     {
         return Err(UsageError::SwitchNotAllowed {
@@ -594,6 +756,64 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 })?,
             }
         }
+        CommandKind::Registry => {
+            if path != Path::new(REGISTRY_REVOCATION_PLAN_SUBCOMMAND) {
+                return Err(UsageError::UnknownSubcommand {
+                    command: command_name,
+                    value: path.to_string_lossy().into_owned(),
+                    expected: REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+                });
+            }
+            let config = operator_config.ok_or(UsageError::MissingSwitch {
+                switch: OPERATOR_CONFIG_SWITCH,
+                command: command_name,
+            })?;
+            let effective_from = effective_from.ok_or(UsageError::MissingSwitch {
+                switch: EFFECTIVE_FROM_SWITCH,
+                command: command_name,
+            })?;
+            let valid_through = valid_through.ok_or(UsageError::MissingSwitch {
+                switch: VALID_THROUGH_SWITCH,
+                command: command_name,
+            })?;
+            let not_after = not_after.ok_or(UsageError::MissingSwitch {
+                switch: NOT_AFTER_SWITCH,
+                command: command_name,
+            })?;
+            // Die einzige Verengung dieses Parsers: eine Unixzeit ist
+            // `i64`-Millisekunden. Sie steht HIER und nicht in
+            // `take_number_value`, weil die beiden Sequenzen den vollen
+            // `u64`-Bereich fuehren.
+            let not_after = i64::try_from(not_after).map_err(|_| UsageError::UnknownNumber {
+                switch: NOT_AFTER_SWITCH,
+                value: not_after.to_string(),
+            })?;
+            Command::RegistryRevocationPlan {
+                config,
+                effective_from_sequence: ChainSequence::new(effective_from),
+                valid_through_sequence: ChainSequence::new(valid_through),
+                not_after: UnixMillis::new(not_after),
+            }
+        }
+        CommandKind::ClockRelease => {
+            if path != Path::new(CLOCK_RELEASE_APPLY_SUBCOMMAND) {
+                return Err(UsageError::UnknownSubcommand {
+                    command: command_name,
+                    value: path.to_string_lossy().into_owned(),
+                    expected: CLOCK_RELEASE_APPLY_SUBCOMMAND,
+                });
+            }
+            Command::ClockReleaseApply {
+                config: operator_config.ok_or(UsageError::MissingSwitch {
+                    switch: OPERATOR_CONFIG_SWITCH,
+                    command: command_name,
+                })?,
+                release: release.ok_or(UsageError::MissingSwitch {
+                    switch: RELEASE_SWITCH,
+                    command: command_name,
+                })?,
+            }
+        }
     };
 
     Ok(Invocation {
@@ -608,10 +828,13 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, FORMAT_SWITCH, Format, INCLUDE_RUNTIME_METADATA_SWITCH, Invocation, KEY_SWITCH,
-        ORGANIZATION_INIT_SUBCOMMAND, OUTPUT_SWITCH, REPORT_SIGNING_KEY_SWITCH,
-        TRUST_ANCHOR_SWITCH, UsageError, parse,
+        CLOCK_RELEASE_APPLY_SUBCOMMAND, Command, EFFECTIVE_FROM_SWITCH, FORMAT_SWITCH, Format,
+        INCLUDE_RUNTIME_METADATA_SWITCH, Invocation, KEY_SWITCH, NOT_AFTER_SWITCH,
+        OPERATOR_CONFIG_SWITCH, ORGANIZATION_INIT_SUBCOMMAND, OUTPUT_SWITCH,
+        REGISTRY_REVOCATION_PLAN_SUBCOMMAND, RELEASE_SWITCH, REPORT_SIGNING_KEY_SWITCH,
+        TRUST_ANCHOR_SWITCH, UsageError, VALID_THROUGH_SWITCH, parse,
     };
+    use ea_types::{ChainSequence, UnixMillis};
     use std::{ffi::OsString, path::PathBuf};
 
     /// Parst eine Argumentfolge OHNE Programmnamen und ohne Prozessstart.
@@ -1075,6 +1298,329 @@ mod tests {
         assert_eq!(
             rejected(&[TRUST_ANCHOR_SWITCH, "anchor.etb"]),
             UsageError::MissingCommand
+        );
+    }
+
+    /// `registry revocation-plan` traegt sein Fenster als DREI Schalter.
+    ///
+    /// Das Fenster ist eine Entscheidung des Betreibers und keine Ableitung:
+    /// `crate::commands::registry` rechnet es nicht aus, sondern reicht die
+    /// drei Zahlen an `ea_admin::RegistryWindow` durch.
+    #[test]
+    fn registry_revocation_plan_parses_in_its_full_form() {
+        assert_eq!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "registry",
+                REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                EFFECTIVE_FROM_SWITCH,
+                "10",
+                VALID_THROUGH_SWITCH,
+                "20",
+                NOT_AFTER_SWITCH,
+                "1700000000000"
+            ])
+            .expect("registry revocation-plan muss parsen"),
+            Invocation {
+                anchor: PathBuf::from("anchor.etb"),
+                format: Format::Text,
+                include_runtime_metadata: false,
+                report_signing_key: None,
+                command: Command::RegistryRevocationPlan {
+                    config: PathBuf::from("operator.json"),
+                    effective_from_sequence: ChainSequence::new(10),
+                    valid_through_sequence: ChainSequence::new(20),
+                    not_after: UnixMillis::new(1_700_000_000_000),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn clock_release_apply_parses_in_its_full_form() {
+        assert_eq!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "clock-release",
+                CLOCK_RELEASE_APPLY_SUBCOMMAND,
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                RELEASE_SWITCH,
+                "release.local-audit"
+            ])
+            .expect("clock-release apply muss parsen"),
+            Invocation {
+                anchor: PathBuf::from("anchor.etb"),
+                format: Format::Text,
+                include_runtime_metadata: false,
+                report_signing_key: None,
+                command: Command::ClockReleaseApply {
+                    config: PathBuf::from("operator.json"),
+                    release: PathBuf::from("release.local-audit"),
+                },
+            }
+        );
+    }
+
+    /// Die angehaengte Wertform gilt auch fuer die drei ZAHLSCHALTER.
+    ///
+    /// `--effective-from=10` ist keine zweite zugelassene Schreibweise,
+    /// sondern ein unbekannter Schalter — dieselbe Zusage wie bei
+    /// `--format=json`.
+    #[test]
+    fn an_attached_window_value_is_an_unknown_switch() {
+        for token in [
+            "--effective-from=10",
+            "--valid-through=20",
+            "--not-after=1700000000000",
+            "--release=release.local-audit",
+        ] {
+            assert_eq!(
+                rejected(&[
+                    TRUST_ANCHOR_SWITCH,
+                    "anchor.etb",
+                    token,
+                    "registry",
+                    REGISTRY_REVOCATION_PLAN_SUBCOMMAND
+                ]),
+                UsageError::UnknownSwitch(token.to_owned()),
+                "{token} darf nicht als Wertform durchgehen"
+            );
+        }
+    }
+
+    /// Auch ein Zahlschalter ohne Wert meldet SEINEN Namen.
+    #[test]
+    fn a_window_switch_without_a_value_is_rejected() {
+        for switch in [
+            EFFECTIVE_FROM_SWITCH,
+            VALID_THROUGH_SWITCH,
+            NOT_AFTER_SWITCH,
+        ] {
+            assert_eq!(
+                rejected(&[
+                    TRUST_ANCHOR_SWITCH,
+                    "anchor.etb",
+                    "registry",
+                    REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+                    switch,
+                    FORMAT_SWITCH,
+                    "text"
+                ]),
+                UsageError::MissingValue(switch),
+                "{switch} ohne Wert muss sich selbst nennen"
+            );
+        }
+    }
+
+    /// Was keine nichtnegative Dezimalzahl ist, wird WOERTLICH zurueckgegeben.
+    #[test]
+    fn a_non_numeric_window_value_is_rejected_verbatim() {
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "registry",
+                REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+                EFFECTIVE_FROM_SWITCH,
+                "zehn"
+            ]),
+            UsageError::UnknownNumber {
+                switch: EFFECTIVE_FROM_SWITCH,
+                value: "zehn".to_owned(),
+            }
+        );
+    }
+
+    /// `--not-after` ist eine Unixzeit in Millisekunden und passt in `i64`.
+    ///
+    /// Die Verengung steht in Schritt 6 der dokumentierten Pruefreihenfolge und
+    /// damit HINTER den verlangten Schaltern; die Folge ist vollstaendig
+    /// angegeben, sonst meldete der Parser zuerst den fehlenden Schalter.
+    #[test]
+    fn a_not_after_beyond_unix_millis_is_rejected_verbatim() {
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "registry",
+                REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                EFFECTIVE_FROM_SWITCH,
+                "10",
+                VALID_THROUGH_SWITCH,
+                "20",
+                NOT_AFTER_SWITCH,
+                "18446744073709551615"
+            ]),
+            UsageError::UnknownNumber {
+                switch: NOT_AFTER_SWITCH,
+                value: "18446744073709551615".to_owned(),
+            }
+        );
+    }
+
+    /// Die drei Fensterschalter gehoeren GENAU `registry`.
+    #[test]
+    fn window_switches_are_rejected_outside_registry() {
+        for switch in [
+            EFFECTIVE_FROM_SWITCH,
+            VALID_THROUGH_SWITCH,
+            NOT_AFTER_SWITCH,
+        ] {
+            assert_eq!(
+                rejected(&[
+                    TRUST_ANCHOR_SWITCH,
+                    "anchor.etb",
+                    switch,
+                    "10",
+                    "verify",
+                    "archive"
+                ]),
+                UsageError::SwitchNotAllowed {
+                    switch,
+                    command: "verify",
+                },
+                "verify darf {switch} nicht annehmen"
+            );
+        }
+    }
+
+    /// `--release` gehoert GENAU `clock-release`.
+    #[test]
+    fn the_release_switch_is_rejected_outside_clock_release() {
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                RELEASE_SWITCH,
+                "release.local-audit",
+                "registry",
+                REGISTRY_REVOCATION_PLAN_SUBCOMMAND
+            ]),
+            UsageError::SwitchNotAllowed {
+                switch: RELEASE_SWITCH,
+                command: "registry",
+            }
+        );
+    }
+
+    /// Beide neuen Kommandos verlangen dieselbe oeffentliche Bedienerdatei
+    /// wie `operator` — sie ist der einzige Weg zu Bestand und Datenbank.
+    #[test]
+    fn both_new_commands_require_the_operator_configuration() {
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "registry",
+                REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+                EFFECTIVE_FROM_SWITCH,
+                "10",
+                VALID_THROUGH_SWITCH,
+                "20",
+                NOT_AFTER_SWITCH,
+                "1700000000000"
+            ]),
+            UsageError::MissingSwitch {
+                switch: OPERATOR_CONFIG_SWITCH,
+                command: "registry",
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "clock-release",
+                CLOCK_RELEASE_APPLY_SUBCOMMAND,
+                RELEASE_SWITCH,
+                "release.local-audit"
+            ]),
+            UsageError::MissingSwitch {
+                switch: OPERATOR_CONFIG_SWITCH,
+                command: "clock-release",
+            }
+        );
+    }
+
+    /// Ohne Fenster gibt es keinen Plan: der Widerruf muss sagen, AB WANN
+    /// neue Freigaben ausbleiben.
+    #[test]
+    fn registry_requires_its_three_window_switches() {
+        for missing in [
+            EFFECTIVE_FROM_SWITCH,
+            VALID_THROUGH_SWITCH,
+            NOT_AFTER_SWITCH,
+        ] {
+            let mut tokens = vec![
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "registry",
+                REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+            ];
+            for (switch, value) in [
+                (EFFECTIVE_FROM_SWITCH, "10"),
+                (VALID_THROUGH_SWITCH, "20"),
+                (NOT_AFTER_SWITCH, "1700000000000"),
+            ] {
+                if switch != missing {
+                    tokens.extend([switch, value]);
+                }
+            }
+            assert_eq!(
+                rejected(&tokens),
+                UsageError::MissingSwitch {
+                    switch: missing,
+                    command: "registry",
+                },
+                "registry darf ohne {missing} nicht durchgehen"
+            );
+        }
+    }
+
+    /// `clock-release apply` verlangt die exakten Freigabebytes.
+    #[test]
+    fn clock_release_requires_its_release_file() {
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "clock-release",
+                CLOCK_RELEASE_APPLY_SUBCOMMAND,
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json"
+            ]),
+            UsageError::MissingSwitch {
+                switch: RELEASE_SWITCH,
+                command: "clock-release",
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_subcommand_of_the_new_commands_is_rejected_verbatim() {
+        assert_eq!(
+            rejected(&[TRUST_ANCHOR_SWITCH, "anchor.etb", "registry", "revoke"]),
+            UsageError::UnknownSubcommand {
+                command: "registry",
+                value: "revoke".to_owned(),
+                expected: REGISTRY_REVOCATION_PLAN_SUBCOMMAND,
+            }
+        );
+        assert_eq!(
+            rejected(&[TRUST_ANCHOR_SWITCH, "anchor.etb", "clock-release", "issue"]),
+            UsageError::UnknownSubcommand {
+                command: "clock-release",
+                value: "issue".to_owned(),
+                expected: CLOCK_RELEASE_APPLY_SUBCOMMAND,
+            }
         );
     }
 

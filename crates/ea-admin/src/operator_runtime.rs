@@ -1,4 +1,7 @@
 //! Native operator composition from one frozen, completely verified archive.
+use crate::clock_release::{
+    ClockReleaseAvailability, ClockReleaseService, ClockReleaseWorkflowError,
+};
 use crate::operator_exchange::ExchangeError;
 use crate::{
     OperatorBindingService, OperatorLifecycleError, OperatorPresence, VerifiedLocalDeviceIdentity,
@@ -518,6 +521,49 @@ impl OperatorRuntime {
                 .expect("certificate hashes are 32 bytes"),
             self.head.preexisting_effective_now().value(),
         )
+    }
+    /// The three clock-release availabilities, asked instead of inferred.
+    ///
+    /// This is the only entry point to `ClockReleaseService::availability` from
+    /// outside this crate. That call needs an `ea_time::TrustedTimeState`, and
+    /// the persisted state is reachable only through
+    /// `ea_trust::TrustStateStore`; a caller without an `ea-trust` edge — the
+    /// recovery CLI, deliberately — cannot name either type. The read therefore
+    /// happens here, and only the three-variant
+    /// [`ClockReleaseAvailability`] leaves the crate. No `ea-trust` or
+    /// `ea-time` type appears in this signature.
+    ///
+    /// The mapping from the time evaluation stays where it already is; this
+    /// method adds no second reading of a clock and no threshold of its own.
+    ///
+    /// The store clone shares this runtime's `Arc<EncryptedDatabase>` and so
+    /// reads the live row. It exists only because `TrustStateStore::load` takes
+    /// `&mut self` for the sake of its committing siblings; the load itself is
+    /// a SELECT and commits nothing.
+    ///
+    /// A `&self` accessor carries no freshness gate, exactly like `head` and
+    /// `trust`. Callers that act on the answer must bracket it with
+    /// [`Self::ensure_current`].
+    ///
+    /// # Errors
+    ///
+    /// The pass-through code of the persisted trust state (`EA-TRUST-STATE-*`)
+    /// or of the time evaluation.
+    pub fn clock_release_availability(
+        &self,
+        now: UnixMillis,
+    ) -> Result<ClockReleaseAvailability, ClockReleaseWorkflowError> {
+        let mut store = self.store.clone();
+        let snapshot = load_trust_state(
+            &mut store,
+            TrustStateKey {
+                organization_id: self.anchor().organization_id(),
+                device_id: self.device_id,
+            },
+        )?;
+        let audit = self.audit_service();
+        ClockReleaseService::new(&self.head, &audit, self.config.binding_object_hash)
+            .availability(snapshot.trusted_time(), now)
     }
     pub fn reauthenticate(&self) -> Result<VerifiedOperatorSession, OperatorRuntimeError> {
         self.ensure_current()?;

@@ -80,10 +80,15 @@ mod operator_remote;
 pub mod operator_runtime;
 pub mod production_state;
 
+pub mod clock_release;
+pub mod device;
 mod error;
 pub mod operator;
 pub mod operator_profile;
 pub mod operator_trust_store;
+pub mod policy;
+pub mod registry;
+pub mod revocation;
 mod root_ceremony;
 pub use operator::*;
 pub use operator_profile::verify_operator_snapshot;

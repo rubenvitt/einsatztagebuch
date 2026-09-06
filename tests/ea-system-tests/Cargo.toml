@@ -13,6 +13,18 @@ publish = false
 # `ea-verify` steht auf der wasm32-Positivliste — die beiden duerfen deshalb
 # nie Dependency einer der Bibliotheks-Crates werden.
 [dev-dependencies]
+# Die Verwaltungsfassade der Stufe 5 als Gegenstand von
+# `e2e_registry_effectiveness`: `RegistryWorkflowService`, `RegistryActionV1`,
+# die Ereignisfabrik, der Widerruf und die Uhrfreigabe. Die Kante gehoert
+# HIERHER und nicht nach `crates/ea-admin`, weil der Zeuge die Wirksamkeit
+# einer Registrierungsaenderung an ihrer FOLGE misst — an dem Grant-Plan, den
+# `ea_writer::build_grant_plan` aus `SelectedRegistryHead::active_certificates`
+# bildet. `ea-admin` haelt bewusst keine `ea-writer`-Kante; die Zusammenschau
+# beider Seiten hat nur in dieser Testcrate einen Ort. Das Merkmal
+# `test-support` von `ea-admin` bleibt AUS: die Linie kommt aus dem
+# `#[path]`-eingebundenen Supportmodul von `ea-trust`, nicht aus
+# Fixturkonstruktoren der Fassade.
+ea-admin.workspace = true
 ea-archive.workspace = true
 # Die Wirtbackends der Stufe 2: `LocalPathBackend`, `ControlledNetworkBackend`,
 # `ArchiveHealthCheckV1`, `ProfileMigrator`, `MigrationFaultPoint` und der
