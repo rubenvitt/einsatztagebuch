@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 const LIMIT: usize = 65_536;
 pub(crate) struct Output {
     pub stdout: Zeroizing<Vec<u8>>,
+    #[cfg(target_os = "macos")]
     pub stderr: Zeroizing<Vec<u8>>,
     pub success: bool,
 }
@@ -96,6 +97,7 @@ fn run_started(
             {
                 return Ok(Output {
                     stdout: stdout.take().expect("received stdout"),
+                    #[cfg(target_os = "macos")]
                     stderr: stderr.take().expect("received stderr"),
                     success: status.success(),
                 });
