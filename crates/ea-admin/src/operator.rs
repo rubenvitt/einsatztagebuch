@@ -758,7 +758,9 @@ impl<'a> OperatorBindingService<'a> {
             .map_err(OperatorLifecycleError::Ceremony)?;
         Ok((signed, auth))
     }
-    fn registry_event(
+    /// `pub(crate)`, damit `crate::registry::RegistryEventFactory` GENAU diese
+    /// Fensterpruefung und Versionsfortschreibung benutzt und keine zweite.
+    pub(crate) fn registry_event(
         &self,
         window: RegistryWindow,
         change: RegistryChangeV1,

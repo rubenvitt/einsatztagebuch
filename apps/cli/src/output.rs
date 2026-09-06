@@ -39,9 +39,13 @@ use std::io::{self, Write};
 
 use ea_admin::{
     AdminError, BootstrapStep, ProductionState,
+    clock_release::{ClockReleaseAvailability, ClockReleaseWorkflowError},
     operator_runtime::{OperatorGoLiveReport, OperatorRuntimeError},
+    registry::RegistryWorkflowError,
+    revocation::RevocationTargetClass,
 };
 use ea_recovery::RecoveryError;
+use ea_types::{ChainSequence, RegistryVersion};
 use ea_verify::VerificationReportV1;
 
 use crate::args::{Format, UsageError};
@@ -58,7 +62,7 @@ use crate::args::{Format, UsageError};
 /// benennt also einen Platz, der noch frei sein muss. Die Begruendung steht in
 /// `crate::commands::organization`; hier steht sie in einem Wort, damit ein
 /// Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 7] = [
+const GRAMMAR_V1: [&str; 9] = [
     "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
     "einsatzarchiv --trust-anchor <file> list    <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -66,6 +70,8 @@ const GRAMMAR_V1: [&str; 7] = [
     "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
+    "einsatzarchiv --trust-anchor <file> registry revocation-plan --operator-config <file> --effective-from <sequence> --valid-through <sequence> --not-after <unix-millis>",
+    "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
 ];
 
 /// Was `organization init` TUT — und was ausdruecklich nicht.
@@ -98,7 +104,30 @@ pub fn print_grammar() {
     println!(
         "operator config contains public archive/database paths, certificate/binding hashes, role and purpose; authority mode requires authority=true and target_certificate_hash; offline exchange uses ceremony_exchange_directory"
     );
+    println!("{REGISTRY_SCOPE_NOTE_V1}");
+    println!("{CLOCK_RELEASE_SCOPE_NOTE_V1}");
 }
+
+/// Was `registry revocation-plan` TUT — und was ausdruecklich nicht.
+///
+/// Dieselbe Bauart wie [`ORGANIZATION_SCOPE_NOTE_V1`] und aus demselben Grund:
+/// das Kommando tut WENIGER, als ein Leser vermuten koennte. Es bereitet die
+/// Aenderung 1 vor und benennt ihre Reichweite; veroeffentlicht wird sie erst
+/// mit der Wurzelsignatur, und die dafuer noetigen Offline-Schluesselquellen
+/// hat ein CLI-Prozess nicht. Das Ziel steht in der Bedienerdatei und nicht in
+/// der Aufrufzeile — dazu die Begruendung in `crate::commands::registry`.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const REGISTRY_SCOPE_NOTE_V1: &str = "registry revocation-plan prepares change 1 for the object \
+     named by target_certificate_hash in the operator config and reports its reach; it publishes \
+     nothing, because publishing needs the root signature";
+
+/// Was `clock-release apply` TUT — und warum es kein `issue` gibt.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const CLOCK_RELEASE_SCOPE_NOTE_V1: &str = "clock-release apply consumes an already issued release \
+     file and never prints its bytes; issuing one is a step of the administration workflow and not \
+     of this tool";
 
 /// Nur stabile Fehlercodes; keine privaten Profil-, Konto- oder Pfadangaben.
 pub fn print_operator_error(error: &OperatorRuntimeError) {
@@ -441,4 +470,239 @@ pub fn print_report_json(report: &VerificationReportV1) -> Result<(), RecoveryEr
     out.write_all(document.as_bytes())?;
     out.flush()?;
     Ok(())
+}
+
+/// Die Reichweite eines geplanten Widerrufs, abgelesen und nicht behauptet.
+///
+/// # Warum dieser Typ hier steht und nicht `ea_admin::revocation::RevocationEffect` gedruckt wird
+///
+/// [`ea_admin::revocation::RevocationEffect`] hat keinen oeffentlichen
+/// Konstruktor — er entsteht ausschliesslich in `plan_revocation` aus einem
+/// gewaehlten Registrierungskopf. Ein Drucker, der ihn naehme, waere ausserhalb
+/// von `ea-admin` nicht messbar: es gaebe keinen Weg, ihm einen Wert
+/// vorzulegen, ohne eine vollstaendige, OS-gebundene Bedienerlaufzeit zu
+/// bauen. Die Zeilen tragen aber genau die Zusagen des Plans, und eine Zusage,
+/// die kein Zeuge liest, ist keine.
+///
+/// Deshalb liest `crate::commands::registry` die vier Angaben an GENAU EINER
+/// Stelle vom Effekt ab und legt sie hier hinein. Der Effekt bleibt die
+/// Wahrheit; dieser Typ ist ihre Anzeige.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevocationPlanView {
+    /// Die Zielart, die `classify_revocation_target` aus dem Bestand
+    /// hergeleitet hat.
+    pub target_class: RevocationTargetClass,
+    /// Die Registrierungsversion des geplanten Ereignisses.
+    pub registry_version: RegistryVersion,
+    /// `RevocationEffect::stops_new_grants_from`.
+    pub stops_new_grants_from: ChainSequence,
+    /// Die Obergrenze des Lease des geplanten Ereignisses.
+    pub valid_through_sequence: ChainSequence,
+    /// `RevocationEffect::recalls_issued_grants` — vertraglich `false`.
+    pub recalls_issued_grants: bool,
+    /// `RevocationEffect::recalls_decrypted_plaintext` — vertraglich `false`.
+    pub recalls_decrypted_plaintext: bool,
+}
+
+/// Was ein Widerruf NICHT zurueckholt, Wort fuer Wort.
+///
+/// # Warum dieser Satz gedruckt wird und kein Kommentar bleibt
+///
+/// „Widerruf holt nichts zurueck" ist eine Produktinvariante der Global
+/// Constraints und eine ausdrueckliche Zusage des Umsetzungsplans an die
+/// BEDIENFUEHRUNG. Ein Betreiber, der einen Widerruf ausloest, soll nicht
+/// glauben, damit sei ein bereits erteilter Zugriff eingesammelt; die
+/// Schluesselumschlaege liegen im Archiv und in Repliken, die diese Handlung
+/// nicht erreicht, und entschluesselter Klartext liegt ausserhalb der
+/// Reichweite jeder Registrierungsaenderung.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+pub const REVOCATION_SCOPE_NOTE_V1: &str = "already issued grants and already decrypted plaintext \
+     are not recalled by this revocation: only new grants stop, and they stop from the effective \
+     sequence onwards";
+
+/// Das Wort einer Zielart, wie es in der Ausgabe steht.
+const fn target_class_word(class: RevocationTargetClass) -> &'static str {
+    match class {
+        RevocationTargetClass::NonAdminDevice => "non-admin-device",
+        RevocationTargetClass::OperatorBinding => "operator-binding",
+        RevocationTargetClass::Component => "component",
+    }
+}
+
+/// Die Textform des Widerrufsplans als GESCHLOSSENE Zeilenfolge.
+///
+/// Geschlossen und nicht „mindestens diese Zeilen": nur ein vollstaendiger
+/// Vergleich faellt ueber eine zusaetzliche Zeile. Keine Uhrzeit, kein
+/// Hostpfad, keine Laufzeitangabe — die Regel dieses Moduls gilt unveraendert;
+/// insbesondere stehen `issuedAt`, `notBefore` und `notAfter` des geplanten
+/// Ereignisses ausdruecklich NICHT hier.
+#[must_use]
+pub fn revocation_plan_lines(view: &RevocationPlanView) -> Vec<String> {
+    vec![
+        format!("target_class={}", target_class_word(view.target_class)),
+        format!("registry_version={}", view.registry_version.get()),
+        format!("stops_new_grants_from={}", view.stops_new_grants_from.get()),
+        format!(
+            "valid_through_sequence={}",
+            view.valid_through_sequence.get()
+        ),
+        format!("recalls_issued_grants={}", view.recalls_issued_grants),
+        format!(
+            "recalls_decrypted_plaintext={}",
+            view.recalls_decrypted_plaintext
+        ),
+        REVOCATION_SCOPE_NOTE_V1.to_owned(),
+    ]
+}
+
+/// Dieselben Angaben als EINE JSON-Zeile.
+///
+/// Von Hand gebaut wie [`print_operator_authority_report`]: alle Werte sind
+/// Zahlen, Wahrheitswerte oder feste ASCII-Woerter dieses Moduls, also gibt es
+/// nichts zu maskieren. Ein Serialisierer daefuer waere eine Dependency fuer
+/// sieben Felder.
+///
+/// Ausdruecklich KEIN neues Schema: `schemas/` ist geschlossen, und diese Zeile
+/// ist eine Anzeige und kein Dokument — dieselbe Ueberlegung, aus der
+/// `organization init` gar keine JSON-Form hat.
+#[must_use]
+pub fn revocation_plan_json(view: &RevocationPlanView) -> String {
+    format!(
+        "{{\"target_class\":\"{}\",\"registry_version\":{},\"stops_new_grants_from\":{},\
+         \"valid_through_sequence\":{},\"recalls_issued_grants\":{},\
+         \"recalls_decrypted_plaintext\":{},\"scope_note\":\"{REVOCATION_SCOPE_NOTE_V1}\"}}",
+        target_class_word(view.target_class),
+        view.registry_version.get(),
+        view.stops_new_grants_from.get(),
+        view.valid_through_sequence.get(),
+        view.recalls_issued_grants,
+        view.recalls_decrypted_plaintext,
+    )
+}
+
+/// Schreibt den Widerrufsplan auf stdout.
+///
+/// # Errors
+///
+/// [`OperatorRuntimeError::Io`], wenn stdout nicht schreibbar ist.
+pub fn print_revocation_plan_report(
+    view: &RevocationPlanView,
+    format: Format,
+) -> Result<(), OperatorRuntimeError> {
+    let body = match format {
+        Format::Json => revocation_plan_json(view),
+        Format::Text => revocation_plan_lines(view).join("\n"),
+    };
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(body.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|_| OperatorRuntimeError::Io)
+}
+
+/// Die Ablehnung einer Bedienerdatei ohne Widerrufsziel, Wort fuer Wort.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const MISSING_REVOCATION_TARGET_REFUSAL_V1: &str = "registry revocation-plan revokes the object \
+     named by target_certificate_hash in the operator config, and this config names none";
+
+/// Druckt die Ablehnung einer Bedienerdatei ohne Widerrufsziel auf stderr.
+pub fn print_missing_revocation_target_refusal() {
+    eprintln!("einsatzarchiv: {MISSING_REVOCATION_TARGET_REFUSAL_V1}");
+}
+
+/// Die Quittung einer verbrauchten Uhrfreigabe.
+///
+/// EINE feste Zeile ohne jeden Platzhalter, und das ist ihr Zweck: die
+/// Freigabebytes binden eine Zufalls-Nonce
+/// (`ea_format::ClockReleaseContextV1`), und eine Ausgabe, die irgendetwas aus
+/// ihnen wiedergaebe, truege sie in jede Protokolldatei. Was von keinem
+/// Eingabebyte abhaengt, kann sie nicht tragen.
+///
+/// Sie sagt ausserdem NICHT, welcher Kopf gewaehlt wurde. Der Grund ist keine
+/// Zurueckhaltung, sondern eine Grenze: `apply_clock_release` liefert ein
+/// `ea_trust::RegistrySelectionOutcome`, und dieses Paket fuehrt keine Kante zu
+/// `ea-trust` — es kann den Ausgang also nicht auseinandernehmen. Solange
+/// `ea-admin` dafuer keinen eigenen Berichtstyp herausgibt, ist eine Quittung
+/// ohne Kopfangabe ehrlicher als eine erfundene.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+pub const CLOCK_RELEASE_APPLIED_V1: &str = "clock_release=applied";
+
+/// Der Bedienhinweis zu einer Verfuegbarkeit, Wort fuer Wort.
+///
+/// # Warum die drei Ausgaenge UNTERSCHIEDLICH klingen muessen
+///
+/// „Es wird gar keine Freigabe angeboten" und „eine Freigabe wurde angeboten
+/// und abgewiesen" sind zwei verschiedene Lagen, und der Umsetzungsplan
+/// verlangt ausdruecklich, dass die Bedienfuehrung sie unterscheidet. Ohne
+/// unabhaengige Zeitreferenz gibt es nichts, wogegen eine Freigabe messen
+/// koennte — ein Betreiber, dem beides gleich klingt, sucht nach einer
+/// Freigabe, die es nicht gibt.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+#[must_use]
+pub const fn clock_release_availability_note(
+    availability: ClockReleaseAvailability,
+) -> &'static str {
+    match availability {
+        ClockReleaseAvailability::Offered => {
+            "a clock release was offered for this state and this one was refused"
+        }
+        ClockReleaseAvailability::IndependentTimeUnavailable => {
+            "no clock release is offered at all: without an independent time reference there is \
+             nothing to measure one against"
+        }
+        ClockReleaseAvailability::NotBlocked => {
+            "the clock is not blocked, so a clock release has no subject here"
+        }
+    }
+}
+
+/// Schreibt die Quittung einer verbrauchten Uhrfreigabe auf stdout.
+///
+/// # Errors
+///
+/// [`OperatorRuntimeError::Io`], wenn stdout nicht schreibbar ist.
+pub fn print_clock_release_applied(format: Format) -> Result<(), OperatorRuntimeError> {
+    let body = match format {
+        Format::Json => "{\"clock_release\":\"applied\"}".to_owned(),
+        Format::Text => CLOCK_RELEASE_APPLIED_V1.to_owned(),
+    };
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(body.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|_| OperatorRuntimeError::Io)
+}
+
+/// Druckt den Bedienhinweis zu einer Verfuegbarkeit auf stderr.
+///
+/// stderr und nicht stdout: er erlaeutert einen FEHLSCHLAG. Ein Aufrufer, der
+/// die Quittung in eine Datei umlenkt, darf darin keinen Hinweistext finden.
+pub fn print_clock_release_availability(availability: ClockReleaseAvailability) {
+    eprintln!(
+        "einsatzarchiv: {}",
+        clock_release_availability_note(availability)
+    );
+}
+
+/// Nur der stabile Fehlercode der Registrierungsablaeufe.
+///
+/// [`RegistryWorkflowError`] zeigt ausschliesslich ihn an — weder Objekthash
+/// noch Bytes koennen von dort hierher gelangen.
+pub fn print_registry_workflow_error(error: &RegistryWorkflowError) {
+    eprintln!("einsatzarchiv: {error}");
+}
+
+/// Nur der stabile Fehlercode der Uhrfreigabe.
+///
+/// [`ClockReleaseWorkflowError`] formatiert ausdruecklich AUSSCHLIESSLICH
+/// seinen Code — auch sein `Debug` —, damit der Freigabekontext und mit ihm die
+/// Nonce in keine Protokollzeile geraet.
+pub fn print_clock_release_error(error: &ClockReleaseWorkflowError) {
+    eprintln!("einsatzarchiv: {error}");
 }

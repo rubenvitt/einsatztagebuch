@@ -29,11 +29,13 @@
 //! `ea-recovery`; `organization.rs` parst nicht, rechnet nicht und entscheidet
 //! keinen Schritt, sondern ruft, druckt und ordnet einen Exitcode zu.
 
+pub mod clock_release;
 pub mod decrypt;
 pub mod export;
 pub mod list;
 pub mod operator;
 pub mod organization;
+pub mod registry;
 pub mod report;
 pub mod verify;
 
@@ -68,6 +70,31 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         // Begruendung steht an `organization::run`.
         Command::OrganizationInit => organization::run(invocation),
         Command::Operator { action, config } => operator::run(invocation, *action, config, now),
+        // Beide neuen Pfade gehen weder durch [`verified`] noch durch die
+        // Wiederherstellungsfassade, und aus demselben Grund wie
+        // `organization init`: sie bilden ueber KEINEN Bestand ein Urteil. Ihre
+        // Fachlogik wohnt vollstaendig in `ea-admin` — die Zielart, das
+        // Registrierungsereignis und die Reichweite eines Widerrufs in
+        // `ea_admin::revocation`, der Dreischritt der Uhrfreigabe in
+        // `ea_admin::clock_release`. Der Bestand selbst wird dabei sehr wohl
+        // geprueft, aber eine Ebene tiefer: `OperatorRuntime::open` verifiziert
+        // ihn geschlossen, bevor es einen Kopf herausgibt.
+        Command::RegistryRevocationPlan {
+            config,
+            effective_from_sequence,
+            valid_through_sequence,
+            not_after,
+        } => registry::run(
+            invocation,
+            config,
+            *effective_from_sequence,
+            *valid_through_sequence,
+            *not_after,
+            now,
+        ),
+        Command::ClockReleaseApply { config, release } => {
+            clock_release::run(invocation, config, release, now)
+        }
     }
 }
 

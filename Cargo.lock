@@ -2073,6 +2073,7 @@ dependencies = [
 name = "ea-system-tests"
 version = "0.1.0"
 dependencies = [
+ "ea-admin",
  "ea-archive",
  "ea-archive-fs",
  "ea-audit",
