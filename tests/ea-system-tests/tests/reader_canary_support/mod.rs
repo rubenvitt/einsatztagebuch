@@ -8,9 +8,11 @@
 //! `tests/ea-system-tests/tests/file_mode_interop_support/mod.rs` und
 //! `crates/ea-reader-wasm` schon fahren:
 //! `crates/ea-reader/tests/verify_fixtures/mod.rs` und darunter
-//! `crates/ea-verify/tests/support/mod.rs`. Neu ist allein der KLARTEXT —
-//! `verify_support::complete_valid_archive_with_plaintext` nimmt ihn als
-//! Parameter, und `crates/ea-reader/tests/fixtures/mod.rs` bleibt unberuehrt
+//! `crates/ea-verify/tests/support/mod.rs`. Die Operator-Kulisse bindet den
+//! KLARTEXT an ein echtes signiertes und aktiviertes Canary-Profil; Name,
+//! Funktion, Subjekt und Salz bleiben erhalten. Die verschluesselten Bytes
+//! tragen Organisation, Bindungshash und Registry-Version dieser Linie.
+//! `crates/ea-reader/tests/fixtures/mod.rs` bleibt unberuehrt
 //! (es zieht `ea-sync-protocol`, und das ist in dieser Testcrate keine Kante).
 //!
 //! # Die eine Naht, die diese Kulisse schliesst
@@ -53,6 +55,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use ea_crypto::{AEAD_NONCE_SIZE, SecretBytes};
 use ea_format::{LocalAuditActionV1, decode_local_audit_event};
@@ -78,7 +81,11 @@ use ea_types::{
 #[path = "../../../../crates/ea-reader/tests/verify_fixtures/mod.rs"]
 pub mod verify_fixtures;
 
+use verify_fixtures::operator::{self, Profile};
 pub use verify_fixtures::{fixtures, verify_support};
+
+const CANARY_OPERATOR_SUBJECT_MARKER_V1: u8 = 0x72;
+const CANARY_OPERATOR_SALT_V1: [u8; 32] = [0x73; 32];
 
 // ---------------------------------------------------------------------------
 // Die Marker
@@ -506,10 +513,11 @@ pub fn canary_incident() -> IncidentV1 {
         CANARY_TIMEZONE_V1,
         OperatorSnapshotV1::new(
             OrganizationId::try_from(&[0x71_u8; 16][..]).expect("16 Byte"),
-            OperatorSubjectId::try_from(&[0x72_u8; 16][..]).expect("16 Byte"),
+            OperatorSubjectId::try_from(&[CANARY_OPERATOR_SUBJECT_MARKER_V1; 16][..])
+                .expect("16 Byte"),
             canary_text("OperatorSnapshotV1.display_name"),
             canary_text("OperatorSnapshotV1.function_label"),
-            [0x73; 32],
+            CANARY_OPERATOR_SALT_V1,
             TypesObjectHash::try_from(&[0x74_u8; 32][..]).expect("32 Byte"),
         )
         .expect("die Bedienerspalte der Kulisse ist gueltig"),
@@ -570,14 +578,32 @@ pub fn canary_incident() -> IncidentV1 {
     .expect("der Kanarieneinsatz ist schemagueltig")
 }
 
-/// Derselbe Einsatz als KLARTEXTBYTES, so wie der Writer sie verschluesselt
-/// haette.
+/// Der Einsatz als KLARTEXTBYTES mit der aktivierten Canary-Operator-Bindung,
+/// exakt so, wie ihn der signierte Fixture-Bestand verschluesselt.
 ///
 /// # Panics
 /// Wenn der Kodierer die Nutzlast abweist.
 #[must_use]
 pub fn canary_incident_plaintext() -> Vec<u8> {
-    encode_payload(&PayloadV1::Incident(canary_incident())).expect("der Kanarieneinsatz kodiert")
+    canary_archive().1[0].clone()
+}
+
+fn canary_archive() -> &'static (verify_support::CompleteArchive, Vec<Vec<u8>>) {
+    static ARCHIVE: OnceLock<(verify_support::CompleteArchive, Vec<Vec<u8>>)> = OnceLock::new();
+    ARCHIVE.get_or_init(|| {
+        let encoded = encode_payload(&PayloadV1::Incident(canary_incident()))
+            .expect("der Kanarieneinsatz kodiert");
+        operator::archive_with_profile(
+            &[&encoded],
+            operator::Defect::None,
+            Profile {
+                subject_marker: CANARY_OPERATOR_SUBJECT_MARKER_V1,
+                display_name: canary_text("OperatorSnapshotV1.display_name"),
+                function_label: canary_text("OperatorSnapshotV1.function_label"),
+                salt: CANARY_OPERATOR_SALT_V1,
+            },
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -675,7 +701,7 @@ impl ReaderCanaryHarness {
             .map(|(field, marker)| (*field, ea_testkit::contains_canary(&plaintext, marker)))
             .collect();
 
-        let complete = verify_support::complete_valid_archive_with_plaintext(&plaintext);
+        let complete = &canary_archive().0;
         assert_eq!(
             complete.anchor_bytes,
             fixtures::complete_archive_anchor_bytes(),
@@ -1105,8 +1131,7 @@ fn collect_error_reports(
     // Der Exportweg ohne Ziel — die Abweisung VOR der Grenze, ueber einem
     // zweiten, gleich gebauten Datensatz.
     let vault = fixtures::session_vault();
-    let plaintext = canary_incident_plaintext();
-    let complete = verify_support::complete_valid_archive_with_plaintext(&plaintext);
+    let complete = &canary_archive().0;
     let classification = fixtures::classify(&complete.fixture, &vault);
     let second_hash = fixtures::entry_hash(&complete.fixture);
     let second = decrypt_verified(

@@ -184,6 +184,7 @@ mod grant;
 mod http;
 mod key_profile;
 mod mode;
+mod operator_profile;
 mod search;
 mod session;
 mod sync;

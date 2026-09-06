@@ -17,6 +17,25 @@ const KEYED_SEED: [u8; 32] = [0x5a; 32];
 /// wurde. Er ist zugleich die Kontoinstanz, unter der der Griff adressiert.
 const KEYLESS_SEED: [u8; 32] = [0xa5; 32];
 
+#[test]
+fn open_existing_never_recreates_a_lost_database_and_preserves_existing_state() {
+    let harness = StoreHarness::new();
+    let provider = InMemoryKeyProvider::new_for_test(KEYED_SEED);
+    let handle = provider
+        .generate(
+            SecretPurpose::LocalDatabaseKey,
+            KeyProtectionProfileV1::OsWrapped,
+        )
+        .unwrap();
+    let existing =
+        EncryptedDatabase::open_existing(&harness.root.join(DATABASE_FILE), &provider, &handle)
+            .unwrap();
+    assert!(!existing.cipher_version().is_empty());
+    let absent = harness.root.join("restored-profile-missing.sqlite3");
+    assert!(EncryptedDatabase::open_existing(&absent, &provider, &handle).is_err());
+    assert!(!absent.exists());
+}
+
 /// Die laufende Nummer der Harness-Wurzel dieses Prozesses.
 static HARNESS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

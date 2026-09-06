@@ -310,6 +310,7 @@ pub struct Identity {
     pub wrong_challenge: bool,
     pub previous_binding: Option<ObjectHash>,
     pub decomposed: bool,
+    pub salt: Option<[u8; 32]>,
 }
 impl Identity {
     pub fn valid() -> Self {
@@ -319,6 +320,7 @@ impl Identity {
             wrong_challenge: false,
             previous_binding: None,
             decomposed: false,
+            salt: None,
         }
     }
 }
@@ -330,7 +332,10 @@ impl ExternalOperatorIdentityVerifier for Identity {
         if self.fail {
             return Err(OperatorLifecycleError::IdentityVerification);
         }
+        let mut salt = [0; 32];
+        getrandom::fill(&mut salt).unwrap();
         Ok(ExternalOperatorIdentity {
+            profile_commitment_salt: self.salt.unwrap_or(salt),
             organization_id: request.organization_id,
             operator_subject_id: if self.wrong_subject {
                 OperatorSubjectId::try_from(&[0x99; 16][..]).unwrap()
@@ -370,14 +375,51 @@ const ADMIN_SECRET: [u8; 32] = [
 pub struct Authorization {
     pub line: RegistryLineBuilder,
     pub authorizations: Vec<Vec<u8>>,
+    pub binding_authorization_timing: Option<(UnixMillis, UnixMillis)>,
     pub wrong_core: bool,
     pub root_only: bool,
     pub reused_nonce: bool,
     pub fail_stage: bool,
     pub staged: Vec<Vec<u8>>,
+    pub included: Vec<Vec<u8>>,
+    pub recovered: Option<Vec<u8>>,
+    pub lose_activation_reply: bool,
+    pub pending_authorization: Option<AuthorizedOperatorIntent>,
+    pub replay_table: Arc<Mutex<support::ReplayTable>>,
     pub stage_directory: support::TempDir,
 }
 impl OperatorAuthorizationPort for Authorization {
+    fn include_prepared_objects(
+        &mut self,
+        objects: &[&[u8]],
+    ) -> Result<(), OperatorLifecycleError> {
+        assert_eq!(objects.len(), 2);
+        for bytes in objects {
+            self.line.add_object(bytes.to_vec());
+            self.included.push(bytes.to_vec());
+        }
+        Ok(())
+    }
+    fn recover_authorization(
+        &mut self,
+        _: &SelectedRegistryHead,
+        _: &OperatorTrustTarget,
+    ) -> Result<AuthorizedOperatorIntent, OperatorLifecycleError> {
+        self.pending_authorization
+            .take()
+            .ok_or(OperatorLifecycleError::Unsupported)
+    }
+    fn recover_activation(
+        &mut self,
+        _: &SelectedRegistryHead,
+        _: &OperatorTrustTarget,
+        _: &[u8],
+    ) -> Result<Vec<u8>, OperatorLifecycleError> {
+        self.recovered
+            .clone()
+            .ok_or(OperatorLifecycleError::Unsupported)
+    }
+
     fn stage_signed_objects(&mut self, objects: &[&[u8]]) -> Result<(), OperatorLifecycleError> {
         use std::io::Write;
         if self.fail_stage {
@@ -406,6 +448,13 @@ impl OperatorAuthorizationPort for Authorization {
         head: &SelectedRegistryHead,
         target: &OperatorTrustTarget,
     ) -> Result<AuthorizedOperatorIntent, OperatorLifecycleError> {
+        let (issued_at, use_time) = match target {
+            OperatorTrustTarget::Binding(_) => self.binding_authorization_timing.unwrap_or((
+                UnixMillis::new(100),
+                head.preexisting_effective_now().value(),
+            )),
+            OperatorTrustTarget::Registry(event) => (UnixMillis::new(100), event.issued_at),
+        };
         let provisional = target.payload(ObjectHash::from(Hash32::ZERO))?;
         let exact = provisional.exact_payload();
         let mut decoder = minicbor::Decoder::new(exact);
@@ -448,7 +497,7 @@ impl OperatorAuthorizationPort for Authorization {
                 } else {
                     ea_crypto::authorized_trust_digest(&core)
                 },
-                issued_at: UnixMillis::new(100),
+                issued_at,
                 expires_at: UnixMillis::new(1100),
                 nonce: [if self.reused_nonce { 0xb0 } else { id }; 32],
             },
@@ -479,28 +528,34 @@ impl OperatorAuthorizationPort for Authorization {
         let payload = target.payload(object_hash(&bytes))?;
         self.line.add_object(bytes.clone());
         let trust = self.line.verified(trust_support::Pin::None);
-        let refreshed = selected(
+        let refreshed = selected_at(
             &self.line,
             self.line.exact_object_bytes(head.registry_head_hash()),
             head.proposed_sequence().get(),
+            use_time,
         );
         let intent = verify_intended_trust_target(
             &trust,
             Some(&refreshed),
             &payload,
-            head.preexisting_effective_now().value(),
+            use_time,
             head.proposed_sequence(),
         )
         .map_err(OperatorLifecycleError::Trust)?;
         self.authorizations.push(bytes.clone());
-        Ok(AuthorizedOperatorIntent {
+        let authorized = AuthorizedOperatorIntent {
             intent,
             exact_authorization: bytes,
-        })
+        };
+        if self.lose_activation_reply && matches!(target, OperatorTrustTarget::Registry(_)) {
+            self.pending_authorization = Some(authorized);
+            return Err(OperatorLifecycleError::Unsupported);
+        }
+        Ok(authorized)
     }
 }
 impl Authorization {
-    pub fn activate(&mut self, prepared: &PreparedOperatorBinding) -> SelectedRegistryHead {
+    pub fn activate(&mut self, prepared: &PublishedBinding) -> SelectedRegistryHead {
         self.line.add_object(prepared.binding_bytes().to_vec());
         self.line.add_object(prepared.activation_bytes().to_vec());
         let ParsedArchiveObject::Trust(parsed) =
@@ -512,10 +567,11 @@ impl Authorization {
         else {
             panic!()
         };
-        selected(
+        selected_at(
             &self.line,
             prepared.activation_bytes(),
             event.fields().effective_from_sequence.get(),
+            event.fields().issued_at.max(UnixMillis::new(1000)),
         )
     }
 }
@@ -566,6 +622,15 @@ impl TrustStateStore for SelectionStore {
     }
 }
 pub fn selected(line: &RegistryLineBuilder, event: &[u8], sequence: u64) -> SelectedRegistryHead {
+    selected_at(line, event, sequence, UnixMillis::new(1000))
+}
+
+pub fn selected_at(
+    line: &RegistryLineBuilder,
+    event: &[u8],
+    sequence: u64,
+    now: UnixMillis,
+) -> SelectedRegistryHead {
     let ParsedArchiveObject::Trust(parsed) = decode_exact_object(event).unwrap() else {
         panic!()
     };
@@ -575,7 +640,7 @@ pub fn selected(line: &RegistryLineBuilder, event: &[u8], sequence: u64) -> Sele
     };
     let version = fields.fields().registry_version;
     let hash = object_hash(event);
-    let time = ea_time::TrustedTimeState::initial(UnixMillis::new(1000));
+    let time = ea_time::TrustedTimeState::initial(now);
     let trust = line.verified_with_record(
         trust_support::Pin::Exact(version, hash),
         17,
@@ -587,7 +652,7 @@ pub fn selected(line: &RegistryLineBuilder, event: &[u8], sequence: u64) -> Sele
         time,
         pin: RegistryHeadPin::new(version, hash),
     };
-    let local = prepare_local_time(&mut store, &candidate, UnixMillis::new(1000), &[]).unwrap();
+    let local = prepare_local_time(&mut store, &candidate, now, &[]).unwrap();
     let RegistrySelectionOutcome::Selected(head) =
         select_registry_head(candidate, local, None).unwrap()
     else {
@@ -667,15 +732,36 @@ pub fn selected_on_chain(
 }
 
 impl Harness {
+    pub fn service<'a>(
+        &self,
+        head: &'a SelectedRegistryHead,
+        audit: &'a dyn ea_audit::LocalAuditService,
+    ) -> OperatorBindingService<'a> {
+        let local = VerifiedLocalDeviceIdentity::verify(
+            head,
+            self.certificate,
+            head.active_certificate_fields(self.certificate)
+                .unwrap()
+                .device_id,
+        )
+        .unwrap();
+        OperatorBindingService::new(head, audit, local)
+    }
     pub fn authorization(&self) -> Authorization {
         Authorization {
             line: self.line.clone(),
             authorizations: Vec::new(),
+            binding_authorization_timing: None,
             wrong_core: false,
             root_only: false,
             reused_nonce: false,
             fail_stage: false,
             staged: Vec::new(),
+            included: Vec::new(),
+            recovered: None,
+            lose_activation_reply: false,
+            pending_authorization: None,
+            replay_table: Arc::new(Mutex::new(support::ReplayTable::default())),
             stage_directory: support::temp_dir("public-stage"),
         }
     }
@@ -687,7 +773,7 @@ impl Harness {
         native: &Native,
         identity: &Identity,
         authorization: &mut Authorization,
-    ) -> Result<PreparedOperatorBinding, OperatorLifecycleError> {
+    ) -> Result<PublishedBinding, OperatorLifecycleError> {
         self.provision_at(
             head,
             audit.service(),
@@ -699,7 +785,7 @@ impl Harness {
         )
     }
     #[allow(clippy::too_many_arguments)]
-    pub fn provision_at(
+    pub fn prepare_at(
         &self,
         head: &SelectedRegistryHead,
         audit: &dyn ea_audit::LocalAuditService,
@@ -728,7 +814,7 @@ impl Harness {
             ceremony: &ceremony,
             store: &mut store,
         };
-        OperatorBindingService::new(head, audit).provision(
+        self.service(head, audit).provision(
             ProvisionOperatorRequest {
                 database,
                 device_certificate_hash: self.certificate,
@@ -764,8 +850,9 @@ impl Harness {
         );
         let table = Arc::new(Mutex::new(support::ReplayTable::default()));
         let mut store = support::PersistentStore::open(&table);
-        OperatorBindingService::new(head, audit).revoke(
+        self.service(head, audit).revoke(
             RevokeOperatorRequest {
+                database: &self.database,
                 binding_object_hash: binding,
                 window: window(
                     head.valid_through_sequence().get() + 1,
@@ -780,6 +867,112 @@ impl Harness {
             self.login(&authenticator),
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn provision_at(
+        &self,
+        head: &SelectedRegistryHead,
+        audit: &dyn ea_audit::LocalAuditService,
+        database: &Arc<EncryptedDatabase>,
+        native: &Native,
+        identity: &Identity,
+        authorization: &mut Authorization,
+        replacement: Option<&RevokedOperatorBinding>,
+    ) -> Result<PublishedBinding, OperatorLifecycleError> {
+        let prepared = self.prepare_at(
+            head,
+            audit,
+            database,
+            native,
+            identity,
+            authorization,
+            replacement,
+        )?;
+        let authenticator = self.authenticator(head);
+        let provider = support::FixtureKeyProvider::root();
+        let ceremony = RootCeremonyService::new(
+            head,
+            &provider,
+            provider.handle(),
+            CertificateHash::from(head.root_certificate_object_hash()),
+            audit,
+            self.binding,
+        );
+        let table = Arc::new(Mutex::new(support::ReplayTable::default()));
+        let mut store = support::PersistentStore::open(&table);
+        self.service(head, audit).authorize_prepared(
+            database,
+            &prepared,
+            native,
+            &mut OperatorMutationPorts {
+                authorization,
+                ceremony: &ceremony,
+                store: &mut store,
+            },
+            self.login(&authenticator),
+        )?;
+        publish(
+            self.service(head, audit),
+            database,
+            &prepared,
+            native,
+            authorization,
+        )
+    }
+}
+
+pub struct PublishedBinding {
+    objects: [Vec<u8>; 4],
+}
+impl PublishedBinding {
+    pub fn binding_authorization_bytes(&self) -> &[u8] {
+        &self.objects[0]
+    }
+    pub fn binding_bytes(&self) -> &[u8] {
+        &self.objects[1]
+    }
+    pub fn activation_authorization_bytes(&self) -> &[u8] {
+        &self.objects[2]
+    }
+    pub fn activation_bytes(&self) -> &[u8] {
+        &self.objects[3]
+    }
+    pub fn binding_object_hash(&self) -> ObjectHash {
+        object_hash(self.binding_bytes())
+    }
+}
+struct Publishing<'a> {
+    authorization: &'a mut Authorization,
+    result: Option<PublishedBinding>,
+}
+impl OperatorBindingPublisher for Publishing<'_> {
+    fn publish(&mut self, ready: &ReadyOperatorBinding) -> Result<(), OperatorLifecycleError> {
+        let objects = [
+            ready.binding_authorization_bytes(),
+            ready.binding_bytes(),
+            ready.activation_authorization_bytes(),
+            ready.activation_bytes(),
+        ];
+        self.authorization.stage_signed_objects(&objects)?;
+        self.result = Some(PublishedBinding {
+            objects: objects.map(<[u8]>::to_vec),
+        });
+        Ok(())
+    }
+}
+pub fn publish(
+    service: OperatorBindingService<'_>,
+    database: &Arc<EncryptedDatabase>,
+    prepared: &PreparedOperatorBinding,
+    native: &Native,
+    authorization: &mut Authorization,
+) -> Result<PublishedBinding, OperatorLifecycleError> {
+    let mut publisher = Publishing {
+        authorization,
+        result: None,
+    };
+    service.publish_prepared(database, prepared, native, &mut publisher)?;
+    Ok(publisher.result.unwrap())
 }
 pub fn window(effective: u64, through: u64) -> RegistryWindow {
     RegistryWindow {
@@ -797,6 +990,24 @@ pub struct RecoveryAdmin {
     account: Account,
 }
 impl RecoveryAdmin {
+    pub fn service<'a>(
+        &self,
+        head: &'a SelectedRegistryHead,
+        audit: &'a dyn ea_audit::LocalAuditService,
+    ) -> OperatorBindingService<'a> {
+        OperatorBindingService::new(
+            head,
+            audit,
+            VerifiedLocalDeviceIdentity::verify(
+                head,
+                self.certificate,
+                head.active_certificate_fields(self.certificate)
+                    .unwrap()
+                    .device_id,
+            )
+            .unwrap(),
+        )
+    }
     pub fn enroll(line: &mut RegistryLineBuilder) -> Self {
         let database = database("recovery-admin");
         let secret = [0x68; 32];

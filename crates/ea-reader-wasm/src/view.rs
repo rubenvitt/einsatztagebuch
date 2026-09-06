@@ -378,6 +378,7 @@ pub fn build_stand(
                     ReaderError::Verify(_)
                     | ReaderError::Format(_)
                     | ReaderError::Decryption(_)
+                    | ReaderError::OperatorProfileCommitment
                     | ReaderError::StaleWitness => VerificationStatus::Invalid,
                 };
                 decryption_verdicts.insert(entry_hash, (status, error.code()));

@@ -23,6 +23,13 @@ use ea_types::{
 };
 use std::{fmt, sync::Arc};
 
+#[path = "operator_host.rs"]
+pub(crate) mod operator_host;
+pub use operator_host::*;
+
+#[path = "operator_revocation.rs"]
+pub(crate) mod operator_revocation;
+
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub enum OperatorLifecycleError {
@@ -36,6 +43,8 @@ pub enum OperatorLifecycleError {
     RegistryWindow,
     TargetMismatch,
     AuditFailed,
+    JournalConflict,
+    Readiness,
     Operator(OperatorError),
     Trust(TrustError),
     Ceremony(AdminError),
@@ -55,6 +64,8 @@ impl OperatorLifecycleError {
             Self::RegistryWindow => "EA-OPERATOR-REGISTRY-WINDOW",
             Self::TargetMismatch => "EA-OPERATOR-TARGET-MISMATCH",
             Self::AuditFailed => "EA-OPERATOR-AUDIT-FAILED",
+            Self::JournalConflict => "EA-OPERATOR-JOURNAL-CONFLICT",
+            Self::Readiness => "EA-OPERATOR-NOT-READY",
             Self::Operator(e) => e.code(),
             Self::Trust(e) => e.code(),
             Self::Ceremony(e) => e.code(),
@@ -124,6 +135,9 @@ pub struct ExternalOperatorIdentity {
     pub operator_subject_id: OperatorSubjectId,
     pub display_name: String,
     pub function_label: String,
+    /// Fresh CSPRNG salt issued by the identifying organizational Admin. Deliver
+    /// only in the encrypted attestation response; never in public exchange data.
+    pub profile_commitment_salt: [u8; 32],
     pub previous_binding_object_hash: Option<ObjectHash>,
     pub challenge: [u8; 32],
 }
@@ -158,6 +172,34 @@ pub struct AuthorizedOperatorIntent {
 /// Offline authorization adapter. It obtains fresh Admin authorization and calls
 /// `ea_trust::verify_intended_trust_target` against this unchanged selected head.
 pub trait OperatorAuthorizationPort {
+    /// Add the exact prepared binding pair to a private authority catalog. This
+    /// is called after local readiness; it never includes activation objects.
+    fn include_prepared_objects(
+        &mut self,
+        _objects: &[&[u8]],
+    ) -> Result<(), OperatorLifecycleError> {
+        Ok(())
+    }
+    /// Reconcile an uncertain Root response for this exact recorded authorization.
+    /// The authority must retain its consumed authorization and audited response
+    /// durably. Never substitute a newly authorized target or a new nonce.
+    fn recover_activation(
+        &mut self,
+        _head: &SelectedRegistryHead,
+        _target: &OperatorTrustTarget,
+        _exact_authorization: &[u8],
+    ) -> Result<Vec<u8>, OperatorLifecycleError> {
+        Err(OperatorLifecycleError::Unsupported)
+    }
+    /// Recover the retained reply for an exact activation target whose remote
+    /// authorization call was interrupted. Must never issue a new authorization.
+    fn recover_authorization(
+        &mut self,
+        _head: &SelectedRegistryHead,
+        _target: &OperatorTrustTarget,
+    ) -> Result<AuthorizedOperatorIntent, OperatorLifecycleError> {
+        Err(OperatorLifecycleError::Unsupported)
+    }
     fn authorize(
         &mut self,
         head: &SelectedRegistryHead,
@@ -165,14 +207,22 @@ pub trait OperatorAuthorizationPort {
     ) -> Result<AuthorizedOperatorIntent, OperatorLifecycleError>;
     /// Durably stage the exact public objects for restart/transport, without
     /// selecting a Registry head. Called only after successful audit persistence.
-    /// For provisioning, the host must confirm encrypted profile persistence and
-    /// native key readiness before publishing or selecting the staged activation.
+    /// Used for revocation. Binding publication uses `OperatorBindingPublisher`.
     fn stage_signed_objects(&mut self, objects: &[&[u8]]) -> Result<(), OperatorLifecycleError>;
 }
 pub struct OperatorMutationPorts<'a> {
     pub authorization: &'a mut dyn OperatorAuthorizationPort,
     pub ceremony: &'a RootCeremonyService<'a>,
     pub store: &'a mut dyn TrustStateStore,
+}
+/// Presence signing without pre-resolving a requested operator binding.
+pub trait OperatorPresence {
+    fn prove_presence_and_sign(&self, challenge: &[u8]) -> Result<[u8; 64], OperatorError>;
+}
+impl<T: OperatorAuthenticator + ?Sized> OperatorPresence for T {
+    fn prove_presence_and_sign(&self, challenge: &[u8]) -> Result<[u8; 64], OperatorError> {
+        OperatorAuthenticator::prove_presence_and_sign(self, challenge)
+    }
 }
 pub struct VerifySessionRequest<'a> {
     pub database: &'a Arc<EncryptedDatabase>,
@@ -181,7 +231,7 @@ pub struct VerifySessionRequest<'a> {
     pub role: OperatorRoleV1,
     pub purpose: ReauthPurpose,
     pub account: Arc<dyn OsAccountProvider>,
-    pub authenticator: &'a dyn OperatorAuthenticator,
+    pub authenticator: &'a dyn OperatorPresence,
 }
 pub struct VerifiedOperatorSession {
     profile: OperatorProfile,
@@ -280,7 +330,9 @@ impl RevokedOperatorBinding {
         Ok(evidence)
     }
 }
-pub struct RevokeOperatorRequest {
+pub struct RevokeOperatorRequest<'a> {
+    /// Durable target database, reused unchanged after interruption.
+    pub database: &'a EncryptedDatabase,
     pub binding_object_hash: ObjectHash,
     pub window: RegistryWindow,
 }
@@ -296,42 +348,38 @@ impl PreparedOperatorRevocation {
         &self.authorization
     }
 }
-pub struct PreparedOperatorBinding {
+pub(crate) struct SignedOperatorBinding {
     binding: ExactObjectBytes,
-    activation: ExactObjectBytes,
     binding_authorization: Vec<u8>,
-    activation_authorization: Vec<u8>,
+    authorization_use_time: UnixMillis,
 }
-impl PreparedOperatorBinding {
-    pub fn binding_bytes(&self) -> &[u8] {
-        self.binding.as_bytes()
-    }
-    pub fn activation_bytes(&self) -> &[u8] {
-        self.activation.as_bytes()
-    }
+impl SignedOperatorBinding {
     pub fn binding_object_hash(&self) -> ObjectHash {
         ea_crypto::object_hash(self.binding.as_bytes())
-    }
-    pub fn binding_authorization_bytes(&self) -> &[u8] {
-        &self.binding_authorization
-    }
-    pub fn activation_authorization_bytes(&self) -> &[u8] {
-        &self.activation_authorization
     }
 }
 pub struct OperatorBindingService<'a> {
     head: &'a SelectedRegistryHead,
     audit: &'a dyn LocalAuditService,
+    local_device: VerifiedLocalDeviceIdentity,
 }
 impl<'a> OperatorBindingService<'a> {
-    pub const fn new(head: &'a SelectedRegistryHead, audit: &'a dyn LocalAuditService) -> Self {
-        Self { head, audit }
+    pub const fn new(
+        head: &'a SelectedRegistryHead,
+        audit: &'a dyn LocalAuditService,
+        local_device: VerifiedLocalDeviceIdentity,
+    ) -> Self {
+        Self {
+            head,
+            audit,
+            local_device,
+        }
     }
     /// Revokes a binding using wire target-kind 1/action 1. Admin certificate
     /// revocation (action 5) belongs to the separate certificate lifecycle.
     pub fn revoke(
         &self,
-        request: RevokeOperatorRequest,
+        request: RevokeOperatorRequest<'_>,
         ports: &mut OperatorMutationPorts<'_>,
         reauth: VerifySessionRequest<'_>,
     ) -> Result<PreparedOperatorRevocation, OperatorLifecycleError> {
@@ -339,13 +387,7 @@ impl<'a> OperatorBindingService<'a> {
             return Err(OperatorLifecycleError::TargetMismatch);
         }
         let actor = self.verify_session(reauth)?;
-        let event = self.registry_event(
-            request.window,
-            RegistryChangeV1::Target {
-                target_kind: 1,
-                object_hash: request.binding_object_hash,
-            },
-        )?;
+        let event = self.revocation_target(&request, actor.proof())?;
         let signed = (|| {
             self.head
                 .active_operator_binding_fields(request.binding_object_hash)
@@ -375,7 +417,8 @@ impl<'a> OperatorBindingService<'a> {
                 },
             )
             .map_err(|_| OperatorLifecycleError::AuditFailed)?;
-        let (registry, authorization) = signed?;
+        let (registry, authorized) = signed?;
+        let authorization = authorized.exact_authorization;
         if let Err(error) = ports
             .authorization
             .stage_signed_objects(&[&authorization, registry.as_bytes()])
@@ -406,23 +449,29 @@ impl<'a> OperatorBindingService<'a> {
         &self,
         request: VerifySessionRequest<'_>,
     ) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
-        let certificate = self
-            .head
-            .active_certificate_fields(request.device_certificate_hash)
-            .ok_or(OperatorError::DeviceCertificateNotActive)?;
+        self.local_device.check(self.head)?;
         let known = self
             .head
             .active_operator_binding_fields(request.binding_object_hash)
-            .filter(|b| b.device_certificate_hash == request.device_certificate_hash)
+            .filter(|b| {
+                b.device_certificate_hash == self.local_device.certificate
+                    && request.device_certificate_hash == self.local_device.certificate
+            })
             .map(|_| request.binding_object_hash);
         let device = AuthenticatedDevice::new(
-            certificate.organization_id,
-            certificate.device_id,
-            ObjectHash::try_from(request.device_certificate_hash.as_bytes().as_slice())
+            self.local_device.organization,
+            self.local_device.device,
+            ObjectHash::try_from(self.local_device.certificate.as_bytes().as_slice())
                 .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
             known,
         );
         let result = (|| {
+            self.head
+                .active_certificate_fields(request.device_certificate_hash)
+                .ok_or(OperatorError::DeviceCertificateNotActive)?;
+            if request.device_certificate_hash != self.local_device.certificate {
+                return Err(OperatorError::DeviceMismatch.into());
+            }
             let bound = BoundOperator::resolve(self.head, request.binding_object_hash)?;
             let authenticator = FreshAuthenticator {
                 bound,
@@ -457,33 +506,27 @@ impl<'a> OperatorBindingService<'a> {
         } else {
             LocalAuditOutcomeV1::Failed
         };
-        self.audit
-            .record_signed(
-                AuditActorProof::AuthenticatedDevice(&device),
-                TypedLocalAuditEvent {
-                    action: LocalAuditActionV1::Login(GenericAuditContextV1::new(known)),
-                    outcome,
-                },
-            )
-            .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+        self.record_local_audit(
+            &device,
+            TypedLocalAuditEvent {
+                action: LocalAuditActionV1::Login(GenericAuditContextV1::new(known)),
+                outcome,
+            },
+        )?;
         if result.is_err() {
-            self.audit
-                .record_signed(
-                    AuditActorProof::AuthenticatedDevice(&device),
-                    TypedLocalAuditEvent {
-                        action: LocalAuditActionV1::ReauthFailure(GenericAuditContextV1::new(
-                            known,
-                        )),
-                        outcome: LocalAuditOutcomeV1::Failed,
-                    },
-                )
-                .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+            self.record_local_audit(
+                &device,
+                TypedLocalAuditEvent {
+                    action: LocalAuditActionV1::ReauthFailure(GenericAuditContextV1::new(known)),
+                    outcome: LocalAuditOutcomeV1::Failed,
+                },
+            )?;
         }
         result
     }
 
-    /// Prepares a binding and its separately authorized activation event against
-    /// the same head. The encrypted row is pending until selected-head verification.
+    /// Signs only the binding, then atomically persists its encrypted profile and
+    /// journal. Activation authorization starts separately in `authorize_prepared`.
     pub fn provision(
         &self,
         request: ProvisionOperatorRequest<'_>,
@@ -543,6 +586,7 @@ impl<'a> OperatorBindingService<'a> {
             } else if old.is_some() {
                 return Err(OperatorLifecycleError::ReplacementRequiresRevocation);
             }
+            operator_host::ensure_preparable(request.database, self.head, old_hash)?;
             let identity_request = ExternalIdentityRequest {
                 organization_id: certificate.organization_id,
                 device_id: certificate.device_id,
@@ -572,12 +616,17 @@ impl<'a> OperatorBindingService<'a> {
             {
                 return Err(OperatorLifecycleError::IdentityVerification);
             }
+            if old.as_ref().is_some_and(|profile| {
+                profile.profile_commitment_salt() == &verified.profile_commitment_salt
+            }) {
+                return Err(OperatorLifecycleError::ProfileCommitment);
+            }
             let normalized = ea_schema::OperatorSnapshotV1::new(
                 verified.organization_id,
                 verified.operator_subject_id,
                 verified.display_name,
                 verified.function_label,
-                fresh()?,
+                verified.profile_commitment_salt,
                 ObjectHash::from(Hash32::ZERO),
             )
             .map_err(|_| OperatorLifecycleError::ProfileCommitment)?;
@@ -621,7 +670,7 @@ impl<'a> OperatorBindingService<'a> {
                 effective_from_sequence: event.effective_from_sequence,
                 revoked_from_sequence: None,
             };
-            let (binding, binding_authorization) = self.sign(
+            let (binding, authorized) = self.sign(
                 &OperatorTrustTarget::Binding(fields),
                 ports,
                 actor.proof(),
@@ -632,12 +681,6 @@ impl<'a> OperatorBindingService<'a> {
             event.change = RegistryChangeV1::OperatorBinding {
                 object_hash: new_hash,
             };
-            let (activation, activation_authorization) = self.sign(
-                &OperatorTrustTarget::Registry(event.clone()),
-                ports,
-                actor.proof(),
-                Some(&binding_authorization),
-            )?;
             if native.os_account_binding_hash(certificate.organization_id, certificate.device_id)?
                 != account_hash
                 || native
@@ -649,11 +692,10 @@ impl<'a> OperatorBindingService<'a> {
             Ok((
                 pending,
                 old,
-                PreparedOperatorBinding {
+                SignedOperatorBinding {
                     binding,
-                    activation,
-                    binding_authorization,
-                    activation_authorization,
+                    binding_authorization: authorized.exact_authorization,
+                    authorization_use_time: authorized.intent.authorization_use_time(),
                 },
             ))
         })();
@@ -670,19 +712,15 @@ impl<'a> OperatorBindingService<'a> {
             outcome,
         )?;
         let (pending, old, prepared) = preparation?;
-        let persist = (|| {
-            ports.authorization.stage_signed_objects(&[
-                prepared.binding_authorization_bytes(),
-                prepared.binding_bytes(),
-                prepared.activation_authorization_bytes(),
-                prepared.activation_bytes(),
-            ])?;
-            pending.persist(
-                request.database,
-                prepared.binding_object_hash(),
-                old.as_ref(),
-            )
-        })();
+        let persist = operator_host::persist_prepared(
+            request.database,
+            self.head,
+            &pending,
+            old.as_ref(),
+            old_hash,
+            prepared,
+            request.window,
+        );
         if let Err(error) = persist {
             self.binding_audit(
                 actor.proof(),
@@ -693,7 +731,7 @@ impl<'a> OperatorBindingService<'a> {
             )?;
             return Err(error);
         }
-        Ok(prepared)
+        persist
     }
 
     fn sign(
@@ -702,7 +740,7 @@ impl<'a> OperatorBindingService<'a> {
         ports: &mut OperatorMutationPorts<'_>,
         proof: &OperatorSessionProof,
         previous_authorization: Option<&[u8]>,
-    ) -> Result<(ExactObjectBytes, Vec<u8>), OperatorLifecycleError> {
+    ) -> Result<(ExactObjectBytes, AuthorizedOperatorIntent), OperatorLifecycleError> {
         let auth = ports.authorization.authorize(self.head, target)?;
         if let Some(previous) = previous_authorization {
             require_distinct_authorizations(previous, &auth.exact_authorization)?;
@@ -718,7 +756,7 @@ impl<'a> OperatorBindingService<'a> {
                 proof,
             )
             .map_err(OperatorLifecycleError::Ceremony)?;
-        Ok((signed, auth.exact_authorization))
+        Ok((signed, auth))
     }
     fn registry_event(
         &self,
@@ -800,7 +838,7 @@ impl OsAccountProvider for SharedAccount {
 }
 struct FreshAuthenticator<'a> {
     bound: BoundOperator,
-    native: &'a dyn OperatorAuthenticator,
+    native: &'a dyn OperatorPresence,
 }
 impl OperatorAuthenticator for FreshAuthenticator<'_> {
     fn bound_operator(&self) -> &BoundOperator {

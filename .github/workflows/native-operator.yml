@@ -1,0 +1,76 @@
+# Portable native-provider checks are separate from the canonical Rust/JS gate.
+# No release credentials, account enrollment, real presence prompts or install.
+name: native-operator
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build helper and monitor; exercise isolated fixtures
+        run: |
+          set -eu
+          sh crates/ea-admin/native/macos/build.sh
+          sh crates/ea-admin/native/macos/verify.sh
+
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Native build, protocol and disposable Secret Service
+        run: sh crates/ea-admin/native/linux/verify-container.sh
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: crates/ea-admin/native/windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: crates/ea-admin/native/windows/global.json
+      - name: Restore exact dependency graph and publish both architectures
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet restore ea-native-operator.csproj --locked-mode
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($arch in @('win-x64', 'win-arm64')) {
+            dotnet publish ea-native-operator.csproj -c Release -r $arch --self-contained false --no-restore -p:UseSharedCompilation=false -o "artifacts/ci-$arch"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Portable state and real process parser tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet restore tests/ProtocolTests.csproj --locked-mode
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project tests/ProtocolTests.csproj --no-restore -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/process_protocol.py artifacts/ci-win-x64/ea-native-operator.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Release manifest data and file integrity fixtures
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./tests/release_manifest.ps1
+          ./tests/management_fixtures.ps1

@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Explicit fixture constructors. Production entry points never consult these.
+test-support = []
+
 [dependencies]
 # Die Zeremonie schreibt die `adminRootCeremony`-Zeile, BEVOR sie die Zielbytes
 # herausgibt. `LocalAuditService::record_signed` ist der einzige Weg dorthin.
@@ -48,6 +52,14 @@ ea-schema.workspace = true
 # um KEINE Abhaengigkeit; die Richtung zeigt ausschliesslich hierher.
 ea-trust.workspace = true
 ea-types.workspace = true
+ea-time.workspace = true
+ea-archive.workspace = true
+ea-recovery.workspace = true
+ea-verify.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
 # Schritt 1 erzeugt „zufaellige Organisations- und Ketten-ID" (`:1336`). Der
 # Baum kennt keinen gemeinsamen Zufallsport: `getrandom::fill` wird an 18
 # Stellen in acht Kisten DIREKT gerufen — `ea-audit`, `ea-crypto`, `ea-draft`,

@@ -3,7 +3,6 @@
 mod lifecycle;
 mod support;
 
-use ea_admin::OperatorBindingService;
 use ea_crypto::{SignerRole, VerificationContext, verify_cose_sign1};
 use ea_format::{LocalAuditActionV1, LocalAuditOutcomeV1, decode_local_audit_event};
 use ea_trust::SelectedRegistryHead;
@@ -38,7 +37,7 @@ fn persisted_login_signature_matches_its_named_writer_certificate() {
     let head = h.head();
     let audit = h.audit(&head, 0);
     let authenticator = h.authenticator(&head);
-    OperatorBindingService::new(&head, audit.service())
+    h.service(&head, audit.service())
         .verify_session(h.login(&authenticator))
         .unwrap();
     let rows = audit.booked();
@@ -62,7 +61,7 @@ fn failed_login_and_reauth_have_valid_device_signatures_and_the_known_binding() 
     let mut authenticator = h.authenticator(&head);
     authenticator.fail = true;
     assert!(
-        OperatorBindingService::new(&head, audit.service())
+        h.service(&head, audit.service())
             .verify_session(h.login(&authenticator))
             .is_err()
     );
@@ -96,7 +95,7 @@ fn unknown_requested_binding_is_audited_without_attributing_it_to_an_operator() 
             .is_none()
     );
     assert!(
-        OperatorBindingService::new(&head, audit.service())
+        h.service(&head, audit.service())
             .verify_session(request)
             .is_err()
     );
@@ -144,7 +143,15 @@ fn binding_and_revocation_audits_verify_exact_actor_targets_and_effective_sequen
         .map(|bytes| decode_local_audit_event(bytes).unwrap())
         .filter(|row| matches!(row.action(), LocalAuditActionV1::BindingChange(_)))
         .collect();
-    assert_eq!(binding_changes.len(), 1);
+    assert_eq!(binding_changes.len(), 4);
+    for row in &binding_changes {
+        let LocalAuditActionV1::BindingChange(context) = row.action() else {
+            unreachable!()
+        };
+        assert!(context.old_binding_object_hash().is_none());
+        assert!(context.new_binding_object_hash() == Some(prepared.binding_object_hash()));
+        assert_eq!(context.effective_from_sequence(), expected_sequence);
+    }
     let row = &binding_changes[0];
     assert!(row.operator_binding_object_hash() == Some(h.binding));
     assert_eq!(row.outcome(), LocalAuditOutcomeV1::Accepted);
@@ -193,7 +200,7 @@ fn signature_verification_rejects_tampering_and_the_original_root_device_mismatc
     let head = h.head();
     let authenticator = h.authenticator(&head);
     let audit = h.audit(&head, 0);
-    OperatorBindingService::new(&head, audit.service())
+    h.service(&head, audit.service())
         .verify_session(h.login(&authenticator))
         .unwrap();
     let mut bytes = audit.booked().remove(0);
@@ -208,9 +215,14 @@ fn signature_verification_rejects_tampering_and_the_original_root_device_mismatc
         0,
         support::FixtureKeyProvider::root(),
     );
-    OperatorBindingService::new(&head, mismatched.service())
-        .verify_session(h.login(&authenticator))
-        .unwrap();
+    assert_eq!(
+        h.service(&head, mismatched.service())
+            .verify_session(h.login(&authenticator))
+            .err()
+            .unwrap()
+            .code(),
+        "EA-OPERATOR-AUDIT-FAILED"
+    );
     assert!(!signature_verifies(
         &mismatched.booked()[0],
         &head,
@@ -224,7 +236,7 @@ fn sqlcipher_persisted_login_bytes_verify_after_reopening_the_database() {
     let head = h.head();
     let authenticator = h.authenticator(&head);
     let audit = sql_audit(&head, &h.database, h.certificate);
-    OperatorBindingService::new(&head, &audit)
+    h.service(&head, &audit)
         .verify_session(h.login(&authenticator))
         .unwrap();
     drop(audit);
@@ -250,7 +262,8 @@ fn recovery_admin_login_is_signed_by_its_own_admin_certificate() {
     let head = support::selected_head_at(&h.line, 3, 50);
     let audit = admin.audit(&head);
     let authenticator = admin.authenticator(&head);
-    OperatorBindingService::new(&head, audit.service())
+    admin
+        .service(&head, audit.service())
         .verify_session(admin.login(&authenticator))
         .unwrap();
     let rows = audit.booked();

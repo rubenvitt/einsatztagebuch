@@ -125,6 +125,8 @@ pub struct HeadOptions {
     /// Bindung stellt, braucht die Bindung mit genau diesem nachgerechneten
     /// Wert. `None` laesst das bestehende Verhalten unveraendert.
     pub binding_operator_profile_commitment_override: Option<Hash32>,
+    /// Native process fixtures bind the actual platform-derived account hash.
+    pub binding_os_account_hash_override: Option<Hash32>,
     /// `allowed-archive-profile-hashes` des Root-signierten `policy-core-v1`.
     ///
     /// Ohne diese Ueberschreibung traegt die Policy den synthetischen Wert
@@ -211,6 +213,7 @@ impl Default for HeadOptions {
             signing_public_key_override: None,
             kem_public_key_override: None,
             binding_operator_profile_commitment_override: None,
+            binding_os_account_hash_override: None,
             policy_allowed_archive_profile_hashes_override: None,
             policy_operating_profile_override: None,
             policy_registry_expiry_behavior_override: None,
@@ -1017,7 +1020,9 @@ fn direct_payload(
                     .unwrap_or_else(|| hash32(marker.wrapping_add(1))),
                 device_certificate_hash: CertificateHash::from(*certificate_hash),
                 operator_role: *role,
-                os_account_binding_hash: hash32(marker.wrapping_add(2)),
+                os_account_binding_hash: options
+                    .binding_os_account_hash_override
+                    .unwrap_or_else(|| hash32(marker.wrapping_add(2))),
                 operator_instance_key_thumbprint: options
                     .binding_instance_key_thumbprint_override
                     .unwrap_or_else(|| KeyThumbprint::from(hash32(marker.wrapping_add(3)))),

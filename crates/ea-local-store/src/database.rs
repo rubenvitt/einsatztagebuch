@@ -231,12 +231,38 @@ impl EncryptedDatabase {
         provider: &dyn KeyProvider,
         database_key: &KeyHandle,
     ) -> Result<Self, StoreError> {
+        Self::open_with_flags(path, provider, database_key, rusqlite::OpenFlags::default())
+    }
+
+    /// Open an existing encrypted store without SQLite's CREATE flag. A login
+    /// cannot silently replace a missing/restored profile with an empty database,
+    /// even if the file disappears after the host checks its existence.
+    pub fn open_existing(
+        path: &Path,
+        provider: &dyn KeyProvider,
+        database_key: &KeyHandle,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_flags(
+            path,
+            provider,
+            database_key,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    }
+
+    fn open_with_flags(
+        path: &Path,
+        provider: &dyn KeyProvider,
+        database_key: &KeyHandle,
+        flags: rusqlite::OpenFlags,
+    ) -> Result<Self, StoreError> {
         let key: SecretVec = provider.unwrap_database_key(database_key)?;
         if key.is_empty() {
             return Err(StoreError::KeyRequired);
         }
 
-        let mut connection = Connection::open(path).map_err(|_| StoreError::Database)?;
+        let mut connection =
+            Connection::open_with_flags(path, flags).map_err(|_| StoreError::Database)?;
 
         // `PRAGMA key` ist die ERSTE Anweisung auf der Verbindung. Danach ist
         // die Verbindung entschluesselt oder gar nicht brauchbar.

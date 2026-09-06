@@ -31,6 +31,10 @@ ea-types.workspace = true
 ea-verify.workspace = true
 
 [dev-dependencies]
+ea-admin = { workspace = true, features = ["test-support"] }
+ea-local-store.workspace = true
+ea-key-provider = { workspace = true, features = ["test-support"] }
+ea-operator.workspace = true
 # Nur fuer die per #[path] eingebundene Fixture-Kette von ea-verify, ea-archive,
 # ea-trust und ea-format sowie fuer den Schemanachweis des Berichts.
 ea-archive.workspace = true

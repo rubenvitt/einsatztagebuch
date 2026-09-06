@@ -33,6 +33,7 @@ pub struct VerifiedEncryptedEntry {
     object_hash: ObjectHash,
     sequence: ChainSequence,
     minted_at: UnixMillis,
+    operator_bindings: Option<crate::operator_profile::HistoricalOperatorBindings>,
 }
 
 impl VerifiedEncryptedEntry {
@@ -43,6 +44,7 @@ impl VerifiedEncryptedEntry {
         object_hash: ObjectHash,
         sequence: ChainSequence,
         minted_at: UnixMillis,
+        operator_bindings: Option<crate::operator_profile::HistoricalOperatorBindings>,
     ) -> Self {
         Self {
             exact_entry_bytes,
@@ -50,6 +52,7 @@ impl VerifiedEncryptedEntry {
             object_hash,
             sequence,
             minted_at,
+            operator_bindings,
         }
     }
 
@@ -78,6 +81,14 @@ impl VerifiedEncryptedEntry {
     #[must_use]
     pub const fn minted_at(&self) -> UnixMillis {
         self.minted_at
+    }
+
+    /// The authenticated historical state at this entry's exact registry head.
+    /// Absence is retained as a refusal, never replaced with unverified bytes.
+    pub(crate) const fn operator_bindings(
+        &self,
+    ) -> Option<&crate::operator_profile::HistoricalOperatorBindings> {
+        self.operator_bindings.as_ref()
     }
 
     /// Die exakten Objektbytes, NUR fuer den Entkapseler dieser Crate.

@@ -57,15 +57,33 @@
 //! ```
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate self as ea_admin;
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
+mod native_identity;
+mod native_process;
+mod native_watch;
+
 pub mod anchor_media;
 pub mod bootstrap;
 pub mod bootstrap_store;
 pub mod genesis;
+pub mod native_provider;
+pub mod operator_authority;
+pub mod operator_ceremony;
+pub mod operator_exchange;
+mod operator_remote;
+pub mod operator_runtime;
 pub mod production_state;
 
 mod error;
 pub mod operator;
 pub mod operator_profile;
+pub mod operator_trust_store;
 mod root_ceremony;
 pub use operator::*;
 pub use operator_profile::verify_operator_snapshot;

@@ -617,6 +617,7 @@ fn an_intended_target_verifies_before_it_is_signed_or_published() {
 
     let intent = verify_intended_trust_target(&trust, None, &payload, USE_TIME, SEQUENCE)
         .expect("die Autorisierung deckt das beabsichtigte Ziel, auch ohne dessen Signatur");
+    assert_eq!(intent.authorization_use_time(), USE_TIME);
     assert!(intent.target_trust_subtype() == payload.subtype());
     assert_eq!(intent.previous_registry_version().get(), 0);
 

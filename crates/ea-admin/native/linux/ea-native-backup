@@ -1,0 +1,18 @@
+#!/bin/sh
+# This deliberately accepts exactly an output archive and one absolute source
+# directory, not arbitrary tar options capable of overriding exclusions.
+set -eu
+unset TAR_OPTIONS
+if [ "$#" -ne 2 ] || [ ! -d "$2" ]; then
+    echo 'usage: ea-native-backup /absolute/archive.tar /absolute/source-directory' >&2
+    exit 2
+fi
+case "$1" in /*) ;; *) exit 2;; esac
+case "$2" in /*) ;; *) exit 2;; esac
+ea_source=$(/usr/bin/realpath -- "$2")
+case "$ea_source" in
+    /var/lib/ea-native-operator|/var/lib/ea-native-operator/*) exit 2;;
+esac
+# dereference is deliberately absent; do not follow a symlink into the marker.
+exec /usr/bin/tar --create --file="$1" --wildcards --no-anchored \
+    --exclude-from=/etc/ea-native-operator/backup-excludes --directory="$ea_source" -- .

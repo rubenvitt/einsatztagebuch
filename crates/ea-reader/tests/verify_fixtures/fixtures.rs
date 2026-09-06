@@ -300,8 +300,8 @@ static UNRESOLVABLE_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = O
 static RESOLVABLE_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
 static FORGED_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
 static FOREIGN_TARGET_STUB_ARCHIVE_V1: OnceLock<verify_support::ReportArchive> = OnceLock::new();
-static GENESIS_PLAINTEXT_ARCHIVE_V1: OnceLock<verify_support::CompleteArchive> = OnceLock::new();
-static GENESIS_PLAINTEXT_V1: OnceLock<Vec<u8>> = OnceLock::new();
+static GENESIS_PLAINTEXT_ARCHIVE_V1: OnceLock<(verify_support::CompleteArchive, Vec<Vec<u8>>)> =
+    OnceLock::new();
 static RECEIPT_ARCHIVE_V1: OnceLock<verify_support::ReceiptArchive> = OnceLock::new();
 
 /// Wie viele Eintraege [`complete_archive`] traegt: GENAU EINEN.
@@ -330,34 +330,26 @@ fn complete() -> &'static verify_support::CompleteArchive {
     COMPLETE_ARCHIVE_V1.get_or_init(verify_support::complete_valid_archive)
 }
 
-/// Der lueckenlose Bestand, dessen einziger Eintrag den EINGEFRORENEN
-/// Genesis-Klartext traegt.
-///
-/// Das ist der EINZIGE Bestand dieses Moduls mit schemagueltigem Klartext, und
-/// er ist der Traeger des vollen Erfolgspfads von `decrypt_verified`: alle
-/// anderen Bestaende tragen `verify_support::COMPLETE_PLAINTEXT_V1`, an dem
-/// die Schemabestimmung erwartungsgemaess scheitert. Er entsteht ueber
-/// `complete_valid_archive_with_plaintext` und damit ueber DENSELBEN Bau wie
-/// [`complete_archive`]; nur der Klartext ist ein anderer. Derselbe Anker,
-/// derselbe Tresor.
+/// Genesis payload with a real, signed operator binding. The schema vector
+/// supplies the body; its synthetic identity is replaced before encryption.
 #[must_use]
 pub fn complete_archive_with_a_genesis_plaintext() -> &'static ArchiveFixture {
-    &GENESIS_PLAINTEXT_ARCHIVE_V1
-        .get_or_init(|| verify_support::complete_valid_archive_with_plaintext(genesis_plaintext()))
-        .fixture
+    &genesis_archive().0.fixture
 }
 
-/// Der eingefrorene Genesis-Vektor aus `vectors/format/payload-v1/genesis.hex`
-/// — dieselbe Quelle, gegen die `crates/ea-schema/tests/v1_validation.rs`
-/// seine Bestimmung misst.
-///
-/// Aus dem Vektor und nicht aus `ea_schema::encode_payload`: der Zeuge soll
-/// den Klartext gegen etwas messen, das NICHT der Reader selbst erzeugt hat.
+/// Exact fixture plaintext before encryption, independently retained for the
+/// decryption comparison. It includes the authenticated operator attribution.
 #[must_use]
 pub fn genesis_plaintext() -> &'static [u8] {
-    GENESIS_PLAINTEXT_V1.get_or_init(|| {
-        hex::decode(include_str!("../../../../vectors/format/payload-v1/genesis.hex").trim_end())
-            .expect("der eingefrorene Genesis-Vektor ist gueltiges Hex")
+    &genesis_archive().1[0]
+}
+
+fn genesis_archive() -> &'static (verify_support::CompleteArchive, Vec<Vec<u8>>) {
+    GENESIS_PLAINTEXT_ARCHIVE_V1.get_or_init(|| {
+        super::operator::archive_with_payloads(
+            &[&super::operator::genesis_plaintext()],
+            super::operator::Defect::None,
+        )
     })
 }
 

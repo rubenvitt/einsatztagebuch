@@ -334,6 +334,25 @@ pub struct TrustPayloadV1 {
 }
 
 impl TrustPayloadV1 {
+    /// Parses the exact canonical `[subtype, payload]` input before signing.
+    pub fn from_exact_digest_input(input: &[u8]) -> Result<Self, FormatError> {
+        if input.len() > crate::ETB_MAX_RAW_BYTES_V1 {
+            return Err(FormatError::EtbRawLimit);
+        }
+        ea_cbor::validate(input, ea_cbor::ParserLimits::V1)?;
+        let mut decoder = Decoder::new(input);
+        expect_array_length(&mut decoder, 2)?;
+        let subtype = TrustSubtypeV1::from_str(decoder.str().map_err(|_| FormatError::Shape)?)?;
+        let payload = exact_item(input, &mut decoder)?;
+        finish(&decoder, input)?;
+        let kind = validate_payload(subtype, payload)?;
+        let parsed = Self::from_validated(subtype, kind, payload.to_vec())?;
+        if parsed.exact_digest_input() != input {
+            return Err(FormatError::Shape);
+        }
+        Ok(parsed)
+    }
+
     pub fn initial_root_certificate(fields: RootCertificateFieldsV1) -> Result<Self, FormatError> {
         if fields.previous_root_certificate_object_hash.is_some() {
             return Err(FormatError::Shape);
