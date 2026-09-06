@@ -22,4 +22,7 @@ pub use event::{
     AuditActorProof, AuditError, AuthenticatedDevice, LocalAuditService, SignedLocalAuditEvent,
     TypedLocalAuditEvent,
 };
-pub use repository::{LocalAuditRepository, SignedLocalAuditService, SqliteLocalAuditRepository};
+pub use repository::{
+    LocalAuditRepository, PreparedLocalAuditEvent, SignedLocalAuditService,
+    SqliteLocalAuditRepository,
+};

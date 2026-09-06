@@ -460,7 +460,15 @@ git commit -m "feat(admin): bootstrap independently anchored organizations"
 
 ### Task 3: Operator Provisioning, Session Verification, and Revocation
 
-**Abgleich DRK-271 gegen `origin/main` (`523df5e`, 2026-09-05):**
+**Fortsetzung DRK-271, 2026-09-06:** Der Arbeitsauftrag umfasst die native
+Zusammensetzung, ein funktionales CLI und die getrennte Offline-Autorität.
+Die frühere Begrenzung auf den synchronen Kern ist aufgehoben. Der detaillierte
+[Ergänzungsplan](2026-09-06-drk-271-native-completion.md) und
+[ADR 0006](../../adr/0006-native-operator-host-and-offline-authority.md) beschreiben
+diese Fortsetzung. Der Branch begann auf frisch gefetchtem `origin/main`;
+der Main-Stand wird vor der PR-Aktualisierung erneut geprüft.
+
+**Verbindliche Implementierungsgrenzen:**
 
 - Der Kern ist synchron. Die Beispiele unten beschreiben das Verhalten; die
   realen Zeugen verwenden `#[test]`, keine Tokio-Laufzeit und kein `.await`.
@@ -477,15 +485,24 @@ git commit -m "feat(admin): bootstrap independently anchored organizations"
   `ea-draft::OperatorProfileRepository` liest es nur. Der administrative
   Schreibpfad gehört in `ea-admin`, benutzt dieselbe verschlüsselte Datenbank
   und darf keine parallele Klartext-Profildatei anlegen.
-- Windows/macOS/Linux stellen bislang OS-Konto- und Präsenz-Ports bereit,
-  keine nativen API-Implementierungen. Der neue Provisionierungsport verlangt
-  extern geprüfte Identität und einen frischen, nicht roamingfähigen,
-  nicht synchronisierten, vom Backup ausgeschlossenen Instanzschlüssel.
-  Vertragstests mit echten Signaturen laufen auf jedem Testhost, einschließlich
-  der Ubuntu-UID-Wiederverwendung. Sie ersetzen keine native Plattformabnahme.
-  Solange dem CLI die nativen/offline Provider fehlen, muss ein
-  `operator provision|verify-session|revoke`-Aufruf dies ohne Mutation mit
-  `Unsupported` melden; weder Identitätstext noch Schlüsseldateien ersetzen sie.
+- Windows/macOS/Ubuntu erhalten echte native Konto-, Schlüssel- und Präsenz-
+  Implementierungen. Der Host verifiziert das installierte Programm vor privatem
+  IPC, begrenzt die Prozesslaufzeit und hält einen durchgehenden Sitzungswächter.
+  Sperre oder verlorene Überwachungsabdeckung bleibt bis zur neuen Anmeldung
+  verriegelt. Native Betriebssystemabnahme erfordert eingerichtete Konten,
+  signierte/geschützte Pakete und reale Dialoge; Cross-Builds ersetzen sie nicht.
+- Das normale CLI komponiert diese Provider mit einem vollständig geprüften
+  Archiv und permanentem SQLCipher-Trust-Zustand. Ein separates Testprogramm
+  verwendet ausdrücklich Test-Provider; der Produktionspfad hat keinen
+  Identitäts-/Signierer-Override aus Konfiguration oder Umgebung.
+- Die Offline-Autorität erhält signierte, Head-gebundene Anfragen. Profil und
+  von ihr frisch erzeugtes Salz werden ausschließlich verschlüsselt zum Ziel
+  übertragen. Ihre private Terminaleingabe folgt auf native Admin-Präsenz und
+  den ausdrücklich bestätigten externen Identitätsabgleich.
+- Der Zielrechner speichert vor dem Austausch die exakten Anfragen und ihre
+  ephemeren Entschlüsselungsschlüssel in SQLCipher. Root-Autorisierung, Replay-
+  Verbrauch, Audit und genaue Antwort dürfen bei Wiederaufnahme weder neue
+  Nonces noch einen teilweise abgeschlossenen Freigabezustand erzeugen.
 - Widerruf hat kein direktes Trust-Ziel: Bindungen werden durch
   `RegistryChangeV1::Target { target_kind: 1, object_hash }` (Action 1)
   widerrufen; ein Admin-Zertifikat durch `AdminCertificate { effect: 1, .. }`
@@ -561,11 +578,13 @@ Expected: FAIL because provisioning/replacement orchestration and native account
 
 - [ ] **Step 3: Implement external identity-check to signed binding flow**
 
-The synchronous core behind explicit trusted native and external identity ports
-is implemented. Signed binding and activation objects are durably staged before
-the encrypted profile is committed; Registry selection activates them separately.
-This step remains open until native adapter composition, publication readiness
-and native platform acceptance are delivered; the contract tests do not close it.
+The implementation now includes the native host and the separate offline authority.
+The signed binding pair and encrypted profile are committed atomically before an
+activation is requested. Activation bytes remain behind fresh native/profile/audit
+readiness checks; a newly verified Registry head and login complete enrollment.
+This step remains open until integrated delivery and the required native acceptance
+evidence exist. Reports must distinguish process fixtures from actual installed-OS
+presence, signing identity, continuous lock detection and the enforced restore path.
 
 Generate fresh 32-byte `profileCommitmentSalt`, keep display name/function/salt only in encrypted profile, compute the exact operator-profile commitment, generate a new non-roaming installation key, derive OS account binding hash through Stage 2 provider, obtain Admin authorization with action 4, and Root-sign the fixed binding core. Verify device certificate, role, effective/revoked sequence, account hash, fresh instance challenge, profile commitment, native presence, and five-minute session expiry on every action. Revocation is Root-signed from its effective sequence. Account deletion/recreation, UID reuse, restored home/app backup, lost Secret Service collection, or missing instance key always requires external re-identification, new key/auth/binding, and revocation of old binding.
 

@@ -64,6 +64,8 @@ pub const FORMAT_SWITCH: &str = "--format";
 pub const OUTPUT_SWITCH: &str = "--output";
 /// `--key <key-source>`, nur bei `decrypt`.
 pub const KEY_SWITCH: &str = "--key";
+/// Public operator configuration; required only by operator commands.
+pub const OPERATOR_CONFIG_SWITCH: &str = "--operator-config";
 /// `--include-runtime-metadata`, nur bei `report`.
 pub const INCLUDE_RUNTIME_METADATA_SWITCH: &str = "--include-runtime-metadata";
 /// `--report-signing-key <source>`, nur bei `report` — und IMMER verweigert.
@@ -146,7 +148,10 @@ pub enum Command {
     /// Schluesselports gibt es in dieser Scheibe nicht.
     OrganizationInit,
     /// Verwaltung des nativen, OS-kontogebundenen Operators.
-    Operator { action: OperatorAction },
+    Operator {
+        action: OperatorAction,
+        config: PathBuf,
+    },
 }
 
 /// Ein vollstaendig geparster Aufruf.
@@ -389,6 +394,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut output: Option<PathBuf> = None;
     let mut key: Option<PathBuf> = None;
     let mut report_signing_key: Option<PathBuf> = None;
+    let mut operator_config: Option<PathBuf> = None;
     let mut format: Option<Format> = None;
     let mut include_runtime_metadata: Option<bool> = None;
     let mut command_kind: Option<CommandKind> = None;
@@ -413,6 +419,9 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 }
                 OUTPUT_SWITCH => take_path_value(&mut output, OUTPUT_SWITCH, &mut arguments)?,
                 KEY_SWITCH => take_path_value(&mut key, KEY_SWITCH, &mut arguments)?,
+                OPERATOR_CONFIG_SWITCH => {
+                    take_path_value(&mut operator_config, OPERATOR_CONFIG_SWITCH, &mut arguments)?
+                }
                 REPORT_SIGNING_KEY_SWITCH => take_path_value(
                     &mut report_signing_key,
                     REPORT_SIGNING_KEY_SWITCH,
@@ -476,6 +485,12 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     if key.is_some() && command_kind != CommandKind::Decrypt {
         return Err(UsageError::SwitchNotAllowed {
             switch: KEY_SWITCH,
+            command: command_name,
+        });
+    }
+    if operator_config.is_some() && command_kind != CommandKind::Operator {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: OPERATOR_CONFIG_SWITCH,
             command: command_name,
         });
     }
@@ -571,7 +586,13 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     });
                 }
             };
-            Command::Operator { action }
+            Command::Operator {
+                action,
+                config: operator_config.ok_or(UsageError::MissingSwitch {
+                    switch: OPERATOR_CONFIG_SWITCH,
+                    command: command_name,
+                })?,
+            }
         }
     };
 

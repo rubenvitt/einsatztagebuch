@@ -37,11 +37,14 @@
 
 use std::io::{self, Write};
 
-use ea_admin::{AdminError, BootstrapStep, ProductionState};
+use ea_admin::{
+    AdminError, BootstrapStep, ProductionState,
+    operator_runtime::{OperatorGoLiveReport, OperatorRuntimeError},
+};
 use ea_recovery::RecoveryError;
 use ea_verify::VerificationReportV1;
 
-use crate::args::UsageError;
+use crate::args::{Format, UsageError};
 
 /// Die geschlossene Grammatik, Zeile fuer Zeile.
 ///
@@ -62,7 +65,7 @@ const GRAMMAR_V1: [&str; 7] = [
     "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
     "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
-    "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke",
+    "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
 ];
 
 /// Was `organization init` TUT — und was ausdruecklich nicht.
@@ -93,15 +96,61 @@ pub fn print_grammar() {
     }
     println!("{ORGANIZATION_SCOPE_NOTE_V1}");
     println!(
-        "operator actions require native account/presence and offline signing providers; this build returns unsupported"
+        "operator config contains public archive/database paths, certificate/binding hashes, role and purpose; authority mode requires authority=true and target_certificate_hash; offline exchange uses ceremony_exchange_directory"
     );
 }
 
-/// Meldet die fehlende Host-Komposition ohne Konto-, Profil- oder Pfadangaben.
-pub fn print_operator_provider_refusal() {
-    eprintln!(
-        "einsatzarchiv: EA-OPERATOR-NATIVE-PROVIDER-UNAVAILABLE: native account/presence and offline signing providers are unavailable"
-    );
+/// Nur stabile Fehlercodes; keine privaten Profil-, Konto- oder Pfadangaben.
+pub fn print_operator_error(error: &OperatorRuntimeError) {
+    eprintln!("einsatzarchiv: {error}");
+}
+
+pub fn print_operator_authority_error(error: &ea_admin::operator_authority::AuthorityError) {
+    eprintln!("einsatzarchiv: {error}");
+}
+
+pub fn print_operator_authority_report(
+    count: usize,
+    format: Format,
+) -> Result<(), OperatorRuntimeError> {
+    let body = match format {
+        Format::Json => format!("{{\"authority\":true,\"processed_requests\":{count}}}\n"),
+        Format::Text => format!("authority=true\nprocessed_requests={count}\n"),
+    };
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(body.as_bytes())
+        .and_then(|()| stdout.flush())
+        .map_err(|_| OperatorRuntimeError::Io)
+}
+
+/// Das oeffentliche Betriebsprotokoll enthaelt keine Klartext-Personendaten.
+pub fn print_operator_report(
+    report: &OperatorGoLiveReport,
+    format: Format,
+) -> Result<(), OperatorRuntimeError> {
+    let body = match format {
+        Format::Json => report.to_json()?,
+        Format::Text => format!(
+            "binding_state={}\nproductive_binding_hashes={}\nrevoked_binding_hashes={}\ndevice_certificate_hash={}\nrole={}\nos_account_binding_hash={}\ncurrent_native_account_match={}\nregistry_head_hash={}\nnext_sequence={}\nrevocation_procedure={}",
+            report.binding_state,
+            report.productive_binding_hashes.join(","),
+            report.revoked_binding_hashes.join(","),
+            report.device_certificate_hash,
+            report.role,
+            report.os_account_binding_hash,
+            report.current_native_account_match,
+            report.registry_head_hash,
+            report.next_sequence,
+            report.revocation_procedure,
+        ),
+    };
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(body.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|_| OperatorRuntimeError::Io)
 }
 
 /// Druckt einen Aufruffehler auf stderr.

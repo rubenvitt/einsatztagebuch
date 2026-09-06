@@ -91,6 +91,7 @@ pub struct VerifiedAdminAuthorizationIntent {
 
 struct VerifiedIntentInner {
     authorization_object_hash: ObjectHash,
+    authorization_use_time: UnixMillis,
     target_trust_subtype: TrustSubtypeV1,
     authorized_target_core_hash: Hash32,
     previous_registry_version: RegistryVersion,
@@ -103,6 +104,13 @@ impl VerifiedAdminAuthorizationIntent {
     #[must_use]
     pub const fn authorization_object_hash(&self) -> ObjectHash {
         self.inner.authorization_object_hash
+    }
+
+    /// Time at which the shared verifier proved this authorization valid.
+    /// Retain it for exact historical replay; it is not a new current permit.
+    #[must_use]
+    pub const fn authorization_use_time(&self) -> UnixMillis {
+        self.inner.authorization_use_time
     }
 
     #[must_use]
@@ -321,6 +329,7 @@ pub fn verify_intended_trust_target(
     Ok(VerifiedAdminAuthorizationIntent {
         inner: VerifiedIntentInner {
             authorization_object_hash,
+            authorization_use_time: now,
             // Beide Werte sind hier BEWIESEN gleich denen des Ziels: die
             // geteilte Regel hat `descriptor.subtype` und
             // `descriptor.authorized_core_hash` gegen genau diese Felder
@@ -610,6 +619,44 @@ pub(crate) fn verify_authorization_signer(
         pre_transition_sequence,
     )?;
     Ok(signer_subject)
+}
+
+/// The existing authorization action table's description of an unsigned target.
+/// This is metadata, not an authorization or permission to sign.
+pub struct IntendedTrustTargetDescription {
+    action_code: u8,
+    organization_id: OrganizationId,
+    authorized_core_hash: Hash32,
+}
+
+impl IntendedTrustTargetDescription {
+    pub const fn action_code(&self) -> u8 {
+        self.action_code
+    }
+    pub const fn organization_id(&self) -> OrganizationId {
+        self.organization_id
+    }
+    pub const fn authorized_core_hash(&self) -> Hash32 {
+        self.authorized_core_hash
+    }
+}
+
+pub fn describe_intended_trust_target(
+    trust: &VerifiedTrust,
+    head: Option<&SelectedRegistryHead>,
+    target: &TrustPayloadV1,
+    at_sequence: ChainSequence,
+) -> Result<IntendedTrustTargetDescription, TrustError> {
+    let state = head.map_or_else(
+        || trust.previous_head(),
+        SelectedRegistryHead::candidate_state,
+    );
+    let descriptor = describe_target(state, TargetSource::Intended(target), at_sequence)?;
+    Ok(IntendedTrustTargetDescription {
+        action_code: descriptor.required_action,
+        organization_id: descriptor.organization_id,
+        authorized_core_hash: descriptor.authorized_core_hash,
+    })
 }
 
 fn describe_target(

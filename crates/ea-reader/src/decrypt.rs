@@ -20,9 +20,10 @@
 //! oeffentlich heraus, und ihr Waechter beweist den Schnitt, statt ihn zu
 //! raten.
 //!
-//! Der EINZIGE Unterschied zu `open_entry` ist der, den der Reader braucht:
 //! `open_entry` verwirft den Klartext mit `drop(plaintext)`, weil `ea-verify`
-//! ihn nie herausgeben darf, und der Reader muss ihn anzeigen. Genau das kostet
+//! ihn nie herausgeben darf. Der Reader prueft vor der Anzeige zusaetzlich
+//! Schema und Operator-Profil gegen die verifizierte historische Bindung.
+//! Die getrennte Klartextfreigabe kostet
 //! die zweite Entkapselung: `claim_own_grants` faehrt bereits archivweit N
 //! HPKE-Entkapselungen und N AEAD-Oeffnungen, deren Klartext verworfen wird,
 //! und je angezeigtem Eintrag kommt eine weitere dazu. Das ist der Preis dafuer,
@@ -64,6 +65,8 @@ use crate::verify::ReaderError;
 /// [`crate::ReaderClassification`], nur paarweise und nur fuer einen Eintrag,
 /// den der Bericht als `ObjectResultKindV1::Valid` fuehrt, den kein Fehlerfeld
 /// nennt und dessen eigener Grant weder isoliert ist noch einen Befund traegt.
+/// Vor der Rueckgabe wird der entschluesselte Operator ausserdem gegen eine
+/// aktivierte Bindung am exakten historischen Manifestkopf geprueft.
 ///
 /// # Die Frischepruefung ist EXAKT und ohne Toleranz
 ///
@@ -87,6 +90,8 @@ use crate::verify::ReaderError;
 /// `effective_now` von dem Lauf abweicht, in dem die Zeugen entstanden.
 /// [`ReaderError::UnsupportedSchema`] mit `EA-READER-SCHEMA-UNSUPPORTED`, wenn
 /// keine der Schemabestimmungen den Klartext traegt. Ausserdem
+/// `EA-OPERATOR-PROFILE-COMMITMENT`, wenn der Snapshot nicht zu einer
+/// aktivierten Writer-Bindung am historischen Manifestkopf passt, sowie
 /// `EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED` und
 /// `EA-VERIFY-DECRYPT-PAYLOAD-OPEN-FAILED` als DURCHGEREICHTE Codes, sowie der
 /// Code von `ea_format::decode_exact_object`.
@@ -142,7 +147,15 @@ pub fn decrypt_verified(
     // Kopie des Klartexts — siehe die benannte Restfrage an
     // [`VerifiedDecryptedRecord`]. Je kuerzer diese Kopie lebt, desto kleiner
     // bleibt die Luecke.
-    let schema = plaintext.with_exposed(|bytes| determined_schema(schemas, bytes))?;
+    let schema = plaintext.with_exposed(|bytes| {
+        determined_schema(schemas, bytes, |payload| {
+            crate::operator_profile::verify_snapshot(
+                payload,
+                manifest.fields(),
+                entry.operator_bindings(),
+            )
+        })
+    })?;
 
     Ok(VerifiedDecryptedRecord {
         plaintext,
@@ -351,8 +364,9 @@ fn decoded_grant(grant: &VerifiedGrantForRecipient) -> Result<Parsed<GrantV1>, R
 fn determined_schema(
     schemas: &SchemaRegistry,
     plaintext: &[u8],
+    verify_payload: impl FnOnce(&PayloadV1) -> Result<(), ReaderError>,
 ) -> Result<SchemaColumnsV1, ReaderError> {
-    schemas
+    let view = schemas
         .schemas()
         .iter()
         .find_map(|descriptor| {
@@ -364,11 +378,12 @@ fn determined_schema(
                 )
                 .ok()
         })
-        .map(|view| SchemaColumnsV1 {
-            source_schema_id: view.source_schema_id(),
-            source_schema_version: view.source_schema_version(),
-            target_schema_id: view.target_schema_id(),
-            target_schema_version: view.target_schema_version(),
-        })
-        .ok_or(ReaderError::UnsupportedSchema)
+        .ok_or(ReaderError::UnsupportedSchema)?;
+    verify_payload(view.payload())?;
+    Ok(SchemaColumnsV1 {
+        source_schema_id: view.source_schema_id(),
+        source_schema_version: view.source_schema_version(),
+        target_schema_id: view.target_schema_id(),
+        target_schema_version: view.target_schema_version(),
+    })
 }

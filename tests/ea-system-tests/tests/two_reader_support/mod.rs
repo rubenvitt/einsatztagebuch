@@ -10,10 +10,10 @@
 //! Bestand entsteht deshalb ueber dieselbe `#[path]`-Kette, die
 //! `crates/ea-reader/tests/verify_fixtures/mod.rs`,
 //! `crates/ea-archive-fs/tests/support/mod.rs` und das Nachbarmodul `support`
-//! dieser Testcrate schon fahren, und ueber `complete_archive_for_recipients`
-//! — den EINEN Bau um die Achse „mehrere Empfaenger" erweitert, statt ihn
-//! hier zu verdoppeln (dieselbe Begruendung, die
-//! `complete_valid_archive_with_plaintexts` dort ausschreibt).
+//! dieser Testcrate schon fahren. Die Operator-Kulisse des Readers ergaenzt
+//! die regulaer signierte und aktivierte Writer-Bindung mit dem kanonischen
+//! Profil-Commitment. `bound_archive` erweitert deren Eintrag um den Plan
+//! fuer mehrere Empfaenger und signiert Manifest und Grants erneut.
 //!
 //! # „Ohne Grant fuer B" ist ein ZWEITER Bau, kein Loeschen
 //!
@@ -29,12 +29,12 @@
 //! [`TwoReaderArchive::without_the_grant_object_of`] existiert allein, damit
 //! der Zeuge das Loeschen als das misst, was es ist.
 //!
-//! # Der Klartext ist der eingefrorene Genesis-Vektor
+//! # Der Genesis-Vektor traegt das Profil der signierten Writer-Bindung
 //!
-//! `decrypt_verified` endet in der Schemabestimmung; `COMPLETE_PLAINTEXT_V1`
-//! traegt keine und fiele mit `EA-READER-SCHEMA-UNSUPPORTED`. Der Vektor aus
-//! `vectors/format/payload-v1/genesis.hex` ist dieselbe Quelle, gegen die
-//! `crates/ea-reader/tests/historical_expiry.rs` seinen Erfolgspfad misst.
+//! `decrypt_verified` prueft Schema UND Operator-Profil. Die Reader-Kulisse
+//! uebernimmt die Struktur aus `vectors/format/payload-v1/genesis.hex` und
+//! setzt Organisation, Operator-Snapshot und Registry-Version passend zur
+//! echten Bindung. Der erwartete Klartext enthaelt dieselben Metadaten.
 //!
 //! `#[path]`-Includes werden je Testziel uebersetzt; daher `allow(dead_code)`
 //! auf Modulebene.
@@ -43,6 +43,11 @@
 /// Das Fixture-Modul aus `ea-verify`, unveraendert weiterverwendet.
 #[path = "../../../../crates/ea-verify/tests/support/mod.rs"]
 pub mod verify_support;
+
+#[path = "../../../../crates/ea-reader/tests/verify_fixtures/operator.rs"]
+mod operator_fixture;
+
+mod bound_archive;
 
 use ea_archive::{ArchiveInventory, ArchiveSource};
 use ea_crypto::{
@@ -253,12 +258,12 @@ pub struct TwoReaderArchive {
 }
 
 impl TwoReaderArchive {
-    fn build(recipients: Vec<PlannedRecipientV1>, plaintext: &[u8]) -> Self {
+    fn build(recipients: Vec<PlannedRecipientV1>) -> Self {
         let grant_recipients = recipients
             .iter()
             .map(|recipient| recipient.key_thumbprint)
             .collect();
-        let archive = verify_support::complete_archive_for_recipients(&recipients, plaintext);
+        let archive = bound_archive::for_recipients(&recipients);
         assert_eq!(
             archive.grant_object_hashes.len(),
             recipients.len(),
@@ -338,34 +343,27 @@ impl TwoReaderArchive {
 
 /// EIN Chiffrat, drei initiale Grants: Recovery an einen Dritten, je ein
 /// `Reader`-Grant an [`reader_a`] und [`reader_b`]. Der Klartext ist der
-/// Genesis-Vektor.
+/// Genesis-Vektor mit dem Profil der signierten Writer-Bindung.
 #[must_use]
 pub fn archive_with_grants_for_both_readers() -> TwoReaderArchive {
-    TwoReaderArchive::build(
-        vec![
-            recovery_recipient(),
-            reader_a().planned(),
-            reader_b().planned(),
-        ],
-        &genesis_plaintext(),
-    )
+    TwoReaderArchive::build(vec![
+        recovery_recipient(),
+        reader_a().planned(),
+        reader_b().planned(),
+    ])
 }
 
 /// Derselbe Bau, dessen Plan NUR [`reader_a`] nennt: fuer [`reader_b`] gibt es
 /// hier keinen eigenen Grant — und hat es nie gegeben.
 #[must_use]
 pub fn archive_with_a_grant_for_reader_a_only() -> TwoReaderArchive {
-    TwoReaderArchive::build(
-        vec![recovery_recipient(), reader_a().planned()],
-        &genesis_plaintext(),
-    )
+    TwoReaderArchive::build(vec![recovery_recipient(), reader_a().planned()])
 }
 
-/// Der eingefrorene Genesis-Vektor aus `vectors/format/payload-v1/genesis.hex`.
+/// Der Genesis-Vektor mit Organisation, Profil und Registry-Version der Linie.
 #[must_use]
 pub fn genesis_plaintext() -> Vec<u8> {
-    hex::decode(include_str!("../../../../vectors/format/payload-v1/genesis.hex").trim_end())
-        .expect("der eingefrorene Genesis-Vektor ist gueltiges Hex")
+    bound_archive::genesis_plaintext().to_vec()
 }
 
 /// Der Eintragshash des EINEN Eintrags eines Bestands.

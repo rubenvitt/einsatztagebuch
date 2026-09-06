@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ea_crypto::{ContentType, object_hash};
 use ea_format::{LocalAuditEventCoreFieldsV1, encode_local_audit_core, encode_local_audit_event};
 use ea_key_provider::{KeyHandle, KeyProvider};
-use ea_local_store::{EncryptedDatabase, StoreValue};
+use ea_local_store::{EncryptedDatabase, StoreTransaction, StoreValue};
 use ea_types::{CertificateHash, DeviceId, EventId, ObjectHash, OrganizationId, UnixMillis};
 
 use crate::event::{
@@ -38,10 +38,35 @@ pub struct SqliteLocalAuditRepository {
     database: Arc<EncryptedDatabase>,
 }
 
+/// Signed bytes prepared for an enclosing durable publication transaction.
+/// This value does not assert that an audit row has been committed.
+pub struct PreparedLocalAuditEvent {
+    signed: SignedLocalAuditEvent,
+}
+impl PreparedLocalAuditEvent {
+    #[must_use]
+    pub fn exact_bytes(&self) -> &[u8] {
+        self.signed.exact_bytes()
+    }
+    #[must_use]
+    pub const fn id(&self) -> EventId {
+        self.signed.id()
+    }
+}
+
 impl SqliteLocalAuditRepository {
     #[must_use]
     pub const fn new(database: Arc<EncryptedDatabase>) -> Self {
         Self { database }
+    }
+
+    /// Append to the caller's transaction; the caller must commit it before
+    /// reporting publication. Any later transaction error rolls this row back.
+    pub fn append_prepared_in(
+        tx: &StoreTransaction<'_>,
+        event: &PreparedLocalAuditEvent,
+    ) -> Result<(), AuditError> {
+        append_signed_in(tx, &event.signed)
     }
 }
 
@@ -51,18 +76,8 @@ impl LocalAuditRepository for SqliteLocalAuditRepository {
         // zurueckkehrt: eine Auditzeile, die der Aufrufer als geschrieben
         // ansieht, waehrend sie noch in einer offenen Transaktion haengt, waere
         // eine Zeile, die ein Absturz verschwinden laesst.
-        self.database.transaction(|transaction| {
-            transaction.execute(
-                "INSERT INTO local_audit_event (event_id, exact_bytes, object_hash) \
-                 VALUES (?1, ?2, ?3)",
-                &[
-                    StoreValue::Blob(event.id().as_bytes().to_vec()),
-                    StoreValue::Blob(event.exact_bytes().to_vec()),
-                    StoreValue::Blob(object_hash(event.exact_bytes()).as_bytes().to_vec()),
-                ],
-            )?;
-            Ok::<(), AuditError>(())
-        })
+        self.database
+            .transaction(|transaction| append_signed_in(transaction, event))
     }
 
     fn event(&self, id: EventId) -> Result<SignedLocalAuditEvent, AuditError> {
@@ -75,6 +90,22 @@ impl LocalAuditRepository for SqliteLocalAuditRepository {
             .ok_or(AuditError::NotFound)?;
         Ok(SignedLocalAuditEvent::sealed(id, row.blob(0)?.to_vec()))
     }
+}
+
+fn append_signed_in(
+    transaction: &StoreTransaction<'_>,
+    event: &SignedLocalAuditEvent,
+) -> Result<(), AuditError> {
+    transaction.execute(
+        "INSERT INTO local_audit_event (event_id, exact_bytes, object_hash) \
+                 VALUES (?1, ?2, ?3)",
+        &[
+            StoreValue::Blob(event.id().as_bytes().to_vec()),
+            StoreValue::Blob(event.exact_bytes().to_vec()),
+            StoreValue::Blob(object_hash(event.exact_bytes()).as_bytes().to_vec()),
+        ],
+    )?;
+    Ok::<(), AuditError>(())
 }
 
 /// Der Dienst, der eine getypte Zeile signiert und bucht.
@@ -100,38 +131,12 @@ pub struct SignedLocalAuditService {
 }
 
 impl SignedLocalAuditService {
-    #[must_use]
-    pub const fn new(
-        repository: Arc<dyn LocalAuditRepository>,
-        provider: Arc<dyn KeyProvider>,
-        signing_handle: KeyHandle,
-        signer_certificate_object_hash: ObjectHash,
-        effective_now: UnixMillis,
-    ) -> Self {
-        Self {
-            repository,
-            provider,
-            signing_handle,
-            signer_certificate_object_hash,
-            effective_now,
-        }
-    }
-}
-
-/// Wer handelt, unter welcher Bindung und unter welchem Signierzertifikat.
-struct ResolvedActor {
-    organization_id: OrganizationId,
-    device_id: DeviceId,
-    operator_binding_object_hash: Option<ObjectHash>,
-    signer_certificate_object_hash: ObjectHash,
-}
-
-impl LocalAuditService for SignedLocalAuditService {
-    fn record_signed(
+    /// Prepare an exact typed signature without booking an audit row.
+    pub fn prepare_signed(
         &self,
         actor: AuditActorProof<'_>,
         event: TypedLocalAuditEvent,
-    ) -> Result<SignedLocalAuditEvent, AuditError> {
+    ) -> Result<PreparedLocalAuditEvent, AuditError> {
         let actor = match actor {
             AuditActorProof::OperatorSession(session) => ResolvedActor {
                 organization_id: session.organization_id(),
@@ -178,8 +183,43 @@ impl LocalAuditService for SignedLocalAuditService {
         // nicht.
         let exact_bytes = encode_local_audit_event(&core, cose.as_bytes())?;
         let signed = SignedLocalAuditEvent::sealed(event_id, exact_bytes);
-        self.repository.append(&signed)?;
-        Ok(signed)
+        Ok(PreparedLocalAuditEvent { signed })
+    }
+    #[must_use]
+    pub const fn new(
+        repository: Arc<dyn LocalAuditRepository>,
+        provider: Arc<dyn KeyProvider>,
+        signing_handle: KeyHandle,
+        signer_certificate_object_hash: ObjectHash,
+        effective_now: UnixMillis,
+    ) -> Self {
+        Self {
+            repository,
+            provider,
+            signing_handle,
+            signer_certificate_object_hash,
+            effective_now,
+        }
+    }
+}
+
+/// Wer handelt, unter welcher Bindung und unter welchem Signierzertifikat.
+struct ResolvedActor {
+    organization_id: OrganizationId,
+    device_id: DeviceId,
+    operator_binding_object_hash: Option<ObjectHash>,
+    signer_certificate_object_hash: ObjectHash,
+}
+
+impl LocalAuditService for SignedLocalAuditService {
+    fn record_signed(
+        &self,
+        actor: AuditActorProof<'_>,
+        event: TypedLocalAuditEvent,
+    ) -> Result<SignedLocalAuditEvent, AuditError> {
+        let prepared = self.prepare_signed(actor, event)?;
+        self.repository.append(&prepared.signed)?;
+        Ok(prepared.signed)
     }
 }
 

@@ -37,3 +37,4 @@
 pub mod verify_support;
 
 pub mod fixtures;
+pub mod operator;

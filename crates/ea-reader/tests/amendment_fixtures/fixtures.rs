@@ -87,6 +87,7 @@ use ea_types::{
 };
 
 use super::verify_fixtures::fixtures as reader_fixtures;
+use super::verify_fixtures::operator;
 use super::verify_fixtures::verify_support::{self, archive_support::ArchiveFixture};
 
 // ---------------------------------------------------------------------------
@@ -173,7 +174,7 @@ pub fn probed_original_entry_hash() -> EntryHash {
             ENTRIES_IN_THE_AMENDMENT_ARCHIVE_V1,
             verify_support::COMPLETE_PLAINTEXT_V1.to_vec(),
         );
-        let probe = verify_support::complete_valid_archive_with_plaintexts(&borrowed(&plaintexts));
+        let probe = operator::archive(&borrowed(&plaintexts), operator::Defect::None);
         reader_fixtures::entry_hash_at(&probe.fixture, ORIGINAL_SEQUENCE_V1)
     })
 }
@@ -251,8 +252,7 @@ pub fn amendment_archive() -> &'static ArchiveFixture {
             ));
             assert_eq!(plaintexts.len(), ENTRIES_IN_THE_AMENDMENT_ARCHIVE_V1);
 
-            let archive =
-                verify_support::complete_valid_archive_with_plaintexts(&borrowed(&plaintexts));
+            let archive = operator::archive(&borrowed(&plaintexts), operator::Defect::None);
             // GEMESSEN und nicht geglaubt: der Eintragshash der Sequenz vier
             // ist ueber beide Laeufe derselbe. Waere er es nicht, naennten die
             // Nachtraege einen Hash, den es im Endbestand gar nicht gibt, und
@@ -320,8 +320,7 @@ pub fn twin_archive() -> &'static ArchiveFixture {
                 usize::try_from(AMENDMENT_A_SEQUENCE_V1 + 1).expect("acht Eintraege")
             );
 
-            let archive =
-                verify_support::complete_valid_archive_with_plaintexts(&borrowed(&plaintexts));
+            let archive = operator::archive(&borrowed(&plaintexts), operator::Defect::None);
             assert!(
                 reader_fixtures::entry_hash_at(&archive.fixture, ORIGINAL_SEQUENCE_V1)
                     == original_entry_hash,
@@ -366,8 +365,19 @@ pub fn original_entry_hash() -> EntryHash {
 /// der Schreiber verschluesselt hat, und nicht irgendeinen Einsatz.
 #[must_use]
 pub fn original_plaintext() -> &'static [u8] {
-    ORIGINAL_PLAINTEXT_V1
-        .get_or_init(|| incident_payload(ORIGINAL_RECORD_SEED_V1, ORIGINAL_INCIDENT_NUMBER_V1))
+    ORIGINAL_PLAINTEXT_V1.get_or_init(|| {
+        operator::archive_with_payloads(
+            &[&incident_payload(
+                ORIGINAL_RECORD_SEED_V1,
+                ORIGINAL_INCIDENT_NUMBER_V1,
+            )],
+            operator::Defect::None,
+        )
+        .1
+        .into_iter()
+        .next()
+        .unwrap()
+    })
 }
 
 /// Der erste gueltige Nachtrag, auf Sequenz [`AMENDMENT_A_SEQUENCE_V1`].

@@ -2227,6 +2227,12 @@ pub fn invoke_step(
     coordinator: &mut BootstrapCoordinator<'_>,
     step: BootstrapStep,
 ) -> Result<(), AdminError> {
+    // External integration-test crates require the non_exhaustive fallback;
+    // ea-admin's internal unit tests include the same fixture through self alias.
+    #[allow(
+        unreachable_patterns,
+        reason = "shared internal and external non_exhaustive fixture"
+    )]
     match step {
         BootstrapStep::GenerateIds => Ok(()),
         BootstrapStep::GenerateOfflineRoot => {

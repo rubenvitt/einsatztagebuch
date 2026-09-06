@@ -45,7 +45,40 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0004_sync_retry.sql",
         sql: include_str!("../migrations/0004_sync_retry.sql"),
     },
+    Migration {
+        version: OPERATOR_TRUST_MIGRATION_VERSION,
+        name: "0005_operator_trust.sql",
+        sql: include_str!("../migrations/0005_operator_trust.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "0006_operator_host.sql",
+        sql: include_str!("../migrations/0006_operator_host.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "0007_operator_authority.sql",
+        sql: include_str!("../migrations/0007_operator_authority.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "0008_operator_exchange.sql",
+        sql: include_str!("../migrations/0008_operator_exchange.sql"),
+    },
+    Migration {
+        version: 9,
+        name: "0009_operator_authority_recovery.sql",
+        sql: include_str!("../migrations/0009_operator_authority_recovery.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "0010_operator_revocation_recovery.sql",
+        sql: include_str!("../migrations/0010_operator_revocation_recovery.sql"),
+    },
 ];
+
+/// Durable trust pins, time state and replay dimensions for operator hosts.
+pub const OPERATOR_TRUST_MIGRATION_VERSION: u32 = 5;
 
 /// Die Fassung, in der die Uebergangstabelle des Verwerfens entsteht.
 ///

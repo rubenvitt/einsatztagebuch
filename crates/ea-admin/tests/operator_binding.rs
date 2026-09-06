@@ -4,8 +4,8 @@ mod support;
 
 use ea_admin::RevokedOperatorBinding;
 use ea_admin::{
-    OperatorBindingService, OperatorLifecycleError, OperatorMutationPorts,
-    ProvisionOperatorRequest, RevokeOperatorRequest, RootCeremonyService,
+    OperatorLifecycleError, OperatorMutationPorts, ProvisionOperatorRequest, RevokeOperatorRequest,
+    RootCeremonyService,
 };
 use ea_draft::OperatorProfileRepository;
 use ea_format::{
@@ -31,7 +31,7 @@ fn lost_writer_key_is_revoked_and_replaced_at_next_entry_50_inside_lease_100() {
     h.account.secret = None;
     let lost_authenticator = h.authenticator(&head);
     assert_eq!(
-        OperatorBindingService::new(&head, h.audit(&head, 0).service())
+        h.service(&head, h.audit(&head, 0).service())
             .verify_session(h.login(&lost_authenticator))
             .err()
             .unwrap()
@@ -53,9 +53,11 @@ fn lost_writer_key_is_revoked_and_replaced_at_next_entry_50_inside_lease_100() {
         admin.binding,
     );
     let admin_authenticator = admin.authenticator(&head);
-    let revocation = OperatorBindingService::new(&head, audit.service())
+    let revocation = admin
+        .service(&head, audit.service())
         .revoke(
             RevokeOperatorRequest {
+                database: &h.database,
                 binding_object_hash: old,
                 window: window(50, 100),
             },
@@ -106,7 +108,8 @@ fn lost_writer_key_is_revoked_and_replaced_at_next_entry_50_inside_lease_100() {
     let mut identity = Identity::valid();
     identity.fail = true;
     assert_eq!(
-        OperatorBindingService::new(&revoked, audit.service())
+        admin
+            .service(&revoked, audit.service())
             .provision(
                 request,
                 &native,
@@ -124,7 +127,8 @@ fn lost_writer_key_is_revoked_and_replaced_at_next_entry_50_inside_lease_100() {
         "EA-OPERATOR-IDENTITY-VERIFICATION"
     );
     assert!(native.account.borrow().secret.is_none());
-    let replacement = OperatorBindingService::new(&revoked, audit.service())
+    let replacement = admin
+        .service(&revoked, audit.service())
         .provision(
             ProvisionOperatorRequest {
                 database: &h.database,
@@ -143,6 +147,28 @@ fn lost_writer_key_is_revoked_and_replaced_at_next_entry_50_inside_lease_100() {
             admin.login(&admin_authenticator),
         )
         .unwrap();
+    admin
+        .service(&revoked, audit.service())
+        .authorize_prepared(
+            &h.database,
+            &replacement,
+            &native,
+            &mut OperatorMutationPorts {
+                authorization: &mut authorization,
+                ceremony: &ceremony,
+                store: &mut store,
+            },
+            admin.login(&admin_authenticator),
+        )
+        .unwrap();
+    let replacement = publish(
+        admin.service(&revoked, audit.service()),
+        &h.database,
+        &replacement,
+        &native,
+        &mut authorization,
+    )
+    .unwrap();
     assert_eq!(
         registry_fields(replacement.activation_bytes())
             .effective_from_sequence
@@ -180,7 +206,8 @@ fn lost_writer_key_is_revoked_and_replaced_at_next_entry_50_inside_lease_100() {
         h.certificate,
     );
     login.purpose = ea_operator::ReauthPurpose::Finalize;
-    let usable = OperatorBindingService::new(&active, audit.service())
+    let usable = h
+        .service(&active, audit.service())
         .verify_session(login)
         .unwrap();
     assert!(usable.proof().binding_object_hash() == replacement.binding_object_hash());
@@ -228,11 +255,12 @@ fn lifecycle_windows_reject_past_proposals_reversed_windows_and_registry_gaps() 
         };
         let mut requested = window(effective, through);
         requested.not_after = ea_types::UnixMillis::new(not_after);
-        let service = OperatorBindingService::new(&head, audit.service());
+        let service = h.service(&head, audit.service());
         assert_eq!(
             service
                 .revoke(
                     RevokeOperatorRequest {
+                        database: &h.database,
                         binding_object_hash: h.binding,
                         window: requested
                     },
@@ -284,6 +312,8 @@ fn deliberate_future_revocation_is_preserved_inside_the_lease_and_at_its_next_bo
     let head = h.head();
     let provider = support::FixtureKeyProvider::root();
     for effective in [75, 101] {
+        // Independent future-window examples need independent durable intents.
+        let target = database("future-revocation-window");
         let audit = h.audit(&head, 0);
         let authenticator = h.authenticator(&head);
         let mut authorization = h.authorization();
@@ -297,9 +327,11 @@ fn deliberate_future_revocation_is_preserved_inside_the_lease_and_at_its_next_bo
         );
         let table = Arc::new(Mutex::new(support::ReplayTable::default()));
         let mut store = support::PersistentStore::open(&table);
-        let prepared = OperatorBindingService::new(&head, audit.service())
+        let prepared = h
+            .service(&head, audit.service())
             .revoke(
                 RevokeOperatorRequest {
+                    database: &target.database,
                     binding_object_hash: h.binding,
                     window: window(effective, 150),
                 },
@@ -368,7 +400,9 @@ fn replacement_survives_an_intervening_authenticated_head() {
             .native
             .authenticator(&active, prepared.binding_object_hash());
         let audit = fixture.harness.audit(&active, 0);
-        let verified = OperatorBindingService::new(&active, audit.service())
+        let verified = fixture
+            .harness
+            .service(&active, audit.service())
             .verify_session(fixture.native.login(
                 &fixture.target.database,
                 &authenticator,
@@ -506,7 +540,7 @@ fn each_login_rechecks_account_instance_device_role_and_native_presence() {
         }
         login.account = Arc::new(account);
         assert_eq!(
-            OperatorBindingService::new(&head, audit.service())
+            h.service(&head, audit.service())
                 .verify_session(login)
                 .err()
                 .unwrap()
@@ -582,7 +616,7 @@ fn binding_and_activation_cannot_share_a_nonce_even_before_registry_commit() {
         OperatorProfileRepository::new(target.database.clone())
             .load()
             .unwrap()
-            .is_none()
+            .is_some()
     );
 }
 
@@ -593,7 +627,7 @@ fn lifecycle_audit_failure_withholds_provisioned_bytes_and_encrypted_profile() {
     let target = database("audit-fail");
     let native = Native::new();
     let mut auth = h.authorization();
-    h.database.execute("CREATE TRIGGER fail_lifecycle_audit BEFORE INSERT ON local_audit_event WHEN (SELECT count(*) FROM local_audit_event)>=3 BEGIN SELECT RAISE(ABORT,'injected'); END",&[]).unwrap();
+    h.database.execute("CREATE TRIGGER fail_lifecycle_audit BEFORE INSERT ON local_audit_event WHEN (SELECT count(*) FROM local_audit_event)>=2 BEGIN SELECT RAISE(ABORT,'injected'); END",&[]).unwrap();
     let audit = sql_audit(&head, &h.database, h.certificate);
     assert_eq!(
         h.provision_at(
@@ -818,7 +852,7 @@ fn replacement_requires_activated_revocation_preserves_person_and_rotates_salt_a
     );
     login.account = Arc::new(original_account);
     assert_eq!(
-        OperatorBindingService::new(&selected, audit.service())
+        h.service(&selected, audit.service())
             .verify_session(login)
             .err()
             .unwrap()
@@ -832,7 +866,7 @@ fn replacement_requires_activated_revocation_preserves_person_and_rotates_salt_a
         h.certificate,
     );
     assert_eq!(
-        OperatorBindingService::new(&selected, audit.service())
+        h.service(&selected, audit.service())
             .verify_session(old_login)
             .err()
             .unwrap()
@@ -899,7 +933,7 @@ fn restart_after_profile_commit_before_return_recovers_the_exact_staged_activati
         h.certificate,
     );
     assert_eq!(
-        OperatorBindingService::new(&active, audit.service())
+        h.service(&active, audit.service())
             .verify_session(login)
             .unwrap()
             .profile()
@@ -949,7 +983,7 @@ fn login_checks_the_decrypted_commitment_before_releasing_profile_and_proof() {
     let h = Harness::new();
     let head = h.head();
     let audit = h.audit(&head, 0);
-    let service = OperatorBindingService::new(&head, audit.service());
+    let service = h.service(&head, audit.service());
     let authenticator = h.authenticator(&head);
     let session = service.verify_session(h.login(&authenticator)).unwrap();
     assert_eq!(session.profile().display_name(), "Ada Lovelace");
@@ -973,7 +1007,7 @@ fn failed_login_audit_withholds_the_profile_and_session() {
     let h = Harness::new();
     let head = h.head();
     let audit = h.audit(&head, 1);
-    let service = OperatorBindingService::new(&head, audit.service());
+    let service = h.service(&head, audit.service());
     let authenticator = h.authenticator(&head);
     assert!(matches!(
         service.verify_session(h.login(&authenticator)),
@@ -1027,7 +1061,8 @@ fn provision_persists_encrypted_pending_profile_and_two_separate_authorized_obje
         prepared.binding_object_hash(),
         h.certificate,
     );
-    let verified = OperatorBindingService::new(&active, active_audit.service())
+    let verified = h
+        .service(&active, active_audit.service())
         .verify_session(login)
         .unwrap();
     assert_eq!(verified.profile().display_name(), "Grace Hopper");
@@ -1057,8 +1092,26 @@ fn failed_durable_staging_cannot_leave_an_unrecoverable_profile_row() {
         OperatorProfileRepository::new(target.database.clone())
             .load()
             .unwrap()
-            .is_none()
+            .is_some()
     );
+    let prepared = h
+        .service(&head, audit.service())
+        .resume_prepared(&target.database)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        prepared.state(),
+        ea_admin::PreparedBindingState::PublicationUncertain
+    );
+    auth.fail_stage = false;
+    publish(
+        h.service(&head, audit.service()),
+        &target.database,
+        &prepared,
+        &native,
+        &mut auth,
+    )
+    .unwrap();
 }
 
 #[test]

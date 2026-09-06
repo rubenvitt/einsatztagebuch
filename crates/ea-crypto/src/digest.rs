@@ -1,4 +1,4 @@
-use ea_types::{EntryHash, Hash32, KeyThumbprint, ObjectHash};
+use ea_types::{EntryHash, Hash32, KeyThumbprint, ObjectHash, OperatorSubjectId, OrganizationId};
 use minicbor::Encoder;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -63,6 +63,38 @@ digest_fn!(renewal_input_digest, RENEWAL_INPUT_DOMAIN);
 digest_fn!(bootstrap_anchor_hash, ANCHOR_PRE_DOMAIN);
 digest_fn!(trust_anchor_hash, ANCHOR_DOMAIN);
 digest_fn!(operator_profile_digest, OPERATOR_PROFILE_DOMAIN);
+
+/// Commits to the five operator-profile fields from design section 6.8.
+///
+/// The context is the deterministic CBOR array `[organizationId,
+/// operatorSubjectId, displayName, functionLabel, profileCommitmentSalt]`.
+/// Text is hashed exactly as supplied: schema validation/normalization belongs
+/// to the caller, and verification must never repair a claimed profile. The
+/// temporary encoding contains personal data and is erased when dropped.
+#[must_use]
+pub fn operator_profile_commitment(
+    organization: OrganizationId,
+    subject: OperatorSubjectId,
+    display_name: &str,
+    function_label: &str,
+    salt: &[u8; 32],
+) -> Hash32 {
+    // Reserve all field bytes plus more than the maximum CBOR framing size so
+    // growth cannot leave a prior allocation containing profile fragments.
+    let capacity = 128usize
+        .saturating_add(display_name.len())
+        .saturating_add(function_label.len());
+    let mut context = Zeroizing::new(Vec::with_capacity(capacity));
+    Encoder::new(&mut *context)
+        .array(5)
+        .and_then(|encoder| encoder.bytes(organization.as_bytes()))
+        .and_then(|encoder| encoder.bytes(subject.as_bytes()))
+        .and_then(|encoder| encoder.str(display_name))
+        .and_then(|encoder| encoder.str(function_label))
+        .and_then(|encoder| encoder.bytes(salt))
+        .expect("encoding the operator-profile context into Vec cannot fail");
+    operator_profile_digest(&context)
+}
 
 // `archiveProfileHash` ueber die deterministischen
 // `archive-backend-profile-core-v1`-Bytes. Das Urbild traegt WEDER einen

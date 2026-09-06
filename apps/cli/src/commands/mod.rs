@@ -51,7 +51,8 @@ use crate::{
 /// Fuehrt das geparste Kommando aus und liefert seinen Exitcode.
 ///
 /// `now` kommt als PARAMETER aus `main` und wird hier nirgends geholt. Die
-/// Begruendung steht dort: es gibt genau eine Uhr im ganzen Werkzeug.
+/// Operator-Dialoge pruefen zusaetzlich die frische Uhr und verstrichene Zeit
+/// im Runtime-Kontext, bevor sie Erfolg auditieren oder ausgeben.
 pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
     match &invocation.command {
         Command::Verify { archive } => verify::run(invocation, archive, now),
@@ -66,7 +67,7 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         // OHNE `now`: dieser Pfad verifiziert nichts und datiert nichts. Die
         // Begruendung steht an `organization::run`.
         Command::OrganizationInit => organization::run(invocation),
-        Command::Operator { action } => operator::run(*action),
+        Command::Operator { action, config } => operator::run(invocation, *action, config, now),
     }
 }
 

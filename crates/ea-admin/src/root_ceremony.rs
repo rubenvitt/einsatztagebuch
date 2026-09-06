@@ -20,6 +20,20 @@ use ea_types::{CertificateHash, ObjectHash};
 
 use crate::error::AdminError;
 
+/// Host-owned durable publication boundary. Implementations retain only public
+/// signature bytes and commit BOTH typed replay keys, the signed audit and the
+/// exact target/reply atomically before returning success.
+pub(crate) trait DurableRootPublication {
+    fn retained_signature(&self) -> Result<Option<Vec<u8>>, AdminError>;
+    fn stage_signature(&self, signature: &[u8]) -> Result<(), AdminError>;
+    fn commit(
+        &self,
+        target: &ExactObjectBytes,
+        replay: &[ea_trust::AdminAuthorizationReplayKey; 2],
+        audit: TypedLocalAuditEvent,
+    ) -> Result<(), AdminError>;
+}
+
 /// Der Dienst, der ein autorisiertes Ziel Wurzel-signiert veroeffentlicht.
 ///
 /// Er wird JE KOPFAUSWAHL gebaut, und das ist keine Bequemlichkeit: die Zeit,
@@ -42,6 +56,33 @@ pub struct RootCeremonyService<'a> {
 }
 
 impl<'a> RootCeremonyService<'a> {
+    /// Resume only the exact staged public signature. Validation is shared with
+    /// the ordinary ceremony, including current proof, intended core and actual
+    /// Root attribution. Only a successful durable callback releases the target.
+    pub(crate) fn publish_durably(
+        &self,
+        intent: &VerifiedAdminAuthorizationIntent,
+        target: TrustPayloadV1,
+        authorization: &[u8],
+        proof: &OperatorSessionProof,
+        publication: &dyn DurableRootPublication,
+    ) -> Result<ExactObjectBytes, AdminError> {
+        let retained = publication.retained_signature()?;
+        let (target, action, signature) =
+            self.prepare_target(intent, target, authorization, proof, retained.as_deref())?;
+        publication.stage_signature(&signature)?;
+        let audit = TypedLocalAuditEvent {
+            action: LocalAuditActionV1::AdminRootCeremony(AdminRootContextV1::new(
+                intent.authorization_object_hash(),
+                object_hash(target.as_bytes()),
+                action,
+            )),
+            outcome: LocalAuditOutcomeV1::Completed,
+        };
+        publication.commit(&target, intent.replay_keys(), audit)?;
+        Ok(target)
+    }
+
     /// Baut den Dienst gegen genau einen gewaehlten Kopf.
     ///
     /// `root_signing_handle` ist die ADRESSE des Wurzelschluessels in dem
@@ -172,6 +213,61 @@ impl<'a> RootCeremonyService<'a> {
         store: &mut dyn TrustStateStore,
         proof: &OperatorSessionProof,
     ) -> Result<ExactObjectBytes, AdminError> {
+        let (published, action_code, _) = self.prepare_target(
+            intent,
+            target,
+            exact_admin_authorization_object,
+            proof,
+            None,
+        )?;
+        let target_object_hash = object_hash(published.as_bytes());
+
+        // 6. Erst jetzt der Verbrauch. Scheitert er, kann er die erste
+        //    Sperrdimension bereits gesetzt haben — `consume_replay_keys` setzt
+        //    sie nacheinander —, und die Autorisierung waere ohne Auditspur
+        //    tot. Deshalb bucht auch dieser Pfad eine `failed`-Zeile.
+        if let Err(error) = consume_admin_authorization_intent(store, intent) {
+            self.book_failure(proof, intent, target_object_hash, action_code);
+            return Err(AdminError::Trust(error));
+        }
+
+        // 7. Die Auditzeile, VOR der Herausgabe.
+        let context = AdminRootContextV1::new(
+            intent.authorization_object_hash(),
+            target_object_hash,
+            action_code,
+        );
+        if self
+            .audit
+            .record_signed(
+                // DER GEPRUEFTE Nachweis, nicht ein mitgefuehrter: eine
+                // Auditzeile, die jemand anderem zugerechnet wird als dem,
+                // dessen Zweck und Bindung geprueft wurden, waere falsch
+                // zugerechnet.
+                AuditActorProof::OperatorSession(proof),
+                TypedLocalAuditEvent {
+                    action: LocalAuditActionV1::AdminRootCeremony(context),
+                    outcome: LocalAuditOutcomeV1::Completed,
+                },
+            )
+            .is_err()
+        {
+            self.book_failure(proof, intent, target_object_hash, action_code);
+            return Err(AdminError::AuditFailed);
+        }
+
+        // 8. Erst jetzt.
+        Ok(published)
+    }
+
+    fn prepare_target(
+        &self,
+        intent: &VerifiedAdminAuthorizationIntent,
+        target: TrustPayloadV1,
+        exact_admin_authorization_object: &[u8],
+        proof: &OperatorSessionProof,
+        retained_signature: Option<&[u8]>,
+    ) -> Result<(ExactObjectBytes, u64, Vec<u8>), AdminError> {
         // 1. Der Nachweis. `is_valid_for` prueft die Bindung ausdruecklich
         //    NICHT (`crates/ea-operator/src/session.rs`), also prueft dieser
         //    Dienst sie selbst — beides: dass die genannte Bindung am
@@ -237,63 +333,30 @@ impl<'a> RootCeremonyService<'a> {
         )
         .map_err(AdminError::Crypto)?;
         let digest = trust_digest(target.exact_digest_input());
-        let signature = self
-            .key_provider
-            .sign(
-                &self.root_signing_handle,
-                ContentType::TrustDigest,
-                self.root_certificate_hash,
-                digest.as_bytes(),
-            )
-            .map_err(AdminError::Key)?;
-
+        let signature = if let Some(retained) = retained_signature {
+            retained.to_vec()
+        } else {
+            self.key_provider
+                .sign(
+                    &self.root_signing_handle,
+                    ContentType::TrustDigest,
+                    self.root_certificate_hash,
+                    digest.as_bytes(),
+                )
+                .map_err(AdminError::Key)?
+                .as_bytes()
+                .to_vec()
+        };
         // 4b. Die ZUSCHREIBUNG. Ohne sie gaebe der Dienst Bytes heraus, die
         //     nie Autoritaet erlangen koennen — und verbrauchte dafuer eine
         //     Einmal-Autorisierung und buchte eine `completed`-Zeile.
-        self.require_root_attribution(signature.as_bytes(), digest.as_bytes())?;
+        self.require_root_attribution(signature.as_slice(), digest.as_bytes())?;
 
         // 5. Die Kodierung.
-        let object = TrustObjectV1::new(target, vec![signature.as_bytes().to_vec()])
+        let object = TrustObjectV1::new(target, vec![signature.as_slice().to_vec()])
             .map_err(AdminError::Format)?;
         let published = encode_trust(&object).map_err(AdminError::Format)?;
-        let target_object_hash = object_hash(published.as_bytes());
-
-        // 6. Erst jetzt der Verbrauch. Scheitert er, kann er die erste
-        //    Sperrdimension bereits gesetzt haben — `consume_replay_keys` setzt
-        //    sie nacheinander —, und die Autorisierung waere ohne Auditspur
-        //    tot. Deshalb bucht auch dieser Pfad eine `failed`-Zeile.
-        if let Err(error) = consume_admin_authorization_intent(store, intent) {
-            self.book_failure(proof, intent, target_object_hash, action_code);
-            return Err(AdminError::Trust(error));
-        }
-
-        // 7. Die Auditzeile, VOR der Herausgabe.
-        let context = AdminRootContextV1::new(
-            intent.authorization_object_hash(),
-            target_object_hash,
-            action_code,
-        );
-        if self
-            .audit
-            .record_signed(
-                // DER GEPRUEFTE Nachweis, nicht ein mitgefuehrter: eine
-                // Auditzeile, die jemand anderem zugerechnet wird als dem,
-                // dessen Zweck und Bindung geprueft wurden, waere falsch
-                // zugerechnet.
-                AuditActorProof::OperatorSession(proof),
-                TypedLocalAuditEvent {
-                    action: LocalAuditActionV1::AdminRootCeremony(context),
-                    outcome: LocalAuditOutcomeV1::Completed,
-                },
-            )
-            .is_err()
-        {
-            self.book_failure(proof, intent, target_object_hash, action_code);
-            return Err(AdminError::AuditFailed);
-        }
-
-        // 8. Erst jetzt.
-        Ok(published)
+        Ok((published, action_code, signature))
     }
 
     /// Stellt fest, dass die frisch erzeugte COSE der Wurzelurkunde DIESES
@@ -330,32 +393,12 @@ impl<'a> RootCeremonyService<'a> {
         exact_cose: &[u8],
         expected_payload: &[u8],
     ) -> Result<(), AdminError> {
-        if self.root_certificate_hash
-            != CertificateHash::from(self.head.root_certificate_object_hash())
-        {
-            return Err(AdminError::RootCertificateMismatch);
-        }
-        let fields = self.head.root_certificate_fields();
-        let parsed = parse_cose_sign1(exact_cose, &[]).map_err(AdminError::Crypto)?;
-        if parsed.content_type() != ContentType::TrustDigest
-            || parsed.certificate_hash() != Some(self.root_certificate_hash)
-            || parsed.payload() != expected_payload
-            || parsed.key_thumbprint() != fields.root_key_thumbprint
-        {
-            return Err(AdminError::RootSignatureMismatch);
-        }
-        let key = CanonicalPublicCoseKey::from_deterministic_cbor(&fields.root_public_cose_key)
-            .map_err(AdminError::Crypto)?;
-        let protected = ProtectedHeader::normal(
-            ContentType::TrustDigest,
-            parsed.key_thumbprint(),
+        verify_root_attribution(
+            self.head,
             self.root_certificate_hash,
-        );
-        key.verify_ed25519_strict(
-            &protected.sig_structure_bytes(expected_payload),
-            parsed.signature_bytes(),
+            exact_cose,
+            expected_payload,
         )
-        .map_err(|_| AdminError::RootSignatureMismatch)
     }
 
     /// Bucht die Zeile mit dem Ausgang `failed`.
@@ -382,6 +425,40 @@ impl<'a> RootCeremonyService<'a> {
             },
         );
     }
+}
+
+/// The shared Root attribution check for a validated intended target, which may
+/// become effective after the selected sequence. This grants no target authority.
+pub(crate) fn verify_root_attribution(
+    head: &SelectedRegistryHead,
+    root_certificate_hash: CertificateHash,
+    exact_cose: &[u8],
+    expected_payload: &[u8],
+) -> Result<(), AdminError> {
+    if root_certificate_hash != CertificateHash::from(head.root_certificate_object_hash()) {
+        return Err(AdminError::RootCertificateMismatch);
+    }
+    let fields = head.root_certificate_fields();
+    let parsed = parse_cose_sign1(exact_cose, &[]).map_err(AdminError::Crypto)?;
+    if parsed.content_type() != ContentType::TrustDigest
+        || parsed.certificate_hash() != Some(root_certificate_hash)
+        || parsed.payload() != expected_payload
+        || parsed.key_thumbprint() != fields.root_key_thumbprint
+    {
+        return Err(AdminError::RootSignatureMismatch);
+    }
+    let key = CanonicalPublicCoseKey::from_deterministic_cbor(&fields.root_public_cose_key)
+        .map_err(AdminError::Crypto)?;
+    let protected = ProtectedHeader::normal(
+        ContentType::TrustDigest,
+        parsed.key_thumbprint(),
+        root_certificate_hash,
+    );
+    key.verify_ed25519_strict(
+        &protected.sig_structure_bytes(expected_payload),
+        parsed.signature_bytes(),
+    )
+    .map_err(|_| AdminError::RootSignatureMismatch)
 }
 
 /// Der Aktionscode der Administrationsautorisierung.

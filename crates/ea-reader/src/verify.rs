@@ -64,9 +64,11 @@ use crate::vault::UnlockedVault;
 /// stabiler Code je Arm, FREMDE Codes DURCHGEREICHT, [`fmt::Display`] schreibt
 /// ausschliesslich den Code, [`fmt::Debug`] delegiert an [`fmt::Display`].
 ///
-/// # Zwei eigene Codes und sonst keiner
+/// # Eigene Reader-Codes und durchgereichte Fachcodes
 ///
 /// `EA-READER-WITNESS-STALE` und `EA-READER-SCHEMA-UNSUPPORTED`.
+/// Der Operator-Abgleich verwendet den gemeinsamen Fachcode
+/// `EA-OPERATOR-PROFILE-COMMITMENT` aus Design §6.8.
 /// `EA-READER-VERIFICATION` ist AUSGESCHLOSSEN — `ReaderSyncError::Verification`
 /// belegt ihn bereits, und ein zweiter Traeger desselben Codes waere genau die
 /// Doppelschreibung, die dieses Repositorium verbietet. Der Name kollidiert
@@ -107,6 +109,8 @@ pub enum ReaderError {
     StaleWitness,
     /// Keine der Schemabestimmungen traegt diesen Klartext.
     UnsupportedSchema,
+    /// Der entschluesselte Operator passt nicht zur verifizierten historischen Bindung.
+    OperatorProfileCommitment,
 }
 
 impl ReaderError {
@@ -121,6 +125,7 @@ impl ReaderError {
             Self::Decryption(error) => error.code(),
             Self::StaleWitness => "EA-READER-WITNESS-STALE",
             Self::UnsupportedSchema => "EA-READER-SCHEMA-UNSUPPORTED",
+            Self::OperatorProfileCommitment => "EA-OPERATOR-PROFILE-COMMITMENT",
         }
     }
 }
@@ -261,6 +266,7 @@ impl ReaderVerifier {
                     entry,
                     key_thumbprint,
                     self.effective_now,
+                    anchor.as_trust_anchor(),
                 );
                 if let Some(witness) = row.witnesses {
                     witnesses.insert(row.state.entry_hash(), witness);
@@ -513,6 +519,7 @@ fn classify_entry(
     entry: &Parsed<EntryPackageV1>,
     key_thumbprint: KeyThumbprint,
     minted_at: UnixMillis,
+    anchor: &ea_trust::TrustAnchorV1,
 ) -> ClassifiedEntryV1 {
     let object_hash = entry.object_hash();
     let entry_hash = entry.value().entry_hash();
@@ -561,6 +568,12 @@ fn classify_entry(
                             object_hash,
                             sequence,
                             minted_at,
+                            crate::operator_profile::historical_bindings(
+                                anchor,
+                                inventory,
+                                entry.value().manifest().fields(),
+                                minted_at,
+                            ),
                         ),
                         grant: VerifiedGrantForRecipient::new(
                             grant.exact_bytes().as_bytes().to_vec(),

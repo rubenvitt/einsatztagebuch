@@ -504,9 +504,9 @@ mod state;
 mod time;
 
 pub use admin_authorization::{
-    VerifiedAdminAuthorization, VerifiedAdminAuthorizationIntent, consume_admin_authorization,
-    consume_admin_authorization_intent, verify_authorized_trust_target,
-    verify_intended_trust_target,
+    IntendedTrustTargetDescription, VerifiedAdminAuthorization, VerifiedAdminAuthorizationIntent,
+    consume_admin_authorization, consume_admin_authorization_intent,
+    describe_intended_trust_target, verify_authorized_trust_target, verify_intended_trust_target,
 };
 pub use admission::{bootstrap_active_certificates, verify_catalogue_admission};
 pub use anchor::{
