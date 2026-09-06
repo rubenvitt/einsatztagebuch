@@ -621,28 +621,86 @@ git commit -m "feat(admin): provision OS-bound operators"
 - Consumes: pending registration, external fingerprint confirmation, Admin/Root ceremony, shared `select_registry_head`, fresh Admin operator proof, and `LocalAuditService`.
 - Produces: append-only policy/Registry events, device activation/revocation, opaque `VerifiedClockRelease`, and no second local time/expiry policy.
 
+**Ausgangslage im Arbeitsbaum (gemessen 2026-09-06, DRK-272).** Der Selektions- und
+Freigabekern steht bereits produktiv in `ea-trust`; dieser Task baut ihn NICHT nach, sondern
+verdrahtet ihn zu Admin-Arbeitsabläufen. Vorhanden und zu verbrauchen:
+`ea_trust::verify_registry_candidate` (`crates/ea-trust/src/registry.rs:571`),
+`ea_trust::prepare_local_time` (`crates/ea-trust/src/time.rs:94`),
+`ea_trust::verify_clock_release` (`crates/ea-trust/src/clock_release.rs:67`) und
+`ea_trust::select_registry_head(candidate, local_time, Option<VerifiedClockRelease>)`
+(`crates/ea-trust/src/registry.rs:687`), das `RegistrySelectionOutcome`
+(`registry.rs:389`) mit den Armen `Selected(SelectedRegistryHead)` / `Advanced` /
+`PendingFuture` liefert. `VerifiedClockRelease` (`clock_release.rs:63`) ist bereits opak,
+nicht `Clone`, und wird von `select_registry_head` per Wert verbraucht; Nonce-Replay, Head
+und Zeit-Floor committen atomar über `RegistrySelectionCommit`
+(`crates/ea-trust/src/state.rs`). Die echte Lücke dieses Tasks sind daher: die
+ea-admin-Fassade über diesen Dreischritt, der Erzeuger der `exact_audit_bytes` für die
+Freigabe, der Aufnahmepunkt für `ReauthPurpose::ClockSkewRelease`, die CLI und der E2E-Zeuge.
+
 - [ ] **Step 1: Write highest-head, lease, and revocation-boundary tests**
+
+Die Zeugen binden die Namen des Arbeitsbaums: der Fehlercode des erschöpften Lease heisst
+`EA-TRUST-SEQUENCE-LEASE` (`crates/ea-trust/src/error.rs:144`); der Code
+`EA-REGISTRY-LEASE-EXHAUSTED` existiert nirgends und DARF NICHT als zweiter Fehlerpfad
+danebengebaut werden. Die Familie `EA-REGISTRY-` ist im Baum bereits belegt — die
+Stale-Quittung des Writers fuehrt `EA-REGISTRY-STALE-BLOCKED` und
+`EA-REGISTRY-STALE-ACK-{REQUIRED,REPLAY,PREVIEW-MISMATCH}`
+(`crates/ea-writer/src/error.rs:119,137-139`) — und scheidet damit auch fuer neue
+ea-admin-Fehler aus. `RegistryVersion` und `ChainSequence` haben `::new(u64)`/`.get()` und keine
+Tupelkonstruktoren (`crates/ea-types/src/ids.rs`). Der Kern ist durchgehend synchron
+(`crates/ea-audit/src/lib.rs:15`); `ea-admin` hat keine async-Runtime. Fixtures kommen aus
+dem eingebundenen `support`-Modul (`crates/ea-admin/tests/support/mod.rs`), nicht aus einem
+`fixtures::`-Namensraum.
 
 ```rust
 #[test]
 fn workflow_uses_shared_highest_applicable_head() {
-    let line = fixtures::heads_with_future_version();
-    assert_eq!(service.selected_head(&line, ChainSequence(10), now_at(500)).unwrap().version(), RegistryVersion(3));
-    assert_eq!(service.selected_head(&line, ChainSequence(12), now_at(500)).unwrap_err().code(), "EA-REGISTRY-LEASE-EXHAUSTED");
+    let line = support::ceremony_line();
+    let service = RegistryWorkflowService::new(/* … */);
+    let selected = service
+        .select(&line, ChainSequence::new(10), support::now_at(500))
+        .expect("head at sequence 10");
+    let RegistrySelectionOutcome::Selected(head) = selected else {
+        panic!("expected a selected head");
+    };
+    assert_eq!(head.registry_version(), RegistryVersion::new(3));
+    assert_eq!(
+        service
+            .select(&line, ChainSequence::new(12), support::now_at(500))
+            .unwrap_err()
+            .code(),
+        "EA-TRUST-SEQUENCE-LEASE",
+    );
 }
 
 #[test]
 fn revoked_reader_receives_no_grant_at_effective_sequence() {
-    assert!(service.active_readers(ChainSequence(9)).contains(&fixtures::reader_cert()));
-    assert!(!service.active_readers(ChainSequence(10)).contains(&fixtures::reader_cert()));
+    // `SelectedRegistryHead::active_certificates` iteriert an der
+    // `proposed_sequence` des Kopfes; die Grenze wird darum ueber zwei
+    // Koepfe gemessen, nicht ueber einen Sequenzparameter.
+    let before = support::selected_head_at(ChainSequence::new(9));
+    let at = support::selected_head_at(ChainSequence::new(10));
+    let after = support::selected_head_at(ChainSequence::new(11));
+    assert!(has_certificate(&before, support::reader_certificate_hash()));
+    assert!(!has_certificate(&at, support::reader_certificate_hash()));
+    assert!(!has_certificate(&after, support::reader_certificate_hash()));
 }
 
-#[tokio::test]
-async fn clock_release_is_exact_expiring_one_use_and_never_lowers_floor() {
-    let release = service.release_future_clock(fixtures::skew_context(), fixtures::admin_reauth()).await.unwrap();
-    assert!(service.apply_release(fixtures::same_skew_context(), release).is_ok());
-    assert!(service.apply_release(fixtures::different_wall_clock(), fixtures::replayed_release()).is_err());
-    assert!(service.apply_release(fixtures::lower_floor(), fixtures::fresh_release()).is_err());
+#[test]
+fn clock_release_is_exact_expiring_one_use_and_never_lowers_floor() {
+    let service = ClockReleaseService::new(/* … */);
+    let bytes = service
+        .issue(support::skew_context(), support::admin_reauth())
+        .expect("issued release");
+    assert!(service.apply(support::same_skew_context(), &bytes).is_ok());
+    assert_eq!(
+        service
+            .apply(support::different_wall_clock(), &bytes)
+            .unwrap_err()
+            .code(),
+        "EA-TRUST-CLOCK-RELEASE-REPLAY",
+    );
+    assert!(service.apply(support::lower_floor(), &bytes).is_err());
 }
 ```
 
@@ -656,7 +714,46 @@ Expected: FAIL because device/policy/Registry and clock-release workflows do not
 
 Require pending request plus external fingerprint confirmation. Admin authorization and Root signature prepare exactly one direct target; a distinct activation authorization creates exactly one matching Registry change. Both bind the same Previous Head and the event is its checked version `+1`. Head 1 uses Change 2 for the initial Policy; anchor-pinned Admin pairs are external basis state, not a second change. Initial policy explicitly fixes profile, Registry age/skew/stale behavior, sequence lease, Evidence window, Reader inactivity/history, archive profiles/network failure, backup/restore, retention/destruction, free text, suites/formats. Policy version/hash/effective sequence, direct-core effective sequence, Root effective Registry version, and `preTransitionSequence` follow the Task-8 closure exactly. Revocation explains that past grants/plaintext cannot be recalled and stops new grants only from `effectiveFromSequence`. Writer, server, Reader, Admin, and CLI consume the shared opaque `RegistryCandidate`/selection proof states; no duplicate grace period or clock calculation is allowed.
 
-When future-clock skew exceeds the bound Guard Policy relative to a deterministically selected, fully verified Receipt/Checkpoint/TSA reference, remain blocked until a newer independent reference validates or an Admin deliberately creates a documented clock release after fresh `ReauthPurpose::ClockSkewRelease`. The signed Action-6 audit context binds organization/target device, current trusted floor, exact observed wall clock, signed policy limit, Registry version and Head hash, Guard-Policy hash, the exact independent reference, closed justification code 0..2, issued/expiry times, and random nonce. Verify the active Admin certificate/binding/capability against the candidate's pre-transition state; only Outcome 1 yields an opaque `VerifiedClockRelease`. `select_registry_head` consumes it by value and commits nonce replay, Head, and floor atomically. A mismatch, expiration, Registry/policy/reference change, clock movement, or attempted floor reduction rejects it; it never waives Registry `notAfter`, `notBefore`, sequence lease, Authorization expiry, or signature errors. Without an independent reference, report `IndependentTimeUnavailable` and do not offer a release.
+Die Aktionscodes 0..6 sind heute ein rohes `pub action_code: u8`
+(`crates/ea-format/src/etb.rs:151`); die (Code, Stelligkeit)-Zuordnung lebt allein im
+Dekodierer `decode_registry_change` (`crates/ea-format/src/etb.rs:1670-1710`). Die
+Ereignisfabrik `OperatorBindingService::registry_event(RegistryWindow, RegistryChangeV1)`
+(`crates/ea-admin/src/operator.rs:761`) ist vorhanden und wird wiederverwendet, nicht
+nachgebaut. `revocation.rs` deckt ausschliesslich das ab, was `OperatorBindingService::revoke`
+(`crates/ea-admin/src/operator.rs:531`, Bindungswiderruf) und `operator_revocation.rs` nicht
+schon leisten; Admin-Zertifikatswiderruf (Aktion 5, Effekt 1) bleibt beim
+Zertifikatslebenszyklus.
+
+When future-clock skew exceeds the bound Guard Policy relative to a deterministically selected, fully verified Receipt/Checkpoint reference, remain blocked until a newer independent reference validates or an Admin deliberately creates a documented clock release after fresh `ReauthPurpose::ClockSkewRelease`. Die Freigabe wird als signierte lokale Auditzeile gebaut — `LocalAuditActionV1::ClockSkewRelease` ist Auditcode 6 (`crates/ea-format/src/local_audit.rs:775`) und NICHT der Registry-Change 6 `RootCertificate` (`crates/ea-format/src/etb.rs:1707`); die beiden Sechsen gehoeren zwei verschiedenen Nummernkreisen. Der Kontext `ClockReleaseContextV1` (`crates/ea-format/src/local_audit.rs:723-763`) bindet organization/target device, current trusted floor, exact observed wall clock, signed policy limit, Registry version und Head hash, Guard-Policy hash, die exakte unabhaengige Referenz, den geschlossenen Begruendungscode 0..2 (`ClockReleaseJustificationV1`, `local_audit.rs:26-30`), issued/expiry times und die Zufalls-Nonce. Die Zeile wird ueber `LocalAuditService::record_signed` (`crates/ea-audit/src/event.rs:229`) gebucht; ihre `exact_bytes()` sind der Eingang von `verify_clock_release`. Verify the active Admin certificate/binding/capability against the candidate's pre-transition state; only Outcome 1 (`LocalAuditOutcomeV1::Accepted`) yields an opaque `VerifiedClockRelease`. `select_registry_head` consumes it by value and commits nonce replay, Head, and floor atomically. A mismatch, expiration, Registry/policy/reference change, clock movement, or attempted floor reduction rejects it; it never waives Registry `notAfter`, `notBefore`, sequence lease, Authorization expiry, or signature errors.
+
+TSA-Referenzen sind ausdruecklich NICHT freigabefaehig: `verify_clock_release` weist
+`IndependentTimeKindV1::Tsa` mit `EA-TRUST-TIME-SOURCE-UNSUPPORTED` ab
+(`crates/ea-trust/src/clock_release.rs:281`, Zeuge
+`crates/ea-trust/tests/clock_release.rs::tsa_within_limit_and_unprovable_time_never_mint_a_release`),
+und `ea_time::IndependentTimeKind` kennt nur Receipt und Checkpoint
+(`crates/ea-time/src/model.rs:9`). Fehlt jede unabhaengige Referenz — also
+`TrustedTimeState::independent_reference() == None` (`crates/ea-time/src/model.rs:144`) —,
+darf die Bedienfuehrung gar keine Freigabe anbieten; die ea-admin-Fassade meldet dafuer
+einen eigenen sprechenden Zustand statt des nichtssagenden `ClockReleaseError::Mismatch`,
+den der Kern heute liefert (`crates/ea-trust/src/clock_release.rs:290`).
+
+Der Zweck `ReauthPurpose::ClockSkewRelease` existiert (`crates/ea-operator/src/session.rs:87`),
+hat aber heute keine annehmende Aufrufstelle: jeder ea-admin-Pfad, der eine
+`VerifySessionRequest` annimmt, lehnt alles ausser `AdminRootCeremony` ab
+(`crates/ea-admin/src/operator.rs:386`, `:538`). Dieser Task baut den Aufnahmepunkt; Muster
+fuer die Zweckpruefung ist `crates/ea-writer/src/finalize.rs:1580-1598`
+(`proof.is_valid_for(purpose, now)`, sonst Zweckabweichung).
+
+Neue Fehler folgen der Hausregel `crates/ea-admin/src/error.rs:12-52`: das Praefix
+`EA-ADMIN-` ist den Server-Auditcodes vorbehalten und DARF NICHT verwendet werden;
+durchgereichte Arme behalten den Code ihrer Herkunft. `apps/cli` haelt heute keine
+produktive `ea-trust`-Kante (`apps/cli/Cargo.toml:26-31`) und bekommt auch keine: die
+Kommandos rufen die ea-admin-Fassade, weil die Fachlogik nicht im Kommandopfad wohnt
+(`apps/cli/src/main.rs:1-14`). Der Parser ist handgeschrieben, nicht `clap`
+(`apps/cli/src/args.rs:1-40`, ADR `docs/adr/0001-toolchain-and-cryptography-dependencies.md`).
+`tests/ea-system-tests` braucht `ea-admin` als neue dev-dependency; Vorbild fuer den E2E ist
+`tests/ea-system-tests/tests/task8_trust_time.rs`, der Linie, Receipt, Checkpoint und
+signierte Freigabe bereits baut.
 
 - [ ] **Step 4: Run gaps/forks/future/stale/clock and server-known-newer-head E2E tests**
 
