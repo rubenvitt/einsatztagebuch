@@ -773,22 +773,105 @@ git commit -m "feat(admin): manage policy registry and revocation"
 **Files:**
 - Create: `crates/ea-admin/src/writer_transition.rs`
 - Create: `apps/cli/src/commands/writer_transition.rs`
+- Modify: `crates/ea-admin/src/lib.rs`, `apps/cli/src/{args,output}.rs`, `apps/cli/src/commands/mod.rs`
+- Modify: `crates/ea-trust/src/{registry,resolver}.rs` (der wirksame Übergang wird lesbar), `crates/ea-trust/tests/support/mod.rs` (additiv, nur `tests/`)
+- Modify: `crates/ea-writer/src/{finalize,error,lib}.rs` (`keyTransition` durch den normalen Pfad, `EA-WRITER-REVOKED`)
+- Modify: `crates/ea-sync-server/src/{validation,ports,commit}.rs` (exakte Transition-Regel statt Pauschalabweisung, `EA-COMMIT-WRITER-REVOKED`)
+- Modify: `crates/ea-verify/src/{archive,entry}.rs` (Prüfung statt Quarantäne)
 - Test: `crates/ea-admin/tests/writer_transition.rs`
+- Test: `crates/ea-trust/tests/registry_transitions.rs` (Zugriff auf den wirksamen Übergang), `crates/ea-writer/tests/key_transition.rs`, `crates/ea-sync-server/tests/commit_service.rs`, `crates/ea-verify/tests/*` (Transition-Regel), `apps/cli/tests/writer_transition.rs`
 - Test: `tests/ea-system-tests/tests/e2e_writer_transition.rs`
 
 **Interfaces:**
 - Consumes: trusted external head, old/new Writer certificates, Admin/Root ceremony, Writer finalization.
 - Produces: `WriterTransitionService::{prepare,activate}`, Root-signed public transition and first new-Writer `keyTransition` Entry.
 
+**Ausgangslage im Arbeitsbaum (gemessen 2026-09-07, DRK-273).** Das Transitionsobjekt und
+seine Registry-Wirkung sind seit Stufe 1–3 vollständig gebaut und bezeugt; dieser Task baut
+sie NICHT nach. Vorhanden: `WriterTransitionFieldsV1` mit `old/new_writer_certificate_hash`,
+`effective_from_sequence`, `previous_entry_hash` und `reason_code: u64`
+(`crates/ea-format/src/etb.rs:238-247`, CDDL `schemas/archive/v1/trust.cddl:147-153`); der
+EINE Kodierer `TrustPayloadV1::writer_transition(fields, admin_authorization_object_hash)`
+(`etb.rs:467`); `RegistryActionV1::WriterTransition { transition_object_hash }` mit
+Aktionscode 3 und Registry-Change 3 (`crates/ea-admin/src/registry.rs:243,264,315`); die
+Kernprüfung `validate_writer_transition_target` (`crates/ea-trust/src/registry.rs:1351` —
+gleiche Organisation und Kette, `effective_from_sequence` gleich der des Ereignisses, alt ≠
+neu, beide Zertifikate der Art Writer, das alte an `preTransitionSequence` und das neue an
+`effective_from` bereichsaktiv, das alte gleich `current_writer_certificate_hash`); und die
+Anwendung `PreviousHeadState::apply_writer_transition` (`crates/ea-trust/src/resolver.rs:100`),
+die den alten Writer ab `effective_from_sequence` widerruft, den neuen zum laufenden Writer
+macht und den Transitionshash festhält. `active_certificate` filtert jedes Writer-Zertifikat,
+das nicht der laufende Writer ist (`resolver.rs:116-135`); der laufende Writer wird beim ersten
+freigegebenen Writer-Zertifikat gesetzt (`registry.rs:1513`) und danach nur noch durch Change 3
+bewegt. Das Manifestfeld `writer_transition_event_hash: Option<ObjectHash>` existiert
+(`crates/ea-format/src/eip.rs:23`), ebenso `PayloadV1::KeyTransition(KeyTransitionV1)` mit
+`writer_transition_event_object_hash` und `organizational_reason` (`crates/ea-schema/src/model.rs:1319`).
+Fixture: `ActionSpec::WriterTransition { old_writer, new_writer, effective_from }`
+(`crates/ea-trust/tests/support/mod.rs:288`), das `previous_entry_hash` fest auf
+`hash32(0x35)` setzt — der Writer-Zeuge braucht dafür eine additive `HeadOptions`-Überschreibung.
+
+Die echten Lücken, gegen die der Abschnitt zu messen ist:
+
+1. **`ea-trust` gibt den wirksamen Übergang nicht heraus.** `current_writer_certificate_hash`
+   und `writer_transition_object_hash` sind `pub(crate)` (`resolver.rs:31-32`);
+   `SelectedRegistryHead` hat keinen Zugriff. Genau darauf berufen sich zwei Pauschalabweisungen:
+   `crates/ea-sync-server/src/validation.rs:243` weist JEDES Manifest mit gesetztem Hash mit
+   `EA-COMMIT-WRITER-TRANSITION` (422) ab, und `crates/ea-verify/src/entry.rs:72`
+   (`claims_unverifiable_writer_transition`) isoliert es. Beide Kommentare sagen wörtlich, dass
+   die echte Prüfung an ihre Stelle tritt, „sobald `ea-trust` einen Zugriff auf die wirksamen
+   Uebergaenge herausgibt". Dieser Task ist diese Stelle: `SelectedRegistryHead` bekommt
+   `current_writer_certificate_hash()`, `effective_writer_transition()` (Objekthash, alter und
+   neuer Writer, `effective_from_sequence`, `previous_entry_hash`) und einen Lesezugriff auf ein
+   bereichsaktives, noch nicht laufendes Writer-Zertifikat — nur Lesezugriffe, keine neue Kante.
+2. **Der Writer schreibt den Hash fest als `None`** (`crates/ea-writer/src/finalize.rs:852`) und
+   baut ausschliesslich `PayloadV1::Incident` (`finalize.rs:726`); `FinalizationInputV1` ist
+   einsatzförmig (`crates/ea-writer/src/incident.rs:21`). Ein `keyTransition` ist durch den
+   normalen Pfad heute nicht erzeugbar. Der Writer prüft ausserdem nirgends, ob sein
+   Bindungszertifikat der laufende Writer ist — ein zurückgespielter alter Writer finalisiert
+   lokal anstandslos und scheitert erst am Server.
+3. **`EA-WRITER-REVOKED` existiert nicht**, und die Familie `EA-WRITER-` gehört den LOKALEN
+   Finalisierungsfehlern von `ea-writer` (`crates/ea-writer/src/error.rs:116-142`); der Server
+   spricht `EA-COMMIT-`. Der Code der Skizze ist deshalb der lokale Fehler des Writers, dessen
+   Bindungszertifikat nicht der laufende Writer des gewählten Kopfes ist; die Serverabsage an
+   den widerrufenen Writer heisst `EA-COMMIT-WRITER-REVOKED` (409, Security Event wie
+   `WriterUnauthorized`, `validation.rs:154`), unterschieden von `EA-COMMIT-WRITER-UNAUTHORIZED`
+   (heute die Antwort, `crates/ea-sync-server/tests/commit_service.rs:1436`).
+4. **`ea-admin` hält bewusst keine `ea-writer`-Kante** (`tests/ea-system-tests/Cargo.toml:16-27`),
+   und `tests/ea-system-tests` hat keine `ea-sync-server`-Kante. `activate` liefert deshalb KEINEN
+   Eintrag, sondern die Felder des Change-3-Ereignisses (`RegistryEventFieldsV1` über
+   `RegistryEventFactory::plan`); den `keyTransition`-Eintrag finalisiert der NEUE Writer über
+   `ea-writer`, und die Zusammenschau beider Seiten mit der Serverregel hat nur in der
+   Systemtest-Crate einen Ort — sie bekommt die Dev-Kanten `ea-sync-server` und
+   `ea-sync-protocol` und ruft `ea_sync_server::validate_commit` mit dem ECHTEN
+   `SelectedRegistryHead` (er implementiert `ActiveRegistryHeadV1`,
+   `crates/ea-sync-server/src/ports.rs:255`). Ein Datenbankserver ist dafür nicht nötig.
+5. Namen der Skizze: `transition.object_hash()` gibt es nicht — `publish_authorized_target`
+   liefert `ExactObjectBytes`, der Hash ist `ea_crypto::object_hash(bytes.as_bytes())`;
+   `entry.manifest()` ist `entry.value().manifest().fields().writer_transition_event_hash`;
+   `CommitFailure` hat kein `.code()`, der Code steht in `.error.code()`; der Kern ist synchron,
+   `#[tokio::test]` übersetzt in keiner der beiden Testcrates. `reason_code` ist auf dem Draht ein
+   blosser `uint` ohne Tabelle in Spec oder Baum; der Dienst reicht ihn durch und erfindet keine.
+
 - [ ] **Step 1: Write transition-hash and old-Writer rejection tests**
 
 ```rust
-#[tokio::test]
-async fn first_new_writer_entry_binds_exact_transition_hash() {
-    let transition = service.prepare(old_writer(), new_writer(), trusted_head(), reason()).await.unwrap();
-    let entry = service.activate(transition).await.unwrap();
-    assert_eq!(entry.manifest().writer_transition_event_hash, Some(transition.object_hash()));
-    assert_eq!(server.commit(old_writer_entry_at_same_sequence()).await.unwrap_err().code(), "EA-WRITER-REVOKED");
+#[test]
+fn first_new_writer_entry_binds_exact_transition_hash() {
+    // ea-admin: prepare → Root ceremony → activate → commit → select the new head
+    let prepared = WriterTransitionService::new(&head)
+        .prepare(&request, intent.authorization_object_hash())
+        .unwrap();
+    let transition_bytes = ceremony.publish_authorized_target(&intent, prepared.payload(), …).unwrap();
+    let transition_hash = ea_crypto::object_hash(transition_bytes.as_bytes());
+    let event = service.activate(&prepared, transition_bytes.as_bytes(), &events, window).unwrap();
+    // ea-writer: the NEW writer's first entry is the keyTransition
+    let outcome = new_writer.finalize_key_transition(&proof, input, &confirmed, now).unwrap();
+    let entry = read_entry(outcome.object_hash);
+    assert_eq!(entry.value().manifest().fields().writer_transition_event_hash, Some(transition_hash));
+    // the restored old writer at the same sequence: locally and at the server
+    assert_eq!(old_writer.finalize(&proof, incident, &preview, now).unwrap_err().code(), "EA-WRITER-REVOKED");
+    let failure = validate_commit(&request_of(old_entry), &old_entry, org, chain, old_writer_hash, &new_head).unwrap_err();
+    assert_eq!(failure.code(), "EA-COMMIT-WRITER-REVOKED");
 }
 ```
 
@@ -802,6 +885,18 @@ Expected: FAIL because Writer transition workflow does not exist.
 
 Bind old/new Writer certificates, effective sequence, previous trusted chain head, Admin authorization, Root signature, and reason code/public metadata in the transition. Reconcile the incoming Writer against server, Reader, or external signed checkpoint before activation. Revoke old Writer from transition sequence. Finalize `keyTransition` through the normal Writer path with encrypted organizational reason. Require exact transition hash only on the first Entry whose Writer certificate changes; reject missing/additional/mismatched hashes.
 
+Die Regel ist gegen den Übergang formulierbar, ohne den Vorgängereintrag zu lesen, weil der
+Übergang den vertrauten Kopf selbst bindet: `effective_from_sequence` ist die Sequenz des
+vertrauten Kopfes plus eins und `previous_entry_hash` sein Eintragshash. Damit gilt an jedem
+Prüfpunkt (Writer, Server, `ea-verify`): der Hash ist GENAU DANN gesetzt, wenn der Eintrag an
+`effective_from_sequence` liegt, den `previous_entry_hash` des Übergangs als Vorgänger nennt
+und vom neuen Writer stammt; er ist dann der Objekthash des wirksamen Übergangs des gewählten
+Kopfes. Jeder andere Eintrag trägt `None`. Fehlend, zusätzlich oder abweichend ist ein
+Trust-Fehler (`design.md:669`). Der Writer nimmt den Hash NICHT als Eingabe entgegen, sondern
+liest ihn aus seinem gewählten Kopf; an `effective_from_sequence` darf der neue Writer nur den
+`keyTransition` finalisieren, nie einen Einsatz. `ea-admin` signiert weiterhin nichts —
+`RootCeremonyService::publish_authorized_target` bleibt der einzige Signierweg.
+
 - [ ] **Step 4: Run lost-old-Writer, restored-backup, and concurrent-old/new tests**
 
 Run: `cargo test --locked -p ea-admin --test writer_transition && cargo test --locked -p ea-system-tests --test e2e_writer_transition -- --test-threads=1`
@@ -811,7 +906,7 @@ Expected: PASS; a restored stale Writer remains blocked and only the authorized 
 - [ ] **Step 5: Commit Writer transition**
 
 ```bash
-git add crates/ea-admin apps/cli tests/ea-system-tests
+git add crates/ea-admin crates/ea-trust crates/ea-writer crates/ea-sync-server crates/ea-verify apps/cli tests/ea-system-tests Cargo.lock
 git commit -m "feat(admin): transition the single active Writer"
 ```
 
