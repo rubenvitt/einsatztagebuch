@@ -912,56 +912,93 @@ git commit -m "feat(admin): transition the single active Writer"
 
 ### Task 6: Administration UI for Requests, Fingerprints, Policy, and Recovery Health
 
+> **Gegen den Arbeitsbaum vermessen (2026-09-07, DRK-274).** Der Abschnitt wurde geschrieben,
+> bevor Tasks 1, 3, 4 und 5 ausgeliefert haben. Korrigiert sind: der Playwright-Pfad
+> (`apps/desktop/tests/e2e/`, `playwright.config.ts:95`, gepinnt durch
+> `apps/desktop/src/e2e-config.test.ts:12`; das Wurzelverzeichnis `tests/` gehört dem
+> Rust-Mitglied `tests/ea-system-tests`), die fehlenden Kontrakt-, Wirt- und Schalendateien,
+> die `ea-admin` nicht als „Admin service DTOs" liefert (die Dienste tragen Lebensdauern und
+> brauchen je einen Port in `state.rs`), der Stufe-2-Zeuge
+> `no_command_serves_a_reader_or_an_administration_surface` (`lib.rs`), der den Teilstring
+> `admin` in Kommandonamen verbietet und in DIESEM Task um die Verwaltung erweitert wird,
+> die Zitierung: `bestätigt` / `nicht erfüllt` / `nicht automatisch prüfbar` stehen NICHT in
+> §17.4 (dort nur die sechs Vokabulare), sondern folgen §17.3 (`design.md:1922-1930`), §18.4
+> (`:1974`) und §21 (`:2044-2073`); die Statuswerte werden als geschlossene Aufzählung aus
+> `ea-admin` emittiert und in der Schale übersetzt, wie `SyncStatus`. Der Fingerprint hat im
+> Baum keinen Erzeuger (`ea-types` kennt kein `Display` auf `ObjectHash`); der Formatierer
+> entsteht in `ea-admin`. Eine aufzählbare Quelle ausstehender Anfragen gibt es nicht (der
+> Server-Port `DeviceRegistrationStore` kennt nur `record_pending`); der Wirt-Port liefert
+> sie, und seine Anbindung an Server oder Offline-Import bleibt wie jeder Desktop-Port eine
+> benannte Abwesenheit bis zur Verdrahtung. Zwei-Admin-Bereitschaft, Schlüssel-Backup,
+> Evidence-Richtlinie und letzter Recovery-Test haben kein gemeinsames Aggregat;
+> `OperatorGoLiveReport` ist es nicht. Das Aggregat entsteht hier in `ea-admin::go_live`.
+> `session_reauthenticate` ist ein Stumpf (`EA-DESKTOP-REAUTH-UNAVAILABLE`); er wird über
+> einen Port geführt, bleibt aber unverdrahtet. Testkennungen (`data-testid`) sind im
+> Baum nicht Hausstil; die Zeugen fragen über Rolle und Namen. `desktop:e2e` läuft weder
+> in `verify:quick` noch in CI (`tools/xtask/src/main.rs`, `.github/workflows/ci.yml`); die
+> E2E-Spezifikation ist ein manuell gefahrener Zeuge wie die von Task 16 der Stufe 2.
+
 **Files:**
+- Create: `crates/ea-admin/src/go_live.rs` (Go-live-Aggregat, tri-state, `Unknown` nie grün)
+- Create: `crates/ea-admin/src/fingerprint.rs` (menschenlesbarer Fingerprint `AA:BB:…`, 32 Paare, Groß-Hex; Rückweg zum `ObjectHash`)
+- Create: `crates/ea-admin/src/ceremony_steps.rs` (getrennte Schritte einer Root-Zeremonie als geschlossene Aufzählung, keine Abkürzung)
+- Modify: `crates/ea-admin/src/lib.rs`, `crates/ea-admin/src/writer_transition.rs` (Phase der Transition)
+- Modify: `crates/ea-ui-contracts/src/lib.rs`, `crates/ea-ui-contracts/src/emit.rs`, `crates/ea-ui-contracts/Cargo.toml`, `crates/ea-ui-contracts/tests/generated_ts_is_current.rs`
+- Regenerate: `apps/desktop/src/bridge/generated-contracts.ts`, `apps/web/src/bridge/generated-contracts.ts`
 - Create: `apps/desktop/src-tauri/src/commands/admin.rs`
+- Modify: `apps/desktop/src-tauri/Cargo.toml` (Kante `ea-admin`), `src-tauri/src/state.rs` (Ports `AdministrationPort`, `ReauthPort`, Nähte `with_administration`, `with_reauth`), `src-tauri/src/lib.rs`, `src-tauri/src/commands/mod.rs`, `src-tauri/src/commands/session.rs` (Fähigkeit `administration`), `src-tauri/src/commands/writer.rs` (`session_reauthenticate` über den Port), `src-tauri/build.rs`, `src-tauri/tauri.conf.json`
+- Modify: `apps/desktop/src-tauri/tests/writer_commands.rs`; Create: `apps/desktop/src-tauri/tests/admin_commands.rs`
+- Modify: `apps/desktop/src/app/role-gate.ts`, `apps/desktop/src/app/AppShell.tsx`, `apps/desktop/src/app/AppShell.test.tsx`, `apps/desktop/src/app/RoleGate.test.tsx`, `apps/desktop/src/design/icons.tsx`, `apps/desktop/src/design/extract-static-css.tsx`, `apps/desktop/src/design/static-antd.css`
 - Create: `apps/desktop/src/features/admin/AdminPage.tsx`
 - Create: `apps/desktop/src/features/admin/DeviceRequests.tsx`
 - Create: `apps/desktop/src/features/admin/FingerprintApproval.tsx`
 - Create: `apps/desktop/src/features/admin/PolicyEditor.tsx`
 - Create: `apps/desktop/src/features/admin/RegistryHealth.tsx`
-- Create: `apps/desktop/src/features/admin/DevicePosture.tsx`
+- Create: `apps/desktop/src/features/admin/GoLiveChecklist.tsx`
+- Create: `apps/desktop/src/features/admin/DevicePosture.tsx` (dünne Hülle um `components/integrity/DevicePosturePanel.tsx`)
 - Create: `apps/desktop/src/features/admin/ClockReleaseWizard.tsx`
 - Create: `apps/desktop/src/features/admin/WriterTransitionWizard.tsx`
+- Create: `apps/desktop/src/features/admin/RevocationConfirm.tsx`
 - Test: `apps/desktop/src/features/admin/AdminPage.test.tsx`
-- Test: `tests/e2e/admin-trust.spec.ts`
+- Test: `apps/desktop/tests/e2e/admin-trust.spec.ts`
 
 **Interfaces:**
-- Consumes: Admin service DTOs and native re-authentication.
-- Produces: separated pending/fingerprint/authorization/Root-import steps and no Admin content access.
+- Consumes: `ea-admin` services (`RegistryWorkflowService`, `RootCeremonyService`, `ClockReleaseService`, `WriterTransitionService`, `operator_exchange`, `revocation`, `production_state`) hinter Wirt-Ports; `ReauthPurpose::{AdminRootCeremony, ClockSkewRelease, RecoveryTest}`; `DevicePostureReport` über den bestehenden Kommando `device_posture_report`.
+- Produces: separated pending/fingerprint/authorization/Root-export/Root-import/publication steps and no Admin content access; a Go-live checklist whose `productionReady` is `true` only when every requirement is `Confirmed`.
 
-- [x] **Step 1: Write separation and full-fingerprint tests**
+- [ ] **Step 1: Write separation and full-fingerprint tests**
 
 ```tsx
 it('does not collapse request fingerprint approval and Root import', async () => {
   render(<AdminPage bridge={pendingDeviceBridge()} />)
   expect(screen.getByText('Anfrage ausstehend')).toBeVisible()
   await user.click(screen.getByRole('button', { name: 'Fingerprint vergleichen' }))
-  expect(screen.getByTestId('full-fingerprint')).toHaveTextContent(/([0-9A-F]{2}:){31}[0-9A-F]{2}/)
+  expect(screen.getByLabelText('Vollständiger Fingerprint')).toHaveTextContent(/([0-9A-F]{2}:){31}[0-9A-F]{2}/)
   expect(screen.getByRole('img', { name: 'QR-Code des vollständigen Fingerprints' })).toBeVisible()
   expect(screen.queryByText('Gerät aktiv')).not.toBeInTheDocument()
 })
 ```
 
-- [x] **Step 2: Run Admin UI tests and verify missing UI**
+- [ ] **Step 2: Run Admin UI tests and verify missing UI**
 
 Run: `pnpm --dir apps/desktop test --run AdminPage`
 
 Expected: FAIL because Admin commands/components do not exist.
 
-- [x] **Step 3: Implement guided, explicit ceremonies**
+- [ ] **Step 3: Implement guided, explicit ceremonies**
 
-Separate pending request, full fingerprint plus QR/second channel, Admin authorization, offline Root signing/export/import, and resulting Registry publication. Require fresh native re-authentication before Admin/Root actions and conscious key-source selection. Show two-Admin readiness, key backup state, Registry age/lease, policy profile, Evidence policy, last Recovery test, Writer transition state, and every device-posture requirement as `bestätigt`, `nicht erfüllt`, or `nicht automatisch prüfbar` with its evidence code. Never render `Unknown` as green or production-ready; export unresolved items to the Go-live evidence checklist. When future-clock skew blocks, offer the clock-release wizard only to a verified Admin, display floor/wall clock/signed limit/expiry, require an allowlisted justification plus re-authentication, and state explicitly that the release changes neither time floor, Registry expiry, nor lease. Revocation copy states that past grants/decrypted data cannot be recalled. Do not show incident content or enable Reader functions from Admin capability.
+Separate pending request, full fingerprint plus QR/second channel, Admin authorization, offline Root signing/export/import, and resulting Registry publication as a closed step enumeration (`ea-admin::ceremony_steps`) that the host advances one step at a time. Require fresh native re-authentication (`session_reauthenticate` with the exact purpose) before Admin/Root actions and conscious key-source selection. Show two-Admin readiness, key backup state, Registry age/lease, policy profile, Evidence policy, last Recovery test, Writer transition state, and every device-posture requirement as `bestätigt`, `nicht erfüllt`, or `nicht automatisch prüfbar` with its evidence code — the three words are the German rendering of the closed union `GoLiveRequirementStatus` emitted from `ea-admin::go_live`, in the manner of `SyncStatus`. Never render `Unknown` as green or production-ready: `productionReady` is computed in Rust and is `false` whenever any requirement is not `Confirmed`; export unresolved items as the deterministic Go-live evidence checklist (`ea.go-live-checklist/v1`). Device posture reuses `components/integrity/DevicePosturePanel.tsx`, which already keeps pass/fail/unknown apart. When future-clock skew blocks, offer the clock-release wizard only to a verified Admin with `ClockReleaseAvailability::Offered`, display floor/wall clock/signed limit (`max_future_clock_skew_ms`)/expiry, require one of the three allowlisted `ClockReleaseJustificationV1` values plus re-authentication, and state explicitly that the release changes neither time floor, Registry expiry, nor lease — the outcome view carries these three as fields, never as prose alone. Revocation copy renders `RevocationEffect::recalls_issued_grants` and `recalls_decrypted_plaintext` (both always `false`) as the statement that past grants and decrypted data cannot be recalled. Do not show incident content or enable Reader functions from Admin capability: the administration route is enabled by role `organizationadmin` plus capability `administration`, the capture route stays bound to the Writer, and the admin session sees no capture route.
 
-- [x] **Step 4: Run keyboard, wrong-role, stale-session, and E2E ceremony tests**
+- [ ] **Step 4: Run keyboard, wrong-role, stale-session, and E2E ceremony tests**
 
 Run: `pnpm --dir apps/desktop test --run && pnpm --dir apps/desktop exec playwright test tests/e2e/admin-trust.spec.ts`
 
-Expected: PASS; all ceremony steps have headings/statuses, focus restoration, accessible QR alternative, and no role escalation.
+Expected: PASS; all ceremony steps have headings/statuses, focus restoration, accessible QR alternative, and no role escalation. The Playwright run is a manual witness: `desktop:e2e` is in no automated gate.
 
-- [x] **Step 5: Commit Administration UI workstream**
+- [ ] **Step 5: Commit Administration UI workstream**
 
 ```bash
-git add apps/desktop tests/e2e pnpm-lock.yaml
+git add apps/desktop apps/web/src/bridge crates/ea-admin crates/ea-ui-contracts Cargo.lock pnpm-lock.yaml
 git commit -m "feat(desktop): add guided Trust administration"
 ```
 
