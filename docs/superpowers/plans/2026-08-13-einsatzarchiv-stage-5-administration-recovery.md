@@ -1006,54 +1006,105 @@ git commit -m "feat(desktop): add guided Trust administration"
 
 ### Task 7: Offline Key Sources and Complete Recovery CLI Grammar
 
+> **Gegen den Arbeitsbaum vermessen (2026-09-07, DRK-275).** Der Abschnitt wurde geschrieben,
+> bevor die Stufen 4 und 5 ausgeliefert haben. Korrigiert sind: **die Crate der
+> Schlüsselquellen.** `ea-key-provider` ist die Grenze des Writers; sein Kontrakt führt bewusst
+> keinen KEM-Port (`crates/ea-key-provider/src/contract.rs:347-350`), und `lib.rs:41-56` pinnt
+> per `compile_fail`, dass aus `KeyPurpose::{RecoveryKem, HistoricalGrantAuthority, KeyApprover}`
+> kein lokaler Zweck wird. Ein Recovery- oder HGA-Schlüsselcontainer dort kehrte diese Typzusage
+> um und veraltete zugleich die Begründung der wasm32-Ausnahme
+> (`tools/xtask/src/main.rs:214-222`, „Writer device"). Die Quellen entstehen deshalb in
+> `ea-recovery` — der einzigen Crate, die laut ihrem Kopf Klartext in Händen hält und Zieldateien
+> mit restriktiven Rechten anlegt (`crates/ea-recovery/src/lib.rs:3-7`); `ea-key-provider` bleibt
+> unberührt. **Die Abhängigkeits-ADR** (`docs/adr/0001-toolchain-and-cryptography-dependencies.md`)
+> ist zu Argon2, scrypt, PBKDF2 und PKCS#11 stumm — weder gepinnt noch abgelehnt; die „reviewte
+> KDF/AEAD-Konfiguration" wird dort in DIESEM Task nachgetragen (Argon2id über `argon2`; die AEAD
+> bleibt das gepinnte ChaCha20-Poly1305 hinter `ea_crypto::aead_seal`, es kommt keine zweite).
+> **PKCS#11:** kein Modul im Baum, keines auf dem Host, kein SoftHSM im Browser-Container;
+> `cryptoki` zöge über `cryptoki-sys`/`libloading` die native Toolchain-Varianz in den Graphen,
+> die ADR 0001 `:75-77` für OpenSSL/`ring` abgelehnt hat. Der Task liefert die explizite Referenz
+> (Modul, Token, Schlüssel-ID — alle drei Pflicht, keine Voreinstellung, kein „erstes Token") und
+> den PIN-Kanal; die Bindung an ein Modul ist eine benannte Grenze mit Exitcode 21 nach dem Muster
+> von `--report-signing-key` (ADR 0001, „Blocked"). **`grant` und `recovery-test`:** nichts im Baum
+> erzeugt oder prüft einen historischen Grant (`crates/ea-verify/src/recipient.rs:236-238` weist
+> `GrantKindV1::Historical` als `AuthorizationUnverifiable` ab); `HistoricalGrantService` ist
+> Task 8, `RecoveryTestService` und die Rust-Bindung von `ea.key-inventory/v1`
+> (`schemas/reports/v1/key-inventory.schema.json`, seit Stufe 1) sind Task 9. Beide Kommandos
+> liefern hier die vollständige Grammatik, verify-before-use über `commands::verified`, die
+> explizite Auflösung ihrer Schlüsselquellen, die Lesbarkeit ihrer Dateieingaben und die
+> Exitcodes — und enden danach mit 21 und dem benannten fehlenden Dienst, nie mit einem
+> Teilerfolg und nie mit einer Ausgabe auf stdout. Der Step-1-Zeuge des ursprünglichen Textes
+> (`grant … .assert().success()`) ist deshalb unerreichbar und ersetzt. **Der Testrahmen:**
+> `assert_cmd` gibt es nicht und kommt nicht (`apps/cli/tests/commands.rs:5-7`); Prozesszeugen
+> laufen über `std::process::Command::new(env!("CARGO_BIN_EXE_einsatzarchiv"))` und die
+> `live_clock_*`-Familie aus `apps/cli/tests/support`. Das Paket heißt `einsatzarchiv-cli`, die
+> Binary `einsatzarchiv`. **JSON:** `schemas/` ist geschlossen (`apps/cli/src/output.rs:31-37`);
+> die Kommandos emittieren weiterhin nur `ea.verification-report/v1`. **Der Geheimniskanal:**
+> Passphrase und PIN kommen aus einer Datei mit restriktiven Rechten, die in der
+> Quellenangabe benannt ist — nie aus argv (sichtbar in `ps`), nie aus der Umgebung, nie aus
+> einem Prompt (ein echofreier Terminalprompt bräuchte `termios`, also eine weitere Kiste).
+> **Die Haken** dieses Abschnitts hatte `111d406` zusammen mit denen der Tasks 5–13 gesetzt,
+> ohne dass etwas gebaut war; sie sind hier zurückgesetzt.
+
 **Files:**
-- Create: `crates/ea-key-provider/src/encrypted_container.rs`
-- Create: `crates/ea-key-provider/src/pkcs11.rs`
-- Create: `crates/ea-recovery/src/key_source.rs`
+- Create: `crates/ea-recovery/src/key_source.rs` (Quellengrammatik `<path>` | `file:<path>` | `container:<path>;passphrase-file=<path>` | `pkcs11:module=<path>;token=<label>;id=<hex>;pin-file=<path>`; Auflösung zu Empfänger- oder Signierschlüssel; kein Scannen, keine Voreinstellung)
+- Create: `crates/ea-recovery/src/encrypted_container.rs` (`EINSATZARCHIV-KEY-CONTAINER-v1`: deterministisches CBOR, Argon2id mit gepinnten Parametern, `ea_crypto::aead_seal`/`aead_open` mit dem Kopf als AAD, Schlüsselart im Kopf; 0600 beim Schreiben, Ablehnung offener Rechte beim Lesen)
+- Create: `crates/ea-recovery/src/pkcs11.rs` (explizite Referenz, PIN-Kanal; Modulbindung als benannte Grenze)
+- Modify: `crates/ea-recovery/src/lib.rs`, `crates/ea-recovery/src/error.rs`, `crates/ea-recovery/src/exit.rs`, `crates/ea-recovery/Cargo.toml`, `Cargo.toml` (`argon2`), `Cargo.lock`
+- Modify: `docs/adr/0001-toolchain-and-cryptography-dependencies.md` (Zeile `argon2`; Abschnitt „Blocked: PKCS#11 module binding")
 - Create: `apps/cli/src/commands/grant.rs`
 - Create: `apps/cli/src/commands/recovery_test.rs`
-- Modify: `apps/cli/src/args.rs`
-- Test: `crates/ea-key-provider/tests/offline_sources.rs`
-- Test: `apps/cli/tests/full_grammar.rs`
+- Modify: `apps/cli/src/args.rs`, `apps/cli/src/commands/mod.rs`, `apps/cli/src/commands/decrypt.rs`, `apps/cli/src/output.rs`
+- Test: `crates/ea-recovery/tests/offline_sources.rs`
+- Test: `apps/cli/tests/full_grammar.rs`; Modify: `apps/cli/tests/commands.rs`, `apps/cli/tests/exit_codes.rs` (Grammatikpins)
 
 **Interfaces:**
-- Consumes: explicit external anchor, encrypted key container/PKCS#11 ports.
-- Produces: full required CLI commands including `grant` and `recovery-test`; no key-source auto-discovery or plaintext export fallback.
+- Consumes: explicit external anchor (`ea_recovery::load_trust_anchor`), `ea_crypto::{aead_seal, aead_open, HpkeRecipientPrivateKey, CoseSigner, SecretBytes, SecretVec}`, the `argon2` crate pinned in ADR 0001.
+- Produces: `ea_recovery::{KeySourceSpec, resolve_recipient_key, resolve_signing_key, EncryptedKeyContainer, Pkcs11KeyReference}`; the full §16.1 grammar including `grant` and `recovery-test`; no key-source auto-discovery, no plaintext export fallback, no implicit anchor.
 
-- [x] **Step 1: Write full grammar and key-source separation tests**
+- [ ] **Step 1: Write full grammar and key-source separation tests**
 
 ```rust
 #[test]
 fn grant_requires_distinct_recovery_authority_authorization_and_recipient_inputs() {
-    cli().args(["--trust-anchor", anchor(), "grant", entry(),
-                "--recovery-key", recovery(), "--authority-key", authority(),
-                "--authorization", auth(), "--recipient-cert", recipient()])
-        .assert().success();
-    cli().args(["--trust-anchor", anchor(), "grant", entry(), "--recovery-key", recovery()])
-        .assert().failure().code(2);
+    // Drei der vier Pflichtschalter fehlen: Aufruffehler VOR jedem gelesenen Byte,
+    // der fehlende Schalter steht woertlich auf stderr, stdout bleibt leer.
+    let output = run(&[
+        "--trust-anchor", &laid.anchor_path(), "grant", &laid.archive_path(),
+        "--recovery-key", &laid.recovery_key_path(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--authority-key"));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn a_container_with_the_wrong_passphrase_fails_with_fourteen_and_leaks_nothing() {
+    let sealed = EncryptedKeyContainer::seal(KeyKind::RecipientKem, &secret, passphrase("richtig"));
+    assert!(matches!(sealed.open(passphrase("falsch")), Err(RecoveryError::KeySource)));
 }
 ```
 
-- [x] **Step 2: Run CLI tests and verify missing commands/providers**
+- [ ] **Step 2: Run CLI tests and verify missing commands/providers**
 
-Run: `cargo test --locked -p ea-key-provider --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
+Run: `cargo test --locked -p ea-recovery --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
 
-Expected: FAIL because encrypted-container/PKCS#11 and full commands are absent.
+Expected: FAIL because the key-source grammar, the encrypted container, the PKCS#11 reference and both commands are absent.
 
-- [x] **Step 3: Implement explicit key-source adapters and complete commands**
+- [ ] **Step 3: Implement explicit key-source adapters and complete commands**
 
-Implement the full grammar from §16.1, always requiring `--trust-anchor`. Encrypted containers use a reviewed password-based KDF/AEAD configuration pinned in the dependency ADR and restrictive file permissions; PKCS#11 uses explicit module/token/key identifiers and user presence/PIN through non-logging secure input. Never infer a Root/Recovery/HGA/Approver key by scanning media. `verify` runs before `decrypt`, `grant`, `export`, and `recovery-test`. Output supports stable text/JSON schemas and established exit codes.
+Implement the full grammar from §16.1, always requiring `--trust-anchor`. Key sources are named explicitly through `ea_recovery::KeySourceSpec`; a bare path keeps the Stage-4 file form (32 raw bytes or 64 hex characters). Encrypted containers use Argon2id with the parameters pinned in ADR 0001 and the already pinned ChaCha20-Poly1305 behind `ea_crypto::aead_seal`, bind the container header as AAD, carry the key kind so a recovery key can never be read as a signing key, are written with mode 0600 and refused when readable by group or others. Passphrase and PIN are read from a named file with the same restrictive-permission rule, never from argv or the environment. PKCS#11 references require module path, token label and key id; nothing is defaulted, scanned or inferred, and the unbound module ends with exit 21 naming the boundary. `verify` runs before `decrypt`, `grant`, `export`, and `recovery-test`; `grant` and `recovery-test` resolve every input and then refuse with exit 21 naming the Task-8 respectively Task-9 service. Output supports the existing text/JSON schema and the established exit codes.
 
-- [x] **Step 4: Run wrong-token, missing-key, target-permission, and grammar tests**
+- [ ] **Step 4: Run wrong-passphrase, open-permissions, missing-switch, and grammar tests**
 
-Run: `cargo test --locked -p ea-key-provider --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
+Run: `cargo test --locked -p ea-recovery --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
 
-Expected: PASS; no command accepts the archive's own anchor as implicit trust.
+Expected: PASS; no command accepts the archive's own anchor as implicit trust; a `pkcs11:` source ends with 21 naming the unbound module; a container or secret file with open permissions is refused before it is read.
 
-- [x] **Step 5: Commit offline key sources and full CLI**
+- [ ] **Step 5: Commit offline key sources and full CLI**
 
 ```bash
-git add crates/ea-key-provider crates/ea-recovery apps/cli Cargo.toml Cargo.lock
+git add crates/ea-recovery apps/cli docs/adr Cargo.toml Cargo.lock
 git commit -m "feat(recovery): add explicit offline key sources"
 ```
 
