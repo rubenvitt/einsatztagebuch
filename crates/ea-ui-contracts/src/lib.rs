@@ -44,10 +44,19 @@ pub use emit::{emit_reader_typescript, emit_typescript};
 
 // Die Sicherheitsaufzaehlungen bleiben, wo sie definiert wurden. Hier steht
 // ausschliesslich die Weitergabe.
+pub use ea_admin::{
+    ceremony_steps::{TrustCeremonyKind, TrustCeremonyStep},
+    clock_release::ClockReleaseAvailability,
+    go_live::{GoLiveChecklist, GoLiveRequirementStatus},
+    revocation::RevocationTargetClass,
+    writer_transition::WriterTransitionPhase,
+};
 pub use ea_archive::QuarantineReason;
 pub use ea_archive_fs::{DetailCause, HealthFinding, SyncStatus};
 pub use ea_crypto::SignerRole;
-pub use ea_format::{KeyProtectionProfileV1, LocalAuditOutcomeV1, OperatorRoleV1};
+pub use ea_format::{
+    ClockReleaseJustificationV1, KeyProtectionProfileV1, LocalAuditOutcomeV1, OperatorRoleV1,
+};
 pub use ea_reader::BundleRejectionCodeV1;
 pub use ea_types::{EntryStatus, EvidenceStatus, VerificationStatus};
 pub use ea_verify::ServerConfirmationV1;
@@ -59,7 +68,7 @@ use ea_schema::{
     CoordinatesV1, ExternalOrganizationV1, IncidentUniquenessKey, KeywordV1, LocationV1,
     OccurredAtV1, PatientCount, SchemaError, StructuredAddressV1,
 };
-use ea_types::{ChainSequence, UnixMillis};
+use ea_types::{ChainSequence, RegistryVersion, UnixMillis};
 use ea_writer::{FinalizationPreview, FinalizeOutcome, RecoveryOutcome};
 
 /// Die Sicherheitsaufzaehlungen der Kontraktflaeche, in Emitterreihenfolge.
@@ -87,6 +96,37 @@ pub const WRITER_ENUMS_V1: &[(&str, &[&str])] = &[
     ("StaleDecision", STALE_DECISION_LITERALS),
     ("HealthFinding", HEALTH_FINDING_LITERALS),
     ("PatientCountStatus", PATIENT_COUNT_STATUS_LITERALS),
+];
+
+/// Die geschlossenen Aufzaehlungen der VERWALTUNGSFLAECHE (Stufe 5, Task 6),
+/// in Emitterreihenfolge.
+///
+/// Sechs davon kommen aus `ea-admin`, eine (`ClockReleaseJustificationV1`)
+/// aus `ea-format`. Alle stehen in der DESKTOP-Datei und nicht in der des
+/// Readers: der Reader hat keine Verwaltungsrolle, und ein `Confirmed` in
+/// seiner Kontraktdatei verbaenne das Wort aus jeder handgeschriebenen
+/// Web-Quelle ohne Reader-Grund. Die Literale SIND die Variantennamen; die
+/// deutsche Kopie (`bestaetigt`, `nicht erfuellt`, `nicht automatisch
+/// pruefbar`) entsteht in der Schale ueber `Record<Union, string>` mit
+/// unquotierten Schluesseln, weil `no-hand-written-contracts.test.ts` jedes
+/// emittierte Literal aus der TSX verbannt.
+pub const ADMIN_ENUMS_V1: &[(&str, &[&str])] = &[
+    (
+        "GoLiveRequirementStatus",
+        GO_LIVE_REQUIREMENT_STATUS_LITERALS,
+    ),
+    ("TrustCeremonyKind", TRUST_CEREMONY_KIND_LITERALS),
+    ("TrustCeremonyStep", TRUST_CEREMONY_STEP_LITERALS),
+    ("WriterTransitionPhase", WRITER_TRANSITION_PHASE_LITERALS),
+    (
+        "ClockReleaseAvailability",
+        CLOCK_RELEASE_AVAILABILITY_LITERALS,
+    ),
+    ("RevocationTargetClass", REVOCATION_TARGET_CLASS_LITERALS),
+    (
+        "ClockReleaseJustificationV1",
+        CLOCK_RELEASE_JUSTIFICATION_V1_LITERALS,
+    ),
 ];
 
 /// Die Statusaufzaehlungen der READER-Flaeche, in Emitterreihenfolge.
@@ -452,6 +492,160 @@ const SERVER_CONFIRMATION_V1_LITERALS: &[&str] = &[
     server_confirmation_literal(ServerConfirmationV1::ServerConfirmed),
     server_confirmation_literal(ServerConfirmationV1::NotServerConfirmed),
 ];
+
+// ---------------------------------------------------------------------------
+// Die geschlossenen Mengen der Verwaltungsflaeche. Jede Zuordnung ist ein
+// `match` OHNE Sammelarm; keine der definierenden Crates fuehrt fuer diese
+// Aufzaehlungen einen Zeichenkettenzugriff, also IST der Variantenname das
+// Literal — und er steht hier und nirgends sonst.
+// ---------------------------------------------------------------------------
+
+/// Der Zustand EINER Go-live-Anforderung. Der dritte Arm ist der Grund, warum
+/// die Aufzaehlung dreiarmig ist und kein `boolean`: „nicht automatisch
+/// pruefbar" ist nie gruen.
+const fn go_live_requirement_status_literal(value: GoLiveRequirementStatus) -> &'static str {
+    match value {
+        GoLiveRequirementStatus::Confirmed => "Confirmed",
+        GoLiveRequirementStatus::NotMet => "NotMet",
+        GoLiveRequirementStatus::NotAutomaticallyVerifiable => "NotAutomaticallyVerifiable",
+    }
+}
+
+const GO_LIVE_REQUIREMENT_STATUS_LITERALS: &[&str] = &[
+    go_live_requirement_status_literal(GoLiveRequirementStatus::Confirmed),
+    go_live_requirement_status_literal(GoLiveRequirementStatus::NotMet),
+    go_live_requirement_status_literal(GoLiveRequirementStatus::NotAutomaticallyVerifiable),
+];
+
+/// Die Art einer Trust-Zeremonie.
+const fn trust_ceremony_kind_literal(value: TrustCeremonyKind) -> &'static str {
+    match value {
+        TrustCeremonyKind::DeviceApprove => "DeviceApprove",
+        TrustCeremonyKind::DeviceRevoke => "DeviceRevoke",
+        TrustCeremonyKind::PolicyChange => "PolicyChange",
+        TrustCeremonyKind::WriterTransition => "WriterTransition",
+    }
+}
+
+const TRUST_CEREMONY_KIND_LITERALS: &[&str] = &[
+    trust_ceremony_kind_literal(TrustCeremonyKind::DeviceApprove),
+    trust_ceremony_kind_literal(TrustCeremonyKind::DeviceRevoke),
+    trust_ceremony_kind_literal(TrustCeremonyKind::PolicyChange),
+    trust_ceremony_kind_literal(TrustCeremonyKind::WriterTransition),
+];
+
+/// Der erreichte Schritt einer Trust-Zeremonie — sechs getrennte Schritte,
+/// keine Abkuerzung.
+const fn trust_ceremony_step_literal(value: TrustCeremonyStep) -> &'static str {
+    match value {
+        TrustCeremonyStep::PendingRequest => "PendingRequest",
+        TrustCeremonyStep::FingerprintConfirmed => "FingerprintConfirmed",
+        TrustCeremonyStep::AdminAuthorized => "AdminAuthorized",
+        TrustCeremonyStep::RootRequestExported => "RootRequestExported",
+        TrustCeremonyStep::RootReplyImported => "RootReplyImported",
+        TrustCeremonyStep::RegistryPublished => "RegistryPublished",
+    }
+}
+
+const TRUST_CEREMONY_STEP_LITERALS: &[&str] = &[
+    trust_ceremony_step_literal(TrustCeremonyStep::PendingRequest),
+    trust_ceremony_step_literal(TrustCeremonyStep::FingerprintConfirmed),
+    trust_ceremony_step_literal(TrustCeremonyStep::AdminAuthorized),
+    trust_ceremony_step_literal(TrustCeremonyStep::RootRequestExported),
+    trust_ceremony_step_literal(TrustCeremonyStep::RootReplyImported),
+    trust_ceremony_step_literal(TrustCeremonyStep::RegistryPublished),
+];
+
+/// Die Phase eines Writer-Uebergangs; `Prepared` ist die unvollendete.
+const fn writer_transition_phase_literal(value: WriterTransitionPhase) -> &'static str {
+    match value {
+        WriterTransitionPhase::NoTransition => "NoTransition",
+        WriterTransitionPhase::Prepared => "Prepared",
+        WriterTransitionPhase::Activated => "Activated",
+    }
+}
+
+const WRITER_TRANSITION_PHASE_LITERALS: &[&str] = &[
+    writer_transition_phase_literal(WriterTransitionPhase::NoTransition),
+    writer_transition_phase_literal(WriterTransitionPhase::Prepared),
+    writer_transition_phase_literal(WriterTransitionPhase::Activated),
+];
+
+/// Was die Bedienfuehrung zur Uhrenfreigabe anbieten darf.
+const fn clock_release_availability_literal(value: ClockReleaseAvailability) -> &'static str {
+    match value {
+        ClockReleaseAvailability::Offered => "Offered",
+        ClockReleaseAvailability::IndependentTimeUnavailable => "IndependentTimeUnavailable",
+        ClockReleaseAvailability::NotBlocked => "NotBlocked",
+    }
+}
+
+const CLOCK_RELEASE_AVAILABILITY_LITERALS: &[&str] = &[
+    clock_release_availability_literal(ClockReleaseAvailability::Offered),
+    clock_release_availability_literal(ClockReleaseAvailability::IndependentTimeUnavailable),
+    clock_release_availability_literal(ClockReleaseAvailability::NotBlocked),
+];
+
+/// Die Zielart eines Widerrufs ueber Aenderung 1 — nie ein Administrator.
+const fn revocation_target_class_literal(value: RevocationTargetClass) -> &'static str {
+    match value {
+        RevocationTargetClass::NonAdminDevice => "NonAdminDevice",
+        RevocationTargetClass::OperatorBinding => "OperatorBinding",
+        RevocationTargetClass::Component => "Component",
+    }
+}
+
+const REVOCATION_TARGET_CLASS_LITERALS: &[&str] = &[
+    revocation_target_class_literal(RevocationTargetClass::NonAdminDevice),
+    revocation_target_class_literal(RevocationTargetClass::OperatorBinding),
+    revocation_target_class_literal(RevocationTargetClass::Component),
+];
+
+/// Die drei zugelassenen Begruendungen einer Uhrenfreigabe
+/// (`crates/ea-format/src/local_audit.rs`, Drahtwerte 0, 1, 2).
+const fn clock_release_justification_literal(value: ClockReleaseJustificationV1) -> &'static str {
+    match value {
+        ClockReleaseJustificationV1::OperatorVerifiedWallClock => "OperatorVerifiedWallClock",
+        ClockReleaseJustificationV1::PlatformTimeSourceRecovery => "PlatformTimeSourceRecovery",
+        ClockReleaseJustificationV1::HardwareClockMaintenance => "HardwareClockMaintenance",
+    }
+}
+
+const CLOCK_RELEASE_JUSTIFICATION_V1_LITERALS: &[&str] = &[
+    clock_release_justification_literal(ClockReleaseJustificationV1::OperatorVerifiedWallClock),
+    clock_release_justification_literal(ClockReleaseJustificationV1::PlatformTimeSourceRecovery),
+    clock_release_justification_literal(ClockReleaseJustificationV1::HardwareClockMaintenance),
+];
+
+/// Die Begruendung aus ihrer DRAHTFORM — fail-closed.
+///
+/// `None` fuer jedes Wort, das nicht in der emittierten Vereinigung steht.
+/// Diese Richtung gibt es, weil die Begruendung ueber den Draht ZUR Freigabe
+/// kommt: sie wandert in den signierten Freigabekontext, und ein ungeprueftes
+/// Wort an dieser Stelle waere eine vierte Begruendung, die die Allowlist
+/// nicht kennt.
+#[must_use]
+pub fn clock_release_justification_from_wire(wire: &str) -> Option<ClockReleaseJustificationV1> {
+    [
+        ClockReleaseJustificationV1::OperatorVerifiedWallClock,
+        ClockReleaseJustificationV1::PlatformTimeSourceRecovery,
+        ClockReleaseJustificationV1::HardwareClockMaintenance,
+    ]
+    .into_iter()
+    .find(|justification| clock_release_justification_literal(*justification) == wire)
+}
+
+/// Die Art einer Trust-Zeremonie aus ihrer DRAHTFORM — fail-closed.
+///
+/// `None` fuer jedes Wort ausserhalb der emittierten Vereinigung: die Art
+/// entscheidet, welche Schritte der Wirt geht, und ein ungeprueftes Wort
+/// koennte den Fingerprint-Vergleich ueberspringen.
+#[must_use]
+pub fn trust_ceremony_kind_from_wire(wire: &str) -> Option<TrustCeremonyKind> {
+    TrustCeremonyKind::ALL
+        .into_iter()
+        .find(|kind| trust_ceremony_kind_literal(*kind) == wire)
+}
 
 /// Das Literal des Patientenzahlzustands aus seiner DRAHTFORM — fail-closed.
 ///
@@ -1018,6 +1212,180 @@ pub struct PendingResumeOutcomeView {
     pub resume: PendingFinalizationResumeView,
     pub blocked_code: Option<String>,
     pub sync: Option<SyncStateView>,
+}
+
+// ---------------------------------------------------------------------------
+// Die Ansichtsmodelle der VERWALTUNGSFLAECHE (Stufe 5, Task 6). Jeder Hash und
+// jeder Fingerprint steht darin als FERTIG formatierte Zeichenkette — der
+// Fingerprint als `AA:BB:…` aus `ea_admin::fingerprint`, die Hashes als Hex —,
+// weil TypeScript nie rechnet und nichts formatiert, was ein Mensch danach
+// Paar fuer Paar vergleicht.
+// ---------------------------------------------------------------------------
+
+/// EINE ausstehende Geraeteanfrage.
+///
+/// `fingerprint` ist der Objekthash der exakten Zertifikatsbytes in der
+/// Schreibweise `AA:BB:…` (32 Paare Gross-Hex); `certificate_kind_code` ist
+/// der Code der Zertifikatsart und nie ein Freitext.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingDeviceRequestView {
+    pub request_id: String,
+    pub certificate_kind_code: String,
+    pub fingerprint: String,
+    pub received_at_ms: UnixMillis,
+}
+
+/// Der Stand EINER Trust-Zeremonie: Art, erreichter Schritt, Ziel.
+///
+/// `step` ist der ERREICHTE Schritt und kein Knopf; der Wirt geht mit
+/// `ea_admin::ceremony_steps::next_step` genau einen weiter.
+/// `exchange_file_name` ist der Dateiname der Offline-Austauschdatei — nie
+/// ihr Pfad.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustCeremonyView {
+    pub ceremony_id: String,
+    pub kind: TrustCeremonyKind,
+    pub step: TrustCeremonyStep,
+    pub target_fingerprint: Option<String>,
+    pub exchange_file_name: Option<String>,
+}
+
+/// Das Policy-Profil des gewaehlten Kopfes, Feld fuer Feld wie
+/// `ea_admin::policy::InitialPolicyRequest` — ohne die Listen der zugelassenen
+/// Profile, Suiten und Formatversionen und ohne den Freitext.
+///
+/// `operating_profile` und `registry_expiry_behavior` bleiben die Drahtzahlen
+/// `0..1`: eine Vereinigung `'Online' | 'Offline'` verbaenne zwei Alltagswoerter
+/// aus jeder handgeschriebenen Desktop-Quelle, und die Zahl traegt denselben
+/// Unterschied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyProfileView {
+    pub operating_profile: u8,
+    pub max_registry_age_ms: u64,
+    pub max_future_clock_skew_ms: u64,
+    pub registry_expiry_behavior: u8,
+    pub evidence_max_delay_ms: u64,
+    pub reader_inactivity_ms: u64,
+    pub reader_trust_refresh_ms: u64,
+    pub reader_history_access_allowed: bool,
+    pub backup_frequency_ms: u64,
+    pub restore_test_interval_ms: u64,
+    pub retention_policy: String,
+    pub effective_from_sequence: ChainSequence,
+    pub lease_valid_through_sequence: ChainSequence,
+    pub not_after_ms: UnixMillis,
+}
+
+/// Alter, Lease und Zeitstatus des gewaehlten Registry-Kopfes.
+///
+/// [`StaleDecision`] steht UNGEFALTET darin, aus demselben Grund wie in
+/// [`FinalizationPreviewView`]: der mittlere Arm verlangt eine ausdrueckliche
+/// Bestaetigung, und ein `boolean` machte ihn von `Fresh` ununterscheidbar.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryHealthView {
+    pub registry_version: RegistryVersion,
+    pub head_hash: String,
+    pub registry_age_ms: u64,
+    pub max_registry_age_ms: u64,
+    pub lease_valid_through_sequence: ChainSequence,
+    pub next_sequence: ChainSequence,
+    pub not_after_ms: UnixMillis,
+    pub stale_decision: StaleDecision,
+}
+
+/// EINE Go-live-Anforderung mit Zustand und Belegcode.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoLiveRequirementView {
+    pub requirement_code: String,
+    pub status: GoLiveRequirementStatus,
+    pub evidence_code: String,
+}
+
+/// Die Go-live-Liste. `production_ready` wird NICHT uebergeben, sondern aus
+/// [`GoLiveChecklist::production_ready`] uebernommen: `true` nur, wenn jede
+/// Anforderung `Confirmed` ist — „Unknown ist nie gruen" wird in Rust
+/// entschieden und hier nur weitergegeben.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoLiveChecklistView {
+    pub requirements: Vec<GoLiveRequirementView>,
+    pub production_ready: bool,
+}
+
+impl From<&GoLiveChecklist> for GoLiveChecklistView {
+    fn from(checklist: &GoLiveChecklist) -> Self {
+        Self {
+            requirements: checklist
+                .requirements()
+                .iter()
+                .map(|requirement| GoLiveRequirementView {
+                    requirement_code: requirement.code().to_owned(),
+                    status: requirement.status(),
+                    evidence_code: requirement.evidence_code().to_owned(),
+                })
+                .collect(),
+            production_ready: checklist.production_ready(),
+        }
+    }
+}
+
+/// Was der Uhrenfreigabe-Assistent zeigen darf.
+///
+/// Die vier Zahlen sind `None`, wenn die Verfuegbarkeit nicht
+/// [`ClockReleaseAvailability::Offered`] ist: ohne Sperre gibt es keinen
+/// Floor zu zeigen, und ohne unabhaengige Referenz keine Grenze. `justifications`
+/// ist die Allowlist aus `ea-format`, nie eine Eingabe.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClockReleaseOfferView {
+    pub availability: ClockReleaseAvailability,
+    pub floor_ms: Option<UnixMillis>,
+    pub observed_wall_clock_ms: Option<UnixMillis>,
+    pub max_future_clock_skew_ms: Option<u64>,
+    pub expires_at_ms: Option<UnixMillis>,
+    pub justifications: Vec<ClockReleaseJustificationV1>,
+}
+
+/// Das Ergebnis einer ausgestellten Uhrenfreigabe.
+///
+/// Die drei `changes_*` sind FELDER und nicht Prosa, und sie sind immer
+/// `false`: eine Freigabe aendert weder Zeitfloor noch Registry-Ablauf noch
+/// Lease (`ea_admin::clock_release`). Die Oberflaeche rendert die drei Werte
+/// und behauptet nichts selbst.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClockReleaseOutcomeView {
+    pub release_id: String,
+    pub expires_at_ms: UnixMillis,
+    pub changes_time_floor: bool,
+    pub changes_registry_expiry: bool,
+    pub changes_lease: bool,
+}
+
+/// Der Stand des Writer-Uebergangs.
+///
+/// `new_writer_hash` und `effective_from_sequence` sind `None` bei
+/// [`WriterTransitionPhase::NoTransition`]; die Hashes sind Hex-Zeichenketten
+/// der Zertifikatshashes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterTransitionView {
+    pub phase: WriterTransitionPhase,
+    pub current_writer_hash: String,
+    pub new_writer_hash: Option<String>,
+    pub effective_from_sequence: Option<ChainSequence>,
+}
+
+/// Was ein Widerruf tut — und was er ausdruecklich NICHT tut.
+///
+/// `recalls_issued_grants` und `recalls_decrypted_plaintext` kommen aus
+/// `ea_admin::revocation::RevocationEffect` und sind dort immer `false`. Sie
+/// stehen als Felder hier, damit die Oberflaeche die Aussage „bereits
+/// erteilte Grants und entschluesselte Daten werden nicht zurueckgeholt"
+/// RENDERT statt sie selbst zu formulieren.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevocationEffectView {
+    pub target_class: RevocationTargetClass,
+    pub target_hash: String,
+    pub stops_new_grants_from_sequence: ChainSequence,
+    pub recalls_issued_grants: bool,
+    pub recalls_decrypted_plaintext: bool,
 }
 
 #[cfg(test)]

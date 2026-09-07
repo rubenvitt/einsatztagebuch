@@ -13,7 +13,7 @@ import { DecorativeIcon } from '../design/icons'
  * Vorgabefall zu fallen; und die Schluessel stehen UNZITIERT, also wiederholt
  * diese Datei kein Kontraktliteral (`no-hand-written-contracts.test.ts`).
  */
-const STALE_TEXT: Record<StaleDecision, string> = {
+export const STALE_TEXT: Record<StaleDecision, string> = {
   Fresh: 'Vertrauensbestand aktuell.',
   StaleAcknowledgeable:
     'Vertrauensbestand veraltet. Ein Abschluss verlangt eine ausdrückliche Bestätigung.',
@@ -31,7 +31,12 @@ const CONFIRMED: Record<StaleDecision, boolean> = {
   HardBlock: false,
 }
 
-function formatDuration(milliseconds: number): string {
+/**
+ * Eine Dauer in Tagen und Stunden — die EINE Formatierung fuer Alter und
+ * Fristen. Die Verwaltungsflaeche (Registry-Alter, Richtlinienfristen) nimmt
+ * dieselbe Funktion, damit derselbe Wert nirgends zwei Gestalten hat.
+ */
+export function formatDuration(milliseconds: number): string {
   const totalHours = Math.floor(milliseconds / (60 * 60 * 1000))
   const days = Math.floor(totalHours / 24)
   const hours = totalHours % 24

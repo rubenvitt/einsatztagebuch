@@ -434,6 +434,147 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+/// Die Ansichtsmodelle der VERWALTUNGSFLAECHE (Stufe 5, Task 6), in
+/// Emitterreihenfolge — das TypeScript-Gegenstueck der zehn Rust-Strukturen
+/// am Ende von `lib.rs`, Feld fuer Feld in Deklarationsreihenfolge.
+///
+/// Sie stehen in der DESKTOP-Datei nach den Writer-Ansichten und nicht in der
+/// Reader-Datei: der Reader hat keine Verwaltungsrolle. Jeder Hash und jeder
+/// Fingerprint ist ein `string`, fertig formatiert in Rust
+/// (`ea_admin::fingerprint::human_readable_fingerprint` fuer `AA:BB:…`);
+/// TypeScript rechnet nichts und formatiert nichts, was danach ein Mensch
+/// vergleicht.
+const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
+    (
+        "PendingDeviceRequestView",
+        &[
+            ("requestId", "string"),
+            ("certificateKindCode", "string"),
+            // `AA:BB:…`, 32 Paare Gross-Hex — der Objekthash der exakten
+            // Zertifikatsbytes, wie `device.rs` ihn definiert.
+            ("fingerprint", "string"),
+            ("receivedAtMs", "number"),
+        ],
+    ),
+    (
+        "TrustCeremonyView",
+        &[
+            ("ceremonyId", "string"),
+            ("kind", "TrustCeremonyKind"),
+            // Der ERREICHTE Schritt; der Wirt geht mit `next_step` genau einen
+            // weiter. Sechs Schritte, keine Abkuerzung.
+            ("step", "TrustCeremonyStep"),
+            ("targetFingerprint", "string | null"),
+            // Der Dateiname der Offline-Austauschdatei — nie ihr Pfad.
+            ("exchangeFileName", "string | null"),
+        ],
+    ),
+    (
+        "PolicyProfileView",
+        &[
+            // Drahtzahl `0..1`; eine Union verbaenne zwei Alltagswoerter aus
+            // der TSX, die Zahl traegt denselben Unterschied.
+            ("operatingProfile", "number"),
+            ("maxRegistryAgeMs", "number"),
+            ("maxFutureClockSkewMs", "number"),
+            ("registryExpiryBehavior", "number"),
+            ("evidenceMaxDelayMs", "number"),
+            ("readerInactivityMs", "number"),
+            ("readerTrustRefreshMs", "number"),
+            ("readerHistoryAccessAllowed", "boolean"),
+            ("backupFrequencyMs", "number"),
+            ("restoreTestIntervalMs", "number"),
+            ("retentionPolicy", "string"),
+            ("effectiveFromSequence", "number"),
+            ("leaseValidThroughSequence", "number"),
+            ("notAfterMs", "number"),
+        ],
+    ),
+    (
+        "RegistryHealthView",
+        &[
+            ("registryVersion", "number"),
+            ("headHash", "string"),
+            ("registryAgeMs", "number"),
+            ("maxRegistryAgeMs", "number"),
+            ("leaseValidThroughSequence", "number"),
+            ("nextSequence", "number"),
+            ("notAfterMs", "number"),
+            // UNGEFALTET, wie in `FinalizationPreviewView`: der mittlere Arm
+            // verlangt eine Bestaetigung, ein `boolean` verloere ihn.
+            ("staleDecision", "StaleDecision"),
+        ],
+    ),
+    (
+        "GoLiveRequirementView",
+        &[
+            ("requirementCode", "string"),
+            // Dreiarmig und kein `boolean`: „nicht automatisch pruefbar" ist
+            // nie gruen.
+            ("status", "GoLiveRequirementStatus"),
+            ("evidenceCode", "string"),
+        ],
+    ),
+    (
+        "GoLiveChecklistView",
+        &[
+            ("requirements", "readonly GoLiveRequirementView[]"),
+            // In Rust gerechnet (`GoLiveChecklist::production_ready`): `true`
+            // NUR, wenn jede Anforderung `Confirmed` ist.
+            ("productionReady", "boolean"),
+        ],
+    ),
+    (
+        "ClockReleaseOfferView",
+        &[
+            ("availability", "ClockReleaseAvailability"),
+            // Die vier Zahlen sind `null`, wenn nichts angeboten wird.
+            ("floorMs", "number | null"),
+            ("observedWallClockMs", "number | null"),
+            ("maxFutureClockSkewMs", "number | null"),
+            ("expiresAtMs", "number | null"),
+            // Die Allowlist aus `ea-format`, nie eine Eingabe.
+            ("justifications", "readonly ClockReleaseJustificationV1[]"),
+        ],
+    ),
+    (
+        "ClockReleaseOutcomeView",
+        &[
+            ("releaseId", "string"),
+            ("expiresAtMs", "number"),
+            // Die drei sind FELDER und immer `false`: eine Freigabe aendert
+            // weder Zeitfloor noch Registry-Ablauf noch Lease. Die
+            // Oberflaeche rendert sie und behauptet nichts selbst.
+            ("changesTimeFloor", "boolean"),
+            ("changesRegistryExpiry", "boolean"),
+            ("changesLease", "boolean"),
+        ],
+    ),
+    (
+        "WriterTransitionView",
+        &[
+            ("phase", "WriterTransitionPhase"),
+            ("currentWriterHash", "string"),
+            // `null` bei `NoTransition`.
+            ("newWriterHash", "string | null"),
+            ("effectiveFromSequence", "number | null"),
+        ],
+    ),
+    (
+        "RevocationEffectView",
+        &[
+            ("targetClass", "RevocationTargetClass"),
+            ("targetHash", "string"),
+            ("stopsNewGrantsFromSequence", "number"),
+            // Beide immer `false` (`RevocationEffect`): bereits erteilte Grants
+            // und entschluesselte Daten werden nicht zurueckgeholt. Als Felder,
+            // damit die Oberflaeche den Satz rendert statt ihn zu schreiben.
+            ("recallsIssuedGrants", "boolean"),
+            ("recallsDecryptedPlaintext", "boolean"),
+        ],
+    ),
+];
+
 /// Die vollstaendige TypeScript-Kontraktdatei als Zeichenkette.
 ///
 /// Zwei Aufrufe liefern byteidentische Ergebnisse; das ist zugesichert und
@@ -449,6 +590,11 @@ pub fn emit_typescript() -> String {
 
     emitted.push_str("\n// The Writer view models.\n");
     for (name, fields) in VIEW_MODELS_V1 {
+        push_object(&mut emitted, name, fields);
+    }
+
+    emitted.push_str("\n// The administration view models.\n");
+    for (name, fields) in ADMIN_VIEW_MODELS_V1 {
         push_object(&mut emitted, name, fields);
     }
 
@@ -494,11 +640,13 @@ pub fn emit_reader_typescript() -> String {
 }
 
 /// Jede emittierte Vereinigung, in fester Reihenfolge: erst die
-/// Sicherheitsaufzaehlungen, dann die uebrigen geschlossenen Mengen.
+/// Sicherheitsaufzaehlungen, dann die uebrigen geschlossenen Mengen des
+/// Writers, zuletzt die der Verwaltungsflaeche.
 fn closed_unions() -> impl Iterator<Item = &'static (&'static str, &'static [&'static str])> {
     crate::SECURITY_ENUMS_V1
         .iter()
         .chain(crate::WRITER_ENUMS_V1)
+        .chain(crate::ADMIN_ENUMS_V1)
 }
 
 fn push_union(emitted: &mut String, name: &str, literals: &[&str]) {

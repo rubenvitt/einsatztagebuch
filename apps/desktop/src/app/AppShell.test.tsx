@@ -86,11 +86,31 @@ it('requires the verified role AND the capability, not either one', () => {
   expect(screen.queryByRole('link', { name: /einsatz erfassen/i })).not.toBeInTheDocument()
 })
 
-it('offers no Reader and no Administration surface at all', () => {
-  render(<AppShell session={{ role: 'writer', capabilities: ['capture'] }} />)
+// Die Rollengrenze der Schale in BEIDE Richtungen: der Writer sieht die
+// Erfassung und nie die Verwaltung, die Admin-Sitzung die Verwaltung und nie
+// die Erfassung, der Reader keines von beiden — und eine Admin-Sitzung OHNE die
+// Faehigkeit `administration` auch keine Verwaltung. Eine Reader-Flaeche gibt
+// es weiterhin nicht (Browser-PWA).
+it('offers no Reader surface and separates the Writer from the Administration', () => {
+  const { rerender } = render(<AppShell session={{ role: 'writer', capabilities: ['capture'] }} />)
   expect(screen.queryByRole('link', { name: /archiv (lesen|öffnen)/i })).not.toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Einsatz erfassen' })).toBeVisible()
   expect(screen.queryByRole('link', { name: /verwaltung|administration/i })).not.toBeInTheDocument()
-  expect(routeTable().map((route) => route.path)).toEqual(['/', '/einsatz'])
+
+  rerender(<AppShell session={{ role: 'organizationadmin', capabilities: ['administration'] }} />)
+  expect(screen.getByRole('link', { name: 'Verwaltung' })).toBeVisible()
+  expect(screen.queryByRole('link', { name: /einsatz erfassen/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /archiv (lesen|öffnen)/i })).not.toBeInTheDocument()
+
+  rerender(<AppShell session={{ role: 'organizationadmin', capabilities: [] }} />)
+  expect(screen.queryByRole('link', { name: /verwaltung/i })).not.toBeInTheDocument()
+
+  rerender(<AppShell session={{ role: 'reader', capabilities: [] }} />)
+  expect(screen.queryByRole('link', { name: /verwaltung/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /einsatz erfassen/i })).not.toBeInTheDocument()
+  expect(screen.getAllByRole('link')).toHaveLength(1)
+
+  expect(routeTable().map((route) => route.path)).toEqual(['/', '/einsatz', '/verwaltung'])
 })
 
 // Der Zeuge, der `routeTable()` von einer Konstante zu einer MESSUNG macht: die
@@ -98,14 +118,55 @@ it('offers no Reader and no Administration surface at all', () => {
 // Konstante mit einer Konstante und bliebe gruen, auch wenn die Schale eine
 // vierte, nicht aufgefuehrte Flaeche anbietet.
 it('renders its navigation from the route table and from nowhere else', () => {
-  render(<AppShell session={writerSession} />)
-  const links = screen.getAllByRole('link')
-  expect(links.map((link) => link.getAttribute('href'))).toEqual(
-    routeTable().map((route) => route.path),
-  )
-  for (const route of routeTable()) {
-    expect(screen.getByRole('link', { name: route.label })).toBeVisible()
+  // Eine Sitzung, die JEDE Route betreten darf, gibt es nicht — die
+  // Faehigkeiten gehoeren verschiedenen Rollen. Der Zeuge misst deshalb je
+  // Rolle: die gerenderten Verweise sind GENAU die freigeschalteten Eintraege
+  // der Tabelle, in Tabellenreihenfolge, und zusammen decken sie die Tabelle.
+  const seen = new Set<string>()
+  const sessions: VerifiedSession[] = [
+    writerSession,
+    { role: 'organizationadmin', capabilities: ['administration'] },
+  ]
+  for (const session of sessions) {
+    const { unmount } = render(<AppShell session={session} />)
+    const links = screen.getAllByRole('link')
+    const enabled = routeTable().filter((route) =>
+      links.some((link) => link.getAttribute('href') === route.path),
+    )
+    expect(links.map((link) => link.getAttribute('href'))).toEqual(enabled.map((route) => route.path))
+    for (const route of enabled) {
+      expect(screen.getByRole('link', { name: route.label })).toBeVisible()
+      seen.add(route.path)
+    }
+    unmount()
   }
+  expect([...seen].sort()).toEqual(routeTable().map((route) => route.path).sort())
+})
+
+it('opens the administration surface only behind the startup recovery', async () => {
+  let release: ((view: PendingFinalizationResumeView) => void) | undefined
+  const pending = new Promise<PendingFinalizationResumeView>((resolve) => {
+    release = resolve
+  })
+  render(
+    <AppShell
+      session={{ role: 'organizationadmin', capabilities: ['administration'] }}
+      recover={() => pending}
+      initialPath="/verwaltung"
+    />,
+  )
+  expect(screen.getByRole('link', { name: 'Verwaltung' })).toBeVisible()
+  expect(screen.queryByRole('region', { name: 'Verwaltung' })).not.toBeInTheDocument()
+  release?.(resumed)
+  await waitFor(() => {
+    expect(screen.getByRole('region', { name: 'Verwaltung' })).toBeVisible()
+  })
+  // Die Schale nennt die Bruecke des Wirts; ohne Wirt bleibt die Verwaltung
+  // mit ihrem Code geschlossen und zeigt keinen Unterbereich.
+  await waitFor(() => {
+    expect(screen.getByRole('alert')).toBeVisible()
+  })
+  expect(screen.queryByRole('region', { name: 'Geräteanfragen' })).not.toBeInTheDocument()
 })
 
 it('ships extracted styles and creates no runtime style tags', () => {

@@ -2,16 +2,19 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use ea_admin::{GoLiveChecklist, TrustCeremonyKind};
 use ea_archive::ArchiveBackendError;
 use ea_archive_fs::{ArchiveHealthCheckV1, ArchiveHealthReport, BundleError};
 use ea_draft::{DiscardService, DraftError, DraftRepository, MasterDataRepository, RestartState};
-use ea_format::OperatorRoleV1;
-use ea_operator::OperatorSessionProof;
+use ea_format::{ClockReleaseJustificationV1, OperatorRoleV1};
+use ea_operator::{OperatorSessionProof, ReauthPurpose};
 use ea_schema::{NativeSourceV1, PersonnelSnapshotV1, SchemaError, VehicleSnapshotV1};
-use ea_types::UnixMillis;
+use ea_types::{ObjectHash, UnixMillis};
 use ea_ui_contracts::{
-    BundleExportView, FinalizationPreviewView, FinalizeOutcomeView, IncidentInputView,
-    PersonnelSelectionView, SyncStateView, VehicleSelectionView,
+    BundleExportView, ClockReleaseOfferView, ClockReleaseOutcomeView, FinalizationPreviewView,
+    FinalizeOutcomeView, IncidentInputView, PendingDeviceRequestView, PersonnelSelectionView,
+    PolicyProfileView, RegistryHealthView, RevocationEffectView, SyncStateView, TrustCeremonyView,
+    VehicleSelectionView, WriterTransitionView,
 };
 use ea_writer::{
     FinalizationInputV1, FinalizationPreview, RecoveryOutcome, WriterError, WriterService,
@@ -552,6 +555,224 @@ pub fn finalization_input(
     })
 }
 
+/// Der synchrone Port der nativen Wiederanmeldung.
+///
+/// Der Port existiert aus demselben Grund wie die Ports darueber: eine
+/// Wiederanmeldung verlangt einen `BoundOperator` aus einer aufgeloesten
+/// Root-signierten Bindung am AKTUELLEN gewaehlten Head (`ea_operator::
+/// OperatorAuthenticator::bound_operator`) und einen Anbieter nativer Praesenz
+/// (Windows Hello, LocalAuthentication, PAM) — beides traegt Lebensdauern und
+/// Plattformbezug und passt nicht in den `'static`-Zustand einer
+/// Tauri-Anwendung. Bis zur Verdrahtung bleibt der Port `None`, und
+/// `session_reauthenticate` antwortet mit der benannten Abwesenheit
+/// [`crate::commands::REAUTH_UNAVAILABLE`].
+///
+/// # Warum der Rumpf KEINEN Nachweis herausgibt
+///
+/// [`OperatorSessionProof`] ist ausdruecklich nicht `Clone`, und ausserhalb
+/// von `ea-operator` kann ihn niemand bauen. Ein Port, der ihn herausgaebe,
+/// braeuchte einen Verbraucher, der ihn ueber die Kommandogrenze weiterreicht —
+/// und keiner der Verbraucher (`DiscardService::begin_discard`,
+/// `RootCeremonyService::publish_authorized_target`, `ClockReleaseService::
+/// issue`) ist von hier aus mit einem Doppel messbar. Der Nachweis gehoert
+/// deshalb dem IMPLEMENTIERER, wie bei [`BoundDiscard`] und [`BoundWriter`]:
+/// derselbe Wirt, der die Praesenz verlangt, haelt das Ergebnis und reicht es
+/// seinem Dienst selbst. Der Desktop merkt sich nur, DASS eine frische
+/// Wiederanmeldung fuer genau diesen Zweck erbracht wurde
+/// ([`SessionState::record_fresh_reauth`]) — die autoritative Pruefung des
+/// Nachweises (`is_valid_for`, Bindung, Konto) bleibt im Kern.
+///
+/// `Send + Sync` steht wie bei den anderen Ports nicht als Supertrait daran;
+/// die Schranke sitzt am Feld von [`DesktopState`].
+pub trait ReauthPort {
+    /// Verlangt frische Praesenz fuer GENAU `purpose`.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns (`EA-OPERATOR-*`), oder eine benannte
+    /// Voraussetzung des Wirts.
+    fn reauthenticate(&self, purpose: ReauthPurpose) -> Result<(), CommandError>;
+}
+
+/// Der synchrone Port der Verwaltungsflaeche (Stufe 5, Task 6).
+///
+/// Der Port existiert, weil die vier Workflow-Dienste aus `ea-admin` allesamt
+/// Lebensdauern tragen — `RootCeremonyService<'a>`, `ClockReleaseService<'a>`,
+/// `WriterTransitionService<'a>`, `RegistryWorkflowService<'store>` — und
+/// dazu einen gewaehlten Registry-Head, einen Trust-Speicher, den
+/// Schluesselport und den Sitzungsnachweis, von denen die Anwendung beim
+/// Hochkommen keines hat. Die Aufloesung geschieht bei der Verdrahtung; bis
+/// dahin ist der Port `None`, und jedes `admin_*`-Kommando antwortet mit der
+/// benannten Abwesenheit [`crate::commands::ADMINISTRATION_UNAVAILABLE`].
+///
+/// # Was der Port NICHT sieht
+///
+/// Keinen Freitext eines Bedieners: der Fingerprint kommt als geparster
+/// [`ObjectHash`] (`ea_admin::fingerprint::parse_human_readable_fingerprint`
+/// laeuft an der Kommandogrenze), die Zeremonieart und die Begruendung kommen
+/// als geschlossene Aufzaehlungen. Keinen Sitzungsnachweis in der Signatur —
+/// derselbe Grund wie bei [`ReauthPort`]: er gehoert dem Implementierer.
+///
+/// # Was der Port NICHT entscheidet
+///
+/// Die Schrittfolge. Jeder Zeremonierumpf liefert die ERREICHTE Ansicht, und
+/// `commands::admin` prueft mit `ea_admin::ceremony_steps::next_step`, dass
+/// genau ein Schritt weitergegangen wurde — ein Port, der springt oder
+/// zurueckfaellt, wird mit
+/// [`crate::commands::CEREMONY_STEP_OUT_OF_ORDER`] abgewiesen. Dafuer liest
+/// die Grenze vor jedem Schritt [`Self::ceremony`].
+///
+/// # Was der Port liefert
+///
+/// Die Ansichtsmodelle aus `ea-ui-contracts`, fertig formatiert; einzig
+/// [`Self::go_live_checklist`] liefert das Rust-Aggregat, weil die Grenze
+/// daraus zwei Antworten macht (die Ansicht und die Evidenzliste
+/// `unresolved_report_json`) und die Entscheidung `production_ready` im
+/// Aggregat bleiben soll.
+pub trait AdministrationPort {
+    /// Die ausstehenden Geraeteanfragen.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn pending_device_requests(&self) -> Result<Vec<PendingDeviceRequestView>, CommandError>;
+
+    /// Der erreichte Stand EINER Zeremonie — vor jedem Schritt gelesen.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns; eine unbekannte Kennung ist ein Fehler und
+    /// keine leere Zeremonie.
+    fn ceremony(&self, ceremony_id: &str) -> Result<TrustCeremonyView, CommandError>;
+
+    /// Beginnt eine Zeremonie fuer eine Anfrage; die Ansicht steht danach auf
+    /// `PendingRequest`.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn begin_ceremony(
+        &self,
+        request_id: &str,
+        kind: TrustCeremonyKind,
+    ) -> Result<TrustCeremonyView, CommandError>;
+
+    /// Vergleicht den ueber den zweiten Kanal gemeldeten Fingerprint
+    /// (`ea_admin::device::confirm_device_fingerprint`).
+    ///
+    /// # Errors
+    ///
+    /// `EA-WORKFLOW-FINGERPRINT-MISMATCH` oder ein anderer Code des Kerns.
+    fn confirm_fingerprint(
+        &self,
+        ceremony_id: &str,
+        reported: &ObjectHash,
+    ) -> Result<TrustCeremonyView, CommandError>;
+
+    /// Erteilt die Administrationsautorisierung — der Implementierer prueft
+    /// seinen frischen Nachweis mit dem Zweck `AdminRootCeremony`.
+    ///
+    /// # Errors
+    ///
+    /// `EA-CEREMONY-*` oder ein anderer Code des Kerns.
+    fn authorize(&self, ceremony_id: &str) -> Result<TrustCeremonyView, CommandError>;
+
+    /// Schreibt die Root-Anfrage als Offline-Austauschdatei; die Ansicht
+    /// traegt danach `exchange_file_name`.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn export_request(&self, ceremony_id: &str) -> Result<TrustCeremonyView, CommandError>;
+
+    /// Liest die Root-Antwort aus der Offline-Austauschdatei.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn import_reply(&self, ceremony_id: &str) -> Result<TrustCeremonyView, CommandError>;
+
+    /// Veroeffentlicht das Registry-Ereignis — der Implementierer prueft
+    /// seinen frischen Nachweis mit dem Zweck `AdminRootCeremony`.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn publish(&self, ceremony_id: &str) -> Result<TrustCeremonyView, CommandError>;
+
+    /// Das Policy-Profil des gewaehlten Kopfes.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn policy_profile(&self) -> Result<PolicyProfileView, CommandError>;
+
+    /// Alter, Lease und Zeitstatus des gewaehlten Kopfes.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn registry_health(&self) -> Result<RegistryHealthView, CommandError>;
+
+    /// Die ausgewertete Go-live-Liste (`ea_admin::go_live::evaluate_go_live`).
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn go_live_checklist(&self) -> Result<GoLiveChecklist, CommandError>;
+
+    /// Was der Uhrenfreigabe-Assistent zeigen darf.
+    ///
+    /// # Errors
+    ///
+    /// `EA-SKEW-*` oder ein anderer Code des Kerns.
+    fn clock_release_offer(&self) -> Result<ClockReleaseOfferView, CommandError>;
+
+    /// Stellt eine Uhrenfreigabe aus — der Implementierer prueft seinen
+    /// frischen Nachweis mit dem Zweck `ClockSkewRelease`.
+    ///
+    /// # Errors
+    ///
+    /// `EA-SKEW-*` oder ein anderer Code des Kerns.
+    fn clock_release_issue(
+        &self,
+        justification: ClockReleaseJustificationV1,
+    ) -> Result<ClockReleaseOutcomeView, CommandError>;
+
+    /// Der Stand des Writer-Uebergangs.
+    ///
+    /// # Errors
+    ///
+    /// Der stabile Code des Kerns.
+    fn writer_transition_state(&self) -> Result<WriterTransitionView, CommandError>;
+
+    /// Bereitet den Uebergang aus dem JSON der Anfrage vor
+    /// (`ea_admin::writer_transition::LoadedWriterTransitionRequest::from_json`).
+    ///
+    /// # Errors
+    ///
+    /// `EA-TRANSITION-*` oder ein anderer Code des Kerns.
+    fn writer_transition_prepare(
+        &self,
+        request_json: &str,
+    ) -> Result<WriterTransitionView, CommandError>;
+
+    /// Aktiviert den vorbereiteten Uebergang — der Implementierer prueft
+    /// seinen frischen Nachweis mit dem Zweck `AdminRootCeremony`.
+    ///
+    /// # Errors
+    ///
+    /// `EA-TRANSITION-*` oder ein anderer Code des Kerns.
+    fn writer_transition_activate(&self) -> Result<WriterTransitionView, CommandError>;
+
+    /// Was ein Widerruf dieses Ziels tut — und was nicht.
+    ///
+    /// # Errors
+    ///
+    /// `EA-WORKFLOW-TARGET-NOT-ACTIVE` oder ein anderer Code des Kerns.
+    fn revocation_effect(&self, target: &ObjectHash) -> Result<RevocationEffectView, CommandError>;
+}
+
 /// Die geprueften Sitzungsangaben dieses Geraets.
 ///
 /// Die Rolle ist eine `Option`, und `None` ist der Anfangszustand: sie kommt
@@ -565,15 +786,66 @@ pub fn finalization_input(
 /// gueltigen Stand daneben lassen kann. Er ist trotzdem keine Beigabe:
 /// [`Self::role`] liefert `None`, solange er fehlt — die zwei Felder koennen
 /// deshalb nicht auseinanderlaufen.
+///
+/// Die FRISCHEMARKE liegt als drittes Feld daneben: der Zweck der juengsten
+/// nativen Wiederanmeldung, die ueber [`ReauthPort`] erbracht wurde. Sie ist
+/// die Haelfte der Frischepflicht, die der Desktop erzwingen kann — der Nachweis
+/// selbst liegt beim Implementierer (siehe [`ReauthPort`]), und
+/// [`OperatorSessionProof`] traegt keinen Leser fuer seinen Zweck. Sie wird
+/// VERBRAUCHT ([`Self::take_fresh_reauth`]) und nicht gelesen: eine
+/// Wiederanmeldung traegt genau eine Root-Wirkung, wie
+/// `DiscardService::begin_discard` den Nachweis als Wert nimmt.
 pub struct SessionState {
     role: Option<OperatorRoleV1>,
     proof: Option<OperatorSessionProof>,
+    fresh_reauth: Option<ReauthPurpose>,
 }
 
 impl SessionState {
     #[must_use]
     pub const fn new(role: Option<OperatorRoleV1>, proof: Option<OperatorSessionProof>) -> Self {
-        Self { role, proof }
+        Self {
+            role,
+            proof,
+            fresh_reauth: None,
+        }
+    }
+
+    /// Merkt sich, dass GENAU JETZT eine Wiederanmeldung fuer `purpose`
+    /// erbracht wurde. Eine juengere ersetzt eine aeltere: es gibt eine
+    /// frischeste Praesenz und keine Sammlung.
+    pub fn record_fresh_reauth(&mut self, purpose: ReauthPurpose) {
+        self.fresh_reauth = Some(purpose);
+    }
+
+    /// Der Zweck der frischesten Wiederanmeldung, solange sie unverbraucht ist.
+    #[must_use]
+    pub const fn fresh_reauth(&self) -> Option<ReauthPurpose> {
+        self.fresh_reauth
+    }
+
+    /// Loescht die Frischemarke — unmittelbar VOR einer neuen Wiederanmeldung,
+    /// damit eine fehlgeschlagene keine aeltere Marke stehen laesst.
+    pub fn clear_fresh_reauth(&mut self) {
+        self.fresh_reauth = None;
+    }
+
+    /// VERBRAUCHT die Frischemarke fuer `purpose` — `true`, wenn sie fuer genau
+    /// diesen Zweck vorlag.
+    ///
+    /// Eine Marke fuer einen ANDEREN Zweck bleibt stehen: ein
+    /// Zeremonieschritt, der versehentlich vor einer Uhrenfreigabe gerufen
+    /// wird, darf dem Bediener die Freigabe nicht wegnehmen, die er gerade
+    /// nachgewiesen hat. Verbraucht wird VOR dem Aufruf des Ports und nicht
+    /// erst bei Erfolg: eine Praesenz, ein Versuch — ein Kern, der ablehnt,
+    /// verlangt fuer den naechsten Versuch eine neue Praesenz, wie es der
+    /// Verwerfensdienst mit seinem als Wert genommenen Nachweis auch tut.
+    pub fn take_fresh_reauth(&mut self, purpose: ReauthPurpose) -> bool {
+        if self.fresh_reauth == Some(purpose) {
+            self.fresh_reauth = None;
+            return true;
+        }
+        false
     }
 
     /// Die geprueften Rolle — und ausschliesslich MIT ihrem Nachweis.
@@ -608,6 +880,9 @@ impl SessionState {
             .proof
             .take()
             .map(OperatorSessionProof::invalidate_on_lock);
+        // Die Frischemarke geht mit: nach der Rueckkehr aus der Sperre ist jede
+        // Wiederanmeldung neu zu erbringen.
+        self.fresh_reauth = None;
     }
 }
 
@@ -628,6 +903,8 @@ pub struct DesktopState {
     writer: Option<Arc<dyn WriterFinalizePort + Send + Sync>>,
     discard: Option<Arc<dyn DraftDiscardPort + Send + Sync>>,
     bundle_export: Option<Arc<dyn ArchiveBundleExportPort + Send + Sync>>,
+    reauth: Option<Arc<dyn ReauthPort + Send + Sync>>,
+    administration: Option<Arc<dyn AdministrationPort + Send + Sync>>,
 }
 
 impl DesktopState {
@@ -650,6 +927,8 @@ impl DesktopState {
             writer,
             discard: None,
             bundle_export: None,
+            reauth: None,
+            administration: None,
         }
     }
 
@@ -702,6 +981,49 @@ impl DesktopState {
     ) -> Self {
         self.bundle_export = Some(bundle_export);
         self
+    }
+
+    /// Die native Wiederanmeldung dieses Wirts.
+    ///
+    /// Aus demselben Grund eine eigene Naht wie [`Self::with_discard`]: sie
+    /// verlangt einen `BoundOperator` aus einer aufgeloesten Root-signierten
+    /// Bindung und einen Anbieter nativer Praesenz, und beides hat die
+    /// Anwendung beim Hochkommen nicht.
+    #[must_use]
+    pub fn with_reauth(mut self, reauth: Arc<dyn ReauthPort + Send + Sync>) -> Self {
+        self.reauth = Some(reauth);
+        self
+    }
+
+    /// Die Wiederanmeldung, als GETEILTER Griff — aus demselben Grund wie
+    /// [`Self::sync_state_port`]: der Kommandorumpf reicht ihn ueber
+    /// `spawn_blocking` auf einen anderen Thread.
+    #[must_use]
+    pub fn reauth_port(&self) -> Option<Arc<dyn ReauthPort + Send + Sync>> {
+        self.reauth.clone()
+    }
+
+    /// Die Verwaltungsflaeche dieses Wirts (Stufe 5, Task 6).
+    ///
+    /// Aus demselben Grund eine eigene Naht wie [`Self::with_discard`]: die
+    /// vier Workflow-Dienste aus `ea-admin` verlangen einen gewaehlten Head,
+    /// einen Trust-Speicher, den Schluesselport und einen Nachweis mit dem
+    /// Zweck `AdminRootCeremony` — nichts davon hat die Anwendung beim
+    /// Hochkommen, und keines davon kommt aus einer Antwort der Oberflaeche.
+    #[must_use]
+    pub fn with_administration(
+        mut self,
+        administration: Arc<dyn AdministrationPort + Send + Sync>,
+    ) -> Self {
+        self.administration = Some(administration);
+        self
+    }
+
+    /// Die Verwaltungsflaeche, als GETEILTER Griff — aus demselben Grund wie
+    /// [`Self::sync_state_port`].
+    #[must_use]
+    pub fn administration_port(&self) -> Option<Arc<dyn AdministrationPort + Send + Sync>> {
+        self.administration.clone()
     }
 
     /// Die geprueften Sitzungsangaben, unter ihrem Schloss.
@@ -784,7 +1106,11 @@ mod tests {
         PersonnelSelectionView,
     };
 
-    use super::{DesktopState, NATIVE_SOURCE_ID, SessionState, finalization_input};
+    use ea_operator::ReauthPurpose;
+
+    use super::{
+        CommandError, DesktopState, NATIVE_SOURCE_ID, ReauthPort, SessionState, finalization_input,
+    };
 
     fn view() -> IncidentInputView {
         IncidentInputView {
@@ -880,6 +1206,76 @@ mod tests {
         session.invalidate_on_lock();
         assert_eq!(session.role, None);
         assert!(session.proof.is_none());
+    }
+
+    /// Die Frischemarke ist EINMALIG und zweckgebunden: sie wird fuer genau
+    /// den Zweck verbraucht, fuer den sie gesetzt wurde, und ein fremder Zweck
+    /// verbraucht sie nicht.
+    ///
+    /// Der Fehlerfall: eine Marke, die nach dem Verbrauch stehen bliebe, liesse
+    /// EINE Wiederanmeldung `AdminAuthorized` UND `RegistryPublished` tragen —
+    /// zwei Root-Wirkungen fuer eine Praesenz. Und eine Marke, die ein
+    /// Zeremonieschritt fuer den Zweck `ClockSkewRelease` verbrauchen koennte,
+    /// naehme dem Bediener eine Freigabe weg, die er gerade nachgewiesen hat.
+    #[test]
+    fn a_fresh_reauth_is_consumed_once_and_only_for_its_purpose() {
+        let mut session = SessionState::new(None, None);
+        assert_eq!(session.fresh_reauth(), None);
+        assert!(!session.take_fresh_reauth(ReauthPurpose::AdminRootCeremony));
+
+        session.record_fresh_reauth(ReauthPurpose::ClockSkewRelease);
+        assert!(!session.take_fresh_reauth(ReauthPurpose::AdminRootCeremony));
+        assert_eq!(
+            session.fresh_reauth(),
+            Some(ReauthPurpose::ClockSkewRelease)
+        );
+
+        assert!(session.take_fresh_reauth(ReauthPurpose::ClockSkewRelease));
+        assert_eq!(session.fresh_reauth(), None);
+        assert!(!session.take_fresh_reauth(ReauthPurpose::ClockSkewRelease));
+
+        session.record_fresh_reauth(ReauthPurpose::AdminRootCeremony);
+        session.clear_fresh_reauth();
+        assert_eq!(session.fresh_reauth(), None);
+    }
+
+    /// Eine zweite Wiederanmeldung ERSETZT die Marke: es gibt genau eine
+    /// frischeste Praesenz, keine Sammlung.
+    #[test]
+    fn a_newer_reauth_replaces_the_older_marker() {
+        let mut session = SessionState::new(None, None);
+        session.record_fresh_reauth(ReauthPurpose::AdminRootCeremony);
+        session.record_fresh_reauth(ReauthPurpose::ClockSkewRelease);
+        assert!(!session.take_fresh_reauth(ReauthPurpose::AdminRootCeremony));
+        assert!(session.take_fresh_reauth(ReauthPurpose::ClockSkewRelease));
+    }
+
+    /// Die Sperre nimmt die Frischemarke mit: nach der Rueckkehr aus der Sperre
+    /// ist jede Wiederanmeldung neu zu erbringen.
+    #[test]
+    fn the_lock_clears_the_fresh_reauth_marker() {
+        let mut session = SessionState::new(Some(OperatorRoleV1::OrganizationAdmin), None);
+        session.record_fresh_reauth(ReauthPurpose::AdminRootCeremony);
+        session.invalidate_on_lock();
+        assert_eq!(session.fresh_reauth(), None);
+    }
+
+    /// Die zwei Verwaltungsnaehte sind beim Hochkommen LEER und werden ueber
+    /// die Bauer gesetzt — nie ueber eine siebte Stellung von `new`.
+    #[test]
+    fn the_administration_seams_start_absent_and_are_set_by_their_builders() {
+        struct NoReauth;
+        impl ReauthPort for NoReauth {
+            fn reauthenticate(&self, _purpose: ReauthPurpose) -> Result<(), CommandError> {
+                Err(CommandError::new("EA-TEST-NEVER"))
+            }
+        }
+        let bare = DesktopState::new(SessionState::new(None, None), None, None, None, None, None);
+        assert!(bare.reauth_port().is_none());
+        assert!(bare.administration_port().is_none());
+        let wired = bare.with_reauth(std::sync::Arc::new(NoReauth));
+        assert!(wired.reauth_port().is_some());
+        assert!(wired.administration_port().is_none());
     }
 
     /// Die Reihenfolge von [`crate::honor_session_lock`], gemessen und nicht

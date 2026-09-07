@@ -80,6 +80,45 @@ export type PatientCountStatus =
   | 'Unknown'
   | 'Known'
 
+export type GoLiveRequirementStatus =
+  | 'Confirmed'
+  | 'NotMet'
+  | 'NotAutomaticallyVerifiable'
+
+export type TrustCeremonyKind =
+  | 'DeviceApprove'
+  | 'DeviceRevoke'
+  | 'PolicyChange'
+  | 'WriterTransition'
+
+export type TrustCeremonyStep =
+  | 'PendingRequest'
+  | 'FingerprintConfirmed'
+  | 'AdminAuthorized'
+  | 'RootRequestExported'
+  | 'RootReplyImported'
+  | 'RegistryPublished'
+
+export type WriterTransitionPhase =
+  | 'NoTransition'
+  | 'Prepared'
+  | 'Activated'
+
+export type ClockReleaseAvailability =
+  | 'Offered'
+  | 'IndependentTimeUnavailable'
+  | 'NotBlocked'
+
+export type RevocationTargetClass =
+  | 'NonAdminDevice'
+  | 'OperatorBinding'
+  | 'Component'
+
+export type ClockReleaseJustificationV1 =
+  | 'OperatorVerifiedWallClock'
+  | 'PlatformTimeSourceRecovery'
+  | 'HardwareClockMaintenance'
+
 // The Writer view models.
 
 export type SyncStateView = {
@@ -235,6 +274,94 @@ export type PendingResumeOutcomeView = {
   readonly sync: SyncStateView | null
 }
 
+// The administration view models.
+
+export type PendingDeviceRequestView = {
+  readonly requestId: string
+  readonly certificateKindCode: string
+  readonly fingerprint: string
+  readonly receivedAtMs: number
+}
+
+export type TrustCeremonyView = {
+  readonly ceremonyId: string
+  readonly kind: TrustCeremonyKind
+  readonly step: TrustCeremonyStep
+  readonly targetFingerprint: string | null
+  readonly exchangeFileName: string | null
+}
+
+export type PolicyProfileView = {
+  readonly operatingProfile: number
+  readonly maxRegistryAgeMs: number
+  readonly maxFutureClockSkewMs: number
+  readonly registryExpiryBehavior: number
+  readonly evidenceMaxDelayMs: number
+  readonly readerInactivityMs: number
+  readonly readerTrustRefreshMs: number
+  readonly readerHistoryAccessAllowed: boolean
+  readonly backupFrequencyMs: number
+  readonly restoreTestIntervalMs: number
+  readonly retentionPolicy: string
+  readonly effectiveFromSequence: number
+  readonly leaseValidThroughSequence: number
+  readonly notAfterMs: number
+}
+
+export type RegistryHealthView = {
+  readonly registryVersion: number
+  readonly headHash: string
+  readonly registryAgeMs: number
+  readonly maxRegistryAgeMs: number
+  readonly leaseValidThroughSequence: number
+  readonly nextSequence: number
+  readonly notAfterMs: number
+  readonly staleDecision: StaleDecision
+}
+
+export type GoLiveRequirementView = {
+  readonly requirementCode: string
+  readonly status: GoLiveRequirementStatus
+  readonly evidenceCode: string
+}
+
+export type GoLiveChecklistView = {
+  readonly requirements: readonly GoLiveRequirementView[]
+  readonly productionReady: boolean
+}
+
+export type ClockReleaseOfferView = {
+  readonly availability: ClockReleaseAvailability
+  readonly floorMs: number | null
+  readonly observedWallClockMs: number | null
+  readonly maxFutureClockSkewMs: number | null
+  readonly expiresAtMs: number | null
+  readonly justifications: readonly ClockReleaseJustificationV1[]
+}
+
+export type ClockReleaseOutcomeView = {
+  readonly releaseId: string
+  readonly expiresAtMs: number
+  readonly changesTimeFloor: boolean
+  readonly changesRegistryExpiry: boolean
+  readonly changesLease: boolean
+}
+
+export type WriterTransitionView = {
+  readonly phase: WriterTransitionPhase
+  readonly currentWriterHash: string
+  readonly newWriterHash: string | null
+  readonly effectiveFromSequence: number | null
+}
+
+export type RevocationEffectView = {
+  readonly targetClass: RevocationTargetClass
+  readonly targetHash: string
+  readonly stopsNewGrantsFromSequence: number
+  readonly recallsIssuedGrants: boolean
+  readonly recallsDecryptedPlaintext: boolean
+}
+
 // The value arrays, so that no consumer repeats a literal.
 
 export const SYNC_STATUS_VALUES = [
@@ -322,4 +449,50 @@ export const HEALTH_FINDING_VALUES = [
 export const PATIENT_COUNT_STATUS_VALUES = [
   'Unknown',
   'Known',
+] as const
+
+export const GO_LIVE_REQUIREMENT_STATUS_VALUES = [
+  'Confirmed',
+  'NotMet',
+  'NotAutomaticallyVerifiable',
+] as const
+
+export const TRUST_CEREMONY_KIND_VALUES = [
+  'DeviceApprove',
+  'DeviceRevoke',
+  'PolicyChange',
+  'WriterTransition',
+] as const
+
+export const TRUST_CEREMONY_STEP_VALUES = [
+  'PendingRequest',
+  'FingerprintConfirmed',
+  'AdminAuthorized',
+  'RootRequestExported',
+  'RootReplyImported',
+  'RegistryPublished',
+] as const
+
+export const WRITER_TRANSITION_PHASE_VALUES = [
+  'NoTransition',
+  'Prepared',
+  'Activated',
+] as const
+
+export const CLOCK_RELEASE_AVAILABILITY_VALUES = [
+  'Offered',
+  'IndependentTimeUnavailable',
+  'NotBlocked',
+] as const
+
+export const REVOCATION_TARGET_CLASS_VALUES = [
+  'NonAdminDevice',
+  'OperatorBinding',
+  'Component',
+] as const
+
+export const CLOCK_RELEASE_JUSTIFICATION_V1_VALUES = [
+  'OperatorVerifiedWallClock',
+  'PlatformTimeSourceRecovery',
+  'HardwareClockMaintenance',
 ] as const

@@ -46,8 +46,8 @@ const [, KNOWN_STATUS] = PATIENT_COUNT_STATUS_VALUES
 
 /** Der Zweck einer erneuten Authentisierung — je Handlung ein eigener. */
 export const FINALIZE_PURPOSE = 'finalize'
-export const DISCARD_PURPOSE = 'discard'
-export const STALE_ACK_PURPOSE = 'stale-ack'
+export const DISCARD_PURPOSE = 'discard-draft'
+export const STALE_ACK_PURPOSE = 'registry-stale-finalize'
 
 /** Die Kommandonamen dieser Flaeche, in der Reihenfolge ihrer Registrierung. */
 export const WRITER_COMMANDS = {

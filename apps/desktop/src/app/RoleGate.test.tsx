@@ -3,14 +3,15 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 
-import { routeTable } from './role-gate'
+import { enabledRoutes, routeTable } from './role-gate'
+import type { VerifiedSession } from './role-gate'
 
 // Die Rollengrenze zwischen Desktop und Browser, in BEIDE Richtungen gemessen.
 //
-// `apps/desktop` traegt den Writer und sonst nichts: keine Reader-Route, kein
-// Reader-Kommando. `apps/web` traegt den Reader und sonst nichts: keine
-// Finalisierung, keine Root-Zeremonie, keine Provisionierung, kein Re-grant,
-// keine Vernichtung. Beide Zusagen stehen in `web-reader-design.md` §3 und in
+// `apps/desktop` traegt den Writer und die Verwaltung und sonst nichts: keine
+// Reader-Route, kein Reader-Kommando. `apps/web` traegt den Reader und sonst
+// nichts: keine Finalisierung, keine Root-Zeremonie, keine Provisionierung,
+// kein Re-grant, keine Vernichtung. Beide Zusagen stehen in `web-reader-design.md` §3 und in
 // `role-gate.ts`; dieser Zeuge liest die QUELLEN und nicht die Absicht.
 //
 // `packageRoot` ist `apps/desktop` — dieselbe Aufloesung wie in
@@ -48,16 +49,44 @@ async function webSources(): Promise<[string, string][]> {
 }
 
 it('exposes no Reader route in the desktop shell', () => {
-  expect(routeTable().map((route) => route.path)).toEqual(['/', '/einsatz'])
+  expect(routeTable().map((route) => route.path)).toEqual(['/', '/einsatz', '/verwaltung'])
   expect(routeTable().some((route) => /reader|lese/i.test(route.label))).toBe(false)
+})
+
+// Jede Faehigkeit gehoert GENAU EINER Rolle. Eine Writer-Sitzung mit einem
+// Eintrag `administration` bekommt die Verwaltung nicht, eine Admin-Sitzung mit
+// einem Eintrag `capture` nicht die Erfassung — sonst genuegte ein
+// Faehigkeitseintrag im Zertifikat, um die Rollengrenze zu verschieben.
+it('binds each capability to exactly one verified role', () => {
+  const paths = (session: VerifiedSession) => enabledRoutes(session).map((route) => route.path)
+  expect(paths({ role: 'writer', capabilities: ['capture'] })).toEqual(['/', '/einsatz'])
+  expect(paths({ role: 'organizationadmin', capabilities: ['administration'] })).toEqual([
+    '/',
+    '/verwaltung',
+  ])
+  expect(paths({ role: 'writer', capabilities: ['administration'] })).toEqual(['/'])
+  expect(paths({ role: 'organizationadmin', capabilities: ['capture'] })).toEqual(['/'])
+  expect(paths({ role: 'organizationadmin', capabilities: [] })).toEqual(['/'])
+  expect(paths({ role: 'reader', capabilities: ['capture', 'administration'] })).toEqual(['/'])
+  expect(paths({ role: 'writer', capabilities: ['capture', 'administration'] })).toEqual([
+    '/',
+    '/einsatz',
+  ])
 })
 
 // „Geloescht statt portiert" heisst hier eine ERZWUNGENE Abwesenheit: ein
 // `reader.rs` ist nie entstanden, und dieser Zeuge faellt, sobald eines
-// einzieht.
+// einzieht. `admin.rs` traegt die Verwaltung (Stufe 5, Task 6).
 it('declares no Reader command in src-tauri', async () => {
   const commands = await readdir(path.join(packageRoot, 'src-tauri/src/commands'))
-  expect(commands.sort()).toEqual(['master_data.rs', 'mod.rs', 'session.rs', 'sync.rs', 'writer.rs'])
+  expect(commands.sort()).toEqual([
+    'admin.rs',
+    'master_data.rs',
+    'mod.rs',
+    'session.rs',
+    'sync.rs',
+    'writer.rs',
+  ])
 })
 
 // Die andere Richtung derselben Grenze: kein Writer, keine Administration, keine

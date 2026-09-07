@@ -37,6 +37,23 @@ const EA_COMMANDS: &[&str] = &[
     "device_posture_report",
     "archive_export_bundle_file",
     "sync_state",
+    "admin_pending_device_requests",
+    "admin_ceremony_begin",
+    "admin_ceremony_confirm_fingerprint",
+    "admin_ceremony_authorize",
+    "admin_ceremony_export_request",
+    "admin_ceremony_import_reply",
+    "admin_ceremony_publish",
+    "admin_policy_profile",
+    "admin_registry_health",
+    "admin_go_live_checklist",
+    "admin_go_live_export_unresolved",
+    "admin_clock_release_offer",
+    "admin_clock_release_issue",
+    "admin_writer_transition_state",
+    "admin_writer_transition_prepare",
+    "admin_writer_transition_activate",
+    "admin_revocation_effect",
 ];
 
 fn main() {

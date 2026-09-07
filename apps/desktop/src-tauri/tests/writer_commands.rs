@@ -57,7 +57,10 @@ const BRIEF_TO_REGISTERED: &[(&str, &str)] = &[("session_current", "verified_ses
 /// Jeder registrierte Name, in REGISTRIERUNGSREIHENFOLGE.
 ///
 /// Die ersten vier sind die Kommandos der Stufe 2 aus Task 15, danach folgen
-/// die zwoelf dieses Tasks.
+/// die zwoelf des Writer-Tasks und ab `sync_state` die siebzehn der
+/// Verwaltungsflaeche (Stufe 5, Task 6, DRK-274) — hier ausgeschrieben, weil
+/// dieser Zeuge die GESAMTE Registrierung misst; ihr eigener Vertrag steht in
+/// `tests/admin_commands.rs`.
 const EXPECTED: &[&str] = &[
     "verified_session",
     "invalidate_session_on_lock",
@@ -77,6 +80,23 @@ const EXPECTED: &[&str] = &[
     "device_posture_report",
     "archive_export_bundle_file",
     "sync_state",
+    "admin_pending_device_requests",
+    "admin_ceremony_begin",
+    "admin_ceremony_confirm_fingerprint",
+    "admin_ceremony_authorize",
+    "admin_ceremony_export_request",
+    "admin_ceremony_import_reply",
+    "admin_ceremony_publish",
+    "admin_policy_profile",
+    "admin_registry_health",
+    "admin_go_live_checklist",
+    "admin_go_live_export_unresolved",
+    "admin_clock_release_offer",
+    "admin_clock_release_issue",
+    "admin_writer_transition_state",
+    "admin_writer_transition_prepare",
+    "admin_writer_transition_activate",
+    "admin_revocation_effect",
 ];
 
 /// Die Kommandonamen, die die Faehigkeitserklaerung der Wirtskonfiguration
@@ -207,9 +227,22 @@ fn the_writer_surface_names_the_same_commands_as_the_host() {
         "startup_recovery",
         "master_data_counts",
     ];
+    // Die Verwaltungsflaeche hat ihre eigene TSX-Quelle und ihren eigenen
+    // Zeugen (`tests/admin_commands.rs`); die Writer-Seite darf sie NICHT
+    // nennen — ein `admin_`-Literal in WriterPage.tsx waere ein Aufruf, den das
+    // Rollentor des Wirts fuer jeden Writer abweist.
     let mut checked = 0_usize;
+    let mut administration = 0_usize;
     for name in EXPECTED {
         if STAGE_TWO.contains(name) {
+            continue;
+        }
+        if name.starts_with("admin_") {
+            assert!(
+                !WRITER_PAGE.contains(&format!("'{name}'")),
+                "WriterPage.tsx nennt das Verwaltungskommando {name}"
+            );
+            administration += 1;
             continue;
         }
         assert!(
@@ -220,8 +253,9 @@ fn the_writer_surface_names_the_same_commands_as_the_host() {
     }
     // Ohne diese Zaehlung liefe die Schleife bei einer leeren Restmenge ueber
     // nichts und blieb gruen.
-    assert_eq!(checked, EXPECTED.len() - STAGE_TWO.len());
+    assert_eq!(checked + administration, EXPECTED.len() - STAGE_TWO.len());
     assert!(checked >= 12);
+    assert_eq!(administration, 17);
 }
 
 /// Die eingebettete Faehigkeitsliste der Konfiguration ist eine ALLOWLIST — und

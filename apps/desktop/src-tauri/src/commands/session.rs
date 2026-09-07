@@ -15,6 +15,16 @@ use crate::state::DesktopState;
 /// Die Faehigkeit, die die Erfassung freischaltet.
 pub const CAPTURE_CAPABILITY: &str = "capture";
 
+/// Die Faehigkeit, die die Verwaltungsflaeche freischaltet (Stufe 5, Task 6).
+///
+/// Zeichengleich mit `ADMINISTRATION_CAPABILITY` in
+/// `apps/desktop/src/app/role-gate.ts`. Sie ist die SCHALENSEITE des Tors:
+/// die Route `/verwaltung` erscheint nur mit ihr. Die Wirtsseite ist das
+/// Rollentor in `commands::admin` — jedes `admin_*`-Kommando prueft die Rolle
+/// selbst und verlaesst sich nicht darauf, dass die Schale die Route versteckt
+/// hat.
+pub(crate) const ADMINISTRATION_CAPABILITY: &str = "administration";
+
 /// Die geprueften Sitzungsangaben in ihrer Drahtform.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SessionDto {
@@ -37,14 +47,16 @@ pub(crate) const fn role_slug(role: OperatorRoleV1) -> &'static str {
 
 /// Was diese Rolle auf DIESEM Geraet darf.
 ///
-/// Der Desktop schaltet ausschliesslich den Writer frei: der Reader ist eine
-/// Browser-PWA, und die Verwaltung ist Stufe 5. Deshalb tragen beide anderen
-/// Rollen hier die leere Liste, und es gibt keinen Weg, aus ihnen lokal eine
-/// Faehigkeit zu machen.
+/// Der Writer traegt die Erfassung, der Organisationsadministrator die
+/// Verwaltung (Stufe 5, Task 6) — und keine Rolle traegt die der anderen. Der
+/// Reader traegt nichts: er ist eine Browser-PWA, und es gibt keinen Weg, aus
+/// ihm lokal eine Faehigkeit zu machen. Kein Sammelarm: eine vierte Rolle
+/// entscheidet hier ausdruecklich.
 pub(crate) const fn capabilities_of(role: OperatorRoleV1) -> &'static [&'static str] {
     match role {
         OperatorRoleV1::Writer => &[CAPTURE_CAPABILITY],
-        OperatorRoleV1::Reader | OperatorRoleV1::OrganizationAdmin => &[],
+        OperatorRoleV1::Reader => &[],
+        OperatorRoleV1::OrganizationAdmin => &[ADMINISTRATION_CAPABILITY],
     }
 }
 
@@ -192,8 +204,8 @@ mod tests {
     use ea_writer::{FinalizationPhase, RecoveryOutcome, WriterError};
 
     use super::{
-        CAPTURE_CAPABILITY, ResumeDto, capabilities_of, phase_literal, phase_of, role_slug,
-        session_dto, startup_recovery_core, verified_session_core,
+        ADMINISTRATION_CAPABILITY, CAPTURE_CAPABILITY, ResumeDto, capabilities_of, phase_literal,
+        phase_of, role_slug, session_dto, startup_recovery_core, verified_session_core,
     };
     use crate::commands::{NO_VERIFIED_SESSION, STARTUP_RECOVERY_UNAVAILABLE};
     use crate::state::{DesktopState, SessionState, StartupRecoveryPort};
@@ -224,15 +236,26 @@ mod tests {
         }
     }
 
-    /// Der Desktop schaltet ausschliesslich den Writer frei.
+    /// Jede Rolle traegt GENAU ihre Faehigkeit: der Writer die Erfassung, der
+    /// Organisationsadministrator die Verwaltung (Stufe 5, Task 6), der Reader
+    /// nichts — er ist eine Browser-PWA.
+    ///
+    /// Die zwei Listen sind einelementig und ausgeschrieben: eine Rolle, die
+    /// die Faehigkeit der anderen mitbekaeme, schaltete in der Schale eine
+    /// Route frei, deren Kommandos sie am Wirt nicht passieren duerfte.
     #[test]
-    fn only_the_writer_carries_a_capability() {
+    fn each_role_carries_exactly_its_own_capability() {
         assert_eq!(
             capabilities_of(OperatorRoleV1::Writer),
             [CAPTURE_CAPABILITY]
         );
         assert!(capabilities_of(OperatorRoleV1::Reader).is_empty());
-        assert!(capabilities_of(OperatorRoleV1::OrganizationAdmin).is_empty());
+        assert_eq!(
+            capabilities_of(OperatorRoleV1::OrganizationAdmin),
+            [ADMINISTRATION_CAPABILITY]
+        );
+        assert_eq!(ADMINISTRATION_CAPABILITY, "administration");
+        assert_ne!(CAPTURE_CAPABILITY, ADMINISTRATION_CAPABILITY);
     }
 
     #[test]
@@ -331,11 +354,9 @@ mod tests {
         assert_eq!(session.role, "writer");
         assert_eq!(session.capabilities, ["capture"]);
         assert!(session_dto(OperatorRoleV1::Reader).capabilities.is_empty());
-        assert!(
-            session_dto(OperatorRoleV1::OrganizationAdmin)
-                .capabilities
-                .is_empty()
-        );
+        let admin = session_dto(OperatorRoleV1::OrganizationAdmin);
+        assert_eq!(admin.role, "organizationadmin");
+        assert_eq!(admin.capabilities, ["administration"]);
     }
 
     #[test]

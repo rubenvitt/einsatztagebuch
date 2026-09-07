@@ -19,7 +19,9 @@ export const EA_CUSTOM_PROPERTY_BLOCK =
  * `Modal`, `message` und `notification` stehen zusaetzlich zu den Komponenten
  * der Schale darin, weil sie erst in Task 16 gerendert werden und eine
  * unformatierte, nicht uebergehbare Bestaetigung genau dort die falsche
- * Ueberraschung waere.
+ * Ueberraschung waere. `QRCode` und `Steps` traegt die Verwaltungsflaeche
+ * (Stufe 5, Task 6): der QR-Code des Fingerprints und der Stepper der
+ * Root-Zeremonie.
  *
  * `ConfigProvider` gehoert NICHT hierher: `@ant-design/static-style-extract`
  * fuehrt ihn samt `Grid` auf seiner eigenen Sperrliste
@@ -38,10 +40,12 @@ export const EXTRACTED_COMPONENTS: readonly string[] = [
   'Input',
   'Layout',
   'Modal',
+  'QRCode',
   'Radio',
   'Result',
   'Space',
   'Spin',
+  'Steps',
   'Tag',
   'Tooltip',
   'Typography',
