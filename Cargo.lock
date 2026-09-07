@@ -1817,6 +1817,7 @@ dependencies = [
 name = "ea-desktop"
 version = "0.1.0"
 dependencies = [
+ "ea-admin",
  "ea-archive",
  "ea-archive-fs",
  "ea-audit",
@@ -2146,6 +2147,7 @@ version = "0.1.0"
 name = "ea-ui-contracts"
 version = "0.1.0"
 dependencies = [
+ "ea-admin",
  "ea-archive",
  "ea-archive-fs",
  "ea-crypto",

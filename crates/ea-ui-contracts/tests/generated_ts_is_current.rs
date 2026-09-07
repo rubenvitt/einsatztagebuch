@@ -117,6 +117,20 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
             "{name} must be emitted from its Rust definition, in declaration order"
         );
     }
+    // Die geschlossenen Mengen der VERWALTUNGSFLAECHE (Stufe 5, Task 6) —
+    // aus `ea-admin` und `ea-format` weitergegeben, gleich streng bewacht.
+    assert!(
+        !ea_ui_contracts::ADMIN_ENUMS_V1.is_empty(),
+        "ADMIN_ENUMS_V1 must carry every closed set of the administration surface"
+    );
+    for (name, variants) in ea_ui_contracts::ADMIN_ENUMS_V1 {
+        let block = named_union_block(&emitted, name);
+        assert_eq!(
+            union_members(&block),
+            variants.to_vec(),
+            "{name} must be emitted from its Rust definition, in declaration order"
+        );
+    }
     // Die Variantenlisten in `lib.rs` sind der EINE Punkt, an dem eine
     // Variante still verloren gehen kann: eine HINZUGEKOMMENE Variante bricht
     // den `match` ohne Sammelarm und damit die Uebersetzung, eine
@@ -147,6 +161,31 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
         // sichtbaren Aenderung. Der Unterschied zwischen bekannter Null und
         // unbekannt haengt an genau diesen zwei Armen.
         ("PatientCountStatus", 2),
+        // Die sieben Vereinigungen der Verwaltungsflaeche. Wo `ea-admin` ein
+        // `ALL` fuehrt, kommt die Zahl von dort; `ClockReleaseAvailability`,
+        // `RevocationTargetClass` und `ClockReleaseJustificationV1` fuehren
+        // keines — die Drei steht deshalb hier. Bei der Statusaufzaehlung
+        // haengt „Unknown ist nie gruen" am DRITTEN Arm; sein Entfernen wird
+        // damit eine sichtbare Aenderung.
+        (
+            "GoLiveRequirementStatus",
+            ea_ui_contracts::GoLiveRequirementStatus::ALL.len(),
+        ),
+        (
+            "TrustCeremonyKind",
+            ea_ui_contracts::TrustCeremonyKind::ALL.len(),
+        ),
+        (
+            "TrustCeremonyStep",
+            ea_ui_contracts::TrustCeremonyStep::ALL.len(),
+        ),
+        (
+            "WriterTransitionPhase",
+            ea_ui_contracts::WriterTransitionPhase::ALL.len(),
+        ),
+        ("ClockReleaseAvailability", 3),
+        ("RevocationTargetClass", 3),
+        ("ClockReleaseJustificationV1", 3),
     ] {
         assert_eq!(
             union_members(&named_union_block(&emitted, name)).len(),
@@ -169,6 +208,77 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
             "Fehler"
         ]
     );
+    // Die Zahlen der sieben Verwaltungsvereinigungen, ein zweites Mal als
+    // nackte Literale gepinnt: 3, 4, 6, 3, 3, 3, 3. Die Schleife oben holt
+    // vier davon aus `ALL` — und `ALL` und der `match` koennten GEMEINSAM um
+    // eine Variante wachsen, ohne dass jemand hier vorbeikaeme. Diese Zeile
+    // macht das zu einer sichtbaren Aenderung.
+    assert_eq!(
+        ea_ui_contracts::ADMIN_ENUMS_V1
+            .iter()
+            .map(|(name, variants)| (*name, variants.len()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("GoLiveRequirementStatus", 3),
+            ("TrustCeremonyKind", 4),
+            ("TrustCeremonyStep", 6),
+            ("WriterTransitionPhase", 3),
+            ("ClockReleaseAvailability", 3),
+            ("RevocationTargetClass", 3),
+            ("ClockReleaseJustificationV1", 3),
+        ]
+    );
+}
+
+/// Die Vereinigungen der Verwaltungsflaeche stehen in der DESKTOP-Datei und
+/// NICHT in der Reader-Datei.
+///
+/// Der Reader ist eine Browser-PWA ohne Verwaltungsrolle; ein `Confirmed` in
+/// seiner Kontraktdatei verbaenne das Wort aus jeder handgeschriebenen
+/// Web-Quelle, ohne dass eine Reader-Entscheidung dahinterstuende — dieselbe
+/// Ueberlegung, die `READER_ENUMS_V1` aus der Desktop-Datei heraushaelt.
+#[test]
+fn the_administration_unions_are_emitted_for_the_desktop_only() {
+    let desktop = ea_ui_contracts::emit_typescript();
+    let reader = ea_ui_contracts::emit_reader_typescript();
+    for (name, _) in ea_ui_contracts::ADMIN_ENUMS_V1 {
+        let header = format!("export type {name} =");
+        assert!(
+            desktop.lines().any(|line| line == header),
+            "the desktop contracts must declare {name}"
+        );
+        assert!(
+            !reader.lines().any(|line| line == header),
+            "the reader contracts must not declare {name}"
+        );
+        assert!(
+            !reader.contains(name),
+            "the reader contracts must not mention {name}"
+        );
+    }
+    // Und die zehn Ansichtsmodelle der Verwaltung ebenso.
+    for view in [
+        "PendingDeviceRequestView",
+        "TrustCeremonyView",
+        "PolicyProfileView",
+        "RegistryHealthView",
+        "GoLiveRequirementView",
+        "GoLiveChecklistView",
+        "ClockReleaseOfferView",
+        "ClockReleaseOutcomeView",
+        "WriterTransitionView",
+        "RevocationEffectView",
+    ] {
+        let header = format!("export type {view} = {{");
+        assert!(
+            desktop.lines().any(|line| line == header),
+            "the desktop contracts must declare {view}"
+        );
+        assert!(
+            !reader.contains(view),
+            "the reader contracts must not mention {view}"
+        );
+    }
 }
 
 #[test]
@@ -176,11 +286,30 @@ fn the_emitted_file_declares_types_and_computes_nothing() {
     let emitted = ea_ui_contracts::emit_typescript();
     let lowercase = emitted.to_ascii_lowercase();
     for forbidden in [
-        "function", "=>", "class", "import(", "require(", "crypto", "subtle", "sha",
+        "function", "=>", "import(", "require(", "crypto", "subtle", "sha",
     ] {
         assert!(
             !lowercase.contains(forbidden),
             "the generated contracts must contain no {forbidden}"
+        );
+    }
+    // Die achte verbotene Zeichenfolge ist "class", und die
+    // Verwaltungsvereinigung `RevocationTargetClass` traegt sie im NAMEN —
+    // samt dem Werte-Array `REVOCATION_TARGET_CLASS_VALUES` und dem Feld
+    // `targetClass` der `RevocationEffectView`. Dieselbe Bauform wie fuer
+    // `SignerRole` unten: maskiert werden GENAU diese drei Schreibweisen,
+    // zeilenweise und mit der Fundstelle im Text; `class Foo`, `className`
+    // und jedes andere Vorkommen faellt weiterhin auf.
+    for line in emitted.lines() {
+        let masked = line
+            .to_ascii_lowercase()
+            .replace("revocationtargetclass", "")
+            .replace("revocation_target_class", "")
+            .replace("targetclass", "");
+        assert!(
+            !masked.contains("class"),
+            "the generated contracts must contain no class outside the \
+             RevocationTargetClass declaration: {line}"
         );
     }
     // Die neunte verbotene Zeichenfolge des Briefs ist "sign", und die

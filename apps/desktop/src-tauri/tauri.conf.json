@@ -22,7 +22,7 @@
         "default",
         {
           "identifier": "ea-writer-commands",
-          "description": "Die VOLLSTAENDIGE Erlaubnisliste der Kommandos dieses Pakets. Sie wirkt, weil build.rs ein App-ACL-Manifest erklaert: dann verlangt tauri fuer JEDES Kommando eine aufgeloeste Erlaubnis, und eine Erlaubnis ohne Kommando laesst generate_context! mit UnknownPermission abbrechen. Kein Name hier bedient das Entschluesseln, den Verlauf oder den Inhalt eines abgeschlossenen Eintrags.",
+          "description": "Die VOLLSTAENDIGE Erlaubnisliste der Kommandos dieses Pakets. Sie wirkt, weil build.rs ein App-ACL-Manifest erklaert: dann verlangt tauri fuer JEDES Kommando eine aufgeloeste Erlaubnis, und eine Erlaubnis ohne Kommando laesst generate_context! mit UnknownPermission abbrechen. Kein Name hier bedient das Entschluesseln, den Verlauf oder den Inhalt eines abgeschlossenen Eintrags. Die admin-Kommandos (Stufe 5, DRK-274) sind im Wirt auf die Rolle OrganizationAdmin gebunden; die ACL erlaubt sie dem Fenster, das Rollentor entscheidet je Aufruf.",
           "local": true,
           "windows": [
             "main"
@@ -45,7 +45,24 @@
             "allow-archive-health-report",
             "allow-device-posture-report",
             "allow-archive-export-bundle-file",
-            "allow-sync-state"
+            "allow-sync-state",
+            "allow-admin-pending-device-requests",
+            "allow-admin-ceremony-begin",
+            "allow-admin-ceremony-confirm-fingerprint",
+            "allow-admin-ceremony-authorize",
+            "allow-admin-ceremony-export-request",
+            "allow-admin-ceremony-import-reply",
+            "allow-admin-ceremony-publish",
+            "allow-admin-policy-profile",
+            "allow-admin-registry-health",
+            "allow-admin-go-live-checklist",
+            "allow-admin-go-live-export-unresolved",
+            "allow-admin-clock-release-offer",
+            "allow-admin-clock-release-issue",
+            "allow-admin-writer-transition-state",
+            "allow-admin-writer-transition-prepare",
+            "allow-admin-writer-transition-activate",
+            "allow-admin-revocation-effect"
           ]
         }
       ]

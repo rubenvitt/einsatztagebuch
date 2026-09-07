@@ -80,9 +80,12 @@ mod operator_remote;
 pub mod operator_runtime;
 pub mod production_state;
 
+pub mod ceremony_steps;
 pub mod clock_release;
 pub mod device;
 mod error;
+pub mod fingerprint;
+pub mod go_live;
 pub mod operator;
 pub mod operator_profile;
 pub mod operator_trust_store;
@@ -105,8 +108,19 @@ pub use bootstrap::{
     KeyBackupRecordV1, OuterKeyRecordV1, RootKeyMaterialV1, SystemRandomSource,
 };
 pub use bootstrap_store::FileBootstrapStore;
+pub use ceremony_steps::{
+    TrustCeremonyKind, TrustCeremonyStep, next_step, reauth_purpose, requires_fresh_reauth,
+};
 pub use error::AdminError;
+pub use fingerprint::{
+    FINGERPRINT_PARSE_ERROR, FingerprintParseError, human_readable_fingerprint,
+    parse_human_readable_fingerprint,
+};
 pub use genesis::{GenesisBinding, GenesisEnvelopeV1, bind_genesis};
+pub use go_live::{
+    GO_LIVE_REQUIREMENT_CODES, GoLiveChecklist, GoLiveEvidence, GoLiveRequirement,
+    GoLiveRequirementStatus, RecoveryTestFreshness, RegistryFreshness, evaluate_go_live,
+};
 pub use production_state::{
     FreshMachineRecoveryProof, ProductionState, RecoveryTestObservation, machine_fingerprint,
     verify_fresh_machine_recovery_test,
@@ -114,5 +128,5 @@ pub use production_state::{
 pub use root_ceremony::RootCeremonyService;
 pub use writer_transition::{
     ActivatedWriterTransition, PreparedWriterTransition, TrustedChainHead, WriterTransitionError,
-    WriterTransitionRequest, WriterTransitionService,
+    WriterTransitionPhase, WriterTransitionRequest, WriterTransitionService,
 };

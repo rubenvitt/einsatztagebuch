@@ -2,6 +2,7 @@ import { ArrowsClockwiseIcon } from '@phosphor-icons/react/dist/csr/ArrowsClockw
 import { LockKeyIcon } from '@phosphor-icons/react/dist/csr/LockKey'
 import { NotePencilIcon } from '@phosphor-icons/react/dist/csr/NotePencil'
 import { ShieldCheckIcon } from '@phosphor-icons/react/dist/csr/ShieldCheck'
+import { UsersThreeIcon } from '@phosphor-icons/react/dist/csr/UsersThree'
 import { WarningIcon } from '@phosphor-icons/react/dist/csr/Warning'
 import type { ReactElement } from 'react'
 
@@ -19,6 +20,7 @@ export const eaIcons = {
   capture: NotePencilIcon,
   locked: LockKeyIcon,
   resuming: ArrowsClockwiseIcon,
+  administration: UsersThreeIcon,
 } as const
 
 export type EaIconName = keyof typeof eaIcons

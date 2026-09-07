@@ -6,10 +6,12 @@
 //! (`commands::run_blocking`), damit die fsync-schwere Finalisierung den
 //! Main-Thread nicht blockiert. Der Rust-Kern unter `crates/` bleibt synchron.
 //!
-//! Die Anwendung traegt weder eine Reader- noch eine Verwaltungsflaeche: der
-//! Reader ist eine Browser-PWA, die Verwaltung ist Stufe 5. Deshalb steht in
-//! [`COMMAND_NAMES`] kein Kommando fuer eine von beiden, und
-//! `apps/desktop/src/app/role-gate.ts` traegt fuer sie keine Route.
+//! Die Anwendung traegt die Writer- und — seit Stufe 5, Task 6 (DRK-274) —
+//! die Verwaltungsflaeche (`commands::admin`, siebzehn `admin_*`-Kommandos
+//! hinter dem Rollentor `OrganizationAdmin` und der Faehigkeit
+//! `administration`). Sie traegt KEINE Reader-Flaeche: der Reader ist eine
+//! Browser-PWA. Deshalb steht in [`COMMAND_NAMES`] kein Kommando fuer ihn, und
+//! `apps/desktop/src/app/role-gate.ts` traegt fuer ihn keine Route.
 
 pub mod commands;
 pub mod state;
@@ -101,7 +103,24 @@ pub fn run() {
             commands::writer::archive_health_report,
             commands::writer::device_posture_report,
             commands::writer::archive_export_bundle_file,
-            commands::sync::sync_state
+            commands::sync::sync_state,
+            commands::admin::admin_pending_device_requests,
+            commands::admin::admin_ceremony_begin,
+            commands::admin::admin_ceremony_confirm_fingerprint,
+            commands::admin::admin_ceremony_authorize,
+            commands::admin::admin_ceremony_export_request,
+            commands::admin::admin_ceremony_import_reply,
+            commands::admin::admin_ceremony_publish,
+            commands::admin::admin_policy_profile,
+            commands::admin::admin_registry_health,
+            commands::admin::admin_go_live_checklist,
+            commands::admin::admin_go_live_export_unresolved,
+            commands::admin::admin_clock_release_offer,
+            commands::admin::admin_clock_release_issue,
+            commands::admin::admin_writer_transition_state,
+            commands::admin::admin_writer_transition_prepare,
+            commands::admin::admin_writer_transition_activate,
+            commands::admin::admin_revocation_effect
         ])
         .run(tauri::generate_context!())
         .expect("der Wirt der Writer-Oberflaeche liess sich nicht starten");
@@ -112,7 +131,7 @@ mod tests {
     use super::{COMMAND_NAMES, registered_command_names};
 
     /// Die Quellen der Kommandomodule, wie sie uebersetzt wurden.
-    const COMMAND_SOURCES: [(&str, &str); 4] = [
+    const COMMAND_SOURCES: [(&str, &str); 5] = [
         ("commands/session.rs", include_str!("commands/session.rs")),
         (
             "commands/master_data.rs",
@@ -120,6 +139,7 @@ mod tests {
         ),
         ("commands/sync.rs", include_str!("commands/sync.rs")),
         ("commands/writer.rs", include_str!("commands/writer.rs")),
+        ("commands/admin.rs", include_str!("commands/admin.rs")),
     ];
 
     /// Diese Datei selbst — die Quelle der Registrierung.
@@ -339,23 +359,73 @@ mod tests {
         assert_eq!(checked, 2, "genau zwei Ausgaenge tragen keine Fortsetzung");
     }
 
-    /// Der Desktop traegt keine Reader- und keine Verwaltungsflaeche, und
-    /// dieser Zeuge haelt die Abwesenheit auf der Kommandoseite fest.
+    /// Der Desktop traegt keine Reader-Flaeche, und dieser Zeuge haelt die
+    /// Abwesenheit auf der Kommandoseite fest.
+    ///
+    /// Die VERWALTUNGSFLAECHE ist mit Stufe 5, Task 6 (DRK-274) angekommen und
+    /// steht deshalb nicht mehr in dieser Verbotsliste: jedes `admin_*`-Kommando
+    /// ist in `commands::admin` auf die Rolle `OrganizationAdmin` und in
+    /// `commands::session::capabilities_of` auf die Faehigkeit
+    /// `administration` gebunden. `registry_edit` bleibt verboten — eine
+    /// Registry wird ueber eine Zeremonie in Schritten VEROEFFENTLICHT und nie
+    /// editiert.
     #[test]
-    fn no_command_serves_a_reader_or_an_administration_surface() {
+    fn no_command_serves_a_reader_surface() {
         for name in COMMAND_NAMES {
-            for forbidden in [
-                "reader",
-                "read_archive",
-                "admin",
-                "registry_edit",
-                "history",
-            ] {
+            for forbidden in ["reader", "read_archive", "registry_edit", "history"] {
                 assert!(
                     !name.contains(forbidden),
                     "{name} bedient eine Flaeche, die dieser Ausbaustufe nicht gehoert"
                 );
             }
         }
+    }
+
+    /// Die Verwaltungsflaeche ist GENAU der Vertrag aus
+    /// `.superpowers/admin-ui-contract.md` §5: siebzehn Namen, jeder einmal, in
+    /// dieser Reihenfolge hinter `sync_state`.
+    ///
+    /// Ausgeschrieben und nicht aus `commands::admin` abgeleitet: der Zeuge
+    /// misst die Registrierung gegen den Vertrag, den die Schale liest, und
+    /// nicht gegen die Quelle, die er bewacht.
+    #[test]
+    fn every_administration_command_is_named_exactly_once_and_matches_the_contract() {
+        const CONTRACT: [&str; 17] = [
+            "admin_pending_device_requests",
+            "admin_ceremony_begin",
+            "admin_ceremony_confirm_fingerprint",
+            "admin_ceremony_authorize",
+            "admin_ceremony_export_request",
+            "admin_ceremony_import_reply",
+            "admin_ceremony_publish",
+            "admin_policy_profile",
+            "admin_registry_health",
+            "admin_go_live_checklist",
+            "admin_go_live_export_unresolved",
+            "admin_clock_release_offer",
+            "admin_clock_release_issue",
+            "admin_writer_transition_state",
+            "admin_writer_transition_prepare",
+            "admin_writer_transition_activate",
+            "admin_revocation_effect",
+        ];
+        let registered: Vec<&str> = COMMAND_NAMES
+            .iter()
+            .copied()
+            .filter(|name| name.starts_with("admin_"))
+            .collect();
+        assert_eq!(registered, CONTRACT);
+        for name in CONTRACT {
+            assert_eq!(
+                COMMAND_NAMES.iter().filter(|entry| **entry == name).count(),
+                1,
+                "{name} steht nicht genau einmal in COMMAND_NAMES"
+            );
+        }
+        let sync_at = COMMAND_NAMES
+            .iter()
+            .position(|name| *name == "sync_state")
+            .expect("sync_state fehlt");
+        assert_eq!(&COMMAND_NAMES[sync_at + 1..], &CONTRACT[..]);
     }
 }

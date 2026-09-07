@@ -6,10 +6,11 @@ import type { ReactElement } from 'react'
 import { StartupRecovery, startupRecovery } from './StartupRecovery'
 import { TrustAgeStatus } from './TrustAgeStatus'
 import { enabledRoutes } from './role-gate'
-import type { EaRoute, VerifiedSession } from './role-gate'
+import type { EaRoute, SessionRole, VerifiedSession } from './role-gate'
 import { verifiedSession, watchSessionLock } from './session-lock'
 import type { SessionLockHandlers } from './session-lock'
 import type { FinalizationPreviewView, PendingFinalizationResumeView } from '../bridge/generated-contracts'
+import { AdminSurface } from '../features/admin/AdminPage'
 import { WriterSurface } from '../features/writer/WriterPage'
 import { DecorativeIcon } from '../design/icons'
 import { eaRuntimeTheme } from '../design/tokens'
@@ -27,25 +28,61 @@ export const eaDesktopBridge: EaDesktopBridge = {
   watchLock: (handlers) => watchSessionLock(handlers),
 }
 
-function RouteSurface({ route }: { readonly route: EaRoute }): ReactElement {
+/** Was die Schale ueber einer Route zeigt: die Landmarke und ihren Inhalt. */
+type Surface = {
+  readonly ariaLabel: string
+  readonly body: ReactElement
+}
+
+/**
+ * Die Tabelle Pfad → Flaeche, deckungsgleich mit `EA_ROUTES`.
+ *
+ * Eine Tabelle und keine Verzweigung: jede Route der Schale hat hier GENAU
+ * einen Eintrag, und eine Route ohne Eintrag zeigt nichts — nicht die Flaeche
+ * einer anderen Route. Die Erfassung und die Verwaltung bauen ihre Bruecke zum
+ * Wirt selbst und zeigen erst danach etwas: ohne gelesenen Entwurf gaebe es
+ * einen zweiten aktiven Entwurf, ohne gelesene Go-live-Liste eine Verwaltung
+ * ohne Aussage.
+ */
+const ROUTE_SURFACES: Record<string, Surface> = {
+  '/': {
+    ariaLabel: 'Übersicht',
+    body: (
+      <Typography.Paragraph>
+        Diese Schale zeigt ausschließlich die Flächen, die die geprüfte Sitzung freischaltet. Der
+        Verlauf und die abgeschlossenen Inhalte sind hier nicht einsehbar.
+      </Typography.Paragraph>
+    ),
+  },
+  '/einsatz': { ariaLabel: 'Erfassung', body: <WriterSurface /> },
+  '/verwaltung': { ariaLabel: 'Verwaltung', body: <AdminSurface /> },
+}
+
+/**
+ * Der Zusatz im Kopf der Schale je Rolle — erschoepfend ueber die
+ * Sitzungsrollen, damit eine Admin-Sitzung nicht unter einem Writer-Titel
+ * arbeitet. Eine Lesersitzung erreicht die Schale nicht mit einer Flaeche, ihr
+ * Eintrag steht der Vollstaendigkeit halber.
+ */
+const ROLE_TITLE: Record<SessionRole, string> = {
+  writer: 'Writer-Gerät',
+  reader: 'Lesegerät',
+  organizationadmin: 'Verwaltung',
+}
+
+function RouteSurface({ route }: { readonly route: EaRoute }): ReactElement | null {
+  const surface = ROUTE_SURFACES[route.path]
+  if (surface === undefined) {
+    return null
+  }
   return (
-    <section aria-label={route.path === '/' ? 'Übersicht' : 'Erfassung'}>
+    <section aria-label={surface.ariaLabel}>
       <Space direction="vertical" size="middle">
         <Space size="small">
           <DecorativeIcon name={route.icon} />
           <Typography.Title level={2}>{route.label}</Typography.Title>
         </Space>
-        {route.path === '/' ? (
-          <Typography.Paragraph>
-            Dieses Gerät führt genau einen Writer und genau einen Entwurf. Der Verlauf und die
-            abgeschlossenen Inhalte sind hier nicht einsehbar.
-          </Typography.Paragraph>
-        ) : (
-          // Die Erfassung selbst. Sie baut ihre Bruecke zum Wirt und zeigt
-          // erst danach ein Formular: ohne gelesenen Entwurf gaebe es einen
-          // zweiten aktiven Entwurf, und es gibt genau einen.
-          <WriterSurface />
-        )}
+        {surface.body}
       </Space>
     </section>
   )
@@ -83,7 +120,7 @@ export function AppShell({
         <Layout>
           <Layout.Header>
             <Space direction="vertical" size="small">
-              <Typography.Text strong>Einsatzarchiv — Writer</Typography.Text>
+              <Typography.Text strong>{`Einsatzarchiv — ${ROLE_TITLE[session.role]}`}</Typography.Text>
               <TrustAgeStatus preview={preview} />
             </Space>
           </Layout.Header>

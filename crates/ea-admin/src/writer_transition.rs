@@ -522,6 +522,34 @@ impl ActivatedWriterTransition {
     }
 }
 
+/// Die PHASE eines Writer-Uebergangs, wie die Verwaltungsflaeche sie zeigt.
+///
+/// Drei Werte, weil der Ablauf oben drei sichtbare Zustaende hat: es laeuft
+/// kein Uebergang, ein Antrag ist vorbereitet ([`PreparedWriterTransition`]),
+/// aber das Aenderung-3-Ereignis ist noch nicht geplant, oder die Aktivierung
+/// ist geschehen ([`ActivatedWriterTransition`]). `Prepared` ist der EINE
+/// unvollendete Zustand — und genau der, den das Go-live-Aggregat
+/// ([`crate::go_live`]) als nicht erfuellt fuehrt: mit einem vorbereiteten,
+/// aber nicht aktivierten Uebergang ist nicht entschieden, wer schreibt.
+///
+/// Die Aufzaehlung traegt KEINE Daten: Hashes und Sequenz des Uebergangs
+/// stehen in den zwei Typen oben und werden dort gelesen, nicht hier kopiert.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterTransitionPhase {
+    /// Kein Uebergang vorbereitet; der laufende Writer bleibt.
+    NoTransition,
+    /// Ein Antrag ist geprueft und die Nutzlast gebildet — noch nichts ist
+    /// veroeffentlicht oder geplant.
+    Prepared,
+    /// Das Aenderung-3-Ereignis ist an die veroeffentlichten Bytes gebunden.
+    Activated,
+}
+
+impl WriterTransitionPhase {
+    /// Alle drei Phasen, in Deklarationsreihenfolge.
+    pub const ALL: [Self; 3] = [Self::NoTransition, Self::Prepared, Self::Activated];
+}
+
 /// Der Dienst des Writer-Uebergangs ueber genau einem gewaehlten Kopf.
 ///
 /// Er wird JE KOPFAUSWAHL gebaut, wie [`crate::RootCeremonyService`]: der

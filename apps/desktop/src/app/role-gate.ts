@@ -23,12 +23,21 @@ function slug(role: OperatorRoleV1): SessionRole {
 export const SESSION_ROLES: readonly SessionRole[] = OPERATOR_ROLE_V1_VALUES.map(slug)
 
 /**
- * Die EINZIGE Rolle, die im Desktop eine Flaeche freischaltet.
+ * Die Rolle, die die Erfassung freischaltet.
  *
  * Die Typannotation ist der Pin: schriebe hier jemand eine Kennung, die keine
  * Kleinschreibung einer Kontraktrolle ist, uebersetzt die Datei nicht.
  */
 export const WRITER_ROLE: SessionRole = 'writer'
+
+/**
+ * Die Rolle, die die Verwaltung freischaltet (Stufe 5, Task 6).
+ *
+ * Derselbe Pin wie beim Writer. Ein Organisationsadmin bekommt damit die
+ * Root-Zeremonien, die Richtlinie und die Registry — und ausdruecklich KEINEN
+ * Fachinhalt: die Admin-Rolle allein oeffnet nie einen Eintrag.
+ */
+export const ADMIN_ROLE: SessionRole = 'organizationadmin'
 
 /**
  * Die Faehigkeit, die die Erfassung freischaltet.
@@ -38,6 +47,24 @@ export const WRITER_ROLE: SessionRole = 'writer'
  * (`DeviceCertificateFieldsV1::capabilities`).
  */
 export const CAPTURE_CAPABILITY = 'capture'
+
+/** Die Faehigkeit, die die Verwaltung freischaltet (`session.rs::capabilities_of`). */
+export const ADMINISTRATION_CAPABILITY = 'administration'
+
+/**
+ * Welcher Rolle eine Faehigkeit GEHOERT.
+ *
+ * Die Tabelle ist die Rollengrenze: eine Faehigkeit schaltet ihre Flaeche nur
+ * frei, wenn die gepruefte Sitzung die Rolle traegt, zu der die Faehigkeit
+ * gehoert. Eine Writer-Sitzung mit einem Eintrag `administration` bekommt die
+ * Verwaltung deshalb nicht, und eine Admin-Sitzung mit einem Eintrag `capture`
+ * nicht die Erfassung — sonst genuegte ein Eintrag im Zertifikat, um die
+ * Grenze zu verschieben.
+ */
+const CAPABILITY_ROLE: Record<string, SessionRole> = {
+  [CAPTURE_CAPABILITY]: WRITER_ROLE,
+  [ADMINISTRATION_CAPABILITY]: ADMIN_ROLE,
+}
 
 /**
  * Die geprueften Angaben EINER Sitzung.
@@ -64,17 +91,22 @@ export type EaRoute = {
 /**
  * Die VOLLSTAENDIGE Routentabelle der Schale.
  *
- * Zwei Eintraege, und das ist die Aussage: Task 15 schaltet ausschliesslich den
- * Writer frei. Der Reader ist eine Browser-PWA
- * (`2026-08-15-einsatzarchiv-web-reader-design.md`:51-56, :466) und die
- * Verwaltung ist Stufe 5 (`design.md`:2177) — die Schale traegt fuer beide
- * keine Route, keine Ansicht und kein Kommando. `AppShell` rendert AUS dieser
- * Tabelle, also faellt der Zeuge in `AppShell.test.tsx`, wenn hier eine dritte
- * Flaeche einzieht.
+ * Drei Eintraege, und das ist die Aussage: die Erfassung (Stufe 2, Task 15) und
+ * die Verwaltung (Stufe 5, Task 6), je an ihre Rolle gebunden. Der Reader ist
+ * eine Browser-PWA (`2026-08-15-einsatzarchiv-web-reader-design.md`:51-56,
+ * :466) — die Schale traegt fuer ihn keine Route, keine Ansicht und kein
+ * Kommando. `AppShell` rendert AUS dieser Tabelle, also faellt der Zeuge in
+ * `AppShell.test.tsx`, wenn hier eine vierte Flaeche einzieht.
  */
 const EA_ROUTES: readonly EaRoute[] = [
   { path: '/', label: 'Übersicht', requiredCapability: null, icon: 'verified' },
   { path: '/einsatz', label: 'Einsatz erfassen', requiredCapability: CAPTURE_CAPABILITY, icon: 'capture' },
+  {
+    path: '/verwaltung',
+    label: 'Verwaltung',
+    requiredCapability: ADMINISTRATION_CAPABILITY,
+    icon: 'administration',
+  },
 ]
 
 export function routeTable(): readonly EaRoute[] {
@@ -84,15 +116,21 @@ export function routeTable(): readonly EaRoute[] {
 /**
  * Ob `session` `route` betreten darf.
  *
- * BEIDE Bedingungen sind notwendig: die geprueften Rolle UND die Faehigkeit des
- * Geraetezertifikats. Eine Lesersitzung mit einem Faehigkeitseintrag bekommt
- * die Erfassung deshalb nicht.
+ * BEIDE Bedingungen sind notwendig: die gepruefte Rolle, zu der die Faehigkeit
+ * GEHOERT, UND die Faehigkeit im Geraetezertifikat. Eine Lesersitzung mit einem
+ * Faehigkeitseintrag bekommt die Erfassung deshalb nicht, und eine Faehigkeit,
+ * die in [`CAPABILITY_ROLE`] keiner Rolle gehoert, schaltet nichts frei.
  */
 export function isRouteEnabled(session: VerifiedSession, route: EaRoute): boolean {
   if (route.requiredCapability === null) {
     return true
   }
-  return session.role === WRITER_ROLE && session.capabilities.includes(route.requiredCapability)
+  const owner = CAPABILITY_ROLE[route.requiredCapability]
+  return (
+    owner !== undefined &&
+    session.role === owner &&
+    session.capabilities.includes(route.requiredCapability)
+  )
 }
 
 export function enabledRoutes(session: VerifiedSession): readonly EaRoute[] {

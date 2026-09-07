@@ -82,6 +82,19 @@ ea-writer.workspace = true
 # EINZIGE Abhaengigkeit, die dieser Task hinzufuegt, und deshalb der Grund fuer
 # den einen `cargo metadata`-Lauf ohne `--locked` im Vorlaufschritt.
 ea-ui-contracts.workspace = true
+# Die Verwaltungsflaeche (Stufe 5, DRK-274). Der Wirt zieht aus `ea-admin`
+# genau vier Dinge: die geschlossene Schrittfolge der Trust-Zeremonie
+# (`ceremony_steps`: `next_step`, `requires_fresh_reauth`, `reauth_purpose`),
+# den Fingerprint-Leser (`parse_human_readable_fingerprint` — die Kommandogrenze
+# liest den Freitext des Bedieners, der Port sieht nur den Hash), das
+# Go-live-Aggregat (`GoLiveChecklist` samt `unresolved_report_json`) und die
+# Typen der vier Workflow-Dienste, die hinter `crate::state::AdministrationPort`
+# stehen. Die Dienste selbst tragen Lebensdauern und werden erst bei der
+# Verdrahtung gebaut; der Port ist die Naht. `test-support` bleibt AUS — es ist
+# dort kein Default-Feature, und ein Fixture-Konstruktor gehoert nicht in den
+# Wirt. Zweite Kante nach `ea-ui-contracts`, deshalb der eine
+# `cargo metadata`-Lauf ohne `--locked`.
+ea-admin.workspace = true
 
 [build-dependencies]
 # Erzeugt die ACL- und Kontextbeiwerke aus `src-tauri/tauri.conf.json`. Diese

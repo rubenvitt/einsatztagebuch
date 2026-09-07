@@ -966,7 +966,7 @@ git commit -m "feat(admin): transition the single active Writer"
 - Consumes: `ea-admin` services (`RegistryWorkflowService`, `RootCeremonyService`, `ClockReleaseService`, `WriterTransitionService`, `operator_exchange`, `revocation`, `production_state`) hinter Wirt-Ports; `ReauthPurpose::{AdminRootCeremony, ClockSkewRelease, RecoveryTest}`; `DevicePostureReport` über den bestehenden Kommando `device_posture_report`.
 - Produces: separated pending/fingerprint/authorization/Root-export/Root-import/publication steps and no Admin content access; a Go-live checklist whose `productionReady` is `true` only when every requirement is `Confirmed`.
 
-- [ ] **Step 1: Write separation and full-fingerprint tests**
+- [x] **Step 1: Write separation and full-fingerprint tests**
 
 ```tsx
 it('does not collapse request fingerprint approval and Root import', async () => {
@@ -979,23 +979,23 @@ it('does not collapse request fingerprint approval and Root import', async () =>
 })
 ```
 
-- [ ] **Step 2: Run Admin UI tests and verify missing UI**
+- [x] **Step 2: Run Admin UI tests and verify missing UI**
 
 Run: `pnpm --dir apps/desktop test --run AdminPage`
 
 Expected: FAIL because Admin commands/components do not exist.
 
-- [ ] **Step 3: Implement guided, explicit ceremonies**
+- [x] **Step 3: Implement guided, explicit ceremonies**
 
 Separate pending request, full fingerprint plus QR/second channel, Admin authorization, offline Root signing/export/import, and resulting Registry publication as a closed step enumeration (`ea-admin::ceremony_steps`) that the host advances one step at a time. Require fresh native re-authentication (`session_reauthenticate` with the exact purpose) before Admin/Root actions and conscious key-source selection. Show two-Admin readiness, key backup state, Registry age/lease, policy profile, Evidence policy, last Recovery test, Writer transition state, and every device-posture requirement as `bestätigt`, `nicht erfüllt`, or `nicht automatisch prüfbar` with its evidence code — the three words are the German rendering of the closed union `GoLiveRequirementStatus` emitted from `ea-admin::go_live`, in the manner of `SyncStatus`. Never render `Unknown` as green or production-ready: `productionReady` is computed in Rust and is `false` whenever any requirement is not `Confirmed`; export unresolved items as the deterministic Go-live evidence checklist (`ea.go-live-checklist/v1`). Device posture reuses `components/integrity/DevicePosturePanel.tsx`, which already keeps pass/fail/unknown apart. When future-clock skew blocks, offer the clock-release wizard only to a verified Admin with `ClockReleaseAvailability::Offered`, display floor/wall clock/signed limit (`max_future_clock_skew_ms`)/expiry, require one of the three allowlisted `ClockReleaseJustificationV1` values plus re-authentication, and state explicitly that the release changes neither time floor, Registry expiry, nor lease — the outcome view carries these three as fields, never as prose alone. Revocation copy renders `RevocationEffect::recalls_issued_grants` and `recalls_decrypted_plaintext` (both always `false`) as the statement that past grants and decrypted data cannot be recalled. Do not show incident content or enable Reader functions from Admin capability: the administration route is enabled by role `organizationadmin` plus capability `administration`, the capture route stays bound to the Writer, and the admin session sees no capture route.
 
-- [ ] **Step 4: Run keyboard, wrong-role, stale-session, and E2E ceremony tests**
+- [x] **Step 4: Run keyboard, wrong-role, stale-session, and E2E ceremony tests**
 
 Run: `pnpm --dir apps/desktop test --run && pnpm --dir apps/desktop exec playwright test tests/e2e/admin-trust.spec.ts`
 
 Expected: PASS; all ceremony steps have headings/statuses, focus restoration, accessible QR alternative, and no role escalation. The Playwright run is a manual witness: `desktop:e2e` is in no automated gate.
 
-- [ ] **Step 5: Commit Administration UI workstream**
+- [x] **Step 5: Commit Administration UI workstream**
 
 ```bash
 git add apps/desktop apps/web/src/bridge crates/ea-admin crates/ea-ui-contracts Cargo.lock pnpm-lock.yaml

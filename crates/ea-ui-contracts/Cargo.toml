@@ -7,6 +7,19 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# `GoLiveRequirementStatus`, `TrustCeremonyKind`, `TrustCeremonyStep`,
+# `WriterTransitionPhase`, `ClockReleaseAvailability` und
+# `RevocationTargetClass` — die sechs geschlossenen Aufzaehlungen der
+# Verwaltungsflaeche (Stufe 5, Task 6). Sie werden RE-EXPORTIERT und nie neu
+# erklaert: `Unknown ist nie gruen` haengt am dritten Arm der
+# Statusaufzaehlung, und eine zweite Deklaration hier koennte ihn verlieren.
+# Eine REINE Typkante: diese Crate ruft keinen Dienst aus `ea-admin` auf,
+# signiert nichts und liest keinen Bestand; sie gibt Variantennamen weiter und
+# kopiert Codes in Ansichtsstrukturen. Das Merkmal `test-support` von
+# `ea-admin` bleibt AUS (es ist dort kein Default-Feature). Die Kante ist
+# einseitig wie die zu `ea-writer`: `ea-admin` steht in `WASM32_EXEMPT_CRATES`,
+# diese Crate ebenso, und kein Weg laeuft zurueck.
+ea-admin.workspace = true
 # `QuarantineReason` — der Grund, aus dem ein Objekt isoliert wurde. Er wird
 # RE-EXPORTIERT und nie neu erklaert: eine zweite Gruendemenge waere genau die
 # Abweichung, die die Driftschranke dieser Crate verhindern soll.

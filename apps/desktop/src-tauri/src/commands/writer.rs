@@ -30,10 +30,12 @@
 //!    [`archive_export_bundle_file`] ruft den Buendelport
 //!    (`crate::state::ArchiveBundleExportPort`) und reicht jede Abweisung mit
 //!    dem Code aus `crates/ea-archive/src/bundle_error.rs` weiter.
-//! 3. **Benannte Abwesenheit.** [`session_reauthenticate`] und
-//!    [`writer_acknowledge_stale_registry`] antworten mit einem stabilen Code.
-//!    Jeder dieser Codes benennt eine Voraussetzung, die in diesem Bauzustand
-//!    nicht aufgeloest ist — und keiner von ihnen ist ein Vorgabewert, der
+//!    [`session_reauthenticate`] ruft seit Stufe 5 (DRK-274) den
+//!    Wiederanmeldeport (`crate::state::ReauthPort`) und setzt die Frischemarke
+//!    der Sitzung; ohne Port bleibt es die benannte Abwesenheit.
+//! 3. **Benannte Abwesenheit.** [`writer_acknowledge_stale_registry`]
+//!    antwortet mit einem stabilen Code — er benennt eine Voraussetzung, die in
+//!    diesem Bauzustand nicht aufgeloest ist, und ist kein Vorgabewert, der
 //!    etwas Gutes behauptet.
 //!
 //! Fail-closed ist die durchgaengige Richtung: eine unbekannte Voraussetzung
@@ -54,8 +56,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     ARCHIVE_HEALTH_UNAVAILABLE, BUNDLE_EXPORT_UNAVAILABLE, CommandError, DISCARD_UNAVAILABLE,
     DRAFT_PAYLOAD_UNREADABLE, DRAFTS_UNAVAILABLE, MASTER_DATA_UNAVAILABLE, MASTER_DATA_UNREADABLE,
-    NO_VERIFIED_SESSION, REAUTH_UNAVAILABLE, SESSION_STATE_UNREADABLE, STALE_ACK_UNAVAILABLE,
-    STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
+    NO_VERIFIED_SESSION, REAUTH_PURPOSE_UNKNOWN, REAUTH_UNAVAILABLE, SESSION_STATE_UNREADABLE,
+    STALE_ACK_UNAVAILABLE, STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
 };
 use crate::state::{ArchiveBundleExportPort, DesktopState, DraftDiscardPort, DraftPayloadPort};
 
@@ -993,6 +995,47 @@ fn finalize_core(
         .map(FinalizeOutcomeDto::from)
 }
 
+/// Der Kern von [`session_reauthenticate`].
+///
+/// Die Reihenfolge ist die Aussage: erst der PORT, dann das Wort. Ohne Port
+/// bleibt die Antwort die benannte Abwesenheit, die die Schale seit Stufe 2
+/// kennt — die Naht fehlt, nicht das Wort. Mit Port ist ein fremdes Wort ein
+/// Fehler und kein Vorgabewert: der Zweck geht in die signierte Challenge ein,
+/// und ein geratener Zweck waere ein geratener Nachweis.
+///
+/// Die Marke der Sitzung wird VOR dem Aufruf geloescht und erst nach dem `Ok`
+/// des Ports gesetzt: eine fehlgeschlagene Praesenz ist keine frische, und sie
+/// laesst auch keine aeltere stehen.
+pub(crate) fn session_reauthenticate_core(
+    state: &DesktopState,
+    purpose: &str,
+) -> Result<ReauthResultDto, CommandError> {
+    let port = state
+        .reauth_port()
+        .ok_or_else(|| CommandError::new(REAUTH_UNAVAILABLE))?;
+    let purpose = ea_operator::ReauthPurpose::ALL
+        .into_iter()
+        .find(|candidate| candidate.label() == purpose)
+        .ok_or_else(|| CommandError::new(REAUTH_PURPOSE_UNKNOWN))?;
+    // Jeder Versuch loescht die alte Marke — auch fuer einen anderen Zweck: es
+    // gibt genau eine frischeste Praesenz, und die wird gleich neu erbracht.
+    state
+        .session()
+        .lock()
+        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
+        .clear_fresh_reauth();
+    port.reauthenticate(purpose)?;
+    state
+        .session()
+        .lock()
+        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
+        .record_fresh_reauth(purpose);
+    Ok(ReauthResultDto {
+        fresh: true,
+        purpose_code: purpose.label().to_owned(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Die Kommandos. Jeder Rumpf ist `pub async fn` und schickt seinen synchronen
 // Kern ueber `run_blocking`.
@@ -1000,19 +1043,25 @@ fn finalize_core(
 
 /// Eine erneute native Authentisierung fuer GENAU einen Zweck.
 ///
+/// Der Zweck kommt als `ReauthPurpose::label()` ueber den Draht
+/// (`admin-root-ceremony`, `clock-skew-release`, `recovery-test`, …) und geht
+/// so auch zurueck: dasselbe Wort, das in die signierte Challenge eingeht.
+///
 /// # Errors
 ///
-/// [`REAUTH_UNAVAILABLE`]: eine Wiederanmeldung verlangt einen `BoundOperator`
-/// aus einer aufgeloesten Root-signierten Bindung und einen Anbieter nativer
-/// Praesenz. Beides ist auf diesem Geraet nicht aufgeloest, und ein
-/// Vorgabewert waere hier ein erfundener Nachweis.
+/// [`REAUTH_UNAVAILABLE`], solange kein `crate::state::ReauthPort` verdrahtet
+/// ist — eine Wiederanmeldung verlangt einen `BoundOperator` aus einer
+/// aufgeloesten Root-signierten Bindung und einen Anbieter nativer Praesenz,
+/// und ein Vorgabewert waere ein erfundener Nachweis.
+/// [`REAUTH_PURPOSE_UNKNOWN`] fuer ein fremdes Wort; der Code des Ports
+/// (`EA-OPERATOR-*`), wenn die Praesenz nicht belegt wurde.
 #[tauri::command]
-pub async fn session_reauthenticate(purpose: String) -> Result<ReauthResultDto, CommandError> {
-    run_blocking(move || {
-        let _ = purpose;
-        Err(CommandError::new(REAUTH_UNAVAILABLE))
-    })
-    .await
+pub async fn session_reauthenticate(
+    state: tauri::State<'_, DesktopState>,
+    purpose: String,
+) -> Result<ReauthResultDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || session_reauthenticate_core(&state, &purpose)).await
 }
 
 /// Die Stammdatensuche.
@@ -1240,7 +1289,8 @@ mod tests {
         BundleExportView, DraftError, RestartState, bundle_export_core, bundle_export_of,
         discard_begin_core, discard_begin_of, discard_resume_core, discard_resume_of, discard_view,
     };
-    use crate::commands::NO_VERIFIED_SESSION;
+    use super::{REAUTH_UNAVAILABLE, session_reauthenticate_core};
+    use crate::commands::{NO_VERIFIED_SESSION, REAUTH_PURPOSE_UNKNOWN};
     use crate::state::{
         ArchiveBundleExportPort, ArchiveHealthPort, DraftDiscardPort, SessionState,
         StartupRecoveryPort,
@@ -1248,6 +1298,129 @@ mod tests {
 
     fn bare_state() -> DesktopState {
         DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+    }
+
+    /// Ein Doppel der Wiederanmeldung, das AUFSCHREIBT, fuer welchen Zweck es
+    /// gefragt wurde, und nach Vorgabe antwortet.
+    struct RecordingReauth {
+        asked: std::sync::Mutex<Vec<ea_operator::ReauthPurpose>>,
+        answer: Result<(), CommandError>,
+    }
+
+    impl RecordingReauth {
+        fn answering(answer: Result<(), CommandError>) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                asked: std::sync::Mutex::new(Vec::new()),
+                answer,
+            })
+        }
+
+        fn asked(&self) -> Vec<ea_operator::ReauthPurpose> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::state::ReauthPort for RecordingReauth {
+        fn reauthenticate(&self, purpose: ea_operator::ReauthPurpose) -> Result<(), CommandError> {
+            self.asked.lock().unwrap().push(purpose);
+            self.answer
+        }
+    }
+
+    /// Ohne Port bleibt die Wiederanmeldung die benannte Abwesenheit — auch
+    /// fuer einen fremden Zweck: die Naht fehlt, nicht das Wort.
+    #[test]
+    fn a_reauth_without_a_port_stays_a_named_absence() {
+        let state = bare_state();
+        for purpose in ["admin-root-ceremony", "finalize", "discard", ""] {
+            assert_eq!(
+                session_reauthenticate_core(&state, purpose)
+                    .unwrap_err()
+                    .code,
+                REAUTH_UNAVAILABLE,
+                "{purpose:?}"
+            );
+        }
+        assert_eq!(state.session().lock().unwrap().fresh_reauth(), None);
+    }
+
+    /// Mit Port ist ein fremdes Wort ein benannter Fehler, und der Port wird
+    /// nicht gerufen: der Zweck geht in die signierte Challenge ein, ein
+    /// geratener Zweck waere ein geratener Nachweis.
+    #[test]
+    fn an_unknown_purpose_never_reaches_the_reauth_port() {
+        let port = RecordingReauth::answering(Ok(()));
+        let state = bare_state().with_reauth(port.clone());
+        for purpose in [
+            "discard",
+            "stale-ack",
+            "AdminRootCeremony",
+            "",
+            "admin-root-ceremony ",
+        ] {
+            assert_eq!(
+                session_reauthenticate_core(&state, purpose)
+                    .unwrap_err()
+                    .code,
+                REAUTH_PURPOSE_UNKNOWN,
+                "{purpose:?}"
+            );
+        }
+        assert!(port.asked().is_empty());
+        assert_eq!(state.session().lock().unwrap().fresh_reauth(), None);
+    }
+
+    /// Jeder der zehn Zwecke geht unter seinem `label()` ueber den Draht, kommt
+    /// als derselbe zurueck und setzt die Frischemarke der Sitzung.
+    #[test]
+    fn every_purpose_label_is_the_wire_form_and_records_the_marker() {
+        let port = RecordingReauth::answering(Ok(()));
+        let state = bare_state().with_reauth(port.clone());
+        for purpose in ea_operator::ReauthPurpose::ALL {
+            let result = session_reauthenticate_core(&state, purpose.label()).unwrap();
+            assert!(result.fresh);
+            assert_eq!(result.purpose_code, purpose.label());
+            assert_eq!(
+                state.session().lock().unwrap().fresh_reauth(),
+                Some(purpose)
+            );
+        }
+        assert_eq!(port.asked(), ea_operator::ReauthPurpose::ALL);
+        assert_eq!(
+            ea_operator::ReauthPurpose::AdminRootCeremony.label(),
+            "admin-root-ceremony"
+        );
+        assert_eq!(
+            ea_operator::ReauthPurpose::ClockSkewRelease.label(),
+            "clock-skew-release"
+        );
+        assert_eq!(
+            ea_operator::ReauthPurpose::RecoveryTest.label(),
+            "recovery-test"
+        );
+    }
+
+    /// Eine ABGEWIESENE Wiederanmeldung traegt den Code des Ports und setzt
+    /// keine Marke — und nimmt eine bestehende Marke mit: eine fehlgeschlagene
+    /// Praesenz ist keine frische.
+    #[test]
+    fn a_refused_reauth_carries_the_port_code_and_leaves_no_marker() {
+        let port = RecordingReauth::answering(Err(CommandError::new(
+            "EA-OPERATOR-PRESENCE-PROOF-INVALID",
+        )));
+        let state = bare_state().with_reauth(port.clone());
+        state
+            .session()
+            .lock()
+            .unwrap()
+            .record_fresh_reauth(ea_operator::ReauthPurpose::ClockSkewRelease);
+        assert_eq!(
+            session_reauthenticate_core(&state, "admin-root-ceremony")
+                .unwrap_err()
+                .code,
+            "EA-OPERATOR-PRESENCE-PROOF-INVALID"
+        );
+        assert_eq!(state.session().lock().unwrap().fresh_reauth(), None);
     }
 
     struct FixedStartup(Result<RecoveryOutcome, WriterError>);
