@@ -651,6 +651,15 @@ impl<'a> WriterTransitionService<'a> {
     ///    — das, was die Wurzel unterschrieben hat —, nicht eine Auswahl
     ///    von Feldern. Ein `writerTransition` mit denselben Feldern unter
     ///    einer anderen Autorisierung ist ein anderes Objekt.
+    ///    NICHT geprueft wird hier die Root-Signatur der Bytes:
+    ///    [`ea_format::decode_exact_object`] parst nur, und das geplante
+    ///    Ereignis ist selbst noch unsigniert. Autoritaet entsteht erst, wenn
+    ///    Root das Change-3-Ereignis signiert und der Kern beim Nachspielen
+    ///    BEIDE Objekte prueft (`crates/ea-trust/src/admission.rs`). Ein
+    ///    Objekt mit passender Nutzlast und fremder Signatur kommt also bis
+    ///    zum geplanten Ereignis und faellt am Kopfuebergang — die Zusage
+    ///    „kein Ereignis planen, das der Kern abweist" gilt fuer die Nutzlast,
+    ///    nicht fuer die Signatur.
     /// 3. Das Fenster beginnt an `effective_from_sequence`. Der Kern
     ///    verlangt es ohnehin; der Admin plant kein Ereignis, das er abweisen
     ///    sieht.

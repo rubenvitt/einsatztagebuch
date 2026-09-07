@@ -1,12 +1,25 @@
 //! Das Verwaltungskommando `writer-transition prepare|activate`.
 //!
-//! # Zwei Messebenen, wie in `registry_workflows.rs`
+//! # Drei Messebenen, wie in `registry_workflows.rs` und `operator.rs`
 //!
 //! Gegen das GEBAUTE Binary wird gemessen, was den Prozess verlaesst:
 //! Grammatikzeile, Exitcode, welcher Strom, welcher Code. Gegen die per
 //! `#[path]` eingebundenen Einheiten [`args`] und [`output`] wird gemessen,
 //! WELCHE Zuordnung der Parser trifft und WELCHE ZEILEN entstehen — ohne
-//! Prozessstart und ohne Bestand.
+//! Prozessstart und ohne Bestand. Gegen das ebenso eingebundene Kommando
+//! [`writer_transition_command`] werden seine REINEN Schritte gemessen —
+//! Fensterbau, Sicht der Vorbereitung, Exitcodezuordnung — mit einer ECHTEN
+//! Vorbereitung ueber einem ECHTEN gewaehlten Kopf: die Linie kommt aus dem
+//! Support von `ea-trust`, der Kopf aus `ea_trust::select_registry_head`, die
+//! Vorbereitung aus `ea_admin::WriterTransitionService::prepare`.
+//!
+//! Die Sicht der Aktivierung (`activate_view`) bleibt hier UNGEMESSEN: ein
+//! `ActivatedWriterTransition` entsteht nur in
+//! `WriterTransitionService::activate`, und das braucht eine Ereignisfabrik
+//! ueber `ea_audit::LocalAuditService` — ein Port, den dieses Paket nicht
+//! kennt (weder `ea-audit` noch das `ea-admin`-Supportmodul, das ihn
+//! bedient, sind Abhaengigkeiten). Gemessen wird sie in
+//! `crates/ea-admin/tests/writer_transition.rs` an der Quelle.
 //!
 //! # Was hier NICHT gemessen wird — und warum
 //!
@@ -32,6 +45,14 @@ mod args;
 #[allow(dead_code)]
 #[path = "../src/output.rs"]
 mod output;
+/// Die Registrierungslinie von `ea-trust`, unveraendert weiterverwendet —
+/// derselbe Weg, den `crates/ea-admin/tests/support/mod.rs` geht. Das Modul
+/// traegt sein `allow(dead_code)` selbst.
+#[path = "../../../crates/ea-trust/tests/support/mod.rs"]
+mod trust_support;
+#[allow(dead_code)]
+#[path = "../src/commands/writer_transition.rs"]
+mod writer_transition_command;
 
 use std::{
     ffi::OsString,
@@ -39,6 +60,22 @@ use std::{
     process::{Command as Process, Output},
 };
 
+use ea_admin::{
+    registry::{RegistryActionV1, RegistryWorkflowError},
+    writer_transition::{
+        PreparedWriterTransition, TrustedChainHead, WriterTransitionError, WriterTransitionRequest,
+        WriterTransitionRequestError, WriterTransitionService,
+    },
+};
+use ea_format::{CertificateKindV1, FormatError, RegistryChangeV1};
+use ea_recovery::ExitCode;
+use ea_time::TrustedTimeState;
+use ea_trust::{
+    ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin,
+    RegistrySelectionCommit, RegistrySelectionOutcome, SelectedRegistryHead, StateStoreError,
+    TrustStateKey, TrustStateStore, prepare_local_time, select_registry_head,
+    verify_registry_candidate,
+};
 use ea_types::{
     CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, OrganizationId,
     RegistryVersion, UnixMillis,
@@ -51,6 +88,8 @@ use args::{
     WRITER_TRANSITION_PREPARE_SUBCOMMAND, parse,
 };
 use output::{WriterTransitionActivateView, WriterTransitionPrepareView};
+use trust_support::{ActionSpec, HeadOptions, Pin, RegistryLineBuilder};
+use writer_transition_command::{activation_window, exit_code_for, exit_code_for_request};
 
 /// Die beiden Grammatikzeilen, wie das Werkzeug sie druckt.
 const PREPARE_GRAMMAR_LINE: &str = "einsatzarchiv --trust-anchor <file> writer-transition prepare \
@@ -183,6 +222,188 @@ fn write_request(directory: &std::path::Path, with_authorization: bool) -> PathB
 
 fn path_str(path: &std::path::Path) -> &str {
     path.to_str().expect("Testpfad ist UTF-8")
+}
+
+// ---------------------------------------------------------------------------
+// Ein ECHTER gewaehlter Kopf und eine ECHTE Vorbereitung
+// ---------------------------------------------------------------------------
+
+/// Die Zeitgrenze der Koepfe und die Betriebssystemuhr der Kopfauswahl —
+/// dieselben Werte wie `FIXTURE_NOT_AFTER_MS` und `FIXTURE_NOW_MS` in
+/// `crates/ea-admin/tests/support/mod.rs`.
+const LINE_NOT_AFTER_MS: i64 = 10_000_000;
+const LINE_NOW_MS: i64 = 1_000;
+
+/// Der Index des Kopfes, der den neuen Writer freigibt und an dem der alte
+/// noch laeuft; die Sequenz, an der er gewaehlt wird; der abgeglichene
+/// Kettenkopf des Antrags an der Obergrenze seines Lease.
+const LINE_LAST_HEAD: usize = 2;
+const LINE_PROPOSED_SEQUENCE: u64 = 90;
+const LINE_TRUSTED_SEQUENCE: u64 = 100;
+
+/// Der Speicher der Kopfauswahl — dieselbe Bauart wie `ModelStore` in
+/// `crates/ea-admin/tests/support/mod.rs`: er fuehrt genau den Stand, den
+/// `select_registry_head` liest und fortschreibt, und sonst nichts.
+struct HeadSelectionStore {
+    key: TrustStateKey,
+    revision: u64,
+    trusted_time: TrustedTimeState,
+    pinned_head: RegistryHeadPin,
+}
+
+impl TrustStateStore for HeadSelectionStore {
+    fn load(&mut self, key: TrustStateKey) -> Result<PersistedTrustRecord, StateStoreError> {
+        if key != self.key {
+            return Err(StateStoreError::Conflict);
+        }
+        Ok(PersistedTrustRecord::new(
+            self.revision,
+            self.trusted_time.clone(),
+            Some(self.pinned_head),
+        ))
+    }
+
+    fn commit_independent_time(
+        &mut self,
+        _key: TrustStateKey,
+        _expected_revision: u64,
+        _commit: &IndependentTimeCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        Err(StateStoreError::Unavailable)
+    }
+
+    fn clock_release_consumed(
+        &mut self,
+        _key: &ClockReleaseReplayKey,
+    ) -> Result<bool, StateStoreError> {
+        Ok(false)
+    }
+
+    fn commit_registry_selection(
+        &mut self,
+        key: TrustStateKey,
+        expected_revision: u64,
+        commit: &RegistrySelectionCommit,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        if key != self.key || expected_revision != self.revision {
+            return Err(StateStoreError::Conflict);
+        }
+        self.revision += 1;
+        self.trusted_time = commit.next_trusted_time().clone();
+        self.pinned_head = *commit.next_head();
+        Ok(PersistedTrustRecord::new(
+            self.revision,
+            self.trusted_time.clone(),
+            Some(self.pinned_head),
+        ))
+    }
+}
+
+fn head_options(effective_from: u64, valid_through: u64) -> HeadOptions {
+    HeadOptions {
+        effective_from: Some(effective_from),
+        valid_through: Some(valid_through),
+        not_after: UnixMillis::new(LINE_NOT_AFTER_MS),
+        ..HeadOptions::default()
+    }
+}
+
+/// Waehlt den Kopf `head_index` der Linie an `proposed_sequence` — ueber
+/// `ea_trust::select_registry_head`, wie `selected_head_at` in
+/// `crates/ea-admin/tests/support/mod.rs`.
+fn selected_head_at(
+    line: &RegistryLineBuilder,
+    head_index: usize,
+    proposed_sequence: u64,
+) -> SelectedRegistryHead {
+    let head = line.heads()[head_index];
+    let key = trust_support::state_key();
+    let trusted_time = TrustedTimeState::initial(UnixMillis::new(LINE_NOW_MS));
+    let trust = line.verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
+    let candidate = verify_registry_candidate(&trust, ChainSequence::new(proposed_sequence))
+        .expect("der Kandidat der Linie muss verifizieren");
+    let mut store = HeadSelectionStore {
+        key,
+        revision: 17,
+        trusted_time,
+        pinned_head: RegistryHeadPin::new(head.version, head.object_hash),
+    };
+    let local_time = prepare_local_time(&mut store, &candidate, UnixMillis::new(LINE_NOW_MS), &[])
+        .expect("die lokale Zeit der Linie muss vorbereitbar sein");
+    let RegistrySelectionOutcome::Selected(selected) =
+        select_registry_head(candidate, local_time, None)
+            .expect("die Auswahl der Linie muss gelingen")
+    else {
+        panic!("die Linie muss ihren eigenen aktuellen Kopf waehlen");
+    };
+    selected
+}
+
+/// Die Kulisse: eine Linie mit Policy `[1, 10]`, altem Writer `[11, 20]` und
+/// neuem Writer `[21, 100]`, der gewaehlte Kopf an 90 und der Antrag, den
+/// der Dienst annimmt. Der erste freigegebene Writer ist der laufende
+/// (`ea-trust`, `apply_effect`); der zweite ist freigegeben, aber nicht der
+/// laufende — genau die Lage vor einem Uebergang.
+struct Scene {
+    head: SelectedRegistryHead,
+    request: WriterTransitionRequest,
+}
+
+impl Scene {
+    fn new() -> Self {
+        let mut line = RegistryLineBuilder::new();
+        line.push(
+            ActionSpec::Policy {
+                policy_version: None,
+                previous_policy_hash: None,
+                effective_from: None,
+            },
+            head_options(1, 10),
+        );
+        let old_writer = line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::Writer,
+                marker: 0x61,
+                effective_from: None,
+            },
+            head_options(11, 20),
+        );
+        let new_writer = line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::Writer,
+                marker: 0x62,
+                effective_from: None,
+            },
+            head_options(21, LINE_TRUSTED_SEQUENCE),
+        );
+        let certificate = |head: &trust_support::BuiltHead| {
+            CertificateHash::from(
+                head.direct_object_hash
+                    .expect("ein Writer-Zertifikat ist ein direktes Ziel"),
+            )
+        };
+        let head = selected_head_at(&line, LINE_LAST_HEAD, LINE_PROPOSED_SEQUENCE);
+        let request = WriterTransitionRequest {
+            old_writer_certificate_hash: certificate(&old_writer),
+            new_writer_certificate_hash: certificate(&new_writer),
+            trusted_head: TrustedChainHead {
+                chain_sequence: ChainSequence::new(LINE_TRUSTED_SEQUENCE),
+                entry_hash: EntryHash::from(hash32(0x77)),
+            },
+            reason_code: 7,
+        };
+        assert!(
+            head.current_writer_certificate_hash() == Some(request.old_writer_certificate_hash),
+            "vor dem Uebergang laeuft der alte Writer"
+        );
+        Self { head, request }
+    }
+
+    fn prepared(&self) -> PreparedWriterTransition {
+        WriterTransitionService::new(&self.head)
+            .prepare(&self.request, ObjectHash::from(hash32(0x66)))
+            .expect("der Uebergang vom laufenden auf den freigegebenen Writer ist vorbereitbar")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -643,14 +864,154 @@ fn the_activate_json_carries_the_same_closed_fields() {
     );
 }
 
-/// Die Aenderung ist die 3 — als Zusage der Bauart und nicht als Rechnung.
+/// Die Aenderung ist die des Ereignisses, das `activate` plant: Aktionscode
+/// und Aenderung von `RegistryActionV1::WriterTransition` — gemessen an der
+/// Produktion, nicht an einer zweiten Zahl.
 #[test]
-fn the_registry_change_of_a_writer_transition_is_three() {
-    assert_eq!(output::WRITER_TRANSITION_REGISTRY_CHANGE_V1, 3);
+fn the_registry_change_of_a_writer_transition_is_the_planned_action() {
+    let transition_object_hash = ObjectHash::from(hash32(0x55));
+    let action = RegistryActionV1::WriterTransition {
+        transition_object_hash,
+    };
+    assert_eq!(
+        output::WRITER_TRANSITION_REGISTRY_CHANGE_V1,
+        action.action_code()
+    );
+    assert!(
+        matches!(
+            action.change(),
+            RegistryChangeV1::WriterTransition { object_hash } if object_hash == transition_object_hash
+        ),
+        "die Aenderung der Aktion ist der writerTransition-Zweig"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// 3. Der Prozess
+// 3. Die reinen Schritte des Kommandos — gegen echte Werte
+// ---------------------------------------------------------------------------
+
+/// Das Fenster beginnt an der Wirksamkeitssequenz der VORBEREITUNG — dem
+/// abgeglichenen Kettenkopf plus eins — und NICHT am Kettenkopf selbst; die
+/// beiden Schalter gehen unveraendert hindurch.
+#[test]
+fn the_activation_window_starts_at_the_prepared_effective_sequence() {
+    let scene = Scene::new();
+    let prepared = scene.prepared();
+    let window = activation_window(
+        &prepared,
+        ChainSequence::new(200),
+        UnixMillis::new(1_700_000_000_000),
+    );
+    assert_eq!(
+        window.effective_from_sequence,
+        prepared.effective_from_sequence()
+    );
+    assert_eq!(
+        window.effective_from_sequence,
+        ChainSequence::new(LINE_TRUSTED_SEQUENCE + 1)
+    );
+    assert_ne!(
+        window.effective_from_sequence, scene.request.trusted_head.chain_sequence,
+        "der Kettenkopf des Antrags ist NICHT die Wirksamkeitssequenz"
+    );
+    assert_eq!(window.valid_through_sequence, ChainSequence::new(200));
+    assert_eq!(window.not_after, UnixMillis::new(1_700_000_000_000));
+}
+
+/// Die Sicht der Vorbereitung liest alten und neuen Writer in der Reihenfolge
+/// des Antrags, den Kettenkopf vom Antrag, die Wirksamkeitssequenz von der
+/// Vorbereitung, Version und Hash vom Kopf — und die Autorisierung so, wie
+/// sie hereinkam, `None` wie `Some`.
+#[test]
+fn the_prepare_view_reads_old_and_new_from_the_request_in_order() {
+    let scene = Scene::new();
+    let prepared = scene.prepared();
+    let request = &scene.request;
+    assert!(
+        request.old_writer_certificate_hash != request.new_writer_certificate_hash,
+        "die Kulisse: zwei verschiedene Writer, damit eine Vertauschung auffaellt"
+    );
+    for authorization in [None, Some(ObjectHash::from(hash32(0x66)))] {
+        let view = writer_transition_command::prepare_view(
+            &prepared,
+            request,
+            scene.head.registry_version(),
+            scene.head.registry_head_hash(),
+            authorization,
+        );
+        assert!(view.old_writer_certificate_hash == request.old_writer_certificate_hash);
+        assert!(view.new_writer_certificate_hash == request.new_writer_certificate_hash);
+        assert!(view.organization_id == prepared.fields().organization_id);
+        assert!(view.chain_id == prepared.fields().chain_id);
+        assert_eq!(
+            view.trusted_head_chain_sequence,
+            request.trusted_head.chain_sequence
+        );
+        assert!(view.trusted_head_entry_hash == request.trusted_head.entry_hash);
+        assert_eq!(
+            view.effective_from_sequence,
+            prepared.effective_from_sequence()
+        );
+        assert_eq!(view.reason_code, request.reason_code);
+        assert_eq!(view.registry_version, scene.head.registry_version());
+        assert!(view.registry_head_hash == scene.head.registry_head_hash());
+        assert!(view.admin_authorization_object_hash == authorization);
+    }
+}
+
+/// Jeder Befund des Uebergangs faellt auf SEINEN Code: die Formhaelfte —
+/// eigen oder durchgereicht — auf 10, alles uebrige auf 12; ein Antrag, der
+/// nicht zu lesen ist, auf 20, einer ohne Form auf 2.
+#[test]
+fn every_writer_transition_finding_maps_to_its_exit_code() {
+    for (error, expected) in [
+        (WriterTransitionError::OldWriterNotCurrent, ExitCode::Trust),
+        (WriterTransitionError::NewWriterNotApproved, ExitCode::Trust),
+        (WriterTransitionError::SameWriter, ExitCode::Trust),
+        (WriterTransitionError::SequenceOverflow, ExitCode::Trust),
+        (
+            WriterTransitionError::TransitionObjectMismatch,
+            ExitCode::Trust,
+        ),
+        (WriterTransitionError::WindowMismatch, ExitCode::Trust),
+        (
+            WriterTransitionError::Registry(RegistryWorkflowError::TargetNotActive),
+            ExitCode::Trust,
+        ),
+        (
+            WriterTransitionError::Format(FormatError::Shape),
+            ExitCode::Integrity,
+        ),
+        (
+            WriterTransitionError::Registry(RegistryWorkflowError::Format(FormatError::Shape)),
+            ExitCode::Integrity,
+        ),
+    ] {
+        assert_eq!(
+            exit_code_for(&error),
+            expected,
+            "{} muss auf {} fallen",
+            error.code(),
+            expected as i32
+        );
+        assert_ne!(exit_code_for(&error), ExitCode::Success);
+    }
+    assert_eq!(
+        exit_code_for_request(&WriterTransitionRequestError::Unreadable),
+        ExitCode::Io
+    );
+    assert_eq!(
+        exit_code_for_request(&WriterTransitionRequestError::Shape),
+        ExitCode::Usage
+    );
+    assert_eq!(ExitCode::Io as i32, 20);
+    assert_eq!(ExitCode::Usage as i32, 2);
+    assert_eq!(ExitCode::Integrity as i32, 10);
+    assert_eq!(ExitCode::Trust as i32, 12);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Der Prozess
 // ---------------------------------------------------------------------------
 
 /// Die Grammatik fuehrt beide Unterkommandos WOERTLICH.

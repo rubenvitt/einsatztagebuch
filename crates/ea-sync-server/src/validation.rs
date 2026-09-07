@@ -92,6 +92,12 @@ pub enum CommitValidationError {
     /// (`design.md` §13.3, letzter Absatz), und er bekommt einen EIGENEN Code:
     /// die Absage muss ihm sagen, dass sein Zertifikat abgeloest ist, nicht
     /// dass es fremd waere.
+    ///
+    /// Benannt wird der Writer, den der WIRKSAME Uebergang des gewaehlten
+    /// Kopfes abgeloest hat. Ein Writer, der durch einen FRUEHEREN Change 3
+    /// abgeloest wurde (A nach A->B->C), steht in der aktiven Menge ebenso
+    /// wenig und bleibt [`Self::WriterUnauthorized`] — dieselbe 409-Zeile,
+    /// dasselbe Security Event; der Port gibt nur den letzten Uebergang heraus.
     WriterRevoked,
     /// Die Schreibersignatur traegt nicht.
     WriterSignature,
@@ -417,19 +423,27 @@ pub fn parse_entry(bytes: &[u8]) -> Result<Parsed<EntryPackageV1>, CommitValidat
 /// Writer-Zertifikat gegenueber dem direkten Vorgaenger aendert") und die
 /// Regel sie nicht dem Kopf ueberlassen soll.
 ///
-/// Der Vorgaenger wird dafuer NICHT gelesen. Der wirksame Uebergang bindet
-/// den vertrauten Kopf selbst: `ea-trust` hat beim Nachspielen des Change 3
-/// geprueft, dass `effective_from_sequence` die naechste Sequenz nach dem
-/// letzten Eintrag des alten Writers ist und `previous_entry_hash` dessen
-/// Hash (`validate_writer_transition_target`,
-/// `crates/ea-trust/src/registry.rs`). Ein Manifest, das an
-/// `effective_from_sequence` diesen Vorgaenger, diesen Objekthash und den
-/// neuen Writer des Uebergangs nennt, bindet damit dieselbe Aussage — jede
-/// andere Kombination ist ein Widerspruch zum Kopf, und ein Widerspruch zum
-/// Vorgaenger braucht keinen zweiten Leser. An jeder anderen Sequenz aendert
-/// sich der Writer gegenueber dem Vorgaenger nicht: der alte Writer ist ab
-/// `effective_from_sequence` widerrufen (oben), der neue schreibt nach seinem
-/// ersten Eintrag ohne Hash weiter.
+/// Der Vorgaenger wird dafuer NICHT gelesen — und `ea-trust` kennt die Kette
+/// nicht: `validate_writer_transition_target`
+/// (`crates/ea-trust/src/registry.rs`) prueft Organisation, Kette,
+/// Zertifikatsart, Bereichsaktivitaet und den laufenden Writer, nie den
+/// `previous_entry_hash`. Die Bindung an die Kette entsteht an drei anderen
+/// Stellen: der Admin traegt Sequenz+1 und Eintragshash des VERTRAUTEN
+/// externen Kopfes in das Objekt ein, und Root signiert sie
+/// (`WriterTransitionService::prepare` in `ea-admin`); der neue Writer weist
+/// einen Uebergang ab, dessen `previous_entry_hash` nicht sein lokal
+/// verifizierter Kopf ist (`EA-WRITER-HEAD-RECONCILIATION-REQUIRED`); und
+/// dieser Server verlangt HIER, dass das Manifest genau diesen Vorgaenger
+/// nennt, und prueft erst danach in `commit.rs` (`EA-COMMIT-PREDECESSOR`,
+/// `EA-COMMIT-SEQUENCE-FORK`), dass Vorgaenger und Sequenz der tatsaechliche
+/// Kettenkopf plus eins sind. Ein Uebergang, dessen Root-signierter
+/// Vorgaenger nicht der Serverkopf ist, laesst an `effective_from_sequence`
+/// deshalb KEINEN Eintrag zu — weder den mit dem Vorgaenger des Uebergangs
+/// (Predecessor-Mismatch) noch den mit dem echten Vorgaenger
+/// (Transition-Mismatch) —, bis ein weiterer Change 3 ihn ersetzt. An jeder
+/// anderen Sequenz aendert sich der Writer gegenueber dem Vorgaenger nicht:
+/// der alte Writer ist ab `effective_from_sequence` widerrufen (oben), der
+/// neue schreibt nach seinem ersten Eintrag ohne Hash weiter.
 fn verify_writer_transition_hash(
     manifest: &ea_format::ManifestCoreFieldsV1,
     transition: Option<ea_trust::EffectiveWriterTransitionV1>,
