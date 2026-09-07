@@ -20,6 +20,14 @@
 //! vererbt wird und ein echofreier Terminalprompt eine weitere Kiste
 //! (`termios`) braeuchte.
 //!
+//! # AUSSTELLEN IST KEIN KOMMANDO DIESES TASKS
+//!
+//! [`EncryptedKeyContainer::seal`] und [`EncryptedKeyContainer::write_new`]
+//! sind Bibliotheksfunktionen, die die Zeugen nutzen; ein ausstellendes
+//! Kommando steht nicht in §16.1 und kommt mit der Zeremonie, die den
+//! jeweiligen Schluessel erzeugt (Root, Recovery, HGA) — nicht mit einem
+//! Klartext-Exportpfad.
+//!
 //! # DIE FELDGRAMMATIK
 //!
 //! Hinter dem Praefix trennen `;` die Felder. Bei `container:` steht der Pfad
@@ -50,6 +58,7 @@ use std::{
 };
 
 use ea_crypto::{CoseSigner, HpkeRecipientPrivateKey, SecretBytes, SecretVec};
+use zeroize::Zeroize as _;
 
 use crate::{
     ExitCode, RecoveryError,
@@ -95,6 +104,15 @@ const CONTAINER_PREFIX: &str = "container:";
 const PKCS11_PREFIX: &str = "pkcs11:";
 /// Das Trennzeichen zwischen zwei Feldern.
 const FIELD_SEPARATOR: char = ';';
+
+/// Die Obergrenze einer Passphrasen- oder PIN-Datei in Bytes, das Zeilenende
+/// eingeschlossen.
+///
+/// Eine Passphrase ist eine Zeile, keine Datei. Was darueber liegt, ist eine
+/// falsch benannte Datei — ein Aufruffehler, [`RecoveryError::KeySource`] —
+/// und wird nicht erst vollstaendig in den Speicher geholt, um das
+/// festzustellen. Dasselbe Muster wie die 1 KiB des Containers.
+pub const MAX_SECRET_FILE_BYTES_V1: usize = 4096;
 
 impl KeySourceSpec {
     /// Parst GENAU EINEN argv-Wert. Rein: liest keine Datei und beruehrt kein
@@ -157,8 +175,15 @@ fn parse_pkcs11(rest: &str) -> Result<KeySourceSpec, KeySourceSpecError> {
     const PIN_FILE: &str = "pin-file=";
 
     let mut fields = NamedFields::new(SOURCE, &[MODULE, TOKEN, ID, PIN_FILE]);
-    for segment in rest.split(FIELD_SEPARATOR) {
-        fields.take(segment)?;
+    // `pkcs11:` ohne ein einziges Glied ist kein „Glied ohne `=`", sondern
+    // eine Referenz, der ALLES fehlt — und die Pflichtpruefung unten nennt
+    // dann das erste Feld der dokumentierten Reihenfolge. Nur der voellig
+    // leere Rest wird so gelesen; ein leeres Glied ZWISCHEN Semikola bleibt
+    // ein Grammatikfehler.
+    if !rest.is_empty() {
+        for segment in rest.split(FIELD_SEPARATOR) {
+            fields.take(segment)?;
+        }
     }
     // Die Pflichtpruefung laeuft in der DOKUMENTIERTEN Reihenfolge, damit ein
     // Aufruf, dem mehrere Felder fehlen, immer dasselbe zuerst benannt
@@ -204,11 +229,20 @@ impl<'a> NamedFields<'a> {
         };
         let (name, value) = segment.split_at(equals + 1);
         let Some(field) = self.known.iter().copied().find(|known| *known == name) else {
-            // Der NAME wird genannt, nie der Wert: der Name ist Grammatik, die
-            // der Aufrufer selbst getippt hat; der Wert kann ein Pfad sein.
+            // Der NAME wird genannt, nie der Wert — aber nur, wenn er auch
+            // ein Name IST. Ein Pfad, der selbst ein `=` traegt
+            // (`/media/recovery=1/pass.txt`), wuerde sonst bis zum ersten
+            // `=` als „Feldname" zurueckgespiegelt; er ist ein Glied ohne
+            // Grammatik.
+            let typed = name.trim_end_matches('=');
+            if !is_field_name(typed) {
+                return Err(KeySourceSpecError::MalformedField {
+                    source: self.source,
+                });
+            }
             return Err(KeySourceSpecError::UnknownField {
                 source: self.source,
-                field: name.trim_end_matches('=').to_owned(),
+                field: typed.to_owned(),
             });
         };
         if self.values.iter().any(|(seen, _)| *seen == field) {
@@ -238,6 +272,18 @@ impl<'a> NamedFields<'a> {
                 field,
             })
     }
+}
+
+/// `[a-z][a-z0-9-]*` — die Form, die jeder bekannte Feldname hat.
+///
+/// Nur ein Glied dieser Form wird als unbekanntes FELD genannt. Alles andere
+/// vor einem `=` — ein Pfad, ein Schraegstrich, ein Grossbuchstabe — ist kein
+/// Name, den der Aufrufer als Grammatik getippt hat, und wird nicht
+/// zurueckgespiegelt.
+fn is_field_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || char == '-')
 }
 
 /// Die Quellart, in deren Grammatik ein Fehler liegt.
@@ -271,7 +317,9 @@ impl fmt::Display for KeySourceKind {
 /// Die Anzeige benennt das betroffene Feld WOERTLICH und nennt nie einen
 /// Wert: Werte sind Pfade eines Recovery-Mediums. `Debug` ist abgeleitet,
 /// weil kein Feld dieses Typs einen Wert traegt — [`Self::UnknownField`]
-/// traegt den NAMEN, den der Aufrufer selbst getippt hat.
+/// traegt den NAMEN, den der Aufrufer selbst getippt hat, und nur dann, wenn
+/// er die Form eines Namens hat (`[a-z][a-z0-9-]*`); ein Pfad mit `=` wird
+/// zu [`Self::MalformedField`] und bleibt ungenannt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum KeySourceSpecError {
@@ -471,19 +519,30 @@ fn module_is_a_regular_file(module: &Path) -> Result<(), RecoveryError> {
 ///    [`RecoveryError::RestrictivePermissionsUnsupported`], BEVOR ein Byte
 ///    gelesen wird. Ohne Rechtebits laesst sich die Zusicherung „nur der
 ///    Eigentuemer" weder pruefen noch halten.
-/// 2. Der Pfad ist KEIN Symlink ([`fs::symlink_metadata`]). Ein Link traegt
-///    eigene Rechte, die ueber die Datei dahinter nichts sagen; ein Geheimnis
-///    hinter einem Link ist nicht als eingegrenzt erwiesen —
+/// 2. An dem Pfad liegt eine REGULAERE DATEI und kein Symlink
+///    ([`fs::symlink_metadata`], VOR [`File::open`]). Ein Link traegt eigene
+///    Rechte, die ueber die Datei dahinter nichts sagen; ein Geheimnis
+///    hinter einem Link ist nicht als eingegrenzt erwiesen. Und eine FIFO
+///    ohne Schreiber liesse `File::open` nie zurueckkehren — die Frage nach
+///    der Dateiart muss deshalb vor dem Oeffnen stehen. Beides
 ///    [`RecoveryError::KeySourceExposed`].
-/// 3. Die Datei ist eine regulaere Datei, und ihre Rechte — gelesen auf dem
-///    GEOEFFNETEN HANDLE, nicht auf dem Pfad, damit dazwischen kein Fenster
-///    liegt — tragen kein Bit fuer Gruppe oder Welt (`mode & 0o077 == 0`).
-///    Sonst [`RecoveryError::KeySourceExposed`].
-/// 4. Der Inhalt geht UNMITTELBAR in einen [`SecretVec`]; kein `Vec`, der ihn
-///    haelt, ueberlebt diese Funktion.
-/// 5. GENAU EIN abschliessendes `\n` oder `\r\n` wird entfernt — das eine,
+/// 3. Dieselbe Frage noch einmal auf dem GEOEFFNETEN HANDLE, nicht auf dem
+///    Pfad, damit dazwischen kein Fenster liegt — sie ist die massgebliche —,
+///    und die Rechte tragen kein Bit fuer Gruppe oder Welt
+///    (`mode & 0o077 == 0`). Sonst [`RecoveryError::KeySourceExposed`].
+/// 4. Gelesen werden hoechstens [`MAX_SECRET_FILE_BYTES_V1`] Bytes. Ein Byte
+///    mehr, und die Datei ist kein Geheimnis dieser Form —
+///    [`RecoveryError::KeySource`], ein Aufruffehler.
+/// 5. Der Lesepuffer wird ueber seine GANZE Kapazitaet ueberschrieben, sobald
+///    der Inhalt in einen [`SecretVec`] gewandert ist; die Kopie dorthin hat
+///    genau die Laenge ihres Inhalts, damit `SecretVec::new` nicht neu
+///    anlegen muss und keine zweite Kopie im freigegebenen Heap liegen
+///    bleibt. Dass `SecretVec::new` einen `Vec` mit ueberschuessiger
+///    Kapazitaet ueber `into_boxed_slice` verschiebt, ist eine Eigenschaft
+///    von `crates/ea-crypto/src/secret.rs` und liegt ausserhalb dieses Moduls.
+/// 6. GENAU EIN abschliessendes `\n` oder `\r\n` wird entfernt — das eine,
 ///    das ein Editor anhaengt. Ein zweites gehoert zur Passphrase.
-/// 6. Eine leere Passphrase ist keine — [`RecoveryError::SecretEmpty`].
+/// 7. Eine leere Passphrase ist keine — [`RecoveryError::SecretEmpty`].
 ///
 /// # Errors
 ///
@@ -491,19 +550,44 @@ fn module_is_a_regular_file(module: &Path) -> Result<(), RecoveryError> {
 /// die vier oben genannten Varianten.
 pub fn read_secret_file(path: &Path) -> Result<SecretVec, RecoveryError> {
     restrictive_permissions_available()?;
-    if fs::symlink_metadata(path)?.is_symlink() {
-        return Err(RecoveryError::KeySourceExposed);
-    }
-    let mut file = File::open(path)?;
+    refuse_unless_regular_file_at(path)?;
+    let file = File::open(path)?;
     refuse_unless_owner_only(&file)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    // Ein Byte mehr als die Grenze, damit „zu gross" von „genau an der
+    // Grenze" unterscheidbar bleibt — dasselbe Muster wie beim Container.
+    file.take(MAX_SECRET_FILE_BYTES_V1 as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_SECRET_FILE_BYTES_V1 {
+        bytes.zeroize();
+        return Err(RecoveryError::KeySource);
+    }
     strip_one_line_ending(&mut bytes);
-    let secret = SecretVec::new(bytes);
+    // Regel 5: die Kopie hat GENAU ihre Laenge, der Puffer wird danach ueber
+    // seine ganze Kapazitaet — auch das abgeschnittene Zeilenende —
+    // ueberschrieben.
+    let secret = SecretVec::new(bytes[..].to_vec());
+    bytes.zeroize();
     if secret.is_empty() {
         return Err(RecoveryError::SecretEmpty);
     }
     Ok(secret)
+}
+
+/// Verweigert einen Pfad, an dem keine regulaere Datei liegt — VOR
+/// [`File::open`].
+///
+/// [`fs::symlink_metadata`] und nicht `metadata`: ein Link ist nach diesen
+/// Metadaten keine Datei und faellt hier mit. Und die Frage steht vor dem
+/// Oeffnen, weil `File::open` auf einer FIFO ohne Schreiber nie zurueckkehrt
+/// — die Pruefung auf dem Handle in [`refuse_unless_owner_only`] bleibt die
+/// massgebliche, sie kann nur nicht die erste sein. Geteilt mit
+/// [`EncryptedKeyContainer::read_from`].
+pub(crate) fn refuse_unless_regular_file_at(path: &Path) -> Result<(), RecoveryError> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(RecoveryError::KeySourceExposed);
+    }
+    Ok(())
 }
 
 /// Entfernt genau ein abschliessendes `\n` oder `\r\n`.

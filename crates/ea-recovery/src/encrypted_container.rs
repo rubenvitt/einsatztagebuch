@@ -35,6 +35,13 @@
 //! Woerterbuchziel; die Zahlen im Kopf dienen der SELBSTBESCHREIBUNG, nicht
 //! der Aushandlung.
 //!
+//! Zwei Schichten, unabhaengig voneinander: das Dekodieren weist fremde
+//! Parameter ab, BEVOR ein KDF laeuft — und taete es das je nicht, bildete
+//! die AAD sich aus den Werten, die der Kopf tatsaechlich traegt
+//! ([`EncryptedKeyContainer::from_bytes`] bewahrt sie), und die AEAD oeffnete
+//! den Container mit veraenderten Parametern nicht. Die erste Schicht ist
+//! gemessen (`tests/offline_sources.rs`); die zweite ist die Bauart.
+//!
 //! Die AEAD ist das ChaCha20-Poly1305 hinter [`ea_crypto::aead_seal`] und
 //! [`ea_crypto::aead_open`] — das einzige der Suite 1. Es kommt keine zweite.
 //!
@@ -48,7 +55,7 @@
 //! Protokoll gehoert.
 
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{Read as _, Write as _},
     path::Path,
 };
@@ -62,7 +69,9 @@ use minicbor::{Decoder, Encoder};
 use zeroize::Zeroize as _;
 
 use crate::{
-    RecoveryError, key_source::refuse_unless_owner_only, report::create_new_file,
+    RecoveryError,
+    key_source::{refuse_unless_owner_only, refuse_unless_regular_file_at},
+    report::create_new_file,
     target::restrictive_permissions_available,
 };
 
@@ -149,10 +158,33 @@ impl ContainedKeyKind {
 #[derive(Clone, Eq, PartialEq)]
 pub struct EncryptedKeyContainer {
     kind: ContainedKeyKind,
+    /// Die KDF-Parameter, wie der Kopf sie traegt — Teil der AAD.
+    ///
+    /// Gespeichert und nicht aus den Konstanten nachgebaut, damit die AAD
+    /// byteweise der Kopf IST: `from_bytes` verlangt zwar genau die gepinnten
+    /// Werte, aber die AEAD-Bindung soll nicht an dieser Pruefung haengen
+    /// (Modulkopf, „zwei Schichten").
+    kdf: KdfParametersV1,
     salt: [u8; KEY_CONTAINER_SALT_SIZE_V1],
     nonce: [u8; AEAD_NONCE_SIZE],
     ciphertext: [u8; CIPHERTEXT_SIZE],
 }
+
+/// Die drei Argon2id-Parameter des `kdf`-Gliedes, in Kopfreihenfolge.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct KdfParametersV1 {
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+}
+
+/// Die gepinnte Parametrierung — das Einzige, was `seal` je in den Kopf
+/// schreibt und `from_bytes` je daraus annimmt.
+const PINNED_KDF_PARAMETERS_V1: KdfParametersV1 = KdfParametersV1 {
+    memory_kib: ARGON2ID_MEMORY_KIB_V1,
+    iterations: ARGON2ID_ITERATIONS_V1,
+    parallelism: ARGON2ID_PARALLELISM_V1,
+};
 
 impl EncryptedKeyContainer {
     /// Versiegelt `secret` unter `passphrase` mit frischem Salz und frischer
@@ -180,7 +212,8 @@ impl EncryptedKeyContainer {
         fill_random(&mut nonce)?;
 
         let key = derive_key(passphrase, &salt)?;
-        let aad = header_bytes(kind, &salt, &nonce);
+        let kdf = PINNED_KDF_PARAMETERS_V1;
+        let aad = header_bytes(kind, kdf, &salt, &nonce);
         let nonce_secret: SecretBytes<AEAD_NONCE_SIZE> = SecretBytes::new(nonce);
         // Der Klartext wandert in einen `SecretVec`, weil `aead_seal` einen
         // verlangt; die Kopie lebt genau bis zum Ende dieses Aufrufs.
@@ -191,6 +224,7 @@ impl EncryptedKeyContainer {
             sealed.try_into().map_err(|_| RecoveryError::KeySource)?;
         Ok(Self {
             kind,
+            kdf,
             salt,
             nonce,
             ciphertext,
@@ -238,7 +272,7 @@ impl EncryptedKeyContainer {
             return Err(RecoveryError::SecretEmpty);
         }
         let key = derive_key(passphrase, &self.salt)?;
-        let aad = header_bytes(self.kind, &self.salt, &self.nonce);
+        let aad = header_bytes(self.kind, self.kdf, &self.salt, &self.nonce);
         let nonce_secret: SecretBytes<AEAD_NONCE_SIZE> = SecretBytes::new(self.nonce);
         let plaintext = aead_open(&key, &nonce_secret, &self.ciphertext, &aad)
             .map_err(|_| RecoveryError::ContainerOpen)?;
@@ -275,7 +309,7 @@ impl EncryptedKeyContainer {
         encoder
             .array(CONTAINER_ITEMS)
             .expect("encoding the container array head cannot fail");
-        encode_header_items(&mut encoder, self.kind, &self.salt, &self.nonce);
+        encode_header_items(&mut encoder, self.kind, self.kdf, &self.salt, &self.nonce);
         encoder
             .bytes(&self.ciphertext)
             .expect("encoding the ciphertext cannot fail");
@@ -319,11 +353,15 @@ impl EncryptedKeyContainer {
         if decoder.u8().map_err(|_| shape)? != KDF_ID_ARGON2ID {
             return Err(shape);
         }
-        // GENAU die gepinnte Parametrierung, siehe den Modulkopf.
-        if decoder.u32().map_err(|_| shape)? != ARGON2ID_MEMORY_KIB_V1
-            || decoder.u32().map_err(|_| shape)? != ARGON2ID_ITERATIONS_V1
-            || decoder.u32().map_err(|_| shape)? != ARGON2ID_PARALLELISM_V1
-        {
+        // GENAU die gepinnte Parametrierung, siehe den Modulkopf. Die Werte
+        // werden trotzdem als die des KOPFES bewahrt: die AAD entsteht aus
+        // ihnen, nicht aus den Konstanten.
+        let kdf = KdfParametersV1 {
+            memory_kib: decoder.u32().map_err(|_| shape)?,
+            iterations: decoder.u32().map_err(|_| shape)?,
+            parallelism: decoder.u32().map_err(|_| shape)?,
+        };
+        if kdf != PINNED_KDF_PARAMETERS_V1 {
             return Err(shape);
         }
 
@@ -349,6 +387,7 @@ impl EncryptedKeyContainer {
         }
         Ok(Self {
             kind,
+            kdf,
             salt,
             nonce,
             ciphertext,
@@ -378,11 +417,13 @@ impl EncryptedKeyContainer {
     /// gehoert.
     ///
     /// Dieselben Regeln wie [`crate::read_secret_file`], in derselben
-    /// Reihenfolge: Plattform, kein Symlink, regulaere Datei mit
-    /// `mode & 0o077 == 0` auf dem geoeffneten Handle — und erst DANN das erste
-    /// gelesene Byte. Ein Container ist zwar verschluesselt, aber eine
-    /// weltlesbare Containerdatei ist ein Woerterbuchziel, und der Aufrufer
-    /// soll das erfahren, bevor er die Passphrase je eingetippt hat.
+    /// Reihenfolge: Plattform, regulaere Datei und kein Symlink VOR dem
+    /// Oeffnen (eine FIFO liesse `File::open` sonst nie zurueckkehren),
+    /// dieselbe Frage samt `mode & 0o077 == 0` auf dem geoeffneten Handle —
+    /// und erst DANN das erste gelesene Byte. Ein Container ist zwar
+    /// verschluesselt, aber eine weltlesbare Containerdatei ist ein
+    /// Woerterbuchziel, und der Aufrufer soll das erfahren, bevor er die
+    /// Passphrase je eingetippt hat.
     ///
     /// # Errors
     ///
@@ -392,9 +433,7 @@ impl EncryptedKeyContainer {
     /// Datei jenseits von 1 KiB, die kein Container sein kann.
     pub fn read_from(path: &Path) -> Result<Self, RecoveryError> {
         restrictive_permissions_available()?;
-        if fs::symlink_metadata(path)?.is_symlink() {
-            return Err(RecoveryError::KeySourceExposed);
-        }
+        refuse_unless_regular_file_at(path)?;
         let file = File::open(path)?;
         refuse_unless_owner_only(&file)?;
         let mut bytes = Vec::new();
@@ -412,6 +451,7 @@ impl EncryptedKeyContainer {
 /// Die deterministischen CBOR-Bytes des Kopfes — die AAD.
 fn header_bytes(
     kind: ContainedKeyKind,
+    kdf: KdfParametersV1,
     salt: &[u8; KEY_CONTAINER_SALT_SIZE_V1],
     nonce: &[u8; AEAD_NONCE_SIZE],
 ) -> Vec<u8> {
@@ -420,7 +460,7 @@ fn header_bytes(
     encoder
         .array(HEADER_ITEMS)
         .expect("encoding the header array head cannot fail");
-    encode_header_items(&mut encoder, kind, salt, nonce);
+    encode_header_items(&mut encoder, kind, kdf, salt, nonce);
     debug_assert!(ea_cbor::validate(&bytes, ParserLimits::V1).is_ok());
     bytes
 }
@@ -430,6 +470,7 @@ fn header_bytes(
 fn encode_header_items(
     encoder: &mut Encoder<&mut Vec<u8>>,
     kind: ContainedKeyKind,
+    kdf: KdfParametersV1,
     salt: &[u8; KEY_CONTAINER_SALT_SIZE_V1],
     nonce: &[u8; AEAD_NONCE_SIZE],
 ) {
@@ -439,15 +480,18 @@ fn encode_header_items(
         .and_then(|encoder| encoder.u8(kind.wire_value()))
         .and_then(|encoder| encoder.array(4))
         .and_then(|encoder| encoder.u8(KDF_ID_ARGON2ID))
-        .and_then(|encoder| encoder.u32(ARGON2ID_MEMORY_KIB_V1))
-        .and_then(|encoder| encoder.u32(ARGON2ID_ITERATIONS_V1))
-        .and_then(|encoder| encoder.u32(ARGON2ID_PARALLELISM_V1))
+        .and_then(|encoder| encoder.u32(kdf.memory_kib))
+        .and_then(|encoder| encoder.u32(kdf.iterations))
+        .and_then(|encoder| encoder.u32(kdf.parallelism))
         .and_then(|encoder| encoder.bytes(salt))
         .and_then(|encoder| encoder.bytes(nonce))
         .expect("encoding fixed header items into a Vec cannot fail");
 }
 
 /// Leitet den AEAD-Schluessel aus Passphrase und Salz ab.
+///
+/// IMMER die gepinnten Konstanten und nie die Werte eines Kopfes: der KDF
+/// wird nicht ausgehandelt. Die Kopfwerte gehen allein in die AAD.
 ///
 /// Die Speicherbloecke des KDF werden HIER angelegt und nach dem Lauf
 /// ueberschrieben — nicht ueber `hash_password_into`, dessen `alloc`-Merkmal

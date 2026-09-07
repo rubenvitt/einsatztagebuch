@@ -105,8 +105,8 @@ pub const WRITER_TRANSITION_PREPARE_COMMAND: &str = "writer-transition prepare";
 ///
 /// # Bei `organization init` bedeutet er etwas ANDERES
 ///
-/// Bei den fuenf Wiederherstellungskommandos ist der Anker eine gepruefte
-/// EINGABE: `ea_recovery::load_trust_anchor` liest ihn, und `design.md`:1782
+/// Bei den sieben Wiederherstellungskommandos aus §16.1 ist der Anker eine
+/// gepruefte EINGABE: `ea_recovery::load_trust_anchor` liest ihn, und `design.md`:1782
 /// verbietet jede andere Herkunft. Waehrend der Ersteinrichtung gibt es ihn
 /// noch gar nicht — er ist das, was die Zeremonie am Ende BILDET. Der Schalter
 /// bleibt trotzdem Pflicht, damit die Grammatik ueber alle Kommandos
@@ -441,7 +441,7 @@ pub enum UsageError {
     /// der jemand ohne Argumente fragt, ist eine Nutzausgabe und keine
     /// Fehlermeldung.
     NoArguments,
-    /// Ein Argument beginnt mit `-` und ist keiner der fuenf Schalter.
+    /// Ein Argument beginnt mit `-` und ist keiner der bekannten Schalter.
     UnknownSwitch(String),
     /// Ein wertnehmender Schalter steht ohne Wert da.
     MissingValue(&'static str),
@@ -460,7 +460,7 @@ pub enum UsageError {
         /// Was statt einer Zahl dastand, woertlich.
         value: String,
     },
-    /// Das erste Positionsargument ist keines der fuenf Kommandos.
+    /// Das erste Positionsargument ist keines der bekannten Kommandos.
     UnknownCommand(String),
     /// Es wurde ein Schalter, aber kein Kommando angegeben.
     MissingCommand,
@@ -1368,8 +1368,8 @@ mod tests {
 
     /// `organization` traegt als Positionsargument ein WORT und keinen Pfad.
     ///
-    /// Die Anzahl ist dieselbe wie bei den fuenf anderen — genau eines —, die
-    /// Bedeutung nicht: hier steht das Unterkommando. Der Anker bleibt
+    /// Die Anzahl ist dieselbe wie bei den sieben Kommandos aus §16.1 — genau
+    /// eines —, die Bedeutung nicht: hier steht das Unterkommando. Der Anker bleibt
     /// trotzdem Pflicht; was er bei diesem Kommando bedeutet, steht an
     /// [`TRUST_ANCHOR_SWITCH`].
     #[test]
@@ -1405,15 +1405,36 @@ mod tests {
         );
     }
 
-    /// Der Anker ist bei ALLEN SECHS Kommandos Pflicht, nicht nur bei `verify`.
+    /// Der Anker ist bei JEDEM Kommando Pflicht, nicht nur bei `verify`: hier
+    /// die sieben Kommandos aus `design.md` §16.1 und `organization init`.
     #[test]
     fn every_command_requires_the_trust_anchor() {
         for tokens in [
             vec!["verify", "archive"],
             vec!["list", "archive"],
             vec!["decrypt", "archive", KEY_SWITCH, "k", OUTPUT_SWITCH, "t"],
+            vec![
+                "grant",
+                "archive",
+                RECOVERY_KEY_SWITCH,
+                "r",
+                AUTHORITY_KEY_SWITCH,
+                "a",
+                AUTHORIZATION_SWITCH,
+                "z",
+                RECIPIENT_CERT_SWITCH,
+                "c",
+            ],
             vec!["report", "archive", OUTPUT_SWITCH, "r.json"],
             vec!["export", "archive", OUTPUT_SWITCH, "t"],
+            vec![
+                "recovery-test",
+                "archive",
+                KEY_INVENTORY_SWITCH,
+                "i",
+                OUTPUT_SWITCH,
+                "r.json",
+            ],
             vec!["organization", ORGANIZATION_INIT_SUBCOMMAND],
         ] {
             assert_eq!(
@@ -1486,6 +1507,23 @@ mod tests {
             UsageError::MissingSwitch {
                 switch: KEY_SWITCH,
                 command: "decrypt",
+            }
+        );
+    }
+
+    /// `grant` ohne einen einzigen seiner vier Schalter nennt `--recovery-key`
+    /// — den ERSTEN der dokumentierten Reihenfolge — und nicht irgendeinen.
+    ///
+    /// Die Reihenfolge ist Teil des Vertrags: wer mehrere Schalter vergessen
+    /// hat, bekommt immer denselben zuerst genannt und arbeitet die
+    /// Grammatikzeile von links nach rechts ab.
+    #[test]
+    fn a_grant_without_any_of_its_switches_names_the_recovery_key_first() {
+        assert_eq!(
+            rejected(&[TRUST_ANCHOR_SWITCH, "anchor.etb", "grant", "archive"]),
+            UsageError::MissingSwitch {
+                switch: RECOVERY_KEY_SWITCH,
+                command: "grant",
             }
         );
     }

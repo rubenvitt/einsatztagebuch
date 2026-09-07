@@ -26,12 +26,12 @@ use std::process::{Command, Output};
 /// Die GANZE gedruckte Folge — geschlossen, samt Scope-Zeilen — pinnt
 /// `apps/cli/tests/full_grammar.rs::the_printed_grammar_is_a_closed_line_sequence`.
 const GRAMMAR_V1: [&str; 8] = [
-    "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
-    "einsatzarchiv --trust-anchor <file> list    <archive-path>",
+    "einsatzarchiv --trust-anchor <file> verify <archive-path>",
+    "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
     "einsatzarchiv --trust-anchor <file> grant <entry-or-archive> --recovery-key <source> --authority-key <source> --authorization <file> --recipient-cert <file>",
-    "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
-    "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
+    "einsatzarchiv --trust-anchor <file> report <archive-path> --output <report-file>",
+    "einsatzarchiv --trust-anchor <file> export <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
 ];
@@ -70,7 +70,8 @@ fn assert_usage_error(tokens: &[&str], name: &str) {
     );
 }
 
-/// Ohne `--trust-anchor` gibt es keinen Lauf — bei ALLEN FUENF Kommandos.
+/// Ohne `--trust-anchor` gibt es keinen Lauf — bei ALLEN SIEBEN Kommandos
+/// aus `design.md` §16.1.
 ///
 /// `design.md`:1765 laesst dazu keinen Spielraum: der Anker kommt von aussen
 /// und nie aus dem Bestand. Ein Werkzeug, das ihn weglassen liesse, verschoebe
@@ -102,8 +103,28 @@ fn trust_commands_require_external_anchor() {
             "--output",
             "target",
         ],
+        vec![
+            "grant",
+            archive_path,
+            "--recovery-key",
+            "recovery.key",
+            "--authority-key",
+            "authority.key",
+            "--authorization",
+            "authorization.bin",
+            "--recipient-cert",
+            "recipient.cert",
+        ],
         vec!["report", archive_path, "--output", "report.json"],
         vec!["export", archive_path, "--output", "target"],
+        vec![
+            "recovery-test",
+            archive_path,
+            "--key-inventory",
+            "inventory.json",
+            "--output",
+            "report.json",
+        ],
     ] {
         assert_usage_error(&tokens, "--trust-anchor");
     }
