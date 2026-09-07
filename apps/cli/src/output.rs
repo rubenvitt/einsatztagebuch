@@ -77,11 +77,13 @@ use crate::args::{Format, UsageError};
 /// Die verfügbaren Aufrufformen. Der Text ist Teil
 /// des beobachtbaren Verhaltens und wird als solcher gemessen.
 ///
-/// # Die ersten sieben Zeilen sind `design.md` §16.1, in dessen Reihenfolge
+/// # Die ersten sieben Zeilen sind `design.md` §16.1, byteweise und in dessen Reihenfolge
 ///
 /// `verify`, `list`, `decrypt`, `grant`, `report`, `export`,
-/// `recovery-test` — die normative Grammatik vollstaendig und in der Ordnung
-/// der Norm; die uebrigen Zeilen sind die Kommandos des Umsetzungsplans.
+/// `recovery-test` — die normative Grammatik vollstaendig, in der Ordnung
+/// der Norm und ohne Spaltenfuellung: die Norm kennt keine, und „ist §16.1"
+/// heisst Byte fuer Byte; die uebrigen Zeilen sind die Kommandos des
+/// Umsetzungsplans.
 /// `grant` und `recovery-test` stehen hier, obwohl beide in dieser Stufe an
 /// einer benannten Grenze enden (`crate::commands::grant`,
 /// `crate::commands::recovery_test`): anders als `--report-signing-key` sind
@@ -98,12 +100,12 @@ use crate::args::{Format, UsageError};
 /// steht in `crate::commands::organization`; hier steht sie in einem Wort,
 /// damit ein Aufrufer sie schon in der Grammatik sieht.
 const GRAMMAR_V1: [&str; 13] = [
-    "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
-    "einsatzarchiv --trust-anchor <file> list    <archive-path>",
+    "einsatzarchiv --trust-anchor <file> verify <archive-path>",
+    "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
     "einsatzarchiv --trust-anchor <file> grant <entry-or-archive> --recovery-key <source> --authority-key <source> --authorization <file> --recipient-cert <file>",
-    "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
-    "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
+    "einsatzarchiv --trust-anchor <file> report <archive-path> --output <report-file>",
+    "einsatzarchiv --trust-anchor <file> export <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",

@@ -1043,6 +1043,10 @@ git commit -m "feat(desktop): add guided Trust administration"
 > Passphrase und PIN kommen aus einer Datei mit restriktiven Rechten, die in der
 > Quellenangabe benannt ist — nie aus argv (sichtbar in `ps`), nie aus der Umgebung, nie aus
 > einem Prompt (ein echofreier Terminalprompt bräuchte `termios`, also eine weitere Kiste).
+> **Ausstellen ist kein Kommando dieses Tasks:** `EncryptedKeyContainer::seal`/`write_new` sind
+> Bibliotheksfunktionen, die die Zeugen nutzen; ein ausstellendes Kommando steht nicht in §16.1 und
+> kommt mit der Zeremonie, die den jeweiligen Schlüssel erzeugt (Root/Recovery/HGA — Tasks 2, 8, 9
+> oder die Desktop-Administration), nicht mit einem Klartext-Exportpfad.
 > **Die Haken** dieses Abschnitts hatte `111d406` zusammen mit denen der Tasks 5–13 gesetzt,
 > ohne dass etwas gebaut war; sie sind hier zurückgesetzt.
 

@@ -14,9 +14,11 @@
 //!
 //! `cryptoki` bindet ein PKCS#11-Modul ueber `cryptoki-sys` und `libloading`
 //! zur Laufzeit als native Bibliothek. Das zieht genau die Varianz der
-//! nativen Toolchain in den Graphen, die
+//! nativen Toolchain in den Graphen, derentwegen
 //! `docs/adr/0001-toolchain-and-cryptography-dependencies.md` unter „Rejected
-//! alternatives" fuer OpenSSL und `ring` abgelehnt hat — und es gibt in dieser
+//! alternatives" OpenSSL und `ring` als suite-weite Abstraktionen abgelehnt
+//! hat (`ring` selbst liegt ueber `rustls` weiterhin im Lockfile, siehe
+//! `deny.toml`) — und es gibt in dieser
 //! Stufe nichts, wogegen die Bindung gemessen werden koennte: kein Modul im
 //! Baum, keines auf dem Host, kein SoftHSM im Browser-Container. Eine Bindung
 //! ohne Zeugen waere eine Zusage, die kein Test traegt.

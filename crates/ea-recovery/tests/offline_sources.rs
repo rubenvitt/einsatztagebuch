@@ -28,6 +28,7 @@ mod support;
 use std::{
     ffi::OsStr,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -35,8 +36,9 @@ use std::{
 use ea_crypto::{CanonicalPublicCoseKey, SecretBytes, SecretVec};
 use ea_recovery::{
     ContainedKeyKind, EncryptedKeyContainer, ExitCode, KeySourceKind, KeySourceSpec,
-    KeySourceSpecError, PKCS11_UNBOUND_CODE, RecoveryError, exit_code_for_error,
-    load_recipient_key, read_secret_file, resolve_recipient_key, resolve_signing_key,
+    KeySourceSpecError, MAX_SECRET_FILE_BYTES_V1, PKCS11_KEY_ID_MAX_BYTES, PKCS11_UNBOUND_CODE,
+    RecoveryError, exit_code_for_error, load_recipient_key, read_secret_file,
+    resolve_recipient_key, resolve_signing_key,
 };
 
 use support::temp_dir;
@@ -125,7 +127,7 @@ fn a_pkcs11_source_carries_all_four_fields_in_any_order() {
 /// hat.
 #[test]
 fn every_missing_duplicate_unknown_and_empty_field_is_named_verbatim() {
-    let cases: [(&str, KeySourceSpecError, &str); 12] = [
+    let cases: [(&str, KeySourceSpecError, &str); 13] = [
         (
             "container:/medium/recovery.container",
             KeySourceSpecError::MissingField {
@@ -206,6 +208,16 @@ fn every_missing_duplicate_unknown_and_empty_field_is_named_verbatim() {
             },
             "pkcs11: `id=` is not hex",
         ),
+        // Ungerade Laenge ist DASSELBE Urteil wie eine fremde Ziffer: eine
+        // halbe Hexstelle benennt kein Byte.
+        (
+            "pkcs11:module=/m;token=t;id=0a1;pin-file=/p",
+            KeySourceSpecError::NotHex {
+                source: KeySourceKind::Pkcs11,
+                field: "id=",
+            },
+            "pkcs11: `id=` is not hex",
+        ),
         (
             "pkcs11:module=/m;token=;id=0a;pin-file=/p",
             KeySourceSpecError::EmptyValue {
@@ -256,6 +268,39 @@ fn every_missing_duplicate_unknown_and_empty_field_is_named_verbatim() {
         !error.to_string().contains("abab"),
         "die Anzeige nennt keinen Wert"
     );
+
+    // Und GENAU an der Grenze wird angenommen: 255 Bytes sind eine CKA_ID.
+    let at_limit = format!(
+        "pkcs11:module=/m;token=t;id={};pin-file=/p",
+        "ab".repeat(PKCS11_KEY_ID_MAX_BYTES)
+    );
+    let KeySourceSpec::Pkcs11 { reference, .. } =
+        KeySourceSpec::parse(OsStr::new(&at_limit)).expect("eine ID an der Grenze parst")
+    else {
+        panic!("die Quellart ist pkcs11");
+    };
+    assert_eq!(reference.key_id().len(), PKCS11_KEY_ID_MAX_BYTES);
+}
+
+/// `pkcs11:` ohne ein einziges Feld nennt `module=` — das ERSTE Feld der
+/// dokumentierten Reihenfolge — und nicht ein leeres Glied ohne `=`.
+///
+/// Die Reihenfolge ist Teil des Vertrags: wer mehrere Felder vergessen hat,
+/// bekommt immer dasselbe zuerst genannt und arbeitet die Grammatik von vorn
+/// ab.
+#[test]
+fn a_pkcs11_spec_with_every_field_absent_names_module_first() {
+    let Err(error) = KeySourceSpec::parse(OsStr::new("pkcs11:")) else {
+        panic!("eine leere Referenz darf nicht parsen");
+    };
+    assert_eq!(
+        error,
+        KeySourceSpecError::MissingField {
+            source: KeySourceKind::Pkcs11,
+            field: "module=",
+        }
+    );
+    assert_eq!(error.to_string(), "pkcs11: missing `module=`");
 }
 
 /// Ein Argument, das kein gueltiges UTF-8 ist, ist ein PFAD — Pfade duerfen
@@ -306,6 +351,29 @@ fn a_spec_error_never_echoes_a_path_or_a_value() {
             assert!(
                 !shown.contains(&rendered_path) && !shown.contains("geheim.container"),
                 "die Fehlerdarstellung nennt den Pfad: {shown}"
+            );
+        }
+    }
+
+    // Ein Pfad, der selbst ein `=` traegt, ist KEIN unbekanntes Feld: er
+    // wuerde sonst bis zum ersten `=` als Feldname zurueckgespiegelt. Nur ein
+    // Glied, dessen Name wie ein Feldname aussieht, wird als solcher genannt;
+    // alles andere ist ein Glied ohne Grammatik.
+    for argument in [
+        "container:/a;/media/recovery=1/pass.txt",
+        "pkcs11:module=/m;token=t;id=0a;/media/KEY=2026/pin.txt",
+    ] {
+        let Err(error) = KeySourceSpec::parse(OsStr::new(argument)) else {
+            panic!("{argument:?} darf nicht parsen");
+        };
+        assert!(
+            matches!(error, KeySourceSpecError::MalformedField { .. }),
+            "{argument:?}: ein Pfad mit `=` ist kein Feldname, war {error:?}"
+        );
+        for shown in [format!("{error}"), format!("{error:?}")] {
+            assert!(
+                !shown.contains("/media") && !shown.contains("recovery") && !shown.contains("KEY"),
+                "die Fehlerdarstellung nennt ein Pfadstueck: {shown}"
             );
         }
     }
@@ -790,8 +858,92 @@ fn read_from_refuses_open_permissions_without_reading_and_accepts_0600_and_0400(
     let Err(error) = EncryptedKeyContainer::read_from(&root.path().join("fehlt")) else {
         panic!("eine fehlende Datei kann keinen Container geben");
     };
-    assert!(matches!(error, RecoveryError::Io(_)));
+    assert!(matches!(error, RecoveryError::Io(ErrorKind::NotFound)));
     assert_eq!(exit_code_for_error(&error), ExitCode::Io);
+}
+
+/// Legt eine FIFO an `path` an, oder `false`, wenn `mkfifo` auf diesem Host
+/// fehlt — dann ist der Fall nicht messbar und wird uebersprungen.
+///
+/// Ueber das Werkzeug und nicht ueber eine Kiste: der Test nimmt keine neue
+/// Dependency auf.
+#[cfg(unix)]
+fn make_fifo(path: &Path) -> bool {
+    match std::process::Command::new("mkfifo").arg(path).status() {
+        Ok(status) if status.success() => true,
+        Ok(status) => panic!("mkfifo ist da, scheitert aber: {status}"),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            eprintln!("mkfifo fehlt auf diesem Host; der FIFO-Fall wird uebersprungen");
+            false
+        }
+        Err(error) => panic!("mkfifo laesst sich nicht starten: {error}"),
+    }
+}
+
+/// Fuehrt `call` in einem eigenen Thread aus und verlangt, dass es
+/// innerhalb einer grosszuegigen Frist ZURUECKKEHRT.
+///
+/// Der Punkt ist das Zurueckkehren: `File::open` auf einer FIFO ohne
+/// Schreiber blockiert fuer immer, und ein Test, der daran haengt, meldet
+/// keinen Fehler, sondern gar nichts. Die Frist macht aus einem Haenger einen
+/// roten Test.
+#[cfg(unix)]
+fn returns_within_timeout<T: Send + 'static>(
+    what: &str,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        // Ein geschlossener Empfaenger heisst: die Frist ist bereits
+        // abgelaufen und der Test gefallen; das Ergebnis interessiert nicht
+        // mehr.
+        let _ = sender.send(call());
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| panic!("{what} kehrt nicht zurueck: die Datei ist eine FIFO"))
+}
+
+/// Eine FIFO wird VOR `File::open` abgewiesen — sonst blockierte das Oeffnen
+/// ohne Schreiber fuer immer, und ein Aufrufer am Recovery-Medium saehe ein
+/// Werkzeug, das einfach steht.
+///
+/// Beide Leser — Geheimnisdatei und Container — fragen die Metadaten des
+/// Pfades schon fuer den Symlink ab; dieselben Metadaten sagen auch, ob es
+/// eine regulaere Datei ist. Die Antwort ist `KeySourceExposed`, wie beim
+/// Symlink: keine regulaere Datei ist als eingegrenzt erwiesen.
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_before_it_is_opened_and_the_call_returns() {
+    let root = temp_dir("fifo-refused");
+    let fifo = root.path().join("geheim.fifo");
+    if !make_fifo(&fifo) {
+        return;
+    }
+    set_mode(&fifo, 0o600);
+
+    let secret_fifo = fifo.clone();
+    let error = returns_within_timeout("read_secret_file", move || {
+        read_secret_file(&secret_fifo).map(|_| ())
+    })
+    .expect_err("eine FIFO ist kein Geheimnis");
+    assert!(
+        matches!(error, RecoveryError::KeySourceExposed),
+        "war {error}"
+    );
+    assert_eq!(exit_code_for_error(&error), ExitCode::Usage);
+
+    let container_fifo = fifo;
+    let error = returns_within_timeout("EncryptedKeyContainer::read_from", move || {
+        EncryptedKeyContainer::read_from(&container_fifo).map(|_| ())
+    })
+    .expect_err("eine FIFO ist kein Container");
+    assert!(
+        matches!(error, RecoveryError::KeySourceExposed),
+        "war {error}"
+    );
 }
 
 // ======================================================================
@@ -858,7 +1010,33 @@ fn read_secret_file_strips_one_line_ending_and_refuses_empty_open_and_symlinked_
     let Err(error) = read_secret_file(&root.path().join("fehlt.txt")) else {
         panic!("eine fehlende Datei kann kein Geheimnis geben");
     };
-    assert!(matches!(error, RecoveryError::Io(_)));
+    assert!(matches!(error, RecoveryError::Io(ErrorKind::NotFound)));
+}
+
+/// Eine Geheimnisdatei hat eine Obergrenze: genau an der Grenze wird sie
+/// gelesen, ein Byte darueber ist sie kein Geheimnis dieser Form —
+/// `KeySource`, Exitcode 2 — und wird nicht erst vollstaendig in den
+/// Speicher geholt.
+///
+/// Gezaehlt werden die DATEIBYTES, das Zeilenende eingeschlossen: die Grenze
+/// gilt dem, was gelesen wird, nicht dem, was danach uebrig bleibt.
+#[cfg(unix)]
+#[test]
+fn read_secret_file_reads_up_to_its_limit_and_refuses_one_byte_more() {
+    let root = temp_dir("secret-file-limit");
+
+    let at_limit = root.path().join("grenze.txt");
+    write_with_mode(&at_limit, &[b'p'; MAX_SECRET_FILE_BYTES_V1], 0o600);
+    let secret = read_secret_file(&at_limit).expect("genau an der Grenze wird gelesen");
+    assert!(secret.matches(&[b'p'; MAX_SECRET_FILE_BYTES_V1]));
+
+    let over = root.path().join("darueber.txt");
+    write_with_mode(&over, &[b'p'; MAX_SECRET_FILE_BYTES_V1 + 1], 0o600);
+    let Err(error) = read_secret_file(&over) else {
+        panic!("ein Byte ueber der Grenze ist kein Geheimnis dieser Form");
+    };
+    assert!(matches!(error, RecoveryError::KeySource), "war {error}");
+    assert_eq!(exit_code_for_error(&error), ExitCode::Usage);
 }
 
 // ======================================================================
@@ -891,6 +1069,52 @@ fn resolve_recipient_key_from_a_file_equals_load_recipient_key() {
         resolve_recipient_key(&KeySourceSpec::File(bad_path)),
         Err(RecoveryError::KeySource)
     ));
+}
+
+/// Die Dateiform liest NUR eine regulaere Datei und NUR so viele Bytes, wie
+/// eine der beiden Formen lang sein kann.
+///
+/// Ein Verzeichnis ist kein Schluessel — `KeySource` und nicht der
+/// Dateisystemfehler, den `read` daraus machte —, und eine Datei jenseits
+/// von 64 Hexzeichen plus Zeilenende ist keine der beiden Formen, ohne dass
+/// sie dafuer vollstaendig gelesen wuerde. Beides ist die FORM, also 2.
+///
+/// Die Rechte der Datei werden hier ausdruecklich NICHT geprueft: die
+/// Dateiform ist die der Stufe 4, und jeder Aufruf der Stufe 4 laeuft
+/// unveraendert weiter.
+#[test]
+fn the_file_form_refuses_a_directory_and_an_oversized_file_as_key_source() {
+    let root = temp_dir("resolve-file-shape");
+
+    let oversized = root.path().join("zu-lang.key");
+    fs::write(&oversized, [b'4'; 200]).expect("schreibbar");
+    let Err(error) = resolve_recipient_key(&KeySourceSpec::File(oversized)) else {
+        panic!("200 Bytes sind keine der beiden Formen");
+    };
+    assert!(matches!(error, RecoveryError::KeySource), "war {error}");
+    assert_eq!(exit_code_for_error(&error), ExitCode::Usage);
+
+    let directory = root.path().join("verzeichnis.key");
+    fs::create_dir(&directory).expect("anlegbar");
+    let Err(error) = resolve_recipient_key(&KeySourceSpec::File(directory.clone())) else {
+        panic!("ein Verzeichnis ist kein Schluessel");
+    };
+    assert!(
+        matches!(error, RecoveryError::KeySource),
+        "ein Verzeichnis ist die falsche Form, kein Dateisystemfehler, war {error}"
+    );
+    assert!(matches!(
+        resolve_signing_key(&KeySourceSpec::File(directory)),
+        Err(RecoveryError::KeySource)
+    ));
+
+    // Eine fehlende Datei bleibt ein Dateisystemfehler, 20.
+    let Err(error) = resolve_recipient_key(&KeySourceSpec::File(root.path().join("fehlt.key")))
+    else {
+        panic!("eine fehlende Datei kann keinen Schluessel geben");
+    };
+    assert!(matches!(error, RecoveryError::Io(ErrorKind::NotFound)));
+    assert_eq!(exit_code_for_error(&error), ExitCode::Io);
 }
 
 /// Die Dateiform als Signierschluessel ist der Ed25519-Seed, und der
@@ -1006,7 +1230,10 @@ fn a_pkcs11_source_ends_at_the_named_boundary_after_checking_the_pin_file_first(
     else {
         panic!("ein fehlendes Modul kann nicht binden");
     };
-    assert!(matches!(error, RecoveryError::Io(_)), "war {error}");
+    assert!(
+        matches!(error, RecoveryError::Io(ErrorKind::NotFound)),
+        "war {error}"
+    );
     assert_eq!(exit_code_for_error(&error), ExitCode::Io);
 
     // Eine offene PIN-Datei faellt VOR dem Modul auf: mit fehlendem Modul

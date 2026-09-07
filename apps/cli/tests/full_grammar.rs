@@ -46,18 +46,22 @@ const GENESIS_PLAINTEXT_FILE_V1: &str = "000000000000.bin";
 /// Die Passphrase jedes Containers dieses Targets.
 const PASSPHRASE_V1: &str = "richtig";
 
+/// Die PIN jeder `pkcs11:`-Referenz dieses Targets — UNVERWECHSELBAR, damit
+/// ihr Fehlen auf stderr etwas beweist.
+const PIN_V1: &str = "pin-7731-distinct";
+
 /// Die Grammatik, wie das Werkzeug sie ohne Argumente druckt — GESCHLOSSEN.
 ///
 /// Geschlossen und nicht „mindestens diese Zeilen": nur ein vollstaendiger
 /// Vergleich faellt ueber eine zusaetzliche oder umsortierte Zeile. Die
 /// ersten sieben Zeilen sind `design.md` §16.1 in dessen Reihenfolge.
 const PRINTED_GRAMMAR_V1: [&str; 21] = [
-    "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
-    "einsatzarchiv --trust-anchor <file> list    <archive-path>",
+    "einsatzarchiv --trust-anchor <file> verify <archive-path>",
+    "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
     "einsatzarchiv --trust-anchor <file> grant <entry-or-archive> --recovery-key <source> --authority-key <source> --authorization <file> --recipient-cert <file>",
-    "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
-    "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
+    "einsatzarchiv --trust-anchor <file> report <archive-path> --output <report-file>",
+    "einsatzarchiv --trust-anchor <file> export <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
@@ -204,7 +208,7 @@ fn pkcs11_argument(laid: &Laid, name: &str, pin_mode: u32) -> String {
     let module = laid.outside(&format!("{name}.so"));
     fs::write(&module, b"kein echtes Modul").expect("die Moduldatei muss schreibbar sein");
     let pin_file = laid.outside(&format!("{name}.pin"));
-    write_with_mode(&pin_file, b"1234\n", pin_mode);
+    write_with_mode(&pin_file, format!("{PIN_V1}\n").as_bytes(), pin_mode);
     format!(
         "pkcs11:module={};token=t;id=0a;pin-file={}",
         path_argument(&module),
@@ -643,9 +647,8 @@ fn decrypt_with_the_wrong_passphrase_fails_with_fourteen() {
     let target = laid.target("klartext");
     let argv = decrypt_argv(&laid, &container, &path_argument(&target));
     let output = run(&as_tokens(&argv));
-    assert_eq!(code_of(&output), 14, "exit code: {}", stderr_of(&output));
+    assert_refusal(&output, 14, "EA-RECOVERY-CONTAINER-OPEN");
     assert!(!target.exists(), "ohne Schluessel entsteht kein Ziel");
-    assert!(output.stdout.is_empty());
 }
 
 /// Eine OFFENE Passphrasendatei ist ein Aufruffehler, benannt, vor dem
@@ -670,7 +673,8 @@ fn decrypt_with_an_exposed_passphrase_file_fails_with_two() {
     assert!(!target.exists());
 }
 
-/// Eine PKCS#11-Referenz endet an der benannten Grenze, 21.
+/// Eine PKCS#11-Referenz endet an der benannten Grenze, 21 — und die PIN,
+/// die dafuer gelesen wurde, steht nicht auf stderr.
 #[cfg(unix)]
 #[test]
 fn decrypt_from_a_pkcs11_source_ends_at_the_named_boundary() {
@@ -683,6 +687,11 @@ fn decrypt_from_a_pkcs11_source_ends_at_the_named_boundary() {
     let output = run(&as_tokens(&argv));
     assert_refusal(&output, 21, "EA-RECOVERY-PKCS11-UNBOUND");
     assert!(!target.exists());
+    let stderr = stderr_of(&output);
+    assert!(
+        !stderr.contains(PIN_V1),
+        "stderr darf die PIN nicht tragen: {stderr}"
+    );
 }
 
 // ===========================================================================
@@ -738,6 +747,45 @@ fn grant_resolves_every_input_and_ends_at_the_named_boundary() {
     json_argv.extend(argv);
     let output = run(&as_tokens(&json_argv));
     assert_refusal(&output, 21, "EA-CLI-GRANT-SERVICE-UNAVAILABLE");
+}
+
+/// Ein `pkcs11:`-Recovery-Schluessel endet an SEINER Grenze, 21 mit
+/// `EA-RECOVERY-PKCS11-UNBOUND` — und nicht an der des fehlenden Dienstes:
+/// der Recovery-Schluessel wird als Erstes aufgeloest, und die gelesene PIN
+/// steht nicht auf stderr.
+#[cfg(unix)]
+#[test]
+fn grant_with_a_pkcs11_recovery_key_ends_at_the_pkcs11_boundary() {
+    let built = live_clock_archive();
+    let laid = lay_out("grant-pkcs11-recovery", &built);
+    let recovery = pkcs11_argument(&laid, "recovery", 0o600);
+    let authority = container_argument(
+        &laid,
+        "authority",
+        ContainedKeyKind::Signing,
+        [0x5d; 32],
+        0o600,
+    );
+    let (authorization, recipient_certificate) = lay_out_grant_files(&laid);
+
+    let argv = grant_argv(
+        &laid,
+        &recovery,
+        &authority,
+        &authorization,
+        &recipient_certificate,
+    );
+    let output = run(&as_tokens(&argv));
+    assert_refusal(&output, 21, "EA-RECOVERY-PKCS11-UNBOUND");
+    let stderr = stderr_of(&output);
+    assert!(
+        !stderr.contains("EA-CLI-GRANT-SERVICE-UNAVAILABLE"),
+        "die PKCS#11-Grenze kommt vor der Dienstgrenze: {stderr}"
+    );
+    assert!(
+        !stderr.contains(PIN_V1),
+        "stderr darf die PIN nicht tragen: {stderr}"
+    );
 }
 
 /// Eine fehlende Autorisierungsdatei ist 20 — die Grenze wird nie erreicht.

@@ -43,7 +43,11 @@
 //! [`std::env::temp_dir`] — gemessen in
 //! `apps/cli/tests/decrypt.rs::no_plaintext_temporary_file_is_created`.
 
-use std::{fs, io::Write as _, path::Path};
+use std::{
+    fs::{self, File},
+    io::{Read as _, Write as _},
+    path::Path,
+};
 
 use ea_archive::{ArchiveBlob, ArchiveError, ArchiveSource as _};
 use ea_crypto::{
@@ -76,6 +80,11 @@ use crate::{
 /// dieselbe Groesse; die Dateiform der Stufe 4 traegt deshalb beide, und
 /// `load_key_material` liest sie fuer beide.
 pub const RECIPIENT_KEY_SIZE_V1: usize = 32;
+
+/// Die Obergrenze, bis zu der eine Schluesseldatei der Stufe-4-Form gelesen
+/// wird: 64 Hexzeichen, `\r\n`, und ein Byte, an dem „zu lang" erkennbar
+/// bleibt. Die Rohform mit 32 Bytes liegt weit darunter.
+const MAX_KEY_FILE_BYTES: usize = 2 * RECIPIENT_KEY_SIZE_V1 + 2 + 1;
 
 /// Das Ergebnis eines vollstaendigen `decrypt`-Laufs.
 ///
@@ -216,18 +225,41 @@ pub fn load_recipient_key(path: &Path) -> Result<HpkeRecipientPrivateKey, Recove
 /// X25519-Schluessel und einen Ed25519-Seed dieselbe, und ihre Byteregeln
 /// stehen deshalb genau einmal — hier.
 ///
+/// # NUR EINE REGULAERE DATEI, UND NUR SO VIEL, WIE EINE FORM LANG IST
+///
+/// [`fs::metadata`] — dem Link folgend, wie Stufe 4 es zuliess — muss eine
+/// regulaere Datei nennen; ein Verzeichnis oder eine FIFO ist die falsche
+/// FORM, [`RecoveryError::KeySource`], und kein Dateisystemfehler. Gelesen
+/// werden hoechstens [`MAX_KEY_FILE_BYTES`]: 64 Hexzeichen, `\r\n`, und ein
+/// Byte, an dem „zu lang" erkennbar ist. Was laenger ist, ist keine der
+/// beiden Formen und wird nicht erst vollstaendig in den Speicher geholt.
+///
+/// Die RECHTE der Datei werden hier ausdruecklich NICHT geprueft: das ist die
+/// Dateiform der Stufe 4, und jeder Aufruf der Stufe 4 laeuft unveraendert
+/// weiter. Wer die Rechte geprueft haben will, benennt einen `container:`.
+///
 /// # Errors
 ///
-/// [`RecoveryError::Io`], wenn die Datei nicht lesbar ist;
-/// [`RecoveryError::KeySource`], wenn sie keine der beiden Formen traegt.
+/// [`RecoveryError::Io`], wenn die Datei fehlt oder nicht lesbar ist;
+/// [`RecoveryError::KeySource`], wenn an dem Pfad keine regulaere Datei liegt
+/// oder sie keine der beiden Formen traegt.
 pub(crate) fn load_key_material(
     path: &Path,
 ) -> Result<SecretBytes<RECIPIENT_KEY_SIZE_V1>, RecoveryError> {
+    if !fs::metadata(path)?.is_file() {
+        return Err(RecoveryError::KeySource);
+    }
+    let mut bytes = Vec::with_capacity(MAX_KEY_FILE_BYTES);
+    File::open(path)?
+        .take(MAX_KEY_FILE_BYTES as u64)
+        .read_to_end(&mut bytes)?;
     // Die gelesenen Bytes SIND Schluesselmaterial. Sie wandern deshalb sofort
     // in einen `SecretVec`, der beim Verlassen dieses Rahmens ueberschrieben
-    // wird — ein blosser `Vec` bliebe als Kopie des Schluessels im Speicher
-    // liegen.
-    let file_bytes = SecretVec::new(fs::read(path)?);
+    // wird; die Kopie dorthin hat genau ihre Laenge, und der Lesepuffer wird
+    // ueber seine ganze Kapazitaet ueberschrieben — ein blosser `Vec` bliebe
+    // als Kopie des Schluessels im Speicher liegen.
+    let file_bytes = SecretVec::new(bytes[..].to_vec());
+    bytes.zeroize();
     let mut material = file_bytes
         .with_exposed(key_material)
         .ok_or(RecoveryError::KeySource)?;

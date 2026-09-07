@@ -47,8 +47,8 @@ pub use exit::{ExitCode, exit_code_for, exit_code_for_error};
 pub use export::{ExportV1, export_directory};
 pub use grant::{GrantInputsV1, ResolvedGrantInputsV1, grant_inputs};
 pub use key_source::{
-    KeySourceKind, KeySourceSpec, KeySourceSpecError, read_secret_file, resolve_recipient_key,
-    resolve_signing_key,
+    KeySourceKind, KeySourceSpec, KeySourceSpecError, MAX_SECRET_FILE_BYTES_V1, read_secret_file,
+    resolve_recipient_key, resolve_signing_key,
 };
 pub use pkcs11::{PKCS11_KEY_ID_MAX_BYTES, PKCS11_UNBOUND_CODE, Pkcs11KeyReference};
 pub use recovery_test::{RecoveryTestInputsV1, recovery_test_inputs};

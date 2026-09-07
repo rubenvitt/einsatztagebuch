@@ -370,6 +370,31 @@ fn an_existing_output_is_refused_before_the_inventory_is_read() {
         b"schon da",
         "das belegte Ziel bleibt unberuehrt"
     );
+
+    // Ein HAENGENDER Symlink ist ebenfalls „etwas an diesem Pfad": `create_new`
+    // scheiterte an ihm, und `metadata` saehe ihn nicht. Auch er ist 2.
+    #[cfg(unix)]
+    {
+        let dangling = laid.outside("haengt.json");
+        std::os::unix::fs::symlink(laid.outside("nirgends.json"), &dangling)
+            .expect("der Symlink muss anlegbar sein");
+        let Err(error) = recovery_test_inputs(
+            laid.archive.path(),
+            &built.anchor(),
+            live_clock(),
+            &laid.outside("fehlt.json"),
+            &dangling,
+        ) else {
+            panic!("ein haengender Symlink ist ein belegtes Ziel");
+        };
+        assert!(matches!(error, RecoveryError::OutputExists), "war {error}");
+        assert!(
+            fs::symlink_metadata(&dangling)
+                .expect("der Symlink bleibt")
+                .is_symlink(),
+            "der Symlink bleibt unberuehrt"
+        );
+    }
 }
 
 /// Ein fehlendes Inventar ist ein Dateisystemfehler, 20.
