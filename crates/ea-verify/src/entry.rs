@@ -10,8 +10,9 @@ use ea_archive::ArchiveInventory;
 use ea_chain::{ChainNode, ChainNodeKind, CheckpointClaim};
 use ea_format::{
     DecodedEvidencePayloadV1, EntryPackageV1, EvidenceObjectV1, GrantKindV1, GrantPlanItemV1,
-    GrantPlanV1, GrantV1, Parsed, ReceiptV1,
+    GrantPlanV1, GrantV1, ManifestCoreFieldsV1, Parsed, ReceiptV1,
 };
+use ea_trust::{EffectiveWriterTransitionV1, SelectedRegistryHead};
 use ea_types::{EntryHash, ObjectHash};
 
 /// Der eigene Code von Gate `grant-plan`.
@@ -47,35 +48,83 @@ pub(crate) fn entry_chain_node(entry: &Parsed<EntryPackageV1>) -> ChainNode {
     }
 }
 
-/// Behauptet das Manifest einen Schreiberwechsel, den dieser Lauf nicht
-/// nachpruefen kann?
+/// Traegt die Aussage des Manifests ueber den Schreiberwechsel gegen den
+/// fuer seine Sequenz gewaehlten Kopf?
 ///
-/// FAIL-CLOSED UND AUSDRUECKLICH KEINE PRUEFUNG. `design.md` §14.1 Schritt 5
-/// verlangt, dass ein gesetztes `writerTransitionEventHash` auf ein im
-/// Trust-Katalog aufloesbares, fuer diese Sequenz WIRKSAMES
-/// `writerTransition`-Ereignis zeigt. Diese Aufloesung ist von `ea-verify` aus
-/// nicht erreichbar: `ea-trust` haelt sowohl
-/// `VerifiedTrustInner::catalog` als auch
-/// `CandidateState::writer_transition_object_hash` `pub(crate)`
-/// (`crates/ea-trust/src/anchor.rs:128`, `crates/ea-trust/src/resolver.rs:32`),
-/// und `SelectedRegistryHead` gibt keinen Uebergang heraus. `ea-trust` ist
-/// geschlossen und wird dafuer nicht aufgebohrt.
+/// `design.md`:669 ist die Norm: `writerTransitionEventHash` ist GENAU DANN
+/// 32 Byte lang, wenn sich das Writer-Zertifikat gegenueber dem direkten
+/// Vorgaenger aendert, und nennt dann den `objectHash` des WIRKSAMEN
+/// Root-signierten `writerTransition`-Ereignisses; ein fehlender,
+/// zusaetzlicher oder unpassender Hash ist ein Trust-Fehler des Objekts.
+/// §14.1 Schritt 5 stellt die Pruefung neben Sequenz und Vorgaengerbindung.
 ///
-/// Ein Objekt, dessen Schreiberwechsel sich nicht pruefen laesst, gilt deshalb
-/// als nicht zuordenbar — es wird ISOLIERT, nicht angenommen. Das ist die
-/// konservative Antwort und keine Verifikation: sobald `ea-trust` einen
-/// Zugriff auf die wirksamen Uebergaenge herausgibt, tritt hier die echte
-/// Pruefung an ihre Stelle. Ein Vergleich gegen die blosse Anwesenheit des
-/// Objekts im Inventar waere ausdruecklich KEIN Ersatz — Katalogmitgliedschaft
-/// ist keine Autorisierung, und eine Pruefung, die wie eine aussieht, ohne eine
-/// zu sein, ist schlimmer als die Verweigerung.
-pub(crate) fn claims_unverifiable_writer_transition(entry: &Parsed<EntryPackageV1>) -> bool {
-    entry
-        .value()
-        .manifest()
-        .fields()
-        .writer_transition_event_hash
-        .is_some()
+/// Bis Stufe 5 stand hier eine Pauschalabweisung: `ea-trust` gab den
+/// wirksamen Uebergang nicht heraus, und jedes gesetzte Feld wurde isoliert.
+/// Seit [`SelectedRegistryHead::effective_writer_transition`] existiert, tritt
+/// die Regel selbst an diese Stelle — siehe [`transition_claim_holds`].
+///
+/// # Warum die Pruefung keinen Vorgaenger liest
+///
+/// Die Norm spricht vom „direkten Vorgaenger", die Pruefung liest den
+/// Eintrag `N` trotzdem nicht. Der Uebergang bindet den VERTRAUTEN KOPF
+/// selbst: das Root-signierte Transitionsobjekt traegt `previous_entry_hash`
+/// — den `entryHash` des letzten Eintrags des alten Writers — und
+/// `effective_from_sequence`, und `ea-trust` gibt beides als ZUSTAND des
+/// gewaehlten Kopfes heraus, nicht als Katalogobjekt: ein Uebergang, den kein
+/// Ereignis der Linie angewandt hat, erscheint dort gar nicht. Ob „sich das
+/// Writer-Zertifikat gegenueber dem direkten Vorgaenger aendert", sagt damit
+/// der Kopf, an dessen Sequenz und an dessen Vorgaengerhash der Eintrag
+/// gemessen wird. Ein Blick in das Inventar waere schwaecher, nicht staerker:
+/// der Vorgaenger kann dort fehlen, und seine Anwesenheit bewiese keine
+/// Autorisierung — Katalogmitgliedschaft ist keine. Die gewoehnliche
+/// Vorgaengerbindung von `N + 1` an `N` bleibt Sache von Gate
+/// `chain-position` ueber die Knotenmenge; derselbe `previous_entry_hash`
+/// geht in den [`ChainNode`].
+pub(crate) fn writer_transition_claim_holds(
+    entry: &Parsed<EntryPackageV1>,
+    selected: &SelectedRegistryHead,
+) -> bool {
+    transition_claim_holds(
+        entry.value().manifest().fields(),
+        selected.effective_writer_transition(),
+    )
+}
+
+/// Der Kern der Transitionsregel, ohne Kopf und ohne Paket — damit jede
+/// einzelne Bedingung fuer sich falsifizierbar ist.
+///
+/// `t` ist der wirksame Uebergang des Kopfes, sofern seine
+/// `effective_from_sequence` die Sequenz des Eintrags ist; ein Uebergang, der
+/// an einer anderen Sequenz wirksam wurde, ist fuer diesen Eintrag keiner.
+/// Dann gilt, ueber dem Paar aus Manifestfeld und `t`:
+///
+/// - `(None, None)`: traegt — Genesis oder unveraenderter Writer;
+/// - `(Some(hash), Some(t))`: traegt genau dann, wenn `hash` der Objekthash
+///   des Uebergangs ist, `previous_entry_hash` der des Uebergangs ist und
+///   `writer_certificate_hash` der neue Writer;
+/// - `(Some(_), None)`: zusaetzlich — traegt nicht;
+/// - `(None, Some(_))`: fehlend — traegt nicht.
+///
+/// Die dritte Bindung ist an der Aufrufstelle bereits durch die Aufloesung
+/// des laufenden Writers gedeckt — auf dem Kopf, der den Uebergang traegt,
+/// ist nur der neue Writer aktiv. Sie steht trotzdem hier, weil die Regel
+/// ueber dem OBJEKT formuliert ist und ihre Aussage nicht an der Reihenfolge
+/// der Gates haengen soll.
+fn transition_claim_holds(
+    fields: &ManifestCoreFieldsV1,
+    transition: Option<&EffectiveWriterTransitionV1>,
+) -> bool {
+    let transition = transition
+        .filter(|transition| transition.effective_from_sequence() == fields.chain_sequence);
+    match (fields.writer_transition_event_hash, transition) {
+        (None, None) => true,
+        (Some(hash), Some(transition)) => {
+            hash == transition.object_hash()
+                && fields.previous_entry_hash == Some(transition.previous_entry_hash())
+                && fields.writer_certificate_hash == transition.new_writer_certificate_hash()
+        }
+        (Some(_), None) | (None, Some(_)) => false,
+    }
 }
 
 /// Gate `grant-plan` ueber GENAU EIN Eintragspaket.
@@ -250,4 +299,138 @@ pub(crate) fn standard_checkpoint_claim(
         head_entry_hash: fields.head_entry_hash,
         checkpoint_object_hash: evidence.object_hash(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Der Transitionskern, Bedingung fuer Bedingung.
+    //!
+    //! Die Integrationszeugen in `tests/writer_transition.rs` messen die Regel
+    //! ueber einen ganzen Bestand; dort deckt die Aufloesung des laufenden
+    //! Writers die dritte Bindung schon vor dem Kern ab. Hier steht jede
+    //! Bedingung fuer sich, gegen einen Uebergang aus
+    //! `EffectiveWriterTransitionV1::fixture` (Merkmal `test-support` von
+    //! `ea-trust`, nur als Dev-Dependency).
+
+    use ea_format::ManifestCoreFieldsV1;
+    use ea_trust::EffectiveWriterTransitionV1;
+    use ea_types::{
+        CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, OrganizationId,
+        RegistryVersion,
+    };
+
+    use super::transition_claim_holds;
+
+    fn hash32(byte: u8) -> Hash32 {
+        Hash32::try_from(&[byte; 32][..]).expect("32 Bytes")
+    }
+
+    fn certificate(byte: u8) -> CertificateHash {
+        CertificateHash::from(ObjectHash::from(hash32(byte)))
+    }
+
+    const SEQUENCE: u64 = 7;
+
+    fn transition() -> EffectiveWriterTransitionV1 {
+        EffectiveWriterTransitionV1::fixture(
+            ObjectHash::from(hash32(0x01)),
+            certificate(0x02),
+            certificate(0x03),
+            ChainSequence::new(SEQUENCE),
+            EntryHash::from(hash32(0x04)),
+        )
+    }
+
+    fn fields(
+        sequence: u64,
+        previous_entry_hash: Option<EntryHash>,
+        writer: CertificateHash,
+        claim: Option<ObjectHash>,
+    ) -> ManifestCoreFieldsV1 {
+        ManifestCoreFieldsV1 {
+            organization_id: OrganizationId::try_from(&[0x21; 16][..]).expect("16 Bytes"),
+            chain_id: ChainId::try_from(&[0x22; 16][..]).expect("16 Bytes"),
+            chain_sequence: ChainSequence::new(sequence),
+            previous_entry_hash,
+            writer_certificate_hash: writer,
+            writer_transition_event_hash: claim,
+            registry_version: RegistryVersion::new(1),
+            registry_head_hash: [0; 32],
+            initial_grant_plan_hash: [0; 32],
+            nonce: [0; 12],
+        }
+    }
+
+    /// Das Manifest, das den Uebergang aus [`transition`] EXAKT beansprucht.
+    fn exact_claim() -> ManifestCoreFieldsV1 {
+        let transition = transition();
+        fields(
+            SEQUENCE,
+            Some(transition.previous_entry_hash()),
+            transition.new_writer_certificate_hash(),
+            Some(transition.object_hash()),
+        )
+    }
+
+    #[test]
+    fn no_claim_and_no_transition_holds() {
+        let manifest = fields(
+            SEQUENCE,
+            Some(EntryHash::from(hash32(0x09))),
+            certificate(0x02),
+            None,
+        );
+        assert!(transition_claim_holds(&manifest, None));
+    }
+
+    #[test]
+    fn the_exact_claim_holds() {
+        assert!(transition_claim_holds(&exact_claim(), Some(&transition())));
+    }
+
+    #[test]
+    fn a_missing_claim_does_not_hold() {
+        let mut manifest = exact_claim();
+        manifest.writer_transition_event_hash = None;
+        assert!(!transition_claim_holds(&manifest, Some(&transition())));
+    }
+
+    #[test]
+    fn an_additional_claim_does_not_hold() {
+        let manifest = exact_claim();
+        assert!(!transition_claim_holds(&manifest, None));
+    }
+
+    #[test]
+    fn a_claim_naming_another_object_does_not_hold() {
+        let mut manifest = exact_claim();
+        manifest.writer_transition_event_hash = Some(ObjectHash::from(hash32(0x99)));
+        assert!(!transition_claim_holds(&manifest, Some(&transition())));
+    }
+
+    #[test]
+    fn a_claim_binding_another_predecessor_does_not_hold() {
+        let mut manifest = exact_claim();
+        manifest.previous_entry_hash = Some(EntryHash::from(hash32(0x99)));
+        assert!(!transition_claim_holds(&manifest, Some(&transition())));
+    }
+
+    #[test]
+    fn a_claim_by_the_old_writer_does_not_hold() {
+        let mut manifest = exact_claim();
+        manifest.writer_certificate_hash = transition().old_writer_certificate_hash();
+        assert!(!transition_claim_holds(&manifest, Some(&transition())));
+    }
+
+    #[test]
+    fn a_transition_effective_at_another_sequence_is_none_for_this_entry() {
+        // Der Uebergang gilt ab `SEQUENCE`; fuer den Eintrag danach ist er
+        // keiner mehr — ein Hash dort ist zusaetzlich, kein Hash dort traegt.
+        let mut later_claim = exact_claim();
+        later_claim.chain_sequence = ChainSequence::new(SEQUENCE + 1);
+        assert!(!transition_claim_holds(&later_claim, Some(&transition())));
+        let mut later_plain = later_claim;
+        later_plain.writer_transition_event_hash = None;
+        assert!(transition_claim_holds(&later_plain, Some(&transition())));
+    }
 }

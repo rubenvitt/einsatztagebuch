@@ -51,8 +51,18 @@ pub enum WriterError {
     ReauthPurposeMismatch,
     /// Der Nachweis gehoert zu einer anderen Bindung.
     ReauthBindingMismatch,
-    /// Eine zurueckgespielte Sicherung verlangt den externen
-    /// Kopfabgleich, bevor wieder finalisiert werden darf.
+    /// Der lokale Kettenkopf widerspricht einer externen Aussage ueber die
+    /// Kette, und der externe Kopfabgleich muss vor jeder Finalisierung
+    /// stattfinden.
+    ///
+    /// Zwei Wege fuehren hierher: eine zurueckgespielte Sicherung, deren
+    /// gewaehlter Head eine andere Sequenz vorschlaegt als die, die aus den
+    /// committeten Bytes folgt — und ein wirksamer Writer-Uebergang, dessen
+    /// `previous_entry_hash` nicht der `entryHash` des lokal verifizierten
+    /// Kopfes ist. Beides ist dieselbe Lage: die Kette, die dieser Bestand
+    /// zeigt, ist nicht die, gegen die Root oder der Server gesprochen haben,
+    /// und der neue Writer muss sich gegen Server, Reader oder einen externen
+    /// signierten Checkpoint abgleichen, bevor er aktiv wird.
     HeadReconciliationRequired,
     /// Die gebundene `chain_id` ist nicht die des gewaehlten Registry-Head.
     ///
@@ -61,6 +71,33 @@ pub enum WriterError {
     /// koennte, und ein dort geminteter Genesis-Knoten machte den Bestand
     /// dauerhaft unfinalisierbar.
     ChainIdMismatch,
+    /// Das Bindungszertifikat ist nicht der LAUFENDE Writer des gewaehlten
+    /// Head.
+    ///
+    /// Der LOKALE Fehler eines zurueckgespielten alten Writers — oder eines
+    /// neuen vor seinem Change 3. Er faellt in Schritt 3, vor dem Nachweis,
+    /// vor jedem Anspruch und vor jedem Geheimnis; bisher erfuhr der Writer
+    /// das erst vom Server (`EA-COMMIT-WRITER-REVOKED`). Die Familie
+    /// `EA-WRITER-` gehoert den lokalen Finalisierungsfehlern, und dieser
+    /// Code ist deshalb ausdruecklich NICHT der Servercode.
+    WriterRevoked,
+    /// An der vorgeschlagenen Sequenz wird der Uebergang wirksam, und der
+    /// Aufrufer wollte einen Einsatz abschliessen.
+    ///
+    /// Die erste Sequenz des neuen Writers traegt GENAU EINEN `keyTransition`
+    /// (`design.md`:669: der Transition-Hash ist gesetzt, wenn sich das
+    /// Writer-Zertifikat gegenueber dem Vorgaenger aendert — und nur dann).
+    WriterTransitionRequired,
+    /// Ein `keyTransition` wurde verlangt, aber an der vorgeschlagenen Sequenz
+    /// wird kein Uebergang auf diesen Writer wirksam — die Linie kennt keinen,
+    /// oder seine Sequenz ist eine andere.
+    ///
+    /// Der Fall, dass der Uebergang wirksam ist, aber einen ANDEREN letzten
+    /// Eintrag des alten Writers nennt als den, der lokal committet liegt, ist
+    /// KEIN Mismatch dieser Art, sondern [`Self::HeadReconciliationRequired`]:
+    /// dort widersprechen sich lokaler Kopf und Root-signierte Aussage ueber
+    /// die Kette, und das verlangt den externen Kopfabgleich.
+    WriterTransitionMismatch,
     /// Es liegt schon eine vorbereitete Abschlussmarke.
     PreparedFinalizationPresent,
     /// Es liegt keine vorbereitete Abschlussmarke.
@@ -128,6 +165,9 @@ impl WriterError {
             Self::ReauthBindingMismatch => "EA-WRITER-REAUTH-BINDING-MISMATCH",
             Self::HeadReconciliationRequired => "EA-WRITER-HEAD-RECONCILIATION-REQUIRED",
             Self::ChainIdMismatch => "EA-WRITER-CHAIN-ID-MISMATCH",
+            Self::WriterRevoked => "EA-WRITER-REVOKED",
+            Self::WriterTransitionRequired => "EA-WRITER-TRANSITION-REQUIRED",
+            Self::WriterTransitionMismatch => "EA-WRITER-TRANSITION-MISMATCH",
             Self::PreparedFinalizationPresent => "EA-WRITER-PREPARED-FINALIZATION-PRESENT",
             Self::NoPreparedFinalization => "EA-WRITER-NO-PREPARED-FINALIZATION",
             Self::PreparedFinalizationUnreadable => "EA-WRITER-PREPARED-FINALIZATION-UNREADABLE",

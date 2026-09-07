@@ -53,6 +53,7 @@
 //! Auswahlzeitpunkt macht nur das gemeldete VERTRAUENSALTER monoton.
 #![forbid(unsafe_code)]
 
+mod content;
 mod entropy;
 mod error;
 mod fault;
@@ -64,6 +65,7 @@ mod operator_commitment;
 mod preview;
 mod recover;
 
+pub use content::KeyTransitionInputV1;
 pub use entropy::EntropyDraws;
 #[cfg(any(test, feature = "test-support"))]
 pub use entropy::{entropy_draws, reset_entropy_draws};

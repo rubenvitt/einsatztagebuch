@@ -174,6 +174,16 @@ pub struct HeadOptions {
     pub revoked_from_sequence: Option<ChainSequence>,
     pub binding_instance_key_thumbprint_override: Option<KeyThumbprint>,
     pub writer_chain_id_override: Option<ChainId>,
+    /// Der `previous_entry_hash` eines Writer-Uebergangs.
+    ///
+    /// Ohne diese Ueberschreibung traegt JEDER Uebergang der Fixture den
+    /// festen Platzhalter `hash32(0x35)`. Ein Zeuge, der bezeugen will, dass
+    /// `SelectedRegistryHead::effective_writer_transition` das Feld des
+    /// veroeffentlichten Objekts DURCHREICHT und keinen Platzhalter, braucht
+    /// einen Wert, den er selbst gewaehlt hat; der Writer-Zeuge der Stufe 5
+    /// braucht den Hash seines ECHTEN letzten Eintrags. `None` laesst das
+    /// bestehende Verhalten und damit jede bestehende Fixture unveraendert.
+    pub writer_transition_previous_entry_hash: Option<EntryHash>,
     pub change_override: ChangeOverride,
     pub direct_authorization_action: Option<u8>,
     pub event_authorization_action: Option<u8>,
@@ -245,6 +255,7 @@ impl Default for HeadOptions {
             revoked_from_sequence: None,
             binding_instance_key_thumbprint_override: None,
             writer_chain_id_override: None,
+            writer_transition_previous_entry_hash: None,
             change_override: ChangeOverride::Exact,
             direct_authorization_action: None,
             event_authorization_action: None,
@@ -1027,7 +1038,9 @@ fn direct_payload(
                 effective_from_sequence: ChainSequence::new(
                     effective_from.unwrap_or(event_effective.get()),
                 ),
-                previous_entry_hash: EntryHash::from(hash32(0x35)),
+                previous_entry_hash: options
+                    .writer_transition_previous_entry_hash
+                    .unwrap_or_else(|| EntryHash::from(hash32(0x35))),
                 reason_code: 1,
             },
             authorization_hash,

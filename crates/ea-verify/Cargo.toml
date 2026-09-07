@@ -16,6 +16,11 @@ ea-trust.workspace = true
 ea-types.workspace = true
 
 [dev-dependencies]
+# `test-support` NUR fuer die Einheitszeugen des Transitionskerns in
+# `src/entry.rs`: `EffectiveWriterTransitionV1::fixture` ist der einzige Weg,
+# einen wirksamen Uebergang ohne ganze Registry-Linie in der Hand zu halten.
+# Dev-Dependency, also weder im wasm32-Lib-Graphen noch produktiv sichtbar.
+ea-trust = { workspace = true, features = ["test-support"] }
 ed25519-dalek.workspace = true
 # Nur fuer die per #[path] eingebundenen Fixture-Module von ea-archive und
 # ea-format, die Objekthashes hexadezimal in Pfadhinweise schreiben und

@@ -70,6 +70,24 @@ ea-operator.workspace = true
 # Fixtures selbst mit.
 ea-reader.workspace = true
 ea-schema.workspace = true
+# Die Commit-Anfrage der Stufe 3 (`EntryCommitRequestV1`) als EINGANG in
+# `ea_sync_server::validate_commit` fuer `e2e_writer_transition`: der Zeuge
+# baut sie aus den Bytes, die der Writer WIRKLICH veroeffentlicht hat, und
+# dem Grant-Plan, den `ea_writer::build_grant_plan` aus dem gewaehlten Kopf
+# bildet. Ohne diese Kante gaebe es keinen Typ, in dem Eintrag, Plan und
+# sortierte Grants gemeinsam an die Serverregel gereicht werden koennten.
+ea-sync-protocol.workspace = true
+# Die Serverregel des Commits (`ea_sync_server::validate_commit`,
+# `EA-COMMIT-WRITER-REVOKED`, `EA-COMMIT-WRITER-TRANSITION`) als DRITTES Tor
+# des Writer-Uebergangs in `e2e_writer_transition`. Die Kante gehoert
+# HIERHER und in keine Bibliotheks-Crate: `ea-admin` haelt bewusst keine
+# `ea-writer`-Kante, `ea-writer` keine Serverkante, und die Zusammenschau —
+# Verwaltung bereitet vor und aktiviert, der neue Writer finalisiert, der
+# Server haelt beide Eintraege gegen den ECHTEN `SelectedRegistryHead` (er
+# implementiert `ActiveRegistryHeadV1`, `crates/ea-sync-server/src/ports.rs`)
+# — hat nur in dieser Testcrate einen Ort. Ein Datenbankserver ist dafuer
+# nicht noetig; der Zeuge ruft die synchrone Pruefung direkt.
+ea-sync-server.workspace = true
 # Die eingefrorenen Vektoren und ihr Manifestmodell. `ea-testkit` haelt
 # `jsonschema` von sich fern: die Schemavalidierung findet ausschliesslich in
 # dieser Testcrate statt.

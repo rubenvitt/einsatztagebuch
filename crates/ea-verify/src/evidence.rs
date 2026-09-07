@@ -28,8 +28,13 @@
 //! das Token nicht nach den 32 Bytes aus
 //! `ea_crypto::cose_sign1_ctt_imprint` DURCHSUCHT: ein Fund darin waere kein
 //! Nachweis der Bindung, und eine Pruefung, die wie eine aussieht, ohne eine zu
-//! sein, ist schlimmer als ihre Verweigerung — dieselbe Regel, nach der
-//! `crate::entry::claims_unverifiable_writer_transition` entscheidet.
+//! sein, ist schlimmer als ihre Verweigerung — dieselbe Regel, nach der der
+//! Schreiberwechsel bis Stufe 5 pauschal isoliert wurde, bis `ea-trust` den
+//! wirksamen Uebergang als Kopfzustand herausgab und
+//! `crate::entry::writer_transition_claim_holds` die echte Regel rechnen
+//! konnte. Dieses Gate haelt KEINEN Transitionsanspruch; der wird an genau
+//! einer Stelle gerechnet, im Eintragsdurchlauf von `crate::archive`, wo der
+//! fuer die Sequenz gewaehlte Kopf neben dem authentischen Manifest steht.
 //!
 //! Fail-closed bleibt es trotzdem: ein Token qualifiziert hier nur, wenn seine
 //! ERREICHBAREN Bindungen tragen; die TSA-Verifikation selbst ist die

@@ -45,8 +45,8 @@ use crate::{
     SilentObserver, VerificationReportV1, VerifyError,
     destruction::record_destructions,
     entry::{
-        claims_unverifiable_writer_transition, entry_chain_node, grant_plan_finding, orphan_grants,
-        receipt_bindings_hold, receipt_for, standard_checkpoint_claim,
+        entry_chain_node, grant_plan_finding, orphan_grants, receipt_bindings_hold, receipt_for,
+        standard_checkpoint_claim, writer_transition_claim_holds,
     },
     evidence::run_evidence_gate,
     gates::StageProtocol,
@@ -383,8 +383,20 @@ pub fn verify_archive_observed(
                 // `ForeignChainId` und kippte damit die Aussage ueber den
                 // GANZEN Bestand. Er ist nicht zuordenbar — und ein nicht
                 // zuordenbarer Eintrag darf nie als blosse Luecke erscheinen.
+                //
+                // DASSELBE fuer einen Schreiberwechsel, der nicht traegt
+                // (`design.md`:669: fehlend, zusaetzlich oder unpassend ist
+                // ein Trust-Fehler des Objekts). Die Regel wird HIER
+                // gerechnet und nirgends sonst: dies ist die eine Stelle, an
+                // der der fuer die Sequenz gewaehlte Kopf — und damit der auf
+                // ihm wirksame Uebergang — neben dem authentischen Manifest
+                // steht. Ein Befund ist ein Befund ueber EIN Objekt, nie ein
+                // `Err` des Laufs, und er heisst `unattributable`: der
+                // Eintrag behauptet einen Wechsel, den die Linie so nicht
+                // vollzogen hat, und ist damit niemandem zurechenbar — genau
+                // wie ein Eintrag, dessen Schreiber sich nicht aufloest.
                 if fields.chain_id != anchor.chain_id()
-                    || claims_unverifiable_writer_transition(entry)
+                    || !writer_transition_claim_holds(entry, &selected)
                 {
                     quarantine_unattributable(&mut report, object_hash);
                     continue;
@@ -416,8 +428,12 @@ pub fn verify_archive_observed(
     // ueberhaupt keine Signatur, sondern parst nur
     // (`crates/ea-trust/src/catalog.rs:17-66`). Bliebe die blosse Anwesenheit
     // des Autorisierungsobjekts im Inventar — und Inventarmitgliedschaft ist
-    // KEINE Autorisierung, genau wie bei
-    // [`claims_unverifiable_writer_transition`]. Wer den Stummel trotzdem als
+    // KEINE Autorisierung. Der Schreiberwechsel stand bis Stufe 5 in
+    // derselben Lage und wird seither gegen den ZUSTAND des gewaehlten
+    // Kopfes gerechnet, nie gegen den Katalog
+    // ([`writer_transition_claim_holds`]); fuer die
+    // `destructionAuthorization` gibt es diesen Zustand noch nicht. Wer den
+    // Stummel trotzdem als
     // Knoten fuehrte, liesse jeden, der ein `.eds` schreiben kann, einen
     // Eintrag spurlos ersetzen. Also gilt `design.md`:1614: ein Stummel ohne
     // vollstaendige Pruefkette BLEIBT EINE LUECKE — das fehlende `.eip`

@@ -290,7 +290,7 @@ unterschieden per `payload_wraps_core`) und werden im signierten
 Bootstrap-Transkript festgehalten, statt eine lokale Auditidentität vorzutäuschen,
 die es vor dem Bootstrap nicht gab.
 
-- [ ] **Step 4: Run the full authorization attack matrix**
+- [x] **Step 4: Run the full authorization attack matrix**
 
 Run: `cargo test --locked -p ea-admin --test authorization --test root_ceremony`
 und `cargo test --locked -p ea-trust`
@@ -576,7 +576,7 @@ Run: `cargo test --locked -p ea-admin --test operator_binding && cargo test --lo
 
 Expected: FAIL because provisioning/replacement orchestration and native account-recreation evidence are absent; existing session contract checks already cover wrong accounts, missing/replaced instance keys, challenge verification, lock invalidation and expiry.
 
-- [ ] **Step 3: Implement external identity-check to signed binding flow**
+- [x] **Step 3: Implement external identity-check to signed binding flow**
 
 The implementation now includes the native host and the separate offline authority.
 The signed binding pair and encrypted profile are committed atomically before an
@@ -852,7 +852,7 @@ Die echten Lücken, gegen die der Abschnitt zu messen ist:
    `#[tokio::test]` übersetzt in keiner der beiden Testcrates. `reason_code` ist auf dem Draht ein
    blosser `uint` ohne Tabelle in Spec oder Baum; der Dienst reicht ihn durch und erfindet keine.
 
-- [ ] **Step 1: Write transition-hash and old-Writer rejection tests**
+- [x] **Step 1: Write transition-hash and old-Writer rejection tests**
 
 ```rust
 #[test]
@@ -875,13 +875,13 @@ fn first_new_writer_entry_binds_exact_transition_hash() {
 }
 ```
 
-- [ ] **Step 2: Run transition tests and verify missing service**
+- [x] **Step 2: Run transition tests and verify missing service**
 
 Run: `cargo test --locked -p ea-admin --test writer_transition && cargo test --locked -p ea-system-tests --test e2e_writer_transition`
 
 Expected: FAIL because Writer transition workflow does not exist.
 
-- [ ] **Step 3: Implement public transition plus encrypted chain Entry**
+- [x] **Step 3: Implement public transition plus encrypted chain Entry**
 
 Bind old/new Writer certificates, effective sequence, previous trusted chain head, Admin authorization, Root signature, and reason code/public metadata in the transition. Reconcile the incoming Writer against server, Reader, or external signed checkpoint before activation. Revoke old Writer from transition sequence. Finalize `keyTransition` through the normal Writer path with encrypted organizational reason. Require exact transition hash only on the first Entry whose Writer certificate changes; reject missing/additional/mismatched hashes.
 
@@ -897,13 +897,13 @@ liest ihn aus seinem gewählten Kopf; an `effective_from_sequence` darf der neue
 `keyTransition` finalisieren, nie einen Einsatz. `ea-admin` signiert weiterhin nichts —
 `RootCeremonyService::publish_authorized_target` bleibt der einzige Signierweg.
 
-- [ ] **Step 4: Run lost-old-Writer, restored-backup, and concurrent-old/new tests**
+- [x] **Step 4: Run lost-old-Writer, restored-backup, and concurrent-old/new tests**
 
 Run: `cargo test --locked -p ea-admin --test writer_transition && cargo test --locked -p ea-system-tests --test e2e_writer_transition -- --test-threads=1`
 
 Expected: PASS; a restored stale Writer remains blocked and only the authorized new Writer advances the chain.
 
-- [ ] **Step 5: Commit Writer transition**
+- [x] **Step 5: Commit Writer transition**
 
 ```bash
 git add crates/ea-admin crates/ea-trust crates/ea-writer crates/ea-sync-server crates/ea-verify apps/cli tests/ea-system-tests Cargo.lock
@@ -929,7 +929,7 @@ git commit -m "feat(admin): transition the single active Writer"
 - Consumes: Admin service DTOs and native re-authentication.
 - Produces: separated pending/fingerprint/authorization/Root-import steps and no Admin content access.
 
-- [ ] **Step 1: Write separation and full-fingerprint tests**
+- [x] **Step 1: Write separation and full-fingerprint tests**
 
 ```tsx
 it('does not collapse request fingerprint approval and Root import', async () => {
@@ -942,23 +942,23 @@ it('does not collapse request fingerprint approval and Root import', async () =>
 })
 ```
 
-- [ ] **Step 2: Run Admin UI tests and verify missing UI**
+- [x] **Step 2: Run Admin UI tests and verify missing UI**
 
 Run: `pnpm --dir apps/desktop test --run AdminPage`
 
 Expected: FAIL because Admin commands/components do not exist.
 
-- [ ] **Step 3: Implement guided, explicit ceremonies**
+- [x] **Step 3: Implement guided, explicit ceremonies**
 
 Separate pending request, full fingerprint plus QR/second channel, Admin authorization, offline Root signing/export/import, and resulting Registry publication. Require fresh native re-authentication before Admin/Root actions and conscious key-source selection. Show two-Admin readiness, key backup state, Registry age/lease, policy profile, Evidence policy, last Recovery test, Writer transition state, and every device-posture requirement as `bestätigt`, `nicht erfüllt`, or `nicht automatisch prüfbar` with its evidence code. Never render `Unknown` as green or production-ready; export unresolved items to the Go-live evidence checklist. When future-clock skew blocks, offer the clock-release wizard only to a verified Admin, display floor/wall clock/signed limit/expiry, require an allowlisted justification plus re-authentication, and state explicitly that the release changes neither time floor, Registry expiry, nor lease. Revocation copy states that past grants/decrypted data cannot be recalled. Do not show incident content or enable Reader functions from Admin capability.
 
-- [ ] **Step 4: Run keyboard, wrong-role, stale-session, and E2E ceremony tests**
+- [x] **Step 4: Run keyboard, wrong-role, stale-session, and E2E ceremony tests**
 
 Run: `pnpm --dir apps/desktop test --run && pnpm --dir apps/desktop exec playwright test tests/e2e/admin-trust.spec.ts`
 
 Expected: PASS; all ceremony steps have headings/statuses, focus restoration, accessible QR alternative, and no role escalation.
 
-- [ ] **Step 5: Commit Administration UI workstream**
+- [x] **Step 5: Commit Administration UI workstream**
 
 ```bash
 git add apps/desktop tests/e2e pnpm-lock.yaml
@@ -983,7 +983,7 @@ git commit -m "feat(desktop): add guided Trust administration"
 - Consumes: explicit external anchor, encrypted key container/PKCS#11 ports.
 - Produces: full required CLI commands including `grant` and `recovery-test`; no key-source auto-discovery or plaintext export fallback.
 
-- [ ] **Step 1: Write full grammar and key-source separation tests**
+- [x] **Step 1: Write full grammar and key-source separation tests**
 
 ```rust
 #[test]
@@ -997,23 +997,23 @@ fn grant_requires_distinct_recovery_authority_authorization_and_recipient_inputs
 }
 ```
 
-- [ ] **Step 2: Run CLI tests and verify missing commands/providers**
+- [x] **Step 2: Run CLI tests and verify missing commands/providers**
 
 Run: `cargo test --locked -p ea-key-provider --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
 
 Expected: FAIL because encrypted-container/PKCS#11 and full commands are absent.
 
-- [ ] **Step 3: Implement explicit key-source adapters and complete commands**
+- [x] **Step 3: Implement explicit key-source adapters and complete commands**
 
 Implement the full grammar from §16.1, always requiring `--trust-anchor`. Encrypted containers use a reviewed password-based KDF/AEAD configuration pinned in the dependency ADR and restrictive file permissions; PKCS#11 uses explicit module/token/key identifiers and user presence/PIN through non-logging secure input. Never infer a Root/Recovery/HGA/Approver key by scanning media. `verify` runs before `decrypt`, `grant`, `export`, and `recovery-test`. Output supports stable text/JSON schemas and established exit codes.
 
-- [ ] **Step 4: Run wrong-token, missing-key, target-permission, and grammar tests**
+- [x] **Step 4: Run wrong-token, missing-key, target-permission, and grammar tests**
 
 Run: `cargo test --locked -p ea-key-provider --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
 
 Expected: PASS; no command accepts the archive's own anchor as implicit trust.
 
-- [ ] **Step 5: Commit offline key sources and full CLI**
+- [x] **Step 5: Commit offline key sources and full CLI**
 
 ```bash
 git add crates/ea-key-provider crates/ea-recovery apps/cli Cargo.toml Cargo.lock
@@ -1032,7 +1032,7 @@ git commit -m "feat(recovery): add explicit offline key sources"
 - Consumes: verified Entry, original Recovery grant, Recovery `KemDecapsulator`, HGA `DigestSigner`, `VerifiedGrantAuthorization`, recipient certificate, `EffectiveNow`, fresh `OperatorSessionProof`, and `LocalAuditService`.
 - Produces: `HistoricalGrantService::create -> ExactObjectBytes` with no `.eip` mutation.
 
-- [ ] **Step 1: Write separation, explicit-target, and expiry tests**
+- [x] **Step 1: Write separation, explicit-target, and expiry tests**
 
 ```rust
 #[tokio::test]
@@ -1052,13 +1052,13 @@ async fn expiry_and_clock_rollback_block_creation_and_opening() {
 }
 ```
 
-- [ ] **Step 2: Run Re-grant tests and verify workflow is absent**
+- [x] **Step 2: Run Re-grant tests and verify workflow is absent**
 
 Run: `cargo test --locked -p ea-recovery --test historical_grant && cargo test --locked -p ea-system-tests --test e2e_historical_grant`
 
 Expected: FAIL because Authorization and historical grant creation are absent.
 
-- [ ] **Step 3: Implement separate proof-state inputs**
+- [x] **Step 3: Implement separate proof-state inputs**
 
 ```rust
 pub async fn create(
@@ -1076,13 +1076,13 @@ pub async fn create(
 
 Authorization binds organization, Registry head/sequence, sorted explicit Entry hashes, recipient thumbprint/certificate, purpose, and `expiresAt`, with two valid active distinct-subject `historicalGrantApprove` signatures. Require native re-authentication specifically for `ReauthPurpose::HistoricalRegrant`, matching the active bound operator and current device; no generic Admin or Recovery session proof is accepted. Recompute `effectiveNow`; decapsulate CEK only from original initial Recovery grant in protected memory; HPKE-wrap to selected Reader; sign with capability `historicalGrant`; bind original Recovery grant and Authorization hashes. Zero CEK. Preserve exact `.eip` bytes. Before releasing the new grant, flush a signed `historicalRegrant` local audit event containing only Authorization, Entry, original Recovery grant, recipient certificate, and new grant hashes plus outcome. Server and Reader Stage 3/4 checks close acceptance/delivery/open expiry.
 
-- [ ] **Step 4: Run end-to-end create/upload/deliver/open and replay-after-expiry tests**
+- [x] **Step 4: Run end-to-end create/upload/deliver/open and replay-after-expiry tests**
 
 Run: `cargo test --locked -p ea-recovery --test historical_grant && cargo test --locked -p ea-system-tests --test e2e_historical_grant`
 
 Expected: PASS; wrong Entry/recipient/Registry/original grant, duplicate subjects, or expired/replayed authorization fails at every boundary.
 
-- [ ] **Step 5: Commit historical re-grant**
+- [x] **Step 5: Commit historical re-grant**
 
 ```bash
 git add crates/ea-recovery crates/ea-admin tests/ea-system-tests
@@ -1105,7 +1105,7 @@ git commit -m "feat(recovery): issue authorized historical grants"
 - Consumes: independent anchor, unchanged archive copy, `ea.key-inventory/v1`, each explicit backup source, fresh `ReauthPurpose::RecoveryTest` proof, and `LocalAuditService`.
 - Produces: `RecoveryTestService::run`, per-medium results, overall success only if complete, signed or hashed cleartext-free report, and durable signed audit reference.
 
-- [ ] **Step 1: Write incomplete-inventory and challenge-domain tests**
+- [x] **Step 1: Write incomplete-inventory and challenge-domain tests**
 
 ```rust
 #[tokio::test]
@@ -1123,19 +1123,19 @@ async fn signature_backup_signs_only_recovery_test_domain() {
 }
 ```
 
-- [ ] **Step 2: Run Recovery test tests and verify workflow is absent**
+- [x] **Step 2: Run Recovery test tests and verify workflow is absent**
 
 Run: `cargo test --locked -p ea-recovery --test recovery_test && pnpm --dir apps/desktop test --run RecoveryTestWizard`
 
 Expected: FAIL because key inventory/test/report/UI do not exist.
 
-- [ ] **Step 3: Implement read-only full-inventory verification**
+- [x] **Step 3: Implement read-only full-inventory verification**
 
 Verify anchor, full archive/head/Trust/Registry, and deterministic sample from every schema/suite/Writer epoch. For each Root/Admin/Writer/Reader/Recovery/server/Approver/HGA/`deletionAttest` backup, derive public key and compare expected thumbprint/certificate. Sign only a random recovery-test domain challenge for signing keys. For every Recovery backup, open the unchanged setup test Entry in protected memory, validate it, display no plaintext, then zero CEK/plaintext/challenge. For non-exportable device/hardware keys, test provider access, native presence, and certificate binding instead of export.
 
 Report binds test ID, anchor hash, archive head, `effectiveNow`, release/schema/suite versions, pseudonymous medium ID, expected/observed thumbprint, test kind/result, and overall result. No private key or decrypted payload. After report hash/signature verification, record and flush a signed `recoveryTest` local audit event containing only the report hash and overall outcome; bind its event ID into the encrypted local status. UI prompts one medium at a time, shows individual result, and updates last/next-due status only after complete success and audit persistence.
 
-- [ ] **Step 4: Run all key-profile, wrong-media, cleartext, and UI E2E tests**
+- [x] **Step 4: Run all key-profile, wrong-media, cleartext, and UI E2E tests**
 
 Run:
 
@@ -1147,7 +1147,7 @@ pnpm --dir apps/desktop exec playwright test tests/e2e/recovery-test.spec.ts
 
 Expected: PASS; archive/Registry/grants/key status remain byte-for-byte unchanged.
 
-- [ ] **Step 5: Commit guided Recovery testing**
+- [x] **Step 5: Commit guided Recovery testing**
 
 ```bash
 git add crates/ea-recovery apps/desktop tests/e2e schemas/reports
@@ -1167,7 +1167,7 @@ git commit -m "feat(recovery): verify every key backup safely"
 - Consumes: Stage 4 `CorrectionReference`, Writer draft/finalization, verified Reader thread.
 - Produces: `AmendmentDraftService::create_from_reference` and a normal immutable `amendment` Entry.
 
-- [ ] **Step 1: Write exact-reference and original-preservation tests**
+- [x] **Step 1: Write exact-reference and original-preservation tests**
 
 ```rust
 #[tokio::test]
@@ -1180,23 +1180,23 @@ async fn amendment_finalization_preserves_original_bytes_and_links_exactly() {
 }
 ```
 
-- [ ] **Step 2: Run amendment tests and verify Writer half is absent**
+- [x] **Step 2: Run amendment tests and verify Writer half is absent**
 
 Run: `cargo test --locked -p ea-admin --test amendment && pnpm --dir apps/desktop exec playwright test tests/e2e/amendment.spec.ts`
 
 Expected: FAIL because correction-reference import and amendment draft UI do not exist.
 
-- [ ] **Step 3: Implement normal Writer amendment finalization**
+- [x] **Step 3: Implement normal Writer amendment finalization**
 
 Accept only a verified cleartext-free reference with original ID/hash/sequence, then require Writer to enter reason and structured change text; operator snapshot is current signed binding. Validate original exists and reference matches. Use normal review, irreversibility confirmation, grant plan, encryption, commit, and sync path. Reader groups all amendments without hiding/replacing original.
 
-- [ ] **Step 4: Run multiple-amendment, wrong-reference, and original-byte tests**
+- [x] **Step 4: Run multiple-amendment, wrong-reference, and original-byte tests**
 
 Run: `cargo test --locked -p ea-admin --test amendment && pnpm --dir apps/desktop exec playwright test tests/e2e/amendment.spec.ts`
 
 Expected: PASS; arbitrary plain reference text cannot forge a link.
 
-- [ ] **Step 5: Commit amendment workflow**
+- [x] **Step 5: Commit amendment workflow**
 
 ```bash
 git add crates/ea-admin apps/desktop tests/e2e
@@ -1220,7 +1220,7 @@ git commit -m "feat(admin): finalize linked amendments"
 - Consumes: two active `destructionApprove` signers, Registry/time, documented privacy-enable policy, fresh `ReauthPurpose::Destruction` operator proof, and `LocalAuditService`.
 - Produces: `VerifiedDestructionAuthorization`, `DestructionStateMachine::apply`, exact allowed transitions, idempotent event IDs, and signed local audit reference.
 
-- [ ] **Step 1: Write privacy gate, two-Approver, and transition-table tests**
+- [x] **Step 1: Write privacy gate, two-Approver, and transition-table tests**
 
 ```rust
 #[test]
@@ -1246,13 +1246,13 @@ async fn requested_transition_requires_matching_reauth_and_durable_audit() {
 }
 ```
 
-- [ ] **Step 2: Run destruction-core tests and verify failure**
+- [x] **Step 2: Run destruction-core tests and verify failure**
 
 Run: `cargo test --locked -p ea-destruction --test authorization --test transitions`
 
 Expected: FAIL because destruction authorization/state machine do not exist.
 
-- [ ] **Step 3: Implement closed states and event validation**
+- [x] **Step 3: Implement closed states and event validation**
 
 Authorization binds destruction ID, organization, Registry head/sequence, sorted
 target Entry hashes plus sequences, scope, nonfachlicher legal-reason code, and
@@ -1272,13 +1272,13 @@ Creating `requested` additionally requires a fresh native operator proof for `De
 
 Implement only: `None→requested`; `requested→inProgress`; `inProgress→pendingBackupExpiry|completeManagedScope|incompleteUnreachableReplica`; `pendingBackupExpiry→completeManagedScope|incompleteUnreachableReplica`; `incompleteUnreachableReplica→inProgress`. After `inProgress`, there is no cancel. Duplicate identical event is idempotent; same ID/hash with different bytes is a Security Event.
 
-- [ ] **Step 4: Run all valid/invalid/replay transition tests**
+- [x] **Step 4: Run all valid/invalid/replay transition tests**
 
 Run: `cargo test --locked -p ea-destruction --test authorization --test transitions`
 
 Expected: PASS; one Approver, duplicate subject, wrong capability/target, stale Registry, and expired/invalid signatures fail.
 
-- [ ] **Step 5: Commit destruction state core**
+- [x] **Step 5: Commit destruction state core**
 
 ```bash
 git add crates/ea-destruction Cargo.toml Cargo.lock
@@ -1302,7 +1302,7 @@ git commit -m "feat(destruction): authorize append-only destruction states"
 - Consumes: verified authorization, managed replica adapters, archive transaction, server delivery block, Writer finalization.
 - Produces: `DestructionExecutor::{plan,resume}`, exact `.eds`, `DeletionAttestationV1`, and later `destructionEvidence` draft.
 
-- [ ] **Step 1: Write Stub continuity and restart tests**
+- [x] **Step 1: Write Stub continuity and restart tests**
 
 ```rust
 #[test]
@@ -1323,25 +1323,25 @@ async fn restart_resumes_same_destruction_id_without_duplicate_delete() {
 }
 ```
 
-- [ ] **Step 2: Run Stub/resume tests and verify executor is absent**
+- [x] **Step 2: Run Stub/resume tests and verify executor is absent**
 
 Run: `cargo test --locked -p ea-destruction --test stub --test resume && cargo test --locked -p ea-system-tests --test e2e_destruction`
 
 Expected: FAIL because Stub/attestation/executor do not exist.
 
-- [ ] **Step 3: Implement verify-before-delete and attested distributed execution**
+- [x] **Step 3: Implement verify-before-delete and attested distributed execution**
 
 Accept authorization, block server delivery/re-grant, verify full pre-state and sign report, then per managed replica remove ciphertext, all grants, plaintext cache/index or schedule immutable backup expiration. Before removing each original `.eip`, create/flush/verify exact `.eds` containing original signed manifest/signature bytes, Entry/ciphertext/original object hashes, destruction ID, and Authorization hash. Remove `.eip` only after Stub durability. Collect signed attestations with pseudonymous replica ID/type, removed object hashes, result, backup deadline, and execution time.
 
 Reconstruct current state and next action only from authorization/events/attestations; idempotently resume the same ID. Use `pendingBackupExpiry` while immutable deadlines remain, `incompleteUnreachableReplica` for known unreachable/unattested replicas, and `completeManagedScope` only when every managed object/cache is confirmed gone and every deadline elapsed. Prepare `destructionEvidence` with successes, pending/unreachable replicas, Stub hashes, and attestations; finalize through normal Writer flow. Never claim unknown exports/screenshots removed.
 
-- [ ] **Step 4: Run immediate, backup-expiry, unreachable, invalid-Stub, and replay tests**
+- [x] **Step 4: Run immediate, backup-expiry, unreachable, invalid-Stub, and replay tests**
 
 Run: `cargo test --locked -p ea-destruction --test stub --test resume && cargo test --locked -p ea-system-tests --test e2e_destruction -- --test-threads=1`
 
 Expected: PASS; unauthorized file removal is `UnexplainedGap`, not authorized destruction.
 
-- [ ] **Step 5: Commit destruction executor**
+- [x] **Step 5: Commit destruction executor**
 
 ```bash
 git add crates/ea-destruction crates/ea-sync-server crates/ea-reader tests/ea-system-tests
@@ -1361,7 +1361,7 @@ git commit -m "feat(destruction): attest resumable archive destruction"
 - Consumes: policy privacy decision, two-Approver authorization import, destruction state/report DTOs, re-authentication.
 - Produces: explicit irreversible process UI using exact German state copy.
 
-- [ ] **Step 1: Write disabled/privacy and state-copy tests**
+- [x] **Step 1: Write disabled/privacy and state-copy tests**
 
 ```tsx
 it('cannot start when the documented privacy decision is absent', async () => {
@@ -1381,23 +1381,23 @@ it.each([
 })
 ```
 
-- [ ] **Step 2: Run UI tests and verify components are absent**
+- [x] **Step 2: Run UI tests and verify components are absent**
 
 Run: `pnpm --dir apps/desktop test --run DestructionWizard`
 
 Expected: FAIL because destruction UI does not exist.
 
-- [ ] **Step 3: Implement deliberate, non-overclaiming workflow**
+- [x] **Step 3: Implement deliberate, non-overclaiming workflow**
 
 Require target hashes/sequences, scope, nonfachlicher legal-reason code, known storage locations, two Approver signature imports, fresh native re-authentication, and final irreversible confirmation. Show verified pre-report, every replica/attestation, backup deadline, unreachable status, Stub/Evidence state, and exact managed-scope limitation. After `inProgress`, offer resume only, never cancel. Do not display deleted payload or claim physical/WORM/backup deletion without a valid attestation.
 
-- [ ] **Step 4: Run keyboard, restart, pending-backup, and unreachable E2E tests**
+- [x] **Step 4: Run keyboard, restart, pending-backup, and unreachable E2E tests**
 
 Run: `pnpm --dir apps/desktop test --run DestructionWizard && pnpm --dir apps/desktop exec playwright test tests/e2e/destruction.spec.ts`
 
 Expected: PASS; UI returns to the reconstructed same process after restart.
 
-- [ ] **Step 5: Commit destruction UI workstream**
+- [x] **Step 5: Commit destruction UI workstream**
 
 ```bash
 git add apps/desktop tests/e2e pnpm-lock.yaml
@@ -1419,7 +1419,7 @@ git commit -m "feat(desktop): guide controlled destruction"
 - Consumes: all three Stage 5 workstreams plus Writer/Reader/server.
 - Produces: `xtask stage-gate 5` and evidence for primary AK 11, 12, 18, 24, 29, 30, 35, 40, 41, 44, 47, 49, 52, 53.
 
-- [ ] **Step 1: Write cumulative Stage 5 gate test**
+- [x] **Step 1: Write cumulative Stage 5 gate test**
 
 ```rust
 #[test]
@@ -1432,19 +1432,19 @@ fn stage_five_gate_requires_all_workstreams_and_primary_criteria() {
 }
 ```
 
-- [ ] **Step 2: Run the gate and confirm missing evidence fails**
+- [x] **Step 2: Run the gate and confirm missing evidence fails**
 
 Run: `cargo test --locked -p xtask --test stage_gate stage_five`
 
 Expected: FAIL listing incomplete lifecycle, Recovery, destruction, OS-binding, and ledger evidence.
 
-- [ ] **Step 3: Add full organization-lifecycle and fresh-machine evidence**
+- [x] **Step 3: Add full organization-lifecycle and fresh-machine evidence**
 
 Automate bootstrap through Recovery readiness; pending device/fingerprint/Admin/Root activation; Reader revocation boundary; Registry warn/block/lease/rollback/fork/time floor; exact, expiring, one-use administrative clock release; Writer transition; amendment; new Reader without past access; selected historical re-grant with purpose-specific re-authentication; expiry at create/accept/deliver/open; every backup Recovery test; valid/invalid anchor; privacy-disabled destruction; two-Approver destruction with immediate, backup-pending, unreachable and resume branches; valid Stub versus unexplained deletion. Verify signed durable audit events for login, failed re-authentication, binding change/revocation, every post-bootstrap Admin/Root ceremony, stale-warning acceptance, export, clock release, Recovery test, re-grant, and destruction. Exercise device-posture `Pass`, `Fail`, and `Unknown`: failure blocks a production session, unknown remains visibly unresolved for Go-live, and neither is mislabeled. Search all Admin/CLI/UI/server/local reports/logs/metadata for operator display names, profile salts, key material, Recovery plaintext, and fachliche canaries.
 
 Update ledger only to `implemented`/`integrated`. Stage 7 retains every native minimum/maximum OS case, quarterly operational rehearsal, external privacy decision, and production key custody evidence.
 
-- [ ] **Step 4: Run the complete Stage 5 gate**
+- [x] **Step 4: Run the complete Stage 5 gate**
 
 Run:
 
@@ -1461,7 +1461,7 @@ cargo run --locked -p xtask -- integration down
 
 Expected: PASS locally; full native/release/manual evidence remains explicitly open for Stage 7.
 
-- [ ] **Step 5: Commit the Stage 5 gate**
+- [x] **Step 5: Commit the Stage 5 gate**
 
 ```bash
 git add tests docs/traceability tools/xtask

@@ -502,6 +502,7 @@ mod resolver;
 mod source;
 mod state;
 mod time;
+mod writer_transition;
 
 pub use admin_authorization::{
     IntendedTrustTargetDescription, VerifiedAdminAuthorization, VerifiedAdminAuthorizationIntent,
@@ -531,3 +532,4 @@ pub use time::{
     LocalTimeBlock, VerifiedSignedTime, prepare_local_time, verify_checkpoint_time,
     verify_receipt_time,
 };
+pub use writer_transition::EffectiveWriterTransitionV1;

@@ -246,6 +246,17 @@ pub trait ActiveRegistryHeadV1: ea_crypto::SignerCertificateResolver + Send + Sy
     /// Die EINZIGE Quelle der aktiven Empfaengermenge. Ein `Vec` und kein
     /// `impl Iterator`, weil der Port objektsicher bleiben muss.
     fn active_certificates(&self) -> Vec<(CertificateHash, &ea_format::DeviceCertificateFieldsV1)>;
+    /// Der laufende Writer der Linie — `None` auf einer Linie, die noch
+    /// keinen Writer freigegeben hat.
+    fn current_writer_certificate_hash(&self) -> Option<CertificateHash>;
+    /// Der auf dieser Linie WIRKSAME Writer-Uebergang — `None` ohne
+    /// angewandten Change 3.
+    ///
+    /// Nach Wert und nicht als Referenz: der Wert ist `Copy`, und so bleibt der
+    /// Port objektsicher, ohne eine Lebensdauer an die Attrappen zu reichen.
+    /// Die Schreiberregel des Commits (`validation.rs`) haelt den
+    /// `writer_transition_event_hash` eines Manifests gegen genau diesen Wert.
+    fn effective_writer_transition(&self) -> Option<ea_trust::EffectiveWriterTransitionV1>;
 }
 
 /// Der echte Kopf ist die eine Produktionsimplementierung.
@@ -275,6 +286,14 @@ impl ActiveRegistryHeadV1 for ea_trust::SelectedRegistryHead {
 
     fn active_certificates(&self) -> Vec<(CertificateHash, &ea_format::DeviceCertificateFieldsV1)> {
         Self::active_certificates(self).collect()
+    }
+
+    fn current_writer_certificate_hash(&self) -> Option<CertificateHash> {
+        Self::current_writer_certificate_hash(self)
+    }
+
+    fn effective_writer_transition(&self) -> Option<ea_trust::EffectiveWriterTransitionV1> {
+        Self::effective_writer_transition(self).copied()
     }
 }
 

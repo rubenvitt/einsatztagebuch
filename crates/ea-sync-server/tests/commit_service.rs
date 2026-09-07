@@ -56,8 +56,9 @@ use ea_sync_server::{
     StoredObject,
     commit::{CommitOutcome, CommitPorts, CommitServiceError, commit_entry},
     reconcile::{ReconcileOutcomeV1, ReconcilePorts, reconcile_object},
-    validation::CommitValidationError,
+    validation::{CommitValidationError, parse_entry, validate_commit},
 };
+use ea_trust::EffectiveWriterTransitionV1;
 use ea_types::{
     CertificateHash, ChainId, ChainSequence, DeviceId, EntryHash, Id16, KeyThumbprint, ObjectHash,
     OrganizationId, RegistryVersion, UnixMillis,
@@ -72,6 +73,8 @@ const SERVER_SEED: [u8; 32] = [0x12; 32];
 const READER_KEM_SEED: [u8; 32] = [0x13; 32];
 const RECOVERY_KEM_SEED: [u8; 32] = [0x14; 32];
 const SECOND_READER_KEM_SEED: [u8; 32] = [0x15; 32];
+const NEW_WRITER_SEED: [u8; 32] = [0x16; 32];
+const OTHER_WRITER_SEED: [u8; 32] = [0x17; 32];
 
 const ORGANIZATION_ID: [u8; 16] = [0x21; 16];
 const CHAIN_ID: [u8; 16] = [0x22; 16];
@@ -79,12 +82,65 @@ const WRITER_DEVICE_ID: [u8; 16] = [0x23; 16];
 const READER_DEVICE_ID: [u8; 16] = [0x24; 16];
 const RECOVERY_DEVICE_ID: [u8; 16] = [0x25; 16];
 const SECOND_READER_DEVICE_ID: [u8; 16] = [0x26; 16];
+const NEW_WRITER_DEVICE_ID: [u8; 16] = [0x27; 16];
+const OTHER_WRITER_DEVICE_ID: [u8; 16] = [0x28; 16];
 
 const REGISTRY_VERSION: u64 = 3;
 const REGISTRY_HEAD_HASH: [u8; 32] = [0x30; 32];
 const POLICY_OBJECT_HASH: [u8; 32] = [0x31; 32];
 const SERVER_CERTIFICATE_HASH: [u8; 32] = [0x32; 32];
 const ADMIN_AUTHORIZATION_HASH: [u8; 32] = [0x33; 32];
+const TRANSITION_OBJECT_HASH: [u8; 32] = [0x34; 32];
+const TRANSITION_PREVIOUS_ENTRY_HASH: [u8; 32] = [0x35; 32];
+/// Die erste Sequenz des neuen Writers; der alte ist ab hier widerrufen.
+const TRANSITION_EFFECTIVE_FROM: u64 = 5;
+
+/// Ein Writer der Kulisse: sein Ed25519-Seed und seine Geraetekennung.
+#[derive(Clone, Copy)]
+struct Writer {
+    seed: [u8; 32],
+    device: [u8; 16],
+}
+
+/// Der Writer des glueklichen Pfades — und der ALTE Writer eines Uebergangs.
+const CURRENT_WRITER: Writer = Writer {
+    seed: WRITER_SEED,
+    device: WRITER_DEVICE_ID,
+};
+
+/// Der Writer, der einen Uebergang uebernimmt.
+const NEW_WRITER: Writer = Writer {
+    seed: NEW_WRITER_SEED,
+    device: NEW_WRITER_DEVICE_ID,
+};
+
+/// Ein Writer-Zertifikat, das weder laufender noch alter Writer ist.
+const OTHER_WRITER: Writer = Writer {
+    seed: OTHER_WRITER_SEED,
+    device: OTHER_WRITER_DEVICE_ID,
+};
+
+/// Wer den Eintrag signiert, und welchen Uebergang sein Manifest nennt.
+#[derive(Clone, Copy)]
+struct Authorship {
+    writer: Writer,
+    writer_transition_event_hash: Option<ObjectHash>,
+}
+
+impl Authorship {
+    /// Der laufende Writer ohne Uebergang — jeder bisherige Zeuge.
+    const CURRENT: Self = Self {
+        writer: CURRENT_WRITER,
+        writer_transition_event_hash: None,
+    };
+
+    fn of(writer: Writer, transition_hash: Option<[u8; 32]>) -> Self {
+        Self {
+            writer,
+            writer_transition_event_hash: transition_hash.map(object_hash_of),
+        }
+    }
+}
 
 fn organization_id() -> OrganizationId {
     OrganizationId::from(Id16::try_from(&ORGANIZATION_ID[..]).expect("16 bytes"))
@@ -157,17 +213,21 @@ fn certificate_bytes(fields: &DeviceCertificateFieldsV1) -> Vec<u8> {
 }
 
 fn writer_certificate_fields() -> DeviceCertificateFieldsV1 {
+    writer_fields_of(CURRENT_WRITER, 0)
+}
+
+fn writer_fields_of(writer: Writer, effective_from_sequence: u64) -> DeviceCertificateFieldsV1 {
     DeviceCertificateFieldsV1 {
         organization_id: organization_id(),
-        device_id: device_id(WRITER_DEVICE_ID),
+        device_id: device_id(writer.device),
         certificate_kind: CertificateKindV1::Writer,
-        signing_public_cose_key: Some(signing_key(WRITER_SEED).to_deterministic_cbor()),
+        signing_public_cose_key: Some(signing_key(writer.seed).to_deterministic_cbor()),
         kem_public_cose_key: None,
-        signing_key_thumbprint: Some(signing_key(WRITER_SEED).thumbprint()),
+        signing_key_thumbprint: Some(signing_key(writer.seed).thumbprint()),
         kem_key_thumbprint: None,
         capabilities: vec!["initialGrant".to_owned()],
         key_protection_profile: KeyProtectionProfileV1::OsWrapped,
-        effective_from_sequence: ChainSequence::new(0),
+        effective_from_sequence: ChainSequence::new(effective_from_sequence),
         revoked_from_sequence: None,
         authority_subject_id: None,
     }
@@ -225,9 +285,21 @@ fn recovery_fields() -> DeviceCertificateFieldsV1 {
 /// Form. Er trifft KEINE Entscheidung: die Aussage, WELCHE Zertifikate aktiv
 /// sind, gehoert dem Test, weil genau sie die Vollstaendigkeitspruefung
 /// herausfordern soll.
+///
+/// Eine Regel des echten Kopfes bildet er nach, weil die Schreiberregel sie
+/// voraussetzt: `active_certificates` verbirgt jedes Writer-Zertifikat, das
+/// nicht der laufende Writer ist (`crates/ea-trust/src/resolver.rs`,
+/// `active_certificate`). Ohne sie waere ein alter oder fremder Writer in der
+/// Attrappe „aktiv", und die Absage kaeme aus einem anderen Grund als in der
+/// Produktion.
 struct FakeHead {
     certificates: Vec<(CertificateHash, DeviceCertificateFieldsV1, Vec<u8>)>,
     policy: PolicyFieldsV1,
+    /// Der laufende Writer — ohne Uebergang das Zertifikat von
+    /// `WRITER_DEVICE_ID`, mit Uebergang dessen neuer Writer.
+    current_writer: Option<CertificateHash>,
+    /// Der auf diesem Kopf wirksame Writer-Uebergang.
+    transition: Option<EffectiveWriterTransitionV1>,
 }
 
 impl FakeHead {
@@ -243,10 +315,24 @@ impl FakeHead {
         // Aufsteigend nach `CertificateHash` — dieselbe Ordnung, die
         // `SelectedRegistryHead::active_certificates` zusagt.
         certificates.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        let current_writer = certificates
+            .iter()
+            .find(|(_, fields, _)| fields.device_id == device_id(WRITER_DEVICE_ID))
+            .map(|(hash, _, _)| *hash);
         Self {
             certificates,
             policy,
+            current_writer,
+            transition: None,
         }
+    }
+
+    /// Derselbe Kopf NACH einem angewandten Change 3: der Uebergang ist
+    /// wirksam, und sein neuer Writer ist der laufende.
+    fn with_transition(mut self, transition: EffectiveWriterTransitionV1) -> Self {
+        self.current_writer = Some(transition.new_writer_certificate_hash());
+        self.transition = Some(transition);
+        self
     }
 
     fn certificate_hash_of(&self, device: [u8; 16]) -> CertificateHash {
@@ -303,8 +389,20 @@ impl ActiveRegistryHeadV1 for FakeHead {
     fn active_certificates(&self) -> Vec<(CertificateHash, &DeviceCertificateFieldsV1)> {
         self.certificates
             .iter()
+            .filter(|(hash, fields, _)| {
+                fields.certificate_kind != CertificateKindV1::Writer
+                    || self.current_writer == Some(*hash)
+            })
             .map(|(hash, fields, _)| (*hash, fields))
             .collect()
+    }
+
+    fn current_writer_certificate_hash(&self) -> Option<CertificateHash> {
+        self.current_writer
+    }
+
+    fn effective_writer_transition(&self) -> Option<EffectiveWriterTransitionV1> {
+        self.transition
     }
 }
 
@@ -381,25 +479,8 @@ fn plan_of(head: &FakeHead, recipients: &[Recipient]) -> GrantPlanV1 {
     .expect("the fixture plan is well formed")
 }
 
-/// Ein echtes `.eip` mit echter Schreibersignatur.
-fn entry_bytes(
-    head: &FakeHead,
-    sequence: u64,
-    previous: Option<EntryHash>,
-    plan: &GrantPlanV1,
-    ciphertext_marker: u8,
-) -> Vec<u8> {
-    entry_bytes_with(
-        head,
-        sequence,
-        previous,
-        plan,
-        ciphertext_marker,
-        (RegistryVersion::new(REGISTRY_VERSION), REGISTRY_HEAD_HASH),
-    )
-}
-
-/// Dasselbe `.eip`, aber mit ausdruecklich gesetztem Registry-Head.
+/// Dasselbe `.eip`, aber mit ausdruecklich gesetztem Registry-Head und
+/// ausdruecklicher Urheberschaft.
 fn entry_bytes_with(
     head: &FakeHead,
     sequence: u64,
@@ -407,6 +488,7 @@ fn entry_bytes_with(
     plan: &GrantPlanV1,
     ciphertext_marker: u8,
     registry: (RegistryVersion, [u8; 32]),
+    authorship: Authorship,
 ) -> Vec<u8> {
     let ciphertext = vec![ciphertext_marker; 32];
     let manifest = ManifestCoreV1::new(
@@ -415,8 +497,8 @@ fn entry_bytes_with(
             chain_id: chain_id(),
             chain_sequence: ChainSequence::new(sequence),
             previous_entry_hash: previous,
-            writer_certificate_hash: head.certificate_hash_of(WRITER_DEVICE_ID),
-            writer_transition_event_hash: None,
+            writer_certificate_hash: head.certificate_hash_of(authorship.writer.device),
+            writer_transition_event_hash: authorship.writer_transition_event_hash,
             registry_version: registry.0,
             registry_head_hash: registry.1,
             initial_grant_plan_hash: *plan.hash().as_bytes(),
@@ -427,7 +509,7 @@ fn entry_bytes_with(
     .expect("the fixture manifest is well formed");
     let signed = SignedManifestV1::new(manifest, &ciphertext)
         .expect("the fixture signed manifest is well formed");
-    let signature = signer(WRITER_SEED)
+    let signature = signer(authorship.writer.seed)
         .sign_record(signed.exact_bytes())
         .expect("signing the fixture manifest cannot fail");
     let package = ea_format::EntryPackageV1::new(signed, ciphertext, signature)
@@ -437,8 +519,13 @@ fn entry_bytes_with(
         .into_vec()
 }
 
-/// Ein echtes `.eag` mit echter Ausstellersignatur.
-fn grant_bytes(head: &FakeHead, entry_hash: EntryHash, recipient: Recipient) -> Vec<u8> {
+/// Ein echtes `.eag` mit echter Ausstellersignatur des benannten Writers.
+fn grant_bytes(
+    head: &FakeHead,
+    entry_hash: EntryHash,
+    recipient: Recipient,
+    writer: Writer,
+) -> Vec<u8> {
     let body = GrantBodyV1::new(GrantBodyFieldsV1 {
         organization_id: organization_id(),
         chain_id: chain_id(),
@@ -447,8 +534,8 @@ fn grant_bytes(head: &FakeHead, entry_hash: EntryHash, recipient: Recipient) -> 
         purpose: recipient.purpose,
         recipient_key_thumbprint: kem_key(recipient.kem_seed).thumbprint(),
         recipient_certificate_hash: head.certificate_hash_of(recipient.device),
-        issuer_key_thumbprint: signing_key(WRITER_SEED).thumbprint(),
-        issuer_certificate_hash: head.certificate_hash_of(WRITER_DEVICE_ID),
+        issuer_key_thumbprint: signing_key(writer.seed).thumbprint(),
+        issuer_certificate_hash: head.certificate_hash_of(writer.device),
         registry_version: RegistryVersion::new(REGISTRY_VERSION),
         registry_head_hash: hash32(REGISTRY_HEAD_HASH),
         created_at_device: UnixMillis::new(1_700_000_000_000),
@@ -461,7 +548,7 @@ fn grant_bytes(head: &FakeHead, entry_hash: EntryHash, recipient: Recipient) -> 
         wrapped_cek: [recipient.device[0]; ea_crypto::HPKE_WRAPPED_CEK_SIZE],
     })
     .expect("the fixture grant body is well formed");
-    let signature = signer(WRITER_SEED)
+    let signature = signer(writer.seed)
         .sign_initial_grant(body.exact_bytes())
         .expect("signing the fixture grant cannot fail");
     let grant = GrantV1::new(body, signature).expect("the fixture grant is well formed");
@@ -502,19 +589,14 @@ fn commit_request(
     recipients: &[Recipient],
     ciphertext_marker: u8,
 ) -> EntryCommitRequestV1 {
-    let plan = plan_of(head, recipients);
-    let entry = entry_bytes(head, sequence, previous, &plan, ciphertext_marker);
-    let ea_format::ParsedArchiveObject::Entry(parsed) =
-        ea_format::decode_exact_object(&entry).expect("the fixture entry parses")
-    else {
-        panic!("the fixture entry is an entry package");
-    };
-    let entry_hash = parsed.value().entry_hash();
-    let grants = recipients
-        .iter()
-        .map(|recipient| grant_bytes(head, entry_hash, *recipient))
-        .collect();
-    EntryCommitRequestV1::new(entry, plan, grants).expect("the fixture commit request is valid")
+    commit_request_with_registry(
+        head,
+        sequence,
+        previous,
+        recipients,
+        ciphertext_marker,
+        (RegistryVersion::new(REGISTRY_VERSION), REGISTRY_HEAD_HASH),
+    )
 }
 
 /// Derselbe Commit, aber mit ausdruecklich gesetztem Registry-Head.
@@ -526,8 +608,39 @@ fn commit_request_with_registry(
     ciphertext_marker: u8,
     registry: (RegistryVersion, [u8; 32]),
 ) -> EntryCommitRequestV1 {
+    commit_request_as(
+        head,
+        sequence,
+        previous,
+        recipients,
+        ciphertext_marker,
+        registry,
+        Authorship::CURRENT,
+    )
+}
+
+/// Derselbe Commit mit ausdruecklicher Urheberschaft: der benannte Writer
+/// signiert Eintrag UND Grants, und sein Manifest nennt den gegebenen
+/// Uebergang.
+fn commit_request_as(
+    head: &FakeHead,
+    sequence: u64,
+    previous: Option<EntryHash>,
+    recipients: &[Recipient],
+    ciphertext_marker: u8,
+    registry: (RegistryVersion, [u8; 32]),
+    authorship: Authorship,
+) -> EntryCommitRequestV1 {
     let plan = plan_of(head, recipients);
-    let entry = entry_bytes_with(head, sequence, previous, &plan, ciphertext_marker, registry);
+    let entry = entry_bytes_with(
+        head,
+        sequence,
+        previous,
+        &plan,
+        ciphertext_marker,
+        registry,
+        authorship,
+    );
     let ea_format::ParsedArchiveObject::Entry(parsed) =
         ea_format::decode_exact_object(&entry).expect("the fixture entry parses")
     else {
@@ -536,7 +649,7 @@ fn commit_request_with_registry(
     let entry_hash = parsed.value().entry_hash();
     let grants = recipients
         .iter()
-        .map(|recipient| grant_bytes(head, entry_hash, *recipient))
+        .map(|recipient| grant_bytes(head, entry_hash, *recipient, authorship.writer))
         .collect();
     EntryCommitRequestV1::new(entry, plan, grants).expect("the fixture commit request is valid")
 }
@@ -1758,9 +1871,34 @@ fn every_service_code_is_stable_and_free_of_domain_values() {
             matches!(error.http_status(), 429 | 500 | 503)
         );
     }
+    assert_eq!(CommitValidationError::ALL.len(), 14);
     for error in CommitValidationError::ALL {
         assert!(error.code().starts_with("EA-COMMIT-"));
+        let service = CommitServiceError::Validation(error);
+        assert_eq!(service.code(), error.code());
+        // Die beiden Schreiberabsagen der 409-Zeile von §13.3 sind Security
+        // Events; der unpassende Uebergangshash ist ein Format-/Trust-Fehler
+        // und keiner (`design.md` §12, `writerTransitionEventHash`).
+        match error {
+            CommitValidationError::WriterUnauthorized | CommitValidationError::WriterRevoked => {
+                assert!(error.is_writer_violation());
+                assert_eq!(service.http_status(), 409);
+            }
+            CommitValidationError::WriterTransitionMismatch => {
+                assert!(!error.is_writer_violation());
+                assert_eq!(service.http_status(), 422);
+            }
+            _ => {}
+        }
     }
+    assert_eq!(
+        CommitValidationError::WriterRevoked.code(),
+        "EA-COMMIT-WRITER-REVOKED"
+    );
+    assert_eq!(
+        CommitValidationError::WriterTransitionMismatch.code(),
+        "EA-COMMIT-WRITER-TRANSITION"
+    );
 }
 
 /// Ein verworfener Receipt bleibt UNSICHTBAR: der Replay liefert den
@@ -1788,6 +1926,347 @@ async fn the_discarded_replay_receipt_stays_invisible() {
         .filter(|bytes| bytes.starts_with(&ea_format::ESR_PREFIX_V1))
         .count();
     assert_eq!(receipts, 2, "the discarded receipt stays as an orphan");
+}
+
+// ---------------------------------------------------------------------------
+// Der Schreiberwechsel (`design.md` §12, `writerTransitionEventHash`; §13.3)
+// ---------------------------------------------------------------------------
+
+/// Der wirksame Uebergang der Kulisse: vom laufenden auf den neuen Writer ab
+/// `TRANSITION_EFFECTIVE_FROM`, an den Eintrag `TRANSITION_PREVIOUS_ENTRY_HASH`
+/// anschliessend.
+fn transition_of(head: &FakeHead) -> EffectiveWriterTransitionV1 {
+    EffectiveWriterTransitionV1::fixture(
+        object_hash_of(TRANSITION_OBJECT_HASH),
+        head.certificate_hash_of(WRITER_DEVICE_ID),
+        head.certificate_hash_of(NEW_WRITER_DEVICE_ID),
+        ChainSequence::new(TRANSITION_EFFECTIVE_FROM),
+        transition_previous_entry_hash(),
+    )
+}
+
+fn transition_previous_entry_hash() -> EntryHash {
+    EntryHash::try_from(TRANSITION_PREVIOUS_ENTRY_HASH.as_slice()).expect("32 bytes")
+}
+
+/// Ein Kopf NACH dem Change 3: alter, neuer und ein dritter Writer sind
+/// freigegeben, der Uebergang ist wirksam, der neue Writer ist der laufende.
+fn transition_head() -> Arc<FakeHead> {
+    let head = FakeHead::new(
+        vec![
+            writer_certificate_fields(),
+            writer_fields_of(NEW_WRITER, TRANSITION_EFFECTIVE_FROM),
+            writer_fields_of(OTHER_WRITER, 0),
+            reader_fields(),
+            recovery_fields(),
+        ],
+        policy(0, 500),
+    );
+    let transition = transition_of(&head);
+    Arc::new(head.with_transition(transition))
+}
+
+/// Ein Commit gegen den Uebergangskopf: `writer` signiert an `sequence` ueber
+/// `previous` und nennt `transition_hash`.
+fn transition_commit(
+    head: &FakeHead,
+    writer: Writer,
+    sequence: u64,
+    previous: Option<EntryHash>,
+    transition_hash: Option<[u8; 32]>,
+) -> EntryCommitRequestV1 {
+    commit_request_as(
+        head,
+        sequence,
+        previous,
+        &[reader_recipient(), recovery_recipient()],
+        0xc0,
+        (RegistryVersion::new(REGISTRY_VERSION), REGISTRY_HEAD_HASH),
+        Authorship::of(writer, transition_hash),
+    )
+}
+
+/// Schritt 2 allein, mit dem benannten Aufrufer.
+fn validate_as(
+    head: &FakeHead,
+    request: &EntryCommitRequestV1,
+    caller: Writer,
+) -> Result<ea_sync_server::validation::ValidatedCommitV1, CommitValidationError> {
+    let entry = parse_entry(request.entry_bytes()).expect("the fixture entry parses");
+    validate_commit(
+        request,
+        &entry,
+        organization_id(),
+        chain_id(),
+        head.certificate_hash_of(caller.device),
+        head,
+    )
+}
+
+/// Der Befund von Schritt 2 — und die Zusicherung, dass es einen gibt.
+fn refusal_as(
+    head: &FakeHead,
+    request: &EntryCommitRequestV1,
+    caller: Writer,
+) -> CommitValidationError {
+    validate_as(head, request, caller)
+        .map(|_| ())
+        .expect_err("step 2 must refuse this commit")
+}
+
+/// Der zurueckgespielte ALTE Writer an der Uebergangssequenz ist widerrufen:
+/// eigener Code, `409`, Security Event, und nichts wird gespeichert.
+#[tokio::test]
+async fn a_revoked_writer_at_the_transition_sequence_is_a_security_event() {
+    let harness = Harness::with_head(transition_head());
+    let request = transition_commit(
+        &harness.head,
+        CURRENT_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(transition_previous_entry_hash()),
+        None,
+    );
+    let ports = harness.ports();
+    let failure = commit_entry(
+        &request,
+        organization_id(),
+        chain_id(),
+        harness.head.certificate_hash_of(WRITER_DEVICE_ID),
+        &ports,
+    )
+    .await
+    .expect_err("the revoked writer must be rejected");
+
+    assert_eq!(
+        failure.error,
+        CommitServiceError::Validation(CommitValidationError::WriterRevoked)
+    );
+    assert_eq!(failure.error.code(), "EA-COMMIT-WRITER-REVOKED");
+    assert_eq!(failure.error.http_status(), 409);
+    assert!(CommitValidationError::WriterRevoked.is_writer_violation());
+    assert_eq!(
+        harness.security.codes(),
+        vec!["writer-unauthorized".to_owned()]
+    );
+    assert_eq!(harness.commits.visible_entry_count(), 0);
+    assert!(
+        harness
+            .objects
+            .objects
+            .lock()
+            .expect("not poisoned")
+            .is_empty(),
+        "nothing of a revoked writer's commit is stored"
+    );
+}
+
+/// Der alte Writer bleibt auch NACH der Uebergangssequenz widerrufen — der
+/// Befund haengt am Uebergang, nicht an der einen Sequenz.
+#[test]
+fn a_revoked_writer_stays_revoked_after_the_transition_sequence() {
+    let head = transition_head();
+    let request = transition_commit(
+        &head,
+        CURRENT_WRITER,
+        TRANSITION_EFFECTIVE_FROM + 1,
+        Some(transition_previous_entry_hash()),
+        None,
+    );
+    assert_eq!(
+        refusal_as(&head, &request, CURRENT_WRITER),
+        CommitValidationError::WriterRevoked
+    );
+}
+
+/// Ein Writer, der weder der laufende noch der alte ist, bleibt UNZULAESSIG:
+/// der Widerrufsbefund wird keinem Fremden gegeben.
+#[test]
+fn a_stranger_is_unauthorized_and_never_told_about_a_revocation() {
+    let head = transition_head();
+    // Ein dritter Writer nach dem Uebergang, ohne Uebergangshash.
+    let stranger = transition_commit(
+        &head,
+        OTHER_WRITER,
+        TRANSITION_EFFECTIVE_FROM + 1,
+        Some(transition_previous_entry_hash()),
+        None,
+    );
+    assert_eq!(
+        refusal_as(&head, &stranger, OTHER_WRITER),
+        CommitValidationError::WriterUnauthorized
+    );
+    // Derselbe Fremde AN der Uebergangssequenz mit dem RICHTIGEN Hash und
+    // Vorgaenger: immer noch unzulaessig, nie ein 422-Formatbefund — die
+    // Schreiberpruefung kommt vor der Uebergangsregel, was auch immer das
+    // Manifest behauptet.
+    let stranger_with_the_right_hash = transition_commit(
+        &head,
+        OTHER_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(transition_previous_entry_hash()),
+        Some(TRANSITION_OBJECT_HASH),
+    );
+    assert_eq!(
+        refusal_as(&head, &stranger_with_the_right_hash, OTHER_WRITER),
+        CommitValidationError::WriterUnauthorized
+    );
+    // Und ohne Hash an derselben Sequenz ebenso.
+    let stranger_without_hash = transition_commit(
+        &head,
+        OTHER_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(transition_previous_entry_hash()),
+        None,
+    );
+    assert_eq!(
+        refusal_as(&head, &stranger_without_hash, OTHER_WRITER),
+        CommitValidationError::WriterUnauthorized
+    );
+    // Und der neue Writer im Manifest, aber ein anderer Aufrufer: die Antwort
+    // gilt dem Aufrufer, nie dem Manifest.
+    let genuine = transition_commit(
+        &head,
+        NEW_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(transition_previous_entry_hash()),
+        Some(TRANSITION_OBJECT_HASH),
+    );
+    assert_eq!(
+        refusal_as(&head, &genuine, OTHER_WRITER),
+        CommitValidationError::WriterUnauthorized
+    );
+    assert_eq!(
+        refusal_as(&head, &genuine, CURRENT_WRITER),
+        CommitValidationError::WriterUnauthorized
+    );
+}
+
+/// Der erste Eintrag des NEUEN Writers bindet den exakten Uebergangshash und
+/// besteht Schritt 2 vollstaendig — Signatur, Grants und Empfaengermenge
+/// eingeschlossen.
+#[test]
+fn the_new_writer_binds_the_exact_transition_hash() {
+    let head = transition_head();
+    let request = transition_commit(
+        &head,
+        NEW_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(transition_previous_entry_hash()),
+        Some(TRANSITION_OBJECT_HASH),
+    );
+    let validated = validate_as(&head, &request, NEW_WRITER).expect("the exact hash is accepted");
+    // `ea-types` leitet fuer Kennungen und Hashes kein `Debug` ab.
+    assert!(
+        validated.device_id == device_id(NEW_WRITER_DEVICE_ID),
+        "the device id is read from the NEW writer's certificate"
+    );
+    assert_eq!(validated.chain_sequence.get(), TRANSITION_EFFECTIVE_FROM);
+    assert!(
+        validated.previous_entry_hash == Some(transition_previous_entry_hash()),
+        "the predecessor is the transition's"
+    );
+
+    // Und der Eintrag DANACH nennt keinen Uebergang mehr.
+    let successor = transition_commit(
+        &head,
+        NEW_WRITER,
+        TRANSITION_EFFECTIVE_FROM + 1,
+        Some(validated.entry_hash),
+        None,
+    );
+    validate_as(&head, &successor, NEW_WRITER).expect("the successor carries no hash");
+}
+
+/// Ein FEHLENDER Hash an der Uebergangssequenz ist ein Format-/Trust-Fehler.
+#[test]
+fn a_missing_transition_hash_at_effective_from_is_refused() {
+    let head = transition_head();
+    let request = transition_commit(
+        &head,
+        NEW_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(transition_previous_entry_hash()),
+        None,
+    );
+    assert_eq!(
+        refusal_as(&head, &request, NEW_WRITER),
+        CommitValidationError::WriterTransitionMismatch
+    );
+    assert_eq!(
+        CommitServiceError::Validation(CommitValidationError::WriterTransitionMismatch).code(),
+        "EA-COMMIT-WRITER-TRANSITION"
+    );
+    assert_eq!(
+        CommitServiceError::Validation(CommitValidationError::WriterTransitionMismatch)
+            .http_status(),
+        422
+    );
+}
+
+/// Ein ZUSAETZLICHER Hash — nach der Uebergangssequenz oder auf einem Kopf
+/// ohne Uebergang — ist derselbe Befund.
+#[test]
+fn an_additional_transition_hash_is_refused() {
+    let head = transition_head();
+    let after = transition_commit(
+        &head,
+        NEW_WRITER,
+        TRANSITION_EFFECTIVE_FROM + 1,
+        Some(transition_previous_entry_hash()),
+        Some(TRANSITION_OBJECT_HASH),
+    );
+    assert_eq!(
+        refusal_as(&head, &after, NEW_WRITER),
+        CommitValidationError::WriterTransitionMismatch
+    );
+
+    let plain = standard_head();
+    let without_transition = transition_commit(
+        &plain,
+        CURRENT_WRITER,
+        0,
+        None,
+        Some(TRANSITION_OBJECT_HASH),
+    );
+    assert_eq!(
+        refusal_as(&plain, &without_transition, CURRENT_WRITER),
+        CommitValidationError::WriterTransitionMismatch
+    );
+}
+
+/// Ein UNPASSENDER Hash — falscher Wert, fremder Vorgaenger oder ein anderes
+/// Writer-Zertifikat als das des Uebergangs — ist derselbe Befund.
+#[test]
+fn a_mismatched_transition_hash_is_refused() {
+    let head = transition_head();
+
+    let wrong_value = transition_commit(
+        &head,
+        NEW_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(transition_previous_entry_hash()),
+        Some([0x99; 32]),
+    );
+    assert_eq!(
+        refusal_as(&head, &wrong_value, NEW_WRITER),
+        CommitValidationError::WriterTransitionMismatch
+    );
+
+    let foreign_predecessor = transition_commit(
+        &head,
+        NEW_WRITER,
+        TRANSITION_EFFECTIVE_FROM,
+        Some(EntryHash::try_from(&[0x98; 32][..]).expect("32 bytes")),
+        Some(TRANSITION_OBJECT_HASH),
+    );
+    assert_eq!(
+        refusal_as(&head, &foreign_predecessor, NEW_WRITER),
+        CommitValidationError::WriterTransitionMismatch
+    );
+
+    // Ein Manifest OHNE Vorgaenger an dieser Sequenz gibt es nicht:
+    // `ManifestCoreV1::new` weist es als `EA-FORMAT-SHAPE` ab, bevor der
+    // Server es je sieht.
 }
 
 // ---------------------------------------------------------------------------
