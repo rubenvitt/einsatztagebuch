@@ -55,7 +55,10 @@ use ea_format::{
 };
 use ea_key_provider::{KeyHandle, KeyProvider};
 use ea_operator::{OperatorSessionProof, ReauthPurpose};
-use ea_schema::{CommonHeaderV1, IncidentV1, OperatorSnapshotV1, PayloadV1, encode_payload};
+use ea_schema::{
+    CommonHeaderV1, IncidentV1, KeyTransitionV1, NativeSourceV1, OperatorSnapshotV1, PayloadV1,
+    encode_payload,
+};
 use ea_trust::SelectedRegistryHead;
 use ea_types::{
     CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, UnixMillis,
@@ -65,6 +68,7 @@ use zeroize::Zeroize;
 use crate::{
     FinalizationFaultPoint, FinalizationPhase, FinalizationPreview, FinalizationStep,
     StaleDecision, WriterError,
+    content::{FinalizationContent, KeyTransitionInputV1},
     entropy::{self, EntropyKind},
     grant_plan::build_grant_plan,
     incident::FinalizationInputV1,
@@ -245,7 +249,41 @@ impl<'a> WriterService<'a> {
         let _draft_lock = self.repository.acquire_draft_lock()?;
         let reached = self.run(
             proof,
-            input,
+            FinalizationContent::Incident(Box::new(input)),
+            observed_now,
+            Stop::After(FinalizationStep::BuildAndHashGrantPlan),
+        )?;
+        reached.preview.ok_or(WriterError::NoDraftContent)
+    }
+
+    /// Die Vorschau eines `keyTransition`: Schritte 1 bis 5, wie
+    /// [`Self::preview`].
+    ///
+    /// Der Uebergangshash ist KEINE Eingabe: er kommt aus
+    /// [`SelectedRegistryHead::effective_writer_transition`] des gebundenen
+    /// Head, und die vorgeschlagene Sequenz muss dessen `effective_from` sein.
+    /// Die Vorschau ist vom selben Typ wie die eines Einsatzes, und ihr
+    /// `recordDigest` ist der der `keyTransition`-Nutzlast — eine Vorschau
+    /// der einen Art kann die andere nie bestaetigen.
+    ///
+    /// # Errors
+    ///
+    /// [`WriterError::WriterTransitionMismatch`], wenn an der vorgeschlagenen
+    /// Sequenz kein Uebergang auf diesen Writer wirksam wird;
+    /// [`WriterError::HeadReconciliationRequired`], wenn der Uebergang einen
+    /// anderen letzten Eintrag nennt als den lokal verifizierten Kopf; sonst
+    /// jeder Blockadegrund der Schritte 1 bis 5.
+    pub fn preview_key_transition(
+        &self,
+        proof: &OperatorSessionProof,
+        input: KeyTransitionInputV1,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizationPreview, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        let reached = self.run(
+            proof,
+            FinalizationContent::KeyTransition(input),
             observed_now,
             Stop::After(FinalizationStep::BuildAndHashGrantPlan),
         )?;
@@ -269,7 +307,41 @@ impl<'a> WriterService<'a> {
     ) -> Result<FinalizeOutcome, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
-        let reached = self.run(proof, input, observed_now, Stop::Confirmed(confirmed))?;
+        let reached = self.run(
+            proof,
+            FinalizationContent::Incident(Box::new(input)),
+            observed_now,
+            Stop::Confirmed(confirmed),
+        )?;
+        reached.outcome.ok_or(WriterError::NoDraftContent)
+    }
+
+    /// Der Abschluss eines `keyTransition`: die Vorschau nachrechnen und dann
+    /// Schritte 6 bis 13 — derselbe Vertrag wie [`Self::finalize`].
+    ///
+    /// Der Eintrag traegt im Manifest `writer_transition_event_hash =
+    /// Some(objectHash des wirksamen Uebergangs)` und in der versiegelten
+    /// Nutzlast denselben Hash samt der organisatorischen Begruendung. Es wird
+    /// keine Einsatznummer beansprucht.
+    ///
+    /// # Errors
+    ///
+    /// Wie [`Self::finalize`] und [`Self::preview_key_transition`].
+    pub fn finalize_key_transition(
+        &self,
+        proof: &OperatorSessionProof,
+        input: KeyTransitionInputV1,
+        confirmed: &FinalizationPreview,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizeOutcome, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        let reached = self.run(
+            proof,
+            FinalizationContent::KeyTransition(input),
+            observed_now,
+            Stop::Confirmed(confirmed),
+        )?;
         reached.outcome.ok_or(WriterError::NoDraftContent)
     }
 
@@ -278,6 +350,11 @@ impl<'a> WriterService<'a> {
     /// AUSSCHLIESSLICH fuer den Nachweis, dass jeder der dreizehn Schritte eine
     /// eigene beobachtbare Nachbedingung hat. Sie eroeffnet keinen Zustand, den
     /// ein Absturz nicht ohnehin hinterlaesst.
+    ///
+    /// EINSATZFOERMIG, wie [`Self::finalize_interrupted_at`]: die
+    /// Inhaltsvereinigung bleibt crate-intern, und die Zeugen der Schritte und
+    /// Unterbrechungspunkte messen die Reihenfolge, nicht den Inhalt. Ein
+    /// `keyTransition` geht durch DIESELBEN Schritte und Punkte.
     ///
     /// # Errors
     ///
@@ -292,7 +369,12 @@ impl<'a> WriterService<'a> {
     ) -> Result<ReachedState, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
-        self.run(proof, input, observed_now, Stop::After(step))
+        self.run(
+            proof,
+            FinalizationContent::Incident(Box::new(input)),
+            observed_now,
+            Stop::After(step),
+        )
     }
 
     /// Laeuft die Reihenfolge und bricht an GENAU `point` ab.
@@ -310,8 +392,29 @@ impl<'a> WriterService<'a> {
     ) -> Result<ReachedState, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
-        self.run(proof, input, observed_now, Stop::AtFault(point))
+        self.run(
+            proof,
+            FinalizationContent::Incident(Box::new(input)),
+            observed_now,
+            Stop::AtFault(point),
+        )
     }
+}
+
+/// Der Inhalt, NACHDEM Schritt 3 ihn gegen den gewaehlten Head gehalten hat.
+///
+/// Ein `keyTransition` traegt ab hier den Objekthash des wirksamen Uebergangs,
+/// den der Head herausgegeben hat — und nur den: Sequenz und
+/// `previous_entry_hash` des Uebergangs sind in Schritt 3 verbraucht, Schritt
+/// 4 (Nutzlast) und Schritt 6 (Manifest) brauchen allein den Hash. Es gibt
+/// keinen Weg, einen `keyTransition` ohne diesen Wert in Schritt 4 zu
+/// bringen, und keinen, ihn von woanders zu nehmen als aus dem Head.
+enum ResolvedContent {
+    Incident(Box<FinalizationInputV1>),
+    KeyTransition {
+        input: KeyTransitionInputV1,
+        transition_object_hash: ObjectHash,
+    },
 }
 
 /// Eine dauerhaft beanspruchte Einsatznummer samt allem, was ihre Freigabe
@@ -546,12 +649,12 @@ impl WriterService<'_> {
     fn run(
         &self,
         proof: &OperatorSessionProof,
-        input: FinalizationInputV1,
+        content: FinalizationContent,
         observed_now: UnixMillis,
         stop: Stop<'_>,
     ) -> Result<ReachedState, WriterError> {
         let mut claimed = None;
-        let reached = self.run_claiming(proof, input, observed_now, stop, &mut claimed);
+        let reached = self.run_claiming(proof, content, observed_now, stop, &mut claimed);
         let Err(error) = reached else {
             return reached;
         };
@@ -580,7 +683,7 @@ impl WriterService<'_> {
     fn run_claiming(
         &self,
         proof: &OperatorSessionProof,
-        input: FinalizationInputV1,
+        content: FinalizationContent,
         observed_now: UnixMillis,
         stop: Stop<'_>,
         claimed: &mut Option<ClaimedIncidentNumber>,
@@ -630,6 +733,64 @@ impl WriterService<'_> {
         {
             return Err(WriterError::SequenceLeaseExhausted);
         }
+        // Der LAUFENDE Writer — VOR dem Nachweis, vor jedem Anspruch und vor
+        // jedem Geheimnis. Ein zurueckgespielter alter Writer (und ein neuer
+        // vor seinem Change 3) faellt HIER, lokal, und nicht erst am Server.
+        //
+        // `None` — eine Linie, die noch keinen Writer freigegeben hat — ist
+        // fuer einen GEBUNDENEN Writer unerreichbar: seine Bindung verlangt
+        // ein freigegebenes Writer-Zertifikat (`validate_binding_target` in
+        // `ea-trust`), und das erste freigegebene Writer-Zertifikat der Linie
+        // IST ihr laufender Writer. Traete es dennoch ein, ist dieser Writer
+        // jedenfalls nicht der laufende — der Vergleich gegen `Some(..)` ist
+        // dann die fail-closed Antwort und braucht keine Sonderregel.
+        if self.head.current_writer_certificate_hash() != Some(self.binding.writer_certificate_hash)
+        {
+            return Err(WriterError::WriterRevoked);
+        }
+        // Der Uebergang an DIESER Sequenz. Der wirksame Uebergang gilt fuer
+        // GENAU seine `effective_from`-Sequenz: dort schreibt der neue Writer
+        // seinen `keyTransition` und nichts anderes, und an jeder anderen
+        // Sequenz ist ein `keyTransition` ein Widerspruch. Dass der neue Writer
+        // des Uebergangs DIESER Writer ist, steht mit dem Waechter darueber
+        // schon fest: ein angewandter Change 3 macht seinen neuen Writer zum
+        // laufenden, und nur ein weiterer Change 3 bewegt ihn weiter.
+        let transition_at_this_sequence = self
+            .head
+            .effective_writer_transition()
+            .filter(|transition| transition.effective_from_sequence() == proposed)
+            .copied();
+        let resolved = match (content, transition_at_this_sequence) {
+            (FinalizationContent::Incident(input), None) => ResolvedContent::Incident(input),
+            (FinalizationContent::Incident(_), Some(_)) => {
+                return Err(WriterError::WriterTransitionRequired);
+            }
+            (FinalizationContent::KeyTransition(_), None) => {
+                return Err(WriterError::WriterTransitionMismatch);
+            }
+            (FinalizationContent::KeyTransition(input), Some(transition)) => {
+                // Der Uebergang nennt den letzten Eintrag des alten Writers.
+                // Ist er nicht der lokal verifizierte Kopf, zeigt dieser
+                // Bestand eine andere Kette als die, gegen die Root signiert
+                // hat — der externe Kopfabgleich geht der Aktivierung vor.
+                if verified_head.map(|head| head.entry_hash())
+                    != Some(transition.previous_entry_hash())
+                {
+                    return Err(WriterError::HeadReconciliationRequired);
+                }
+                ResolvedContent::KeyTransition {
+                    input,
+                    transition_object_hash: transition.object_hash(),
+                }
+            }
+        };
+        let transition_event_hash = match &resolved {
+            ResolvedContent::Incident(_) => None,
+            ResolvedContent::KeyTransition {
+                transition_object_hash,
+                ..
+            } => Some(*transition_object_hash),
+        };
         require_fresh_proof(
             proof,
             ReauthPurpose::Finalize,
@@ -700,30 +861,69 @@ impl WriterService<'_> {
             Stop::Confirmed(confirmed) => confirmed.record_id(),
             _ => entropy::uuid_v7(effective_now.get())?,
         };
-        let incident_number = input.human_incident_number.clone();
-        let incident = self.build_incident(input, &profile, record_id, effective_now)?;
-        let uniqueness = incident.incident_uniqueness_key()?;
-        let year = i32::from(uniqueness.local_civil_year());
-        // GEFRAGT wird hier, BEANSPRUCHT wird nach dem letzten fail-closed
-        // Tor (Schritt 5, unten). Der Brief verlangt den Anspruch „unter dieser
-        // Sperre, vor dem Serialisieren", und sein GRUND — „refuse a taken
-        // number before serializing" — ist mit der Frage vollstaendig erfuellt.
-        //
-        // Der DAUERHAFTE Anspruch darf hier nicht stehen:
-        // `IncidentNumberRegister` hat `claim` und `contains` und KEINE
-        // Freigabe. Faellt danach noch ein Tor — ein geaenderter Head, eine
-        // geaenderte Policy, ein fortgeschrittenes `effectiveNow`, alles Faelle,
-        // die laut Addendum „eine neue Vorschau und eine neue Bestaetigung"
-        // ergeben sollen und keine Umgehung —, waere die Nummer fuer immer
-        // verbrannt, und der Bediener muesste sich fuer denselben realen Einsatz
-        // eine andere ausdenken.
-        if self
-            .incident_numbers
-            .contains(profile.organization_id(), year, &incident_number)?
-        {
-            return Err(WriterError::IncidentNumberTaken);
-        }
-        state.draft_record_bytes = encode_payload(&PayloadV1::Incident(incident))?;
+        let (payload, mut pending_claim) = match resolved {
+            ResolvedContent::Incident(input) => {
+                let incident_number = input.human_incident_number.clone();
+                let incident = self.build_incident(*input, &profile, record_id, effective_now)?;
+                let uniqueness = incident.incident_uniqueness_key()?;
+                let year = i32::from(uniqueness.local_civil_year());
+                // GEFRAGT wird hier, BEANSPRUCHT wird nach dem letzten
+                // fail-closed Tor (Schritt 5, unten). Der Brief verlangt den
+                // Anspruch „unter dieser Sperre, vor dem Serialisieren", und
+                // sein GRUND — „refuse a taken number before serializing" —
+                // ist mit der Frage vollstaendig erfuellt.
+                //
+                // Der DAUERHAFTE Anspruch darf hier nicht stehen:
+                // `IncidentNumberRegister` hat `claim` und `contains` und
+                // KEINE Freigabe. Faellt danach noch ein Tor — ein
+                // geaenderter Head, eine geaenderte Policy, ein
+                // fortgeschrittenes `effectiveNow`, alles Faelle, die laut
+                // Addendum „eine neue Vorschau und eine neue Bestaetigung"
+                // ergeben sollen und keine Umgehung —, waere die Nummer fuer
+                // immer verbrannt, und der Bediener muesste sich fuer
+                // denselben realen Einsatz eine andere ausdenken.
+                if self.incident_numbers.contains(
+                    profile.organization_id(),
+                    year,
+                    &incident_number,
+                )? {
+                    return Err(WriterError::IncidentNumberTaken);
+                }
+                (
+                    PayloadV1::Incident(incident),
+                    Some(ClaimedIncidentNumber {
+                        organization_id: profile.organization_id(),
+                        local_civil_year: year,
+                        human_incident_number: incident_number,
+                    }),
+                )
+            }
+            ResolvedContent::KeyTransition {
+                input,
+                transition_object_hash,
+            } => {
+                // Kein Einsatz, keine Einsatznummer, kein Anspruch. Der
+                // Objekthash des Uebergangs kommt aus dem Head — Schritt 3
+                // hat ihn festgestellt —, die Begruendung vom Aufrufer, und
+                // beides geht in die VERSIEGELTE Nutzlast.
+                let header = self.build_header(
+                    &profile,
+                    record_id,
+                    effective_now,
+                    input.timezone,
+                    input.source,
+                )?;
+                (
+                    PayloadV1::KeyTransition(KeyTransitionV1::new(
+                        header,
+                        transition_object_hash,
+                        input.organizational_reason,
+                    )?),
+                    None,
+                )
+            }
+        };
+        state.draft_record_bytes = encode_payload(&payload)?;
         state.reached_step = Some(FinalizationStep::ValidateAndSerialize);
         if stop.ends_after(FinalizationStep::ValidateAndSerialize) {
             return Ok(state);
@@ -794,7 +994,8 @@ impl WriterService<'_> {
         // Der DAUERHAFTE Anspruch auf die Einsatznummer — hinter dem letzten
         // fail-closed Tor und vor der ersten Ziehung eines Geheimnisses. Nur
         // der abschliessende Lauf beansprucht; eine Vorschau, die sie
-        // verbrauchte, machte ihren eigenen Abschluss unmoeglich.
+        // verbrauchte, machte ihren eigenen Abschluss unmoeglich. Ein
+        // `keyTransition` hat keine Nummer und beansprucht nichts.
         //
         // JEDER Fehler des Anspruchs bricht ab, und nicht nur der belegte Name.
         // Die Asymmetrie waere das Leck: die FRAGE dreissig Zeilen darueber
@@ -809,18 +1010,15 @@ impl WriterService<'_> {
         // in Schritt 9, unmittelbar mit der bestaetigten Abwesenheit des
         // `draftDEK` — ab da traegt ein Eintrag die Nummer, der sich nicht mehr
         // zuruecknehmen laesst.
-        if matches!(stop, Stop::Confirmed(_)) {
-            match self
-                .incident_numbers
-                .claim(profile.organization_id(), year, &incident_number)
-            {
-                Ok(()) => {
-                    *claimed = Some(ClaimedIncidentNumber {
-                        organization_id: profile.organization_id(),
-                        local_civil_year: year,
-                        human_incident_number: incident_number.clone(),
-                    });
-                }
+        if matches!(stop, Stop::Confirmed(_))
+            && let Some(claim) = pending_claim.take()
+        {
+            match self.incident_numbers.claim(
+                claim.organization_id,
+                claim.local_civil_year,
+                &claim.human_incident_number,
+            ) {
+                Ok(()) => *claimed = Some(claim),
                 Err(ea_draft::DraftError::IncidentNumberTaken) => {
                     return Err(WriterError::IncidentNumberTaken);
                 }
@@ -849,7 +1047,10 @@ impl WriterService<'_> {
             chain_sequence: proposed,
             previous_entry_hash: verified_head.map(|head| head.entry_hash()),
             writer_certificate_hash: self.binding.writer_certificate_hash,
-            writer_transition_event_hash: None,
+            // GENAU dann gesetzt, wenn dieser Eintrag der `keyTransition`
+            // des wirksamen Uebergangs ist (`design.md`:669) — und dann auf
+            // dessen Objekthash. Ein Einsatz traegt IMMER `None`.
+            writer_transition_event_hash: transition_event_hash,
             registry_version: self.head.registry_version(),
             registry_head_hash: *self.head.registry_head_hash().as_bytes(),
             initial_grant_plan_hash: plan_hash,
@@ -1082,16 +1283,20 @@ impl WriterService<'_> {
 }
 
 impl WriterService<'_> {
-    /// Baut den Einsatz samt Kopf — Kopfposition 7 aus der verifizierten
-    /// Sitzung und der NUR LESEND geoeffneten Profilzeile.
-    fn build_incident(
+    /// Baut den gemeinsamen Kopf JEDER Nutzlast — Kopfposition 7 aus der
+    /// verifizierten Sitzung und der NUR LESEND geoeffneten Profilzeile.
+    ///
+    /// EINE Stelle fuer Einsatz und `keyTransition`: `recordId`,
+    /// `finalizedAtDevice`, der `operator`-Snapshot und die `registryVersion`
+    /// entstehen hier und nie aus einer Eingabe.
+    fn build_header(
         &self,
-        input: FinalizationInputV1,
         profile: &ea_draft::OperatorProfile,
         record_id: [u8; 16],
         effective_now: UnixMillis,
-    ) -> Result<IncidentV1, WriterError> {
-        let number = input.human_incident_number;
+        timezone: String,
+        source: NativeSourceV1,
+    ) -> Result<CommonHeaderV1, WriterError> {
         let operator = OperatorSnapshotV1::new(
             profile.organization_id(),
             profile.operator_subject_id(),
@@ -1100,14 +1305,32 @@ impl WriterService<'_> {
             *profile.profile_commitment_salt(),
             profile.operator_binding_object_hash(),
         )?;
-        let header = CommonHeaderV1::new(
+        Ok(CommonHeaderV1::new(
             ea_types::RecordId::try_from(record_id.as_slice())
                 .map_err(|_| WriterError::LocalRng)?,
             effective_now,
-            input.timezone,
+            timezone,
             operator,
-            input.source,
+            source,
             self.head.registry_version(),
+        )?)
+    }
+
+    /// Baut den Einsatz samt Kopf.
+    fn build_incident(
+        &self,
+        input: FinalizationInputV1,
+        profile: &ea_draft::OperatorProfile,
+        record_id: [u8; 16],
+        effective_now: UnixMillis,
+    ) -> Result<IncidentV1, WriterError> {
+        let number = input.human_incident_number;
+        let header = self.build_header(
+            profile,
+            record_id,
+            effective_now,
+            input.timezone,
+            input.source,
         )?;
         Ok(IncidentV1::new(
             header,

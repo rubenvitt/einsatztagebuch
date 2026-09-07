@@ -12,8 +12,8 @@ use ea_types::{
 };
 
 use crate::{
-    ClockReleaseReplayKey, LocalTimeBlock, RegistryError, RegistryHeadPin, RegistrySelectionCommit,
-    TrustError, VerifiedClockRelease, VerifiedTrust,
+    ClockReleaseReplayKey, EffectiveWriterTransitionV1, LocalTimeBlock, RegistryError,
+    RegistryHeadPin, RegistrySelectionCommit, TrustError, VerifiedClockRelease, VerifiedTrust,
     admin_authorization::{AdminAuthorizationReplay, verify_admin_authorization},
     catalog::TrustCatalog,
     certificate::{ActiveCertificate, RootAuthority},
@@ -180,6 +180,79 @@ impl SelectedRegistryHead {
     pub fn active_capabilities(&self, certificate_hash: CertificateHash) -> Option<&[String]> {
         self.active_certificate_fields(certificate_hash)
             .map(|certificate| certificate.capabilities.as_slice())
+    }
+
+    /// Der LAUFENDE Writer dieses Kopfes — das eine Writer-Zertifikat, das
+    /// [`Self::active_certificate_fields`] als Writer durchlaesst.
+    ///
+    /// Er wird beim ersten freigegebenen Writer-Zertifikat der Linie gesetzt
+    /// und danach nur noch durch einen Registry-Change 3 bewegt. `None` auf
+    /// einer Linie, die noch keinen Writer freigegeben hat.
+    ///
+    /// Rein lesend und additiv. Er existiert, weil ein Writer, dessen
+    /// Bindungszertifikat NICHT dieser Hash ist, das bisher erst am Server
+    /// erfuhr: lokal finalisierte ein zurueckgespielter alter Writer
+    /// anstandslos. Mit diesem Leser stellt er es selbst fest.
+    #[must_use]
+    pub fn current_writer_certificate_hash(&self) -> Option<CertificateHash> {
+        self.inner.candidate_state.current_writer_certificate_hash
+    }
+
+    /// Der auf dieser Linie WIRKSAME Writer-Uebergang — `None` auf einer
+    /// Linie ohne angewandten Change 3.
+    ///
+    /// Er ist der Zustand des Kopfes, nicht ein Objekt des Katalogs: ein
+    /// `writerTransition`-Objekt, das im Bundle liegt, aber von keinem
+    /// Ereignis der Linie angewandt wurde, erscheint hier NICHT. Genau darauf
+    /// muessen sich Server (`EA-COMMIT-WRITER-TRANSITION`) und Pruefung
+    /// stuetzen, wenn sie den `writer_transition_event_hash` eines Manifests
+    /// gegen den Uebergang halten, statt jedes gesetzte Feld pauschal
+    /// abzuweisen.
+    ///
+    /// Ein spaeterer Change 3 ersetzt den frueheren; sichtbar ist stets der
+    /// zuletzt angewandte.
+    #[must_use]
+    pub fn effective_writer_transition(&self) -> Option<&EffectiveWriterTransitionV1> {
+        self.inner.candidate_state.writer_transition.as_ref()
+    }
+
+    /// Ein FREIGEGEBENES Writer-Zertifikat, das an `at_sequence` bereichsaktiv
+    /// ist — unabhaengig davon, ob es der laufende Writer ist.
+    ///
+    /// Dieselbe Bereichsregel wie ueberall in dieser Crate:
+    /// `effective_from_sequence <= at_sequence`, und ein gesetztes
+    /// `revoked_from_sequence` liegt STRENG dahinter. Zertifikate einer
+    /// anderen Art antworten `None`, auch wenn sie aktiv sind.
+    ///
+    /// Er existiert, weil [`Self::active_certificate_fields`] jedes
+    /// Writer-Zertifikat verbirgt, das nicht der laufende Writer ist — und
+    /// genau so ein Zertifikat muss ein Admin VOR dem Change 3 lesen, um den
+    /// Uebergang darauf vorzubereiten: das neue Writer-Zertifikat ist
+    /// freigegeben und ab seiner Sequenz bereichsaktiv, aber noch nicht der
+    /// laufende Writer.
+    ///
+    /// # Was dieser Leser NICHT ist
+    ///
+    /// Er ist KEINE Schreibautoritaet. Ein Writer, der hier `Some` bekommt,
+    /// darf deshalb noch nicht finalisieren, und ein Server darf deshalb noch
+    /// keinen Eintrag von ihm annehmen: bereichsaktiv sind vor dem Uebergang
+    /// der alte UND der neue Writer, laufender Writer ist nur einer. Wer
+    /// Schreiben autorisiert, fragt [`Self::current_writer_certificate_hash`]
+    /// beziehungsweise [`Self::active_certificate_fields`], nie diesen Leser.
+    #[must_use]
+    pub fn approved_writer_certificate_fields(
+        &self,
+        certificate_hash: CertificateHash,
+        at_sequence: ChainSequence,
+    ) -> Option<&DeviceCertificateFieldsV1> {
+        let certificate = self
+            .inner
+            .candidate_state
+            .certificates
+            .get(&certificate_hash)?;
+        (certificate.fields.certificate_kind == CertificateKindV1::Writer
+            && certificate_active(certificate, at_sequence))
+        .then_some(&certificate.fields)
     }
 
     #[must_use]
@@ -561,11 +634,7 @@ enum TransitionEffect {
     ActivateBinding(ActiveOperatorBinding),
     Policy(ResolvedPolicy),
     Root(RootAuthority),
-    WriterTransition {
-        object_hash: ObjectHash,
-        old_writer: CertificateHash,
-        new_writer: CertificateHash,
-    },
+    WriterTransition(EffectiveWriterTransitionV1),
 }
 
 pub fn verify_registry_candidate(
@@ -1132,11 +1201,18 @@ fn prepare_effect(
                 pre_transition_sequence,
                 replay,
             )?;
-            Ok(TransitionEffect::WriterTransition {
-                object_hash: *object_hash,
-                old_writer: target.fields.old_writer_certificate_hash,
-                new_writer: target.fields.new_writer_certificate_hash,
-            })
+            // `effective_from_sequence` des Objekts ist oben gegen die des
+            // Ereignisses geprueft; der Wert hier ist der des VEROEFFENTLICHTEN
+            // Objekts, genau wie die uebrigen vier Felder.
+            Ok(TransitionEffect::WriterTransition(
+                EffectiveWriterTransitionV1::new(
+                    *object_hash,
+                    target.fields.old_writer_certificate_hash,
+                    target.fields.new_writer_certificate_hash,
+                    target.fields.effective_from_sequence,
+                    target.fields.previous_entry_hash,
+                ),
+            ))
         }
         RegistryChangeV1::OperatorBinding { object_hash } => {
             let target = authorized_binding_target(state, *object_hash)?;
@@ -1544,12 +1620,8 @@ fn apply_effect(
         }
         TransitionEffect::Policy(policy) => state.policy = Some(policy),
         TransitionEffect::Root(root) => state.root = root,
-        TransitionEffect::WriterTransition {
-            object_hash,
-            old_writer,
-            new_writer,
-        } => {
-            if !state.apply_writer_transition(object_hash, old_writer, new_writer, revoked_from) {
+        TransitionEffect::WriterTransition(transition) => {
+            if !state.apply_writer_transition(transition) {
                 return Err(RegistryError::ActivationMissing);
             }
         }

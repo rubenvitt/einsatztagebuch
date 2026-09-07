@@ -2788,13 +2788,46 @@ fn build_complete_entry(
     previous_entry_hash: Option<EntryHash>,
     plaintext: &[u8],
 ) -> EntryPackageV1 {
+    build_complete_entry_signed_by(
+        head,
+        writer_certificate_hash,
+        &writer_device_signer(),
+        None,
+        chain_id,
+        plan_hash,
+        chain_sequence,
+        previous_entry_hash,
+        plaintext,
+    )
+}
+
+/// [`build_complete_entry`] mit GEWAEHLTEM Signierer und GEWAEHLTER
+/// Transitionsaussage.
+///
+/// Die beiden Freiheitsgrade, die ein Writer-Uebergang braucht und die der
+/// lueckenfreie Bestand nie brauchte: der Eintrag des NEUEN Writers wird mit
+/// dessen Schluessel signiert, und sein Manifest traegt den Objekthash des
+/// wirksamen `writerTransition`-Ereignisses (`design.md`:669). Alle
+/// bestehenden Aufrufer gehen durch den Wrapper und bleiben unveraendert.
+#[allow(clippy::too_many_arguments)]
+fn build_complete_entry_signed_by(
+    head: HeadRefV1,
+    writer_certificate_hash: CertificateHash,
+    signer: &CoseSigner,
+    writer_transition_event_hash: Option<ObjectHash>,
+    chain_id: ChainId,
+    plan_hash: Hash32,
+    chain_sequence: u64,
+    previous_entry_hash: Option<EntryHash>,
+    plaintext: &[u8],
+) -> EntryPackageV1 {
     let fields = || ManifestCoreFieldsV1 {
         organization_id: trust_support::organization(),
         chain_id,
         chain_sequence: ChainSequence::new(chain_sequence),
         previous_entry_hash,
         writer_certificate_hash,
-        writer_transition_event_hash: None,
+        writer_transition_event_hash,
         registry_version: head.version,
         registry_head_hash: *head.hash.as_bytes(),
         initial_grant_plan_hash: *plan_hash.as_bytes(),
@@ -2818,7 +2851,7 @@ fn build_complete_entry(
         "der Manifestkern haengt an der LAENGE des Ciphertexts, nicht an seinen Bytes"
     );
     let signed = SignedManifestV1::new(manifest, &ciphertext).expect("das Manifest muss binden");
-    let signature = writer_device_signer()
+    let signature = signer
         .sign_record(signed.exact_bytes())
         .expect("der Fixture-Signierer muss signieren");
     EntryPackageV1::new(signed, ciphertext, signature)
@@ -2850,6 +2883,41 @@ fn complete_grant_bytes(
     recipient_certificate_hash: CertificateHash,
     recipient_public_key: &HpkeRecipientPublicKey,
 ) -> Vec<u8> {
+    complete_grant_bytes_issued_by(
+        head,
+        writer_certificate_hash,
+        writer_device_key_thumbprint(),
+        &writer_device_signer(),
+        chain_id,
+        entry_hash,
+        chain_sequence,
+        purpose,
+        recipient_key_thumbprint,
+        recipient_certificate_hash,
+        recipient_public_key,
+    )
+}
+
+/// [`complete_grant_bytes`] mit GEWAEHLTEM Aussteller.
+///
+/// Der Grant des neuen Writers traegt dessen Abdruck und dessen Zertifikat
+/// und ist mit dessen Schluessel signiert — `GrantV1::new` bindet die
+/// Signatur an genau dieses Paar. Alle bestehenden Aufrufer gehen durch den
+/// Wrapper und bleiben unveraendert.
+#[allow(clippy::too_many_arguments)]
+fn complete_grant_bytes_issued_by(
+    head: HeadRefV1,
+    issuer_certificate_hash: CertificateHash,
+    issuer_key_thumbprint: KeyThumbprint,
+    issuer: &CoseSigner,
+    chain_id: ChainId,
+    entry_hash: EntryHash,
+    chain_sequence: u64,
+    purpose: GrantPurposeV1,
+    recipient_key_thumbprint: KeyThumbprint,
+    recipient_certificate_hash: CertificateHash,
+    recipient_public_key: &HpkeRecipientPublicKey,
+) -> Vec<u8> {
     let fields = |encapsulated_key, wrapped_cek| GrantBodyFieldsV1 {
         organization_id: trust_support::organization(),
         chain_id,
@@ -2858,8 +2926,8 @@ fn complete_grant_bytes(
         purpose,
         recipient_key_thumbprint,
         recipient_certificate_hash,
-        issuer_key_thumbprint: writer_device_key_thumbprint(),
-        issuer_certificate_hash: writer_certificate_hash,
+        issuer_key_thumbprint,
+        issuer_certificate_hash,
         registry_version: head.version,
         registry_head_hash: head.hash,
         created_at_device: UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
@@ -2887,7 +2955,7 @@ fn complete_grant_bytes(
         exact_grant_context(body.exact_bytes()) == context,
         "der Grantkontext haengt nicht an der Kapselung"
     );
-    let signature = writer_device_signer()
+    let signature = issuer
         .sign_initial_grant(body.exact_bytes())
         .expect("der Fixture-Aussteller muss signieren");
     let grant = GrantV1::new(body, signature).expect("der Fixture-Grant muss binden");
@@ -3005,6 +3073,405 @@ pub fn complete_archive_for_recipients(
         entry_object_hashes,
         grant_object_hashes,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Writer-Uebergang: zwei Writer-Zertifikate, ein Change 3 und die
+// Transitionsregel aus `design.md`:669.
+// ---------------------------------------------------------------------------
+
+/// Der geheime Schluessel des ZWEITEN Writers.
+///
+/// Ein EIGENER Schluessel und nicht der der Linie: ohne
+/// `HeadOptions::signing_public_key_override` truegen beide Writer-Zertifikate
+/// denselben Schluessel, und ein Eintrag, den der ALTE Schluessel unter dem
+/// NEUEN Zertifikat signiert, waere an Gate `manifest-signature` von einem
+/// echten Eintrag des neuen Writers nicht zu unterscheiden. Kein Geheimnis im
+/// Sinne des Produkts; dieses Modul wird nur in Testzielen uebersetzt.
+const SECOND_WRITER_DEVICE_SECRET_V1: [u8; 32] = [
+    0x2a, 0x9e, 0x51, 0xc7, 0x03, 0x6d, 0xb4, 0xf8, 0x1b, 0x47, 0xe0, 0x92, 0x5c, 0xd6, 0x38, 0xa1,
+    0x7f, 0x0c, 0xe5, 0x63, 0x94, 0x2d, 0xb8, 0x16, 0xca, 0x59, 0x07, 0xf1, 0x4e, 0xad, 0x71, 0x3b,
+];
+
+/// Der oeffentliche Schluessel aus [`SECOND_WRITER_DEVICE_SECRET_V1`], wie
+/// ihn das zweite Writer-Zertifikat traegt.
+fn second_writer_public_key() -> CanonicalPublicCoseKey {
+    CanonicalPublicCoseKey::ed25519(
+        *SigningKey::from_bytes(&SECOND_WRITER_DEVICE_SECRET_V1)
+            .verifying_key()
+            .as_bytes(),
+    )
+    .expect("der zweite Fixture-Schluessel muss ein Ed25519-COSE-Schluessel sein")
+}
+
+/// Der Abdruck des Schluessels des zweiten Writers.
+///
+/// Oeffentlich, weil ein Zeuge ihn in `publicKeyThumbprints` wiederfinden
+/// muss: das Feld ist Nachweis des GEPRUEFTEN, und nach einem Uebergang hat
+/// die Pruefung Signaturen BEIDER Writer getragen.
+#[must_use]
+pub fn second_writer_device_key_thumbprint() -> KeyThumbprint {
+    second_writer_public_key().thumbprint()
+}
+
+/// Der Signierer des zweiten Writers.
+fn second_writer_device_signer() -> CoseSigner {
+    CoseSigner::from_secret(SecretBytes::new(SECOND_WRITER_DEVICE_SECRET_V1))
+}
+
+/// Die Sequenz des LETZTEN Eintrags des alten Writers — das `N` der
+/// Transitionsregel.
+pub const TRANSITION_LAST_OLD_WRITER_SEQUENCE_V1: u64 = 1;
+
+/// Die Sequenz, ab der der neue Writer schreibt: `N + 1`.
+///
+/// Der Uebergang ist ab hier wirksam, der alte Writer ab hier widerrufen,
+/// und GENAU der Eintrag auf dieser Sequenz traegt den Transitionshash.
+pub const TRANSITION_EFFECTIVE_FROM_V1: u64 = TRANSITION_LAST_OLD_WRITER_SEQUENCE_V1 + 1;
+
+/// Die Sequenz des zweiten Eintrags des neuen Writers: `N + 2`.
+///
+/// Er traegt KEINEN Transitionshash mehr — sein direkter Vorgaenger ist
+/// bereits ein Eintrag desselben Writers.
+pub const TRANSITION_TRAILING_SEQUENCE_V1: u64 = TRANSITION_EFFECTIVE_FROM_V1 + 1;
+
+/// Die Sequenz, ab der das Zertifikat des neuen Writers FREIGEGEBEN ist.
+///
+/// VOR dem Uebergang, und das ist die Regel und kein Zufall: `ea-trust`
+/// verlangt fuer einen Change 3, dass das neue Zertifikat an `effective_from`
+/// des Uebergangs bereichsaktiv ist (`validate_writer_transition_target`,
+/// `crates/ea-trust/src/registry.rs`). Freigegeben heisst dabei NICHT
+/// laufend: bis zum Change 3 bleibt der alte Writer der laufende, und der
+/// Eintrag des alten Writers auf dieser Sequenz liegt unter dem Kopf, der das
+/// neue Zertifikat freigibt — mit dem alten Writer als Schreiber.
+pub const TRANSITION_NEW_WRITER_APPROVAL_SEQUENCE_V1: u64 = 1;
+
+/// Die Zahl der Eintraege eines Uebergangsbestands: `0..=N+2`.
+pub const TRANSITION_ENTRY_COUNT_V1: u64 = TRANSITION_TRAILING_SEQUENCE_V1 + 1;
+
+/// Der Defekt, den GENAU EIN Eintrag eines Uebergangsbestands traegt.
+///
+/// Die vier Mutanten der Transitionsregel aus `design.md`:669 („fehlend,
+/// zusaetzlich oder unpassend"; unpassend in beiden Bindungen) und der
+/// zurueckgespielte alte Writer. EINER JE BESTAND, damit der Befund
+/// eindeutig einem Objekt zuzuordnen ist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterTransitionDefectV1 {
+    /// Keiner: der Uebergang ist exakt bezeugt.
+    None,
+    /// Der Eintrag auf `N + 1` traegt KEINEN Transitionshash.
+    MissingClaim,
+    /// Der Eintrag auf `N + 2` traegt den Transitionshash — ein Uebergang
+    /// wird nur EINMAL beansprucht, vom ersten Eintrag des neuen Writers.
+    AdditionalClaim,
+    /// Der Eintrag auf `N + 1` traegt einen Hash, der NICHT der des wirksamen
+    /// Uebergangs ist.
+    ///
+    /// Bewusst ein Hash, der im Bestand VORKOMMT: das Root-signierte
+    /// Registrierungsereignis des Change 3 statt des Transitionsobjekts, das
+    /// es anwendet. Ein Vergleich gegen die blosse Anwesenheit im Inventar
+    /// traefe hier ins Leere — Katalogmitgliedschaft ist keine
+    /// Autorisierung.
+    WrongClaim,
+    /// Der Eintrag auf `N + 1` traegt den richtigen Hash und bindet den
+    /// Eintrag `N` — aber der Uebergang der LINIE nennt einen anderen letzten
+    /// Eintrag des alten Writers (den auf Sequenz null).
+    ForeignPredecessor,
+    /// Der Eintrag auf `N + 1` stammt vom ALTEN Writer: sein Schluessel, sein
+    /// Zertifikat, kein Transitionshash. Der zurueckgespielte Writer aus
+    /// Stufe 5, Task 5.
+    RestoredOldWriter,
+}
+
+/// Ein Bestand mit zwei Writern und einem Change 3 dazwischen.
+pub struct WriterTransitionArchive {
+    pub fixture: ArchiveFixture,
+    pub anchor_bytes: Vec<u8>,
+    /// Objekthashes der abgelegten `.eip`, indexgleich zur Sequenz.
+    pub entry_object_hashes: Vec<ObjectHash>,
+    /// Der Objekthash des Root-signierten `writerTransition`-Objekts — der
+    /// Wert, den der erste Eintrag des neuen Writers nennen MUSS.
+    pub transition_object_hash: ObjectHash,
+    pub old_writer_certificate_hash: CertificateHash,
+    pub new_writer_certificate_hash: CertificateHash,
+}
+
+impl WriterTransitionArchive {
+    #[must_use]
+    pub fn anchor(&self) -> TrustAnchorV1 {
+        decode_trust_anchor(&self.anchor_bytes).expect("der Fixture-Anker muss dekodieren")
+    }
+
+    /// Der Objekthash des Eintrags auf `chain_sequence`.
+    #[must_use]
+    pub fn entry_object_hash_at(&self, chain_sequence: u64) -> ObjectHash {
+        self.entry_object_hashes
+            [usize::try_from(chain_sequence).expect("die Sequenz passt in usize")]
+    }
+}
+
+/// Ein Writer, wie ihn die Bausteine dieses Bestands brauchen.
+struct TransitionWriterV1 {
+    certificate_hash: CertificateHash,
+    signer: CoseSigner,
+    key_thumbprint: KeyThumbprint,
+}
+
+/// Ein Eintrag des Uebergangsbestands, bevor er gebaut ist.
+struct TransitionEntrySpecV1<'a> {
+    head: HeadRefV1,
+    writer: &'a TransitionWriterV1,
+    chain_sequence: u64,
+    previous_entry_hash: Option<EntryHash>,
+    writer_transition_event_hash: Option<ObjectHash>,
+}
+
+/// Baut die Linie mit zwei Writern und den Bestand `0..=N+2` mit hoechstens
+/// EINEM `defect`.
+///
+/// # Die Linie
+///
+/// Kopf 1 Policy `[0, 0]` (veraltet, wie in [`complete_line`]), Kopf 2 alter
+/// Writer `[0, 100]`, Kopf 3 neuer Writer freigegeben `[1, 100]`, Kopf 4
+/// Change 3 `[2, 100]`. Der Kopf je Sequenz ist der, den `verify_archive`
+/// WAEHLT — der letzte, dessen Lease bei oder vor der Sequenz beginnt —, und
+/// das Manifest muss genau ihn nennen, weil `ea-trust` einen Signierer nur
+/// gegen die Registrierungsversion des gewaehlten Kopfes aufloest. Sequenz
+/// null liegt also unter Kopf 2, Sequenz `N = 1` unter Kopf 3 (mit dem ALTEN
+/// Writer, der dort noch laeuft), `N + 1` und `N + 2` unter Kopf 4.
+///
+/// # Der Uebergang bindet den echten letzten Eintrag
+///
+/// `previous_entry_hash` des Transitionsobjekts ist der `entryHash` des
+/// Eintrags `N` — kein Platzhalter. Deshalb entstehen die Eintraege des alten
+/// Writers VOR dem Change 3 und die Trust-Objekte werden erst danach
+/// abgelegt; die Manifeste der fruehen Eintraege haengen nicht an Kopf 4.
+#[must_use]
+pub fn writer_transition_archive(defect: WriterTransitionDefectV1) -> WriterTransitionArchive {
+    let mut line = trust_support::RegistryLineBuilder::new();
+    line.push(
+        policy_action(),
+        trust_support::HeadOptions {
+            effective_from: Some(POLICY_LEASE_FROM_V1),
+            valid_through: Some(POLICY_LEASE_THROUGH_V1),
+            not_after: UnixMillis::new(COMPLETE_POLICY_NOT_AFTER_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let old_head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x11,
+            effective_from: Some(COMPLETE_WRITER_LEASE_FROM_V1),
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(COMPLETE_WRITER_LEASE_FROM_V1),
+            valid_through: Some(COMPLETE_WRITER_LEASE_THROUGH_V1),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let new_head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x12,
+            effective_from: Some(TRANSITION_NEW_WRITER_APPROVAL_SEQUENCE_V1),
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(TRANSITION_NEW_WRITER_APPROVAL_SEQUENCE_V1),
+            valid_through: Some(COMPLETE_WRITER_LEASE_THROUGH_V1),
+            signing_public_key_override: Some(second_writer_public_key()),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let old_writer = TransitionWriterV1 {
+        certificate_hash: CertificateHash::from(
+            old_head
+                .direct_object_hash
+                .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+        ),
+        signer: writer_device_signer(),
+        key_thumbprint: writer_device_key_thumbprint(),
+    };
+    let new_writer = TransitionWriterV1 {
+        certificate_hash: CertificateHash::from(
+            new_head
+                .direct_object_hash
+                .expect("ein Device-Uebergang traegt ein direktes Ziel"),
+        ),
+        signer: second_writer_device_signer(),
+        key_thumbprint: second_writer_device_key_thumbprint(),
+    };
+    let anchor_bytes = line.exact_anchor_bytes().to_vec();
+    let chain_id = decode_trust_anchor(&anchor_bytes)
+        .expect("der Fixture-Anker muss dekodieren")
+        .chain_id();
+
+    let mut fixture = ArchiveFixture::new();
+    let mut entry_object_hashes = Vec::new();
+    let mut entry_hashes: Vec<EntryHash> = Vec::new();
+    let mut previous_entry_hash = None;
+
+    // Die Eintraege des alten Writers, `0..=N`.
+    for chain_sequence in COMPLETE_GENESIS_SEQUENCE_V1..=TRANSITION_LAST_OLD_WRITER_SEQUENCE_V1 {
+        let head = if chain_sequence < TRANSITION_NEW_WRITER_APPROVAL_SEQUENCE_V1 {
+            HeadRefV1::of(&old_head)
+        } else {
+            HeadRefV1::of(&new_head)
+        };
+        let (object_hash, entry_hash) = push_transition_entry(
+            &mut fixture,
+            chain_id,
+            &TransitionEntrySpecV1 {
+                head,
+                writer: &old_writer,
+                chain_sequence,
+                previous_entry_hash,
+                writer_transition_event_hash: None,
+            },
+        );
+        entry_object_hashes.push(object_hash);
+        entry_hashes.push(entry_hash);
+        previous_entry_hash = Some(entry_hash);
+    }
+
+    // Der Change 3. Sein `previous_entry_hash` ist der ECHTE letzte Eintrag
+    // des alten Writers — ausser der Bestand soll gerade das Gegenteil
+    // bezeugen.
+    let transition_previous_entry_hash = match defect {
+        WriterTransitionDefectV1::ForeignPredecessor => entry_hashes[0],
+        _ => {
+            entry_hashes[usize::try_from(TRANSITION_LAST_OLD_WRITER_SEQUENCE_V1)
+                .expect("die Sequenz passt in usize")]
+        }
+    };
+    let transition_head = line.push(
+        trust_support::ActionSpec::WriterTransition {
+            old_writer: ObjectHash::from(
+                Hash32::try_from(old_writer.certificate_hash.as_bytes().as_slice())
+                    .expect("ein Zertifikatshash sind 32 Bytes"),
+            ),
+            new_writer: ObjectHash::from(
+                Hash32::try_from(new_writer.certificate_hash.as_bytes().as_slice())
+                    .expect("ein Zertifikatshash sind 32 Bytes"),
+            ),
+            effective_from: Some(TRANSITION_EFFECTIVE_FROM_V1),
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(TRANSITION_EFFECTIVE_FROM_V1),
+            valid_through: Some(COMPLETE_WRITER_LEASE_THROUGH_V1),
+            writer_transition_previous_entry_hash: Some(transition_previous_entry_hash),
+            ..trust_support::HeadOptions::default()
+        },
+    );
+    let transition_object_hash = transition_head
+        .direct_object_hash
+        .expect("ein Change 3 traegt ein direktes Ziel");
+    push_trust_objects(&mut fixture, &line);
+
+    // `N + 1`: der erste Eintrag unter dem Uebergangskopf.
+    let (first_writer, first_claim) = match defect {
+        WriterTransitionDefectV1::None
+        | WriterTransitionDefectV1::AdditionalClaim
+        | WriterTransitionDefectV1::ForeignPredecessor => {
+            (&new_writer, Some(transition_object_hash))
+        }
+        WriterTransitionDefectV1::MissingClaim => (&new_writer, None),
+        WriterTransitionDefectV1::WrongClaim => (&new_writer, Some(transition_head.object_hash)),
+        WriterTransitionDefectV1::RestoredOldWriter => (&old_writer, None),
+    };
+    let (object_hash, entry_hash) = push_transition_entry(
+        &mut fixture,
+        chain_id,
+        &TransitionEntrySpecV1 {
+            head: HeadRefV1::of(&transition_head),
+            writer: first_writer,
+            chain_sequence: TRANSITION_EFFECTIVE_FROM_V1,
+            previous_entry_hash,
+            writer_transition_event_hash: first_claim,
+        },
+    );
+    entry_object_hashes.push(object_hash);
+    previous_entry_hash = Some(entry_hash);
+
+    // `N + 2`: der zweite Eintrag des neuen Writers, ohne Aussage — ausser der
+    // Bestand soll den ZUSAETZLICHEN Hash bezeugen.
+    let (object_hash, _) = push_transition_entry(
+        &mut fixture,
+        chain_id,
+        &TransitionEntrySpecV1 {
+            head: HeadRefV1::of(&transition_head),
+            writer: &new_writer,
+            chain_sequence: TRANSITION_TRAILING_SEQUENCE_V1,
+            previous_entry_hash,
+            writer_transition_event_hash: (defect == WriterTransitionDefectV1::AdditionalClaim)
+                .then_some(transition_object_hash),
+        },
+    );
+    entry_object_hashes.push(object_hash);
+
+    WriterTransitionArchive {
+        fixture,
+        anchor_bytes,
+        entry_object_hashes,
+        transition_object_hash,
+        old_writer_certificate_hash: old_writer.certificate_hash,
+        new_writer_certificate_hash: new_writer.certificate_hash,
+    }
+}
+
+/// Legt einen Eintrag des Uebergangsbestands samt seinem Recovery-Grant ab.
+///
+/// Der Grant ist vom SELBEN Writer ausgestellt, der den Eintrag signiert:
+/// Gate `recipient-grant` prueft den Aussteller gegen den zur Sequenz
+/// laufenden Writer, und nach dem Uebergang ist das der neue.
+fn push_transition_entry(
+    fixture: &mut ArchiveFixture,
+    chain_id: ChainId,
+    spec: &TransitionEntrySpecV1<'_>,
+) -> (ObjectHash, EntryHash) {
+    let plan_hash = complete_grant_plan_hash(
+        complete_recipient_key_thumbprint(),
+        complete_recipient_certificate_hash(),
+    );
+    let entry = build_complete_entry_signed_by(
+        spec.head,
+        spec.writer.certificate_hash,
+        &spec.writer.signer,
+        spec.writer_transition_event_hash,
+        chain_id,
+        plan_hash,
+        spec.chain_sequence,
+        spec.previous_entry_hash,
+        COMPLETE_PLAINTEXT_V1,
+    );
+    let entry_bytes = encode_entry_package(&entry)
+        .expect("das Fixture-Eintragspaket muss kodieren")
+        .into_vec();
+    let entry_object_hash = object_hash(&entry_bytes);
+    let entry_hash = entry.entry_hash();
+    let grant_bytes = complete_grant_bytes_issued_by(
+        spec.head,
+        spec.writer.certificate_hash,
+        spec.writer.key_thumbprint,
+        &spec.writer.signer,
+        chain_id,
+        entry_hash,
+        spec.chain_sequence,
+        GrantPurposeV1::Recovery,
+        complete_recipient_key_thumbprint(),
+        complete_recipient_certificate_hash(),
+        &complete_recipient_private_key().public_key(),
+    );
+    push_grant(fixture, spec.chain_sequence, grant_bytes);
+    fixture.push_exact_bytes(
+        &format!(
+            "{}{:012}_entry.eip",
+            ea_archive::ENTRIES_DIR_V1,
+            spec.chain_sequence
+        ),
+        entry_bytes,
+    );
+    (entry_object_hash, entry_hash)
 }
 
 // ---------------------------------------------------------------------------

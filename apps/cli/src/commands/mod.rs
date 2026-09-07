@@ -38,6 +38,7 @@ pub mod organization;
 pub mod registry;
 pub mod report;
 pub mod verify;
+pub mod writer_transition;
 
 use std::path::Path;
 
@@ -95,6 +96,27 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         Command::ClockReleaseApply { config, release } => {
             clock_release::run(invocation, config, release, now)
         }
+        // Dieselbe Bauart wie die beiden Pfade darueber: kein Urteil ueber
+        // einen Bestand, die Fachlogik in `ea_admin::writer_transition`, der
+        // Bestand eine Ebene tiefer in `OperatorRuntime::open` geprueft.
+        Command::WriterTransitionPrepare { config, request } => {
+            writer_transition::prepare(invocation, config, request, now)
+        }
+        Command::WriterTransitionActivate {
+            config,
+            request,
+            transition_object,
+            valid_through_sequence,
+            not_after,
+        } => writer_transition::activate(
+            invocation,
+            config,
+            request,
+            transition_object,
+            *valid_through_sequence,
+            *not_after,
+            now,
+        ),
     }
 }
 

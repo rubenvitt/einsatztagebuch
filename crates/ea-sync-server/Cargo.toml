@@ -19,4 +19,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 ea-testkit.workspace = true
+# Nur der Fixture-Konstruktor des wirksamen Writer-Uebergangs; produktiv
+# entsteht der Wert ausschliesslich in `ea-trust`.
+ea-trust = { workspace = true, features = ["test-support"] }
 tokio.workspace = true

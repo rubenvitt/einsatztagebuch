@@ -231,7 +231,9 @@ impl CommitServiceError {
     pub const fn http_status(self) -> u16 {
         match self {
             Self::Validation(
-                CommitValidationError::WriterUnauthorized | CommitValidationError::RegistryMismatch,
+                CommitValidationError::WriterUnauthorized
+                | CommitValidationError::WriterRevoked
+                | CommitValidationError::RegistryMismatch,
             )
             | Self::IdentityConflict
             | Self::SequenceFork

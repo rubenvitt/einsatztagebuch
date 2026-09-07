@@ -73,13 +73,18 @@ pub enum RecipientGrantErrorV1 {
     /// Der Grant beruft sich auf eine Authorization, die dieser Lauf nicht
     /// aufloesen kann.
     ///
-    /// FAIL-CLOSED UND AUSDRUECKLICH KEINE PRUEFUNG, dieselbe Lage wie bei
-    /// `crate::entry::claims_unverifiable_writer_transition`: ein historischer
-    /// Grant MUSS nach `design.md`:782 eine Authorization tragen, die Eintrag
-    /// und Empfaenger exakt abdeckt, und diese Aufloesung ist von `ea-verify`
-    /// aus nicht erreichbar — `ea-trust` exportiert dafuer keine Pruefung und
-    /// haelt seinen Katalog `pub(crate)`. Ein solcher Grant wird deshalb NICHT
-    /// benutzt, und es wird nichts mit ihm geoeffnet.
+    /// FAIL-CLOSED UND AUSDRUECKLICH KEINE PRUEFUNG — die Lage, in der der
+    /// Schreiberwechsel bis Stufe 5 stand, bevor `ea-trust` den wirksamen
+    /// Uebergang als Kopfzustand herausgab und
+    /// `crate::entry::writer_transition_claim_holds` die echte Regel rechnen
+    /// konnte. Fuer die Grant-Authorization gibt es diesen Zustand NICHT: ein
+    /// historischer Grant MUSS nach `design.md`:782 eine Authorization
+    /// tragen, die Eintrag und Empfaenger exakt abdeckt, `SelectedRegistryHead`
+    /// gibt keine angewandte Grant-Authorization heraus, und `ea-trust` haelt
+    /// seinen Katalog `pub(crate)`. Ein solcher Grant wird deshalb NICHT
+    /// benutzt, und es wird nichts mit ihm geoeffnet. Dieses Gate haelt auch
+    /// keinen Transitionsanspruch: der wird an genau einer Stelle gerechnet,
+    /// im Eintragsdurchlauf von `crate::archive`.
     AuthorizationUnverifiable,
 }
 

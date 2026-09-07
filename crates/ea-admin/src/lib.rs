@@ -90,6 +90,7 @@ pub mod policy;
 pub mod registry;
 pub mod revocation;
 mod root_ceremony;
+pub mod writer_transition;
 pub use operator::*;
 pub use operator_profile::verify_operator_snapshot;
 
@@ -111,3 +112,7 @@ pub use production_state::{
     verify_fresh_machine_recovery_test,
 };
 pub use root_ceremony::RootCeremonyService;
+pub use writer_transition::{
+    ActivatedWriterTransition, PreparedWriterTransition, TrustedChainHead, WriterTransitionError,
+    WriterTransitionRequest, WriterTransitionService,
+};

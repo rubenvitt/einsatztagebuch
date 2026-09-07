@@ -8,7 +8,7 @@ use ea_format::{
 use ea_types::{CertificateHash, ChainSequence, Hash32, ObjectHash, RegistryVersion};
 
 use crate::{
-    TrustError, TrustStateSnapshot,
+    EffectiveWriterTransitionV1, TrustError, TrustStateSnapshot,
     catalog::TrustCatalog,
     certificate::{ActiveCertificate, RootAuthority},
     operator_binding::ActiveOperatorBinding,
@@ -29,7 +29,9 @@ pub(crate) struct PreviousHeadState {
     pub(crate) valid_through_sequence: ChainSequence,
     pub(crate) head_event: Option<RegistryEventFieldsV1>,
     pub(crate) current_writer_certificate_hash: Option<CertificateHash>,
-    pub(crate) writer_transition_object_hash: Option<ObjectHash>,
+    /// Der auf dieser Linie angewandte Change 3 — `None`, solange keiner
+    /// angewandt wurde. Ein spaeterer Change 3 ersetzt den frueheren.
+    pub(crate) writer_transition: Option<EffectiveWriterTransitionV1>,
 }
 
 impl PreviousHeadState {
@@ -84,7 +86,7 @@ impl PreviousHeadState {
             valid_through_sequence: ChainSequence::new(0),
             head_event: None,
             current_writer_certificate_hash: None,
-            writer_transition_object_hash: None,
+            writer_transition: None,
         })
     }
 
@@ -97,19 +99,23 @@ impl PreviousHeadState {
         self.catalog.get(&object_hash)
     }
 
+    /// Wendet einen geprueften Change 3 an: widerruft den alten Writer ab
+    /// `effective_from_sequence`, macht den neuen zum laufenden Writer und
+    /// haelt den Uebergang VOLLSTAENDIG fest, damit ein gewaehlter Kopf ihn
+    /// herausgeben kann. `false`, wenn das alte Zertifikat nicht bekannt ist.
     pub(crate) fn apply_writer_transition(
         &mut self,
-        transition_object_hash: ObjectHash,
-        old_writer: CertificateHash,
-        new_writer: CertificateHash,
-        effective_from_sequence: ChainSequence,
+        transition: EffectiveWriterTransitionV1,
     ) -> bool {
-        let Some(old_certificate) = self.certificates.get_mut(&old_writer) else {
+        let Some(old_certificate) = self
+            .certificates
+            .get_mut(&transition.old_writer_certificate_hash())
+        else {
             return false;
         };
-        old_certificate.fields.revoked_from_sequence = Some(effective_from_sequence);
-        self.current_writer_certificate_hash = Some(new_writer);
-        self.writer_transition_object_hash = Some(transition_object_hash);
+        old_certificate.fields.revoked_from_sequence = Some(transition.effective_from_sequence());
+        self.current_writer_certificate_hash = Some(transition.new_writer_certificate_hash());
+        self.writer_transition = Some(transition);
         true
     }
 
@@ -360,16 +366,17 @@ pub(crate) mod tests {
     };
     use ea_time::TrustedTimeState;
     use ea_types::{
-        CertificateHash, ChainId, ChainSequence, DeviceId, Hash32, KeyThumbprint, ObjectHash,
-        OperatorSubjectId, OrganizationId, RegistryVersion, SubjectId, UnixMillis,
+        CertificateHash, ChainId, ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint,
+        ObjectHash, OperatorSubjectId, OrganizationId, RegistryVersion, SubjectId, UnixMillis,
     };
     use minicbor::Encoder;
 
     use super::PreviousHeadResolver;
     use crate::{
-        IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin, RegistrySelectionCommit,
-        StateStoreError, TrustObjectSource, TrustSourceError, TrustStateKey, TrustStateStore,
-        certificate::ActiveCertificate, decode_trust_anchor, load_trust_state, verify_trust,
+        EffectiveWriterTransitionV1, IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin,
+        RegistrySelectionCommit, StateStoreError, TrustObjectSource, TrustSourceError,
+        TrustStateKey, TrustStateStore, certificate::ActiveCertificate, decode_trust_anchor,
+        load_trust_state, verify_trust,
     };
 
     pub(crate) const ROOT_SECRET: [u8; 32] = [
@@ -647,12 +654,15 @@ pub(crate) mod tests {
         );
 
         let transition_hash = object_hash(b"verified Writer transition");
-        assert!(writer_state.apply_writer_transition(
+        let transition = EffectiveWriterTransitionV1::new(
             transition_hash,
             prepared_hash,
             next_writer_certificate_hash,
             ChainSequence::new(41),
-        ));
+            EntryHash::from(hash32(0x35)),
+        );
+        assert!(writer_state.writer_transition.is_none());
+        assert!(writer_state.apply_writer_transition(transition));
         assert_eq!(
             writer_state
                 .certificates
@@ -663,7 +673,12 @@ pub(crate) mod tests {
             Some(ChainSequence::new(41))
         );
         assert!(writer_state.current_writer_certificate_hash == Some(next_writer_certificate_hash));
-        assert!(writer_state.writer_transition_object_hash == Some(transition_hash));
+        assert_eq!(writer_state.writer_transition, Some(transition));
+        assert!(
+            writer_state
+                .writer_transition
+                .is_some_and(|recorded| recorded.object_hash() == transition_hash)
+        );
         assert!(matches!(
             PreviousHeadResolver::new(&writer_state)
                 .resolve(prepared_hash, RegistryVersion::new(0)),

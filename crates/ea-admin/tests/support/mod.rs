@@ -2401,3 +2401,183 @@ pub fn component_bindings() -> Vec<ComponentBindingV1> {
         },
     ]
 }
+
+// ===========================================================================
+// Die Kulisse des Writer-Uebergangs (Stufe 5, Task 5)
+// ===========================================================================
+
+/// Der Index des Kopfes VOR dem Uebergang in
+/// [`writer_transition_ceremony_line`] — der Kopf, der das neue
+/// Writer-Zertifikat freigibt und an dem der alte Writer noch laeuft.
+pub const TRANSITION_PRE_HEAD: usize = 5;
+
+/// Die Sequenz, an der die Zeugen den Kopf vor dem Uebergang waehlen — im
+/// Fenster des letzten Kopfes (81..100).
+pub const TRANSITION_PROPOSED_SEQUENCE: u64 = 90;
+
+/// Die Kettensequenz des abgeglichenen Kopfes: der letzte Eintrag des alten
+/// Writers steht an der Obergrenze des Lease des letzten Kopfes.
+pub const TRANSITION_TRUSTED_SEQUENCE: u64 = 100;
+
+/// Die erste Sequenz des neuen Writers — `TRANSITION_TRUSTED_SEQUENCE + 1`,
+/// zugleich die Sequenz, an der `prepare_unsigned` die Autorisierung des
+/// Uebergangs bindet (`previous.valid_through + 1`).
+pub const TRANSITION_EFFECTIVE_FROM: u64 = 101;
+
+/// Der `reason_code`, den die `ea-trust`-Fixture in JEDEN Uebergang schreibt
+/// (`crates/ea-trust/tests/support/mod.rs`, Zweig `ActionSpec::WriterTransition`).
+///
+/// Auf dem Draht ist er ein blosser `uint` ohne Tabelle; der Dienst reicht ihn
+/// durch. Ein Zeuge, der ueber die Zeremonie veroeffentlichen will, muss
+/// GENAU diesen Wert nennen, sonst deckt die vorbereitete Autorisierung einen
+/// anderen Kern.
+pub const FIXTURE_TRANSITION_REASON_CODE: u64 = 1;
+
+/// Die Zeremonienlinie mit ZWEI freigegebenen Writer-Zertifikaten.
+///
+/// `ceremony_line_for` fuehrt genau ein Writer-Zertifikat; ein Uebergang
+/// nennt zwei, die beide freigegeben sein muessen (`tests/root_ceremony.rs`
+/// laesst Aktionscode 3 deshalb aus). Diese Linie schliesst die Luecke.
+pub struct TransitionCeremonyLine {
+    /// Die Zeremonie: Linie, Autorisierung des Uebergangs, Bindung, Wurzel.
+    /// `target_payload` ist die Nutzlast, die die FIXTURE fuer den Uebergang
+    /// gebaut hat — der Zeuge vergleicht sie mit der des Dienstes.
+    pub ceremony: CeremonyLine,
+    /// Das erste freigegebene Writer-Zertifikat: der laufende Writer.
+    pub old_writer_certificate_hash: CertificateHash,
+    /// Ein Lesegeraet — bereichsaktiv, aber kein Writer.
+    pub reader_certificate_hash: CertificateHash,
+    /// Das zweite freigegebene Writer-Zertifikat: ab
+    /// [`Self::new_writer_effective_from`] bereichsaktiv, aber vor dem
+    /// Uebergang NICHT der laufende Writer.
+    pub new_writer_certificate_hash: CertificateHash,
+    /// Derselbe Wert als Objekthash — `ActionSpec::WriterTransition` nennt
+    /// seine Zertifikate als Objekte.
+    pub new_writer_certificate_object_hash: ObjectHash,
+    pub new_writer_effective_from: ChainSequence,
+    /// Der `previous_entry_hash`, den die Autorisierung des Uebergangs deckt.
+    pub previous_entry_hash: EntryHash,
+}
+
+/// Baut die Linie: Policy `[1, 10]`, alter Writer `[11, 20]`, Bindung
+/// `[21, 40]`, zweite Bindung `[41, 60]`, Reader `[61, 80]`, neuer Writer
+/// `[81, 100]` — und danach `prepare_unsigned` fuer den Uebergang mit
+/// `effective_from = 101` und `previous_entry_hash`.
+///
+/// # Panics
+///
+/// Wenn die Fixture ihre eigenen direkten Ziele nicht baut.
+#[must_use]
+pub fn writer_transition_ceremony_line(previous_entry_hash: EntryHash) -> TransitionCeremonyLine {
+    let instance_thumbprint = KeyThumbprint::from(
+        Hash32::try_from(
+            public_key(INSTANCE_SECRET)
+                .thumbprint()
+                .as_bytes()
+                .as_slice(),
+        )
+        .expect("ein Thumbprint ist 32 Byte"),
+    );
+    let mut line = RegistryLineBuilder::new();
+    let root_certificate_hash = CertificateHash::from(line.current_root_hash());
+    line.push(policy_action(), head_options(1, 10));
+    let old_writer = line.push(
+        ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x61,
+            effective_from: None,
+        },
+        head_options(11, 20),
+    );
+    let writer_certificate_object_hash = old_writer
+        .direct_object_hash
+        .expect("das erste Writer-Zertifikat ist ein direktes Ziel");
+    let binding = line.push(
+        ActionSpec::OperatorBinding {
+            certificate_hash: writer_certificate_object_hash,
+            role: OperatorRoleV1::Writer,
+            marker: BINDING_MARKER,
+            effective_from: None,
+        },
+        HeadOptions {
+            binding_instance_key_thumbprint_override: Some(instance_thumbprint),
+            ..head_options(21, 40)
+        },
+    );
+    let binding_object_hash = binding
+        .direct_object_hash
+        .expect("die Bedienerbindung ist ein direktes Ziel");
+    let second = line.push(
+        ActionSpec::OperatorBinding {
+            certificate_hash: writer_certificate_object_hash,
+            role: OperatorRoleV1::Writer,
+            marker: SECOND_BINDING_MARKER,
+            effective_from: None,
+        },
+        HeadOptions {
+            binding_instance_key_thumbprint_override: Some(instance_thumbprint),
+            revoked_from_sequence: Some(ChainSequence::new(SECOND_BINDING_REVOKED_FROM)),
+            ..head_options(41, 60)
+        },
+    );
+    let second_binding_object_hash = second
+        .direct_object_hash
+        .expect("die zweite Bedienerbindung ist ein direktes Ziel");
+    let reader = line.push(
+        ActionSpec::Device {
+            kind: CertificateKindV1::Reader,
+            marker: 0x63,
+            effective_from: None,
+        },
+        head_options(61, 80),
+    );
+    let reader_certificate_object_hash = reader
+        .direct_object_hash
+        .expect("das Lesezertifikat ist ein direktes Ziel");
+    let new_writer = line.push(
+        ActionSpec::Device {
+            kind: CertificateKindV1::Writer,
+            marker: 0x62,
+            effective_from: None,
+        },
+        head_options(81, 100),
+    );
+    let new_writer_certificate_object_hash = new_writer
+        .direct_object_hash
+        .expect("das zweite Writer-Zertifikat ist ein direktes Ziel");
+    assert_eq!(
+        new_writer.valid_through,
+        ChainSequence::new(TRANSITION_TRUSTED_SEQUENCE)
+    );
+    // Erst JETZT die Autorisierung des Uebergangs, gebunden an den letzten
+    // Kopf. Das Transitionsobjekt selbst bleibt aus dem Katalog fort — es
+    // entsteht im Dienst.
+    let (authorization_object_hash, target_payload) = line.prepare_unsigned(
+        ActionSpec::WriterTransition {
+            old_writer: writer_certificate_object_hash,
+            new_writer: new_writer_certificate_object_hash,
+            effective_from: None,
+        },
+        HeadOptions {
+            writer_transition_previous_entry_hash: Some(previous_entry_hash),
+            ..HeadOptions::default()
+        },
+    );
+    TransitionCeremonyLine {
+        ceremony: CeremonyLine {
+            target_payload,
+            authorization_object_hash,
+            binding_object_hash,
+            second_binding_object_hash,
+            writer_certificate_object_hash,
+            root_certificate_hash,
+            line,
+        },
+        old_writer_certificate_hash: CertificateHash::from(writer_certificate_object_hash),
+        reader_certificate_hash: CertificateHash::from(reader_certificate_object_hash),
+        new_writer_certificate_hash: CertificateHash::from(new_writer_certificate_object_hash),
+        new_writer_certificate_object_hash,
+        new_writer_effective_from: new_writer.effective_from,
+        previous_entry_hash,
+    }
+}

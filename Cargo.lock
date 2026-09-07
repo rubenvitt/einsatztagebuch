@@ -2087,6 +2087,8 @@ dependencies = [
  "ea-operator",
  "ea-reader",
  "ea-schema",
+ "ea-sync-protocol",
+ "ea-sync-server",
  "ea-testkit",
  "ea-time",
  "ea-trust",

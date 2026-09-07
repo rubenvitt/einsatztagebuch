@@ -61,12 +61,12 @@ use ea_trust::{
     verify_registry_candidate,
 };
 use ea_types::{
-    ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
-    UnixMillis,
+    CertificateHash, ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint, ObjectHash,
+    OrganizationId, UnixMillis,
 };
 use ea_writer::{
-    FinalizationFaultPoint, FinalizationInputV1, ReachedState, WriterBindingV1, WriterError,
-    WriterService,
+    FinalizationFaultPoint, FinalizationInputV1, KeyTransitionInputV1, ReachedState,
+    WriterBindingV1, WriterError, WriterService,
 };
 use ed25519_dalek::{Signer as _, SigningKey};
 
@@ -89,8 +89,34 @@ const OTHER_WRITER_SECRET: [u8; 32] = [
     0x51, 0xac, 0x0d, 0x74, 0x2e, 0xb8, 0x96, 0x1f, 0x43, 0xd5, 0x60, 0x8a, 0x27, 0xce, 0x19, 0xb3,
     0x7d, 0x04, 0xe2, 0x5b, 0x98, 0x36, 0xaf, 0x11, 0x6c, 0xd9, 0x40, 0x83, 0x2a, 0xf7, 0x65, 0x1e,
 ];
+/// Der Seed des Schluesselspeichers des NEUEN Writer-Geraets.
+///
+/// Ein ZWEITER Provider und nicht ein zweiter Schluessel im ersten: die
+/// Adresse eines Griffs ist (Speicher, Konto, Zweck), und `WriterSigningKey`
+/// ist je Konto GENAU EIN Platz. Ein zweites `generate` schriebe frisches
+/// Material an dieselbe Adresse — das ist der Fall, den
+/// [`WriterHarness::with_variant`] fuer den Datenbankschluessel ausdruecklich
+/// ausschliesst. Der neue Writer ist ein anderes Geraet, und das ist hier
+/// wortwoertlich so gebaut.
+const NEW_WRITER_PROVIDER_SEED: [u8; 32] = [0x9e; 32];
+/// Der private X25519-Schluessel des OEFFENBAREN Recovery-Empfaengers.
+///
+/// Die Vorgabe-Empfaengerschluessel der Fixture (`kem_key`) sind blosse
+/// oeffentliche Punkte ohne privates Gegenstueck: mit ihnen kann KEIN Test
+/// einen veroeffentlichten Eintrag oeffnen. Ein Zeuge, der die versiegelte
+/// Nutzlast eines `keyTransition` nachlesen muss, braucht einen Empfaenger,
+/// dessen Geheimnis er kennt.
+const OPENABLE_RECOVERY_SECRET: [u8; 32] = [
+    0x6b, 0x1e, 0x3f, 0xa8, 0x90, 0x27, 0xd4, 0x5c, 0x12, 0xf0, 0x8b, 0x39, 0xc6, 0x4d, 0xe7, 0x71,
+    0x0a, 0x95, 0x2c, 0xb3, 0x58, 0xdf, 0x46, 0x8e, 0x63, 0x1a, 0xf9, 0x24, 0xc1, 0x7d, 0x0f, 0x52,
+];
+/// Die organisatorische Begruendung der Uebergangszeugen — ein Kanarienvogel,
+/// der in KEINEM veroeffentlichten Bytestrom auftauchen darf.
+pub const CANARY_TRANSITION_REASON: &str = "CANARY-TRANSITION-REASON-Schluesselwechsel";
 const BINDING_MARKER: u8 = 0x22;
 const WRITER_MARKER: u8 = 0x61;
+/// Der Marker des ZWEITEN Writer-Zertifikats derselben Linie.
+const NEW_WRITER_MARKER: u8 = 0x67;
 const RECOVERY_MARKER: u8 = 0x62;
 const READER_ONE_MARKER: u8 = 0x63;
 const READER_TWO_MARKER: u8 = 0x64;
@@ -220,6 +246,28 @@ fn kem_key(marker: u8) -> CanonicalPublicCoseKey {
     CanonicalPublicCoseKey::x25519(bytes).expect("ein X25519-Schluessel ist 32 Byte lang")
 }
 
+/// Der private Schluessel des oeffenbaren Recovery-Empfaengers.
+fn openable_recovery_private_key() -> ea_crypto::HpkeRecipientPrivateKey {
+    ea_crypto::HpkeRecipientPrivateKey::from_bytes(ea_crypto::SecretBytes::new(
+        OPENABLE_RECOVERY_SECRET,
+    ))
+    .expect("der oeffenbare Empfaengerschluessel ist ein X25519-Schluessel")
+}
+
+/// Der oeffentliche COSE-Schluessel zu [`openable_recovery_private_key`] —
+/// derselbe Abdruck, den die Grants dieser Linie adressieren.
+fn openable_recovery_public_key() -> CanonicalPublicCoseKey {
+    CanonicalPublicCoseKey::x25519(*openable_recovery_private_key().public_key().as_bytes())
+        .expect("ein X25519-Punkt ist ein COSE-Schluessel")
+}
+
+/// Das ZWEITE Writer-Zertifikat einer Linie samt seiner Bedienerbindung.
+#[derive(Clone, Copy)]
+struct SecondWriterLine {
+    certificate_hash: ObjectHash,
+    binding_object_hash: ObjectHash,
+}
+
 /// Was aus der gebauten Linie herausgereicht wird.
 struct BuiltLine {
     line: RegistryLineBuilder,
@@ -228,6 +276,9 @@ struct BuiltLine {
     /// Der Objekthash des Serverquittungszertifikats — `None`, solange die
     /// Variante es nicht anfordert.
     server_receipt_certificate_hash: Option<ObjectHash>,
+    /// Das zweite Writer-Zertifikat und seine Bindung — `None`, solange kein
+    /// zweiter Writer-Schluessel uebergeben wurde.
+    second_writer: Option<SecondWriterLine>,
 }
 
 /// Wie eine Fixture von der glatten Linie abweicht.
@@ -280,13 +331,29 @@ pub struct LineVariantV1 {
     /// diesen Knopf gibt es keinen Aufbau, in dem der Waechter
     /// `NoActiveRecoveryRecipient` ueberhaupt erreichbar ist.
     pub without_recovery_recipient: bool,
+    /// Der Recovery-Empfaenger traegt einen Schluessel, dessen PRIVATES
+    /// Gegenstueck die Fixture kennt ([`OPENABLE_RECOVERY_SECRET`]).
+    ///
+    /// ADDITIV und per Vorgabe AUS: der Vorgabeschluessel bleibt der blosse
+    /// oeffentliche Punkt aus `kem_key`, und jede bestehende Fixture sieht
+    /// dieselben Zertifikatsbytes wie zuvor. Eingeschaltet kann
+    /// [`WriterHarness::decrypt_entry_as_recovery_recipient`] einen
+    /// veroeffentlichten Eintrag wirklich oeffnen — ueber den Grant, HPKE und
+    /// AEAD, wie ein Recovery-Empfaenger es tut.
+    pub recovery_recipient_openable: bool,
 }
 
 /// Baut die EINE Registrierungslinie der Fixture.
+///
+/// `second_writer_public_key` haengt ein ZWEITES Writer-Zertifikat und eine
+/// Bindung DESSELBEN Bedieners daran — freigegeben und bereichsaktiv, aber
+/// nicht der laufende Writer, solange kein Change 3 folgt. Genau die Lage vor
+/// einem Writer-Uebergang. `None` laesst die Linie, wie sie war.
 fn build_line(
     writer_public_key: &CanonicalPublicCoseKey,
     profile_hashes: Vec<Hash32>,
     variant: LineVariantV1,
+    second_writer_public_key: Option<&CanonicalPublicCoseKey>,
 ) -> BuiltLine {
     let mut line = RegistryLineBuilder::new();
     line.push(
@@ -324,7 +391,11 @@ fn build_line(
                 effective_from: Some(0),
             },
             HeadOptions {
-                kem_public_key_override: Some(kem_key(RECOVERY_MARKER)),
+                kem_public_key_override: Some(if variant.recovery_recipient_openable {
+                    openable_recovery_public_key()
+                } else {
+                    kem_key(RECOVERY_MARKER)
+                }),
                 ..head_options(0, 30)
             },
         );
@@ -380,6 +451,28 @@ fn build_line(
     let writer_certificate_hash = writer
         .direct_object_hash
         .expect("das Writer-Zertifikat ist ein direktes Ziel");
+    // Die Bindungsoptionen sind fuer BEIDE Bindungen dieselben: derselbe
+    // Bediener meldet sich auf beiden Geraeten an. Nur das Zertifikat weicht
+    // ab, und damit der Bindungshash.
+    let binding_options = |valid_through: u64| HeadOptions {
+        binding_instance_key_thumbprint_override: Some(KeyThumbprint::from(
+            Hash32::try_from(
+                public_key(INSTANCE_SECRET)
+                    .thumbprint()
+                    .as_bytes()
+                    .as_slice(),
+            )
+            .expect("ein Thumbprint ist 32 Byte lang"),
+        )),
+        binding_operator_profile_commitment_override: Some(
+            if variant.foreign_operator_profile_commitment {
+                foreign_profile_commitment()
+            } else {
+                expected_profile_commitment(trust_support::organization())
+            },
+        ),
+        ..head_options(0, valid_through)
+    };
     let binding = line.push(
         ActionSpec::OperatorBinding {
             certificate_hash: writer_certificate_hash,
@@ -387,32 +480,46 @@ fn build_line(
             marker: BINDING_MARKER,
             effective_from: Some(0),
         },
-        HeadOptions {
-            binding_instance_key_thumbprint_override: Some(KeyThumbprint::from(
-                Hash32::try_from(
-                    public_key(INSTANCE_SECRET)
-                        .thumbprint()
-                        .as_bytes()
-                        .as_slice(),
-                )
-                .expect("ein Thumbprint ist 32 Byte lang"),
-            )),
-            binding_operator_profile_commitment_override: Some(
-                if variant.foreign_operator_profile_commitment {
-                    foreign_profile_commitment()
-                } else {
-                    expected_profile_commitment(trust_support::organization())
-                },
-            ),
-            ..head_options(0, 100)
-        },
+        binding_options(100),
     );
+    let second_writer = second_writer_public_key.map(|public| {
+        let certificate = line.push(
+            ActionSpec::Device {
+                kind: CertificateKindV1::Writer,
+                marker: NEW_WRITER_MARKER,
+                effective_from: Some(0),
+            },
+            HeadOptions {
+                signing_public_key_override: Some(public.clone()),
+                ..head_options(0, 110)
+            },
+        );
+        let certificate_hash = certificate
+            .direct_object_hash
+            .expect("das zweite Writer-Zertifikat ist ein direktes Ziel");
+        let binding = line.push(
+            ActionSpec::OperatorBinding {
+                certificate_hash,
+                role: OperatorRoleV1::Writer,
+                marker: BINDING_MARKER,
+                effective_from: Some(0),
+            },
+            binding_options(120),
+        );
+        SecondWriterLine {
+            certificate_hash,
+            binding_object_hash: binding
+                .direct_object_hash
+                .expect("die zweite Bedienerbindung ist ein direktes Ziel"),
+        }
+    });
     BuiltLine {
         binding_object_hash: binding
             .direct_object_hash
             .expect("die Bedienerbindung ist ein direktes Ziel"),
         writer_certificate_hash,
         server_receipt_certificate_hash,
+        second_writer,
         line,
     }
 }
@@ -586,6 +693,9 @@ pub struct WriterHarness {
     backup: Vec<(String, Vec<u8>)>,
     backend: Arc<LocalPathBackend>,
     server_receipt_certificate_hash: Option<ObjectHash>,
+    /// Das zweite Writer-Zertifikat der Linie — `None` in jeder Fixture, die
+    /// keinen Writer-Uebergang vorbereitet.
+    second_writer: Option<SecondWriterLine>,
     head: SelectedRegistryHead,
     binding: WriterBindingV1,
     line: RegistryLineBuilder,
@@ -623,7 +733,7 @@ impl WriterHarness {
         let profile_hash = local_profile()
             .profile_hash()
             .expect("das Profil der Fixture ist kodierbar");
-        let built = build_line(&writer_public, vec![profile_hash], variant);
+        let built = build_line(&writer_public, vec![profile_hash], variant, None);
         let head_index = built.line.heads().len() - 1;
         let key = trust_support::state_key();
         let trusted_time = TrustedTimeState::initial(UnixMillis::new(FIXTURE_NOW_MS));
@@ -638,6 +748,15 @@ impl WriterHarness {
     /// Eine Fixture, deren Registrierungslinie GENAU in einem Punkt abweicht.
     #[must_use]
     pub fn with_variant(variant: LineVariantV1) -> Self {
+        Self::with_variant_and_second_writer(variant, None)
+    }
+
+    /// Wie [`Self::with_variant`], mit einem ZWEITEN Writer-Zertifikat auf
+    /// derselben Linie — siehe [`build_line`].
+    fn with_variant_and_second_writer(
+        variant: LineVariantV1,
+        second_writer_public_key: Option<&CanonicalPublicCoseKey>,
+    ) -> Self {
         let lock = take_lock();
         ea_writer::reset_entropy_draws();
         let root = fixture_root("finalize");
@@ -667,7 +786,12 @@ impl WriterHarness {
         // Backends kommt danach aus GENAU der signierten Policy des gewaehlten
         // Head. Eine zweite, danebenlaufende Policy waere die Luecke, die die
         // Profilpruefung wertlos macht.
-        let built = build_line(&writer_public, vec![profile_hash], variant);
+        let built = build_line(
+            &writer_public,
+            vec![profile_hash],
+            variant,
+            second_writer_public_key,
+        );
         let head = select_head(&built.line, FIXTURE_NOW_MS);
         let backend = LocalPathBackend::open(
             root.join("archive"),
@@ -738,6 +862,7 @@ impl WriterHarness {
             open: Some(open),
             backup,
             server_receipt_certificate_hash: built.server_receipt_certificate_hash,
+            second_writer: built.second_writer,
             backend: Arc::new(backend),
             head,
             binding,
@@ -1136,6 +1261,7 @@ impl WriterHarness {
             &public_key(OTHER_WRITER_SECRET),
             vec![profile_hash],
             LineVariantV1::default(),
+            None,
         );
         let other_head = select_head(&other.line, FIXTURE_NOW_MS);
         issue_proof(&other_head, other.binding_object_hash, purpose)
@@ -1393,26 +1519,7 @@ impl WriterHarness {
     /// speicherbar.
     #[must_use]
     pub fn writer_keys_cannot_decrypt(&self, entry_hash: EntryHash) -> bool {
-        let path = self
-            .published_entry_paths()
-            .into_iter()
-            .find(|path| path.contains(&hex(entry_hash.as_bytes())))
-            .expect("der committed Eintrag muss unter seinem Layoutnamen liegen");
-        let bytes = self
-            .backend
-            .read_for_test(&path)
-            .expect("das committed .eip muss lesbar sein");
-        let parsed =
-            ea_format::decode_exact_object(&bytes).expect("das committed .eip muss dekodieren");
-        let ea_format::ParsedArchiveObject::Entry(entry) = &parsed else {
-            panic!("unter entries/ liegt ein Eintragspaket");
-        };
-        // `assert_eq!` verlangt `Debug`, und Stufe 1 leitet fuer `EntryHash`
-        // keines ab — ein Hash gehoert in keine Protokollzeile.
-        assert!(
-            entry.value().entry_hash() == entry_hash,
-            "gemessen wird GENAU der Eintrag, dessen Hash der Abschluss gemeldet hat"
-        );
+        let entry = self.published_entry(entry_hash);
         let nonce = ea_crypto::SecretBytes::new(entry.value().manifest().fields().nonce);
         let aad = ea_crypto::payload_aad(entry.value().manifest().exact_bytes());
 
@@ -1476,6 +1583,114 @@ impl WriterHarness {
         })
     }
 
+    /// Der VEROEFFENTLICHTE Eintrag mit diesem `entryHash`, dekodiert.
+    ///
+    /// # Panics
+    ///
+    /// Wenn unter `entries/` kein Eintrag mit diesem Hash liegt oder die
+    /// liegenden Bytes kein Eintragspaket sind.
+    #[must_use]
+    pub fn published_entry(
+        &self,
+        entry_hash: EntryHash,
+    ) -> ea_format::Parsed<ea_format::EntryPackageV1> {
+        let path = self
+            .published_entry_paths()
+            .into_iter()
+            .find(|path| path.contains(&hex(entry_hash.as_bytes())))
+            .expect("der committed Eintrag muss unter seinem Layoutnamen liegen");
+        let bytes = self
+            .backend
+            .read_for_test(&path)
+            .expect("das committed .eip muss lesbar sein");
+        let parsed =
+            ea_format::decode_exact_object(&bytes).expect("das committed .eip muss dekodieren");
+        let ea_format::ParsedArchiveObject::Entry(entry) = parsed else {
+            panic!("unter entries/ liegt ein Eintragspaket");
+        };
+        // `assert_eq!` verlangt `Debug`, und Stufe 1 leitet fuer `EntryHash`
+        // keines ab — ein Hash gehoert in keine Protokollzeile.
+        assert!(
+            entry.value().entry_hash() == entry_hash,
+            "gemessen wird GENAU der Eintrag, dessen Hash der Abschluss gemeldet hat"
+        );
+        entry
+    }
+
+    /// JEDER veroeffentlichte Bytestrom des Bestands — Eintraege und Grants,
+    /// ohne Staging-Adressen — als `(Pfad, Bytes)`.
+    ///
+    /// Die Kulisse eines Kanarienvogel-Zeugen: was hier NICHT vorkommt, hat
+    /// der Writer nicht im Klartext veroeffentlicht.
+    #[must_use]
+    pub fn published_archive_bytes(&self) -> Vec<(String, Vec<u8>)> {
+        self.published_entry_paths()
+            .into_iter()
+            .chain(self.published_grant_paths())
+            .map(|path| {
+                let bytes = self
+                    .backend
+                    .read_for_test(&path)
+                    .expect("ein veroeffentlichtes Objekt muss lesbar sein");
+                (path, bytes)
+            })
+            .collect()
+    }
+
+    /// Oeffnet den veroeffentlichten Eintrag SO, wie der Recovery-Empfaenger
+    /// ihn oeffnet: sein Grant, HPKE ueber `grant-context-v1`, dann AEAD ueber
+    /// den Manifestkern. Liefert den Klartext der Nutzlast.
+    ///
+    /// Verlangt eine Linie mit
+    /// [`LineVariantV1::recovery_recipient_openable`]; ohne sie gibt es keinen
+    /// Empfaenger, dessen Geheimnis die Fixture kennt.
+    ///
+    /// # Panics
+    ///
+    /// Wenn kein Grant dieses Eintrags an den oeffenbaren Empfaenger
+    /// adressiert ist oder eine der beiden Entschluesselungen scheitert.
+    #[must_use]
+    pub fn decrypt_entry_as_recovery_recipient(&self, entry_hash: EntryHash) -> Vec<u8> {
+        let entry = self.published_entry(entry_hash);
+        let private = openable_recovery_private_key();
+        let thumbprint = openable_recovery_public_key().thumbprint();
+        for path in self.published_grant_paths() {
+            let bytes = self
+                .backend
+                .read_for_test(&path)
+                .expect("ein veroeffentlichter Grant muss lesbar sein");
+            let parsed = ea_format::decode_exact_object(&bytes)
+                .expect("ein veroeffentlichter Grant muss dekodieren");
+            let ea_format::ParsedArchiveObject::Grant(grant) = &parsed else {
+                continue;
+            };
+            let body = grant.value().grant_body();
+            let fields = body.fields();
+            if fields.entry_hash != entry_hash || fields.recipient_key_thumbprint != thumbprint {
+                continue;
+            }
+            let context = body
+                .exact_grant_context()
+                .expect("ein veroeffentlichter Grant traegt seinen Kontext");
+            let sealed =
+                ea_crypto::HpkeSealed::from_parts(fields.encapsulated_key, fields.wrapped_cek)
+                    .expect("die Kapselung des Grants ist wohlgeformt");
+            let cek = ea_crypto::hpke_open(
+                &private,
+                &sealed,
+                &ea_crypto::hpke_info(context),
+                &ea_crypto::hpke_aad(context),
+            )
+            .expect("der oeffenbare Empfaenger entkapselt seinen Grant");
+            let nonce = ea_crypto::SecretBytes::new(entry.value().manifest().fields().nonce);
+            let aad = ea_crypto::payload_aad(entry.value().manifest().exact_bytes());
+            let plaintext = ea_crypto::aead_open(&cek, &nonce, entry.value().ciphertext(), &aad)
+                .expect("die CEK des Grants oeffnet den Eintrag");
+            return plaintext.with_exposed(<[u8]>::to_vec);
+        }
+        panic!("kein Grant dieses Eintrags ist an den oeffenbaren Recovery-Empfaenger adressiert");
+    }
+
     #[must_use]
     pub const fn root(&self) -> &PathBuf {
         &self.root
@@ -1484,6 +1699,537 @@ impl WriterHarness {
     #[must_use]
     pub const fn line(&self) -> &RegistryLineBuilder {
         &self.line
+    }
+}
+
+/// Das NEUE Writer-Geraet: eigener Schluesselspeicher, eigene Ablage, eigene
+/// Bindung — und derselbe Bestand wie das alte.
+///
+/// Der neue Writer uebernimmt den Bestand, nicht die Datenbank: Profilzeile,
+/// Entwurf und Nummernregister sind geraetegebunden und entstehen hier neu,
+/// mit derselben Bedienerin auf demselben Bestand.
+struct NewWriterDevice {
+    provider: Arc<InMemoryKeyProvider>,
+    open: OpenStore,
+    binding: WriterBindingV1,
+}
+
+/// Die Kulisse eines Writer-Uebergangs: zwei Geraete, EIN Bestand, EINE Linie.
+///
+/// Sie besitzt eine [`WriterHarness`] (das alte Geraet, dem der Bestand und
+/// die Sperre gehoeren) und ein [`NewWriterDevice`]. Der Change 3 wird ERST
+/// gedrueckt, wenn der alte Writer seinen letzten Eintrag geschrieben hat:
+/// der Uebergang nennt dessen `entryHash`, und der ist vorher nicht bekannt.
+pub struct TransitionHarness {
+    old: WriterHarness,
+    new_device: NewWriterDevice,
+    /// Die Linie OHNE den Change 3 — der stale Kopf des alten Writers.
+    pre_transition_line: RegistryLineBuilder,
+    transition_object_hash: Option<ObjectHash>,
+}
+
+impl TransitionHarness {
+    /// Zwei Geraete auf einer Linie mit zwei freigegebenen Writer-Zertifikaten
+    /// und noch OHNE Uebergang.
+    ///
+    /// # Panics
+    ///
+    /// Wenn Schluesselspeicher, Ablage oder Linie nicht entstehen.
+    #[must_use]
+    pub fn new() -> Self {
+        let provider = Arc::new(InMemoryKeyProvider::new_for_test(NEW_WRITER_PROVIDER_SEED));
+        let signing_handle = provider
+            .generate(
+                SecretPurpose::WriterSigningKey,
+                KeyProtectionProfileV1::OsWrapped,
+            )
+            .expect("der In-Prozess-Provider erreicht OsWrapped");
+        let public = CanonicalPublicCoseKey::ed25519(
+            provider
+                .signing_public_key_for_test(SecretPurpose::WriterSigningKey)
+                .expect("der erzeugte Signaturschluessel ist lesbar"),
+        )
+        .expect("ein erzeugter Ed25519-Schluessel ist gueltig");
+        let old = WriterHarness::with_variant_and_second_writer(
+            LineVariantV1 {
+                recovery_recipient_openable: true,
+                ..LineVariantV1::default()
+            },
+            Some(&public),
+        );
+        let second = old
+            .second_writer
+            .expect("die Linie traegt das zweite Writer-Zertifikat");
+
+        let root = old.root.join("new-writer");
+        fs::create_dir_all(&root).expect("die Wurzel des neuen Geraets muss anlegbar sein");
+        let database_key = provider
+            .generate(
+                SecretPurpose::LocalDatabaseKey,
+                KeyProtectionProfileV1::OsWrapped,
+            )
+            .expect("der In-Prozess-Provider erreicht OsWrapped");
+        let open = open_store(&root, &provider, &database_key);
+        seed_operator_profile_for_binding(&open.database, second.binding_object_hash);
+        let draft = open
+            .repository
+            .load_or_create()
+            .expect("der Entwurf des neuen Geraets muss entstehen");
+        open.repository
+            .save(draft)
+            .expect("das neue Geraet muss speichern koennen");
+
+        let binding = WriterBindingV1 {
+            binding_object_hash: second.binding_object_hash,
+            writer_certificate_hash: second.certificate_hash.into(),
+            writer_key_thumbprint: public.thumbprint(),
+            writer_signing_handle: signing_handle,
+            chain_id: old.head.chain_id(),
+            archive_profile_hash: old.binding.archive_profile_hash,
+        };
+        let pre_transition_line = old.line.clone();
+        Self {
+            old,
+            new_device: NewWriterDevice {
+                provider,
+                open,
+                binding,
+            },
+            pre_transition_line,
+            transition_object_hash: None,
+        }
+    }
+
+    /// Das alte Geraet, dem der Bestand gehoert.
+    #[must_use]
+    pub const fn old(&self) -> &WriterHarness {
+        &self.old
+    }
+
+    #[must_use]
+    pub const fn old_mut(&mut self) -> &mut WriterHarness {
+        &mut self.old
+    }
+
+    /// Der alte Writer schreibt seinen ersten — und letzten — Eintrag.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Finalisierung nicht traegt.
+    #[must_use]
+    pub fn old_writer_finalizes_first_entry(&self) -> ea_writer::FinalizeOutcome {
+        self.old.finalize_once()
+    }
+
+    /// Drueckt den Change 3: ab `effective_from` schreibt der neue Writer, und
+    /// der Uebergang nennt `previous_entry_hash` als letzten Eintrag des alten.
+    ///
+    /// Liefert den Objekthash des Root-signierten `writerTransition`-Objekts —
+    /// GENAU den Hash, den das Manifest des ersten neuen Eintrags tragen muss.
+    ///
+    /// # Panics
+    ///
+    /// Wenn schon ein Uebergang gedrueckt wurde.
+    pub fn activate_transition(
+        &mut self,
+        effective_from: u64,
+        previous_entry_hash: EntryHash,
+    ) -> ObjectHash {
+        assert!(
+            self.transition_object_hash.is_none(),
+            "die Fixture drueckt GENAU EINEN Change 3"
+        );
+        let second = self
+            .old
+            .second_writer
+            .expect("die Linie traegt das zweite Writer-Zertifikat");
+        let head = self.old.line.push(
+            ActionSpec::WriterTransition {
+                old_writer: ObjectHash::try_from(
+                    self.old
+                        .binding
+                        .writer_certificate_hash
+                        .as_bytes()
+                        .as_slice(),
+                )
+                .expect("ein Zertifikatshash ist ein 32-Byte-Objekthash"),
+                new_writer: second.certificate_hash,
+                effective_from: None,
+            },
+            HeadOptions {
+                writer_transition_previous_entry_hash: Some(previous_entry_hash),
+                ..head_options(effective_from, effective_from.saturating_add(129))
+            },
+        );
+        let hash = head
+            .direct_object_hash
+            .expect("der Uebergang ist ein direktes Ziel");
+        self.transition_object_hash = Some(hash);
+        hash
+    }
+
+    /// Der Objekthash des gedrueckten Uebergangs.
+    ///
+    /// # Panics
+    ///
+    /// Wenn noch kein Uebergang gedrueckt wurde.
+    #[must_use]
+    pub fn transition_object_hash(&self) -> ObjectHash {
+        self.transition_object_hash
+            .expect("der Uebergang muss gedrueckt sein")
+    }
+
+    /// Der Kopf NACH dem Change 3, gewaehlt fuer `proposed`.
+    ///
+    /// # Panics
+    ///
+    /// Wenn noch kein Uebergang gedrueckt wurde.
+    #[must_use]
+    pub fn post_transition_head(&self, proposed: u64) -> SelectedRegistryHead {
+        assert!(
+            self.transition_object_hash.is_some(),
+            "der Kopf nach dem Uebergang verlangt den Uebergang"
+        );
+        select_head_for_sequence(&self.old.line, FIXTURE_NOW_MS, proposed)
+    }
+
+    /// Der Kopf VOR dem Change 3 — der stale Kopf des alten Writers —,
+    /// gewaehlt fuer `proposed`.
+    #[must_use]
+    pub fn pre_transition_head(&self, proposed: u64) -> SelectedRegistryHead {
+        select_head_for_sequence(&self.pre_transition_line, FIXTURE_NOW_MS, proposed)
+    }
+
+    /// Eine Server-Checkpointaussage ueber den committeten Kopf `through`.
+    #[must_use]
+    pub fn checkpoint_claims_through(
+        &self,
+        through: &ea_writer::FinalizeOutcome,
+    ) -> [ea_chain::CheckpointClaim; 1] {
+        [ea_chain::CheckpointClaim {
+            chain_id: self.old.head.chain_id(),
+            covered_from_sequence: ChainSequence::new(0),
+            covered_through_sequence: through.sequence,
+            head_entry_hash: through.entry_hash,
+            checkpoint_object_hash: ObjectHash::try_from([0xc7_u8; 32].as_slice())
+                .expect("32 Byte sind ein Objekthash"),
+        }]
+    }
+
+    /// Der Dienst des NEUEN Geraets auf dem GETEILTEN Bestand.
+    #[must_use]
+    pub fn new_writer_service<'a>(
+        &'a self,
+        source: &'a dyn ea_archive::ArchiveSource,
+        head: &'a SelectedRegistryHead,
+        checkpoint_claims: &'a [ea_chain::CheckpointClaim],
+    ) -> WriterService<'a> {
+        WriterService::new(
+            Arc::clone(&self.new_device.open.repository),
+            Arc::clone(&self.new_device.provider) as Arc<dyn KeyProvider>,
+            self.old.backend.as_ref(),
+            source,
+            head,
+            checkpoint_claims,
+            IncidentNumberRegister::new(Arc::clone(&self.new_device.open.database)),
+            OperatorProfileRepository::new(Arc::clone(&self.new_device.open.database)),
+            self.new_device.binding,
+        )
+    }
+
+    /// Der Dienst des ALTEN Geraets gegen einen beliebigen Kopf.
+    #[must_use]
+    pub fn old_writer_service<'a>(
+        &'a self,
+        source: &'a dyn ea_archive::ArchiveSource,
+        head: &'a SelectedRegistryHead,
+        checkpoint_claims: &'a [ea_chain::CheckpointClaim],
+    ) -> WriterService<'a> {
+        WriterService::new(
+            Arc::clone(&self.old.store().repository),
+            Arc::clone(&self.old.provider) as Arc<dyn KeyProvider>,
+            self.old.backend.as_ref(),
+            source,
+            head,
+            checkpoint_claims,
+            IncidentNumberRegister::new(Arc::clone(&self.old.store().database)),
+            OperatorProfileRepository::new(Arc::clone(&self.old.store().database)),
+            self.old.binding,
+        )
+    }
+
+    /// Ein ECHTER Nachweis der NEUEN Bindung gegen `head`.
+    ///
+    /// Nur gegen einen Kopf ausstellbar, auf dem das neue Zertifikat der
+    /// laufende Writer ist — vorher ist es fuer `BoundOperator::resolve`
+    /// nicht aktiv.
+    #[must_use]
+    pub fn new_writer_proof(&self, head: &SelectedRegistryHead) -> OperatorSessionProof {
+        issue_proof(
+            head,
+            self.new_device.binding.binding_object_hash,
+            ReauthPurpose::Finalize,
+        )
+    }
+
+    /// Ein ECHTER Nachweis der ALTEN Bindung gegen `head`.
+    #[must_use]
+    pub fn old_writer_proof(&self, head: &SelectedRegistryHead) -> OperatorSessionProof {
+        issue_proof(
+            head,
+            self.old.binding.binding_object_hash,
+            ReauthPurpose::Finalize,
+        )
+    }
+
+    #[must_use]
+    pub fn new_writer_certificate_hash(&self) -> CertificateHash {
+        self.new_device.binding.writer_certificate_hash
+    }
+
+    #[must_use]
+    pub fn old_writer_certificate_hash(&self) -> CertificateHash {
+        self.old.binding.writer_certificate_hash
+    }
+
+    /// Ob der `draftDEK` des NEUEN Geraets noch da ist.
+    #[must_use]
+    pub fn new_writer_draft_dek_is_present(&self) -> bool {
+        self.new_device.open.repository.load_or_create().is_ok()
+    }
+
+    /// Ob eine Einsatznummer im Register des NEUEN Geraets verbraucht ist.
+    #[must_use]
+    pub fn new_writer_incident_number_is_taken(&self, number: &str) -> bool {
+        IncidentNumberRegister::new(Arc::clone(&self.new_device.open.database))
+            .contains(
+                trust_support::organization(),
+                FIXTURE_LOCAL_CIVIL_YEAR,
+                number,
+            )
+            .expect("das Register muss lesbar sein")
+    }
+
+    /// Oeffnet einen veroeffentlichten Eintrag als Recovery-Empfaenger —
+    /// siehe [`WriterHarness::decrypt_entry_as_recovery_recipient`].
+    #[must_use]
+    pub fn decrypt_entry_as_recovery_recipient(&self, entry_hash: EntryHash) -> Vec<u8> {
+        self.old.decrypt_entry_as_recovery_recipient(entry_hash)
+    }
+
+    // -----------------------------------------------------------------------
+    // Die Verwaltungsseite des Uebergangs (Stufe 5, Task 5, Systemzeuge)
+    // -----------------------------------------------------------------------
+    //
+    // Die Methoden darunter existieren fuer GENAU EINEN Aufrufer:
+    // `tests/ea-system-tests/tests/e2e_writer_transition.rs`, der den
+    // Uebergang nicht ueber `activate_transition` von der Fixture signieren
+    // laesst, sondern ueber `ea_admin::WriterTransitionService` und die
+    // ECHTE Wurzelzeremonie (`RootCeremonyService::publish_authorized_target`)
+    // — auf DIESER Linie, mit DIESEN beiden Writer-Geraeten. Die
+    // Zeremonienfixture von `ea-admin` (`writer_transition_ceremony_line`)
+    // baut ihre eigene Linie mit synthetischen Geraeteschluesseln; auf ihr
+    // kann kein Writer einen Eintrag finalisieren. Die Linie muss deshalb
+    // HIER bleiben, und die Verwaltung muss an sie heran: die Autorisierung
+    // in den Katalog legen, den Kopf VOR dem Change 3 waehlen, und den
+    // Change 3 mit dem Ereignis pushen, das die Ereignisfabrik von `ea-admin`
+    // geplant hat. Alles ADDITIV; `activate_transition` bleibt, wie es war.
+
+    /// Der Kopf der Linie, WIE SIE JETZT STEHT, gewaehlt fuer `proposed` —
+    /// vor oder nach dem Change 3, ohne Behauptung darueber.
+    ///
+    /// Neben [`Self::pre_transition_head`], weil jener Kopf aus der KOPIE
+    /// der Linie kommt, die beim Aufbau genommen wurde: eine Autorisierung,
+    /// die [`Self::prepare_transition_authorization`] spaeter in den Katalog
+    /// legt, kennt er nicht — und `ea_trust::verify_intended_trust_target`
+    /// sucht sie im Katalog des GEWAEHLTEN Kopfes.
+    #[must_use]
+    pub fn line_head(&self, proposed: u64) -> SelectedRegistryHead {
+        select_head_for_sequence(&self.old.line, FIXTURE_NOW_MS, proposed)
+    }
+
+    /// Legt die Administrationsautorisierung eines Uebergangs auf den neuen
+    /// Writer ab `effective_from` mit `previous_entry_hash` in den Katalog —
+    /// gebunden an den aktuellen Kopf, mit einem Nutzungsfenster um
+    /// `effectiveNow` — und gibt ihren Objekthash samt der UNSIGNIERTEN
+    /// Nutzlast heraus, die die Fixture fuer denselben Uebergang gebaut hat.
+    ///
+    /// Das Transitionsobjekt selbst bleibt aus dem Katalog fort: es entsteht
+    /// in der Zeremonie. Dieselbe Bauart wie `writer_transition_ceremony_line`
+    /// in `crates/ea-admin/tests/support/mod.rs`; der `reason_code` ist der
+    /// der `ea-trust`-Fixture (`1`), und ein Antrag, der die Autorisierung
+    /// nutzen will, muss ihn nennen.
+    ///
+    /// # Panics
+    ///
+    /// Wenn schon ein Uebergang gedrueckt wurde.
+    pub fn prepare_transition_authorization(
+        &mut self,
+        effective_from: u64,
+        previous_entry_hash: EntryHash,
+    ) -> (ObjectHash, ea_format::TrustPayloadV1) {
+        assert!(
+            self.transition_object_hash.is_none(),
+            "die Autorisierung gehoert VOR den Change 3"
+        );
+        let second = self
+            .old
+            .second_writer
+            .expect("die Linie traegt das zweite Writer-Zertifikat");
+        self.old.line.prepare_unsigned(
+            ActionSpec::WriterTransition {
+                old_writer: self.old_writer_certificate_object_hash(),
+                new_writer: second.certificate_hash,
+                effective_from: Some(effective_from),
+            },
+            HeadOptions {
+                // Das Nutzungsfenster der Autorisierung ist
+                // `(issued_at, issued_at + 1000)`; die Zeremonie nutzt sie
+                // zur `effectiveNow` des gewaehlten Kopfes.
+                issued_at: UnixMillis::new(FIXTURE_NOW_MS),
+                writer_transition_previous_entry_hash: Some(previous_entry_hash),
+                ..HeadOptions::default()
+            },
+        )
+    }
+
+    /// Drueckt den Change 3 mit einem VEROEFFENTLICHTEN Transitionsobjekt und
+    /// dem Ereignis, das die Verwaltung dafuer geplant hat.
+    ///
+    /// Die Bytes wandern in den Katalog, der Kopf traegt GENAU `event` —
+    /// `ChangeOverride::Raw` laesst die Fixture die Aenderung der Verwaltung
+    /// uebernehmen, ihr eigenes Zielobjekt und dessen Autorisierung bleiben
+    /// fort. Die Fixture signiert das EREIGNIS mit der Wurzel der Linie und
+    /// stellt seine Autorisierung aus; das ZIEL hat sie nicht signiert.
+    /// Dieselbe Bauart wie `the_full_transition_moves_the_current_writer_on_the_successor_head`
+    /// in `crates/ea-admin/tests/writer_transition.rs`.
+    ///
+    /// # Panics
+    ///
+    /// Wenn schon ein Uebergang gedrueckt wurde.
+    pub fn activate_published_transition(
+        &mut self,
+        exact_transition_object: &[u8],
+        event: &ea_format::RegistryEventFieldsV1,
+    ) -> trust_support::BuiltHead {
+        assert!(
+            self.transition_object_hash.is_none(),
+            "die Fixture drueckt GENAU EINEN Change 3"
+        );
+        let second = self
+            .old
+            .second_writer
+            .expect("die Linie traegt das zweite Writer-Zertifikat");
+        self.old.line.add_object(exact_transition_object.to_vec());
+        let head = self.old.line.push(
+            ActionSpec::WriterTransition {
+                old_writer: self.old_writer_certificate_object_hash(),
+                new_writer: second.certificate_hash,
+                effective_from: None,
+            },
+            HeadOptions {
+                effective_from: Some(event.effective_from_sequence.get()),
+                valid_through: Some(event.valid_through_sequence.get()),
+                issued_at: event.issued_at,
+                not_before: event.not_before,
+                not_after: event.not_after,
+                change_override: trust_support::ChangeOverride::Raw(event.change.clone()),
+                omit_direct_object: true,
+                omit_direct_authorization: true,
+                ..HeadOptions::default()
+            },
+        );
+        self.transition_object_hash = Some(ea_crypto::object_hash(exact_transition_object));
+        head
+    }
+
+    /// Das alte Writer-Zertifikat als Objekthash — `ActionSpec` nennt seine
+    /// Zertifikate als Objekte.
+    fn old_writer_certificate_object_hash(&self) -> ObjectHash {
+        ObjectHash::try_from(
+            self.old
+                .binding
+                .writer_certificate_hash
+                .as_bytes()
+                .as_slice(),
+        )
+        .expect("ein Zertifikatshash ist ein 32-Byte-Objekthash")
+    }
+
+    /// Der Schluesselspeicher des NEUEN Geraets.
+    ///
+    /// Herausgegeben, damit ein Zeuge ein Manifest mit dem ECHTEN Schluessel
+    /// des neuen Writers nachsignieren kann — ein Manifest, das sich vom
+    /// veroeffentlichten allein im `writer_transition_event_hash`
+    /// unterscheidet, ist die einzige saubere Kulisse fuer die Serverregel
+    /// „fehlend, zusaetzlich oder abweichend".
+    #[must_use]
+    pub fn new_writer_provider(&self) -> Arc<InMemoryKeyProvider> {
+        Arc::clone(&self.new_device.provider)
+    }
+
+    /// Die Bindung des NEUEN Geraets: Zertifikat, Griff, Kette.
+    #[must_use]
+    pub const fn new_writer_binding(&self) -> WriterBindingV1 {
+        self.new_device.binding
+    }
+
+    /// Eine KOPIE des Bestands, wie er JETZT daliegt, als eigener Bestand
+    /// unter der Wurzel des alten Geraets.
+    ///
+    /// Die Kulisse des zurueckgespielten alten Writers, der WEITERSCHREIBT:
+    /// er arbeitet auf seiner Sicherung des Bestands, nicht auf dem
+    /// geteilten. Auf dem geteilten Bestand koennte er es gar nicht — dort
+    /// liegt ab dem Uebergang der Eintrag des neuen Writers an derselben
+    /// Sequenz, und Schritt 3 hielte mit
+    /// `EA-WRITER-HEAD-RECONCILIATION-REQUIRED` an, BEVOR ein Eintrag
+    /// entsteht. Der Eintrag, den der Server abweisen muss, entsteht nur auf
+    /// einem Bestand, der den Uebergang nicht kennt.
+    ///
+    /// Die Datenbank des alten Geraets bleibt, wie sie ist; die Rueckspielung
+    /// der DATENBANK aus einer Sicherung bezeugt
+    /// `crates/ea-writer/tests/key_transition.rs` (der `draftDEK` kehrt nicht
+    /// zurueck, ein Abschluss scheitert dort an Schritt 9).
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Kopie nicht anlegbar oder der Bestand nicht zu oeffnen ist.
+    #[must_use]
+    pub fn old_writer_archive_replica(&self) -> LocalPathBackend {
+        let source = self.old.root.join("archive");
+        let replica = self.old.root.join("restored-archive");
+        assert!(
+            !replica.exists(),
+            "die Fixture legt GENAU EINE Kopie des Bestands an"
+        );
+        copy_directory(&source, &replica);
+        LocalPathBackend::open(
+            replica,
+            local_profile(),
+            &BoundArchiveProfilePolicyV1::from_policy(self.old.head.policy_fields()),
+        )
+        .expect("die Kopie des Bestands muss sich oeffnen lassen")
+    }
+}
+
+/// Kopiert `source` samt Unterverzeichnissen nach `target`.
+fn copy_directory(source: &std::path::Path, target: &std::path::Path) {
+    fs::create_dir_all(target).expect("das Zielverzeichnis muss anlegbar sein");
+    for entry in fs::read_dir(source).expect("das Quellverzeichnis muss lesbar sein") {
+        let entry = entry.expect("ein Verzeichniseintrag muss lesbar sein");
+        let path = entry.path();
+        let destination = target.join(entry.file_name());
+        if path.is_dir() {
+            copy_directory(&path, &destination);
+        } else {
+            fs::copy(&path, &destination).expect("eine Bestandsdatei muss kopierbar sein");
+        }
+    }
+}
+
+impl Default for TransitionHarness {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1625,6 +2371,15 @@ fn capture_database_files(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 /// soll so bleiben: Stufe 2 konsumiert Bedieneridentitaet und stellt sie nicht
 /// aus.
 fn seed_operator_profile(database: &EncryptedDatabase, built: &BuiltLine) {
+    seed_operator_profile_for_binding(database, built.binding_object_hash);
+}
+
+/// Setzt die EINE Profilzeile fuer `binding_object_hash` — dieselbe Bedienerin,
+/// gebunden auf ein anderes Geraet.
+fn seed_operator_profile_for_binding(
+    database: &EncryptedDatabase,
+    binding_object_hash: ObjectHash,
+) {
     database
         .execute(
             "INSERT INTO operator_profile (singleton, organization_id, operator_subject_id, \
@@ -1636,10 +2391,25 @@ fn seed_operator_profile(database: &EncryptedDatabase, built: &BuiltLine) {
                 StoreValue::Text(FIXTURE_DISPLAY_NAME.to_owned()),
                 StoreValue::Text(FIXTURE_FUNCTION_LABEL.to_owned()),
                 StoreValue::Blob(FIXTURE_PROFILE_COMMITMENT_SALT.to_vec()),
-                StoreValue::Blob(built.binding_object_hash.as_bytes().to_vec()),
+                StoreValue::Blob(binding_object_hash.as_bytes().to_vec()),
             ],
         )
         .expect("die Profilzeile muss sich setzen lassen");
+}
+
+/// Die Eingabe eines `keyTransition` — Zeitzone und Quelle wie beim Einsatz,
+/// dazu die versiegelte organisatorische Begruendung.
+///
+/// Der Uebergangshash steht ABSICHTLICH nicht hier: der Writer liest ihn aus
+/// dem gewaehlten Kopf und nimmt ihn von keinem Aufrufer entgegen.
+#[must_use]
+pub fn key_transition_input(organizational_reason: &str) -> KeyTransitionInputV1 {
+    KeyTransitionInputV1 {
+        timezone: "Europe/Berlin".to_owned(),
+        source: NativeSourceV1::new("ea.writer.fixture", 1)
+            .expect("die Quelle der Fixture ist gueltig"),
+        organizational_reason: organizational_reason.to_owned(),
+    }
 }
 
 /// Kleinbuchstaben-Hex, wie jeder Dateiname des Layouts.
@@ -1673,7 +2443,14 @@ pub fn other_incident() -> FinalizationInputV1 {
     incident_numbered("2026-000043")
 }
 
-fn incident_numbered(number: &str) -> FinalizationInputV1 {
+/// Ein GUELTIGER Einsatz mit einer frei gewaehlten Einsatznummer.
+///
+/// Oeffentlich fuer den Systemzeugen des Writer-Uebergangs: ein alter Writer,
+/// der auf seiner Kopie des Bestands WEITERSCHREIBT, braucht je Eintrag eine
+/// Nummer, die sein Register noch nicht fuehrt — und die beiden festen Nummern
+/// oben sind nach zwei Eintraegen verbraucht.
+#[must_use]
+pub fn incident_numbered(number: &str) -> FinalizationInputV1 {
     FinalizationInputV1 {
         timezone: "Europe/Berlin".to_owned(),
         source: NativeSourceV1::new("ea.writer.fixture", 1)

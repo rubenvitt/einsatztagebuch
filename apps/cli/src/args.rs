@@ -2,7 +2,7 @@
 //!
 //! # Warum von Hand und nicht mit `clap`
 //!
-//! Die Grammatik ist mit sieben Kommandos, vier wertnehmenden Schaltern und
+//! Die Grammatik ist mit zehn Kommandos, zwoelf wertnehmenden Schaltern und
 //! einem Flag abgeschlossen und klein. Das Repo ist dependency-diszipliniert:
 //! jede externe Kiste traegt eine begruendete Zeile in
 //! `docs/adr/0001-toolchain-and-cryptography-dependencies.md`. Eine
@@ -70,6 +70,22 @@ pub const REGISTRY_REVOCATION_PLAN_SUBCOMMAND: &str = "revocation-plan";
 /// einem gescheiterten `apply` und kein eigener Vollzug. Die Grammatik fuehrt
 /// deshalb weder `issue` noch `availability`.
 pub const CLOCK_RELEASE_APPLY_SUBCOMMAND: &str = "apply";
+/// Die BEIDEN Unterkommandos von `writer-transition`.
+///
+/// `prepare` prueft den Antrag gegen den gewaehlten Kopf und zeigt die
+/// Felder, die die Wurzelzeremonie unterschreiben wird; `activate` haelt die
+/// veroeffentlichten Objektbytes gegen dieselbe Vorbereitung und plant das
+/// Aenderung-3-Ereignis. Keines von beiden signiert oder veroeffentlicht —
+/// dieselbe Grenze wie bei `registry revocation-plan`, und aus demselben
+/// Grund: die Zeremonie braucht Offline-Schluesselquellen und den
+/// Beweiszustand `ea_trust::VerifiedAdminAuthorizationIntent`, und beides hat
+/// ein CLI-Prozess nicht. Die Begruendung steht in
+/// `crate::commands::writer_transition`.
+pub const WRITER_TRANSITION_PREPARE_SUBCOMMAND: &str = "prepare";
+pub const WRITER_TRANSITION_ACTIVATE_SUBCOMMAND: &str = "activate";
+/// Der Name, unter dem ein Schalter abgelehnt wird, den nur `activate`
+/// nimmt: `prepare` kennt weder das Objekt noch das Fenster.
+pub const WRITER_TRANSITION_PREPARE_COMMAND: &str = "writer-transition prepare";
 
 /// `--trust-anchor <file>`, PFLICHT bei allen Kommandos.
 ///
@@ -99,11 +115,34 @@ pub const KEY_SWITCH: &str = "--key";
 /// Begruendung in `crate::commands::registry`.
 pub const OPERATOR_CONFIG_SWITCH: &str = "--operator-config";
 /// `--effective-from <sequence>`, nur bei `registry`.
+///
+/// Ausdruecklich NICHT bei `writer-transition activate`: dort ist die
+/// Wirksamkeitssequenz keine Entscheidung des Betreibers, sondern folgt aus
+/// dem abgeglichenen Kettenkopf des Antrags (`chain_sequence + 1`), und
+/// `ea_admin::writer_transition::WriterTransitionService::activate` weist
+/// jedes Fenster ab, das woanders beginnt. Ein Schalter, dessen einziger
+/// gueltiger Wert feststeht, waere eine Gelegenheit, ihn falsch zu setzen.
 pub const EFFECTIVE_FROM_SWITCH: &str = "--effective-from";
-/// `--valid-through <sequence>`, nur bei `registry`.
+/// `--valid-through <sequence>`, bei `registry` und `writer-transition activate`.
 pub const VALID_THROUGH_SWITCH: &str = "--valid-through";
-/// `--not-after <unix-millis>`, nur bei `registry`.
+/// `--not-after <unix-millis>`, bei `registry` und `writer-transition activate`.
 pub const NOT_AFTER_SWITCH: &str = "--not-after";
+/// `--request <file>`, nur bei `writer-transition`.
+///
+/// Die Datei traegt den Antrag — zwei Zertifikatshashes, den abgeglichenen
+/// Kettenkopf und den Begruendungscode — und wird von `ea-admin` gelesen
+/// (`ea_admin::writer_transition::WriterTransitionRequest::load`). Ein
+/// eigener Schalter und kein Feld der Bedienerdatei, weil der Antrag zu EINEM
+/// Uebergang gehoert und die Bedienerdatei zu einem Bediener; die
+/// Ueberladung von `target_certificate_hash` beim Widerruf wird hier nicht
+/// wiederholt.
+pub const REQUEST_SWITCH: &str = "--request";
+/// `--transition-object <file>`, nur bei `writer-transition activate`.
+///
+/// Die Datei traegt die EXAKTEN Bytes des Transitionsobjekts, wie die
+/// Wurzelzeremonie sie herausgegeben hat. Sie wird unveraendert an
+/// `ea-admin` durchgereicht; dieses Paket dekodiert sie nicht.
+pub const TRANSITION_OBJECT_SWITCH: &str = "--transition-object";
 /// `--release <file>`, nur bei `clock-release`.
 ///
 /// Die Datei traegt die EXAKTEN Bytes einer signierten
@@ -221,6 +260,33 @@ pub enum Command {
         /// Die Datei mit den exakten Freigabebytes.
         release: PathBuf,
     },
+    /// Einen Writer-Uebergang gegen den gewaehlten Kopf VORBEREITEN.
+    ///
+    /// Traegt KEIN Fenster: die Vorbereitung plant kein Ereignis, sie prueft
+    /// den Antrag und zeigt die Felder, die die Zeremonie unterschreiben soll.
+    WriterTransitionPrepare {
+        /// Die oeffentliche Bedienerdatei.
+        config: PathBuf,
+        /// Die Antragsdatei.
+        request: PathBuf,
+    },
+    /// Die veroeffentlichten Bytes eines Uebergangs gegen den Antrag halten
+    /// und das Aenderung-3-Ereignis PLANEN.
+    ///
+    /// Zwei Fensterzahlen und nicht drei: die Wirksamkeitssequenz folgt aus
+    /// dem Antrag (siehe [`EFFECTIVE_FROM_SWITCH`]).
+    WriterTransitionActivate {
+        /// Die oeffentliche Bedienerdatei.
+        config: PathBuf,
+        /// Die Antragsdatei — DIESELBE wie bei `prepare`.
+        request: PathBuf,
+        /// Die Datei mit den exakten Bytes des veroeffentlichten Objekts.
+        transition_object: PathBuf,
+        /// Bis zu dieser Sequenz reicht das Lease des Ereignisses.
+        valid_through_sequence: ChainSequence,
+        /// Die Zeitgrenze des Ereignisses.
+        not_after: UnixMillis,
+    },
 }
 
 /// Ein vollstaendig geparster Aufruf.
@@ -334,11 +400,11 @@ impl fmt::Display for UsageError {
             Self::UnknownCommand(command) => write!(
                 formatter,
                 "unknown command {command}; expected verify, list, decrypt, report, export, \
-                 organization, operator, registry or clock-release"
+                 organization, operator, registry, clock-release or writer-transition"
             ),
             Self::MissingCommand => formatter.write_str(
                 "no command was given; expected verify, list, decrypt, report, export, \
-                 organization, operator, registry or clock-release",
+                 organization, operator, registry, clock-release or writer-transition",
             ),
             Self::MissingTrustAnchor => write!(
                 formatter,
@@ -372,7 +438,7 @@ impl fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// Welches der sieben Kommandos gemeint ist.
+/// Welches der zehn Kommandos gemeint ist.
 ///
 /// Eine eigene Aufzaehlung statt einer Zeichenkette, damit die Auswertung unten
 /// VOLLSTAENDIG ist und kein `unreachable!()` braucht. Ein `unreachable!()`
@@ -388,6 +454,7 @@ enum CommandKind {
     Operator,
     Registry,
     ClockRelease,
+    WriterTransition,
 }
 
 impl CommandKind {
@@ -403,6 +470,7 @@ impl CommandKind {
             Self::Operator => "operator",
             Self::Registry => "registry",
             Self::ClockRelease => "clock-release",
+            Self::WriterTransition => "writer-transition",
         }
     }
 
@@ -418,6 +486,7 @@ impl CommandKind {
             "operator" => Some(Self::Operator),
             "registry" => Some(Self::Registry),
             "clock-release" => Some(Self::ClockRelease),
+            "writer-transition" => Some(Self::WriterTransition),
             _ => None,
         }
     }
@@ -485,6 +554,21 @@ fn take_number_value(
     Ok(())
 }
 
+/// Verengt den Wert von `--not-after` auf eine Unixzeit.
+///
+/// Die einzige Verengung dieses Parsers: eine Unixzeit ist
+/// `i64`-Millisekunden. Sie steht HIER und nicht in [`take_number_value`],
+/// weil die Sequenzen den vollen `u64`-Bereich fuehren — und in Schritt 6
+/// der Pruefreihenfolge, also HINTER den verlangten Schaltern.
+fn unix_millis(not_after: u64) -> Result<UnixMillis, UsageError> {
+    i64::try_from(not_after)
+        .map(UnixMillis::new)
+        .map_err(|_| UsageError::UnknownNumber {
+            switch: NOT_AFTER_SWITCH,
+            value: not_after.to_string(),
+        })
+}
+
 /// Parst die Argumente OHNE den Programmnamen.
 ///
 /// Der Aufrufer uebergibt `std::env::args_os().skip(1)`. Das `skip` steht dort
@@ -519,6 +603,8 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut report_signing_key: Option<PathBuf> = None;
     let mut operator_config: Option<PathBuf> = None;
     let mut release: Option<PathBuf> = None;
+    let mut request: Option<PathBuf> = None;
+    let mut transition_object: Option<PathBuf> = None;
     let mut effective_from: Option<u64> = None;
     let mut valid_through: Option<u64> = None;
     let mut not_after: Option<u64> = None;
@@ -550,6 +636,12 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     take_path_value(&mut operator_config, OPERATOR_CONFIG_SWITCH, &mut arguments)?
                 }
                 RELEASE_SWITCH => take_path_value(&mut release, RELEASE_SWITCH, &mut arguments)?,
+                REQUEST_SWITCH => take_path_value(&mut request, REQUEST_SWITCH, &mut arguments)?,
+                TRANSITION_OBJECT_SWITCH => take_path_value(
+                    &mut transition_object,
+                    TRANSITION_OBJECT_SWITCH,
+                    &mut arguments,
+                )?,
                 EFFECTIVE_FROM_SWITCH => {
                     take_number_value(&mut effective_from, EFFECTIVE_FROM_SWITCH, &mut arguments)?
                 }
@@ -628,7 +720,10 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     if operator_config.is_some()
         && !matches!(
             command_kind,
-            CommandKind::Operator | CommandKind::Registry | CommandKind::ClockRelease
+            CommandKind::Operator
+                | CommandKind::Registry
+                | CommandKind::ClockRelease
+                | CommandKind::WriterTransition
         )
     {
         return Err(UsageError::SwitchNotAllowed {
@@ -643,11 +738,35 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
         });
     }
     for (present, switch) in [
-        (effective_from.is_some(), EFFECTIVE_FROM_SWITCH),
+        (request.is_some(), REQUEST_SWITCH),
+        (transition_object.is_some(), TRANSITION_OBJECT_SWITCH),
+    ] {
+        if present && command_kind != CommandKind::WriterTransition {
+            return Err(UsageError::SwitchNotAllowed {
+                switch,
+                command: command_name,
+            });
+        }
+    }
+    // `--effective-from` gehoert allein `registry`; die beiden anderen
+    // Fensterzahlen nimmt auch `writer-transition` — ob sein Unterkommando
+    // sie nimmt, entscheidet Schritt 6.
+    if effective_from.is_some() && command_kind != CommandKind::Registry {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: EFFECTIVE_FROM_SWITCH,
+            command: command_name,
+        });
+    }
+    for (present, switch) in [
         (valid_through.is_some(), VALID_THROUGH_SWITCH),
         (not_after.is_some(), NOT_AFTER_SWITCH),
     ] {
-        if present && command_kind != CommandKind::Registry {
+        if present
+            && !matches!(
+                command_kind,
+                CommandKind::Registry | CommandKind::WriterTransition
+            )
+        {
             return Err(UsageError::SwitchNotAllowed {
                 switch,
                 command: command_name,
@@ -663,6 +782,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 | CommandKind::Operator
                 | CommandKind::Registry
                 | CommandKind::ClockRelease
+                | CommandKind::WriterTransition
         )
     {
         return Err(UsageError::SwitchNotAllowed {
@@ -780,19 +900,11 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 switch: NOT_AFTER_SWITCH,
                 command: command_name,
             })?;
-            // Die einzige Verengung dieses Parsers: eine Unixzeit ist
-            // `i64`-Millisekunden. Sie steht HIER und nicht in
-            // `take_number_value`, weil die beiden Sequenzen den vollen
-            // `u64`-Bereich fuehren.
-            let not_after = i64::try_from(not_after).map_err(|_| UsageError::UnknownNumber {
-                switch: NOT_AFTER_SWITCH,
-                value: not_after.to_string(),
-            })?;
             Command::RegistryRevocationPlan {
                 config,
                 effective_from_sequence: ChainSequence::new(effective_from),
                 valid_through_sequence: ChainSequence::new(valid_through),
-                not_after: UnixMillis::new(not_after),
+                not_after: unix_millis(not_after)?,
             }
         }
         CommandKind::ClockRelease => {
@@ -812,6 +924,61 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     switch: RELEASE_SWITCH,
                     command: command_name,
                 })?,
+            }
+        }
+        CommandKind::WriterTransition => {
+            let config = operator_config.ok_or(UsageError::MissingSwitch {
+                switch: OPERATOR_CONFIG_SWITCH,
+                command: command_name,
+            })?;
+            let request = request.ok_or(UsageError::MissingSwitch {
+                switch: REQUEST_SWITCH,
+                command: command_name,
+            })?;
+            if path == Path::new(WRITER_TRANSITION_PREPARE_SUBCOMMAND) {
+                // Was nur `activate` nimmt, weist `prepare` mit seinem
+                // eigenen Namen ab — dieselbe Regel wie Schritt 4, eine
+                // Ebene tiefer: ein stilles Ignorieren liesse den Aufrufer
+                // glauben, das Objekt sei gehalten und das Fenster geplant.
+                for (present, switch) in [
+                    (transition_object.is_some(), TRANSITION_OBJECT_SWITCH),
+                    (valid_through.is_some(), VALID_THROUGH_SWITCH),
+                    (not_after.is_some(), NOT_AFTER_SWITCH),
+                ] {
+                    if present {
+                        return Err(UsageError::SwitchNotAllowed {
+                            switch,
+                            command: WRITER_TRANSITION_PREPARE_COMMAND,
+                        });
+                    }
+                }
+                Command::WriterTransitionPrepare { config, request }
+            } else if path == Path::new(WRITER_TRANSITION_ACTIVATE_SUBCOMMAND) {
+                let transition_object = transition_object.ok_or(UsageError::MissingSwitch {
+                    switch: TRANSITION_OBJECT_SWITCH,
+                    command: command_name,
+                })?;
+                let valid_through = valid_through.ok_or(UsageError::MissingSwitch {
+                    switch: VALID_THROUGH_SWITCH,
+                    command: command_name,
+                })?;
+                let not_after = not_after.ok_or(UsageError::MissingSwitch {
+                    switch: NOT_AFTER_SWITCH,
+                    command: command_name,
+                })?;
+                Command::WriterTransitionActivate {
+                    config,
+                    request,
+                    transition_object,
+                    valid_through_sequence: ChainSequence::new(valid_through),
+                    not_after: unix_millis(not_after)?,
+                }
+            } else {
+                return Err(UsageError::UnknownSubcommand {
+                    command: command_name,
+                    value: path.to_string_lossy().into_owned(),
+                    expected: "prepare or activate",
+                });
             }
         }
     };

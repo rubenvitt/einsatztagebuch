@@ -43,9 +43,13 @@ use ea_admin::{
     operator_runtime::{OperatorGoLiveReport, OperatorRuntimeError},
     registry::RegistryWorkflowError,
     revocation::RevocationTargetClass,
+    writer_transition::{WriterTransitionError, WriterTransitionRequestError},
 };
 use ea_recovery::RecoveryError;
-use ea_types::{ChainSequence, RegistryVersion};
+use ea_types::{
+    CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, OrganizationId,
+    RegistryVersion, UnixMillis,
+};
 use ea_verify::VerificationReportV1;
 
 use crate::args::{Format, UsageError};
@@ -62,7 +66,7 @@ use crate::args::{Format, UsageError};
 /// benennt also einen Platz, der noch frei sein muss. Die Begruendung steht in
 /// `crate::commands::organization`; hier steht sie in einem Wort, damit ein
 /// Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 9] = [
+const GRAMMAR_V1: [&str; 11] = [
     "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
     "einsatzarchiv --trust-anchor <file> list    <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -72,6 +76,8 @@ const GRAMMAR_V1: [&str; 9] = [
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
     "einsatzarchiv --trust-anchor <file> registry revocation-plan --operator-config <file> --effective-from <sequence> --valid-through <sequence> --not-after <unix-millis>",
     "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
+    "einsatzarchiv --trust-anchor <file> writer-transition prepare --operator-config <file> --request <file>",
+    "einsatzarchiv --trust-anchor <file> writer-transition activate --operator-config <file> --request <file> --transition-object <file> --valid-through <sequence> --not-after <unix-millis>",
 ];
 
 /// Was `organization init` TUT — und was ausdruecklich nicht.
@@ -106,6 +112,7 @@ pub fn print_grammar() {
     );
     println!("{REGISTRY_SCOPE_NOTE_V1}");
     println!("{CLOCK_RELEASE_SCOPE_NOTE_V1}");
+    println!("{WRITER_TRANSITION_SCOPE_NOTE_V1}");
 }
 
 /// Was `registry revocation-plan` TUT — und was ausdruecklich nicht.
@@ -128,6 +135,19 @@ const REGISTRY_SCOPE_NOTE_V1: &str = "registry revocation-plan prepares change 1
 const CLOCK_RELEASE_SCOPE_NOTE_V1: &str = "clock-release apply consumes an already issued release \
      file and never prints its bytes; issuing one is a step of the administration workflow and not \
      of this tool";
+
+/// Was `writer-transition` TUT — und was ausdruecklich nicht.
+///
+/// Dieselbe Bauart wie [`REGISTRY_SCOPE_NOTE_V1`]: beide Unterkommandos tun
+/// WENIGER, als ihr Name vermuten laesst. `prepare` prueft und zeigt,
+/// `activate` haelt und plant; signiert wird in der Wurzelzeremonie, und die
+/// hat dieser Prozess nicht.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const WRITER_TRANSITION_SCOPE_NOTE_V1: &str = "writer-transition prepare checks the request file \
+     against the selected head and shows the fields the root ceremony will sign; activate holds \
+     the published transition object against the same request and plans change 3; neither signs \
+     nor publishes anything";
 
 /// Nur stabile Fehlercodes; keine privaten Profil-, Konto- oder Pfadangaben.
 pub fn print_operator_error(error: &OperatorRuntimeError) {
@@ -704,5 +724,378 @@ pub fn print_registry_workflow_error(error: &RegistryWorkflowError) {
 /// seinen Code — auch sein `Debug` —, damit der Freigabekontext und mit ihm die
 /// Nonce in keine Protokollzeile geraet.
 pub fn print_clock_release_error(error: &ClockReleaseWorkflowError) {
+    eprintln!("einsatzarchiv: {error}");
+}
+
+/// Schreibt `bytes` als Kleinbuchstaben-Hex in eine Zeichenkette.
+///
+/// Dieselbe Regel wie [`write_hex`] und aus demselben Grund von Hand: `hex`
+/// ist eine DEV-Dependency dieses Pakets. Die Zeilenbauer unten liefern
+/// `String`s, damit ein Zeuge sie ohne Prozessstart vergleichen kann.
+fn hex_string(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // `write!` in einen `String` kann nicht scheitern.
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+/// Der vorbereitete Writer-Uebergang, abgelesen und nicht behauptet.
+///
+/// # Warum dieser Typ hier steht und nicht `PreparedWriterTransition` gedruckt wird
+///
+/// Dieselbe Ueberlegung wie bei [`RevocationPlanView`]:
+/// `ea_admin::writer_transition::PreparedWriterTransition` hat keinen
+/// oeffentlichen Konstruktor — er entsteht ausschliesslich in `prepare` aus
+/// einem gewaehlten Kopf. Ein Drucker, der ihn naehme, waere ausserhalb von
+/// `ea-admin` nicht messbar. `crate::commands::writer_transition` liest die
+/// Angaben an GENAU EINER Stelle von der Vorbereitung und vom Kopf ab und
+/// legt sie hier hinein.
+///
+/// Organisation und Kette stammen aus dem KOPF (ueber die Felder der
+/// Vorbereitung, die `prepare` von dort uebernimmt), Registrierungsversion
+/// und Kopfhash ebenfalls: sie sagen dem Betreiber, GEGEN WELCHEN Stand der
+/// Antrag geprueft wurde.
+///
+/// Kein `Debug`: die Hashtypen von `ea-types` fuehren keines, und eine hier
+/// erfundene Anzeige waere eine zweite Hexform.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct WriterTransitionPrepareView {
+    /// Die Organisation der Wurzelurkunde des gewaehlten Kopfes.
+    pub organization_id: OrganizationId,
+    /// Die Kette des gewaehlten Kopfes.
+    pub chain_id: ChainId,
+    /// Der laufende Writer, der abgibt.
+    pub old_writer_certificate_hash: CertificateHash,
+    /// Der freigegebene Writer, der uebernimmt.
+    pub new_writer_certificate_hash: CertificateHash,
+    /// Die Sequenz des abgeglichenen Kettenkopfes aus dem Antrag.
+    pub trusted_head_chain_sequence: ChainSequence,
+    /// Der Eintragshash des abgeglichenen Kettenkopfes aus dem Antrag.
+    pub trusted_head_entry_hash: EntryHash,
+    /// Die erste Sequenz des neuen Writers — `trusted_head + 1`.
+    pub effective_from_sequence: ChainSequence,
+    /// Der Begruendungscode, unveraendert durchgereicht.
+    pub reason_code: u64,
+    /// Die Registrierungsversion des gewaehlten Kopfes.
+    pub registry_version: RegistryVersion,
+    /// Der Objekthash des gewaehlten Kopfes.
+    pub registry_head_hash: ObjectHash,
+    /// Der Hash der erteilten Administrationsautorisierung aus dem Antrag —
+    /// `None`, wenn der Antrag keinen nennt und der Platzhalter kodiert hat.
+    pub admin_authorization_object_hash: Option<ObjectHash>,
+}
+
+/// Wo die Administrationsautorisierung gebunden wird, wenn der Antrag KEINEN
+/// Hash nennt.
+///
+/// # Warum dieser Satz gedruckt wird
+///
+/// Ohne Hash ruft `prepare` den Dienst mit dem Platzhalter
+/// `ObjectHash::from(Hash32::ZERO)` — genau wie
+/// `ea_admin::policy::plan_initial_policy` die Policy-Form prueft, bevor eine
+/// Autorisierung erteilt ist. Der echte Hash tritt beim Signieren an diese
+/// Stelle: die Zeremonie fuehrt ihren Beweiszustand ueber die Nutzlast, die
+/// SIE mit dem Hash der erteilten Autorisierung bildet
+/// (`ea_trust::VerifiedAdminAuthorizationIntent`), und diesen Zustand hat
+/// ein CLI-Prozess nicht — die Zeremonie ist Host-Arbeit, wie in Task 4. Ein
+/// Betreiber, der die gezeigten Felder mit den signierten vergleicht, soll
+/// wissen, dass der Autorisierungshash der EINE Unterschied ist.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+pub const WRITER_TRANSITION_PLACEHOLDER_NOTE_V1: &str = "the admin authorization is bound at \
+     the root ceremony and not by this run: the fields above were checked against the selected \
+     head with a placeholder authorization hash, and the ceremony signs them with the real one; \
+     activate needs the request file to name admin_authorization_object_hash";
+
+/// Wo die Administrationsautorisierung gebunden wurde, wenn der Antrag den
+/// Hash NENNT.
+///
+/// Ein ZWEITER Text und keine Variante des ersten mit Platzhalter: die
+/// beiden Lagen sind verschieden — im einen Fall ist die gezeigte Nutzlast
+/// die der Zeremonie bis auf den Hash, im anderen ist sie GENAU die, die die
+/// Zeremonie signiert, und `activate` kann die veroeffentlichten Bytes
+/// dagegen halten. Ein Betreiber soll die Lage an der Zeile erkennen.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+pub const WRITER_TRANSITION_BOUND_NOTE_V1: &str = "the admin authorization named by the request \
+     file was bound into the prepared payload: it is the payload the root ceremony signs, and \
+     activate holds the published object against exactly this payload";
+
+/// Die Zeile, die zur Lage des Antrags gehoert.
+#[must_use]
+pub const fn writer_transition_authorization_note(bound: bool) -> &'static str {
+    if bound {
+        WRITER_TRANSITION_BOUND_NOTE_V1
+    } else {
+        WRITER_TRANSITION_PLACEHOLDER_NOTE_V1
+    }
+}
+
+/// Die Textform der Vorbereitung als GESCHLOSSENE Zeilenfolge.
+///
+/// Dieselbe Form wie [`revocation_plan_lines`]: stabile Schluessel-Wert-Paare,
+/// gepunktete Schluessel fuer den zusammengehoerigen Kettenkopf, Bytefolgen
+/// als Kleinbuchstaben-Hex. Keine Uhrzeit, kein Hostpfad.
+#[must_use]
+pub fn writer_transition_prepare_lines(view: &WriterTransitionPrepareView) -> Vec<String> {
+    vec![
+        format!(
+            "organization_id={}",
+            hex_string(view.organization_id.as_bytes())
+        ),
+        format!("chain_id={}", hex_string(view.chain_id.as_bytes())),
+        format!(
+            "old_writer_certificate_hash={}",
+            hex_string(view.old_writer_certificate_hash.as_bytes())
+        ),
+        format!(
+            "new_writer_certificate_hash={}",
+            hex_string(view.new_writer_certificate_hash.as_bytes())
+        ),
+        format!(
+            "trusted_head.chain_sequence={}",
+            view.trusted_head_chain_sequence.get()
+        ),
+        format!(
+            "trusted_head.entry_hash={}",
+            hex_string(view.trusted_head_entry_hash.as_bytes())
+        ),
+        format!(
+            "effective_from_sequence={}",
+            view.effective_from_sequence.get()
+        ),
+        format!("reason_code={}", view.reason_code),
+        format!("registry_version={}", view.registry_version.get()),
+        format!(
+            "registry_head_hash={}",
+            hex_string(view.registry_head_hash.as_bytes())
+        ),
+        format!(
+            "admin_authorization_object_hash={}",
+            view.admin_authorization_object_hash
+                .map_or_else(|| "none".to_owned(), |hash| hex_string(hash.as_bytes()))
+        ),
+        writer_transition_authorization_note(view.admin_authorization_object_hash.is_some())
+            .to_owned(),
+    ]
+}
+
+/// Dieselben Angaben als EINE JSON-Zeile.
+///
+/// Von Hand gebaut wie [`revocation_plan_json`]: Zahlen, Hex und feste
+/// ASCII-Saetze dieses Moduls, nichts zu maskieren. Ausdruecklich KEIN neues
+/// Schema — `schemas/` ist geschlossen, und diese Zeile ist eine Anzeige.
+#[must_use]
+pub fn writer_transition_prepare_json(view: &WriterTransitionPrepareView) -> String {
+    format!(
+        "{{\"organization_id\":\"{}\",\"chain_id\":\"{}\",\
+         \"old_writer_certificate_hash\":\"{}\",\"new_writer_certificate_hash\":\"{}\",\
+         \"trusted_head\":{{\"chain_sequence\":{},\"entry_hash\":\"{}\"}},\
+         \"effective_from_sequence\":{},\"reason_code\":{},\"registry_version\":{},\
+         \"registry_head_hash\":\"{}\",\"admin_authorization_object_hash\":{},\
+         \"authorization_note\":\"{}\"}}",
+        hex_string(view.organization_id.as_bytes()),
+        hex_string(view.chain_id.as_bytes()),
+        hex_string(view.old_writer_certificate_hash.as_bytes()),
+        hex_string(view.new_writer_certificate_hash.as_bytes()),
+        view.trusted_head_chain_sequence.get(),
+        hex_string(view.trusted_head_entry_hash.as_bytes()),
+        view.effective_from_sequence.get(),
+        view.reason_code,
+        view.registry_version.get(),
+        hex_string(view.registry_head_hash.as_bytes()),
+        view.admin_authorization_object_hash.map_or_else(
+            || "null".to_owned(),
+            |hash| format!("\"{}\"", hex_string(hash.as_bytes()))
+        ),
+        writer_transition_authorization_note(view.admin_authorization_object_hash.is_some()),
+    )
+}
+
+/// Die Ablehnung eines Antrags ohne Autorisierungshash bei `activate`, Wort
+/// fuer Wort.
+///
+/// Dieselbe Bauart wie [`MISSING_REVOCATION_TARGET_REFUSAL_V1`] und aus
+/// demselben Grund Exitcode 2 und nicht ein `EA-TRANSITION-REQUEST-`-Code:
+/// die Datei IST in Form — `prepare` nimmt sie —, ihr fehlt ein Feld, das
+/// GENAU DIESES Kommando braucht. Ohne den Hash bildete `activate` die
+/// Nutzlast mit dem Platzhalter, und die veroeffentlichten Bytes hielten
+/// niemals dagegen; ein Lauf, der das erst am Bestand meldete, haette ein
+/// Archiv geoeffnet, um einen Aufruffehler zu finden.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const MISSING_AUTHORIZATION_HASH_REFUSAL_V1: &str = "writer-transition activate holds the \
+     published object against the payload the root ceremony signed, and that payload names the \
+     admin authorization: the request file must carry admin_authorization_object_hash";
+
+/// Druckt die Ablehnung eines Antrags ohne Autorisierungshash auf stderr.
+pub fn print_missing_authorization_hash_refusal() {
+    eprintln!("einsatzarchiv: {MISSING_AUTHORIZATION_HASH_REFUSAL_V1}");
+}
+
+/// Schreibt die Vorbereitung auf stdout.
+///
+/// # Errors
+///
+/// [`OperatorRuntimeError::Io`], wenn stdout nicht schreibbar ist.
+pub fn print_writer_transition_prepare_report(
+    view: &WriterTransitionPrepareView,
+    format: Format,
+) -> Result<(), OperatorRuntimeError> {
+    let body = match format {
+        Format::Json => writer_transition_prepare_json(view),
+        Format::Text => writer_transition_prepare_lines(view).join("\n"),
+    };
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(body.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|_| OperatorRuntimeError::Io)
+}
+
+/// Die Registrierungsaenderung eines Writer-Uebergangs, als Zahl.
+///
+/// Fest und nicht abgelesen: `ActivatedWriterTransition` entsteht
+/// ausschliesslich in `WriterTransitionService::activate`, und das plant
+/// ausschliesslich `RegistryActionV1::WriterTransition` — Aktion 3, Aenderung
+/// 3 (`crates/ea-admin/src/registry.rs`). Dieses Paket fuehrt keine Kante zu
+/// `ea-format` und koennte die Aenderung des Ereignisses ohnehin nicht
+/// benennen; eine Zahl, die aus der Bauart folgt, ist ehrlicher als eine, die
+/// hier nachgerechnet wuerde.
+pub const WRITER_TRANSITION_REGISTRY_CHANGE_V1: u8 = 3;
+
+/// Das geplante Aenderung-3-Ereignis, abgelesen und nicht behauptet.
+///
+/// # Warum hier Zeitfelder stehen, obwohl dieses Modul keine Uhrzeit druckt
+///
+/// Die Regel dieses Moduls verbietet LAUFZEITANGABEN — wann der Lauf war,
+/// auf welchem Host. `issued_at`, `not_before` und `not_after` sind hier
+/// etwas anderes: sie sind FELDER des geplanten Ereignisses, und das
+/// Ereignis ist der Gegenstand der Ausgabe. Die Wurzel signiert genau diese
+/// Felder; ein Bericht, der sie verschwiege, zeigte ein Ereignis, das
+/// niemand nachbauen und mit dem signierten vergleichen koennte. Beim
+/// Widerrufsplan ist der Gegenstand die REICHWEITE, nicht das Ereignis —
+/// deshalb fehlen sie dort. Dass `issued_at` von der Uhr des Laufs stammt
+/// (`OperatorBindingService::registry_event` setzt es auf `now`), ist die
+/// Folge davon, dass das Ereignis sie traegt, und kein Schleichweg: ein
+/// Zeuge vergleicht diese Zeilen ohne Prozessstart ueber die Sicht.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct WriterTransitionActivateView {
+    /// Die Registrierungsversion des geplanten Ereignisses — `+1` auf den Kopf.
+    pub registry_version: RegistryVersion,
+    /// Der Hash des Vorgaengerkopfes, an den das Ereignis bindet.
+    pub previous_registry_hash: Option<Hash32>,
+    /// Ab dieser Sequenz wirkt der Uebergang — die des Antrags.
+    pub effective_from_sequence: ChainSequence,
+    /// Bis zu dieser Sequenz reicht das Lease des Ereignisses.
+    pub valid_through_sequence: ChainSequence,
+    pub issued_at: UnixMillis,
+    pub not_before: UnixMillis,
+    pub not_after: UnixMillis,
+    /// Der Objekthash der veroeffentlichten Bytes, den die Aenderung nennt.
+    pub transition_object_hash: ObjectHash,
+}
+
+/// Was `activate` NICHT getan hat, Wort fuer Wort.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+pub const WRITER_TRANSITION_ACTIVATE_NOTE_V1: &str = "this is the planned change 3 event and not \
+     a published one: the root signs it, the successor head is selected afterwards, and the new \
+     writer's first entry is the keyTransition that names the transition object hash";
+
+/// Die Textform der Aktivierung als GESCHLOSSENE Zeilenfolge.
+#[must_use]
+pub fn writer_transition_activate_lines(view: &WriterTransitionActivateView) -> Vec<String> {
+    vec![
+        format!("registry_version={}", view.registry_version.get()),
+        format!(
+            "previous_registry_hash={}",
+            view.previous_registry_hash
+                .map_or_else(|| "none".to_owned(), |hash| hex_string(hash.as_bytes()))
+        ),
+        format!(
+            "effective_from_sequence={}",
+            view.effective_from_sequence.get()
+        ),
+        format!(
+            "valid_through_sequence={}",
+            view.valid_through_sequence.get()
+        ),
+        format!("issued_at={}", view.issued_at.get()),
+        format!("not_before={}", view.not_before.get()),
+        format!("not_after={}", view.not_after.get()),
+        format!("registry_change={WRITER_TRANSITION_REGISTRY_CHANGE_V1}"),
+        format!(
+            "transition_object_hash={}",
+            hex_string(view.transition_object_hash.as_bytes())
+        ),
+        WRITER_TRANSITION_ACTIVATE_NOTE_V1.to_owned(),
+    ]
+}
+
+/// Dieselben Angaben als EINE JSON-Zeile; ein fehlender Vorgaengerhash ist
+/// `null`.
+#[must_use]
+pub fn writer_transition_activate_json(view: &WriterTransitionActivateView) -> String {
+    format!(
+        "{{\"registry_version\":{},\"previous_registry_hash\":{},\
+         \"effective_from_sequence\":{},\"valid_through_sequence\":{},\
+         \"issued_at\":{},\"not_before\":{},\"not_after\":{},\
+         \"registry_change\":{WRITER_TRANSITION_REGISTRY_CHANGE_V1},\
+         \"transition_object_hash\":\"{}\",\
+         \"activation_note\":\"{WRITER_TRANSITION_ACTIVATE_NOTE_V1}\"}}",
+        view.registry_version.get(),
+        view.previous_registry_hash.map_or_else(
+            || "null".to_owned(),
+            |hash| format!("\"{}\"", hex_string(hash.as_bytes()))
+        ),
+        view.effective_from_sequence.get(),
+        view.valid_through_sequence.get(),
+        view.issued_at.get(),
+        view.not_before.get(),
+        view.not_after.get(),
+        hex_string(view.transition_object_hash.as_bytes()),
+    )
+}
+
+/// Schreibt die Aktivierung auf stdout.
+///
+/// # Errors
+///
+/// [`OperatorRuntimeError::Io`], wenn stdout nicht schreibbar ist.
+pub fn print_writer_transition_activate_report(
+    view: &WriterTransitionActivateView,
+    format: Format,
+) -> Result<(), OperatorRuntimeError> {
+    let body = match format {
+        Format::Json => writer_transition_activate_json(view),
+        Format::Text => writer_transition_activate_lines(view).join("\n"),
+    };
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(body.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|_| OperatorRuntimeError::Io)
+}
+
+/// Nur der stabile Fehlercode des Writer-Uebergangs.
+///
+/// [`WriterTransitionError`] zeigt ausschliesslich ihn an — auch sein
+/// `Debug`; weder Objekthash noch Bytes koennen von dort hierher gelangen.
+pub fn print_writer_transition_error(error: &WriterTransitionError) {
+    eprintln!("einsatzarchiv: {error}");
+}
+
+/// Nur der stabile Fehlercode der Antragsdatei.
+///
+/// Der Inhalt der Datei kommt NIE hierher: [`WriterTransitionRequestError`]
+/// traegt ihn nicht, und der vom Aufrufer eingegebene Pfad steht bereits in
+/// seiner Aufrufzeile.
+pub fn print_writer_transition_request_error(error: &WriterTransitionRequestError) {
     eprintln!("einsatzarchiv: {error}");
 }

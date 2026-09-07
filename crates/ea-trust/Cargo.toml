@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Explizite Fixture-Konstruktoren fuer Zeugen ANDERER Crates (Server, Writer,
+# Pruefung), die einen wirksamen Writer-Uebergang gegen einen Eintrag halten
+# wollen, ohne dafuer eine ganze Registry-Linie nachzuspielen. Produktive
+# Eintrittspunkte konsultieren dieses Merkmal nie; ohne Merkmal gibt es
+# ausserhalb der Crate keinen Konstruktor.
+test-support = []
+
 [dependencies]
 ea-cbor.workspace = true
 ea-crypto.workspace = true

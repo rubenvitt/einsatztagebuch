@@ -85,13 +85,25 @@ pub enum CommitValidationError {
     /// Der Aufrufer ist nicht der Writer dieses Manifests, oder das benannte
     /// Zertifikat ist zur Sequenz nicht als Writer aktiv.
     WriterUnauthorized,
+    /// Der Aufrufer IST der Writer dieses Manifests — aber der alte Writer des
+    /// auf dem gewaehlten Kopf wirksamen Uebergangs, also ab dessen
+    /// `effective_from_sequence` widerrufen. Ein zurueckgespielter alter
+    /// Writer, der weiterschreibt, ist ein Security Event wie ein fremder
+    /// (`design.md` §13.3, letzter Absatz), und er bekommt einen EIGENEN Code:
+    /// die Absage muss ihm sagen, dass sein Zertifikat abgeloest ist, nicht
+    /// dass es fremd waere.
+    WriterRevoked,
     /// Die Schreibersignatur traegt nicht.
     WriterSignature,
-    /// Das Manifest behauptet einen Schreiberwechsel, den dieser Stand nicht
-    /// nachpruefen kann. FAIL-CLOSED: `ea-trust` gibt die wirksamen
-    /// Uebergaenge nicht heraus (`crates/ea-verify/src/entry.rs`), und was
-    /// nicht geprueft werden kann, wird nicht angenommen.
-    WriterTransitionUnverifiable,
+    /// Der `writer_transition_event_hash` des Manifests passt nicht zum
+    /// wirksamen Uebergang des gewaehlten Kopfes: er FEHLT an dessen
+    /// `effective_from_sequence`, ist an jeder anderen Sequenz oder auf einem
+    /// Kopf ohne Uebergang ZUSAETZLICH, oder er ist UNPASSEND — ein anderer
+    /// Objekthash, ein anderer Vorgaenger als der letzte Eintrag des alten
+    /// Writers, oder ein anderes Writer-Zertifikat als der neue Writer des
+    /// Uebergangs. Ein Format-/Trust-Fehler, kein Security Event (`design.md`
+    /// §12, `writerTransitionEventHash`).
+    WriterTransitionMismatch,
     /// Suite oder Formatversion stehen nicht in der gebundenen Richtlinie.
     SuiteUnsupported,
     /// Registry-Version oder Registry-Head des Manifests sind nicht die des
@@ -113,14 +125,15 @@ pub enum CommitValidationError {
 
 impl CommitValidationError {
     /// Alle Arme — damit ein spaeter ergaenzter sofort auffaellt.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ObjectFamily,
         Self::EntryInvalid,
         Self::OrganizationMismatch,
         Self::ChainMismatch,
         Self::WriterUnauthorized,
+        Self::WriterRevoked,
         Self::WriterSignature,
-        Self::WriterTransitionUnverifiable,
+        Self::WriterTransitionMismatch,
         Self::SuiteUnsupported,
         Self::RegistryMismatch,
         Self::GrantPlanMismatch,
@@ -137,8 +150,9 @@ impl CommitValidationError {
             Self::OrganizationMismatch => "EA-COMMIT-ORGANIZATION",
             Self::ChainMismatch => "EA-COMMIT-CHAIN",
             Self::WriterUnauthorized => "EA-COMMIT-WRITER-UNAUTHORIZED",
+            Self::WriterRevoked => "EA-COMMIT-WRITER-REVOKED",
             Self::WriterSignature => "EA-COMMIT-WRITER-SIGNATURE",
-            Self::WriterTransitionUnverifiable => "EA-COMMIT-WRITER-TRANSITION",
+            Self::WriterTransitionMismatch => "EA-COMMIT-WRITER-TRANSITION",
             Self::SuiteUnsupported => "EA-COMMIT-SUITE",
             Self::RegistryMismatch => "EA-COMMIT-REGISTRY",
             Self::GrantPlanMismatch => "EA-COMMIT-GRANT-PLAN",
@@ -149,10 +163,16 @@ impl CommitValidationError {
     }
 
     /// Ein unzulaessiger Writer ist ein SECURITY EVENT und nicht bloss eine
-    /// Absage (`design.md` §13.3, letzter Absatz).
+    /// Absage (`design.md` §13.3, letzter Absatz). Der widerrufene Writer
+    /// gehoert dazu: er schreibt mit einem Zertifikat, das die Linie abgeloest
+    /// hat. Der unpassende Uebergangshash gehoert NICHT dazu — er ist ein
+    /// Formatbefund ueber ein Manifest des zulaessigen Writers.
     #[must_use]
     pub const fn is_writer_violation(self) -> bool {
-        matches!(self, Self::WriterUnauthorized | Self::WriterSignature)
+        matches!(
+            self,
+            Self::WriterUnauthorized | Self::WriterRevoked | Self::WriterSignature
+        )
     }
 }
 
@@ -240,13 +260,23 @@ pub fn validate_commit(
     if manifest.chain_id != chain_id || manifest.chain_id != head.chain_id() {
         return Err(CommitValidationError::ChainMismatch);
     }
-    if manifest.writer_transition_event_hash.is_some() {
-        return Err(CommitValidationError::WriterTransitionUnverifiable);
-    }
+    // ERST die Identitaet des Aufrufers, DANN sein Widerruf: die Antwort gilt
+    // dem Aufrufer, und ueber den Widerrufsstand eines anderen Writers erfaehrt
+    // er nichts.
     if manifest.writer_certificate_hash != writer_certificate_hash {
         return Err(CommitValidationError::WriterUnauthorized);
     }
+    let transition = head.effective_writer_transition();
+    if transition.is_some_and(|t| t.old_writer_certificate_hash() == writer_certificate_hash) {
+        return Err(CommitValidationError::WriterRevoked);
+    }
+    // Ein Writer, der nicht der laufende ist, steht nicht in der aktiven
+    // Menge des Kopfes und bleibt UNZULAESSIG — auch nach dem Uebergang, und
+    // GLEICHGUELTIG, welchen Uebergangshash er behauptet: ein Fremder ist
+    // immer das Security Event der 409-Zeile, nie ein 422-Formatbefund.
     let writer = active_writer(head, writer_certificate_hash)?;
+    // Und erst fuer den zulaessigen Writer die Uebergangsregel.
+    verify_writer_transition_hash(manifest, transition)?;
 
     let policy = head.policy_fields();
     if !policy
@@ -370,6 +400,53 @@ pub fn parse_entry(bytes: &[u8]) -> Result<Parsed<EntryPackageV1>, CommitValidat
     match decode_exact_object(bytes).map_err(|_| CommitValidationError::EntryInvalid)? {
         ParsedArchiveObject::Entry(entry) => Ok(entry),
         _ => Err(CommitValidationError::ObjectFamily),
+    }
+}
+
+/// Die Regel des `writerTransitionEventHash` (`design.md` §12): er ist
+/// GENAU DANN gesetzt, wenn sich das Writer-Zertifikat gegenueber dem direkten
+/// Vorgaenger aendert, und nennt dann den Objekthash des wirksamen
+/// Root-signierten `writerTransition`-Ereignisses.
+///
+/// Laeuft NACH `active_writer`: der Writer des Manifests ist hier bereits der
+/// laufende Writer des Kopfes. Die Bedingung `writer_certificate_hash ==
+/// new_writer_certificate_hash()` ist damit in der Produktion tautologisch —
+/// nach einem angewandten Change 3 ist der neue Writer der laufende, und nur
+/// er ist aktiv — und steht trotzdem hier, weil der Spec-Satz sie woertlich
+/// verlangt (`design.md` §12: der Hash ist gesetzt, „wenn sich das
+/// Writer-Zertifikat gegenueber dem direkten Vorgaenger aendert") und die
+/// Regel sie nicht dem Kopf ueberlassen soll.
+///
+/// Der Vorgaenger wird dafuer NICHT gelesen. Der wirksame Uebergang bindet
+/// den vertrauten Kopf selbst: `ea-trust` hat beim Nachspielen des Change 3
+/// geprueft, dass `effective_from_sequence` die naechste Sequenz nach dem
+/// letzten Eintrag des alten Writers ist und `previous_entry_hash` dessen
+/// Hash (`validate_writer_transition_target`,
+/// `crates/ea-trust/src/registry.rs`). Ein Manifest, das an
+/// `effective_from_sequence` diesen Vorgaenger, diesen Objekthash und den
+/// neuen Writer des Uebergangs nennt, bindet damit dieselbe Aussage — jede
+/// andere Kombination ist ein Widerspruch zum Kopf, und ein Widerspruch zum
+/// Vorgaenger braucht keinen zweiten Leser. An jeder anderen Sequenz aendert
+/// sich der Writer gegenueber dem Vorgaenger nicht: der alte Writer ist ab
+/// `effective_from_sequence` widerrufen (oben), der neue schreibt nach seinem
+/// ersten Eintrag ohne Hash weiter.
+fn verify_writer_transition_hash(
+    manifest: &ea_format::ManifestCoreFieldsV1,
+    transition: Option<ea_trust::EffectiveWriterTransitionV1>,
+) -> Result<(), CommitValidationError> {
+    let expected = transition.filter(|t| t.effective_from_sequence() == manifest.chain_sequence);
+    match (manifest.writer_transition_event_hash, expected) {
+        (None, None) => Ok(()),
+        (Some(claimed), Some(transition))
+            if claimed == transition.object_hash()
+                && manifest.previous_entry_hash == Some(transition.previous_entry_hash())
+                && manifest.writer_certificate_hash == transition.new_writer_certificate_hash() =>
+        {
+            Ok(())
+        }
+        // Unpassend, zusaetzlich oder fehlend — derselbe Befund, damit die
+        // Absage nicht verraet, WELCHER Teil der Behauptung falsch war.
+        (Some(_), _) | (None, Some(_)) => Err(CommitValidationError::WriterTransitionMismatch),
     }
 }
 
