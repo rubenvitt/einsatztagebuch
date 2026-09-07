@@ -775,11 +775,11 @@ git commit -m "feat(admin): manage policy registry and revocation"
 - Create: `apps/cli/src/commands/writer_transition.rs`
 - Modify: `crates/ea-admin/src/lib.rs`, `apps/cli/src/{args,output}.rs`, `apps/cli/src/commands/mod.rs`
 - Modify: `crates/ea-trust/src/{registry,resolver}.rs` (der wirksame Übergang wird lesbar), `crates/ea-trust/tests/support/mod.rs` (additiv, nur `tests/`)
-- Modify: `crates/ea-writer/src/{finalize,error,lib}.rs` (`keyTransition` durch den normalen Pfad, `EA-WRITER-REVOKED`)
+- Modify: `crates/ea-writer/src/{finalize,error,lib}.rs`, Create: `crates/ea-writer/src/content.rs` (`keyTransition` durch den normalen Pfad, `EA-WRITER-REVOKED`)
 - Modify: `crates/ea-sync-server/src/{validation,ports,commit}.rs` (exakte Transition-Regel statt Pauschalabweisung, `EA-COMMIT-WRITER-REVOKED`)
-- Modify: `crates/ea-verify/src/{archive,entry}.rs` (Prüfung statt Quarantäne)
+- Modify: `crates/ea-verify/src/{archive,entry,evidence,recipient}.rs` (Prüfung statt Quarantäne)
 - Test: `crates/ea-admin/tests/writer_transition.rs`
-- Test: `crates/ea-trust/tests/registry_transitions.rs` (Zugriff auf den wirksamen Übergang), `crates/ea-writer/tests/key_transition.rs`, `crates/ea-sync-server/tests/commit_service.rs`, `crates/ea-verify/tests/*` (Transition-Regel), `apps/cli/tests/writer_transition.rs`
+- Test: `crates/ea-trust/tests/writer_transition_access.rs` (Zugriff auf den wirksamen Übergang), `crates/ea-writer/tests/key_transition.rs`, `crates/ea-sync-server/tests/commit_service.rs`, `crates/ea-verify/tests/*` (Transition-Regel), `apps/cli/tests/writer_transition.rs`
 - Test: `tests/ea-system-tests/tests/e2e_writer_transition.rs`
 
 **Interfaces:**

@@ -60,6 +60,16 @@
 //! beginnt. Das Fenster wird deshalb aus `prepared.effective_from_sequence()`
 //! und den beiden Schaltern zusammengesetzt — dieselbe Bauart wie in
 //! `crate::commands::registry`, mit einer Zahl weniger.
+//!
+//! # Die reinen Schritte stehen einzeln
+//!
+//! Fensterbau (`activation_window`), die beiden Sichten (`prepare_view`,
+//! `activate_view`) und die Exitcodezuordnung (`exit_code_for`,
+//! `exit_code_for_request`) sind Funktionen ihrer Argumente, ohne Laufzeit
+//! und ohne Bestand. Sie stehen `pub(crate)`, damit
+//! `apps/cli/tests/writer_transition.rs` sie per `#[path]` gegen echte Werte
+//! aus `ea-admin` misst — der Happy Path durch `OperatorRuntime::open` ist
+//! dort nicht erreichbar (siehe die Kopfnotiz jener Datei).
 
 use std::{fs::File, io::Read as _, path::Path};
 
@@ -68,12 +78,12 @@ use ea_admin::{
     operator_runtime::{OperatorRuntime, OperatorRuntimeConfig, OperatorRuntimeError},
     registry::{RegistryEventFactory, RegistryWorkflowError},
     writer_transition::{
-        WriterTransitionError, WriterTransitionRequest, WriterTransitionRequestError,
-        WriterTransitionService,
+        ActivatedWriterTransition, PreparedWriterTransition, WriterTransitionError,
+        WriterTransitionRequest, WriterTransitionRequestError, WriterTransitionService,
     },
 };
 use ea_recovery::ExitCode;
-use ea_types::{ChainSequence, Hash32, ObjectHash, UnixMillis};
+use ea_types::{ChainSequence, Hash32, ObjectHash, RegistryVersion, UnixMillis};
 
 use crate::{
     args::Invocation,
@@ -124,24 +134,14 @@ pub fn prepare(
     let result = run(invocation, config_path, now, |runtime| {
         let service = WriterTransitionService::new(runtime.head());
         let prepared = service.prepare(&request, authorization)?;
-        let fields = prepared.fields();
         let head = runtime.head();
-        // Alle Angaben werden ABGELESEN: die Felder von der Vorbereitung,
-        // Version und Hash vom Kopf, Kettenkopf und Autorisierung vom Antrag.
-        let view = WriterTransitionPrepareView {
-            organization_id: fields.organization_id,
-            chain_id: fields.chain_id,
-            old_writer_certificate_hash: fields.old_writer_certificate_hash,
-            new_writer_certificate_hash: fields.new_writer_certificate_hash,
-            trusted_head_chain_sequence: request.trusted_head.chain_sequence,
-            trusted_head_entry_hash: fields.previous_entry_hash,
-            effective_from_sequence: prepared.effective_from_sequence(),
-            reason_code: fields.reason_code,
-            registry_version: head.registry_version(),
-            registry_head_hash: head.registry_head_hash(),
-            admin_authorization_object_hash: loaded.admin_authorization_object_hash,
-        };
-        Ok(Report::Prepare(view))
+        Ok(Report::Prepare(prepare_view(
+            &prepared,
+            &request,
+            head.registry_version(),
+            head.registry_head_hash(),
+            loaded.admin_authorization_object_hash,
+        )))
     });
     finish(invocation, result)
 }
@@ -186,28 +186,75 @@ pub fn activate(
         let prepared = service.prepare(&request, authorization)?;
         let audit = runtime.audit_service();
         let events = RegistryEventFactory::new(runtime.head(), &audit, runtime.local_device());
-        // Das Fenster beginnt an der Wirksamkeitssequenz des Antrags — die
-        // einzige Stelle, an der der Dienst es annimmt.
-        let window = RegistryWindow {
-            effective_from_sequence: prepared.effective_from_sequence(),
-            valid_through_sequence,
-            not_after,
-        };
+        let window = activation_window(&prepared, valid_through_sequence, not_after);
         let activated = service.activate(&prepared, &transition_object, &events, window)?;
-        let event = activated.event();
-        let view = WriterTransitionActivateView {
-            registry_version: event.registry_version,
-            previous_registry_hash: event.previous_registry_hash,
-            effective_from_sequence: event.effective_from_sequence,
-            valid_through_sequence: event.valid_through_sequence,
-            issued_at: event.issued_at,
-            not_before: event.not_before,
-            not_after: event.not_after,
-            transition_object_hash: activated.transition_object_hash(),
-        };
-        Ok(Report::Activate(view))
+        Ok(Report::Activate(activate_view(&activated)))
     });
     finish(invocation, result)
+}
+
+/// Setzt das Fenster der Aktivierung zusammen.
+///
+/// Es beginnt an der Wirksamkeitssequenz der VORBEREITUNG — der einzigen
+/// Stelle, an der `WriterTransitionService::activate` es annimmt — und
+/// NICHT am abgeglichenen Kettenkopf des Antrags; die beiden Schalter werden
+/// unveraendert durchgereicht (Modulbeschreibung).
+pub(crate) const fn activation_window(
+    prepared: &PreparedWriterTransition,
+    valid_through_sequence: ChainSequence,
+    not_after: UnixMillis,
+) -> RegistryWindow {
+    RegistryWindow {
+        effective_from_sequence: prepared.effective_from_sequence(),
+        valid_through_sequence,
+        not_after,
+    }
+}
+
+/// Liest die Sicht der Vorbereitung ab.
+///
+/// Alle Angaben werden ABGELESEN: die Felder von der Vorbereitung — alter
+/// und neuer Writer in der Reihenfolge des Antrags —, Version und Hash vom
+/// gewaehlten Kopf, Kettenkopf vom Antrag, die Autorisierung so, wie die
+/// Antragsdatei sie nannte oder nicht nannte.
+pub(crate) const fn prepare_view(
+    prepared: &PreparedWriterTransition,
+    request: &WriterTransitionRequest,
+    registry_version: RegistryVersion,
+    registry_head_hash: ObjectHash,
+    admin_authorization_object_hash: Option<ObjectHash>,
+) -> WriterTransitionPrepareView {
+    let fields = prepared.fields();
+    WriterTransitionPrepareView {
+        organization_id: fields.organization_id,
+        chain_id: fields.chain_id,
+        old_writer_certificate_hash: fields.old_writer_certificate_hash,
+        new_writer_certificate_hash: fields.new_writer_certificate_hash,
+        trusted_head_chain_sequence: request.trusted_head.chain_sequence,
+        trusted_head_entry_hash: fields.previous_entry_hash,
+        effective_from_sequence: prepared.effective_from_sequence(),
+        reason_code: fields.reason_code,
+        registry_version,
+        registry_head_hash,
+        admin_authorization_object_hash,
+    }
+}
+
+/// Liest die Sicht der Aktivierung vom geplanten Ereignis ab.
+pub(crate) const fn activate_view(
+    activated: &ActivatedWriterTransition,
+) -> WriterTransitionActivateView {
+    let event = activated.event();
+    WriterTransitionActivateView {
+        registry_version: event.registry_version,
+        previous_registry_hash: event.previous_registry_hash,
+        effective_from_sequence: event.effective_from_sequence,
+        valid_through_sequence: event.valid_through_sequence,
+        issued_at: event.issued_at,
+        not_before: event.not_before,
+        not_after: event.not_after,
+        transition_object_hash: activated.transition_object_hash(),
+    }
 }
 
 /// Die abgelesene Sicht EINES der beiden Unterkommandos.
@@ -324,7 +371,7 @@ fn read_transition_object(path: &Path) -> Result<Vec<u8>, OperatorRuntimeError> 
 /// unveraendert wiederholbar. Der Auffangarm ist Pflicht:
 /// [`WriterTransitionRequestError`] ist `#[non_exhaustive]`, und ein neuer
 /// Arm dort ist ein Befund ueber die Eingabe, also konservativ 2.
-fn exit_code_for_request(error: &WriterTransitionRequestError) -> ExitCode {
+pub(crate) const fn exit_code_for_request(error: &WriterTransitionRequestError) -> ExitCode {
     match error {
         WriterTransitionRequestError::Unreadable => ExitCode::Io,
         _ => ExitCode::Usage,
@@ -342,7 +389,7 @@ fn exit_code_for_request(error: &WriterTransitionRequestError) -> ExitCode {
 /// Vertrauenslage und faellt auf 12. Beide Auffangarme sind Pflicht:
 /// [`WriterTransitionError`] und [`RegistryWorkflowError`] sind
 /// `#[non_exhaustive]`, und ein neuer Arm soll konservativ auf 12 fallen.
-fn exit_code_for(error: &WriterTransitionError) -> ExitCode {
+pub(crate) const fn exit_code_for(error: &WriterTransitionError) -> ExitCode {
     match error {
         WriterTransitionError::Format(_)
         | WriterTransitionError::Registry(RegistryWorkflowError::Format(_)) => ExitCode::Integrity,
