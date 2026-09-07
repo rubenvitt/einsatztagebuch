@@ -34,6 +34,24 @@
 //! eine Schemaaenderung durch die Hintertuer. `list --format json` und
 //! `verify --format json` schreiben deshalb BEIDE genau das Dokument
 //! `ea.verification-report/v1` — byteweise dasselbe.
+//!
+//! # `--format` bei `grant` und `recovery-test`: angenommen, wirkungslos
+//!
+//! Beide Kommandos schreiben in dieser Stufe NICHTS auf stdout — weder in
+//! der Text- noch in der JSON-Form —, genau wie `decrypt` und `export`. Die
+//! Regel von `organization init` (JSON verweigert, 21) greift hier NICHT,
+//! und das ist kein Widerspruch, sondern ihre Grenze: sie sagt, dass ein
+//! Kommando mit einer TEXTAUSGABE, die kein Verifikationsbericht ist, keine
+//! JSON-Form hat, weil `schemas/` geschlossen ist. `grant` und
+//! `recovery-test` haben keine Ausgabe, deren Form zu waehlen waere; ihr
+//! Ergebnis IST der Exitcode, und spaeter — Task 8 und 9 — ein Grant-Objekt
+//! beziehungsweise die Berichtsdatei, deren Form `--format` so wenig
+//! aendert wie bei `report`. Eine Verweigerung heute waere eine Zusage, die
+//! Task 9 zuruecknaehme, und sie muesste VOR der Verifikation stehen (wie
+//! `--report-signing-key`) und damit einen Befund mit 21 ueberdecken.
+//! `--format json` wird deshalb bei beiden GENAU SO angenommen wie bei
+//! `decrypt` und `export`: es parst und entscheidet nichts. Gemessen in
+//! `apps/cli/tests/full_grammar.rs`.
 
 use std::io::{self, Write};
 
@@ -59,19 +77,34 @@ use crate::args::{Format, UsageError};
 /// Die verfügbaren Aufrufformen. Der Text ist Teil
 /// des beobachtbaren Verhaltens und wird als solcher gemessen.
 ///
-/// # Warum die sechste Zeile `<new-file>` sagt
+/// # Die ersten sieben Zeilen sind `design.md` §16.1, in dessen Reihenfolge
 ///
-/// Bei den fuenf ersten ist der Anker eine gepruefte EINGABE. Bei
-/// `organization init` ist er das, was die Zeremonie am Ende bildet — der Pfad
-/// benennt also einen Platz, der noch frei sein muss. Die Begruendung steht in
-/// `crate::commands::organization`; hier steht sie in einem Wort, damit ein
-/// Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 11] = [
+/// `verify`, `list`, `decrypt`, `grant`, `report`, `export`,
+/// `recovery-test` — die normative Grammatik vollstaendig und in der Ordnung
+/// der Norm; die uebrigen Zeilen sind die Kommandos des Umsetzungsplans.
+/// `grant` und `recovery-test` stehen hier, obwohl beide in dieser Stufe an
+/// einer benannten Grenze enden (`crate::commands::grant`,
+/// `crate::commands::recovery_test`): anders als `--report-signing-key` sind
+/// sie keine Schalter, die ausnahmslos verweigert werden, sondern Kommandos,
+/// die verifizieren, ihre Quellen aufloesen und ihre Eingaben lesen — mit
+/// den Codes, die der Dienst spaeter traegt. Was sie NICHT tun, sagt ihre
+/// Scope-Zeile ([`GRANT_SCOPE_NOTE_V1`], [`RECOVERY_TEST_SCOPE_NOTE_V1`]).
+///
+/// # Warum die Zeile von `organization init` `<new-file>` sagt
+///
+/// Bei den Wiederherstellungskommandos ist der Anker eine gepruefte EINGABE.
+/// Bei `organization init` ist er das, was die Zeremonie am Ende bildet — der
+/// Pfad benennt also einen Platz, der noch frei sein muss. Die Begruendung
+/// steht in `crate::commands::organization`; hier steht sie in einem Wort,
+/// damit ein Aufrufer sie schon in der Grammatik sieht.
+const GRAMMAR_V1: [&str; 13] = [
     "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
     "einsatzarchiv --trust-anchor <file> list    <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
+    "einsatzarchiv --trust-anchor <file> grant <entry-or-archive> --recovery-key <source> --authority-key <source> --authorization <file> --recipient-cert <file>",
     "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
     "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
+    "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
     "einsatzarchiv --trust-anchor <file> registry revocation-plan --operator-config <file> --effective-from <sequence> --valid-through <sequence> --not-after <unix-millis>",
@@ -106,6 +139,9 @@ pub fn print_grammar() {
     for line in GRAMMAR_V1 {
         println!("{line}");
     }
+    println!("{KEY_SOURCE_NOTE_V1}");
+    println!("{GRANT_SCOPE_NOTE_V1}");
+    println!("{RECOVERY_TEST_SCOPE_NOTE_V1}");
     println!("{ORGANIZATION_SCOPE_NOTE_V1}");
     println!(
         "operator config contains public archive/database paths, certificate/binding hashes, role and purpose; authority mode requires authority=true and target_certificate_hash; offline exchange uses ceremony_exchange_directory"
@@ -114,6 +150,44 @@ pub fn print_grammar() {
     println!("{CLOCK_RELEASE_SCOPE_NOTE_V1}");
     println!("{WRITER_TRANSITION_SCOPE_NOTE_V1}");
 }
+
+/// Die Grammatik einer `<key-source>`, Wort fuer Wort.
+///
+/// # Warum sie GEDRUCKT wird, obwohl `--format` es nicht wird
+///
+/// `--format text|json` erklaert die Grammatik nirgends: seine zwei Woerter
+/// stehen im Fehlertext, sobald ein drittes kommt. Eine Schluesselquelle hat
+/// drei Formen mit je einem Praefix und benannten Feldern, und ein Aufrufer,
+/// der sie nur aus `unknown field` erraten muesste, tippte sie nie richtig.
+/// Die Zeile nennt deshalb die Formen — und die Regel, die alle drei teilen:
+/// Passphrase und PIN kommen aus einer benannten Datei, nie aus argv und
+/// nie aus der Umgebung (`ea_recovery::key_source`). Definiert ist die
+/// Grammatik dort; hier steht ihre Anzeige.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const KEY_SOURCE_NOTE_V1: &str = "key-source is <path> | file:<path> | \
+     container:<path>;passphrase-file=<path> | \
+     pkcs11:module=<path>;token=<label>;id=<hex>;pin-file=<path>; passphrase and pin are read \
+     from the named file with owner-only permissions, never from argv or the environment";
+
+/// Was `grant` TUT — und wo es in dieser Stufe endet.
+///
+/// Dieselbe Bauart wie [`ORGANIZATION_SCOPE_NOTE_V1`]: das Kommando tut
+/// WENIGER, als sein Name verspricht, und die Grammatik sagt das, bevor ein
+/// Aufrufer es an der Verweigerung bemerkt. Die Begruendung fuer die 21 steht
+/// in `crate::commands::grant`.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const GRANT_SCOPE_NOTE_V1: &str = "grant verifies the archive with the recovery key, resolves \
+     both key sources and reads both files, then ends with exit 21 naming the missing \
+     historical grant service; it issues nothing";
+
+/// Was `recovery-test` TUT — und wo es in dieser Stufe endet.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const RECOVERY_TEST_SCOPE_NOTE_V1: &str = "recovery-test verifies the archive, requires a free \
+     output path and reads the key inventory, then ends with exit 21 naming the missing recovery \
+     test service; it writes nothing";
 
 /// Was `registry revocation-plan` TUT — und was ausdruecklich nicht.
 ///
@@ -338,6 +412,66 @@ const REPORT_SIGNING_REFUSAL_V1: &str = "report signing is unavailable in suite 
 /// waere.
 pub fn print_report_signing_refusal() {
     eprintln!("einsatzarchiv: {REPORT_SIGNING_REFUSAL_V1}");
+}
+
+/// Der stabile Code, mit dem `grant` seine Grenze benennt.
+///
+/// `EA-CLI-` und nicht `EA-RECOVERY-`: die Grenze liegt im KOMMANDOPFAD —
+/// `ea-recovery` hat jede Eingabe aufgeloest und traegt keinen Fehler; was
+/// fehlt, ist der Dienst, den dieses Werkzeug rufen wuerde. Ein Skript
+/// unterscheidet daran diese 21 von der PKCS#11-Grenze
+/// (`EA-RECOVERY-PKCS11-UNBOUND`) und von einer Plattform ohne Rechtebits.
+pub const GRANT_SERVICE_UNAVAILABLE_CODE: &str = "EA-CLI-GRANT-SERVICE-UNAVAILABLE";
+
+/// Der stabile Code, mit dem `recovery-test` seine Grenze benennt.
+pub const RECOVERY_TEST_SERVICE_UNAVAILABLE_CODE: &str = "EA-CLI-RECOVERY-TEST-SERVICE-UNAVAILABLE";
+
+/// Die Verweigerung des historischen Grants, Wort fuer Wort.
+///
+/// # Sie NENNT, was geschehen ist, was fehlt und was NICHT entstanden ist
+///
+/// Drei Aussagen, alle pruefbar: der Bestand ist verifiziert und jede Eingabe
+/// aufgeloest (sonst stuende ein anderer Code da), der
+/// `HistoricalGrantService` ist Stage-5 Task 8, und es wurde nichts
+/// ausgestellt und nichts geschrieben. Ohne die dritte Aussage suchte ein
+/// Betreiber nach einem Grant-Objekt, das es nicht gibt. Die Begruendung fuer
+/// 21 statt 0 oder 15 steht in `crate::commands::grant`.
+///
+/// Sie nennt KEINEN Pfad und KEIN Byte einer Eingabe: die Zeile ist fest und
+/// haengt von keinem Argument ab — dieselbe Regel wie bei
+/// [`CLOCK_RELEASE_APPLIED_V1`].
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const GRANT_SERVICE_REFUSAL_V1: &str = "the archive verified and every grant input resolved, \
+     but the historical grant service arrives with Stage-5 Task 8: nothing was issued and \
+     nothing was written";
+
+/// Druckt die Verweigerung des historischen Grants auf stderr.
+///
+/// stdout bleibt LEER: es ist kein Grant entstanden, ueber den etwas zu sagen
+/// waere.
+pub fn print_grant_service_refusal() {
+    eprintln!("einsatzarchiv: {GRANT_SERVICE_UNAVAILABLE_CODE}: {GRANT_SERVICE_REFUSAL_V1}");
+}
+
+/// Die Verweigerung des Wiederherstellungstests, Wort fuer Wort.
+///
+/// Dieselbe Bauart wie [`GRANT_SERVICE_REFUSAL_V1`]; der Dienst ist Task 9,
+/// und die dritte Aussage heisst hier: die Berichtsdatei ist NICHT angelegt.
+///
+/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
+const RECOVERY_TEST_SERVICE_REFUSAL_V1: &str = "the archive verified, the output path is free \
+     and the key inventory was read, but the recovery test service arrives with Stage-5 Task 9: \
+     no report was written";
+
+/// Druckt die Verweigerung des Wiederherstellungstests auf stderr.
+///
+/// stdout bleibt LEER, und am Zielpfad liegt nichts.
+pub fn print_recovery_test_service_refusal() {
+    eprintln!(
+        "einsatzarchiv: {RECOVERY_TEST_SERVICE_UNAVAILABLE_CODE}: \
+         {RECOVERY_TEST_SERVICE_REFUSAL_V1}"
+    );
 }
 
 /// Die Ablehnung einer Quelle, die kein Dateisystembestand ist, Wort fuer Wort.

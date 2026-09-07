@@ -123,6 +123,37 @@ pub fn output_directory_is_free(output: &Path) -> Result<(), RecoveryError> {
     }
 }
 
+/// Prueft, ob `output` als ZIELDATEI taugt — OHNE etwas anzulegen.
+///
+/// Das Gegenstueck zu [`output_directory_is_free`] fuer eine DATEI, und aus
+/// demselben Grund eine blosse Frage: `recovery-test` kennt zwischen der
+/// Verifikation und dem ersten geschriebenen Byte noch das Lesen seines
+/// Inventars, und ein Ziel, das nicht taugt, muss seinen Aufrufcode 2 vor
+/// dessen Dateisystemfehler 20 tragen (`design.md`:1815). Angelegt wird hier
+/// nichts; die bindende Entscheidung trifft spaeter
+/// `crate::report::create_new_file` mit `create_new(true)`, und dort ist der
+/// Rennzweig fail-closed.
+///
+/// „Frei" heisst: an diesem Pfad gibt es NICHTS — keine Datei, kein
+/// Verzeichnis, keinen Symlink. Ein leeres Verzeichnis ist fuer eine
+/// Zieldatei kein freier Platz: `create_new` legte dort keine Datei an.
+///
+/// # Errors
+///
+/// [`RecoveryError::OutputExists`], wenn an `output` irgendetwas liegt oder
+/// sich der Pfad nicht befragen laesst.
+pub fn output_file_is_free(output: &Path) -> Result<(), RecoveryError> {
+    // `symlink_metadata` und nie `metadata`: ein haengender Symlink ist
+    // ebenfalls „etwas an diesem Pfad", und `create_new` scheiterte an ihm.
+    match fs::symlink_metadata(output) {
+        Ok(_) => Err(RecoveryError::OutputExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // Es gibt es vielleicht, aber es laesst sich nicht befragen. Auch das
+        // heisst: so, wie du es aufgerufen hast, schreibe ich dort nicht.
+        Err(_) => Err(RecoveryError::OutputExists),
+    }
+}
+
 /// Stellt sicher, dass `output` ein NEUES oder LEERES Verzeichnis ist.
 ///
 /// Existiert es nicht, wird es mit [`OUTPUT_DIRECTORY_MODE_V1`] angelegt.

@@ -168,6 +168,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.3.0",
+ "zeroize",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -678,6 +690,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f"
+dependencies = [
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -1981,7 +2002,9 @@ dependencies = [
 name = "ea-recovery"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "ea-archive",
+ "ea-cbor",
  "ea-crypto",
  "ea-format",
  "ea-time",
@@ -1989,8 +2012,10 @@ dependencies = [
  "ea-types",
  "ea-verify",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "hex",
  "minicbor",
+ "zeroize",
 ]
 
 [[package]]

@@ -178,6 +178,13 @@ pub const fn exit_code_for_error(error: &RecoveryError) -> ExitCode {
         // Begruendung, warum das 2 und nicht 14 ist, steht an
         // `RecoveryError::KeySource`.
         RecoveryError::KeySource => ExitCode::Usage,
+        // „Entschluesselung fehlgeschlagen": der Container hat die Form
+        // erfuellt, seine Art passt, der KDF ist gelaufen — und die AEAD
+        // oeffnet nicht. Das ist keine Aussage mehr ueber den Aufruf, sondern
+        // ueber die Passphrase gegen dieses Chiffrat, und damit die Zeile 14
+        // der Norm. Die Begruendung, warum das 14 und nicht 2 ist, steht an
+        // `RecoveryError::ContainerOpen`.
+        RecoveryError::ContainerOpen => ExitCode::Key,
         // „Schluessel fehlt": der vorgelegte Schluessel oeffnet diesen Bestand
         // nicht. Der EINZIGE Abbruchgrund dieser Aufzaehlung, der aus einem
         // vollstaendig gebildeten und makellosen Bericht entsteht — siehe die
@@ -194,6 +201,16 @@ pub const fn exit_code_for_error(error: &RecoveryError) -> ExitCode {
         // die kein Verzeichnis ist, wird deshalb nicht ersatzweise als eine
         // gelesen. Ausdruecklich nicht 20 — es ist nichts misslungen.
         RecoveryError::UnsupportedSource => ExitCode::Unsupported,
+        // Eine offene oder verlinkte Geheimnis-/Containerdatei: ein
+        // KONFIGURATIONSFEHLER, nach `chmod 600` unveraendert wiederholbar.
+        // Die Begruendung steht an `RecoveryError::KeySourceExposed`.
+        RecoveryError::KeySourceExposed => ExitCode::Usage,
+        // Eine leere Passphrasen- oder PIN-Datei: ebenfalls eine Aussage ueber
+        // den Aufruf, nicht ueber den Bestand.
+        RecoveryError::SecretEmpty => ExitCode::Usage,
+        // Die benannte Grenze der PKCS#11-Bindung: „nicht unterstuetzte
+        // Providerfaehigkeit", dasselbe Muster wie `--report-signing-key`.
+        RecoveryError::Pkcs11Unbound => ExitCode::Unsupported,
         RecoveryError::Verify(error) => match error {
             VerifyError::Archive(error) => match error {
                 ArchiveError::Unavailable => ExitCode::Io,

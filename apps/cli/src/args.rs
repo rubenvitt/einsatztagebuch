@@ -2,8 +2,8 @@
 //!
 //! # Warum von Hand und nicht mit `clap`
 //!
-//! Die Grammatik ist mit zehn Kommandos, zwoelf wertnehmenden Schaltern und
-//! einem Flag abgeschlossen und klein. Das Repo ist dependency-diszipliniert:
+//! Die Grammatik ist mit zwoelf Kommandos, siebzehn wertnehmenden Schaltern
+//! und einem Flag abgeschlossen und klein. Das Repo ist dependency-diszipliniert:
 //! jede externe Kiste traegt eine begruendete Zeile in
 //! `docs/adr/0001-toolchain-and-cryptography-dependencies.md`. Eine
 //! Argumentbibliothek in den Graphen eines WIEDERHERSTELLUNGSWERKZEUGS zu
@@ -35,6 +35,19 @@
 //! [`PathBuf`]: auf darwin und Linux ist ein Pfad eine Bytefolge, und ein
 //! Wiederherstellungswerkzeug, das einen Bestand wegen der Kodierung seines
 //! Verzeichnisnamens nicht oeffnet, versagt genau dann, wenn es gebraucht wird.
+//!
+//! # Schluesselquellen werden HIER geparst, aber DORT definiert
+//!
+//! `--key`, `--recovery-key` und `--authority-key` tragen eine
+//! `<key-source>`-Angabe. Ihre Grammatik — `<path>` | `file:<path>` |
+//! `container:<path>;passphrase-file=<path>` |
+//! `pkcs11:module=<path>;token=<label>;id=<hex>;pin-file=<path>` — wohnt in
+//! `ea_recovery::KeySourceSpec::parse` und wird von hier nur AUFGERUFEN: ein
+//! Parser, der sie ein zweites Mal fuehrte, koennte still von ihr abweichen.
+//! Ein Grammatikfehler dort ist ein Aufruffehler hier
+//! ([`UsageError::KeySource`]), Exitcode 2, und nennt den Schalter UND das
+//! Feld. Ein blosser Pfad bleibt die Dateiform der Stufe 4, damit jeder
+//! bisherige Aufruf unveraendert weiterlaeuft.
 
 use std::{
     ffi::OsString,
@@ -42,6 +55,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ea_recovery::{KeySourceSpec, KeySourceSpecError};
 use ea_types::{ChainSequence, UnixMillis};
 
 /// Das EINZIGE Unterkommando von `organization`.
@@ -102,10 +116,42 @@ pub const WRITER_TRANSITION_PREPARE_COMMAND: &str = "writer-transition prepare";
 pub const TRUST_ANCHOR_SWITCH: &str = "--trust-anchor";
 /// `--format text|json`, Vorgabe `text`.
 pub const FORMAT_SWITCH: &str = "--format";
-/// `--output <target>`, bei `decrypt`, `report` und `export`.
+/// `--output <target>`, bei `decrypt`, `report`, `export` und `recovery-test`.
 pub const OUTPUT_SWITCH: &str = "--output";
 /// `--key <key-source>`, nur bei `decrypt`.
 pub const KEY_SWITCH: &str = "--key";
+/// `--recovery-key <source>`, nur bei `grant`.
+///
+/// Der private Recovery-KEM-Schluessel, mit dessen Abdruck verifiziert wird.
+/// Ein EIGENER Schalter neben [`KEY_SWITCH`] und nicht derselbe unter anderem
+/// Kommando, weil `grant` ZWEI Schluesselquellen traegt und `design.md` §16.1
+/// beide beim Namen nennt: wer `--key` an `grant` haengt, hat sich vertan,
+/// und die Grammatik sagt das.
+pub const RECOVERY_KEY_SWITCH: &str = "--recovery-key";
+/// `--authority-key <source>`, nur bei `grant`.
+///
+/// Der GETRENNTE Signierschluessel der historischen Grant-Autoritaet
+/// (`design.md` §16.2). Getrennt heisst: eine andere Quelle als der
+/// Recovery-Schluessel, und `ea_recovery::resolve_signing_key` liest einen
+/// Container nur, wenn sein Kopf die Signierart traegt.
+pub const AUTHORITY_KEY_SWITCH: &str = "--authority-key";
+/// `--authorization <file>`, nur bei `grant`.
+///
+/// Die Datei traegt die von zwei `historicalGrantApprove`-Subjekten signierte
+/// Autorisierung. Sie wird in dieser Stufe GELESEN und nicht geparst — der
+/// Parser gehoert zum Dienst (`ea_recovery::grant`).
+pub const AUTHORIZATION_SWITCH: &str = "--authorization";
+/// `--recipient-cert <file>`, nur bei `grant`.
+///
+/// Das Zertifikat des Empfaengers, der den historischen Grant bekommen soll.
+/// Wie die Autorisierung: gelesen, nicht geparst.
+pub const RECIPIENT_CERT_SWITCH: &str = "--recipient-cert";
+/// `--key-inventory <file>`, nur bei `recovery-test`.
+///
+/// Das Inventar `ea.key-inventory/v1`. Seine Rust-Bindung ist Stage-5 Task 9;
+/// hier wird die Datei gelesen, und ihre Bytes gehen ungeparst an die
+/// Fassade (`ea_recovery::recovery_test`).
+pub const KEY_INVENTORY_SWITCH: &str = "--key-inventory";
 /// Public operator configuration; required only by operator commands.
 ///
 /// `registry` und `clock-release` verlangen dieselbe Datei und aus demselben
@@ -188,6 +234,49 @@ pub enum OperatorAction {
     Revoke,
 }
 
+/// Eine geparste Schluesselquelle, wie sie in [`Command`] steht.
+///
+/// # Warum ein Huelltyp und nicht [`KeySourceSpec`] selbst
+///
+/// [`Command`] leitet `Debug` ab, damit die Unittests dieses Moduls
+/// `assert_eq!` ueber ganze Aufrufe fuehren koennen. [`KeySourceSpec`] fuehrt
+/// BEWUSST keines: jede Variante traegt Hostpfade eines Recovery-Mediums, und
+/// ein `Debug` waere der bequemste Weg, sie in eine Ausgabe zu bringen. Der
+/// Huelltyp haelt beides zusammen: seine Anzeige nennt allein die QUELLART
+/// — `file`, `container`, `pkcs11` — und keinen Pfad.
+#[derive(Clone, Eq, PartialEq)]
+pub struct KeySourceArgument(KeySourceSpec);
+
+impl KeySourceArgument {
+    /// Die Quellenangabe, wie `ea-recovery` sie aufloest.
+    #[must_use]
+    pub const fn spec(&self) -> &KeySourceSpec {
+        &self.0
+    }
+
+    /// Das Wort der Quellart, wie es in der Anzeige steht.
+    const fn kind_word(&self) -> &'static str {
+        match self.0 {
+            KeySourceSpec::File(_) => "file",
+            KeySourceSpec::Container { .. } => "container",
+            KeySourceSpec::Pkcs11 { .. } => "pkcs11",
+        }
+    }
+}
+
+impl From<KeySourceSpec> for KeySourceArgument {
+    fn from(spec: KeySourceSpec) -> Self {
+        Self(spec)
+    }
+}
+
+impl fmt::Debug for KeySourceArgument {
+    /// Nur die Quellart. Kein Pfad, kein Label, keine ID.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "KeySourceArgument({})", self.kind_word())
+    }
+}
+
 /// Das gewaehlte Kommando samt seinen Pfaden.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -206,8 +295,38 @@ pub enum Command {
         /// Wurzel des Bestands.
         archive: PathBuf,
         /// Herkunft des Empfaengerschluessels.
-        key: PathBuf,
+        key: KeySourceArgument,
         /// Neues oder leeres Zielverzeichnis.
+        output: PathBuf,
+    },
+    /// Bestand pruefen und die Eingaben eines historischen Re-Grants
+    /// aufloesen.
+    ///
+    /// Das Positionsargument heisst in `design.md` §16.1 `<entry-or-archive>`.
+    /// In dieser Stufe ist es die Wurzel des Bestands: die Eingrenzung auf
+    /// einen einzelnen Eintrag ist eine Entscheidung des Dienstes (Task 8)
+    /// und nicht der Grammatik — ein Pfad, der auf eine Datei zeigt, ist
+    /// heute ein nicht lesbarer Bestand und endet mit 20.
+    Grant {
+        /// Wurzel des Bestands.
+        archive: PathBuf,
+        /// Herkunft des privaten Recovery-KEM-Schluessels.
+        recovery_key: KeySourceArgument,
+        /// Herkunft des getrennten HGA-Signierschluessels.
+        authority_key: KeySourceArgument,
+        /// Die Autorisierungsdatei.
+        authorization: PathBuf,
+        /// Das Empfaengerzertifikat.
+        recipient_certificate: PathBuf,
+    },
+    /// Bestand pruefen und die Eingaben eines Wiederherstellungstests
+    /// aufloesen.
+    RecoveryTest {
+        /// Wurzel des Bestands.
+        archive: PathBuf,
+        /// Das Schluesselinventar.
+        key_inventory: PathBuf,
+        /// Zieldatei des Berichts.
         output: PathBuf,
     },
     /// Bestand pruefen und den Bericht kanonisch in eine Datei schreiben.
@@ -378,6 +497,20 @@ pub enum UsageError {
         /// Das Kommando, das ihn nicht kennt.
         command: &'static str,
     },
+    /// Eine `<key-source>`-Angabe verletzt die Quellengrammatik.
+    ///
+    /// Traegt den SCHALTER, weil `grant` zwei Schluesselquellen fuehrt und
+    /// der Aufrufer wissen soll, welche er zu aendern hat — dieselbe Regel wie
+    /// bei [`Self::UnknownNumber`]. Den FEHLER traegt es unveraendert:
+    /// [`KeySourceSpecError`] nennt das betroffene Feld woertlich und nie
+    /// einen Wert, und eine hiesige Abschrift koennte still von ihm
+    /// abweichen.
+    KeySource {
+        /// Der Schalter, dessen Wert keine gueltige Quellenangabe ist.
+        switch: &'static str,
+        /// Der Grammatikfehler, wie `ea-recovery` ihn meldet.
+        error: KeySourceSpecError,
+    },
 }
 
 impl fmt::Display for UsageError {
@@ -399,12 +532,14 @@ impl fmt::Display for UsageError {
             ),
             Self::UnknownCommand(command) => write!(
                 formatter,
-                "unknown command {command}; expected verify, list, decrypt, report, export, \
-                 organization, operator, registry, clock-release or writer-transition"
+                "unknown command {command}; expected verify, list, decrypt, grant, report, \
+                 export, recovery-test, organization, operator, registry, clock-release or \
+                 writer-transition"
             ),
             Self::MissingCommand => formatter.write_str(
-                "no command was given; expected verify, list, decrypt, report, export, \
-                 organization, operator, registry, clock-release or writer-transition",
+                "no command was given; expected verify, list, decrypt, grant, report, export, \
+                 recovery-test, organization, operator, registry, clock-release or \
+                 writer-transition",
             ),
             Self::MissingTrustAnchor => write!(
                 formatter,
@@ -432,13 +567,14 @@ impl fmt::Display for UsageError {
             Self::SwitchNotAllowed { switch, command } => {
                 write!(formatter, "{switch} is not allowed for {command}")
             }
+            Self::KeySource { switch, error } => write!(formatter, "{switch}: {error}"),
         }
     }
 }
 
 impl std::error::Error for UsageError {}
 
-/// Welches der zehn Kommandos gemeint ist.
+/// Welches der zwoelf Kommandos gemeint ist.
 ///
 /// Eine eigene Aufzaehlung statt einer Zeichenkette, damit die Auswertung unten
 /// VOLLSTAENDIG ist und kein `unreachable!()` braucht. Ein `unreachable!()`
@@ -448,8 +584,10 @@ enum CommandKind {
     Verify,
     List,
     Decrypt,
+    Grant,
     Report,
     Export,
+    RecoveryTest,
     Organization,
     Operator,
     Registry,
@@ -464,8 +602,10 @@ impl CommandKind {
             Self::Verify => "verify",
             Self::List => "list",
             Self::Decrypt => "decrypt",
+            Self::Grant => "grant",
             Self::Report => "report",
             Self::Export => "export",
+            Self::RecoveryTest => "recovery-test",
             Self::Organization => "organization",
             Self::Operator => "operator",
             Self::Registry => "registry",
@@ -480,8 +620,10 @@ impl CommandKind {
             "verify" => Some(Self::Verify),
             "list" => Some(Self::List),
             "decrypt" => Some(Self::Decrypt),
+            "grant" => Some(Self::Grant),
             "report" => Some(Self::Report),
             "export" => Some(Self::Export),
+            "recovery-test" => Some(Self::RecoveryTest),
             "organization" => Some(Self::Organization),
             "operator" => Some(Self::Operator),
             "registry" => Some(Self::Registry),
@@ -518,6 +660,32 @@ fn take_path_value(
         return Err(UsageError::MissingValue(switch));
     }
     *slot = Some(PathBuf::from(value));
+    Ok(())
+}
+
+/// Liest die SCHLUESSELQUELLE eines Schalters in `slot`.
+///
+/// Dieselben zwei Konventionen wie [`take_path_value`], und danach die
+/// Quellengrammatik aus `ea-recovery`: was mit `-` beginnt, ist ein Schalter
+/// und kein Wert; was danach die Grammatik verletzt, ist ein Aufruffehler,
+/// der Schalter und Feld nennt. Ein Nicht-UTF-8-Wert ist nach
+/// [`KeySourceSpec::parse`] ein Pfad der Dateiform — dieselbe Regel wie fuer
+/// jeden anderen Pfadwert dieses Parsers.
+fn take_key_source_value(
+    slot: &mut Option<KeySourceArgument>,
+    switch: &'static str,
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<(), UsageError> {
+    if slot.is_some() {
+        return Err(UsageError::DuplicateSwitch(switch));
+    }
+    let value = arguments.next().ok_or(UsageError::MissingValue(switch))?;
+    if looks_like_switch(&value) {
+        return Err(UsageError::MissingValue(switch));
+    }
+    let spec =
+        KeySourceSpec::parse(&value).map_err(|error| UsageError::KeySource { switch, error })?;
+    *slot = Some(KeySourceArgument::from(spec));
     Ok(())
 }
 
@@ -599,7 +767,12 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
 
     let mut anchor: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
-    let mut key: Option<PathBuf> = None;
+    let mut key: Option<KeySourceArgument> = None;
+    let mut recovery_key: Option<KeySourceArgument> = None;
+    let mut authority_key: Option<KeySourceArgument> = None;
+    let mut authorization: Option<PathBuf> = None;
+    let mut recipient_certificate: Option<PathBuf> = None;
+    let mut key_inventory: Option<PathBuf> = None;
     let mut report_signing_key: Option<PathBuf> = None;
     let mut operator_config: Option<PathBuf> = None;
     let mut release: Option<PathBuf> = None;
@@ -631,7 +804,24 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     take_path_value(&mut anchor, TRUST_ANCHOR_SWITCH, &mut arguments)?;
                 }
                 OUTPUT_SWITCH => take_path_value(&mut output, OUTPUT_SWITCH, &mut arguments)?,
-                KEY_SWITCH => take_path_value(&mut key, KEY_SWITCH, &mut arguments)?,
+                KEY_SWITCH => take_key_source_value(&mut key, KEY_SWITCH, &mut arguments)?,
+                RECOVERY_KEY_SWITCH => {
+                    take_key_source_value(&mut recovery_key, RECOVERY_KEY_SWITCH, &mut arguments)?
+                }
+                AUTHORITY_KEY_SWITCH => {
+                    take_key_source_value(&mut authority_key, AUTHORITY_KEY_SWITCH, &mut arguments)?
+                }
+                AUTHORIZATION_SWITCH => {
+                    take_path_value(&mut authorization, AUTHORIZATION_SWITCH, &mut arguments)?
+                }
+                RECIPIENT_CERT_SWITCH => take_path_value(
+                    &mut recipient_certificate,
+                    RECIPIENT_CERT_SWITCH,
+                    &mut arguments,
+                )?,
+                KEY_INVENTORY_SWITCH => {
+                    take_path_value(&mut key_inventory, KEY_INVENTORY_SWITCH, &mut arguments)?
+                }
                 OPERATOR_CONFIG_SWITCH => {
                     take_path_value(&mut operator_config, OPERATOR_CONFIG_SWITCH, &mut arguments)?
                 }
@@ -717,6 +907,28 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
+    // Die vier Eingaben von `grant` gehoeren allein `grant`, das Inventar
+    // allein `recovery-test`. `--key` bleibt bei `decrypt`: `grant` fuehrt
+    // seine beiden Schluesselquellen unter eigenem Namen.
+    for (present, switch) in [
+        (recovery_key.is_some(), RECOVERY_KEY_SWITCH),
+        (authority_key.is_some(), AUTHORITY_KEY_SWITCH),
+        (authorization.is_some(), AUTHORIZATION_SWITCH),
+        (recipient_certificate.is_some(), RECIPIENT_CERT_SWITCH),
+    ] {
+        if present && command_kind != CommandKind::Grant {
+            return Err(UsageError::SwitchNotAllowed {
+                switch,
+                command: command_name,
+            });
+        }
+    }
+    if key_inventory.is_some() && command_kind != CommandKind::RecoveryTest {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: KEY_INVENTORY_SWITCH,
+            command: command_name,
+        });
+    }
     if operator_config.is_some()
         && !matches!(
             command_kind,
@@ -778,6 +990,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command_kind,
             CommandKind::Verify
                 | CommandKind::List
+                | CommandKind::Grant
                 | CommandKind::Organization
                 | CommandKind::Operator
                 | CommandKind::Registry
@@ -831,6 +1044,28 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 command: command_name,
             })?,
         },
+        // Die vier Pflichtschalter in der Reihenfolge von `design.md` §16.1,
+        // damit ein Aufruf, dem mehrere fehlen, immer denselben zuerst
+        // genannt bekommt.
+        CommandKind::Grant => Command::Grant {
+            archive: path,
+            recovery_key: recovery_key.ok_or(UsageError::MissingSwitch {
+                switch: RECOVERY_KEY_SWITCH,
+                command: command_name,
+            })?,
+            authority_key: authority_key.ok_or(UsageError::MissingSwitch {
+                switch: AUTHORITY_KEY_SWITCH,
+                command: command_name,
+            })?,
+            authorization: authorization.ok_or(UsageError::MissingSwitch {
+                switch: AUTHORIZATION_SWITCH,
+                command: command_name,
+            })?,
+            recipient_certificate: recipient_certificate.ok_or(UsageError::MissingSwitch {
+                switch: RECIPIENT_CERT_SWITCH,
+                command: command_name,
+            })?,
+        },
         CommandKind::Report => Command::Report {
             archive: path,
             output: output.ok_or(UsageError::MissingSwitch {
@@ -840,6 +1075,17 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
         },
         CommandKind::Export => Command::Export {
             source: path,
+            output: output.ok_or(UsageError::MissingSwitch {
+                switch: OUTPUT_SWITCH,
+                command: command_name,
+            })?,
+        },
+        CommandKind::RecoveryTest => Command::RecoveryTest {
+            archive: path,
+            key_inventory: key_inventory.ok_or(UsageError::MissingSwitch {
+                switch: KEY_INVENTORY_SWITCH,
+                command: command_name,
+            })?,
             output: output.ok_or(UsageError::MissingSwitch {
                 switch: OUTPUT_SWITCH,
                 command: command_name,
@@ -995,12 +1241,14 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
 #[cfg(test)]
 mod tests {
     use super::{
-        CLOCK_RELEASE_APPLY_SUBCOMMAND, Command, EFFECTIVE_FROM_SWITCH, FORMAT_SWITCH, Format,
-        INCLUDE_RUNTIME_METADATA_SWITCH, Invocation, KEY_SWITCH, NOT_AFTER_SWITCH,
-        OPERATOR_CONFIG_SWITCH, ORGANIZATION_INIT_SUBCOMMAND, OUTPUT_SWITCH,
-        REGISTRY_REVOCATION_PLAN_SUBCOMMAND, RELEASE_SWITCH, REPORT_SIGNING_KEY_SWITCH,
-        TRUST_ANCHOR_SWITCH, UsageError, VALID_THROUGH_SWITCH, parse,
+        AUTHORITY_KEY_SWITCH, AUTHORIZATION_SWITCH, CLOCK_RELEASE_APPLY_SUBCOMMAND, Command,
+        EFFECTIVE_FROM_SWITCH, FORMAT_SWITCH, Format, INCLUDE_RUNTIME_METADATA_SWITCH, Invocation,
+        KEY_INVENTORY_SWITCH, KEY_SWITCH, KeySourceArgument, NOT_AFTER_SWITCH,
+        OPERATOR_CONFIG_SWITCH, ORGANIZATION_INIT_SUBCOMMAND, OUTPUT_SWITCH, RECIPIENT_CERT_SWITCH,
+        RECOVERY_KEY_SWITCH, REGISTRY_REVOCATION_PLAN_SUBCOMMAND, RELEASE_SWITCH,
+        REPORT_SIGNING_KEY_SWITCH, TRUST_ANCHOR_SWITCH, UsageError, VALID_THROUGH_SWITCH, parse,
     };
+    use ea_recovery::{KeySourceKind, KeySourceSpec, KeySourceSpecError};
     use ea_types::{ChainSequence, UnixMillis};
     use std::{ffi::OsString, path::PathBuf};
 
@@ -1068,7 +1316,7 @@ mod tests {
                 report_signing_key: None,
                 command: Command::Decrypt {
                     archive: PathBuf::from("archive"),
-                    key: PathBuf::from("recipient.key"),
+                    key: file_key("recipient.key"),
                     output: PathBuf::from("target"),
                 },
             }
@@ -1789,6 +2037,322 @@ mod tests {
                 expected: CLOCK_RELEASE_APPLY_SUBCOMMAND,
             }
         );
+    }
+
+    /// Die Stufe-4-Form eines Schluessels als Kommandowert.
+    fn file_key(path: &str) -> KeySourceArgument {
+        KeySourceArgument::from(KeySourceSpec::File(PathBuf::from(path)))
+    }
+
+    /// `grant` traegt seine vier Eingaben als VIER Schalter, in der Reihenfolge
+    /// von `design.md` §16.1.
+    #[test]
+    fn grant_parses_in_its_full_form() {
+        assert_eq!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "grant",
+                "archive",
+                RECOVERY_KEY_SWITCH,
+                "recovery.key",
+                AUTHORITY_KEY_SWITCH,
+                "file:authority.key",
+                AUTHORIZATION_SWITCH,
+                "authorization.bin",
+                RECIPIENT_CERT_SWITCH,
+                "recipient.cert"
+            ])
+            .expect("grant muss parsen"),
+            Invocation {
+                anchor: PathBuf::from("anchor.etb"),
+                format: Format::Text,
+                include_runtime_metadata: false,
+                report_signing_key: None,
+                command: Command::Grant {
+                    archive: PathBuf::from("archive"),
+                    recovery_key: file_key("recovery.key"),
+                    authority_key: file_key("authority.key"),
+                    authorization: PathBuf::from("authorization.bin"),
+                    recipient_certificate: PathBuf::from("recipient.cert"),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_test_parses_in_its_full_form() {
+        assert_eq!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "recovery-test",
+                "archive",
+                KEY_INVENTORY_SWITCH,
+                "inventory.json",
+                OUTPUT_SWITCH,
+                "recovery-test.json"
+            ])
+            .expect("recovery-test muss parsen"),
+            Invocation {
+                anchor: PathBuf::from("anchor.etb"),
+                format: Format::Text,
+                include_runtime_metadata: false,
+                report_signing_key: None,
+                command: Command::RecoveryTest {
+                    archive: PathBuf::from("archive"),
+                    key_inventory: PathBuf::from("inventory.json"),
+                    output: PathBuf::from("recovery-test.json"),
+                },
+            }
+        );
+    }
+
+    /// Jeder der vier `grant`-Schalter ist Pflicht und wird WOERTLICH genannt.
+    #[test]
+    fn grant_requires_each_of_its_four_switches() {
+        let full = [
+            (RECOVERY_KEY_SWITCH, "recovery.key"),
+            (AUTHORITY_KEY_SWITCH, "authority.key"),
+            (AUTHORIZATION_SWITCH, "authorization.bin"),
+            (RECIPIENT_CERT_SWITCH, "recipient.cert"),
+        ];
+        for (missing, _) in full {
+            let mut tokens = vec![TRUST_ANCHOR_SWITCH, "anchor.etb", "grant", "archive"];
+            for (switch, value) in full {
+                if switch != missing {
+                    tokens.extend([switch, value]);
+                }
+            }
+            assert_eq!(
+                rejected(&tokens),
+                UsageError::MissingSwitch {
+                    switch: missing,
+                    command: "grant",
+                },
+                "grant darf ohne {missing} nicht durchgehen"
+            );
+        }
+    }
+
+    /// `recovery-test` verlangt Inventar UND Zieldatei.
+    #[test]
+    fn recovery_test_requires_inventory_and_output() {
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "recovery-test",
+                "archive",
+                OUTPUT_SWITCH,
+                "recovery-test.json"
+            ]),
+            UsageError::MissingSwitch {
+                switch: KEY_INVENTORY_SWITCH,
+                command: "recovery-test",
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "recovery-test",
+                "archive",
+                KEY_INVENTORY_SWITCH,
+                "inventory.json"
+            ]),
+            UsageError::MissingSwitch {
+                switch: OUTPUT_SWITCH,
+                command: "recovery-test",
+            }
+        );
+    }
+
+    /// Die vier `grant`-Schalter gehoeren GENAU `grant`, `--key-inventory`
+    /// genau `recovery-test` — und `--key` bleibt bei `decrypt`, `--output`
+    /// kommt nicht zu `grant`.
+    #[test]
+    fn the_new_switches_are_rejected_on_every_other_command() {
+        for switch in [
+            RECOVERY_KEY_SWITCH,
+            AUTHORITY_KEY_SWITCH,
+            AUTHORIZATION_SWITCH,
+            RECIPIENT_CERT_SWITCH,
+        ] {
+            for command in ["verify", "recovery-test"] {
+                assert_eq!(
+                    rejected(&[
+                        TRUST_ANCHOR_SWITCH,
+                        "anchor.etb",
+                        switch,
+                        "value",
+                        command,
+                        "archive"
+                    ]),
+                    UsageError::SwitchNotAllowed { switch, command },
+                    "{command} darf {switch} nicht annehmen"
+                );
+            }
+        }
+        for command in ["verify", "grant"] {
+            assert_eq!(
+                rejected(&[
+                    TRUST_ANCHOR_SWITCH,
+                    "anchor.etb",
+                    KEY_INVENTORY_SWITCH,
+                    "inventory.json",
+                    command,
+                    "archive"
+                ]),
+                UsageError::SwitchNotAllowed {
+                    switch: KEY_INVENTORY_SWITCH,
+                    command,
+                },
+                "{command} darf {KEY_INVENTORY_SWITCH} nicht annehmen"
+            );
+        }
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                KEY_SWITCH,
+                "recovery.key",
+                "grant",
+                "archive"
+            ]),
+            UsageError::SwitchNotAllowed {
+                switch: KEY_SWITCH,
+                command: "grant",
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                OUTPUT_SWITCH,
+                "target",
+                "grant",
+                "archive"
+            ]),
+            UsageError::SwitchNotAllowed {
+                switch: OUTPUT_SWITCH,
+                command: "grant",
+            }
+        );
+    }
+
+    /// Auch die beiden neuen Kommandos verlangen den Anker — und die Pruefung
+    /// steht VOR ihren Pflichtschaltern: hier fehlt alles, gemeldet wird der
+    /// Anker.
+    #[test]
+    fn grant_and_recovery_test_require_the_trust_anchor() {
+        assert_eq!(
+            rejected(&["grant", "archive"]),
+            UsageError::MissingTrustAnchor
+        );
+        assert_eq!(
+            rejected(&["recovery-test", "archive"]),
+            UsageError::MissingTrustAnchor
+        );
+    }
+
+    /// `--key` parst durch die Quellengrammatik: die drei Formen gehen durch,
+    /// ein Grammatikfehler nennt den Schalter UND das Feld.
+    #[test]
+    fn a_key_source_parses_through_the_source_grammar() {
+        let Ok(Invocation {
+            command: Command::Decrypt { key, .. },
+            ..
+        }) = parsed(&[
+            TRUST_ANCHOR_SWITCH,
+            "anchor.etb",
+            "decrypt",
+            "archive",
+            KEY_SWITCH,
+            "file:recipient.key",
+            OUTPUT_SWITCH,
+            "target",
+        ])
+        else {
+            panic!("die ausgeschriebene Dateiform muss parsen");
+        };
+        assert!(key == file_key("recipient.key"));
+
+        let Ok(Invocation {
+            command: Command::Decrypt { key, .. },
+            ..
+        }) = parsed(&[
+            TRUST_ANCHOR_SWITCH,
+            "anchor.etb",
+            "decrypt",
+            "archive",
+            KEY_SWITCH,
+            "container:recipient.container;passphrase-file=pass.txt",
+            OUTPUT_SWITCH,
+            "target",
+        ])
+        else {
+            panic!("die Containerform muss parsen");
+        };
+        assert!(
+            key == KeySourceArgument::from(KeySourceSpec::Container {
+                path: PathBuf::from("recipient.container"),
+                passphrase_file: PathBuf::from("pass.txt"),
+            })
+        );
+
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "decrypt",
+                "archive",
+                KEY_SWITCH,
+                "container:recipient.container",
+                OUTPUT_SWITCH,
+                "target"
+            ]),
+            UsageError::KeySource {
+                switch: KEY_SWITCH,
+                error: KeySourceSpecError::MissingField {
+                    source: KeySourceKind::Container,
+                    field: "passphrase-file=",
+                },
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "grant",
+                "archive",
+                RECOVERY_KEY_SWITCH,
+                "recovery.key",
+                AUTHORITY_KEY_SWITCH,
+                "pkcs11:module=m.so;token=t;pin-file=p",
+            ]),
+            UsageError::KeySource {
+                switch: AUTHORITY_KEY_SWITCH,
+                error: KeySourceSpecError::MissingField {
+                    source: KeySourceKind::Pkcs11,
+                    field: "id=",
+                },
+            }
+        );
+    }
+
+    /// Die Anzeige einer Quellenangabe nennt die QUELLART und keinen Pfad.
+    #[test]
+    fn a_key_source_argument_debugs_without_its_paths() {
+        let shown = format!(
+            "{:?}",
+            KeySourceArgument::from(KeySourceSpec::Container {
+                path: PathBuf::from("/media/recovery/key.container"),
+                passphrase_file: PathBuf::from("/media/recovery/pass.txt"),
+            })
+        );
+        assert_eq!(shown, "KeySourceArgument(container)");
+        assert!(!shown.contains("media"));
     }
 
     /// Ein Pfadwert geht unbesehen durch, ein Schaltername nicht.

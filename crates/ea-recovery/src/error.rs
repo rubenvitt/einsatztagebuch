@@ -71,6 +71,31 @@ pub enum RecoveryError {
     /// Scharf getrennt von [`Self::Io`]: dort war die Datei nicht LESBAR, hier
     /// war sie lesbar und traegt das Falsche.
     KeySource,
+    /// Der Container ist dekodiert, seine Art passt, der KDF ist gelaufen —
+    /// und die AEAD oeffnet nicht.
+    ///
+    /// Exitcode 14 und ausdruecklich NICHT 2, in scharfer Abgrenzung zu
+    /// [`Self::KeySource`]: dort traegt die benannte Datei kein
+    /// Schluesselmaterial dieser Form — kein Container, eine fremde Art, eine
+    /// fremde Parametrierung —, und das ist eine Aussage ueber den AUFRUF.
+    /// Hier hat die Datei die Form vollstaendig erfuellt: sie ist als
+    /// Container gelesen, ihre Art ist die verlangte, ihre Parameter sind die
+    /// gepinnten. Gescheitert ist erst die ENTSCHLUESSELUNG, und
+    /// „Schluessel fehlt oder Entschluesselung fehlgeschlagen" ist nach
+    /// `design.md`:1808 die Zeile 14.
+    ///
+    /// Drei Wege fuehren hierher, und alle drei bekommen DIESELBE Antwort,
+    /// damit ein Angreifer aus dem Fehler nichts lernt: die falsche
+    /// Passphrase, ein verkipptes Byte in Chiffrat oder Tag, und ein
+    /// verkipptes Kopfbyte, das noch dekodiert, aber die AAD veraendert —
+    /// Salz, Nonce, Art. Welcher es war, sagt die Poly1305-Pruefung nicht,
+    /// und dieses Bauwerk sagt es deshalb auch nicht.
+    ///
+    /// Scharf getrennt von [`Self::Decryption`]: dort scheiterte ein GRANT
+    /// des Bestands, hier die Huelle um den Schluessel, mit dem der Bestand
+    /// erst geoeffnet werden sollte. Beide stehen auf 14, weil die Norm nicht
+    /// danach fragt, welche Huelle es war.
+    ContainerOpen,
     /// Es gibt keinen Grant dieses Bestands auf den vorgelegten Schluessel.
     ///
     /// `ea-verify` meldet das AUSDRUECKLICH NICHT als Befund: ein fehlender
@@ -125,6 +150,40 @@ pub enum RecoveryError {
     /// dagegen [`Self::Io`] und damit 20. Die Grenze verlaeuft zwischen „diese
     /// Quellart trage ich nicht" und „an dieser Quelle ist etwas gescheitert".
     UnsupportedSource,
+    /// Eine Container- oder Geheimnisdatei ist nicht als allein ihrem
+    /// Eigentuemer gehoerend erwiesen.
+    ///
+    /// Zwei Wege fuehren hierher: ihre Rechte tragen ein Bit fuer Gruppe oder
+    /// Welt (`mode & 0o077 != 0`), oder der genannte Pfad ist ein SYMLINK,
+    /// dessen Rechte ueber die Datei dahinter nichts sagen. Beides wird
+    /// festgestellt, BEVOR ein Byte gelesen wird — eine Passphrase, die jeder
+    /// auf dem Rechner lesen kann, ist keine, und der Aufrufer soll das
+    /// erfahren, bevor er sie irgendwo eingibt.
+    ///
+    /// Exitcode 2, „Aufruf- oder Konfigurationsfehler": derselbe Aufruf ist
+    /// nach einem `chmod 600` unveraendert wiederholbar; am Bestand liegt es
+    /// nicht. Scharf getrennt von [`Self::Io`] (die Datei liess sich nicht
+    /// befragen) und von [`Self::KeySource`] (sie war lesbar und traegt das
+    /// Falsche).
+    KeySourceExposed,
+    /// Eine Passphrasen- oder PIN-Datei ist — nach dem einen erlaubten
+    /// Zeilenende — leer.
+    ///
+    /// Eine leere Passphrase ist keine, und ein KDF ueber null Bytes ist
+    /// keine Sicherung, sondern ihre Attrappe. Exitcode 2: der Aufrufer hat
+    /// eine Datei benannt, die kein Geheimnis traegt, und derselbe Aufruf ist
+    /// mit einer gefuellten Datei unveraendert wiederholbar.
+    SecretEmpty,
+    /// Die PKCS#11-Referenz ist vollstaendig geprueft, die PIN gelesen — und
+    /// an ein Modul gebunden wird in dieser Stufe nicht.
+    ///
+    /// DIE BENANNTE GRENZE aus `crate::pkcs11`: es gibt keine
+    /// `cryptoki`-Kante, kein Modul im Baum und keinen Zeugen. Exitcode 21,
+    /// „nicht unterstuetzte Providerfaehigkeit" — es ist nichts misslungen, es
+    /// ist etwas nicht vorhanden. Sein `code()` ist
+    /// [`crate::PKCS11_UNBOUND_CODE`], damit die Grenze an genau einer Stelle
+    /// benannt ist.
+    Pkcs11Unbound,
 }
 
 impl RecoveryError {
@@ -138,12 +197,16 @@ impl RecoveryError {
             Self::Verify(error) => error.code(),
             Self::OutputExists => "EA-RECOVERY-OUTPUT-EXISTS",
             Self::KeySource => "EA-RECOVERY-KEY-SOURCE",
+            Self::ContainerOpen => "EA-RECOVERY-CONTAINER-OPEN",
             Self::NoOwnGrant => "EA-RECOVERY-NO-OWN-GRANT",
             Self::Decryption => "EA-RECOVERY-DECRYPTION",
             Self::RestrictivePermissionsUnsupported => {
                 "EA-RECOVERY-RESTRICTIVE-PERMISSIONS-UNSUPPORTED"
             }
             Self::UnsupportedSource => "EA-RECOVERY-UNSUPPORTED-SOURCE",
+            Self::KeySourceExposed => "EA-RECOVERY-KEY-SOURCE-EXPOSED",
+            Self::SecretEmpty => "EA-RECOVERY-SECRET-EMPTY",
+            Self::Pkcs11Unbound => crate::pkcs11::PKCS11_UNBOUND_CODE,
         }
     }
 }

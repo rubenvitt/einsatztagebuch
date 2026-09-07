@@ -8,6 +8,19 @@ rust-version = "1.95"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
+# Argon2id fuer den verschluesselten Schluesselcontainer von `ea-recovery`
+# (`EINSATZARCHIV-KEY-CONTAINER-v1`), ratifiziert in
+# `docs/adr/0001-toolchain-and-cryptography-dependencies.md`. Defaults aus:
+# `password-hash` (PHC-Zeichenketten, `getrandom` ueber `password-hash`) wird
+# nicht gebraucht — der Container traegt Salz und Parameter selbst in
+# deterministischem CBOR. `alloc` bleibt ebenfalls aus: es ist als
+# `password-hash?/alloc` deklariert, und schon die SCHWACHE Referenz liesse
+# Cargo `password-hash` und `phc` ins Lockfile aufnehmen, ohne dass etwas davon
+# gebaut wuerde; `ea-recovery` reicht dem KDF seine Speicherbloecke deshalb
+# selbst (`hash_password_into_with_memory`). `zeroize` bleibt an, damit diese
+# Bloecke beim Verlassen ueberschrieben werden. Die AEAD bleibt das gepinnte
+# ChaCha20-Poly1305 hinter `ea_crypto::aead_seal`; es kommt keine zweite.
+argon2 = { version = "=0.6.0", default-features = false, features = ["zeroize"] }
 async-trait = { version = "=0.1.92", default-features = false }
 aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = ["behavior-version-latest", "http-1x", "rt-tokio"] }
 aws-smithy-http-client = { version = "=1.4.0", default-features = false, features = ["rustls-ring"] }
