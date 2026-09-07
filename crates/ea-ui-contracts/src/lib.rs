@@ -40,7 +40,9 @@
 
 mod emit;
 
-pub use emit::{emit_reader_typescript, emit_typescript};
+pub use emit::{
+    ADMIN_VIEW_MODELS_V1, admin_view_model_fields, emit_reader_typescript, emit_typescript,
+};
 
 // Die Sicherheitsaufzaehlungen bleiben, wo sie definiert wurden. Hier steht
 // ausschliesslich die Weitergabe.
@@ -1270,7 +1272,13 @@ pub struct PolicyProfileView {
     pub reader_history_access_allowed: bool,
     pub backup_frequency_ms: u64,
     pub restore_test_interval_ms: u64,
-    pub retention_policy: String,
+    /// Die Mindestaufbewahrung aus `RetentionPolicyFieldsV1`, `None` wenn die
+    /// Policy keine nennt. Kein Freitext: die Aufbewahrungsrichtlinie ist im
+    /// Format strukturiert (`minimum_retention_ms`, `destruction_enabled`), und
+    /// eine Zeichenkette hier waere der einzige unbegrenzte Textkanal der Flaeche.
+    pub minimum_retention_ms: Option<u64>,
+    /// Ob die Policy eine autorisierte Vernichtung ueberhaupt zulaesst.
+    pub destruction_enabled: bool,
     pub effective_from_sequence: ChainSequence,
     pub lease_valid_through_sequence: ChainSequence,
     pub not_after_ms: UnixMillis,

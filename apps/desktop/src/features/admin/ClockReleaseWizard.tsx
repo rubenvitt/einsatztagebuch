@@ -79,31 +79,37 @@ export function ClockReleaseWizard({
     )
   }
 
+  // Zweite Verteidigungslinie hinter `validateClockReleaseOffer`: ein Angebot
+  // ohne eine seiner vier Zahlen bekommt KEINE Handhabe. Der Bediener soll
+  // Floor, Wanduhr, Limit und Ablauf gegen seine zweite Uhr vergleichen — ohne
+  // eine davon gibt es nichts zu vergleichen und nichts zu begruenden.
+  if (
+    offer.floorMs === null ||
+    offer.observedWallClockMs === null ||
+    offer.maxFutureClockSkewMs === null ||
+    offer.expiresAtMs === null
+  ) {
+    return (
+      <Space direction="vertical" size="small">
+        <Typography.Text>Zeitfreigabe unvollständig gemeldet</Typography.Text>
+        <Typography.Text>
+          Der Wirt bietet eine Freigabe an, nennt aber nicht alle vier Werte (Zeit-Floor, Wanduhr,
+          signiertes Limit, Ablauf). Ohne sie wird keine Freigabe erteilt.
+        </Typography.Text>
+        <Typography.Text>{INVARIANT_TEXT}</Typography.Text>
+      </Space>
+    )
+  }
+
   const items = [
-    {
-      key: 'floor',
-      label: 'Zeit-Floor',
-      children: offer.floorMs === null ? 'nicht genannt' : formatInstant(offer.floorMs),
-    },
+    { key: 'floor', label: 'Zeit-Floor', children: formatInstant(offer.floorMs) },
     {
       key: 'wall',
       label: 'Wanduhr des Betriebssystems',
-      children:
-        offer.observedWallClockMs === null ? 'nicht genannt' : formatInstant(offer.observedWallClockMs),
+      children: formatInstant(offer.observedWallClockMs),
     },
-    {
-      key: 'limit',
-      label: 'Signiertes Limit',
-      children:
-        offer.maxFutureClockSkewMs === null
-          ? 'nicht genannt'
-          : formatDuration(offer.maxFutureClockSkewMs),
-    },
-    {
-      key: 'expiry',
-      label: 'Ablauf',
-      children: offer.expiresAtMs === null ? 'nicht genannt' : formatInstant(offer.expiresAtMs),
-    },
+    { key: 'limit', label: 'Signiertes Limit', children: formatDuration(offer.maxFutureClockSkewMs) },
+    { key: 'expiry', label: 'Ablauf', children: formatInstant(offer.expiresAtMs) },
   ]
   const unexpected =
     outcome !== null &&

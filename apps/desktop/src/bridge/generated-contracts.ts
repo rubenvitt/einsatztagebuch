@@ -302,7 +302,8 @@ export type PolicyProfileView = {
   readonly readerHistoryAccessAllowed: boolean
   readonly backupFrequencyMs: number
   readonly restoreTestIntervalMs: number
-  readonly retentionPolicy: string
+  readonly minimumRetentionMs: number | null
+  readonly destructionEnabled: boolean
   readonly effectiveFromSequence: number
   readonly leaseValidThroughSequence: number
   readonly notAfterMs: number

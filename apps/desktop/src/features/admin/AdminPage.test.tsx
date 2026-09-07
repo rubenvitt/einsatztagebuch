@@ -8,6 +8,7 @@ import type { ReactElement } from 'react'
 
 import { ADMIN_COMMANDS, AdminPage, AdminSurface, REAUTH_PURPOSES } from './AdminPage'
 import type { AdminBridge } from './AdminPage'
+import { validateChecklist } from './contract-check'
 import type {
   ClockReleaseOfferView,
   GoLiveChecklistView,
@@ -158,7 +159,8 @@ function fakeAdminBridge(overrides: Partial<AdminBridge> = {}): AdminBridge {
       readerHistoryAccessAllowed: false,
       backupFrequencyMs: DAY,
       restoreTestIntervalMs: 90 * DAY,
-      retentionPolicy: 'EA-RETENTION-10Y',
+      minimumRetentionMs: 3650 * DAY,
+      destructionEnabled: false,
       effectiveFromSequence: 12,
       leaseValidThroughSequence: 120,
       notAfterMs: 1_771_600_000_000,
@@ -237,6 +239,25 @@ function fakeAdminBridge(overrides: Partial<AdminBridge> = {}): AdminBridge {
   }
 }
 
+/**
+ * Jeder Textknoten der Seite, der das alleinstehende Wort „aktiv" traegt.
+ *
+ * Je KNOTEN und nicht ueber `textContent` der ganzen Seite: dort stossen die
+ * Texte benachbarter Elemente ohne Leerzeichen aneinander („Gerät aktivAnfrage
+ * ausstehend"), und `\b` findet die Grenze nicht mehr.
+ */
+function activeWordNodes(): string[] {
+  const found: string[] = []
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const text = node.textContent ?? ''
+    if (/\baktiv\b/.test(text)) {
+      found.push(text)
+    }
+  }
+  return found
+}
+
 function ceremonyRegion(name: RegExp | string) {
   return within(screen.getByRole('region', { name }))
 }
@@ -248,9 +269,13 @@ it('does not collapse request fingerprint approval and Root import', async () =>
   expect(screen.getByText('Anfrage ausstehend')).toBeVisible()
   await user.click(screen.getByRole('button', { name: 'Fingerprint vergleichen' }))
   expect(screen.getByLabelText('Vollständiger Fingerprint')).toHaveTextContent(FINGERPRINT_SHAPE)
-  expect(
-    screen.getByRole('img', { name: 'QR-Code des vollständigen Fingerprints' }),
-  ).toBeVisible()
+  const qr = screen.getByRole('img', { name: 'QR-Code des vollständigen Fingerprints' })
+  expect(qr).toBeVisible()
+  // Als SVG und nicht als Canvas: Ant Design legt Rolle und Namen auf das
+  // gezeichnete Element selbst, also IST der benannte Knoten das SVG. Ein
+  // Canvas waere in einer DOM-Attrappe leer und auf einem Drucker ein Bitmap.
+  expect(qr).toBeInstanceOf(SVGElement)
+  expect(qr.tagName.toLowerCase()).toBe('svg')
   expect(screen.queryByText('Gerät aktiv')).not.toBeInTheDocument()
 })
 
@@ -292,6 +317,9 @@ it('walks the six device approval steps with one action each and fresh proof bef
   expect(bridge.reauthenticate).toHaveBeenNthCalledWith(1, REAUTH_PURPOSES.adminRootCeremony)
   expect(bridge.authorize).toHaveBeenCalledTimes(1)
   expect(heading()).toHaveFocus()
+  // Je Schritt GENAU eine Handlung neben dem Listenknopf „Fingerprint
+  // vergleichen" — an jedem Schritt gemessen, nicht nur an dreien.
+  expect(requests.getAllByRole('button')).toHaveLength(2)
 
   await user.click(requests.getByRole('button', { name: 'Root-Anfrage exportieren' }))
   await waitFor(() => {
@@ -299,6 +327,7 @@ it('walks the six device approval steps with one action each and fresh proof bef
   })
   expect(requests.getByText(/root-anfrage-0001\.json/)).toBeVisible()
   expect(heading()).toHaveFocus()
+  expect(requests.getAllByRole('button')).toHaveLength(2)
 
   await user.click(requests.getByRole('button', { name: 'Root-Antwort importieren' }))
   await waitFor(() => {
@@ -315,6 +344,8 @@ it('walks the six device approval steps with one action each and fresh proof bef
   expect(bridge.publish).toHaveBeenCalledTimes(1)
   expect(heading()).toHaveFocus()
   expect(requests.getByText('Gerät aktiv')).toBeVisible()
+  // Am Ende bleibt nur der Listenknopf: die Zeremonie hat keine Handlung mehr.
+  expect(requests.getAllByRole('button')).toHaveLength(1)
 })
 
 // Ohne frischen Nachweis KEINE Autorisierung — und das steht im Wortlaut da.
@@ -369,6 +400,15 @@ it('never renders an unverifiable checklist as production ready', () => {
   expect(row).toHaveTextContent('nicht automatisch prüfbar')
   expect(row).toHaveTextContent('EA-GOLIVE-EVIDENCE-UNAVAILABLE')
   expect(screen.getAllByText('bestätigt')).toHaveLength(14)
+  // Und die FARBE sagt dasselbe wie das Wort: die offene Zeile ist nicht gruen,
+  // eine bestaetigte ist es. Ohne diesen Zeugen koennte „nicht automatisch
+  // prüfbar" in einem gruenen Etikett stehen.
+  const unverifiableTag = row?.querySelector('.ant-tag')
+  expect(unverifiableTag).not.toBeNull()
+  expect(unverifiableTag).not.toHaveClass('ant-tag-success')
+  const confirmedTag = screen.getByText('EA-GOLIVE-POLICY').closest('li')?.querySelector('.ant-tag')
+  expect(confirmedTag).not.toBeNull()
+  expect(confirmedTag).toHaveClass('ant-tag-success')
 })
 
 it('refuses a green light the host asserts over an unconfirmed row', () => {
@@ -378,6 +418,18 @@ it('refuses a green light the host asserts over an unconfirmed row', () => {
     'nicht produktionsbereit',
   )
   expect(screen.queryByText('produktionsbereit')).not.toBeInTheDocument()
+})
+
+// Eine LEERE Liste ist kein Ja: ein Wirt, der ohne eine einzige Anforderung
+// `productionReady: true` meldet, hat nichts bestaetigt.
+it('refuses a green light over an empty checklist', () => {
+  const checklist: GoLiveChecklistView = { requirements: [], productionReady: true }
+  render(<AdminPage bridge={fakeAdminBridge({ checklist })} />)
+  expect(screen.getByRole('status', { name: 'Go-live-Bereitschaft' })).toHaveTextContent(
+    'nicht produktionsbereit',
+  )
+  expect(screen.queryByText('produktionsbereit')).not.toBeInTheDocument()
+  expect(screen.queryByText('bestätigt')).not.toBeInTheDocument()
 })
 
 it('renders production ready only when every row is confirmed', async () => {
@@ -435,6 +487,13 @@ it('issues an offered clock release only with a justification and fresh proof', 
   expect(release.getByText('Wanduhr des Betriebssystems')).toBeVisible()
   expect(release.getByText('Signiertes Limit')).toBeVisible()
   expect(release.getByText('Ablauf')).toBeVisible()
+  // Die WERTE, nicht nur die Beschriftungen: Floor und Wanduhr als ISO-Zeitpunkt
+  // in UTC, das Limit als Dauer in Minuten, der Ablauf als Zeitpunkt.
+  expect(release.getByText('2026-02-13T16:26:40.000Z')).toBeVisible()
+  expect(release.getByText('2026-02-13T16:41:40.000Z')).toBeVisible()
+  expect(release.getByText('5 min')).toBeVisible()
+  expect(release.getByText('2026-02-13T17:26:40.000Z')).toBeVisible()
+  expect(release.queryByText('nicht genannt')).not.toBeInTheDocument()
   expect(
     release.getByText(
       'Die Freigabe ändert weder den Zeit-Floor noch den Registry-Ablauf noch die Sequenz-Lease.',
@@ -487,6 +546,23 @@ it('warns when a clock release outcome claims a change it must never make', asyn
   expect(release.getByText('Zeit-Floor geändert: ja')).toBeVisible()
 })
 
+// Zweite Verteidigungslinie hinter `validateClockReleaseOffer`: erreicht ein
+// Angebot ohne eine seiner vier Zahlen doch die Flaeche, gibt es KEINE
+// Handhabe — fail-closed und im Wortlaut.
+it('offers no release when an offered clock release lacks one of its numbers', () => {
+  render(
+    <AdminPage
+      bridge={fakeAdminBridge({ clockReleaseOffer: { ...offeredRelease(), expiresAtMs: null } })}
+    />,
+  )
+  const release = ceremonyRegion('Zeitfreigabe')
+  expect(release.getByText('Zeitfreigabe unvollständig gemeldet')).toBeVisible()
+  expect(release.queryByRole('button')).not.toBeInTheDocument()
+  expect(release.queryByRole('radio')).not.toBeInTheDocument()
+  expect(release.queryByRole('checkbox')).not.toBeInTheDocument()
+  expect(release.queryByText('Zeitfreigabe angeboten')).not.toBeInTheDocument()
+})
+
 // §12.4: die Grenze steht VOR dem Widerruf im Wortlaut da — und der Widerruf
 // selbst ist eine Root-Zeremonie ohne Fingerprint-Schritt.
 it('states both non-recall sentences and opens a revocation ceremony without a fingerprint step', async () => {
@@ -507,13 +583,42 @@ it('states both non-recall sentences and opens a revocation ceremony without a f
 
   await user.click(revocation.getByRole('button', { name: 'Widerruf als Root-Zeremonie beginnen' }))
   expect(bridge.beginCeremony).toHaveBeenCalledWith('DD'.repeat(32), 'DeviceRevoke')
-  const heading = await revocation.findByRole('heading', { level: 4 })
-  expect(heading).toHaveTextContent(/Schritt 1 von 5: Anfrage ausstehend/)
+  const heading = () => revocation.getByRole('heading', { level: 4 })
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 1 von 5: Anfrage ausstehend/)
+  })
   expect(revocation.queryByText('Fingerprint bestätigt')).not.toBeInTheDocument()
   expect(revocation.queryByLabelText('Vollständiger Fingerprint')).not.toBeInTheDocument()
   expect(revocation.queryByRole('img')).not.toBeInTheDocument()
-  // Ohne Fingerprint-Schritt ist die ERSTE Handlung die Autorisierung.
+  // Ohne Fingerprint-Schritt ist die ERSTE Handlung die Autorisierung. Neben ihr
+  // stehen „Wirkung prüfen" und der Beginn-Knopf — je Schritt also drei Knoepfe.
   expect(revocation.getByRole('button', { name: 'Neu anmelden und autorisieren' })).toBeVisible()
+  expect(revocation.getAllByRole('button')).toHaveLength(3)
+
+  await user.click(revocation.getByRole('button', { name: 'Neu anmelden und autorisieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 2 von 5: Admin-Autorisierung erteilt/)
+  })
+  expect(revocation.getAllByRole('button')).toHaveLength(3)
+
+  await user.click(revocation.getByRole('button', { name: 'Root-Anfrage exportieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 3 von 5: Root-Anfrage exportiert/)
+  })
+  expect(revocation.getAllByRole('button')).toHaveLength(3)
+
+  await user.click(revocation.getByRole('button', { name: 'Root-Antwort importieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 4 von 5: Root-Antwort importiert/)
+  })
+  expect(revocation.getAllByRole('button')).toHaveLength(3)
+
+  await user.click(revocation.getByRole('button', { name: 'Neu anmelden und veröffentlichen' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 5 von 5/)
+  })
+  expect(revocation.getAllByRole('button')).toHaveLength(2)
+  expect(bridge.reauthenticate).toHaveBeenCalledTimes(2)
 })
 
 it('refuses a recall promise the host must never make', async () => {
@@ -548,15 +653,44 @@ it('opens a policy change as a Root ceremony without a fingerprint step', async 
   const bridge = fakeAdminBridge()
   render(<AdminPage bridge={bridge} />)
   const policy = ceremonyRegion('Richtlinie')
-  expect(policy.getByText('EA-RETENTION-10Y')).toBeVisible()
+  expect(policy.getByText('3650 d 0 h')).toBeVisible()
+  expect(policy.getByText('nicht zugelassen')).toBeVisible()
   expect(policy.getByText(/Root-signiertes .*policyChange/)).toBeVisible()
   await user.click(policy.getByRole('button', { name: 'Richtlinienänderung vorbereiten' }))
   expect(bridge.beginCeremony).toHaveBeenCalledWith(expect.any(String), 'PolicyChange')
-  const heading = await policy.findByRole('heading', { level: 4 })
-  expect(heading).toHaveTextContent(/Schritt 1 von 5/)
-  expect(heading).toHaveFocus()
+  const heading = () => policy.getByRole('heading', { level: 4 })
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 1 von 5/)
+  })
+  expect(heading()).toHaveFocus()
   expect(policy.queryByText('Fingerprint bestätigt')).not.toBeInTheDocument()
   expect(policy.queryByRole('img')).not.toBeInTheDocument()
+  // Je Schritt GENAU eine Handlung neben „Richtlinienänderung vorbereiten".
+  expect(policy.getAllByRole('button')).toHaveLength(2)
+
+  await user.click(policy.getByRole('button', { name: 'Neu anmelden und autorisieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 2 von 5: Admin-Autorisierung erteilt/)
+  })
+  expect(policy.getAllByRole('button')).toHaveLength(2)
+
+  await user.click(policy.getByRole('button', { name: 'Root-Anfrage exportieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 3 von 5: Root-Anfrage exportiert/)
+  })
+  expect(policy.getAllByRole('button')).toHaveLength(2)
+
+  await user.click(policy.getByRole('button', { name: 'Root-Antwort importieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 4 von 5: Root-Antwort importiert/)
+  })
+  expect(policy.getAllByRole('button')).toHaveLength(2)
+
+  await user.click(policy.getByRole('button', { name: 'Neu anmelden und veröffentlichen' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 5 von 5/)
+  })
+  expect(policy.getAllByRole('button')).toHaveLength(1)
 })
 
 it('prepares and then activates a writer transition with fresh proof', async () => {
@@ -566,7 +700,7 @@ it('prepares and then activates a writer transition with fresh proof', async () 
   expect(transition.getByText('kein Wechsel')).toBeVisible()
   expect(
     transition.getByText(
-      'Es gibt genau einen aktiven Writer; der bisherige Writer bleibt nach der Aktivierung dauerhaft blockiert.',
+      'Es gibt genau einen aktiven Writer; der bisherige Writer bleibt nach dem Root-signierten Registry-Ereignis dauerhaft blockiert.',
     ),
   ).toBeVisible()
   expect(
@@ -582,13 +716,72 @@ it('prepares and then activates a writer transition with fresh proof', async () 
   expect(transition.getByText('BB'.repeat(32))).toBeVisible()
   expect(transition.getByText('88')).toBeVisible()
 
+  // VOR der Aktivierung behauptet keine Zeile der Seite, etwas sei „aktiv":
+  // die Folgebeschreibung der unwiderruflichen Handlung sagt es nicht, und das
+  // einzige Wort „aktiv" der ganzen Flaeche ist der letzte Schrittname.
+  expect(activeWordNodes()).toHaveLength(0)
+
   await user.click(transition.getByRole('checkbox'))
   await user.click(transition.getByRole('button', { name: 'Neu anmelden und aktivieren' }))
   await waitFor(() => {
-    expect(transition.getByText('aktiviert')).toBeVisible()
+    expect(
+      transition.getByText('aktiviert — Registry-Ereignis noch nicht veröffentlicht'),
+    ).toBeVisible()
   })
   expect(bridge.reauthenticate).toHaveBeenCalledWith(REAUTH_PURPOSES.adminRootCeremony)
   expect(bridge.activateWriterTransition).toHaveBeenCalledTimes(1)
+
+  // Die Grenze (§12.5): `Activated` bindet das Change-3-Ereignis an
+  // veroeffentlichte Bytes; Autoritaet entsteht erst mit dem Root-signierten
+  // Registry-Ereignis. Bis dahin bleibt der bisherige Writer der einzige.
+  expect(
+    transition.getByText(
+      'Der Wechsel wird erst mit dem Root-signierten Registry-Ereignis wirksam; bis dahin bleibt der bisherige Writer der einzige aktive.',
+    ),
+  ).toBeVisible()
+  expect(transition.queryByText('aktiviert')).not.toBeInTheDocument()
+  expect(activeWordNodes()).toHaveLength(0)
+  expect(transition.queryByLabelText('Wechselanfrage (JSON)')).not.toBeInTheDocument()
+
+  // Und das Registry-Ereignis ist eine Root-Zeremonie der vierten Art — im
+  // selben Stepper wie die drei anderen, ohne Fingerprint-Schritt.
+  await user.click(
+    transition.getByRole('button', { name: 'Registry-Ereignis als Root-Zeremonie beginnen' }),
+  )
+  expect(bridge.beginCeremony).toHaveBeenCalledWith('BB'.repeat(32), 'WriterTransition')
+  const heading = () => transition.getByRole('heading', { level: 4 })
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Writer-Wechsel — Schritt 1 von 5: Anfrage ausstehend/)
+  })
+  expect(heading()).toHaveFocus()
+  expect(transition.queryByText('Fingerprint bestätigt')).not.toBeInTheDocument()
+  expect(transition.queryByRole('img')).not.toBeInTheDocument()
+  expect(transition.getAllByRole('button')).toHaveLength(2)
+
+  await user.click(transition.getByRole('button', { name: 'Neu anmelden und autorisieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 2 von 5/)
+  })
+  expect(transition.getAllByRole('button')).toHaveLength(2)
+  await user.click(transition.getByRole('button', { name: 'Root-Anfrage exportieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 3 von 5/)
+  })
+  expect(transition.getAllByRole('button')).toHaveLength(2)
+  await user.click(transition.getByRole('button', { name: 'Root-Antwort importieren' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 4 von 5/)
+  })
+  expect(transition.getAllByRole('button')).toHaveLength(2)
+  expect(activeWordNodes()).toHaveLength(0)
+  await user.click(transition.getByRole('button', { name: 'Neu anmelden und veröffentlichen' }))
+  await waitFor(() => {
+    expect(heading()).toHaveTextContent(/Schritt 5 von 5: Gerät aktiv/)
+  })
+  // Jetzt — und erst jetzt — steht „aktiv" auf der Seite, GENAU zweimal:
+  // im Schrittnamen der Ueberschrift und im Stepper-Eintrag.
+  expect(activeWordNodes()).toHaveLength(2)
+  expect(transition.getAllByRole('button')).toHaveLength(1)
 })
 
 it('states registry age and lease as two separate numbers', () => {
@@ -634,6 +827,34 @@ it('shows the refusal code when the bridge cannot be built', async () => {
     expect(screen.getByRole('alert')).toHaveTextContent('EA-DESKTOP-ADMINISTRATION-FORBIDDEN')
   })
   expect(screen.queryByRole('region')).not.toBeInTheDocument()
+})
+
+// Eine Antwort AUSSERHALB des Kontrakts schliesst die Flaeche genauso — aber
+// die Schale erfindet dafuer keinen Wirtscode und sagt auch nicht, der Wirt
+// habe keinen genannt: sie nennt die Grenze, an der sie abgelehnt hat.
+it('names a contract violation in words and shows no surface', async () => {
+  let violation: unknown = null
+  try {
+    validateChecklist({ requirements: [], productionReady: 'ja' })
+  } catch (error) {
+    violation = error
+  }
+  expect(violation).not.toBeNull()
+  render(<AdminSurface connect={() => Promise.reject(violation)} />)
+  await waitFor(() => {
+    expect(screen.getByRole('alert')).toHaveTextContent('Antwort außerhalb des Kontrakts')
+  })
+  expect(screen.getByRole('alert')).not.toHaveTextContent('keinen Fehlercode')
+  expect(screen.queryByRole('region')).not.toBeInTheDocument()
+})
+
+// Ein Fehler OHNE Code und ohne Kontraktnamen bleibt, was er ist: ein Fehler,
+// dessen Code fehlt — kein erfundener.
+it('says that the code is missing for a bare error', async () => {
+  render(<AdminSurface connect={() => Promise.reject(new Error('kaputt'))} />)
+  await waitFor(() => {
+    expect(screen.getByRole('alert')).toHaveTextContent('Der Wirt hat keinen Fehlercode genannt.')
+  })
 })
 
 it('names the seventeen host commands once each', () => {

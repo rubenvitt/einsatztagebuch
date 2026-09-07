@@ -75,7 +75,17 @@ export function PolicyEditor({
       label: 'Restore-Testintervall',
       children: formatDuration(policy.restoreTestIntervalMs),
     },
-    { key: 'retention', label: 'Aufbewahrungsrichtlinie', children: policy.retentionPolicy },
+    {
+      key: 'retention',
+      label: 'Mindestaufbewahrung',
+      children:
+        policy.minimumRetentionMs === null ? 'nicht festgelegt' : formatDuration(policy.minimumRetentionMs),
+    },
+    {
+      key: 'destruction',
+      label: 'Autorisierte Vernichtung',
+      children: policy.destructionEnabled ? 'zugelassen' : 'nicht zugelassen',
+    },
     {
       key: 'effective',
       label: 'Wirksam ab Sequenz',

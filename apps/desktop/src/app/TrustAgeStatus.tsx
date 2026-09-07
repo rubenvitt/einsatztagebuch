@@ -33,11 +33,20 @@ const CONFIRMED: Record<StaleDecision, boolean> = {
 
 /**
  * Eine Dauer in Tagen und Stunden — die EINE Formatierung fuer Alter und
- * Fristen. Die Verwaltungsflaeche (Registry-Alter, Richtlinienfristen) nimmt
- * dieselbe Funktion, damit derselbe Wert nirgends zwei Gestalten hat.
+ * Fristen. Die Verwaltungsflaeche (Registry-Alter, Richtlinienfristen,
+ * Uhrenversatz) nimmt dieselbe Funktion, damit derselbe Wert nirgends zwei
+ * Gestalten hat.
+ *
+ * Unter einer Stunde in Minuten: ein zulaessiger Uhrenversatz von fuenf
+ * Minuten als „0 h" waere die Aussage „kein Versatz erlaubt" — und genau das
+ * Gegenteil dessen, was der Bediener gegen seine zweite Uhr prueft. Ab einer
+ * Stunde bleibt die Gestalt unveraendert.
  */
 export function formatDuration(milliseconds: number): string {
   const totalHours = Math.floor(milliseconds / (60 * 60 * 1000))
+  if (totalHours === 0) {
+    return `${String(Math.floor(milliseconds / (60 * 1000)))} min`
+  }
   const days = Math.floor(totalHours / 24)
   const hours = totalHours % 24
   if (days === 0) {

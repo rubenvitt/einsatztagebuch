@@ -254,6 +254,10 @@ it('shows no surface at all without a verified session', async () => {
     expect(screen.getByText(/keine geprüfte sitzung/i)).toBeVisible()
   })
   expect(screen.queryAllByRole('link')).toHaveLength(0)
+  // Der Hinweis gilt JEDER Rolle — eine Admin-Sitzung hat keine „Erfassung",
+  // die geschlossen bleiben koennte. Der Satz nennt die Flaeche.
+  expect(screen.getByText(/die fläche bleibt bis dahin geschlossen/i)).toBeVisible()
+  expect(screen.queryByText(/erfassung bleibt/i)).not.toBeInTheDocument()
 })
 
 it('drops the whole surface when the native lock event arrives', async () => {

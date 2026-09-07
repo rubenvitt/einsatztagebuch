@@ -795,6 +795,13 @@ pub trait AdministrationPort {
 /// VERBRAUCHT ([`Self::take_fresh_reauth`]) und nicht gelesen: eine
 /// Wiederanmeldung traegt genau eine Root-Wirkung, wie
 /// `DiscardService::begin_discard` den Nachweis als Wert nimmt.
+///
+/// Die Marke ist auf die ZWECKKLASSE bezogen ([`ReauthPurpose`]) und nicht
+/// auf eine Zeremoniekennung oder ein Ziel — dieselbe Koernung wie der
+/// [`OperatorSessionProof`] des Kerns, dessen Zweck ebenfalls klassenweit ist
+/// und kein Ziel traegt. Eine Anwesenheit = eine privilegierte Handlung dieser
+/// Klasse; WELCHE, entscheidet der Schritt, der sie verbraucht. Eine feinere
+/// Bindung hier waere eine Zusage, die der Nachweis darunter nicht deckt.
 pub struct SessionState {
     role: Option<OperatorRoleV1>,
     proof: Option<OperatorSessionProof>,

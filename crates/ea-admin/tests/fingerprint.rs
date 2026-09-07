@@ -89,12 +89,27 @@ fn malformed_input_fails_with_the_unreadable_code() {
     let thirty_three_pairs = format!("{canonical}:AB");
     let non_hex = canonical.replacen("11", "1G", 1);
     let embedded_whitespace = canonical.replacen(':', " ", 1);
-    let colon_less_short: String = canonical.chars().filter(|c| *c != ':').take(62).collect();
+    // Leerraum in der MITTE, von der Paarzahl entkoppelt: `embedded_whitespace`
+    // oben verschmilzt zwei Paare zu einem fuenf Zeichen langen und ist damit
+    // auch ueber die Laenge unlesbar. Diese drei halten die Paarzahl (oder die
+    // 64 Zeichen der kompakten Form) bei und tragen NUR den Leerraum als
+    // Fehler — getrimmt wird ausschliesslich an den Enden.
+    let colon_then_space = canonical.replacen(':', ": ", 1);
+    let compact: String = canonical.chars().filter(|c| *c != ':').collect();
+    let mut compact_with_space_for_a_digit = compact.clone();
+    compact_with_space_for_a_digit.replace_range(32..33, " ");
+    let mut compact_with_an_inserted_space = compact.clone();
+    compact_with_an_inserted_space.insert(32, ' ');
+    assert_eq!(compact_with_space_for_a_digit.len(), 64);
+    let colon_less_short: String = compact.chars().take(62).collect();
     for malformed in [
         thirty_one_pairs,
         thirty_three_pairs,
         non_hex,
         embedded_whitespace,
+        colon_then_space,
+        compact_with_space_for_a_digit,
+        compact_with_an_inserted_space,
         colon_less_short,
         String::new(),
         "::".to_owned(),

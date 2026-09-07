@@ -59,7 +59,16 @@ const HOST_DOUBLE = String(function installHostDouble(
     targetFingerprint: ceremonyKind === 'DeviceApprove' ? fingerprint : null,
     exchangeFileName,
   })
-  const advance = (step: string) => () => {
+  // Jedes Zeremoniekommando nach dem Beginn traegt die Kennung der EINEN
+  // laufenden Zeremonie unter dem Namen des Kontrakts (`ceremonyId`). Ein
+  // umbenanntes Feld in `connectAdminBridge` faellt hier, nicht erst am Wirt.
+  const requireCeremonyId = (args: { ceremonyId?: unknown }) => {
+    if (args.ceremonyId !== 'zeremonie-1') {
+      throw { code: 'EA-E2E-MISSING-ARG' }
+    }
+  }
+  const advance = (step: string) => (args: { ceremonyId?: unknown }) => {
+    requireCeremonyId(args)
     ceremonyStep = step
     return ceremony()
   }
@@ -101,7 +110,11 @@ const HOST_DOUBLE = String(function installHostDouble(
       exchangeFileName = null
       return ceremony()
     },
-    admin_ceremony_confirm_fingerprint: (args: { reportedFingerprint: string }) => {
+    admin_ceremony_confirm_fingerprint: (args: {
+      ceremonyId?: unknown
+      reportedFingerprint: string
+    }) => {
+      requireCeremonyId(args)
       if (args.reportedFingerprint.toUpperCase() !== fingerprint) {
         throw { code: 'EA-WORKFLOW-FINGERPRINT-MISMATCH' }
       }
@@ -109,7 +122,8 @@ const HOST_DOUBLE = String(function installHostDouble(
       return ceremony()
     },
     admin_ceremony_authorize: advance('AdminAuthorized'),
-    admin_ceremony_export_request: () => {
+    admin_ceremony_export_request: (args: { ceremonyId?: unknown }) => {
+      requireCeremonyId(args)
       exchangeFileName = 'root-anfrage-0001.json'
       ceremonyStep = 'RootRequestExported'
       return ceremony()
@@ -127,7 +141,8 @@ const HOST_DOUBLE = String(function installHostDouble(
       readerHistoryAccessAllowed: false,
       backupFrequencyMs: day,
       restoreTestIntervalMs: 90 * day,
-      retentionPolicy: 'EA-RETENTION-10Y',
+      minimumRetentionMs: 3650 * day,
+      destructionEnabled: false,
       effectiveFromSequence: 12,
       leaseValidThroughSequence: 120,
       notAfterMs: 1771600000000,
@@ -164,7 +179,10 @@ const HOST_DOUBLE = String(function installHostDouble(
       expiresAtMs: null,
       justifications: [],
     },
-    admin_clock_release_issue: () => {
+    admin_clock_release_issue: (args: { justification?: unknown }) => {
+      if (typeof args.justification !== 'string') {
+        throw { code: 'EA-E2E-MISSING-ARG' }
+      }
       throw { code: 'EA-SKEW-NOT-BLOCKED' }
     },
     admin_writer_transition_state: {
@@ -173,11 +191,16 @@ const HOST_DOUBLE = String(function installHostDouble(
       newWriterHash: null,
       effectiveFromSequence: null,
     },
-    admin_writer_transition_prepare: {
-      phase: 'Prepared',
-      currentWriterHash: 'AA'.repeat(32),
-      newWriterHash: 'BB'.repeat(32),
-      effectiveFromSequence: 88,
+    admin_writer_transition_prepare: (args: { requestJson?: unknown }) => {
+      if (typeof args.requestJson !== 'string' || args.requestJson === '') {
+        throw { code: 'EA-E2E-MISSING-ARG' }
+      }
+      return {
+        phase: 'Prepared',
+        currentWriterHash: 'AA'.repeat(32),
+        newWriterHash: 'BB'.repeat(32),
+        effectiveFromSequence: 88,
+      }
     },
     admin_writer_transition_activate: {
       phase: 'Activated',
