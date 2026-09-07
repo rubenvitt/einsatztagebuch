@@ -9,13 +9,18 @@
 //! deshalb durch [`verified`], und [`verified`] ruft ausschliesslich
 //! [`ea_recovery::verify_directory`].
 //!
-//! # `decrypt` UND `export` gehen NICHT durch [`verified`]
+//! # `decrypt`, `export`, `grant` UND `recovery-test` gehen NICHT durch [`verified`]
 //!
-//! Kein Sonderweg, sondern derselbe Weg eine Ebene tiefer: beide brauchen den
-//! Bericht UND die Bytes aus EINEM eingelesenen Bestand, und die Reihenfolge
-//! ihrer Schritte ist der Gegenstand des jeweiligen Kommandos. Beides wohnt
-//! deshalb geschlossen in `ea_recovery::decrypt_directory` beziehungsweise
-//! `ea_recovery::export_directory`, die ihrerseits ausschliesslich durch
+//! Kein Sonderweg, sondern derselbe Weg eine Ebene tiefer: alle vier brauchen
+//! den Bericht UND etwas aus demselben Lauf — `decrypt` und `export` die Bytes
+//! des EINEN eingelesenen Bestands, `grant` die Verifikation mit dem Abdruck
+//! seines Recovery-Schluessels und danach die uebrigen Eingaben,
+//! `recovery-test` das freie Ziel und das Inventar HINTER dem Befund —, und
+//! die Reihenfolge ihrer Schritte ist der Gegenstand des jeweiligen
+//! Kommandos. Alles davon wohnt deshalb geschlossen in
+//! `ea_recovery::decrypt_directory`, `ea_recovery::export_directory`,
+//! `ea_recovery::grant_inputs` beziehungsweise
+//! `ea_recovery::recovery_test_inputs`, die ihrerseits ausschliesslich durch
 //! dieselbe Verifikationsfassade laufen. Auch hier ruft kein Kommandopfad
 //! `verify_archive`.
 //!
@@ -32,9 +37,11 @@
 pub mod clock_release;
 pub mod decrypt;
 pub mod export;
+pub mod grant;
 pub mod list;
 pub mod operator;
 pub mod organization;
+pub mod recovery_test;
 pub mod registry;
 pub mod report;
 pub mod verify;
@@ -65,8 +72,28 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
             key,
             output,
         } => decrypt::run(invocation, archive, key, output, now),
+        Command::Grant {
+            archive,
+            recovery_key,
+            authority_key,
+            authorization,
+            recipient_certificate,
+        } => grant::run(
+            invocation,
+            archive,
+            recovery_key,
+            authority_key,
+            authorization,
+            recipient_certificate,
+            now,
+        ),
         Command::Report { archive, output } => report::run(invocation, archive, output, now),
         Command::Export { source, output } => export::run(invocation, source, output, now),
+        Command::RecoveryTest {
+            archive,
+            key_inventory,
+            output,
+        } => recovery_test::run(invocation, archive, key_inventory, output, now),
         // OHNE `now`: dieser Pfad verifiziert nichts und datiert nichts. Die
         // Begruendung steht an `organization::run`.
         Command::OrganizationInit => organization::run(invocation),

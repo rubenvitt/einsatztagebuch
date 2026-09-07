@@ -26,16 +26,29 @@
 //! ausdruecklich als eigene Angabe entgegen, damit ein falsch verdrahteter
 //! Schluesselspeicher als ENTSCHLUESSELUNGSFEHLER sichtbar wird und nicht als
 //! fehlender Grant.
+//!
+//! # `--key` IST EINE QUELLENANGABE, KEIN PFAD
+//!
+//! Seit Stage 5 loest `ea_recovery::resolve_recipient_key` sie auf: die
+//! Dateiform der Stufe 4, der verschluesselte Container oder die
+//! PKCS#11-Referenz. Welche es ist, hat `crate::args` bereits entschieden;
+//! hier wird nur aufgeloest. Eine offene Passphrasendatei (2), die falsche
+//! Passphrase (14) und die benannte PKCS#11-Grenze (21) enden deshalb hier,
+//! BEVOR der Bestand gelesen wird — dieselbe Stelle, an der bisher eine
+//! unlesbare Schluesseldatei endete.
 
 use std::path::Path;
 
 use ea_recovery::{
-    ExitCode, decrypt_directory, exit_code_for, exit_code_for_error, load_recipient_key,
-    load_trust_anchor,
+    ExitCode, decrypt_directory, exit_code_for, exit_code_for_error, load_trust_anchor,
+    resolve_recipient_key,
 };
 use ea_types::UnixMillis;
 
-use crate::{args::Invocation, output};
+use crate::{
+    args::{Invocation, KeySourceArgument},
+    output,
+};
 
 /// Fuehrt `decrypt` aus.
 ///
@@ -43,7 +56,7 @@ use crate::{args::Invocation, output};
 pub fn run(
     invocation: &Invocation,
     archive: &Path,
-    key_source: &Path,
+    key_source: &KeySourceArgument,
     output_path: &Path,
     now: UnixMillis,
 ) -> ExitCode {
@@ -54,7 +67,7 @@ pub fn run(
             return exit_code_for_error(&error);
         }
     };
-    let key = match load_recipient_key(key_source) {
+    let key = match resolve_recipient_key(key_source.spec()) {
         Ok(key) => key,
         Err(error) => {
             output::print_recovery_error(&error);

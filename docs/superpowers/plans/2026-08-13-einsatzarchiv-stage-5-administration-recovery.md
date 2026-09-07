@@ -1050,19 +1050,20 @@ git commit -m "feat(desktop): add guided Trust administration"
 - Create: `crates/ea-recovery/src/key_source.rs` (Quellengrammatik `<path>` | `file:<path>` | `container:<path>;passphrase-file=<path>` | `pkcs11:module=<path>;token=<label>;id=<hex>;pin-file=<path>`; Auflösung zu Empfänger- oder Signierschlüssel; kein Scannen, keine Voreinstellung)
 - Create: `crates/ea-recovery/src/encrypted_container.rs` (`EINSATZARCHIV-KEY-CONTAINER-v1`: deterministisches CBOR, Argon2id mit gepinnten Parametern, `ea_crypto::aead_seal`/`aead_open` mit dem Kopf als AAD, Schlüsselart im Kopf; 0600 beim Schreiben, Ablehnung offener Rechte beim Lesen)
 - Create: `crates/ea-recovery/src/pkcs11.rs` (explizite Referenz, PIN-Kanal; Modulbindung als benannte Grenze)
-- Modify: `crates/ea-recovery/src/lib.rs`, `crates/ea-recovery/src/error.rs`, `crates/ea-recovery/src/exit.rs`, `crates/ea-recovery/Cargo.toml`, `Cargo.toml` (`argon2`), `Cargo.lock`
+- Create: `crates/ea-recovery/src/grant.rs`, `crates/ea-recovery/src/recovery_test.rs` (Eingabefassaden: verify-before-use, Quellenauflösung, Dateilesbarkeit — ohne Prozessstart messbar; Task 8 und 9 setzen ihre Dienste darauf)
+- Modify: `crates/ea-recovery/src/lib.rs`, `crates/ea-recovery/src/error.rs`, `crates/ea-recovery/src/exit.rs`, `crates/ea-recovery/src/decrypt.rs`, `crates/ea-recovery/src/target.rs`, `crates/ea-recovery/Cargo.toml`, `Cargo.toml` (`argon2`), `Cargo.lock`
 - Modify: `docs/adr/0001-toolchain-and-cryptography-dependencies.md` (Zeile `argon2`; Abschnitt „Blocked: PKCS#11 module binding")
 - Create: `apps/cli/src/commands/grant.rs`
 - Create: `apps/cli/src/commands/recovery_test.rs`
 - Modify: `apps/cli/src/args.rs`, `apps/cli/src/commands/mod.rs`, `apps/cli/src/commands/decrypt.rs`, `apps/cli/src/output.rs`
-- Test: `crates/ea-recovery/tests/offline_sources.rs`
-- Test: `apps/cli/tests/full_grammar.rs`; Modify: `apps/cli/tests/commands.rs`, `apps/cli/tests/exit_codes.rs` (Grammatikpins)
+- Test: `crates/ea-recovery/tests/offline_sources.rs`, `crates/ea-recovery/tests/grant_inputs.rs`
+- Test: `apps/cli/tests/full_grammar.rs`; Modify: `apps/cli/tests/commands.rs` (Grammatikpin; `exit_codes.rs` pinnt den Textbericht, nicht die Grammatik, und bleibt unverändert)
 
 **Interfaces:**
 - Consumes: explicit external anchor (`ea_recovery::load_trust_anchor`), `ea_crypto::{aead_seal, aead_open, HpkeRecipientPrivateKey, CoseSigner, SecretBytes, SecretVec}`, the `argon2` crate pinned in ADR 0001.
-- Produces: `ea_recovery::{KeySourceSpec, resolve_recipient_key, resolve_signing_key, EncryptedKeyContainer, Pkcs11KeyReference}`; the full §16.1 grammar including `grant` and `recovery-test`; no key-source auto-discovery, no plaintext export fallback, no implicit anchor.
+- Produces: `ea_recovery::{KeySourceSpec, resolve_recipient_key, resolve_signing_key, EncryptedKeyContainer, Pkcs11KeyReference, grant_inputs, recovery_test_inputs}`; the full §16.1 grammar including `grant` and `recovery-test`; no key-source auto-discovery, no plaintext export fallback, no implicit anchor.
 
-- [ ] **Step 1: Write full grammar and key-source separation tests**
+- [x] **Step 1: Write full grammar and key-source separation tests**
 
 ```rust
 #[test]
@@ -1081,27 +1082,27 @@ fn grant_requires_distinct_recovery_authority_authorization_and_recipient_inputs
 #[test]
 fn a_container_with_the_wrong_passphrase_fails_with_fourteen_and_leaks_nothing() {
     let sealed = EncryptedKeyContainer::seal(KeyKind::RecipientKem, &secret, passphrase("richtig"));
-    assert!(matches!(sealed.open(passphrase("falsch")), Err(RecoveryError::KeySource)));
+    assert!(matches!(sealed.open(passphrase("falsch")), Err(RecoveryError::ContainerOpen)));
 }
 ```
 
-- [ ] **Step 2: Run CLI tests and verify missing commands/providers**
+- [x] **Step 2: Run CLI tests and verify missing commands/providers**
 
 Run: `cargo test --locked -p ea-recovery --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
 
 Expected: FAIL because the key-source grammar, the encrypted container, the PKCS#11 reference and both commands are absent.
 
-- [ ] **Step 3: Implement explicit key-source adapters and complete commands**
+- [x] **Step 3: Implement explicit key-source adapters and complete commands**
 
 Implement the full grammar from §16.1, always requiring `--trust-anchor`. Key sources are named explicitly through `ea_recovery::KeySourceSpec`; a bare path keeps the Stage-4 file form (32 raw bytes or 64 hex characters). Encrypted containers use Argon2id with the parameters pinned in ADR 0001 and the already pinned ChaCha20-Poly1305 behind `ea_crypto::aead_seal`, bind the container header as AAD, carry the key kind so a recovery key can never be read as a signing key, are written with mode 0600 and refused when readable by group or others. Passphrase and PIN are read from a named file with the same restrictive-permission rule, never from argv or the environment. PKCS#11 references require module path, token label and key id; nothing is defaulted, scanned or inferred, and the unbound module ends with exit 21 naming the boundary. `verify` runs before `decrypt`, `grant`, `export`, and `recovery-test`; `grant` and `recovery-test` resolve every input and then refuse with exit 21 naming the Task-8 respectively Task-9 service. Output supports the existing text/JSON schema and the established exit codes.
 
-- [ ] **Step 4: Run wrong-passphrase, open-permissions, missing-switch, and grammar tests**
+- [x] **Step 4: Run wrong-passphrase, open-permissions, missing-switch, and grammar tests**
 
 Run: `cargo test --locked -p ea-recovery --test offline_sources && cargo test --locked -p einsatzarchiv-cli --test full_grammar`
 
 Expected: PASS; no command accepts the archive's own anchor as implicit trust; a `pkcs11:` source ends with 21 naming the unbound module; a container or secret file with open permissions is refused before it is read.
 
-- [ ] **Step 5: Commit offline key sources and full CLI**
+- [x] **Step 5: Commit offline key sources and full CLI**
 
 ```bash
 git add crates/ea-recovery apps/cli docs/adr Cargo.toml Cargo.lock

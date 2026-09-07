@@ -7,9 +7,17 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# Argon2id, die Passphrasen-KDF des verschluesselten Schluesselcontainers
+# (`src/encrypted_container.rs`). Die AEAD dahinter ist weiterhin das
+# ChaCha20-Poly1305 aus `ea-crypto`; diese Kante bringt KEINE zweite.
+argon2.workspace = true
 # Archivbestand und Layout: diese Crate legt die dateisystemgestuetzte
 # ArchiveSource ueber ein Verzeichnis und braucht dafuer die Pfadregeln.
 ea-archive.workspace = true
+# Deterministisches CBOR fuer den Schluesselcontainer: `validate` vor jedem
+# Dekodieren, damit ein nicht kanonischer Container gar nicht erst geoeffnet
+# wird — derselbe Weg wie `ea_trust::decode_trust_anchor`.
+ea-cbor.workspace = true
 # Entschluesselung: Empfaengerschluessel, Grants und CEK-Auspackung.
 ea-crypto.workspace = true
 ea-format.workspace = true
@@ -18,6 +26,16 @@ ea-types.workspace = true
 # Die Verifikationspipeline. verify-before-use laeuft ausschliesslich hier
 # hindurch; kein Kommandopfad ruft verify_archive direkt.
 ea-verify.workspace = true
+# Salz und Nonce des Schluesselcontainers. Dieselbe Kiste und derselbe Aufruf
+# wie in `crates/ea-crypto/src/hpke.rs`; `ea-crypto` gibt keinen
+# Zufallshelfer heraus, und ein zweiter Entropieweg waere eine zweite Wahrheit.
+getrandom.workspace = true
+# Der CBOR-Kodierer des Schluesselcontainers, wie in `ea-trust` und
+# `ea-key-provider`.
+minicbor.workspace = true
+# Ueberschreibt die Stapelkopie des abgeleiteten Containerschluessels, sobald
+# sie in `SecretBytes` gewandert ist.
+zeroize.workspace = true
 
 [dev-dependencies]
 # Nur fuer die per #[path] eingebundene Fixture-Kette von ea-verify, ea-archive,
@@ -25,4 +43,3 @@ ea-verify.workspace = true
 ea-time.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
-minicbor.workspace = true

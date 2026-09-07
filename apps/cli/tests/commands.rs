@@ -20,13 +20,19 @@ mod support;
 
 use std::process::{Command, Output};
 
-/// Die sechs Zeilen der Grammatik, wie sie das Werkzeug auf stdout druckt.
-const GRAMMAR_V1: [&str; 6] = [
+/// Die sieben Zeilen von `design.md` §16.1 und die von `organization init`,
+/// wie sie das Werkzeug auf stdout druckt.
+///
+/// Die GANZE gedruckte Folge — geschlossen, samt Scope-Zeilen — pinnt
+/// `apps/cli/tests/full_grammar.rs::the_printed_grammar_is_a_closed_line_sequence`.
+const GRAMMAR_V1: [&str; 8] = [
     "einsatzarchiv --trust-anchor <file> verify  <archive-path>",
     "einsatzarchiv --trust-anchor <file> list    <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
+    "einsatzarchiv --trust-anchor <file> grant <entry-or-archive> --recovery-key <source> --authority-key <source> --authorization <file> --recipient-cert <file>",
     "einsatzarchiv --trust-anchor <file> report  <archive-path> --output <report-file>",
     "einsatzarchiv --trust-anchor <file> export  <archive-or-server> --output <new-target>",
+    "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
 ];
 

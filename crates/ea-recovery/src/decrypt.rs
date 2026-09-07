@@ -58,6 +58,7 @@ use ea_format::{
 use ea_trust::TrustAnchorV1;
 use ea_types::{KeyThumbprint, UnixMillis};
 use ea_verify::{ObjectResultKindV1, ObjectTypeV1, VerificationReportV1, VerifyError};
+use zeroize::Zeroize as _;
 
 use crate::{
     ExitCode, FsArchiveSource, RecoveryError, exit_code_for,
@@ -71,7 +72,9 @@ use crate::{
 /// Die Zahl der Rohbytes eines Empfaengerschluessels.
 ///
 /// X25519, also 32 — dieselbe Groesse, die
-/// [`HpkeRecipientPrivateKey::from_bytes`] verlangt.
+/// [`HpkeRecipientPrivateKey::from_bytes`] verlangt. Ein Ed25519-Seed hat
+/// dieselbe Groesse; die Dateiform der Stufe 4 traegt deshalb beide, und
+/// `load_key_material` liest sie fuer beide.
 pub const RECIPIENT_KEY_SIZE_V1: usize = 32;
 
 /// Das Ergebnis eines vollstaendigen `decrypt`-Laufs.
@@ -202,16 +205,36 @@ pub fn decrypt_directory(
 /// [`RecoveryError::KeySource`], wenn sie keine dieser beiden Formen traegt
 /// oder ihre Bytes kein X25519-Schluessel sind.
 pub fn load_recipient_key(path: &Path) -> Result<HpkeRecipientPrivateKey, RecoveryError> {
+    HpkeRecipientPrivateKey::from_bytes(load_key_material(path)?)
+        .map_err(|_| RecoveryError::KeySource)
+}
+
+/// Die 32 Schluesselbytes aus einer Datei der Stufe-4-Form.
+///
+/// GETEILT zwischen [`load_recipient_key`] und
+/// [`crate::key_source::resolve_signing_key`]: die Dateiform ist fuer einen
+/// X25519-Schluessel und einen Ed25519-Seed dieselbe, und ihre Byteregeln
+/// stehen deshalb genau einmal — hier.
+///
+/// # Errors
+///
+/// [`RecoveryError::Io`], wenn die Datei nicht lesbar ist;
+/// [`RecoveryError::KeySource`], wenn sie keine der beiden Formen traegt.
+pub(crate) fn load_key_material(
+    path: &Path,
+) -> Result<SecretBytes<RECIPIENT_KEY_SIZE_V1>, RecoveryError> {
     // Die gelesenen Bytes SIND Schluesselmaterial. Sie wandern deshalb sofort
     // in einen `SecretVec`, der beim Verlassen dieses Rahmens ueberschrieben
     // wird — ein blosser `Vec` bliebe als Kopie des Schluessels im Speicher
     // liegen.
     let file_bytes = SecretVec::new(fs::read(path)?);
-    let material = file_bytes
-        .with_exposed(recipient_key_material)
+    let mut material = file_bytes
+        .with_exposed(key_material)
         .ok_or(RecoveryError::KeySource)?;
-    HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(material))
-        .map_err(|_| RecoveryError::KeySource)
+    let secret = SecretBytes::new(material);
+    // `[u8; 32]` ist `Copy`: die Stapelkopie bleibt sonst liegen.
+    material.zeroize();
+    Ok(secret)
 }
 
 /// Der Abdruck, unter dem dieser Schluessel in einem Grant steht.
@@ -229,7 +252,7 @@ pub fn recipient_key_thumbprint(
 }
 
 /// Die 32 Schluesselbytes aus dem Dateiinhalt, oder nichts.
-fn recipient_key_material(bytes: &[u8]) -> Option<[u8; RECIPIENT_KEY_SIZE_V1]> {
+fn key_material(bytes: &[u8]) -> Option<[u8; RECIPIENT_KEY_SIZE_V1]> {
     if let Ok(raw) = <[u8; RECIPIENT_KEY_SIZE_V1]>::try_from(bytes) {
         return Some(raw);
     }
@@ -446,43 +469,35 @@ fn exact_grant_context(body: &GrantBodyV1) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RECIPIENT_KEY_SIZE_V1, recipient_key_material};
+    use super::{RECIPIENT_KEY_SIZE_V1, key_material};
 
     /// Die beiden zulaessigen Formen — und die, die es NICHT sind.
     #[test]
     fn the_key_source_accepts_exactly_two_forms() {
         let raw = [0x4c_u8; RECIPIENT_KEY_SIZE_V1];
-        assert_eq!(recipient_key_material(&raw), Some(raw));
+        assert_eq!(key_material(&raw), Some(raw));
 
         let hex = b"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c";
-        assert_eq!(recipient_key_material(hex), Some(raw));
+        assert_eq!(key_material(hex), Some(raw));
         assert_eq!(
-            recipient_key_material(
-                b"4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C"
-            ),
+            key_material(b"4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C4C"),
             Some(raw)
         );
         assert_eq!(
-            recipient_key_material(
-                b"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\n"
-            ),
+            key_material(b"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\n"),
             Some(raw)
         );
         assert_eq!(
-            recipient_key_material(
-                b"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\r\n"
-            ),
+            key_material(b"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\r\n"),
             Some(raw)
         );
 
         // Zu kurz, zu lang, und Hex mit einer Ziffer ausser der Reihe.
-        assert_eq!(recipient_key_material(&[0x4c_u8; 31]), None);
-        assert_eq!(recipient_key_material(&[0x4c_u8; 33]), None);
-        assert_eq!(recipient_key_material(b""), None);
+        assert_eq!(key_material(&[0x4c_u8; 31]), None);
+        assert_eq!(key_material(&[0x4c_u8; 33]), None);
+        assert_eq!(key_material(b""), None);
         assert_eq!(
-            recipient_key_material(
-                b"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4z"
-            ),
+            key_material(b"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4z"),
             None
         );
     }
@@ -496,6 +511,6 @@ mod tests {
     fn a_raw_key_ending_in_a_newline_byte_survives() {
         let mut raw = [0x4c_u8; RECIPIENT_KEY_SIZE_V1];
         raw[RECIPIENT_KEY_SIZE_V1 - 1] = b'\n';
-        assert_eq!(recipient_key_material(&raw), Some(raw));
+        assert_eq!(key_material(&raw), Some(raw));
     }
 }
