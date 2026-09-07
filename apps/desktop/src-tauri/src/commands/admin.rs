@@ -29,7 +29,12 @@
 //! Kommando antwortet mit [`ADMINISTRATION_UNAVAILABLE`]. Kein Kern liest
 //! Freitext in einen Dienst: der Fingerprint wird HIER geparst
 //! (`ea_admin::fingerprint`), die Art und die Begruendung HIER aus der
-//! emittierten Vereinigung geholt; der Port sieht nur Werte.
+//! emittierten Vereinigung geholt; der Port sieht nur Werte. Die EINE
+//! Ausnahme ist `admin_writer_transition_prepare(requestJson)`: das JSON der
+//! Uebergangsanfrage geht als Text an den Port, weil der Kern es selbst
+//! fail-closed liest — `LoadedWriterTransitionRequest::from_json` mit seinem
+//! `REQUEST_LIMIT` — und ein zweiter Parser an dieser Grenze eine zweite
+//! Wahrheit ueber dasselbe Dokument waere.
 //!
 //! Fail-closed ist die durchgaengige Richtung: eine unbekannte Voraussetzung
 //! ist keine erfuellte, ein fremdes Drahtwort keine Wahl.
@@ -53,7 +58,7 @@ use serde::Serialize;
 use super::{
     ADMINISTRATION_FORBIDDEN, ADMINISTRATION_UNAVAILABLE, ADMINISTRATION_WIRE_VALUE,
     CEREMONY_STEP_OUT_OF_ORDER, CommandError, REAUTH_REQUIRED, SESSION_STATE_UNREADABLE,
-    run_blocking,
+    TRANSITION_NOT_PREPARED, run_blocking,
 };
 use crate::state::{AdministrationPort, DesktopState, SessionState};
 
@@ -169,15 +174,40 @@ pub struct TrustCeremonyDto {
     pub exchange_file_name: Option<String>,
 }
 
-impl From<&TrustCeremonyView> for TrustCeremonyDto {
-    fn from(view: &TrustCeremonyView) -> Self {
-        Self {
+impl TryFrom<&TrustCeremonyView> for TrustCeremonyDto {
+    type Error = CommandError;
+
+    /// `TryFrom` und nicht `From`, weil die Ansicht einen Wert traegt, den die
+    /// Grenze pruefen MUSS ([`checked_exchange_file_name`]) — ein `From`
+    /// haette ihn still durchgereicht, und jeder Zeremoniekern geht hier
+    /// durch.
+    fn try_from(view: &TrustCeremonyView) -> Result<Self, CommandError> {
+        Ok(Self {
             ceremony_id: view.ceremony_id.clone(),
             kind: trust_ceremony_kind_literal(view.kind),
             step: trust_ceremony_step_literal(view.step),
             target_fingerprint: view.target_fingerprint.clone(),
-            exchange_file_name: view.exchange_file_name.clone(),
+            exchange_file_name: checked_exchange_file_name(view.exchange_file_name.as_deref())?,
+        })
+    }
+}
+
+/// `exchangeFileName` ist ein NAME und nie ein Pfad.
+///
+/// Die Global Constraints verbieten einen Pfad auf der Oberflaeche, und ein
+/// Port, der einen Pfad haendigt, legte ihn genau dort ab — der Emitter
+/// verspricht der Schale einen Dateinamen, und die Schale zeigt, was sie
+/// bekommt. Ein Trenner (`/`, `\`), ein Elternverweis (`..`) oder ein leerer
+/// Name ist deshalb [`ADMINISTRATION_WIRE_VALUE`]: der Wert des Ports ist
+/// keiner der vereinbarten, so wie ein fremdes Drahtwort der Schale keine
+/// Wahl ist. `None` bleibt `None` — vor dem Export gibt es keine Datei.
+fn checked_exchange_file_name(name: Option<&str>) -> Result<Option<String>, CommandError> {
+    match name {
+        None => Ok(None),
+        Some(name) if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") => {
+            Err(CommandError::new(ADMINISTRATION_WIRE_VALUE))
         }
+        Some(name) => Ok(Some(name.to_owned())),
     }
 }
 
@@ -195,7 +225,8 @@ pub struct PolicyProfileDto {
     pub reader_history_access_allowed: bool,
     pub backup_frequency_ms: u64,
     pub restore_test_interval_ms: u64,
-    pub retention_policy: String,
+    pub minimum_retention_ms: Option<u64>,
+    pub destruction_enabled: bool,
     pub effective_from_sequence: u64,
     pub lease_valid_through_sequence: u64,
     pub not_after_ms: i64,
@@ -214,7 +245,8 @@ impl From<&PolicyProfileView> for PolicyProfileDto {
             reader_history_access_allowed: view.reader_history_access_allowed,
             backup_frequency_ms: view.backup_frequency_ms,
             restore_test_interval_ms: view.restore_test_interval_ms,
-            retention_policy: view.retention_policy.clone(),
+            minimum_retention_ms: view.minimum_retention_ms,
+            destruction_enabled: view.destruction_enabled,
             effective_from_sequence: view.effective_from_sequence.get(),
             lease_valid_through_sequence: view.lease_valid_through_sequence.get(),
             not_after_ms: view.not_after_ms.get(),
@@ -485,7 +517,7 @@ impl Administration<'_> {
         {
             return Err(CommandError::new(CEREMONY_STEP_OUT_OF_ORDER));
         }
-        Ok(TrustCeremonyDto::from(&reached))
+        TrustCeremonyDto::try_from(&reached)
     }
 
     pub(crate) fn pending_device_requests(
@@ -512,7 +544,7 @@ impl Administration<'_> {
         if begun.kind != kind || begun.step != TrustCeremonyStep::PendingRequest {
             return Err(CommandError::new(CEREMONY_STEP_OUT_OF_ORDER));
         }
-        Ok(TrustCeremonyDto::from(&begun))
+        TrustCeremonyDto::try_from(&begun)
     }
 
     /// Der Freitext des Bedieners wird HIER gelesen; der Port sieht den Hash.
@@ -621,8 +653,16 @@ impl Administration<'_> {
     }
 
     /// Die Aktivierung ist eine Root-Wirkung und verlangt denselben Zweck wie
-    /// die Zeremonieart `WriterTransition`.
+    /// die Zeremonieart `WriterTransition` — aber erst der Stand, dann die
+    /// Praesenz, dann der Port: ein Uebergang, der nicht `Prepared` ist, wird
+    /// mit [`TRANSITION_NOT_PREPARED`] abgewiesen, OHNE die Marke zu
+    /// verbrauchen (wie [`Administration::advance`]: Reihenfolge vor
+    /// Praesenz).
     pub(crate) fn writer_transition_activate(&self) -> Result<WriterTransitionDto, CommandError> {
+        let current = self.port.writer_transition_state()?;
+        if current.phase != WriterTransitionPhase::Prepared {
+            return Err(CommandError::new(TRANSITION_NOT_PREPARED));
+        }
         self.take_fresh_reauth(reauth_purpose(TrustCeremonyKind::WriterTransition))?;
         self.port
             .writer_transition_activate()
@@ -993,8 +1033,10 @@ pub async fn admin_writer_transition_prepare(
 ///
 /// # Errors
 ///
-/// [`REAUTH_REQUIRED`] ohne unverbrauchte Marke; `EA-TRANSITION-*` aus dem
-/// Kern; sonst wie [`admin_pending_device_requests`].
+/// [`TRANSITION_NOT_PREPARED`], wenn der Stand nicht `Prepared` ist (die
+/// Marke bleibt dann stehen); [`REAUTH_REQUIRED`] ohne unverbrauchte Marke;
+/// `EA-TRANSITION-*` aus dem Kern; sonst wie
+/// [`admin_pending_device_requests`].
 #[tauri::command]
 pub async fn admin_writer_transition_activate(
     state: tauri::State<'_, DesktopState>,
@@ -1032,9 +1074,10 @@ mod tests {
     use ea_operator::ReauthPurpose;
     use ea_types::{ChainSequence, ObjectHash, UnixMillis};
     use ea_ui_contracts::{
-        ADMIN_ENUMS_V1, ClockReleaseAvailability, ClockReleaseOfferView, ClockReleaseOutcomeView,
-        PendingDeviceRequestView, PolicyProfileView, RegistryHealthView, RevocationEffectView,
-        RevocationTargetClass, TrustCeremonyView, WriterTransitionPhase, WriterTransitionView,
+        ADMIN_ENUMS_V1, ADMIN_VIEW_MODELS_V1, ClockReleaseAvailability, ClockReleaseOfferView,
+        ClockReleaseOutcomeView, PendingDeviceRequestView, PolicyProfileView, RegistryHealthView,
+        RevocationEffectView, RevocationTargetClass, TrustCeremonyView, WriterTransitionPhase,
+        WriterTransitionView, admin_view_model_fields,
     };
 
     use super::{
@@ -1051,7 +1094,7 @@ mod tests {
     };
     use crate::commands::{
         ADMINISTRATION_FORBIDDEN, ADMINISTRATION_UNAVAILABLE, ADMINISTRATION_WIRE_VALUE,
-        CEREMONY_STEP_OUT_OF_ORDER, CommandError, REAUTH_REQUIRED,
+        CEREMONY_STEP_OUT_OF_ORDER, CommandError, REAUTH_REQUIRED, TRANSITION_NOT_PREPARED,
     };
     use crate::state::{AdministrationPort, DesktopState, SessionState};
 
@@ -1065,23 +1108,35 @@ mod tests {
         ceremonies: Mutex<BTreeMap<String, TrustCeremonyView>>,
         calls: Mutex<Vec<&'static str>>,
         jumps: bool,
+        /// Was der Port beim Export als `exchange_file_name` behauptet — im
+        /// Regelfall ein Name; ein Doppel kann hier einen PFAD behaupten.
+        exchange_file_name: String,
+        /// Der Stand des Writer-Uebergangs, damit `writer_transition_state`
+        /// sagt, was `prepare` und `activate` bewirkt haben.
+        transition_phase: Mutex<WriterTransitionPhase>,
     }
 
     impl FakeAdministration {
-        fn compliant() -> Arc<Self> {
+        fn build(jumps: bool, exchange_file_name: &str) -> Arc<Self> {
             Arc::new(Self {
                 ceremonies: Mutex::new(BTreeMap::new()),
                 calls: Mutex::new(Vec::new()),
-                jumps: false,
+                jumps,
+                exchange_file_name: exchange_file_name.to_owned(),
+                transition_phase: Mutex::new(WriterTransitionPhase::NoTransition),
             })
         }
 
+        fn compliant() -> Arc<Self> {
+            Self::build(false, "root-request.eax")
+        }
+
         fn jumping() -> Arc<Self> {
-            Arc::new(Self {
-                ceremonies: Mutex::new(BTreeMap::new()),
-                calls: Mutex::new(Vec::new()),
-                jumps: true,
-            })
+            Self::build(true, "root-request.eax")
+        }
+
+        fn exporting(exchange_file_name: &str) -> Arc<Self> {
+            Self::build(false, exchange_file_name)
         }
 
         fn calls(&self) -> Vec<&'static str> {
@@ -1109,9 +1164,22 @@ mod tests {
                     .ok_or_else(|| CommandError::new("EA-TEST-AT-END"))?
             };
             if view.step == TrustCeremonyStep::RootRequestExported {
-                view.exchange_file_name = Some("root-request.eax".to_owned());
+                view.exchange_file_name = Some(self.exchange_file_name.clone());
             }
             Ok(view.clone())
+        }
+
+        /// Der Stand des Uebergangs aus der gemerkten Phase: `NoTransition`
+        /// traegt keinen neuen Writer, die zwei anderen Phasen denselben.
+        fn transition_view(&self) -> WriterTransitionView {
+            let phase = *self.transition_phase.lock().unwrap();
+            let prepared = phase != WriterTransitionPhase::NoTransition;
+            WriterTransitionView {
+                phase,
+                current_writer_hash: "cd".repeat(32),
+                new_writer_hash: prepared.then(|| "ef".repeat(32)),
+                effective_from_sequence: prepared.then(|| ChainSequence::new(9)),
+            }
         }
     }
 
@@ -1206,7 +1274,8 @@ mod tests {
                 reader_history_access_allowed: false,
                 backup_frequency_ms: 604_800_000,
                 restore_test_interval_ms: 7_776_000_000,
-                retention_policy: "10y".to_owned(),
+                minimum_retention_ms: Some(315_360_000_000),
+                destruction_enabled: false,
                 effective_from_sequence: ChainSequence::new(0),
                 lease_valid_through_sequence: ChainSequence::new(1_000),
                 not_after_ms: UnixMillis::new(1_800_000_000_000),
@@ -1277,12 +1346,7 @@ mod tests {
 
         fn writer_transition_state(&self) -> Result<WriterTransitionView, CommandError> {
             self.note("writer_transition_state");
-            Ok(WriterTransitionView {
-                phase: WriterTransitionPhase::NoTransition,
-                current_writer_hash: "cd".repeat(32),
-                new_writer_hash: None,
-                effective_from_sequence: None,
-            })
+            Ok(self.transition_view())
         }
 
         fn writer_transition_prepare(
@@ -1293,22 +1357,14 @@ mod tests {
             if request_json.is_empty() {
                 return Err(CommandError::new("EA-TRANSITION-REQUEST-UNREADABLE"));
             }
-            Ok(WriterTransitionView {
-                phase: WriterTransitionPhase::Prepared,
-                current_writer_hash: "cd".repeat(32),
-                new_writer_hash: Some("ef".repeat(32)),
-                effective_from_sequence: Some(ChainSequence::new(9)),
-            })
+            *self.transition_phase.lock().unwrap() = WriterTransitionPhase::Prepared;
+            Ok(self.transition_view())
         }
 
         fn writer_transition_activate(&self) -> Result<WriterTransitionView, CommandError> {
             self.note("writer_transition_activate");
-            Ok(WriterTransitionView {
-                phase: WriterTransitionPhase::Activated,
-                current_writer_hash: "cd".repeat(32),
-                new_writer_hash: Some("ef".repeat(32)),
-                effective_from_sequence: Some(ChainSequence::new(9)),
-            })
+            *self.transition_phase.lock().unwrap() = WriterTransitionPhase::Activated;
+            Ok(self.transition_view())
         }
 
         fn revocation_effect(
@@ -1429,30 +1485,67 @@ mod tests {
         }
     }
 
-    /// Eine Writer-Sitzung an einem VERDRAHTETEN Port: FORBIDDEN, und der Port
-    /// wird nicht einmal gerufen. Das Tor haengt an der Rolle und nicht an der
-    /// Anwesenheit des Ports.
+    /// Eine Sitzung OHNE nachgewiesenen Administrator an einem VERDRAHTETEN
+    /// Port: FORBIDDEN fuer JEDES der siebzehn Kommandos, und der Port wird
+    /// nicht einmal gerufen. Das Tor haengt an der Rolle und nicht an der
+    /// Anwesenheit des Ports — und es steht in jedem Kern, nicht nur in dreien.
+    ///
+    /// Ehrlich benannt: `SessionState::new(Some(Writer), None)` traegt zwar die
+    /// Writer-Rolle, aber KEINEN Nachweis, und `SessionState::role` liefert
+    /// dann `None`. Gemessen wird hier also der `None`-Arm von
+    /// [`require_administrator`] am Tor, nicht der Writer-Arm. Den Writer-Arm
+    /// AM TOR zu messen verlangte einen `OperatorSessionProof`, und den baut
+    /// ausserhalb von `ea-operator` niemand: es gibt keinen Konstruktor, auch
+    /// keinen unter `cfg(test)`; `verify_current_session` nimmt einen an,
+    /// stellt aber keinen aus. Der Writer- und der Reader-Arm sind deshalb in
+    /// `only_an_organization_admin_passes_the_role_gate` direkt am Tor
+    /// bezeugt, und dieser Zeuge misst, dass jeder Kern durch das Tor geht.
     #[test]
-    fn a_writer_session_is_forbidden_even_with_a_wired_port() {
+    fn a_session_without_a_verified_admin_is_forbidden_on_every_core() {
         let port = FakeAdministration::compliant();
         let state = state_with(
             Arc::clone(&port),
             SessionState::new(Some(OperatorRoleV1::Writer), None),
         );
-        assert_eq!(
+        let codes = [
             pending_device_requests_core(&state).unwrap_err().code,
-            ADMINISTRATION_FORBIDDEN
-        );
-        assert_eq!(
             ceremony_begin_core(&state, "req-1", "DeviceApprove")
                 .unwrap_err()
                 .code,
-            ADMINISTRATION_FORBIDDEN
-        );
-        assert_eq!(
+            ceremony_confirm_fingerprint_core(&state, "cer-req-1", GOOD_FINGERPRINT)
+                .unwrap_err()
+                .code,
+            ceremony_authorize_core(&state, "cer-req-1")
+                .unwrap_err()
+                .code,
+            ceremony_export_request_core(&state, "cer-req-1")
+                .unwrap_err()
+                .code,
+            ceremony_import_reply_core(&state, "cer-req-1")
+                .unwrap_err()
+                .code,
+            ceremony_publish_core(&state, "cer-req-1").unwrap_err().code,
+            policy_profile_core(&state).unwrap_err().code,
+            registry_health_core(&state).unwrap_err().code,
             go_live_checklist_core(&state).unwrap_err().code,
-            ADMINISTRATION_FORBIDDEN
-        );
+            go_live_export_unresolved_core(&state).unwrap_err().code,
+            clock_release_offer_core(&state).unwrap_err().code,
+            clock_release_issue_core(&state, "HardwareClockMaintenance")
+                .unwrap_err()
+                .code,
+            writer_transition_state_core(&state).unwrap_err().code,
+            writer_transition_prepare_core(&state, "{}")
+                .unwrap_err()
+                .code,
+            writer_transition_activate_core(&state).unwrap_err().code,
+            revocation_effect_core(&state, GOOD_FINGERPRINT)
+                .unwrap_err()
+                .code,
+        ];
+        assert_eq!(codes.len(), 17);
+        for code in codes {
+            assert_eq!(code, ADMINISTRATION_FORBIDDEN);
+        }
         assert!(
             port.calls().is_empty(),
             "der Port wird ohne Administratorrolle nicht gerufen"
@@ -1730,6 +1823,42 @@ mod tests {
         );
     }
 
+    /// `exchangeFileName` ist ein NAME und nie ein Pfad: ein Port, der beim
+    /// Export einen Pfad, einen Elternverweis oder einen leeren Namen
+    /// behauptet, wird mit WIRE-VALUE abgewiesen — sonst laege ein Pfad auf
+    /// der Oberflaeche. Ein schlichter Name kommt durch. Der Port ist zu diesem
+    /// Zeitpunkt schon gelaufen; gemessen wird der Code, nicht die Marke.
+    #[test]
+    fn an_exchange_file_path_from_the_port_is_a_wire_error() {
+        let cases: [(&str, Result<&str, &str>); 6] = [
+            ("/tmp/x.eaex", Err(ADMINISTRATION_WIRE_VALUE)),
+            ("C:\\exchange\\x.eaex", Err(ADMINISTRATION_WIRE_VALUE)),
+            ("../x.eaex", Err(ADMINISTRATION_WIRE_VALUE)),
+            ("x/../y.eaex", Err(ADMINISTRATION_WIRE_VALUE)),
+            ("", Err(ADMINISTRATION_WIRE_VALUE)),
+            ("root-request-1.eaex", Ok("root-request-1.eaex")),
+        ];
+        for (claimed, expected) in cases {
+            let port = FakeAdministration::exporting(claimed);
+            let session = fresh(ReauthPurpose::AdminRootCeremony);
+            let admin = admin(&port, &session);
+            let id = admin
+                .ceremony_begin("req-8", "DeviceRevoke")
+                .unwrap()
+                .ceremony_id;
+            assert_eq!(admin.authorize(&id).unwrap().step, "AdminAuthorized");
+            let exported = admin.export_request(&id);
+            match expected {
+                Err(code) => assert_eq!(exported.unwrap_err().code, code, "{claimed:?}"),
+                Ok(name) => assert_eq!(
+                    exported.unwrap().exchange_file_name.as_deref(),
+                    Some(name),
+                    "{claimed:?}"
+                ),
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Uhrenfreigabe, Writer-Uebergang, Widerruf.
     // -----------------------------------------------------------------------
@@ -1825,15 +1954,50 @@ mod tests {
             admin.writer_transition_activate().unwrap().phase,
             "Activated"
         );
+        // Jede Aktivierung liest ZUERST den Stand — auch die zwei, die dann an
+        // der Praesenz scheitern; erst die dritte erreicht `activate`.
         assert_eq!(
             port.calls(),
             [
                 "writer_transition_state",
                 "writer_transition_prepare",
                 "writer_transition_prepare",
+                "writer_transition_state",
+                "writer_transition_state",
+                "writer_transition_state",
                 "writer_transition_activate",
             ]
         );
+    }
+
+    /// Die Aktivierung eines NICHT vorbereiteten Uebergangs — `NoTransition`
+    /// oder schon `Activated` — ist TRANSITION-NOT-PREPARED und verbraucht
+    /// die Frischemarke NICHT: der Stand wird vor der Praesenz gelesen, wie
+    /// die Reihenfolge einer Zeremonie vor ihrer Praesenz geprueft wird. Sonst
+    /// muesste der Administrator sich fuer einen Schritt neu anmelden, den es
+    /// gar nicht gibt. Der Port sieht nur die Lesung, nie `activate`.
+    #[test]
+    fn activating_an_unprepared_transition_keeps_the_marker() {
+        for phase in [
+            WriterTransitionPhase::NoTransition,
+            WriterTransitionPhase::Activated,
+        ] {
+            let port = FakeAdministration::compliant();
+            *port.transition_phase.lock().unwrap() = phase;
+            let session = fresh(ReauthPurpose::AdminRootCeremony);
+            let admin = admin(&port, &session);
+            assert_eq!(
+                admin.writer_transition_activate().unwrap_err().code,
+                TRANSITION_NOT_PREPARED,
+                "{phase:?}"
+            );
+            assert_eq!(
+                session.lock().unwrap().fresh_reauth(),
+                Some(ReauthPurpose::AdminRootCeremony),
+                "{phase:?}: die Marke bleibt stehen"
+            );
+            assert_eq!(port.calls(), ["writer_transition_state"], "{phase:?}");
+        }
     }
 
     /// Der Widerruf nimmt den Hash in beiden Schreibweisen und liefert die zwei
@@ -2023,5 +2187,121 @@ mod tests {
             literals("ClockReleaseJustificationV1")
         );
         assert_eq!(ADMIN_ENUMS_V1.len(), 7);
+    }
+
+    /// Die Schluessel EINES JSON-Objekts in DOKUMENTREIHENFOLGE.
+    ///
+    /// `serde_json::Value` sortiert seine Schluessel, sofern nicht irgendeine
+    /// Crate im Graphen `preserve_order` einschaltet — und eine Aussage ueber
+    /// die Reihenfolge darf nicht an einer transitiv aktivierten Funktion
+    /// haengen. Der Besucher liest den Text, den `Serialize` geschrieben hat,
+    /// und nimmt die Schluessel, wie sie kommen.
+    struct KeysInOrder(Vec<String>);
+
+    impl<'de> serde::Deserialize<'de> for KeysInOrder {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = KeysInOrder;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("ein JSON-Objekt")
+                }
+
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        keys.push(key);
+                    }
+                    Ok(KeysInOrder(keys))
+                }
+            }
+
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+
+    fn wire_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        serde_json::from_str::<KeysInOrder>(&serde_json::to_string(value).unwrap())
+            .unwrap()
+            .0
+    }
+
+    /// Jede Drahtform serialisiert GENAU die emittierten Felder — Name fuer
+    /// Name, in Reihenfolge —, gemessen gegen `ADMIN_VIEW_MODELS_V1` ueber
+    /// `admin_view_model_fields` und nicht gegen eine zweite Liste hier. Zehn
+    /// Ansichtsmodelle, zehn Drahtformen, in der Reihenfolge der Tabelle;
+    /// `GoLiveRequirementView` ist ein eigener Eintrag und keine Beigabe der
+    /// Liste. Ein umbenanntes oder verschobenes DTO-Feld faellt hier.
+    #[test]
+    fn every_admin_dto_serialises_exactly_the_emitted_fields() {
+        fn emitted(name: &str) -> Vec<String> {
+            admin_view_model_fields(name)
+                .unwrap_or_else(|| panic!("das emittierte Ansichtsmodell {name} fehlt"))
+                .iter()
+                .map(|(field, _)| (*field).to_owned())
+                .collect()
+        }
+        let port = FakeAdministration::compliant();
+        let session = fresh(ReauthPurpose::ClockSkewRelease);
+        let admin = admin(&port, &session);
+        let checklist = admin.go_live_checklist().unwrap();
+        let checked: [(&str, Vec<String>); 10] = [
+            (
+                "PendingDeviceRequestView",
+                wire_keys(&admin.pending_device_requests().unwrap()[0]),
+            ),
+            (
+                "TrustCeremonyView",
+                wire_keys(&admin.ceremony_begin("req-9", "DeviceApprove").unwrap()),
+            ),
+            (
+                "PolicyProfileView",
+                wire_keys(&admin.policy_profile().unwrap()),
+            ),
+            (
+                "RegistryHealthView",
+                wire_keys(&admin.registry_health().unwrap()),
+            ),
+            (
+                "GoLiveRequirementView",
+                wire_keys(&checklist.requirements[0]),
+            ),
+            ("GoLiveChecklistView", wire_keys(&checklist)),
+            (
+                "ClockReleaseOfferView",
+                wire_keys(&admin.clock_release_offer().unwrap()),
+            ),
+            (
+                "ClockReleaseOutcomeView",
+                wire_keys(
+                    &admin
+                        .clock_release_issue("HardwareClockMaintenance")
+                        .unwrap(),
+                ),
+            ),
+            (
+                "WriterTransitionView",
+                wire_keys(&admin.writer_transition_state().unwrap()),
+            ),
+            (
+                "RevocationEffectView",
+                wire_keys(&admin.revocation_effect(GOOD_FINGERPRINT).unwrap()),
+            ),
+        ];
+        assert_eq!(checked.len(), 10);
+        for (name, keys) in &checked {
+            assert_eq!(*keys, emitted(name), "{name}");
+        }
+        // Und die Tabelle hat KEINEN Eintrag, der hier ungemessen bliebe.
+        let table_names: Vec<&str> = ADMIN_VIEW_MODELS_V1.iter().map(|(name, _)| *name).collect();
+        let checked_names: Vec<&str> = checked.iter().map(|(name, _)| *name).collect();
+        assert_eq!(checked_names, table_names);
+        assert!(admin_view_model_fields("NoSuchView").is_none());
     }
 }

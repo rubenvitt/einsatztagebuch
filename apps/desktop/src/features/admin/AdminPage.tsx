@@ -3,13 +3,21 @@ import { Alert, Space, Typography } from 'antd'
 import { useEffect, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 
-import { DEVICE_APPROVE_KIND, DEVICE_REVOKE_KIND, POLICY_CHANGE_KIND } from './ceremony'
+import {
+  DEVICE_APPROVE_KIND,
+  DEVICE_REVOKE_KIND,
+  POLICY_CHANGE_KIND,
+  WRITER_TRANSITION_KIND,
+} from './ceremony'
 import { ClockReleaseWizard } from './ClockReleaseWizard'
 import {
+  isContractViolation,
   validateCeremony,
   validateChecklist,
   validateClockReleaseOffer,
+  validateClockReleaseOutcome,
   validatePendingRequests,
+  validatePolicyProfile,
   validateRegistryHealth,
   validateRevocationEffect,
   validateWriterTransition,
@@ -116,12 +124,25 @@ export type AdminBridge = {
 }
 
 /**
+ * Der Satz fuer eine Antwort, die `contract-check.ts` abgelehnt hat.
+ *
+ * Kein Wirtscode — der Wirt hat keinen genannt, und die Schale erfindet
+ * keinen. Aber auch nicht „keinen Fehlercode genannt": der Wirt hat
+ * geantwortet, nur ausserhalb des Kontrakts, und das ist die Aussage.
+ */
+export const CONTRACT_VIOLATION_TEXT = 'Antwort außerhalb des Kontrakts'
+
+/**
  * Der CODE einer Ablehnung des Wirts — und nur der.
  *
  * `CommandError` ist `{ code }`; ein Fehler ohne Code ist kein Fehler des
- * Wirts, und die Flaeche erfindet dann keinen. Sie sagt, dass der Code fehlt.
+ * Wirts, und die Flaeche erfindet dann keinen. Sie sagt, dass der Code fehlt —
+ * oder, wenn die Schale selbst an der Kontraktgrenze abgelehnt hat, genau das.
  */
 export function refusalCode(error: unknown): string {
+  if (isContractViolation(error)) {
+    return CONTRACT_VIOLATION_TEXT
+  }
   if (typeof error === 'object' && error !== null && 'code' in error) {
     const { code } = error as { code: unknown }
     if (typeof code === 'string' && code.length > 0) {
@@ -316,7 +337,11 @@ export function AdminPage({ bridge }: { readonly bridge: AdminBridge }): ReactEl
               setTransitionNotice,
             )
           }}
+          onBeginCeremony={(targetHash) => {
+            begin(targetHash, WRITER_TRANSITION_KIND)
+          }}
         />
+        {stepper(WRITER_TRANSITION_KIND)}
       </Region>
 
       <Region title="Zeitfreigabe">
@@ -383,7 +408,7 @@ export async function connectAdminBridge(): Promise<AdminBridge> {
       call<unknown>(ADMIN_COMMANDS.pendingDeviceRequests).then(validatePendingRequests),
       call<unknown>(ADMIN_COMMANDS.goLiveChecklist).then(validateChecklist),
       call<unknown>(ADMIN_COMMANDS.registryHealth).then(validateRegistryHealth),
-      call<PolicyProfileView>(ADMIN_COMMANDS.policyProfile),
+      call<unknown>(ADMIN_COMMANDS.policyProfile).then(validatePolicyProfile),
       call<unknown>(ADMIN_COMMANDS.writerTransitionState).then(validateWriterTransition),
       call<unknown>(ADMIN_COMMANDS.clockReleaseOffer).then(validateClockReleaseOffer),
       call<DevicePostureSummaryView>(WRITER_COMMANDS.devicePosture).catch(() => null),
@@ -408,7 +433,9 @@ export async function connectAdminBridge(): Promise<AdminBridge> {
     publish: (ceremonyId) => ceremonyCall(ADMIN_COMMANDS.ceremonyPublish, { ceremonyId }),
     exportUnresolved: () => call(ADMIN_COMMANDS.goLiveExportUnresolved),
     issueClockRelease: (justification) =>
-      call(ADMIN_COMMANDS.clockReleaseIssue, { justification }),
+      call<unknown>(ADMIN_COMMANDS.clockReleaseIssue, { justification }).then(
+        validateClockReleaseOutcome,
+      ),
     prepareWriterTransition: (requestJson) =>
       call<unknown>(ADMIN_COMMANDS.writerTransitionPrepare, { requestJson }).then(
         validateWriterTransition,
@@ -461,7 +488,7 @@ export function AdminSurface({
         showIcon={false}
         closable={false}
         message="Die Verwaltung ist nicht geöffnet"
-        description={`Der Wirt hat die Verwaltung abgelehnt: ${refused}. Es wird keine Fläche gezeigt.`}
+        description={`Grund: ${refused}. Es wird keine Fläche gezeigt.`}
       />
     )
   }

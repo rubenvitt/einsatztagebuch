@@ -176,12 +176,14 @@ const CLOSURE_SEVERITY: Record<ShellClosure, number> = {
   'lock-unconfirmed': 3,
 }
 
+// „Fläche" und nicht „Erfassung": der Hinweis steht vor JEDER Rolle, und eine
+// Admin-Sitzung hat keine Erfassung, die geschlossen bleiben koennte.
 const CLOSURE_NOTICE: Record<ShellClosure, { readonly title: string; readonly subTitle: string }> = {
   'no-session': {
     title: 'Keine geprüfte Sitzung',
     subTitle:
       'Dieses Gerät hat keine gültige Bedienerbindung mit frischer Präsenz. Melden Sie sich ' +
-      'über die Anmeldung des Betriebssystems erneut an; die Erfassung bleibt bis dahin ' +
+      'über die Anmeldung des Betriebssystems erneut an; die Fläche bleibt bis dahin ' +
       'geschlossen.',
   },
   locked: {
@@ -189,7 +191,7 @@ const CLOSURE_NOTICE: Record<ShellClosure, { readonly title: string; readonly su
     subTitle:
       'Eine Sperre des Betriebssystems hat die Sitzung entwertet, und der Wirt hat die ' +
       'Entwertung bestätigt. Melden Sie sich über die Anmeldung des Betriebssystems erneut an; ' +
-      'die Erfassung bleibt bis dahin geschlossen.',
+      'die Fläche bleibt bis dahin geschlossen.',
   },
   'lock-watch-refused': {
     title: 'Sperrpflicht nicht eingehängt',
@@ -202,7 +204,7 @@ const CLOSURE_NOTICE: Record<ShellClosure, { readonly title: string; readonly su
     title: 'Sperre nicht bestätigt',
     subTitle:
       'Eine Sperre des Betriebssystems ist eingetreten, der Wirt hat die Entwertung der Sitzung ' +
-      'aber nicht bestätigt. Die Erfassung bleibt geschlossen. Beenden Sie die Anwendung und ' +
+      'aber nicht bestätigt. Die Fläche bleibt geschlossen. Beenden Sie die Anwendung und ' +
       'starten Sie sie neu, bevor Sie weiterarbeiten.',
   },
 }

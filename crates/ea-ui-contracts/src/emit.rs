@@ -444,7 +444,15 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
 /// (`ea_admin::fingerprint::human_readable_fingerprint` fuer `AA:BB:…`);
 /// TypeScript rechnet nichts und formatiert nichts, was danach ein Mensch
 /// vergleicht.
-const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
+///
+/// OEFFENTLICH und lesend, anders als die Writer-Tabellen: der Wirt
+/// (`apps/desktop/src-tauri/src/commands/admin.rs`) traegt je Ansichtsmodell
+/// eine Drahtform mit `rename_all = "camelCase"`, und ihre serde-Schluessel
+/// muessen Name fuer Name und in Reihenfolge die emittierten Felder sein.
+/// Sein Zeuge misst gegen DIESE Tabelle — ueber [`admin_view_model_fields`] —
+/// und nicht gegen eine zweite Liste dort; die eine benannte Quelle bleibt der
+/// Emitter, und ein `const` laesst sich nicht beschreiben.
+pub const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
     (
         "PendingDeviceRequestView",
         &[
@@ -484,7 +492,8 @@ const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ("readerHistoryAccessAllowed", "boolean"),
             ("backupFrequencyMs", "number"),
             ("restoreTestIntervalMs", "number"),
-            ("retentionPolicy", "string"),
+            ("minimumRetentionMs", "number | null"),
+            ("destructionEnabled", "boolean"),
             ("effectiveFromSequence", "number"),
             ("leaseValidThroughSequence", "number"),
             ("notAfterMs", "number"),
@@ -574,6 +583,21 @@ const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
 ];
+
+/// Die Feldtabelle EINES Verwaltungs-Ansichtsmodells aus
+/// [`ADMIN_VIEW_MODELS_V1`] — `(Feldname, TS-Typ)` in Emitterreihenfolge —
+/// oder `None` fuer einen Namen, den der Emitter nicht kennt.
+///
+/// Der Wirt pinnt seine Drahtformen hiermit an den Emitter: ein umbenanntes
+/// oder verschobenes DTO-Feld faellt dort gegen diese Tabelle, statt still
+/// eine TypeScript-Eigenschaft `undefined` zu lassen. `None` und kein Panic,
+/// damit der Aufrufer den fehlenden Namen selbst benennt.
+#[must_use]
+pub fn admin_view_model_fields(name: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    ADMIN_VIEW_MODELS_V1
+        .iter()
+        .find_map(|(candidate, fields)| (*candidate == name).then_some(*fields))
+}
 
 /// Die vollstaendige TypeScript-Kontraktdatei als Zeichenkette.
 ///

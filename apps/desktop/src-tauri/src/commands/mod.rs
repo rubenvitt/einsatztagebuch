@@ -108,6 +108,16 @@ pub const REAUTH_PURPOSE_UNKNOWN: &str = "EA-DESKTOP-REAUTH-PURPOSE-UNKNOWN";
 /// Port muss danach genau diesen erreicht haben. Ein Sprung oder ein
 /// Rueckfall wird nicht hingenommen.
 pub const CEREMONY_STEP_OUT_OF_ORDER: &str = "EA-DESKTOP-CEREMONY-STEP-OUT-OF-ORDER";
+/// Die Aktivierung des Writer-Uebergangs verlangt den Stand `Prepared` — und
+/// die Grenze liest ihn VOR der Praesenz.
+///
+/// Ohne vorbereiteten Uebergang (`NoTransition`) oder nach einer Aktivierung
+/// (`Activated`) gibt es nichts zu aktivieren; der Kern lehnte ohnehin ab
+/// (`EA-TRANSITION-*`). Wuerde die Frischemarke davor verbraucht, muesste
+/// sich der Administrator fuer einen Schritt neu anmelden, den es nicht gibt.
+/// Dieselbe Reihenfolge wie bei einer Zeremonie: Reihenfolge vor Praesenz,
+/// Praesenz vor dem Port. Der Stand kommt vom Port, der Code von hier.
+pub const TRANSITION_NOT_PREPARED: &str = "EA-DESKTOP-TRANSITION-NOT-PREPARED";
 
 /// Jeder Name, den [`crate::run`] registriert — in Registrierungsreihenfolge.
 pub const COMMAND_NAMES: &[&str] = &[
