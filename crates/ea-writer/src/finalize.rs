@@ -160,11 +160,12 @@ pub struct WriterService<'a> {
     pub(crate) key_provider: Arc<dyn KeyProvider>,
     pub(crate) backend: &'a dyn ArchiveBackend,
     pub(crate) source: &'a dyn ArchiveSource,
-    head: &'a SelectedRegistryHead,
+    pub(crate) head: &'a SelectedRegistryHead,
     checkpoint_claims: &'a [CheckpointClaim],
-    incident_numbers: IncidentNumberRegister,
+    pub(crate) incident_numbers: IncidentNumberRegister,
     operator_profiles: OperatorProfileRepository,
-    binding: WriterBindingV1,
+    pub(crate) binding: WriterBindingV1,
+    pub(crate) stale_store: Option<crate::StaleRegistryStore>,
 }
 
 /// Alles, was diese Finalisierung an das gebundene Geraet knuepft.
@@ -222,7 +223,97 @@ impl<'a> WriterService<'a> {
             incident_numbers,
             operator_profiles,
             binding,
+            stale_store: None,
         }
+    }
+
+    /// Attach the encrypted durable receipt store of this Writer installation.
+    #[must_use]
+    pub fn with_stale_registry_store(mut self, store: crate::StaleRegistryStore) -> Self {
+        self.stale_store = Some(store);
+        self
+    }
+
+    /// Acknowledge exactly the visible stale warning after native presence
+    /// signed its preview hash. A failed audit write releases no receipt.
+    pub fn acknowledge_stale_registry(
+        &self,
+        proof: OperatorSessionProof,
+        input: FinalizationInputV1,
+        confirmed: &FinalizationPreview,
+        warning_confirmed: bool,
+        observed_now: UnixMillis,
+    ) -> Result<crate::StaleRegistryAcknowledgement, WriterError> {
+        if !warning_confirmed {
+            return Err(WriterError::StaleAckRequired);
+        }
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            &proof,
+            FinalizationContent::Incident(Box::new(input)),
+            observed_now,
+            Stop::Acknowledge(confirmed),
+        )?;
+        self.issue_stale_receipt(proof, confirmed, self.floored_now(observed_now))
+    }
+
+    /// Consume the exact durable receipt before drawing a secret. A failed
+    /// attempt never restores receipt authority; prepared recovery uses only
+    /// the already prepared bytes and does not need a second acknowledgement.
+    pub fn finalize_with_stale_registry(
+        &self,
+        proof: &OperatorSessionProof,
+        input: FinalizationInputV1,
+        confirmed: &FinalizationPreview,
+        acknowledgement: &crate::StaleRegistryAcknowledgement,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizeOutcome, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.stale_store
+            .as_ref()
+            .ok_or(WriterError::StaleAckRequired)?
+            .require_unused(acknowledgement)?;
+        let reached = self.run(
+            proof,
+            FinalizationContent::Incident(Box::new(input)),
+            observed_now,
+            Stop::WithStale {
+                confirmed,
+                acknowledgement,
+                fault: None,
+            },
+        )?;
+        reached.outcome.ok_or(WriterError::NoDraftContent)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finalize_stale_interrupted_at(
+        &self,
+        proof: &OperatorSessionProof,
+        input: FinalizationInputV1,
+        confirmed: &FinalizationPreview,
+        acknowledgement: &crate::StaleRegistryAcknowledgement,
+        observed_now: UnixMillis,
+        point: FinalizationFaultPoint,
+    ) -> Result<ReachedState, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.stale_store
+            .as_ref()
+            .ok_or(WriterError::StaleAckRequired)?
+            .require_unused(acknowledgement)?;
+        self.run(
+            proof,
+            FinalizationContent::Incident(Box::new(input)),
+            observed_now,
+            Stop::WithStale {
+                confirmed,
+                acknowledgement,
+                fault: Some(point),
+            },
+        )
     }
 
     /// Die Vorschau: Schritte 1 bis 5 unter beiden Sperren.
@@ -424,10 +515,11 @@ enum ResolvedContent {
 /// reist ausschliesslich im Prozessspeicher zwischen Anspruch und Freigabe;
 /// eine Protokollzeile bekommt er nie, und deshalb traegt der Typ auch kein
 /// `Debug`.
-struct ClaimedIncidentNumber {
-    organization_id: ea_types::OrganizationId,
-    local_civil_year: i32,
-    human_incident_number: String,
+pub(crate) struct ClaimedIncidentNumber {
+    pub(crate) stale_event_id: Option<ea_types::EventId>,
+    pub(crate) organization_id: ea_types::OrganizationId,
+    pub(crate) local_civil_year: i32,
+    pub(crate) human_incident_number: String,
 }
 
 /// Wo der Lauf anhaelt.
@@ -440,9 +532,15 @@ pub(crate) enum Stop<'p> {
     AtFault(FinalizationFaultPoint),
     /// Vollstaendig, gegen diese bestaetigte Vorschau.
     Confirmed(&'p FinalizationPreview),
+    Acknowledge(&'p FinalizationPreview),
+    WithStale {
+        confirmed: &'p FinalizationPreview,
+        acknowledgement: &'p crate::StaleRegistryAcknowledgement,
+        fault: Option<FinalizationFaultPoint>,
+    },
 }
 
-impl Stop<'_> {
+impl<'p> Stop<'p> {
     /// Ob der Lauf nach `step` endet.
     fn ends_after(self, step: FinalizationStep) -> bool {
         matches!(self, Self::After(stop) if stop == step)
@@ -450,7 +548,18 @@ impl Stop<'_> {
 
     /// Ob der Lauf an `point` abbricht.
     fn breaks_at(self, point: FinalizationFaultPoint) -> bool {
-        matches!(self, Self::AtFault(stop) if stop == point)
+        matches!(self, Self::AtFault(stop) | Self::WithStale { fault: Some(stop), .. } if stop == point)
+    }
+
+    fn confirmed(self) -> Option<&'p FinalizationPreview> {
+        match self {
+            Self::Confirmed(preview)
+            | Self::Acknowledge(preview)
+            | Self::WithStale {
+                confirmed: preview, ..
+            } => Some(preview),
+            _ => None,
+        }
     }
 }
 
@@ -629,6 +738,41 @@ impl core::fmt::Debug for ReachedState {
 }
 
 impl WriterService<'_> {
+    fn require_current_proof(
+        &self,
+        proof: &OperatorSessionProof,
+        purpose: ReauthPurpose,
+        observed_now: UnixMillis,
+    ) -> Result<(), WriterError> {
+        let certificate = self
+            .head
+            .active_certificate_fields(self.binding.writer_certificate_hash)
+            .ok_or(WriterError::WriterRevoked)?;
+        let binding = self
+            .head
+            .active_operator_binding_fields(self.binding.binding_object_hash)
+            .ok_or(WriterError::ReauthBindingMismatch)?;
+        if proof.binding_object_hash() != self.binding.binding_object_hash
+            || proof.organization_id() != certificate.organization_id
+            || proof.device_id() != certificate.device_id
+            || binding.device_certificate_hash != self.binding.writer_certificate_hash
+        {
+            return Err(WriterError::ReauthBindingMismatch);
+        }
+        let now = self.floored_now(observed_now);
+        if proof.is_valid_at(purpose, now) {
+            return Ok(());
+        }
+        if ReauthPurpose::ALL
+            .iter()
+            .any(|candidate| proof.is_valid_at(*candidate, now))
+        {
+            Err(WriterError::ReauthPurposeMismatch)
+        } else {
+            Err(WriterError::ReauthRequired)
+        }
+    }
+
     /// Laeuft die Reihenfolge und GIBT die beanspruchte Einsatznummer wieder
     /// frei, wenn der Lauf vor der unwiderruflichen Grenze scheitert.
     ///
@@ -664,11 +808,17 @@ impl WriterService<'_> {
             // Nummer stehen — den Zustand VOR dieser Zusage — und ist damit
             // fail-closed, waehrend ein vertauschter Code dem Bediener den
             // Abbruchgrund verschwiege.
-            let _ = self.incident_numbers.release(
-                claim.organization_id,
-                claim.local_civil_year,
-                &claim.human_incident_number,
-            );
+            if let Some(event_id) = claim.stale_event_id {
+                if let Some(store) = &self.stale_store {
+                    let _ = store.release_claim(event_id);
+                }
+            } else {
+                let _ = self.incident_numbers.release(
+                    claim.organization_id,
+                    claim.local_civil_year,
+                    &claim.human_incident_number,
+                );
+            }
         }
         Err(error)
     }
@@ -791,12 +941,24 @@ impl WriterService<'_> {
                 ..
             } => Some(*transition_object_hash),
         };
-        require_fresh_proof(
-            proof,
-            ReauthPurpose::Finalize,
-            self.binding.binding_object_hash,
-            self.head,
-        )?;
+        if matches!(stop, Stop::Acknowledge(_) | Stop::WithStale { .. }) {
+            self.require_current_proof(
+                proof,
+                if matches!(stop, Stop::Acknowledge(_)) {
+                    ReauthPurpose::RegistryStaleFinalize
+                } else {
+                    ReauthPurpose::Finalize
+                },
+                observed_now,
+            )?;
+        } else {
+            require_fresh_proof(
+                proof,
+                ReauthPurpose::Finalize,
+                self.binding.binding_object_hash,
+                self.head,
+            )?;
+        }
         let binding_fields = self
             .head
             .active_operator_binding_fields(self.binding.binding_object_hash)
@@ -857,9 +1019,9 @@ impl WriterService<'_> {
         // nicht serialisierbar ist — oder aus der bestaetigten Vorschau
         // uebernommen. Ein zweiter Zug wuerde andere Nutzlastbytes und damit
         // eine andere Vorschau ergeben.
-        let record_id = match stop {
-            Stop::Confirmed(confirmed) => confirmed.record_id(),
-            _ => entropy::uuid_v7(effective_now.get())?,
+        let record_id = match stop.confirmed() {
+            Some(confirmed) => confirmed.record_id(),
+            None => entropy::uuid_v7(effective_now.get())?,
         };
         let (payload, mut pending_claim) = match resolved {
             ResolvedContent::Incident(input) => {
@@ -892,6 +1054,7 @@ impl WriterService<'_> {
                 (
                     PayloadV1::Incident(incident),
                     Some(ClaimedIncidentNumber {
+                        stale_event_id: None,
                         organization_id: profile.organization_id(),
                         local_civil_year: year,
                         human_incident_number: incident_number,
@@ -971,7 +1134,7 @@ impl WriterService<'_> {
         if decision.is_hard_block() {
             return Err(WriterError::RegistryStaleBlocked);
         }
-        if let Stop::Confirmed(confirmed) = stop {
+        if let Some(confirmed) = stop.confirmed() {
             let recomputed = state
                 .preview
                 .as_ref()
@@ -980,15 +1143,43 @@ impl WriterService<'_> {
             if recomputed != confirmed.preview_hash() {
                 return Err(WriterError::StaleAckPreviewMismatch);
             }
-            if decision == StaleDecision::StaleAcknowledgeable {
-                // Der Bestaetigungspfad selbst ist NICHT geliefert (siehe
-                // `crate::stale_registry`); fail-closed heisst hier: ohne den
-                // Pfad gibt es keine Bestaetigung, und ein veralteter Head
-                // blockiert.
+        }
+        match stop {
+            Stop::Acknowledge(confirmed) => {
+                if decision != StaleDecision::StaleAcknowledgeable
+                    || confirmed.decision() != decision
+                    || proof.context_hash() != Some(confirmed.preview_hash())
+                {
+                    return Err(WriterError::StaleAckPreviewMismatch);
+                }
+                return Ok(state);
+            }
+            Stop::WithStale {
+                confirmed,
+                acknowledgement,
+                ..
+            } => {
+                if decision != StaleDecision::StaleAcknowledgeable
+                    || confirmed.decision() != decision
+                    || acknowledgement.proof.context_hash() != Some(confirmed.preview_hash())
+                    || self.floored_now(observed_now) < acknowledgement.acknowledged_at
+                {
+                    return Err(WriterError::StaleAckPreviewMismatch);
+                }
+                self.require_current_proof(
+                    &acknowledgement.proof,
+                    ReauthPurpose::RegistryStaleFinalize,
+                    observed_now,
+                )?;
+                self.stale_store
+                    .as_ref()
+                    .ok_or(WriterError::StaleAckRequired)?
+                    .consume(acknowledgement)?;
+            }
+            _ if decision == StaleDecision::StaleAcknowledgeable => {
                 return Err(WriterError::StaleAckRequired);
             }
-        } else if decision == StaleDecision::StaleAcknowledgeable {
-            return Err(WriterError::StaleAckRequired);
+            _ => {}
         }
 
         // Der DAUERHAFTE Anspruch auf die Einsatznummer — hinter dem letzten
@@ -1010,14 +1201,33 @@ impl WriterService<'_> {
         // in Schritt 9, unmittelbar mit der bestaetigten Abwesenheit des
         // `draftDEK` — ab da traegt ein Eintrag die Nummer, der sich nicht mehr
         // zuruecknehmen laesst.
-        if matches!(stop, Stop::Confirmed(_))
-            && let Some(claim) = pending_claim.take()
+        if matches!(stop, Stop::Confirmed(_) | Stop::WithStale { .. })
+            && let Some(mut claim) = pending_claim.take()
         {
-            match self.incident_numbers.claim(
-                claim.organization_id,
-                claim.local_civil_year,
-                &claim.human_incident_number,
-            ) {
+            let outcome = if let Stop::WithStale {
+                acknowledgement, ..
+            } = stop
+            {
+                let draft = self.repository.load_or_create()?;
+                self.stale_store
+                    .as_ref()
+                    .ok_or(WriterError::StaleAckRequired)?
+                    .claim_number(
+                        &self.incident_numbers,
+                        acknowledgement.event_id(),
+                        &draft,
+                        &claim,
+                    )?;
+                claim.stale_event_id = Some(acknowledgement.event_id());
+                Ok(())
+            } else {
+                self.incident_numbers.claim(
+                    claim.organization_id,
+                    claim.local_civil_year,
+                    &claim.human_incident_number,
+                )
+            };
+            match outcome {
                 Ok(()) => *claimed = Some(claim),
                 Err(ea_draft::DraftError::IncidentNumberTaken) => {
                     return Err(WriterError::IncidentNumberTaken);
@@ -1187,6 +1397,16 @@ impl WriterService<'_> {
             return Ok(state);
         }
         let exact_marker = transaction.encode()?;
+        if let Stop::WithStale {
+            acknowledgement, ..
+        } = stop
+            && let Some(claim) = claimed.as_ref()
+        {
+            self.stale_store
+                .as_ref()
+                .ok_or(WriterError::StaleAckRequired)?
+                .record_prepared_claim(acknowledgement.event_id(), transaction.entry_hash, claim)?;
+        }
         self.repository.replace_prepared_finalization_marker(Some(
             PreparedFinalizationMarker::new(exact_marker.clone()),
         ))?;

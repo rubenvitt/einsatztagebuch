@@ -102,6 +102,7 @@ impl WriterService<'_> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
         let Some(marker) = self.repository.prepared_finalization_marker()? else {
+            self.recover_unmarked_stale_claims()?;
             return Ok(RecoveryOutcome::NothingPending);
         };
         let transaction = PreparedTransactionV1::decode(marker.as_bytes())?;
@@ -126,14 +127,20 @@ impl WriterService<'_> {
         // Schluesselfehler ist eine Aussage ueber JETZT — Geraet gesperrt, TPM
         // belegt — und darf nicht als „unwiderruflich" gelesen werden; er
         // bricht ab.
-        let key_present = match self.repository.load_or_create() {
-            Ok(_) => true,
+        let original_draft = match self.repository.load_or_create() {
+            Ok(draft) => Some(draft),
             Err(ea_draft::DraftError::Key(ea_key_provider::KeyError::NotFound))
-            | Err(ea_draft::DraftError::Crypto(ea_crypto::CryptoError::AeadOpen)) => false,
+            | Err(ea_draft::DraftError::Crypto(ea_crypto::CryptoError::AeadOpen)) => None,
             Err(other) => return Err(WriterError::Draft(other)),
         };
 
-        if key_present {
+        if let Some(draft) = original_draft {
+            // Only a cryptographically consistent prepared transaction whose
+            // original draft still decrypts may release its exact local claim.
+            // Receipt consumption remains append-only and is never reverted.
+            if let Some(store) = &self.stale_store {
+                store.recover_reversible_claims(&draft)?;
+            }
             // Vor der Grenze: unvollstaendiges Staging verwerfen und die Marke
             // loesen. Die Staging-Dateien bleiben HIER liegen, und das ist die
             // Zusage und keine Auslassung: solange dieser Aufruf laeuft, ist
@@ -159,6 +166,19 @@ impl WriterService<'_> {
         Ok(RecoveryOutcome::CommittedFromPreparedBytes {
             sequence: transaction.sequence,
         })
+    }
+
+    /// Caller holds both locks and has established that no prepared marker
+    /// exists. Only the original, successfully decrypted draft can release its
+    /// own journaled claim. A replacement draft cannot erase a committed claim.
+    fn recover_unmarked_stale_claims(&self) -> Result<(), WriterError> {
+        if let Some(store) = &self.stale_store
+            && store.has_unreleased_claims()?
+        {
+            let draft = self.repository.load_or_create()?;
+            store.recover_reversible_claims(&draft)?;
+        }
+        Ok(())
     }
 }
 
@@ -222,6 +242,7 @@ impl WriterService<'_> {
         if self.repository.prepared_finalization_marker()?.is_some() {
             return Ok(ReconciliationOutcomeV1::NotProven);
         }
+        self.recover_unmarked_stale_claims()?;
 
         // Die committeten Eintragskennungen und die Reste, in EINEM Durchlauf.
         // Ein zweiter Durchlauf sähe einen anderen Bestand, wenn dazwischen

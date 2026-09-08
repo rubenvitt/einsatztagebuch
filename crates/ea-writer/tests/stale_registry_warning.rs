@@ -12,10 +12,8 @@
 //! Auswahlzeitpunkt — waere jeder Head strukturell immer frisch, und der harte
 //! Block fuer Evidence Grade eine Attrappe.
 //!
-//! Der BESTAETIGUNGSpfad (`acknowledge_stale_registry`,
-//! `StaleRegistryAcknowledgement`) ist eine offengelegte Auslassung dieses
-//! Tasks. Ohne ihn ist der Ausgang fail-closed: ein veralteter Head blockiert,
-//! und diese Datei belegt, dass er die drei Faelle UNTERSCHEIDET.
+//! Ohne Einmalquittung bleibt der Ausgang fail-closed. Die autorisierte
+//! Fortsetzung ist getrennt in `stale_registry_acknowledgement.rs` bezeugt.
 
 mod support;
 

@@ -15,7 +15,9 @@
 
 use std::sync::Arc;
 
-use ea_local_store::{EncryptedDatabase, StoreError, StoreValue, unix_millis_now};
+use ea_local_store::{
+    EncryptedDatabase, StoreError, StoreTransaction, StoreValue, unix_millis_now,
+};
 use ea_types::OrganizationId;
 use unicode_normalization::UnicodeNormalization;
 
@@ -51,7 +53,26 @@ impl IncidentNumberRegister {
         local_civil_year: i32,
         human_incident_number: &str,
     ) -> Result<(), DraftError> {
-        let outcome = self.database.execute(
+        self.database.transaction(|tx| {
+            Self::claim_in(tx, organization_id, local_civil_year, human_incident_number)
+        })
+    }
+
+    /// Whether an atomic recovery journal uses this register's exact store.
+    #[must_use]
+    pub fn uses_database(&self, database: &Arc<EncryptedDatabase>) -> bool {
+        Arc::ptr_eq(&self.database, database)
+    }
+
+    /// Claim with the normal UNIQUE/NFC rules in the caller's atomic journal
+    /// transaction. The caller must hold the Writer and draft locks.
+    pub fn claim_in(
+        tx: &StoreTransaction<'_>,
+        organization_id: OrganizationId,
+        local_civil_year: i32,
+        human_incident_number: &str,
+    ) -> Result<(), DraftError> {
+        let outcome = tx.execute(
             "INSERT INTO incident_number_register \
              (organization_id, local_civil_year, human_incident_number, claimed_at_ms) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -100,7 +121,21 @@ impl IncidentNumberRegister {
         local_civil_year: i32,
         human_incident_number: &str,
     ) -> Result<(), DraftError> {
-        self.database.execute(
+        self.database.transaction(|tx| {
+            Self::release_in(tx, organization_id, local_civil_year, human_incident_number)
+        })
+    }
+
+    /// Release the exact normalized claim in the same transaction as its
+    /// durable recovery resolution. The reversible-boundary rule of `release`
+    /// still applies; this operation grants no independent recovery authority.
+    pub fn release_in(
+        tx: &StoreTransaction<'_>,
+        organization_id: OrganizationId,
+        local_civil_year: i32,
+        human_incident_number: &str,
+    ) -> Result<(), DraftError> {
+        tx.execute(
             "DELETE FROM incident_number_register WHERE organization_id = ?1 \
              AND local_civil_year = ?2 AND human_incident_number = ?3",
             &[

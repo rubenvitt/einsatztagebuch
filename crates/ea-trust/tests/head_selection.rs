@@ -4146,3 +4146,43 @@ fn independently_committed_time_survives_a_later_selection_transaction_failure()
     );
     assert!(store.record.pinned_head == Some(pin(previous_head)));
 }
+
+#[test]
+fn review_stale_reauth_must_reject_a_ready_successor() {
+    let (candidate, context) =
+        fallback_candidate(pending_setup_with_guard_and_current_expiry(300, 975));
+    let mut store = ModelStore::new(
+        context.key,
+        context.trusted_time.clone(),
+        Some(pin(context.previous_head)),
+    );
+    let time = prepare_local_time(&mut store, &candidate, UnixMillis::new(950), &[]).unwrap();
+    let RegistrySelectionOutcome::Selected(selected) =
+        select_registry_head(candidate, time, None).unwrap()
+    else {
+        panic!("prior fallback must be selectable");
+    };
+    let trust = context.line.verified_with_record(
+        Pin::Head(0),
+        store.record.revision,
+        store.record.trusted_time.clone(),
+        context.key,
+    );
+    let successor = verify_registry_candidate(&trust, ChainSequence::new(60)).unwrap();
+    let time = prepare_local_time(&mut store, &successor, UnixMillis::new(950), &[]).unwrap();
+    let RegistrySelectionOutcome::PendingFuture(pending) =
+        select_registry_head(successor, time, None).unwrap()
+    else {
+        panic!("successor still future");
+    };
+    let fallback = verify_current_head_fallback(&trust, pending).unwrap();
+    store.set_next_revision(47);
+    let time = prepare_local_time(&mut store, &fallback, UnixMillis::new(1200), &[]).unwrap();
+    match time.reauthentication_time(&selected) {
+        Ok(token) => panic!(
+            "new API returned fresh reauth token at {} under H1 expired at 975 despite known H2 ready at 1200",
+            token.value().get()
+        ),
+        Err(error) => assert_eq!(error, RegistryError::SuccessorReady),
+    }
+}

@@ -1212,6 +1212,160 @@ impl WriterHarness {
         issue_proof(&self.head, self.binding.binding_object_hash, purpose)
     }
 
+    pub fn context_proof(
+        &self,
+        preview: &ea_writer::FinalizationPreview,
+        purpose: ReauthPurpose,
+        now: UnixMillis,
+    ) -> OperatorSessionProof {
+        let time = self.reauthentication_time_at(now, false).unwrap();
+        self.context_proof_with_time(preview, purpose, &time)
+    }
+
+    pub fn context_proof_with_time(
+        &self,
+        preview: &ea_writer::FinalizationPreview,
+        purpose: ReauthPurpose,
+        time: &ea_trust::PreexistingEffectiveNow,
+    ) -> OperatorSessionProof {
+        let authenticator = FakeAuthenticator {
+            bound: BoundOperator::resolve(&self.head, self.binding.binding_object_hash).unwrap(),
+            signing_key: signing_key(INSTANCE_SECRET),
+            challenges: RefCell::new(Vec::new()),
+        };
+        authenticator
+            .reauthenticate_for_context(
+                Box::new(FakeAccount {
+                    binding_hash: trust_support::hash32(BINDING_MARKER.wrapping_add(2)),
+                }),
+                purpose,
+                time,
+                preview.preview_hash(),
+            )
+            .unwrap()
+    }
+
+    pub fn reauthentication_time_at(
+        &self,
+        now: UnixMillis,
+        independent_reference: bool,
+    ) -> Result<ea_trust::PreexistingEffectiveNow, ea_trust::RegistryError> {
+        let head_index = self.line.heads().len() - 1;
+        let head = self.line.heads()[head_index];
+        let key = trust_support::state_key();
+        let trusted_time = TrustedTimeState::from_persisted(
+            self.observed_now(),
+            independent_reference.then(|| {
+                ea_time::IndependentTimeInput::new(
+                    ea_time::IndependentTimeKind::Receipt,
+                    ObjectHash::from(trust_support::hash32(0x67)),
+                    self.observed_now(),
+                )
+            }),
+        )
+        .unwrap();
+        let trust =
+            self.line
+                .verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
+        let candidate = verify_registry_candidate(&trust, ChainSequence::new(0)).unwrap();
+        let mut store = ModelStore {
+            key,
+            revision: 17,
+            trusted_time,
+            pinned_head: RegistryHeadPin::new(head.version, head.object_hash),
+        };
+        let block = prepare_local_time(&mut store, &candidate, now, &[]).unwrap();
+        block.reauthentication_time(&self.head)
+    }
+
+    /// A verified future policy successor to the still-pinned Writer Head.
+    pub fn add_known_successor(&mut self, ready: UnixMillis) {
+        self.line.push(
+            ActionSpec::Policy {
+                policy_version: None,
+                previous_policy_hash: None,
+                effective_from: None,
+            },
+            HeadOptions {
+                issued_at: ready,
+                not_before: UnixMillis::new(ready.get() - 1),
+                not_after: UnixMillis::new(ready.get() + 1_000_000),
+                policy_registry_expiry_behavior_override: Some(1),
+                ..head_options(0, 1_000)
+            },
+        );
+    }
+
+    pub fn fallback_reauthentication_time(
+        &self,
+        now: UnixMillis,
+    ) -> Result<ea_trust::PreexistingEffectiveNow, ea_trust::RegistryError> {
+        let index = self.line.heads().len() - 2;
+        let key = trust_support::state_key();
+        let trusted_time = TrustedTimeState::initial(self.observed_now());
+        let trust = self
+            .line
+            .verified_with_record(Pin::Head(index), 17, trusted_time.clone(), key);
+        let successor = verify_registry_candidate(&trust, ChainSequence::new(0)).unwrap();
+        let mut store = ModelStore {
+            key,
+            revision: 17,
+            trusted_time,
+            pinned_head: RegistryHeadPin::new(
+                self.head.registry_version(),
+                self.head.registry_head_hash(),
+            ),
+        };
+        let time = prepare_local_time(&mut store, &successor, self.observed_now(), &[]).unwrap();
+        let RegistrySelectionOutcome::PendingFuture(pending) =
+            select_registry_head(successor, time, None).unwrap()
+        else {
+            panic!("the signed successor must still be future at observation");
+        };
+        let fallback = ea_trust::verify_current_head_fallback(&trust, pending).unwrap();
+        prepare_local_time(&mut store, &fallback, now, &[])
+            .unwrap()
+            .reauthentication_time(&self.head)
+    }
+
+    pub fn reselected_head(&self, now: UnixMillis) -> SelectedRegistryHead {
+        select_head(&self.line, now.get())
+    }
+
+    pub fn candidate_beyond_lease(
+        &self,
+    ) -> Result<ea_trust::RegistryCandidate, ea_trust::RegistryError> {
+        let index = self.line.heads().len() - 1;
+        let trust = self.line.verified_with_record(
+            Pin::Head(index),
+            17,
+            TrustedTimeState::initial(self.observed_now()),
+            trust_support::state_key(),
+        );
+        verify_registry_candidate(
+            &trust,
+            ChainSequence::new(self.head.valid_through_sequence().get() + 1),
+        )
+    }
+
+    pub fn audit_bytes(&self, id: ea_types::EventId) -> Vec<u8> {
+        self.database()
+            .query_row(
+                "SELECT exact_bytes FROM local_audit_event WHERE event_id = ?1",
+                &[StoreValue::Blob(id.as_bytes().to_vec())],
+            )
+            .unwrap()
+            .unwrap()
+            .blob(0)
+            .unwrap()
+            .to_vec()
+    }
+
+    pub fn reopen_store(&mut self) {
+        self.open = None;
+        self.open = Some(open_store(&self.root, &self.provider, &self.database_key));
+    }
+
     /// Ein ECHTER, aber ABGELAUFENER Nachweis fuer `Finalize`.
     ///
     /// Er ist gegen DIESELBE Linie und DIESELBE Bindung ausgestellt — nur

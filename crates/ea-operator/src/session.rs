@@ -171,6 +171,7 @@ pub struct OperatorSessionProof {
     device_id: DeviceId,
     binding_object_hash: ObjectHash,
     challenge_nonce: [u8; 32],
+    context_hash: Option<ea_types::Hash32>,
     issued_at: UnixMillis,
     expires_at: UnixMillis,
     invalidated: bool,
@@ -192,7 +193,14 @@ impl OperatorSessionProof {
     /// die vollstaendige Pruefung am aktuellen Head.
     #[must_use]
     pub fn is_valid_for(&self, purpose: ReauthPurpose, now: &PreexistingEffectiveNow) -> bool {
-        let now = now.value().get();
+        self.is_valid_at(purpose, now.value())
+    }
+
+    /// Recheck an already issued proof against current host time. This cannot
+    /// issue authority; issuance still requires a verified trusted-time token.
+    #[must_use]
+    pub fn is_valid_at(&self, purpose: ReauthPurpose, now: UnixMillis) -> bool {
+        let now = now.get();
         self.purpose == purpose
             && !self.invalidated
             && now >= self.issued_at.get()
@@ -216,6 +224,7 @@ impl OperatorSessionProof {
             device_id: self.device_id,
             binding_object_hash: self.binding_object_hash,
             challenge_nonce: self.challenge_nonce,
+            context_hash: self.context_hash,
             issued_at: self.issued_at,
             expires_at: self.expires_at,
             invalidated: true,
@@ -262,6 +271,12 @@ impl OperatorSessionProof {
     #[must_use]
     pub const fn challenge_nonce(&self) -> &[u8; 32] {
         &self.challenge_nonce
+    }
+
+    /// Exact transaction context signed by native presence, if requested.
+    #[must_use]
+    pub const fn context_hash(&self) -> Option<ea_types::Hash32> {
+        self.context_hash
     }
 }
 
@@ -318,37 +333,94 @@ pub trait OperatorAuthenticator {
         account: Box<dyn OsAccountProvider>,
         purpose: ReauthPurpose,
     ) -> Result<OperatorSessionProof, OperatorError> {
-        let bound = self.bound_operator();
-
-        let instance_key = bound.verify_account(account.as_ref())?;
-
-        let mut nonce = [0_u8; 32];
-        getrandom::fill(&mut nonce).map_err(|_| OperatorError::LocalRng)?;
-
-        let issued_at = bound.effective_now();
-        let expires_at = issued_at
-            .get()
-            .checked_add(MAX_INACTIVITY_MS)
-            .map(UnixMillis::new)
-            .ok_or(OperatorError::ValidityWindowUnrepresentable)?;
-
-        let challenge = challenge_bytes(bound, purpose, &nonce, issued_at, expires_at);
-        let signature = self.prove_presence_and_sign(&challenge)?;
-        instance_key
-            .verify_ed25519_strict(&challenge, &signature)
-            .map_err(|_| OperatorError::PresenceProofInvalid)?;
-
-        Ok(OperatorSessionProof {
+        authenticate(
+            self,
+            account,
             purpose,
-            organization_id: bound.organization_id(),
-            device_id: bound.device_id(),
-            binding_object_hash: bound.binding_object_hash(),
-            challenge_nonce: nonce,
-            issued_at,
-            expires_at,
-            invalidated: false,
-        })
+            self.bound_operator().effective_now(),
+            None,
+            None,
+            None,
+        )
     }
+
+    /// Sign an exact operation context using freshly verified time. The token
+    /// cannot be constructed from caller wall-clock values, and cannot lower
+    /// the selected binding's trusted time floor.
+    fn reauthenticate_for_context(
+        &self,
+        account: Box<dyn OsAccountProvider>,
+        purpose: ReauthPurpose,
+        now: &PreexistingEffectiveNow,
+        context_hash: ea_types::Hash32,
+    ) -> Result<OperatorSessionProof, OperatorError> {
+        if now.value() < self.bound_operator().effective_now() {
+            return Err(OperatorError::PresenceProofInvalid);
+        }
+        authenticate(
+            self,
+            account,
+            purpose,
+            now.value(),
+            Some(context_hash),
+            now.wall_clock_ceiling(),
+            now.successor_ready_at(),
+        )
+    }
+}
+
+fn authenticate<T: OperatorAuthenticator + ?Sized>(
+    authenticator: &T,
+    account: Box<dyn OsAccountProvider>,
+    purpose: ReauthPurpose,
+    issued_at: UnixMillis,
+    context_hash: Option<ea_types::Hash32>,
+    wall_clock_ceiling: Option<UnixMillis>,
+    successor_ready_at: Option<UnixMillis>,
+) -> Result<OperatorSessionProof, OperatorError> {
+    let bound = authenticator.bound_operator();
+
+    let instance_key = bound.verify_account(account.as_ref())?;
+
+    let mut nonce = [0_u8; 32];
+    getrandom::fill(&mut nonce).map_err(|_| OperatorError::LocalRng)?;
+
+    let mut expires_at = issued_at
+        .get()
+        .checked_add(MAX_INACTIVITY_MS)
+        .map(UnixMillis::new)
+        .ok_or(OperatorError::ValidityWindowUnrepresentable)?;
+    if let Some(ceiling) = wall_clock_ceiling {
+        expires_at = expires_at.min(UnixMillis::new(ceiling.get().saturating_add(1)));
+    }
+    if let Some(ready) = successor_ready_at {
+        expires_at = expires_at.min(ready);
+    }
+    if expires_at <= issued_at {
+        return Err(OperatorError::PresenceProofInvalid);
+    }
+
+    let mut challenge = challenge_bytes(bound, purpose, &nonce, issued_at, expires_at);
+    if let Some(context) = context_hash {
+        challenge.extend_from_slice(b"\0exact-operation-context-v1\0");
+        challenge.extend_from_slice(context.as_bytes());
+    }
+    let signature = authenticator.prove_presence_and_sign(&challenge)?;
+    instance_key
+        .verify_ed25519_strict(&challenge, &signature)
+        .map_err(|_| OperatorError::PresenceProofInvalid)?;
+
+    Ok(OperatorSessionProof {
+        purpose,
+        organization_id: bound.organization_id(),
+        device_id: bound.device_id(),
+        binding_object_hash: bound.binding_object_hash(),
+        challenge_nonce: nonce,
+        context_hash,
+        issued_at,
+        expires_at,
+        invalidated: false,
+    })
 }
 
 impl fmt::Debug for OperatorSessionProof {

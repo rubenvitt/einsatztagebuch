@@ -34,17 +34,11 @@
 //! bedienen — und ein Typ ohne Erzeuger ist eine Attrappe. Er entsteht mit
 //! seinem ersten Leser.
 //!
-//! Der Bestaetigungspfad eines VERALTETEN Registry-Head
-//! (`acknowledge_stale_registry`, `StaleRegistryAcknowledgement`) ist nicht
-//! gebaut. Die ERKENNUNG ist es: [`WriterService::preview`] und
-//! [`WriterService::finalize`] nehmen die beobachtete Zeit des Wirts als
-//! Argument, und gegen sie sind [`StaleDecision::StaleAcknowledgeable`] und
-//! [`StaleDecision::HardBlock`] erreichbar — gemessen in
-//! `tests/stale_registry_warning.rs`. Ohne den Bestaetigungspfad ist der
-//! Ausgang fail-closed: [`WriterError::StaleAckRequired`] fuer das
-//! Standardprofil mit signiertem `warn`, [`WriterError::RegistryStaleBlocked`]
-//! fuer Evidence Grade und signiertes `block`. Ein Typ ohne Erzeuger waere eine
-//! Attrappe und schlimmer als eine benannte Auslassung.
+//! [`WriterService::acknowledge_stale_registry`] issues a signed durable
+//! one-use receipt after native presence signs the exact preview context.
+//! [`WriterService::finalize_with_stale_registry`] consumes it before secrets;
+//! ordinary [`WriterService::finalize`] remains fail-closed for stale heads.
+//! Evidence Grade, signed `block`, and the sequence lease remain hard limits.
 //!
 //! Was die beobachtete Zeit NICHT ist: eine Zeit, die dieser Kern selbst
 //! feststellt. Sie kommt vom Wirt, wie jede Zeit in diesem Workspace
@@ -64,6 +58,7 @@ mod marker;
 mod operator_commitment;
 mod preview;
 mod recover;
+mod stale_registry;
 
 pub use content::KeyTransitionInputV1;
 pub use entropy::EntropyDraws;
@@ -78,3 +73,4 @@ pub use grant_plan::build_grant_plan;
 pub use incident::FinalizationInputV1;
 pub use preview::{FinalizationPreview, StaleDecision};
 pub use recover::{ReconciliationOutcomeV1, RecoveryOutcome};
+pub use stale_registry::{StaleRegistryAcknowledgement, StaleRegistryStore};
