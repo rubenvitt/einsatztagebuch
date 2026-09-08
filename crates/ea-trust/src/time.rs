@@ -89,6 +89,80 @@ pub struct LocalTimeBlock<'store> {
     pub(crate) pre_transition_sequence: ChainSequence,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) evaluation: TimeEvaluation,
+    pub(crate) fallback_barrier: Option<crate::registry::FallbackSuccessorBarrier>,
+}
+
+impl LocalTimeBlock<'_> {
+    /// Fresh native presence may be required after a bound Registry expires.
+    /// This proves only local time, never renews the Registry or its lease.
+    /// The persisted exact Head and the preexisting policy must still match.
+    pub fn reauthentication_time(
+        self,
+        selected: &crate::SelectedRegistryHead,
+    ) -> Result<crate::PreexistingEffectiveNow, crate::RegistryError> {
+        if self.pinned_head
+            != Some(RegistryHeadPin::new(
+                selected.registry_version(),
+                selected.registry_head_hash(),
+            ))
+            || self.candidate_registry_version != selected.registry_version()
+            || self.candidate_registry_head_hash != selected.registry_head_hash()
+            || self.guard_policy_object_hash != selected.policy_object_hash()
+            || self.proposed_sequence != selected.proposed_sequence()
+            || self.evaluation.raw_now() < selected.preexisting_effective_now().value()
+        {
+            return Err(TrustError::StateConflict.into());
+        }
+        if self.evaluation.future_skew() == ea_time::FutureSkew::Blocked {
+            return Err(crate::RegistryError::FutureSkew);
+        }
+        let mut successor_ready_at = selected.preexisting_effective_now().successor_ready_at();
+        if let Some(barrier) = &self.fallback_barrier {
+            barrier.require_pending(
+                self.candidate_registry_version,
+                self.candidate_registry_head_hash,
+                self.evaluation.raw_now(),
+            )?;
+            successor_ready_at = Some(
+                successor_ready_at
+                    .map_or(barrier.ready_at(), |known| known.min(barrier.ready_at())),
+            );
+        }
+        if successor_ready_at.is_some_and(|ready| self.evaluation.raw_now() >= ready) {
+            return Err(crate::RegistryError::SuccessorReady);
+        }
+        // Affirm the unchanged Head with the same persistent CAS used by
+        // Registry selection. Another connection changing the pin/revision
+        // after prepare_local_time must not issue a current-time proof.
+        let commit = crate::RegistrySelectionCommit::compare_and_affirm(
+            self.trusted_time.clone(),
+            self.pinned_head.ok_or(TrustError::StateConflict)?,
+            None,
+        );
+        let committed = self
+            .store
+            .commit_registry_selection(self.state_key, self.expected_revision, &commit)
+            .map_err(map_store_error)?;
+        if committed.revision() <= self.expected_revision
+            || committed.trusted_time() != &self.trusted_time
+            || committed.pinned_head().copied() != self.pinned_head
+        {
+            return Err(TrustError::StateConflict.into());
+        }
+        Ok(crate::PreexistingEffectiveNow {
+            value: self.evaluation.raw_now(),
+            successor_ready_at,
+            wall_clock_ceiling: self.trusted_time.independent_reference().map(|reference| {
+                UnixMillis::new(
+                    i64::try_from(
+                        i128::from(reference.verified_time().get())
+                            + i128::from(selected.policy_fields().max_future_clock_skew_ms),
+                    )
+                    .unwrap_or(i64::MAX),
+                )
+            }),
+        })
+    }
 }
 
 pub fn prepare_local_time<'store>(
@@ -158,6 +232,7 @@ pub fn prepare_local_time<'store>(
         proposed_sequence: candidate.proposed_sequence,
         pre_transition_sequence: candidate.pre_transition_sequence,
         evaluation,
+        fallback_barrier: candidate.fallback_barrier.clone(),
     })
 }
 

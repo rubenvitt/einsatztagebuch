@@ -136,6 +136,8 @@ pub enum WriterError {
     Draft(DraftError),
     Format(FormatError),
     Key(KeyError),
+    Audit(ea_audit::AuditError),
+    Store(ea_local_store::StoreError),
     /// Die Nutzlast oder eine Momentaufnahme ist ungueltig; der Code ist der
     /// von `ea-schema` gemeldete, unveraendert weitergegeben.
     ///
@@ -186,6 +188,8 @@ impl WriterError {
             Self::Draft(error) => error.code(),
             Self::Format(error) => error.code(),
             Self::Key(error) => error.code(),
+            Self::Audit(error) => error.code(),
+            Self::Store(error) => error.code(),
             Self::Payload(code) => code,
         }
     }
@@ -241,6 +245,18 @@ impl From<FormatError> for WriterError {
 impl From<KeyError> for WriterError {
     fn from(error: KeyError) -> Self {
         Self::Key(error)
+    }
+}
+
+impl From<ea_audit::AuditError> for WriterError {
+    fn from(error: ea_audit::AuditError) -> Self {
+        Self::Audit(error)
+    }
+}
+
+impl From<ea_local_store::StoreError> for WriterError {
+    fn from(error: ea_local_store::StoreError) -> Self {
+        Self::Store(error)
     }
 }
 

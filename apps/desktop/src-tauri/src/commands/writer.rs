@@ -33,10 +33,9 @@
 //!    [`session_reauthenticate`] ruft seit Stufe 5 (DRK-274) den
 //!    Wiederanmeldeport (`crate::state::ReauthPort`) und setzt die Frischemarke
 //!    der Sitzung; ohne Port bleibt es die benannte Abwesenheit.
-//! 3. **Benannte Abwesenheit.** [`writer_acknowledge_stale_registry`]
-//!    antwortet mit einem stabilen Code — er benennt eine Voraussetzung, die in
-//!    diesem Bauzustand nicht aufgeloest ist, und ist kein Vorgabewert, der
-//!    etwas Gutes behauptet.
+//! 3. [`writer_acknowledge_stale_registry`] forwards the exact visible preview
+//!    and confirmation to the concrete Writer port. Native proof and durable
+//!    signed one-use receipt are enforced by the core.
 //!
 //! Fail-closed ist die durchgaengige Richtung: eine unbekannte Voraussetzung
 //! ist keine erfuellte.
@@ -57,7 +56,7 @@ use super::{
     ARCHIVE_HEALTH_UNAVAILABLE, BUNDLE_EXPORT_UNAVAILABLE, CommandError, DISCARD_UNAVAILABLE,
     DRAFT_PAYLOAD_UNREADABLE, DRAFTS_UNAVAILABLE, MASTER_DATA_UNAVAILABLE, MASTER_DATA_UNREADABLE,
     NO_VERIFIED_SESSION, REAUTH_PURPOSE_UNKNOWN, REAUTH_UNAVAILABLE, SESSION_STATE_UNREADABLE,
-    STALE_ACK_UNAVAILABLE, STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
+    STARTUP_RECOVERY_UNAVAILABLE, WRITER_UNAVAILABLE, run_blocking,
 };
 use crate::state::{ArchiveBundleExportPort, DesktopState, DraftDiscardPort, DraftPayloadPort};
 
@@ -981,6 +980,32 @@ fn preview_core(
     port.preview(&view).map(FinalizationPreviewDto::from)
 }
 
+fn acknowledge_stale_registry_of(
+    port: &dyn crate::state::WriterFinalizePort,
+    incident: &IncidentInputDto,
+    confirmed: &FinalizationPreviewDto,
+    warning_confirmed: bool,
+) -> Result<StaleAcknowledgementDto, CommandError> {
+    let input = writer_input_core(incident)?;
+    port.acknowledge_stale_registry(&input, &confirmed.to_view()?, warning_confirmed)?;
+    Ok(StaleAcknowledgementDto {
+        captured: true,
+        proof_code: "EA-REGISTRY-STALE-ACK-CAPTURED".to_owned(),
+    })
+}
+
+fn acknowledge_stale_registry_core(
+    state: &DesktopState,
+    incident: &IncidentInputDto,
+    confirmed: &FinalizationPreviewDto,
+    warning_confirmed: bool,
+) -> Result<StaleAcknowledgementDto, CommandError> {
+    let port = state
+        .writer()
+        .ok_or_else(|| CommandError::new(WRITER_UNAVAILABLE))?;
+    acknowledge_stale_registry_of(port, incident, confirmed, warning_confirmed)
+}
+
 /// Der Kern von [`writer_finalize`].
 fn finalize_core(
     state: &DesktopState,
@@ -1187,20 +1212,22 @@ pub async fn writer_preview(
 
 /// Die Bestaetigung eines veralteten Registry-Head.
 ///
-/// Sie BLEIBT ein Stummel, und zwar entschieden: Ruling R62 (DRK-206,
-/// 2026-08-28): Quittungspfad nach Stufe 5 verschoben. `WriterService::acknowledge_stale_registry`
-/// existiert nicht, und diese Grenze baut den Kern nicht nach — eine hier
-/// erfundene Quittung waere eine Bestaetigung, die niemand geprueft hat.
-///
 /// # Errors
 ///
-/// [`STALE_ACK_UNAVAILABLE`]: der Bestaetigungspfad ist im Kern eine benannte
-/// Auslassung (`ea-writer/src/lib.rs`), und der Ausgang ist dort fail-closed.
-/// Diese Grenze erfindet ihn nicht — sie sagt, dass es ihn nicht gibt, und die
-/// Oberflaeche zeigt daraufhin „keine Bestaetigung erfasst".
+/// The concrete Writer port requires native purpose/context proof and a
+/// durable signed receipt. DTO flags alone never confer authority.
 #[tauri::command]
-pub async fn writer_acknowledge_stale_registry() -> Result<StaleAcknowledgementDto, CommandError> {
-    run_blocking(|| Err(CommandError::new(STALE_ACK_UNAVAILABLE))).await
+pub async fn writer_acknowledge_stale_registry(
+    state: tauri::State<'_, DesktopState>,
+    incident: IncidentInputDto,
+    confirmed: FinalizationPreviewDto,
+    warning_confirmed: bool,
+) -> Result<StaleAcknowledgementDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || {
+        acknowledge_stale_registry_core(&state, &incident, &confirmed, warning_confirmed)
+    })
+    .await
 }
 
 /// Der unwiderrufliche Abschluss.
@@ -1271,6 +1298,10 @@ pub async fn archive_export_bundle_file(
 }
 
 #[cfg(test)]
+#[path = "../../../../../crates/ea-writer/tests/support/mod.rs"]
+mod stale_support;
+
+#[cfg(test)]
 mod tests {
     use ea_archive_fs::BundleError;
     use ea_key_provider::{DevicePostureReport, PostureRequirement};
@@ -1298,6 +1329,69 @@ mod tests {
 
     fn bare_state() -> DesktopState {
         DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+    }
+
+    #[test]
+    fn stale_ack_host_contract_crosses_real_port_native_proof_service_and_signed_store() {
+        use crate::state::{BoundWriter, WriterFinalizePort};
+        use ea_operator::ReauthPurpose;
+        use std::sync::Mutex;
+        let harness = super::stale_support::WriterHarness::with_incident();
+        let source = harness.source();
+        let service = harness.service(&source).with_stale_registry_store(
+            ea_writer::StaleRegistryStore::new(harness.database()).unwrap(),
+        );
+        let master = ea_draft::MasterDataRepository::new(harness.database());
+        let now = harness.observed_now_after_expiry();
+        let initial = harness.proof_for(ReauthPurpose::Finalize);
+        let mut incident = valid_incident();
+        incident.personnel.clear();
+        incident.personnel_empty_reason = Some("Keine Personen".to_owned());
+        incident.vehicles.clear();
+        incident.vehicles_empty_reason = Some("Keine Fahrzeuge".to_owned());
+        let view = incident.to_view().unwrap();
+        let input =
+            crate::state::finalization_input(&view, "Europe/Berlin", vec![], vec![]).unwrap();
+        let preview = service.preview(&initial, input, now).unwrap();
+        let confirmed =
+            super::FinalizationPreviewDto::from(FinalizationPreviewView::from(&preview));
+        let current = harness.context_proof(&preview, ReauthPurpose::Finalize, now);
+        let proof_slot = Mutex::new(None);
+        let receipt_slot = Mutex::new(None);
+        let clock = || now;
+        let port = BoundWriter::new(&service, &current, &master, "Europe/Berlin", Some(&preview))
+            .with_stale_registry(&proof_slot, &receipt_slot, &clock);
+        assert_eq!(
+            super::acknowledge_stale_registry_of(&port, &incident, &confirmed, true)
+                .unwrap_err()
+                .code,
+            "EA-WRITER-REAUTH-REQUIRED"
+        );
+        *proof_slot.lock().unwrap() =
+            Some(harness.context_proof(&preview, ReauthPurpose::RegistryStaleFinalize, now));
+        assert_eq!(
+            super::acknowledge_stale_registry_of(&port, &incident, &confirmed, false)
+                .unwrap_err()
+                .code,
+            "EA-REGISTRY-STALE-ACK-REQUIRED"
+        );
+        *proof_slot.lock().unwrap() =
+            Some(harness.context_proof(&preview, ReauthPurpose::RegistryStaleFinalize, now));
+        let captured =
+            super::acknowledge_stale_registry_of(&port, &incident, &confirmed, true).unwrap();
+        assert!(captured.captured);
+        let receipt_id = receipt_slot.lock().unwrap().as_ref().unwrap().event_id();
+        let audit = harness.audit_bytes(receipt_id);
+        assert!(matches!(
+            ea_format::decode_local_audit_event(&audit)
+                .unwrap()
+                .action(),
+            ea_format::LocalAuditActionV1::RegistryStaleWarnAcceptance(_)
+        ));
+        let outcome = port.finalize(&view, &confirmed.to_view().unwrap()).unwrap();
+        assert_eq!(outcome.sequence.get(), 0);
+        assert_eq!(harness.audit_bytes(receipt_id), audit);
+        assert!(receipt_slot.lock().unwrap().is_none());
     }
 
     /// Ein Doppel der Wiederanmeldung, das AUFSCHREIBT, fuer welchen Zweck es

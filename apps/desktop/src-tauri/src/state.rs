@@ -356,6 +356,17 @@ pub trait WriterPreviewPort {
 /// Vorschau, gegen die er bestaetigt wurde, keiner ist: derselbe Wirt muss
 /// beides koennen.
 pub trait WriterFinalizePort: WriterPreviewPort {
+    /// Confirm the exact visible stale warning. The port must hold an opaque
+    /// native proof whose signed context is this preview hash.
+    fn acknowledge_stale_registry(
+        &self,
+        _incident: &IncidentInputView,
+        _confirmed: &FinalizationPreviewView,
+        _warning_confirmed: bool,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new(WriterError::StaleAckRequired.code()))
+    }
+
     /// Schliesst den Eintrag ab — unwiderruflich.
     ///
     /// # Errors
@@ -387,6 +398,9 @@ pub struct BoundWriter<'a> {
     master_data: &'a MasterDataRepository,
     timezone: &'a str,
     issued: Option<&'a FinalizationPreview>,
+    stale_proof: Option<&'a Mutex<Option<OperatorSessionProof>>>,
+    stale_receipt: Option<&'a Mutex<Option<ea_writer::StaleRegistryAcknowledgement>>>,
+    clock: &'a (dyn Fn() -> UnixMillis + Send + Sync),
 }
 
 impl<'a> BoundWriter<'a> {
@@ -404,7 +418,25 @@ impl<'a> BoundWriter<'a> {
             master_data,
             timezone,
             issued,
+            stale_proof: None,
+            stale_receipt: None,
+            clock: &host_now,
         }
+    }
+
+    /// Bind the native reauthentication slot and retained opaque receipt of
+    /// this host session. Startup owns these slots and clears them on lock.
+    #[must_use]
+    pub fn with_stale_registry(
+        mut self,
+        proof: &'a Mutex<Option<OperatorSessionProof>>,
+        receipt: &'a Mutex<Option<ea_writer::StaleRegistryAcknowledgement>>,
+        clock: &'a (dyn Fn() -> UnixMillis + Send + Sync),
+    ) -> Self {
+        self.stale_proof = Some(proof);
+        self.stale_receipt = Some(receipt);
+        self.clock = clock;
+        self
     }
 
     /// Die Eingabe des Kerns aus der Ansicht der Oberflaeche.
@@ -470,13 +502,50 @@ impl WriterPreviewPort for BoundWriter<'_> {
     ) -> Result<FinalizationPreviewView, CommandError> {
         let input = self.input(incident)?;
         self.service
-            .preview(self.proof, input, host_now())
+            .preview(self.proof, input, (self.clock)())
             .map(|preview| FinalizationPreviewView::from(&preview))
             .map_err(|error| CommandError::new(error.code()))
     }
 }
 
 impl WriterFinalizePort for BoundWriter<'_> {
+    fn acknowledge_stale_registry(
+        &self,
+        incident: &IncidentInputView,
+        confirmed: &FinalizationPreviewView,
+        warning_confirmed: bool,
+    ) -> Result<(), CommandError> {
+        let issued = self
+            .issued
+            .ok_or_else(|| CommandError::new(PREVIEW_NOT_ISSUED))?;
+        if FinalizationPreviewView::from(issued) != *confirmed {
+            return Err(CommandError::new(PREVIEW_MISMATCH));
+        }
+        let slot = self
+            .stale_receipt
+            .ok_or_else(|| CommandError::new(WriterError::StaleAckRequired.code()))?;
+        let mut receipt = slot
+            .lock()
+            .map_err(|_| CommandError::new(WriterError::ReauthRequired.code()))?;
+        *receipt = None;
+        let proof = self
+            .stale_proof
+            .and_then(|slot| slot.lock().ok()?.take())
+            .ok_or_else(|| CommandError::new(WriterError::ReauthRequired.code()))?;
+        *receipt = Some(
+            self.service
+                .acknowledge_stale_registry(
+                    proof,
+                    self.input(incident)?,
+                    issued,
+                    warning_confirmed,
+                    (self.clock)(),
+                )
+                .map_err(|error| CommandError::new(error.code()))?,
+        );
+        Ok(())
+    }
+
     /// Der Abschluss gegen die Vorschau, die DIESER Wirt ausgestellt hat.
     ///
     /// Die Bestaetigung der Oberflaeche ist eine ANSICHT und keine Vorschau; sie
@@ -497,8 +566,20 @@ impl WriterFinalizePort for BoundWriter<'_> {
             return Err(CommandError::new(PREVIEW_MISMATCH));
         }
         let input = self.input(incident)?;
+        if let Some(slot) = self.stale_receipt
+            && let Some(receipt) = slot
+                .lock()
+                .map_err(|_| CommandError::new(WriterError::ReauthRequired.code()))?
+                .take()
+        {
+            return self
+                .service
+                .finalize_with_stale_registry(self.proof, input, issued, &receipt, (self.clock)())
+                .map(|outcome| FinalizeOutcomeView::new(&outcome, None))
+                .map_err(|error| CommandError::new(error.code()));
+        }
         self.service
-            .finalize(self.proof, input, issued, host_now())
+            .finalize(self.proof, input, issued, (self.clock)())
             .map(|outcome| FinalizeOutcomeView::new(&outcome, None))
             .map_err(|error| CommandError::new(error.code()))
     }

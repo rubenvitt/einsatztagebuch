@@ -96,6 +96,22 @@ ea-ui-contracts.workspace = true
 # `cargo metadata`-Lauf ohne `--locked`.
 ea-admin.workspace = true
 
+[dev-dependencies]
+# Real Writer/SQLCipher/native-challenge fixture for the host acknowledgement
+# contract. Test-support stays out of the production dependency graph.
+ea-writer = { workspace = true, features = ["test-support"] }
+ea-draft = { workspace = true, features = ["test-support"] }
+ea-archive-fs = { workspace = true, features = ["test-support"] }
+ea-key-provider = { workspace = true, features = ["test-support"] }
+ea-testkit.workspace = true
+ea-trust.workspace = true
+ea-time.workspace = true
+ea-crypto.workspace = true
+ed25519-dalek.workspace = true
+ea-chain.workspace = true
+ea-verify.workspace = true
+minicbor.workspace = true
+
 [build-dependencies]
 # Erzeugt die ACL- und Kontextbeiwerke aus `src-tauri/tauri.conf.json`. Diese
 # Datei entsteht in Task 15; bis dahin bleibt `build.rs` ein Stumpf und ruft

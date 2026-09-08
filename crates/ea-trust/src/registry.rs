@@ -30,13 +30,28 @@ pub struct PreexistingRegistryAuthority {
 }
 
 pub struct PreexistingEffectiveNow {
-    value: UnixMillis,
+    pub(crate) value: UnixMillis,
+    pub(crate) wall_clock_ceiling: Option<UnixMillis>,
+    pub(crate) successor_ready_at: Option<UnixMillis>,
 }
 
 impl PreexistingEffectiveNow {
     #[must_use]
     pub const fn value(&self) -> UnixMillis {
         self.value
+    }
+
+    /// Inclusive ceiling derived from the verified independent reference and
+    /// guard policy. Consumers must not prolong native presence beyond it.
+    #[must_use]
+    pub const fn wall_clock_ceiling(&self) -> Option<UnixMillis> {
+        self.wall_clock_ceiling
+    }
+
+    /// Exclusive boundary of the verified successor to this fallback Head.
+    #[must_use]
+    pub const fn successor_ready_at(&self) -> Option<UnixMillis> {
+        self.successor_ready_at
     }
 }
 
@@ -465,10 +480,35 @@ pub enum RegistrySelectionOutcome {
     PendingFuture(PendingFutureSuccessor),
 }
 
-struct FallbackSuccessorBarrier {
+#[derive(Clone)]
+pub(crate) struct FallbackSuccessorBarrier {
     registry_version: RegistryVersion,
     registry_head_hash: ObjectHash,
     event: RegistryEventFieldsV1,
+}
+
+impl FallbackSuccessorBarrier {
+    pub(crate) fn ready_at(&self) -> UnixMillis {
+        self.event.issued_at.max(self.event.not_before)
+    }
+
+    pub(crate) fn require_pending(
+        &self,
+        current_version: RegistryVersion,
+        current_hash: ObjectHash,
+        now: UnixMillis,
+    ) -> Result<(), RegistryError> {
+        if self.registry_version <= current_version
+            || self.registry_head_hash == current_hash
+            || self.event.registry_version != self.registry_version
+        {
+            return Err(TrustError::StateConflict.into());
+        }
+        if now >= self.ready_at() {
+            return Err(RegistryError::SuccessorReady);
+        }
+        Ok(())
+    }
 }
 
 pub struct RegistryCandidate {
@@ -497,7 +537,7 @@ pub struct RegistryCandidate {
     pub(crate) proposed_sequence: ChainSequence,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) pre_transition_sequence: ChainSequence,
-    fallback_barrier: Option<FallbackSuccessorBarrier>,
+    pub(crate) fallback_barrier: Option<FallbackSuccessorBarrier>,
 }
 
 impl RegistryCandidate {
@@ -762,6 +802,24 @@ pub fn select_registry_head(
     let replay_key = require_release_pairing(&candidate, &local_time, release)?;
     let raw_now = local_time.evaluation.raw_now();
     let warnings = *local_time.evaluation.warnings();
+    let wall_clock_ceiling = local_time
+        .trusted_time
+        .independent_reference()
+        .map(|reference| {
+            UnixMillis::new(
+                i64::try_from(
+                    i128::from(reference.verified_time().get())
+                        + i128::from(
+                            candidate
+                                .guard_policy
+                                .fields
+                                .max_future_clock_skew_ms
+                                .min(candidate.target_policy.fields.max_future_clock_skew_ms),
+                        ),
+                )
+                .unwrap_or(i64::MAX),
+            )
+        });
     let is_current = candidate_is_current(&candidate);
 
     if !is_current
@@ -807,15 +865,11 @@ pub fn select_registry_head(
 
     if is_current {
         if let Some(barrier) = candidate.fallback_barrier.as_ref() {
-            if barrier.registry_version <= candidate.registry_version
-                || barrier.registry_head_hash == candidate.registry_head_hash
-                || barrier.event.registry_version != barrier.registry_version
-            {
-                return Err(TrustError::StateConflict.into());
-            }
-            if raw_now >= barrier.event.issued_at && raw_now >= barrier.event.not_before {
-                return Err(RegistryError::SuccessorReady);
-            }
+            barrier.require_pending(
+                candidate.registry_version,
+                candidate.registry_head_hash,
+                raw_now,
+            )?;
         }
         if stale {
             return Err(RegistryError::Stale);
@@ -835,6 +889,7 @@ pub fn select_registry_head(
             raw_now,
             warnings,
             committed_revision,
+            wall_clock_ceiling,
         )));
     }
 
@@ -861,6 +916,7 @@ pub fn select_registry_head(
         raw_now,
         warnings,
         committed_revision,
+        wall_clock_ceiling,
     )))
 }
 
@@ -995,6 +1051,7 @@ fn selected_head(
     raw_now: UnixMillis,
     warnings: TimeWarnings,
     committed_revision: u64,
+    wall_clock_ceiling: Option<UnixMillis>,
 ) -> SelectedRegistryHead {
     SelectedRegistryHead {
         inner: Arc::new(SelectedHeadInner {
@@ -1008,7 +1065,14 @@ fn selected_head(
             proposed_sequence: candidate.proposed_sequence,
             head_event_not_after: candidate.head_event.not_after,
             head_event_issued_at: candidate.head_event.issued_at,
-            preexisting_effective_now: PreexistingEffectiveNow { value: raw_now },
+            preexisting_effective_now: PreexistingEffectiveNow {
+                value: raw_now,
+                wall_clock_ceiling,
+                successor_ready_at: candidate
+                    .fallback_barrier
+                    .as_ref()
+                    .map(FallbackSuccessorBarrier::ready_at),
+            },
             warnings,
             committed_revision,
         }),

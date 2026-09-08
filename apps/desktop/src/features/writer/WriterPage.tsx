@@ -96,7 +96,7 @@ export type WriterBridge = {
   readonly saveDraft: (input: IncidentInputView) => Promise<SyncStateView>
   readonly searchMasterData: (query: string) => Promise<MasterDataResultView>
   readonly preview: (input: IncidentInputView) => Promise<FinalizationPreviewView>
-  readonly acknowledgeStaleRegistry: () => Promise<StaleAcknowledgementView>
+  readonly acknowledgeStaleRegistry: (input: IncidentInputView, confirmed: FinalizationPreviewView) => Promise<StaleAcknowledgementView>
   readonly finalize: (
     input: IncidentInputView,
     confirmed: FinalizationPreviewView,
@@ -350,9 +350,11 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
   }
 
   const acknowledge = (): void => {
+    if (preview === null) return
+    const confirmed = preview
     setAcknowledgementRefused(false)
     withFreshProof(STALE_ACK_PURPOSE, () =>
-      bridge.acknowledgeStaleRegistry().then(
+      bridge.acknowledgeStaleRegistry(incident, confirmed).then(
         (result) => {
           setAcknowledgement(result)
           if (!result.captured) {
@@ -495,7 +497,7 @@ export async function connectWriterBridge(): Promise<WriterBridge> {
     saveDraft: (input) => call(WRITER_COMMANDS.draftSave, { incident: input }),
     searchMasterData: (query) => call(WRITER_COMMANDS.masterDataSearch, { query }),
     preview: (input) => call(WRITER_COMMANDS.preview, { incident: input }),
-    acknowledgeStaleRegistry: () => call(WRITER_COMMANDS.acknowledgeStaleRegistry),
+    acknowledgeStaleRegistry: (input, confirmed) => call(WRITER_COMMANDS.acknowledgeStaleRegistry, { incident: input, confirmed, warningConfirmed: true }),
     finalize: (input, confirmed) =>
       call(WRITER_COMMANDS.finalize, { incident: input, confirmed }),
     archiveHealth: () => call(WRITER_COMMANDS.archiveHealth),
