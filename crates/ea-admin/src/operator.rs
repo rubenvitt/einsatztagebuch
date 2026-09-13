@@ -449,80 +449,29 @@ impl<'a> OperatorBindingService<'a> {
         &self,
         request: VerifySessionRequest<'_>,
     ) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
-        self.local_device.check(self.head)?;
-        let known = self
-            .head
-            .active_operator_binding_fields(request.binding_object_hash)
-            .filter(|b| {
-                b.device_certificate_hash == self.local_device.certificate
-                    && request.device_certificate_hash == self.local_device.certificate
-            })
-            .map(|_| request.binding_object_hash);
-        let device = AuthenticatedDevice::new(
-            self.local_device.organization,
-            self.local_device.device,
-            ObjectHash::try_from(self.local_device.certificate.as_bytes().as_slice())
-                .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
-            known,
-        );
-        let result = (|| {
-            self.head
-                .active_certificate_fields(request.device_certificate_hash)
-                .ok_or(OperatorError::DeviceCertificateNotActive)?;
-            if request.device_certificate_hash != self.local_device.certificate {
-                return Err(OperatorError::DeviceMismatch.into());
-            }
-            let bound = BoundOperator::resolve(self.head, request.binding_object_hash)?;
-            let authenticator = FreshAuthenticator {
-                bound,
-                native: request.authenticator,
-            };
-            let proof = authenticator.reauthenticate(
-                Box::new(SharedAccount(request.account.clone())),
-                request.purpose,
-            )?;
-            verify_current_session(
-                self.head,
-                request.device_certificate_hash,
-                request.role,
-                &proof,
-                request.purpose,
-                request.account.as_ref(),
-            )?;
-            let profile = operator_profile::load(request.database)?
-                .ok_or(OperatorLifecycleError::ProfileMissing)?;
-            if profile.operator_binding_object_hash() != request.binding_object_hash {
-                return Err(OperatorLifecycleError::ProfileCommitment);
-            }
-            let fields = self
-                .head
-                .active_operator_binding_fields(request.binding_object_hash)
-                .ok_or(OperatorError::BindingNotActive)?;
-            verify_operator_snapshot(&profile, fields)?;
-            Ok(VerifiedOperatorSession { profile, proof })
-        })();
-        let outcome = if result.is_ok() {
-            LocalAuditOutcomeV1::Completed
-        } else {
-            LocalAuditOutcomeV1::Failed
-        };
-        self.record_local_audit(
-            &device,
-            TypedLocalAuditEvent {
-                action: LocalAuditActionV1::Login(GenericAuditContextV1::new(known)),
-                outcome,
-            },
-        )?;
-        if result.is_err() {
-            self.record_local_audit(
-                &device,
-                TypedLocalAuditEvent {
-                    action: LocalAuditActionV1::ReauthFailure(GenericAuditContextV1::new(known)),
-                    outcome: LocalAuditOutcomeV1::Failed,
-                },
-            )?;
-        }
-        result
+        self.verify_session_inner(request, None)
+    }
+
+    pub fn verify_session_for_context(
+        &self,
+        request: VerifySessionRequest<'_>,
+        context_hash: Hash32,
+    ) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
+        self.verify_session_inner(request, Some(context_hash))
+    }
+
+    fn verify_session_inner(
+        &self,
+        request: VerifySessionRequest<'_>,
+        context_hash: Option<Hash32>,
+    ) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
+        verify_session_with_authority(
+            SessionAuthority::Current(self.head),
+            self.audit,
+            self.local_device,
+            request,
+            context_hash,
+        )
     }
 
     /// Signs only the binding, then atomically persists its encrypted profile and
@@ -795,7 +744,10 @@ impl<'a> OperatorBindingService<'a> {
             issued_at: now,
             not_before: now,
             not_after: window.not_after,
-            policy_object_hash: self.head.policy_object_hash(),
+            policy_object_hash: match &change {
+                RegistryChangeV1::Policy { object_hash } => *object_hash,
+                _ => self.head.policy_object_hash(),
+            },
             change,
             root_key_thumbprint: self.head.root_certificate_fields().root_key_thumbprint,
         })
@@ -880,4 +832,181 @@ fn require_distinct_authorizations(
         return Err(OperatorLifecycleError::Trust(TrustError::AuthReplay));
     }
     Ok(())
+}
+
+/// Writer-only native session boundary. No administration mutation methods.
+pub struct WriterOperatorSessionService<'a> {
+    head: ea_trust::WriterRegistryHeadRef<'a>,
+    audit: &'a dyn LocalAuditService,
+    local_device: VerifiedLocalDeviceIdentity,
+}
+impl<'a> WriterOperatorSessionService<'a> {
+    pub fn new(
+        head: ea_trust::WriterRegistryHeadRef<'a>,
+        audit: &'a dyn LocalAuditService,
+        local_device: VerifiedLocalDeviceIdentity,
+    ) -> Self {
+        Self {
+            head,
+            audit,
+            local_device,
+        }
+    }
+    pub fn verify_session(
+        &self,
+        request: VerifySessionRequest<'_>,
+        context: Option<Hash32>,
+    ) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
+        verify_session_with_authority(
+            SessionAuthority::Writer(self.head),
+            self.audit,
+            self.local_device,
+            request,
+            context,
+        )
+    }
+}
+#[derive(Clone, Copy)]
+enum SessionAuthority<'a> {
+    Current(&'a SelectedRegistryHead),
+    Writer(ea_trust::WriterRegistryHeadRef<'a>),
+}
+impl SessionAuthority<'_> {
+    fn view(&self) -> ea_trust::WriterRegistryHeadRef<'_> {
+        match self {
+            Self::Current(h) => (*h).into(),
+            Self::Writer(h) => *h,
+        }
+    }
+    fn check(&self, device: VerifiedLocalDeviceIdentity) -> Result<(), OperatorLifecycleError> {
+        match self {
+            Self::Current(head) => device.check(head),
+            Self::Writer(head) => device.check_writer(*head),
+        }
+    }
+    fn resolve(
+        &self,
+        binding: ObjectHash,
+        role: OperatorRoleV1,
+        purpose: ReauthPurpose,
+    ) -> Result<BoundOperator, OperatorError> {
+        match self {
+            Self::Current(head) => BoundOperator::resolve(head, binding),
+            Self::Writer(head) => {
+                if role != OperatorRoleV1::Writer || !purpose.is_writer_purpose() {
+                    return Err(OperatorError::RoleMismatch);
+                }
+                BoundOperator::resolve_writer(*head, binding)
+            }
+        }
+    }
+    fn verify(
+        &self,
+        request: &VerifySessionRequest<'_>,
+        proof: &OperatorSessionProof,
+    ) -> Result<(), OperatorError> {
+        match self {
+            Self::Current(head) => verify_current_session(
+                head,
+                request.device_certificate_hash,
+                request.role,
+                proof,
+                request.purpose,
+                request.account.as_ref(),
+            ),
+            Self::Writer(head) => ea_operator::verify_writer_session(
+                *head,
+                request.device_certificate_hash,
+                proof,
+                request.purpose,
+                request.account.as_ref(),
+            ),
+        }
+    }
+}
+fn verify_session_with_authority(
+    authority: SessionAuthority<'_>,
+    audit: &dyn LocalAuditService,
+    local_device: VerifiedLocalDeviceIdentity,
+    request: VerifySessionRequest<'_>,
+    context_hash: Option<Hash32>,
+) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
+    authority.check(local_device)?;
+    let head = authority.view();
+    let known = head
+        .active_operator_binding_fields(request.binding_object_hash)
+        .filter(|b| {
+            b.device_certificate_hash == local_device.certificate
+                && request.device_certificate_hash == local_device.certificate
+        })
+        .map(|_| request.binding_object_hash);
+    let device = AuthenticatedDevice::new(
+        local_device.organization,
+        local_device.device,
+        ObjectHash::try_from(local_device.certificate.as_bytes().as_slice())
+            .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
+        known,
+    );
+    let result = (|| {
+        head.active_certificate_fields(request.device_certificate_hash)
+            .ok_or(OperatorError::DeviceCertificateNotActive)?;
+        if request.device_certificate_hash != local_device.certificate {
+            return Err(OperatorError::DeviceMismatch.into());
+        }
+        let bound =
+            authority.resolve(request.binding_object_hash, request.role, request.purpose)?;
+        let authenticator = FreshAuthenticator {
+            bound,
+            native: request.authenticator,
+        };
+        let account = Box::new(SharedAccount(request.account.clone()));
+        let proof = match context_hash {
+            Some(context) => authenticator.reauthenticate_for_context(
+                account,
+                request.purpose,
+                head.preexisting_effective_now(),
+                context,
+            ),
+            None => authenticator.reauthenticate(account, request.purpose),
+        }?;
+        authority.verify(&request, &proof)?;
+        let profile = operator_profile::load(request.database)?
+            .ok_or(OperatorLifecycleError::ProfileMissing)?;
+        if profile.operator_binding_object_hash() != request.binding_object_hash {
+            return Err(OperatorLifecycleError::ProfileCommitment);
+        }
+        let fields = head
+            .active_operator_binding_fields(request.binding_object_hash)
+            .ok_or(OperatorError::BindingNotActive)?;
+        verify_operator_snapshot(&profile, fields)?;
+        Ok(VerifiedOperatorSession { profile, proof })
+    })();
+    let outcome = if result.is_ok() {
+        LocalAuditOutcomeV1::Completed
+    } else {
+        LocalAuditOutcomeV1::Failed
+    };
+    operator_host::record_local_audit_for(
+        head,
+        audit,
+        local_device,
+        &device,
+        TypedLocalAuditEvent {
+            action: LocalAuditActionV1::Login(GenericAuditContextV1::new(known)),
+            outcome,
+        },
+    )?;
+    if result.is_err() {
+        operator_host::record_local_audit_for(
+            head,
+            audit,
+            local_device,
+            &device,
+            TypedLocalAuditEvent {
+                action: LocalAuditActionV1::ReauthFailure(GenericAuditContextV1::new(known)),
+                outcome: LocalAuditOutcomeV1::Failed,
+            },
+        )?;
+    }
+    result
 }

@@ -44,7 +44,7 @@
 //! Kommando mit einer TEXTAUSGABE, die kein Verifikationsbericht ist, keine
 //! JSON-Form hat, weil `schemas/` geschlossen ist. `grant` und
 //! `recovery-test` haben keine Ausgabe, deren Form zu waehlen waere; ihr
-//! Ergebnis IST der Exitcode, und spaeter — Task 8 und 9 — ein Grant-Objekt
+//! Ergebnis IST der Exitcode, und bei der Neuberechtigung ein durabel auditiertes Grant-Objekt
 //! beziehungsweise die Berichtsdatei, deren Form `--format` so wenig
 //! aendert wie bei `report`. Eine Verweigerung heute waere eine Zusage, die
 //! Task 9 zuruecknaehme, und sie muesste VOR der Verifikation stehen (wie
@@ -99,7 +99,7 @@ use crate::args::{Format, UsageError};
 /// Pfad benennt also einen Platz, der noch frei sein muss. Die Begruendung
 /// steht in `crate::commands::organization`; hier steht sie in einem Wort,
 /// damit ein Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 13] = [
+const GRAMMAR_V1: [&str; 17] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -108,6 +108,10 @@ const GRAMMAR_V1: [&str; 13] = [
     "einsatzarchiv --trust-anchor <file> export <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
+    "einsatzarchiv --trust-anchor <new-file> organization certify-root --initial-registry-version <u64>",
+    "einsatzarchiv --trust-anchor <file> posture target --operator-config <file> --output <new-target.json>",
+    "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
+    "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
     "einsatzarchiv --trust-anchor <file> registry revocation-plan --operator-config <file> --effective-from <sequence> --valid-through <sequence> --not-after <unix-millis>",
     "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
@@ -119,14 +123,9 @@ const GRAMMAR_V1: [&str; 13] = [
 ///
 /// # Warum diese Zeile ueberhaupt gedruckt wird
 ///
-/// Die uebrigen fuenf Kommandos tun, was ihr Name sagt. Das sechste tut
-/// WENIGER, als sein Name vermuten laesst: es beginnt oder setzt die Zeremonie
-/// fort und berichtet ihren Schritt, aber es fuehrt keinen Schritt aus, der
-/// eine Offline-Schluesselquelle braucht — `ea_key_provider::SecretPurpose`
-/// kennt vier lokale Writer-Zwecke und ausdruecklich keinen Wurzelzweck
-/// (`crates/ea-key-provider/src/contract.rs:32-51`), und ein CLI-Prozess kann
-/// die aeusseren Schluessel nicht herbeireden. Wer das erst an einem
-/// ausbleibenden Schritt bemerkt, hat die Zeremonie bereits begonnen.
+/// Init remains start/resume. The separate certify-root command binds the
+/// already provisioned native Root only; later offline sources and the complete
+/// Recovery gate remain independent orchestration steps.
 ///
 /// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
 const ORGANIZATION_SCOPE_NOTE_V1: &str = "organization init begins or resumes the ceremony and \
@@ -172,17 +171,8 @@ const KEY_SOURCE_NOTE_V1: &str = "key-source is <path> | file:<path> | \
      pkcs11:module=<path>;token=<label>;id=<hex>;pin-file=<path>; passphrase and pin are read \
      from the named file with owner-only permissions, never from argv or the environment";
 
-/// Was `grant` TUT — und wo es in dieser Stufe endet.
-///
-/// Dieselbe Bauart wie [`ORGANIZATION_SCOPE_NOTE_V1`]: das Kommando tut
-/// WENIGER, als sein Name verspricht, und die Grammatik sagt das, bevor ein
-/// Aufrufer es an der Verweigerung bemerkt. Die Begruendung fuer die 21 steht
-/// in `crate::commands::grant`.
-///
-/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
-const GRANT_SCOPE_NOTE_V1: &str = "grant verifies the archive with the recovery key, resolves \
-     both key sources and reads both files, then ends with exit 21 naming the missing \
-     historical grant service; it issues nothing";
+/// Native configuration and deterministic append-only grant output.
+const GRANT_SCOPE_NOTE_V1: &str = "grant verifies the archive and requires --operator-config for native historical-regrant presence; signed audited grants are appended under --output or archive/grants";
 
 /// Was `recovery-test` TUT — und wo es in dieser Stufe endet.
 ///
@@ -350,6 +340,19 @@ pub fn print_organization_json_refusal() {
     eprintln!("einsatzarchiv: {ORGANIZATION_JSON_REFUSAL_V1}");
 }
 
+/// The bounded bootstrap extension has no versioned JSON schema yet.
+pub fn print_certify_root_json_refusal() {
+    eprintln!(
+        "einsatzarchiv: organization certify-root has a text form only: no versioned ceremony-status JSON schema is available"
+    );
+}
+
+pub fn print_certify_root_anchor_path_occupied_refusal() {
+    eprintln!(
+        "einsatzarchiv: the --trust-anchor path of organization certify-root names a future anchor and must be unoccupied"
+    );
+}
+
 /// Schreibt den Zeremoniestatus als geschlossene Zeilenfolge auf stdout.
 ///
 /// # Die Form ist GELIEHEN, nicht erfunden
@@ -416,49 +419,12 @@ pub fn print_report_signing_refusal() {
     eprintln!("einsatzarchiv: {REPORT_SIGNING_REFUSAL_V1}");
 }
 
-/// Der stabile Code, mit dem `grant` seine Grenze benennt.
-///
-/// `EA-CLI-` und nicht `EA-RECOVERY-`: die Grenze liegt im KOMMANDOPFAD —
-/// `ea-recovery` hat jede Eingabe aufgeloest und traegt keinen Fehler; was
-/// fehlt, ist der Dienst, den dieses Werkzeug rufen wuerde. Ein Skript
-/// unterscheidet daran diese 21 von der PKCS#11-Grenze
-/// (`EA-RECOVERY-PKCS11-UNBOUND`) und von einer Plattform ohne Rechtebits.
-pub const GRANT_SERVICE_UNAVAILABLE_CODE: &str = "EA-CLI-GRANT-SERVICE-UNAVAILABLE";
-
 /// Der stabile Code, mit dem `recovery-test` seine Grenze benennt.
 pub const RECOVERY_TEST_SERVICE_UNAVAILABLE_CODE: &str = "EA-CLI-RECOVERY-TEST-SERVICE-UNAVAILABLE";
 
-/// Die Verweigerung des historischen Grants, Wort fuer Wort.
-///
-/// # Sie NENNT, was geschehen ist, was fehlt und was NICHT entstanden ist
-///
-/// Drei Aussagen, alle pruefbar: der Bestand ist verifiziert und jede Eingabe
-/// aufgeloest (sonst stuende ein anderer Code da), der
-/// `HistoricalGrantService` ist Stage-5 Task 8, und es wurde nichts
-/// ausgestellt und nichts geschrieben. Ohne die dritte Aussage suchte ein
-/// Betreiber nach einem Grant-Objekt, das es nicht gibt. Die Begruendung fuer
-/// 21 statt 0 oder 15 steht in `crate::commands::grant`.
-///
-/// Sie nennt KEINEN Pfad und KEIN Byte einer Eingabe: die Zeile ist fest und
-/// haengt von keinem Argument ab — dieselbe Regel wie bei
-/// [`CLOCK_RELEASE_APPLIED_V1`].
-///
-/// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.
-const GRANT_SERVICE_REFUSAL_V1: &str = "the archive verified and every grant input resolved, \
-     but the historical grant service arrives with Stage-5 Task 8: nothing was issued and \
-     nothing was written";
-
-/// Druckt die Verweigerung des historischen Grants auf stderr.
-///
-/// stdout bleibt LEER: es ist kein Grant entstanden, ueber den etwas zu sagen
-/// waere.
-pub fn print_grant_service_refusal() {
-    eprintln!("einsatzarchiv: {GRANT_SERVICE_UNAVAILABLE_CODE}: {GRANT_SERVICE_REFUSAL_V1}");
-}
-
 /// Die Verweigerung des Wiederherstellungstests, Wort fuer Wort.
 ///
-/// Dieselbe Bauart wie [`GRANT_SERVICE_REFUSAL_V1`]; der Dienst ist Task 9,
+/// Der Dienst ist Task 9,
 /// und die dritte Aussage heisst hier: die Berichtsdatei ist NICHT angelegt.
 ///
 /// Englisch wie jede andere beobachtbare Zeichenkette dieses Binaers.

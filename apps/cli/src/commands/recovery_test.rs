@@ -1,43 +1,14 @@
-//! Kommando `recovery-test`.
+//! Native recovery source capture, restore/test and verified report exchange.
 //!
-//! Prueft vollstaendig, sichert das Ziel, liest das Inventar — und endet dann
-//! an der benannten Grenze.
+//! The explicit runtime configuration selects the independently provisioned
+//! installation, current operator and exact archive profile. Every productive
+//! operation uses RecoveryTestRuntime; caller paths or parsed inventory never
+//! attest restoration, identity or readiness. Report targets are exclusive new
+//! files, and failed tests retain their separate signed diagnostic status.
 //!
-//! # WAS DIESER HANDLER TUT
-//!
-//! Anker laden, die Fassade `ea_recovery::recovery_test_inputs` rufen, den
-//! Exitcode ableiten. Die Reihenfolge — Verifikation ohne Schluessel, Befund
-//! vor allem Weiteren, freies Ziel VOR dem Inventar — wohnt in der Fassade
-//! und ist dort ohne Prozessstart messbar
-//! (`crates/ea-recovery/tests/grant_inputs.rs`).
-//!
-//! # WARUM DER ERFOLGSPFAD MIT 21 ENDET, UND NICHT MIT 0 ODER 15
-//!
-//! Der `RecoveryTestService` und die Rust-Bindung von `ea.key-inventory/v1`
-//! sind Stage-5 Task 9. Ein Lauf, der mit 0 endete, meldete einen bestandenen
-//! Wiederherstellungstest, den niemand gefahren hat; einer, der mit 15
-//! endete, behauptete eine vollstaendige Pruefung mit fachlichem Rest, wo gar
-//! keine stattfand. 21 sagt, was ist: der Dienst ist nicht vorhanden. Das ist
-//! dasselbe Muster wie `--report-signing-key` in `super::report` (ADR 0001,
-//! „Blocked": angenommen, verweigert, benannt) und dieselbe Stellung wie in
-//! `super::grant`: HINTER Verifikation und Eingaben, damit Befunde und
-//! Eingabefehler ihre eigenen Codes tragen. Der Code ist
-//! [`crate::output::RECOVERY_TEST_SERVICE_UNAVAILABLE_CODE`].
-//!
-//! # ES ENTSTEHT KEINE ZIELDATEI
-//!
-//! Die Fassade fragt nur, ob das Ziel frei ist; angelegt wird es erst vom
-//! Dienst mit `create_new(true)`. Ein Ziel, das entstuende und leer bliebe,
-//! gaelte beim naechsten Versuch als belegt — und truege den Namen eines
-//! Berichts, den es nicht gibt. Gemessen in
-//! `apps/cli/tests/full_grammar.rs`.
-//!
-//! # ES WIRD NICHTS AUSGEGEBEN
-//!
-//! Wie bei `grant`, `decrypt` und `export`: das Ergebnis dieses Kommandos
-//! WIRD die Berichtsdatei sein, und `--format` entscheidet — wie bei
-//! `report` — nicht ueber deren Form. Es parst und tut hier nichts; siehe
-//! `crate::output` neben der JSON-Verweigerung von `organization init`.
+//! Without runtime arguments the legacy verification-only facade keeps its
+//! named Unsupported boundary. It cannot claim a successful recovery test or
+//! create an empty report file merely because public archive checks passed.
 
 use std::path::Path;
 
@@ -56,8 +27,22 @@ pub fn run(
     archive: &Path,
     key_inventory: &Path,
     output_path: &Path,
+    runtime: Option<&crate::args::RecoveryRuntimeArguments>,
     now: UnixMillis,
 ) -> ExitCode {
+    if let Some(runtime) = runtime {
+        return run_with_runtime_opener(
+            invocation,
+            archive,
+            key_inventory,
+            output_path,
+            runtime,
+            now,
+            |config, anchor, now| {
+                ea_admin::operator_runtime::OperatorRuntime::open(config, anchor, now, false)
+            },
+        );
+    }
     let anchor = match load_trust_anchor(&invocation.anchor) {
         Ok(anchor) => anchor,
         Err(error) => {
@@ -88,4 +73,190 @@ pub fn run(
         // Ein BEFUND ueber den Bestand: dieselbe Ableitung wie bei `verify`.
         finding => finding,
     }
+}
+
+pub(crate) fn run_with_runtime_opener(
+    invocation: &Invocation,
+    archive: &Path,
+    key_inventory: &Path,
+    output: &Path,
+    runtime: &crate::args::RecoveryRuntimeArguments,
+    now: UnixMillis,
+    open: impl FnOnce(
+        ea_admin::operator_runtime::OperatorRuntimeConfig,
+        &Path,
+        UnixMillis,
+    ) -> Result<
+        ea_admin::operator_runtime::OperatorRuntime,
+        ea_admin::operator_runtime::OperatorRuntimeError,
+    >,
+) -> ExitCode {
+    use ea_admin::{
+        operator_runtime::OperatorRuntimeConfig,
+        recovery_test_runtime::{RecoveryTestRuntime, parse_recovery_archive_profile},
+    };
+    let result = (|| -> Result<(), CommandFailure> {
+        let anchor = load_trust_anchor(&invocation.anchor)?;
+        let source = ea_recovery::FsArchiveSource::open(archive)?;
+        ea_recovery::RecoveryArchiveProbe::verify(&source, &anchor, now).map_err(test_failure)?;
+        ea_recovery::output_file_is_free(output)?;
+        let inventory = ea_recovery::KeyInventory::parse(&read(key_inventory, 1024 * 1024)?)
+            .map_err(|_| test_failure(ea_recovery::RecoveryTestError::Inventory))?;
+        let config = OperatorRuntimeConfig::load(&runtime.config)?;
+        let observed = std::fs::canonicalize(archive).map_err(|_| io_failure())?;
+        if observed != std::fs::canonicalize(&config.archive_directory).map_err(|_| io_failure())? {
+            return Err(test_failure(ea_recovery::RecoveryTestError::Source));
+        }
+        let profile = parse_recovery_archive_profile(&read(&runtime.profile, 65536)?)?;
+        let mut service =
+            RecoveryTestRuntime::new(open(config, &invocation.anchor, now)?, profile)?;
+        match &runtime.action {
+            crate::args::recovery::RecoveryRuntimeAction::Capture {
+                snapshot,
+                passphrase,
+            } => {
+                let phrase = ea_recovery::read_secret_file(passphrase)?;
+                let captured = service.capture_inventory(&inventory, snapshot, &phrase)?;
+                write_new(output, captured.exact_envelope())?;
+            }
+            crate::args::recovery::RecoveryRuntimeAction::Import { source, report } => {
+                let imported = service.import_completed_report(
+                    &inventory,
+                    &read(source, 512 * 1024)?,
+                    &read(report, 4 * 1024 * 1024)?,
+                )?;
+                write_new(output, imported.exact_envelope())?;
+            }
+            crate::args::recovery::RecoveryRuntimeAction::Status => {
+                let report = service
+                    .read_imported_completed_report(&inventory)?
+                    .ok_or_else(|| test_failure(ea_recovery::RecoveryTestError::Incomplete))?;
+                write_new(output, report.exact_envelope())?;
+            }
+            crate::args::recovery::RecoveryRuntimeAction::FailureStatus { restore } => {
+                let report = service
+                    .read_failed_report(&inventory, restore)?
+                    .ok_or_else(|| test_failure(ea_recovery::RecoveryTestError::Incomplete))?;
+                write_new(output, report.exact_envelope())?;
+                return Err(test_failure(ea_recovery::RecoveryTestError::Incomplete));
+            }
+            crate::args::recovery::RecoveryRuntimeAction::RestoreRun {
+                source,
+                snapshot,
+                passphrase,
+                restore,
+                media,
+            } => {
+                let media = ea_admin::recovery_test_runtime::parse_recovery_media_sources(
+                    &read(media, 1024 * 1024)?,
+                    &inventory,
+                )?;
+                let exact_source = read(source, 512 * 1024)?;
+                let phrase = ea_recovery::read_secret_file(passphrase)?;
+                let restored = service.restore_source(
+                    ea_admin::recovery_test_runtime::RecoverySourceRestore {
+                        inventory: &inventory,
+                        exact_source: &exact_source,
+                        snapshot,
+                        passphrase: &phrase,
+                        target: restore,
+                    },
+                )?;
+                drop(phrase);
+                match service.run_restored_test_report(&restored, &inventory, &media)? {
+                    ea_admin::recovery_test_runtime::RecoveryTestOutcome::Completed(report) => {
+                        write_new(output, report.exact_envelope())?;
+                    }
+                    ea_admin::recovery_test_runtime::RecoveryTestOutcome::Failed(report) => {
+                        write_new(output, report.exact_envelope())?;
+                        return Err(test_failure(ea_recovery::RecoveryTestError::Incomplete));
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::Success,
+        Err(CommandFailure(code, exit)) => {
+            eprintln!("{code}");
+            exit
+        }
+    }
+}
+struct CommandFailure(&'static str, ExitCode);
+fn io_failure() -> CommandFailure {
+    CommandFailure("EA-RECOVERY-TEST-IO", ExitCode::Io)
+}
+fn test_failure(error: ea_recovery::RecoveryTestError) -> CommandFailure {
+    use ea_recovery::RecoveryTestError::*;
+    CommandFailure(
+        error.code(),
+        match error {
+            Archive | Payload => ExitCode::Integrity,
+            Key | Protection => ExitCode::Key,
+            Role | Operator | Audit | Machine => ExitCode::Trust,
+            Incomplete => ExitCode::Incomplete,
+            Inventory | Source => ExitCode::Usage,
+            Entropy | Store => ExitCode::Io,
+        },
+    )
+}
+impl From<ea_recovery::RecoveryError> for CommandFailure {
+    fn from(error: ea_recovery::RecoveryError) -> Self {
+        Self(error.code(), ea_recovery::exit_code_for_error(&error))
+    }
+}
+impl From<ea_admin::operator_runtime::OperatorRuntimeError> for CommandFailure {
+    fn from(error: ea_admin::operator_runtime::OperatorRuntimeError) -> Self {
+        Self(error.code(), error.exit_code())
+    }
+}
+impl From<ea_admin::recovery_test_runtime::RecoveryRuntimeError> for CommandFailure {
+    fn from(error: ea_admin::recovery_test_runtime::RecoveryRuntimeError) -> Self {
+        use ea_admin::recovery_test_runtime::RecoveryRuntimeError::*;
+        match error {
+            Runtime(e) => e.into(),
+            Test(e) => test_failure(e),
+            Aborted => Self("EA-RECOVERY-TEST-CANCELLED", ExitCode::Incomplete),
+            Store(e) => Self(e.code(), ExitCode::Io),
+            Backend(e) => Self(e.code(), ExitCode::Io),
+        }
+    }
+}
+fn read(path: &Path, limit: usize) -> Result<Vec<u8>, CommandFailure> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|_| io_failure())?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| io_failure())?;
+    if bytes.len() > limit {
+        return Err(test_failure(ea_recovery::RecoveryTestError::Source));
+    }
+    Ok(bytes)
+}
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), CommandFailure> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|_| io_failure())?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| io_failure())?;
+    #[cfg(unix)]
+    std::fs::File::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )
+    .and_then(|d| d.sync_all())
+    .map_err(|_| io_failure())?;
+    Ok(())
 }

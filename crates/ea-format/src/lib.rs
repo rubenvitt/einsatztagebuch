@@ -17,8 +17,8 @@ mod trust_view;
 pub use archive_profile::{
     ActiveProfilePointerCoreV1, ArchiveBackendProfileCoreFieldsV1, ArchiveBackendProfileCoreV1,
     ArchiveInventoryEntryV1, ArchiveInventoryListV1, ArchiveProfileKindV1,
-    encode_active_profile_pointer_core, encode_archive_backend_profile_core,
-    encode_archive_inventory_list,
+    decode_active_profile_pointer_core, encode_active_profile_pointer_core,
+    encode_archive_backend_profile_core, encode_archive_inventory_list,
 };
 pub use eag::{
     GrantBodyFieldsV1, GrantBodyV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1, GrantPurposeV1,

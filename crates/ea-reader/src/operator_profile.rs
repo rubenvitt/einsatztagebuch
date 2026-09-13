@@ -5,23 +5,19 @@ use std::collections::BTreeMap;
 use ea_archive::ArchiveInventory;
 use ea_format::{ManifestCoreFieldsV1, OperatorBindingFieldsV1, OperatorRoleV1};
 use ea_schema::{CommonHeaderV1, PayloadV1};
-use ea_trust::{
-    RegistrySelectionOutcome, SelectedRegistryHead, TrustAnchorV1, load_trust_state,
-    prepare_local_time, select_registry_head, verify_registry_candidate, verify_trust,
-};
+use ea_trust::{HistoricalRegistryAuthority, TrustAnchorV1};
 use ea_types::{ObjectHash, UnixMillis};
-use ea_verify::{EphemeralTrustStateStore, verification_state_key};
 
 use crate::ReaderError;
 
 /// Only authenticated, activated binding fields at this entry's sequence.
-/// Retaining a SelectedRegistryHead per entry would also retain a separately
+/// Retaining a HistoricalRegistryAuthority per entry would also retain a separately
 /// replayed copy of the entire trust catalog per entry. These small fields
 /// keep that catalog out of the long-lived decryption witnesses.
 pub(crate) struct HistoricalOperatorBindings(BTreeMap<ObjectHash, OperatorBindingFieldsV1>);
 
 impl HistoricalOperatorBindings {
-    fn from_head(head: &SelectedRegistryHead, inventory: &ArchiveInventory) -> Self {
+    fn from_head(head: &HistoricalRegistryAuthority, inventory: &ArchiveInventory) -> Self {
         Self(
             inventory
                 .trust()
@@ -37,8 +33,8 @@ impl HistoricalOperatorBindings {
 }
 
 /// Replays the authenticated line only as far as the manifest's exact head.
-/// The anchor and clock are the same inputs as the archive report; this does
-/// not introduce a weaker historical clock or use catalog membership as proof.
+/// The exact signed line supplies historical authority without creating a
+/// current-action time token or using catalog membership as proof.
 /// A later revocation must not replace this entry's historical attribution.
 pub(crate) fn historical_bindings(
     anchor: &TrustAnchorV1,
@@ -51,35 +47,15 @@ pub(crate) fn historical_bindings(
     {
         return None;
     }
-    let key = verification_state_key(anchor.organization_id());
-    let mut store = EphemeralTrustStateStore::new(key, effective_now);
-    let mut previous_version = None;
-    for _ in 0..ea_trust::MAX_TRUST_OBJECTS_V1 {
-        let snapshot = load_trust_state(&mut store, key).ok()?;
-        let trust = verify_trust(anchor, inventory, snapshot).ok()?;
-        let candidate = verify_registry_candidate(&trust, manifest.chain_sequence).ok()?;
-        let version = candidate.registry_version();
-        if version > manifest.registry_version
-            || previous_version.is_some_and(|previous| version <= previous)
-        {
-            return None;
-        }
-        previous_version = Some(version);
-        let target = version == manifest.registry_version;
-        if target && *candidate.registry_head_hash().as_bytes() != manifest.registry_head_hash {
-            return None;
-        }
-        let time = prepare_local_time(&mut store, &candidate, effective_now, &[]).ok()?;
-        match select_registry_head(candidate, time, None).ok()? {
-            RegistrySelectionOutcome::Selected(head) if target => {
-                return Some(HistoricalOperatorBindings::from_head(&head, inventory));
-            }
-            RegistrySelectionOutcome::Advanced(_) if target => return None,
-            RegistrySelectionOutcome::PendingFuture(_) => return None,
-            RegistrySelectionOutcome::Selected(_) | RegistrySelectionOutcome::Advanced(_) => {}
-        }
-    }
-    None
+    let head = ea_verify::historical_registry_head(
+        inventory,
+        anchor,
+        manifest.registry_version,
+        ObjectHash::try_from(manifest.registry_head_hash.as_slice()).ok()?,
+        manifest.chain_sequence,
+        effective_now,
+    )?;
+    Some(HistoricalOperatorBindings::from_head(&head, inventory))
 }
 
 pub(crate) fn verify_snapshot(

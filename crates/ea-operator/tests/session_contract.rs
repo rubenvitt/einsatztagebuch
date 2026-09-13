@@ -290,6 +290,26 @@ pub(crate) mod fixtures {
         select_head_of(&build_line().0, now_ms)
     }
 
+    pub fn stale_writer_registry_head() -> ea_trust::StaleWriterRegistryHead {
+        let (line, _, _) = build_line();
+        let index = line.heads().len() - 1;
+        let head = line.heads()[index];
+        let key = support::state_key();
+        let now = UnixMillis::new(FIXTURE_NOT_AFTER_MS + 1);
+        let trusted_time = TrustedTimeState::initial(now);
+        let trust = line.verified_with_record(Pin::Head(index), 17, trusted_time.clone(), key);
+        let mut store = ModelStore {
+            key,
+            revision: 17,
+            trusted_time,
+            pinned_head: RegistryHeadPin::new(head.version, head.object_hash),
+        };
+        let candidate =
+            verify_registry_candidate(&trust, ChainSequence::new(PROPOSED_SEQUENCE)).unwrap();
+        let time = prepare_local_time(&mut store, &candidate, now, &[]).unwrap();
+        ea_trust::select_stale_writer_registry_head(candidate, time).unwrap()
+    }
+
     /// Waehlt den letzten Head EINER GEBAUTEN LINIE — der gemeinsame Rumpf von
     /// [`selected_registry_head_at`] und den beiden Randlinien darunter.
     ///
@@ -602,6 +622,61 @@ pub(crate) mod fixtures {
 }
 
 use fixtures::FakeAuthenticator;
+
+#[test]
+fn stale_writer_binding_can_issue_only_writer_purpose_presence() {
+    let head = fixtures::stale_writer_registry_head();
+    for purpose in ReauthPurpose::ALL {
+        let bound =
+            BoundOperator::resolve_writer(head.as_writer(), fixtures::binding_object_hash())
+                .unwrap();
+        let auth = FakeAuthenticator::new(bound);
+        let proof = auth.reauthenticate(fixtures::valid_account(), purpose);
+        let allowed = matches!(
+            purpose,
+            ReauthPurpose::Finalize
+                | ReauthPurpose::DiscardDraft
+                | ReauthPurpose::RegistryStaleFinalize
+        );
+        assert_eq!(proof.is_ok(), allowed, "purpose {}", purpose.label());
+        if let Ok(proof) = proof {
+            ea_operator::verify_writer_session(
+                head.as_writer(),
+                ea_types::CertificateHash::from(fixtures::writer_certificate_object_hash()),
+                &proof,
+                purpose,
+                fixtures::valid_account().as_ref(),
+            )
+            .unwrap();
+            assert!(
+                ea_operator::verify_writer_session(
+                    head.as_writer(),
+                    ea_types::CertificateHash::from(fixtures::writer_certificate_object_hash()),
+                    &proof,
+                    purpose,
+                    fixtures::wrong_account().as_ref()
+                )
+                .is_err()
+            );
+        } else {
+            assert!(
+                auth.challenges().is_empty(),
+                "forbidden purpose must not request presence"
+            );
+        }
+    }
+}
+
+#[test]
+fn writer_context_cannot_resolve_an_administrator_binding() {
+    let (line, binding, _) = fixtures::build_line_for(
+        ea_format::CertificateKindV1::OrganizationAdmin,
+        ea_format::OperatorRoleV1::OrganizationAdmin,
+        0x62,
+    );
+    let head = fixtures::select_head_of(&line, fixtures::FIXTURE_NOW_MS);
+    assert!(BoundOperator::resolve_writer((&head).into(), binding).is_err());
+}
 
 #[test]
 fn finalization_requires_matching_account_instance_key_and_fresh_presence() {

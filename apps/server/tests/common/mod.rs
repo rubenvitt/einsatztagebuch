@@ -478,6 +478,61 @@ pub async fn spawn_server_in_bucket(
     server_certificate_hash: ea_types::CertificateHash,
     bucket: &str,
 ) -> TestServer {
+    spawn_server_with_deletion_component(
+        pool,
+        now,
+        organization_id,
+        server_secret,
+        server_certificate_hash,
+        bucket,
+        None,
+    )
+    .await
+}
+pub async fn spawn_server_with_deletion_component(
+    pool: PgPool,
+    now: ea_types::UnixMillis,
+    organization_id: ea_types::OrganizationId,
+    server_secret: [u8; 32],
+    server_certificate_hash: ea_types::CertificateHash,
+    bucket: &str,
+    deletion: Option<([u8; 32], ea_types::CertificateHash)>,
+) -> TestServer {
+    spawn_server_with_object_store(
+        pool,
+        now,
+        organization_id,
+        server_secret,
+        server_certificate_hash,
+        bucket,
+        TestExecutionPorts {
+            deletion,
+            objects_override: None,
+            clock_override: None,
+        },
+    )
+    .await
+}
+pub struct TestExecutionPorts {
+    pub deletion: Option<([u8; 32], ea_types::CertificateHash)>,
+    pub objects_override: Option<std::sync::Arc<dyn ea_sync_server::ObjectStore>>,
+    pub clock_override: Option<std::sync::Arc<dyn ea_sync_server::ServerClock>>,
+}
+/// Scheduling-only decorator for actual adapter race tests.
+pub async fn spawn_server_with_object_store(
+    pool: PgPool,
+    now: ea_types::UnixMillis,
+    organization_id: ea_types::OrganizationId,
+    server_secret: [u8; 32],
+    server_certificate_hash: ea_types::CertificateHash,
+    bucket: &str,
+    execution: TestExecutionPorts,
+) -> TestServer {
+    let TestExecutionPorts {
+        deletion,
+        objects_override,
+        clock_override,
+    } = execution;
     use std::sync::Arc;
 
     use einsatzarchiv_server::{
@@ -501,7 +556,8 @@ pub async fn spawn_server_in_bucket(
         .expect("the bound address must be readable");
     let authority = format!("localhost:{}", address.port());
 
-    let clock = Arc::new(FixedClock(now));
+    let clock: Arc<dyn ea_sync_server::ServerClock> =
+        clock_override.unwrap_or_else(|| Arc::new(FixedClock(now)));
     let repository = Arc::new(PostgresRepository::new(pool.clone()));
     let signer = Arc::new(
         ServerKeyStore::new(
@@ -511,7 +567,19 @@ pub async fn spawn_server_in_bucket(
         )
         .expect("the test server key must load"),
     );
-    let objects = Arc::new(S3ObjectStore::new(
+    let deletion_component = deletion
+        .map(|(secret, certificate)| {
+            einsatzarchiv_server::adapters::deletion_key::ServerDeletionKeyStore::new(
+                ea_crypto::SecretBytes::new(secret),
+                certificate,
+                signer.as_ref(),
+            )
+            .unwrap()
+        })
+        .map(|value| {
+            Arc::new(value) as Arc<dyn ea_sync_server::managed_destruction::ServerDeletionComponent>
+        });
+    let default_objects = Arc::new(S3ObjectStore::new(
         object_store_client().await,
         bucket.to_owned(),
         organization_id,
@@ -519,6 +587,7 @@ pub async fn spawn_server_in_bucket(
         repository.clone(),
         clock.clone(),
     ));
+    let objects: Arc<dyn ea_sync_server::ObjectStore> = objects_override.unwrap_or(default_objects);
     let web_origins = Arc::new(
         einsatzarchiv_server::config::WebOriginPolicy::new(TEST_BUNDLE_ORIGIN.to_owned(), &[])
             .expect("the test bundle origin must be a usable https origin"),
@@ -527,6 +596,7 @@ pub async fn spawn_server_in_bucket(
         authority: authority.clone(),
         clock,
         signer,
+        deletion_component,
         objects: objects.clone(),
         repository: repository.clone(),
         trust_authority: Arc::new(PostgresTrustAuthority::new(pool, objects)),
@@ -988,8 +1058,31 @@ pub async fn stand_up_read_server_with_server_key(
     with_grant_authorities: bool,
     foreign_server_key: Option<([u8; 32], ea_types::CertificateHash)>,
 ) -> ReadyServer {
+    stand_up_read_server_with_closure(
+        database,
+        now_millis,
+        trust_closure::build_with(false, with_grant_authorities),
+        foreign_server_key,
+    )
+    .await
+}
+
+pub async fn stand_up_destruction_server(database: &TestDatabase) -> ReadyServer {
+    stand_up_read_server_with_closure(
+        database,
+        READ_SERVER_NOW_MILLIS,
+        trust_closure::build_for_destruction(),
+        None,
+    )
+    .await
+}
+async fn stand_up_read_server_with_closure(
+    database: &TestDatabase,
+    now_millis: i64,
+    closure: trust_closure::ExtendedClosure,
+    foreign_server_key: Option<([u8; 32], ea_types::CertificateHash)>,
+) -> ReadyServer {
     let fixture = seed_trust_fixture(database.pool(), trust_closure::ROTATION_CASE, &[]).await;
-    let closure = trust_closure::build_with(false, with_grant_authorities);
     assert!(
         closure.organization_id == fixture.organization_id,
         "the extension binds to the frozen anchor's organization"

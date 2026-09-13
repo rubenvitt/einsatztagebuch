@@ -93,8 +93,8 @@ invalid:
 }
 
 const char *ea_parse(const unsigned char *data, size_t len, EaRequest *r) {
-    enum { OP, SLOT, KIND, DATA, PRESENCE, REPLACE, INSTALLATION, FIELD_COUNT };
-    const char *names[] = {"op", "slot", "kind", "data", "presence", "replace", "installation_id"};
+    enum { OP, SLOT, KIND, DATA, PRESENCE, REPLACE, INSTALLATION, EXPECTED_PUBLIC, FIELD_COUNT };
+    const char *names[] = {"op", "slot", "kind", "data", "presence", "replace", "installation_id", "expected_public_key"};
     char *values[FIELD_COUNT] = {0};
     gboolean seen[FIELD_COUNT] = {0}, boolean[FIELD_COUNT] = {0};
     const char *error = "invalid-request";
@@ -135,7 +135,11 @@ const char *ea_parse(const unsigned char *data, size_t len, EaRequest *r) {
     gboolean generate = !strcmp(r->op, "generate"), sign = !strcmp(r->op, "sign");
     gboolean wrap = !strcmp(r->op, "wrap-secret"), unwrap = !strcmp(r->op, "unwrap-secret");
     gboolean pub = !strcmp(r->op, "public-key"), contains = !strcmp(r->op, "contains");
-    if (!bare && !generate && !sign && !wrap && !unwrap && !pub && !contains && strcmp(r->op, "delete")) goto done;
+    gboolean backup = !strcmp(r->op, "backup-signing-seed");
+    if (!bare && !generate && !sign && !wrap && !unwrap && !pub && !contains && !backup && strcmp(r->op, "delete")) goto done;
+    if (seen[EXPECTED_PUBLIC] != backup) goto done;
+    if (backup && (seen[KIND] || seen[REPLACE] || !seen[PRESENCE] || !seen[INSTALLATION])) goto done;
+    if (backup && len > 512) { error = "request-too-large"; goto done; }
     if (bare && (seen[SLOT] || seen[KIND])) goto done;
     if (seen[REPLACE] && !generate) goto done;
     if (seen[DATA] != (sign || wrap)) goto done;
@@ -168,7 +172,12 @@ const char *ea_parse(const unsigned char *data, size_t len, EaRequest *r) {
         if (!ea_unhex(values[INSTALLATION], r->installation, 32, &n) || n != 32) goto done;
         r->has_installation = TRUE;
     }
-    error = NULL;
+    if (backup) {
+        size_t n;
+        if (!ea_unhex(values[EXPECTED_PUBLIC], r->expected_public, 32, &n) || n != 32) goto done;
+        r->has_expected_public = TRUE;
+        error = ea_validate_signing_backup(r);
+    } else error = NULL;
 done:
     for (size_t i = 0; i < FIELD_COUNT; i++) if (values[i]) {
         OPENSSL_cleanse(values[i], strlen(values[i])); g_free(values[i]);
@@ -196,4 +205,12 @@ gboolean ea_parse_challenge(const unsigned char *data, size_t len, char challeng
 done:
     g_free(key); g_free(value);
     return ok;
+}
+
+const char *ea_validate_signing_backup(const EaRequest *r) {
+    if (strcmp(r->op, "backup-signing-seed") ||
+        (strcmp(r->slot, "admin-signing") && strcmp(r->slot, "root-signing")) ||
+        *r->kind || r->replace || r->data_len || !r->has_installation || !r->has_expected_public)
+        return "invalid-request";
+    return r->presence ? NULL : "presence-required";
 }

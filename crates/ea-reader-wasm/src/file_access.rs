@@ -258,22 +258,80 @@ pub fn file_mode_bundle_extension() -> String {
 /// laesst, und die des Klassifizierers.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "fileModeOpenBundle")]
-pub fn file_mode_open_bundle(
+pub async fn file_mode_open_bundle(
     session: u32,
     bytes: Vec<u8>,
     effective_now_ms: i64,
 ) -> Result<String, JsValue> {
     view::close_stand();
-    let effective_now = UnixMillis::new(effective_now_ms);
+    let source = ea_reader::ReaderArchiveSourceV1::Bundle(
+        ea_reader::ArchiveBundleSource::from_bytes(bytes)
+            .map_err(|e| JsValue::from_str(e.code()))?,
+    );
+    let effective_now =
+        observe_grant_time(session, &source, UnixMillis::new(effective_now_ms)).await?;
     let stand = with_unlocked_vault(session, effective_now, move |vault| {
         let mut observer = RecordingObserver::new();
-        ReaderFileMode::open_bundle_observed(bytes, vault, effective_now, &mut observer)
+        ReaderFileMode::open_source_observed(source, vault, effective_now, &mut observer)
             .map(|opened| view::build_stand(opened, vault, effective_now, observer.events()))
     })?
     .map_err(|error| JsValue::from_str(error.code()))?;
     let rendered = file_mode_archive_json(stand.opened());
     view::install_stand(stand);
     Ok(rendered)
+}
+
+/// Open the per-vault metadata handle before borrowing the session. OPFS
+/// serializes concurrent floor updates; put flushes before any decapsulation.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn observe_grant_time(
+    session: u32,
+    source: &dyn ea_reader::ArchiveSource,
+    now: UnixMillis,
+) -> Result<UnixMillis, JsValue> {
+    let authority_key = with_unlocked_vault(
+        session,
+        now,
+        ea_reader::ReaderCacheDestruction::authority_key,
+    )?
+    .map_err(|e| JsValue::from_str(e.code()))?;
+    let authority = crate::opfs_worker::OpfsBlobStore::open("ea-reader", &[authority_key])
+        .await
+        .map_err(|e| JsValue::from_str(e.code()))?;
+    let authority_time = with_unlocked_vault(session, now, |vault| {
+        ea_reader::ReaderCacheDestruction::observed_authority_time(vault, &authority)
+    })?
+    .map_err(JsValue::from_str)?;
+    drop(authority);
+    let now = now.max(authority_time);
+    // This pass has NO recipient key. Authenticated Receipt/Checkpoint time
+    // must reach OPFS before classification can perform its first HPKE.
+    let observed = with_unlocked_vault(session, now, |vault| {
+        ea_reader::ReaderVerifier::new(ea_reader::ReaderMode::File, now)
+            .verified_time(source, vault)
+    })?
+    .map_err(|e| JsValue::from_str(e.code()))?;
+    persist_grant_time(session, observed).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn persist_grant_time(
+    session: u32,
+    observed: UnixMillis,
+) -> Result<UnixMillis, JsValue> {
+    let now = observed;
+    let key = with_unlocked_vault(session, now, ea_reader::ReaderGrantTimeStore::blob_key)?
+        .map_err(|e| JsValue::from_str(e.code()))?;
+    let mut store = crate::opfs_worker::OpfsBlobStore::open(
+        "einsatzarchiv-reader-grant-time",
+        std::slice::from_ref(&key),
+    )
+    .await
+    .map_err(|e| JsValue::from_str(e.code()))?;
+    with_unlocked_vault(session, now, |vault| {
+        ea_reader::ReaderGrantTimeStore::observe(vault, &mut store, observed)
+    })?
+    .map_err(|e| JsValue::from_str(e.code()))
 }
 
 /// Legt eine leere Verzeichnisquelle an und gibt ihre Kennung zurueck.
@@ -349,7 +407,7 @@ pub fn file_mode_directory_unavailable(handle: u32) -> Result<(), JsValue> {
 /// Berechtigung ist `EA-ARCHIVE-UNAVAILABLE`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "fileModeOpenDirectory")]
-pub fn file_mode_open_directory(
+pub async fn file_mode_open_directory(
     session: u32,
     handle: u32,
     effective_now_ms: i64,
@@ -358,7 +416,8 @@ pub fn file_mode_open_directory(
     let source = DIRECTORY_SOURCES
         .with(|table| table.borrow_mut().remove(&handle))
         .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))?;
-    let effective_now = UnixMillis::new(effective_now_ms);
+    let effective_now =
+        observe_grant_time(session, &source, UnixMillis::new(effective_now_ms)).await?;
     let stand = with_unlocked_vault(session, effective_now, move |vault| {
         let mut observer = RecordingObserver::new();
         ReaderFileMode::open_directory_observed(source, vault, effective_now, &mut observer)
@@ -421,4 +480,15 @@ mod tests {
         assert_eq!(mixed.not_server_confirmed, 1);
         assert_eq!(mixed.archive_wide, ServerConfirmationV1::NotServerConfirmed);
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn take_directory_source(handle: u32) -> Result<DirectoryHandleSource, JsValue> {
+    DIRECTORY_SOURCES
+        .with(|table| table.borrow_mut().remove(&handle))
+        .ok_or_else(|| JsValue::from_str(BRIDGE_ARGUMENT_CODE))
+}
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn clear_directory_sources() {
+    DIRECTORY_SOURCES.with(|table| table.borrow_mut().clear());
 }

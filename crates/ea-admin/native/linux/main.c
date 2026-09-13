@@ -54,7 +54,17 @@ int main(int argc, char **argv) {
         OPENSSL_cleanse(request, sizeof *request); g_free(request);
         return result;
     }
-    if (!error) error = ea_execute(request, &fields);
+    if (!error && !strcmp(request->op, "backup-signing-seed")) {
+        EaSigningBackupFrame *frame = g_malloc0(sizeof *frame);
+        error = ea_execute_signing_backup(request, frame);
+        if (!error) {
+            gboolean written = ea_write_signing_backup(STDOUT_FILENO, frame);
+            OPENSSL_cleanse(frame, sizeof *frame); g_free(frame);
+            OPENSSL_cleanse(request, sizeof *request); g_free(request);
+            return written ? 0 : 1;
+        }
+        OPENSSL_cleanse(frame, sizeof *frame); g_free(frame);
+    } else if (!error) error = ea_execute(request, &fields);
     OPENSSL_cleanse(request, sizeof *request); g_free(request);
     if (error) {
         fields = json_object_new();

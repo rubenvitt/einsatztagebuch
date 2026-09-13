@@ -79,6 +79,11 @@
 mod contract;
 #[cfg(feature = "test-support")]
 mod in_memory;
+mod native_posture;
+mod os_build;
+mod machine_identity;
+pub use machine_identity::{MachineIdentityError, MeasuredMachineIdentity, measure_native_machine_identity};
+pub use os_build::{HostOsBuild, measure_native_os_build};
 // Die drei Plattformraender sind BEDINGUNGSLOS deklariert und nicht per
 // `#[cfg(target_os = …)]` gegated. Ein gegateter Rand wuerde auf dem Host, auf
 // dem Stufe 2 geprueft wird, nicht einmal geparst — der gepinnte Compiler

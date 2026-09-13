@@ -1875,3 +1875,6 @@ fn candidate_and_local_time_block_must_come_from_the_same_exact_flow() {
     assert!(store.replay_queries.is_empty());
     assert_only_task9_time_was_committed(&block_fixture, &store);
 }
+
+#[path = "clock_repair/cases.rs"]
+mod clock_repair_cases;

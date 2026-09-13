@@ -12,7 +12,7 @@
 //! genau ein Recovery — kommen aus demselben eingefrorenen Konstruktor.
 
 use ea_format::{CertificateKindV1, GrantPlanItemV1, GrantPlanV1, GrantPurposeV1};
-use ea_trust::SelectedRegistryHead;
+use ea_trust::{SelectedRegistryHead, WriterRegistryHeadRef};
 
 use crate::WriterError;
 
@@ -34,6 +34,12 @@ use crate::WriterError;
 /// Plan ablehnt — bei KEINEM, bei einem ZWEITEN Recovery-Empfaenger oder bei
 /// einem doppelten Empfaenger.
 pub fn build_grant_plan(head: &SelectedRegistryHead) -> Result<GrantPlanV1, WriterError> {
+    build_writer_grant_plan(head.into())
+}
+
+pub(crate) fn build_writer_grant_plan(
+    head: WriterRegistryHeadRef<'_>,
+) -> Result<GrantPlanV1, WriterError> {
     let mut items = Vec::new();
     for (certificate_hash, fields) in head.active_certificates() {
         let purpose = match fields.certificate_kind {

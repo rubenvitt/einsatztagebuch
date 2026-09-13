@@ -151,6 +151,7 @@ impl LocalTimeBlock<'_> {
         }
         Ok(crate::PreexistingEffectiveNow {
             value: self.evaluation.raw_now(),
+            persisted_floor: committed.trusted_time().floor(),
             successor_ready_at,
             wall_clock_ceiling: self.trusted_time.independent_reference().map(|reference| {
                 UnixMillis::new(

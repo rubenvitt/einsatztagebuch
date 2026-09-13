@@ -80,6 +80,19 @@ export type PatientCountStatus =
   | 'Unknown'
   | 'Known'
 
+export type LocalWriterLockDiagnosis =
+  | 'Missing'
+  | 'AbandonedInert'
+  | 'LiveOwner'
+  | 'Unreadable'
+
+export type DestructionStateV1 =
+  | 'requested'
+  | 'inProgress'
+  | 'pendingBackupExpiry'
+  | 'completeManagedScope'
+  | 'incompleteUnreachableReplica'
+
 export type GoLiveRequirementStatus =
   | 'Confirmed'
   | 'NotMet'
@@ -98,6 +111,15 @@ export type TrustCeremonyStep =
   | 'RootRequestExported'
   | 'RootReplyImported'
   | 'RegistryPublished'
+  | 'TargetPublished'
+
+export type FingerprintSubjectV1 =
+  | 'RegistrationRequest'
+  | 'IssuedCertificate'
+
+export type TrustCeremonyRoundV1 =
+  | 'IssueTarget'
+  | 'ActivateRegistry'
 
 export type WriterTransitionPhase =
   | 'NoTransition'
@@ -235,8 +257,26 @@ export type IncidentInputView = {
   readonly externalOrganizations: readonly ExternalOrganizationView[]
 }
 
+export type CorrectionReferenceView = {
+  readonly originalRecordId: string
+  readonly originalEntryHash: string
+  readonly originalSequence: number
+}
+
+export type AmendmentChangeView = {
+  readonly fieldPath: string
+  readonly changeText: string
+}
+
+export type AmendmentInputView = {
+  readonly reference: CorrectionReferenceView
+  readonly reason: string
+  readonly changes: readonly AmendmentChangeView[]
+}
+
 export type DraftStateView = {
   readonly incident: IncidentInputView
+  readonly amendment?: AmendmentInputView | null
   readonly sync: SyncStateView
 }
 
@@ -276,11 +316,114 @@ export type PendingResumeOutcomeView = {
 
 // The administration view models.
 
+export type RecoveryMediumRequestView = {
+  readonly runId: string
+  readonly requestId: string
+  readonly mediumIdHash: string
+  readonly index: number
+  readonly total: number
+  readonly roleCode: string
+  readonly certificateHash: string
+  readonly expectedThumbprint: string
+  readonly protectionCode: number
+  readonly testKindCode: string
+}
+
+export type RecoveryMediumObservationView = {
+  readonly request: RecoveryMediumRequestView
+  readonly resultCode: number
+  readonly observedThumbprint: string | null
+  readonly errorCode: string | null
+}
+
+export type RecoveryReportView = {
+  readonly completed: boolean
+  readonly exactPublicReportJson: string
+  readonly envelopeHash: string
+  readonly sourceEnvelopeHash: string
+  readonly auditId: string
+  readonly finishedAtMs: number
+  readonly nextDueAtMs: number | null
+}
+
+export type RecoveryRunView = {
+  readonly operationId: string
+  readonly phaseCode: number
+  readonly request: RecoveryMediumRequestView | null
+  readonly observations: readonly RecoveryMediumObservationView[]
+  readonly report: RecoveryReportView | null
+  readonly errorCode: string | null
+}
+
+export type RecoveryAdministrationView = {
+  readonly lastSuccess: RecoveryReportView | null
+  readonly lastFailure: RecoveryReportView | null
+  readonly run: RecoveryRunView | null
+}
+
+export type DestructionTargetView = {
+  readonly entryHash: string
+  readonly chainSequence: number
+  readonly stubObjectHash: string | null
+}
+
+export type DestructionPreflightView = {
+  readonly jobHash: string
+  readonly exactCanonicalReportJson: string
+  readonly knownReplicaCount: number
+}
+
+export type DestructionReplicaView = {
+  readonly deviceId: string
+  readonly kindCode: number
+  readonly attestationHash: string | null
+  readonly resultCode: number | null
+  readonly backupExpiryAt: number | null
+}
+
+export type DestructionProcessView = {
+  readonly destructionId: string
+  readonly authorizationObjectHash: string
+  readonly state: DestructionStateV1
+  readonly scopeCode: number
+  readonly legalReasonCode: number
+  readonly controllerDeviceId: string
+  readonly custodianDeviceId: string
+  readonly approverCertificateHashes: readonly string[]
+  readonly targets: readonly DestructionTargetView[]
+  readonly preflight: DestructionPreflightView | null
+  readonly replicas: readonly DestructionReplicaView[]
+  readonly evidenceEntryHash: string | null
+}
+
+export type DestructionAdministrationView = {
+  readonly privacyDecisionEnabled: boolean
+  readonly policyHash: string
+  readonly knownDestructionIds: readonly string[]
+  readonly process: DestructionProcessView | null
+}
+
+export type DestructionReaderDeliveryView = {
+  readonly destructionId: string
+  readonly jobHash: string
+  readonly readerId: string
+  readonly exactAuthorization: readonly number[]
+  readonly exactInitiatingEvent: readonly number[]
+  readonly exactJobUpload: readonly number[]
+}
+
+export type DestructionEvidenceReviewView = {
+  readonly writerDeviceId: string
+  readonly process: DestructionProcessView
+  readonly preview: FinalizationPreviewView
+}
+
 export type PendingDeviceRequestView = {
   readonly requestId: string
   readonly certificateKindCode: string
   readonly fingerprint: string
   readonly receivedAtMs: number
+  readonly fingerprintSubject: FingerprintSubjectV1
 }
 
 export type TrustCeremonyView = {
@@ -289,6 +432,9 @@ export type TrustCeremonyView = {
   readonly step: TrustCeremonyStep
   readonly targetFingerprint: string | null
   readonly exchangeFileName: string | null
+  readonly round: TrustCeremonyRoundV1
+  readonly linkedCeremonyId: string | null
+  readonly fingerprintSubject: FingerprintSubjectV1 | null
 }
 
 export type PolicyProfileView = {
@@ -350,6 +496,7 @@ export type ClockReleaseOutcomeView = {
 
 export type WriterTransitionView = {
   readonly phase: WriterTransitionPhase
+  readonly ceremonyId: string | null
   readonly currentWriterHash: string
   readonly newWriterHash: string | null
   readonly effectiveFromSequence: number | null
@@ -452,6 +599,21 @@ export const PATIENT_COUNT_STATUS_VALUES = [
   'Known',
 ] as const
 
+export const LOCAL_WRITER_LOCK_DIAGNOSIS_VALUES = [
+  'Missing',
+  'AbandonedInert',
+  'LiveOwner',
+  'Unreadable',
+] as const
+
+export const DESTRUCTION_STATE_V1_VALUES = [
+  'requested',
+  'inProgress',
+  'pendingBackupExpiry',
+  'completeManagedScope',
+  'incompleteUnreachableReplica',
+] as const
+
 export const GO_LIVE_REQUIREMENT_STATUS_VALUES = [
   'Confirmed',
   'NotMet',
@@ -472,6 +634,17 @@ export const TRUST_CEREMONY_STEP_VALUES = [
   'RootRequestExported',
   'RootReplyImported',
   'RegistryPublished',
+  'TargetPublished',
+] as const
+
+export const FINGERPRINT_SUBJECT_V1_VALUES = [
+  'RegistrationRequest',
+  'IssuedCertificate',
+] as const
+
+export const TRUST_CEREMONY_ROUND_V1_VALUES = [
+  'IssueTarget',
+  'ActivateRegistry',
 ] as const
 
 export const WRITER_TRANSITION_PHASE_VALUES = [

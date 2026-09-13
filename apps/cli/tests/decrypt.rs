@@ -11,24 +11,9 @@
 //!
 //! # DIE UHR IST HIER KEIN PARAMETER
 //!
-//! Die CLI kennt genau eine, `SystemTime::now()`. Jeder Bestand stammt deshalb
-//! aus der `live_clock_*`-Familie; die geerbten Bestaende sind unter der echten
-//! Uhr stumm und liefern eine LEERE Aussage, die faelschlich wie Erfolg
-//! aussieht. Die Begruendung steht in `apps/cli/tests/support/mod.rs`.
-//!
-//! # ZWEI WEGE AUF DIE 14, UND SIE SIND NICHT DERSELBE
-//!
-//! - FEHLENDER EIGENER GRANT: der vorgelegte Schluessel ist ein anderer, sein
-//!   Abdruck steht in keinem Grant des Bestands. `ea-verify` meldet das
-//!   ausdruecklich NICHT als Befund (`crates/ea-verify/src/recipient.rs:13-15`),
-//!   der Bericht bleibt makellos, und `exit_code_for` saehe `Success`. Diesen
-//!   Weg misst [`decrypt_with_the_wrong_key_fails_with_fourteen`]; der Code
-//!   entsteht im Pfad von `decrypt` selbst, genau wie es
-//!   `crates/ea-recovery/src/exit.rs:71-76` verlangt.
-//! - FEHLGESCHLAGENE ENTKAPSELUNG: der Grant nennt den eigenen Abdruck, ist
-//!   aber auf fremdes Material gekapselt. Das IST ein Befund, und der Lauf
-//!   endet bereits an Schritt 2. Gemessen wird er in
-//!   `crates/ea-recovery/tests/live_clock.rs`.
+//! Die CLI verwendet `SystemTime::now()`. Diese Tests behalten die
+//! `live_clock_*`-Familie mit aktuell waehlbarem Head. Historische Lesbarkeit
+//! nach einer alten Registry-Lease wird separat in `exit_codes.rs` geprueft.
 
 #[path = "support/mod.rs"]
 mod support;

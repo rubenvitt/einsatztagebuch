@@ -15,6 +15,8 @@
 //! Alle Methoden sind synchron, wie der ganze Rust-Kern.
 #![forbid(unsafe_code)]
 
+mod clock_repair;
+pub use clock_repair::{ClockRepairAuditService, ClockRepairLogin};
 mod event;
 mod repository;
 

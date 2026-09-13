@@ -22,6 +22,9 @@ use ea_types::{
 };
 use minicbor::{Decoder, Encoder};
 
+#[path = "certificate_attacks/pre_anchor_objects.rs"]
+mod pre_anchor_objects;
+
 const ROOT_SECRET_HEX: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
 const ROOT_PUBLIC_HEX: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const ADMIN_ONE_PUBLIC_HEX: &str =
@@ -577,6 +580,36 @@ struct Fixture {
 }
 
 fn build_fixture(spec: &BootstrapSpec) -> Fixture {
+    let fixture = build_pre_fixture(spec);
+    let anchor_bytes = encode_anchor(
+        fixture.anchor.organization_id(),
+        fixture.anchor.root_public_cose_key().clone(),
+        fixture.anchor.root_certificate_object_hash(),
+        fixture.anchor.initial_admin_certificate_object_hashes(),
+        fixture
+            .anchor
+            .initial_admin_operator_binding_object_hashes(),
+    );
+    Fixture {
+        anchor: decode_trust_anchor(&anchor_bytes).unwrap(),
+        source: fixture.source,
+        snapshot: snapshot(
+            spec.snapshot_organization,
+            fixture.prepared_certificate_hash,
+        ),
+        prepared_certificate_hash: fixture.prepared_certificate_hash,
+    }
+}
+
+struct PreFixture {
+    anchor: ea_trust::PreAnchorV1,
+    source: MemorySource,
+    prepared_certificate_hash: ObjectHash,
+}
+
+// Shared exact original-object construction. This boundary creates neither a
+// final Anchor nor a Genesis/snapshot; only build_fixture adds those later.
+fn build_pre_fixture(spec: &BootstrapSpec) -> PreFixture {
     let root_key = public_key(spec.root_certificate_key);
     let root_thumbprint = spec
         .root_thumbprint_override
@@ -730,18 +763,19 @@ fn build_fixture(spec: &BootstrapSpec) -> Fixture {
     pinned_certificates.sort_unstable();
     pinned_bindings.sort_unstable();
     let anchor_key = public_key(KeyFixture::Root);
-    let anchor_bytes = encode_anchor(
+    let anchor = ea_trust::encode_pre_anchor_v1(
         spec.anchor_organization,
-        anchor_key,
+        chain_id(0x31),
+        &anchor_key.to_deterministic_cbor(),
+        anchor_key.thumbprint(),
         anchor_root_hash,
         &pinned_certificates,
         &pinned_bindings,
-    );
-    let anchor = decode_trust_anchor(&anchor_bytes).unwrap();
-    Fixture {
+    )
+    .unwrap();
+    PreFixture {
         anchor,
         source: MemorySource::new(objects),
-        snapshot: snapshot(spec.snapshot_organization, prepared_certificate_hash),
         prepared_certificate_hash,
     }
 }

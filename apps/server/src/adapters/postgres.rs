@@ -534,6 +534,15 @@ impl SecurityEventSink for PostgresRepository {
 
 #[async_trait]
 impl ObjectTypeDirectory for PostgresRepository {
+    async fn begin_object_write(
+        &self,
+        org: ea_types::OrganizationId,
+        entry: ea_types::EntryHash,
+    ) -> Result<Box<dyn ea_sync_server::managed_destruction::ObjectWriteGuard>, RepositoryError>
+    {
+        super::postgres_destruction::begin_object_write(self.pool(), org, entry).await
+    }
+
     async fn object_type_of(
         &self,
         hash: ObjectHash,
@@ -826,9 +835,10 @@ impl ArchiveExportDirectory for PostgresRepository {
         limit: usize,
     ) -> Result<Vec<ExportIndexEntryV1>, RepositoryError> {
         let rows = sqlx::query(
-            "SELECT object_hash, object_type_code, size_bytes, technical_index FROM object_index \
-             WHERE organization_id = $1 AND technical_index > $2 \
-             ORDER BY technical_index LIMIT $3",
+            "SELECT i.object_hash, i.object_type_code, i.size_bytes, i.technical_index FROM object_index i \
+             WHERE i.organization_id = $1 AND i.technical_index > $2 \
+             AND NOT EXISTS(SELECT 1 FROM destruction_removed_objects r WHERE r.organization_id=i.organization_id AND r.object_hash=i.object_hash) \
+             ORDER BY i.technical_index LIMIT $3",
         )
         .bind(&organization_id.as_bytes()[..])
         .bind(i64::try_from(after_technical_index).map_err(|_| RepositoryError::Unavailable)?)
@@ -869,6 +879,25 @@ impl HistoricalGrantStore for PostgresRepository {
         command: HistoricalGrantCommandV1,
     ) -> Result<AppendOutcome, RepositoryError> {
         let mut transaction = self.pool.begin().await.map_err(|e| unavailable(&e))?;
+
+        // A verified grant may have waited after S3 staging. Serialize its
+        // final index publication with reservation/freeze using the same lock.
+        let org: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT organization_id FROM organizations WHERE organization_id=$1 FOR SHARE",
+        )
+        .bind(command.organization_id.as_bytes().as_slice())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        if org.is_none() {
+            return Ok(AppendOutcome::Conflict);
+        }
+        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM destruction_targets WHERE organization_id=$1 AND entry_hash=$2)")
+            .bind(command.organization_id.as_bytes().as_slice()).bind(command.entry_hash.as_bytes().as_slice())
+            .fetch_one(&mut *transaction).await.map_err(|e|unavailable(&e))?;
+        if blocked {
+            return Ok(AppendOutcome::Conflict);
+        }
         sqlx::query(
             "INSERT INTO object_index (object_hash, organization_id, object_type_code, \
              size_bytes, stored_at_millis) VALUES ($1, $2, 2, $3, $4) ON CONFLICT DO NOTHING",
@@ -985,11 +1014,166 @@ impl ReaderAckStore for PostgresRepository {
 /// Der Vernichtungsvorgang, APPEND-ONLY.
 #[async_trait]
 impl DestructionStore for PostgresRepository {
+    async fn frozen_destruction_object_hashes(
+        &self,
+        org: ea_types::OrganizationId,
+        id: ea_types::DestructionId,
+    ) -> Result<Vec<ObjectHash>, RepositoryError> {
+        let rows=sqlx::query("SELECT object_hash FROM destruction_job_objects WHERE organization_id=$1 AND destruction_id=$2 ORDER BY object_hash")
+            .bind(org.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).fetch_all(&self.pool).await.map_err(|e|unavailable(&e))?;
+        rows.iter()
+            .map(|row| object_hash_of(row, "object_hash"))
+            .collect()
+    }
+
+    async fn server_removal_measured(
+        &self,
+        org: ea_types::OrganizationId,
+        id: ea_types::DestructionId,
+        at: ea_types::UnixMillis,
+    ) -> Result<bool, RepositoryError> {
+        let mut connection = self.pool.acquire().await.map_err(|e| unavailable(&e))?;
+        super::postgres_destruction::server_removal_measured(&mut connection, org, id, at).await
+    }
+
+    async fn record_replica_attestation(
+        &self,
+        c: ea_sync_server::managed_destruction::DestructionAttestationCommand,
+        clock: &dyn ea_sync_server::ServerClock,
+    ) -> Result<AppendOutcome, RepositoryError> {
+        super::postgres_destruction::record_attestation(self.pool(), c, clock).await
+    }
+
+    async fn begin_managed_execution(
+        &self,
+        c: ea_sync_server::managed_destruction::ServerExecutionCommand,
+    ) -> Result<Box<dyn ea_sync_server::managed_destruction::ServerExecutionGuard>, RepositoryError>
+    {
+        super::postgres_destruction::begin_execution(self.pool(), c).await
+    }
+
+    async fn destruction_job(
+        &self,
+        org: ea_types::OrganizationId,
+        id: ea_types::DestructionId,
+    ) -> Result<Option<ea_sync_server::managed_destruction::StoredDestructionJob>, RepositoryError>
+    {
+        super::postgres_destruction::read_job(self.pool(), org, id).await
+    }
+    async fn managed_target_objects(
+        &self,
+        org: ea_types::OrganizationId,
+        id: ea_types::DestructionId,
+        targets: &[(ea_types::EntryHash, u64, ObjectHash)],
+    ) -> Result<Vec<IndexedObjectV1>, RepositoryError> {
+        super::postgres_destruction::target_objects(self.pool(), org, id, targets).await
+    }
+    async fn record_destruction_job(
+        &self,
+        c: ea_sync_server::managed_destruction::DestructionJobCommand,
+        clock: &dyn ea_sync_server::ServerClock,
+    ) -> Result<AppendOutcome, RepositoryError> {
+        super::postgres_destruction::record_job(self.pool(), c, clock).await
+    }
+
+    async fn record_destruction_event(
+        &self,
+        command: ea_sync_server::managed_destruction::DestructionEventCommand,
+        clock: &dyn ea_sync_server::ServerClock,
+    ) -> Result<AppendOutcome, RepositoryError> {
+        super::postgres_destruction::record_event(self.pool(), command, clock).await
+    }
+
+    async fn reservation_matches(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        destruction_id: ea_types::DestructionId,
+        authorization_hash: ObjectHash,
+        targets: &[(EntryHash, u64)],
+    ) -> Result<bool, RepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(|e| unavailable(&e))?;
+        // Same organization-first ordering as admission/trust indexing. Hold
+        // a share lock while reading the immutable reservation and ALL targets.
+        let org = sqlx::query(
+            "SELECT organization_id FROM organizations WHERE organization_id=$1 FOR SHARE",
+        )
+        .bind(organization_id.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| unavailable(&e))?;
+        if org.is_none() {
+            return Ok(false);
+        }
+        let saved = sqlx::query("SELECT authorization_object_hash FROM destructions WHERE organization_id=$1 AND destruction_id=$2")
+            .bind(organization_id.as_bytes().as_slice()).bind(destruction_id.as_bytes().as_slice()).fetch_optional(&mut *tx).await.map_err(|e| unavailable(&e))?;
+        let Some(saved) = saved else {
+            return Ok(false);
+        };
+        if object_hash_of(&saved, "authorization_object_hash")? != authorization_hash {
+            return Ok(false);
+        }
+        let rows = sqlx::query("SELECT entry_hash,chain_sequence FROM destruction_targets WHERE organization_id=$1 AND destruction_id=$2 ORDER BY entry_hash")
+            .bind(organization_id.as_bytes().as_slice()).bind(destruction_id.as_bytes().as_slice()).fetch_all(&mut *tx).await.map_err(|e| unavailable(&e))?;
+        if rows.len() != targets.len() {
+            return Ok(false);
+        }
+        for (row, (hash, sequence)) in rows.iter().zip(targets) {
+            let actual_hash: Vec<u8> = row.get("entry_hash");
+            let actual_sequence: i64 = row.get("chain_sequence");
+            if actual_hash != hash.as_bytes()
+                || u64::try_from(actual_sequence).ok() != Some(*sequence)
+            {
+                return Ok(false);
+            }
+        }
+        tx.commit().await.map_err(|e| unavailable(&e))?;
+        Ok(true)
+    }
+
     async fn record_destruction_request(
         &self,
         command: DestructionRequestCommandV1,
+        clock: &dyn ea_sync_server::ServerClock,
     ) -> Result<AppendOutcome, RepositoryError> {
         let mut transaction = self.pool.begin().await.map_err(|e| unavailable(&e))?;
+        // Same org -> chain/index order as trust indexing. NO KEY UPDATE
+        // blocks catalog/anchor updates while remaining compatible with the
+        // KEY SHARE locks acquired by concurrent Commit foreign keys.
+        let catalog = sqlx::query("SELECT trust_catalog_revision,trust_anchor_bytes FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
+            .bind(command.organization_id.as_bytes().as_slice())
+            .fetch_optional(&mut *transaction).await.map_err(|e| unavailable(&e))?
+            .ok_or(RepositoryError::HeadConflict)?;
+        let revision: i64 = catalog.get("trust_catalog_revision");
+        let anchor: Option<Vec<u8>> = catalog.get("trust_anchor_bytes");
+        if revision != command.authority_fence.catalog_revision
+            || anchor.as_deref() != Some(command.authority_fence.exact_anchor_bytes.as_slice())
+        {
+            return Err(RepositoryError::HeadConflict);
+        }
+        // Serialize with CommitRepository's identical chain-head lock. A
+        // progress change after policy selection must retry admission; it may
+        // have made a disabling signed policy effective. A missing chain has
+        // no eligible target inventory and cannot authorize a new reservation.
+        let head = sqlx::query("SELECT head_sequence, head_entry_hash, head_accepted_at_server_millis FROM chain_heads WHERE organization_id=$1 AND chain_id=$2 FOR UPDATE")
+            .bind(command.organization_id.as_bytes().as_slice())
+            .bind(command.chain_id.as_bytes().as_slice())
+            .fetch_optional(&mut *transaction).await.map_err(|e| unavailable(&e))?
+            .ok_or(RepositoryError::HeadConflict)?;
+        let sequence: i64 = head.get("head_sequence");
+        let entry: Vec<u8> = head.get("head_entry_hash");
+        let accepted: i64 = head.get("head_accepted_at_server_millis");
+        if u64::try_from(sequence) != Ok(command.expected_chain_head.sequence.get())
+            || entry != command.expected_chain_head.entry_hash.as_bytes()
+            || accepted != command.expected_chain_head.accepted_at_server.get()
+        {
+            return Err(RepositoryError::HeadConflict);
+        }
+        // Re-read time AFTER both locks: waiting/staging must not silently
+        // extend the signed head window. notAfter is inclusive in v1.
+        let now = clock.now();
+        if now < command.authority_fence.selected_at || now > command.authority_fence.not_after {
+            return Err(RepositoryError::HeadConflict);
+        }
         sqlx::query(
             "INSERT INTO object_index (object_hash, organization_id, object_type_code, \
              size_bytes, stored_at_millis) VALUES ($1, $2, 5, $3, $4) ON CONFLICT DO NOTHING",

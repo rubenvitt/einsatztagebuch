@@ -272,6 +272,9 @@ impl CoseSign1Bytes {
 pub enum KeyError {
     /// Der Eintrag existiert nicht (mehr).
     NotFound,
+    /// The provider could not establish the key state. Locks, timeouts,
+    /// malformed responses and namespace mismatches are not proof of absence.
+    ProviderUnavailable,
     /// Der Griff dient einem anderen Zweck als der aufgerufene Vorgang.
     PurposeMismatch,
     /// Ein Zweck, der auf einem Writer nie privat vorliegt.
@@ -308,6 +311,7 @@ impl KeyError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::NotFound => "EA-KEY-NOT-FOUND",
+            Self::ProviderUnavailable => "EA-KEY-PROVIDER-UNAVAILABLE",
             Self::PurposeMismatch => "EA-KEY-PURPOSE-MISMATCH",
             Self::ForbiddenPurpose => "EA-KEY-FORBIDDEN-PURPOSE",
             Self::ProtectionProfileMismatch => "EA-KEY-PROTECTION-PROFILE-MISMATCH",

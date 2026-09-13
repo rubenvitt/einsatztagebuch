@@ -447,3 +447,25 @@ fn a_forged_second_receipt_with_a_smaller_object_hash_is_never_the_chosen_one() 
         "die Schranke verbietet den Widerspruch, nicht die Bestaetigung"
     );
 }
+
+#[test]
+fn signed_archived_receipts_remain_valid_after_their_registry_lease_expires() {
+    let built = receipt_archive(ReceiptArchiveSpec::bare().with_receipts());
+    let report = verify_archive(
+        &built.fixture,
+        &built.anchor(),
+        VerifyOptions::new(UnixMillis::new(9_000_000_000_000)),
+    )
+    .unwrap();
+    assert_eq!(
+        report.object_results().count(),
+        built.entry_object_hashes.len()
+    );
+    assert!(
+        report
+            .object_results()
+            .all(|r| r.server_confirmation() == ServerConfirmationV1::ServerConfirmed)
+    );
+    assert_eq!(report.signature_errors().len(), 0);
+    assert!(report.verified_time_floor().is_some());
+}

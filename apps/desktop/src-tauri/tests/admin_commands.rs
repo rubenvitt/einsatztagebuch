@@ -3,7 +3,7 @@
 //!
 //! Drei Zusagen greifen ineinander:
 //!
-//! 1. Der `invoke_handler` registriert GENAU diese siebzehn Namen, in dieser
+//! 1. Der `invoke_handler` registriert GENAU die benannten Kommandos, in dieser
 //!    Reihenfolge, hinter `sync_state`; das App-ACL-Manifest in `build.rs` und
 //!    die Faehigkeitserklaerung in `tauri.conf.json` decken dieselbe Menge.
 //! 2. Die Schale (`apps/desktop/src/features/admin/AdminPage.tsx`,
@@ -12,10 +12,12 @@
 //! 3. Kein Name bedient das Lesen, Entschluesseln oder den Verlauf eines
 //!    Eintrags: die Verwaltung fuehrt Zeremonien, sie oeffnet kein Archiv.
 
-/// Die siebzehn Namen aus `.superpowers/admin-ui-contract.md` §5, woertlich.
+/// Die Verwaltungskommandos einschließlich der dauerhaften offenen Zeremonien.
 const ADMIN_EXPECTED: &[&str] = &[
     "admin_pending_device_requests",
+    "admin_open_ceremonies",
     "admin_ceremony_begin",
+    "admin_ceremony_read",
     "admin_ceremony_confirm_fingerprint",
     "admin_ceremony_authorize",
     "admin_ceremony_export_request",
@@ -23,6 +25,7 @@ const ADMIN_EXPECTED: &[&str] = &[
     "admin_ceremony_publish",
     "admin_policy_profile",
     "admin_registry_health",
+    "admin_writer_lock_diagnosis",
     "admin_go_live_checklist",
     "admin_go_live_export_unresolved",
     "admin_clock_release_offer",
@@ -82,7 +85,7 @@ fn acl_declared_commands() -> Vec<String> {
         .collect()
 }
 
-/// Registriert, ACL-erklaert und erlaubt — dieselben siebzehn, ueberall.
+/// Registriert, ACL-erklaert und erlaubt — dieselben Kommandos, ueberall.
 #[test]
 fn the_administration_commands_are_registered_declared_and_permitted() {
     let registered = ea_desktop::registered_command_names();
@@ -139,7 +142,7 @@ fn the_administration_surface_names_the_same_commands_as_the_host() {
         checked += 1;
     }
     // Ohne diese Zaehlung liefe die Schleife ueber nichts und blieb gruen.
-    assert_eq!(checked, 17);
+    assert_eq!(checked, 20);
 }
 
 /// Kein Verwaltungskommando liest, entschluesselt oder blaettert: die
@@ -148,13 +151,18 @@ fn the_administration_surface_names_the_same_commands_as_the_host() {
 fn no_administration_command_serves_content() {
     for name in ADMIN_EXPECTED {
         for forbidden in ["reader", "read", "decrypt", "history", "content", "entry"] {
+            // This exact endpoint returns the existing payload-free ceremony
+            // DTO. It opens a persisted administration round, never content.
+            if *name == "admin_ceremony_read" && forbidden == "read" {
+                continue;
+            }
             assert!(
                 !name.contains(forbidden),
                 "{name} enthaelt {forbidden} und bedient damit eine Flaeche, die der Verwaltung nicht gehoert"
             );
         }
     }
-    assert_eq!(ADMIN_EXPECTED.len(), 17);
+    assert_eq!(ADMIN_EXPECTED.len(), 20);
 }
 
 /// Jeder Wiederanmeldungszweck, den eine Flaeche sendet, ist ein

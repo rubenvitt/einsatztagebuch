@@ -26,9 +26,29 @@ mod error;
 mod exit;
 mod export;
 mod grant;
+mod historical_grant;
 mod key_source;
+mod key_inventory;
+mod challenge;
+mod backup_key;
+pub use backup_key::RecoveryBackupKdf;
+mod source_verification;
+mod test_run;
+mod completion;
+mod failure;
+pub use failure::{RecoveryFailureCore,VerifiedFailedRecoveryReport,recovery_failure_envelope,verify_failed_recovery_report};
+pub use completion::{RecoveryCompletionCore,VerifiedCompletedRecoveryReport,recovery_completion_envelope,verify_completed_recovery_report};
+pub use test_run::{RecoveryTestRun,CompletedRecoveryRun,FailedRecoveryRun,RecoveryRunOutcome,RecoveryMediumCheck};
+pub use source_verification::{VerifiedRecoverySource,recovery_source_envelope,verify_recovery_source,verify_recovery_audit_context};
+mod source_manifest;
+pub use source_manifest::{RecoveryProbeBinding,RecoverySourceCore,RecoverySourceFields,recovery_archive_inventory_hash};
+pub use challenge::{RecoverySigningBackup, RecoveryTestError, VerifiedBackupChallenge, verify_signing_backup, verify_historical_signing_backup};
 mod pkcs11;
+mod pkcs11_provider;
 mod recovery_test;
+mod recovery_sample;
+pub use recovery_sample::{RecoveryArchiveProbe, VerifiedRecoveryMedium, VerifiedRecoverySample};
+mod resolved_key;
 mod report;
 mod source;
 mod target;
@@ -43,15 +63,19 @@ pub use encrypted_container::{
     EncryptedKeyContainer, KEY_CONTAINER_DOMAIN_V1,
 };
 pub use error::RecoveryError;
+pub use key_inventory::{KeyInventory, KeyInventoryError, RecoveryKeyRole, RecoveryMedium, RecoveryTestKind};
 pub use exit::{ExitCode, exit_code_for, exit_code_for_error};
 pub use export::{ExportV1, export_directory};
 pub use grant::{GrantInputsV1, ResolvedGrantInputsV1, grant_inputs};
+pub use historical_grant::{HistoricalGrantError, HistoricalGrantService, HistoricalGrantSigner, RecoveryKem, GrantRegistrySource, GrantOperatorContext, VerifiedRecoveryEntry};
 pub use key_source::{
     KeySourceKind, KeySourceSpec, KeySourceSpecError, MAX_SECRET_FILE_BYTES_V1, read_secret_file,
     resolve_recipient_key, resolve_signing_key,
 };
-pub use pkcs11::{PKCS11_KEY_ID_MAX_BYTES, PKCS11_UNBOUND_CODE, Pkcs11KeyReference};
+pub use pkcs11::{PKCS11_KEY_ID_MAX_BYTES, Pkcs11KeyReference};
+pub use pkcs11_provider::{Pkcs11ProviderError, Pkcs11RecipientKey, Pkcs11SigningKey};
 pub use recovery_test::{RecoveryTestInputsV1, recovery_test_inputs};
+pub use resolved_key::{ResolvedRecipientKey, ResolvedSigningKey};
 #[cfg(unix)]
 pub use report::OUTPUT_FILE_MODE_V1;
 pub use report::{RuntimeMetadataV1, emit_report_document, write_report_document};
@@ -60,3 +84,6 @@ pub use source::FsArchiveSource;
 pub use target::OUTPUT_DIRECTORY_MODE_V1;
 pub use target::{output_directory_is_free, output_file_is_free, prepare_output_directory};
 pub use verify::{load_trust_anchor, verify_directory};
+
+mod verified_signing_backup;
+pub use verified_signing_backup::{seal_verified_signing, verify_signing_container_key};

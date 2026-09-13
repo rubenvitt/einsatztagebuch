@@ -1,4 +1,9 @@
 //! Native operator composition from one frozen, completely verified archive.
+pub mod writer;
+pub mod clock_repair;
+pub mod prepared_diagnosis;
+mod acquisition;
+pub(crate) mod destruction_authority;
 use crate::clock_release::{
     ClockReleaseAvailability, ClockReleaseService, ClockReleaseWorkflowError,
 };
@@ -15,7 +20,10 @@ use ea_archive::ArchiveInventory;
 use ea_audit::{SignedLocalAuditService, SqliteLocalAuditRepository};
 use ea_crypto::CanonicalPublicCoseKey;
 use ea_format::{CertificateKindV1, DecodedTrustPayloadV1, KeyProtectionProfileV1, OperatorRoleV1};
-use ea_key_provider::{KeyError, KeyProvider, SecretPurpose};
+use ea_key_provider::{
+    DevicePostureProvider, DevicePostureReport, KeyError, KeyProvider, PostureRequirement,
+    SecretPurpose, SupportMatrixRow,
+};
 use ea_local_store::{EncryptedDatabase, StoreError};
 use ea_operator::{MAX_INACTIVITY_MS, OperatorError, OsAccountProvider, ReauthPurpose};
 use ea_recovery::{ExitCode, FsArchiveSource, RecoveryError, exit_code_for, load_trust_anchor};
@@ -48,6 +56,7 @@ pub enum OperatorRuntimeError {
     SignerMismatch,
     Expired,
     DatabaseMissing,
+    Posture,
     Recovery(RecoveryError),
     Verification(ExitCode),
     Trust(TrustError),
@@ -70,6 +79,7 @@ impl OperatorRuntimeError {
             Self::SignerMismatch => "EA-OPERATOR-SIGNER-MISMATCH",
             Self::Expired => "EA-OPERATOR-RUNTIME-EXPIRED",
             Self::DatabaseMissing => "EA-OPERATOR-DATABASE-REQUIRED",
+            Self::Posture => "EA-OPERATOR-POSTURE",
             Self::Verification(_) => "EA-OPERATOR-ARCHIVE-VERIFICATION",
             Self::Recovery(e) => e.code(),
             Self::Trust(e) => e.code(),
@@ -263,22 +273,22 @@ impl OperatorArchiveSnapshot {
         if anchor_path.starts_with(&directory) {
             return Err(OperatorRuntimeError::Config);
         }
-        let source = FsArchiveSource::open(&directory)?;
+        let source = FsArchiveSource::open_committed(&directory)?;
         let report = verify_archive(&source, &anchor, VerifyOptions::new(now))
             .map_err(|_| OperatorRuntimeError::Archive)?;
-        let verdict = exit_code_for(&report);
-        if verdict != ExitCode::Success {
-            return Err(OperatorRuntimeError::Verification(verdict));
-        }
-        if !report.is_fully_verified()
-            || report.chain_head().entry_hash().as_bytes() == &[0; 32]
+        // Operator authority needs authenticated public manifest progression.
+        // Destruction completion additionally needs encrypted Evidence and is
+        // deliberately not inferred from this narrow verifier proof.
+        let chain_head = report
+            .verified_public_chain_head()
+            .ok_or_else(|| OperatorRuntimeError::Verification(exit_code_for(&report)))?;
+        if chain_head.entry_hash().as_bytes() == &[0; 32]
             || report.entry_package_count() + report.destroyed_entry_count() == 0
         {
             return Err(OperatorRuntimeError::Sequence);
         }
         let next_sequence = ChainSequence::new(
-            report
-                .chain_head()
+            chain_head
                 .sequence()
                 .get()
                 .checked_add(1)
@@ -311,6 +321,8 @@ impl OperatorArchiveSnapshot {
     }
 }
 
+pub mod posture;
+
 /// Runtime keys and local data are deliberately absent from Debug/Serialize.
 pub struct OperatorRuntime {
     config: OperatorRuntimeConfig,
@@ -326,6 +338,7 @@ pub struct OperatorRuntime {
     account_hash: Hash32,
     opened: Instant,
     anchor_path: PathBuf,
+    posture: Arc<dyn DevicePostureProvider>,
 }
 impl OperatorRuntime {
     /// Only provision may initialize native installation state and an absent DB.
@@ -342,6 +355,11 @@ impl OperatorRuntime {
             now,
             initialize_native,
             NativeOperatorProvider::open_installed,
+            Arc::from(
+                SupportMatrixRow::current_host()
+                    .ok_or(OperatorRuntimeError::Posture)?
+                    .posture_provider(),
+            ),
         )
     }
 
@@ -356,7 +374,36 @@ impl OperatorRuntime {
         initialize_native: bool,
         native: Arc<NativeOperatorProvider>,
     ) -> Result<Self, OperatorRuntimeError> {
-        Self::open_using(config, anchor_path, now, initialize_native, |_| Ok(native))
+        Self::open_with_test_native_and_posture(
+            config,
+            anchor_path,
+            now,
+            initialize_native,
+            native,
+            Arc::new(FixturePassingPosture),
+        )
+    }
+
+    /// Fixture-only injection. The installed production path always chooses the
+    /// actual host adapter and cannot select a report from config or environment.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn open_with_test_native_and_posture(
+        config: OperatorRuntimeConfig,
+        anchor_path: &Path,
+        now: UnixMillis,
+        initialize_native: bool,
+        native: Arc<NativeOperatorProvider>,
+        posture: Arc<dyn DevicePostureProvider>,
+    ) -> Result<Self, OperatorRuntimeError> {
+        Self::open_using(
+            config,
+            anchor_path,
+            now,
+            initialize_native,
+            |_| Ok(native),
+            posture,
+        )
     }
 
     fn open_using(
@@ -365,61 +412,83 @@ impl OperatorRuntime {
         now: UnixMillis,
         initialize_native: bool,
         open_native: impl FnOnce(bool) -> Result<Arc<NativeOperatorProvider>, NativeProviderError>,
+        posture: Arc<dyn DevicePostureProvider>,
     ) -> Result<Self, OperatorRuntimeError> {
-        let opened = Instant::now();
-        let snapshot = OperatorArchiveSnapshot::open(&config.archive_directory, anchor_path, now)?;
-        // The hash identifies exact parsed bytes; device/role become authoritative
-        // only after their active certificate and native signing key are checked.
-        let certificate = snapshot
-            .inventory
-            .trust()
-            .iter()
-            .find(|p| p.object_hash().as_bytes() == config.device_certificate_hash.as_bytes())
-            .ok_or(OperatorRuntimeError::SignerMismatch)?;
-        let fields = match certificate
-            .value()
-            .decoded_payload()
-            .map_err(|_| OperatorRuntimeError::Archive)?
-        {
-            DecodedTrustPayloadV1::InitialAdminDevice(fields) => fields,
-            DecodedTrustPayloadV1::AuthorizedDevice(fields) => fields.fields().clone(),
-            _ => return Err(OperatorRuntimeError::SignerMismatch),
-        };
-        let device_id = fields.device_id;
-        let slot = role_slot(config.role)?;
-        let native = open_native(initialize_native)?;
-        let signer = Arc::new(native.signing_provider(slot));
-        let key = signer.handle(SecretPurpose::LocalDatabaseKey);
-        let exists = config
-            .database_path
-            .try_exists()
-            .map_err(|_| OperatorRuntimeError::Io)?;
-        if !exists && !initialize_native {
-            return Err(OperatorRuntimeError::DatabaseMissing);
+        Self::acquire_using(
+            config,
+            anchor_path,
+            acquisition::AcquisitionTime::Explicit(now),
+            initialize_native,
+            open_native,
+            posture,
+        )
+    }
+
+    fn acquire_using(
+        config: OperatorRuntimeConfig,
+        anchor_path: &Path,
+        time: acquisition::AcquisitionTime,
+        initialize_native: bool,
+        open_native: impl FnOnce(bool) -> Result<Arc<NativeOperatorProvider>, NativeProviderError>,
+        posture: Arc<dyn DevicePostureProvider>,
+    ) -> Result<Self, OperatorRuntimeError> {
+        // Provisioning can create keys with native presence. It retains its
+        // existing explicit-time path outside this pure read/acquire gate.
+        if initialize_native {
+            return Self::open_without_acquisition(
+                config,
+                anchor_path,
+                time.value()?,
+                true,
+                open_native,
+                posture,
+            );
         }
-        if !exists && !signer.contains(&key)? {
-            signer.generate(
-                SecretPurpose::LocalDatabaseKey,
-                KeyProtectionProfileV1::OsWrapped,
-            )?;
-        }
-        let database = Arc::new(if exists {
-            EncryptedDatabase::open_existing(&config.database_path, signer.as_ref(), &key)?
-        } else {
-            EncryptedDatabase::open(&config.database_path, signer.as_ref(), &key)?
-        });
+        let path = config.database_path.clone();
+        acquisition::acquire(&path, time, |now| {
+            Self::open_without_acquisition(config, anchor_path, now, false, open_native, posture)
+        })
+    }
+
+    fn open_without_acquisition(
+        config: OperatorRuntimeConfig,
+        anchor_path: &Path,
+        now: UnixMillis,
+        initialize_native: bool,
+        open_native: impl FnOnce(bool) -> Result<Arc<NativeOperatorProvider>, NativeProviderError>,
+        posture: Arc<dyn DevicePostureProvider>,
+    ) -> Result<Self, OperatorRuntimeError> {
+        #[cfg(feature = "test-support")]
+        let profile = runtime_profile::Span::start("acquire", config.role, None);
+        let RuntimeResources {
+            config,
+            snapshot,
+            native,
+            database,
+            mut store,
+            signer,
+            device_id,
+            opened,
+            anchor_path: owned_anchor_path,
+            posture,
+        } = open_resources(
+            config,
+            anchor_path,
+            now,
+            initialize_native,
+            open_native,
+            posture,
+        )?;
+        #[cfg(feature = "test-support")]
+        if let Some(profile) = &profile { profile.mark("resources-return"); }
         let key = TrustStateKey {
             organization_id: snapshot.anchor.organization_id(),
             device_id,
         };
-        let mut store = OperatorTrustStateStore::open(
-            Arc::clone(&database),
-            key,
-            snapshot.anchor.chain_id(),
-            snapshot.anchor.trust_anchor_hash(),
-            UnixMillis::new(0),
-        )?;
+        let slot = role_slot(config.role)?;
         let (head, trust) = select_current(&snapshot, &mut store, key, now)?;
+        #[cfg(feature = "test-support")]
+        if let Some(profile) = &profile { profile.mark("select-return"); }
         let public = native
             .public_key(slot)?
             .ok_or(OperatorRuntimeError::SignerMismatch)?;
@@ -443,9 +512,14 @@ impl OperatorRuntime {
             device_id,
             account_hash,
             opened,
-            anchor_path: anchor_path.to_path_buf(),
+            anchor_path: owned_anchor_path,
+            posture,
         };
-        runtime.ensure_current()?;
+        // Opening a read-only diagnostic context must remain possible when the
+        // measured posture is unresolved. Privileged consumers use ensure_current.
+        runtime.ensure_fresh_context()?;
+        #[cfg(feature = "test-support")]
+        if let Some(profile) = &profile { profile.mark("identity-return"); }
         Ok(runtime)
     }
     pub fn config(&self) -> &OperatorRuntimeConfig {
@@ -496,6 +570,40 @@ impl OperatorRuntime {
     /// Call before/after every blocking exchange or privileged operation. Expired
     /// contexts must be reopened and reauthenticated; old frozen time is not renewed.
     pub fn ensure_current(&self) -> Result<(), OperatorRuntimeError> {
+        self.posture_admission()?;
+        self.ensure_fresh_context()?;
+        Ok(())
+    }
+
+    pub(crate) fn ensure_same_action_authority(&self) -> Result<(), OperatorRuntimeError> {
+        self.ensure_current()?;
+        let fresh = self.reopened_for_action()?;
+        fresh.ensure_current()?;
+        self.ensure_same_authority_as(&fresh)
+    }
+
+    pub(crate) fn ensure_same_authority_as(&self, fresh: &Self) -> Result<(), OperatorRuntimeError> {
+        if fresh.head.registry_head_hash() != self.head.registry_head_hash()
+            || fresh.head.registry_version() != self.head.registry_version()
+            || fresh.next_sequence() != self.next_sequence()
+            || fresh.account_hash != self.account_hash
+            || !fresh
+                .head
+                .preexisting_effective_now()
+                .has_same_persisted_bounds(self.head.preexisting_effective_now())
+        {
+            return Err(OperatorError::ProofMismatch.into());
+        }
+        Ok(())
+    }
+
+    pub fn device_posture_report(&self) -> Result<DevicePostureReport, OperatorRuntimeError> {
+        self.posture
+            .report()
+            .map_err(|_| OperatorRuntimeError::Posture)
+    }
+
+    fn ensure_fresh_context(&self) -> Result<(), OperatorRuntimeError> {
         let fresh = fresh_wall_clock()?;
         validate_freshness(
             self.opened.elapsed(),
@@ -566,20 +674,79 @@ impl OperatorRuntime {
             .availability(snapshot.trusted_time(), now)
     }
     pub fn reauthenticate(&self) -> Result<VerifiedOperatorSession, OperatorRuntimeError> {
+        self.reauthenticate_for(self.config.purpose)
+    }
+
+    /// Re-resolve current archive authority without renewing the native watcher.
+    /// A locked provider still fails; only an explicit new login may replace it.
+    pub fn refresh_for_action(&mut self) -> Result<(), OperatorRuntimeError> {
+        *self = self.reopened_for_action()?;
+        Ok(())
+    }
+
+    /// Fresh independent authority check while a host retains an exact preview
+    /// and its original selected time. This never renews the native watcher.
+    #[cfg_attr(feature = "test-support", track_caller)]
+    pub fn reopened_for_action(&self) -> Result<Self, OperatorRuntimeError> {
+        #[cfg(feature = "test-support")]
+        let _profile = runtime_profile::Span::start(
+            "reopen", self.config.role, Some(std::panic::Location::caller()),
+        );
+        self.native.ensure_session_active()?;
+        Self::acquire_using(
+            self.config.clone(),
+            &self.anchor_path,
+            acquisition::AcquisitionTime::FreshWallClock,
+            false,
+            |_| Ok(Arc::clone(&self.native)),
+            Arc::clone(&self.posture),
+        )
+    }
+
+    /// The action selects its exact existing purpose; configuration cannot
+    /// substitute a proof for another action.
+    pub fn reauthenticate_for(
+        &self,
+        purpose: ReauthPurpose,
+    ) -> Result<VerifiedOperatorSession, OperatorRuntimeError> {
+        self.reauthenticate_with_context(purpose, None)
+    }
+
+    pub fn reauthenticate_for_context(
+        &self,
+        purpose: ReauthPurpose,
+        context: Hash32,
+    ) -> Result<VerifiedOperatorSession, OperatorRuntimeError> {
+        self.reauthenticate_with_context(purpose, Some(context))
+    }
+
+    fn reauthenticate_with_context(
+        &self,
+        purpose: ReauthPurpose,
+        context: Option<Hash32>,
+    ) -> Result<VerifiedOperatorSession, OperatorRuntimeError> {
+        if purpose == ReauthPurpose::GoLivePostureDocumentation {
+            return Err(OperatorRuntimeError::Posture);
+        }
         self.ensure_current()?;
         let audit = self.audit_service();
         let presence = BoundedPresence(self);
-        let session = OperatorBindingService::new(&self.head, &audit, self.local_device)
-            .verify_session(VerifySessionRequest {
-                database: &self.database,
-                binding_object_hash: self.config.binding_object_hash,
-                device_certificate_hash: self.config.device_certificate_hash,
-                role: self.config.role,
-                purpose: self.config.purpose,
-                account: self.native.clone(),
-                authenticator: &presence,
-            })?;
-        self.ensure_current()?;
+        let service = OperatorBindingService::new(&self.head, &audit, self.local_device);
+        let request = VerifySessionRequest {
+            database: &self.database,
+            binding_object_hash: self.config.binding_object_hash,
+            device_certificate_hash: self.config.device_certificate_hash,
+            role: self.config.role,
+            purpose,
+            account: self.native.clone(),
+            authenticator: &presence,
+        };
+        let session = match context {
+            Some(context) => service.verify_session_for_context(request, context),
+            None => service.verify_session(request),
+        }?;
+        self.ensure_same_action_authority()?;
+        self.native.record_verified_session(&session)?;
         Ok(session)
     }
     /// Reload published bytes with the same independent anchor and persistent
@@ -594,9 +761,14 @@ impl OperatorRuntime {
         let now = fresh_wall_clock()?;
         // Preserve the validated native provider and its continuous watcher.
         // Reopening a snapshot cannot clear an invalidated native session.
-        let refreshed = Self::open_using(config, &self.anchor_path, now, false, |_| {
-            Ok(Arc::clone(&self.native))
-        })?;
+        let refreshed = Self::open_using(
+            config,
+            &self.anchor_path,
+            now,
+            false,
+            |_| Ok(Arc::clone(&self.native)),
+            Arc::clone(&self.posture),
+        )?;
         *self = refreshed;
         Ok(())
     }
@@ -607,11 +779,10 @@ impl OperatorRuntime {
         let session = self.reauthenticate()?;
         self.go_live_report_for(session.proof().binding_object_hash())
     }
-    fn go_live_report_for(
+    fn verify_bound_operator_identity(
         &self,
         binding: ObjectHash,
-    ) -> Result<OperatorGoLiveReport, OperatorRuntimeError> {
-        self.ensure_current()?;
+    ) -> Result<&ea_format::OperatorBindingFieldsV1, OperatorRuntimeError> {
         let fields = self
             .head
             .active_operator_binding_fields(binding)
@@ -634,14 +805,33 @@ impl OperatorRuntime {
         if instance_key.thumbprint() != fields.operator_instance_key_thumbprint {
             return Err(OperatorError::InstanceKeyMismatch.into());
         }
+        Ok(fields)
+    }
+    fn go_live_report_for(
+        &self,
+        binding: ObjectHash,
+    ) -> Result<OperatorGoLiveReport, OperatorRuntimeError> {
+        self.ensure_fresh_context()?;
+        let fields = self.verify_bound_operator_identity(binding)?;
+        let account_hash = fields.os_account_binding_hash;
         let profile = crate::operator_profile::load(&self.database)?
             .ok_or(OperatorLifecycleError::ProfileMissing)?;
         if profile.operator_binding_object_hash() != binding {
             return Err(OperatorLifecycleError::ProfileCommitment.into());
         }
         crate::verify_operator_snapshot(&profile, fields)?;
-        self.ensure_current()?;
+        self.ensure_fresh_context()?;
+        let posture = self.device_posture_report()?;
+        let admission = self.posture_admission_for_report().ok();
         Ok(OperatorGoLiveReport {
+            device_posture_evidence: PostureRequirement::ALL
+                .into_iter()
+                .map(|requirement| posture.check(requirement).evidence_code())
+                .collect(),
+            production_ready: admission.is_some(),
+            documented_posture: admission
+                .as_ref()
+                .and_then(PostureDocumentationReport::from_admission),
             binding_state: "active",
             productive_binding_hashes: vec![hex::encode(binding.as_bytes())],
             revoked_binding_hashes: Vec::new(),
@@ -660,7 +850,7 @@ impl OperatorRuntime {
         &self,
         binding: ObjectHash,
     ) -> Result<OperatorGoLiveReport, OperatorRuntimeError> {
-        self.ensure_current()?;
+        self.ensure_fresh_context()?;
         let fields = self
             .head
             .revoked_operator_binding_fields(binding)
@@ -673,8 +863,15 @@ impl OperatorRuntime {
         let account_hash = self
             .native
             .os_account_binding_hash(self.anchor().organization_id(), self.device_id)?;
-        self.ensure_current()?;
+        self.ensure_fresh_context()?;
+        let posture = self.device_posture_report()?;
         Ok(OperatorGoLiveReport {
+            device_posture_evidence: PostureRequirement::ALL
+                .into_iter()
+                .map(|requirement| posture.check(requirement).evidence_code())
+                .collect(),
+            production_ready: false,
+            documented_posture: None,
             binding_state: "revoked",
             productive_binding_hashes: Vec::new(),
             revoked_binding_hashes: vec![hex::encode(binding.as_bytes())],
@@ -693,7 +890,7 @@ struct BoundedPresence<'a>(&'a OperatorRuntime);
 impl OperatorPresence for BoundedPresence<'_> {
     fn prove_presence_and_sign(&self, challenge: &[u8]) -> Result<[u8; 64], OperatorError> {
         prove_with_deadline(self.0.native.as_ref(), challenge, || {
-            self.0.ensure_current()
+            self.0.ensure_same_action_authority()
         })
     }
 }
@@ -839,6 +1036,10 @@ fn select_current(
 /// identifier, private key, file path, or plaintext report of personal data.
 #[derive(Serialize)]
 pub struct OperatorGoLiveReport {
+    /// Verified documentation is separate from the unchanged raw measurement codes.
+    pub documented_posture: Option<PostureDocumentationReport>,
+    pub device_posture_evidence: Vec<&'static str>,
+    pub production_ready: bool,
     pub binding_state: &'static str,
     pub productive_binding_hashes: Vec<String>,
     pub revoked_binding_hashes: Vec<String>,
@@ -850,9 +1051,196 @@ pub struct OperatorGoLiveReport {
     pub next_sequence: u64,
     pub revocation_procedure: &'static str,
 }
+
+#[derive(Serialize)]
+pub struct PostureDocumentationReport {
+    pub documented_unknown_mask: u8,
+    pub document_hash: String,
+    pub evidence_reference_hash: String,
+    pub valid_until_exclusive: i64,
+}
+impl PostureDocumentationReport {
+    fn from_admission(value: &posture::VerifiedPostureAdmission<'_>) -> Option<Self> {
+        Some(Self {
+            documented_unknown_mask: value.documented_unknown_mask(),
+            document_hash: hex::encode(value.document_hash()?.as_bytes()),
+            evidence_reference_hash: hex::encode(value.evidence_reference_hash()?.as_bytes()),
+            valid_until_exclusive: value.valid_until()?.get(),
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
+struct FixturePassingPosture;
+#[cfg(feature = "test-support")]
+impl DevicePostureProvider for FixturePassingPosture {
+    fn report(&self) -> Result<DevicePostureReport, KeyError> {
+        Ok(DevicePostureReport {
+            full_disk_encryption: PostureRequirement::FullDiskEncryption.pass(),
+            locked_non_shared_account: PostureRequirement::LockedNonSharedAccount.pass(),
+            automatic_screen_lock: PostureRequirement::AutomaticScreenLock.pass(),
+            supported_os_patch_level: PostureRequirement::SupportedOsPatchLevel.pass(),
+        })
+    }
+}
 impl OperatorGoLiveReport {
     pub fn to_json(&self) -> Result<String, OperatorRuntimeError> {
         serde_json::to_string(self).map_err(|_| OperatorRuntimeError::Config)
+    }
+}
+
+struct RuntimeResources {
+    config: OperatorRuntimeConfig,
+    snapshot: OperatorArchiveSnapshot,
+    native: Arc<NativeOperatorProvider>,
+    database: Arc<EncryptedDatabase>,
+    store: OperatorTrustStateStore,
+    signer: Arc<NativeKeyProvider>,
+    device_id: DeviceId,
+    opened: Instant,
+    anchor_path: PathBuf,
+    posture: Arc<dyn DevicePostureProvider>,
+}
+fn open_resources(
+    config: OperatorRuntimeConfig,
+    anchor_path: &Path,
+    now: UnixMillis,
+    initialize_native: bool,
+    open_native: impl FnOnce(bool) -> Result<Arc<NativeOperatorProvider>, NativeProviderError>,
+    posture: Arc<dyn DevicePostureProvider>,
+) -> Result<RuntimeResources, OperatorRuntimeError> {
+    #[cfg(feature = "test-support")]
+    let profile = runtime_profile::Span::start("resources", config.role, None);
+    let opened = Instant::now();
+    let snapshot = OperatorArchiveSnapshot::open(&config.archive_directory, anchor_path, now)?;
+    #[cfg(feature = "test-support")]
+    if let Some(profile) = &profile { profile.mark("snapshot-return"); }
+    // The hash identifies exact parsed bytes; device/role become authoritative
+    // only after their active certificate and native signing key are checked.
+    let certificate = snapshot
+        .inventory
+        .trust()
+        .iter()
+        .find(|p| p.object_hash().as_bytes() == config.device_certificate_hash.as_bytes())
+        .ok_or(OperatorRuntimeError::SignerMismatch)?;
+    let fields = match certificate
+        .value()
+        .decoded_payload()
+        .map_err(|_| OperatorRuntimeError::Archive)?
+    {
+        DecodedTrustPayloadV1::InitialAdminDevice(fields) => fields,
+        DecodedTrustPayloadV1::AuthorizedDevice(fields) => fields.fields().clone(),
+        _ => return Err(OperatorRuntimeError::SignerMismatch),
+    };
+    let device_id = fields.device_id;
+    let slot = role_slot(config.role)?;
+    let native = open_native(initialize_native)?;
+    let signer = Arc::new(native.signing_provider(slot));
+    let key = signer.handle(SecretPurpose::LocalDatabaseKey);
+    let exists = config
+        .database_path
+        .try_exists()
+        .map_err(|_| OperatorRuntimeError::Io)?;
+    if !exists && !initialize_native {
+        return Err(OperatorRuntimeError::DatabaseMissing);
+    }
+    if !exists && !signer.contains(&key)? {
+        signer.generate(
+            SecretPurpose::LocalDatabaseKey,
+            KeyProtectionProfileV1::OsWrapped,
+        )?;
+    }
+    #[cfg(feature = "test-support")]
+    if let Some(profile) = &profile { profile.mark("database-begin"); }
+    let database = Arc::new(if exists {
+        EncryptedDatabase::open_existing(&config.database_path, signer.as_ref(), &key)?
+    } else {
+        EncryptedDatabase::open(&config.database_path, signer.as_ref(), &key)?
+    });
+    #[cfg(feature = "test-support")]
+    if let Some(profile) = &profile { profile.mark("database-return"); }
+    let key = TrustStateKey {
+        organization_id: snapshot.anchor.organization_id(),
+        device_id,
+    };
+    let store = OperatorTrustStateStore::open(
+        Arc::clone(&database),
+        key,
+        snapshot.anchor.chain_id(),
+        snapshot.anchor.trust_anchor_hash(),
+        UnixMillis::new(0),
+    )?;
+    #[cfg(feature = "test-support")]
+    if let Some(profile) = &profile { profile.mark("store-return"); }
+    Ok(RuntimeResources {
+        config,
+        snapshot,
+        native,
+        database,
+        store,
+        signer,
+        device_id,
+        opened,
+        anchor_path: anchor_path.to_path_buf(),
+        posture,
+    })
+}
+
+/// Diagnostic-only spans: fixed labels, public role/code location and times.
+/// No payload, path, account, key, or context-authority value is emitted.
+#[cfg(feature = "test-support")]
+mod runtime_profile {
+    use super::OperatorRoleV1;
+    use std::{cell::Cell, sync::atomic::{AtomicU64, Ordering}, time::Instant};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    thread_local! { static CURRENT: Cell<u64> = const { Cell::new(0) }; }
+    pub(super) struct Span {
+        id: u64,
+        parent: u64,
+        label: &'static str,
+        role: &'static str,
+        started: Instant,
+    }
+    impl Span {
+        pub(super) fn start(
+            label: &'static str,
+            role: OperatorRoleV1,
+            caller: Option<&'static std::panic::Location<'static>>,
+        ) -> Option<Self> {
+            if std::env::var_os("EA_TEST_NATIVE_RESUME_PHASES").as_deref()
+                != Some(std::ffi::OsStr::new("1")) { return None; }
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let parent = CURRENT.replace(id);
+            let role = match role {
+                OperatorRoleV1::OrganizationAdmin => "admin",
+                OperatorRoleV1::Writer => "writer",
+                _ => "other",
+            };
+            let span = Self { id, parent, label, role, started: Instant::now() };
+            let (source, line) = caller.map_or(("none", 0), |caller| {
+                let source = if caller.file().ends_with("destruction_runtime/exchange.rs") {
+                    "exchange"
+                } else if caller.file().ends_with("destruction_runtime.rs") {
+                    "destruction"
+                } else if caller.file().ends_with("operator_runtime.rs") {
+                    "runtime"
+                } else { "other" };
+                (source, caller.line())
+            });
+            eprintln!("runtime-profile {id} {parent} {role} {label} caller {source} {line}");
+            span.mark("begin");
+            Some(span)
+        }
+        pub(super) fn mark(&self, stage: &'static str) {
+            eprintln!("runtime-profile {} {} {} {} {stage} {}",
+                self.id, self.parent, self.role, self.label, self.started.elapsed().as_micros());
+        }
+    }
+    impl Drop for Span {
+        fn drop(&mut self) {
+            self.mark("return");
+            CURRENT.set(self.parent);
+        }
     }
 }
 

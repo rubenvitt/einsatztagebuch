@@ -15,6 +15,9 @@ import { readerBridge } from './bridge/reader-bridge'
 import { DecorativeIcon } from './design/icons'
 import { eaRuntimeTheme } from './design/tokens'
 import { EnrollmentPage } from './features/enrollment/EnrollmentPage'
+import { ReaderDestructionPage } from './features/destruction/ReaderDestructionPage'
+import { readerDestructionBridge } from './features/destruction/reader-destruction'
+import { downloadReaderAttestation } from './features/destruction/files'
 import { SingleExport } from './features/export/SingleExport'
 import { fileModeBridge } from './features/file-mode/DirectoryHandle'
 import { OpenArchivePanel } from './features/file-mode/OpenArchivePanel'
@@ -76,6 +79,7 @@ export const EA_WEB_ROUTES: readonly EaWebRoute[] = [
     label: 'Einzelexport',
     render: () => <SingleExport bridge={readerSessionBridge} host={window} />,
   },
+  { path: '/vernichtung', label: 'Reader-Cache', render: () => <ReaderDestructionPage bridge={readerDestructionBridge} session={readerSessionBridge} host={window} download={downloadReaderAttestation} /> },
 ]
 
 /**

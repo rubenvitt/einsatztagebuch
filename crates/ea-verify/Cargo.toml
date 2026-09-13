@@ -11,9 +11,11 @@ ea-archive.workspace = true
 ea-chain.workspace = true
 ea-crypto.workspace = true
 ea-format.workspace = true
+ea-schema.workspace = true
 ea-time.workspace = true
 ea-trust.workspace = true
 ea-types.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # `test-support` NUR fuer die Einheitszeugen des Transitionskerns in

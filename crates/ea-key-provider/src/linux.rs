@@ -1,32 +1,9 @@
-//! Der Ubuntu-Rand des Schluesselports.
+//! Ubuntu-Rand: Gerätemessungen und lokale Schlüsselpolitik.
 //!
-//! `design.md`:1485 nennt fuer Ubuntu Secret Service plus einen geschuetzten
-//! lokalen Schluesselcontainer, und `design.md`:235 verlangt ausdruecklich eine
-//! durch PAM entsperrte Secret-Service-Collection mit eigener zufaelliger
-//! Kontoinstanz — NICHT eine Datei, die allein durch UID-Dateirechte geschuetzt
-//! ist. Diese Zeile beansprucht ausschliesslich
-//! [`KeyProtectionProfileV1::OsWrapped`]
-//! ([`SupportMatrixRow::reachable_protection_profile`]).
-//!
-//! Was hier NICHT liegt: ein `KeyProvider`. Der Secret Service ist ein
-//! D-Bus-Dienst, und Stufe 2 nimmt keine native API-Familie in
-//! `[workspace.dependencies]` auf
-//! (`docs/adr/0001-toolchain-and-cryptography-dependencies.md:152-153`). Was hier
-//! liegt, ist die vollstaendig pruefbare Haelfte: die Uebersetzung der einen
-//! Eintragspolitik in die Kennzeichen der Collection und der Haltungsadapter
-//! dieser Zeile.
-//!
-//! Die FOLGE dieser Grenze, damit sie niemand erst im Betrieb entdeckt: es gibt
-//! auf dieser Zeile keinen `KeyProvider`, der eine per PAM entsperrte
-//! Secret-Service-Collection anlegt oder liest, keine PAM- oder
-//! Polkit-Praesenzpruefung und keinen Leser des LUKS-Status.
-//! `UbuntuDevicePosture` meldet vier `Unknown`, also ist
-//! `DevicePostureReport::is_production_ready` auf dieser Zeile immer `false` und
-//! eine Sitzung in produktiver Rolle entsteht hier nicht. Fail-closed und
-//! richtig gerichtet — aber eine SPERRE, die erst der Task loest, der die
-//! nativen API-Familien samt ADR einfuehrt.
-//!
-//! [`KeyProtectionProfileV1::OsWrapped`]: ea_format::KeyProtectionProfileV1::OsWrapped
+//! Der native Schlüsselhost liegt in `ea-admin` (ADR-0006). Dieser Adapter
+//! liest Verschlüsselung der eindeutigen Blockgeräte-Abstammung des Root-Dateisystems.
+//! Unbelegbare Voraussetzungen bleiben Unknown; Rohdaten verlassen den Adapter nicht.
+//! Die Messgrenzen stehen in `docs/device-posture.md`.
 
 use crate::{
     contract::{KeyEntryPolicy, KeyError},
@@ -64,24 +41,13 @@ pub const fn secret_service_attributes(policy: KeyEntryPolicy) -> UbuntuSecretSe
     }
 }
 
-/// Der Haltungsadapter dieser Zeile.
-///
-/// Die vier Signale, die Ubuntu 24.04 LTS dafuer dokumentiert bereitstellt, sind
-/// der LUKS-Status des Wurzelgeraets, die Kontoart samt aktiver Sitzungen des
-/// Sitzungsmanagers, die Sperrbildschirm-Einstellung der Sitzung und der
-/// Paketstand der unterstuetzten Veroeffentlichung. Alle vier liegen hinter
-/// D-Bus-Diensten beziehungsweise Systemwerkzeugen; Stufe 2 traegt keine native
-/// API-Familie, um sie zu lesen, und dieser Adapter meldet deshalb vier
-/// `Unknown` mit ihren Beweiscodes.
-///
-/// Ein `Unknown` sperrt die Sitzung in produktiver Rolle und erzeugt eine
-/// Pflichtzeile im Go-live-Bericht — der vom Produkt verlangte Ausgang, kein
-/// automatischer Pass.
+/// Liest die belegbaren Ubuntu-Signale über feste, begrenzte Systemaufrufe.
+/// Andere Plattformen und nicht belegbare Voraussetzungen bleiben Unknown.
 pub struct UbuntuDevicePosture;
 
 impl DevicePostureProvider for UbuntuDevicePosture {
     fn report(&self) -> Result<DevicePostureReport, KeyError> {
-        Ok(DevicePostureReport::unresolved())
+        Ok(crate::native_posture::ubuntu_report())
     }
 }
 

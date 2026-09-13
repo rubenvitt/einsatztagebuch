@@ -16,6 +16,7 @@ const invoked = vi.mocked(invoke)
 
 const CEREMONY = {
   ceremonyId: 'zeremonie-1',
+  round: 'ActivateRegistry', linkedCeremonyId: null, fingerprintSubject: null,
   kind: 'DeviceApprove',
   step: 'PendingRequest',
   targetFingerprint: null,
@@ -24,6 +25,7 @@ const CEREMONY = {
 
 const TRANSITION = {
   phase: 'NoTransition',
+  ceremonyId: null,
   currentWriterHash: 'AA'.repeat(32),
   newWriterHash: null,
   effectiveFromSequence: null,
@@ -31,6 +33,8 @@ const TRANSITION = {
 
 /** Die Drahtantworten je Kommando — gueltig nach `contract-check.ts`. */
 const ANSWERS: Record<string, unknown> = {
+  [ADMIN_COMMANDS.diagnoseWriterLock]: 'Missing',
+  [ADMIN_COMMANDS.openCeremonies]: [],
   [ADMIN_COMMANDS.pendingDeviceRequests]: [],
   [ADMIN_COMMANDS.goLiveChecklist]: { requirements: [], productionReady: false },
   [ADMIN_COMMANDS.registryHealth]: {
@@ -72,6 +76,7 @@ const ANSWERS: Record<string, unknown> = {
   [WRITER_COMMANDS.devicePosture]: { requirements: [], productionReady: false },
   [WRITER_COMMANDS.reauthenticate]: { fresh: true, purposeCode: 'EA-OPERATOR-REAUTH' },
   [ADMIN_COMMANDS.ceremonyBegin]: CEREMONY,
+  [ADMIN_COMMANDS.ceremonyRead]: CEREMONY,
   [ADMIN_COMMANDS.ceremonyConfirmFingerprint]: CEREMONY,
   [ADMIN_COMMANDS.ceremonyAuthorize]: CEREMONY,
   [ADMIN_COMMANDS.ceremonyExportRequest]: CEREMONY,
@@ -106,9 +111,10 @@ beforeEach(() => {
   })
 })
 
-it('reads the seven values with the seven argument-free commands', async () => {
+it('reads the eight values with the eight argument-free commands', async () => {
   await connectAdminBridge()
   for (const command of [
+    ADMIN_COMMANDS.openCeremonies,
     ADMIN_COMMANDS.pendingDeviceRequests,
     ADMIN_COMMANDS.goLiveChecklist,
     ADMIN_COMMANDS.registryHealth,
@@ -119,7 +125,7 @@ it('reads the seven values with the seven argument-free commands', async () => {
   ]) {
     expect(invoked).toHaveBeenCalledWith(command, undefined)
   }
-  expect(invoked).toHaveBeenCalledTimes(7)
+  expect(invoked).toHaveBeenCalledTimes(8)
 })
 
 it('sends every action under the argument names of the host contract', async () => {
@@ -141,6 +147,9 @@ it('sends every action under the argument names of the host contract', async () 
     ceremonyId: 'zeremonie-1',
     reportedFingerprint: 'AB:CD',
   })
+
+  await bridge.readCeremony('zeremonie-1')
+  expect(invoked).toHaveBeenLastCalledWith(ADMIN_COMMANDS.ceremonyRead, { ceremonyId: 'zeremonie-1' })
 
   await bridge.authorize('zeremonie-1')
   expect(invoked).toHaveBeenLastCalledWith(ADMIN_COMMANDS.ceremonyAuthorize, {
@@ -183,10 +192,12 @@ it('sends every action under the argument names of the host contract', async () 
     targetHash: 'DD'.repeat(32),
   })
 
-  // Sieben Werte plus zwoelf Handlungen: 19 Aufrufe, und jedes der 17
+  // Acht Werte plus dreizehn Handlungen: 21 Aufrufe, und jedes der 19
   // Verwaltungskommandos ist GENAU einmal ueber den Draht gegangen — keine
   // Handlung ruft ein zweites Kommando, keine laesst ihres aus.
-  expect(invoked).toHaveBeenCalledTimes(19)
+  expect(invoked).toHaveBeenCalledTimes(21)
+  await bridge.diagnoseWriterLock()
+  expect(invoked).toHaveBeenLastCalledWith(ADMIN_COMMANDS.diagnoseWriterLock, undefined)
   const names = invoked.mock.calls.map(([command]) => command)
   for (const command of Object.values(ADMIN_COMMANDS)) {
     expect(names.filter((name) => name === command)).toHaveLength(1)
@@ -214,4 +225,24 @@ it('validates the clock release outcome the host returns', async () => {
   await expect(bridge.issueClockRelease('HardwareClockMaintenance')).rejects.toMatchObject({
     name: 'ContractViolation',
   })
+})
+
+it('refuses a different ceremony when opening the linked activation', async () => {
+  const bridge = await connectAdminBridge()
+  await expect(bridge.readCeremony('other-id')).rejects.toMatchObject({ name: 'ContractViolation' })
+})
+
+
+it('diagnoses the lock only on request with no IPC arguments and validates every answer', async () => {
+  const bridge = await connectAdminBridge()
+  expect(invoked).not.toHaveBeenCalledWith('admin_writer_lock_diagnosis', undefined)
+  for (const value of ['Missing', 'AbandonedInert', 'LiveOwner', 'Unreadable']) {
+    invoked.mockResolvedValueOnce(value)
+    await expect(bridge.diagnoseWriterLock()).resolves.toBe(value)
+    expect(invoked).toHaveBeenLastCalledWith('admin_writer_lock_diagnosis', undefined)
+  }
+  for (const value of ['Ready', null, { state: 'Missing' }, '/private/archive']) {
+    invoked.mockResolvedValueOnce(value)
+    await expect(bridge.diagnoseWriterLock()).rejects.toMatchObject({ name: 'ContractViolation' })
+  }
 })

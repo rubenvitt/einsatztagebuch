@@ -43,6 +43,16 @@ impl TrustEventStore for PostgresRepository {
         event: TrustEventCommandV1,
     ) -> Result<TrustIndexOutcome, RepositoryError> {
         let mut transaction = self.pool().begin().await.map_err(|e| unavailable(&e))?;
+        // Match reservation lock order: organization before any object/index
+        // row. The existing trigger alone updates the revision atomically.
+        sqlx::query(
+            "SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE",
+        )
+        .bind(event.organization_id.as_bytes().as_slice())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?
+        .ok_or(RepositoryError::Unavailable)?;
 
         let existing = sqlx::query(
             "SELECT event_code FROM trust_events WHERE organization_id = $1 AND object_hash = $2",

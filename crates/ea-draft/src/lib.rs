@@ -36,6 +36,7 @@
 mod autosave;
 mod csv_import;
 mod discard;
+mod evidence;
 mod fault;
 mod incident_number;
 mod lock;
@@ -44,9 +45,10 @@ mod model;
 mod operator_profile;
 mod repository;
 
-pub use autosave::AutosaveDraftRepository;
+pub use autosave::{AutosaveDraftRepository, read_unscoped_prepared_finalization_marker_in};
 pub use csv_import::{CsvImporter, ImportError};
 pub use discard::{DiscardPhase, DiscardService};
+pub use evidence::{EvidenceDraftBinding, EvidenceDraftSource};
 pub use fault::{DiscardFaultPoint, PREPARED_FINALIZATION_BEATS_DISCARD_INTENT, RestartState};
 pub use incident_number::IncidentNumberRegister;
 pub use lock::DraftLock;

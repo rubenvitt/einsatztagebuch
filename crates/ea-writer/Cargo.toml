@@ -38,6 +38,7 @@ ea-crypto.workspace = true
 # Die EINE aktive Entwurfsablage: `DraftLock`, `DraftRepository`,
 # `IncidentNumberRegister`, `OperatorProfileRepository`.
 ea-draft.workspace = true
+ea-destruction.workspace = true
 # Die eingefrorenen Stufe-1-Konstruktoren der Archivbytes: `ManifestCoreV1`,
 # `SignedManifestV1`, `EntryPackageV1`, `GrantPlanV1`, `GrantBodyV1`, `GrantV1`.
 ea-format.workspace = true
@@ -79,6 +80,8 @@ zeroize.workspace = true
 test-support = []
 
 [dev-dependencies]
+hex.workspace = true
+ea-sync-protocol.workspace = true
 # Die SELBSTKANTE, die `test-support` fuer die Integrationstests einschaltet.
 ea-writer = { workspace = true, features = ["test-support"] }
 # Die BEOBACHTUNGSFLAECHE von `LocalPathBackend` — `relative_paths_below_for_test`,

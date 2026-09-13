@@ -19,6 +19,8 @@ test-support = []
 # `ea-trust` kehrte die Schichtung um.
 ea-audit.workspace = true
 ea-draft.workspace = true
+ea-destruction.workspace = true
+ea-sync-protocol.workspace = true
 ea-local-store.workspace = true
 minicbor.workspace = true
 # `VerificationContext::root_trust_digest` — die EINE Stelle, an der die
@@ -54,6 +56,9 @@ ea-trust.workspace = true
 ea-types.workspace = true
 ea-time.workspace = true
 ea-archive.workspace = true
+ea-archive-fs.workspace = true
+ea-writer.workspace = true
+ea-reader.workspace = true
 ea-recovery.workspace = true
 ea-verify.workspace = true
 hex.workspace = true
@@ -70,6 +75,11 @@ zeroize.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+ea-writer = { workspace = true, features = ["test-support"] }
+ea-draft = { workspace = true, features = ["test-support"] }
+ea-archive-fs = { workspace = true, features = ["test-support"] }
+ea-chain.workspace = true
+ea-testkit.workspace = true
 ea-key-provider = { workspace = true, features = ["test-support"] }
 # Die Zeugen bauen eine ECHTE Registrierungslinie und waehlen einen ECHTEN
 # Kopf; sie binden `crates/ea-trust/tests/support/mod.rs` per `#[path]` ein,
@@ -78,3 +88,7 @@ ea-key-provider = { workspace = true, features = ["test-support"] }
 # und alle bereits `=`-gepinnte Familien des Workspace.
 ea-time.workspace = true
 ed25519-dalek.workspace = true
+
+# Safe nonblocking private backup pipes; Windows Tokio uses an uncontrolled extra buffer.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+tokio = { workspace = true, features = ["process", "io-util"] }

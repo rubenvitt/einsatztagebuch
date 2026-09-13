@@ -59,7 +59,7 @@ use ea_schema::{
     CommonHeaderV1, IncidentV1, KeyTransitionV1, NativeSourceV1, OperatorSnapshotV1, PayloadV1,
     encode_payload,
 };
-use ea_trust::SelectedRegistryHead;
+use ea_trust::{SelectedRegistryHead, WriterRegistryHeadRef};
 use ea_types::{
     CertificateHash, ChainId, ChainSequence, EntryHash, Hash32, ObjectHash, UnixMillis,
 };
@@ -70,7 +70,7 @@ use crate::{
     StaleDecision, WriterError,
     content::{FinalizationContent, KeyTransitionInputV1},
     entropy::{self, EntropyKind},
-    grant_plan::build_grant_plan,
+    grant_plan::build_writer_grant_plan,
     incident::FinalizationInputV1,
     marker::PreparedTransactionV1,
     operator_commitment::operator_profile_commitment,
@@ -160,7 +160,7 @@ pub struct WriterService<'a> {
     pub(crate) key_provider: Arc<dyn KeyProvider>,
     pub(crate) backend: &'a dyn ArchiveBackend,
     pub(crate) source: &'a dyn ArchiveSource,
-    pub(crate) head: &'a SelectedRegistryHead,
+    pub(crate) head: WriterRegistryHeadRef<'a>,
     checkpoint_claims: &'a [CheckpointClaim],
     pub(crate) incident_numbers: IncidentNumberRegister,
     operator_profiles: OperatorProfileRepository,
@@ -193,6 +193,41 @@ pub struct WriterBindingV1 {
 }
 
 impl<'a> WriterService<'a> {
+    pub fn preview_destruction_evidence(
+        &self,
+        proof: &OperatorSessionProof,
+        input: crate::DestructionEvidenceInputV1,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizationPreview, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            proof,
+            FinalizationContent::DestructionEvidence(input),
+            observed_now,
+            Stop::After(FinalizationStep::BuildAndHashGrantPlan),
+        )?
+        .preview
+        .ok_or(WriterError::NoDraftContent)
+    }
+    pub fn finalize_destruction_evidence(
+        &self,
+        proof: &OperatorSessionProof,
+        input: crate::DestructionEvidenceInputV1,
+        confirmed: &FinalizationPreview,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizeOutcome, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            proof,
+            FinalizationContent::DestructionEvidence(input),
+            observed_now,
+            Stop::Confirmed(confirmed),
+        )?
+        .outcome
+        .ok_or(WriterError::NoDraftContent)
+    }
     /// Baut den Dienst FUER GENAU EINE Bedienerbindung und EINEN Bestand.
     ///
     /// Neun Argumente, und keines davon ist zusammenlegbar: die drei Ports
@@ -208,6 +243,34 @@ impl<'a> WriterService<'a> {
         backend: &'a dyn ArchiveBackend,
         source: &'a dyn ArchiveSource,
         head: &'a SelectedRegistryHead,
+        checkpoint_claims: &'a [CheckpointClaim],
+        incident_numbers: IncidentNumberRegister,
+        operator_profiles: OperatorProfileRepository,
+        binding: WriterBindingV1,
+    ) -> Self {
+        Self::new_for_writer(
+            repository,
+            key_provider,
+            backend,
+            source,
+            head.into(),
+            checkpoint_claims,
+            incident_numbers,
+            operator_profiles,
+            binding,
+        )
+    }
+
+    /// Accept the sealed Writer view. All stale receipt and finalization gates
+    /// still run; this constructor cannot expose general Registry authority.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_writer(
+        repository: Arc<dyn DraftRepository>,
+        key_provider: Arc<dyn KeyProvider>,
+        backend: &'a dyn ArchiveBackend,
+        source: &'a dyn ArchiveSource,
+        head: WriterRegistryHeadRef<'a>,
         checkpoint_claims: &'a [CheckpointClaim],
         incident_numbers: IncidentNumberRegister,
         operator_profiles: OperatorProfileRepository,
@@ -314,6 +377,56 @@ impl<'a> WriterService<'a> {
                 fault: Some(point),
             },
         )
+    }
+
+    pub fn acknowledge_stale_amendment(
+        &self,
+        proof: OperatorSessionProof,
+        input: crate::AmendmentInputV1,
+        confirmed: &FinalizationPreview,
+        warning_confirmed: bool,
+        observed_now: UnixMillis,
+    ) -> Result<crate::StaleRegistryAcknowledgement, WriterError> {
+        if !warning_confirmed {
+            return Err(WriterError::StaleAckRequired);
+        }
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            &proof,
+            FinalizationContent::Amendment(input),
+            observed_now,
+            Stop::Acknowledge(confirmed),
+        )?;
+        self.issue_stale_receipt(proof, confirmed, self.floored_now(observed_now))
+    }
+
+    pub fn finalize_amendment_with_stale_registry(
+        &self,
+        proof: &OperatorSessionProof,
+        input: crate::AmendmentInputV1,
+        confirmed: &FinalizationPreview,
+        acknowledgement: &crate::StaleRegistryAcknowledgement,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizeOutcome, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.stale_store
+            .as_ref()
+            .ok_or(WriterError::StaleAckRequired)?
+            .require_unused(acknowledgement)?;
+        self.run(
+            proof,
+            FinalizationContent::Amendment(input),
+            observed_now,
+            Stop::WithStale {
+                confirmed,
+                acknowledgement,
+                fault: None,
+            },
+        )?
+        .outcome
+        .ok_or(WriterError::NoDraftContent)
     }
 
     /// Die Vorschau: Schritte 1 bis 5 unter beiden Sperren.
@@ -436,6 +549,43 @@ impl<'a> WriterService<'a> {
         reached.outcome.ok_or(WriterError::NoDraftContent)
     }
 
+    pub fn preview_amendment(
+        &self,
+        proof: &OperatorSessionProof,
+        input: crate::AmendmentInputV1,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizationPreview, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            proof,
+            FinalizationContent::Amendment(input),
+            observed_now,
+            Stop::After(FinalizationStep::BuildAndHashGrantPlan),
+        )?
+        .preview
+        .ok_or(WriterError::NoDraftContent)
+    }
+
+    pub fn finalize_amendment(
+        &self,
+        proof: &OperatorSessionProof,
+        input: crate::AmendmentInputV1,
+        confirmed: &FinalizationPreview,
+        observed_now: UnixMillis,
+    ) -> Result<FinalizeOutcome, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            proof,
+            FinalizationContent::Amendment(input),
+            observed_now,
+            Stop::Confirmed(confirmed),
+        )?
+        .outcome
+        .ok_or(WriterError::NoDraftContent)
+    }
+
     /// Laeuft die Reihenfolge und haelt NACH `step` an.
     ///
     /// AUSSCHLIESSLICH fuer den Nachweis, dass jeder der dreizehn Schritte eine
@@ -465,6 +615,42 @@ impl<'a> WriterService<'a> {
             FinalizationContent::Incident(Box::new(input)),
             observed_now,
             Stop::After(step),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finalize_destruction_evidence_interrupted_at(
+        &self,
+        proof: &OperatorSessionProof,
+        input: crate::DestructionEvidenceInputV1,
+        observed_now: UnixMillis,
+        point: FinalizationFaultPoint,
+    ) -> Result<ReachedState, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            proof,
+            FinalizationContent::DestructionEvidence(input),
+            observed_now,
+            Stop::AtFault(point),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finalize_amendment_interrupted_at(
+        &self,
+        proof: &OperatorSessionProof,
+        input: crate::AmendmentInputV1,
+        observed_now: UnixMillis,
+        point: FinalizationFaultPoint,
+    ) -> Result<ReachedState, WriterError> {
+        let _writer_lock = self.backend.acquire_writer_lock()?;
+        let _draft_lock = self.repository.acquire_draft_lock()?;
+        self.run(
+            proof,
+            FinalizationContent::Amendment(input),
+            observed_now,
+            Stop::AtFault(point),
         )
     }
 
@@ -502,6 +688,8 @@ impl<'a> WriterService<'a> {
 /// bringen, und keinen, ihn von woanders zu nehmen als aus dem Head.
 enum ResolvedContent {
     Incident(Box<FinalizationInputV1>),
+    Amendment(crate::AmendmentInputV1),
+    DestructionEvidence(crate::DestructionEvidenceInputV1),
     KeyTransition {
         input: KeyTransitionInputV1,
         transition_object_hash: ObjectHash,
@@ -511,11 +699,11 @@ enum ResolvedContent {
 /// Eine dauerhaft beanspruchte Einsatznummer samt allem, was ihre Freigabe
 /// braucht.
 ///
-/// Der Schluessel des Registers und nichts sonst (`design.md`:361-373). Er
-/// reist ausschliesslich im Prozessspeicher zwischen Anspruch und Freigabe;
-/// eine Protokollzeile bekommt er nie, und deshalb traegt der Typ auch kein
-/// `Debug`.
+/// The encrypted source journal retains this exact register claim with its
+/// original draft identity until the irreversible boundary. No public audit
+/// or archive field receives the number; the in-process carrier has no Debug.
 pub(crate) struct ClaimedIncidentNumber {
+    pub(crate) source_claim_id: Option<i64>,
     pub(crate) stale_event_id: Option<ea_types::EventId>,
     pub(crate) organization_id: ea_types::OrganizationId,
     pub(crate) local_civil_year: i32,
@@ -808,7 +996,9 @@ impl WriterService<'_> {
             // Nummer stehen — den Zustand VOR dieser Zusage — und ist damit
             // fail-closed, waehrend ein vertauschter Code dem Bediener den
             // Abbruchgrund verschwiege.
-            if let Some(event_id) = claim.stale_event_id {
+            if let Some(claim_id) = claim.source_claim_id {
+                let _ = self.release_original_claim(claim_id);
+            } else if let Some(event_id) = claim.stale_event_id {
                 if let Some(store) = &self.stale_store {
                     let _ = store.release_claim(event_id);
                 }
@@ -838,6 +1028,7 @@ impl WriterService<'_> {
         stop: Stop<'_>,
         claimed: &mut Option<ClaimedIncidentNumber>,
     ) -> Result<ReachedState, WriterError> {
+        self.require_draft_content(&content)?;
         let mut state = ReachedState::empty();
 
         // Eine liegende Abschlussmarke hat an JEDEM Eingang Vorrang: nach dem
@@ -912,7 +1103,16 @@ impl WriterService<'_> {
             .copied();
         let resolved = match (content, transition_at_this_sequence) {
             (FinalizationContent::Incident(input), None) => ResolvedContent::Incident(input),
-            (FinalizationContent::Incident(_), Some(_)) => {
+            (FinalizationContent::Amendment(input), None) => ResolvedContent::Amendment(input),
+            (FinalizationContent::DestructionEvidence(input), None) => {
+                ResolvedContent::DestructionEvidence(input)
+            }
+            (
+                FinalizationContent::Incident(_)
+                | FinalizationContent::Amendment(_)
+                | FinalizationContent::DestructionEvidence(_),
+                Some(_),
+            ) => {
                 return Err(WriterError::WriterTransitionRequired);
             }
             (FinalizationContent::KeyTransition(_), None) => {
@@ -935,7 +1135,9 @@ impl WriterService<'_> {
             }
         };
         let transition_event_hash = match &resolved {
-            ResolvedContent::Incident(_) => None,
+            ResolvedContent::Incident(_)
+            | ResolvedContent::Amendment(_)
+            | ResolvedContent::DestructionEvidence(_) => None,
             ResolvedContent::KeyTransition {
                 transition_object_hash,
                 ..
@@ -1023,6 +1225,10 @@ impl WriterService<'_> {
             Some(confirmed) => confirmed.record_id(),
             None => entropy::uuid_v7(effective_now.get())?,
         };
+        let destruction_binding = match &resolved {
+            ResolvedContent::DestructionEvidence(input) => Some(input.evidence.clone()),
+            _ => None,
+        };
         let (payload, mut pending_claim) = match resolved {
             ResolvedContent::Incident(input) => {
                 let incident_number = input.human_incident_number.clone();
@@ -1054,11 +1260,81 @@ impl WriterService<'_> {
                 (
                     PayloadV1::Incident(incident),
                     Some(ClaimedIncidentNumber {
+                        source_claim_id: None,
                         stale_event_id: None,
                         organization_id: profile.organization_id(),
                         local_civil_year: year,
                         human_incident_number: incident_number,
                     }),
+                )
+            }
+            ResolvedContent::Amendment(input) => {
+                let (object_hash, number) = self.original_identity(input.original)?;
+                if object_hash != input.original_object_hash
+                    || number != input.original_incident_number
+                    || input.original.original_sequence >= proposed
+                {
+                    return Err(WriterError::OriginalIdentityMismatch);
+                }
+                self.require_original_bytes(input.original, object_hash)?;
+                let header = self.build_header(
+                    &profile,
+                    record_id,
+                    effective_now,
+                    input.content.timezone,
+                    input.content.source,
+                )?;
+                (
+                    PayloadV1::Amendment(ea_schema::AmendmentV1::new(
+                        header,
+                        number,
+                        input.original.original_record_id,
+                        input.original.original_entry_hash,
+                        input.original.original_sequence,
+                        input.content.reason,
+                        input.content.changes,
+                    )?),
+                    None,
+                )
+            }
+            ResolvedContent::DestructionEvidence(input) => {
+                // Evidence uses the ordinary irreversible draft-key boundary.
+                // A different active user draft must never be consumed by it.
+                if !self.repository.load_or_create()?.notes().is_empty() {
+                    return Err(WriterError::DestructionEvidenceInvalid);
+                }
+                input
+                    .evidence
+                    .validate_for_writer(
+                        profile.organization_id(),
+                        self.binding.chain_id,
+                        proposed,
+                        effective_now,
+                    )
+                    .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
+                input
+                    .evidence
+                    .validate_archive(self.source)
+                    .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
+                input
+                    .evidence
+                    .validate_managed_archive(self.backend)
+                    .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
+                let header = self.build_header(
+                    &profile,
+                    record_id,
+                    effective_now,
+                    input.timezone,
+                    input.source,
+                )?;
+                (
+                    PayloadV1::DestructionEvidence(
+                        input
+                            .evidence
+                            .into_payload(header)
+                            .map_err(|_| WriterError::DestructionEvidenceInvalid)?,
+                    ),
+                    None,
                 )
             }
             ResolvedContent::KeyTransition {
@@ -1086,6 +1362,17 @@ impl WriterService<'_> {
                 )
             }
         };
+        let original_identity = if let PayloadV1::Incident(incident) = &payload {
+            Some(crate::original_source::OriginalIncidentIdentity {
+                record_id: incident.header().record_id(),
+                organization_id: profile.organization_id(),
+                year: i32::from(incident.incident_uniqueness_key()?.local_civil_year()),
+                number: incident.human_incident_number().to_owned(),
+                sequence: proposed,
+            })
+        } else {
+            None
+        };
         state.draft_record_bytes = encode_payload(&payload)?;
         state.reached_step = Some(FinalizationStep::ValidateAndSerialize);
         if stop.ends_after(FinalizationStep::ValidateAndSerialize) {
@@ -1093,7 +1380,7 @@ impl WriterService<'_> {
         }
 
         // ---- 5. Den Grant-Plan bilden, hashen und die Vorschau rechnen ----
-        let plan = build_grant_plan(self.head)?;
+        let plan = build_writer_grant_plan(self.head)?;
         let preview = FinalizationPreview::new(
             FinalizationPreviewCoreFieldsV1 {
                 organization_id: profile.organization_id(),
@@ -1201,10 +1488,8 @@ impl WriterService<'_> {
         // in Schritt 9, unmittelbar mit der bestaetigten Abwesenheit des
         // `draftDEK` — ab da traegt ein Eintrag die Nummer, der sich nicht mehr
         // zuruecknehmen laesst.
-        if matches!(stop, Stop::Confirmed(_) | Stop::WithStale { .. })
-            && let Some(mut claim) = pending_claim.take()
-        {
-            let outcome = if let Stop::WithStale {
+        if let Some(mut claim) = pending_claim.take() {
+            if let Stop::WithStale {
                 acknowledgement, ..
             } = stop
             {
@@ -1219,21 +1504,10 @@ impl WriterService<'_> {
                         &claim,
                     )?;
                 claim.stale_event_id = Some(acknowledgement.event_id());
-                Ok(())
             } else {
-                self.incident_numbers.claim(
-                    claim.organization_id,
-                    claim.local_civil_year,
-                    &claim.human_incident_number,
-                )
-            };
-            match outcome {
-                Ok(()) => *claimed = Some(claim),
-                Err(ea_draft::DraftError::IncidentNumberTaken) => {
-                    return Err(WriterError::IncidentNumberTaken);
-                }
-                Err(other) => return Err(WriterError::Draft(other)),
+                claim.source_claim_id = Some(self.claim_original_number(&claim)?);
             }
+            *claimed = Some(claim);
         }
 
         // ---- 6. Die Geheimnisse EINMAL ziehen und den entryHash bilden ----
@@ -1357,6 +1631,27 @@ impl WriterService<'_> {
                 .as_bytes()
                 .to_vec(),
         };
+        if let Some(identity) = &original_identity {
+            self.record_original_identity(identity, &transaction)?;
+        }
+        if let Some(evidence) = &destruction_binding {
+            let expected = evidence.draft_source()
+                .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
+            if self.repository.evidence_draft_source()? != Some(expected) {
+                return Err(ea_draft::DraftError::EvidenceBinding.into());
+            }
+            evidence
+                .bind_prepared_entry(
+                    &self.incident_numbers.database_handle(),
+                    &transaction.entry_bytes,
+                )
+                .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
+            // Native repository adapters recheck refusal after the SQL effect.
+            // An error preserves the immutable publication row for recovery.
+            if self.repository.evidence_draft_source()? != Some(expected) {
+                return Err(ea_draft::DraftError::EvidenceBinding.into());
+            }
+        }
         let targets = transaction.targets()?;
         if stop.breaks_at(FinalizationFaultPoint::BeforeStagingCreate) {
             return Ok(state);
@@ -1733,6 +2028,9 @@ impl WriterService<'_> {
         stop: Stop<'_>,
         state: &mut ReachedState,
     ) -> Result<Option<FinalizeOutcome>, WriterError> {
+        ea_destruction::SqliteDestructionJobs::new(self.incident_numbers.database_handle())
+            .validate_prepared_evidence(&transaction.entry_bytes, self.source, self.backend)
+            .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
         let targets = transaction.targets()?;
 
         // ---- 10. Die Grants create-if-absent veroeffentlichen ----
@@ -1782,6 +2080,7 @@ impl WriterService<'_> {
             return Ok(None);
         }
         self.backend.sync_directory(&targets.entry)?;
+        self.confirm_original_publication(transaction)?;
         if stop.breaks_at(FinalizationFaultPoint::AfterEntryDirectoryFlush)
             || stop.ends_after(FinalizationStep::PublishEntryLast)
         {
@@ -2022,7 +2321,7 @@ fn require_fresh_proof(
     proof: &OperatorSessionProof,
     purpose: ReauthPurpose,
     bound_binding_object_hash: ObjectHash,
-    head: &SelectedRegistryHead,
+    head: WriterRegistryHeadRef<'_>,
 ) -> Result<(), WriterError> {
     if proof.binding_object_hash() != bound_binding_object_hash {
         return Err(WriterError::ReauthBindingMismatch);

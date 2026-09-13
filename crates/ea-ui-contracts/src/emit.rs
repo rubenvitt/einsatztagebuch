@@ -45,6 +45,12 @@ const HEADER: &str = "\
 /// `activated` ist ein `boolean` und traegt denselben Unterschied ohne diesen
 /// Preis; der GRUND steht daneben und bleibt eine geschlossene Union, weil er
 /// sieben Werte hat und jeder einzelne benannt gehoert.
+const CORRECTION_REFERENCE_FIELDS: &[(&str, &str)] = &[
+    ("originalRecordId", "string"),
+    ("originalEntryHash", "string"),
+    ("originalSequence", "number"),
+];
+
 const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
     (
         "BundleActivationView",
@@ -204,12 +210,14 @@ const READER_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ("reason", "string"),
         ],
     ),
+    ("CorrectionReferenceView", CORRECTION_REFERENCE_FIELDS),
     (
         "ReaderAmendmentThreadView",
         &[
             ("original", "ReaderEntryView"),
             ("amendments", "readonly ReaderEntryView[]"),
             ("rejected", "readonly ReaderRejectedAmendmentView[]"),
+            ("correctionReference?", "CorrectionReferenceView"),
         ],
     ),
     (
@@ -391,9 +399,26 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ),
         ],
     ),
+    ("CorrectionReferenceView", CORRECTION_REFERENCE_FIELDS),
+    (
+        "AmendmentChangeView",
+        &[("fieldPath", "string"), ("changeText", "string")],
+    ),
+    (
+        "AmendmentInputView",
+        &[
+            ("reference", "CorrectionReferenceView"),
+            ("reason", "string"),
+            ("changes", "readonly AmendmentChangeView[]"),
+        ],
+    ),
     (
         "DraftStateView",
-        &[("incident", "IncidentInputView"), ("sync", "SyncStateView")],
+        &[
+            ("incident", "IncidentInputView"),
+            ("amendment?", "AmendmentInputView | null"),
+            ("sync", "SyncStateView"),
+        ],
     ),
     (
         "MasterDataResultView",
@@ -454,6 +479,132 @@ const VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
 /// Emitter, und ein `const` laesst sich nicht beschreiben.
 pub const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
     (
+        "RecoveryMediumRequestView",
+        &[
+            ("runId", "string"),
+            ("requestId", "string"),
+            ("mediumIdHash", "string"),
+            ("index", "number"),
+            ("total", "number"),
+            ("roleCode", "string"),
+            ("certificateHash", "string"),
+            ("expectedThumbprint", "string"),
+            ("protectionCode", "number"),
+            ("testKindCode", "string"),
+        ],
+    ),
+    (
+        "RecoveryMediumObservationView",
+        &[
+            ("request", "RecoveryMediumRequestView"),
+            ("resultCode", "number"),
+            ("observedThumbprint", "string | null"),
+            ("errorCode", "string | null"),
+        ],
+    ),
+    (
+        "RecoveryReportView",
+        &[
+            ("completed", "boolean"),
+            ("exactPublicReportJson", "string"),
+            ("envelopeHash", "string"),
+            ("sourceEnvelopeHash", "string"),
+            ("auditId", "string"),
+            ("finishedAtMs", "number"),
+            ("nextDueAtMs", "number | null"),
+        ],
+    ),
+    (
+        "RecoveryRunView",
+        &[
+            ("operationId", "string"),
+            ("phaseCode", "number"),
+            ("request", "RecoveryMediumRequestView | null"),
+            ("observations", "readonly RecoveryMediumObservationView[]"),
+            ("report", "RecoveryReportView | null"),
+            ("errorCode", "string | null"),
+        ],
+    ),
+    (
+        "RecoveryAdministrationView",
+        &[
+            ("lastSuccess", "RecoveryReportView | null"),
+            ("lastFailure", "RecoveryReportView | null"),
+            ("run", "RecoveryRunView | null"),
+        ],
+    ),
+    (
+        "DestructionTargetView",
+        &[
+            ("entryHash", "string"),
+            ("chainSequence", "number"),
+            ("stubObjectHash", "string | null"),
+        ],
+    ),
+    (
+        "DestructionPreflightView",
+        &[
+            ("jobHash", "string"),
+            ("exactCanonicalReportJson", "string"),
+            ("knownReplicaCount", "number"),
+        ],
+    ),
+    (
+        "DestructionReplicaView",
+        &[
+            ("deviceId", "string"),
+            ("kindCode", "number"),
+            ("attestationHash", "string | null"),
+            ("resultCode", "number | null"),
+            ("backupExpiryAt", "number | null"),
+        ],
+    ),
+    (
+        "DestructionProcessView",
+        &[
+            ("destructionId", "string"),
+            ("authorizationObjectHash", "string"),
+            ("state", "DestructionStateV1"),
+            ("scopeCode", "number"),
+            ("legalReasonCode", "number"),
+            ("controllerDeviceId", "string"),
+            ("custodianDeviceId", "string"),
+            ("approverCertificateHashes", "readonly string[]"),
+            ("targets", "readonly DestructionTargetView[]"),
+            ("preflight", "DestructionPreflightView | null"),
+            ("replicas", "readonly DestructionReplicaView[]"),
+            ("evidenceEntryHash", "string | null"),
+        ],
+    ),
+    (
+        "DestructionAdministrationView",
+        &[
+            ("privacyDecisionEnabled", "boolean"),
+            ("policyHash", "string"),
+            ("knownDestructionIds", "readonly string[]"),
+            ("process", "DestructionProcessView | null"),
+        ],
+    ),
+    (
+        "DestructionReaderDeliveryView",
+        &[
+            ("destructionId", "string"),
+            ("jobHash", "string"),
+            ("readerId", "string"),
+            ("exactAuthorization", "readonly number[]"),
+            ("exactInitiatingEvent", "readonly number[]"),
+            ("exactJobUpload", "readonly number[]"),
+        ],
+    ),
+    (
+        "DestructionEvidenceReviewView",
+        &[
+            ("writerDeviceId", "string"),
+            ("process", "DestructionProcessView"),
+            ("preview", "FinalizationPreviewView"),
+        ],
+    ),
+    (
         "PendingDeviceRequestView",
         &[
             ("requestId", "string"),
@@ -462,6 +613,7 @@ pub const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             // Zertifikatsbytes, wie `device.rs` ihn definiert.
             ("fingerprint", "string"),
             ("receivedAtMs", "number"),
+            ("fingerprintSubject", "FingerprintSubjectV1"),
         ],
     ),
     (
@@ -475,6 +627,9 @@ pub const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             ("targetFingerprint", "string | null"),
             // Der Dateiname der Offline-Austauschdatei — nie ihr Pfad.
             ("exchangeFileName", "string | null"),
+            ("round", "TrustCeremonyRoundV1"),
+            ("linkedCeremonyId", "string | null"),
+            ("fingerprintSubject", "FingerprintSubjectV1 | null"),
         ],
     ),
     (
@@ -563,6 +718,7 @@ pub const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
         "WriterTransitionView",
         &[
             ("phase", "WriterTransitionPhase"),
+            ("ceremonyId", "string | null"),
             ("currentWriterHash", "string"),
             // `null` bei `NoTransition`.
             ("newWriterHash", "string | null"),

@@ -23,6 +23,12 @@ pub enum DraftError {
     /// Es wurde NICHTS geschrieben. Der Aufrufer liest neu und speichert auf
     /// dem Gewinner weiter; alter Inhalt kehrt nicht zurueck.
     RevisionConflict,
+    /// A regular draft action cannot access an Evidence-reserved slot.
+    EvidenceReserved,
+    /// The exact draft/job route does not match.
+    EvidenceBinding,
+    /// An existing user draft or transition occupies the single slot.
+    EvidenceOccupied,
     /// Diese Einsatznummer ist unter derselben Organisation und demselben
     /// oertlichen Kalenderjahr bereits verbraucht.
     IncidentNumberTaken,
@@ -87,6 +93,9 @@ impl DraftError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::RevisionConflict => "EA-DRAFT-REVISION-CONFLICT",
+            Self::EvidenceReserved => "EA-DRAFT-EVIDENCE-RESERVED",
+            Self::EvidenceBinding => "EA-DRAFT-EVIDENCE-BINDING",
+            Self::EvidenceOccupied => "EA-DRAFT-EVIDENCE-OCCUPIED",
             Self::IncidentNumberTaken => "EA-DRAFT-INCIDENT-NUMBER-TAKEN",
             Self::NoDraft => "EA-DRAFT-NOT-FOUND",
             Self::LockHeld => "EA-DRAFT-LOCK-HELD",

@@ -63,6 +63,7 @@ const BRIEF_TO_REGISTERED: &[(&str, &str)] = &[("session_current", "verified_ses
 /// `tests/admin_commands.rs`.
 const EXPECTED: &[&str] = &[
     "verified_session",
+    "session_login",
     "invalidate_session_on_lock",
     "startup_recovery",
     "master_data_counts",
@@ -73,15 +74,38 @@ const EXPECTED: &[&str] = &[
     "draft_discard_begin",
     "draft_discard_resume",
     "writer_recover_pending",
+    "writer_amendment_import",
+    "draft_save_amendment",
+    "writer_preview_amendment",
+    "writer_finalize_amendment",
+    "writer_acknowledge_stale_amendment",
     "writer_preview",
     "writer_acknowledge_stale_registry",
     "writer_finalize",
     "archive_health_report",
     "device_posture_report",
     "archive_export_bundle_file",
+    "destruction_read",
+    "destruction_prepare",
+    "destruction_start",
+    "destruction_resume",
+    "destruction_import_progress",
+    "destruction_export_reader_delivery",
+    "destruction_synchronize",
+    "destruction_authenticate_custodian",
+    "destruction_evidence_preview",
+    "destruction_evidence_finalize",
+    "destruction_evidence_recover",
+    "destruction_evidence_discard",
+    "recovery_read",
+    "recovery_start",
+    "recovery_submit",
+    "recovery_cancel",
     "sync_state",
     "admin_pending_device_requests",
+    "admin_open_ceremonies",
     "admin_ceremony_begin",
+    "admin_ceremony_read",
     "admin_ceremony_confirm_fingerprint",
     "admin_ceremony_authorize",
     "admin_ceremony_export_request",
@@ -89,6 +113,7 @@ const EXPECTED: &[&str] = &[
     "admin_ceremony_publish",
     "admin_policy_profile",
     "admin_registry_health",
+    "admin_writer_lock_diagnosis",
     "admin_go_live_checklist",
     "admin_go_live_export_unresolved",
     "admin_clock_release_offer",
@@ -215,26 +240,30 @@ fn the_app_acl_manifest_declares_every_registered_command() {
 /// Kommando auf. Dieser Zeuge liest die TypeScript-Quelle und verlangt jeden
 /// Namen dieses Tasks darin.
 ///
-/// Die vier Kommandos der Stufe 2 stehen nicht in dieser Liste: sie werden von
+/// Die Kommandos der Schale stehen nicht in dieser Liste: sie werden von
 /// `session-lock.ts` und `StartupRecovery.tsx` gerufen, und Task 15 fuehrt fuer
 /// sie eigene Zeugen (`the_shell_listens_to_the_event_the_host_announces`).
 #[test]
 fn the_writer_surface_names_the_same_commands_as_the_host() {
     const WRITER_PAGE: &str = include_str!("../../src/features/writer/WriterPage.tsx");
-    const STAGE_TWO: &[&str] = &[
+    const SHELL_COMMANDS: &[&str] = &[
         "verified_session",
+        "session_login",
         "invalidate_session_on_lock",
         "startup_recovery",
         "master_data_counts",
     ];
+    assert!(include_str!("../../src/app/session-lock.ts").contains("invoke('session_login')"));
     // Die Verwaltungsflaeche hat ihre eigene TSX-Quelle und ihren eigenen
     // Zeugen (`tests/admin_commands.rs`); die Writer-Seite darf sie NICHT
     // nennen — ein `admin_`-Literal in WriterPage.tsx waere ein Aufruf, den das
     // Rollentor des Wirts fuer jeden Writer abweist.
     let mut checked = 0_usize;
     let mut administration = 0_usize;
+    let mut destruction = 0_usize;
+    let mut recovery = 0_usize;
     for name in EXPECTED {
-        if STAGE_TWO.contains(name) {
+        if SHELL_COMMANDS.contains(name) {
             continue;
         }
         if name.starts_with("admin_") {
@@ -245,6 +274,23 @@ fn the_writer_surface_names_the_same_commands_as_the_host() {
             administration += 1;
             continue;
         }
+        if name.starts_with("recovery_") {
+            assert!(!WRITER_PAGE.contains(&format!("'{name}'")));
+            assert!(
+                include_str!("../../src/features/admin/RecoverySurface.tsx")
+                    .contains(&format!("'{name}'"))
+            );
+            recovery += 1;
+            continue;
+        }
+        if name.starts_with("destruction_") {
+            assert!(
+                !WRITER_PAGE.contains(&format!("'{name}'")),
+                "WriterPage.tsx nennt das Vernichtungskommando {name}"
+            );
+            destruction += 1;
+            continue;
+        }
         assert!(
             WRITER_PAGE.contains(&format!("'{name}'")),
             "WriterPage.tsx nennt {name} nicht"
@@ -253,9 +299,14 @@ fn the_writer_surface_names_the_same_commands_as_the_host() {
     }
     // Ohne diese Zaehlung liefe die Schleife bei einer leeren Restmenge ueber
     // nichts und blieb gruen.
-    assert_eq!(checked + administration, EXPECTED.len() - STAGE_TWO.len());
+    assert_eq!(
+        checked + administration + destruction + recovery,
+        EXPECTED.len() - SHELL_COMMANDS.len()
+    );
     assert!(checked >= 12);
-    assert_eq!(administration, 17);
+    assert_eq!(administration, 20);
+    assert_eq!(destruction, 12);
+    assert_eq!(recovery, 4);
 }
 
 /// Die eingebettete Faehigkeitsliste der Konfiguration ist eine ALLOWLIST — und

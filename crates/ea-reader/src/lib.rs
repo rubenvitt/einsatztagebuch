@@ -189,6 +189,8 @@ mod search;
 mod session;
 mod sync;
 mod trust_state;
+mod grant_time;
+pub use grant_time::ReaderGrantTimeStore;
 mod vault;
 mod verify;
 
@@ -219,11 +221,11 @@ pub use ea_archive::{
 };
 pub use ea_crypto::HpkeRecipientPrivateKey;
 pub use ea_format::{
-    ExportContextV1, LocalAuditActionV1, LocalAuditOutcomeV1, decode_local_audit_event,
+    ETB_MAX_RAW_BYTES_V1, ExportContextV1, LocalAuditActionV1, LocalAuditOutcomeV1, decode_local_audit_event,
 };
 pub use ea_index::{IndexError, IndexPressureV1, ReaderQueryV1, ReaderSearchHitV1};
 pub use ea_schema::{PayloadV1, SchemaRegistry};
-pub use ea_sync_protocol::HttpMethod;
+pub use ea_sync_protocol::{DestructionJobUploadV1, HttpMethod};
 pub use ea_trust::{TrustAnchorV1, decode_trust_anchor};
 pub use ea_types::{
     ChainSequence, DestructionId, DeviceId, EntryHash, EntryStatus, EventId, Hash32, KeyThumbprint,
@@ -274,3 +276,13 @@ pub use trust_state::{
 };
 pub use vault::{ReaderVault, ReaderVaultError, SealedVaultV1, UnlockedVault, VaultContentsV1};
 pub use verify::{ReaderClassification, ReaderError, ReaderVerifier};
+
+mod destruction;
+pub use destruction::{ReaderDestructionInstructionBytes, VerifiedReaderDestructionInstruction};
+
+mod cache_destruction;
+pub use cache_destruction::{ReaderCacheDestruction, ReaderCacheRemovalReceipt};
+
+mod destruction_authority;
+
+mod reader_attestation;

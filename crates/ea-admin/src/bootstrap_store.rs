@@ -37,6 +37,11 @@ use crate::{AdminError, BootstrapStateV1, BootstrapStore};
 /// Der Zeremoniezustand in EINER Datei.
 pub struct FileBootstrapStore {
     path: PathBuf,
+    // The descriptor's lifetime is the kernel lease; closing it releases the
+    // lock even after process death. Never unlink the lock file on release.
+    lease: Option<File>,
+    #[cfg(feature = "test-support")]
+    fail_after_rename_once: bool,
 }
 
 impl FileBootstrapStore {
@@ -46,7 +51,49 @@ impl FileBootstrapStore {
     /// Zeremonie, die niemand begonnen hat.
     #[must_use]
     pub const fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            lease: None,
+            #[cfg(feature = "test-support")]
+            fail_after_rename_once: false,
+        }
+    }
+
+    /// Holds the exclusive kernel lease until this store is dropped.
+    /// Acquire before loading state and keep the store for the whole ceremony
+    /// operation. Acquisition itself never reads or creates ceremony state.
+    ///
+    /// Supported on macOS x86_64/aarch64 and Linux GNU 64-bit x86_64/aarch64.
+    /// Other platforms refuse this explicit API; their legacy unleased port
+    /// remains unchanged and provides no continuous lease guarantee.
+    ///
+    /// # Errors
+    /// [`AdminError::BootstrapStoreUnavailable`] on contention, unsupported
+    /// platforms, or an unsafe/unavailable lock file. No host path is exposed.
+    pub fn acquire_lease(mut self) -> Result<Self, AdminError> {
+        if let Some(lease) = &self.lease {
+            validate_bootstrap_lock(&self.lock_path(), lease)?;
+        } else {
+            self.lease = Some(open_bootstrap_lock(&self.lock_path())?);
+        }
+        Ok(self)
+    }
+
+    /// Internal host boundary: require a retained lease and its current inode.
+    pub(crate) fn ensure_lease(&self) -> Result<(), AdminError> {
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or(AdminError::BootstrapStoreUnavailable)?;
+        validate_bootstrap_lock(&self.lock_path(), lease)
+    }
+
+    /// Injects one test-only error after the real state rename, before its
+    /// parent flush. It cannot roll back the state already present on disk.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn fail_next_parent_flush_after_rename_for_test(&mut self) {
+        self.fail_after_rename_once = true;
     }
 
     /// Der Pfad der Zustandsdatei.
@@ -65,6 +112,12 @@ impl FileBootstrapStore {
         temporary.push(".writing");
         PathBuf::from(temporary)
     }
+
+    fn lock_path(&self) -> PathBuf {
+        let mut lock = self.path.clone().into_os_string();
+        lock.push(".lock");
+        PathBuf::from(lock)
+    }
 }
 
 impl BootstrapStore for FileBootstrapStore {
@@ -79,6 +132,9 @@ impl BootstrapStore for FileBootstrapStore {
     /// Eine FEHLENDE Datei ist keines von beidem, sondern schlicht keine
     /// Zeremonie.
     fn load(&self) -> Result<Option<BootstrapStateV1>, AdminError> {
+        if let Some(lease) = &self.lease {
+            validate_bootstrap_lock(&self.lock_path(), lease)?;
+        }
         match fs::read(&self.path) {
             Ok(image) => BootstrapStateV1::from_persisted_image(&image).map(Some),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -128,6 +184,27 @@ impl BootstrapStore for FileBootstrapStore {
     /// NICHT durchgereicht — ihre Anzeige nimmt je nach Pfad den Hostpfad auf,
     /// und der gehoert in keine Diagnose.
     fn store(&mut self, state: &BootstrapStateV1) -> Result<(), AdminError> {
+        // Legacy callers participate in the same kernel lock for this write,
+        // including the monotonicity read and every .writing cleanup. Their
+        // separate earlier load + later store is NOT a cross-process CAS.
+        #[cfg(any(
+            all(
+                target_os = "macos",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            all(
+                target_os = "linux",
+                target_env = "gnu",
+                target_pointer_width = "64",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))]
+        let _write_lease = if let Some(lease) = &self.lease {
+            validate_bootstrap_lock(&self.lock_path(), lease)?;
+            None
+        } else {
+            Some(open_bootstrap_lock(&self.lock_path())?)
+        };
         let image = state.persisted_image();
         if BootstrapStateV1::from_persisted_image(&image)?.step() != state.step() {
             return Err(AdminError::BootstrapStateShape);
@@ -139,8 +216,9 @@ impl BootstrapStore for FileBootstrapStore {
         }
 
         let temporary = self.temporary_path();
-        // Ein Rest aus einem abgebrochenen frueheren Lauf ist kein Zustand und
-        // darf `create_new` nicht blockieren; er wird verworfen, nicht gelesen.
+        // Under the supported-platform lease, a leftover from a crashed writer
+        // may be removed. A participating live writer cannot own it now.
+        // The legacy path on other platforms has no such lease guarantee.
         let _ = fs::remove_file(&temporary);
         let written = (|| -> io::Result<()> {
             let mut options = OpenOptions::new();
@@ -163,6 +241,10 @@ impl BootstrapStore for FileBootstrapStore {
             let _ = fs::remove_file(&temporary);
             AdminError::BootstrapStoreUnavailable
         })?;
+        #[cfg(feature = "test-support")]
+        if std::mem::take(&mut self.fail_after_rename_once) {
+            return Err(AdminError::BootstrapStoreUnavailable);
+        }
         sync_parent_directory(&self.path)
     }
 }
@@ -175,6 +257,139 @@ impl BootstrapStore for FileBootstrapStore {
 /// entstehenden Organisation, und die gehen niemanden ausser dem Konto an, das
 /// die Zeremonie fuehrt.
 const STATE_FILE_MODE_V1: u32 = 0o600;
+
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn open_bootstrap_lock(path: &Path) -> Result<File, AdminError> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    // Same pinned O_NOFOLLOW | O_NONBLOCK constants as ea-archive-fs's
+    // local_path/lock_diagnosis. Linux aarch64 differs from x86_64.
+    #[cfg(target_os = "macos")]
+    const NOFOLLOW_NONBLOCK: i32 = 0x100 | 0x4;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const NOFOLLOW_NONBLOCK: i32 = 0x20000 | 2048;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const NOFOLLOW_NONBLOCK: i32 = 0x8000 | 2048;
+
+    let before = match fs::symlink_metadata(path) {
+        Ok(metadata) if valid_bootstrap_lock(&metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        _ => return Err(AdminError::BootstrapStoreUnavailable),
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(STATE_FILE_MODE_V1)
+        .custom_flags(NOFOLLOW_NONBLOCK)
+        .open(path)
+        .map_err(|_| AdminError::BootstrapStoreUnavailable)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| AdminError::BootstrapStoreUnavailable)?;
+    if !valid_bootstrap_lock(&opened)
+        || before.is_some_and(|before| before.dev() != opened.dev() || before.ino() != opened.ino())
+    {
+        return Err(AdminError::BootstrapStoreUnavailable);
+    }
+    file.try_lock()
+        .map_err(|_| AdminError::BootstrapStoreUnavailable)?;
+    validate_bootstrap_lock(path, &file)?;
+    Ok(file)
+}
+
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn valid_bootstrap_lock(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.is_file()
+        && metadata.len() == 0
+        && metadata.nlink() == 1
+        && metadata.mode() & 0o7777 == STATE_FILE_MODE_V1
+}
+
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn validate_bootstrap_lock(path: &Path, file: &File) -> Result<(), AdminError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let opened = file
+        .metadata()
+        .map_err(|_| AdminError::BootstrapStoreUnavailable)?;
+    let named = fs::symlink_metadata(path).map_err(|_| AdminError::BootstrapStoreUnavailable)?;
+    if valid_bootstrap_lock(&opened)
+        && valid_bootstrap_lock(&named)
+        && opened.dev() == named.dev()
+        && opened.ino() == named.ino()
+    {
+        Ok(())
+    } else {
+        Err(AdminError::BootstrapStoreUnavailable)
+    }
+}
+
+#[cfg(not(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+fn open_bootstrap_lock(_: &Path) -> Result<File, AdminError> {
+    Err(AdminError::BootstrapStoreUnavailable)
+}
+
+#[cfg(not(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+fn validate_bootstrap_lock(_: &Path, _: &File) -> Result<(), AdminError> {
+    Err(AdminError::BootstrapStoreUnavailable)
+}
 
 /// Flusht den Verzeichniseintrag, der eben durch das Rename entstanden ist.
 ///

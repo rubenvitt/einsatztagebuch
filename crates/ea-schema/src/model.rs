@@ -4,12 +4,13 @@ use ea_types::{
 use jiff::{Timestamp, tz::TimeZoneDatabase};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::SchemaError;
+use crate::{SchemaError, SecretText};
+use zeroize::{Zeroize, Zeroizing};
 
 pub struct CommonHeaderV1 {
     pub(crate) record_id: RecordId,
     pub(crate) finalized_at_device: UnixMillis,
-    pub(crate) timezone: String,
+    pub(crate) timezone: SecretText,
     pub(crate) operator: OperatorSnapshotV1,
     pub(crate) source: NativeSourceV1,
     pub(crate) registry_version: RegistryVersion,
@@ -86,13 +87,22 @@ impl CommonHeaderV1 {
 pub struct OperatorSnapshotV1 {
     pub(crate) organization_id: OrganizationId,
     pub(crate) operator_subject_id: OperatorSubjectId,
-    pub(crate) display_name: String,
-    pub(crate) function_label: String,
+    pub(crate) display_name: SecretText,
+    pub(crate) function_label: SecretText,
     pub(crate) salt: [u8; 32],
     pub(crate) operator_binding_object_hash: ObjectHash,
 }
 
 impl OperatorSnapshotV1 {
+    /// Applies the existing private-profile NFC rule without requiring a binding.
+    #[must_use]
+    pub fn normalize_profile_texts(
+        display_name: impl Into<String>,
+        function_label: impl Into<String>,
+    ) -> (SecretText, SecretText) {
+        (normalize_text(display_name), normalize_text(function_label))
+    }
+
     pub fn new(
         organization_id: OrganizationId,
         operator_subject_id: OperatorSubjectId,
@@ -101,11 +111,12 @@ impl OperatorSnapshotV1 {
         salt: [u8; 32],
         operator_binding_object_hash: ObjectHash,
     ) -> Result<Self, SchemaError> {
+        let (display_name, function_label) = Self::normalize_profile_texts(display_name, function_label);
         Ok(Self {
             organization_id,
             operator_subject_id,
-            display_name: normalize_text(display_name),
-            function_label: normalize_text(function_label),
+            display_name,
+            function_label,
             salt,
             operator_binding_object_hash,
         })
@@ -143,7 +154,7 @@ impl OperatorSnapshotV1 {
 }
 
 pub struct NativeSourceV1 {
-    pub(crate) source_id: String,
+    pub(crate) source_id: SecretText,
     pub(crate) source_format_version: u64,
 }
 
@@ -172,7 +183,7 @@ impl NativeSourceV1 {
 
 pub struct ValidatedPayload {
     pub(crate) payload: PayloadV1,
-    pub(crate) exact_bytes: Vec<u8>,
+    pub(crate) exact_bytes: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl ValidatedPayload {
@@ -339,16 +350,16 @@ pub struct IncidentV1 {
 }
 
 pub(crate) struct IncidentBodyV1 {
-    pub(crate) human_incident_number: String,
+    pub(crate) human_incident_number: SecretText,
     pub(crate) occurred_at: OccurredAtV1,
     pub(crate) keyword: KeywordV1,
     pub(crate) location: LocationV1,
     pub(crate) personnel: Vec<PersonnelSnapshotV1>,
-    pub(crate) personnel_empty_reason: Option<String>,
+    pub(crate) personnel_empty_reason: Option<SecretText>,
     pub(crate) vehicles: Vec<VehicleSnapshotV1>,
-    pub(crate) vehicles_empty_reason: Option<String>,
+    pub(crate) vehicles_empty_reason: Option<SecretText>,
     pub(crate) patient_count: PatientCount,
-    pub(crate) notes: Option<String>,
+    pub(crate) notes: Option<SecretText>,
     pub(crate) external_organizations: Vec<ExternalOrganizationV1>,
 }
 
@@ -453,7 +464,7 @@ impl IncidentV1 {
         Ok(IncidentUniquenessKey {
             organization_id: self.header.operator.organization_id,
             local_civil_year: local_civil_year(&self.header.timezone, self.body.occurred_at.start)?,
-            incident_number_nfc_bytes: self.body.human_incident_number.as_bytes().to_vec(),
+            incident_number_nfc_bytes: self.body.human_incident_number.as_bytes().to_vec().into(),
         })
     }
 
@@ -526,7 +537,7 @@ impl core::fmt::Debug for IncidentV1 {
 pub struct IncidentUniquenessKey {
     organization_id: OrganizationId,
     local_civil_year: i16,
-    incident_number_nfc_bytes: Vec<u8>,
+    incident_number_nfc_bytes: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl IncidentUniquenessKey {
@@ -580,10 +591,10 @@ impl core::fmt::Debug for OccurredAtV1 {
 }
 
 pub enum KeywordV1 {
-    FreeText(String),
+    FreeText(SecretText),
     Reference {
-        reference_id: String,
-        display_text: String,
+        reference_id: SecretText,
+        display_text: SecretText,
     },
 }
 
@@ -630,7 +641,7 @@ impl KeywordV1 {
 
 pub enum LocationV1 {
     FreeText {
-        free_text: String,
+        free_text: SecretText,
         coordinates: Option<CoordinatesV1>,
     },
     Structured {
@@ -714,12 +725,12 @@ impl CoordinatesV1 {
 }
 
 pub struct StructuredAddressV1 {
-    pub(crate) street: Option<String>,
-    pub(crate) house_number: Option<String>,
-    pub(crate) postal_code: Option<String>,
-    pub(crate) locality: Option<String>,
-    pub(crate) admin_area: Option<String>,
-    pub(crate) country_code: Option<String>,
+    pub(crate) street: Option<SecretText>,
+    pub(crate) house_number: Option<SecretText>,
+    pub(crate) postal_code: Option<SecretText>,
+    pub(crate) locality: Option<SecretText>,
+    pub(crate) admin_area: Option<SecretText>,
+    pub(crate) country_code: Option<SecretText>,
 }
 
 impl StructuredAddressV1 {
@@ -819,7 +830,7 @@ impl MasterDataRevisionV1 {
 }
 
 pub struct ImportedProvenanceV1 {
-    pub(crate) source_id: String,
+    pub(crate) source_id: SecretText,
     pub(crate) source_format_version: u64,
     pub(crate) import_protocol_hash: ObjectHash,
 }
@@ -861,15 +872,15 @@ impl ImportedProvenanceV1 {
 
 pub enum PersonnelSnapshotV1 {
     Master {
-        master_personnel_id: String,
-        display_name: String,
-        role_or_function: Option<String>,
+        master_personnel_id: SecretText,
+        display_name: SecretText,
+        role_or_function: Option<SecretText>,
         revision: MasterDataRevisionV1,
         imported_provenance: Option<ImportedProvenanceV1>,
     },
     AdHoc {
-        display_name: String,
-        role_or_function: Option<String>,
+        display_name: SecretText,
+        role_or_function: Option<SecretText>,
     },
 }
 
@@ -999,17 +1010,17 @@ impl PersonnelSnapshotV1 {
 
 pub enum VehicleSnapshotV1 {
     Master {
-        master_vehicle_id: String,
-        display_name: String,
-        radio_call_sign: Option<String>,
-        license_plate: Option<String>,
+        master_vehicle_id: SecretText,
+        display_name: SecretText,
+        radio_call_sign: Option<SecretText>,
+        license_plate: Option<SecretText>,
         revision: MasterDataRevisionV1,
         imported_provenance: Option<ImportedProvenanceV1>,
     },
     AdHoc {
-        display_name: String,
-        radio_call_sign: Option<String>,
-        license_plate: Option<String>,
+        display_name: SecretText,
+        radio_call_sign: Option<SecretText>,
+        license_plate: Option<SecretText>,
     },
 }
 
@@ -1152,8 +1163,8 @@ impl VehicleSnapshotV1 {
 }
 
 pub struct ExternalOrganizationV1 {
-    pub(crate) id: Option<String>,
-    pub(crate) display_name: String,
+    pub(crate) id: Option<SecretText>,
+    pub(crate) display_name: SecretText,
 }
 
 impl ExternalOrganizationV1 {
@@ -1183,11 +1194,11 @@ impl ExternalOrganizationV1 {
 }
 pub struct AmendmentV1 {
     pub(crate) header: CommonHeaderV1,
-    pub(crate) original_incident_number: String,
+    pub(crate) original_incident_number: SecretText,
     pub(crate) original_record_id: RecordId,
     pub(crate) original_entry_hash: ea_types::EntryHash,
     pub(crate) original_sequence: ea_types::ChainSequence,
-    pub(crate) reason: String,
+    pub(crate) reason: SecretText,
     pub(crate) changes: Vec<AmendmentChangeV1>,
 }
 
@@ -1274,8 +1285,8 @@ impl AmendmentV1 {
 }
 
 pub struct AmendmentChangeV1 {
-    pub(crate) field_path: String,
-    pub(crate) change_text: String,
+    pub(crate) field_path: SecretText,
+    pub(crate) change_text: SecretText,
 }
 
 impl AmendmentChangeV1 {
@@ -1319,7 +1330,7 @@ impl AmendmentChangeV1 {
 pub struct KeyTransitionV1 {
     pub(crate) header: CommonHeaderV1,
     pub(crate) writer_transition_event_object_hash: ObjectHash,
-    pub(crate) organizational_reason: String,
+    pub(crate) organizational_reason: SecretText,
 }
 
 impl KeyTransitionV1 {
@@ -1628,8 +1639,14 @@ impl ReplicaStateV1 {
     }
 }
 
-fn normalize_text(value: impl Into<String>) -> String {
-    value.into().nfc().collect()
+fn normalize_text(value: impl Into<String>) -> SecretText {
+    let input = Zeroizing::new(value.into());
+    let size = input.nfc().map(char::len_utf8).sum();
+    let mut normalized = String::with_capacity(size);
+    for character in input.nfc() {
+        normalized.push(character);
+    }
+    SecretText::from(normalized)
 }
 
 fn require_nonempty<T>(values: &[T], field: &'static str) -> Result<(), SchemaError> {
@@ -1755,4 +1772,10 @@ fn local_civil_year(timezone_name: &str, start: UnixMillis) -> Result<i16, Schem
         .get(timezone_name)
         .map_err(|_| SchemaError::invalid("EA-SCHEMA-TIMEZONE-UNKNOWN", Some("timezone")))?;
     Ok(timestamp.to_zoned(timezone).year())
+}
+
+impl Drop for OperatorSnapshotV1 {
+    fn drop(&mut self) {
+        self.salt.zeroize();
+    }
 }

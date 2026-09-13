@@ -216,7 +216,7 @@ let unlocking: Promise<number> | undefined
  * Die Kennung, ohne Sitzung ein Fehlschlag mit dem Code, den Rust fuer eine
  * Kennung gibt, die es nicht gibt — eine nie eroeffnete ist genau das.
  */
-function requireSession(): number {
+export function requireSession(): number {
   if (sessionHandle === undefined) {
     throw new Error('EA-READER-SESSION-UNKNOWN')
   }

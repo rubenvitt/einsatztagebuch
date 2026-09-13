@@ -10,10 +10,9 @@
 //!
 //! # DIE UHR IST HIER KEIN PARAMETER
 //!
-//! Die CLI kennt genau eine, `SystemTime::now()`. Jeder Bestand stammt deshalb
-//! aus der `live_clock_*`-Familie; die geerbten Bestaende sind unter der echten
-//! Uhr stumm und liefern eine LEERE Aussage, die faelschlich wie Erfolg
-//! aussieht. Die Begruendung steht in `apps/cli/tests/support/mod.rs`.
+//! Die CLI verwendet `SystemTime::now()`. Diese Tests behalten die
+//! `live_clock_*`-Familie mit aktuell waehlbarem Head. Historische Lesbarkeit
+//! nach einer alten Registry-Lease wird separat in `exit_codes.rs` geprueft.
 
 #[path = "support/mod.rs"]
 mod support;

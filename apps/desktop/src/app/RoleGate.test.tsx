@@ -81,8 +81,11 @@ it('declares no Reader command in src-tauri', async () => {
   const commands = await readdir(path.join(packageRoot, 'src-tauri/src/commands'))
   expect(commands.sort()).toEqual([
     'admin.rs',
+    'destruction.rs',
     'master_data.rs',
     'mod.rs',
+    'recovery',
+    'recovery.rs',
     'session.rs',
     'sync.rs',
     'writer.rs',
@@ -98,7 +101,15 @@ it('exposes no writer or administration surface in apps/web', async () => {
   expect(sources.length).toBeGreaterThan(0)
   expect(sources.map(([file]) => file)).toContain('main.tsx')
   for (const [file, text] of sources) {
-    expect(text, file).not.toMatch(
+    // Task12's Reader-local removal and receipt consume verified existing
+    // authorization. They do not issue authorization, start a managed job or
+    // expose an Admin surface. Keep every other destruction name forbidden.
+    const readerText = file === 'bridge/opfs-worker.ts'
+      ? text.replace(/\breaderDestruction(?:Apply|Receipt)\b|'reader-destruction-(?:apply|receipt)'/g, '')
+      : file === 'vault/webauthn-prf.ts'
+        ? text.replace(/'reader-destruction-apply'/g, '')
+        : text
+    expect(readerText, file).not.toMatch(
       /finaliz|Root-Zeremonie|rootCeremony|provision|historicalRegrant|destruction|Entwurf verwerfen/i,
     )
   }

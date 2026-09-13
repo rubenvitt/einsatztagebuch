@@ -48,6 +48,32 @@ pub fn verify_current_session(
     Ok(())
 }
 
+/// Revalidate Writer-only presence without granting general current authority.
+pub fn verify_writer_session(
+    head: ea_trust::WriterRegistryHeadRef<'_>,
+    expected_device_certificate_hash: ea_types::CertificateHash,
+    proof: &OperatorSessionProof,
+    purpose: ReauthPurpose,
+    account: &dyn OsAccountProvider,
+) -> Result<(), OperatorError> {
+    let bound = BoundOperator::resolve_writer(head, proof.binding_object_hash())?;
+    if bound.device_certificate_hash() != expected_device_certificate_hash {
+        return Err(OperatorError::DeviceMismatch);
+    }
+    if !purpose.is_writer_purpose()
+        || proof.organization_id() != bound.organization_id()
+        || proof.device_id() != bound.device_id()
+        || !proof.is_valid_for(purpose, head.preexisting_effective_now())
+        || bound
+            .proof_not_after()
+            .is_some_and(|end| head.preexisting_effective_now().value() >= end)
+    {
+        return Err(OperatorError::ProofMismatch);
+    }
+    bound.verify_account(account)?;
+    Ok(())
+}
+
 /// Die Domaintrennung der lokalen Praesenz-Challenge.
 ///
 /// Sie gehoert DIESER Crate und ist ausdruecklich keine Stufe-1-Konstante: die
@@ -87,16 +113,24 @@ pub enum ReauthPurpose {
     ClockSkewRelease,
     /// Migration eines Archivprofils.
     ArchiveProfileMigration,
+    /// Purpose-limited documentation of unmeasurable Go-live prerequisites.
+    GoLivePostureDocumentation,
 }
 
 impl ReauthPurpose {
-    /// Alle zehn Zwecke, in Deklarationsreihenfolge.
+    pub const fn is_writer_purpose(self) -> bool {
+        matches!(
+            self,
+            Self::Finalize | Self::DiscardDraft | Self::RegistryStaleFinalize
+        )
+    }
+    /// Alle elf Zwecke, in Deklarationsreihenfolge.
     ///
     /// Die Laenge ist Teil des Typs: ein elfter Zweck bricht dieses Literal und
     /// erzwingt damit, dass der Namensvergleich in
     /// `every_purpose_carries_a_distinct_label` ihn mitnimmt statt ihn
     /// stillschweigend auszulassen.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Finalize,
         Self::DiscardDraft,
         Self::RegistryStaleFinalize,
@@ -107,6 +141,7 @@ impl ReauthPurpose {
         Self::Destruction,
         Self::ClockSkewRelease,
         Self::ArchiveProfileMigration,
+        Self::GoLivePostureDocumentation,
     ];
 
     /// Die Zeichenkette, die den Zweck in der Challenge NENNT.
@@ -129,6 +164,7 @@ impl ReauthPurpose {
             Self::Destruction => "destruction",
             Self::ClockSkewRelease => "clock-skew-release",
             Self::ArchiveProfileMigration => "archive-profile-migration",
+            Self::GoLivePostureDocumentation => "go-live-posture-documentation",
         }
     }
 }
@@ -178,6 +214,13 @@ pub struct OperatorSessionProof {
 }
 
 impl OperatorSessionProof {
+    /// Read-only deadline for bounding an authenticated remote request to the
+    /// actual native presence that admitted it. This cannot extend or mint proof.
+    #[must_use]
+    pub const fn expires_at(&self) -> UnixMillis {
+        self.expires_at
+    }
+
     /// Ob dieser Nachweis `purpose` zur Zeit des gewaehlten Head autorisiert.
     ///
     /// Vier Bedingungen, alle notwendig: der Zweck stimmt, der Nachweis ist
@@ -380,6 +423,10 @@ fn authenticate<T: OperatorAuthenticator + ?Sized>(
 ) -> Result<OperatorSessionProof, OperatorError> {
     let bound = authenticator.bound_operator();
 
+    if !bound.permits_purpose(purpose) {
+        return Err(OperatorError::RoleMismatch);
+    }
+
     let instance_key = bound.verify_account(account.as_ref())?;
 
     let mut nonce = [0_u8; 32];
@@ -395,6 +442,9 @@ fn authenticate<T: OperatorAuthenticator + ?Sized>(
     }
     if let Some(ready) = successor_ready_at {
         expires_at = expires_at.min(ready);
+    }
+    if let Some(end) = bound.proof_not_after() {
+        expires_at = expires_at.min(end);
     }
     if expires_at <= issued_at {
         return Err(OperatorError::PresenceProofInvalid);
@@ -486,7 +536,7 @@ mod tests {
         let mut sorted = labels.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        // Zehn Zwecke, zehn Namen: ein doppeltes Label liesse eine Signatur fuer
+        // Elf Zwecke, elf Namen: ein doppeltes Label liesse eine Signatur fuer
         // den einen Zweck als eine fuer den anderen durchgehen.
         assert_eq!(sorted.len(), labels.len());
     }

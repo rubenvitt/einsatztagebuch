@@ -71,7 +71,7 @@
 //! [`ea_types::EntryHash`] und [`ea_types::RecordId`] lassen sich deshalb nur
 //! mit `assert!(a == b)` vergleichen, nicht mit `assert_eq!`.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use ea_reader::{
     ReaderClassification, SchemaRegistry, SilentObserver, UnlockedVault, VerifiedDecryptedRecord,
@@ -467,7 +467,7 @@ struct ClassifiedArchiveV1 {
     classification: ReaderClassification,
 }
 
-static VAULT_V1: OnceLock<UnlockedVault> = OnceLock::new();
+static VAULT_V1: OnceLock<Mutex<UnlockedVault>> = OnceLock::new();
 static AMENDMENT_CLASSIFIED_V1: OnceLock<ClassifiedArchiveV1> = OnceLock::new();
 static TWIN_CLASSIFIED_V1: OnceLock<ClassifiedArchiveV1> = OnceLock::new();
 
@@ -476,21 +476,26 @@ static TWIN_CLASSIFIED_V1: OnceLock<ClassifiedArchiveV1> = OnceLock::new();
 /// Derselbe Tresor fuer beide Bestaende: sie tragen denselben Anker und
 /// denselben Empfaengerabdruck, weil sie ueber dieselbe Registrierungslinie
 /// gebaut sind.
-fn vault() -> &'static UnlockedVault {
-    VAULT_V1.get_or_init(reader_fixtures::unlocked_vault_with_pinned_anchor)
+fn vault() -> MutexGuard<'static, UnlockedVault> {
+    // The observed-time floor mutates within a session. Serialize fixture
+    // access while retaining the one vault identity bound to cached witnesses.
+    VAULT_V1
+        .get_or_init(|| Mutex::new(reader_fixtures::unlocked_vault_with_pinned_anchor()))
+        .lock()
+        .expect("fixture vault access must not have panicked")
 }
 
 fn classified_amendment_archive() -> &'static ClassifiedArchiveV1 {
     AMENDMENT_CLASSIFIED_V1.get_or_init(|| ClassifiedArchiveV1 {
         fixture: amendment_archive(),
-        classification: reader_fixtures::classify(amendment_archive(), vault()),
+        classification: reader_fixtures::classify(amendment_archive(), &vault()),
     })
 }
 
 fn classified_twin_archive() -> &'static ClassifiedArchiveV1 {
     TWIN_CLASSIFIED_V1.get_or_init(|| ClassifiedArchiveV1 {
         fixture: twin_archive(),
-        classification: reader_fixtures::classify(twin_archive(), vault()),
+        classification: reader_fixtures::classify(twin_archive(), &vault()),
     })
 }
 
@@ -520,7 +525,7 @@ fn record_at(source: &ClassifiedArchiveV1, chain_sequence: u64) -> VerifiedDecry
     decrypt_verified(
         entry,
         grant,
-        vault(),
+        &vault(),
         &SchemaRegistry::v1(),
         reader_fixtures::EFFECTIVE_NOW,
         &mut SilentObserver,

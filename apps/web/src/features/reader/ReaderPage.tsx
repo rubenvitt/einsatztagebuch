@@ -1,6 +1,7 @@
+import { onReaderViewsInvalidated } from '../../bridge/reader-invalidation'
 import { Alert, Button, ConfigProvider, Space, Tabs, Typography } from 'antd'
 import deDE from 'antd/locale/de_DE'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import type {
@@ -86,23 +87,33 @@ function VerificationSummary({ stand }: { readonly stand: ReaderStandView }): Re
  * und im Server-Modus fuellt ihn diese Stufe noch nicht aus dem Cache.
  */
 export function ReaderPage({ bridge }: { readonly bridge: ReaderBridge }): ReactElement {
+  const generation = useRef(0)
   const [loaded, setLoaded] = useState<Loaded | undefined>(undefined)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [opened, setOpened] = useState<Opened | undefined>(undefined)
   const [technical, setTechnical] = useState<ReaderTechnicalView | undefined>(undefined)
 
+  useEffect(() => onReaderViewsInvalidated(() => {
+    generation.current += 1
+    setOpened(undefined)
+    setTechnical(undefined)
+    setFailure(undefined)
+    setLoaded({ stand: null })
+  }), [])
+
   useEffect(() => {
     // Der Bestand wird beim Montieren EINMAL gelesen. Die Abbruchmarke haelt
     // eine spaete Antwort von einer schon abgebauten Flaeche fern.
     let cancelled = false
+    const current = generation.current
     void bridge.standView().then(
       stand => {
-        if (!cancelled) {
+        if (!cancelled && current === generation.current) {
           setLoaded({ stand })
         }
       },
       (reason: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && current === generation.current) {
           setFailure(failureText(reason))
         }
       },
@@ -113,26 +124,31 @@ export function ReaderPage({ bridge }: { readonly bridge: ReaderBridge }): React
   }, [bridge])
 
   function openEntry(entryHash: string): void {
+    const current = generation.current
     void Promise.all([bridge.entryView(entryHash), bridge.amendmentThread(entryHash)]).then(
       ([entry, thread]) => {
+        if (current !== generation.current) return
         setFailure(undefined)
         setOpened({ entry, thread })
       },
-      (reason: unknown) => setFailure(failureText(reason)),
+      (reason: unknown) => { if (current === generation.current) setFailure(failureText(reason)) },
     )
   }
 
   function openTechnical(entryHash: string): void {
+    const current = generation.current
     void bridge.technicalView(entryHash).then(
       view => {
+        if (current !== generation.current) return
         setFailure(undefined)
         setTechnical(view)
       },
-      (reason: unknown) => setFailure(failureText(reason)),
+      (reason: unknown) => { if (current === generation.current) setFailure(failureText(reason)) },
     )
   }
 
   function closeStand(): void {
+    generation.current += 1
     void bridge.closeStand().then(
       () => {
         setOpened(undefined)

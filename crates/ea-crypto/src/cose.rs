@@ -49,6 +49,10 @@ pub enum ContentType {
     /// signiert Receipts, Checkpoints und Cursor mit demselben Schluessel, und
     /// getrennt werden die drei ueber Domaene und Content-Type.
     TechnicalCursorDigest,
+    /// Internal durable destruction pre-state report; never an archive object.
+    DestructionPreflightDigest,
+    /// Internal, bounded documentation of unmeasurable device prerequisites.
+    GoLivePostureDigest,
 }
 
 impl ContentType {
@@ -69,6 +73,8 @@ impl ContentType {
             Self::ReaderAckCbor => "application/vnd.einsatzarchiv.reader-ack+cbor",
             Self::RecoveryTestDigest => "application/vnd.einsatzarchiv.recovery-test-digest",
             Self::TechnicalCursorDigest => "application/vnd.einsatzarchiv.technical-cursor-digest",
+            Self::DestructionPreflightDigest => "application/vnd.einsatzarchiv.destruction-preflight-digest",
+            Self::GoLivePostureDigest => "application/vnd.einsatzarchiv.go-live-posture-digest",
         }
     }
 
@@ -82,6 +88,8 @@ impl ContentType {
                 | Self::TrustDigest
                 | Self::RecoveryTestDigest
                 | Self::TechnicalCursorDigest
+                | Self::DestructionPreflightDigest
+                | Self::GoLivePostureDigest
         )
     }
 
@@ -114,6 +122,8 @@ impl TryFrom<&str> for ContentType {
             "application/vnd.einsatzarchiv.technical-cursor-digest" => {
                 Ok(Self::TechnicalCursorDigest)
             }
+            "application/vnd.einsatzarchiv.destruction-preflight-digest" => Ok(Self::DestructionPreflightDigest),
+            "application/vnd.einsatzarchiv.go-live-posture-digest" => Ok(Self::GoLivePostureDigest),
             _ => Err(CryptoError::UnsupportedSuite),
         }
     }
@@ -477,6 +487,21 @@ impl CoseSigner {
         )
     }
 
+    /// Sign the fixed internal preflight profile; never an arbitrary digest.
+    pub fn sign_destruction_preflight_report(
+        &self,
+        certificate_hash: CertificateHash,
+        exact_core: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let bindings = crate::destruction_preflight::bindings(exact_core)?;
+        self.sign_normal(ContentType::DestructionPreflightDigest, certificate_hash, bindings.digest.as_bytes())
+    }
+
+    pub fn sign_go_live_posture_document(&self, exact_core: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let core = crate::GoLivePostureCore::from_exact(exact_core)?;
+        self.sign_normal(ContentType::GoLivePostureDigest, core.fields().issuer_certificate_hash, core.digest().as_bytes())
+    }
+
     pub fn sign_deletion_attestation_digest(
         &self,
         certificate_hash: CertificateHash,
@@ -618,6 +643,68 @@ impl CoseSigner {
         let sig_structure = encode_sig_structure(&protected.exact, payload);
         let signature: Signature = self.0.sign(&sig_structure);
         encode_cose_sign1(&protected.exact, None, payload, &signature.to_bytes())
+    }
+}
+
+/// A purpose-specific COSE operation for a nonexporting offline signer.
+///
+/// Only the existing historical-grant and recovery-test constructors exist.
+/// The header/payload cannot be supplied or changed independently; completion
+/// verifies the returned Ed25519 signature before emitting exact COSE bytes.
+pub struct ExternalCoseSigningRequest {
+    public_key: CanonicalPublicCoseKey,
+    protected: ProtectedHeader,
+    payload: Vec<u8>,
+}
+
+impl ExternalCoseSigningRequest {
+    pub fn historical_grant(
+        public_key: CanonicalPublicCoseKey,
+        exact_grant_body: &[u8],
+    ) -> Result<Self, CryptoError> {
+        public_key.ed25519_bytes()?;
+        let bindings = grant_bindings(exact_grant_body, GrantKind::Historical)?;
+        if bindings.key_thumbprint != public_key.thumbprint() {
+            return Err(CryptoError::SignerMismatch);
+        }
+        Ok(Self {
+            protected: ProtectedHeader::normal(
+                ContentType::GrantDigest,
+                public_key.thumbprint(),
+                bindings.certificate_hash,
+            ),
+            public_key,
+            payload: bindings.digest.as_bytes().to_vec(),
+        })
+    }
+
+    pub fn recovery_test(
+        public_key: CanonicalPublicCoseKey,
+        certificate_hash: CertificateHash,
+        challenge: SecretBytes<32>,
+    ) -> Result<Self, CryptoError> {
+        public_key.ed25519_bytes()?;
+        let digest = recovery_test_digest(challenge, public_key.thumbprint());
+        Ok(Self {
+            protected: ProtectedHeader::normal(
+                ContentType::RecoveryTestDigest,
+                public_key.thumbprint(),
+                certificate_hash,
+            ),
+            public_key,
+            payload: digest.as_bytes().to_vec(),
+        })
+    }
+
+    #[must_use]
+    pub fn sig_structure_bytes(&self) -> Vec<u8> {
+        self.protected.sig_structure_bytes(&self.payload)
+    }
+
+    pub fn complete(self, signature: [u8; 64]) -> Result<Vec<u8>, CryptoError> {
+        let encoded = encode_cose_sign1(&self.protected.exact, None, &self.payload, &signature)?;
+        parse_cose_sign1(&encoded, &[])?.verify_with_key(&self.public_key)?;
+        Ok(encoded)
     }
 }
 
@@ -1084,6 +1171,29 @@ impl VerificationContext {
             Some(CertificateCapability::DestructionApprove),
             false,
             bindings.operation.registry,
+        ))
+    }
+
+    pub fn destruction_preflight_report(
+        exact_core: &[u8],
+        certificate_hash: CertificateHash,
+    ) -> Result<Self, CryptoError> {
+        let bindings = crate::destruction_preflight::bindings(exact_core)?;
+        Ok(Self::digest(
+            ContentType::DestructionPreflightDigest,
+            bindings.digest, certificate_hash, None, bindings.organization_id,
+            bindings.sequence, SignerRole::DeletionAttest,
+            Some(CertificateCapability::DeletionAttest), false, bindings.registry,
+        ))
+    }
+
+    pub fn go_live_posture_document(exact_core: &[u8]) -> Result<Self, CryptoError> {
+        let core = crate::GoLivePostureCore::from_exact(exact_core)?;
+        let fields = core.fields();
+        Ok(Self::digest(
+            ContentType::GoLivePostureDigest, core.digest(), fields.issuer_certificate_hash,
+            None, fields.organization_id, fields.issued_sequence, SignerRole::OrganizationAdmin,
+            Some(CertificateCapability::OrganizationAdminApprove), false, fields.registry_version,
         ))
     }
 

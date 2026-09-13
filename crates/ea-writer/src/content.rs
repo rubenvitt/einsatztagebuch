@@ -1,4 +1,4 @@
-//! Die ZWEI Inhalte, die der normale Finalisierungspfad tragen kann.
+//! Die Inhalte des gemeinsamen normalen Finalisierungspfads.
 //!
 //! Ein `keyTransition` geht durch DIESELBEN dreizehn Schritte wie ein Einsatz
 //! (`design.md` §9.3): derselbe Kopf, derselbe Kettenkopf, dieselbe Vorschau,
@@ -6,7 +6,7 @@
 //! ist der Inhalt von Schritt 4 und das Manifestfeld
 //! `writer_transition_event_hash` — und genau das steht hier als geschlossene
 //! Vereinigung, damit `finalize.rs` an JEDER Stelle, an der der Inhalt zaehlt,
-//! ueber beide Arme entscheiden MUSS.
+//! jede Inhaltsart ausdruecklich behandelt.
 //!
 //! Was hier NICHT steht: der Uebergangshash. Der Writer liest ihn aus dem
 //! gewaehlten Kopf (`SelectedRegistryHead::effective_writer_transition`) und
@@ -36,6 +36,14 @@ pub struct KeyTransitionInputV1 {
     pub organizational_reason: String,
 }
 
+/// Normal Writer content projected from an authenticated durable destruction
+/// job and its complete managed denominator. No caller supplies result flags.
+pub struct DestructionEvidenceInputV1 {
+    pub timezone: String,
+    pub source: NativeSourceV1,
+    pub evidence: ea_destruction::VerifiedDestructionEvidence,
+}
+
 /// Was ein Lauf der dreizehn Schritte abschliesst.
 ///
 /// Der Einsatz liegt in einer `Box`, weil seine Momentaufnahmen den Wert um
@@ -43,5 +51,7 @@ pub struct KeyTransitionInputV1 {
 /// EINMAL in Schritt 4 entnommen, und nichts liest ihn davor.
 pub(crate) enum FinalizationContent {
     Incident(Box<FinalizationInputV1>),
+    Amendment(crate::AmendmentInputV1),
     KeyTransition(KeyTransitionInputV1),
+    DestructionEvidence(DestructionEvidenceInputV1),
 }

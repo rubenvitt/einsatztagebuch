@@ -25,6 +25,76 @@ use minicbor::{Decoder, Encoder};
 
 use crate::WriterError;
 
+/// Structural inspection of supplied opaque marker bytes only.
+///
+/// This is not cryptographic authorization, a recovery proof, a durable-store
+/// snapshot, a draft-key assessment, or permission to publish or repair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedMarkerDiagnosisV1 {
+    /// The existing decoder or reencoder cannot read the marker.
+    Unreadable,
+    /// The marker passes the existing structural self-consistency checks.
+    /// This says nothing about reversibility, irreversibility or executability.
+    StructurallyConsistent,
+    /// The first discrepancy in the existing verifier's check order.
+    Inconsistent(PreparedMarkerDiscrepancyV1),
+}
+
+/// A structural discrepancy, containing no marker fields or object bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedMarkerDiscrepancyV1 {
+    /// Reencoding differs from the original bytes.
+    NoncanonicalReencoding,
+    /// Internal grant/hash vector lengths differ. The byte decoder constructs
+    /// both together, so malformed wire counts are `Unreadable` instead.
+    GrantCountMismatch,
+    /// There is no grant.
+    EmptyGrants,
+    /// An embedded grant object cannot be decoded.
+    GrantDecode,
+    /// An embedded grant object has another archive-object type.
+    GrantType,
+    /// A grant object's hash differs from the marker's claim.
+    GrantObjectHash,
+    /// The embedded entry object cannot be decoded.
+    EntryDecode,
+    /// The embedded entry object has another archive-object type.
+    EntryType,
+    /// The entry object's hash differs from the marker's claim.
+    EntryObjectHash,
+    /// The entry hash differs from the marker's claim.
+    EntryHash,
+    /// The entry's manifest sequence differs from the marker's claim.
+    Sequence,
+    /// The entry's initial grant-plan hash differs from the marker's claim.
+    GrantPlanHash,
+}
+
+/// Inspect only the exact supplied marker bytes, without any repository,
+/// backend, file, key-provider, session, clock, or mutation operation.
+///
+/// The private existing decoder and structural verifier are the sole source
+/// of this classification. Success conveys no authority or repair decision.
+pub fn diagnose_prepared_marker(exact: &[u8]) -> PreparedMarkerDiagnosisV1 {
+    let Ok(transaction) = PreparedTransactionV1::decode(exact) else {
+        return PreparedMarkerDiagnosisV1::Unreadable;
+    };
+    match transaction.verify_detailed(exact) {
+        Ok(()) => PreparedMarkerDiagnosisV1::StructurallyConsistent,
+        Err(StructuralVerificationError::Reencoding(_)) => PreparedMarkerDiagnosisV1::Unreadable,
+        Err(StructuralVerificationError::Inconsistent(detail)) => {
+            PreparedMarkerDiagnosisV1::Inconsistent(detail)
+        }
+    }
+}
+
+// Keep the encoder's original WriterError distinct from self-contradictions.
+// Neither this error nor the private transaction is exposed by diagnosis.
+enum StructuralVerificationError {
+    Reencoding(WriterError),
+    Inconsistent(PreparedMarkerDiscrepancyV1),
+}
+
 /// Die Strukturversion der Marke. Der Kodierer schreibt sie.
 const MARKER_VERSION_V1: u64 = 1;
 
@@ -201,7 +271,7 @@ impl PreparedTransactionV1 {
     /// Quelle — und aus genau diesem Feld bildet [`Self::targets`] den
     /// Zielnamen des `.eip`.
     ///
-    /// # Warum nur die WIEDERAUFNAHME sie ruft und nicht auch der glatte Lauf
+    /// # Warum WIEDERAUFNAHME und Strukturdiagnose sie nutzen, nicht der glatte Lauf
     ///
     /// Nicht, weil dort die exakten Bytes fehlten — Schritt 8 bildet sie mit
     /// `transaction.encode()`. Sondern weil die Nachrechnung dort
@@ -225,35 +295,50 @@ impl PreparedTransactionV1 {
     /// ohnehin nicht — der Wert ist gerade erst aus denselben Bytes dekodiert
     /// worden —, und genau deshalb wird sie benannt statt verschluckt.
     pub(crate) fn verify(&self, exact: &[u8]) -> Result<(), WriterError> {
-        let inconsistent = || WriterError::PreparedFinalizationInconsistent;
-        if self.encode()? != exact {
-            return Err(inconsistent());
+        self.verify_detailed(exact).map_err(|error| match error {
+            StructuralVerificationError::Reencoding(original) => original,
+            StructuralVerificationError::Inconsistent(_) => {
+                WriterError::PreparedFinalizationInconsistent
+            }
+        })
+    }
+
+    fn verify_detailed(&self, exact: &[u8]) -> Result<(), StructuralVerificationError> {
+        use PreparedMarkerDiscrepancyV1 as Discrepancy;
+        use StructuralVerificationError::{Inconsistent, Reencoding};
+
+        if self.encode().map_err(Reencoding)? != exact {
+            return Err(Inconsistent(Discrepancy::NoncanonicalReencoding));
         }
-        if self.grant_object_hashes.len() != self.grant_bytes.len() || self.grant_bytes.is_empty() {
-            return Err(inconsistent());
+        if self.grant_object_hashes.len() != self.grant_bytes.len() {
+            return Err(Inconsistent(Discrepancy::GrantCountMismatch));
+        }
+        if self.grant_bytes.is_empty() {
+            return Err(Inconsistent(Discrepancy::EmptyGrants));
         }
         for (hash, bytes) in self.grant_object_hashes.iter().zip(&self.grant_bytes) {
-            let parsed = ea_format::decode_exact_object(bytes).map_err(|_| inconsistent())?;
+            let parsed = ea_format::decode_exact_object(bytes)
+                .map_err(|_| Inconsistent(Discrepancy::GrantDecode))?;
             let ea_format::ParsedArchiveObject::Grant(grant) = &parsed else {
-                return Err(inconsistent());
+                return Err(Inconsistent(Discrepancy::GrantType));
             };
             if grant.object_hash().as_bytes() != hash.as_bytes() {
-                return Err(inconsistent());
+                return Err(Inconsistent(Discrepancy::GrantObjectHash));
             }
         }
-        let parsed =
-            ea_format::decode_exact_object(&self.entry_bytes).map_err(|_| inconsistent())?;
+        let parsed = ea_format::decode_exact_object(&self.entry_bytes)
+            .map_err(|_| Inconsistent(Discrepancy::EntryDecode))?;
         let ea_format::ParsedArchiveObject::Entry(entry) = &parsed else {
-            return Err(inconsistent());
+            return Err(Inconsistent(Discrepancy::EntryType));
         };
         if entry.object_hash().as_bytes() != self.entry_object_hash.as_bytes() {
-            return Err(inconsistent());
+            return Err(Inconsistent(Discrepancy::EntryObjectHash));
         }
         if entry.value().entry_hash().as_bytes() != self.entry_hash.as_bytes() {
-            return Err(inconsistent());
+            return Err(Inconsistent(Discrepancy::EntryHash));
         }
         if entry.value().manifest().fields().chain_sequence != self.sequence {
-            return Err(inconsistent());
+            return Err(Inconsistent(Discrepancy::Sequence));
         }
         if entry
             .value()
@@ -263,7 +348,7 @@ impl PreparedTransactionV1 {
             .as_slice()
             != self.grant_plan_hash.as_slice()
         {
-            return Err(inconsistent());
+            return Err(Inconsistent(Discrepancy::GrantPlanHash));
         }
         Ok(())
     }
@@ -288,4 +373,40 @@ fn hex(bytes: &[u8]) -> String {
         out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_grant_count_mismatch_remains_inconsistent_without_a_wire_witness() {
+        // The byte decoder cannot construct this state: every pair populates
+        // both vectors. An extra internal hash is omitted by zip when encoding.
+        let transaction = PreparedTransactionV1 {
+            sequence: ChainSequence::new(0),
+            entry_hash: EntryHash::try_from(&[0u8; 32][..]).unwrap(),
+            entry_object_hash: ObjectHash::try_from(&[0u8; 32][..]).unwrap(),
+            entry_bytes: Vec::new(),
+            grant_object_hashes: vec![Hash32::try_from(&[0u8; 32][..]).unwrap()],
+            grant_bytes: Vec::new(),
+            grant_plan_hash: Vec::new(),
+        };
+        let exact = transaction.encode().unwrap();
+        assert!(matches!(
+            transaction.verify_detailed(&exact),
+            Err(StructuralVerificationError::Inconsistent(
+                PreparedMarkerDiscrepancyV1::GrantCountMismatch
+            ))
+        ));
+        assert_eq!(
+            transaction.verify(&exact).unwrap_err().code(),
+            "EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT"
+        );
+        // Reading these bytes creates equal empty vectors, a different state.
+        assert_eq!(
+            diagnose_prepared_marker(&exact),
+            PreparedMarkerDiagnosisV1::Inconsistent(PreparedMarkerDiscrepancyV1::EmptyGrants)
+        );
+    }
 }

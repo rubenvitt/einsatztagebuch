@@ -20,6 +20,11 @@ enum SelfTests {
         }
         func parse(_ text: String) throws -> Request { try Request.parse(Data(text.utf8)) }
         try check(try parse("{\"op\":\"account\"}").op == "account")
+        let backupPin = String(repeating: "ab", count: 32)
+        for slot in ["admin-signing", "root-signing"] {
+            try check(try parse("{\"op\":\"backup-signing-seed\",\"slot\":\"\(slot)\",\"installation_id\":\"\(backupPin)\",\"expected_public_key\":\"\(backupPin)\",\"presence\":true}").op == "backup-signing-seed")
+        }
+
         for text in ["{}", "[]", "null", "{\"op\":\"account\",\"op\":\"initialize\"}",
                      "{\"op\":\"account\",\"presence\":1}", "{\"op\":\"account\",\"uid\":501}",
                      "{\"op\":\"account\",\"presence\":true}", "{\"op\":\"account\"}{}",
@@ -176,6 +181,78 @@ enum SelfTests {
         let beforeExcludedFailure = memory.reads
         try rejects("backup-exclusion-failed") { _ = try exclusionDenied.execute(Request.parse(Data("{\"op\":\"account\"}".utf8))) }
         try check { memory.reads == beforeExcludedFailure }
+        // Existing deterministic fixture slots: this call must never generate or replace.
+        let backupSeed = Data(repeating: 0x47, count: 32)
+        let backupPublic = try Curve25519.Signing.PrivateKey(rawRepresentation: backupSeed).publicKey.rawRepresentation
+        let backupMetadata = StoredKey(kind: "ed25519", publicKey: backupPublic)
+        try memory.put(marker, slot: "admin-signing", metadata: backupMetadata,
+                       data: marker.seal(backupSeed, slot: "admin-signing", metadata: backupMetadata),
+                       replace: false, context: LAContext())
+        let backupRequest = try Request.parse(Data("{\"op\":\"backup-signing-seed\",\"slot\":\"admin-signing\",\"installation_id\":\"\(marker.idHex)\",\"expected_public_key\":\"\(Hex.encode(backupPublic))\",\"presence\":true}".utf8))
+        let boundedBackup = Data("{\"op\":\"backup-signing-seed\",\"slot\":\"admin-signing\",\"installation_id\":\"\(marker.idHex)\",\"expected_public_key\":\"\(Hex.encode(backupPublic))\",\"presence\":true}".utf8)
+        try check { try Request.parse(boundedBackup + Data(repeating: 32, count: 512 - boundedBackup.count)).op == "backup-signing-seed" }
+        let backupWrites = memory.writes
+        let backupPresence = presenceCalls
+        for slot in ["operator-instance", "writer-signing", "database-key", "draft-key", "other"] {
+            var direct = Request(op: "backup-signing-seed", slot: slot, kind: nil, data: nil, presence: true, replace: false, expectedInstallationID: marker.id)
+            direct.expectedPublicKey = backupPublic
+            let readsBefore = memory.reads
+            try rejects("invalid-request") { _ = try provider.executeBackup(direct) }
+            try check { memory.reads == readsBefore }
+        }
+        let backupFrame = try provider.executeBackup(backupRequest)
+        try backupFrame.inspect { bytes in
+            try check { bytes.count == 106 && bytes[8] == 1 && bytes[9] == 1 }
+            try check { bytes.prefix(8).elementsEqual("EABKSEED".utf8) }
+            try check { bytes[10..<42].elementsEqual(marker.id) && bytes[42..<74].elementsEqual(backupPublic) }
+            try check { bytes[74..<106].elementsEqual(backupSeed) }
+        }
+        try check { memory.writes == backupWrites && presenceCalls == backupPresence + 1 }
+        let rootSeed = Data(repeating: 0x48, count: 32)
+        let rootPublic = try Curve25519.Signing.PrivateKey(rawRepresentation: rootSeed).publicKey.rawRepresentation
+        let rootMetadata = StoredKey(kind: "ed25519", publicKey: rootPublic)
+        try memory.put(marker, slot: "root-signing", metadata: rootMetadata,
+            data: marker.seal(rootSeed, slot: "root-signing", metadata: rootMetadata), replace: false, context: LAContext())
+        var rootRequest = Request(op: "backup-signing-seed", slot: "root-signing", kind: nil, data: nil, presence: true, replace: false, expectedInstallationID: marker.id)
+        rootRequest.expectedPublicKey = rootPublic
+        let writesBeforeRoot = memory.writes
+        let rootFrame = try provider.executeBackup(rootRequest)
+        try rootFrame.inspect { bytes in try check { bytes[9] == 2 && bytes[74..<106].elementsEqual(rootSeed) } }
+        _ = try provider.executeBackup(rootRequest)
+        try check { memory.writes == writesBeforeRoot }
+        try rejects("io-failed") { try rootFrame.write(to: -1) }
+        try rootFrame.inspect { bytes in try check { bytes.allSatisfy { $0 == 0 } } }
+        var wrongPublic = backupRequest
+        wrongPublic.expectedPublicKey = rootPublic
+        let secretReadsBeforeMismatch = memory.secretReads
+        try rejects("key-invalid") { _ = try provider.executeBackup(wrongPublic) }
+        try check { memory.secretReads == secretReadsBeforeMismatch }
+        memory.afterSecretRead = { memory.locked = true }
+        try rejects("locked") { _ = try provider.executeBackup(backupRequest) }
+        memory.afterSecretRead = nil; memory.locked = false
+        memory.afterSecretRead = { currentAccount = otherAccount }
+        try rejects("account-changed") { _ = try provider.executeBackup(backupRequest) }
+        memory.afterSecretRead = nil; currentAccount = account
+        let originalSlot = memory.values[marker.service]!["admin-signing"]!
+        memory.afterSecretRead = { memory.values[marker.service]!["admin-signing"] = (rootMetadata, originalSlot.1) }
+        try rejects("key-invalid") { _ = try provider.executeBackup(backupRequest) }
+        memory.afterSecretRead = nil; memory.values[marker.service]!["admin-signing"] = originalSlot
+        memory.values[marker.service]!["admin-signing"] = (backupMetadata, try marker.seal(rootSeed, slot: "admin-signing", metadata: backupMetadata))
+        try rejects("key-invalid") { _ = try provider.executeBackup(backupRequest) }
+        memory.values[marker.service]!["admin-signing"] = originalSlot
+        try rejects("protected-pipe-required") { _ = try deniedPipe.executeBackup(backupRequest) }
+        try rejects("invalid-request") { _ = try provider.execute(backupRequest) }
+        var ends: [Int32] = [0, 0]
+        guard pipe(&ends) == 0 else { throw Failure("io-failed") }
+        try backupFrame.write(to: ends[1]); close(ends[1])
+        var wire = [UInt8](repeating: 0, count: 107)
+        let wireCount = Darwin.read(ends[0], &wire, wire.count)
+        try check { wireCount == 106 && wire[74..<106].elementsEqual(backupSeed) }
+        let eofCount = Darwin.read(ends[0], &wire, 1); close(ends[0])
+        try check { eofCount == 0 }
+        wire.withUnsafeMutableBytes { _ = memset_s($0.baseAddress!, $0.count, 0, $0.count) }
+        backupFrame.clear()
+        try backupFrame.inspect { bytes in try check { bytes.allSatisfy { $0 == 0 } } }
         // Removing the marker cannot trigger a search of any surviving namespace.
         try FileManager.default.removeItem(at: markerURL)
         let beforeLoss = memory.reads

@@ -27,6 +27,7 @@
 //! voruebergehend erkannt ist, wird wiederholt.
 
 use std::sync::Arc;
+mod response;
 
 use ea_archive::ArchiveBackend as _;
 use ea_archive_fs::{LocalPathBackend, PlannedPublicationV1, PublicationQueue};
@@ -86,6 +87,8 @@ pub enum TransportErrorV1 {
     /// Der TLS-Aufbau ist gescheitert. Fail-closed und ausdruecklich KEIN
     /// Grund, unverschluesselt zu wiederholen.
     Tls,
+    /// The configured bounded response exceeded its byte ceiling.
+    ResponseTooLarge,
 }
 
 /// Die Transportnaht.
@@ -500,6 +503,36 @@ impl SyncClient {
         .await
     }
 
+    /// Fresh authenticated read of the actual server reservation. A successful
+    /// response must bind this exact operation; its unsigned state is never
+    /// interpreted as physical execution or a signed transition.
+    pub async fn destruction_status(
+        &self,
+        destruction: ea_types::DestructionId,
+        expected_authorization: ObjectHash,
+    ) -> Result<ea_sync_protocol::DestructionStatusResponseV1, SyncClientError> {
+        let nonce = self.fresh_challenge().await?;
+        let target = format!("/v1/destructions/{}", hex_lower(destruction.as_bytes()));
+        let request = self.sign(HttpMethod::Get, &target, None, nonce)?;
+        let response = self
+            .config
+            .transport
+            .send(request)
+            .await
+            .map_err(|_| SyncClientError::Protocol)?;
+        if response.status != 200 {
+            return Err(SyncClientError::Protocol);
+        }
+        let status = ea_sync_protocol::DestructionStatusResponseV1::decode(&response.body)
+            .map_err(|_| SyncClientError::Protocol)?;
+        if status.destruction_id() != destruction
+            || status.authorization_object_hash() != expected_authorization
+        {
+            return Err(SyncClientError::Protocol);
+        }
+        Ok(status)
+    }
+
     fn record_transport_failure(
         &self,
         entry: ObjectHash,
@@ -707,6 +740,7 @@ pub struct HyperTlsTransport {
     address: std::net::SocketAddr,
     server_name: String,
     tls: Arc<rustls::ClientConfig>,
+    response_limit: Option<usize>,
 }
 
 /// Wie lange der Transport auf TCP-Verbindung, TLS-Aufbau und Handshake
@@ -743,6 +777,22 @@ async fn within<T, E>(
 }
 
 impl HyperTlsTransport {
+    /// TLS-identical transport with a streamed response ceiling. The existing
+    /// constructor remains compatible; native destruction always selects this one.
+    pub fn new_bounded(
+        address: std::net::SocketAddr,
+        server_name: String,
+        roots: rustls::RootCertStore,
+        maximum_response_bytes: usize,
+    ) -> Result<Self, SyncClientError> {
+        if maximum_response_bytes == 0 || maximum_response_bytes > ea_sync_protocol::MAX_READER_PAGE_BYTES_V1 {
+            return Err(SyncClientError::Protocol);
+        }
+        let mut transport = Self::new(address, server_name, roots)?;
+        transport.response_limit = Some(maximum_response_bytes);
+        Ok(transport)
+    }
+
     /// Baut den Transport gegen genau diese Wurzeln.
     ///
     /// TLS 1.3 ist die einzige angebotene Fassung, und der Anbieter ist `ring`
@@ -769,6 +819,7 @@ impl HyperTlsTransport {
             address,
             server_name,
             tls: Arc::new(tls),
+            response_limit: None,
         })
     }
 }
@@ -779,7 +830,7 @@ impl SyncTransportV1 for HyperTlsTransport {
         &self,
         request: TransportRequestV1,
     ) -> Result<TransportResponseV1, TransportErrorV1> {
-        use http_body_util::{BodyExt as _, Full};
+        use http_body_util::Full;
 
         // Jede Phase unter einem Deckel: eine stille Gegenstelle haengt sonst
         // den ganzen Push, und `TransportErrorV1::Timeout` waere unerreichbar.
@@ -830,19 +881,18 @@ impl SyncTransportV1 for HyperTlsTransport {
         // Kopf UND Koerper unter EINEM Deckel: ein Server, der den Kopf
         // schickt und den Koerper nie beendet, haengt sonst genau so lange wie
         // einer, der gar nicht antwortet.
-        let read = within(
-            REQUEST_TIMEOUT_MS_V1,
+        let read = tokio::time::timeout(
+            core::time::Duration::from_millis(REQUEST_TIMEOUT_MS_V1),
             async {
-                let response = sender.send_request(outgoing).await?;
+                let response = sender.send_request(outgoing).await.map_err(|_| TransportErrorV1::Timeout)?;
                 let status = response.status().as_u16();
-                let body = response.into_body().collect().await?.to_bytes().to_vec();
-                Ok::<_, hyper::Error>((status, body))
+                let body = response::read(response.into_body(), self.response_limit).await?;
+                Ok::<_, TransportErrorV1>((status, body))
             },
-            TransportErrorV1::Timeout,
         )
         .await;
         driver.abort();
-        let (status, body) = read?;
+        let (status, body) = read.map_err(|_| TransportErrorV1::Timeout)??;
         Ok(TransportResponseV1 { status, body })
     }
 }

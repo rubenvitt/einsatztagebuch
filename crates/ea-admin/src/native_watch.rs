@@ -5,6 +5,7 @@ use crate::{
     native_provider::{NativeProviderError, helper_command},
 };
 use std::{
+    collections::BTreeSet,
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::Child,
@@ -18,10 +19,14 @@ use std::{
 
 const LINE_LIMIT: u64 = 1024;
 const COVERAGE_DEADLINE: Duration = Duration::from_secs(1);
+struct VerifiedActivity {
+    last_presence: Instant,
+    consumed_nonces: BTreeSet<[u8; 32]>,
+}
 pub(crate) struct SessionWatch {
     child: Mutex<Child>,
     invalidated: Arc<AtomicBool>,
-    started: Instant,
+    activity: Mutex<VerifiedActivity>,
     coverage: Mutex<mpsc::Receiver<()>>,
     pending: Arc<Mutex<Option<String>>>,
 }
@@ -97,7 +102,10 @@ impl SessionWatch {
         Ok(Self {
             child: Mutex::new(child),
             invalidated,
-            started,
+            activity: Mutex::new(VerifiedActivity {
+                last_presence: started,
+                consumed_nonces: BTreeSet::new(),
+            }),
             coverage: Mutex::new(coverage),
             pending,
         })
@@ -143,8 +151,39 @@ impl SessionWatch {
         }
         result
     }
+    pub(crate) fn record_verified_presence(
+        &self,
+        nonce: &[u8; 32],
+    ) -> Result<(), NativeProviderError> {
+        // The native provider calls this only for a fully verified and audited
+        // new session. Coverage alone never reaches this path. In particular,
+        // an expired watch cannot be renewed by the completion of a late call.
+        self.ensure_valid()?;
+        let mut activity = self
+            .activity
+            .lock()
+            .map_err(|_| NativeProviderError::Locked)?;
+        if activity.last_presence.elapsed() >= Duration::from_secs(300) {
+            self.invalidated.store(true, Ordering::SeqCst);
+        }
+        if self.invalidated.load(Ordering::SeqCst) {
+            return Err(NativeProviderError::Locked);
+        }
+        if !activity.consumed_nonces.insert(*nonce) {
+            return Err(NativeProviderError::Protocol);
+        }
+        activity.last_presence = Instant::now();
+        Ok(())
+    }
     fn check_lifetime(&self) -> Result<(), NativeProviderError> {
-        if self.started.elapsed() >= Duration::from_secs(300) {
+        if self
+            .activity
+            .lock()
+            .map_err(|_| NativeProviderError::Locked)?
+            .last_presence
+            .elapsed()
+            >= Duration::from_secs(300)
+        {
             self.invalidated.store(true, Ordering::SeqCst);
         }
         let exited = self
@@ -292,6 +331,77 @@ for line in sys.stdin:
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.directory);
         }
+    }
+
+    // Only private tests adjust this monotonic endpoint. Production accepts
+    // neither caller time nor a configurable inactivity duration.
+    fn age_activity(watch: &mut SessionWatch, duration: Duration) {
+        watch.activity.get_mut().unwrap().last_presence =
+            Instant::now().checked_sub(duration).unwrap();
+    }
+    fn activity_age(watch: &SessionWatch) -> Duration {
+        watch.activity.lock().unwrap().last_presence.elapsed()
+    }
+
+    #[test]
+    fn verified_presence_renews_only_a_still_active_watch() {
+        let fixture = Fixture::new("ack");
+        let mut watch = fixture.watch();
+        age_activity(&mut watch, Duration::from_secs(299));
+        watch.record_verified_presence(&[0x41; 32]).unwrap();
+        assert!(activity_age(&watch) < Duration::from_secs(1));
+        watch.ensure_valid().unwrap();
+    }
+
+    #[test]
+    fn coverage_polling_does_not_renew_idle_and_expiration_is_permanent() {
+        let fixture = Fixture::new("ack");
+        let mut watch = fixture.watch();
+        age_activity(&mut watch, Duration::from_secs(299));
+        for _ in 0..3 {
+            watch.ensure_valid().unwrap();
+        }
+        assert!(activity_age(&watch) >= Duration::from_secs(299));
+        age_activity(&mut watch, Duration::from_secs(300));
+        assert!(matches!(
+            watch.ensure_valid(),
+            Err(NativeProviderError::Locked)
+        ));
+        assert!(watch.record_verified_presence(&[0x42; 32]).is_err());
+        // Even undoing the elapsed clock in this private test cannot clear
+        // the permanent invalidation; production has no such setter.
+        age_activity(&mut watch, Duration::ZERO);
+        assert!(watch.record_verified_presence(&[0x43; 32]).is_err());
+        assert!(watch.ensure_valid().is_err());
+    }
+
+    #[test]
+    fn previously_consumed_presence_cannot_renew_even_after_another_proof() {
+        let fixture = Fixture::new("ack");
+        let mut watch = fixture.watch();
+        watch.record_verified_presence(&[0x44; 32]).unwrap();
+        watch.record_verified_presence(&[0x45; 32]).unwrap();
+        age_activity(&mut watch, Duration::from_secs(299));
+        for nonce in [[0x44; 32], [0x45; 32], [0x44; 32]] {
+            assert!(watch.record_verified_presence(&nonce).is_err());
+            assert!(activity_age(&watch) >= Duration::from_secs(299));
+        }
+    }
+
+    #[test]
+    fn native_failure_or_eof_cannot_be_revived_by_presence() {
+        for mode in ["invalidate", "partial-ack", "slow"] {
+            let fixture = Fixture::new(mode);
+            let watch = fixture.watch();
+            assert!(watch.ensure_valid().is_err());
+            assert!(watch.record_verified_presence(&[0x46; 32]).is_err());
+            assert!(watch.ensure_valid().is_err());
+        }
+        let fixture = Fixture::new("ack");
+        let watch = fixture.watch();
+        terminate(&mut watch.child.lock().unwrap());
+        assert!(watch.record_verified_presence(&[0x47; 32]).is_err());
+        assert!(watch.ensure_valid().is_err());
     }
 
     #[test]

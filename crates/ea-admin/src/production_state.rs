@@ -23,7 +23,7 @@
 //! abweichender Anchor, nicht lesbarer Testeintrag oder unvollstaendiges
 //! Sample macht den Gesamttest fehlgeschlagen; Teilerfolg darf nicht als
 //! erfolgreicher Recovery-Test erscheinen." Genau das setzt
-//! [`verify_fresh_machine_recovery_test`] durch — und weil die Folge in allen
+//! `verify_fresh_machine_recovery_test` durch — und weil die Folge in allen
 //! fuenf Faellen dieselbe ist, tragen sie EINEN Code.
 //!
 //! # Es gibt keinen Schalter nach `Ready`
@@ -76,8 +76,11 @@
 use core::fmt;
 
 use ea_crypto::object_hash;
-use ea_types::{Hash32, KeyThumbprint};
+use ea_types::Hash32;
+#[cfg(feature = "test-support")]
+use ea_types::KeyThumbprint;
 
+#[cfg(feature = "test-support")]
 use crate::AdminError;
 
 /// Die Domaene des Rechnerabdrucks.
@@ -159,13 +162,14 @@ impl fmt::Debug for ProductionState {
 ///
 /// Reine Beobachtung und kein Urteil: die Felder sind das, was der Wirt beim
 /// Durchlauf gesehen hat, das Urteil faellt
-/// [`verify_fresh_machine_recovery_test`]. Der Bericht selbst — Test-ID,
+/// `verify_fresh_machine_recovery_test`. Der Bericht selbst — Test-ID,
 /// Zeiten, Versionen, pseudonyme Medien-IDs — gehoert nach `:1897` in die
 /// Berichtsschicht und nicht hierher; hier stehen genau die fuenf Groessen,
 /// an denen der Test scheitern kann, plus der Rechner, auf dem er lief.
 ///
 /// Kein privater Schluessel und kein entschluesselter Payload steht darin —
 /// `:1897` verbietet beides ausdruecklich auch fuer den Bericht.
+#[cfg(feature = "test-support")]
 pub struct RecoveryTestObservation {
     /// Der Rechner, auf dem der Test lief. Ein Bindungshash, kein Geheimnis.
     pub machine_fingerprint: Hash32,
@@ -194,7 +198,7 @@ pub struct RecoveryTestObservation {
 /// Der Nachweis, dass Schritt 12 auf einem FRISCHEN Rechner vollstaendig
 /// gelungen ist.
 ///
-/// Konstruierbar ausschliesslich in [`verify_fresh_machine_recovery_test`].
+/// Konstruierbar ausschliesslich in `verify_fresh_machine_recovery_test`.
 /// Kein `Default`, kein `Clone`, kein `Debug`, und im inhaerenten
 /// `impl`-Block nur Leser — siehe die Moduldokumentation.
 ///
@@ -204,10 +208,25 @@ pub struct RecoveryTestObservation {
 /// [`ProductionState::Ready`].
 ///
 /// [`BootstrapCoordinator::record_fresh_machine_recovery_test`]: crate::BootstrapCoordinator::record_fresh_machine_recovery_test
-pub struct FreshMachineRecoveryProof {
+/// Normal production builds cannot turn caller assertions into readiness.
+///
+/// ```compile_fail
+/// let observation = ea_admin::RecoveryTestObservation {
+///     machine_fingerprint: ea_types::Hash32::ZERO,
+///     media_expected: 9, media_present: 9,
+///     expected_trust_anchor_hash: ea_types::Hash32::ZERO,
+///     observed_trust_anchor_hash: ea_types::Hash32::ZERO,
+///     expected_key_thumbprint: ea_types::KeyThumbprint::try_from(&[1u8;32][..]).unwrap(),
+///     observed_key_thumbprint: ea_types::KeyThumbprint::try_from(&[1u8;32][..]).unwrap(),
+///     test_entry_readable: true, sample_entries_expected: 1, sample_entries_decrypted: 1,
+/// };
+/// let _ = ea_admin::verify_fresh_machine_recovery_test(ea_types::Hash32::ZERO, &observation);
+/// ```
+pub struct FreshMachineRecoveryProof<'a> {
     machine_fingerprint: Hash32,
     expected_trust_anchor_hash: Hash32,
     media_expected: usize,
+    admission: crate::RecoveryTestFreshness<'a>,
 }
 
 /// Faellt das Urteil ueber einen Recovery-Testlauf.
@@ -235,10 +254,11 @@ pub struct FreshMachineRecoveryProof {
 /// Zeremonienmaschine lief; [`AdminError::RecoveryTestFailed`] mit
 /// `EA-CEREMONY-RECOVERY-TEST-FAILED` fuer jeden der fuenf Ausgaenge aus
 /// `:1897`.
+#[cfg(feature = "test-support")]
 pub fn verify_fresh_machine_recovery_test(
     ceremony_machine_fingerprint: Hash32,
     observation: &RecoveryTestObservation,
-) -> Result<FreshMachineRecoveryProof, AdminError> {
+) -> Result<FreshMachineRecoveryProof<'static>, AdminError> {
     if observation.machine_fingerprint == ceremony_machine_fingerprint {
         return Err(AdminError::RecoveryTestSameMachine);
     }
@@ -259,10 +279,25 @@ pub fn verify_fresh_machine_recovery_test(
         machine_fingerprint: observation.machine_fingerprint,
         expected_trust_anchor_hash: observation.expected_trust_anchor_hash,
         media_expected: observation.media_expected,
+        admission: crate::RecoveryTestFreshness::for_testing(&ProductionState::Ready,ea_types::UnixMillis::new(0),u64::MAX,ea_types::UnixMillis::new(0)),
     })
 }
 
-impl FreshMachineRecoveryProof {
+impl<'a> FreshMachineRecoveryProof<'a> {
+    pub(crate) fn from_verified_completed(report: &ea_recovery::VerifiedCompletedRecoveryReport, admission: crate::RecoveryTestFreshness<'a>) -> Self {
+        Self {
+            machine_fingerprint: report.target_machine(),
+            expected_trust_anchor_hash: report.anchor_hash(),
+            media_expected: report.tested_media_count(),
+            admission,
+        }
+    }
+
+    /// Rechecks actual current native admission, archive scope and durable bytes.
+    pub fn is_current(&self) -> bool {
+        self.admission.is_fresh()
+    }
+
     /// Der Rechner, der den Test bestanden hat.
     ///
     /// Ein Leser und kein Konstruktor: der Koordinator schreibt den Wert in

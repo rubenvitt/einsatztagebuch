@@ -38,14 +38,8 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ea_archive::{ArchiveInventory, ArchiveSource};
-use ea_format::{
-    DecodedTrustPayloadV1, DestroyedEntryStubV1, EntryPackageV1, FormatError, GrantKindV1, GrantV1,
-    Parsed,
-};
-use ea_types::{
-    ChainSequence, DestructionId, EntryHash, EntryStatus, KeyThumbprint, ObjectHash, UnixMillis,
-    VerificationStatus,
-};
+use ea_format::{DestroyedEntryStubV1, EntryPackageV1, FormatError, Parsed};
+use ea_types::{EntryHash, EntryStatus, KeyThumbprint, ObjectHash, UnixMillis, VerificationStatus};
 use ea_verify::{
     ChainGapV1, DecryptionErrorV1, GateObserver, ObjectErrorV1, ObjectResultKindV1,
     QuarantinedObjectV1, ServerConfirmationV1, VerificationReportV1, VerifyError, VerifyOptions,
@@ -107,6 +101,9 @@ pub enum ReaderError {
     Decryption(DecryptionErrorV1),
     /// Der Zeuge stammt aus einem anderen Klassifikationslauf.
     StaleWitness,
+    GrantExpired,
+    /// Local expiry metadata must flush before a historical grant is consumed.
+    TimePersistence(crate::ReaderVaultError),
     /// Keine der Schemabestimmungen traegt diesen Klartext.
     UnsupportedSchema,
     /// Der entschluesselte Operator passt nicht zur verifizierten historischen Bindung.
@@ -124,6 +121,8 @@ impl ReaderError {
             Self::Format(error) => error.code(),
             Self::Decryption(error) => error.code(),
             Self::StaleWitness => "EA-READER-WITNESS-STALE",
+            Self::GrantExpired => "EA-GRANT-EXPIRED",
+            Self::TimePersistence(error) => error.code(),
             Self::UnsupportedSchema => "EA-READER-SCHEMA-UNSUPPORTED",
             Self::OperatorProfileCommitment => "EA-OPERATOR-PROFILE-COMMITMENT",
         }
@@ -175,18 +174,12 @@ impl std::error::Error for ReaderError {}
 /// benennt, woher der Aufrufer seine Quelle nimmt, und das entscheidet der
 /// Aufrufer.
 ///
-/// # EIN Zeitwert je Lauf
-///
-/// `VerifyOptions::effective_now()` ist wortgleich `os_wall_clock()`; es gibt je
-/// Lauf genau EINEN Zeitwert, und Gate `recipient-grant` misst die Nutzungsfrist
-/// des eigenen Grants gegen ihn. Derselbe Wert geht spaeter an
-/// [`crate::decrypt_verified`], statt dort neu aus der Wirtsuhr gelesen zu
-/// werden — ein je Entkapselung frisch gelesener Wert waere in
-/// Millisekundenaufloesung praktisch nie gleich und machte die Entschluesselung
-/// unmoeglich. Die Kehrseite ist benannt und gehoert woanders hin: friert eine
-/// lange Sitzung ihren `effectiveNow` ein, bemerkt sie das Ablaufen eines
-/// Registrierungskopfes nicht; die Neuklassifikation bei Sitzungsalter besitzt
-/// die Reader-Oberflaeche.
+/// Each opening supplies a fresh host time and consumes the vault high-water
+/// mark plus authenticated Receipt/Checkpoint times. Hosts restore and flush
+/// ReaderGrantTimeStore BEFORE HPKE, using a recipient-free verified-time pass.
+/// Raw classify refuses uncommitted historical-grant time. Witnesses retain the
+/// effective opening time; decrypt_verified independently checks grant expiry
+/// and rejects stale witnesses before HPKE.
 pub struct ReaderVerifier {
     mode: ReaderMode,
     effective_now: UnixMillis,
@@ -200,6 +193,35 @@ impl ReaderVerifier {
             mode,
             effective_now,
         }
+    }
+
+    /// Verify independent signed times WITHOUT a recipient key. Hosts may
+    /// persist this result before invoking classification/decapsulation.
+    pub fn verified_time(
+        &self,
+        source: &dyn ArchiveSource,
+        session: &UnlockedVault,
+    ) -> Result<UnixMillis, ReaderError> {
+        let now = session.observe_effective_time(self.effective_now);
+        let anchor = PinnedTrustAnchor::from_vault(session);
+        let report =
+            ea_verify::verify_archive(source, anchor.as_trust_anchor(), VerifyOptions::new(now))?;
+        Ok(now.max(report.verified_time_floor().unwrap_or(now)))
+    }
+
+    /// Host path: authenticate signed time without KEM, merge/flush encrypted
+    /// metadata, then permit HPKE only up to that successfully committed floor.
+    pub fn classify_with_time_store(
+        &self,
+        source: &dyn ArchiveSource,
+        session: &UnlockedVault,
+        store: &mut dyn crate::ReaderBlobStore,
+        observer: &mut dyn GateObserver,
+    ) -> Result<ReaderClassification, ReaderError> {
+        let observed = self.verified_time(source, session)?;
+        let durable = crate::ReaderGrantTimeStore::observe(session, store, observed)
+            .map_err(ReaderError::TimePersistence)?;
+        Self::new(self.mode, durable).classify(source, session, observer)
     }
 
     /// Der Modus, in dem dieser Reader seine Bytes bezieht.
@@ -234,10 +256,14 @@ impl ReaderVerifier {
         session: &UnlockedVault,
         observer: &mut dyn GateObserver,
     ) -> Result<ReaderClassification, ReaderError> {
+        let effective_now = session.observe_effective_time(self.effective_now);
         let anchor = PinnedTrustAnchor::from_vault(session);
-        let options = VerifyOptions::new(self.effective_now)
-            .with_recipient(session.kem_key_thumbprint(), session.kem_private_key());
+        let options = VerifyOptions::new(effective_now)
+            .with_recipient(session.kem_key_thumbprint(), session.kem_private_key())
+            .with_recipient_time_ceiling(session.durable_grant_time());
         let report = verify_archive_observed(source, anchor.as_trust_anchor(), options, observer)?;
+        let effective_now =
+            session.observe_effective_time(report.verified_time_floor().unwrap_or(effective_now));
         let inventory = ArchiveInventory::build(source).map_err(VerifyError::from)?;
 
         let findings = ReportFindingsV1::collect(&report);
@@ -265,7 +291,7 @@ impl ReaderVerifier {
                     &inventory,
                     entry,
                     key_thumbprint,
-                    self.effective_now,
+                    effective_now,
                     anchor.as_trust_anchor(),
                 );
                 if let Some(witness) = row.witnesses {
@@ -274,7 +300,7 @@ impl ReaderVerifier {
                 rows.insert(row.state.entry_hash(), row.state);
             }
             for stub in inventory.destroyed() {
-                if let Some(state) = classify_stub(&findings, &inventory, stub, &rows) {
+                if let Some(state) = classify_stub(&findings, stub, &rows) {
                     rows.insert(state.entry_hash(), state);
                 }
             }
@@ -410,21 +436,22 @@ struct ClassifiedEntryV1 {
 /// `QuarantineReason` und KEINEN Code — `QuarantineReason::as_str()` liefert
 /// ein Schemaliteral und keinen `EA-`-Code.
 struct ReportFindingsV1 {
+    recipient_grants: BTreeMap<EntryHash, (ObjectHash, Option<UnixMillis>)>,
     object_results: BTreeMap<ObjectHash, (ObjectResultKindV1, ServerConfirmationV1)>,
     format_errors: BTreeSet<ObjectHash>,
     quarantined: BTreeSet<ObjectHash>,
     signature_errors: BTreeMap<ObjectHash, &'static str>,
     evidence_errors: BTreeMap<ObjectHash, &'static str>,
     decryption_errors: BTreeMap<ObjectHash, &'static str>,
-    gaps: Vec<(ChainSequence, ChainSequence)>,
-    /// Je Vorgang der Autorisierungshash, den die TRANSITIONEN authentifiziert
-    /// haben — nicht der, den ein Stummel behauptet.
-    authorized_destructions: BTreeMap<DestructionId, ObjectHash>,
 }
 
 impl ReportFindingsV1 {
     fn collect(report: &VerificationReportV1) -> Self {
         Self {
+            recipient_grants: report
+                .recipient_grants()
+                .map(|(entry, grant, expires)| (entry, (grant, expires)))
+                .collect(),
             object_results: report
                 .object_results()
                 .map(|result| {
@@ -454,19 +481,6 @@ impl ReportFindingsV1 {
                 .decryption_errors()
                 .map(|error| (error.object_hash(), error.code()))
                 .collect(),
-            gaps: report
-                .gaps()
-                .map(|gap| (gap.from_sequence(), gap.through_sequence()))
-                .collect(),
-            authorized_destructions: report
-                .authorized_destructions()
-                .map(|destruction| {
-                    (
-                        destruction.destruction_id(),
-                        destruction.authorization_object_hash(),
-                    )
-                })
-                .collect(),
         }
     }
 
@@ -487,13 +501,6 @@ impl ReportFindingsV1 {
             self.object_results.get(&object_hash),
             Some((ObjectResultKindV1::Valid, _))
         )
-    }
-
-    /// Ob eine Sequenz in einem Lueckenintervall liegt.
-    fn is_missing_sequence(&self, sequence: ChainSequence) -> bool {
-        self.gaps
-            .iter()
-            .any(|(from, through)| *from <= sequence && sequence <= *through)
     }
 }
 
@@ -538,7 +545,15 @@ fn classify_entry(
     } else if let Some(code) = findings.evidence_errors.get(&object_hash) {
         (VerificationStatus::Invalid, persistable_detail_code(code))
     } else {
-        match own_grant(inventory, entry_hash, key_thumbprint) {
+        match findings
+            .recipient_grants
+            .get(&entry_hash)
+            .and_then(|(hash, _)| {
+                inventory
+                    .grants()
+                    .iter()
+                    .find(|grant| grant.object_hash() == *hash)
+            }) {
             // EIN ISOLIERTER GRANT IST SO GUT WIE KEINER, dieselbe Schranke, die
             // `claim_own_grants` selbst traegt: eine doppelt abgelegte `.eag`
             // wird nicht benutzt, und was nicht benutzt wurde, hat auch keinen
@@ -557,7 +572,11 @@ fn classify_entry(
                 } else if let Some(code) = findings.signature_errors.get(&grant_hash) {
                     // Der EINTRAG ist gueltig, nur der Grant traegt nicht.
                     (
-                        VerificationStatus::MissingGrant,
+                        if *code == "EA-GRANT-EXPIRED" {
+                            VerificationStatus::Invalid
+                        } else {
+                            VerificationStatus::MissingGrant
+                        },
                         persistable_detail_code(code),
                     )
                 } else if findings.is_valid_result(object_hash) {
@@ -580,6 +599,10 @@ fn classify_entry(
                             entry_hash,
                             key_thumbprint,
                             minted_at,
+                            findings
+                                .recipient_grants
+                                .get(&entry_hash)
+                                .and_then(|(_, expires)| *expires),
                         ),
                     });
                     (VerificationStatus::Verified, None)
@@ -613,155 +636,44 @@ fn classify_entry(
     }
 }
 
-/// Die Zustandszeile eines `.eds`-Stummels, in BEIDEN Dimensionen getrennt.
-///
-/// # `ObjectResultKindV1::AuthorizedDestroyed` ist ein TOTER Zweig
-///
-/// `confirm_entries` ist der einzige Erzeuger von `objectResults` — sein
-/// eigener Doc-Kommentar sagt „HIER UND NUR HIER entstehen die
-/// `objectResults`" — und setzt ausnahmslos `Valid`; die Variante
-/// `AuthorizedDestroyed` wird workspaceweit nirgends konstruiert. Der
-/// Eintragszustand kommt deshalb aus einer PRUEFKETTE, die
-/// [`stub_destruction_is_authorized`] zieht. Schliesst sie sich, ist der
-/// Zustand `autorisiert vernichtet`; sonst `ungeklaerte Luecke`.
-/// `web-reader-design.md` §14.1: „Ein Stub ohne vollstaendige Pruefkette bleibt
-/// eine Luecke."
-///
-/// # Die VERIFIKATIONSdimension bleibt davon unberuehrt
-///
-/// Ein `.eds` wird nie ein Kettenknoten und bekommt nie ein `objectResult`;
-/// seine Sequenz liegt damit in einem `gaps`-Intervall, und in der
-/// Verifikationsdimension ist er `Luecke` — auch dann, wenn seine Vernichtung
-/// autorisiert ist. `design.md` §17.4 haelt die beiden Dimensionen ausdruecklich
-/// auseinander.
+/// A Stub's result comes exclusively from the shared full verification chain,
+/// including decrypted Writer Evidence. A state-event/target join alone cannot
+/// authorize its unsigned original-object-hash field.
 fn classify_stub(
     findings: &ReportFindingsV1,
-    inventory: &ArchiveInventory,
     stub: &Parsed<DestroyedEntryStubV1>,
     placed: &BTreeMap<EntryHash, ReaderEntryStateV1>,
 ) -> Option<ReaderEntryStateV1> {
-    let object_hash = stub.object_hash();
-    // EIN ISOLIERTES ODER UNLESBARES OBJEKT WIRD NICHT BENUTZT. Ein Stummel,
-    // der selbst in der Quarantaene steht, ist nicht zuordenbar — aus ihm eine
-    // Zeile ueber einen Eintrag zu bilden hiesse, eine Zuordnung zu behaupten,
-    // die der Lauf gerade verweigert hat.
-    if findings.quarantined.contains(&object_hash) || findings.format_errors.contains(&object_hash)
+    let hash = stub.object_hash();
+    if findings.quarantined.contains(&hash)
+        || findings.format_errors.contains(&hash)
+        || placed.contains_key(&stub.value().entry_hash())
     {
         return None;
     }
-    let entry_hash = stub.value().entry_hash();
-    // Ein VORHANDENES `.eip` regiert seine eigene Zeile. Sonst stuenden zwei
-    // Zeilen unter demselben Schluessel, und `state_of` entschiede nach
-    // Einfuegereihenfolge.
-    if placed.contains_key(&entry_hash) {
-        return None;
-    }
-    let sequence = stub
-        .value()
-        .signed_manifest()
-        .manifest()
-        .fields()
-        .chain_sequence;
-    let entry_state = if stub_destruction_is_authorized(findings, inventory, stub.value(), sequence)
-    {
-        EntryStatus::AuthorizedDestroyed
-    } else {
-        EntryStatus::UnexplainedGap
-    };
-    let verification = if findings.is_missing_sequence(sequence) {
-        VerificationStatus::Gap
-    } else {
-        // Der Stummel behauptet eine Vernichtung auf einer Sequenz, die der
-        // Bericht NICHT als fehlend fuehrt — die Kette widerspricht ihm also.
-        // Ein Widerspruch ist keine Luecke; fail-closed in die strengere
-        // Richtung.
-        VerificationStatus::Invalid
-    };
+    let authorized = findings
+        .object_results
+        .get(&hash)
+        .is_some_and(|(result, _)| *result == ObjectResultKindV1::AuthorizedDestroyed);
     Some(ReaderEntryStateV1::new(
-        entry_hash,
-        object_hash,
-        sequence,
-        verification,
-        entry_state,
-        findings.server_confirmation(object_hash),
+        stub.value().entry_hash(),
+        hash,
+        stub.value()
+            .signed_manifest()
+            .manifest()
+            .fields()
+            .chain_sequence,
+        if authorized {
+            VerificationStatus::Verified
+        } else {
+            VerificationStatus::Gap
+        },
+        if authorized {
+            EntryStatus::AuthorizedDestroyed
+        } else {
+            EntryStatus::UnexplainedGap
+        },
+        findings.server_confirmation(hash),
         None,
     ))
-}
-
-/// Ob sich die Pruefkette eines Stummels bis zur Autorisierung SCHLIESST.
-///
-/// DREI GLIEDER, und jedes traegt allein: (1) die `destructionId`, die der
-/// Stummel nennt, fuehrt der Bericht unter `authorizedDestructions`; (2) der
-/// `destructionAuthorizationObjectHash`, den der Stummel nennt, ist GENAU der
-/// Hash, den die signierten Transitionen dieses Vorgangs authentifiziert haben
-/// — `ea_verify::destruction` uebernimmt ihn aus der Kette, nie aus einem
-/// Stummel; (3) die Autorisierung unter diesem Hash nennt unter `targets` den
-/// `entryHash` UND die Sequenz des Stummels.
-///
-/// Ein Join allein ueber die Kennung liesse jedes kopierte, signierte Manifest
-/// unter einer im Bestand liegenden Kennung als `autorisiert vernichtet`
-/// erscheinen — GEMESSEN am Bestand
-/// `report_archive_with_a_stub_naming_a_forged_authorization_hash`, ohne einen
-/// einzigen neuen Befund im Bericht, weil `ea-verify` die beiden Stummelfelder
-/// an keiner Stelle prueft. Die Ziele der Autorisierung liest `ea-verify`
-/// ebenfalls nicht; deshalb stehen beide Glieder HIER. Was die Vier-Augen-
-/// Signaturen der Autorisierung selbst angeht, gilt weiter das Wort von
-/// `ea_verify::destruction`: die Transitionen binden ihren Objekthash
-/// kryptografisch, aus unauthentischen Bytes stammt hier keine Sachaussage.
-///
-/// Der Zustand des Vorgangs (`beantragt` … `vollstaendig`) bleibt ohne
-/// Gewicht: der Bericht fuehrt ihn, und `autorisiert` ist er in jedem davon.
-///
-/// `inventory.trust()` liegt aufsteigend nach Objekthash — die dokumentierte
-/// Invariante, auf der auch `ArchiveInventory::read_exact_trust_object`
-/// binaer sucht.
-fn stub_destruction_is_authorized(
-    findings: &ReportFindingsV1,
-    inventory: &ArchiveInventory,
-    stub: &DestroyedEntryStubV1,
-    sequence: ChainSequence,
-) -> bool {
-    let Some(authorization_object_hash) =
-        findings.authorized_destructions.get(&stub.destruction_id())
-    else {
-        return false;
-    };
-    if *authorization_object_hash != stub.destruction_authorization_object_hash() {
-        return false;
-    }
-    let Ok(index) = inventory
-        .trust()
-        .binary_search_by_key(authorization_object_hash, Parsed::object_hash)
-    else {
-        return false;
-    };
-    let Ok(DecodedTrustPayloadV1::DestructionAuthorization(fields)) =
-        inventory.trust()[index].value().decoded_payload()
-    else {
-        return false;
-    };
-    fields.destruction_id == stub.destruction_id()
-        && fields.targets.iter().any(|target| {
-            target.entry_hash() == stub.entry_hash().as_bytes()
-                && target.chain_sequence() == sequence.get()
-        })
-}
-
-/// Der eigene INITIALE Grant auf `entry_hash`.
-///
-/// Das Praedikat von `ea_verify::own_grant`, ZEICHENGLEICH nachgebaut, weil
-/// jenes `pub(crate)` ist. Die drei Bindungen sind die Art, der `entryHash` und
-/// der eigene Abdruck; `find` laeuft ueber das nach Objekthash aufsteigende
-/// `inventory.grants()` und waehlt damit denselben Grant wie die Pipeline.
-fn own_grant(
-    inventory: &ArchiveInventory,
-    entry_hash: EntryHash,
-    key_thumbprint: KeyThumbprint,
-) -> Option<&Parsed<GrantV1>> {
-    inventory.grants().iter().find(|grant| {
-        let fields = grant.value().grant_body().fields();
-        fields.kind == GrantKindV1::Initial
-            && fields.entry_hash == entry_hash
-            && fields.recipient_key_thumbprint == key_thumbprint
-    })
 }

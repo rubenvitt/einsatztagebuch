@@ -821,10 +821,25 @@ pub enum AppendOutcome {
     Conflict,
 }
 
+/// Technical identity of the catalog that produced a verified current head.
+/// This fence grants no authority; only the signed head supplies policy/roles.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RegistryAdmissionFenceV1 {
+    pub catalog_revision: i64,
+    pub exact_anchor_bytes: Vec<u8>,
+    pub selected_at: UnixMillis,
+    pub not_after: UnixMillis,
+}
+
 /// Ein angenommener Vernichtungsvorgang, wie er in die Ablage geht.
 #[derive(Clone, Eq, PartialEq)]
 pub struct DestructionRequestCommandV1 {
     pub organization_id: OrganizationId,
+    pub chain_id: ChainId,
+    /// The independently read progress at which the current policy was checked.
+    /// Storage must compare this while holding the chain-head write lock.
+    pub expected_chain_head: ChainHeadStateV1,
+    pub authority_fence: RegistryAdmissionFenceV1,
     pub destruction_id: ea_types::DestructionId,
     pub authorization: IndexedObjectV1,
     /// Die Ziele in der Ordnung der Authorization. Die Zielidentitaet ist der

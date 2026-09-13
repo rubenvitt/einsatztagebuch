@@ -1,16 +1,18 @@
-import { App, ConfigProvider, Layout, Result, Space, Typography } from 'antd'
+import { App, Button, ConfigProvider, Layout, Result, Space, Typography } from 'antd'
 import deDE from 'antd/locale/de_DE'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import { StartupRecovery, startupRecovery } from './StartupRecovery'
 import { TrustAgeStatus } from './TrustAgeStatus'
 import { enabledRoutes } from './role-gate'
 import type { EaRoute, SessionRole, VerifiedSession } from './role-gate'
-import { verifiedSession, watchSessionLock } from './session-lock'
+import { loginSession, verifiedSession, watchSessionLock } from './session-lock'
 import type { SessionLockHandlers } from './session-lock'
 import type { FinalizationPreviewView, PendingFinalizationResumeView } from '../bridge/generated-contracts'
 import { AdminSurface } from '../features/admin/AdminPage'
+import { DestructionSurface } from '../features/admin/DestructionSurface'
+import { RecoverySurface } from '../features/admin/RecoverySurface'
 import { WriterSurface } from '../features/writer/WriterPage'
 import { DecorativeIcon } from '../design/icons'
 import { eaRuntimeTheme } from '../design/tokens'
@@ -18,12 +20,14 @@ import { eaRuntimeTheme } from '../design/tokens'
 /** Alles, was die Schale vom Wirt braucht — und nichts darueber hinaus. */
 export type EaDesktopBridge = {
   readonly loadSession: () => Promise<VerifiedSession>
+  readonly login?: () => Promise<VerifiedSession>
   readonly recover: () => Promise<PendingFinalizationResumeView>
   readonly watchLock: (handlers: SessionLockHandlers) => Promise<() => void>
 }
 
 export const eaDesktopBridge: EaDesktopBridge = {
   loadSession: () => verifiedSession(),
+  login: () => loginSession(),
   recover: () => startupRecovery(),
   watchLock: (handlers) => watchSessionLock(handlers),
 }
@@ -55,7 +59,7 @@ const ROUTE_SURFACES: Record<string, Surface> = {
     ),
   },
   '/einsatz': { ariaLabel: 'Erfassung', body: <WriterSurface /> },
-  '/verwaltung': { ariaLabel: 'Verwaltung', body: <AdminSurface /> },
+  '/verwaltung': { ariaLabel: 'Verwaltung', body: <Space direction="vertical" size="large" style={{ width: '100%' }}><AdminSurface /><RecoverySurface /><DestructionSurface /></Space> },
 }
 
 /**
@@ -77,7 +81,7 @@ function RouteSurface({ route }: { readonly route: EaRoute }): ReactElement | nu
   }
   return (
     <section aria-label={surface.ariaLabel}>
-      <Space direction="vertical" size="middle">
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Space size="small">
           <DecorativeIcon name={route.icon} />
           <Typography.Title level={2}>{route.label}</Typography.Title>
@@ -89,15 +93,13 @@ function RouteSurface({ route }: { readonly route: EaRoute }): ReactElement | nu
 }
 
 /**
- * Die Schale — Navigation aus der Routentabelle, Inhalt hinter der
+ * Die Schale — Navigation aus der Routentabelle, Writer-Inhalt hinter der
  * Wiederaufnahme.
  *
- * Die Trennung ist die Entscheidung dieses Tasks: der VERWEIS auf die Erfassung
- * haengt allein an der geprueften Sitzung und erscheint deshalb sofort, der
- * INHALT jeder Route erst, wenn `WriterService::recover_pending` zurueckgekehrt
- * ist. Eine Schale, die auch ihre Navigation erst nach einem Wirtsaufruf
- * zeigt, waere ohne Wirt stumm; eine Erfassungsflaeche vor der Wiederaufnahme
- * duerfte es nicht geben.
+ * Der Verweis auf die Erfassung haengt an der geprueften Sitzung; der Inhalt
+ * einer Writer-Route wartet auf WriterService::recover_pending. Admin-Sitzungen
+ * haben keinen Writer-Startup-Port. Ihre drei Verwaltungsdienste pruefen jeweils
+ * selbst ihre aktuelle native Zulassung und zeigen fehlende Dienste als Fehler.
  */
 export function AppShell({
   session,
@@ -113,18 +115,19 @@ export function AppShell({
   const [path, setPath] = useState(initialPath)
   const routes = enabledRoutes(session)
   const active = routes.find((route) => route.path === path) ?? routes[0]
+  const surface = active === undefined ? null : <RouteSurface route={active} />
 
   return (
     <ConfigProvider locale={deDE} theme={eaRuntimeTheme}>
       <App>
         <Layout>
-          <Layout.Header>
+          <Layout.Header className="ea-shell-header">
             <Space direction="vertical" size="small">
               <Typography.Text strong>{`Einsatzarchiv — ${ROLE_TITLE[session.role]}`}</Typography.Text>
               <TrustAgeStatus preview={preview} />
             </Space>
           </Layout.Header>
-          <Layout.Content>
+          <Layout.Content className="ea-shell-content">
             <nav aria-label="Hauptbereiche">
               <Space size="middle">
                 {routes.map((route) => (
@@ -142,9 +145,9 @@ export function AppShell({
                 ))}
               </Space>
             </nav>
-            <StartupRecovery recover={recover}>
-              {active === undefined ? null : <RouteSurface route={active} />}
-            </StartupRecovery>
+            {session.role === 'writer'
+              ? <StartupRecovery recover={recover}>{surface}</StartupRecovery>
+              : surface}
           </Layout.Content>
         </Layout>
       </App>
@@ -216,7 +219,12 @@ const CLOSURE_NOTICE: Record<ShellClosure, { readonly title: string; readonly su
  * einer leeren Seite. Sie erscheint vor der ersten Antwort des Wirts, nach jeder
  * Sperre und immer dann, wenn die Sperrpflicht selbst nicht haengt.
  */
-function LockedNotice({ closure }: { readonly closure: ShellClosure }): ReactElement {
+function LockedNotice({ closure, login, busy = false, failed = false }: {
+  readonly closure: ShellClosure
+  readonly login?: (() => void) | undefined
+  readonly busy?: boolean
+  readonly failed?: boolean
+}): ReactElement {
   const notice = CLOSURE_NOTICE[closure]
   return (
     <ConfigProvider locale={deDE} theme={eaRuntimeTheme}>
@@ -225,6 +233,10 @@ function LockedNotice({ closure }: { readonly closure: ShellClosure }): ReactEle
           icon={<DecorativeIcon name="locked" size={48} />}
           title={notice.title}
           subTitle={notice.subTitle}
+          extra={login === undefined ? undefined : <Space direction="vertical">
+            <Button type="primary" loading={busy} onClick={login}>Mit Betriebssystem anmelden</Button>
+            {failed && <Typography.Text role="alert">Die Anmeldung wurde nicht bestätigt. Prüfen Sie die Gerätefreigabe und versuchen Sie es erneut.</Typography.Text>}
+          </Space>}
         />
       </App>
     </ConfigProvider>
@@ -256,8 +268,14 @@ export function EaDesktopApp({
   readonly bridge?: EaDesktopBridge
 }): ReactElement {
   const [state, setState] = useState<ShellState>({ kind: 'starting' })
+  const [watchReady, setWatchReady] = useState(false)
+  const [loginBusy, setLoginBusy] = useState(false)
+  const [loginFailed, setLoginFailed] = useState(false)
+  const generation = useRef(0)
 
   useEffect(() => {
+    generation.current += 1
+    setWatchReady(false)
     let live = true
     let stop: (() => void) | undefined
     const open = (session: VerifiedSession): void => {
@@ -280,9 +298,12 @@ export function EaDesktopApp({
     bridge
       .watchLock({
         onLocked: () => {
+          generation.current += 1
           close('locked')
         },
         onUnconfirmed: () => {
+          generation.current += 1
+          setWatchReady(false)
           close('lock-unconfirmed')
         },
       })
@@ -293,6 +314,7 @@ export function EaDesktopApp({
             return
           }
           stop = unlisten
+          setWatchReady(true)
           bridge.loadSession().then(open, () => {
             close('no-session')
           })
@@ -303,13 +325,33 @@ export function EaDesktopApp({
       )
 
     return () => {
+      generation.current += 1
       live = false
       stop?.()
     }
   }, [bridge])
 
+  const login = async (): Promise<void> => {
+    if (!watchReady || loginBusy || bridge.login === undefined) return
+    const started = generation.current
+    setLoginBusy(true)
+    setLoginFailed(false)
+    try {
+      const session = await bridge.login()
+      if (generation.current === started) setState({ kind: 'active', session })
+    } catch {
+      if (generation.current === started) setLoginFailed(true)
+    } finally {
+      setLoginBusy(false)
+    }
+  }
+
   if (state.kind !== 'active') {
-    return <LockedNotice closure={state.kind === 'starting' ? 'no-session' : state.closure} />
+    const closure = state.kind === 'starting' ? 'no-session' : state.closure
+    const canLogin = watchReady && bridge.login !== undefined &&
+      (closure === 'no-session' || closure === 'locked')
+    return <LockedNotice closure={closure} login={canLogin ? () => { void login() } : undefined}
+      busy={loginBusy} failed={loginFailed} />
   }
   return <AppShell session={state.session} />
 }

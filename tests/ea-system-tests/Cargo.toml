@@ -13,6 +13,16 @@ publish = false
 # `ea-verify` steht auf der wasm32-Positivliste — die beiden duerfen deshalb
 # nie Dependency einer der Bibliotheks-Crates werden.
 [dev-dependencies]
+ea-destruction.workspace = true
+ea-recovery.workspace = true
+einsatzarchiv-server.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+sqlx-core.workspace = true
+sqlx-postgres.workspace = true
+aws-sdk-s3.workspace = true
+aws-smithy-http-client.workspace = true
+async-trait.workspace = true
 # Die Verwaltungsfassade der Stufe 5 als Gegenstand von
 # `e2e_registry_effectiveness`: `RegistryWorkflowService`, `RegistryActionV1`,
 # die Ereignisfabrik, der Widerruf und die Uhrfreigabe. Die Kante gehoert

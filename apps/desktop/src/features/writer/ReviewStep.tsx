@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 
 import { PATIENT_COUNT_STATUS_VALUES } from '../../bridge/generated-contracts'
 import type {
+  AmendmentInputView,
   ArchiveHealthSummaryView,
   DevicePostureSummaryView,
   FinalizationPreviewView,
@@ -70,20 +71,31 @@ function TrustHolding({
  */
 export function ReviewStep({
   incident,
+  amendment,
   preview,
   health,
   posture,
 }: {
-  readonly incident: IncidentInputView
+  readonly incident: IncidentInputView | null
+  readonly amendment?: AmendmentInputView | null
   readonly preview: FinalizationPreviewView | null
   readonly health: ArchiveHealthSummaryView | null
   readonly posture: DevicePostureSummaryView | null
 }): ReactElement {
-  const known = incident.patientCountStatus === KNOWN_STATUS
+  const known = incident?.patientCountStatus === KNOWN_STATUS
   return (
     <section aria-label="Prüfung">
       <Space direction="vertical" size="middle">
-        <Descriptions
+        {incident === null ? (
+          <Space orientation="vertical">
+            <Typography.Text strong>Nachtrag zum unveränderten Original</Typography.Text>
+            <Typography.Text>{amendment?.reference.originalRecordId}</Typography.Text>
+            <Typography.Text code>{amendment?.reference.originalEntryHash}</Typography.Text>
+            <Typography.Text>Originalsequenz {amendment?.reference.originalSequence}</Typography.Text>
+            <Typography.Text>{amendment?.reason}</Typography.Text>
+            {amendment?.changes.map((change, index) => <Typography.Paragraph key={index}>{change.fieldPath}: {change.changeText}</Typography.Paragraph>)}
+          </Space>
+        ) : <Descriptions
           column={1}
           items={[
             {
@@ -190,7 +202,7 @@ export function ReviewStep({
                       .join(', '),
             },
           ]}
-        />
+        />}
 
         {preview === null ? (
           <Typography.Text>

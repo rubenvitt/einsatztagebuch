@@ -112,6 +112,7 @@ pub struct VerifiedGrantForRecipient {
     entry_hash: EntryHash,
     recipient_key_thumbprint: KeyThumbprint,
     minted_at: UnixMillis,
+    expires_at: Option<UnixMillis>,
 }
 
 impl VerifiedGrantForRecipient {
@@ -121,12 +122,14 @@ impl VerifiedGrantForRecipient {
         entry_hash: EntryHash,
         recipient_key_thumbprint: KeyThumbprint,
         minted_at: UnixMillis,
+        expires_at: Option<UnixMillis>,
     ) -> Self {
         Self {
             exact_grant_bytes,
             entry_hash,
             recipient_key_thumbprint,
             minted_at,
+            expires_at,
         }
     }
 
@@ -151,5 +154,8 @@ impl VerifiedGrantForRecipient {
     /// Die exakten Objektbytes, NUR fuer den Entkapseler dieser Crate.
     pub(crate) fn exact_grant_bytes(&self) -> &[u8] {
         &self.exact_grant_bytes
+    }
+    pub(crate) const fn expires_at(&self) -> Option<UnixMillis> {
+        self.expires_at
     }
 }

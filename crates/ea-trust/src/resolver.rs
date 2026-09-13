@@ -90,6 +90,31 @@ impl PreviousHeadState {
         })
     }
 
+    /// Clock issuance cannot stop at an intermediate candidate while this
+    /// same exact catalog already advertises another sequence-relevant Head.
+    /// This is a refusal boundary, never a second replay or authority source.
+    pub(crate) fn has_later_clock_registry(
+        &self,
+        candidate: RegistryVersion,
+        sequence: ChainSequence,
+    ) -> Result<bool, TrustError> {
+        for hash in self.catalog.hashes_for_subtype(ea_format::TrustSubtypeV1::RegistryEvent) {
+            let object = self.catalog.get(hash).ok_or(TrustError::Source)?;
+            let ea_format::DecodedTrustPayloadV1::RegistryEvent(core) = object.value()
+                .decoded_payload().map_err(|_| TrustError::Source)? else {
+                return Err(TrustError::Source);
+            };
+            let fields = core.fields();
+            if fields.organization_id == self.root.fields.organization_id
+                && fields.registry_version > candidate
+                && fields.effective_from_sequence <= sequence
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn initial_admin_pair_count(&self) -> usize {
         debug_assert_eq!(self.admin_certificates.len(), self.admin_bindings.len());
         self.admin_bindings.len()
@@ -179,7 +204,7 @@ impl PreviousHeadState {
         Some(binding)
     }
 
-    fn resolve_selected(
+    pub(crate) fn resolve_selected(
         &self,
         certificate_hash: CertificateHash,
         bound_registry: RegistryVersion,

@@ -30,11 +30,9 @@
 //! `SelectedRegistryHead::active_capabilities` gelesen — eine zweite Fassung
 //! derselben Regel waere eine zweite Gelegenheit, sie falsch zu schreiben.
 //!
-//! Die NUTZUNGSFRIST steckt in genau diesem Kopf: `select_registry_head` gibt
-//! einen Kopf nur heraus, solange `effectiveNow` innerhalb seines
-//! `not-before`/`not-after` liegt (`crates/ea-trust/src/registry.rs:556-600`).
-//! Ein Grant ist damit exakt so lange benutzbar, wie die Registrierung, auf
-//! die er sich beruft, Autoritaet traegt.
+//! Initial grants retain the authority of their exact historical Registry
+//! and sequence. Historical grants are separately verified against their
+//! authorization and its expiresAt in crate::historical before decapsulation.
 
 use core::fmt;
 
@@ -44,7 +42,7 @@ use ea_crypto::{
     hpke_info, hpke_open, payload_aad, verify_cose_sign1,
 };
 use ea_format::{EntryPackageV1, GrantKindV1, GrantV1, Parsed};
-use ea_trust::SelectedRegistryHead;
+use ea_trust::HistoricalRegistryAuthority;
 use ea_types::KeyThumbprint;
 
 use crate::{Decapsulation, ObjectErrorV1, RecipientKeyV1, VerificationReportV1};
@@ -73,18 +71,8 @@ pub enum RecipientGrantErrorV1 {
     /// Der Grant beruft sich auf eine Authorization, die dieser Lauf nicht
     /// aufloesen kann.
     ///
-    /// FAIL-CLOSED UND AUSDRUECKLICH KEINE PRUEFUNG — die Lage, in der der
-    /// Schreiberwechsel bis Stufe 5 stand, bevor `ea-trust` den wirksamen
-    /// Uebergang als Kopfzustand herausgab und
-    /// `crate::entry::writer_transition_claim_holds` die echte Regel rechnen
-    /// konnte. Fuer die Grant-Authorization gibt es diesen Zustand NICHT: ein
-    /// historischer Grant MUSS nach `design.md`:782 eine Authorization
-    /// tragen, die Eintrag und Empfaenger exakt abdeckt, `SelectedRegistryHead`
-    /// gibt keine angewandte Grant-Authorization heraus, und `ea-trust` haelt
-    /// seinen Katalog `pub(crate)`. Ein solcher Grant wird deshalb NICHT
-    /// benutzt, und es wird nichts mit ihm geoeffnet. Dieses Gate haelt auch
-    /// keinen Transitionsanspruch: der wird an genau einer Stelle gerechnet,
-    /// im Eintragsdurchlauf von `crate::archive`.
+    /// The initial-grant checker cannot authorize a historical candidate.
+    /// Those candidates go through crate::historical and its shared proof.
     AuthorizationUnverifiable,
 }
 
@@ -219,7 +207,7 @@ pub(crate) fn own_grant<'a>(
 pub(crate) fn verify_own_grant(
     grant: &Parsed<GrantV1>,
     entry: &Parsed<EntryPackageV1>,
-    selected: &SelectedRegistryHead,
+    selected: &HistoricalRegistryAuthority,
 ) -> Result<KeyThumbprint, RecipientGrantErrorV1> {
     let sequence = entry.value().manifest().fields().chain_sequence;
     let body = grant.value().grant_body();
@@ -245,16 +233,14 @@ pub(crate) fn verify_own_grant(
 
 /// Entkapselt den CEK und oeffnet den Ciphertext des Eintrags.
 ///
-/// DER KLARTEXT VERLAESST DIESE FUNKTION NIE. `design.md` §14 haelt fest, dass
-/// entschluesselte Inhalte nicht in Berichte, Zwischenablagen oder temporaere
-/// Dateien gehoeren; hier wird der Erfolg deshalb als blosses
-/// [`Decapsulation::Performed`] gemeldet und der [`ea_crypto::SecretVec`] beim
-/// Verlassen des Rahmens ueberschrieben.
+/// The private caller checks encrypted destructionEvidence in a SecretVec.
+/// No plaintext enters the public report; dropping that private call frame
+/// zeroizes the plaintext after collecting only authenticated public hashes.
 pub(crate) fn open_entry(
     grant: &Parsed<GrantV1>,
     entry: &Parsed<EntryPackageV1>,
     recipient: RecipientKeyV1<'_>,
-) -> Result<(), DecryptionErrorV1> {
+) -> Result<ea_crypto::SecretVec, DecryptionErrorV1> {
     let body = grant.value().grant_body();
     let context = body
         .exact_grant_context()
@@ -279,8 +265,7 @@ pub(crate) fn open_entry(
         &payload_aad(manifest.exact_bytes()),
     )
     .map_err(|_| DecryptionErrorV1::PayloadOpenFailed)?;
-    drop(plaintext);
-    Ok(())
+    Ok(plaintext)
 }
 
 /// Traegt den Ausgang der Entkapselung in den Bericht ein.

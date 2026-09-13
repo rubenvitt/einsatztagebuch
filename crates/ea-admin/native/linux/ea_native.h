@@ -17,8 +17,8 @@
 
 typedef struct {
     char op[20], slot[65], kind[10];
-    gboolean presence, replace, has_installation;
-    unsigned char installation[32], data[EA_MAX_MESSAGE / 2];
+    gboolean presence, replace, has_installation, has_expected_public;
+    unsigned char installation[32], expected_public[32], data[EA_MAX_MESSAGE / 2];
     size_t data_len;
 } EaRequest;
 
@@ -63,6 +63,10 @@ const char *ea_marker_publish(EaMarkerStore *store, const EaMarker *marker);
 const char *ea_marker_recheck(EaMarkerStore *store, const EaAccount *account, const EaMarker *marker);
 const char *ea_marker_reset(EaMarkerStore *store);
 void ea_marker_store_close(EaMarkerStore *store);
+typedef struct { unsigned char bytes[106]; } EaSigningBackupFrame;
+const char *ea_validate_signing_backup(const EaRequest *request);
+const char *ea_execute_signing_backup(const EaRequest *request, EaSigningBackupFrame *frame);
+gboolean ea_write_signing_backup(int output, EaSigningBackupFrame *frame);
 const char *ea_execute(const EaRequest *request, JsonObject **fields);
 const char *ea_watch_account(const EaRequest *request, JsonObject **fields, char **instance_path);
 #endif

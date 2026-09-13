@@ -153,11 +153,7 @@ pub struct DevicePostureReport {
 impl DevicePostureReport {
     /// Ein Bericht, in dem KEINE der vier Anforderungen belegt ist.
     ///
-    /// Der Ausgangszustand jedes nativen Adapters der Stufe 2: sie liest keines
-    /// der vier Signale, weil dafuer keine native API-Familie zur Verfuegung
-    /// steht (`docs/adr/0001-toolchain-and-cryptography-dependencies.md:152-153`).
-    /// Vier `Unknown` sind die WAHRE Aussage darueber; vier `Pass` waeren eine
-    /// falsche und vier `Fail` eine ebenso falsche.
+    /// Native Messungen ersetzen ausschließlich die zuverlässig belegbaren Felder.
     #[must_use]
     pub const fn unresolved() -> Self {
         Self {
@@ -184,18 +180,8 @@ impl DevicePostureReport {
     /// Nur wenn ALLE VIER Anforderungen belegt erfuellt sind. Ein `Fail` sperrt,
     /// und ein `Unknown` sperrt ebenfalls — es ist kein automatischer Pass.
     ///
-    /// STAND DER STUFE 2, ausgesprochen statt vorausgesetzt: kein nativer
-    /// Haltungsadapter dieser Stufe liest eines der vier Signale
-    /// ([`SupportMatrixRow::posture_provider`]), also meldet JEDE Zeile der
-    /// Support-Matrix vier `Unknown`, und diese Methode gibt in jedem
-    /// Produktivbau auf jeder Zeile `false` zurueck. Ein Verbraucher, der die
-    /// Erzeugung einer Sitzung in produktiver Rolle daran haengt — Task 11 und
-    /// Task 16 —, erzeugt heute also keine. Das ist die richtige Richtung
-    /// (fail-closed: eine unbelegte Haltung ist keine belegte), aber es ist eine
-    /// SPERRE und kein Nebeneffekt: sie loest sich erst, wenn der Task, der die
-    /// nativen API-Familien samt ADR einfuehrt, die vier Signale wirklich liest.
-    /// Bis dahin traegt der Go-live-Bericht die vier `EA-POSTURE-*-UNREPORTABLE`
-    /// Zeilen aus [`Self::go_live_follow_up`].
+    /// Die nativen Adapter belegen nur verlässlich messbare Signale.
+    /// Jede offene Voraussetzung bleibt eine Sperre und erscheint im Go-live-Bericht.
     #[must_use]
     pub fn is_production_ready(&self) -> bool {
         PostureRequirement::ALL
@@ -220,9 +206,13 @@ impl DevicePostureReport {
 ///
 /// Synchron wie der ganze Rust-Kern, damit `Box<dyn DevicePostureProvider>`
 /// trivial konstruierbar ist.
-pub trait DevicePostureProvider {
+pub trait DevicePostureProvider: Send + Sync {
     /// Liest die vier Signale dieser Plattform.
     fn report(&self) -> Result<DevicePostureReport, KeyError>;
+    /// Independent native OS build observation; never a patch-policy verdict.
+    fn os_build_identity(&self) -> Result<crate::HostOsBuild, KeyError> {
+        crate::measure_native_os_build()
+    }
 }
 
 /// Eine Zeile der v0.1-Support-Matrix.
@@ -301,22 +291,9 @@ impl SupportMatrixRow {
 
     /// Der native Haltungsadapter dieser Zeile.
     ///
-    /// ALLE VIER Adapter melden heute [`DevicePostureReport::unresolved`], also
-    /// vier `Unknown`: Stufe 2 traegt keine native API-Familie, hinter der die
-    /// vier Signale liegen (BitLocker-Status und Richtlinien-APIs, FileVault und
-    /// Systemframeworks, LUKS und D-Bus-Dienste), und jede solche Familie ist
-    /// eine ADR-pflichtige Dependency-Entscheidung
-    /// (`docs/adr/0001-toolchain-and-cryptography-dependencies.md`, Abschnitt
-    /// „Consequences"). Zusaetzlich fuehrt jede Crate dieses Bauwerks
-    /// `#![forbid(unsafe_code)]`, ein FFI-Aufruf ist hier also nicht nur
-    /// undokumentiert, sondern unuebersetzbar.
-    ///
-    /// Die Folge, damit sie niemand erst im Betrieb entdeckt:
-    /// [`DevicePostureReport::is_production_ready`] ist auf JEDER Zeile immer
-    /// `false`, und [`DevicePostureReport::go_live_follow_up`] nennt immer alle
-    /// vier Anforderungen. Wer diesen Port aufruft, bekommt die WAHRE Aussage
-    /// ueber ein Geraet, dessen Haltung niemand gelesen hat — nicht die Haltung
-    /// des Geraets.
+    /// Nur die passende Host-Plattform misst. Feste Systemprogramme, kleine
+    /// Ausgabegrenzen und Zeitlimits verhindern offene Aufruf-/Inventarflächen.
+    /// Nicht messbare Kontoexklusivität und Patch-Konformität bleiben Unknown.
     #[must_use]
     pub fn posture_provider(self) -> Box<dyn DevicePostureProvider> {
         match self {

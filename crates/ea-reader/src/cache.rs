@@ -95,6 +95,9 @@ impl ReaderObjectCache {
         store: &mut dyn ReaderBlobStore,
         exact_bytes: &[u8],
     ) -> Result<ObjectHash, ReaderVaultError> {
+        if crate::cache_destruction::denied(store, &self.cache_key, exact_bytes)? {
+            return Err(ReaderVaultError::Contents);
+        }
         let hash = object_hash(exact_bytes);
         let key = cache_key(hash)?;
         let mut nonce = [0_u8; AEAD_NONCE_SIZE];
@@ -120,6 +123,20 @@ impl ReaderObjectCache {
     /// wurde oder verfaelscht ist; `EA-READER-VAULT-CONTENTS` fuer einen Blob,
     /// der nicht einmal seinen Nonce traegt.
     pub fn get_exact_object(
+        &self,
+        store: &dyn ReaderBlobStore,
+        object_hash: ObjectHash,
+    ) -> Result<Option<Vec<u8>>, ReaderVaultError> {
+        let bytes = self.get_unfiltered(store, object_hash)?;
+        if let Some(bytes) = &bytes
+            && crate::cache_destruction::denied(store, &self.cache_key, bytes)?
+        {
+            return Ok(None);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn get_unfiltered(
         &self,
         store: &dyn ReaderBlobStore,
         object_hash: ObjectHash,
@@ -185,7 +202,7 @@ impl ReaderObjectCache {
 /// Der Bytespeicher traegt auch den versiegelten Tresor, die Eintragszustaende
 /// und den Sync-Cursor. Ein Schluessel ohne das Cachepraefix ist deshalb kein
 /// Fehler, sondern schlicht kein Objekt.
-fn object_hash_of(key: &ReaderBlobKey) -> Option<ObjectHash> {
+pub(crate) fn object_hash_of(key: &ReaderBlobKey) -> Option<ObjectHash> {
     let hex_digits = key.as_str().strip_prefix(CACHE_KEY_PREFIX)?;
     let bytes = hex::decode(hex_digits).ok()?;
     ObjectHash::try_from(bytes.as_slice()).ok()

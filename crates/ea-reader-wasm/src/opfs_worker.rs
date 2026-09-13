@@ -113,7 +113,7 @@ use std::collections::{BTreeMap, btree_map::Entry};
 
 use ea_reader::{ReaderBlobError, ReaderBlobKey, ReaderBlobStore};
 use js_sys::{Function, Promise, Reflect};
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     DedicatedWorkerGlobalScope, FileSystemDirectoryHandle, FileSystemFileHandle,
@@ -413,6 +413,146 @@ async fn take_turn(key: &ReaderBlobKey) -> KeyTurn {
     turn
 }
 
+/// A browser-wide namespace lease. Shared readers/writers on known files
+/// coexist; full enumeration/removal takes the exclusive Web Lock. This also
+/// covers another worker/tab of the same origin, not only this event loop.
+#[derive(Debug)]
+struct NamespaceTurn {
+    release: Function,
+}
+impl Drop for NamespaceTurn {
+    fn drop(&mut self) {
+        let _ = self.release.call0(&JsValue::UNDEFINED);
+    }
+}
+async fn namespace_turn(
+    directory: &str,
+    exclusive: bool,
+) -> Result<NamespaceTurn, ReaderBlobError> {
+    let navigator = Reflect::get(&js_sys::global(), &JsValue::from_str("navigator"))
+        .map_err(|e| from_js(&e))?;
+    let locks = Reflect::get(&navigator, &JsValue::from_str("locks")).map_err(|e| from_js(&e))?;
+    let request = Reflect::get(&locks, &JsValue::from_str("request"))
+        .map_err(|e| from_js(&e))?
+        .dyn_into::<Function>()
+        .map_err(|_| host("Web Locks unavailable"))?;
+    let mut release = None;
+    let released = Promise::new(&mut |resolve, _| release = Some(resolve));
+    let turn = NamespaceTurn {
+        release: release.ok_or_else(|| host("release promise unavailable"))?,
+    };
+    let mut acquired = None;
+    let ready = Promise::new(&mut |resolve, _| acquired = Some(resolve));
+    let acquired = acquired.ok_or_else(|| host("acquire promise unavailable"))?;
+    let callback = Closure::wrap(Box::new(move |_: JsValue| -> Promise {
+        let _ = acquired.call0(&JsValue::UNDEFINED);
+        released.clone()
+    }) as Box<dyn FnMut(JsValue) -> Promise>);
+    let options = js_sys::Object::new();
+    Reflect::set(
+        &options,
+        &JsValue::from_str("mode"),
+        &JsValue::from_str(if exclusive { "exclusive" } else { "shared" }),
+    )
+    .map_err(|e| from_js(&e))?;
+    let requested = request
+        .call3(
+            &locks,
+            &JsValue::from_str(&format!("einsatzarchiv-opfs:{directory}")),
+            &options,
+            callback.as_ref(),
+        )
+        .map_err(|e| from_js(&e))?
+        .dyn_into::<Promise>()
+        .map_err(|_| host("Web Locks did not return promise"))?;
+    let finished = requested.clone();
+    // Keep the JS callback alive even if the waiting Rust future is dropped.
+    // Dropping turn resolves its release promise, so a later grant releases.
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = JsFuture::from(finished).await;
+        drop(callback);
+    });
+    let race = js_sys::Array::new();
+    race.push(&ready);
+    race.push(&requested);
+    settle(Promise::race(&race)).await?;
+    Ok(turn)
+}
+async fn root_namespace(directory: &str) -> Result<FileSystemDirectoryHandle, ReaderBlobError> {
+    let scope = js_sys::global()
+        .dyn_into::<DedicatedWorkerGlobalScope>()
+        .map_err(|_| host("OPFS requires a dedicated worker"))?;
+    let root = settle(scope.navigator().storage().get_directory())
+        .await?
+        .dyn_into::<FileSystemDirectoryHandle>()
+        .map_err(|_| host("invalid OPFS root"))?;
+    directory_child(&root, directory).await
+}
+async fn all_keys(
+    namespace: FileSystemDirectoryHandle,
+) -> Result<Vec<ReaderBlobKey>, ReaderBlobError> {
+    let mut pending = vec![(String::new(), namespace)];
+    let mut keys = Vec::new();
+    while let Some((prefix, directory)) = pending.pop() {
+        let entries = Reflect::get(&directory, &JsValue::from_str("entries"))
+            .map_err(|e| from_js(&e))?
+            .dyn_into::<Function>()
+            .map_err(|_| host("directory enumeration unavailable"))?;
+        let iterator = entries.call0(&directory).map_err(|e| from_js(&e))?;
+        let next = Reflect::get(&iterator, &JsValue::from_str("next"))
+            .map_err(|e| from_js(&e))?
+            .dyn_into::<Function>()
+            .map_err(|_| host("invalid directory iterator"))?;
+        loop {
+            let promise = next
+                .call0(&iterator)
+                .map_err(|e| from_js(&e))?
+                .dyn_into::<Promise>()
+                .map_err(|_| host("invalid directory iteration"))?;
+            let item = settle(promise).await?;
+            if Reflect::get(&item, &JsValue::from_str("done"))
+                .map_err(|e| from_js(&e))?
+                .as_bool()
+                == Some(true)
+            {
+                break;
+            }
+            let pair = js_sys::Array::from(
+                &Reflect::get(&item, &JsValue::from_str("value")).map_err(|e| from_js(&e))?,
+            );
+            let name = pair
+                .get(0)
+                .as_string()
+                .ok_or_else(|| host("invalid OPFS entry name"))?;
+            let path = format!("{prefix}{name}");
+            let handle = pair.get(1);
+            let kind = Reflect::get(&handle, &JsValue::from_str("kind"))
+                .map_err(|e| from_js(&e))?
+                .as_string()
+                .ok_or_else(|| host("invalid OPFS entry kind"))?;
+            if kind == "directory" {
+                if path.len() > 128 {
+                    return Err(host("OPFS key too long"));
+                }
+                pending.push((
+                    format!("{path}/"),
+                    handle
+                        .dyn_into::<FileSystemDirectoryHandle>()
+                        .map_err(|_| host("invalid directory handle"))?,
+                ));
+            } else if kind == "file" {
+                keys.push(ReaderBlobKey::new(&path)?)
+            } else {
+                return Err(host("unknown OPFS entry kind"));
+            }
+            if keys.len() + pending.len() > 100_000 {
+                return Err(host("managed OPFS inventory limit"));
+            }
+        }
+    }
+    Ok(keys)
+}
+
 /// Der Speicher des Readers auf OPFS.
 ///
 /// Er haelt je Schluessel des Vorlaufs ein OFFENES `FileSystemSyncAccessHandle`
@@ -436,9 +576,23 @@ pub struct OpfsBlobStore {
     /// gesperrt und bekaeme genau den `EA-READER-BLOB-HOST`, den die
     /// Warteschlange verhindern soll.
     turns: Vec<KeyTurn>,
+    _namespace: NamespaceTurn,
+    complete_inventory: bool,
 }
 
 impl OpfsBlobStore {
+    /// Open the complete exclusive managed namespace, including persisted
+    /// keys unknown to the caller and newly required metadata addresses.
+    pub async fn open_all(
+        directory: &str,
+        extra: &[ReaderBlobKey],
+    ) -> Result<Self, ReaderBlobError> {
+        let turn = namespace_turn(directory, true).await?;
+        let mut keys = all_keys(root_namespace(directory).await?).await?;
+        keys.extend_from_slice(extra);
+        Self::open_locked(directory, &keys, turn, true).await
+    }
+
     /// Der ASYNCHRONE Vorlauf: Namensraum oeffnen, Zugriffshandles oeffnen.
     ///
     /// Danach ist der Speicher synchron. `directory` ist ein Verzeichnis
@@ -470,6 +624,15 @@ impl OpfsBlobStore {
     /// `EA-READER-BLOB-HOST`, wenn der Aufruf nicht in einem dedizierten
     /// Worker steht oder der Wirtspeicher nicht antwortet.
     pub async fn open(directory: &str, keys: &[ReaderBlobKey]) -> Result<Self, ReaderBlobError> {
+        let turn = namespace_turn(directory, false).await?;
+        Self::open_locked(directory, keys, turn, false).await
+    }
+    async fn open_locked(
+        directory: &str,
+        keys: &[ReaderBlobKey],
+        namespace: NamespaceTurn,
+        complete_inventory: bool,
+    ) -> Result<Self, ReaderBlobError> {
         // SORTIERT und ohne Doppel, und beides ist tragend. Die Sortierung
         // gibt allen Aufrufern EINE globale Ordnung, in der sie ihre Plaetze
         // nehmen: zwei Speicher ueber {a, b} und ueber {b, a} warteten sonst
@@ -487,6 +650,8 @@ impl OpfsBlobStore {
         let mut store = Self {
             handles: BTreeMap::new(),
             turns: Vec::with_capacity(ordered.len()),
+            _namespace: namespace,
+            complete_inventory,
         };
         // Die Plaetze VOR jeder OPFS-Beruehrung: ab hier liegt der ganze
         // Zugriff dieses Speichers innerhalb seiner Warteschlangenplaetze.
@@ -551,6 +716,9 @@ impl Drop for OpfsBlobStore {
 }
 
 impl ReaderBlobStore for OpfsBlobStore {
+    fn inventory_is_complete(&self) -> bool {
+        self.complete_inventory
+    }
     fn put(&mut self, key: &ReaderBlobKey, bytes: &[u8]) -> Result<(), ReaderBlobError> {
         let handle = self.handle(key)?;
         let mut framed = Vec::with_capacity(bytes.len() + 1);

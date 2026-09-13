@@ -84,6 +84,8 @@
 #![forbid(unsafe_code)]
 
 mod account;
+mod clock_repair;
+pub use clock_repair::{ClockRepairProfileSnapshot, ClockRepairSession, authenticate_clock_repair};
 // Die drei Plattformraender sind BEDINGUNGSLOS deklariert und nicht per
 // `#[cfg(target_os = …)]` gegated: so belegt der gepinnte Compiler auf dem
 // Pruefhost die Typkorrektheit aller drei Ernten, und nicht nur die des Hosts.
@@ -95,5 +97,5 @@ pub mod windows;
 pub use account::{BoundOperator, OperatorError, OsAccountInputs, OsAccountProvider};
 pub use session::{
     MAX_INACTIVITY_MS, OperatorAuthenticator, OperatorSessionProof, REAUTH_CHALLENGE_DOMAIN,
-    ReauthPurpose, verify_current_session,
+    ReauthPurpose, verify_current_session, verify_writer_session,
 };

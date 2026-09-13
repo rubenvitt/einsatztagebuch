@@ -519,3 +519,25 @@ Native error descriptions and request fields are never echoed in failures.
 - [GNOME Keyring's native collection/item implementation](https://github.com/GNOME/gnome-keyring/blob/master/daemon/dbus/gkd-secret-objects.c)
   informs the typed distinction between ordinary key-item events and account/lock events;
   the shipped private-keyring test checks that distinction against Ubuntu's actual daemon.
+
+## Closed signing-backup transport
+
+`backup-signing-seed` is a separate internal parent/helper operation. Its request
+is exactly `op`, `slot`, `installation_id`, `expected_public_key`, `presence`:
+only `admin-signing`/`root-signing`, both public values lowerhex32, presence true,
+at most 512 request bytes and EOF. No kind/data/replace/path/prompt fields.
+Both parser and provider enforce the closed operation; generic `unwrap-secret`
+continues to reject signing keys. No slot generation, import, replacement or
+mutation occurs. Existing native presence, installation/account/lock checks and
+actual seed-derived public-key binding precede the response.
+
+Success is a fixed 106-byte binary response, **without newline**:
+`EABKSEED` (8), version1 (1), role Admin1/Root2 (1), installation32,
+actual Ed25519 publickey32, seed32. Only the private Rust backup adapter may
+consume it, requiring exact frame, EOF and Exit0 before its deadline, then
+existing v1 encrypted-container sealing and final host admission. Failures have
+nonzero exit and only static error diagnostics. No seed enters JSON, hex strings,
+argv, environment or logs. Controlled buffers are cleared on normal completion
+and error paths; this does not prove erasure of OS/library/compiler copies or
+cleanup after process termination. Partial pipewrites cannot be retracted.
+This transport alone supplies no retained backup medium, Step3/7 or Ready proof.

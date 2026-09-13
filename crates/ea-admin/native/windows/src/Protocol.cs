@@ -26,6 +26,7 @@ internal sealed class Request : IDisposable
     internal string? Slot { get; private init; }
     internal string? Kind { get; private init; }
     internal string? InstallationId { get; private init; }
+    internal byte[]? ExpectedPublicKey { get; private init; }
     internal byte[]? Data { get; private init; }
     internal bool Presence { get; private init; }
     internal bool Replace { get; private init; }
@@ -88,6 +89,7 @@ internal sealed class Request : IDisposable
                     allowed.Remove("presence");
                     allowed.UnionWith(["prompt", "max_bytes", "timeout_ms"]);
                     break;
+                case "backup-signing-seed": allowed.UnionWith(["slot", "expected_public_key"]); break;
                 case "generate": allowed.UnionWith(["slot", "kind", "replace"]); break;
                 case "sign": case "wrap-secret": allowed.UnionWith(["slot", "kind", "data"]); break;
                 case "contains": case "public-key": case "unwrap-secret": case "delete": allowed.UnionWith(["slot", "kind"]); break;
@@ -119,13 +121,27 @@ internal sealed class Request : IDisposable
             if (op == "sign" && slot != "writer-signing" && !presence) throw new Failure("presence-required");
             if (replace && (op != "generate" || slot != "operator-instance" || kind != "ed25519")) throw new Failure("invalid-request");
             if ((replace || op == "reset") && !presence) throw new Failure("presence-required");
-            return new Request { Op = op, Slot = slot, Kind = kind, InstallationId = installation, Data = data, Presence = presence, Replace = replace };
+            var request = new Request { Op = op, Slot = slot, Kind = kind, InstallationId = installation, Data = data, Presence = presence, Replace = replace,
+                ExpectedPublicKey = op == "backup-signing-seed" && strings.TryGetValue("expected_public_key", out var expected) ? Hex.Decode(expected) : null };
+            if (op == "backup-signing-seed") {
+                if (bytes.Length > 512) throw new Failure("request-too-large");
+                if (!fields.SetEquals(["op", "slot", "installation_id", "expected_public_key", "presence"])) throw new Failure("invalid-request");
+                request.RequireSigningBackup();
+            }
+            return request;
         }
         catch (Exception e) when (e is Failure or JsonException or InvalidOperationException or ArgumentException)
         {
             if (data != null) CryptographicOperations.ZeroMemory(data);
             throw e is Failure f ? f : new Failure("invalid-request");
         }
+    }
+    internal void RequireSigningBackup() {
+        if (Op != "backup-signing-seed" || Slot is not ("admin-signing" or "root-signing") ||
+            Kind != null || Data != null || Replace || InstallationId?.Length != 64 ||
+            Hex.Decode(InstallationId).Length != 32 || ExpectedPublicKey?.Length != 32)
+            throw new Failure("invalid-request");
+        if (!Presence) throw new Failure("presence-required");
     }
     public void Dispose() { if (Data != null) CryptographicOperations.ZeroMemory(Data); }
 }
@@ -197,6 +213,13 @@ internal static class Transport
             return reader.TokenType == JsonTokenType.EndObject && !reader.Read() && watch;
         }
         catch (JsonException) { return false; }
+    }
+    internal static void WriteSigningBackup(Stream output, byte[] response)
+    {
+        try {
+            if (response.Length != 106) throw new Failure("native-failed");
+            output.Write(response); output.Flush();
+        } finally { CryptographicOperations.ZeroMemory(response); }
     }
     internal static void WriteLine(Stream output, byte[] response)
     {

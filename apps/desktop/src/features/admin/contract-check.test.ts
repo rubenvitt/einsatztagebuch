@@ -3,6 +3,7 @@ import { expect, it } from 'vitest'
 import {
   CONTRACT_VIOLATION_NAME,
   validateCeremony,
+  validateOpenCeremonies,
   validateChecklist,
   validateClockReleaseOffer,
   validateClockReleaseOutcome,
@@ -24,6 +25,18 @@ const ceremony = () => ({
   step: 'PendingRequest',
   targetFingerprint: null,
   exchangeFileName: null,
+  round: 'ActivateRegistry',
+  linkedCeremonyId: null,
+  fingerprintSubject: null,
+})
+
+it('accepts exact open rounds but refuses duplicate identifiers, completed rounds and invalid lists', () => {
+  const open = ceremony()
+  expect(validateOpenCeremonies([open])).toEqual([open])
+  for (const input of [null, {}, [open, open], [{ ...open, step: 'RegistryPublished' }],
+    [{ ...open, round: 'IssueTarget', step: 'TargetPublished' }], Array(1025).fill(open)]) {
+    violates(() => validateOpenCeremonies(input))
+  }
 })
 
 const checklist = () => ({
@@ -46,9 +59,20 @@ const registryHealth = () => ({
 
 const transition = () => ({
   phase: 'Prepared',
+  ceremonyId: null,
   currentWriterHash: 'AA'.repeat(32),
   newWriterHash: 'BB'.repeat(32),
   effectiveFromSequence: 88,
+})
+
+it('requires a valid saved writer-round identifier and rejects one on an already completed transition', () => {
+  expect(validateWriterTransition({ ...transition(), ceremonyId: 'saved-round-1' }).ceremonyId).toBe('saved-round-1')
+  for (const ceremonyId of [undefined, '', '../other', 12]) {
+    violates(() => validateWriterTransition({ ...transition(), ceremonyId }))
+  }
+  for (const phase of ['NoTransition', 'Activated']) {
+    violates(() => validateWriterTransition({ ...transition(), phase, ceremonyId: 'saved-round-1' }))
+  }
 })
 
 const offered = () => ({
@@ -138,6 +162,14 @@ it('accepts every valid fixture unchanged', () => {
 })
 
 it('rejects a literal outside the emitted union', () => {
+  violates(() => validateCeremony({ ...ceremony(), round: 'Done' }))
+  violates(() => validateCeremony({ ...ceremony(), round: undefined }))
+  violates(() => validateCeremony({ ...ceremony(), fingerprintSubject: undefined }))
+  violates(() => validateCeremony({ ...ceremony(), linkedCeremonyId: undefined }))
+  violates(() => validateCeremony({ ...ceremony(), linkedCeremonyId: '../private' }))
+  violates(() => validateCeremony({ ...ceremony(), step: 'RegistryPublished', round: 'IssueTarget' }))
+  violates(() => validateCeremony({ ...ceremony(), step: 'TargetPublished' }))
+  violates(() => validateCeremony({ ...ceremony(), fingerprintSubject: 'RegistrationRequest' }))
   violates(() => validateCeremony({ ...ceremony(), step: 'Done' }))
   violates(() => validateCeremony({ ...ceremony(), kind: 'Bootstrap' }))
   violates(() =>

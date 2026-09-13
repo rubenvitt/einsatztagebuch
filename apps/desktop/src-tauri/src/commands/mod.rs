@@ -8,7 +8,10 @@
 //! auseinanderlaeuft.
 
 pub mod admin;
+pub mod destruction;
+pub mod destruction_evidence;
 pub mod master_data;
+pub mod recovery;
 pub mod session;
 pub mod sync;
 pub mod writer;
@@ -122,6 +125,7 @@ pub const TRANSITION_NOT_PREPARED: &str = "EA-DESKTOP-TRANSITION-NOT-PREPARED";
 /// Jeder Name, den [`crate::run`] registriert — in Registrierungsreihenfolge.
 pub const COMMAND_NAMES: &[&str] = &[
     "verified_session",
+    "session_login",
     "invalidate_session_on_lock",
     "startup_recovery",
     "master_data_counts",
@@ -132,15 +136,38 @@ pub const COMMAND_NAMES: &[&str] = &[
     "draft_discard_begin",
     "draft_discard_resume",
     "writer_recover_pending",
+    "writer_amendment_import",
+    "draft_save_amendment",
+    "writer_preview_amendment",
+    "writer_finalize_amendment",
+    "writer_acknowledge_stale_amendment",
     "writer_preview",
     "writer_acknowledge_stale_registry",
     "writer_finalize",
     "archive_health_report",
     "device_posture_report",
     "archive_export_bundle_file",
+    "destruction_read",
+    "destruction_prepare",
+    "destruction_start",
+    "destruction_resume",
+    "destruction_import_progress",
+    "destruction_export_reader_delivery",
+    "destruction_synchronize",
+    "destruction_authenticate_custodian",
+    "destruction_evidence_preview",
+    "destruction_evidence_finalize",
+    "destruction_evidence_recover",
+    "destruction_evidence_discard",
+    "recovery_read",
+    "recovery_start",
+    "recovery_submit",
+    "recovery_cancel",
     "sync_state",
     "admin_pending_device_requests",
+    "admin_open_ceremonies",
     "admin_ceremony_begin",
+    "admin_ceremony_read",
     "admin_ceremony_confirm_fingerprint",
     "admin_ceremony_authorize",
     "admin_ceremony_export_request",
@@ -148,6 +175,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "admin_ceremony_publish",
     "admin_policy_profile",
     "admin_registry_health",
+    "admin_writer_lock_diagnosis",
     "admin_go_live_checklist",
     "admin_go_live_export_unresolved",
     "admin_clock_release_offer",

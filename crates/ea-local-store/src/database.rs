@@ -18,6 +18,10 @@ use rusqlite::{Connection, ErrorCode, Statement, TransactionBehavior, types::Val
 
 use crate::migrations;
 
+mod backup;
+mod destruction;
+pub use backup::EncryptedSnapshot;
+
 /// Ein Fehlschlag an der Speichergrenze.
 ///
 /// Wie ueberall in diesem Bauwerk assertieren Tests gegen [`StoreError::code`]
@@ -111,6 +115,24 @@ pub enum StoreValue {
 pub struct StoreRow(Vec<StoreValue>);
 
 impl StoreRow {
+    /// Consume a one-Blob row directly into the zeroizing secret carrier.
+    /// No cloned ordinary `Vec` survives this transfer. This is intended for
+    /// encrypted native key rows, never for formatting or serialization.
+    pub fn into_secret_blob(mut self) -> Result<SecretVec, StoreError> {
+        if self.0.len() == 1
+            && let StoreValue::Blob(bytes) = self.0.pop().ok_or(StoreError::Shape)?
+        {
+            return Ok(SecretVec::new(bytes));
+        }
+        // A malformed multi-column key query must not leave its Blob copies
+        // behind while reporting the shape error.
+        for value in self.0 {
+            if let StoreValue::Blob(bytes) = value {
+                drop(SecretVec::new(bytes));
+            }
+        }
+        Err(StoreError::Shape)
+    }
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
@@ -285,6 +307,7 @@ impl EncryptedDatabase {
         }
         run_ignoring_rows(&connection, "PRAGMA temp_store = MEMORY")?;
         run_ignoring_rows(&connection, "PRAGMA foreign_keys = ON")?;
+        run_ignoring_rows(&connection, "PRAGMA synchronous = FULL")?;
 
         // Der erste echte Lesevorgang. Ein falscher Schluessel scheitert HIER
         // und nicht irgendwann spaeter mitten in einem Schreibvorgang.

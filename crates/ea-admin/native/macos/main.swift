@@ -28,6 +28,8 @@ do {
     try Transport.requirePrivatePipes()
     if request.op == "watch-session", let id = request.expectedInstallationID {
         try WatchSession(request: request).run(installationID: id)
+    } else if request.op == "backup-signing-seed" {
+        try NativeProvider().executeBackup(request).write()
     } else {
         Transport.writeResponse(try NativeProvider().execute(request))
     }

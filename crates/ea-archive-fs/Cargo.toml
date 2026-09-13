@@ -14,6 +14,9 @@ ea-archive.workspace = true
 ea-audit.workspace = true
 ea-crypto.workspace = true
 ea-format.workspace = true
+# The measured local commit component stores exact bytes in the existing
+# SQLCipher database; no second at-rest cryptographic format is introduced.
+ea-local-store.workspace = true
 # Der Profilwechsel verlangt einen FRISCHEN Bedienernachweis mit genau dem
 # Zweck `ReauthPurpose::ArchiveProfileMigration`. Der Nachweistyp lebt hier.
 ea-operator.workspace = true

@@ -492,11 +492,26 @@ mod certificate;
 #[cfg_attr(not(test), allow(dead_code))]
 mod catalog;
 mod clock_release;
+mod clock_repair;
 mod error;
+mod grant_authorization;
+mod historical_registry;
+mod registry_publication;
+pub use registry_publication::{
+    VerifiedDirectTargetPublicationAudit, VerifiedRegistryPublicationAudit,
+    verify_direct_target_publication_audit, verify_registry_publication_audit,
+};
+mod catalog_custody;
+pub use catalog_custody::{VerifiedCatalogCustody, verify_catalog_custody_authority};
+pub use historical_registry::HistoricalRegistryAuthority;
+pub use registry::verify_historical_registry_authority;
 #[cfg_attr(not(test), allow(dead_code))]
 mod operator_binding;
 mod policy;
 mod registry;
+mod writer_registry;
+pub use registry::select_stale_writer_registry_head;
+pub use writer_registry::{StaleWriterRegistryHead, WriterRegistryHeadRef};
 #[cfg_attr(not(test), allow(dead_code))]
 mod resolver;
 mod source;
@@ -512,10 +527,15 @@ pub use admin_authorization::{
 pub use admission::{bootstrap_active_certificates, verify_catalogue_admission};
 pub use anchor::{
     PreAnchorV1, TrustAnchorV1, VerifiedTrust, decode_pre_anchor, decode_trust_anchor,
-    encode_pre_anchor_v1, verify_trust,
+    encode_pre_anchor_v1, verify_pre_anchor_bootstrap_objects, verify_trust,
 };
 pub use clock_release::{VerifiedClockRelease, verify_clock_release};
+pub use clock_repair::{ClockRepairRegistryAuthority, verify_clock_repair_authority};
 pub use error::{ClockReleaseError, RegistryError, TrustError, TrustSourceError};
+pub use grant_authorization::{
+    GrantAuthorizationError, VerifiedGrantAuthorization, distinct_authority_subjects,
+    verify_archived_grant_authorization, verify_grant_authorization,
+};
 pub use registry::{
     AdvancedRegistryHead, PendingFutureSuccessor, PreexistingEffectiveNow,
     PreexistingRegistryAuthority, RegistryCandidate, RegistrySelectionOutcome,

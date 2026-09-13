@@ -50,6 +50,10 @@ pub struct FsArchiveSource {
 }
 
 impl FsArchiveSource {
+    /// Exact component bytes remain untrusted input to the ordinary verifier.
+    pub fn with_exact_component(self, _source: &dyn ArchiveSource) -> Result<Self, ea_archive::ArchiveBackendError> {
+        Err(ea_archive::ArchiveBackendError::MissingLocalCommitComponent)
+    }
     /// Liest den gesamten Bestand unter `root` ein.
     ///
     /// # Durchlauf und Ordnung
@@ -81,9 +85,30 @@ impl FsArchiveSource {
     /// wenn die Gesamtzahl der Bytes [`MAX_TOTAL_ARCHIVE_BYTES_V1`] oder die Zahl
     /// der Bytesequenzen [`MAX_ARCHIVE_BLOBS_V1`] uebersteigt.
     pub fn open(root: &Path) -> Result<Self, RecoveryError> {
+        Self::open_with_staging(root, true)
+    }
+
+    /// Frozen operational view of committed archive bytes. Staging remains
+    /// available through `open` for forensic recovery, but cannot supply an
+    /// operation's next committed sequence before the final atomic rename.
+    pub fn open_committed(root: &Path) -> Result<Self, RecoveryError> {
+        Self::open_with_staging(root, false)
+    }
+
+    /// Select committed objects from the already frozen bytes. Recovery source
+    /// scopes retain staging too, while their chain/sample verification uses
+    /// this exact snapshot without another filesystem read.
+    pub fn committed_view(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            blobs: self.blobs.iter().filter(|(path,_)|!ea_archive::is_staging_path(path)).cloned().collect(),
+        }
+    }
+
+    fn open_with_staging(root: &Path, include_staging: bool) -> Result<Self, RecoveryError> {
         let mut blobs = Vec::new();
         let mut total_bytes = 0usize;
-        read_directory(root, "", &mut blobs, &mut total_bytes)?;
+        read_directory(root, "", &mut blobs, &mut total_bytes, include_staging)?;
         Ok(Self {
             root: root.to_path_buf(),
             blobs,
@@ -127,6 +152,7 @@ fn read_directory(
     prefix: &str,
     blobs: &mut Vec<(String, Vec<u8>)>,
     total_bytes: &mut usize,
+    include_staging: bool,
 ) -> Result<(), RecoveryError> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(directory)? {
@@ -164,8 +190,11 @@ fn read_directory(
             format!("{prefix}/{name}")
         };
         if metadata.is_dir() {
-            read_directory(&path, &relative, blobs, total_bytes)?;
+            read_directory(&path, &relative, blobs, total_bytes, include_staging)?;
         } else if metadata.is_file() {
+            if !include_staging && ea_archive::is_staging_path(&relative) {
+                continue;
+            }
             // ZUERST die angekuendigte Laenge, DANN das Lesen. Andersherum legte
             // eine einzelne uebergrosse Datei ihren Puffer vollstaendig an,
             // bevor er verworfen wuerde — der Deckel schuetzte dann nichts

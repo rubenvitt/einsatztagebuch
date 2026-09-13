@@ -98,6 +98,7 @@ function offeredRelease(): ClockReleaseOfferView {
 function noTransition(): WriterTransitionView {
   return {
     phase: 'NoTransition',
+    ceremonyId: null,
     currentWriterHash: 'AA'.repeat(32),
     newWriterHash: null,
     effectiveFromSequence: null,
@@ -115,6 +116,9 @@ function ceremony(
     step,
     targetFingerprint: kind === 'DeviceApprove' ? FINGERPRINT : null,
     exchangeFileName,
+    round: 'ActivateRegistry',
+    linkedCeremonyId: null,
+    fingerprintSubject: kind === 'DeviceApprove' ? 'IssuedCertificate' : null,
   }
 }
 
@@ -129,12 +133,18 @@ function ceremony(
 function fakeAdminBridge(overrides: Partial<AdminBridge> = {}): AdminBridge {
   let kind: TrustCeremonyKind = 'DeviceApprove'
   return {
+    diagnoseWriterLock: vi.fn(async () => 'Missing' as const),
+    openCeremonies: [],
+    readOpenCeremonies: vi.fn(async () => []),
+    readCeremony: vi.fn(async () => ceremony(kind, 'PendingRequest')),
+    readWriterTransition: vi.fn(async () => noTransition()),
     pendingRequests: [
       {
         requestId: 'anfrage-1',
         certificateKindCode: 'EA-CERT-READER-DEVICE',
         fingerprint: FINGERPRINT,
         receivedAtMs: 1_771_000_000_000,
+        fingerprintSubject: 'IssuedCertificate',
       },
     ],
     checklist: confirmedChecklist(),
@@ -213,6 +223,7 @@ function fakeAdminBridge(overrides: Partial<AdminBridge> = {}): AdminBridge {
     prepareWriterTransition: vi.fn(() =>
       Promise.resolve<WriterTransitionView>({
         phase: 'Prepared',
+        ceremonyId: null,
         currentWriterHash: 'AA'.repeat(32),
         newWriterHash: 'BB'.repeat(32),
         effectiveFromSequence: 88,
@@ -221,6 +232,7 @@ function fakeAdminBridge(overrides: Partial<AdminBridge> = {}): AdminBridge {
     activateWriterTransition: vi.fn(() =>
       Promise.resolve<WriterTransitionView>({
         phase: 'Activated',
+        ceremonyId: null,
         currentWriterHash: 'BB'.repeat(32),
         newWriterHash: null,
         effectiveFromSequence: 88,
@@ -693,95 +705,83 @@ it('opens a policy change as a Root ceremony without a fingerprint step', async 
   expect(policy.getAllByRole('button')).toHaveLength(1)
 })
 
-it('prepares and then activates a writer transition with fresh proof', async () => {
-  const bridge = fakeAdminBridge()
+it('opens the exact persisted writer round after preparing, without deriving a new round from a writer hash', async () => {
+  const id = 'saved-writer-issue-round'
+  const bridge = fakeAdminBridge({
+    prepareWriterTransition: vi.fn(async () => ({ ...noTransition(), phase: 'Prepared' as const, ceremonyId: id })),
+    readCeremony: vi.fn(async () => ({ ...ceremony('WriterTransition', 'PendingRequest'), ceremonyId: id, round: 'IssueTarget' as const })),
+  })
   render(<AdminPage bridge={bridge} />)
-  const transition = ceremonyRegion('Writer-Wechsel')
-  expect(transition.getByText('kein Wechsel')).toBeVisible()
-  expect(
-    transition.getByText(
-      'Es gibt genau einen aktiven Writer; der bisherige Writer bleibt nach dem Root-signierten Registry-Ereignis dauerhaft blockiert.',
-    ),
-  ).toBeVisible()
-  expect(
-    transition.queryByRole('button', { name: 'Neu anmelden und aktivieren' }),
-  ).not.toBeInTheDocument()
-
-  await user.type(transition.getByLabelText('Wechselanfrage (JSON)'), '{{"newWriter":"BB"}')
-  await user.click(transition.getByRole('button', { name: 'Wechsel vorbereiten' }))
-  expect(bridge.prepareWriterTransition).toHaveBeenCalledWith('{"newWriter":"BB"}')
-  await waitFor(() => {
-    expect(transition.getByText('vorbereitet')).toBeVisible()
-  })
-  expect(transition.getByText('BB'.repeat(32))).toBeVisible()
-  expect(transition.getByText('88')).toBeVisible()
-
-  // VOR der Aktivierung behauptet keine Zeile der Seite, etwas sei „aktiv":
-  // die Folgebeschreibung der unwiderruflichen Handlung sagt es nicht, und das
-  // einzige Wort „aktiv" der ganzen Flaeche ist der letzte Schrittname.
+  const region = ceremonyRegion('Writer-Wechsel')
+  await user.type(region.getByLabelText('Wechselanfrage (JSON)'), '{{"request":"exact"}')
+  await user.click(region.getByRole('button', { name: 'Wechsel vorbereiten' }))
+  await user.click(await region.findByRole('button', { name: 'Gespeicherte Root-Runde öffnen' }))
+  expect(bridge.readCeremony).toHaveBeenCalledWith(id)
+  expect(bridge.beginCeremony).not.toHaveBeenCalled()
+  expect(bridge.activateWriterTransition).not.toHaveBeenCalled()
   expect(activeWordNodes()).toHaveLength(0)
+  expect(region.queryByRole('button', { name: 'Neu anmelden und aktivieren' })).not.toBeInTheDocument()
+  await waitFor(() => expect(region.getByRole('heading', { level: 4 })).toHaveTextContent('Writer-Wechsel'))
+})
 
-  await user.click(transition.getByRole('checkbox'))
-  await user.click(transition.getByRole('button', { name: 'Neu anmelden und aktivieren' }))
-  await waitFor(() => {
-    expect(
-      transition.getByText('aktiviert — Registry-Ereignis noch nicht veröffentlicht'),
-    ).toBeVisible()
+it('refreshes the native writer state after publishing and exposes the saved activation round', async () => {
+  const issue = 'writer-issue'
+  const activation = 'writer-activation'
+  const initial = { ...noTransition(), phase: 'Prepared' as const, ceremonyId: issue }
+  const bridge = fakeAdminBridge({
+    writerTransition: initial,
+    readCeremony: vi.fn(async (id) => ({ ...ceremony('WriterTransition', 'RootReplyImported'), ceremonyId: id, round: 'IssueTarget' as const })),
+    publish: vi.fn(async () => ({ ...ceremony('WriterTransition', 'TargetPublished'), ceremonyId: issue, round: 'IssueTarget' as const, linkedCeremonyId: activation })),
+    readWriterTransition: vi.fn(async () => ({ ...initial, ceremonyId: activation })),
   })
-  expect(bridge.reauthenticate).toHaveBeenCalledWith(REAUTH_PURPOSES.adminRootCeremony)
-  expect(bridge.activateWriterTransition).toHaveBeenCalledTimes(1)
+  render(<AdminPage bridge={bridge} />)
+  const region = ceremonyRegion('Writer-Wechsel')
+  await user.click(region.getByRole('button', { name: 'Gespeicherte Root-Runde öffnen' }))
+  await user.click(await region.findByRole('button', { name: 'Neu anmelden und veröffentlichen' }))
+  await waitFor(() => expect(bridge.readWriterTransition).toHaveBeenCalledTimes(1))
+  await user.click(region.getByRole('button', { name: 'Gespeicherte Root-Runde öffnen' }))
+  expect(bridge.readCeremony).toHaveBeenLastCalledWith(activation)
+  expect(bridge.beginCeremony).not.toHaveBeenCalled()
+})
 
-  // Die Grenze (§12.5): `Activated` bindet das Change-3-Ereignis an
-  // veroeffentlichte Bytes; Autoritaet entsteht erst mit dem Root-signierten
-  // Registry-Ereignis. Bis dahin bleibt der bisherige Writer der einzige.
-  expect(
-    transition.getByText(
-      'Der Wechsel wird erst mit dem Root-signierten Registry-Ereignis wirksam; bis dahin bleibt der bisherige Writer der einzige aktive.',
-    ),
-  ).toBeVisible()
-  expect(transition.queryByText('aktiviert')).not.toBeInTheDocument()
-  expect(activeWordNodes()).toHaveLength(0)
-  expect(transition.queryByLabelText('Wechselanfrage (JSON)')).not.toBeInTheDocument()
+it('shows an activated native writer transition without starting another root round', () => {
+  const bridge = fakeAdminBridge({ writerTransition: { ...noTransition(), phase: 'Activated', ceremonyId: null } })
+  render(<AdminPage bridge={bridge} />)
+  const region = ceremonyRegion('Writer-Wechsel')
+  expect(region.getByText('Writer-Wechsel im signierten Registry-Stand wirksam')).toBeVisible()
+  expect(region.queryByRole('button')).not.toBeInTheDocument()
+  expect(region.queryByText(/noch nicht veröffentlicht/)).not.toBeInTheDocument()
+})
 
-  // Und das Registry-Ereignis ist eine Root-Zeremonie der vierten Art — im
-  // selben Stepper wie die drei anderen, ohne Fingerprint-Schritt.
-  await user.click(
-    transition.getByRole('button', { name: 'Registry-Ereignis als Root-Zeremonie beginnen' }),
-  )
-  expect(bridge.beginCeremony).toHaveBeenCalledWith('BB'.repeat(32), 'WriterTransition')
-  const heading = () => transition.getByRole('heading', { level: 4 })
-  await waitFor(() => {
-    expect(heading()).toHaveTextContent(/Writer-Wechsel — Schritt 1 von 5: Anfrage ausstehend/)
+it('resumes an existing policy round after reopening without creating or authorizing another round', async () => {
+  const saved = { ...ceremony('PolicyChange', 'RootRequestExported', 'root-anfrage.json'), ceremonyId: 'saved-policy' }
+  const bridge = fakeAdminBridge({
+    openCeremonies: [saved],
+    readCeremony: vi.fn(async () => saved),
+    readOpenCeremonies: vi.fn(async () => [saved]),
   })
-  expect(heading()).toHaveFocus()
-  expect(transition.queryByText('Fingerprint bestätigt')).not.toBeInTheDocument()
-  expect(transition.queryByRole('img')).not.toBeInTheDocument()
-  expect(transition.getAllByRole('button')).toHaveLength(2)
+  render(<AdminPage bridge={bridge} />)
+  const stored = ceremonyRegion('Gespeicherte Root-Runden')
+  await user.click(stored.getByRole('button', { name: 'Richtlinienänderung – saved-policy öffnen' }))
+  expect(bridge.readCeremony).toHaveBeenCalledWith('saved-policy')
+  expect(bridge.beginCeremony).not.toHaveBeenCalled()
+  expect(bridge.reauthenticate).not.toHaveBeenCalled()
+  expect(bridge.authorize).not.toHaveBeenCalled()
+  const policy = ceremonyRegion('Richtlinie')
+  await waitFor(() => expect(policy.getByRole('heading', { level: 4 })).toHaveTextContent('Root-Anfrage exportiert'))
+  expect(policy.getByRole('heading', { level: 4 })).toHaveFocus()
+  expect(policy.getByRole('button', { name: 'Root-Antwort importieren' })).toBeVisible()
+})
 
-  await user.click(transition.getByRole('button', { name: 'Neu anmelden und autorisieren' }))
-  await waitFor(() => {
-    expect(heading()).toHaveTextContent(/Schritt 2 von 5/)
-  })
-  expect(transition.getAllByRole('button')).toHaveLength(2)
-  await user.click(transition.getByRole('button', { name: 'Root-Anfrage exportieren' }))
-  await waitFor(() => {
-    expect(heading()).toHaveTextContent(/Schritt 3 von 5/)
-  })
-  expect(transition.getAllByRole('button')).toHaveLength(2)
-  await user.click(transition.getByRole('button', { name: 'Root-Antwort importieren' }))
-  await waitFor(() => {
-    expect(heading()).toHaveTextContent(/Schritt 4 von 5/)
-  })
-  expect(transition.getAllByRole('button')).toHaveLength(2)
-  expect(activeWordNodes()).toHaveLength(0)
-  await user.click(transition.getByRole('button', { name: 'Neu anmelden und veröffentlichen' }))
-  await waitFor(() => {
-    expect(heading()).toHaveTextContent(/Schritt 5 von 5: Gerät aktiv/)
-  })
-  // Jetzt — und erst jetzt — steht „aktiv" auf der Seite, GENAU zweimal:
-  // im Schrittnamen der Ueberschrift und im Stepper-Eintrag.
-  expect(activeWordNodes()).toHaveLength(2)
-  expect(transition.getAllByRole('button')).toHaveLength(1)
+it('keeps a previously read round visible and shows a failed refresh instead of claiming there are no open rounds', async () => {
+  const saved = { ...ceremony('DeviceRevoke', 'AdminAuthorized'), ceremonyId: 'saved-revocation' }
+  const bridge = fakeAdminBridge({ openCeremonies: [saved], readOpenCeremonies: vi.fn(async () => { throw { code: 'EA-ADMINISTRATION-STALE' } }) })
+  render(<AdminPage bridge={bridge} />)
+  const stored = ceremonyRegion('Gespeicherte Root-Runden')
+  await user.click(stored.getByRole('button', { name: 'Gespeicherte Runden neu lesen' }))
+  expect(await stored.findByRole('alert')).toHaveTextContent('EA-ADMINISTRATION-STALE')
+  expect(stored.getByRole('button', { name: 'Widerruf – saved-revocation öffnen' })).toBeVisible()
+  expect(stored.queryByText('Keine offenen Root-Runden vorhanden.')).not.toBeInTheDocument()
 })
 
 it('states registry age and lease as two separate numbers', () => {
@@ -795,13 +795,15 @@ it('states registry age and lease as two separate numbers', () => {
   expect(registry.getByText('Vertrauensbestand aktuell.')).toBeVisible()
 })
 
-it('renders the eight administration regions in order and no incident content', () => {
+it('renders the ten administration regions in order and no incident content', () => {
   render(<AdminPage bridge={fakeAdminBridge()} />)
   const regions = screen.getAllByRole('region').map((region) => region.getAttribute('aria-label'))
   expect(regions).toEqual([
     'Go-live-Status',
+    'Gespeicherte Root-Runden',
     'Geräteanfragen',
     'Registry',
+    'Archiv-Sperre',
     'Richtlinie',
     'Writer-Wechsel',
     'Zeitfreigabe',
@@ -857,10 +859,10 @@ it('says that the code is missing for a bare error', async () => {
   })
 })
 
-it('names the seventeen host commands once each', () => {
+it('names the twenty host commands once each', () => {
   const names = Object.values(ADMIN_COMMANDS)
-  expect(names).toHaveLength(17)
-  expect(new Set(names).size).toBe(17)
+  expect(names).toHaveLength(20)
+  expect(new Set(names).size).toBe(20)
   for (const name of names) {
     expect(name).toMatch(/^admin_[a-z_]+$/)
   }
@@ -920,4 +922,15 @@ it('carries every style the administration surface injects in the checked-in fil
     expect(text.length).toBeGreaterThan(0)
     expect(staticCss, `nicht extrahiert: ${JSON.stringify(text.slice(0, 160))}`).toContain(text)
   }
+})
+
+
+it('offers the read-only archive lock diagnosis only after the explicit button press', async () => {
+  const diagnoseWriterLock = vi.fn(async () => 'AbandonedInert' as const)
+  render(<AdminPage bridge={fakeAdminBridge({ diagnoseWriterLock })} />)
+  expect(diagnoseWriterLock).not.toHaveBeenCalled()
+  const region = within(screen.getByRole('region', { name: 'Archiv-Sperre' }))
+  await user.click(region.getByRole('button', { name: 'Archiv-Sperre prüfen' }))
+  expect(await region.findByRole('status')).toHaveTextContent('Keine aktive Schreibsperre festgestellt.')
+  expect(diagnoseWriterLock).toHaveBeenCalledTimes(1)
 })

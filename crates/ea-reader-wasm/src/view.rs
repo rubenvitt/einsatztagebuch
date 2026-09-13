@@ -374,11 +374,13 @@ pub fn build_stand(
             Ok(record) => decrypted.push(record),
             Err(error) => {
                 let status = match error {
+                    ReaderError::GrantExpired => VerificationStatus::Invalid,
                     ReaderError::UnsupportedSchema => VerificationStatus::UnsupportedSchema,
                     ReaderError::Verify(_)
                     | ReaderError::Format(_)
                     | ReaderError::Decryption(_)
                     | ReaderError::OperatorProfileCommitment
+                    | ReaderError::TimePersistence(_)
                     | ReaderError::StaleWitness => VerificationStatus::Invalid,
                 };
                 decryption_verdicts.insert(entry_hash, (status, error.code()));
@@ -864,7 +866,14 @@ pub fn thread_json(stand: &ReaderStand, entry_hash: EntryHash) -> Result<String,
         json.finish()
     }));
 
+    let reference = thread.correction_reference();
+    let mut correction = Json::object();
+    correction.string("originalRecordId", &hex_of(reference.original_record_id.as_bytes()));
+    correction.string("originalEntryHash", &hex_of(reference.original_entry_hash.as_bytes()));
+    correction.raw("originalSequence", &reference.original_sequence.get().to_string());
+
     let mut json = Json::object();
+    json.raw("correctionReference", &correction.finish());
     json.raw("original", &original);
     json.raw("amendments", &amendments);
     json.raw("rejected", &rejected);

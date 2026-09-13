@@ -99,8 +99,27 @@ impl WriterService<'_> {
     ///
     /// Sonst der Fehler des Ports.
     pub fn recover_pending(&self) -> Result<RecoveryOutcome, WriterError> {
+        self.recover_pending_bound(None)
+    }
+
+    /// Recover only the exact durable Evidence job requested by the native host.
+    pub fn recover_pending_for_evidence(
+        &self,
+        expected: ea_draft::EvidenceDraftSource,
+    ) -> Result<RecoveryOutcome, WriterError> {
+        self.recover_pending_bound(Some(expected))
+    }
+
+    fn recover_pending_bound(
+        &self,
+        expected: Option<ea_draft::EvidenceDraftSource>,
+    ) -> Result<RecoveryOutcome, WriterError> {
         let _writer_lock = self.backend.acquire_writer_lock()?;
         let _draft_lock = self.repository.acquire_draft_lock()?;
+        let bound = self.repository.evidence_draft_source()?;
+        if expected.is_some() && expected != bound {
+            return Err(ea_draft::DraftError::EvidenceBinding.into());
+        }
         let Some(marker) = self.repository.prepared_finalization_marker()? else {
             self.recover_unmarked_stale_claims()?;
             return Ok(RecoveryOutcome::NothingPending);
@@ -114,6 +133,12 @@ impl WriterService<'_> {
         // heraushilft. Fail-closed heisst hier in beide Richtungen: abbrechen,
         // ohne ein Byte zu veroeffentlichen und ohne die Marke zu loesen.
         transaction.verify(marker.as_bytes())?;
+        if let Some(bound) = bound {
+            ea_destruction::SqliteDestructionJobs::new(self.incident_numbers.database_handle())
+                .require_prepared_evidence_source(&transaction.entry_bytes, bound, self.source, self.backend)
+                .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
+        }
+
 
         // Der ZEUGE der Grenze ist der ENTWURF SELBST, und nicht ein Feld der
         // Marke: laesst er sich laden, war sein `draftDEK` da und
@@ -135,6 +160,7 @@ impl WriterService<'_> {
         };
 
         if let Some(draft) = original_draft {
+            self.recover_original_claims()?;
             // Only a cryptographically consistent prepared transaction whose
             // original draft still decrypts may release its exact local claim.
             // Receipt consumption remains append-only and is never reverted.
@@ -172,6 +198,7 @@ impl WriterService<'_> {
     /// exists. Only the original, successfully decrypted draft can release its
     /// own journaled claim. A replacement draft cannot erase a committed claim.
     fn recover_unmarked_stale_claims(&self) -> Result<(), WriterError> {
+        self.recover_original_claims()?;
         if let Some(store) = &self.stale_store
             && store.has_unreleased_claims()?
         {

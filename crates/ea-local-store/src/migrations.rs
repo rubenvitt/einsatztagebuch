@@ -75,6 +75,91 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0010_operator_revocation_recovery.sql",
         sql: include_str!("../migrations/0010_operator_revocation_recovery.sql"),
     },
+    Migration {
+        version: 11,
+        name: "0011_destruction.sql",
+        sql: include_str!("../migrations/0011_destruction.sql"),
+    },
+    Migration {
+        version: 12,
+        name: "0012_managed_destruction.sql",
+        sql: include_str!("../migrations/0012_managed_destruction.sql"),
+    },
+    Migration {
+        version: 13,
+        name: "0013_go_live_posture.sql",
+        sql: include_str!("../migrations/0013_go_live_posture.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "0014_destruction_jobs.sql",
+        sql: include_str!("../migrations/0014_destruction_jobs.sql"),
+    },
+    Migration {
+        version: 15,
+        name: "0015_destruction_cleanup.sql",
+        sql: include_str!("../migrations/0015_destruction_cleanup.sql"),
+    },
+    Migration {
+        version: 16,
+        name: "0016_local_commit.sql",
+        sql: include_str!("../migrations/0016_local_commit.sql"),
+    },
+    Migration {
+        version: 17,
+        name: "0017_destruction_local_measurement.sql",
+        sql: include_str!("../migrations/0017_destruction_local_measurement.sql"),
+    },
+    Migration {
+        version: 18,
+        name: "0018_recovery_sources.sql",
+        sql: include_str!("../migrations/0018_recovery_sources.sql"),
+    },
+    Migration {
+        version: 19,
+        name: "0019_destruction_acquisition_purge.sql",
+        sql: include_str!("../migrations/0019_destruction_acquisition_purge.sql"),
+    },
+    Migration {
+        version: 20,
+        name: "0020_destruction_local_attestation.sql",
+        sql: include_str!("../migrations/0020_destruction_local_attestation.sql"),
+    },
+    Migration {
+        version: 21,
+        name: "0021_writer_destruction_evidence.sql",
+        sql: include_str!("../migrations/0021_writer_destruction_evidence.sql"),
+    },
+    Migration {
+        version: 22,
+        name: "0022_recovery_failure.sql",
+        sql: include_str!("../migrations/0022_recovery_failure.sql"),
+    },
+    Migration {
+        version: 23,
+        name: "0023_administration_ceremony.sql",
+        sql: include_str!("../migrations/0023_administration_ceremony.sql"),
+    },
+    Migration {
+        version: 24,
+        name: "0024_destruction_import.sql",
+        sql: include_str!("../migrations/0024_destruction_import.sql"),
+    },
+    Migration {
+        version: 25,
+        name: "0025_writer_evidence_draft.sql",
+        sql: include_str!("../migrations/0025_writer_evidence_draft.sql"),
+    },
+    Migration {
+        version: 26,
+        name: "0026_native_archive_component.sql",
+        sql: include_str!("../migrations/0026_native_archive_component.sql"),
+    },
+    Migration {
+        version: 27,
+        name: "0027_native_bootstrap_participant.sql",
+        sql: include_str!("../migrations/0027_native_bootstrap_participant.sql"),
+    },
 ];
 
 /// Durable trust pins, time state and replay dimensions for operator hosts.

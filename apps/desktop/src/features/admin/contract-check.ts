@@ -1,4 +1,6 @@
 import {
+  FINGERPRINT_SUBJECT_V1_VALUES,
+  TRUST_CEREMONY_ROUND_V1_VALUES,
   CLOCK_RELEASE_AVAILABILITY_VALUES,
   CLOCK_RELEASE_JUSTIFICATION_V1_VALUES,
   GO_LIVE_REQUIREMENT_STATUS_VALUES,
@@ -8,6 +10,7 @@ import {
   TRUST_CEREMONY_STEP_VALUES,
   WRITER_TRANSITION_PHASE_VALUES,
 } from '../../bridge/generated-contracts'
+import { ACTIVATE_REGISTRY_ROUND, ISSUE_TARGET_ROUND, REGISTRY_PUBLISHED_STEP, TARGET_PUBLISHED_STEP } from './ceremony'
 import type {
   ClockReleaseOfferView,
   ClockReleaseOutcomeView,
@@ -112,12 +115,41 @@ function fileNameOrNull(raw: unknown, what: string): string | null {
 
 export function validateCeremony(raw: unknown): TrustCeremonyView {
   const candidate = record(raw, 'Die Zeremonie')
+  const round = oneOf(TRUST_CEREMONY_ROUND_V1_VALUES, candidate.round, 'Die Objektrunde')
+  const step = oneOf(TRUST_CEREMONY_STEP_VALUES, candidate.step, 'Der Zeremonieschritt')
+  const fingerprintSubject = candidate.fingerprintSubject === null ? null : oneOf(FINGERPRINT_SUBJECT_V1_VALUES, candidate.fingerprintSubject, 'Der Fingerprint-Bezug')
+  const targetFingerprint = candidate.targetFingerprint === null ? null : fingerprint(candidate.targetFingerprint)
+  const ceremonyId = identifier(candidate.ceremonyId)
+  const linkedCeremonyId = candidate.linkedCeremonyId === null ? null : identifier(candidate.linkedCeremonyId)
+  if ((fingerprintSubject === null) !== (targetFingerprint === null)
+    || (step === REGISTRY_PUBLISHED_STEP && round !== ACTIVATE_REGISTRY_ROUND)
+    || (step === TARGET_PUBLISHED_STEP && round !== ISSUE_TARGET_ROUND)
+    || linkedCeremonyId === ceremonyId) throw new ContractViolation('Die Zeremonierunde ist widersprüchlich.')
   return {
-    ...(candidate as unknown as TrustCeremonyView),
+    ceremonyId, round, linkedCeremonyId, fingerprintSubject, targetFingerprint,
     kind: oneOf(TRUST_CEREMONY_KIND_VALUES, candidate.kind, 'Die Zeremonieart'),
-    step: oneOf(TRUST_CEREMONY_STEP_VALUES, candidate.step, 'Der Zeremonieschritt'),
+    step,
     exchangeFileName: fileNameOrNull(candidate.exchangeFileName, 'Die Austauschdatei'),
   }
+}
+
+function identifier(raw: unknown): string {
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(raw)) throw new ContractViolation('Die Vorgangskennung ist ungültig.')
+  return raw
+}
+
+export function validateOpenCeremonies(raw: unknown): readonly TrustCeremonyView[] {
+  if (!Array.isArray(raw) || raw.length > 1024) throw new ContractViolation('Die gespeicherten Runden sind keine begrenzte Liste.')
+  const rounds = raw.map(validateCeremony)
+  if (new Set(rounds.map(round => round.ceremonyId)).size !== rounds.length
+    || rounds.some(round => round.step === REGISTRY_PUBLISHED_STEP || round.step === TARGET_PUBLISHED_STEP)) {
+    throw new ContractViolation('Die Liste offener Runden enthält doppelte oder abgeschlossene Vorgänge.')
+  }
+  return rounds
+}
+function fingerprint(raw: unknown): string {
+  if (typeof raw !== 'string' || !/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(raw)) throw new ContractViolation('Der Fingerprint ist ungültig.')
+  return raw
 }
 
 export function validateChecklist(raw: unknown): GoLiveChecklistView {
@@ -148,9 +180,16 @@ export function validateRegistryHealth(raw: unknown): RegistryHealthView {
 
 export function validateWriterTransition(raw: unknown): WriterTransitionView {
   const candidate = record(raw, 'Der Writer-Wechsel')
+  const phase = oneOf(WRITER_TRANSITION_PHASE_VALUES, candidate.phase, 'Die Wechselphase')
+  const ceremonyId = candidate.ceremonyId === null ? null : identifier(candidate.ceremonyId)
+  const [, prepared] = WRITER_TRANSITION_PHASE_VALUES
+  if (ceremonyId !== null && phase !== prepared) {
+    throw new ContractViolation('Die gespeicherte Runde gehört zu keinem offenen Writer-Wechsel.')
+  }
   return {
     ...(candidate as unknown as WriterTransitionView),
-    phase: oneOf(WRITER_TRANSITION_PHASE_VALUES, candidate.phase, 'Die Wechselphase'),
+    phase,
+    ceremonyId,
   }
 }
 
@@ -266,5 +305,14 @@ export function validatePendingRequests(raw: unknown): readonly PendingDeviceReq
   if (!Array.isArray(raw)) {
     throw new ContractViolation('Die Geräteanfragen sind keine Liste.')
   }
-  return raw.map((row: unknown) => record(row, 'Die Geräteanfrage') as unknown as PendingDeviceRequestView)
+  return raw.map((row: unknown) => {
+    const candidate = record(row, 'Die Geräteanfrage')
+    return {
+      requestId: identifier(candidate.requestId),
+      certificateKindCode: identifier(candidate.certificateKindCode),
+      fingerprint: fingerprint(candidate.fingerprint),
+      fingerprintSubject: oneOf(FINGERPRINT_SUBJECT_V1_VALUES, candidate.fingerprintSubject, 'Der Fingerprint-Bezug'),
+      receivedAtMs: num(candidate.receivedAtMs, 'Der Anfrageeingang'),
+    }
+  })
 }

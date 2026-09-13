@@ -32,6 +32,7 @@ const WORKSPACE_MEMBERS: &[&str] = &[
     "crates/ea-local-store",
     "crates/ea-audit",
     "crates/ea-draft",
+    "crates/ea-destruction",
     "crates/ea-writer",
     "crates/ea-ui-contracts",
     "crates/ea-sync-protocol",

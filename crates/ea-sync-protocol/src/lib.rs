@@ -21,6 +21,8 @@
 mod challenge;
 mod commit;
 mod enrollment;
+mod destruction_job;
+pub use destruction_job::DestructionJobUploadV1;
 mod error;
 mod http_signature;
 mod reader;
@@ -155,14 +157,13 @@ pub enum EndpointV1 {
     ArchiveExports,
     Destructions,
     DestructionStatus,
+    DestructionEvents,
+    DestructionJobs,
 }
 
 impl EndpointV1 {
-    /// Die siebzehn Zeilen von `design.md` §13.2 in ihrer Reihenfolge.
-    ///
-    /// Die Liste steht hier, damit jede Pruefung ueber die Menge LAEUFT statt
-    /// sie abzuschreiben; ein achtzehnter Endpunkt faellt dadurch laut auf.
-    pub const ALL: [Self; 17] = [
+    /// Original v1 endpoints followed by the approved additive destruction transport.
+    pub const ALL: [Self; 19] = [
         Self::AuthChallenges,
         Self::DeviceRegistrations,
         Self::WebauthnCredentials,
@@ -180,6 +181,8 @@ impl EndpointV1 {
         Self::ArchiveExports,
         Self::Destructions,
         Self::DestructionStatus,
+        Self::DestructionEvents,
+        Self::DestructionJobs,
     ];
 
     #[must_use]
@@ -217,6 +220,8 @@ impl EndpointV1 {
             Self::ArchiveExports => "/v1/archive-exports/current",
             Self::Destructions => "/v1/destructions",
             Self::DestructionStatus => "/v1/destructions/{destructionId}",
+            Self::DestructionEvents => "/v1/destructions/{destructionId}/events",
+            Self::DestructionJobs => "/v1/destructions/{destructionId}/jobs",
         }
     }
 
@@ -245,6 +250,8 @@ impl EndpointV1 {
             Self::ArchiveExports => 15,
             Self::Destructions => 16,
             Self::DestructionStatus => 17,
+            Self::DestructionEvents => 18,
+            Self::DestructionJobs => 19,
         }
     }
 
@@ -268,6 +275,7 @@ impl EndpointV1 {
             Self::TrustEvents => Some(ea_crypto::CertificateCapability::OrganizationAdminApprove),
             Self::HistoricalGrants => Some(ea_crypto::CertificateCapability::HistoricalGrant),
             Self::Destructions => Some(ea_crypto::CertificateCapability::DestructionApprove),
+            Self::DestructionEvents | Self::DestructionJobs => Some(ea_crypto::CertificateCapability::DeletionAttest),
             _ => None,
         }
     }
@@ -312,7 +320,7 @@ impl EndpointV1 {
             | Self::VaultBlobs
             | Self::TrustEvents
             | Self::HistoricalGrants => 201,
-            Self::DeviceRegistrations | Self::Destructions => 202,
+            Self::DeviceRegistrations | Self::Destructions | Self::DestructionEvents | Self::DestructionJobs => 202,
             Self::ReaderAcks => 204,
             _ => 200,
         }

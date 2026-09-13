@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+test-support = ["ea-admin/test-support"]
+
 [dependencies]
 # Der Wirt der Oberflaeche. Die Merkmalsauswahl ist ausgeschrieben und nicht
 # `default` geerbt, weil zwei der Merkmale TRAGEND sind und ein spaeteres
@@ -43,6 +46,8 @@ tauri = { workspace = true, features = [
 # und -Rueckgaben.
 serde.workspace = true
 serde_json.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
 # Der Stufe-2-Kern, den die Kommandos dieses Pakets aufrufen. Alle Kanten stehen
 # HIER, damit Task 15 genau eine weitere Kante zieht und jedes Kommando dort
 # `--locked` behalten kann.
@@ -95,6 +100,14 @@ ea-ui-contracts.workspace = true
 # Wirt. Zweite Kante nach `ea-ui-contracts`, deshalb der eine
 # `cargo metadata`-Lauf ohne `--locked`.
 ea-admin.workspace = true
+ea-destruction.workspace = true
+ea-recovery.workspace = true
+
+# Authenticated native destruction exchange; existing TLS/signature profile.
+ea-sync-client.workspace = true
+ea-sync-protocol.workspace = true
+ea-crypto.workspace = true
+rustls.workspace = true
 
 [dev-dependencies]
 # Real Writer/SQLCipher/native-challenge fixture for the host acknowledgement

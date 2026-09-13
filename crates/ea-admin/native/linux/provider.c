@@ -228,7 +228,13 @@ static void account_fields(Context *c, JsonObject *o, gboolean locked) {
     json_object_set_boolean_member(o, "locked", locked);
 }
 
-static const char *operate(Context *c, const EaRequest *r, JsonObject *o) {
+static const char *operate_inner(Context *c, const EaRequest *r, JsonObject *o, EaSigningBackupFrame *backup) {
+    if (backup) {
+        OPENSSL_cleanse(backup, sizeof *backup);
+        const char *invalid = ea_validate_signing_backup(r);
+        if (invalid) return invalid;
+        if (CRYPTO_memcmp(r->installation, c->marker.id, 32)) return "installation-changed";
+    } else if (!strcmp(r->op, "backup-signing-seed")) return "invalid-request";
     const char *kind = ea_secret_slot(r->slot) ? "secret32" : "ed25519";
     unsigned char plain[32] = {0}, box[EA_ENVELOPE_SIZE] = {0}, public_key[32] = {0}, signature[64] = {0};
     SecretItem *item = NULL;
@@ -264,10 +270,31 @@ static const char *operate(Context *c, const EaRequest *r, JsonObject *o) {
         goto done;
     }
     if (!item) { error = "key-missing"; goto done; }
+    if (backup) {
+        unsigned char expected[32]; size_t n;
+        if (!pub || !ea_unhex(pub, expected, 32, &n) || n != 32 || CRYPTO_memcmp(expected, r->expected_public, 32)) {
+            error = "key-invalid"; goto done;
+        }
+    }
     error = read_value(c, item, box, sizeof box);
     if (error) goto done;
     if (!ea_open(&c->marker, c->instance, r->slot, kind, pub, box, plain)) { error = "key-invalid"; goto done; }
-    if (!strcmp(r->op, "unwrap-secret")) hex_member(o, "secret", plain, 32);
+    if (backup) {
+        if (!ea_public(plain, public_key) || CRYPTO_memcmp(public_key, r->expected_public, 32)) { error = "key-invalid"; goto done; }
+        /* Re-read authenticated public metadata after the blocking seed read. */
+        SecretItem *latest = NULL; char *latest_pub = NULL;
+        error = lookup(c, r->slot, &latest);
+        if (!error && !latest) error = "key-missing";
+        if (!error) error = metadata(c, latest, r->slot, "ed25519", &latest_pub);
+        if (!error && strcmp(latest_pub, pub)) error = "key-invalid";
+        g_free(latest_pub); g_clear_object(&latest);
+        if (error) goto done;
+        memcpy(backup->bytes, "EABKSEED", 8); backup->bytes[8] = 1;
+        backup->bytes[9] = !strcmp(r->slot, "admin-signing") ? 1 : 2;
+        memcpy(backup->bytes + 10, c->marker.id, 32);
+        memcpy(backup->bytes + 42, public_key, 32);
+        memcpy(backup->bytes + 74, plain, 32);
+    } else if (!strcmp(r->op, "unwrap-secret")) hex_member(o, "secret", plain, 32);
     else if (!strcmp(r->op, "sign")) {
         if (!ea_public(plain, public_key)) { error = "crypto-failed"; goto done; }
         char *actual = ea_hex(public_key, 32);
@@ -277,12 +304,21 @@ static const char *operate(Context *c, const EaRequest *r, JsonObject *o) {
         hex_member(o, "signature", signature, 64);
     } else error = "invalid-request";
 done:
+    if (error && backup) OPENSSL_cleanse(backup, sizeof *backup);
     OPENSSL_cleanse(plain, sizeof plain); OPENSSL_cleanse(box, sizeof box); OPENSSL_cleanse(signature, sizeof signature);
     g_free(pub); g_clear_object(&item);
     return error;
 }
 
-static const char *execute(const EaRequest *r, JsonObject **fields, char **watched_instance) {
+static const char *operate(Context *c, const EaRequest *r, JsonObject *o) {
+    return operate_inner(c, r, o, NULL);
+}
+
+static const char *execute(const EaRequest *r, JsonObject **fields, char **watched_instance, EaSigningBackupFrame *backup) {
+    if (backup) {
+        const char *invalid = ea_validate_signing_backup(r);
+        if (invalid) return invalid;
+    } else if (!strcmp(r->op, "backup-signing-seed")) return "invalid-request";
     Context c = {.store = {.base_fd = -1, .dir_fd = -1, .lock_fd = -1}};
     JsonObject *o = json_object_new();
     gboolean account_op = !strcmp(r->op, "account") || !strcmp(r->op, "initialize");
@@ -356,17 +392,18 @@ static const char *execute(const EaRequest *r, JsonObject **fields, char **watch
         goto done;
     }
     if (account_op) account_fields(&c, o, FALSE);
-    else error = operate(&c, r, o);
+    else error = backup ? operate_inner(&c, r, o, backup) : operate(&c, r, o);
     if (!error) error = check(&c, TRUE);
     if (!error) error = instance(&c, !metadata_only);
     if (error) goto done;
 success:
-    error = check(&c, FALSE);
+    error = check(&c, backup != NULL);
     if (!error) {
         hex_member(o, "installation_id", c.marker.id, 32);
         json_object_set_boolean_member(o, "ok", TRUE);
     }
 done:
+    if (error && backup) OPENSSL_cleanse(backup, sizeof *backup);
     if (error && watched_instance) g_clear_pointer(watched_instance, g_free);
     if (!error) *fields = o;
     else {
@@ -383,11 +420,20 @@ done:
     return error;
 }
 
-const char *ea_execute(const EaRequest *r, JsonObject **fields) { return execute(r, fields, NULL); }
+const char *ea_execute(const EaRequest *r, JsonObject **fields) { return execute(r, fields, NULL, NULL); }
 
 /* Internal watch setup only; the object path never enters JSON or logs. */
 const char *ea_watch_account(const EaRequest *r, JsonObject **fields, char **instance_path) {
     *instance_path = NULL;
     if (strcmp(r->op, "account") || !r->has_installation || r->presence) return "invalid-request";
-    return execute(r, fields, instance_path);
+    return execute(r, fields, instance_path, NULL);
+}
+
+const char *ea_execute_signing_backup(const EaRequest *r, EaSigningBackupFrame *frame) {
+    memset(frame, 0, sizeof *frame);
+    JsonObject *fields = NULL;
+    const char *error = execute(r, &fields, NULL, frame);
+    if (fields) json_object_unref(fields);
+    if (error) OPENSSL_cleanse(frame, sizeof *frame);
+    return error;
 }

@@ -106,6 +106,8 @@ exceptions = [
   { crate = "ring", allow = ["ISC"] },
   { crate = "rustls-webpki", allow = ["ISC"] },
   { crate = "untrusted", allow = ["ISC"] },
+  # ADR-0007: explicit offline PKCS#11 loading, permissive ISC terms.
+  { crate = "libloading", allow = ["ISC"] },
   # CDLA-Permissive-2.0 — eine permissive DATENlizenz (Community Data License
   # Agreement) ueber den gebuendelten Mozilla-Wurzelzertifikatssatz, kein
   # Quellcode. Weg in den Graphen: `sqlx` mit

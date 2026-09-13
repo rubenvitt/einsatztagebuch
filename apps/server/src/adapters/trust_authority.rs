@@ -365,6 +365,7 @@ fn walk_to_selected_head(
     for round in 0..head_count.saturating_add(1) {
         let snapshot = load_trust_state(store, key).map_err(HeadWalkError::from)?;
         let trust = verify_trust(anchor, source, snapshot).map_err(HeadWalkError::from)?;
+        let previous_pin = trust.pinned_head().copied();
         let candidate = match verify_registry_candidate(&trust, proposed_sequence) {
             Ok(candidate) => candidate,
             Err(RegistryError::Rollback) if round == 0 => return Ok((trust, None)),
@@ -373,7 +374,17 @@ fn walk_to_selected_head(
         let local_time =
             prepare_local_time(store, &candidate, now, &[]).map_err(HeadWalkError::from)?;
         match select_registry_head(candidate, local_time, None).map_err(HeadWalkError::from)? {
-            RegistrySelectionOutcome::Selected(selected) => return Ok((trust, Some(selected))),
+            RegistrySelectionOutcome::Selected(selected) => {
+                // A usable head may still have a ready successor at the same
+                // sequence. Only an affirmed, unchanged pin is the latest head.
+                if previous_pin.is_some_and(|pin| {
+                    pin.registry_version() == selected.registry_version()
+                        && pin.registry_head_hash() == selected.registry_head_hash()
+                }) {
+                    return Ok((trust, Some(selected)));
+                }
+                carried = Some(trust);
+            }
             // Ein Uebergang ist geschafft; der naechste Durchlauf liest den
             // fortgeschriebenen Stand.
             RegistrySelectionOutcome::Advanced(_) => carried = Some(trust),
@@ -668,6 +679,32 @@ impl TrustEventValidator for PostgresTrustAuthority {
 /// Denselben Kopf fuer beides zu nehmen ergaebe die falsche Empfaengermenge.
 #[async_trait]
 impl ea_sync_server::RegistryHeadDirectory for PostgresTrustAuthority {
+    async fn historical_registry_authority(
+        &self,
+        organization_id: OrganizationId,
+        version: RegistryVersion,
+        hash: ObjectHash,
+        sequence: ChainSequence,
+    ) -> Result<Option<ea_trust::HistoricalRegistryAuthority>, AuthorityError> {
+        let Some(prepared) = self
+            .prepare(organization_id, None)
+            .await
+            .map_err(|_| AuthorityError::Unavailable)?
+        else {
+            return Ok(None);
+        };
+        let key = verification_state_key(organization_id);
+        let mut store =
+            EphemeralTrustStateStore::new(key, UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS));
+        let trust = verify_trust(
+            &prepared.anchor,
+            &prepared.source,
+            load_trust_state(&mut store, key).map_err(|_| AuthorityError::Unavailable)?,
+        )
+        .map_err(|_| AuthorityError::Unavailable)?;
+        Ok(ea_trust::verify_historical_registry_authority(&trust, version, hash, sequence).ok())
+    }
+
     async fn select_head_for_sequence(
         &self,
         organization_id: OrganizationId,
@@ -719,6 +756,68 @@ impl ea_sync_server::RegistryHeadDirectory for PostgresTrustAuthority {
                 Ok(RegistryHeadSelectionV1::NoApplicableHead)
             }
         }
+    }
+    async fn select_current_admission(
+        &self,
+        organization_id: OrganizationId,
+        proposed_sequence: ChainSequence,
+        now: UnixMillis,
+    ) -> Result<Option<ea_sync_server::RegistryAdmissionV1>, AuthorityError> {
+        let Some(before) = self.authority_snapshot(organization_id).await? else {
+            return Ok(None);
+        };
+        let Some(anchor_bytes) = before.catalog.anchor_bytes.as_ref() else {
+            return Ok(None);
+        };
+        let Ok(anchor) = decode_trust_anchor(anchor_bytes) else {
+            return Ok(None);
+        };
+        let catalog = self
+            .trust_catalog(organization_id)
+            .await
+            .map_err(|_| AuthorityError::Unavailable)?;
+        let head_count = registry_event_count(&catalog);
+        let source = CatalogSource(catalog);
+        let key = verification_state_key(organization_id);
+        let mut store =
+            EphemeralTrustStateStore::new(key, UnixMillis::new(INITIAL_TRUSTED_FLOOR_MILLIS));
+        let selected = match walk_to_selected_head(
+            &anchor,
+            &source,
+            &mut store,
+            key,
+            proposed_sequence,
+            now,
+            head_count,
+        ) {
+            Ok((_, selected)) => selected,
+            Err(HeadWalkError::Unavailable) => return Err(AuthorityError::Unavailable),
+            Err(HeadWalkError::StateConflict) => return Err(AuthorityError::StateConflict),
+            Err(HeadWalkError::NotApplicable | HeadWalkError::Invalid) => None,
+        };
+        // The S3 reads are outside the SQL snapshot. Accept only a completed
+        // signature walk bracketed by the SAME technical catalog and anchor.
+        // A later publisher is fenced again under the reservation row lock.
+        let after = self
+            .authority_snapshot(organization_id)
+            .await?
+            .ok_or(AuthorityError::StateConflict)?;
+        if before.catalog != after.catalog {
+            return Err(AuthorityError::StateConflict);
+        }
+        let Some(head) = selected else {
+            return Ok(None);
+        };
+        let fence = ea_sync_server::RegistryAdmissionFenceV1 {
+            catalog_revision: before.catalog.revision,
+            exact_anchor_bytes: anchor_bytes.clone(),
+            selected_at: now,
+            not_after: head.not_after(),
+        };
+        Ok(Some(ea_sync_server::RegistryAdmissionV1 {
+            head: Arc::new(head),
+            fence,
+        }))
     }
 }
 

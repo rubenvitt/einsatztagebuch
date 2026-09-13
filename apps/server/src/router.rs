@@ -134,6 +134,8 @@ pub fn router(state: Arc<AppState>, web_origins: Arc<WebOriginPolicy>) -> Router
             EndpointV1::DestructionStatus.path_template(),
             get(destructions::read_destruction),
         )
+        .route(EndpointV1::DestructionEvents.path_template(), post(destructions::create_event))
+        .route(EndpointV1::DestructionJobs.path_template(), post(destructions::create_job))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
             web_origins,

@@ -162,7 +162,7 @@ pub(crate) fn into_selection_replay_key(
     Ok(proof.replay_key)
 }
 
-fn require_candidate_block_preflight(
+pub(crate) fn require_candidate_block_preflight(
     candidate: &RegistryCandidate,
     local_time: &LocalTimeBlock<'_>,
 ) -> Result<(), ClockReleaseError> {

@@ -1,3 +1,4 @@
+import { invalidateReaderViews } from '../bridge/reader-invalidation'
 // Die EINE Stelle des Web-Buendels, an der `navigator.credentials` gerufen
 // wird — und die EINZIGE, durch die ein Klartext-Schluesselbaustein ueberhaupt
 // durch JavaScript laeuft.
@@ -356,6 +357,7 @@ async function call(request: WithoutId<EaOpfsRequest>): Promise<EaOpfsResponse> 
  * `EA-READER-FILE-MODE-BRIDGE-ARGUMENT`) und wuesste nicht, warum.
  */
 export async function callReaderWorker(request: ReaderWorkerMessage): Promise<EaOpfsResponse> {
+  if (request.kind === 'reader-destruction-apply' || request.kind === 'reader-destruction-apply-delivery') invalidateReaderViews()
   return call(request)
 }
 

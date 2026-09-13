@@ -14,30 +14,13 @@
 //! ueberfluessig: sie entscheidet jeden ihrer Faelle, bevor ein Byte gelesen
 //! wird. `verify` und `list` lesen wirklich, und damit zieht sie ein.
 //!
-//! # DIE UHRENREGEL — und ihre EINE begruendete Ausnahme
+//! # Betriebssystemuhr und historische Verifikation
 //!
-//! Die CLI kennt genau EINE Uhr, `SystemTime::now()`. Die geerbten Bestaende
-//! aus `crates/ea-verify/tests/support` tragen Registrierungskoepfe aus
-//! `trust_support::HeadOptions::default()` (`issued_at = 100`,
-//! `not_after = 10_000`); unter der echten Uhr sind sie samtlich veraltet, Gate
-//! `trust` traegt nicht mehr, und der Bericht degeneriert zu einer LEEREN
-//! Aussage, die faelschlich wie Erfolg aussieht. Gemessen in
-//! `crates/ea-recovery/tests/live_clock.rs`.
-//!
-//! Deshalb gilt: jeder Bestand, der hier einen BEFUND belegen soll, stammt aus
-//! der `live_clock_*`-Familie. `isolation_archive`,
-//! `archive_with_a_missing_middle_entry` und `destruction_archive` kommen in
-//! `apps/cli` NICHT vor; ihre Befunde sind unter der echten Uhr unerreichbar
-//! und werden dort gemessen, wo die Uhr ein Parameter ist —
-//! `crates/ea-recovery/tests/exit_codes.rs`.
-//!
-//! Die AUSNAHME ist `complete_valid_archive`, und sie ist keine Aufweichung,
-//! sondern der Gegenstand: dieser Bestand wird hier benutzt, WEIL er unter der
-//! echten Uhr degeneriert. Er ist der gepinnte Gegenfall zu Exitcode 15
-//! („vollstaendig geprueft, und ueber den einen geparsten Eintrag ist nichts
-//! ausgesagt") und ausdruecklich kein Erfolgspfad. Faellt diese Zusicherung
-//! weg, meldete die CLI genau hier Erfolg ueber einen Bestand, ueber den sie
-//! nichts gesagt hat.
+//! Die CLI verwendet `SystemTime::now()`. Die `live_clock_*`-Familie hat
+//! aktuell waehlbare Registry-Koepfe. Geerbte kurze Leases bleiben fuer
+//! historische Lesefaelle geeignet: Task 8 verifiziert exakt gebundene
+//! Registry/Sequenz ohne eine alte Lease zur Lesefrist zu machen.
+//! `exit_codes.rs` belegt dies am echten verify- und list-Prozess.
 //!
 //! `#[path]`-Includes werden je Testtarget uebersetzt; ein Target, das nur
 //! einen Teil der Helfer nutzt, erzeugt sonst `dead_code`-Warnungen, die unter

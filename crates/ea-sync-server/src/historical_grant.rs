@@ -1,46 +1,4 @@
-//! `POST /v1/entries/{entryHash}/historical-grants` — der historische
-//! Re-Grant (`design.md` §13.3, §16.2).
-//!
-//! # Was der Koerper traegt — und was nicht
-//!
-//! `historical-grant-upload-v1` ist ein EINZELOBJEKT-Upload: genau ein exaktes
-//! `.eag` und sonst nichts (`schemas/protocol/v1/entry-commit.cddl`, und die
-//! Feldtabelle des Sync-Wire-Nachtrags fuehrt fuer diesen Rahmen die einzige
-//! Zeile `exact-eag-bytes`). Die Mehr-Augen-`GrantAuthorization` und der
-//! urspruengliche Recovery-Grant reisen also NICHT mit.
-//!
-//! Sie muessen es auch nicht: `grant-body-v1` NENNT beide, ueber
-//! `grant-authorization-object-hash` und
-//! `original-recovery-grant-object-hash`. `design.md` §13.3 sagt, der Endpunkt
-//! „prueft […] urspruenglichen Recovery-Grant, `GrantAuthorization`, Ziel-Entry
-//! und Empfaenger“ — pruefen, nicht entgegennehmen. Der Server loest beide
-//! deshalb content-addressed auf und stellt das gelieferte `.eag` gegen sie.
-//! Was er nicht aufloesen kann, nimmt er nicht an; das ist fail-closed und
-//! nicht bequem.
-//!
-//! # Warum die Autorisierung nicht ueber `POST /v1/trust/events` kommt
-//!
-//! Weil `ea-trust` fuer sie heute keine Signiererregel im
-//! Registrierungsabschluss fuehrt und die Aufnahme sie deshalb fail-closed als
-//! `EA-TRUST-EVENT-UNVERIFIABLE` abweist
-//! (`crates/ea-trust/src/admission.rs`). Ihre Pruefung gehoert an die Stelle,
-//! an der sie WIRKT — hier. Nachgebaut wird dabei nichts: die Signaturen
-//! laufen durch [`ea_crypto::verify_cose_sign1`] mit
-//! [`ea_crypto::VerificationContext::historical_grant_approval_trust_digest`],
-//! also durch dieselbe Kante, ueber die auch `ea-trust` seine Signierer
-//! aufloest. Diese Datei traegt keine zweite Zertifikatsaufloesung und keine
-//! zweite Capability-Regel.
-//!
-//! # Die zwei Augen sind ZWEI
-//!
-//! `ea-format` erzwingt an einer `grantAuthorization` mindestens zwei
-//! Signaturen (`validate_signature_count`), aber nicht, dass sie von
-//! VERSCHIEDENEN Zertifikaten stammen — zweimal derselbe Approver kaeme dort
-//! durch. `design.md` §16.2 verlangt „zwei unterschiedliche
-//! `historicalGrantApprove`-Schluessel“. Die Zaehlung ueber die
-//! unterschiedlichen Zertifikatshashes steht deshalb HIER, und sie ist der
-//! Kern dieses Endpunkts.
-
+//! Historical re-grants verify approval-time authority independently of Entry age.
 use core::fmt;
 
 use ea_crypto::{CryptoError, VerificationContext, verify_cose_sign1};
@@ -90,7 +48,7 @@ pub enum HistoricalGrantError {
     /// Der Pfad nennt einen Eintrag, den diese Organisation nicht fuehrt.
     EntryUnknown,
     /// Die Ausstellersignatur traegt nicht, oder das Ausstellerzertifikat ist
-    /// zur Eintragssequenz nicht als Historical Grant Authority aktiv.
+    /// zur aktuellen Autorisierungssequenz nicht als Historical Grant Authority aktiv.
     IssuerUnauthorized,
     /// Der genannte urspruengliche Recovery-Grant fehlt, ist kein
     /// Recovery-Grant, oder gehoert zu einem anderen Eintrag.
@@ -331,8 +289,31 @@ pub async fn accept_historical_grant(
         return Err(HistoricalGrantError::Blocked.into());
     }
 
-    // 4. Der anwendbare Kopf zur EINTRAGSSEQUENZ.
-    let head = select_head(organization_id, entry.sequence, now, ports).await?;
+    let authorization_hash = fields
+        .grant_authorization_object_hash
+        .ok_or(HistoricalGrantError::AuthorizationUnverifiable)?;
+    let authorization =
+        verify_grant_authorization(authorization_hash, now, ports, organization_id).await?;
+    // A later Reader/HGA is authorized at the approval sequence, independently
+    // of the immutable historical Entry sequence.
+    let authorization_sequence = ChainSequence::new(authorization.authorization_sequence);
+    let committed = ports
+        .entries
+        .chain_head(organization_id, fields.chain_id)
+        .await
+        .map_err(HistoricalGrantError::from)?
+        .ok_or(HistoricalGrantError::EntryUnknown)?;
+    let current_sequence = ChainSequence::new(
+        committed
+            .sequence
+            .get()
+            .checked_add(1)
+            .ok_or(HistoricalGrantError::GrantInvalid)?,
+    );
+    if authorization_sequence > current_sequence {
+        return Err(HistoricalGrantError::AuthorizationMismatch.into());
+    }
+    let head = select_head(organization_id, current_sequence, now, ports).await?;
     if fields.registry_version != head.registry_version()
         || fields.registry_head_hash.as_bytes() != head.registry_head_hash().as_bytes()
     {
@@ -348,7 +329,7 @@ pub async fn accept_historical_grant(
     //    `CertificateCapability::HistoricalGrant`. Diese Datei liest keine
     //    Capability von Hand.
     let context =
-        VerificationContext::historical_grant(grant.grant_body().exact_bytes(), entry.sequence)
+        VerificationContext::historical_grant(grant.grant_body().exact_bytes(), current_sequence)
             .map_err(HistoricalGrantError::from)?;
     verify_cose_sign1(
         grant.issuer_signature(),
@@ -361,14 +342,8 @@ pub async fn accept_historical_grant(
     let recovery_hash = fields
         .original_recovery_grant_object_hash
         .ok_or(HistoricalGrantError::RecoveryGrantMismatch)?;
-    verify_original_recovery_grant(recovery_hash, path_entry_hash, organization_id, ports).await?;
+    verify_original_recovery_grant(recovery_hash, &entry, organization_id, now, ports).await?;
 
-    // 7. Die Mehr-Augen-Autorisierung samt Frist.
-    let authorization_hash = fields
-        .grant_authorization_object_hash
-        .ok_or(HistoricalGrantError::AuthorizationUnverifiable)?;
-    let authorization =
-        verify_grant_authorization(authorization_hash, now, ports, organization_id).await?;
     if !authorization.entry_hashes.contains(&path_entry_hash)
         || authorization.recipient_key_thumbprint != fields.recipient_key_thumbprint
         || authorization.recipient_certificate_hash != fields.recipient_certificate_hash
@@ -376,6 +351,21 @@ pub async fn accept_historical_grant(
         return Err(HistoricalGrantError::AuthorizationMismatch.into());
     }
 
+    if authorization.registry_version != fields.registry_version
+        || authorization.registry_head_hash != fields.registry_head_hash
+        || fields.purpose != GrantPurposeV1::Reader
+        || !head.active_certificates().iter().any(|(hash, cert)| {
+            *hash == fields.recipient_certificate_hash
+                && cert.certificate_kind == ea_format::CertificateKindV1::Reader
+                && cert.kem_key_thumbprint == Some(fields.recipient_key_thumbprint)
+        })
+    {
+        return Err(HistoricalGrantError::AuthorizationMismatch.into());
+    }
+    // Recheck the deadline immediately before crossing the publication boundary.
+    if ports.clock.now() > authorization.expires_at {
+        return Err(HistoricalGrantError::Expired.into());
+    }
     // 8. Die Ablage. `expiresAt` kommt aus der Autorisierung und nicht aus dem
     //    Grant: die Frist gehoert der Mehr-Augen-Entscheidung, und der Grant
     //    fuehrt sie gar nicht.
@@ -427,10 +417,27 @@ async fn select_head(
 /// tatsaechlich der Recovery-Grant ist.
 async fn verify_original_recovery_grant(
     recovery_hash: ObjectHash,
-    entry_hash: EntryHash,
+    entry: &crate::models::EntryIndexEntryV1,
     organization_id: OrganizationId,
+    now: UnixMillis,
     ports: &HistoricalGrantPorts<'_>,
 ) -> Result<(), HistoricalGrantFailure> {
+    let delivery = ports
+        .entries
+        .grant_delivery(organization_id, recovery_hash)
+        .await
+        .map_err(HistoricalGrantError::from)?
+        .ok_or(HistoricalGrantError::RecoveryGrantMismatch)?;
+    if delivery.entry_hash != entry.entry_hash || delivery.expires_at.is_some() {
+        return Err(HistoricalGrantError::RecoveryGrantMismatch.into());
+    }
+    let entry_bytes = exact_bytes(ObjectTypeV1::Entry, entry.entry_object_hash, ports).await?;
+    let ParsedArchiveObject::Entry(package) = decode_exact_object(&entry_bytes)
+        .map_err(|_| HistoricalGrantError::RecoveryGrantMismatch)?
+    else {
+        return Err(HistoricalGrantError::RecoveryGrantMismatch.into());
+    };
+    let manifest = package.value().manifest().fields();
     let bytes = exact_bytes(ObjectTypeV1::Grant, recovery_hash, ports)
         .await
         .map_err(|_| HistoricalGrantError::RecoveryGrantMismatch)?;
@@ -443,10 +450,45 @@ async fn verify_original_recovery_grant(
     let fields = recovery.grant_body().fields();
     if recovery.purpose() != GrantPurposeV1::Recovery
         || recovery.kind() != GrantKindV1::Initial
-        || fields.entry_hash != entry_hash
+        || fields.entry_hash != entry.entry_hash
         || fields.organization_id != organization_id
+        || fields.chain_id != manifest.chain_id
+        || fields.issuer_certificate_hash != manifest.writer_certificate_hash
+        || fields.registry_version != manifest.registry_version
+        || fields.registry_head_hash.as_bytes() != &manifest.registry_head_hash
     {
         return Err(HistoricalGrantError::RecoveryGrantMismatch.into());
+    }
+    let context =
+        VerificationContext::initial_grant(recovery.grant_body().exact_bytes(), entry.sequence)
+            .map_err(|_| HistoricalGrantError::RecoveryGrantMismatch)?;
+    let archived = ports
+        .heads
+        .historical_registry_authority(
+            organization_id,
+            manifest.registry_version,
+            ObjectHash::try_from(manifest.registry_head_hash.as_slice())
+                .map_err(|_| HistoricalGrantError::RecoveryGrantMismatch)?,
+            entry.sequence,
+        )
+        .await
+        .map_err(HistoricalGrantError::from)?;
+    if let Some(head) = archived {
+        verify_cose_sign1(recovery.issuer_signature(), &head, &context)
+            .map_err(|_| HistoricalGrantError::RecoveryGrantMismatch)?;
+    } else {
+        let head = select_head(organization_id, entry.sequence, now, ports).await?;
+        if head.registry_version() != manifest.registry_version
+            || head.registry_head_hash().as_bytes() != &manifest.registry_head_hash
+        {
+            return Err(HistoricalGrantError::RecoveryGrantMismatch.into());
+        }
+        verify_cose_sign1(
+            recovery.issuer_signature(),
+            &HeadResolver(head.as_ref()),
+            &context,
+        )
+        .map_err(|_| HistoricalGrantError::RecoveryGrantMismatch)?;
     }
     Ok(())
 }
@@ -498,6 +540,11 @@ async fn verify_grant_authorization(
         ports,
     )
     .await?;
+    if fields.registry_version != head.registry_version()
+        || fields.registry_head_hash.as_bytes() != head.registry_head_hash().as_bytes()
+    {
+        return Err(HistoricalGrantError::AuthorizationMismatch.into());
+    }
     let approvers = distinct_approvers(
         object.signatures(),
         object.exact_digest_input(),
@@ -516,7 +563,7 @@ async fn verify_grant_authorization(
     Ok(fields)
 }
 
-/// Zaehlt die UNTERSCHIEDLICHEN Zertifikate, die diesen Digest gueltig
+/// Zaehlt die UNTERSCHIEDLICHEN authoritySubjectId-Werte, die diesen Digest gueltig
 /// unterschrieben haben.
 ///
 /// Der Zertifikatshash jeder Signatur kommt aus IHREM eigenen geschuetzten
@@ -531,16 +578,12 @@ pub(crate) fn distinct_approvers(
     head: &dyn ActiveRegistryHeadV1,
     context_of: impl Fn(&[u8], CertificateHash) -> Result<VerificationContext, CryptoError>,
 ) -> Result<usize, CryptoError> {
-    let mut seen = std::collections::BTreeSet::new();
-    for signature in signatures {
-        let certificate_hash = ea_crypto::parse_cose_sign1(signature, &[])?
-            .certificate_hash()
-            .ok_or(CryptoError::InvalidCose)?;
-        let context = context_of(exact_digest_input, certificate_hash)?;
-        let verified = verify_cose_sign1(signature, &HeadResolver(head), &context)?;
-        seen.insert(*verified.certificate_hash().as_bytes());
-    }
-    Ok(seen.len())
+    ea_trust::distinct_authority_subjects(
+        signatures,
+        exact_digest_input,
+        &HeadResolver(head),
+        context_of,
+    )
 }
 
 async fn exact_bytes(
@@ -588,6 +631,9 @@ async fn store_grant(
         .put_if_absent(staged)
         .await
         .map_err(HistoricalGrantError::from)?;
+    if ports.clock.now() > expires_at {
+        return Err(HistoricalGrantError::Expired.into());
+    }
     let outcome = ports
         .grants
         .record_historical_grant(HistoricalGrantCommandV1 {

@@ -18,6 +18,8 @@
 /// [`archive_support::ArchiveFixture`]. Hier wird nichts davon nachgebaut.
 #[path = "../../../ea-archive/tests/support/mod.rs"]
 pub mod archive_support;
+pub mod destruction_v12;
+pub mod historical;
 
 use ea_crypto::{
     CanonicalPublicCoseKey, CoseSigner, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_WRAPPED_CEK_SIZE,
@@ -285,14 +287,14 @@ impl GrantPlanSpec {
 /// unterscheiden sich in ihren Koepfen, nicht in dem, was ein Objekt von einem
 /// Kopf wissen muss.
 #[derive(Clone, Copy)]
-struct HeadRefV1 {
+pub(crate) struct HeadRefV1 {
     version: RegistryVersion,
     hash: Hash32,
 }
 
 impl HeadRefV1 {
     /// Der Kopf, den `head` bezeichnet.
-    fn of(head: &trust_support::BuiltHead) -> Self {
+    pub(crate) fn of(head: &trust_support::BuiltHead) -> Self {
         Self {
             version: head.version,
             hash: Hash32::try_from(head.object_hash.as_bytes().as_slice())
@@ -2220,7 +2222,7 @@ pub fn other_recipient_certificate_hash() -> CertificateHash {
 
 /// Der Planhash des lueckenfreien Bestands: GENAU EIN Recovery-Grant an
 /// `recipient`.
-fn complete_grant_plan_hash(
+pub(crate) fn complete_grant_plan_hash(
     recipient_key_thumbprint: KeyThumbprint,
     recipient_certificate_hash: CertificateHash,
 ) -> Hash32 {
@@ -2810,7 +2812,7 @@ fn build_complete_entry(
 /// wirksamen `writerTransition`-Ereignisses (`design.md`:669). Alle
 /// bestehenden Aufrufer gehen durch den Wrapper und bleiben unveraendert.
 #[allow(clippy::too_many_arguments)]
-fn build_complete_entry_signed_by(
+pub(crate) fn build_complete_entry_signed_by(
     head: HeadRefV1,
     writer_certificate_hash: CertificateHash,
     signer: &CoseSigner,
@@ -2905,7 +2907,7 @@ fn complete_grant_bytes(
 /// Signatur an genau dieses Paar. Alle bestehenden Aufrufer gehen durch den
 /// Wrapper und bleiben unveraendert.
 #[allow(clippy::too_many_arguments)]
-fn complete_grant_bytes_issued_by(
+pub(crate) fn complete_grant_bytes_issued_by(
     head: HeadRefV1,
     issuer_certificate_hash: CertificateHash,
     issuer_key_thumbprint: KeyThumbprint,
@@ -3660,6 +3662,7 @@ impl DestructionArchive {
 struct DestructionLease {
     head: trust_support::BuiltHead,
     certificate_hash: CertificateHash,
+    replica_id: [u8; 16],
     authorization_sequence: u64,
 }
 
@@ -3693,6 +3696,7 @@ struct DestructionLine {
 /// Schreiberzertifikate fuehrt.
 #[derive(Clone, Copy)]
 struct DestructionAuthority {
+    approvers: [CertificateHash; 2],
     leases: [DestructionLease; 2],
     writer_certificate_hash: CertificateHash,
 }
@@ -3714,6 +3718,31 @@ impl DestructionAuthority {
     }
 }
 
+fn push_destruction_approvers(
+    line: &mut trust_support::RegistryLineBuilder,
+) -> [CertificateHash; 2] {
+    [0x64, 0x65].map(|marker| {
+        let head = line.push(
+            trust_support::ActionSpec::Device {
+                kind: CertificateKindV1::KeyApprover,
+                marker,
+                effective_from: Some(0),
+            },
+            trust_support::HeadOptions {
+                effective_from: Some(0),
+                valid_through: Some(0),
+                not_after: UnixMillis::new(500),
+                authority_subject_id_override: Some(
+                    ea_types::SubjectId::try_from(&[marker; 16][..]).unwrap(),
+                ),
+                certificate_capabilities_override: Some(vec!["destructionApprove".into()]),
+                ..Default::default()
+            },
+        );
+        CertificateHash::from(head.direct_object_hash.unwrap())
+    })
+}
+
 fn destruction_line() -> DestructionLine {
     let mut line = trust_support::RegistryLineBuilder::new();
     line.push(
@@ -3725,6 +3754,7 @@ fn destruction_line() -> DestructionLine {
             ..trust_support::HeadOptions::default()
         },
     );
+    let approvers = push_destruction_approvers(&mut line);
     let writer = line.push(
         trust_support::ActionSpec::Device {
             kind: CertificateKindV1::Writer,
@@ -3751,6 +3781,7 @@ fn destruction_line() -> DestructionLine {
             },
         );
         DestructionLease {
+            replica_id: [marker.wrapping_add(0x40); 16],
             certificate_hash: CertificateHash::from(
                 head.direct_object_hash
                     .expect("ein Device-Uebergang traegt ein direktes Ziel"),
@@ -3776,6 +3807,7 @@ fn destruction_line() -> DestructionLine {
     let anchor_bytes = line.exact_anchor_bytes().to_vec();
     DestructionLine {
         authority: DestructionAuthority {
+            approvers,
             leases,
             writer_certificate_hash: CertificateHash::from(
                 writer
@@ -3885,6 +3917,7 @@ fn push_destruction(
             authorization_object_hash,
             spec.marker,
             certificate_hash,
+            lease.replica_id,
         );
         let hash = object_hash(&bytes);
         fixture.push_exact_bytes(
@@ -3908,22 +3941,7 @@ fn push_destruction(
     }
 }
 
-/// Baut die Vernichtungsautorisierung eines Vorgangs.
-///
-/// ZWEI SIGNATUREN UNTER VERSCHIEDENEN ZERTIFIKATEN, weil `ea-format` fuer
-/// diese Unterart mindestens zwei verlangt
-/// (`crates/ea-format/src/etb.rs:1248`): das Vier-Augen-Prinzip aus
-/// `design.md`:1818 steht schon im Wire-Format, und es verlangt ZWEI
-/// UNTERSCHIEDLICHE Approver. Zweimal dasselbe Zertifikat ergaebe zwei
-/// byteidentische Signaturen — strukturell zulaessig und fachlich eine Luege.
-///
-/// Die Signaturen sind darueber hinaus STRUKTURELL gueltig und werden von
-/// dieser Pipeline nie geprueft: `ea-verify` prueft die Transitionen, und die
-/// binden den Objekthash der Autorisierung kryptografisch mit ein.
-///
-/// Die `targets` kommen als Parameter, weil `ea-verify` sie nie liest, ein
-/// Leser sie aber gegen den `entryHash` eines `.eds` haelt — siehe
-/// [`DestructionSpec::targets`].
+/// Real signatures by two independently admitted destructionApprove subjects.
 fn destruction_authorization_bytes(
     authority: DestructionAuthority,
     lease: DestructionLease,
@@ -3942,7 +3960,8 @@ fn destruction_authorization_bytes(
     })
     .expect("die Fixture-Vernichtungsautorisierung muss kodieren");
     let signer = writer_device_signer();
-    let signatures = [lease.certificate_hash, authority.writer_certificate_hash]
+    let signatures = authority
+        .approvers
         .into_iter()
         .map(|certificate_hash| {
             signer
@@ -3995,11 +4014,12 @@ fn deletion_attestation_bytes(
     authorization_object_hash: ObjectHash,
     marker: u8,
     certificate_hash: CertificateHash,
+    replica_id: [u8; 16],
 ) -> Vec<u8> {
     let payload = TrustPayloadV1::deletion_attestation(DeletionAttestationFieldsV1 {
         destruction_id,
         destruction_authorization_object_hash: authorization_object_hash,
-        replica_id: [marker; 16],
+        replica_id,
         replica_kind: 0,
         removed_object_hashes: vec![
             ObjectHash::try_from(&[marker; 32][..]).expect("32 Bytes sind ein Objekthash"),
@@ -4224,6 +4244,7 @@ fn report_line() -> ReportLine {
             ..trust_support::HeadOptions::default()
         },
     );
+    let approvers = push_destruction_approvers(&mut line);
     let server_head = line.push(
         trust_support::ActionSpec::Device {
             kind: CertificateKindV1::ServerReceipt,
@@ -4271,6 +4292,7 @@ fn report_line() -> ReportLine {
             },
         );
         DestructionLease {
+            replica_id: [marker.wrapping_add(0x40); 16],
             certificate_hash: CertificateHash::from(
                 head.direct_object_hash
                     .expect("ein Device-Uebergang traegt ein direktes Ziel"),
@@ -4306,6 +4328,7 @@ fn report_line() -> ReportLine {
     let anchor_bytes = line.exact_anchor_bytes().to_vec();
     ReportLine {
         authority: DestructionAuthority {
+            approvers,
             leases,
             writer_certificate_hash,
         },

@@ -70,7 +70,7 @@ function EntryStateBlock({ state }: { readonly state: ReaderEntryStateView }): R
         label="Verifikation"
         value={state.verification}
         color={verificationColor(state.verification)}
-        {...(state.detailCode === null ? {} : { description: `Befundcode ${state.detailCode}` })}
+        {...(state.detailCode === null ? {} : { description: state.detailCode === 'EA-GRANT-EXPIRED' ? 'historische Freigabe abgelaufen' : `Befundcode ${state.detailCode}` })}
       />
       <StatusDimension
         label="Eintragszustand"

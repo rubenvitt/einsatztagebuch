@@ -156,7 +156,12 @@ one HPKE decapsulation and one signature check against a test vector — is stil
 outstanding. `ea-recovery` is exempt from that gate by design: it carries
 `std::fs` and plaintext and is therefore not shared browser code.
 
-## Blocked: PKCS#11 module binding
+## Historical boundary: PKCS#11 module binding
+
+The boundary below records the original Task-7 delivery. It is superseded by
+[ADR 0007](0007-offline-pkcs11-provider.md): the current resolver uses a real,
+independently tested non-exporting provider within its explicit module profile.
+The earlier evidence is retained here as the decision history.
 
 `design.md` §16.1 names `pkcs11:` as a key source of the recovery CLI, and
 Stage-5 Task 7 delivers its grammar in full: module path, token label and key

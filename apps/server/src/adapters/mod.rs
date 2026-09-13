@@ -12,3 +12,7 @@ pub mod server_keys;
 pub mod trust_authority;
 pub mod trust_index;
 pub mod trust_state;
+
+mod postgres_destruction;
+
+pub mod deletion_key;

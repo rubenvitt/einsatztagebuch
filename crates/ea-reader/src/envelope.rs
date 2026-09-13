@@ -374,6 +374,12 @@ pub(crate) fn derive_trust_state_key_v1(
     derive_key(vault_key, VAULT_TRUST_STATE_INFO_V1)
 }
 
+pub(crate) fn derive_grant_time_key_v1(
+    vault_key: &SecretBytes<CEK_SIZE>,
+) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+    derive_key(vault_key, b"ea-reader-grant-time-v1")
+}
+
 /// Der Schluessel des bestaetigten Sync-Cursors.
 pub(crate) fn derive_sync_cursor_key_v1(
     vault_key: &SecretBytes<CEK_SIZE>,

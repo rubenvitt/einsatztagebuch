@@ -339,6 +339,19 @@ impl DraftDiscardPort for BoundDiscard<'_> {
 /// und es heisst, dass die Grenze die ANSICHT weiterreicht und der Kern seine
 /// eigene Vorschau behaelt.
 pub trait WriterPreviewPort {
+    fn validate_amendment_reference(
+        &self,
+        _reference: &ea_ui_contracts::CorrectionReferenceView,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new("EA-DESKTOP-AMENDMENT-UNAVAILABLE"))
+    }
+    fn preview_amendment(
+        &self,
+        _input: &ea_ui_contracts::AmendmentInputView,
+    ) -> Result<FinalizationPreviewView, CommandError> {
+        Err(CommandError::new("EA-DESKTOP-AMENDMENT-UNAVAILABLE"))
+    }
+
     /// Die Vorschau zu genau diesem Einsatzrumpf.
     ///
     /// # Errors
@@ -356,6 +369,22 @@ pub trait WriterPreviewPort {
 /// Vorschau, gegen die er bestaetigt wurde, keiner ist: derselbe Wirt muss
 /// beides koennen.
 pub trait WriterFinalizePort: WriterPreviewPort {
+    fn finalize_amendment(
+        &self,
+        _input: &ea_ui_contracts::AmendmentInputView,
+        _confirmed: &FinalizationPreviewView,
+    ) -> Result<FinalizeOutcomeView, CommandError> {
+        Err(CommandError::new("EA-DESKTOP-AMENDMENT-UNAVAILABLE"))
+    }
+    fn acknowledge_stale_amendment(
+        &self,
+        _input: &ea_ui_contracts::AmendmentInputView,
+        _confirmed: &FinalizationPreviewView,
+        _warning_confirmed: bool,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new(WriterError::StaleAckRequired.code()))
+    }
+
     /// Confirm the exact visible stale warning. The port must hold an opaque
     /// native proof whose signed context is this preview hash.
     fn acknowledge_stale_registry(
@@ -393,6 +422,7 @@ pub trait WriterFinalizePort: WriterPreviewPort {
 /// die zwei Aufrufe [`WriterService::preview`] und [`WriterService::finalize`]
 /// stehen damit UEBERSETZT im Baum.
 pub struct BoundWriter<'a> {
+    amendments: Option<&'a ea_admin::amendment::AmendmentDraftService<'a, 'a>>,
     service: &'a WriterService<'a>,
     proof: &'a OperatorSessionProof,
     master_data: &'a MasterDataRepository,
@@ -416,6 +446,7 @@ impl<'a> BoundWriter<'a> {
             service,
             proof,
             master_data,
+            amendments: None,
             timezone,
             issued,
             stale_proof: None,
@@ -439,8 +470,70 @@ impl<'a> BoundWriter<'a> {
         self
     }
 
+    #[must_use]
+    pub fn with_amendments(
+        mut self,
+        service: &'a ea_admin::amendment::AmendmentDraftService<'a, 'a>,
+        clock: &'a (dyn Fn() -> UnixMillis + Send + Sync),
+    ) -> Self {
+        self.amendments = Some(service);
+        self.clock = clock;
+        self
+    }
+
+    pub(crate) fn prepare_amendment_input(
+        &self,
+        input: &ea_ui_contracts::AmendmentInputView,
+    ) -> Result<ea_writer::AmendmentInputV1, CommandError> {
+        let reference = input
+            .reference
+            .to_reference()
+            .ok_or_else(|| CommandError::new("EA-DESKTOP-AMENDMENT-REFERENCE-REJECTED"))?;
+        let changes = input
+            .changes
+            .iter()
+            .map(|change| {
+                ea_schema::AmendmentChangeV1::new(
+                    change.field_path.clone(),
+                    change.change_text.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CommandError::new(e.code()))?;
+        self.amendments
+            .ok_or_else(|| CommandError::new("EA-DESKTOP-AMENDMENT-UNAVAILABLE"))?
+            .create_from_reference(
+                reference,
+                ea_writer::AmendmentContentV1 {
+                    timezone: self.timezone.to_owned(),
+                    source: NativeSourceV1::new(NATIVE_SOURCE_ID, NATIVE_SOURCE_FORMAT_VERSION)
+                        .map_err(|e| CommandError::new(e.code()))?,
+                    reason: input.reason.clone(),
+                    changes,
+                },
+                (self.clock)(),
+            )
+            .map_err(|e| CommandError::new(e.code()))
+    }
+
+    fn confirmed_preview(
+        &self,
+        confirmed: &FinalizationPreviewView,
+    ) -> Result<&FinalizationPreview, CommandError> {
+        let issued = self
+            .issued
+            .ok_or_else(|| CommandError::new(PREVIEW_NOT_ISSUED))?;
+        if FinalizationPreviewView::from(issued) != *confirmed {
+            return Err(CommandError::new(PREVIEW_MISMATCH));
+        }
+        Ok(issued)
+    }
+
     /// Die Eingabe des Kerns aus der Ansicht der Oberflaeche.
-    fn input(&self, incident: &IncidentInputView) -> Result<FinalizationInputV1, CommandError> {
+    pub(crate) fn input(
+        &self,
+        incident: &IncidentInputView,
+    ) -> Result<FinalizationInputV1, CommandError> {
         let personnel = incident
             .personnel
             .iter()
@@ -496,6 +589,31 @@ impl<'a> BoundWriter<'a> {
 }
 
 impl WriterPreviewPort for BoundWriter<'_> {
+    fn validate_amendment_reference(
+        &self,
+        reference: &ea_ui_contracts::CorrectionReferenceView,
+    ) -> Result<(), CommandError> {
+        self.prepare_amendment_input(&ea_ui_contracts::AmendmentInputView {
+            reference: reference.clone(),
+            reason: String::new(),
+            changes: vec![],
+        })
+        .map(|_| ())
+    }
+    fn preview_amendment(
+        &self,
+        input: &ea_ui_contracts::AmendmentInputView,
+    ) -> Result<FinalizationPreviewView, CommandError> {
+        self.service
+            .preview_amendment(
+                self.proof,
+                self.prepare_amendment_input(input)?,
+                (self.clock)(),
+            )
+            .map(|preview| FinalizationPreviewView::from(&preview))
+            .map_err(|e| CommandError::new(e.code()))
+    }
+
     fn preview(
         &self,
         incident: &IncidentInputView,
@@ -509,6 +627,69 @@ impl WriterPreviewPort for BoundWriter<'_> {
 }
 
 impl WriterFinalizePort for BoundWriter<'_> {
+    fn finalize_amendment(
+        &self,
+        input: &ea_ui_contracts::AmendmentInputView,
+        confirmed: &FinalizationPreviewView,
+    ) -> Result<FinalizeOutcomeView, CommandError> {
+        let issued = self.confirmed_preview(confirmed)?;
+        let input = self.prepare_amendment_input(input)?;
+        let receipt = self
+            .stale_receipt
+            .map(|slot| {
+                slot.lock()
+                    .map(|mut slot| slot.take())
+                    .map_err(|_| CommandError::new(WriterError::ReauthRequired.code()))
+            })
+            .transpose()?
+            .flatten();
+        let outcome = match receipt {
+            Some(receipt) => self.service.finalize_amendment_with_stale_registry(
+                self.proof,
+                input,
+                issued,
+                &receipt,
+                (self.clock)(),
+            ),
+            None => self
+                .service
+                .finalize_amendment(self.proof, input, issued, (self.clock)()),
+        }
+        .map_err(|e| CommandError::new(e.code()))?;
+        Ok(FinalizeOutcomeView::new(&outcome, None))
+    }
+
+    fn acknowledge_stale_amendment(
+        &self,
+        input: &ea_ui_contracts::AmendmentInputView,
+        confirmed: &FinalizationPreviewView,
+        warning_confirmed: bool,
+    ) -> Result<(), CommandError> {
+        let issued = self.confirmed_preview(confirmed)?;
+        let mut receipt = self
+            .stale_receipt
+            .ok_or_else(|| CommandError::new(WriterError::StaleAckRequired.code()))?
+            .lock()
+            .map_err(|_| CommandError::new(WriterError::ReauthRequired.code()))?;
+        *receipt = None;
+        let proof = self
+            .stale_proof
+            .and_then(|slot| slot.lock().ok()?.take())
+            .ok_or_else(|| CommandError::new(WriterError::ReauthRequired.code()))?;
+        *receipt = Some(
+            self.service
+                .acknowledge_stale_amendment(
+                    proof,
+                    self.prepare_amendment_input(input)?,
+                    issued,
+                    warning_confirmed,
+                    (self.clock)(),
+                )
+                .map_err(|e| CommandError::new(e.code()))?,
+        );
+        Ok(())
+    }
+
     fn acknowledge_stale_registry(
         &self,
         incident: &IncidentInputView,
@@ -675,6 +856,119 @@ pub trait ReauthPort {
     fn reauthenticate(&self, purpose: ReauthPurpose) -> Result<(), CommandError>;
 }
 
+/// Authority owned by the native host, checked again for each command. The UI
+/// never receives or reconstructs its operator proofs.
+pub trait RuntimeSessionPort: Send + Sync {
+    fn verified_role(&self) -> Result<Option<OperatorRoleV1>, CommandError>;
+    fn login(&self) -> Result<(), CommandError> {
+        Err(CommandError::new(crate::commands::REAUTH_UNAVAILABLE))
+    }
+    /// Clear every proof, issued preview, and pending receipt before notifying UI.
+    fn invalidate(&self);
+}
+
+/// Native destruction operations retain and verify their own proofs and exact
+/// durable jobs. No caller-supplied boolean or view is an authority argument.
+pub trait DestructionAdministrationPort: Send + Sync {
+    /// Select existing public originals only. Legacy hosts must refuse;
+    /// there is no fallback to unlock, prepare, start or archive bundle export.
+    fn export_reader_delivery(
+        &self,
+        _id: ea_types::DestructionId,
+        _expected_preflight_hash: ea_types::ObjectHash,
+        _reader: ea_types::DeviceId,
+    ) -> Result<ea_ui_contracts::DestructionReaderDeliveryView, CommandError> {
+        Err(CommandError::new("EA-DESKTOP-READER-DELIVERY-UNAVAILABLE"))
+    }
+
+    /// Explicitly opens the same configured custodian and obtains its own
+    /// Writer presence. This does not start, resume or finalize a destruction.
+    fn authenticate_custodian(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+    /// Authenticated server reads and verified local import only; no remote job or event POST.
+    fn synchronize(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+    fn read(
+        &self,
+        id: Option<ea_types::DestructionId>,
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+    fn prepare(
+        &self,
+        exact_authorization: &[u8],
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+    fn start(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+    fn resume(
+        &self,
+        id: ea_types::DestructionId,
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+    fn import_progress(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+        exact_etb_objects: &[Vec<u8>],
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryMediumChoice {
+    UseConfiguredSource,
+    Missing,
+}
+
+/// Admin orchestration with a separately authenticated native Writer.
+/// No renderer evidence, session or unverified draft reference enters this port.
+pub trait DestructionEvidencePort: Send + Sync {
+    fn preview(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+    ) -> Result<ea_ui_contracts::DestructionEvidenceReviewView, CommandError>;
+    fn finalize(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+        confirmed: &ea_ui_contracts::FinalizationPreviewView,
+    ) -> Result<ea_ui_contracts::FinalizeOutcomeView, CommandError>;
+    fn recover(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+    ) -> Result<ea_ui_contracts::PendingResumeOutcomeView, CommandError>;
+    fn discard(
+        &self,
+        id: ea_types::DestructionId,
+        expected_preflight_hash: ea_types::ObjectHash,
+    ) -> Result<ea_ui_contracts::DiscardStateView, CommandError>;
+}
+
+/// Inputs select only a configured medium route; the native kernel establishes
+/// identity, protection and result independently.
+pub trait RecoveryAdministrationPort: Send + Sync {
+    fn read(&self) -> Result<ea_ui_contracts::RecoveryAdministrationView, CommandError>;
+    fn start(&self) -> Result<ea_ui_contracts::RecoveryAdministrationView, CommandError>;
+    fn submit(
+        &self,
+        operation: &str,
+        run: &str,
+        request: &str,
+        choice: RecoveryMediumChoice,
+    ) -> Result<ea_ui_contracts::RecoveryAdministrationView, CommandError>;
+    fn cancel(
+        &self,
+        operation: &str,
+    ) -> Result<ea_ui_contracts::RecoveryAdministrationView, CommandError>;
+}
+
 /// Der synchrone Port der Verwaltungsflaeche (Stufe 5, Task 6).
 ///
 /// Der Port existiert, weil die vier Workflow-Dienste aus `ea-admin` allesamt
@@ -711,6 +1005,24 @@ pub trait ReauthPort {
 /// `unresolved_report_json`) und die Entscheidung `production_ready` im
 /// Aggregat bleiben soll.
 pub trait AdministrationPort {
+    /// Read-only snapshot of the configured local archive's writer lock.
+    /// Unconfigured adapters refuse rather than infer availability.
+    fn diagnose_writer_lock(
+        &self,
+    ) -> Result<ea_ui_contracts::LocalWriterLockDiagnosis, CommandError> {
+        Err(CommandError::new(
+            crate::commands::ADMINISTRATION_UNAVAILABLE,
+        ))
+    }
+
+    /// Reopens exact persisted unfinished rounds across all four workflows.
+    /// Unconfigured/older adapters explicitly refuse this optional read seam.
+    fn open_ceremonies(&self) -> Result<Vec<TrustCeremonyView>, CommandError> {
+        Err(CommandError::new(
+            crate::commands::ADMINISTRATION_UNAVAILABLE,
+        ))
+    }
+
     /// Die ausstehenden Geraeteanfragen.
     ///
     /// # Errors
@@ -983,6 +1295,7 @@ impl SessionState {
 #[derive(Clone)]
 pub struct DesktopState {
     session: Arc<Mutex<SessionState>>,
+    runtime_session: Option<Arc<dyn RuntimeSessionPort>>,
     startup: Option<Arc<dyn StartupRecoveryPort + Send + Sync>>,
     master_data: Option<Arc<MasterDataRepository>>,
     drafts: Option<Arc<dyn DraftPayloadPort + Send + Sync>>,
@@ -993,6 +1306,9 @@ pub struct DesktopState {
     bundle_export: Option<Arc<dyn ArchiveBundleExportPort + Send + Sync>>,
     reauth: Option<Arc<dyn ReauthPort + Send + Sync>>,
     administration: Option<Arc<dyn AdministrationPort + Send + Sync>>,
+    destruction: Option<Arc<dyn DestructionAdministrationPort>>,
+    destruction_evidence: Option<Arc<dyn DestructionEvidencePort>>,
+    recovery: Option<Arc<dyn RecoveryAdministrationPort>>,
 }
 
 impl DesktopState {
@@ -1007,6 +1323,7 @@ impl DesktopState {
     ) -> Self {
         Self {
             session: Arc::new(Mutex::new(session)),
+            runtime_session: None,
             startup,
             master_data,
             drafts,
@@ -1017,6 +1334,9 @@ impl DesktopState {
             bundle_export: None,
             reauth: None,
             administration: None,
+            destruction: None,
+            destruction_evidence: None,
+            recovery: None,
         }
     }
 
@@ -1030,6 +1350,36 @@ impl DesktopState {
     pub fn with_sync_state(mut self, sync_state: Arc<dyn SyncStatePort + Send + Sync>) -> Self {
         self.sync_state = Some(sync_state);
         self
+    }
+
+    #[must_use]
+    pub fn with_destruction(mut self, port: Arc<dyn DestructionAdministrationPort>) -> Self {
+        self.destruction = Some(port);
+        self
+    }
+
+    pub fn destruction_port(&self) -> Option<Arc<dyn DestructionAdministrationPort>> {
+        self.destruction.clone()
+    }
+
+    #[must_use]
+    pub fn with_destruction_evidence(mut self, port: Arc<dyn DestructionEvidencePort>) -> Self {
+        self.destruction_evidence = Some(port);
+        self
+    }
+
+    pub fn destruction_evidence_port(&self) -> Option<Arc<dyn DestructionEvidencePort>> {
+        self.destruction_evidence.clone()
+    }
+
+    #[must_use]
+    pub fn with_recovery(mut self, port: Arc<dyn RecoveryAdministrationPort>) -> Self {
+        self.recovery = Some(port);
+        self
+    }
+
+    pub fn recovery_port(&self) -> Option<Arc<dyn RecoveryAdministrationPort>> {
+        self.recovery.clone()
     }
 
     /// Der Sync-Zustandsport, als GETEILTER Griff.
@@ -1120,6 +1470,29 @@ impl DesktopState {
         &self.session
     }
 
+    #[must_use]
+    pub fn with_runtime_session(mut self, runtime: Arc<dyn RuntimeSessionPort>) -> Self {
+        self.runtime_session = Some(runtime);
+        self
+    }
+
+    pub fn verified_role(&self) -> Result<Option<OperatorRoleV1>, CommandError> {
+        if let Some(runtime) = &self.runtime_session {
+            return runtime.verified_role();
+        }
+        self.session
+            .lock()
+            .map(|session| session.role())
+            .map_err(|_| CommandError::new(crate::commands::SESSION_STATE_UNREADABLE))
+    }
+
+    pub fn login(&self) -> Result<(), CommandError> {
+        self.runtime_session
+            .as_ref()
+            .ok_or_else(|| CommandError::new(crate::commands::REAUTH_UNAVAILABLE))?
+            .login()
+    }
+
     /// Entwertet die Sitzung, und zwar UNABHAENGIG von einem vergifteten
     /// Schloss.
     ///
@@ -1128,6 +1501,9 @@ impl DesktopState {
     /// ist, liesse die Sitzung stehen. [`PoisonError::into_inner`] ist genau
     /// dafuer da.
     pub fn invalidate_session_on_lock(&self) {
+        if let Some(runtime) = &self.runtime_session {
+            runtime.invalidate();
+        }
         self.session
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1199,6 +1575,41 @@ mod tests {
     use super::{
         CommandError, DesktopState, NATIVE_SOURCE_ID, ReauthPort, SessionState, finalization_input,
     };
+
+    #[test]
+    fn native_role_is_rechecked_and_lock_discards_host_authority_before_announcement() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct NativeSession(AtomicBool);
+        impl super::RuntimeSessionPort for NativeSession {
+            fn verified_role(&self) -> Result<Option<OperatorRoleV1>, CommandError> {
+                Ok(self
+                    .0
+                    .load(Ordering::SeqCst)
+                    .then_some(OperatorRoleV1::Writer))
+            }
+            fn invalidate(&self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let native = Arc::new(NativeSession(AtomicBool::new(true)));
+        let state = DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+            .with_runtime_session(native.clone());
+        assert_eq!(state.verified_role().unwrap(), Some(OperatorRoleV1::Writer));
+        crate::honor_session_lock(&state, || {
+            assert!(!native.0.load(Ordering::SeqCst));
+            assert_eq!(state.verified_role().unwrap(), None);
+        });
+        // Neither an old UI marker nor another role read revives native authority.
+        state
+            .session()
+            .lock()
+            .unwrap()
+            .record_fresh_reauth(ReauthPurpose::Finalize);
+        assert_eq!(state.verified_role().unwrap(), None);
+    }
 
     fn view() -> IncidentInputView {
         IncidentInputView {

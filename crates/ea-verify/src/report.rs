@@ -537,6 +537,7 @@ pub struct VerificationReportV1 {
     pub(crate) entry_package_count: usize,
     pub(crate) destroyed_entry_count: usize,
     pub(crate) chain_head: ChainHeadV1,
+    pub(crate) public_chain_head: Option<ChainHeadV1>,
     pub(crate) registry_versions: BTreeSet<RegistryVersion>,
     pub(crate) object_results: BTreeMap<ObjectHash, ObjectResultV1>,
     pub(crate) authorized_destructions: BTreeMap<DestructionId, AuthorizedDestructionV1>,
@@ -565,9 +566,28 @@ pub struct VerificationReportV1 {
     /// KEIN Berichtsfeld: das Schema ist `additionalProperties: false`. Der
     /// Wert wirkt allein ueber [`VerificationReportV1::is_fully_verified`].
     pub(crate) pipeline_completed: bool,
+    // In-process exact selection proof; never changes the public report bytes.
+    pub(crate) verified_time_floor: Option<ea_types::UnixMillis>,
+    pub(crate) recipient_grants: BTreeMap<EntryHash, (ObjectHash, Option<ea_types::UnixMillis>)>,
 }
 
 impl VerificationReportV1 {
+    /// Authenticated public manifest-chain progression. This cannot establish
+    /// Stub destruction completion or its original EIP object hash.
+    pub fn verified_public_chain_head(&self) -> Option<ChainHeadV1> {
+        self.public_chain_head
+    }
+
+    pub fn verified_time_floor(&self) -> Option<ea_types::UnixMillis> {
+        self.verified_time_floor
+    }
+    pub fn recipient_grants(
+        &self,
+    ) -> impl Iterator<Item = (EntryHash, ObjectHash, Option<ea_types::UnixMillis>)> + '_ {
+        self.recipient_grants
+            .iter()
+            .map(|(entry, (grant, expires))| (*entry, *grant, *expires))
+    }
     /// Ein leerer Bericht ueber `chain_head`, noch ohne `reportHash`.
     ///
     /// `pub(crate)`: der Bericht bleibt von aussen nur lesbar.
@@ -577,6 +597,7 @@ impl VerificationReportV1 {
             entry_package_count: 0,
             destroyed_entry_count: 0,
             chain_head,
+            public_chain_head: None,
             registry_versions: BTreeSet::new(),
             object_results: BTreeMap::new(),
             authorized_destructions: BTreeMap::new(),
@@ -591,6 +612,8 @@ impl VerificationReportV1 {
             rollback: RollbackAssessment::NotAssessable,
             report_hash: Hash32::ZERO,
             pipeline_completed: false,
+            recipient_grants: BTreeMap::new(),
+            verified_time_floor: None,
         }
     }
 

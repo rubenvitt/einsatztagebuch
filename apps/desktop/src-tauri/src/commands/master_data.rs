@@ -18,12 +18,20 @@ pub(crate) fn master_data_counts_core(
     let repository = state
         .master_data()
         .ok_or_else(|| CommandError::new(MASTER_DATA_UNAVAILABLE))?;
+    state
+        .verified_role()?
+        .filter(|role| *role == ea_format::OperatorRoleV1::Writer)
+        .ok_or_else(|| CommandError::new(super::NO_VERIFIED_SESSION))?;
     let persons = repository
         .person_count()
         .map_err(|_| CommandError::new(MASTER_DATA_UNREADABLE))?;
     let vehicles = repository
         .vehicle_count()
         .map_err(|_| CommandError::new(MASTER_DATA_UNREADABLE))?;
+    state
+        .verified_role()?
+        .filter(|role| *role == ea_format::OperatorRoleV1::Writer)
+        .ok_or_else(|| CommandError::new(super::NO_VERIFIED_SESSION))?;
     Ok(MasterDataCountsDto { persons, vehicles })
 }
 

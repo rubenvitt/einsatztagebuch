@@ -203,6 +203,10 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
 #[allow(dead_code)]
 const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
     (
+        "ea-destruction",
+        "Native destruction request service persists exact authorization/event bytes and signed operator audit atomically in SQLCipher. Shared pure transition rules remain in wasm-safe ea-verify.",
+    ),
+    (
         "ea-recovery",
         "carries the filesystem-backed archive source, plaintext handling and \
          restrictive target permissions on top of `std::fs`, so it is not shared \
@@ -541,15 +545,34 @@ fn run_build_wasm(root: &Path) -> Result<(), String> {
         ],
     )
     .map_err(|error| format!("failed to invoke cargo: {error}"))?;
+    // Cargo owns artifact placement, including CARGO_TARGET_DIR and project
+    // configuration. Resolve its actual target directory rather than silently
+    // requiring the default workspace/target layout after a successful build.
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--locked", "--format-version", "1", "--no-deps"])
+        .current_dir(root)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .output()
+        .map_err(|error| format!("failed to read cargo target directory: {error}"))?;
+    if !metadata.status.success() {
+        return Err("cargo metadata could not resolve the built WASM artifact".to_owned());
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| format!("invalid cargo metadata: {error}"))?;
+    let target = metadata["target_directory"]
+        .as_str()
+        .ok_or("cargo metadata omitted target_directory")?;
+    let artifact = Path::new(target).join("wasm32-unknown-unknown/debug/ea_reader_wasm.wasm");
     run_process_without_rustflags(
         root,
         "wasm-bindgen",
         &[
-            "--target",
-            "web",
-            "--out-dir",
-            "apps/web/src/bridge/pkg",
-            "target/wasm32-unknown-unknown/debug/ea_reader_wasm.wasm",
+            std::ffi::OsStr::new("--target"),
+            std::ffi::OsStr::new("web"),
+            std::ffi::OsStr::new("--out-dir"),
+            std::ffi::OsStr::new("apps/web/src/bridge/pkg"),
+            artifact.as_os_str(),
         ],
     )
     .map_err(|error| format!("failed to invoke wasm-bindgen: {error}"))?;

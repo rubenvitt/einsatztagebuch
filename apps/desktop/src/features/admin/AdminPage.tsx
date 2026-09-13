@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
-import { Alert, Space, Typography } from 'antd'
-import { useEffect, useState } from 'react'
+import { Alert, Button, Space, Typography } from 'antd'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 
 import {
@@ -8,11 +8,15 @@ import {
   DEVICE_REVOKE_KIND,
   POLICY_CHANGE_KIND,
   WRITER_TRANSITION_KIND,
+  TRUST_CEREMONY_KIND_TEXT,
+  stepText,
 } from './ceremony'
 import { ClockReleaseWizard } from './ClockReleaseWizard'
 import {
   isContractViolation,
   validateCeremony,
+  validateOpenCeremonies,
+  ContractViolation,
   validateChecklist,
   validateClockReleaseOffer,
   validateClockReleaseOutcome,
@@ -28,6 +32,7 @@ import { FingerprintApproval, REAUTH_REQUIRED_TEXT } from './FingerprintApproval
 import { GoLiveChecklist } from './GoLiveChecklist'
 import { POLICY_REQUEST_ID, PolicyEditor } from './PolicyEditor'
 import { RegistryHealth } from './RegistryHealth'
+import { WriterLockDiagnosis, validateWriterLockDiagnosis } from './WriterLockDiagnosis'
 import { RevocationConfirm } from './RevocationConfirm'
 import { WriterTransitionWizard } from './WriterTransitionWizard'
 import type {
@@ -40,6 +45,7 @@ import type {
   PolicyProfileView,
   ReauthResultView,
   RegistryHealthView,
+  LocalWriterLockDiagnosis,
   RevocationEffectView,
   TrustCeremonyKind,
   TrustCeremonyView,
@@ -54,8 +60,10 @@ import { WRITER_COMMANDS } from '../writer/WriterPage'
  * hier ausgeschrieben und nirgends ein zweites Mal.
  */
 export const ADMIN_COMMANDS = {
+  openCeremonies: 'admin_open_ceremonies',
   pendingDeviceRequests: 'admin_pending_device_requests',
   ceremonyBegin: 'admin_ceremony_begin',
+  ceremonyRead: 'admin_ceremony_read',
   ceremonyConfirmFingerprint: 'admin_ceremony_confirm_fingerprint',
   ceremonyAuthorize: 'admin_ceremony_authorize',
   ceremonyExportRequest: 'admin_ceremony_export_request',
@@ -63,6 +71,7 @@ export const ADMIN_COMMANDS = {
   ceremonyPublish: 'admin_ceremony_publish',
   policyProfile: 'admin_policy_profile',
   registryHealth: 'admin_registry_health',
+  diagnoseWriterLock: 'admin_writer_lock_diagnosis',
   goLiveChecklist: 'admin_go_live_checklist',
   goLiveExportUnresolved: 'admin_go_live_export_unresolved',
   clockReleaseOffer: 'admin_clock_release_offer',
@@ -89,7 +98,7 @@ export const REAUTH_PURPOSES = {
 /**
  * Alles, was diese Flaeche vom Wirt braucht — und nichts darueber hinaus.
  *
- * Die sieben WERTE sind beim ersten Rendervorgang bekannt (Muster
+ * Die acht WERTE sind beim ersten Rendervorgang bekannt (Muster
  * `WriterBridge`): eine Verwaltungsflaeche, die ihre Go-live-Liste erst nach
  * einem Mikrotask kennt, haette einen Moment ohne Aussage ueber die
  * Produktionsbereitschaft. Alles andere ist eine HANDLUNG und asynchron. Was
@@ -97,15 +106,20 @@ export const REAUTH_PURPOSES = {
  * einen Klartext oeffnet.
  */
 export type AdminBridge = {
+  readonly diagnoseWriterLock: () => Promise<LocalWriterLockDiagnosis>
+  readonly openCeremonies: readonly TrustCeremonyView[]
+  readonly readOpenCeremonies: () => Promise<readonly TrustCeremonyView[]>
   readonly pendingRequests: readonly PendingDeviceRequestView[]
   readonly checklist: GoLiveChecklistView
   readonly registryHealth: RegistryHealthView
   readonly policy: PolicyProfileView
   readonly writerTransition: WriterTransitionView
+  readonly readWriterTransition: () => Promise<WriterTransitionView>
   readonly clockReleaseOffer: ClockReleaseOfferView
   readonly devicePosture: DevicePostureSummaryView | null
   readonly reauthenticate: (purposeCode: string) => Promise<ReauthResultView>
   readonly beginCeremony: (requestId: string, kind: TrustCeremonyKind) => Promise<TrustCeremonyView>
+  readonly readCeremony: (ceremonyId: string) => Promise<TrustCeremonyView>
   readonly confirmFingerprint: (
     ceremonyId: string,
     reportedFingerprint: string,
@@ -167,7 +181,7 @@ function Region({ title, children }: { readonly title: string; readonly children
 /**
  * Die Verwaltungsflaeche.
  *
- * Acht Unterbereiche in fester Reihenfolge; die Root-Zeremonie oeffnet sich
+ * Neun Unterbereiche in fester Reihenfolge; die Root-Zeremonie oeffnet sich
  * unter dem Bereich, der sie begonnen hat (Geraeteanfrage, Richtlinie oder
  * Widerruf), und es laeuft hoechstens eine zugleich. Jede Root-Handlung
  * authentisiert ERST und jedes Mal neu; ist der Nachweis nicht frisch, geschieht
@@ -179,6 +193,7 @@ function Region({ title, children }: { readonly title: string; readonly children
  * `WriterPage`.
  */
 export function AdminPage({ bridge }: { readonly bridge: AdminBridge }): ReactElement {
+  const diagnoseWriterLock = useCallback(() => bridge.diagnoseWriterLock(), [bridge])
   const [ceremony, setCeremony] = useState<TrustCeremonyView | null>(null)
   const [ceremonyNotice, setCeremonyNotice] = useState<string | null>(null)
   const [ceremonyError, setCeremonyError] = useState<string | null>(null)
@@ -189,6 +204,23 @@ export function AdminPage({ bridge }: { readonly bridge: AdminBridge }): ReactEl
   const [effect, setEffect] = useState<RevocationEffectView | null>(null)
   const [revocationNotice, setRevocationNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [savedRounds, setSavedRounds] = useState(bridge.openCeremonies)
+  const [roundsNotice, setRoundsNotice] = useState<string | null>(null)
+  const [readingRounds, setReadingRounds] = useState(false)
+  const roundReadGeneration = useRef(0)
+  const refreshRounds = useCallback(() => {
+    const issued = ++roundReadGeneration.current
+    setReadingRounds(true)
+    setRoundsNotice(null)
+    bridge.readOpenCeremonies().then(
+      rounds => { if (issued === roundReadGeneration.current) setSavedRounds(rounds) },
+      (error: unknown) => { if (issued === roundReadGeneration.current) setRoundsNotice(refusalCode(error)) },
+    ).finally(() => { if (issued === roundReadGeneration.current) setReadingRounds(false) })
+  }, [bridge])
+  useEffect(() => {
+    if (ceremony !== null) refreshRounds()
+    return () => { roundReadGeneration.current += 1 }
+  }, [ceremony, refreshRounds])
 
   /** Eine Handlung des Wirts, deren Ablehnung als Code an `onRefused` geht. */
   const run = <T,>(
@@ -279,8 +311,16 @@ export function AdminPage({ bridge }: { readonly bridge: AdminBridge }): ReactEl
           ceremonyStep(() => bridge.importReply(ceremony.ceremonyId))
         }}
         onPublish={() => {
-          ceremonyRootStep(() => bridge.publish(ceremony.ceremonyId))
+          ceremonyRootStep(async () => {
+            const published = await bridge.publish(ceremony.ceremonyId)
+            setCeremony(published)
+            if (published.kind === WRITER_TRANSITION_KIND) {
+              setTransition(await bridge.readWriterTransition())
+            }
+            return published
+          })
         }}
+        onOpenLinkedCeremony={(id) => { ceremonyStep(() => bridge.readCeremony(id)) }}
       />
     )
 
@@ -288,6 +328,28 @@ export function AdminPage({ bridge }: { readonly bridge: AdminBridge }): ReactEl
     <Space direction="vertical" size="large">
       <Region title="Go-live-Status">
         <GoLiveChecklist checklist={bridge.checklist} onExportUnresolved={bridge.exportUnresolved} />
+      </Region>
+
+      <Region title="Gespeicherte Root-Runden">
+        {roundsNotice !== null && <Alert role="alert" type="warning" title="Gespeicherte Runden konnten nicht gelesen werden." description={roundsNotice} />}
+        {savedRounds.length === 0 ? <Typography.Paragraph>Keine offenen Root-Runden vorhanden.</Typography.Paragraph> :
+          <ul>{savedRounds.map(saved => <li key={saved.ceremonyId}>
+            <Space direction="vertical" size="small">
+              <Button disabled={busy} style={{ height: 'auto', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'left' }}
+                onClick={() => {
+                  setRoundsNotice(null)
+                  run(async () => {
+                    const result = await bridge.readCeremony(saved.ceremonyId)
+                    if (result.kind !== saved.kind) throw new ContractViolation('Die gespeicherte Runde gehört zu einem anderen Vorgang.')
+                    return result
+                  }, setCeremony, setRoundsNotice)
+                }}>
+                {TRUST_CEREMONY_KIND_TEXT[saved.kind]} – {saved.ceremonyId} öffnen
+              </Button>
+              <Typography.Text>{stepText(saved, saved.step)}</Typography.Text>
+            </Space>
+          </li>)}</ul>}
+        <Button disabled={busy || readingRounds} onClick={refreshRounds}>Gespeicherte Runden neu lesen</Button>
       </Region>
 
       <Region title="Geräteanfragen">
@@ -303,6 +365,10 @@ export function AdminPage({ bridge }: { readonly bridge: AdminBridge }): ReactEl
 
       <Region title="Registry">
         <RegistryHealth health={bridge.registryHealth} />
+      </Region>
+
+      <Region title="Archiv-Sperre">
+        <WriterLockDiagnosis diagnose={diagnoseWriterLock} busy={busy} />
       </Region>
 
       <Region title="Richtlinie">
@@ -337,8 +403,14 @@ export function AdminPage({ bridge }: { readonly bridge: AdminBridge }): ReactEl
               setTransitionNotice,
             )
           }}
-          onBeginCeremony={(targetHash) => {
-            begin(targetHash, WRITER_TRANSITION_KIND)
+          onOpenCeremony={(id) => {
+            ceremonyStep(async () => {
+              const result = await bridge.readCeremony(id)
+              if (result.kind !== WRITER_TRANSITION_KIND) {
+                throw new ContractViolation('Die gespeicherte Runde gehört zu einem anderen Vorgang.')
+              }
+              return result
+            })
           }}
         />
         {stepper(WRITER_TRANSITION_KIND)}
@@ -394,7 +466,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 /**
  * Die Bruecke ueber die Kommandos des Wirts.
  *
- * Sie wird EINMAL gebaut, nachdem die sieben Werte gelesen sind. Jede Antwort
+ * Sie wird EINMAL gebaut, nachdem die acht Werte gelesen sind. Jede Antwort
  * mit einer Position einer geschlossenen Aufzaehlung laeuft durch
  * `contract-check.ts`, statt geglaubt zu werden. Die Geraetehaltung ist die
  * einzige Antwort, deren Ausfall die Flaeche nicht schliesst: ohne Meldung
@@ -403,8 +475,9 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
  * GESCHLOSSEN laesst.
  */
 export async function connectAdminBridge(): Promise<AdminBridge> {
-  const [pendingRequests, checklist, registryHealth, policy, writerTransition, clockReleaseOffer, devicePosture] =
+  const [openCeremonies, pendingRequests, checklist, registryHealth, policy, writerTransition, clockReleaseOffer, devicePosture] =
     await Promise.all([
+      call<unknown>(ADMIN_COMMANDS.openCeremonies).then(validateOpenCeremonies),
       call<unknown>(ADMIN_COMMANDS.pendingDeviceRequests).then(validatePendingRequests),
       call<unknown>(ADMIN_COMMANDS.goLiveChecklist).then(validateChecklist),
       call<unknown>(ADMIN_COMMANDS.registryHealth).then(validateRegistryHealth),
@@ -416,15 +489,24 @@ export async function connectAdminBridge(): Promise<AdminBridge> {
   const ceremonyCall = (command: string, args: Record<string, unknown>) =>
     call<unknown>(command, args).then(validateCeremony)
   return {
+    diagnoseWriterLock: () => call<unknown>(ADMIN_COMMANDS.diagnoseWriterLock).then(validateWriterLockDiagnosis),
+    openCeremonies,
+    readOpenCeremonies: () => call<unknown>(ADMIN_COMMANDS.openCeremonies).then(validateOpenCeremonies),
     pendingRequests,
     checklist,
     registryHealth,
     policy,
     writerTransition,
+    readWriterTransition: () => call<unknown>(ADMIN_COMMANDS.writerTransitionState).then(validateWriterTransition),
     clockReleaseOffer,
     devicePosture,
     reauthenticate: (purpose) => call(WRITER_COMMANDS.reauthenticate, { purpose }),
     beginCeremony: (requestId, kind) => ceremonyCall(ADMIN_COMMANDS.ceremonyBegin, { requestId, kind }),
+    readCeremony: async (ceremonyId) => {
+      const result = await ceremonyCall(ADMIN_COMMANDS.ceremonyRead, { ceremonyId })
+      if (result.ceremonyId !== ceremonyId) throw new ContractViolation('Die Antwort gehört zu einer anderen Zeremonie.')
+      return result
+    },
     confirmFingerprint: (ceremonyId, reportedFingerprint) =>
       ceremonyCall(ADMIN_COMMANDS.ceremonyConfirmFingerprint, { ceremonyId, reportedFingerprint }),
     authorize: (ceremonyId) => ceremonyCall(ADMIN_COMMANDS.ceremonyAuthorize, { ceremonyId }),
@@ -487,8 +569,8 @@ export function AdminSurface({
         type="error"
         showIcon={false}
         closable={false}
-        message="Die Verwaltung ist nicht geöffnet"
-        description={`Grund: ${refused}. Es wird keine Fläche gezeigt.`}
+        message="Die allgemeine Verwaltung ist nicht geöffnet"
+        description={`Grund: ${refused}. Ihre Verwaltungsfunktionen bleiben geschlossen.`}
       />
     )
   }

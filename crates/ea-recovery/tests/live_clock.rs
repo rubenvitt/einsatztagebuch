@@ -1,19 +1,10 @@
-//! Ein Bestand, dessen Registrierungsfenster die ECHTE Betriebssystemuhr
-//! enthaelt.
+//! Archivpruefung unter der echten Betriebssystemuhr.
 //!
-//! # Warum es dieses Target gibt
-//!
-//! Die CLU des Wiederherstellungspfades kennt genau EINE Uhr:
-//! `SystemTime::now()`. Unter ihr degenerieren die geerbten Fixtures aus
-//! `crates/ea-verify/tests/support` zu einer LEEREN Aussage — gemessen, nicht
-//! vermutet: `complete_valid_archive()` liefert bei der Fixture-Uhr 800
-//! `object_results().len() == 1`, bei der echten Uhr `0`, und zwar bei
-//! unveraendertem `is_fully_verified() == true`. Ein Erfolgspfad, der sich auf
-//! diesen Bestand stuetzte, pruefte nichts und saehe trotzdem gruen aus.
-//!
-//! `the_inherited_fixture_says_nothing_at_the_real_os_clock` haelt genau diesen
-//! Kontrastbefund fest, damit die Begruendung dieses Targets nicht als
-//! Kommentar behauptet, sondern als Test gemessen wird.
+//! Die CLI verwendet `SystemTime::now()`. Live-Fixtures behalten einen
+//! aktuell waehlbaren Registry-Head; geerbte Fixtures pruefen zusaetzlich,
+//! dass alte, exakt signierte Eintraege nach Ablauf der urspruenglichen
+//! Registry-Lease weiterhin verifiziert werden (§§12.3/12.4).
+//! Beide Faelle muessen wirkliche Objektergebnisse liefern.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -66,14 +57,10 @@ fn the_live_fixture_is_fully_verified_at_the_real_os_clock() {
     );
 }
 
-/// Der Kontrastbefund: der GEERBTE Bestand sagt bei derselben Uhr nichts.
-///
-/// `is_fully_verified()` wird hier ABSICHTLICH NICHT geprueft — es ist wahr,
-/// und genau das ist die Falle. Der Bestand traegt ein Eintragspaket, und ueber
-/// dieses Paket wird nichts ausgesagt. Ein Erfolgspfad, der sich allein auf
-/// `is_fully_verified()` stuetzte, nennte das gruen.
+/// Historische Signaturen bleiben nach Ablauf der alten Head-Lease pruefbar.
+/// Die Aussage muss vollstaendig sein und den konkreten Eintrag umfassen.
 #[test]
-fn the_inherited_fixture_says_nothing_at_the_real_os_clock() {
+fn the_inherited_fixture_remains_verified_after_its_registry_lease_expires() {
     let built = support::verify_support::complete_valid_archive();
     let anchor = built.anchor();
 
@@ -84,12 +71,9 @@ fn the_inherited_fixture_says_nothing_at_the_real_os_clock() {
         report.entry_package_count() == 1,
         "der geerbte Bestand traegt weiterhin genau ein Eintragspaket"
     );
-    assert!(
-        report.object_results().len() == 0,
-        "unter der echten Uhr darf ueber KEIN Objekt etwas ausgesagt werden, \
-         gemessen wurden {}",
-        report.object_results().len()
-    );
+    assert!(report.is_fully_verified());
+    assert_eq!(report.object_results().len(), 1);
+    assert_eq!(report.public_key_thumbprints().len(), 2);
 }
 
 /// Ohne Trust-Objekte traegt Gate `trust` nicht: kein einziger Abdruck.

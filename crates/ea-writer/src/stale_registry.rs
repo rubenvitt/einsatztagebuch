@@ -222,7 +222,7 @@ impl WriterService<'_> {
             ea_crypto::SignerRole::Writer,
             self.head.registry_version(),
         )?;
-        ea_crypto::verify_cose_sign1(signature, self.head, &context)?;
+        ea_crypto::verify_cose_sign1(signature, &self.head, &context)?;
         store.database.transaction(|tx| {
             let presence = ea_crypto::object_hash(proof.challenge_nonce());
             if tx

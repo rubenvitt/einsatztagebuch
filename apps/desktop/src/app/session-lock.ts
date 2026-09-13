@@ -75,6 +75,10 @@ export async function verifiedSession(
   return validateSession(await bridge.invoke(VERIFIED_SESSION_COMMAND))
 }
 
+export async function loginSession(bridge: SessionBridge = tauriSessionBridge): Promise<VerifiedSession> {
+  return validateSession(await bridge.invoke('session_login'))
+}
+
 /**
  * Die zwei Nachrichten, die eine Sperre auslöst.
  *

@@ -9,16 +9,16 @@ use crate::{
 
 pub(crate) fn encode_payload(payload: &PayloadV1) -> Result<Vec<u8>, SchemaError> {
     payload.validate()?;
-    let encoded = encode_payload_unchecked(payload)?;
+    let encoded = zeroize::Zeroizing::new(encode_payload_unchecked(payload)?);
     if encoded.len() > PAYLOAD_PLAINTEXT_MAX_BYTES_V1 {
         return Err(SchemaError::invalid("EA-SCHEMA-PLAINTEXT-LIMIT", None));
     }
     ea_cbor::validate(&encoded, ea_cbor::ParserLimits::V1)?;
-    Ok(encoded)
+    Ok(encoded.to_vec())
 }
 
 pub(crate) fn encode_payload_unchecked(payload: &PayloadV1) -> Result<Vec<u8>, SchemaError> {
-    let mut encoder = Encoder::new(Vec::new());
+    let mut encoder = Encoder::new(ProtectedWriter::new()?);
     encoder.array(11).map_err(encode_error)?;
     encoder.str(payload.record_type()).map_err(encode_error)?;
     let header = match payload {
@@ -36,11 +36,11 @@ pub(crate) fn encode_payload_unchecked(payload: &PayloadV1) -> Result<Vec<u8>, S
         PayloadV1::KeyTransition(value) => encode_key_transition(&mut encoder, value)?,
         PayloadV1::DestructionEvidence(value) => encode_destruction_evidence(&mut encoder, value)?,
     }
-    Ok(encoder.into_writer())
+    Ok(encoder.into_writer().into_vec())
 }
 
 fn encode_destruction_evidence(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     value: &DestructionEvidenceV1,
 ) -> Result<(), SchemaError> {
     encoder.array(7).map_err(encode_error)?;
@@ -117,7 +117,7 @@ fn encode_destruction_evidence(
 }
 
 fn encode_key_transition(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     value: &KeyTransitionV1,
 ) -> Result<(), SchemaError> {
     encoder.array(2).map_err(encode_error)?;
@@ -131,7 +131,7 @@ fn encode_key_transition(
 }
 
 fn encode_amendment(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     value: &AmendmentV1,
 ) -> Result<(), SchemaError> {
     encoder.array(6).map_err(encode_error)?;
@@ -159,7 +159,10 @@ fn encode_amendment(
     Ok(())
 }
 
-fn encode_incident(encoder: &mut Encoder<Vec<u8>>, value: &IncidentV1) -> Result<(), SchemaError> {
+fn encode_incident(
+    encoder: &mut Encoder<ProtectedWriter>,
+    value: &IncidentV1,
+) -> Result<(), SchemaError> {
     encoder.array(12).map_err(encode_error)?;
     encoder
         .str(&value.body.human_incident_number)
@@ -209,7 +212,10 @@ fn encode_incident(encoder: &mut Encoder<Vec<u8>>, value: &IncidentV1) -> Result
     Ok(())
 }
 
-fn encode_keyword(encoder: &mut Encoder<Vec<u8>>, keyword: &KeywordV1) -> Result<(), SchemaError> {
+fn encode_keyword(
+    encoder: &mut Encoder<ProtectedWriter>,
+    keyword: &KeywordV1,
+) -> Result<(), SchemaError> {
     match keyword {
         KeywordV1::FreeText(text) => {
             encoder.array(2).map_err(encode_error)?;
@@ -230,7 +236,7 @@ fn encode_keyword(encoder: &mut Encoder<Vec<u8>>, keyword: &KeywordV1) -> Result
 }
 
 fn encode_location(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     location: &LocationV1,
 ) -> Result<(), SchemaError> {
     encoder.array(3).map_err(encode_error)?;
@@ -262,7 +268,7 @@ fn encode_location(
 }
 
 fn encode_coordinates(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     coordinates: Option<&CoordinatesV1>,
 ) -> Result<(), SchemaError> {
     let Some(coordinates) = coordinates else {
@@ -276,7 +282,7 @@ fn encode_coordinates(
 }
 
 fn encode_personnel(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     snapshot: &PersonnelSnapshotV1,
 ) -> Result<(), SchemaError> {
     match snapshot {
@@ -309,7 +315,7 @@ fn encode_personnel(
 }
 
 fn encode_vehicle(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     snapshot: &VehicleSnapshotV1,
 ) -> Result<(), SchemaError> {
     match snapshot {
@@ -346,7 +352,7 @@ fn encode_vehicle(
 }
 
 fn encode_revision(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     revision: &MasterDataRevisionV1,
 ) -> Result<(), SchemaError> {
     encoder.array(2).map_err(encode_error)?;
@@ -364,7 +370,7 @@ fn encode_revision(
 }
 
 fn encode_provenance(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     provenance: Option<&ImportedProvenanceV1>,
 ) -> Result<(), SchemaError> {
     let Some(provenance) = provenance else {
@@ -383,7 +389,7 @@ fn encode_provenance(
 }
 
 fn encode_optional_text(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     value: Option<&str>,
 ) -> Result<(), SchemaError> {
     match value {
@@ -398,7 +404,7 @@ fn encode_optional_text(
 }
 
 fn encode_optional_integer(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     value: Option<i64>,
 ) -> Result<(), SchemaError> {
     match value {
@@ -413,7 +419,7 @@ fn encode_optional_integer(
 }
 
 fn encode_common_tail(
-    encoder: &mut Encoder<Vec<u8>>,
+    encoder: &mut Encoder<ProtectedWriter>,
     header: &CommonHeaderV1,
     schema_id: &str,
 ) -> Result<(), SchemaError> {
@@ -459,7 +465,10 @@ fn encode_common_tail(
     Ok(())
 }
 
-fn encode_genesis(encoder: &mut Encoder<Vec<u8>>, value: &GenesisV1) -> Result<(), SchemaError> {
+fn encode_genesis(
+    encoder: &mut Encoder<ProtectedWriter>,
+    value: &GenesisV1,
+) -> Result<(), SchemaError> {
     encoder.array(6).map_err(encode_error)?;
     encoder
         .bytes(value.organization_id.as_bytes())
@@ -478,6 +487,45 @@ fn encode_genesis(encoder: &mut Encoder<Vec<u8>>, value: &GenesisV1) -> Result<(
     Ok(())
 }
 
-fn encode_error<E>(_error: E) -> SchemaError {
-    SchemaError::invalid("EA-SCHEMA-ENCODE", None)
+fn encode_error(error: minicbor::encode::Error<WriteFailure>) -> SchemaError {
+    SchemaError::invalid(
+        if matches!(error.as_write(), Some(WriteFailure::Limit)) {
+            "EA-SCHEMA-PLAINTEXT-LIMIT"
+        } else {
+            "EA-SCHEMA-ENCODE"
+        },
+        None,
+    )
+}
+#[derive(Debug)]
+enum WriteFailure {
+    Limit,
+}
+struct ProtectedWriter(Vec<u8>);
+impl ProtectedWriter {
+    fn new() -> Result<Self, SchemaError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(PAYLOAD_PLAINTEXT_MAX_BYTES_V1)
+            .map_err(|_| SchemaError::invalid("EA-SCHEMA-ENCODE", None))?;
+        Ok(Self(bytes))
+    }
+    fn into_vec(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+impl Drop for ProtectedWriter {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+impl minicbor::encode::Write for ProtectedWriter {
+    type Error = WriteFailure;
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        if self.0.len().saturating_add(bytes.len()) > PAYLOAD_PLAINTEXT_MAX_BYTES_V1 {
+            return Err(WriteFailure::Limit);
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
 }
