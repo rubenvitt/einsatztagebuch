@@ -454,6 +454,9 @@ fn signed_source_case(
         .iter()
         .find(|m| m.role() == RecoveryKeyRole::Root)
         .unwrap();
+    // Plan T9 Step 1: exactly one medium never presented, every other medium
+    // genuinely passes -> the whole run is Failed with one missing row.
+    let mut one_missing_run = new_run();
     assert!(
         failed_run
             .test_signing(
@@ -512,6 +515,9 @@ fn signed_source_case(
             failed_run
                 .test_recovery(medium.pseudonymous_id_hash(), key)
                 .unwrap();
+            one_missing_run
+                .test_recovery(medium.pseudonymous_id_hash(), key)
+                .unwrap();
         } else {
             let signer = signers
                 .iter()
@@ -532,8 +538,44 @@ fn signed_source_case(
             failed_run
                 .test_signing(medium.pseudonymous_id_hash(), signer)
                 .unwrap();
+            if medium.pseudonymous_id_hash() != root_medium.pseudonymous_id_hash() {
+                one_missing_run
+                    .test_signing(medium.pseudonymous_id_hash(), signer)
+                    .unwrap();
+            }
         }
     }
+    assert!(matches!(
+        one_missing_run
+            .medium_check(root_medium.pseudonymous_id_hash())
+            .unwrap(),
+        ea_recovery::RecoveryMediumCheck::Missing
+    ));
+    let ea_recovery::RecoveryRunOutcome::Failed(one_missing) =
+        one_missing_run.finish_report().unwrap()
+    else {
+        panic!("one missing medium must fail the overall recovery test");
+    };
+    let one_missing_json: serde_json::Value =
+        serde_json::from_slice(one_missing.exact_report()).unwrap();
+    assert_eq!(one_missing_json["result"], "failed");
+    assert_eq!(
+        one_missing_json["errorCode"],
+        ea_recovery::RecoveryTestError::Incomplete.code()
+    );
+    let one_missing_rows = one_missing_json["media"].as_array().unwrap();
+    assert_eq!(one_missing_rows.len(), keys.media().len());
+    let not_passed = one_missing_rows
+        .iter()
+        .filter(|row| row["result"] != "passed")
+        .collect::<Vec<_>>();
+    assert_eq!(not_passed.len(), 1);
+    assert_eq!(not_passed[0]["result"], "missing");
+    assert_eq!(
+        not_passed[0]["mediumIdHash"],
+        hex::encode(root_medium.pseudonymous_id_hash().as_bytes())
+    );
+    assert_eq!(not_passed[0]["observedThumbprint"], "");
     let ea_recovery::RecoveryRunOutcome::Failed(failed) = failed_run.finish_report().unwrap()
     else {
         panic!("a failed key test cannot be erased by retrying with a good key");
