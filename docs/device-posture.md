@@ -66,9 +66,12 @@ Wall-Clock-Rückdrehschutz; er verändert keinen signierten Trust-Zeitboden.
 Die Rust-Auswertung des Go-live-Aggregats nimmt hierfür ausschließlich eine
 opaque, an die Runtime gebundene `VerifiedPostureAdmission` entgegen und prüft
 sie bei der Auswertung erneut. Dokumentierte Zeilen erhalten
-`EA-GOLIVE-POSTURE-DOCUMENTED`; der Betriebsbericht führt Rohmesscodes und
-Dokument-/Beleghash sowie Frist getrennt. Dies bestätigt keine sonstige offene
-Go-live-Anforderung und ist keine Plattformabnahme.
+`EA-GOLIVE-POSTURE-DOCUMENTED` als sichtbaren Nachweishinweis, bleiben im
+Go-live aber `nicht automatisch prüfbar`: `Unknown` wird dort nie grün, und die
+Go-live-Liste ist nicht produktionsbereit, solange eine Voraussetzung `Unknown`
+ist. Der Nachweis wirkt nur auf die Sitzungszulassung. Der Betriebsbericht führt
+Rohmesscodes und Dokument-/Beleghash sowie Frist getrennt. Dies bestätigt keine
+sonstige offene Go-live-Anforderung und ist keine Plattformabnahme.
 
 Die tragenden Plattformbeschreibungen sind Apples
 [FileVault-Verwaltung](https://support.apple.com/en-gb/guide/deployment/dep0a2cb7686/web),
