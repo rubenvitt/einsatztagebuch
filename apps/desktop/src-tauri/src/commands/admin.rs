@@ -2558,8 +2558,8 @@ mod tests {
 
     /// Jede Drahtform serialisiert GENAU die emittierten Felder — Name fuer
     /// Name, in Reihenfolge —, gemessen gegen `ADMIN_VIEW_MODELS_V1` ueber
-    /// `admin_view_model_fields` und nicht gegen eine zweite Liste hier. Zehn
-    /// Ansichtsmodelle, zehn Drahtformen, in der Reihenfolge der Tabelle;
+    /// `admin_view_model_fields` und nicht gegen eine zweite Liste hier. Jedes
+    /// Ansichtsmodell der Tabelle, je eine Drahtform, in ihrer Reihenfolge;
     /// `GoLiveRequirementView` ist ein eigener Eintrag und keine Beigabe der
     /// Liste. Ein umbenanntes oder verschobenes DTO-Feld faellt hier.
     #[test]
@@ -2615,6 +2615,97 @@ mod tests {
             policy_hash: "07".repeat(32),
             known_destruction_ids: vec![process.destruction_id.clone()],
             process: Some(process.clone()),
+        };
+        // Die Drahtform der Reader-Zustellung hat private Felder und keine
+        // Umwandlung; gemessen wird sie deshalb dort, wo sie entsteht — am
+        // Kern des Kommandos hinter einem Administratorport, der genau die
+        // drei Originale liefert.
+        let reader_delivery = {
+            use crate::state::{DestructionAdministrationPort, RuntimeSessionPort};
+            use ea_ui_contracts::{DestructionAdministrationView, DestructionReaderDeliveryView};
+            struct Admin;
+            impl RuntimeSessionPort for Admin {
+                fn verified_role(&self) -> Result<Option<OperatorRoleV1>, CommandError> {
+                    Ok(Some(OperatorRoleV1::OrganizationAdmin))
+                }
+                fn invalidate(&self) {}
+            }
+            struct Delivery;
+            fn unused() -> Result<DestructionAdministrationView, CommandError> {
+                Err(CommandError::new("EA-TEST-UNUSED"))
+            }
+            impl DestructionAdministrationPort for Delivery {
+                fn export_reader_delivery(
+                    &self,
+                    _: ea_types::DestructionId,
+                    _: ObjectHash,
+                    _: ea_types::DeviceId,
+                ) -> Result<DestructionReaderDeliveryView, CommandError> {
+                    Ok(DestructionReaderDeliveryView {
+                        destruction_id: "11".repeat(16),
+                        job_hash: "22".repeat(32),
+                        reader_id: "33".repeat(16),
+                        exact_authorization: vec![1],
+                        exact_initiating_event: vec![2],
+                        exact_job_upload: vec![3],
+                    })
+                }
+                fn authenticate_custodian(
+                    &self,
+                    _: ea_types::DestructionId,
+                    _: ObjectHash,
+                ) -> Result<DestructionAdministrationView, CommandError> {
+                    unused()
+                }
+                fn synchronize(
+                    &self,
+                    _: ea_types::DestructionId,
+                    _: ObjectHash,
+                ) -> Result<DestructionAdministrationView, CommandError> {
+                    unused()
+                }
+                fn read(
+                    &self,
+                    _: Option<ea_types::DestructionId>,
+                ) -> Result<DestructionAdministrationView, CommandError> {
+                    unused()
+                }
+                fn prepare(&self, _: &[u8]) -> Result<DestructionAdministrationView, CommandError> {
+                    unused()
+                }
+                fn start(
+                    &self,
+                    _: ea_types::DestructionId,
+                    _: ObjectHash,
+                ) -> Result<DestructionAdministrationView, CommandError> {
+                    unused()
+                }
+                fn resume(
+                    &self,
+                    _: ea_types::DestructionId,
+                ) -> Result<DestructionAdministrationView, CommandError> {
+                    unused()
+                }
+                fn import_progress(
+                    &self,
+                    _: ea_types::DestructionId,
+                    _: ObjectHash,
+                    _: &[Vec<u8>],
+                ) -> Result<DestructionAdministrationView, CommandError> {
+                    unused()
+                }
+            }
+            let state =
+                DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+                    .with_runtime_session(Arc::new(Admin))
+                    .with_destruction(Arc::new(Delivery));
+            crate::commands::destruction::destruction_export_reader_delivery_core(
+                &state,
+                &"11".repeat(16),
+                &"22".repeat(32),
+                &"33".repeat(16),
+            )
+            .unwrap()
         };
         let evidence_review =
             crate::commands::destruction_evidence::DestructionEvidenceReviewWire::try_from(
@@ -2675,7 +2766,7 @@ mod tests {
                 }),
             })
             .unwrap();
-        let checked: [(&str, Vec<String>); 21] = [
+        let checked: [(&str, Vec<String>); 22] = [
             (
                 "RecoveryMediumRequestView",
                 wire_keys(&recovery["run"]["observations"][0]["request"]),
@@ -2707,6 +2798,7 @@ mod tests {
                 "DestructionAdministrationView",
                 wire_keys(&DestructionAdministrationWire::try_from(destruction).unwrap()),
             ),
+            ("DestructionReaderDeliveryView", wire_keys(&reader_delivery)),
             ("DestructionEvidenceReviewView", wire_keys(&evidence_review)),
             (
                 "PendingDeviceRequestView",
@@ -2750,7 +2842,7 @@ mod tests {
                 wire_keys(&admin.revocation_effect(GOOD_FINGERPRINT).unwrap()),
             ),
         ];
-        assert_eq!(checked.len(), 21);
+        assert_eq!(checked.len(), 22);
         for (name, keys) in &checked {
             if name.starts_with("Recovery") {
                 // Recovery IPC uses serde_json::Value, whose object key order
