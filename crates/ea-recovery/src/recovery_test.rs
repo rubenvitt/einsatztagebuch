@@ -5,12 +5,13 @@
 //!
 //! Sie ist die EINGABESEITE von `recovery-test`: der Bestand wird
 //! verifiziert, die Zieldatei des Berichts als frei erwiesen und das
-//! Schluesselinventar gelesen. Sie ist NICHT der Dienst: der
-//! `RecoveryTestService` und die Rust-Bindung von `ea.key-inventory/v1`
-//! (`schemas/reports/v1/key-inventory.schema.json`) sind Stage-5 Task 9.
-//! Das Inventar wird deshalb als BYTES herausgegeben und nicht geparst — ein
-//! Parser ohne den Dienst, der sein Ergebnis braucht, waere ein Vertrag ohne
-//! Gegenseite.
+//! Schluesselinventar gelesen. Sie ist NICHT der Dienst: den gefuehrten Lauf
+//! traegt `RecoveryTestRun` (`test_run.rs`) mit der nativen
+//! `RecoveryTestRuntime` in `ea-admin`, die Rust-Bindung von
+//! `ea.key-inventory/v1` (`schemas/reports/v1/key-inventory.schema.json`) ist
+//! `KeyInventory` (`key_inventory.rs`). Diese Fassade gibt das Inventar
+//! weiterhin als exakte BYTES heraus und parst es nicht; das Parsen gehoert
+//! dem Aufrufer, der den Lauf fuehrt.
 //!
 //! # DIE REIHENFOLGE IST DER GEGENSTAND
 //!
