@@ -349,6 +349,28 @@ fn request_is_signed_audited_durable_and_exact_replay_survives_reopen() {
     let requested = service.request(&auth, &event, &[target], &proof).unwrap();
     assert_eq!(requested.state(), DestructionState::Requested);
     assert_eq!(count(&f, "local_audit_event"), 1);
+    // Plan T11 Step 3: the flushed audit binds only the authorization hash,
+    // the state-event hash and the outcome, each checked on its own value.
+    let stored = f
+        .database
+        .query_row("SELECT exact_bytes FROM local_audit_event", &[])
+        .unwrap()
+        .unwrap();
+    let stored = stored.blob(0).unwrap();
+    assert_eq!(stored, requested.audit_exact_bytes());
+    let recorded = ea_format::decode_local_audit_event(stored).unwrap();
+    let ea_format::LocalAuditActionV1::Destruction(context) = recorded.action() else {
+        panic!("destruction audit action")
+    };
+    assert!(
+        context.destruction_authorization_object_hash() == ea_crypto::object_hash(&auth),
+        "audit must bind the authorization hash"
+    );
+    assert!(
+        context.state_event_object_hash() == ea_crypto::object_hash(&event),
+        "audit must bind the requested state-event hash"
+    );
+    assert!(recorded.outcome() == ea_format::LocalAuditOutcomeV1::Completed);
     let verified = verify_authorization(&auth, &head).unwrap();
     let restarted = SqliteDestructionRepository::new(f.reopen());
     let loaded = restarted.reconstruct(&verified, &head).unwrap().unwrap();

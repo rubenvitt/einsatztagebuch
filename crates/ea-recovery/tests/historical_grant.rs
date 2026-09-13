@@ -344,6 +344,27 @@ fn issuance_rewraps_the_original_cek_and_commits_signed_audit_before_release() {
         panic!("historical action")
     };
     assert!(context.new_grant_object_hash() == object_hash(bytes.as_bytes()));
+    // Plan T8 Step 3: the audit binds exactly the Authorization, Entry,
+    // original Recovery grant, recipient certificate and new grant hashes
+    // plus the outcome. Each binding is checked on its own value, so a
+    // consistent swap in construction and self-check cannot pass.
+    assert!(
+        context.authorization_object_hash() == auth.object_hash(),
+        "audit must bind the Authorization hash"
+    );
+    assert!(
+        context.entry_hash() == f.entry_hash,
+        "audit must bind the Entry hash"
+    );
+    assert!(
+        context.original_recovery_grant_object_hash() == object_hash(&f.original_bytes),
+        "audit must bind the original Recovery grant hash"
+    );
+    assert!(
+        context.recipient_certificate_object_hash() == object_hash(&f.recipient_certificate),
+        "audit must bind the recipient certificate hash"
+    );
+    assert!(event.outcome() == ea_format::LocalAuditOutcomeV1::Completed);
     let mut output = harness.fixture.fixture;
     output.push_exact_bytes("trust/authorization.etb", auth.exact_bytes().to_vec());
     output.push_object("grants/historical.eag", bytes);

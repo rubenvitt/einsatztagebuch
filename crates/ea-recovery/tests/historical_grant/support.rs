@@ -185,6 +185,7 @@ impl Harness {
             &self.fixture.recipient_certificate,
         )
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn create_using(
         &self,
         auth: &ea_trust::VerifiedGrantAuthorization,
