@@ -1,5 +1,6 @@
 //! Real native helpers, signed authorization, SQLCipher and the actual Desktop IPC core.
 mod completion;
+mod failure;
 mod pending;
 mod custodian;
 mod evidence;
