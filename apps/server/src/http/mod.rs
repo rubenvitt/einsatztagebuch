@@ -79,6 +79,7 @@ pub struct AppState {
     pub authority: String,
     pub clock: Arc<dyn ServerClock>,
     pub signer: Arc<dyn ServerSigner>,
+    pub deletion_component:Option<Arc<dyn ea_sync_server::managed_destruction::ServerDeletionComponent>>,
     pub objects: Arc<dyn ObjectStore>,
     pub repository: Arc<PostgresRepository>,
     pub trust_authority: Arc<PostgresTrustAuthority>,
@@ -164,6 +165,7 @@ impl AppState {
             objects: self.objects.as_ref(),
             destructions: self.repository.as_ref(),
             heads: self.trust_authority.as_ref(),
+            chain_heads: self.repository.as_ref(),
         }
     }
 

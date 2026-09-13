@@ -18,7 +18,7 @@
 
 use std::{fs, path::Path};
 
-use ea_crypto::HpkeRecipientPrivateKey;
+use ea_crypto::HpkeRecipient;
 use ea_trust::{TrustAnchorV1, decode_trust_anchor};
 use ea_types::{KeyThumbprint, UnixMillis};
 use ea_verify::{VerificationReportV1, VerifyOptions, verify_archive};
@@ -49,7 +49,7 @@ pub fn verify_directory(
     root: &Path,
     anchor: &TrustAnchorV1,
     now: UnixMillis,
-    recipient: Option<(KeyThumbprint, &HpkeRecipientPrivateKey)>,
+    recipient: Option<(KeyThumbprint, &dyn HpkeRecipient)>,
 ) -> Result<VerificationReportV1, RecoveryError> {
     let source = FsArchiveSource::open(root)?;
     verify_source(&source, anchor, now, recipient)
@@ -70,7 +70,7 @@ pub(crate) fn verify_source(
     source: &FsArchiveSource,
     anchor: &TrustAnchorV1,
     now: UnixMillis,
-    recipient: Option<(KeyThumbprint, &HpkeRecipientPrivateKey)>,
+    recipient: Option<(KeyThumbprint, &dyn HpkeRecipient)>,
 ) -> Result<VerificationReportV1, RecoveryError> {
     let options = VerifyOptions::new(now);
     let options = match recipient {

@@ -23,6 +23,11 @@ import init, {
   fileModeOpenDirectory,
   fileModePushBlob,
   readerAmendmentThread,
+  readerDestructionAttest,
+  readerDestructionAttestation,
+  readerDestructionApply,
+  readerDestructionApplyDelivery,
+  readerDestructionReceipt,
   readerEntryView,
   readerExportOne,
   readerNoteActivity,
@@ -191,6 +196,11 @@ export type EaOpfsRequest =
       readonly person: string
     }
   | { readonly id: number; readonly kind: 'reader-stand-close' }
+  | { readonly id: number; readonly kind: 'reader-destruction-apply'; readonly session: number; readonly source: number; readonly authorization: Uint8Array; readonly initiatingEvent: Uint8Array; readonly preflightCore: Uint8Array; readonly preflightSignature: Uint8Array; readonly inventory: Uint8Array; readonly preflightCertificate: Uint8Array; readonly effectiveNowMs: bigint }
+  | { readonly id: number; readonly kind: 'reader-destruction-apply-delivery'; readonly session: number; readonly source: number; readonly authorization: Uint8Array; readonly initiatingEvent: Uint8Array; readonly jobUpload: Uint8Array; readonly effectiveNowMs: bigint }
+  | { readonly id: number; readonly kind: 'reader-destruction-receipt'; readonly session: number; readonly jobHash: Uint8Array; readonly effectiveNowMs: bigint }
+  | { readonly id: number; readonly kind: 'reader-destruction-attest'; readonly session: number; readonly source: number; readonly jobHash: Uint8Array; readonly certificate: Uint8Array; readonly effectiveNowMs: bigint }
+  | { readonly id: number; readonly kind: 'reader-destruction-attestation'; readonly session: number; readonly source: number; readonly jobHash: Uint8Array; readonly effectiveNowMs: bigint }
 
 /**
  * Die Antwort — der Wert oder der STABILE CODE des Fehlschlags.
@@ -469,7 +479,7 @@ scope.addEventListener('message', (event) => {
           scope.postMessage({
             id: request.id,
             ok: true,
-            status: fileModeOpenBundle(request.session, request.bytes, request.effectiveNowMs),
+            status: await fileModeOpenBundle(request.session, request.bytes, request.effectiveNowMs),
           })
           return
         case 'file-mode-begin-directory':
@@ -497,7 +507,7 @@ scope.addEventListener('message', (event) => {
           scope.postMessage({
             id: request.id,
             ok: true,
-            status: fileModeOpenDirectory(request.session, request.handle, request.effectiveNowMs),
+            status: await fileModeOpenDirectory(request.session, request.handle, request.effectiveNowMs),
           })
           return
         // Die sechs Reader-Nachrichten reichen ihr JSON UNVERAENDERT durch —
@@ -505,6 +515,21 @@ scope.addEventListener('message', (event) => {
         // Hauptthread, in `./reader-bridge.ts`, und nur dort; ein Fehlschlag
         // (`EA-READER-VIEW-NO-STAND`, `-UNKNOWN-ENTRY`, `-NO-THREAD`,
         // `-NO-MANIFEST`) faellt in den Auffangarm und reist als Code.
+        case 'reader-destruction-attest':
+          scope.postMessage({ id: request.id, ok: true, bytes: await readerDestructionAttest(request.session, request.source, request.jobHash, request.certificate, request.effectiveNowMs) })
+          return
+        case 'reader-destruction-attestation':
+          scope.postMessage({ id: request.id, ok: true, bytes: await readerDestructionAttestation(request.session, request.source, request.jobHash, request.effectiveNowMs) })
+          return
+        case 'reader-destruction-apply':
+          scope.postMessage({ id: request.id, ok: true, status: await readerDestructionApply(request.session, request.source, request.authorization, request.initiatingEvent, request.preflightCore, request.preflightSignature, request.inventory, request.preflightCertificate, request.effectiveNowMs) })
+          return
+        case 'reader-destruction-apply-delivery':
+          scope.postMessage({ id: request.id, ok: true, status: await readerDestructionApplyDelivery(request.session, request.source, request.authorization, request.initiatingEvent, request.jobUpload, request.effectiveNowMs) })
+          return
+        case 'reader-destruction-receipt':
+          scope.postMessage({ id: request.id, ok: true, status: await readerDestructionReceipt(request.session, request.jobHash, request.effectiveNowMs) })
+          return
         case 'reader-stand-view':
           scope.postMessage({ id: request.id, ok: true, status: readerStandView() })
           return

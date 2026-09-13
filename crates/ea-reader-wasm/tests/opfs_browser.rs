@@ -251,3 +251,37 @@ async fn a_closed_store_leaves_no_queue_entry_behind() {
         "a closed store must leave no queue entry behind"
     );
 }
+
+#[wasm_bindgen_test]
+async fn complete_inventory_lease_blocks_concurrent_writes_until_measurement_finishes() {
+    use std::{cell::Cell, rc::Rc};
+    let store = OpfsBlobStore::open_all("ea-reader-complete-lease", &[])
+        .await
+        .unwrap();
+    let completed = Rc::new(Cell::new(false));
+    let observed = Rc::clone(&completed);
+    let write = future_to_promise(async move {
+        let key = ReaderBlobKey::new("cache/late").unwrap();
+        let mut writer = OpfsBlobStore::open("ea-reader-complete-lease", &[key.clone()])
+            .await
+            .unwrap();
+        writer.put(&key, OPAQUE).unwrap();
+        observed.set(true);
+        Ok(JsValue::UNDEFINED)
+    });
+    one_macrotask().await;
+    one_macrotask().await;
+    assert!(
+        !completed.get(),
+        "exclusive enumeration must fence even previously unknown keys"
+    );
+    drop(store);
+    JsFuture::from(write).await.unwrap();
+    assert!(completed.get());
+    let mut reopened = OpfsBlobStore::open_all("ea-reader-complete-lease", &[])
+        .await
+        .unwrap();
+    let key = ReaderBlobKey::new("cache/late").unwrap();
+    assert_eq!(reopened.get(&key).unwrap().as_deref(), Some(OPAQUE));
+    reopened.delete(&key).unwrap();
+}

@@ -6,11 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+pkcs11-fixture = ["ea-recovery/pkcs11-fixture"]
+desktop-fixture = ["dep:ea-desktop"]
+
 [[bin]]
 name = "einsatzarchiv"
 path = "src/main.rs"
 
 [dependencies]
+# Explicit integration-test build only; the installed CLI never chooses the
+# fixture constructor. Ordinary CLI builds retain no desktop dependency.
+ea-desktop = { path = "../desktop/src-tauri", optional = true, features = ["test-support"] }
 # Die Fachlogik des SECHSTEN Kommandos, und ausschliesslich sie:
 # `BootstrapCoordinator` fuehrt den Zwoelfschrittablauf aus `§12.1`
 # (`design.md`:1336-1349), `FileBootstrapStore` persistiert ihn, `AdminError`
@@ -24,6 +31,9 @@ path = "src/main.rs"
 # Umsetzungsplan der Stufe 5, Task 2 — die Spec-Grammatik
 # (`design.md`:1787-1793) fuehrt es nicht.
 ea-admin.workspace = true
+# Dieselbe native Maschinenmessung wie beim tatsächlichen Recovery-Test.
+# Kein Fixtureprovider oder Schlüsselzugriff im installierten CLI.
+ea-key-provider.workspace = true
 # Die gesamte uebrige Fachlogik. Dieses Paket traegt nur Argumentgrammatik,
 # Ausgabeform und process::exit.
 ea-recovery.workspace = true
@@ -31,6 +41,17 @@ ea-types.workspace = true
 ea-verify.workspace = true
 
 [dev-dependencies]
+ea-writer.workspace = true
+ea-draft.workspace = true
+ea-reader.workspace = true
+ea-testkit.workspace = true
+ea-archive-fs.workspace = true
+ea-sync-protocol.workspace = true
+ea-destruction.workspace = true
+ea-schema.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+ea-ui-contracts.workspace = true
 ea-admin = { workspace = true, features = ["test-support"] }
 ea-local-store.workspace = true
 ea-key-provider = { workspace = true, features = ["test-support"] }
@@ -48,3 +69,16 @@ hex.workspace = true
 jsonschema.workspace = true
 minicbor.workspace = true
 serde_json.workspace = true
+
+# Actual native destruction transport against the existing isolated TLS/PG/S3 fixture.
+einsatzarchiv-server.workspace = true
+ea-sync-server.workspace = true
+ea-sync-client.workspace = true
+aws-sdk-s3.workspace = true
+aws-smithy-http-client.workspace = true
+sqlx.workspace = true
+sqlx-core.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+sha2.workspace = true

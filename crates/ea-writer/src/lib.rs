@@ -47,20 +47,24 @@
 //! Auswahlzeitpunkt macht nur das gemeldete VERTRAUENSALTER monoton.
 #![forbid(unsafe_code)]
 
+mod amendment;
 mod content;
 mod entropy;
 mod error;
+mod evidence_draft;
 mod fault;
 mod finalize;
 mod grant_plan;
 mod incident;
 mod marker;
 mod operator_commitment;
+mod original_source;
 mod preview;
 mod recover;
 mod stale_registry;
 
-pub use content::KeyTransitionInputV1;
+pub use amendment::{AmendmentContentV1, AmendmentInputV1, OriginalReferenceV1};
+pub use content::{KeyTransitionInputV1,DestructionEvidenceInputV1};
 pub use entropy::EntropyDraws;
 #[cfg(any(test, feature = "test-support"))]
 pub use entropy::{entropy_draws, reset_entropy_draws};
@@ -71,6 +75,9 @@ pub use finalize::{
 };
 pub use grant_plan::build_grant_plan;
 pub use incident::FinalizationInputV1;
+pub use marker::{
+    PreparedMarkerDiagnosisV1, PreparedMarkerDiscrepancyV1, diagnose_prepared_marker,
+};
 pub use preview::{FinalizationPreview, StaleDecision};
 pub use recover::{ReconciliationOutcomeV1, RecoveryOutcome};
 pub use stale_registry::{StaleRegistryAcknowledgement, StaleRegistryStore};

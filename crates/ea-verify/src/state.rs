@@ -83,6 +83,15 @@ impl EphemeralTrustStateStore {
         }
     }
 
+    /// Initialize a verification walk from an already persisted pin. The pin
+    /// is still checked against the exact signed line by verify_trust.
+    pub fn with_pin(key: TrustStateKey, floor: UnixMillis, pin: Option<RegistryHeadPin>) -> Self {
+        Self {
+            pinned_head: pin,
+            ..Self::new(key, floor)
+        }
+    }
+
     /// Der Schluessel, den dieser Speicher bedient. Jeder andere ist Konflikt.
     #[must_use]
     pub const fn key(&self) -> TrustStateKey {

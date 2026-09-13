@@ -174,16 +174,8 @@ pub enum RecoveryError {
     /// eine Datei benannt, die kein Geheimnis traegt, und derselbe Aufruf ist
     /// mit einer gefuellten Datei unveraendert wiederholbar.
     SecretEmpty,
-    /// Die PKCS#11-Referenz ist vollstaendig geprueft, die PIN gelesen — und
-    /// an ein Modul gebunden wird in dieser Stufe nicht.
-    ///
-    /// DIE BENANNTE GRENZE aus `crate::pkcs11`: es gibt keine
-    /// `cryptoki`-Kante, kein Modul im Baum und keinen Zeugen. Exitcode 21,
-    /// „nicht unterstuetzte Providerfaehigkeit" — es ist nichts misslungen, es
-    /// ist etwas nicht vorhanden. Sein `code()` ist
-    /// [`crate::PKCS11_UNBOUND_CODE`], damit die Grenze an genau einer Stelle
-    /// benannt ist.
-    Pkcs11Unbound,
+    /// A bounded, path-free failure of an explicitly selected token provider.
+    Pkcs11Provider(crate::Pkcs11ProviderError),
 }
 
 impl RecoveryError {
@@ -206,7 +198,7 @@ impl RecoveryError {
             Self::UnsupportedSource => "EA-RECOVERY-UNSUPPORTED-SOURCE",
             Self::KeySourceExposed => "EA-RECOVERY-KEY-SOURCE-EXPOSED",
             Self::SecretEmpty => "EA-RECOVERY-SECRET-EMPTY",
-            Self::Pkcs11Unbound => crate::pkcs11::PKCS11_UNBOUND_CODE,
+            Self::Pkcs11Provider(error) => error.code(),
         }
     }
 }

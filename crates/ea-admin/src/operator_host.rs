@@ -23,6 +23,27 @@ impl VerifiedLocalDeviceIdentity {
         certificate: CertificateHash,
         expected_local_device_id: DeviceId,
     ) -> Result<Self, OperatorLifecycleError> {
+        Self::verify_view(head.into(), certificate, expected_local_device_id)
+    }
+    pub fn verify_writer(
+        head: ea_trust::WriterRegistryHeadRef<'_>,
+        certificate: CertificateHash,
+        expected_local_device_id: DeviceId,
+    ) -> Result<Self, OperatorLifecycleError> {
+        if head.current_writer_certificate_hash() != Some(certificate) {
+            return Err(OperatorLifecycleError::TargetMismatch);
+        }
+        let identity = Self::verify_view(head, certificate, expected_local_device_id)?;
+        if identity.role != SignerRole::Writer {
+            return Err(OperatorLifecycleError::TargetMismatch);
+        }
+        Ok(identity)
+    }
+    fn verify_view(
+        head: ea_trust::WriterRegistryHeadRef<'_>,
+        certificate: CertificateHash,
+        expected_local_device_id: DeviceId,
+    ) -> Result<Self, OperatorLifecycleError> {
         let fields = head
             .active_certificate_fields(certificate)
             .ok_or(OperatorError::DeviceCertificateNotActive)?;
@@ -43,6 +64,15 @@ impl VerifiedLocalDeviceIdentity {
             head: head.registry_head_hash(),
             role,
         })
+    }
+    pub(super) fn check_writer(
+        &self,
+        head: ea_trust::WriterRegistryHeadRef<'_>,
+    ) -> Result<(), OperatorLifecycleError> {
+        if self.chain != head.chain_id() || self.head != head.registry_head_hash() {
+            return Err(OperatorLifecycleError::TargetMismatch);
+        }
+        Self::verify_writer(head, self.certificate, self.device).map(|_| ())
     }
     pub(super) fn check(&self, head: &SelectedRegistryHead) -> Result<(), OperatorLifecycleError> {
         if self.chain != head.chain_id() || self.head != head.registry_head_hash() {
@@ -464,47 +494,15 @@ impl OperatorBindingService<'_> {
         device: &AuthenticatedDevice,
         event: TypedLocalAuditEvent,
     ) -> Result<(), OperatorLifecycleError> {
-        let action = audit_context(&event.action)?;
-        let outcome = event.outcome;
-        let signed = self
-            .audit
-            .record_signed(AuditActorProof::AuthenticatedDevice(device), event)
-            .map_err(|_| OperatorLifecycleError::AuditFailed)?;
-        let checked = (|| {
-            let row = ea_format::decode_local_audit_event(signed.exact_bytes()).map_err(|_| ())?;
-            if row.signer_certificate_object_hash().as_bytes()
-                != self.local_device.certificate.as_bytes()
-                || row.organization_id() != self.local_device.organization
-                || row.device_id() != self.local_device.device
-                || row.operator_binding_object_hash() != device.known_binding_object_hash()
-                || audit_context(row.action()).map_err(|_| ())? != action
-                || row.outcome() != outcome
-                || row.effective_now() != self.head.preexisting_effective_now().value()
-            {
-                return Err(());
-            }
-            let mut decoder = minicbor::Decoder::new(signed.exact_bytes());
-            decoder.array().map_err(|_| ())?;
-            decoder.skip().map_err(|_| ())?;
-            let start = decoder.position();
-            decoder.skip().map_err(|_| ())?;
-            let context = VerificationContext::local_audit(
-                row.exact_core(),
-                self.head.proposed_sequence(),
-                self.local_device.role,
-                self.head.registry_version(),
-            )
-            .map_err(|_| ())?;
-            verify_cose_sign1(
-                &signed.exact_bytes()[start..decoder.position()],
-                self.head,
-                &context,
-            )
-            .map_err(|_| ())?;
-            Ok(())
-        })();
-        checked.map_err(|_| OperatorLifecycleError::AuditFailed)
+        record_local_audit_for(
+            self.head.into(),
+            self.audit,
+            self.local_device,
+            device,
+            event,
+        )
     }
+
     pub fn resume_prepared(
         &self,
         database: &Arc<EncryptedDatabase>,
@@ -943,4 +941,51 @@ fn audit_context(action: &LocalAuditActionV1) -> Result<AuditContext, OperatorLi
         }
         _ => Err(OperatorLifecycleError::AuditFailed),
     }
+}
+
+pub(super) fn record_local_audit_for(
+    head: ea_trust::WriterRegistryHeadRef<'_>,
+    audit: &dyn LocalAuditService,
+    local_device: VerifiedLocalDeviceIdentity,
+    device: &AuthenticatedDevice,
+    event: TypedLocalAuditEvent,
+) -> Result<(), OperatorLifecycleError> {
+    let action = audit_context(&event.action)?;
+    let outcome = event.outcome;
+    let signed = audit
+        .record_signed(AuditActorProof::AuthenticatedDevice(device), event)
+        .map_err(|_| OperatorLifecycleError::AuditFailed)?;
+    let checked = (|| {
+        let row = ea_format::decode_local_audit_event(signed.exact_bytes()).map_err(|_| ())?;
+        if row.signer_certificate_object_hash().as_bytes() != local_device.certificate.as_bytes()
+            || row.organization_id() != local_device.organization
+            || row.device_id() != local_device.device
+            || row.operator_binding_object_hash() != device.known_binding_object_hash()
+            || audit_context(row.action()).map_err(|_| ())? != action
+            || row.outcome() != outcome
+            || row.effective_now() != head.preexisting_effective_now().value()
+        {
+            return Err(());
+        }
+        let mut decoder = minicbor::Decoder::new(signed.exact_bytes());
+        decoder.array().map_err(|_| ())?;
+        decoder.skip().map_err(|_| ())?;
+        let start = decoder.position();
+        decoder.skip().map_err(|_| ())?;
+        let context = VerificationContext::local_audit(
+            row.exact_core(),
+            head.proposed_sequence(),
+            local_device.role,
+            head.registry_version(),
+        )
+        .map_err(|_| ())?;
+        verify_cose_sign1(
+            &signed.exact_bytes()[start..decoder.position()],
+            &head,
+            &context,
+        )
+        .map_err(|_| ())?;
+        Ok(())
+    })();
+    checked.map_err(|_| OperatorLifecycleError::AuditFailed)
 }

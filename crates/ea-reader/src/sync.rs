@@ -432,6 +432,7 @@ impl<'a> ReaderSyncService<'a> {
     /// aber nicht wegdiskutiert.
     pub fn sync_state_blob_keys() -> Result<Vec<ReaderBlobKey>, ReaderSyncError> {
         Ok(vec![
+            crate::ReaderCacheDestruction::journal_key()?,
             ReaderBlobKey::new(READER_SYNC_CURSOR_BLOB_KEY_V1).map_err(ReaderVaultError::from)?,
             ReaderBlobKey::new(READER_SYNC_OBJECTS_BLOB_KEY_V1).map_err(ReaderVaultError::from)?,
         ])

@@ -64,20 +64,40 @@ extern crate self as ea_admin;
 #[path = "../tests/support/mod.rs"]
 mod test_support;
 
+mod native_bootstrap_root;
+mod native_bootstrap_admin_participant;
+pub use native_bootstrap_admin_participant::{
+    BootstrapAdminParticipantIdentity, PreparedNativeBootstrapAdminParticipant,
+    prepare_native_bootstrap_admin_participant,
+};
 mod native_identity;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use native_bootstrap_root::complete_native_root_step_with_test_opener;
+pub use native_bootstrap_root::{
+    NativeInitialRootV1, complete_installed_native_root_step, complete_native_root_step,
+    prepare_native_root_for_ceremony, sign_native_initial_root,
+};
 mod native_process;
 mod native_watch;
 
+pub mod administration_runtime;
+pub mod amendment;
 pub mod anchor_media;
 pub mod bootstrap;
 pub mod bootstrap_store;
 pub mod genesis;
+pub mod native_archive;
 pub mod native_provider;
 pub mod operator_authority;
 pub mod operator_ceremony;
 pub mod operator_exchange;
 mod operator_remote;
 pub mod operator_runtime;
+pub mod recovery_test_runtime;
+pub use operator_runtime::posture;
+pub mod destruction_runtime;
+pub mod historical_grant;
 pub mod production_state;
 
 pub mod ceremony_steps;
@@ -120,13 +140,16 @@ pub use genesis::{GenesisBinding, GenesisEnvelopeV1, bind_genesis};
 pub use go_live::{
     GO_LIVE_REQUIREMENT_CODES, GoLiveChecklist, GoLiveEvidence, GoLiveRequirement,
     GoLiveRequirementStatus, RecoveryTestFreshness, RegistryFreshness, evaluate_go_live,
+    evaluate_go_live_with_posture_admission,
 };
-pub use production_state::{
-    FreshMachineRecoveryProof, ProductionState, RecoveryTestObservation, machine_fingerprint,
-    verify_fresh_machine_recovery_test,
-};
+pub use production_state::{FreshMachineRecoveryProof, ProductionState, machine_fingerprint};
+#[cfg(feature = "test-support")]
+pub use production_state::{RecoveryTestObservation, verify_fresh_machine_recovery_test};
 pub use root_ceremony::RootCeremonyService;
 pub use writer_transition::{
     ActivatedWriterTransition, PreparedWriterTransition, TrustedChainHead, WriterTransitionError,
     WriterTransitionPhase, WriterTransitionRequest, WriterTransitionService,
 };
+
+mod native_signing_backup;
+pub use native_signing_backup::{NativeSigningBackupError, seal_native_bootstrap_admin_backup, seal_native_bootstrap_root_backup};

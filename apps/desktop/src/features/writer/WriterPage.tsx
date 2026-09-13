@@ -1,8 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
-import { Alert, Button, Space, Typography } from 'antd'
+import { Alert, Button, Input, Space, Typography } from 'antd'
 import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 
+import { AmendmentDraft, amendmentInputViolation } from './AmendmentDraft'
 import { ArchiveBundleExport } from './ArchiveBundleExport'
 import { DiscardDraftAction } from './DiscardDraftAction'
 import { FinalizeStep } from './FinalizeStep'
@@ -16,6 +17,8 @@ import {
   SYNC_STATUS_VALUES,
 } from '../../bridge/generated-contracts'
 import type {
+  AmendmentInputView,
+  CorrectionReferenceView,
   ArchiveHealthSummaryView,
   BundleExportView,
   DiscardStateView,
@@ -58,6 +61,11 @@ export const WRITER_COMMANDS = {
   draftSave: 'draft_save',
   discardBegin: 'draft_discard_begin',
   discardResume: 'draft_discard_resume',
+  amendmentImport: 'writer_amendment_import',
+  amendmentSave: 'draft_save_amendment',
+  amendmentPreview: 'writer_preview_amendment',
+  amendmentFinalize: 'writer_finalize_amendment',
+  amendmentAcknowledge: 'writer_acknowledge_stale_amendment',
   preview: 'writer_preview',
   acknowledgeStaleRegistry: 'writer_acknowledge_stale_registry',
   finalize: 'writer_finalize',
@@ -91,6 +99,12 @@ export const WRITER_COMMANDS = {
  * Alles andere ist eine HANDLUNG und damit asynchron.
  */
 export type WriterBridge = {
+  readonly importAmendment?: (reference: CorrectionReferenceView) => Promise<AmendmentInputView>
+  readonly saveAmendment?: (input: AmendmentInputView) => Promise<SyncStateView>
+  readonly previewAmendment?: (input: AmendmentInputView) => Promise<FinalizationPreviewView>
+  readonly finalizeAmendment?: (input: AmendmentInputView, confirmed: FinalizationPreviewView) => Promise<FinalizeOutcomeView>
+  readonly acknowledgeStaleAmendment?: (input: AmendmentInputView, confirmed: FinalizationPreviewView) => Promise<StaleAcknowledgementView>
+
   readonly draft: DraftStateView
   readonly pendingResume: PendingResumeOutcomeView | null
   readonly saveDraft: (input: IncidentInputView) => Promise<SyncStateView>
@@ -162,7 +176,7 @@ export function firstInputViolation(incident: IncidentInputView): string | null 
  * angezeigte Wortlaut ein beliebiger Text aus einer Antwort — und die vier
  * Zustandsnamen sind woertliche Oberflaechenkopie einer globalen Randbedingung.
  */
-function validateSyncState(raw: unknown): SyncStateView {
+export function validateSyncState(raw: unknown): SyncStateView {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error('Der Sync-Zustand ist kein Objekt.')
   }
@@ -226,6 +240,9 @@ type Stage =
  * eine inhaltsfuehrende Ansicht der Publikationsschlange.
  */
 export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): ReactElement {
+  const [amendment, setAmendment] = useState<AmendmentInputView | null>(bridge.draft.amendment ?? null)
+  const [referenceText, setReferenceText] = useState('')
+  const [importError, setImportError] = useState<string | null>(null)
   const [incident, setIncident] = useState<IncidentInputView>(bridge.draft.incident)
   const [sync, setSync] = useState<SyncStateView>(bridge.draft.sync)
   const [stage, setStage] = useState<Stage>({ kind: 'form' })
@@ -271,7 +288,7 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
    * feststeht, ist ein Aufruf zu viel.
    */
   const check = (): void => {
-    const found = firstInputViolation(incident)
+    const found = amendment === null ? firstInputViolation(incident) : amendmentInputViolation(amendment)
     setViolation(found)
     setPreview(null)
     setPreviewRefused(false)
@@ -281,7 +298,7 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
     if (found !== null) {
       return
     }
-    void bridge.preview(incident).then(
+    void (amendment === null ? bridge.preview(incident) : bridge.previewAmendment?.(amendment) ?? Promise.reject(new Error('EA-DESKTOP-AMENDMENT-UNAVAILABLE'))).then(
       (result) => {
         setPreview(result)
       },
@@ -327,10 +344,12 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
     }
     const confirmed = preview
     withFreshProof(FINALIZE_PURPOSE, () =>
-      bridge.finalize(incident, confirmed).then((outcome) => {
+      (amendment === null ? bridge.finalize(incident, confirmed) : bridge.finalizeAmendment?.(amendment, confirmed) ?? Promise.reject(new Error('EA-DESKTOP-AMENDMENT-UNAVAILABLE'))).then((outcome) => {
         // Nach dem Commit bleibt der Oberflaeche NICHTS als Hash und Sequenz.
         setStage({ kind: 'closed', outcome })
         setIncident(blankIncident())
+        setAmendment(null)
+        setReferenceText('')
         setSync(outcome.sync)
         setPreview(null)
         setAcknowledgement(null)
@@ -344,6 +363,8 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
         setDiscardState(state)
         if (state.complete) {
           setIncident(blankIncident())
+        setAmendment(null)
+        setReferenceText('')
         }
       }),
     )
@@ -354,7 +375,7 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
     const confirmed = preview
     setAcknowledgementRefused(false)
     withFreshProof(STALE_ACK_PURPOSE, () =>
-      bridge.acknowledgeStaleRegistry(incident, confirmed).then(
+      (amendment === null ? bridge.acknowledgeStaleRegistry(incident, confirmed) : bridge.acknowledgeStaleAmendment?.(amendment, confirmed) ?? Promise.reject(new Error('EA-DESKTOP-AMENDMENT-UNAVAILABLE'))).then(
         (result) => {
           setAcknowledgement(result)
           if (!result.captured) {
@@ -397,18 +418,50 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
 
         <Space direction="vertical" size="middle">
           <SyncStatus state={sync} label="Speicherzustand" />
-          <IncidentForm
-            incident={incident}
-            onChange={edit}
-            onSearch={bridge.searchMasterData}
-          />
+          {amendment === null ? (
+            <>
+              {bridge.importAmendment === undefined ? null : (
+                <section aria-label="Nachtrag beginnen">
+                  <label htmlFor="correction-reference">Korrekturreferenz aus dem Reader</label>
+                  <Input.TextArea id="correction-reference" value={referenceText} onChange={event => setReferenceText(event.target.value)} />
+                  <Typography.Paragraph>Für einen Nachtrag muss der aktive Entwurf leer sein. Das Original wird anhand seiner Referenz geprüft.</Typography.Paragraph>
+                  <Button disabled={busy || JSON.stringify(incident) !== JSON.stringify(blankIncident())} onClick={() => {
+                    setImportError(null)
+                    let reference: CorrectionReferenceView
+                    try {
+                      reference = JSON.parse(referenceText) as CorrectionReferenceView
+                      if (reference === null || typeof reference !== 'object' || typeof reference.originalRecordId !== 'string' || typeof reference.originalEntryHash !== 'string' || !Number.isSafeInteger(reference.originalSequence) || reference.originalSequence < 0) throw new Error()
+                    } catch { setImportError('Die Korrekturreferenz ist nicht lesbar.'); return }
+                    setBusy(true)
+                    void bridge.importAmendment?.(reference).then(value => {
+                      setAmendment(value)
+                      setReferenceText('')
+                      setPreview(null)
+                      setAcknowledgement(null)
+                      setStage({ kind: 'form' })
+                    }).catch((error: unknown) => {
+                      const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'EA-DESKTOP-AMENDMENT-REFERENCE-REJECTED'
+                      setImportError(code === 'EA-WRITER-ORIGINAL-IDENTITY-MISSING' ? 'Die gesicherte Originalzuordnung fehlt. Stellen Sie die Erfassungsquelle aus der Sicherung wieder her. ' + code : 'Die Originalreferenz wurde abgelehnt. ' + code)
+                    }).finally(() => setBusy(false))
+                  }}>Nachtrag beginnen</Button>
+                  {importError === null ? null : <Alert type="error" message={importError} />}
+                </section>
+              )}
+              <IncidentForm incident={incident} onChange={edit} onSearch={bridge.searchMasterData} />
+            </>
+          ) : <AmendmentDraft value={amendment} onChange={value => {
+            setAmendment(value)
+            setPreview(null)
+            setAcknowledgement(null)
+            setStage({ kind: 'form' })
+          }} disabled={busy} />}
           <Space size="middle">
             <Button type="primary" onClick={check}>
               Prüfen
             </Button>
             <Button
               onClick={() => {
-                void bridge.saveDraft(incident).then(setSync, () => undefined)
+                void (amendment === null ? bridge.saveDraft(incident) : bridge.saveAmendment?.(amendment) ?? Promise.reject(new Error())).then(setSync, () => undefined)
               }}
             >
               Entwurf speichern
@@ -436,7 +489,7 @@ export function WriterPage({ bridge }: { readonly bridge: WriterBridge }): React
                 description={violation}
               />
             )}
-            <ReviewStep incident={incident} preview={preview} health={health} posture={posture} />
+            <ReviewStep incident={amendment === null ? incident : null} amendment={amendment} preview={preview} health={health} posture={posture} />
             {previewRefused ? (
               <Alert
                 type="error"
@@ -494,6 +547,11 @@ export async function connectWriterBridge(): Promise<WriterBridge> {
   return {
     draft,
     pendingResume,
+    importAmendment: reference => call(WRITER_COMMANDS.amendmentImport, { reference }),
+    saveAmendment: amendment => call(WRITER_COMMANDS.amendmentSave, { amendment }),
+    previewAmendment: amendment => call(WRITER_COMMANDS.amendmentPreview, { amendment }),
+    finalizeAmendment: (amendment, confirmed) => call(WRITER_COMMANDS.amendmentFinalize, { amendment, confirmed }),
+    acknowledgeStaleAmendment: (amendment, confirmed) => call(WRITER_COMMANDS.amendmentAcknowledge, { amendment, confirmed, warningConfirmed: true }),
     saveDraft: (input) => call(WRITER_COMMANDS.draftSave, { incident: input }),
     searchMasterData: (query) => call(WRITER_COMMANDS.masterDataSearch, { query }),
     preview: (input) => call(WRITER_COMMANDS.preview, { incident: input }),

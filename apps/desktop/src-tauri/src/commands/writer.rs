@@ -155,6 +155,58 @@ pub struct IncidentInputDto {
     pub external_organizations: Vec<ExternalOrganizationDto>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorrectionReferenceDto {
+    pub original_record_id: String,
+    pub original_entry_hash: String,
+    pub original_sequence: u64,
+}
+impl CorrectionReferenceDto {
+    fn to_view(&self) -> ea_ui_contracts::CorrectionReferenceView {
+        ea_ui_contracts::CorrectionReferenceView {
+            original_record_id: self.original_record_id.clone(),
+            original_entry_hash: self.original_entry_hash.clone(),
+            original_sequence: self.original_sequence,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AmendmentChangeDto {
+    pub field_path: String,
+    pub change_text: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AmendmentInputDto {
+    pub reference: CorrectionReferenceDto,
+    pub reason: String,
+    pub changes: Vec<AmendmentChangeDto>,
+}
+impl AmendmentInputDto {
+    fn to_view(&self) -> ea_ui_contracts::AmendmentInputView {
+        ea_ui_contracts::AmendmentInputView {
+            reference: self.reference.to_view(),
+            reason: self.reason.clone(),
+            changes: self
+                .changes
+                .iter()
+                .map(|change| ea_ui_contracts::AmendmentChangeView {
+                    field_path: change.field_path.clone(),
+                    change_text: change.change_text.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+/// Versioned local encrypted draft payload, not an archive wire or authority.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AmendmentDraftEnvelope {
+    amendment: AmendmentInputDto,
+}
+
 /// Der Eingabevertrag ist verletzt — mit dem Code der Stufe 1.
 pub const INCIDENT_INPUT_REJECTED: &str = "EA-DESKTOP-INCIDENT-INPUT-REJECTED";
 
@@ -258,6 +310,7 @@ impl From<&ea_ui_contracts::SyncStateView> for SyncStateDto {
 #[serde(rename_all = "camelCase")]
 pub struct DraftStateDto {
     pub incident: IncidentInputDto,
+    pub amendment: Option<AmendmentInputDto>,
     pub sync: SyncStateDto,
 }
 
@@ -620,13 +673,17 @@ fn master_data_search_core(
     let repository = state
         .master_data()
         .ok_or_else(|| CommandError::new(MASTER_DATA_UNAVAILABLE))?;
+    state
+        .verified_role()?
+        .filter(|role| *role == ea_format::OperatorRoleV1::Writer)
+        .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
     let personnel_total = repository
         .person_count()
         .map_err(|_| CommandError::new(MASTER_DATA_UNREADABLE))?;
     let vehicle_total = repository
         .vehicle_count()
         .map_err(|_| CommandError::new(MASTER_DATA_UNREADABLE))?;
-    let personnel = repository
+    let mut personnel = repository
         .snapshot_person(query)
         .map(|snapshot| {
             vec![PersonnelSelectionDto {
@@ -636,7 +693,7 @@ fn master_data_search_core(
             }]
         })
         .unwrap_or_default();
-    let vehicles = repository
+    let mut vehicles = repository
         .snapshot_vehicle(query)
         .map(|snapshot| {
             vec![VehicleSelectionDto {
@@ -647,6 +704,21 @@ fn master_data_search_core(
             }]
         })
         .unwrap_or_default();
+    if state.verified_role().ok().flatten() != Some(ea_format::OperatorRoleV1::Writer) {
+        use zeroize::Zeroize;
+        for person in &mut personnel {
+            person.master_personnel_id.zeroize();
+            person.display_name.zeroize();
+            person.role_label.zeroize();
+        }
+        for vehicle in &mut vehicles {
+            vehicle.master_vehicle_id.zeroize();
+            vehicle.display_name.zeroize();
+            vehicle.radio_call_name.zeroize();
+            vehicle.license_plate.zeroize();
+        }
+        return Err(CommandError::new(NO_VERIFIED_SESSION));
+    }
     Ok(MasterDataResultDto {
         personnel,
         vehicles,
@@ -681,10 +753,7 @@ fn master_data_search_core(
 /// [`draft_state_of`] herausgezogen und dort vollstaendig bezeugt.
 fn draft_load_core(state: &DesktopState) -> Result<DraftStateDto, CommandError> {
     state
-        .session()
-        .lock()
-        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
-        .role()
+        .verified_role()?
         .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
     let repository = state
         .drafts()
@@ -710,8 +779,16 @@ fn draft_state_of(
     let payload = repository
         .load_payload()
         .map_err(|_| CommandError::new(DRAFTS_UNAVAILABLE))?;
+    let amendment = serde_json::from_str::<AmendmentDraftEnvelope>(&payload)
+        .ok()
+        .map(|envelope| envelope.amendment);
     Ok(DraftStateDto {
-        incident: decode_draft_payload(&payload)?,
+        incident: if amendment.is_some() {
+            blank_incident_dto()
+        } else {
+            decode_draft_payload(&payload)?
+        },
+        amendment,
         sync: SyncStateDto {
             status: ea_archive_fs::SyncStatus::LocallySaved.label(),
             detail_cause: None,
@@ -898,10 +975,7 @@ fn discard_port(
         .discard()
         .ok_or_else(|| CommandError::new(DISCARD_UNAVAILABLE))?;
     state
-        .session()
-        .lock()
-        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
-        .role()
+        .verified_role()?
         .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
     Ok(port)
 }
@@ -1297,6 +1371,126 @@ pub async fn archive_export_bundle_file(
     run_blocking(move || bundle_export_core(&state)).await
 }
 
+fn amendment_preview_of(
+    port: &dyn crate::state::WriterFinalizePort,
+    input: &AmendmentInputDto,
+) -> Result<FinalizationPreviewDto, CommandError> {
+    port.preview_amendment(&input.to_view())
+        .map(FinalizationPreviewDto::from)
+}
+fn amendment_finalize_of(
+    port: &dyn crate::state::WriterFinalizePort,
+    input: &AmendmentInputDto,
+    confirmed: &FinalizationPreviewDto,
+) -> Result<FinalizeOutcomeDto, CommandError> {
+    port.finalize_amendment(&input.to_view(), &confirmed.to_view()?)
+        .map(FinalizeOutcomeDto::from)
+}
+fn amendment_save_of(
+    repository: &(impl DraftPayloadPort + ?Sized),
+    input: &AmendmentInputDto,
+) -> Result<SyncStateDto, CommandError> {
+    let payload = serde_json::to_string(&AmendmentDraftEnvelope {
+        amendment: input.clone(),
+    })
+    .map_err(|_| CommandError::new(DRAFT_PAYLOAD_UNREADABLE))?;
+    repository
+        .save_payload(payload)
+        .map_err(|e| CommandError::new(e.code()))?;
+    Ok(SyncStateDto {
+        status: ea_archive_fs::SyncStatus::LocallySaved.label(),
+        detail_cause: None,
+    })
+}
+fn amendment_port(
+    state: &DesktopState,
+) -> Result<&(dyn crate::state::WriterFinalizePort + Send + Sync), CommandError> {
+    state
+        .verified_role()?
+        .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
+    state
+        .writer()
+        .ok_or_else(|| CommandError::new(WRITER_UNAVAILABLE))
+}
+
+/// Import exact coordinates; the port verifies public archive and encrypted
+/// origin source before a draft is created. Caller text never proves identity.
+#[tauri::command]
+pub async fn writer_amendment_import(
+    state: tauri::State<'_, DesktopState>,
+    reference: CorrectionReferenceDto,
+) -> Result<AmendmentInputDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || {
+        amendment_port(&state)?.validate_amendment_reference(&reference.to_view())?;
+        Ok(AmendmentInputDto {
+            reference,
+            reason: String::new(),
+            changes: vec![AmendmentChangeDto {
+                field_path: String::new(),
+                change_text: String::new(),
+            }],
+        })
+    })
+    .await
+}
+#[tauri::command]
+pub async fn draft_save_amendment(
+    state: tauri::State<'_, DesktopState>,
+    amendment: AmendmentInputDto,
+) -> Result<SyncStateDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || {
+        amendment_port(&state)?.validate_amendment_reference(&amendment.reference.to_view())?;
+        amendment_save_of(
+            state
+                .drafts()
+                .ok_or_else(|| CommandError::new(DRAFTS_UNAVAILABLE))?,
+            &amendment,
+        )
+    })
+    .await
+}
+#[tauri::command]
+pub async fn writer_preview_amendment(
+    state: tauri::State<'_, DesktopState>,
+    amendment: AmendmentInputDto,
+) -> Result<FinalizationPreviewDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || amendment_preview_of(amendment_port(&state)?, &amendment)).await
+}
+#[tauri::command]
+pub async fn writer_finalize_amendment(
+    state: tauri::State<'_, DesktopState>,
+    amendment: AmendmentInputDto,
+    confirmed: FinalizationPreviewDto,
+) -> Result<FinalizeOutcomeDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || amendment_finalize_of(amendment_port(&state)?, &amendment, &confirmed))
+        .await
+}
+#[tauri::command]
+pub async fn writer_acknowledge_stale_amendment(
+    state: tauri::State<'_, DesktopState>,
+    amendment: AmendmentInputDto,
+    confirmed: FinalizationPreviewDto,
+    warning_confirmed: bool,
+) -> Result<StaleAcknowledgementDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || {
+        amendment_port(&state)?.acknowledge_stale_amendment(
+            &amendment.to_view(),
+            &confirmed.to_view()?,
+            warning_confirmed,
+        )?;
+        Ok(StaleAcknowledgementDto {
+            captured: true,
+            proof_code: "EA-REGISTRY-STALE-ACK-CAPTURED".into(),
+        })
+    })
+    .await
+}
+
 #[cfg(test)]
 #[path = "../../../../../crates/ea-writer/tests/support/mod.rs"]
 mod stale_support;
@@ -1329,6 +1523,32 @@ mod tests {
 
     fn bare_state() -> DesktopState {
         DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+    }
+
+    #[test]
+    fn an_open_database_does_not_authorize_master_data_reads() {
+        let harness = super::stale_support::WriterHarness::with_incident();
+        let master = std::sync::Arc::new(ea_draft::MasterDataRepository::new(harness.database()));
+        let state = DesktopState::new(
+            SessionState::new(None, None),
+            None,
+            Some(master),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            master_data_search_core(&state, "private-row")
+                .unwrap_err()
+                .code,
+            NO_VERIFIED_SESSION
+        );
+        assert_eq!(
+            crate::commands::master_data::master_data_counts_core(&state)
+                .unwrap_err()
+                .code,
+            NO_VERIFIED_SESSION
+        );
     }
 
     #[test]
@@ -1392,6 +1612,90 @@ mod tests {
         assert_eq!(outcome.sequence.get(), 0);
         assert_eq!(harness.audit_bytes(receipt_id), audit);
         assert!(receipt_slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn amendment_host_command_rechecks_exact_reference_and_crosses_native_writer_path() {
+        use crate::state::BoundWriter;
+        use ea_operator::ReauthPurpose;
+        let mut harness = super::stale_support::WriterHarness::with_incident();
+        harness.materialize_trust_objects();
+        let original = harness.finalize_once();
+        let row = harness
+            .database()
+            .query_row("SELECT record_id FROM writer_original_identity", &[])
+            .unwrap()
+            .unwrap();
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let dto = super::AmendmentInputDto {
+            reference: super::CorrectionReferenceDto {
+                original_record_id: hex(row.blob(0).unwrap()),
+                original_entry_hash: hex(original.entry_hash.as_bytes()),
+                original_sequence: 0,
+            },
+            reason: "Angabe ergänzen".into(),
+            changes: vec![super::AmendmentChangeDto {
+                field_path: "notes".into(),
+                change_text: "Weitere Beobachtung".into(),
+            }],
+        };
+        let before = harness
+            .published_entry(original.entry_hash)
+            .exact_bytes()
+            .as_bytes()
+            .to_vec();
+        {
+            let repository = harness.repository();
+            super::amendment_save_of(repository.as_ref(), &dto).unwrap();
+        }
+        harness.reopen_store();
+        let persisted = harness.repository().load_or_create().unwrap();
+        let reopened: super::AmendmentDraftEnvelope =
+            serde_json::from_str(persisted.notes()).unwrap();
+        assert_eq!(reopened.amendment, dto);
+        harness.select_sequence(1);
+        let source = harness.source();
+        let service = harness.service(&source);
+        let anchor = harness.anchor();
+        let amendments = ea_admin::amendment::AmendmentDraftService::new(&service, &anchor);
+        let master = ea_draft::MasterDataRepository::new(harness.database());
+        let now = harness.observed_now();
+        let clock = || now;
+        let proof = harness.proof_for(ReauthPurpose::Finalize);
+        let port = BoundWriter::new(&service, &proof, &master, "Europe/Berlin", None)
+            .with_amendments(&amendments, &clock);
+        let preview_view = super::amendment_preview_of(&port, &dto).unwrap();
+        let input = port.prepare_amendment_input(&dto.to_view()).unwrap();
+        let preview = service.preview_amendment(&proof, input, now).unwrap();
+        assert_eq!(
+            preview_view,
+            super::FinalizationPreviewDto::from(FinalizationPreviewView::from(&preview))
+        );
+        let port = BoundWriter::new(&service, &proof, &master, "Europe/Berlin", Some(&preview))
+            .with_amendments(&amendments, &clock);
+        let mut forged = dto.clone();
+        forged.reference.original_sequence = 2;
+        assert_eq!(
+            super::amendment_finalize_of(&port, &forged, &preview_view)
+                .unwrap_err()
+                .code,
+            "EA-WRITER-ORIGINAL-IDENTITY-MISMATCH"
+        );
+        let outcome = super::amendment_finalize_of(&port, &dto, &preview_view).unwrap();
+        assert_eq!(outcome.sequence, 1);
+        assert_eq!(
+            harness
+                .published_entry(original.entry_hash)
+                .exact_bytes()
+                .as_bytes(),
+            before
+        );
+        assert!(harness.draft_is_blank());
     }
 
     /// Ein Doppel der Wiederanmeldung, das AUFSCHREIBT, fuer welchen Zweck es

@@ -20,6 +20,45 @@ use crate::models::{
 /// Der content-addressed Object Store (`design.md` §13.3, §13.4).
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
+    /// Verify complete actual bucket scope against independently verified target
+    /// membership. Unknown/unindexed target holdings block freeze and completion.
+    async fn verify_destruction_scope(
+        &self,
+        _targets: &[ea_types::EntryHash],
+        _known: &[crate::IndexedObjectV1],
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unavailable)
+    }
+
+    /// Complete provider listing can be empty after removal; absence of a live
+    /// GetObject response is never sufficient.
+    async fn remaining_destruction_versions(
+        &self,
+        _kind: ObjectTypeV1,
+        _hash: ObjectHash,
+    ) -> Result<Vec<crate::managed_destruction::StoredObjectVersion>, StoreError> {
+        Err(StoreError::Unavailable)
+    }
+    async fn remove_destruction_version(
+        &self,
+        _kind: ObjectTypeV1,
+        _hash: ObjectHash,
+        _version: &crate::managed_destruction::StoredObjectVersion,
+        _window: &crate::managed_destruction::ServerRemovalWindow,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unavailable)
+    }
+
+    /// Complete provider-observed versions, delete markers and retention.
+    /// No unimplemented adapter may infer absence or unlocked storage.
+    async fn destruction_versions(
+        &self,
+        _kind: ObjectTypeV1,
+        _hash: ObjectHash,
+    ) -> Result<crate::managed_destruction::ObservedObjectVersions, StoreError> {
+        Err(StoreError::Unavailable)
+    }
+
     /// Stromt den Koerper groessenbegrenzt in einen TEMPORAEREN Schluessel und
     /// hasht dabei mit.
     ///
@@ -76,6 +115,16 @@ pub trait ObjectStore: Send + Sync {
 /// Rateschleife ueber den Namensraum.
 #[async_trait]
 pub trait ObjectTypeDirectory: Send + Sync {
+    /// Holds the organization's shared mutation lock through the provider
+    /// write and refuses every already reserved destruction target.
+    async fn begin_object_write(
+        &self,
+        _org: ea_types::OrganizationId,
+        _entry: ea_types::EntryHash,
+    ) -> Result<Box<dyn crate::managed_destruction::ObjectWriteGuard>, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+
     async fn object_type_of(
         &self,
         hash: ObjectHash,
@@ -179,6 +228,19 @@ pub trait CheckpointDirectory: Send + Sync {
 /// Trust-Endpunkte aktive Menge — und damit die falsche Empfaengermenge.
 #[async_trait]
 pub trait RegistryHeadDirectory: Send + Sync {
+    /// Exact archival signature authority. It conveys no current permission;
+    /// implementations without historical replay return None and callers may
+    /// still require an ordinary fresh exact head.
+    async fn historical_registry_authority(
+        &self,
+        _organization_id: ea_types::OrganizationId,
+        _version: ea_types::RegistryVersion,
+        _hash: ObjectHash,
+        _sequence: ea_types::ChainSequence,
+    ) -> Result<Option<ea_trust::HistoricalRegistryAuthority>, AuthorityError> {
+        Ok(None)
+    }
+
     /// Der hoechste dem Server bekannte anwendbare Kopf fuer diese Zeit und
     /// diese Sequenz (`design.md` §13.3, Schritt 5).
     async fn select_head_for_sequence(
@@ -187,6 +249,23 @@ pub trait RegistryHeadDirectory: Send + Sync {
         proposed_sequence: ea_types::ChainSequence,
         now: ea_types::UnixMillis,
     ) -> Result<RegistryHeadSelectionV1, AuthorityError>;
+
+    /// Current admission needs the catalog identity from the SAME verified
+    /// selection. Implementations without a durable snapshot fail closed.
+    /// Pending-time/future-only selections return None, never an old fallback.
+    async fn select_current_admission(
+        &self,
+        _organization_id: ea_types::OrganizationId,
+        _proposed_sequence: ea_types::ChainSequence,
+        _now: ea_types::UnixMillis,
+    ) -> Result<Option<RegistryAdmissionV1>, AuthorityError> {
+        Err(AuthorityError::Unavailable)
+    }
+}
+
+pub struct RegistryAdmissionV1 {
+    pub head: std::sync::Arc<dyn ActiveRegistryHeadV1>,
+    pub fence: crate::models::RegistryAdmissionFenceV1,
 }
 
 /// Wie die Kopfauswahl auf eine Sequenz antwortet.
@@ -233,6 +312,14 @@ pub enum RegistryHeadSelectionV1 {
 /// Kante auf, und `SelectedRegistryHead` implementiert sie bereits
 /// (`crates/ea-trust/src/resolver.rs`:333).
 pub trait ActiveRegistryHeadV1: ea_crypto::SignerCertificateResolver + Send + Sync {
+    /// Complete verified historical custody, including revoked identities.
+    /// Adapters without this evidence must refuse managed job admission.
+    fn known_certificate_fields(
+        &self,
+    ) -> Option<Vec<(CertificateHash, &ea_format::DeviceCertificateFieldsV1)>> {
+        None
+    }
+
     fn registry_version(&self) -> ea_types::RegistryVersion;
     fn registry_head_hash(&self) -> ObjectHash;
     /// Die Kettenkennung des Ankers — die Autoritaet fuer „in welche Kette
@@ -264,6 +351,12 @@ pub trait ActiveRegistryHeadV1: ea_crypto::SignerCertificateResolver + Send + Sy
 /// Jede Methode leitet unveraendert weiter; es gibt hier keine Zeile, die eine
 /// eigene Aussage traefe.
 impl ActiveRegistryHeadV1 for ea_trust::SelectedRegistryHead {
+    fn known_certificate_fields(
+        &self,
+    ) -> Option<Vec<(CertificateHash, &ea_format::DeviceCertificateFieldsV1)>> {
+        Some(Self::known_certificate_fields(self).collect())
+    }
+
     fn registry_version(&self) -> ea_types::RegistryVersion {
         Self::registry_version(self)
     }
@@ -683,6 +776,27 @@ pub trait EntryDirectory: Send + Sync {
     ) -> Result<Option<ObjectHash>, RepositoryError>;
 }
 
+/// Independently persisted server chain progress, never a request's sequence.
+#[async_trait]
+pub trait ChainHeadReader: Send + Sync {
+    async fn committed_chain_head(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<crate::models::ChainHeadStateV1>, RepositoryError>;
+}
+
+#[async_trait]
+impl<T: EntryDirectory + ?Sized> ChainHeadReader for T {
+    async fn committed_chain_head(
+        &self,
+        organization_id: ea_types::OrganizationId,
+        chain_id: ea_types::ChainId,
+    ) -> Result<Option<crate::models::ChainHeadStateV1>, RepositoryError> {
+        self.chain_head(organization_id, chain_id).await
+    }
+}
+
 /// Der Objektbestand einer Organisation, in Blaetterreihenfolge.
 ///
 /// Er traegt den ARCHIVEXPORT und sonst nichts. Ein eigener Port neben
@@ -724,12 +838,97 @@ pub trait ReaderAckStore: Send + Sync {
 /// Die APPEND-ONLY-Ablage der Vernichtungsvorgaenge (`design.md` §16.3).
 #[async_trait]
 pub trait DestructionStore: Send + Sync {
+    async fn frozen_destruction_object_hashes(
+        &self,
+        _org: ea_types::OrganizationId,
+        _id: ea_types::DestructionId,
+    ) -> Result<Vec<ObjectHash>, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+
+    /// Technical confirmation of this server's immutable measured result,
+    /// additional to (and never replacing) exact signed replica reconstruction.
+    async fn server_removal_measured(
+        &self,
+        _org: ea_types::OrganizationId,
+        _id: ea_types::DestructionId,
+        _at: ea_types::UnixMillis,
+    ) -> Result<bool, RepositoryError> {
+        Ok(false)
+    }
+
+    async fn record_replica_attestation(
+        &self,
+        _command: crate::managed_destruction::DestructionAttestationCommand,
+        _clock: &dyn ServerClock,
+    ) -> Result<crate::AppendOutcome, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+
+    async fn begin_managed_execution(
+        &self,
+        _command: crate::managed_destruction::ServerExecutionCommand,
+    ) -> Result<Box<dyn crate::managed_destruction::ServerExecutionGuard>, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+
+    async fn destruction_job(
+        &self,
+        _org: ea_types::OrganizationId,
+        _id: ea_types::DestructionId,
+    ) -> Result<Option<crate::managed_destruction::StoredDestructionJob>, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+    async fn managed_target_objects(
+        &self,
+        _org: ea_types::OrganizationId,
+        _id: ea_types::DestructionId,
+        _targets: &[(ea_types::EntryHash, u64, ObjectHash)],
+    ) -> Result<Vec<crate::IndexedObjectV1>, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+    async fn record_destruction_job(
+        &self,
+        _command: crate::managed_destruction::DestructionJobCommand,
+        _clock: &dyn ServerClock,
+    ) -> Result<crate::AppendOutcome, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+
+    /// Append already verified exact history under the same org/chain/current
+    /// authority fence as reservation admission. Implementations must compare
+    /// the complete expected history while holding the destruction row lock.
+    async fn record_destruction_event(
+        &self,
+        _command: crate::managed_destruction::DestructionEventCommand,
+        _clock: &dyn ServerClock,
+    ) -> Result<crate::models::AppendOutcome, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
+
+    /// Read a real reservation and its complete target set under one repository
+    /// snapshot. This is a measurement of delivery blocking, not execution or
+    /// cryptographic state authority. Adapters lacking this check fail closed.
+    async fn reservation_matches(
+        &self,
+        _organization_id: ea_types::OrganizationId,
+        _destruction_id: ea_types::DestructionId,
+        _authorization_hash: ea_types::ObjectHash,
+        _targets: &[(ea_types::EntryHash, u64)],
+    ) -> Result<bool, RepositoryError> {
+        Ok(false)
+    }
+
     /// Nimmt eine gepruefte Mehr-Augen-Authorization an und legt den Vorgang
     /// im Zustand `requested` an — mit seinen Zielen, gegen die anschliessend
-    /// jede Auslieferung und jeder Re-Grant gesperrt wird.
+    /// jede Auslieferung und jeder Re-Grant gesperrt wird. Vor einem neuen Satz
+    /// muessen Katalog/Anker-Fence und expected_chain_head unter Organisations-
+    /// und Kopfsperre unveraendert sein. Die frische Uhr muss nach dem Warten
+    /// noch im geprueften Zeitfenster liegen; sonst HeadConflict, ohne Mutation.
     async fn record_destruction_request(
         &self,
         command: crate::models::DestructionRequestCommandV1,
+        clock: &dyn ServerClock,
     ) -> Result<crate::models::AppendOutcome, RepositoryError>;
 
     /// Der gespeicherte Stand, oder `None` fuer eine unbekannte Kennung.

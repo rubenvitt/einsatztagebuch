@@ -4,6 +4,11 @@ using Ea.NativeOperator;
 
 var passed = 0;
 void Check(bool value, string name) { if (!value) throw new Exception(name); passed++; }
+foreach (var backupSlot in new[] { "admin-signing", "root-signing" })
+{
+    using var backupRequest = Request.Parse(System.Text.Encoding.UTF8.GetBytes($"{{\"op\":\"backup-signing-seed\",\"slot\":\"{backupSlot}\",\"installation_id\":\"{new string('a',64)}\",\"expected_public_key\":\"{new string('b',64)}\",\"presence\":true}}"));
+    Check(backupRequest.Op == "backup-signing-seed", "closed signing backup request");
+}
 void Reject(string json, string code = "invalid-request") {
     try { using var ignored = Request.Parse(Encoding.UTF8.GetBytes(json)); throw new Exception("accepted invalid request"); }
     catch (Failure f) { Check(f.Code == code, "stable error: " + code); }
@@ -80,6 +85,23 @@ var sensitiveRequest = Request.Parse(Encoding.UTF8.GetBytes($"{{\"op\":\"wrap-se
 var sensitiveBytes = sensitiveRequest.Data!;
 sensitiveRequest.Dispose();
 Check(sensitiveBytes.All(b => b == 0), "request secret cleared on disposal");
+foreach (var slot in new[] { "admin-signing", "root-signing" }) {
+    var fixtureSeed = Enumerable.Repeat((byte)0x47,32).ToArray();
+    var fixturePublic = Crypto.PublicKey(fixtureSeed);
+    using var request = Request.Parse(Encoding.UTF8.GetBytes($"{{\"op\":\"backup-signing-seed\",\"slot\":\"{slot}\",\"installation_id\":\"{id}\",\"expected_public_key\":\"{Hex.Encode(fixturePublic)}\",\"presence\":true}}"));
+    var frame = SigningBackup.Frame(request, Hex.Decode(id), fixturePublic, fixtureSeed);
+    Check(frame.Length == 106 && frame.AsSpan(0,8).SequenceEqual("EABKSEED"u8) && frame[8] == 1 && frame[9] == (slot == "admin-signing" ? 1 : 2), "exact binary backup header");
+    Check(frame.AsSpan(10,32).SequenceEqual(Hex.Decode(id)) && frame.AsSpan(42,32).SequenceEqual(fixturePublic) && frame.AsSpan(74,32).SequenceEqual(fixtureSeed), "exact backup bindings and seed");
+    using var output = new MemoryStream();
+    Transport.WriteSigningBackup(output, frame);
+    Check(output.Length == 106 && frame.All(b => b == 0), "binary write has no LF and clears owner");
+    CryptographicOperations.ZeroMemory(output.GetBuffer());
+    fixtureSeed[0] ^= 1;
+    try { SigningBackup.Frame(request, Hex.Decode(id), fixturePublic, fixtureSeed); throw new Exception("wrong seed accepted"); }
+    catch (Failure f) { Check(f.Code == "key-invalid", "actual seed binding"); }
+    CryptographicOperations.ZeroMemory(fixtureSeed);
+}
+SigningBackupTests.Run(Check);
 ConsoleLineTests.Run(Check);
 await WatchTests.Run(Check);
 Console.WriteLine($"{passed} protocol/crypto checks passed; no Windows OS store or session API executed.");

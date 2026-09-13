@@ -43,13 +43,15 @@ ea-types.workspace = true
 # Frischer `draftDEK`, frische AEAD-Nonce und frische Entwurfskennung aus dem
 # CSPRNG des Betriebssystems.
 getrandom.workspace = true
+# Minimal retained incident-number equality tokens after authorized purge.
+hmac = { workspace = true, features = ["zeroize"] }
 # Der ROHE, domainfreie SHA-256 ueber die EXAKTEN Eingabebytes einer
 # CSV-Datei — `inputFileHash` des Trockenlaufs und des Protokollurbilds.
 # `ea-crypto` fuehrt AUSSCHLIESSLICH domaingetrennte Hashfunktionen, und
 # `verification_report_hash` ist per Dokumentation auf Berichtsbytes
 # beschraenkt; eine neue Domainkonstante entsteht hier ausdruecklich nicht
 # (D-B01).
-sha2.workspace = true
+sha2 = { workspace = true, features = ["zeroize"] }
 # NFC-Normalisierung der Einsatznummer VOR dem Registerschluessel, damit kein
 # Aufrufer den Schluessel mit einer zerlegten Form aufweichen kann.
 unicode-normalization.workspace = true

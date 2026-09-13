@@ -1,0 +1,309 @@
+{
+  "lastFailure": {
+    "auditId": "fe9ebf292e713b66340eb3adcb3032b5",
+    "completed": false,
+    "envelopeHash": "d708a2e78145467d2bb8a85b98ea1bdc54eb066c63e92c08762d5537802de2d3",
+    "exactPublicReportJson": "{\"schemaId\":\"ea.recovery-test/v1\",\"testId\":\"92f62c5d03cf5d8a52163039debd9b9b\",\"sourceEnvelopeHash\":\"8a21e2b75ad5f330e17788cd4e50d3d84f6658bd5db73e44a5554b37d4a3c8de\",\"sourceMachine\":\"a0f19b66b4c48f289556461fee5405794de30e31627c2867b15dad5935dd4853\",\"targetMachine\":\"2f289c16a0852097f11109175350d5c3365add106774db0c35387bcbd9ba83e3\",\"targetInstallation\":\"7577dd0c6d1b5b74c56dae83e4939f5c44cf71f3deca8e2acc50132fa27f6050\",\"anchorHash\":\"bd1db46e8004e1ff8112b4b87cebd468492ad2fe9534e9aa1f9a1468cc73fe26\",\"archiveInventoryHash\":\"dc58261f5e3726cf1e894ba77174343699b48288da4d71646396fe2fe38c8036\",\"tipSequence\":1,\"tipEntryHash\":\"872196bce681bead276d1992c480d81abd33a2c7f501f7148cc899fba2fc9294\",\"registryVersion\":20,\"registryHeadHash\":\"66491d5e754879e41ef95433571d56b0cafb2cd4583ab8661c4deec17ed23658\",\"proposedSequence\":2,\"effectiveNow\":1788953285464,\"releaseVersion\":\"0.1.0\",\"schemaVersions\":[\"ea.genesis/v1\",\"ea.incident/v1\",\"ea.amendment/v1\",\"ea.key-transition/v1\",\"ea.destruction-evidence/v1\"],\"suiteVersions\":[\"EINSATZARCHIV-SUITE-1\"],\"media\":[{\"mediumIdHash\":\"00dc5efb5fb808edce3dcdf2e12368507b575d74336c30dab10d205d208be6fd\",\"role\":\"recoveryRecipient\",\"certificateHash\":\"fbf487ec491106d335b95e3846efea69362627d77f7864f9d5bc83275fa8ca95\",\"expectedThumbprint\":\"80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa\",\"observedThumbprint\":\"80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa\",\"testKind\":\"recoveryDecrypt\",\"result\":\"passed\"},{\"mediumIdHash\":\"18f29bdd1e434fca18000af9bef0e3a54298fdf44a51019013b22865d3812bb0\",\"role\":\"organizationAdmin\",\"certificateHash\":\"8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"1cb6ca5942c7f6728b9f669c2afdb37faf4f69baa6574bedf0bbd48e11ca4089\",\"role\":\"organizationAdmin\",\"certificateHash\":\"7741a86366c2348392878b05e7a4e83f8585be901f999229fc694378ebe42ea9\",\"expectedThumbprint\":\"51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee\",\"observedThumbprint\":\"51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"2dd00c414da2424446de39bd2aaa8690636d0d6434cc86e026e7a5f34e501c2d\",\"role\":\"root\",\"certificateHash\":\"311b1401fa3d1a273ffa96789f605a2fafebba5ade33768ca69ff517b3c52698\",\"expectedThumbprint\":\"cd55fdba7a00e29f11e2e57078e21817a1c536a8a9cff1e2e1e5bbf2f6f20fba\",\"observedThumbprint\":\"\",\"testKind\":\"signatureChallenge\",\"result\":\"missing\",\"errorCode\":\"EA-RECOVERY-TEST-INCOMPLETE\"},{\"mediumIdHash\":\"2e74973c1eba672b6a04de7eff2fe6353d8af93c19688366c0831aa7946d4e07\",\"role\":\"writer\",\"certificateHash\":\"8519e3a8496a4e2fb7065e470816242d52c3c17e9a00d89c3e34803eb102b146\",\"expectedThumbprint\":\"2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17\",\"observedThumbprint\":\"2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"3e307556267db9ffc3707ad1d287c200c66a42a9f37741114362c71e1bb0a4e2\",\"role\":\"deletionAttest\",\"certificateHash\":\"d641115484dcf56125822abc441c485d6e2605a7d418ec2453485412b426b9fb\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"41d8273921ac9f77890fc9f546962c7124ebcd28d541462a90435423596a4472\",\"role\":\"keyApprover\",\"certificateHash\":\"851430d6650f44849fce92f4d40c9a381c36474de7baa8e4701cd038fbf5d689\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"4f58960cf33ed741b5633ff39eed6d5b1c2a6ec553cec077920f2b0598da07e6\",\"role\":\"keyApprover\",\"certificateHash\":\"a419860f03b2ce7e974b9670e40a91c334c97fdac6da6d290b16483414e6706c\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"5fcbc14e67e5aa397d8d9669cefb5c6987baaa7d3f57c8b3d445939cd21f9f8f\",\"role\":\"organizationAdmin\",\"certificateHash\":\"d0b63e35ba84a12c4d9c3d737e2131ed07a2bedf19eacd87d451315321efe862\",\"expectedThumbprint\":\"5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59\",\"observedThumbprint\":\"5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"af63d5f9ec3e7affa6e3eff7e79837eade6537d51b27ca053ecf2e09a6d0b922\",\"role\":\"serverReceipt\",\"certificateHash\":\"0e2063ab679fba0bc29cb29d5629c5a843d5ebd8e908a23d7c956d192c9da759\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"c56a29bbea9f5406efe4e6c2a84fa8ebdedb80450709552e56603221d12e4253\",\"role\":\"organizationAdmin\",\"certificateHash\":\"8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"providerPresence\",\"result\":\"passed\"},{\"mediumIdHash\":\"c5ccee3463838bc3ee81d2a14344d6a04924a87511ee565be292502a4b8eb7c4\",\"role\":\"historicalGrantAuthority\",\"certificateHash\":\"268ec9bde471732378d333971294770d4c49ed44220a2ce0ee2f57f21b0d1085\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e4674d8aef6494998e0a5ef0176733ff6895b827f66bee59d2ab227d1493bf60\",\"role\":\"writer\",\"certificateHash\":\"23158cddba4b012c3b81d2f773b086c5505157bfdbd3f6ce99630971abb3d149\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e5416fe81b7412f4dc42033df2bf3577201795a1f9a580bed1d4fcc015e14471\",\"role\":\"reader\",\"certificateHash\":\"2473f0bb627cf521051cab55e33dac92367acfa6b928500c74e45def3a2ac44d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e6edee686d318a1038c650efa9b025cfe346e575142ddab37c7505a2016d9f58\",\"role\":\"recoveryRecipient\",\"certificateHash\":\"e797b2fe833dcdfbd12ad824120cc3c554176d7cef5b242803fe5391775786df\",\"expectedThumbprint\":\"445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e\",\"observedThumbprint\":\"445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e\",\"testKind\":\"recoveryDecrypt\",\"result\":\"passed\"},{\"mediumIdHash\":\"f17ee89bde3d215137649a24f9e4df1441e8e8b87e8185492f86ce9f98a545bc\",\"role\":\"root\",\"certificateHash\":\"8bb28e7b30e4277b63c717097a5f4730cf5c6499e521ce22a0c10ce7e92d3421\",\"expectedThumbprint\":\"866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743\",\"observedThumbprint\":\"866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"}],\"samples\":[],\"result\":\"failed\",\"errorCode\":\"EA-RECOVERY-TEST-INCOMPLETE\"}",
+    "finishedAtMs": 1788953766265,
+    "nextDueAtMs": null,
+    "sourceEnvelopeHash": "8a21e2b75ad5f330e17788cd4e50d3d84f6658bd5db73e44a5554b37d4a3c8de"
+  },
+  "lastSuccess": {
+    "auditId": "3ff656aab5e57063c8257384f0e0df85",
+    "completed": true,
+    "envelopeHash": "b3864028f45d8bc5397572d2371ade8989c04eb4851e2f97eecc5a47451ddb19",
+    "exactPublicReportJson": "{\"schemaId\":\"ea.recovery-test/v1\",\"testId\":\"19116b137911633be36b33f4975381fb\",\"sourceEnvelopeHash\":\"8a21e2b75ad5f330e17788cd4e50d3d84f6658bd5db73e44a5554b37d4a3c8de\",\"sourceMachine\":\"a0f19b66b4c48f289556461fee5405794de30e31627c2867b15dad5935dd4853\",\"targetMachine\":\"2f289c16a0852097f11109175350d5c3365add106774db0c35387bcbd9ba83e3\",\"targetInstallation\":\"7577dd0c6d1b5b74c56dae83e4939f5c44cf71f3deca8e2acc50132fa27f6050\",\"anchorHash\":\"bd1db46e8004e1ff8112b4b87cebd468492ad2fe9534e9aa1f9a1468cc73fe26\",\"archiveInventoryHash\":\"dc58261f5e3726cf1e894ba77174343699b48288da4d71646396fe2fe38c8036\",\"tipSequence\":1,\"tipEntryHash\":\"872196bce681bead276d1992c480d81abd33a2c7f501f7148cc899fba2fc9294\",\"registryVersion\":20,\"registryHeadHash\":\"66491d5e754879e41ef95433571d56b0cafb2cd4583ab8661c4deec17ed23658\",\"proposedSequence\":2,\"effectiveNow\":1788959937290,\"releaseVersion\":\"0.1.0\",\"schemaVersions\":[\"ea.genesis/v1\",\"ea.incident/v1\",\"ea.amendment/v1\",\"ea.key-transition/v1\",\"ea.destruction-evidence/v1\"],\"suiteVersions\":[\"EINSATZARCHIV-SUITE-1\"],\"media\":[{\"mediumIdHash\":\"00dc5efb5fb808edce3dcdf2e12368507b575d74336c30dab10d205d208be6fd\",\"role\":\"recoveryRecipient\",\"certificateHash\":\"fbf487ec491106d335b95e3846efea69362627d77f7864f9d5bc83275fa8ca95\",\"expectedThumbprint\":\"80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa\",\"observedThumbprint\":\"80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa\",\"testKind\":\"recoveryDecrypt\",\"result\":\"passed\"},{\"mediumIdHash\":\"18f29bdd1e434fca18000af9bef0e3a54298fdf44a51019013b22865d3812bb0\",\"role\":\"organizationAdmin\",\"certificateHash\":\"8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"1cb6ca5942c7f6728b9f669c2afdb37faf4f69baa6574bedf0bbd48e11ca4089\",\"role\":\"organizationAdmin\",\"certificateHash\":\"7741a86366c2348392878b05e7a4e83f8585be901f999229fc694378ebe42ea9\",\"expectedThumbprint\":\"51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee\",\"observedThumbprint\":\"51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"2dd00c414da2424446de39bd2aaa8690636d0d6434cc86e026e7a5f34e501c2d\",\"role\":\"root\",\"certificateHash\":\"311b1401fa3d1a273ffa96789f605a2fafebba5ade33768ca69ff517b3c52698\",\"expectedThumbprint\":\"cd55fdba7a00e29f11e2e57078e21817a1c536a8a9cff1e2e1e5bbf2f6f20fba\",\"observedThumbprint\":\"cd55fdba7a00e29f11e2e57078e21817a1c536a8a9cff1e2e1e5bbf2f6f20fba\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"2e74973c1eba672b6a04de7eff2fe6353d8af93c19688366c0831aa7946d4e07\",\"role\":\"writer\",\"certificateHash\":\"8519e3a8496a4e2fb7065e470816242d52c3c17e9a00d89c3e34803eb102b146\",\"expectedThumbprint\":\"2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17\",\"observedThumbprint\":\"2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"3e307556267db9ffc3707ad1d287c200c66a42a9f37741114362c71e1bb0a4e2\",\"role\":\"deletionAttest\",\"certificateHash\":\"d641115484dcf56125822abc441c485d6e2605a7d418ec2453485412b426b9fb\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"41d8273921ac9f77890fc9f546962c7124ebcd28d541462a90435423596a4472\",\"role\":\"keyApprover\",\"certificateHash\":\"851430d6650f44849fce92f4d40c9a381c36474de7baa8e4701cd038fbf5d689\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"4f58960cf33ed741b5633ff39eed6d5b1c2a6ec553cec077920f2b0598da07e6\",\"role\":\"keyApprover\",\"certificateHash\":\"a419860f03b2ce7e974b9670e40a91c334c97fdac6da6d290b16483414e6706c\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"5fcbc14e67e5aa397d8d9669cefb5c6987baaa7d3f57c8b3d445939cd21f9f8f\",\"role\":\"organizationAdmin\",\"certificateHash\":\"d0b63e35ba84a12c4d9c3d737e2131ed07a2bedf19eacd87d451315321efe862\",\"expectedThumbprint\":\"5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59\",\"observedThumbprint\":\"5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"af63d5f9ec3e7affa6e3eff7e79837eade6537d51b27ca053ecf2e09a6d0b922\",\"role\":\"serverReceipt\",\"certificateHash\":\"0e2063ab679fba0bc29cb29d5629c5a843d5ebd8e908a23d7c956d192c9da759\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"c56a29bbea9f5406efe4e6c2a84fa8ebdedb80450709552e56603221d12e4253\",\"role\":\"organizationAdmin\",\"certificateHash\":\"8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"providerPresence\",\"result\":\"passed\"},{\"mediumIdHash\":\"c5ccee3463838bc3ee81d2a14344d6a04924a87511ee565be292502a4b8eb7c4\",\"role\":\"historicalGrantAuthority\",\"certificateHash\":\"268ec9bde471732378d333971294770d4c49ed44220a2ce0ee2f57f21b0d1085\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e4674d8aef6494998e0a5ef0176733ff6895b827f66bee59d2ab227d1493bf60\",\"role\":\"writer\",\"certificateHash\":\"23158cddba4b012c3b81d2f773b086c5505157bfdbd3f6ce99630971abb3d149\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e5416fe81b7412f4dc42033df2bf3577201795a1f9a580bed1d4fcc015e14471\",\"role\":\"reader\",\"certificateHash\":\"2473f0bb627cf521051cab55e33dac92367acfa6b928500c74e45def3a2ac44d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e6edee686d318a1038c650efa9b025cfe346e575142ddab37c7505a2016d9f58\",\"role\":\"recoveryRecipient\",\"certificateHash\":\"e797b2fe833dcdfbd12ad824120cc3c554176d7cef5b242803fe5391775786df\",\"expectedThumbprint\":\"445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e\",\"observedThumbprint\":\"445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e\",\"testKind\":\"recoveryDecrypt\",\"result\":\"passed\"},{\"mediumIdHash\":\"f17ee89bde3d215137649a24f9e4df1441e8e8b87e8185492f86ce9f98a545bc\",\"role\":\"root\",\"certificateHash\":\"8bb28e7b30e4277b63c717097a5f4730cf5c6499e521ce22a0c10ce7e92d3421\",\"expectedThumbprint\":\"866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743\",\"observedThumbprint\":\"866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"}],\"samples\":[{\"entryHash\":\"872196bce681bead276d1992c480d81abd33a2c7f501f7148cc899fba2fc9294\",\"objectHash\":\"f61de8e7f2fbb9c92ed7d8de0d6fbd74213d708c49e603ab4b7ded6c59662501\",\"grantHash\":\"2b3e8e0b67717f8f5d553f3bb91ed152556f6c8ab77be1f483cf2e998ffecfb4\",\"sequence\":1,\"writerCertificateHash\":\"8519e3a8496a4e2fb7065e470816242d52c3c17e9a00d89c3e34803eb102b146\",\"schemaId\":\"ea.amendment\",\"schemaVersion\":1,\"suiteId\":\"EINSATZARCHIV-SUITE-1\"},{\"entryHash\":\"dc579806c468118d7378ea6239abcb6069a51cb768485e54b3c4da6075e6c20b\",\"objectHash\":\"b34f65f17084d5a1f9a5a05d22c046494c9b2606b8c8f0dfcf3be85bfa2dea3d\",\"grantHash\":\"5a2f84dc253aacdb4395e795f7be9ef10c41e87b93bdd9b2345217fdd6dd474e\",\"sequence\":0,\"writerCertificateHash\":\"23158cddba4b012c3b81d2f773b086c5505157bfdbd3f6ce99630971abb3d149\",\"schemaId\":\"ea.incident\",\"schemaVersion\":1,\"suiteId\":\"EINSATZARCHIV-SUITE-1\"}],\"result\":\"complete\"}",
+    "finishedAtMs": 1788960586716,
+    "nextDueAtMs": 1791552586716,
+    "sourceEnvelopeHash": "8a21e2b75ad5f330e17788cd4e50d3d84f6658bd5db73e44a5554b37d4a3c8de"
+  },
+  "run": {
+    "errorCode": null,
+    "observations": [
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "0e2063ab679fba0bc29cb29d5629c5a843d5ebd8e908a23d7c956d192c9da759",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 1,
+          "mediumIdHash": "af63d5f9ec3e7affa6e3eff7e79837eade6537d51b27ca053ecf2e09a6d0b922",
+          "protectionCode": 2,
+          "requestId": "4429e5b739f097b07b19ff96152143cf2eb346704b25a5891b8ed26c76d24b01",
+          "roleCode": "serverReceipt",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "2473f0bb627cf521051cab55e33dac92367acfa6b928500c74e45def3a2ac44d",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 2,
+          "mediumIdHash": "e5416fe81b7412f4dc42033df2bf3577201795a1f9a580bed1d4fcc015e14471",
+          "protectionCode": 2,
+          "requestId": "1aa21ac2809b41e768b79e152d6a5ff6f9d7424aa57f43c5bac27753e2b127c7",
+          "roleCode": "reader",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "268ec9bde471732378d333971294770d4c49ed44220a2ce0ee2f57f21b0d1085",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 3,
+          "mediumIdHash": "c5ccee3463838bc3ee81d2a14344d6a04924a87511ee565be292502a4b8eb7c4",
+          "protectionCode": 2,
+          "requestId": "2c8f6ca2bcc7e5b876fbbc35f29023949fa374bb373622d46303e74be9e1b427",
+          "roleCode": "historicalGrantAuthority",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee",
+        "request": {
+          "certificateHash": "7741a86366c2348392878b05e7a4e83f8585be901f999229fc694378ebe42ea9",
+          "expectedThumbprint": "51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee",
+          "index": 4,
+          "mediumIdHash": "1cb6ca5942c7f6728b9f669c2afdb37faf4f69baa6574bedf0bbd48e11ca4089",
+          "protectionCode": 2,
+          "requestId": "723d7cf06c2d2f012fbbd87a01a65168cc33cf5a49177ff8840d10f7bcbab88c",
+          "roleCode": "organizationAdmin",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "851430d6650f44849fce92f4d40c9a381c36474de7baa8e4701cd038fbf5d689",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 5,
+          "mediumIdHash": "41d8273921ac9f77890fc9f546962c7124ebcd28d541462a90435423596a4472",
+          "protectionCode": 2,
+          "requestId": "07e9e0cf967dd7a38376d329ff7e595fbe821fdba7c5c17ac5ca51e51372b444",
+          "roleCode": "keyApprover",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17",
+        "request": {
+          "certificateHash": "8519e3a8496a4e2fb7065e470816242d52c3c17e9a00d89c3e34803eb102b146",
+          "expectedThumbprint": "2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17",
+          "index": 6,
+          "mediumIdHash": "2e74973c1eba672b6a04de7eff2fe6353d8af93c19688366c0831aa7946d4e07",
+          "protectionCode": 2,
+          "requestId": "74c3e61d865497e186ec089b6b6ce076e240cea8bbcce6e87487aac92178b77e",
+          "roleCode": "writer",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 7,
+          "mediumIdHash": "18f29bdd1e434fca18000af9bef0e3a54298fdf44a51019013b22865d3812bb0",
+          "protectionCode": 2,
+          "requestId": "3bda975d5fd2adc217cd5d70d92c4bd470ee3839b4eeb44387c4f44bfceaacdf",
+          "roleCode": "organizationAdmin",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "a419860f03b2ce7e974b9670e40a91c334c97fdac6da6d290b16483414e6706c",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 8,
+          "mediumIdHash": "4f58960cf33ed741b5633ff39eed6d5b1c2a6ec553cec077920f2b0598da07e6",
+          "protectionCode": 2,
+          "requestId": "a5c66e043cdf1db829049fc646aec1b764ade6cd7b140e96366a58ab968e63e3",
+          "roleCode": "keyApprover",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59",
+        "request": {
+          "certificateHash": "d0b63e35ba84a12c4d9c3d737e2131ed07a2bedf19eacd87d451315321efe862",
+          "expectedThumbprint": "5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59",
+          "index": 9,
+          "mediumIdHash": "5fcbc14e67e5aa397d8d9669cefb5c6987baaa7d3f57c8b3d445939cd21f9f8f",
+          "protectionCode": 2,
+          "requestId": "5a5ffe989ada4f54a702c1d1dc0f21b4b349f878650335e1b2e58e44cac7eaf8",
+          "roleCode": "organizationAdmin",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "d641115484dcf56125822abc441c485d6e2605a7d418ec2453485412b426b9fb",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 10,
+          "mediumIdHash": "3e307556267db9ffc3707ad1d287c200c66a42a9f37741114362c71e1bb0a4e2",
+          "protectionCode": 2,
+          "requestId": "b529ad2106a4422f36b29efb4e42dc5c70efd04571ed2abdbc172cc2842f23d5",
+          "roleCode": "deletionAttest",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e",
+        "request": {
+          "certificateHash": "e797b2fe833dcdfbd12ad824120cc3c554176d7cef5b242803fe5391775786df",
+          "expectedThumbprint": "445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e",
+          "index": 11,
+          "mediumIdHash": "e6edee686d318a1038c650efa9b025cfe346e575142ddab37c7505a2016d9f58",
+          "protectionCode": 2,
+          "requestId": "acf2d2cce3fb334c55e2230c1d99bb665d8a732f712e36230abf0e5c9731910e",
+          "roleCode": "recoveryRecipient",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "recoveryDecrypt",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 12,
+          "mediumIdHash": "c56a29bbea9f5406efe4e6c2a84fa8ebdedb80450709552e56603221d12e4253",
+          "protectionCode": 0,
+          "requestId": "d5fd9970dd06feda1f885031a202f32eb6c2d78183d5e39267dbd7b5e0409e00",
+          "roleCode": "organizationAdmin",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "providerPresence",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa",
+        "request": {
+          "certificateHash": "fbf487ec491106d335b95e3846efea69362627d77f7864f9d5bc83275fa8ca95",
+          "expectedThumbprint": "80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa",
+          "index": 13,
+          "mediumIdHash": "00dc5efb5fb808edce3dcdf2e12368507b575d74336c30dab10d205d208be6fd",
+          "protectionCode": 2,
+          "requestId": "0f8c1e105904fe558f138e785eba4c910c80b4a41898c7323e010f80d8488d5a",
+          "roleCode": "recoveryRecipient",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "recoveryDecrypt",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+        "request": {
+          "certificateHash": "23158cddba4b012c3b81d2f773b086c5505157bfdbd3f6ce99630971abb3d149",
+          "expectedThumbprint": "bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87",
+          "index": 14,
+          "mediumIdHash": "e4674d8aef6494998e0a5ef0176733ff6895b827f66bee59d2ab227d1493bf60",
+          "protectionCode": 2,
+          "requestId": "aec0d72c6eb195774f2e3986d76f0a856f7bc8cf5c31087b38182b30153fb62f",
+          "roleCode": "writer",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+        "request": {
+          "certificateHash": "8bb28e7b30e4277b63c717097a5f4730cf5c6499e521ce22a0c10ce7e92d3421",
+          "expectedThumbprint": "866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743",
+          "index": 15,
+          "mediumIdHash": "f17ee89bde3d215137649a24f9e4df1441e8e8b87e8185492f86ce9f98a545bc",
+          "protectionCode": 2,
+          "requestId": "1792c7012690aed054e54a54af7120c22f4d49ff49bb947c16700004fc1736d1",
+          "roleCode": "root",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      },
+      {
+        "errorCode": null,
+        "observedThumbprint": "cd55fdba7a00e29f11e2e57078e21817a1c536a8a9cff1e2e1e5bbf2f6f20fba",
+        "request": {
+          "certificateHash": "311b1401fa3d1a273ffa96789f605a2fafebba5ade33768ca69ff517b3c52698",
+          "expectedThumbprint": "cd55fdba7a00e29f11e2e57078e21817a1c536a8a9cff1e2e1e5bbf2f6f20fba",
+          "index": 16,
+          "mediumIdHash": "2dd00c414da2424446de39bd2aaa8690636d0d6434cc86e026e7a5f34e501c2d",
+          "protectionCode": 2,
+          "requestId": "858451a0a853d15ce43645dc84cf13fcf0331698827043be31f4dcdf823f1b13",
+          "roleCode": "root",
+          "runId": "19116b137911633be36b33f4975381fb",
+          "testKindCode": "signatureChallenge",
+          "total": 16
+        },
+        "resultCode": 0
+      }
+    ],
+    "operationId": "55941df374b58d1197d8bb0b5d36d068",
+    "phaseCode": 3,
+    "report": {
+      "auditId": "3ff656aab5e57063c8257384f0e0df85",
+      "completed": true,
+      "envelopeHash": "b3864028f45d8bc5397572d2371ade8989c04eb4851e2f97eecc5a47451ddb19",
+      "exactPublicReportJson": "{\"schemaId\":\"ea.recovery-test/v1\",\"testId\":\"19116b137911633be36b33f4975381fb\",\"sourceEnvelopeHash\":\"8a21e2b75ad5f330e17788cd4e50d3d84f6658bd5db73e44a5554b37d4a3c8de\",\"sourceMachine\":\"a0f19b66b4c48f289556461fee5405794de30e31627c2867b15dad5935dd4853\",\"targetMachine\":\"2f289c16a0852097f11109175350d5c3365add106774db0c35387bcbd9ba83e3\",\"targetInstallation\":\"7577dd0c6d1b5b74c56dae83e4939f5c44cf71f3deca8e2acc50132fa27f6050\",\"anchorHash\":\"bd1db46e8004e1ff8112b4b87cebd468492ad2fe9534e9aa1f9a1468cc73fe26\",\"archiveInventoryHash\":\"dc58261f5e3726cf1e894ba77174343699b48288da4d71646396fe2fe38c8036\",\"tipSequence\":1,\"tipEntryHash\":\"872196bce681bead276d1992c480d81abd33a2c7f501f7148cc899fba2fc9294\",\"registryVersion\":20,\"registryHeadHash\":\"66491d5e754879e41ef95433571d56b0cafb2cd4583ab8661c4deec17ed23658\",\"proposedSequence\":2,\"effectiveNow\":1788959937290,\"releaseVersion\":\"0.1.0\",\"schemaVersions\":[\"ea.genesis/v1\",\"ea.incident/v1\",\"ea.amendment/v1\",\"ea.key-transition/v1\",\"ea.destruction-evidence/v1\"],\"suiteVersions\":[\"EINSATZARCHIV-SUITE-1\"],\"media\":[{\"mediumIdHash\":\"00dc5efb5fb808edce3dcdf2e12368507b575d74336c30dab10d205d208be6fd\",\"role\":\"recoveryRecipient\",\"certificateHash\":\"fbf487ec491106d335b95e3846efea69362627d77f7864f9d5bc83275fa8ca95\",\"expectedThumbprint\":\"80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa\",\"observedThumbprint\":\"80610f02e96a86b12a72bfc4fc939d3759f955b993e49894c10cc5d0d9daffaa\",\"testKind\":\"recoveryDecrypt\",\"result\":\"passed\"},{\"mediumIdHash\":\"18f29bdd1e434fca18000af9bef0e3a54298fdf44a51019013b22865d3812bb0\",\"role\":\"organizationAdmin\",\"certificateHash\":\"8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"1cb6ca5942c7f6728b9f669c2afdb37faf4f69baa6574bedf0bbd48e11ca4089\",\"role\":\"organizationAdmin\",\"certificateHash\":\"7741a86366c2348392878b05e7a4e83f8585be901f999229fc694378ebe42ea9\",\"expectedThumbprint\":\"51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee\",\"observedThumbprint\":\"51d53691575b17e32587f41e5b9c85feeec5cccd5c0826be4abd2dfe7d33a6ee\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"2dd00c414da2424446de39bd2aaa8690636d0d6434cc86e026e7a5f34e501c2d\",\"role\":\"root\",\"certificateHash\":\"311b1401fa3d1a273ffa96789f605a2fafebba5ade33768ca69ff517b3c52698\",\"expectedThumbprint\":\"cd55fdba7a00e29f11e2e57078e21817a1c536a8a9cff1e2e1e5bbf2f6f20fba\",\"observedThumbprint\":\"cd55fdba7a00e29f11e2e57078e21817a1c536a8a9cff1e2e1e5bbf2f6f20fba\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"2e74973c1eba672b6a04de7eff2fe6353d8af93c19688366c0831aa7946d4e07\",\"role\":\"writer\",\"certificateHash\":\"8519e3a8496a4e2fb7065e470816242d52c3c17e9a00d89c3e34803eb102b146\",\"expectedThumbprint\":\"2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17\",\"observedThumbprint\":\"2943cca047d93512b54f50db89b9ee34aa1ba402d721e8c4b75912b328a82e17\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"3e307556267db9ffc3707ad1d287c200c66a42a9f37741114362c71e1bb0a4e2\",\"role\":\"deletionAttest\",\"certificateHash\":\"d641115484dcf56125822abc441c485d6e2605a7d418ec2453485412b426b9fb\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"41d8273921ac9f77890fc9f546962c7124ebcd28d541462a90435423596a4472\",\"role\":\"keyApprover\",\"certificateHash\":\"851430d6650f44849fce92f4d40c9a381c36474de7baa8e4701cd038fbf5d689\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"4f58960cf33ed741b5633ff39eed6d5b1c2a6ec553cec077920f2b0598da07e6\",\"role\":\"keyApprover\",\"certificateHash\":\"a419860f03b2ce7e974b9670e40a91c334c97fdac6da6d290b16483414e6706c\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"5fcbc14e67e5aa397d8d9669cefb5c6987baaa7d3f57c8b3d445939cd21f9f8f\",\"role\":\"organizationAdmin\",\"certificateHash\":\"d0b63e35ba84a12c4d9c3d737e2131ed07a2bedf19eacd87d451315321efe862\",\"expectedThumbprint\":\"5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59\",\"observedThumbprint\":\"5c840f7a40230170abdee5151a594efdf270f7a89825f5c310badf6b589c5c59\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"af63d5f9ec3e7affa6e3eff7e79837eade6537d51b27ca053ecf2e09a6d0b922\",\"role\":\"serverReceipt\",\"certificateHash\":\"0e2063ab679fba0bc29cb29d5629c5a843d5ebd8e908a23d7c956d192c9da759\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"c56a29bbea9f5406efe4e6c2a84fa8ebdedb80450709552e56603221d12e4253\",\"role\":\"organizationAdmin\",\"certificateHash\":\"8970b55ccc5d32437ac7a598ef12c1e011e6245bdcd8ded0221bd89361e8572d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"providerPresence\",\"result\":\"passed\"},{\"mediumIdHash\":\"c5ccee3463838bc3ee81d2a14344d6a04924a87511ee565be292502a4b8eb7c4\",\"role\":\"historicalGrantAuthority\",\"certificateHash\":\"268ec9bde471732378d333971294770d4c49ed44220a2ce0ee2f57f21b0d1085\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e4674d8aef6494998e0a5ef0176733ff6895b827f66bee59d2ab227d1493bf60\",\"role\":\"writer\",\"certificateHash\":\"23158cddba4b012c3b81d2f773b086c5505157bfdbd3f6ce99630971abb3d149\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e5416fe81b7412f4dc42033df2bf3577201795a1f9a580bed1d4fcc015e14471\",\"role\":\"reader\",\"certificateHash\":\"2473f0bb627cf521051cab55e33dac92367acfa6b928500c74e45def3a2ac44d\",\"expectedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"observedThumbprint\":\"bcd48776591b338f2ab7e8f0c6815d21ee4cd40a9cca93193ef33eccb0d61a87\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"},{\"mediumIdHash\":\"e6edee686d318a1038c650efa9b025cfe346e575142ddab37c7505a2016d9f58\",\"role\":\"recoveryRecipient\",\"certificateHash\":\"e797b2fe833dcdfbd12ad824120cc3c554176d7cef5b242803fe5391775786df\",\"expectedThumbprint\":\"445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e\",\"observedThumbprint\":\"445aeb3229bdcbc6529bed1743cb6d8c1bd6109e5e340e7680a191b6901bc44e\",\"testKind\":\"recoveryDecrypt\",\"result\":\"passed\"},{\"mediumIdHash\":\"f17ee89bde3d215137649a24f9e4df1441e8e8b87e8185492f86ce9f98a545bc\",\"role\":\"root\",\"certificateHash\":\"8bb28e7b30e4277b63c717097a5f4730cf5c6499e521ce22a0c10ce7e92d3421\",\"expectedThumbprint\":\"866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743\",\"observedThumbprint\":\"866eefbd6718c8846cd7ddfe43fc74ab1daac4538ff8514ea2ec2d410a415743\",\"testKind\":\"signatureChallenge\",\"result\":\"passed\"}],\"samples\":[{\"entryHash\":\"872196bce681bead276d1992c480d81abd33a2c7f501f7148cc899fba2fc9294\",\"objectHash\":\"f61de8e7f2fbb9c92ed7d8de0d6fbd74213d708c49e603ab4b7ded6c59662501\",\"grantHash\":\"2b3e8e0b67717f8f5d553f3bb91ed152556f6c8ab77be1f483cf2e998ffecfb4\",\"sequence\":1,\"writerCertificateHash\":\"8519e3a8496a4e2fb7065e470816242d52c3c17e9a00d89c3e34803eb102b146\",\"schemaId\":\"ea.amendment\",\"schemaVersion\":1,\"suiteId\":\"EINSATZARCHIV-SUITE-1\"},{\"entryHash\":\"dc579806c468118d7378ea6239abcb6069a51cb768485e54b3c4da6075e6c20b\",\"objectHash\":\"b34f65f17084d5a1f9a5a05d22c046494c9b2606b8c8f0dfcf3be85bfa2dea3d\",\"grantHash\":\"5a2f84dc253aacdb4395e795f7be9ef10c41e87b93bdd9b2345217fdd6dd474e\",\"sequence\":0,\"writerCertificateHash\":\"23158cddba4b012c3b81d2f773b086c5505157bfdbd3f6ce99630971abb3d149\",\"schemaId\":\"ea.incident\",\"schemaVersion\":1,\"suiteId\":\"EINSATZARCHIV-SUITE-1\"}],\"result\":\"complete\"}",
+      "finishedAtMs": 1788960586716,
+      "nextDueAtMs": 1791552586716,
+      "sourceEnvelopeHash": "8a21e2b75ad5f330e17788cd4e50d3d84f6658bd5db73e44a5554b37d4a3c8de"
+    },
+    "request": null
+  }
+}

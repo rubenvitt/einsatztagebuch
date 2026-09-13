@@ -4,12 +4,15 @@ import type { ReactElement } from 'react'
 
 import {
   ADMIN_AUTHORIZED_STEP,
+  FINGERPRINT_SUBJECT_TEXT,
+  ISSUE_TARGET_ROUND,
   PENDING_REQUEST_STEP,
   REGISTRY_PUBLISHED_STEP,
+  TARGET_PUBLISHED_STEP,
   ROOT_REPLY_IMPORTED_STEP,
   ROOT_REQUEST_EXPORTED_STEP,
   TRUST_CEREMONY_KIND_TEXT,
-  TRUST_CEREMONY_STEP_TEXT,
+  stepText,
   authorizationStep,
   visibleSteps,
 } from './ceremony'
@@ -47,6 +50,7 @@ export function FingerprintApproval({
   onExportRequest,
   onImportReply,
   onPublish,
+  onOpenLinkedCeremony,
 }: {
   readonly ceremony: TrustCeremonyView
   /** Ein Hinweis ohne Fehlercode — etwa die verweigerte Wiederanmeldung. */
@@ -59,21 +63,24 @@ export function FingerprintApproval({
   readonly onExportRequest: () => void
   readonly onImportReply: () => void
   readonly onPublish: () => void
+  readonly onOpenLinkedCeremony: (ceremonyId: string) => void
 }): ReactElement {
   const [reported, setReported] = useState('')
   const headingRef = useRef<HTMLHeadingElement>(null)
   const inputId = useId()
-  const steps = visibleSteps(ceremony.kind)
+  const steps = visibleSteps(ceremony.kind, ceremony.round)
   const index = Math.max(0, steps.indexOf(ceremony.step))
-  const label = TRUST_CEREMONY_STEP_TEXT[ceremony.step]
+  const label = stepText(ceremony, ceremony.step)
 
   useEffect(() => {
     headingRef.current?.focus()
   }, [ceremony.ceremonyId, ceremony.step])
 
+  useEffect(() => { setReported('') }, [ceremony.ceremonyId])
+
   const items = steps.map((step, position) => ({
     key: step,
-    title: position <= index ? TRUST_CEREMONY_STEP_TEXT[step] : `Schritt ${String(position + 1)}`,
+    title: position <= index ? stepText(ceremony, step) : `Schritt ${String(position + 1)}`,
   }))
 
   const action = (): ReactElement => {
@@ -95,6 +102,9 @@ export function FingerprintApproval({
       const fingerprint = ceremony.targetFingerprint ?? ''
       return (
         <Space direction="vertical" size="small">
+          {ceremony.fingerprintSubject !== null && (
+            <Typography.Text strong>{FINGERPRINT_SUBJECT_TEXT[ceremony.fingerprintSubject]}</Typography.Text>
+          )}
           <Typography.Text>
             Vergleichen Sie den Fingerprint über einen zweiten Kanal. Volltext und QR-Code zeigen
             denselben Wert.
@@ -118,7 +128,7 @@ export function FingerprintApproval({
           />
           <Button
             type="primary"
-            disabled={busy || reported.trim() === ''}
+            disabled={busy || reported.trim() === '' || fingerprint === '' || ceremony.fingerprintSubject === null}
             onClick={() => {
               onConfirmFingerprint(reported.trim())
             }}
@@ -156,8 +166,9 @@ export function FingerprintApproval({
       return (
         <Space direction="vertical" size="small">
           <Typography.Text>
-            Die Veröffentlichung des Registry-Ereignisses verlangt eine frische native
-            Wiederanmeldung.
+            {ceremony.round === ISSUE_TARGET_ROUND
+              ? 'Die Veröffentlichung des ausgestellten Ziels verlangt eine frische native Wiederanmeldung.'
+              : 'Die Veröffentlichung des Registry-Ereignisses verlangt eine frische native Wiederanmeldung.'}
           </Typography.Text>
           <Button type="primary" disabled={busy} onClick={onPublish}>
             Neu anmelden und veröffentlichen
@@ -170,6 +181,18 @@ export function FingerprintApproval({
         <Typography.Text>
           Das Root-signierte Registry-Ereignis ist veröffentlicht. Die Zeremonie ist abgeschlossen.
         </Typography.Text>
+      )
+    }
+    if (step === TARGET_PUBLISHED_STEP) {
+      return (
+        <Space direction="vertical" size="small">
+          <Typography.Text>Die Registry-Aktivierung steht noch aus.</Typography.Text>
+          {ceremony.linkedCeremonyId !== null && (
+            <Button disabled={busy} onClick={() => { onOpenLinkedCeremony(ceremony.linkedCeremonyId!) }}>
+              Registry-Aktivierung öffnen
+            </Button>
+          )}
+        </Space>
       )
     }
     return <Typography.Text>Dieser Schritt hat hier keine Handlung.</Typography.Text>

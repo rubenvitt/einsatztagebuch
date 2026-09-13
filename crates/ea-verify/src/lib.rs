@@ -74,10 +74,13 @@
 
 mod archive;
 mod destruction;
+mod destroyed;
 mod entry;
 mod error;
 mod evidence;
 mod gates;
+mod historical;
+pub use historical::{historical_registry_head, verify_original_recovery_grant};
 mod json;
 mod recipient;
 mod report;
@@ -108,3 +111,6 @@ pub use report::{
     VerificationReportV1,
 };
 pub use state::{EphemeralTrustStateStore, verification_state_key};
+
+mod preflight_report;
+pub use preflight_report::verify_destruction_preflight_report;

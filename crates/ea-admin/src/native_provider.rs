@@ -1,4 +1,4 @@
-//! Native provider boundary. Private signing keys remain in the installed helper.
+//! Native signing boundary; closed bootstrap backups seal through a separate private port.
 
 use crate::{InstanceKeyPolicy, NativeOperatorProvisioning, OperatorLifecycleError};
 use crate::{native_identity::NativeExecutableIdentity, native_watch::SessionWatch};
@@ -142,6 +142,23 @@ impl NativeOperatorProvider {
 
     pub fn installation_id(&self) -> Hash32 {
         Hash32::try_from(self.installation.as_slice()).expect("32 bytes")
+    }
+
+    /// Fresh acknowledgement of continuous native lock/account-switch coverage.
+    /// Failure is latched for this provider; unlock cannot revive old proofs.
+    pub fn ensure_session_active(&self) -> Result<(), NativeProviderError> {
+        self.watch.ensure_valid()
+    }
+
+    /// Internal completion edge only: the runtime has rechecked current native
+    /// authority after the opaque session's successful durable Login audit.
+    /// It never changes the session proof or an in-flight action deadline.
+    pub(crate) fn record_verified_session(
+        &self,
+        session: &crate::VerifiedOperatorSession,
+    ) -> Result<(), NativeProviderError> {
+        self.watch
+            .record_verified_presence(session.proof().challenge_nonce())
     }
 
     /// Fixed private-console prompts for the separate Windows authority. The
@@ -400,7 +417,7 @@ impl NativeKeyProvider {
         if handle.keystore_provider() != KeystoreProvider::OperatingSystem
             || handle.account_instance() != self.native.installation_id()
         {
-            return Err(KeyError::NotFound);
+            return Err(KeyError::ProviderUnavailable);
         }
         Ok(match handle.purpose() {
             SecretPurpose::WriterSigningKey => self.signing_slot.name(),
@@ -475,6 +492,13 @@ impl KeyProvider for NativeKeyProvider {
     }
     fn unwrap_secret(&self, handle: &KeyHandle) -> Result<SecretBytes<32>, KeyError> {
         handle.require_purpose(&[SecretPurpose::DraftDek, SecretPurpose::LocalDatabaseKey])?;
+        // Only a successful metadata response under this unchanged native
+        // installation/watch proves absence. An unwrap failure may be a lock,
+        // denial, damaged item or lost response and must not cross the Writer's
+        // irreversible recovery boundary. Concurrent removal is safe to retry.
+        if !self.contains(handle)? {
+            return Err(KeyError::NotFound);
+        }
         let mut value = self
             .native
             .call(json!({"op":"unwrap-secret","slot":self.slot(handle)?}))
@@ -483,7 +507,7 @@ impl KeyProvider for NativeKeyProvider {
         wipe_json(&mut value);
         let mut bytes = Zeroizing::new(decoded.map_err(key_error)?);
         if bytes.len() != 32 {
-            return Err(KeyError::NotFound);
+            return Err(KeyError::ProviderUnavailable);
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&bytes);
@@ -507,7 +531,7 @@ impl KeyProvider for NativeKeyProvider {
             .map_err(key_error)?
             .get("contains")
             .and_then(Value::as_bool)
-            .ok_or(KeyError::NotFound)
+            .ok_or(KeyError::ProviderUnavailable)
     }
     fn reached_protection_profile(
         &self,
@@ -531,7 +555,7 @@ fn lifecycle_error(error: NativeProviderError) -> OperatorLifecycleError {
     OperatorLifecycleError::Operator(operator_error(error))
 }
 fn key_error(_: NativeProviderError) -> KeyError {
-    KeyError::NotFound
+    KeyError::ProviderUnavailable
 }
 fn checked_cose_signature(
     public: &CanonicalPublicCoseKey,
@@ -783,3 +807,6 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
+
+mod signing_backup;
+pub(crate) use signing_backup::{NativeBackupBinding, NativeSigningBackupSlot};

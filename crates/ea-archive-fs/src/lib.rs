@@ -27,12 +27,17 @@ mod controlled_network;
 mod format_package;
 mod health;
 mod local_path;
+mod lock_diagnosis;
 mod profile_migration;
 mod publication_queue;
+mod sqlcipher_commit;
+mod sqlcipher_backend;
+pub use sqlcipher_backend::SqlcipherArchiveBackend;
+pub use sqlcipher_commit::SqliteCommitStore;
 
 pub use bundle::{BundleExportReport, open_archive_bundle, write_archive_bundle};
 pub use controlled_network::{
-    AtRestEncryptedStoreV1, ControlledNetworkBackend, LocalCommitComponentV1,
+    AtRestEncryptedStoreV1, ControlledNetworkBackend, ControlledNetworkLocalComponentV1, LocalCommitComponentV1,
     ProvenLocalCommitComponentV1,
 };
 // Der Container selbst lebt seit dem Umzug in `ea-archive`, weil er kein
@@ -57,6 +62,7 @@ pub use local_path::{
     CAPABILITY_SCRATCH_DIR_V1, CONTROL_FILES_V1, CapabilityReportV1, CapabilityTestVectorV1,
     LocalPathArchiveSource, LocalPathBackend,
 };
+pub use lock_diagnosis::{LocalWriterLockDiagnosis, diagnose_local_writer_lock};
 pub use profile_migration::{
     FinalizationLockStateV1, MigrationFaultPoint, MigrationResultV1, MigrationSourceV1,
     ProfileMigrator,

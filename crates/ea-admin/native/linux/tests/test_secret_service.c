@@ -80,6 +80,56 @@ static void real_storage_roundtrip(void) {
     g_assert_true(ea_watch_bus_barrier(&watch));
     while (g_main_context_iteration(NULL, FALSE)) {}
     g_assert_false(state.invalidated);
+    /* Existing deterministic test slots in the real private Secret Service.
+     * Internal storage boundary only: no Polkit/PAM/logind presence claim. */
+    const char *backup_slots[] = {"admin-signing", "root-signing"};
+    for (size_t role = 0; role < G_N_ELEMENTS(backup_slots); role++) {
+        unsigned char seed[32], expected[32], box[EA_ENVELOPE_SIZE];
+        memset(seed, 0x47 + role, sizeof seed);
+        g_assert_true(ea_public(seed, expected));
+        char *public_hex = ea_hex(expected, 32);
+        g_assert_true(ea_seal(&c.marker, c.instance, backup_slots[role], "ed25519", public_hex, seed, box));
+        g_assert_null(put(&c, backup_slots[role], "ed25519", public_hex, box, sizeof box, FALSE));
+        EaRequest backup = {.op = "backup-signing-seed", .presence = TRUE, .has_installation = TRUE, .has_expected_public = TRUE};
+        strcpy(backup.slot, backup_slots[role]); memcpy(backup.installation, c.marker.id, 32); memcpy(backup.expected_public, expected, 32);
+        EaSigningBackupFrame frame = {0};
+        JsonObject *empty = json_object_new();
+        g_assert_null(operate_inner(&c, &backup, empty, &frame));
+        g_assert_cmpuint(json_object_get_size(empty), ==, 0);
+        g_assert_true(!memcmp(frame.bytes, "EABKSEED", 8) && frame.bytes[8] == 1 && frame.bytes[9] == role + 1);
+        g_assert_true(!memcmp(frame.bytes + 10, c.marker.id, 32) && !memcmp(frame.bytes + 42, expected, 32) && !memcmp(frame.bytes + 74, seed, 32));
+        int endpoints[2]; g_assert_cmpint(pipe(endpoints), ==, 0);
+        g_assert_true(ea_write_signing_backup(endpoints[1], &frame)); close(endpoints[1]);
+        unsigned char wire[107] = {0}; size_t received = 0;
+        for (;;) { ssize_t got = read(endpoints[0], wire + received, sizeof wire - received); g_assert_cmpint(got, >=, 0); if (!got) break; received += (size_t)got; }
+        close(endpoints[0]);
+        g_assert_cmpuint(received, ==, 106);
+        for (size_t j = 0; j < sizeof frame.bytes; j++) g_assert_cmpuint(frame.bytes[j], ==, 0);
+        OPENSSL_cleanse(wire, sizeof wire);
+        g_assert_null(operate_inner(&c, &backup, empty, &frame));
+        g_assert_false(ea_write_signing_backup(-1, &frame));
+        for (size_t j = 0; j < sizeof frame.bytes; j++) g_assert_cmpuint(frame.bytes[j], ==, 0);
+        const char *denied_slots[] = {"operator-instance", "writer-signing", "database-key", "draft-key", "other"};
+        for (size_t j = 0; j < G_N_ELEMENTS(denied_slots); j++) {
+            strcpy(backup.slot, denied_slots[j]); memset(&frame, 0x47, sizeof frame);
+            g_assert_cmpstr(operate_inner(&c, &backup, empty, &frame), ==, "invalid-request");
+            for (size_t k = 0; k < sizeof frame.bytes; k++) g_assert_cmpuint(frame.bytes[k], ==, 0);
+        }
+        strcpy(backup.slot, backup_slots[role]);
+        backup.presence = FALSE;
+        g_assert_cmpstr(operate_inner(&c, &backup, empty, &frame), ==, "presence-required");
+        backup.presence = TRUE; backup.installation[0] ^= 1;
+        g_assert_cmpstr(operate_inner(&c, &backup, empty, &frame), ==, "installation-changed");
+        backup.installation[0] ^= 1;
+        OPENSSL_cleanse(&frame, sizeof frame);
+        backup.expected_public[0] ^= 1;
+        g_assert_cmpstr(operate_inner(&c, &backup, empty, &frame), ==, "key-invalid");
+        backup.expected_public[0] ^= 1;
+        /* The ordinary JSON executor is not a seed transport. */
+        g_assert_cmpstr(operate(&c, &backup, empty), ==, "invalid-request");
+        json_object_unref(empty); g_free(public_hex);
+        OPENSSL_cleanse(seed, sizeof seed); OPENSSL_cleanse(box, sizeof box);
+    }
     /* Real collection locking must prevent storage access, without a prompt. */
     GList *objects = g_list_append(NULL, c.login), *locked = NULL;
     g_assert_cmpint(secret_service_lock_sync(c.service, objects, NULL, &locked, NULL), ==, 1);

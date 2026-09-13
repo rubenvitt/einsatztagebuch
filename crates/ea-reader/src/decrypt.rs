@@ -88,6 +88,8 @@ use crate::verify::ReaderError;
 ///
 /// [`ReaderError::StaleWitness`] mit `EA-READER-WITNESS-STALE`, wenn
 /// `effective_now` von dem Lauf abweicht, in dem die Zeugen entstanden.
+/// `EA-GRANT-TIME-NOT-DURABLE`, wenn ein historischer Zeuge ohne zuvor
+/// wiederhergestellten und dauerhaft geschriebenen Zeitfloor verwendet wird.
 /// [`ReaderError::UnsupportedSchema`] mit `EA-READER-SCHEMA-UNSUPPORTED`, wenn
 /// keine der Schemabestimmungen den Klartext traegt. Ausserdem
 /// `EA-OPERATOR-PROFILE-COMMITMENT`, wenn der Snapshot nicht zu einer
@@ -103,8 +105,18 @@ pub fn decrypt_verified(
     effective_now: UnixMillis,
     observer: &mut dyn GateObserver,
 ) -> Result<VerifiedDecryptedRecord, ReaderError> {
+    let effective_now = session.observe_effective_time(effective_now);
+    if grant
+        .expires_at()
+        .is_some_and(|expires| effective_now.max(grant.minted_at()) > expires)
+    {
+        return Err(ReaderError::GrantExpired);
+    }
     if entry.minted_at() != effective_now || grant.minted_at() != effective_now {
         return Err(ReaderError::StaleWitness);
+    }
+    if grant.expires_at().is_some() && session.durable_grant_time() < effective_now {
+        return Err(ea_verify::VerifyError::RecipientTimeNotDurable.into());
     }
 
     let entry_package = decoded_entry(entry)?;

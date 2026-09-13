@@ -32,7 +32,19 @@ final class NativeProvider {
     }
     #endif
 
+    private enum Response { case json([String: Any]), backup(SigningBackupFrame) }
     func execute(_ request: Request) throws -> [String: Any] {
+        guard request.op != "backup-signing-seed" else { throw Failure("invalid-request") }
+        guard case let .json(fields) = try executeResponse(request) else { throw Failure("native-failed") }
+        return fields
+    }
+    func executeBackup(_ request: Request) throws -> SigningBackupFrame {
+        try request.requireSigningBackup()
+        guard case let .backup(frame) = try executeResponse(request) else { throw Failure("native-failed") }
+        return frame
+    }
+    private func executeResponse(_ request: Request) throws -> Response {
+        if request.op == "backup-signing-seed" { try request.requireSigningBackup() }
         let account = try accountReader()
         let markers = MarkerStore(directory: try markerDirectory(account), account: account, backupCheck: backupCheck)
         let quietContext = try NativePresence.context(requirePresence: false)
@@ -70,7 +82,7 @@ final class NativeProvider {
                 try markers.reset(installation)
                 try recheckAccount(account)
                 // installation_id identifies the invalidated namespace here.
-                return ["ok": true, "installation_id": installation.idHex, "reset": true]
+                return .json(["ok": true, "installation_id": installation.idHex, "reset": true])
             }
             var locked = try isLocked(account, installation: installation, context: quietContext)
             if request.presence && presenceContext == nil {
@@ -83,12 +95,32 @@ final class NativeProvider {
             if request.op == "account" || request.op == "initialize" {
                 try markers.recheck(installation)
                 try recheckAccount(account)
-                return ["ok": true, "platform": "macos", "guid_values": account.guidValues,
+                return .json(["ok": true, "platform": "macos", "guid_values": account.guidValues,
                         "unique_id_values": account.uniqueIDValues, "uid": account.uid,
-                        "installation_id": installation.idHex, "locked": locked]
+                        "installation_id": installation.idHex, "locked": locked])
             }
             guard !locked else { throw Failure("locked") }
             let context = presenceContext ?? quietContext
+            if request.op == "backup-signing-seed" {
+                try pipeCheck()
+                let slot = request.slot!
+                guard let metadata = try keys.metadata(installation, slot: slot, context: context) else { throw Failure("key-missing") }
+                guard metadata.kind == "ed25519", metadata.publicKey == request.expectedPublicKey else { throw Failure("key-invalid") }
+                let ciphertext = try keys.read(installation, slot: slot, context: context)
+                var seed = try installation.open(ciphertext, slot: slot, metadata: metadata)
+                defer { seed.resetBytes(in: 0..<seed.count) }
+                guard seed.count == 32 else { throw Failure("key-invalid") }
+                let actual = try Curve25519.Signing.PrivateKey(rawRepresentation: seed).publicKey.rawRepresentation
+                guard actual == metadata.publicKey, actual == request.expectedPublicKey else { throw Failure("key-invalid") }
+                let frame = try SigningBackupFrame(role: slot == "admin-signing" ? 1 : 2,
+                    installation: installation.id, publicKey: actual, seed: seed)
+                let latest = try keys.metadata(installation, slot: slot, context: context)
+                guard latest?.metadata == metadata.metadata else { throw Failure("key-invalid") }
+                try markers.recheck(installation)
+                try recheckAccount(account)
+                guard try !isLocked(account, installation: installation, context: quietContext) else { throw Failure("locked") }
+                return .backup(frame)
+            }
             var fields = try operate(request, installation: installation, context: context)
             // A marker removal, account transition or lock during an operation
             // suppresses the result (including signatures and unwrapped secrets).
@@ -97,7 +129,7 @@ final class NativeProvider {
             guard try !isLocked(account, installation: installation, context: quietContext) else { throw Failure("locked") }
             fields["ok"] = true
             fields["installation_id"] = installation.idHex
-            return fields
+            return .json(fields)
         }
     }
 

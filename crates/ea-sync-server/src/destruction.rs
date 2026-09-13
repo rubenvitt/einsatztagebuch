@@ -10,9 +10,11 @@
 //!
 //! 1. Angenommen wird AUSSCHLIESSLICH eine gueltige Mehr-Augen-
 //!    `DestructionAuthorization` — zwei UNTERSCHIEDLICHE, aktuell berechtigte
-//!    `destructionApprove`-Zertifikate.
-//! 2. Der Vorgang beginnt im Zustand `requested` und in keinem anderen: er ist
-//!    der einzige Startzustand des Automaten.
+//!    destructionApprove-Personen nach ihrer stabilen authoritySubjectId.
+//! 2. Die Annahme legt eine nicht ausfuehrbare Sperrreservierung unter dem
+//!    bestehenden Wire-Code requested an. Ohne signiertes Transition-Event
+//!    ist diese Zeile KEIN autoritativer Zustand des Automaten. Der native
+//!    Dienst ea-destruction bindet Reauth, Signatur und dauerhaftes Audit.
 //! 3. Ab der Annahme sind neue Auslieferungen und historische Re-Grants fuer
 //!    die Ziele GESPERRT (§16.3, Schritt 2).
 //!
@@ -44,7 +46,7 @@ use crate::{
         AppendOutcome, DestructionRequestCommandV1, IndexedObjectV1, RepositoryError, StoreError,
     },
     ports::{
-        AuthorityError, DestructionStore, ObjectStore, RegistryHeadDirectory,
+        AuthorityError, ChainHeadReader, DestructionStore, ObjectStore, RegistryHeadDirectory,
         RegistryHeadSelectionV1, ServerClock,
     },
 };
@@ -67,11 +69,14 @@ pub struct DestructionPorts<'a> {
     pub objects: &'a dyn ObjectStore,
     pub destructions: &'a dyn DestructionStore,
     pub heads: &'a dyn RegistryHeadDirectory,
+    pub chain_heads: &'a dyn ChainHeadReader,
 }
 
 /// Warum ein Vernichtungsvorgang nicht angenommen oder nicht ausgegeben wurde.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum DestructionError {
+    /// Root-signed policy must enable destruction and name the recorded privacy decision.
+    PrivacyGate,
     /// Die gelieferten Bytes sind kein `.etb`, keine
     /// `destructionAuthorization`, oder sie binden eine andere Organisation.
     AuthorizationInvalid,
@@ -93,7 +98,8 @@ pub enum DestructionError {
 
 impl DestructionError {
     /// Alle Arme — damit ein spaeter ergaenzter sofort auffaellt.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::PrivacyGate,
         Self::AuthorizationInvalid,
         Self::AuthorizationUnverifiable,
         Self::AuthorizationInsufficient,
@@ -106,6 +112,7 @@ impl DestructionError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::PrivacyGate => "EA-DESTRUCTION-PRIVACY-GATE",
             Self::AuthorizationInvalid => "EA-DESTRUCTION-AUTHORIZATION-INVALID",
             Self::AuthorizationUnverifiable => "EA-DESTRUCTION-AUTHORIZATION-UNVERIFIABLE",
             Self::AuthorizationInsufficient => "EA-DESTRUCTION-AUTHORIZATION-INSUFFICIENT",
@@ -192,9 +199,10 @@ impl std::error::Error for DestructionError {}
 
 /// `POST /v1/destructions` — nimmt GENAU EINE Mehr-Augen-Authorization an.
 ///
-/// Die Antwort ist der Stand des angelegten Vorgangs: `requested`, ohne
-/// Uebergang und ohne Attestierung. Der Nachtrag gibt ihr `202` — angenommen,
-/// noch nicht ausgefuehrt.
+/// Die Antwort ist die Sperrreservierung: Wire-Code requested, ohne
+/// signierten Uebergang und ohne Attestierung. 202 bedeutet angenommen.
+/// Erst der native, signierte und dauerhaft auditierte Start berechtigt den
+/// Executor zur weiteren Vorpruefung; die Datenbankzahl allein tut das nicht.
 ///
 /// # Errors
 ///
@@ -221,6 +229,30 @@ pub async fn accept_destruction_request(
     // steht in `ea-format` und wird hier NICHT nachgebaut.
     ea_format::validate_destruction_targets(&fields.targets)?;
 
+    // Exact replay reads the existing immutable reservation. It grants no new
+    // authority, writes no objects and remains available after policy changes.
+    if let Some(saved) = ports
+        .destructions
+        .destruction_state(organization_id, fields.destruction_id)
+        .await?
+    {
+        if saved.authorization_object_hash != parsed.object_hash() {
+            return Err(DestructionError::Conflict);
+        }
+        let exact = ports
+            .objects
+            .get_exact_in(ObjectTypeV1::Trust, saved.authorization_object_hash)
+            .await?
+            .collect()
+            .await
+            .map_err(|_| DestructionError::DependencyUnavailable)?
+            .into_bytes();
+        if exact.as_ref() != exact_authorization_etb_bytes {
+            return Err(DestructionError::Conflict);
+        }
+        return destruction_status(organization_id, fields.destruction_id, ports).await;
+    }
+
     // Die Approver werden zur AUTORISIERUNGSSEQUENZ aufgeloest, nicht zur
     // aktuellen Kettenposition: die Autorisierung nennt sie selbst, und ihre
     // Berechtigung ist an genau diese Position gebunden.
@@ -239,6 +271,19 @@ pub async fn accept_destruction_request(
             return Err(DestructionError::AuthorizationUnverifiable);
         }
     };
+    // Native reauthentication and its signed audit live in the local request
+    // service. This endpoint grants only a non-executable block reservation.
+    // It MUST still enforce the signed privacy gate for direct HTTP clients.
+    let policy = &head.policy_fields().retention_policy;
+    if !policy.destruction_enabled || policy.eds_privacy_decision_document_hash.is_none() {
+        return Err(DestructionError::PrivacyGate);
+    }
+    if fields.registry_version != head.registry_version()
+        || fields.registry_head_hash.as_bytes() != head.registry_head_hash().as_bytes()
+        || fields.organization_id != head.policy_fields().organization_id
+    {
+        return Err(DestructionError::AuthorizationUnverifiable);
+    }
     let approvers = distinct_approvers(
         object.signatures(),
         object.exact_digest_input(),
@@ -250,6 +295,37 @@ pub async fn accept_destruction_request(
     .map_err(|_| DestructionError::AuthorizationUnverifiable)?;
     if approvers < REQUIRED_DISTINCT_APPROVERS_V1 {
         return Err(DestructionError::AuthorizationInsufficient);
+    }
+
+    // NEW reservations require the policy at the server's next committed
+    // operation, independently of authorization_sequence. A published future
+    // successor is not effective until this boundary actually reaches it.
+    let chain_id = head.chain_id();
+    let expected_chain_head = ports
+        .chain_heads
+        .committed_chain_head(organization_id, chain_id)
+        .await?
+        .ok_or(DestructionError::AuthorizationUnverifiable)?;
+    let next = expected_chain_head
+        .sequence
+        .get()
+        .checked_add(1)
+        .ok_or(DestructionError::AuthorizationUnverifiable)?;
+    let current_admission = ports
+        .heads
+        .select_current_admission(organization_id, ChainSequence::new(next), now)
+        .await?
+        .ok_or(DestructionError::AuthorizationUnverifiable)?;
+    let current = &current_admission.head;
+    if current.chain_id() != chain_id || current.policy_fields().organization_id != organization_id
+    {
+        return Err(DestructionError::AuthorizationUnverifiable);
+    }
+    let current_policy = &current.policy_fields().retention_policy;
+    if !current_policy.destruction_enabled
+        || current_policy.eds_privacy_decision_document_hash.is_none()
+    {
+        return Err(DestructionError::PrivacyGate);
     }
 
     // Erst jetzt wird abgelegt. Die Authorization liegt content-addressed im
@@ -278,17 +354,23 @@ pub async fn accept_destruction_request(
 
     let outcome = ports
         .destructions
-        .record_destruction_request(DestructionRequestCommandV1 {
-            organization_id,
-            destruction_id: fields.destruction_id,
-            authorization: IndexedObjectV1 {
-                kind: ObjectTypeV1::Trust,
-                object_hash: stored.object_hash(),
-                size_bytes: stored.size_bytes(),
+        .record_destruction_request(
+            DestructionRequestCommandV1 {
+                organization_id,
+                chain_id,
+                expected_chain_head,
+                authority_fence: current_admission.fence,
+                destruction_id: fields.destruction_id,
+                authorization: IndexedObjectV1 {
+                    kind: ObjectTypeV1::Trust,
+                    object_hash: stored.object_hash(),
+                    size_bytes: stored.size_bytes(),
+                },
+                targets,
+                requested_at: now,
             },
-            targets,
-            requested_at: now,
-        })
+            ports.clock,
+        )
         .await?;
     if outcome == AppendOutcome::Conflict {
         return Err(DestructionError::Conflict);
@@ -321,8 +403,64 @@ pub async fn destruction_status(
         .destruction_state(organization_id, destruction_id)
         .await?
         .ok_or(DestructionError::Unknown)?;
+    // A successful status is the host's delivery-barrier observation. Re-read
+    // the exact accepted signed target set and require every reservation row;
+    // a status flag or an unrelated operation's target block is insufficient.
+    let exact = ports
+        .objects
+        .get_exact_in(ObjectTypeV1::Trust, state.authorization_object_hash)
+        .await?
+        .collect()
+        .await
+        .map_err(|_| DestructionError::DependencyUnavailable)?
+        .into_bytes();
+    let ParsedArchiveObject::Trust(auth) = decode_exact_object(&exact)? else {
+        return Err(DestructionError::Internal);
+    };
+    let DecodedTrustPayloadV1::DestructionAuthorization(fields) = auth.value().decoded_payload()?
+    else {
+        return Err(DestructionError::Internal);
+    };
+    if auth.object_hash() != state.authorization_object_hash
+        || fields.organization_id != organization_id
+        || fields.destruction_id != destruction_id
+    {
+        return Err(DestructionError::Conflict);
+    }
+    let targets = fields
+        .targets
+        .iter()
+        .map(|t| {
+            Ok((
+                EntryHash::try_from(t.entry_hash().as_slice())
+                    .map_err(|_| DestructionError::Internal)?,
+                t.chain_sequence(),
+            ))
+        })
+        .collect::<Result<Vec<_>, DestructionError>>()?;
+    if !ports
+        .destructions
+        .reservation_matches(
+            organization_id,
+            destruction_id,
+            state.authorization_object_hash,
+            &targets,
+        )
+        .await?
+    {
+        return Err(DestructionError::Conflict);
+    }
     let transitions = exact_records(&state.transition_object_hashes, ports).await?;
     let attestations = exact_records(&state.attestation_object_hashes, ports).await?;
+    crate::managed_destruction::verify_stored_history(
+        organization_id,
+        destruction_id,
+        &state,
+        &transitions,
+        &attestations,
+        ports,
+    )
+    .await?;
     DestructionStatusResponseV1::new(
         destruction_id,
         state.state,

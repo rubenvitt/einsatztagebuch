@@ -1,58 +1,9 @@
-//! Die explizite PKCS#11-Referenz — und die benannte Grenze dahinter.
-//!
-//! # DREI PFLICHTANGABEN, KEINE VOREINSTELLUNG
-//!
-//! Modulpfad, Token-Label und Schluessel-ID sind saemtlich Pflicht. Es gibt
-//! kein „erstes Token", keinen Standardmodulpfad und keine Suche ueber alle
-//! Slots: die Global Constraint des Stage-5-Plans verbietet, einen
-//! Root-/Recovery-/HGA-/Approver-Schluessel durch Absuchen eines Mediums zu
-//! finden, und ein Modul, das nicht genannt ist, wird auch nicht geladen. Die
-//! PIN kommt aus einer benannten Datei mit restriktiven Rechten
-//! ([`crate::read_secret_file`]), nie aus argv und nie aus der Umgebung.
-//!
-//! # WARUM ES KEINE `cryptoki`-KANTE GIBT
-//!
-//! `cryptoki` bindet ein PKCS#11-Modul ueber `cryptoki-sys` und `libloading`
-//! zur Laufzeit als native Bibliothek. Das zieht genau die Varianz der
-//! nativen Toolchain in den Graphen, derentwegen
-//! `docs/adr/0001-toolchain-and-cryptography-dependencies.md` unter „Rejected
-//! alternatives" OpenSSL und `ring` als suite-weite Abstraktionen abgelehnt
-//! hat (`ring` selbst liegt ueber `rustls` weiterhin im Lockfile, siehe
-//! `deny.toml`) — und es gibt in dieser
-//! Stufe nichts, wogegen die Bindung gemessen werden koennte: kein Modul im
-//! Baum, keines auf dem Host, kein SoftHSM im Browser-Container. Eine Bindung
-//! ohne Zeugen waere eine Zusage, die kein Test traegt.
-//!
-//! Die Referenz wird deshalb VOLLSTAENDIG geprueft und die PIN-Datei
-//! VOLLSTAENDIG gelesen; danach endet der Lauf mit
-//! [`crate::RecoveryError::Pkcs11Unbound`] (Exitcode 21) und benennt die
-//! Grenze. Das ist dasselbe Muster wie `--report-signing-key` in ADR 0001,
-//! Abschnitt „Blocked": angenommen, verweigert, benannt.
-//!
-//! # WAS EIN SPAETERER TASK ERGAENZEN MUSS
-//!
-//! 1. Eine ADR-Zeile fuer `cryptoki` (samt `cryptoki-sys` und `libloading`)
-//!    mit Primaerquellen- und RustSec-Pruefung; `libloading` traegt ISC, also
-//!    eine NAMENTLICHE Ausnahme in `deny.toml`, falls die Lizenzpruefung sie
-//!    verlangt.
-//! 2. Ein SoftHSM-Modul im Browser-Container als Zeuge, gegen das Login,
-//!    Objektsuche ueber `CKA_LABEL`/`CKA_ID` und Entkapselung beziehungsweise
-//!    Signatur gemessen werden.
-//! 3. Den Austausch von [`PKCS11_UNBOUND_CODE`] gegen die Bindung — an genau
-//!    einer Stelle, in [`crate::key_source`].
+//! Explicit module, token label and object ID; no default source or key scan.
+//! The offline operation provider is defined in `pkcs11_provider` (ADR 0007).
 
 use std::path::{Path, PathBuf};
 
 use crate::key_source::{KeySourceKind, KeySourceSpecError};
-
-/// Der Code, mit dem die unverbundene Modulbindung benannt wird.
-///
-/// DIE BENANNTE GRENZE DIESER STUFE. Ein Aufruf mit einer `pkcs11:`-Quelle
-/// endet — nach vollstaendig geprueffter Referenz und gelesener PIN-Datei —
-/// mit [`crate::RecoveryError::Pkcs11Unbound`], dessen `code()` genau diese
-/// Zeichenkette ist, und mit [`crate::ExitCode::Unsupported`] (21): „nicht
-/// unterstuetzte Providerfaehigkeit". Die Begruendung steht im Modulkopf.
-pub const PKCS11_UNBOUND_CODE: &str = "EA-RECOVERY-PKCS11-UNBOUND";
 
 /// Die Obergrenze einer `CKA_ID` in Bytes.
 ///

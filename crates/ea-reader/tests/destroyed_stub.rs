@@ -13,26 +13,17 @@ use ea_types::{DestructionId, ObjectHash};
 
 use verify_fixtures::{fixtures, verify_support};
 
-// GEMESSEN und gegen den frueheren Plantext korrigiert: dieser Bestand
-// ERREICHT die Entkapselung. Vier seiner Eintraege tragen einen eigenen Grant
-// auf den Abdruck des Tresors, `claim_own_grants` oeffnet sie, und das
-// archivweite Protokoll enthaelt `hpke-open`. Eine Zusicherung auf die
-// ABWESENHEIT des Ereignisses waere hier also rot gewesen — und ueber einem
-// Bestand ohne eigene Grants waere sie gruen gewesen, ohne etwas zu messen.
-//
-// Was der Stummel wirklich zusagt, ist enger und staerker: er wird nie ein
-// Kettenknoten, bekommt kein `objectResult`, kein Grant nennt seinen
-// `entryHash`, und `claim_own_grants` laeuft ausschliesslich ueber platzierte
-// Eintraege MIT `objectResult`. Der Typzusage nach heisst das: fuer einen
-// Stummel ist `decrypt_verified` gar nicht erst formulierbar.
+// These older archives have valid approval/events but no normal encrypted
+// Writer Evidence binding the Stub. Every Stub remains an unexplained gap;
+// the other four actual entries still reach HPKE.
 #[test]
 fn a_stub_reaches_no_decapsulation_in_either_outcome() {
     let vault = fixtures::unlocked_vault_with_pinned_anchor();
     for (label, source, entry_state) in [
         (
-            "autorisiert vernichtet",
+            "Autorisierung ohne gebundene Writer-Evidence",
             fixtures::stub_with_resolvable_authorization(),
-            EntryStatus::AuthorizedDestroyed,
+            EntryStatus::UnexplainedGap,
         ),
         (
             "ungeklaerte Luecke: Kennung zeigt auf nichts",
@@ -86,9 +77,7 @@ fn a_stub_reaches_no_decapsulation_in_either_outcome() {
             .state_of(key)
             .expect("der Stummel traegt entryHash und Sequenz selbst");
         assert_eq!(state.entry_state(), entry_state, "{label}");
-        // BEIDE Dimensionen bleiben getrennt (design.md §17.4): auch der
-        // autorisiert vernichtete Stummel hat KEIN objectResult und steht in
-        // einem gaps-Intervall, ist in der Verifikationsdimension also `Gap`.
+        // These fixtures have no complete Stub Evidence, hence no result.
         assert_eq!(state.verification(), VerificationStatus::Gap, "{label}");
         assert_eq!(
             state.sequence(),
@@ -98,22 +87,10 @@ fn a_stub_reaches_no_decapsulation_in_either_outcome() {
     }
 }
 
-// Die PRUEFKETTE, aus der `autorisiert vernichtet` ueberhaupt erst entsteht.
-//
-// `ObjectResultKindV1::AuthorizedDestroyed` ist ein TOTER Zweig —
-// `confirm_entries` ist der einzige Erzeuger von `objectResults` und setzt
-// ausnahmslos `Valid`. Der Zustand kommt deshalb aus drei Gliedern: die
-// `destructionId` des Stummels gegen `authorized_destructions()`, sein
-// `destructionAuthorizationObjectHash` gegen den Hash, den die Transitionen
-// authentifiziert haben, und der Eintrag des Stummels gegen die `targets` der
-// Autorisierung. Dieser Zeuge haelt fest, dass ALLE VIER Bestaende denselben
-// Vorgang fuehren, der Bericht ueber keinen von ihnen einen zusaetzlichen
-// Befund traegt — und dass jeder der drei Luecken-Bestaende GENAU EIN Glied
-// bricht. Ein Join, der ein Glied auslaesst, laesst also mindestens einen von
-// ihnen als `autorisiert vernichtet` durch; das misst
-// `a_stub_reaches_no_decapsulation_in_either_outcome`.
+// Authorization/transition/target joins are independently visible, but they
+// never substitute for the later authenticated encrypted Stub binding.
 #[test]
-fn the_authorized_destruction_is_reached_only_through_the_full_chain() {
+fn the_authorization_graph_alone_cannot_supply_stub_evidence() {
     let vault = fixtures::unlocked_vault_with_pinned_anchor();
     let resolvable = fixtures::classify(fixtures::stub_with_resolvable_authorization(), &vault);
     let (authorized_id, authorized_hash) = the_one_authorized_destruction(&resolvable);

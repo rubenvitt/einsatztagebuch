@@ -6,6 +6,7 @@
 //! wasm32-Positivliste — es traegt die zielunabhaengigen Ports und den
 //! host-freien Containerleser, aber keine Wirtimplementierung. Hier steht das
 //! Gegenstueck.
+mod managed;
 
 use std::{
     collections::BTreeSet,
@@ -50,6 +51,153 @@ use crate::{FormatPackageOutcomeV1, format_package::materialize_format_package_r
 /// laengst — ohne diese Zeile waere der Inventarvergleich eines Profilwechsels
 /// dauerhaft ungleich statt nur waehrend eines gehaltenen Griffs.
 pub const CONTROL_FILES_V1: [&str; 2] = [".ea-writer.lock", ".ea-active-profile"];
+
+#[cfg(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn read_existing_profile_pointer(
+    root: &Path,
+) -> Result<Option<ActiveProfilePointerCoreV1>, ArchiveBackendError> {
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    // Same pinned native constants as lock_diagnosis.rs; Linux aarch64's
+    // O_NOFOLLOW differs from x86_64. No extra dependency or unsafe call.
+    #[cfg(target_os = "macos")]
+    const NOFOLLOW_NONBLOCK: i32 = 0x100 | 0x4;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const NOFOLLOW_NONBLOCK: i32 = 0x20000 | 2048;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const NOFOLLOW_NONBLOCK: i32 = 0x8000 | 2048;
+
+    let root_before = fs::symlink_metadata(root).map_err(|_| ArchiveBackendError::Io)?;
+    let valid_root = |metadata: &fs::Metadata| {
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.mode() & 0o444 != 0
+            && metadata.mode() & 0o111 != 0
+    };
+    if !valid_root(&root_before) {
+        return Err(ArchiveBackendError::Io);
+    }
+    let same = |left: &fs::Metadata, right: &fs::Metadata| {
+        left.dev() == right.dev() && left.ino() == right.ino()
+    };
+    let root_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(NOFOLLOW_NONBLOCK)
+        .open(root)
+        .map_err(|_| ArchiveBackendError::Io)?;
+    let root_unchanged = || {
+        let (Ok(opened), Ok(named)) = (root_file.metadata(), fs::symlink_metadata(root)) else {
+            return false;
+        };
+        if !valid_root(&opened)
+            || !valid_root(&named)
+            || !same(&root_before, &opened)
+            || !same(&opened, &named)
+        {
+            return false;
+        }
+        // Mode bits do not reflect ACL denials. Exercise actual directory
+        // access, including the first read, without exposing entry names or
+        // walking the inventory. The held descriptor and named root must
+        // still identify the original directory after that access.
+        if fs::read_dir(root)
+            .and_then(|mut entries| entries.next().transpose().map(|_| ()))
+            .is_err()
+        {
+            return false;
+        }
+        fs::symlink_metadata(root)
+            .is_ok_and(|current| valid_root(&current) && same(&opened, &current))
+    };
+    if !root_unchanged() {
+        return Err(ArchiveBackendError::Io);
+    }
+    let path = root.join(CONTROL_FILES_V1[1]);
+    let before = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if root_unchanged() {
+                Ok(None)
+            } else {
+                Err(ArchiveBackendError::Io)
+            };
+        }
+        Err(_) => return Err(ArchiveBackendError::Io),
+    };
+    if !before.is_file() || before.file_type().is_symlink() || before.mode() & 0o444 == 0 {
+        return Err(ArchiveBackendError::Io);
+    }
+    let limit = ActiveProfilePointerCoreV1::MAX_ENCODED_BYTES;
+    if before.len() > limit as u64 {
+        return Err(ArchiveBackendError::Format(ea_format::FormatError::Shape));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(NOFOLLOW_NONBLOCK)
+        .open(&path)
+        .map_err(|_| ArchiveBackendError::Io)?;
+    let unchanged = || {
+        let (Ok(opened), Ok(named)) = (file.metadata(), fs::symlink_metadata(&path)) else {
+            return false;
+        };
+        root_unchanged()
+            && opened.is_file()
+            && named.is_file()
+            && !named.file_type().is_symlink()
+            && same(&before, &opened)
+            && same(&opened, &named)
+            && opened.len() == before.len()
+            && named.len() == before.len()
+            && opened.mtime() == before.mtime()
+            && opened.mtime_nsec() == before.mtime_nsec()
+            && opened.ctime() == before.ctime()
+            && opened.ctime_nsec() == before.ctime_nsec()
+    };
+    if !unchanged() {
+        return Err(ArchiveBackendError::Io);
+    }
+    let mut bytes = Vec::with_capacity(limit + 1);
+    (&file)
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ArchiveBackendError::Io)?;
+    if !unchanged() || bytes.len() as u64 != before.len() {
+        return Err(ArchiveBackendError::Io);
+    }
+    ea_format::decode_active_profile_pointer_core(&bytes)
+        .map(Some)
+        .map_err(ArchiveBackendError::Format)
+}
+
+#[cfg(not(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+fn read_existing_profile_pointer(
+    _: &Path,
+) -> Result<Option<ActiveProfilePointerCoreV1>, ArchiveBackendError> {
+    Err(ArchiveBackendError::Io)
+}
 
 /// Das Verzeichnis, in dem der Capability-Test arbeitet.
 ///
@@ -229,6 +377,7 @@ impl WriterLockRelease for LocalWriterLockRelease {
 /// Ein Bestand auf dem lokalen Dateisystem.
 pub struct LocalPathBackend {
     root: PathBuf,
+    existing_only: bool,
     profile: ArchiveBackendProfileV1,
     held: Arc<AtomicBool>,
     /// Adressen, die die Fixture als „auf einem anderen Dateisystem" markiert.
@@ -303,10 +452,39 @@ impl LocalPathBackend {
         profile: ArchiveBackendProfileV1,
         policy: &BoundArchiveProfilePolicyV1,
     ) -> Result<Self, ArchiveBackendError> {
+        Self::open_with_mode(root, profile, policy, false)
+    }
+
+    /// Opens an existing directory, never creating its root or missing parents.
+    /// Subsequent writes retain this restriction. This path-based check does
+    /// not establish mount identity or exclude replacement/symlink races.
+    ///
+    /// # Errors
+    /// Rejects disallowed profiles before I/O; absent roots, non-directories
+    /// and filesystem failures return an error.
+    pub fn open_existing(
+        root: PathBuf,
+        profile: ArchiveBackendProfileV1,
+        policy: &BoundArchiveProfilePolicyV1,
+    ) -> Result<Self, ArchiveBackendError> {
+        Self::open_with_mode(root, profile, policy, true)
+    }
+
+    fn open_with_mode(
+        root: PathBuf,
+        profile: ArchiveBackendProfileV1,
+        policy: &BoundArchiveProfilePolicyV1,
+        existing_only: bool,
+    ) -> Result<Self, ArchiveBackendError> {
         policy.require(profile.profile_hash()?)?;
-        fs::create_dir_all(&root).map_err(|_| ArchiveBackendError::Io)?;
+        if existing_only {
+            require_directory(&root)?;
+        } else {
+            fs::create_dir_all(&root).map_err(|_| ArchiveBackendError::Io)?;
+        }
         let backend = Self {
             root,
+            existing_only,
             profile,
             held: Arc::new(AtomicBool::new(false)),
             foreign: Mutex::new(BTreeSet::new()),
@@ -317,6 +495,7 @@ impl LocalPathBackend {
         // Formatbeiwerk als Verpflichtung JEDES Bestands, und Stufe 2 ist die
         // erste, die Bestaende erzeugt.
         let format_package = backend.materialize_format_package_under_lock()?;
+        backend.require_existing_root()?;
         Ok(Self {
             format_package,
             ..backend
@@ -335,9 +514,25 @@ impl LocalPathBackend {
     fn materialize_format_package_under_lock(
         &self,
     ) -> Result<FormatPackageOutcomeV1, ArchiveBackendError> {
-        let Ok(lock) = self.acquire_writer_lock() else {
-            return Ok(FormatPackageOutcomeV1::Deferred);
+        let lock = match self.acquire_writer_lock() {
+            Ok(lock) => lock,
+            Err(ArchiveBackendError::AlreadyLocked) => return Ok(FormatPackageOutcomeV1::Deferred),
+            Err(error) => return Err(error),
         };
+        if self.existing_only {
+            // Only the fixed format package may prepare its nested schema
+            // directories. Each child is created under an existing parent;
+            // arbitrary archive writes never recreate a missing parent chain.
+            for (relative, _) in crate::FORMAT_PACKAGE_FILES_V1 {
+                if let Some(parent) = Path::new(relative).parent() {
+                    let mut directory = self.root.clone();
+                    for component in parent.components() {
+                        directory.push(component);
+                        self.ensure_directory(&directory)?;
+                    }
+                }
+            }
+        }
         // Der berichtende Weg und nicht `materialize_format_package`: die
         // Zahl der Abweichungen ist der Beobachtungspunkt, und ein `Result`,
         // das im Fehlerfall den Bericht verwirft, traegt sie nicht.
@@ -361,10 +556,16 @@ impl LocalPathBackend {
     fn open_scratch(
         root: PathBuf,
         profile: ArchiveBackendProfileV1,
+        existing_only: bool,
     ) -> Result<Self, ArchiveBackendError> {
-        fs::create_dir_all(&root).map_err(|_| ArchiveBackendError::Io)?;
+        if existing_only {
+            require_directory(&root)?;
+        } else {
+            fs::create_dir_all(&root).map_err(|_| ArchiveBackendError::Io)?;
+        }
         Ok(Self {
             root,
+            existing_only,
             profile,
             held: Arc::new(AtomicBool::new(false)),
             foreign: Mutex::new(BTreeSet::new()),
@@ -493,6 +694,7 @@ impl LocalPathBackend {
         &self,
         pointer: &ActiveProfilePointerCoreV1,
     ) -> Result<(), ArchiveBackendError> {
+        self.require_existing_root()?;
         let bytes =
             encode_active_profile_pointer_core(pointer).map_err(ArchiveBackendError::Format)?;
         let target = self.absolute(CONTROL_FILES_V1[1]);
@@ -528,6 +730,27 @@ impl LocalPathBackend {
         fs::read(self.absolute(CONTROL_FILES_V1[1])).ok()
     }
 
+    /// Reads an existing canonical pointer without creating files or a root.
+    ///
+    /// Only an absent pointer under a readable existing root returns `None`.
+    /// Supported macOS/GNU Linux targets use the same no-follow/nonblocking
+    /// open and inode checks as the local lock diagnosis. Other targets refuse
+    /// the read. The caller must keep ancestor names stable: these path-based
+    /// checks do not prove an atomic snapshot or mount identity.
+    ///
+    /// # Errors
+    /// [`ArchiveBackendError::Io`] for unavailable roots, nonregular/symlink
+    /// files, unreadable or replaced paths; [`ArchiveBackendError::Format`]
+    /// for oversized or invalid/noncanonical pointer bytes.
+    pub fn read_active_profile_pointer(
+        &self,
+    ) -> Result<Option<ActiveProfilePointerCoreV1>, ArchiveBackendError> {
+        self.require_existing_root()?;
+        let result = read_existing_profile_pointer(&self.root);
+        self.require_existing_root()?;
+        result
+    }
+
     /// Fuehrt den Capability-Test dieses Profils aus.
     ///
     /// Er laeuft in einer KRATZWURZEL unterhalb der Bestandswurzel — also auf
@@ -543,9 +766,19 @@ impl LocalPathBackend {
         &self,
         vector: &CapabilityTestVectorV1,
     ) -> Result<CapabilityReportV1, ArchiveBackendError> {
-        let scratch_root = self.root.join(CAPABILITY_SCRATCH_DIR_V1).join(vector.id());
+        self.require_existing_root()?;
+        let scratch_parent = self.root.join(CAPABILITY_SCRATCH_DIR_V1);
+        let scratch_root = scratch_parent.join(vector.id());
         let _ = fs::remove_dir_all(&scratch_root);
-        let scratch = Self::open_scratch(scratch_root.clone(), self.profile.clone())?;
+        if self.existing_only {
+            self.ensure_directory(&scratch_parent)?;
+            self.ensure_directory(&scratch_root)?;
+        }
+        let scratch = Self::open_scratch(
+            scratch_root.clone(),
+            self.profile.clone(),
+            self.existing_only,
+        )?;
         let report = scratch.capability_probes(vector);
         let _ = fs::remove_dir_all(&scratch_root);
         report
@@ -589,7 +822,8 @@ impl LocalPathBackend {
         // Ablehnung unten kann deshalb nur aus der Betriebssystemsperre kommen,
         // und ein Traeger, der `flock`/`LockFileEx` stillschweigend ignoriert,
         // faellt hier auf statt durch.
-        let contender = Self::open_scratch(self.root.clone(), self.profile.clone())?;
+        let contender =
+            Self::open_scratch(self.root.clone(), self.profile.clone(), self.existing_only)?;
         let held = self.acquire_writer_lock()?;
         report.exclusive_writer_lock = matches!(
             contender.acquire_writer_lock(),
@@ -602,7 +836,8 @@ impl LocalPathBackend {
         // Verbindungsabbruch und Wiederanlauf: der Bestand wird ERNEUT
         // geoeffnet — alle Griffe des ersten Oeffnens sind damit fort — und die
         // Bytes werden exakt nachgeprueft.
-        let reopened = Self::open_scratch(self.root.clone(), self.profile.clone())?;
+        let reopened =
+            Self::open_scratch(self.root.clone(), self.profile.clone(), self.existing_only)?;
         report.disconnect_and_resume_keeps_exact_bytes =
             reopened.read_bytes(renamed.as_str()).as_deref() == Some(vector.object_bytes())
                 && matches!(
@@ -642,11 +877,42 @@ impl LocalPathBackend {
         self.walk()
     }
 
+    fn require_existing_root(&self) -> Result<(), ArchiveBackendError> {
+        if self.existing_only {
+            require_directory(&self.root)?;
+        }
+        Ok(())
+    }
+
+    // Existing mode creates one directory only. In particular the configured
+    // root is never itself a create target, even for a flat archive filename.
+    fn ensure_directory(&self, directory: &Path) -> Result<(), ArchiveBackendError> {
+        if !self.existing_only {
+            return fs::create_dir_all(directory).map_err(|_| ArchiveBackendError::Io);
+        }
+        self.require_existing_root()?;
+        if directory == self.root {
+            return Ok(());
+        }
+        if !directory.starts_with(&self.root) {
+            return Err(ArchiveBackendError::Path);
+        }
+        require_directory(directory.parent().ok_or(ArchiveBackendError::Path)?)?;
+        match fs::create_dir(directory) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                require_directory(directory)
+            }
+            Err(_) => Err(ArchiveBackendError::Io),
+        }
+    }
+
     fn create_bytes_if_absent(
         &self,
         relative: &ArchivePath,
         bytes: &[u8],
     ) -> Result<(), ArchiveBackendError> {
+        self.require_existing_root()?;
         let absolute = self.absolute(relative.as_str());
         if let Ok(existing) = fs::read(&absolute) {
             return if existing == bytes {
@@ -656,7 +922,7 @@ impl LocalPathBackend {
             };
         }
         if let Some(parent) = absolute.parent() {
-            fs::create_dir_all(parent).map_err(|_| ArchiveBackendError::Io)?;
+            self.ensure_directory(parent)?;
         }
         let mut file = OpenOptions::new()
             .write(true)
@@ -668,28 +934,31 @@ impl LocalPathBackend {
     }
 }
 
+fn require_directory(path: &Path) -> Result<(), ArchiveBackendError> {
+    let metadata = fs::metadata(path).map_err(|_| ArchiveBackendError::Io)?;
+    if !metadata.is_dir() {
+        return Err(ArchiveBackendError::Io);
+    }
+    Ok(())
+}
+
 /// Oeffnet `path` und belegt es mit der exklusiven Betriebssystemsperre.
 ///
-/// `None`, wenn schon jemand sperrt ODER die Datei sich nicht oeffnen laesst.
-/// Die beiden Faelle werden ABSICHTLICH nicht unterschieden: der Aufrufer hat
-/// an dieser Stelle ohnehin nur EINE Handlung — nicht schreiben.
-///
-/// `create(true)` und NICHT `truncate`: die Datei traegt keinen Inhalt, und ein
-/// Abschneiden waere ein Schreibzugriff, BEVOR die Sperre steht.
-///
-/// Wortgleich zu `DraftLock::acquire` in `crates/ea-draft/src/lock.rs`. Die
-/// beiden Crates duerfen nicht voneinander abhaengen, also steht die Sperre
-/// zweimal da; sie steht dann aber auch in derselben Gestalt, damit ein Leser
-/// die eine an der anderen pruefen kann.
-fn open_and_lock_exclusively(path: &Path) -> Option<File> {
+/// Preserves I/O errors separately from actual lock contention. The legacy
+/// open mode maps them back to AlreadyLocked at its public boundary.
+/// `create(true)` never truncates the persistent lock file.
+fn open_and_lock_exclusively(path: &Path) -> Result<File, ArchiveBackendError> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)
-        .ok()?;
-    file.try_lock().ok()?;
-    Some(file)
+        .map_err(|_| ArchiveBackendError::Io)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => ArchiveBackendError::AlreadyLocked,
+        std::fs::TryLockError::Error(_) => ArchiveBackendError::Io,
+    })?;
+    Ok(file)
 }
 
 /// Flusht ein Verzeichnis.
@@ -762,6 +1031,13 @@ impl ArchiveBackend for LocalPathBackend {
             .collect())
     }
 
+    fn visit_managed_blobs(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        self.visit_managed_contents(visitor)
+    }
+
     /// Entfernt die Adresse und macht den VERSCHWUNDENEN Namen dauerhaft.
     ///
     /// Der zweite Flush ist dieselbe Zusage wie bei
@@ -771,6 +1047,7 @@ impl ArchiveBackend for LocalPathBackend {
     /// laeuft durch, ohne das Verzeichnis anzufassen — es gibt dann nichts,
     /// dessen Verschwinden dauerhaft zu machen waere.
     fn remove_if_present(&self, relative: &ArchivePath) -> Result<(), ArchiveBackendError> {
+        self.require_existing_root()?;
         let absolute = self.absolute(relative.as_str());
         match fs::remove_file(&absolute) {
             Ok(()) => {}
@@ -791,10 +1068,11 @@ impl ArchiveBackend for LocalPathBackend {
                 return Err(ArchiveBackendError::NotSameFilesystem);
             }
         }
+        self.require_existing_root()?;
         let source = self.absolute(from.as_str());
         let target = self.absolute(to.as_str());
         let target_directory = self.absolute(to.directory());
-        fs::create_dir_all(&target_directory).map_err(|_| ArchiveBackendError::Io)?;
+        self.ensure_directory(&target_directory)?;
         // Die ECHTE Geraetepruefung. Sie vergleicht die tragenden
         // Verzeichnisse, weil das Ziel noch nicht existiert.
         let source_device = device_of(&self.absolute(from.directory()));
@@ -831,7 +1109,7 @@ impl ArchiveBackend for LocalPathBackend {
             return Err(ArchiveBackendError::Path);
         }
         let absolute = self.absolute(directory);
-        fs::create_dir_all(&absolute).map_err(|_| ArchiveBackendError::Io)?;
+        self.ensure_directory(&absolute)?;
         // Beide Flushes sind noetig und keiner ist Zutat: der erste macht das
         // Verzeichnis selbst dauerhaft, der zweite seinen NAMEN, der im
         // Elternverzeichnis lebt. Ein leeres Verzeichnis traegt keine Datei, an
@@ -868,10 +1146,12 @@ impl ArchiveBackend for LocalPathBackend {
     /// # Errors
     ///
     /// [`ArchiveBackendError::AlreadyLocked`], wenn sie schon gehalten wird —
-    /// und ebenso, wenn die Sperrdatei sich nicht oeffnen laesst. Fail-closed:
+    /// im Legacy-Modus ebenso bei I/O-Fehlern; Existing-Modus reicht diese
+    /// als [`ArchiveBackendError::Io`] heraus. Fail-closed:
     /// ohne genommene Sperre wird nicht geschrieben, und der Aufrufer hat an
     /// dieser Stelle ohnehin nur EINE Handlung.
     fn acquire_writer_lock(&self) -> Result<WriterLock, ArchiveBackendError> {
+        self.require_existing_root()?;
         if self.held.swap(true, Ordering::SeqCst) {
             return Err(ArchiveBackendError::AlreadyLocked);
         }
@@ -884,13 +1164,17 @@ impl ArchiveBackend for LocalPathBackend {
         // Faelle wirkungslos.
         //
         match open_and_lock_exclusively(&lock_file) {
-            Some(file) => Ok(WriterLock::new(Arc::new(LocalWriterLockRelease {
+            Ok(file) => Ok(WriterLock::new(Arc::new(LocalWriterLockRelease {
                 held: Arc::clone(&self.held),
                 lock_file: file,
             }))),
-            None => {
+            Err(error) => {
                 self.held.store(false, Ordering::SeqCst);
-                Err(ArchiveBackendError::AlreadyLocked)
+                Err(if self.existing_only {
+                    error
+                } else {
+                    ArchiveBackendError::AlreadyLocked
+                })
             }
         }
     }
@@ -1006,9 +1290,12 @@ impl LocalPathBackend {
     ///
     /// Wenn das Wirtdateisystem das Schreiben ablehnt.
     pub fn overwrite_for_test(&self, relative: &str, bytes: &[u8]) {
+        self.require_existing_root()
+            .expect("die Bestandswurzel muss vorhanden sein");
         let absolute = self.absolute(relative);
         if let Some(parent) = absolute.parent() {
-            fs::create_dir_all(parent).expect("das Elternverzeichnis muss anlegbar sein");
+            self.ensure_directory(parent)
+                .expect("das Elternverzeichnis muss anlegbar sein");
         }
         fs::write(absolute, bytes).expect("das Schreiben muss gelingen");
     }

@@ -23,6 +23,8 @@ pub enum VerifyError {
     /// maskieren: der Bericht kennt keine freien Zeichenketten, und was keine
     /// ist, darf auch nicht als solche hinausgehen.
     NonCanonicalReport,
+    /// Historical recipient use needs its observed time committed by the host.
+    RecipientTimeNotDurable,
 }
 
 impl VerifyError {
@@ -32,6 +34,7 @@ impl VerifyError {
         match self {
             Self::Archive(error) => error.code(),
             Self::NonCanonicalReport => "EA-VERIFY-NON-CANONICAL-REPORT",
+            Self::RecipientTimeNotDurable => "EA-GRANT-TIME-NOT-DURABLE",
         }
     }
 }

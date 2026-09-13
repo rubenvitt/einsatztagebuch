@@ -12,7 +12,7 @@ use crate::LocalPathBackend;
 /// Sie ist ein fester Klartext und kein Zufallswert: der Nachweis vergleicht
 /// die Bytes AM RUHEORT gegen genau ihn, und ein Vergleich gegen einen Wert,
 /// den nur die Ablage kennt, wuerde nichts belegen.
-const AT_REST_PROBE_RELATIVE_V1: &str = ".ea-at-rest-probe";
+pub(crate) const AT_REST_PROBE_RELATIVE_V1: &str = ".ea-at-rest-probe";
 const AT_REST_PROBE_PLAINTEXT_V1: &[u8] = b"EINSATZARCHIV-AT-REST-PROBE-v1";
 
 /// Enthaelt `haystack` die Folge `needle`?
@@ -53,6 +53,13 @@ pub trait AtRestEncryptedStoreV1: Send + Sync {
     /// Genau dieser Leser macht die Verschluesselung pruefbar: er zeigt, was
     /// ein Angreifer mit Zugriff auf den Datentraeger sieht.
     fn bytes_at_rest(&self, relative: &str) -> Option<Vec<u8>>;
+
+    /// Search the physical storage for the measured canary. File-backed
+    /// implementations may stream the files to keep large queues bounded.
+    fn at_rest_contains(&self, relative: &str, needle: &[u8]) -> Option<bool> {
+        self.bytes_at_rest(relative)
+            .map(|bytes| contains_subsequence(&bytes, needle))
+    }
 
     /// Entfernt `relative`, sofern vorhanden.
     fn remove(&self, relative: &str);
@@ -98,17 +105,20 @@ impl LocalCommitComponentV1 {
             .put(AT_REST_PROBE_RELATIVE_V1, AT_REST_PROBE_PLAINTEXT_V1)
             .map_err(|_| ArchiveBackendError::MissingLocalCommitComponent)?;
         let restored = self.store.get(AT_REST_PROBE_RELATIVE_V1);
-        let at_rest = self.store.bytes_at_rest(AT_REST_PROBE_RELATIVE_V1);
+        let contains_probe = self
+            .store
+            .at_rest_contains(AT_REST_PROBE_RELATIVE_V1, AT_REST_PROBE_PLAINTEXT_V1);
         self.store.remove(AT_REST_PROBE_RELATIVE_V1);
 
         let restored = restored.ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
-        let at_rest = at_rest.ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
+        let contains_probe =
+            contains_probe.ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
         if restored != AT_REST_PROBE_PLAINTEXT_V1 {
             // Eine Ablage, die ihre eigenen Bytes nicht zurueckgibt, waere
             // keine dauerhafte Commit-Komponente.
             return Err(ArchiveBackendError::MissingLocalCommitComponent);
         }
-        if contains_subsequence(&at_rest, AT_REST_PROBE_PLAINTEXT_V1) {
+        if contains_probe {
             return Err(ArchiveBackendError::MissingLocalCommitComponent);
         }
         Ok(ProvenLocalCommitComponentV1 {
@@ -197,7 +207,68 @@ pub struct ControlledNetworkBackend {
     local_commit: ProvenLocalCommitComponentV1,
 }
 
+/// Policy-approved local component and immutable intended remote target.
+/// Opening this carrier never accesses the remote filesystem.
+pub struct ControlledNetworkLocalComponentV1 {
+    network_root: PathBuf,
+    profile: ArchiveBackendProfileV1,
+    local_commit: ProvenLocalCommitComponentV1,
+}
+
+impl ControlledNetworkLocalComponentV1 {
+    /// Connects only to the stored existing target after checking current policy.
+    /// The borrow preserves the local component on failure and permits retry.
+    ///
+    /// # Errors
+    /// Returns policy, missing-directory or filesystem errors without replacing
+    /// the configured target or creating its root or missing ancestors.
+    pub fn connect_existing(
+        &self,
+        policy: &BoundArchiveProfilePolicyV1,
+    ) -> Result<LocalPathBackend, ArchiveBackendError> {
+        LocalPathBackend::open_existing(self.network_root.clone(), self.profile.clone(), policy)
+    }
+
+    /// The admitted encrypted local component, retained across connect attempts.
+    #[must_use]
+    pub const fn local_commit(&self) -> &ProvenLocalCommitComponentV1 {
+        &self.local_commit
+    }
+}
+
+impl std::fmt::Debug for ControlledNetworkLocalComponentV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ControlledNetworkLocalComponentV1(<local component admitted>)")
+    }
+}
+
 impl ControlledNetworkBackend {
+    /// Admits and measures only the local component, with no remote I/O.
+    /// The full configured profile is checked before the at-rest probe writes.
+    ///
+    /// # Errors
+    /// Rejects an unprofiled target, disallowed exact profile or missing/unproven
+    /// local component, in that order.
+    pub fn open_local_component(
+        network_root: PathBuf,
+        local_commit: Option<LocalCommitComponentV1>,
+        profile: ArchiveBackendProfileV1,
+        policy: &BoundArchiveProfilePolicyV1,
+    ) -> Result<ControlledNetworkLocalComponentV1, ArchiveBackendError> {
+        if !matches!(profile, ArchiveBackendProfileV1::ControlledNetworkPath(_)) {
+            return Err(ArchiveBackendError::UnprofiledNetworkPath);
+        }
+        policy.require(profile.profile_hash()?)?;
+        let local_commit = local_commit
+            .ok_or(ArchiveBackendError::MissingLocalCommitComponent)?
+            .prove_encryption_at_rest()?;
+        Ok(ControlledNetworkLocalComponentV1 {
+            network_root,
+            profile,
+            local_commit,
+        })
+    }
+
     /// Oeffnet das Netzbackend.
     ///
     /// Die Reihenfolge der Ablehnungen ist die Zusage:

@@ -578,6 +578,10 @@ impl fmt::Debug for SealedVaultV1 {
 /// Aufgabe „Sitzungssperre, Zeroize, authenticator-bestätigter Einzelexport und
 /// signiertes lokales Audit".
 pub struct UnlockedVault {
+    // Runtime-only high-water mark; public vault bytes are unchanged. A host
+    // reopening a vault restores it through ReaderGrantTimeStore before opening.
+    effective_time_floor: std::cell::Cell<ea_types::UnixMillis>,
+    durable_grant_time_floor: std::cell::Cell<ea_types::UnixMillis>,
     vault_key: SecretBytes<CEK_SIZE>,
     kem_private_key: HpkeRecipientPrivateKey,
     kem_key_thumbprint: KeyThumbprint,
@@ -587,6 +591,19 @@ pub struct UnlockedVault {
 }
 
 impl UnlockedVault {
+    pub(crate) fn durable_grant_time(&self) -> ea_types::UnixMillis {
+        self.durable_grant_time_floor.get()
+    }
+    pub(crate) fn affirm_durable_grant_time(&self, now: ea_types::UnixMillis) {
+        self.durable_grant_time_floor
+            .set(now.max(self.durable_grant_time_floor.get()));
+    }
+
+    pub(crate) fn observe_effective_time(&self, now: ea_types::UnixMillis) -> ea_types::UnixMillis {
+        let effective = now.max(self.effective_time_floor.get());
+        self.effective_time_floor.set(effective);
+        effective
+    }
     /// Der private X25519-Empfaengerschluessel.
     ///
     /// Die EINGABE der HPKE-Entkapselung und damit von
@@ -714,6 +731,10 @@ impl UnlockedVault {
     /// Der Schluessel des Zustandsspeichers dieser Sitzung.
     pub(crate) fn trust_state_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
         derive_trust_state_key_v1(&self.vault_key)
+    }
+
+    pub(crate) fn grant_time_key(&self) -> Result<SecretBytes<CEK_SIZE>, ReaderVaultError> {
+        crate::envelope::derive_grant_time_key_v1(&self.vault_key)
     }
 
     /// Der Schluessel des Eintragszustandsspeichers.
@@ -872,6 +893,8 @@ impl ReaderVault {
             CanonicalPublicCoseKey::x25519(*kem_private_key.public_key().as_bytes())?.thumbprint();
 
         Ok(UnlockedVault {
+            effective_time_floor: std::cell::Cell::new(ea_types::UnixMillis::new(i64::MIN)),
+            durable_grant_time_floor: std::cell::Cell::new(ea_types::UnixMillis::new(i64::MIN)),
             vault_key,
             kem_private_key,
             kem_key_thumbprint,

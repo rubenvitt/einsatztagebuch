@@ -11,6 +11,7 @@
   <ItemGroup>
     <Compile Remove="NativeReadOnly/**/*.cs" />
     <Compile Include="../src/Protocol.cs" Link="Protocol.cs" />
+    <Compile Include="../src/SigningBackup.cs" Link="SigningBackup.cs" />
     <Compile Include="../src/Crypto.cs" Link="Crypto.cs" />
     <Compile Include="../src/Win32.cs" Link="Win32.cs" />
     <Compile Include="../src/ConsoleLine.cs" Link="ConsoleLine.cs" />

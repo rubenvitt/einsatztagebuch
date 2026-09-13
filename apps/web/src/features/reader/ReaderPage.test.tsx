@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { invalidateReaderViews } from '../../bridge/reader-invalidation'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { Tag } from 'antd'
 import { expect, it, vi } from 'vitest'
 
@@ -446,4 +447,25 @@ it('renders an unrepresentable occurredAt as plain text instead of throwing', ()
   }
   // Und ein tragbarer Zeitpunkt bleibt, was er war.
   expect(formatOccurredAt(Date.UTC(2026, 2, 1, 7, 30), 'Europe/Berlin')).toContain('Europe/Berlin')
+})
+
+it('explains an expired historical authorization and exposes no incident', async () => {
+  const missing=missingGrantEntry()
+  const expired: ReaderEntryView={...missing,state:{...missing.state,verification:INVALID,detailCode:'EA-GRANT-EXPIRED'}}
+  render(<ReaderPage bridge={fakeBridge(stand({entries:[expired],fullyVerified:false}))} />)
+  expect(await screen.findByText('historische Freigabe abgelaufen')).toBeVisible()
+  expect(screen.queryByRole('article', {name:/Einsatz/})).not.toBeInTheDocument()
+})
+
+it('drops displayed personal data before managed deletion and ignores a late entry response', async () => {
+  let resolveEntry!: (entry: ReaderEntryView) => void
+  const bridge = fakeBridge(stand(), { entryView: vi.fn(() => new Promise<ReaderEntryView>(resolve => { resolveEntry = resolve })) })
+  render(<ReaderPage bridge={bridge} />)
+  const user = userEvent.setup()
+  await user.click(await screen.findByRole('button', { name: /Eintrag öffnen/ }))
+  act(() => invalidateReaderViews())
+  expect(await screen.findByText('Kein Bestand geöffnet')).toBeVisible()
+  await act(async () => { resolveEntry(decryptedEntry()); await Promise.resolve() })
+  expect(screen.queryByRole('article')).not.toBeInTheDocument()
+  expect(screen.queryByRole('tab')).not.toBeInTheDocument()
 })

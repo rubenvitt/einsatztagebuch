@@ -26,6 +26,16 @@ internal static class NativeProvider
 
     internal static byte[] Execute(Request request)
     {
+        byte[]? pendingBackup = null;
+        try {
+            var result = ExecuteCore(request, ref pendingBackup);
+            pendingBackup = null; // all using-disposals have completed successfully
+            return result;
+        } finally { if (pendingBackup != null) CryptographicOperations.ZeroMemory(pendingBackup); }
+    }
+    private static byte[] ExecuteCore(Request request, ref byte[]? pendingBackup)
+    {
+        if (request.Op == "backup-signing-seed") request.RequireSigningBackup();
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) || !Environment.Is64BitProcess) throw new Failure("platform-unavailable");
         RequireParentPipes();
         using var account = new NativeAccount();
@@ -75,6 +85,7 @@ internal static class NativeProvider
         var store = new CredentialStore(installation);
         var fields = new Dictionary<string, object?> { ["ok"] = true, ["installation_id"] = installation.IdHex };
         byte[]? secretOutput = null;
+        byte[]? backupOutput = null;
         try
         {
             string slot = request.Slot!;
@@ -100,12 +111,22 @@ internal static class NativeProvider
                     case "contains": fields["contains"] = stored != null; break;
                     case "public-key": fields["public_key"] = stored?.PublicKey == null ? null : Hex.Encode(stored.PublicKey); break;
                     case "delete": store.Delete(slot); break;
-                    case "sign": case "unwrap-secret":
+                    case "sign": case "unwrap-secret": case "backup-signing-seed":
                         if (stored == null) throw new Failure("key-missing");
+                        if (request.Op == "backup-signing-seed" &&
+                            (stored.Kind != "ed25519" || stored.PublicKey == null || !stored.PublicKey.SequenceEqual(request.ExpectedPublicKey!)))
+                            throw new Failure("key-invalid");
                         var secret = store.ReadSecret(slot, stored);
                         try
                         {
-                            if (request.Op == "unwrap-secret") secretOutput = secret.ToArray();
+                            if (request.Op == "backup-signing-seed") {
+                                backupOutput = SigningBackup.Frame(request, Hex.Decode(installation.IdHex), stored.PublicKey!, secret);
+                                pendingBackup = backupOutput;
+                                var latest = store.ReadMetadata(slot);
+                                if (latest == null || latest.Kind != "ed25519" || latest.PublicKey == null || !latest.PublicKey.SequenceEqual(stored.PublicKey!))
+                                    throw new Failure("key-invalid");
+                            }
+                            else if (request.Op == "unwrap-secret") secretOutput = secret.ToArray();
                             else
                             {
                                 if (stored.PublicKey == null || !Crypto.PublicKey(secret).SequenceEqual(stored.PublicKey)) throw new Failure("key-invalid");
@@ -120,9 +141,15 @@ internal static class NativeProvider
             // Lock/account/marker changes suppress signatures and plaintext, even
             // if the store mutation has already completed. Never auto-retry it.
             installation.Recheck(); session.RequireUnlocked();
+            if (backupOutput != null) {
+                account.Recheck(); installation.Recheck(); session.RequireUnlocked(); RequireParentPipes();
+                // Transfer the sole frame allocation only after final guards.
+                var result = backupOutput; backupOutput = null; return result;
+            }
             if (secretOutput == null) return JsonSerializer.SerializeToUtf8Bytes(fields);
             return Transport.SecretReply(installation.IdHex, secretOutput);
         }
-        finally { if (secretOutput != null) CryptographicOperations.ZeroMemory(secretOutput); }
+        finally { if (secretOutput != null) CryptographicOperations.ZeroMemory(secretOutput);
+            if (backupOutput != null) CryptographicOperations.ZeroMemory(backupOutput); }
     }
 }

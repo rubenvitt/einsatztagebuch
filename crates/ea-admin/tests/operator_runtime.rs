@@ -1,6 +1,9 @@
 //! Runtime boundaries use the existing archive verifier and native identity ports.
 #[path = "../../ea-recovery/tests/support/mod.rs"]
 mod archives;
+use archives::verify_support as support;
+#[path = "../../ea-verify/tests/destruction_stub_support/mod.rs"]
+mod stub_support;
 
 use ea_admin::operator_runtime::{
     OperatorArchiveSnapshot, OperatorRuntimeConfig, OperatorRuntimeError,
@@ -242,16 +245,26 @@ fn next_sequence_comes_from_one_complete_verified_frozen_archive() {
 }
 
 #[test]
-fn unverified_truncated_stale_or_empty_archives_cannot_supply_a_sequence() {
+fn historical_chain_progress_does_not_require_a_fresh_action_head() {
     let directory = archives::temp_dir("operator-runtime-bad-archive");
     let fixture = archives::verify_support::complete_valid_archive();
     let anchor = directory.path().join("anchor");
     std::fs::write(&anchor, &fixture.anchor_bytes).unwrap();
     let archive = directory.path().join("archive");
     archives::materialize(&fixture.fixture, &archive);
-    assert!(
-        OperatorArchiveSnapshot::open(&archive, &anchor, UnixMillis::new(100_000_000)).is_err()
-    );
+    let snapshot = OperatorArchiveSnapshot::open(&archive, &anchor, UnixMillis::new(100_000_000))
+        .expect("historically authenticated sequence is independent of action freshness");
+    assert_eq!(snapshot.next_sequence().get(), 1);
+}
+
+#[test]
+fn unverified_truncated_or_empty_archives_cannot_supply_a_sequence() {
+    let directory = archives::temp_dir("operator-runtime-incomplete-archive");
+    let fixture = archives::verify_support::complete_valid_archive();
+    let anchor = directory.path().join("anchor");
+    std::fs::write(&anchor, &fixture.anchor_bytes).unwrap();
+    let archive = directory.path().join("archive");
+    archives::materialize(&fixture.fixture, &archive);
     std::fs::remove_dir_all(&archive).unwrap();
     std::fs::create_dir(&archive).unwrap();
     assert!(OperatorArchiveSnapshot::open(&archive, &anchor, UnixMillis::new(1_000)).is_err());
@@ -259,6 +272,36 @@ fn unverified_truncated_stale_or_empty_archives_cannot_supply_a_sequence() {
     archives::materialize(&bad.fixture, &archive);
     std::fs::write(&anchor, bad.anchor().exact_bytes()).unwrap();
     assert!(OperatorArchiveSnapshot::open(&archive, &anchor, UnixMillis::new(1_000)).is_err());
+}
+
+#[test]
+fn recipientless_stub_can_supply_only_authenticated_public_chain_progress() {
+    let directory = archives::temp_dir("operator-runtime-public-progress");
+    for sequence in [1, 2] {
+        let fixture = stub_support::fixture_at(true, true, sequence);
+        let archive = directory.path().join(format!("archive-{sequence}"));
+        archives::materialize(&fixture.source, &archive);
+        let anchor = directory.path().join(format!("anchor-{sequence}"));
+        std::fs::write(&anchor, fixture.original.anchor.exact_bytes()).unwrap();
+        let result = OperatorArchiveSnapshot::open(&archive, &anchor, UnixMillis::new(800));
+        if sequence == 1 {
+            let snapshot = result.expect("authentic original manifests remain public progress");
+            assert_eq!(snapshot.next_sequence().get(), 2);
+            assert!(!snapshot.report().is_fully_verified());
+            assert!(
+                snapshot
+                    .report()
+                    .object_results()
+                    .all(|item| { item.object_hash() != fixture.stub_hash }),
+                "a public sequence does not authorize destruction completion"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "disconnected manifests supply no sequence authority"
+            );
+        }
+    }
 }
 
 #[test]

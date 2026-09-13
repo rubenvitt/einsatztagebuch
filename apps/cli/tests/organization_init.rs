@@ -418,3 +418,50 @@ fn the_json_form_is_refused_because_no_schema_carries_this_status() {
         "die Verweigerung faellt VOR der Zeremonie"
     );
 }
+
+/// Bootstrap and actual fresh-machine Recovery must compare the same native
+/// measurement, including on macOS where Linux machine-id files do not exist.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn initial_ceremony_persists_the_actual_platform_machine_identity_and_keeps_it_on_resume() {
+    use ea_admin::{BootstrapStore, FileBootstrapStore};
+    let measured = ea_key_provider::measure_native_machine_identity()
+        .expect("the supported test host must provide its public native machine measurement");
+    let directory = support::temp_dir("organization-native-machine");
+    let anchor = argument(&directory.path().join("anchor.etb"));
+    let state_path = directory.path().join("anchor.etb.bootstrap-state");
+    let args = ["--trust-anchor", &anchor, "organization", "init"];
+    assert_eq!(code(&run(&args)), 0);
+    let store = FileBootstrapStore::new(state_path);
+    let first = store.load().unwrap().unwrap();
+    assert!(
+        first.ceremony_machine() == Some(measured.fingerprint()),
+        "the persisted ceremony must use the same actual measurement as native Recovery"
+    );
+    let before = first.persisted_image();
+    assert_eq!(code(&run(&args)), 0);
+    let reopened = store.load().unwrap().unwrap();
+    assert_eq!(
+        reopened.persisted_image(),
+        before,
+        "resuming must not replace the original ceremony identity or any existing state"
+    );
+    assert!(!directory.path().join("anchor.etb").exists());
+}
+
+#[test]
+fn resuming_a_ceremony_without_a_machine_does_not_bind_it_to_the_current_host() {
+    use ea_admin::{BootstrapCoordinator, BootstrapStore, FileBootstrapStore, SystemRandomSource};
+    let directory = support::temp_dir("organization-legacy-no-machine");
+    let anchor = argument(&directory.path().join("anchor.etb"));
+    let mut store = FileBootstrapStore::new(directory.path().join("anchor.etb.bootstrap-state"));
+    BootstrapCoordinator::begin(&mut store, &mut SystemRandomSource, None).unwrap();
+    let before = store.load().unwrap().unwrap().persisted_image();
+    assert_eq!(
+        code(&run(&["--trust-anchor", &anchor, "organization", "init"])),
+        0
+    );
+    let resumed = store.load().unwrap().unwrap();
+    assert!(resumed.ceremony_machine().is_none());
+    assert_eq!(resumed.persisted_image(), before);
+}

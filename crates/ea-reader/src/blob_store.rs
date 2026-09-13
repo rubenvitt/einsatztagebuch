@@ -86,6 +86,12 @@ impl std::error::Error for ReaderBlobError {}
 /// Stelle, an der ueber Klartext entschieden wird — und `web-reader-design.md`
 /// §9 laesst Kryptographie ausschliesslich in geteiltem Rust zu.
 pub trait ReaderBlobStore {
+    /// True only while keys() enumerates the entire exclusively held managed
+    /// namespace. A preopened subset cannot attest complete cache removal.
+    fn inventory_is_complete(&self) -> bool {
+        false
+    }
+
     /// # Errors
     /// Jeder Fehlschlag des Wirtspeichers, ohne den Schluesselinhalt zu nennen.
     fn put(&mut self, key: &ReaderBlobKey, bytes: &[u8]) -> Result<(), ReaderBlobError>;
@@ -124,6 +130,9 @@ impl InMemoryReaderBlobStore {
 }
 
 impl ReaderBlobStore for InMemoryReaderBlobStore {
+    fn inventory_is_complete(&self) -> bool {
+        true
+    }
     fn put(&mut self, key: &ReaderBlobKey, bytes: &[u8]) -> Result<(), ReaderBlobError> {
         self.blobs.insert(key.clone(), bytes.to_vec());
         Ok(())

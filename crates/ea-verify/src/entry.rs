@@ -12,7 +12,7 @@ use ea_format::{
     DecodedEvidencePayloadV1, EntryPackageV1, EvidenceObjectV1, GrantKindV1, GrantPlanItemV1,
     GrantPlanV1, GrantV1, ManifestCoreFieldsV1, Parsed, ReceiptV1,
 };
-use ea_trust::{EffectiveWriterTransitionV1, SelectedRegistryHead};
+use ea_trust::{EffectiveWriterTransitionV1, HistoricalRegistryAuthority};
 use ea_types::{EntryHash, ObjectHash};
 
 /// Der eigene Code von Gate `grant-plan`.
@@ -60,7 +60,7 @@ pub(crate) fn entry_chain_node(entry: &Parsed<EntryPackageV1>) -> ChainNode {
 ///
 /// Bis Stufe 5 stand hier eine Pauschalabweisung: `ea-trust` gab den
 /// wirksamen Uebergang nicht heraus, und jedes gesetzte Feld wurde isoliert.
-/// Seit [`SelectedRegistryHead::effective_writer_transition`] existiert, tritt
+/// Seit [`HistoricalRegistryAuthority::effective_writer_transition`] existiert, tritt
 /// die Regel selbst an diese Stelle — siehe [`transition_claim_holds`].
 ///
 /// # Warum die Pruefung keinen Vorgaenger liest
@@ -82,7 +82,7 @@ pub(crate) fn entry_chain_node(entry: &Parsed<EntryPackageV1>) -> ChainNode {
 /// geht in den [`ChainNode`].
 pub(crate) fn writer_transition_claim_holds(
     entry: &Parsed<EntryPackageV1>,
-    selected: &SelectedRegistryHead,
+    selected: &HistoricalRegistryAuthority,
 ) -> bool {
     transition_claim_holds(
         entry.value().manifest().fields(),
@@ -110,7 +110,7 @@ pub(crate) fn writer_transition_claim_holds(
 /// ist nur der neue Writer aktiv. Sie steht trotzdem hier, weil die Regel
 /// ueber dem OBJEKT formuliert ist und ihre Aussage nicht an der Reihenfolge
 /// der Gates haengen soll.
-fn transition_claim_holds(
+pub(crate) fn transition_claim_holds(
     fields: &ManifestCoreFieldsV1,
     transition: Option<&EffectiveWriterTransitionV1>,
 ) -> bool {

@@ -7,8 +7,8 @@ use ea_writer::{FinalizationPhase, RecoveryOutcome};
 use serde::Serialize;
 
 use super::{
-    CommandError, NO_VERIFIED_SESSION, SESSION_STATE_UNREADABLE, STARTUP_RECOVERY_FAILED,
-    STARTUP_RECOVERY_UNAVAILABLE, run_blocking,
+    CommandError, NO_VERIFIED_SESSION, STARTUP_RECOVERY_FAILED, STARTUP_RECOVERY_UNAVAILABLE,
+    run_blocking,
 };
 use crate::state::DesktopState;
 
@@ -132,12 +132,23 @@ fn session_dto(role: OperatorRoleV1) -> SessionDto {
 
 pub(crate) fn verified_session_core(state: &DesktopState) -> Result<SessionDto, CommandError> {
     let role = state
-        .session()
-        .lock()
-        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
-        .role()
+        .verified_role()?
         .ok_or_else(|| CommandError::new(NO_VERIFIED_SESSION))?;
     Ok(session_dto(role))
+}
+
+/// Starts a fresh native presence ceremony for the verified configured role.
+/// No role, key, account identity or proof is accepted from the webview.
+#[tauri::command]
+pub async fn session_login(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<SessionDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || {
+        state.login()?;
+        verified_session_core(&state)
+    })
+    .await
 }
 
 pub(crate) fn startup_recovery_core(state: &DesktopState) -> Result<ResumeDto, CommandError> {

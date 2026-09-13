@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { expect, it } from 'vitest'
 
 import { AppShell, EaDesktopApp } from './AppShell'
@@ -64,6 +64,31 @@ function bridgeDouble(overrides: Partial<EaDesktopBridge> = {}): EaDesktopBridge
     ...overrides,
   }
 }
+
+it('requires an explicit native login and rejects a login completed after a lock event', async () => {
+  let handlers: SessionLockHandlers | undefined
+  let finish: ((session: VerifiedSession) => void) | undefined
+  render(<EaDesktopApp bridge={bridgeDouble({
+    loadSession: () => Promise.reject(new Error('no current proof')),
+    login: () => new Promise((resolve) => { finish = resolve }),
+    watchLock: (value) => { handlers = value; return Promise.resolve(() => undefined) },
+  })} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Mit Betriebssystem anmelden' }))
+  await act(async () => {
+    handlers?.onLocked()
+    finish?.(writerSession)
+  })
+  expect(screen.queryByRole('link', { name: /einsatz erfassen/i })).not.toBeInTheDocument()
+})
+
+it('opens a verified native login only while the subscribed lock generation is unchanged', async () => {
+  render(<EaDesktopApp bridge={bridgeDouble({
+    loadSession: () => Promise.reject(new Error('no current proof')),
+    login: () => Promise.resolve(writerSession),
+  })} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Mit Betriebssystem anmelden' }))
+  expect(await screen.findByRole('link', { name: /einsatz erfassen/i })).toBeVisible()
+})
 
 it('enables the Writer link only from the verified session, never from local configuration', async () => {
   const { rerender } = render(<AppShell session={{ role: 'reader', capabilities: [] }} />)
@@ -143,29 +168,45 @@ it('renders its navigation from the route table and from nowhere else', () => {
   expect([...seen].sort()).toEqual(routeTable().map((route) => route.path).sort())
 })
 
-it('opens the administration surface only behind the startup recovery', async () => {
-  let release: ((view: PendingFinalizationResumeView) => void) | undefined
-  const pending = new Promise<PendingFinalizationResumeView>((resolve) => {
-    release = resolve
-  })
+it('opens Administration without a Writer recovery port and keeps all three unavailable host services closed', async () => {
+  let recoveryCalls = 0
   render(
     <AppShell
       session={{ role: 'organizationadmin', capabilities: ['administration'] }}
-      recover={() => pending}
+      recover={() => {
+        recoveryCalls += 1
+        return Promise.reject(new Error('EA-DESKTOP-STARTUP-RECOVERY-UNAVAILABLE'))
+      }}
       initialPath="/verwaltung"
     />,
   )
   expect(screen.getByRole('link', { name: 'Verwaltung' })).toBeVisible()
+  expect(await screen.findByRole('region', { name: 'Verwaltung' })).toBeVisible()
+  expect(recoveryCalls).toBe(0)
+  expect(screen.queryByText(/wiederaufnahme läuft|wiederaufnahme nicht abgeschlossen/i)).not.toBeInTheDocument()
+  // Real independent surfaces still contact their own host services. No
+  // NothingPending or empty successful Admin/Recovery/Destruction view is supplied.
+  await waitFor(() => {
+    expect(screen.getAllByRole('alert')).toHaveLength(3)
+  })
+  expect(screen.getByText('Die allgemeine Verwaltung ist nicht geöffnet')).toBeVisible()
+  expect(screen.getByText('Recovery-Test nicht geöffnet')).toBeVisible()
+  expect(screen.getByText('Vernichtungsverwaltung nicht geöffnet')).toBeVisible()
+  expect(screen.queryByRole('region', { name: 'Geräteanfragen' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: 'Kontrollierte Vernichtung' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: 'Recovery-Test' })).not.toBeInTheDocument()
+})
+
+it('does not open a direct Administration route without its capability', () => {
+  render(
+    <AppShell
+      session={{ role: 'organizationadmin', capabilities: [] }}
+      recover={() => Promise.reject(new Error('Writer recovery is unavailable'))}
+      initialPath="/verwaltung"
+    />,
+  )
+  expect(screen.queryByRole('link', { name: 'Verwaltung' })).not.toBeInTheDocument()
   expect(screen.queryByRole('region', { name: 'Verwaltung' })).not.toBeInTheDocument()
-  release?.(resumed)
-  await waitFor(() => {
-    expect(screen.getByRole('region', { name: 'Verwaltung' })).toBeVisible()
-  })
-  // Die Schale nennt die Bruecke des Wirts; ohne Wirt bleibt die Verwaltung
-  // mit ihrem Code geschlossen und zeigt keinen Unterbereich.
-  await waitFor(() => {
-    expect(screen.getByRole('alert')).toBeVisible()
-  })
   expect(screen.queryByRole('region', { name: 'Geräteanfragen' })).not.toBeInTheDocument()
 })
 

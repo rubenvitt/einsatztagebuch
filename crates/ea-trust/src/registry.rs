@@ -31,6 +31,7 @@ pub struct PreexistingRegistryAuthority {
 
 pub struct PreexistingEffectiveNow {
     pub(crate) value: UnixMillis,
+    pub(crate) persisted_floor: UnixMillis,
     pub(crate) wall_clock_ceiling: Option<UnixMillis>,
     pub(crate) successor_ready_at: Option<UnixMillis>,
 }
@@ -39,6 +40,23 @@ impl PreexistingEffectiveNow {
     #[must_use]
     pub const fn value(&self) -> UnixMillis {
         self.value
+    }
+
+    /// Exact durable floor captured by successful selection, for transactional
+    /// native store fences. This getter cannot create or advance time authority.
+    #[must_use]
+    pub const fn persisted_floor(&self) -> UnixMillis {
+        self.persisted_floor
+    }
+
+    /// Compare the durable time authority captured by successful selection.
+    /// Ordinary wall-clock passage does not change these bounds. A new signed
+    /// time input or known successor does, even when Head and sequence stay put.
+    #[must_use]
+    pub fn has_same_persisted_bounds(&self, other: &Self) -> bool {
+        self.persisted_floor == other.persisted_floor
+            && self.wall_clock_ceiling == other.wall_clock_ceiling
+            && self.successor_ready_at == other.successor_ready_at
     }
 
     /// Inclusive ceiling derived from the verified independent reference and
@@ -189,6 +207,20 @@ impl SelectedRegistryHead {
             .candidate_state
             .active_certificates(self.inner.proposed_sequence)
             .map(|(hash, certificate)| (hash, &certificate.fields))
+    }
+
+    /// Historically admitted component identities, including revoked ones.
+    /// This is custody inventory data only: presence here is never current
+    /// signing, delivery, recipient or operator authority. Use the active
+    /// lookup for those decisions. Revocation cannot erase a known holder.
+    pub fn known_certificate_fields(
+        &self,
+    ) -> impl Iterator<Item = (CertificateHash, &DeviceCertificateFieldsV1)> {
+        self.inner
+            .candidate_state
+            .certificates
+            .iter()
+            .map(|(hash, certificate)| (*hash, &certificate.fields))
     }
 
     #[must_use]
@@ -513,7 +545,7 @@ impl FallbackSuccessorBarrier {
 
 pub struct RegistryCandidate {
     /// Die Kettenkennung des Ankers, gegen den dieser Kandidat geprueft wurde.
-    chain_id: ChainId,
+    pub(crate) chain_id: ChainId,
     registry_version: RegistryVersion,
     registry_head_hash: ObjectHash,
     preexisting_authority: Option<PreexistingRegistryAuthority>,
@@ -890,6 +922,7 @@ pub fn select_registry_head(
             warnings,
             committed_revision,
             wall_clock_ceiling,
+            commit.next_trusted_time().floor(),
         )));
     }
 
@@ -917,7 +950,82 @@ pub fn select_registry_head(
         warnings,
         committed_revision,
         wall_clock_ceiling,
+        commit.next_trusted_time().floor(),
     )))
+}
+
+/// Resolve only the Standard/warn Writer exception at real expired time.
+/// General current-head selection remains fail-closed on the same inputs.
+pub fn select_stale_writer_registry_head(
+    candidate: RegistryCandidate,
+    mut local_time: LocalTimeBlock<'_>,
+) -> Result<crate::StaleWriterRegistryHead, RegistryError> {
+    require_candidate_local_time(&candidate, &local_time)?;
+    require_release_pairing(&candidate, &local_time, None)?;
+    let raw_now = local_time.evaluation.raw_now();
+    let policy = &candidate.target_policy.fields;
+    if !candidate_is_current(&candidate)
+        || raw_now <= candidate.head_event.not_after
+        || policy.operating_profile != 0
+        || policy.registry_expiry_behavior != 0
+    {
+        return Err(RegistryError::Stale);
+    }
+    if candidate.proposed_sequence < candidate.head_event.effective_from_sequence
+        || candidate.proposed_sequence > candidate.head_event.valid_through_sequence
+    {
+        return Err(RegistryError::SequenceLease);
+    }
+    if let Some(barrier) = &candidate.fallback_barrier {
+        barrier.require_pending(
+            candidate.registry_version,
+            candidate.registry_head_hash,
+            raw_now,
+        )?;
+    }
+    let writer = candidate
+        .candidate_state
+        .current_writer_certificate_hash
+        .ok_or(RegistryError::Stale)?;
+    if candidate
+        .candidate_state
+        .active_certificate(writer, candidate.proposed_sequence)
+        .is_none()
+    {
+        return Err(RegistryError::Stale);
+    }
+    let current = candidate.original_pin.ok_or(TrustError::StateConflict)?;
+    let commit =
+        RegistrySelectionCommit::compare_and_affirm(local_time.trusted_time.clone(), current, None);
+    let revision = commit_selection(&mut local_time, &commit)?;
+    let ceiling = local_time
+        .trusted_time
+        .independent_reference()
+        .map(|reference| {
+            UnixMillis::new(
+                i64::try_from(
+                    i128::from(reference.verified_time().get())
+                        + i128::from(
+                            candidate
+                                .guard_policy
+                                .fields
+                                .max_future_clock_skew_ms
+                                .min(policy.max_future_clock_skew_ms),
+                        ),
+                )
+                .unwrap_or(i64::MAX),
+            )
+        });
+    Ok(crate::StaleWriterRegistryHead {
+        snapshot: selected_head(
+            candidate,
+            raw_now,
+            *local_time.evaluation.warnings(),
+            revision,
+            ceiling,
+            commit.next_trusted_time().floor(),
+        ),
+    })
 }
 
 pub fn verify_current_head_fallback(
@@ -1052,6 +1160,7 @@ fn selected_head(
     warnings: TimeWarnings,
     committed_revision: u64,
     wall_clock_ceiling: Option<UnixMillis>,
+    persisted_floor: UnixMillis,
 ) -> SelectedRegistryHead {
     SelectedRegistryHead {
         inner: Arc::new(SelectedHeadInner {
@@ -1067,6 +1176,7 @@ fn selected_head(
             head_event_issued_at: candidate.head_event.issued_at,
             preexisting_effective_now: PreexistingEffectiveNow {
                 value: raw_now,
+                persisted_floor,
                 wall_clock_ceiling,
                 successor_ready_at: candidate
                     .fallback_barrier
@@ -1077,6 +1187,97 @@ fn selected_head(
             committed_revision,
         }),
     }
+}
+
+/// Replay an exact archival signature context without selecting current action
+/// authority, observing caller time, or mutating persistent state.
+pub fn verify_historical_registry_authority(
+    trust: &VerifiedTrust,
+    version: RegistryVersion,
+    hash: ObjectHash,
+    sequence: ChainSequence,
+) -> Result<crate::HistoricalRegistryAuthority, RegistryError> {
+    let topology = RegistryTopology::build(trust)?;
+    let mut state = trust.previous_head().clone();
+    let mut replay = AdminAuthorizationReplay::default();
+    replay_to_pin(
+        trust,
+        &topology,
+        &mut state,
+        &mut replay,
+        RegistryHeadPin::new(version, hash),
+    )?;
+    if sequence < state.effective_from_sequence || sequence > state.valid_through_sequence {
+        return Err(RegistryError::SequenceLease);
+    }
+    // The signed lease is also bounded by the next VALID known successor.
+    // Exact old bytes preserve authority before that boundary, never at/after
+    // a successor's effective sequence (including same-sequence publication).
+    if let Some(next) = version.get().checked_add(1)
+        && let Some(successor) =
+            topology.exact(RegistryVersion::new(next), Some(state.registry_head_hash))?
+    {
+        let event = load_registry_event(&trust.inner.catalog, successor.object_hash)?;
+        let mut successor_state = state.clone();
+        if verify_and_apply_registry_event(trust, &mut successor_state, &event, &mut replay).is_ok()
+            && sequence >= successor_state.effective_from_sequence
+        {
+            return Err(RegistryError::SequenceLease);
+        }
+    }
+    Ok(crate::HistoricalRegistryAuthority {
+        state: Arc::new(state),
+        chain: trust.chain_id(),
+        sequence,
+    })
+}
+
+/// This private pre-transition state is used only by the exact publication
+/// audit verifier; it is never exported as a historical signer resolver.
+pub(crate) fn registry_publication_predecessor(
+    trust: &VerifiedTrust,
+    target: ObjectHash,
+) -> Result<(PreviousHeadState, ChainSequence, RegistryEventFieldsV1, ObjectHash), RegistryError> {
+    let topology = RegistryTopology::build(trust)?;
+    let event = load_registry_event(&trust.inner.catalog, target)?;
+    let previous_version = event.fields.registry_version.get().checked_sub(1)
+        .filter(|version| *version > 0).ok_or(RegistryError::Rollback)?;
+    let previous_hash = event.fields.previous_registry_hash.ok_or(RegistryError::Previous)?;
+    let mut state = trust.previous_head().clone();
+    let mut replay = AdminAuthorizationReplay::default();
+    replay_to_pin(trust, &topology, &mut state, &mut replay,
+        RegistryHeadPin::new(RegistryVersion::new(previous_version), ObjectHash::from(previous_hash)))?;
+    let found = topology.exact(event.fields.registry_version, Some(previous_hash))?
+        .ok_or(RegistryError::Gap)?;
+    if found.object_hash != target { return Err(RegistryError::Fork); }
+    let mut applied = state.clone();
+    let sequence = verify_and_apply_registry_event(trust, &mut applied, &event, &mut replay)?;
+    Ok((state, sequence, event.fields, event.authorization_object_hash))
+}
+
+/// Private original context only for the exact direct-publication audit.
+/// Sequence comes from the signed target, never unsigned journal metadata.
+pub(crate) fn direct_publication_authority(
+    trust: &VerifiedTrust,
+    target_hash: ObjectHash,
+) -> Result<(PreviousHeadState, ChainSequence, ObjectHash), RegistryError> {
+    let target=trust.inner.catalog.get(&target_hash).ok_or(TrustError::Source)?;
+    let (sequence,authorization_hash)=match target.value().decoded_payload().map_err(|_|TrustError::Source)? {
+        DecodedTrustPayloadV1::AuthorizedDevice(core)
+            if core.fields().certificate_kind!=CertificateKindV1::OrganizationAdmin=>
+            (core.fields().effective_from_sequence,core.authorization_object_hash()),
+        DecodedTrustPayloadV1::Policy(core)=>(core.fields().effective_from_sequence,core.authorization_object_hash()),
+        DecodedTrustPayloadV1::WriterTransition(core)=>(core.fields().effective_from_sequence,core.authorization_object_hash()),
+        _=>return Err(TrustError::ActionMismatch.into()),
+    };
+    let authorization=trust.inner.catalog.get(&authorization_hash).ok_or(TrustError::Source)?;
+    let DecodedTrustPayloadV1::OrganizationAdminAuthorization(fields)=authorization.value().decoded_payload().map_err(|_|TrustError::Source)? else {return Err(TrustError::ActionMismatch.into())};
+    let topology=RegistryTopology::build(trust)?;
+    let mut state=trust.previous_head().clone();
+    let mut replay=AdminAuthorizationReplay::default();
+    replay_to_pin(trust,&topology,&mut state,&mut replay,RegistryHeadPin::new(fields.registry_version,ObjectHash::from(fields.registry_head_hash)))?;
+    if sequence<state.effective_from_sequence || sequence>state.valid_through_sequence {return Err(RegistryError::SequenceLease)}
+    Ok((state,sequence,authorization_hash))
 }
 
 fn replay_to_pin(

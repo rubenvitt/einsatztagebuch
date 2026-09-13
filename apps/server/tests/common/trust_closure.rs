@@ -120,6 +120,7 @@ pub const HISTORICAL_GRANT_AUTHORITY_SEED: [u8; 32] = [0xd7; 32];
 pub const APPROVER_A_SEED: [u8; 32] = [0xd8; 32];
 /// Der ZWEITE Key Approver.
 pub const APPROVER_B_SEED: [u8; 32] = [0xd9; 32];
+pub const DELETION_COMPONENT_SEED: [u8; 32] = [0xda; 32];
 
 const WRITER_DEVICE_ID: [u8; 16] = [0xe1; 16];
 const READER_DEVICE_ID: [u8; 16] = [0xe2; 16];
@@ -176,6 +177,7 @@ pub struct ExtendedClosure {
     /// traegt: Historical Grant Authority und zwei Key Approver.
     pub historical_grant_authority_certificate_hash: Option<CertificateHash>,
     pub approver_certificate_hashes: Option<[CertificateHash; 2]>,
+    pub deletion_certificate_hash: Option<CertificateHash>,
     /// Der Kopf, den ein Commit binden muss.
     pub registry_version: RegistryVersion,
     pub registry_head_hash: ObjectHash,
@@ -635,10 +637,23 @@ pub fn server_receipt_certificate_hash() -> CertificateHash {
 /// Wie [`build`].
 #[must_use]
 pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> ExtendedClosure {
+    build_components(with_second_reader, with_grant_authorities, false)
+}
+pub fn build_for_destruction() -> ExtendedClosure {
+    build_components(false, true, true)
+}
+fn build_components(
+    with_second_reader: bool,
+    with_grant_authorities: bool,
+    with_deletion: bool,
+) -> ExtendedClosure {
     let context = frozen_context();
 
     // Jeder Zwischenkopf deckt genau EINE Sequenz; der letzte deckt den Rest.
-    let count = 4 + usize::from(with_second_reader) + if with_grant_authorities { 3 } else { 0 };
+    let count = 4
+        + usize::from(with_second_reader)
+        + usize::from(with_deletion)
+        + if with_grant_authorities { 3 } else { 0 };
     let lease_of = |index: usize| {
         let from = LEASE_FROM_SEQUENCE + index as u64;
         let through = if index + 1 == count {
@@ -885,6 +900,39 @@ pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> Ext
         approvers = Some([approver_hashes[0], approver_hashes[1]]);
     }
 
+    let deletion_certificate_hash = if with_deletion {
+        let index = count - 1;
+        let component = certificate_transition(
+            &context,
+            device_fields(
+                &context,
+                SERVER_DEVICE_ID,
+                CertificateKindV1::DeletionAttest,
+                Some(DELETION_COMPONENT_SEED),
+                None,
+                vec![CertificateCapability::DeletionAttest],
+                lease_of(index).0,
+                None,
+            ),
+            registry_version,
+            registry_head_hash,
+            lease_of(index),
+            0x50,
+            [
+                "deletion-certificate-authorization",
+                "deletion-certificate",
+                "deletion-head-authorization",
+                "deletion-head-event",
+            ],
+        );
+        registry_version += 1;
+        registry_head_hash = component.head_hash;
+        objects.extend(component.objects);
+        Some(component.certificate_hash)
+    } else {
+        None
+    };
+
     ExtendedClosure {
         organization_id: context.organization_id,
         chain_id: context.chain_id,
@@ -895,6 +943,7 @@ pub fn build_with(with_second_reader: bool, with_grant_authorities: bool) -> Ext
         second_reader_certificate_hash: second_reader,
         historical_grant_authority_certificate_hash: historical_grant_authority,
         approver_certificate_hashes: approvers,
+        deletion_certificate_hash,
         registry_version: RegistryVersion::new(registry_version),
         registry_head_hash,
         objects,

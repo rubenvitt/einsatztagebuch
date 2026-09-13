@@ -3,29 +3,12 @@
 //!
 //! # Warum diese Familie existiert
 //!
-//! Die geerbten Bestaende aus [`super::verify_support`] tragen samtlich Koepfe
-//! aus `trust_support::HeadOptions::default()` (`issued_at = 100`,
-//! `not_after = 10_000`). Unter der echten Uhr — gemessen 1_786_938_024_364 —
-//! sind die laengst veraltet, Gate `trust` traegt nicht mehr, und der Bericht
-//! sagt ueber KEIN Objekt etwas aus, obwohl `is_fully_verified()` wahr bleibt.
-//! Die Fixture-Uhr `FIXTURE_OS_WALL_CLOCK_V1 = 800` rettet sie dort, wo die Uhr
-//! ein Parameter ist; im Wiederherstellungspfad ist sie es nicht.
-//!
-//! # Die drei Werte, an denen alles haengt
-//!
-//! GEMESSEN und nicht hergeleitet:
-//!
-//! - Der Policy-Kopf bleibt zur echten Uhr VERALTET
-//!   ([`LIVE_POLICY_NOT_AFTER_V1`] liegt vor `now`). Genau deshalb wird er
-//!   nachgezogen statt gewaehlt, und der Schreiberkopf deckt die Sequenz null
-//!   selbst. Diese Asymmetrie ist der ganze Mechanismus — sie zu
-//!   "appreparieren" macht den Genesis-Eintrag `unattributable`. Die Tabelle
-//!   an `verify_support::GENESIS_GAP_SEQUENCE_V1` misst alle fuenf Varianten
-//!   durch.
-//! - [`LIVE_POLICY_MAX_REGISTRY_AGE_MS_V1`] hebt allein die Altersschranke auf,
-//!   die den ganzen Linienstand sonst verwerfen wuerde.
-//! - Der Schreiberkopf ist bis [`LIVE_WRITER_NOT_AFTER_V1`] gueltig und deshalb
-//!   waehlbar.
+//! Diese Familie bietet neben historischer Lesbarkeit auch einen zur
+//! Betriebssystemuhr frisch waehlbaren Schreiberkopf. Ihre festen weiten
+//! Leases vermeiden zeitabhaengige Fixture-Bytes. Geerbte kurze Leases bleiben
+//! seit Task 8 fuer historische Verifikation ebenfalls geeignet.
+//! Der vergangene Policy-Head, die explizite Altersgrenze und der weite
+//! Schreiber-Head bleiben unveraendert fuer aktuelle Auswahlproben erhalten.
 //!
 //! # Determinismus
 //!
@@ -67,11 +50,9 @@ use super::verify_support::{
 
 /// Ende der Gueltigkeit des Policy-Kopfes: 2001-09-09.
 ///
-/// LIEGT BEWUSST IN DER VERGANGENHEIT. Ein Registrierungskopf, der zur Uhr des
-/// Laufs veraltet ist, wird nicht gewaehlt, sondern nachgezogen
-/// (`crates/ea-trust/src/registry.rs:594` und `:640-647`). Genau dadurch wird
-/// der Schreiberkopf die Autoritaet ueber die Sequenz null, und erst dadurch
-/// ist der Genesis-Eintrag zuordenbar.
+/// Liegt bewusst in der Vergangenheit. Aktuelle Auswahl zieht bis zum
+/// Schreiberkopf nach; historische Verifikation bindet den genauen im
+/// Manifest genannten Head unabhaengig von dessen Wandzeit-Lease.
 pub const LIVE_POLICY_NOT_AFTER_V1: i64 = 1_000_000_000_000;
 
 /// Die Altersschranke, die die Policy dieses Bestands setzt.

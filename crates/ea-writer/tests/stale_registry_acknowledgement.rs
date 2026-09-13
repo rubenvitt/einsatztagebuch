@@ -764,3 +764,41 @@ fn known_successor_stops_receipt_issuance_and_consumption_at_readiness() {
         Err(ea_trust::RegistryError::SuccessorReady)
     ));
 }
+
+#[test]
+fn an_already_expired_writer_context_requires_and_consumes_the_exact_signed_ack() {
+    let harness = WriterHarness::with_incident();
+    let now = harness.observed_now_after_expiry();
+    let head = harness.stale_writer_head(now);
+    let source = harness.source();
+    let service = harness
+        .service_for_writer(&source, head.as_writer())
+        .with_stale_registry_store(StaleRegistryStore::new(harness.database()).unwrap());
+    let initial = harness.writer_context_proof(head.as_writer(), ReauthPurpose::Finalize, None);
+    let preview = service.preview(&initial, valid_incident(), now).unwrap();
+    assert!(
+        service
+            .finalize(&initial, valid_incident(), &preview, now)
+            .is_err()
+    );
+    let accept = harness.writer_context_proof(
+        head.as_writer(),
+        ReauthPurpose::RegistryStaleFinalize,
+        Some(&preview),
+    );
+    let receipt = service
+        .acknowledge_stale_registry(accept, valid_incident(), &preview, true, now)
+        .unwrap();
+    let finalize =
+        harness.writer_context_proof(head.as_writer(), ReauthPurpose::Finalize, Some(&preview));
+    let outcome = service
+        .finalize_with_stale_registry(&finalize, valid_incident(), &preview, &receipt, now)
+        .unwrap();
+    assert_eq!(outcome.sequence.get(), 0);
+    assert_eq!(
+        service
+            .finalize_with_stale_registry(&finalize, valid_incident(), &preview, &receipt, now)
+            .unwrap_err(),
+        WriterError::StaleAckReplay
+    );
+}

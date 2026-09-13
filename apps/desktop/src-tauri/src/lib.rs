@@ -14,6 +14,7 @@
 //! `apps/desktop/src/app/role-gate.ts` traegt fuer ihn keine Route.
 
 pub mod commands;
+pub mod runtime;
 pub mod state;
 
 pub use commands::COMMAND_NAMES;
@@ -43,8 +44,8 @@ pub fn registered_command_names() -> &'static [&'static str] {
 ///
 /// Wer das Sperrsignal der Plattform beobachtet — Windows-Sitzungswechsel,
 /// macOS-Screen-Lock-Notification, Ubuntu-Sitzungsmanager —, ruft genau diese
-/// Funktion und nicht `emit` allein. Der Beobachter selbst fehlt noch: er
-/// braucht plattformnahe Abhaengigkeiten, die dieser Task nicht ziehen darf.
+/// Funktion und nicht `emit` allein. Der konfigurierte native Host beobachtet
+/// die bereits installierte plattformgebundene Subscription kontinuierlich.
 pub fn honor_session_lock(state: &state::DesktopState, announce: impl FnOnce()) {
     state.invalidate_session_on_lock();
     announce();
@@ -65,11 +66,8 @@ pub fn announce_session_lock<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
 /// Startet die Anwendung.
 ///
-/// Der Zustand geht OHNE Rolle, ohne Nachweis, ohne Startpfad und ohne
-/// geoeffnete Datenbank hinein: die Aufloesung der Root-signierten
-/// Bedienerbindung, der Schreibdienst und die entschluesselte Datenbank gehoeren
-/// Task 16. Bis dahin antwortet jedes Kommando mit einer BENANNTEN Abwesenheit,
-/// und die Schale zeigt ihre Flaeche ohne Sitzung.
+/// An explicit public operator configuration and independent anchor compose the
+/// native session. The first proof still requires the user's login action.
 ///
 /// # Panics
 ///
@@ -77,16 +75,44 @@ pub fn announce_session_lock<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// kein Zustand, in dem weitergearbeitet werden darf.
 pub fn run() {
     tauri::Builder::default()
-        .manage(state::DesktopState::new(
-            state::SessionState::new(None, None),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ))
+        .setup(|app| {
+            let config = runtime::DesktopLaunchConfig::parse(std::env::args_os().skip(1))
+                .map_err(|error| std::io::Error::other(error.code))?;
+            let state = if let Some(config) = config {
+                let native = runtime::NativeDesktopRuntime::open(config)
+                    .map_err(|error| std::io::Error::other(error.code))?;
+                let state = native.desktop_state();
+                let handle = tauri::Manager::app_handle(app).clone();
+                let monitor =
+                    runtime::NativeSessionMonitor::start(native, state.clone(), move || {
+                        let _ = tauri::Emitter::emit(&handle, SESSION_LOCK_EVENT, ());
+                    });
+                tauri::Manager::manage(app, monitor);
+                state
+            } else {
+                state::DesktopState::new(
+                    state::SessionState::new(None, None),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+            tauri::Manager::manage(app, state);
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && let Some(monitor) =
+                    tauri::Manager::try_state::<runtime::NativeSessionMonitor>(window)
+            {
+                monitor.stop();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::session::verified_session,
+            commands::session::session_login,
             commands::session::invalidate_session_on_lock,
             commands::session::startup_recovery,
             commands::master_data::master_data_counts,
@@ -97,15 +123,38 @@ pub fn run() {
             commands::writer::draft_discard_begin,
             commands::writer::draft_discard_resume,
             commands::writer::writer_recover_pending,
+            commands::writer::writer_amendment_import,
+            commands::writer::draft_save_amendment,
+            commands::writer::writer_preview_amendment,
+            commands::writer::writer_finalize_amendment,
+            commands::writer::writer_acknowledge_stale_amendment,
             commands::writer::writer_preview,
             commands::writer::writer_acknowledge_stale_registry,
             commands::writer::writer_finalize,
             commands::writer::archive_health_report,
             commands::writer::device_posture_report,
             commands::writer::archive_export_bundle_file,
+            commands::destruction::destruction_read,
+            commands::destruction::destruction_prepare,
+            commands::destruction::destruction_start,
+            commands::destruction::destruction_resume,
+            commands::destruction::destruction_import_progress,
+            commands::destruction::destruction_export_reader_delivery,
+            commands::destruction::destruction_synchronize,
+            commands::destruction::destruction_authenticate_custodian,
+            commands::destruction_evidence::destruction_evidence_preview,
+            commands::destruction_evidence::destruction_evidence_finalize,
+            commands::destruction_evidence::destruction_evidence_recover,
+            commands::destruction_evidence::destruction_evidence_discard,
+            commands::recovery::recovery_read,
+            commands::recovery::recovery_start,
+            commands::recovery::recovery_submit,
+            commands::recovery::recovery_cancel,
             commands::sync::sync_state,
             commands::admin::admin_pending_device_requests,
+            commands::admin::admin_open_ceremonies,
             commands::admin::admin_ceremony_begin,
+            commands::admin::admin_ceremony_read,
             commands::admin::admin_ceremony_confirm_fingerprint,
             commands::admin::admin_ceremony_authorize,
             commands::admin::admin_ceremony_export_request,
@@ -113,6 +162,7 @@ pub fn run() {
             commands::admin::admin_ceremony_publish,
             commands::admin::admin_policy_profile,
             commands::admin::admin_registry_health,
+            commands::admin::admin_writer_lock_diagnosis,
             commands::admin::admin_go_live_checklist,
             commands::admin::admin_go_live_export_unresolved,
             commands::admin::admin_clock_release_offer,
@@ -131,7 +181,7 @@ mod tests {
     use super::{COMMAND_NAMES, registered_command_names};
 
     /// Die Quellen der Kommandomodule, wie sie uebersetzt wurden.
-    const COMMAND_SOURCES: [(&str, &str); 5] = [
+    const COMMAND_SOURCES: [(&str, &str); 8] = [
         ("commands/session.rs", include_str!("commands/session.rs")),
         (
             "commands/master_data.rs",
@@ -140,6 +190,15 @@ mod tests {
         ("commands/sync.rs", include_str!("commands/sync.rs")),
         ("commands/writer.rs", include_str!("commands/writer.rs")),
         ("commands/admin.rs", include_str!("commands/admin.rs")),
+        ("commands/recovery.rs", include_str!("commands/recovery.rs")),
+        (
+            "commands/destruction.rs",
+            include_str!("commands/destruction.rs"),
+        ),
+        (
+            "commands/destruction_evidence.rs",
+            include_str!("commands/destruction_evidence.rs"),
+        ),
     ];
 
     /// Diese Datei selbst — die Quelle der Registrierung.
@@ -390,9 +449,11 @@ mod tests {
     /// nicht gegen die Quelle, die er bewacht.
     #[test]
     fn every_administration_command_is_named_exactly_once_and_matches_the_contract() {
-        const CONTRACT: [&str; 17] = [
+        const CONTRACT: [&str; 20] = [
             "admin_pending_device_requests",
+            "admin_open_ceremonies",
             "admin_ceremony_begin",
+            "admin_ceremony_read",
             "admin_ceremony_confirm_fingerprint",
             "admin_ceremony_authorize",
             "admin_ceremony_export_request",
@@ -400,6 +461,7 @@ mod tests {
             "admin_ceremony_publish",
             "admin_policy_profile",
             "admin_registry_health",
+            "admin_writer_lock_diagnosis",
             "admin_go_live_checklist",
             "admin_go_live_export_unresolved",
             "admin_clock_release_offer",

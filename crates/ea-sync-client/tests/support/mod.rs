@@ -519,6 +519,9 @@ impl SyncHarness {
     /// allein der Wiederaufnahmezustand in der lokalen Ablage. Genau diese
     /// Zusage misst `resume.rs`.
     fn client(&self) -> SyncClient {
+        self.client_with_transport(Arc::clone(&self.server) as Arc<dyn SyncTransportV1>)
+    }
+    pub fn client_with_transport(&self, transport: Arc<dyn SyncTransportV1>) -> SyncClient {
         let ArchiveBackendProfileV1::ControlledNetworkPath(profile) = controlled_network_profile()
         else {
             unreachable!("die Fixture baut ein kontrolliertes Netzprofil");
@@ -527,7 +530,7 @@ impl SyncHarness {
             backend: self.writer.backend_handle(),
             anchor_bytes: self.writer.anchor_bytes(),
             network: self.queue.clone(),
-            transport: Arc::clone(&self.server) as Arc<dyn SyncTransportV1>,
+            transport,
             signer: Arc::new(ea_sync_protocol::RequestSigner::from_secret(
                 ea_crypto::SecretBytes::new([0x77; 32]),
             )),

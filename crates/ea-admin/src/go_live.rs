@@ -1,5 +1,5 @@
 //! Das Go-live-Aggregat: fuenfzehn Anforderungen, drei Zustaende, und
-//! `Unknown` ist nie gruen.
+//! Rohe Messungen und signiert dokumentierte Voraussetzungen bleiben getrennt.
 //!
 //! # Was hier zusammenkommt
 //!
@@ -20,8 +20,10 @@
 //! ist `true` NUR, wenn jede `Confirmed` ist. `NotAutomaticallyVerifiable` ist
 //! kein Ja und kein „wahrscheinlich": es ist die Aussage, dass diese Maschine
 //! den Beleg nicht hat. Eine Oberflaeche, die daraus ein Gruen machte, wuerde
-//! den Bericht nach §17.3 („nicht automatisch pruefbare Voraussetzungen
-//! dokumentieren") in sein Gegenteil verkehren. Deshalb wird
+//! den Bericht nach §17.3 in sein Gegenteil verkehren. Eine dokumentierte
+//! Voraussetzung wird deshalb nur mit der separat verifizierten, bei der
+//! Auswertung erneut geprueften Runtime-Admission bestaetigt. Die zugrunde
+//! liegende native Messung bleibt Unknown. Deshalb wird
 //! `production_ready` HIER gerechnet und nicht in TypeScript.
 //!
 //! # Was dieses Modul NICHT tut
@@ -44,10 +46,11 @@
 use ea_key_provider::{DevicePostureReport, PostureRequirement};
 use ea_types::{ChainSequence, UnixMillis};
 use serde::Serialize;
+#[cfg(feature = "test-support")]
+use crate::production_state::ProductionState;
 
 use crate::{
     bootstrap::{BackedUpKeyClass, KeyBackupRecordV1},
-    production_state::ProductionState,
     writer_transition::WriterTransitionPhase,
 };
 
@@ -253,38 +256,47 @@ impl RegistryFreshness {
 /// einen bestandenen Test. Dazu der Zeitpunkt des Abschlusses und das
 /// Intervall der Policy (`restoreTestIntervalMs`): ein bestandener Test, der
 /// laenger zurueckliegt, belegt nichts mehr.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A production caller cannot manufacture a fresh recovery result from flags.
+///
+/// ```compile_fail
+/// let state = ea_admin::ProductionState::Ready;
+/// let _ = ea_admin::RecoveryTestFreshness {
+///     production_state: &state,
+///     completed_at: ea_types::UnixMillis::new(1),
+///     interval_ms: 100,
+///     now: ea_types::UnixMillis::new(2),
+/// };
+/// ```
+#[derive(Clone, Copy)]
 pub struct RecoveryTestFreshness<'a> {
-    /// Der Freigabezustand der Organisation.
-    pub production_state: &'a ProductionState,
-    /// Abschluss des letzten bestandenen Tests.
-    pub completed_at: UnixMillis,
-    /// Das Intervall, innerhalb dessen ein Test als frisch gilt.
-    pub interval_ms: u64,
-    /// Der Zeitpunkt, gegen den `completed_at` gehalten wird.
-    pub now: UnixMillis,
+    evidence: RecoveryFreshnessEvidence<'a>,
 }
-
-impl RecoveryTestFreshness<'_> {
-    /// Frisch NUR bei `Ready` UND `0 <= now - completed_at <= interval_ms`.
-    ///
-    /// Ein Abschluss in der Zukunft ist kein frischer Abschluss; ein
-    /// Ueberlauf der Differenz ebenso wenig. Der `match` ueber den Zustand hat
-    /// keinen Sammelarm: `ProductionState` ist `#[non_exhaustive]`, in der
-    /// eigenen Crate aber vollstaendig sichtbar — eine dritte Variante bricht
-    /// hier die Uebersetzung, statt still als frisch zu gelten.
-    fn is_fresh(self) -> bool {
-        let ready = match self.production_state {
-            ProductionState::Ready => true,
-            ProductionState::BlockedRecoveryTest => false,
-        };
-        let within_interval = self
-            .now
-            .get()
-            .checked_sub(self.completed_at.get())
-            .and_then(|elapsed| u64::try_from(elapsed).ok())
-            .is_some_and(|elapsed| elapsed <= self.interval_ms);
-        ready && within_interval
+#[derive(Clone, Copy)]
+enum RecoveryFreshnessEvidence<'a> {
+    Native {
+        runtime: &'a crate::recovery_test_runtime::RecoveryTestRuntime,
+        inventory: &'a ea_recovery::KeyInventory,
+        report_hash: ea_types::ObjectHash,
+    },
+    #[cfg(feature = "test-support")]
+    Fixture { state: &'a ProductionState, completed_at: UnixMillis, interval_ms: u64, now: UnixMillis },
+}
+impl<'a> RecoveryTestFreshness<'a> {
+    pub(crate) fn from_current(runtime: &'a crate::recovery_test_runtime::RecoveryTestRuntime, inventory: &'a ea_recovery::KeyInventory, report_hash: ea_types::ObjectHash) -> Self {
+        Self { evidence: RecoveryFreshnessEvidence::Native { runtime, inventory, report_hash } }
+    }
+    /// Pure aggregate fixtures cannot be used in production builds.
+    #[cfg(feature = "test-support")]
+    pub fn for_testing(state: &'a ProductionState, completed_at: UnixMillis, interval_ms: u64, now: UnixMillis) -> Self {
+        Self { evidence: RecoveryFreshnessEvidence::Fixture { state, completed_at, interval_ms, now } }
+    }
+    pub(crate) fn is_fresh(self) -> bool {
+        match self.evidence {
+            RecoveryFreshnessEvidence::Native { runtime, inventory, report_hash } => runtime.current_completed_report_matches(inventory, report_hash).is_ok(),
+            #[cfg(feature = "test-support")]
+            RecoveryFreshnessEvidence::Fixture { state, completed_at, interval_ms, now } => *state == ProductionState::Ready
+                && now.get().checked_sub(completed_at.get()).and_then(|n|u64::try_from(n).ok()).is_some_and(|elapsed| elapsed <= interval_ms),
+        }
     }
 }
 
@@ -391,6 +403,23 @@ struct UnresolvedRowV1<'a> {
 /// Wertet die Belege aus — genau fuenfzehn Zeilen, in fester Reihenfolge.
 #[must_use]
 pub fn evaluate_go_live(evidence: &GoLiveEvidence<'_>) -> GoLiveChecklist {
+    evaluate_go_live_with_posture_admission(evidence, None)
+}
+
+/// Revalidates the runtime-bound documentation without changing raw measurements.
+/// A failure or an expired/changed document never confirms an Unknown row.
+#[must_use]
+pub fn evaluate_go_live_with_posture_admission(
+    evidence: &GoLiveEvidence<'_>,
+    admission: Option<&crate::operator_runtime::posture::VerifiedPostureAdmission<'_>>,
+) -> GoLiveChecklist {
+    let documented = evidence
+        .device_posture
+        .zip(admission)
+        .map_or(0, |(report, admission)| {
+            admission.current_documented_mask(report)
+        });
+
     let mut requirements = Vec::with_capacity(GO_LIVE_REQUIREMENT_CODES.len());
 
     requirements.push(GoLiveRequirement::from_option(
@@ -480,22 +509,29 @@ pub fn evaluate_go_live(evidence: &GoLiveEvidence<'_>) -> GoLiveChecklist {
         "EA-GOLIVE-EVIDENCE-WRITER-TRANSITION-PREPARED",
     ));
 
-    for requirement in PostureRequirement::ALL {
+    for (index, requirement) in PostureRequirement::ALL.into_iter().enumerate() {
         let code = posture_requirement_code(requirement);
         requirements.push(match evidence.device_posture {
             None => GoLiveRequirement::unavailable(code),
             Some(report) => {
                 let check = report.check(requirement);
+                let documented_unknown = check.is_unknown() && documented & (1 << index) != 0;
                 GoLiveRequirement {
                     code,
-                    status: if check.is_unknown() {
+                    status: if documented_unknown {
+                        GoLiveRequirementStatus::Confirmed
+                    } else if check.is_unknown() {
                         GoLiveRequirementStatus::NotAutomaticallyVerifiable
                     } else if check.is_pass() {
                         GoLiveRequirementStatus::Confirmed
                     } else {
                         GoLiveRequirementStatus::NotMet
                     },
-                    evidence_code: check.evidence_code().to_owned(),
+                    evidence_code: if documented_unknown {
+                        "EA-GOLIVE-POSTURE-DOCUMENTED".to_owned()
+                    } else {
+                        check.evidence_code().to_owned()
+                    },
                 }
             }
         });

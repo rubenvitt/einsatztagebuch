@@ -26,17 +26,10 @@ use ea_chain::{
     ChainNode, CheckpointClaim, RollbackAssessment, RollbackFinding, VerifiedChain,
     assess_rollback, build_chain,
 };
-use ea_crypto::{
-    HpkeRecipientPrivateKey, VerificationContext, parse_cose_sign1, verify_cose_sign1,
-};
+use ea_crypto::{HpkeRecipient, VerificationContext, parse_cose_sign1, verify_cose_sign1};
 use ea_format::{CertificateKindV1, EntryPackageV1, Parsed, ReceiptV1};
-use ea_trust::{
-    PreexistingRegistryAuthority, RegistrySelectionOutcome, SelectedRegistryHead, TrustAnchorV1,
-    TrustStateKey, VerifiedSignedTime, VerifiedTrust, load_trust_state, prepare_local_time,
-    select_registry_head, verify_checkpoint_time, verify_receipt_time, verify_registry_candidate,
-    verify_trust,
-};
-use ea_types::{CertificateHash, ChainSequence, KeyThumbprint, ObjectHash, UnixMillis};
+use ea_trust::{TrustAnchorV1, TrustStateKey, VerifiedTrust, load_trust_state, verify_trust};
+use ea_types::{CertificateHash, KeyThumbprint, ObjectHash, UnixMillis};
 
 use crate::{
     ChainGapV1, ChainHeadV1, Decapsulation, EphemeralTrustStateStore, Gate, GateObserver,
@@ -75,6 +68,7 @@ use crate::{
 pub struct VerifyOptions<'a> {
     os_wall_clock: UnixMillis,
     recipient: Option<RecipientKeyV1<'a>>,
+    recipient_time_ceiling: Option<UnixMillis>,
     evidence_requirement: EvidenceRequirementV1,
 }
 
@@ -90,6 +84,7 @@ impl<'a> VerifyOptions<'a> {
         Self {
             os_wall_clock,
             recipient: None,
+            recipient_time_ceiling: None,
             evidence_requirement: EvidenceRequirementV1::NotRequired,
         }
     }
@@ -107,12 +102,21 @@ impl<'a> VerifyOptions<'a> {
     pub const fn with_recipient(
         mut self,
         key_thumbprint: KeyThumbprint,
-        private_key: &'a HpkeRecipientPrivateKey,
+        private_key: &'a dyn HpkeRecipient,
     ) -> Self {
         self.recipient = Some(RecipientKeyV1 {
             key_thumbprint,
             private_key,
         });
+        self
+    }
+
+    /// Bound historical recipient use to the host's successfully persisted
+    /// time. Rechecked against this run's authenticated Receipt/Checkpoint
+    /// floor before any HPKE, including if the source changed after preflight.
+    #[must_use]
+    pub const fn with_recipient_time_ceiling(mut self, ceiling: UnixMillis) -> Self {
+        self.recipient_time_ceiling = Some(ceiling);
         self
     }
 
@@ -172,7 +176,7 @@ impl fmt::Debug for VerifyOptions<'_> {
 #[derive(Clone, Copy)]
 pub struct RecipientKeyV1<'a> {
     key_thumbprint: KeyThumbprint,
-    private_key: &'a HpkeRecipientPrivateKey,
+    private_key: &'a dyn HpkeRecipient,
 }
 
 impl<'a> RecipientKeyV1<'a> {
@@ -184,7 +188,7 @@ impl<'a> RecipientKeyV1<'a> {
 
     /// Das Schluesselmaterial der Entkapselung.
     #[must_use]
-    pub const fn private_key(&self) -> &'a HpkeRecipientPrivateKey {
+    pub const fn private_key(&self) -> &'a dyn HpkeRecipient {
         self.private_key
     }
 }
@@ -319,13 +323,9 @@ pub fn verify_archive_observed(
     // keinen Kopf mit Operationsautoritaet findet, bekommt keine Aussage; ein
     // Eintrag, dessen Schreiberzertifikat sich nicht aufloest, wird isoliert.
     //
-    // BEHANDELT WIRD NACH AUFSTEIGENDER SEQUENZ, nicht in Inventarreihenfolge:
-    // die folgt dem Objekthash, und die Registrierungslinie laesst sich nur
-    // VORWAERTS nachziehen — ein einmal gepinnter Kopf geht nie zurueck. Liefe
-    // die Schleife nach Hash, entschiede der Zufall der Hashwerte darueber,
-    // welcher Eintrag noch in der Lease seines Kopfes liegt. Der Objekthash
-    // bleibt als zweites Ordnungsmerkmal, damit die Reihenfolge auch bei
-    // gleicher Sequenz total und damit reproduzierbar ist.
+    // Stable sequence order keeps chain findings deterministic. Each archived
+    // signature uses its exact signed historical head; current action pins do
+    // not replace or expire that historical attribution.
     let mut ordered: Vec<&Parsed<EntryPackageV1>> = inventory.entries().iter().collect();
     ordered.sort_by_key(|entry| {
         (
@@ -353,14 +353,15 @@ pub fn verify_archive_observed(
             continue;
         }
         let fields = entry.value().manifest().fields();
-        let Some(selected) = select_head_for_sequence(
-            &mut store,
-            key,
-            anchor,
+        let Some(selected) = crate::historical::historical_registry_head(
             &inventory,
-            options.os_wall_clock(),
+            anchor,
+            fields.registry_version,
+            ObjectHash::try_from(fields.registry_head_hash.as_slice()).expect("fixed hash"),
             fields.chain_sequence,
+            options.os_wall_clock(),
         ) else {
+            quarantine_unattributable(&mut report, object_hash);
             continue;
         };
         if !writer_is_active(&selected, fields.writer_certificate_hash) {
@@ -419,26 +420,30 @@ pub fn verify_archive_observed(
     // Beziehung zwischen Objekten — die Frage laesst sich erst beantworten,
     // wenn alle Knoten vorliegen.
     //
-    // EIN `.eds` WIRD HIER KEIN KNOTEN, und das ist fail-closed und gemessen:
-    // `design.md` §14.1 verlangt fuer `authorizedDestroyed` eine AUFLOESBARE
-    // `destructionAuthorization`. Diese Aufloesung ist von `ea-verify` aus
-    // nicht erreichbar — `ea-trust` exportiert keine Pruefung dafuer
-    // (`crates/ea-trust/src/lib.rs:450-469`), `TrustCatalog` ist `pub(crate)`
-    // (`crates/ea-trust/src/catalog.rs:11`), und `catalog::load` prueft
-    // ueberhaupt keine Signatur, sondern parst nur
-    // (`crates/ea-trust/src/catalog.rs:17-66`). Bliebe die blosse Anwesenheit
-    // des Autorisierungsobjekts im Inventar — und Inventarmitgliedschaft ist
-    // KEINE Autorisierung. Der Schreiberwechsel stand bis Stufe 5 in
-    // derselben Lage und wird seither gegen den ZUSTAND des gewaehlten
-    // Kopfes gerechnet, nie gegen den Katalog
-    // ([`writer_transition_claim_holds`]); fuer die
-    // `destructionAuthorization` gibt es diesen Zustand noch nicht. Wer den
-    // Stummel trotzdem als
-    // Knoten fuehrte, liesse jeden, der ein `.eds` schreiben kann, einen
-    // Eintrag spurlos ersetzen. Also gilt `design.md`:1614: ein Stummel ohne
-    // vollstaendige Pruefkette BLEIBT EINE LUECKE — das fehlende `.eip`
-    // erscheint als `gaps`-Eintrag, `authorizedDestructions` bleibt leer, und
-    // `destroyedEntryCount` zaehlt ihn weiterhin als blossen Zaehler.
+    // Original signed Stub identities support provisional chain inspection.
+    // Their final results require the later encrypted Writer Evidence below.
+    let attestations = record_destructions(
+        &mut report,
+        &inventory,
+        options.os_wall_clock(),
+        |version, hash, sequence| {
+            crate::historical::historical_registry_head(
+                &inventory,
+                anchor,
+                version,
+                hash,
+                sequence,
+                options.os_wall_clock(),
+            )
+        },
+    );
+    let stub_candidates =
+        crate::destroyed::candidates(&report, &inventory, anchor, options.os_wall_clock());
+    nodes.extend(
+        stub_candidates
+            .iter()
+            .map(|stub| crate::destroyed::node(stub)),
+    );
     protocol.enter(Gate::ChainPosition);
     let chain = place_in_chain(&mut report, anchor, &nodes);
 
@@ -503,6 +508,27 @@ pub fn verify_archive_observed(
 
     // Gate `recipient-grant` und, DAHINTER UND ALS KEIN GATE, die Entkapselung.
     protocol.enter(Gate::RecipientGrant);
+    if let Some(ceiling) = options.recipient_time_ceiling
+        && let Some(recipient) = options.recipient()
+        && inventory.grants().iter().any(|grant| {
+            let fields = grant.value().grant_body().fields();
+            fields.kind == ea_format::GrantKindV1::Historical
+                && fields.recipient_key_thumbprint == recipient.key_thumbprint()
+                && placed.iter().any(|entry| {
+                    entry.value().entry_hash() == fields.entry_hash
+                        && own_grant(&inventory, entry, recipient.key_thumbprint()).is_none()
+                })
+        })
+        && report
+            .verified_time_floor
+            .map_or(options.os_wall_clock(), |floor| {
+                floor.max(options.os_wall_clock())
+            })
+            > ceiling
+    {
+        return Err(VerifyError::RecipientTimeNotDurable);
+    }
+    let mut destruction_evidence = Vec::new();
     let decapsulation = claim_own_grants(
         &mut report,
         &mut store,
@@ -511,31 +537,98 @@ pub fn verify_archive_observed(
         &inventory,
         options,
         &placed,
+        &mut destruction_evidence,
     );
     if decapsulation == Decapsulation::Performed {
         protocol.decapsulated();
     }
 
-    // `authorizedDestructions`, UND AUSDRUECKLICH KEIN GATE. Die neun
-    // Bezeichner aus `design.md` §14.1 sind geschlossen, und
-    // [`crate::GATE_ORDER_V1`] ist ihre einzige Quelle; ein zehnter Eintrag im
-    // Protokoll waere eine erfundene Stufe. Der Schritt laeuft deshalb still.
-    //
-    // ZULETZT, und das ist nicht beliebig: die Registrierungslinie laesst sich
-    // nur VORWAERTS nachziehen. Die `authorizationSequence` einer Vernichtung
-    // liegt hinter den Eintragssequenzen ihres Bestands; liefe dieser Schritt
-    // frueher, zoege er die Linie ueber die Lease des Schreiberkopfes hinaus
-    // und keiner der Eintraege waere danach noch zuzuordnen.
-    record_destructions(&mut report, &inventory, |sequence| {
-        select_head_for_sequence(
-            &mut store,
-            key,
-            anchor,
-            &inventory,
-            options.os_wall_clock(),
-            sequence,
-        )
-    });
+    // Preserve public signed identity progression independently of whether
+    // this recipient can read the later destruction Evidence. Every public
+    // error still withholds this proof; it never authenticates original EIP
+    // object hashes or implies that deletion was completed.
+    if chain
+        .as_ref()
+        .is_some_and(ea_chain::VerifiedChain::is_fully_verified)
+        && report.gaps.is_empty()
+        && report.format_errors.is_empty()
+        && report.quarantined_objects.is_empty()
+        && report.signature_errors.is_empty()
+        && report.evidence_errors.is_empty()
+        && report.decryption_errors.is_empty()
+    {
+        report.public_chain_head = Some(report.chain_head);
+    }
+
+    // Final classification uses only Stubs bound by authenticated plaintext
+    // Evidence and signed deletion attestations. No Stub ever reaches HPKE.
+    if !inventory.destroyed().is_empty() {
+        // Start with the continuous signed-identity prefix. Removing an
+        // unsupported Stub can disconnect another Evidence, so converge by
+        // shrinking both the candidate nodes and the usable Evidence set.
+        let mut approved;
+        loop {
+            let prefix = ea_chain::build_chain(anchor.chain_id(), &nodes)
+                .ok()
+                .and_then(|chain| {
+                    chain
+                        .nodes()
+                        .first()
+                        .filter(|node| node.chain_sequence.get() == 0)?;
+                    chain.verified_head().map(|head| head.chain_sequence())
+                });
+            destruction_evidence.retain(|proof| prefix.is_some_and(|end| proof.sequence <= end));
+            approved = stub_candidates
+                .iter()
+                .filter(|stub| {
+                    !report.quarantined_objects.contains_key(&stub.object_hash())
+                        && crate::destroyed::evidence_holds(
+                            stub,
+                            &destruction_evidence,
+                            &attestations,
+                            &inventory,
+                        )
+                })
+                .map(|stub| stub.object_hash())
+                .collect::<std::collections::BTreeSet<_>>();
+            let before = nodes.len();
+            nodes.retain(|node| {
+                node.kind != ea_chain::ChainNodeKind::DestroyedStub
+                    || approved.contains(&node.object_hash)
+            });
+            if nodes.len() == before {
+                break;
+            }
+        }
+        for hash in &approved {
+            report.object_results.insert(
+                *hash,
+                ObjectResultV1::new(
+                    *hash,
+                    ObjectTypeV1::Destroyed,
+                    ObjectResultKindV1::AuthorizedDestroyed,
+                    ServerConfirmationV1::NotServerConfirmed,
+                ),
+            );
+        }
+        report.gaps.clear();
+        report.chain_head = ChainHeadV1::sentinel(anchor.chain_id());
+        place_in_chain(&mut report, anchor, &nodes);
+        for stub in &stub_candidates {
+            if !approved.contains(&stub.object_hash()) {
+                let sequence = stub
+                    .value()
+                    .signed_manifest()
+                    .manifest()
+                    .fields()
+                    .chain_sequence;
+                report
+                    .gaps
+                    .entry((anchor.chain_id(), sequence))
+                    .or_insert(ChainGapV1::new(anchor.chain_id(), sequence, sequence));
+            }
+        }
+    }
 
     // ERST HIER, und nach nichts anderem: die Pipeline ist vollstaendig
     // durchgelaufen. Ein frueherer Ausstieg — Gate `trust` traegt nicht —
@@ -555,19 +648,28 @@ pub fn verify_archive_observed(
 /// OHNE EMPFAENGERSCHLUESSEL passiert hier gar nichts: „eigener Grant" setzt
 /// voraus, dass es ein Eigenes gibt. Das Gate laeuft trotzdem — es hat nur
 /// nichts zu pruefen —, und es wird nichts entkapselt und nichts abgewertet.
+// Gate inputs stay borrowed from the same verification invocation; the last
+// output retains only public destruction identifiers, never opened plaintext.
+#[allow(clippy::too_many_arguments)]
 fn claim_own_grants(
     report: &mut VerificationReportV1,
-    store: &mut EphemeralTrustStateStore,
-    key: TrustStateKey,
+    _store: &mut EphemeralTrustStateStore,
+    _key: TrustStateKey,
     anchor: &TrustAnchorV1,
     inventory: &ArchiveInventory,
     options: VerifyOptions<'_>,
     placed: &[&Parsed<EntryPackageV1>],
+    destruction_evidence: &mut Vec<crate::destroyed::VerifiedEvidence>,
 ) -> Decapsulation {
     let Some(recipient) = options.recipient() else {
         return Decapsulation::Skipped;
     };
     let mut decapsulation = Decapsulation::Skipped;
+    let effective_now = report
+        .verified_time_floor
+        .map_or(options.os_wall_clock(), |floor| {
+            floor.max(options.os_wall_clock())
+        });
     for entry in placed {
         if !report.object_results.contains_key(&entry.object_hash()) {
             continue;
@@ -575,8 +677,73 @@ fn claim_own_grants(
         // FEHLENDER GRANT ist kein Befund: der Eintrag bleibt gueltig und
         // sichtbar, er wird nur nicht geoeffnet (`design.md`:1612).
         let Some(grant) = own_grant(inventory, entry, recipient.key_thumbprint()) else {
+            // Initial grants have priority. Historical candidates are selected only
+            // after verification, so a forged lower hash cannot shadow a valid one.
+            let mut first_failure = None;
+            for grant in inventory.grants().iter().filter(|grant| {
+                let f = grant.value().grant_body().fields();
+                f.kind == ea_format::GrantKindV1::Historical
+                    && f.entry_hash == entry.value().entry_hash()
+                    && f.recipient_key_thumbprint == recipient.key_thumbprint()
+            }) {
+                if report
+                    .quarantined_objects
+                    .contains_key(&grant.object_hash())
+                {
+                    continue;
+                }
+                match crate::historical::verify_historical_grant(
+                    inventory,
+                    anchor,
+                    entry,
+                    grant,
+                    effective_now,
+                ) {
+                    Ok(expires) => {
+                        report.recipient_grants.insert(
+                            entry.value().entry_hash(),
+                            (grant.object_hash(), Some(expires)),
+                        );
+                        report
+                            .public_key_thumbprints
+                            .insert(grant.value().grant_body().fields().issuer_key_thumbprint);
+                        if record_decapsulation(
+                            report,
+                            grant,
+                            open_for_destruction(
+                                grant,
+                                entry,
+                                recipient,
+                                inventory,
+                                anchor,
+                                effective_now,
+                                destruction_evidence,
+                            ),
+                        ) == Decapsulation::Performed
+                        {
+                            decapsulation = Decapsulation::Performed;
+                        }
+                        first_failure = None;
+                        break;
+                    }
+                    Err(code) => {
+                        first_failure.get_or_insert((grant.object_hash(), code));
+                    }
+                }
+            }
+            if let Some((hash, code)) = first_failure {
+                report
+                    .recipient_grants
+                    .insert(entry.value().entry_hash(), (hash, None));
+                report
+                    .signature_errors
+                    .insert(ObjectErrorV1::new(hash, code));
+            }
             continue;
         };
+        report
+            .recipient_grants
+            .insert(entry.value().entry_hash(), (grant.object_hash(), None));
         // EIN ISOLIERTES OBJEKT WIRD NICHT BENUTZT, und es bekommt auch keinen
         // zweiten Befund. Eine doppelt abgelegte `.eag` bleibt im Inventar
         // ihrer Familie (`crates/ea-archive/src/inventory.rs:283-289`) und
@@ -589,14 +756,14 @@ fn claim_own_grants(
         {
             continue;
         }
-        let selected = select_pinned_head(
-            store,
-            key,
-            anchor,
+        let manifest = entry.value().manifest().fields();
+        let selected = crate::historical::historical_registry_head(
             inventory,
+            anchor,
+            manifest.registry_version,
+            ObjectHash::try_from(manifest.registry_head_hash.as_slice()).expect("fixed hash"),
+            manifest.chain_sequence,
             options.os_wall_clock(),
-            entry.value().manifest().fields().chain_sequence,
-            |_| None,
         );
         let verified = selected
             .ok_or(RecipientGrantErrorV1::HeadUnavailable)
@@ -616,13 +783,43 @@ fn claim_own_grants(
         }
 
         // HPKE-OPEN, KEIN GATE. Erst hier, hinter dem neunten.
-        if record_decapsulation(report, grant, open_entry(grant, entry, recipient))
-            == Decapsulation::Performed
+        if record_decapsulation(
+            report,
+            grant,
+            open_for_destruction(
+                grant,
+                entry,
+                recipient,
+                inventory,
+                anchor,
+                effective_now,
+                destruction_evidence,
+            ),
+        ) == Decapsulation::Performed
         {
             decapsulation = Decapsulation::Performed;
         }
     }
     decapsulation
+}
+
+fn open_for_destruction(
+    grant: &Parsed<ea_format::GrantV1>,
+    entry: &Parsed<EntryPackageV1>,
+    recipient: crate::RecipientKeyV1<'_>,
+    inventory: &ArchiveInventory,
+    anchor: &TrustAnchorV1,
+    now: UnixMillis,
+    evidence: &mut Vec<crate::destroyed::VerifiedEvidence>,
+) -> Result<(), crate::DecryptionErrorV1> {
+    let plaintext = open_entry(grant, entry, recipient)?;
+    if !inventory.destroyed().is_empty()
+        && let Some(proof) = plaintext
+            .with_exposed(|bytes| crate::destroyed::inspect(bytes, entry, inventory, anchor, now))
+    {
+        evidence.push(proof);
+    }
+    Ok(())
 }
 
 /// Gate `receipt` ueber die Eintraege: Quittung suchen, pruefen, Ergebnis
@@ -693,6 +890,12 @@ fn confirm_entries<'a>(
                     // Nachweis des Geprueften: der Abdruck, der die
                     // Serversignatur GETRAGEN hat.
                     report.public_key_thumbprints.insert(thumbprint);
+                    let signed_time = receipt.value().core().fields().accepted_at_server;
+                    report.verified_time_floor = Some(
+                        report
+                            .verified_time_floor
+                            .map_or(signed_time, |old| old.max(signed_time)),
+                    );
                     confirmation = ServerConfirmationV1::ServerConfirmed;
                     confirmed.push((*entry, receipt));
                 }
@@ -731,8 +934,8 @@ fn confirm_entries<'a>(
 ///
 /// Liefert bei Erfolg den Schluesselabdruck, der die Pruefung getragen hat.
 fn confirm_receipt(
-    store: &mut EphemeralTrustStateStore,
-    key: TrustStateKey,
+    _store: &mut EphemeralTrustStateStore,
+    _key: TrustStateKey,
     anchor: &TrustAnchorV1,
     inventory: &ArchiveInventory,
     os_wall_clock: UnixMillis,
@@ -743,24 +946,19 @@ fn confirm_receipt(
         return Err(ReceiptGateErrorV1::BindingMismatch);
     }
 
-    let mut time_verified = false;
-    let selected = select_pinned_head(
-        store,
-        key,
-        anchor,
+    let fields = receipt.value().core().fields();
+    let selected = crate::historical::historical_registry_head(
         inventory,
+        anchor,
+        fields.registry_version,
+        ObjectHash::from(fields.registry_head_hash),
+        fields.chain_sequence,
         os_wall_clock,
-        entry.value().manifest().fields().chain_sequence,
-        |authority| {
-            let verified = verify_receipt_time(authority, receipt).ok();
-            time_verified = verified.is_some();
-            verified
-        },
     )
     .ok_or(ReceiptGateErrorV1::UntrustedTime)?;
-    if !time_verified {
-        return Err(ReceiptGateErrorV1::UntrustedTime);
-    }
+    selected
+        .verify_receipt(receipt)
+        .map_err(|_| ReceiptGateErrorV1::UntrustedTime)?;
 
     let core = receipt.value().core();
     let context = VerificationContext::receipt(core.exact_bytes())
@@ -788,8 +986,8 @@ fn confirm_receipt(
 /// Kopfwiderspruch zu `quarantinedObjects` mit Grund `conflicting`.
 fn assess_checkpoints(
     report: &mut VerificationReportV1,
-    store: &mut EphemeralTrustStateStore,
-    key: TrustStateKey,
+    _store: &mut EphemeralTrustStateStore,
+    _key: TrustStateKey,
     anchor: &TrustAnchorV1,
     inventory: &ArchiveInventory,
     os_wall_clock: UnixMillis,
@@ -801,20 +999,22 @@ fn assess_checkpoints(
         let Some(claim) = standard_checkpoint_claim(evidence) else {
             continue;
         };
-        let mut verified = false;
-        let _ = select_pinned_head(
-            store,
-            key,
-            anchor,
+        let ea_format::DecodedEvidencePayloadV1::Standard { core, .. } = evidence
+            .value()
+            .decoded_payload()
+            .expect("parsed standard checkpoint")
+        else {
+            continue;
+        };
+        let fields = core.fields();
+        let verified = crate::historical::historical_registry_head_by_hash(
             inventory,
-            os_wall_clock,
+            anchor,
+            ObjectHash::from(fields.registry_head_hash),
             claim.covered_through_sequence,
-            |authority| {
-                let proof = verify_checkpoint_time(authority, evidence).ok();
-                verified = proof.is_some();
-                proof
-            },
-        );
+            os_wall_clock,
+        )
+        .is_some_and(|head| head.verify_checkpoint(evidence).is_ok());
         if !verified {
             report.signature_errors.insert(ObjectErrorV1::new(
                 evidence.object_hash(),
@@ -828,6 +1028,13 @@ fn assess_checkpoints(
         if let Some(thumbprint) = checkpoint_signer_thumbprint(evidence) {
             report.public_key_thumbprints.insert(thumbprint);
         }
+        report.verified_time_floor = Some(
+            report
+                .verified_time_floor
+                .map_or(fields.issued_at_server, |old| {
+                    old.max(fields.issued_at_server)
+                }),
+        );
         claims.push(claim);
     }
 
@@ -893,52 +1100,6 @@ fn checkpoint_signer_thumbprint(
         return None;
     };
     Some(parse_cose_sign1(&exact_cose, &[]).ok()?.key_thumbprint())
-}
-
-/// Waehlt den bereits gepinnten Kopf ueber `sequence` und laesst `verify_time`
-/// dabei auf die VORBESTEHENDE Registrierungsautoritaet blicken.
-///
-/// ZWEITER DURCHLAUF, UND DAS IST NOTWENDIG, nicht bequem. `verify_receipt_time`
-/// und `verify_checkpoint_time` verlangen eine
-/// [`PreexistingRegistryAuthority`], die den Bezugswert der Aussage traegt
-/// (`crates/ea-trust/src/time.rs:179-185`). Solange die Registrierungslinie
-/// noch NACHGEZOGEN wird, ist die vorbestehende Autoritaet der VORGAENGERKOPF,
-/// dessen Lease die Sequenz gerade nicht deckt — gemessen an einer Linie aus
-/// Policy-, Server- und Schreiberkopf: beim Erreichen von `Selected` fuer die
-/// erste Eintragssequenz ist die Autoritaet noch der Serverkopf. Erst wenn der
-/// Schreiberkopf gepinnt ist, nimmt `verify_registry_candidate` den
-/// `current_candidate`-Weg (`crates/ea-trust/src/registry.rs:513-533`) und gibt
-/// genau diesen Kopf als vorbestehende Autoritaet heraus. Deshalb laeuft Gate
-/// `receipt` erst NACH der Eintragsschleife, und deshalb genuegt hier eine
-/// einzige Runde ohne Aufholschritte.
-///
-/// `verify_time` liefert `None`, wenn die Aussage nicht traegt; dann wird
-/// KEINE Zeitquelle eingespeist und der Kopf trotzdem gewaehlt — der Aufrufer
-/// braucht ihn fuer seinen eigenen Befund.
-fn select_pinned_head<F>(
-    store: &mut EphemeralTrustStateStore,
-    key: TrustStateKey,
-    anchor: &TrustAnchorV1,
-    inventory: &ArchiveInventory,
-    os_wall_clock: UnixMillis,
-    sequence: ChainSequence,
-    verify_time: F,
-) -> Option<SelectedRegistryHead>
-where
-    F: FnOnce(&PreexistingRegistryAuthority) -> Option<VerifiedSignedTime>,
-{
-    let trust = verified_trust(store, key, anchor, inventory)?;
-    let candidate = verify_registry_candidate(&trust, sequence).ok()?;
-    let sources: Vec<VerifiedSignedTime> = candidate
-        .preexisting_authority()
-        .and_then(verify_time)
-        .into_iter()
-        .collect();
-    let local_time = prepare_local_time(store, &candidate, os_wall_clock, &sources).ok()?;
-    match select_registry_head(candidate, local_time, None).ok()? {
-        RegistrySelectionOutcome::Selected(selected) => Some(selected),
-        RegistrySelectionOutcome::Advanced(_) | RegistrySelectionOutcome::PendingFuture(_) => None,
-    }
 }
 
 /// Gate `chain-position`: setzt die Knoten in die Kette des Ankers und traegt
@@ -1015,74 +1176,18 @@ fn verified_trust(
     verify_trust(anchor, inventory, snapshot).ok()
 }
 
-/// Obergrenze der Aufholschritte je Eintragssequenz.
-///
-/// Jeder Aufholschritt pinnt eine STRIKT hoehere Registrierungsversion, und
-/// jede Version braucht mindestens ein eigenes Registrierungsereignis im
-/// Bestand. Mehr Schritte als zulaessige Trust-Objekte kann es deshalb nicht
-/// geben; die Schranke ist eine Abbruchgarantie, keine Fachregel.
-const MAX_REGISTRY_CATCH_UP_STEPS_V1: usize = ea_trust::MAX_TRUST_OBJECTS_V1;
-
-/// Gate `registry`: waehlt den Kopf mit Operationsautoritaet ueber
-/// `proposed_sequence`.
-///
-/// Die Reihenfolge ist bindend und darf nicht aufgebrochen werden:
-/// `load_trust_state` -> `verify_trust` -> `verify_registry_candidate` ->
-/// `prepare_local_time` -> `select_registry_head`. `prepare_local_time`
-/// verlangt, dass Revision, Zeitzustand und gepinnter Kopf des Speichers
-/// EXAKT zum Kandidaten passen; ein fremder Commit dazwischen liefert
-/// `TrustError::StateConflict`. Deshalb laeuft auch `verify_trust` je Runde
-/// erneut: jede erfolgreiche Auswahl schreibt eine neue Revision, und ein
-/// Kandidat aus der Vorrunde ist danach veraltet.
-///
-/// Nur [`RegistrySelectionOutcome::Selected`] traegt Autoritaet.
-/// `PendingFuture` bricht das Gate fuer diese Sequenz ab: ein noch nicht
-/// wirksamer Nachfolger ist keine Autoritaet, und Warten hilft nicht, weil die
-/// Uhr fest ist.
-///
-/// [`RegistrySelectionOutcome::Advanced`] wird ebenfalls NICHT als Autoritaet
-/// benutzt — der Kopf daraus fliesst in keine Aussage —, beendet aber die
-/// Runde nicht, sondern loest die naechste aus. `Advanced` heisst
-/// ausdruecklich: es wurde ein Kopf NACHGEZOGEN, der die Sequenz noch nicht
-/// abdeckt. Ein Verifizierer startet aus einem leeren Stand und muss die
-/// Registrierungslinie von Version eins an nachziehen; schon die kleinste
-/// echte Linie braucht dafuer zwei Koepfe (einen fuer die Policy, einen fuer
-/// das Schreiberzertifikat). Wer beim ersten `Advanced` abbraeche, koennte
-/// keinen einzigen Eintrag je zuordnen.
-fn select_head_for_sequence(
-    store: &mut EphemeralTrustStateStore,
-    key: TrustStateKey,
-    anchor: &TrustAnchorV1,
-    inventory: &ArchiveInventory,
-    os_wall_clock: UnixMillis,
-    proposed_sequence: ChainSequence,
-) -> Option<SelectedRegistryHead> {
-    for _ in 0..MAX_REGISTRY_CATCH_UP_STEPS_V1 {
-        let trust = verified_trust(store, key, anchor, inventory)?;
-        let candidate = verify_registry_candidate(&trust, proposed_sequence).ok()?;
-        // Zeitquellen bleiben leer, solange der Speicher keinen Kopf traegt:
-        // `prepare_local_time` verwirft jede Quelle, deren Autoritaetskopf
-        // nicht der gepinnte ist, und vor der ersten Auswahl ist keiner
-        // gepinnt.
-        let local_time = prepare_local_time(store, &candidate, os_wall_clock, &[]).ok()?;
-        match select_registry_head(candidate, local_time, None).ok()? {
-            RegistrySelectionOutcome::Selected(selected) => return Some(selected),
-            RegistrySelectionOutcome::Advanced(_) => {}
-            RegistrySelectionOutcome::PendingFuture(_) => return None,
-        }
-    }
-    None
-}
-
 /// Loest `writer_certificate_hash` in den zur Sequenz aktiven Zertifikaten auf.
 ///
 /// Verlangt ausdruecklich ein Zertifikat der Art `Writer`: ein Server- oder
 /// Adminzertifikat schreibt keine Eintraege, und ein Manifest, das eines als
 /// Schreiber benennt, ist nicht zuordenbar.
-fn writer_is_active(selected: &SelectedRegistryHead, writer: CertificateHash) -> bool {
-    selected.active_certificates().any(|(hash, fields)| {
-        hash == writer && fields.certificate_kind == CertificateKindV1::Writer
-    })
+fn writer_is_active(
+    selected: &ea_trust::HistoricalRegistryAuthority,
+    writer: CertificateHash,
+) -> bool {
+    selected
+        .active_certificate_fields(writer)
+        .is_some_and(|fields| fields.certificate_kind == CertificateKindV1::Writer)
 }
 
 /// Gate `manifest-signature`: prueft die Schreibersignatur gegen den
@@ -1104,7 +1209,7 @@ fn writer_is_active(selected: &SelectedRegistryHead, writer: CertificateHash) ->
 /// deshalb faengt schon das Bilden des Kontexts seinen Fehler ab.
 fn verified_signer(
     entry: &Parsed<EntryPackageV1>,
-    selected: &SelectedRegistryHead,
+    selected: &ea_trust::HistoricalRegistryAuthority,
 ) -> Result<KeyThumbprint, ManifestSignatureErrorV1> {
     let context = VerificationContext::record(entry.value().signed_manifest().exact_bytes())?;
     let signer = verify_cose_sign1(entry.value().writer_signature(), selected, &context)?;

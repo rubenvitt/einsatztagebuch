@@ -23,6 +23,12 @@ use crate::{
 /// `#[tauri::command]`-Handler die synchrone Kernoperation ueber
 /// `tauri::async_runtime::spawn_blocking` ausfuehrt.
 pub trait DraftRepository: Send + Sync {
+    /// Local content routing only. A bound Evidence repository must expose its
+    /// exact durable job reference so ordinary content cannot consume its slot.
+    fn evidence_draft_source(&self) -> Result<Option<crate::EvidenceDraftSource>, DraftError> {
+        Ok(None)
+    }
+
     /// Gibt den aktiven Entwurf zurueck oder legt den einen an, den es geben
     /// darf.
     ///

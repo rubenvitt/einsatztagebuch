@@ -120,10 +120,17 @@ export type ReaderRejectedAmendmentView = {
   readonly reason: string
 }
 
+export type CorrectionReferenceView = {
+  readonly originalRecordId: string
+  readonly originalEntryHash: string
+  readonly originalSequence: number
+}
+
 export type ReaderAmendmentThreadView = {
   readonly original: ReaderEntryView
   readonly amendments: readonly ReaderEntryView[]
   readonly rejected: readonly ReaderRejectedAmendmentView[]
+  readonly correctionReference?: CorrectionReferenceView
 }
 
 export type ReaderSearchHitView = {

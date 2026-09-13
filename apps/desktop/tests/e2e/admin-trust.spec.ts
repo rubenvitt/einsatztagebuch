@@ -29,6 +29,7 @@ const FINGERPRINT = Array.from({ length: 32 }, (_, index) =>
 const HOST_DOUBLE = String(function installHostDouble(
   session: SessionDouble,
   fingerprint: string,
+  resumePolicy = false,
 ): void {
   const invoked: string[] = []
   const goLiveCodes = [
@@ -49,15 +50,18 @@ const HOST_DOUBLE = String(function installHostDouble(
     'EA-POSTURE-OS-PATCH-LEVEL',
   ]
   const day = 24 * 60 * 60 * 1000
-  let ceremonyKind = 'DeviceApprove'
-  let ceremonyStep = 'PendingRequest'
-  let exchangeFileName: string | null = null
+  let ceremonyKind = resumePolicy ? 'PolicyChange' : 'DeviceApprove'
+  let ceremonyStep = resumePolicy ? 'RootRequestExported' : 'PendingRequest'
+  let exchangeFileName: string | null = resumePolicy ? 'saved-policy-request.json' : null
   const ceremony = () => ({
     ceremonyId: 'zeremonie-1',
     kind: ceremonyKind,
     step: ceremonyStep,
     targetFingerprint: ceremonyKind === 'DeviceApprove' ? fingerprint : null,
     exchangeFileName,
+    round: 'ActivateRegistry',
+    linkedCeremonyId: null,
+    fingerprintSubject: ceremonyKind === 'DeviceApprove' ? 'IssuedCertificate' : null,
   })
   // Jedes Zeremoniekommando nach dem Beginn traegt die Kennung der EINEN
   // laufenden Zeremonie unter dem Namen des Kontrakts (`ceremonyId`). Ein
@@ -96,12 +100,14 @@ const HOST_DOUBLE = String(function installHostDouble(
       ],
       productionReady: false,
     },
+    admin_open_ceremonies: () => resumePolicy && ceremonyStep !== 'RegistryPublished' ? [ceremony()] : [],
     admin_pending_device_requests: [
       {
         requestId: 'anfrage-1',
         certificateKindCode: 'EA-CERT-READER-DEVICE',
         fingerprint,
         receivedAtMs: 1771000000000,
+        fingerprintSubject: 'IssuedCertificate',
       },
     ],
     admin_ceremony_begin: (args: { requestId: string; kind: string }) => {
@@ -122,6 +128,10 @@ const HOST_DOUBLE = String(function installHostDouble(
       return ceremony()
     },
     admin_ceremony_authorize: advance('AdminAuthorized'),
+    admin_ceremony_read: (args: { ceremonyId?: unknown }) => {
+      requireCeremonyId(args)
+      return ceremony()
+    },
     admin_ceremony_export_request: (args: { ceremonyId?: unknown }) => {
       requireCeremonyId(args)
       exchangeFileName = 'root-anfrage-0001.json'
@@ -187,6 +197,7 @@ const HOST_DOUBLE = String(function installHostDouble(
     },
     admin_writer_transition_state: {
       phase: 'NoTransition',
+      ceremonyId: null,
       currentWriterHash: 'AA'.repeat(32),
       newWriterHash: null,
       effectiveFromSequence: null,
@@ -197,6 +208,7 @@ const HOST_DOUBLE = String(function installHostDouble(
       }
       return {
         phase: 'Prepared',
+        ceremonyId: null,
         currentWriterHash: 'AA'.repeat(32),
         newWriterHash: 'BB'.repeat(32),
         effectiveFromSequence: 88,
@@ -204,6 +216,7 @@ const HOST_DOUBLE = String(function installHostDouble(
     },
     admin_writer_transition_activate: {
       phase: 'Activated',
+      ceremonyId: null,
       currentWriterHash: 'BB'.repeat(32),
       newWriterHash: null,
       effectiveFromSequence: 88,
@@ -243,9 +256,9 @@ const HOST_DOUBLE = String(function installHostDouble(
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: host, writable: true })
 })
 
-async function bootSession(page: Page, session: SessionDouble): Promise<void> {
+async function bootSession(page: Page, session: SessionDouble, resumePolicy = false): Promise<void> {
   await page.addInitScript(
-    `(${HOST_DOUBLE})(${JSON.stringify(session)}, ${JSON.stringify(FINGERPRINT)})`,
+    `(${HOST_DOUBLE})(${JSON.stringify(session)}, ${JSON.stringify(FINGERPRINT)}, ${JSON.stringify(resumePolicy)})`,
   )
   await page.goto('/')
 }
@@ -264,7 +277,7 @@ async function invokedCommands(page: Page): Promise<string[]> {
   )
 }
 
-test('shows the eight regions and walks a device approval to an active device', async ({
+test('shows the nine regions and walks an activation round to an active device', async ({
   context,
   page,
 }) => {
@@ -273,6 +286,7 @@ test('shows the eight regions and walks a device approval to an active device', 
 
   for (const name of [
     'Go-live-Status',
+    'Gespeicherte Root-Runden',
     'Geräteanfragen',
     'Registry',
     'Richtlinie',
@@ -319,6 +333,25 @@ test('shows the eight regions and walks a device approval to an active device', 
   expect(invoked).toContain('admin_ceremony_publish')
 })
 
+test('opens the exact saved policy round after reload without beginning or authorizing again', async ({ context, page }) => {
+  await installOfflineGuard(context)
+  await bootSession(page, ADMIN_SESSION, true)
+  await page.getByRole('link', { name: 'Verwaltung' }).click()
+  await page.reload()
+  await page.getByRole('link', { name: 'Verwaltung' }).click()
+  const saved = page.getByRole('region', { name: 'Gespeicherte Root-Runden' })
+  await saved.getByRole('button', { name: 'Richtlinienänderung – zeremonie-1 öffnen' }).click()
+  const policy = page.getByRole('region', { name: 'Richtlinie', exact: true })
+  await expect(policy.getByRole('heading', { level: 4 })).toContainText('Root-Anfrage exportiert')
+  await expect(policy.getByRole('heading', { level: 4 })).toBeFocused()
+  await expect(policy.getByRole('button', { name: 'Root-Antwort importieren' })).toBeVisible()
+  const invoked = await invokedCommands(page)
+  expect(invoked).toContain('admin_ceremony_read')
+  expect(invoked).not.toContain('admin_ceremony_begin')
+  expect(invoked).not.toContain('admin_ceremony_authorize')
+  expect(invoked).not.toContain('session_reauthenticate')
+})
+
 test('reaches no reader or writer function from the administration', async ({ context, page }) => {
   await installOfflineGuard(context)
   await bootAdmin(page)
@@ -334,7 +367,9 @@ test('reaches no reader or writer function from the administration', async ({ co
   const invoked = await invokedCommands(page)
   // Ohne diese Zusicherung laeuft die Schleife darunter ueber die leere Menge.
   expect(invoked.length).toBeGreaterThan(5)
+  const administrativeStatusReads = new Set(['recovery_read', 'destruction_read', 'admin_ceremony_read'])
   for (const command of invoked) {
+    if (administrativeStatusReads.has(command)) continue
     expect(command).not.toMatch(/decrypt|history|entry|content|read/)
   }
 })

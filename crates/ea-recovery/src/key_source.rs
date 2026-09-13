@@ -53,7 +53,7 @@ use core::fmt;
 use std::{
     ffi::OsStr,
     fs::{self, File},
-    io::{self, Read as _},
+    io::Read as _,
     path::{Path, PathBuf},
 };
 
@@ -61,7 +61,8 @@ use ea_crypto::{CoseSigner, HpkeRecipientPrivateKey, SecretBytes, SecretVec};
 use zeroize::Zeroize as _;
 
 use crate::{
-    ExitCode, RecoveryError,
+    ExitCode, Pkcs11RecipientKey, Pkcs11SigningKey, RecoveryError, ResolvedRecipientKey,
+    ResolvedSigningKey,
     decrypt::load_key_material,
     encrypted_container::{ContainedKeyKind, EncryptedKeyContainer},
     pkcs11::Pkcs11KeyReference,
@@ -435,12 +436,20 @@ impl std::error::Error for KeySourceSpecError {}
 /// [`RecoveryError::ContainerOpen`] bei falscher Passphrase oder einem
 /// Container, der dekodiert und trotzdem nicht oeffnet (Exitcode 14). PKCS#11:
 /// die Fehler der PIN-Datei, [`RecoveryError::Io`] fuer ein fehlendes Modul,
-/// danach IMMER [`RecoveryError::Pkcs11Unbound`] — die benannte Grenze.
-pub fn resolve_recipient_key(
-    spec: &KeySourceSpec,
-) -> Result<HpkeRecipientPrivateKey, RecoveryError> {
+/// danach die geschlossenen Fehlerkategorien des expliziten Tokenproviders.
+pub fn resolve_recipient_key(spec: &KeySourceSpec) -> Result<ResolvedRecipientKey, RecoveryError> {
+    if let KeySourceSpec::Pkcs11 {
+        reference,
+        pin_file,
+    } = spec
+    {
+        return Pkcs11RecipientKey::open(reference.clone(), pin_file)
+            .map(ResolvedRecipientKey::Pkcs11);
+    }
     let material = resolve_material(spec, ContainedKeyKind::RecipientKem)?;
-    HpkeRecipientPrivateKey::from_bytes(material).map_err(|_| RecoveryError::KeySource)
+    HpkeRecipientPrivateKey::from_bytes(material)
+        .map(ResolvedRecipientKey::Software)
+        .map_err(|_| RecoveryError::KeySource)
 }
 
 /// Loest eine Quelle zum SIGNIERSCHLUESSEL (Ed25519-Seed) auf.
@@ -454,9 +463,18 @@ pub fn resolve_recipient_key(
 ///
 /// Wie [`resolve_recipient_key`]; der Container muss die Art
 /// [`ContainedKeyKind::Signing`] tragen.
-pub fn resolve_signing_key(spec: &KeySourceSpec) -> Result<CoseSigner, RecoveryError> {
+pub fn resolve_signing_key(spec: &KeySourceSpec) -> Result<ResolvedSigningKey, RecoveryError> {
+    if let KeySourceSpec::Pkcs11 {
+        reference,
+        pin_file,
+    } = spec
+    {
+        return Pkcs11SigningKey::open(reference.clone(), pin_file).map(ResolvedSigningKey::Pkcs11);
+    }
     let material = resolve_material(spec, ContainedKeyKind::Signing)?;
-    Ok(CoseSigner::from_secret(material))
+    Ok(ResolvedSigningKey::Software(CoseSigner::from_secret(
+        material,
+    )))
 }
 
 /// Die 32 Schluesselbytes aus einer Quelle, fuer GENAU EINE Schluesselart.
@@ -482,33 +500,9 @@ fn resolve_material(
             let container = EncryptedKeyContainer::read_from(path)?;
             container.open(kind, &passphrase)
         }
-        KeySourceSpec::Pkcs11 {
-            reference,
-            pin_file,
-        } => {
-            // Dieselbe Reihenfolge wie beim Container: die PIN-Datei wird
-            // vollstaendig gelesen und geprueft, BEVOR das Modul beruehrt
-            // wird — eine offene PIN-Datei ist ein Aufruffehler (2) und
-            // schlaegt die Grenze (21).
-            let _pin = read_secret_file(pin_file)?;
-            module_is_a_regular_file(reference.module())?;
-            Err(RecoveryError::Pkcs11Unbound)
-        }
+        // Native keys resolve only to operation handles above, never material.
+        KeySourceSpec::Pkcs11 { .. } => Err(RecoveryError::KeySource),
     }
-}
-
-/// Prueft, dass die Modulbibliothek EXISTIERT und eine Datei ist.
-///
-/// `fs::metadata` und ausdruecklich nicht `symlink_metadata`: eine
-/// Modulbibliothek ist auf jedem Betriebssystem ueblicherweise ein Link auf
-/// ihre versionierte Datei, und der Link ist hier die richtige Antwort. Was
-/// hinter dem Pfad steht, wird in dieser Stufe nicht geladen.
-fn module_is_a_regular_file(module: &Path) -> Result<(), RecoveryError> {
-    let metadata = fs::metadata(module)?;
-    if !metadata.is_file() {
-        return Err(RecoveryError::Io(io::ErrorKind::InvalidInput));
-    }
-    Ok(())
 }
 
 /// Liest eine Passphrasen- oder PIN-Datei in einen [`SecretVec`].

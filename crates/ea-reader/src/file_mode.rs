@@ -194,6 +194,16 @@ impl std::error::Error for ReaderFileModeError {}
 pub struct ReaderFileMode;
 
 impl ReaderFileMode {
+    /// Open a previously parsed immutable source after host time preverification.
+    pub fn open_source_observed(
+        source: ReaderArchiveSourceV1,
+        vault: &UnlockedVault,
+        effective_now: UnixMillis,
+        observer: &mut dyn GateObserver,
+    ) -> Result<OpenedArchiveV1, ReaderFileModeError> {
+        open(source, vault, effective_now, observer)
+    }
+
     /// Oeffnet die EINE exportierte Datei aus dem gewoehnlichen Dateidialog.
     ///
     /// Der universelle Weg. Er MUSS immer angeboten werden, weil

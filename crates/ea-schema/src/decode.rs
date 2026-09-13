@@ -1,3 +1,4 @@
+use crate::SecretText;
 use ea_types::{
     ChainId, ChainSequence, DestructionId, EntryHash, Id16, ObjectHash, OperatorSubjectId,
     OrganizationId, RecordId, RegistryVersion, UnixMillis,
@@ -606,7 +607,8 @@ fn record_type_for_schema(schema_id: &str) -> &'static str {
     }
 }
 
-pub(crate) fn validate_timezone(name: &str) -> Result<(), SchemaError> {
+/// Checks an IANA zone against the pinned Suite-v1 timezone database.
+pub fn validate_timezone(name: &str) -> Result<(), SchemaError> {
     if jiff_tzdb::VERSION != Some(IANA_TZDB_VERSION_V1) {
         return Err(SchemaError::invalid(
             "EA-SCHEMA-TZDB-VERSION",
@@ -675,8 +677,14 @@ fn nonempty_array_len(
     Ok(length)
 }
 
-pub(crate) fn text(decoder: &mut Decoder<'_>, field: &'static str) -> Result<String, SchemaError> {
-    decoder.str().map(str::to_owned).map_err(|_| shape(field))
+pub(crate) fn text(
+    decoder: &mut Decoder<'_>,
+    field: &'static str,
+) -> Result<SecretText, SchemaError> {
+    decoder
+        .str()
+        .map(|text| SecretText::from(text.to_owned()))
+        .map_err(|_| shape(field))
 }
 
 pub(crate) fn uint(decoder: &mut Decoder<'_>, field: &'static str) -> Result<u64, SchemaError> {
@@ -702,7 +710,7 @@ fn optional_integer(
 fn optional_text(
     decoder: &mut Decoder<'_>,
     field: &'static str,
-) -> Result<Option<String>, SchemaError> {
+) -> Result<Option<SecretText>, SchemaError> {
     if decoder.datatype().map_err(|_| shape(field))? == Type::Null {
         decoder.null().map_err(|_| shape(field))?;
         Ok(None)

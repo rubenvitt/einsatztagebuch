@@ -68,6 +68,32 @@ impl<R: CryptoRandomSource + ?Sized> TryCryptoRng for InfallibleRandomAdapter<'_
 
 pub struct HpkeRecipientPrivateKey(<Kem as KemTrait>::PrivateKey);
 
+/// Suite-v1 recipient operations, including non-exporting native providers.
+/// Verification and authorization stay in the caller before this crypto step.
+pub trait HpkeRecipient: Send + Sync {
+    fn public_key(&self) -> HpkeRecipientPublicKey;
+    fn open_envelope(
+        &self,
+        sealed: &HpkeSealed,
+        info: &[u8],
+        aad: &[u8],
+    ) -> Result<SecretBytes<32>, CryptoError>;
+}
+
+impl HpkeRecipient for HpkeRecipientPrivateKey {
+    fn public_key(&self) -> HpkeRecipientPublicKey {
+        Self::public_key(self)
+    }
+    fn open_envelope(
+        &self,
+        sealed: &HpkeSealed,
+        info: &[u8],
+        aad: &[u8],
+    ) -> Result<SecretBytes<32>, CryptoError> {
+        software_hpke_open(self, sealed, info, aad)
+    }
+}
+
 impl HpkeRecipientPrivateKey {
     pub fn from_bytes(bytes: SecretBytes<32>) -> Result<Self, CryptoError> {
         let private = <Kem as KemTrait>::PrivateKey::from_bytes(bytes.expose())
@@ -186,6 +212,15 @@ fn hpke_seal_with_random_source(
 }
 
 pub fn hpke_open(
+    recipient: &dyn HpkeRecipient,
+    sealed: &HpkeSealed,
+    info: &[u8],
+    aad: &[u8],
+) -> Result<SecretBytes<32>, CryptoError> {
+    recipient.open_envelope(sealed, info, aad)
+}
+
+fn software_hpke_open(
     recipient: &HpkeRecipientPrivateKey,
     sealed: &HpkeSealed,
     info: &[u8],
@@ -212,10 +247,125 @@ pub fn hpke_open(
     Ok(SecretBytes::new(cek))
 }
 
+/// Opens the suite-v1 envelope with a token-derived X25519 DH result.
+///
+/// The provider computes DH against this envelope's encapsulated public key;
+/// its private recipient key is never an input to the application. RFC 9180
+/// DHKEM context binding, labeled KDF and base-mode key schedule are the pinned
+/// `hpke` implementation's own operations, not a second HKDF implementation.
+/// Both DH and the resulting CEK have zeroizing ownership. This function only
+/// implements cryptography; the calling Recovery service still verifies the
+/// exact grant, certificate and authorization before permitting token use.
+pub fn hpke_open_with_token_dh(
+    recipient: &HpkeRecipientPublicKey,
+    dh: SecretBytes<32>,
+    sealed: &HpkeSealed,
+    info: &[u8],
+    aad: &[u8],
+) -> Result<SecretBytes<32>, CryptoError> {
+    use hpke::{
+        aead::{AeadCtxR, AeadTag},
+        kdf::Kdf as _,
+        kem::SharedSecret,
+    };
+    use zeroize::Zeroizing;
+
+    // RFC 9180 §7.1.4: reject a non-contributory X25519 result. Check the
+    // library's documented info bound before its infallible key schedule.
+    if dh.matches(&[0; 32]) || info.len() >= 65_531 {
+        return Err(CryptoError::HpkeOpen);
+    }
+    let mut context = [0_u8; 64];
+    context[..32].copy_from_slice(sealed.encapsulated_key());
+    context[32..].copy_from_slice(recipient.as_bytes());
+    let mut shared = SharedSecret::<Kem>::default();
+    Kdf::extract_and_expand(dh.expose(), b"KEM\x00\x20", &context, &mut shared.0)
+        .map_err(|_| CryptoError::HpkeOpen)?;
+    let mut receiver: AeadCtxR<Aead, Kdf, Kem> =
+        Kdf::combine_secrets::<Aead, Kem, _>(&OpModeR::<Kem>::Base, shared, info).into();
+    let tag = AeadTag::<Aead>::from_bytes(&sealed.wrapped_cek()[32..])
+        .map_err(|_| CryptoError::HpkeOpen)?;
+    // A zeroizing caller-owned buffer also covers a backend that mutates its
+    // output before reporting an authentication failure.
+    let mut plaintext = Zeroizing::new([0_u8; 32]);
+    plaintext.copy_from_slice(&sealed.wrapped_cek()[..32]);
+    receiver
+        .open_inout_detached(plaintext.as_mut_slice().into(), aad, &tag)
+        .map_err(|_| CryptoError::HpkeOpen)?;
+    Ok(SecretBytes::new(*plaintext))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use zeroize::Zeroizing;
+
+    #[test]
+    fn token_dh_opener_matches_existing_exact_wire_and_binds_both_contexts() {
+        let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x42; 32])).unwrap();
+        let info = hex::decode("45494e5341545a4152434849562d48504b452d494e464f2d76318101").unwrap();
+        let aad = hex::decode("45494e5341545a4152434849562d48504b452d4141442d76318101").unwrap();
+        let enc: [u8; 32] =
+            hex::decode("083f7859feb58bd62e43682c35a9936668e96c103e74e25530134e2dc6419758")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let ciphertext: [u8; 48] = hex::decode("4e62b6d7e5687cb98df9bd00ab0a1523b7b08b4135726cf24343d29c646ede252078a7a40a8c79d065ea59beb8a9353a").unwrap().try_into().unwrap();
+        let sealed = HpkeSealed::from_parts(enc, ciphertext).unwrap();
+        let dh = || SecretBytes::new(x25519_dalek::x25519([0x42; 32], enc));
+        let opened =
+            hpke_open_with_token_dh(&recipient.public_key(), dh(), &sealed, &info, &aad).unwrap();
+        assert!(opened.matches(&[0x60; 32]));
+        assert!(
+            hpke_open_with_token_dh(&recipient.public_key(), dh(), &sealed, b"wrong-info", &aad)
+                .is_err()
+        );
+        assert!(
+            hpke_open_with_token_dh(&recipient.public_key(), dh(), &sealed, &info, b"wrong-aad")
+                .is_err()
+        );
+        let wrong = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x43; 32])).unwrap();
+        assert!(hpke_open_with_token_dh(&wrong.public_key(), dh(), &sealed, &info, &aad).is_err());
+        let mut changed_enc = enc;
+        changed_enc[0] ^= 1;
+        let changed = HpkeSealed::from_parts(changed_enc, ciphertext).unwrap();
+        assert!(
+            hpke_open_with_token_dh(&recipient.public_key(), dh(), &changed, &info, &aad).is_err()
+        );
+    }
+
+    #[test]
+    fn token_dh_opener_rejects_noncontributory_exchange_and_oversized_info() {
+        let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x42; 32])).unwrap();
+        let sealed = hpke_seal(
+            &recipient.public_key(),
+            &SecretBytes::new([0x60; 32]),
+            b"info",
+            b"aad",
+        )
+        .unwrap();
+        assert!(
+            hpke_open_with_token_dh(
+                &recipient.public_key(),
+                SecretBytes::new([0; 32]),
+                &sealed,
+                b"info",
+                b"aad"
+            )
+            .is_err()
+        );
+        let dh = SecretBytes::new(x25519_dalek::x25519([0x42; 32], *sealed.encapsulated_key()));
+        assert!(
+            hpke_open_with_token_dh(
+                &recipient.public_key(),
+                dh,
+                &sealed,
+                &vec![0; 65_536],
+                b"aad"
+            )
+            .is_err()
+        );
+    }
 
     struct FixedSecretSource {
         bytes: Zeroizing<Vec<u8>>,

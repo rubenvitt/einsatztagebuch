@@ -60,6 +60,18 @@ static void rejects_ambiguous_protocol(void) {
 }
 
 /* RFC 8032 test 1 catches hashing before signing or a non-Ed25519 primitive. */
+static void signing_backup_parser(void) {
+    const char *slots[] = {"admin-signing", "root-signing"};
+    for (size_t i = 0; i < G_N_ELEMENTS(slots); i++) {
+        char *wire = g_strdup_printf("{\"op\":\"backup-signing-seed\",\"slot\":\"%s\",\"installation_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expected_public_key\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"presence\":true}", slots[i]);
+        EaRequest r;
+        g_assert_null(ea_parse((const unsigned char *)wire, strlen(wire), &r));
+        unsigned char exact[512]; memset(exact, ' ', sizeof exact); memcpy(exact, wire, strlen(wire));
+        g_assert_null(ea_parse(exact, sizeof exact, &r));
+        g_free(wire);
+    }
+}
+
 static void ed25519_rfc8032(void) {
     unsigned char seed[32], pub[32], sig[64], expected_pub[32], expected_sig[64];
     size_t n;
@@ -123,5 +135,6 @@ int main(int argc, char **argv) {
     g_test_add_func("/protocol/reject", rejects_ambiguous_protocol);
     g_test_add_func("/crypto/rfc8032", ed25519_rfc8032);
     g_test_add_func("/crypto/two-store", two_store_encryption);
+    g_test_add_func("/backup/parser", signing_backup_parser);
     return g_test_run();
 }

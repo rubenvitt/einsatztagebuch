@@ -763,6 +763,32 @@ impl BootstrapStateV1 {
         self.chain_id
     }
 
+    /// Der zu Beginn festgehaltene Maschinenabdruck. Wiederaufnahme misst
+    /// diesen Wert nicht neu; eine fehlende ursprüngliche Messung bleibt offen.
+    #[must_use]
+    pub const fn ceremony_machine(&self) -> Option<Hash32> {
+        self.ceremony_machine
+    }
+
+    /// Read-only predecessor check for native Root preparation.
+    pub(crate) const fn has_root_material(&self) -> bool {
+        self.root_material().is_some()
+    }
+
+    pub(crate) const fn root_material(&self) -> Option<&RootKeyMaterialV1> {
+        self.root.as_ref()
+    }
+
+    /// Only step and Root material may extend the existing fresh-state image
+    /// for native Root preparation/completion. Later fields stay at the same
+    /// defaults used by the Coordinator, without a second field allowlist.
+    pub(crate) fn has_only_early_root_fields(&self) -> bool {
+        let mut expected = Self::fresh(self.organization_id, self.chain_id, self.ceremony_machine);
+        expected.step = self.step;
+        expected.root.clone_from(&self.root);
+        self.persisted_image() == expected.persisted_image()
+    }
+
     /// Die exakten Vorstufenbytes, sobald Schritt 3 sie gebaut hat.
     #[must_use]
     pub fn exact_pre_anchor_bytes(&self) -> Option<&[u8]> {
@@ -1850,9 +1876,12 @@ impl<'a> BootstrapCoordinator<'a> {
     /// Ports.
     pub fn record_fresh_machine_recovery_test(
         &mut self,
-        proof: FreshMachineRecoveryProof,
+        proof: FreshMachineRecoveryProof<'_>,
     ) -> Result<ProductionState, AdminError> {
         self.require_completed(BootstrapStep::CreateGenesisAndFinalAnchor)?;
+        if !proof.is_current() {
+            return Err(AdminError::RecoveryTestFailed);
+        }
         let ceremony_machine = self
             .state
             .ceremony_machine

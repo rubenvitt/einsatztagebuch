@@ -131,11 +131,9 @@ pub fn exit_code_for(report: &VerificationReportV1) -> ExitCode {
     );
 
     // 6 — „vollstaendig geprueft, aber fachlich unvollstaendig oder teilweise
-    // vernichtet". DIE WICHTIGSTE ZEILE: gemessen liefert ein Bestand, dessen
-    // Registrierungskoepfe zur Laufuhr saemtlich veraltet sind,
-    // `is_fully_verified() == true` bei NULL Objektergebnissen ueber einem
-    // geparsten Eintrag. Ohne diese Zeile meldete das Werkzeug Erfolg ueber
-    // einen Bestand, ueber den es nichts ausgesagt hat.
+    // vernichtet". Die defensive Vollstaendigkeitspruefung verlangt fuer
+    // jeden geparsten Eintrag ein Ergebnis. Eine alte Registry-Lease allein
+    // erzeugt seit Task 8 keine fehlenden historischen Objektergebnisse.
     //
     // Verglichen wird gegen `entry_package_count() + destroyed_entry_count()`,
     // weil beide Objektarten ein Ergebnis tragen koennen; ein autorisierter
@@ -208,9 +206,15 @@ pub const fn exit_code_for_error(error: &RecoveryError) -> ExitCode {
         // Eine leere Passphrasen- oder PIN-Datei: ebenfalls eine Aussage ueber
         // den Aufruf, nicht ueber den Bestand.
         RecoveryError::SecretEmpty => ExitCode::Usage,
-        // Die benannte Grenze der PKCS#11-Bindung: „nicht unterstuetzte
-        // Providerfaehigkeit", dasselbe Muster wie `--report-signing-key`.
-        RecoveryError::Pkcs11Unbound => ExitCode::Unsupported,
+        RecoveryError::Pkcs11Provider(error) => match error {
+            crate::Pkcs11ProviderError::Unavailable | crate::Pkcs11ProviderError::KeyProtection => {
+                ExitCode::Unsupported
+            }
+            crate::Pkcs11ProviderError::Cleanup => ExitCode::Io,
+            crate::Pkcs11ProviderError::Authentication
+            | crate::Pkcs11ProviderError::KeySelection
+            | crate::Pkcs11ProviderError::Operation => ExitCode::Key,
+        },
         RecoveryError::Verify(error) => match error {
             VerifyError::Archive(error) => match error {
                 ArchiveError::Unavailable => ExitCode::Io,

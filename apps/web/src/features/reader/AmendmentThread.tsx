@@ -1,4 +1,4 @@
-import { Space, Typography } from 'antd'
+import { Input, Space, Typography } from 'antd'
 import type { ReactElement } from 'react'
 
 import type { ReaderAmendmentThreadView } from '../../bridge/generated-contracts'
@@ -29,6 +29,12 @@ export function AmendmentThread({
       <Space orientation="vertical" size="middle">
         <Typography.Title level={3}>Original</Typography.Title>
         <EntryView entry={thread.original} />
+        {thread.correctionReference === undefined ? null : (
+          <Space orientation="vertical">
+            <Typography.Text>Diese Referenz kann im Writer für einen eigenen Nachtrag übernommen werden.</Typography.Text>
+            <Input.TextArea aria-label="Korrekturreferenz für den Writer" readOnly value={JSON.stringify(thread.correctionReference)} />
+          </Space>
+        )}
 
         <Typography.Title level={3}>Nachträge</Typography.Title>
         {thread.amendments.length === 0 ? (

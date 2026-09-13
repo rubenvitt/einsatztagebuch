@@ -497,7 +497,7 @@ fn encode_header_items(
 /// ueberschrieben — nicht ueber `hash_password_into`, dessen `alloc`-Merkmal
 /// `password-hash` und `phc` ins Lockfile zoege (Begruendung an der
 /// `argon2`-Zeile des Wurzelmanifests).
-fn derive_key(
+pub(crate) fn derive_key(
     passphrase: &SecretVec,
     salt: &[u8; KEY_CONTAINER_SALT_SIZE_V1],
 ) -> Result<SecretBytes<CEK_SIZE>, RecoveryError> {

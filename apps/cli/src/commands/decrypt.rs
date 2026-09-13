@@ -33,7 +33,7 @@
 //! Dateiform der Stufe 4, der verschluesselte Container oder die
 //! PKCS#11-Referenz. Welche es ist, hat `crate::args` bereits entschieden;
 //! hier wird nur aufgeloest. Eine offene Passphrasendatei (2), die falsche
-//! Passphrase (14) und die benannte PKCS#11-Grenze (21) enden deshalb hier,
+//! Passphrase (14) und ein nicht verfügbarer PKCS#11-Provider (21) enden hier,
 //! BEVOR der Bestand gelesen wird — dieselbe Stelle, an der bisher eine
 //! unlesbare Schluesseldatei endete.
 

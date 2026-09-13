@@ -37,8 +37,16 @@ struct Request {
     let presence: Bool
     let replace: Bool
     let expectedInstallationID: Data?
+    var expectedPublicKey: Data? = nil
     static let maximumBytes = 65_536
     static let secretSlots: Set<String> = ["database-key", "draft-key"]
+
+    func requireSigningBackup() throws {
+        guard op == "backup-signing-seed", slot == "admin-signing" || slot == "root-signing",
+              kind == nil, data == nil, !replace, expectedInstallationID?.count == 32,
+              expectedPublicKey?.count == 32 else { throw Failure("invalid-request") }
+        guard presence else { throw Failure("presence-required") }
+    }
 
     static func parseChallenge(_ bytes: Data) throws -> String {
         guard bytes.count < 1024 else { throw Failure("invalid-request") }
@@ -59,6 +67,7 @@ struct Request {
         switch op {
         case "account", "initialize", "reset": break
         case "watch-session": allowed = ["op", "installation_id"]
+        case "backup-signing-seed": allowed.formUnion(["slot", "expected_public_key"])
         case "generate": allowed.formUnion(["slot", "kind", "replace"])
         case "sign", "wrap-secret": allowed.formUnion(["slot", "kind", "data"])
         case "public-key", "unwrap-secret", "delete", "contains": allowed.formUnion(["slot", "kind"])
@@ -108,8 +117,16 @@ struct Request {
             data = try Hex.decode(value)
             if op == "wrap-secret" && data?.count != 32 { throw Failure("invalid-request") }
         }
-        return Request(op: op, slot: slot, kind: kind, data: data, presence: presence, replace: replace,
-                       expectedInstallationID: expectedInstallationID)
+        var request = Request(op: op, slot: slot, kind: kind, data: data, presence: presence, replace: replace,
+                              expectedInstallationID: expectedInstallationID)
+        if op == "backup-signing-seed" {
+            guard bytes.count <= 512 else { throw Failure("request-too-large") }
+            guard Set(object.keys) == ["op", "slot", "installation_id", "expected_public_key", "presence"],
+                  let text = object["expected_public_key"] as? String else { throw Failure("invalid-request") }
+            request.expectedPublicKey = try Hex.decode(text)
+            try request.requireSigningBackup()
+        }
+        return request
     }
 }
 
@@ -212,4 +229,39 @@ enum Transport {
             }
         }
     }
+}
+
+// One fixed owned allocation; no secret String/JSON/Data slice is produced.
+// CryptoKit and Data internals remain outside this owner's cleanup guarantee.
+final class SigningBackupFrame {
+    private let storage = UnsafeMutableRawPointer.allocate(byteCount: 106, alignment: 1)
+    init(role: UInt8, installation: Data, publicKey: Data, seed: Data) throws {
+        storage.initializeMemory(as: UInt8.self, repeating: 0, count: 106)
+        guard (role == 1 || role == 2), installation.count == 32, publicKey.count == 32, seed.count == 32 else {
+            throw Failure("key-invalid")
+        }
+        for (offset, byte) in "EABKSEED".utf8.enumerated() { storage.storeBytes(of: byte, toByteOffset: offset, as: UInt8.self) }
+        storage.storeBytes(of: UInt8(1), toByteOffset: 8, as: UInt8.self)
+        storage.storeBytes(of: role, toByteOffset: 9, as: UInt8.self)
+        installation.withUnsafeBytes { storage.advanced(by: 10).copyMemory(from: $0.baseAddress!, byteCount: 32) }
+        publicKey.withUnsafeBytes { storage.advanced(by: 42).copyMemory(from: $0.baseAddress!, byteCount: 32) }
+        seed.withUnsafeBytes { storage.advanced(by: 74).copyMemory(from: $0.baseAddress!, byteCount: 32) }
+    }
+    func clear() { _ = memset_s(storage, 106, 0, 106) }
+    deinit { clear(); storage.deallocate() }
+    func write(to fd: Int32 = STDOUT_FILENO) throws {
+        defer { clear() }
+        var offset = 0
+        while offset < 106 {
+            let count = Darwin.write(fd, storage.advanced(by: offset), 106 - offset)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { throw Failure("io-failed") }
+            offset += count
+        }
+    }
+    #if SELF_TEST
+    func inspect(_ body: (UnsafeRawBufferPointer) throws -> Void) rethrows {
+        try body(UnsafeRawBufferPointer(start: storage, count: 106))
+    }
+    #endif
 }

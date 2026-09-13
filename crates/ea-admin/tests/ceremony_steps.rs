@@ -32,7 +32,10 @@ fn walk(kind: TrustCeremonyKind) -> Vec<TrustCeremonyStep> {
 fn device_approve_walks_all_six_steps_in_order() {
     assert_eq!(
         walk(TrustCeremonyKind::DeviceApprove),
-        TrustCeremonyStep::ALL.to_vec()
+        TrustCeremonyStep::ALL
+            .into_iter()
+            .filter(|step| *step != TrustCeremonyStep::TargetPublished)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -41,7 +44,12 @@ fn device_approve_walks_all_six_steps_in_order() {
 fn the_other_three_kinds_skip_exactly_the_fingerprint_step() {
     let without_fingerprint: Vec<TrustCeremonyStep> = TrustCeremonyStep::ALL
         .into_iter()
-        .filter(|step| *step != TrustCeremonyStep::FingerprintConfirmed)
+        .filter(|step| {
+            !matches!(
+                step,
+                TrustCeremonyStep::FingerprintConfirmed | TrustCeremonyStep::TargetPublished
+            )
+        })
         .collect();
     assert_eq!(without_fingerprint.len(), 5);
     for kind in [
@@ -86,8 +94,7 @@ fn no_step_jumps_two_positions_ahead() {
     }
 }
 
-/// Genau zwei Schritte verlangen einen FRISCHEN Bedienernachweis: die
-/// Admin-Autorisierung und die Veroeffentlichung.
+/// Each round requires fresh presence for authorization and its publication.
 #[test]
 fn exactly_the_two_root_touching_steps_require_fresh_reauth() {
     let requiring: Vec<TrustCeremonyStep> = TrustCeremonyStep::ALL
@@ -99,6 +106,7 @@ fn exactly_the_two_root_touching_steps_require_fresh_reauth() {
         vec![
             TrustCeremonyStep::AdminAuthorized,
             TrustCeremonyStep::RegistryPublished,
+            TrustCeremonyStep::TargetPublished,
         ]
     );
 }
@@ -127,7 +135,7 @@ fn every_kind_reauthenticates_for_the_admin_root_ceremony() {
 #[test]
 fn the_all_arrays_are_complete_and_free_of_duplicates() {
     assert_eq!(TrustCeremonyKind::ALL.len(), 4);
-    assert_eq!(TrustCeremonyStep::ALL.len(), 6);
+    assert_eq!(TrustCeremonyStep::ALL.len(), 7);
     for (index, kind) in TrustCeremonyKind::ALL.iter().enumerate() {
         assert_eq!(
             TrustCeremonyKind::ALL.iter().position(|k| k == kind),

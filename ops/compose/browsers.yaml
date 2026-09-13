@@ -30,6 +30,9 @@ name: einsatzarchiv-browsers
 
 services:
   browsers:
+    # The pinned Chrome-for-Testing linux64 driver is x86_64. Select the
+    # matching image variant explicitly, including on Apple Silicon hosts.
+    platform: linux/amd64
     # Der Bauzusammenhang ist `ops/compose` und nicht die Wurzel: das Rezept
     # unten braucht keine einzige Datei aus dem Baum, und ein Zusammenhang
     # über der Wurzel schickte `target/` und `node_modules/` an den Daemon.
@@ -50,7 +53,21 @@ services:
       # Namen `google-chrome`/`chrome` im PATH sucht, das Abbild ihn aber
       # ausschließlich unter `/ms-playwright/` ablegt.
       dockerfile_inline: |
+        FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e AS pkcs11-build
+        RUN apt-get update \
+         && apt-get install --yes --no-install-recommends build-essential cmake libssl-dev \
+         && curl --fail --silent --show-error --location \
+              https://codeload.github.com/softhsm/SoftHSMv2/tar.gz/refs/tags/2.7.0 \
+              --output /tmp/softhsm.tar.gz \
+         && echo "be14a5820ec457eac5154462ffae51ba5d8a643f6760514d4b4b83a77be91573  /tmp/softhsm.tar.gz" | sha256sum --check --strict - \
+         && tar -xzf /tmp/softhsm.tar.gz -C /tmp \
+         && cmake -S /tmp/SoftHSMv2-2.7.0 -B /tmp/softhsm-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DENABLE_EDDSA=ON -DENABLE_ECC=ON \
+         && cmake --build /tmp/softhsm-build --parallel 4
         FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+        # The actual module is available to Linux Stage-5 gates. Tokens are
+        # initialized in per-run temporary directories, never baked in the image.
+        COPY --from=pkcs11-build /tmp/softhsm-build/src/lib/libsofthsm2.so /usr/local/lib/softhsm/libsofthsm2.so
+        COPY --from=pkcs11-build /tmp/softhsm-build/src/bin/util/softhsm2-util /usr/local/bin/softhsm2-util
         RUN curl --fail --silent --show-error --location \
               --output /tmp/chromedriver.zip \
               https://storage.googleapis.com/chrome-for-testing-public/151.0.7922.34/linux64/chromedriver-linux64.zip \

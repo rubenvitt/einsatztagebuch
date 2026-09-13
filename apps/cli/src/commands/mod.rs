@@ -41,6 +41,7 @@ pub mod grant;
 pub mod list;
 pub mod operator;
 pub mod organization;
+pub mod posture;
 pub mod recovery_test;
 pub mod registry;
 pub mod report;
@@ -78,6 +79,8 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
             authority_key,
             authorization,
             recipient_certificate,
+            operator_config,
+            output,
         } => grant::run(
             invocation,
             archive,
@@ -85,18 +88,32 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
             authority_key,
             authorization,
             recipient_certificate,
+            operator_config.as_deref(),
+            output.as_deref(),
             now,
         ),
         Command::Report { archive, output } => report::run(invocation, archive, output, now),
         Command::Export { source, output } => export::run(invocation, source, output, now),
         Command::RecoveryTest {
+            runtime,
             archive,
             key_inventory,
             output,
-        } => recovery_test::run(invocation, archive, key_inventory, output, now),
+        } => recovery_test::run(
+            invocation,
+            archive,
+            key_inventory,
+            output,
+            runtime.as_ref(),
+            now,
+        ),
         // OHNE `now`: dieser Pfad verifiziert nichts und datiert nichts. Die
         // Begruendung steht an `organization::run`.
         Command::OrganizationInit => organization::run(invocation),
+        Command::OrganizationCertifyRoot {
+            initial_registry_version,
+        } => organization::run_certify_root(invocation, *initial_registry_version),
+        Command::Posture { action, config } => posture::run(invocation, action, config, now),
         Command::Operator { action, config } => operator::run(invocation, *action, config, now),
         // Beide neuen Pfade gehen weder durch [`verified`] noch durch die
         // Wiederherstellungsfassade, und aus demselben Grund wie

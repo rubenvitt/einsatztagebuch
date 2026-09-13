@@ -110,13 +110,13 @@ impl SchemaRegistry {
         ea_cbor::validate(exact_bytes, ea_cbor::ParserLimits::V1)?;
         let payload = crate::decode::decode_payload(schema_id, exact_bytes)?;
         payload.validate()?;
-        let reencoded = crate::encode::encode_payload_unchecked(&payload)?;
-        if reencoded != exact_bytes {
+        let reencoded = zeroize::Zeroizing::new(crate::encode::encode_payload_unchecked(&payload)?);
+        if reencoded.as_slice() != exact_bytes {
             return Err(SchemaError::invalid("EA-SCHEMA-REENCODE", None));
         }
         Ok(ValidatedPayload {
             payload,
-            exact_bytes: exact_bytes.to_vec(),
+            exact_bytes: zeroize::Zeroizing::new(exact_bytes.to_vec()),
         })
     }
 

@@ -163,6 +163,38 @@ async fn a_two_approver_authorization_is_accepted_and_blocks_delivery_and_regran
         "a running destruction blocks the historical re-grant"
     );
 
+    // A grant verified before reservation could have been delayed between its
+    // S3 write and SQL publication. The actual repository must recheck too.
+    use ea_sync_server::HistoricalGrantStore;
+    let exact = upload.exact_eag_bytes();
+    let ea_format::ParsedArchiveObject::Grant(parsed) =
+        ea_format::decode_exact_object(exact).unwrap()
+    else {
+        panic!()
+    };
+    let fields = parsed.value().grant_body().fields();
+    let late =
+        einsatzarchiv_server::adapters::postgres::PostgresRepository::new(database.pool().clone())
+            .record_historical_grant(ea_sync_server::HistoricalGrantCommandV1 {
+                organization_id: ready.closure.organization_id,
+                entry_hash: prepared.entry.entry_hash,
+                object: ea_sync_server::IndexedObjectV1 {
+                    kind: ea_format::ObjectTypeV1::Grant,
+                    object_hash: parsed.object_hash(),
+                    size_bytes: exact.len() as u64,
+                },
+                recipient_key_thumbprint: fields.recipient_key_thumbprint,
+                expires_at: ea_types::UnixMillis::new(AUTHORIZATION_EXPIRES_AT),
+                stored_at: ea_types::UnixMillis::new(common::READ_SERVER_NOW_MILLIS),
+            })
+            .await
+            .unwrap();
+    assert_eq!(
+        late,
+        ea_sync_server::AppendOutcome::Conflict,
+        "a delayed verified grant cannot appear in a frozen target inventory"
+    );
+
     database.cleanup().await;
 }
 
@@ -205,6 +237,114 @@ async fn the_stored_destruction_state_is_delivered_on_its_own_endpoint() {
 
 /// ZWEIMAL derselbe Approver sind nicht zwei Approver — und der Vorgang
 /// entsteht nicht.
+#[tokio::test]
+async fn barrier_status_requires_every_real_target_and_exact_authorization_object() {
+    use ea_format::{DecodedTrustPayloadV1, ParsedArchiveObject, TrustObjectV1, TrustPayloadV1};
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, true).await;
+    let approvers = archive_objects::approvers(&ready.closure);
+    let mut prepared = prepare(&ready, 0x68, &approvers).await;
+    let second = common::commit_one_entry(
+        &ready,
+        prepared.entry.sequence + 1,
+        Some(prepared.entry.entry_hash),
+        0x69,
+    )
+    .await;
+    let ParsedArchiveObject::Trust(original) =
+        ea_format::decode_exact_object(prepared.upload.exact_authorization_etb_bytes()).unwrap()
+    else {
+        panic!()
+    };
+    let DecodedTrustPayloadV1::DestructionAuthorization(mut fields) =
+        original.value().decoded_payload().unwrap()
+    else {
+        panic!()
+    };
+    fields.authorization_sequence = second.sequence;
+    fields.targets.push(ea_format::DestructionTargetV1::new(
+        *second.entry_hash.as_bytes(),
+        second.sequence,
+    ));
+    fields.targets.sort_by_key(|t| *t.entry_hash());
+    let payload = TrustPayloadV1::destruction_authorization(fields).unwrap();
+    let signatures = approvers
+        .iter()
+        .map(|(cert, seed)| {
+            ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(*seed))
+                .sign_destruction_approval_digest(*cert, payload.exact_digest_input())
+                .unwrap()
+        })
+        .collect();
+    let exact = ea_format::encode_trust(&TrustObjectV1::new(payload, signatures).unwrap()).unwrap();
+    prepared.authorization_hash = ea_crypto::object_hash(exact.as_bytes());
+    prepared.upload = DestructionRequestV1::new(exact.into_vec()).unwrap();
+    let accepted = post_destruction(&ready, &prepared, [0xa0; 16]).await;
+    assert_eq!(
+        accepted.status,
+        202,
+        "{:?}",
+        common::error_code(&accepted.body)
+    );
+    let id = archive_objects::destruction_id_of(prepared.marker);
+    let target = format!("/v1/destructions/{}", hex::encode(id.as_bytes()));
+    let read = |request_id| {
+        let ready = &ready;
+        let target = &target;
+        async move {
+            common::call(&common::ApiCall {
+                ready,
+                signer_seed: common::trust_closure::READER_SIGNING_SEED,
+                endpoint: EndpointV1::DestructionStatus,
+                target,
+                body: None,
+                request_id,
+            })
+            .await
+        }
+    };
+    let positive = read([0xa1; 16]).await;
+    assert_eq!(positive.status, 200);
+    assert!(
+        DestructionStatusResponseV1::decode(&positive.body)
+            .unwrap()
+            .authorization_object_hash()
+            == prepared.authorization_hash
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM destruction_targets WHERE destruction_id=$1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+    sqlx::query("DELETE FROM destruction_targets WHERE destruction_id=$1 AND entry_hash=$2")
+        .bind(id.as_bytes().as_slice())
+        .bind(second.entry_hash.as_bytes().as_slice())
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let missing = read([0xa2; 16]).await;
+    assert_eq!(
+        missing.status, 409,
+        "one missing target must withhold barrier confirmation"
+    );
+    sqlx::query("INSERT INTO destruction_targets(organization_id,destruction_id,entry_hash,chain_sequence) VALUES($1,$2,$3,$4)").bind(ready.closure.organization_id.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(second.entry_hash.as_bytes().as_slice()).bind(second.sequence as i64).execute(database.pool()).await.unwrap();
+    assert_eq!(read([0xa3; 16]).await.status, 200);
+    sqlx::query("UPDATE destructions SET authorization_object_hash=$1 WHERE destruction_id=$2")
+        .bind(&[0x43u8; 32][..])
+        .bind(id.as_bytes().as_slice())
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert_ne!(
+        read([0xa4; 16]).await.status,
+        200,
+        "an unavailable different auth object cannot confirm delivery blocking"
+    );
+    database.cleanup().await;
+}
+
 #[tokio::test]
 async fn a_destruction_signed_twice_by_the_same_approver_is_refused() {
     let database = common::fresh_database().await;
@@ -475,5 +615,150 @@ async fn a_running_destruction_also_blocks_the_single_object_read() {
         "chain continuity stays readable through the object endpoint"
     );
 
+    database.cleanup().await;
+}
+
+fn requested_event(ready: &common::ReadyServer, prepared: &Prepared, marker: u8) -> Vec<u8> {
+    use ea_format::{DestructionTransitionFieldsV1, TrustObjectV1, TrustPayloadV1};
+    let payload = TrustPayloadV1::destruction_transition(DestructionTransitionFieldsV1 {
+        destruction_id: archive_objects::destruction_id_of(prepared.marker),
+        destruction_authorization_object_hash: prepared.authorization_hash,
+        event_id: ea_types::EventId::try_from(&[marker; 16][..]).unwrap(),
+        previous_event_object_hash: None,
+        from_state: None,
+        to_state: 0,
+        trigger_code: 0,
+        executed_at: ea_types::UnixMillis::new(common::READ_SERVER_NOW_MILLIS),
+    })
+    .unwrap();
+    let signature = ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(
+        trust_closure::DELETION_COMPONENT_SEED,
+    ))
+    .sign_destruction_transition_digest(
+        ready.closure.deletion_certificate_hash.unwrap(),
+        payload.exact_digest_input(),
+        prepared.upload.exact_authorization_etb_bytes(),
+    )
+    .unwrap();
+    ea_format::encode_trust(&TrustObjectV1::new(payload, vec![signature]).unwrap())
+        .unwrap()
+        .as_bytes()
+        .to_vec()
+}
+
+#[tokio::test]
+async fn actual_signed_event_is_durable_and_exact_replay_preserves_the_v1_history() {
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_destruction_server(&database).await;
+    let prepared = prepare(&ready, 0x61, &archive_objects::approvers(&ready.closure)).await;
+    assert_eq!(
+        post_destruction(&ready, &prepared, [0x61; 16]).await.status,
+        202
+    );
+    let exact = requested_event(&ready, &prepared, 0x62);
+    let path = format!(
+        "/v1/destructions/{}/events",
+        hex::encode(archive_objects::destruction_id_of(prepared.marker).as_bytes())
+    );
+    for marker in [0x63, 0x64] {
+        let response = common::call(&common::ApiCall {
+            ready: &ready,
+            signer_seed: trust_closure::DELETION_COMPONENT_SEED,
+            endpoint: EndpointV1::DestructionEvents,
+            target: &path,
+            body: Some(&exact),
+            request_id: [marker; 16],
+        })
+        .await;
+        assert_eq!(
+            response.status,
+            202,
+            "signed exact event must persist: {:?}",
+            common::error_code(&response.body)
+        );
+        let status = DestructionStatusResponseV1::decode(&response.body).unwrap();
+        assert_eq!(status.state(), 0);
+        assert_eq!(status.transitions().len(), 1);
+        assert_eq!(status.transitions()[0].exact_object_bytes(), exact);
+    }
+    let bad_capability = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::DestructionEvents,
+        target: &path,
+        body: Some(&exact),
+        request_id: [0x65; 16],
+    })
+    .await;
+    assert_eq!(bad_capability.status, 403);
+    let mut tampered = exact.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    let bad_signature = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::DELETION_COMPONENT_SEED,
+        endpoint: EndpointV1::DestructionEvents,
+        target: &path,
+        body: Some(&tampered),
+        request_id: [0x66; 16],
+    })
+    .await;
+    assert_eq!(bad_signature.status, 422);
+    let fork = requested_event(&ready, &prepared, 0x67);
+    let conflict = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::DELETION_COMPONENT_SEED,
+        endpoint: EndpointV1::DestructionEvents,
+        target: &path,
+        body: Some(&fork),
+        request_id: [0x68; 16],
+    })
+    .await;
+    assert_eq!(conflict.status, 409);
+    // A signed transition is a claim; no job/measurement means no physical
+    // progress admission even when both COSE and HTTP signatures are valid.
+    let ea_format::ParsedArchiveObject::Trust(parsed) =
+        ea_format::decode_exact_object(&exact).unwrap()
+    else {
+        panic!()
+    };
+    let ea_format::DecodedTrustPayloadV1::DestructionTransition(mut fields) =
+        parsed.value().decoded_payload().unwrap()
+    else {
+        panic!()
+    };
+    fields.event_id = ea_types::EventId::try_from(&[0x69; 16][..]).unwrap();
+    fields.from_state = Some(0);
+    fields.to_state = 1;
+    fields.trigger_code = 1;
+    fields.previous_event_object_hash = Some(ea_crypto::object_hash(&exact));
+    let payload = ea_format::TrustPayloadV1::destruction_transition(fields).unwrap();
+    let signature = ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(
+        trust_closure::DELETION_COMPONENT_SEED,
+    ))
+    .sign_destruction_transition_digest(
+        ready.closure.deletion_certificate_hash.unwrap(),
+        payload.exact_digest_input(),
+        prepared.upload.exact_authorization_etb_bytes(),
+    )
+    .unwrap();
+    let premature =
+        ea_format::encode_trust(&ea_format::TrustObjectV1::new(payload, vec![signature]).unwrap())
+            .unwrap();
+    let refused = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::DELETION_COMPONENT_SEED,
+        endpoint: EndpointV1::DestructionEvents,
+        target: &path,
+        body: Some(premature.as_bytes()),
+        request_id: [0x69; 16],
+    })
+    .await;
+    assert_eq!(refused.status, 409);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM destruction_transitions")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
     database.cleanup().await;
 }

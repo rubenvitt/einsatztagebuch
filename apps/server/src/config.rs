@@ -71,6 +71,29 @@ pub const ENV_WEB_ADDITIONAL_ORIGINS: &str = "EA_WEB_ADDITIONAL_ORIGINS";
 pub const ENV_SERVER_SIGNING_KEY: &str = "EA_SERVER_SIGNING_KEY_HEX";
 pub const ENV_SERVER_CERTIFICATE_HASH: &str = "EA_SERVER_CERTIFICATE_HASH_HEX";
 pub const ENV_SERVER_KEY_GENERATION: &str = "EA_SERVER_KEY_GENERATION";
+pub const ENV_DELETION_SIGNING_KEY: &str = "EA_DELETION_SIGNING_KEY_HEX";
+pub const ENV_DELETION_CERTIFICATE_HASH: &str = "EA_DELETION_CERTIFICATE_HASH_HEX";
+pub struct ServerDeletionCredential {
+    pub secret: ea_crypto::SecretBytes<32>,
+    pub certificate: ea_types::CertificateHash,
+}
+fn deletion_credential() -> Result<Option<ServerDeletionCredential>, ConfigError> {
+    match (
+        std::env::var_os(ENV_DELETION_SIGNING_KEY),
+        std::env::var_os(ENV_DELETION_CERTIFICATE_HASH),
+    ) {
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Ok(Some(ServerDeletionCredential {
+            secret: ea_crypto::SecretBytes::new(fixed_hex::<32>(ENV_DELETION_SIGNING_KEY)?),
+            certificate: ea_types::CertificateHash::try_from(
+                fixed_hex::<32>(ENV_DELETION_CERTIFICATE_HASH)?.as_slice(),
+            )
+            .map_err(|_| ConfigError::Invalid(ENV_DELETION_CERTIFICATE_HASH))?,
+        })),
+        (None, Some(_)) => Err(ConfigError::Missing(ENV_DELETION_SIGNING_KEY)),
+        (Some(_), None) => Err(ConfigError::Missing(ENV_DELETION_CERTIFICATE_HASH)),
+    }
+}
 
 /// Die Befunde beim Hochfahren. Alle fail-closed: der Server startet nicht.
 #[derive(Debug)]
@@ -249,6 +272,7 @@ fn relying_party_id_of(origin: &str, name: &'static str) -> Result<String, Confi
 }
 
 pub struct ServerConfiguration {
+    pub deletion_credential: Option<ServerDeletionCredential>,
     pub bind_address: String,
     pub sync_authority: String,
     pub organization_id: ea_types::OrganizationId,
@@ -288,6 +312,7 @@ impl ServerConfiguration {
     /// Liest die Konfiguration aus der Umgebung — vollstaendig oder gar nicht.
     pub fn from_environment() -> Result<Self, ConfigError> {
         Ok(Self {
+            deletion_credential: deletion_credential()?,
             bind_address: optional(ENV_BIND_ADDRESS, "127.0.0.1:8443"),
             sync_authority: required(ENV_SYNC_AUTHORITY)?,
             organization_id: ea_types::OrganizationId::try_from(

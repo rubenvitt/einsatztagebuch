@@ -359,6 +359,9 @@ impl ActiveProfilePointerCoreV1 {
     /// Die Strukturversion an Position eins.
     pub const STRUCTURE_VERSION: u64 = 1;
 
+    /// Array/version (2), byte-string header/hash (34), maximum uint (9).
+    pub const MAX_ENCODED_BYTES: usize = 45;
+
     #[must_use]
     pub const fn new(active_profile_hash: Hash32, generation: u64) -> Self {
         Self {
@@ -394,6 +397,38 @@ pub fn encode_active_profile_pointer_core(
         .and_then(|encoder| encoder.u64(core.generation))
         .map_err(|_| FormatError::Shape)?;
     Ok(bytes)
+}
+
+/// Decodes only the exact deterministic existing v1 pointer core.
+///
+/// This validates syntax, not activation authority or generation freshness.
+///
+/// # Errors
+/// [`FormatError::Shape`] for wrong shape, version, hash length, over-limit,
+/// trailing or noncanonical input.
+pub fn decode_active_profile_pointer_core(
+    bytes: &[u8],
+) -> Result<ActiveProfilePointerCoreV1, FormatError> {
+    if bytes.len() > ActiveProfilePointerCoreV1::MAX_ENCODED_BYTES {
+        return Err(FormatError::Shape);
+    }
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(|_| FormatError::Shape)? != Some(3)
+        || decoder.u64().map_err(|_| FormatError::Shape)?
+            != ActiveProfilePointerCoreV1::STRUCTURE_VERSION
+    {
+        return Err(FormatError::Shape);
+    }
+    let hash = Hash32::try_from(decoder.bytes().map_err(|_| FormatError::Shape)?)
+        .map_err(|_| FormatError::Shape)?;
+    let generation = decoder.u64().map_err(|_| FormatError::Shape)?;
+    let pointer = ActiveProfilePointerCoreV1::new(hash, generation);
+    if decoder.position() != bytes.len()
+        || encode_active_profile_pointer_core(&pointer)?.as_slice() != bytes
+    {
+        return Err(FormatError::Shape);
+    }
+    Ok(pointer)
 }
 
 /// Kleinbuchstaben-Hex, damit `Debug` ohne `hex`-Abhaengigkeit auskommt.

@@ -197,3 +197,6 @@ pub fn bridge_echo(value: &str) -> String {
 pub fn bridge_echo_js(value: &str) -> String {
     bridge_echo(value)
 }
+
+/// Verified managed-cache removal and durable local measurement.
+pub mod destruction_bridge;

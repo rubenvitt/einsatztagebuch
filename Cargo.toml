@@ -1,5 +1,6 @@
 [workspace]
-members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-index", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-reader", "crates/ea-reader-wasm", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "crates/ea-sync-server", "crates/ea-sync-client", "crates/ea-admin", "apps/server", "apps/cli", "apps/desktop/src-tauri"]
+members = ["tools/xtask", "tests/ea-system-tests", "crates/ea-types", "crates/ea-cbor", "crates/ea-crypto", "crates/ea-format", "crates/ea-index", "crates/ea-schema", "crates/ea-time", "crates/ea-trust", "crates/ea-archive", "crates/ea-archive-fs", "crates/ea-chain", "crates/ea-verify", "crates/ea-reader", "crates/ea-reader-wasm", "crates/ea-recovery", "crates/ea-testkit", "crates/ea-key-provider", "crates/ea-operator", "crates/ea-local-store", "crates/ea-audit", "crates/ea-draft", "crates/ea-destruction", "crates/ea-writer", "crates/ea-ui-contracts", "crates/ea-sync-protocol", "crates/ea-sync-server", "crates/ea-sync-client", "crates/ea-admin", "apps/server", "apps/cli", "apps/desktop/src-tauri"]
+exclude = ["vendor/cryptoki"]
 resolver = "2"
 
 [workspace.package]
@@ -50,6 +51,7 @@ ea-audit = { path = "crates/ea-audit" }
 ea-cbor = { path = "crates/ea-cbor" }
 ea-chain = { path = "crates/ea-chain" }
 ea-crypto = { path = "crates/ea-crypto" }
+ea-destruction = { path = "crates/ea-destruction" }
 ea-draft = { path = "crates/ea-draft" }
 ea-format = { path = "crates/ea-format" }
 ea-index = { path = "crates/ea-index" }
@@ -73,6 +75,7 @@ ea-schema = { path = "crates/ea-schema" }
 ea-sync-client = { path = "crates/ea-sync-client" }
 ea-sync-protocol = { path = "crates/ea-sync-protocol" }
 ea-sync-server = { path = "crates/ea-sync-server" }
+einsatzarchiv-server = { path = "apps/server" }
 ea-testkit = { path = "crates/ea-testkit" }
 ea-time = { path = "crates/ea-time" }
 ea-trust = { path = "crates/ea-trust" }
@@ -102,6 +105,9 @@ getrandom = { version = "=0.4.3", features = ["wasm_js"] }
 # Default-Merkmale — `default-features = false` ist ein No-op und steht als
 # ausgeschriebene Absicht, aus der die Ledgerzeile `hkdf = []` entsteht.
 hkdf = { version = "=0.13.0", default-features = false }
+hmac = { version = "=0.13.0", default-features = false }
+# ADR-0007: explicit offline PKCS#11 module only; no generated bindings.
+cryptoki = { version = "=0.12.0", default-features = false }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 jiff = { version = "=0.2.35", default-features = false, features = ["std", "tzdb-bundle-always"] }
 jiff-tzdb = "=0.1.8"
@@ -154,7 +160,7 @@ web-sys = { version = "=0.3.103", default-features = false, features = [
   "File", "FileSystemDirectoryHandle", "FileSystemFileHandle",
   "FileSystemGetDirectoryOptions", "FileSystemGetFileOptions",
   "FileSystemReadWriteOptions", "FileSystemSyncAccessHandle", "Headers",
-  "MessageEvent", "Navigator", "Request", "RequestInit", "Response",
+  "MessageEvent", "Navigator", "Performance", "Request", "RequestInit", "Response",
   "ServiceWorkerGlobalScope", "StorageManager", "SubtleCrypto",
   "VisibilityState", "Window", "Worker", "WorkerGlobalScope",
   "WorkerNavigator", "XmlHttpRequest", "XmlHttpRequestResponseType",
@@ -162,3 +168,7 @@ web-sys = { version = "=0.3.103", default-features = false, features = [
 zeroize = { version = "=1.9.0", features = ["derive"] }
 x25519-dalek = { version = "=3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 x509-tsp = "=0.1.0"
+
+# ADR 0007: upstream 0.12.0 with zeroizing C_GetAttributeValue scratch buffers.
+[patch.crates-io]
+cryptoki = { path = "vendor/cryptoki" }

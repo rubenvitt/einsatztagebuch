@@ -68,6 +68,19 @@ pub trait ArchiveBackend: Send + Sync {
     /// Der Fehler des Wirtdateisystems.
     fn staged_paths(&self) -> Result<Vec<String>, ArchiveBackendError>;
 
+    /// Inspect every actual managed blob, including staging, duplicate and
+    /// quarantined bytes. This is a physical-holdings view, never chain progress.
+    /// Callers hold the Writer lock; implementations must propagate incomplete
+    /// enumeration/read errors and enforce the ordinary archive resource bounds.
+    /// An adapter without complete custody inspection cannot publish destruction
+    /// Evidence. Other normal Writer payloads do not require this capability.
+    fn visit_managed_blobs(
+        &self,
+        _visitor: &mut dyn FnMut(crate::ArchiveBlob<'_>) -> Result<(), crate::ArchiveError>,
+    ) -> Result<(), crate::ArchiveError> {
+        Err(crate::ArchiveError::Unavailable)
+    }
+
     /// Entfernt ein Archivobjekt, wenn es dort liegt.
     ///
     /// Die NAMENSSYMMETRIE zu [`Self::create_if_absent`] ist Absicht: dort

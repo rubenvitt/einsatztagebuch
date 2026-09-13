@@ -80,17 +80,20 @@ pub enum TrustCeremonyStep {
     /// Das Registry-Ereignis ist veroeffentlicht — verlangt einen FRISCHEN
     /// Bedienernachweis.
     RegistryPublished,
+    /// The signed target is published; its separate Registry activation is pending.
+    TargetPublished,
 }
 
 impl TrustCeremonyStep {
-    /// Alle sechs Schritte, in Deklarationsreihenfolge.
-    pub const ALL: [Self; 6] = [
+    /// Every step, including the distinct terminal step of an issuance round.
+    pub const ALL: [Self; 7] = [
         Self::PendingRequest,
         Self::FingerprintConfirmed,
         Self::AdminAuthorized,
         Self::RootRequestExported,
         Self::RootReplyImported,
         Self::RegistryPublished,
+        Self::TargetPublished,
     ];
 }
 
@@ -118,7 +121,56 @@ pub const fn next_step(
         TrustCeremonyStep::AdminAuthorized => Some(TrustCeremonyStep::RootRequestExported),
         TrustCeremonyStep::RootRequestExported => Some(TrustCeremonyStep::RootReplyImported),
         TrustCeremonyStep::RootReplyImported => Some(TrustCeremonyStep::RegistryPublished),
-        TrustCeremonyStep::RegistryPublished => None,
+        TrustCeremonyStep::RegistryPublished | TrustCeremonyStep::TargetPublished => None,
+    }
+}
+
+/// Chooses the successor within one explicitly identified ceremony round.
+#[must_use]
+pub const fn next_step_for_round(
+    kind: TrustCeremonyKind,
+    round: crate::administration_runtime::TrustCeremonyRoundV1,
+    step: TrustCeremonyStep,
+) -> Option<TrustCeremonyStep> {
+    match (round, step) {
+        (
+            crate::administration_runtime::TrustCeremonyRoundV1::IssueTarget,
+            TrustCeremonyStep::RootReplyImported,
+        ) => Some(TrustCeremonyStep::TargetPublished),
+        _ => next_step(kind, step),
+    }
+}
+
+#[cfg(test)]
+mod round_tests {
+    use super::*;
+    use crate::administration_runtime::TrustCeremonyRoundV1;
+    #[test]
+    fn target_publication_never_claims_registry_activation() {
+        let published = next_step_for_round(
+            TrustCeremonyKind::DeviceApprove,
+            TrustCeremonyRoundV1::IssueTarget,
+            TrustCeremonyStep::RootReplyImported,
+        )
+        .unwrap();
+        assert_eq!(format!("{published:?}"), "TargetPublished");
+        assert!(requires_fresh_reauth(published));
+        assert!(
+            next_step_for_round(
+                TrustCeremonyKind::DeviceApprove,
+                TrustCeremonyRoundV1::IssueTarget,
+                published
+            )
+            .is_none()
+        );
+        assert_eq!(
+            next_step_for_round(
+                TrustCeremonyKind::DeviceRevoke,
+                TrustCeremonyRoundV1::ActivateRegistry,
+                TrustCeremonyStep::RootReplyImported
+            ),
+            Some(TrustCeremonyStep::RegistryPublished)
+        );
     }
 }
 
@@ -131,7 +183,9 @@ pub const fn next_step(
 #[must_use]
 pub const fn requires_fresh_reauth(step: TrustCeremonyStep) -> bool {
     match step {
-        TrustCeremonyStep::AdminAuthorized | TrustCeremonyStep::RegistryPublished => true,
+        TrustCeremonyStep::AdminAuthorized
+        | TrustCeremonyStep::RegistryPublished
+        | TrustCeremonyStep::TargetPublished => true,
         TrustCeremonyStep::PendingRequest
         | TrustCeremonyStep::FingerprintConfirmed
         | TrustCeremonyStep::RootRequestExported

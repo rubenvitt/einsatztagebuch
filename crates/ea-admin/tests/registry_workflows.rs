@@ -664,9 +664,14 @@ fn an_activation_event_binds_the_checked_head_and_its_version_plus_one() {
     assert_eq!(event.effective_from_sequence, ChainSequence::new(101));
     assert_eq!(
         hash_bytes(event.policy_object_hash),
-        hash_bytes(head.policy_object_hash()),
-        "das Ereignis uebernimmt den Policy-Hash des gewaehlten Kopfes"
+        hash_bytes(policy_hash),
+        "PolicyChange binds the exact new policy in the event header"
     );
+    let unchanged=events.plan(next_window(),&RegistryActionV1::DeviceApprove {
+        certificate_object_hash:object_hash_marker(0xb4)
+    }).unwrap();
+    assert!(unchanged.policy_object_hash==head.policy_object_hash(),
+        "all other actions retain the predecessor policy");
 }
 
 #[test]

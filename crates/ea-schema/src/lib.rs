@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod decode;
+pub use decode::validate_timezone;
 mod encode;
 mod error;
 mod model;
+mod secret_text;
+pub use secret_text::SecretText;
 mod registry;
 mod transform;
 mod v1;

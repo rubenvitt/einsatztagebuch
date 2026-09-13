@@ -53,6 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         configuration.server_certificate_hash,
         configuration.server_key_generation,
     )?);
+    let deletion_component=configuration.deletion_credential.map(|credential|
+        einsatzarchiv_server::adapters::deletion_key::ServerDeletionKeyStore::new(
+            credential.secret,credential.certificate,signer.as_ref()))
+        .transpose()?.map(|component|Arc::new(component) as Arc<dyn ea_sync_server::managed_destruction::ServerDeletionComponent>);
     let http_client = aws_smithy_http_client::Builder::new()
         .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
             aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
@@ -87,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         authority: configuration.sync_authority.clone(),
         clock,
         signer,
+        deletion_component,
         objects: objects.clone(),
         repository: repository.clone(),
         trust_authority: Arc::new(PostgresTrustAuthority::new(pool.clone(), objects)),

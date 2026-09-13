@@ -1,8 +1,15 @@
 import {
   TRUST_CEREMONY_KIND_VALUES,
   TRUST_CEREMONY_STEP_VALUES,
+  TRUST_CEREMONY_ROUND_V1_VALUES,
 } from '../../bridge/generated-contracts'
-import type { TrustCeremonyKind, TrustCeremonyStep } from '../../bridge/generated-contracts'
+import type { FingerprintSubjectV1, TrustCeremonyKind, TrustCeremonyRoundV1, TrustCeremonyStep, TrustCeremonyView } from '../../bridge/generated-contracts'
+
+export const [ISSUE_TARGET_ROUND, ACTIVATE_REGISTRY_ROUND] = TRUST_CEREMONY_ROUND_V1_VALUES
+export const FINGERPRINT_SUBJECT_TEXT: Record<FingerprintSubjectV1, string> = {
+  RegistrationRequest: 'Fingerprint der Registrierungsanfrage',
+  IssuedCertificate: 'Fingerprint des ausgestellten Zertifikats',
+}
 
 /**
  * Die vier Arten einer Root-Zeremonie, AUS der emittierten Vereinigung.
@@ -23,6 +30,7 @@ export const [
   ROOT_REQUEST_EXPORTED_STEP,
   ROOT_REPLY_IMPORTED_STEP,
   REGISTRY_PUBLISHED_STEP,
+  TARGET_PUBLISHED_STEP,
 ] = TRUST_CEREMONY_STEP_VALUES
 
 /**
@@ -40,6 +48,18 @@ export const TRUST_CEREMONY_STEP_TEXT: Record<TrustCeremonyStep, string> = {
   RootRequestExported: 'Root-Anfrage exportiert',
   RootReplyImported: 'Root-Antwort importiert',
   RegistryPublished: 'Gerät aktiv',
+  TargetPublished: 'Ziel veröffentlicht',
+}
+
+const REGISTRY_PUBLISHED_TEXT: Record<TrustCeremonyKind, string> = {
+  DeviceApprove: 'Gerät aktiv',
+  DeviceRevoke: 'Widerruf wirksam',
+  PolicyChange: 'Richtlinie aktiviert',
+  WriterTransition: 'Writer-Wechsel aktiviert',
+}
+
+export function stepText(ceremony: TrustCeremonyView, step: TrustCeremonyStep): string {
+  return step === REGISTRY_PUBLISHED_STEP ? REGISTRY_PUBLISHED_TEXT[ceremony.kind] : TRUST_CEREMONY_STEP_TEXT[step]
 }
 
 /** Der Name der Zeremonie ueber dem Stepper. */
@@ -67,10 +87,10 @@ const COMPARES_FINGERPRINT: Record<TrustCeremonyKind, boolean> = {
 }
 
 /** Die Schritte, die eine Zeremonie dieser Art tatsaechlich hat, in Reihenfolge. */
-export function visibleSteps(kind: TrustCeremonyKind): readonly TrustCeremonyStep[] {
-  return COMPARES_FINGERPRINT[kind]
-    ? TRUST_CEREMONY_STEP_VALUES
-    : TRUST_CEREMONY_STEP_VALUES.filter((step) => step !== FINGERPRINT_CONFIRMED_STEP)
+export function visibleSteps(kind: TrustCeremonyKind, round: TrustCeremonyRoundV1): readonly TrustCeremonyStep[] {
+  return TRUST_CEREMONY_STEP_VALUES.filter((step) =>
+    (COMPARES_FINGERPRINT[kind] || step !== FINGERPRINT_CONFIRMED_STEP)
+    && step !== (round === ISSUE_TARGET_ROUND ? REGISTRY_PUBLISHED_STEP : TARGET_PUBLISHED_STEP))
 }
 
 /**

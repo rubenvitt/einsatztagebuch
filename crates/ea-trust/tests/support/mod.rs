@@ -98,6 +98,11 @@ pub struct HeadOptions {
     pub policy_max_registry_age_ms_override: Option<u64>,
     pub policy_max_future_clock_skew_ms_override: Option<u64>,
     pub certificate_capabilities_override: Option<Vec<String>>,
+    pub authority_subject_id_override: Option<SubjectId>,
+    /// Several certified component roles can belong to the same real device.
+    pub device_id_override: Option<DeviceId>,
+    pub policy_destruction_enabled_override: Option<bool>,
+    pub policy_eds_privacy_decision_document_hash_override: Option<Option<Hash32>>,
     /// Der oeffentliche SIGNATURschluessel eines Geraetezertifikats.
     ///
     /// Ohne diese Ueberschreibung tragen ALLE Geraetezertifikate der Linie
@@ -243,6 +248,10 @@ impl Default for HeadOptions {
             policy_max_registry_age_ms_override: None,
             policy_max_future_clock_skew_ms_override: None,
             certificate_capabilities_override: None,
+            authority_subject_id_override: None,
+            device_id_override: None,
+            policy_destruction_enabled_override: None,
+            policy_eds_privacy_decision_document_hash_override: None,
             signing_public_key_override: None,
             kem_public_key_override: None,
             binding_operator_profile_commitment_override: None,
@@ -383,6 +392,12 @@ pub struct RegistryLineBuilder {
     state: LineState,
     heads: Vec<BuiltHead>,
     transition_count: u8,
+}
+
+impl Default for RegistryLineBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RegistryLineBuilder {
@@ -964,6 +979,10 @@ fn direct_payload(
                 options
                     .policy_reader_trust_refresh_ms_override
                     .unwrap_or(86_400_000),
+                options.policy_destruction_enabled_override.unwrap_or(true),
+                options
+                    .policy_eds_privacy_decision_document_hash_override
+                    .unwrap_or(Some(hash32(0xa2))),
             ),
             authorization_hash,
         )
@@ -994,11 +1013,17 @@ fn direct_payload(
                 kind,
                 CertificateKindV1::OrganizationAdmin | CertificateKindV1::KeyApprover
             )
-            .then(|| SubjectId::try_from(&[*marker; 16][..]).unwrap());
+            .then(|| {
+                options
+                    .authority_subject_id_override
+                    .unwrap_or_else(|| SubjectId::try_from(&[*marker; 16][..]).unwrap())
+            });
             TrustPayloadV1::authorized_device_certificate(
                 DeviceCertificateFieldsV1 {
                     organization_id: organization(),
-                    device_id: DeviceId::try_from(&[marker.wrapping_add(0x40); 16][..]).unwrap(),
+                    device_id: options.device_id_override.unwrap_or_else(|| {
+                        DeviceId::try_from(&[marker.wrapping_add(0x40); 16][..]).unwrap()
+                    }),
                     certificate_kind: *kind,
                     signing_public_cose_key: signing_key
                         .as_ref()
@@ -1257,6 +1282,8 @@ fn policy_fields(
     operating_profile: u8,
     registry_expiry_behavior: u8,
     reader_trust_refresh_ms: u64,
+    destruction_enabled: bool,
+    eds_privacy_decision_document_hash: Option<Hash32>,
 ) -> PolicyFieldsV1 {
     PolicyFieldsV1 {
         organization_id: organization(),
@@ -1276,8 +1303,8 @@ fn policy_fields(
         restore_test_interval_ms: 2_592_000_000,
         retention_policy: RetentionPolicyFieldsV1 {
             minimum_retention_ms: Some(86_400_000),
-            destruction_enabled: true,
-            eds_privacy_decision_document_hash: Some(hash32(0xa2)),
+            destruction_enabled,
+            eds_privacy_decision_document_hash,
         },
         free_text_policy: FreeTextPolicyFieldsV1 {
             free_text_allowed: false,

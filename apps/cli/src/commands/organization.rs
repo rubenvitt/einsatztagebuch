@@ -1,4 +1,4 @@
-//! Kommando `organization init`.
+//! Explicit organization start/resume and existing-native-Root certification.
 //!
 //! Beginnt die Ersteinrichtung einer Organisation oder setzt die persistierte
 //! fort und berichtet, wo sie steht.
@@ -36,13 +36,15 @@
 //!
 //! Der Koordinator nimmt die AEUSSEREN Schluessel — Root, Recovery-KEM, HGA,
 //! Approver — als wirtseitig gestellte, opake Griffe entgegen.
-//! `ea_key_provider::SecretPurpose` traegt vier LOKALE Writer-Zwecke und
-//! ausdruecklich keinen Wurzelzweck
-//! (`crates/ea-key-provider/src/contract.rs:32-51`); ein CLI-Prozess kann diese
-//! Schluessel also weder erzeugen noch adressieren, und die Ports fuer
-//! Offline-Schluesselquellen sind Plan-Task 7 und nicht dieser.
+//! Der native Provider kann einen bereits provisionierten Root ueber seinen
+//! eigenen `NativeSigningSlot::Root` adressieren. `sign_native_initial_root`
+//! liefert daraus das exakte oeffentliche Initial-Root-Zertifikat samt
+//! Materialhash. Dieser Adapter erzeugt keinen Schluessel und persistiert
+//! keinen Bootstrap-Schritt. `certify-root` bindet den vorhandenen installierten
+//! Root und die exakte lokale Zertifikatsablage an Schritt 2. Es erzeugt keinen
+//! Key und fuehrt keinen spaeteren Schritt aus. `init` bleibt Start/Resume.
 //!
-//! Dieses Kommando fuehrt deshalb GENAU DREI Dinge aus: es beginnt eine
+//! `organization init` fuehrt deshalb GENAU DREI Dinge aus: es beginnt eine
 //! Zeremonie mit zufaelligen Organisations- und Ketten-IDs (`:1336`) oder
 //! setzt die persistierte fort, es berichtet Schritt, Kennungen und
 //! Produktivzustand, und es beendet den Prozess mit dem passenden Code. Es
@@ -63,9 +65,7 @@
 
 use std::path::PathBuf;
 
-use ea_admin::{
-    AdminError, BootstrapCoordinator, FileBootstrapStore, SystemRandomSource, machine_fingerprint,
-};
+use ea_admin::{AdminError, BootstrapCoordinator, FileBootstrapStore, SystemRandomSource};
 use ea_recovery::{ExitCode, RecoveryError, exit_code_for_error};
 
 use crate::{
@@ -121,6 +121,30 @@ pub fn run(invocation: &Invocation) -> ExitCode {
     // beginnen; welcher der beiden Faelle eintrat, ist keine Frage dieses
     // Pfades, sondern des persistierten Zustands.
     let mut store = FileBootstrapStore::new(state_path(&invocation.anchor));
+    // Keep the kernel lease through load/begin AND the final status report.
+    // Other platforms retain their existing unleased path; a future full host
+    // must not claim this guarantee until its explicit lease API is supported.
+    #[cfg(any(
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            target_pointer_width = "64",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    {
+        store = match store.acquire_lease() {
+            Ok(store) => store,
+            Err(error) => {
+                output::print_admin_error(&error);
+                return exit_code_for_admin_error(error);
+            }
+        };
+    }
     let coordinator = match BootstrapCoordinator::resume_or_begin(
         &mut store,
         &mut SystemRandomSource,
@@ -157,11 +181,10 @@ pub fn run(invocation: &Invocation) -> ExitCode {
 /// erst BEIM Vergleich nennte, waere die Partei, die den Produktivzustand
 /// will; er wird deshalb in Schritt 1 festgehalten.
 ///
-/// Geerntet wird ausschliesslich, was das Betriebssystem ohnehin als seine
-/// Identitaet fuehrt und was `ea-operator` fuer die Kontobindung derselben
-/// Maschine liest (`crates/ea-operator/src/linux.rs:4-40`). Gehasht wird das
-/// in `ea-admin` — dieses Paket traegt bewusst keine `ea-crypto`-Kante, siehe
-/// [`LOCAL_RANDOM_SOURCE_CODE`].
+/// Verwendet dieselbe vorhandene Plattformmessung und Normalisierung wie
+/// der native Recovery-Test: macOS Hardware-UUID, Linux machine-id oder
+/// Windows MachineGuid. Es werden weder eine Kennung aus Argumenten noch
+/// Fixture-/Umgebungswerte als Maschinenmessung angenommen.
 ///
 /// `None`, wo sich der Rechner nicht benennen laesst. Das ist kein
 /// Fehlschlag dieses Kommandos: Schritt 1 gelingt, und Schritt 12 ist danach
@@ -170,23 +193,70 @@ pub fn run(invocation: &Invocation) -> ExitCode {
 /// schlechtere Wahl: er verhinderte auch die elf Schritte, die es nicht
 /// betrifft.
 fn ceremony_machine() -> Option<ea_types::Hash32> {
-    for source in MACHINE_IDENTITY_SOURCES {
-        if let Ok(identity) = std::fs::read(source) {
-            let trimmed = identity.trim_ascii();
-            if !trimmed.is_empty() {
-                return Some(machine_fingerprint(trimmed));
-            }
-        }
-    }
-    None
+    ea_key_provider::measure_native_machine_identity()
+        .ok()
+        .map(|measurement| measurement.fingerprint())
 }
 
-/// Die Orte, an denen ein Wirt seine Maschinenidentitaet fuehrt.
-///
-/// In der Reihenfolge, in der `systemd` sie selbst liest: `/etc/machine-id`
-/// zuerst, der D-Bus-Ort als Rueckfall auf aelteren Installationen. Auf einem
-/// Wirt ohne beide bleibt es bei `None`.
-const MACHINE_IDENTITY_SOURCES: [&str; 2] = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
+/// Certifies only the existing installed Root; no fixture selection in this entry.
+pub fn run_certify_root(invocation: &Invocation, version: ea_types::RegistryVersion) -> ExitCode {
+    run_certify_root_with_host(
+        invocation,
+        version,
+        ea_admin::complete_installed_native_root_step,
+    )
+}
+
+// Shared with the separate integration-test executable. The ordinary entry
+// above always chooses the installed host, regardless of unified test features.
+pub(crate) fn run_certify_root_with_host(
+    invocation: &Invocation,
+    version: ea_types::RegistryVersion,
+    complete: impl FnOnce(
+        &mut FileBootstrapStore,
+        ea_types::RegistryVersion,
+    ) -> Result<ea_admin::BootstrapStateV1, AdminError>,
+) -> ExitCode {
+    if invocation.format == Format::Json {
+        output::print_certify_root_json_refusal();
+        return ExitCode::Unsupported;
+    }
+    match invocation.anchor.try_exists() {
+        Ok(false) => {}
+        Ok(true) => {
+            output::print_certify_root_anchor_path_occupied_refusal();
+            return ExitCode::Usage;
+        }
+        Err(error) => {
+            let error = RecoveryError::from(error);
+            output::print_recovery_error(&error);
+            return exit_code_for_error(&error);
+        }
+    }
+    let result = (|| {
+        // The lease survives the entire host operation AND status flush. Unlike
+        // init's legacy path, unsupported lease platforms cannot complete step 2.
+        let mut store = FileBootstrapStore::new(state_path(&invocation.anchor)).acquire_lease()?;
+        let state = complete(&mut store, version)?;
+        if let Err(error) = output::print_bootstrap_status_text(
+            state.step(),
+            state.organization_id().as_bytes(),
+            state.chain_id().as_bytes(),
+            state.production_state(),
+        ) {
+            output::print_recovery_error(&error);
+            return Ok(exit_code_for_error(&error));
+        }
+        Ok::<_, AdminError>(ExitCode::Success)
+    })();
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            output::print_admin_error(&error);
+            exit_code_for_admin_error(error)
+        }
+    }
+}
 
 /// Der Pfad der Zustandsdatei neben `anchor`.
 ///

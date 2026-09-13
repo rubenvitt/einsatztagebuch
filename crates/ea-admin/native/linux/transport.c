@@ -64,3 +64,15 @@ gboolean ea_write_json(int output, JsonObject *fields) {
     g_free(bytes); g_object_unref(generator); json_node_free(node);
     return ok;
 }
+
+gboolean ea_write_signing_backup(int output, EaSigningBackupFrame *frame) {
+    size_t offset = 0;
+    while (offset < sizeof frame->bytes) {
+        ssize_t n = write(output, frame->bytes + offset, sizeof frame->bytes - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { OPENSSL_cleanse(frame, sizeof *frame); return FALSE; }
+        offset += (size_t)n;
+    }
+    OPENSSL_cleanse(frame, sizeof *frame);
+    return TRUE;
+}

@@ -11,30 +11,14 @@
 //! einen Teil der Helfer nutzt, erzeugt sonst `dead_code`-Warnungen, die unter
 //! `-D warnings` brechen. Daher `allow(dead_code)` auf Modulebene.
 //!
-//! # ZWEI FIXTUREFAMILIEN, UND SIE SIND NICHT AUSTAUSCHBAR
+//! # Fixture-Zeit und aktuelle Aktionen
 //!
-//! Die GEERBTEN Bestaende aus [`verify_support`] — `complete_valid_archive`,
-//! `isolation_archive`, `archive_with_a_missing_middle_entry`,
-//! `destruction_archive` und alles Uebrige — tragen samtlich
-//! Registrierungskoepfe aus `trust_support::HeadOptions::default()`
-//! (`issued_at = 100`, `not_after = 10_000`, Policy `max_registry_age`
-//! 86_400_000). Sie sind AUSSCHLIESSLICH unter der Fixture-Uhr
-//! [`verify_support::FIXTURE_OS_WALL_CLOCK_V1`] aussagekraeftig. Unter der
-//! echten Betriebssystemuhr sind ALLE ihre Koepfe veraltet, Gate `trust` traegt
-//! nicht mehr, und der Bericht degeneriert zu einer LEEREN Aussage, die
-//! faelschlich wie Erfolg aussieht — gemessen in
-//! `crates/ea-recovery/tests/live_clock.rs`.
-//!
-//! Daraus folgt eine feste Trennung:
-//!
-//! - Die geerbten Bestaende sind NUR dort zulaessig, wo die Uhr ein PARAMETER
-//!   ist — also in `crates/ea-recovery/tests`, wo `verify_directory` sie
-//!   entgegennimmt. In keinem Test unter `apps/cli` duerfen sie vorkommen: die
-//!   CLI kennt genau EINE Uhr, `SystemTime::now()`.
-//! - Fuer alles, was gegen die ECHTE Uhr laeuft, gibt es die
-//!   `live_clock_*`-Familie dieses Moduls. Ihre Registrierungsfenster
-//!   enthalten die echte Uhr; ihre Befunde sind deshalb unter
-//!   `SystemTime::now()` messbar.
+//! Geerbte Bestaende besitzen kurze, feste Registry-Leases und bleiben seit
+//! Task 8 unter ihrer exakt gebundenen historischen Registry lesbar. Die
+//! `live_clock_*`-Familie hat zusaetzlich einen zur Betriebssystemuhr frisch
+//! waehlbaren Head fuer aktuelle Aktionen. Historische Leseproben duerfen
+//! beide Familien verwenden; frische Autorisierung darf nicht durch
+//! historische Verifikation ersetzt werden.
 #![allow(dead_code)]
 
 /// Die Fixture-Kette aus `ea-verify`, unveraendert weiterverwendet.

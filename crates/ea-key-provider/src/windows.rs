@@ -1,28 +1,9 @@
-//! Der Windows-Rand des Schluesselports.
+//! Windows-Rand: Gerätemessungen und lokale Schlüsselpolitik.
 //!
-//! `design.md`:1483 nennt fuer Windows CNG/DPAPI und hardwaregestuetzte
-//! Provider, „soweit verfuegbar". Wie unter macOS ist das keine Erlaubnis zum
-//! stillen Ausweichen: diese Zeile beansprucht ausschliesslich
-//! [`KeyProtectionProfileV1::OsWrapped`]
-//! ([`SupportMatrixRow::reachable_protection_profile`]).
-//!
-//! Was hier NICHT liegt: ein `KeyProvider`. CNG und DPAPI sind Win32-Aufrufe,
-//! und Stufe 2 nimmt keine native API-Familie in `[workspace.dependencies]` auf
-//! (`docs/adr/0001-toolchain-and-cryptography-dependencies.md:152-153`). Was
-//! hier liegt, ist die vollstaendig pruefbare Haelfte: die Uebersetzung der einen
-//! Eintragspolitik in die DPAPI-Kennzeichen und der Haltungsadapter dieser
-//! Zeile.
-//!
-//! Die FOLGE dieser Grenze, damit sie niemand erst im Betrieb entdeckt: es gibt
-//! auf dieser Zeile keinen `KeyProvider`, der CNG oder DPAPI ruft, keine
-//! Windows-Hello- oder Credential-UI-Praesenzpruefung und keinen Leser des
-//! BitLocker-Status. `WindowsDevicePosture` meldet vier `Unknown`, also ist
-//! `DevicePostureReport::is_production_ready` auf dieser Zeile immer `false` und
-//! eine Sitzung in produktiver Rolle entsteht hier nicht. Fail-closed und
-//! richtig gerichtet — aber eine SPERRE, die erst der Task loest, der die
-//! nativen API-Familien samt ADR einfuehrt.
-//!
-//! [`KeyProtectionProfileV1::OsWrapped`]: ea_format::KeyProtectionProfileV1::OsWrapped
+//! Der native Schlüsselhost liegt in `ea-admin` (ADR-0006). Dieser Adapter
+//! liest BitLocker-Schutz der festen Volumes und explizite Inaktivitätssperre.
+//! Unbelegbare Voraussetzungen bleiben Unknown; Rohdaten verlassen den Adapter nicht.
+//! Die Messgrenzen stehen in `docs/device-posture.md`.
 
 use crate::{
     contract::{KeyEntryPolicy, KeyError},
@@ -56,23 +37,13 @@ pub const fn dpapi_flags(policy: KeyEntryPolicy) -> WindowsDpapiFlags {
     }
 }
 
-/// Der Haltungsadapter dieser Zeile.
-///
-/// Die vier Signale, die Windows 11 dafuer dokumentiert bereitstellt, sind der
-/// BitLocker-Schutzstatus des Systemvolumes, die Kontoart samt
-/// Mehrfachanmeldung, die Richtlinie fuer die Bildschirmsperre und der
-/// Buildstand des Betriebssystems. Alle vier liegen hinter Win32-, WMI- oder
-/// Richtlinien-APIs; Stufe 2 traegt keine native API-Familie, um sie zu lesen,
-/// und dieser Adapter meldet deshalb vier `Unknown` mit ihren Beweiscodes.
-///
-/// Ein `Unknown` sperrt die Sitzung in produktiver Rolle und erzeugt eine
-/// Pflichtzeile im Go-live-Bericht — der vom Produkt verlangte Ausgang, kein
-/// automatischer Pass.
+/// Liest die belegbaren Windows-Signale über feste, begrenzte Systemaufrufe.
+/// Andere Plattformen und nicht belegbare Voraussetzungen bleiben Unknown.
 pub struct WindowsDevicePosture;
 
 impl DevicePostureProvider for WindowsDevicePosture {
     fn report(&self) -> Result<DevicePostureReport, KeyError> {
-        Ok(DevicePostureReport::unresolved())
+        Ok(crate::native_posture::windows_host_report())
     }
 }
 

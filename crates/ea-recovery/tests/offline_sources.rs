@@ -36,7 +36,7 @@ use std::{
 use ea_crypto::{CanonicalPublicCoseKey, SecretBytes, SecretVec};
 use ea_recovery::{
     ContainedKeyKind, EncryptedKeyContainer, ExitCode, KeySourceKind, KeySourceSpec,
-    KeySourceSpecError, MAX_SECRET_FILE_BYTES_V1, PKCS11_KEY_ID_MAX_BYTES, PKCS11_UNBOUND_CODE,
+    KeySourceSpecError, MAX_SECRET_FILE_BYTES_V1, PKCS11_KEY_ID_MAX_BYTES,
     RecoveryError, exit_code_for_error, load_recipient_key, read_secret_file,
     resolve_recipient_key, resolve_signing_key,
 };
@@ -1195,7 +1195,7 @@ fn a_container_resolves_to_its_kind_and_refuses_the_other() {
 /// geprueffter PIN-Datei und vorhandenem Modul.
 #[cfg(unix)]
 #[test]
-fn a_pkcs11_source_ends_at_the_named_boundary_after_checking_the_pin_file_first() {
+fn a_pkcs11_source_refuses_an_invalid_module_after_checking_the_pin_file_first() {
     let root = temp_dir("resolve-pkcs11");
     let module = root.path().join("softhsm.so");
     fs::write(&module, b"kein echtes Modul").expect("schreibbar");
@@ -1217,11 +1217,11 @@ fn a_pkcs11_source_ends_at_the_named_boundary_after_checking_the_pin_file_first(
         |spec: &KeySourceSpec| resolve_signing_key(spec).map(|_| ()),
     ] {
         let Err(error) = resolve(&spec_for(module.clone(), pin_file.clone())) else {
-            panic!("in dieser Stufe bindet nichts an ein Modul");
+            panic!("invalid native module must be refused");
         };
-        assert!(matches!(error, RecoveryError::Pkcs11Unbound), "war {error}");
+        assert!(matches!(error, RecoveryError::Pkcs11Provider(ea_recovery::Pkcs11ProviderError::Unavailable)), "war {error}");
         assert_eq!(exit_code_for_error(&error), ExitCode::Unsupported);
-        assert_eq!(error.code(), PKCS11_UNBOUND_CODE);
+        assert_eq!(error.code(), "EA-RECOVERY-PKCS11-UNAVAILABLE");
     }
 
     // Ein fehlendes Modul ist ein Dateisystemfehler, 20.
@@ -1305,7 +1305,7 @@ fn no_new_error_display_names_a_path_or_a_secret() {
     let expected = [
         RecoveryError::KeySourceExposed,
         RecoveryError::SecretEmpty,
-        RecoveryError::Pkcs11Unbound,
+        RecoveryError::Pkcs11Provider(ea_recovery::Pkcs11ProviderError::Unavailable),
         RecoveryError::ContainerOpen,
     ];
     for (error, expected) in errors.iter().zip(expected) {
@@ -1340,8 +1340,8 @@ fn the_new_variants_carry_their_codes_and_exit_codes() {
             ExitCode::Usage,
         ),
         (
-            RecoveryError::Pkcs11Unbound,
-            "EA-RECOVERY-PKCS11-UNBOUND",
+            RecoveryError::Pkcs11Provider(ea_recovery::Pkcs11ProviderError::Unavailable),
+            "EA-RECOVERY-PKCS11-UNAVAILABLE",
             ExitCode::Unsupported,
         ),
     ];
@@ -1350,7 +1350,6 @@ fn the_new_variants_carry_their_codes_and_exit_codes() {
         assert_eq!(error.to_string(), code);
         assert_eq!(exit_code_for_error(&error), exit);
     }
-    assert_eq!(PKCS11_UNBOUND_CODE, "EA-RECOVERY-PKCS11-UNBOUND");
     assert_eq!(
         KeySourceSpecError::MalformedField {
             source: KeySourceKind::Pkcs11

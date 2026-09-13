@@ -268,73 +268,12 @@ pub fn verify_trust(
     }
 
     let catalog = Arc::new(TrustCatalog::load(source)?);
-    let mut direct = DirectBootstrapObjects::from_catalog(&catalog)?;
-    direct.require_exact_anchor_sets(anchor)?;
-
-    let root_hash = anchor.root_certificate_object_hash();
-    let root_fields = direct
-        .roots
-        .remove(&root_hash)
-        .ok_or(TrustError::AnchorPin)?;
-    verify_root_anchor_fields(anchor, &root_fields)?;
-    let root_object = catalog_object(&catalog, root_hash)?;
-    let root_signature = only_signature(root_object)?;
-    CoseVerifier::verify_initial_root_pop(
-        root_signature,
-        anchor.root_public_cose_key(),
-        trust_digest(root_object.exact_digest_input()).as_bytes(),
-    )
-    .map_err(|_| TrustError::Signature)?;
-
-    let root_certificate_hash = CertificateHash::from(root_hash);
-    let root_resolver = BootstrapRootResolver::new(
-        root_certificate_hash,
-        catalog
-            .get(&root_hash)
-            .ok_or(TrustError::AnchorPin)?
-            .exact_bytes()
-            .as_bytes(),
-    );
-
-    let mut certificates = BTreeMap::new();
-    for object_hash in anchor.initial_admin_certificate_object_hashes() {
-        let fields = direct
-            .admin_certificates
-            .remove(object_hash)
-            .ok_or(TrustError::AnchorPin)?;
-        let certificate = verify_admin_certificate(
-            &catalog,
-            *object_hash,
-            fields,
-            &root_resolver,
-            root_certificate_hash,
-            anchor.organization_id(),
-        )?;
-        if certificates
-            .insert(CertificateHash::from(*object_hash), certificate)
-            .is_some()
-        {
-            return Err(TrustError::BootstrapPair);
-        }
-    }
-
-    let mut bindings =
-        Vec::with_capacity(anchor.initial_admin_operator_binding_object_hashes().len());
-    for object_hash in anchor.initial_admin_operator_binding_object_hashes() {
-        let fields = direct
-            .admin_bindings
-            .remove(object_hash)
-            .ok_or(TrustError::AnchorPin)?;
-        bindings.push(verify_admin_binding(
-            &catalog,
-            *object_hash,
-            fields,
-            &root_resolver,
-            root_certificate_hash,
-            anchor.organization_id(),
-        )?);
-    }
-    validate_admin_pairs(&certificates, &bindings)?;
+    let CheckedBootstrapObjects {
+        root_hash,
+        root_fields,
+        certificates,
+        bindings,
+    } = check_bootstrap_objects(&BootstrapAnchorFields::from(anchor), &catalog)?;
 
     let active_certificates = certificates
         .into_values()
@@ -364,6 +303,146 @@ pub fn verify_trust(
     };
     Ok(VerifiedTrust {
         inner: Arc::new(inner),
+    })
+}
+
+/// Checks the pinned original bootstrap objects relative to this PreAnchor.
+/// Success does not prove recovery media, a second-channel confirmation,
+/// distinct real OS accounts or any Registry/production authority. No final
+/// Anchor, Genesis or trust-state snapshot is synthesized.
+///
+/// # Errors
+/// Uses the same source, pin, Root/initial-Admin signature and exact pair
+/// errors as the bootstrap-object portion of [`verify_trust`].
+pub fn verify_pre_anchor_bootstrap_objects(
+    anchor: &PreAnchorV1,
+    source: &dyn TrustObjectSource,
+) -> Result<(), TrustError> {
+    let catalog = TrustCatalog::load(source)?;
+    check_bootstrap_objects(&BootstrapAnchorFields::from(anchor), &catalog).map(|_| ())
+}
+
+struct BootstrapAnchorFields<'a> {
+    organization_id: OrganizationId,
+    root_public_cose_key: &'a CanonicalPublicCoseKey,
+    exact_root_public_cose_key: &'a [u8],
+    root_key_thumbprint: KeyThumbprint,
+    root_certificate_object_hash: ObjectHash,
+    certificate_hashes: &'a [ObjectHash],
+    binding_hashes: &'a [ObjectHash],
+}
+
+impl<'a> From<&'a TrustAnchorV1> for BootstrapAnchorFields<'a> {
+    fn from(anchor: &'a TrustAnchorV1) -> Self {
+        Self {
+            organization_id: anchor.organization_id(),
+            root_public_cose_key: anchor.root_public_cose_key(),
+            exact_root_public_cose_key: anchor.root_public_cose_key_bytes(),
+            root_key_thumbprint: anchor.root_key_thumbprint(),
+            root_certificate_object_hash: anchor.root_certificate_object_hash(),
+            certificate_hashes: anchor.initial_admin_certificate_object_hashes(),
+            binding_hashes: anchor.initial_admin_operator_binding_object_hashes(),
+        }
+    }
+}
+
+impl<'a> From<&'a PreAnchorV1> for BootstrapAnchorFields<'a> {
+    fn from(anchor: &'a PreAnchorV1) -> Self {
+        Self {
+            organization_id: anchor.organization_id(),
+            root_public_cose_key: anchor.root_public_cose_key(),
+            exact_root_public_cose_key: anchor.root_public_cose_key_bytes(),
+            root_key_thumbprint: anchor.root_key_thumbprint(),
+            root_certificate_object_hash: anchor.root_certificate_object_hash(),
+            certificate_hashes: anchor.initial_admin_certificate_object_hashes(),
+            binding_hashes: anchor.initial_admin_operator_binding_object_hashes(),
+        }
+    }
+}
+
+struct CheckedBootstrapObjects {
+    root_hash: ObjectHash,
+    root_fields: RootCertificateFieldsV1,
+    certificates: BTreeMap<CertificateHash, VerifiedAdminCertificate>,
+    bindings: Vec<VerifiedAdminBinding>,
+}
+
+fn check_bootstrap_objects(
+    anchor: &BootstrapAnchorFields<'_>,
+    catalog: &TrustCatalog,
+) -> Result<CheckedBootstrapObjects, TrustError> {
+    let mut direct = DirectBootstrapObjects::from_catalog(catalog)?;
+    direct.require_exact_anchor_sets(anchor)?;
+
+    let root_hash = anchor.root_certificate_object_hash;
+    let root_fields = direct
+        .roots
+        .remove(&root_hash)
+        .ok_or(TrustError::AnchorPin)?;
+    verify_root_anchor_fields(anchor, &root_fields)?;
+    let root_object = catalog_object(catalog, root_hash)?;
+    let root_signature = only_signature(root_object)?;
+    CoseVerifier::verify_initial_root_pop(
+        root_signature,
+        anchor.root_public_cose_key,
+        trust_digest(root_object.exact_digest_input()).as_bytes(),
+    )
+    .map_err(|_| TrustError::Signature)?;
+
+    let root_certificate_hash = CertificateHash::from(root_hash);
+    let root_resolver = BootstrapRootResolver::new(
+        root_certificate_hash,
+        catalog
+            .get(&root_hash)
+            .ok_or(TrustError::AnchorPin)?
+            .exact_bytes()
+            .as_bytes(),
+    );
+
+    let mut certificates = BTreeMap::new();
+    for object_hash in anchor.certificate_hashes {
+        let fields = direct
+            .admin_certificates
+            .remove(object_hash)
+            .ok_or(TrustError::AnchorPin)?;
+        let certificate = verify_admin_certificate(
+            catalog,
+            *object_hash,
+            fields,
+            &root_resolver,
+            root_certificate_hash,
+            anchor.organization_id,
+        )?;
+        if certificates
+            .insert(CertificateHash::from(*object_hash), certificate)
+            .is_some()
+        {
+            return Err(TrustError::BootstrapPair);
+        }
+    }
+
+    let mut bindings = Vec::with_capacity(anchor.binding_hashes.len());
+    for object_hash in anchor.binding_hashes {
+        let fields = direct
+            .admin_bindings
+            .remove(object_hash)
+            .ok_or(TrustError::AnchorPin)?;
+        bindings.push(verify_admin_binding(
+            catalog,
+            *object_hash,
+            fields,
+            &root_resolver,
+            root_certificate_hash,
+            anchor.organization_id,
+        )?);
+    }
+    validate_admin_pairs(&certificates, &bindings)?;
+
+    Ok(CheckedBootstrapObjects {
+        root_hash,
+        root_fields,
+        certificates,
+        bindings,
     })
 }
 
@@ -419,20 +498,25 @@ impl DirectBootstrapObjects {
         Ok(direct)
     }
 
-    fn require_exact_anchor_sets(&self, anchor: &TrustAnchorV1) -> Result<(), TrustError> {
+    fn require_exact_anchor_sets(
+        &self,
+        anchor: &BootstrapAnchorFields<'_>,
+    ) -> Result<(), TrustError> {
         if !self
             .roots
             .keys()
             .copied()
-            .eq(std::iter::once(anchor.root_certificate_object_hash()))
-            || !self.admin_certificates.keys().copied().eq(anchor
-                .initial_admin_certificate_object_hashes()
-                .iter()
-                .copied())
-            || !self.admin_bindings.keys().copied().eq(anchor
-                .initial_admin_operator_binding_object_hashes()
-                .iter()
-                .copied())
+            .eq(std::iter::once(anchor.root_certificate_object_hash))
+            || !self
+                .admin_certificates
+                .keys()
+                .copied()
+                .eq(anchor.certificate_hashes.iter().copied())
+            || !self
+                .admin_bindings
+                .keys()
+                .copied()
+                .eq(anchor.binding_hashes.iter().copied())
         {
             return Err(TrustError::AnchorPin);
         }
@@ -441,12 +525,12 @@ impl DirectBootstrapObjects {
 }
 
 fn verify_root_anchor_fields(
-    anchor: &TrustAnchorV1,
+    anchor: &BootstrapAnchorFields<'_>,
     fields: &RootCertificateFieldsV1,
 ) -> Result<(), TrustError> {
-    if fields.organization_id != anchor.organization_id()
-        || fields.root_public_cose_key != anchor.root_public_cose_key_bytes()
-        || fields.root_key_thumbprint != anchor.root_key_thumbprint()
+    if fields.organization_id != anchor.organization_id
+        || fields.root_public_cose_key != anchor.exact_root_public_cose_key
+        || fields.root_key_thumbprint != anchor.root_key_thumbprint
         || fields.previous_root_certificate_object_hash.is_some()
     {
         return Err(TrustError::AnchorPin);

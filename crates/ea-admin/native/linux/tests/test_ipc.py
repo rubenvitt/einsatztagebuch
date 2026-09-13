@@ -25,6 +25,24 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(result["code"], expected)
         return result
 
+    def test_closed_signing_backup_requests(self):
+        rejected = self.invoke
+        backup = dict(op="backup-signing-seed", slot="admin-signing", installation_id="ab" * 32,
+                      expected_public_key="bc" * 32, presence=True)
+        for field in list(backup):
+            missing = dict(backup); del missing[field]
+            rejected(json.dumps(missing).encode(), "invalid-request")
+        for change in [dict(slot=s) for s in ["operator-instance", "writer-signing", "database-key", "draft-key", "unknown"]] + [
+                dict(kind="ed25519"), dict(replace=False), dict(data=""), dict(prompt="SECRET-CANARY"),
+                dict(expected_public_key="AB" * 32), dict(expected_public_key="ab" * 31),
+                dict(installation_id="ab" * 31), dict(presence=1), dict(presence="true")]:
+            rejected(json.dumps(dict(backup, **change)).encode(), "invalid-request")
+        rejected(json.dumps(dict(backup, presence=False)).encode(), "presence-required")
+        wire = json.dumps(backup).encode()
+        rejected(wire + b" " * (513 - len(wire)), "request-too-large")
+        rejected(wire[:-1] + b',"expected_public_key":"' + b"bc" * 32 + b'"}', "invalid-request")
+        rejected(wire[:-1] + b',"expected_public_\\u006bey":"' + b"bc" * 32 + b'"}', "invalid-request")
+
     def test_untrusted_json_never_reaches_native_services(self):
         for raw in [b"", b"[]", b'{"op":"account","op":"initialize"}',
                     b'{"op":"account","presence":1}', b'{"op":"account"}{}',

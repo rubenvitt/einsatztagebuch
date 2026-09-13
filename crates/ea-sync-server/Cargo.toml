@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 aws-sdk-s3.workspace = true
 ea-crypto.workspace = true
+ea-destruction.workspace = true
 ea-format.workspace = true
 ea-sync-protocol.workspace = true
 ea-trust.workspace = true

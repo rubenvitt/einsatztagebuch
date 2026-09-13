@@ -464,8 +464,8 @@ fn every_error_variant_carries_a_distinct_code_and_a_mapped_status() {
 }
 
 #[test]
-fn the_endpoint_table_is_the_closed_seventeen_line_v1_surface() {
-    assert_eq!(EndpointV1::ALL.len(), 17);
+fn the_endpoint_table_preserves_seventeen_original_lines_and_two_exact_destruction_extensions() {
+    assert_eq!(EndpointV1::ALL.len(), 19);
     let mut paths = std::collections::BTreeSet::new();
     let mut codes = std::collections::BTreeSet::new();
     let mut unsigned = 0;

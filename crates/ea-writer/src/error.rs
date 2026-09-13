@@ -130,6 +130,12 @@ pub enum WriterError {
     KeyDeletionNotConfirmed,
     /// Es gibt keinen Entwurfsinhalt zu finalisieren.
     NoDraftContent,
+    /// Retained Writer acquisition source is absent; archive alone cannot
+    /// reveal the encrypted original identity. Restore its source backup.
+    OriginalIdentityMissing,
+    OriginalIdentityMismatch,
+    DestructionEvidenceInvalid,
+    OriginalArchiveUnverified,
     Archive(ArchiveError),
     Backend(ArchiveBackendError),
     Crypto(CryptoError),
@@ -152,6 +158,10 @@ impl WriterError {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
+            Self::OriginalIdentityMissing => "EA-WRITER-ORIGINAL-IDENTITY-MISSING",
+            Self::OriginalIdentityMismatch => "EA-WRITER-ORIGINAL-IDENTITY-MISMATCH",
+            Self::DestructionEvidenceInvalid=>"EA-WRITER-DESTRUCTION-EVIDENCE-INVALID",
+            Self::OriginalArchiveUnverified => "EA-WRITER-ORIGINAL-ARCHIVE-UNVERIFIED",
             Self::ChainHeadUnusable(_) => "EA-WRITER-CHAIN-HEAD-UNUSABLE",
             Self::RollbackDetected => "EA-WRITER-ROLLBACK-DETECTED",
             Self::SequenceLeaseExhausted => "EA-WRITER-SEQUENCE-LEASE-EXHAUSTED",

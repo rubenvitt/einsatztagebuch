@@ -8,28 +8,25 @@ import { IrreversibleActionConfirm } from '../../components/integrity/Irreversib
 /**
  * Der Wortlaut je Phase — erschoepfend, unzitierte Schluessel.
  *
- * „aktiviert" heisst NICHT „aktiv": die dritte Phase bindet das Change-3-Ereignis
- * an veroeffentlichte Bytes (§12.5); Autoritaet entsteht erst, wenn Root das
- * Registry-Ereignis signiert und es veroeffentlicht ist. Der Phasenname sagt
- * deshalb dazu, was noch fehlt.
+ * Die native Projektion liefert Activated erst aus dem signierten Registry-
+ * Stand. Offene IssueTarget-/ActivateRegistry-Runden bleiben Prepared.
  */
 export const WRITER_TRANSITION_PHASE_TEXT: Record<WriterTransitionPhase, string> = {
   NoTransition: 'kein Wechsel',
   Prepared: 'vorbereitet',
-  Activated: 'aktiviert — Registry-Ereignis noch nicht veröffentlicht',
+  Activated: 'Writer-Wechsel im signierten Registry-Stand wirksam',
 }
 
 /**
  * Welche Handhabe je Phase steht — genau EINE, als erschoepfende Abbildung.
  *
- * Ohne Wechsel: die Anfrage einlesen. Vorbereitet: unwiderruflich aktivieren.
- * Aktiviert: das Registry-Ereignis als Root-Zeremonie beginnen — und KEIN
- * zweites Vorbereiten, solange das erste nicht veroeffentlicht ist.
+ * Eine gespeicherte Runde wird ausschliesslich ueber ihre native ID geoeffnet.
+ * Ein bereits wirksamer Wechsel startet keine weitere Runde.
  */
-const PHASE_ACTION: Record<WriterTransitionPhase, 'prepare' | 'activate' | 'publish'> = {
+const PHASE_ACTION: Record<WriterTransitionPhase, 'prepare' | 'activate' | 'done'> = {
   NoTransition: 'prepare',
   Prepared: 'activate',
-  Activated: 'publish',
+  Activated: 'done',
 }
 
 /**
@@ -44,12 +41,10 @@ export const ACTIVATED_BOUNDARY_TEXT =
  * Der Writer-Wechsel (§12.5): vorbereiten, mit frischem Nachweis aktivieren,
  * dann das Registry-Ereignis als Root-Zeremonie veroeffentlichen.
  *
- * Es gibt genau einen aktiven Writer; die Aktivierung ist unwiderruflich und
- * nimmt deshalb die Handhabe fuer unwiderrufliche Handlungen. Die Wechselanfrage
+ * Es gibt genau einen aktiven Writer. Die Wechselanfrage
  * kommt als JSON aus dem Werkzeug, das sie erzeugt hat — die Schale prueft sie
- * nicht nach, der Kern lehnt eine fremde ab (`EA-TRANSITION-*`). Das Wort
- * „aktiv" faellt auf dieser Flaeche nirgends ueber den NEUEN Writer: erst der
- * letzte Schritt des Steppers darf das sagen.
+ * nicht nach, der Kern lehnt eine fremde ab (`EA-TRANSITION-*`). Die Oberflaeche
+ * leitet weder einen Zielhash noch eine neue Root-Runde aus Writer-Hashes ab.
  */
 export function WriterTransitionWizard({
   state,
@@ -57,15 +52,14 @@ export function WriterTransitionWizard({
   busy,
   onPrepare,
   onActivate,
-  onBeginCeremony,
+  onOpenCeremony,
 }: {
   readonly state: WriterTransitionView
   readonly notice: string | null
   readonly busy: boolean
   readonly onPrepare: (requestJson: string) => void
   readonly onActivate: () => void
-  /** Beginnt die Root-Zeremonie der Art Writer-Wechsel fuer den genannten Hash. */
-  readonly onBeginCeremony: (targetHash: string) => void
+  readonly onOpenCeremony: (ceremonyId: string) => void
 }): ReactElement {
   const [requestJson, setRequestJson] = useState('')
   const inputId = useId()
@@ -95,6 +89,17 @@ export function WriterTransitionWizard({
   ]
 
   const action = (): ReactElement => {
+    if (state.ceremonyId !== null) {
+      const id = state.ceremonyId
+      return (
+        <Space direction="vertical" size="small">
+          <Typography.Text>{ACTIVATED_BOUNDARY_TEXT}</Typography.Text>
+          <Button type="primary" disabled={busy} onClick={() => onOpenCeremony(id)}>
+            Gespeicherte Root-Runde öffnen
+          </Button>
+        </Space>
+      )
+    }
     switch (PHASE_ACTION[state.phase]) {
       case 'activate':
         return (
@@ -107,21 +112,8 @@ export function WriterTransitionWizard({
             onConfirm={onActivate}
           />
         )
-      case 'publish':
-        return (
-          <Space direction="vertical" size="small">
-            <Typography.Text>{ACTIVATED_BOUNDARY_TEXT}</Typography.Text>
-            <Button
-              type="primary"
-              disabled={busy}
-              onClick={() => {
-                onBeginCeremony(state.newWriterHash ?? state.currentWriterHash)
-              }}
-            >
-              Registry-Ereignis als Root-Zeremonie beginnen
-            </Button>
-          </Space>
-        )
+      case 'done':
+        return <Typography.Text>Die Root-signierte Aktivierung ist veröffentlicht.</Typography.Text>
       case 'prepare':
         return (
           <Space direction="vertical" size="small">

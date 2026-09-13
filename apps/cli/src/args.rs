@@ -49,6 +49,9 @@
 //! Feld. Ein blosser Pfad bleibt die Dateiform der Stufe 4, damit jeder
 //! bisherige Aufruf unveraendert weiterlaeuft.
 
+#[path = "args/recovery.rs"]
+pub(crate) mod recovery;
+pub use recovery::RecoveryRuntimeArguments;
 use std::{
     ffi::OsString,
     fmt,
@@ -56,10 +59,13 @@ use std::{
 };
 
 use ea_recovery::{KeySourceSpec, KeySourceSpecError};
-use ea_types::{ChainSequence, UnixMillis};
+use ea_types::{ChainSequence, RegistryVersion, UnixMillis};
 
-/// Das EINZIGE Unterkommando von `organization`.
+/// Start/resume retains the existing ceremony without advancing offline steps.
 pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
+pub const ORGANIZATION_CERTIFY_ROOT_SUBCOMMAND: &str = "certify-root";
+pub const ORGANIZATION_SUBCOMMANDS: &str = "init|certify-root";
+pub const INITIAL_REGISTRY_VERSION_SWITCH: &str = "--initial-registry-version";
 /// Das EINZIGE Unterkommando von `registry`.
 ///
 /// Es heisst `revocation-plan` und nicht `revoke`, weil es GENAU DAS tut, was
@@ -116,7 +122,7 @@ pub const WRITER_TRANSITION_PREPARE_COMMAND: &str = "writer-transition prepare";
 pub const TRUST_ANCHOR_SWITCH: &str = "--trust-anchor";
 /// `--format text|json`, Vorgabe `text`.
 pub const FORMAT_SWITCH: &str = "--format";
-/// `--output <target>`, bei `decrypt`, `report`, `export` und `recovery-test`.
+/// `--output <target>`, bei `decrypt`, `grant`, `report`, `export` und `recovery-test`.
 pub const OUTPUT_SWITCH: &str = "--output";
 /// `--key <key-source>`, nur bei `decrypt`.
 pub const KEY_SWITCH: &str = "--key";
@@ -226,6 +232,27 @@ pub enum Format {
     Json,
 }
 
+pub const POSTURE_TARGET_SWITCH: &str = "--posture-target";
+pub const POSTURE_DOCUMENT_SWITCH: &str = "--posture-document";
+pub const EVIDENCE_REFERENCE_SWITCH: &str = "--evidence-reference";
+pub const VALID_FOR_MS_SWITCH: &str = "--valid-for-ms";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PostureAction {
+    Target {
+        output: PathBuf,
+    },
+    Issue {
+        target: PathBuf,
+        evidence_reference: PathBuf,
+        lifetime_ms: i64,
+        output: PathBuf,
+    },
+    Import {
+        document: PathBuf,
+    },
+}
+
 /// Die geschlossenen Operator-Aktionen; Identität kommt ausschließlich vom Provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperatorAction {
@@ -318,10 +345,15 @@ pub enum Command {
         authorization: PathBuf,
         /// Das Empfaengerzertifikat.
         recipient_certificate: PathBuf,
+        /// Native operator configuration; required for issuance.
+        operator_config: Option<PathBuf>,
+        /// New output directory; defaults to archive/grants.
+        output: Option<PathBuf>,
     },
     /// Bestand pruefen und die Eingaben eines Wiederherstellungstests
     /// aufloesen.
     RecoveryTest {
+        runtime: Option<RecoveryRuntimeArguments>,
         /// Wurzel des Bestands.
         archive: PathBuf,
         /// Das Schluesselinventar.
@@ -345,15 +377,19 @@ pub enum Command {
     },
     /// Die Ersteinrichtung einer Organisation beginnen oder fortsetzen.
     ///
-    /// Traegt KEINEN Pfad: das einzige Positionsargument ist das Wort `init`,
-    /// und der Ort, an dem gearbeitet wird, steht in
-    /// [`Invocation::anchor`]. Ein zweites Unterkommando gibt es nicht — was
-    /// hier stuende, muesste einen Schritt fuehren, und die dafuer noetigen
-    /// Schluesselports gibt es in dieser Scheibe nicht.
+    /// The location remains `Invocation::anchor`.
     OrganizationInit,
+    /// Certify only the existing installed native Root and retain step 2.
+    OrganizationCertifyRoot {
+        initial_registry_version: RegistryVersion,
+    },
     /// Verwaltung des nativen, OS-kontogebundenen Operators.
     Operator {
         action: OperatorAction,
+        config: PathBuf,
+    },
+    Posture {
+        action: PostureAction,
         config: PathBuf,
     },
     /// Eine Aenderung 1 fuer das in der Bedienerdatei benannte Ziel PLANEN.
@@ -590,6 +626,7 @@ enum CommandKind {
     RecoveryTest,
     Organization,
     Operator,
+    Posture,
     Registry,
     ClockRelease,
     WriterTransition,
@@ -608,6 +645,7 @@ impl CommandKind {
             Self::RecoveryTest => "recovery-test",
             Self::Organization => "organization",
             Self::Operator => "operator",
+            Self::Posture => "posture",
             Self::Registry => "registry",
             Self::ClockRelease => "clock-release",
             Self::WriterTransition => "writer-transition",
@@ -626,6 +664,7 @@ impl CommandKind {
             "recovery-test" => Some(Self::RecoveryTest),
             "organization" => Some(Self::Organization),
             "operator" => Some(Self::Operator),
+            "posture" => Some(Self::Posture),
             "registry" => Some(Self::Registry),
             "clock-release" => Some(Self::ClockRelease),
             "writer-transition" => Some(Self::WriterTransition),
@@ -773,11 +812,18 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut authorization: Option<PathBuf> = None;
     let mut recipient_certificate: Option<PathBuf> = None;
     let mut key_inventory: Option<PathBuf> = None;
+    let mut recovery_mode = None;
+    let mut recovery_paths = std::collections::BTreeMap::new();
     let mut report_signing_key: Option<PathBuf> = None;
     let mut operator_config: Option<PathBuf> = None;
+    let mut posture_target = None;
+    let mut posture_document = None;
+    let mut evidence_reference = None;
+    let mut valid_for_ms = None;
     let mut release: Option<PathBuf> = None;
     let mut request: Option<PathBuf> = None;
     let mut transition_object: Option<PathBuf> = None;
+    let mut initial_registry_version: Option<u64> = None;
     let mut effective_from: Option<u64> = None;
     let mut valid_through: Option<u64> = None;
     let mut not_after: Option<u64> = None;
@@ -800,9 +846,29 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 ));
             };
             match switch {
+                recovery::MODE => {
+                    take_path_value(&mut recovery_mode, recovery::MODE, &mut arguments)?
+                }
+                value if recovery::SWITCHES.contains(&value) => {
+                    let name = *recovery::SWITCHES
+                        .iter()
+                        .find(|name| **name == value)
+                        .expect("matched recovery switch");
+                    if recovery_paths.contains_key(name) {
+                        return Err(UsageError::DuplicateSwitch(name));
+                    }
+                    let mut path = None;
+                    take_path_value(&mut path, name, &mut arguments)?;
+                    recovery_paths.insert(name, path.expect("required value"));
+                }
                 TRUST_ANCHOR_SWITCH => {
                     take_path_value(&mut anchor, TRUST_ANCHOR_SWITCH, &mut arguments)?;
                 }
+                INITIAL_REGISTRY_VERSION_SWITCH => take_number_value(
+                    &mut initial_registry_version,
+                    INITIAL_REGISTRY_VERSION_SWITCH,
+                    &mut arguments,
+                )?,
                 OUTPUT_SWITCH => take_path_value(&mut output, OUTPUT_SWITCH, &mut arguments)?,
                 KEY_SWITCH => take_key_source_value(&mut key, KEY_SWITCH, &mut arguments)?,
                 RECOVERY_KEY_SWITCH => {
@@ -824,6 +890,22 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 }
                 OPERATOR_CONFIG_SWITCH => {
                     take_path_value(&mut operator_config, OPERATOR_CONFIG_SWITCH, &mut arguments)?
+                }
+                POSTURE_TARGET_SWITCH => {
+                    take_path_value(&mut posture_target, POSTURE_TARGET_SWITCH, &mut arguments)?
+                }
+                POSTURE_DOCUMENT_SWITCH => take_path_value(
+                    &mut posture_document,
+                    POSTURE_DOCUMENT_SWITCH,
+                    &mut arguments,
+                )?,
+                EVIDENCE_REFERENCE_SWITCH => take_path_value(
+                    &mut evidence_reference,
+                    EVIDENCE_REFERENCE_SWITCH,
+                    &mut arguments,
+                )?,
+                VALID_FOR_MS_SWITCH => {
+                    take_number_value(&mut valid_for_ms, VALID_FOR_MS_SWITCH, &mut arguments)?
                 }
                 RELEASE_SWITCH => take_path_value(&mut release, RELEASE_SWITCH, &mut arguments)?,
                 REQUEST_SWITCH => take_path_value(&mut request, REQUEST_SWITCH, &mut arguments)?,
@@ -901,6 +983,25 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     // und HIER abgelehnt: ein Aufrufer, der `--key` an `verify` haengt, hat
     // sich vertan, und ein stilles Ignorieren liesse ihn glauben, der
     // Schluessel sei benutzt worden.
+    for (present, switch) in [
+        (posture_target.is_some(), POSTURE_TARGET_SWITCH),
+        (posture_document.is_some(), POSTURE_DOCUMENT_SWITCH),
+        (evidence_reference.is_some(), EVIDENCE_REFERENCE_SWITCH),
+        (valid_for_ms.is_some(), VALID_FOR_MS_SWITCH),
+    ] {
+        if present && command_kind != CommandKind::Posture {
+            return Err(UsageError::SwitchNotAllowed {
+                switch,
+                command: command_name,
+            });
+        }
+    }
+    if initial_registry_version.is_some() && command_kind != CommandKind::Organization {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: INITIAL_REGISTRY_VERSION_SWITCH,
+            command: command_name,
+        });
+    }
     if key.is_some() && command_kind != CommandKind::Decrypt {
         return Err(UsageError::SwitchNotAllowed {
             switch: KEY_SWITCH,
@@ -929,10 +1030,21 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
+    if (recovery_mode.is_some() || !recovery_paths.is_empty())
+        && command_kind != CommandKind::RecoveryTest
+    {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: recovery::MODE,
+            command: command_name,
+        });
+    }
     if operator_config.is_some()
         && !matches!(
             command_kind,
-            CommandKind::Operator
+            CommandKind::RecoveryTest
+                | CommandKind::Grant
+                | CommandKind::Posture
+                | CommandKind::Operator
                 | CommandKind::Registry
                 | CommandKind::ClockRelease
                 | CommandKind::WriterTransition
@@ -990,7 +1102,6 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command_kind,
             CommandKind::Verify
                 | CommandKind::List
-                | CommandKind::Grant
                 | CommandKind::Organization
                 | CommandKind::Operator
                 | CommandKind::Registry
@@ -1061,6 +1172,8 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 switch: AUTHORIZATION_SWITCH,
                 command: command_name,
             })?,
+            operator_config,
+            output,
             recipient_certificate: recipient_certificate.ok_or(UsageError::MissingSwitch {
                 switch: RECIPIENT_CERT_SWITCH,
                 command: command_name,
@@ -1081,6 +1194,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             })?,
         },
         CommandKind::RecoveryTest => Command::RecoveryTest {
+            runtime: recovery::build(recovery_mode, operator_config, recovery_paths)?,
             archive: path,
             key_inventory: key_inventory.ok_or(UsageError::MissingSwitch {
                 switch: KEY_INVENTORY_SWITCH,
@@ -1091,16 +1205,32 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 command: command_name,
             })?,
         },
-        CommandKind::Organization => {
-            if path != Path::new(ORGANIZATION_INIT_SUBCOMMAND) {
+        CommandKind::Organization => match path.to_str() {
+            Some(ORGANIZATION_INIT_SUBCOMMAND) => {
+                if initial_registry_version.is_some() {
+                    return Err(UsageError::SwitchNotAllowed {
+                        switch: INITIAL_REGISTRY_VERSION_SWITCH,
+                        command: "organization init",
+                    });
+                }
+                Command::OrganizationInit
+            }
+            Some(ORGANIZATION_CERTIFY_ROOT_SUBCOMMAND) => Command::OrganizationCertifyRoot {
+                initial_registry_version: RegistryVersion::new(initial_registry_version.ok_or(
+                    UsageError::MissingSwitch {
+                        switch: INITIAL_REGISTRY_VERSION_SWITCH,
+                        command: "organization certify-root",
+                    },
+                )?),
+            },
+            _ => {
                 return Err(UsageError::UnknownSubcommand {
                     command: command_name,
                     value: path.to_string_lossy().into_owned(),
-                    expected: ORGANIZATION_INIT_SUBCOMMAND,
+                    expected: ORGANIZATION_SUBCOMMANDS,
                 });
             }
-            Command::OrganizationInit
-        }
+        },
         CommandKind::Operator => {
             let action = match path.to_str() {
                 Some("provision") => OperatorAction::Provision,
@@ -1121,6 +1251,82 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     command: command_name,
                 })?,
             }
+        }
+        CommandKind::Posture => {
+            let config = operator_config.ok_or(UsageError::MissingSwitch {
+                switch: OPERATOR_CONFIG_SWITCH,
+                command: command_name,
+            })?;
+            let mode = path.to_str().unwrap_or("");
+            for (present, switch, allowed) in [
+                (
+                    posture_target.is_some(),
+                    POSTURE_TARGET_SWITCH,
+                    mode == "issue",
+                ),
+                (
+                    posture_document.is_some(),
+                    POSTURE_DOCUMENT_SWITCH,
+                    mode == "import",
+                ),
+                (
+                    evidence_reference.is_some(),
+                    EVIDENCE_REFERENCE_SWITCH,
+                    mode == "issue",
+                ),
+                (valid_for_ms.is_some(), VALID_FOR_MS_SWITCH, mode == "issue"),
+                (
+                    output.is_some(),
+                    OUTPUT_SWITCH,
+                    mode == "target" || mode == "issue",
+                ),
+            ] {
+                if present && !allowed {
+                    return Err(UsageError::SwitchNotAllowed {
+                        switch,
+                        command: "posture",
+                    });
+                }
+            }
+            let missing = |switch| UsageError::MissingSwitch {
+                switch,
+                command: "posture",
+            };
+            let action = match mode {
+                "target" => PostureAction::Target {
+                    output: output.ok_or_else(|| missing(OUTPUT_SWITCH))?,
+                },
+                "issue" => {
+                    let target = posture_target.ok_or_else(|| missing(POSTURE_TARGET_SWITCH))?;
+                    let evidence_reference =
+                        evidence_reference.ok_or_else(|| missing(EVIDENCE_REFERENCE_SWITCH))?;
+                    let value = valid_for_ms.ok_or_else(|| missing(VALID_FOR_MS_SWITCH))?;
+                    let lifetime_ms = i64::try_from(value)
+                        .ok()
+                        .filter(|value| (1..=86_400_000).contains(value))
+                        .ok_or_else(|| UsageError::UnknownNumber {
+                            switch: VALID_FOR_MS_SWITCH,
+                            value: value.to_string(),
+                        })?;
+                    PostureAction::Issue {
+                        target,
+                        evidence_reference,
+                        lifetime_ms,
+                        output: output.ok_or_else(|| missing(OUTPUT_SWITCH))?,
+                    }
+                }
+                "import" => PostureAction::Import {
+                    document: posture_document.ok_or_else(|| missing(POSTURE_DOCUMENT_SWITCH))?,
+                },
+                _ => {
+                    return Err(UsageError::UnknownSubcommand {
+                        command: "posture",
+                        value: mode.to_owned(),
+                        expected: "target, issue or import",
+                    });
+                }
+            };
+            Command::Posture { action, config }
         }
         CommandKind::Registry => {
             if path != Path::new(REGISTRY_REVOCATION_PLAN_SUBCOMMAND) {
@@ -1244,7 +1450,7 @@ mod tests {
         AUTHORITY_KEY_SWITCH, AUTHORIZATION_SWITCH, CLOCK_RELEASE_APPLY_SUBCOMMAND, Command,
         EFFECTIVE_FROM_SWITCH, FORMAT_SWITCH, Format, INCLUDE_RUNTIME_METADATA_SWITCH, Invocation,
         KEY_INVENTORY_SWITCH, KEY_SWITCH, KeySourceArgument, NOT_AFTER_SWITCH,
-        OPERATOR_CONFIG_SWITCH, ORGANIZATION_INIT_SUBCOMMAND, OUTPUT_SWITCH, RECIPIENT_CERT_SWITCH,
+        OPERATOR_CONFIG_SWITCH, ORGANIZATION_INIT_SUBCOMMAND, ORGANIZATION_SUBCOMMANDS, OUTPUT_SWITCH, RECIPIENT_CERT_SWITCH,
         RECOVERY_KEY_SWITCH, REGISTRY_REVOCATION_PLAN_SUBCOMMAND, RELEASE_SWITCH,
         REPORT_SIGNING_KEY_SWITCH, TRUST_ANCHOR_SWITCH, UsageError, VALID_THROUGH_SWITCH, parse,
     };
@@ -1400,7 +1606,7 @@ mod tests {
             UsageError::UnknownSubcommand {
                 command: "organization",
                 value: "iniit".to_owned(),
-                expected: ORGANIZATION_INIT_SUBCOMMAND,
+                expected: ORGANIZATION_SUBCOMMANDS,
             }
         );
     }
@@ -2113,8 +2319,35 @@ mod tests {
                     authority_key: file_key("authority.key"),
                     authorization: PathBuf::from("authorization.bin"),
                     recipient_certificate: PathBuf::from("recipient.cert"),
+                    operator_config: None,
+                    output: None,
                 },
             }
+        );
+    }
+
+    #[test]
+    fn grant_accepts_native_config_and_optional_output() {
+        assert!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "grant",
+                "archive",
+                RECOVERY_KEY_SWITCH,
+                "recovery.key",
+                AUTHORITY_KEY_SWITCH,
+                "authority.key",
+                AUTHORIZATION_SWITCH,
+                "authorization.eat",
+                RECIPIENT_CERT_SWITCH,
+                "reader.eat",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                OUTPUT_SWITCH,
+                "grants"
+            ])
+            .is_ok()
         );
     }
 
@@ -2138,6 +2371,7 @@ mod tests {
                 include_runtime_metadata: false,
                 report_signing_key: None,
                 command: Command::RecoveryTest {
+                    runtime: None,
                     archive: PathBuf::from("archive"),
                     key_inventory: PathBuf::from("inventory.json"),
                     output: PathBuf::from("recovery-test.json"),
@@ -2207,8 +2441,8 @@ mod tests {
     }
 
     /// Die vier `grant`-Schalter gehoeren GENAU `grant`, `--key-inventory`
-    /// genau `recovery-test` — und `--key` bleibt bei `decrypt`, `--output`
-    /// kommt nicht zu `grant`.
+    /// genau `recovery-test` — und `--key` bleibt bei `decrypt`.
+    /// Das optionale Grant-Ausgabeziel wird im positiven Grant-Test geprüft.
     #[test]
     fn the_new_switches_are_rejected_on_every_other_command() {
         for switch in [
@@ -2260,20 +2494,6 @@ mod tests {
             ]),
             UsageError::SwitchNotAllowed {
                 switch: KEY_SWITCH,
-                command: "grant",
-            }
-        );
-        assert_eq!(
-            rejected(&[
-                TRUST_ANCHOR_SWITCH,
-                "anchor.etb",
-                OUTPUT_SWITCH,
-                "target",
-                "grant",
-                "archive"
-            ]),
-            UsageError::SwitchNotAllowed {
-                switch: OUTPUT_SWITCH,
                 command: "grant",
             }
         );
@@ -2423,6 +2643,136 @@ mod tests {
                 parse([raw_switch].into_iter()),
                 Err(UsageError::UnknownSwitch(_))
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_runtime_grammar_tests {
+    use super::*;
+    fn invoke(extra: &[&str]) -> Result<Invocation, UsageError> {
+        let mut args = vec![
+            "--trust-anchor",
+            "anchor.etb",
+            "recovery-test",
+            "archive",
+            "--key-inventory",
+            "inventory.json",
+            "--output",
+            "report.cbor",
+        ];
+        args.extend_from_slice(extra);
+        parse(args.into_iter().map(OsString::from))
+    }
+    #[test]
+    fn recovery_runtime_modes_require_explicit_native_and_backup_inputs() {
+        assert!(
+            invoke(&[
+                "--recovery-mode",
+                "capture",
+                "--operator-config",
+                "operator.json",
+                "--archive-profile",
+                "profile.json",
+                "--snapshot",
+                "snapshot.db",
+                "--backup-passphrase-file",
+                "backup.passphrase"
+            ])
+            .is_ok()
+        );
+        assert!(
+            invoke(&[
+                "--recovery-mode",
+                "restore-run",
+                "--operator-config",
+                "operator.json",
+                "--archive-profile",
+                "profile.json",
+                "--source-envelope",
+                "source.cbor",
+                "--snapshot",
+                "snapshot.db",
+                "--backup-passphrase-file",
+                "backup.passphrase",
+                "--restore-database",
+                "restore.sqlite",
+                "--media-sources",
+                "media.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            invoke(&[
+                "--recovery-mode",
+                "import",
+                "--operator-config",
+                "operator.json",
+                "--archive-profile",
+                "profile.json",
+                "--source-envelope",
+                "source.cbor",
+                "--completed-report",
+                "completed.cbor"
+            ])
+            .is_ok()
+        );
+        assert!(
+            invoke(&[
+                "--recovery-mode",
+                "status",
+                "--operator-config",
+                "operator.json",
+                "--archive-profile",
+                "profile.json"
+            ])
+            .is_ok()
+        );
+        for extra in [
+            vec!["--recovery-mode", "unknown"],
+            vec!["--recovery-mode", "capture"],
+            vec!["--snapshot", "snapshot.db"],
+            vec![
+                "--recovery-mode",
+                "status",
+                "--operator-config",
+                "operator.json",
+                "--archive-profile",
+                "profile.json",
+                "--snapshot",
+                "snapshot.db",
+            ],
+            vec![
+                "--recovery-mode",
+                "restore-run",
+                "--operator-config",
+                "operator.json",
+                "--archive-profile",
+                "profile.json",
+                "--source-envelope",
+                "source.cbor",
+                "--snapshot",
+                "snapshot.db",
+                "--backup-passphrase-file",
+                "backup.passphrase",
+                "--restore-database",
+                "restore.sqlite",
+            ],
+            vec![
+                "--recovery-mode",
+                "status",
+                "--operator-config",
+                "operator.json",
+                "--archive-profile",
+                "profile.json",
+                "--machine-hash",
+                "11",
+            ],
+        ] {
+            assert!(
+                invoke(&extra).is_err(),
+                "inconsistent recovery mode must be rejected"
+            );
         }
     }
 }

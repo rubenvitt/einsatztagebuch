@@ -42,7 +42,9 @@
 use std::sync::{Arc, Mutex};
 
 use ea_admin::{
-    GoLiveRequirementStatus, TrustCeremonyKind, TrustCeremonyStep, next_step,
+    GoLiveRequirementStatus, TrustCeremonyKind, TrustCeremonyStep,
+    administration_runtime::{FingerprintSubjectV1, TrustCeremonyRoundV1},
+    ceremony_steps::next_step_for_round,
     parse_human_readable_fingerprint, reauth_purpose, requires_fresh_reauth,
 };
 use ea_format::{ClockReleaseJustificationV1, OperatorRoleV1};
@@ -86,6 +88,20 @@ pub(crate) const fn trust_ceremony_step_literal(value: TrustCeremonyStep) -> &'s
         TrustCeremonyStep::RootRequestExported => "RootRequestExported",
         TrustCeremonyStep::RootReplyImported => "RootReplyImported",
         TrustCeremonyStep::RegistryPublished => "RegistryPublished",
+        TrustCeremonyStep::TargetPublished => "TargetPublished",
+    }
+}
+
+const fn fingerprint_subject_literal(value: FingerprintSubjectV1) -> &'static str {
+    match value {
+        FingerprintSubjectV1::RegistrationRequest => "RegistrationRequest",
+        FingerprintSubjectV1::IssuedCertificate => "IssuedCertificate",
+    }
+}
+const fn trust_ceremony_round_literal(value: TrustCeremonyRoundV1) -> &'static str {
+    match value {
+        TrustCeremonyRoundV1::IssueTarget => "IssueTarget",
+        TrustCeremonyRoundV1::ActivateRegistry => "ActivateRegistry",
     }
 }
 
@@ -150,6 +166,7 @@ pub struct PendingDeviceRequestDto {
     pub certificate_kind_code: String,
     pub fingerprint: String,
     pub received_at_ms: i64,
+    pub fingerprint_subject: &'static str,
 }
 
 impl From<&PendingDeviceRequestView> for PendingDeviceRequestDto {
@@ -159,6 +176,7 @@ impl From<&PendingDeviceRequestView> for PendingDeviceRequestDto {
             certificate_kind_code: view.certificate_kind_code.clone(),
             fingerprint: view.fingerprint.clone(),
             received_at_ms: view.received_at_ms.get(),
+            fingerprint_subject: fingerprint_subject_literal(view.fingerprint_subject),
         }
     }
 }
@@ -172,6 +190,9 @@ pub struct TrustCeremonyDto {
     pub step: &'static str,
     pub target_fingerprint: Option<String>,
     pub exchange_file_name: Option<String>,
+    pub round: &'static str,
+    pub linked_ceremony_id: Option<String>,
+    pub fingerprint_subject: Option<&'static str>,
 }
 
 impl TryFrom<&TrustCeremonyView> for TrustCeremonyDto {
@@ -182,14 +203,50 @@ impl TryFrom<&TrustCeremonyView> for TrustCeremonyDto {
     /// haette ihn still durchgereicht, und jeder Zeremoniekern geht hier
     /// durch.
     fn try_from(view: &TrustCeremonyView) -> Result<Self, CommandError> {
+        if view.target_fingerprint.is_some() != view.fingerprint_subject.is_some()
+            || (view.step == TrustCeremonyStep::RegistryPublished
+                && view.round != TrustCeremonyRoundV1::ActivateRegistry)
+            || (view.step == TrustCeremonyStep::TargetPublished
+                && view.round != TrustCeremonyRoundV1::IssueTarget)
+        {
+            return Err(CommandError::new(ADMINISTRATION_WIRE_VALUE));
+        }
+        let ceremony_id = checked_ceremony_identifier(&view.ceremony_id)?;
+        let linked_ceremony_id = view
+            .linked_ceremony_id
+            .as_deref()
+            .map(checked_ceremony_identifier)
+            .transpose()?;
+        if linked_ceremony_id.as_ref() == Some(&ceremony_id) {
+            return Err(CommandError::new(ADMINISTRATION_WIRE_VALUE));
+        }
+        if let Some(fingerprint) = &view.target_fingerprint {
+            parse_human_readable_fingerprint(fingerprint)
+                .map_err(|_| CommandError::new(ADMINISTRATION_WIRE_VALUE))?;
+        }
         Ok(Self {
-            ceremony_id: view.ceremony_id.clone(),
+            ceremony_id,
             kind: trust_ceremony_kind_literal(view.kind),
             step: trust_ceremony_step_literal(view.step),
             target_fingerprint: view.target_fingerprint.clone(),
             exchange_file_name: checked_exchange_file_name(view.exchange_file_name.as_deref())?,
+            round: trust_ceremony_round_literal(view.round),
+            linked_ceremony_id,
+            fingerprint_subject: view.fingerprint_subject.map(fingerprint_subject_literal),
         })
     }
+}
+
+fn checked_ceremony_identifier(value: &str) -> Result<String, CommandError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(CommandError::new(ADMINISTRATION_WIRE_VALUE));
+    }
+    Ok(value.to_owned())
 }
 
 /// `exchangeFileName` ist ein NAME und nie ein Pfad.
@@ -377,6 +434,7 @@ impl From<&ClockReleaseOutcomeView> for ClockReleaseOutcomeDto {
 #[serde(rename_all = "camelCase")]
 pub struct WriterTransitionDto {
     pub phase: &'static str,
+    pub ceremony_id: Option<String>,
     pub current_writer_hash: String,
     pub new_writer_hash: Option<String>,
     pub effective_from_sequence: Option<u64>,
@@ -386,6 +444,7 @@ impl From<&WriterTransitionView> for WriterTransitionDto {
     fn from(view: &WriterTransitionView) -> Self {
         Self {
             phase: writer_transition_phase_literal(view.phase),
+            ceremony_id: view.ceremony_id.clone(),
             current_writer_hash: view.current_writer_hash.clone(),
             new_writer_hash: view.new_writer_hash.clone(),
             effective_from_sequence: view
@@ -462,11 +521,7 @@ fn administration(state: &DesktopState) -> Result<Administration<'_>, CommandErr
     let port = state
         .administration_port()
         .ok_or_else(|| CommandError::new(ADMINISTRATION_UNAVAILABLE))?;
-    let role = state
-        .session()
-        .lock()
-        .map_err(|_| CommandError::new(SESSION_STATE_UNREADABLE))?
-        .role();
+    let role = state.verified_role()?;
     require_administrator(role)?;
     Ok(Administration {
         port,
@@ -503,8 +558,20 @@ impl Administration<'_> {
         target: TrustCeremonyStep,
         step: impl FnOnce(&dyn AdministrationPort) -> Result<TrustCeremonyView, CommandError>,
     ) -> Result<TrustCeremonyDto, CommandError> {
+        self.advance_with_target(ceremony_id, |_| target, step)
+    }
+
+    fn advance_with_target(
+        &self,
+        ceremony_id: &str,
+        target: impl FnOnce(&TrustCeremonyView) -> TrustCeremonyStep,
+        step: impl FnOnce(&dyn AdministrationPort) -> Result<TrustCeremonyView, CommandError>,
+    ) -> Result<TrustCeremonyDto, CommandError> {
         let current = self.port.ceremony(ceremony_id)?;
-        if next_step(current.kind, current.step) != Some(target) {
+        let target = target(&current);
+        if current.ceremony_id != ceremony_id
+            || next_step_for_round(current.kind, current.round, current.step) != Some(target)
+        {
             return Err(CommandError::new(CEREMONY_STEP_OUT_OF_ORDER));
         }
         if requires_fresh_reauth(target) {
@@ -513,6 +580,7 @@ impl Administration<'_> {
         let reached = step(self.port.as_ref())?;
         if reached.ceremony_id != current.ceremony_id
             || reached.kind != current.kind
+            || reached.round != current.round
             || reached.step != target
         {
             return Err(CommandError::new(CEREMONY_STEP_OUT_OF_ORDER));
@@ -531,6 +599,29 @@ impl Administration<'_> {
             .collect())
     }
 
+    pub(crate) fn open_ceremonies(&self) -> Result<Vec<TrustCeremonyDto>, CommandError> {
+        let rounds = self.port.open_ceremonies()?;
+        if rounds.len() > 4096 {
+            return Err(CommandError::new(ADMINISTRATION_WIRE_VALUE));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        rounds
+            .iter()
+            .map(|round| {
+                checked_ceremony_identifier(&round.ceremony_id)?;
+                if !ids.insert(&round.ceremony_id)
+                    || matches!(
+                        round.step,
+                        TrustCeremonyStep::TargetPublished | TrustCeremonyStep::RegistryPublished
+                    )
+                {
+                    return Err(CommandError::new(ADMINISTRATION_WIRE_VALUE));
+                }
+                TrustCeremonyDto::try_from(round)
+            })
+            .collect()
+    }
+
     /// Beginnt eine Zeremonie; der Beginn steht auf `PendingRequest`, alles
     /// andere ist ein Sprung.
     pub(crate) fn ceremony_begin(
@@ -545,6 +636,18 @@ impl Administration<'_> {
             return Err(CommandError::new(CEREMONY_STEP_OUT_OF_ORDER));
         }
         TrustCeremonyDto::try_from(&begun)
+    }
+
+    pub(crate) fn ceremony_read(
+        &self,
+        ceremony_id: &str,
+    ) -> Result<TrustCeremonyDto, CommandError> {
+        checked_ceremony_identifier(ceremony_id)?;
+        let value = self.port.ceremony(ceremony_id)?;
+        if value.ceremony_id != ceremony_id {
+            return Err(CommandError::new(ADMINISTRATION_WIRE_VALUE));
+        }
+        TrustCeremonyDto::try_from(&value)
     }
 
     /// Der Freitext des Bedieners wird HIER gelesen; der Port sieht den Hash.
@@ -586,9 +689,14 @@ impl Administration<'_> {
     }
 
     pub(crate) fn publish(&self, ceremony_id: &str) -> Result<TrustCeremonyDto, CommandError> {
-        self.advance(ceremony_id, TrustCeremonyStep::RegistryPublished, |port| {
-            port.publish(ceremony_id)
-        })
+        self.advance_with_target(
+            ceremony_id,
+            |current| match current.round {
+                TrustCeremonyRoundV1::IssueTarget => TrustCeremonyStep::TargetPublished,
+                TrustCeremonyRoundV1::ActivateRegistry => TrustCeremonyStep::RegistryPublished,
+            },
+            |port| port.publish(ceremony_id),
+        )
     }
 
     pub(crate) fn policy_profile(&self) -> Result<PolicyProfileDto, CommandError> {
@@ -695,12 +803,25 @@ pub(crate) fn pending_device_requests_core(
     administration(state)?.pending_device_requests()
 }
 
+pub(crate) fn open_ceremonies_core(
+    state: &DesktopState,
+) -> Result<Vec<TrustCeremonyDto>, CommandError> {
+    administration(state)?.open_ceremonies()
+}
+
 pub(crate) fn ceremony_begin_core(
     state: &DesktopState,
     request_id: &str,
     kind: &str,
 ) -> Result<TrustCeremonyDto, CommandError> {
     administration(state)?.ceremony_begin(request_id, kind)
+}
+
+pub(crate) fn ceremony_read_core(
+    state: &DesktopState,
+    ceremony_id: &str,
+) -> Result<TrustCeremonyDto, CommandError> {
+    administration(state)?.ceremony_read(ceremony_id)
 }
 
 pub(crate) fn ceremony_confirm_fingerprint_core(
@@ -741,6 +862,15 @@ pub(crate) fn ceremony_publish_core(
 
 pub(crate) fn policy_profile_core(state: &DesktopState) -> Result<PolicyProfileDto, CommandError> {
     administration(state)?.policy_profile()
+}
+
+pub(crate) fn writer_lock_diagnosis_core(
+    state: &DesktopState,
+) -> Result<&'static str, CommandError> {
+    administration(state)?
+        .port
+        .diagnose_writer_lock()
+        .map(ea_ui_contracts::local_writer_lock_diagnosis_literal)
 }
 
 pub(crate) fn registry_health_core(
@@ -817,6 +947,25 @@ pub async fn admin_pending_device_requests(
 ) -> Result<Vec<PendingDeviceRequestDto>, CommandError> {
     let state = state.inner().clone();
     run_blocking(move || pending_device_requests_core(&state)).await
+}
+
+/// Lists existing verified unfinished rounds without creating new authority.
+#[tauri::command]
+pub async fn admin_open_ceremonies(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<TrustCeremonyDto>, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || open_ceremonies_core(&state)).await
+}
+
+/// Reopens one persisted ceremony, including its separately authorized round.
+#[tauri::command]
+pub async fn admin_ceremony_read(
+    state: tauri::State<'_, DesktopState>,
+    ceremony_id: String,
+) -> Result<TrustCeremonyDto, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || ceremony_read_core(&state, &ceremony_id)).await
 }
 
 /// Beginnt eine Trust-Zeremonie fuer eine Anfrage.
@@ -944,6 +1093,18 @@ pub async fn admin_registry_health(
     run_blocking(move || registry_health_core(&state)).await
 }
 
+/// Read-only diagnosis of the configured local archive lock, without arguments.
+///
+/// # Errors
+/// Requires the same admitted administrator and live native session as other views.
+#[tauri::command]
+pub async fn admin_writer_lock_diagnosis(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<&'static str, CommandError> {
+    let state = state.inner().clone();
+    run_blocking(move || writer_lock_diagnosis_core(&state)).await
+}
+
 /// Die Go-live-Liste — fuenfzehn Anforderungen, `productionReady` nur, wenn
 /// jede bestaetigt ist.
 ///
@@ -1067,8 +1228,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ea_admin::{
-        GoLiveChecklist, GoLiveEvidence, TrustCeremonyKind, TrustCeremonyStep, evaluate_go_live,
-        next_step, requires_fresh_reauth,
+        GoLiveChecklist, GoLiveEvidence, TrustCeremonyKind, TrustCeremonyStep,
+        administration_runtime::{FingerprintSubjectV1, TrustCeremonyRoundV1},
+        ceremony_steps::next_step_for_round,
+        evaluate_go_live, requires_fresh_reauth,
     };
     use ea_format::{ClockReleaseJustificationV1, OperatorRoleV1};
     use ea_operator::ReauthPurpose;
@@ -1083,14 +1246,15 @@ mod tests {
     use super::{
         Administration, ceremony_authorize_core, ceremony_begin_core,
         ceremony_confirm_fingerprint_core, ceremony_export_request_core,
-        ceremony_import_reply_core, ceremony_publish_core, clock_release_availability_literal,
-        clock_release_issue_core, clock_release_justification_literal, clock_release_offer_core,
+        ceremony_import_reply_core, ceremony_publish_core, ceremony_read_core,
+        clock_release_availability_literal, clock_release_issue_core,
+        clock_release_justification_literal, clock_release_offer_core, fingerprint_subject_literal,
         go_live_checklist_core, go_live_export_unresolved_core, go_live_requirement_status_literal,
         pending_device_requests_core, policy_profile_core, registry_health_core,
         require_administrator, revocation_effect_core, revocation_target_class_literal,
-        trust_ceremony_kind_literal, trust_ceremony_step_literal, writer_transition_activate_core,
-        writer_transition_phase_literal, writer_transition_prepare_core,
-        writer_transition_state_core,
+        trust_ceremony_kind_literal, trust_ceremony_round_literal, trust_ceremony_step_literal,
+        writer_transition_activate_core, writer_transition_phase_literal,
+        writer_transition_prepare_core, writer_transition_state_core,
     };
     use crate::commands::{
         ADMINISTRATION_FORBIDDEN, ADMINISTRATION_UNAVAILABLE, ADMINISTRATION_WIRE_VALUE,
@@ -1160,7 +1324,7 @@ mod tests {
             view.step = if self.jumps {
                 TrustCeremonyStep::RegistryPublished
             } else {
-                next_step(view.kind, view.step)
+                next_step_for_round(view.kind, view.round, view.step)
                     .ok_or_else(|| CommandError::new("EA-TEST-AT-END"))?
             };
             if view.step == TrustCeremonyStep::RootRequestExported {
@@ -1176,6 +1340,7 @@ mod tests {
             let prepared = phase != WriterTransitionPhase::NoTransition;
             WriterTransitionView {
                 phase,
+                ceremony_id: None,
                 current_writer_hash: "cd".repeat(32),
                 new_writer_hash: prepared.then(|| "ef".repeat(32)),
                 effective_from_sequence: prepared.then(|| ChainSequence::new(9)),
@@ -1188,6 +1353,10 @@ mod tests {
     }
 
     impl AdministrationPort for FakeAdministration {
+        fn open_ceremonies(&self) -> Result<Vec<TrustCeremonyView>, CommandError> {
+            self.note("open_ceremonies");
+            Ok(self.ceremonies.lock().unwrap().values().cloned().collect())
+        }
         fn pending_device_requests(&self) -> Result<Vec<PendingDeviceRequestView>, CommandError> {
             self.note("pending_device_requests");
             Ok(vec![PendingDeviceRequestView {
@@ -1195,6 +1364,7 @@ mod tests {
                 certificate_kind_code: "Writer".to_owned(),
                 fingerprint: ea_admin::human_readable_fingerprint(&hash(0xAB)),
                 received_at_ms: UnixMillis::new(1_771_000_000_000),
+                fingerprint_subject: FingerprintSubjectV1::IssuedCertificate,
             }])
         }
 
@@ -1225,6 +1395,10 @@ mod tests {
                 target_fingerprint: (kind == TrustCeremonyKind::DeviceApprove)
                     .then(|| ea_admin::human_readable_fingerprint(&hash(0xAB))),
                 exchange_file_name: None,
+                round: TrustCeremonyRoundV1::ActivateRegistry,
+                linked_ceremony_id: None,
+                fingerprint_subject: (kind == TrustCeremonyKind::DeviceApprove)
+                    .then_some(FingerprintSubjectV1::IssuedCertificate),
             };
             self.ceremonies
                 .lock()
@@ -1421,13 +1595,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Fail-closed: ohne Port gibt es keine Verwaltung — fuer JEDES der
-    /// siebzehn Kommandos denselben Code, und keiner davon ist ein leerer
+    /// achtzehn Kommandos denselben Code, und keiner davon ist ein leerer
     /// Bericht.
     #[test]
     fn a_shell_without_an_administration_port_gets_a_named_absence() {
         let state = bare_state();
         let codes = [
             pending_device_requests_core(&state).unwrap_err().code,
+            ceremony_read_core(&state, "cer-req-1").unwrap_err().code,
             ceremony_begin_core(&state, "req-1", "DeviceApprove")
                 .unwrap_err()
                 .code,
@@ -1461,7 +1636,7 @@ mod tests {
                 .unwrap_err()
                 .code,
         ];
-        assert_eq!(codes.len(), 17);
+        assert_eq!(codes.len(), 18);
         for code in codes {
             assert_eq!(code, ADMINISTRATION_UNAVAILABLE);
         }
@@ -1486,7 +1661,7 @@ mod tests {
     }
 
     /// Eine Sitzung OHNE nachgewiesenen Administrator an einem VERDRAHTETEN
-    /// Port: FORBIDDEN fuer JEDES der siebzehn Kommandos, und der Port wird
+    /// Port: FORBIDDEN fuer JEDES der achtzehn Kommandos, und der Port wird
     /// nicht einmal gerufen. Das Tor haengt an der Rolle und nicht an der
     /// Anwesenheit des Ports — und es steht in jedem Kern, nicht nur in dreien.
     ///
@@ -1509,6 +1684,7 @@ mod tests {
         );
         let codes = [
             pending_device_requests_core(&state).unwrap_err().code,
+            ceremony_read_core(&state, "cer-req-1").unwrap_err().code,
             ceremony_begin_core(&state, "req-1", "DeviceApprove")
                 .unwrap_err()
                 .code,
@@ -1542,7 +1718,7 @@ mod tests {
                 .unwrap_err()
                 .code,
         ];
-        assert_eq!(codes.len(), 17);
+        assert_eq!(codes.len(), 18);
         for code in codes {
             assert_eq!(code, ADMINISTRATION_FORBIDDEN);
         }
@@ -1641,10 +1817,12 @@ mod tests {
                 "publish",
             ]
         );
-        // Jeder Schritt mit Frischepflicht ist genau einer der zwei bezeugten.
+        // Diese Registry-Runde hat zwei Praesenzschritte. TargetPublished
+        // gehoert ausschliesslich zur getrennten IssueTarget-Runde.
         assert_eq!(
             TrustCeremonyStep::ALL
                 .into_iter()
+                .filter(|step| *step != TrustCeremonyStep::TargetPublished)
                 .filter(|step| requires_fresh_reauth(*step))
                 .count(),
             2
@@ -1820,6 +1998,124 @@ mod tests {
         assert_eq!(
             session.lock().unwrap().fresh_reauth(),
             Some(ReauthPurpose::ClockSkewRelease)
+        );
+    }
+
+    #[test]
+    fn open_ceremonies_is_read_only_and_refuses_terminal_or_malformed_views() {
+        let port = FakeAdministration::compliant();
+        let session = stale();
+        let admin = admin(&port, &session);
+        let pending = admin
+            .ceremony_begin("open-existing", "DeviceRevoke")
+            .unwrap();
+        let calls_before = port.calls().len();
+        let rows = admin.open_ceremonies().unwrap();
+        assert_eq!(rows, vec![pending.clone()]);
+        assert_eq!(&port.calls()[calls_before..], &["open_ceremonies"]);
+        assert!(session.lock().unwrap().fresh_reauth().is_none());
+        {
+            let mut rows = port.ceremonies.lock().unwrap();
+            rows.get_mut(&pending.ceremony_id).unwrap().step = TrustCeremonyStep::RegistryPublished;
+        }
+        assert_eq!(
+            admin.open_ceremonies().unwrap_err().code,
+            ADMINISTRATION_WIRE_VALUE
+        );
+        {
+            let mut rows = port.ceremonies.lock().unwrap();
+            let row = rows.get_mut(&pending.ceremony_id).unwrap();
+            row.step = TrustCeremonyStep::PendingRequest;
+            row.ceremony_id = "../private".into();
+        }
+        assert_eq!(
+            admin.open_ceremonies().unwrap_err().code,
+            ADMINISTRATION_WIRE_VALUE
+        );
+    }
+
+    #[test]
+    fn open_ceremonies_keeps_the_host_role_and_missing_port_gate() {
+        assert_eq!(
+            super::open_ceremonies_core(&bare_state()).unwrap_err().code,
+            ADMINISTRATION_UNAVAILABLE
+        );
+        let port = FakeAdministration::compliant();
+        let state = state_with(port.clone(), SessionState::new(None, None));
+        assert_eq!(
+            super::open_ceremonies_core(&state).unwrap_err().code,
+            ADMINISTRATION_FORBIDDEN
+        );
+        assert!(port.calls().is_empty());
+    }
+
+    #[test]
+    fn target_publication_requires_fresh_presence_and_never_claims_registry_activation() {
+        let port = FakeAdministration::compliant();
+        let session = stale();
+        let admin = admin(&port, &session);
+        let id = admin
+            .ceremony_begin("issue", "DeviceApprove")
+            .unwrap()
+            .ceremony_id;
+        {
+            let mut views = port.ceremonies.lock().unwrap();
+            let view = views.get_mut(&id).unwrap();
+            view.round = TrustCeremonyRoundV1::IssueTarget;
+            view.step = TrustCeremonyStep::RootReplyImported;
+            view.fingerprint_subject = Some(FingerprintSubjectV1::RegistrationRequest);
+            view.linked_ceremony_id = Some("activate-exact".to_owned());
+        }
+        assert_eq!(admin.publish(&id).unwrap_err().code, REAUTH_REQUIRED);
+        assert!(!port.calls().contains(&"publish"));
+        session
+            .lock()
+            .unwrap()
+            .record_fresh_reauth(ReauthPurpose::AdminRootCeremony);
+        let reached = admin.publish(&id).unwrap();
+        assert_eq!(reached.step, "TargetPublished");
+        assert_eq!(reached.round, "IssueTarget");
+        assert_eq!(reached.fingerprint_subject, Some("RegistrationRequest"));
+        assert_eq!(
+            reached.linked_ceremony_id.as_deref(),
+            Some("activate-exact")
+        );
+        assert_eq!(admin.ceremony_read(&id).unwrap(), reached);
+        assert!(session.lock().unwrap().fresh_reauth().is_none());
+    }
+
+    #[test]
+    fn ceremony_read_refuses_paths_other_ids_and_inconsistent_round_claims() {
+        let port = FakeAdministration::compliant();
+        let session = stale();
+        let admin = admin(&port, &session);
+        assert_eq!(
+            admin.ceremony_read("../private").unwrap_err().code,
+            ADMINISTRATION_WIRE_VALUE
+        );
+        assert!(port.calls().is_empty());
+        let id = admin
+            .ceremony_begin("read", "DeviceApprove")
+            .unwrap()
+            .ceremony_id;
+        {
+            let mut views = port.ceremonies.lock().unwrap();
+            views.get_mut(&id).unwrap().ceremony_id = "different".to_owned();
+        }
+        assert_eq!(
+            admin.ceremony_read(&id).unwrap_err().code,
+            ADMINISTRATION_WIRE_VALUE
+        );
+        {
+            let mut views = port.ceremonies.lock().unwrap();
+            let view = views.get_mut(&id).unwrap();
+            view.ceremony_id = id.clone();
+            view.round = TrustCeremonyRoundV1::IssueTarget;
+            view.step = TrustCeremonyStep::RegistryPublished;
+        }
+        assert_eq!(
+            admin.ceremony_read(&id).unwrap_err().code,
+            ADMINISTRATION_WIRE_VALUE
         );
     }
 
@@ -2186,7 +2482,35 @@ mod tests {
             .map(clock_release_justification_literal),
             literals("ClockReleaseJustificationV1")
         );
-        assert_eq!(ADMIN_ENUMS_V1.len(), 7);
+        use ea_ui_contracts::DestructionStateV1;
+        assert_eq!(
+            [
+                DestructionStateV1::Requested,
+                DestructionStateV1::InProgress,
+                DestructionStateV1::PendingBackupExpiry,
+                DestructionStateV1::CompleteManagedScope,
+                DestructionStateV1::IncompleteUnreachableReplica,
+            ]
+            .map(crate::commands::destruction::destruction_state_literal),
+            literals("DestructionStateV1")
+        );
+        assert_eq!(
+            [
+                FingerprintSubjectV1::RegistrationRequest,
+                FingerprintSubjectV1::IssuedCertificate,
+            ]
+            .map(fingerprint_subject_literal),
+            literals("FingerprintSubjectV1")
+        );
+        assert_eq!(
+            [
+                TrustCeremonyRoundV1::IssueTarget,
+                TrustCeremonyRoundV1::ActivateRegistry,
+            ]
+            .map(trust_ceremony_round_literal),
+            literals("TrustCeremonyRoundV1")
+        );
+        assert_eq!(ADMIN_ENUMS_V1.len(), 11);
     }
 
     /// Die Schluessel EINES JSON-Objekts in DOKUMENTREIHENFOLGE.
@@ -2251,7 +2575,139 @@ mod tests {
         let session = fresh(ReauthPurpose::ClockSkewRelease);
         let admin = admin(&port, &session);
         let checklist = admin.go_live_checklist().unwrap();
-        let checked: [(&str, Vec<String>); 10] = [
+        use crate::commands::destruction::{
+            DestructionAdministrationWire, DestructionPreflightWire, DestructionProcessWire,
+            DestructionReplicaWire, DestructionTargetWire,
+        };
+        let target = ea_ui_contracts::DestructionTargetView {
+            entry_hash: "ab".repeat(32),
+            chain_sequence: ea_types::ChainSequence::new(7),
+            stub_object_hash: None,
+        };
+        let preflight = ea_ui_contracts::DestructionPreflightView {
+            job_hash: "cd".repeat(32),
+            exact_canonical_report_json: "{}".to_owned(),
+            known_replica_count: 3,
+        };
+        let replica = ea_ui_contracts::DestructionReplicaView {
+            device_id: "08".repeat(16),
+            kind_code: 0,
+            attestation_hash: None,
+            result_code: None,
+            backup_expiry_at: None,
+        };
+        let process = ea_ui_contracts::DestructionProcessView {
+            destruction_id: "01".repeat(16),
+            authorization_object_hash: "02".repeat(32),
+            state: ea_ui_contracts::DestructionStateV1::Requested,
+            scope_code: 1,
+            legal_reason_code: 2,
+            controller_device_id: "03".repeat(16),
+            custodian_device_id: "04".repeat(16),
+            approver_certificate_hashes: vec!["05".repeat(32), "06".repeat(32)],
+            targets: vec![target.clone()],
+            preflight: Some(preflight.clone()),
+            replicas: vec![replica.clone()],
+            evidence_entry_hash: None,
+        };
+        let destruction = ea_ui_contracts::DestructionAdministrationView {
+            privacy_decision_enabled: true,
+            policy_hash: "07".repeat(32),
+            known_destruction_ids: vec![process.destruction_id.clone()],
+            process: Some(process.clone()),
+        };
+        let evidence_review =
+            crate::commands::destruction_evidence::DestructionEvidenceReviewWire::try_from(
+                ea_ui_contracts::DestructionEvidenceReviewView {
+                    writer_device_id: process.custodian_device_id.clone(),
+                    process: process.clone(),
+                    preview: ea_ui_contracts::FinalizationPreviewView {
+                        proposed_sequence: ea_types::ChainSequence::new(8),
+                        binds_predecessor: true,
+                        effective_now: ea_types::UnixMillis::new(1000),
+                        trust_age_ms: 100,
+                        reader_trust_refresh_ms: 1000,
+                        trust_refresh_overdue: false,
+                        stale_decision: ea_ui_contracts::StaleDecision::Fresh,
+                    },
+                },
+            )
+            .unwrap();
+        let recovery_request = ea_ui_contracts::RecoveryMediumRequestView {
+            run_id: "01".repeat(16),
+            request_id: "02".repeat(32),
+            medium_id_hash: "03".repeat(32),
+            index: 1,
+            total: 1,
+            role_code: "root".into(),
+            certificate_hash: "04".repeat(32),
+            expected_thumbprint: "05".repeat(32),
+            protection_code: 2,
+            test_kind_code: "signatureChallenge".into(),
+        };
+        let recovery_report = ea_ui_contracts::RecoveryReportView {
+            completed: true,
+            exact_public_report_json: serde_json::json!({"schemaId":"ea.recovery-test/v1",
+                "testId":"01".repeat(16),"result":"complete","sourceEnvelopeHash":"06".repeat(32)})
+            .to_string(),
+            envelope_hash: "07".repeat(32),
+            source_envelope_hash: "06".repeat(32),
+            audit_id: "08".repeat(16),
+            finished_at_ms: 1000,
+            next_due_at_ms: Some(2000),
+        };
+        let recovery =
+            crate::commands::recovery::recovery_wire(ea_ui_contracts::RecoveryAdministrationView {
+                last_success: Some(recovery_report.clone()),
+                last_failure: None,
+                run: Some(ea_ui_contracts::RecoveryRunView {
+                    operation_id: "09".repeat(16),
+                    phase_code: 3,
+                    request: None,
+                    observations: vec![ea_ui_contracts::RecoveryMediumObservationView {
+                        request: recovery_request,
+                        result_code: 0,
+                        observed_thumbprint: Some("05".repeat(32)),
+                        error_code: None,
+                    }],
+                    report: Some(recovery_report),
+                    error_code: None,
+                }),
+            })
+            .unwrap();
+        let checked: [(&str, Vec<String>); 21] = [
+            (
+                "RecoveryMediumRequestView",
+                wire_keys(&recovery["run"]["observations"][0]["request"]),
+            ),
+            (
+                "RecoveryMediumObservationView",
+                wire_keys(&recovery["run"]["observations"][0]),
+            ),
+            ("RecoveryReportView", wire_keys(&recovery["lastSuccess"])),
+            ("RecoveryRunView", wire_keys(&recovery["run"])),
+            ("RecoveryAdministrationView", wire_keys(&recovery)),
+            (
+                "DestructionTargetView",
+                wire_keys(&DestructionTargetWire::try_from(target).unwrap()),
+            ),
+            (
+                "DestructionPreflightView",
+                wire_keys(&DestructionPreflightWire::from(preflight)),
+            ),
+            (
+                "DestructionReplicaView",
+                wire_keys(&DestructionReplicaWire::try_from(replica).unwrap()),
+            ),
+            (
+                "DestructionProcessView",
+                wire_keys(&DestructionProcessWire::try_from(process).unwrap()),
+            ),
+            (
+                "DestructionAdministrationView",
+                wire_keys(&DestructionAdministrationWire::try_from(destruction).unwrap()),
+            ),
+            ("DestructionEvidenceReviewView", wire_keys(&evidence_review)),
             (
                 "PendingDeviceRequestView",
                 wire_keys(&admin.pending_device_requests().unwrap()[0]),
@@ -2294,14 +2750,60 @@ mod tests {
                 wire_keys(&admin.revocation_effect(GOOD_FINGERPRINT).unwrap()),
             ),
         ];
-        assert_eq!(checked.len(), 10);
+        assert_eq!(checked.len(), 21);
         for (name, keys) in &checked {
-            assert_eq!(*keys, emitted(name), "{name}");
+            if name.starts_with("Recovery") {
+                // Recovery IPC uses serde_json::Value, whose object key order
+                // is unspecified. Check the exact emitted field set instead.
+                let mut keys = keys.clone();
+                keys.sort_unstable();
+                let mut fields = emitted(name);
+                fields.sort_unstable();
+                assert_eq!(keys, fields, "{name}");
+            } else {
+                assert_eq!(*keys, emitted(name), "{name}");
+            }
         }
         // Und die Tabelle hat KEINEN Eintrag, der hier ungemessen bliebe.
         let table_names: Vec<&str> = ADMIN_VIEW_MODELS_V1.iter().map(|(name, _)| *name).collect();
         let checked_names: Vec<&str> = checked.iter().map(|(name, _)| *name).collect();
         assert_eq!(checked_names, table_names);
         assert!(admin_view_model_fields("NoSuchView").is_none());
+    }
+    #[test]
+    fn lock_diagnosis_requires_admin_and_emits_only_the_closed_result() {
+        use ea_ui_contracts::LocalWriterLockDiagnosis;
+        assert_eq!(
+            super::writer_lock_diagnosis_core(&bare_state())
+                .unwrap_err()
+                .code,
+            ADMINISTRATION_UNAVAILABLE
+        );
+        let port = FakeAdministration::compliant();
+        let state = state_with(
+            Arc::clone(&port),
+            SessionState::new(Some(OperatorRoleV1::Writer), None),
+        );
+        assert_eq!(
+            super::writer_lock_diagnosis_core(&state).unwrap_err().code,
+            ADMINISTRATION_FORBIDDEN
+        );
+        assert!(port.calls.lock().unwrap().is_empty());
+        for (value, literal) in [
+            (LocalWriterLockDiagnosis::Missing, "Missing"),
+            (LocalWriterLockDiagnosis::AbandonedInert, "AbandonedInert"),
+            (LocalWriterLockDiagnosis::LiveOwner, "LiveOwner"),
+            (LocalWriterLockDiagnosis::Unreadable, "Unreadable"),
+        ] {
+            assert_eq!(
+                ea_ui_contracts::local_writer_lock_diagnosis_literal(value),
+                literal
+            );
+            assert_eq!(
+                serde_json::to_value(ea_ui_contracts::local_writer_lock_diagnosis_literal(value))
+                    .unwrap(),
+                literal
+            );
+        }
     }
 }

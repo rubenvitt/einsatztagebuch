@@ -27,6 +27,6 @@ mod database;
 pub mod migrations;
 
 pub use database::{
-    EncryptedDatabase, StoreError, StoreRow, StoreTransaction, StoreValue, unix_millis_now,
+    EncryptedDatabase, EncryptedSnapshot, StoreError, StoreRow, StoreTransaction, StoreValue, unix_millis_now,
 };
 pub use migrations::Migration;

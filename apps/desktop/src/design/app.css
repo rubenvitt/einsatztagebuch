@@ -28,6 +28,34 @@ body {
   outline-offset: 2px;
 }
 
+/* Trust observations can wrap over several lines in a narrow desktop window. */
+.ea-shell-header {
+  height: auto;
+  line-height: 1.5;
+  padding: 16px;
+  color: var(--ea-ink);
+  background: var(--ea-surface);
+}
+
+.ea-shell-content {
+  padding: 16px;
+  min-width: 0;
+}
+
+/* Keep long exact hashes readable inside the table's own scroll container. */
+.ea-destruction-replica-table {
+  min-width: 56rem;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.ea-destruction-replica-table th,
+.ea-destruction-replica-table td {
+  padding: 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--ant-color-border);
+}
+
 /* Nicht wesentliche Uebergaenge aus, wenn das Betriebssystem es verlangt. */
 @media (prefers-reduced-motion: reduce) {
   *,

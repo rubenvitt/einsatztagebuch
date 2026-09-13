@@ -140,6 +140,7 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
     // faengt damit auch das Wachstum; wo sie keines fuehrt, steht sie hier und
     // macht ein bewusstes Entfernen zu einer sichtbaren Aenderung.
     for (name, expected) in [
+        ("DestructionStateV1", 5),
         ("SyncStatus", ea_ui_contracts::SyncStatus::ALL.len()),
         ("DetailCause", ea_ui_contracts::DetailCause::ALL.len()),
         (
@@ -179,6 +180,9 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
             "TrustCeremonyStep",
             ea_ui_contracts::TrustCeremonyStep::ALL.len(),
         ),
+        ("LocalWriterLockDiagnosis", 4),
+        ("FingerprintSubjectV1", 2),
+        ("TrustCeremonyRoundV1", 2),
         (
             "WriterTransitionPhase",
             ea_ui_contracts::WriterTransitionPhase::ALL.len(),
@@ -208,8 +212,8 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
             "Fehler"
         ]
     );
-    // Die Zahlen der sieben Verwaltungsvereinigungen, ein zweites Mal als
-    // nackte Literale gepinnt: 3, 4, 6, 3, 3, 3, 3. Die Schleife oben holt
+    // Die Zahlen der Verwaltungsvereinigungen sind ein zweites Mal als
+    // nackte Literale gepinnt. Die Schleife oben holt
     // vier davon aus `ALL` — und `ALL` und der `match` koennten GEMEINSAM um
     // eine Variante wachsen, ohne dass jemand hier vorbeikaeme. Diese Zeile
     // macht das zu einer sichtbaren Aenderung.
@@ -219,9 +223,13 @@ fn every_security_enum_is_derived_from_its_rust_definition() {
             .map(|(name, variants)| (*name, variants.len()))
             .collect::<Vec<_>>(),
         vec![
+            ("LocalWriterLockDiagnosis", 4),
+            ("DestructionStateV1", 5),
             ("GoLiveRequirementStatus", 3),
             ("TrustCeremonyKind", 4),
-            ("TrustCeremonyStep", 6),
+            ("TrustCeremonyStep", 7),
+            ("FingerprintSubjectV1", 2),
+            ("TrustCeremonyRoundV1", 2),
             ("WriterTransitionPhase", 3),
             ("ClockReleaseAvailability", 3),
             ("RevocationTargetClass", 3),

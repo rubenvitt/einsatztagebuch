@@ -5,7 +5,7 @@ use ea_crypto::{
     macos_os_account_binding_hash, windows_os_account_binding_hash,
 };
 use ea_format::OperatorRoleV1;
-use ea_trust::SelectedRegistryHead;
+use ea_trust::{SelectedRegistryHead, WriterRegistryHeadRef};
 use ea_types::{
     CertificateHash, DeviceId, Hash32, KeyThumbprint, ObjectHash, OrganizationId, UnixMillis,
 };
@@ -214,6 +214,8 @@ pub struct BoundOperator {
     os_account_binding_hash: Hash32,
     operator_instance_key_thumbprint: KeyThumbprint,
     effective_now: UnixMillis,
+    writer_only: bool,
+    proof_not_after: Option<UnixMillis>,
 }
 
 impl BoundOperator {
@@ -241,12 +243,46 @@ impl BoundOperator {
         head: &SelectedRegistryHead,
         binding_object_hash: ObjectHash,
     ) -> Result<Self, OperatorError> {
+        Self::resolve_inner(head.into(), binding_object_hash, false)
+    }
+
+    /// Resolve only the Writer role from a sealed current-or-stale Writer view.
+    /// Even a direct Authenticator cannot use this binding for other purposes.
+    pub fn resolve_writer(
+        head: WriterRegistryHeadRef<'_>,
+        binding_object_hash: ObjectHash,
+    ) -> Result<Self, OperatorError> {
+        Self::resolve_inner(head, binding_object_hash, true)
+    }
+
+    fn resolve_inner(
+        head: WriterRegistryHeadRef<'_>,
+        binding_object_hash: ObjectHash,
+        writer_only: bool,
+    ) -> Result<Self, OperatorError> {
         let binding = head
             .active_operator_binding_fields(binding_object_hash)
             .ok_or(OperatorError::BindingNotActive)?;
         let certificate = head
             .active_certificate_fields(binding.device_certificate_hash)
             .ok_or(OperatorError::DeviceCertificateNotActive)?;
+        if writer_only
+            && (binding.operator_role != OperatorRoleV1::Writer
+                || certificate.certificate_kind != ea_format::CertificateKindV1::Writer
+                || head.current_writer_certificate_hash() != Some(binding.device_certificate_hash))
+        {
+            return Err(OperatorError::RoleMismatch);
+        }
+        let time = head.preexisting_effective_now();
+        let proof_not_after = if writer_only {
+            time.wall_clock_ceiling()
+                .map(|ceiling| UnixMillis::new(ceiling.get().saturating_add(1)))
+                .into_iter()
+                .chain(time.successor_ready_at())
+                .min()
+        } else {
+            None
+        };
         Ok(Self {
             organization_id: binding.organization_id,
             device_id: certificate.device_id,
@@ -256,7 +292,17 @@ impl BoundOperator {
             os_account_binding_hash: binding.os_account_binding_hash,
             operator_instance_key_thumbprint: binding.operator_instance_key_thumbprint,
             effective_now: head.preexisting_effective_now().value(),
+            writer_only,
+            proof_not_after,
         })
+    }
+
+    pub(crate) fn permits_purpose(&self, purpose: crate::ReauthPurpose) -> bool {
+        !self.writer_only || purpose.is_writer_purpose()
+    }
+
+    pub(crate) fn proof_not_after(&self) -> Option<UnixMillis> {
+        self.proof_not_after
     }
 
     pub(crate) const fn organization_id(&self) -> OrganizationId {

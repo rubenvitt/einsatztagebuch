@@ -1345,6 +1345,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cryptoki"
+version = "0.12.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "cryptoki-sys",
+ "libloading 0.8.9",
+ "log",
+ "secrecy",
+ "zeroize",
+]
+
+[[package]]
+name = "cryptoki-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1fd850498411e4057f1cba79e6e2bc7cbe960544c1046ab46d4685c403a1121"
+dependencies = [
+ "libloading 0.8.9",
+]
+
+[[package]]
 name = "cssparser"
 version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1723,25 +1744,33 @@ name = "ea-admin"
 version = "0.1.0"
 dependencies = [
  "ea-archive",
+ "ea-archive-fs",
  "ea-audit",
+ "ea-chain",
  "ea-crypto",
+ "ea-destruction",
  "ea-draft",
  "ea-format",
  "ea-key-provider",
  "ea-local-store",
  "ea-operator",
+ "ea-reader",
  "ea-recovery",
  "ea-schema",
+ "ea-sync-protocol",
+ "ea-testkit",
  "ea-time",
  "ea-trust",
  "ea-types",
  "ea-verify",
+ "ea-writer",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
  "minicbor",
  "serde",
  "serde_json",
+ "tokio",
  "zeroize",
 ]
 
@@ -1768,6 +1797,7 @@ dependencies = [
  "ea-crypto",
  "ea-format",
  "ea-key-provider",
+ "ea-local-store",
  "ea-operator",
  "ea-time",
  "ea-trust",
@@ -1805,6 +1835,7 @@ dependencies = [
  "hex",
  "minicbor",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -1844,12 +1875,16 @@ dependencies = [
  "ea-audit",
  "ea-chain",
  "ea-crypto",
+ "ea-destruction",
  "ea-draft",
  "ea-format",
  "ea-key-provider",
  "ea-local-store",
  "ea-operator",
+ "ea-recovery",
  "ea-schema",
+ "ea-sync-client",
+ "ea-sync-protocol",
  "ea-testkit",
  "ea-time",
  "ea-trust",
@@ -1858,11 +1893,44 @@ dependencies = [
  "ea-verify",
  "ea-writer",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "minicbor",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "zeroize",
+]
+
+[[package]]
+name = "ea-destruction"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-sdk-s3",
+ "ea-archive",
+ "ea-archive-fs",
+ "ea-audit",
+ "ea-cbor",
+ "ea-crypto",
+ "ea-draft",
+ "ea-format",
+ "ea-key-provider",
+ "ea-local-store",
+ "ea-operator",
+ "ea-schema",
+ "ea-sync-protocol",
+ "ea-sync-server",
+ "ea-testkit",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ea-verify",
+ "ed25519-dalek",
+ "hex",
+ "minicbor",
+ "tokio",
 ]
 
 [[package]]
@@ -1882,6 +1950,7 @@ dependencies = [
  "ea-types",
  "ed25519-dalek",
  "getrandom 0.4.3",
+ "hmac",
  "minicbor",
  "sha2 0.11.0",
  "unicode-normalization",
@@ -2011,10 +2080,16 @@ name = "ea-recovery"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "cryptoki",
  "ea-archive",
+ "ea-audit",
  "ea-cbor",
  "ea-crypto",
  "ea-format",
+ "ea-key-provider",
+ "ea-local-store",
+ "ea-operator",
+ "ea-schema",
  "ea-time",
  "ea-trust",
  "ea-types",
@@ -2023,6 +2098,8 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "minicbor",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
@@ -2037,6 +2114,7 @@ dependencies = [
  "jiff-tzdb",
  "minicbor",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -2093,6 +2171,7 @@ dependencies = [
  "async-trait",
  "aws-sdk-s3",
  "ea-crypto",
+ "ea-destruction",
  "ea-format",
  "ea-sync-protocol",
  "ea-testkit",
@@ -2107,6 +2186,9 @@ dependencies = [
 name = "ea-system-tests"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
  "ea-admin",
  "ea-archive",
  "ea-archive-fs",
@@ -2114,12 +2196,14 @@ dependencies = [
  "ea-cbor",
  "ea-chain",
  "ea-crypto",
+ "ea-destruction",
  "ea-draft",
  "ea-format",
  "ea-key-provider",
  "ea-local-store",
  "ea-operator",
  "ea-reader",
+ "ea-recovery",
  "ea-schema",
  "ea-sync-protocol",
  "ea-sync-server",
@@ -2130,11 +2214,16 @@ dependencies = [
  "ea-verify",
  "ea-writer",
  "ed25519-dalek",
+ "einsatzarchiv-server",
  "hex",
  "jsonschema",
  "minicbor",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
+ "sqlx-core",
+ "sqlx-postgres",
+ "tokio",
  "toml 0.8.23",
 ]
 
@@ -2200,12 +2289,14 @@ dependencies = [
  "ea-chain",
  "ea-crypto",
  "ea-format",
+ "ea-schema",
  "ea-time",
  "ea-trust",
  "ea-types",
  "ed25519-dalek",
  "hex",
  "minicbor",
+ "serde_json",
 ]
 
 [[package]]
@@ -2218,12 +2309,14 @@ dependencies = [
  "ea-cbor",
  "ea-chain",
  "ea-crypto",
+ "ea-destruction",
  "ea-draft",
  "ea-format",
  "ea-key-provider",
  "ea-local-store",
  "ea-operator",
  "ea-schema",
+ "ea-sync-protocol",
  "ea-testkit",
  "ea-time",
  "ea-trust",
@@ -2232,6 +2325,7 @@ dependencies = [
  "ea-writer",
  "ed25519-dalek",
  "getrandom 0.4.3",
+ "hex",
  "minicbor",
  "zeroize",
 ]
@@ -2264,23 +2358,46 @@ dependencies = [
 name = "einsatzarchiv-cli"
 version = "0.1.0"
 dependencies = [
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
  "ea-admin",
  "ea-archive",
+ "ea-archive-fs",
  "ea-crypto",
+ "ea-desktop",
+ "ea-destruction",
+ "ea-draft",
  "ea-format",
  "ea-key-provider",
  "ea-local-store",
  "ea-operator",
+ "ea-reader",
  "ea-recovery",
+ "ea-schema",
+ "ea-sync-client",
+ "ea-sync-protocol",
+ "ea-sync-server",
+ "ea-testkit",
  "ea-time",
  "ea-trust",
  "ea-types",
+ "ea-ui-contracts",
  "ea-verify",
+ "ea-writer",
  "ed25519-dalek",
+ "einsatzarchiv-server",
+ "getrandom 0.4.3",
  "hex",
  "jsonschema",
  "minicbor",
+ "rustls",
  "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "sqlx-core",
+ "tokio",
+ "tokio-rustls",
+ "zeroize",
 ]
 
 [[package]]
@@ -2294,9 +2411,11 @@ dependencies = [
  "ea-archive",
  "ea-archive-fs",
  "ea-crypto",
+ "ea-destruction",
  "ea-format",
  "ea-key-provider",
  "ea-local-store",
+ "ea-schema",
  "ea-sync-client",
  "ea-sync-protocol",
  "ea-sync-server",
@@ -2305,7 +2424,9 @@ dependencies = [
  "ea-trust",
  "ea-types",
  "ea-verify",
+ "ed25519-dalek",
  "hex",
+ "minicbor",
  "rustls",
  "sha2 0.11.0",
  "sqlx",
@@ -3714,7 +3835,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
 dependencies = [
  "gtk-sys",
- "libloading",
+ "libloading 0.7.4",
  "once_cell",
 ]
 
@@ -3741,6 +3862,16 @@ checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
 dependencies = [
  "cfg-if",
  "winapi",
+]
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -5054,6 +5185,15 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "security-framework"

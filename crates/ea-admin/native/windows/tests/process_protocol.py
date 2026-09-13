@@ -67,4 +67,29 @@ extra = 3
 if sys.platform != 'win32':
     held_open(json.dumps(watch).encode() + b'\n', 'platform-unavailable', 3)
     extra += 1
-print(f'{len(cases) + extra} real-helper process protocol checks passed; no native state accessed.')
+
+backup_checks = 0
+def rejected(payload, expected):
+    global backup_checks
+    result = subprocess.run(sys.argv[1:], input=payload, capture_output=True, timeout=15)
+    assert result.returncode == 1 and result.stderr == b"", "backup failure output"
+    assert json.loads(result.stdout) == {"ok": False, "code": expected}, expected
+    backup_checks += 1
+
+backup = dict(op="backup-signing-seed", slot="admin-signing", installation_id="ab" * 32,
+              expected_public_key="bc" * 32, presence=True)
+for field in list(backup):
+    missing = dict(backup); del missing[field]
+    rejected(json.dumps(missing).encode(), "installation-required" if field == "installation_id" else "invalid-request")
+for change in [dict(slot=s) for s in ["operator-instance", "writer-signing", "database-key", "draft-key", "unknown"]] + [
+        dict(kind="ed25519"), dict(replace=False), dict(data=""), dict(prompt="SECRET-CANARY"),
+        dict(expected_public_key="AB" * 32), dict(expected_public_key="ab" * 31),
+        dict(installation_id="ab" * 31), dict(presence=1), dict(presence="true")]:
+    rejected(json.dumps(dict(backup, **change)).encode(), "invalid-request")
+rejected(json.dumps(dict(backup, presence=False)).encode(), "presence-required")
+wire = json.dumps(backup).encode()
+rejected(wire + b" " * (513 - len(wire)), "request-too-large")
+rejected(wire[:-1] + b',"expected_public_key":"' + b"bc" * 32 + b'"}', "invalid-request")
+rejected(wire[:-1] + b',"expected_public_\\u006bey":"' + b"bc" * 32 + b'"}', "invalid-request")
+
+print(f'{len(cases) + extra + backup_checks} real-helper process protocol checks passed; no native state accessed.')

@@ -534,7 +534,7 @@ pub fn target_profile_hash() -> Hash32 {
 }
 
 /// Eine Policy, die genau `allowed` zulaesst.
-fn policy_with(allowed: Vec<Hash32>) -> PolicyFieldsV1 {
+pub fn policy_with(allowed: Vec<Hash32>) -> PolicyFieldsV1 {
     PolicyFieldsV1 {
         organization_id: OrganizationId::try_from(&[0x21_u8; 16][..])
             .expect("16 Bytes sind eine Organisationskennung"),

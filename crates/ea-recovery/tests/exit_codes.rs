@@ -21,9 +21,10 @@
 //! In DIESEM Target ist die Uhr ein Parameter von [`verify_directory`], und nur
 //! deshalb duerfen hier die GEERBTEN Bestaende aus
 //! `crates/ea-verify/tests/support` unter [`FIXTURE_OS_WALL_CLOCK_V1`] stehen.
-//! Unter `apps/cli` ist das ausgeschlossen: dort gibt es nur
-//! `SystemTime::now()`, und unter ihr degenerieren die geerbten Koepfe zu einer
-//! leeren Aussage. Die `live_clock_*`-Familie ist dort die einzige zulaessige.
+//! Die CLI verwendet `SystemTime::now()`. Seit Task 8 bleiben die geerbten
+//! Eintraege unter ihrer exakt gebundenen historischen Registry verifizierbar,
+//! auch nach deren Wandzeit-Lease. Aktuelle Aktionen brauchen weiterhin die
+//! frische Auswahl; die `live_clock_*`-Familie deckt diesen Kontext ab.
 //!
 //! # EIN CODE IST HIER NICHT ERREICHBAR, UND DAS IST KEIN VERSAEUMNIS
 //!
@@ -71,7 +72,7 @@ mod support;
 
 use std::{fs, path::Path};
 
-use ea_crypto::HpkeRecipientPrivateKey;
+use ea_crypto::HpkeRecipient;
 use ea_format::EIP_PREFIX_V1;
 use ea_recovery::{
     ExitCode, RecoveryError, exit_code_for, exit_code_for_error, load_trust_anchor,
@@ -108,7 +109,7 @@ fn report_of(
     fixture: &ArchiveFixture,
     anchor: &TrustAnchorV1,
     now: UnixMillis,
-    recipient: Option<(KeyThumbprint, &HpkeRecipientPrivateKey)>,
+    recipient: Option<(KeyThumbprint, &dyn HpkeRecipient)>,
 ) -> VerificationReportV1 {
     let root = temp_dir(tag);
     materialize(fixture, root.path());
@@ -216,14 +217,13 @@ fn every_finding_maps_to_its_normative_exit_code() {
     );
     assert_eq!(exit_code_for(&report), ExitCode::Key);
 
-    // ----------------------------------------------------------- 15 (a) ---
-    // DIE WICHTIGSTE ZEILE: vollstaendig geprueft, und ueber den einen
-    // geparsten Eintrag ist NICHTS ausgesagt. Der geerbte Bestand unter der
-    // ECHTEN Uhr ist genau dieser Fall — `is_fully_verified()` bleibt wahr,
-    // `objectResults` ist leer. Ohne Regel 6 meldete die CLI hier Erfolg.
+    // ------------------------------------------------------------ 0 (old) -
+    // Eine abgelaufene Registry-Lease ist keine Lesefrist. Die genaue
+    // historische Registry und Sequenz autorisieren weiterhin diesen Eintrag
+    // (§§12.3/12.4); geprueft wird eine echte, nicht eine leere Aussage.
     let built = complete_valid_archive();
     let report = report_of(
-        "exit-incomplete-empty",
+        "exit-historical-lease",
         &built.fixture,
         &built.anchor(),
         live_clock(),
@@ -231,15 +231,15 @@ fn every_finding_maps_to_its_normative_exit_code() {
     );
     assert!(
         report.is_fully_verified()
-            && report.object_results().len() == 0
+            && report.object_results().len() == 1
             && report.entry_package_count() == 1
-            && report.public_key_thumbprints().len() == 1,
-        "der geerbte Bestand ist unter der echten Uhr geprueft und dennoch stumm"
+            && report.public_key_thumbprints().len() == 2,
+        "die historische Registry muss den alten Eintrag weiterhin verifizieren"
     );
-    assert_eq!(exit_code_for(&report), ExitCode::Incomplete);
+    assert_eq!(exit_code_for(&report), ExitCode::Success);
 
-    // ----------------------------------------------------------- 15 (b) ---
-    // Der zweite Weg auf dieselbe Zeile: „teilweise vernichtet". Der Bestand
+    // ----------------------------------------------------------- 15 -------
+    // „Teilweise vernichtet": Der Bestand
     // ist ohne Befund, traegt aber einen autorisierten Vernichtungsvorgang.
     let built = destruction_archive(&[DestructionSpec::new(
         0x51,

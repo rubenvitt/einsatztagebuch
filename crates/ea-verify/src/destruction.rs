@@ -7,15 +7,10 @@
 //! GEPARSTEN Feldern; `destructions/<id>/{events,attestations}/` ist ein
 //! Hinweis, kein Beweis.
 //!
-//! DIE AUTORISIERUNG WIRD HIER NICHT SELBST GEPRUEFT, und das ist keine
-//! Luecke: `ea_crypto::VerificationContext::destruction_transition_trust_digest`
-//! rechnet `object_hash` ueber die uebergebenen Autorisierungsbytes nach und
-//! vergleicht ihn mit dem Feld der Transition
-//! (`crates/ea-crypto/src/cose.rs:1093-1101`). Eine getragene Transition
-//! authentifiziert damit genau den `authorizationObjectHash`, den der Bericht
-//! ausweist — aus unauthentischen Bytes stammt hier also keine Sachaussage.
-//! Die Vier-Augen-Signaturen der Autorisierung selbst gehoeren zur
-//! Ausstellung, nicht zur Zustandsermittlung.
+//! Original approval is verified at its exact signed historical Registry: two
+//! distinct destructionApprove subjects and the original privacy policy.
+//! A component transition signature cannot substitute for those approvals.
+//! Events retain the immutable v1 authorization-bound signer context.
 //!
 //! WAS EIN WIDERSPRUCH IST UND WAS EIN SIGNATURBEFUND: eine Transition, deren
 //! Signatur nicht traegt, ist ein `signatureErrors`-Eintrag und nimmt an der
@@ -41,8 +36,11 @@ use ea_format::{
     DecodedTrustPayloadV1, DeletionAttestationFieldsV1, DestructionTransitionFieldsV1, Parsed,
     TrustObjectV1,
 };
-use ea_trust::SelectedRegistryHead;
-use ea_types::{CertificateHash, ChainSequence, DestructionId, EventId, KeyThumbprint, ObjectHash};
+use ea_trust::HistoricalRegistryAuthority;
+use ea_types::{
+    CertificateHash, ChainSequence, DestructionId, EventId, KeyThumbprint, ObjectHash,
+    RegistryVersion, UnixMillis,
+};
 
 use crate::{
     AuthorizedDestructionV1, DestructionStateV1, ObjectErrorV1, QuarantinedObjectV1,
@@ -63,6 +61,8 @@ pub enum DestructionErrorV1 {
     /// Bindung an `destructionId` und `authorizationObjectHash` steckt genau
     /// darin. Fail-closed: unpruefbar ist nicht dasselbe wie gueltig.
     AuthorizationUnresolved,
+    /// The original signed approval/privacy context does not authorize this operation.
+    AuthorizationInvalid,
     /// Fuer die `authorizationSequence` liess sich kein Registrierungskopf mit
     /// Operationsautoritaet gewinnen.
     HeadUnavailable,
@@ -85,6 +85,7 @@ impl DestructionErrorV1 {
     pub const fn code(self) -> &'static str {
         match self {
             Self::AuthorizationUnresolved => "EA-VERIFY-DESTRUCTION-AUTHORIZATION-UNRESOLVED",
+            Self::AuthorizationInvalid => "EA-VERIFY-DESTRUCTION-AUTHORIZATION-INVALID",
             Self::HeadUnavailable => "EA-VERIFY-DESTRUCTION-HEAD-UNAVAILABLE",
             Self::SignatureInvalid => "EA-VERIFY-DESTRUCTION-SIGNATURE-INVALID",
             Self::SignerMismatch => "EA-VERIFY-DESTRUCTION-SIGNER-MISMATCH",
@@ -120,7 +121,7 @@ impl DestructionStateV1 {
     /// (`docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md`:335-336):
     /// 0 requested, 1 inProgress, 2 pendingBackupExpiry, 3
     /// completeManagedScope, 4 incompleteUnreachableReplica.
-    const fn from_code(code: u8) -> Option<Self> {
+    pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             0 => Some(Self::Requested),
             1 => Some(Self::InProgress),
@@ -136,7 +137,7 @@ impl DestructionStateV1 {
     /// AUSGESCHRIEBEN statt `as u8`: die Deklarationsreihenfolge des Enums ist
     /// die des Schemas, die Codes stammen aus dem Wire-Format. Dass beide
     /// heute uebereinstimmen, ist kein Grund, sie zu koppeln.
-    const fn code(self) -> u8 {
+    pub const fn code(self) -> u8 {
         match self {
             Self::Requested => 0,
             Self::InProgress => 1,
@@ -152,7 +153,7 @@ impl DestructionStateV1 {
     /// NACH `InProgress` GIBT ES KEIN ABBRECHEN, und `CompleteManagedScope`
     /// ist der einzige erfolgreiche Endzustand: er hat gar keine ausgehende
     /// Kante.
-    const fn may_advance_to(self, next: Self) -> bool {
+    pub const fn may_advance_to(self, next: Self) -> bool {
         matches!(
             (self, next),
             (Self::Requested, Self::InProgress)
@@ -210,11 +211,37 @@ struct VerifiedEvent {
 pub(crate) fn record_destructions(
     report: &mut VerificationReportV1,
     inventory: &ArchiveInventory,
-    mut head_for: impl FnMut(ChainSequence) -> Option<SelectedRegistryHead>,
-) {
-    let authorizations = authorizations(inventory);
+    observed_at: UnixMillis,
+    mut head_for: impl FnMut(
+        RegistryVersion,
+        ObjectHash,
+        ChainSequence,
+    ) -> Option<HistoricalRegistryAuthority>,
+) -> BTreeMap<ObjectHash, DeletionAttestationFieldsV1> {
+    let mut authorizations = authorizations(inventory);
+    authorizations.retain(|hash, authorization| {
+        if report.quarantined_objects.contains_key(hash) {
+            return false;
+        }
+        let valid = head_for(
+            authorization.version,
+            authorization.head_hash,
+            authorization.sequence,
+        )
+        .is_some_and(|head| historical_approval_is_valid(*authorization, &head));
+        if !valid {
+            record_signature_error(report, *hash, DestructionErrorV1::AuthorizationInvalid);
+        }
+        valid
+    });
     let mut ordered: Vec<DestructionObject<'_>> = Vec::new();
     for trust in inventory.trust() {
+        if report
+            .quarantined_objects
+            .contains_key(&trust.object_hash())
+        {
+            continue;
+        }
         let Ok(payload) = trust.value().decoded_payload() else {
             continue;
         };
@@ -249,12 +276,14 @@ pub(crate) fn record_destructions(
     ordered.sort_by_key(|object| (object.authorization.sequence, object.object_hash));
 
     let mut events: BTreeMap<DestructionId, Vec<VerifiedEvent>> = BTreeMap::new();
+    let mut attestations = BTreeMap::new();
     for object in ordered {
         let verified = verify_destruction_object(
             object.trust,
             object.authorization,
             &mut head_for,
-            object.kind.context_builder(),
+            &object.kind,
+            observed_at,
         );
         match verified {
             Ok(thumbprint) => {
@@ -263,7 +292,9 @@ pub(crate) fn record_destructions(
                 // Beleg EINER Replik; der Stand des Vorgangs steht in der
                 // Kette. Ihr Beitrag zum Bericht ist deshalb genau einer: der
                 // Abdruck des Loeschzeugen, der sie getragen hat.
-                if let DestructionObjectKind::Transition(fields) = object.kind {
+                if let DestructionObjectKind::Attestation(fields) = object.kind {
+                    attestations.insert(object.object_hash, fields);
+                } else if let DestructionObjectKind::Transition(fields) = object.kind {
                     events
                         .entry(fields.destruction_id)
                         .or_default()
@@ -282,6 +313,7 @@ pub(crate) fn record_destructions(
             report.authorized_destructions.insert(destruction_id, entry);
         }
     }
+    attestations
 }
 
 /// Ein Destruction-Objekt mit aufgeloester Autorisierung, bereit zur Pruefung.
@@ -338,6 +370,8 @@ fn authorizations(inventory: &ArchiveInventory) -> BTreeMap<ObjectHash, Authoriz
                 Authorization {
                     exact_bytes: trust.exact_bytes().as_bytes(),
                     sequence: ChainSequence::new(fields.authorization_sequence),
+                    version: fields.registry_version,
+                    head_hash: ObjectHash::from(fields.registry_head_hash),
                 },
             )),
             _ => None,
@@ -358,6 +392,35 @@ struct Authorization<'a> {
     /// (`crates/ea-crypto/src/cose.rs:1069-1090`). Der Registrierungskopf muss
     /// deshalb ueber genau dieser Sequenz gewaehlt werden.
     sequence: ChainSequence,
+    version: RegistryVersion,
+    head_hash: ObjectHash,
+}
+
+fn historical_approval_is_valid(
+    authorization: Authorization<'_>,
+    head: &HistoricalRegistryAuthority,
+) -> bool {
+    let Ok(ea_format::ParsedArchiveObject::Trust(parsed)) =
+        ea_format::decode_exact_object(authorization.exact_bytes)
+    else {
+        return false;
+    };
+    let Ok(DecodedTrustPayloadV1::DestructionAuthorization(fields)) =
+        parsed.value().decoded_payload()
+    else {
+        return false;
+    };
+    let privacy = &head.policy_fields().retention_policy;
+    fields.organization_id == head.organization_id()
+        && privacy.destruction_enabled
+        && privacy.eds_privacy_decision_document_hash.is_some()
+        && ea_trust::distinct_authority_subjects(
+            parsed.value().signatures(),
+            parsed.value().exact_digest_input(),
+            head,
+            VerificationContext::destruction_approval_trust_digest,
+        )
+        .is_ok_and(|people| people >= 2)
 }
 
 /// Prueft die EINE Signatur eines Destruction-Objekts gegen den Kopf ueber der
@@ -372,8 +435,13 @@ struct Authorization<'a> {
 fn verify_destruction_object(
     trust: &Parsed<TrustObjectV1>,
     authorization: Authorization<'_>,
-    head_for: &mut impl FnMut(ChainSequence) -> Option<SelectedRegistryHead>,
-    context_for: DestructionContextFn,
+    head_for: &mut impl FnMut(
+        RegistryVersion,
+        ObjectHash,
+        ChainSequence,
+    ) -> Option<HistoricalRegistryAuthority>,
+    kind: &DestructionObjectKind,
+    observed_at: UnixMillis,
 ) -> Result<KeyThumbprint, DestructionErrorV1> {
     let signature = trust
         .value()
@@ -384,15 +452,45 @@ fn verify_destruction_object(
         .map_err(DestructionErrorV1::from)?
         .certificate_hash()
         .ok_or(DestructionErrorV1::SignerMismatch)?;
-    let context = context_for(
+    let context = kind.context_builder()(
         trust.value().exact_digest_input(),
         authorization.exact_bytes,
         certificate_hash,
     )
     .map_err(DestructionErrorV1::from)?;
-    let selected = head_for(authorization.sequence).ok_or(DestructionErrorV1::HeadUnavailable)?;
+    let selected = head_for(
+        authorization.version,
+        authorization.head_hash,
+        authorization.sequence,
+    )
+    .ok_or(DestructionErrorV1::HeadUnavailable)?;
     let signer =
         verify_cose_sign1(signature, &selected, &context).map_err(DestructionErrorV1::from)?;
+    if let DestructionObjectKind::Attestation(fields) = kind {
+        let certificate = selected
+            .active_certificate_fields(certificate_hash)
+            .ok_or(DestructionErrorV1::SignerUnauthorized)?;
+        if certificate.device_id.as_bytes() != &fields.replica_id {
+            return Err(DestructionErrorV1::SignerMismatch);
+        }
+        // The signature authenticates the claim; only a temporally possible,
+        // known managed-replica claim may contribute to destroyed Stub proof.
+        // Keep this existing v1 contract aligned with the execution verifier.
+        if !matches!(fields.replica_kind, 0..=2)
+            || fields.executed_at.get() < 0
+            || fields.executed_at > observed_at
+            || fields
+                .backup_expiry_at
+                .is_some_and(|deadline| deadline.get() < 0)
+            || fields.result == 1 && fields.backup_expiry_at.is_none()
+            || fields.result == 0
+                && fields
+                    .backup_expiry_at
+                    .is_some_and(|deadline| deadline > fields.executed_at)
+        {
+            return Err(DestructionErrorV1::Unverifiable);
+        }
+    }
     Ok(signer.key_thumbprint())
 }
 

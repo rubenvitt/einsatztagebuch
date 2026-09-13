@@ -11,11 +11,10 @@
 //!
 //! # DIE UHR IST HIER KEIN PARAMETER
 //!
-//! Die CLI kennt genau eine, `SystemTime::now()`. Jeder Bestand, der hier einen
-//! BEFUND belegt, stammt deshalb aus der `live_clock_*`-Familie; die geerbten
-//! Bestaende sind unter der echten Uhr stumm. Die eine Ausnahme —
-//! `complete_valid_archive` — steht hier ausdruecklich als GEGENFALL und ist in
-//! [`an_inherited_archive_at_the_real_clock_fails_with_fifteen`] begruendet.
+//! Die CLI verwendet `SystemTime::now()`. Die meisten Faelle nutzen die
+//! `live_clock_*`-Familie mit aktuell waehlbarer Registry. Der geerbte Bestand
+//! belegt zusaetzlich, dass historische Eintraege nach der urspruenglichen
+//! Registry-Lease weiter vollstaendig verifiziert und aufgelistet werden.
 //!
 //! # EIN CODE IST AUS `verify` UND `list` NICHT ERREICHBAR
 //!
@@ -415,18 +414,11 @@ fn a_foreign_encapsulation_stays_invisible_without_a_recipient_key() {
     );
 }
 
-/// Der GEGENFALL zu Code 15: geprueft und dennoch stumm.
-///
-/// Hier steht ABSICHTLICH ein geerbter Bestand, und zwar genau deshalb, weil er
-/// unter der echten Uhr degeneriert: seine Registrierungskoepfe sind samtlich
-/// veraltet, `isFullyVerified` bleibt wahr, und ueber den einen geparsten
-/// Eintrag wird NICHTS ausgesagt. Ohne Regel 6 der Ableitung meldete die CLI
-/// genau hier Erfolg ueber einen Bestand, ueber den sie nichts gesagt hat.
-///
-/// Das ist der einzige Ort in `apps/cli`, an dem ein geerbter Bestand vorkommt,
-/// und er ist kein Erfolgspfad, sondern dessen Gegenprobe.
+/// §§12.3/12.4: Die Registry-Lease begrenzt aktuelle Aktionen, nicht das
+/// Lesen exakt gebundener historischer Eintraege. Beide CLI-Lesepfade liefern
+/// Erfolg mit einem wirklichen Objektergebnis statt einer leeren Aussage.
 #[test]
-fn an_inherited_archive_at_the_real_clock_fails_with_fifteen() {
+fn an_inherited_archive_remains_readable_after_its_registry_lease_expires() {
     let built = complete_valid_archive();
     let archive = temp_dir("inherited-archive");
     materialize(&built.fixture, archive.path());
@@ -435,15 +427,19 @@ fn an_inherited_archive_at_the_real_clock_fails_with_fifteen() {
         .expect("die Ankerdatei muss schreibbar sein");
     let laid = Laid { archive, anchor };
 
-    let (code, _) = run_command("verify", &laid, "text");
-    assert_eq!(code, 15, "exit code");
+    for command in ["verify", "list"] {
+        let (code, stdout) = run_command(command, &laid, "text");
+        assert_eq!(code, 0, "{command} exit code");
+        assert!(!stdout.is_empty(), "{command} must report the old entry");
+    }
 
     let report = report_of(&laid);
     assert!(
         report.is_fully_verified()
-            && report.object_results().len() == 0
-            && report.entry_package_count() == 1,
-        "der geerbte Bestand ist unter der echten Uhr geprueft und dennoch stumm"
+            && report.object_results().len() == 1
+            && report.entry_package_count() == 1
+            && report.public_key_thumbprints().len() == 2,
+        "der geerbte Bestand bleibt unter seiner historischen Registry lesbar"
     );
 }
 

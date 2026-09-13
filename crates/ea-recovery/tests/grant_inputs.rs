@@ -313,7 +313,7 @@ fn a_pkcs11_recovery_key_ends_at_the_boundary_before_the_archive_is_read() {
     ) else {
         panic!("in dieser Stufe bindet nichts an ein Modul");
     };
-    assert!(matches!(error, RecoveryError::Pkcs11Unbound), "war {error}");
+    assert!(matches!(error, RecoveryError::Pkcs11Provider(ea_recovery::Pkcs11ProviderError::Unavailable)), "war {error}");
     assert_eq!(exit_code_for_error(&error), ExitCode::Unsupported);
 }
 

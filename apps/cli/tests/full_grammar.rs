@@ -55,7 +55,7 @@ const PIN_V1: &str = "pin-7731-distinct";
 /// Geschlossen und nicht „mindestens diese Zeilen": nur ein vollstaendiger
 /// Vergleich faellt ueber eine zusaetzliche oder umsortierte Zeile. Die
 /// ersten sieben Zeilen sind `design.md` §16.1 in dessen Reihenfolge.
-const PRINTED_GRAMMAR_V1: [&str; 21] = [
+const PRINTED_GRAMMAR_V1: [&str; 24] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -64,13 +64,16 @@ const PRINTED_GRAMMAR_V1: [&str; 21] = [
     "einsatzarchiv --trust-anchor <file> export <archive-or-server> --output <new-target>",
     "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
+    "einsatzarchiv --trust-anchor <file> posture target --operator-config <file> --output <new-target.json>",
+    "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
+    "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
     "einsatzarchiv --trust-anchor <file> registry revocation-plan --operator-config <file> --effective-from <sequence> --valid-through <sequence> --not-after <unix-millis>",
     "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition prepare --operator-config <file> --request <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition activate --operator-config <file> --request <file> --transition-object <file> --valid-through <sequence> --not-after <unix-millis>",
     "key-source is <path> | file:<path> | container:<path>;passphrase-file=<path> | pkcs11:module=<path>;token=<label>;id=<hex>;pin-file=<path>; passphrase and pin are read from the named file with owner-only permissions, never from argv or the environment",
-    "grant verifies the archive with the recovery key, resolves both key sources and reads both files, then ends with exit 21 naming the missing historical grant service; it issues nothing",
+    "grant verifies the archive and requires --operator-config for native historical-regrant presence; signed audited grants are appended under --output or archive/grants",
     "recovery-test verifies the archive, requires a free output path and reads the key inventory, then ends with exit 21 naming the missing recovery test service; it writes nothing",
     "organization init begins or resumes the ceremony and reports its step; it drives no step that needs offline key sources",
     "operator config contains public archive/database paths, certificate/binding hashes, role and purpose; authority mode requires authority=true and target_certificate_hash; offline exchange uses ceremony_exchange_directory",
@@ -453,7 +456,6 @@ fn every_new_switch_is_rejected_on_a_foreign_command() {
         ("--recipient-cert", "export"),
         ("--key-inventory", "grant"),
         ("--key", "grant"),
-        ("--output", "grant"),
     ] {
         let output = run(&[
             "--trust-anchor",
@@ -685,7 +687,7 @@ fn decrypt_from_a_pkcs11_source_ends_at_the_named_boundary() {
     let target = laid.target("klartext");
     let argv = decrypt_argv(&laid, &reference, &path_argument(&target));
     let output = run(&as_tokens(&argv));
-    assert_refusal(&output, 21, "EA-RECOVERY-PKCS11-UNBOUND");
+    assert_refusal(&output, 21, "EA-RECOVERY-PKCS11-UNAVAILABLE");
     assert!(!target.exists());
     let stderr = stderr_of(&output);
     assert!(
@@ -703,7 +705,7 @@ fn decrypt_from_a_pkcs11_source_ends_at_the_named_boundary() {
 /// noch ein Schluesselbyte noch die Passphrase.
 #[cfg(unix)]
 #[test]
-fn grant_resolves_every_input_and_ends_at_the_named_boundary() {
+fn grant_resolves_every_input_and_requires_native_configuration() {
     let built = live_clock_archive();
     let laid = lay_out("grant-ok", &built);
     let authority = container_argument(
@@ -723,7 +725,7 @@ fn grant_resolves_every_input_and_ends_at_the_named_boundary() {
         &recipient_certificate,
     );
     let output = run(&as_tokens(&argv));
-    assert_refusal(&output, 21, "EA-CLI-GRANT-SERVICE-UNAVAILABLE");
+    assert_refusal(&output, 2, "EA-GRANT-NATIVE-CONFIGURATION-REQUIRED");
 
     let stderr = stderr_of(&output);
     let temp_root = path_argument(laid.outside.path());
@@ -746,11 +748,11 @@ fn grant_resolves_every_input_and_ends_at_the_named_boundary() {
     let mut json_argv = vec!["--format".to_owned(), "json".to_owned()];
     json_argv.extend(argv);
     let output = run(&as_tokens(&json_argv));
-    assert_refusal(&output, 21, "EA-CLI-GRANT-SERVICE-UNAVAILABLE");
+    assert_refusal(&output, 2, "EA-GRANT-NATIVE-CONFIGURATION-REQUIRED");
 }
 
 /// Ein `pkcs11:`-Recovery-Schluessel endet an SEINER Grenze, 21 mit
-/// `EA-RECOVERY-PKCS11-UNBOUND` — und nicht an der des fehlenden Dienstes:
+/// `EA-RECOVERY-PKCS11-UNAVAILABLE` — und nicht an der des fehlenden Dienstes:
 /// der Recovery-Schluessel wird als Erstes aufgeloest, und die gelesene PIN
 /// steht nicht auf stderr.
 #[cfg(unix)]
@@ -776,7 +778,7 @@ fn grant_with_a_pkcs11_recovery_key_ends_at_the_pkcs11_boundary() {
         &recipient_certificate,
     );
     let output = run(&as_tokens(&argv));
-    assert_refusal(&output, 21, "EA-RECOVERY-PKCS11-UNBOUND");
+    assert_refusal(&output, 21, "EA-RECOVERY-PKCS11-UNAVAILABLE");
     let stderr = stderr_of(&output);
     assert!(
         !stderr.contains("EA-CLI-GRANT-SERVICE-UNAVAILABLE"),

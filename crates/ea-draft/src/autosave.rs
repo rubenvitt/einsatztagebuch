@@ -39,14 +39,15 @@ const SELECT_DRAFT: &str = "SELECT draft_id, payload_ciphertext, payload_nonce, 
 
 /// Die Ablage, die genau einen aktiven Entwurf zulaesst.
 pub struct AutosaveDraftRepository {
-    database: Arc<EncryptedDatabase>,
-    provider: Arc<dyn KeyProvider>,
+    pub(crate) database: Arc<EncryptedDatabase>,
+    pub(crate) provider: Arc<dyn KeyProvider>,
+    pub(crate) evidence: Option<crate::EvidenceDraftBinding>,
 }
 
 impl AutosaveDraftRepository {
     #[must_use]
     pub fn new(database: Arc<EncryptedDatabase>, provider: Arc<dyn KeyProvider>) -> Self {
-        Self { database, provider }
+        Self { database, provider, evidence: None }
     }
 
     /// Fuehrt eine Transaktion, die einen leeren Entwurf anlegt, und raeumt
@@ -77,7 +78,10 @@ impl AutosaveDraftRepository {
         let created = Cell::new(None);
         let outcome = self
             .database
-            .transaction(|transaction| work(transaction, &created));
+            .transaction(|transaction| {
+                self.require_evidence_access(transaction)?;
+                work(transaction, &created)
+            });
         if outcome.is_err() {
             // NACH der Transaktion: `EncryptedDatabase::transaction` haelt die
             // Verbindung unter einem `Mutex`, und der Schluesselport darf sie
@@ -180,6 +184,11 @@ struct StoredDraftRow {
 }
 
 impl DraftRepository for AutosaveDraftRepository {
+    fn evidence_draft_source(&self) -> Result<Option<crate::EvidenceDraftSource>, DraftError> {
+        self.check_evidence_access()?;
+        Ok(self.evidence.map(|binding| binding.source()))
+    }
+
     fn load_or_create(&self) -> Result<Draft, DraftError> {
         self.transaction_creating_blank(|transaction, created| {
             if let Some(row) = self.read_row(transaction)? {
@@ -205,7 +214,9 @@ impl DraftRepository for AutosaveDraftRepository {
     }
 
     fn save(&self, draft: Draft) -> Result<SavedDraft, DraftError> {
+        if self.evidence.is_some() && !draft.notes().is_empty() { return Err(DraftError::EvidenceBinding); }
         self.database.transaction(|transaction| {
+            self.require_evidence_access(transaction)?;
             let row = self.read_row(transaction)?.ok_or(DraftError::NoDraft)?;
             if row.draft_id != draft.draft_id() || row.revision != draft.revision() {
                 return Err(DraftError::RevisionConflict);
@@ -249,6 +260,7 @@ impl DraftRepository for AutosaveDraftRepository {
 
     fn draft_dek_handle(&self, draft: &SavedDraft) -> Result<KeyHandle, DraftError> {
         self.database.transaction(|transaction| {
+            self.require_evidence_access(transaction)?;
             let row = self.read_row(transaction)?.ok_or(DraftError::NoDraft)?;
             if row.draft_id != draft.draft_id() {
                 return Err(DraftError::NoDraft);
@@ -262,6 +274,7 @@ impl DraftRepository for AutosaveDraftRepository {
             return Err(DraftError::TransitionUnavailable);
         }
         self.database.transaction(|transaction| {
+            self.require_evidence_access(transaction)?;
             let row = self.read_row(transaction)?.ok_or(DraftError::NoDraft)?;
             if row.draft_id != draft.draft_id() || row.revision != draft.revision() {
                 return Err(DraftError::RevisionConflict);
@@ -310,6 +323,7 @@ impl DraftRepository for AutosaveDraftRepository {
     }
 
     fn pending_discard(&self) -> Result<Option<DiscardIntent>, DraftError> {
+        self.check_evidence_access()?;
         if !self.transition_table_exists()? {
             return Ok(None);
         }
@@ -340,6 +354,9 @@ impl DraftRepository for AutosaveDraftRepository {
         // scheitern.
         let clear_transition = self.transition_table_exists()?;
         self.transaction_creating_blank(|transaction, created| {
+            if self.evidence.is_some() && transaction.query_row("SELECT kind FROM draft_transition WHERE singleton=0 AND kind=1", &[])?.is_none() {
+                return Err(DraftError::EvidenceBinding);
+            }
             if clear_transition {
                 transaction.execute("DELETE FROM draft_transition WHERE singleton = 0", &[])?;
             }
@@ -356,6 +373,10 @@ impl DraftRepository for AutosaveDraftRepository {
             return Err(DraftError::TransitionUnavailable);
         }
         self.transaction_creating_blank(|transaction, created| {
+            if self.evidence.is_some() {
+                let saved = transaction.query_row("SELECT draft_id,save_revision FROM draft_transition WHERE singleton=0 AND kind=0", &[])?.ok_or(DraftError::EvidenceBinding)?;
+                if saved.blob(0)? != intent.draft_id().as_bytes() || saved.integer(1)? != i64::try_from(intent.revision()).map_err(|_|DraftError::EvidenceBinding)? { return Err(DraftError::EvidenceBinding); }
+            }
             let row = self.read_row(transaction)?.ok_or(DraftError::NoDraft)?;
             if row.draft_id != intent.draft_id() {
                 return Err(DraftError::NoDraft);
@@ -376,15 +397,8 @@ impl DraftRepository for AutosaveDraftRepository {
     fn prepared_finalization_marker(
         &self,
     ) -> Result<Option<PreparedFinalizationMarker>, DraftError> {
-        if !self.transition_table_exists()? {
-            return Ok(None);
-        }
-        let row = self.database.query_row(
-            "SELECT marker FROM draft_transition WHERE singleton = 0 AND kind = ?1",
-            &[StoreValue::Integer(TRANSITION_FINALIZATION)],
-        )?;
-        let Some(row) = row else { return Ok(None) };
-        Ok(Some(PreparedFinalizationMarker::new(row.blob(0)?.to_vec())))
+        self.database
+            .transaction(|tx| read_prepared_marker_in(tx, self.evidence))
     }
 
     fn replace_prepared_finalization_marker(
@@ -395,6 +409,7 @@ impl DraftRepository for AutosaveDraftRepository {
             return Err(DraftError::TransitionUnavailable);
         }
         self.database.transaction(|transaction| {
+            self.require_evidence_access(transaction)?;
             // EIN Schreibvorgang, in beide Richtungen. `draft_transition` ist
             // ein einziger Platz: eine gesetzte Abschlussmarke verdraengt eine
             // gebuchte Verwerfensabsicht und umgekehrt. Genau deshalb kann die
@@ -469,4 +484,33 @@ const fn provider_from_code(code: i64) -> Result<KeystoreProvider, DraftError> {
         1 => Ok(KeystoreProvider::InMemory),
         _ => Err(DraftError::Payload),
     }
+}
+
+/// Read ordinary draft routing, migration presence and opaque marker bytes in
+/// the caller's existing snapshot. SELECT only; no provider or Evidence access.
+/// This local observation supplies no authorization to recover or publish.
+pub fn read_unscoped_prepared_finalization_marker_in(
+    tx: &StoreTransaction<'_>,
+) -> Result<Option<PreparedFinalizationMarker>, DraftError> {
+    read_prepared_marker_in(tx, None)
+}
+
+fn read_prepared_marker_in(
+    transaction: &StoreTransaction<'_>,
+    evidence: Option<crate::EvidenceDraftBinding>,
+) -> Result<Option<PreparedFinalizationMarker>, DraftError> {
+    crate::evidence::require_evidence_access_in(transaction, evidence)?;
+    let migration = transaction.query_row(
+        "SELECT count(*) FROM schema_migration WHERE version = ?1",
+        &[StoreValue::Integer(i64::from(DISCARD_MIGRATION_VERSION))],
+    )?;
+    if !migration.is_some_and(|row| row.integer(0).is_ok_and(|count| count > 0)) {
+        return Ok(None);
+    }
+    let row = transaction.query_row(
+        "SELECT marker FROM draft_transition WHERE singleton = 0 AND kind = ?1",
+        &[StoreValue::Integer(TRANSITION_FINALIZATION)],
+    )?;
+    let Some(row) = row else { return Ok(None) };
+    Ok(Some(PreparedFinalizationMarker::new(row.blob(0)?.to_vec())))
 }

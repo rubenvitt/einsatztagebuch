@@ -351,12 +351,12 @@ mod tests {
     #[test]
     fn a_vehicle_projects_display_name_radio_call_sign_and_licence_plate() {
         let full = VehicleSnapshotV1::AdHoc {
-            display_name: "Löschfahrzeug".to_owned(),
-            radio_call_sign: Some("LF 10".to_owned()),
-            license_plate: Some("B-FW 1234".to_owned()),
+            display_name: "Löschfahrzeug".to_owned().into(),
+            radio_call_sign: Some("LF 10".to_owned().into()),
+            license_plate: Some("B-FW 1234".to_owned().into()),
         };
         let bare = VehicleSnapshotV1::AdHoc {
-            display_name: "MTW".to_owned(),
+            display_name: "MTW".to_owned().into(),
             radio_call_sign: None,
             license_plate: None,
         };
@@ -381,11 +381,11 @@ mod tests {
     fn every_person_projects_its_display_name_and_an_empty_crew_projects_nothing() {
         let crew = vec![
             PersonnelSnapshotV1::AdHoc {
-                display_name: "Ada Lovelace".to_owned(),
-                role_or_function: Some("Gruppenführerin".to_owned()),
+                display_name: "Ada Lovelace".to_owned().into(),
+                role_or_function: Some("Gruppenführerin".to_owned().into()),
             },
             PersonnelSnapshotV1::AdHoc {
-                display_name: "Grace Hopper".to_owned(),
+                display_name: "Grace Hopper".to_owned().into(),
                 role_or_function: None,
             },
         ];

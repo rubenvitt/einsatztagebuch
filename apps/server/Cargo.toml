@@ -28,6 +28,11 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
+ea-destruction.workspace = true
+ea-schema.workspace = true
+ed25519-dalek.workspace = true
+minicbor.workspace = true
+ea-trust = { workspace = true, features = ["test-support"] }
 # Der WRITER-SYNC-KLIENT, gegen den echten Server. `writer_sync_e2e.rs` ist das
 # einzige Ziel dieses Pakets, das ihn zieht: die annehmende Haelfte des
 # Quittungspfades verlangt einen Bestand, den der VOLLE Verifizierer wirklich

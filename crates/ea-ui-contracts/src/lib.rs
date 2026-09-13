@@ -47,6 +47,7 @@ pub use emit::{
 // Die Sicherheitsaufzaehlungen bleiben, wo sie definiert wurden. Hier steht
 // ausschliesslich die Weitergabe.
 pub use ea_admin::{
+    administration_runtime::{FingerprintSubjectV1, TrustCeremonyRoundV1},
     ceremony_steps::{TrustCeremonyKind, TrustCeremonyStep},
     clock_release::ClockReleaseAvailability,
     go_live::{GoLiveChecklist, GoLiveRequirementStatus},
@@ -61,11 +62,23 @@ pub use ea_format::{
 };
 pub use ea_reader::BundleRejectionCodeV1;
 pub use ea_types::{EntryStatus, EvidenceStatus, VerificationStatus};
-pub use ea_verify::ServerConfirmationV1;
+pub use ea_verify::{DestructionStateV1, ServerConfirmationV1};
+
+mod destruction;
+mod recovery;
+pub use destruction::{
+    DestructionAdministrationView, DestructionEvidenceReviewView, DestructionPreflightView,
+    DestructionProcessView, DestructionReplicaView, DestructionTargetView, DestructionReaderDeliveryView,
+};
 pub use ea_writer::{FinalizationPhase, StaleDecision};
+pub use recovery::{
+    RecoveryAdministrationView, RecoveryMediumObservationView, RecoveryMediumRequestView,
+    RecoveryReportView, RecoveryRunView,
+};
 
 use ea_archive::QuarantinedObject;
 use ea_archive_fs::ArchiveHealthReport;
+pub use ea_archive_fs::LocalWriterLockDiagnosis;
 use ea_schema::{
     CoordinatesV1, ExternalOrganizationV1, IncidentUniquenessKey, KeywordV1, LocationV1,
     OccurredAtV1, PatientCount, SchemaError, StructuredAddressV1,
@@ -114,11 +127,18 @@ pub const WRITER_ENUMS_V1: &[(&str, &[&str])] = &[
 /// emittierte Literal aus der TSX verbannt.
 pub const ADMIN_ENUMS_V1: &[(&str, &[&str])] = &[
     (
+        "LocalWriterLockDiagnosis",
+        LOCAL_WRITER_LOCK_DIAGNOSIS_LITERALS,
+    ),
+    ("DestructionStateV1", DESTRUCTION_STATE_V1_LITERALS),
+    (
         "GoLiveRequirementStatus",
         GO_LIVE_REQUIREMENT_STATUS_LITERALS,
     ),
     ("TrustCeremonyKind", TRUST_CEREMONY_KIND_LITERALS),
     ("TrustCeremonyStep", TRUST_CEREMONY_STEP_LITERALS),
+    ("FingerprintSubjectV1", FINGERPRINT_SUBJECT_V1_LITERALS),
+    ("TrustCeremonyRoundV1", TRUST_CEREMONY_ROUND_V1_LITERALS),
     ("WriterTransitionPhase", WRITER_TRANSITION_PHASE_LITERALS),
     (
         "ClockReleaseAvailability",
@@ -129,6 +149,42 @@ pub const ADMIN_ENUMS_V1: &[(&str, &[&str])] = &[
         "ClockReleaseJustificationV1",
         CLOCK_RELEASE_JUSTIFICATION_V1_LITERALS,
     ),
+];
+
+/// Exhaustive, path-free mapping of a read-only diagnostic snapshot.
+#[must_use]
+pub const fn local_writer_lock_diagnosis_literal(value: LocalWriterLockDiagnosis) -> &'static str {
+    match value {
+        LocalWriterLockDiagnosis::Missing => "Missing",
+        LocalWriterLockDiagnosis::AbandonedInert => "AbandonedInert",
+        LocalWriterLockDiagnosis::LiveOwner => "LiveOwner",
+        LocalWriterLockDiagnosis::Unreadable => "Unreadable",
+    }
+}
+
+const LOCAL_WRITER_LOCK_DIAGNOSIS_LITERALS: &[&str] = &[
+    local_writer_lock_diagnosis_literal(LocalWriterLockDiagnosis::Missing),
+    local_writer_lock_diagnosis_literal(LocalWriterLockDiagnosis::AbandonedInert),
+    local_writer_lock_diagnosis_literal(LocalWriterLockDiagnosis::LiveOwner),
+    local_writer_lock_diagnosis_literal(LocalWriterLockDiagnosis::Unreadable),
+];
+
+const fn destruction_state_literal(state: DestructionStateV1) -> &'static str {
+    match state {
+        DestructionStateV1::Requested
+        | DestructionStateV1::InProgress
+        | DestructionStateV1::PendingBackupExpiry
+        | DestructionStateV1::CompleteManagedScope
+        | DestructionStateV1::IncompleteUnreachableReplica => state.as_str(),
+    }
+}
+
+pub const DESTRUCTION_STATE_V1_LITERALS: &[&str] = &[
+    destruction_state_literal(DestructionStateV1::Requested),
+    destruction_state_literal(DestructionStateV1::InProgress),
+    destruction_state_literal(DestructionStateV1::PendingBackupExpiry),
+    destruction_state_literal(DestructionStateV1::CompleteManagedScope),
+    destruction_state_literal(DestructionStateV1::IncompleteUnreachableReplica),
 ];
 
 /// Die Statusaufzaehlungen der READER-Flaeche, in Emitterreihenfolge.
@@ -546,6 +602,7 @@ const fn trust_ceremony_step_literal(value: TrustCeremonyStep) -> &'static str {
         TrustCeremonyStep::RootRequestExported => "RootRequestExported",
         TrustCeremonyStep::RootReplyImported => "RootReplyImported",
         TrustCeremonyStep::RegistryPublished => "RegistryPublished",
+        TrustCeremonyStep::TargetPublished => "TargetPublished",
     }
 }
 
@@ -556,6 +613,28 @@ const TRUST_CEREMONY_STEP_LITERALS: &[&str] = &[
     trust_ceremony_step_literal(TrustCeremonyStep::RootRequestExported),
     trust_ceremony_step_literal(TrustCeremonyStep::RootReplyImported),
     trust_ceremony_step_literal(TrustCeremonyStep::RegistryPublished),
+    trust_ceremony_step_literal(TrustCeremonyStep::TargetPublished),
+];
+
+const fn fingerprint_subject_literal(value: FingerprintSubjectV1) -> &'static str {
+    match value {
+        FingerprintSubjectV1::RegistrationRequest => "RegistrationRequest",
+        FingerprintSubjectV1::IssuedCertificate => "IssuedCertificate",
+    }
+}
+const FINGERPRINT_SUBJECT_V1_LITERALS: &[&str] = &[
+    fingerprint_subject_literal(FingerprintSubjectV1::RegistrationRequest),
+    fingerprint_subject_literal(FingerprintSubjectV1::IssuedCertificate),
+];
+const fn trust_ceremony_round_literal(value: TrustCeremonyRoundV1) -> &'static str {
+    match value {
+        TrustCeremonyRoundV1::IssueTarget => "IssueTarget",
+        TrustCeremonyRoundV1::ActivateRegistry => "ActivateRegistry",
+    }
+}
+const TRUST_CEREMONY_ROUND_V1_LITERALS: &[&str] = &[
+    trust_ceremony_round_literal(TrustCeremonyRoundV1::IssueTarget),
+    trust_ceremony_round_literal(TrustCeremonyRoundV1::ActivateRegistry),
 ];
 
 /// Die Phase eines Writer-Uebergangs; `Prepared` ist die unvollendete.
@@ -1149,10 +1228,64 @@ impl IncidentInputView {
     }
 }
 
+/// Untrusted Reader handoff. Only the Writer's original-source resolver can
+/// establish that these coordinates name the encrypted original identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CorrectionReferenceView {
+    pub original_record_id: String,
+    pub original_entry_hash: String,
+    pub original_sequence: u64,
+}
+impl CorrectionReferenceView {
+    pub fn to_reference(&self) -> Option<ea_reader::CorrectionReference> {
+        fn bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
+            if text.len() != N * 2 {
+                return None;
+            }
+            let mut bytes = [0; N];
+            for (out, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+                let digit = |ch: u8| match ch {
+                    b'0'..=b'9' => Some(ch - b'0'),
+                    b'a'..=b'f' => Some(ch - b'a' + 10),
+                    _ => None,
+                };
+                *out = digit(pair[0])? * 16 + digit(pair[1])?;
+            }
+            Some(bytes)
+        }
+        let id = &self.original_record_id;
+        let id = if id.len() == 36 && [8, 13, 18, 23].iter().all(|&i| id.as_bytes()[i] == b'-') {
+            id.replace('-', "")
+        } else {
+            id.clone()
+        };
+        Some(ea_reader::CorrectionReference {
+            original_record_id: ea_types::RecordId::try_from(bytes::<16>(&id)?.as_slice()).ok()?,
+            original_entry_hash: ea_types::EntryHash::try_from(
+                bytes::<32>(&self.original_entry_hash)?.as_slice(),
+            )
+            .ok()?,
+            original_sequence: ChainSequence::new(self.original_sequence),
+        })
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmendmentChangeView {
+    pub field_path: String,
+    pub change_text: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmendmentInputView {
+    pub reference: CorrectionReferenceView,
+    pub reason: String,
+    pub changes: Vec<AmendmentChangeView>,
+}
+
 /// Der aktive Entwurf samt seinem Speicherzustand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DraftStateView {
     pub incident: IncidentInputView,
+    pub amendment: Option<AmendmentInputView>,
     pub sync: SyncStateView,
 }
 
@@ -1226,7 +1359,7 @@ pub struct PendingResumeOutcomeView {
 
 /// EINE ausstehende Geraeteanfrage.
 ///
-/// `fingerprint` ist der Objekthash der exakten Zertifikatsbytes in der
+/// `fingerprint_subject` benennt die exakten verglichenen Bytes; `fingerprint` ist ihr Objekthash in der
 /// Schreibweise `AA:BB:…` (32 Paare Gross-Hex); `certificate_kind_code` ist
 /// der Code der Zertifikatsart und nie ein Freitext.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1235,6 +1368,7 @@ pub struct PendingDeviceRequestView {
     pub certificate_kind_code: String,
     pub fingerprint: String,
     pub received_at_ms: UnixMillis,
+    pub fingerprint_subject: FingerprintSubjectV1,
 }
 
 /// Der Stand EINER Trust-Zeremonie: Art, erreichter Schritt, Ziel.
@@ -1250,6 +1384,9 @@ pub struct TrustCeremonyView {
     pub step: TrustCeremonyStep,
     pub target_fingerprint: Option<String>,
     pub exchange_file_name: Option<String>,
+    pub round: TrustCeremonyRoundV1,
+    pub linked_ceremony_id: Option<String>,
+    pub fingerprint_subject: Option<FingerprintSubjectV1>,
 }
 
 /// Das Policy-Profil des gewaehlten Kopfes, Feld fuer Feld wie
@@ -1375,6 +1512,8 @@ pub struct ClockReleaseOutcomeView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriterTransitionView {
     pub phase: WriterTransitionPhase,
+    /// Exact persisted IssueTarget or ActivateRegistry round, when work remains.
+    pub ceremony_id: Option<String>,
     pub current_writer_hash: String,
     pub new_writer_hash: Option<String>,
     pub effective_from_sequence: Option<ChainSequence>,

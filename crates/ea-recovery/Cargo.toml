@@ -6,7 +6,27 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Explicit Stage-5 real-module gate; never a production provider override.
+pkcs11-fixture = []
+
+[[test]]
+name = "pkcs11_provider"
+required-features = ["pkcs11-fixture"]
+
+[[example]]
+name = "pkcs11_fixture"
+required-features = ["pkcs11-fixture"]
+
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+# Guided recovery validates native/offline providers and persists exact encrypted source snapshots.
+ea-key-provider.workspace = true
+ea-local-store.workspace = true
+ea-schema.workspace = true
+cryptoki.workspace = true
 # Argon2id, die Passphrasen-KDF des verschluesselten Schluesselcontainers
 # (`src/encrypted_container.rs`). Die AEAD dahinter ist weiterhin das
 # ChaCha20-Poly1305 aus `ea-crypto`; diese Kante bringt KEINE zweite.
@@ -14,6 +34,9 @@ argon2.workspace = true
 # Archivbestand und Layout: diese Crate legt die dateisystemgestuetzte
 # ArchiveSource ueber ein Verzeichnis und braucht dafuer die Pfadregeln.
 ea-archive.workspace = true
+ea-audit.workspace = true
+ea-operator.workspace = true
+ea-time.workspace = true
 # Deterministisches CBOR fuer den Schluesselcontainer: `validate` vor jedem
 # Dekodieren, damit ein nicht kanonischer Container gar nicht erst geoeffnet
 # wird — derselbe Weg wie `ea_trust::decode_trust_anchor`.
@@ -38,6 +61,8 @@ minicbor.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+ea-key-provider = { workspace = true, features = ["test-support"] }
+ea-local-store.workspace = true
 # Nur fuer die per #[path] eingebundene Fixture-Kette von ea-verify, ea-archive,
 # ea-trust und ea-format. Dev-Dependencies, also nie im Lib-Graphen.
 ea-time.workspace = true

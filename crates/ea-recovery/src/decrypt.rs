@@ -52,7 +52,7 @@ use std::{
 use ea_archive::{ArchiveBlob, ArchiveError, ArchiveSource as _};
 use ea_crypto::{
     AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, HPKE_ENCAPSULATED_KEY_SIZE,
-    HPKE_WRAPPED_CEK_SIZE, HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, SecretVec, aead_open,
+    HPKE_WRAPPED_CEK_SIZE, HpkeRecipient, HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, SecretVec, aead_open,
     hpke_aad, hpke_info, hpke_open, payload_aad,
 };
 use ea_format::{
@@ -144,7 +144,7 @@ pub fn decrypt_directory(
     root: &Path,
     anchor: &TrustAnchorV1,
     now: UnixMillis,
-    key: &HpkeRecipientPrivateKey,
+    key: &dyn HpkeRecipient,
     output: &Path,
 ) -> Result<DecryptionV1, RecoveryError> {
     // 1 — VOR jedem gelesenen Byte. Wo die Zusicherung nicht zu halten ist,
@@ -276,7 +276,7 @@ pub(crate) fn load_key_material(
 /// [`RecoveryError::KeySource`], wenn der oeffentliche Punkt kein kanonischer
 /// COSE-Schluessel ist.
 pub fn recipient_key_thumbprint(
-    key: &HpkeRecipientPrivateKey,
+    key: &dyn HpkeRecipient,
 ) -> Result<KeyThumbprint, RecoveryError> {
     Ok(CanonicalPublicCoseKey::x25519(*key.public_key().as_bytes())
         .map_err(|_| RecoveryError::KeySource)?
@@ -417,7 +417,7 @@ fn is_valid_entry(report: &VerificationReportV1, entry: &Parsed<EntryPackageV1>)
 fn write_plaintext(
     entry: &Parsed<EntryPackageV1>,
     grant: &Parsed<GrantV1>,
-    key: &HpkeRecipientPrivateKey,
+    key: &dyn HpkeRecipient,
     output: &Path,
 ) -> Result<(), RecoveryError> {
     let body = grant.value().grant_body();

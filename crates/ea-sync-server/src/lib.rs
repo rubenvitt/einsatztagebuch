@@ -22,6 +22,7 @@ pub mod auth;
 pub mod checkpoint;
 pub mod commit;
 pub mod destruction;
+pub mod managed_destruction;
 pub mod export;
 pub mod historical_grant;
 pub mod models;
@@ -39,15 +40,20 @@ pub use models::{
     DestructionStateV1, EntryIndexEntryV1, ExportIndexEntryV1, GrantDeliveryV1, GrantIndexEntryV1,
     GrantRecipientV1, HistoricalGrantCommandV1, IndexedObjectV1, PENDING_REGISTRATION_STATE_V1,
     PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, ReaderVaultBlobV1,
-    RegistryLineEntryV1, RepositoryError, SecurityEventKindV1, SecurityEventV1, StagedObject,
-    StoreError, StoredObject, StoredWebauthnCredentialV1, TrustEventCommandV1, TrustIndexOutcome,
-    VaultBlobOutcome, WebauthnCredentialV1, object_key, object_type_segment,
+    RegistryAdmissionFenceV1, RegistryLineEntryV1, RepositoryError, SecurityEventKindV1,
+    SecurityEventV1, StagedObject, StoreError, StoredObject, StoredWebauthnCredentialV1,
+    TrustEventCommandV1, TrustIndexOutcome, VaultBlobOutcome, WebauthnCredentialV1, object_key,
+    object_type_segment,
 };
 pub use ports::{
-    ActiveRegistryHeadV1, ArchiveExportDirectory, AuthorityError, ChallengeSpendOutcome,
-    ChallengeStore, CheckpointDirectory, CommitRepository, DestructionStore,
+    ActiveRegistryHeadV1, ArchiveExportDirectory, AuthorityError, ChainHeadReader,
+    ChallengeSpendOutcome, ChallengeStore, CheckpointDirectory, CommitRepository, DestructionStore,
     DeviceAuthorityDirectory, DeviceRegistrationStore, EntryDirectory, HistoricalGrantStore,
-    ObjectStore, ObjectTypeDirectory, ReaderAckStore, RegistryHeadDirectory,
+    ObjectStore, ObjectTypeDirectory, ReaderAckStore, RegistryAdmissionV1, RegistryHeadDirectory,
     RegistryHeadSelectionV1, RequestIdStore, SecurityEventSink, ServerClock, ServerSigner,
     TrustEventStore, VaultBlobStore, WebauthnCredentialStore,
 };
+
+pub mod server_destruction;
+
+mod managed_grant_membership;

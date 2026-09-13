@@ -50,9 +50,7 @@ use ea_operator::{
     BoundOperator, OperatorAuthenticator, OperatorError, OperatorSessionProof, OsAccountProvider,
     ReauthPurpose,
 };
-use ea_schema::{
-    KeywordV1, LocationV1, NativeSourceV1, OccurredAtV1, PatientCount, StructuredAddressV1,
-};
+use ea_schema::NativeSourceV1;
 use ea_time::TrustedTimeState;
 use ea_trust::{
     ClockReleaseReplayKey, IndependentTimeCommit, PersistedTrustRecord, RegistryHeadPin,
@@ -144,8 +142,8 @@ const FIXTURE_NOT_AFTER_MS: i64 = FIXTURE_ISSUED_AT_MS + 86_399_000;
 const FIXTURE_SHORT_TRUST_REFRESH_MS: u64 = 60_000;
 /// Das oertliche Kalenderjahr des Einsatzes in `Europe/Berlin`.
 pub const FIXTURE_LOCAL_CIVIL_YEAR: i32 = 2026;
-/// Die Einsatznummer der Fixture.
-pub const FIXTURE_INCIDENT_NUMBER: &str = "2026-000042";
+mod incident_input;
+pub use incident_input::FIXTURE_INCIDENT_NUMBER;
 /// Die Sequenz, die die Fixture beansprucht. Ein LEERER Bestand hat keinen
 /// verifizierten Kopf, also ist die einzige gueltige Sequenz die NULL.
 const PROPOSED_SEQUENCE: u64 = 0;
@@ -341,6 +339,7 @@ pub struct LineVariantV1 {
     /// veroeffentlichten Eintrag wirklich oeffnen — ueber den Grant, HPKE und
     /// AEAD, wie ein Recovery-Empfaenger es tut.
     pub recovery_recipient_openable: bool,
+    pub reader_recipient_openable: bool,
 }
 
 /// Baut die EINE Registrierungslinie der Fixture.
@@ -407,7 +406,19 @@ fn build_line(
             effective_from: Some(0),
         },
         HeadOptions {
-            kem_public_key_override: Some(kem_key(READER_ONE_MARKER)),
+            kem_public_key_override: Some(if variant.reader_recipient_openable {
+                CanonicalPublicCoseKey::x25519(
+                    *ea_crypto::HpkeRecipientPrivateKey::from_bytes(ea_crypto::SecretBytes::new(
+                        [0x72; 32],
+                    ))
+                    .unwrap()
+                    .public_key()
+                    .as_bytes(),
+                )
+                .unwrap()
+            } else {
+                kem_key(READER_ONE_MARKER)
+            }),
             ..head_options(0, 40)
         },
     );
@@ -1267,7 +1278,7 @@ impl WriterHarness {
         let trust =
             self.line
                 .verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
-        let candidate = verify_registry_candidate(&trust, ChainSequence::new(0)).unwrap();
+        let candidate = verify_registry_candidate(&trust, self.head.proposed_sequence()).unwrap();
         let mut store = ModelStore {
             key,
             revision: 17,
@@ -1328,8 +1339,76 @@ impl WriterHarness {
             .reauthentication_time(&self.head)
     }
 
+    pub fn stale_writer_head(&self, now: UnixMillis) -> ea_trust::StaleWriterRegistryHead {
+        let key = trust_support::state_key();
+        let trusted_time = TrustedTimeState::initial(now);
+        let index = self.line.heads().len() - 1;
+        let trust = self
+            .line
+            .verified_with_record(Pin::Head(index), 17, trusted_time.clone(), key);
+        let candidate = verify_registry_candidate(&trust, self.head.proposed_sequence()).unwrap();
+        let mut store = ModelStore {
+            key,
+            revision: 17,
+            trusted_time,
+            pinned_head: RegistryHeadPin::new(
+                self.head.registry_version(),
+                self.head.registry_head_hash(),
+            ),
+        };
+        let time = prepare_local_time(&mut store, &candidate, now, &[]).unwrap();
+        ea_trust::select_stale_writer_registry_head(candidate, time).unwrap()
+    }
+    pub fn service_for_writer<'a>(
+        &'a self,
+        source: &'a dyn ea_archive::ArchiveSource,
+        head: ea_trust::WriterRegistryHeadRef<'a>,
+    ) -> WriterService<'a> {
+        WriterService::new_for_writer(
+            Arc::clone(&self.store().repository),
+            Arc::clone(&self.provider) as Arc<dyn KeyProvider>,
+            self.backend.as_ref(),
+            source,
+            head,
+            &[],
+            IncidentNumberRegister::new(self.database()),
+            OperatorProfileRepository::new(self.database()),
+            self.binding,
+        )
+    }
+    pub fn writer_context_proof(
+        &self,
+        head: ea_trust::WriterRegistryHeadRef<'_>,
+        purpose: ReauthPurpose,
+        preview: Option<&ea_writer::FinalizationPreview>,
+    ) -> OperatorSessionProof {
+        let auth = FakeAuthenticator {
+            bound: BoundOperator::resolve_writer(head, self.binding.binding_object_hash).unwrap(),
+            signing_key: signing_key(INSTANCE_SECRET),
+            challenges: RefCell::new(Vec::new()),
+        };
+        let account = Box::new(FakeAccount {
+            binding_hash: trust_support::hash32(BINDING_MARKER.wrapping_add(2)),
+        });
+        if let Some(preview) = preview {
+            auth.reauthenticate_for_context(
+                account,
+                purpose,
+                head.preexisting_effective_now(),
+                preview.preview_hash(),
+            )
+            .unwrap()
+        } else {
+            auth.reauthenticate(account, purpose).unwrap()
+        }
+    }
+
     pub fn reselected_head(&self, now: UnixMillis) -> SelectedRegistryHead {
         select_head(&self.line, now.get())
+    }
+
+    pub fn select_sequence(&mut self, proposed: u64) {
+        self.head = select_head_for_sequence(&self.line, self.observed_now().get(), proposed);
     }
 
     pub fn candidate_beyond_lease(
@@ -2605,36 +2684,7 @@ pub fn other_incident() -> FinalizationInputV1 {
 /// oben sind nach zwei Eintraegen verbraucht.
 #[must_use]
 pub fn incident_numbered(number: &str) -> FinalizationInputV1 {
-    FinalizationInputV1 {
-        timezone: "Europe/Berlin".to_owned(),
-        source: NativeSourceV1::new("ea.writer.fixture", 1)
-            .expect("die Quelle der Fixture ist gueltig"),
-        human_incident_number: number.to_owned(),
-        occurred_at: OccurredAtV1::new(UnixMillis::new(FIXTURE_NOW_MS - 3_600_000), None)
-            .expect("das Intervall der Fixture ist gueltig"),
-        keyword: KeywordV1::free_text("Verkehrsunfall")
-            .expect("das Stichwort der Fixture ist gueltig"),
-        location: LocationV1::structured(
-            StructuredAddressV1::new(
-                Some("Hauptstrasse".to_owned()),
-                Some("1".to_owned()),
-                Some("12345".to_owned()),
-                Some("Musterstadt".to_owned()),
-                None,
-                Some("DE".to_owned()),
-            )
-            .expect("die Adresse der Fixture ist gueltig"),
-            None,
-        )
-        .expect("der Ort der Fixture ist gueltig"),
-        personnel: Vec::new(),
-        personnel_empty_reason: Some("keine Personalzuordnung erfasst".to_owned()),
-        vehicles: Vec::new(),
-        vehicles_empty_reason: Some("keine Fahrzeugzuordnung erfasst".to_owned()),
-        patient_count: PatientCount::Known(0),
-        notes: None,
-        external_organizations: Vec::new(),
-    }
+    incident_input::incident_numbered_at(number, UnixMillis::new(FIXTURE_NOW_MS - 3_600_000))
 }
 
 /// Die Kulisse der BEREINIGUNG.

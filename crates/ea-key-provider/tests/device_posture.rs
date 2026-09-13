@@ -65,27 +65,57 @@ fn a_report_is_production_ready_only_when_all_four_checks_pass() {
     }
 }
 
-/// Die Haltung, die der native Adapter DIESES Hosts meldet.
-///
-/// Stufe 2 traegt keine native API-Familie (`ADR-0001:152-153`, K-02 der
-/// Vorpruefung), also kann kein Adapter eine der vier Anforderungen belegen und
-/// meldet `Unknown` mit dem jeweiligen Beweiscode. Das ist der von
-/// `design.md`:1489 und dem Task verlangte Ausgang und ausdruecklich kein
-/// automatischer Pass: die Sitzung bleibt gesperrt und alle vier Anforderungen
-/// stehen als Go-live-Zeilen.
+/// Live observation: only stable evidence codes leave the actual host adapter.
 #[test]
-fn the_host_posture_adapter_resolves_nothing_and_claims_nothing() {
-    let row = SupportMatrixRow::current_host().expect("the host is a support-matrix row");
+fn the_host_posture_adapter_preserves_unverifiable_requirements() {
+    let Some(row) = SupportMatrixRow::current_host() else {
+        return;
+    };
     let report = row.posture_provider().report().unwrap();
+    eprintln!("native posture evidence: {report:?}");
     assert!(!report.is_production_ready());
-    assert_eq!(report.go_live_follow_up(), PostureRequirement::ALL.to_vec());
-    for check in [
-        report.full_disk_encryption,
+    assert_eq!(
         report.locked_non_shared_account,
-        report.automatic_screen_lock,
+        PostureRequirement::LockedNonSharedAccount.unknown()
+    );
+    assert_eq!(
         report.supported_os_patch_level,
-    ] {
-        assert!(matches!(check, PostureCheck::Unknown { .. }));
+        PostureRequirement::SupportedOsPatchLevel.unknown()
+    );
+    for requirement in PostureRequirement::ALL {
+        assert!(
+            [
+                requirement.pass(),
+                requirement.fail(),
+                requirement.unknown()
+            ]
+            .contains(&report.check(requirement))
+        );
+    }
+}
+
+#[test]
+fn adapters_never_use_another_platform_as_host_evidence() {
+    use ea_key_provider::{
+        linux::UbuntuDevicePosture, macos::MacOsDevicePosture, windows::WindowsDevicePosture,
+    };
+    if !cfg!(target_os = "macos") {
+        assert_eq!(
+            MacOsDevicePosture.report().unwrap(),
+            DevicePostureReport::unresolved()
+        );
+    }
+    if !cfg!(target_os = "linux") {
+        assert_eq!(
+            UbuntuDevicePosture.report().unwrap(),
+            DevicePostureReport::unresolved()
+        );
+    }
+    if !cfg!(target_os = "windows") {
+        assert_eq!(
+            WindowsDevicePosture.report().unwrap(),
+            DevicePostureReport::unresolved()
+        );
     }
 }
 

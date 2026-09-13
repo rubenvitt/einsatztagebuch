@@ -63,7 +63,8 @@ const ENTRY_STATE_KEY_PREFIX: &str = "entry-state/";
 /// steht HIER und nicht in `ea-verify`, weil `ea-verify` sie nicht braucht:
 /// dort ist ein Code ein `&'static str` aus dem Programmtext, und nur der
 /// Speicher muss ihn aus Bytes zurueckgewinnen.
-const PERSISTED_DETAIL_CODES_V1: [&str; 25] = [
+const PERSISTED_DETAIL_CODES_V1: [&str; 26] = [
+    "EA-GRANT-EXPIRED",
     "EA-VERIFY-CHECKPOINT-UNVERIFIABLE",
     "EA-VERIFY-DECRYPT-CEK-UNWRAP-FAILED",
     "EA-VERIFY-DECRYPT-PAYLOAD-OPEN-FAILED",

@@ -28,8 +28,9 @@ impl<'a> BoundedDecoder<'a> {
         let consumed = scanner.position;
         let end = start.checked_add(consumed).ok_or(CborError::ItemLimit)?;
         let exact = self.input.get(start..end).ok_or(CborError::Invalid)?;
-        let canonical = crate::encode::canonical_reencode(exact, self.limits)?;
-        if canonical != exact {
+        let canonical =
+            zeroize::Zeroizing::new(crate::encode::canonical_reencode(exact, self.limits)?);
+        if canonical.as_slice() != exact {
             return Err(CborError::Invalid);
         }
         self.position += consumed;

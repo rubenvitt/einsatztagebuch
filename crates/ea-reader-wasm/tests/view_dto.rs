@@ -213,6 +213,29 @@ fn a_fully_verified_amendment_stand_lists_every_state_and_threads_the_original()
         .expect("das Original traegt einen Faden");
     let thread_view = parsed(&thread);
     assert_eq!(
+        thread_view["correctionReference"]["originalEntryHash"],
+        hex_of(amendments::original_entry_hash())
+    );
+    assert_eq!(
+        thread_view["correctionReference"]["originalSequence"],
+        amendments::ORIGINAL_SEQUENCE_V1
+    );
+    assert_eq!(
+        thread_view["correctionReference"]["originalRecordId"],
+        amendments::original_record_id()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        thread_view["correctionReference"]
+            .as_object()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
         thread_view["original"]["state"]["entryHash"],
         hex_of(amendments::original_entry_hash())
     );
