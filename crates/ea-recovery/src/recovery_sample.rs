@@ -74,12 +74,14 @@ impl<'a> RecoveryArchiveProbe<'a> {
         anchor: &'a TrustAnchorV1,
         now: UnixMillis,
     ) -> Result<Self, RecoveryTestError> {
-        let source=source.committed_view();
+        let source = source.committed_view();
         let report = crate::verify::verify_source(&source, anchor, now, None)
             .map_err(|_| RecoveryTestError::Archive)?;
         // This opaque getter requires all public gates, including a continuous
         // signed chain. It does not promote an unreadable destruction Stub.
-        let chain_head=report.verified_public_chain_head().ok_or(RecoveryTestError::Archive)?;
+        let chain_head = report
+            .verified_public_chain_head()
+            .ok_or(RecoveryTestError::Archive)?;
         let inventory = ArchiveInventory::build(&source).map_err(|_| RecoveryTestError::Archive)?;
         Ok(Self {
             source,
@@ -92,7 +94,9 @@ impl<'a> RecoveryArchiveProbe<'a> {
     pub fn inventory(&self) -> &ArchiveInventory {
         &self.inventory
     }
-    pub fn verified_public_chain_head(&self)->ea_verify::ChainHeadV1 {self.chain_head}
+    pub fn verified_public_chain_head(&self) -> ea_verify::ChainHeadV1 {
+        self.chain_head
+    }
     pub fn test_recovery_medium(
         &self,
         medium: &RecoveryMedium,

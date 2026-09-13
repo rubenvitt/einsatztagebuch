@@ -231,27 +231,78 @@ fn inventory_rejects_ambiguous_duplicate_unsorted_and_unprofiled_inputs() {
 #[test]
 fn retired_backup_possession_uses_signed_past_epoch_without_current_authority() {
     use ea_format::CertificateKindV1;
-    use ea_types::{CertificateHash,ChainSequence,UnixMillis};
-    use ea_recovery::{FsArchiveSource,RecoveryArchiveProbe};
-    use support::verify_support::{self as fixture,archive_support::{ArchiveFixture,trust_support}};
+    use ea_recovery::{FsArchiveSource, RecoveryArchiveProbe};
     use ea_trust::TrustObjectSource;
-    let mut f=fixture::historical::fixture_with_payload(recovery_payload);
-    let options=|sequence|trust_support::HeadOptions{effective_from:Some(sequence),valid_through:Some(100),not_after:UnixMillis::new(10_000),..Default::default()};
-    let issued=f.line.push(trust_support::ActionSpec::Device{kind:CertificateKindV1::ServerReceipt,marker:0x75,effective_from:Some(1)},options(1));
-    let cert=CertificateHash::from(issued.direct_object_hash.unwrap());
-    f.head=f.line.push(trust_support::ActionSpec::Revoke{target_kind:2,object_hash:issued.direct_object_hash.unwrap()},options(2));
-    let current=f.selected(2,800,800);assert!(current.active_certificate_fields(cert).is_none());
-    let mut archive=ArchiveFixture::new();let trust=f.line.source();trust.visit_trust_object_hashes(&mut |hash|{
-        archive.push_exact_bytes(&format!("registry/{}.etb",hex::encode(hash.as_bytes())),trust.read_exact_trust_object(hash)?.unwrap().to_vec());Ok(())
-    }).unwrap();
-    archive.push_exact_bytes("entries/first.eip",f.entry_bytes);archive.push_exact_bytes("grants/first.eag",f.original_bytes);
-    let temp=support::temp_dir("t9-retired-signing");support::materialize(&archive,temp.path());let source=FsArchiveSource::open_committed(temp.path()).unwrap();
-    let probe=RecoveryArchiveProbe::verify(&source,&f.anchor,UnixMillis::new(800)).unwrap();
-    let past=ea_verify::historical_registry_head(probe.inventory(),&f.anchor,issued.version,issued.object_hash,ChainSequence::new(1),UnixMillis::new(800)).unwrap();
-    let fields=past.active_certificate_fields(cert).unwrap();
+    use ea_types::{CertificateHash, ChainSequence, UnixMillis};
+    use support::verify_support::{
+        self as fixture,
+        archive_support::{ArchiveFixture, trust_support},
+    };
+    let mut f = fixture::historical::fixture_with_payload(recovery_payload);
+    let options = |sequence| trust_support::HeadOptions {
+        effective_from: Some(sequence),
+        valid_through: Some(100),
+        not_after: UnixMillis::new(10_000),
+        ..Default::default()
+    };
+    let issued = f.line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::ServerReceipt,
+            marker: 0x75,
+            effective_from: Some(1),
+        },
+        options(1),
+    );
+    let cert = CertificateHash::from(issued.direct_object_hash.unwrap());
+    f.head = f.line.push(
+        trust_support::ActionSpec::Revoke {
+            target_kind: 2,
+            object_hash: issued.direct_object_hash.unwrap(),
+        },
+        options(2),
+    );
+    let current = f.selected(2, 800, 800);
+    assert!(current.active_certificate_fields(cert).is_none());
+    let mut archive = ArchiveFixture::new();
+    let trust = f.line.source();
+    trust
+        .visit_trust_object_hashes(&mut |hash| {
+            archive.push_exact_bytes(
+                &format!("registry/{}.etb", hex::encode(hash.as_bytes())),
+                trust.read_exact_trust_object(hash)?.unwrap().to_vec(),
+            );
+            Ok(())
+        })
+        .unwrap();
+    archive.push_exact_bytes("entries/first.eip", f.entry_bytes);
+    archive.push_exact_bytes("grants/first.eag", f.original_bytes);
+    let temp = support::temp_dir("t9-retired-signing");
+    support::materialize(&archive, temp.path());
+    let source = FsArchiveSource::open_committed(temp.path()).unwrap();
+    let probe = RecoveryArchiveProbe::verify(&source, &f.anchor, UnixMillis::new(800)).unwrap();
+    let past = ea_verify::historical_registry_head(
+        probe.inventory(),
+        &f.anchor,
+        issued.version,
+        issued.object_hash,
+        ChainSequence::new(1),
+        UnixMillis::new(800),
+    )
+    .unwrap();
+    let fields = past.active_certificate_fields(cert).unwrap();
     let inventory=KeyInventory::parse(&serde_json::to_vec(&serde_json::json!({"schemaId":"ea.key-inventory/v1","inventoryId":"aa".repeat(16),"media":[{"mediumId":"old-receipt","keyRole":"serverReceipt","expectedKeyThumbprint":hex::encode(fields.signing_key_thumbprint.unwrap().as_bytes()),"certificateObjectHash":hex::encode(cert.as_bytes()),"protectionProfile":"offlineEncryptedContainer","testKind":"signatureChallenge"}]})).unwrap()).unwrap();
-    let signer=trust_support::authorized_device_signer();
-    assert!(ea_recovery::verify_signing_backup(&current,&inventory.media()[0],&signer).is_err());
-    assert!(ea_recovery::verify_historical_signing_backup(&past,&inventory.media()[0],&signer).is_ok());
-    assert!(ea_recovery::verify_historical_signing_backup(&past,&inventory.media()[0],&ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new([79;32]))).is_err());
+    let signer = trust_support::authorized_device_signer();
+    assert!(ea_recovery::verify_signing_backup(&current, &inventory.media()[0], &signer).is_err());
+    assert!(
+        ea_recovery::verify_historical_signing_backup(&past, &inventory.media()[0], &signer)
+            .is_ok()
+    );
+    assert!(
+        ea_recovery::verify_historical_signing_backup(
+            &past,
+            &inventory.media()[0],
+            &ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new([79; 32]))
+        )
+        .is_err()
+    );
 }

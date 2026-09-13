@@ -20,8 +20,8 @@
 
 mod challenge;
 mod commit;
-mod enrollment;
 mod destruction_job;
+mod enrollment;
 pub use destruction_job::DestructionJobUploadV1;
 mod error;
 mod http_signature;
@@ -275,7 +275,9 @@ impl EndpointV1 {
             Self::TrustEvents => Some(ea_crypto::CertificateCapability::OrganizationAdminApprove),
             Self::HistoricalGrants => Some(ea_crypto::CertificateCapability::HistoricalGrant),
             Self::Destructions => Some(ea_crypto::CertificateCapability::DestructionApprove),
-            Self::DestructionEvents | Self::DestructionJobs => Some(ea_crypto::CertificateCapability::DeletionAttest),
+            Self::DestructionEvents | Self::DestructionJobs => {
+                Some(ea_crypto::CertificateCapability::DeletionAttest)
+            }
             _ => None,
         }
     }
@@ -320,7 +322,10 @@ impl EndpointV1 {
             | Self::VaultBlobs
             | Self::TrustEvents
             | Self::HistoricalGrants => 201,
-            Self::DeviceRegistrations | Self::Destructions | Self::DestructionEvents | Self::DestructionJobs => 202,
+            Self::DeviceRegistrations
+            | Self::Destructions
+            | Self::DestructionEvents
+            | Self::DestructionJobs => 202,
             Self::ReaderAcks => 204,
             _ => 200,
         }

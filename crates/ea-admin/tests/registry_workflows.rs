@@ -667,11 +667,18 @@ fn an_activation_event_binds_the_checked_head_and_its_version_plus_one() {
         hash_bytes(policy_hash),
         "PolicyChange binds the exact new policy in the event header"
     );
-    let unchanged=events.plan(next_window(),&RegistryActionV1::DeviceApprove {
-        certificate_object_hash:object_hash_marker(0xb4)
-    }).unwrap();
-    assert!(unchanged.policy_object_hash==head.policy_object_hash(),
-        "all other actions retain the predecessor policy");
+    let unchanged = events
+        .plan(
+            next_window(),
+            &RegistryActionV1::DeviceApprove {
+                certificate_object_hash: object_hash_marker(0xb4),
+            },
+        )
+        .unwrap();
+    assert!(
+        unchanged.policy_object_hash == head.policy_object_hash(),
+        "all other actions retain the predecessor policy"
+    );
 }
 
 #[test]

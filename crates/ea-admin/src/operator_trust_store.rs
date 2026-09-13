@@ -115,8 +115,11 @@ impl OperatorTrustStateStore {
 
     /// Read this exact runtime-bound record through the caller's existing
     /// transaction. This neither re-locks the database nor creates authority.
-    pub(crate) fn read_record_in(&self,tx:&StoreTransaction<'_>)->Result<PersistedTrustRecord,StateStoreError>{
-        self.read_in(tx).map_err(|error|error.0)
+    pub(crate) fn read_record_in(
+        &self,
+        tx: &StoreTransaction<'_>,
+    ) -> Result<PersistedTrustRecord, StateStoreError> {
+        self.read_in(tx).map_err(|error| error.0)
     }
     fn read_in(&self, tx: &StoreTransaction<'_>) -> Result<PersistedTrustRecord, TransactionError> {
         self.decode(tx.query_row(READ_RECORD, &self.parameters())?)

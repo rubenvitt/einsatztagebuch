@@ -279,12 +279,20 @@ pub fn verify_fresh_machine_recovery_test(
         machine_fingerprint: observation.machine_fingerprint,
         expected_trust_anchor_hash: observation.expected_trust_anchor_hash,
         media_expected: observation.media_expected,
-        admission: crate::RecoveryTestFreshness::for_testing(&ProductionState::Ready,ea_types::UnixMillis::new(0),u64::MAX,ea_types::UnixMillis::new(0)),
+        admission: crate::RecoveryTestFreshness::for_testing(
+            &ProductionState::Ready,
+            ea_types::UnixMillis::new(0),
+            u64::MAX,
+            ea_types::UnixMillis::new(0),
+        ),
     })
 }
 
 impl<'a> FreshMachineRecoveryProof<'a> {
-    pub(crate) fn from_verified_completed(report: &ea_recovery::VerifiedCompletedRecoveryReport, admission: crate::RecoveryTestFreshness<'a>) -> Self {
+    pub(crate) fn from_verified_completed(
+        report: &ea_recovery::VerifiedCompletedRecoveryReport,
+        admission: crate::RecoveryTestFreshness<'a>,
+    ) -> Self {
         Self {
             machine_fingerprint: report.target_machine(),
             expected_trust_anchor_hash: report.anchor_hash(),

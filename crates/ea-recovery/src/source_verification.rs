@@ -162,18 +162,37 @@ fn verify_scope(
     for medium in keys.media() {
         if medium.role() == RecoveryKeyRole::Root {
             if medium.test_kind() == RecoveryTestKind::RecoveryDecrypt
-                || historical_signing_authority(probe.inventory(),anchor,medium,head.registry_version(),now).is_none()
+                || historical_signing_authority(
+                    probe.inventory(),
+                    anchor,
+                    medium,
+                    head.registry_version(),
+                    now,
+                )
+                .is_none()
             {
                 return Err(RecoveryTestError::Role);
             }
         } else if medium.role() != RecoveryKeyRole::RecoveryRecipient {
-            let cert = head.known_certificate_fields()
-                .find(|(hash,_)|*hash==medium.certificate())
-                .map(|(_,fields)|fields)
+            let cert = head
+                .known_certificate_fields()
+                .find(|(hash, _)| *hash == medium.certificate())
+                .map(|(_, fields)| fields)
                 .ok_or(RecoveryTestError::Role)?;
-            if head.active_certificate_fields(medium.certificate()).is_none()
-                && historical_signing_authority(probe.inventory(),anchor,medium,head.registry_version(),now).is_none()
-            { return Err(RecoveryTestError::Role); }
+            if head
+                .active_certificate_fields(medium.certificate())
+                .is_none()
+                && historical_signing_authority(
+                    probe.inventory(),
+                    anchor,
+                    medium,
+                    head.registry_version(),
+                    now,
+                )
+                .is_none()
+            {
+                return Err(RecoveryTestError::Role);
+            }
             if crate::challenge::certificate_role(cert.certificate_kind) != medium.role()
                 || cert.signing_key_thumbprint != Some(medium.expected_thumbprint())
                 || medium.test_kind() == RecoveryTestKind::RecoveryDecrypt
@@ -237,15 +256,28 @@ fn verify_scope(
             DecodedTrustPayloadV1::AuthorizedDevice(c) => Some(c.fields()),
             _ => None,
         };
-        let root=match &payload {
-            DecodedTrustPayloadV1::InitialRoot(fields)=>Some(fields),
-            DecodedTrustPayloadV1::AuthorizedRoot(core)=>Some(core.fields()),
-            _=>None,
+        let root = match &payload {
+            DecodedTrustPayloadV1::InitialRoot(fields) => Some(fields),
+            DecodedTrustPayloadV1::AuthorizedRoot(core) => Some(core.fields()),
+            _ => None,
         };
-        if let Some(root)=root
-            && historical_authority(probe.inventory(),anchor,(hash,RecoveryKeyRole::Root,root.root_key_thumbprint),head.registry_version(),now).is_some()
-            && !keys.media().iter().any(|m|m.role()==RecoveryKeyRole::Root && m.certificate()==hash && m.expected_thumbprint()==root.root_key_thumbprint)
-        { return Err(RecoveryTestError::Incomplete); }
+        if let Some(root) = root
+            && historical_authority(
+                probe.inventory(),
+                anchor,
+                (hash, RecoveryKeyRole::Root, root.root_key_thumbprint),
+                head.registry_version(),
+                now,
+            )
+            .is_some()
+            && !keys.media().iter().any(|m| {
+                m.role() == RecoveryKeyRole::Root
+                    && m.certificate() == hash
+                    && m.expected_thumbprint() == root.root_key_thumbprint
+            })
+        {
+            return Err(RecoveryTestError::Incomplete);
+        }
         if let Some(cert) = cert
             && head.active_certificate_fields(hash).is_some()
             && !keys.media().iter().any(|m| {
@@ -271,7 +303,6 @@ fn verify_scope(
     Ok(())
 }
 
-
 // Discovery selects only exact signed past snapshots and retains the existing
 // successor/effective-sequence barrier. It can never return current authority.
 pub(crate) fn historical_signing_authority(
@@ -281,45 +312,77 @@ pub(crate) fn historical_signing_authority(
     through: RegistryVersion,
     now: UnixMillis,
 ) -> Option<HistoricalRegistryAuthority> {
-    historical_authority(inventory,anchor,(medium.certificate(),medium.role(),medium.expected_thumbprint()),through,now)
+    historical_authority(
+        inventory,
+        anchor,
+        (
+            medium.certificate(),
+            medium.role(),
+            medium.expected_thumbprint(),
+        ),
+        through,
+        now,
+    )
 }
 fn historical_authority(
-    inventory:&ea_archive::ArchiveInventory,
-    anchor:&TrustAnchorV1,
-    identity:(CertificateHash,RecoveryKeyRole,ea_types::KeyThumbprint),
-    through:RegistryVersion,
-    now:UnixMillis,
-)->Option<HistoricalRegistryAuthority> {
-    let (certificate,role,thumbprint)=identity;
+    inventory: &ea_archive::ArchiveInventory,
+    anchor: &TrustAnchorV1,
+    identity: (CertificateHash, RecoveryKeyRole, ea_types::KeyThumbprint),
+    through: RegistryVersion,
+    now: UnixMillis,
+) -> Option<HistoricalRegistryAuthority> {
+    let (certificate, role, thumbprint) = identity;
     let mut routes = Vec::new();
     for object in inventory.trust() {
-        if let Ok(DecodedTrustPayloadV1::RegistryEvent(core))=object.value().decoded_payload() {
-            let f=core.fields();
-            if f.registry_version<=through {
-                routes.push((f.registry_version,object.object_hash(),f.effective_from_sequence));
+        if let Ok(DecodedTrustPayloadV1::RegistryEvent(core)) = object.value().decoded_payload() {
+            let f = core.fields();
+            if f.registry_version <= through {
+                routes.push((
+                    f.registry_version,
+                    object.object_hash(),
+                    f.effective_from_sequence,
+                ));
             }
         }
     }
     routes.sort_by_key(|route| std::cmp::Reverse(route.0));
-    for (version,hash,sequence) in routes {
-        let Some(past)=ea_verify::historical_registry_head(inventory,anchor,version,hash,sequence,now) else {continue};
-        if role==RecoveryKeyRole::Root {
+    for (version, hash, sequence) in routes {
+        let Some(past) =
+            ea_verify::historical_registry_head(inventory, anchor, version, hash, sequence, now)
+        else {
+            continue;
+        };
+        if role == RecoveryKeyRole::Root {
             use ea_crypto::SignerCertificateResolver;
-            let Some(object)=inventory.trust().iter().find(|o|o.object_hash().as_bytes()==certificate.as_bytes()) else{continue};
-            let Ok(payload)=object.value().decoded_payload() else{continue};
-            let root=match &payload {
-                DecodedTrustPayloadV1::InitialRoot(fields)=>fields,
-                DecodedTrustPayloadV1::AuthorizedRoot(core)=>core.fields(),
-                _=>continue,
+            let Some(object) = inventory
+                .trust()
+                .iter()
+                .find(|o| o.object_hash().as_bytes() == certificate.as_bytes())
+            else {
+                continue;
             };
-            if root.root_key_thumbprint==thumbprint && past.resolve(certificate,version).is_ok_and(|resolved|resolved.root_line_accepted) {
+            let Ok(payload) = object.value().decoded_payload() else {
+                continue;
+            };
+            let root = match &payload {
+                DecodedTrustPayloadV1::InitialRoot(fields) => fields,
+                DecodedTrustPayloadV1::AuthorizedRoot(core) => core.fields(),
+                _ => continue,
+            };
+            if root.root_key_thumbprint == thumbprint
+                && past
+                    .resolve(certificate, version)
+                    .is_ok_and(|resolved| resolved.root_line_accepted)
+            {
                 return Some(past);
             }
         }
-        if let Some(cert)=past.active_certificate_fields(certificate)
-            && crate::challenge::certificate_role(cert.certificate_kind)==role
-            && cert.signing_key_thumbprint==Some(thumbprint)
-        { return Some(past); }
+        if let Some(cert) = past.active_certificate_fields(certificate)
+            && crate::challenge::certificate_role(cert.certificate_kind) == role
+            && cert.signing_key_thumbprint == Some(thumbprint)
+        {
+            return Some(past);
+        }
     }
     None
 }

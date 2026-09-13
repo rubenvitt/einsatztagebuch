@@ -237,14 +237,18 @@ impl NativeDesktopRuntime {
         if self.role != OperatorRoleV1::OrganizationAdmin {
             return Err(CommandError::new(crate::commands::ADMINISTRATION_FORBIDDEN));
         }
-        let owner = self.destruction.as_ref().ok_or_else(|| {
-            CommandError::new(crate::commands::ADMINISTRATION_UNAVAILABLE)
-        })?;
+        let owner = self
+            .destruction
+            .as_ref()
+            .ok_or_else(|| CommandError::new(crate::commands::ADMINISTRATION_UNAVAILABLE))?;
         self.administration_action(None, |admin, _, resources| {
-            let owner = owner.lock().map_err(|_| CommandError::new("EA-DESKTOP-RUNTIME-LOCK"))?;
+            let owner = owner
+                .lock()
+                .map_err(|_| CommandError::new("EA-DESKTOP-RUNTIME-LOCK"))?;
             let port = owner.runtime.writer_prepared_diagnosis();
             #[cfg(feature = "test-support")]
-            let result = port.diagnose_with_test_after_profile(admin, &resources.profile, after_profile);
+            let result =
+                port.diagnose_with_test_after_profile(admin, &resources.profile, after_profile);
             #[cfg(not(feature = "test-support"))]
             let result = {
                 after_profile();

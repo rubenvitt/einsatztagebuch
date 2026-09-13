@@ -6,8 +6,8 @@ pub mod exchange;
 pub mod inbox;
 pub mod publication;
 mod registration;
-pub mod target;
 pub(crate) mod root_exchange;
+pub mod target;
 pub mod views;
 
 /// Exact object whose bytes were compared through the second channel.

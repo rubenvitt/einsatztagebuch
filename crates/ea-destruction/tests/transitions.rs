@@ -184,24 +184,46 @@ fn every_valid_signed_history_path_reduces_and_backward_time_or_foreign_authoriz
 #[test]
 fn immutable_authorization_and_event_survive_lease_expiry_without_current_authority() {
     let fixture = support::Fixture::new(true, true, false);
-    let exact_auth=fixture.authorization();
-    let exact_event=support::event(&fixture,&exact_auth,
-        support::event_fields(&fixture,&exact_auth,0x44,None,0,None));
-    let original=fixture.head();
-    let late=ea_types::UnixMillis::new(20_000_000);
+    let exact_auth = fixture.authorization();
+    let exact_event = support::event(
+        &fixture,
+        &exact_auth,
+        support::event_fields(&fixture, &exact_auth, 0x44, None, 0, None),
+    );
+    let original = fixture.head();
+    let late = ea_types::UnixMillis::new(20_000_000);
     assert!(support::try_selected(&fixture.line, late.get()).is_err());
-    let trust=fixture.line.verified_with_floor(support::trust::Pin::Exact(
-        original.registry_version(),original.registry_head_hash()),late);
-    let history=ea_trust::verify_historical_registry_authority(&trust,
-        original.registry_version(),original.registry_head_hash(),original.proposed_sequence()).unwrap();
-    let auth=ea_destruction::verify_authorization_historical(&exact_auth,&history).unwrap();
-    let event=ea_destruction::verify_event_historical(&exact_event,&auth,&history,late).unwrap();
-    let mut reducer=ea_destruction::DestructionStateMachine::new(&auth);
+    let trust = fixture.line.verified_with_floor(
+        support::trust::Pin::Exact(original.registry_version(), original.registry_head_hash()),
+        late,
+    );
+    let history = ea_trust::verify_historical_registry_authority(
+        &trust,
+        original.registry_version(),
+        original.registry_head_hash(),
+        original.proposed_sequence(),
+    )
+    .unwrap();
+    let auth = ea_destruction::verify_authorization_historical(&exact_auth, &history).unwrap();
+    let event =
+        ea_destruction::verify_event_historical(&exact_event, &auth, &history, late).unwrap();
+    let mut reducer = ea_destruction::DestructionStateMachine::new(&auth);
     reducer.apply(&event).unwrap();
-    assert_eq!(reducer.state(),Some(ea_destruction::DestructionState::Requested));
-    let mut changed=exact_event;
-    let last=changed.len()-1; changed[last]^=1;
-    assert!(ea_destruction::verify_event_historical(&changed,&auth,&history,late).is_err());
-    assert!(ea_destruction::verify_event_historical(event.exact_bytes(),&auth,&history,
-        ea_types::UnixMillis::new(999)).is_err());
+    assert_eq!(
+        reducer.state(),
+        Some(ea_destruction::DestructionState::Requested)
+    );
+    let mut changed = exact_event;
+    let last = changed.len() - 1;
+    changed[last] ^= 1;
+    assert!(ea_destruction::verify_event_historical(&changed, &auth, &history, late).is_err());
+    assert!(
+        ea_destruction::verify_event_historical(
+            event.exact_bytes(),
+            &auth,
+            &history,
+            ea_types::UnixMillis::new(999)
+        )
+        .is_err()
+    );
 }

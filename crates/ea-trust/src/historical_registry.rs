@@ -46,8 +46,13 @@ impl HistoricalRegistryAuthority {
     }
     /// Historically admitted identities in this verified snapshot, including
     /// revoked holders. This iterator grants no signing or reading authority.
-    pub fn known_certificate_fields(&self) -> impl Iterator<Item=(CertificateHash, &DeviceCertificateFieldsV1)> {
-        self.state.certificates.iter().map(|(hash, cert)| (*hash, &cert.fields))
+    pub fn known_certificate_fields(
+        &self,
+    ) -> impl Iterator<Item = (CertificateHash, &DeviceCertificateFieldsV1)> {
+        self.state
+            .certificates
+            .iter()
+            .map(|(hash, cert)| (*hash, &cert.fields))
     }
     pub fn effective_writer_transition(&self) -> Option<&EffectiveWriterTransitionV1> {
         self.state.writer_transition.as_ref()

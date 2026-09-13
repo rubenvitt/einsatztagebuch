@@ -100,7 +100,9 @@ fn run(recover: bool) {
     let draft = repository.load_or_create().unwrap();
     let saved = repository.save(draft).unwrap();
     let draft_key = repository.draft_dek_handle(&saved).unwrap();
-    let binding = repository.reserve_evidence_draft(fixture.evidence.draft_source().unwrap()).unwrap();
+    let binding = repository
+        .reserve_evidence_draft(fixture.evidence.draft_source().unwrap())
+        .unwrap();
     let repository = Arc::new(repository.for_evidence_draft(binding).unwrap());
     use ea_local_store::StoreValue as V;
     fixture.native.database.execute("INSERT INTO operator_profile(singleton,organization_id,operator_subject_id,display_name,function_label,profile_commitment_salt,operator_binding_object_hash) VALUES(0,?1,?2,?3,?4,?5,?6)",&[V::Blob(fixture.head.active_certificate_fields(fixture.native.certificate).unwrap().organization_id.as_bytes().to_vec()),V::Blob(vec![0x73;16]),V::Text("Destruction Writer".into()),V::Text("Operator".into()),V::Blob(vec![0x74;32]),V::Blob(fixture.native.binding.as_bytes().to_vec())]).unwrap();
@@ -351,10 +353,15 @@ fn run(recover: bool) {
             resumed.recover_pending().unwrap().summary(),
             ("CommittedFromPreparedBytes", 1)
         );
-        assert!(matches!(
-            resumed.recover_pending(),
-            Err(ea_writer::WriterError::Draft(ea_draft::DraftError::EvidenceBinding))
-        ), "a consumed Evidence facade cannot address the new ordinary draft");
+        assert!(
+            matches!(
+                resumed.recover_pending(),
+                Err(ea_writer::WriterError::Draft(
+                    ea_draft::DraftError::EvidenceBinding
+                ))
+            ),
+            "a consumed Evidence facade cannot address the new ordinary draft"
+        );
         let reopened = AutosaveDraftRepository::new(fixture.native.reopen(), provider.clone());
         assert!(reopened.evidence_binding().unwrap().is_none());
         assert!(reopened.prepared_finalization_marker().unwrap().is_none());

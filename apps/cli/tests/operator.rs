@@ -7,17 +7,17 @@
 #[path = "../src/args.rs"]
 mod args;
 #[allow(dead_code)]
-#[path = "../src/commands/operator.rs"]
-mod operator_command;
-#[allow(dead_code)]
 #[path = "../src/commands/grant.rs"]
 mod grant_command;
 #[allow(dead_code)]
-#[path = "../src/commands/posture.rs"]
-mod posture_command;
+#[path = "../src/commands/operator.rs"]
+mod operator_command;
 #[allow(dead_code)]
 #[path = "../src/output.rs"]
 mod output;
+#[allow(dead_code)]
+#[path = "../src/commands/posture.rs"]
+mod posture_command;
 #[allow(dead_code)]
 #[path = "../src/commands/recovery_test.rs"]
 mod recovery_command;
@@ -946,23 +946,63 @@ mod process_native {
         println!("EA_CLI_FIXTURE_OUTPUT");
         std::io::stdout().flush().unwrap();
         let invocation = args::parse(arguments.into_iter().map(std::ffi::OsString::from)).unwrap();
-        if let args::Command::Grant { ref archive, ref recovery_key, ref authority_key, ref authorization, ref recipient_certificate, ref operator_config, ref output } = invocation.command {
-            let code=grant_command::run_with_runtime_opener(&invocation,archive,recovery_key,authority_key,authorization,recipient_certificate,operator_config.as_deref(),output.as_deref(),support::live_clock(),
-                |config,anchor,now| {
-                    let native=NativeOperatorProvider::open_test_fixture(directory.join("ea-native-operator"),false)?;
-                    OperatorRuntime::open_with_test_native(config,anchor,now,false,native)
-                });
+        if let args::Command::Grant {
+            ref archive,
+            ref recovery_key,
+            ref authority_key,
+            ref authorization,
+            ref recipient_certificate,
+            ref operator_config,
+            ref output,
+        } = invocation.command
+        {
+            let code = grant_command::run_with_runtime_opener(
+                &invocation,
+                archive,
+                recovery_key,
+                authority_key,
+                authorization,
+                recipient_certificate,
+                operator_config.as_deref(),
+                output.as_deref(),
+                support::live_clock(),
+                |config, anchor, now| {
+                    let native = NativeOperatorProvider::open_test_fixture(
+                        directory.join("ea-native-operator"),
+                        false,
+                    )?;
+                    OperatorRuntime::open_with_test_native(config, anchor, now, false, native)
+                },
+            );
             std::io::stdout().flush().unwrap();
             std::io::stderr().flush().unwrap();
             std::process::exit(code.as_i32());
         }
-        if let args::Command::Posture { ref action, ref config } = invocation.command {
-            let code = posture_command::run_with_runtime_opener(&invocation, action, config, support::live_clock(),
+        if let args::Command::Posture {
+            ref action,
+            ref config,
+        } = invocation.command
+        {
+            let code = posture_command::run_with_runtime_opener(
+                &invocation,
+                action,
+                config,
+                support::live_clock(),
                 |config, anchor, now| {
-                    let native = NativeOperatorProvider::open_test_fixture(directory.join("ea-native-operator"), false)?;
-                    let posture = Arc::from(ea_key_provider::SupportMatrixRow::current_host().ok_or(ea_admin::operator_runtime::OperatorRuntimeError::Posture)?.posture_provider());
-                    OperatorRuntime::open_with_test_native_and_posture(config, anchor, now, false, native, posture)
-                });
+                    let native = NativeOperatorProvider::open_test_fixture(
+                        directory.join("ea-native-operator"),
+                        false,
+                    )?;
+                    let posture = Arc::from(
+                        ea_key_provider::SupportMatrixRow::current_host()
+                            .ok_or(ea_admin::operator_runtime::OperatorRuntimeError::Posture)?
+                            .posture_provider(),
+                    );
+                    OperatorRuntime::open_with_test_native_and_posture(
+                        config, anchor, now, false, native, posture,
+                    )
+                },
+            );
             std::io::stdout().flush().unwrap();
             std::io::stderr().flush().unwrap();
             std::process::exit(code.as_i32());
@@ -1060,31 +1100,52 @@ mod process_native {
             fn event(&self, label: &str) {
                 use std::os::unix::fs::OpenOptionsExt as _;
                 let elapsed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis()
                     .saturating_sub(self.origin);
-                let mut file = fs::OpenOptions::new().create(true).append(true)
-                    .mode(0o600).open(&self.file).unwrap();
-                let line = format!("{} {} {} {label} {elapsed}\n",
-                    self.role, self.ordinal, std::process::id());
+                let mut file = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .mode(0o600)
+                    .open(&self.file)
+                    .unwrap();
+                let line = format!(
+                    "{} {} {} {label} {elapsed}\n",
+                    self.role,
+                    self.ordinal,
+                    std::process::id()
+                );
                 file.write_all(line.as_bytes()).unwrap();
             }
         }
         impl Drop for ResumeHelperTrace {
-            fn drop(&mut self) { self.event("return"); }
+            fn drop(&mut self) {
+                self.event("return");
+            }
         }
         let resume_trace = fs::read_to_string(directory.join("reader-resume-trace-origin"))
-            .ok().map(|origin| ResumeHelperTrace {
+            .ok()
+            .map(|origin| ResumeHelperTrace {
                 file: directory.join("reader-resume-helper-trace"),
                 origin: origin.parse().unwrap(),
                 role: if authority { "admin" } else { "writer" },
                 ordinal: match op {
-                    "watch-session" => 0, "account" => 1, "public-key" => 2,
-                    "unwrap-secret" => 3, "sign" => 4, "presence" => 5,
-                    "contains" => 6, _ => 7,
+                    "watch-session" => 0,
+                    "account" => 1,
+                    "public-key" => 2,
+                    "unwrap-secret" => 3,
+                    "sign" => 4,
+                    "presence" => 5,
+                    "contains" => 6,
+                    _ => 7,
                 },
             });
-        if let Some(trace) = &resume_trace { trace.event("enter"); }
-        let installation = recovery::target_installation_id(&directory).unwrap_or_else(|| if authority { "c2" } else { "c1" }.repeat(32));
+        if let Some(trace) = &resume_trace {
+            trace.event("enter");
+        }
+        let installation = recovery::target_installation_id(&directory)
+            .unwrap_or_else(|| if authority { "c2" } else { "c1" }.repeat(32));
         writeln!(
             fs::OpenOptions::new()
                 .create(true)
@@ -1135,17 +1196,32 @@ mod process_native {
             // No challenge, key, proof, signature or installation ID is logged.
             let trace_watch = |event: &str| {
                 if directory.join("reader-opfs-watch-diagnostics").exists() {
-                    use std::os::unix::fs::OpenOptionsExt as _;
                     use std::io::Write as _;
-                    let mut file = fs::OpenOptions::new().create(true).append(true).mode(0o600)
-                        .open(directory.join("reader-opfs-watch-events")).unwrap();
-                    writeln!(file, "{} {event}", if authority { "admin" } else { "writer" }).unwrap();
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    let mut file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .mode(0o600)
+                        .open(directory.join("reader-opfs-watch-events"))
+                        .unwrap();
+                    writeln!(
+                        file,
+                        "{} {event}",
+                        if authority { "admin" } else { "writer" }
+                    )
+                    .unwrap();
                 }
             };
-            let watcher_seconds = if directory.join("reader-opfs-short-watch").exists() { 60 }
-                else if directory.join("long-recovery-run").exists() { 1800 } else { 300 };
+            let watcher_seconds = if directory.join("reader-opfs-short-watch").exists() {
+                60
+            } else if directory.join("long-recovery-run").exists() {
+                1800
+            } else {
+                300
+            };
             trace_watch("start");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(watcher_seconds);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(watcher_seconds);
             while std::time::Instant::now() < deadline {
                 let challenge = match incoming.recv_timeout(std::time::Duration::from_millis(20)) {
                     Ok(challenge) => Some(challenge),
@@ -1179,7 +1255,9 @@ mod process_native {
                 }
             }
             trace_watch("ttl-exit");
-            if let Some(trace) = &resume_trace { trace.event("ttl-exit"); }
+            if let Some(trace) = &resume_trace {
+                trace.event("ttl-exit");
+            }
             return;
         }
         let mode = fs::read_to_string(directory.join("helper-mode")).unwrap_or_default();
@@ -1188,7 +1266,9 @@ mod process_native {
             .and_then(|s| s.parse::<u8>().ok())
             .unwrap_or(0);
         let offline_target = directory.join("offline-target").exists();
-        let instance = if directory.join("target-recovery-fixture").exists() { recovery::TARGET_INSTANCE_SECRET } else if authority {
+        let instance = if directory.join("target-recovery-fixture").exists() {
+            recovery::TARGET_INSTANCE_SECRET
+        } else if authority {
             ADMIN_INSTANCE_SECRET
         } else if offline_target {
             [0x47 + generation; 32]
@@ -1206,135 +1286,172 @@ mod process_native {
             "operator-instance" => instance,
             "writer-signing" if mode == "foreign-writer" => [0x79; 32],
             "writer-signing" => trust_support::device_signing_secret(),
-            "admin-signing" if directory.join("target-recovery-fixture").exists() => trust_support::device_signing_secret(),
+            "admin-signing" if directory.join("target-recovery-fixture").exists() => {
+                trust_support::device_signing_secret()
+            }
             "admin-signing" if authority => trust_support::second_admin_signing_secret(),
             "root-signing" if authority => trust_support::root_signing_secret(),
             _ => [0; 32],
         };
-        if bootstrap_root::signing_backup::binary_fixture_response(&directory, &request, &installation, secret, allowed) { return; }
-        let mut response = if let Some(response) = bootstrap_root::participant::native_key_response(&directory, &request) {
+        if bootstrap_root::signing_backup::binary_fixture_response(
+            &directory,
+            &request,
+            &installation,
+            secret,
+            allowed,
+        ) {
+            return;
+        }
+        let mut response = if let Some(response) =
+            bootstrap_root::participant::native_key_response(&directory, &request)
+        {
             response
         } else if let Some(response) = administration::native_key_response(&directory, &request) {
             response
         } else if let Some(response) = recovery::target_key_response(&directory, &request) {
             response
-        } else { match op {
-            "account" => recovery::target_account_response(&directory).unwrap_or_else(||account_response_for(authority)),
-            "initialize" if !authority => account_response(),
-            "generate" if slot == "operator-instance" && !authority && offline_target => {
-                assert_eq!(request["replace"], true);
-                fs::write(
-                    directory.join("instance-generation"),
-                    (generation + 1).to_string(),
-                )
-                .unwrap();
-                json!({})
-            }
-            "public-key"
-                if slot == "operator-instance"
-                    && (mode == "instance-missing" || offline_target && generation == 0) =>
-            {
-                json!({"public_key":null})
-            }
-            "public-key" if allowed => {
-                json!({"public_key":hex::encode(SigningKey::from_bytes(&secret).verifying_key().to_bytes())})
-            }
-            "unwrap-secret" if slot == "database-key" && mode != "database-key-missing" => {
-                let (provider, key) = database_provider_for(authority);
-                provider
-                    .unwrap_database_key(&key)
+        } else {
+            match op {
+                "account" => recovery::target_account_response(&directory)
+                    .unwrap_or_else(|| account_response_for(authority)),
+                "initialize" if !authority => account_response(),
+                "generate" if slot == "operator-instance" && !authority && offline_target => {
+                    assert_eq!(request["replace"], true);
+                    fs::write(
+                        directory.join("instance-generation"),
+                        (generation + 1).to_string(),
+                    )
+                    .unwrap();
+                    json!({})
+                }
+                "public-key"
+                    if slot == "operator-instance"
+                        && (mode == "instance-missing" || offline_target && generation == 0) =>
+                {
+                    json!({"public_key":null})
+                }
+                "public-key" if allowed => {
+                    json!({"public_key":hex::encode(SigningKey::from_bytes(&secret).verifying_key().to_bytes())})
+                }
+                "unwrap-secret" if slot == "database-key" && mode != "database-key-missing" => {
+                    let (provider, key) = database_provider_for(authority);
+                    provider
+                        .unwrap_database_key(&key)
+                        .unwrap()
+                        .with_exposed(|bytes| json!({"secret":hex::encode(bytes)}))
+                }
+                "wrap-secret" if slot == "draft-key" && !authority => {
+                    // Synthetic native store for the process fixture only. Its
+                    // fixed test wrapping key is not a production OS-key claim;
+                    // raw draft DEKs never go into a temporary file.
+                    let counter_path = directory.join("fixture-draft-key.counter");
+                    let counter = fs::read_to_string(&counter_path)
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(0)
+                        + 1;
+                    fs::write(counter_path, counter.to_string()).unwrap();
+                    let mut nonce = [0u8; 12];
+                    nonce[4..].copy_from_slice(&counter.to_be_bytes());
+                    let secret = ea_crypto::SecretVec::new(
+                        hex::decode(request["data"].as_str().unwrap()).unwrap(),
+                    );
+                    assert_eq!(secret.len(), 32);
+                    let ciphertext = ea_crypto::aead_seal(
+                        &ea_crypto::SecretBytes::new([0x93; 32]),
+                        &ea_crypto::SecretBytes::new(nonce),
+                        secret,
+                        b"native-draft-fixture-v1",
+                    )
+                    .unwrap();
+                    let mut sealed = nonce.to_vec();
+                    sealed.extend(ciphertext);
+                    fs::write(directory.join("fixture-draft-key.sealed"), sealed).unwrap();
+                    json!({})
+                }
+                "unwrap-secret" if slot == "draft-key" && !authority => {
+                    if mode == "draft-unwrap-unavailable" {
+                        emit_native_response(&json!({"ok":false}));
+                        return;
+                    }
+                    if mode == "draft-unwrap-malformed" {
+                        emit_native_response(
+                            &json!({"ok":true,"installation_id":installation,"secret":""}),
+                        );
+                        return;
+                    }
+                    let sealed = fs::read(directory.join("fixture-draft-key.sealed")).unwrap();
+                    ea_crypto::aead_open(
+                        &ea_crypto::SecretBytes::new([0x93; 32]),
+                        &ea_crypto::SecretBytes::new(sealed[..12].try_into().unwrap()),
+                        &sealed[12..],
+                        b"native-draft-fixture-v1",
+                    )
                     .unwrap()
                     .with_exposed(|bytes| json!({"secret":hex::encode(bytes)}))
-            }
-            "wrap-secret" if slot == "draft-key" && !authority => {
-                // Synthetic native store for the process fixture only. Its
-                // fixed test wrapping key is not a production OS-key claim;
-                // raw draft DEKs never go into a temporary file.
-                let counter_path = directory.join("fixture-draft-key.counter");
-                let counter = fs::read_to_string(&counter_path)
-                    .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0) + 1;
-                fs::write(counter_path, counter.to_string()).unwrap();
-                let mut nonce = [0u8; 12];
-                nonce[4..].copy_from_slice(&counter.to_be_bytes());
-                let secret = ea_crypto::SecretVec::new(hex::decode(request["data"].as_str().unwrap()).unwrap());
-                assert_eq!(secret.len(), 32);
-                let ciphertext = ea_crypto::aead_seal(
-                    &ea_crypto::SecretBytes::new([0x93; 32]),
-                    &ea_crypto::SecretBytes::new(nonce), secret, b"native-draft-fixture-v1",
-                ).unwrap();
-                let mut sealed = nonce.to_vec();
-                sealed.extend(ciphertext);
-                fs::write(directory.join("fixture-draft-key.sealed"), sealed).unwrap();
-                json!({})
-            }
-            "unwrap-secret" if slot == "draft-key" && !authority => {
-                if mode == "draft-unwrap-unavailable" {
-                    emit_native_response(&json!({"ok":false}));
-                    return;
                 }
-                if mode == "draft-unwrap-malformed" {
-                    emit_native_response(&json!({"ok":true,"installation_id":installation,"secret":""}));
-                    return;
+                "delete" if slot == "draft-key" && !authority => {
+                    if mode == "draft-delete-refused" {
+                        emit_native_response(&json!({"ok":false}));
+                        return;
+                    }
+                    let path = directory.join("fixture-draft-key.sealed");
+                    if path.exists() {
+                        fs::remove_file(path).unwrap();
+                    }
+                    if mode == "draft-delete-response-lost" {
+                        emit_native_response(&json!({"ok":false}));
+                        return;
+                    }
+                    json!({})
                 }
-                let sealed = fs::read(directory.join("fixture-draft-key.sealed")).unwrap();
-                ea_crypto::aead_open(
-                    &ea_crypto::SecretBytes::new([0x93; 32]),
-                    &ea_crypto::SecretBytes::new(sealed[..12].try_into().unwrap()),
-                    &sealed[12..], b"native-draft-fixture-v1",
-                ).unwrap().with_exposed(|bytes| json!({"secret":hex::encode(bytes)}))
-            }
-            "delete" if slot == "draft-key" && !authority => {
-                if mode == "draft-delete-refused" {
-                    emit_native_response(&json!({"ok":false}));
-                    return;
-                }
-                let path = directory.join("fixture-draft-key.sealed");
-                if path.exists() { fs::remove_file(path).unwrap(); }
-                if mode == "draft-delete-response-lost" {
-                    emit_native_response(&json!({"ok":false}));
-                    return;
-                }
-                json!({})
-            }
-            "contains" if slot == "draft-key" && !authority => {
-                if mode == "draft-contains-malformed" { json!({"contains":"false"}) }
-                else { json!({"contains":directory.join("fixture-draft-key.sealed").exists()}) }
-            }
-            "contains" => json!({"contains":mode!="database-key-missing"}),
-            "sign" if allowed => {
-                if slot == "operator-instance" {
-                    let barrier = directory.join("hold-operator-signature");
-                    if barrier.exists() {
-                        fs::write(directory.join("operator-signature-paused"), b"").unwrap();
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                        while barrier.exists() {
-                            assert!(std::time::Instant::now() < deadline, "bounded native presence fixture");
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
+                "contains" if slot == "draft-key" && !authority => {
+                    if mode == "draft-contains-malformed" {
+                        json!({"contains":"false"})
+                    } else {
+                        json!({"contains":directory.join("fixture-draft-key.sealed").exists()})
                     }
                 }
-                if authority && slot == "root-signing" {
-                    let barrier = directory.join("hold-root-signature");
-                    if barrier.exists() {
-                        fs::write(directory.join("root-signature-paused"), b"").unwrap();
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_secs(5);
-                        while barrier.exists() {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "bounded Root fixture barrier"
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(10));
+                "contains" => json!({"contains":mode!="database-key-missing"}),
+                "sign" if allowed => {
+                    if slot == "operator-instance" {
+                        let barrier = directory.join("hold-operator-signature");
+                        if barrier.exists() {
+                            fs::write(directory.join("operator-signature-paused"), b"").unwrap();
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(10);
+                            while barrier.exists() {
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "bounded native presence fixture"
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
                         }
                     }
+                    if authority && slot == "root-signing" {
+                        let barrier = directory.join("hold-root-signature");
+                        if barrier.exists() {
+                            fs::write(directory.join("root-signature-paused"), b"").unwrap();
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(5);
+                            while barrier.exists() {
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "bounded Root fixture barrier"
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
+                        }
+                    }
+                    let data = hex::decode(request["data"].as_str().unwrap()).unwrap();
+                    recovery::pause_test_signature(&directory, &data);
+                    destruction::pause_completion_audit_signature(&directory, &data);
+                    json!({"signature":hex::encode(SigningKey::from_bytes(&secret).sign(&data).to_bytes())})
                 }
-                let data = hex::decode(request["data"].as_str().unwrap()).unwrap();
-                recovery::pause_test_signature(&directory, &data);
-                destruction::pause_completion_audit_signature(&directory, &data);
-                json!({"signature":hex::encode(SigningKey::from_bytes(&secret).sign(&data).to_bytes())})
+                _ => json!({"ok":false}),
             }
-            _ => json!({"ok":false}),
-        }};
+        };
         if response.get("ok").is_none() {
             response["ok"] = json!(true);
         }

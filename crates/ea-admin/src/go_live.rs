@@ -43,11 +43,11 @@
 //! Zeitstempel, kein Pfad, keine Zahl. Zwei Aufrufe liefern dieselben Bytes;
 //! die Reihenfolge ist die der Anforderungen und nie die einer `HashMap`.
 
+#[cfg(feature = "test-support")]
+use crate::production_state::ProductionState;
 use ea_key_provider::{DevicePostureReport, PostureRequirement};
 use ea_types::{ChainSequence, UnixMillis};
 use serde::Serialize;
-#[cfg(feature = "test-support")]
-use crate::production_state::ProductionState;
 
 use crate::{
     bootstrap::{BackedUpKeyClass, KeyBackupRecordV1},
@@ -279,23 +279,67 @@ enum RecoveryFreshnessEvidence<'a> {
         report_hash: ea_types::ObjectHash,
     },
     #[cfg(feature = "test-support")]
-    Fixture { state: &'a ProductionState, completed_at: UnixMillis, interval_ms: u64, now: UnixMillis },
+    Fixture {
+        state: &'a ProductionState,
+        completed_at: UnixMillis,
+        interval_ms: u64,
+        now: UnixMillis,
+    },
 }
 impl<'a> RecoveryTestFreshness<'a> {
-    pub(crate) fn from_current(runtime: &'a crate::recovery_test_runtime::RecoveryTestRuntime, inventory: &'a ea_recovery::KeyInventory, report_hash: ea_types::ObjectHash) -> Self {
-        Self { evidence: RecoveryFreshnessEvidence::Native { runtime, inventory, report_hash } }
+    pub(crate) fn from_current(
+        runtime: &'a crate::recovery_test_runtime::RecoveryTestRuntime,
+        inventory: &'a ea_recovery::KeyInventory,
+        report_hash: ea_types::ObjectHash,
+    ) -> Self {
+        Self {
+            evidence: RecoveryFreshnessEvidence::Native {
+                runtime,
+                inventory,
+                report_hash,
+            },
+        }
     }
     /// Pure aggregate fixtures cannot be used in production builds.
     #[cfg(feature = "test-support")]
-    pub fn for_testing(state: &'a ProductionState, completed_at: UnixMillis, interval_ms: u64, now: UnixMillis) -> Self {
-        Self { evidence: RecoveryFreshnessEvidence::Fixture { state, completed_at, interval_ms, now } }
+    pub fn for_testing(
+        state: &'a ProductionState,
+        completed_at: UnixMillis,
+        interval_ms: u64,
+        now: UnixMillis,
+    ) -> Self {
+        Self {
+            evidence: RecoveryFreshnessEvidence::Fixture {
+                state,
+                completed_at,
+                interval_ms,
+                now,
+            },
+        }
     }
     pub(crate) fn is_fresh(self) -> bool {
         match self.evidence {
-            RecoveryFreshnessEvidence::Native { runtime, inventory, report_hash } => runtime.current_completed_report_matches(inventory, report_hash).is_ok(),
+            RecoveryFreshnessEvidence::Native {
+                runtime,
+                inventory,
+                report_hash,
+            } => runtime
+                .current_completed_report_matches(inventory, report_hash)
+                .is_ok(),
             #[cfg(feature = "test-support")]
-            RecoveryFreshnessEvidence::Fixture { state, completed_at, interval_ms, now } => *state == ProductionState::Ready
-                && now.get().checked_sub(completed_at.get()).and_then(|n|u64::try_from(n).ok()).is_some_and(|elapsed| elapsed <= interval_ms),
+            RecoveryFreshnessEvidence::Fixture {
+                state,
+                completed_at,
+                interval_ms,
+                now,
+            } => {
+                *state == ProductionState::Ready
+                    && now
+                        .get()
+                        .checked_sub(completed_at.get())
+                        .and_then(|n| u64::try_from(n).ok())
+                        .is_some_and(|elapsed| elapsed <= interval_ms)
+            }
         }
     }
 }

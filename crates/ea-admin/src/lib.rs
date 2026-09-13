@@ -64,8 +64,8 @@ extern crate self as ea_admin;
 #[path = "../tests/support/mod.rs"]
 mod test_support;
 
-mod native_bootstrap_root;
 mod native_bootstrap_admin_participant;
+mod native_bootstrap_root;
 pub use native_bootstrap_admin_participant::{
     BootstrapAdminParticipantIdentity, PreparedNativeBootstrapAdminParticipant,
     prepare_native_bootstrap_admin_participant,
@@ -152,4 +152,6 @@ pub use writer_transition::{
 };
 
 mod native_signing_backup;
-pub use native_signing_backup::{NativeSigningBackupError, seal_native_bootstrap_admin_backup, seal_native_bootstrap_root_backup};
+pub use native_signing_backup::{
+    NativeSigningBackupError, seal_native_bootstrap_admin_backup, seal_native_bootstrap_root_backup,
+};

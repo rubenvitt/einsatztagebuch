@@ -98,10 +98,16 @@ impl PreviousHeadState {
         candidate: RegistryVersion,
         sequence: ChainSequence,
     ) -> Result<bool, TrustError> {
-        for hash in self.catalog.hashes_for_subtype(ea_format::TrustSubtypeV1::RegistryEvent) {
+        for hash in self
+            .catalog
+            .hashes_for_subtype(ea_format::TrustSubtypeV1::RegistryEvent)
+        {
             let object = self.catalog.get(hash).ok_or(TrustError::Source)?;
-            let ea_format::DecodedTrustPayloadV1::RegistryEvent(core) = object.value()
-                .decoded_payload().map_err(|_| TrustError::Source)? else {
+            let ea_format::DecodedTrustPayloadV1::RegistryEvent(core) = object
+                .value()
+                .decoded_payload()
+                .map_err(|_| TrustError::Source)?
+            else {
                 return Err(TrustError::Source);
             };
             let fields = core.fields();

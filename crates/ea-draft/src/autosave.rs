@@ -47,7 +47,11 @@ pub struct AutosaveDraftRepository {
 impl AutosaveDraftRepository {
     #[must_use]
     pub fn new(database: Arc<EncryptedDatabase>, provider: Arc<dyn KeyProvider>) -> Self {
-        Self { database, provider, evidence: None }
+        Self {
+            database,
+            provider,
+            evidence: None,
+        }
     }
 
     /// Fuehrt eine Transaktion, die einen leeren Entwurf anlegt, und raeumt
@@ -76,12 +80,10 @@ impl AutosaveDraftRepository {
         work: impl FnOnce(&StoreTransaction<'_>, &Cell<Option<KeyHandle>>) -> Result<T, DraftError>,
     ) -> Result<T, DraftError> {
         let created = Cell::new(None);
-        let outcome = self
-            .database
-            .transaction(|transaction| {
-                self.require_evidence_access(transaction)?;
-                work(transaction, &created)
-            });
+        let outcome = self.database.transaction(|transaction| {
+            self.require_evidence_access(transaction)?;
+            work(transaction, &created)
+        });
         if outcome.is_err() {
             // NACH der Transaktion: `EncryptedDatabase::transaction` haelt die
             // Verbindung unter einem `Mutex`, und der Schluesselport darf sie
@@ -214,7 +216,9 @@ impl DraftRepository for AutosaveDraftRepository {
     }
 
     fn save(&self, draft: Draft) -> Result<SavedDraft, DraftError> {
-        if self.evidence.is_some() && !draft.notes().is_empty() { return Err(DraftError::EvidenceBinding); }
+        if self.evidence.is_some() && !draft.notes().is_empty() {
+            return Err(DraftError::EvidenceBinding);
+        }
         self.database.transaction(|transaction| {
             self.require_evidence_access(transaction)?;
             let row = self.read_row(transaction)?.ok_or(DraftError::NoDraft)?;
@@ -354,7 +358,14 @@ impl DraftRepository for AutosaveDraftRepository {
         // scheitern.
         let clear_transition = self.transition_table_exists()?;
         self.transaction_creating_blank(|transaction, created| {
-            if self.evidence.is_some() && transaction.query_row("SELECT kind FROM draft_transition WHERE singleton=0 AND kind=1", &[])?.is_none() {
+            if self.evidence.is_some()
+                && transaction
+                    .query_row(
+                        "SELECT kind FROM draft_transition WHERE singleton=0 AND kind=1",
+                        &[],
+                    )?
+                    .is_none()
+            {
                 return Err(DraftError::EvidenceBinding);
             }
             if clear_transition {

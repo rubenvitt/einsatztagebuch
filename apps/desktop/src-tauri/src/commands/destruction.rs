@@ -433,7 +433,13 @@ pub async fn destruction_export_reader_delivery(
     reader_id: String,
 ) -> Result<DestructionReaderDeliveryWire, CommandError> {
     let state = state.inner().clone();
-    super::run_blocking(move || destruction_export_reader_delivery_core(
-        &state, &destruction_id, &expected_preflight_hash, &reader_id,
-    )).await
+    super::run_blocking(move || {
+        destruction_export_reader_delivery_core(
+            &state,
+            &destruction_id,
+            &expected_preflight_hash,
+            &reader_id,
+        )
+    })
+    .await
 }

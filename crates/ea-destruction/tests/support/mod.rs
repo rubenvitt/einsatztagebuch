@@ -2,11 +2,11 @@
 // Share the archive fixture's exact Trust types with preflight consumers.
 #[path = "../../../ea-verify/tests/support/mod.rs"]
 pub mod verify_support;
-pub use verify_support::archive_support::trust_support as trust;
 use ea_format::*;
 use ea_trust::*;
 use ea_types::*;
 use trust::{ActionSpec, HeadOptions, RegistryLineBuilder};
+pub use verify_support::archive_support::trust_support as trust;
 pub const NOW: i64 = 1000;
 pub struct Fixture {
     pub line: RegistryLineBuilder,

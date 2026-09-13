@@ -1,8 +1,8 @@
 //! Native desktop composition. Configuration carries public references only;
 //! authority comes from the installed helper, current signed archive and proofs.
 
-mod archive_config;
 mod administration;
+mod archive_config;
 mod destruction;
 pub mod destruction_transport;
 mod drafts;
@@ -237,7 +237,9 @@ impl NativeDesktopRuntime {
         Self::assemble_with_destruction(
             launch,
             controller.into(),
-            Some(destruction::DestructionResources::with_local_test_runtime(destruction)),
+            Some(destruction::DestructionResources::with_local_test_runtime(
+                destruction,
+            )),
         )
     }
     /// Only the fixture process chooses a native helper. Production loads the installed provider.
@@ -249,7 +251,10 @@ impl NativeDesktopRuntime {
         custodian: Arc<NativeOperatorProvider>,
     ) -> Result<Arc<Self>, CommandError> {
         let resources = destruction::DestructionResources::open_with_test_custodian(
-            launch.destruction_config.as_deref().ok_or_else(|| CommandError::new(CONFIG_ERROR))?,
+            launch
+                .destruction_config
+                .as_deref()
+                .ok_or_else(|| CommandError::new(CONFIG_ERROR))?,
             &controller,
             &launch.trust_anchor,
             custodian,
@@ -264,7 +269,10 @@ impl NativeDesktopRuntime {
         custodian_helper: &std::path::Path,
     ) -> Result<Arc<Self>, CommandError> {
         let resources = destruction::DestructionResources::open_with_test_custodian_path(
-            launch.destruction_config.as_deref().ok_or_else(|| CommandError::new(CONFIG_ERROR))?,
+            launch
+                .destruction_config
+                .as_deref()
+                .ok_or_else(|| CommandError::new(CONFIG_ERROR))?,
             &controller,
             &launch.trust_anchor,
             custodian_helper,
@@ -283,7 +291,9 @@ impl NativeDesktopRuntime {
             return Err(CommandError::new(CONFIG_ERROR));
         }
         Ok(Arc::new(Self {
-            administration: launch.administration_config.as_deref()
+            administration: launch
+                .administration_config
+                .as_deref()
                 .map(|path| administration::AdministrationResources::open(path, &runtime))
                 .transpose()?,
             recovery: launch
@@ -355,7 +365,9 @@ impl NativeDesktopRuntime {
             DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
         };
         let state = if self.destruction.is_some() {
-            state.with_destruction(self.clone()).with_destruction_evidence(self.clone())
+            state
+                .with_destruction(self.clone())
+                .with_destruction_evidence(self.clone())
         } else {
             state
         };
@@ -584,17 +596,51 @@ impl Drop for NativeSessionMonitor {
 mod tests {
     #[test]
     fn administration_launch_is_explicit_complete_and_never_silently_ignored() {
-        let args=["--operator-config","operator.json","--trust-anchor","anchor.cbor",
-            "--administration-config","administration.json"];
-        let launch=super::DesktopLaunchConfig::parse(args.map(std::ffi::OsString::from)).unwrap().unwrap();
-        assert_eq!(launch.administration_config,Some(std::path::PathBuf::from("administration.json")));
+        let args = [
+            "--operator-config",
+            "operator.json",
+            "--trust-anchor",
+            "anchor.cbor",
+            "--administration-config",
+            "administration.json",
+        ];
+        let launch = super::DesktopLaunchConfig::parse(args.map(std::ffi::OsString::from))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            launch.administration_config,
+            Some(std::path::PathBuf::from("administration.json"))
+        );
         for args in [
-            vec!["--administration-config","administration.json"],
-            vec!["--operator-config","operator.json","--administration-config","administration.json"],
-            vec!["--operator-config","operator.json","--trust-anchor","anchor.cbor","--administration-config"],
-            vec!["--operator-config","operator.json","--trust-anchor","anchor.cbor","--administration-config","a.json","--administration-config","b.json"],
+            vec!["--administration-config", "administration.json"],
+            vec![
+                "--operator-config",
+                "operator.json",
+                "--administration-config",
+                "administration.json",
+            ],
+            vec![
+                "--operator-config",
+                "operator.json",
+                "--trust-anchor",
+                "anchor.cbor",
+                "--administration-config",
+            ],
+            vec![
+                "--operator-config",
+                "operator.json",
+                "--trust-anchor",
+                "anchor.cbor",
+                "--administration-config",
+                "a.json",
+                "--administration-config",
+                "b.json",
+            ],
         ] {
-            assert!(super::DesktopLaunchConfig::parse(args.into_iter().map(std::ffi::OsString::from)).is_err());
+            assert!(
+                super::DesktopLaunchConfig::parse(args.into_iter().map(std::ffi::OsString::from))
+                    .is_err()
+            );
         }
     }
     #[test]

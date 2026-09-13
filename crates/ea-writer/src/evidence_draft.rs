@@ -2,11 +2,16 @@
 use crate::{WriterError, content::FinalizationContent, finalize::WriterService};
 
 impl WriterService<'_> {
-    pub(crate) fn require_draft_content(&self, content: &FinalizationContent) -> Result<(), WriterError> {
+    pub(crate) fn require_draft_content(
+        &self,
+        content: &FinalizationContent,
+    ) -> Result<(), WriterError> {
         let bound = self.repository.evidence_draft_source()?;
         match content {
             FinalizationContent::DestructionEvidence(input) => {
-                let expected = input.evidence.draft_source()
+                let expected = input
+                    .evidence
+                    .draft_source()
                     .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
                 if bound != Some(expected) {
                     return Err(ea_draft::DraftError::EvidenceBinding.into());

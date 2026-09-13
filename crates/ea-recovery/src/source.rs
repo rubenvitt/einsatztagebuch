@@ -51,7 +51,10 @@ pub struct FsArchiveSource {
 
 impl FsArchiveSource {
     /// Exact component bytes remain untrusted input to the ordinary verifier.
-    pub fn with_exact_component(self, _source: &dyn ArchiveSource) -> Result<Self, ea_archive::ArchiveBackendError> {
+    pub fn with_exact_component(
+        self,
+        _source: &dyn ArchiveSource,
+    ) -> Result<Self, ea_archive::ArchiveBackendError> {
         Err(ea_archive::ArchiveBackendError::MissingLocalCommitComponent)
     }
     /// Liest den gesamten Bestand unter `root` ein.
@@ -101,7 +104,12 @@ impl FsArchiveSource {
     pub fn committed_view(&self) -> Self {
         Self {
             root: self.root.clone(),
-            blobs: self.blobs.iter().filter(|(path,_)|!ea_archive::is_staging_path(path)).cloned().collect(),
+            blobs: self
+                .blobs
+                .iter()
+                .filter(|(path, _)| !ea_archive::is_staging_path(path))
+                .cloned()
+                .collect(),
         }
     }
 

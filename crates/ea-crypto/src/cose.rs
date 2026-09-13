@@ -73,7 +73,9 @@ impl ContentType {
             Self::ReaderAckCbor => "application/vnd.einsatzarchiv.reader-ack+cbor",
             Self::RecoveryTestDigest => "application/vnd.einsatzarchiv.recovery-test-digest",
             Self::TechnicalCursorDigest => "application/vnd.einsatzarchiv.technical-cursor-digest",
-            Self::DestructionPreflightDigest => "application/vnd.einsatzarchiv.destruction-preflight-digest",
+            Self::DestructionPreflightDigest => {
+                "application/vnd.einsatzarchiv.destruction-preflight-digest"
+            }
             Self::GoLivePostureDigest => "application/vnd.einsatzarchiv.go-live-posture-digest",
         }
     }
@@ -122,7 +124,9 @@ impl TryFrom<&str> for ContentType {
             "application/vnd.einsatzarchiv.technical-cursor-digest" => {
                 Ok(Self::TechnicalCursorDigest)
             }
-            "application/vnd.einsatzarchiv.destruction-preflight-digest" => Ok(Self::DestructionPreflightDigest),
+            "application/vnd.einsatzarchiv.destruction-preflight-digest" => {
+                Ok(Self::DestructionPreflightDigest)
+            }
             "application/vnd.einsatzarchiv.go-live-posture-digest" => Ok(Self::GoLivePostureDigest),
             _ => Err(CryptoError::UnsupportedSuite),
         }
@@ -494,12 +498,20 @@ impl CoseSigner {
         exact_core: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         let bindings = crate::destruction_preflight::bindings(exact_core)?;
-        self.sign_normal(ContentType::DestructionPreflightDigest, certificate_hash, bindings.digest.as_bytes())
+        self.sign_normal(
+            ContentType::DestructionPreflightDigest,
+            certificate_hash,
+            bindings.digest.as_bytes(),
+        )
     }
 
     pub fn sign_go_live_posture_document(&self, exact_core: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let core = crate::GoLivePostureCore::from_exact(exact_core)?;
-        self.sign_normal(ContentType::GoLivePostureDigest, core.fields().issuer_certificate_hash, core.digest().as_bytes())
+        self.sign_normal(
+            ContentType::GoLivePostureDigest,
+            core.fields().issuer_certificate_hash,
+            core.digest().as_bytes(),
+        )
     }
 
     pub fn sign_deletion_attestation_digest(
@@ -1181,9 +1193,15 @@ impl VerificationContext {
         let bindings = crate::destruction_preflight::bindings(exact_core)?;
         Ok(Self::digest(
             ContentType::DestructionPreflightDigest,
-            bindings.digest, certificate_hash, None, bindings.organization_id,
-            bindings.sequence, SignerRole::DeletionAttest,
-            Some(CertificateCapability::DeletionAttest), false, bindings.registry,
+            bindings.digest,
+            certificate_hash,
+            None,
+            bindings.organization_id,
+            bindings.sequence,
+            SignerRole::DeletionAttest,
+            Some(CertificateCapability::DeletionAttest),
+            false,
+            bindings.registry,
         ))
     }
 
@@ -1191,9 +1209,16 @@ impl VerificationContext {
         let core = crate::GoLivePostureCore::from_exact(exact_core)?;
         let fields = core.fields();
         Ok(Self::digest(
-            ContentType::GoLivePostureDigest, core.digest(), fields.issuer_certificate_hash,
-            None, fields.organization_id, fields.issued_sequence, SignerRole::OrganizationAdmin,
-            Some(CertificateCapability::OrganizationAdminApprove), false, fields.registry_version,
+            ContentType::GoLivePostureDigest,
+            core.digest(),
+            fields.issuer_certificate_hash,
+            None,
+            fields.organization_id,
+            fields.issued_sequence,
+            SignerRole::OrganizationAdmin,
+            Some(CertificateCapability::OrganizationAdminApprove),
+            false,
+            fields.registry_version,
         ))
     }
 

@@ -87,7 +87,10 @@ pub struct RecoverySourceCapture<'a> {
     pub passphrase: &'a SecretVec,
 }
 impl RecoveryTestRuntime {
-    pub fn with_archive_config(runtime: OperatorRuntime, config: crate::native_archive::NativeArchiveConfig) -> Result<Self, RecoveryRuntimeError> {
+    pub fn with_archive_config(
+        runtime: OperatorRuntime,
+        config: crate::native_archive::NativeArchiveConfig,
+    ) -> Result<Self, RecoveryRuntimeError> {
         Self::new(runtime, config.profile)
     }
     pub fn archive_profile_hash(&self) -> Result<ea_types::Hash32, RecoveryRuntimeError> {
@@ -474,8 +477,8 @@ impl RecoveryTestRuntime {
 mod execution;
 mod guided;
 pub use guided::{
-    RecoveryMediumObservation, RecoveryMediumRequest, RecoveryMediumStatus, RecoveryTestAbort,
-    RecoverySessionObserver, RecoveryTestGuide,
+    RecoveryMediumObservation, RecoveryMediumRequest, RecoveryMediumStatus,
+    RecoverySessionObserver, RecoveryTestAbort, RecoveryTestGuide,
 };
 
 mod inputs;

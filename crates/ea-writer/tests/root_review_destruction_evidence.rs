@@ -98,7 +98,10 @@ fn run(recover: bool) {
         provider.clone(),
     ));
     let draft = repository.load_or_create().unwrap();
-    assert!(draft.notes().is_empty(), "Evidence starts from an empty draft");
+    assert!(
+        draft.notes().is_empty(),
+        "Evidence starts from an empty draft"
+    );
     let binding = repository
         .reserve_evidence_draft(fixture.evidence.draft_source().unwrap())
         .unwrap();
@@ -203,34 +206,36 @@ fn run(recover: bool) {
         ));
         let binding = repository.evidence_binding().unwrap().unwrap();
         let repository = Arc::new(repository.for_evidence_draft(binding).unwrap());
-        let resume_service = |repository: Arc<AutosaveDraftRepository>| ea_writer::WriterService::new(
-            repository,
-            provider.clone(),
-            &fixture.backend,
-            &source,
-            &fixture.head,
-            &[],
-            IncidentNumberRegister::new(reopened.clone()),
-            OperatorProfileRepository::new(reopened.clone()),
-            ea_writer::WriterBindingV1 {
-                binding_object_hash: fixture.native.binding,
-                writer_certificate_hash: fixture.native.certificate,
-                writer_key_thumbprint: fixture
-                    .head
-                    .active_certificate_fields(fixture.native.certificate)
-                    .unwrap()
-                    .signing_key_thumbprint
-                    .unwrap(),
-                writer_signing_handle: provider
-                    .generate(
-                        SecretPurpose::WriterSigningKey,
-                        KeyProtectionProfileV1::OsWrapped,
-                    )
-                    .unwrap(),
-                chain_id: fixture.head.chain_id(),
-                archive_profile_hash: fixture.backend.profile_hash().unwrap(),
-            },
-        );
+        let resume_service = |repository: Arc<AutosaveDraftRepository>| {
+            ea_writer::WriterService::new(
+                repository,
+                provider.clone(),
+                &fixture.backend,
+                &source,
+                &fixture.head,
+                &[],
+                IncidentNumberRegister::new(reopened.clone()),
+                OperatorProfileRepository::new(reopened.clone()),
+                ea_writer::WriterBindingV1 {
+                    binding_object_hash: fixture.native.binding,
+                    writer_certificate_hash: fixture.native.certificate,
+                    writer_key_thumbprint: fixture
+                        .head
+                        .active_certificate_fields(fixture.native.certificate)
+                        .unwrap()
+                        .signing_key_thumbprint
+                        .unwrap(),
+                    writer_signing_handle: provider
+                        .generate(
+                            SecretPurpose::WriterSigningKey,
+                            KeyProtectionProfileV1::OsWrapped,
+                        )
+                        .unwrap(),
+                    chain_id: fixture.head.chain_id(),
+                    archive_profile_hash: fixture.backend.profile_hash().unwrap(),
+                },
+            )
+        };
         let resumed = resume_service(repository);
         let reinjected = fixture
             .backend
@@ -239,7 +244,10 @@ fn run(recover: bool) {
         std::fs::write(&reinjected, &fixture.original.original_bytes).unwrap();
         let observed = resumed.recover_pending();
         assert!(
-            matches!(observed, Err(ea_writer::WriterError::DestructionEvidenceInvalid)),
+            matches!(
+                observed,
+                Err(ea_writer::WriterError::DestructionEvidenceInvalid)
+            ),
             "staged target must prevent Evidence publication: {:?}; staged_original_exists={}",
             observed.as_ref().map(|outcome| outcome.summary()),
             reinjected.exists(),
@@ -278,16 +286,24 @@ fn run(recover: bool) {
             resumed.recover_pending().unwrap().summary(),
             ("CommittedFromPreparedBytes", 1)
         );
-        assert!(matches!(
-            resumed.recover_pending(),
-            Err(ea_writer::WriterError::Draft(ea_draft::DraftError::EvidenceBinding))
-        ), "the consumed Evidence facade cannot address the new ordinary draft");
+        assert!(
+            matches!(
+                resumed.recover_pending(),
+                Err(ea_writer::WriterError::Draft(
+                    ea_draft::DraftError::EvidenceBinding
+                ))
+            ),
+            "the consumed Evidence facade cannot address the new ordinary draft"
+        );
         let ordinary = Arc::new(AutosaveDraftRepository::new(
             fixture.native.reopen(),
             provider.clone(),
         ));
         assert_eq!(
-            resume_service(ordinary).recover_pending().unwrap().summary(),
+            resume_service(ordinary)
+                .recover_pending()
+                .unwrap()
+                .summary(),
             ("NothingPending", 0)
         );
         Some(exact)

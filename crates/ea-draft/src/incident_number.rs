@@ -33,8 +33,8 @@ pub struct IncidentNumberRegister {
 impl IncidentNumberRegister {
     /// The register's one NFC equality definition, also used to identify
     /// historical raw claim spellings during exact authorized source cleanup.
-    pub fn same_number(left:&str,right:&str)->bool {
-        Zeroizing::new(register_key(left))==Zeroizing::new(register_key(right))
+    pub fn same_number(left: &str, right: &str) -> bool {
+        Zeroizing::new(register_key(left)) == Zeroizing::new(register_key(right))
     }
     /// Retain only a minimal equality token before an independently authorized
     /// target purge. This method removes no source row and grants no authority
