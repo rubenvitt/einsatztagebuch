@@ -40,36 +40,59 @@
 //! ```compile_fail
 //! use ea_admin::FreshMachineRecoveryProof;
 //!
-//! fn forge() -> FreshMachineRecoveryProof {
+//! fn forge() -> FreshMachineRecoveryProof<'static> {
 //!     FreshMachineRecoveryProof::default()
 //! }
 //! ```
 //!
-//! Auch nicht ueber die Felder:
+//! Auch nicht ueber die Felder — das Literal ist vollstaendig und typrichtig,
+//! es scheitert allein an ihrer Privatheit:
 //!
 //! ```compile_fail
-//! use ea_admin::FreshMachineRecoveryProof;
+//! use ea_admin::{FreshMachineRecoveryProof, RecoveryTestFreshness};
 //! use ea_types::Hash32;
 //!
-//! fn forge(machine: Hash32) -> FreshMachineRecoveryProof {
-//!     FreshMachineRecoveryProof { machine_fingerprint: machine }
+//! fn forge(
+//!     machine: Hash32,
+//!     anchor: Hash32,
+//!     admission: RecoveryTestFreshness<'_>,
+//! ) -> FreshMachineRecoveryProof<'_> {
+//!     FreshMachineRecoveryProof {
+//!         machine_fingerprint: machine,
+//!         expected_trust_anchor_hash: anchor,
+//!         media_expected: 9,
+//!         admission,
+//!     }
 //! }
 //! ```
 //!
-//! Und es gibt keinen `set_ready`, kein `force`, kein Merkmal und keine
-//! `#[cfg(test)]`-Hintertuer — diese Datei enthaelt kein einziges `cfg`.
+//! Und es gibt keinen `set_ready`, kein `force` und keine
+//! `#[cfg(test)]`-Hintertuer. Das einzige `cfg` dieser Datei ist
+//! `feature = "test-support"`: es blendet die Fixture-Beobachtung
+//! `RecoveryTestObservation` samt ihrem Urteil
+//! `verify_fresh_machine_recovery_test` im Produktionsbuild AUS. Der
+//! Produktionsweg zu einem Nachweis fuehrt allein ueber die native
+//! Recovery-Test-Laufzeit ([`crate::recovery_test_runtime`]).
 //!
 //! Der positive Gegenzeuge, damit die beiden obigen an ihrem Gegenstand
-//! scheitern und nicht an ihren Importen:
+//! scheitern und nicht an ihren Importen, Lebenszeiten oder Feldtypen:
 //!
 //! ```
-//! use ea_admin::ProductionState;
+//! use ea_admin::{FreshMachineRecoveryProof, ProductionState, RecoveryTestFreshness};
 //! use ea_types::Hash32;
 //!
 //! assert_eq!(format!("{:?}", ProductionState::BlockedRecoveryTest), "BlockedRecoveryTest");
 //! assert_ne!(ProductionState::BlockedRecoveryTest, ProductionState::Ready);
-//! // `ea_types::Hash32` ist hier erreichbar — die beiden `compile_fail`-Zeugen
-//! // oben scheitern also an ihrem Gegenstand und nicht an ihren Importen.
+//! // Dieselbe Signatur wie der Feldzeuge oben, nur ohne Literal.
+//! fn forge(
+//!     machine: Hash32,
+//!     anchor: Hash32,
+//!     admission: RecoveryTestFreshness<'_>,
+//! ) -> FreshMachineRecoveryProof<'_> {
+//!     let _: (Hash32, Hash32, usize, RecoveryTestFreshness<'_>) = (machine, anchor, 9, admission);
+//!     unimplemented!()
+//! }
+//! let _ = forge;
 //! let _ = Hash32::try_from(&[0_u8; 32][..]).unwrap();
 //! ```
 
@@ -198,9 +221,12 @@ pub struct RecoveryTestObservation {
 /// Der Nachweis, dass Schritt 12 auf einem FRISCHEN Rechner vollstaendig
 /// gelungen ist.
 ///
-/// Konstruierbar ausschliesslich in `verify_fresh_machine_recovery_test`.
-/// Kein `Default`, kein `Clone`, kein `Debug`, und im inhaerenten
-/// `impl`-Block nur Leser — siehe die Moduldokumentation.
+/// Im Produktionsbuild konstruierbar ausschliesslich aus einem verifizierten
+/// abgeschlossenen Bericht der nativen Recovery-Test-Laufzeit
+/// (`from_verified_completed`, crate-intern); unter `test-support` zusaetzlich
+/// in `verify_fresh_machine_recovery_test`. Kein `Default`, kein `Clone`, kein
+/// `Debug`, und im inhaerenten `impl`-Block nur Leser — siehe die
+/// Moduldokumentation.
 ///
 /// Er wird von
 /// [`BootstrapCoordinator::record_fresh_machine_recovery_test`] VERBRAUCHT und
@@ -208,19 +234,44 @@ pub struct RecoveryTestObservation {
 /// [`ProductionState::Ready`].
 ///
 /// [`BootstrapCoordinator::record_fresh_machine_recovery_test`]: crate::BootstrapCoordinator::record_fresh_machine_recovery_test
-/// Normal production builds cannot turn caller assertions into readiness.
+///
+/// Aufrufer-Behauptungen werden nicht zur Produktionsfreigabe. Dass die
+/// Fixture-Namen `RecoveryTestObservation` und
+/// `verify_fresh_machine_recovery_test` im Produktionsbuild FEHLEN, sichert das
+/// `#[cfg(feature = "test-support")]` an ihrer Definition und ihrem Export;
+/// ein Doctest dieser Crate kann das nicht zeigen, denn ihre Selbstkante in
+/// `Cargo.toml` schaltet `test-support` fuer jeden ihrer Testlaeufe ein. Was
+/// hier unter jedem Merkmalsstand haelt: selbst wo die Beobachtung existiert,
+/// nimmt der Uebergang nach `Ready` sie nicht an — er verlangt den Nachweis.
 ///
 /// ```compile_fail
-/// let observation = ea_admin::RecoveryTestObservation {
-///     machine_fingerprint: ea_types::Hash32::ZERO,
-///     media_expected: 9, media_present: 9,
-///     expected_trust_anchor_hash: ea_types::Hash32::ZERO,
-///     observed_trust_anchor_hash: ea_types::Hash32::ZERO,
-///     expected_key_thumbprint: ea_types::KeyThumbprint::try_from(&[1u8;32][..]).unwrap(),
-///     observed_key_thumbprint: ea_types::KeyThumbprint::try_from(&[1u8;32][..]).unwrap(),
-///     test_entry_readable: true, sample_entries_expected: 1, sample_entries_decrypted: 1,
+/// use ea_admin::{AdminError, BootstrapCoordinator, ProductionState, RecoveryTestObservation};
+///
+/// fn claim_ready(
+///     coordinator: &mut BootstrapCoordinator<'_>,
+///     observation: RecoveryTestObservation,
+/// ) -> Result<ProductionState, AdminError> {
+///     coordinator.record_fresh_machine_recovery_test(observation)
+/// }
+/// ```
+///
+/// Der positive Gegenzeuge mit denselben Importen und derselben Signatur, nur
+/// mit dem Nachweis statt der Beobachtung:
+///
+/// ```
+/// use ea_admin::{
+///     AdminError, BootstrapCoordinator, FreshMachineRecoveryProof, ProductionState,
+///     RecoveryTestObservation,
 /// };
-/// let _ = ea_admin::verify_fresh_machine_recovery_test(ea_types::Hash32::ZERO, &observation);
+///
+/// fn claim_ready(
+///     coordinator: &mut BootstrapCoordinator<'_>,
+///     proof: FreshMachineRecoveryProof<'_>,
+/// ) -> Result<ProductionState, AdminError> {
+///     coordinator.record_fresh_machine_recovery_test(proof)
+/// }
+/// fn observed(_: RecoveryTestObservation) {}
+/// let _ = (claim_ready, observed);
 /// ```
 pub struct FreshMachineRecoveryProof<'a> {
     machine_fingerprint: Hash32,
