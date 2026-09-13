@@ -394,7 +394,7 @@ fn signed_source_case(
         .sign_local_audit(&exact)
         .unwrap();
         ea_recovery::recovery_failure_envelope(
-            &failure_core,
+            failure_core,
             &encode_local_audit_event(&exact, &signature).unwrap(),
         )
         .unwrap()
