@@ -1137,15 +1137,44 @@ Zum Umfang gehören der tatsächliche CLI-Erzeugungspfad, Serverannahme und
 Die nachstehenden Signaturskizzen beschreiben Rollen und Beweisgrenzen; die
 konkrete synchrone API wird an diese vorhandenen Ports angepasst.
 
+**Nachmessung 2026-09-13 (DRK-250, HEAD `8be0a47`):** Korrigiert sind Namen,
+Pfade und Signaturen; keine Zusage entfällt. Der Autorisierungsprüfer liegt in
+`crates/ea-trust/src/grant_authorization.rs` (`VerifiedGrantAuthorization` :37,
+`verify_grant_authorization` :53, `verify_archived_grant_authorization` :71,
+`distinct_authority_subjects` :137, `EA-GRANT-AUTH-EXPIRED` :25); eine Datei
+`crates/ea-admin/src/grant_authorization.rs` gibt es nicht. Die Ports heißen
+`RecoveryKem` (`crates/ea-recovery/src/historical_grant.rs:63`),
+`HistoricalGrantSigner` (:84), `GrantRegistrySource` (:97, wählt Kopf und
+Zeitboden bei jedem Aufruf neu) und `GrantOperatorContext` (:100, trägt
+Gerätezertifikat, `OperatorSessionProof` und OS-Konto).
+`HistoricalGrantService::create` (:157) ist eine synchrone assoziierte Funktion
+ohne `&self` mit Fehler `HistoricalGrantError`; `effectiveNow` und der frische
+Operatorbeweis werden weiterhin konsumiert, nur nicht als eigene Parameter. Die
+native Komposition mit der Zweckprüfung `ReauthPurpose::HistoricalRegrant` liegt in
+`crates/ea-admin/src/historical_grant.rs:19-24`, der CLI-Pfad in
+`apps/cli/src/commands/grant.rs`, die Serverannahme in
+`crates/ea-sync-server/src/historical_grant.rs`, die historische Auswahl in
+`crates/ea-verify/src/historical.rs`, `EA-GRANT-EXPIRED` in
+`crates/ea-reader/src/verify.rs:124`; die Auditaktion ist
+`LocalAuditActionV1::HistoricalRegrant` (`crates/ea-format/src/local_audit.rs:778`).
+Die Kernzeugen in `crates/ea-recovery/tests/historical_grant.rs` sind `#[test]`; die
+Testnamen in Step 1 sind Skizzen, sinngleiche Zeugen stehen dort bei :130, :210
+und :264. Asynchron ist nur der Systemzeuge
+`tests/ea-system-tests/tests/e2e_historical_grant.rs:32`.
+
 **Files:**
 - Create: `crates/ea-recovery/src/historical_grant.rs`
-- Create: `crates/ea-admin/src/grant_authorization.rs`
+- Create: `crates/ea-trust/src/grant_authorization.rs`
+- Create: `crates/ea-admin/src/historical_grant.rs`
+- Create: `crates/ea-verify/src/historical.rs`
+- Modify: `apps/cli/src/commands/grant.rs`, `crates/ea-sync-server/src/historical_grant.rs`, `crates/ea-reader/src/verify.rs`
 - Test: `crates/ea-recovery/tests/historical_grant.rs`
 - Test: `tests/ea-system-tests/tests/e2e_historical_grant.rs`
+- Test: `apps/server/tests/historical_grant_api.rs`, `apps/cli/tests/operator_grant/mod.rs`
 
 **Interfaces:**
-- Consumes: verified Entry, original Recovery grant, Recovery `KemDecapsulator`, HGA `DigestSigner`, `VerifiedGrantAuthorization`, recipient certificate, `EffectiveNow`, fresh `OperatorSessionProof`, and `LocalAuditService`.
-- Produces: `HistoricalGrantService::create -> ExactObjectBytes` with no `.eip` mutation.
+- Consumes: verified Entry and original Recovery grant (`VerifiedRecoveryEntry`), Recovery `RecoveryKem`, HGA `HistoricalGrantSigner`, `VerifiedGrantAuthorization`, recipient certificate, `effectiveNow` via `GrantRegistrySource`, fresh `OperatorSessionProof` via `GrantOperatorContext`, and `LocalAuditService`.
+- Produces: `HistoricalGrantService::create -> Result<ExactObjectBytes, HistoricalGrantError>` with no `.eip` mutation.
 
 - [ ] **Step 1: Write separation, explicit-target, and expiry tests**
 
@@ -1176,17 +1205,20 @@ Expected: FAIL because Authorization and historical grant creation are absent.
 - [ ] **Step 3: Implement separate proof-state inputs**
 
 ```rust
-pub async fn create(
-    &self,
-    entry: &VerifiedEncryptedEntry,
-    original_recovery_grant: &VerifiedRecoveryGrant,
-    authorization: &VerifiedGrantAuthorization,
-    recovery_kem: &dyn KemDecapsulator,
-    grant_authority: &dyn DigestSigner,
-    recipient: &VerifiedReaderCertificate,
-    effective_now: EffectiveNow,
-    operator_proof: OperatorSessionProof,
-) -> Result<ExactObjectBytes, RecoveryError>;
+// crates/ea-recovery/src/historical_grant.rs:154-167 (gemessen 2026-09-13)
+impl HistoricalGrantService {
+    pub fn create(
+        entry: &VerifiedRecoveryEntry,
+        authorization: &VerifiedGrantAuthorization,
+        recovery: &dyn RecoveryKem,
+        authority: &dyn HistoricalGrantSigner,
+        issuer_certificate: CertificateHash,
+        recipient_certificate: &[u8],
+        registry: &dyn GrantRegistrySource,
+        operator: GrantOperatorContext<'_>,
+        audit: &dyn LocalAuditService,
+    ) -> Result<ExactObjectBytes, HistoricalGrantError>;
+}
 ```
 
 Authorization binds organization, Registry head/sequence, sorted explicit Entry hashes, recipient thumbprint/certificate, purpose, and `expiresAt`, with two valid active distinct-subject `historicalGrantApprove` signatures. Require native re-authentication specifically for `ReauthPurpose::HistoricalRegrant`, matching the active bound operator and current device; no generic Admin or Recovery session proof is accepted. Recompute `effectiveNow`; decapsulate CEK only from original initial Recovery grant in protected memory; HPKE-wrap to selected Reader; sign with capability `historicalGrant`; bind original Recovery grant and Authorization hashes. Zero CEK. Preserve exact `.eip` bytes. Before releasing the new grant, flush a signed `historicalRegrant` local audit event containing only Authorization, Entry, original Recovery grant, recipient certificate, and new grant hashes plus outcome. Server and Reader Stage 3/4 checks close acceptance/delivery/open expiry.
@@ -1200,7 +1232,7 @@ Expected: PASS; wrong Entry/recipient/Registry/original grant, duplicate subject
 - [ ] **Step 5: Commit historical re-grant**
 
 ```bash
-git add crates/ea-recovery crates/ea-admin tests/ea-system-tests
+git add crates/ea-recovery crates/ea-trust crates/ea-admin crates/ea-verify crates/ea-sync-server crates/ea-reader apps/cli apps/server tests/ea-system-tests
 git commit -m "feat(recovery): issue authorized historical grants"
 ```
 
@@ -1215,19 +1247,44 @@ sein. `LocalAuditService::record_signed` ist synchron. UI-Zeugen liegen unter
 ersetzt keinen Nachweis der produktiven Host-Komposition oder der dauerhaften,
 verschlüsselten Teststatus-Aktualisierung nach vollständig erfolgreichem Test.
 
+**Nachmessung 2026-09-13 (DRK-250, HEAD `8be0a47`):** Einen
+`RecoveryTestService::run` gibt es nicht; der Name steht nur noch im Kommentar
+`crates/ea-recovery/src/recovery_test.rs:9`. Der Testkern ist `RecoveryTestRun`
+(`crates/ea-recovery/src/test_run.rs:74`) mit `RecoveryRunOutcome` (:89) sowie
+`VerifiedCompletedRecoveryReport`/`verify_completed_recovery_report`
+(`crates/ea-recovery/src/completion.rs:105`, :182). Nativ führt ihn
+`RecoveryTestRuntime` (`crates/ea-admin/src/recovery_test_runtime.rs:73`) mit
+`run_restored_test`/`run_restored_test_guided`
+(`recovery_test_runtime/execution.rs:204`, :236) und
+`read_completed_report`/`read_failed_report` (:511, :557); die Auditaktion
+`LocalAuditActionV1::RecoveryTest` schreibt `recovery_test_runtime.rs:223`/:346.
+`Modify` statt `Create` gilt nur für Dateien, die an der Basis `1e5e7de` schon
+bestanden (hier `recovery_test.rs`); in der Fortsetzung entstandene Dateien
+bleiben `Create`. Der Browserzeuge heißt `apps/desktop/tests/e2e/recovery.spec.ts`
+und ist ausdrücklich nur IPC-Zeuge (:13); `recovery-test.spec.ts` existiert nicht.
+Die Kernzeugen sind `#[test]`; `one_missing_or_wrong_medium_fails_the_overall_test`
+aus Step 1 hat im Ziel `--test recovery_test` noch kein Gegenstück, die Zusage
+bleibt. Native CLI-Zeugen liegen in `apps/cli/tests/operator_recovery/`; die
+Desktop-Module dort verlangen `--features desktop-fixture` (`mod.rs:4-7`), die
+geführten Proben in `guided.rs` (:151, :197, :244, :376, :451, :514) sind
+`#[ignore]` und laufen im Normalziel nicht mit.
+
 **Files:**
-- Create: `crates/ea-recovery/src/recovery_test.rs`
+- Modify: `crates/ea-recovery/src/recovery_test.rs`
 - Create: `crates/ea-recovery/src/key_inventory.rs`
 - Create: `crates/ea-recovery/src/challenge.rs`
+- Create: `crates/ea-recovery/src/test_run.rs`, `crates/ea-recovery/src/completion.rs`
+- Create: `crates/ea-admin/src/recovery_test_runtime.rs`, `crates/ea-admin/src/recovery_test_runtime/{execution,guided,import,inputs,native_medium}.rs`
 - Create: `apps/desktop/src/features/admin/RecoveryTestWizard.tsx`
-- Create: `apps/desktop/src-tauri/src/commands/recovery.rs`
+- Create: `apps/desktop/src-tauri/src/commands/recovery.rs`, `apps/desktop/src-tauri/src/commands/recovery/wire.rs`
 - Test: `crates/ea-recovery/tests/recovery_test.rs`
 - Test: `apps/desktop/src/features/admin/RecoveryTestWizard.test.tsx`
-- Test: `tests/e2e/recovery-test.spec.ts`
+- Test: `apps/desktop/tests/e2e/recovery.spec.ts`
+- Test: `apps/cli/tests/operator_recovery/` (`mod.rs`, `guided.rs`, `desktop_portable.rs`)
 
 **Interfaces:**
 - Consumes: independent anchor, unchanged archive copy, `ea.key-inventory/v1`, each explicit backup source, fresh `ReauthPurpose::RecoveryTest` proof, and `LocalAuditService`.
-- Produces: `RecoveryTestService::run`, per-medium results, overall success only if complete, signed or hashed cleartext-free report, and durable signed audit reference.
+- Produces: `RecoveryTestRun` with `RecoveryRunOutcome` (`ea-recovery`), driven natively by `RecoveryTestRuntime` (`ea-admin`), per-medium results, overall success only if complete, signed or hashed cleartext-free report, and durable signed audit reference.
 
 - [ ] **Step 1: Write incomplete-inventory and challenge-domain tests**
 
@@ -1266,7 +1323,7 @@ Run:
 ```bash
 cargo test --locked -p ea-recovery --test recovery_test
 pnpm --dir apps/desktop test --run RecoveryTestWizard
-pnpm --dir apps/desktop exec playwright test tests/e2e/recovery-test.spec.ts
+pnpm --dir apps/desktop exec playwright test tests/e2e/recovery.spec.ts
 ```
 
 Expected: PASS; archive/Registry/grants/key status remain byte-for-byte unchanged.
@@ -1274,7 +1331,7 @@ Expected: PASS; archive/Registry/grants/key status remain byte-for-byte unchange
 - [ ] **Step 5: Commit guided Recovery testing**
 
 ```bash
-git add crates/ea-recovery apps/desktop tests/e2e schemas/reports
+git add crates/ea-recovery crates/ea-admin apps/desktop apps/desktop/tests/e2e apps/cli schemas/reports
 git commit -m "feat(recovery): verify every key backup safely"
 ```
 
@@ -1290,12 +1347,31 @@ Task 12 erweitert dieselbe Writer-Infrastruktur später um DestructionEvidence;
 die Arbeiten an diesen gemeinsamen Dateien laufen nacheinander. Browserzeugen
 liegen unter `apps/desktop/tests/e2e` und gegebenenfalls `apps/web/tests/e2e`.
 
+**Nachmessung 2026-09-13 (DRK-250, HEAD `8be0a47`):**
+`AmendmentDraftService::create_from_reference(&self, reference: CorrectionReference,
+content: AmendmentContentV1, observed_now: UnixMillis) -> Result<AmendmentInputV1,
+WriterError>` (`crates/ea-admin/src/amendment.rs:25-30`) ist synchron und
+delegiert an `WriterService::prepare_amendment`; die Skizze in Step 1 (async,
+Freitext statt `AmendmentContentV1`) beschreibt nur die Rollen, der Zeuge
+`crates/ea-admin/tests/amendment.rs:15` ist `#[test]`. Die Writer-Hälfte liegt in
+`crates/ea-writer/src/{amendment,content,finalize}.rs` mit
+`crates/ea-writer/tests/amendment.rs`. Das Verzeichnis
+`apps/desktop/src/features/reader` gibt es nicht; der Thread liegt in
+`apps/web/src/features/reader/AmendmentThread.tsx`. Der Browserzeuge
+`apps/desktop/tests/e2e/amendment.spec.ts` ist nur UI/IPC-Zeuge (:4) mit einem Fall;
+die Playwright-Zusage aus Step 4 für mehrere Nachträge und falsche Verweise bleibt.
+Das Playwright-Kommando löst relativ zu `apps/desktop` korrekt auf
+(`playwright.config.ts:95`); falsch waren nur die Files-Zeile und `git add tests/e2e`.
+
 **Files:**
 - Create: `crates/ea-admin/src/amendment.rs`
+- Create: `crates/ea-writer/src/amendment.rs`
+- Modify: `crates/ea-writer/src/content.rs`, `crates/ea-writer/src/finalize.rs`
 - Create: `apps/desktop/src/features/writer/AmendmentDraft.tsx`
-- Modify: `apps/desktop/src/features/reader/AmendmentThread.tsx`
-- Create: `tests/e2e/amendment.spec.ts`
+- Modify: `apps/web/src/features/reader/AmendmentThread.tsx`
+- Create: `apps/desktop/tests/e2e/amendment.spec.ts`
 - Test: `crates/ea-admin/tests/amendment.rs`
+- Test: `crates/ea-writer/tests/amendment.rs`, `apps/desktop/src/features/writer/AmendmentDraft.test.tsx`, `apps/web/src/features/reader/AmendmentThread.test.tsx`
 
 **Interfaces:**
 - Consumes: Stage 4 `CorrectionReference`, Writer draft/finalization, verified Reader thread.
@@ -1333,7 +1409,7 @@ Expected: PASS; arbitrary plain reference text cannot forge a link.
 - [ ] **Step 5: Commit amendment workflow**
 
 ```bash
-git add crates/ea-admin apps/desktop tests/e2e
+git add crates/ea-admin crates/ea-writer apps/desktop apps/desktop/tests/e2e apps/web
 git commit -m "feat(admin): finalize linked amendments"
 ```
 
@@ -1355,14 +1431,30 @@ Personenprüfung konsumiert die gemeinsame Korrektur aus Task 8. Native
 zweckspezifische Prüfung erfolgt vor synchronem, dauerhaftem Audit; der
 Auditdienst allein prüft Zweck und Frische nicht.
 
+**Nachmessung 2026-09-13 (DRK-250, HEAD `8be0a47`):** Der Antragsweg liegt in
+`crates/ea-destruction/src/service.rs` (`DestructionRequestService::request` :179,
+`request_guarded` :194, Zweck `ReauthPurpose::Destruction` :168/:208) und ist
+synchron; die dritte Skizze in Step 1 ist entsprechend synchron gefasst. Seine
+Zeugen stehen in `crates/ea-destruction/tests/requests.rs` (:333
+`request_is_signed_audited_durable_and_exact_replay_survives_reopen`, :373
+`wrong_purpose_stale_account_and_audit_failure_never_publish_requested`), die
+Serverannahme des Datenschutz-Gates in `crates/ea-destruction/tests/server_admission.rs`.
+Die Testnamen in Step 1 sind Skizzen; sinngleich sind
+`authorization.rs:14` `both_signed_privacy_conditions_are_required`, :26
+`two_certificates_of_one_person_are_not_two_approvers` und `transitions.rs:3`
+`exactly_eight_normative_edges_and_no_cancel_are_accepted`. „expired signatures" in
+Step 4 ist im Sinne der Korrektur oben zu lesen: v1 trägt kein `expiresAt`.
+
 **Files:**
 - Create: `crates/ea-destruction/Cargo.toml`
 - Create: `crates/ea-destruction/src/lib.rs`
 - Create: `crates/ea-destruction/src/authorization.rs`
 - Create: `crates/ea-destruction/src/state.rs`
 - Create: `crates/ea-destruction/src/event.rs`
+- Create: `crates/ea-destruction/src/service.rs`
 - Test: `crates/ea-destruction/tests/authorization.rs`
 - Test: `crates/ea-destruction/tests/transitions.rs`
+- Test: `crates/ea-destruction/tests/requests.rs`, `crates/ea-destruction/tests/server_admission.rs`
 
 **Interfaces:**
 - Consumes: two active `destructionApprove` signers, Registry/time, documented privacy-enable policy, fresh `ReauthPurpose::Destruction` operator proof, and `LocalAuditService`.
@@ -1386,17 +1478,17 @@ fn only_normative_transitions_are_accepted() {
     assert!(apply(Some(InProgress), event(Requested)).is_err());
 }
 
-#[tokio::test]
-async fn requested_transition_requires_matching_reauth_and_durable_audit() {
-    assert!(service.request(fixtures::authorization(), fixtures::wrong_purpose_proof()).await.is_err());
-    let requested = service.request(fixtures::authorization(), fixtures::destruction_proof()).await.unwrap();
-    assert!(service.audit_is_signed_and_flushed(requested.audit_event_id()).await);
+#[test]
+fn requested_transition_requires_matching_reauth_and_durable_audit() {
+    assert!(service.request(&auth, &event, &targets, &fixtures::wrong_purpose_proof()).is_err());
+    let requested = service.request(&auth, &event, &targets, &fixtures::destruction_proof()).unwrap();
+    assert!(fixtures::audit_is_signed_and_flushed(requested.audit_exact_bytes()));
 }
 ```
 
 - [ ] **Step 2: Run destruction-core tests and verify failure**
 
-Run: `cargo test --locked -p ea-destruction --test authorization --test transitions`
+Run: `cargo test --locked -p ea-destruction --test authorization --test transitions --test requests`
 
 Expected: FAIL because destruction authorization/state machine do not exist.
 
@@ -1422,9 +1514,9 @@ Implement only: `None→requested`; `requested→inProgress`; `inProgress→pend
 
 - [ ] **Step 4: Run all valid/invalid/replay transition tests**
 
-Run: `cargo test --locked -p ea-destruction --test authorization --test transitions`
+Run: `cargo test --locked -p ea-destruction --test authorization --test transitions --test requests`
 
-Expected: PASS; one Approver, duplicate subject, wrong capability/target, stale Registry, and expired/invalid signatures fail.
+Expected: PASS; one Approver, duplicate subject, wrong capability/target, stale Registry, and expired/invalid signatures fail (expired meaning expired or revoked signers, since v1 carries no `expiresAt`).
 
 - [ ] **Step 5: Commit destruction state core**
 
@@ -1436,29 +1528,69 @@ git commit -m "feat(destruction): authorize append-only destruction states"
 ### Task 12: Destroyed Entry Stub, Replica Attestation, and Resumable Executor
 
 **Gemessene Korrektur DRK-250:** `.eds`-Format und Teile der
-Vernichtungsrekonstruktion sind vorhanden. `ea-verify` nimmt `.eds` derzeit noch
-nicht in die technische Kette auf; Reader-Zustände allein beweisen keine
-vollständige Autorisierungsprüfung. Der Umfang schließt deshalb
+Vernichtungsrekonstruktion sind vorhanden. Zum Messzeitpunkt 2026-09-08 nahm
+`ea-verify` `.eds` noch nicht in die technische Kette auf; seit `de019fc` tut es
+das (`crates/ea-verify/src/archive.rs:441-445`, :565-609, neu
+`crates/ea-verify/src/destroyed.rs`; Nachmessung 2026-09-13). Reader-Zustände
+allein beweisen keine vollständige Autorisierungsprüfung. Der Umfang schließt deshalb
 `crates/ea-verify/src/{archive,destruction}.rs`, Reader-Verifikation sowie echte
 Server-/Archiv-/Replikadapter ein. Server-Ports, PostgreSQL/S3-Komposition und
 Aufnahme von Transition-/Attestation-Ereignissen müssen den Executor tatsächlich
 tragen. Ein Trait oder In-Memory-Harness allein genügt nicht. Nach Task 10 wird
 die gemeinsame normale Writer-Pipeline für DestructionEvidence ergänzt.
 
+**Nachmessung 2026-09-13 (DRK-250, HEAD `8be0a47`):** Ein `executor.rs` und ein
+`DestructionExecutor::{plan,resume}` existieren nicht. Die Ausführung ist
+aufgeteilt auf `crates/ea-destruction/src/{execution,job,local,local_attestation,purge,inventory,barrier,preflight,imported_preflight,original_authority}.rs`
+(Eintritt `SqliteDestructionJobs::start_execution`, `execution.rs:45`); fortgesetzt
+wird über `DestructionRequestService::resume`/`resume_historical`
+(`service.rs:124`, :109). Die native Orchestrierung liegt in
+`crates/ea-admin/src/destruction_runtime.rs` und `destruction_runtime/`, die
+Serverseite zusätzlich in `crates/ea-sync-server/src/{managed_destruction,server_destruction}.rs`.
+Ein `DeletionAttestationV1` gibt es nicht; das Wireformat ist
+`ea_format::DeletionAttestationFieldsV1` (`crates/ea-format/src/etb.rs:287`), geprüft
+als `VerifiedDeletionAttestation` (`attestation.rs:29`,
+`verify_attestation_historical` :49). Die Testziele `--test resume` und
+`--test e2e_destruction` existieren nicht. Resume-Zeugen sind
+`crates/ea-destruction/tests/preflight.rs:31`, `requests.rs:97` und im CLI-Ziel
+`apps/cli/tests/operator_destruction/{crash.rs:24,restart.rs:3}`. Die drei
+Systemziele `e2e_destruction_{policy,admission_race,catalog_race}` sind
+Admissionszeugen ohne physische Entfernung (`e2e_destruction_policy.rs:1-2`); der
+physische Same-Job-Zeuge ist `einsatzarchiv-cli --test operator` unter
+`process_native::destruction::` (`#[cfg(unix)]`, `apps/cli/tests/operator.rs:214-215,1473-1475`).
+Dessen Desktop-Untermodul verlangt `--features desktop-fixture`
+(`operator_destruction/mod.rs:923-924`); ohne das Feature laufen diese Fälle still
+nicht mit. Server- und Systemziele brauchen die Integrationsumgebung. Die Zusagen
+aus Step 4 (sofort, Backup-Frist, unerreichbar, ungültiger Stub, Replay,
+`UnexplainedGap`) bleiben; ob sie ein eigenes System-E2E
+`tests/ea-system-tests/tests/e2e_destruction.rs` oder der CLI-Zeuge trägt, ist
+offene Entscheidung, siehe DRK-250. Der native Erzeuger für
+`incompleteUnreachableReplica→inProgress` aus Task 11 — in
+`crates/ea-admin/src/destruction_runtime/` nennt nur `failure.rs` den Zustand — ist
+per Ruling vom 13.09.2026 aus dem ersten Stufe-5-PR in das Folgeticket DRK-319
+verschoben; die
+Kante bleibt Zusage dieses Plans.
+
 **Files:**
 - Create: `crates/ea-destruction/src/stub.rs`
-- Create: `crates/ea-destruction/src/attestation.rs`
-- Create: `crates/ea-destruction/src/executor.rs`
-- Create: `crates/ea-destruction/src/reconstruct.rs`
-- Modify: `crates/ea-sync-server/src/destruction.rs`
+- Create: `crates/ea-destruction/src/attestation.rs`, `crates/ea-destruction/src/local_attestation.rs`
+- Create: `crates/ea-destruction/src/{execution,job,local,purge,inventory,barrier,preflight,imported_preflight,original_authority}.rs` (statt eines einzelnen `executor.rs`)
+- Create: `crates/ea-destruction/src/reconstruct.rs`, `crates/ea-destruction/src/reconstruct/`
+- Create: `crates/ea-admin/src/destruction_runtime.rs`, `crates/ea-admin/src/destruction_runtime/`
+- Create: `crates/ea-verify/src/destroyed.rs`; Modify: `crates/ea-verify/src/archive.rs`, `crates/ea-verify/src/destruction.rs`
+- Modify: `crates/ea-sync-server/src/destruction.rs`; Create: `crates/ea-sync-server/src/managed_destruction.rs`, `crates/ea-sync-server/src/server_destruction.rs`
 - Modify: `crates/ea-reader/src/entry_state.rs`
+- Modify: `crates/ea-writer` (DestructionEvidence über die normale Pipeline; Zeuge `crates/ea-writer/tests/destruction_evidence.rs`)
 - Test: `crates/ea-destruction/tests/stub.rs`
-- Test: `crates/ea-destruction/tests/resume.rs`
-- Test: `tests/ea-system-tests/tests/e2e_destruction.rs`
+- Test: `crates/ea-destruction/tests/preflight.rs`, `crates/ea-destruction/tests/requests.rs` (Resume; `tests/resume.rs` existiert nicht)
+- Test: `apps/cli/tests/operator_destruction/` (physischer Same-Job-Zeuge)
+- Test: `apps/server/tests/destruction_jobs_api.rs`
+- Test: `tests/ea-system-tests/tests/e2e_destruction_policy.rs`, `e2e_destruction_admission_race.rs`, `e2e_destruction_catalog_race.rs`
+- Test: `tests/ea-system-tests/tests/e2e_destruction.rs` — existiert nicht; offene Entscheidung, siehe Nachmessung
 
 **Interfaces:**
 - Consumes: verified authorization, managed replica adapters, archive transaction, server delivery block, Writer finalization.
-- Produces: `DestructionExecutor::{plan,resume}`, exact `.eds`, `DeletionAttestationV1`, and later `destructionEvidence` draft.
+- Produces: `SqliteDestructionJobs::start_execution` and `DestructionRequestService::{resume,resume_historical}` (in place of `DestructionExecutor::{plan,resume}`), exact `.eds`, `ea_format::DeletionAttestationFieldsV1` verified as `VerifiedDeletionAttestation`, and later `destructionEvidence` draft.
 
 - [ ] **Step 1: Write Stub continuity and restart tests**
 
@@ -1483,7 +1615,7 @@ async fn restart_resumes_same_destruction_id_without_duplicate_delete() {
 
 - [ ] **Step 2: Run Stub/resume tests and verify executor is absent**
 
-Run: `cargo test --locked -p ea-destruction --test stub --test resume && cargo test --locked -p ea-system-tests --test e2e_destruction`
+Run: `cargo test --locked -p ea-destruction --test stub --test preflight --test requests && cargo test --locked -p einsatzarchiv-cli --test operator process_native::destruction:: -- --test-threads=1`
 
 Expected: FAIL because Stub/attestation/executor do not exist.
 
@@ -1495,14 +1627,21 @@ Reconstruct current state and next action only from authorization/events/attesta
 
 - [ ] **Step 4: Run immediate, backup-expiry, unreachable, invalid-Stub, and replay tests**
 
-Run: `cargo test --locked -p ea-destruction --test stub --test resume && cargo test --locked -p ea-system-tests --test e2e_destruction -- --test-threads=1`
+Run:
 
-Expected: PASS; unauthorized file removal is `UnexplainedGap`, not authorized destruction.
+```bash
+cargo test --locked -p ea-destruction --test stub --test preflight --test requests
+cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator process_native::destruction:: -- --test-threads=1
+cargo test --locked -p einsatzarchiv-server --test destruction_jobs_api -- --test-threads=1
+cargo test --locked -p ea-system-tests --test e2e_destruction_policy --test e2e_destruction_admission_race --test e2e_destruction_catalog_race -- --test-threads=1
+```
+
+Expected: PASS; unauthorized file removal is `UnexplainedGap`, not authorized destruction. The three system targets are admission witnesses only; the physical branches run in the CLI target (see Nachmessung).
 
 - [ ] **Step 5: Commit destruction executor**
 
 ```bash
-git add crates/ea-destruction crates/ea-sync-server crates/ea-reader tests/ea-system-tests
+git add crates/ea-destruction crates/ea-admin crates/ea-verify crates/ea-sync-server crates/ea-reader crates/ea-writer apps/cli apps/server tests/ea-system-tests
 git commit -m "feat(destruction): attest resumable archive destruction"
 ```
 
@@ -1516,12 +1655,32 @@ nicht nur eine Vorschau mit einem Fake-Port. Tests liegen unter
 `apps/desktop/tests/e2e`. Die exakt vorgegebene deutsche Statuskopie bleibt
 unverändert.
 
+**Nachmessung 2026-09-13 (DRK-250, HEAD `8be0a47`):** Die Vernichtungskommandos
+liegen nicht in `commands/admin.rs`, sondern in
+`apps/desktop/src-tauri/src/commands/destruction.rs:294-429`
+(`destruction_read`, `_prepare`, `_start`, `_resume`, `_import_progress`,
+`_synchronize`, `_authenticate_custodian`, `_export_reader_delivery`) und
+`commands/destruction_evidence.rs`; die Host-Komposition in
+`src/runtime/destruction.rs`, `src/runtime/destruction/` und
+`src/runtime/destruction_transport.rs`. Die Statuskopie steht wörtlich in
+`DestructionStatus.tsx:6-12`; ihr `it.each` liegt in `DestructionStatus.test.tsx:7`,
+den der Vitest-Filter `DestructionWizard` nicht erfasst. Der Browserzeuge
+`apps/desktop/tests/e2e/destruction.spec.ts` ist ein Grenzdouble (:10); „Restart" ist
+dort ein Neuladen. Native Restart-Zeugen liegen in
+`apps/cli/tests/operator_destruction/desktop/{pending,completion}.rs` und laufen nur
+mit `--features desktop-fixture`.
+
 **Files:**
 - Create: `apps/desktop/src/features/admin/DestructionWizard.tsx`
 - Create: `apps/desktop/src/features/admin/DestructionStatus.tsx`
-- Modify: `apps/desktop/src-tauri/src/commands/admin.rs`
+- Create: `apps/desktop/src/features/admin/DestructionSurface.tsx`, `DestructionEvidence.tsx`, `destruction-contract.ts`, `destruction-evidence-bridge.ts`
+- Create: `apps/desktop/src-tauri/src/commands/destruction.rs`, `apps/desktop/src-tauri/src/commands/destruction_evidence.rs`
+- Create: `apps/desktop/src-tauri/src/runtime/destruction.rs`, `apps/desktop/src-tauri/src/runtime/destruction/`, `apps/desktop/src-tauri/src/runtime/destruction_transport.rs`
+- Modify: `apps/desktop/src-tauri/src/commands/admin.rs` (Verwaltungsansicht trägt `destruction_enabled`, :286)
 - Test: `apps/desktop/src/features/admin/DestructionWizard.test.tsx`
-- Test: `tests/e2e/destruction.spec.ts`
+- Test: `apps/desktop/src/features/admin/DestructionStatus.test.tsx`, `DestructionSurface.test.tsx`, `DestructionEvidence.test.tsx`, `destruction-contract.test.ts`
+- Test: `apps/desktop/tests/e2e/destruction.spec.ts`
+- Test: `apps/cli/tests/operator_destruction/desktop/` (native Restart-Zeugen, `--features desktop-fixture`)
 
 **Interfaces:**
 - Consumes: policy privacy decision, two-Approver authorization import, destruction state/report DTOs, re-authentication.
@@ -1549,7 +1708,7 @@ it.each([
 
 - [ ] **Step 2: Run UI tests and verify components are absent**
 
-Run: `pnpm --dir apps/desktop test --run DestructionWizard`
+Run: `pnpm --dir apps/desktop test --run DestructionWizard DestructionStatus`
 
 Expected: FAIL because destruction UI does not exist.
 
@@ -1559,14 +1718,14 @@ Require target hashes/sequences, scope, nonfachlicher legal-reason code, known s
 
 - [ ] **Step 4: Run keyboard, restart, pending-backup, and unreachable E2E tests**
 
-Run: `pnpm --dir apps/desktop test --run DestructionWizard && pnpm --dir apps/desktop exec playwright test tests/e2e/destruction.spec.ts`
+Run: `pnpm --dir apps/desktop test --run DestructionWizard DestructionStatus && pnpm --dir apps/desktop exec playwright test tests/e2e/destruction.spec.ts`
 
 Expected: PASS; UI returns to the reconstructed same process after restart.
 
 - [ ] **Step 5: Commit destruction UI workstream**
 
 ```bash
-git add apps/desktop tests/e2e pnpm-lock.yaml
+git add apps/desktop apps/desktop/tests/e2e apps/cli/tests/operator_destruction/desktop pnpm-lock.yaml
 git commit -m "feat(desktop): guide controlled destruction"
 ```
 
@@ -1574,15 +1733,91 @@ git commit -m "feat(desktop): guide controlled destruction"
 
 **Gemessene Korrektur DRK-250:** `xtask stage-gate` kennt inzwischen Stufen
 1–4; Stufe 5 fehlt. Die unverändert offenen 19 Ledgerzeilen sind am vollständigen
-Lauf zu belegen. Die Prüfung umfasst produktive Komposition, die noch fehlende
-signierte Einmal-Quittung für Stale Registry, die administrativen Diagnosepfade
+Lauf zu belegen. Die Prüfung umfasst produktive Komposition, die seit `be2abfe`
+gebaute signierte Einmal-Quittung für Stale Registry
+(`crates/ea-writer/src/finalize.rs:302`,
+`apps/desktop/src-tauri/src/commands/writer.rs:1294`), die administrativen Diagnosepfade
 für widersprüchliche Abschlussmarken und verwaiste Sperren sowie beide
 v1.1-Escrow-Familien aus den Global Constraints. Native Identity-Provider und
 CLI-Komposition existieren: sie werden integriert, nicht neu erfunden. Posture
 `Fail` muss eine Produktionssitzung blockieren, `Unknown` bleibt im Go-live
-sichtbar ungelöst. Native Min-/Max-Release-Matrix, echte Organisationsfreigabe,
+sichtbar ungelöst. (An HEAD `8be0a47` weicht der Baum davon ab, siehe
+Nachmessung; Ruling vom 13.09.2026 bestätigt die Zusage wörtlich.) Native
+Min-/Max-Release-Matrix, echte Organisationsfreigabe,
 quartalsweise Übungen und Produktionsschlüssel-Custody bleiben Stufe 7; fehlende
 Produktimplementierung darf nicht als reine Stufe-7-Evidenz verschoben werden.
+
+**Nachmessung 2026-09-13 (DRK-250, HEAD `8be0a47`):** Korrigiert sind Kommandos,
+Pfade und die Testskizze; keine Zusage entfällt.
+- `run_stage_gate` (`tools/xtask/src/main.rs:3934-3948`) verzweigt nur für die
+  Stufen 1–4 und meldet sonst „stage-gate is only defined for stages 1, 2, 3 and 4
+  so far" (:3946). Vorbild ist `run_stage_four_gate` (:3730) mit den Konstanten
+  `STAGE_FOUR_PRIMARY_ACCEPTANCE_CRITERIA` (:2282) und `STAGE_FOUR_REQUIRED_SCRIPTS`
+  (:2318) und dem JSON-Bericht, der ergänzt und nie umbenannt wird (:3889-3905,
+  Kommentar :3897-3898).
+- Zwei bestehende Pins bewegen sich in diesem Task. Erstens
+  `the_stage_switch_still_refuses_an_undefined_stage`
+  (`tools/xtask/tests/stage_gate.rs:2010-2029`) ruft heute Stufe 5 und erwartet
+  „stages 1, 2, 3 and 4"; sein Kommentar legt fest, dass er mit dem Schalter wandert
+  (auf Stufe 6 und „stages 1, 2, 3, 4 and 5"). Zweitens fixiert die WR-Pin-Tabelle
+  `("WR-075", "7.5", "5", "planned")` (:554); jeder Statuswechsel von WR-075 zieht dort
+  mit. `stage_gate.rs` ist deshalb `Modify` (wie Ruling R44 der Stufe 2).
+- `stage-gate:5` fehlt in `package.json` (vorhanden: :25, :28, :30); der Lauf ruft wie
+  in Stufe 3 das Skript.
+- `xtask test-privacy --scope …` gibt es nicht: Ruling R41
+  (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-2-offline-writer.md:136`)
+  schließt `test-privacy` als Subkommando aus, und der `test-*`-Arm weist jedes
+  Argument ab (`main.rs:4052-4057`). Die Form folgt Stufe 3
+  (`docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-3-blind-sync.md:1255`):
+  direkter `cargo test -p ea-system-tests --test privacy_canaries_…`.
+- `pnpm test:recovery` ist `cargo test --workspace --all-targets --locked`
+  (`main.rs:4052-4057`, :1134-1140), also der Workspace-Lauf und kein
+  Recovery-spezifischer Lauf.
+- Ein Systemziel `e2e_destruction` existiert nicht; vorhanden sind drei
+  Admissionszeugen `e2e_destruction_{policy,admission_race,catalog_race}`. Der
+  physische Zeuge und die offene Entscheidung zu einem System-E2E stehen in
+  Task 12. Der Playwright-Zeuge heißt `recovery.spec.ts`.
+- `xtask_test::stage_gate` existiert nicht, und `workstreams`/`canary_findings` sind
+  keine Berichtsfelder. Die Skizze in Step 1 folgt der Prozessform der Stufe 4
+  (`run_stage_gate_in_the_workspace`, `stage_gate.rs:947`;
+  `stage_four_gate_requires_two_readers_the_browser_matrix_and_the_file_mode`
+  :2873-2890); die beiden Felder kommen additiv hinzu.
+- Von den 19 Ledgerzeilen auf (Stufe 5, `planned`) haben FR-120, FR-121, FR-123,
+  FR-124 und WR-075 ein leeres `primary_acceptance_criterion`
+  (`docs/traceability/v0.1-requirements.csv`, Zeilen 131, 132, 134, 135, 158). Der
+  `evidenced`-Filter (`main.rs:3881-3888`) überspringt solche Zeilen. Die 14 primären
+  AK belegen sie also nicht; das Gate braucht für sie eine eigene Prüfung, etwa
+  über `rows_still_planned(&rows, "5", …)` (:3239).
+- Die Konstante `STALE_ACK_UNAVAILABLE`
+  (`apps/desktop/src-tauri/src/commands/mod.rs:59`) ist seit `be2abfe` Rest und nur
+  noch im Test-Mock `apps/desktop/src/features/writer/WriterPage.test.tsx:466`
+  referenziert.
+- **Rulings vom 13.09.2026 (DRK-250)** — die Zusagen dieses Tasks und der Global
+  Constraints bleiben unverändert; entschieden ist nur Reihenfolge und Zuschnitt:
+  (1) Posture `Unknown` bleibt im Go-live nie grün, auch mit gültigem signiertem
+  Go-live-Dokument. An HEAD `8be0a47` wurde es noch `Confirmed` mit
+  `EA-GOLIVE-POSTURE-DOCUMENTED` (`crates/ea-admin/src/go_live.rs:562-575`); die
+  Korrektur folgt als eigener Commit. Ein dokumentiertes `Unknown` darf eine Sitzung
+  öffnen, `Fail` blockiert, der Stale-Writer verlangt weiter `Pass`.
+  (2) Nativer Clock-Release: `ClockRepairRuntime::release`
+  (`crates/ea-admin/src/operator_runtime/clock_repair.rs:235-243`) liefert nach
+  `recheck()` `Expired`. Der vorbereitete Patch ist für diesen Task (DRK-282)
+  freigegeben, unter RED-first-Nativzeugen, Gegenproben (Pass, Fail, Ablauf,
+  Doppelverbrauch, normaler Reopen) und unabhängigem Security-Review; die
+  Unknown-Erweiterung ist ein eigener Schritt.
+  (3) Escrow-v1.1-Profil
+  (`docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md:3`,
+  Status „proposed") ist in das Folgeticket DRK-318 verschoben (Security-Review vor
+  Code). E1/E2 haben in diesem Plan keinen eigenen Task-Abschnitt; ihre Abnahme und
+  die Reihenfolge „E1/E2 precede T14" stehen in
+  `docs/superpowers/plans/2026-09-08-drk-250-runtime-closure.md:83-91`. Bis DRK-318
+  bleibt WR-075 `planned`, und dieses Gate kann nicht vollständig schließen.
+  (4) Controlled-Network-Archiv: `RecoveryTestRuntime::new` weist
+  `ControlledNetworkPath` ab (`crates/ea-admin/src/recovery_test_runtime.rs:112`);
+  Aufnahme in Stufe 5 oder dokumentierte Grenze wird im Folgeticket DRK-320
+  entschieden.
+  (5) Der erste Stufe-5-PR umfasst Task 8–13 samt dieser Plankorrektur; dieser Task
+  bleibt DRK-282, der native 4→1-Retry aus Task 12 ist DRK-319.
 
 **Files:**
 - Create: `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs`
@@ -1590,8 +1825,9 @@ Produktimplementierung darf nicht als reine Stufe-7-Evidenz verschoben werden.
 - Create: `tests/ea-system-tests/tests/privacy_canaries_admin_recovery_destruction.rs`
 - Create: `docs/traceability/stage-5-gate.md`
 - Modify: `docs/traceability/v0.1-requirements.csv`
-- Modify: `tools/xtask/src/main.rs`
-- Test: `tools/xtask/tests/stage_gate.rs`
+- Modify: `tools/xtask/src/main.rs` (Zweig `run_stage_five_gate`, `STAGE_FIVE_*`-Konstanten, Fehlertext :3946)
+- Modify: `package.json` (Skript `stage-gate:5`)
+- Modify: `tools/xtask/tests/stage_gate.rs` (neuer Stufe-5-Test; Pins :2010-2029 und :554)
 
 **Interfaces:**
 - Consumes: all three Stage 5 workstreams plus Writer/Reader/server.
@@ -1600,13 +1836,20 @@ Produktimplementierung darf nicht als reine Stufe-7-Evidenz verschoben werden.
 - [ ] **Step 1: Write cumulative Stage 5 gate test**
 
 ```rust
+// Skizze in der Prozessform der Stufe 4 (tools/xtask/tests/stage_gate.rs:2873-2890):
+// `xtask stage-gate 5` als Prozess, Auswertung des JSON-Berichts. Die Schluessel
+// `stage_five_workstreams` und `stage_five_canary_findings` sind NEU und additiv.
 #[test]
 fn stage_five_gate_requires_all_workstreams_and_primary_criteria() {
-    let gate = xtask_test::stage_gate(5);
-    assert_eq!(gate.workstreams, ["admin-trust", "recovery-regrant-amendment", "destruction"]);
-    assert_eq!(gate.primary_acceptance_criteria,
-        [11, 12, 18, 24, 29, 30, 35, 40, 41, 44, 47, 49, 52, 53]);
-    assert!(gate.canary_findings.is_empty());
+    let output = run_stage_gate_in_the_workspace("5");
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["stage"], serde_json::json!(5));
+    assert_eq!(report["stage_five_workstreams"],
+        serde_json::json!(["admin-trust", "recovery-regrant-amendment", "destruction"]));
+    assert_eq!(report["stage_five_primary_acceptance_criteria"],
+        serde_json::json!([11, 12, 18, 24, 29, 30, 35, 40, 41, 44, 47, 49, 52, 53]));
+    assert_eq!(report["stage_five_canary_findings"], serde_json::json!([]));
 }
 ```
 
@@ -1629,19 +1872,20 @@ Run:
 ```bash
 cargo run --locked -p xtask -- integration up
 pnpm test:recovery
-cargo test --locked -p ea-system-tests --test e2e_organization_lifecycle --test e2e_recovery_fresh_machine --test e2e_historical_grant --test e2e_destruction -- --test-threads=1
-pnpm --dir apps/desktop exec playwright test tests/e2e/admin-trust.spec.ts tests/e2e/recovery-test.spec.ts tests/e2e/amendment.spec.ts tests/e2e/destruction.spec.ts
-cargo run --locked -p xtask -- test-privacy --scope admin-recovery-destruction
-cargo run --locked -p xtask -- stage-gate 5
+cargo test --locked -p ea-system-tests --test e2e_organization_lifecycle --test e2e_recovery_fresh_machine --test e2e_historical_grant --test e2e_destruction_policy --test e2e_destruction_admission_race --test e2e_destruction_catalog_race -- --test-threads=1
+cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator process_native::destruction:: -- --test-threads=1
+pnpm --dir apps/desktop exec playwright test tests/e2e/admin-trust.spec.ts tests/e2e/recovery.spec.ts tests/e2e/amendment.spec.ts tests/e2e/destruction.spec.ts
+cargo test --locked -p ea-system-tests --test privacy_canaries_admin_recovery_destruction
+pnpm stage-gate:5
 pnpm verify:quick
 cargo run --locked -p xtask -- integration down
 ```
 
-Expected: PASS locally; full native/release/manual evidence remains explicitly open for Stage 7.
+Expected: PASS locally; full native/release/manual evidence remains explicitly open for Stage 7. `pnpm test:recovery` is the full workspace test run; the physical destruction branches run in the CLI `operator` target, not in the three admission system targets.
 
 - [ ] **Step 5: Commit the Stage 5 gate**
 
 ```bash
-git add tests docs/traceability tools/xtask
+git add tests docs/traceability tools/xtask package.json
 git commit -m "test(admin): close administration and Recovery stage"
 ```
