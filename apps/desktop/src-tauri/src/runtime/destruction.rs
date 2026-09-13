@@ -757,15 +757,23 @@ impl DestructionAdministrationPort for NativeDesktopRuntime {
                         ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
                     )
                     .map_err(|error| CommandError::new(error.code()))?
-                } else if let Some(hash) = pending_job(&status, now()?) {
-                    resources.runtime.mark_pending_backup_progress(
-                        id,
-                        hash,
-                        ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
-                    )
-                    .map_err(|error| CommandError::new(error.code()))?
                 } else {
-                    status
+                    let observed_now = now()?;
+                    if let Some(hash) = pending_job(&status, observed_now) {
+                        resources.runtime.mark_pending_backup_progress(
+                            id,
+                            hash,
+                            ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
+                        )
+                        .map_err(|error| CommandError::new(error.code()))?
+                    } else if let Some(hash) = failure_job(&status, observed_now) {
+                        resources
+                            .runtime
+                            .mark_incomplete_progress(id, hash)
+                            .map_err(|error| CommandError::new(error.code()))?
+                    } else {
+                        status
+                    }
                 }
             };
             resources.view(Some(status))
@@ -842,6 +850,54 @@ pub(super) fn pending_job(
         }
     }
     pending.then_some(status.preflight_hash).flatten()
+}
+/// Routing only, the mirror of `pending_job`: an attested Reader/Server backup
+/// duty whose maximum deadline has elapsed. A never attested or negatively
+/// attested duty is ordinary waiting after Start and is not routed, because
+/// state4 stays terminal without a native retry. The native service re-decides
+/// from the exact originals and its own selected time; this grants no authority.
+pub(super) fn failure_job(
+    status: &NativeDestructionStatus,
+    observed_now: ea_types::UnixMillis,
+) -> Option<ObjectHash> {
+    use ea_destruction::{DestructionState, EvidenceReplicaStatus, ManagedReplicaKind};
+    if !matches!(
+        status.state,
+        DestructionState::InProgress | DestructionState::PendingBackupExpiry
+    ) || status.targets.is_empty()
+        || status
+            .targets
+            .iter()
+            .any(|target| target.stub_object_hash.is_none())
+        || !status.replicas.iter().any(|replica| {
+            replica.device_id == status.custodian_device_id
+                && replica.kind == ManagedReplicaKind::Writer
+                && matches!((replica.result, replica.attestation_hash),
+                    (EvidenceReplicaStatus::Successful(success), Some(hash)) if success == hash)
+        })
+    {
+        return None;
+    }
+    let mut overdue = false;
+    for replica in &status.replicas {
+        match (replica.result, replica.attestation_hash) {
+            (EvidenceReplicaStatus::Successful(success), Some(hash)) if success == hash => {}
+            (EvidenceReplicaStatus::PendingBackup, Some(_))
+                if matches!(
+                    replica.kind,
+                    ManagedReplicaKind::Reader | ManagedReplicaKind::SyncServer
+                ) =>
+            {
+                match replica.backup_expiry_at {
+                    Some(expiry) if expiry <= observed_now => overdue = true,
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    overdue.then_some(status.preflight_hash).flatten()
 }
 fn project(value: NativeDestructionStatus) -> Result<DestructionProcessView, CommandError> {
     use ea_destruction::{DestructionState, EvidenceReplicaStatus, ManagedReplicaKind};
@@ -920,6 +976,191 @@ fn project(value: NativeDestructionStatus) -> Result<DestructionProcessView, Com
 #[cfg(test)]
 mod tests {
     use super::Config;
+
+    mod routing {
+        use super::super::{completion_job, failure_job, pending_job};
+        use ea_admin::destruction_runtime::{
+            NativeDestructionReplica, NativeDestructionStatus, NativeDestructionTarget,
+        };
+        use ea_destruction::{DestructionState, EvidenceReplicaStatus, ManagedReplicaKind};
+        use ea_types::{ChainSequence, DestructionId, DeviceId, EntryHash, ObjectHash, UnixMillis};
+
+        const JOB: u8 = 0x30;
+        const NOW: i64 = 2_000;
+        fn hash(n: u8) -> ObjectHash {
+            ObjectHash::try_from(&[n; 32][..]).unwrap()
+        }
+        fn device(n: u8) -> DeviceId {
+            DeviceId::try_from(&[n; 16][..]).unwrap()
+        }
+        fn writer() -> NativeDestructionReplica {
+            NativeDestructionReplica {
+                device_id: device(1),
+                kind: ManagedReplicaKind::Writer,
+                attestation_hash: Some(hash(1)),
+                result: EvidenceReplicaStatus::Successful(hash(1)),
+                backup_expiry_at: None,
+            }
+        }
+        fn remote(
+            n: u8,
+            kind: ManagedReplicaKind,
+            attested: bool,
+            result: EvidenceReplicaStatus,
+            expiry: Option<i64>,
+        ) -> NativeDestructionReplica {
+            NativeDestructionReplica {
+                device_id: device(n),
+                kind,
+                attestation_hash: attested.then(|| hash(n)),
+                result,
+                backup_expiry_at: expiry.map(UnixMillis::new),
+            }
+        }
+        fn backup(n: u8, expiry: i64) -> NativeDestructionReplica {
+            remote(
+                n,
+                ManagedReplicaKind::Reader,
+                true,
+                EvidenceReplicaStatus::PendingBackup,
+                Some(expiry),
+            )
+        }
+        fn status(
+            state: DestructionState,
+            replicas: Vec<NativeDestructionReplica>,
+        ) -> NativeDestructionStatus {
+            NativeDestructionStatus {
+                destruction_id: DestructionId::try_from(&[9; 16][..]).unwrap(),
+                authorization_hash: hash(0x20),
+                state,
+                scope_code: 0,
+                legal_reason_code: 0,
+                targets: vec![NativeDestructionTarget {
+                    entry_hash: EntryHash::try_from(&[0x21; 32][..]).unwrap(),
+                    chain_sequence: ChainSequence::new(1),
+                    stub_object_hash: Some(hash(0x22)),
+                }],
+                controller_device_id: device(2),
+                custodian_device_id: device(1),
+                preflight_hash: Some(hash(JOB)),
+                evidence_entry_hash: None,
+                preflight_report_json: Some("{}".into()),
+                replicas,
+                approver_certificate_hashes: Vec::new(),
+                privacy_decision_enabled: true,
+                policy_hash: hash(0x23),
+            }
+        }
+        fn routes(value: &NativeDestructionStatus) -> (bool, bool, bool) {
+            let now = UnixMillis::new(NOW);
+            (
+                completion_job(value).is_some(),
+                pending_job(value, now).is_some(),
+                failure_job(value, now) == Some(hash(JOB)),
+            )
+        }
+
+        #[test]
+        fn only_an_attested_elapsed_backup_deadline_routes_to_failure() {
+            use DestructionState::{InProgress, PendingBackupExpiry};
+            for state in [InProgress, PendingBackupExpiry] {
+                // Deadline equal to the observation already elapsed.
+                assert_eq!(
+                    routes(&status(state, vec![writer(), backup(3, NOW)])),
+                    (false, false, true)
+                );
+                assert_eq!(
+                    routes(&status(state, vec![writer(), backup(3, NOW + 1)])),
+                    (false, true, false)
+                );
+                // A later second deadline cannot hide the elapsed duty.
+                assert_eq!(
+                    routes(&status(
+                        state,
+                        vec![writer(), backup(3, NOW + 1), backup(4, NOW - 1)]
+                    )),
+                    (false, false, true)
+                );
+            }
+            let server = remote(
+                5,
+                ManagedReplicaKind::SyncServer,
+                true,
+                EvidenceReplicaStatus::PendingBackup,
+                Some(NOW - 1),
+            );
+            assert_eq!(
+                routes(&status(InProgress, vec![writer(), server])),
+                (false, false, true)
+            );
+            let complete = remote(
+                3,
+                ManagedReplicaKind::Reader,
+                true,
+                EvidenceReplicaStatus::Successful(hash(3)),
+                None,
+            );
+            assert_eq!(
+                routes(&status(InProgress, vec![writer(), complete])),
+                (true, false, false)
+            );
+        }
+
+        #[test]
+        fn waiting_negative_terminal_or_incomplete_views_are_not_routed_to_failure() {
+            use DestructionState::{
+                CompleteManagedScope, InProgress, IncompleteUnreachableReplica, Requested,
+            };
+            let never = remote(
+                3,
+                ManagedReplicaKind::Reader,
+                false,
+                EvidenceReplicaStatus::Unreachable,
+                None,
+            );
+            let negative = remote(
+                3,
+                ManagedReplicaKind::Reader,
+                true,
+                EvidenceReplicaStatus::Unreachable,
+                None,
+            );
+            let no_expiry = remote(
+                3,
+                ManagedReplicaKind::Reader,
+                true,
+                EvidenceReplicaStatus::PendingBackup,
+                None,
+            );
+            let writer_backup = remote(
+                3,
+                ManagedReplicaKind::Writer,
+                true,
+                EvidenceReplicaStatus::PendingBackup,
+                Some(NOW - 1),
+            );
+            for other in [never, negative, no_expiry, writer_backup] {
+                assert!(!routes(&status(InProgress, vec![writer(), backup(4, NOW), other])).2);
+            }
+            for state in [
+                Requested,
+                CompleteManagedScope,
+                IncompleteUnreachableReplica,
+            ] {
+                assert!(!routes(&status(state, vec![writer(), backup(3, NOW)])).2);
+            }
+            let mut missing_stub = status(InProgress, vec![writer(), backup(3, NOW)]);
+            missing_stub.targets[0].stub_object_hash = None;
+            assert!(!routes(&missing_stub).2);
+            let mut foreign_custodian = status(InProgress, vec![writer(), backup(3, NOW)]);
+            foreign_custodian.custodian_device_id = device(7);
+            assert!(!routes(&foreign_custodian).2);
+            let mut unbound = status(InProgress, vec![writer(), backup(3, NOW)]);
+            unbound.replicas[0].attestation_hash = Some(hash(0x40));
+            assert!(!routes(&unbound).2);
+        }
+    }
 
     fn config() -> serde_json::Value {
         serde_json::json!({

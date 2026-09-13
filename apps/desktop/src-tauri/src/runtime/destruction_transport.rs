@@ -243,13 +243,27 @@ impl NativeDestructionServerTransport {
         phase!("import.return");
         let (hash, pending) = if let Some(hash) = super::destruction::completion_job(&status) {
             (hash, false)
-        } else if let Some(hash) = super::destruction::pending_job(
-            &status,
-            super::now().map_err(|_| Error::Configuration)?,
-        ) {
-            (hash, true)
         } else {
-            return Ok(status);
+            let observed_now = super::now().map_err(|_| Error::Configuration)?;
+            if let Some(hash) = super::destruction::pending_job(&status, observed_now) {
+                (hash, true)
+            } else if let Some(hash) = super::destruction::failure_job(&status, observed_now) {
+                // The conservative Failure producer deliberately has no delivery
+                // port: missing timely confirmation must be recordable without a
+                // server. No reservation is simulated. Only after the durable
+                // local commit publish the exact originals and import the reply.
+                phase!("failure.begin");
+                native.mark_incomplete_progress(id, hash)?;
+                phase!("failure.publish.begin");
+                let context = native.prepare_server_exchange(id, hash)?;
+                self.admit(&context)?;
+                self.publish(&context)?;
+                let status = self.import(native, &context)?;
+                phase!("failure.return");
+                return Ok(status);
+            } else {
+                return Ok(status);
+            }
         };
         // The imported status only selects the explicit native action. Obtain
         // a fresh authenticated reservation; never substitute NoRegisteredServer.
