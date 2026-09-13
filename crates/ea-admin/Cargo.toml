@@ -75,6 +75,18 @@ zeroize.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+# Die SELBSTKANTE, die `test-support` fuer die eigenen Testziele einschaltet —
+# dieselbe Bauart wie in `crates/ea-draft/Cargo.toml`. Die Fixture-Eingaenge
+# (`RecoveryTestObservation`, `verify_fresh_machine_recovery_test`,
+# `RecoveryTestFreshness::for_testing`) existieren nur unter diesem Merkmal;
+# Lib-Unittests, Integrationsziele und Doctests dieser Crate erreichen sie
+# ueber diese Kante, nicht ueber `--features` auf der Kommandozeile.
+# Entwicklungskanten eines Nicht-Wurzelpakets gehen nie in fremde Graphen ein
+# (Resolver 2): `ea-desktop` und `einsatzarchiv-cli` sehen `ea-admin` im
+# Normalbuild weiterhin OHNE `test-support`.
+# `workspace = true` statt `path = "."`: `tools/xtask/tests/workspace.rs`
+# verlangt fuer jede Kante die geteilte Fassung.
+ea-admin = { workspace = true, features = ["test-support"] }
 ea-writer = { workspace = true, features = ["test-support"] }
 ea-draft = { workspace = true, features = ["test-support"] }
 ea-archive-fs = { workspace = true, features = ["test-support"] }
