@@ -20,11 +20,13 @@
 //! ist `true` NUR, wenn jede `Confirmed` ist. `NotAutomaticallyVerifiable` ist
 //! kein Ja und kein „wahrscheinlich": es ist die Aussage, dass diese Maschine
 //! den Beleg nicht hat. Eine Oberflaeche, die daraus ein Gruen machte, wuerde
-//! den Bericht nach §17.3 in sein Gegenteil verkehren. Eine dokumentierte
-//! Voraussetzung wird deshalb nur mit der separat verifizierten, bei der
-//! Auswertung erneut geprueften Runtime-Admission bestaetigt. Die zugrunde
-//! liegende native Messung bleibt Unknown. Deshalb wird
-//! `production_ready` HIER gerechnet und nicht in TypeScript.
+//! den Bericht nach §17.3 in sein Gegenteil verkehren. Auch eine signiert
+//! dokumentierte Voraussetzung bleibt deshalb `NotAutomaticallyVerifiable`:
+//! die separat verifizierte, bei der Auswertung erneut gepruefte
+//! Runtime-Admission setzt nur den Belegcode `EA-GOLIVE-POSTURE-DOCUMENTED`
+//! und bestaetigt nichts. Sie darf eine Sitzung oeffnen, macht den Go-live aber
+//! nie gruen. Deshalb wird `production_ready` HIER gerechnet und nicht in
+//! TypeScript.
 //!
 //! # Was dieses Modul NICHT tut
 //!
@@ -45,7 +47,7 @@
 
 #[cfg(feature = "test-support")]
 use crate::production_state::ProductionState;
-use ea_key_provider::{DevicePostureReport, PostureRequirement};
+use ea_key_provider::{DevicePostureReport, PostureCheck, PostureRequirement};
 use ea_types::{ChainSequence, UnixMillis};
 use serde::Serialize;
 
@@ -451,7 +453,9 @@ pub fn evaluate_go_live(evidence: &GoLiveEvidence<'_>) -> GoLiveChecklist {
 }
 
 /// Revalidates the runtime-bound documentation without changing raw measurements.
-/// A failure or an expired/changed document never confirms an Unknown row.
+/// No document ever confirms an Unknown row: a currently valid document only
+/// replaces its evidence code with `EA-GOLIVE-POSTURE-DOCUMENTED`, the row stays
+/// `NotAutomaticallyVerifiable` and `production_ready` stays `false`.
 #[must_use]
 pub fn evaluate_go_live_with_posture_admission(
     evidence: &GoLiveEvidence<'_>,
@@ -557,31 +561,44 @@ pub fn evaluate_go_live_with_posture_admission(
         let code = posture_requirement_code(requirement);
         requirements.push(match evidence.device_posture {
             None => GoLiveRequirement::unavailable(code),
-            Some(report) => {
-                let check = report.check(requirement);
-                let documented_unknown = check.is_unknown() && documented & (1 << index) != 0;
-                GoLiveRequirement {
-                    code,
-                    status: if documented_unknown {
-                        GoLiveRequirementStatus::Confirmed
-                    } else if check.is_unknown() {
-                        GoLiveRequirementStatus::NotAutomaticallyVerifiable
-                    } else if check.is_pass() {
-                        GoLiveRequirementStatus::Confirmed
-                    } else {
-                        GoLiveRequirementStatus::NotMet
-                    },
-                    evidence_code: if documented_unknown {
-                        "EA-GOLIVE-POSTURE-DOCUMENTED".to_owned()
-                    } else {
-                        check.evidence_code().to_owned()
-                    },
-                }
-            }
+            Some(report) => posture_row(
+                code,
+                report.check(requirement),
+                documented & (1 << index) != 0,
+            ),
         });
     }
 
     GoLiveChecklist { requirements }
+}
+
+/// Der Belegcode einer `Unknown`-Haltungszeile, deren Voraussetzung ein
+/// gueltiger, bei der Auswertung erneut gepruefter Go-live-Nachweis dokumentiert.
+const POSTURE_DOCUMENTED: &str = "EA-GOLIVE-POSTURE-DOCUMENTED";
+
+/// EINE Haltungszeile aus der Rohmessung und der erneut geprueften Dokumentation.
+///
+/// Der Status folgt AUSSCHLIESSLICH der Rohmessung: `Unknown` bleibt
+/// `NotAutomaticallyVerifiable`, auch wenn ein gueltiger Nachweis die
+/// Voraussetzung dokumentiert (Ruling 2026-09-13, „`Unknown` nie gruen"). Die
+/// Dokumentation ersetzt dann nur den Belegcode als sichtbaren Hinweis.
+fn posture_row(code: &'static str, check: PostureCheck, documented: bool) -> GoLiveRequirement {
+    let documented_unknown = check.is_unknown() && documented;
+    GoLiveRequirement {
+        code,
+        status: if check.is_unknown() {
+            GoLiveRequirementStatus::NotAutomaticallyVerifiable
+        } else if check.is_pass() {
+            GoLiveRequirementStatus::Confirmed
+        } else {
+            GoLiveRequirementStatus::NotMet
+        },
+        evidence_code: if documented_unknown {
+            POSTURE_DOCUMENTED.to_owned()
+        } else {
+            check.evidence_code().to_owned()
+        },
+    }
 }
 
 /// Ob EINE Sicherung dieser Klasse mit mindestens zwei Medien vorliegt.
@@ -589,4 +606,92 @@ fn class_is_backed_up(records: &[KeyBackupRecordV1], class: BackedUpKeyClass) ->
     records
         .iter()
         .any(|record| record.class == class && record.media.len() >= MINIMUM_BACKUP_MEDIA)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Elf bestaetigte Nicht-Haltungszeilen und die vier gegebenen Haltungszeilen.
+    fn checklist_with_posture(rows: [GoLiveRequirement; 4]) -> GoLiveChecklist {
+        let mut requirements: Vec<GoLiveRequirement> = GO_LIVE_REQUIREMENT_CODES[..11]
+            .iter()
+            .map(|code| GoLiveRequirement {
+                code,
+                status: GoLiveRequirementStatus::Confirmed,
+                evidence_code: "EA-GOLIVE-EVIDENCE-FIXTURE".to_owned(),
+            })
+            .collect();
+        requirements.extend(rows);
+        GoLiveChecklist { requirements }
+    }
+
+    /// Ruling 2026-09-13 („Plan wörtlich"): `Unknown` ist im Go-live nie gruen —
+    /// auch nicht mit gueltigem, erneut geprueftem Go-live-Nachweis. Der Nachweis
+    /// bleibt als Belegcode sichtbar und aendert den Status nicht.
+    #[test]
+    fn a_documented_unknown_posture_row_stays_unresolved_and_blocks_production_ready() {
+        for requirement in PostureRequirement::ALL {
+            let code = posture_requirement_code(requirement);
+            let row = posture_row(code, requirement.unknown(), true);
+            assert_eq!(
+                row.status(),
+                GoLiveRequirementStatus::NotAutomaticallyVerifiable,
+                "{code}: dokumentiertes Unknown darf nicht bestaetigt sein"
+            );
+            assert_eq!(row.evidence_code(), POSTURE_DOCUMENTED, "{code}");
+
+            let rows = PostureRequirement::ALL.map(|other| {
+                let other_code = posture_requirement_code(other);
+                if other == requirement {
+                    posture_row(other_code, other.unknown(), true)
+                } else {
+                    posture_row(other_code, other.pass(), false)
+                }
+            });
+            let checklist = checklist_with_posture(rows);
+            assert!(
+                !checklist.production_ready(),
+                "{code}: dokumentiertes Unknown macht nie produktionsbereit"
+            );
+            assert_eq!(
+                checklist
+                    .unresolved()
+                    .map(GoLiveRequirement::code)
+                    .collect::<Vec<_>>(),
+                vec![code]
+            );
+        }
+    }
+
+    /// Die Dokumentation beruehrt weder Pass noch Fail noch undokumentiertes Unknown.
+    #[test]
+    fn documentation_never_changes_pass_fail_or_undocumented_unknown_rows() {
+        for requirement in PostureRequirement::ALL {
+            let code = posture_requirement_code(requirement);
+            for documented in [false, true] {
+                let pass = posture_row(code, requirement.pass(), documented);
+                assert_eq!(pass.status(), GoLiveRequirementStatus::Confirmed);
+                assert_eq!(pass.evidence_code(), requirement.pass().evidence_code());
+
+                let fail = posture_row(code, requirement.fail(), documented);
+                assert_eq!(fail.status(), GoLiveRequirementStatus::NotMet);
+                assert_eq!(fail.evidence_code(), requirement.fail().evidence_code());
+            }
+            let unknown = posture_row(code, requirement.unknown(), false);
+            assert_eq!(
+                unknown.status(),
+                GoLiveRequirementStatus::NotAutomaticallyVerifiable
+            );
+            assert_eq!(
+                unknown.evidence_code(),
+                requirement.unknown().evidence_code()
+            );
+        }
+        let all_pass = checklist_with_posture(
+            PostureRequirement::ALL
+                .map(|r| posture_row(posture_requirement_code(r), r.pass(), false)),
+        );
+        assert!(all_pass.production_ready());
+    }
 }

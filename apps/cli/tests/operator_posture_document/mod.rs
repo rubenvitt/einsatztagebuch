@@ -211,7 +211,7 @@ fn issuance_returns_nothing_without_exact_durable_document_bytes() {
 }
 
 #[test]
-fn documented_admission_confirms_only_live_unknown_rows_and_never_a_changed_measurement() {
+fn documented_admission_marks_only_live_unknown_rows_and_never_confirms_them() {
     use ea_admin::go_live::{
         GoLiveEvidence, GoLiveRequirementStatus, evaluate_go_live_with_posture_admission,
     };
@@ -251,22 +251,28 @@ fn documented_admission_confirms_only_live_unknown_rows_and_never_a_changed_meas
         device_posture: Some(&raw),
     };
     let report = evaluate_go_live_with_posture_admission(&evidence, Some(&admission));
+    // Ruling 2026-09-13 ("Plan wörtlich"): a valid document stays visible as
+    // evidence, but a documented Unknown is never green in Go-live.
     for row in &report.requirements()[11..] {
-        assert_eq!(row.status(), GoLiveRequirementStatus::Confirmed);
+        assert_eq!(
+            row.status(),
+            GoLiveRequirementStatus::NotAutomaticallyVerifiable
+        );
         assert_eq!(row.evidence_code(), "EA-GOLIVE-POSTURE-DOCUMENTED");
     }
     assert!(
         !report.production_ready(),
-        "other missing requirements remain unresolved"
+        "documented Unknown posture rows remain unresolved"
     );
     posture.0.lock().unwrap().automatic_screen_lock =
         PostureRequirement::AutomaticScreenLock.fail();
     let changed = evaluate_go_live_with_posture_admission(&evidence, Some(&admission));
     assert!(
-        changed.requirements()[11..]
-            .iter()
-            .all(|row| row.status() != GoLiveRequirementStatus::Confirmed),
-        "old opaque admission cannot hide a new measured failure"
+        changed.requirements()[11..].iter().all(|row| {
+            row.status() != GoLiveRequirementStatus::Confirmed
+                && row.evidence_code() != "EA-GOLIVE-POSTURE-DOCUMENTED"
+        }),
+        "old opaque admission cannot mark rows documented after a new measured failure"
     );
     assert!(runtime.reauthenticate().is_err());
 }
