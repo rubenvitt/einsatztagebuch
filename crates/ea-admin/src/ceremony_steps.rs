@@ -141,39 +141,6 @@ pub const fn next_step_for_round(
     }
 }
 
-#[cfg(test)]
-mod round_tests {
-    use super::*;
-    use crate::administration_runtime::TrustCeremonyRoundV1;
-    #[test]
-    fn target_publication_never_claims_registry_activation() {
-        let published = next_step_for_round(
-            TrustCeremonyKind::DeviceApprove,
-            TrustCeremonyRoundV1::IssueTarget,
-            TrustCeremonyStep::RootReplyImported,
-        )
-        .unwrap();
-        assert_eq!(format!("{published:?}"), "TargetPublished");
-        assert!(requires_fresh_reauth(published));
-        assert!(
-            next_step_for_round(
-                TrustCeremonyKind::DeviceApprove,
-                TrustCeremonyRoundV1::IssueTarget,
-                published
-            )
-            .is_none()
-        );
-        assert_eq!(
-            next_step_for_round(
-                TrustCeremonyKind::DeviceRevoke,
-                TrustCeremonyRoundV1::ActivateRegistry,
-                TrustCeremonyStep::RootReplyImported
-            ),
-            Some(TrustCeremonyStep::RegistryPublished)
-        );
-    }
-}
-
 /// Ob das ERREICHEN dieses Schritts einen frischen Bedienernachweis verlangt.
 ///
 /// `true` genau fuer [`TrustCeremonyStep::AdminAuthorized`] und
@@ -207,5 +174,38 @@ pub const fn reauth_purpose(kind: TrustCeremonyKind) -> ReauthPurpose {
         | TrustCeremonyKind::DeviceRevoke
         | TrustCeremonyKind::PolicyChange
         | TrustCeremonyKind::WriterTransition => ReauthPurpose::AdminRootCeremony,
+    }
+}
+
+#[cfg(test)]
+mod round_tests {
+    use super::*;
+    use crate::administration_runtime::TrustCeremonyRoundV1;
+    #[test]
+    fn target_publication_never_claims_registry_activation() {
+        let published = next_step_for_round(
+            TrustCeremonyKind::DeviceApprove,
+            TrustCeremonyRoundV1::IssueTarget,
+            TrustCeremonyStep::RootReplyImported,
+        )
+        .unwrap();
+        assert_eq!(format!("{published:?}"), "TargetPublished");
+        assert!(requires_fresh_reauth(published));
+        assert!(
+            next_step_for_round(
+                TrustCeremonyKind::DeviceApprove,
+                TrustCeremonyRoundV1::IssueTarget,
+                published
+            )
+            .is_none()
+        );
+        assert_eq!(
+            next_step_for_round(
+                TrustCeremonyKind::DeviceRevoke,
+                TrustCeremonyRoundV1::ActivateRegistry,
+                TrustCeremonyStep::RootReplyImported
+            ),
+            Some(TrustCeremonyStep::RegistryPublished)
+        );
     }
 }
