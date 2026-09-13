@@ -785,7 +785,9 @@ impl HyperTlsTransport {
         roots: rustls::RootCertStore,
         maximum_response_bytes: usize,
     ) -> Result<Self, SyncClientError> {
-        if maximum_response_bytes == 0 || maximum_response_bytes > ea_sync_protocol::MAX_READER_PAGE_BYTES_V1 {
+        if maximum_response_bytes == 0
+            || maximum_response_bytes > ea_sync_protocol::MAX_READER_PAGE_BYTES_V1
+        {
             return Err(SyncClientError::Protocol);
         }
         let mut transport = Self::new(address, server_name, roots)?;
@@ -884,7 +886,10 @@ impl SyncTransportV1 for HyperTlsTransport {
         let read = tokio::time::timeout(
             core::time::Duration::from_millis(REQUEST_TIMEOUT_MS_V1),
             async {
-                let response = sender.send_request(outgoing).await.map_err(|_| TransportErrorV1::Timeout)?;
+                let response = sender
+                    .send_request(outgoing)
+                    .await
+                    .map_err(|_| TransportErrorV1::Timeout)?;
                 let status = response.status().as_u16();
                 let body = response::read(response.into_body(), self.response_limit).await?;
                 Ok::<_, TransportErrorV1>((status, body))

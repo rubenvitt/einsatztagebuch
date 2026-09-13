@@ -71,28 +71,44 @@ impl SqliteCommitStore {
         maximum_objects: u64,
         maximum_bytes: u64,
     ) -> Result<Self, ArchiveBackendError> {
-        let objects = i64::try_from(maximum_objects).ok().filter(|n| *n > 0)
+        let objects = i64::try_from(maximum_objects)
+            .ok()
+            .filter(|n| *n > 0)
             .ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
-        let bytes = i64::try_from(maximum_bytes).ok().filter(|n| *n > 0)
+        let bytes = i64::try_from(maximum_bytes)
+            .ok()
+            .filter(|n| *n > 0)
             .ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
-        if !database.has_migration(16).map_err(|_| ArchiveBackendError::Io)? {
+        if !database
+            .has_migration(16)
+            .map_err(|_| ArchiveBackendError::Io)?
+        {
             return Err(ArchiveBackendError::MissingLocalCommitComponent);
         }
-        let row = database.query_row(
-            "SELECT object_limit,byte_limit FROM local_commit_scope WHERE namespace=?1",
-            &[StoreValue::Blob(namespace.as_bytes().to_vec())],
-        ).map_err(|_| ArchiveBackendError::Io)?
+        let row = database
+            .query_row(
+                "SELECT object_limit,byte_limit FROM local_commit_scope WHERE namespace=?1",
+                &[StoreValue::Blob(namespace.as_bytes().to_vec())],
+            )
+            .map_err(|_| ArchiveBackendError::Io)?
             .ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
         if row.integer(0).map_err(|_| ArchiveBackendError::Io)? != objects
             || row.integer(1).map_err(|_| ArchiveBackendError::Io)? != bytes
         {
             return Err(ArchiveBackendError::ByteConflict);
         }
-        Ok(Self { database, namespace })
+        Ok(Self {
+            database,
+            namespace,
+        })
     }
 
-    pub(crate) fn database(&self) -> &Arc<EncryptedDatabase> { &self.database }
-    pub(crate) fn namespace(&self) -> Hash32 { self.namespace }
+    pub(crate) fn database(&self) -> &Arc<EncryptedDatabase> {
+        &self.database
+    }
+    pub(crate) fn namespace(&self) -> Hash32 {
+        self.namespace
+    }
     pub(crate) fn params(&self, relative: &str) -> Result<Vec<StoreValue>, ArchiveBackendError> {
         validate_path(relative)?;
         Ok(vec![
@@ -143,7 +159,9 @@ impl SqliteCommitStore {
 }
 impl AtRestEncryptedStoreV1 for SqliteCommitStore {
     fn put(&self, relative: &str, bytes: &[u8]) -> Result<(), ArchiveBackendError> {
-        self.database.transaction::<_, StorageFailure>(|tx| self.put_in(tx,relative,bytes)).map_err(|error|error.0)
+        self.database
+            .transaction::<_, StorageFailure>(|tx| self.put_in(tx, relative, bytes))
+            .map_err(|error| error.0)
     }
 
     fn get(&self, relative: &str) -> Option<Vec<u8>> {
@@ -166,34 +184,63 @@ impl AtRestEncryptedStoreV1 for SqliteCommitStore {
 }
 
 impl SqliteCommitStore {
-    pub(crate) fn put_in(&self, tx:&StoreTransaction<'_>, relative:&str, bytes:&[u8]) -> Result<(),StorageFailure> {
+    pub(crate) fn put_in(
+        &self,
+        tx: &StoreTransaction<'_>,
+        relative: &str,
+        bytes: &[u8],
+    ) -> Result<(), StorageFailure> {
         let mut params = self.params(relative).map_err(StorageFailure)?;
         let probe = relative == AT_REST_PROBE_RELATIVE_V1;
         if probe && bytes.len() > 65_536 {
             return Err(StorageFailure(ArchiveBackendError::Path));
         }
-            let row = if probe {
-                tx.query_row("SELECT probe_bytes FROM local_commit_probe WHERE namespace=?1", &params[..1])?
+        let row = if probe {
+            tx.query_row(
+                "SELECT probe_bytes FROM local_commit_probe WHERE namespace=?1",
+                &params[..1],
+            )?
+        } else {
+            tx.query_row("SELECT exact_bytes FROM local_commit_object WHERE namespace=?1 AND relative_path=?2", &params)?
+        };
+        if let Some(row) = row {
+            return if row.blob(0)? == bytes {
+                Ok(())
             } else {
-                tx.query_row("SELECT exact_bytes FROM local_commit_object WHERE namespace=?1 AND relative_path=?2", &params)?
+                Err(StorageFailure(ArchiveBackendError::ByteConflict))
             };
-            if let Some(row) = row {
-                return if row.blob(0)? == bytes { Ok(()) } else { Err(StorageFailure(ArchiveBackendError::ByteConflict)) };
-            }
-            if probe {
-                tx.execute("INSERT INTO local_commit_probe(namespace,probe_bytes) VALUES(?1,?2)", &[params[0].clone(), StoreValue::Blob(bytes.to_vec())])?;
-                return Ok(());
-            }
-            let limits = tx.query_row("SELECT object_limit,byte_limit FROM local_commit_scope WHERE namespace=?1", &params[..1])?.ok_or(StoreError::Shape)?;
-            let used = tx.query_row("SELECT count(*),coalesce(sum(length(exact_bytes)),0) FROM local_commit_object WHERE namespace=?1", &params[..1])?.ok_or(StoreError::Shape)?;
-            let length = i64::try_from(bytes.len()).map_err(|_| StorageFailure(ArchiveBackendError::PendingPublication))?;
-            let maximum_bytes = limits.integer(1)?;
-            if used.integer(0)? >= limits.integer(0)? || used.integer(1)?.checked_add(length).is_none_or(|total| total > maximum_bytes) {
-                return Err(StorageFailure(ArchiveBackendError::PendingPublication));
-            }
-            params.push(StoreValue::Blob(bytes.to_vec()));
-            tx.execute("INSERT INTO local_commit_object(namespace,relative_path,exact_bytes) VALUES(?1,?2,?3)", &params)?;
-            Ok(())
+        }
+        if probe {
+            tx.execute(
+                "INSERT INTO local_commit_probe(namespace,probe_bytes) VALUES(?1,?2)",
+                &[params[0].clone(), StoreValue::Blob(bytes.to_vec())],
+            )?;
+            return Ok(());
+        }
+        let limits = tx
+            .query_row(
+                "SELECT object_limit,byte_limit FROM local_commit_scope WHERE namespace=?1",
+                &params[..1],
+            )?
+            .ok_or(StoreError::Shape)?;
+        let used = tx.query_row("SELECT count(*),coalesce(sum(length(exact_bytes)),0) FROM local_commit_object WHERE namespace=?1", &params[..1])?.ok_or(StoreError::Shape)?;
+        let length = i64::try_from(bytes.len())
+            .map_err(|_| StorageFailure(ArchiveBackendError::PendingPublication))?;
+        let maximum_bytes = limits.integer(1)?;
+        if used.integer(0)? >= limits.integer(0)?
+            || used
+                .integer(1)?
+                .checked_add(length)
+                .is_none_or(|total| total > maximum_bytes)
+        {
+            return Err(StorageFailure(ArchiveBackendError::PendingPublication));
+        }
+        params.push(StoreValue::Blob(bytes.to_vec()));
+        tx.execute(
+            "INSERT INTO local_commit_object(namespace,relative_path,exact_bytes) VALUES(?1,?2,?3)",
+            &params,
+        )?;
+        Ok(())
     }
     fn physical_bytes(&self) -> Option<Vec<u8>> {
         // The compatibility diagnostic is bounded. Production admission uses
@@ -234,7 +281,6 @@ impl SqliteCommitStore {
         }
         (observed > 0).then_some(false)
     }
-
 }
 
 fn validate_path(relative: &str) -> Result<(), ArchiveBackendError> {

@@ -1,9 +1,9 @@
 //! Native operator composition from one frozen, completely verified archive.
-pub mod writer;
-pub mod clock_repair;
-pub mod prepared_diagnosis;
 mod acquisition;
+pub mod clock_repair;
 pub(crate) mod destruction_authority;
+pub mod prepared_diagnosis;
+pub mod writer;
 use crate::clock_release::{
     ClockReleaseAvailability, ClockReleaseService, ClockReleaseWorkflowError,
 };
@@ -480,7 +480,9 @@ impl OperatorRuntime {
             posture,
         )?;
         #[cfg(feature = "test-support")]
-        if let Some(profile) = &profile { profile.mark("resources-return"); }
+        if let Some(profile) = &profile {
+            profile.mark("resources-return");
+        }
         let key = TrustStateKey {
             organization_id: snapshot.anchor.organization_id(),
             device_id,
@@ -488,7 +490,9 @@ impl OperatorRuntime {
         let slot = role_slot(config.role)?;
         let (head, trust) = select_current(&snapshot, &mut store, key, now)?;
         #[cfg(feature = "test-support")]
-        if let Some(profile) = &profile { profile.mark("select-return"); }
+        if let Some(profile) = &profile {
+            profile.mark("select-return");
+        }
         let public = native
             .public_key(slot)?
             .ok_or(OperatorRuntimeError::SignerMismatch)?;
@@ -519,7 +523,9 @@ impl OperatorRuntime {
         // measured posture is unresolved. Privileged consumers use ensure_current.
         runtime.ensure_fresh_context()?;
         #[cfg(feature = "test-support")]
-        if let Some(profile) = &profile { profile.mark("identity-return"); }
+        if let Some(profile) = &profile {
+            profile.mark("identity-return");
+        }
         Ok(runtime)
     }
     pub fn config(&self) -> &OperatorRuntimeConfig {
@@ -582,7 +588,10 @@ impl OperatorRuntime {
         self.ensure_same_authority_as(&fresh)
     }
 
-    pub(crate) fn ensure_same_authority_as(&self, fresh: &Self) -> Result<(), OperatorRuntimeError> {
+    pub(crate) fn ensure_same_authority_as(
+        &self,
+        fresh: &Self,
+    ) -> Result<(), OperatorRuntimeError> {
         if fresh.head.registry_head_hash() != self.head.registry_head_hash()
             || fresh.head.registry_version() != self.head.registry_version()
             || fresh.next_sequence() != self.next_sequence()
@@ -690,7 +699,9 @@ impl OperatorRuntime {
     pub fn reopened_for_action(&self) -> Result<Self, OperatorRuntimeError> {
         #[cfg(feature = "test-support")]
         let _profile = runtime_profile::Span::start(
-            "reopen", self.config.role, Some(std::panic::Location::caller()),
+            "reopen",
+            self.config.role,
+            Some(std::panic::Location::caller()),
         );
         self.native.ensure_session_active()?;
         Self::acquire_using(
@@ -1114,7 +1125,9 @@ fn open_resources(
     let opened = Instant::now();
     let snapshot = OperatorArchiveSnapshot::open(&config.archive_directory, anchor_path, now)?;
     #[cfg(feature = "test-support")]
-    if let Some(profile) = &profile { profile.mark("snapshot-return"); }
+    if let Some(profile) = &profile {
+        profile.mark("snapshot-return");
+    }
     // The hash identifies exact parsed bytes; device/role become authoritative
     // only after their active certificate and native signing key are checked.
     let certificate = snapshot
@@ -1151,14 +1164,18 @@ fn open_resources(
         )?;
     }
     #[cfg(feature = "test-support")]
-    if let Some(profile) = &profile { profile.mark("database-begin"); }
+    if let Some(profile) = &profile {
+        profile.mark("database-begin");
+    }
     let database = Arc::new(if exists {
         EncryptedDatabase::open_existing(&config.database_path, signer.as_ref(), &key)?
     } else {
         EncryptedDatabase::open(&config.database_path, signer.as_ref(), &key)?
     });
     #[cfg(feature = "test-support")]
-    if let Some(profile) = &profile { profile.mark("database-return"); }
+    if let Some(profile) = &profile {
+        profile.mark("database-return");
+    }
     let key = TrustStateKey {
         organization_id: snapshot.anchor.organization_id(),
         device_id,
@@ -1171,7 +1188,9 @@ fn open_resources(
         UnixMillis::new(0),
     )?;
     #[cfg(feature = "test-support")]
-    if let Some(profile) = &profile { profile.mark("store-return"); }
+    if let Some(profile) = &profile {
+        profile.mark("store-return");
+    }
     Ok(RuntimeResources {
         config,
         snapshot,
@@ -1191,7 +1210,11 @@ fn open_resources(
 #[cfg(feature = "test-support")]
 mod runtime_profile {
     use super::OperatorRoleV1;
-    use std::{cell::Cell, sync::atomic::{AtomicU64, Ordering}, time::Instant};
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicU64, Ordering},
+        time::Instant,
+    };
     static NEXT: AtomicU64 = AtomicU64::new(1);
     thread_local! { static CURRENT: Cell<u64> = const { Cell::new(0) }; }
     pub(super) struct Span {
@@ -1208,7 +1231,10 @@ mod runtime_profile {
             caller: Option<&'static std::panic::Location<'static>>,
         ) -> Option<Self> {
             if std::env::var_os("EA_TEST_NATIVE_RESUME_PHASES").as_deref()
-                != Some(std::ffi::OsStr::new("1")) { return None; }
+                != Some(std::ffi::OsStr::new("1"))
+            {
+                return None;
+            }
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
             let parent = CURRENT.replace(id);
             let role = match role {
@@ -1216,7 +1242,13 @@ mod runtime_profile {
                 OperatorRoleV1::Writer => "writer",
                 _ => "other",
             };
-            let span = Self { id, parent, label, role, started: Instant::now() };
+            let span = Self {
+                id,
+                parent,
+                label,
+                role,
+                started: Instant::now(),
+            };
             let (source, line) = caller.map_or(("none", 0), |caller| {
                 let source = if caller.file().ends_with("destruction_runtime/exchange.rs") {
                     "exchange"
@@ -1224,7 +1256,9 @@ mod runtime_profile {
                     "destruction"
                 } else if caller.file().ends_with("operator_runtime.rs") {
                     "runtime"
-                } else { "other" };
+                } else {
+                    "other"
+                };
                 (source, caller.line())
             });
             eprintln!("runtime-profile {id} {parent} {role} {label} caller {source} {line}");
@@ -1232,8 +1266,14 @@ mod runtime_profile {
             Some(span)
         }
         pub(super) fn mark(&self, stage: &'static str) {
-            eprintln!("runtime-profile {} {} {} {} {stage} {}",
-                self.id, self.parent, self.role, self.label, self.started.elapsed().as_micros());
+            eprintln!(
+                "runtime-profile {} {} {} {} {stage} {}",
+                self.id,
+                self.parent,
+                self.role,
+                self.label,
+                self.started.elapsed().as_micros()
+            );
         }
     }
     impl Drop for Span {

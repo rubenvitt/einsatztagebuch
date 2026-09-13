@@ -36,9 +36,9 @@ use std::{
 use ea_crypto::{CanonicalPublicCoseKey, SecretBytes, SecretVec};
 use ea_recovery::{
     ContainedKeyKind, EncryptedKeyContainer, ExitCode, KeySourceKind, KeySourceSpec,
-    KeySourceSpecError, MAX_SECRET_FILE_BYTES_V1, PKCS11_KEY_ID_MAX_BYTES,
-    RecoveryError, exit_code_for_error, load_recipient_key, read_secret_file,
-    resolve_recipient_key, resolve_signing_key,
+    KeySourceSpecError, MAX_SECRET_FILE_BYTES_V1, PKCS11_KEY_ID_MAX_BYTES, RecoveryError,
+    exit_code_for_error, load_recipient_key, read_secret_file, resolve_recipient_key,
+    resolve_signing_key,
 };
 
 use support::temp_dir;
@@ -1219,7 +1219,13 @@ fn a_pkcs11_source_refuses_an_invalid_module_after_checking_the_pin_file_first()
         let Err(error) = resolve(&spec_for(module.clone(), pin_file.clone())) else {
             panic!("invalid native module must be refused");
         };
-        assert!(matches!(error, RecoveryError::Pkcs11Provider(ea_recovery::Pkcs11ProviderError::Unavailable)), "war {error}");
+        assert!(
+            matches!(
+                error,
+                RecoveryError::Pkcs11Provider(ea_recovery::Pkcs11ProviderError::Unavailable)
+            ),
+            "war {error}"
+        );
         assert_eq!(exit_code_for_error(&error), ExitCode::Unsupported);
         assert_eq!(error.code(), "EA-RECOVERY-PKCS11-UNAVAILABLE");
     }

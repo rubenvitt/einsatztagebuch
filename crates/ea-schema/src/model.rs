@@ -111,7 +111,8 @@ impl OperatorSnapshotV1 {
         salt: [u8; 32],
         operator_binding_object_hash: ObjectHash,
     ) -> Result<Self, SchemaError> {
-        let (display_name, function_label) = Self::normalize_profile_texts(display_name, function_label);
+        let (display_name, function_label) =
+            Self::normalize_profile_texts(display_name, function_label);
         Ok(Self {
             organization_id,
             operator_subject_id,

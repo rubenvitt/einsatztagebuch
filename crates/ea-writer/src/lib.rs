@@ -64,7 +64,7 @@ mod recover;
 mod stale_registry;
 
 pub use amendment::{AmendmentContentV1, AmendmentInputV1, OriginalReferenceV1};
-pub use content::{KeyTransitionInputV1,DestructionEvidenceInputV1};
+pub use content::{DestructionEvidenceInputV1, KeyTransitionInputV1};
 pub use entropy::EntropyDraws;
 #[cfg(any(test, feature = "test-support"))]
 pub use entropy::{entropy_draws, reset_entropy_draws};

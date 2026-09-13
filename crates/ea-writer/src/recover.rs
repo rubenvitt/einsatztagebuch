@@ -135,10 +135,14 @@ impl WriterService<'_> {
         transaction.verify(marker.as_bytes())?;
         if let Some(bound) = bound {
             ea_destruction::SqliteDestructionJobs::new(self.incident_numbers.database_handle())
-                .require_prepared_evidence_source(&transaction.entry_bytes, bound, self.source, self.backend)
+                .require_prepared_evidence_source(
+                    &transaction.entry_bytes,
+                    bound,
+                    self.source,
+                    self.backend,
+                )
                 .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
         }
-
 
         // Der ZEUGE der Grenze ist der ENTWURF SELBST, und nicht ein Feld der
         // Marke: laesst er sich laden, war sein `draftDEK` da und

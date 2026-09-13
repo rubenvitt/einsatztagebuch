@@ -1237,22 +1237,54 @@ pub fn verify_historical_registry_authority(
 pub(crate) fn registry_publication_predecessor(
     trust: &VerifiedTrust,
     target: ObjectHash,
-) -> Result<(PreviousHeadState, ChainSequence, RegistryEventFieldsV1, ObjectHash), RegistryError> {
+) -> Result<
+    (
+        PreviousHeadState,
+        ChainSequence,
+        RegistryEventFieldsV1,
+        ObjectHash,
+    ),
+    RegistryError,
+> {
     let topology = RegistryTopology::build(trust)?;
     let event = load_registry_event(&trust.inner.catalog, target)?;
-    let previous_version = event.fields.registry_version.get().checked_sub(1)
-        .filter(|version| *version > 0).ok_or(RegistryError::Rollback)?;
-    let previous_hash = event.fields.previous_registry_hash.ok_or(RegistryError::Previous)?;
+    let previous_version = event
+        .fields
+        .registry_version
+        .get()
+        .checked_sub(1)
+        .filter(|version| *version > 0)
+        .ok_or(RegistryError::Rollback)?;
+    let previous_hash = event
+        .fields
+        .previous_registry_hash
+        .ok_or(RegistryError::Previous)?;
     let mut state = trust.previous_head().clone();
     let mut replay = AdminAuthorizationReplay::default();
-    replay_to_pin(trust, &topology, &mut state, &mut replay,
-        RegistryHeadPin::new(RegistryVersion::new(previous_version), ObjectHash::from(previous_hash)))?;
-    let found = topology.exact(event.fields.registry_version, Some(previous_hash))?
+    replay_to_pin(
+        trust,
+        &topology,
+        &mut state,
+        &mut replay,
+        RegistryHeadPin::new(
+            RegistryVersion::new(previous_version),
+            ObjectHash::from(previous_hash),
+        ),
+    )?;
+    let found = topology
+        .exact(event.fields.registry_version, Some(previous_hash))?
         .ok_or(RegistryError::Gap)?;
-    if found.object_hash != target { return Err(RegistryError::Fork); }
+    if found.object_hash != target {
+        return Err(RegistryError::Fork);
+    }
     let mut applied = state.clone();
     let sequence = verify_and_apply_registry_event(trust, &mut applied, &event, &mut replay)?;
-    Ok((state, sequence, event.fields, event.authorization_object_hash))
+    Ok((
+        state,
+        sequence,
+        event.fields,
+        event.authorization_object_hash,
+    ))
 }
 
 /// Private original context only for the exact direct-publication audit.
@@ -1261,23 +1293,63 @@ pub(crate) fn direct_publication_authority(
     trust: &VerifiedTrust,
     target_hash: ObjectHash,
 ) -> Result<(PreviousHeadState, ChainSequence, ObjectHash), RegistryError> {
-    let target=trust.inner.catalog.get(&target_hash).ok_or(TrustError::Source)?;
-    let (sequence,authorization_hash)=match target.value().decoded_payload().map_err(|_|TrustError::Source)? {
+    let target = trust
+        .inner
+        .catalog
+        .get(&target_hash)
+        .ok_or(TrustError::Source)?;
+    let (sequence, authorization_hash) = match target
+        .value()
+        .decoded_payload()
+        .map_err(|_| TrustError::Source)?
+    {
         DecodedTrustPayloadV1::AuthorizedDevice(core)
-            if core.fields().certificate_kind!=CertificateKindV1::OrganizationAdmin=>
-            (core.fields().effective_from_sequence,core.authorization_object_hash()),
-        DecodedTrustPayloadV1::Policy(core)=>(core.fields().effective_from_sequence,core.authorization_object_hash()),
-        DecodedTrustPayloadV1::WriterTransition(core)=>(core.fields().effective_from_sequence,core.authorization_object_hash()),
-        _=>return Err(TrustError::ActionMismatch.into()),
+            if core.fields().certificate_kind != CertificateKindV1::OrganizationAdmin =>
+        {
+            (
+                core.fields().effective_from_sequence,
+                core.authorization_object_hash(),
+            )
+        }
+        DecodedTrustPayloadV1::Policy(core) => (
+            core.fields().effective_from_sequence,
+            core.authorization_object_hash(),
+        ),
+        DecodedTrustPayloadV1::WriterTransition(core) => (
+            core.fields().effective_from_sequence,
+            core.authorization_object_hash(),
+        ),
+        _ => return Err(TrustError::ActionMismatch.into()),
     };
-    let authorization=trust.inner.catalog.get(&authorization_hash).ok_or(TrustError::Source)?;
-    let DecodedTrustPayloadV1::OrganizationAdminAuthorization(fields)=authorization.value().decoded_payload().map_err(|_|TrustError::Source)? else {return Err(TrustError::ActionMismatch.into())};
-    let topology=RegistryTopology::build(trust)?;
-    let mut state=trust.previous_head().clone();
-    let mut replay=AdminAuthorizationReplay::default();
-    replay_to_pin(trust,&topology,&mut state,&mut replay,RegistryHeadPin::new(fields.registry_version,ObjectHash::from(fields.registry_head_hash)))?;
-    if sequence<state.effective_from_sequence || sequence>state.valid_through_sequence {return Err(RegistryError::SequenceLease)}
-    Ok((state,sequence,authorization_hash))
+    let authorization = trust
+        .inner
+        .catalog
+        .get(&authorization_hash)
+        .ok_or(TrustError::Source)?;
+    let DecodedTrustPayloadV1::OrganizationAdminAuthorization(fields) = authorization
+        .value()
+        .decoded_payload()
+        .map_err(|_| TrustError::Source)?
+    else {
+        return Err(TrustError::ActionMismatch.into());
+    };
+    let topology = RegistryTopology::build(trust)?;
+    let mut state = trust.previous_head().clone();
+    let mut replay = AdminAuthorizationReplay::default();
+    replay_to_pin(
+        trust,
+        &topology,
+        &mut state,
+        &mut replay,
+        RegistryHeadPin::new(
+            fields.registry_version,
+            ObjectHash::from(fields.registry_head_hash),
+        ),
+    )?;
+    if sequence < state.effective_from_sequence || sequence > state.valid_through_sequence {
+        return Err(RegistryError::SequenceLease);
+    }
+    Ok((state, sequence, authorization_hash))
 }
 
 fn replay_to_pin(

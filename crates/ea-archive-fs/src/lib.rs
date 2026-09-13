@@ -30,15 +30,15 @@ mod local_path;
 mod lock_diagnosis;
 mod profile_migration;
 mod publication_queue;
-mod sqlcipher_commit;
 mod sqlcipher_backend;
+mod sqlcipher_commit;
 pub use sqlcipher_backend::SqlcipherArchiveBackend;
 pub use sqlcipher_commit::SqliteCommitStore;
 
 pub use bundle::{BundleExportReport, open_archive_bundle, write_archive_bundle};
 pub use controlled_network::{
-    AtRestEncryptedStoreV1, ControlledNetworkBackend, ControlledNetworkLocalComponentV1, LocalCommitComponentV1,
-    ProvenLocalCommitComponentV1,
+    AtRestEncryptedStoreV1, ControlledNetworkBackend, ControlledNetworkLocalComponentV1,
+    LocalCommitComponentV1, ProvenLocalCommitComponentV1,
 };
 // Der Container selbst lebt seit dem Umzug in `ea-archive`, weil er kein
 // `std::fs` beruehrt und im Datei-Modus des Web-Readers im wasm32-Ziel laeuft.

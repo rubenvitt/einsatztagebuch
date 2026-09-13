@@ -68,7 +68,8 @@ mod destruction;
 mod recovery;
 pub use destruction::{
     DestructionAdministrationView, DestructionEvidenceReviewView, DestructionPreflightView,
-    DestructionProcessView, DestructionReplicaView, DestructionTargetView, DestructionReaderDeliveryView,
+    DestructionProcessView, DestructionReaderDeliveryView, DestructionReplicaView,
+    DestructionTargetView,
 };
 pub use ea_writer::{FinalizationPhase, StaleDecision};
 pub use recovery::{

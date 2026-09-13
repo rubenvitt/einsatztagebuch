@@ -102,7 +102,12 @@ fn fresh_registry() -> RegistryFreshness {
 }
 
 fn fresh_recovery_test(state: &ProductionState) -> RecoveryTestFreshness<'_> {
-    RecoveryTestFreshness::for_testing(state, UnixMillis::new(NOW.get() - 3_600_000), 30 * 86_400_000, NOW)
+    RecoveryTestFreshness::for_testing(
+        state,
+        UnixMillis::new(NOW.get() - 3_600_000),
+        30 * 86_400_000,
+        NOW,
+    )
 }
 
 /// Die Kulisse eines VOLLSTAENDIG belegten Bestands; jeder Zeuge veraendert
@@ -448,7 +453,12 @@ fn a_stale_or_future_recovery_test_is_not_met() {
         UnixMillis::new(NOW.get() + 1),
     ] {
         let checklist = evaluate_go_live(&GoLiveEvidence {
-            last_recovery_test: Some(RecoveryTestFreshness::for_testing(&scene.state,completed_at,30 * 86_400_000,NOW)),
+            last_recovery_test: Some(RecoveryTestFreshness::for_testing(
+                &scene.state,
+                completed_at,
+                30 * 86_400_000,
+                NOW,
+            )),
             ..scene.evidence()
         });
         assert_eq!(
@@ -459,7 +469,12 @@ fn a_stale_or_future_recovery_test_is_not_met() {
     }
     // Genau am Intervall ist noch frisch.
     let checklist = evaluate_go_live(&GoLiveEvidence {
-        last_recovery_test: Some(RecoveryTestFreshness::for_testing(&scene.state,UnixMillis::new(NOW.get() - 30 * 86_400_000),30 * 86_400_000,NOW)),
+        last_recovery_test: Some(RecoveryTestFreshness::for_testing(
+            &scene.state,
+            UnixMillis::new(NOW.get() - 30 * 86_400_000),
+            30 * 86_400_000,
+            NOW,
+        )),
         ..scene.evidence()
     });
     assert_eq!(

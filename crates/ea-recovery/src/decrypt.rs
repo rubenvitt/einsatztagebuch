@@ -52,8 +52,8 @@ use std::{
 use ea_archive::{ArchiveBlob, ArchiveError, ArchiveSource as _};
 use ea_crypto::{
     AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, HPKE_ENCAPSULATED_KEY_SIZE,
-    HPKE_WRAPPED_CEK_SIZE, HpkeRecipient, HpkeRecipientPrivateKey, HpkeSealed, SecretBytes, SecretVec, aead_open,
-    hpke_aad, hpke_info, hpke_open, payload_aad,
+    HPKE_WRAPPED_CEK_SIZE, HpkeRecipient, HpkeRecipientPrivateKey, HpkeSealed, SecretBytes,
+    SecretVec, aead_open, hpke_aad, hpke_info, hpke_open, payload_aad,
 };
 use ea_format::{
     EntryPackageV1, GrantBodyV1, GrantKindV1, GrantV1, Parsed, ParsedArchiveObject,
@@ -275,9 +275,7 @@ pub(crate) fn load_key_material(
 ///
 /// [`RecoveryError::KeySource`], wenn der oeffentliche Punkt kein kanonischer
 /// COSE-Schluessel ist.
-pub fn recipient_key_thumbprint(
-    key: &dyn HpkeRecipient,
-) -> Result<KeyThumbprint, RecoveryError> {
+pub fn recipient_key_thumbprint(key: &dyn HpkeRecipient) -> Result<KeyThumbprint, RecoveryError> {
     Ok(CanonicalPublicCoseKey::x25519(*key.public_key().as_bytes())
         .map_err(|_| RecoveryError::KeySource)?
         .thumbprint())

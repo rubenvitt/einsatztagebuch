@@ -160,7 +160,7 @@ impl WriterError {
         match self {
             Self::OriginalIdentityMissing => "EA-WRITER-ORIGINAL-IDENTITY-MISSING",
             Self::OriginalIdentityMismatch => "EA-WRITER-ORIGINAL-IDENTITY-MISMATCH",
-            Self::DestructionEvidenceInvalid=>"EA-WRITER-DESTRUCTION-EVIDENCE-INVALID",
+            Self::DestructionEvidenceInvalid => "EA-WRITER-DESTRUCTION-EVIDENCE-INVALID",
             Self::OriginalArchiveUnverified => "EA-WRITER-ORIGINAL-ARCHIVE-UNVERIFIED",
             Self::ChainHeadUnusable(_) => "EA-WRITER-CHAIN-HEAD-UNUSABLE",
             Self::RollbackDetected => "EA-WRITER-ROLLBACK-DETECTED",

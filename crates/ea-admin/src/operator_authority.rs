@@ -413,7 +413,13 @@ fn prepare_request_file(
         Some(reply) => Some(reply),
         None => match begin_request(database, &bytes) {
             Err(AuthorityError::Uncertain)
-                if matches!(payload.op.as_str(), "authorize-target" | "admin-trust-target") => None,
+                if matches!(
+                    payload.op.as_str(),
+                    "authorize-target" | "admin-trust-target"
+                ) =>
+            {
+                None
+            }
             other => other?,
         },
     };
@@ -454,7 +460,11 @@ fn process_file(
         None if payload.op == "admin-trust-target" => {
             let session = runtime.reauthenticate()?;
             crate::administration_runtime::root_exchange::authorize(
-                runtime, target, &request, &payload.args, &session,
+                runtime,
+                target,
+                &request,
+                &payload.args,
+                &session,
             )?
         }
         None if payload.op == "authorize-target" => {

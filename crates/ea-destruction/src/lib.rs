@@ -3,9 +3,12 @@
 //! service atomically stores the native-authorized request and its signed audit.
 //! Execution and managed-replica completion evidence belong to the executor.
 mod authorization;
-mod original_authority;
 mod imported_preflight;
-pub use imported_preflight::{VerifiedImportedPreflight, ImportedPreflightTarget, PreflightTargetContext, preflight_target_contexts};
+mod original_authority;
+pub use imported_preflight::{
+    ImportedPreflightTarget, PreflightTargetContext, VerifiedImportedPreflight,
+    preflight_target_contexts,
+};
 mod attestation;
 mod barrier;
 mod event;
@@ -20,21 +23,33 @@ mod reconstruct;
 mod service;
 mod state;
 mod stub;
-pub use authorization::{
-    VerifiedDestructionAuthorization, VerifiedDestructionTarget, verify_authorization, verify_authorization_historical,
+pub use attestation::{
+    ManagedReplicaKind, VerifiedDeletionAttestation, verify_attestation_historical,
 };
-pub use barrier::{ConfirmedDeliveryBarrier, DeliveryBarrierEvidence, ServerReservationPort, confirm_delivery_barrier, confirm_no_registered_server};
-pub use attestation::{ManagedReplicaKind, VerifiedDeletionAttestation, verify_attestation_historical};
+pub use authorization::{
+    VerifiedDestructionAuthorization, VerifiedDestructionTarget, verify_authorization,
+    verify_authorization_historical,
+};
+pub use barrier::{
+    ConfirmedDeliveryBarrier, DeliveryBarrierEvidence, ServerReservationPort,
+    confirm_delivery_barrier, confirm_no_registered_server,
+};
 pub use ea_verify::DestructionStateV1 as DestructionState;
 pub use event::{VerifiedDestructionEvent, verify_event, verify_event_historical};
 pub use execution::{DestructionExecutionContext, DurableDestructionStart};
 pub use inventory::{DurableManagedInventory, ManagedArchiveRegistration, SqliteManagedCustody};
 pub use job::{DurableDestructionJob, SqliteDestructionJobs};
-pub use local::{LocalActionAuthorityGuard,LocalDestructionCheckpoint, LocalDestructionExecution, MeasuredLocalRemoval};
+pub use local::{
+    LocalActionAuthorityGuard, LocalDestructionCheckpoint, LocalDestructionExecution,
+    MeasuredLocalRemoval,
+};
 pub use local_attestation::LocalAttestationCheckpoint;
-pub use reconstruct::{EvidenceReplicaStatus,VerifiedDestructionEvidence,ReconstructedDestruction,project_imported_evidence,reconstruct_imported_history};
 pub use preflight::{SignedDestructionPreflight, prepare_preflight, verify_preflight};
-pub use purge::{AcquisitionPurgeCheckpoint,MeasuredAcquisitionRemoval};
+pub use purge::{AcquisitionPurgeCheckpoint, MeasuredAcquisitionRemoval};
+pub use reconstruct::{
+    EvidenceReplicaStatus, ReconstructedDestruction, VerifiedDestructionEvidence,
+    project_imported_evidence, reconstruct_imported_history,
+};
 pub use service::{
     DestructionRequestService, RequestedDestruction, ResumedDestruction,
     SqliteDestructionRepository,

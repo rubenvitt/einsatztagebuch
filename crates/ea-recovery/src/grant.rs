@@ -1,7 +1,7 @@
 //! Frozen, fully verified inputs for historical grant issuance.
 use std::{fs, path::Path};
 
-use crate::{ResolvedSigningKey, ResolvedRecipientKey};
+use crate::{ResolvedRecipientKey, ResolvedSigningKey};
 use ea_trust::TrustAnchorV1;
 use ea_types::UnixMillis;
 use ea_verify::VerificationReportV1;
@@ -60,7 +60,9 @@ pub struct ResolvedGrantInputsV1 {
 
 impl ResolvedGrantInputsV1 {
     /// Immutable archive snapshot verified before resolving the HGA key.
-    pub fn source(&self) -> &FsArchiveSource { &self.source }
+    pub fn source(&self) -> &FsArchiveSource {
+        &self.source
+    }
     /// Der private Recovery-KEM-Schluessel, mit dessen Abdruck verifiziert
     /// wurde.
     #[must_use]

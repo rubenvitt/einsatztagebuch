@@ -56,17 +56,28 @@ fn drain(source: &dyn ArchiveSource) -> Vec<(String, Vec<u8>)> {
 fn operational_snapshot_excludes_staging_while_forensic_snapshot_retains_it() {
     let directory = temp_dir("committed-versus-forensic");
     std::fs::create_dir(directory.path().join("entries")).unwrap();
-    std::fs::write(directory.path().join("entries/original.eip"), b"committed exact bytes").unwrap();
+    std::fs::write(
+        directory.path().join("entries/original.eip"),
+        b"committed exact bytes",
+    )
+    .unwrap();
     let staging = directory.path().join("entries/prepared.eip.staging");
     std::fs::write(&staging, b"prepared exact bytes").unwrap();
     let operational = FsArchiveSource::open_committed(directory.path()).unwrap();
     let forensic = FsArchiveSource::open(directory.path()).unwrap();
     assert_eq!(drain(&operational).len(), 1);
     assert_eq!(drain(&forensic).len(), 2);
-    assert!(drain(&operational).iter().all(|(path, _)| !path.ends_with(".staging")));
+    assert!(
+        drain(&operational)
+            .iter()
+            .all(|(path, _)| !path.ends_with(".staging"))
+    );
     std::fs::rename(staging, directory.path().join("entries/prepared.eip")).unwrap();
     assert_eq!(drain(&operational).len(), 1, "the selection remains frozen");
-    assert_eq!(drain(&FsArchiveSource::open_committed(directory.path()).unwrap()).len(), 2);
+    assert_eq!(
+        drain(&FsArchiveSource::open_committed(directory.path()).unwrap()).len(),
+        2
+    );
 }
 
 /// Dieselben Paare, nach dem Pfadhinweis sortiert.

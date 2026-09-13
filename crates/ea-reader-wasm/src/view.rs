@@ -868,9 +868,18 @@ pub fn thread_json(stand: &ReaderStand, entry_hash: EntryHash) -> Result<String,
 
     let reference = thread.correction_reference();
     let mut correction = Json::object();
-    correction.string("originalRecordId", &hex_of(reference.original_record_id.as_bytes()));
-    correction.string("originalEntryHash", &hex_of(reference.original_entry_hash.as_bytes()));
-    correction.raw("originalSequence", &reference.original_sequence.get().to_string());
+    correction.string(
+        "originalRecordId",
+        &hex_of(reference.original_record_id.as_bytes()),
+    );
+    correction.string(
+        "originalEntryHash",
+        &hex_of(reference.original_entry_hash.as_bytes()),
+    );
+    correction.raw(
+        "originalSequence",
+        &reference.original_sequence.get().to_string(),
+    );
 
     let mut json = Json::object();
     json.raw("correctionReference", &correction.finish());

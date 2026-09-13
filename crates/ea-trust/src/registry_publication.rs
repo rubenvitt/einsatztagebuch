@@ -233,10 +233,7 @@ fn verify_exact_audit(
     decoder.skip().map_err(|_| TrustError::Signature)?;
     ea_crypto::verify_cose_sign1(
         &exact_audit[start..decoder.position()],
-        &PublicationResolver {
-            state,
-            sequence,
-        },
+        &PublicationResolver { state, sequence },
         &context,
     )
     .map_err(|_| TrustError::Signature)?;

@@ -1635,7 +1635,8 @@ impl WriterService<'_> {
             self.record_original_identity(identity, &transaction)?;
         }
         if let Some(evidence) = &destruction_binding {
-            let expected = evidence.draft_source()
+            let expected = evidence
+                .draft_source()
                 .map_err(|_| WriterError::DestructionEvidenceInvalid)?;
             if self.repository.evidence_draft_source()? != Some(expected) {
                 return Err(ea_draft::DraftError::EvidenceBinding.into());

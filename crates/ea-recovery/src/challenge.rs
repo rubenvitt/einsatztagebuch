@@ -141,7 +141,8 @@ pub fn verify_historical_signing_backup(
         return Err(RecoveryTestError::Role);
     }
     if medium.role() != RecoveryKeyRole::Root {
-        let cert = head.active_certificate_fields(medium.certificate())
+        let cert = head
+            .active_certificate_fields(medium.certificate())
             .ok_or(RecoveryTestError::Role)?;
         if certificate_role(cert.certificate_kind) != medium.role()
             || cert.signing_key_thumbprint != Some(medium.expected_thumbprint())
@@ -149,7 +150,14 @@ pub fn verify_historical_signing_backup(
             return Err(RecoveryTestError::Role);
         }
     }
-    challenge(head, medium, backup, head.organization_id(), head.proposed_sequence(), head.registry_version())
+    challenge(
+        head,
+        medium,
+        backup,
+        head.organization_id(),
+        head.proposed_sequence(),
+        head.registry_version(),
+    )
 }
 fn challenge(
     resolver: &impl ea_crypto::SignerCertificateResolver,

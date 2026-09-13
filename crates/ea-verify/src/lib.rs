@@ -73,8 +73,8 @@
 //! ganzen Bestand: es wird ueber keinen Eintrag etwas ausgesagt.
 
 mod archive;
-mod destruction;
 mod destroyed;
+mod destruction;
 mod entry;
 mod error;
 mod evidence;

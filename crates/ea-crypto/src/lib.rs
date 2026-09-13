@@ -6,14 +6,16 @@ mod digest;
 mod native_archive;
 pub use native_archive::native_archive_component_namespace;
 mod destruction_preflight;
-mod posture_document;
 mod error;
 mod hpke;
 mod os_account;
+mod posture_document;
 mod secret;
 mod thumbprint;
 
-pub use destruction_preflight::{ParsedDestructionPreflightCore, decode_destruction_preflight_core};
+pub use destruction_preflight::{
+    ParsedDestructionPreflightCore, decode_destruction_preflight_core,
+};
 
 pub use aead::{
     AEAD_NONCE_SIZE, AEAD_OVERHEAD, CEK_SIZE, aead_open, aead_seal, checked_ciphertext_length,
@@ -41,14 +43,16 @@ pub use digest::{
     web_bundle_hash,
 };
 pub use error::CryptoError;
-pub use posture_document::{GoLivePostureCore, GoLivePostureFields, GO_LIVE_POSTURE_MAX_LIFETIME_MS};
 pub use hpke::{
     HPKE_AEAD_ID, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_KDF_ID, HPKE_KEM_ID, HPKE_MODE,
-    HPKE_WRAPPED_CEK_SIZE, HpkeRecipient, HpkeRecipientPrivateKey, HpkeRecipientPublicKey, HpkeSealed, hpke_open,
-    hpke_open_with_token_dh, hpke_seal,
+    HPKE_WRAPPED_CEK_SIZE, HpkeRecipient, HpkeRecipientPrivateKey, HpkeRecipientPublicKey,
+    HpkeSealed, hpke_open, hpke_open_with_token_dh, hpke_seal,
 };
 pub use os_account::{
     linux_os_account_binding_hash, macos_os_account_binding_hash, windows_os_account_binding_hash,
+};
+pub use posture_document::{
+    GO_LIVE_POSTURE_MAX_LIFETIME_MS, GoLivePostureCore, GoLivePostureFields,
 };
 pub use secret::{SecretBytes, SecretVec};
 pub use thumbprint::CanonicalPublicCoseKey;

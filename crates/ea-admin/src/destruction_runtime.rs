@@ -1,9 +1,9 @@
 //! Current native Admin controller plus an explicitly separate local Writer custodian.
 mod completion;
-mod pending;
-mod failure;
-mod execution;
 mod evidence_writer;
+mod execution;
+mod failure;
+mod pending;
 pub use evidence_writer::{NativeEvidenceWriter, NativeEvidenceWriterError};
 mod custodian;
 mod exchange;

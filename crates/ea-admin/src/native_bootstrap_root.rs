@@ -1,9 +1,9 @@
 //! Initial Root PoP using an already provisioned native Root slot.
 
 mod step_two;
-pub(crate) use step_two::read_participant_context;
 #[cfg(feature = "test-support")]
 pub use step_two::complete_native_root_step_with_test_opener;
+pub(crate) use step_two::read_participant_context;
 pub use step_two::{complete_installed_native_root_step, complete_native_root_step};
 
 use crate::{

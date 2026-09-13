@@ -15,26 +15,71 @@ mod common;
 
 #[tokio::test]
 async fn authorization_registry_hash_is_not_just_signed_but_bound_to_selected_head() {
-    let database=common::fresh_database().await;
-    let ready=common::stand_up_read_server(&database,common::READ_SERVER_NOW_MILLIS,true).await;
-    let mut prepared=prepare(&ready,AUTHORIZATION_EXPIRES_AT,0x91,&archive_objects::approvers(&ready.closure)).await;
-    let original=archive_objects::grant_authorization(&ready.closure,vec![prepared.entry.entry_hash],archive_objects::Recipient::reader(&ready.closure),AUTHORIZATION_EXPIRES_AT,0x92,&archive_objects::approvers(&ready.closure));
-    let ea_format::ParsedArchiveObject::Trust(parsed)=ea_format::decode_exact_object(&original).unwrap() else { panic!() };
-    let ea_format::DecodedTrustPayloadV1::GrantAuthorization(mut fields)=parsed.value().decoded_payload().unwrap() else { panic!() };
-    fields.registry_head_hash=ea_types::Hash32::ZERO;
-    let payload=ea_format::TrustPayloadV1::grant_authorization(fields).unwrap();
-    let signatures=archive_objects::approvers(&ready.closure).iter().map(|(cert,seed)|ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(*seed)).sign_historical_grant_approval_digest(*cert,payload.exact_digest_input()).unwrap()).collect();
-    let bytes=ea_format::encode_trust(&ea_format::TrustObjectV1::new(payload,signatures).unwrap()).unwrap();
-    let hash=common::seed_trust_object_bytes(bytes.as_bytes()).await;
-    prepared.grant_bytes=archive_objects::historical_grant_bytes(&ready.closure,prepared.entry.entry_hash,archive_objects::Recipient::reader(&ready.closure),prepared.entry.recovery_grant_object_hash,hash);
-    prepared.upload=ea_sync_protocol::HistoricalGrantUploadV1::new(prepared.grant_bytes.clone()).unwrap();
-    let response=post_grant(&ready,&prepared,[0x93;16],common::READ_SERVER_NOW_MILLIS).await;
-    assert_eq!(response.status,422,"signed false head must be rejected");
-    assert_eq!(common::error_code(&response.body).as_deref(),Some("EA-GRANT-AUTHORIZATION-MISMATCH"));
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_read_server(&database, common::READ_SERVER_NOW_MILLIS, true).await;
+    let mut prepared = prepare(
+        &ready,
+        AUTHORIZATION_EXPIRES_AT,
+        0x91,
+        &archive_objects::approvers(&ready.closure),
+    )
+    .await;
+    let original = archive_objects::grant_authorization(
+        &ready.closure,
+        vec![prepared.entry.entry_hash],
+        archive_objects::Recipient::reader(&ready.closure),
+        AUTHORIZATION_EXPIRES_AT,
+        0x92,
+        &archive_objects::approvers(&ready.closure),
+    );
+    let ea_format::ParsedArchiveObject::Trust(parsed) =
+        ea_format::decode_exact_object(&original).unwrap()
+    else {
+        panic!()
+    };
+    let ea_format::DecodedTrustPayloadV1::GrantAuthorization(mut fields) =
+        parsed.value().decoded_payload().unwrap()
+    else {
+        panic!()
+    };
+    fields.registry_head_hash = ea_types::Hash32::ZERO;
+    let payload = ea_format::TrustPayloadV1::grant_authorization(fields).unwrap();
+    let signatures = archive_objects::approvers(&ready.closure)
+        .iter()
+        .map(|(cert, seed)| {
+            ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(*seed))
+                .sign_historical_grant_approval_digest(*cert, payload.exact_digest_input())
+                .unwrap()
+        })
+        .collect();
+    let bytes =
+        ea_format::encode_trust(&ea_format::TrustObjectV1::new(payload, signatures).unwrap())
+            .unwrap();
+    let hash = common::seed_trust_object_bytes(bytes.as_bytes()).await;
+    prepared.grant_bytes = archive_objects::historical_grant_bytes(
+        &ready.closure,
+        prepared.entry.entry_hash,
+        archive_objects::Recipient::reader(&ready.closure),
+        prepared.entry.recovery_grant_object_hash,
+        hash,
+    );
+    prepared.upload =
+        ea_sync_protocol::HistoricalGrantUploadV1::new(prepared.grant_bytes.clone()).unwrap();
+    let response = post_grant(
+        &ready,
+        &prepared,
+        [0x93; 16],
+        common::READ_SERVER_NOW_MILLIS,
+    )
+    .await;
+    assert_eq!(response.status, 422, "signed false head must be rejected");
+    assert_eq!(
+        common::error_code(&response.body).as_deref(),
+        Some("EA-GRANT-AUTHORIZATION-MISMATCH")
+    );
     drop(ready);
     database.cleanup().await;
 }
-
 
 use common::{archive_objects, trust_closure};
 use ea_sync_protocol::{EndpointV1, GrantListResponseV1};

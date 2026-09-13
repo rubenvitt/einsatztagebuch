@@ -181,6 +181,7 @@ mod envelope;
 mod export;
 mod file_mode;
 mod grant;
+mod grant_time;
 mod http;
 mod key_profile;
 mod mode;
@@ -189,7 +190,6 @@ mod search;
 mod session;
 mod sync;
 mod trust_state;
-mod grant_time;
 pub use grant_time::ReaderGrantTimeStore;
 mod vault;
 mod verify;
@@ -221,7 +221,8 @@ pub use ea_archive::{
 };
 pub use ea_crypto::HpkeRecipientPrivateKey;
 pub use ea_format::{
-    ETB_MAX_RAW_BYTES_V1, ExportContextV1, LocalAuditActionV1, LocalAuditOutcomeV1, decode_local_audit_event,
+    ETB_MAX_RAW_BYTES_V1, ExportContextV1, LocalAuditActionV1, LocalAuditOutcomeV1,
+    decode_local_audit_event,
 };
 pub use ea_index::{IndexError, IndexPressureV1, ReaderQueryV1, ReaderSearchHitV1};
 pub use ea_schema::{PayloadV1, SchemaRegistry};

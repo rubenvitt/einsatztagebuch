@@ -124,7 +124,7 @@ impl EncryptedDatabase {
     fn restore_with_secret(
         source: &Path,
         expected_ciphertext_hash: [u8; 32],
-        expected_migrations: [u8;32],
+        expected_migrations: [u8; 32],
         source_secret: &SecretVec,
         target: &Path,
         target_provider: &dyn KeyProvider,
@@ -174,22 +174,36 @@ impl EncryptedDatabase {
     /// Opens only an existing, exact known historical schema as read-only proof
     /// material. Never applies migrations or supplies operational admission.
     pub fn open_recovery_source_exact(
-        path:&Path, expected_migrations:[u8;32], provider:&dyn KeyProvider, key:&KeyHandle,
-    )->Result<Self,StoreError> {
-        if known_migration_prefix(expected_migrations).is_none() {return Err(StoreError::Migration);}
-        let secret=provider.unwrap_database_key(key)?;
-        let connection=Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)
-            .map_err(|_|StoreError::Database)?;
-        secret.with_exposed(|bytes|set_cipher_key(&connection,bytes))?;
-        run_ignoring_rows(&connection,"PRAGMA temp_store = MEMORY")?;
-        run_ignoring_rows(&connection,"PRAGMA query_only = ON")?;
-        if validate(&connection)?!=expected_migrations {return Err(StoreError::Migration);}
-        let cipher_version=scalar_pragma(&connection,"PRAGMA cipher_version")?;
-        Ok(Self{connection:std::sync::Mutex::new(connection),path:path.to_path_buf(),cipher_version})
+        path: &Path,
+        expected_migrations: [u8; 32],
+        provider: &dyn KeyProvider,
+        key: &KeyHandle,
+    ) -> Result<Self, StoreError> {
+        if known_migration_prefix(expected_migrations).is_none() {
+            return Err(StoreError::Migration);
+        }
+        let secret = provider.unwrap_database_key(key)?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|_| StoreError::Database)?;
+        secret.with_exposed(|bytes| set_cipher_key(&connection, bytes))?;
+        run_ignoring_rows(&connection, "PRAGMA temp_store = MEMORY")?;
+        run_ignoring_rows(&connection, "PRAGMA query_only = ON")?;
+        if validate(&connection)? != expected_migrations {
+            return Err(StoreError::Migration);
+        }
+        let cipher_version = scalar_pragma(&connection, "PRAGMA cipher_version")?;
+        Ok(Self {
+            connection: std::sync::Mutex::new(connection),
+            path: path.to_path_buf(),
+            cipher_version,
+        })
     }
 }
 
-fn validate(connection: &Connection) -> Result<[u8;32], StoreError> {
+fn validate(connection: &Connection) -> Result<[u8; 32], StoreError> {
     if scalar_pragma(connection, "PRAGMA cipher_version")?.is_empty() {
         return Err(StoreError::CipherUnavailable);
     }
@@ -207,7 +221,8 @@ fn validate(connection: &Connection) -> Result<[u8;32], StoreError> {
     let actual = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| StoreError::Migration)?;
-    if actual.len() < 18 || actual.len() > migrations::MIGRATIONS.len()
+    if actual.len() < 18
+        || actual.len() > migrations::MIGRATIONS.len()
         || actual
             .iter()
             .zip(migrations::MIGRATIONS)
@@ -258,7 +273,7 @@ fn export(
         let transaction = connection
             .transaction_with_behavior(behavior)
             .map_err(|_| StoreError::Database)?;
-        let migrations_hash=validate(&transaction)?;
+        let migrations_hash = validate(&transaction)?;
         run_ignoring_rows(&transaction, "SELECT sqlcipher_export('recovery_snapshot')")?;
         if !scalar_pragma(
             &transaction,
@@ -270,10 +285,10 @@ fn export(
             return Err(StoreError::Database);
         }
         transaction.commit().map_err(|_| StoreError::Database)?;
-        Ok::<_,StoreError>(migrations_hash)
+        Ok::<_, StoreError>(migrations_hash)
     })();
     let detached = run_ignoring_rows(connection, "DETACH DATABASE recovery_snapshot");
-    let migrations_hash=outcome?;
+    let migrations_hash = outcome?;
     detached?;
     File::open(target)
         .and_then(|file| file.sync_all())
@@ -289,7 +304,7 @@ fn export(
     owned.keep = true;
     Ok(receipt)
 }
-fn migration_hash(count:usize) -> [u8; 32] {
+fn migration_hash(count: usize) -> [u8; 32] {
     let mut chain = Vec::new();
     for migration in &migrations::MIGRATIONS[..count] {
         chain.extend_from_slice(&migration.version.to_be_bytes());
@@ -298,8 +313,8 @@ fn migration_hash(count:usize) -> [u8; 32] {
     *object_hash(&chain).as_bytes()
 }
 
-fn known_migration_prefix(expected:[u8;32])->Option<usize> {
-    (18..=migrations::MIGRATIONS.len()).find(|count|migration_hash(*count)==expected)
+fn known_migration_prefix(expected: [u8; 32]) -> Option<usize> {
+    (18..=migrations::MIGRATIONS.len()).find(|count| migration_hash(*count) == expected)
 }
 
 fn read_ciphertext(path: &Path) -> Result<Vec<u8>, StoreError> {

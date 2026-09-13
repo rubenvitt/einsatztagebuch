@@ -53,26 +53,36 @@ fn destruction_compaction_requires_secure_delete_and_observes_empty_freelist_and
 
 #[test]
 fn an_uncheckpointable_live_transaction_cannot_be_reported_as_compacted() {
-    let path=std::env::temp_dir().join(format!("ea-destruction-busy-compaction-{}",std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "ea-destruction-busy-compaction-{}",
+        std::process::id()
+    ));
     std::fs::create_dir(&path).unwrap();
-    let provider=InMemoryKeyProvider::new_for_test([0x73;32]);
-    let key=provider.generate(SecretPurpose::LocalDatabaseKey,KeyProtectionProfileV1::OsWrapped).unwrap();
-    let db=EncryptedDatabase::open(&path.join("local.db"),&provider,&key).unwrap();
-    let holder=EncryptedDatabase::open_existing(&path.join("local.db"),&provider,&key).unwrap();
-    db.query_row("PRAGMA secure_delete=ON",&[]).unwrap();
-    let ready=std::sync::Barrier::new(2);
-    let release=std::sync::Barrier::new(2);
-    let result=std::thread::scope(|scope| {
+    let provider = InMemoryKeyProvider::new_for_test([0x73; 32]);
+    let key = provider
+        .generate(
+            SecretPurpose::LocalDatabaseKey,
+            KeyProtectionProfileV1::OsWrapped,
+        )
+        .unwrap();
+    let db = EncryptedDatabase::open(&path.join("local.db"), &provider, &key).unwrap();
+    let holder = EncryptedDatabase::open_existing(&path.join("local.db"), &provider, &key).unwrap();
+    db.query_row("PRAGMA secure_delete=ON", &[]).unwrap();
+    let ready = std::sync::Barrier::new(2);
+    let release = std::sync::Barrier::new(2);
+    let result = std::thread::scope(|scope| {
         scope.spawn(|| {
-            holder.transaction::<_,ea_local_store::StoreError>(|tx| {
-                tx.query_row("SELECT count(*) FROM schema_migration",&[])?;
-                ready.wait();
-                release.wait();
-                Ok(())
-            }).unwrap();
+            holder
+                .transaction::<_, ea_local_store::StoreError>(|tx| {
+                    tx.query_row("SELECT count(*) FROM schema_migration", &[])?;
+                    ready.wait();
+                    release.wait();
+                    Ok(())
+                })
+                .unwrap();
         });
         ready.wait();
-        let result=db.compact_after_authorized_destruction();
+        let result = db.compact_after_authorized_destruction();
         release.wait();
         result
     });
