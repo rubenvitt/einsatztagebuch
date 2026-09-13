@@ -2016,12 +2016,17 @@ mod tests {
     /// Vier `Unknown` sind die WAHRE Aussage ueber ein Geraet, dessen Haltung
     /// niemand gelesen hat — und `production_ready` ist dann `false`.
     ///
-    /// Der Fehlerfall, den dieser Zeuge faengt: ein Adapter oder eine Abbildung,
-    /// die ein unlesbares Signal in ein `Some(true)` druecken — dann waere die
-    /// Sperre der produktiven Rolle still gefallen.
+    /// Der Fehlerfall, den dieser Zeuge faengt: eine Abbildung, die ein
+    /// unlesbares Signal in ein `Some(true)` drueckt — dann waere die Sperre
+    /// der produktiven Rolle still gefallen.
+    ///
+    /// Gemessen am unaufgeloesten Bericht und NICHT am Host: seit der native
+    /// macOS-Adapter FileVault liest, ist die Host-Haltung maschinenabhaengig.
+    /// Einen einschleusbaren Anbieter bekommt `device_posture_core` dafuer
+    /// ausdruecklich nicht (`docs/device-posture.md`).
     #[test]
-    fn the_host_posture_reports_four_unresolved_requirements_and_is_not_production_ready() {
-        let dto = device_posture_core().expect("die Haltung ist kein Fehlschlag");
+    fn an_unread_posture_reports_four_unresolved_requirements_and_is_not_production_ready() {
+        let dto = super::DevicePostureDto::from(&posture_view(&DevicePostureReport::unresolved()));
         assert_eq!(dto.requirements.len(), PostureRequirement::ALL.len());
         assert!(!dto.production_ready);
         for requirement in &dto.requirements {
@@ -2029,6 +2034,39 @@ mod tests {
             assert!(requirement.evidence_code.ends_with("-UNREPORTABLE"));
             assert!(requirement.requirement_code.starts_with("EA-POSTURE-"));
         }
+    }
+
+    /// Die ECHTE Host-Haltung, mit der Erwartung aus ihrer eigenen Messung:
+    /// `production_ready` nur, wenn jede Zeile belegt `Some(true)` ist; jede
+    /// unbelegte Zeile traegt den Unbelegbarkeitscode. Kontoexklusivitaet und
+    /// Patchstand misst kein Adapter automatisch positiv — sie bleiben auf
+    /// jedem Host `None`, und deshalb ist KEIN Host allein aus seiner Messung
+    /// produktionsbereit. Gilt auf einem Mac mit und ohne FileVault gleich.
+    #[test]
+    fn the_host_posture_is_never_production_ready_from_its_measurement_alone() {
+        let dto = device_posture_core().expect("die Haltung ist kein Fehlschlag");
+        assert_eq!(dto.requirements.len(), PostureRequirement::ALL.len());
+        for requirement in &dto.requirements {
+            assert!(requirement.requirement_code.starts_with("EA-POSTURE-"));
+            if requirement.satisfied.is_none() {
+                assert!(requirement.evidence_code.ends_with("-UNREPORTABLE"));
+            }
+        }
+        for unmeasurable in ["EA-POSTURE-ACCOUNT-EXCLUSIVE", "EA-POSTURE-OS-PATCH-LEVEL"] {
+            let row = dto
+                .requirements
+                .iter()
+                .find(|requirement| requirement.requirement_code == unmeasurable)
+                .expect("die Zeile fehlt");
+            assert_eq!(row.satisfied, None, "{unmeasurable}");
+        }
+        assert_eq!(
+            dto.production_ready,
+            dto.requirements
+                .iter()
+                .all(|requirement| requirement.satisfied == Some(true))
+        );
+        assert!(!dto.production_ready);
     }
 
     /// Die Abbildung selbst, an allen drei Ergebnissen — der Bericht des Hosts

@@ -428,10 +428,29 @@ mod tests {
     /// `administration` gebunden. `registry_edit` bleibt verboten — eine
     /// Registry wird ueber eine Zeremonie in Schritten VEROEFFENTLICHT und nie
     /// editiert.
+    ///
+    /// GENAU EINE Ausnahme vom Wort `reader`, beim vollen Namen und fuer kein
+    /// anderes Verbotswort: `destruction_export_reader_delivery` (Stufe 5,
+    /// Task 13, Plan-Nachmessung 2026-09-13) ist KEINE Reader-Leseflaeche. Es
+    /// ist ein Vernichtungskommando der Verwaltung — an `OrganizationAdmin`
+    /// gebunden (`tests/reader_delivery_commands.rs`), in der Oberflaeche nur
+    /// unter `/verwaltung` erreichbar — und gibt drei UNVERAENDERTE oeffentliche
+    /// Originale (Authorization-ETB, Started-ETB, `DestructionJobUploadV1`)
+    /// heraus, die ein Reader zum Vollzug braucht. Es entschluesselt nichts,
+    /// liest kein Archiv und zeigt keinen Klartext; die Administrationsrolle
+    /// verleiht weiterhin keinen Inhaltszugriff (`web-reader-design.md` §3).
+    /// Jeder weitere Name mit `reader` faellt hier weiter.
     #[test]
     fn no_command_serves_a_reader_surface() {
+        const READER_DELIVERY_EXPORT: &str = "destruction_export_reader_delivery";
+        // Die Ausnahme ist registriert — sonst stuende hier eine Freigabe fuer
+        // einen Namen, den niemand mehr misst.
+        assert!(COMMAND_NAMES.contains(&READER_DELIVERY_EXPORT));
         for name in COMMAND_NAMES {
             for forbidden in ["reader", "read_archive", "registry_edit", "history"] {
+                if forbidden == "reader" && *name == READER_DELIVERY_EXPORT {
+                    continue;
+                }
                 assert!(
                     !name.contains(forbidden),
                     "{name} bedient eine Flaeche, die dieser Ausbaustufe nicht gehoert"
