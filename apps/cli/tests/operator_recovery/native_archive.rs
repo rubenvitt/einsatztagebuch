@@ -15,6 +15,7 @@ fn component_profile() -> ea_archive::ArchiveBackendProfileV1 {
 }
 
 #[test]
+#[ignore = "DRK-320: planned RED of the controlled-network recovery source; RecoveryTestRuntime::new still refuses ControlledNetworkPath (ruling 2026-09-13)"]
 fn native_recovery_opens_exact_policy_bound_sqlcipher_component_without_profile_relabeling() {
     let installed=RecoveryInstallation::with_profile(None,false,Some(component_profile()));
     let runtime=installed.open();
