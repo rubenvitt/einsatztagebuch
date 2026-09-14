@@ -79,6 +79,61 @@ impl DestructionAdministrationPort for Observe {
     fn resume(&self, _: DestructionId) -> Result<DestructionAdministrationView, CommandError> {
         self.called()
     }
+    fn mark_incomplete(
+        &self,
+        id: DestructionId,
+        hash: ObjectHash,
+    ) -> Result<DestructionAdministrationView, CommandError> {
+        assert_eq!(id.as_bytes(), &[0x11; 16]);
+        assert_eq!(hash.as_bytes(), &[0x22; 32]);
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(CommandError::new("NATIVE-MARK-INCOMPLETE-REFUSED"))
+    }
+}
+/// A legacy or foreign host port without the explicit action refuses it.
+struct Legacy;
+impl DestructionAdministrationPort for Legacy {
+    fn authenticate_custodian(
+        &self,
+        _: DestructionId,
+        _: ObjectHash,
+    ) -> Result<DestructionAdministrationView, CommandError> {
+        unreachable!()
+    }
+    fn synchronize(
+        &self,
+        _: DestructionId,
+        _: ObjectHash,
+    ) -> Result<DestructionAdministrationView, CommandError> {
+        unreachable!()
+    }
+    fn read(
+        &self,
+        _: Option<DestructionId>,
+    ) -> Result<DestructionAdministrationView, CommandError> {
+        unreachable!()
+    }
+    fn prepare(&self, _: &[u8]) -> Result<DestructionAdministrationView, CommandError> {
+        unreachable!()
+    }
+    fn start(
+        &self,
+        _: DestructionId,
+        _: ObjectHash,
+    ) -> Result<DestructionAdministrationView, CommandError> {
+        unreachable!()
+    }
+    fn resume(&self, _: DestructionId) -> Result<DestructionAdministrationView, CommandError> {
+        unreachable!()
+    }
+    fn import_progress(
+        &self,
+        _: DestructionId,
+        _: ObjectHash,
+        _: &[Vec<u8>],
+    ) -> Result<DestructionAdministrationView, CommandError> {
+        unreachable!()
+    }
 }
 fn host(role: Option<OperatorRoleV1>) -> (DesktopState, Arc<Observe>) {
     let port = Arc::new(Observe(AtomicUsize::new(0)));
@@ -105,6 +160,7 @@ fn every_destruction_action_refuses_non_admin_before_touching_the_port() {
             destruction_resume_core(&state, &id),
             destruction_synchronize_core(&state, &id, &hash),
             destruction_authenticate_custodian_core(&state, &id, &hash),
+            destruction_mark_incomplete_core(&state, &id, &hash),
             destruction_import_progress_core(&state, &id, &hash, &[vec![1]]),
         ] {
             assert_eq!(
@@ -133,6 +189,36 @@ fn exact_synchronize_identifiers_reach_only_the_native_synchronize_port() {
 }
 
 #[test]
+fn explicit_mark_incomplete_has_its_own_port_and_preserves_its_native_refusal() {
+    let (state, port) = host(Some(OperatorRoleV1::OrganizationAdmin));
+    let result = destruction_mark_incomplete_core(&state, &"11".repeat(16), &"22".repeat(32));
+    assert_eq!(result.err().unwrap().code, "NATIVE-MARK-INCOMPLETE-REFUSED");
+    assert_eq!(port.0.load(Ordering::SeqCst), 1);
+    // Resume never reaches the explicit action's port.
+    assert_eq!(
+        destruction_resume_core(&state, &"11".repeat(16))
+            .err()
+            .unwrap()
+            .code,
+        "NATIVE-PORT-REFUSED"
+    );
+}
+
+#[test]
+fn a_port_without_the_explicit_action_refuses_it() {
+    let state = DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+        .with_runtime_session(Arc::new(Role(Some(OperatorRoleV1::OrganizationAdmin))))
+        .with_destruction(Arc::new(Legacy));
+    assert_eq!(
+        destruction_mark_incomplete_core(&state, &"11".repeat(16), &"22".repeat(32))
+            .err()
+            .unwrap()
+            .code,
+        "EA-DESKTOP-DESTRUCTION-MARK-INCOMPLETE-UNAVAILABLE"
+    );
+}
+
+#[test]
 fn custodian_login_has_its_own_port_and_preserves_its_native_refusal() {
     let (state, port) = host(Some(OperatorRoleV1::OrganizationAdmin));
     let result =
@@ -153,6 +239,9 @@ fn malformed_identifiers_and_unbounded_authorization_never_enter_the_native_port
         destruction_synchronize_core(&state, &id, &"A".repeat(64)),
         destruction_authenticate_custodian_core(&state, "../job", &"22".repeat(32)),
         destruction_authenticate_custodian_core(&state, &id, &"A".repeat(64)),
+        destruction_mark_incomplete_core(&state, "../job", &"22".repeat(32)),
+        destruction_mark_incomplete_core(&state, &id, &"A".repeat(64)),
+        destruction_mark_incomplete_core(&state, &id, ""),
         destruction_prepare_core(&state, &[]),
         destruction_prepare_core(&state, &vec![0; ea_format::ETB_MAX_RAW_BYTES_V1 + 1]),
     ] {

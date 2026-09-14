@@ -1,6 +1,7 @@
 //! Actual native Desktop configuration and commands over authenticated TLS/PG/S3.
 mod reader_opfs;
 mod pending;
+mod failure;
 use super::*;
 use ea_desktop::commands::{
     destruction_evidence::{destruction_evidence_finalize_core, destruction_evidence_preview_core},
@@ -22,6 +23,17 @@ fn hex(bytes: &[u8]) -> String {
 fn configured_host(
     f: &NativeDestructionFixture,
     server: &ServerFixture,
+) -> Arc<NativeDesktopRuntime> {
+    configured_host_with(f, server, "desktop-server-destruction.json", Vec::new())
+}
+
+/// Same exact configuration grammar under its own file; `extra_servers` are
+/// appended after the registered server (e.g. an unbound server identity).
+fn configured_host_with(
+    f: &NativeDestructionFixture,
+    server: &ServerFixture,
+    config_name: &str,
+    extra_servers: Vec<serde_json::Value>,
 ) -> Arc<NativeDesktopRuntime> {
     let open = |directory: &Path| {
         NativeOperatorProvider::open_test_fixture(directory.join("ea-native-operator"), false)
@@ -45,7 +57,16 @@ fn configured_host(
     else {
         panic!("explicit protected component container");
     };
-    let config_path = f._directory.path().join("desktop-server-destruction.json");
+    let config_path = f._directory.path().join(config_name);
+    let mut servers = vec![serde_json::json!({
+        "device_id": hex(server.config.device_id.as_bytes()),
+        "address": server.config.address.to_string(),
+        "server_name": server.config.server_name,
+        "authority": server.config.authority,
+        "ca_file": server.config.ca_file,
+        "server_certificate_hash": hex(server.config.server_certificate.as_bytes())
+    })];
+    servers.extend(extra_servers);
     let evidence_settings_path = f
         ._directory
         .path()
@@ -72,14 +93,7 @@ fn configured_host(
         "component_certificate_hash": hex(f.component.as_bytes()),
         "component_key_source": format!("container:{};passphrase-file={}", path.display(), passphrase_file.display()),
         "delivery": "authenticated-server",
-        "servers": [{
-            "device_id": hex(server.config.device_id.as_bytes()),
-            "address": server.config.address.to_string(),
-            "server_name": server.config.server_name,
-            "authority": server.config.authority,
-            "ca_file": server.config.ca_file,
-            "server_certificate_hash": hex(server.config.server_certificate.as_bytes())
-        }],
+        "servers": servers,
         "holders": [{
             "archive_directory": f.archive,
             "filesystem_row_id": profile.filesystem_row_id,

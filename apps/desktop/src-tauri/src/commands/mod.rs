@@ -155,6 +155,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "destruction_export_reader_delivery",
     "destruction_synchronize",
     "destruction_authenticate_custodian",
+    "destruction_mark_incomplete",
     "destruction_evidence_preview",
     "destruction_evidence_finalize",
     "destruction_evidence_recover",

@@ -52,6 +52,13 @@ export async function connectDestructionBridge(call: NativeCall = nativeCall): P
       }
       return view
     },
+    markIncomplete: async (destructionId, expectedPreflightHash) => {
+      const view = await checked('destruction_mark_incomplete', { destructionId, expectedPreflightHash }, destructionId)
+      if (view.process?.preflight?.jobHash !== expectedPreflightHash) {
+        throw new ContractViolation('Der Abschluss gehört nicht zum angezeigten Vorbericht.')
+      }
+      return view
+    },
   }
 }
 

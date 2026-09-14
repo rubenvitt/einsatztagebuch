@@ -243,27 +243,15 @@ impl NativeDestructionServerTransport {
         phase!("import.return");
         let (hash, pending) = if let Some(hash) = super::destruction::completion_job(&status) {
             (hash, false)
+        } else if let Some(hash) = super::destruction::pending_job(
+            &status,
+            super::now().map_err(|_| Error::Configuration)?,
+        ) {
+            (hash, true)
         } else {
-            let observed_now = super::now().map_err(|_| Error::Configuration)?;
-            if let Some(hash) = super::destruction::pending_job(&status, observed_now) {
-                (hash, true)
-            } else if let Some(hash) = super::destruction::failure_job(&status, observed_now) {
-                // The conservative Failure producer deliberately has no delivery
-                // port: missing timely confirmation must be recordable without a
-                // server. No reservation is simulated. Only after the durable
-                // local commit publish the exact originals and import the reply.
-                phase!("failure.begin");
-                native.mark_incomplete_progress(id, hash)?;
-                phase!("failure.publish.begin");
-                let context = native.prepare_server_exchange(id, hash)?;
-                self.admit(&context)?;
-                self.publish(&context)?;
-                let status = self.import(native, &context)?;
-                phase!("failure.return");
-                return Ok(status);
-            } else {
-                return Ok(status);
-            }
+            // Resume never records state4 (Ruling 13.09.2026); only the
+            // explicit, separately confirmed `mark_incomplete` does.
+            return Ok(status);
         };
         // The imported status only selects the explicit native action. Obtain
         // a fresh authenticated reservation; never substitute NoRegisteredServer.
@@ -313,6 +301,29 @@ impl NativeDestructionServerTransport {
             phase!("complete.return");
         }
         Ok(status)
+    }
+    /// The explicit, separately confirmed final action (Ruling 13.09.2026). The
+    /// conservative Failure producer deliberately has no delivery port: missing
+    /// timely confirmation must be recordable without a reachable server, so no
+    /// reservation is simulated. Only local binding checks precede the durable
+    /// commit; afterwards publish the exact originals and import the reply.
+    pub fn mark_incomplete(
+        &mut self,
+        native: &mut DestructionRuntime,
+        id: DestructionId,
+        expected_preflight_hash: ObjectHash,
+    ) -> Result<NativeDestructionStatus, Error> {
+        {
+            // No request: bind the configured servers, their certificates and
+            // the component key to this job before the final event is signed.
+            let context = native.prepare_server_exchange(id, expected_preflight_hash)?;
+            self.admit(&context)?;
+        }
+        native.mark_incomplete_progress(id, expected_preflight_hash)?;
+        let context = native.prepare_server_exchange(id, expected_preflight_hash)?;
+        self.admit(&context)?;
+        self.publish(&context)?;
+        self.import(native, &context)
     }
     /// Read actual server claims and durably import verified exact ETB objects.
     /// This operation sends no event/job POST and cannot start remote execution.

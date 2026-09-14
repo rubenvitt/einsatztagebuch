@@ -8,8 +8,9 @@ mod reader_delivery;
 use super::*;
 use ea_desktop::{
     commands::destruction::{
-        destruction_import_progress_core, destruction_prepare_core, destruction_read_core,
-        destruction_resume_core, destruction_start_core,
+        destruction_import_progress_core, destruction_mark_incomplete_core,
+        destruction_prepare_core, destruction_read_core, destruction_resume_core,
+        destruction_start_core,
     },
     runtime::{DesktopLaunchConfig, NativeDesktopRuntime},
     state::RuntimeSessionPort,

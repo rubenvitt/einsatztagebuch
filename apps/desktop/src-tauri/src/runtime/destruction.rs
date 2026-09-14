@@ -757,29 +757,56 @@ impl DestructionAdministrationPort for NativeDesktopRuntime {
                         ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
                     )
                     .map_err(|error| CommandError::new(error.code()))?
+                } else if let Some(hash) = pending_job(&status, now()?) {
+                    resources.runtime.mark_pending_backup_progress(
+                        id,
+                        hash,
+                        ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
+                    )
+                    .map_err(|error| CommandError::new(error.code()))?
                 } else {
-                    let observed_now = now()?;
-                    if let Some(hash) = pending_job(&status, observed_now) {
-                        resources.runtime.mark_pending_backup_progress(
-                            id,
-                            hash,
-                            ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
-                        )
-                        .map_err(|error| CommandError::new(error.code()))?
-                    } else if let Some(hash) = failure_job(&status, observed_now) {
-                        resources
-                            .runtime
-                            .mark_incomplete_progress(id, hash)
-                            .map_err(|error| CommandError::new(error.code()))?
-                    } else {
-                        status
-                    }
+                    // Resume never records state4 (Ruling 13.09.2026); only the
+                    // explicit, separately confirmed `mark_incomplete` does.
+                    status
                 }
             };
             resources.view(Some(status))
         })
     }
+    fn mark_incomplete(
+        &self,
+        id: DestructionId,
+        expected_preflight_hash: ObjectHash,
+    ) -> Result<DestructionAdministrationView, CommandError> {
+        self.destruction_action(|resources| {
+            resources
+                .runtime
+                .unlock()
+                .map_err(|error| CommandError::new(error.code()))?;
+            let current = resources
+                .runtime
+                .status(id)
+                .map_err(|error| CommandError::new(error.code()))?;
+            // The same offer the view showed, on a fresh read and fresh time.
+            // Routing only: the native service re-decides and binds the job hash.
+            if mark_incomplete_job(&current, now()?).is_none() {
+                return Err(CommandError::new(MARK_INCOMPLETE_NOT_OFFERED));
+            }
+            let status = if let Some(transport) = &mut resources.server_transport {
+                transport
+                    .mark_incomplete(&mut resources.runtime, id, expected_preflight_hash)
+                    .map_err(|error| CommandError::new(error.code()))?
+            } else {
+                resources
+                    .runtime
+                    .mark_incomplete_progress(id, expected_preflight_hash)
+                    .map_err(|error| CommandError::new(error.code()))?
+            };
+            resources.view(Some(status))
+        })
+    }
 }
+const MARK_INCOMPLETE_NOT_OFFERED: &str = "EA-DESTRUCTION-MARK-INCOMPLETE-NOT-OFFERED";
 /// Routes only explicit Resume. This projection grants no authority: the native
 /// service rechecks signed history, all deadlines, custody and actual archives.
 pub(super) fn completion_job(status: &NativeDestructionStatus) -> Option<ObjectHash> {
@@ -851,12 +878,15 @@ pub(super) fn pending_job(
     }
     pending.then_some(status.preflight_hash).flatten()
 }
-/// Routing only, the mirror of `pending_job`: an attested Reader/Server backup
-/// duty whose maximum deadline has elapsed. A never attested or negatively
-/// attested duty is ordinary waiting after Start and is not routed, because
-/// state4 stays terminal without a native retry. The native service re-decides
-/// from the exact originals and its own selected time; this grants no authority.
-pub(super) fn failure_job(
+/// Offer predicate of the explicit final action „Als unvollständig abschließen"
+/// (Ruling 13.09.2026); Resume never uses it. Inside the envelope the native
+/// core accepts, it mirrors the failure reasons of `claims::decide`: an elapsed
+/// attested backup deadline (`OverdueUnconfirmed`), or a known replica without
+/// any attestation or with a negative latest one (`Unconfirmed`). It is
+/// stricter than the core: only after the custodian's own verified cleanup.
+/// Routing only; the native service re-decides from the exact originals and its
+/// own selected time, and this grants no authority.
+pub(super) fn mark_incomplete_job(
     status: &NativeDestructionStatus,
     observed_now: ea_types::UnixMillis,
 ) -> Option<ObjectHash> {
@@ -878,26 +908,22 @@ pub(super) fn failure_job(
     {
         return None;
     }
-    let mut overdue = false;
+    let mut offered = false;
     for replica in &status.replicas {
         match (replica.result, replica.attestation_hash) {
             (EvidenceReplicaStatus::Successful(success), Some(hash)) if success == hash => {}
-            (EvidenceReplicaStatus::PendingBackup, Some(_))
-                if matches!(
-                    replica.kind,
-                    ManagedReplicaKind::Reader | ManagedReplicaKind::SyncServer
-                ) =>
-            {
-                match replica.backup_expiry_at {
-                    Some(expiry) if expiry <= observed_now => overdue = true,
-                    Some(_) => {}
-                    None => return None,
-                }
-            }
+            (EvidenceReplicaStatus::PendingBackup, Some(_)) => match replica.backup_expiry_at {
+                Some(expiry) if expiry <= observed_now => offered = true,
+                Some(_) => {}
+                // The core refuses a Pending claim without a deadline.
+                None => return None,
+            },
+            // No claim at all, or a negative latest claim: `Unconfirmed`.
+            (EvidenceReplicaStatus::Unreachable, _) => offered = true,
             _ => return None,
         }
     }
-    overdue.then_some(status.preflight_hash).flatten()
+    offered.then_some(status.preflight_hash).flatten()
 }
 fn project(value: NativeDestructionStatus) -> Result<DestructionProcessView, CommandError> {
     use ea_destruction::{DestructionState, EvidenceReplicaStatus, ManagedReplicaKind};
@@ -978,7 +1004,7 @@ mod tests {
     use super::Config;
 
     mod routing {
-        use super::super::{completion_job, failure_job, pending_job};
+        use super::super::{completion_job, mark_incomplete_job, pending_job};
         use ea_admin::destruction_runtime::{
             NativeDestructionReplica, NativeDestructionStatus, NativeDestructionTarget,
         };
@@ -1057,13 +1083,26 @@ mod tests {
             (
                 completion_job(value).is_some(),
                 pending_job(value, now).is_some(),
-                failure_job(value, now) == Some(hash(JOB)),
+                mark_incomplete_job(value, now) == Some(hash(JOB)),
+            )
+        }
+        fn never(n: u8, kind: ManagedReplicaKind) -> NativeDestructionReplica {
+            remote(n, kind, false, EvidenceReplicaStatus::Unreachable, None)
+        }
+        fn negative(n: u8) -> NativeDestructionReplica {
+            remote(
+                n,
+                ManagedReplicaKind::Reader,
+                true,
+                EvidenceReplicaStatus::Unreachable,
+                None,
             )
         }
 
         #[test]
-        fn only_an_attested_elapsed_backup_deadline_routes_to_failure() {
+        fn an_elapsed_deadline_or_a_missing_or_negative_attestation_offers_the_explicit_action() {
             use DestructionState::{InProgress, PendingBackupExpiry};
+            use ManagedReplicaKind::{Reader, SyncServer};
             for state in [InProgress, PendingBackupExpiry] {
                 // Deadline equal to the observation already elapsed.
                 assert_eq!(
@@ -1082,10 +1121,21 @@ mod tests {
                     )),
                     (false, false, true)
                 );
+                // Ruling 13.09.: a known replica without a valid attestation
+                // (core `Unconfirmed`) is offered, also beside a running deadline.
+                for replicas in [
+                    vec![writer(), never(3, Reader)],
+                    vec![writer(), never(3, SyncServer)],
+                    vec![writer(), negative(3)],
+                    vec![writer(), backup(3, NOW + 1), never(4, Reader)],
+                    vec![writer(), backup(3, NOW + 1), negative(4)],
+                ] {
+                    assert_eq!(routes(&status(state, replicas)), (false, false, true));
+                }
             }
             let server = remote(
                 5,
-                ManagedReplicaKind::SyncServer,
+                SyncServer,
                 true,
                 EvidenceReplicaStatus::PendingBackup,
                 Some(NOW - 1),
@@ -1096,7 +1146,7 @@ mod tests {
             );
             let complete = remote(
                 3,
-                ManagedReplicaKind::Reader,
+                Reader,
                 true,
                 EvidenceReplicaStatus::Successful(hash(3)),
                 None,
@@ -1108,57 +1158,63 @@ mod tests {
         }
 
         #[test]
-        fn waiting_negative_terminal_or_incomplete_views_are_not_routed_to_failure() {
+        fn the_offer_stays_inside_the_envelope_the_native_core_accepts() {
             use DestructionState::{
                 CompleteManagedScope, InProgress, IncompleteUnreachableReplica, Requested,
             };
-            let never = remote(
-                3,
-                ManagedReplicaKind::Reader,
-                false,
-                EvidenceReplicaStatus::Unreachable,
+            use ManagedReplicaKind::{Reader, Writer};
+            // The core refuses a Pending claim without deadline (`EA-DESTRUCTION-EVENT`).
+            let no_expiry = remote(4, Reader, true, EvidenceReplicaStatus::PendingBackup, None);
+            // An inconsistent success projection is never a basis for an offer.
+            let unbound_success = remote(
+                4,
+                Reader,
+                true,
+                EvidenceReplicaStatus::Successful(hash(0x41)),
                 None,
             );
-            let negative = remote(
-                3,
-                ManagedReplicaKind::Reader,
-                true,
-                EvidenceReplicaStatus::Unreachable,
-                None,
-            );
-            let no_expiry = remote(
-                3,
-                ManagedReplicaKind::Reader,
-                true,
-                EvidenceReplicaStatus::PendingBackup,
-                None,
-            );
-            let writer_backup = remote(
-                3,
-                ManagedReplicaKind::Writer,
-                true,
-                EvidenceReplicaStatus::PendingBackup,
-                Some(NOW - 1),
-            );
-            for other in [never, negative, no_expiry, writer_backup] {
-                assert!(!routes(&status(InProgress, vec![writer(), backup(4, NOW), other])).2);
+            for other in [no_expiry, unbound_success] {
+                assert!(!routes(&status(InProgress, vec![writer(), never(3, Reader), other])).2);
             }
+            // Only running deadlines: Pending, not an offer.
+            assert_eq!(
+                routes(&status(
+                    InProgress,
+                    vec![writer(), backup(3, NOW + 1), backup(4, NOW + 2)]
+                )),
+                (false, true, false)
+            );
             for state in [
                 Requested,
                 CompleteManagedScope,
                 IncompleteUnreachableReplica,
             ] {
-                assert!(!routes(&status(state, vec![writer(), backup(3, NOW)])).2);
+                for replicas in [
+                    vec![writer(), backup(3, NOW)],
+                    vec![writer(), never(3, Reader)],
+                ] {
+                    assert!(!routes(&status(state, replicas)).2);
+                }
             }
-            let mut missing_stub = status(InProgress, vec![writer(), backup(3, NOW)]);
-            missing_stub.targets[0].stub_object_hash = None;
-            assert!(!routes(&missing_stub).2);
-            let mut foreign_custodian = status(InProgress, vec![writer(), backup(3, NOW)]);
-            foreign_custodian.custodian_device_id = device(7);
-            assert!(!routes(&foreign_custodian).2);
-            let mut unbound = status(InProgress, vec![writer(), backup(3, NOW)]);
-            unbound.replicas[0].attestation_hash = Some(hash(0x40));
-            assert!(!routes(&unbound).2);
+            let triggers: [fn() -> NativeDestructionReplica; 2] =
+                [|| backup(3, NOW), || never(3, Reader)];
+            for trigger in triggers {
+                let mut missing_stub = status(InProgress, vec![writer(), trigger()]);
+                missing_stub.targets[0].stub_object_hash = None;
+                assert!(!routes(&missing_stub).2);
+                let mut no_target = status(InProgress, vec![writer(), trigger()]);
+                no_target.targets.clear();
+                assert!(!routes(&no_target).2);
+                let mut foreign_custodian = status(InProgress, vec![writer(), trigger()]);
+                foreign_custodian.custodian_device_id = device(7);
+                assert!(!routes(&foreign_custodian).2);
+                let mut unbound = status(InProgress, vec![writer(), trigger()]);
+                unbound.replicas[0].attestation_hash = Some(hash(0x40));
+                assert!(!routes(&unbound).2);
+                // Before the custodian's own cleanup the offer stays closed,
+                // although the core would already accept (contract boundary).
+                assert!(!routes(&status(InProgress, vec![never(1, Writer), trigger()])).2);
+            }
         }
     }
 
