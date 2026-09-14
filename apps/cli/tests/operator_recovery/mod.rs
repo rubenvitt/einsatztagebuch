@@ -249,11 +249,13 @@ impl RecoveryInstallation {
             false,
         )
         .unwrap();
-        let host = Arc::from(
-            ea_key_provider::SupportMatrixRow::current_host()
-                .unwrap()
-                .posture_provider(),
-        );
+        // A documentable measurement independent of the runner's disk: the
+        // unencrypted root of GitHub's ubuntu-24.04 runner is a measured Fail
+        // that no posture document may cover (see operator_posture_document).
+        let host: Arc<dyn ea_key_provider::DevicePostureProvider> =
+            Arc::new(ea_key_provider::DevicePostureProviderFake::unknown(
+                ea_key_provider::PostureRequirement::FullDiskEncryption,
+            ));
         let runtime = OperatorRuntime::open_with_test_native_and_posture(
             OperatorRuntimeConfig::load(&self.config).unwrap(),
             &self.anchor,
@@ -1235,7 +1237,8 @@ fn native_cli_capture_dispatches_exact_arguments_to_durable_signed_source() {
         &invocation,archive,key_inventory,output,runtime.as_ref().unwrap(),support::live_clock(),
         |config,anchor,now| {
             let native=NativeOperatorProvider::open_test_fixture(installed.directory.path().join("ea-native-operator"),false)?;
-            let host=Arc::from(ea_key_provider::SupportMatrixRow::current_host().unwrap().posture_provider());
+            // Same documentable measurement as `RecoveryInstallation::open`.
+            let host:Arc<dyn ea_key_provider::DevicePostureProvider>=Arc::new(ea_key_provider::DevicePostureProviderFake::unknown(ea_key_provider::PostureRequirement::FullDiskEncryption));
             OperatorRuntime::open_with_test_native_and_posture(config,anchor,now,false,native,host)
         },
     );
