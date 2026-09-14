@@ -134,6 +134,68 @@ describe('explicit final incomplete action', () => {
     expect(host.markIncomplete).toHaveBeenCalledExactlyOnceWith(PROCESS_ID, PREFLIGHT_HASH)
     expect(host.resume).not.toHaveBeenCalled()
   })
+
+  it('re-reads the host state after a failure, so a durable local state4 is never hidden behind the old offer', async () => {
+    // A transport failure after the durable local commit: the host already holds state4.
+    const host = {
+      ...bridge(view(offered())),
+      markIncomplete: vi.fn(async () => { throw { code: 'EA-DESTRUCTION-TRANSPORT-UNAVAILABLE' } }),
+      refresh: vi.fn(async () => view(offered({ state: 'incompleteUnreachableReplica' }))),
+    }
+    const user = userEvent.setup()
+    render(<DestructionWizard bridge={host} />)
+    await user.click(screen.getByRole('button', { name: ACTION }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('checkbox', { name: UNDERSTOOD }))
+    await user.click(within(dialog).getByRole('button', { name: CONFIRM }))
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('bekannte Replik nicht erreichbar'))
+    expect(screen.getByRole('alert')).toHaveTextContent('EA-DESTRUCTION-TRANSPORT-UNAVAILABLE')
+    expect(screen.queryByRole('button', { name: ACTION })).not.toBeInTheDocument()
+    expect(host.refresh).toHaveBeenCalledOnce()
+    expect(host.markIncomplete).toHaveBeenCalledOnce()
+    expect(host.resume).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Status neu lesen' })).toBeEnabled()
+  })
+
+  it('keeps the action refusal visible when the re-read itself fails', async () => {
+    const host = {
+      ...bridge(view(offered())),
+      markIncomplete: vi.fn(async () => { throw { code: 'EA-DESTRUCTION-TRANSPORT-UNAVAILABLE' } }),
+      refresh: vi.fn(async () => { throw { code: 'EA-DESTRUCTION-NATIVE-SESSION' } }),
+    }
+    const user = userEvent.setup()
+    render(<DestructionWizard bridge={host} />)
+    await user.click(screen.getByRole('button', { name: ACTION }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('checkbox', { name: UNDERSTOOD }))
+    await user.click(within(dialog).getByRole('button', { name: CONFIRM }))
+    await waitFor(() => expect(host.refresh).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Status neu lesen' })).toBeEnabled())
+    expect(screen.getByRole('alert')).toHaveTextContent('EA-DESTRUCTION-TRANSPORT-UNAVAILABLE')
+    expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('in Bearbeitung')
+  })
+
+  it('discards a late re-read that belongs to a replaced bridge', async () => {
+    let finishRefresh!: (value: DestructionAdministrationView) => void
+    const first = {
+      ...bridge(view(offered())),
+      markIncomplete: vi.fn(async () => { throw { code: 'EA-DESTRUCTION-TRANSPORT-UNAVAILABLE' } }),
+      refresh: vi.fn(() => new Promise<DestructionAdministrationView>((resolve) => { finishRefresh = resolve })),
+    }
+    const second = bridge(view(offered()))
+    const user = userEvent.setup()
+    const rendered = render(<DestructionWizard bridge={first} />)
+    await user.click(screen.getByRole('button', { name: ACTION }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('checkbox', { name: UNDERSTOOD }))
+    await user.click(within(dialog).getByRole('button', { name: CONFIRM }))
+    await waitFor(() => expect(first.refresh).toHaveBeenCalledOnce())
+    rendered.rerender(<DestructionWizard bridge={second} />)
+    await act(async () => finishRefresh(view(offered({ state: 'incompleteUnreachableReplica' }))))
+    expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('in Bearbeitung')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(second.refresh).not.toHaveBeenCalled()
+  })
 })
 
 describe('DestructionWizard', () => {
