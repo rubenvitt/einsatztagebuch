@@ -58,13 +58,13 @@ async function webSources(): Promise<[string, string][]> {
 // ab, signiert keine Transition und keine Autorisierung und erreicht kein
 // Admin-Kommando; den Gesamtauftrag fuehrt die Desktop-Administration.
 //
-// OFFENE GRENZE: `readerDestructionAttest` signiert frisch mit dem
-// Vault-Ed25519 unter einem eigenen `deletionAttest`-Zertifikat. §3 der
-// Web-Reader-Spec (Zeilen 54–56) verbietet Webcode fuer
-// „Vernichtungsausfuehrung"; dass die lokale Cacheattestierung darunter
-// zulaessig ist, ist laut
-// `.superpowers/sdd/2026-08-13-einsatzarchiv-stage-5-administration-recovery/managed-reader-signing-boundary.md`
-// eine Auslegung ohne ausdrueckliche Ausnahme im Wortlaut — ein Ruling steht aus.
+// GRENZE: `readerDestructionAttest` signiert frisch mit dem Vault-Ed25519 unter
+// einem eigenen `deletionAttest`-Zertifikat. §3 der Web-Reader-Spec (Zeilen
+// 54–56) verbietet Webcode fuer „Vernichtungsausfuehrung"; die enge Ausnahme
+// fuer genau diese Mitwirkung als verwaltete Replik steht seit dem Ruling vom
+// 13.09.2026 ausdruecklich in §3 (Zeilen 57–66). Dieser Zeuge prueft Woerter,
+// nicht Exporte oder Signaturmacht; die kryptographische Bindung des
+// Uebergangssignierers an die Auftragskomponente ist ein eigenes Folgeticket.
 //
 // Ausgenommen werden nur diese vollen Namen in genau diesen Dateien, als ganze
 // Bezeichner oder als exakte Zeichenkette samt Anfuehrungszeichen. Jeder andere
