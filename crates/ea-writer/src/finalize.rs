@@ -975,9 +975,10 @@ impl WriterService<'_> {
     /// gibt frei, was dann noch gemeldet ist.
     ///
     /// AUSSCHLIESSLICH am FEHLERausgang. Ein frueher `Ok`-Ausgang gibt nichts
-    /// frei — er ist ein Halt der Fehlerinjektion, und die beansprucht gar
-    /// nicht erst (siehe die Klausel `matches!(stop, Stop::Confirmed(_))` am
-    /// Anspruch).
+    /// frei — er ist ein Halt der Fehlerinjektion und steht fuer einen Absturz.
+    /// Auch er beansprucht die Nummer vor dem ersten Fehlerfenster im Journal;
+    /// frei wird sie erst beim Neustart ueber die Wiederherstellung
+    /// (`recover_pending`), wie nach einem echten Absturz.
     fn run(
         &self,
         proof: &OperatorSessionProof,
