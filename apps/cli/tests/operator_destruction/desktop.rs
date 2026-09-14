@@ -16,7 +16,8 @@ use ea_desktop::{
     state::RuntimeSessionPort,
 };
 
-fn desktop(f: &NativeDestructionFixture) -> std::sync::Arc<NativeDesktopRuntime> {
+/// Local test runtime without any server transport: the NoServer Desktop host.
+pub(super) fn desktop(f: &NativeDestructionFixture) -> std::sync::Arc<NativeDesktopRuntime> {
     let native = NativeOperatorProvider::open_test_fixture(
         f.admin_directory.join("ea-native-operator"),
         false,

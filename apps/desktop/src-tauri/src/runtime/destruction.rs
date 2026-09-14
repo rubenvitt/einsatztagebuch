@@ -793,10 +793,60 @@ impl DestructionAdministrationPort for NativeDesktopRuntime {
                 return Err(CommandError::new(MARK_INCOMPLETE_NOT_OFFERED));
             }
             let status = if let Some(transport) = &mut resources.server_transport {
+                // Decide on the actual server claims, not only on the last local
+                // observation: the same read-only GET/import as Synchronize (it
+                // signs nothing; an imported claim may itself move 1→2). Only an
+                // unreachable server, a failed TLS handshake or a missing server
+                // reservation fall back to the local view, because the final step
+                // must stay recordable without a reachable server. Binding, native
+                // and protocol refusals propagate before anything is signed.
+                use super::destruction_transport::NativeDestructionTransportError as Transport;
+                let observed = match transport.synchronize(
+                    &mut resources.runtime,
+                    id,
+                    expected_preflight_hash,
+                ) {
+                    Ok(imported) => imported,
+                    Err(Transport::Unavailable | Transport::Tls | Transport::ReservationMissing) => {
+                        resources
+                            .runtime
+                            .unlock()
+                            .map_err(|error| CommandError::new(error.code()))?;
+                        resources
+                            .runtime
+                            .status(id)
+                            .map_err(|error| CommandError::new(error.code()))?
+                    }
+                    Err(error) => return Err(CommandError::new(error.code())),
+                };
+                if mark_incomplete_job(&observed, now()?).is_none() {
+                    return Err(CommandError::new(MARK_INCOMPLETE_NOT_OFFERED));
+                }
                 transport
                     .mark_incomplete(&mut resources.runtime, id, expected_preflight_hash)
                     .map_err(|error| CommandError::new(error.code()))?
             } else {
+                // Never reach Start below for a job without its durable Start.
+                if !matches!(
+                    current.state,
+                    ea_destruction::DestructionState::InProgress
+                        | ea_destruction::DestructionState::PendingBackupExpiry
+                ) {
+                    return Err(CommandError::new(MARK_INCOMPLETE_NOT_OFFERED));
+                }
+                // The producer has no delivery port, so bind this host first with
+                // the same NoRegisteredServer barrier as Start and Resume
+                // (`confirm_no_registered_server`): any registered server, current
+                // or historical, refuses before the final event is signed. With the
+                // durable Start present this is its exact replay and signs nothing.
+                resources
+                    .runtime
+                    .start(
+                        id,
+                        expected_preflight_hash,
+                        ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
+                    )
+                    .map_err(|error| CommandError::new(error.code()))?;
                 resources
                     .runtime
                     .mark_incomplete_progress(id, expected_preflight_hash)

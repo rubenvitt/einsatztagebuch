@@ -194,7 +194,10 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
     }
   }
 
-  const run = async (action: () => Promise<DestructionAdministrationView | null>): Promise<void> => {
+  const run = async (
+    action: () => Promise<DestructionAdministrationView | null>,
+    rereadOnFailure = false,
+  ): Promise<void> => {
     const lease = acquireBusy()
     if (lease === null) return
     const requestGeneration = generation.current
@@ -210,6 +213,17 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
     } catch (error: unknown) {
       if (requestGeneration === generation.current) {
         setRefused(error instanceof AuthorizationFileError ? error.message : refusalCode(error))
+        if (rereadOnFailure) {
+          // A failure may follow a durable native commit (e.g. publication after a
+          // local state4). Show the host's actual state under the same lease; the
+          // action's own code stays visible, also when this read is refused.
+          try {
+            const reread = await bridge.refresh()
+            if (requestGeneration === generation.current) setView(reread)
+          } catch {
+            // Keep the action's refusal; "Status neu lesen" remains available.
+          }
+        }
       }
     } finally {
       lease.release()
@@ -360,7 +374,7 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
               const destructionId = process.destructionId
               const jobHash = process.preflight.jobHash
               closeFinal()
-              void run(() => bridge.markIncomplete(destructionId, jobHash))
+              void run(() => bridge.markIncomplete(destructionId, jobHash), true)
             }}>
               Endgültig als unvollständig abschließen
             </Button>,

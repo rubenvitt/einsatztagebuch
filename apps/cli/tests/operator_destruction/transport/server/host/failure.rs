@@ -74,6 +74,147 @@ fn view(
     serde_json::to_value(value.unwrap()).unwrap()
 }
 
+/// Prepare, Start and the local Writer cleanup on the configured server host.
+/// Returns the destruction id, the job hash and the cleaned view.
+fn started_and_cleaned(
+    f: &NativeDestructionFixture,
+    server: &ServerFixture,
+) -> (String, String, serde_json::Value) {
+    let host = configured_host(f, server);
+    let state = host.desktop_state();
+    let prepared = view(destruction_prepare_core(&state, &f.authorization));
+    let id = prepared["process"]["destructionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let hash = prepared["process"]["preflight"]["jobHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    destruction_start_core(&state, &id, &hash).unwrap();
+    drop(state);
+    drop(host);
+    let host = configured_host(f, server);
+    let cleaned = view(destruction_resume_core(&host.desktop_state(), &id));
+    assert_eq!(cleaned["process"]["state"], "inProgress");
+    assert!(
+        cleaned["process"]["replicas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kindCode"] == 1 && r["resultCode"].is_null()),
+        "the Reader is locally never attested: the action is offered"
+    );
+    assert!(
+        cleaned["process"]["replicas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kindCode"] == 2),
+        "the job is bound to the registered server"
+    );
+    (id, hash, cleaned)
+}
+
+/// MI-1: a server-bound job reopened by a Desktop host without any server
+/// transport (`no-registered-server`) must meet the same NoServer barrier as
+/// Start and Resume before the final event is signed.
+#[test]
+fn native_desktop_explicit_failure_on_a_no_server_host_refuses_a_server_bound_job_before_signing()
+{
+    let f = NativeDestructionFixture::with_reader_opfs();
+    fs::write(f.admin_directory.join("long-recovery-run"), b"").unwrap();
+    let services = tokio::runtime::Runtime::new().unwrap();
+    let server = services.block_on(ServerFixture::seed(&f));
+    let (id, hash, _) = started_and_cleaned(&f, &server);
+
+    let db = super::super::super::super::completion::writer_database(&f);
+    let batches = super::super::super::super::failure::count(&db, "destruction_import_batch");
+    let audits = super::super::super::super::failure::count(&db, "local_audit_event");
+    let local = super::super::super::super::desktop::desktop(&f);
+    local.login().unwrap();
+    let state = local.desktop_state();
+    let before = view(destruction_read_core(&state, Some(&id)));
+    assert_eq!(before["process"]["state"], "inProgress");
+    let refused = destruction_mark_incomplete_core(&state, &id, &hash)
+        .err()
+        .expect("a NoServer host never signs state4 for a server-bound job");
+    assert_eq!(refused.code, "EA-DESTRUCTION-TARGET");
+    assert_eq!(
+        super::super::super::super::failure::count(&db, "destruction_import_batch"),
+        batches
+    );
+    assert_eq!(
+        super::super::super::super::failure::count(&db, "local_audit_event"),
+        audits
+    );
+    assert_eq!(
+        view(destruction_read_core(&state, Some(&id)))["process"],
+        before["process"],
+        "the refused attempt committed nothing locally"
+    );
+    drop(state);
+    drop(local);
+    assert!(state4_transitions(&services, &server).is_empty());
+}
+
+/// MI-2: the configured action first reads and imports the actual server
+/// claims. A Reader removal attested successfully so far only at the server
+/// leaves nothing missing, so no final state4 may be signed.
+#[test]
+fn native_desktop_explicit_failure_imports_server_claims_before_deciding_and_refuses_without_a_reason()
+ {
+    let f = NativeDestructionFixture::with_reader_opfs();
+    fs::write(f.admin_directory.join("long-recovery-run"), b"").unwrap();
+    let services = tokio::runtime::Runtime::new().unwrap();
+    let server = services.block_on(ServerFixture::seed(&f));
+    let (id, hash, cleaned) = started_and_cleaned(&f, &server);
+
+    let db = super::super::super::super::completion::writer_database(&f);
+    let success = super::super::super::super::completion::fixture_reader_claim(&f, &db);
+    let ParsedArchiveObject::Trust(parsed) = decode_exact_object(&success).unwrap() else {
+        panic!()
+    };
+    let DecodedTrustPayloadV1::DeletionAttestation(claim) =
+        parsed.value().decoded_payload().unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(claim.result, 0, "a successful removal claim");
+    let success_hash = hex(object_hash(&success).as_bytes());
+    post_server_only_original(&services, &server, &id, &success);
+
+    let host = configured_host(&f, &server);
+    let state = host.desktop_state();
+    let before = view(destruction_read_core(&state, Some(&id)));
+    assert_eq!(
+        before["process"], cleaned["process"],
+        "the server-only success claim is not local yet: the local view still offers the action"
+    );
+    let refused = destruction_mark_incomplete_core(&state, &id, &hash)
+        .err()
+        .expect("after importing the actual server claims nothing is missing");
+    assert_eq!(refused.code, "EA-DESTRUCTION-MARK-INCOMPLETE-NOT-OFFERED");
+    assert!(
+        state4_transitions(&services, &server).is_empty(),
+        "no state4 at the server"
+    );
+    let after = view(destruction_read_core(&state, Some(&id)));
+    assert_eq!(after["process"]["state"], "inProgress", "no local state4");
+    assert!(
+        after["process"]["replicas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kindCode"] == 1
+                && r["resultCode"] == 0
+                && r["attestationHash"] == success_hash.as_str()),
+        "the read-only import durably kept the actual server claim"
+    );
+    drop(state);
+    drop(host);
+}
+
 #[test]
 fn native_desktop_explicit_failure_binds_servers_before_commit_then_publishes_and_imports_the_actual_reply()
  {
@@ -142,7 +283,10 @@ fn native_desktop_explicit_failure_binds_servers_before_commit_then_publishes_an
     drop(unbound);
     assert!(state4_transitions(&services, &server).is_empty());
 
-    // Phase 2: the overdue Reader original exists only at the server.
+    // Phase 2: the overdue Reader original exists only at the server. The
+    // action imports the actual server claims before it decides (MI-2), so the
+    // decision itself already rests on this overdue claim, not on the stale
+    // local "never attested" observation read below.
     let db = super::super::super::super::completion::writer_database(&f);
     let reader = super::super::super::super::pending::changed_reader_claim(&f, &db, |claim| {
         claim.result = 1;
@@ -173,7 +317,7 @@ fn native_desktop_explicit_failure_binds_servers_before_commit_then_publishes_an
             .unwrap()
             .iter()
             .any(|r| r["kindCode"] == 1 && r["resultCode"].is_null()),
-        "the server-only original is not local yet"
+        "before the action, the server-only original is not local yet"
     );
     let failed = view(destruction_mark_incomplete_core(&state, &id, &hash));
     assert_eq!(failed["process"]["state"], "incompleteUnreachableReplica");
