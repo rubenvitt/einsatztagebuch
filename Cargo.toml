@@ -172,6 +172,16 @@ zeroize = { version = "=1.9.0", features = ["derive"] }
 x25519-dalek = { version = "=3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 x509-tsp = "=0.1.0"
 
+# ADR 0001 "Development and test build profile": optimized dev/test builds so the
+# native process fixtures finish inside the product's fixed 300 s presence-proof
+# and 40 s reply deadlines on CI runners. Debug assertions and overflow checks
+# stay enabled; release builds are unaffected.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
 # ADR 0007: upstream 0.12.0 with zeroizing C_GetAttributeValue scratch buffers.
 [patch.crates-io]
 cryptoki = { path = "vendor/cryptoki" }
