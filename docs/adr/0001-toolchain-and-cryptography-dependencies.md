@@ -192,6 +192,54 @@ signing are measured; and the replacement of the boundary in
 `pkcs11:` source is a fully validated reference that ends with `21`, never a
 partial success.
 
+## Development and test build profile
+
+Decision date: 2026-09-14 (DRK-327, ruling by the repository owner).
+
+The root `Cargo.toml` sets `[profile.dev] opt-level = 1` and
+`[profile.dev.package."*"] opt-level = 2`. Until then the workspace had no
+`[profile]` section, so every dependency — SQLCipher, the COSE, Ed25519, HPKE
+and Argon2id stack — was compiled at `opt-level = 0`.
+
+The trigger was the Stage-5 gate on `ubuntu-24.04`. The native process fixtures
+in `apps/cli/tests/operator.rs` (`process_native::*`) run the real
+`OperatorRuntime`, `DestructionRuntime` and administration rounds against fixed
+product deadlines: an operator presence proof expires `MAX_INACTIVITY_MS`
+(300 s) after issuance, and the administration fixtures wait at most 40 s for a
+signed root reply. On the GitHub runner the unoptimized fixture setup crossed
+both. With per-phase timestamps, `evidence_writer::adapter_lock_refuses_preview_without_reservation`
+reached `start` after 134 s and failed in `resume_local` at about 305 s with
+`EA-OPERATOR-PRESENCE-PROOF-INVALID` even when run alone (diagnostic run
+34862813478); `separate_native_root_signs_the_exact_existing_admin_authorization_target`
+crossed its 40 s reply wait in the same run. The same tests are green on the
+development host. This is a test-speed gap against product constants, not a
+Linux behaviour difference, and the constants are not relaxed for tests.
+
+Measured locally on `linux/amd64` with a 4-CPU quota (the runner's core count),
+same test, serial:
+
+| Profile | `prepare` | `start` | `resume_local` | total | cold build of the `operator` target, 16 CPUs |
+| --- | --- | --- | --- | --- | --- |
+| no `[profile]` (before) | 31.6 s | 49.7 s | 88.1 s | 109 s | — |
+| dependencies `opt-level = 2` only | 22.1 s | 37.3 s | 65.3 s | 80 s | 329 s |
+| workspace `1`, dependencies `2` (selected) | 17.3 s | 29.6 s | 49.9 s | 61 s | 352 s |
+
+Starting the fixture helper (an `exec` of the 182 MB test binary) costs 25-33 ms
+per call and is not the bottleneck; the time is computation in workspace and
+dependency code. Dependencies alone would leave the CI run at roughly 220 s
+against the 300 s proof, too close under parallel load; the selected profile
+projects to roughly 170 s.
+
+`opt-level` does not change test semantics here: the `dev` profile keeps
+`debug-assertions` and `overflow-checks` enabled regardless of optimization,
+and the only `cfg(debug_assertions)` in the tree selects the Windows subsystem
+in `apps/desktop/src-tauri/src/main.rs`. `release` is unchanged. The cost is a
+longer cold build and a less faithful debugger view of workspace code.
+Switching the gate runner to `cargo-nextest` was deferred: it runs every test
+in its own process, which rebuilds the `OnceLock` archive fixtures of
+`ea-reader` and `ea-system-tests` per test, and it is only reconsidered if the
+gate still exceeds its 90-minute budget with this profile.
+
 ## Consequences
 
 - Dependency upgrades, enabled-feature changes, or Suite 1 algorithm changes
