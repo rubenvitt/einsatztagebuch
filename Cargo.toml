@@ -51,6 +51,9 @@ ea-audit = { path = "crates/ea-audit" }
 ea-cbor = { path = "crates/ea-cbor" }
 ea-chain = { path = "crates/ea-chain" }
 ea-crypto = { path = "crates/ea-crypto" }
+# Nur fuer das optionale `desktop-fixture` von `apps/cli`; ohne dieses Merkmal
+# zieht kein Mitglied den Wirt als normale Kante.
+ea-desktop = { path = "apps/desktop/src-tauri" }
 ea-destruction = { path = "crates/ea-destruction" }
 ea-draft = { path = "crates/ea-draft" }
 ea-format = { path = "crates/ea-format" }
