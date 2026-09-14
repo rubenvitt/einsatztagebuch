@@ -31,7 +31,7 @@ use ea_writer::{FinalizationFaultPoint, RecoveryOutcome, WriterError};
 
 use support::{
     MatrixOutcome, MediumFailure, WriterMatrixHarness, archive_support, draft_support, occurrences,
-    published_objects_are_complete, single_offset,
+    published_objects_are_complete, single_offset, writer_support::FIXTURE_INCIDENT_NUMBER,
 };
 
 /// Die Befunde, die einen HALB geschriebenen Bestand bezeugen wuerden.
@@ -346,6 +346,38 @@ fn a_media_failure_at_any_durable_step_never_produces_a_half_written_archive() {
                 probe.expects_a_prepared_marker(),
                 "{point:?}: die Ablage widerspricht der Klasse {probe:?}"
             );
+            // Ein Abbruchpunkt VOR der Marke ist ein Prozessverlust, und der
+            // Anspruch der Einsatznummer liegt seit T10 VOR dem ersten
+            // Fehlerfenster im Journal (`writer_incident_claim`). Er bleibt
+            // stehen, bis der START ihn freigibt — dieselbe Folge, die
+            // `crates/ea-writer/tests/stale_registry_acknowledgement.rs::review_crash_before_marker_must_release_incident_number`
+            // misst. Ohne diesen Neustart wiese der folgende Abschluss mit
+            // `EA-WRITER-INCIDENT-NUMBER-TAKEN` ab, und die Matrix erreichte
+            // das Medium nicht mehr. Der Neustart schreibt nicht in den Bestand
+            // und steht VOR dem erwarteten Inventar.
+            if matches!(probe, MediumProbe::FinalizeIsRefused) {
+                assert!(
+                    harness
+                        .inner()
+                        .incident_number_is_taken(FIXTURE_INCIDENT_NUMBER),
+                    "{point:?}/{failure:?}: der abgebrochene Lauf hat seine Nummer nicht \
+                     beansprucht — der Neustart unten waere leer"
+                );
+                let restarted = harness.resume_pending().unwrap_or_else(|error| {
+                    panic!("{point:?}/{failure:?}: der Neustart vor der Marke scheitert: {error:?}")
+                });
+                assert_eq!(
+                    restarted,
+                    RecoveryOutcome::NothingPending,
+                    "{point:?}/{failure:?}: vor der Marke hat der Neustart nichts zu vollenden"
+                );
+                assert!(
+                    !harness
+                        .inner()
+                        .incident_number_is_taken(FIXTURE_INCIDENT_NUMBER),
+                    "{point:?}/{failure:?}: der Neustart hat die Nummer nicht freigegeben"
+                );
+            }
             // Das ERWARTETE Inventar entsteht VOR der Verweigerung. Aus den
             // tatsaechlichen Bytes gebildet koennten `MissingFile` und
             // `ModifiedFile` nie feuern, und die Zusicherung waere leer.
@@ -368,6 +400,15 @@ fn a_media_failure_at_any_durable_step_never_produces_a_half_written_archive() {
                     assert!(
                         is_a_medium_refusal(&error),
                         "{point:?}/{failure:?}: abgewiesen wurde mit {error:?} und nicht vom Medium"
+                    );
+                    // Vor der Grenze gibt der Fehlerausgang den Anspruch
+                    // zurueck: der Medienfehler darf die Nummer nicht verbrennen.
+                    assert!(
+                        !harness
+                            .inner()
+                            .incident_number_is_taken(FIXTURE_INCIDENT_NUMBER),
+                        "{point:?}/{failure:?}: nach der Medienverweigerung ist die Nummer \
+                         weiterhin belegt"
                     );
                     reached_the_medium += 1;
                 }
