@@ -1,7 +1,9 @@
 #[path = "verify_fixtures/mod.rs"]
 mod verify_fixtures;
 
+use ea_archive::{ArchiveInventory, QuarantineReason};
 use ea_reader::{ReaderMode, ReaderVerifier, SchemaRegistry, SilentObserver, decrypt_verified};
+use ea_types::VerificationStatus;
 use verify_fixtures::{
     fixtures,
     operator::{self, Defect},
@@ -71,10 +73,48 @@ refusal!(
     a_payload_cannot_claim_another_registry_version,
     HeaderRegistry
 );
-refusal!(
-    a_manifest_cannot_borrow_a_different_registry_head_hash,
-    ManifestHead
-);
+/// A manifest naming a Registry head that does not exist on the signed line is
+/// refused already by the public pipeline, not only at decryption: gate
+/// `registry` resolves the EXACT bound head (`design.md` §14.1 step 3,
+/// `crate::historical::historical_registry_head` in `ea-verify`). The entry is
+/// isolated as `unattributable`, the report is never fully verified (§14.1),
+/// and no decryption witness exists, so `decrypt_verified` is unreachable.
+#[test]
+fn a_manifest_cannot_borrow_a_different_registry_head_hash() {
+    let archive = operator::archive(&[&operator::genesis_plaintext()], Defect::ManifestHead);
+    let vault = fixtures::vault_pinning(archive.anchor_bytes);
+    let classification = ReaderVerifier::new(ReaderMode::File, fixtures::EFFECTIVE_NOW)
+        .classify(&archive.fixture, &vault, &mut SilentObserver)
+        .unwrap();
+    let report = classification.report();
+    assert!(
+        !report.is_fully_verified(),
+        "a borrowed registry head must never verify publicly"
+    );
+
+    let inventory = ArchiveInventory::build(&archive.fixture).unwrap();
+    let [entry] = inventory.entries() else {
+        panic!("exactly one entry package")
+    };
+    let quarantined: Vec<_> = report
+        .quarantined_objects()
+        .map(|object| (*object.object_hash().as_bytes(), object.reason()))
+        .collect();
+    assert_eq!(
+        quarantined,
+        [(
+            *entry.object_hash().as_bytes(),
+            QuarantineReason::Unattributable
+        )]
+    );
+
+    let entry_hash = operator::entry_hash(&archive.fixture);
+    let state = classification.state_of(entry_hash).unwrap();
+    assert_eq!(state.verification(), VerificationStatus::Invalid);
+    assert_eq!(state.detail_code(), None);
+    assert!(classification.verified_entry(entry_hash).is_none());
+    assert!(classification.verified_grant(entry_hash).is_none());
+}
 refusal!(
     a_binding_not_yet_effective_never_discloses_plaintext,
     NotYetEffective
