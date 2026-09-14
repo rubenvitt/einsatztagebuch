@@ -416,8 +416,8 @@ fn signer_and_verifier_round_trip_every_signed_endpoint_through_the_wire_headers
         round_trips += 1;
     }
     assert_eq!(
-        round_trips, 14,
-        "fourteen of the seventeen endpoints are RFC-9421 signed"
+        round_trips, 16,
+        "sixteen of the nineteen endpoints are RFC-9421 signed"
     );
 }
 
@@ -477,7 +477,7 @@ fn the_requested_key_is_rejected_on_every_other_endpoint() {
         assert_eq!(error.http_status(), 401, "{}", endpoint.path_template());
         rejected += 1;
     }
-    assert_eq!(rejected, 14);
+    assert_eq!(rejected, 16);
 }
 
 #[test]
