@@ -307,7 +307,7 @@ async fn no_column_of_the_schema_carries_a_domain_value() {
     .expect("reading information_schema.columns must succeed");
 
     // Positivkontrolle: ein leeres Ergebnis waere ebenfalls frei von verbotenen
-    // Woertern und bewiese nichts. Die Migration legt sechsundzwanzig Tabellen
+    // Woertern und bewiese nichts. Die Migrationen legen vierunddreissig Tabellen
     // an; deutlich weniger Spalten als hier gefordert hiesse, dass der
     // Kanarienvogel gar nicht hingesehen hat.
     assert!(
@@ -442,8 +442,9 @@ async fn plant_admin_audit(
     .map(|_| ())
 }
 
-/// Alle sechsundzwanzig Tabellen der Stufe 3 sind da, samt den additiven
-/// Migrationen fuer bestehende Installationen.
+/// Alle vierunddreissig Tabellen sind da: die sechsundzwanzig der Stufe 3,
+/// samt den additiven Migrationen fuer bestehende Installationen, und die acht
+/// der verwalteten Vernichtung aus `0003_managed_destruction.sql` (Stufe 5).
 #[tokio::test]
 async fn the_migrations_create_every_planned_table() {
     let database = common::fresh_database().await;
@@ -453,7 +454,15 @@ async fn the_migrations_create_every_planned_table() {
         "challenges",
         "checkpoints",
         "clock_release_replays",
+        "destruction_attestation_intake",
         "destruction_attestations",
+        "destruction_event_cores",
+        "destruction_job_objects",
+        "destruction_job_stubs",
+        "destruction_job_versions",
+        "destruction_jobs",
+        "destruction_removed_objects",
+        "destruction_server_measurements",
         "destruction_targets",
         "destruction_transitions",
         "destructions",
@@ -494,8 +503,9 @@ async fn the_migrations_create_every_planned_table() {
             .expect("the migration bookkeeping table must exist");
     assert_eq!(
         applied,
-        vec![(1_i64,), (2_i64,)],
-        "the original schema and the additive trust cache migration must both apply"
+        vec![(1_i64,), (2_i64,), (3_i64,)],
+        "the original schema, the additive trust cache migration and the additive managed \
+         destruction migration must all apply"
     );
 
     database.cleanup().await;
