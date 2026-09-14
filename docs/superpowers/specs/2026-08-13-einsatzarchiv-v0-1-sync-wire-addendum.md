@@ -397,9 +397,12 @@ Die Codes der Trust-Annahme, mit ihrer Abbildung:
 `EA-TRUST-EVENT-UNVERIFIABLE` trifft **genau fünf** Trust-Subtypen, und die
 Menge ist abschließend: `destructionAuthorization`, `destructionTransition`,
 `deletionAttestation`, `webBundleRelease` und `webBundleRevocation`. Die drei
-Vernichtungsarten reisen über `POST /v1/destructions`; die beiden Bundle-Arten
-haben in Stufe 3 **keinen** Aufnahmeendpunkt und sind nur als Format
-definiert.
+Vernichtungsarten reisen nicht über `POST /v1/trust/events`:
+`destructionAuthorization` über `POST /v1/destructions`, `destructionTransition`
+und `deletionAttestation` seit Stufe 5 über den additiven Endpunkt
+`POST /v1/destructions/{destructionId}/events` (Abschnitt „Die beiden additiven
+Vernichtungsendpunkte"); die beiden Bundle-Arten haben in Stufe 3 **keinen**
+Aufnahmeendpunkt und sind nur als Format definiert.
 
 Die `grantAuthorization` gehört ausdrücklich **nicht** dazu: sie wird an
 `POST /v1/trust/events` als **Katalogstoff** angenommen. Angenommen heißt
@@ -445,8 +448,12 @@ Domänenkonstante ‖ Core-Bytes. Das Gültigkeitsfenster steht im Token selbst:
 `expiresAt` ist eine absolute Serverzeit, und ein Cursor mit
 `expiresAt < jetzt` wird abgewiesen, bevor seine Bindung geprüft wird.
 
-Die Domänenkonstante ist **additiv**: die 24 eingefrorenen Domänenkonstanten
-unter `vectors/crypto/suite-1/domain-string/` kennen heute keinen Cursor, und
+Die Domänenkonstante ist **additiv**: die eingefrorenen Domänenkonstanten
+unter `vectors/crypto/suite-1/domain-string/` (24 bei Einführung des Cursors,
+seit Stufe 5 um die drei Domänen
+`EINSATZARCHIV-DESTRUCTION-PREFLIGHT-v1`, `EINSATZARCHIV-GOLIVE-POSTURE-v1` und
+`EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1` auf 27 erweitert) kennen keinen
+Cursor, und
 keine von ihnen wird durch diese Ergänzung berührt.
 
 Es entsteht **keine** neue `CertificateCapability`. Design §13 sagt wörtlich
@@ -464,6 +471,61 @@ Domäne, Digest und Tokenrahmen fest und nimmt Signierer und Prüfer als
 übergebene Schnittstellen entgegen; der Task, der den Serverschlüssel-Port baut,
 ergänzt den Content-Type gemeinsam mit der zugehörigen Signaturmethode. Diese
 Stelle ist damit benannt und nicht stillschweigend offen.
+
+## Die beiden additiven Vernichtungsendpunkte
+
+Stufe 5 ergänzt die Endpunkttabelle **additiv** um zwei Zeilen; die 17
+ursprünglichen Endpunkte behalten Pfad, Methode und Endpunktcode 1–17
+(`EndpointV1::ALL` und `EndpointV1::code` in `crates/ea-sync-protocol/src/lib.rs`,
+gepinnt in `crates/ea-sync-protocol/tests/destruction_transport.rs` und
+`crates/ea-sync-protocol/tests/framing.rs`). Kein bestehender Rahmen, keine
+Objektform und kein Feld eines v1-Trust-Objekts ändert sich.
+
+| Endpunkt | Code | Signatur | Capability | Erfolg |
+| --- | --- | --- | --- | --- |
+| `POST /v1/destructions/{destructionId}/events` | 18 | signiert | `deletionAttest` | 202 mit `destruction-status-response-v1` |
+| `POST /v1/destructions/{destructionId}/jobs` | 19 | signiert | `deletionAttest` | 202 mit `destruction-status-response-v1` |
+
+Belege: Methode, Pfad, Code, Authentisierung, Capability, Medientypen und
+Erfolgsstatus stehen in `EndpointV1::method`, `path_template`, `code`,
+`authentication`, `required_capability`, `request_media_type`,
+`response_media_type` und `success_status`
+(`crates/ea-sync-protocol/src/lib.rs`). Request- und Antwortkörper tragen
+`application/einsatzarchiv+cbor;v=1`. Die Handler `create_event` und
+`create_job` in `apps/server/src/http/destructions.rs` antworten im Erfolgsfall
+mit den exakten Bytes der `DestructionStatusResponseV1`.
+
+`POST /v1/destructions/{destructionId}/events` nimmt genau ein exaktes `.etb`
+entgegen. Ist es eine `deletionAttestation`, prüft
+`ea_sync_server::managed_destruction::accept_attestation`; jeder andere Körper
+geht an `accept_event`, das über `ea_destruction::verify_event_historical` eine
+`destructionTransition` verlangt und alles andere mit
+`EA-DESTRUCTION-AUTHORIZATION-UNVERIFIABLE` (422) abweist. Die Körperdecke ist
+`ETB_MAX_RAW_BYTES_V1` plus 1 024 Byte Rahmenaufschlag (`DESTRUCTION_BODY_LIMIT`).
+
+`POST /v1/destructions/{destructionId}/jobs` nimmt `DestructionJobUploadV1`
+entgegen (`crates/ea-sync-protocol/src/destruction_job.rs`): ein deterministisches
+CBOR-Array aus **genau vier** `bstr` — exakter Preflight-Core, exakte
+COSE-Sign1 über diesen Core, exakte Inventarbytes, Zertifikatshash mit genau
+32 Byte. Die ersten drei dürfen nicht leer sein, nachfolgende Bytes sind
+unzulässig; jede Abweichung ist `EA-SYNC-FRAME-SHAPE` (400). Der Core ist das
+interne Profil aus
+`docs/superpowers/specs/2026-09-09-einsatzarchiv-destruction-preflight-profile.md`.
+Die Körperdecke ist `MAX_READER_PAGE_BYTES_V1`.
+
+Die ID im Pfad ist die 16-Byte-Vernichtungskennung in Hex; eine ID, die kein
+Hex von genau 16 Byte ist, ergibt `EA-SYNC-FRAME-SHAPE` (400, `id16_from_hex` in
+`apps/server/src/http/mod.rs`). Ein Aufrufer ohne zertifiziertes Gerät erhält
+`EA-DESTRUCTION-AUTHORIZATION-UNVERIFIABLE` (422). Die fachlichen Codes sind
+die der `DestructionError` in `crates/ea-sync-server/src/destruction.rs` mit
+ihrer dortigen Abbildung: `EA-DESTRUCTION-PRIVACY-GATE`,
+`EA-DESTRUCTION-AUTHORIZATION-INVALID` und
+`EA-DESTRUCTION-AUTHORIZATION-UNVERIFIABLE` auf 422,
+`EA-DESTRUCTION-UNKNOWN` auf 404, `EA-DESTRUCTION-CONFLICT` auf 409,
+`EA-DESTRUCTION-DEPENDENCY-UNAVAILABLE` auf 503 und `EA-DESTRUCTION-INTERNAL`
+auf 500. Rahmen-, Signatur-, Capability- und Größenfehler kommen unverändert
+aus `SyncProtocolError` und `AuthServiceError`. `retryable=true` gilt wie
+überall nur für 429, 500 und 503.
 
 ## Feld-zu-Design-Review
 
@@ -486,6 +548,8 @@ Stelle ist damit benannt und nicht stillschweigend offen.
 | `GET /v1/archive-exports/current` — Aufrufer: jedes freigegebene Gerät der Organisation; Request: kein Körper; Response: Objektfolge plus archive-export-manifest-v1; Status: 200; 400, 401, 403, 413, 500, 503 | §13.3 | bestätigt |
 | `POST /v1/destructions` — Aufrufer: destructionApprove; Request: destruction-request-v1; Response: destruction-status-response-v1; Status: 202; 400, 401, 403, 404, 409, 413, 422, 500, 503 | §13.3, §16 | bestätigt |
 | `GET /v1/destructions/{destructionId}` — Aufrufer: jedes freigegebene Gerät der Organisation; Request: kein Körper; Response: destruction-status-response-v1; Status: 200; 400, 401, 403, 404, 500, 503 | §16 | bestätigt |
+| `POST /v1/destructions/{destructionId}/events` — Endpunktcode 18; Aufrufer: deletionAttest; Request: genau ein exaktes `.etb` der Art destructionTransition oder deletionAttestation; Response: destruction-status-response-v1; Status: 202; 400, 401, 403, 404, 409, 413, 422, 500, 503 | §16; Abschnitt „Die beiden additiven Vernichtungsendpunkte" | bestätigt |
+| `POST /v1/destructions/{destructionId}/jobs` — Endpunktcode 19; Aufrufer: deletionAttest; Request: DestructionJobUploadV1; Response: destruction-status-response-v1; Status: 202; 400, 401, 403, 404, 409, 413, 422, 500, 503 | §16; Abschnitt „Die beiden additiven Vernichtungsendpunkte"; destruction-preflight-profile.md | bestätigt |
 | `challenge-request-v1` / organization-id | §13.1, ratenbegrenzter Challenge-Endpunkt ohne `tag` | bestätigt |
 | Ratenbegrenzung / Zählschlüssel = SHA-256 der Gegenstellenadresse ohne Port | §13.1, ratenbegrenzter Challenge-Endpunkt | bestätigt |
 | `webauthn-credential-registration-v1` / subject-id, credential-id, credential-public-cose-key | web-reader-design.md §6.4.1 | bestätigt |
@@ -508,6 +572,10 @@ Stelle ist damit benannt und nicht stillschweigend offen.
 | trust-event-upload-v1 / exact-etb-bytes | Design §12 | bestätigt |
 | historical-grant-upload-v1 / exact-eag-bytes | Design §13.3 | bestätigt |
 | destruction-request-v1 / exact-destruction-authorization-etb-bytes | Design §16 | bestätigt |
+| DestructionJobUploadV1 / exact-core-bytes | destruction-preflight-core-internal-v1 in docs/superpowers/specs/2026-09-09-einsatzarchiv-destruction-preflight-profile.md | bestätigt |
+| DestructionJobUploadV1 / exact-preflight-signature-bytes | exact-cose-sign1 in docs/superpowers/specs/2026-09-09-einsatzarchiv-destruction-preflight-profile.md | bestätigt |
+| DestructionJobUploadV1 / exact-inventory-bytes | Design §16; DestructionJobUploadV1 in crates/ea-sync-protocol/src/destruction_job.rs | bestätigt |
+| DestructionJobUploadV1 / certificate-hash (32 Byte) | DestructionJobUploadV1 in crates/ea-sync-protocol/src/destruction_job.rs | bestätigt |
 | protocol-error-v1 / error-code | Design §13.5 | bestätigt |
 | protocol-error-v1 / request-id | Design §13.1, global eindeutige Request-ID | bestätigt |
 | protocol-error-v1 / retryable | Design §13.5 | bestätigt |
