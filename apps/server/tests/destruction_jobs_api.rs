@@ -1193,7 +1193,7 @@ async fn pending_backup_resumes_the_same_job_only_after_actual_version_removal()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    let fixture = JobFixture::at(wall);
+    let fixture = JobFixture::with_replica_signers(wall, true);
     let database = common::fresh_database().await;
     let bucket = common::unique_bucket_name("ea-t12-retained");
     let s3 = common::object_store_client().await;
@@ -1349,6 +1349,75 @@ async fn pending_backup_resumes_the_same_job_only_after_actual_version_removal()
     assert_eq!(att.result, 1);
     assert_eq!(att.backup_expiry_at, Some(UnixMillis::new(deadline)));
     let event = transition(&fixture, Some(1), 2, Some(object_hash(&start)), 0xa3);
+    // Spec §16.3: inProgress→pendingBackupExpiry only once every immediately
+    // removable known replica is attested. The Writer and Reader duties of the
+    // frozen denominator have no claim yet, so the server refuses the edge.
+    let premature = common::call_at(
+        &common::ApiCall {
+            ready: &ready,
+            signer_seed: COMPONENT_SEED,
+            endpoint: EndpointV1::DestructionEvents,
+            target: &events,
+            body: Some(&event),
+            request_id: [0xb0; 16],
+        },
+        wall,
+    )
+    .await;
+    assert_eq!(
+        (premature.status, common::error_code(&premature.body)),
+        (409, Some("EA-DESTRUCTION-CONFLICT".to_owned())),
+        "an unattested immediate replica duty prevents pendingBackupExpiry"
+    );
+    let mut removed = vec![
+        object_hash(&fixture.original.original_bytes),
+        object_hash(&fixture.original.initial_grant_bytes),
+    ];
+    removed.sort();
+    let immediate = &fixture.replica_signers[1..];
+    assert!(
+        !immediate.is_empty(),
+        "the frozen denominator has immediate duties"
+    );
+    for (index, (certificate, device, kind, seed)) in immediate.iter().enumerate() {
+        let payload = TrustPayloadV1::deletion_attestation(DeletionAttestationFieldsV1 {
+            destruction_id: DestructionId::try_from(&[0x74; 16][..]).unwrap(),
+            destruction_authorization_object_hash: object_hash(&fixture.auth),
+            replica_id: *device.as_bytes(),
+            replica_kind: *kind,
+            removed_object_hashes: removed.clone(),
+            result: 0,
+            backup_expiry_at: None,
+            executed_at: UnixMillis::new(wall),
+        })
+        .unwrap();
+        let signature = CoseSigner::from_secret(SecretBytes::new(*seed))
+            .sign_deletion_attestation_digest(
+                *certificate,
+                payload.exact_digest_input(),
+                &fixture.auth,
+            )
+            .unwrap();
+        let exact = encode_trust(&TrustObjectV1::new(payload, vec![signature]).unwrap()).unwrap();
+        let accepted = common::call_at(
+            &common::ApiCall {
+                ready: &ready,
+                signer_seed: CONTROLLER_SEED,
+                endpoint: EndpointV1::DestructionEvents,
+                target: &events,
+                body: Some(exact.as_bytes()),
+                request_id: [0xb1 + index as u8; 16],
+            },
+            wall,
+        )
+        .await;
+        assert_eq!(
+            accepted.status,
+            202,
+            "immediate replica removal claim is recorded: {:?}",
+            common::error_code(&accepted.body)
+        );
+    }
     let pending = common::call_at(
         &common::ApiCall {
             ready: &ready,
@@ -1361,7 +1430,12 @@ async fn pending_backup_resumes_the_same_job_only_after_actual_version_removal()
         wall,
     )
     .await;
-    assert_eq!(pending.status, 202);
+    assert_eq!(
+        pending.status,
+        202,
+        "all immediate duties attested, server retention still running: {:?}",
+        common::error_code(&pending.body)
+    );
     let newer = common::spawn_server_with_deletion_component(
         database.pool().clone(),
         UnixMillis::new(deadline + 1),
@@ -1409,7 +1483,12 @@ async fn pending_backup_resumes_the_same_job_only_after_actual_version_removal()
     );
     let done = DestructionStatusResponseV1::decode(&resumed.body).unwrap();
     assert_eq!(done.state(), 2, "no artificial pending→inProgress edge");
-    assert_eq!(done.attestations().len(), 2);
+    // Server pending + server removal after the deadline + one claim per
+    // immediate Writer/Reader duty.
+    assert_eq!(
+        done.attestations().len(),
+        2 + fixture.replica_signers.len() - 1
+    );
     let remaining = s3
         .list_object_versions()
         .bucket(&bucket)
