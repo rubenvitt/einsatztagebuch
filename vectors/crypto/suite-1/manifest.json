@@ -599,6 +599,23 @@
       "expectedOutcome": {
         "kind": "accepted"
       },
+      "file": "domain-string/einsatzarchiv-destruction-preflight-v1.bin",
+      "fileSha256": "483f61800c7b28b7b7fa0d784c6e53d50f235ae7125940435e9a5387810d7a7a",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-destruction-preflight-v1",
+      "objectBytes": "45494e5341545a4152434849562d4445535452554354494f4e2d505245464c494748542d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
       "file": "domain-string/einsatzarchiv-evidence-renewal-input-v1.bin",
       "fileSha256": "65132e7952a151fba208cbcfedceb30071d75a8e265c1aace3e7830839443223",
       "inputBytes": "",
@@ -639,6 +656,23 @@
       "intermediateDigests": {},
       "name": "domain-string/einsatzarchiv-finalization-preview-v1",
       "objectBytes": "45494e5341545a4152434849562d46494e414c495a4154494f4e2d505245564945572d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-string/einsatzarchiv-golive-posture-v1.bin",
+      "fileSha256": "aa06054d6a4b3b84444c9112cb214cb1ca68ddfaf77c1b766c1828e8d5024440",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-golive-posture-v1",
+      "objectBytes": "45494e5341545a4152434849562d474f4c4956452d504f53545552452d7631",
       "schemaId": "ea.crypto.domain-separation-string/v1",
       "source": {
         "commit": "ea-testkit::crypto_suite_one_manifest",
@@ -707,6 +741,23 @@
       "intermediateDigests": {},
       "name": "domain-string/einsatzarchiv-hpke-info-v1",
       "objectBytes": "45494e5341545a4152434849562d48504b452d494e464f2d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-string/einsatzarchiv-native-archive-component-v1.bin",
+      "fileSha256": "7164fc5efe85bd3daf7ea6ee2df72f56b1135bdde8970c08c524fccd428094f5",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-native-archive-component-v1",
+      "objectBytes": "45494e5341545a4152434849562d4e41544956452d415243484956452d434f4d504f4e454e542d7631",
       "schemaId": "ea.crypto.domain-separation-string/v1",
       "source": {
         "commit": "ea-testkit::crypto_suite_one_manifest",
