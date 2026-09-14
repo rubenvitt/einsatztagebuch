@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 # Explicit integration-test build only; the installed CLI never chooses the
 # fixture constructor. Ordinary CLI builds retain no desktop dependency.
-ea-desktop = { path = "../desktop/src-tauri", optional = true, features = ["test-support"] }
+ea-desktop = { workspace = true, optional = true, features = ["test-support"] }
 # Die Fachlogik des SECHSTEN Kommandos, und ausschliesslich sie:
 # `BootstrapCoordinator` fuehrt den Zwoelfschrittablauf aus `§12.1`
 # (`design.md`:1336-1349), `FileBootstrapStore` persistiert ihn, `AdminError`
