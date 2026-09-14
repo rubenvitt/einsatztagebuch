@@ -44,16 +44,17 @@ async fn fresh_signed_get_checks_exact_id_hash_and_http_success() {
     let observed = client.destruction_status(id, hash).await.unwrap();
     assert!(observed.authorization_object_hash() == hash);
     client.destruction_status(id, hash).await.unwrap();
-    let requests = server.seen.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].method, HttpMethod::Get);
-    assert_eq!(
-        requests[0].target,
-        "/v1/destructions/19191919191919191919191919191919"
-    );
-    assert!(requests[0].headers.iter().any(|(h, _)| *h == "signature"));
-    assert_ne!(requests[0].nonce, requests[1].nonce);
-    drop(requests);
+    {
+        let requests = server.seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, HttpMethod::Get);
+        assert_eq!(
+            requests[0].target,
+            "/v1/destructions/19191919191919191919191919191919"
+        );
+        assert!(requests[0].headers.iter().any(|(h, _)| *h == "signature"));
+        assert_ne!(requests[0].nonce, requests[1].nonce);
+    }
     server.response.lock().unwrap().body =
         status(id, ObjectHash::try_from(&[0x21; 32][..]).unwrap());
     assert!(client.destruction_status(id, hash).await.is_err());
