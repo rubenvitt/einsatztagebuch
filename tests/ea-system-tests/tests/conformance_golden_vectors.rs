@@ -34,13 +34,14 @@ use std::{
 };
 
 use ea_crypto::{
-    AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, ContentType, GRANT_SUITE_ID, HPKE_AEAD_ID,
-    HPKE_ENCAPSULATED_KEY_SIZE, HPKE_KDF_ID, HPKE_KEM_ID, HPKE_MODE, HPKE_WRAPPED_CEK_SIZE,
-    HpkeRecipientPrivateKey, HpkeSealed, ProtectedHeader, SUITE_ID, SecretBytes, SecretVec,
-    active_profile_pointer_digest, aead_open, aead_seal, archive_inventory_digest,
-    archive_profile_digest, authorized_trust_digest, bootstrap_anchor_hash, ciphertext_digest,
-    cose_sign1_ctt_imprint, entry_hash, finalization_preview_digest, grant_digest,
-    grant_plan_digest, hpke_aad, hpke_info, hpke_open, linux_os_account_binding_hash, object_hash,
+    AEAD_NONCE_SIZE, CEK_SIZE, CanonicalPublicCoseKey, ContentType, CoseSigner, GRANT_SUITE_ID,
+    GoLivePostureCore, HPKE_AEAD_ID, HPKE_ENCAPSULATED_KEY_SIZE, HPKE_KDF_ID, HPKE_KEM_ID,
+    HPKE_MODE, HPKE_WRAPPED_CEK_SIZE, HpkeRecipientPrivateKey, HpkeSealed, ProtectedHeader,
+    SUITE_ID, SecretBytes, SecretVec, active_profile_pointer_digest, aead_open, aead_seal,
+    archive_inventory_digest, archive_profile_digest, authorized_trust_digest,
+    bootstrap_anchor_hash, ciphertext_digest, cose_sign1_ctt_imprint, entry_hash,
+    finalization_preview_digest, grant_digest, grant_plan_digest, hpke_aad, hpke_info, hpke_open,
+    linux_os_account_binding_hash, native_archive_component_namespace, object_hash,
     operator_profile_digest, parse_cose_sign1, payload_aad, receipt_digest, record_digest,
     recovery_test_digest, renewal_input_digest, trust_anchor_hash, trust_digest,
     validate_unsigned_protocol_core, verification_report_hash,
@@ -82,12 +83,18 @@ const MANIFEST_PATH: &str = "vectors/crypto/suite-1/manifest.json";
 
 /// Die Zahl der Eintraege. Ein truncatiertes Manifest darf nicht still
 /// durchlaufen: ohne diese Schranke waere ein leeres Manifest trivial gruen.
-const EXPECTED_ENTRY_COUNT: usize = 74;
+const EXPECTED_ENTRY_COUNT: usize = 77;
 
 /// Die Zahl der VERSCHIEDENEN `EINSATZARCHIV-`-Zeichenketten im Quelltext von
 /// `crates/ea-crypto`. Ohne diese Schranke koennte ein Scanner, der nichts
 /// findet, die Abdeckungspruefung leer bestehen.
-const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 25;
+///
+/// Stufe 5 hat drei hinzugebracht: `EINSATZARCHIV-DESTRUCTION-PREFLIGHT-v1`,
+/// `EINSATZARCHIV-GOLIVE-POSTURE-v1` und
+/// `EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1`. Alle drei sind eingefroren;
+/// die dritte pinnt die heutigen Bytes, und eine Aenderung unter DRK-320
+/// erzeugt ihren Vektor ausdruecklich neu.
+const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 28;
 
 /// Das feste Urbild der Domain-Digest-Vektoren.
 const PROBE: &[u8] = b"suite-1 digest probe";
@@ -201,8 +208,8 @@ const DOMAIN_CONTEXTS: [(&str, &str, ContextFn); 3] = [
     ),
 ];
 
-/// Die 24 Domain-Trennungszeichenketten als eigene Eintraege.
-const DOMAIN_STRINGS: [&str; 24] = [
+/// Die 27 Domain-Trennungszeichenketten als eigene Eintraege.
+const DOMAIN_STRINGS: [&str; 27] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
     "EINSATZARCHIV-CHECKPOINT-v1",
@@ -227,6 +234,9 @@ const DOMAIN_STRINGS: [&str; 24] = [
     "EINSATZARCHIV-ARCHIVE-INVENTORY-v1",
     "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
     "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
+    "EINSATZARCHIV-DESTRUCTION-PREFLIGHT-v1",
+    "EINSATZARCHIV-GOLIVE-POSTURE-v1",
+    "EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1",
 ];
 
 /// Der Schluessel des RFC-8439-Vektors: 0x80 bis 0x9f.
@@ -603,8 +613,22 @@ const STAGE_TWO_SUITE_ONE_ADDITIONS: [&str; 8] = [
     "domain-string/einsatzarchiv-finalization-preview-v1",
 ];
 
+/// Die drei Eintraege, die STUFE 5 additiv hinzugefuegt hat.
+///
+/// Die Domaenen der internen signierten Profile
+/// (`docs/superpowers/specs/2026-09-09-einsatzarchiv-destruction-preflight-profile.md`,
+/// `docs/superpowers/specs/2026-09-09-einsatzarchiv-go-live-posture-profile.md`)
+/// und die Namensraumdomaene aus `crates/ea-crypto/src/native_archive.rs`.
+/// Getrennt von [`STAGE_TWO_SUITE_ONE_ADDITIONS`] gefuehrt, damit jede Stufe
+/// ihre eigene Zulassungsliste behaelt.
+const STAGE_FIVE_SUITE_ONE_ADDITIONS: [&str; 3] = [
+    "domain-string/einsatzarchiv-destruction-preflight-v1",
+    "domain-string/einsatzarchiv-golive-posture-v1",
+    "domain-string/einsatzarchiv-native-archive-component-v1",
+];
+
 /// Haelt fest, dass die 66 Stufe-1-Vektoren dieser Familie UNVERAENDERT sind
-/// und Stufe 2 genau acht Eintraege HINZUGEFUEGT hat.
+/// und Stufe 2 genau acht, Stufe 5 genau drei Eintraege HINZUGEFUEGT hat.
 ///
 /// Zwei Richtungen, und beide sind noetig:
 ///
@@ -613,7 +637,8 @@ const STAGE_TWO_SUITE_ONE_ADDITIONS: [&str; 8] = [
 ///    Byte-Aenderung an einem eingefrorenen Vektor — auch dann, wenn das
 ///    Manifest im selben Zug „mitgepflegt" wird.
 /// 2. Die Restmenge des Manifests ist GENAU
-///    [`STAGE_TWO_SUITE_ONE_ADDITIONS`]. Faengt: einen neunten Zugang, der
+///    [`STAGE_TWO_SUITE_ONE_ADDITIONS`] plus
+///    [`STAGE_FIVE_SUITE_ONE_ADDITIONS`]. Faengt: einen weiteren Zugang, der
 ///    sich hinter der Summe versteckt, und ein Umsortieren der Familien.
 ///
 /// Was dieser Zeuge NICHT ist: eine zweite Pruefung der Digestrechnung. Die
@@ -629,12 +654,14 @@ fn the_sixty_six_stage_one_vectors_are_unchanged_and_stage_two_only_added_eight(
     let manifest = VectorManifest::from_json(&text)
         .unwrap_or_else(|error| panic!("failed to parse {MANIFEST_PATH}: {error}"));
 
-    // Die Arithmetik der Erweiterung, ausgeschrieben statt gerechnet: 66 + 8
+    // Die Arithmetik der Erweiterung, ausgeschrieben statt gerechnet: 66 + 8 + 3
     // MUSS die Summe sein, die EXPECTED_ENTRY_COUNT pinnt.
     assert_eq!(
-        STAGE_ONE_SUITE_ONE_ENTRIES.len() + STAGE_TWO_SUITE_ONE_ADDITIONS.len(),
+        STAGE_ONE_SUITE_ONE_ENTRIES.len()
+            + STAGE_TWO_SUITE_ONE_ADDITIONS.len()
+            + STAGE_FIVE_SUITE_ONE_ADDITIONS.len(),
         EXPECTED_ENTRY_COUNT,
-        "66 eingefrorene plus 8 in Stufe 2 hinzugefuegte Eintraege sind die Summe"
+        "66 eingefrorene plus 8 in Stufe 2 und 3 in Stufe 5 hinzugefuegte Eintraege sind die Summe"
     );
 
     let present = manifest
@@ -672,9 +699,12 @@ fn the_sixty_six_stage_one_vectors_are_unchanged_and_stage_two_only_added_eight(
         .collect::<BTreeSet<_>>();
     assert_eq!(
         added,
-        STAGE_TWO_SUITE_ONE_ADDITIONS.into_iter().collect(),
+        STAGE_TWO_SUITE_ONE_ADDITIONS
+            .into_iter()
+            .chain(STAGE_FIVE_SUITE_ONE_ADDITIONS)
+            .collect(),
         "ueber die 66 eingefrorenen Eintraege hinaus traegt die Familie GENAU die acht \
-         in Stufe 2 hinzugefuegten Eintraege"
+         in Stufe 2 und die drei in Stufe 5 hinzugefuegten Eintraege"
     );
 }
 
@@ -821,7 +851,200 @@ fn check_domain_strings(entries: &[VectorEntry]) -> Vec<String> {
         );
         names.push(entry.name.clone());
     }
+    check_internal_profile_domain_digests(entries);
+    check_native_archive_namespace_domain(entries);
     names
+}
+
+/// Die Namensraumdomaene der nativen Archivkomponente, gegen den lokalen KAT.
+///
+/// `native_archive_component_namespace` hasht `domain || 0x00 || anker ||
+/// profil` (`crates/ea-crypto/src/native_archive.rs`). Der Erwartungswert
+/// entsteht zweifach: unabhaengig aus der EINGEFRORENEN Zeichenkette, und als
+/// veroeffentlichte Antwort des KAT
+/// `crates/ea-crypto/tests/native_archive_namespace.rs` (Anker `0x11`, Profil
+/// `0x22`). Stimmen beide mit `ea-crypto` ueberein, ist die eingefrorene
+/// Zeichenkette byteweise die, die der Namensraum heute verwendet.
+///
+/// Diese Pruefung erzeugt KEINEN eigenen Manifesteintrag.
+fn check_native_archive_namespace_domain(entries: &[VectorEntry]) {
+    let domain = &entry(
+        entries,
+        "domain-string/einsatzarchiv-native-archive-component-v1",
+    )
+    .object_bytes;
+    let anchor = [0x11_u8; 32];
+    let profile = [0x22_u8; 32];
+    let mut preimage = domain.clone();
+    preimage.push(0);
+    preimage.extend_from_slice(&anchor);
+    preimage.extend_from_slice(&profile);
+    let actual = native_archive_component_namespace(
+        Hash32::try_from(anchor.as_slice()).unwrap(),
+        Hash32::try_from(profile.as_slice()).unwrap(),
+    );
+    assert_eq!(
+        hex::encode(actual.as_bytes()),
+        sha256_hex(&preimage),
+        "the native archive namespace must be SHA-256(frozen domain || 0x00 || anchor || profile)"
+    );
+    assert_eq!(
+        hex::encode(actual.as_bytes()),
+        "98dfa0d03db8a913d179f7b21123fc1fe342308784a6c538babbd86b425b5db5",
+        "the native archive namespace must reproduce the local KAT"
+    );
+}
+
+/// Die Domaenen der beiden internen signierten Profile, ueber die OEFFENTLICHE
+/// Signatur-API nachgerechnet.
+///
+/// `destruction_preflight.rs` und `posture_document.rs` hashen
+/// `domain || 0x00 || core`; der Preflight-Digest selbst ist crate-privat. Er
+/// wird deshalb als Nutzlast der COSE-Sign1 abgelesen, die die typisierte
+/// Signaturmethode ueber einen profilgerechten Kern bildet. Der Kern traegt die
+/// EINGEFRORENE Zeichenkette, und der Erwartungswert entsteht unabhaengig als
+/// `SHA-256(eingefroren || 0x00 || kern)`. Stimmen beide, ist die eingefrorene
+/// Zeichenkette byteweise die, die `ea-crypto` heute signiert. Die Kerne folgen
+/// den lokalen KATs `crates/ea-destruction/tests/preflight_crypto.rs` und
+/// `crates/ea-crypto/tests/posture_crypto.rs`.
+///
+/// Diese Pruefung erzeugt KEINEN eigenen Manifesteintrag; sie bindet die
+/// beiden `domain-string/`-Eintraege an ihr Profil.
+fn check_internal_profile_domain_digests(entries: &[VectorEntry]) {
+    let frozen = |name: &str| {
+        String::from_utf8(entry(entries, name).object_bytes.clone())
+            .unwrap_or_else(|_| panic!("{name} must freeze a UTF-8 domain string"))
+    };
+    let expected = |domain: &str, core: &[u8]| {
+        let mut preimage = domain.as_bytes().to_vec();
+        preimage.push(0);
+        preimage.extend_from_slice(core);
+        sha256_hex(&preimage)
+    };
+    let signer = CoseSigner::from_secret(SecretBytes::new([0x42; 32]));
+
+    let preflight_domain = frozen("domain-string/einsatzarchiv-destruction-preflight-v1");
+    let report = b"{}";
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(16)
+        .unwrap()
+        .str(&preflight_domain)
+        .unwrap()
+        .u64(1)
+        .unwrap()
+        .bytes(&VECTOR_ORGANIZATION_ID)
+        .unwrap()
+        .bytes(&[0x12; 16])
+        .unwrap()
+        .bytes(&[0x13; 16])
+        .unwrap()
+        .bytes(&[0x70; 32])
+        .unwrap()
+        .bytes(&[0x72; 32])
+        .unwrap()
+        .bytes(object_hash(report).as_bytes())
+        .unwrap()
+        .bytes(report)
+        .unwrap()
+        .u64(3)
+        .unwrap()
+        .bytes(&[0x73; 32])
+        .unwrap()
+        .u64(5)
+        .unwrap()
+        .u64(3)
+        .unwrap()
+        .bytes(&[0x73; 32])
+        .unwrap()
+        .u64(5)
+        .unwrap()
+        .i64(1_000)
+        .unwrap();
+    let preflight = encoder.into_writer();
+    let certificate = CertificateHash::try_from([0x51_u8; 32].as_slice()).unwrap();
+    let signature = signer
+        .sign_destruction_preflight_report(certificate, &preflight)
+        .unwrap_or_else(|error| {
+            panic!("a core under the frozen preflight domain must be signable: {error:?}")
+        });
+    let parsed = parse_cose_sign1(&signature, &[]).unwrap();
+    assert_eq!(
+        parsed.content_type().as_str(),
+        "application/vnd.einsatzarchiv.destruction-preflight-digest"
+    );
+    assert_eq!(
+        hex::encode(parsed.payload()),
+        expected(&preflight_domain, &preflight),
+        "the preflight signature must cover SHA-256(frozen domain || 0x00 || core)"
+    );
+
+    let posture_domain = frozen("domain-string/einsatzarchiv-golive-posture-v1");
+    let issuer = [0x43_u8; 32];
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(20)
+        .unwrap()
+        .str(&posture_domain)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .bytes(&[1; 16])
+        .unwrap()
+        .bytes(&[2; 16])
+        .unwrap()
+        .bytes(&[3; 32])
+        .unwrap()
+        .bytes(&[4; 32])
+        .unwrap()
+        .bytes(&[5; 16])
+        .unwrap()
+        .bytes(&[6; 32])
+        .unwrap()
+        .bytes(&[7; 32])
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .bytes(&[8; 32])
+        .unwrap()
+        .u8(14)
+        .unwrap()
+        .bytes(object_hash(b"public documented prerequisites").as_bytes())
+        .unwrap()
+        .bytes(&issuer)
+        .unwrap()
+        .bytes(&[9; 32])
+        .unwrap()
+        .u64(10)
+        .unwrap()
+        .bytes(&[11; 32])
+        .unwrap()
+        .u64(12)
+        .unwrap()
+        .i64(1_000)
+        .unwrap()
+        .i64(86_401_000)
+        .unwrap();
+    let posture = encoder.into_writer();
+    let core = GoLivePostureCore::from_exact(&posture).unwrap_or_else(|error| {
+        panic!("a core under the frozen posture domain must parse: {error:?}")
+    });
+    assert_eq!(
+        hex::encode(core.digest().as_bytes()),
+        expected(&posture_domain, &posture),
+        "the posture digest must be SHA-256(frozen domain || 0x00 || core)"
+    );
+    let signature = signer.sign_go_live_posture_document(&posture).unwrap();
+    let parsed = parse_cose_sign1(&signature, &[]).unwrap();
+    assert_eq!(
+        parsed.content_type().as_str(),
+        "application/vnd.einsatzarchiv.go-live-posture-digest"
+    );
+    assert_eq!(
+        parsed.payload(),
+        core.digest().as_bytes().as_slice(),
+        "the posture signature must cover exactly that digest"
+    );
 }
 
 /// SHA-256 gegen die veroeffentlichten Vektoren.

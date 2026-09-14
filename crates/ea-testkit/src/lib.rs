@@ -753,10 +753,24 @@ const CRYPTO_DEVICE_ID: [u8; 16] = [0x11; 16];
 ///
 /// ADDITIV erweitert um die drei Domaenen des Archivbackendprofils (D-B02) und
 /// um die Vorschaudomaene der Abschlussbestaetigung.
+///
+/// In Stufe 5 ADDITIV erweitert um die beiden Domaenen der internen signierten
+/// Profile: `destruction_preflight.rs`
+/// (`docs/superpowers/specs/2026-09-09-einsatzarchiv-destruction-preflight-profile.md`)
+/// und `posture_document.rs`
+/// (`docs/superpowers/specs/2026-09-09-einsatzarchiv-go-live-posture-profile.md`).
+/// Beide hashen `domain || 0x00 || core`, also NICHT die Form
+/// `domain || urbild` der Domain-Digest-Eintraege; eingefroren wird deshalb nur
+/// die Zeichenkette, und `ea-system-tests` rechnet den Digest ueber die
+/// oeffentliche Signatur-API nach. Ebenso additiv die Namensraumdomaene
+/// `EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1` aus `native_archive.rs`
+/// (`domain || 0x00 || anker || profil`); sie pinnt die heutigen Bytes, und
+/// eine Aenderung unter DRK-320 erzeugt diesen Eintrag ausdruecklich neu.
+///
 /// Kein bestehender Eintrag wurde umbenannt, entfernt oder umsortiert; das
 /// Manifest sortiert seine Eintraege ohnehin nach Namen
 /// ([`VectorManifest::to_json`]).
-const CRYPTO_DOMAIN_STRINGS: [&str; 24] = [
+const CRYPTO_DOMAIN_STRINGS: [&str; 27] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
     "EINSATZARCHIV-CHECKPOINT-v1",
@@ -781,6 +795,9 @@ const CRYPTO_DOMAIN_STRINGS: [&str; 24] = [
     "EINSATZARCHIV-ARCHIVE-INVENTORY-v1",
     "EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1",
     "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
+    "EINSATZARCHIV-DESTRUCTION-PREFLIGHT-v1",
+    "EINSATZARCHIV-GOLIVE-POSTURE-v1",
+    "EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1",
 ];
 
 /// Die domaingetrennten Digestfunktionen mit ihrer Domaene.
@@ -7339,12 +7356,12 @@ mod tests {
         assert!(report.is_clean(), "{:?}", report.mismatches);
     }
 
-    /// Der Erzeuger liefert 74 verschiedene Eintraege, und jeder Dateipfad
+    /// Der Erzeuger liefert 77 verschiedene Eintraege, und jeder Dateipfad
     /// liegt unter der Familienwurzel.
     #[test]
     fn the_crypto_generator_names_every_entry_and_file_exactly_once() {
         let manifest = crypto_suite_one_manifest();
-        assert_eq!(manifest.entries.len(), 74);
+        assert_eq!(manifest.entries.len(), 77);
         let names = manifest
             .entries
             .iter()
