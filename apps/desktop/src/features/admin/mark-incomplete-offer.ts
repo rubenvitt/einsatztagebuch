@@ -1,4 +1,7 @@
 import type { DestructionProcessView } from '../../bridge/generated-contracts'
+import { DESTRUCTION_STATE_V1_VALUES } from '../../bridge/generated-contracts'
+
+const [, IN_PROGRESS, PENDING_BACKUP_EXPIRY] = DESTRUCTION_STATE_V1_VALUES
 
 /**
  * Visibility only for „Als unvollständig abschließen". Mirrors the host's offer
@@ -9,7 +12,7 @@ import type { DestructionProcessView } from '../../bridge/generated-contracts'
  * time grants no authority and never changes a state.
  */
 export function markIncompleteOffered(process: DestructionProcessView, nowMs: number): boolean {
-  if ((process.state !== 'inProgress' && process.state !== 'pendingBackupExpiry')
+  if ((process.state !== IN_PROGRESS && process.state !== PENDING_BACKUP_EXPIRY)
     || process.preflight === null
     || process.targets.length === 0
     || process.targets.some((target) => target.stubObjectHash === null)
