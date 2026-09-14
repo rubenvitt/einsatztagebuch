@@ -572,27 +572,33 @@ fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
     );
 
     // Der aufgeloeste Baum des WIRTS. `-e features` zeigt die Merkmalskanten,
-    // `-i` dreht ihn auf die Verbraucher von `ea-archive-fs`.
-    let resolved = Command::new("cargo")
-        .args([
-            "tree",
-            "--locked",
-            "-p",
-            "ea-desktop",
-            "-e",
-            "features",
-            "-i",
-            CRATE,
-        ])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(
-        resolved.status.success(),
-        "cargo tree must resolve the host graph: {}",
-        String::from_utf8_lossy(&resolved.stderr)
-    );
-    let tree = String::from_utf8(resolved.stdout).unwrap();
+    // `-i` dreht ihn auf die Verbraucher von `ea-archive-fs`. `no-dev` nimmt
+    // die eigenen `[dev-dependencies]` des Wirts heraus: Zusicherung 2 erlaubt
+    // genau diese Kanten, und seit der Wirt Testziele mit echtem Writer hat,
+    // fordert er das Merkmal dort selbst an.
+    let resolve = |edges: &str| {
+        let resolved = Command::new("cargo")
+            .args([
+                "tree",
+                "--locked",
+                "-p",
+                "ea-desktop",
+                "-e",
+                edges,
+                "-i",
+                CRATE,
+            ])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            resolved.status.success(),
+            "cargo tree must resolve the host graph: {}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        String::from_utf8(resolved.stdout).unwrap()
+    };
+    let tree = resolve("no-dev,features");
     // Positivkontrolle: der Baum enthaelt die Kante, die geprueft werden soll.
     // Ohne sie waere die Abwesenheit des Merkmals kein Befund.
     for consumer in ["ea-desktop", "ea-writer", "ea-ui-contracts"] {
@@ -605,6 +611,14 @@ fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
     assert!(
         !tree.contains(SURFACE),
         "the resolved feature graph of the host must not contain {CRATE}/{SURFACE}:\n{tree}"
+    );
+    // Zweite Positivkontrolle: mit den Dev-Kanten erscheint das Merkmal. Sonst
+    // saegte `no-dev` nur die Sicht ab und die Abwesenheit oben saegte nichts.
+    let with_dev = resolve("features");
+    assert!(
+        with_dev.contains(SURFACE),
+        "the host's own dev edges must make {CRATE}/{SURFACE} visible; otherwise its absence \
+         above says nothing about the feature and only something about the command:\n{with_dev}"
     );
 }
 
