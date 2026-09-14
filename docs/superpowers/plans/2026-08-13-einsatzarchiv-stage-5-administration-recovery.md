@@ -1562,14 +1562,68 @@ Dessen Desktop-Untermodul verlangt `--features desktop-fixture`
 (`operator_destruction/mod.rs:923-924`); ohne das Feature laufen diese Fälle still
 nicht mit. Server- und Systemziele brauchen die Integrationsumgebung. Die Zusagen
 aus Step 4 (sofort, Backup-Frist, unerreichbar, ungültiger Stub, Replay,
-`UnexplainedGap`) bleiben; ob sie ein eigenes System-E2E
-`tests/ea-system-tests/tests/e2e_destruction.rs` oder der CLI-Zeuge trägt, ist
-offene Entscheidung, siehe DRK-250. Der native Erzeuger für
+`UnexplainedGap`) bleiben; welcher Zeuge sie trägt, ist seit 2026-09-14
+entschieden (siehe folgende Nachmessung). Der native Erzeuger für
 `incompleteUnreachableReplica→inProgress` aus Task 11 — in
 `crates/ea-admin/src/destruction_runtime/` nennt nur `failure.rs` den Zustand — ist
 per Ruling vom 13.09.2026 aus dem ersten Stufe-5-PR in das Folgeticket DRK-319
 verschoben; die
 Kante bleibt Zusage dieses Plans.
+
+**Nachmessung 2026-09-14 (DRK-250, HEAD `041911d`, Abnahme
+`.superpowers/sdd/2026-08-13-einsatzarchiv-stage-5-administration-recovery/claude-t12-t13-acceptance.md`):** Entschieden: Ein eigenes System-E2E
+`tests/ea-system-tests/tests/e2e_destruction.rs` wird nicht angelegt. Sofort,
+Backup-Frist, unerreichbar und Replay trägt physisch der native CLI-Zeuge
+`einsatzarchiv-cli --features desktop-fixture --test operator process_native::destruction::`
+gegen TLS, PostgreSQL, S3 mit ObjectLock, SQLCipher und den Produkt-Worker mit
+OPFS. Die drei `e2e_destruction_*` bleiben Admissionszeugen. Ungültiger Stub und
+`UnexplainedGap` sind deterministisch in `crates/ea-destruction/tests/stub.rs`,
+`crates/ea-verify/tests/destruction_stub.rs` und
+`crates/ea-reader/tests/{destroyed_stub,destruction_evidence,missing_grant}.rs`
+bezeugt. Neben `destruction_jobs_api` trägt `apps/server/tests/destruction_api.rs`
+Liefer-/Re-Grant-Sperre und Replay (:78, :439, :650).
+
+Die Step-4-Aussage zu `UnexplainedGap` ist gemessen genauer: `EntryStatus::UnexplainedGap`
+entsteht nur an einem `.eds`-Stub ohne autorisierende Verifikation. Einziger
+Erzeuger ist `classify_stub` (`crates/ea-reader/src/verify.rs:642`, Zweig :674),
+aufgerufen nur für `inventory.destroyed()` (:302-303). Ein fehlendes `.eip` ohne
+Stub ist eine Sequenzlücke (`ChainGapV1`) ohne Zustandszeile, weil
+`ReaderEntryStateV1::new` Entry- und Objekthash verlangt
+(`crates/ea-reader/src/entry_state.rs:128-130`); Zeuge
+`crates/ea-reader/tests/missing_grant.rs:86`. Ein nicht autorisierter Stub trägt
+zusätzlich eine Sequenzlücke (`crates/ea-verify/src/archive.rs:617-630`); eine
+Sequenzlücke beweist also nicht, dass kein Stub existiert.
+
+Der Reader-/OPFS-Zeuge `process_native::destruction::transport::server::host::reader_opfs`
+startet Vite auf `apps/web` (`apps/cli/tests/operator_destruction/transport/server/host/reader_opfs.rs:25-30`,
+`reader_opfs.mjs:13`). Dessen Worker importiert `./pkg/ea_reader_wasm.js`
+(`apps/web/src/bridge/opfs-worker.ts:42`). Das gitignorierte Paket erzeugt erst
+`cargo run --locked -p xtask -- build-wasm` (`tools/xtask/src/main.rs:530`,
+`--out-dir apps/web/src/bridge/pkg`). Die Servertransportzeugen des CLI-Ziels
+binden `apps/server/tests/common/mod.rs` ein (`transport/server.rs:13-14`) und
+brauchen deshalb wie die Serverziele `DATABASE_URL` und `EA_OBJECT_STORE_ENDPOINT`
+(`common/mod.rs:56`, :65).
+
+Rulings vom 13.09.2026:
+- „Fortsetzen" erzeugt nie Zustand 4 (`apps/desktop/src-tauri/src/runtime/destruction.rs:768`,
+  `runtime/destruction_transport.rs:252`). 1/2→4 entsteht nur über die eigene
+  bestätigte Aktion `destruction_mark_incomplete` (`ebb6e03`; Angebot
+  `runtime/destruction.rs:889`, Servermodus `destruction_transport.rs:310`). Native
+  Zeugen: `apps/cli/tests/operator_destruction/desktop/failure.rs:97`, :202, :238
+  und `transport/server/host/failure.rs:78`.
+- Die Bindung des Übergangssignierers an die Auftragskomponente ist DRK-321.
+  `verify_event`/`verify_event_historical` entnehmen das Zertifikat dem
+  Signaturheader (`crates/ea-destruction/src/event.rs:77-79`, :127-129) und prüfen am
+  Signierer Rolle und Fähigkeit `deletionAttest` (`crates/ea-crypto/src/cose.rs:1274-1275`);
+  eine Komponentenbindung steht dort nicht. Geprüft wird die Komponente beim
+  Publizieren (`destruction_transport.rs:556`) und am Server gegen den HTTP-Principal
+  (`crates/ea-sync-server/src/managed_destruction.rs:154`).
+- Web-Reader-Design §3 ist präzisiert (`16167c0`,
+  `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md:57-66`): Als
+  verwaltete Replik entfernt der Reader auf einen geprüften, administrativ
+  signierten Auftrag nur den eigenen Cache und Index. Er signiert eine eigene,
+  jobgebundene Löschattestierung. Er beantragt, startet, setzt fort oder bricht
+  keine Vernichtung ab und signiert weder Übergang noch Autorisierung.
 
 **Files:**
 - Create: `crates/ea-destruction/src/stub.rs`
@@ -1584,9 +1638,9 @@ Kante bleibt Zusage dieses Plans.
 - Test: `crates/ea-destruction/tests/stub.rs`
 - Test: `crates/ea-destruction/tests/preflight.rs`, `crates/ea-destruction/tests/requests.rs` (Resume; `tests/resume.rs` existiert nicht)
 - Test: `apps/cli/tests/operator_destruction/` (physischer Same-Job-Zeuge)
-- Test: `apps/server/tests/destruction_jobs_api.rs`
+- Test: `apps/server/tests/destruction_jobs_api.rs`, `apps/server/tests/destruction_api.rs`
 - Test: `tests/ea-system-tests/tests/e2e_destruction_policy.rs`, `e2e_destruction_admission_race.rs`, `e2e_destruction_catalog_race.rs`
-- Test: `tests/ea-system-tests/tests/e2e_destruction.rs` — existiert nicht; offene Entscheidung, siehe Nachmessung
+- Test: `tests/ea-system-tests/tests/e2e_destruction.rs` — wird nicht angelegt (Entscheidung 2026-09-14); die physischen Zweige trägt `apps/cli/tests/operator_destruction/`, siehe Nachmessung
 
 **Interfaces:**
 - Consumes: verified authorization, managed replica adapters, archive transaction, server delivery block, Writer finalization.
@@ -1615,7 +1669,7 @@ async fn restart_resumes_same_destruction_id_without_duplicate_delete() {
 
 - [ ] **Step 2: Run Stub/resume tests and verify executor is absent**
 
-Run: `cargo test --locked -p ea-destruction --test stub --test preflight --test requests && cargo test --locked -p einsatzarchiv-cli --test operator process_native::destruction:: -- --test-threads=1`
+Run: `cargo test --locked -p ea-destruction --test stub --test preflight --test requests && cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator process_native::destruction:: -- --test-threads=1`
 
 Expected: FAIL because Stub/attestation/executor do not exist.
 
@@ -1631,12 +1685,13 @@ Run:
 
 ```bash
 cargo test --locked -p ea-destruction --test stub --test preflight --test requests
+cargo run --locked -p xtask -- build-wasm
 cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator process_native::destruction:: -- --test-threads=1
-cargo test --locked -p einsatzarchiv-server --test destruction_jobs_api -- --test-threads=1
+cargo test --locked -p einsatzarchiv-server --test destruction_api --test destruction_jobs_api -- --test-threads=1
 cargo test --locked -p ea-system-tests --test e2e_destruction_policy --test e2e_destruction_admission_race --test e2e_destruction_catalog_race -- --test-threads=1
 ```
 
-Expected: PASS; unauthorized file removal is `UnexplainedGap`, not authorized destruction. The three system targets are admission witnesses only; the physical branches run in the CLI target (see Nachmessung).
+Expected: PASS; unauthorized file removal is never authorized destruction: a Stub without authorizing verification is `UnexplainedGap`, and a removed `.eip` without a Stub is a sequence gap without a state row. The three system targets are admission witnesses only; the physical branches run in the CLI target, whose Reader/OPFS witness needs the `build-wasm` package first (see Nachmessung 2026-09-14).
 
 - [ ] **Step 5: Commit destruction executor**
 
@@ -1670,17 +1725,42 @@ dort ein Neuladen. Native Restart-Zeugen liegen in
 `apps/cli/tests/operator_destruction/desktop/{pending,completion}.rs` und laufen nur
 mit `--features desktop-fixture`.
 
+**Nachmessung 2026-09-14 (DRK-250, HEAD `041911d`, Abnahme
+`.superpowers/sdd/2026-08-13-einsatzarchiv-stage-5-administration-recovery/claude-t12-t13-acceptance.md`):** Seit `ebb6e03` liegen die Tauri-Kommandos in
+`commands/destruction.rs:307-455`. Hinzugekommen ist `destruction_mark_incomplete`
+(:393, registriert in `apps/desktop/src-tauri/src/lib.rs:145` und `build.rs:53`).
+
+Ruling vom 13.09.2026: „Fortsetzen" erzeugt nie Zustand 4
+(`src/runtime/destruction.rs:768`, `src/runtime/destruction_transport.rs:252`).
+Zustand 4 entsteht nur über die eigene bestätigte Aktion „Als unvollständig
+abschließen" mit dem Bestätigungsknopf „Endgültig als unvollständig abschließen"
+(`DestructionWizard.test.tsx:73`, :91; `destruction.spec.ts:136-155`). Das Angebot
+entscheidet der Host (`mark_incomplete_job`, `src/runtime/destruction.rs:889`);
+`mark-incomplete-offer.ts` steuert nur die Sichtbarkeit. „Nach `inProgress` nur
+Fortsetzen, nie Abbrechen" gilt unverändert; in `commands/destruction.rs` gibt es
+kein Abbruchkommando.
+
+Der Plan-Aufruf `pnpm --dir apps/desktop test --run DestructionWizard DestructionStatus`
+war nicht die gemessene Form (`apps/desktop/package.json:9` ist nur `vitest`). Er
+ließ außerdem `DestructionSurface`, `DestructionEvidence`, `destruction-contract`
+und `mark-incomplete-offer` aus. Step 2/4 nennen die Dateien deshalb ausdrücklich.
+Host-Komposition, IPC-Registrierung und Rollentor tragen `ea-desktop --lib` und die
+Kommandoziele unter `apps/desktop/src-tauri/tests/`. Die nativen Desktop-Zeugen
+(`pending`, `completion`, `failure`, `custodian`, `evidence`, `reader_delivery`)
+laufen unter `process_native::destruction::desktop::` mit `--features desktop-fixture`.
+
 **Files:**
 - Create: `apps/desktop/src/features/admin/DestructionWizard.tsx`
 - Create: `apps/desktop/src/features/admin/DestructionStatus.tsx`
-- Create: `apps/desktop/src/features/admin/DestructionSurface.tsx`, `DestructionEvidence.tsx`, `destruction-contract.ts`, `destruction-evidence-bridge.ts`
+- Create: `apps/desktop/src/features/admin/DestructionSurface.tsx`, `DestructionEvidence.tsx`, `destruction-contract.ts`, `destruction-evidence-bridge.ts`, `mark-incomplete-offer.ts`
 - Create: `apps/desktop/src-tauri/src/commands/destruction.rs`, `apps/desktop/src-tauri/src/commands/destruction_evidence.rs`
 - Create: `apps/desktop/src-tauri/src/runtime/destruction.rs`, `apps/desktop/src-tauri/src/runtime/destruction/`, `apps/desktop/src-tauri/src/runtime/destruction_transport.rs`
 - Modify: `apps/desktop/src-tauri/src/commands/admin.rs` (Verwaltungsansicht trägt `destruction_enabled`, :286)
 - Test: `apps/desktop/src/features/admin/DestructionWizard.test.tsx`
-- Test: `apps/desktop/src/features/admin/DestructionStatus.test.tsx`, `DestructionSurface.test.tsx`, `DestructionEvidence.test.tsx`, `destruction-contract.test.ts`
+- Test: `apps/desktop/src/features/admin/DestructionStatus.test.tsx`, `DestructionSurface.test.tsx`, `DestructionEvidence.test.tsx`, `destruction-contract.test.ts`, `mark-incomplete-offer.test.ts`
+- Test: `apps/desktop/src-tauri/tests/{destruction_commands,destruction_evidence_commands,reader_delivery_commands,writer_commands,admin_commands}.rs`
 - Test: `apps/desktop/tests/e2e/destruction.spec.ts`
-- Test: `apps/cli/tests/operator_destruction/desktop/` (native Restart-Zeugen, `--features desktop-fixture`)
+- Test: `apps/cli/tests/operator_destruction/desktop/` (native Restart- und Failure-Zeugen, `--features desktop-fixture`)
 
 **Interfaces:**
 - Consumes: policy privacy decision, two-Approver authorization import, destruction state/report DTOs, re-authentication.
@@ -1708,7 +1788,7 @@ it.each([
 
 - [ ] **Step 2: Run UI tests and verify components are absent**
 
-Run: `pnpm --dir apps/desktop test --run DestructionWizard DestructionStatus`
+Run: `pnpm --dir apps/desktop exec vitest run src/features/admin/DestructionWizard.test.tsx src/features/admin/DestructionStatus.test.tsx`
 
 Expected: FAIL because destruction UI does not exist.
 
@@ -1718,9 +1798,17 @@ Require target hashes/sequences, scope, nonfachlicher legal-reason code, known s
 
 - [ ] **Step 4: Run keyboard, restart, pending-backup, and unreachable E2E tests**
 
-Run: `pnpm --dir apps/desktop test --run DestructionWizard DestructionStatus && pnpm --dir apps/desktop exec playwright test tests/e2e/destruction.spec.ts`
+Run:
 
-Expected: PASS; UI returns to the reconstructed same process after restart.
+```bash
+pnpm --dir apps/desktop exec vitest run src/features/admin/DestructionWizard.test.tsx src/features/admin/DestructionStatus.test.tsx src/features/admin/DestructionSurface.test.tsx src/features/admin/DestructionEvidence.test.tsx src/features/admin/destruction-contract.test.ts src/features/admin/mark-incomplete-offer.test.ts
+pnpm --dir apps/desktop exec playwright test tests/e2e/destruction.spec.ts
+cargo test --locked -p ea-desktop --lib
+cargo test --locked -p ea-desktop --test destruction_commands --test destruction_evidence_commands --test reader_delivery_commands --test writer_commands --test admin_commands
+cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator process_native::destruction::desktop:: -- --test-threads=1
+```
+
+Expected: PASS; UI returns to the reconstructed same process after restart. The Playwright target is an IPC double where restart means reload; native restart runs in the CLI target (see Nachmessung).
 
 - [ ] **Step 5: Commit destruction UI workstream**
 
@@ -1775,8 +1863,8 @@ Pfade und die Testskizze; keine Zusage entfällt.
   Recovery-spezifischer Lauf.
 - Ein Systemziel `e2e_destruction` existiert nicht; vorhanden sind drei
   Admissionszeugen `e2e_destruction_{policy,admission_race,catalog_race}`. Der
-  physische Zeuge und die offene Entscheidung zu einem System-E2E stehen in
-  Task 12. Der Playwright-Zeuge heißt `recovery.spec.ts`.
+  physische Zeuge und die Entscheidung vom 14.09.2026 gegen ein eigenes
+  System-E2E stehen in Task 12. Der Playwright-Zeuge heißt `recovery.spec.ts`.
 - `xtask_test::stage_gate` existiert nicht, und `workstreams`/`canary_findings` sind
   keine Berichtsfelder. Die Skizze in Step 1 folgt der Prozessform der Stufe 4
   (`run_stage_gate_in_the_workspace`, `stage_gate.rs:947`;
