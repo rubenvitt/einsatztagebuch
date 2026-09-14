@@ -48,6 +48,85 @@ async function webSources(): Promise<[string, string][]> {
   )
 }
 
+// Die EINZIGE Ausnahme vom Wort „destruction" im Web: die Reader-lokale
+// Cacheentfernung aus Stufe 5, Task 12 („per managed replica remove … plaintext
+// cache/index … collect signed attestations"). Der Reader verbraucht eine
+// bereits nativ autorisierte und gestartete Anweisung (Autorisierung,
+// Startnachweis, Jobdatei — Rust prueft sie vollstaendig), entfernt NUR seinen
+// eigenen OPFS-Cache, liest die Messquittung und gibt seinen eigenen jobgebundenen
+// Loeschbeleg aus. Er beantragt, startet, setzt fort oder bricht keinen Auftrag
+// ab, signiert keine Transition und keine Autorisierung und erreicht kein
+// Admin-Kommando; den Gesamtauftrag fuehrt die Desktop-Administration.
+//
+// OFFENE GRENZE: `readerDestructionAttest` signiert frisch mit dem
+// Vault-Ed25519 unter einem eigenen `deletionAttest`-Zertifikat. §3 der
+// Web-Reader-Spec (Zeilen 54–56) verbietet Webcode fuer
+// „Vernichtungsausfuehrung"; dass die lokale Cacheattestierung darunter
+// zulaessig ist, ist laut
+// `.superpowers/sdd/2026-08-13-einsatzarchiv-stage-5-administration-recovery/managed-reader-signing-boundary.md`
+// eine Auslegung ohne ausdrueckliche Ausnahme im Wortlaut — ein Ruling steht aus.
+//
+// Ausgenommen werden nur diese vollen Namen in genau diesen Dateien, als ganze
+// Bezeichner oder als exakte Zeichenkette samt Anfuehrungszeichen. Jeder andere
+// Name mit „destruction" und jedes andere verbotene Wort faellt weiter, auch in
+// diesen Dateien. Ein hier gefuehrter Name, der aus seiner Datei verschwindet,
+// laesst den Zeugen ebenfalls fallen, damit die Ausnahme nicht still veraltet.
+const readerCacheDestructionNames: Readonly<Record<string, readonly string[]>> = {
+  'bridge/opfs-worker.ts': [
+    'readerDestructionApply',
+    'readerDestructionApplyDelivery',
+    'readerDestructionReceipt',
+    'readerDestructionAttest',
+    'readerDestructionAttestation',
+    "'reader-destruction-apply'",
+    "'reader-destruction-apply-delivery'",
+    "'reader-destruction-receipt'",
+    "'reader-destruction-attest'",
+    "'reader-destruction-attestation'",
+  ],
+  'features/destruction/ReaderDestructionPage.tsx': [
+    'ReaderDestructionPage',
+    'ReaderDestructionPageProps',
+    'ReaderDestructionBridge',
+    "'./reader-destruction'",
+  ],
+  'features/destruction/reader-destruction.ts': [
+    'ReaderDestructionBridge',
+    'createReaderDestructionBridge',
+    'readerDestructionBridge',
+    "'reader-destruction-apply-delivery'",
+    "'reader-destruction-attest'",
+    "'reader-destruction-attestation'",
+  ],
+  'main.tsx': [
+    'ReaderDestructionPage',
+    'readerDestructionBridge',
+    "'./features/destruction/ReaderDestructionPage'",
+    "'./features/destruction/reader-destruction'",
+    "'./features/destruction/files'",
+  ],
+  'vault/webauthn-prf.ts': ["'reader-destruction-apply'", "'reader-destruction-apply-delivery'"],
+}
+
+function withoutReaderCacheDestructionNames(file: string, text: string): string {
+  let rest = text
+  // Zeichenketten VOR Bezeichnern: sonst schnitte `ReaderDestructionPage` aus
+  // `'./features/destruction/ReaderDestructionPage'` und der Pfad fehlte danach.
+  const names = [...(readerCacheDestructionNames[file] ?? [])].sort(
+    (left, right) => Number(right.startsWith("'")) - Number(left.startsWith("'")),
+  )
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // Ein Bezeichner nur als GANZES Wort: `readerDestructionApply` darf aus
+    // `readerDestructionApplyStart` nichts herausschneiden.
+    const pattern = new RegExp(name.startsWith("'") ? escaped : `(?<![\\w$])${escaped}(?![\\w$])`, 'g')
+    expect(pattern.test(rest), `${file}: ${name}`).toBe(true)
+    pattern.lastIndex = 0
+    rest = rest.replace(pattern, '')
+  }
+  return rest
+}
+
 it('exposes no Reader route in the desktop shell', () => {
   expect(routeTable().map((route) => route.path)).toEqual(['/', '/einsatz', '/verwaltung'])
   expect(routeTable().some((route) => /reader|lese/i.test(route.label))).toBe(false)
@@ -77,11 +156,16 @@ it('binds each capability to exactly one verified role', () => {
 // „Geloescht statt portiert" heisst hier eine ERZWUNGENE Abwesenheit: ein
 // `reader.rs` ist nie entstanden, und dieser Zeuge faellt, sobald eines
 // einzieht. `admin.rs` traegt die Verwaltung (Stufe 5, Task 6).
+// `destruction.rs` und `destruction_evidence.rs` sind Stufe 5, Task 13 (beide im
+// Plan als „Create" gefuehrt): die administrative Vernichtung und die
+// Finalisierung ihres Evidence-Eintrags, beide hinter
+// `admin::require_administrator` — keine Reader-Leseflaeche.
 it('declares no Reader command in src-tauri', async () => {
   const commands = await readdir(path.join(packageRoot, 'src-tauri/src/commands'))
   expect(commands.sort()).toEqual([
     'admin.rs',
     'destruction.rs',
+    'destruction_evidence.rs',
     'master_data.rs',
     'mod.rs',
     'recovery',
@@ -100,16 +184,13 @@ it('exposes no writer or administration surface in apps/web', async () => {
   // bleibt gruen — ein falscher Wurzelpfad saehe aus wie ein sauberes Web.
   expect(sources.length).toBeGreaterThan(0)
   expect(sources.map(([file]) => file)).toContain('main.tsx')
+  // Jede Ausnahmedatei muss es geben; ein Tippfehler im Schluessel waere sonst
+  // eine Ausnahme, die nie greift, und sahe trotzdem wie eine Regel aus.
+  expect(sources.map(([file]) => file)).toEqual(
+    expect.arrayContaining(Object.keys(readerCacheDestructionNames)),
+  )
   for (const [file, text] of sources) {
-    // Task12's Reader-local removal and receipt consume verified existing
-    // authorization. They do not issue authorization, start a managed job or
-    // expose an Admin surface. Keep every other destruction name forbidden.
-    const readerText = file === 'bridge/opfs-worker.ts'
-      ? text.replace(/\breaderDestruction(?:Apply|Receipt)\b|'reader-destruction-(?:apply|receipt)'/g, '')
-      : file === 'vault/webauthn-prf.ts'
-        ? text.replace(/'reader-destruction-apply'/g, '')
-        : text
-    expect(readerText, file).not.toMatch(
+    expect(withoutReaderCacheDestructionNames(file, text), file).not.toMatch(
       /finaliz|Root-Zeremonie|rootCeremony|provision|historicalRegrant|destruction|Entwurf verwerfen/i,
     )
   }

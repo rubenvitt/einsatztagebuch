@@ -54,6 +54,16 @@ Design §5.2 wird ersetzt:
 - Die **Web-Anwendung** stellt ausschließlich Reader-Funktionen bereit. Sie
   enthält keinen Code für Writer-Finalisierung, Root-Zeremonien,
   Operator-Provisionierung, Historical Re-grant oder Vernichtungsausführung.
+  Reader-Funktion und keine Vernichtungsausführung ist allein die Mitwirkung
+  des Readers als verwaltete Replik (Ruling 2026-09-13, DRK-250): Auf einen
+  von der Administration signierten, im Rust/WASM-Kern geprüften
+  Vernichtungsauftrag entfernt er ausschließlich den eigenen Cache und Index
+  und signiert darüber eine eigene, jobgebundene Löschattestierung mit seinem
+  Reader-Geräteschlüssel unter einem Root-zertifizierten
+  `deletionAttest`-Zertifikat. Die Web-Anwendung beantragt, startet, setzt
+  fort oder bricht keine Vernichtung ab, signiert keinen Zustandsübergang und
+  keine Autorisierung und erhält dadurch keine Administrations- oder
+  Writer-Autorität.
 - Ein Writer-Gerät DARF weiterhin niemals einen privaten Reader-, Recovery- oder
   Historical-Grant-Authority-Schlüssel besitzen.
 - Die Administrationsrolle verleiht weiterhin keinen Inhaltszugriff.
