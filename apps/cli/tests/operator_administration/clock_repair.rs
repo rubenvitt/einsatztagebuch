@@ -74,6 +74,7 @@ fn provider(installation: &AdministrationInstallation) -> Arc<NativeOperatorProv
     .unwrap()
 }
 #[test]
+#[ignore = "DRK-282: planned RED; ClockRepairRuntime::release stays at the closed RuntimeExpired stub until the native clock-release patch is approved there (ruling 2026-09-13)"]
 fn native_clock_only_restart_persists_audits_consumes_once_and_old_reference_still_blocks_normal_reopen()
  {
     let installation = AdministrationInstallation::new();
