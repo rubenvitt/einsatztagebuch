@@ -59,6 +59,7 @@
           "allow-destruction-export-reader-delivery",
           "allow-destruction-synchronize",
           "allow-destruction-authenticate-custodian",
+          "allow-destruction-mark-incomplete",
           "allow-destruction-evidence-preview",
           "allow-destruction-evidence-finalize",
           "allow-destruction-evidence-recover",

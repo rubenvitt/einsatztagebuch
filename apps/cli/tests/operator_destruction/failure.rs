@@ -228,18 +228,20 @@ fn actual_entries(f: &NativeDestructionFixture) -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn count(db: &EncryptedDatabase, table: &str) -> i64 {
+pub(super) fn count(db: &EncryptedDatabase, table: &str) -> i64 {
     db.query_row(&format!("SELECT count(*) FROM {table}"), &[])
         .unwrap()
         .unwrap()
         .integer(0)
         .unwrap()
 }
-fn context(db: &EncryptedDatabase) -> Vec<u8> {
+pub(super) fn context(db: &EncryptedDatabase) -> Vec<u8> {
     db.query_row("SELECT exact_context FROM destruction_import_batch ORDER BY insertion_sequence DESC LIMIT 1", &[])
         .unwrap().unwrap().blob(0).unwrap().to_vec()
 }
-fn exact_failure_event(
+/// The single signed state4 event of the latest local batch, verified
+/// historically and byte-identical to its archive copy.
+pub(super) fn exact_failure_event(
     f: &NativeDestructionFixture,
     context: &[u8],
     from: u8,

@@ -51,8 +51,90 @@ function bridge(initial = view()): DestructionBridge {
     resume: vi.fn(async () => initial),
     synchronize: vi.fn(async () => initial),
     authenticateCustodian: vi.fn(async () => initial),
+    markIncomplete: vi.fn(async () => initial),
   }
 }
+
+/** Custodian Writer succeeded with verified stubs; Server deadline elapsed, Reader never attested. */
+function offered(overrides: Partial<DestructionProcessView> = {}): DestructionProcessView {
+  return process({
+    state: 'inProgress',
+    custodianDeviceId: '41'.repeat(16),
+    targets: [{ entryHash: 'cc'.repeat(32), chainSequence: 7, stubObjectHash: 'e1'.repeat(32) }],
+    ...overrides,
+  })
+}
+
+describe('explicit final incomplete action', () => {
+  const ACTION = 'Als unvollständig abschließen'
+  const CONFIRM = 'Endgültig als unvollständig abschließen'
+  const UNDERSTOOD = 'Ich habe verstanden, dass dieser Abschluss endgültig ist.'
+
+  it('is offered only when the host view shows a replica without valid attestation or an elapsed deadline', () => {
+    const rendered = render(<DestructionWizard bridge={bridge(view(offered()))} />)
+    expect(screen.getByRole('button', { name: ACTION })).toBeEnabled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    for (const other of [
+      process({ state: 'inProgress' }),
+      offered({ state: 'incompleteUnreachableReplica' }),
+      offered({ state: 'completeManagedScope' }),
+      offered({ replicas: [
+        { deviceId: '41'.repeat(16), kindCode: 0, attestationHash: 'a1'.repeat(32), resultCode: 0, backupExpiryAt: null },
+        { deviceId: '42'.repeat(16), kindCode: 2, attestationHash: 'a2'.repeat(32), resultCode: 1, backupExpiryAt: Date.now() + 3_600_000 },
+      ], preflight: { ...process().preflight!, knownReplicaCount: 2 } }),
+    ]) {
+      rendered.rerender(<DestructionWizard bridge={bridge(view(other))} />)
+      expect(screen.queryByRole('button', { name: ACTION })).not.toBeInTheDocument()
+    }
+  })
+
+  it('requires a separate final confirmation and shows only the returned host state', async () => {
+    const host = bridge(view(offered()))
+    let finish: (result: DestructionAdministrationView) => void = () => undefined
+    host.markIncomplete = vi.fn(() => new Promise<DestructionAdministrationView>((resolve) => { finish = resolve }))
+    const user = userEvent.setup()
+    render(<DestructionWizard bridge={host} />)
+    await user.click(screen.getByRole('button', { name: ACTION }))
+    const dialog = await screen.findByRole('dialog')
+    // jsdom keeps the antd enter motion at opacity 0; presence in the dialog is the witness here.
+    expect(within(dialog).getByText('Vorgang endgültig als unvollständig abschließen?')).toBeInTheDocument()
+    expect(within(dialog).getByText('Mindestens eine bekannte Replik hat keine gültige Attestierung, oder eine attestierte Backup-Frist ist abgelaufen. Die Anwendung signiert dafür den Status „bekannte Replik nicht erreichbar“.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Dieser Schritt ist endgültig. Später eingehende Nachweise ändern diesen Status nicht mehr, und einen Rückweg zur Fortsetzung gibt es derzeit nicht. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Der Abschluss bestätigt keine Löschung auf den betroffenen Repliken.')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: CONFIRM })).toBeDisabled()
+    await user.click(within(dialog).getByRole('button', { name: 'Zurück' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(host.markIncomplete).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: ACTION }))
+    const reopened = await screen.findByRole('dialog')
+    expect(within(reopened).getByRole('checkbox', { name: UNDERSTOOD })).not.toBeChecked()
+    await user.click(within(reopened).getByRole('checkbox', { name: UNDERSTOOD }))
+    const confirm = within(reopened).getByRole('button', { name: CONFIRM })
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+    expect(host.markIncomplete).toHaveBeenCalledExactlyOnceWith(PROCESS_ID, PREFLIGHT_HASH)
+    expect(host.resume).not.toHaveBeenCalled()
+    expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('in Bearbeitung')
+    await act(async () => finish(view(offered({ state: 'incompleteUnreachableReplica' }))))
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('bekannte Replik nicht erreichbar'))
+    expect(screen.queryByRole('button', { name: ACTION })).not.toBeInTheDocument()
+  })
+
+  it('keeps the verified process and shows the native refusal code', async () => {
+    const host = { ...bridge(view(offered())), markIncomplete: vi.fn(async () => { throw { code: 'EA-DESTRUCTION-MARK-INCOMPLETE-NOT-OFFERED' } }) }
+    const user = userEvent.setup()
+    render(<DestructionWizard bridge={host} />)
+    await user.click(screen.getByRole('button', { name: ACTION }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('checkbox', { name: UNDERSTOOD }))
+    await user.click(within(dialog).getByRole('button', { name: CONFIRM }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('EA-DESTRUCTION-MARK-INCOMPLETE-NOT-OFFERED')
+    expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('in Bearbeitung')
+    expect(host.markIncomplete).toHaveBeenCalledExactlyOnceWith(PROCESS_ID, PREFLIGHT_HASH)
+    expect(host.resume).not.toHaveBeenCalled()
+  })
+})
 
 describe('DestructionWizard', () => {
   it('shares its native busy lease with explicit Reader file delivery', async () => {

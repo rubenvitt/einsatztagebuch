@@ -1,4 +1,4 @@
-import { Alert, Button, Checkbox, Descriptions, Space, Typography } from 'antd'
+import { Alert, Button, Checkbox, Descriptions, Modal, Space, Typography } from 'antd'
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
@@ -6,6 +6,7 @@ import { refusalCode } from './AdminPage'
 import { DestructionEvidence } from './DestructionEvidence'
 import type { DestructionBusyLease, DestructionEvidenceBridge } from './DestructionEvidence'
 import { DestructionStatus } from './DestructionStatus'
+import { markIncompleteOffered } from './mark-incomplete-offer'
 import { ReaderDelivery } from './ReaderDelivery'
 import type { ReaderDeliveryBridge } from './reader-delivery-bridge'
 import { DESTRUCTION_STATE_V1_VALUES } from '../../bridge/generated-contracts'
@@ -24,6 +25,8 @@ export type DestructionBridge = {
   resume: (destructionId: string) => Promise<DestructionAdministrationView>
   synchronize: (destructionId: string, expectedPreflightHash: string) => Promise<DestructionAdministrationView>
   authenticateCustodian: (destructionId: string, expectedPreflightHash: string) => Promise<DestructionAdministrationView>
+  /** The explicit, separately confirmed final action; never part of resume. */
+  markIncomplete: (destructionId: string, expectedPreflightHash: string) => Promise<DestructionAdministrationView>
 }
 
 class AuthorizationFileError extends Error {}
@@ -149,6 +152,8 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
 }): ReactElement {
   const [view, setView] = useState(bridge.initial)
   const [confirmed, setConfirmed] = useState(false)
+  const [finalOpen, setFinalOpen] = useState(false)
+  const [finalConfirmed, setFinalConfirmed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [refused, setRefused] = useState<string | null>(null)
   const [authorizationFile, setAuthorizationFile] = useState<File | null>(null)
@@ -164,6 +169,8 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
     pending.current = null
     setView(bridge.initial)
     setConfirmed(false)
+    setFinalOpen(false)
+    setFinalConfirmed(false)
     setBusy(false)
     setRefused(null)
     setAuthorizationFile(null)
@@ -214,6 +221,12 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
     && process.targets.length > 0 && process.approverCertificateHashes.length >= 2
     && new Set(process.approverCertificateHashes).size === process.approverCertificateHashes.length
   const canResume = process !== null && process.state !== REQUESTED && process.state !== COMPLETE
+  // Visibility only; the host re-reads and decides with its own time.
+  const canMarkIncomplete = process !== null && markIncompleteOffered(process, Date.now())
+  const closeFinal = (): void => {
+    setFinalOpen(false)
+    setFinalConfirmed(false)
+  }
 
   return (
     <section aria-label="Kontrollierte Vernichtung">
@@ -319,6 +332,14 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
               Vernichtung fortsetzen
             </Button>
           )}
+          {canMarkIncomplete && process !== null && (
+            <Button danger disabled={busy} onClick={() => {
+              setFinalConfirmed(false)
+              setFinalOpen(true)
+            }}>
+              Als unvollständig abschließen
+            </Button>
+          )}
           {process?.preflight !== null && process !== null && process.replicas.some((replica) => replica.kindCode === 2) && (
             <Button disabled={busy} onClick={() => { void run(() => bridge.synchronize(process.destructionId, process.preflight!.jobHash)) }}>
               Servernachweise abgleichen
@@ -326,6 +347,39 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
           )}
           <Button disabled={busy} onClick={() => { void run(bridge.refresh) }}>Status neu lesen</Button>
         </Space>
+        {finalOpen && canMarkIncomplete && (
+        // Mounted only while open: closing leaves no stale consent or dialog behind.
+        <Modal
+          open
+          title="Vorgang endgültig als unvollständig abschließen?"
+          onCancel={closeFinal}
+          footer={[
+            <Button key="back" onClick={closeFinal}>Zurück</Button>,
+            <Button key="confirm" danger type="primary" disabled={busy || !finalConfirmed} onClick={() => {
+              if (!finalConfirmed || process === null || process.preflight === null) return
+              const destructionId = process.destructionId
+              const jobHash = process.preflight.jobHash
+              closeFinal()
+              void run(() => bridge.markIncomplete(destructionId, jobHash))
+            }}>
+              Endgültig als unvollständig abschließen
+            </Button>,
+          ]}
+        >
+          <Typography.Paragraph>
+            Mindestens eine bekannte Replik hat keine gültige Attestierung, oder eine attestierte Backup-Frist ist abgelaufen. Die Anwendung signiert dafür den Status „bekannte Replik nicht erreichbar“.
+          </Typography.Paragraph>
+          <Typography.Paragraph>
+            Dieser Schritt ist endgültig. Später eingehende Nachweise ändern diesen Status nicht mehr, und einen Rückweg zur Fortsetzung gibt es derzeit nicht. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.
+          </Typography.Paragraph>
+          <Typography.Paragraph>
+            Der Abschluss bestätigt keine Löschung auf den betroffenen Repliken.
+          </Typography.Paragraph>
+          <Checkbox checked={finalConfirmed} disabled={busy} onChange={(event) => { setFinalConfirmed(event.target.checked) }}>
+            Ich habe verstanden, dass dieser Abschluss endgültig ist.
+          </Checkbox>
+        </Modal>
+        )}
       </Space>
     </section>
   )

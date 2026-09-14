@@ -8,7 +8,7 @@ const JOB = '22'.repeat(32)
 type ProcessState = 'requested' | 'inProgress' | 'pendingBackupExpiry' | 'incompleteUnreachableReplica'
 
 /** Browser boundary double only; actual native execution has a separate CLI witness. */
-async function host(page: Page, initial: ProcessState | null = null, privacy = true, server = false): Promise<string[]> {
+async function host(page: Page, initial: ProcessState | null = null, privacy = true, server = false, offer = false): Promise<string[]> {
   let saved = initial
   const invoked: string[] = []
   const view = () => ({
@@ -16,9 +16,10 @@ async function host(page: Page, initial: ProcessState | null = null, privacy = t
     knownDestructionIds: saved === null ? [] : [ID],
     process: saved === null ? null : {
       destructionId: ID, authorizationObjectHash: '44'.repeat(32), state: saved,
-      scopeCode: 1, legalReasonCode: 2, controllerDeviceId: '55'.repeat(16), custodianDeviceId: '66'.repeat(16),
+      // `offer`: the custodian Writer succeeded with a verified stub (host view double only).
+      scopeCode: 1, legalReasonCode: 2, controllerDeviceId: '55'.repeat(16), custodianDeviceId: (offer ? 'aa' : '66').repeat(16),
       approverCertificateHashes: ['77'.repeat(32), '88'.repeat(32)],
-      targets: [{ entryHash: '99'.repeat(32), chainSequence: 7, stubObjectHash: null }],
+      targets: [{ entryHash: '99'.repeat(32), chainSequence: 7, stubObjectHash: offer ? 'ab'.repeat(32) : null }],
       evidenceEntryHash: null,
       preflight: { jobHash: JOB, exactCanonicalReportJson: JSON.stringify({ knownReplicaCount: server ? 3 : 2 }), knownReplicaCount: server ? 3 : 2 },
       replicas: [
@@ -73,6 +74,11 @@ async function host(page: Page, initial: ProcessState | null = null, privacy = t
       saved = 'pendingBackupExpiry'
       return view()
     }
+    if (command === 'destruction_mark_incomplete' && offer) {
+      expect(args).toEqual({ destructionId: ID, expectedPreflightHash: JOB })
+      saved = 'incompleteUnreachableReplica'
+      return view()
+    }
     throw new Error('EA-E2E-UNCONFIGURED-ADMINISTRATION')
   })
   await page.addInitScript(() => {
@@ -121,6 +127,32 @@ test('explicit server synchronization uses its own command and retains the retur
   await page.reload()
   await page.getByRole('link', { name: 'Verwaltung' }).click()
   await expect(page.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveText('wartet auf Backup-Frist')
+})
+
+test('explicit final incomplete action needs its own confirmation and the host state survives reload', async ({ context, page }) => {
+  await installOfflineGuard(context)
+  const invoked = await host(page, 'inProgress', true, false, true)
+  await open(page)
+  const action = page.getByRole('button', { name: 'Als unvollständig abschließen' })
+  await action.click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toContainText('Dieser Schritt ist endgültig.')
+  const confirm = dialog.getByRole('button', { name: 'Endgültig als unvollständig abschließen' })
+  await expect(confirm).toBeDisabled()
+  await dialog.getByRole('button', { name: 'Zurück' }).click()
+  await expect(dialog).toBeHidden()
+  expect(invoked).not.toContain('destruction_mark_incomplete')
+  await action.click()
+  await dialog.getByRole('checkbox', { name: 'Ich habe verstanden, dass dieser Abschluss endgültig ist.' }).check()
+  await confirm.click()
+  await expect(page.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveText('bekannte Replik nicht erreichbar')
+  expect(invoked.filter((command) => command === 'destruction_mark_incomplete')).toHaveLength(1)
+  expect(invoked).not.toContain('destruction_resume')
+  await expect(action).toHaveCount(0)
+  await page.reload()
+  await page.getByRole('link', { name: 'Verwaltung' }).click()
+  await expect(page.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveText('bekannte Replik nicht erreichbar')
+  await expect(page.getByRole('button', { name: 'Als unvollständig abschließen' })).toHaveCount(0)
 })
 
 test('keyboard confirmation starts the exact imported process once and reload restores it', async ({ context, page }) => {

@@ -92,6 +92,19 @@ pub fn destruction_synchronize_core(
     port.synchronize(id, hash)?.try_into()
 }
 
+/// The explicit final action only; Resume never records state 4.
+pub fn destruction_mark_incomplete_core(
+    state: &crate::state::DesktopState,
+    id: &str,
+    expected_preflight_hash: &str,
+) -> Result<DestructionAdministrationWire, CommandError> {
+    let port = port(state)?;
+    let id = parse_id(id)?;
+    let hash = ea_types::ObjectHash::try_from(parse_hex::<32>(expected_preflight_hash)?.as_slice())
+        .map_err(|_| CommandError::new(WIRE_ERROR))?;
+    port.mark_incomplete(id, hash)?.try_into()
+}
+
 pub fn destruction_authenticate_custodian_core(
     state: &crate::state::DesktopState,
     id: &str,
@@ -372,6 +385,19 @@ pub async fn destruction_authenticate_custodian(
     let state = state.inner().clone();
     super::run_blocking(move || {
         destruction_authenticate_custodian_core(&state, &destruction_id, &expected_preflight_hash)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn destruction_mark_incomplete(
+    state: tauri::State<'_, crate::state::DesktopState>,
+    destruction_id: String,
+    expected_preflight_hash: String,
+) -> Result<DestructionAdministrationWire, CommandError> {
+    let state = state.inner().clone();
+    super::run_blocking(move || {
+        destruction_mark_incomplete_core(&state, &destruction_id, &expected_preflight_hash)
     })
     .await
 }

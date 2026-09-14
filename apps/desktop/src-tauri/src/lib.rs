@@ -142,6 +142,7 @@ pub fn run() {
             commands::destruction::destruction_export_reader_delivery,
             commands::destruction::destruction_synchronize,
             commands::destruction::destruction_authenticate_custodian,
+            commands::destruction::destruction_mark_incomplete,
             commands::destruction_evidence::destruction_evidence_preview,
             commands::destruction_evidence::destruction_evidence_finalize,
             commands::destruction_evidence::destruction_evidence_recover,

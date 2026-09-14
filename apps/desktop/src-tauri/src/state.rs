@@ -911,6 +911,18 @@ pub trait DestructionAdministrationPort: Send + Sync {
         &self,
         id: ea_types::DestructionId,
     ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError>;
+    /// The explicit, separately confirmed and final operator action that
+    /// records missing confirmation (state 4). Resume never reaches it. Hosts
+    /// without the native producer refuse; there is no fallback to Resume.
+    fn mark_incomplete(
+        &self,
+        _id: ea_types::DestructionId,
+        _expected_preflight_hash: ea_types::ObjectHash,
+    ) -> Result<ea_ui_contracts::DestructionAdministrationView, CommandError> {
+        Err(CommandError::new(
+            "EA-DESKTOP-DESTRUCTION-MARK-INCOMPLETE-UNAVAILABLE",
+        ))
+    }
     fn import_progress(
         &self,
         id: ea_types::DestructionId,

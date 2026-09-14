@@ -41,6 +41,18 @@ describe('native destruction bridge', () => {
     expect(call.mock.calls).toHaveLength(3)
   })
 
+  it('uses the separate explicit final command and rejects a reply for another preflight', async () => {
+    const reply = { ...raw(ID), process: { ...raw(ID).process!, state: 'incompleteUnreachableReplica', replicas: [{ deviceId: '33'.repeat(16), kindCode: 1, attestationHash: null, resultCode: null, backupExpiryAt: null }], preflight: { jobHash: HASH, exactCanonicalReportJson: '{}', knownReplicaCount: 1 } } }
+    const call = vi.fn(async (_command: string, _args?: Record<string, unknown>) => reply)
+    const bridge = await connectDestructionBridge(call)
+    const result = await bridge.markIncomplete(ID, HASH)
+    expect(result.process?.state).toBe('incompleteUnreachableReplica')
+    expect(call).toHaveBeenLastCalledWith('destruction_mark_incomplete', { destructionId: ID, expectedPreflightHash: HASH })
+    await expect(bridge.markIncomplete(ID, 'ff'.repeat(32))).rejects.toThrow(/Vorbericht/)
+    await expect(bridge.markIncomplete(SECOND_ID, HASH)).rejects.toThrow(/Vorgang/)
+    expect(call.mock.calls.map(([command]) => command)).not.toContain('destruction_resume')
+  })
+
   it('uses exact IPC fields and retains the selected persisted process across refresh', async () => {
     const call = vi.fn(async (_command: string, args?: Record<string, unknown>) => raw(typeof args?.destructionId === 'string' ? args.destructionId : null))
     const bridge = await connectDestructionBridge(call)

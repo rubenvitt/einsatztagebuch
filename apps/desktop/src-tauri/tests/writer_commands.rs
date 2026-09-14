@@ -93,6 +93,7 @@ const EXPECTED: &[&str] = &[
     "destruction_export_reader_delivery",
     "destruction_synchronize",
     "destruction_authenticate_custodian",
+    "destruction_mark_incomplete",
     "destruction_evidence_preview",
     "destruction_evidence_finalize",
     "destruction_evidence_recover",
@@ -305,7 +306,7 @@ fn the_writer_surface_names_the_same_commands_as_the_host() {
     );
     assert!(checked >= 12);
     assert_eq!(administration, 20);
-    assert_eq!(destruction, 12);
+    assert_eq!(destruction, 13);
     assert_eq!(recovery, 4);
 }
 
