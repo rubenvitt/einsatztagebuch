@@ -414,7 +414,19 @@ nothing.
 | Service | Image, tag and digest | Reason |
 | --- | --- | --- |
 | PostgreSQL | `postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af` | The official Debian-based image of the current PostgreSQL 18 line, published on Docker Hub. |
-| Object store | `minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e` | **MinIO** is the S3-compatible service, chosen by name. It implements `PutBucketVersioning` and `ListObjectVersions`, which the bucket-versioning requirement of this stage needs; SeaweedFS, LocalStack and Garage are rejected above. The image also ships `mc` at `/usr/bin/mc`, so readiness (`mc ready local`) and bucket setup need no third container. |
+| Object store | `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e` | **MinIO** is the S3-compatible service, chosen by name. It implements `PutBucketVersioning` and `ListObjectVersions`, which the bucket-versioning requirement of this stage needs; SeaweedFS, LocalStack and Garage are rejected above. The image also ships `mc` at `/usr/bin/mc`, so readiness (`mc ready local`) and bucket setup need no third container. |
+
+**Addendum 2026-09-14: same digest, MinIO's own registry.** Docker Hub
+refuses anonymous pulls of `minio/minio`, including this pinned digest.
+`docker manifest inspect` answers `denied` / `unauthorized: authentication
+required`, and the hosted `gate` workflow fails in `integration up` before any
+test. The identical manifest list, `sha256:14cea493…62bd8936e`, is served
+anonymously by `quay.io/minio/minio`, the registry MinIO publishes to itself.
+Pulling it by digest from there returns exactly that digest. Only the
+registry host changes: the digest binds the content, so every measurement
+recorded against the earlier reference (the Stage 3 gate report names it
+verbatim) holds unchanged for this one. The choice of service, tag and digest
+stands.
 
 MinIO's server is AGPL-3.0-licensed. That is a licence of a *service run in a
 development container*, not of a Rust crate in the dependency graph and not of
