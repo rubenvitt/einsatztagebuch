@@ -1,5 +1,10 @@
 //! Real issuance -> server admission/storage -> delivery -> Reader opening.
 //! PostgreSQL/S3 are real adapters; separate historical_grant_api tests cover HTTP.
+//!
+//! `allow(clippy::duplicate_mod)`: the recovery, reader and verify fixtures pull
+//! the same shared support files in through their own `#[path]` chains, as in
+//! `support/mod.rs` of this crate.
+#![allow(clippy::duplicate_mod)]
 #[allow(dead_code)]
 #[path = "../../../crates/ea-recovery/tests/historical_grant/support.rs"]
 mod issuance;
@@ -284,8 +289,6 @@ async fn create_upload_deliver_open_and_replay_after_expiry() {
         .unwrap()
         .into_bytes();
     assert_eq!(stored.as_ref(), f.entry_bytes);
-    drop(reader_ports);
-    drop(ports);
     drop(heads);
     drop(objects);
     drop(repo);
