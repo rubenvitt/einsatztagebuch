@@ -178,7 +178,17 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 /// Eine Bedienerdatei in Form, mit einem Bestand, den es nicht gibt.
+///
+/// Die Datenbankdatei `operator.sqlite` liegt dagegen LEER daneben. Die
+/// prozesslokale Erwerbssperre (`crates/ea-admin/src/operator_runtime/acquisition.rs`,
+/// Schluessel ist der kanonische, EXISTIERENDE Datenbankpfad) weist einen
+/// Lauf ohne sie mit `EA-OPERATOR-DATABASE-REQUIRED` (14) ab, BEVOR der Anker
+/// gelesen wird. Geoeffnet wird die Datei erst nach Bestand, Anker und
+/// Geraetezertifikat — in diesen Tests also nie; [`operator_database_is_untouched`]
+/// misst das.
 fn write_config(directory: &std::path::Path) -> PathBuf {
+    std::fs::write(directory.join("operator.sqlite"), b"")
+        .expect("die Datenbankdatei muss anlegbar sein");
     let config = directory.join("operator.json");
     std::fs::write(
         &config,
@@ -222,6 +232,14 @@ fn write_request(directory: &std::path::Path, with_authorization: bool) -> PathB
 
 fn path_str(path: &std::path::Path) -> &str {
     path.to_str().expect("Testpfad ist UTF-8")
+}
+
+/// Die von [`write_config`] angelegte Datenbankdatei ist noch LEER: der Lauf
+/// ist am Anker gescheitert, ohne sie zu oeffnen oder zu initialisieren.
+fn operator_database_is_untouched(directory: &std::path::Path) -> bool {
+    std::fs::read(directory.join("operator.sqlite"))
+        .expect("die Datenbankdatei muss lesbar sein")
+        .is_empty()
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1201,7 @@ fn a_well_formed_request_and_config_reach_the_archive() {
     }
     assert_eq!(output.status.code(), Some(20), "war: {stderr}");
     assert!(output.stdout.is_empty());
+    assert!(operator_database_is_untouched(&directory));
 }
 
 /// Bei `activate` steht die Objektdatei VOR der Bedienerdatei: eine
@@ -1310,4 +1329,5 @@ fn activate_with_the_authorization_hash_reaches_the_archive() {
     }
     assert_eq!(output.status.code(), Some(20), "war: {stderr}");
     assert!(output.stdout.is_empty());
+    assert!(operator_database_is_untouched(&directory));
 }

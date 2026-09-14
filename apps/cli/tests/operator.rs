@@ -82,6 +82,21 @@ fn public_config_reaches_real_anchor_validation_without_mutating_inputs() {
     let original = b"existing private-path independent anchor";
     fs::write(&anchor, original).unwrap();
     fs::write(&config, public_config()).unwrap();
+    // The process-local acquisition gate keys on the canonical EXISTING
+    // database path and refuses an absent one (EA-OPERATOR-DATABASE-REQUIRED,
+    // 14) before the anchor is read. An empty file satisfies the gate; it is
+    // only opened after archive, anchor and certificate, so it stays empty.
+    let database = directory.path().join("operator.sqlite");
+    fs::write(&database, b"").unwrap();
+    let entries = || {
+        let mut names = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    let entries_before = entries();
     let output = run(&[
         "--trust-anchor",
         anchor.to_str().unwrap(),
@@ -97,7 +112,8 @@ fn public_config_reaches_real_anchor_validation_without_mutating_inputs() {
     assert!(!stderr.contains("private-path"));
     assert_eq!(fs::read(&anchor).unwrap(), original);
     assert_eq!(fs::read_to_string(&config).unwrap(), public_config());
-    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    assert!(fs::read(&database).unwrap().is_empty());
+    assert_eq!(entries(), entries_before);
 }
 
 #[test]
@@ -179,7 +195,7 @@ fn invalid_subcommands_report_command_specific_choices() {
         (
             "organization",
             "iniit",
-            "einsatzarchiv: unknown organization subcommand iniit; expected init",
+            "einsatzarchiv: unknown organization subcommand iniit; expected init|certify-root",
         ),
         (
             "operator",
