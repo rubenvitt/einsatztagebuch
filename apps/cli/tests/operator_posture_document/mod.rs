@@ -64,6 +64,19 @@ fn posture_cli_accepts_only_closed_documentation_operations() {
     }
 }
 
+/// A documentable measurement that does not depend on the runner's disk.
+///
+/// The real Ubuntu adapter measures full-disk encryption, and the root of
+/// GitHub's `ubuntu-24.04` runner is an unencrypted `part`/`disk` chain: a
+/// measured Fail that no posture document may cover (`unknown_mask`). Only
+/// `actual_cli_target_issue_import_uses_native_admin_and_real_host_measurements`
+/// keeps measuring the actual host.
+fn documentable_measurement() -> Arc<dyn DevicePostureProvider> {
+    Arc::new(ea_key_provider::DevicePostureProviderFake::unknown(
+        ea_key_provider::PostureRequirement::FullDiskEncryption,
+    ))
+}
+
 struct NativePostureFixture {
     directory: support::TempDir,
     config: PathBuf,
@@ -148,8 +161,7 @@ impl NativePostureFixture {
 #[test]
 fn signed_native_posture_document_allows_admission_after_real_reopen_without_relabeling_unknown() {
     let fixture = NativePostureFixture::new();
-    let host: Arc<dyn DevicePostureProvider> =
-        Arc::from(SupportMatrixRow::current_host().unwrap().posture_provider());
+    let host = documentable_measurement();
     let runtime = fixture.open(host.clone());
     assert!(
         !runtime
@@ -196,8 +208,7 @@ fn signed_native_posture_document_allows_admission_after_real_reopen_without_rel
 #[test]
 fn issuance_returns_nothing_without_exact_durable_document_bytes() {
     let fixture = NativePostureFixture::new();
-    let host = Arc::from(SupportMatrixRow::current_host().unwrap().posture_provider());
-    let runtime = fixture.open(host);
+    let runtime = fixture.open(documentable_measurement());
     runtime.database().execute("CREATE TRIGGER corrupt_issued_document AFTER INSERT ON go_live_posture_issued BEGIN UPDATE go_live_posture_issued SET exact_envelope=x'80' WHERE object_hash=NEW.object_hash; END",&[]).unwrap();
     let result = runtime.issue_posture_document(
         &runtime.posture_target_context().unwrap(),
@@ -312,6 +323,33 @@ fn actual_cli_target_issue_import_uses_native_admin_and_real_host_measurements()
     let target = dir.join("target.json");
     let doc = dir.join("document.cbor");
     let evidence = dir.join("public-evidence.txt");
+    // The CLI measures the actual host. A measured Fail is never documentable:
+    // on such a host (GitHub's unencrypted ubuntu-24.04 root) the target step
+    // itself refuses and publishes nothing.
+    let measured = SupportMatrixRow::current_host()
+        .unwrap()
+        .posture_provider()
+        .report()
+        .unwrap();
+    if ea_key_provider::PostureRequirement::ALL
+        .into_iter()
+        .any(|requirement| {
+            matches!(
+                measured.check(requirement),
+                ea_key_provider::PostureCheck::Fail { .. }
+            )
+        })
+    {
+        let output = run(&["target", "--output", target.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(12), "{stderr}");
+        assert!(stderr.contains("EA-OPERATOR-POSTURE"), "{stderr}");
+        assert!(
+            !target.exists(),
+            "a refused target step writes no public output"
+        );
+        return;
+    }
     for args in [
         vec!["target", "--output", target.to_str().unwrap()],
         vec![
@@ -362,8 +400,7 @@ fn actual_cli_target_issue_import_uses_native_admin_and_real_host_measurements()
 #[test]
 fn forged_target_signature_and_durable_document_tampering_fail_after_reopen() {
     let fixture = NativePostureFixture::new();
-    let host: Arc<dyn DevicePostureProvider> =
-        Arc::from(SupportMatrixRow::current_host().unwrap().posture_provider());
+    let host = documentable_measurement();
     let runtime = fixture.open(host.clone());
     let target = runtime.posture_target_context().unwrap();
     let document = runtime
@@ -408,8 +445,7 @@ fn forged_target_signature_and_durable_document_tampering_fail_after_reopen() {
 #[test]
 fn document_expiry_and_durable_clock_watermark_are_checked_after_reopen() {
     let fixture = NativePostureFixture::new();
-    let host: Arc<dyn DevicePostureProvider> =
-        Arc::from(SupportMatrixRow::current_host().unwrap().posture_provider());
+    let host = documentable_measurement();
     let runtime = fixture.open(host.clone());
     let doc = runtime
         .issue_posture_document(
@@ -486,9 +522,7 @@ fn native_context_proof_uses_exact_retained_context_and_documentation_cannot_be_
         runtime
             .issue_posture_document(
                 &NativePostureFixture::new()
-                    .open(Arc::from(
-                        SupportMatrixRow::current_host().unwrap().posture_provider()
-                    ))
+                    .open(documentable_measurement())
                     .posture_target_context()
                     .unwrap(),
                 ea_crypto::object_hash(b"evidence"),
@@ -644,8 +678,7 @@ fn native_documentation_prompt_rechecks_measurement_and_audits_failure_before_an
 fn valid_admin_signatures_still_require_exact_current_registry_target_and_time() {
     use ea_crypto::{CoseSigner, GoLivePostureCore, SecretBytes};
     let fixture = NativePostureFixture::new();
-    let host = Arc::from(SupportMatrixRow::current_host().unwrap().posture_provider());
-    let runtime = fixture.open(host);
+    let runtime = fixture.open(documentable_measurement());
     let exact = runtime
         .issue_posture_document(
             &runtime.posture_target_context().unwrap(),
@@ -814,8 +847,7 @@ fn separate_native_admin_documents_writer_target_and_new_selected_head_invalidat
     )
     .unwrap();
     drop(db);
-    let host: Arc<dyn DevicePostureProvider> =
-        Arc::from(SupportMatrixRow::current_host().unwrap().posture_provider());
+    let host = documentable_measurement();
     let native = NativeOperatorProvider::open_test_fixture(
         writer.directory.path().join("ea-native-operator"),
         false,
