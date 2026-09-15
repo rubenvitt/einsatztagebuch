@@ -173,9 +173,7 @@ impl ParticipantFixture {
         &self,
         name: &str,
     ) -> Result<PreparedNativeBootstrapAdminParticipant, OperatorLifecycleError> {
-        let mut store = FileBootstrapStore::new(self.state.clone())
-            .acquire_lease()
-            .unwrap();
+        let mut store = reacquire_lease(self.state.clone());
         prepare_native_bootstrap_admin_participant(
             &mut store,
             &self.database,
@@ -195,9 +193,7 @@ impl ParticipantFixture {
             fs::read(step_two::original_path(&self.state)).unwrap(),
             self.root_bytes
         );
-        let store = FileBootstrapStore::new(self.state.clone())
-            .acquire_lease()
-            .unwrap();
+        let store = reacquire_lease(self.state.clone());
         let state = store.load().unwrap().unwrap();
         assert_eq!(state.step(), BootstrapStep::GenerateOfflineRoot);
         assert_eq!(
@@ -493,9 +489,7 @@ fn participant_different_identity_and_salt_preserve_exact_journal() {
     let fixture = ParticipantFixture::new();
     fixture.prepare("Änne").unwrap();
     let original = journal_bytes(&fixture);
-    let mut store = FileBootstrapStore::new(fixture.state.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut store = reacquire_lease(fixture.state.clone());
     for (device, subject, salt) in [(0x37, 0x35, 0x36), (0x34, 0x38, 0x36), (0x34, 0x35, 0x39)] {
         let identity = BootstrapAdminParticipantIdentity::new(
             DeviceId::try_from(&[device; 16][..]).unwrap(),
@@ -533,7 +527,7 @@ fn paused_operation(
     let database = fixture.database.clone();
     let identity = fixture.identity("Änne");
     let operation = std::thread::spawn(move || {
-        let mut store = FileBootstrapStore::new(state).acquire_lease().unwrap();
+        let mut store = reacquire_lease(state);
         prepare_native_bootstrap_admin_participant(&mut store, &database, &native, identity)
     });
     let paused = fixture.directory.path().join("operator-signature-paused");

@@ -29,6 +29,32 @@ fn installation(authority: bool) -> (support::TempDir, Arc<NativeOperatorProvide
     (directory, native)
 }
 
+/// Re-acquires a ceremony lease that this test process released moments ago.
+///
+/// libtest runs sibling tests on other threads that keep spawning native
+/// helpers. A child forked by another thread holds copies of every open
+/// descriptor, including this process's flock descriptor, until its `execve`
+/// closes them. Until then the kernel lease is genuinely still held and the
+/// non-blocking acquisition refuses, as it must (DRK-323). The CLI takes its
+/// lease once per process and spawns from the holding thread, so only this
+/// multithreaded test harness sees the window. Only that transient refusal is
+/// waited out; any other error, or a holder that outlives the bound, fails.
+/// Refusal assertions keep calling `acquire_lease` directly.
+fn reacquire_lease(path: PathBuf) -> FileBootstrapStore {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match FileBootstrapStore::new(path.clone()).acquire_lease() {
+            Ok(store) => return store,
+            Err(ea_admin::AdminError::BootstrapStoreUnavailable)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("released ceremony lease was not re-acquired: {error:?}"),
+        }
+    }
+}
+
 fn fields() -> RootCertificateFieldsV1 {
     let key = CanonicalPublicCoseKey::ed25519(
         SigningKey::from_bytes(&trust_support::root_signing_secret())

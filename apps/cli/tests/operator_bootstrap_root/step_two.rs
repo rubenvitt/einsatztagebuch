@@ -67,9 +67,7 @@ fn native_root_step_two_retains_original_and_reopens_without_signing_or_rewritin
     let original_identity = file_identity(&original);
     drop(store);
 
-    let mut reopened = FileBootstrapStore::new(path.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut reopened = reacquire_lease(path.clone());
     let repeated =
         complete_native_root_step(&mut reopened, &native, RegistryVersion::new(7)).unwrap();
     assert_eq!(repeated.exact_certificate().as_bytes(), exact);
@@ -116,9 +114,7 @@ fn native_root_step_two_reuses_actual_original_left_before_state_commit() {
     let prior_signs = sign_count(directory.path());
     drop(store);
 
-    let mut reopened = FileBootstrapStore::new(path.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut reopened = reacquire_lease(path.clone());
     let result =
         complete_native_root_step(&mut reopened, &native, RegistryVersion::new(7)).unwrap();
     assert_eq!(
@@ -302,7 +298,7 @@ fn native_root_step_two_retains_original_on_real_state_write_failure_and_reuses_
     let prior_signs = sign_count(directory.path());
     fs::remove_dir(&writing).unwrap();
     drop(store);
-    let mut store = FileBootstrapStore::new(path).acquire_lease().unwrap();
+    let mut store = reacquire_lease(path);
     let output = complete_native_root_step(&mut store, &native, RegistryVersion::new(7)).unwrap();
     assert_eq!(output.exact_certificate().as_bytes(), retained);
     assert_eq!(sign_count(directory.path()), prior_signs);
@@ -436,15 +432,13 @@ fn native_root_step_two_reconfirms_parent_flush_after_injected_post_rename_error
     let alias = directory.path().join("ceremony-alias");
     symlink(&ceremony, &alias).unwrap();
     let alias_path = alias.join("late-flush.bootstrap-state");
-    let mut alias_store = FileBootstrapStore::new(alias_path).acquire_lease().unwrap();
+    let mut alias_store = reacquire_lease(alias_path);
     assert!(
         complete_native_root_step(&mut alias_store, &native, RegistryVersion::new(7)).is_err(),
         "step 2 must reconfirm the same parentflush instead of only rereading bytes"
     );
     drop(alias_store);
-    let mut store = FileBootstrapStore::new(path.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut store = reacquire_lease(path.clone());
     let result = complete_native_root_step(&mut store, &native, RegistryVersion::new(7)).unwrap();
     assert_eq!(result.exact_certificate().as_bytes(), original_bytes);
     assert_eq!(fs::read(&path).unwrap(), state_bytes);
