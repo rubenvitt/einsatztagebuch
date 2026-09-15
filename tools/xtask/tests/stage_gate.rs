@@ -2008,21 +2008,23 @@ fn the_stage_two_gate_report_must_carry_its_content_contract() {
 
 #[test]
 fn the_stage_switch_still_refuses_an_undefined_stage() {
-    // Stufe 5 und nicht mehr Stufe 4: die Stufe-4-Abnahme oeffnet den Schalter
-    // fuer 4, und die Zusicherung dieses Tests ist die UNVERAENDERTE — eine
+    // Stufe 6 und nicht mehr Stufe 5: die Stufe-5-Abnahme oeffnet den Schalter
+    // fuer 5, und die Zusicherung dieses Tests ist die UNVERAENDERTE — eine
     // undefinierte Stufe wird abgewiesen, und die Fehlerzeile nennt die
     // definierten. Sie WANDERT mit dem Schalter, statt aufgeweicht zu werden;
     // die Stufe-3-Abnahme hat sie von 3 auf 4 gestellt und `"stages 1 and 2"`
-    // auf `"stages 1, 2 and 3"`, die Stufe-4-Abnahme stellt sie von 4 auf 5
-    // und auf `"stages 1, 2, 3 and 4"`. Der Pin steht bewusst auf dem KURZEN
-    // Teilstring: ein `grep -rn "only defined for stages"` trifft ihn deshalb
-    // NICHT, und wer den Schalter oeffnet, findet ihn ueber diesen Kommentar.
-    let root = stage_two_fixture("stage-five");
-    let output = run_stage_gate(&root, "5");
+    // auf `"stages 1, 2 and 3"`, die Stufe-4-Abnahme von 4 auf 5 und auf
+    // `"stages 1, 2, 3 and 4"`, die Stufe-5-Abnahme stellt sie von 5 auf 6
+    // und auf `"stages 1, 2, 3, 4 and 5"`. Der Pin steht bewusst auf dem
+    // KURZEN Teilstring: ein `grep -rn "only defined for stages"` trifft ihn
+    // deshalb NICHT, und wer den Schalter oeffnet, findet ihn ueber diesen
+    // Kommentar.
+    let root = stage_two_fixture("stage-six");
+    let output = run_stage_gate(&root, "6");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr.contains("stages 1, 2, 3 and 4"),
+        stderr.contains("stages 1, 2, 3, 4 and 5"),
         "the switch must name the stages it defines; stderr: {stderr}"
     );
 }
@@ -3249,4 +3251,340 @@ fn stage_four_gate_report_records_the_measured_full_gate_run() {
              actually carries ({count} = {expected}) as its own word; cell: {cell}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stufe 5 — Administration, Recovery und Vernichtung (Task 14).
+//
+// Diese Stufe ist die erste, die mit einer OFFENEN Ledgerzeile schliesst. Die
+// Tests darunter halten deshalb zwei Dinge auseinander, die im Ledger
+// identisch aussehen: eine Zeile, die die Stufe bewusst als dokumentierte
+// Grenze fuehrt, und eine Zeile, die schlicht vergessen wurde. Sie duerfen
+// nie dasselbe Ergebnis erzeugen.
+
+/// Die zwei Skripte, die Stufe 5 verlangt.
+const STAGE_FIVE_SCRIPTS: [&str; 2] = ["stage-gate:5", "test:recovery"];
+
+/// Der Stufe-5-Gate-Bericht, relativ zur Gate-Wurzel.
+const STAGE_FIVE_GATE_REPORT_PATH: &str = "docs/traceability/stage-5-gate.md";
+
+/// Die vierzehn primaeren Abnahmekriterien der Stufe 5, aufsteigend.
+const STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 14] =
+    [11, 12, 18, 24, 29, 30, 35, 40, 41, 44, 47, 49, 52, 53];
+
+/// Die drei Workstreams, lexikografisch.
+const STAGE_FIVE_WORKSTREAMS: [&str; 3] =
+    ["admin-trust", "destruction", "recovery-regrant-amendment"];
+
+/// Die fuenf Ledgerzeilen ohne primaeres Abnahmekriterium.
+const STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION: [&str; 5] =
+    ["FR-120", "FR-121", "FR-123", "FR-124", "WR-075"];
+
+/// Die eine Zeile, die diese Stufe als dokumentierte Grenze fuehrt.
+const STAGE_FIVE_DOCUMENTED_BOUNDARY: &str = "WR-075";
+
+/// Schreibt ein Stufe-5-Ledger, in dem JEDE Stufe-5-Zeile auf `integrated`
+/// steht — ausser den namentlich genannten, die auf `planned` bleiben.
+///
+/// Die Zeilen anderer Stufen bleiben unveraendert: der Gate filtert ueber die
+/// Stufenspalte, und ein Fixture, das fremde Zeilen anfasst, wuerde eine
+/// Zusicherung ueber die Stufe 5 mit einer ueber das ganze Ledger verwechseln.
+fn write_stage_five_ledger(root: &Path, still_planned: &[&str]) {
+    let source = fs::read_to_string(workspace_root().join(REQUIREMENT_LEDGER_RELATIVE))
+        .expect("the requirement ledger must be readable");
+    let mut lines = Vec::new();
+    let mut moved = 0_usize;
+    let mut held = 0_usize;
+    for (index, line) in source.lines().enumerate() {
+        if index == 0 || line.is_empty() {
+            lines.push(line.to_owned());
+            continue;
+        }
+        let mut fields = ledger_fields(line);
+        if fields[7] == "5" {
+            if still_planned.contains(&fields[0].as_str()) {
+                fields[8] = "planned".to_owned();
+                held += 1;
+            } else {
+                fields[8] = "integrated".to_owned();
+                moved += 1;
+            }
+        }
+        lines.push(format!("\"{}\"", fields.join("\",\"")));
+    }
+    assert_eq!(
+        held,
+        still_planned.len(),
+        "the fixture must really hold every named row on planned"
+    );
+    assert!(
+        moved > 0,
+        "the fixture must really move at least one stage 5 row"
+    );
+    let path = root.join(REQUIREMENT_LEDGER_RELATIVE);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+}
+
+/// Baut eine gruene Stufe-5-Grundlage.
+///
+/// Wie [`stage_four_fixture`], mit zwei Unterschieden: es gibt kein
+/// Szenarienmanifest, und das Ledger haelt GENAU die dokumentierte Grenze auf
+/// `planned`.
+fn stage_five_fixture(label: &str) -> PathBuf {
+    let root = fixture_root(label);
+    copy_from_the_workspace(&root, DESIGN_DOCUMENT_RELATIVE);
+    copy_from_the_workspace(&root, STAGE_FIVE_GATE_REPORT_PATH);
+    write_stage_five_ledger(&root, &[STAGE_FIVE_DOCUMENTED_BOUNDARY]);
+    write_package_manifest(&root, &STAGE_FIVE_SCRIPTS);
+    root
+}
+
+/// Ersetzt im Stufe-5-Bericht des Fixtures eine Teilkette.
+///
+/// Der Rueckgabewert ist die Trefferzahl, und jeder Aufrufer prueft sie: eine
+/// Mutation, die NICHTS trifft, wuerde einen gruenen Gate als Beleg fuer eine
+/// Pruefung ausgeben, die es gar nicht gibt.
+fn mutate_stage_five_report(root: &Path, from: &str, to: &str) -> usize {
+    let path = root.join(STAGE_FIVE_GATE_REPORT_PATH);
+    let text = fs::read_to_string(&path).expect("the stage 5 gate report must be readable");
+    let hits = text.matches(from).count();
+    fs::write(&path, text.replace(from, to)).unwrap();
+    hits
+}
+
+/// Haelt fest, dass `stage-gate 5` den eingecheckten Baum ABWEIST, solange die
+/// Belege nicht gemessen und die Ledgerzeilen nicht bewegt sind.
+///
+/// Das ist der RED dieser Stufe, und er ist bewusst als Test festgehalten und
+/// nicht bloss als Notiz: die achtzehn Zeilen sind die Arbeitsliste der Stufe,
+/// und wenn sie wandern, MUSS dieser Test invertieren. Wer ihn dann gruen
+/// sehen will, muss ihn bewusst umdrehen — und genau an dieser Stelle steht
+/// die Frage, ob die Belege wirklich vorliegen.
+///
+/// Die zweite Zusicherung ist die tragende: die dokumentierte Grenze steht
+/// NICHT in der Mangelliste. Eine bewusste Grenze und eine vergessene Zeile
+/// duerfen im Gate nicht dieselbe Form haben.
+#[test]
+fn stage_five_gate_refuses_the_checked_in_tree_until_the_ledger_moves() {
+    let output = run_stage_gate_in_the_workspace("5");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stage-gate 5 must refuse the checked-in tree while the ledger is unmoved; \
+         stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("requirement ledger rows still on planned"),
+        "the gate must say WHY it refuses; stderr: {stderr}"
+    );
+    // Die achtzehn unbelegten Zeilen, jede namentlich.
+    for identifier in [
+        "AK-11", "AK-12", "AK-18", "AK-24", "AK-29", "AK-30", "AK-35", "AK-40", "AK-41", "AK-44",
+        "AK-47", "AK-49", "AK-52", "AK-53", "FR-120", "FR-121", "FR-123", "FR-124",
+    ] {
+        assert!(
+            stderr.contains(identifier),
+            "the gate must name {identifier} among the unevidenced rows; stderr: {stderr}"
+        );
+    }
+    // Und die Grenze NICHT.
+    let planned_clause = stderr
+        .split("requirement ledger rows still on planned:")
+        .nth(1)
+        .expect("the gate must carry the planned clause");
+    assert!(
+        !planned_clause.contains(STAGE_FIVE_DOCUMENTED_BOUNDARY),
+        "{STAGE_FIVE_DOCUMENTED_BOUNDARY} is a documented boundary and must never appear \
+         in the list of unevidenced rows; stderr: {stderr}"
+    );
+}
+
+/// Haelt fest, dass der Gate ein Ledger ANNIMMT, dessen einzige offene
+/// Stufe-5-Zeile die dokumentierte Grenze ist.
+#[test]
+fn stage_five_gate_accepts_a_ledger_whose_only_open_row_is_the_documented_boundary() {
+    let root = stage_five_fixture("stage-five-green");
+    let output = run_stage_gate(&root, "5");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "the gate must accept a ledger whose only open stage 5 row is the documented \
+         boundary; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout must be JSON: {error}; stdout: {stdout}"));
+
+    assert_eq!(report["stage"], serde_json::json!(5));
+    assert_eq!(
+        report["stage_five_primary_acceptance_criteria"],
+        serde_json::json!(STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA)
+    );
+    assert_eq!(
+        report["stage_five_workstreams"],
+        serde_json::json!(STAGE_FIVE_WORKSTREAMS)
+    );
+    assert_eq!(
+        report["stage_five_rows_without_primary_criterion"],
+        serde_json::json!(STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION)
+    );
+    // Die zwei Schluessel sind GETRENNT und tragen Verschiedenes.
+    assert_eq!(
+        report["stage_five_documented_boundaries"],
+        serde_json::json!([STAGE_FIVE_DOCUMENTED_BOUNDARY])
+    );
+    assert_eq!(
+        report["stage_five_rows_still_planned"],
+        serde_json::json!([] as [&str; 0]),
+        "a documented boundary must never be counted as an unevidenced row"
+    );
+    // Der Schluessel steht mit einem LEEREN Array da und fehlt nicht.
+    assert_eq!(
+        report["vector_families"],
+        serde_json::json!([] as [&str; 0])
+    );
+}
+
+/// Haelt fest, dass die Ausnahme fuer die dokumentierte Grenze an der
+/// Belegpflicht haengt und nicht an der Liste allein.
+///
+/// Das ist die tragende Zusicherung des ganzen Mechanismus. Eine Liste
+/// erlaubter Ausnahmen OHNE Belegpflicht waere eine Freigabe auf Vorrat: sie
+/// liesse WR-075 auch dann durch, wenn der Bericht ueber die Grenze schweigt,
+/// und ein Leser koennte eine bewusste Entscheidung nicht mehr von einer
+/// vergessenen Zeile unterscheiden.
+#[test]
+fn the_documented_boundary_needs_the_report_to_name_it() {
+    let root = stage_five_fixture("stage-five-silent-boundary");
+    // Die Grenze aus dem Bericht schneiden — und NUR sie.
+    let hits = mutate_stage_five_report(&root, STAGE_FIVE_DOCUMENTED_BOUNDARY, "WR-000");
+    assert!(
+        hits > 0,
+        "the mutation must really remove the boundary from the report"
+    );
+    let output = run_stage_gate(&root, "5");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a boundary the report does not name must not pass; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("documented boundary")
+            && stderr.contains(STAGE_FIVE_DOCUMENTED_BOUNDARY)
+            && stderr.contains(STAGE_FIVE_GATE_REPORT_PATH),
+        "the gate must say which boundary is unnamed and where it belongs; stderr: {stderr}"
+    );
+}
+
+/// Haelt fest, dass eine Grenze, die KEINE mehr ist, ebenfalls auffaellt.
+///
+/// Der Gegenfall zum Test darueber, und aus demselben Grund tragend: ein
+/// Bericht, der eine Grenze behauptet, die es nicht mehr gibt, fuehrt eine
+/// erbrachte Leistung als offen. Die Stufe wuerde sich aermer machen, als sie
+/// ist, und der naechste Leser suchte nach einem Blocker, der weg ist.
+#[test]
+fn a_documented_boundary_that_is_no_longer_planned_is_a_defect() {
+    let root = stage_five_fixture("stage-five-stale-boundary");
+    // Diesmal bewegt das Fixture ALLE Stufe-5-Zeilen, die Grenze eingeschlossen.
+    write_stage_five_ledger(&root, &[]);
+    let output = run_stage_gate(&root, "5");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a boundary that is no longer planned must not pass silently; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("is no longer planned") && stderr.contains(STAGE_FIVE_DOCUMENTED_BOUNDARY),
+        "the gate must name the boundary that has become stale; stderr: {stderr}"
+    );
+}
+
+/// Haelt fest, dass der Gate JEDE der fuenf Zeilen ohne primaeres Kriterium
+/// namentlich im Bericht verlangt.
+///
+/// Ohne diese Pruefung waere der Nachweis dieser fuenf Zeilen LEER, und das ist
+/// gemessen: die Belegrechnung filtert ueber
+/// `!row.primary_acceptance_criterion.is_empty()` und zaehlt eine Zeile ohne
+/// Kriterium weder als belegt noch als Mangel.
+#[test]
+fn stage_five_gate_requires_every_row_without_a_primary_criterion_in_the_report() {
+    for identifier in STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION {
+        // Die Grenze traegt ihre eigene Pruefung und ist dort abgedeckt.
+        if identifier == STAGE_FIVE_DOCUMENTED_BOUNDARY {
+            continue;
+        }
+        let root = stage_five_fixture(&format!("stage-five-row-{identifier}"));
+        let hits = mutate_stage_five_report(&root, identifier, "FR-000");
+        assert!(
+            hits > 0,
+            "the mutation must really remove {identifier} from the report"
+        );
+        let output = run_stage_gate(&root, "5");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "a stage 5 row without a primary criterion that the report does not name must \
+             not pass: {identifier}; stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("no primary") && stderr.contains(identifier),
+            "the gate must name {identifier} as unevidenced; stderr: {stderr}"
+        );
+    }
+}
+
+/// Haelt fest, dass der Gate jeden der drei Workstreams namentlich verlangt.
+///
+/// Namentlich und nicht als Sammelzeile: die Stufe schliesst drei Workstreams
+/// ZUGLEICH ab, und ein Bericht, der einen davon verschweigt, belegt zwei
+/// Drittel.
+#[test]
+fn stage_five_gate_requires_each_workstream_by_name() {
+    for workstream in STAGE_FIVE_WORKSTREAMS {
+        let root = stage_five_fixture(&format!("stage-five-ws-{workstream}"));
+        let hits = mutate_stage_five_report(&root, workstream, "not-a-workstream");
+        assert!(
+            hits > 0,
+            "the mutation must really remove {workstream} from the report"
+        );
+        let output = run_stage_gate(&root, "5");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "a workstream the report does not name must not pass: {workstream}; \
+             stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("workstream") && stderr.contains(workstream),
+            "the gate must name the missing workstream {workstream}; stderr: {stderr}"
+        );
+    }
+}
+
+/// Haelt fest, dass der Bericht die Reichweitenklausel WOERTLICH tragen muss.
+///
+/// Dieselbe Zusicherung wie in den Stufen 2 bis 4, und aus demselben Grund:
+/// die Klausel nennt, was die Stufe NICHT belegt. Ein Bericht ohne sie liest
+/// sich als Betriebsabnahme.
+#[test]
+fn stage_five_gate_requires_the_host_scope_clause_verbatim() {
+    let root = stage_five_fixture("stage-five-scope");
+    let hits = mutate_stage_five_report(&root, "ubuntu-24.04 als Gate-Laeufer", "irgendwo");
+    assert_eq!(
+        hits, 1,
+        "the mutation must hit the scope clause exactly once"
+    );
+    let output = run_stage_gate(&root, "5");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr.contains("scope clause"),
+        "the gate must report the missing scope clause; stderr: {stderr}"
+    );
 }

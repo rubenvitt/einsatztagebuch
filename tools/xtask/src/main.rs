@@ -2442,6 +2442,150 @@ const STAGE_FOUR_HOST_SCOPE_CLAUSE: &str = concat!(
     "Plattform ist damit NICHT belegt und bleibt Stufe 7."
 );
 
+/// Stufe 5 friert KEINE Vektorfamilie ein, wie Stufe 4.
+///
+/// Die drei Stufe-5-Domain-Strings sind mit `c96045c` als Golden-Vektoren der
+/// Suite 1 ERGAENZT worden (PREFLIGHT, GOLIVE-POSTURE,
+/// NATIVE-ARCHIVE-COMPONENT); kein bestehender Vektor aendert sich, und eine
+/// Ergaenzung in eine fremde Familie ist kein Einfrieren einer eigenen.
+///
+/// Der Bericht weist den Schluessel `vector_families` trotzdem aus, mit einem
+/// LEEREN Array — dieselbe Begruendung wie in
+/// [`STAGE_FOUR_VECTOR_FAMILIES`].
+const STAGE_FIVE_VECTOR_FAMILIES: [&str; 0] = [];
+
+/// Die primaeren Abnahmekriterien der Stufe 5 nach Task 14 des Stufe-5-Plans.
+///
+/// VIERZEHN, aufsteigend. Sie decken die 19 Ledgerzeilen NICHT vollstaendig
+/// ab: fuenf Zeilen haben ueberhaupt kein primaeres Kriterium und laufen
+/// deshalb ueber [`STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION`].
+const STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA: [u32; 14] =
+    [11, 12, 18, 24, 29, 30, 35, 40, 41, 44, 47, 49, 52, 53];
+
+/// Der Stufe-5-Gate-Bericht, relativ zur Gate-Wurzel.
+const STAGE_FIVE_GATE_REPORT_PATH: &str = "docs/traceability/stage-5-gate.md";
+
+/// Die drei Workstreams, fuer die der Gate KUMULATIV Nachweise verlangt —
+/// lexikografisch, damit Bericht und Fehlerzeile byteidentisch bleiben.
+///
+/// Sie stehen hier als eigene Konstante und nicht bloss als Literale im
+/// Berichtsvertrag, weil der Bericht sie EINZELN als Abschnitt fuehren muss:
+/// ein Workstream, dessen Belege fehlen, soll namentlich gemeldet werden und
+/// nicht in einer Sammelzeile ueber fehlende Abschnitte verschwinden.
+const STAGE_FIVE_WORKSTREAMS: [&str; 3] =
+    ["admin-trust", "destruction", "recovery-regrant-amendment"];
+
+/// Die fuenf Ledgerzeilen der Stufe 5 OHNE primaeres Abnahmekriterium.
+///
+/// Sie brauchen eigene Gate-Logik, und das ist gemessen: die Belegrechnung der
+/// Stufen 2 bis 4 filtert ueber
+/// `!row.primary_acceptance_criterion.is_empty()` und zaehlt eine Zeile ohne
+/// Kriterium deshalb WEDER als belegt NOCH als Mangel — sie faellt lautlos aus
+/// der Rechnung. Fuer vier Zeilen dieser Stufe (FR-120, FR-121, FR-123,
+/// FR-124) waere das der gesamte Nachweis, und WR-075 kaeme als fuenfte dazu.
+/// Der Gate verlangt sie deshalb NAMENTLICH im Bericht.
+const STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION: [&str; 5] =
+    ["FR-120", "FR-121", "FR-123", "FR-124", "WR-075"];
+
+/// Die Ledgerzeilen, die diese Stufe als DOKUMENTIERTE GRENZE fuehrt und
+/// deshalb auf `planned` stehen lassen darf.
+///
+/// GENAU EINE, und die Ausnahme ist eng: WR-075 verlangt die Re-Encryption
+/// gegen den gebundenen Transport-Key-Fingerprint, und die zugehoerige
+/// v1.1-Objektfamilie entsteht erst in DRK-318 — vor dessen normativem und
+/// Security-Review gibt es nichts zu belegen. Ruling Ruben vom 2026-09-15:
+/// der Gate schliesst mit dokumentierter Grenze statt auf DRK-318 zu warten.
+///
+/// Die Ausnahme ist NICHT stillschweigend. [`rows_still_planned_with_boundary`]
+/// laesst diese Zeile nur durch, wenn der Bericht sie mitsamt ihrem
+/// besitzenden Ticket woertlich nennt — sonst waere eine dokumentierte Grenze
+/// von einer vergessenen Zeile nicht zu unterscheiden, und genau diese
+/// Verwechslung ist der Grund, aus dem die Stufe ueberhaupt ein Gate hat.
+///
+/// Jede ANDERE Stufe-5-Zeile auf `planned` bleibt ein Mangel.
+const STAGE_FIVE_DOCUMENTED_BOUNDARY_ROWS: [&str; 1] = ["WR-075"];
+
+/// Die Skripte, die die Wurzel-`package.json` fuehren MUSS.
+///
+/// GENAU ZWEI, und die Kuerze ist eine Korrektur aus `c832acd`: der Plan hatte
+/// hier urspruenglich `xtask test-privacy --scope` vorgesehen, was gegen
+/// Ruling R41 verstoesst, und `pnpm test:recovery` als Teillauf gefuehrt,
+/// obwohl es der WORKSPACE-Lauf ist. Die Skripte frueherer Stufen stehen
+/// nicht hier; sie werden bereits von deren Konstanten gehalten.
+const STAGE_FIVE_REQUIRED_SCRIPTS: [&str; 2] = ["stage-gate:5", "test:recovery"];
+
+/// Die Pflichtabschnitte des Stufe-5-Gate-Berichts, in Dokumentreihenfolge.
+///
+/// Die ersten vier folgen dem Muster der Stufen 2 bis 4. Die drei danach sind
+/// die dieser Stufe eigenen Nachweispflichten: die Auditkette, die
+/// Geraete-Posture in ALLEN DREI Zustaenden und die Ledgerbewegung, die
+/// ausschliesslich hier stattfindet.
+///
+/// `## Dokumentierte Grenzen` steht als eigener Pflichtabschnitt da, weil
+/// diese Stufe als erste mit einer offenen Ledgerzeile schliesst. Sein
+/// Schweigen laese sich als „keine Grenzen" lesen, und das waere die
+/// folgenschwerste stille Falschaussage, die dieser Bericht machen kann.
+///
+/// Umlautfrei, wie alle frueheren Gate-Berichte, weil der Gate Literale
+/// vergleicht.
+const STAGE_FIVE_GATE_REPORT_SECTIONS: [&str; 8] = [
+    "## 1. Primaere Abnahmekriterien und ihre Belege",
+    "## 2. Reichweite der Stufe-5-Abnahme",
+    "## 3. Die drei Workstreams",
+    "## 4. Entscheidungen dieser Stufe",
+    "## 5. Signierte Auditereignisse",
+    "## 6. Geraete-Posture in drei Zustaenden",
+    "## Ledgerpflege",
+    "## Dokumentierte Grenzen",
+];
+
+/// Die Literale, die der Stufe-5-Gate-Bericht nennen MUSS.
+///
+/// Der Gate prueft Literale, keine Prosa. Die ersten drei sind die
+/// Posture-Zustaende: ein Bericht, der `Fail` und `Unknown` nicht beide beim
+/// Namen nennt, kann die Zusage „keiner von beiden DARF falsch etikettiert
+/// werden" nicht belegen.
+///
+/// Die beiden Ticketnummern sind die besitzenden Tickets der zwei
+/// dokumentierten Grenzen. Sie stehen hier und nicht nur im Abschnitt, weil
+/// eine Grenze OHNE Besitzer keine Grenze ist, sondern eine Luecke.
+///
+/// Der letzte Eintrag ist die Offenlegungspflicht dieser Stufe, in der
+/// Tradition der Stufen 2 bis 4: ein gruener Stufe-5-Gate ohne diesen Satz
+/// liest sich als Betriebsabnahme, die diese Stufe ausdruecklich nicht
+/// erbringt.
+const STAGE_FIVE_GATE_REPORT_LITERALS: [&str; 10] = [
+    "Fail",
+    "Unknown",
+    "production_ready",
+    "DRK-318",
+    "DRK-320",
+    "docs/traceability/v0.1-requirements.csv",
+    "crates/ea-admin/src/operator_runtime.rs",
+    "apps/cli/tests/operator_administration/clock_repair.rs",
+    "quartalsweise",
+    "Ein gruener Stufe-5-Gate ist ausdruecklich kein Beleg fuer die nativen \
+     Minimal- und Maximalfaelle, fuer die quartalsweise Uebung, fuer die \
+     externe Datenschutzentscheidung und fuer die Custody der \
+     Produktionsschluessel; alle vier bleiben Stufe 7",
+];
+
+/// Die Reichweitenklausel der Stufe 5, umlaut- und auszeichnungsfrei wie
+/// [`STAGE_FOUR_HOST_SCOPE_CLAUSE`].
+///
+/// Der Gate-Bericht MUSS sie woertlich tragen. Sie nennt die PLATTFORM der
+/// nativen Zeugen, und das ist der Punkt, an dem dieser Stufe im September
+/// 2026 beinahe ein Beleg durchgegangen waere: bis `d9b2645` liefen ALLE
+/// nativen Messungen ausschliesslich auf macOS, der erste Linux-Lauf brachte
+/// vierzehn Fehlschlaege, und keiner davon war ein Produktfehler.
+const STAGE_FIVE_HOST_SCOPE_CLAUSE: &str = concat!(
+    "Stufe 5 belegt ihre nativen Zeugen auf zwei Plattformen: macOS als ",
+    "Entwicklungsplattform und ubuntu-24.04 als Gate-Laeufer, beide unter ",
+    "der Toolchain 1.95.0. Die Plattformmatrix, eine installierte ",
+    "OS-Praesenz und ein tatsaechlich gemounteter Netz-Positivzeuge sind ",
+    "damit NICHT belegt und bleiben Stufe 7."
+);
+
 /// Der Spaltenvertrag des Ledgers. Spaetere Stufen ergaenzen nur Zeilen.
 const LEDGER_COLUMNS: [&str; 9] = [
     "requirement_id",
@@ -3251,6 +3395,81 @@ fn rows_still_planned(rows: &[LedgerRow], stage: &str, problems: &mut Vec<String
     still_planned
 }
 
+/// Wie [`rows_still_planned`], aber mit einer eng gefuehrten Ausnahme fuer
+/// Zeilen, die die Stufe als DOKUMENTIERTE GRENZE schliesst.
+///
+/// Liefert `(unentschuldigt, aufgeschoben)`. Nur die erste Menge ist ein
+/// Mangel; die zweite steht im Bericht und macht die Grenze sichtbar.
+///
+/// Die Ausnahme greift NUR, wenn drei Dinge zugleich gelten: die Zeile steht
+/// in `boundaries`, sie steht wirklich auf `planned`, und der Gate-Bericht
+/// nennt sie samt ihrem besitzenden Ticket. Das dritte ist der eigentliche
+/// Riegel. Eine Liste erlaubter Ausnahmen ohne Belegpflicht waere eine
+/// Freigabe auf Vorrat: sie wuerde WR-075 auch dann durchlassen, wenn der
+/// Bericht ueber die Grenze SCHWEIGT, und ein Leser haette keine Moeglichkeit,
+/// eine bewusste Entscheidung von einer vergessenen Zeile zu unterscheiden.
+///
+/// Umgekehrt ist eine Grenzzeile, die NICHT MEHR auf `planned` steht, ebenfalls
+/// ein Mangel — gemeldet als `documented boundary ... is no longer planned`.
+/// Der Grund ist derselbe wie beim frueh bewegten Ledger: Der Bericht
+/// behauptet dann eine Grenze, die es nicht mehr gibt, und die Stufe wuerde
+/// eine erbrachte Leistung als offen fuehren.
+fn rows_still_planned_with_boundary(
+    rows: &[LedgerRow],
+    stage: &str,
+    boundaries: &[&str],
+    report: Option<&str>,
+    problems: &mut Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut unexcused = Vec::new();
+    let mut deferred = Vec::new();
+    for row in rows
+        .iter()
+        .filter(|row| row.values[7] == stage && row.values[8] == "planned")
+    {
+        if boundaries.contains(&row.requirement_id.as_str()) {
+            deferred.push(row.requirement_id.clone());
+        } else {
+            unexcused.push(row.requirement_id.clone());
+        }
+    }
+    if !unexcused.is_empty() {
+        problems.push(format!(
+            "stage {stage} requirement ledger rows still on planned: {}",
+            unexcused.join(", ")
+        ));
+    }
+
+    // Die Belegpflicht der Ausnahme. Ohne lesbaren Bericht ist sie NICHT
+    // erfuellt, und der fehlende Bericht wird an seiner eigenen Stelle
+    // gemeldet — hier steht deshalb kein zweiter Lesefehler, sondern die
+    // Grenze gilt schlicht als unbelegt.
+    for identifier in &deferred {
+        if !report.is_some_and(|text| text.contains(identifier.as_str())) {
+            problems.push(format!(
+                "stage {stage} carries {identifier} as a documented boundary, \
+                 but {STAGE_FIVE_GATE_REPORT_PATH} does not name it"
+            ));
+        }
+    }
+
+    // Eine Grenze, die keine mehr ist.
+    for boundary in boundaries {
+        let known = rows
+            .iter()
+            .any(|row| row.requirement_id == *boundary && row.values[7] == stage);
+        if known && !deferred.iter().any(|entry| entry == *boundary) {
+            problems.push(format!(
+                "stage {stage} documented boundary {boundary} is no longer planned; \
+                 remove it from the boundary list and from \
+                 {STAGE_FIVE_GATE_REPORT_PATH}"
+            ));
+        }
+    }
+
+    (unexcused, deferred)
+}
+
 /// Prueft die Pflichtabschnitte eines Gate-Berichts — als ZEILE und nicht als
 /// Teilkette.
 ///
@@ -3911,6 +4130,234 @@ fn run_stage_four_gate(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Prueft das Stufe-5-Gate und schreibt den Bericht nach stdout.
+///
+/// Die Stufe schliesst drei Workstreams zugleich ab — `admin-trust`,
+/// `recovery-regrant-amendment` und `destruction` — und ist die erste, deren
+/// Gate KUMULATIV prueft: nicht nur, dass die eigenen Belege vorliegen,
+/// sondern dass keine der 19 Ledgerzeilen ohne Beleg auf `implemented` oder
+/// `integrated` gewandert ist.
+///
+/// Drei Dinge unterscheiden diesen Gate von den vier davor.
+///
+/// ERSTENS die fuenf Zeilen ohne primaeres Abnahmekriterium. Die Belegrechnung
+/// der frueheren Stufen filtert sie lautlos heraus; hier traegt
+/// [`STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION`] sie namentlich in den
+/// Berichtsvertrag.
+///
+/// ZWEITENS die dokumentierte Grenze. WR-075 bleibt bis DRK-318 `planned`, und
+/// der Gate laesst genau diese eine Zeile durch — aber nur gegen einen
+/// Bericht, der sie samt Ticket nennt. Siehe
+/// [`rows_still_planned_with_boundary`].
+///
+/// DRITTENS die Posture. Der Bericht muss `Fail` und `Unknown` BEIDE beim
+/// Namen nennen, weil die Zusage dieser Stufe lautet, dass keiner von beiden
+/// falsch etikettiert werden darf — ein Bericht, der nur den blockierenden
+/// Fall nennt, belegt die Haelfte.
+///
+/// Wie die Gates der Stufen 3 und 4 braucht dieser KEINEN laufenden Dienst,
+/// keinen Browser und keinen nativen Helfer: er liest Dokumente, das Ledger
+/// und ein Manifest.
+fn run_stage_five_gate(root: &Path) -> Result<(), String> {
+    let gate_root = stage_gate_root(root);
+    let mut problems = Vec::new();
+
+    // 1. Vektorfamilien — KEINE, wie in Stufe 4. Die Schleife haelt die Form
+    // der vier frueheren Gates.
+    let vectors = gate_root.join("vectors");
+    let mut families: Vec<&str> = Vec::new();
+    for family in STAGE_FIVE_VECTOR_FAMILIES {
+        if family_carries_a_manifest(&vectors, family) {
+            families.push(family);
+        } else {
+            problems.push(format!(
+                "stage 5 vector family without a readable manifest under {}: {family}",
+                vectors.display()
+            ));
+        }
+    }
+
+    // 2. Der Gate-Bericht. Er wird VOR dem Ledger gelesen, anders als in den
+    // Stufen 2 bis 4, und das ist tragend: die Ledgerpruefung dieser Stufe
+    // braucht seinen Text, um die dokumentierte Grenze zu belegen.
+    let report_path = gate_root.join(STAGE_FIVE_GATE_REPORT_PATH);
+    let mut gate_report_criteria = Vec::new();
+    let gate_report_text = match fs::read_to_string(&report_path) {
+        Ok(report) => {
+            collect_document_contract(
+                &report_path,
+                &report,
+                &STAGE_FIVE_GATE_REPORT_SECTIONS,
+                &STAGE_FIVE_GATE_REPORT_LITERALS,
+                &mut problems,
+            );
+            if !report.contains(STAGE_FIVE_HOST_SCOPE_CLAUSE) {
+                // Bewusst OHNE die Klausel im Text, wie in den Stufen 3 und 4.
+                problems.push(format!(
+                    "{} does not carry the stage 5 host scope clause verbatim",
+                    report_path.display()
+                ));
+            }
+            // Die drei Workstreams einzeln, damit ein fehlender namentlich
+            // gemeldet wird.
+            let unnamed = STAGE_FIVE_WORKSTREAMS
+                .iter()
+                .filter(|workstream| !report.contains(**workstream))
+                .copied()
+                .collect::<Vec<_>>();
+            if !unnamed.is_empty() {
+                problems.push(format!(
+                    "{} does not name the stage 5 workstreams: {}",
+                    report_path.display(),
+                    unnamed.join(", ")
+                ));
+            }
+            // Und die fuenf Zeilen ohne primaeres Kriterium, aus demselben
+            // Grund: fuer sie ist der Bericht der EINZIGE Nachweisort.
+            let unnamed_rows = STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION
+                .iter()
+                .filter(|identifier| !report.contains(**identifier))
+                .copied()
+                .collect::<Vec<_>>();
+            if !unnamed_rows.is_empty() {
+                problems.push(format!(
+                    "{} does not name the stage 5 ledger rows that carry no primary \
+                     acceptance criterion: {}",
+                    report_path.display(),
+                    unnamed_rows.join(", ")
+                ));
+            }
+            match gate_report_acceptance_criteria(
+                &report_path,
+                &report,
+                &STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA,
+            ) {
+                Ok(found) => gate_report_criteria = found,
+                Err(error) => problems.push(error),
+            }
+            Some(report)
+        }
+        Err(error) => {
+            problems.push(format!("failed to read {}: {error}", report_path.display()));
+            None
+        }
+    };
+
+    // 3. Ledger: Wohlgeformtheit, Abdeckung der Pflichtzeilenmenge und die
+    // Zeilen, die die Stufe noch offen fuehrt — letztere mit der einen
+    // dokumentierten Grenze.
+    let ledger_path = gate_root.join(REQUIREMENT_LEDGER_PATH);
+    let rows = match read_requirement_ledger(&ledger_path) {
+        Ok(rows) => rows,
+        Err(error) => {
+            problems.push(error);
+            Vec::new()
+        }
+    };
+    let design_path = gate_root.join(DESIGN_DOCUMENT_PATH);
+    match fs::read_to_string(&design_path)
+        .map_err(|error| format!("failed to read {}: {error}", design_path.display()))
+        .and_then(|design| required_requirement_identifiers(&design))
+    {
+        Ok(required) => {
+            let covered = rows
+                .iter()
+                .map(|row| row.requirement_id.clone())
+                .collect::<BTreeSet<_>>();
+            let uncovered = required
+                .difference(&covered)
+                .cloned()
+                .collect::<Vec<String>>();
+            if !uncovered.is_empty() {
+                problems.push(format!(
+                    "the requirement ledger {} does not cover: {}",
+                    ledger_path.display(),
+                    uncovered.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+    let (still_planned, documented_boundaries) = rows_still_planned_with_boundary(
+        &rows,
+        "5",
+        &STAGE_FIVE_DOCUMENTED_BOUNDARY_ROWS,
+        gate_report_text.as_deref(),
+        &mut problems,
+    );
+
+    // 4. Skripte.
+    let package_path = gate_root.join(PACKAGE_MANIFEST_PATH);
+    match fs::read_to_string(&package_path)
+        .map_err(|error| format!("failed to read {}: {error}", package_path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|error| format!("invalid {}: {error}", package_path.display()))
+        }) {
+        Ok(manifest) => {
+            let missing = STAGE_FIVE_REQUIRED_SCRIPTS
+                .iter()
+                .filter(|script| {
+                    manifest
+                        .get("scripts")
+                        .and_then(|scripts| scripts.get(*script))
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|command| command.trim().is_empty())
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "{} does not declare the required scripts: {}",
+                    package_path.display(),
+                    missing.join(", ")
+                ));
+            }
+        }
+        Err(error) => problems.push(error),
+    }
+
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
+
+    let row_identifiers = rows
+        .iter()
+        .map(|row| row.requirement_id.clone())
+        .collect::<Vec<_>>();
+    let evidenced = rows
+        .iter()
+        .filter(|row| {
+            matches!(row.values[8].as_str(), "implemented" | "integrated")
+                && !row.primary_acceptance_criterion.is_empty()
+        })
+        .filter_map(|row| row.primary_acceptance_criterion.parse::<u32>().ok())
+        .collect::<BTreeSet<_>>();
+    let report = serde_json::json!({
+        "stage": 5,
+        "vector_families": families,
+        "primary_acceptance_criteria": STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA,
+        "evidenced_acceptance_criteria": evidenced,
+        "rows": row_identifiers,
+        "gate_report": STAGE_FIVE_GATE_REPORT_PATH,
+        "gate_report_acceptance_criteria": gate_report_criteria,
+        "stage_five_primary_acceptance_criteria": STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA,
+        "stage_five_workstreams": STAGE_FIVE_WORKSTREAMS,
+        "stage_five_rows_without_primary_criterion": STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION,
+        // Die aufgeschobenen Zeilen stehen als EIGENER Schluessel da und nicht
+        // in `stage_five_rows_still_planned`: eine bewusste Grenze und eine
+        // vergessene Zeile duerfen im Bericht nicht dieselbe Form haben.
+        "stage_five_documented_boundaries": documented_boundaries,
+        "stage_five_rows_still_planned": still_planned,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&report)
+            .map_err(|error| format!("failed to render the stage gate report: {error}"))?
+    );
+    Ok(())
+}
+
 /// Prueft die Stufe-1-Vektorfamilien und schreibt den Bericht nach stdout.
 ///
 /// Eine Familie zaehlt erst als vorhanden, wenn [`family_carries_a_manifest`]
@@ -3941,9 +4388,12 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
     if stage == 4 {
         return run_stage_four_gate(root);
     }
+    if stage == 5 {
+        return run_stage_five_gate(root);
+    }
     if stage != 1 {
         return Err(format!(
-            "stage-gate is only defined for stages 1, 2, 3 and 4 so far, not {stage}"
+            "stage-gate is only defined for stages 1, 2, 3, 4 and 5 so far, not {stage}"
         ));
     }
     let vectors = stage_gate_root(root).join("vectors");
