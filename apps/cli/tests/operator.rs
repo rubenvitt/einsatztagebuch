@@ -330,16 +330,26 @@ mod process_native {
         // Keep the native response pipe on fd 3 before discarding libtest's
         // stdout. exec avoids a shell/awk pipeline for every native operation;
         // stderr remains connected to the production subprocess reader.
-        fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nexport EA_CLI_TEST_DIRECTORY={}\nexec 3>&1\nexec {} --ignored --exact process_native::native_cli_helper --nocapture >/dev/null\n",
-                shell_quote(directory),
-                shell_quote(&test_binary)
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        let script = format!(
+            "#!/bin/sh\nexport EA_CLI_TEST_DIRECTORY={}\nexec 3>&1\nexec {} --ignored --exact process_native::native_cli_helper --nocapture >/dev/null\n",
+            shell_quote(directory),
+            shell_quote(&test_binary)
+        );
+        // A short-lived shell writes the script. A writable descriptor opened
+        // here would be copied into helpers that sibling test threads fork
+        // concurrently, and until their execve the kernel refuses to execute
+        // the script with ETXTBSY (DRK-323). This process never holds one.
+        let written = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "umask 077 && printf '%s' \"$2\" > \"$1\" && chmod 700 \"$1\"",
+                "sh",
+            ])
+            .arg(&helper)
+            .arg(script)
+            .status()
+            .unwrap();
+        assert!(written.success(), "fixture helper script was not written");
     }
 
     struct Installation {

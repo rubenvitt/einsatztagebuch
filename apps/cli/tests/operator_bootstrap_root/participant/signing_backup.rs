@@ -14,9 +14,7 @@ fn admin_backup_reads_bound_completed_journal_without_regenerating_participant()
     let journal_before = journal_bytes(&fixture);
     let generations = fixture.generate_count();
     let offset = calls(fixture.directory.path()).len();
-    let mut ceremony = FileBootstrapStore::new(fixture.state.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut ceremony = reacquire_lease(fixture.state.clone());
     let passphrase = SecretVec::new(b"synthetic admin backup passphrase".to_vec());
     let container = seal_native_bootstrap_admin_backup(
         &mut ceremony,
@@ -45,9 +43,7 @@ fn admin_backup_reads_bound_completed_journal_without_regenerating_participant()
 fn admin_backup_refuses_missing_journal_and_wrong_current_database_key_before_export() {
     let fixture = ParticipantFixture::new();
     let passphrase = SecretVec::new(b"synthetic admin backup passphrase".to_vec());
-    let mut ceremony = FileBootstrapStore::new(fixture.state.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut ceremony = reacquire_lease(fixture.state.clone());
     assert!(
         seal_native_bootstrap_admin_backup(
             &mut ceremony,
@@ -66,9 +62,7 @@ fn admin_backup_refuses_missing_journal_and_wrong_current_database_key_before_ex
     )
     .unwrap();
     let offset = calls(fixture.directory.path()).len();
-    let mut ceremony = FileBootstrapStore::new(fixture.state.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut ceremony = reacquire_lease(fixture.state.clone());
     assert!(
         seal_native_bootstrap_admin_backup(
             &mut ceremony,
@@ -114,9 +108,7 @@ fn admin_backup_recomputes_retained_commitment_before_export() {
         .unwrap();
     drop(database);
     let offset = calls(fixture.directory.path()).len();
-    let mut ceremony = FileBootstrapStore::new(fixture.state.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut ceremony = reacquire_lease(fixture.state.clone());
     let result = seal_native_bootstrap_admin_backup(
         &mut ceremony,
         &fixture.database,
@@ -138,9 +130,7 @@ fn admin_backup_watch_loss_during_final_database_unwrap_refuses_after_returned_h
     fixture.prepare("Änne").unwrap();
     let barrier = fixture.directory.path().join("hold-final-backup-unwrap");
     fs::write(&barrier, b"").unwrap();
-    let mut ceremony = FileBootstrapStore::new(fixture.state.clone())
-        .acquire_lease()
-        .unwrap();
+    let mut ceremony = reacquire_lease(fixture.state.clone());
     let result = std::thread::scope(|scope| {
         let action = scope.spawn(|| {
             seal_native_bootstrap_admin_backup(
