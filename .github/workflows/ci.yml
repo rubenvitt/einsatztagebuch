@@ -70,6 +70,14 @@ jobs:
     # `user 57m44s`, also einen Parallelitätsgrad von rund 3,8. Auf vier Kernen
     # ist diese Arbeit damit kaum noch zu verdichten; erwartet werden 45–75 min
     # kalt und 25–45 min mit warmen Caches.
+    #
+    # Erste vollständig grüne Messung auf dem Läufer, 15.09.2026, Lauf
+    # 34936505876 auf `db08333`: 50 min 26 s mit warmen Caches. Der Wert liegt
+    # über dem warmen Fenster der Schätzung und innerhalb des kalten. Alle
+    # Gates davor starben unter fail-fast am Target `einsatzarchiv-cli --test
+    # operator`; dieser Lauf ist damit der erste, der die Targets danach
+    # überhaupt erreicht hat. Die Schätzung oben wird davon nicht widerlegt,
+    # sie ist nur nicht mehr das einzige Argument.
     runs-on: ubuntu-24.04
     # Die Frist, und sie stimmt mit ihrem Kommentar überein: ein hängender
     # Auftrag soll nach ANDERTHALB Stunden abbrechen. Neunzig Minuten liegen
