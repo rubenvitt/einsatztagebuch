@@ -196,7 +196,15 @@ fn signed_native_posture_document_allows_admission_after_real_reopen_without_rel
         "raw native Unknown remains visible"
     );
     let report = reopened.go_live_report().unwrap();
-    assert!(report.production_ready);
+    // Ein dokumentiertes Unknown öffnet die Sitzung, ist aber keine
+    // Go-live-Produktionsreife: Der JSON-Bericht nennt nur die Zulassung und
+    // führt keinen Schlüssel `production_ready`, der sie als Reife ausgäbe.
+    let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    assert_eq!(json["session_admitted"], serde_json::Value::Bool(true));
+    assert!(
+        json.get("production_ready").is_none(),
+        "the operator report must not label a documented Unknown as production ready"
+    );
     let documented = report.documented_posture.unwrap();
     assert_eq!(
         documented.document_hash,
@@ -930,7 +938,7 @@ fn concurrent_duplicate_imports_are_idempotent_older_document_cannot_replace_new
         .integer(0)
         .unwrap();
     let report = runtime.go_live_report().unwrap();
-    assert!(report.production_ready);
+    assert!(report.session_admitted);
     let after = runtime
         .database()
         .query_row("SELECT last_observed_wall FROM go_live_posture_clock", &[])

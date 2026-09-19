@@ -86,7 +86,7 @@ fn each_failed_or_unresolved_posture_denies_a_real_native_session() {
             assert_eq!(measured, report);
             assert_eq!(measured.go_live_follow_up(), report.go_live_follow_up());
             let go_live = runtime.go_live_report().unwrap();
-            assert!(!go_live.production_ready);
+            assert!(!go_live.session_admitted);
             assert!(
                 go_live
                     .device_posture_evidence
