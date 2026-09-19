@@ -62,9 +62,14 @@ async function webSources(): Promise<[string, string][]> {
 // einem eigenen `deletionAttest`-Zertifikat. §3 der Web-Reader-Spec (Zeilen
 // 54–56) verbietet Webcode fuer „Vernichtungsausfuehrung"; die enge Ausnahme
 // fuer genau diese Mitwirkung als verwaltete Replik steht seit dem Ruling vom
-// 13.09.2026 ausdruecklich in §3 (Zeilen 57–66). Dieser Zeuge prueft Woerter,
-// nicht Exporte oder Signaturmacht; die kryptographische Bindung des
-// Uebergangssignierers an die Auftragskomponente ist ein eigenes Folgeticket.
+// 13.09.2026 ausdruecklich in §3 (Zeilen 57–66). Dieser Zeuge prueft Woerter und
+// die Methodenmenge von `ReaderDestructionBridge`. Die Faehigkeiten pruefen seit
+// DRK-321 eigene Allowlists: die WASM-Exporte in
+// `crates/ea-reader-wasm/tests/bridge_boundary.rs`, die Signieraufrufe der
+// Reader-Crates in `crates/ea-reader/tests/signing_capability_boundary.rs` und
+// die Worker-Nachrichten in `apps/web/src/bridge/worker-capabilities.test.ts`.
+// Kryptographisch verweigern `ea-destruction` und `ea-reader` jeden Uebergang,
+// dessen Signierer auf einem Geraet mit Reader-Zertifikat sitzt (Regel R1).
 //
 // Ausgenommen werden nur diese vollen Namen in genau diesen Dateien, als ganze
 // Bezeichner oder als exakte Zeichenkette samt Anfuehrungszeichen. Jeder andere
@@ -193,5 +198,28 @@ it('exposes no writer or administration surface in apps/web', async () => {
     expect(withoutReaderCacheDestructionNames(file, text), file).not.toMatch(
       /finaliz|Root-Zeremonie|rootCeremony|provision|historicalRegrant|destruction|Entwurf verwerfen/i,
     )
+    // Deutsche Oberflaechentexte fuer Auftragsschritte, die der Reader nie
+    // ausfuehrt (§3). Bewusst eng: die Route `/vernichtung` mit dem Label
+    // „Reader-Cache" bleibt erlaubt, ein Knopf „Vernichtung fortsetzen" nicht.
+    expect(text, file).not.toMatch(
+      /Vernichtung\s+(starten|fortsetzen|abbrechen|beantragen)|(Ü|Ue)bergang\s+signieren|Zustands(ü|ue)bergang/i,
+    )
   }
+})
+
+// Die Ausnahme oben nimmt den NAMEN `ReaderDestructionBridge` aus dem Wortscan.
+// Damit darunter keine neue Faehigkeit einzieht — etwa eine Methode `resume`
+// ohne das Wort „destruction" —, ist ihre Methodenmenge hier festgeschrieben.
+it('pins the methods of the exempted ReaderDestructionBridge', async () => {
+  const source = await readFile(
+    path.join(webSourceRoot, 'features/destruction/reader-destruction.ts'),
+    'utf8',
+  )
+  const start = source.indexOf('export type ReaderDestructionBridge = {')
+  expect(start, 'ReaderDestructionBridge type block').toBeGreaterThan(-1)
+  const block = source.slice(start, source.indexOf('\n}', start))
+  const methods = [...block.matchAll(/^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\??\s*[:(]/gm)]
+    .map((match) => match[1])
+    .sort()
+  expect(methods).toEqual(['apply', 'attest', 'historical'])
 })

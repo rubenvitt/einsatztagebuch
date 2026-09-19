@@ -176,3 +176,190 @@ fn the_reader_crate_reexports_the_gate_order_instead_of_redeclaring_it() {
     assert_eq!(ReaderMode::Server.code(), "server");
     assert_eq!(ReaderMode::File.code(), "file");
 }
+
+/// Was eine Ausfuhr der Bruecke dem Web-Reader an Faehigkeit gibt. Die Liste
+/// ist geschlossen: eine neue Faehigkeit ist eine Entscheidung und kein Nebenbei.
+/// Es gibt bewusst KEINE Faehigkeit „Zustandsuebergang", „Autorisierung" oder
+/// „Vernichtung starten/fortsetzen/abbrechen" (Web-Reader-Design §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Capability {
+    Diagnostics,
+    Runtime,
+    Storage,
+    BundleTrust,
+    View,
+    Enrollment,
+    Vault,
+    Session,
+    FileMode,
+    Sync,
+    Export,
+    /// Nur der eigene Cache und Index (Web-Reader-Design §3).
+    ReplicaCacheRemoval,
+    /// Nur die eigene, jobgebundene Loeschattestierung (Web-Reader-Design §3).
+    ReplicaAttestation,
+}
+
+/// Jede `#[wasm_bindgen]`-Ausfuhr von `ea-reader-wasm` mit ihrer Faehigkeit,
+/// nach `js_name` sortiert. Eine neue Ausfuhr wird erst gruen, wenn sie hier
+/// mit Faehigkeit eingetragen ist; eine entfernte, wenn ihre Zeile geht.
+const WASM_EXPORTS: &[(&str, Capability)] = &[
+    ("blobGet", Capability::Storage),
+    ("blobPut", Capability::Storage),
+    ("bridgeEcho", Capability::Diagnostics),
+    ("enrollmentBegin", Capability::Enrollment),
+    ("enrollmentConfirmFingerprints", Capability::Enrollment),
+    ("enrollmentFingerprints", Capability::Enrollment),
+    ("enrollmentFinish", Capability::Enrollment),
+    ("enrollmentRegisterAuthenticator", Capability::Enrollment),
+    ("evaluateBundleCandidate", Capability::BundleTrust),
+    ("fileModeBeginDirectory", Capability::FileMode),
+    ("fileModeBundleExtension", Capability::FileMode),
+    ("fileModeDirectoryUnavailable", Capability::FileMode),
+    ("fileModeOpenBundle", Capability::FileMode),
+    ("fileModeOpenDirectory", Capability::FileMode),
+    ("fileModePushBlob", Capability::FileMode),
+    ("readerAmendmentThread", Capability::View),
+    ("readerDestructionApply", Capability::ReplicaCacheRemoval),
+    (
+        "readerDestructionApplyDelivery",
+        Capability::ReplicaCacheRemoval,
+    ),
+    ("readerDestructionAttest", Capability::ReplicaAttestation),
+    (
+        "readerDestructionAttestation",
+        Capability::ReplicaAttestation,
+    ),
+    ("readerDestructionReceipt", Capability::ReplicaCacheRemoval),
+    ("readerEntryView", Capability::View),
+    ("readerExportOne", Capability::Export),
+    ("readerNoteActivity", Capability::Session),
+    ("readerNoteVisibility", Capability::Session),
+    ("readerRuntimeWitness", Capability::Runtime),
+    ("readerSearch", Capability::View),
+    ("readerSessionLock", Capability::Session),
+    ("readerSessionStateAt", Capability::Session),
+    ("readerStandClose", Capability::View),
+    ("readerStandView", Capability::View),
+    ("readerSyncAcceptBatch", Capability::Sync),
+    ("readerSyncNextRequest", Capability::Sync),
+    ("readerTechnicalView", Capability::View),
+    ("readerTrustAge", Capability::BundleTrust),
+    ("readerVaultSeal", Capability::Vault),
+    ("readerVaultUnlock", Capability::Vault),
+];
+
+/// Liest jede `#[wasm_bindgen(...)]`-Ausfuhr der Crate und gibt ihren
+/// `js_name` zurueck. Eine Ausfuhr OHNE `js_name` ist ein Fehler: sonst
+/// entstuende ein Export am Namensscan vorbei.
+fn wasm_export_names() -> Vec<(String, PathBuf)> {
+    let mut sources: Vec<PathBuf> = Vec::new();
+    collect_rust_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    sources.sort();
+    let mut names = Vec::new();
+    for path in sources {
+        let source = fs::read_to_string(&path)
+            .expect("bridge sources must be readable")
+            .replace("#[wasm_bindgen::prelude::wasm_bindgen", "#[wasm_bindgen");
+        for (index, _) in source.match_indices("#[wasm_bindgen") {
+            if source[index..].starts_with("#[wasm_bindgen_test") {
+                continue;
+            }
+            let attribute = &source[index..index + source[index..].find(']').unwrap()];
+            let name = attribute
+                .split_once("js_name")
+                .and_then(|(_, rest)| rest.trim_start().strip_prefix('='))
+                .map(|rest| {
+                    rest.trim_start()
+                        .trim_start_matches('"')
+                        .split(|c: char| c == '"' || c == ',' || c == ')' || c.is_whitespace())
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "every wasm_bindgen export must name itself with `js_name`, so the \
+                         capability allowlist sees it: `{attribute}]` in {}",
+                        path.display()
+                    )
+                });
+            names.push((name, path.clone()));
+        }
+    }
+    names
+}
+
+/// DRK-321: die Reader-Grenze wird nach FAEHIGKEITEN geprueft, nicht nach
+/// Woertern. Die Menge der WASM-Ausfuhren ist genau `WASM_EXPORTS`, in beide
+/// Richtungen, und nur die Replikenfaehigkeiten beruehren die Vernichtung.
+#[test]
+fn wasm_exports_match_the_capability_allowlist() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let found = wasm_export_names();
+    let mut seen = BTreeSet::new();
+    for (name, path) in &found {
+        assert!(
+            seen.insert(name.as_str()),
+            "duplicate wasm export `{name}` in {}",
+            path.display()
+        );
+    }
+    let allowed: BTreeMap<&str, Capability> = WASM_EXPORTS.iter().copied().collect();
+    assert_eq!(
+        allowed.len(),
+        WASM_EXPORTS.len(),
+        "the allowlist names every export once"
+    );
+    let unlisted: Vec<_> = found
+        .iter()
+        .filter(|(name, _)| !allowed.contains_key(name.as_str()))
+        .map(|(name, path)| format!("{name} ({})", path.display()))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "new wasm exports need a capability entry in WASM_EXPORTS: {unlisted:?}"
+    );
+    let stale: Vec<_> = allowed
+        .keys()
+        .filter(|name| !seen.contains(*name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "WASM_EXPORTS lists exports that no longer exist: {stale:?}"
+    );
+    let replica = |wanted: Capability| -> BTreeSet<&str> {
+        WASM_EXPORTS
+            .iter()
+            .filter(|(_, capability)| *capability == wanted)
+            .map(|(name, _)| *name)
+            .collect()
+    };
+    assert_eq!(
+        replica(Capability::ReplicaAttestation),
+        BTreeSet::from(["readerDestructionAttest", "readerDestructionAttestation"])
+    );
+    assert_eq!(
+        replica(Capability::ReplicaCacheRemoval),
+        BTreeSet::from([
+            "readerDestructionApply",
+            "readerDestructionApplyDelivery",
+            "readerDestructionReceipt",
+        ])
+    );
+    for (name, capability) in WASM_EXPORTS {
+        let lower = name.to_ascii_lowercase();
+        assert!(
+            !lower.contains("destruction")
+                || matches!(
+                    capability,
+                    Capability::ReplicaCacheRemoval | Capability::ReplicaAttestation
+                ),
+            "`{name}` touches destruction outside the two replica capabilities"
+        );
+    }
+}
