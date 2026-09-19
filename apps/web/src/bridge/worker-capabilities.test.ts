@@ -26,9 +26,16 @@ type WorkerCapability =
   | 'replica-cache-removal'
   | 'replica-attestation'
 
-// `satisfies Record<…>`: eine fehlende Art ist ein Typfehler, eine erfundene
-// fällt am Überschuss-Eigenschaftscheck. Der Laufzeitabgleich unten wirkt auch
-// ohne Typprüfung.
+// Zwei Netze, die sich ergänzen:
+// - Typzeit (`pnpm typecheck`): `satisfies Record<…>` macht eine fehlende Art
+//   zum Typfehler, der Überschuss-Eigenschaftscheck eine erfundene.
+// - Laufzeit (vitest, auch ohne Typprüfung): Union-Arten, `case`-Labels und
+//   Tabellenschlüssel werden als Text gelesen und müssen gleich sein. Gelesen
+//   wird JEDER Zeichenkettenwert in einfachen, doppelten oder Backtick-
+//   Anführungszeichen, nicht nur `[a-z-]` — sonst fiele eine Art wie
+//   `'…-resume2'` aus beiden Mengen heraus und bliebe unbemerkt (DRK-321, M9).
+//   Zusätzlich muss jedes `kind`-Vorkommen der Union und jedes `case` des
+//   Dispatchers von diesen Mustern erfasst werden.
 const WORKER_CAPABILITIES = {
   put: 'storage',
   get: 'storage',
@@ -86,11 +93,25 @@ function wasmImports(source: string): string[] {
     .filter(name => name.length > 0)
 }
 
+// Ein Zeichenkettenwert in '…', "…" oder `…`; Gruppe 2 ist sein Inhalt.
+const quoted = "(['\"`])((?:(?!\\1).)+)\\1"
+
 it('every worker message kind has exactly one capability, in both directions', () => {
-  const declared = sorted(
-    [...requestUnion(worker).matchAll(/readonly kind: '([a-z-]+)'/g)].map(m => m[1] ?? ''),
+  const union = requestUnion(worker)
+  const kindPattern = new RegExp('\\bkind\\??\\s*:\\s*' + quoted, 'g')
+  const casePattern = new RegExp('\\bcase\\s+' + quoted + '\\s*:', 'g')
+  const declaredMatches = [...union.matchAll(kindPattern)]
+  const dispatchedMatches = [...worker.matchAll(casePattern)]
+  // Jedes `kind:` der Union und jedes `case` des Workers muss erfasst sein:
+  // eine Form, die die Muster nicht lesen, ist rot statt unsichtbar.
+  expect(declaredMatches.length, 'every kind in EaOpfsRequest is read').toBe(
+    [...union.matchAll(/\bkind\??\s*:/g)].length,
   )
-  const dispatched = sorted([...worker.matchAll(/case '([a-z-]+)':/g)].map(m => m[1] ?? ''))
+  expect(dispatchedMatches.length, 'every case label in opfs-worker.ts is read').toBe(
+    [...worker.matchAll(/\bcase\b/g)].length,
+  )
+  const declared = sorted(declaredMatches.map(m => m[2] ?? ''))
+  const dispatched = sorted(dispatchedMatches.map(m => m[2] ?? ''))
   const listed = sorted(Object.keys(WORKER_CAPABILITIES))
   expect(declared).toEqual(listed)
   expect(dispatched).toEqual(listed)
