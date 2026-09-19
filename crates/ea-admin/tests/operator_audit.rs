@@ -405,8 +405,19 @@ fn the_revocation_audit_carries_no_operator_plaintext() {
 /// `MAX_INACTIVITY_MS` weitergerückt ist. Vorgelegt wird er dort, wo ein
 /// mitgebrachter Nachweis tatsächlich gegen die Zeit geprüft wird: an der
 /// Wurzelzeremonie (`RootCeremonyService::publish_authorized_target`).
+///
+/// Geparkt, weil die Produktseite eine abgelaufene Sitzung an zwei Stellen
+/// VOR jedem Auditabschnitt abweist: `root_ceremony.rs:279`
+/// (`is_valid_for` → `AdminError::ReauthMismatch`) und
+/// `OperatorRuntime::reauthenticate_with_context` → `ensure_current()`
+/// (`operator_runtime.rs:742`) → `ensure_fresh_context` →
+/// `validate_freshness` (`:617`). Gebucht wird nur der schmale Fall, dass die
+/// Sitzung erst WÄHREND der nativen Präsenzabfrage abläuft:
+/// `prove_with_deadline` (`:913`/`:916`) liefert `ProofMismatch`, und
+/// `verify_session_with_authority` bucht `Login(Failed)` + `ReauthFailure`
+/// (`operator.rs:983-1010`) — als gescheiterte Anmeldung, nicht als Ablauf.
 #[test]
-#[ignore = "DRK-282: planned RED; eine abgelaufene Operator-Sitzung wird abgelehnt, aber nicht auditiert (Spec 2169; root_ceremony.rs:279, operator_runtime.rs validate_freshness) — Produktentscheidung offen"]
+#[ignore = "DRK-282: planned RED; expired session is refused but not audited: root_ceremony.rs:279 is_valid_for and OperatorRuntime::reauthenticate_with_context -> ensure_current (operator_runtime.rs:742) -> validate_freshness (:617) return before any audit; only expiry during native presence is booked (prove_with_deadline :913/:916 -> ProofMismatch -> Login(Failed)+ReauthFailure, operator.rs:983-1010), not as expiry (Spec 2169, AK 53); product decision open"]
 fn an_expired_operator_session_is_refused_and_audited_without_plaintext() {
     use ea_operator::{MAX_INACTIVITY_MS, ReauthPurpose};
     use support::{
