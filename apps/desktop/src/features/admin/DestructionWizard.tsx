@@ -12,7 +12,17 @@ import type { ReaderDeliveryBridge } from './reader-delivery-bridge'
 import { DESTRUCTION_STATE_V1_VALUES } from '../../bridge/generated-contracts'
 import type { DestructionAdministrationView, DestructionProcessView } from '../../bridge/generated-contracts'
 
-const [REQUESTED, , , COMPLETE] = DESTRUCTION_STATE_V1_VALUES
+const [REQUESTED, , , COMPLETE, INCOMPLETE] = DESTRUCTION_STATE_V1_VALUES
+
+/**
+ * Permanent refusals of the native 4→1 retry chained into „Vernichtung
+ * fortsetzen" (Ruling G2, 19.09.2026): an explanation instead of a silent
+ * no-op. The code stays visible; the host decides, this text grants nothing.
+ */
+const RESUME_REFUSAL_TEXT: Readonly<Record<string, string>> = {
+  'EA-DESTRUCTION-RETRY-READER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt als unvollständig abgeschlossen.',
+  'EA-DESTRUCTION-RETRY-NO-SERVER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Sync-Server als Löschort gebunden oder in dieser Anwendung eingerichtet. Ohne nachträgliche Serverbestätigung bleibt der Vorgang als unvollständig abgeschlossen.',
+}
 
 /** The selected signed file is passed unchanged; parsing and fresh presence live in the host. */
 export type DestructionBridge = {
@@ -261,7 +271,9 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
         {!view.privacyDecisionEnabled && (
           <Alert type="warning" title="Datenschutzrechtliche Freigabe fehlt" description="Die dokumentierte Richtlinie lässt keinen neuen Vernichtungsvorgang zu." />
         )}
-        {refused !== null && <Alert role="alert" type="error" title="Handlung nicht abgeschlossen" description={refused} />}
+        {refused !== null && <Alert role="alert" type="error" title="Handlung nicht abgeschlossen" description={
+          Object.hasOwn(RESUME_REFUSAL_TEXT, refused) ? <>{RESUME_REFUSAL_TEXT[refused]} <Typography.Text code>{refused}</Typography.Text></> : refused
+        } />}
         {process === null ? (
           <>
             <Typography.Paragraph>
@@ -342,7 +354,9 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
             </Button>
           )}
           {canResume && process !== null && (
-            <Button disabled={busy} onClick={() => { void run(() => bridge.resume(process.destructionId)) }}>
+            // In state4 the host chains the 4→1 retry: a failure may follow a durable
+            // 4→1, so the host's actual state is re-read as after the final action.
+            <Button disabled={busy} onClick={() => { void run(() => bridge.resume(process.destructionId), process.state === INCOMPLETE) }}>
               Vernichtung fortsetzen
             </Button>
           )}
@@ -365,7 +379,7 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
         // Mounted only while open: closing leaves no stale consent or dialog behind.
         <Modal
           open
-          title="Vorgang endgültig als unvollständig abschließen?"
+          title="Vorgang als unvollständig abschließen?"
           onCancel={closeFinal}
           footer={[
             <Button key="back" onClick={closeFinal}>Zurück</Button>,
@@ -376,7 +390,7 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
               closeFinal()
               void run(() => bridge.markIncomplete(destructionId, jobHash), true)
             }}>
-              Endgültig als unvollständig abschließen
+              Unvollständigen Abschluss signieren
             </Button>,
           ]}
         >
@@ -384,13 +398,13 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
             Mindestens eine bekannte Replik hat keine gültige Attestierung, oder eine attestierte Backup-Frist ist abgelaufen. Die Anwendung signiert dafür den Status „bekannte Replik nicht erreichbar“.
           </Typography.Paragraph>
           <Typography.Paragraph>
-            Dieser Schritt ist endgültig. Später eingehende Nachweise ändern diesen Status nicht mehr, und einen Rückweg zur Fortsetzung gibt es derzeit nicht. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.
+            Für nicht erreichbare Lesegeräte ist dieser Schritt endgültig: Später eingehende Nachweise ändern diesen Status nicht mehr. Fehlen nur Bestätigungen von Sync-Servern, lässt sich der Vorgang mit „Vernichtung fortsetzen“ wieder aufnehmen, sobald alle Löschungen bestätigt sind. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.
           </Typography.Paragraph>
           <Typography.Paragraph>
             Der Abschluss bestätigt keine Löschung auf den betroffenen Repliken.
           </Typography.Paragraph>
           <Checkbox checked={finalConfirmed} disabled={busy} onChange={(event) => { setFinalConfirmed(event.target.checked) }}>
-            Ich habe verstanden, dass dieser Abschluss endgültig ist.
+            Ich habe verstanden, dass dieser Abschluss für nicht erreichbare Lesegeräte endgültig ist.
           </Checkbox>
         </Modal>
         )}

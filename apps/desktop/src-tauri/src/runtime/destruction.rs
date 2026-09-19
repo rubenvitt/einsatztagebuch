@@ -750,6 +750,19 @@ impl DestructionAdministrationPort for NativeDesktopRuntime {
                     ea_admin::destruction_runtime::NativeDestructionDelivery::NoRegisteredServer,
                 )
                 .map_err(|error| CommandError::new(error.code()))?;
+                // Ruling G2: never a silent no-op in state4. Without an
+                // authenticated server delivery the native retry refuses first
+                // with exactly this code; there is no retained-event exchange
+                // here to ask it, so the host mirrors that refusal.
+                if retry_job(&status)
+                    .map_err(|error| CommandError::new(error.code()))?
+                    .is_some()
+                {
+                    return Err(CommandError::new(
+                        ea_admin::destruction_runtime::NativeDestructionError::RetryNoServerDuty
+                            .code(),
+                    ));
+                }
                 if let Some(hash) = completion_job(&status) {
                     resources.runtime.complete_verified_progress(
                         id,
@@ -928,6 +941,35 @@ pub(super) fn pending_job(
     }
     pending.then_some(status.preflight_hash).flatten()
 }
+/// Routes explicit Resume in state4 to the native 4→1 retry (Ruling G2,
+/// 19.09.2026): `Ok(Some(job))` in state4, `Ok(None)` in every other state.
+/// Resume in state4 is never a silent no-op. Deliberately lenient: the view
+/// alone decides nothing, the native core re-decides from the exact originals
+/// (Reader duty, open duty at its own `now`) and refuses with its own code.
+/// Only a state4 job without any server duty in its denominator is refused
+/// here, with the core's own first refusal (`EA-DESTRUCTION-RETRY-NO-SERVER-DUTY`),
+/// because no server could ever confirm it (G1). Grants no authority.
+pub(super) fn retry_job(
+    status: &NativeDestructionStatus,
+) -> Result<Option<ObjectHash>, ea_admin::destruction_runtime::NativeDestructionError> {
+    use ea_admin::destruction_runtime::NativeDestructionError;
+    use ea_destruction::{DestructionError, DestructionState, ManagedReplicaKind};
+    if status.state != DestructionState::IncompleteUnreachableReplica {
+        return Ok(None);
+    }
+    // A state4 always carries its durable job; like the core, a missing one is storage.
+    let job = status
+        .preflight_hash
+        .ok_or(NativeDestructionError::Core(DestructionError::Storage))?;
+    if !status
+        .replicas
+        .iter()
+        .any(|replica| replica.kind == ManagedReplicaKind::SyncServer)
+    {
+        return Err(NativeDestructionError::RetryNoServerDuty);
+    }
+    Ok(Some(job))
+}
 /// Offer predicate of the explicit final action „Als unvollständig abschließen"
 /// (Ruling 13.09.2026); Resume never uses it. Inside the envelope the native
 /// core accepts, it mirrors the failure reasons of `claims::decide`: an elapsed
@@ -1054,9 +1096,10 @@ mod tests {
     use super::Config;
 
     mod routing {
-        use super::super::{completion_job, mark_incomplete_job, pending_job};
+        use super::super::{completion_job, mark_incomplete_job, pending_job, retry_job};
         use ea_admin::destruction_runtime::{
-            NativeDestructionReplica, NativeDestructionStatus, NativeDestructionTarget,
+            NativeDestructionError, NativeDestructionReplica, NativeDestructionStatus,
+            NativeDestructionTarget,
         };
         use ea_destruction::{DestructionState, EvidenceReplicaStatus, ManagedReplicaKind};
         use ea_types::{ChainSequence, DestructionId, DeviceId, EntryHash, ObjectHash, UnixMillis};
@@ -1265,6 +1308,71 @@ mod tests {
                 // although the core would already accept (contract boundary).
                 assert!(!routes(&status(InProgress, vec![never(1, Writer), trigger()])).2);
             }
+        }
+
+        /// Ruling G2 (19.09.2026): Resume in state4 is never a silent no-op.
+        /// Every server-bound state4 routes to the native 4→1 retry, whatever
+        /// the host view shows; the core re-decides (Reader duty, open duty at
+        /// now). Only a job without any server duty is refused on the host,
+        /// with the core's own first refusal.
+        #[test]
+        fn resume_in_state4_routes_every_server_bound_job_to_the_native_retry() {
+            use DestructionState::{
+                CompleteManagedScope, InProgress, IncompleteUnreachableReplica,
+                PendingBackupExpiry, Requested,
+            };
+            use ManagedReplicaKind::{Reader, SyncServer, Writer};
+            fn confirmed(n: u8, kind: ManagedReplicaKind) -> NativeDestructionReplica {
+                remote(
+                    n,
+                    kind,
+                    true,
+                    EvidenceReplicaStatus::Successful(hash(n)),
+                    None,
+                )
+            }
+            let cases: [fn() -> Vec<NativeDestructionReplica>; 6] = [
+                // Server confirmed late: the retry case of S1.
+                || vec![writer(), confirmed(5, SyncServer)],
+                || vec![writer(), confirmed(3, Reader), confirmed(5, SyncServer)],
+                // Reader or server still open: the core refuses with its code.
+                || vec![writer(), never(3, Reader), confirmed(5, SyncServer)],
+                || vec![writer(), negative(3), never(5, SyncServer)],
+                || vec![writer(), backup(3, NOW - 1), never(5, SyncServer)],
+                // The custodian's own duty open: the core decides, not the view.
+                || vec![never(1, Writer), confirmed(5, SyncServer)],
+            ];
+            for replicas in cases {
+                let incomplete = status(IncompleteUnreachableReplica, replicas());
+                assert!(retry_job(&incomplete) == Ok(Some(hash(JOB))));
+                // The retry is the only route in state4; the others stay closed.
+                assert_eq!(routes(&incomplete), (false, false, false));
+                for state in [
+                    Requested,
+                    InProgress,
+                    PendingBackupExpiry,
+                    CompleteManagedScope,
+                ] {
+                    assert!(retry_job(&status(state, replicas())) == Ok(None));
+                }
+            }
+            for replicas in [vec![writer()], vec![writer(), confirmed(3, Reader)]] {
+                assert!(
+                    retry_job(&status(IncompleteUnreachableReplica, replicas))
+                        == Err(NativeDestructionError::RetryNoServerDuty)
+                );
+            }
+            let mut unbound = status(
+                IncompleteUnreachableReplica,
+                vec![writer(), confirmed(5, SyncServer)],
+            );
+            unbound.preflight_hash = None;
+            assert!(
+                retry_job(&unbound)
+                    == Err(NativeDestructionError::Core(
+                        ea_destruction::DestructionError::Storage
+                    ))
+            );
         }
     }
 
