@@ -520,6 +520,35 @@ fn historical_preflight_survives_its_signer_revocation_but_new_action_does_not()
     );
 }
 
+/// Web-Reader-Design §3: the reader's own `deletionAttest` key sits on its
+/// Reader device and never authorizes a state transition, even though kind
+/// and capability alone would admit it.
+#[test]
+fn an_initiating_event_signed_from_a_reader_device_is_not_a_removal_capability() {
+    let verify = |f: &fixtures::Fixture| {
+        let inventory = ea_archive::ArchiveInventory::build(&f.original.source()).unwrap();
+        VerifiedReaderDestructionInstruction::verify(
+            &inventory,
+            &f.original.anchor,
+            &f.current(),
+            f.reader,
+            f.input(),
+        )
+        .map(|_| ())
+    };
+    let control = fixtures::Fixture::with_reader_attestation_key([0x52; 32]);
+    assert!(
+        verify(&control).is_ok(),
+        "the component on the writer side signs the same start"
+    );
+    let reader_signed = fixtures::Fixture::with_reader_signed_initiating_event([0x52; 32]);
+    assert!(Some(reader_signed.event_certificate) == reader_signed.reader_attestation_certificate);
+    assert!(
+        verify(&reader_signed).is_err(),
+        "a transition signed from a Reader device is refused"
+    );
+}
+
 #[test]
 fn unparseable_encrypted_cache_holdings_prevent_a_complete_receipt() {
     let f = fixtures::Fixture::new();

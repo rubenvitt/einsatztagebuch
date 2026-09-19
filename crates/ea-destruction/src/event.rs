@@ -42,6 +42,9 @@ pub fn verify_event(
 
 /// Verify immutable v1 signer authority at the authorization head, with a
 /// separate trusted observation time. The caller performs current admission.
+/// Web-Reader-Design §3: a signer whose device holds a Reader certificate at
+/// the authorization head (revoked included) is refused as
+/// `EA-DESTRUCTION-SIGNATURE`; the reader signs no state transition.
 pub(crate) fn verify_event_at(
     exact: &[u8],
     auth: &VerifiedDestructionAuthorization,
@@ -83,6 +86,13 @@ pub(crate) fn verify_event_at(
         cert,
     )?;
     verify_cose_sign1(signature, head, &context)?;
+    let signer = head
+        .active_certificate_fields(cert)
+        .ok_or(Error::Signature)?;
+    if ea_verify::device_holds_reader_certificate(signer.device_id, head.known_certificate_fields())
+    {
+        return Err(Error::Signature);
+    }
     Ok(VerifiedDestructionEvent {
         fields,
         hash: parsed.object_hash(),
@@ -92,6 +102,7 @@ pub(crate) fn verify_event_at(
 
 /// Historical v1 signature attribution with an independent observation time.
 /// Current physical/action admission remains a separate caller obligation.
+/// Refuses a signer on a Reader device like [`verify_event_at`].
 pub fn verify_event_historical(
     exact: &[u8],
     auth: &VerifiedDestructionAuthorization,
@@ -133,6 +144,13 @@ pub fn verify_event_historical(
         cert,
     )?;
     verify_cose_sign1(signature, head, &context)?;
+    let signer = head
+        .active_certificate_fields(cert)
+        .ok_or(Error::Signature)?;
+    if ea_verify::device_holds_reader_certificate(signer.device_id, head.known_certificate_fields())
+    {
+        return Err(Error::Signature);
+    }
     Ok(VerifiedDestructionEvent {
         fields,
         hash: parsed.object_hash(),

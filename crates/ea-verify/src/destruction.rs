@@ -191,6 +191,29 @@ struct VerifiedEvent {
     fields: DestructionTransitionFieldsV1,
 }
 
+/// Web-Reader-Design §3: a device that holds a Reader certificate signs no
+/// destruction state transition. `known` is every certificate the Registry
+/// head admitted, revoked holders included: revocation does not turn a
+/// Reader device into a transition signer.
+///
+/// Shared by the local transition checks in `ea-destruction` and `ea-reader`.
+/// The offline report of this crate does not apply it (yet): changing
+/// `VerificationReportV1` findings is a separate, vector-reviewed decision.
+pub fn device_holds_reader_certificate<'a>(
+    device: ea_types::DeviceId,
+    known: impl IntoIterator<
+        Item = (
+            ea_types::CertificateHash,
+            &'a ea_format::DeviceCertificateFieldsV1,
+        ),
+    >,
+) -> bool {
+    known.into_iter().any(|(_, certificate)| {
+        certificate.device_id == device
+            && certificate.certificate_kind == ea_format::CertificateKindV1::Reader
+    })
+}
+
 /// Traegt `authorizedDestructions`, `quarantinedObjects`, `signatureErrors`
 /// und `publicKeyThumbprints` fuer alle Vernichtungsvorgaenge des Bestands ein.
 ///
