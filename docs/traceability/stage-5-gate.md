@@ -56,7 +56,7 @@ sie ab.
 | AK 47 | Organisationsadministration | `crates/ea-admin/tests/authorization.rs` (16/0/0: Root-only, Admin-only, falscher Core und — neu mit `8444a83` — `a_self_rotation_of_the_signing_admin_never_reaches_the_key_port` mit `EA-TRUST-SELF-AUTHORIZATION`), `::root_ceremony.rs` (7/0/0, Einmaligkeit), `::ceremony_steps.rs` (7/0/0), `apps/cli/tests/organization_certify_root.rs` (4/0/0). Nullkontext (gepinntes Admin-Paar vor der Registry, finaler Anchor bindet dieselben Felder, danach keine weitere Nutzung): `crates/ea-trust/tests/bootstrap.rs` (8/0/0), `::certificate_attacks.rs` (14/0/0), `::registry_attacks.rs` (12/0/0), `crates/ea-admin/tests/bootstrap.rs` (53/0/0) | Der Transport-Fingerprint-Anteil haengt an `WR-075` und bleibt bis DRK-318 offen |
 | AK 49 | Registry-Wirksamkeit | `crates/ea-admin/tests/registry_workflows.rs::the_workflow_selects_the_highest_applicable_head` und `::a_wrong_previous_head_blocks` (20/0/0), fuer Forks und future-only Heads `e2e_registry_effectiveness.rs` (7/0/0); den neueren wirksamen Head am Server erzwingen `apps/server/tests/auth_trust_api.rs::a_registry_event_that_is_not_the_next_head_names_the_head_that_is`, `::a_selected_head_behind_the_persisted_pin_is_refused` (13/0/0) und `commit_failures.rs::a_package_binding_an_older_head_names_the_required_head` (17/0/0), beide mit `xtask integration up` | Die unvermeidbare Offline-Grenze ist dokumentiert und bleibt bestehen |
 | AK 52 | Gefuehrter Recovery-Test | `crates/ea-admin/tests/bootstrap.rs::a_partial_recovery_test_never_becomes_a_successful_one` (53/0/0, `EA-CEREMONY-RECOVERY-TEST-FAILED` bei einem fehlenden Medium) und `crates/ea-recovery/tests/recovery_test.rs::real_backup_challenges_are_fresh_bound_to_the_signed_certificate_and_never_productive` (6/0/0). Nativ bindet `process_native::recovery::native_source_capture_binds_real_snapshot_machine_inventory_and_signed_audit_without_readiness` Inventar und signiertes Audit (1/0/0). Die sechs nativen Zeugen `process_native::recovery::guided::` sind `#[ignore]`, weil sie eine echte Fremdmaschine verlangen (0/0/6). Korrigiert: `recovery_input_profiles.rs`, `backup_key.rs`, `offline_sources.rs` belegen Eingabeprofile, KDF und Parser | Die Fremdmaschine der nativen guided-Zeugen und die quartalsweise Uebung bleiben Stufe 7 |
-| AK 53 | Operator-Identitaet | `crates/ea-admin/tests/operator_binding.rs` (21/0/0), `::operator_host.rs` (17/0/0), `::operator_audit.rs` (8/0/1) mit `the_revocation_audit_carries_no_operator_plaintext` (neu, `8444a83`), nativ `process_native::administration::host::` (2/0/0 in 163 s, nur mit `--features desktop-fixture` uebersetzt). Offen: eine abgelaufene Sitzung wird abgelehnt, aber NICHT auditiert — der Zeuge `an_expired_operator_session_is_refused_and_audited_without_plaintext` ist als RED geparkt, siehe `## Dokumentierte Grenzen` | Der Ubuntu-UID-Wiederverwendungsfall auf einer installierten OS-Praesenz bleibt Stufe 7; der Transport-Fingerprint-Anteil haengt an `WR-075` |
+| AK 53 | Operator-Identitaet | `crates/ea-admin/tests/operator_binding.rs` (21/0/0), `::operator_host.rs` (17/0/0), `::operator_audit.rs` (12/0/0) mit `the_revocation_audit_carries_no_operator_plaintext` (neu, `8444a83`), nativ `process_native::administration::host::` (2/0/0 in 163 s, nur mit `--features desktop-fixture` uebersetzt). Abgelaufene Sitzung (DRK-282): abgelehnt UND als `sessionExpired` (Aktionscode 12, Ausgang `failed`) klartextfrei gebucht — Zeremonie `an_expired_operator_session_is_refused_and_audited_without_plaintext` (entparkt), Gegenproben `a_foreign_purpose_proof_is_refused_without_an_expiry_row` und `an_expired_session_stays_refused_when_its_audit_cannot_be_booked`, Laufzeit `the_runtime_expiry_row_is_device_signed_and_names_only_the_known_binding` und der Modultest `operator_runtime::tests::only_an_expiry_is_booked_once_before_the_unchanged_refusal` (`--lib` 84/0/0); Grenze siehe `## Dokumentierte Grenzen` | Der Ubuntu-UID-Wiederverwendungsfall auf einer installierten OS-Praesenz bleibt Stufe 7; der Transport-Fingerprint-Anteil haengt an `WR-075` |
 
 ## 2. Reichweite der Stufe-5-Abnahme
 
@@ -188,8 +188,9 @@ Clock-Release, den Recovery-Test, den Re-Grant und die Vernichtung.
 
 | Ereignis | Zeuge | Messung |
 |---|---|---|
-| Login, fehlgeschlagene Reauthentisierung | `crates/ea-admin/tests/operator_audit.rs::failed_login_and_reauth_have_valid_device_signatures_…`, `operator_host.rs::unknown_requested_certificate_still_records_signed_failed_login` | 8/0/1 und 17/0/0 |
-| Bindungsaenderung und -widerruf | `operator_audit.rs::binding_and_revocation_audits_verify_…`, `operator_binding.rs::revocation_signs_the_exact_binding_registry_change_…` | 8/0/1 und 21/0/0 |
+| Login, fehlgeschlagene Reauthentisierung | `crates/ea-admin/tests/operator_audit.rs::failed_login_and_reauth_have_valid_device_signatures_…`, `operator_host.rs::unknown_requested_certificate_still_records_signed_failed_login` | 12/0/0 und 17/0/0 |
+| Abgelaufene Sitzung (`sessionExpired`, Code 12, DRK-282) | `operator_audit.rs::an_expired_operator_session_is_refused_and_audited_without_plaintext` (Zeremonie), `::the_runtime_expiry_row_is_device_signed_and_names_only_the_known_binding` (Laufzeit), Vektor `vectors/local-audit/v1/event/accepted-session-expired.bin` | 12/0/0 |
+| Bindungsaenderung und -widerruf | `operator_audit.rs::binding_and_revocation_audits_verify_…`, `operator_binding.rs::revocation_signs_the_exact_binding_registry_change_…` | 12/0/0 und 21/0/0 |
 | Admin- und Rootzeremonien | `crates/ea-admin/tests/root_ceremony.rs` (Audit je Veroeffentlichung; `ceremony_steps.rs` prueft nur die Schrittfolge) | 7/0/0 |
 | Stale-Registry-Quittung | `crates/ea-writer/tests/stale_registry_acknowledgement.rs` | 19/0/0 |
 | Export | `crates/ea-reader/tests/export.rs`, `audit_redaction.rs` (`PlaintextExport`) | 9/0/0 und 5/0/0 |
@@ -211,8 +212,7 @@ Serverprotokolle. Korrigiert: `privacy_canaries_writer.rs` (4/0/0) prueft nur
 fachliche Writer-Canaries, und `apps/cli/tests/safety_audit.rs` ist kein
 signiertes Auditereignis.
 
-Offen: das Audit der abgelaufenen Sitzung (Abschnitt 1, AK 53) und das native
-Clock-Release-Audit (Abschnitt 4).
+Offen: das native Clock-Release-Audit (Abschnitt 4).
 
 ## 6. Geraete-Posture in drei Zustaenden
 
@@ -281,20 +281,22 @@ AK-48 stehen auf Stufe 2 `integrated` und decken nur die Profilzulassung in
 `#[ignore = "DRK-320: …"]` geparkt, ebenso der offene RED
 `cargo test -p ea-recovery --test fs_source_union`. Der tatsaechlich gemountete
 Netz-Positivzeuge bleibt Stufe-7-Evidenz.
-**Audit der abgelaufenen Sitzung fehlt im Produkt — besitzendes Ticket
-DRK-282, Entscheidung offen.**
-`design.md` Zeile 2169 verlangt, dass eine abgelaufene Sitzung abgelehnt UND
-klartextfrei auditiert wird. Gemessen wird sie nur abgelehnt:
-`crates/ea-admin/src/root_ceremony.rs:279` bricht mit `ReauthMismatch` ab,
-bevor `book_failure` erreicht wird, `reauthenticate_with_context` prueft
-ueber `ensure_current()` (`crates/ea-admin/src/operator_runtime.rs:742`) die
-Frische vor dem auditierten Abschnitt und liefert
-`EA-OPERATOR-RUNTIME-EXPIRED` ohne Audit (nur ein Ablauf WAEHREND der
-Praesenzabfrage bucht Login(Failed) und ReauthFailure, nicht als Ablauf), und `LocalAuditActionV1` kennt keine Aktion dafuer. Der Zeuge
-`crates/ea-admin/tests/operator_audit.rs::an_expired_operator_session_is_refused_and_audited_without_plaintext`
-ist mit `#[ignore = "DRK-282: …"]` geparkt. Bis zur Entscheidung — Auditaktion
-nachruesten oder Zusage auf den Widerruf beschraenken — kann AK-53 nicht
-wandern.
+**Audit der abgelaufenen Sitzung — DRK-282, entschieden und umgesetzt.**
+Ruling Ruben vom 2026-09-19: `design.md` Zeile 2169 gilt unverändert, das
+Produkt wird ergänzt. Eine abgelaufene Sitzung wird VOR der Abweisung als
+eigene Aktion `sessionExpired` (Aktionscode 12, generischer Kontext) mit dem
+Ausgang `failed` signiert und dauerhaft gebucht; der Fehlercode der Abweisung
+bleibt `EA-CEREMONY-REAUTH-MISMATCH` bzw. `EA-OPERATOR-RUNTIME-EXPIRED`, und
+eine gescheiterte Buchung ändert an der Abweisung nichts. Die Aktion ist
+additiv (`local-audit.cddl` `0..12`, Codes 0..11 byteidentisch, neuer Vektor
+`accepted-session-expired`). Gebucht wird an der Wurzelzeremonie und in
+`OperatorRuntime::reauthenticate_with_context`, nicht in `ensure_current`, das
+je Aktion mehrfach läuft. Verbleibende Grenze: ein durch eine OS-Sperre
+entwerteter, aber noch nicht abgelaufener Nachweis wird an der Zeremonie
+weiterhin nur abgelehnt — es gibt keinen öffentlichen Leser für das Sperrbit,
+und das ist kein Ablauf. `administration_runtime/authorization.rs:118/:310`
+verwerfen Autorisierungsfenster, keine Bedienersitzung, und buchen deshalb
+keinen Ablauf.
 
 **Nativer Clock-Release — besitzendes Ticket DRK-282, Anwendung offen.**
 Siehe Abschnitt 4. Bis dahin

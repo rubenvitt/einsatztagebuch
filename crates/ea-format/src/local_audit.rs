@@ -763,8 +763,12 @@ impl ClockReleaseContextV1 {
     }
 }
 
-/// Die zwoelf Aktionen von `schemas/reports/v1/local-audit.cddl:63-75`, jede
+/// Die dreizehn Aktionen von `schemas/reports/v1/local-audit.cddl`, jede
 /// mit dem Kontext, an den die Grammatik sie bindet.
+///
+/// `SessionExpired` (Code 12, DRK-282) ist ADDITIV am Ende angehängt: die
+/// Codes 0..11 und ihre Kodierung sind unverändert, und ein älterer Leser
+/// weist die 12 als unbekannten Aktionscode ab, statt sie falsch zu deuten.
 pub enum LocalAuditActionV1 {
     Login(GenericAuditContextV1),
     ReauthFailure(GenericAuditContextV1),
@@ -778,11 +782,14 @@ pub enum LocalAuditActionV1 {
     HistoricalRegrant(HistoricalRegrantContextV1),
     Destruction(DestructionContextV1),
     ArchiveProfileMigration(ArchiveProfileMigrationContextV1),
+    /// Eine abgelaufene Bedienersitzung wurde abgewiesen (AK 53). Der
+    /// generische Kontext nennt höchstens die bekannte Bindung als Hash.
+    SessionExpired(GenericAuditContextV1),
 }
 
 impl LocalAuditActionV1 {
-    /// Der eingefrorene Aktionscode, `0..11` in der Reihenfolge von
-    /// `schemas/reports/v1/local-audit.cddl:63-75`.
+    /// Der eingefrorene Aktionscode, `0..12` in der Reihenfolge von
+    /// `schemas/reports/v1/local-audit.cddl`.
     #[must_use]
     pub const fn code(&self) -> u8 {
         match self {
@@ -798,6 +805,7 @@ impl LocalAuditActionV1 {
             Self::HistoricalRegrant(_) => 9,
             Self::Destruction(_) => 10,
             Self::ArchiveProfileMigration(_) => 11,
+            Self::SessionExpired(_) => 12,
         }
     }
 
@@ -809,7 +817,10 @@ impl LocalAuditActionV1 {
     #[must_use]
     pub const fn context_tag(&self) -> u8 {
         match self {
-            Self::Login(_) | Self::ReauthFailure(_) | Self::RecoveryTest(_) => 0,
+            Self::Login(_)
+            | Self::ReauthFailure(_)
+            | Self::RecoveryTest(_)
+            | Self::SessionExpired(_) => 0,
             Self::RegistryStaleWarnAcceptance(_) => 1,
             Self::ClockSkewRelease(_) => 2,
             Self::PlaintextExport(_) => 3,
@@ -1083,7 +1094,8 @@ fn encode_local_audit_context(
     match action {
         LocalAuditActionV1::Login(context)
         | LocalAuditActionV1::ReauthFailure(context)
-        | LocalAuditActionV1::RecoveryTest(context) => {
+        | LocalAuditActionV1::RecoveryTest(context)
+        | LocalAuditActionV1::SessionExpired(context) => {
             encode_optional_hash(encoder, context.subject_object_hash)?;
         }
         LocalAuditActionV1::BindingChange(context) | LocalAuditActionV1::Revocation(context) => {
@@ -1289,6 +1301,7 @@ fn decode_local_audit_action(
         11 => LocalAuditActionV1::ArchiveProfileMigration(
             decode_archive_profile_migration_context(decoder)?,
         ),
+        12 => LocalAuditActionV1::SessionExpired(decode_generic_context(decoder)?),
         _ => return Err(FormatError::TagMismatch),
     };
     if action.code() != action_code || u64::from(action.context_tag()) != context_tag {
