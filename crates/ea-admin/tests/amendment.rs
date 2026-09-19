@@ -8,7 +8,7 @@ use ea_reader::{
     AuthenticatorPrfV1, ReaderEntryThread, ReaderMode, ReaderVault, ReaderVerifier, SchemaRegistry,
     SilentObserver, VaultContentsV1,
 };
-use ea_schema::AmendmentChangeV1;
+use ea_schema::{AmendmentChangeV1, PayloadV1};
 use ea_writer::AmendmentContentV1;
 
 #[test]
@@ -111,6 +111,40 @@ fn amendment_finalization_preserves_original_bytes_and_reader_keeps_multiple_ame
     .unwrap();
     assert_eq!(thread.amendments().len(), 2);
     assert!(thread.rejected().is_empty());
+    // FR-121: jeder finalisierte Nachtrag trägt Original-ID, Original-Hash,
+    // Grund und Ersteller — gelesen aus den veröffentlichten, verifizierten
+    // und entschlüsselten Bytes, nicht aus der Eingabestruktur. Der
+    // Original-Hash wird gegen den Abschlussbericht des Originals gemessen,
+    // die Original-ID gegen den Kopf des entschlüsselten Originals, der
+    // Ersteller gegen die Profilzeile der Fixture (`support`:
+    // `BINDING_MARKER`, `FIXTURE_DISPLAY_NAME`, `FIXTURE_FUNCTION_LABEL`) und
+    // gegen die Bindung, für die der Präsenznachweis ausgestellt wurde.
+    let original_record_id = thread.original().with_payload(|payload| {
+        let PayloadV1::Incident(incident) = payload else {
+            panic!("das Original ist ein Einsatz");
+        };
+        incident.header().record_id()
+    });
+    let binding = harness
+        .proof_for(ReauthPurpose::Finalize)
+        .binding_object_hash();
+    for (index, amendment) in thread.amendments().iter().enumerate() {
+        let expected_reason = format!("Berichtigung {}", index + 1);
+        amendment.with_payload(|payload| {
+            let PayloadV1::Amendment(stored) = payload else {
+                panic!("ein beigetretener Nachtrag ist ein Nachtrag");
+            };
+            assert!(stored.original_record_id() == original_record_id);
+            assert!(stored.original_entry_hash() == original.entry_hash);
+            assert!(stored.original_sequence() == thread.original().chain_sequence());
+            assert_eq!(stored.reason(), expected_reason);
+            let creator = stored.header().operator();
+            assert_eq!(creator.operator_subject_id().as_bytes(), &[0x22; 16]);
+            assert_eq!(creator.display_name(), "Ada Lovelace");
+            assert_eq!(creator.function_label(), "Einsatzleitung");
+            assert!(creator.operator_binding_object_hash() == binding);
+        });
+    }
     assert!(thread.original().entry_hash() == original.entry_hash);
     assert_eq!(
         harness

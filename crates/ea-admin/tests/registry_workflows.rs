@@ -841,6 +841,76 @@ fn an_expired_head_blocks_fail_closed() {
     assert_eq!(blocked(&line, Pin::Head(0), 50, NOW_MS), "EA-TRUST-STALE");
 }
 
+/// AK 24, Pflichtfelder: `issuedAt`, `notBefore` und `notAfter` eines Kopfes
+/// sind Pflicht. Typseitig können sie gar nicht fehlen
+/// (`RegistryEventFieldsV1` trägt sie als `UnixMillis`, nicht als `Option`),
+/// also misst der Zeuge den Decoder: die ECHTEN Signaturbytes eines Kopfes
+/// dieser Linie, einmal ohne das Feld (Array mit zwölf statt dreizehn
+/// Elementen) und einmal mit `null` an seiner Stelle. Beide Formen weist
+/// `TrustPayloadV1::from_exact_digest_input` fail-closed ab; die
+/// unveränderten Bytes desselben Kopfes gehen als Gegenprobe durch.
+#[test]
+fn a_head_without_issued_at_not_before_or_not_after_is_refused_by_the_decoder() {
+    // Unverwechselbare Werte: jeder steht als genau eine 9-Byte-Ganzzahl
+    // (`0x1b` + acht Bytes) in der Kopfnutzlast.
+    const ISSUED_AT: i64 = 0x7a00_0000_0000_0001;
+    const NOT_BEFORE: i64 = 0x7a00_0000_0000_0002;
+    const NOT_AFTER: i64 = 0x7a00_0000_0000_0003;
+    let mut line = RegistryLineBuilder::new();
+    let head = line.push(
+        policy_action(),
+        HeadOptions {
+            issued_at: UnixMillis::new(ISSUED_AT),
+            not_before: UnixMillis::new(NOT_BEFORE),
+            not_after: UnixMillis::new(NOT_AFTER),
+            ..window(1, 100)
+        },
+    );
+    let ea_format::ParsedArchiveObject::Trust(parsed) =
+        ea_format::decode_exact_object(line.exact_object_bytes(head.object_hash))
+            .expect("der Kopf der Linie dekodiert")
+    else {
+        panic!("ein Registrierungskopf ist ein Vertrauensobjekt");
+    };
+    let digest_input = parsed.value().exact_digest_input().to_vec();
+    assert!(
+        ea_format::TrustPayloadV1::from_exact_digest_input(&digest_input).is_ok(),
+        "Gegenprobe: der unveränderte Kopf dekodiert"
+    );
+
+    // Der Kern ist das einzige Array mit dreizehn Elementen (`0x8d`) direkt
+    // hinter dem zweistelligen Nutzlastarray (`0x82`).
+    let core = digest_input
+        .windows(2)
+        .position(|pair| pair == [0x82, 0x8d])
+        .map(|index| index + 1)
+        .expect("der Kopfkern ist ein Array mit dreizehn Elementen");
+    for (field, value) in [
+        ("issuedAt", ISSUED_AT),
+        ("notBefore", NOT_BEFORE),
+        ("notAfter", NOT_AFTER),
+    ] {
+        let mut encoded = vec![0x1b];
+        encoded.extend_from_slice(&value.to_be_bytes());
+        let at = digest_input
+            .windows(encoded.len())
+            .position(|window| window == encoded.as_slice())
+            .expect("jeder Zeitwert steht genau einmal im Kern");
+
+        let mut missing = digest_input.clone();
+        missing.splice(at..at + encoded.len(), []);
+        missing[core] = 0x8c;
+        let mut null = digest_input.clone();
+        null.splice(at..at + encoded.len(), [0xf6]);
+        for (form, bytes) in [("fehlt", missing), ("null", null)] {
+            let error = ea_format::TrustPayloadV1::from_exact_digest_input(&bytes)
+                .err()
+                .unwrap_or_else(|| panic!("AK 24: ein Kopf, dessen {field} {form}, dekodiert"));
+            assert_eq!(error.code(), "EA-FORMAT-SHAPE", "{field} {form}");
+        }
+    }
+}
+
 #[test]
 fn a_ready_successor_blocks_the_current_head_fallback() {
     let mut line = RegistryLineBuilder::new();
