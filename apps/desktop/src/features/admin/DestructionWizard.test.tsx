@@ -83,6 +83,7 @@ describe('resuming an incomplete destruction (Ruling G2)', () => {
 
   for (const [code, explanation] of [
     ['EA-DESTRUCTION-RETRY-READER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt als unvollständig abgeschlossen.'],
+    ['EA-DESTRUCTION-RETRY-DUTY-OPEN', 'Der Vorgang kann noch nicht fortgesetzt werden: Mindestens eine Replik hat die Löschung noch nicht bestätigt. Gleichen Sie die Servernachweise ab und setzen Sie später erneut fort.'],
     ['EA-DESTRUCTION-RETRY-NO-SERVER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Sync-Server als Löschort gebunden oder in dieser Anwendung eingerichtet. Ohne nachträgliche Serverbestätigung bleibt der Vorgang als unvollständig abgeschlossen.'],
   ] as const) {
     it(`explains ${code} in German instead of idling, keeps the code and re-reads the host state`, async () => {
