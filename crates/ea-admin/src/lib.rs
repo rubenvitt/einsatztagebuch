@@ -138,9 +138,9 @@ pub use fingerprint::{
 };
 pub use genesis::{GenesisBinding, GenesisEnvelopeV1, bind_genesis};
 pub use go_live::{
-    GO_LIVE_REQUIREMENT_CODES, GoLiveChecklist, GoLiveEvidence, GoLiveRequirement,
-    GoLiveRequirementStatus, RecoveryTestFreshness, RegistryFreshness, evaluate_go_live,
-    evaluate_go_live_with_posture_admission,
+    EdsPrivacyDecision, GO_LIVE_REQUIREMENT_CODES, GoLiveChecklist, GoLiveEvidence,
+    GoLiveRequirement, GoLiveRequirementStatus, RecoveryTestFreshness, RegistryFreshness,
+    evaluate_go_live, evaluate_go_live_with_posture_admission,
 };
 pub use production_state::{FreshMachineRecoveryProof, ProductionState, machine_fingerprint};
 #[cfg(feature = "test-support")]

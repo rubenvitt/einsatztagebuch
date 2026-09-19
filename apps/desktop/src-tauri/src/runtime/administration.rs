@@ -636,6 +636,7 @@ fn unknown_checklist() -> ea_admin::GoLiveChecklist {
         last_recovery_test: None,
         writer_transition: None,
         device_posture: None,
+        eds_privacy_decision: None,
     })
 }
 fn go_live_projection(
@@ -643,7 +644,8 @@ fn go_live_projection(
     recovery: Option<ea_admin::go_live::RecoveryTestFreshness<'_>>,
 ) -> Result<ea_admin::GoLiveChecklist, CommandError> {
     use ea_admin::go_live::{
-        GoLiveEvidence, RegistryFreshness, evaluate_go_live_with_posture_admission,
+        EdsPrivacyDecision, GoLiveEvidence, RegistryFreshness,
+        evaluate_go_live_with_posture_admission,
     };
     let posture = runtime.device_posture_report().map_err(runtime_error)?;
     let admission = runtime.posture_admission().ok();
@@ -678,6 +680,10 @@ fn go_live_projection(
             last_recovery_test: recovery,
             writer_transition: Some(transition.phase()),
             device_posture: Some(&posture),
+            // Dieselben signierten Felder, die das Vernichtungs-Gate liest.
+            eds_privacy_decision: Some(EdsPrivacyDecision::from_retention_policy(
+                &policy.retention_policy,
+            )),
         },
         admission.as_ref(),
     ))

@@ -1445,6 +1445,10 @@ pub struct GoLiveRequirementView {
     pub requirement_code: String,
     pub status: GoLiveRequirementStatus,
     pub evidence_code: String,
+    /// Der signierte Hash des Dokuments zur `.eds`-Restnachweis-Entscheidung
+    /// (AK 44) als Kleinbuchstaben-Hex — `None` für jede andere Zeile. Beleg,
+    /// nicht Einstufung: die steht im `evidence_code`.
+    pub decision_document_hash: Option<String>,
 }
 
 /// Die Go-live-Liste. `production_ready` wird NICHT uebergeben, sondern aus
@@ -1467,6 +1471,7 @@ impl From<&GoLiveChecklist> for GoLiveChecklistView {
                     requirement_code: requirement.code().to_owned(),
                     status: requirement.status(),
                     evidence_code: requirement.evidence_code().to_owned(),
+                    decision_document_hash: requirement.decision_document_hash().map(hex32),
                 })
                 .collect(),
             production_ready: checklist.production_ready(),

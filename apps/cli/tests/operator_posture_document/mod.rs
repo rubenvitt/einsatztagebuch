@@ -268,11 +268,12 @@ fn documented_admission_marks_only_live_unknown_rows_and_never_confirms_them() {
         last_recovery_test: None,
         writer_transition: None,
         device_posture: Some(&raw),
+        eds_privacy_decision: None,
     };
     let report = evaluate_go_live_with_posture_admission(&evidence, Some(&admission));
     // Ruling 2026-09-13 ("Plan wörtlich"): a valid document stays visible as
     // evidence, but a documented Unknown is never green in Go-live.
-    for row in &report.requirements()[11..] {
+    for row in &report.requirements()[11..15] {
         assert_eq!(
             row.status(),
             GoLiveRequirementStatus::NotAutomaticallyVerifiable
@@ -287,7 +288,7 @@ fn documented_admission_marks_only_live_unknown_rows_and_never_confirms_them() {
         PostureRequirement::AutomaticScreenLock.fail();
     let changed = evaluate_go_live_with_posture_admission(&evidence, Some(&admission));
     assert!(
-        changed.requirements()[11..].iter().all(|row| {
+        changed.requirements()[11..15].iter().all(|row| {
             row.status() != GoLiveRequirementStatus::Confirmed
                 && row.evidence_code() != "EA-GOLIVE-POSTURE-DOCUMENTED"
         }),

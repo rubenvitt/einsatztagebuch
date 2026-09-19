@@ -40,6 +40,7 @@ fn raw_checklist(runtime: &OperatorRuntime) -> ea_admin::GoLiveChecklist {
         last_recovery_test: None,
         writer_transition: None,
         device_posture: Some(&posture),
+        eds_privacy_decision: None,
     })
 }
 

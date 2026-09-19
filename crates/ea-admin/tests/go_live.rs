@@ -1,7 +1,7 @@
 //! Die Zeugen des Go-live-Aggregats (Stufe 5, Task 6).
 //!
 //! Die eine Zusage, die alles andere traegt: `Unknown` ist nie gruen.
-//! `production_ready()` ist `true` NUR, wenn jede der fuenfzehn Anforderungen
+//! `production_ready()` ist `true` NUR, wenn jede der sechzehn Anforderungen
 //! `Confirmed` ist; ein `NotMet` UND ein `NotAutomaticallyVerifiable` an
 //! beliebiger Stelle machen es `false`. Dazu die feste Reihenfolge, die
 //! deterministische Ausgabe und das Fehlen von Zeitstempeln und Pfaden darin.
@@ -11,19 +11,20 @@ use ea_admin::{
     anchor_media::AnchorMediumId,
     bootstrap::BackedUpKeyClass,
     go_live::{
-        GO_LIVE_REQUIREMENT_CODES, GoLiveChecklist, GoLiveEvidence, GoLiveRequirementStatus,
-        RecoveryTestFreshness, RegistryFreshness, evaluate_go_live,
+        EdsPrivacyDecision, GO_LIVE_REQUIREMENT_CODES, GoLiveChecklist, GoLiveEvidence,
+        GoLiveRequirementStatus, RecoveryTestFreshness, RegistryFreshness, evaluate_go_live,
     },
     production_state::ProductionState,
     writer_transition::WriterTransitionPhase,
 };
+use ea_format::RetentionPolicyFieldsV1;
 use ea_key_provider::{DevicePostureReport, PostureRequirement};
 use ea_types::{ChainSequence, Hash32, KeyThumbprint, UnixMillis};
 
 const NOW: UnixMillis = UnixMillis::new(1_788_000_000_000);
 const UNAVAILABLE: &str = "EA-GOLIVE-EVIDENCE-UNAVAILABLE";
 
-const EXPECTED_CODES: [&str; 15] = [
+const EXPECTED_CODES: [&str; 16] = [
     "EA-GOLIVE-TWO-ADMINS",
     "EA-GOLIVE-KEY-BACKUP-ROOT",
     "EA-GOLIVE-KEY-BACKUP-ADMIN",
@@ -39,7 +40,29 @@ const EXPECTED_CODES: [&str; 15] = [
     "EA-POSTURE-ACCOUNT-EXCLUSIVE",
     "EA-POSTURE-SCREEN-LOCK",
     "EA-POSTURE-OS-PATCH-LEVEL",
+    "EA-GOLIVE-EDS-PRIVACY-DECISION",
 ];
+
+/// Der Index der `.eds`-Restnachweis-Anforderung (AK 44) — die letzte Zeile.
+const EDS_PRIVACY: usize = 15;
+const EDS_RELEASED: &str = "EA-GOLIVE-EVIDENCE-EDS-RESIDUAL-RELEASED";
+const EDS_DISABLED: &str = "EA-GOLIVE-EVIDENCE-EDS-DESTRUCTION-DISABLED";
+const EDS_MISSING: &str = "EA-GOLIVE-EVIDENCE-EDS-PRIVACY-DECISION-MISSING";
+
+/// Die Aufbewahrungsrichtlinie eines signierten Kopfes — dieselbe Struktur,
+/// die das Vernichtungs-Gate liest.
+fn retention(destruction_enabled: bool, document: Option<u8>) -> RetentionPolicyFieldsV1 {
+    RetentionPolicyFieldsV1 {
+        minimum_retention_ms: Some(86_400_000),
+        destruction_enabled,
+        eds_privacy_decision_document_hash: document
+            .map(|seed| Hash32::try_from([seed; 32].as_slice()).expect("zweiunddreißig Bytes")),
+    }
+}
+
+fn eds_decision(destruction_enabled: bool, document: Option<u8>) -> EdsPrivacyDecision {
+    EdsPrivacyDecision::from_retention_policy(&retention(destruction_enabled, document))
+}
 
 fn thumbprint(seed: u8) -> KeyThumbprint {
     KeyThumbprint::from(Hash32::try_from([seed; 32].as_slice()).expect("zweiunddreissig Bytes"))
@@ -137,6 +160,7 @@ impl Scene {
             last_recovery_test: Some(fresh_recovery_test(&self.state)),
             writer_transition: Some(WriterTransitionPhase::NoTransition),
             device_posture: Some(&self.posture),
+            eds_privacy_decision: Some(eds_decision(true, Some(0xa2))),
         }
     }
 }
@@ -151,6 +175,7 @@ fn unknown_evidence() -> GoLiveEvidence<'static> {
         last_recovery_test: None,
         writer_transition: None,
         device_posture: None,
+        eds_privacy_decision: None,
     }
 }
 
@@ -170,12 +195,12 @@ fn codes(checklist: &GoLiveChecklist) -> Vec<&'static str> {
         .collect()
 }
 
-/// Ohne jeden Beleg: fuenfzehn Anforderungen, alle nicht automatisch pruefbar,
+/// Ohne jeden Beleg: sechzehn Anforderungen, alle nicht automatisch prüfbar,
 /// und der Bestand ist NICHT produktionsbereit.
 #[test]
-fn all_none_evidence_yields_fifteen_unverifiable_requirements() {
+fn all_none_evidence_yields_sixteen_unverifiable_requirements() {
     let checklist = evaluate_go_live(&unknown_evidence());
-    assert_eq!(checklist.requirements().len(), 15);
+    assert_eq!(checklist.requirements().len(), 16);
     assert!(
         statuses(&checklist)
             .iter()
@@ -188,7 +213,7 @@ fn all_none_evidence_yields_fifteen_unverifiable_requirements() {
             .all(|requirement| requirement.evidence_code() == UNAVAILABLE)
     );
     assert!(!checklist.production_ready());
-    assert_eq!(checklist.unresolved().count(), 15);
+    assert_eq!(checklist.unresolved().count(), 16);
 }
 
 /// Ein vollstaendig belegter Bestand ist produktionsbereit — und NUR der.
@@ -287,7 +312,14 @@ fn flipping_any_single_requirement_flips_production_ready_to_false() {
                 let requirement = posture_requirements[index - 11];
                 scene.posture = posture_with(requirement, requirement.fail());
             }
-            _ => unreachable!("fuenfzehn Anforderungen"),
+            // Vernichtung aktiviert, aber keine dokumentierte Freigabe.
+            EDS_PRIVACY => {
+                not_met = Some(GoLiveEvidence {
+                    eds_privacy_decision: Some(eds_decision(true, None)),
+                    ..scene.evidence()
+                })
+            }
+            _ => unreachable!("sechzehn Anforderungen"),
         }
         let evidence = not_met.unwrap_or_else(|| scene.evidence());
         let checklist = evaluate_go_live(&evidence);
@@ -369,7 +401,13 @@ fn flipping_any_single_requirement_flips_production_ready_to_false() {
                 let requirement = posture_requirements[index - 11];
                 scene.posture = posture_with(requirement, requirement.unknown());
             }
-            _ => unreachable!("fuenfzehn Anforderungen"),
+            EDS_PRIVACY => {
+                unknown = Some(GoLiveEvidence {
+                    eds_privacy_decision: None,
+                    ..scene.evidence()
+                })
+            }
+            _ => unreachable!("sechzehn Anforderungen"),
         }
         let evidence = unknown.unwrap_or_else(|| scene.evidence());
         let checklist = evaluate_go_live(&evidence);
@@ -563,4 +601,94 @@ fn the_status_enum_lists_its_three_variants_in_order() {
             WriterTransitionPhase::Activated,
         ]
     );
+}
+
+/// AK 44 (`design.md` §16.3, §21): der Go-live-Bericht enthält Einstufung und
+/// Entscheidung zum `.eds`-Restnachweis — abgeleitet AUSSCHLIESSLICH aus den
+/// signierten Feldern, die auch das Vernichtungs-Gate liest. Drei Fälle.
+#[test]
+fn the_eds_privacy_row_classifies_the_signed_retention_policy() {
+    let scene = Scene::satisfied();
+    let row = |decision: EdsPrivacyDecision| {
+        let checklist = evaluate_go_live(&GoLiveEvidence {
+            eds_privacy_decision: Some(decision),
+            ..scene.evidence()
+        });
+        let requirement = checklist.requirements()[EDS_PRIVACY].clone();
+        assert_eq!(requirement.code(), "EA-GOLIVE-EDS-PRIVACY-DECISION");
+        (requirement, checklist.production_ready())
+    };
+
+    // 1. Freigabe dokumentiert: erfüllt, Einstufung „Restnachweis
+    //    freigegeben", der Dokumenthash ist der Beleg.
+    let (released, ready) = row(eds_decision(true, Some(0xa2)));
+    assert_eq!(released.status(), GoLiveRequirementStatus::Confirmed);
+    assert_eq!(released.evidence_code(), EDS_RELEASED);
+    assert_eq!(released.decision_document_hash(), Some(&[0xa2; 32]));
+    assert!(ready);
+
+    // 2. Vernichtung deaktiviert: die signierte Policy IST die dokumentierte
+    //    Deaktivierung — erfüllt, mit oder ohne mitgeführten Hash.
+    for document in [None, Some(0xb3)] {
+        let (disabled, ready) = row(eds_decision(false, document));
+        assert_eq!(disabled.status(), GoLiveRequirementStatus::Confirmed);
+        assert_eq!(disabled.evidence_code(), EDS_DISABLED, "{document:?}");
+        assert_eq!(
+            disabled.decision_document_hash(),
+            document.map(|seed| [seed; 32]).as_ref()
+        );
+        assert!(ready);
+    }
+
+    // 3. Vernichtung aktiviert OHNE Freigabe: widersprüchlich, genau der Fall,
+    //    den das Vernichtungs-Gate mit `EA-DESTRUCTION-PRIVACY-GATE` abweist.
+    let (missing, ready) = row(eds_decision(true, None));
+    assert_eq!(missing.status(), GoLiveRequirementStatus::NotMet);
+    assert_eq!(missing.evidence_code(), EDS_MISSING);
+    assert_eq!(missing.decision_document_hash(), None);
+    assert!(!ready);
+
+    // Ohne gewählten Kopf: kein Beleg, nie grün.
+    let checklist = evaluate_go_live(&GoLiveEvidence {
+        eds_privacy_decision: None,
+        ..scene.evidence()
+    });
+    let unknown = &checklist.requirements()[EDS_PRIVACY];
+    assert_eq!(
+        unknown.status(),
+        GoLiveRequirementStatus::NotAutomaticallyVerifiable
+    );
+    assert_eq!(unknown.evidence_code(), UNAVAILABLE);
+    assert_eq!(unknown.decision_document_hash(), None);
+    assert!(!checklist.production_ready());
+}
+
+/// Der Dokumenthash erscheint nur in der Zeile, nie in der Evidenzliste der
+/// offenen Punkte: die bleibt „nur Codes", auch wenn die `.eds`-Zeile offen ist.
+#[test]
+fn the_decision_document_hash_never_enters_the_unresolved_report() {
+    let scene = Scene::satisfied();
+    for decision in [
+        eds_decision(true, None),
+        eds_decision(true, Some(0xa2)),
+        eds_decision(false, Some(0xa2)),
+    ] {
+        let checklist = evaluate_go_live(&GoLiveEvidence {
+            eds_privacy_decision: Some(decision),
+            ..scene.evidence()
+        });
+        // Eine Zeile MIT Hash ist nie offen und steht also nie im Bericht.
+        for requirement in checklist.unresolved() {
+            assert_eq!(requirement.decision_document_hash(), None);
+        }
+        let report = checklist.unresolved_report_json();
+        assert!(!report.contains(&"a2".repeat(32)), "{report}");
+    }
+    // Und KEINE andere Zeile trägt einen Dokumenthash.
+    let checklist = evaluate_go_live(&scene.evidence());
+    for (index, requirement) in checklist.requirements().iter().enumerate() {
+        if index != EDS_PRIVACY {
+            assert_eq!(requirement.decision_document_hash(), None, "{index}");
+        }
+    }
 }

@@ -50,6 +50,7 @@ const GO_LIVE_CODES = [
   'EA-POSTURE-ACCOUNT-EXCLUSIVE',
   'EA-POSTURE-SCREEN-LOCK',
   'EA-POSTURE-OS-PATCH-LEVEL',
+  'EA-GOLIVE-EDS-PRIVACY-DECISION',
 ] as const
 
 function confirmedChecklist(): GoLiveChecklistView {
@@ -58,6 +59,7 @@ function confirmedChecklist(): GoLiveChecklistView {
       requirementCode: code,
       status: 'Confirmed',
       evidenceCode: `${code}-EVIDENCE`,
+      decisionDocumentHash: null,
     })),
     productionReady: true,
   }
@@ -411,7 +413,7 @@ it('never renders an unverifiable checklist as production ready', () => {
   expect(row).not.toBeNull()
   expect(row).toHaveTextContent('nicht automatisch prüfbar')
   expect(row).toHaveTextContent('EA-GOLIVE-EVIDENCE-UNAVAILABLE')
-  expect(screen.getAllByText('bestätigt')).toHaveLength(14)
+  expect(screen.getAllByText('bestätigt')).toHaveLength(15)
   // Und die FARBE sagt dasselbe wie das Wort: die offene Zeile ist nicht gruen,
   // eine bestaetigte ist es. Ohne diesen Zeugen koennte „nicht automatisch
   // prüfbar" in einem gruenen Etikett stehen.
@@ -430,6 +432,57 @@ it('refuses a green light the host asserts over an unconfirmed row', () => {
     'nicht produktionsbereit',
   )
   expect(screen.queryByText('produktionsbereit')).not.toBeInTheDocument()
+})
+
+// AK 44: der Go-live-Bericht zeigt Einstufung UND Entscheidung zum
+// `.eds`-Restnachweis — die Einstufung als deutsches Wort zum Belegcode, die
+// Entscheidung als signierter Dokumenthash. Die Schale bewertet nichts.
+it('shows the eds classification and the signed decision document hash', () => {
+  const hash = 'a2'.repeat(32)
+  const withEds = (evidenceCode: string, status: 'Confirmed' | 'NotMet', decisionDocumentHash: string | null): GoLiveChecklistView => {
+    const ready = confirmedChecklist()
+    return {
+      requirements: ready.requirements.map((requirement) =>
+        requirement.requirementCode === 'EA-GOLIVE-EDS-PRIVACY-DECISION'
+          ? { ...requirement, status, evidenceCode, decisionDocumentHash }
+          : requirement,
+      ),
+      productionReady: status === 'Confirmed',
+    }
+  }
+  const edsRow = () => screen.getByText('EA-GOLIVE-EDS-PRIVACY-DECISION').closest('li')
+
+  const released = render(
+    <AdminPage bridge={fakeAdminBridge({ checklist: withEds('EA-GOLIVE-EVIDENCE-EDS-RESIDUAL-RELEASED', 'Confirmed', hash) })} />,
+  )
+  expect(edsRow()).toHaveTextContent('Restnachweis freigegeben')
+  expect(edsRow()).toHaveTextContent(`Dokumenthash der Entscheidung: ${hash}`)
+  released.unmount()
+
+  const disabled = render(
+    <AdminPage bridge={fakeAdminBridge({ checklist: withEds('EA-GOLIVE-EVIDENCE-EDS-DESTRUCTION-DISABLED', 'Confirmed', null) })} />,
+  )
+  expect(edsRow()).toHaveTextContent('Vernichtung deaktiviert')
+  expect(edsRow()).not.toHaveTextContent('Dokumenthash der Entscheidung')
+  disabled.unmount()
+
+  render(
+    <AdminPage bridge={fakeAdminBridge({ checklist: withEds('EA-GOLIVE-EVIDENCE-EDS-PRIVACY-DECISION-MISSING', 'NotMet', null) })} />,
+  )
+  expect(edsRow()).toHaveTextContent('Vernichtung aktiviert ohne dokumentierte Freigabe')
+  expect(edsRow()).toHaveTextContent('nicht erfüllt')
+  expect(screen.getByRole('status', { name: 'Go-live-Bereitschaft' })).toHaveTextContent(
+    'nicht produktionsbereit',
+  )
+  // Der Hash ist Beleg und kein Textkanal: nur `null` oder 64 Kleinbuchstaben-Hex.
+  const row = { ...confirmedChecklist().requirements[15] }
+  expect(validateChecklist({ requirements: [{ ...row, decisionDocumentHash: hash }], productionReady: true })
+    .requirements[0]?.decisionDocumentHash).toBe(hash)
+  for (const bad of ['A2'.repeat(32), 'a2'.repeat(31), 'Freigabe liegt vor', 42, undefined]) {
+    expect(() =>
+      validateChecklist({ requirements: [{ ...row, decisionDocumentHash: bad }], productionReady: true }),
+    ).toThrow('Der Dokumenthash der Restnachweis-Entscheidung ist ungültig.')
+  }
 })
 
 // Eine LEERE Liste ist kein Ja: ein Wirt, der ohne eine einzige Anforderung
