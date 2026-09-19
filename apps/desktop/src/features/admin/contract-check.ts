@@ -152,6 +152,15 @@ function fingerprint(raw: unknown): string {
   return raw
 }
 
+/** Der signierte Dokumenthash der `.eds`-Entscheidung: `null` oder 64 Kleinbuchstaben-Hex. */
+function decisionDocumentHash(raw: unknown): string | null {
+  if (raw === null) return null
+  if (typeof raw !== 'string' || !/^[0-9a-f]{64}$/.test(raw)) {
+    throw new ContractViolation('Der Dokumenthash der Restnachweis-Entscheidung ist ungültig.')
+  }
+  return raw
+}
+
 export function validateChecklist(raw: unknown): GoLiveChecklistView {
   const candidate = record(raw, 'Die Go-live-Liste')
   if (!Array.isArray(candidate.requirements)) {
@@ -163,6 +172,7 @@ export function validateChecklist(raw: unknown): GoLiveChecklistView {
       return {
         ...(requirement as unknown as GoLiveChecklistView['requirements'][number]),
         status: oneOf(GO_LIVE_REQUIREMENT_STATUS_VALUES, requirement.status, 'Der Go-live-Status'),
+        decisionDocumentHash: decisionDocumentHash(requirement.decisionDocumentHash),
       }
     }),
     // Ein fehlendes oder fremdes Bit ist KEIN Ja.

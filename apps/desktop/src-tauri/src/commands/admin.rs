@@ -347,6 +347,7 @@ pub struct GoLiveRequirementDto {
     pub requirement_code: String,
     pub status: &'static str,
     pub evidence_code: String,
+    pub decision_document_hash: Option<String>,
 }
 
 /// Die Go-live-Liste; `production_ready` kommt aus dem Aggregat und wird hier
@@ -368,6 +369,7 @@ impl From<&GoLiveChecklistView> for GoLiveChecklistDto {
                     requirement_code: requirement.requirement_code.clone(),
                     status: go_live_requirement_status_literal(requirement.status),
                     evidence_code: requirement.evidence_code.clone(),
+                    decision_document_hash: requirement.decision_document_hash.clone(),
                 })
                 .collect(),
             production_ready: view.production_ready,
@@ -1105,7 +1107,7 @@ pub async fn admin_writer_lock_diagnosis(
     run_blocking(move || writer_lock_diagnosis_core(&state)).await
 }
 
-/// Die Go-live-Liste — fuenfzehn Anforderungen, `productionReady` nur, wenn
+/// Die Go-live-Liste — sechzehn Anforderungen, `productionReady` nur, wenn
 /// jede bestaetigt ist.
 ///
 /// # Errors
@@ -1481,6 +1483,7 @@ mod tests {
                 last_recovery_test: None,
                 writer_transition: None,
                 device_posture: None,
+                eds_privacy_decision: None,
             }))
         }
 
@@ -2322,7 +2325,7 @@ mod tests {
     // Lesende Flaechen.
     // -----------------------------------------------------------------------
 
-    /// Ohne einen einzigen Beleg ist NICHTS gruen: fuenfzehn Anforderungen,
+    /// Ohne einen einzigen Beleg ist NICHTS grün: sechzehn Anforderungen,
     /// jede `NotAutomaticallyVerifiable`, `productionReady == false`.
     #[test]
     fn a_checklist_without_evidence_is_not_production_ready() {
@@ -2330,11 +2333,12 @@ mod tests {
         let session = stale();
         let admin = admin(&port, &session);
         let checklist = admin.go_live_checklist().unwrap();
-        assert_eq!(checklist.requirements.len(), 15);
+        assert_eq!(checklist.requirements.len(), 16);
         assert!(!checklist.production_ready);
         for requirement in &checklist.requirements {
             assert_eq!(requirement.status, "NotAutomaticallyVerifiable");
             assert_eq!(requirement.evidence_code, "EA-GOLIVE-EVIDENCE-UNAVAILABLE");
+            assert_eq!(requirement.decision_document_hash, None);
             assert!(requirement.requirement_code.starts_with("EA-"));
         }
         let codes: Vec<&str> = checklist
@@ -2357,7 +2361,7 @@ mod tests {
             "{json}"
         );
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["unresolved"].as_array().unwrap().len(), 15);
+        assert_eq!(parsed["unresolved"].as_array().unwrap().len(), 16);
         // `serde_json::Value` sortiert Schluessel; gemessen wird die MENGE der
         // Felder — genau die drei Codes und nichts daneben.
         for row in parsed["unresolved"].as_array().unwrap() {

@@ -41,7 +41,7 @@ it('accepts exact open rounds but refuses duplicate identifiers, completed round
 
 const checklist = () => ({
   requirements: [
-    { requirementCode: 'EA-GOLIVE-POLICY', status: 'Confirmed', evidenceCode: 'EA-GOLIVE-POLICY-EVIDENCE' },
+    { requirementCode: 'EA-GOLIVE-POLICY', status: 'Confirmed', evidenceCode: 'EA-GOLIVE-POLICY-EVIDENCE', decisionDocumentHash: null },
   ],
   productionReady: true,
 })

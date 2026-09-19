@@ -470,6 +470,7 @@ export type GoLiveRequirementView = {
   readonly requirementCode: string
   readonly status: GoLiveRequirementStatus
   readonly evidenceCode: string
+  readonly decisionDocumentHash: string | null
 }
 
 export type GoLiveChecklistView = {

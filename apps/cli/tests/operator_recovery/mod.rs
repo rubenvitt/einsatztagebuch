@@ -1332,12 +1332,12 @@ fn native_source_import_accepts_authentic_foreign_completion_and_mints_only_dura
     }
     let checklist=reopened.evaluate_current_go_live(Some(&inventory),|current,freshness|{
         assert_eq!(current.head().registry_version().get(),scope.core().fields().registry_version);
-        let evidence=ea_admin::GoLiveEvidence{active_admin_count:None,key_backups:None,registry:None,policy_present:None,evidence_policy_present:None,last_recovery_test:freshness,writer_transition:None,device_posture:None};
+        let evidence=ea_admin::GoLiveEvidence{active_admin_count:None,key_backups:None,registry:None,policy_present:None,evidence_policy_present:None,last_recovery_test:freshness,writer_transition:None,device_posture:None,eds_privacy_decision:None};
         ea_admin::evaluate_go_live(&evidence)
     }).unwrap();
     assert_eq!(checklist.requirements()[9].status(),ea_admin::GoLiveRequirementStatus::Confirmed);
     let freshness=reopened.recovery_test_freshness(&inventory).unwrap();
-    let evidence=ea_admin::GoLiveEvidence{active_admin_count:None,key_backups:None,registry:None,policy_present:None,evidence_policy_present:None,last_recovery_test:Some(freshness),writer_transition:None,device_posture:None};
+    let evidence=ea_admin::GoLiveEvidence{active_admin_count:None,key_backups:None,registry:None,policy_present:None,evidence_policy_present:None,last_recovery_test:Some(freshness),writer_transition:None,device_posture:None,eds_privacy_decision:None};
     assert_eq!(ea_admin::evaluate_go_live(&evidence).requirements()[9].status(),ea_admin::GoLiveRequirementStatus::Confirmed);
     let changed=original_archive.join("entries/000000000000_entry.eip");
     let original=fs::read(&changed).unwrap();

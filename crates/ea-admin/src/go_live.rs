@@ -1,4 +1,4 @@
-//! Das Go-live-Aggregat: fuenfzehn Anforderungen, drei Zustaende, und
+//! Das Go-live-Aggregat: sechzehn Anforderungen, drei Zustände, und
 //! Rohe Messungen und signiert dokumentierte Voraussetzungen bleiben getrennt.
 //!
 //! # Was hier zusammenkommt
@@ -8,7 +8,9 @@
 //! Schluesselklassen auf je zwei Medien, einen frischen Registry-Kopf mit
 //! reichendem Lease, eine Policy und eine Evidence-Richtlinie, einen
 //! Frischrechner-Recovery-Test innerhalb seines Intervalls, keinen halb
-//! vollendeten Writer-Uebergang und eine belegte Geraetehaltung. Der Baum
+//! vollendeten Writer-Übergang, eine belegte Gerätehaltung und eine
+//! dokumentierte datenschutzrechtliche Freigabe oder Deaktivierung des
+//! `.eds`-Restnachweises (§16.3, AK 44). Der Baum
 //! hat fuer keine dieser Aussagen ein gemeinsames Aggregat —
 //! [`crate::operator_runtime::OperatorGoLiveReport`] ist ein Betriebsbericht
 //! ueber Bindungen und nicht diese Liste. Hier entsteht sie.
@@ -47,6 +49,7 @@
 
 #[cfg(feature = "test-support")]
 use crate::production_state::ProductionState;
+use ea_format::RetentionPolicyFieldsV1;
 use ea_key_provider::{DevicePostureReport, PostureCheck, PostureRequirement};
 use ea_types::{ChainSequence, UnixMillis};
 use serde::Serialize;
@@ -85,14 +88,15 @@ impl GoLiveRequirementStatus {
 /// Der Belegcode, wenn kein Beleg vorliegt.
 pub const EVIDENCE_UNAVAILABLE: &str = "EA-GOLIVE-EVIDENCE-UNAVAILABLE";
 
-/// Die fuenfzehn Anforderungscodes in der FESTEN Reihenfolge der Liste.
+/// Die sechzehn Anforderungscodes in der FESTEN Reihenfolge der Liste.
 ///
-/// Elf Go-live-Codes und die vier Haltungscodes, die
+/// Elf Go-live-Codes, die vier Haltungscodes, die
 /// `apps/desktop/src-tauri/src/commands/writer.rs` schon heute fuer
 /// [`PostureRequirement`] fuehrt — dieselben Zeichenketten, damit die
 /// Haltungszeile der Verwaltungsflaeche und die des Writers denselben Code
-/// tragen.
-pub const GO_LIVE_REQUIREMENT_CODES: [&str; 15] = [
+/// tragen —, und am Ende die `.eds`-Restnachweis-Entscheidung (AK 44), additiv
+/// angehängt, damit kein bestehender Index wandert.
+pub const GO_LIVE_REQUIREMENT_CODES: [&str; 16] = [
     TWO_ADMINS,
     KEY_BACKUP_ROOT,
     KEY_BACKUP_ADMIN,
@@ -108,6 +112,7 @@ pub const GO_LIVE_REQUIREMENT_CODES: [&str; 15] = [
     posture_requirement_code(PostureRequirement::LockedNonSharedAccount),
     posture_requirement_code(PostureRequirement::AutomaticScreenLock),
     posture_requirement_code(PostureRequirement::SupportedOsPatchLevel),
+    EDS_PRIVACY_DECISION,
 ];
 
 const TWO_ADMINS: &str = "EA-GOLIVE-TWO-ADMINS";
@@ -121,6 +126,17 @@ const POLICY: &str = "EA-GOLIVE-POLICY";
 const EVIDENCE_POLICY: &str = "EA-GOLIVE-EVIDENCE-POLICY";
 const RECOVERY_TEST: &str = "EA-GOLIVE-RECOVERY-TEST";
 const WRITER_TRANSITION: &str = "EA-GOLIVE-WRITER-TRANSITION";
+const EDS_PRIVACY_DECISION: &str = "EA-GOLIVE-EDS-PRIVACY-DECISION";
+
+/// Einstufung „Restnachweis freigegeben": Vernichtung aktiviert und der Hash
+/// der datenschutzrechtlichen Freigabe signiert im Kopf.
+const EDS_RESIDUAL_RELEASED: &str = "EA-GOLIVE-EVIDENCE-EDS-RESIDUAL-RELEASED";
+/// Einstufung „Vernichtung deaktiviert": die signierte Policy selbst ist die
+/// dokumentierte Deaktivierung.
+const EDS_DESTRUCTION_DISABLED: &str = "EA-GOLIVE-EVIDENCE-EDS-DESTRUCTION-DISABLED";
+/// Vernichtung aktiviert OHNE dokumentierte Freigabe — der Fall, den das
+/// Vernichtungs-Gate mit `EA-DESTRUCTION-PRIVACY-GATE` abweist.
+const EDS_PRIVACY_DECISION_MISSING: &str = "EA-GOLIVE-EVIDENCE-EDS-PRIVACY-DECISION-MISSING";
 
 /// Die Mindestzahl aktiver Administratoren (`design.md` Global Constraints:
 /// „At least two active Admin keys … exist before production").
@@ -153,6 +169,7 @@ pub struct GoLiveRequirement {
     code: &'static str,
     status: GoLiveRequirementStatus,
     evidence_code: String,
+    decision_document_hash: Option<[u8; 32]>,
 }
 
 impl GoLiveRequirement {
@@ -174,11 +191,24 @@ impl GoLiveRequirement {
         &self.evidence_code
     }
 
+    /// Der Hash des Dokuments zur `.eds`-Restnachweis-Entscheidung, wie ihn
+    /// der gewählte Kopf signiert führt — `None` für jede andere Zeile.
+    ///
+    /// Er ist Beleg, nicht Einstufung: die Einstufung steht im
+    /// [`Self::evidence_code`]. Die Software bewertet das Dokument nicht
+    /// (`design.md` §16.3); sie weist nur nach, dass und welches signiert
+    /// vorliegt.
+    #[must_use]
+    pub const fn decision_document_hash(&self) -> Option<&[u8; 32]> {
+        self.decision_document_hash.as_ref()
+    }
+
     fn unavailable(code: &'static str) -> Self {
         Self {
             code,
             status: GoLiveRequirementStatus::NotAutomaticallyVerifiable,
             evidence_code: EVIDENCE_UNAVAILABLE.to_owned(),
+            decision_document_hash: None,
         }
     }
 
@@ -202,6 +232,7 @@ impl GoLiveRequirement {
             } else {
                 not_met_evidence.to_owned()
             },
+            decision_document_hash: None,
         }
     }
 
@@ -248,6 +279,59 @@ impl RegistryFreshness {
     const fn lease_covers_next(self) -> bool {
         self.next_sequence.get() <= self.lease_valid_through.get()
             && self.now.get() <= self.not_after.get()
+    }
+}
+
+/// Die `.eds`-Restnachweis-Entscheidung des gewählten Registry-Kopfes.
+///
+/// Entsteht AUSSCHLIESSLICH aus der Root-signierten
+/// [`RetentionPolicyFieldsV1`] — denselben zwei Feldern, die das
+/// Vernichtungs-Gate (`destruction_runtime::prepare`, `ea-destruction`,
+/// `ea-sync-server`) liest. Keine öffentlichen Felder, kein Freitext, kein
+/// lokaler Schalter: Go-live-Bericht und Gate können nie auseinanderlaufen.
+#[derive(Clone, Copy)]
+pub struct EdsPrivacyDecision {
+    destruction_enabled: bool,
+    document_hash: Option<[u8; 32]>,
+}
+
+impl EdsPrivacyDecision {
+    /// Liest die Entscheidung aus der Aufbewahrungsrichtlinie des Kopfes
+    /// (`head.policy_fields().retention_policy`).
+    #[must_use]
+    pub fn from_retention_policy(policy: &RetentionPolicyFieldsV1) -> Self {
+        Self {
+            destruction_enabled: policy.destruction_enabled,
+            document_hash: policy
+                .eds_privacy_decision_document_hash
+                .map(|hash| *hash.as_bytes()),
+        }
+    }
+
+    /// Die Zeile. Drei belegte Fälle; die Rechtmäßigkeit bewertet die
+    /// Software nicht (§16.3):
+    ///
+    /// - Vernichtung aktiviert mit Dokumenthash: erfüllt, „Restnachweis
+    ///   freigegeben".
+    /// - Vernichtung deaktiviert: erfüllt, „Vernichtung deaktiviert" — ein
+    ///   etwa vorhandener Hash wird als Beleg mitgeführt und ändert nichts.
+    /// - Vernichtung aktiviert OHNE Dokumenthash: widersprüchlich, NICHT
+    ///   erfüllt.
+    fn row(self) -> GoLiveRequirement {
+        let (status, evidence) = match (self.destruction_enabled, self.document_hash) {
+            (true, Some(_)) => (GoLiveRequirementStatus::Confirmed, EDS_RESIDUAL_RELEASED),
+            (false, _) => (GoLiveRequirementStatus::Confirmed, EDS_DESTRUCTION_DISABLED),
+            (true, None) => (
+                GoLiveRequirementStatus::NotMet,
+                EDS_PRIVACY_DECISION_MISSING,
+            ),
+        };
+        GoLiveRequirement {
+            code: EDS_PRIVACY_DECISION,
+            status,
+            evidence_code: evidence.to_owned(),
+            decision_document_hash: self.document_hash,
+        }
     }
 }
 
@@ -369,6 +453,9 @@ pub struct GoLiveEvidence<'a> {
     pub writer_transition: Option<WriterTransitionPhase>,
     /// Der Haltungsbericht des Geraets.
     pub device_posture: Option<&'a DevicePostureReport>,
+    /// Die `.eds`-Restnachweis-Entscheidung aus der signierten Policy des
+    /// gewählten Kopfes.
+    pub eds_privacy_decision: Option<EdsPrivacyDecision>,
 }
 
 /// Die ausgewertete Liste. Entsteht ausschliesslich in [`evaluate_go_live`].
@@ -378,7 +465,7 @@ pub struct GoLiveChecklist {
 }
 
 impl GoLiveChecklist {
-    /// Alle fuenfzehn Anforderungen, in der Reihenfolge von
+    /// Alle sechzehn Anforderungen, in der Reihenfolge von
     /// [`GO_LIVE_REQUIREMENT_CODES`].
     #[must_use]
     pub fn requirements(&self) -> &[GoLiveRequirement] {
@@ -446,7 +533,7 @@ struct UnresolvedRowV1<'a> {
     evidence_code: &'a str,
 }
 
-/// Wertet die Belege aus — genau fuenfzehn Zeilen, in fester Reihenfolge.
+/// Wertet die Belege aus — genau sechzehn Zeilen, in fester Reihenfolge.
 #[must_use]
 pub fn evaluate_go_live(evidence: &GoLiveEvidence<'_>) -> GoLiveChecklist {
     evaluate_go_live_with_posture_admission(evidence, None)
@@ -569,6 +656,11 @@ pub fn evaluate_go_live_with_posture_admission(
         });
     }
 
+    requirements.push(evidence.eds_privacy_decision.map_or_else(
+        || GoLiveRequirement::unavailable(EDS_PRIVACY_DECISION),
+        EdsPrivacyDecision::row,
+    ));
+
     GoLiveChecklist { requirements }
 }
 
@@ -598,6 +690,7 @@ fn posture_row(code: &'static str, check: PostureCheck, documented: bool) -> GoL
         } else {
             check.evidence_code().to_owned()
         },
+        decision_document_hash: None,
     }
 }
 
@@ -612,17 +705,23 @@ fn class_is_backed_up(records: &[KeyBackupRecordV1], class: BackedUpKeyClass) ->
 mod tests {
     use super::*;
 
-    /// Elf bestaetigte Nicht-Haltungszeilen und die vier gegebenen Haltungszeilen.
+    /// Elf bestätigte Nicht-Haltungszeilen, die vier gegebenen Haltungszeilen
+    /// und eine bestätigte `.eds`-Zeile — sechzehn, wie die echte Liste.
     fn checklist_with_posture(rows: [GoLiveRequirement; 4]) -> GoLiveChecklist {
+        let confirmed = |code| GoLiveRequirement {
+            code,
+            status: GoLiveRequirementStatus::Confirmed,
+            evidence_code: "EA-GOLIVE-EVIDENCE-FIXTURE".to_owned(),
+            decision_document_hash: None,
+        };
         let mut requirements: Vec<GoLiveRequirement> = GO_LIVE_REQUIREMENT_CODES[..11]
             .iter()
-            .map(|code| GoLiveRequirement {
-                code,
-                status: GoLiveRequirementStatus::Confirmed,
-                evidence_code: "EA-GOLIVE-EVIDENCE-FIXTURE".to_owned(),
-            })
+            .copied()
+            .map(confirmed)
             .collect();
         requirements.extend(rows);
+        requirements.push(confirmed(EDS_PRIVACY_DECISION));
+        assert_eq!(requirements.len(), GO_LIVE_REQUIREMENT_CODES.len());
         GoLiveChecklist { requirements }
     }
 

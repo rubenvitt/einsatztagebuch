@@ -677,6 +677,9 @@ pub const ADMIN_VIEW_MODELS_V1: &[(&str, &[(&str, &str)])] = &[
             // nie gruen.
             ("status", "GoLiveRequirementStatus"),
             ("evidenceCode", "string"),
+            // Nur die `.eds`-Zeile (AK 44) trägt ihn: der signierte
+            // Dokumenthash als Beleg, sonst `null`.
+            ("decisionDocumentHash", "string | null"),
         ],
     ),
     (

@@ -48,6 +48,7 @@ const HOST_DOUBLE = String(function installHostDouble(
     'EA-POSTURE-ACCOUNT-EXCLUSIVE',
     'EA-POSTURE-SCREEN-LOCK',
     'EA-POSTURE-OS-PATCH-LEVEL',
+    'EA-GOLIVE-EDS-PRIVACY-DECISION',
   ]
   const day = 24 * 60 * 60 * 1000
   let ceremonyKind = resumePolicy ? 'PolicyChange' : 'DeviceApprove'
@@ -174,8 +175,14 @@ const HOST_DOUBLE = String(function installHostDouble(
               requirementCode: code,
               status: 'NotAutomaticallyVerifiable',
               evidenceCode: 'EA-GOLIVE-EVIDENCE-UNAVAILABLE',
+              decisionDocumentHash: null,
             }
-          : { requirementCode: code, status: 'Confirmed', evidenceCode: `${code}-EVIDENCE` },
+          : {
+              requirementCode: code,
+              status: 'Confirmed',
+              evidenceCode: `${code}-EVIDENCE`,
+              decisionDocumentHash: null,
+            },
       ),
       productionReady: false,
     },
