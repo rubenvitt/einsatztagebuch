@@ -27,12 +27,16 @@ haben ihn in diesem PR bekommen (`8444a83`, `9d3716f`, `fad9c7a`,
 `37a3301`), die Klartextsuche ueber die Stufe-5-Audits mit `4fe094b`.
 Die Einzelzusagen aus Plan Task 14 Step 3 stehen zusaetzlich in Abschnitt 3.
 
-Der Ledger bleibt trotzdem der Riegel: die neunzehn Zeilen stehen auf
-`planned`, und `stage-gate 5` bleibt rot, bis die drei in `## Dokumentierte
-Grenzen` genannten Produktluecken dieser Stufe geschlossen sind — der native
-Clock-Release, das Audit der abgelaufenen Sitzung und die Einstufung zum
-Restnachweis im Go-live-Bericht. Wo eine Zelle `Offen` sagt, ist das eine
-dieser drei Luecken und keine fehlende Messung.
+**Das Gate schliesst (DRK-282, 2026-09-19).** Die drei Produktluecken, an
+denen der Ledger bis hierher als Riegel hing — der native Clock-Release
+(`5e055d0`, `59b08ac`, `8dae049`), das Audit der abgelaufenen Sitzung
+(`96e0c3c`) und die Einstufung zum Restnachweis im Go-live-Bericht
+(`2d52b5e`) —, sind geschlossen. Achtzehn der neunzehn Zeilen stehen jetzt
+auf `implemented` oder `integrated` (Begruendung je Zeile in `## Ledgerpflege`),
+WR-075 bleibt als dokumentierte Grenze auf `planned`, und
+`cargo run --locked -p xtask -- stage-gate 5` endet mit Exit 0. Keine Zelle
+dieses Berichts sagt mehr `Offen`; was offen bleibt, steht mit Besitzer in
+`## Dokumentierte Grenzen` oder in der Spalte „Offen in spaeterer Stufe".
 
 ## 1. Primaere Abnahmekriterien und ihre Belege
 
@@ -48,7 +52,7 @@ sie ab.
 | AK 18 | Nachtrag | `crates/ea-admin/tests/amendment.rs::amendment_finalization_preserves_original_bytes_and_reader_keeps_multiple_amendments` (1/0/0) — der Nachtrag referenziert das Original und aendert keine Originalbytes | Die Anzeige mehrerer verketteter Nachtraege im Browser-Reader liegt in Stufe 4 und wird hier nicht erneut belegt |
 | AK 24 | Registry-Ueberalterung | `crates/ea-admin/tests/registry_workflows.rs` (20/0/0: Pflichtfelder ueber `a_head_without_issued_at_not_before_or_not_after_is_refused_by_the_decoder` mit `EA-FORMAT-SHAPE`, neu mit `9d3716f`; `the_sequence_lease_boundary_is_exact`, `an_expired_head_blocks_fail_closed`) und fuer Standard-`warn` `crates/ea-writer/tests/stale_registry_acknowledgement.rs::standard_warn_persists_a_signed_receipt_before_finalizing_once` (19/0/0) mit `stale_registry_warning.rs` (4/0/0). Korrigiert: `apps/cli/tests/registry_workflows.rs` (56/0/0) belegt Widerrufsplan und Clock-Release-Grammatik, nicht warn/block | Die Betriebsentscheidung ueber die Altersrichtlinie einer echten Organisation bleibt Stufe 7 |
 | AK 29 | Rollentrennung | `crates/ea-key-provider/tests/writer_role_guard.rs::writer_profile_rejects_forbidden_private_key_purposes` (8/0/0) — Writer-Profile verweigern Reader-, Recovery-, Historical-Grant-Authority- und Key-Approver-Privatschluessel; dass lokal genannte Faehigkeiten keine Rolle erweitern, belegt `::a_writer_certificate_capability_is_decided_against_the_parsed_allowlist` (`EA-KEY-FORBIDDEN-CAPABILITY` fuer jede Nicht-Writer-Faehigkeit). Korrigiert: `privacy_canaries_writer.rs` und `operator_trust_store.rs` pruefen keine Schluesselrollen | Die installierte OS-Praesenz auf einem Produktionsgeraet bleibt Stufe 7 |
-| AK 30 | Kontrollierte Vernichtung | Zwei Approver: `crates/ea-destruction/tests/authorization.rs` (10/0/0). Alle bekannten Speicherorte und Backupfristen: `process_native::destruction::completion::` (4 Tests), unerreichbare Replikate: `::failure::` (7 Tests), backup-pending: `::pending::` (8 Tests), sofortiger Abschluss: `::completion::native_completion_requires_every_duty_then_persists_exact_signed_transition_and_replays`, Fortsetzen: `native_destruction_local_resume_removes_real_eip_grants_and_reopens_measured_attestation`; das Ziel `einsatzarchiv-cli --test operator process_native::destruction::` liest 52/0/0 in 1335 s seriell | Die externe Datenschutzentscheidung zum Restnachweis bleibt Stufe 7 |
+| AK 30 | Kontrollierte Vernichtung | Zwei Approver: `crates/ea-destruction/tests/authorization.rs` (10/0/0). Alle bekannten Speicherorte und Backupfristen: `process_native::destruction::completion::` (4 Tests), unerreichbare Replikate: `::failure::` (7 Tests), backup-pending: `::pending::` (8 Tests), sofortiger Abschluss: `::completion::native_completion_requires_every_duty_then_persists_exact_signed_transition_and_replays`, Fortsetzen: `native_destruction_local_resume_removes_real_eip_grants_and_reopens_measured_attestation`; das Ziel `einsatzarchiv-cli --test operator process_native::destruction::` liest 52/0/0 in 1335 s seriell | Die externe Datenschutzentscheidung zum Restnachweis bleibt Stufe 7; der native Retry aus `incompleteUnreachableReplica` ist DRK-319 (`## Dokumentierte Grenzen`) |
 | AK 35 | Registry-Angriffe | `tests/ea-system-tests/tests/e2e_registry_effectiveness.rs::a_rollback_a_same_version_fork_and_an_expired_head_block_the_line` — Rollback und gleiche Version mit anderem Hash fail-closed; `::the_trusted_time_floor_rises_with_an_accepted_head_and_neither_a_clock_rollback_nor_an_older_head_lowers_it` (neu mit `fad9c7a`) — der Floor steigt auf das `issuedAt` des angenommenen Kopfes und sinkt weder bei Uhrruecklauf noch mit einem neueren Kopf aelterer Zeit; Ziel 7/0/0. Upload-Ablehnung bei einem zurueckgehaltenen, dem Server bekannten Kopf: `apps/server/tests/commit_failures.rs::a_package_binding_an_older_head_names_the_required_head` (17/0/0, mit `xtask integration up`) | Das nicht erkennbare Offline-Fenster ist eine dokumentierte Grenze des Designs, keine Stufenluecke |
 | AK 40 | Historische Grant-Autoritaet | `crates/ea-recovery/tests/historical_grant.rs::separate_key_roles_recipient_native_presence_and_durable_audit_are_required` (8/0/0) fuer getrennte Recovery-KEM und Grant-Signatur, `crates/ea-trust/tests/grant_authorization.rs` (5/0/0) fuer die Mehr-Augen-Authorization; Server-Pfad `e2e_historical_grant.rs` (1/0/0) | Die Custody der Produktionsschluessel bleibt Stufe 7 |
 | AK 41 | Destroyed Entry Stub | `process_native::destruction::writer_evidence::native_writer_evidence_reopens_as_real_reader_authorized_destruction` (in 52/0/0) — gueltiger `.eds` mit Writer-Signatur, `entryHash` und Kettenkontinuitaet; die nicht autorisierte Entfernung als sichtbare Luecke: `crates/ea-verify/tests/destruction_stub.rs` (8/0/0) und `receipt_checkpoint.rs` (3/0/0) | Die nativen Minimal- und Maximalfaelle des Stubs bleiben Stufe 7 |
@@ -73,8 +77,9 @@ ausgeschlossen.
 Belastbare Gate-Zahlen aus den beiden gruenen Laeufen auf `db08333`
 (Lauf 34936505876): vollstaendiger Gate-Durchlauf 50 min 26 s beim ersten
 vollstaendigen Lauf, 29 min 49 s mit vollstaendig warmen Caches, beide unter
-der 90-Minuten-Frist. Das Target `einsatzarchiv-cli --test operator` liest
-213 bestanden, 0 fehlgeschlagen, 25 ignoriert.
+der 90-Minuten-Frist. Das Target `einsatzarchiv-cli --test operator` las auf
+`db08333` 213 bestanden, 0 fehlgeschlagen, 25 ignoriert — vor dem nativen
+Clock-Release; die Zahlen dieses Endstands stehen in den Abschnitten 1 bis 6.
 
 Die Messung vom 2026-09-19 fuer diesen Bericht lief auf macOS. Die
 Linux-Zahlen oben stammen aus dem CI-Gate; die Ziele dieses Berichts laufen
@@ -122,7 +127,7 @@ Grenzen`). Die Einzelzusagen haben folgende Zeugen:
 | Ausstehende Aktivierung von Geraet, Fingerprint, Admin, Root | `crates/ea-admin/tests/registry_workflows.rs`, `::fingerprint.rs`, `::ceremony_steps.rs::device_approve_walks_all_six_steps_in_order` | 20/0/0, 5/0/0, 7/0/0 |
 | Widerrufsgrenze des Readers | AK 11 | siehe Abschnitt 1 |
 | Registry warn/block/Lease/Rollback/Fork/Zeitboden | AK 24, AK 35, AK 49 | siehe Abschnitt 1 |
-| Exakte, ablaufende, einmalige Clock-Freigabe | `crates/ea-admin/tests/clock_release.rs::a_release_is_issued_once_consumed_once_and_replayed_never` (in-process); nativ offen | 18/0/0 |
+| Exakte, ablaufende, einmalige Clock-Freigabe | `crates/ea-admin/tests/clock_release.rs::a_release_is_issued_once_consumed_once_and_replayed_never` (in-process); nativ `apps/cli/tests/operator_administration/clock_repair.rs` unter `process_native::administration::clock_repair::` (Abschnitt 4) | 18/0/0; nativ 13/0/0 (19 s seriell) |
 | Writer-Uebergang | `crates/ea-admin/tests/writer_transition.rs` | 15/0/0 |
 | Nachtrag | AK 18, FR-120 bis FR-124 | siehe Abschnitt 1 und Ledgerpflege |
 | Neuer Reader ohne vergangenen Zugriff, ausgewaehlter Re-Grant | AK 12 | siehe Abschnitt 1 |
@@ -168,16 +173,41 @@ finden (`--features desktop-fixture`, Dev-Kanten der CLI). Er laeuft ueber
 selbst Prozesse startet (dieselbe Form wie das archive-fs-Gate aus `82f29b1`).
 Befund: ea-desktops eigener Release-Build traegt die Kante nicht.
 
-**Nativer Clock-Release.** Freigegeben per Ruling vom 2026-09-13 unter
-Auflagen: RED-first, Gegenproben fuer Pass, Fail, Ablauf, Doppelverbrauch und
-Reopen, unabhaengiges Security-Review, die `Unknown`-Erweiterung separat. Der
-native RED in `apps/cli/tests/operator_administration/clock_repair.rs` ist mit
-`#[ignore = "DRK-282: …"]` geparkt (`8bdf548`), weil
-`ClockRepairRuntime::release` weiter am geschlossenen `RuntimeExpired`-Stub
-endet. Der Patch liegt unangewendet im Archiv der Stufe-5-Belege (SHA256
-`08f09b2b…`) und laesst sich am 2026-09-19 sauber auf `main` anwenden. Er wird
-erst nach erneuter ausdruecklicher Freigabe angewendet; beim Anwenden muss der
-Ignore entfernt werden.
+**Nativer Clock-Release — angewendet mit `5e055d0`, `59b08ac` und
+`8dae049`.** Freigegeben per Ruling vom 2026-09-13, erneut bestaetigt am
+2026-09-19, unter Auflagen: RED-first, Gegenproben fuer Pass, Fail, Ablauf,
+Doppelverbrauch und Reopen, unabhaengiges Security-Review, die
+`Unknown`-Erweiterung separat. Der gepruefte Patch (SHA256 `08f09b2b…`) ist
+unveraendert uebernommen; der native RED in
+`apps/cli/tests/operator_administration/clock_repair.rs` ist entparkt (vorher
+0/1 am `RuntimeExpired`-Stub, danach gruen). `ClockRepairRuntime::release`
+oeffnet die einmalige Freigabe nur bei gemessenem Pass jeder
+`PostureRequirement`; Fail und Unknown enden vor jedem Dialog mit
+`EA-OPERATOR-POSTURE`. Die `Unknown`-Erweiterung bleibt ausdruecklich
+DRAUSSEN: ein dokumentiertes `Unknown` darf nach dem Posture-Ruling eine
+gewoehnliche Sitzung oeffnen, den Clock-Pfad oeffnet es nicht.
+
+Das Security-Review hat den Stand `5e055d0`/`59b08ac` als „mit Auflagen
+freigabefaehig" bewertet; beide Auflagen setzt `8dae049` um. Erstens: nach dem
+dauerhaften Consume (Revision, Replay-Nonce, beide Audits) endet `release`
+nicht mehr mit einem Fehler — die Nachpruefungen liegen vollstaendig in
+`recheck()` direkt davor. Zweitens: eine wiederholte Freigabe fuer DIESELBE
+blockierende Referenz und DENSELBEN gepinnten Head wird beim Oeffnen und am
+Anfang von `release` fail-closed mit `EA-SKEW-ALREADY-RELEASED` verweigert,
+vor Praesenz und Audit. Ein neuer, weiterhin zu alter Zeitbeleg erlaubt genau
+eine weitere, jeweils signiert auditierte Freigabe; dieselben Bytes bleiben
+`EA-TRUST-CLOCK-RELEASE-REPLAY`, und der gewoehnliche Reopen mit der alten
+Referenz bleibt nach jedem Zyklus `EA-TRUST-FUTURE-SKEW`. Zeuge:
+`cargo test --locked -p einsatzarchiv-cli --test operator process_native::administration::clock_repair:: -- --test-threads=1`
+13/0/0 in 19 s seriell auf dem Endstand; in-process `ea-admin --test
+clock_release` 18/0/0 und `--lib` 84/0/0.
+
+Der aeltere Zeuge `native_clock_repair_after_actual_restart_gap`
+(`apps/cli/tests/operator_administration/mod.rs`, aus `f5aec07`) bleibt
+`#[ignore]`: er erwartet, dass der GEWOEHNLICHE Reopen nach dem Neustart
+gelingt, und widerspricht damit genau der FutureSkew-Grenze, die
+`clock_repair.rs` festhaelt. Sein Ignore-Grund nennt das jetzt und verweist
+auf den Ersatz.
 
 ## 5. Signierte Auditereignisse
 
@@ -194,7 +224,7 @@ Clock-Release, den Recovery-Test, den Re-Grant und die Vernichtung.
 | Admin- und Rootzeremonien | `crates/ea-admin/tests/root_ceremony.rs` (Audit je Veroeffentlichung; `ceremony_steps.rs` prueft nur die Schrittfolge) | 7/0/0 |
 | Stale-Registry-Quittung | `crates/ea-writer/tests/stale_registry_acknowledgement.rs` | 19/0/0 |
 | Export | `crates/ea-reader/tests/export.rs`, `audit_redaction.rs` (`PlaintextExport`) | 9/0/0 und 5/0/0 |
-| Clock-Release | `crates/ea-admin/tests/clock_release.rs::a_release_is_issued_once_consumed_once_and_replayed_never` (in-process) | 18/0/0; der native Pfad ist offen, siehe Abschnitt 4 |
+| Clock-Release | `crates/ea-admin/tests/clock_release.rs::a_release_is_issued_once_consumed_once_and_replayed_never` (in-process); nativ `process_native::administration::clock_repair::native_clock_only_restart_persists_audits_consumes_once_and_old_reference_still_blocks_normal_reopen` — `Login`/`Completed` und `ClockSkewRelease`/`Accepted` dauerhaft signiert gebucht, genau ein Consume; die Gegenproben `native_clock_repair_failed_login_audit_transaction_records_no_presence_and_releases_no_bytes` und `native_clock_repair_failed_release_audit_transaction_releases_no_bytes_and_no_consume` belegen, dass ohne dauerhaftes Audit nichts freigegeben wird | 18/0/0; nativ 13/0/0 |
 | Recovery-Test | `process_native::recovery::native_source_capture_binds_real_snapshot_machine_inventory_and_signed_audit_without_readiness` — die signierte `recoveryTest`-Zeile schreibt nur die native Laufzeit | 1/0/0 |
 | Re-Grant | `crates/ea-recovery/tests/historical_grant.rs` | 8/0/0 |
 | Vernichtung | `process_native::destruction::audit_repair::` und der Start-Audit in `process_native::destruction::` | 52/0/0 |
@@ -212,15 +242,13 @@ Serverprotokolle. Korrigiert: `privacy_canaries_writer.rs` (4/0/0) prueft nur
 fachliche Writer-Canaries, und `apps/cli/tests/safety_audit.rs` ist kein
 signiertes Auditereignis.
 
-Offen: das native Clock-Release-Audit (Abschnitt 4).
-
 ## 6. Geraete-Posture in drei Zustaenden
 
 | Zustand | Zusage | Zeuge | Stand |
 |---|---|---|---|
 | Pass | Oeffnet eine Produktionssitzung; der Stale-Writer verlangt genau dieses strikte Pass | `process_native::desktop::stale_writer_opens_only_on_measured_pass_never_on_unknown_or_fail` (nur mit `--features desktop-fixture`, neu mit `37a3301`) — echte Installation mit abgelaufener Registry: Pass oeffnet genau den Stale-Writer, jede der vier Anforderungen auf Unknown oder Fail endet mit `EA-OPERATOR-POSTURE`; die gewoehnliche Sitzung oeffnet bei Pass in `process_native::posture::` | 1/0/0 (1,9 s); 16/0/0 (25 s) |
 | Fail | Blockiert eine Produktionssitzung, ausnahmslos | `process_native::posture::each_failed_or_unresolved_posture_denies_a_real_native_session` — jede Anforderung auf Fail (und auf Unknown ohne Dokument) verweigert die native Sitzung mit `EA-OPERATOR-POSTURE`, `session_admitted == false`, Belegcode unveraendert. Dass Fail sich nicht dokumentieren laesst, belegt `process_native::posture_document::actual_cli_target_issue_import_uses_native_admin_and_real_host_measurements` auf dem Gate-Laeufer (Diag-Lauf 34876674848: `/dev/sda1` ohne `crypt`, FDE FAIL, Exit 12, kein `target.json`). Korrigiert: `operator_administration/host.rs` enthaelt keinen dieser Pfade | in 16/0/0 (25 s) |
-| Unknown | Bleibt fuer den Go-live sichtbar ungeloest, auch mit signiertem Dokument; darf aber eine Sitzung oeffnen | `process_native::posture_document::signed_native_posture_document_allows_admission_after_real_reopen_without_relabeling_unknown` (Sitzung oeffnet, `session_admitted`), `crates/ea-admin/src/go_live.rs::a_documented_unknown_posture_row_stays_unresolved_and_blocks_production_ready` und `crates/ea-key-provider/tests/device_posture.rs` (`DevicePostureProviderFake::unknown`) | in 16/0/0; `ea-admin --lib` 83/0/0; 7/0/0 |
+| Unknown | Bleibt fuer den Go-live sichtbar ungeloest, auch mit signiertem Dokument; darf aber eine Sitzung oeffnen | `process_native::posture_document::signed_native_posture_document_allows_admission_after_real_reopen_without_relabeling_unknown` (Sitzung oeffnet, `session_admitted`), `crates/ea-admin/src/go_live.rs::a_documented_unknown_posture_row_stays_unresolved_and_blocks_production_ready` und `crates/ea-key-provider/tests/device_posture.rs` (`DevicePostureProviderFake::unknown`) | in 16/0/0; `ea-admin --lib` 84/0/0; 7/0/0 |
 
 Keiner der beiden Zustaende `Fail` und `Unknown` DARF falsch etikettiert
 werden. Das ist die Zusage, an der dieser Abschnitt haengt, und der Grund, aus
@@ -236,7 +264,54 @@ FR-120, FR-121, FR-123, FR-124 und WR-075.
 
 **Hier und nur hier** bewegt sich der Ledger, ausschliesslich nach
 `implemented` oder `integrated`. Ein frueherer Wechsel macht das Stufengate
-rot; PR #22 hat deshalb keine Zeile bewegt.
+rot; PR #22 hat deshalb keine Zeile bewegt. DRK-282 bewegt achtzehn Zeilen;
+WR-075 bleibt `planned` (siehe `## Dokumentierte Grenzen`).
+
+**Die Regel `implemented` gegen `integrated`.** Sie folgt den Stufen 3 und 4
+und nicht einer eigenen Lesart: `integrated` heisst, der Beleg laeuft ueber
+einen KOMPONIERTEN Pfad — ein Systemziel unter `tests/ea-system-tests/`, ein
+Serverziel mit `xtask integration up` oder ein nativer Prozesszeuge
+`process_native::…` — UND keine benannte Produkthaelfte der Zeile ist offen
+(Stufe 4: AK-10, AK-42, WR-043, WR-053, WR-054, WR-082). `implemented` heisst,
+der Beleg ist ein Crate- oder In-Process-Zeuge, ODER eine benannte Haelfte
+bleibt offen (Stufe 3: AK-45 ohne Schreiber; Stufe 4: WR-041 nur die
+CODE-Seite, FR-085, FR-100, WR-063). Was global der Stufe 7 vorbehalten ist —
+native Minimal-/Maximalfaelle, quartalsweise Uebung, externe
+Datenschutzentscheidung, Custody der Produktionsschluessel — ist keine
+Produkthaelfte dieser Zeilen und senkt keine auf `implemented`.
+
+| Ledgerzeile | Neuer Status | Begruendung |
+|---|---|---|
+| `AK-11` | integrated | Systemziel `e2e_registry_effectiveness.rs` traegt die Widerrufsgrenze; offen ist nur die Stufe-7-Uebung |
+| `AK-12` | integrated | `e2e_historical_grant.rs` gegen den echten Server neben dem Crate-Zeugen der Auswahl |
+| `AK-18` | implemented | Einziger Produktzeuge ist `crates/ea-admin/tests/amendment.rs` in-process; `amendment.spec.ts` ist UI/IPC-Double |
+| `AK-24` | implemented | `registry_workflows.rs` und `stale_registry_acknowledgement.rs` sind Crate-Zeugen; kein komponierter Lauf traegt warn/block |
+| `AK-29` | implemented | `writer_role_guard.rs` ist Crate-Zeuge; kein nativer Profilzeuge |
+| `AK-30` | integrated | `process_native::destruction::` gegen TLS, PostgreSQL, S3 mit ObjectLock und SQLCipher, 52/0/0; der native Retry aus Zustand 4 (DRK-319) aendert nichts daran, dass alle erlaubten Zustaende korrekt abgebildet sind |
+| `AK-35` | integrated | Systemziel `e2e_registry_effectiveness.rs` und Serverziel `commit_failures.rs` mit `integration up` |
+| `AK-40` | integrated | Serverpfad `e2e_historical_grant.rs` neben `historical_grant.rs` und `grant_authorization.rs` |
+| `AK-41` | integrated | Nativer Zeuge `writer_evidence::native_writer_evidence_reopens_as_real_reader_authorized_destruction` oeffnet den echten `.eds` im Reader; die nativen Min-/Max-Faelle sind Stufe-7-Vorbehalt, keine offene Produkthaelfte |
+| `AK-44` | integrated | Drei Systemziele mit `integration up` fuer das Datenschutz-Gate, dazu die Go-live-Zeile aus denselben signierten Feldern (`2d52b5e`); die externe Entscheidung selbst ist Stufe-7-Vorbehalt |
+| `AK-47` | implemented | Die Transport-Fingerprint-Bindung haengt an WR-075 und bleibt bis DRK-318 offen — das WR-041-Muster |
+| `AK-49` | integrated | Systemziel plus `auth_trust_api.rs` und `commit_failures.rs` mit `integration up` |
+| `AK-52` | implemented | Die sechs nativen `process_native::recovery::guided::` sind `#[ignore]` (Fremdmaschine); der gefuehrte Pfad ist nativ nicht bezeugt |
+| `AK-53` | implemented | Transport-Fingerprint-Anteil an WR-075 (DRK-318) offen; `sessionExpired` (`96e0c3c`) ist geschlossen |
+| `FR-120` | implemented | `crates/ea-admin/tests/amendment.rs` in-process, wie AK 18 |
+| `FR-121` | implemented | Derselbe Zeuge liest Original-ID, -Hash, Sequenz, Grund und Ersteller aus verifizierten Bytes; in-process |
+| `FR-123` | implemented | Derselbe Zeuge, Originalbytes identisch; in-process |
+| `FR-124` | implemented | Derselbe Zeuge, zwei Nachtraege; in-process |
+
+Die Belegspalte jeder bewegten Zeile nennt die Zeugen aus Abschnitt 1 bzw. der
+Tabelle unten im Stil der Stufe-4-Zeilen (`Datei::Test; kurze Aussage`);
+`source`, `title` und die Kriteriumsspalten sind unveraendert. Mitgezogene
+Pins: KEINE. Die WR-Pin-Tabelle `WEB_READER_MUST_ROWS` in
+`tools/xtask/tests/stage_gate.rs` fuehrt `("WR-075", "7.5", "5", "planned")`,
+und das bleibt richtig; der D1-Pin auf die WR-075-Belegspalte
+(`organizationAdminAuthorization`, `2-of-N`) bleibt unberuehrt, weil die Zeile
+unberuehrt bleibt. Kein anderer xtask-Test pinnt Status oder Beleg einer der
+achtzehn Zeilen. Invertiert ist der Zeuge des eingecheckten Baums:
+`stage_five_gate_passes_the_checked_in_tree_with_wr_075_as_the_only_open_row`
+verlangt jetzt Exit 0 statt Exit 2.
 
 **Die fuenf Zeilen ohne primaeres Abnahmekriterium.** FR-120, FR-121, FR-123,
 FR-124 und WR-075 haben kein primaeres Kriterium (FR-120 bis FR-124 nennen
@@ -281,42 +356,39 @@ AK-48 stehen auf Stufe 2 `integrated` und decken nur die Profilzulassung in
 `#[ignore = "DRK-320: …"]` geparkt, ebenso der offene RED
 `cargo test -p ea-recovery --test fs_source_union`. Der tatsaechlich gemountete
 Netz-Positivzeuge bleibt Stufe-7-Evidenz.
-**Audit der abgelaufenen Sitzung — DRK-282, entschieden und umgesetzt.**
-Ruling Ruben vom 2026-09-19: `design.md` Zeile 2169 gilt unverändert, das
-Produkt wird ergänzt. Eine abgelaufene Sitzung wird VOR der Abweisung als
-eigene Aktion `sessionExpired` (Aktionscode 12, generischer Kontext) mit dem
-Ausgang `failed` signiert und dauerhaft gebucht; der Fehlercode der Abweisung
-bleibt `EA-CEREMONY-REAUTH-MISMATCH` bzw. `EA-OPERATOR-RUNTIME-EXPIRED`, und
-eine gescheiterte Buchung ändert an der Abweisung nichts. Die Aktion ist
-additiv (`local-audit.cddl` `0..12`, Codes 0..11 byteidentisch, neuer Vektor
-`accepted-session-expired`). Gebucht wird an der Wurzelzeremonie und in
-`OperatorRuntime::reauthenticate_with_context`, nicht in `ensure_current`, das
-je Aktion mehrfach läuft. Verbleibende Grenze: ein durch eine OS-Sperre
-entwerteter, aber noch nicht abgelaufener Nachweis wird an der Zeremonie
-weiterhin nur abgelehnt — es gibt keinen öffentlichen Leser für das Sperrbit,
-und das ist kein Ablauf. `administration_runtime/authorization.rs:118/:310`
+
+**Geschlossen mit DRK-282: die drei Produktluecken dieser Stufe.** Das Audit
+der abgelaufenen Sitzung als eigene Aktion `sessionExpired` (`96e0c3c`, Ruling
+vom 2026-09-19), der native Clock-Release samt beiden Auflagen des
+Security-Reviews (`5e055d0`, `59b08ac`, `8dae049`, Abschnitt 4) und die
+Go-live-Anforderung `EA-GOLIVE-EDS-PRIVACY-DECISION` aus der signierten
+`retention_policy` (`2d52b5e`, AK 44, aktivierte Vernichtung ohne Freigabe haelt
+`production_ready` auf `false`) sind umgesetzt und in den Abschnitten 1, 4 und 5
+bezeugt; sie sind keine Grenzen mehr.
+
+Zur Reichweite von `sessionExpired` bleibt festzuhalten, was KEIN Ablauf ist:
+ein durch eine OS-Sperre entwerteter, aber noch nicht abgelaufener Nachweis
+wird an der Zeremonie weiterhin nur abgelehnt — es gibt keinen oeffentlichen
+Leser fuer das Sperrbit. `administration_runtime/authorization.rs:118/:310`
 verwerfen Autorisierungsfenster, keine Bedienersitzung, und buchen deshalb
 keinen Ablauf.
 
-**Nativer Clock-Release — besitzendes Ticket DRK-282, Anwendung offen.**
-Siehe Abschnitt 4. Bis dahin
-fehlt das native Clock-Release-Audit aus Abschnitt 5.
+**Zwei buendelnde Systemziele aus Plan Task 14 nicht gebaut — besitzendes
+Ticket DRK-427 (S5-F9).** `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs`
+und `e2e_recovery_fresh_machine.rs` (siehe Abschnitt 3) gibt es nicht. Jede
+ihrer Einzelzusagen hat einen der dort aufgefuehrten Zeugen; es fehlt der EINE
+Lauf, der sie in einer Organisation bzw. auf einer frischen Maschine
+nacheinander ausfuehrt. Im Plan bleiben Task 14 Step 3 und Step 4 deshalb
+offen.
 
-**Zwei Systemziele aus Plan Task 14 nicht gebaut — besitzendes Ticket
-DRK-282.** `e2e_organization_lifecycle.rs` und `e2e_recovery_fresh_machine.rs`
-(siehe Abschnitt 3). Ihre Einzelzusagen haben die dort aufgefuehrten Zeugen;
-ob die beiden buendelnden Ziele vor dem Schliessen noch entstehen, ist offen.
-
-**Go-live-Bericht mit Einstufung zum Restnachweis — erledigt in DRK-282
-(Branch `drk-282-golive-privacy`).** `GoLiveChecklist` führt als sechzehnte
-Anforderung `EA-GOLIVE-EDS-PRIVACY-DECISION`, abgeleitet ausschließlich aus der
-Root-signierten `retention_policy` des gewählten Kopfes — denselben Feldern, die
-das Vernichtungs-Gate liest; Bericht und Gate können nicht auseinanderlaufen.
-Einstufung als Belegcode (`EA-GOLIVE-EVIDENCE-EDS-RESIDUAL-RELEASED`,
-`…-EDS-DESTRUCTION-DISABLED`, `…-EDS-PRIVACY-DECISION-MISSING`), Entscheidung als
-signierter Dokumenthash in der Zeile. Aktivierte Vernichtung ohne Freigabe hält
-`production_ready` auf `false`. Die externe Datenschutzentscheidung selbst und
-ihre rechtliche Bewertung bleiben Stufe 7.
+**Nativer Retry aus `incompleteUnreachableReplica` — besitzendes Ticket
+DRK-319.** Die Zustandsmaschine nimmt die Kante `incompleteUnreachableReplica`
+nach `inProgress` an (`crates/ea-destruction/tests/transitions.rs`), einen
+nativen Erzeuger dafuer gibt es in `crates/ea-admin/src/destruction_runtime/`
+noch nicht; das Ruling vom 2026-09-13 hat ihn aus dem ersten Stufe-5-PR in
+DRK-319 verschoben. Der Plan fuehrt die Kante weiter als Zusage, ihre native
+Erzeugung liegt bei DRK-319. AK 30 bleibt davon unberuehrt, weil alle
+erlaubten Zustaende korrekt abgebildet sind.
 
 **Der Stufe 7 vorbehalten.** Vier Dinge bleiben ausdruecklich ausserhalb dieser
 Stufe: die nativen Minimal- und Maximalfaelle, die quartalsweise Uebung, die
@@ -329,3 +401,13 @@ strukturell rot werden). DRK-324 fuehrt die Haertung der Reader-`ActionClock`
 als P3. DRK-323 ist mit `db08333` behoben und auf dem echten Laeufer belegt
 (RED `954fc7d` 28 von 30 Laeufen rot, GREEN `db08333` 0 von 30); dieses Gate
 fuehrt `bootstrap_root` deshalb NICHT mehr als lastabhaengig.
+Beim Nachmessen fuer diesen Bericht war der ERSTE Lauf von
+`cargo test --locked -p ea-admin --lib` rot: 83/1/0,
+`operator_exchange::tests::exchange_files_resume_exactly_and_never_replace_a_conflicting_reply`
+brach an `crates/ea-admin/src/operator_exchange.rs:686` mit `Err(Io)` ab
+(zweites, identisches `write_exchange_file`). Einzeln und in drei vollen
+Wiederholungen danach 84/0/0. Die Ursache ist NICHT geklaert; der Verdacht
+ist der nicht blockierende `try_lock` auf die Sperrdatei im gemeinsamen
+`temp_dir` unter paralleler Last. Ein gruener Wiederholungslauf belegt keinen
+Flake; der Befund steht hier, damit die Zahl 84/0/0 nicht mehr sagt, als
+gemessen ist.

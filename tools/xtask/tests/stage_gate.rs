@@ -3353,51 +3353,76 @@ fn mutate_stage_five_report(root: &Path, from: &str, to: &str) -> usize {
     hits
 }
 
-/// Haelt fest, dass `stage-gate 5` den eingecheckten Baum ABWEIST, solange die
-/// Belege nicht gemessen und die Ledgerzeilen nicht bewegt sind.
+/// Haelt fest, dass `stage-gate 5` den eingecheckten Baum ANNIMMT und dabei
+/// WR-075 als einzige offene Stufe-5-Zeile fuehrt.
 ///
-/// Das ist der RED dieser Stufe, und er ist bewusst als Test festgehalten und
-/// nicht bloss als Notiz: die achtzehn Zeilen sind die Arbeitsliste der Stufe,
-/// und wenn sie wandern, MUSS dieser Test invertieren. Wer ihn dann gruen
-/// sehen will, muss ihn bewusst umdrehen — und genau an dieser Stelle steht
-/// die Frage, ob die Belege wirklich vorliegen.
+/// Bis DRK-282 war das der RED dieser Stufe
+/// (`stage_five_gate_refuses_the_checked_in_tree_until_the_ledger_moves`):
+/// der Gate wies den Baum mit Exit 2 ab und nannte die achtzehn unbelegten
+/// Zeilen namentlich. Mit dem Schliessen der drei Produktluecken (`5e055d0`,
+/// `59b08ac`, `8dae049`, `96e0c3c`, `2d52b5e`) sind die achtzehn Zeilen auf
+/// `implemented` oder `integrated` gewandert, und der Test ist BEWUSST
+/// invertiert — mit der Begruendung je Zeile im Abschnitt `## Ledgerpflege`
+/// von `docs/traceability/stage-5-gate.md`.
 ///
-/// Die zweite Zusicherung ist die tragende: die dokumentierte Grenze steht
-/// NICHT in der Mangelliste. Eine bewusste Grenze und eine vergessene Zeile
-/// duerfen im Gate nicht dieselbe Form haben.
+/// Phase-1-Form der Stufe 4: der ECHTE Arbeitsbaum, Exit 0, JSON-Bericht. Die
+/// Mutationsproben darunter laufen weiter gegen Fixtures und bleiben rot.
+/// `evidenced_acceptance_criteria` ist eine Menge ueber das GANZE Ledger und
+/// wird deshalb nur auf ENTHALTEN der vierzehn geprueft, nie auf Gleichheit.
 #[test]
-fn stage_five_gate_refuses_the_checked_in_tree_until_the_ledger_moves() {
+fn stage_five_gate_passes_the_checked_in_tree_with_wr_075_as_the_only_open_row() {
     let output = run_stage_gate_in_the_workspace("5");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "stage-gate 5 must refuse the checked-in tree while the ledger is unmoved; \
-         stderr: {stderr}"
-    );
     assert!(
-        stderr.contains("requirement ledger rows still on planned"),
-        "the gate must say WHY it refuses; stderr: {stderr}"
+        output.status.success(),
+        "stage-gate 5 must accept the checked-in tree; stderr: {stderr}"
     );
-    // Die achtzehn unbelegten Zeilen, jede namentlich.
-    for identifier in [
-        "AK-11", "AK-12", "AK-18", "AK-24", "AK-29", "AK-30", "AK-35", "AK-40", "AK-41", "AK-44",
-        "AK-47", "AK-49", "AK-52", "AK-53", "FR-120", "FR-121", "FR-123", "FR-124",
-    ] {
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout must be JSON: {error}; stdout: {stdout}"));
+
+    assert_eq!(report["stage"], serde_json::json!(5));
+    assert_eq!(
+        report["stage_five_workstreams"],
+        serde_json::json!(STAGE_FIVE_WORKSTREAMS)
+    );
+    assert_eq!(
+        report["stage_five_primary_acceptance_criteria"],
+        serde_json::json!(STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA)
+    );
+    assert_eq!(
+        report["gate_report_acceptance_criteria"],
+        serde_json::json!(STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA),
+        "the gate report must carry exactly the fourteen criteria; stdout: {stdout}"
+    );
+    let evidenced = report["evidenced_acceptance_criteria"]
+        .as_array()
+        .expect("the gate must report the evidenced criteria");
+    for criterion in STAGE_FIVE_PRIMARY_ACCEPTANCE_CRITERIA {
         assert!(
-            stderr.contains(identifier),
-            "the gate must name {identifier} among the unevidenced rows; stderr: {stderr}"
+            evidenced.iter().any(|value| value == criterion),
+            "AK {criterion} must be evidenced by a moved ledger row; stdout: {stdout}"
         );
     }
-    // Und die Grenze NICHT.
-    let planned_clause = stderr
-        .split("requirement ledger rows still on planned:")
-        .nth(1)
-        .expect("the gate must carry the planned clause");
-    assert!(
-        !planned_clause.contains(STAGE_FIVE_DOCUMENTED_BOUNDARY),
-        "{STAGE_FIVE_DOCUMENTED_BOUNDARY} is a documented boundary and must never appear \
-         in the list of unevidenced rows; stderr: {stderr}"
+    assert_eq!(
+        report["stage_five_rows_without_primary_criterion"],
+        serde_json::json!(STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION)
+    );
+    // Die Grenze steht als Grenze da und NICHT als unbelegte Zeile.
+    assert_eq!(
+        report["stage_five_documented_boundaries"],
+        serde_json::json!([STAGE_FIVE_DOCUMENTED_BOUNDARY])
+    );
+    assert_eq!(
+        report["stage_five_rows_still_planned"],
+        serde_json::json!([] as [&str; 0]),
+        "no stage 5 ledger row other than the documented boundary may still be planned; \
+         stdout: {stdout}"
+    );
+    // Der Schluessel steht mit einem LEEREN Array da und fehlt nicht.
+    assert_eq!(
+        report["vector_families"],
+        serde_json::json!([] as [&str; 0])
     );
 }
 

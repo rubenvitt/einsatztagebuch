@@ -15,6 +15,15 @@
 > bleiben Gegenstand des kumulativen Gates. Die normative Spezifikation und die
 > Global Constraints gelten vollständig, einschließlich der zwei zusätzlichen
 > v1.1-Escrow-Aufgaben. Testdoubles allein schließen keinen Produktpfad.
+>
+> **Abschluss 2026-09-19 (DRK-282).** Die Haken der Tasks 8–14 sind dort
+> gesetzt, wo der Schritt belegt ist (Zeugen und Zahlen in
+> `docs/traceability/stage-5-gate.md`). Zwei Schritte bleiben bewusst offen:
+> Task 14 Step 3 und Step 4 (die bündelnden Systemziele
+> `e2e_organization_lifecycle` und `e2e_recovery_fresh_machine` sind nicht
+> gebaut, DRK-427). Der native Retry aus `incompleteUnreachableReplica`
+> (Task 12) ist per Ruling vom 13.09.2026 an DRK-319 verschoben; die Kante
+> bleibt Zusage dieses Plans.
 
 ## Global Constraints
 
@@ -1176,7 +1185,7 @@ und :264. Asynchron ist nur der Systemzeuge
 - Consumes: verified Entry and original Recovery grant (`VerifiedRecoveryEntry`), Recovery `RecoveryKem`, HGA `HistoricalGrantSigner`, `VerifiedGrantAuthorization`, recipient certificate, `effectiveNow` via `GrantRegistrySource`, fresh `OperatorSessionProof` via `GrantOperatorContext`, and `LocalAuditService`.
 - Produces: `HistoricalGrantService::create -> Result<ExactObjectBytes, HistoricalGrantError>` with no `.eip` mutation.
 
-- [ ] **Step 1: Write separation, explicit-target, and expiry tests**
+- [x] **Step 1: Write separation, explicit-target, and expiry tests**
 
 ```rust
 #[tokio::test]
@@ -1196,13 +1205,13 @@ async fn expiry_and_clock_rollback_block_creation_and_opening() {
 }
 ```
 
-- [ ] **Step 2: Run Re-grant tests and verify workflow is absent**
+- [x] **Step 2: Run Re-grant tests and verify workflow is absent**
 
 Run: `cargo test --locked -p ea-recovery --test historical_grant && cargo test --locked -p ea-system-tests --test e2e_historical_grant`
 
 Expected: FAIL because Authorization and historical grant creation are absent.
 
-- [ ] **Step 3: Implement separate proof-state inputs**
+- [x] **Step 3: Implement separate proof-state inputs**
 
 ```rust
 // crates/ea-recovery/src/historical_grant.rs:154-167 (gemessen 2026-09-13)
@@ -1223,13 +1232,13 @@ impl HistoricalGrantService {
 
 Authorization binds organization, Registry head/sequence, sorted explicit Entry hashes, recipient thumbprint/certificate, purpose, and `expiresAt`, with two valid active distinct-subject `historicalGrantApprove` signatures. Require native re-authentication specifically for `ReauthPurpose::HistoricalRegrant`, matching the active bound operator and current device; no generic Admin or Recovery session proof is accepted. Recompute `effectiveNow`; decapsulate CEK only from original initial Recovery grant in protected memory; HPKE-wrap to selected Reader; sign with capability `historicalGrant`; bind original Recovery grant and Authorization hashes. Zero CEK. Preserve exact `.eip` bytes. Before releasing the new grant, flush a signed `historicalRegrant` local audit event containing only Authorization, Entry, original Recovery grant, recipient certificate, and new grant hashes plus outcome. Server and Reader Stage 3/4 checks close acceptance/delivery/open expiry.
 
-- [ ] **Step 4: Run end-to-end create/upload/deliver/open and replay-after-expiry tests**
+- [x] **Step 4: Run end-to-end create/upload/deliver/open and replay-after-expiry tests**
 
 Run: `cargo test --locked -p ea-recovery --test historical_grant && cargo test --locked -p ea-system-tests --test e2e_historical_grant`
 
 Expected: PASS; wrong Entry/recipient/Registry/original grant, duplicate subjects, or expired/replayed authorization fails at every boundary.
 
-- [ ] **Step 5: Commit historical re-grant**
+- [x] **Step 5: Commit historical re-grant**
 
 ```bash
 git add crates/ea-recovery crates/ea-trust crates/ea-admin crates/ea-verify crates/ea-sync-server crates/ea-reader apps/cli apps/server tests/ea-system-tests
@@ -1286,7 +1295,7 @@ geführten Proben in `guided.rs` (:151, :197, :244, :376, :451, :514) sind
 - Consumes: independent anchor, unchanged archive copy, `ea.key-inventory/v1`, each explicit backup source, fresh `ReauthPurpose::RecoveryTest` proof, and `LocalAuditService`.
 - Produces: `RecoveryTestRun` with `RecoveryRunOutcome` (`ea-recovery`), driven natively by `RecoveryTestRuntime` (`ea-admin`), per-medium results, overall success only if complete, signed or hashed cleartext-free report, and durable signed audit reference.
 
-- [ ] **Step 1: Write incomplete-inventory and challenge-domain tests**
+- [x] **Step 1: Write incomplete-inventory and challenge-domain tests**
 
 ```rust
 #[tokio::test]
@@ -1304,19 +1313,19 @@ async fn signature_backup_signs_only_recovery_test_domain() {
 }
 ```
 
-- [ ] **Step 2: Run Recovery test tests and verify workflow is absent**
+- [x] **Step 2: Run Recovery test tests and verify workflow is absent**
 
 Run: `cargo test --locked -p ea-recovery --test recovery_test && pnpm --dir apps/desktop test --run RecoveryTestWizard`
 
 Expected: FAIL because key inventory/test/report/UI do not exist.
 
-- [ ] **Step 3: Implement read-only full-inventory verification**
+- [x] **Step 3: Implement read-only full-inventory verification**
 
 Verify anchor, full archive/head/Trust/Registry, and deterministic sample from every schema/suite/Writer epoch. For each Root/Admin/Writer/Reader/Recovery/server/Approver/HGA/`deletionAttest` backup, derive public key and compare expected thumbprint/certificate. Sign only a random recovery-test domain challenge for signing keys. For every Recovery backup, open the unchanged setup test Entry in protected memory, validate it, display no plaintext, then zero CEK/plaintext/challenge. For non-exportable device/hardware keys, test provider access, native presence, and certificate binding instead of export.
 
 Report binds test ID, anchor hash, archive head, `effectiveNow`, release/schema/suite versions, pseudonymous medium ID, expected/observed thumbprint, test kind/result, and overall result. No private key or decrypted payload. After report hash/signature verification, record and flush a signed `recoveryTest` local audit event containing only the report hash and overall outcome; bind its event ID into the encrypted local status. UI prompts one medium at a time, shows individual result, and updates last/next-due status only after complete success and audit persistence.
 
-- [ ] **Step 4: Run all key-profile, wrong-media, cleartext, and UI E2E tests**
+- [x] **Step 4: Run all key-profile, wrong-media, cleartext, and UI E2E tests**
 
 Run:
 
@@ -1328,7 +1337,7 @@ pnpm --dir apps/desktop exec playwright test tests/e2e/recovery.spec.ts
 
 Expected: PASS; archive/Registry/grants/key status remain byte-for-byte unchanged.
 
-- [ ] **Step 5: Commit guided Recovery testing**
+- [x] **Step 5: Commit guided Recovery testing**
 
 ```bash
 git add crates/ea-recovery crates/ea-admin apps/desktop apps/desktop/tests/e2e apps/cli schemas/reports
@@ -1377,7 +1386,7 @@ Das Playwright-Kommando löst relativ zu `apps/desktop` korrekt auf
 - Consumes: Stage 4 `CorrectionReference`, Writer draft/finalization, verified Reader thread.
 - Produces: `AmendmentDraftService::create_from_reference` and a normal immutable `amendment` Entry.
 
-- [ ] **Step 1: Write exact-reference and original-preservation tests**
+- [x] **Step 1: Write exact-reference and original-preservation tests**
 
 ```rust
 #[tokio::test]
@@ -1390,23 +1399,23 @@ async fn amendment_finalization_preserves_original_bytes_and_links_exactly() {
 }
 ```
 
-- [ ] **Step 2: Run amendment tests and verify Writer half is absent**
+- [x] **Step 2: Run amendment tests and verify Writer half is absent**
 
 Run: `cargo test --locked -p ea-admin --test amendment && pnpm --dir apps/desktop exec playwright test tests/e2e/amendment.spec.ts`
 
 Expected: FAIL because correction-reference import and amendment draft UI do not exist.
 
-- [ ] **Step 3: Implement normal Writer amendment finalization**
+- [x] **Step 3: Implement normal Writer amendment finalization**
 
 Accept only a verified cleartext-free reference with original ID/hash/sequence, then require Writer to enter reason and structured change text; operator snapshot is current signed binding. Validate original exists and reference matches. Use normal review, irreversibility confirmation, grant plan, encryption, commit, and sync path. Reader groups all amendments without hiding/replacing original.
 
-- [ ] **Step 4: Run multiple-amendment, wrong-reference, and original-byte tests**
+- [x] **Step 4: Run multiple-amendment, wrong-reference, and original-byte tests**
 
 Run: `cargo test --locked -p ea-admin --test amendment && pnpm --dir apps/desktop exec playwright test tests/e2e/amendment.spec.ts`
 
 Expected: PASS; arbitrary plain reference text cannot forge a link.
 
-- [ ] **Step 5: Commit amendment workflow**
+- [x] **Step 5: Commit amendment workflow**
 
 ```bash
 git add crates/ea-admin crates/ea-writer apps/desktop apps/desktop/tests/e2e apps/web
@@ -1460,7 +1469,7 @@ Step 4 ist im Sinne der Korrektur oben zu lesen: v1 trägt kein `expiresAt`.
 - Consumes: two active `destructionApprove` signers, Registry/time, documented privacy-enable policy, fresh `ReauthPurpose::Destruction` operator proof, and `LocalAuditService`.
 - Produces: `VerifiedDestructionAuthorization`, `DestructionStateMachine::apply`, exact allowed transitions, idempotent event IDs, and signed local audit reference.
 
-- [ ] **Step 1: Write privacy gate, two-Approver, and transition-table tests**
+- [x] **Step 1: Write privacy gate, two-Approver, and transition-table tests**
 
 ```rust
 #[test]
@@ -1486,13 +1495,13 @@ fn requested_transition_requires_matching_reauth_and_durable_audit() {
 }
 ```
 
-- [ ] **Step 2: Run destruction-core tests and verify failure**
+- [x] **Step 2: Run destruction-core tests and verify failure**
 
 Run: `cargo test --locked -p ea-destruction --test authorization --test transitions --test requests`
 
 Expected: FAIL because destruction authorization/state machine do not exist.
 
-- [ ] **Step 3: Implement closed states and event validation**
+- [x] **Step 3: Implement closed states and event validation**
 
 Authorization binds destruction ID, organization, Registry head/sequence, sorted
 target Entry hashes plus sequences, scope, nonfachlicher legal-reason code, and
@@ -1512,13 +1521,13 @@ Creating `requested` additionally requires a fresh native operator proof for `De
 
 Implement only: `None→requested`; `requested→inProgress`; `inProgress→pendingBackupExpiry|completeManagedScope|incompleteUnreachableReplica`; `pendingBackupExpiry→completeManagedScope|incompleteUnreachableReplica`; `incompleteUnreachableReplica→inProgress`. After `inProgress`, there is no cancel. Duplicate identical event is idempotent; same ID/hash with different bytes is a Security Event.
 
-- [ ] **Step 4: Run all valid/invalid/replay transition tests**
+- [x] **Step 4: Run all valid/invalid/replay transition tests**
 
 Run: `cargo test --locked -p ea-destruction --test authorization --test transitions --test requests`
 
 Expected: PASS; one Approver, duplicate subject, wrong capability/target, stale Registry, and expired/invalid signatures fail (expired meaning expired or revoked signers, since v1 carries no `expiresAt`).
 
-- [ ] **Step 5: Commit destruction state core**
+- [x] **Step 5: Commit destruction state core**
 
 ```bash
 git add crates/ea-destruction Cargo.toml Cargo.lock
@@ -1646,7 +1655,7 @@ Rulings vom 13.09.2026:
 - Consumes: verified authorization, managed replica adapters, archive transaction, server delivery block, Writer finalization.
 - Produces: `SqliteDestructionJobs::start_execution` and `DestructionRequestService::{resume,resume_historical}` (in place of `DestructionExecutor::{plan,resume}`), exact `.eds`, `ea_format::DeletionAttestationFieldsV1` verified as `VerifiedDeletionAttestation`, and later `destructionEvidence` draft.
 
-- [ ] **Step 1: Write Stub continuity and restart tests**
+- [x] **Step 1: Write Stub continuity and restart tests**
 
 ```rust
 #[test]
@@ -1667,19 +1676,19 @@ async fn restart_resumes_same_destruction_id_without_duplicate_delete() {
 }
 ```
 
-- [ ] **Step 2: Run Stub/resume tests and verify executor is absent**
+- [x] **Step 2: Run Stub/resume tests and verify executor is absent**
 
 Run: `cargo test --locked -p ea-destruction --test stub --test preflight --test requests && cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator process_native::destruction:: -- --test-threads=1`
 
 Expected: FAIL because Stub/attestation/executor do not exist.
 
-- [ ] **Step 3: Implement verify-before-delete and attested distributed execution**
+- [x] **Step 3: Implement verify-before-delete and attested distributed execution**
 
 Accept authorization, block server delivery/re-grant, verify full pre-state and sign report, then per managed replica remove ciphertext, all grants, plaintext cache/index or schedule immutable backup expiration. Before removing each original `.eip`, create/flush/verify exact `.eds` containing original signed manifest/signature bytes, Entry/ciphertext/original object hashes, destruction ID, and Authorization hash. Remove `.eip` only after Stub durability. Collect signed attestations with pseudonymous replica ID/type, removed object hashes, result, backup deadline, and execution time.
 
 Reconstruct current state and next action only from authorization/events/attestations; idempotently resume the same ID. Use `pendingBackupExpiry` while immutable deadlines remain, `incompleteUnreachableReplica` for known unreachable/unattested replicas, and `completeManagedScope` only when every managed object/cache is confirmed gone and every deadline elapsed. Prepare `destructionEvidence` with successes, pending/unreachable replicas, Stub hashes, and attestations; finalize through normal Writer flow. Never claim unknown exports/screenshots removed.
 
-- [ ] **Step 4: Run immediate, backup-expiry, unreachable, invalid-Stub, and replay tests**
+- [x] **Step 4: Run immediate, backup-expiry, unreachable, invalid-Stub, and replay tests**
 
 Run:
 
@@ -1693,7 +1702,7 @@ cargo test --locked -p ea-system-tests --test e2e_destruction_policy --test e2e_
 
 Expected: PASS; unauthorized file removal is never authorized destruction: a Stub without authorizing verification is `UnexplainedGap`, and a removed `.eip` without a Stub is a sequence gap without a state row. The three system targets are admission witnesses only; the physical branches run in the CLI target, whose Reader/OPFS witness needs the `build-wasm` package first (see Nachmessung 2026-09-14).
 
-- [ ] **Step 5: Commit destruction executor**
+- [x] **Step 5: Commit destruction executor**
 
 ```bash
 git add crates/ea-destruction crates/ea-admin crates/ea-verify crates/ea-sync-server crates/ea-reader crates/ea-writer apps/cli apps/server tests/ea-system-tests
@@ -1766,7 +1775,7 @@ laufen unter `process_native::destruction::desktop::` mit `--features desktop-fi
 - Consumes: policy privacy decision, two-Approver authorization import, destruction state/report DTOs, re-authentication.
 - Produces: explicit irreversible process UI using exact German state copy.
 
-- [ ] **Step 1: Write disabled/privacy and state-copy tests**
+- [x] **Step 1: Write disabled/privacy and state-copy tests**
 
 ```tsx
 it('cannot start when the documented privacy decision is absent', async () => {
@@ -1786,17 +1795,17 @@ it.each([
 })
 ```
 
-- [ ] **Step 2: Run UI tests and verify components are absent**
+- [x] **Step 2: Run UI tests and verify components are absent**
 
 Run: `pnpm --dir apps/desktop exec vitest run src/features/admin/DestructionWizard.test.tsx src/features/admin/DestructionStatus.test.tsx`
 
 Expected: FAIL because destruction UI does not exist.
 
-- [ ] **Step 3: Implement deliberate, non-overclaiming workflow**
+- [x] **Step 3: Implement deliberate, non-overclaiming workflow**
 
 Require target hashes/sequences, scope, nonfachlicher legal-reason code, known storage locations, two Approver signature imports, fresh native re-authentication, and final irreversible confirmation. Show verified pre-report, every replica/attestation, backup deadline, unreachable status, Stub/Evidence state, and exact managed-scope limitation. After `inProgress`, offer resume only, never cancel. Do not display deleted payload or claim physical/WORM/backup deletion without a valid attestation.
 
-- [ ] **Step 4: Run keyboard, restart, pending-backup, and unreachable E2E tests**
+- [x] **Step 4: Run keyboard, restart, pending-backup, and unreachable E2E tests**
 
 Run:
 
@@ -1810,7 +1819,7 @@ cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test opera
 
 Expected: PASS; UI returns to the reconstructed same process after restart. The Playwright target is an IPC double where restart means reload; native restart runs in the CLI target (see Nachmessung).
 
-- [ ] **Step 5: Commit destruction UI workstream**
+- [x] **Step 5: Commit destruction UI workstream**
 
 ```bash
 git add apps/desktop apps/desktop/tests/e2e apps/cli/tests/operator_destruction/desktop pnpm-lock.yaml
@@ -1921,7 +1930,7 @@ Pfade und die Testskizze; keine Zusage entfällt.
 - Consumes: all three Stage 5 workstreams plus Writer/Reader/server.
 - Produces: `xtask stage-gate 5` and evidence for primary AK 11, 12, 18, 24, 29, 30, 35, 40, 41, 44, 47, 49, 52, 53.
 
-- [ ] **Step 1: Write cumulative Stage 5 gate test**
+- [x] **Step 1: Write cumulative Stage 5 gate test**
 
 ```rust
 // Skizze in der Prozessform der Stufe 4 (tools/xtask/tests/stage_gate.rs:2873-2890):
@@ -1941,7 +1950,7 @@ fn stage_five_gate_requires_all_workstreams_and_primary_criteria() {
 }
 ```
 
-- [ ] **Step 2: Run the gate and confirm missing evidence fails**
+- [x] **Step 2: Run the gate and confirm missing evidence fails**
 
 Run: `cargo test --locked -p xtask --test stage_gate stage_five`
 
@@ -1971,7 +1980,7 @@ cargo run --locked -p xtask -- integration down
 
 Expected: PASS locally; full native/release/manual evidence remains explicitly open for Stage 7. `pnpm test:recovery` is the full workspace test run; the physical destruction branches run in the CLI `operator` target, not in the three admission system targets.
 
-- [ ] **Step 5: Commit the Stage 5 gate**
+- [x] **Step 5: Commit the Stage 5 gate**
 
 ```bash
 git add tests docs/traceability tools/xtask package.json
