@@ -5,6 +5,7 @@ import subprocess
 import sys
 import select
 import signal
+import socket
 import time
 
 binary = os.path.abspath(sys.argv[1])
@@ -52,7 +53,17 @@ def frame(pipe, timeout=1):
 for case in ("fresh", "replay", "duplicate-key", "unknown", "uppercase", "short", "oversize", "pipelined", "partial", "stopped",
              "stalled-native", "lock-on-challenge", "challenge-expiry", "exact-limit", "fragmented"):
     mode = case if case in ("stalled-native", "lock-on-challenge", "challenge-expiry") else "challenge"
-    run = subprocess.Popen([binary, mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    # The stalled fixture reports its stall on this barrier and waits for the
+    # release, so the check below does not depend on a wall-clock window.
+    barrier, fixture_end = socket.socketpair() if case == "stalled-native" else (None, None)
+    extra = {} if fixture_end is None else {
+        "pass_fds": (fixture_end.fileno(),),
+        "env": {**os.environ, "EA_WATCH_BARRIER_FD": str(fixture_end.fileno())},
+    }
+    run = subprocess.Popen([binary, mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                           **extra)
+    if fixture_end is not None:
+        fixture_end.close()
     nonce = "12" * 32
     payload = json.dumps({"challenge": nonce}, separators=(",", ":")).encode() + b"\n"
     try:
@@ -73,10 +84,17 @@ for case in ("fresh", "replay", "duplicate-key", "unknown", "uppercase", "short"
             assert not select.select([run.stdout], [], [], 1.1)[0], "stopped subscriber acknowledged"
             os.kill(run.pid, signal.SIGCONT)
             assert frame(run.stdout) == invalidated, "resume rehabilitated stopped watch"
-        elif case in ("stalled-native", "lock-on-challenge"):
+        elif case == "stalled-native":
             run.stdin.write(payload)
-            if case == "stalled-native":
-                assert not select.select([run.stdout], [], [], 1)[0], "stalled native callback acknowledged"
+            assert select.select([barrier], [], [], 5)[0] and barrier.recv(1) == b"S", "native callback never stalled"
+            # The fixture is blocked inside the drain before the ACK; any frame
+            # already written would be an acknowledgement ahead of that drain.
+            assert not select.select([run.stdout], [], [], 0)[0], "challenge acknowledged before native event drain"
+            barrier.sendall(b"R")
+            # Whatever the fixture writes next must be terminal, never an ACK.
+            assert frame(run.stdout, 5) == invalidated, "stalled native callback acknowledged"
+        elif case == "lock-on-challenge":
+            run.stdin.write(payload)
             assert frame(run.stdout) == invalidated, "challenge bypassed native event drain"
         elif case == "challenge-expiry":
             started = time.monotonic()
@@ -117,4 +135,6 @@ for case in ("fresh", "replay", "duplicate-key", "unknown", "uppercase", "short"
             run.wait()
         for pipe in (run.stdin, run.stdout, run.stderr):
             pipe.close()
+        if barrier is not None:
+            barrier.close()
 print(json.dumps({"ok": True, "watch_protocol_tests": checks}, separators=(",", ":")))

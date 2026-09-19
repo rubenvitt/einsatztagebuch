@@ -226,8 +226,27 @@ final class FixtureWatchEvents: WatchEvents {
         checks += 1
         if checks == 3 && mode == "lock-unlock" { latch?.invalidate(); latch?.invalidate() }
         if checks == 3 && mode == "lost" { throw Failure("watch-unavailable") }
-        if checks == 3 && mode == "stalled-native" { Thread.sleep(forTimeInterval: 1.1) }
+        if checks == 2 && mode == "stalled-native" { awaitChallenge() }
+        if checks == 3 && mode == "stalled-native" { stall() }
         if checks == 3 && mode == "lock-on-challenge" { latch?.invalidate() }
+    }
+    // Check 2 is the first loop drain after readiness. Holding it until the
+    // challenge bytes are queued makes check 3 the drain inside the challenge
+    // branch, i.e. the one that runs before any acknowledgement.
+    private func awaitChallenge() {
+        var input = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+        _ = poll(&input, 1, 5_000)
+    }
+    // The test observes the stall on the barrier, checks that nothing was
+    // acknowledged, and releases it. The stall then lasts at least 1.1 s on
+    // the session's own clock, so it always exceeds the one-second budget.
+    private func stall() {
+        let started = WatchClock.now()
+        guard let text = ProcessInfo.processInfo.environment["EA_WATCH_BARRIER_FD"],
+              let barrier = Int32(text) else { return }
+        var byte: UInt8 = 83 // "S"
+        guard Darwin.write(barrier, &byte, 1) == 1, Darwin.read(barrier, &byte, 1) == 1 else { return }
+        while WatchClock.now() - started < 1.1 { Thread.sleep(forTimeInterval: 0.05) }
     }
     func cancel() { latch = nil }
 }
