@@ -1,11 +1,11 @@
 //! Purpose-only native Clock repair. No ordinary operator authority is returned.
 use super::*;
 use ea_archive::ArchiveSource;
-use ea_audit::{AuditError, SignedLocalAuditEvent};
+use ea_audit::{AuditError, ClockRepairAuditService, SignedLocalAuditEvent};
 use ea_format::ClockReleaseJustificationV1;
 use ea_trust::ClockReleaseError;
 use ea_trust::{ClockRepairRegistryAuthority, verify_clock_repair_authority};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 pub enum ClockRepairRuntimeError {
     Runtime(OperatorRuntimeError),
@@ -90,12 +90,24 @@ impl ClockRepairRuntime {
         anchor: &Path,
         native: Arc<NativeOperatorProvider>,
     ) -> Result<Self, ClockRepairRuntimeError> {
-        Self::open_using(
+        Self::open_with_test_native_and_posture(
             config,
             anchor,
-            |_| Ok(native),
+            native,
             Arc::new(super::FixturePassingPosture),
         )
+    }
+    /// Nur für Fixtures: der installierte Pfad wählt immer den tatsächlichen
+    /// Host-Adapter und kann keinen Bericht aus Konfiguration übernehmen.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn open_with_test_native_and_posture(
+        config: OperatorRuntimeConfig,
+        anchor: &Path,
+        native: Arc<NativeOperatorProvider>,
+        posture: Arc<dyn DevicePostureProvider>,
+    ) -> Result<Self, ClockRepairRuntimeError> {
+        Self::open_using(config, anchor, |_| Ok(native), posture)
     }
     fn open_using(
         config: OperatorRuntimeConfig,
@@ -234,12 +246,145 @@ impl ClockRepairRuntime {
     }
     pub fn release(
         self,
-        _justification: ClockReleaseJustificationV1,
+        justification: ClockReleaseJustificationV1,
     ) -> Result<CompletedClockRepair, ClockRepairRuntimeError> {
         self.recheck()?;
-        Err(ClockRepairRuntimeError::Runtime(
-            OperatorRuntimeError::Expired,
-        ))
+        let r = &self.resources;
+        let profile = crate::operator_profile::load(&r.database)
+            .map_err(OperatorRuntimeError::from)?
+            .ok_or(OperatorRuntimeError::Config)?;
+        let public = r
+            .native
+            .public_key(NativeSigningSlot::Admin)
+            .map_err(OperatorRuntimeError::from)?
+            .ok_or(OperatorRuntimeError::SignerMismatch)?;
+        let local = ea_operator::ClockRepairProfileSnapshot {
+            organization_id: profile.organization_id(),
+            operator_subject_id: profile.operator_subject_id(),
+            binding_hash: profile.operator_binding_object_hash(),
+            display_name: profile.display_name(),
+            function_label: profile.function_label(),
+            salt: profile.profile_commitment_salt(),
+        };
+        let failure = RefCell::new(None);
+        let proof = ea_operator::authenticate_clock_repair(
+            &self.authority,
+            r.native.as_ref(),
+            &public,
+            &local,
+            |challenge| {
+                let check = || {
+                    self.recheck().map_err(|error| {
+                        failure.replace(Some(error));
+                        OperatorError::PresenceProofInvalid
+                    })
+                };
+                check()?;
+                let signature =
+                    OperatorPresence::prove_presence_and_sign(r.native.as_ref(), challenge)?;
+                check()?;
+                Ok(signature)
+            },
+        );
+        if let Some(error) = failure.into_inner() {
+            return Err(error);
+        }
+        let proof = proof.map_err(OperatorRuntimeError::from)?;
+        let expires = proof.expires_at();
+        let audit = ClockRepairAuditService::new(
+            Arc::new(SqliteLocalAuditRepository::new(r.database.clone())),
+            r.signer.clone(),
+            r.signer.handle(SecretPurpose::WriterSigningKey),
+        );
+        let login = self.checked_audit(|check| audit.record_login_checked(&proof, check))?;
+        if !proof.is_valid_at(self.recheck()?) {
+            return Err(OperatorRuntimeError::Expired.into());
+        }
+        r.native
+            .record_verified_clock_presence(&proof, &login)
+            .map_err(OperatorRuntimeError::from)?;
+        let release = self.checked_audit(|check| {
+            audit.record_release_checked(proof, &login, justification, check)
+        })?;
+        if self.recheck()? >= expires {
+            return Err(OperatorRuntimeError::Expired.into());
+        }
+        self.consume_exact_release(&release)?;
+        // The selector consumed one exact evaluation; never return its general
+        // authority. Reopening with the same old reference remains blocked.
+        self.check_local()?;
+        if fresh_wall_clock()? >= expires {
+            return Err(OperatorRuntimeError::Expired.into());
+        }
+        Ok(CompletedClockRepair {
+            login: login.into_event(),
+            release,
+        })
+    }
+
+    fn checked_audit<T>(
+        &self,
+        operation: impl FnOnce(
+            &mut dyn FnMut() -> Result<UnixMillis, AuditError>,
+        ) -> Result<T, AuditError>,
+    ) -> Result<T, ClockRepairRuntimeError> {
+        let mut failure = None;
+        let result = operation(&mut || {
+            self.recheck().map_err(|error| {
+                failure = Some(error);
+                AuditError::SessionExpired
+            })
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(result?)
+    }
+
+    fn consume_exact_release(
+        &self,
+        release: &SignedLocalAuditEvent,
+    ) -> Result<(), ClockRepairRuntimeError> {
+        // Reconstruct the audit's original blocked evaluation only for the
+        // unchanged historical verifier and one-use CAS selector. Fresh live
+        // issuance has already been rechecked; this is never current admission.
+        let audit = ea_format::decode_clock_release_audit(release.exact_bytes())
+            .map_err(|_| ClockReleaseError::Mismatch)?;
+        let snapshot = &self.resources.snapshot;
+        let mut store = self.resources.store.clone();
+        let key = TrustStateKey {
+            organization_id: snapshot.anchor.organization_id(),
+            device_id: self.resources.device_id,
+        };
+        let trust = verify_trust(
+            &snapshot.anchor,
+            &snapshot.inventory,
+            load_trust_state(&mut store, key).map_err(OperatorRuntimeError::from)?,
+        )
+        .map_err(OperatorRuntimeError::from)?;
+        let candidate = verify_registry_candidate(&trust, snapshot.next_sequence)
+            .map_err(OperatorRuntimeError::from)?;
+        let sources = signed_times(snapshot, &candidate);
+        let mut block = prepare_local_time(
+            &mut store,
+            &candidate,
+            audit.context().observed_os_wall_clock(),
+            &sources,
+        )
+        .map_err(OperatorRuntimeError::from)?;
+        self.authority.require_same_state(&candidate, &block)?;
+        let release =
+            ea_trust::verify_clock_release(&candidate, &mut block, release.exact_bytes())?;
+        match select_registry_head(candidate, block, Some(release))
+            .map_err(OperatorRuntimeError::from)?
+        {
+            RegistrySelectionOutcome::Selected(head)
+                if head.registry_head_hash() == self.authority.registry_head_hash() =>
+            {
+                Ok(())
+            }
+            _ => Err(ClockReleaseError::Mismatch.into()),
+        }
     }
 }
 fn signed_times(

@@ -21,6 +21,13 @@ impl ClockRepairLogin {
     pub fn event(&self) -> &SignedLocalAuditEvent {
         &self.event
     }
+    pub fn into_event(self) -> SignedLocalAuditEvent {
+        self.event
+    }
+    /// Exact durable Login/Completed belongs to this native Clock presence.
+    pub fn matches_presence(&self, session: &ClockRepairSession<'_>) -> bool {
+        self.subject == session.login_subject_hash()
+    }
 }
 pub struct ClockRepairAuditService {
     repository: Arc<dyn LocalAuditRepository>,
