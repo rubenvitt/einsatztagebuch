@@ -58,7 +58,11 @@ pub struct Registry<'a> {
 }
 impl GrantRegistrySource for Registry<'_> {
     fn current_head(&self) -> Result<ea_trust::SelectedRegistryHead, HistoricalGrantError> {
-        Ok(self.fixture.selected(1, self.now.get(), self.now.get()))
+        Ok(self.fixture.selected(
+            self.fixture.current_sequence,
+            self.now.get(),
+            self.now.get(),
+        ))
     }
 }
 struct Provider(InMemoryKeyProvider);
@@ -129,7 +133,7 @@ impl Harness {
             ea_types::UnixMillis::new(800),
         )
         .unwrap();
-        let head = f.selected(1, 800, 800);
+        let head = f.selected(f.current_sequence, 800, 800);
         let proof = Authenticator(BoundOperator::resolve(&head, f.operator_binding).unwrap())
             .reauthenticate(Box::new(Account), ReauthPurpose::HistoricalRegrant)
             .unwrap();

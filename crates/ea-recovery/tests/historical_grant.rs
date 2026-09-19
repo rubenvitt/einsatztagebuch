@@ -525,3 +525,146 @@ fn a_new_reader_opens_the_selected_old_entry_only_after_the_recovery_regrant() {
         "derselbe Eintrag, dieselben Bytes: {report:?}"
     );
 }
+
+/// AK 12, die AUSWAHL: von ZWEI alten Einträgen öffnet der neue Reader nach
+/// dem Re-Grant genau den ausgewählten; der nicht ausgewählte bleibt zu.
+///
+/// Die Einträge liegen an Sequenz 0 und 1, beide vor der Aufnahme des Readers
+/// (wirksam ab Sequenz 2), beide nur mit ihrem ursprünglichen Recovery-Grant.
+/// Die Autorisierung nennt ausschließlich den ersten. Gemessen wird wie im
+/// Einzeleintragszeugen an der Empfängerstufe von `verify_archive_observed`.
+///
+/// Zusätzlich öffnet ein DRITTER Schlüssel ohne jeden Grant dasselbe Archiv:
+/// der historische Grant des neuen Readers darf ihm weder zugeschrieben noch
+/// für ihn entkapselt werden. Das ist der Empfängerfilter der historischen
+/// Hälfte in `crates/ea-verify/src/archive.rs` (`claim_own_grants`,
+/// `f.recipient_key_thumbprint == recipient.key_thumbprint()`).
+#[test]
+fn of_two_old_entries_only_the_selected_one_opens_for_the_new_reader_after_the_regrant() {
+    struct Decapsulations(usize);
+    impl ea_verify::GateObserver for Decapsulations {
+        fn on_gate(&mut self, _: ea_verify::Gate) {}
+        fn on_decapsulation(&mut self) {
+            self.0 += 1;
+        }
+    }
+    let h = Harness::new(fixture::historical::fixture_with_two_old_entries(
+        fixture::COMPLETE_PLAINTEXT_V1,
+    ));
+    let f = &h.fixture;
+    let second = f
+        .second_old_entry
+        .as_ref()
+        .expect("die Fixture trägt einen zweiten alten Eintrag");
+    assert!(second.entry_hash != f.entry_hash);
+    let stored = [
+        (
+            h.root.path().join("archive/entries/000000000000_entry.eip"),
+            &f.entry_bytes,
+        ),
+        (
+            h.root.path().join("archive/entries/000000000001_entry.eip"),
+            &second.entry_bytes,
+        ),
+    ];
+    let entry_objects = [
+        object_hash(&f.entry_bytes),
+        object_hash(&second.entry_bytes),
+    ];
+    let reader = fixture::other_recipient_private_key();
+    let stranger =
+        ea_crypto::HpkeRecipientPrivateKey::from_bytes(ea_crypto::SecretBytes::new([0x7a; 32]))
+            .unwrap();
+    let stranger_thumbprint = fixture::key_thumbprint_of(&stranger);
+    assert!(stranger_thumbprint != fixture::other_recipient_key_thumbprint());
+    assert!(stranger_thumbprint != fixture::complete_recipient_key_thumbprint());
+    let open = |archive: &fixture::archive_support::ArchiveFixture,
+                thumbprint,
+                key: &ea_crypto::HpkeRecipientPrivateKey| {
+        let mut observer = Decapsulations(0);
+        let report = ea_verify::verify_archive_observed(
+            archive,
+            &f.anchor,
+            ea_verify::VerifyOptions::new(ea_types::UnixMillis::new(800))
+                .with_recipient(thumbprint, key),
+            &mut observer,
+        )
+        .unwrap();
+        (report, observer.0)
+    };
+    let both_entries_valid = |report: &ea_verify::VerificationReportV1| {
+        entry_objects.iter().all(|entry| {
+            report.object_results().any(|result| {
+                result.object_hash() == *entry
+                    && result.object_type() == ea_verify::ObjectTypeV1::Entry
+                    && result.result() == ea_verify::ObjectResultKindV1::Valid
+            })
+        })
+    };
+
+    // Die Autorisierung wählt GENAU den ersten Eintrag aus.
+    let auth = ea_trust::verify_grant_authorization(
+        &f.authorization(800),
+        &f.selected(f.current_sequence, 800, 800),
+    )
+    .unwrap();
+    let mut before = fixture::archive_support::ArchiveFixture::new();
+    for (path, bytes) in f.fixture.blobs() {
+        before.push_exact_bytes(path, bytes.clone());
+    }
+    before.push_exact_bytes("trust/authorization.etb", auth.exact_bytes().to_vec());
+
+    // VORHER: beide Einträge gültig, keiner geöffnet.
+    let (report, decapsulations) =
+        open(&before, fixture::other_recipient_key_thumbprint(), &reader);
+    assert!(report.is_fully_verified(), "{report:?}");
+    assert!(both_entries_valid(&report), "{report:?}");
+    assert_eq!(report.recipient_grants().count(), 0, "{report:?}");
+    assert_eq!(decapsulations, 0);
+    assert_eq!(report.decryption_errors().len(), 0);
+
+    // Der Recovery-Re-Grant über den echten Ausstellungsdienst.
+    let grant = h
+        .create(&auth)
+        .expect("die gültige Zeremonie stellt den Re-Grant aus");
+    let grant_object = object_hash(grant.as_bytes());
+    let mut after = before;
+    after.push_object("grants/historical.eag", grant);
+
+    // NACHHER: genau der ausgewählte Eintrag öffnet, der andere nicht.
+    let (report, decapsulations) = open(&after, fixture::other_recipient_key_thumbprint(), &reader);
+    assert!(report.is_fully_verified(), "{report:?}");
+    assert!(both_entries_valid(&report), "{report:?}");
+    let opened: Vec<_> = report.recipient_grants().collect();
+    assert_eq!(opened.len(), 1, "{report:?}");
+    assert!(opened[0].0 == f.entry_hash, "geöffnet ist der AUSGEWÄHLTE");
+    assert!(opened[0].1 == grant_object);
+    assert!(
+        report
+            .recipient_grants()
+            .all(|(entry, _, _)| entry != second.entry_hash),
+        "der NICHT ausgewählte alte Eintrag hat keinen Grant für den neuen Reader"
+    );
+    assert_eq!(
+        decapsulations, 1,
+        "genau eine Entkapselung: die des ausgewählten Eintrags"
+    );
+    assert_eq!(report.decryption_errors().len(), 0);
+
+    // Ein dritter Schlüssel ohne Grant: der historische Grant des neuen
+    // Readers wird ihm weder zugeschrieben noch für ihn entkapselt.
+    let (report, decapsulations) = open(&after, stranger_thumbprint, &stranger);
+    assert_eq!(
+        report.recipient_grants().count(),
+        0,
+        "ein fremder historischer Grant ist nicht der eigene"
+    );
+    assert_eq!(decapsulations, 0);
+    assert_eq!(report.decryption_errors().len(), 0);
+    assert!(report.is_fully_verified(), "{report:?}");
+
+    // Beide gespeicherten Eintragsdateien sind unverändert.
+    for (path, bytes) in &stored {
+        assert_eq!(&&std::fs::read(path).unwrap(), bytes);
+    }
+}
