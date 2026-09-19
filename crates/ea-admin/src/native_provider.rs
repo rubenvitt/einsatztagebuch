@@ -161,6 +161,23 @@ impl NativeOperatorProvider {
             .record_verified_presence(session.proof().challenge_nonce())
     }
 
+    /// Clock-only completion after durable Login and the runtime's fresh
+    /// context check. It cannot manufacture a general operator session or
+    /// revive a closed watcher, and preserves the ordinary nonce semantics.
+    pub(crate) fn record_verified_clock_presence(
+        &self,
+        session: &ea_operator::ClockRepairSession<'_>,
+        login: &ea_audit::ClockRepairLogin,
+    ) -> Result<(), NativeProviderError> {
+        let now = crate::operator_runtime::fresh_wall_clock()
+            .map_err(|_| NativeProviderError::Protocol)?;
+        if !login.matches_presence(session) || !session.is_valid_at(now) {
+            return Err(NativeProviderError::Protocol);
+        }
+        self.watch
+            .record_verified_presence(session.challenge_nonce())
+    }
+
     /// Fixed private-console prompts for the separate Windows authority. The
     /// helper opens the real console; stdin remains the private JSON protocol.
     #[cfg(windows)]
