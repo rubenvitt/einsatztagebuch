@@ -142,7 +142,10 @@ pub(super) fn destruction_files(f: &NativeDestructionFixture) -> usize {
 
 /// Exact 4→1 originals in the local archive.
 pub(super) fn local_retries(f: &NativeDestructionFixture) -> usize {
-    fs::read_dir(f.archive.join(ea_archive::DESTRUCTIONS_DIR_V1))
+    archive_retries(&f.archive)
+}
+fn archive_retries(archive: &Path) -> usize {
+    fs::read_dir(archive.join(ea_archive::DESTRUCTIONS_DIR_V1))
         .unwrap()
         .filter_map(|entry| {
             let exact = fs::read(entry.unwrap().path()).unwrap();
@@ -364,7 +367,10 @@ pub(super) fn assert_server_completed_once(o: &Incomplete, f: &NativeDestruction
             .fetch_all(o.server.database.pool()),
         )
         .unwrap();
-    // Every job POST re-executes and re-attests the current server state
+    // Known server behaviour, deliberately tolerated here (follow-up DRK-430
+    // „Server: Job-Replay in Zustand 1 ohne erneute Ausführung und
+    // Attestierung“): every job POST re-executes and re-attests the current
+    // server state
     // (each Resume re-contact relays the job); every such measurement is a
     // successful removal and is imported exactly.
     assert!(!measured.is_empty(), "an actual server measurement");
@@ -531,6 +537,8 @@ fn native_retry_survives_a_listener_loss_between_its_reads_and_resumes_once_afte
     // adapter → no commit, no publish.
     let before = local_counts(&f);
     let server_before = server_transitions(&o.services, &o.server);
+    // The skipped import audit exists only because the job POST re-executes
+    // and re-attests at the server (follow-up DRK-430).
     let skip = f.admin_directory.join("hold-completion-audit-skip");
     fs::write(&skip, b"1").unwrap();
     let barrier = f.admin_directory.join("hold-completion-audit");
@@ -668,5 +676,109 @@ fn native_retry_keeps_a_reader_case_in_state4_before_and_after_the_same_server_r
     assert!(
         server_retries(&o.services, &o.server).is_empty(),
         "the server holds no 4→1"
+    );
+}
+
+/// One-shot host guard: at the first check after the local 4→1 original
+/// exists in the archive (i.e. after the retry's local commit, before its
+/// publication), the registered listener stops. It never refuses itself.
+struct StopListenerAfterLocalRetry {
+    archive: PathBuf,
+    address: std::net::SocketAddr,
+    listener: tokio::task::AbortHandle,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+impl ea_admin::destruction_runtime::DestructionHostGuard for StopListenerAfterLocalRetry {
+    fn require_open(&self) -> Result<(), ea_admin::destruction_runtime::NativeDestructionError> {
+        use std::sync::atomic::Ordering;
+        if self.armed.load(Ordering::SeqCst) && archive_retries(&self.archive) > 0 {
+            self.armed.store(false, Ordering::SeqCst);
+            self.listener.abort();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !matches!(
+                std::net::TcpStream::connect_timeout(
+                    &self.address,
+                    std::time::Duration::from_secs(1)
+                ),
+                Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+            ) {
+                assert!(std::time::Instant::now() < until, "listener must stop");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// B2: the retry commits 4→1 locally, its publication fails (listener off),
+/// state1 stays local while the server still stands at 4. After the same
+/// server restarts, Resume in state1 publishes the exact existing 4→1 (no new
+/// 4→1 anywhere) and continues to 1→3.
+#[test]
+fn native_retry_replays_the_committed_4_to_1_over_tls_after_its_publication_failed() {
+    let began = std::time::Instant::now();
+    let f = NativeDestructionFixture::with_reader_opfs();
+    let mut o = incomplete_with_unexecuted_server(&f, true);
+    let (id, job) = (o.id, o.job);
+    o.server.restart_listener(&o.services);
+    let mut transport =
+        NativeDestructionServerTransport::open(vec![o.server.config.clone()], &f.key_source)
+            .unwrap();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut native = f.runtime();
+    native.set_host_guard(Arc::new(StopListenerAfterLocalRetry {
+        archive: f.archive.clone(),
+        address: o.server.config.address,
+        listener: o.server.serving.abort_handle(),
+        armed: armed.clone(),
+    }));
+    let code = refused_code(transport.resume(&mut native, id));
+    assert!(
+        [UNAVAILABLE, TLS].contains(&code),
+        "failed publication: {code}"
+    );
+    assert!(
+        !armed.load(std::sync::atomic::Ordering::SeqCst),
+        "the listener stopped only after the local 4→1 commit"
+    );
+    assert_eq!(local_retries(&f), 1, "the 4→1 is durable locally");
+    assert_eq!(state_after_refusal(&mut native, id), 1);
+    let (local_retry, exact) = last_event(&mut native, id, job);
+    let fields = transition(&exact);
+    assert_eq!((fields.from_state, fields.to_state), (Some(4), 1));
+    assert!(fields.previous_event_object_hash == Some(o.retained));
+    assert!(
+        server_retries(&o.services, &o.server).is_empty(),
+        "the server still stands at 4"
+    );
+    assert!(
+        server_transitions(&o.services, &o.server)
+            .iter()
+            .map(|row| row.2)
+            .collect::<Vec<_>>()
+            .ends_with(&[1, 4])
+    );
+    drop(native);
+    eprintln!(
+        "retry replay: committed, publication failed {:?}",
+        began.elapsed()
+    );
+
+    o.server.restart_listener(&o.services);
+    let mut native = f.runtime();
+    let done = transport.resume(&mut native, id).unwrap();
+    assert_eq!(
+        done.state.code(),
+        3,
+        "Resume in state1 publishes 4→1, then 1→3"
+    );
+    assert_eq!(local_retries(&f), 1, "no new local 4→1");
+    let retries = server_retries(&o.services, &o.server);
+    assert_eq!(retries.len(), 1);
+    assert_eq!(retries[0].0.as_slice(), local_retry.as_bytes().as_slice());
+    assert_server_completed_once(&o, &f);
+    eprintln!(
+        "retry replay: 4→1 relayed, 1→3 complete {:?}",
+        began.elapsed()
     );
 }
