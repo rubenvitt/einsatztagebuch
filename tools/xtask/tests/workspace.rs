@@ -487,6 +487,171 @@ fn ea_archive_fs_names_its_mutating_test_surface_as_a_release_exclusion() {
     }
 }
 
+/// Every dependency table of one member manifest whose kind is in `kinds`,
+/// labelled for failure messages — the top-level tables AND their
+/// platform-specific twins under `[target.'cfg(..)'.<kind>]`.
+///
+/// Die Plattformtabellen gehören dazu, weil Cargo sie beim Bau für die
+/// passende Zielplattform genauso auflöst wie die allgemeinen: eine Kante in
+/// `[target.'cfg(windows)'.dependencies]` landet im Windows-Build, und Windows
+/// ist Auslieferungsplattform. `crates/ea-admin/Cargo.toml` nutzt solche
+/// Tabellen bereits; eine Prüfung nur der drei allgemeinen Tabellen sähe eine
+/// dort eingeschmuggelte Testfläche nicht.
+fn dependency_tables<'a>(manifest: &'a Value, kinds: &[&str]) -> Vec<(String, &'a toml::Table)> {
+    let mut tables = Vec::new();
+    for kind in kinds {
+        if let Some(table) = manifest.get(*kind).and_then(Value::as_table) {
+            tables.push(((*kind).to_owned(), table));
+        }
+    }
+    if let Some(platforms) = manifest.get("target").and_then(Value::as_table) {
+        for (platform, section) in platforms {
+            for kind in kinds {
+                if let Some(table) = section.get(*kind).and_then(Value::as_table) {
+                    tables.push((format!("[target.'{platform}'.{kind}]"), table));
+                }
+            }
+        }
+    }
+    tables
+}
+
+/// Whether a dependency entry asks for `feature` by name.
+fn edge_asks_for(edge: &Value, feature: &str) -> bool {
+    edge.get("features")
+        .and_then(Value::as_array)
+        .is_some_and(|features| features.iter().any(|entry| entry.as_str() == Some(feature)))
+}
+
+/// The workspace members that are a production build ON THEIR OWN: every
+/// member with a `bin`, `cdylib` or `staticlib` target, read from
+/// `cargo metadata` and not from a hand-kept list.
+///
+/// Die Regel folgt einer Eigenschaft und keiner Namensliste: nur ein solches
+/// Ziel wird selbst ausgeliefert (Server- und CLI-Binärdatei, der Tauri-Wirt
+/// als Binärdatei, das wasm-Modul als `cdylib`). Ein reines `lib`-Mitglied
+/// erreicht einen Build nur über einen dieser Wirte und ist damit über dessen
+/// Graphen mitgeprüft; ein Paket nur aus `lib`- und `test`-Zielen wie
+/// `tests/ea-system-tests` fällt so von selbst heraus, `example`-Ziele zählen
+/// nicht. `publish = false` taugt als Unterscheidung nicht — JEDES Mitglied
+/// dieses Arbeitsbereichs trägt es. `tools/xtask` bleibt als Binärdatei
+/// bewusst drin: es liefert zwar nichts aus, aber sein Graph kostet einen
+/// Aufruf von Zehntelsekunden, und eine Ausnahme per Name wäre genau die
+/// Liste, die ein neuer Wirt nicht kennen würde.
+fn production_hosts(root: &std::path::Path) -> Vec<String> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps", "--locked"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cargo metadata must describe the workspace: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let members: BTreeSet<&str> = metadata["workspace_members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let mut hosts = Vec::new();
+    for package in metadata["packages"].as_array().unwrap() {
+        if !members.contains(package["id"].as_str().unwrap()) {
+            continue;
+        }
+        let ships = package["targets"].as_array().unwrap().iter().any(|target| {
+            target["kind"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|kind| matches!(kind.as_str(), Some("bin" | "cdylib" | "staticlib")))
+        });
+        if ships {
+            hosts.push(package["name"].as_str().unwrap().to_owned());
+        }
+    }
+    hosts.sort();
+    // Untergrenze gegen eine leere oder verstümmelte Ableitung: fiele die
+    // Liste leer aus, bestünde jede Prüfung über sie hinweg ohne Befund. Die
+    // Namen hier sind Beispiele, die dabei sein MÜSSEN, nicht der Umfang.
+    for known in [
+        "einsatzarchiv-cli",
+        "ea-desktop",
+        "einsatzarchiv-server",
+        "ea-reader-wasm",
+    ] {
+        assert!(
+            hosts.iter().any(|host| host == known),
+            "{known} ships a bin or cdylib and must be derived as a production host: {hosts:?}"
+        );
+    }
+    hosts
+}
+
+/// Runs `cargo tree --locked <arguments>` in the workspace root and returns
+/// its output; a failing command fails the test instead of yielding an empty
+/// (and therefore clean-looking) tree.
+fn cargo_tree(root: &std::path::Path, arguments: &[&str]) -> String {
+    let mut full = vec!["tree", "--locked"];
+    full.extend_from_slice(arguments);
+    let resolved = Command::new("cargo")
+        .args(&full)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        resolved.status.success(),
+        "cargo {} must resolve: {}",
+        full.join(" "),
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    String::from_utf8(resolved.stdout).unwrap()
+}
+
+/// Asserts that no derived production host resolves `<krate>/<surface>` in its
+/// normal (`no-dev`) feature graph on ANY platform (`--target all`).
+///
+/// Der volle Baum und nicht `-i <krate>`: ein Wirt, der die Crate gar nicht
+/// zieht, ließe `cargo tree -i` mit „did not match any packages" scheitern,
+/// und dieser Wirt ist gerade der, über den eine neue Kante hereinkäme. Die
+/// Positivkontrolle pro Wirt ist deshalb, dass der Baum mit dem Wirt selbst
+/// beginnt — ein vertippter Name oder eine leere Ausgabe scheitert daran. Im
+/// Fehlerfall zeigt der invertierte Baum den Weg zur Fläche.
+fn assert_no_host_resolves(root: &std::path::Path, krate: &str, surface: &str) {
+    let surface_node = format!("{krate} feature \"{surface}\"");
+    for host in production_hosts(root) {
+        let shipped = cargo_tree(
+            root,
+            &["-p", &host, "-e", "no-dev,features", "--target", "all"],
+        );
+        assert!(
+            shipped.starts_with(&format!("{host} v")),
+            "the resolved tree of {host} must start with {host} itself:\n{shipped}"
+        );
+        if shipped.contains(&surface_node) {
+            let path = cargo_tree(
+                root,
+                &[
+                    "-p",
+                    &host,
+                    "-e",
+                    "no-dev,features",
+                    "--target",
+                    "all",
+                    "-i",
+                    krate,
+                ],
+            );
+            panic!(
+                "the production host {host} resolves {krate}/{surface} through a normal edge on \
+                 some platform:\n{path}"
+            );
+        }
+    }
+}
+
 /// Pins that NO non-test edge carries the `ea-archive-fs` test surface — read
 /// off the RESOLVED feature graph and not off manifest prose.
 ///
@@ -540,19 +705,15 @@ fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
             .unwrap()
             .parse()
             .unwrap();
-        for table in ["dependencies", "build-dependencies", "dev-dependencies"] {
-            let Some(edge) = manifest.get(table).and_then(|deps| deps.get(CRATE)) else {
+        for (table, dependencies) in dependency_tables(
+            &manifest,
+            &["dependencies", "build-dependencies", "dev-dependencies"],
+        ) {
+            let Some(edge) = dependencies.get(CRATE) else {
                 continue;
             };
-            let asks_for_the_surface =
-                edge.get("features")
-                    .and_then(Value::as_array)
-                    .is_some_and(|features| {
-                        features
-                            .iter()
-                            .any(|feature| feature.as_str() == Some(SURFACE))
-                    });
-            if table == "dev-dependencies" {
+            let asks_for_the_surface = edge_asks_for(edge, SURFACE);
+            if table.trim_end_matches(']').ends_with("dev-dependencies") {
                 if asks_for_the_surface {
                     dev_edges += 1;
                 }
@@ -575,28 +736,23 @@ fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
     // `-i` dreht ihn auf die Verbraucher von `ea-archive-fs`. `no-dev` nimmt
     // die eigenen `[dev-dependencies]` des Wirts heraus: Zusicherung 2 erlaubt
     // genau diese Kanten, und seit der Wirt Testziele mit echtem Writer hat,
-    // fordert er das Merkmal dort selbst an.
+    // fordert er das Merkmal dort selbst an. `--target all` löst die Kanten
+    // ALLER Zielplattformen auf, nicht nur die des Rechners, auf dem der Test
+    // läuft.
     let resolve = |edges: &str| {
-        let resolved = Command::new("cargo")
-            .args([
-                "tree",
-                "--locked",
+        cargo_tree(
+            &root,
+            &[
                 "-p",
                 "ea-desktop",
                 "-e",
                 edges,
+                "--target",
+                "all",
                 "-i",
                 CRATE,
-            ])
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        assert!(
-            resolved.status.success(),
-            "cargo tree must resolve the host graph: {}",
-            String::from_utf8_lossy(&resolved.stderr)
-        );
-        String::from_utf8(resolved.stdout).unwrap()
+            ],
+        )
     };
     let tree = resolve("no-dev,features");
     // Positivkontrolle: der Baum enthaelt die Kante, die geprueft werden soll.
@@ -620,6 +776,9 @@ fn no_non_test_edge_carries_the_ea_archive_fs_test_surface() {
         "the host's own dev edges must make {CRATE}/{SURFACE} visible; otherwise its absence \
          above says nothing about the feature and only something about the command:\n{with_dev}"
     );
+    // Und nicht nur `ea-desktop`: jeder abgeleitete Produktionswirt. Die
+    // Positivkontrollen oben belegen, dass der Befehl die Fläche sehen kann.
+    assert_no_host_resolves(&root, CRATE, SURFACE);
 }
 
 /// Pins that NO non-test edge carries the `ea-reader` test surface — the same
@@ -673,44 +832,27 @@ fn no_non_test_edge_carries_the_ea_reader_test_surface() {
             .unwrap()
             .parse()
             .unwrap();
-        for table in ["dependencies", "build-dependencies"] {
-            let Some(edge) = manifest.get(table).and_then(|deps| deps.get(CRATE)) else {
+        for (table, dependencies) in
+            dependency_tables(&manifest, &["dependencies", "build-dependencies"])
+        {
+            let Some(edge) = dependencies.get(CRATE) else {
                 continue;
             };
-            let asks_for_the_surface =
-                edge.get("features")
-                    .and_then(Value::as_array)
-                    .is_some_and(|features| {
-                        features
-                            .iter()
-                            .any(|feature| feature.as_str() == Some(SURFACE))
-                    });
             assert!(
-                !asks_for_the_surface,
+                !edge_asks_for(edge, SURFACE),
                 "{member} {table} re-enables {CRATE}/{SURFACE}; the two damaging methods would be \
                  back in a non-test build"
             );
         }
     }
 
-    // Der aufgeloeste Baum des BROWSER-Wirts, einmal ohne und einmal mit dem
-    // Merkmal. Der zweite Lauf ist die Positivkontrolle des ersten.
+    // Der aufgelöste Baum des BROWSER-Wirts, einmal ohne und einmal mit dem
+    // Merkmal, über ALLE Zielplattformen. Der zweite Lauf ist die
+    // Positivkontrolle des ersten.
     let resolve = |extra: &[&str]| {
-        let mut arguments = vec![
-            "tree", "--locked", "-p", HOST, "-e", "features", "-i", CRATE,
-        ];
+        let mut arguments = vec!["-p", HOST, "-e", "features", "--target", "all", "-i", CRATE];
         arguments.extend_from_slice(extra);
-        let resolved = Command::new("cargo")
-            .args(&arguments)
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        assert!(
-            resolved.status.success(),
-            "cargo tree must resolve the browser graph: {}",
-            String::from_utf8_lossy(&resolved.stderr)
-        );
-        String::from_utf8(resolved.stdout).unwrap()
+        cargo_tree(&root, &arguments)
     };
 
     let shipped = resolve(&[]);
@@ -729,6 +871,10 @@ fn no_non_test_edge_carries_the_ea_reader_test_surface() {
         "forcing {CRATE}/{SURFACE} must make it appear; otherwise its absence above says nothing \
          about the feature and only something about the command:\n{forced}"
     );
+    // Der Browser-Wirt ist nicht der einzige Verbraucher: `ea-ui-contracts`
+    // und über sie der Desktop-Wirt ziehen `ea-reader` ebenfalls. Geprüft wird
+    // deshalb jeder abgeleitete Produktionswirt, ohne Dev-Kanten.
+    assert_no_host_resolves(&root, CRATE, SURFACE);
 
     // Und dieselbe Manifest- und `cfg`-Zusicherung wie beim Nachbarn: der
     // Schalter an der Wurzelkante wirkt nur, solange `test-support` das EINZIGE
@@ -806,22 +952,26 @@ fn no_non_test_edge_carries_the_ea_reader_test_surface() {
 /// - `dev_edges > 0` of the archive-fs test is replaced by two resolved
 ///   positive controls on the CLI, see below.
 ///
-/// The production hosts are the two binaries that consume `ea-admin` through a
-/// normal edge: `einsatzarchiv-cli` and `ea-desktop` (the latter also through
-/// `ea-ui-contracts`). `ea-system-tests` is a test crate and ships nothing.
-/// Each host resolves with `-e no-dev,features`, the shape of the archive-fs
-/// test, and must name itself as a consumer of `ea-admin` — otherwise an empty
-/// tree, a failed command or a mistyped package name would pass.
+/// The production hosts are DERIVED, not listed: every member with a `bin`,
+/// `cdylib` or `staticlib` target (`production_hosts`). A hand-kept list of
+/// today's two consumers (`einsatzarchiv-cli`, `ea-desktop`) missed a host
+/// that starts consuming `ea-admin` tomorrow — for instance
+/// `einsatzarchiv-server` through a feature of `ea-ui-contracts`. Every host
+/// resolves with `-e no-dev,features --target all`: the normal edges of EVERY
+/// platform, not only of the machine running the test, because Windows is a
+/// delivery platform and `[target.'cfg(..)'.dependencies]` tables are resolved
+/// only for their platform. The manifest side reads those tables too.
 ///
-/// The positive controls make the absence a finding: the CLI with
-/// `--features desktop-fixture` MUST show `ea-admin feature "test-support"`
-/// (the one normal edge the check exists for), and the CLI with its own dev
-/// edges (`-e features`) MUST show it too.
+/// The positive controls make the absence a finding: the two hosts that
+/// consume `ea-admin` today must name themselves as its normal consumers, the
+/// CLI with `--features desktop-fixture` MUST show `ea-admin feature
+/// "test-support"` (the one normal edge the check exists for), and the CLI
+/// with its own dev edges (`-e features`) MUST show it too — all with the same
+/// `--target all` as the check itself.
 #[test]
 fn no_production_build_carries_the_ea_admin_test_surface() {
     const CRATE: &str = "ea-admin";
     const SURFACE: &str = "test-support";
-    const HOSTS: [&str; 2] = ["einsatzarchiv-cli", "ea-desktop"];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let surface_edge = format!("{CRATE}/{SURFACE}");
     let surface_node = format!("{CRATE} feature \"{SURFACE}\"");
@@ -860,20 +1010,14 @@ fn no_production_build_carries_the_ea_admin_test_surface() {
             .unwrap()
             .parse()
             .unwrap();
-        for table in ["dependencies", "build-dependencies"] {
-            let Some(edge) = manifest.get(table).and_then(|deps| deps.get(CRATE)) else {
+        for (table, dependencies) in
+            dependency_tables(&manifest, &["dependencies", "build-dependencies"])
+        {
+            let Some(edge) = dependencies.get(CRATE) else {
                 continue;
             };
-            let asks_for_the_surface =
-                edge.get("features")
-                    .and_then(Value::as_array)
-                    .is_some_and(|features| {
-                        features
-                            .iter()
-                            .any(|feature| feature.as_str() == Some(SURFACE))
-                    });
             assert!(
-                !asks_for_the_surface,
+                !edge_asks_for(edge, SURFACE),
                 "{member} {table} re-enables {surface_edge}; the fixture constructors would be \
                  in a non-test build"
             );
@@ -904,43 +1048,51 @@ fn no_production_build_carries_the_ea_admin_test_surface() {
         }
     }
 
-    // Graphseite: der aufgeloeste Merkmalsgraph jedes Produktionswirts, in der
-    // Form des archive-fs-Tests.
+    // Graphseite: der aufgelöste Merkmalsgraph JEDES abgeleiteten
+    // Produktionswirts, ohne Dev-Kanten und über alle Zielplattformen.
+    assert_no_host_resolves(&root, CRATE, SURFACE);
+
+    // Positivkontrollen, alle mit derselben Befehlsform wie die Prüfung oben.
     let resolve = |host: &str, edges: &str, extra: &[&str]| {
-        let mut arguments = vec!["tree", "--locked", "-p", host, "-e", edges, "-i", CRATE];
+        let mut arguments = vec!["-p", host, "-e", edges, "--target", "all", "-i", CRATE];
         arguments.extend_from_slice(extra);
-        let resolved = Command::new("cargo")
-            .args(&arguments)
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        assert!(
-            resolved.status.success(),
-            "cargo {} must resolve: {}",
-            arguments.join(" "),
-            String::from_utf8_lossy(&resolved.stderr)
-        );
-        String::from_utf8(resolved.stdout).unwrap()
+        cargo_tree(&root, &arguments)
     };
-    for host in HOSTS {
-        let shipped = resolve(host, "no-dev,features", &[]);
-        // Positivkontrolle: der Wirt verbraucht `ea-admin` wirklich ueber eine
-        // normale Kante. Ohne sie koennte die Abwesenheit unten nicht scheitern.
+    // Die beiden Wirte, die `ea-admin` heute über eine normale Kante ziehen,
+    // müssen sich als Verbraucher nennen. Sonst prüfte die Schleife oben nur
+    // Wirte, deren Graph `ea-admin` gar nicht enthält.
+    for consumer in ["einsatzarchiv-cli", "ea-desktop"] {
+        let shipped = resolve(consumer, "no-dev,features", &[]);
         assert!(
-            shipped.contains(&format!("{host} v")) && shipped.contains("ea-admin feature"),
-            "{host} must appear as a normal consumer of {CRATE} in the resolved tree; without \
-             the edge the assertion below cannot fail:\n{shipped}"
-        );
-        assert!(
-            !shipped.contains(&surface_node),
-            "the resolved feature graph of the production host {host} must not contain \
-             {surface_edge}:\n{shipped}"
+            shipped.contains(&format!("{consumer} v")) && shipped.contains("ea-admin feature"),
+            "{consumer} must appear as a normal consumer of {CRATE} in the resolved tree; \
+             without the edge the host check above cannot fail:\n{shipped}"
         );
     }
 
-    // Erste Positivkontrolle: genau die eine normale Kante, fuer die dieser
-    // Test existiert. Mit `desktop-fixture` MUSS die Flaeche erscheinen, sonst
-    // saehe der Test die Kante gar nicht und waere blind.
+    // Erste Positivkontrolle: genau die eine normale Kante, für die dieser
+    // Test existiert. Mit `desktop-fixture` MUSS die Fläche erscheinen, sonst
+    // sähe der Test die Kante gar nicht und wäre blind — einmal im vollen Baum,
+    // den die Wirtsprüfung liest, und einmal im invertierten mit dem Weg.
+    let fixture_full = cargo_tree(
+        &root,
+        &[
+            "-p",
+            "einsatzarchiv-cli",
+            "-e",
+            "no-dev,features",
+            "--target",
+            "all",
+            "--features",
+            "desktop-fixture",
+        ],
+    );
+    assert!(
+        fixture_full.contains(&surface_node),
+        "the full tree of einsatzarchiv-cli --features desktop-fixture must contain \
+         {surface_node}; otherwise the host check above reads a tree in which the surface can \
+         never show"
+    );
     let fixture = resolve(
         "einsatzarchiv-cli",
         "no-dev,features",
@@ -953,7 +1105,7 @@ fn no_production_build_carries_the_ea_admin_test_surface() {
          and only something about the command:\n{fixture}"
     );
     // Zweite Positivkontrolle, wie beim archive-fs-Test: mit den Dev-Kanten des
-    // CLI erscheint die Flaeche ebenfalls. Sonst saegte `no-dev` nur die Sicht ab.
+    // CLI erscheint die Fläche ebenfalls. Sonst sägte `no-dev` nur die Sicht ab.
     let with_dev = resolve("einsatzarchiv-cli", "features", &[]);
     assert!(
         with_dev.contains(&surface_node),
