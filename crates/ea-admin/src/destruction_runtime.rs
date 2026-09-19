@@ -45,10 +45,19 @@ pub enum NativeDestructionError {
     FilesystemCapabilities,
     /// 4→1 refused: the signed job has no Server duty or no per-call
     /// authenticated server reservation was offered (DRK-319, only Part S).
+    /// Unique: `grep -rn EA-DESTRUCTION-RETRY-NO-SERVER-DUTY` finds only this
+    /// definition and its witnesses.
     RetryNoServerDuty,
     /// 4→1 refused permanently in v0.1: the open duty concerns a Reader
     /// (Ruling G1), including a Reader confirmed only after state4 (G4).
+    /// Decided locally before any server read. Unique: `grep -rn
+    /// EA-DESTRUCTION-RETRY-READER-DUTY` finds only this definition and its witnesses.
     RetryReaderDuty,
+    /// 4→1 refused for now (G4): a non-Reader duty (typically the Server)
+    /// still lacks confirmation at the decision time; retry after the server
+    /// has executed and attested. Unique: `grep -rn
+    /// EA-DESTRUCTION-RETRY-DUTY-OPEN` finds only this definition and its witnesses.
+    RetryDutyOpen,
 }
 impl NativeDestructionError {
     pub fn code(self) -> &'static str {
@@ -61,6 +70,7 @@ impl NativeDestructionError {
             Self::FilesystemCapabilities => "EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS",
             Self::RetryNoServerDuty => "EA-DESTRUCTION-RETRY-NO-SERVER-DUTY",
             Self::RetryReaderDuty => "EA-DESTRUCTION-RETRY-READER-DUTY",
+            Self::RetryDutyOpen => "EA-DESTRUCTION-RETRY-DUTY-OPEN",
         }
     }
 }

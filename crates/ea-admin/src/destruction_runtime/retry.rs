@@ -53,6 +53,11 @@ impl DestructionRuntime {
     /// `NativeDestructionExchange::events()`). Only
     /// `NativeDestructionDelivery::AuthenticatedServer` is admitted. A second
     /// call with the same retained event replays the existing 4→1 exactly.
+    ///
+    /// Order: local refusals (`RETRY-NO-SERVER-DUTY`, `RETRY-READER-DUTY`)
+    /// before any network read; first reservation read; decision; component
+    /// signature; both native audit signatures; second reservation read;
+    /// commit transaction. Publication is the caller's step after the commit.
     pub fn resume_incomplete_progress(
         &mut self,
         id: DestructionId,
@@ -110,6 +115,12 @@ impl DestructionRuntime {
             .any(|(_, kind)| *kind == DutyKind::Server)
         {
             return Err(Error::RetryNoServerDuty);
+        }
+        // Local pre-decision (G2): a Reader case is refused with its permanent
+        // explanation even while no server is reachable. It grants nothing;
+        // the decision after the actual admission below remains binding.
+        if self.local_reader_refusal(&admission, retained) {
+            return Err(Error::RetryReaderDuty);
         }
         // First actual admission: original authority, custody freeze, durable
         // job, authenticated reservation and the exact existing Start replay.
@@ -184,18 +195,39 @@ impl DestructionRuntime {
             exact
         };
         fence.exact_event = Some(object_hash(&exact));
-        // Second actual admission after the blocking signing work, outside any
-        // transaction. A failed read refuses; the signed, unimported 4→1 is
-        // then never published. The barrier carries no time: this is only
-        // "successfully addressed per call", no invented freshness window.
-        self.with_started(
-            &saved,
-            NativeDestructionDelivery::AuthenticatedServer(&mut *port),
-            |_, _, _, _| Ok(()),
-        )?;
-        self.import_retry_progress(id, expected_preflight_hash, &exact, fence)
+        // The second actual admission runs inside the bound import after the
+        // component signature AND both blocking native audit signatures,
+        // immediately before (never inside) the commit transaction. A failed
+        // read refuses; the signed, unimported 4→1 is then never published.
+        // The barrier carries no time: "successfully addressed per call" only.
+        self.import_retry_progress(id, expected_preflight_hash, &exact, fence, port)
     }
 
+    /// True only if the already verified local history is exactly in the
+    /// retained state4 and its Reader question is decidably refused. Any other
+    /// outcome (including errors) defers to the authoritative admitted path.
+    fn local_reader_refusal(&self, saved: &SavedDestruction, retained: ObjectHash) -> bool {
+        let Some(job) = saved.job.as_ref() else {
+            return false;
+        };
+        let Ok(rebuilt) = reconstruct_imported_history(job, &saved.events, &saved.attestations)
+        else {
+            return false;
+        };
+        if rebuilt.state() != DestructionState::IncompleteUnreachableReplica
+            || rebuilt.last_event_hash() != retained
+        {
+            return false;
+        }
+        let Ok((_, _, retained_time)) = retained_fields(saved, retained) else {
+            return false;
+        };
+        let now = self.controller.head().preexisting_effective_now().value();
+        matches!(
+            self.retry_observation(saved, retained, retained_time, now),
+            Err(Error::RetryReaderDuty)
+        )
+    }
     /// Current decision over the unchanged verified claim set. The retained
     /// state4 is bound by its signed fields only; see `claims::decide_retry`.
     fn retry_observation(
@@ -254,7 +286,7 @@ impl DestructionRuntime {
             Ok(decision) => decision,
             Err(RetryRefusal::NoServer) => return Err(Error::RetryNoServerDuty),
             Err(RetryRefusal::Reader) => return Err(Error::RetryReaderDuty),
-            Err(RetryRefusal::StillOpen) => return Err(DestructionError::Event.into()),
+            Err(RetryRefusal::StillOpen) => return Err(Error::RetryDutyOpen),
         };
         let device = self
             .custodian

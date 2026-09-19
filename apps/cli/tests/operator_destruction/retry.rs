@@ -14,15 +14,24 @@ use ea_format::{DeletionAttestationFieldsV1, DestructionTransitionFieldsV1, Trus
 struct StubReservation {
     authorization: ObjectHash,
     calls: usize,
-    refuse: bool,
+    /// Refuse every read while set; shareable to flip it mid-action.
+    refuse: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Refuse from this 1-based call number on (e.g. only the second read).
+    refuse_from: Option<usize>,
 }
 impl StubReservation {
     fn new(f: &NativeDestructionFixture) -> Self {
         Self {
             authorization: ea_crypto::object_hash(&f.authorization),
             calls: 0,
-            refuse: false,
+            refuse: Default::default(),
+            refuse_from: None,
         }
+    }
+    fn refusing(f: &NativeDestructionFixture) -> Self {
+        let port = Self::new(f);
+        port.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        port
     }
 }
 impl ea_destruction::ServerReservationPort for StubReservation {
@@ -32,7 +41,9 @@ impl ea_destruction::ServerReservationPort for StubReservation {
         id: DestructionId,
     ) -> Result<Vec<u8>, ea_destruction::DestructionError> {
         self.calls += 1;
-        if self.refuse {
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst)
+            || self.refuse_from.is_some_and(|from| self.calls >= from)
+        {
             return Err(ea_destruction::DestructionError::Storage);
         }
         Ok(ea_sync_protocol::DestructionStatusResponseV1::new(
@@ -373,9 +384,10 @@ fn native_retry_refuses_an_open_server_duty_missing_server_and_failed_reservatio
         let reader = completion::fixture_reader_claim(&f, db);
         runtime.import_signed_progress(id, job, &[reader]).unwrap();
     });
-    // G4: the Server duty is still unconfirmed now; no 4→1→4 loop.
+    // G4: the Server duty is still unconfirmed now; no 4→1→4 loop. Own code
+    // so the host can explain "not yet" instead of a generic event refusal.
     let calls = port.calls;
-    refuses_without_append(&db, "EA-DESTRUCTION-EVENT", || {
+    refuses_without_append(&db, "EA-DESTRUCTION-RETRY-DUTY-OPEN", || {
         runtime.resume_incomplete_progress(
             id,
             job,
@@ -396,10 +408,7 @@ fn native_retry_refuses_an_open_server_duty_missing_server_and_failed_reservatio
             NativeDestructionDelivery::NoRegisteredServer,
         )
     });
-    let mut refused = StubReservation {
-        refuse: true,
-        ..StubReservation::new(&f)
-    };
+    let mut refused = StubReservation::refusing(&f);
     refuses_without_append(&db, "EA-DESTRUCTION-STORAGE", || {
         runtime.resume_incomplete_progress(
             id,
@@ -426,6 +435,22 @@ fn native_retry_refuses_an_open_server_duty_missing_server_and_failed_reservatio
         )
     });
     assert_eq!(runtime.status(id).unwrap().state.code(), 4);
+    // E.2: withheld native Admin presence refuses before anything is signed.
+    fs::rename(
+        f.admin_directory.join("ea-native-operator"),
+        f.admin_directory.join("withheld-native-helper"),
+    )
+    .unwrap();
+    let calls = port.calls;
+    refuses_without_append(&db, "EA-DESTRUCTION-NATIVE-SESSION", || {
+        runtime.resume_incomplete_progress(
+            id,
+            job,
+            retained,
+            NativeDestructionDelivery::AuthenticatedServer(&mut port),
+        )
+    });
+    assert_eq!(port.calls, calls, "no reservation read without presence");
 }
 
 #[test]
@@ -449,6 +474,18 @@ fn native_retry_refuses_when_the_open_duty_was_a_reader() {
         replica.kind == ea_destruction::ManagedReplicaKind::Reader
             && replica.result == ea_destruction::EvidenceReplicaStatus::Unreachable
     }));
+    // G2: with the server down, the permanent Reader explanation still wins
+    // over a transport refusal, because it is decided before any read.
+    let mut down = StubReservation::refusing(&f);
+    refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
+        runtime.resume_incomplete_progress(
+            id,
+            job,
+            retained,
+            NativeDestructionDelivery::AuthenticatedServer(&mut down),
+        )
+    });
+    assert_eq!(down.calls, 0, "refused locally before any server read");
     refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
         runtime.resume_incomplete_progress(
             id,
@@ -465,6 +502,16 @@ fn native_retry_refuses_when_the_open_duty_was_a_reader() {
         replica.result,
         ea_destruction::EvidenceReplicaStatus::Successful(_)
     )));
+    let mut down = StubReservation::refusing(&f);
+    refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
+        runtime.resume_incomplete_progress(
+            id,
+            job,
+            retained,
+            NativeDestructionDelivery::AuthenticatedServer(&mut down),
+        )
+    });
+    assert_eq!(down.calls, 0, "late Reader original: still refused locally");
     refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
         runtime.resume_incomplete_progress(
             id,
@@ -551,4 +598,177 @@ fn native_retry_pre_sign_snapshot_refuses_a_real_competing_import() {
     assert_eq!(failure::count(&db, "destruction_import_batch"), batches + 1);
     assert_eq!(failure::count(&db, "local_audit_event"), audits + 2);
     assert_eq!(other.status(id).unwrap().state.code(), 4);
+}
+
+fn destruction_files(f: &NativeDestructionFixture) -> usize {
+    fs::read_dir(f.archive.join(ea_archive::DESTRUCTIONS_DIR_V1))
+        .map(|dir| dir.count())
+        .unwrap_or(0)
+}
+/// Server-bound state4 with every duty confirmed: ready for 4→1.
+fn ready(f: &NativeDestructionFixture, port: &mut StubReservation) -> Incomplete {
+    let ready = incomplete(f, port, |runtime, id, job, db| {
+        let reader = completion::fixture_reader_claim(f, db);
+        runtime.import_signed_progress(id, job, &[reader]).unwrap();
+    });
+    let server = server_claim(f, &ready.db, |_| {});
+    let mut runtime = ready.runtime;
+    runtime
+        .import_signed_progress(ready.id, ready.job, &[server])
+        .unwrap();
+    Incomplete { runtime, ..ready }
+}
+
+#[test]
+fn native_retry_refuses_a_failing_second_reservation_read_without_commit() {
+    let f = NativeDestructionFixture::with_optional_reader_opfs(true, 3, true);
+    let mut port = StubReservation::new(&f);
+    let Incomplete {
+        mut runtime,
+        id,
+        job,
+        db,
+        retained,
+        ..
+    } = ready(&f, &mut port);
+    // The first read (admission) succeeds, the second (after all blocking
+    // signing work) fails: nothing is committed, published or replayed.
+    port.refuse_from = Some(port.calls + 2);
+    let files = destruction_files(&f);
+    refuses_without_append(&db, "EA-DESTRUCTION-STORAGE", || {
+        runtime.resume_incomplete_progress(
+            id,
+            job,
+            retained,
+            NativeDestructionDelivery::AuthenticatedServer(&mut port),
+        )
+    });
+    assert_eq!(Some(port.calls), port.refuse_from, "exactly two actual reads");
+    assert_eq!(destruction_files(&f), files, "the signed 4→1 was never published");
+    assert_eq!(runtime.status(id).unwrap().state.code(), 4);
+    // A later healthy attempt signs and commits exactly one new 4→1.
+    port.refuse_from = None;
+    let resumed = runtime
+        .resume_incomplete_progress(
+            id,
+            job,
+            retained,
+            NativeDestructionDelivery::AuthenticatedServer(&mut port),
+        )
+        .unwrap();
+    assert_eq!(resumed.state.code(), 1);
+    assert_eq!(destruction_files(&f), files + 1);
+    let (_, fields) = latest_batch_event(&db);
+    assert_eq!((fields.from_state, fields.to_state), (Some(4), 1));
+    assert!(fields.previous_event_object_hash == Some(retained));
+}
+
+/// E.5: faults while the actual native Destruction audit signature is held.
+/// The server fault proves the second read follows the blocking audit work.
+#[test]
+fn native_retry_held_audit_refuses_changed_history_holder_storage_and_server() {
+    for fault in ["history", "holdings", "storage", "server"] {
+        let f = NativeDestructionFixture::with_optional_reader_opfs(true, 3, true);
+        let mut port = StubReservation::new(&f);
+        // The actual original target entry, read before its local removal.
+        let source = ea_recovery::FsArchiveSource::open_committed(&f.archive).unwrap();
+        let original = ea_archive::ArchiveInventory::build(&source).unwrap().entries()[0]
+            .exact_bytes()
+            .as_bytes()
+            .to_vec();
+        let Incomplete {
+            mut runtime,
+            id,
+            job,
+            db,
+            retained,
+            ..
+        } = ready(&f, &mut port);
+        let mut other = (fault == "history").then(|| f.runtime());
+        let competing = server_claim(&f, &db, |fields| {
+            fields.executed_at = UnixMillis::new(fields.executed_at.get() + 1);
+        });
+        let refuse = port.refuse.clone();
+        let batches = failure::count(&db, "destruction_import_batch");
+        let files = destruction_files(&f);
+        let barrier = f.admin_directory.join("hold-completion-audit");
+        fs::write(&barrier, b"").unwrap();
+        let result = std::thread::scope(|scope| {
+            let task = scope.spawn(|| {
+                runtime.resume_incomplete_progress(
+                    id,
+                    job,
+                    retained,
+                    NativeDestructionDelivery::AuthenticatedServer(&mut port),
+                )
+            });
+            wait_marker(&f.admin_directory.join("completion-audit-paused"));
+            let audits = failure::count(&db, "local_audit_event");
+            match fault {
+                "history" => {
+                    other
+                        .as_mut()
+                        .unwrap()
+                        .import_signed_progress(id, job, &[competing])
+                        .unwrap();
+                }
+                "holdings" => fs::write(
+                    f.archive.join("entries/retry-reintroduced.eip.staging"),
+                    &original,
+                )
+                .unwrap(),
+                "storage" => {
+                    db.execute("CREATE TRIGGER retry_fixture_refusal BEFORE INSERT ON destruction_import_batch BEGIN SELECT RAISE(ABORT,'fixture refusal'); END", &[]).unwrap();
+                }
+                "server" => refuse.store(true, std::sync::atomic::Ordering::SeqCst),
+                _ => unreachable!(),
+            }
+            fs::remove_file(&barrier).unwrap();
+            let result = task.join().unwrap();
+            assert!(
+                f.admin_directory
+                    .join("completion-audit-returned")
+                    .try_exists()
+                    .unwrap(),
+                "actual held helper returned; timeout is not an accepted refusal"
+            );
+            assert_eq!(
+                failure::count(&db, "local_audit_event"),
+                audits + if fault == "history" { 2 } else { 0 },
+                "both retry audits roll back together: {fault}"
+            );
+            result
+        });
+        let error = result.err().expect("late retry commit must be refused");
+        eprintln!("native retry held audit: {fault} {}", error.code());
+        let expected = match fault {
+            "history" => "EA-DESTRUCTION-SECURITY-CONFLICT",
+            "holdings" => "EA-DESTRUCTION-TARGET",
+            "storage" | "server" => "EA-DESTRUCTION-STORAGE",
+            _ => unreachable!(),
+        };
+        assert_eq!(error.code(), expected, "actual retry audit barrier: {fault}");
+        assert_eq!(
+            failure::count(&db, "destruction_import_batch"),
+            batches + if fault == "history" { 1 } else { 0 }
+        );
+        if fault != "history" {
+            assert_eq!(destruction_files(&f), files, "nothing published: {fault}");
+        }
+        // Reintroduced bytes make even the status read refuse (Target); the
+        // unchanged batch count above already shows that state4 remains.
+        if fault != "holdings" {
+            assert_eq!(runtime.status(id).unwrap().state.code(), 4);
+        }
+    }
+}
+fn wait_marker(path: &Path) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !path.try_exists().unwrap() {
+        assert!(
+            std::time::Instant::now() < until,
+            "actual native audit marker was not reached"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
