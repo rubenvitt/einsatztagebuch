@@ -283,6 +283,16 @@ pub(crate) fn pause_audit_signature(directory: &Path, data: &[u8]) {
     if core.u64().ok() != Some(10) {
         return;
     } // existing Destruction audit
+    // Optional deterministic selector: let the first N matching Destruction
+    // audits pass (e.g. an earlier import batch within the same action).
+    let skip = directory.join("hold-completion-audit-skip");
+    if let Ok(text) = fs::read_to_string(&skip) {
+        let left: u32 = text.trim().parse().unwrap();
+        if left > 0 {
+            fs::write(&skip, (left - 1).to_string()).unwrap();
+            return;
+        }
+    }
     // One-shot barrier: a competing real native admission must not wait on the
     // first action's marker. No payload is written to the fixture filesystem.
     let marker = directory.join("completion-audit-paused");

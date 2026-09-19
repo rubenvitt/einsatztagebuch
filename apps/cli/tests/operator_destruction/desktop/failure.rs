@@ -177,11 +177,18 @@ fn native_desktop_resume_keeps_an_elapsed_attested_deadline_open_and_only_the_ex
         json(destruction_read_core(&state, Some(&id)))["process"],
         failed["process"]
     );
+    // Ruling G2 (DRK-319): Resume in state4 never idles silently. Without a
+    // server duty and server transport the retry is refused explicitly; it
+    // neither retries nor re-signs (append check below).
     assert_eq!(
-        json(destruction_resume_core(&state, &id))["process"],
-        failed["process"],
-        "Resume in state4 neither retries nor re-signs"
+        destruction_resume_core(&state, &id)
+            .err()
+            .expect("no silent no-op in state4")
+            .code,
+        "EA-DESTRUCTION-RETRY-NO-SERVER-DUTY"
     );
+    // A refused native action closes the session; a new explicit login follows.
+    reopened.login().unwrap();
     assert_eq!(
         destruction_mark_incomplete_core(&state, &id, &job)
             .err()

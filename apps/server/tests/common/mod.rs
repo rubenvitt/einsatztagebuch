@@ -528,6 +528,40 @@ pub async fn spawn_server_with_object_store(
     bucket: &str,
     execution: TestExecutionPorts,
 ) -> TestServer {
+    spawn_server_with_object_store_at(
+        "127.0.0.1:0",
+        pool,
+        now,
+        organization_id,
+        server_secret,
+        server_certificate_hash,
+        bucket,
+        execution,
+    )
+    .await
+    .expect("binding the loopback listener must succeed")
+    .0
+}
+
+/// Derselbe Server an einer AUSDRÜCKLICHEN Adresse, mit dem Handle seines
+/// Lauscher-Tasks.
+///
+/// Ein Neustart DESSELBEN registrierten Servers muss an derselben Adresse
+/// binden, weil die Klientenkonfiguration Adresse und Authority festhält. Ein
+/// Abbruch des Handles schließt genau den TLS-Lauscher; Datenbank und Bucket
+/// bleiben. Ein Bindefehler kommt zurück, statt zu paniken, damit der Aufrufer
+/// begrenzt wiederholen kann.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_server_with_object_store_at(
+    bind: &str,
+    pool: PgPool,
+    now: ea_types::UnixMillis,
+    organization_id: ea_types::OrganizationId,
+    server_secret: [u8; 32],
+    server_certificate_hash: ea_types::CertificateHash,
+    bucket: &str,
+    execution: TestExecutionPorts,
+) -> std::io::Result<(TestServer, tokio::task::JoinHandle<()>)> {
     let TestExecutionPorts {
         deletion,
         objects_override,
@@ -548,9 +582,7 @@ pub async fn spawn_server_with_object_store(
     install_crypto_provider();
     let (certificate, key) = write_test_tls_material();
     let tls = tls_server_config(&certificate, &key).expect("the test TLS material must load");
-    let listener = TlsListener::bind("127.0.0.1:0", tls)
-        .await
-        .expect("binding the loopback listener must succeed");
+    let listener = TlsListener::bind(bind, tls).await?;
     let address = listener
         .local_address()
         .expect("the bound address must be readable");
@@ -606,10 +638,10 @@ pub async fn spawn_server_with_object_store(
         ),
     });
 
-    tokio::spawn(async move {
+    let serving = tokio::spawn(async move {
         let _ = serve(listener, router(state, web_origins)).await;
     });
-    TestServer { address, authority }
+    Ok((TestServer { address, authority }, serving))
 }
 
 /// Ein eindeutiger, S3-GUELTIGER Bucketname mit dem gegebenen Praefix.
