@@ -4028,13 +4028,13 @@ const LOCAL_AUDIT_MANIFEST_PATH: &str = "vectors/local-audit/v1/manifest.json";
 /// Die Wurzel der Familie, relativ zur Arbeitsbaumwurzel.
 const LOCAL_AUDIT_VECTOR_ROOT: &str = "vectors/local-audit/v1";
 
-/// Die Zahl der Eintraege: zwoelf angenommene, einer je Aktion, und fuenf
+/// Die Zahl der Eintraege: dreizehn angenommene, einer je Aktion, und fuenf
 /// abgelehnte. Ohne diese Schranke liefe ein truncatiertes Manifest still
 /// durch.
-const LOCAL_AUDIT_EXPECTED_ENTRY_COUNT: usize = 17;
+const LOCAL_AUDIT_EXPECTED_ENTRY_COUNT: usize = 18;
 
 /// Die Zahl der Aktionen aus `schemas/reports/v1/local-audit.cddl:3`.
-const LOCAL_AUDIT_ACTION_COUNT: u8 = 12;
+const LOCAL_AUDIT_ACTION_COUNT: u8 = 13;
 
 /// Der angenommene Vektor, aus dem die vier Einbyteabweichungen entstehen.
 const LOCAL_AUDIT_EDIT_BASE: &str = "event/accepted-plaintext-export";
@@ -4125,7 +4125,7 @@ fn check_local_audit_vectors(entries: &[VectorEntry]) -> usize {
     assert_eq!(
         action_codes,
         (0..LOCAL_AUDIT_ACTION_COUNT).collect::<BTreeSet<u8>>(),
-        "the accepted vectors must cover every one of the twelve actions exactly once"
+        "the accepted vectors must cover every one of the thirteen actions exactly once"
     );
     assert_eq!(
         null_binding, 1,

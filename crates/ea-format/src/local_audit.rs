@@ -370,7 +370,7 @@ where
 // bindet in seinen zwoelf Zweigen jede Aktion an genau einen Kontextarm, und
 // `ea_crypto::validate_unsigned_protocol_core` weist ein falsches Paar an der
 // Signaturgrenze ab. Ein Typ mit unabhaengigem Aktionsfeld und unabhaengigem
-// Kontextfeld boete das freie Produkt aus zwoelf Aktionen und neun Kontexten,
+// Kontextfeld boete das freie Produkt aus dreizehn Aktionen und neun Kontexten,
 // dessen Mehrheit unbaubare Bytes sind. Hier ist ein falsches Paar deshalb
 // nicht ablehnbar, sondern nicht konstruierbar.
 // ---------------------------------------------------------------------------
@@ -1013,7 +1013,7 @@ pub fn encode_local_audit_event(core: &[u8], cose_sign1: &[u8]) -> Result<Vec<u8
     Ok(exact)
 }
 
-/// Dekodiert ein signiertes Ereignis jeder der zwoelf Aktionen.
+/// Dekodiert ein signiertes Ereignis jeder der dreizehn Aktionen.
 ///
 /// Das allgemeine Gegenstueck zu [`decode_clock_release_audit`], das unberuehrt
 /// daneben stehen bleibt. Beide lesen denselben Kern und pruefen dieselben drei
