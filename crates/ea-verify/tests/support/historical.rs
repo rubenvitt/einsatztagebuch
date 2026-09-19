@@ -21,6 +21,19 @@ pub struct HistoricalFixture {
     pub hga_certificate: CertificateHash,
     pub approvers: [CertificateHash; 2],
     pub head: trust_support::BuiltHead,
+    /// Die Sequenz, an der der Reader und die Adminbindung wirksam werden und
+    /// an der Autorisierung und aktuelle Auswahl stehen: `1` in der
+    /// Standardfixture, `2` in [`fixture_with_two_old_entries`].
+    pub current_sequence: u64,
+    /// Der zweite alte Eintrag, nur in [`fixture_with_two_old_entries`].
+    pub second_old_entry: Option<SecondOldEntry>,
+}
+/// Ein zweiter Eintrag VOR der Aufnahme des Readers, mit eigenem
+/// ursprünglichem Recovery-Grant und eigenem CEK (`complete_cek(1)`).
+pub struct SecondOldEntry {
+    pub entry_hash: EntryHash,
+    pub entry_bytes: Vec<u8>,
+    pub original_bytes: Vec<u8>,
 }
 pub fn fixture(plaintext: &[u8]) -> HistoricalFixture {
     fixture_with_payload(|_, _| plaintext.to_vec())
@@ -29,6 +42,12 @@ pub fn fixture_with_payload(
     payload: impl FnOnce(RegistryVersion, ObjectHash) -> Vec<u8>,
 ) -> HistoricalFixture {
     fixture_with_host_options(payload, None)
+}
+/// ZWEI alte Einträge (Sequenz 0 und 1) vor der Aufnahme des Readers, der
+/// damit erst ab Sequenz 2 wirksam wird. Beide tragen nur ihren
+/// ursprünglichen Recovery-Grant; ein Re-Grant kann einen davon auswählen.
+pub fn fixture_with_two_old_entries(plaintext: &[u8]) -> HistoricalFixture {
+    fixture_with_options(|_, _| plaintext.to_vec(), None, None, None, true, true)
 }
 pub struct HostOptions {
     pub not_after: i64,
@@ -41,21 +60,28 @@ pub fn fixture_with_host_options(
     payload: impl FnOnce(RegistryVersion, ObjectHash) -> Vec<u8>,
     host: Option<HostOptions>,
 ) -> HistoricalFixture {
-    fixture_with_options(payload, host, None, None, true)
+    fixture_with_options(payload, host, None, None, true, false)
 }
 pub fn fixture_with_expired_original_head(
     payload: impl FnOnce(RegistryVersion, ObjectHash) -> Vec<u8>,
 ) -> HistoricalFixture {
-    fixture_with_options(payload, None, Some(500), None, true)
+    fixture_with_options(payload, None, Some(500), None, true, false)
 }
 pub fn fixture_with_writer_signer(plaintext: &[u8], signer: &CoseSigner) -> HistoricalFixture {
-    fixture_with_options(|_, _| plaintext.to_vec(), None, None, Some(signer), true)
+    fixture_with_options(
+        |_, _| plaintext.to_vec(),
+        None,
+        None,
+        Some(signer),
+        true,
+        false,
+    )
 }
 pub fn fixture_with_host_options_and_no_server(
     payload: impl FnOnce(RegistryVersion, ObjectHash) -> Vec<u8>,
     host: Option<HostOptions>,
 ) -> HistoricalFixture {
-    fixture_with_options(payload, host, None, None, false)
+    fixture_with_options(payload, host, None, None, false, false)
 }
 fn fixture_with_options(
     payload: impl FnOnce(RegistryVersion, ObjectHash) -> Vec<u8>,
@@ -63,12 +89,17 @@ fn fixture_with_options(
     original_not_after: Option<i64>,
     writer_signer: Option<&CoseSigner>,
     include_server: bool,
+    two_old_entries: bool,
 ) -> HistoricalFixture {
     let usable_not_after = host.as_ref().map_or(10_000, |h| h.not_after);
+    // Die letzte Sequenz VOR dem Reader; der Reader wird eine Stelle danach
+    // wirksam.
+    let last_old_sequence = u64::from(two_old_entries);
+    let current_sequence = last_old_sequence + 1;
     let mut line = trust_support::RegistryLineBuilder::new();
     let before = || trust_support::HeadOptions {
         effective_from: Some(0),
-        valid_through: Some(0),
+        valid_through: Some(last_old_sequence),
         not_after: UnixMillis::new(500),
         policy_max_registry_age_ms_override: host.as_ref().map(|h| h.max_age),
         ..Default::default()
@@ -164,14 +195,45 @@ fn fixture_with_options(
         certificates[0],
         &complete_recipient_private_key().public_key(),
     );
+    let second_old_entry = two_old_entries.then(|| {
+        let entry = build_complete_entry_signed_by(
+            HeadRefV1::of(&writer_head),
+            certificates[4],
+            signer,
+            None,
+            anchor.chain_id(),
+            plan,
+            1,
+            Some(entry_hash),
+            &plaintext,
+        );
+        let original_bytes = complete_grant_bytes_issued_by(
+            HeadRefV1::of(&writer_head),
+            certificates[4],
+            signer.public_key().unwrap().thumbprint(),
+            signer,
+            anchor.chain_id(),
+            entry.entry_hash(),
+            1,
+            GrantPurposeV1::Recovery,
+            complete_recipient_key_thumbprint(),
+            certificates[0],
+            &complete_recipient_private_key().public_key(),
+        );
+        SecondOldEntry {
+            entry_hash: entry.entry_hash(),
+            entry_bytes: encode_entry_package(&entry).unwrap().into_vec(),
+            original_bytes,
+        }
+    });
     let head = line.push(
         trust_support::ActionSpec::Device {
             kind: CertificateKindV1::Reader,
             marker: 0x56,
-            effective_from: Some(1),
+            effective_from: Some(current_sequence),
         },
         trust_support::HeadOptions {
-            effective_from: Some(1),
+            effective_from: Some(current_sequence),
             valid_through: Some(100),
             not_after: UnixMillis::new(usable_not_after),
             kem_public_key_override: Some(
@@ -198,10 +260,10 @@ fn fixture_with_options(
             certificate_hash: admin_hash,
             role: ea_format::OperatorRoleV1::OrganizationAdmin,
             marker: 0x42,
-            effective_from: Some(1),
+            effective_from: Some(current_sequence),
         },
         trust_support::HeadOptions {
-            effective_from: Some(1),
+            effective_from: Some(current_sequence),
             valid_through: Some(100),
             not_after: UnixMillis::new(usable_not_after),
             binding_operator_profile_commitment_override: host.as_ref().map(|h| h.commitment),
@@ -215,6 +277,13 @@ fn fixture_with_options(
     push_trust_objects(&mut fixture, &line);
     fixture.push_exact_bytes("entries/000000000000_entry.eip", entry_bytes.clone());
     fixture.push_exact_bytes("grants/000000000000_original.eag", original_bytes.clone());
+    if let Some(second) = &second_old_entry {
+        fixture.push_exact_bytes("entries/000000000001_entry.eip", second.entry_bytes.clone());
+        fixture.push_exact_bytes(
+            "grants/000000000001_original.eag",
+            second.original_bytes.clone(),
+        );
+    }
     HistoricalFixture {
         fixture,
         line,
@@ -228,6 +297,8 @@ fn fixture_with_options(
         hga_certificate: certificates[1],
         approvers: [certificates[2], certificates[3]],
         head,
+        current_sequence,
+        second_old_entry,
     }
 }
 impl HistoricalFixture {
@@ -245,7 +316,7 @@ impl HistoricalFixture {
             registry_version: self.head.version,
             registry_head_hash: Hash32::try_from(self.head.object_hash.as_bytes().as_slice())
                 .unwrap(),
-            authorization_sequence: 1,
+            authorization_sequence: self.current_sequence,
             entry_hashes: vec![self.entry_hash],
             recipient_key_thumbprint: other_recipient_key_thumbprint(),
             recipient_certificate_hash: self.recipient_certificate_hash,

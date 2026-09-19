@@ -658,6 +658,102 @@ fn a_rollback_a_same_version_fork_and_an_expired_head_block_the_line() {
     assert_eq!(blocked(&expired, &mut store, 70, WALL_MS), "EA-TRUST-STALE");
 }
 
+/// AK 35, die Zeithälfte: der `trustedTimeFloor` ist monoton.
+///
+/// `design.md` (Abschnitt „effectiveNow"): der Floor ist das Maximum aus dem
+/// bisher gespeicherten Floor und `issuedAt`/`notBefore` jedes AKZEPTIERTEN
+/// Registrierungsereignisses; die Zeiten des gerade geprüften Kandidaten
+/// stehen noch nicht in `rawNow`. Gemessen wird in drei Schritten an EINEM
+/// Speicher, jeweils mit dem exakten Wert statt einer Ungleichung — eine
+/// Ungleichung bestünde auch, wenn nie fortgeschrieben würde:
+///
+/// 1. Ein neuerer Kopf mit `issuedAt` JENSEITS des Floors wird angenommen,
+///    sobald die Wanduhr ihn erreicht hat (vorher ist er nur zukünftig): der
+///    Floor steigt auf genau dessen `issuedAt` und NICHT auf die Wanduhr —
+///    die Wanduhr ist keine vertrauenswürdige Zeitquelle.
+/// 2. Die Wanduhr läuft weit hinter den Floor zurück: der Floor bleibt,
+///    `rawNow` ist der Floor, und der Rücklauf ist als Warnung sichtbar.
+/// 3. Ein noch neuerer Kopf mit ÄLTEREN Zeiten wird angenommen: der Floor
+///    bleibt, wo er war.
+#[test]
+fn the_trusted_time_floor_rises_with_an_accepted_head_and_neither_a_clock_rollback_nor_an_older_head_lowers_it()
+ {
+    /// `issuedAt` des neueren Kopfes, JENSEITS des persistierten Floors.
+    const NEWER_ISSUED_AT_MS: i64 = 3_500;
+    const NEWER_NOT_BEFORE_MS: i64 = 3_000;
+    /// Die Wanduhr, an der er angenommen wird: jenseits seines `issuedAt`.
+    const ACCEPTING_WALL_MS: i64 = 4_000;
+    /// Eine Wanduhr weit HINTER dem Floor.
+    const ROLLED_BACK_MS: i64 = 1_000;
+
+    let scene = scene();
+    let mut line = scene.line.clone();
+    line.push(
+        policy_action(),
+        HeadOptions {
+            issued_at: UnixMillis::new(NEWER_ISSUED_AT_MS),
+            not_before: UnixMillis::new(NEWER_NOT_BEFORE_MS),
+            not_after: UnixMillis::new(20_000),
+            ..window(70, 79)
+        },
+    );
+    // Der Nachfolger trägt die Vorgabezeiten der Fixture (`issuedAt` 100,
+    // `notBefore` 90) und liegt damit weit HINTER jedem Floor dieses Zeugen.
+    let older = line.push(policy_action(), window(80, 89));
+    assert!(older.version.get() > line.heads()[HEAD_APPENDED].version.get());
+
+    let mut store = store_at(&line, HEAD_GUARD_POLICY, time_without_reference());
+    assert_eq!(store.trusted_time().floor(), UnixMillis::new(FLOOR_MS));
+
+    // 1. Annahme des neueren Kopfes.
+    let newer = selected(&line, &mut store, 70, ACCEPTING_WALL_MS);
+    assert!(store.pinned_head() == Some(pin_of(&line, HEAD_APPENDED)));
+    assert_eq!(
+        store.trusted_time().floor(),
+        UnixMillis::new(NEWER_ISSUED_AT_MS),
+        "der Floor steigt auf das `issuedAt` des angenommenen Kopfes"
+    );
+    assert_eq!(
+        newer.preexisting_effective_now().persisted_floor(),
+        UnixMillis::new(NEWER_ISSUED_AT_MS)
+    );
+    assert_eq!(
+        newer.preexisting_effective_now().value(),
+        UnixMillis::new(ACCEPTING_WALL_MS)
+    );
+
+    // 2. Uhrrücklauf am selben Kopf.
+    let rolled_back = selected(&line, &mut store, 71, ROLLED_BACK_MS);
+    assert_eq!(
+        store.trusted_time().floor(),
+        UnixMillis::new(NEWER_ISSUED_AT_MS),
+        "ein Uhrrücklauf senkt den Floor nicht"
+    );
+    assert_eq!(
+        rolled_back.preexisting_effective_now().value(),
+        UnixMillis::new(NEWER_ISSUED_AT_MS),
+        "`rawNow` fällt nicht mit der Wanduhr zurück"
+    );
+    assert!(rolled_back.warnings().clock_rollback());
+
+    // 3. Annahme des Nachfolgers mit älteren Zeiten.
+    let after_older = selected(&line, &mut store, 80, WALL_MS);
+    assert!(store.pinned_head() == Some(pin_of(&line, HEAD_APPENDED + 1)));
+    assert_eq!(
+        store.trusted_time().floor(),
+        UnixMillis::new(NEWER_ISSUED_AT_MS),
+        "ein Kopf mit älteren Zeiten senkt den Floor nicht"
+    );
+    assert_eq!(
+        after_older.preexisting_effective_now().persisted_floor(),
+        UnixMillis::new(NEWER_ISSUED_AT_MS)
+    );
+    // Keine unabhängige Zeitquelle war beteiligt: jeder Schritt oben ist die
+    // Registrierungsauswahl allein.
+    assert_eq!(store.independent_commits(), 0);
+    assert_eq!(store.selection_commits(), 3);
+}
+
 // ===========================================================================
 // 4. Die Leasegrenze
 // ===========================================================================
@@ -836,7 +932,11 @@ fn a_clock_release_binds_the_clock_it_was_issued_for_and_is_consumed_exactly_onc
     assert!(matches!(outcome, RegistrySelectionOutcome::Selected(_)));
     assert_eq!(store.selection_commits(), commits_before + 1);
     assert_eq!(store.consumed_releases(), 1);
-    assert!(store.trusted_time().floor() >= floor_before);
+    // GLEICH, nicht nur „nicht kleiner": die Freigabe senkt den Floor nie und
+    // hebt ihn auch nicht — die gesperrte Wanduhr 3_201 ist keine
+    // vertrauenswürdige Zeitquelle (`design.md`, Clock-Release).
+    assert_eq!(store.trusted_time().floor(), floor_before);
+    assert_eq!(floor_before, UnixMillis::new(FLOOR_MS));
     // Der Boden ist nicht durch eine NEUE unabhaengige Referenz gestiegen: die
     // Zeugen dieser Datei legen keine Zeitquellen vor.
     assert_eq!(store.independent_commits(), 0);
