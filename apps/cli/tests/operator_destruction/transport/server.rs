@@ -9,6 +9,7 @@ use ea_sync_protocol::EndpointV1;
 
 mod host;
 mod failure;
+mod retry;
 
 #[path = "../../../../server/tests/common/mod.rs"]
 mod common;
@@ -18,6 +19,11 @@ struct ServerFixture {
     server: common::TestServer,
     bucket: String,
     config: NativeDestructionServerConfig,
+    /// The registered server's own DeletionAttest certificate, kept for an
+    /// actual restart of the same identity (`retry.rs`).
+    deletion_certificate: CertificateHash,
+    /// The actual TLS listener task; aborting it stops only this listener.
+    serving: tokio::task::JoinHandle<()>,
 }
 impl ServerFixture {
     async fn seed(f: &NativeDestructionFixture) -> Self {
@@ -146,7 +152,8 @@ impl ServerFixture {
             200,
         )
         .await;
-        let server = common::spawn_server_with_object_store(
+        let (server, serving) = common::spawn_server_with_object_store_at(
+            "127.0.0.1:0",
             pool.clone(),
             system_now(),
             org,
@@ -159,7 +166,8 @@ impl ServerFixture {
                 clock_override: Some(Arc::new(einsatzarchiv_server::adapters::clock::SystemClock)),
             },
         )
-        .await;
+        .await
+        .expect("binding the loopback listener must succeed");
         // The independent approver performs the real reservation. The native Admin host never owns this authority.
         let body = ea_sync_protocol::DestructionRequestV1::new(f.authorization.clone()).unwrap();
         let nonce = common::fresh_challenge(&server, org).await;
@@ -204,6 +212,8 @@ impl ServerFixture {
             server,
             bucket,
             config,
+            deletion_certificate: component_cert,
+            serving,
         }
     }
 }

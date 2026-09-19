@@ -2,6 +2,7 @@
 mod reader_opfs;
 mod pending;
 mod failure;
+mod retry;
 use super::*;
 use ea_desktop::commands::{
     destruction_evidence::{destruction_evidence_finalize_core, destruction_evidence_preview_core},
