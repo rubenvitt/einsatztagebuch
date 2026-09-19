@@ -1577,7 +1577,10 @@ entschieden (siehe folgende Nachmessung). Der native Erzeuger für
 `crates/ea-admin/src/destruction_runtime/` nennt nur `failure.rs` den Zustand — ist
 per Ruling vom 13.09.2026 aus dem ersten Stufe-5-PR in das Folgeticket DRK-319
 verschoben; die
-Kante bleibt Zusage dieses Plans.
+Kante bleibt Zusage dieses Plans. Ruling Ruben 19.09.2026 (DRK-319 G1) — der native
+4→1-Retry ist für servergebundene Pflichten geliefert; Reader-Fälle bleiben in v0.1
+dauerhaft in Zustand 4 (`incompleteUnreachableReplica`), spät importierte
+Reader-Originale zählen nicht.
 
 **Nachmessung 2026-09-14 (DRK-250, HEAD `041911d`, Abnahme
 `.superpowers/sdd/2026-08-13-einsatzarchiv-stage-5-administration-recovery/claude-t12-t13-acceptance.md`):** Entschieden: Ein eigenes System-E2E
@@ -1743,7 +1746,7 @@ Ruling vom 13.09.2026: „Fortsetzen" erzeugt nie Zustand 4
 (`src/runtime/destruction.rs:768`, `src/runtime/destruction_transport.rs:252`).
 Zustand 4 entsteht nur über die eigene bestätigte Aktion „Als unvollständig
 abschließen" mit dem Bestätigungsknopf „Endgültig als unvollständig abschließen"
-(`DestructionWizard.test.tsx:73`, :91; `destruction.spec.ts:136-155`). Seit DRK-319 S3
+(`DestructionWizard.test.tsx:169-173`; `destruction.spec.ts:134-158`, Stand 19.09.). Seit DRK-319 S3
 (Ruling G3, 19.09.2026) heißt der Bestätigungsknopf wie die Aktion „Als unvollständig
 abschließen“; endgültig ist der Abschluss nur für nicht erreichbare Lesegeräte, Serverfälle
 setzt „Vernichtung fortsetzen“ über den nativen 4→1-Retry fort. Das Angebot
@@ -1917,7 +1920,10 @@ Pfade und die Testskizze; keine Zusage entfällt.
   Aufnahme in Stufe 5 oder dokumentierte Grenze wird im Folgeticket DRK-320
   entschieden.
   (5) Der erste Stufe-5-PR umfasst Task 8–13 samt dieser Plankorrektur; dieser Task
-  bleibt DRK-282, der native 4→1-Retry aus Task 12 ist DRK-319.
+  bleibt DRK-282, der native 4→1-Retry aus Task 12 ist DRK-319. Ruling Ruben
+  19.09.2026 (DRK-319 G1) — der native 4→1-Retry ist für servergebundene Pflichten
+  geliefert; Reader-Fälle bleiben in v0.1 dauerhaft in Zustand 4
+  (`incompleteUnreachableReplica`), spät importierte Reader-Originale zählen nicht.
 
 **Files:**
 - Create: `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs`

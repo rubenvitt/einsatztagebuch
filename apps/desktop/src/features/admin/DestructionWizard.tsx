@@ -16,8 +16,14 @@ const [REQUESTED, , , COMPLETE, INCOMPLETE] = DESTRUCTION_STATE_V1_VALUES
 
 /**
  * Refusals of the native 4→1 retry chained into „Vernichtung fortsetzen"
- * (Ruling G2, 19.09.2026): Reader duty and missing server duty are permanent,
- * an open duty at now is temporary (G4). An explanation instead of a silent
+ * (Ruling G2, 19.09.2026): Reader duty is permanent (G1, v0.1 never leaves
+ * state 4 for a Reader case); missing server duty is not — it heals once a
+ * sync server is configured as a deletion location. An open duty at now is
+ * temporary too (G4). Without a transport (no sync server set up at all),
+ * the host reports every state-4 process as NO-SERVER-DUTY, Reader cases
+ * included — that is the core's first refusal, decided before any server
+ * contact; the transport path is what tells Reader duty apart with its own
+ * READER-DUTY code once a server exists. An explanation instead of a silent
  * no-op. The code stays visible; the host decides, this text grants nothing.
  */
 const RESUME_REFUSAL_TEXT: Readonly<Record<string, string>> = {
