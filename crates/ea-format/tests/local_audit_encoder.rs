@@ -1,4 +1,4 @@
-//! Der allgemeine Kodierer der zwoelf `local-audit-event-v1`-Ereignisse.
+//! Der allgemeine Kodierer der dreizehn `local-audit-event-v1`-Ereignisse.
 //!
 //! Der eingefrorene Stufe-1-Test `local_audit.rs` steht daneben und bleibt
 //! unberuehrt: er prueft den SPEZIELLEN Dekodierer der Taktfreigabe gegen
@@ -375,7 +375,7 @@ mod fixtures {
         )
     }
 
-    /// Alle zwoelf Aktionen mit ihrem eigenen Kontext.
+    /// Alle dreizehn Aktionen mit ihrem eigenen Kontext.
     ///
     /// `login` traegt KEINE Bindung: die nullbare sechste Position muss
     /// mindestens einmal als `null` durch den Kodierer laufen.
@@ -442,10 +442,15 @@ mod fixtures {
                 LocalAuditActionV1::ArchiveProfileMigration(archive_profile_migration()),
                 LocalAuditOutcomeV1::Completed,
             ),
+            // DRK-282: die abgelaufene Sitzung, additiv als Code 12 am Ende.
+            event(
+                LocalAuditActionV1::SessionExpired(GenericAuditContextV1::new(None)),
+                LocalAuditOutcomeV1::Failed,
+            ),
         ]
     }
 
-    /// Dieselben zwoelf Aktionen mit den beiden eingefrorenen Zahlen.
+    /// Dieselben dreizehn Aktionen mit den beiden eingefrorenen Zahlen.
     ///
     /// Anders als `one_event_per_action` traegt hier JEDES Ereignis eine
     /// Bindung und dieselbe Zeit, weil die beiden Versaetze sonst wandern.
@@ -454,9 +459,9 @@ mod fixtures {
         for (index, event) in one_event_per_action().into_iter().enumerate() {
             let mut event = event;
             event.operator_binding_object_hash = Some(object_hash(0x20));
-            let action_code = u8::try_from(index).expect("twelve actions");
+            let action_code = u8::try_from(index).expect("thirteen actions");
             let context_tag = match action_code {
-                0 | 1 | 8 => 0,
+                0 | 1 | 8 | 12 => 0,
                 2 | 3 => 4,
                 4 => 1,
                 5 => 3,
@@ -465,7 +470,7 @@ mod fixtures {
                 9 => 6,
                 10 => 7,
                 11 => 8,
-                _ => unreachable!("the twelve actions are closed"),
+                _ => unreachable!("the thirteen actions are closed"),
             };
             expectations.push((event, action_code, context_tag));
         }
@@ -546,7 +551,7 @@ mod fixtures {
                     [GENERIC_SUBJECT_FILL; 32],
                 ))]
             }
-            LocalAuditActionV1::ReauthFailure(_) => {
+            LocalAuditActionV1::ReauthFailure(_) | LocalAuditActionV1::SessionExpired(_) => {
                 vec![ContextPosition::OptionalHash(None)]
             }
             LocalAuditActionV1::BindingChange(_) => vec![
@@ -632,7 +637,8 @@ mod fixtures {
         match action {
             LocalAuditActionV1::Login(_)
             | LocalAuditActionV1::ReauthFailure(_)
-            | LocalAuditActionV1::RecoveryTest(_) => {
+            | LocalAuditActionV1::RecoveryTest(_)
+            | LocalAuditActionV1::SessionExpired(_) => {
                 read.push(read_optional_hash(decoder));
             }
             LocalAuditActionV1::ClockSkewRelease(_) => {
@@ -709,7 +715,8 @@ mod fixtures {
         match action {
             LocalAuditActionV1::Login(context)
             | LocalAuditActionV1::ReauthFailure(context)
-            | LocalAuditActionV1::RecoveryTest(context) => {
+            | LocalAuditActionV1::RecoveryTest(context)
+            | LocalAuditActionV1::SessionExpired(context) => {
                 vec![ContextPosition::OptionalHash(
                     context.subject_object_hash().map(|hash| *hash.as_bytes()),
                 )]

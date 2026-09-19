@@ -6237,7 +6237,7 @@ const LOCAL_AUDIT_SIGNER_CERTIFICATE_OBJECT_HASH: [u8; 32] = [0x33; 32];
 
 /// Die Wirkzeit aller lokalen Auditvektoren in Millisekunden seit der Epoche.
 ///
-/// EINE Zeit fuer alle zwoelf: `effective-now` ist die einzige Position
+/// EINE Zeit fuer alle dreizehn: `effective-now` ist die einzige Position
 /// veraenderlicher Laenge vor dem Kontext, und die drei Byteversaetze unten
 /// haengen daran.
 const LOCAL_AUDIT_EFFECTIVE_NOW_MS: i64 = 1_700_000_000_000;
@@ -6326,6 +6326,9 @@ const LOCAL_AUDIT_MIGRATION_INVENTORY_FILL: u8 = 0x87;
 /// Der D-B02-Slot `activePointerHash`.
 const LOCAL_AUDIT_MIGRATION_ACTIVE_POINTER_FILL: u8 = 0x88;
 
+/// Der Gegenstand des `sessionExpired`-Ereignisses (Code 12, DRK-282).
+const LOCAL_AUDIT_SESSION_EXPIRED_SUBJECT_FILL: u8 = 0x89;
+
 /// Die Sequenz, ab der die neue Bindung wirkt.
 const LOCAL_AUDIT_BINDING_CHANGE_SEQUENCE: u64 = 41;
 
@@ -6413,7 +6416,10 @@ fn local_audit_event(
     }
 }
 
-/// Die zwoelf Ereignisse, eines je Aktion, mit ihrem Vektornamen.
+/// Die dreizehn Ereignisse, eines je Aktion, mit ihrem Vektornamen.
+///
+/// Das dreizehnte (`sessionExpired`, DRK-282) steht additiv am Ende; die zwölf
+/// älteren Vektoren bleiben Byte für Byte unverändert.
 ///
 /// Alle neun Kontextmarken kommen vor, und beide nullbaren Stellen stehen
 /// mindestens einmal als `null`: die Bedienerbindung im `login`-Ereignis, der
@@ -6574,6 +6580,16 @@ fn local_audit_accepted_events() -> Vec<(&'static str, LocalAuditEventCoreFields
                     local_audit_hash32(LOCAL_AUDIT_MIGRATION_ACTIVE_POINTER_FILL),
                 )),
                 LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-session-expired",
+            local_audit_event(
+                LocalAuditActionV1::SessionExpired(GenericAuditContextV1::new(Some(
+                    local_audit_object_hash(LOCAL_AUDIT_SESSION_EXPIRED_SUBJECT_FILL),
+                ))),
+                LocalAuditOutcomeV1::Failed,
                 binding,
             ),
         ),
@@ -7900,13 +7916,13 @@ mod tests {
     }
 
     /// Der Erzeuger benennt jeden Eintrag und jede Datei genau einmal, deckt
-    /// alle zwoelf Aktionen ab und ist deterministisch.
+    /// alle dreizehn Aktionen ab und ist deterministisch.
     #[test]
     fn the_local_audit_generator_is_deterministic() {
         let manifest = local_audit_v1_manifest();
         assert_eq!(manifest.family, LOCAL_AUDIT_FAMILY);
         assert_eq!(manifest.version, LOCAL_AUDIT_V1_VERSION);
-        assert_eq!(manifest.entries.len(), 17);
+        assert_eq!(manifest.entries.len(), 18);
         let names = manifest
             .entries
             .iter()
@@ -7919,7 +7935,7 @@ mod tests {
             .filter(|entry| entry.expected_outcome == ExpectedOutcome::Accepted)
             .count();
         assert_eq!(
-            accepted, 12,
+            accepted, 13,
             "one accepted vector per action of local-audit-action-v1"
         );
         assert_eq!(manifest.entries.len() - accepted, 5);

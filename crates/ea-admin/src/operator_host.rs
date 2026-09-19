@@ -928,9 +928,12 @@ enum AuditContext {
 }
 fn audit_context(action: &LocalAuditActionV1) -> Result<AuditContext, OperatorLifecycleError> {
     match action {
-        LocalAuditActionV1::Login(c) | LocalAuditActionV1::ReauthFailure(c) => Ok(
-            AuditContext::Generic(action.code(), c.subject_object_hash()),
-        ),
+        LocalAuditActionV1::Login(c)
+        | LocalAuditActionV1::ReauthFailure(c)
+        | LocalAuditActionV1::SessionExpired(c) => Ok(AuditContext::Generic(
+            action.code(),
+            c.subject_object_hash(),
+        )),
         LocalAuditActionV1::BindingChange(c) | LocalAuditActionV1::Revocation(c) => {
             Ok(AuditContext::Binding(
                 action.code(),

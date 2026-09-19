@@ -187,6 +187,23 @@ impl TypedLocalAuditEvent {
             outcome: LocalAuditOutcomeV1::Failed,
         }
     }
+
+    /// Die Abweisung einer abgelaufenen Bedienersitzung (DRK-282, AK 53).
+    ///
+    /// Eine eigene Aktion (`sessionExpired`, Code 12) statt einer
+    /// `reauthFailure`: nur so ist der Ablauf im Audit als Ablauf erkennbar.
+    /// Der Kontext nennt höchstens den Hash einer bereits BEKANNTEN Bindung —
+    /// nie Konto, Anzeigename, Funktion oder Salt. Der Ausgang ist immer
+    /// `failed`, weil die Sitzung abgewiesen wurde.
+    #[must_use]
+    pub const fn session_expired(known_binding_object_hash: Option<ObjectHash>) -> Self {
+        Self {
+            action: LocalAuditActionV1::SessionExpired(GenericAuditContextV1::new(
+                known_binding_object_hash,
+            )),
+            outcome: LocalAuditOutcomeV1::Failed,
+        }
+    }
 }
 
 /// Eine geschriebene, signierte Auditzeile.

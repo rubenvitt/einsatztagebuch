@@ -460,6 +460,44 @@ impl<'a> OperatorBindingService<'a> {
         self.verify_session_inner(request, Some(context_hash))
     }
 
+    /// Bucht die Abweisung einer abgelaufenen Sitzung (DRK-282, AK 53).
+    ///
+    /// Der Aufrufer weist die Sitzung ohnehin ab; diese Zeile hält nur fest,
+    /// DASS abgewiesen wurde, und zwar als Ablauf (`sessionExpired`) mit dem
+    /// Ausgang `failed`. Gebucht wird unter dem geprüften Gerät, wie bei der
+    /// gescheiterten Anmeldung: die Bindung erscheint nur als Hash und nur,
+    /// wenn sie am gewählten Kopf für genau dieses Gerät aktiv ist — sonst
+    /// wird die Zeile niemandem zugerechnet. Kein Konto, kein Name, kein Salt.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler der Gerätprüfung oder [`OperatorLifecycleError::AuditFailed`],
+    /// wenn die Zeile nicht signiert, nicht dauerhaft geschrieben oder nicht
+    /// zurückgelesen werden konnte. Der Aufrufer bleibt dann bei seiner
+    /// Abweisung.
+    pub fn record_session_expired(
+        &self,
+        binding_object_hash: ObjectHash,
+        device_certificate_hash: CertificateHash,
+    ) -> Result<(), OperatorLifecycleError> {
+        let authority = SessionAuthority::Current(self.head);
+        authority.check(self.local_device)?;
+        let head = authority.view();
+        let (device, known) = audit_device(
+            head,
+            self.local_device,
+            binding_object_hash,
+            device_certificate_hash,
+        )?;
+        operator_host::record_local_audit_for(
+            head,
+            self.audit,
+            self.local_device,
+            &device,
+            TypedLocalAuditEvent::session_expired(known),
+        )
+    }
+
     fn verify_session_inner(
         &self,
         request: VerifySessionRequest<'_>,
@@ -924,6 +962,31 @@ impl SessionAuthority<'_> {
         }
     }
 }
+/// Das geprüfte Gerät, unter dem eine Anmelde- oder Ablaufzeile gebucht wird,
+/// und die Bindung, die ihr zugerechnet werden darf: nur eine am Kopf aktive
+/// Bindung genau dieses Geräts, sonst keine.
+fn audit_device(
+    head: ea_trust::WriterRegistryHeadRef<'_>,
+    local_device: VerifiedLocalDeviceIdentity,
+    binding_object_hash: ObjectHash,
+    device_certificate_hash: CertificateHash,
+) -> Result<(AuthenticatedDevice, Option<ObjectHash>), OperatorLifecycleError> {
+    let known = head
+        .active_operator_binding_fields(binding_object_hash)
+        .filter(|b| {
+            b.device_certificate_hash == local_device.certificate
+                && device_certificate_hash == local_device.certificate
+        })
+        .map(|_| binding_object_hash);
+    let device = AuthenticatedDevice::new(
+        local_device.organization,
+        local_device.device,
+        ObjectHash::try_from(local_device.certificate.as_bytes().as_slice())
+            .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
+        known,
+    );
+    Ok((device, known))
+}
 fn verify_session_with_authority(
     authority: SessionAuthority<'_>,
     audit: &dyn LocalAuditService,
@@ -933,20 +996,12 @@ fn verify_session_with_authority(
 ) -> Result<VerifiedOperatorSession, OperatorLifecycleError> {
     authority.check(local_device)?;
     let head = authority.view();
-    let known = head
-        .active_operator_binding_fields(request.binding_object_hash)
-        .filter(|b| {
-            b.device_certificate_hash == local_device.certificate
-                && request.device_certificate_hash == local_device.certificate
-        })
-        .map(|_| request.binding_object_hash);
-    let device = AuthenticatedDevice::new(
-        local_device.organization,
-        local_device.device,
-        ObjectHash::try_from(local_device.certificate.as_bytes().as_slice())
-            .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
-        known,
-    );
+    let (device, known) = audit_device(
+        head,
+        local_device,
+        request.binding_object_hash,
+        request.device_certificate_hash,
+    )?;
     let result = (|| {
         head.active_certificate_fields(request.device_certificate_hash)
             .ok_or(OperatorError::DeviceCertificateNotActive)?;

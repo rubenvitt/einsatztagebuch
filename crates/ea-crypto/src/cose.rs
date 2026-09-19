@@ -4250,7 +4250,8 @@ fn validate_local_audit_core(decoder: &mut Decoder<'_>, length: u64) -> Result<(
     let action = decoder
         .u64()
         .map_err(|_| CryptoError::InvalidProtocolCore)?;
-    if action > 11
+    // Aktion 12 (`sessionExpired`, DRK-282) ist additiv am Ende angehängt.
+    if action > 12
         || decoder
             .u64()
             .map_err(|_| CryptoError::InvalidProtocolCore)?
@@ -4273,7 +4274,7 @@ fn validate_local_audit_context(
         return Err(CryptoError::InvalidProtocolCore);
     }
     let expected_tag = match action {
-        0 | 1 | 8 => 0,
+        0 | 1 | 8 | 12 => 0,
         2 | 3 => 4,
         4 => 1,
         5 => 3,

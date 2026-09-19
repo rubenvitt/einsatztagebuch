@@ -16,7 +16,7 @@ use ea_trust::{
     SelectedRegistryHead, TrustStateStore, VerifiedAdminAuthorizationIntent,
     consume_admin_authorization_intent,
 };
-use ea_types::{CertificateHash, ObjectHash};
+use ea_types::{CertificateHash, ObjectHash, UnixMillis};
 
 use crate::error::AdminError;
 
@@ -280,6 +280,9 @@ impl<'a> RootCeremonyService<'a> {
             ReauthPurpose::AdminRootCeremony,
             self.head.preexisting_effective_now(),
         ) {
+            // AK 53 (DRK-282): ist der EINZIGE Grund der Ablauf, wird er vor
+            // der Abweisung gebucht. Der Fehlercode bleibt derselbe.
+            self.book_expiry(proof);
             return Err(AdminError::ReauthMismatch);
         }
         if self
@@ -399,6 +402,40 @@ impl<'a> RootCeremonyService<'a> {
             exact_cose,
             expected_payload,
         )
+    }
+
+    /// Bucht `sessionExpired` (Ausgang `failed`), wenn der Nachweis
+    /// AUSSCHLIESSLICH wegen seines Ablaufs abgewiesen wird (DRK-282, AK 53).
+    ///
+    /// Ablauf heißt: die Zeit des gewählten Kopfes hat `expires_at` erreicht,
+    /// und derselbe Nachweis wäre unmittelbar davor für DIESEN Zweck gültig
+    /// gewesen — also richtiger Zweck, nicht durch eine Sperre entwertet. Die
+    /// Bindung muss zudem die dieses Dienstes und am Kopf aktiv sein. Trifft
+    /// eines davon nicht zu, ist der Grund nicht (nur) der Ablauf, und es wird
+    /// nichts als Ablauf beschriftet.
+    ///
+    /// Die Zeile nennt nur Hashes: die Bindung des Nachweises, Organisation,
+    /// Gerät und Signierzertifikat. Ohne Rückgabe und ohne Fehlerweg wie
+    /// [`Self::book_failure`]: scheitert die Buchung, bleibt es bei der
+    /// Abweisung (fail-closed).
+    fn book_expiry(&self, proof: &OperatorSessionProof) {
+        let now = self.head.preexisting_effective_now().value();
+        let expires_at = proof.expires_at();
+        let expired = now.get() >= expires_at.get()
+            && expires_at.get().checked_sub(1).is_some_and(|last| {
+                proof.is_valid_at(ReauthPurpose::AdminRootCeremony, UnixMillis::new(last))
+            });
+        let binding = proof.binding_object_hash();
+        if !expired
+            || binding != self.operator_binding_object_hash
+            || self.head.active_operator_binding_fields(binding).is_none()
+        {
+            return;
+        }
+        let _ = self.audit.record_signed(
+            AuditActorProof::OperatorSession(proof),
+            TypedLocalAuditEvent::session_expired(Some(binding)),
+        );
     }
 
     /// Bucht die Zeile mit dem Ausgang `failed`.

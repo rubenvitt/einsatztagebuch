@@ -466,16 +466,18 @@ COSE-Signatur. Deren Payload sind exakt die Bytes von
 `local-audit-event-core-v1`; geschützte Header lösen den Signer zum genannten
 aktiven Geräte- oder Admin-Zertifikat auf. Es gibt kein Freitext-Detailfeld.
 
-Action 0..11 bedeutet login, reauthFailure, bindingChange, revocation,
+Action 0..12 bedeutet login, reauthFailure, bindingChange, revocation,
 registryStaleWarnAcceptance, plaintextExport, clockSkewRelease,
-adminRootCeremony, recoveryTest, historicalRegrant, destruction und
-archiveProfileMigration. Outcome 0..2 bedeutet failed, accepted und completed.
+adminRootCeremony, recoveryTest, historicalRegrant, destruction,
+archiveProfileMigration und sessionExpired. `sessionExpired` (12) ist additiv
+am Ende angehängt (DRK-282, AK 53): die Codes 0..11 und ihre Bytes bleiben
+unverändert, ein älterer Leser weist die 12 als unbekannte Action ab. Outcome 0..2 bedeutet failed, accepted und completed.
 Die Kontext-Tags 0..8 bedeuten generic, staleRegistry, clockRelease, export,
 bindingLifecycle, adminRoot, historicalRegrant, destruction und
 archiveProfileMigration.
 
-Die Action-zu-Kontext-Zuordnung ist geschlossen: login, reauthFailure und
-recoveryTest verwenden generic; bindingChange und revocation verwenden
+Die Action-zu-Kontext-Zuordnung ist geschlossen: login, reauthFailure,
+recoveryTest und sessionExpired verwenden generic; bindingChange und revocation verwenden
 bindingLifecycle; alle übrigen Actions verwenden nur ihren gleichnamigen typisierten
 Kontext. Generic enthält nur einen Object Hash oder `null`. Export enthält nur
 Entry Hash und Target Kind, nie einen Pfad. Der Stale-Kontext ist die einmalige
@@ -525,7 +527,8 @@ local-audit-event-core-v1 =
   local-audit-event-core-for-v1<8, generic-audit-context-v1> /
   local-audit-event-core-for-v1<9, historical-regrant-audit-context-v1> /
   local-audit-event-core-for-v1<10, destruction-audit-context-v1> /
-  local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1>
+  local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1> /
+  local-audit-event-core-for-v1<12, generic-audit-context-v1>
 ```
 
 ## JSON-Berichte

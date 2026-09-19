@@ -406,18 +406,13 @@ fn the_revocation_audit_carries_no_operator_plaintext() {
 /// mitgebrachter Nachweis tatsächlich gegen die Zeit geprüft wird: an der
 /// Wurzelzeremonie (`RootCeremonyService::publish_authorized_target`).
 ///
-/// Geparkt, weil die Produktseite eine abgelaufene Sitzung an zwei Stellen
-/// VOR jedem Auditabschnitt abweist: `root_ceremony.rs:279`
-/// (`is_valid_for` → `AdminError::ReauthMismatch`) und
-/// `OperatorRuntime::reauthenticate_with_context` → `ensure_current()`
-/// (`operator_runtime.rs:742`) → `ensure_fresh_context` →
-/// `validate_freshness` (`:617`). Gebucht wird nur der schmale Fall, dass die
-/// Sitzung erst WÄHREND der nativen Präsenzabfrage abläuft:
-/// `prove_with_deadline` (`:913`/`:916`) liefert `ProofMismatch`, und
-/// `verify_session_with_authority` bucht `Login(Failed)` + `ReauthFailure`
-/// (`operator.rs:983-1010`) — als gescheiterte Anmeldung, nicht als Ablauf.
+/// DRK-282 (Ruling 19.09.2026): gebucht wird die eigene Aktion
+/// `sessionExpired` (Code 12) mit dem Ausgang `failed`, VOR der Abweisung,
+/// deren Code unverändert bleibt. Den Laufzeitpfad
+/// (`OperatorRuntime::reauthenticate_with_context`) bezeugen
+/// `the_runtime_expiry_row_is_device_signed_and_names_only_the_known_binding`
+/// und der Modultest `only_an_expiry_is_booked_once_before_the_unchanged_refusal`.
 #[test]
-#[ignore = "DRK-282: planned RED; expired session is refused but not audited: root_ceremony.rs:279 is_valid_for and OperatorRuntime::reauthenticate_with_context -> ensure_current (operator_runtime.rs:742) -> validate_freshness (:617) return before any audit; only expiry during native presence is booked (prove_with_deadline :913/:916 -> ProofMismatch -> Login(Failed)+ReauthFailure, operator.rs:983-1010), not as expiry (Spec 2169, AK 53); product decision open"]
 fn an_expired_operator_session_is_refused_and_audited_without_plaintext() {
     use ea_operator::{MAX_INACTIVITY_MS, ReauthPurpose};
     use support::{
@@ -488,4 +483,187 @@ fn an_expired_operator_session_is_refused_and_audited_without_plaintext() {
         assert!(signature_verifies(bytes, &head, SignerRole::Writer));
         assert!(!leaks(bytes, account.as_bytes()));
     }
+    // Als ABLAUF erkennbar: genau eine Zeile `sessionExpired` (Code 12) mit
+    // dem Ausgang `failed`, zugerechnet der Bindung des Nachweises.
+    assert_eq!(rows.len(), 1, "je Abweisung genau eine Zeile");
+    let row = decode_local_audit_event(&rows[0]).unwrap();
+    assert_eq!(row.outcome(), LocalAuditOutcomeV1::Failed);
+    let LocalAuditActionV1::SessionExpired(context) = row.action() else {
+        panic!("sessionExpired expected");
+    };
+    assert!(context.subject_object_hash() == Some(proof.binding_object_hash()));
+    assert!(row.operator_binding_object_hash() == Some(proof.binding_object_hash()));
+    assert!(row.effective_now() == head.preexisting_effective_now().value());
+
+    // Kein Audit-Spam: ein zweiter Aufruf mit derselben abgelaufenen Sitzung
+    // bucht genau eine weitere Zeile — je Aufruf eine, keine Schleife.
+    let again = service
+        .publish_authorized_target(
+            &intent,
+            ceremony.target_payload(),
+            &authorization_bytes,
+            &mut store,
+            &proof,
+        )
+        .err()
+        .expect("auch beim zweiten Mal abgewiesen");
+    assert_eq!(again.code(), "EA-CEREMONY-REAUTH-MISMATCH");
+    assert_eq!(audit.booked().len(), 2);
+}
+
+/// AK 53, Gegenprobe zur Beschriftung: ein Nachweis für einen FREMDEN Zweck
+/// ist abgelaufen UND falsch — die Zeremonie weist ihn ab, bucht aber keinen
+/// Ablauf, weil der Grund nicht (nur) der Ablauf ist. Ein nicht abgelaufener
+/// Nachweis des falschen Zwecks bucht ebenfalls nichts.
+#[test]
+fn a_foreign_purpose_proof_is_refused_without_an_expiry_row() {
+    use ea_operator::{MAX_INACTIVITY_MS, ReauthPurpose};
+    use support::{
+        AuditHarness, FIXTURE_NOW_MS, FixtureKeyProvider, LAST_HEAD, PROPOSED_SEQUENCE,
+        PersistentStore, ReplayTable, ceremony_line, ceremony_proof, ceremony_service,
+        selected_head, selected_head_at_time,
+    };
+
+    let ceremony = ceremony_line();
+    let opened = selected_head(&ceremony.line);
+    let proof = ceremony_proof(&ceremony, &opened, ReauthPurpose::RecoveryTest);
+    for now in [FIXTURE_NOW_MS, FIXTURE_NOW_MS + MAX_INACTIVITY_MS] {
+        let head = selected_head_at_time(&ceremony.line, LAST_HEAD, PROPOSED_SEQUENCE, now);
+        let intent = ceremony.intent(&head);
+        let provider = FixtureKeyProvider::root();
+        let audit = AuditHarness::with_provider(
+            &head,
+            ceremony.writer_certificate_object_hash,
+            0,
+            FixtureKeyProvider::device(),
+        );
+        let service = ceremony_service(&head, &provider, &audit, &ceremony);
+        let table = std::sync::Arc::new(std::sync::Mutex::new(ReplayTable::default()));
+        let mut store = PersistentStore::open(&table);
+        let authorization_bytes = ceremony.authorization_bytes().to_vec();
+        let error = service
+            .publish_authorized_target(
+                &intent,
+                ceremony.target_payload(),
+                &authorization_bytes,
+                &mut store,
+                &proof,
+            )
+            .err()
+            .expect("ein fremder Zweck autorisiert keine Zeremonie");
+        assert_eq!(error.code(), "EA-CEREMONY-REAUTH-MISMATCH");
+        assert!(
+            audit.booked().is_empty(),
+            "ein fremder Zweck ist kein Ablauf"
+        );
+    }
+}
+
+/// AK 53, fail-closed: scheitert die Buchung des Ablaufs, bleibt es bei der
+/// Abweisung mit ihrem bisherigen Code — nichts wird freigegeben.
+#[test]
+fn an_expired_session_stays_refused_when_its_audit_cannot_be_booked() {
+    use ea_operator::{MAX_INACTIVITY_MS, ReauthPurpose};
+    use support::{
+        AuditHarness, FIXTURE_NOW_MS, FixtureKeyProvider, LAST_HEAD, PROPOSED_SEQUENCE,
+        PersistentStore, ReplayTable, ceremony_line, ceremony_proof, ceremony_service,
+        selected_head, selected_head_at_time,
+    };
+
+    let ceremony = ceremony_line();
+    let opened = selected_head(&ceremony.line);
+    let proof = ceremony_proof(&ceremony, &opened, ReauthPurpose::AdminRootCeremony);
+    let head = selected_head_at_time(
+        &ceremony.line,
+        LAST_HEAD,
+        PROPOSED_SEQUENCE,
+        FIXTURE_NOW_MS + MAX_INACTIVITY_MS,
+    );
+    let intent = ceremony.intent(&head);
+    let provider = FixtureKeyProvider::root();
+    let audit = AuditHarness::with_provider(
+        &head,
+        ceremony.writer_certificate_object_hash,
+        1,
+        FixtureKeyProvider::device(),
+    );
+    let service = ceremony_service(&head, &provider, &audit, &ceremony);
+    let table = std::sync::Arc::new(std::sync::Mutex::new(ReplayTable::default()));
+    let mut store = PersistentStore::open(&table);
+    let authorization_bytes = ceremony.authorization_bytes().to_vec();
+    let error = service
+        .publish_authorized_target(
+            &intent,
+            ceremony.target_payload(),
+            &authorization_bytes,
+            &mut store,
+            &proof,
+        )
+        .err()
+        .expect("ohne Buchung erst recht keine Zeremonie");
+    assert_eq!(error.code(), "EA-CEREMONY-REAUTH-MISMATCH");
+    assert_eq!(provider.signatures_produced(), 0);
+    assert!(audit.booked().is_empty());
+}
+
+/// AK 53, Laufzeitpfad: `OperatorRuntime::reauthenticate_with_context` bucht
+/// über `OperatorBindingService::record_session_expired`, bevor es
+/// `EA-OPERATOR-RUNTIME-EXPIRED` meldet. Die Zeile ist gerätesigniert, nennt
+/// die bekannte Bindung als Hash und sonst nichts.
+#[test]
+fn the_runtime_expiry_row_is_device_signed_and_names_only_the_known_binding() {
+    let h = Harness::new();
+    let head = h.head();
+    let audit = h.audit(&head, 0);
+    h.service(&head, audit.service())
+        .record_session_expired(h.binding, h.certificate)
+        .unwrap();
+    let rows = audit.booked();
+    assert_eq!(rows.len(), 1);
+    assert!(signature_verifies(&rows[0], &head, SignerRole::Writer));
+    let row = decode_local_audit_event(&rows[0]).unwrap();
+    assert_eq!(row.outcome(), LocalAuditOutcomeV1::Failed);
+    assert!(row.signer_certificate_object_hash() == certificate_hash(h.certificate));
+    assert!(row.operator_binding_object_hash() == Some(h.binding));
+    let LocalAuditActionV1::SessionExpired(context) = row.action() else {
+        panic!("sessionExpired expected");
+    };
+    assert!(context.subject_object_hash() == Some(h.binding));
+    // Klartextfrei: Anzeigename, Funktion, Profil-Salt und Kontokennung
+    // stehen weder roh noch hexkodiert in der Zeile. Gegenprobe: der
+    // Bindungshash, der dort stehen SOLL, wird gefunden.
+    let mut canaries = stored_profile_canaries(&h.database);
+    canaries.push(h.account.hash.as_bytes().to_vec());
+    for canary in &canaries {
+        assert!(
+            !leaks(&rows[0], canary),
+            "die Ablaufzeile trägt Klartext: {}",
+            hex::encode(canary)
+        );
+    }
+    assert!(leaks(&rows[0], h.binding.as_bytes()));
+
+    // Eine unbekannte Bindung wird niemandem zugerechnet.
+    let audit = h.audit(&head, 0);
+    let unknown = ObjectHash::try_from(&[0xab; 32][..]).unwrap();
+    h.service(&head, audit.service())
+        .record_session_expired(unknown, h.certificate)
+        .unwrap();
+    let rows = audit.booked();
+    assert_eq!(rows.len(), 1);
+    let row = decode_local_audit_event(&rows[0]).unwrap();
+    assert!(row.operator_binding_object_hash().is_none());
+    let LocalAuditActionV1::SessionExpired(context) = row.action() else {
+        panic!("sessionExpired expected");
+    };
+    assert!(context.subject_object_hash().is_none());
+
+    // Fail-closed: scheitert die Ablage, meldet der Dienst den Fehler.
+    let audit = h.audit(&head, 1);
+    assert!(
+        h.service(&head, audit.service())
+            .record_session_expired(h.binding, h.certificate)
+            .is_err()
+    );
+    assert!(audit.booked().is_empty());
 }

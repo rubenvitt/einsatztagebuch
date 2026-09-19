@@ -739,7 +739,15 @@ impl OperatorRuntime {
         if purpose == ReauthPurpose::GoLivePostureDocumentation {
             return Err(OperatorRuntimeError::Posture);
         }
-        self.ensure_current()?;
+        // AK 53 (DRK-282): eine abgelaufene Sitzung wird VOR der Abweisung
+        // klartextfrei gebucht. Nur hier und nicht in `ensure_current` selbst:
+        // das läuft je Aktion mehrfach (auch zweimal in der Präsenzfrist) und
+        // buchte sonst mehrere Zeilen für eine einzige Abweisung.
+        refuse_expired_after_audit(self.ensure_current(), || {
+            // Fail-closed: scheitert die Buchung, bleibt es bei der Abweisung
+            // mit ihrem unveränderten Code.
+            let _ = self.record_session_expired();
+        })?;
         let audit = self.audit_service();
         let presence = BoundedPresence(self);
         let service = OperatorBindingService::new(&self.head, &audit, self.local_device);
@@ -759,6 +767,15 @@ impl OperatorRuntime {
         self.ensure_same_action_authority()?;
         self.native.record_verified_session(&session)?;
         Ok(session)
+    }
+    /// Bucht `sessionExpired` unter dem geprüften Gerät, am gewählten Kopf und
+    /// mit der Gerätesignatur dieser Laufzeit (DRK-282, AK 53).
+    fn record_session_expired(&self) -> Result<(), OperatorLifecycleError> {
+        let audit = self.audit_service();
+        OperatorBindingService::new(&self.head, &audit, self.local_device).record_session_expired(
+            self.config.binding_object_hash,
+            self.config.device_certificate_hash,
+        )
     }
     /// Reload published bytes with the same independent anchor and persistent
     /// database. Previous session proofs are not reused; call verify_session next.
@@ -923,6 +940,19 @@ pub(crate) fn fresh_wall_clock() -> Result<UnixMillis, OperatorRuntimeError> {
     Ok(UnixMillis::new(
         i64::try_from(now.as_millis()).map_err(|_| OperatorRuntimeError::Expired)?,
     ))
+}
+/// Bucht genau dann, wenn die Prüfung einen ABLAUF meldet, und genau einmal;
+/// danach wird das unveränderte Ergebnis zurückgegeben. Andere Befunde
+/// (Haltung, Kontowechsel, Konfiguration) sind kein Ablauf und werden hier
+/// nicht als solcher beschriftet.
+fn refuse_expired_after_audit(
+    checked: Result<(), OperatorRuntimeError>,
+    book: impl FnOnce(),
+) -> Result<(), OperatorRuntimeError> {
+    if matches!(checked, Err(OperatorRuntimeError::Expired)) {
+        book();
+    }
+    checked
 }
 fn validate_freshness(
     elapsed: Duration,
@@ -1329,5 +1359,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// DRK-282, AK 53: nur der Ablauf wird gebucht, genau einmal je Aufruf,
+    /// VOR der Abweisung — und der Fehlercode bleibt der des Ablaufs.
+    #[test]
+    fn only_an_expiry_is_booked_once_before_the_unchanged_refusal() {
+        let booked = Cell::new(0_u32);
+        let refused = refuse_expired_after_audit(Err(OperatorRuntimeError::Expired), || {
+            booked.set(booked.get() + 1);
+        });
+        assert_eq!(booked.get(), 1);
+        assert_eq!(
+            refused.err().map(|error| error.code()),
+            Some("EA-OPERATOR-RUNTIME-EXPIRED")
+        );
+        for other in [
+            Ok(()),
+            Err(OperatorRuntimeError::Posture),
+            Err(OperatorRuntimeError::Config),
+        ] {
+            let before = booked.get();
+            let expected = other.as_ref().err().map(|error| error.code());
+            let result = refuse_expired_after_audit(other, || booked.set(booked.get() + 1));
+            assert_eq!(booked.get(), before, "nur ein Ablauf ist ein Ablauf");
+            assert_eq!(result.err().map(|error| error.code()), expected);
+        }
     }
 }

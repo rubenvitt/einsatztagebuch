@@ -1,6 +1,6 @@
 ; Signed cleartext-free local audit contract. There is no free-text field.
 COSE-Sign1 = any
-local-audit-action-v1 = 0..11
+local-audit-action-v1 = 0..12
 local-audit-outcome-v1 = 0..2
 
 stale-registry-context-v1 = [
@@ -72,7 +72,8 @@ local-audit-event-core-v1 =
   local-audit-event-core-for-v1<8, generic-audit-context-v1> /
   local-audit-event-core-for-v1<9, historical-regrant-audit-context-v1> /
   local-audit-event-core-for-v1<10, destruction-audit-context-v1> /
-  local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1>
+  local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1> /
+  local-audit-event-core-for-v1<12, generic-audit-context-v1>
 
 local-audit-event-core-for-v1<ACTION, CONTEXT> = [
   1, event-id: bstr .size 16, organization-id: bstr .size 16,

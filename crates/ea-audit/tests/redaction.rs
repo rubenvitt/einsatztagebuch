@@ -89,3 +89,42 @@ fn typed_audit_never_carries_fachliche_bytes_and_never_leaks_in_errors() {
         event.exact_bytes()
     );
 }
+
+/// DRK-282, AK 53: die Abweisung einer abgelaufenen Sitzung ist eine eigene,
+/// klartextfreie Aktion (`sessionExpired`, Code 12) mit dem Ausgang `failed`.
+/// Der generische Kontext nennt höchstens einen Bindungshash — kein Konto,
+/// keinen Namen, keinen Freitext.
+#[test]
+fn a_session_expiry_is_booked_as_its_own_failed_action_under_the_frozen_grammar() {
+    let harness = AuditHarness::new();
+    let audit = harness.audit_service();
+    let session = harness.operator_session();
+    let binding = session.binding_object_hash();
+    let event = audit
+        .record_signed(
+            AuditActorProof::OperatorSession(&session),
+            TypedLocalAuditEvent::session_expired(Some(binding)),
+        )
+        .unwrap();
+    let decoded = ea_format::decode_local_audit_event(event.exact_bytes()).unwrap();
+    assert_eq!(decoded.action().code(), 12);
+    assert_eq!(decoded.action().context_tag(), 0);
+    assert_eq!(decoded.outcome(), LocalAuditOutcomeV1::Failed);
+    let LocalAuditActionV1::SessionExpired(context) = decoded.action() else {
+        panic!("sessionExpired expected");
+    };
+    assert!(context.subject_object_hash() == Some(binding));
+    assert!(decoded.operator_binding_object_hash() == Some(binding));
+    let cddl = include_str!("../../../schemas/reports/v1/local-audit.cddl")
+        .replace("#6.18(COSE-Sign1)", "COSE-Sign1");
+    cddl_cat::validate_cbor_bytes("local-audit-event-core-v1", &cddl, decoded.exact_core())
+        .unwrap();
+    assert_eq!(
+        harness
+            .reopen_audit()
+            .event(event.id())
+            .unwrap()
+            .exact_bytes(),
+        event.exact_bytes()
+    );
+}
