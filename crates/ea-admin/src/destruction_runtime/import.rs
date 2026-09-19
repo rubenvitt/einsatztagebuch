@@ -39,7 +39,7 @@ impl DestructionRuntime {
         expected_preflight_hash: ObjectHash,
         exact_etb_objects: &[Vec<u8>],
     ) -> Result<NativeDestructionStatus, Error> {
-        self.import_progress_bound(id, expected_preflight_hash, exact_etb_objects, None)
+        self.import_progress_bound(id, expected_preflight_hash, exact_etb_objects, None, None)
     }
     pub(super) fn import_completion_progress(
         &mut self,
@@ -53,6 +53,7 @@ impl DestructionRuntime {
             expected_preflight_hash,
             &[exact_event.to_vec()],
             Some(CommitBinding::Complete(before_signing)),
+            None,
         )
     }
     pub(super) fn import_pending_progress(
@@ -67,6 +68,7 @@ impl DestructionRuntime {
             expected_preflight_hash,
             &[exact_event.to_vec()],
             Some(CommitBinding::Pending(Box::new(fence))),
+            None,
         )
     }
     pub(super) fn import_failure_progress(
@@ -81,6 +83,7 @@ impl DestructionRuntime {
             expected_preflight_hash,
             &[exact_event.to_vec()],
             Some(CommitBinding::Failure(Box::new(fence))),
+            None,
         )
     }
     pub(super) fn import_retry_progress(
@@ -89,13 +92,32 @@ impl DestructionRuntime {
         expected_preflight_hash: ObjectHash,
         exact_event: &[u8],
         fence: super::retry::RetryCommitFence,
+        server: &mut dyn ServerReservationPort,
     ) -> Result<NativeDestructionStatus, Error> {
         self.import_progress_bound(
             id,
             expected_preflight_hash,
             &[exact_event.to_vec()],
             Some(CommitBinding::Retry(Box::new(fence))),
+            Some(server),
         )
+    }
+    /// Actual delivery re-admission after all blocking signing work (component
+    /// and both native audits) and immediately before the commit transaction,
+    /// never inside it. Only the Retry binding supplies a port.
+    fn readmit<'p>(
+        &self,
+        saved: &SavedDestruction,
+        server: Option<&mut (dyn ServerReservationPort + 'p)>,
+    ) -> Result<(), Error> {
+        match server {
+            Some(port) => self.with_started(
+                saved,
+                NativeDestructionDelivery::AuthenticatedServer(port),
+                |_, _, _, _| Ok(()),
+            ),
+            None => Ok(()),
+        }
     }
     fn commit_progress(
         &self,
@@ -120,6 +142,7 @@ impl DestructionRuntime {
         expected_preflight_hash: ObjectHash,
         exact_etb_objects: &[Vec<u8>],
         binding: Option<CommitBinding>,
+        mut server: Option<&mut dyn ServerReservationPort>,
     ) -> Result<NativeDestructionStatus, Error> {
         let objects = bounded_set(exact_etb_objects)?;
         self.unlock()?;
@@ -144,6 +167,7 @@ impl DestructionRuntime {
         {
             // A bound last event may have arrived in a larger historical batch.
             // Reuse its exact event without adding a second batch or audit.
+            self.readmit(&saved, server.as_deref_mut())?;
             self.commit_progress(&saved, before, binding.as_ref(), |_| Ok(()))?;
             self.publish_progress(&saved)?;
             return self.project_status(&saved);
@@ -159,6 +183,7 @@ impl DestructionRuntime {
             // read_saved checked the exact signed set and repaired both audit
             // mirrors. No second audit, fresh timestamp, or event is invented.
             if binding.is_some() {
+                self.readmit(&saved, server.as_deref_mut())?;
                 self.commit_progress(&saved, before, binding.as_ref(), |_| Ok(()))?;
             }
             self.publish_progress(&saved)?;
@@ -223,6 +248,7 @@ impl DestructionRuntime {
             state.exact_bytes(),
             &saved,
         )?;
+        self.readmit(&saved, server)?;
         let mut guard = self.action_guard()?;
         let commit = |tx: &ea_local_store::StoreTransaction<'_>| {
             guard.check_in(tx)?;
