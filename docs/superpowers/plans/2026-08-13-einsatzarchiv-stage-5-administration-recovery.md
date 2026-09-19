@@ -1743,7 +1743,10 @@ Ruling vom 13.09.2026: „Fortsetzen" erzeugt nie Zustand 4
 (`src/runtime/destruction.rs:768`, `src/runtime/destruction_transport.rs:252`).
 Zustand 4 entsteht nur über die eigene bestätigte Aktion „Als unvollständig
 abschließen" mit dem Bestätigungsknopf „Endgültig als unvollständig abschließen"
-(`DestructionWizard.test.tsx:73`, :91; `destruction.spec.ts:136-155`). Das Angebot
+(`DestructionWizard.test.tsx:73`, :91; `destruction.spec.ts:136-155`). Seit DRK-319 S3
+(Ruling G3, 19.09.2026) heißt der Knopf „Unvollständigen Abschluss signieren“; endgültig
+ist der Abschluss nur für nicht erreichbare Lesegeräte, Serverfälle setzt „Vernichtung
+fortsetzen“ über den nativen 4→1-Retry fort. Das Angebot
 entscheidet der Host (`mark_incomplete_job`, `src/runtime/destruction.rs:889`);
 `mark-incomplete-offer.ts` steuert nur die Sichtbarkeit. „Nach `inProgress` nur
 Fortsetzen, nie Abbrechen" gilt unverändert; in `commands/destruction.rs` gibt es

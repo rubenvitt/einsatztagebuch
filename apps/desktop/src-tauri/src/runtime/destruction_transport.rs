@@ -239,8 +239,19 @@ impl NativeDestructionServerTransport {
         phase!("publish-2.begin");
         self.publish(&context)?;
         phase!("import.begin");
-        let status = self.import(native, &context)?;
+        let mut status = self.import(native, &context)?;
         phase!("import.return");
+        // Ruling G2 (19.09.2026): in state4 the server re-contact above is
+        // chained into the native 4→1 retry, then continues like any Resume
+        // below (1→3 or 1→2). The core decides and refuses a Reader case or an
+        // open duty with its own code; never a silent no-op, never a loop.
+        if let Some(hash) = super::destruction::retry_job(&status)? {
+            phase!("retry.begin");
+            status = self.resume_incomplete(native, id, hash)?;
+            if super::destruction::retry_job(&status)?.is_some() {
+                return Err(Error::CausalHistory);
+            }
+        }
         let (hash, pending) = if let Some(hash) = super::destruction::completion_job(&status) {
             (hash, false)
         } else if let Some(hash) = super::destruction::pending_job(
@@ -301,6 +312,44 @@ impl NativeDestructionServerTransport {
             phase!("complete.return");
         }
         Ok(status)
+    }
+    /// Native 4→1 retry for a server-bound state4, only chained from `resume`
+    /// after its server re-contact and import. The retained 1/2→4 original is
+    /// the last event of the freshly admitted exchange. The core reads the
+    /// reservation per call before and after signing; publication follows the
+    /// durable local commit, then the actual server reply is imported.
+    fn resume_incomplete(
+        &mut self,
+        native: &mut DestructionRuntime,
+        id: DestructionId,
+        expected_preflight_hash: ObjectHash,
+    ) -> Result<NativeDestructionStatus, Error> {
+        let context = native.prepare_server_exchange(id, expected_preflight_hash)?;
+        self.admit(&context)?;
+        let retained = context
+            .events()?
+            .last()
+            .map(|event| event.0)
+            .ok_or(Error::CausalHistory)?;
+        let mut barrier = Reservation {
+            transport: self,
+            context: &context,
+            failure: None,
+        };
+        let outcome = native.resume_incomplete_progress(
+            id,
+            expected_preflight_hash,
+            retained,
+            NativeDestructionDelivery::AuthenticatedServer(&mut barrier),
+        );
+        if let Some(error) = barrier.failure {
+            return Err(error);
+        }
+        outcome?;
+        let context = native.prepare_server_exchange(id, expected_preflight_hash)?;
+        self.admit(&context)?;
+        self.publish(&context)?;
+        self.import(native, &context)
     }
     /// The explicit, separately confirmed final action (Ruling 13.09.2026). The
     /// conservative Failure producer deliberately has no delivery port: missing

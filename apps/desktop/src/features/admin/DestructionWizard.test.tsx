@@ -65,10 +65,64 @@ function offered(overrides: Partial<DestructionProcessView> = {}): DestructionPr
   })
 }
 
+describe('resuming an incomplete destruction (Ruling G2)', () => {
+  const RESUME = 'Vernichtung fortsetzen'
+  const incomplete = (): DestructionAdministrationView => view(offered({ state: 'incompleteUnreachableReplica' }))
+
+  it('offers no new action: the existing resume chains the host retry and shows only the returned state', async () => {
+    const host = { ...bridge(incomplete()), resume: vi.fn(async () => view(offered({ state: 'completeManagedScope' }))) }
+    const user = userEvent.setup()
+    render(<DestructionWizard bridge={host} />)
+    expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('bekannte Replik nicht erreichbar')
+    expect(screen.queryByRole('button', { name: /wiederholen|erneut versuchen/i })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: RESUME }))
+    expect(host.resume).toHaveBeenCalledExactlyOnceWith(PROCESS_ID)
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('im verwalteten Umfang abgeschlossen'))
+    expect(host.markIncomplete).not.toHaveBeenCalled()
+  })
+
+  for (const [code, explanation] of [
+    ['EA-DESTRUCTION-RETRY-READER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt als unvollständig abgeschlossen.'],
+    ['EA-DESTRUCTION-RETRY-NO-SERVER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Sync-Server als Löschort gebunden oder in dieser Anwendung eingerichtet. Ohne nachträgliche Serverbestätigung bleibt der Vorgang als unvollständig abgeschlossen.'],
+  ] as const) {
+    it(`explains ${code} in German instead of idling, keeps the code and re-reads the host state`, async () => {
+      const host = {
+        ...bridge(incomplete()),
+        resume: vi.fn(async () => { throw { code } }),
+        refresh: vi.fn(async () => incomplete()),
+      }
+      const user = userEvent.setup()
+      render(<DestructionWizard bridge={host} />)
+      await user.click(screen.getByRole('button', { name: RESUME }))
+      const alert = await screen.findByRole('alert')
+      expect(alert).toHaveTextContent(explanation)
+      expect(alert).toHaveTextContent(code)
+      await waitFor(() => expect(host.refresh).toHaveBeenCalledOnce())
+      expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('bekannte Replik nicht erreichbar')
+      expect(host.resume).toHaveBeenCalledExactlyOnceWith(PROCESS_ID)
+    })
+  }
+
+  it('shows a durable 4→1 even when the chained completion fails afterwards', async () => {
+    const host = {
+      ...bridge(incomplete()),
+      resume: vi.fn(async () => { throw { code: 'EA-DESTRUCTION-TRANSPORT-UNAVAILABLE' } }),
+      refresh: vi.fn(async () => view(offered({ state: 'inProgress' }))),
+    }
+    const user = userEvent.setup()
+    render(<DestructionWizard bridge={host} />)
+    await user.click(screen.getByRole('button', { name: RESUME }))
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveTextContent('in Bearbeitung'))
+    expect(screen.getByRole('alert')).toHaveTextContent('EA-DESTRUCTION-TRANSPORT-UNAVAILABLE')
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Der Vorgang kann nicht fortgesetzt werden')
+  })
+})
+
 describe('explicit final incomplete action', () => {
   const ACTION = 'Als unvollständig abschließen'
-  const CONFIRM = 'Endgültig als unvollständig abschließen'
-  const UNDERSTOOD = 'Ich habe verstanden, dass dieser Abschluss endgültig ist.'
+  // Ruling G3 (19.09.2026): final only for unreachable Readers; a server-bound case resumes later.
+  const CONFIRM = 'Unvollständigen Abschluss signieren'
+  const UNDERSTOOD = 'Ich habe verstanden, dass dieser Abschluss für nicht erreichbare Lesegeräte endgültig ist.'
 
   it('is offered only when the host view shows a replica without valid attestation or an elapsed deadline', () => {
     const rendered = render(<DestructionWizard bridge={bridge(view(offered()))} />)
@@ -97,9 +151,10 @@ describe('explicit final incomplete action', () => {
     await user.click(screen.getByRole('button', { name: ACTION }))
     const dialog = await screen.findByRole('dialog')
     // jsdom keeps the antd enter motion at opacity 0; presence in the dialog is the witness here.
-    expect(within(dialog).getByText('Vorgang endgültig als unvollständig abschließen?')).toBeInTheDocument()
+    expect(within(dialog).getByText('Vorgang als unvollständig abschließen?')).toBeInTheDocument()
     expect(within(dialog).getByText('Mindestens eine bekannte Replik hat keine gültige Attestierung, oder eine attestierte Backup-Frist ist abgelaufen. Die Anwendung signiert dafür den Status „bekannte Replik nicht erreichbar“.')).toBeInTheDocument()
-    expect(within(dialog).getByText('Dieser Schritt ist endgültig. Später eingehende Nachweise ändern diesen Status nicht mehr, und einen Rückweg zur Fortsetzung gibt es derzeit nicht. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Für nicht erreichbare Lesegeräte ist dieser Schritt endgültig: Später eingehende Nachweise ändern diesen Status nicht mehr. Fehlen nur Bestätigungen von Sync-Servern, lässt sich der Vorgang mit „Vernichtung fortsetzen“ wieder aufnehmen, sobald alle Löschungen bestätigt sind. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.')).toBeInTheDocument()
+    expect(dialog).not.toHaveTextContent(/Rückweg|Endgültig als unvollständig/)
     expect(within(dialog).getByText('Der Abschluss bestätigt keine Löschung auf den betroffenen Repliken.')).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: CONFIRM })).toBeDisabled()
     await user.click(within(dialog).getByRole('button', { name: 'Zurück' }))

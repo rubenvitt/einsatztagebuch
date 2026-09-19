@@ -63,6 +63,8 @@ async function host(page: Page, initial: ProcessState | null = null, privacy = t
     }
     if (command === 'destruction_resume') {
       expect(args).toEqual({ destructionId: ID })
+      // Ruling G2: resume in state4 chains the native retry; the Reader case is refused, never idle.
+      if (saved === 'incompleteUnreachableReplica') throw { code: 'EA-DESTRUCTION-RETRY-READER-DUTY' }
       return view()
     }
     if (command === 'destruction_authenticate_custodian') {
@@ -136,14 +138,14 @@ test('explicit final incomplete action needs its own confirmation and the host s
   const action = page.getByRole('button', { name: 'Als unvollständig abschließen' })
   await action.click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog).toContainText('Dieser Schritt ist endgültig.')
-  const confirm = dialog.getByRole('button', { name: 'Endgültig als unvollständig abschließen' })
+  await expect(dialog).toContainText('Für nicht erreichbare Lesegeräte ist dieser Schritt endgültig')
+  const confirm = dialog.getByRole('button', { name: 'Unvollständigen Abschluss signieren' })
   await expect(confirm).toBeDisabled()
   await dialog.getByRole('button', { name: 'Zurück' }).click()
   await expect(dialog).toBeHidden()
   expect(invoked).not.toContain('destruction_mark_incomplete')
   await action.click()
-  await dialog.getByRole('checkbox', { name: 'Ich habe verstanden, dass dieser Abschluss endgültig ist.' }).check()
+  await dialog.getByRole('checkbox', { name: 'Ich habe verstanden, dass dieser Abschluss für nicht erreichbare Lesegeräte endgültig ist.' }).check()
   await confirm.click()
   await expect(page.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveText('bekannte Replik nicht erreichbar')
   expect(invoked.filter((command) => command === 'destruction_mark_incomplete')).toHaveLength(1)
@@ -188,6 +190,11 @@ for (const [state, copy] of [
     await expect(page.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveText(copy)
     await expect(page.getByRole('table', { name: 'Verwaltete Repliken' }).locator('time')).toHaveAttribute('datetime', '1999-01-01T00:00:00.000Z')
     await page.getByRole('button', { name: 'Vernichtung fortsetzen' }).click()
+    if (state === 'incompleteUnreachableReplica') {
+      const refusal = page.getByRole('region', { name: 'Kontrollierte Vernichtung' }).getByRole('alert')
+      await expect(refusal).toContainText('Die fehlende Löschbestätigung betrifft ein Lesegerät.')
+      await expect(refusal).toContainText('EA-DESTRUCTION-RETRY-READER-DUTY')
+    }
     await expect(page.getByRole('status', { name: 'Vernichtungsstatus' })).toHaveText(copy)
     await page.reload()
     await page.getByRole('link', { name: 'Verwaltung' }).click()
