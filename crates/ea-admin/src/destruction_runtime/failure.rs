@@ -1,8 +1,7 @@
 //! Explicit conservative failure history, never a physical execution permit.
-mod claims;
+use super::claims::{self, ClaimDecision, ClaimFact, ClaimResult};
 use super::status::SavedDestruction;
 use super::*;
-use claims::{ClaimDecision, ClaimFact, ClaimResult};
 use ea_archive::ArchiveBackend;
 use ea_destruction::{
     LocalActionAuthorityGuard, VerifiedDestructionEvidence, project_imported_evidence,
@@ -305,7 +304,7 @@ impl DestructionRuntime {
         })
     }
 }
-fn original_started(saved: &SavedDestruction) -> Result<ObjectHash, Error> {
+pub(super) fn original_started(saved: &SavedDestruction) -> Result<ObjectHash, Error> {
     let mut starts = saved
         .events
         .iter()

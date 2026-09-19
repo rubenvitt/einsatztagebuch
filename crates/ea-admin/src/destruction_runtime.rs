@@ -1,9 +1,11 @@
 //! Current native Admin controller plus an explicitly separate local Writer custodian.
+mod claims;
 mod completion;
 mod evidence_writer;
 mod execution;
 mod failure;
 mod pending;
+mod retry;
 pub use evidence_writer::{NativeEvidenceWriter, NativeEvidenceWriterError};
 mod custodian;
 mod exchange;
@@ -41,6 +43,12 @@ pub enum NativeDestructionError {
     UnsupportedPkcs11,
     Session,
     FilesystemCapabilities,
+    /// 4→1 refused: the signed job has no Server duty or no per-call
+    /// authenticated server reservation was offered (DRK-319, only Part S).
+    RetryNoServerDuty,
+    /// 4→1 refused permanently in v0.1: the open duty concerns a Reader
+    /// (Ruling G1), including a Reader confirmed only after state4 (G4).
+    RetryReaderDuty,
 }
 impl NativeDestructionError {
     pub fn code(self) -> &'static str {
@@ -51,6 +59,8 @@ impl NativeDestructionError {
             Self::UnsupportedPkcs11 => "EA-DESTRUCTION-COMPONENT-PKCS11-UNAVAILABLE",
             Self::Session => "EA-DESTRUCTION-NATIVE-SESSION",
             Self::FilesystemCapabilities => "EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS",
+            Self::RetryNoServerDuty => "EA-DESTRUCTION-RETRY-NO-SERVER-DUTY",
+            Self::RetryReaderDuty => "EA-DESTRUCTION-RETRY-READER-DUTY",
         }
     }
 }

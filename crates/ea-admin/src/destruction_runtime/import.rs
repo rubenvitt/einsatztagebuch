@@ -20,6 +20,7 @@ enum CommitBinding {
     Complete(ObjectHash),
     Pending(Box<super::pending::PendingCommitFence>),
     Failure(Box<super::failure::FailureCommitFence>),
+    Retry(Box<super::retry::RetryCommitFence>),
 }
 impl CommitBinding {
     fn snapshot(&self) -> ObjectHash {
@@ -27,6 +28,7 @@ impl CommitBinding {
             Self::Complete(snapshot) => *snapshot,
             Self::Pending(fence) => fence.snapshot(),
             Self::Failure(fence) => fence.snapshot(),
+            Self::Retry(fence) => fence.snapshot(),
         }
     }
 }
@@ -81,6 +83,20 @@ impl DestructionRuntime {
             Some(CommitBinding::Failure(Box::new(fence))),
         )
     }
+    pub(super) fn import_retry_progress(
+        &mut self,
+        id: DestructionId,
+        expected_preflight_hash: ObjectHash,
+        exact_event: &[u8],
+        fence: super::retry::RetryCommitFence,
+    ) -> Result<NativeDestructionStatus, Error> {
+        self.import_progress_bound(
+            id,
+            expected_preflight_hash,
+            &[exact_event.to_vec()],
+            Some(CommitBinding::Retry(Box::new(fence))),
+        )
+    }
     fn commit_progress(
         &self,
         saved: &SavedDestruction,
@@ -94,6 +110,7 @@ impl DestructionRuntime {
                 self.with_pending_backup_commit(saved, fence, write)
             }
             Some(CommitBinding::Failure(fence)) => self.with_failure_commit(saved, fence, write),
+            Some(CommitBinding::Retry(fence)) => self.with_retry_commit(saved, fence, write),
             None => self.custodian.database().transaction(write),
         }
     }
@@ -343,6 +360,26 @@ impl DestructionRuntime {
             self.mirror_audit(row.blob(4)?)?;
         }
         Ok(())
+    }
+    /// Local, audit-bound arrival order of the already verified import batches
+    /// (`insertion_sequence`): the first batch index of every exact object.
+    /// Covered by the snapshot hash; confers no authority of its own.
+    pub(super) fn import_positions(
+        &self,
+        saved: &SavedDestruction,
+    ) -> Result<BTreeMap<ObjectHash, usize>, Error> {
+        let key = [
+            blob(saved.auth.fields().organization_id.as_bytes()),
+            blob(saved.auth.fields().destruction_id.as_bytes()),
+        ];
+        let mut positions = BTreeMap::new();
+        for (index, row) in self.rows("SELECT exact_context FROM destruction_import_batch WHERE organization_id=?1 AND destruction_id=?2 ORDER BY insertion_sequence",&key)?.iter().enumerate() {
+            let context = codec::decode_context(row.blob(0)?)?;
+            for hash in codec::decode_set(context.set, saved)?.into_keys() {
+                positions.entry(hash).or_insert(index);
+            }
+        }
+        Ok(positions)
     }
     pub(super) fn publish_progress(&self, saved: &SavedDestruction) -> Result<(), Error> {
         use ea_archive::{ArchiveBackend, ArchivePath};
