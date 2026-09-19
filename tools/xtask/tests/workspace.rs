@@ -778,3 +778,186 @@ fn no_non_test_edge_carries_the_ea_reader_test_surface() {
         }
     }
 }
+
+/// Pins that NO production build carries the `ea-admin` test surface — the
+/// third member of the family of `no_non_test_edge_carries_the_ea_archive_fs_test_surface`
+/// and `no_non_test_edge_carries_the_ea_reader_test_surface`, and the check the
+/// stage 5 gate report (`docs/traceability/stage-5-gate.md`, section 4,
+/// „Testflaeche ueber `desktop-fixture`") asks for.
+///
+/// The stake: `ea-admin/test-support` switches on fixture constructors
+/// (`RecoveryTestObservation`, `verify_fresh_machine_recovery_test`,
+/// `RecoveryTestFreshness::for_testing`) that production entry points never
+/// consult. They reach a build through ONE normal edge:
+/// `einsatzarchiv-cli/desktop-fixture` → `dep:ea-desktop` with
+/// `features = ["test-support"]` → `ea-desktop/test-support` →
+/// `ea-admin/test-support`. That edge is optional and sits in a FEATURE table,
+/// so a scan of the dependency tables — the construction of both neighbours —
+/// is blind to it. Only the resolved graph sees it.
+///
+/// Two assertions of the neighbours do not carry over, and each divergence is
+/// deliberate:
+///
+/// - the shared workspace edge is NOT `default-features = false`: `ea-admin`
+///   declares no `default` at all, so the switch would guard nothing. The
+///   fail-closed analogue is that no `default` of `ea-admin` — and no
+///   `default` of any member, followed transitively through its own feature
+///   table — ever reaches `ea-admin/test-support`;
+/// - `dev_edges > 0` of the archive-fs test is replaced by two resolved
+///   positive controls on the CLI, see below.
+///
+/// The production hosts are the two binaries that consume `ea-admin` through a
+/// normal edge: `einsatzarchiv-cli` and `ea-desktop` (the latter also through
+/// `ea-ui-contracts`). `ea-system-tests` is a test crate and ships nothing.
+/// Each host resolves with `-e no-dev,features`, the shape of the archive-fs
+/// test, and must name itself as a consumer of `ea-admin` — otherwise an empty
+/// tree, a failed command or a mistyped package name would pass.
+///
+/// The positive controls make the absence a finding: the CLI with
+/// `--features desktop-fixture` MUST show `ea-admin feature "test-support"`
+/// (the one normal edge the check exists for), and the CLI with its own dev
+/// edges (`-e features`) MUST show it too.
+#[test]
+fn no_production_build_carries_the_ea_admin_test_surface() {
+    const CRATE: &str = "ea-admin";
+    const SURFACE: &str = "test-support";
+    const HOSTS: [&str; 2] = ["einsatzarchiv-cli", "ea-desktop"];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let surface_edge = format!("{CRATE}/{SURFACE}");
+    let surface_node = format!("{CRATE} feature \"{SURFACE}\"");
+
+    // Manifestseite, Teil 1: `ea-admin` selbst schaltet die Flaeche nie per
+    // Vorgabe ein.
+    let admin: Value = fs::read_to_string(root.join("crates/ea-admin/Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        admin
+            .get("features")
+            .and_then(|features| features.get(SURFACE))
+            .is_some(),
+        "{CRATE} must still declare {SURFACE}; otherwise this test guards a feature that no \
+         longer exists"
+    );
+    let admin_default = admin
+        .get("features")
+        .and_then(|features| features.get("default"))
+        .and_then(Value::as_array)
+        .map(|default| default.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert!(
+        !admin_default.contains(&SURFACE),
+        "{CRATE} must not enable {SURFACE} by default; every consumer would inherit the \
+         fixture constructors"
+    );
+
+    // Manifestseite, Teil 2: kein Mitglied erreicht die Flaeche aus seinem
+    // `default` heraus — transitiv ueber die eigene Merkmalstabelle — und keine
+    // normale oder Build-Kante fordert sie an. Nur `[dev-dependencies]` duerfen.
+    for member in WORKSPACE_MEMBERS {
+        let manifest: Value = fs::read_to_string(root.join(member).join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        for table in ["dependencies", "build-dependencies"] {
+            let Some(edge) = manifest.get(table).and_then(|deps| deps.get(CRATE)) else {
+                continue;
+            };
+            let asks_for_the_surface =
+                edge.get("features")
+                    .and_then(Value::as_array)
+                    .is_some_and(|features| {
+                        features
+                            .iter()
+                            .any(|feature| feature.as_str() == Some(SURFACE))
+                    });
+            assert!(
+                !asks_for_the_surface,
+                "{member} {table} re-enables {surface_edge}; the fixture constructors would be \
+                 in a non-test build"
+            );
+        }
+        let Some(features) = manifest.get("features").and_then(Value::as_table) else {
+            continue;
+        };
+        let mut pending = vec!["default".to_owned()];
+        let mut reached = BTreeSet::new();
+        while let Some(feature) = pending.pop() {
+            if !reached.insert(feature.clone()) {
+                continue;
+            }
+            let Some(expansion) = features.get(&feature).and_then(Value::as_array) else {
+                continue;
+            };
+            for entry in expansion.iter().filter_map(Value::as_str) {
+                assert!(
+                    entry != surface_edge && entry != format!("{CRATE}?/{SURFACE}"),
+                    "{member} reaches {surface_edge} from its default features (via \
+                     `{feature}`); a plain build of {member} would carry the fixture \
+                     constructors"
+                );
+                if !entry.contains('/') && !entry.starts_with("dep:") {
+                    pending.push(entry.to_owned());
+                }
+            }
+        }
+    }
+
+    // Graphseite: der aufgeloeste Merkmalsgraph jedes Produktionswirts, in der
+    // Form des archive-fs-Tests.
+    let resolve = |host: &str, edges: &str, extra: &[&str]| {
+        let mut arguments = vec!["tree", "--locked", "-p", host, "-e", edges, "-i", CRATE];
+        arguments.extend_from_slice(extra);
+        let resolved = Command::new("cargo")
+            .args(&arguments)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            resolved.status.success(),
+            "cargo {} must resolve: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        String::from_utf8(resolved.stdout).unwrap()
+    };
+    for host in HOSTS {
+        let shipped = resolve(host, "no-dev,features", &[]);
+        // Positivkontrolle: der Wirt verbraucht `ea-admin` wirklich ueber eine
+        // normale Kante. Ohne sie koennte die Abwesenheit unten nicht scheitern.
+        assert!(
+            shipped.contains(&format!("{host} v")) && shipped.contains("ea-admin feature"),
+            "{host} must appear as a normal consumer of {CRATE} in the resolved tree; without \
+             the edge the assertion below cannot fail:\n{shipped}"
+        );
+        assert!(
+            !shipped.contains(&surface_node),
+            "the resolved feature graph of the production host {host} must not contain \
+             {surface_edge}:\n{shipped}"
+        );
+    }
+
+    // Erste Positivkontrolle: genau die eine normale Kante, fuer die dieser
+    // Test existiert. Mit `desktop-fixture` MUSS die Flaeche erscheinen, sonst
+    // saehe der Test die Kante gar nicht und waere blind.
+    let fixture = resolve(
+        "einsatzarchiv-cli",
+        "no-dev,features",
+        &["--features", "desktop-fixture"],
+    );
+    assert!(
+        fixture.contains(&surface_node) && fixture.contains("ea-desktop feature \"test-support\""),
+        "einsatzarchiv-cli --features desktop-fixture must make {surface_edge} visible through \
+         ea-desktop/test-support; otherwise the absence above says nothing about the feature \
+         and only something about the command:\n{fixture}"
+    );
+    // Zweite Positivkontrolle, wie beim archive-fs-Test: mit den Dev-Kanten des
+    // CLI erscheint die Flaeche ebenfalls. Sonst saegte `no-dev` nur die Sicht ab.
+    let with_dev = resolve("einsatzarchiv-cli", "features", &[]);
+    assert!(
+        with_dev.contains(&surface_node),
+        "the CLI's own dev edges must make {surface_edge} visible; otherwise `no-dev` above \
+         only narrowed the view:\n{with_dev}"
+    );
+}
