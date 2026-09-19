@@ -15,12 +15,14 @@ import type { DestructionAdministrationView, DestructionProcessView } from '../.
 const [REQUESTED, , , COMPLETE, INCOMPLETE] = DESTRUCTION_STATE_V1_VALUES
 
 /**
- * Permanent refusals of the native 4→1 retry chained into „Vernichtung
- * fortsetzen" (Ruling G2, 19.09.2026): an explanation instead of a silent
+ * Refusals of the native 4→1 retry chained into „Vernichtung fortsetzen"
+ * (Ruling G2, 19.09.2026): Reader duty and missing server duty are permanent,
+ * an open duty at now is temporary (G4). An explanation instead of a silent
  * no-op. The code stays visible; the host decides, this text grants nothing.
  */
 const RESUME_REFUSAL_TEXT: Readonly<Record<string, string>> = {
   'EA-DESTRUCTION-RETRY-READER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt als unvollständig abgeschlossen.',
+  'EA-DESTRUCTION-RETRY-DUTY-OPEN': 'Der Vorgang kann noch nicht fortgesetzt werden: Mindestens eine Replik hat die Löschung noch nicht bestätigt. Gleichen Sie die Servernachweise ab und setzen Sie später erneut fort.',
   'EA-DESTRUCTION-RETRY-NO-SERVER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Sync-Server als Löschort gebunden oder in dieser Anwendung eingerichtet. Ohne nachträgliche Serverbestätigung bleibt der Vorgang als unvollständig abgeschlossen.',
 }
 
