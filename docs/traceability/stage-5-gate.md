@@ -52,7 +52,7 @@ sie ab.
 | AK 18 | Nachtrag | `crates/ea-admin/tests/amendment.rs::amendment_finalization_preserves_original_bytes_and_reader_keeps_multiple_amendments` (1/0/0) — der Nachtrag referenziert das Original und aendert keine Originalbytes | Die Anzeige mehrerer verketteter Nachtraege im Browser-Reader liegt in Stufe 4 und wird hier nicht erneut belegt |
 | AK 24 | Registry-Ueberalterung | `crates/ea-admin/tests/registry_workflows.rs` (20/0/0: Pflichtfelder ueber `a_head_without_issued_at_not_before_or_not_after_is_refused_by_the_decoder` mit `EA-FORMAT-SHAPE`, neu mit `9d3716f`; `the_sequence_lease_boundary_is_exact`, `an_expired_head_blocks_fail_closed`) und fuer Standard-`warn` `crates/ea-writer/tests/stale_registry_acknowledgement.rs::standard_warn_persists_a_signed_receipt_before_finalizing_once` (19/0/0) mit `stale_registry_warning.rs` (4/0/0). Korrigiert: `apps/cli/tests/registry_workflows.rs` (56/0/0) belegt Widerrufsplan und Clock-Release-Grammatik, nicht warn/block | Die Betriebsentscheidung ueber die Altersrichtlinie einer echten Organisation bleibt Stufe 7 |
 | AK 29 | Rollentrennung | `crates/ea-key-provider/tests/writer_role_guard.rs::writer_profile_rejects_forbidden_private_key_purposes` (8/0/0) — Writer-Profile verweigern Reader-, Recovery-, Historical-Grant-Authority- und Key-Approver-Privatschluessel; dass lokal genannte Faehigkeiten keine Rolle erweitern, belegt `::a_writer_certificate_capability_is_decided_against_the_parsed_allowlist` (`EA-KEY-FORBIDDEN-CAPABILITY` fuer jede Nicht-Writer-Faehigkeit). Korrigiert: `privacy_canaries_writer.rs` und `operator_trust_store.rs` pruefen keine Schluesselrollen | Die installierte OS-Praesenz auf einem Produktionsgeraet bleibt Stufe 7 |
-| AK 30 | Kontrollierte Vernichtung | Zwei Approver: `crates/ea-destruction/tests/authorization.rs` (10/0/0). Alle bekannten Speicherorte und Backupfristen: `process_native::destruction::completion::` (4 Tests), unerreichbare Replikate: `::failure::` (7 Tests), backup-pending: `::pending::` (8 Tests), sofortiger Abschluss: `::completion::native_completion_requires_every_duty_then_persists_exact_signed_transition_and_replays`, Fortsetzen: `native_destruction_local_resume_removes_real_eip_grants_and_reopens_measured_attestation`; das Ziel `einsatzarchiv-cli --test operator process_native::destruction::` liest 52/0/0 in 1335 s seriell | Die externe Datenschutzentscheidung zum Restnachweis bleibt Stufe 7; der native Retry aus `incompleteUnreachableReplica` ist DRK-319 (`## Dokumentierte Grenzen`) |
+| AK 30 | Kontrollierte Vernichtung | Zwei Approver: `crates/ea-destruction/tests/authorization.rs` (10/0/0). Alle bekannten Speicherorte und Backupfristen: `process_native::destruction::completion::` (4 Tests), unerreichbare Replikate: `::failure::` (7 Tests), backup-pending: `::pending::` (8 Tests), sofortiger Abschluss: `::completion::native_completion_requires_every_duty_then_persists_exact_signed_transition_and_replays`, Fortsetzen: `native_destruction_local_resume_removes_real_eip_grants_and_reopens_measured_attestation`; das Ziel `einsatzarchiv-cli --test operator process_native::destruction::` liest 52/0/0 in 1335 s seriell (Messung vor dem nativen Retry). Retry aus Zustand 4 nach 1 fuer servergebundene Pflichten (DRK-319, Erzeuger `crates/ea-admin/src/destruction_runtime/retry.rs`): `process_native::destruction::retry::native_retry_resumes_a_server_bound_incomplete_once_every_duty_is_confirmed`, verweigernd `::retry::native_retry_refuses_when_the_open_duty_was_a_reader` und `::retry::native_retry_refuses_an_open_server_duty_missing_server_and_failed_reservation`; gegen denselben neu gestarteten TLS-Server mit PostgreSQL und S3 `::transport::server::retry::native_retry_survives_a_listener_loss_between_its_reads_and_resumes_once_after_the_same_server_restarts`, `::transport::server::retry::native_retry_replays_the_committed_4_to_1_over_tls_after_its_publication_failed` und ueber den Desktop-Pfad `::transport::server::host::retry::native_desktop_resume_in_state4_chains_the_retry_and_completes_against_the_restarted_server` (die `transport::server::`-Zeugen nur mit `--features desktop-fixture`); mit diesem Merkmal las das Ziel in der Messung des Folge-PRs vor dem Rebase 99/0/1 seriell | Die externe Datenschutzentscheidung zum Restnachweis bleibt Stufe 7; Reader-Faelle bleiben nach Ruling G1 in v0.1 dauerhaft in `incompleteUnreachableReplica` (`## Dokumentierte Grenzen`) |
 | AK 35 | Registry-Angriffe | `tests/ea-system-tests/tests/e2e_registry_effectiveness.rs::a_rollback_a_same_version_fork_and_an_expired_head_block_the_line` — Rollback und gleiche Version mit anderem Hash fail-closed; `::the_trusted_time_floor_rises_with_an_accepted_head_and_neither_a_clock_rollback_nor_an_older_head_lowers_it` (neu mit `fad9c7a`) — der Floor steigt auf das `issuedAt` des angenommenen Kopfes und sinkt weder bei Uhrruecklauf noch mit einem neueren Kopf aelterer Zeit; Ziel 7/0/0. Upload-Ablehnung bei einem zurueckgehaltenen, dem Server bekannten Kopf: `apps/server/tests/commit_failures.rs::a_package_binding_an_older_head_names_the_required_head` (17/0/0, mit `xtask integration up`) | Das nicht erkennbare Offline-Fenster ist eine dokumentierte Grenze des Designs, keine Stufenluecke |
 | AK 40 | Historische Grant-Autoritaet | `crates/ea-recovery/tests/historical_grant.rs::separate_key_roles_recipient_native_presence_and_durable_audit_are_required` (8/0/0) fuer getrennte Recovery-KEM und Grant-Signatur, `crates/ea-trust/tests/grant_authorization.rs` (5/0/0) fuer die Mehr-Augen-Authorization; Server-Pfad `e2e_historical_grant.rs` (1/0/0) | Die Custody der Produktionsschluessel bleibt Stufe 7 |
 | AK 41 | Destroyed Entry Stub | `process_native::destruction::writer_evidence::native_writer_evidence_reopens_as_real_reader_authorized_destruction` (in 52/0/0) — gueltiger `.eds` mit Writer-Signatur, `entryHash` und Kettenkontinuitaet; die nicht autorisierte Entfernung als sichtbare Luecke: `crates/ea-verify/tests/destruction_stub.rs` (8/0/0) und `receipt_checkpoint.rs` (3/0/0) | Die nativen Minimal- und Maximalfaelle des Stubs bleiben Stufe 7 |
@@ -287,7 +287,7 @@ Produkthaelfte dieser Zeilen und senkt keine auf `implemented`.
 | `AK-18` | implemented | Einziger Produktzeuge ist `crates/ea-admin/tests/amendment.rs` in-process; `amendment.spec.ts` ist UI/IPC-Double |
 | `AK-24` | implemented | `registry_workflows.rs` und `stale_registry_acknowledgement.rs` sind Crate-Zeugen; kein komponierter Lauf traegt warn/block |
 | `AK-29` | implemented | `writer_role_guard.rs` ist Crate-Zeuge; kein nativer Profilzeuge |
-| `AK-30` | integrated | `process_native::destruction::` gegen TLS, PostgreSQL, S3 mit ObjectLock und SQLCipher, 52/0/0; der native Retry aus Zustand 4 (DRK-319) aendert nichts daran, dass alle erlaubten Zustaende korrekt abgebildet sind |
+| `AK-30` | integrated | `process_native::destruction::` gegen TLS, PostgreSQL, S3 mit ObjectLock und SQLCipher, 52/0/0; den nativen Retry aus Zustand 4 fuer servergebundene Pflichten liefert DRK-319 mit eigenen Zeugen im selben Ziel, Reader-Faelle bleiben nach Ruling G1 dauerhaft in Zustand 4 — beides sind erlaubte, korrekt abgebildete Zustaende |
 | `AK-35` | integrated | Systemziel `e2e_registry_effectiveness.rs` und Serverziel `commit_failures.rs` mit `integration up` |
 | `AK-40` | integrated | Serverpfad `e2e_historical_grant.rs` neben `historical_grant.rs` und `grant_authorization.rs` |
 | `AK-41` | integrated | Nativer Zeuge `writer_evidence::native_writer_evidence_reopens_as_real_reader_authorized_destruction` oeffnet den echten `.eds` im Reader; die nativen Min-/Max-Faelle sind Stufe-7-Vorbehalt, keine offene Produkthaelfte |
@@ -381,24 +381,60 @@ Lauf, der sie in einer Organisation bzw. auf einer frischen Maschine
 nacheinander ausfuehrt. Im Plan bleiben Task 14 Step 3 und Step 4 deshalb
 offen.
 
-**Nativer Retry aus `incompleteUnreachableReplica` — besitzendes Ticket
-DRK-319.** Die Zustandsmaschine nimmt die Kante `incompleteUnreachableReplica`
-nach `inProgress` an (`crates/ea-destruction/tests/transitions.rs`), einen
-nativen Erzeuger dafuer gibt es in `crates/ea-admin/src/destruction_runtime/`
-noch nicht; das Ruling vom 2026-09-13 hat ihn aus dem ersten Stufe-5-PR in
-DRK-319 verschoben. Der Plan fuehrt die Kante weiter als Zusage, ihre native
-Erzeugung liegt bei DRK-319. AK 30 bleibt davon unberuehrt, weil alle
-erlaubten Zustaende korrekt abgebildet sind.
+**Geschlossen mit den Folgetickets DRK-319, DRK-321, DRK-324 und DRK-326.**
+Den nativen Erzeuger der Kante `incompleteUnreachableReplica` nach
+`inProgress` (`crates/ea-destruction/tests/transitions.rs`), den das Ruling vom
+2026-09-13 aus dem ersten Stufe-5-PR verschoben hatte, liefert DRK-319 in
+`crates/ea-admin/src/destruction_runtime/retry.rs` (`0fd03cf`, `ca48589`) —
+aber nur fuer servergebundene Pflichten: der Retry entsteht erst, wenn zu
+`now` keine Pflicht mehr fehlt, die Serverreservierung wird vor dem Signieren
+und nach der blockierenden Arbeit erneut gelesen, und eine Reader-Pflicht wird
+vor jedem Netzzugriff mit `EA-DESTRUCTION-RETRY-READER-DUTY` verweigert.
+„Vernichtung fortsetzen" im Desktop verkettet den Retry in Zustand 4
+(`7e4f757`). Zeugen: `apps/cli/tests/operator_destruction/retry.rs`,
+`.../transport/server/retry.rs` (Neustart desselben TLS-Servers mit PostgreSQL
+und S3, Replay nach gescheitertem `publish`) und
+`.../transport/server/host/retry.rs` (Desktop-Pfad), siehe AK 30 in
+Abschnitt 1. DRK-321 (`d290a4b`, Regel R1): ein Vernichtungsuebergang, den ein
+Geraet mit Reader-Zertifikat signiert, wird lokal mit
+`EA-DESTRUCTION-SIGNATURE` verweigert, auch bei widerrufenem
+Reader-Zertifikat — Zeugen
+`crates/ea-destruction/tests/transitions.rs::a_transition_signed_by_a_reader_deletion_attest_key_is_refused_locally`
+und `::a_revoked_reader_certificate_still_marks_its_device_as_a_reader`,
+im Reader `crates/ea-reader/tests/destruction_cache.rs::an_initiating_event_signed_from_a_reader_device_is_not_a_removal_capability`;
+die Reader-Grenze pinnen Faehigkeits-Allowlists (`c849d84`, `79f4d99`).
+DRK-324 und DRK-326 stehen unten bei den nicht blockierenden Punkten.
+
+**Reader-Faelle bleiben in Zustand 4 — Ruling G1 (Ruben, 2026-09-19).** In
+v0.1 fuehrt kein Weg einen Job mit unbestaetigter Reader-Pflicht aus
+`incompleteUnreachableReplica` zurueck; der Zustand ist fuer Lesegeraete
+endgueltig und korrekt abgebildet. Das ist eine Umfangsentscheidung und keine
+offene Produkthaelfte; AK 30 bleibt davon unberuehrt, weil alle erlaubten
+Zustaende korrekt abgebildet sind.
+
+**Server-Mehrfachausfuehrung — besitzendes Ticket DRK-430.** Der Server fuehrt
+bei jedem erneuten Job-POST neu aus und attestiert neu. Das ist vorbestehend
+und nicht durch den Retry entstanden; der Replay-Zeuge in
+`.../transport/server/retry.rs` nimmt es mit Verweis auf DRK-430 hin.
+
+**Reichweite von R1 — besitzende Tickets DRK-431 und DRK-432.** R1 wirkt
+lokal in `ea-destruction` und `ea-reader`. Der Offline-Bericht von `ea-verify`
+wendet die Regel noch nicht an (DRK-431). R1 setzt voraus, dass kein
+Controller-, Writer- oder Admin-Geraet ein Reader-Zertifikat traegt; diese
+Registry-Invariante erzwingt heute niemand (DRK-432, Prioritaet hoch).
 
 **Der Stufe 7 vorbehalten.** Vier Dinge bleiben ausdruecklich ausserhalb dieser
 Stufe: die nativen Minimal- und Maximalfaelle, die quartalsweise Uebung, die
 externe Datenschutzentscheidung und die Custody der Produktionsschluessel.
 
-**Nicht blockierend, hier aber benannt.** DRK-326 fuehrt das macOS-Watch-
-Protokoll mit 100 ms Spielraum (`WatchTests.swift` schlaeft 1,1 s gegen ein
-Prueffenster von 1 s; der Test kann auf einem ausgelasteten Laeufer
-strukturell rot werden). DRK-324 fuehrt die Haertung der Reader-`ActionClock`
-als P3. DRK-323 ist mit `db08333` behoben und auf dem echten Laeufer belegt
+**Nicht blockierend, hier aber benannt.** Die beiden P3-Risiken der ersten
+Fassung sind geschlossen. DRK-326 (`d600996`): `WatchTests.swift` wartet auf
+den gestauten Callback nicht mehr mit einem Schlaf von 1,1 s gegen ein
+Prueffenster von 1 s, sondern an einer Barriere direkt vor dem ACK; bis zur
+Challenge bleibt ein wanduhrabhaengiges Restbudget von rund 1 s, dessen Riss
+den Test rot macht und nie falsch gruen. DRK-324 (`786746c`): die
+Reader-`ActionClock` laeuft nie rueckwaerts, setzt nach dem Anheben des
+Mindestwerts neu an und holt einen Suspend auf. DRK-323 ist mit `db08333` behoben und auf dem echten Laeufer belegt
 (RED `954fc7d` 28 von 30 Laeufen rot, GREEN `db08333` 0 von 30); dieses Gate
 fuehrt `bootstrap_root` deshalb NICHT mehr als lastabhaengig.
 Beim Nachmessen fuer diesen Bericht war der ERSTE Lauf von
