@@ -1568,7 +1568,7 @@ fn native_writer_transition_rejects_caller_tip_and_activates_only_the_exact_two_
 /// The eventual repair constructor must expose only this bounded diagnostic,
 /// never an ordinary SelectedRegistryHead/admin action.
 #[test]
-#[ignore = "clock-specific restart admission requires independent review of this actual gap"]
+#[ignore = "DRK-282: contradicts the FutureSkew boundary (expects the ordinary reopen after restart to succeed); superseded by clock_repair.rs"]
 fn native_clock_repair_after_actual_restart_gap() {
     use ea_trust::{prepare_local_time,verify_receipt_time,verify_registry_candidate};
     let installation=AdministrationInstallation::new();
