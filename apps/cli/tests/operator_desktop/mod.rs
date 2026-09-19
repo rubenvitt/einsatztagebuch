@@ -706,6 +706,63 @@ fn native_desktop_restarts_after_registry_expiry_and_requires_signed_ack() {
     assert!(native.reauthenticate(ReauthPurpose::Destruction).is_err());
 }
 
+/// DRK-282, Posture-Ruling „Plan wörtlich": die Stale-Writer-Ausnahme verlangt
+/// STRIKT gemessenes Pass in allen vier Anforderungen (`writer.rs`,
+/// `ensure_writer_ready`). Ein Unknown — das eine gewöhnliche Sitzung mit
+/// signierter Dokumentation zulassen darf — und jedes Fail öffnen sie nicht.
+///
+/// Ein gültiges signiertes Posture-Dokument lässt sich hier nicht beilegen:
+/// Dokumentation läuft spätestens mit `Registry.notAfter` ab, und genau dieses
+/// `notAfter` liegt für die abgelaufene Registry in der Vergangenheit. Der
+/// Stale-Pfad liest `go_live_posture_evidence` zudem gar nicht.
+#[test]
+fn stale_writer_opens_only_on_measured_pass_never_on_unknown_or_fail() {
+    use ea_key_provider::{DevicePostureProvider, DevicePostureProviderFake, PostureRequirement};
+    let mut installed = Installation::new();
+    configure_writer_expiring_at(
+        &mut installed,
+        UnixMillis::new(support::live_clock().get() - 1000),
+    );
+    let open = |posture: DevicePostureProviderFake| {
+        let native = NativeOperatorProvider::open_test_fixture(
+            installed.directory.path().join("ea-native-operator"),
+            false,
+        )
+        .unwrap();
+        let posture: Arc<dyn DevicePostureProvider> = Arc::new(posture);
+        InteractiveOperatorRuntime::open_with_test_native_and_posture(
+            OperatorRuntimeConfig::load(&installed.config).unwrap(),
+            &installed.anchor,
+            support::live_clock(),
+            native,
+            posture,
+        )
+    };
+    // Gegenprobe: gemessenes Pass öffnet genau die Stale-Writer-Ausnahme.
+    match open(DevicePostureProviderFake::all_passing()) {
+        Ok(InteractiveOperatorRuntime::StaleWriter(_)) => {}
+        Ok(InteractiveOperatorRuntime::Current(_)) => {
+            panic!("the expired Registry must route through the stale-writer exception")
+        }
+        Err(error) => panic!("measured Pass must open the stale writer: {}", error.code()),
+    }
+    for requirement in PostureRequirement::ALL {
+        for (label, posture) in [
+            ("unknown", DevicePostureProviderFake::unknown(requirement)),
+            ("fail", DevicePostureProviderFake::failing(requirement)),
+        ] {
+            match open(posture) {
+                Ok(_) => panic!("{label} {requirement:?} must not open the stale writer"),
+                Err(error) => assert_eq!(
+                    error.code(),
+                    "EA-OPERATOR-POSTURE",
+                    "{label} {requirement:?}"
+                ),
+            }
+        }
+    }
+}
+
 #[test]
 fn native_presence_cannot_survive_a_registry_revocation_during_the_dialog() {
     for stale in [false, true] {

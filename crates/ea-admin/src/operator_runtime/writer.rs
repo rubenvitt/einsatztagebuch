@@ -36,7 +36,26 @@ impl InteractiveOperatorRuntime {
         now: UnixMillis,
         native: Arc<NativeOperatorProvider>,
     ) -> Result<Self, OperatorRuntimeError> {
-        Self::open_using(config, anchor, now, native, Arc::new(FixturePassingPosture))
+        Self::open_with_test_native_and_posture(
+            config,
+            anchor,
+            now,
+            native,
+            Arc::new(FixturePassingPosture),
+        )
+    }
+    /// Fixture-only injection. The installed production path always chooses the
+    /// actual host adapter and cannot select a report from config or environment.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn open_with_test_native_and_posture(
+        config: OperatorRuntimeConfig,
+        anchor: &Path,
+        now: UnixMillis,
+        native: Arc<NativeOperatorProvider>,
+        posture: Arc<dyn DevicePostureProvider>,
+    ) -> Result<Self, OperatorRuntimeError> {
+        Self::open_using(config, anchor, now, native, posture)
     }
     fn open_using(
         config: OperatorRuntimeConfig,
