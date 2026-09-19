@@ -177,6 +177,18 @@ impl VerifiedReaderDestructionInstruction {
         )
         .map_err(|_| INVALID)?;
         verify_cose_sign1(signature, &original, &context).map_err(|_| INVALID)?;
+        // Web-Reader-Design §3, same rule as `ea_destruction::verify_event_at`:
+        // a signer on a device that holds a Reader certificate at the
+        // authorization head (revoked included) never signs a transition.
+        let signer = original
+            .active_certificate_fields(certificate)
+            .ok_or(INVALID)?;
+        if ea_verify::device_holds_reader_certificate(
+            signer.device_id,
+            original.known_certificate_fields(),
+        ) {
+            return Err(INVALID);
+        }
         let (replica, targets) = parse_inventory(
             input.inventory,
             inventory,

@@ -227,3 +227,84 @@ fn immutable_authorization_and_event_survive_lease_expiry_without_current_author
         .is_err()
     );
 }
+
+/// Web-Reader-Design §3: the reader signs no state transition. Its own
+/// `deletionAttest` certificate (for its cache attestation) sits on a Reader
+/// device, and a transition signed under it is refused locally, current and
+/// historical, while the same fields under the desktop component pass.
+#[test]
+fn a_transition_signed_by_a_reader_deletion_attest_key_is_refused_locally() {
+    refuses_reader_device_transitions(false);
+}
+
+/// Revocation cannot turn a Reader device into a transition signer.
+#[test]
+fn a_revoked_reader_certificate_still_marks_its_device_as_a_reader() {
+    refuses_reader_device_transitions(true);
+}
+
+fn refuses_reader_device_transitions(reader_revoked: bool) {
+    let mut f = support::Fixture::new(true, true, false);
+    let reader_deletion = support::with_reader_deletion_attest(&mut f, reader_revoked);
+    let bytes = f.authorization();
+    let head = f.head();
+    let auth = verify_authorization(&bytes, &head).unwrap();
+    let reader_device = ea_types::DeviceId::try_from(&[0xa5; 16][..]).unwrap();
+    assert_eq!(
+        head.known_certificate_fields()
+            .any(|(hash, cert)| cert.device_id == reader_device
+                && cert.certificate_kind == ea_format::CertificateKindV1::Reader
+                && head.active_certificate_fields(hash).is_none()),
+        reader_revoked,
+        "fixture: Reader certificate revoked at the authorization head",
+    );
+    let history = {
+        let trust = f.line.verified_with_floor(
+            support::trust::Pin::Exact(head.registry_version(), head.registry_head_hash()),
+            ea_types::UnixMillis::new(support::NOW),
+        );
+        ea_trust::verify_historical_registry_authority(
+            &trust,
+            head.registry_version(),
+            head.registry_head_hash(),
+            head.proposed_sequence(),
+        )
+        .unwrap()
+    };
+    let historical_auth =
+        ea_destruction::verify_authorization_historical(&bytes, &history).unwrap();
+    let observed = ea_types::UnixMillis::new(support::NOW);
+
+    // Positive control: the desktop component on the Writer-side device.
+    let request = support::event_fields(&f, &bytes, 1, None, 0, None);
+    let accepted = verify_event(
+        &support::event_signed_by(&bytes, request.clone(), f.deletion),
+        &auth,
+        &head,
+    )
+    .unwrap();
+    ea_destruction::verify_event_historical(
+        accepted.exact_bytes(),
+        &historical_auth,
+        &history,
+        observed,
+    )
+    .unwrap();
+
+    let start = support::event_fields(&f, &bytes, 2, Some(0), 1, Some(accepted.object_hash()));
+    for fields in [request, start] {
+        let exact = support::event_signed_by(&bytes, fields, reader_deletion);
+        let current = verify_event(&exact, &auth, &head).err().map(|e| e.code());
+        let historical =
+            ea_destruction::verify_event_historical(&exact, &historical_auth, &history, observed)
+                .err()
+                .map(|e| e.code());
+        assert_eq!(
+            (current, historical),
+            (
+                Some("EA-DESTRUCTION-SIGNATURE"),
+                Some("EA-DESTRUCTION-SIGNATURE")
+            ),
+        );
+    }
+}

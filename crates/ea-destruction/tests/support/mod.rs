@@ -238,11 +238,55 @@ pub fn event_fields(
     }
 }
 pub fn event(f: &Fixture, auth: &[u8], fields: DestructionTransitionFieldsV1) -> Vec<u8> {
+    event_signed_by(auth, fields, f.deletion)
+}
+/// A transition signed under an explicit `deletionAttest` certificate. All
+/// fixture devices share the authorized device key, so any such hash signs.
+pub fn event_signed_by(
+    auth: &[u8],
+    fields: DestructionTransitionFieldsV1,
+    certificate: CertificateHash,
+) -> Vec<u8> {
     let payload = TrustPayloadV1::destruction_transition(fields).unwrap();
     let signature = trust::authorized_device_signer()
-        .sign_destruction_transition_digest(f.deletion, payload.exact_digest_input(), auth)
+        .sign_destruction_transition_digest(certificate, payload.exact_digest_input(), auth)
         .unwrap();
     exact(payload, vec![signature])
+}
+/// Adds a Reader device (marker 0x65, device `[0xa5; 16]`) and a
+/// `deletionAttest` certificate on that same device, as the web reader holds
+/// for its own cache attestation. Returns the Reader `deletionAttest` hash.
+/// `reader_revoked` revokes the Reader certificate before the authorization
+/// head: the device stays a known Reader holder.
+pub fn with_reader_deletion_attest(f: &mut Fixture, reader_revoked: bool) -> CertificateHash {
+    let effective = f.line.heads().last().unwrap().valid_through.get() + 1;
+    f.line.push(
+        ActionSpec::Device {
+            kind: CertificateKindV1::Reader,
+            marker: 0x65,
+            effective_from: None,
+        },
+        HeadOptions {
+            revoked_from_sequence: reader_revoked.then(|| ChainSequence::new(effective + 1)),
+            ..options()
+        },
+    );
+    CertificateHash::from(
+        f.line
+            .push(
+                ActionSpec::Device {
+                    kind: CertificateKindV1::DeletionAttest,
+                    marker: 0x66,
+                    effective_from: None,
+                },
+                HeadOptions {
+                    device_id_override: Some(DeviceId::try_from(&[0xa5; 16][..]).unwrap()),
+                    ..options()
+                },
+            )
+            .direct_object_hash
+            .unwrap(),
+    )
 }
 pub fn entry(f: &Fixture) -> EntryPackageV1 {
     let head = f.head();

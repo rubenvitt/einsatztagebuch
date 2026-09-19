@@ -23,22 +23,28 @@ impl Fixture {
         Self::with_alternate_event_signer(false)
     }
     pub fn with_alternate_event_signer(alternate: bool) -> Self {
-        Self::build(alternate, None, None, false)
+        Self::build(alternate, None, None, false, false)
     }
     pub fn with_reader_attestation_key(secret: [u8; 32]) -> Self {
-        Self::build(false, Some(secret), None, false)
+        Self::build(false, Some(secret), None, false, false)
+    }
+    /// The initiating 0→1 event is signed by the reader's own
+    /// `deletionAttest` key on its Reader device (Web-Reader-Design §3 forbids it).
+    pub fn with_reader_signed_initiating_event(secret: [u8; 32]) -> Self {
+        Self::build(false, Some(secret), None, false, true)
     }
     pub fn with_reader_attestation_identity(secret: [u8; 32], device: DeviceId) -> Self {
-        Self::build(false, Some(secret), Some(device), false)
+        Self::build(false, Some(secret), Some(device), false, false)
     }
     pub fn with_two_reader_attestation_certificates(secret: [u8; 32]) -> Self {
-        Self::build(false, Some(secret), None, true)
+        Self::build(false, Some(secret), None, true, false)
     }
     fn build(
         alternate: bool,
         reader_secret: Option<[u8; 32]>,
         device_override: Option<DeviceId>,
         two_reader_certificates: bool,
+        reader_signs_event: bool,
     ) -> Self {
         let mut original =
             support::destruction_v12::OriginalFixture::new(support::COMPLETE_PLAINTEXT_V1);
@@ -142,7 +148,14 @@ impl Fixture {
             executed_at: UnixMillis::new(800),
         })
         .unwrap();
-        let signature = trust::authorized_device_signer()
+        let (event_signer, event_certificate) = match (reader_signs_event, reader_secret) {
+            (true, Some(secret)) => (
+                ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new(secret)),
+                reader_attestation_certificate.unwrap(),
+            ),
+            _ => (trust::authorized_device_signer(), event_certificate),
+        };
+        let signature = event_signer
             .sign_destruction_transition_digest(
                 event_certificate,
                 payload.exact_digest_input(),
