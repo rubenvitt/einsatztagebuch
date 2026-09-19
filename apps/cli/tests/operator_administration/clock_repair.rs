@@ -592,3 +592,26 @@ fn native_clock_repair_consumed_release_bytes_cannot_be_replayed() {
     assert_eq!(blocked.clock_audits(), (1, 1));
     blocked.assert_ordinary_future_skew("after refused replay");
 }
+
+/// Beobachtung für das Security-Review: ein zweiter, vollständig neuer
+/// Durchlauf (neue native Präsenz, neues dauerhaftes Audit-Paar) ist möglich.
+/// Er verbraucht erneut genau eine Auswahl und öffnet die normale Zulassung
+/// trotzdem nie; nur ein neu signierter Zeitbeleg könnte das.
+#[test]
+fn native_clock_repair_repeated_full_cycles_stay_audited_and_never_open_ordinary_admission() {
+    let blocked = BlockedInstallation::new();
+    let mut revision = blocked.trust_revision();
+    for cycle in 1..=2 {
+        blocked
+            .open_repair()
+            .unwrap()
+            .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+            .expect("each cycle needs its own presence and durable audits");
+        let next = blocked.trust_revision();
+        assert!(next > revision, "cycle {cycle}: exactly one new consume");
+        revision = next;
+        assert_eq!(blocked.clock_audits(), (cycle, cycle));
+        assert_eq!(blocked.presence_signatures(), cycle);
+        blocked.assert_ordinary_future_skew("after repeated Clock releases");
+    }
+}
