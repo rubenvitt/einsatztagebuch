@@ -3,7 +3,8 @@ use super::*;
 use ea_archive::ArchiveSource;
 use ea_audit::{AuditError, ClockRepairAuditService, SignedLocalAuditEvent};
 use ea_format::ClockReleaseJustificationV1;
-use ea_trust::ClockReleaseError;
+use ea_local_store::{StoreError, StoreValue};
+use ea_trust::{ClockReleaseError, TrustStateStore as _};
 use ea_trust::{ClockRepairRegistryAuthority, verify_clock_repair_authority};
 use std::cell::{Cell, RefCell};
 
@@ -11,6 +12,19 @@ pub enum ClockRepairRuntimeError {
     Runtime(OperatorRuntimeError),
     Clock(ClockReleaseError),
     Audit(AuditError),
+    /// Für dieselbe blockierende unabhängige Zeitreferenz und denselben
+    /// gepinnten Head ist bereits eine Freigabe dauerhaft verbraucht.
+    ///
+    /// Eine wiederholt neu signierte Freigabe wäre eine permanente
+    /// Clock-Ausnahme statt einer tatsächlichen Zeitkorrektur; der Pfad
+    /// verweigert deshalb fail-closed VOR Präsenz und vor jedem Audit.
+    ///
+    /// `EA-SKEW-` statt `EA-TRUST-CLOCK-RELEASE-`: der Befund stammt nicht vom
+    /// Freigabekern, sondern aus dem dauerhaften lokalen Audit dieser Schicht
+    /// (Begründung der Familie in `crate::clock_release`). Er ist auch nicht
+    /// `EA-TRUST-CLOCK-RELEASE-REPLAY`: dort werden exakt dieselben Bytes
+    /// wieder eingespielt, hier wäre es eine neue Freigabe mit neuer Nonce.
+    AlreadyReleased,
 }
 impl ClockRepairRuntimeError {
     pub fn code(&self) -> &'static str {
@@ -18,6 +32,7 @@ impl ClockRepairRuntimeError {
             Self::Runtime(e) => e.code(),
             Self::Clock(e) => e.code(),
             Self::Audit(e) => e.code(),
+            Self::AlreadyReleased => "EA-SKEW-ALREADY-RELEASED",
         }
     }
 }
@@ -147,6 +162,7 @@ impl ClockRepairRuntime {
                         last_wall: Cell::new(now),
                     };
                     runtime.check_local()?;
+                    runtime.require_unreleased_situation()?;
                     Ok(runtime)
                 })())
             },
@@ -248,6 +264,9 @@ impl ClockRepairRuntime {
         self,
         justification: ClockReleaseJustificationV1,
     ) -> Result<CompletedClockRepair, ClockRepairRuntimeError> {
+        // Erneut hier: eine vor dem ersten Consume geöffnete Laufzeit darf
+        // dieselbe Sperrsituation nicht ein zweites Mal freigeben.
+        self.require_unreleased_situation()?;
         self.recheck()?;
         let r = &self.resources;
         let profile = crate::operator_profile::load(&r.database)
@@ -306,16 +325,19 @@ impl ClockRepairRuntime {
         let release = self.checked_audit(|check| {
             audit.record_release_checked(proof, &login, justification, check)
         })?;
+        // Letzte Nachprüfung VOR dem dauerhaften Consume: `recheck` umfasst
+        // `check_local` (Watch, Signer, Bindung, Profil, gemessene Posture)
+        // und die frische Walltime gegen den Ablauf der Präsenz.
         if self.recheck()? >= expires {
             return Err(OperatorRuntimeError::Expired.into());
         }
         self.consume_exact_release(&release)?;
-        // The selector consumed one exact evaluation; never return its general
-        // authority. Reopening with the same old reference remains blocked.
-        self.check_local()?;
-        if fresh_wall_clock()? >= expires {
-            return Err(OperatorRuntimeError::Expired.into());
-        }
+        // Nach dem Consume sind Revision, Replay-Nonce und beide Audits
+        // dauerhaft. Hier darf keine Prüfung mehr auf `Err` gehen, sonst
+        // meldete `release` eine Freigabe als gescheitert, die gebucht ist.
+        // Der Selector hat genau eine Auswertung verbraucht; seine allgemeine
+        // Autorität wird nie zurückgegeben, und ein Reopen mit derselben alten
+        // Referenz bleibt gesperrt.
         Ok(CompletedClockRepair {
             login: login.into_event(),
             release,
@@ -339,6 +361,80 @@ impl ClockRepairRuntime {
             return Err(error);
         }
         Ok(result?)
+    }
+
+    /// Verweigert, wenn für die aktuell blockierende unabhängige Referenz und
+    /// den aktuell gepinnten Head bereits eine Freigabe verbraucht wurde.
+    ///
+    /// Nutzt ausschließlich vorhandenen dauerhaften Zustand: die signierten
+    /// `ClockSkewRelease`/`Accepted`-Audits (ihr Kontext trägt Referenz und
+    /// Head) und die Replay-Tabelle des Trust-Stores (ihre Nonce belegt den
+    /// Consume). Ein Accepted-Audit ohne Consume — ein Abbruch vor dem Consume
+    /// — sperrt nicht: dann wurde nichts freigegeben.
+    fn require_unreleased_situation(&self) -> Result<(), ClockRepairRuntimeError> {
+        let r = &self.resources;
+        let key = TrustStateKey {
+            organization_id: self.authority.organization_id(),
+            device_id: r.device_id,
+        };
+        let record = r
+            .store
+            .clone()
+            .load(key)
+            .map_err(OperatorRuntimeError::from)?;
+        let reference = record
+            .trusted_time()
+            .independent_reference()
+            .ok_or(ClockReleaseError::Mismatch)?;
+        let pin = *record.pinned_head().ok_or(ClockReleaseError::Mismatch)?;
+        let spent = r
+            .database
+            .transaction(|tx| -> Result<bool, StoreError> {
+                let mut after = 0_i64;
+                while let Some(row) = tx.query_row(
+                    "SELECT insertion_sequence,exact_bytes FROM local_audit_event \
+                     WHERE insertion_sequence>?1 ORDER BY insertion_sequence LIMIT 1",
+                    &[StoreValue::Integer(after)],
+                )? {
+                    after = row.integer(0)?;
+                    // Andere Audit-Arten sind hier ohne Belang.
+                    let Ok(audit) = ea_format::decode_clock_release_audit(row.blob(1)?) else {
+                        continue;
+                    };
+                    let context = audit.context();
+                    let signed = context.independent_reference();
+                    if audit.organization_id() != key.organization_id
+                        || audit.target_device_id() != key.device_id
+                        || audit.outcome() != ea_format::LocalAuditOutcomeV1::Accepted
+                        || context.registry_version() != pin.registry_version()
+                        || context.registry_head_hash() != pin.registry_head_hash()
+                        || signed.object_hash() != reference.object_hash()
+                        || signed.verified_time() != reference.verified_time()
+                    {
+                        continue;
+                    }
+                    if tx
+                        .query_row(
+                            "SELECT 1 FROM operator_clock_release_replay \
+                             WHERE organization_id=?1 AND device_id=?2 AND nonce=?3",
+                            &[
+                                StoreValue::Blob(key.organization_id.as_bytes().to_vec()),
+                                StoreValue::Blob(key.device_id.as_bytes().to_vec()),
+                                StoreValue::Blob(audit.nonce().to_vec()),
+                            ],
+                        )?
+                        .is_some()
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .map_err(OperatorRuntimeError::from)?;
+        if spent {
+            return Err(ClockRepairRuntimeError::AlreadyReleased);
+        }
+        Ok(())
     }
 
     fn consume_exact_release(
@@ -383,6 +479,10 @@ impl ClockRepairRuntime {
             {
                 Ok(())
             }
+            // Nach `require_same_state` bei derselben Auswertungszeit sind
+            // `Advanced` (stale/Lease) und ein abweichender Head bereits vor
+            // dem Commit ausgeschlossen (`require_fresh_event`); dieser Arm
+            // ist reine Abwehr und im geprüften Pfad nicht erreichbar.
             _ => Err(ClockReleaseError::Mismatch.into()),
         }
     }

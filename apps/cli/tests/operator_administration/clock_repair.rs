@@ -71,6 +71,19 @@ fn persist_reference(
         verify_receipt_time(candidate.preexisting_authority().unwrap(), &receipt).unwrap();
     drop(prepare_local_time(store, &candidate, now, &[verified]).unwrap());
 }
+/// Eigene, unabhängige Verbindung: liest nur, was tatsächlich gebucht ist.
+fn open_database(path: &std::path::Path) -> EncryptedDatabase {
+    let (provider, key) = database_provider_for(true);
+    EncryptedDatabase::open(path, &provider, &key).unwrap()
+}
+fn count(path: &std::path::Path, table: &str) -> i64 {
+    open_database(path)
+        .query_row(&format!("SELECT count(*) FROM {table}"), &[])
+        .unwrap()
+        .unwrap()
+        .integer(0)
+        .unwrap()
+}
 fn provider(installation: &AdministrationInstallation) -> Arc<NativeOperatorProvider> {
     NativeOperatorProvider::open_test_fixture(
         installation.directory.path().join("ea-native-operator"),
@@ -78,6 +91,9 @@ fn provider(installation: &AdministrationInstallation) -> Arc<NativeOperatorProv
     )
     .unwrap()
 }
+
+/// Exaktes Trust-Objekt eines neu signierten Heads: (Objekt-Hash, Bytes).
+type TrustObject = (ObjectHash, Arc<[u8]>);
 
 /// Tatsächlicher Neustart mit einem dauerhaft verifizierten, zu alten
 /// ServerReceipt-Zeitbezug: der gewöhnliche Einstieg verweigert FutureSkew.
@@ -171,8 +187,11 @@ impl BlockedInstallation {
         self.installation.directory.path().join(name)
     }
     fn database(&self) -> EncryptedDatabase {
-        let (provider, key) = database_provider_for(true);
-        EncryptedDatabase::open(&self.path("operator.sqlite"), &provider, &key).unwrap()
+        open_database(&self.path("operator.sqlite"))
+    }
+    /// Zeilen der dauerhaften Replay-Tabelle: genau eine je verbrauchter Freigabe.
+    fn replay_rows(&self) -> i64 {
+        count(&self.path("operator.sqlite"), "operator_clock_release_replay")
     }
     /// Persistierter Trust-Zustand: jeder Consume/Commit erhöht die Revision.
     fn trust_revision(&self) -> u64 {
@@ -221,6 +240,54 @@ impl BlockedInstallation {
         assert_eq!(self.trust_revision(), revision, "{context}: no trust consume");
         assert_eq!(self.clock_audits(), audits, "{context}: no durable audit");
         self.assert_ordinary_future_skew(context);
+    }
+    /// Signiert einen neuen Registry-Head über `action` und liefert genau die
+    /// dabei neu entstandenen exakten Trust-Objekte (noch nicht im Archiv).
+    fn next_head(
+        &mut self,
+        action: ActionSpec,
+    ) -> (trust_support::BuiltHead, Vec<TrustObject>) {
+        use ea_trust::TrustObjectSource as _;
+        let mut prior = std::collections::BTreeSet::new();
+        self.installation
+            .line
+            .source()
+            .visit_trust_object_hashes(&mut |hash| {
+                prior.insert(hash);
+                Ok(())
+            })
+            .unwrap();
+        let head = self.installation.line.push(
+            action,
+            HeadOptions {
+                effective_from: Some(1),
+                valid_through: Some(support::LIVE_WRITER_LEASE_THROUGH_V1),
+                not_after: UnixMillis::new(support::LIVE_WRITER_NOT_AFTER_V1),
+                ..HeadOptions::default()
+            },
+        );
+        let mut objects = Vec::new();
+        let source = self.installation.line.source();
+        source
+            .visit_trust_object_hashes(&mut |hash| {
+                if !prior.contains(&hash) {
+                    objects.push((hash, source.read_exact_trust_object(hash)?.unwrap()));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(!objects.is_empty());
+        (head, objects)
+    }
+    fn publish(&self, objects: &[TrustObject]) {
+        for (hash, exact) in objects {
+            fs::write(
+                self.path("archive")
+                    .join(format!("{}.etb", hex::encode(hash.as_bytes()))),
+                exact,
+            )
+            .unwrap();
+        }
     }
     /// Hält die tatsächliche native Präsenz-Signatur an, führt `during` aus und
     /// gibt sie danach wieder frei. Liefert den Fehler von `release`.
@@ -308,16 +375,23 @@ fn native_clock_only_restart_persists_audits_consumes_once_and_old_reference_sti
     }
 }
 
-/// Fixture-Posture: fest oder ab der ersten tatsächlichen Präsenz-Signatur Fail.
+/// Fixture-Posture: fest, oder Fail, sobald `fail_when` einen tatsächlich
+/// dauerhaft beobachteten Zustand meldet (Präsenz-Signatur, Audit, Consume).
 struct ClockPosture {
     report: Mutex<DevicePostureReport>,
-    fail_after_presence: Option<PathBuf>,
+    fail_when: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+}
+impl ClockPosture {
+    fn passing_until(fail_when: impl Fn() -> bool + Send + Sync + 'static) -> Arc<Self> {
+        Arc::new(Self {
+            report: Mutex::new(DevicePostureProviderFake::all_passing().report().unwrap()),
+            fail_when: Some(Box::new(fail_when)),
+        })
+    }
 }
 impl DevicePostureProvider for ClockPosture {
     fn report(&self) -> Result<DevicePostureReport, KeyError> {
-        if self.fail_after_presence.as_ref().is_some_and(|path| {
-            fs::read_to_string(path).is_ok_and(|calls| calls.contains("sign operator-instance"))
-        }) {
+        if self.fail_when.as_ref().is_some_and(|fail| fail()) {
             return Ok(DevicePostureProviderFake::failing_screen_lock()
                 .report()
                 .unwrap());
@@ -341,7 +415,7 @@ fn native_clock_repair_admits_only_measured_pass_and_refuses_fail_or_unknown_bef
         ] {
             let posture = Arc::new(ClockPosture {
                 report: Mutex::new(report),
-                fail_after_presence: None,
+                fail_when: None,
             });
             let refused = blocked.open_repair_with_posture(posture);
             assert!(
@@ -358,9 +432,9 @@ fn native_clock_repair_admits_only_measured_pass_and_refuses_fail_or_unknown_bef
 fn native_clock_repair_posture_failing_after_presence_leaves_no_audit_and_no_consume() {
     let blocked = BlockedInstallation::new();
     let (revision, audits) = (blocked.trust_revision(), blocked.clock_audits());
-    let posture = Arc::new(ClockPosture {
-        report: Mutex::new(DevicePostureProviderFake::all_passing().report().unwrap()),
-        fail_after_presence: Some(blocked.path("helper-calls")),
+    let calls = blocked.path("helper-calls");
+    let posture = ClockPosture::passing_until(move || {
+        fs::read_to_string(&calls).is_ok_and(|calls| calls.contains("sign operator-instance"))
     });
     let repair = blocked
         .open_repair_with_posture(posture)
@@ -421,53 +495,16 @@ fn native_clock_repair_reference_change_during_held_presence_leaves_no_audit_and
 
 #[test]
 fn native_clock_repair_revocation_during_held_presence_leaves_no_audit_and_no_consume() {
-    use ea_trust::TrustObjectSource as _;
     let mut blocked = BlockedInstallation::new();
     let (revision, audits) = (blocked.trust_revision(), blocked.clock_audits());
     let binding = blocked.config.binding_object_hash;
-    let archive = blocked.path("archive");
-    let mut prior = std::collections::BTreeSet::new();
-    blocked
-        .installation
-        .line
-        .source()
-        .visit_trust_object_hashes(&mut |hash| {
-            prior.insert(hash);
-            Ok(())
-        })
-        .unwrap();
-    blocked.installation.line.push(
-        ActionSpec::Revoke {
-            target_kind: 1,
-            object_hash: binding,
-        },
-        HeadOptions {
-            effective_from: Some(1),
-            valid_through: Some(support::LIVE_WRITER_LEASE_THROUGH_V1),
-            not_after: UnixMillis::new(support::LIVE_WRITER_NOT_AFTER_V1),
-            ..HeadOptions::default()
-        },
-    );
-    let mut revocation = Vec::new();
-    let source = blocked.installation.line.source();
-    source
-        .visit_trust_object_hashes(&mut |hash| {
-            if !prior.contains(&hash) {
-                revocation.push((hash, source.read_exact_trust_object(hash)?.unwrap()));
-            }
-            Ok(())
-        })
-        .unwrap();
-    assert!(!revocation.is_empty());
+    let (_, revocation) = blocked.next_head(ActionSpec::Revoke {
+        target_kind: 1,
+        object_hash: binding,
+    });
     let refused = blocked.release_holding_presence(|| {
         // Signierte Sperrung der Admin-Bindung erscheint in der Archivquelle.
-        for (hash, exact) in &revocation {
-            fs::write(
-                archive.join(format!("{}.etb", hex::encode(hash.as_bytes()))),
-                exact,
-            )
-            .unwrap();
-        }
+        blocked.publish(&revocation);
     });
     assert_eq!(refused.code(), "EA-OPERATOR-ARCHIVE");
     assert_eq!(blocked.trust_revision(), revision, "no trust consume");
@@ -593,25 +630,186 @@ fn native_clock_repair_consumed_release_bytes_cannot_be_replayed() {
     blocked.assert_ordinary_future_skew("after refused replay");
 }
 
-/// Beobachtung für das Security-Review: ein zweiter, vollständig neuer
-/// Durchlauf (neue native Präsenz, neues dauerhaftes Audit-Paar) ist möglich.
-/// Er verbraucht erneut genau eine Auswahl und öffnet die normale Zulassung
-/// trotzdem nie; nur ein neu signierter Zeitbeleg könnte das.
+/// Auflage P2-1: kippt die Posture genau zwischen dauerhaftem Consume und
+/// einer (früheren) Nachprüfung, darf `release` den dauerhaft gebuchten
+/// Trust-Zustand und das Audit-Paar nicht als Fehlschlag melden.
 #[test]
-fn native_clock_repair_repeated_full_cycles_stay_audited_and_never_open_ordinary_admission() {
+fn native_clock_repair_posture_failing_right_after_the_durable_consume_still_reports_the_release() {
     let blocked = BlockedInstallation::new();
-    let mut revision = blocked.trust_revision();
-    for cycle in 1..=2 {
-        blocked
-            .open_repair()
-            .unwrap()
-            .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
-            .expect("each cycle needs its own presence and durable audits");
-        let next = blocked.trust_revision();
-        assert!(next > revision, "cycle {cycle}: exactly one new consume");
-        revision = next;
-        assert_eq!(blocked.clock_audits(), (cycle, cycle));
-        assert_eq!(blocked.presence_signatures(), cycle);
-        blocked.assert_ordinary_future_skew("after repeated Clock releases");
-    }
+    let revision = blocked.trust_revision();
+    assert_eq!(blocked.replay_rows(), 0);
+    let database = blocked.path("operator.sqlite");
+    // Fail erst, sobald die Replay-Zeile tatsächlich gebucht ist.
+    let posture =
+        ClockPosture::passing_until(move || count(&database, "operator_clock_release_replay") > 0);
+    let completed = blocked
+        .open_repair_with_posture(posture)
+        .expect("control: measured Pass opens the Clock path")
+        .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+        .expect("a durable consume must never be reported as a failed release");
+    let audit = ea_format::decode_clock_release_audit(completed.release().exact_bytes()).unwrap();
+    assert_eq!(audit.outcome(), ea_format::LocalAuditOutcomeV1::Accepted);
+    assert!(blocked.trust_revision() > revision, "exactly one consume");
+    assert_eq!(blocked.replay_rows(), 1);
+    assert_eq!(blocked.clock_audits(), (1, 1));
+    assert_eq!(blocked.presence_signatures(), 1);
+    blocked.assert_ordinary_future_skew("after a release whose posture failed afterwards");
+}
+
+/// Gegenstück zu P2-1: ein Fehler nach dem dauerhaften Accepted-Audit entsteht
+/// nur noch VOR dem Consume — Revision und Replay-Tabelle bleiben unverändert.
+/// Weil nichts verbraucht wurde, bleibt genau eine spätere Freigabe möglich.
+#[test]
+fn native_clock_repair_failure_after_the_durable_release_audit_happens_before_any_consume() {
+    let blocked = BlockedInstallation::new();
+    let revision = blocked.trust_revision();
+    let database = blocked.path("operator.sqlite");
+    let before = count(&database, "local_audit_event");
+    // Fail, sobald Login- UND Freigabe-Audit dauerhaft gebucht sind.
+    let posture = ClockPosture::passing_until(move || {
+        count(&database, "local_audit_event") >= before + 2
+    });
+    let refused = blocked
+        .open_repair_with_posture(posture)
+        .expect("control: measured Pass opens the Clock path")
+        .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+        .err()
+        .expect("posture Fail after the durable release audit must refuse");
+    assert_eq!(refused.code(), "EA-OPERATOR-POSTURE");
+    assert_eq!(blocked.clock_audits(), (1, 1), "both audits are durable");
+    assert_eq!(blocked.trust_revision(), revision, "no trust consume");
+    assert_eq!(blocked.replay_rows(), 0, "no replay row");
+    blocked.assert_ordinary_future_skew("posture Fail before the consume");
+    // Unverbraucht: dieselbe Sperrsituation lässt noch genau eine Freigabe zu.
+    blocked
+        .open_repair()
+        .unwrap()
+        .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+        .expect("nothing was consumed by the refused attempt");
+    assert_eq!(blocked.clock_audits(), (2, 2));
+    assert_eq!(blocked.replay_rows(), 1);
+}
+
+/// Auflage P2-2: eine wiederholt neu signierte Freigabe ersetzt keine
+/// tatsächliche Zeitkorrektur. Für dieselbe blockierende Referenz und
+/// denselben gepinnten Head wird nach einem Consume jede weitere Freigabe VOR
+/// Präsenz und Audit verweigert; erst eine neue Sperrreferenz ist wieder genau
+/// einmal freigebbar.
+#[test]
+fn native_clock_repair_second_release_for_the_same_reference_and_head_is_refused_before_presence() {
+    let blocked = BlockedInstallation::new();
+    // Bereits vor der ersten Freigabe geöffnet: das Öffnen allein schützt nicht.
+    let early = blocked
+        .open_repair()
+        .expect("control: the sealed Clock path opens");
+    blocked
+        .open_repair()
+        .unwrap()
+        .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+        .expect("the first release for this blocking reference");
+    let (revision, replay) = (blocked.trust_revision(), blocked.replay_rows());
+    assert_eq!(replay, 1);
+    assert_eq!(blocked.clock_audits(), (1, 1));
+    assert_eq!(blocked.presence_signatures(), 1);
+
+    let reopened = blocked.open_repair();
+    assert_eq!(
+        reopened.err().map(|error| error.code()),
+        Some("EA-SKEW-ALREADY-RELEASED"),
+        "the same blocking reference and head cannot be released twice"
+    );
+    let refused = early
+        .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+        .err()
+        .expect("a runtime opened before the first release must refuse too");
+    assert_eq!(refused.code(), "EA-SKEW-ALREADY-RELEASED");
+    assert_eq!(blocked.presence_signatures(), 1, "no second presence");
+    assert_eq!(blocked.clock_audits(), (1, 1), "no second audit pair");
+    assert_eq!(blocked.trust_revision(), revision, "no second consume");
+    assert_eq!(blocked.replay_rows(), replay);
+    blocked.assert_ordinary_future_skew("after the refused repeated release");
+
+    // Gegenprobe: eine neue, weiterhin zu alte signierte Referenz ist eine
+    // echte neue Sperrsituation und genau einmal freigebbar.
+    let mut store = blocked.store.clone();
+    persist_reference(
+        &blocked.installation,
+        &mut store,
+        blocked.key,
+        &blocked.reference,
+        UnixMillis::new(blocked.accepted.get() + 1_000),
+    );
+    blocked.assert_ordinary_future_skew("a new but still too old reference");
+    let revision = blocked.trust_revision();
+    blocked
+        .open_repair()
+        .expect("a new blocking reference opens the Clock path again")
+        .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+        .expect("a new blocking reference is released exactly once");
+    assert!(blocked.trust_revision() > revision, "exactly one new consume");
+    assert_eq!(blocked.replay_rows(), 2);
+    assert_eq!(blocked.clock_audits(), (2, 2));
+    assert_eq!(blocked.presence_signatures(), 2);
+    blocked.assert_ordinary_future_skew("after the release of the new reference");
+    assert_eq!(
+        blocked.open_repair().err().map(|error| error.code()),
+        Some("EA-SKEW-ALREADY-RELEASED"),
+        "the new reference is spent as well"
+    );
+    assert_eq!(blocked.presence_signatures(), 2);
+    assert_eq!(blocked.clock_audits(), (2, 2));
+}
+
+/// Übergangszweig (P3-3): der Kandidat ist ein neuerer Head als der gepinnte.
+/// Nur hier verändert der Consume den Pin (`advance_head`); der Floor darf
+/// dabei nur steigen — in dieser Fixture liegt der neue Head nicht nach dem
+/// bestehenden Floor, er bleibt also gleich. Die Freigabe bleibt einmalig und
+/// öffnet die normale Zulassung nicht.
+#[test]
+fn native_clock_repair_transition_to_a_newer_head_advances_pin_once_and_keeps_future_skew() {
+    let mut blocked = BlockedInstallation::new();
+    let before = blocked.store.clone().load(blocked.key).unwrap();
+    let pin = *before.pinned_head().unwrap();
+    assert_eq!(pin.registry_head_hash().as_bytes(), blocked.reference.head.as_bytes());
+    let (head, objects) = blocked.next_head(ActionSpec::Device {
+        kind: ea_format::CertificateKindV1::Reader,
+        marker: 0x7c,
+        effective_from: Some(1),
+    });
+    blocked.publish(&objects);
+    blocked.assert_ordinary_future_skew("a newer head does not correct the clock");
+    assert_eq!(
+        blocked.trust_revision(),
+        before.revision(),
+        "control: nothing pinned the newer head yet"
+    );
+    blocked
+        .open_repair()
+        .expect("the Clock path opens for the newer candidate head")
+        .release(ea_format::ClockReleaseJustificationV1::OperatorVerifiedWallClock)
+        .expect("exactly one release selects the newer head");
+    let after = blocked.store.clone().load(blocked.key).unwrap();
+    let advanced = *after.pinned_head().unwrap();
+    assert!(after.revision() > before.revision(), "exactly one consume");
+    assert_eq!(advanced.registry_version(), head.version, "pin moved to the candidate");
+    assert!(advanced.registry_head_hash() == head.object_hash);
+    assert!(advanced.registry_version() > pin.registry_version());
+    assert!(
+        after.trusted_time().floor() >= before.trusted_time().floor(),
+        "the floor never falls"
+    );
+    assert!(
+        after.trusted_time().independent_reference()
+            == before.trusted_time().independent_reference(),
+        "the blocking reference is unchanged"
+    );
+    assert_eq!(blocked.replay_rows(), 1);
+    assert_eq!(blocked.clock_audits(), (1, 1));
+    blocked.assert_ordinary_future_skew("after the transition release");
+    assert_eq!(
+        blocked.open_repair().err().map(|error| error.code()),
+        Some("EA-SKEW-ALREADY-RELEASED"),
+        "the newly pinned head with the same reference is spent"
+    );
+    assert_eq!(blocked.presence_signatures(), 1);
 }
