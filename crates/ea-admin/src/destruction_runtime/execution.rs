@@ -86,7 +86,7 @@ impl DestructionRuntime {
         })?;
         self.status_saved(&saved.auth)
     }
-    fn with_started(
+    pub(super) fn with_started(
         &self,
         saved: &super::status::SavedDestruction,
         delivery: NativeDestructionDelivery<'_>,
