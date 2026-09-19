@@ -280,3 +280,201 @@ fn recovery_admin_login_is_signed_by_its_own_admin_certificate() {
             == certificate_hash(admin.certificate)
     );
 }
+
+/// Die Klartextmerkmale eines gespeicherten Bedienerprofils: Anzeigename,
+/// Funktionsbezeichnung und Profil-Salt, GELESEN aus der Profiltabelle und
+/// nicht abgeschrieben — der Zeuge sucht nach dem, was wirklich gespeichert ist.
+fn stored_profile_canaries(database: &ea_local_store::EncryptedDatabase) -> Vec<Vec<u8>> {
+    let row = database
+        .query_row(
+            "SELECT display_name, function_label, profile_commitment_salt FROM operator_profile",
+            &[],
+        )
+        .unwrap()
+        .expect("das Bedienerprofil ist gespeichert");
+    vec![
+        row.text(0).unwrap().as_bytes().to_vec(),
+        row.text(1).unwrap().as_bytes().to_vec(),
+        row.blob(2).unwrap().to_vec(),
+    ]
+}
+
+/// Findet `canary` roh oder hexkodiert (klein und groß) in `bytes`?
+fn leaks(bytes: &[u8], canary: &[u8]) -> bool {
+    assert!(
+        !canary.is_empty(),
+        "ein leerer Kanarienvogel bezeugt nichts"
+    );
+    let lower = hex::encode(canary);
+    let upper = lower.to_uppercase();
+    ea_testkit::contains_canary(bytes, canary)
+        || ea_testkit::contains_canary(bytes, lower.as_bytes())
+        || ea_testkit::contains_canary(bytes, upper.as_bytes())
+}
+
+/// AK 53, Widerruf: das Widerrufsaudit ist signiert und KLARTEXTFREI.
+///
+/// Kanarien sind Anzeigename, Funktionsbezeichnung und Profil-Salt BEIDER
+/// Bedienerinnen — der handelnden und der widerrufenen — sowie beider
+/// Kontokennungen. Eine Klarkontokennung (Benutzername, UID) erreicht
+/// `ea-admin` in dieser Fixture gar nicht; die einzige Kontokennung ist der
+/// `os_account_binding_hash`, und der wird deshalb gesucht.
+///
+/// GEGENPROBE gegen Leerlauf: dieselbe Suche FINDET den Bindungshash der
+/// handelnden Bedienerin in derselben Zeile — der Heuhaufen ist also wirklich
+/// die Auditzeile, und die Suche trifft, was dort steht.
+#[test]
+fn the_revocation_audit_carries_no_operator_plaintext() {
+    let h = Harness::new();
+    let head = h.head();
+    let audit = h.audit(&head, 0);
+    let target = database("revocation-canary-target");
+    let native = Native::new();
+    let mut authorization = h.authorization();
+    let salt: [u8; 32] = std::array::from_fn(|index| 0xa5 ^ (index as u8).wrapping_mul(29));
+    let prepared = h
+        .provision(
+            &head,
+            &audit,
+            &target.database,
+            &native,
+            &Identity {
+                salt: Some(salt),
+                ..Identity::valid()
+            },
+            &mut authorization,
+        )
+        .unwrap();
+    let active = authorization.activate(&prepared);
+    let audit = h.audit(&active, 0);
+    h.revoke(
+        &active,
+        audit.service(),
+        prepared.binding_object_hash(),
+        &mut authorization,
+    )
+    .unwrap();
+
+    let mut canaries = stored_profile_canaries(&h.database);
+    let revoked = stored_profile_canaries(&target.database);
+    assert!(
+        revoked[2] == salt,
+        "das Salt der widerrufenen Bedienerin ist das gesetzte"
+    );
+    canaries.extend(revoked);
+    canaries.push(h.account.hash.as_bytes().to_vec());
+    canaries.push(native.account.borrow().hash.as_bytes().to_vec());
+
+    let rows = audit.booked();
+    let revocations: Vec<_> = rows
+        .iter()
+        .filter(|bytes| {
+            matches!(
+                decode_local_audit_event(bytes).unwrap().action(),
+                LocalAuditActionV1::Revocation(_)
+            )
+        })
+        .collect();
+    assert_eq!(revocations.len(), 1);
+    assert!(signature_verifies(
+        revocations[0],
+        &active,
+        SignerRole::Writer
+    ));
+    assert!(
+        leaks(revocations[0], h.binding.as_bytes()),
+        "Gegenprobe: die Suche findet, was in der Zeile steht"
+    );
+    for bytes in &rows {
+        for canary in &canaries {
+            assert!(
+                !leaks(bytes, canary),
+                "eine Auditzeile des Widerrufs trägt Klartext: {}",
+                hex::encode(canary)
+            );
+        }
+    }
+}
+
+/// AK 53, abgelaufene Sitzung: ein Nachweis, dessen Fünf-Minuten-Sitzung
+/// abgelaufen ist, wird abgewiesen — und die Abweisung ist als signiertes,
+/// klartextfreies Auditereignis gebucht.
+///
+/// Der Nachweis entsteht am gewählten Kopf zur Fixture-Zeit und wird am
+/// SELBEN Kopf vorgelegt, dessen vertraute Zeit um genau
+/// `MAX_INACTIVITY_MS` weitergerückt ist. Vorgelegt wird er dort, wo ein
+/// mitgebrachter Nachweis tatsächlich gegen die Zeit geprüft wird: an der
+/// Wurzelzeremonie (`RootCeremonyService::publish_authorized_target`).
+#[test]
+#[ignore = "DRK-282: planned RED; eine abgelaufene Operator-Sitzung wird abgelehnt, aber nicht auditiert (Spec 2169; root_ceremony.rs:279, operator_runtime.rs validate_freshness) — Produktentscheidung offen"]
+fn an_expired_operator_session_is_refused_and_audited_without_plaintext() {
+    use ea_operator::{MAX_INACTIVITY_MS, ReauthPurpose};
+    use support::{
+        AuditHarness, FIXTURE_NOW_MS, FixtureKeyProvider, LAST_HEAD, PROPOSED_SEQUENCE,
+        PersistentStore, ReplayTable, ceremony_line, ceremony_proof, ceremony_service,
+        selected_head, selected_head_at_time,
+    };
+
+    let ceremony = ceremony_line();
+    let opened = selected_head(&ceremony.line);
+    let proof = ceremony_proof(&ceremony, &opened, ReauthPurpose::AdminRootCeremony);
+    assert!(
+        proof.is_valid_for(
+            ReauthPurpose::AdminRootCeremony,
+            opened.preexisting_effective_now()
+        ),
+        "Vorbedingung: beim Öffnen ist die Sitzung gültig"
+    );
+    let head = selected_head_at_time(
+        &ceremony.line,
+        LAST_HEAD,
+        PROPOSED_SEQUENCE,
+        FIXTURE_NOW_MS + MAX_INACTIVITY_MS,
+    );
+    assert!(
+        !proof.is_valid_for(
+            ReauthPurpose::AdminRootCeremony,
+            head.preexisting_effective_now()
+        ),
+        "Vorbedingung: fünf Minuten später ist dieselbe Sitzung abgelaufen"
+    );
+
+    let intent = ceremony.intent(&head);
+    let provider = FixtureKeyProvider::root();
+    let audit = AuditHarness::with_provider(
+        &head,
+        ceremony.writer_certificate_object_hash,
+        0,
+        FixtureKeyProvider::device(),
+    );
+    let service = ceremony_service(&head, &provider, &audit, &ceremony);
+    let table = std::sync::Arc::new(std::sync::Mutex::new(ReplayTable::default()));
+    let mut store = PersistentStore::open(&table);
+    let authorization_bytes = ceremony.authorization_bytes().to_vec();
+    let error = service
+        .publish_authorized_target(
+            &intent,
+            ceremony.target_payload(),
+            &authorization_bytes,
+            &mut store,
+            &proof,
+        )
+        .err()
+        .expect("eine abgelaufene Sitzung autorisiert keine Zeremonie");
+    assert_eq!(error.code(), "EA-CEREMONY-REAUTH-MISMATCH");
+    assert_eq!(provider.signatures_produced(), 0);
+
+    // DIE ZUSAGE: die Abweisung ist gebucht.
+    let rows = audit.booked();
+    assert!(
+        !rows.is_empty(),
+        "AK 53: eine abgelaufene Sitzung wird auditiert — gebucht wurde nichts"
+    );
+    // Die einzige Kontokennung der Fixture ist der `os_account_binding_hash`
+    // der Bindung: `hash32(BINDING_MARKER + 2)` (`support::operator_proof`).
+    let account = support::trust_support::hash32(0x71 + 2);
+    for bytes in &rows {
+        assert!(signature_verifies(bytes, &head, SignerRole::Writer));
+        assert!(!leaks(bytes, account.as_bytes()));
+    }
+}

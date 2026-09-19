@@ -398,9 +398,26 @@ pub fn selected_head_at(
     head_index: usize,
     proposed_sequence: u64,
 ) -> SelectedRegistryHead {
+    selected_head_at_time(line, head_index, proposed_sequence, FIXTURE_NOW_MS)
+}
+
+/// Wie [`selected_head_at`], aber zur vertrauten Zeit `now_ms` statt
+/// [`FIXTURE_NOW_MS`] — für Zeugen, die einen Nachweis an einem SPÄTEREN
+/// Stand desselben Kopfes vorlegen.
+///
+/// # Panics
+///
+/// Wenn die Fixture diesen Kopf zu dieser Zeit nicht wählt.
+#[must_use]
+pub fn selected_head_at_time(
+    line: &RegistryLineBuilder,
+    head_index: usize,
+    proposed_sequence: u64,
+    now_ms: i64,
+) -> SelectedRegistryHead {
     let head = line.heads()[head_index];
     let key = trust_support::state_key();
-    let trusted_time = TrustedTimeState::initial(UnixMillis::new(FIXTURE_NOW_MS));
+    let trusted_time = TrustedTimeState::initial(UnixMillis::new(now_ms));
     let trust = line.verified_with_record(Pin::Head(head_index), 17, trusted_time.clone(), key);
     let candidate = verify_registry_candidate(&trust, ChainSequence::new(proposed_sequence))
         .expect("der Kandidat der Fixture muss verifizieren");
@@ -410,9 +427,8 @@ pub fn selected_head_at(
         trusted_time,
         pinned_head: RegistryHeadPin::new(head.version, head.object_hash),
     };
-    let local_time =
-        prepare_local_time(&mut store, &candidate, UnixMillis::new(FIXTURE_NOW_MS), &[])
-            .expect("die lokale Zeit der Fixture muss vorbereitbar sein");
+    let local_time = prepare_local_time(&mut store, &candidate, UnixMillis::new(now_ms), &[])
+        .expect("die lokale Zeit der Fixture muss vorbereitbar sein");
     let RegistrySelectionOutcome::Selected(selected) =
         select_registry_head(candidate, local_time, None)
             .expect("die Auswahl der Fixture muss gelingen")
