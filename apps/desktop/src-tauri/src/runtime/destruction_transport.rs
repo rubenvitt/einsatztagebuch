@@ -212,6 +212,17 @@ impl NativeDestructionServerTransport {
         if saved.state == ea_destruction::DestructionState::Requested {
             return Err(Error::CausalHistory);
         }
+        if super::destruction::retry_job(&saved)?.is_some() {
+            // Ruling G2 (Review M1): the permanent Reader refusal is decided
+            // locally, before any server contact, so an unreachable server
+            // cannot hide it behind a transport code. Grants nothing.
+            phase!("retry-local.begin");
+            let retained = {
+                let context = native.prepare_server_exchange(id, hash)?;
+                retained_event(&context)?
+            };
+            native.refuse_reader_retry_locally(id, hash, retained)?;
+        }
         phase!("prepare-1.begin");
         let context = native.prepare_server_exchange(id, hash)?;
         phase!("admit-1.begin");
@@ -326,11 +337,7 @@ impl NativeDestructionServerTransport {
     ) -> Result<NativeDestructionStatus, Error> {
         let context = native.prepare_server_exchange(id, expected_preflight_hash)?;
         self.admit(&context)?;
-        let retained = context
-            .events()?
-            .last()
-            .map(|event| event.0)
-            .ok_or(Error::CausalHistory)?;
+        let retained = retained_event(&context)?;
         let mut barrier = Reservation {
             transport: self,
             context: &context,
@@ -654,6 +661,14 @@ impl NativeDestructionServerTransport {
         native.unlock()?;
         Ok(native.status(context.destruction_id())?)
     }
+}
+/// The retained 1/2→4 original: the last event of the admitted history.
+fn retained_event(context: &NativeDestructionExchange) -> Result<ObjectHash, Error> {
+    context
+        .events()?
+        .last()
+        .map(|event| event.0)
+        .ok_or(Error::CausalHistory)
 }
 struct Reservation<'a> {
     transport: &'a NativeDestructionServerTransport,

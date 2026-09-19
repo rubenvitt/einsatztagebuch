@@ -21,9 +21,9 @@ const [REQUESTED, , , COMPLETE, INCOMPLETE] = DESTRUCTION_STATE_V1_VALUES
  * no-op. The code stays visible; the host decides, this text grants nothing.
  */
 const RESUME_REFUSAL_TEXT: Readonly<Record<string, string>> = {
-  'EA-DESTRUCTION-RETRY-READER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt als unvollständig abgeschlossen.',
+  'EA-DESTRUCTION-RETRY-READER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt im Status „bekannte Replik nicht erreichbar“.',
   'EA-DESTRUCTION-RETRY-DUTY-OPEN': 'Der Vorgang kann noch nicht fortgesetzt werden: Mindestens eine Replik hat die Löschung noch nicht bestätigt. Gleichen Sie die Servernachweise ab und setzen Sie später erneut fort.',
-  'EA-DESTRUCTION-RETRY-NO-SERVER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Sync-Server als Löschort gebunden oder in dieser Anwendung eingerichtet. Ohne nachträgliche Serverbestätigung bleibt der Vorgang als unvollständig abgeschlossen.',
+  'EA-DESTRUCTION-RETRY-NO-SERVER-DUTY': 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Server als Löschort hinterlegt, oder in dieser Anwendung ist kein Sync-Server eingerichtet. Ohne nachträgliche Serverbestätigung bleibt er im Status „bekannte Replik nicht erreichbar“.',
 }
 
 /** The selected signed file is passed unchanged; parsing and fresh presence live in the host. */
@@ -392,7 +392,7 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
               closeFinal()
               void run(() => bridge.markIncomplete(destructionId, jobHash), true)
             }}>
-              Unvollständigen Abschluss signieren
+              Als unvollständig abschließen
             </Button>,
           ]}
         >
@@ -400,13 +400,16 @@ export function DestructionWizard({ bridge, evidenceBridge, readerDeliveryBridge
             Mindestens eine bekannte Replik hat keine gültige Attestierung, oder eine attestierte Backup-Frist ist abgelaufen. Die Anwendung signiert dafür den Status „bekannte Replik nicht erreichbar“.
           </Typography.Paragraph>
           <Typography.Paragraph>
-            Für nicht erreichbare Lesegeräte ist dieser Schritt endgültig: Später eingehende Nachweise ändern diesen Status nicht mehr. Fehlen nur Bestätigungen von Sync-Servern, lässt sich der Vorgang mit „Vernichtung fortsetzen“ wieder aufnehmen, sobald alle Löschungen bestätigt sind. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.
+            Für nicht erreichbare Lesegeräte ist dieser Schritt endgültig: Später eingehende Nachweise ändern diesen Status nicht mehr. Fehlen nur Bestätigungen von Sync-Servern, lässt sich der Vorgang mit „Vernichtung fortsetzen“ wieder aufnehmen, sobald alle Löschungen bestätigt sind.
+          </Typography.Paragraph>
+          <Typography.Paragraph>
+            Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.
           </Typography.Paragraph>
           <Typography.Paragraph>
             Der Abschluss bestätigt keine Löschung auf den betroffenen Repliken.
           </Typography.Paragraph>
           <Checkbox checked={finalConfirmed} disabled={busy} onChange={(event) => { setFinalConfirmed(event.target.checked) }}>
-            Ich habe verstanden, dass dieser Abschluss für nicht erreichbare Lesegeräte endgültig ist.
+            Ich habe verstanden, dass dieser Abschluss keine Löschung bestätigt und für nicht erreichbare Lesegeräte endgültig ist.
           </Checkbox>
         </Modal>
         )}

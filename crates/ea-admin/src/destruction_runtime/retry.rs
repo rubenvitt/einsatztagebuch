@@ -91,6 +91,28 @@ impl DestructionRuntime {
             before_sign,
         )
     }
+    /// Local-only pre-decision of `resume_incomplete_progress` for a host that
+    /// must re-contact its servers first (Ruling G2): the same Reader check the
+    /// retry runs before any network read, without delivery, reservation,
+    /// signature, audit or append. `Err(RETRY-READER-DUTY)` is the permanent
+    /// Reader refusal; `Ok(())` grants nothing, the retry itself re-decides.
+    pub fn refuse_reader_retry_locally(
+        &mut self,
+        id: DestructionId,
+        expected_preflight_hash: ObjectHash,
+        retained_incomplete_event: ObjectHash,
+    ) -> Result<(), Error> {
+        self.unlock()?;
+        let saved = self.read_saved(id)?;
+        let job = saved.job.as_ref().ok_or(DestructionError::Storage)?;
+        if job.job_hash() != expected_preflight_hash {
+            return Err(DestructionError::SecurityConflict.into());
+        }
+        if self.local_reader_refusal(&saved, retained_incomplete_event) {
+            return Err(Error::RetryReaderDuty);
+        }
+        Ok(())
+    }
     fn resume_incomplete_impl(
         &mut self,
         id: DestructionId,
