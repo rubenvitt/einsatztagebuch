@@ -23,9 +23,9 @@ use ea_types::{CertificateHash, ChainSequence, UnixMillis};
 
 use support::{
     AFTER_REVOCATION_SEQUENCE, AuditHarness, EARLIER_HEAD, EARLIER_SEQUENCE, FixtureKeyProvider,
-    LAST_HEAD, PROPOSED_SEQUENCE, PersistentStore, ReplayTable, ceremony_line, ceremony_proof,
-    ceremony_service, ceremony_service_for, ceremony_service_under_root, second_operator_proof,
-    selected_head, selected_head_at, trust_support, verified,
+    LAST_HEAD, PROPOSED_SEQUENCE, PersistentStore, ReplayTable, ceremony_line, ceremony_line_for,
+    ceremony_proof, ceremony_service, ceremony_service_for, ceremony_service_under_root,
+    second_operator_proof, selected_head, selected_head_at, trust_support, verified,
 };
 use trust_support::{ActionSpec, HeadOptions, Pin, RegistryLineBuilder};
 
@@ -228,6 +228,69 @@ fn a_payload_whose_core_is_not_the_authorized_one_never_reaches_the_key_port() {
         "ein Abbruch vor der Signatur bucht keine Zeile"
     );
     assert_untouched(&table);
+}
+
+/// Selbstrotation: die Administratorin, die die Autorisierung signiert, stellt
+/// sich selbst ein neues Administratorzertifikat aus.
+///
+/// Die Linie signiert jede Autorisierung als die erste Bootstrap-
+/// Administratorin (Subjekt `0x41`, `AuthorizationSigner::InitialAdmin`). Ein
+/// `AdminIssue` mit Marke `0x41` traegt dasselbe `authority_subject_id` —
+/// neuer Schlüssel, neues Gerät, dieselbe Person. Genau diesen Fall nennt der
+/// Unittest „a distinct certificate/key/device cannot hide the same Admin
+/// person" in `crates/ea-trust/src/admin_authorization.rs`.
+///
+/// DER SCHLÜSSELPORT IST KONSTRUKTIV UNERREICHBAR: ohne
+/// `VerifiedAdminAuthorizationIntent` lässt sich `publish_authorized_target`
+/// gar nicht aufrufen. Die Zählerprüfung am Ende belegt nur zusätzlich, dass
+/// der aufgebaute Dienst nicht angefasst wurde.
+#[test]
+fn a_self_rotation_of_the_signing_admin_never_reaches_the_key_port() {
+    // Gegenprobe zuerst: dieselbe Autorisierung für die ZWEITE
+    // Bootstrap-Administratorin (Subjekt `0x42`) trägt. Scheiterte schon sie,
+    // bewiese die Selbstrotation unten nichts über die Selbstprüfung.
+    let other = ceremony_line_for(&|_, _| ActionSpec::AdminIssue {
+        marker: 0x42,
+        effective_from: None,
+    });
+    let other_head = selected_head(&other.line);
+    verify_intended_trust_target(
+        &verified(&other.line),
+        Some(&other_head),
+        &other.target_payload,
+        USE_TIME,
+        other_head.proposed_sequence(),
+    )
+    .expect("die Rotation einer ANDEREN Administratorin ist autorisierbar");
+
+    let ceremony = ceremony_line_for(&|_, _| ActionSpec::AdminIssue {
+        marker: 0x41,
+        effective_from: None,
+    });
+    let head = selected_head(&ceremony.line);
+    let provider = FixtureKeyProvider::root();
+    let audit = AuditHarness::new(&head, ceremony.writer_certificate_object_hash, 0);
+    let _service = ceremony_service(&head, &provider, &audit, &ceremony);
+
+    let error = verify_intended_trust_target(
+        &verified(&ceremony.line),
+        Some(&head),
+        &ceremony.target_payload,
+        USE_TIME,
+        head.proposed_sequence(),
+    )
+    .err()
+    .expect("eine Administratorin autorisiert nie die Rotation ihrer selbst");
+    expect_trust_code(error, "EA-TRUST-SELF-AUTHORIZATION");
+    assert_eq!(
+        provider.signatures_produced(),
+        0,
+        "der Schluesselport wurde gar nicht erst gefragt"
+    );
+    assert!(
+        audit.booked().is_empty(),
+        "ohne Beweiszustand entsteht keine Zeremonie und keine Auditzeile"
+    );
 }
 
 /// Die Nutzlast einer FREMDEN Linie mit demselben Subtyp.

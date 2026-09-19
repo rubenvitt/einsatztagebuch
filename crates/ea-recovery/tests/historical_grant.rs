@@ -416,3 +416,112 @@ fn a_valid_current_authorization_regrants_an_entry_whose_original_registry_lease
     );
     assert!(report.is_fully_verified(), "{report:?}");
 }
+
+/// AK 12, die NEGATIVE Hälfte: ein neuer Reader ohne vergangenen Zugriff
+/// öffnet den ausgewählten alten Eintrag erst NACH dem Recovery-Re-Grant.
+///
+/// „Öffnen" ist hier die Empfängerstufe von `ea_verify::verify_archive` mit
+/// dem Schlüssel des neuen Readers — dieselbe, die
+/// `issuance_rewraps_the_original_cek_and_commits_signed_audit_before_release`
+/// für die positive Hälfte benutzt: Sie verifiziert den eigenen Grant und
+/// entschlüsselt dahinter den Eintrag (`GateObserver::on_decapsulation`).
+///
+/// KEIN FEHLERCODE, UND DAS IST GEMESSEN: Ein fehlender eigener Grant ist
+/// nach `crates/ea-verify/src/archive.rs` („FEHLENDER GRANT ist kein Befund")
+/// kein Befund. Fail-closed heißt hier: kein Grant im Bericht, keine
+/// Entkapselung, kein Entschlüsselungsbefund — der Eintrag selbst bleibt
+/// gültig und sichtbar.
+#[test]
+fn a_new_reader_opens_the_selected_old_entry_only_after_the_recovery_regrant() {
+    struct Decapsulations(usize);
+    impl ea_verify::GateObserver for Decapsulations {
+        fn on_gate(&mut self, _: ea_verify::Gate) {}
+        fn on_decapsulation(&mut self) {
+            self.0 += 1;
+        }
+    }
+    let h = Harness::new(fixture::historical::fixture(fixture::COMPLETE_PLAINTEXT_V1));
+    let f = &h.fixture;
+    let stored = h.root.path().join("archive/entries/000000000000_entry.eip");
+    let entry_object = object_hash(&f.entry_bytes);
+    let reader = fixture::other_recipient_private_key();
+    let open_as_new_reader = |archive: &fixture::archive_support::ArchiveFixture| {
+        let mut observer = Decapsulations(0);
+        let report = ea_verify::verify_archive_observed(
+            archive,
+            &f.anchor,
+            ea_verify::VerifyOptions::new(ea_types::UnixMillis::new(800))
+                .with_recipient(fixture::other_recipient_key_thumbprint(), &reader),
+            &mut observer,
+        )
+        .unwrap();
+        (report, observer.0)
+    };
+    let auth =
+        ea_trust::verify_grant_authorization(&f.authorization(800), &f.selected(1, 800, 800))
+            .unwrap();
+    // Derselbe Bestand vorher und nachher, bis auf GENAU den neuen Grant.
+    let mut before = fixture::archive_support::ArchiveFixture::new();
+    for (path, bytes) in f.fixture.blobs() {
+        before.push_exact_bytes(path, bytes.clone());
+    }
+    before.push_exact_bytes("trust/authorization.etb", auth.exact_bytes().to_vec());
+
+    // VORHER: kein eigener Grant, keine Entkapselung — der Eintrag bleibt aber
+    // gültig; es scheitert das Öffnen und nicht die Verifikation.
+    assert_eq!(std::fs::read(&stored).unwrap(), f.entry_bytes);
+    let (report, decapsulations) = open_as_new_reader(&before);
+    assert!(
+        report
+            .recipient_grants()
+            .all(|(entry, _, _)| entry != f.entry_hash),
+        "vor dem Re-Grant hat der neue Reader KEINEN Grant auf den alten Eintrag"
+    );
+    assert_eq!(report.recipient_grants().count(), 0);
+    assert_eq!(
+        decapsulations, 0,
+        "vor dem Re-Grant wird für den neuen Reader nichts entkapselt"
+    );
+    assert!(report.is_fully_verified(), "{report:?}");
+    assert!(
+        report
+            .object_results()
+            .any(|result| result.object_hash() == entry_object
+                && result.object_type() == ea_verify::ObjectTypeV1::Entry
+                && result.result() == ea_verify::ObjectResultKindV1::Valid),
+        "der alte Eintrag bleibt gültig und sichtbar: {report:?}"
+    );
+    assert_eq!(report.decryption_errors().len(), 0);
+
+    // Der Recovery-Re-Grant über den echten Ausstellungsdienst.
+    let grant = h
+        .create(&auth)
+        .expect("die gültige Zeremonie stellt den Re-Grant aus");
+    let grant_object = object_hash(grant.as_bytes());
+    let mut after = before;
+    after.push_object("grants/historical.eag", grant);
+
+    // NACHHER: genau dieser Grant öffnet genau diesen Eintrag.
+    let (report, decapsulations) = open_as_new_reader(&after);
+    assert!(report.is_fully_verified(), "{report:?}");
+    let opened: Vec<_> = report.recipient_grants().collect();
+    assert_eq!(opened.len(), 1, "{report:?}");
+    assert!(opened[0].0 == f.entry_hash);
+    assert!(opened[0].1 == grant_object);
+    assert!(
+        opened[0].2.is_some(),
+        "ein historischer Grant trägt sein Ablaufdatum"
+    );
+    assert_eq!(decapsulations, 1, "nach dem Re-Grant wird entkapselt");
+    assert_eq!(report.decryption_errors().len(), 0);
+
+    // Die gespeicherten Eintragsbytes sind vorher und nachher dieselben.
+    assert_eq!(std::fs::read(&stored).unwrap(), f.entry_bytes);
+    assert!(
+        report
+            .object_results()
+            .any(|result| result.object_hash() == entry_object
+                && result.result() == ea_verify::ObjectResultKindV1::Valid),
+        "derselbe Eintrag, dieselben Bytes: {report:?}"
+    );
+}
