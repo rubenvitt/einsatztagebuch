@@ -396,6 +396,10 @@ fn native_retry_refuses_an_open_server_duty_missing_server_and_failed_reservatio
         )
     });
     assert!(port.calls > calls, "the actual reservation was read first");
+    // Not a Reader case: the local pre-decision grants nothing and refuses nothing.
+    let audits = failure::count(&db, "local_audit_event");
+    assert!(runtime.refuse_reader_retry_locally(id, job, retained).is_ok());
+    assert_eq!(failure::count(&db, "local_audit_event"), audits);
     // Import the missing Server original; the refusals below are not about it.
     let server = server_claim(&f, &db, |_| {});
     runtime.import_signed_progress(id, job, &[server]).unwrap();
@@ -486,6 +490,12 @@ fn native_retry_refuses_when_the_open_duty_was_a_reader() {
         )
     });
     assert_eq!(down.calls, 0, "refused locally before any server read");
+    // The same local pre-decision alone, for a host that re-contacts servers first.
+    refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
+        runtime
+            .refuse_reader_retry_locally(id, job, retained)
+            .map(|()| runtime.status(id).unwrap())
+    });
     refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
         runtime.resume_incomplete_progress(
             id,
@@ -512,6 +522,11 @@ fn native_retry_refuses_when_the_open_duty_was_a_reader() {
         )
     });
     assert_eq!(down.calls, 0, "late Reader original: still refused locally");
+    refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
+        runtime
+            .refuse_reader_retry_locally(id, job, retained)
+            .map(|()| runtime.status(id).unwrap())
+    });
     refuses_without_append(&db, "EA-DESTRUCTION-RETRY-READER-DUTY", || {
         runtime.resume_incomplete_progress(
             id,
@@ -771,4 +786,92 @@ fn wait_marker(path: &Path) {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+/// The shared test CA as exact PEM text, without loading the server test
+/// harness a second time (it is already a module of `transport::server`).
+/// Nothing listens at the witness address, so no handshake ever uses it.
+#[cfg(feature = "desktop-fixture")]
+fn test_ca_pem() -> &'static str {
+    const SOURCE: &str = include_str!("../../../server/tests/common/mod.rs");
+    const END: &str = "-----END CERTIFICATE-----";
+    let start = SOURCE.find("-----BEGIN CERTIFICATE-----").unwrap();
+    let end = start + SOURCE[start..].find(END).unwrap() + END.len();
+    &SOURCE[start..end]
+}
+
+/// DRK-319 S3 (Review M1): the desktop host transport refuses a Reader case
+/// with its permanent explanation BEFORE any network access. With the only
+/// registered server unreachable, Resume in state4 answers RETRY-READER-DUTY,
+/// not a transport code, and appends nothing.
+#[cfg(feature = "desktop-fixture")]
+#[test]
+fn desktop_resume_refuses_a_reader_case_before_the_unreachable_server() {
+    use ea_desktop::runtime::destruction_transport::{
+        NativeDestructionServerConfig, NativeDestructionServerTransport,
+        NativeDestructionTransportError,
+    };
+    let f = NativeDestructionFixture::with_optional_reader_opfs(true, 3, true);
+    let mut port = StubReservation::new(&f);
+    let Incomplete {
+        mut runtime, id, db, ..
+    } = incomplete(&f, &mut port, |runtime, id, job, db| {
+        let server = server_claim(&f, db, |_| {});
+        runtime.import_signed_progress(id, job, &[server]).unwrap();
+    });
+    let source = ea_recovery::FsArchiveSource::open_committed(&f.archive).unwrap();
+    let inventory = ea_archive::ArchiveInventory::build(&source).unwrap();
+    let (certificate, device) = inventory
+        .trust()
+        .iter()
+        .find_map(|p| {
+            let ea_format::DecodedTrustPayloadV1::AuthorizedDevice(c) =
+                p.value().decoded_payload().ok()?
+            else {
+                return None;
+            };
+            (c.fields().signing_key_thumbprint
+                == Some(public(transport::SERVER_TRANSPORT_SECRET).thumbprint()))
+            .then_some((
+                ea_types::CertificateHash::try_from(p.object_hash().as_bytes().as_slice())
+                    .unwrap(),
+                c.fields().device_id,
+            ))
+        })
+        .unwrap();
+    // A port that was bound once and is closed again: nothing listens there.
+    let address = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let ca_file = f._directory.path().join("unreachable-ca.pem");
+    fs::write(&ca_file, test_ca_pem()).unwrap();
+    let mut transport = NativeDestructionServerTransport::open(
+        vec![NativeDestructionServerConfig {
+            device_id: device,
+            address,
+            server_name: "localhost".into(),
+            authority: format!("localhost:{}", address.port()),
+            ca_file,
+            server_certificate: certificate,
+        }],
+        &f.key_source,
+    )
+    .unwrap();
+    let audits = failure::count(&db, "local_audit_event");
+    let imports = failure::count(&db, "destruction_import_batch");
+    let result = transport.resume(&mut runtime, id);
+    assert!(
+        matches!(
+            result,
+            Err(NativeDestructionTransportError::Native(
+                NativeDestructionError::RetryReaderDuty
+            ))
+        ),
+        "Reader case must be explained before the network: {:?}",
+        result.err().map(|error| error.code())
+    );
+    assert_eq!(failure::count(&db, "local_audit_event"), audits);
+    assert_eq!(failure::count(&db, "destruction_import_batch"), imports);
+    assert_eq!(runtime.status(id).unwrap().state.code(), 4);
 }

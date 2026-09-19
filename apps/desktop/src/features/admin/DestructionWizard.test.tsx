@@ -82,9 +82,9 @@ describe('resuming an incomplete destruction (Ruling G2)', () => {
   })
 
   for (const [code, explanation] of [
-    ['EA-DESTRUCTION-RETRY-READER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt als unvollständig abgeschlossen.'],
+    ['EA-DESTRUCTION-RETRY-READER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Die fehlende Löschbestätigung betrifft ein Lesegerät. Lesegeräte lassen sich in dieser Version nicht erneut anbinden; der Vorgang bleibt im Status „bekannte Replik nicht erreichbar“.'],
     ['EA-DESTRUCTION-RETRY-DUTY-OPEN', 'Der Vorgang kann noch nicht fortgesetzt werden: Mindestens eine Replik hat die Löschung noch nicht bestätigt. Gleichen Sie die Servernachweise ab und setzen Sie später erneut fort.'],
-    ['EA-DESTRUCTION-RETRY-NO-SERVER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Sync-Server als Löschort gebunden oder in dieser Anwendung eingerichtet. Ohne nachträgliche Serverbestätigung bleibt der Vorgang als unvollständig abgeschlossen.'],
+    ['EA-DESTRUCTION-RETRY-NO-SERVER-DUTY', 'Der Vorgang kann nicht fortgesetzt werden: Für ihn ist kein Server als Löschort hinterlegt, oder in dieser Anwendung ist kein Sync-Server eingerichtet. Ohne nachträgliche Serverbestätigung bleibt er im Status „bekannte Replik nicht erreichbar“.'],
   ] as const) {
     it(`explains ${code} in German instead of idling, keeps the code and re-reads the host state`, async () => {
       const host = {
@@ -117,13 +117,27 @@ describe('resuming an incomplete destruction (Ruling G2)', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('EA-DESTRUCTION-TRANSPORT-UNAVAILABLE')
     expect(screen.getByRole('alert')).not.toHaveTextContent('Der Vorgang kann nicht fortgesetzt werden')
   })
+
+  it('re-reads after a failed resume only in state4, where a durable 4→1 may precede the failure', async () => {
+    const host = {
+      ...bridge(view(offered({ state: 'inProgress' }))),
+      resume: vi.fn(async () => { throw { code: 'EA-DESTRUCTION-TRANSPORT-UNAVAILABLE' } }),
+    }
+    const user = userEvent.setup()
+    render(<DestructionWizard bridge={host} />)
+    await user.click(screen.getByRole('button', { name: RESUME }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('EA-DESTRUCTION-TRANSPORT-UNAVAILABLE')
+    await waitFor(() => expect(screen.getByRole('button', { name: RESUME })).toBeEnabled())
+    expect(host.refresh).not.toHaveBeenCalled()
+  })
 })
 
 describe('explicit final incomplete action', () => {
   const ACTION = 'Als unvollständig abschließen'
   // Ruling G3 (19.09.2026): final only for unreachable Readers; a server-bound case resumes later.
-  const CONFIRM = 'Unvollständigen Abschluss signieren'
-  const UNDERSTOOD = 'Ich habe verstanden, dass dieser Abschluss für nicht erreichbare Lesegeräte endgültig ist.'
+  // Controller ruling (S3 review N1): the confirmation repeats the action name.
+  const CONFIRM = 'Als unvollständig abschließen'
+  const UNDERSTOOD = 'Ich habe verstanden, dass dieser Abschluss keine Löschung bestätigt und für nicht erreichbare Lesegeräte endgültig ist.'
 
   it('is offered only when the host view shows a replica without valid attestation or an elapsed deadline', () => {
     const rendered = render(<DestructionWizard bridge={bridge(view(offered()))} />)
@@ -154,7 +168,8 @@ describe('explicit final incomplete action', () => {
     // jsdom keeps the antd enter motion at opacity 0; presence in the dialog is the witness here.
     expect(within(dialog).getByText('Vorgang als unvollständig abschließen?')).toBeInTheDocument()
     expect(within(dialog).getByText('Mindestens eine bekannte Replik hat keine gültige Attestierung, oder eine attestierte Backup-Frist ist abgelaufen. Die Anwendung signiert dafür den Status „bekannte Replik nicht erreichbar“.')).toBeInTheDocument()
-    expect(within(dialog).getByText('Für nicht erreichbare Lesegeräte ist dieser Schritt endgültig: Später eingehende Nachweise ändern diesen Status nicht mehr. Fehlen nur Bestätigungen von Sync-Servern, lässt sich der Vorgang mit „Vernichtung fortsetzen“ wieder aufnehmen, sobald alle Löschungen bestätigt sind. Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Für nicht erreichbare Lesegeräte ist dieser Schritt endgültig: Später eingehende Nachweise ändern diesen Status nicht mehr. Fehlen nur Bestätigungen von Sync-Servern, lässt sich der Vorgang mit „Vernichtung fortsetzen“ wieder aufnehmen, sobald alle Löschungen bestätigt sind.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Importieren oder gleichen Sie vorher alle vorliegenden Nachweise ab.')).toBeInTheDocument()
     expect(dialog).not.toHaveTextContent(/Rückweg|Endgültig als unvollständig/)
     expect(within(dialog).getByText('Der Abschluss bestätigt keine Löschung auf den betroffenen Repliken.')).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: CONFIRM })).toBeDisabled()
