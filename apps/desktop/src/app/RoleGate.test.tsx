@@ -210,16 +210,50 @@ it('exposes no writer or administration surface in apps/web', async () => {
 // Die Ausnahme oben nimmt den NAMEN `ReaderDestructionBridge` aus dem Wortscan.
 // Damit darunter keine neue Faehigkeit einzieht — etwa eine Methode `resume`
 // ohne das Wort „destruction" —, ist ihre Methodenmenge hier festgeschrieben.
+//
+// Gelesen wird der GANZE Typ: der Block bis zur passenden schliessenden
+// Klammer, dahinter darf nichts als das Zeilenende stehen (kein `& Extra`,
+// kein `| Extra`). Jede Zeile auf oberster Ebene muss ein erkanntes Mitglied
+// sein; Schluessel in Anfuehrungszeichen zaehlen wie nackte. Alles andere —
+// Indexsignaturen, Aufrufsignaturen, berechnete Schluessel, Spreads,
+// mehrzeilige Mitglieder — faellt, statt still uebersehen zu werden.
+function readerDestructionBridgeMembers(source: string): string[] {
+  const head = 'export type ReaderDestructionBridge ='
+  const start = source.indexOf(head)
+  expect(start, 'ReaderDestructionBridge type').toBeGreaterThan(-1)
+  expect(source.indexOf(head, start + 1), 'a single ReaderDestructionBridge declaration').toBe(-1)
+  const open = source.indexOf('{', start)
+  expect(source.slice(start + head.length, open).trim(), 'the type is one object literal').toBe('')
+  let depth = 0
+  let close = -1
+  for (let index = open; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '{') depth += 1
+    if (char === '}') depth -= 1
+    if (depth === 0) {
+      close = index
+      break
+    }
+  }
+  expect(close, 'closing brace of ReaderDestructionBridge').toBeGreaterThan(open)
+  const rest = source.slice(close + 1)
+  expect(rest.slice(0, rest.indexOf('\n')).trim(), 'nothing is joined to the type').toMatch(/^;?$/)
+  // Auch nicht auf der Folgezeile: `}\n  & { resume: … }` ist derselbe Typ.
+  expect(rest.replace(/^\s*;?/, '').trimStart(), 'nothing is joined to the type').not.toMatch(/^[&|]/)
+  const members: string[] = []
+  for (const line of source.slice(open + 1, close).split('\n')) {
+    if (line.trim() === '') continue
+    const match = /^\s*(?:readonly\s+)?(['"]?)([A-Za-z_$][\w$]*)\1\??\s*:\s*\(.*\)\s*=>\s*.+$/.exec(line)
+    expect(match, `unrecognized ReaderDestructionBridge member: ${line.trim()}`).not.toBeNull()
+    members.push(match?.[2] ?? '')
+  }
+  return members.sort()
+}
+
 it('pins the methods of the exempted ReaderDestructionBridge', async () => {
   const source = await readFile(
     path.join(webSourceRoot, 'features/destruction/reader-destruction.ts'),
     'utf8',
   )
-  const start = source.indexOf('export type ReaderDestructionBridge = {')
-  expect(start, 'ReaderDestructionBridge type block').toBeGreaterThan(-1)
-  const block = source.slice(start, source.indexOf('\n}', start))
-  const methods = [...block.matchAll(/^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\??\s*[:(]/gm)]
-    .map((match) => match[1])
-    .sort()
-  expect(methods).toEqual(['apply', 'attest', 'historical'])
+  expect(readerDestructionBridgeMembers(source)).toEqual(['apply', 'attest', 'historical'])
 })

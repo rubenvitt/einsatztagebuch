@@ -122,9 +122,10 @@ fn every_wasm_bindgen_export_sits_behind_the_wasm32_cfg() {
     for path in &sources {
         // Die qualifizierte Form wird auf die kurze zurueckgefuehrt, damit
         // GENAU EIN Muster gesucht wird und keine Schreibweise durchrutscht.
-        let source = fs::read_to_string(path)
-            .expect("bridge sources must be readable")
-            .replace("#[wasm_bindgen::prelude::wasm_bindgen", "#[wasm_bindgen");
+        // Jede andere Form (etwa `cfg_attr`) wird vorher rot (DRK-321, M3).
+        let raw = fs::read_to_string(path).expect("bridge sources must be readable");
+        assert_only_recognized_wasm_bindgen_forms(&raw, path);
+        let source = raw.replace("#[wasm_bindgen::prelude::wasm_bindgen", "#[wasm_bindgen");
         for (index, _) in source.match_indices("#[wasm_bindgen") {
             // `#[wasm_bindgen_test]` ist kein Export und wird nicht gezaehlt.
             if source[index..].starts_with("#[wasm_bindgen_test") {
@@ -249,6 +250,85 @@ const WASM_EXPORTS: &[(&str, Capability)] = &[
     ("readerVaultUnlock", Capability::Vault),
 ];
 
+/// DRK-321 (Fixrunde, M3): jedes Vorkommen des Bezeichners `wasm_bindgen`
+/// ausserhalb von Kommentarzeilen muss eine der zwei Formen sein, die die
+/// Scanner lesen koennen:
+/// - `#[wasm_bindgen` als Attribut direkt hinter `#[` (die Exportform), oder
+/// - ein Pfadanfang `wasm_bindgen::…`, der selbst nicht hinter `::` steht
+///   (`use wasm_bindgen::prelude::*;`, `wasm_bindgen::JsValue`).
+///
+/// Damit wird jede andere Form rot, statt still am Scan vorbeizugehen:
+/// `#[cfg_attr(…, wasm_bindgen(js_name = …))]`, ein Alias
+/// `use wasm_bindgen::prelude::wasm_bindgen as wb;` oder `use wasm_bindgen as w;`,
+/// `extern crate wasm_bindgen`. `wasm_bindgen_test` und `wasm_bindgen_futures`
+/// sind andere Bezeichner und zaehlen nicht.
+fn unrecognized_wasm_bindgen_forms(source: &str) -> Vec<String> {
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let code = code.replace("#[wasm_bindgen::prelude::wasm_bindgen", "#[wasm_bindgen");
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut findings = Vec::new();
+    for (index, token) in code.match_indices("wasm_bindgen") {
+        let before = &code[..index];
+        let after = &code[index + token.len()..];
+        if before.chars().next_back().is_some_and(ident) || after.chars().next().is_some_and(ident)
+        {
+            continue;
+        }
+        let attribute = before.ends_with("#[");
+        let path_root = after.starts_with("::") && !before.ends_with("::");
+        if !(attribute || path_root) {
+            let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+            let line_end = after
+                .find('\n')
+                .map_or(code.len(), |i| index + token.len() + i);
+            findings.push(code[line_start..line_end].trim().to_owned());
+        }
+    }
+    findings
+}
+
+fn assert_only_recognized_wasm_bindgen_forms(source: &str, path: &Path) {
+    let findings = unrecognized_wasm_bindgen_forms(source);
+    assert!(
+        findings.is_empty(),
+        "wasm_bindgen appears in a form the export scanners cannot read (cfg_attr, \
+         alias, extern crate, ...). Write exports as \
+         `#[cfg(target_arch = \"wasm32\")]` + `#[wasm_bindgen(js_name = \"...\")]`. \
+         {}: {findings:?}",
+        path.display()
+    );
+}
+
+#[test]
+fn the_wasm_bindgen_form_scanner_rejects_hidden_exports() {
+    assert!(
+        unrecognized_wasm_bindgen_forms(
+            "use wasm_bindgen::prelude::*;\nuse wasm_bindgen_futures::JsFuture;\n\
+             // #[cfg_attr(x, wasm_bindgen)]\n#[wasm_bindgen(js_name = \"a\")]\n\
+             fn a(v: wasm_bindgen::JsValue) {}\n#[wasm_bindgen_test]\nfn t() {}\n"
+        )
+        .is_empty()
+    );
+    for hidden in [
+        "#[cfg_attr(target_arch = \"wasm32\", wasm_bindgen(js_name = \"x\"))]",
+        "#[cfg_attr(target_arch = \"wasm32\", wasm_bindgen::prelude::wasm_bindgen)]",
+        "use wasm_bindgen::prelude::wasm_bindgen as wb;",
+        "use wasm_bindgen as w;",
+        "extern crate wasm_bindgen;",
+        "#[ wasm_bindgen(js_name = \"x\")]",
+    ] {
+        assert_eq!(
+            unrecognized_wasm_bindgen_forms(hidden).len(),
+            1,
+            "must be flagged: {hidden}"
+        );
+    }
+}
+
 /// Liest jede `#[wasm_bindgen(...)]`-Ausfuhr der Crate und gibt ihren
 /// `js_name` zurueck. Eine Ausfuhr OHNE `js_name` ist ein Fehler: sonst
 /// entstuende ein Export am Namensscan vorbei.
@@ -261,9 +341,9 @@ fn wasm_export_names() -> Vec<(String, PathBuf)> {
     sources.sort();
     let mut names = Vec::new();
     for path in sources {
-        let source = fs::read_to_string(&path)
-            .expect("bridge sources must be readable")
-            .replace("#[wasm_bindgen::prelude::wasm_bindgen", "#[wasm_bindgen");
+        let raw = fs::read_to_string(&path).expect("bridge sources must be readable");
+        assert_only_recognized_wasm_bindgen_forms(&raw, &path);
+        let source = raw.replace("#[wasm_bindgen::prelude::wasm_bindgen", "#[wasm_bindgen");
         for (index, _) in source.match_indices("#[wasm_bindgen") {
             if source[index..].starts_with("#[wasm_bindgen_test") {
                 continue;

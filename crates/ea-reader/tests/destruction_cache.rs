@@ -542,7 +542,13 @@ fn an_initiating_event_signed_from_a_reader_device_is_not_a_removal_capability()
         "the component on the writer side signs the same start"
     );
     let reader_signed = fixtures::Fixture::with_reader_signed_initiating_event([0x52; 32]);
-    assert!(Some(reader_signed.event_certificate) == reader_signed.reader_attestation_certificate);
+    assert_eq!(
+        Some(*reader_signed.event_certificate.as_bytes()),
+        reader_signed
+            .reader_attestation_certificate
+            .map(|certificate| *certificate.as_bytes()),
+        "the initiating event is signed by the reader's own deletionAttest certificate"
+    );
     assert!(
         verify(&reader_signed).is_err(),
         "a transition signed from a Reader device is refused"

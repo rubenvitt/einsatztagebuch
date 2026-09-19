@@ -6,13 +6,18 @@
 //! liest `crates/ea-reader/src` und `crates/ea-reader-wasm/src` als Text und
 //! hält jeden Signieraufruf gegen eine Allowlist:
 //!
-//! - jeder `sign_*`-Aufruf (Methode oder `Typ::sign_*(`) braucht eine Zeile in
-//!   `COSE_SIGNING_CALLS`;
+//! - jede `sign_*`-Referenz (Aufruf `.sign_*(`/`Typ::sign_*(` und seit der
+//!   Fixrunde M4 auch ein Funktionszeiger `Typ::sign_*` ohne Aufruf) braucht
+//!   eine Zeile in `COSE_SIGNING_CALLS`;
 //! - die Roh-`.sign(`-Aufrufe (HTTP-Nachrichtensignatur, Vault-Schlüsselbeweis)
 //!   sind kein COSE-Objekt und stehen je Datei mit ihrer Anzahl in
 //!   `RAW_SIGNING_CALLS`;
 //! - die Bausteine eines Übergangs, einer Autorisierung oder eines Preflights
-//!   kommen gar nicht vor.
+//!   kommen gar nicht vor;
+//! - die normalen Abhängigkeiten beider Crates sind festgeschrieben
+//!   (`READER_DEPENDENCIES`), damit keine Crate mit eigener Signier-API
+//!   (etwa `ea-destruction`, `ea-admin`, `ea-writer`) am Namensscan vorbei
+//!   einzieht.
 //!
 //! Die Prüfung ist bewusst textuell, wie `bridge_boundary.rs` in
 //! `ea-reader-wasm`: ein neuer Aufruf wird rot, bis er begründet eingetragen ist.
@@ -56,6 +61,110 @@ const FORBIDDEN: &[&str] = &[
     "DestructionTransitionFieldsV1 {",
     "DestructionAuthorizationFieldsV1 {",
 ];
+
+/// Normale Abhängigkeiten (`[dependencies]`, `[target.….dependencies]`,
+/// `[build-dependencies]`) je Reader-Crate. Eine neue Abhängigkeit wird erst
+/// grün, wenn sie hier begründet eingetragen ist. Dev-Abhängigkeiten zählen
+/// nicht: sie erreichen `src/` nicht.
+const READER_DEPENDENCIES: &[(&str, &[&str])] = &[
+    (
+        "ea-reader",
+        &[
+            "ea-archive",
+            "ea-cbor",
+            "ea-crypto",
+            "ea-format",
+            "ea-index",
+            "ea-schema",
+            "ea-sync-protocol",
+            "ea-trust",
+            "ea-types",
+            "ea-verify",
+            "ed25519-dalek",
+            "getrandom",
+            "hex",
+            "hkdf",
+            "minicbor",
+            "sha2",
+            "zeroize",
+        ],
+    ),
+    (
+        "ea-reader-wasm",
+        &[
+            "ea-crypto",
+            "ea-reader",
+            "getrandom",
+            "hex",
+            "js-sys",
+            "sha2",
+            "wasm-bindgen",
+            "wasm-bindgen-futures",
+            "web-sys",
+            "zeroize",
+        ],
+    ),
+];
+
+/// Crates mit eigener Übergangs-, Autorisierungs- oder Preflight-Signatur.
+/// Unabhängig von der Allowlist nie eine Reader-Abhängigkeit, auch nicht als
+/// Dev-Abhängigkeit.
+const FORBIDDEN_DEPENDENCIES: &[&str] =
+    &["ea-destruction", "ea-admin", "ea-writer", "ea-sync-server"];
+
+/// `(Tabellenart, Abhängigkeitsname)` aus einem `Cargo.toml`, ohne TOML-Parser:
+/// Tabellenköpfe und `name = …`/`name.workspace = …`-Zeilen. Eine Zeile in
+/// einer Abhängigkeitstabelle, die keinem dieser Muster folgt, ist ein Fehler.
+fn manifest_dependencies(manifest: &str) -> Vec<(String, String)> {
+    let mut table = String::new();
+    let mut out = Vec::new();
+    for line in manifest.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[') {
+            let header = header.trim_end_matches(']').trim();
+            table = header.to_owned();
+            // `[dependencies.foo]`, `[target.'cfg(..)'.dependencies.foo]`
+            for kind in ["dev-dependencies.", "build-dependencies.", "dependencies."] {
+                if let Some(index) = header.find(kind) {
+                    let kind_name = kind.trim_end_matches('.');
+                    out.push((
+                        kind_name.to_owned(),
+                        header[index + kind.len()..].to_owned(),
+                    ));
+                    table = format!("{kind_name}-table");
+                    break;
+                }
+            }
+            continue;
+        }
+        let kind = if table.ends_with("dev-dependencies") {
+            "dev-dependencies"
+        } else if table.ends_with("build-dependencies") {
+            "build-dependencies"
+        } else if table.ends_with("dependencies") {
+            "dependencies"
+        } else {
+            continue;
+        };
+        let name = line
+            .split(['=', '.', ' '])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        assert!(
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "unreadable dependency line `{line}`"
+        );
+        out.push((kind.to_owned(), name.to_owned()));
+    }
+    out
+}
 
 fn collect_rust_sources(directory: &Path, into: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory)
@@ -103,7 +212,8 @@ fn reader_sources() -> Vec<(String, String)> {
     out
 }
 
-/// Jeder Aufruf `.sign_x(` oder `::sign_x(` im Code.
+/// Jede Referenz `.sign_x` oder `::sign_x` im Code, ob aufgerufen oder als
+/// Funktionszeiger genommen.
 fn sign_calls(code: &str) -> Vec<String> {
     let mut calls = Vec::new();
     for (index, _) in code.match_indices("sign_") {
@@ -115,9 +225,7 @@ fn sign_calls(code: &str) -> Vec<String> {
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
-        if code[index + name.len()..].trim_start().starts_with('(') {
-            calls.push(name);
-        }
+        calls.push(name);
     }
     calls
 }
@@ -184,10 +292,62 @@ fn reader_crates_sign_only_their_own_attestation_and_audit() {
 }
 
 #[test]
+fn reader_crates_depend_only_on_pinned_crates() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates directory");
+    for (name, pinned) in READER_DEPENDENCIES {
+        let manifest =
+            fs::read_to_string(crates.join(name).join("Cargo.toml")).expect("readable manifest");
+        let all = manifest_dependencies(&manifest);
+        for (kind, dependency) in &all {
+            assert!(
+                !FORBIDDEN_DEPENDENCIES.contains(&dependency.as_str()),
+                "{name} must not depend on `{dependency}` ({kind}): it carries a \
+                 transition/authorization signing API (Web-Reader-Design §3)"
+            );
+        }
+        let normal: std::collections::BTreeSet<&str> = all
+            .iter()
+            .filter(|(kind, _)| kind != "dev-dependencies")
+            .map(|(_, dependency)| dependency.as_str())
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = pinned.iter().copied().collect();
+        assert_eq!(
+            normal, expected,
+            "{name}: normal dependencies must match READER_DEPENDENCIES"
+        );
+    }
+}
+
+#[test]
+fn the_manifest_reader_sees_every_table_form() {
+    let manifest = "[package]\nname = \"x\"\n[dependencies]\na.workspace = true\n\
+                    b = { version = \"1\" } # note\n[target.'cfg(unix)'.dependencies]\nc = \"1\"\n\
+                    [dependencies.d]\nversion = \"1\"\n[build-dependencies]\ne = \"1\"\n\
+                    [dev-dependencies]\nf.workspace = true\n[features]\ng = []\n";
+    let found: Vec<_> = manifest_dependencies(manifest)
+        .into_iter()
+        .map(|(kind, name)| format!("{kind}:{name}"))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "dependencies:a",
+            "dependencies:b",
+            "dependencies:c",
+            "dependencies:d",
+            "build-dependencies:e",
+            "dev-dependencies:f",
+        ]
+    );
+}
+
+#[test]
 fn the_scanner_sees_method_and_path_calls() {
     assert_eq!(
-        sign_calls("a.sign_x(1); B::sign_y (2); sign_z(3); c.sign_w;"),
-        ["sign_x", "sign_y"]
+        sign_calls("a.sign_x(1); B::sign_y (2); sign_z(3); c.sign_w; let f = C::sign_v;"),
+        ["sign_x", "sign_y", "sign_w", "sign_v"]
     );
     assert_eq!(
         raw_sign_calls("k.sign(d); k.sign (e); k.signal(f); sign(g)"),
