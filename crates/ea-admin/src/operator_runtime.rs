@@ -839,7 +839,7 @@ impl OperatorRuntime {
                 .into_iter()
                 .map(|requirement| posture.check(requirement).evidence_code())
                 .collect(),
-            production_ready: admission.is_some(),
+            session_admitted: admission.is_some(),
             documented_posture: admission
                 .as_ref()
                 .and_then(PostureDocumentationReport::from_admission),
@@ -881,7 +881,7 @@ impl OperatorRuntime {
                 .into_iter()
                 .map(|requirement| posture.check(requirement).evidence_code())
                 .collect(),
-            production_ready: false,
+            session_admitted: false,
             documented_posture: None,
             binding_state: "revoked",
             productive_binding_hashes: Vec::new(),
@@ -1050,7 +1050,11 @@ pub struct OperatorGoLiveReport {
     /// Verified documentation is separate from the unchanged raw measurement codes.
     pub documented_posture: Option<PostureDocumentationReport>,
     pub device_posture_evidence: Vec<&'static str>,
-    pub production_ready: bool,
+    /// Wahr heißt: Eine Sitzung darf öffnen (Pass oder dokumentiertes
+    /// Unknown). Das ist KEINE Go-live-Produktionsreife — ein dokumentiertes
+    /// Unknown ist im Go-live nie grün; die Reife rechnet allein
+    /// [`crate::go_live::GoLiveChecklist::production_ready`].
+    pub session_admitted: bool,
     pub binding_state: &'static str,
     pub productive_binding_hashes: Vec<String>,
     pub revoked_binding_hashes: Vec<String>,
