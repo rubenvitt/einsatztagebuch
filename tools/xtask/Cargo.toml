@@ -6,7 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Das Saat-Ziel `seed-demo`. AUSDRUECKLICH nicht `default`: ein
+# Vorgabebau von `xtask` loest `ea-demo-world` nicht auf, und der Zeuge
+# `no_production_build_carries_the_ea_admin_test_surface` liest den
+# Merkmalsgraphen jedes Produktionswirts — `xtask` eingeschlossen — mit
+# VORGABEmerkmalen. Dieselbe Bauweise wie `desktop-fixture` in `apps/cli`.
+seed-demo = ["dep:ea-demo-world", "ea-demo-world/fixture-world"]
+
 [dependencies]
+ea-demo-world = { workspace = true, optional = true }
 cddl.workspace = true
 cddl-cat.workspace = true
 ea-cbor.workspace = true

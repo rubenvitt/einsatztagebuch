@@ -1,0 +1,77 @@
+[package]
+name = "ea-demo-world"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Ohne dieses Merkmal ist die Crate LEER: kein Modul, keine Kante, keine
+# Fixture-Fläche. Es ist ausdrücklich NICHT `default` — ein Produktivbau darf
+# die Demo-Welt nicht einmal auflösen können. Der Zeuge
+# `no_production_build_carries_the_ea_admin_test_surface` in
+# `tools/xtask/tests/workspace.rs` liest den Merkmalsgraphen jedes
+# Produktionswirts mit VORGABEmerkmalen; eine Kante, die erst hier entsteht,
+# ist dort unsichtbar. Dieselbe Bauweise wie `desktop-fixture` in `apps/cli`.
+default = []
+fixture-world = [
+  "dep:ea-archive",
+  "dep:ea-crypto",
+  "dep:ea-format",
+  "dep:ea-key-provider",
+  "dep:ea-local-store",
+  "dep:ea-operator",
+  "dep:ea-recovery",
+  "dep:ea-schema",
+  "dep:ea-time",
+  "dep:ea-trust",
+  "dep:ea-types",
+  "dep:ea-verify",
+  "dep:ed25519-dalek",
+  "dep:hex",
+  "dep:minicbor",
+  "dep:serde_json",
+  # Die zwei Fixture-Flächen, die die eingebundene Support-Kette BRAUCHT:
+  # `ea-trust/test-support` trägt die Bauwerkzeuge, gegen die
+  # `crates/ea-trust/tests/support/mod.rs` übersetzt, und
+  # `ea-key-provider/test-support` den `InMemoryKeyProvider`, mit dem die
+  # Demo-Datenbanken verschlüsselt werden. Beide stehen hier und NICHT in der
+  # Kantentabelle: dort würden sie auch ohne `fixture-world` aufgelöst, und
+  # der Manifestteil der Zeugen prüft genau die Kantentabelle.
+  "ea-trust/test-support",
+  "ea-key-provider/test-support",
+]
+
+[dependencies]
+# ALLE Kanten sind optional und hängen an `fixture-world`. Keine einzige wird
+# von einem Vorgabebau angefordert.
+ea-archive = { workspace = true, optional = true }
+ea-crypto = { workspace = true, optional = true }
+ea-format = { workspace = true, optional = true }
+ea-key-provider = { workspace = true, optional = true }
+ea-local-store = { workspace = true, optional = true }
+# `macos::account_inputs`, `linux::account_inputs`, `windows::account_inputs`
+# und `OsAccountInputs::binding_hash` — dieselbe Ableitung, die
+# `ea_admin::native_provider` aus der Helferantwort führt. Die Demowelt
+# rechnet den Bindungshash nicht nach, sondern nutzt genau diesen Weg.
+ea-operator = { workspace = true, optional = true }
+ea-recovery = { workspace = true, optional = true }
+ea-schema = { workspace = true, optional = true }
+ea-time = { workspace = true, optional = true }
+ea-trust = { workspace = true, optional = true }
+ea-types = { workspace = true, optional = true }
+ea-verify = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+minicbor = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `OperatorArchiveSnapshot::open` ist der Zeuge, dass die gesäte Welt eine
+# ECHTE Welt ist. Die Fläche ist ungemerkmalt öffentlich; `test-support`
+# wird hier ausdrücklich NICHT angefordert.
+ea-admin.workspace = true
+ea-archive.workspace = true
+ea-format.workspace = true
+serde_json.workspace = true

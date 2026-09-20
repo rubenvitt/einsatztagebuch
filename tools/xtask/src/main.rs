@@ -203,6 +203,17 @@ fn verify_quick_commands() -> Vec<(&'static str, Vec<&'static str>)> {
 #[allow(dead_code)]
 const WASM32_EXEMPT_CRATES: &[(&str, &str)] = &[
     (
+        "ea-demo-world",
+        "schreibt eine FIXTURE-Demowelt ueber `std::fs` auf die Platte — \
+         Archivblobs, Ankerbytes, zwei SQLCipher-Datenbanken und vier \
+         Konfigurationsdateien — und ist damit Wirtscode fuer die Vorfuehrung, \
+         nicht geteilter Browsercode: `web-reader-design.md` §9 macht nur die \
+         Verifikationskette zu geteiltem Rust, und die endet bei `ea-verify`, \
+         das auf der Positivliste bleibt. Die Crate ist ohne ihr Merkmal \
+         `fixture-world` ausserdem LEER und wird von keinem Wirt ueber eine \
+         Vorgabekante erreicht.",
+    ),
+    (
         "ea-destruction",
         "Native destruction request service persists exact authorization/event bytes and signed operator audit atomically in SQLCipher. Shared pure transition rules remain in wasm-safe ea-verify.",
     ),
@@ -4473,6 +4484,103 @@ fn run_stage_gate(root: &Path, stage: u32) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "seed-demo")]
+const SEED_DEMO_ARGUMENT_ERROR: &str = "usage: xtask seed-demo <verzeichnis>";
+
+/// Sät die FIXTURE-DEMOWELT und nennt danach genau die drei Startangaben.
+///
+/// Das Ziel liegt hinter dem Merkmal `seed-demo`, das `ea-demo-world` und
+/// darüber dessen `fixture-world` einschaltet. Ohne das Merkmal existiert
+/// weder diese Funktion noch die Kante dorthin; ein Vorgabebau von `xtask`
+/// kann die Fixture-Fläche nicht einmal auflösen.
+#[cfg(feature = "seed-demo")]
+fn run_seed_demo(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let directory = args
+        .next()
+        .ok_or_else(|| SEED_DEMO_ARGUMENT_ERROR.to_owned())?;
+    if args.next().is_some() {
+        return Err(SEED_DEMO_ARGUMENT_ERROR.to_owned());
+    }
+    let world = ea_demo_world::seed_demo_world(std::path::Path::new(&directory))
+        .map_err(|error| format!("die Fixture-Demowelt ließ sich nicht säen: {error}"))?;
+
+    let display = |path: &std::path::Path| path.display().to_string();
+    println!("FIXTURE-DEMOWELT gesät unter {}", display(&world.root));
+    println!();
+    println!("Diese Welt ist eine VORFÜHRUNG. Ihre Schlüssel stehen als Konstanten im");
+    println!("Quelltext von `crates/ea-demo-world` und sind damit öffentlich bekannt.");
+    println!("Nichts hier ist Bestand, nichts hier ist Beweis.");
+    println!();
+    println!("Erzeugt:");
+    println!(
+        "  Archiv                {}",
+        display(&world.archive_directory)
+    );
+    println!(
+        "  Ankerbytes            {}  (AUSSERHALB des Archivs)",
+        display(&world.anchor_path)
+    );
+    println!(
+        "  Writer-Station        {}",
+        display(&world.writer.directory)
+    );
+    println!(
+        "  Admin-Station         {}",
+        display(&world.admin.directory)
+    );
+    println!();
+    println!("1) Writer-Station starten:");
+    println!(
+        "   ea-desktop --operator-config {} --trust-anchor {} --writer-config {}",
+        display(&world.writer.operator_config),
+        display(&world.anchor_path),
+        display(&world.writer.role_config)
+    );
+    println!();
+    println!("2) Admin-Station starten:");
+    println!(
+        "   ea-desktop --operator-config {} --trust-anchor {} --administration-config {}",
+        display(&world.admin.operator_config),
+        display(&world.anchor_path),
+        display(&world.admin.role_config)
+    );
+    println!();
+    println!("   `--writer-config` und `--administration-config` schließen sich am Wirt");
+    println!("   gegenseitig aus: der Writer verlangt die Rolle `writer`, die Administration");
+    println!("   die Rolle `organization-admin`. Deshalb zwei Stationen.");
+    println!();
+    println!("3) Reader (Web-Anwendung, „Archiv öffnen\"):");
+    println!(
+        "   Verzeichnis          {}",
+        display(&world.reader_archive_directory)
+    );
+    println!(
+        "   Eintragspaket        {}",
+        display(&world.reader_entry_package)
+    );
+    println!("   Reader-Grant         {}", display(&world.reader_grant));
+    println!("   Readerschlüssel     {}", world.reader_private_key_hex);
+    println!("   (X25519, roh, hex — FIXTURE. Ohne den Grant zeigt der Reader nichts.)");
+    println!();
+    println!("WAS DIESE WELT NICHT KANN");
+    println!();
+    println!("  * Ein Entwicklungsbau des Wirts ÖFFNET sie nicht. Jede native Sitzung geht");
+    println!("    über `NativeOperatorProvider::open_installed`, und dessen");
+    println!("    `NativeExecutableIdentity::for_installed` verlangt einen signierten,");
+    println!("    installierten Geschwisterhelfer (`ea-native-operator`) mit passender");
+    println!("    Signaturkennung. Ohne diesen Helfer bricht der Start mit");
+    println!("    `EA-OPERATOR-NATIVE-DENIED` ab, bevor eine Zeile der Welt gelesen wird.");
+    println!("    Die zwei Befehle oben sind die richtigen Befehle — sie brauchen eine");
+    println!("    Installation, keine andere Welt.");
+    println!();
+    println!("  * Das gebundene Betriebssystemkonto ist ein FESTES Fixture-Konto, kein");
+    println!("    echtes. Die Welt ist deshalb zwischen Rechnern portabel, aber an die");
+    println!("    Plattformfamilie gebunden: die Kontoableitung unterscheidet macOS, Linux");
+    println!("    und Windows. Eine auf macOS gesäte Welt passt NICHT auf Linux oder");
+    println!("    Windows — säe sie auf der Zielplattform neu.");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let root = workspace_root();
     let mut args = env::args().skip(1);
@@ -4569,6 +4677,17 @@ fn run() -> Result<(), String> {
             }
             run_build_wasm(&root)
         }
+        // Die Saat der Fixture-Demowelt. Ohne das Merkmal `seed-demo` gibt es
+        // das Ziel nicht — und die Meldung sagt, wie man es einschaltet,
+        // statt den Aufrufer mit `unknown gate` stehen zu lassen.
+        #[cfg(feature = "seed-demo")]
+        "seed-demo" => run_seed_demo(args),
+        #[cfg(not(feature = "seed-demo"))]
+        "seed-demo" => Err(
+            "seed-demo is only built with --features seed-demo; the fixture \
+                            demo world is deliberately unreachable from a default build"
+                .to_owned(),
+        ),
         _ => Err(format!("unknown gate: {gate}")),
     }
 }
