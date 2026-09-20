@@ -43,9 +43,45 @@ redistributable is official, signed and hash-matched, but no person looked at
 this particular version. Pin the printed hash in the repository once it has
 been reviewed, and this step becomes a pinned check instead of a published one.
 
-It STOPS BEFORE SIGNING. Sign-Release.ps1 needs a code-signing certificate
-thumbprint, and that is not a scripting gap - the certificate does not exist
-yet. Nothing here can substitute for it.
+It CAN SIGN AND INSTALL, mit `-SelfSignedCert`. Sign-Release.ps1 braucht einen
+Zertifikats-Thumbprint, und ohne gekauftes Zertifikat gibt es dafür genau einen
+ehrlichen Weg: ein selbstsigniertes Code-Signing-Zertifikat, das auf DIESEM
+Rechner verankert wird. Das reicht, weil der Rust-Prüfer (native_identity.rs)
+nur eine vom Betriebssystem als `Valid` bewertete Authenticode-Signatur und die
+DER-Gleichheit der Zertifikate von Parent, Helfer und Manifest verlangt — es
+gibt, anders als bei macOS mit `anchor apple generic`, KEINE Forderung nach
+einem öffentlichen Anker. Keine Prüfung wird dafür geändert oder umgangen.
+
+    ############################################################
+    #  NUR FÜR EIGENE, KONTROLLIERTE RECHNER.                  #
+    #  Eine selbstsignierte Kette trägt KEINE Verteilung an     #
+    #  Dritte. Wer das Zertifikat in `LocalMachine\Root` legt,  #
+    #  erklärt es maschinenweit zur Wurzel: alles, was mit      #
+    #  seinem privaten Schlüssel signiert ist, gilt diesem      #
+    #  Rechner als vertrauenswürdig. Auf einem fremden oder     #
+    #  geteilten Rechner ist das eine Vertrauensausweitung und  #
+    #  kein Behelf. Für echte Auslieferung: ein Zertifikat      #
+    #  einer öffentlichen CA, danach dieselben Skripte ohne     #
+    #  `-SelfSignedCert`.                                      #
+    ############################################################
+
+Der Schalter erzeugt (oder verwendet wieder) das Zertifikat in
+`Cert:\CurrentUser\My`, verankert seinen ÖFFENTLICHEN Teil in
+`LocalMachine\Root` und `LocalMachine\TrustedPublisher`, beweist mit einer
+Wegwerfdatei, dass `Set-AuthenticodeSignature` damit `Valid` liefert, legt einen
+geschützten Ablage- und Installationsbaum an und ruft dann Sign-Release.ps1 und
+Install-Release.ps1 unverändert auf. Ein zweiter Lauf legt kein zweites
+Zertifikat an; Ablage und Installation bekommen je eine eigene Laufkennung, ein
+bestehendes Verzeichnis wird also nie überschrieben oder gelöscht.
+
+`-SelfSignedCert` verlangt einen ERHÖHTEN Lauf (Install-Release.ps1 besteht
+selbst darauf) und ändert damit den Rechner: Wurzelspeicher und ein geschützter
+Installationsbaum. Zwei Folgen davon sind unangenehm und deshalb hier benannt:
+ein erhöhter Lauf hinterlässt Arbeitskopie, `.dotnet` und `target` mit erhöhtem
+Besitzer, was einen späteren nicht erhöhten Lauf auf demselben `-Path` stören
+kann; und die native Anmeldung selbst kann dieser Lauf nicht vorführen, weil sie
+ein NICHT erhöhtes interaktives Konto braucht. Das Skript gibt den dafür nötigen
+Befehl am Ende aus, statt einen Erfolg zu behaupten.
 
 Out of scope: the WASM reader, the desktop and web frontends, and the Postgres
 and S3 integration services. This builds the Windows native release path only.
@@ -84,10 +120,34 @@ pnpm, which the release path does not need, so it is opt-in.
 Do not install anything. Report a missing prerequisite with its winget command
 and stop. Use this in CI or on a managed machine.
 
+.PARAMETER SelfSignedCert
+Selbstsignierte Signaturkette: Zertifikat anlegen/wiederverwenden, maschinenweit
+verankern, signieren, installieren. Nur für eigene, kontrollierte Rechner (siehe
+Kasten oben). Verlangt einen erhöhten Lauf und verträgt sich weder mit
+-NoInstall noch mit -SkipPackage.
+
+.PARAMETER ReleaseRoot
+Wurzel des geschützten Ablage- und Installationsbaums für -SelfSignedCert.
+Muss ein lokaler Pfad mit Laufwerksbuchstaben auf einem festen Datenträger sein.
+Voreinstellung C:\Einsatzarchiv.
+
+.PARAMETER Version
+Fassung für Manifest und Installation. Voreinstellung ist die Fassung aus
+crates/ea-admin/Cargo.toml - genau die Kiste, deren CARGO_PKG_VERSION der
+Prüfer gegen das Manifest hält.
+
+.PARAMETER CertificateProvider
+Schlüsselspeicheranbieter für ein NEU angelegtes Zertifikat. Leer heisst: die
+Voreinstellung von New-SelfSignedCertificate (CNG). Falls die Signierprobe
+scheitert, ist der eine dokumentierte Ausweichwert
+'Microsoft Enhanced RSA and AES Cryptographic Provider'.
+
 .EXAMPLE
 pwsh -File bootstrap-windows-build.ps1
 .EXAMPLE
 pwsh -File bootstrap-windows-build.ps1 -Path D:\build\ea -Ref main -Runtime win-arm64
+.EXAMPLE
+pwsh -File bootstrap-windows-build.ps1 -SelfSignedCert
 #>
 [CmdletBinding()]
 param(
@@ -97,7 +157,11 @@ param(
     [switch]$SkipTests,
     [switch]$SkipPackage,
     [switch]$Desktop,
-    [switch]$NoInstall
+    [switch]$NoInstall,
+    [switch]$SelfSignedCert,
+    [string]$ReleaseRoot = 'C:\Einsatzarchiv',
+    [string]$Version,
+    [string]$CertificateProvider
 )
 
 $ErrorActionPreference = 'Stop'
@@ -181,6 +245,163 @@ function Invoke-Checked([string]$What, [string]$Exe, [string[]]$Arguments, [stri
     if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
 
+# ------------------------------------------------ selbstsignierte Kette: Teile
+
+# Ein fester Betreff, damit ein zweiter Lauf dasselbe Zertifikat wiederfindet,
+# statt den Speicher mit Schlüsseln zuzumüllen.
+$SelfSignedSubject = 'CN=Einsatzarchiv Self-Signed Release Signer, O=Einsatzarchiv, OU=Self-signed local trust'
+$CodeSigningOid = '1.3.6.1.5.5.7.3.3'
+
+# Diese beiden Zeichenketten sind WÖRTLICH die aus ReleaseSecurity.psm1 (der
+# SDDL, den der Installer seinem eigenen Ziel gibt). Nicht "so ähnlich":
+# Besitzer Administratoren, SYSTEM und Administratoren voll, Builtin-Benutzer
+# nur lesen/ausführen (0x1200a9, kein einziges Bit aus der Schreibmaske
+# 0x500D0156), geschützte DACL ohne Vererbung von oben.
+$ProtectedDirectorySddl = 'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
+$ProtectedFileSddl = 'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)'
+
+function Test-Elevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        return [Security.Principal.WindowsPrincipal]::new($identity).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    finally { $identity.Dispose() }
+}
+
+function Test-CodeSigningEku($Certificate) {
+    foreach ($extension in $Certificate.Extensions) {
+        if ($extension -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
+            foreach ($usage in $extension.EnhancedKeyUsages) {
+                if ($usage.Value -eq $CodeSigningOid) { return $true }
+            }
+        }
+    }
+    return $false
+}
+
+# Dieselben Bedingungen, die Sign-Release.ps1 danach selbst stellt: privater
+# Schlüssel, gültiger Zeitraum, EKU Codesignatur. Der Sicherheitsabstand von 30
+# Tagen verhindert, dass ein Lauf ein Zertifikat wiederverwendet, das noch
+# während der Restlaufzeit des Bundles abläuft - ohne Zeitstempel endet die
+# Gültigkeit der Signatur mit dem Zertifikat.
+function Find-SelfSignedSigner {
+    $found = @(Get-ChildItem -LiteralPath 'Cert:\CurrentUser\My' | Where-Object {
+            $_.Subject -like '*CN=Einsatzarchiv Self-Signed Release Signer*' -and
+            $_.Issuer -eq $_.Subject -and $_.HasPrivateKey -and
+            $_.NotBefore -le [DateTime]::Now -and $_.NotAfter -gt [DateTime]::Now.AddDays(30) -and
+            (Test-CodeSigningEku $_)
+        })
+    return ($found | Sort-Object NotAfter -Descending | Select-Object -First 1)
+}
+
+function New-SelfSignedSigner {
+    $parameters = @{
+        Type              = 'CodeSigningCert'
+        Subject           = $SelfSignedSubject
+        FriendlyName      = 'Einsatzarchiv self-signed release signer'
+        CertStoreLocation = 'Cert:\CurrentUser\My'
+        KeyAlgorithm      = 'RSA'
+        KeyLength         = 3072
+        HashAlgorithm     = 'SHA256'
+        # Fünf Minuten Vorlauf gegen Uhrenversatz, drei Jahre Laufzeit. Ohne
+        # Zeitstempeldienst ist die Signatur danach nicht mehr `Valid`.
+        NotBefore         = (Get-Date).AddMinutes(-5)
+        NotAfter          = (Get-Date).AddYears(3)
+    }
+    if ($CertificateProvider) { $parameters.Provider = $CertificateProvider }
+    # New-SelfSignedCertificate kommt aus dem PKI-Modul und läuft in PowerShell 7
+    # über die Windows-PowerShell-Kompatibilitätsschicht. Das Ergebnis ist ein
+    # DESERIALISIERTES Objekt ohne Methoden - nur der Thumbprint wird übernommen,
+    # das echte Zertifikat kommt danach aus dem Speicher.
+    $created = New-SelfSignedCertificate @parameters
+    return $created.Thumbprint
+}
+
+# Verankert ausschliesslich den ÖFFENTLICHEN Teil. Der private Schlüssel bleibt,
+# wo er hingehört: im Benutzerspeicher des Signierenden.
+function Add-MachineTrust([byte[]]$Der, [string]$StoreName) {
+    $public = [Security.Cryptography.X509Certificates.X509Certificate2]::new($Der)
+    $store = [Security.Cryptography.X509Certificates.X509Store]::new(
+        $StoreName, [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+    try {
+        $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $present = @($store.Certificates | Where-Object { $_.Thumbprint -eq $public.Thumbprint })
+        if ($present.Count -gt 0) {
+            Write-Note "LocalMachine\$StoreName : bereits verankert"
+            return
+        }
+        $store.Add($public)
+        Write-Note "LocalMachine\$StoreName : verankert"
+    }
+    finally {
+        $store.Close()
+        $store.Dispose()
+        $public.Dispose()
+    }
+}
+
+# Die Signierprobe. Sign-Release.ps1 prüft nach JEDEM Signieren auf Status
+# `Valid`, und das hängt an der Vertrauenskette und daran, ob
+# Set-AuthenticodeSignature mit dem Schlüsselanbieter dieses Zertifikats
+# überhaupt umgehen kann. Beides hier zu klären kostet eine Sekunde; es erst
+# beim Signieren zu erfahren kostet den ganzen Bau.
+function Test-CodeSigning($Certificate) {
+    $probe = Join-Path ([IO.Path]::GetTempPath()) "ea-sign-probe-$([Guid]::NewGuid().ToString('N')).ps1"
+    try {
+        Set-Content -LiteralPath $probe -Value '# Einsatzarchiv Signierprobe' -Encoding utf8
+        $signed = Microsoft.PowerShell.Security\Set-AuthenticodeSignature `
+            -LiteralPath $probe -Certificate $Certificate -HashAlgorithm SHA256 -ErrorAction Stop
+        return [string]$signed.Status
+    }
+    catch {
+        # Ein unpassender Schluesselanbieter meldet sich als FEHLER und nicht als
+        # Status. Beides muss hier ankommen, sonst zerlegt es den Lauf mit einem
+        # Rohfehler statt mit dem Wiederholungsbefehl.
+        return "Fehler: $($_.Exception.Message)"
+    }
+    finally { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
+}
+
+function Set-ProtectedSecurity([string]$LiteralPath) {
+    $item = Get-Item -LiteralPath $LiteralPath -Force
+    if ($item.PSIsContainer) {
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm($ProtectedDirectorySddl)
+    }
+    else {
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetSecurityDescriptorSddlForm($ProtectedFileSddl)
+    }
+    Set-Acl -LiteralPath $LiteralPath -AclObject $security
+}
+
+function New-ProtectedDirectory([string]$LiteralPath) {
+    if (-not (Test-Path -LiteralPath $LiteralPath)) {
+        New-Item -ItemType Directory -Path $LiteralPath | Out-Null
+    }
+    # Ein frisch unter C:\ angelegtes Verzeichnis erbt von der Wurzel ACEs, die
+    # authentifizierten Benutzern Schreibrechte geben. Deshalb wird der
+    # geschützte Deskriptor gesetzt, und zwar bei JEDEM Lauf: so heilt ein
+    # zweiter Lauf einen von Hand verbogenen Baum, statt daran zu scheitern.
+    Set-ProtectedSecurity $LiteralPath
+}
+
+# Geprüft wird NICHT mit nachgebauter Logik, sondern mit dem Tor selbst:
+# Assert-EaProtectedPins aus ReleaseSecurity.psm1 braucht nur ein Objekt mit
+# .Paths. Dieselbe Prüfung, die Install-Release.ps1 später wirklich anwendet -
+# also keine Abweichung zwischen Vorprüfung und Urteil.
+function Assert-ProtectedTree([string]$LiteralPath) {
+    $chain = @()
+    $current = [IO.Path]::GetFullPath($LiteralPath)
+    while ($current) {
+        $chain += $current
+        $parent = [IO.Directory]::GetParent($current)
+        $current = if ($null -eq $parent) { $null } else { $parent.FullName }
+    }
+    Assert-EaProtectedPins ([pscustomobject]@{ Paths = $chain })
+}
+
 # ---------------------------------------------------------------- host checks
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -198,6 +419,81 @@ if (-not $Runtime) {
 $RustTriple = if ($Runtime -eq 'win-arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
 
 Write-Step "Ziel: $Runtime ($RustTriple), Ref $Ref, Arbeitsverzeichnis $Path"
+
+# ------------------------------------------- selbstsignierte Kette: Teil 1/2
+#
+# Alles, was ohne Arbeitskopie entschieden werden kann, wird hier entschieden -
+# VOR dem Bau. Ein fehlender Rechteschritt oder ein Zertifikat, mit dem sich
+# nicht signieren lässt, soll nach einer Sekunde auffallen und nicht nach einer
+# halben Stunde Bauzeit.
+
+$SigningCertificate = $null
+$SigningCertificateDer = $null
+$SigningPin = $null
+$InstalledBundle = $null
+
+if ($SelfSignedCert) {
+    Write-Step 'Selbstsignierte Signaturkette vorbereiten'
+    Write-Note 'NUR fuer eigene, kontrollierte Rechner - keine Verteilung an Dritte'
+
+    if ($NoInstall) {
+        Stop-WithRemedy '-SelfSignedCert und -NoInstall widersprechen sich: die Kette legt ein Zertifikat in den Maschinenspeicher und installiert das Bundle.' `
+            'Einen der beiden Schalter weglassen.'
+    }
+    if ($SkipPackage) {
+        Stop-WithRemedy '-SelfSignedCert braucht das Paket aus Package.ps1 als Eingabe fuer Sign-Release.ps1.' `
+            '-SkipPackage weglassen.'
+    }
+    if (-not (Test-Elevated)) {
+        # Kein stilles Scheitern und kein heimliches Nachfordern: Install-Release.ps1
+        # verlangt in seiner Zeile 90 ausdruecklich einen erhoehten Administrator,
+        # und das Verankern im Maschinenspeicher braucht es ebenfalls.
+        Stop-WithRemedy 'Dieser Lauf ist nicht erhoeht. Die selbstsignierte Kette schreibt in LocalMachine\Root und Install-Release.ps1 besteht auf einem erhoehten Administrator.' `
+            "Terminal als Administrator oeffnen (UAC bestaetigen) und erneut ausfuehren:`n  pwsh -NoProfile -File `"$PSCommandPath`" -SelfSignedCert"
+    }
+    if ($ReleaseRoot.Length -lt 4 -or -not [char]::IsAsciiLetter($ReleaseRoot[0]) -or
+        $ReleaseRoot[1] -ne ':' -or $ReleaseRoot[2] -ne '\' -or $ReleaseRoot.Substring(2).Contains(':')) {
+        Stop-WithRemedy "ReleaseRoot '$ReleaseRoot' ist kein lokaler Pfad mit Laufwerksbuchstaben unterhalb der Wurzel." `
+            'Etwa -ReleaseRoot C:\Einsatzarchiv angeben; das native Installationsmodul lehnt alles andere ab.'
+    }
+    # Die Wurzel selbst scheidet aus: sie gehoert nicht uns, und ihre Rechte
+    # koennen wir nicht auf den geschuetzten Deskriptor ziehen, ohne dem ganzen
+    # Datentraeger die Vererbung umzuhaengen.
+    $ReleaseRoot = [IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
+
+    $signer = Find-SelfSignedSigner
+    if ($signer) {
+        Write-Note "Zertifikat wiederverwendet: $($signer.Thumbprint) (gueltig bis $($signer.NotAfter.ToString('yyyy-MM-dd')))"
+        $thumbprint = $signer.Thumbprint
+    }
+    else {
+        Write-Note 'Kein passendes Zertifikat gefunden - es wird eines angelegt'
+        $thumbprint = New-SelfSignedSigner
+        Write-Note "Zertifikat angelegt: $thumbprint"
+    }
+
+    $SigningCertificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint"
+    $SigningCertificateDer = $SigningCertificate.RawData
+    # Kleinschreibung ist Pflicht: Install-Release.ps1 prueft -ExpectedCertificateSha256
+    # gegen \A[0-9a-f]{64}\z und vergleicht danach gross-/kleinempfindlich.
+    $SigningPin = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData($SigningCertificateDer)).ToLowerInvariant()
+    Write-Note "oeffentlicher DER-SHA-256-Pin: $SigningPin"
+
+    # Erst verankern, dann pruefen: Set-AuthenticodeSignature meldet `Valid` nur,
+    # wenn die Kette schon beim Signieren steht.
+    Add-MachineTrust $SigningCertificateDer 'Root'
+    Add-MachineTrust $SigningCertificateDer 'TrustedPublisher'
+
+    $probeStatus = Test-CodeSigning $SigningCertificate
+    if ($probeStatus -ne 'Valid') {
+        Stop-WithRemedy "Signierprobe ergab Status '$probeStatus' statt 'Valid'. Sign-Release.ps1 wuerde an genau dieser Bedingung scheitern." `
+            ("Haeufigste Ursache ist der Schluesselanbieter des Zertifikats. Altes Zertifikat entfernen und mit dem Ausweichanbieter neu anlegen:`n" +
+             "  Remove-Item -LiteralPath 'Cert:\CurrentUser\My\$thumbprint'`n" +
+             "  pwsh -NoProfile -File `"$PSCommandPath`" -SelfSignedCert -CertificateProvider 'Microsoft Enhanced RSA and AES Cryptographic Provider'")
+    }
+    Write-Note 'Signierprobe: Valid'
+}
 
 # ------------------------------------------------------------- prerequisites
 
@@ -459,6 +755,94 @@ if (-not $SkipPackage) {
     Write-Note "Paket: $packaged"
 }
 
+# ------------------------------------------- selbstsignierte Kette: Teil 2/2
+
+if ($SelfSignedCert) {
+    Write-Step 'Signieren und installieren'
+
+    # Gelesen, nicht geaendert: dieselben Module, die Sign-Release.ps1 und
+    # Install-Release.ps1 benutzen. Assert-EaProtectedPins kommt aus
+    # ReleaseSecurity.psm1 und ruft Assert-EaAclPolicy aus ReleaseManifest.psm1.
+    Import-Module (Join-Path $WindowsRoot 'scripts\ReleaseManifest.psm1') -Force
+    Import-Module (Join-Path $WindowsRoot 'scripts\ReleaseSecurity.psm1') -Force
+
+    if (-not $Version) {
+        # Der Pruefer haelt das Manifest gegen CARGO_PKG_VERSION der Kiste
+        # ea-admin; die Fassung kommt deshalb aus deren Cargo.toml.
+        $versionMatch = Select-String -LiteralPath (Join-Path $Path 'crates\ea-admin\Cargo.toml') `
+            -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1
+        if (-not $versionMatch) { throw 'Keine Fassung in crates/ea-admin/Cargo.toml gefunden' }
+        $Version = $versionMatch.Matches[0].Groups[1].Value
+    }
+    if ($Version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?\z') {
+        Stop-WithRemedy "Fassung '$Version' passt nicht auf das Muster, das Sign-Release.ps1 verlangt." `
+            'Fassung ausdruecklich angeben: -Version 0.1.0'
+    }
+    Write-Note "Fassung: $Version"
+
+    # Eine Laufkennung je Lauf. Damit ist die Wiederholbarkeit ohne Loeschen
+    # erfuellt: Sign-Release.ps1 und Install-Release.ps1 bestehen beide auf
+    # frischen Zielen, und ein zweiter Lauf nimmt eigene, statt einem
+    # bestehenden Verzeichnis nahe zu kommen.
+    $runId = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $stageRoot = Join-Path $ReleaseRoot 'stage'
+    $installRoot = Join-Path $ReleaseRoot 'install'
+    $runStage = Join-Path $stageRoot "$Version-$Runtime-$runId"
+    $bundle = Join-Path $runStage 'bundle'
+    $kit = Join-Path $runStage 'management'
+    $InstalledBundle = Join-Path $installRoot "$Version-$Runtime-$runId"
+
+    # Install-Release.ps1 prueft Besitzer und wirksame DACL der Quelle UND jedes
+    # Vorfahren, und ebenso des Zielelternteils. Ein Ablageordner im Profil oder
+    # unter Downloads faellt dabei durch - deshalb dieser eigene Baum.
+    Write-Note "geschuetzter Baum: $ReleaseRoot"
+    foreach ($directory in @($ReleaseRoot, $stageRoot, $installRoot, $runStage)) {
+        New-ProtectedDirectory $directory
+    }
+    Assert-ProtectedTree $runStage
+    Assert-ProtectedTree $installRoot
+
+    Invoke-Checked 'Sign-Release.ps1' 'pwsh' @(
+        '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-File', (Join-Path $WindowsRoot 'scripts\Sign-Release.ps1'),
+        '-ParentBinary', $parentExe,
+        '-HelperPackage', $packaged,
+        '-Destination', $bundle,
+        '-ManagementDestination', $kit,
+        '-Architecture', $Runtime,
+        '-Version', $Version,
+        '-CertificateThumbprint', $SigningCertificate.Thumbprint) $Path
+
+    # Sign-Release.ps1 legt seine Ziele mit den geerbten Rechten an, und der
+    # Besitzer eines neu angelegten Objekts ist je nach Richtlinie der Erzeuger
+    # und nicht die Administratorengruppe. Erst danach traegt das Bundle die
+    # Rechte, die der Installer sehen will. Das schwaecht nichts ab: es ist
+    # genau der Deskriptor, den Install-Release.ps1 seinem eigenen Ziel gibt.
+    Set-ProtectedSecurity $bundle
+    foreach ($file in Get-ChildItem -LiteralPath $bundle -Force) {
+        Set-ProtectedSecurity $file.FullName
+        Assert-ProtectedTree $file.FullName
+    }
+    Assert-ProtectedTree $bundle
+    Write-Note "signiertes Bundle: $bundle"
+    Write-Note "Management-Kit: $kit"
+
+    # Der Aufruf geht ueber den Pfad INNERHALB des Kits: Install-Release.ps1
+    # prueft sein eigenes Verzeichnis auf genau acht Eintraege und seine eigenen
+    # Bytes gegen den Pin. Deshalb landet hier auch nichts weiter im Kit - kein
+    # Protokoll, keine Kopie, nichts.
+    Invoke-Checked 'Install-Release.ps1' 'pwsh' @(
+        '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-File', (Join-Path $kit 'Install-Release.ps1'),
+        '-Bundle', $bundle,
+        '-Destination', $InstalledBundle,
+        '-Architecture', $Runtime,
+        '-Version', $Version,
+        '-ExpectedCertificateSha256', $SigningPin) $Path
+
+    Write-Note "Installation: $InstalledBundle"
+}
+
 # ----------------------------------------------------------------- desktop
 
 $desktopExe = $null
@@ -519,16 +903,51 @@ Write-Host "  Parent : $parentExe"
 Write-Host "  Helfer : $helperExe"
 if ($packaged) { Write-Host "  Paket  : $packaged" }
 if ($desktopExe) { Write-Host "  Fenster: $desktopExe" }
+if ($InstalledBundle) { Write-Host "  Install: $InstalledBundle" }
 
-Write-Step 'Was jetzt noch fehlt - und warum kein Skript es loesen kann'
-Write-Host @"
+if ($SelfSignedCert) {
+    Write-Step 'Was diese Kette traegt - und was nicht'
+    Write-Host @"
+Signiert und installiert mit einem SELBSTSIGNIERTEN Zertifikat:
+
+   Thumbprint : $($SigningCertificate.Thumbprint)
+   DER-Pin    : $SigningPin
+   verankert  : LocalMachine\Root und LocalMachine\TrustedPublisher
+   Installation: $InstalledBundle
+
+Das gilt NUR auf diesem Rechner und nur, solange dieses Zertifikat im
+Wurzelspeicher liegt. Es traegt keine Verteilung an Dritte: wer das Bundle
+woanders hinkopiert, hat dort eine Signatur ohne Anker. Ohne Zeitstempel
+endet die Gueltigkeit ausserdem mit dem Zertifikat.
+
+Die native Anmeldung kann dieser Lauf NICHT vorfuehren - sie verlangt ein
+nicht erhoehtes, interaktives Konto. Dafuer in einem NORMALEN Terminal
+(ohne Administratorrechte):
+
+   & "$InstalledBundle\einsatzarchiv.exe"
+
+Die Organisationszeremonie bleibt davon unberuehrt - Root, Trust Anchor,
+Registry, Operator-Bereitstellung. Siehe docs/operator-ceremony.md.
+
+Aufraeumen (keine Automatik, damit nichts unbemerkt verschwindet):
+Ablage- und Installationsverzeichnisse unter $ReleaseRoot tragen je eine
+Laufkennung und bleiben stehen. Zertifikat zurueckziehen hiesse: aus
+Cert:\CurrentUser\My, Cert:\LocalMachine\Root und
+Cert:\LocalMachine\TrustedPublisher entfernen.
+"@
+}
+else {
+    Write-Step 'Was jetzt noch fehlt'
+    Write-Host @"
 Signieren (Sign-Release.ps1) braucht ein Code-Signing-Zertifikat mit privatem
-Schluessel in Cert:\CurrentUser\My, EKU 1.3.6.1.5.5.7.3.3. So eines gibt es
-fuer dieses Projekt noch nicht. Das ist keine Luecke in diesem Skript: der
-Rust-Kern prueft Authenticode und die DER-Gleichheit der Signaturen von Parent
-und Helfer, und ohne Zertifikat existiert nichts, was er pruefen koennte.
+Schluessel in Cert:\CurrentUser\My, EKU 1.3.6.1.5.5.7.3.3. Fuer eigene,
+kontrollierte Rechner erzeugt und verankert -SelfSignedCert genau so eines
+und laeuft die Kette bis zur Installation durch (erhoehtes Terminal noetig):
 
-Sobald es da ist:
+   pwsh -NoProfile -File "$PSCommandPath" -SelfSignedCert
+
+Fuer eine Auslieferung an Dritte fuehrt daran kein Weg vorbei: ein Zertifikat
+einer oeffentlichen CA, danach dieselben Skripte mit dessen Thumbprint:
 
    pwsh -File "$WindowsRoot\scripts\Sign-Release.ps1" ``
        -ParentBinary "$parentExe" ``
@@ -546,3 +965,4 @@ Und auch ein signiertes, installiertes Bundle ist noch kein bedienbarer
 Writer: davor liegt die Organisationszeremonie - Root, Trust Anchor, Registry,
 Operator-Bereitstellung. Siehe docs/operator-ceremony.md.
 "@
+}
