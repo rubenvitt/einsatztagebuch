@@ -412,10 +412,15 @@ endgueltig und korrekt abgebildet. Das ist eine Umfangsentscheidung und keine
 offene Produkthaelfte; AK 30 bleibt davon unberuehrt, weil alle erlaubten
 Zustaende korrekt abgebildet sind.
 
-**Server-Mehrfachausfuehrung — besitzendes Ticket DRK-430.** Der Server fuehrt
-bei jedem erneuten Job-POST neu aus und attestiert neu. Das ist vorbestehend
-und nicht durch den Retry entstanden; der Replay-Zeuge in
-`.../transport/server/retry.rs` nimmt es mit Verweis auf DRK-430 hin.
+**Server-Mehrfachausfuehrung — besitzendes Ticket DRK-430, erledigt.** Der
+Server fuehrte bei jedem erneuten Job-POST neu aus und attestierte neu; das
+war vorbestehend und nicht durch den Retry entstanden. Seit DRK-430 fuehrt
+`execute_server` nur noch aus, solange die eigene dauerhafte Messung dieses
+Servers die physische Pflicht noch nicht erfuellt meldet — genau das
+Praedikat, das die Vollendung ohnehin verlangt. Der Replay-Zeuge in
+`.../transport/server/retry.rs` pinnt jetzt genau eine Messung statt fuenf,
+und `repeated_job_post_in_state_one_returns_the_single_existing_attestation`
+in `apps/server/tests/destruction_jobs_api.rs` haelt die Grenze fest.
 
 **Reichweite von R1 — DRK-431 geschlossen, besitzendes Ticket DRK-432.** R1
 wirkt lokal in `ea-destruction` und `ea-reader` und seit DRK-431 auch im
