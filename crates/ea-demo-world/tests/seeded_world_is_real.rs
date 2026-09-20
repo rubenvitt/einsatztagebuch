@@ -4,7 +4,7 @@
 //! verlangt einen signierten nativen Helfer, den kein Entwicklungsbau hat
 //! (`NativeExecutableIdentity::for_installed`). Was sich messen lässt, ist
 //! der Schritt davor und der eigentliche Anspruch: dass ein Bediener-Wirt die
-//! Welt OEFFNEN würde.
+//! Welt ÖFFNEN würde.
 //!
 //! [`OperatorArchiveSnapshot::open`] ist genau dieser Schritt. Sie prüft in
 //! einem Zug
@@ -182,6 +182,69 @@ fn the_reader_finds_its_entry_package_and_its_grant() {
     );
     assert_eq!(world.reader_archive_directory, world.archive_directory);
     assert_eq!(world.reader_private_key_hex.len(), 64);
+}
+
+/// Der eigentliche Reader-Zeuge: der Grant muss ENTKAPSELN.
+///
+/// Dass zwei Dateien da sind, sagt darüber nichts. Gemessen wird deshalb der
+/// Weg, den auch die Web-Anwendung geht — `verify_archive` mit dem
+/// Readerschlüssel über den MATERIALISIERTEN Bestand — und zwar gegen den
+/// falschen Schlüssel als Kontrolle. Ohne diese Gegenprobe wäre ein Bericht
+/// ohne Entschlüsselungsfehler auch dann sauber, wenn gar nichts entkapselt
+/// worden wäre.
+#[test]
+fn the_reader_key_actually_decapsulates_the_seeded_grant() {
+    let scratch = scratch("demo-world-decapsulate");
+    let root = scratch.path().join("welt");
+    let world = seed_demo_world(&root).expect("die Demowelt muss sich säen lassen");
+
+    let source = ea_recovery::FsArchiveSource::open(&world.archive_directory)
+        .expect("der gesäte Bestand muss als Quelle zu öffnen sein");
+    let anchor = ea_trust::decode_trust_anchor(&fs::read(&world.anchor_path).unwrap())
+        .expect("die Ankerbytes müssen dekodieren");
+
+    let key = support::verify_support::other_recipient_private_key();
+    let report = ea_verify::verify_archive(
+        &source,
+        &anchor,
+        ea_verify::VerifyOptions::new(support::live_clock()).with_recipient(
+            support::verify_support::other_recipient_key_thumbprint(),
+            &key,
+        ),
+    )
+    .expect("der Bestand muss sich durchlaufen lassen");
+    assert_eq!(
+        report.decryption_errors().len(),
+        0,
+        "der Readerschlüssel muss den gesäten Grant entkapseln: {:?}",
+        report
+            .decryption_errors()
+            .map(|e| e.code())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        report.recipient_grants().count(),
+        1,
+        "genau ein Grant muss diesen Readerschlüssel adressieren"
+    );
+
+    // Gegenprobe: der andere Fixture-Schlüssel ist der FALSCHE zu diesem
+    // Grant und muss HPKE erreichen und scheitern.
+    let wrong = support::verify_support::complete_recipient_private_key();
+    let wrong_report = ea_verify::verify_archive(
+        &source,
+        &anchor,
+        ea_verify::VerifyOptions::new(support::live_clock()).with_recipient(
+            support::verify_support::other_recipient_key_thumbprint(),
+            &wrong,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        wrong_report.decryption_errors().len(),
+        1,
+        "ein falscher Schlüssel muss gemeldet und nicht stillschweigend übergangen werden"
+    );
 }
 
 #[test]
