@@ -29,7 +29,6 @@ fn contents(source: &dyn ArchiveSource) -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
-#[ignore = "DRK-320: planned RED; FsArchiveSource::with_exact_component is still a stub (ruling 2026-09-13)"]
 fn exact_union_keeps_identical_bytes_once_and_only_committed_view_excludes_staging() {
     let root = support::temp_dir("exact-component-union");
     std::fs::create_dir(root.path().join("entries")).unwrap();
@@ -59,7 +58,6 @@ fn exact_union_keeps_identical_bytes_once_and_only_committed_view_excludes_stagi
 }
 
 #[test]
-#[ignore = "DRK-320: planned RED; FsArchiveSource::with_exact_component is still a stub (ruling 2026-09-13)"]
 fn address_conflicts_invalid_paths_and_incomplete_components_fail_without_precedence() {
     let root = support::temp_dir("exact-component-conflict");
     std::fs::create_dir(root.path().join("entries")).unwrap();
@@ -107,7 +105,6 @@ fn address_conflicts_invalid_paths_and_incomplete_components_fail_without_preced
 }
 
 #[test]
-#[ignore = "DRK-320: planned RED; FsArchiveSource::with_exact_component is still a stub (ruling 2026-09-13)"]
 fn component_enumeration_stops_at_the_resource_limit_even_for_duplicate_zero_byte_rows() {
     use std::cell::Cell;
     struct Excessive(Cell<usize>);
