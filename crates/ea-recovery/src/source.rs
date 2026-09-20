@@ -1,11 +1,13 @@
 use std::{
+    collections::HashMap,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
 
 use ea_archive::{
-    ArchiveBlob, ArchiveError, ArchiveSource, MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
+    ArchiveBackendError, ArchiveBlob, ArchiveError, ArchivePath, ArchiveSource, LAYOUT_PATHS_V1,
+    MAX_ARCHIVE_BLOBS_V1, MAX_TOTAL_ARCHIVE_BYTES_V1,
 };
 
 use crate::RecoveryError;
@@ -50,12 +52,127 @@ pub struct FsArchiveSource {
 }
 
 impl FsArchiveSource {
-    /// Exact component bytes remain untrusted input to the ordinary verifier.
+    /// Vereinigt diesen bereits eingelesenen Bestand mit den Bytes einer EXAKT
+    /// gebundenen Komponente.
+    ///
+    /// Die Bytes der Komponente bleiben ungeprueftes Eingabematerial des
+    /// gewoehnlichen Verifikationswegs: hier entsteht nur eine
+    /// Bytevereinigung, kein Urteil. Die Vereinigung entsteht ausschliesslich
+    /// im Speicher und schreibt KEINE Komponentenbytes in das Dateisystem —
+    /// `root` bleibt unberuehrt, und ein erneutes [`FsArchiveSource::open`]
+    /// auf derselben Wurzel sieht denselben Bestand wie zuvor.
+    ///
+    /// # Adresse vor Bytes
+    ///
+    /// Jede eingehende Adresse wird zuerst gegen den Adressvertrag eines
+    /// Bestands geprueft ([`ArchivePath`]), bevor ihre Bytes ueberhaupt
+    /// betrachtet werden. Die Adresse entscheidet dabei nie darueber, ob die
+    /// Bytes ein Archivobjekt SIND — das entscheidet weiterhin allein das
+    /// 9-Byte-Exact-Object-Praefix beim Inventarisieren. Hier wird adressiert,
+    /// nicht klassifiziert.
+    ///
+    /// # Bytegleich einmal, bytefremd gar nicht
+    ///
+    /// Eine Adresse, die dieser Bestand schon traegt, ist fuer bytegleiche
+    /// Wiederholungen idempotent — sie bleibt genau einmal in der Vereinigung
+    /// — und fuer abweichende Bytes fail-closed
+    /// ([`ArchiveBackendError::ByteConflict`]). Das ist dieselbe Zusage, die
+    /// `create_if_absent` beim Schreiben gibt
+    /// (`crates/ea-archive/src/backend.rs:20`); ein stilles Ersetzen gaebe es
+    /// hier so wenig wie dort. Die Ordnung ist fest: zuerst die Zeilen dieses
+    /// Bestands in ihrer Durchlaufreihenfolge, danach die neuen Zeilen der
+    /// Komponente in ihrer Besuchsreihenfolge.
+    ///
+    /// # Staging
+    ///
+    /// Staging-Adressen der Komponente werden UEBERNOMMEN. Sie bleiben
+    /// Sicherungsmaterial und werden nie Kettenfortschritt: genau dafuer
+    /// schneidet [`FsArchiveSource::committed_view`] sie wieder heraus, und
+    /// zwar aus derselben eingefrorenen Vereinigung, ohne erneut zu lesen.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::Path`], wenn eine eingehende Adresse keine
+    /// gueltige Transportadresse eines Bestands ist.
+    /// [`ArchiveBackendError::ByteConflict`], wenn dieselbe Adresse
+    /// abweichende Bytes traegt. [`ArchiveBackendError::InventoryMismatch`],
+    /// wenn die Komponente sich nicht zu Ende aufzaehlen laesst oder ihre
+    /// Aufzaehlung eine Ressourcengrenze des Bestands reisst: beides heisst,
+    /// dass sie ein Inventar behauptet, das sich mit diesem nicht vereinigen
+    /// laesst. Ein Fehler verwirft IMMER die ganze Vereinigung; eine
+    /// unvollstaendige Komponente wird nie teilweise uebernommen.
     pub fn with_exact_component(
         self,
-        _source: &dyn ArchiveSource,
-    ) -> Result<Self, ea_archive::ArchiveBackendError> {
-        Err(ea_archive::ArchiveBackendError::MissingLocalCommitComponent)
+        source: &dyn ArchiveSource,
+    ) -> Result<Self, ArchiveBackendError> {
+        let Self { root, mut blobs } = self;
+        // Ein linearer Vergleich je Zeile waere quadratisch, und die Schranke
+        // dieses Bestands ist `MAX_ARCHIVE_BLOBS_V1`: die Adresse muss in
+        // konstanter Zeit auffindbar sein, sonst ist die Grenze selbst der
+        // Angriff.
+        let mut address_of: HashMap<String, usize> = blobs
+            .iter()
+            .enumerate()
+            .map(|(at, (path_hint, _))| (path_hint.clone(), at))
+            .collect();
+        let mut total_bytes = blobs
+            .iter()
+            .fold(0usize, |sum, (_, bytes)| sum.saturating_add(bytes.len()));
+        let mut enumerated = 0usize;
+        let mut refusal: Option<ArchiveBackendError> = None;
+        let walked = source.visit_blobs(&mut |blob| {
+            // Eine Quelle, die den Fehler des Besuchers verschluckt und
+            // weiterreicht, darf die Vereinigung nicht doch noch wachsen
+            // lassen.
+            if refusal.is_some() {
+                return Err(ArchiveError::Unavailable);
+            }
+            // GEZAEHLT WIRD DER BESUCH, nicht die gewachsene Vereinigung.
+            // Bytegleiche Wiederholungen fallen unten zusammen und kosteten
+            // die Aufzaehlung sonst gar nichts — eine Quelle, die dieselbe
+            // leere Zeile beliebig oft reicht, liefe damit unbegrenzt weiter.
+            enumerated = enumerated.saturating_add(1);
+            if enumerated > MAX_ARCHIVE_BLOBS_V1 {
+                refusal = Some(ArchiveBackendError::InventoryMismatch);
+                return Err(ArchiveError::BlobLimit);
+            }
+            if let Err(error) = component_address(blob.path_hint()) {
+                refusal = Some(error);
+                return Err(ArchiveError::Unavailable);
+            }
+            if let Some(&at) = address_of.get(blob.path_hint()) {
+                if blobs[at].1 != blob.bytes() {
+                    refusal = Some(ArchiveBackendError::ByteConflict);
+                    return Err(ArchiveError::Unavailable);
+                }
+                return Ok(());
+            }
+            // Dieselben INKLUSIVEN Grenzen wie beim Einlesen: genau
+            // `MAX_ARCHIVE_BLOBS_V1` Zeilen und genau
+            // `MAX_TOTAL_ARCHIVE_BYTES_V1` Bytes bleiben zulaessig. Gedeckelt
+            // wird VOR dem Anlegen, sonst entstuende genau der Puffer, den der
+            // Deckel verhindern soll.
+            if blobs.len() >= MAX_ARCHIVE_BLOBS_V1 {
+                refusal = Some(ArchiveBackendError::InventoryMismatch);
+                return Err(ArchiveError::BlobLimit);
+            }
+            total_bytes = total_bytes.saturating_add(blob.bytes().len());
+            if total_bytes > MAX_TOTAL_ARCHIVE_BYTES_V1 {
+                refusal = Some(ArchiveBackendError::InventoryMismatch);
+                return Err(ArchiveError::TotalByteLimit);
+            }
+            address_of.insert(blob.path_hint().to_owned(), blobs.len());
+            blobs.push((blob.path_hint().to_owned(), blob.bytes().to_vec()));
+            Ok(())
+        });
+        if let Some(error) = refusal {
+            return Err(error);
+        }
+        // Ein Fehler der QUELLE selbst. Er bleibt eine Aussage ueber das
+        // Inventar der Komponente und wird nie zu einem Befund ueber ein
+        // einzelnes Objekt.
+        walked.map_err(|_| ArchiveBackendError::InventoryMismatch)?;
+        Ok(Self { root, blobs })
     }
     /// Liest den gesamten Bestand unter `root` ein.
     ///
@@ -149,6 +266,29 @@ impl ArchiveSource for FsArchiveSource {
         }
         Ok(())
     }
+}
+
+/// Prueft eine EINGEHENDE Adresse gegen den Adressvertrag eines Bestands.
+///
+/// Kein zweiter Vertrag, sondern [`ArchivePath`] auf einen wurzelrelativen
+/// Pfadhinweis angewandt: entweder eine der festen Dateien der Layoutliste,
+/// oder eine Adresse unterhalb eines ihrer Verzeichnisse. Genommen wird das
+/// LAENGSTE passende Verzeichnis, damit `format/schemas/x` unter
+/// `format/schemas/` faellt und nicht unter `format/`.
+///
+/// Geprueft wird damit genau das, was auch das Schreiben durchsetzt, und es
+/// bleibt eine Aussage ueber die ADRESSE: was die Bytes sind, entscheidet
+/// weiterhin allein das Inventar.
+fn component_address(path_hint: &str) -> Result<(), ArchiveBackendError> {
+    if ArchivePath::at_layout_file(path_hint).is_ok() {
+        return Ok(());
+    }
+    let directory = LAYOUT_PATHS_V1
+        .into_iter()
+        .filter(|candidate| candidate.ends_with('/') && path_hint.starts_with(candidate))
+        .max_by_key(|candidate| candidate.len())
+        .ok_or(ArchiveBackendError::Path)?;
+    ArchivePath::in_dir(directory, &path_hint[directory.len()..]).map(|_| ())
 }
 
 /// Liest ein Verzeichnis und steigt in seine Unterverzeichnisse ab.
