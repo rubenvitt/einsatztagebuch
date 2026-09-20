@@ -1003,6 +1003,157 @@ async fn durable_started_job_removes_every_s3_generation_and_records_only_server
     cleanup_fixture(database, &bucket).await;
 }
 
+/// Spec §16.3 (design.md:1856): a merely resent event must not run a step
+/// twice. In state 1 this server already holds its own successful measurement,
+/// so the exact repeated job POST returns precisely that one — one signed
+/// attestation, one measurement row, no further provider write. The wanted
+/// re-measurements are pinned next door: state 2 in
+/// `pending_backup_resumes_the_same_job_only_after_actual_version_removal`
+/// and the failed preceding measurement in
+/// `failed_measurement_flush_preserves_start_and_resumes_after_host_restart`.
+#[tokio::test]
+async fn repeated_job_post_in_state_one_returns_the_single_existing_attestation() {
+    let fixture = JobFixture::new();
+    let database = common::fresh_database().await;
+    let bucket = common::unique_bucket_name("ea-t12-replay1");
+    common::ensure_bucket(&bucket).await;
+    let ready = fixture.seed(&database, &bucket).await;
+    let jobs = format!("/v1/destructions/{}/jobs", hex::encode([0x74; 16]));
+    let events = format!("/v1/destructions/{}/events", hex::encode([0x74; 16]));
+    assert_eq!(
+        common::call(&common::ApiCall {
+            ready: &ready,
+            signer_seed: COMPONENT_SEED,
+            endpoint: EndpointV1::DestructionJobs,
+            target: &jobs,
+            body: Some(&fixture.body),
+            request_id: [0x71; 16],
+        })
+        .await
+        .status,
+        202
+    );
+    let request = transition(&fixture, None, 0, None, 0x71);
+    assert_eq!(
+        common::call(&common::ApiCall {
+            ready: &ready,
+            signer_seed: COMPONENT_SEED,
+            endpoint: EndpointV1::DestructionEvents,
+            target: &events,
+            body: Some(&request),
+            request_id: [0x72; 16],
+        })
+        .await
+        .status,
+        202
+    );
+    let start = transition(&fixture, Some(0), 1, Some(object_hash(&request)), 0x72);
+    let executed = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: COMPONENT_SEED,
+        endpoint: EndpointV1::DestructionEvents,
+        target: &events,
+        body: Some(&start),
+        request_id: [0x73; 16],
+    })
+    .await;
+    assert_eq!(
+        executed.status,
+        202,
+        "the valid start measures once: {:?}",
+        common::error_code(&executed.body)
+    );
+    let measured = DestructionStatusResponseV1::decode(&executed.body).unwrap();
+    assert_eq!(measured.state(), 1, "Writer and Reader remain outstanding");
+    assert_eq!(measured.attestations().len(), 1);
+    let attested = measured.attestations()[0].object_hash();
+    let written = trust_object_versions(&bucket).await;
+    // Continuing at the desktop happens LATER, so each resume carries the same
+    // identity on a fresh clock. Replaying under the identical clock would
+    // produce a byte-identical attestation and hide a second execution behind
+    // the content-addressed primary key.
+    let mut ready = ready;
+    for (index, at) in [NOW + 1, NOW + 2].into_iter().enumerate() {
+        let host = common::spawn_server_with_deletion_component(
+            database.pool().clone(),
+            UnixMillis::new(at),
+            fixture.original.anchor.organization_id(),
+            SERVER_SEED,
+            fixture.server,
+            &bucket,
+            Some((COMPONENT_SEED, fixture.component)),
+        )
+        .await;
+        ready = common::ReadyServer {
+            server: host,
+            closure: ready.closure,
+        };
+        let replayed = common::call_at(
+            &common::ApiCall {
+                ready: &ready,
+                signer_seed: CONTROLLER_SEED,
+                endpoint: EndpointV1::DestructionJobs,
+                target: &jobs,
+                body: Some(&fixture.body),
+                request_id: [0x74 + index as u8; 16],
+            },
+            at,
+        )
+        .await;
+        assert_eq!(
+            replayed.status,
+            202,
+            "the resent job stays accepted: {:?}",
+            common::error_code(&replayed.body)
+        );
+        let status = DestructionStatusResponseV1::decode(&replayed.body).unwrap();
+        assert_eq!(status.state(), 1, "no state moved");
+        assert_eq!(
+            status.attestations().len(),
+            1,
+            "the resent job must not sign a second attestation"
+        );
+        assert!(
+            status.attestations()[0].object_hash() == attested,
+            "exactly the existing measurement is returned"
+        );
+        assert_eq!(status.transitions().len(), 2, "no event was appended");
+    }
+    let rows: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM destruction_server_measurements),\
+         (SELECT count(*) FROM destruction_attestations),\
+         (SELECT count(*) FROM destruction_attestation_intake)",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        (1, 1, 0),
+        "one measurement, one attestation, no re-import of the server's own claim"
+    );
+    assert_eq!(
+        trust_object_versions(&bucket).await,
+        written,
+        "the replay wrote no further provider object"
+    );
+    cleanup_fixture(database, &bucket).await;
+}
+
+/// Every actual `.etb` generation the provider holds for this bucket.
+async fn trust_object_versions(bucket: &str) -> usize {
+    common::object_store_client()
+        .await
+        .list_object_versions()
+        .bucket(bucket)
+        .prefix("etb/")
+        .send()
+        .await
+        .unwrap()
+        .versions()
+        .len()
+}
+
 #[tokio::test]
 async fn reserved_target_cannot_enter_real_s3_staging_again() {
     use ea_sync_server::ObjectStore;
