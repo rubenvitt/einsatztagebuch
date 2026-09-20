@@ -72,6 +72,9 @@ serde_json = { workspace = true, optional = true }
 # ECHTE Welt ist. Die Fläche ist ungemerkmalt öffentlich; `test-support`
 # wird hier ausdrücklich NICHT angefordert.
 ea-admin.workspace = true
+ea-recovery.workspace = true
+ea-trust.workspace = true
+ea-verify.workspace = true
 ea-archive.workspace = true
 ea-format.workspace = true
 serde_json.workspace = true
