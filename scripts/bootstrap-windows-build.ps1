@@ -224,6 +224,20 @@ if (-not $msvc) {
 }
 Write-Note "MSVC ($MsvcComponent): $msvc"
 
+# Perl, und zwar fuer den RUST-Teil — deshalb steht es nicht in der README des
+# Windows-Teilbaums, die nur den .NET-Helfer beschreibt.
+#
+# `Cargo.toml` pinnt `rusqlite`/`libsqlite3-sys` auf das Merkmal
+# `bundled-sqlcipher-vendored-openssl` (ADR 0002, verschluesselter lokaler
+# Speicher). SQLCipher braucht OpenSSLs Krypto, das Repo vendored es statt sich
+# auf ein System-OpenSSL zu verlassen, und `openssl-src` fuehrt zum Bauen
+# `perl ./Configure` aus. Ohne perl bricht `openssl-sys` mit
+#   Error configuring OpenSSL build: Command 'perl' not found
+# ab — gemessen auf ARM64 am 2026-09-20. NASM braucht es nicht, der Aufruf
+# uebergibt `no-asm`; cmake ebenfalls nicht, `aws-lc-sys` ist nicht im Lockfile.
+Assert-Tool -Name 'perl' -Label 'Perl (baut das vendored OpenSSL von SQLCipher)' `
+    -WingetId 'StrawberryPerl.StrawberryPerl'
+
 # ------------------------------------------------------------------ checkout
 
 Write-Step 'Arbeitskopie herstellen'
