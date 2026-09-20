@@ -30,11 +30,27 @@ async-trait.workspace = true
 # einer Registrierungsaenderung an ihrer FOLGE misst — an dem Grant-Plan, den
 # `ea_writer::build_grant_plan` aus `SelectedRegistryHead::active_certificates`
 # bildet. `ea-admin` haelt bewusst keine `ea-writer`-Kante; die Zusammenschau
-# beider Seiten hat nur in dieser Testcrate einen Ort. Das Merkmal
-# `test-support` von `ea-admin` bleibt AUS: die Linie kommt aus dem
-# `#[path]`-eingebundenen Supportmodul von `ea-trust`, nicht aus
-# Fixturkonstruktoren der Fassade.
-ea-admin.workspace = true
+# beider Seiten hat nur in dieser Testcrate einen Ort.
+#
+# `test-support` (DRK-427): die zwei buendelnden Systemziele
+# `e2e_organization_lifecycle` und `e2e_recovery_fresh_machine` binden
+# `crates/ea-admin/tests/support/mod.rs` per `#[path]` ein — dieselbe Kulisse,
+# die `crates/ea-admin/tests/bootstrap.rs` fuehrt. Jenes Modul nennt
+# `RecoveryTestObservation` und `verify_fresh_machine_recovery_test` in seinen
+# Importen; beide stehen hinter diesem Merkmal, und ohne die Kante uebersetzt
+# das Modul gar nicht. Eine zweite, hier nachgebaute Zeremonienkulisse waere
+# die zweite Wahrheit, die dieses Paket ueberall sonst vermeidet.
+# Die Kante ist eine DEV-Kante, und nur die duerfen diese Flaeche anfordern —
+# `tools/xtask/tests/workspace.rs::no_production_build_carries_the_ea_admin_test_surface`
+# prueft `dependencies` und `build-dependencies` und laesst
+# `[dev-dependencies]` ausdruecklich zu; kein Produktionsbau erreicht die
+# Fixturkonstruktoren dadurch.
+# Was die Kante NICHT aendert: `e2e_registry_effectiveness` baut seine Linie
+# weiter aus dem `#[path]`-eingebundenen Supportmodul von `ea-trust` und nicht
+# aus Fixturkonstruktoren der Fassade. Das war bis hierher vom Merkmalsstand
+# erzwungen und ist jetzt eine Regel der Autorenschaft; der Zeuge selbst ist
+# unveraendert.
+ea-admin = { workspace = true, features = ["test-support"] }
 ea-archive.workspace = true
 # Die Wirtbackends der Stufe 2: `LocalPathBackend`, `ControlledNetworkBackend`,
 # `ArchiveHealthCheckV1`, `ProfileMigrator`, `MigrationFaultPoint` und der
