@@ -269,6 +269,18 @@ if ($env:RUSTUP_TOOLCHAIN -and $env:RUSTUP_TOOLCHAIN -ne $pin) {
 Invoke-Checked 'rustup toolchain install' 'rustup' @('toolchain', 'install', $pin, '--profile', 'minimal') $Path
 Invoke-Checked 'rustup target add' 'rustup' @('target', 'add', '--toolchain', $pin, $RustTriple) $Path
 
+# Die Fassung wird ueber die Umgebung gewaehlt und NICHT ueber `cargo +<pin>`.
+# Gemessen auf Windows/PowerShell 7: das `+`-Argument kam beim rustup-Shim als
+# EIN Argument an, und rustup meldete
+#   toolchain '1.95.0 build --locked --release -p ...' is not installed
+# waehrend dieselbe Uebergabeform fuer `rustup target add` sauber durchlief.
+# Warum genau das `+`-Token anders behandelt wird, ist offen; die Variable
+# umgeht die Frage und ist ohnehin die deutlichere Aussage. Ein FREMDER Wert
+# ist weiter oben bereits abgewiesen worden, hier wird also nur der Pin gesetzt,
+# den `rust-toolchain.toml` selbst nennt.
+$env:RUSTUP_TOOLCHAIN = $pin
+Write-Note "RUSTUP_TOOLCHAIN: $env:RUSTUP_TOOLCHAIN"
+
 $sdkPin = (Get-Content -LiteralPath (Join-Path $WindowsRoot 'global.json') -Raw | ConvertFrom-Json).sdk.version
 # Das SDK kommt ISOLIERT in die Arbeitskopie und nicht auf die Maschine.
 #
@@ -327,7 +339,7 @@ Write-Note "CARGO_TARGET_DIR: $env:CARGO_TARGET_DIR"
 
 Write-Step 'Parent-CLI bauen (einsatzarchiv.exe)'
 Invoke-Checked 'cargo build' 'cargo' @(
-    '+' + $pin, 'build', '--locked', '--release',
+    'build', '--locked', '--release',
     '-p', 'einsatzarchiv-cli', '--target', $RustTriple) $Path
 
 $parentExe = Join-Path $env:CARGO_TARGET_DIR "$RustTriple\release\einsatzarchiv.exe"
