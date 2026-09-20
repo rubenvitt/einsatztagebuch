@@ -61,6 +61,31 @@ def entitlements(team, identifier):
     return value
 
 
+KEYCHAIN_GROUPS = "keychain-access-groups"
+
+
+def covers_keychain_group(granted, team, required):
+    """Whether a profile AUTHORIZES the helper's keychain group.
+
+    Coverage and not equality, and the reason is measured, not assumed: Apple
+    issues Developer ID profiles with the team wildcard and never with an exact
+    group. Profile L4L537AM9Z for org.einsatzarchiv.operator.native, generated
+    2026-09-20, grants exactly ["H95J852PKP.*"]; the exact string is not
+    obtainable from the portal on this path, so an equality check here refuses
+    every profile Apple can actually issue.
+
+    The product property does not rest on this check. The helper's items live in
+    the exact group because the SIGNED entitlement says so, and verify_code pins
+    that with equality. The profile is only the authorization envelope.
+
+    The accepted wildcard is pinned to the team on purpose. A bare "*" would
+    carry an empty prefix and cover everything, and a prefix like "H" would
+    reach into a foreign team; neither is an envelope this release may use.
+    """
+    require(isinstance(granted, list), "profile lacks a keychain group list")
+    return any(entry == required or entry == team + ".*" for entry in granted)
+
+
 def validate_profile(profile, team, identifier):
     require(profile.get("TeamIdentifier") == [team], "provisioning profile Team mismatch")
     expiry = profile.get("ExpirationDate")
@@ -68,6 +93,10 @@ def validate_profile(profile, team, identifier):
             datetime.datetime.now(datetime.timezone.utc), "expired or undated provisioning profile")
     granted = profile.get("Entitlements", {})
     for key, expected in entitlements(team, identifier).items():
+        if key == KEYCHAIN_GROUPS:
+            require(len(expected) == 1 and covers_keychain_group(granted.get(key), team, expected[0]),
+                    "profile does not authorize the keychain group: " + key)
+            continue
         require(granted.get(key) == expected, "profile lacks exact entitlement: " + key)
     require(not any(granted.get(key) for key in UNSAFE), "development or unsafe profile refused")
 

@@ -19,12 +19,32 @@ class ReleaseTests(unittest.TestCase):
         return {"TeamIdentifier": [self.team], "Entitlements": release.entitlements(self.team, identifier),
                 "ExpirationDate": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)}
 
-    def test_helper_exact_group(self):
+    def test_helper_group_coverage(self):
+        # This witness used to refuse the team wildcard. It was measured wrong:
+        # Apple issues Developer ID profiles with exactly that wildcard and with
+        # no exact group. Profile L4L537AM9Z for org.einsatzarchiv.operator.native,
+        # generated 2026-09-20, grants ["H95J852PKP.*"], so the former assertion
+        # refused every profile the portal can issue on this path. The exact group
+        # remains required on the SIGNED entitlement; test_signed_entitlements_are
+        # _exact below and verify_code carry that half.
         value = self.profile(release.HELPER)
         release.validate_profile(value, self.team, release.HELPER)
-        value["Entitlements"]["keychain-access-groups"] = [self.team + ".*"]
-        with self.assertRaises(ValueError):
+        for accepted in ([self.team + ".*"], [self.team + ".other", self.team + ".*"]):
+            value["Entitlements"]["keychain-access-groups"] = accepted
             release.validate_profile(value, self.team, release.HELPER)
+        # A bare star carries an empty prefix, a foreign team is a foreign team,
+        # and a deeper wildcard does not reach this group.
+        for refused in (["*"], ["OTHER12345.*"], [self.team + ".org.einsatzarchiv.other.*"],
+                        [self.team + ".other"], [], None, self.team + ".*"):
+            value["Entitlements"]["keychain-access-groups"] = refused
+            with self.assertRaises(ValueError):
+                release.validate_profile(value, self.team, release.HELPER)
+
+    def test_signed_entitlements_stay_exact(self):
+        # The profile may cover, the signature may not: the helper's signed
+        # entitlement names the one group and nothing wider.
+        self.assertEqual(release.entitlements(self.team, release.HELPER)["keychain-access-groups"],
+                         [self.team + "." + release.HELPER])
 
     def test_es_entitlement_required(self):
         value = self.profile(release.MONITOR)

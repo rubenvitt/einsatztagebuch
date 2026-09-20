@@ -179,10 +179,16 @@ no production CLI, environment, account field or plist bypass.
 `build.sh` creates both unsigned Mach-O executables. The signed build requires
 the actual compiled Rust CLI, explicit Apple Team ID, signing-certificate
 SHA-1 identity, and two Apple-issued provisioning profiles. One profile must
-authorize the helper's exact dedicated Keychain access group; the other must
-authorize `com.apple.developer.endpoint-security.client`. Wildcard/mismatched,
-expired, unsafe or development profiles fail. The ES entitlement must be
-obtained through Apple's deployment process; no script grants it.
+authorize the helper's dedicated Keychain access group (see the wildcard
+qualification below); the other must authorize
+`com.apple.developer.endpoint-security.client`. Mismatched, expired,
+unsafe or development profiles fail. A wildcard fails everywhere EXCEPT the
+helper's Keychain group, where Apple issues `<team>.*` and no exact group at
+all (measured on profile L4L537AM9Z, 2026-09-20); `validate_profile` therefore
+accepts a team-pinned wildcard as the authorization envelope, while the signed
+entitlement still names the exact group and `verify_code` pins it. The ES
+entitlement must be obtained through Apple's deployment process; no script
+grants it.
 
 ```sh
 rtk proxy sh crates/ea-admin/native/macos/build-signed.sh \
