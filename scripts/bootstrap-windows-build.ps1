@@ -454,6 +454,15 @@ if (-not $SkipPackage) {
     Write-Note "Paket: $packaged"
 }
 
+# -------------------------------------------------------------- smoke start
+
+# Das gebaute Programm einmal wirklich starten. Ohne Argumente schreibt es
+# seine Kommandouebersicht und endet mit 0 (gemessen), es ist also ein
+# ungefaehrlicher Lebendnachweis und zugleich die Antwort auf „und was kann
+# das Ding jetzt".
+Write-Step 'Einsatzarchiv starten'
+Invoke-Checked 'einsatzarchiv' $parentExe @() $Path
+
 # ------------------------------------------------------------------ summary
 
 Write-Step 'Fertig'
