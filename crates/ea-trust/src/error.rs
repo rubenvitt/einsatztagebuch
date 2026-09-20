@@ -122,6 +122,7 @@ pub enum RegistryError {
     ActivationMissing,
     PolicyMismatch,
     SequenceLease,
+    DeviceRoleConflict,
 }
 
 impl RegistryError {
@@ -142,6 +143,7 @@ impl RegistryError {
             Self::ActivationMissing => "EA-TRUST-ACTIVATION-MISSING",
             Self::PolicyMismatch => "EA-TRUST-POLICY-MISMATCH",
             Self::SequenceLease => "EA-TRUST-SEQUENCE-LEASE",
+            Self::DeviceRoleConflict => "EA-TRUST-DEVICE-ROLE-CONFLICT",
         }
     }
 }
