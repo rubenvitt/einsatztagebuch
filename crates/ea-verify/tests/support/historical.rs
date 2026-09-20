@@ -49,6 +49,20 @@ pub fn fixture_with_payload(
 pub fn fixture_with_two_old_entries(plaintext: &[u8]) -> HistoricalFixture {
     fixture_with_options(|_, _| plaintext.to_vec(), None, None, None, true, true)
 }
+/// Dieselben ZWEI alten Einträge über einem GEWÄHLTEN Klartext.
+///
+/// Für den Zeugen, der die alten Einträge nach der Entkapselung auch LIEST —
+/// die Recovery-Probe der Stufe 5 (`ea_recovery::RecoveryArchiveProbe`)
+/// validiert jede entschlüsselte Nutzlast gegen eine der fünf
+/// Schemabestimmungen, und [`COMPLETE_PLAINTEXT_V1`] trifft bewusst keine.
+/// Beide alten Einträge tragen denselben Klartext und je einen eigenen CEK.
+///
+/// [`COMPLETE_PLAINTEXT_V1`]: super::COMPLETE_PLAINTEXT_V1
+pub fn fixture_with_two_old_entries_and_payload(
+    payload: impl FnOnce(RegistryVersion, ObjectHash) -> Vec<u8>,
+) -> HistoricalFixture {
+    fixture_with_options(payload, None, None, None, true, true)
+}
 pub struct HostOptions {
     pub not_after: i64,
     pub max_age: u64,

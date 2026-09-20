@@ -118,8 +118,11 @@ Zeugenflaeche: `apps/cli/tests/operator_destruction/`,
 
 **Einzelzusagen aus Plan Task 14 Step 3.** Der Plan buendelt sie in zwei
 Systemzielen, `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs` und
-`e2e_recovery_fresh_machine.rs`, die es NICHT gibt (siehe `## Dokumentierte
-Grenzen`). Die Einzelzusagen haben folgende Zeugen:
+`e2e_recovery_fresh_machine.rs`. Beide sind mit DRK-427 gebaut und lesen je
+1/0/0 (0,4 s beziehungsweise 1,0 s Testzeit, ohne Netzdienste). Sie fuehren
+KEINE neue Zusage ein: jeder ihrer Abschnitte ruft dieselbe Fassade wie der
+Einzelzeuge in der Tabelle unten, und was sie nicht buendeln koennen, steht in
+`## Dokumentierte Grenzen`. Die Einzelzusagen haben folgende Zeugen:
 
 | Zusage aus Step 3 | Zeuge | Messung |
 |---|---|---|
@@ -373,13 +376,42 @@ Leser fuer das Sperrbit. `administration_runtime/authorization.rs:118/:310`
 verwerfen Autorisierungsfenster, keine Bedienersitzung, und buchen deshalb
 keinen Ablauf.
 
-**Zwei buendelnde Systemziele aus Plan Task 14 nicht gebaut — besitzendes
-Ticket DRK-427 (S5-F9).** `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs`
-und `e2e_recovery_fresh_machine.rs` (siehe Abschnitt 3) gibt es nicht. Jede
-ihrer Einzelzusagen hat einen der dort aufgefuehrten Zeugen; es fehlt der EINE
-Lauf, der sie in einer Organisation bzw. auf einer frischen Maschine
-nacheinander ausfuehrt. Im Plan bleiben Task 14 Step 3 und Step 4 deshalb
-offen.
+**Geschlossen mit DRK-427: die zwei buendelnden Systemziele aus Plan Task
+14.** `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs` (Einrichtung
+bis zur Recovery-Bereitschaft, ausstehende Geraeteaktivierung, Widerrufsgrenze,
+Lease/Rueckrollen/Gabelung/Ueberalterung, Uhrfreigabe, Writer-Uebergang,
+Nachtrag, Vernichtung) und `e2e_recovery_fresh_machine.rs`
+(Offline-Schluesselquelle, Recovery auf frischer Maschine, Urteil des
+gefuehrten Recovery-Tests ueber genau diese Messung, Schluesselinventar,
+Re-Grant) laufen je 1/0/0, rein dateisystem- und prozessintern und ohne
+`xtask integration up`.
+
+Was sie AUSDRUECKLICH nicht buendeln, und warum:
+
+- Beide laufen ueber mehrere Kulissen, nicht ueber eine. Die
+  Einrichtungszeremonie lebt vor der Registrierungslinie, der
+  Writer-Uebergang verlangt zwei Geraete mit eigenem Schluesselspeicher, die
+  Vernichtung eine Policy mit `destructionEnabled` und zwei
+  `destructionApprove`-Zertifikate, und die Bestandsfixture hat keine
+  Zeremonie. Jede Naht ist im jeweiligen Zeugen benannt.
+- Schritt 12 der Zeremonie und die gemessene Recovery-Probe laufen auf zwei
+  Organisationen. Gebuendelt ist das URTEIL:
+  `ea_admin::verify_fresh_machine_recovery_test` bewertet die WIRKLICH
+  gemessene Probe (Medien, Anker, Abdruck, Lesbarkeit, Sample kommen aus dem
+  Lauf), und dieselbe Funktion fuehrt die Organisation der Zeremonie nach
+  `Ready`.
+- Die Reader-Haelfte des Nachtragszeugen (mehrere verkettete Nachtraege an
+  einem Faden) bleibt bei
+  `crates/ea-admin/tests/amendment.rs`; die Uebergangskulisse fuehrt den
+  oeffenbaren Wiederherstellungsempfaenger statt eines oeffenbaren Readers.
+- Die physischen Vernichtungszweige (sofort, backup-pending, unerreichbar,
+  Fortsetzen) und der NATIVE gefuehrte Recovery-Test bleiben bei ihren
+  nativen Zeugen in `apps/cli`; sie verlangen einen gemessenen Wirt
+  beziehungsweise eine echte Fremdmaschine (AK 30, AK 52).
+
+Im Plan sind Task 14 Step 3 und Step 4 damit im Umfang dieser beiden Ziele
+belegt; die nativen und dienstgebundenen Teile von Step 4 bleiben bei den
+Kommandos, die der Plan dort nennt.
 
 **Geschlossen mit den Folgetickets DRK-319, DRK-321, DRK-324 und DRK-326.**
 Den nativen Erzeuger der Kante `incompleteUnreachableReplica` nach

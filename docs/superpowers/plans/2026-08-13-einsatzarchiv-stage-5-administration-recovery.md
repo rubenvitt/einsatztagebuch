@@ -20,8 +20,11 @@
 > gesetzt, wo der Schritt belegt ist (Zeugen und Zahlen in
 > `docs/traceability/stage-5-gate.md`). Zwei Schritte bleiben bewusst offen:
 > Task 14 Step 3 und Step 4 (die bündelnden Systemziele
-> `e2e_organization_lifecycle` und `e2e_recovery_fresh_machine` sind nicht
-> gebaut, DRK-427). Der native Retry aus `incompleteUnreachableReplica`
+> `e2e_organization_lifecycle` und `e2e_recovery_fresh_machine` sind mit
+> DRK-427 gebaut und lesen je 1/0/0; die nativen und dienstgebundenen Teile
+> von Step 4 bleiben bei den dort genannten Kommandos — Grenzen in
+> `docs/traceability/stage-5-gate.md`, `## Dokumentierte Grenzen`). Der native
+> Retry aus `incompleteUnreachableReplica`
 > (Task 12) ist per Ruling vom 13.09.2026 an DRK-319 verschoben; die Kante
 > bleibt Zusage dieses Plans.
 
