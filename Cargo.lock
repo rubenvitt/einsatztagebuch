@@ -1867,6 +1867,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ea-demo-world"
+version = "0.1.0"
+dependencies = [
+ "ea-admin",
+ "ea-archive",
+ "ea-crypto",
+ "ea-format",
+ "ea-key-provider",
+ "ea-local-store",
+ "ea-operator",
+ "ea-recovery",
+ "ea-schema",
+ "ea-time",
+ "ea-trust",
+ "ea-types",
+ "ea-verify",
+ "ed25519-dalek",
+ "hex",
+ "minicbor",
+ "serde_json",
+]
+
+[[package]]
 name = "ea-desktop"
 version = "0.1.0"
 dependencies = [
@@ -7574,6 +7597,7 @@ dependencies = [
  "cddl",
  "cddl-cat",
  "ea-cbor",
+ "ea-demo-world",
  "ea-format",
  "ea-schema",
  "jsonschema",
