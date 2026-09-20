@@ -70,16 +70,21 @@ Der Schalter erzeugt (oder verwendet wieder) das Zertifikat in
 `LocalMachine\Root` und `LocalMachine\TrustedPublisher`, beweist mit einer
 Wegwerfdatei, dass `Set-AuthenticodeSignature` damit `Valid` liefert, legt einen
 geschützten Ablage- und Installationsbaum an und ruft dann Sign-Release.ps1 und
-Install-Release.ps1 unverändert auf. Ein zweiter Lauf legt kein zweites
-Zertifikat an; Ablage und Installation bekommen je eine eigene Laufkennung, ein
-bestehendes Verzeichnis wird also nie überschrieben oder gelöscht.
+Install-Release.ps1 unverändert auf. Ablage und Installation bekommen je eine
+eigene Laufkennung, ein bestehendes Verzeichnis wird also nie überschrieben oder
+gelöscht. Ein zweiter Lauf nimmt dasselbe Zertifikat wieder, solange es noch
+mehr als 30 Tage gültig ist; danach legt er ein neues an und sagt dazu, dass das
+alte im Wurzelspeicher verankert bleibt, bis jemand es von Hand entfernt.
 
 `-SelfSignedCert` verlangt einen ERHÖHTEN Lauf (Install-Release.ps1 besteht
 selbst darauf) und ändert damit den Rechner: Wurzelspeicher und ein geschützter
 Installationsbaum. Zwei Folgen davon sind unangenehm und deshalb hier benannt:
 ein erhöhter Lauf hinterlässt Arbeitskopie, `.dotnet` und `target` mit erhöhtem
 Besitzer, was einen späteren nicht erhöhten Lauf auf demselben `-Path` stören
-kann; und die native Anmeldung selbst kann dieser Lauf nicht vorführen, weil sie
+kann — deshalb für `-SelfSignedCert` einen EIGENEN `-Path` nehmen und nicht die
+Arbeitskopie, in der normal entwickelt wird, etwa
+`-Path C:\ea-release -SelfSignedCert`; und die native Anmeldung selbst kann
+dieser Lauf nicht vorführen, weil sie
 ein NICHT erhöhtes interaktives Konto braucht. Das Skript gibt den dafür nötigen
 Befehl am Ende aus, statt einen Erfolg zu behaupten.
 
@@ -364,16 +369,35 @@ function Test-CodeSigning($Certificate) {
 }
 
 function Set-ProtectedSecurity([string]$LiteralPath) {
-    $item = Get-Item -LiteralPath $LiteralPath -Force
-    if ($item.PSIsContainer) {
-        $security = [Security.AccessControl.DirectorySecurity]::new()
-        $security.SetSecurityDescriptorSddlForm($ProtectedDirectorySddl)
-    }
-    else {
-        $security = [Security.AccessControl.FileSecurity]::new()
-        $security.SetSecurityDescriptorSddlForm($ProtectedFileSddl)
-    }
+    $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $directory = (Get-Item -LiteralPath $LiteralPath -Force).PSIsContainer
+
+    # Besitzer und DACL verlangen UNTERSCHIEDLICHE Rechte - WRITE_OWNER gegen
+    # WRITE_DAC -, und ein Aufruf, der beides traegt, scheitert an dem Teil, der
+    # fehlt. Deshalb erst der Besitzer allein: Set-Acl schreibt nur die
+    # Abschnitte, die am uebergebenen Deskriptor auch wirklich gesetzt wurden.
+    # Der Besitzer ist hier keine Formsache - Assert-EaAclPolicy laesst nur
+    # SYSTEM, Administratoren und TrustedInstaller durch, und der Erzeuger eines
+    # frischen Verzeichnisses ist je nach Richtlinie keins davon.
+    $owner = if ($directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
+    $owner.SetOwner($administrators)
+    Set-Acl -LiteralPath $LiteralPath -AclObject $owner
+
+    $sddl = if ($directory) { $ProtectedDirectorySddl } else { $ProtectedFileSddl }
+    $security = if ($directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
+    $security.SetSecurityDescriptorSddlForm($sddl)
     Set-Acl -LiteralPath $LiteralPath -AclObject $security
+
+    # Zurueckgelesen statt geglaubt. Ohne diese Zeile faellt ein nicht
+    # uebernommener Besitzerwechsel erst spaeter auf, als nacktes
+    # 'Protected owner and DACL required' aus dem Modul - richtig geurteilt,
+    # aber ohne den Hinweis, woran es lag.
+    $applied = Get-Acl -LiteralPath $LiteralPath
+    $appliedOwner = $applied.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($appliedOwner -ne $administrators.Value) {
+        Stop-WithRemedy "Besitzer von '$LiteralPath' ist $appliedOwner statt der Administratorengruppe; Install-Release.ps1 lehnt den Baum damit ab." `
+            "Besitz uebernehmen und erneut ausfuehren:`n  takeown /F `"$LiteralPath`" /A"
+    }
 }
 
 function New-ProtectedDirectory([string]$LiteralPath) {
@@ -467,7 +491,17 @@ if ($SelfSignedCert) {
         $thumbprint = $signer.Thumbprint
     }
     else {
-        Write-Note 'Kein passendes Zertifikat gefunden - es wird eines angelegt'
+        # Ehrlich bleiben: ein abgelaufenes oder in den 30-Tage-Abstand
+        # gelaufenes Zertifikat desselben Betreffs wird NICHT ersetzt. Es bleibt
+        # im Benutzerspeicher und vor allem bleibt es im Wurzelspeicher der
+        # Maschine verankert. Wer nicht aufraeumt, hat danach zwei Wurzeln fuer
+        # dasselbe Projekt - deshalb steht es hier und wird nicht verschwiegen.
+        $stale = @(Get-ChildItem -LiteralPath 'Cert:\CurrentUser\My' |
+            Where-Object { $_.Subject -like '*CN=Einsatzarchiv Self-Signed Release Signer*' })
+        foreach ($old in $stale) {
+            Write-Note "ALT: $($old.Thumbprint) laeuft $($old.NotAfter.ToString('yyyy-MM-dd')) ab und bleibt verankert - von Hand entfernen"
+        }
+        Write-Note 'Kein brauchbares Zertifikat gefunden - es wird eines angelegt'
         $thumbprint = New-SelfSignedSigner
         Write-Note "Zertifikat angelegt: $thumbprint"
     }
