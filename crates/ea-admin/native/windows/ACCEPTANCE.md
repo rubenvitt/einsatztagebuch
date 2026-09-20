@@ -15,6 +15,19 @@ installer into `/private/tmp/drk271-dotnet`, with CLI home and NuGet cache also
 isolated under `/private/tmp`. No global SDK/package installation. SDK/NuGet
 network access was approved by the execution approval review.
 
+**Addendum 2026-09-20 — the SDK pin moved and this table has NOT been
+remeasured against it.** `global.json` now reads `10.0.112` with
+`rollForward: latestPatch` instead of `10.0.100` with `rollForward: disable`.
+The reason is that 10.0.112 is the security patch of the same feature band, and
+a build toolchain deliberately held on a superseded patch is supply chain nobody
+wants to defend later. The band stays pinned because the band, not the patch, is
+what changes MSBuild, the analyzers and the language version; the machine-wide
+10.0.4xx that winget installs remains excluded. Both patches are still
+retrievable from the CDN even though the download page lists only the newest per
+band, so `dotnet-install --version` reproduces either exactly. Every row above
+was observed on 10.0.100 and stands as the record of that run; a run on 10.0.112
+is required before any row may be claimed for the new pin.
+
 | Check | Observed result |
 |---|---|
 | Initial `dotnet build ... -r win-x64` | exit 0, 0 warnings, 0 errors |
