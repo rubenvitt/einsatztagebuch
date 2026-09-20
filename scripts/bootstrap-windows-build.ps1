@@ -76,6 +76,10 @@ Skip the portable .NET protocol suite. The build itself still runs.
 .PARAMETER SkipPackage
 Stop after the build instead of staging the release bundle with Package.ps1.
 
+.PARAMETER Desktop
+Also build the Tauri writer application and start it. This pulls in Node and
+pnpm, which the release path does not need, so it is opt-in.
+
 .PARAMETER NoInstall
 Do not install anything. Report a missing prerequisite with its winget command
 and stop. Use this in CI or on a managed machine.
@@ -92,6 +96,7 @@ param(
     [ValidateSet('win-x64', 'win-arm64', IgnoreCase = $false)][string]$Runtime,
     [switch]$SkipTests,
     [switch]$SkipPackage,
+    [switch]$Desktop,
     [switch]$NoInstall
 )
 
@@ -454,6 +459,50 @@ if (-not $SkipPackage) {
     Write-Note "Paket: $packaged"
 }
 
+# ----------------------------------------------------------------- desktop
+
+$desktopExe = $null
+if ($Desktop) {
+    Write-Step 'Tauri-Anwendung bauen'
+
+    Assert-Tool -Name 'node' -Label 'Node.js' -WingetId 'OpenJS.NodeJS'
+    $wantedNode = (Get-Content -LiteralPath (Join-Path $Path '.node-version') -Raw).Trim()
+    $haveNode = ((& node --version) -join '').TrimStart('v')
+    if ($haveNode -ne $wantedNode) {
+        # Kein Abbruch: `.node-version` ist der Pin der Entwicklungsumgebung,
+        # und der vite-Bau ist nicht die Stelle, an der eine Patchabweichung
+        # ein Urteil kippt. Sichtbar bleibt sie trotzdem.
+        Write-Note "Node $haveNode statt $wantedNode aus .node-version - weiter, aber gemerkt"
+    }
+
+    # pnpm kommt aus `packageManager` und nicht aus winget: die Fassung steht im
+    # Repo, corepack liefert genau sie.
+    $packageManager = (Get-Content -LiteralPath (Join-Path $Path 'package.json') -Raw |
+        ConvertFrom-Json).packageManager
+    Write-Note "packageManager: $packageManager"
+    Invoke-Checked 'corepack enable' 'corepack' @('enable') $Path
+    Invoke-Checked 'corepack prepare' 'corepack' @('prepare', $packageManager, '--activate') $Path
+
+    Invoke-Checked 'pnpm install' 'pnpm' @('install', '--frozen-lockfile') $Path
+    # Der Rust-Wirt bettet `apps/desktop/dist` ein, das muss also VOR dem
+    # cargo-Bau stehen (tauri.conf.json: frontendDist = ../dist).
+    Invoke-Checked 'vite build' 'pnpm' @('--dir', 'apps/desktop', 'exec', 'vite', 'build') $Path
+
+    Invoke-Checked 'cargo build (desktop)' 'cargo' @(
+        'build', '--locked', '--release', '-p', 'ea-desktop', '--target', $RustTriple) $Path
+
+    $desktopExe = Join-Path $env:CARGO_TARGET_DIR "$RustTriple\release\ea-desktop.exe"
+    if (-not (Test-Path -LiteralPath $desktopExe)) { throw "cargo meldete Erfolg, aber $desktopExe fehlt" }
+
+    Write-Step 'Einsatzarchiv-Fenster starten'
+    # OHNE --operator-config und --trust-anchor: die Schale oeffnet sich, zeigt
+    # aber nur die Flaechen, die eine GEPRUEFTE Sitzung freischaltet. Ohne
+    # bereitgestellte Operator-Identitaet ist das die leere Schale. Das ist der
+    # ehrliche Stand und kein Fehler des Baus.
+    Write-Note 'ohne Operator-Konfiguration: die Schale oeffnet leer'
+    Start-Process -FilePath $desktopExe
+}
+
 # -------------------------------------------------------------- smoke start
 
 # Das gebaute Programm einmal wirklich starten. Ohne Argumente schreibt es
@@ -469,6 +518,7 @@ Write-Step 'Fertig'
 Write-Host "  Parent : $parentExe"
 Write-Host "  Helfer : $helperExe"
 if ($packaged) { Write-Host "  Paket  : $packaged" }
+if ($desktopExe) { Write-Host "  Fenster: $desktopExe" }
 
 Write-Step 'Was jetzt noch fehlt - und warum kein Skript es loesen kann'
 Write-Host @"
