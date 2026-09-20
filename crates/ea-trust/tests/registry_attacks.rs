@@ -2,7 +2,7 @@ mod support;
 
 use ea_format::{CertificateKindV1, OperatorRoleV1, RegistryChangeV1, TrustSubtypeV1};
 use ea_trust::{RegistryError, verify_registry_candidate};
-use ea_types::{ChainId, ChainSequence, Hash32, RegistryVersion, UnixMillis};
+use ea_types::{ChainId, ChainSequence, DeviceId, Hash32, RegistryVersion, UnixMillis};
 
 use support::{
     ActionSpec, ChangeOverride, HeadOptions, Pin, PreviousHash, RegistryLineBuilder, RootSigner,
@@ -1202,4 +1202,198 @@ fn candidate_local_replay_is_discarded_after_a_late_failure() {
             .expect("the corrupt Root signature remains the only failure");
         assert_eq!(error.code(), "EA-TRUST-SIGNATURE");
     }
+}
+
+// Die beiden Invarianten, auf denen Regel R1 aus DRK-321 ruht
+// (`ea_verify::device_holds_reader_certificate`): sie bindet an das
+// `device_id` des Signierers und liest dazu JEDES Zertifikat, das der Kopf
+// zugelassen hat — widerrufene eingeschlossen. Traegt derselbe Kopf ein
+// Reader-Zertifikat neben einem Writer- oder Quittungszertifikat desselben
+// Geraets, verweigert R1 die eigenen Uebergaenge dieses Geraets; steht
+// derselbe Signaturschluessel in Zertifikaten zweier Geraete, kommt der
+// Reader-Schluessel unter einem anderen `device_id` an R1 vorbei. Beides
+// gehoert in die Registry und nicht erst an den Vernichtungsuebergang.
+//
+// Durchgesetzt ist hier nur die ERSTE, und auch sie ohne
+// `CertificateKindV1::DeletionAttest`. Warum die zweite aussetzt, steht am
+// Zeugen, der sie bezeugt; warum Kind 7 draussen bleibt, an seiner
+// Positivkontrolle.
+
+/// Ein Geraetezertifikat mit ausdruecklichem Geraet und ausdruecklichem
+/// Schluessel — die Vorgabewerte der Fixture legen beides fest.
+fn device_on(
+    kind: CertificateKindV1,
+    marker: u8,
+    device: Option<u8>,
+    secret: Option<[u8; 32]>,
+) -> (ActionSpec, HeadOptions) {
+    (
+        ActionSpec::Device {
+            kind,
+            marker,
+            effective_from: None,
+        },
+        HeadOptions {
+            device_id_override: device
+                .map(|byte| DeviceId::try_from(&[byte; 16][..]).expect("16 bytes")),
+            signing_public_key_override: secret.map(support::device_signing_key),
+            ..HeadOptions::default()
+        },
+    )
+}
+
+/// Der erste Schluessel neben dem Vorgabewert der Fixture.
+const READER_SECRET: [u8; 32] = [0x17; 32];
+/// Der zweite.
+const WRITER_SECRET: [u8; 32] = [0x2b; 32];
+
+fn accept_third_head(line: &RegistryLineBuilder) {
+    let trust = line.verified(Pin::Head(1));
+    let candidate = verify_registry_candidate(&trust, ChainSequence::new(201))
+        .expect("die getrennten Rollen und getrennten Schluessel bleiben zulaessig");
+    assert_eq!(candidate.registry_version(), RegistryVersion::new(3));
+}
+
+#[test]
+fn registry_head_rejects_a_reader_certificate_on_a_writer_or_server_device() {
+    // Das Reader-Zertifikat kommt NACH dem Writer-Zertifikat desselben Geraets.
+    for first in [CertificateKindV1::Writer, CertificateKindV1::ServerReceipt] {
+        let mut line = RegistryLineBuilder::new();
+        line.push(policy(), HeadOptions::default());
+        let (action, options) = device_on(first, 0x61, Some(0xa1), None);
+        line.push(action, options);
+        let (action, options) = device_on(
+            CertificateKindV1::Reader,
+            0x62,
+            Some(0xa1),
+            Some(READER_SECRET),
+        );
+        line.push(action, options);
+        expect_error(&line, Pin::Head(1), 201, "EA-TRUST-DEVICE-ROLE-CONFLICT");
+    }
+
+    // Und in der anderen Reihenfolge: das Writer-Zertifikat kommt NACH dem
+    // Reader-Zertifikat desselben Geraets.
+    let mut reversed = RegistryLineBuilder::new();
+    reversed.push(policy(), HeadOptions::default());
+    let (action, options) = device_on(CertificateKindV1::Reader, 0x61, Some(0xa1), None);
+    reversed.push(action, options);
+    let (action, options) = device_on(
+        CertificateKindV1::Writer,
+        0x62,
+        Some(0xa1),
+        Some(WRITER_SECRET),
+    );
+    reversed.push(action, options);
+    expect_error(
+        &reversed,
+        Pin::Head(1),
+        201,
+        "EA-TRUST-DEVICE-ROLE-CONFLICT",
+    );
+}
+
+/// AUSGESETZT, nicht erledigt — und das ist gemessen, nicht vermutet.
+///
+/// `crates/ea-trust/tests/support/mod.rs` gibt JEDEM Geraetezertifikat einer
+/// Linie denselben Signaturschluessel, solange keines ein eigenes
+/// `signing_public_key_override` bekommt; das Modul sagt es selbst zu
+/// (`authorized_device_signer`: „der Signierer, dessen oeffentlicher
+/// Schluessel in JEDEM Geraetezertifikat dieser Linie steht"). Damit ist jede
+/// Fixture mit zwei Geraeten genau die Lage, die diese Regel verwirft. Mit
+/// durchgesetzter Regel fallen 20 der 212 Zeugen von `ea-trust` und weitere
+/// in `ea-verify`; dasselbe Supportmodul binden dreizehn Pakete per `#[path]`
+/// ein. Die Reparatur ist keine Zeile in `ea-trust`, sondern eine Wanderung
+/// der geteilten Fixture durch den ganzen Baum — und damit eine eigene
+/// Entscheidung. Die eingefrorenen v1-Vektoren sind davon NICHT betroffen:
+/// `ea-testkit` stellt ausschliesslich Administratorzertifikate aus, auf vier
+/// verschiedenen Geraeten mit vier verschiedenen Schluesseln.
+#[ignore = "DRK-432: geteilte Fixture gibt allen Geraeten einen Schluessel; Durchsetzung entscheidet Ruben"]
+#[test]
+fn registry_head_rejects_one_signing_key_in_certificates_of_two_devices() {
+    // Genau der Umgehungsweg aus dem Ticket: ein Kind-7-Zertifikat mit dem
+    // SCHLUESSEL des Readers auf einem ANDEREN Geraet.
+    let mut line = RegistryLineBuilder::new();
+    line.push(policy(), HeadOptions::default());
+    let (action, options) = device_on(
+        CertificateKindV1::Reader,
+        0x61,
+        Some(0xa1),
+        Some(READER_SECRET),
+    );
+    line.push(action, options);
+    let (action, options) = device_on(
+        CertificateKindV1::DeletionAttest,
+        0x62,
+        Some(0xa2),
+        Some(READER_SECRET),
+    );
+    line.push(action, options);
+    expect_error(&line, Pin::Head(1), 201, "EA-TRUST-DEVICE-KEY-REUSE");
+}
+
+#[test]
+fn registry_head_accepts_separate_devices_with_separate_signing_keys() {
+    let mut line = RegistryLineBuilder::new();
+    line.push(policy(), HeadOptions::default());
+    let (action, options) = device_on(
+        CertificateKindV1::Writer,
+        0x61,
+        Some(0xa1),
+        Some(WRITER_SECRET),
+    );
+    line.push(action, options);
+    let (action, options) = device_on(
+        CertificateKindV1::Reader,
+        0x62,
+        Some(0xa2),
+        Some(READER_SECRET),
+    );
+    line.push(action, options);
+    accept_third_head(&line);
+}
+
+#[test]
+fn registry_head_accepts_a_deletion_attest_certificate_on_the_reader_device() {
+    // GEMESSEN, nicht angenommen: der Web-Reader haelt ein
+    // `deletionAttest`-Zertifikat auf seinem eigenen Geraet, um die
+    // Vernichtung seines Caches zu bezeugen
+    // (`crates/ea-destruction/tests/support/mod.rs:256`,
+    // `crates/ea-destruction/tests/preflight.rs:135`). Genau fuer diese
+    // Paarung gibt es R1: sie bleibt zulaessig, und R1 verhindert nur, dass
+    // aus ihr ein Signierer von Vernichtungsuebergaengen wird. Mit
+    // `DeletionAttest` in der Konfliktmenge fallen sieben der acht
+    // Preflight-Zeugen von `ea-destruction`.
+    let mut line = RegistryLineBuilder::new();
+    line.push(policy(), HeadOptions::default());
+    let (action, options) = device_on(CertificateKindV1::Reader, 0x65, Some(0xa5), None);
+    line.push(action, options);
+    let (action, options) = device_on(CertificateKindV1::DeletionAttest, 0x66, Some(0xa5), None);
+    line.push(action, options);
+    accept_third_head(&line);
+}
+
+#[test]
+fn registry_head_accepts_admin_and_reader_on_one_device_with_separate_keys() {
+    // `design.md`:133 erlaubt genau das: Admin und Reader duerfen auf
+    // demselben physischen Geraet als getrennt zertifizierte Rollen mit
+    // getrennten Schluesseln stehen. Die Admin-Rolle allein verleiht keinen
+    // Inhaltszugriff, und R1 fragt nach dem Reader, nicht nach dem Admin.
+    let mut line = RegistryLineBuilder::new();
+    line.push(policy(), HeadOptions::default());
+    line.push(
+        ActionSpec::AdminIssue {
+            marker: 0x43,
+            effective_from: None,
+        },
+        HeadOptions::default(),
+    );
+    let (action, options) = device_on(
+        CertificateKindV1::Reader,
+        0x62,
+        Some(0x83),
+        Some(READER_SECRET),
+    );
+    line.push(action, options);
+    accept_third_head(&line);
 }

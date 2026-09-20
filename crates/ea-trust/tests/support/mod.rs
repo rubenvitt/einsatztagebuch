@@ -1574,6 +1574,19 @@ pub fn object_hash_marker(byte: u8) -> ObjectHash {
     ObjectHash::from(hash32(byte))
 }
 
+/// Der oeffentliche Ed25519-Schluessel zu einem Geheimnis dieser Fixture.
+///
+/// Er wird HERAUSGEGEBEN, weil ein Zeuge der Schluesseleindeutigkeit zwei
+/// Geraetezertifikate mit VERSCHIEDENEN Schluesseln braucht. Ohne
+/// `signing_public_key_override` traegt jedes Geraetezertifikat der Linie
+/// denselben Schluessel (`NEW_ADMIN_SECRET`), und genau das ist die Lage, die
+/// die Eindeutigkeitsregel verwirft — die Positivkontrolle waere damit
+/// unbaubar. Eine zweite Ableitung im Zeugen daneben waere eine zweite
+/// Wahrheit ueber die Schluesselform dieser Linie.
+pub fn device_signing_key(secret: [u8; 32]) -> CanonicalPublicCoseKey {
+    key_from_secret(secret)
+}
+
 pub fn authorized_device_signing_key_thumbprint() -> KeyThumbprint {
     key_from_secret(NEW_ADMIN_SECRET).thumbprint()
 }

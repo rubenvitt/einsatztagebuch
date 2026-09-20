@@ -1907,6 +1907,7 @@ fn apply_effect(
     match effect {
         TransitionEffect::ActivateCertificate(certificate) => {
             let certificate_hash = CertificateHash::from(certificate.object_hash);
+            admit_device_invariants(state, &certificate.fields)?;
             let is_writer = certificate.fields.certificate_kind == CertificateKindV1::Writer;
             if state
                 .certificates
@@ -1964,6 +1965,63 @@ fn apply_effect(
         }
     }
     Ok(())
+}
+
+/// Die Invariante, auf der Regel R1 aus DRK-321 ruht
+/// (`ea_verify::device_holds_reader_certificate`): kein Reader-Zertifikat auf
+/// einem Writer- oder Quittungsgeraet.
+///
+/// R1 bindet an das `device_id` des Signierers und liest dazu JEDES
+/// Zertifikat, das der Kopf zugelassen hat — widerrufene eingeschlossen.
+/// `design.md`:133 verlangt die Trennung, `ea-trust` erzwang sie bisher nicht.
+/// Wird sie verletzt, verweigert R1 auch die EIGENEN Uebergaenge dieses
+/// Geraets und gespeicherte Historie wird unlesbar: fail-closed, faellt aber
+/// erst am Uebergang auf statt hier am Kopf.
+///
+/// Geprueft wird gegen ALLE bekannten Zertifikate des Kopfes, nicht nur die
+/// bereichsaktiven — R1 liest ebenso, und ein Widerruf macht aus einem
+/// Readergeraet kein Signierergeraet.
+///
+/// Die zweite Invariante aus DRK-432 — ein Signaturschluessel steht in den
+/// Zertifikaten hoechstens EINES Geraets — steht hier NICHT. Sie ist gemessen
+/// und ausgesetzt: `crates/ea-trust/tests/support/mod.rs` gibt jedem
+/// Geraetezertifikat einer Linie denselben Schluessel
+/// (`authorized_device_signer`, ebenda), und dieses Modul binden dreizehn
+/// Pakete per `#[path]` ein. Der Zeuge dazu liegt als `#[ignore]` in
+/// `tests/registry_attacks.rs`.
+fn admit_device_invariants(
+    state: &PreviousHeadState,
+    candidate: &DeviceCertificateFieldsV1,
+) -> Result<(), RegistryError> {
+    if state.certificates.values().any(|known| {
+        known.fields.device_id == candidate.device_id
+            && roles_conflict(known.fields.certificate_kind, candidate.certificate_kind)
+    }) {
+        return Err(RegistryError::DeviceRoleConflict);
+    }
+    Ok(())
+}
+
+/// Ein Reader neben einem Writer oder einer Serverquittung.
+///
+/// `CertificateKindV1::DeletionAttest` gehoert NICHT dazu, und das ist
+/// gemessen: der Web-Reader haelt ein `deletionAttest`-Zertifikat auf seinem
+/// EIGENEN Geraet, um die Vernichtung seines Caches zu bezeugen
+/// (`crates/ea-destruction/tests/support/mod.rs:256`,
+/// `crates/ea-destruction/tests/preflight.rs:135`). Genau fuer diese Paarung
+/// gibt es R1: sie ist zulaessig, und R1 verhindert nur, dass aus ihr ein
+/// Signierer von Vernichtungsuebergaengen wird. Wer sie hier verbietet, nimmt
+/// dem Reader die Cachebezeugung — sieben der acht Preflight-Zeugen von
+/// `ea-destruction` fallen dann.
+fn roles_conflict(left: CertificateKindV1, right: CertificateKindV1) -> bool {
+    fn writer_or_server(kind: CertificateKindV1) -> bool {
+        matches!(
+            kind,
+            CertificateKindV1::Writer | CertificateKindV1::ServerReceipt
+        )
+    }
+    (left == CertificateKindV1::Reader && writer_or_server(right))
+        || (writer_or_server(left) && right == CertificateKindV1::Reader)
 }
 
 fn certificate_active(certificate: &ActiveCertificate, at_sequence: ChainSequence) -> bool {
