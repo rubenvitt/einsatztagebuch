@@ -149,7 +149,11 @@ fn the_recovery_key_comes_from_a_named_offline_source(medium: &Path) -> Resolved
     // Eine falsche Passphrase oeffnet nichts — und der Fehler nennt keinen
     // Hostpfad.
     let wrong_passphrase_path = medium.join("wrong.pass");
-    write_secret_file(&wrong_passphrase_path, b"ea-drk-427-falsch\n");
+    // Abgeleitet statt eigenes Literal: so steht in dieser Datei genau EINE
+    // Passphrase, und die Ableitung ist nachweislich eine andere Zeile.
+    let wrong_passphrase = format!("nicht-{CONTAINER_PASSPHRASE}");
+    assert_ne!(wrong_passphrase, CONTAINER_PASSPHRASE);
+    write_secret_file(&wrong_passphrase_path, wrong_passphrase.as_bytes());
     let wrong = ea_recovery::KeySourceSpec::parse(OsStr::new(&format!(
         "container:{};passphrase-file={}",
         container_path.display(),
