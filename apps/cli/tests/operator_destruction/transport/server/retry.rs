@@ -367,13 +367,17 @@ pub(super) fn assert_server_completed_once(o: &Incomplete, f: &NativeDestruction
             .fetch_all(o.server.database.pool()),
         )
         .unwrap();
-    // Known server behaviour, deliberately tolerated here (follow-up DRK-430
-    // „Server: Job-Replay in Zustand 1 ohne erneute Ausführung und
-    // Attestierung“): every job POST re-executes and re-attests the current
-    // server state
-    // (each Resume re-contact relays the job); every such measurement is a
-    // successful removal and is imported exactly.
-    assert!(!measured.is_empty(), "an actual server measurement");
+    // DRK-430: the server measures this job exactly once. Every later Resume
+    // re-contact relays the same job, and each such POST used to re-execute
+    // and re-attest the unchanged server state — five measurements for one
+    // physical removal. Since §16.3 (design.md:1856) the resent job returns
+    // the existing successful measurement instead, so exactly one row remains;
+    // it is a successful removal and is imported exactly.
+    assert_eq!(
+        measured.len(),
+        1,
+        "exactly one server measurement for the whole 4→1→3, not one per relay"
+    );
     let source = ea_recovery::FsArchiveSource::open_committed(&f.archive).unwrap();
     let inventory = ArchiveInventory::build(&source).unwrap();
     for (result, hash, exact) in &measured {
@@ -528,19 +532,20 @@ fn native_retry_survives_a_listener_loss_between_its_reads_and_resumes_once_afte
         began.elapsed()
     );
 
-    // 3. Resume chains the retry. Its re-contact POSTs the job again, so the
-    // server executes and attests anew and exactly one import batch (one
-    // Controller Destruction audit) precedes the retry; that audit passes. The
-    // retry's first reservation read succeeds; while its own native
-    // Destruction audit signature is held, the registered listener stops; the
-    // read after that blocking work fails in the actual Desktop `Reservation`
-    // adapter → no commit, no publish.
+    // 3. Resume chains the retry. Its re-contact POSTs the same job again, and
+    // since DRK-430 the server returns its existing measurement instead of
+    // executing and attesting anew, so nothing new is imported. The retry's
+    // first reservation read succeeds; while its own native Destruction audit
+    // signature is held, the registered listener stops; the read after that
+    // blocking work fails in the actual Desktop `Reservation` adapter → no
+    // commit, no publish.
     let before = local_counts(&f);
     let server_before = server_transitions(&o.services, &o.server);
-    // The skipped import audit exists only because the job POST re-executes
-    // and re-attests at the server (follow-up DRK-430).
+    // No audit may pass before the held one: the import batch that used to
+    // precede the retry existed only because the job POST re-executed and
+    // re-attested at the server (DRK-430).
     let skip = f.admin_directory.join("hold-completion-audit-skip");
-    fs::write(&skip, b"1").unwrap();
+    fs::write(&skip, b"0").unwrap();
     let barrier = f.admin_directory.join("hold-completion-audit");
     fs::write(&barrier, b"").unwrap();
     let mut native = f.runtime();
@@ -571,13 +576,14 @@ fn native_retry_survives_a_listener_loss_between_its_reads_and_resumes_once_afte
     assert_eq!(
         fs::read_to_string(&skip).unwrap(),
         "0",
-        "exactly the one import audit passed before the held retry audit"
+        "no Destruction audit passed before the held retry audit"
     );
-    // Only the import batch (and its two audits) is durable; the retry's own
-    // batch and both audits rolled back together and nothing was published.
+    // Nothing is durable: the resent job added no server attestation, so there
+    // is no import batch, and the retry's own batch and both audits rolled
+    // back together and nothing was published.
     let after = local_counts(&f);
-    assert_eq!(after.batches, before.batches + 1, "only the import batch");
-    assert_eq!(after.audits, before.audits + 2, "only the import audits");
+    assert_eq!(after.batches, before.batches, "no import batch either");
+    assert_eq!(after.audits, before.audits, "no import audits either");
     assert_eq!(local_retries(&f), 0, "the signed 4→1 was never persisted");
     assert_eq!(state_after_refusal(&mut native, id), 4);
     assert!(last_event(&mut native, id, job).0 == o.retained);
