@@ -72,6 +72,22 @@ pub enum DestructionErrorV1 {
     SignerMismatch,
     /// Das Zertifikat traegt hier keine `deletionAttest`-Autoritaet.
     SignerUnauthorized,
+    /// Das Signierergeraet haelt am Autorisierungskopf ein Reader-Zertifikat.
+    ///
+    /// EIGENER CODE statt [`Self::SignerUnauthorized`]: das Zertifikat der
+    /// Signatur traegt `deletionAttest` sehr wohl — die Cache-Attestierung des
+    /// Readers verlangt es ausdruecklich (Ruling 2026-09-13, DRK-250). Was
+    /// fehlt, ist nicht die Faehigkeit des ZERTIFIKATS, sondern die
+    /// Zulaessigkeit des GERAETS fuer genau diese Unterart. Die beiden Faelle
+    /// unter einen Code zu legen hiesse, dem Leser des Berichts die einzige
+    /// Unterscheidung zu nehmen, die hier etwas erklaert.
+    ///
+    /// GILT NUR FUER UEBERGAENGE: Web-Reader-Design §3
+    /// (`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md`:54-66)
+    /// verbietet dem Reader den ZUSTANDSUEBERGANG und traegt ihm die
+    /// Loeschattestierung der eigenen Replik im selben Satz auf. Eine
+    /// Attestierung von einem Reader-Geraet ist deshalb kein Befund.
+    ReaderDeviceSigner,
     /// Die Signatur liess sich nicht pruefen.
     ///
     /// AUFFANGFALL: [`CryptoError`] ist `#[non_exhaustive]`, eine neue Variante
@@ -90,6 +106,7 @@ impl DestructionErrorV1 {
             Self::SignatureInvalid => "EA-VERIFY-DESTRUCTION-SIGNATURE-INVALID",
             Self::SignerMismatch => "EA-VERIFY-DESTRUCTION-SIGNER-MISMATCH",
             Self::SignerUnauthorized => "EA-VERIFY-DESTRUCTION-SIGNER-UNAUTHORIZED",
+            Self::ReaderDeviceSigner => "EA-VERIFY-DESTRUCTION-READER-DEVICE-SIGNER",
             Self::Unverifiable => "EA-VERIFY-DESTRUCTION-UNVERIFIABLE",
         }
     }
@@ -196,9 +213,10 @@ struct VerifiedEvent {
 /// head admitted, revoked holders included: revocation does not turn a
 /// Reader device into a transition signer.
 ///
-/// Shared by the local transition checks in `ea-destruction` and `ea-reader`.
-/// The offline report of this crate does not apply it (yet): changing
-/// `VerificationReportV1` findings is a separate, vector-reviewed decision.
+/// Shared by the local transition checks in `ea-destruction` and `ea-reader`
+/// and, since DRK-431, by the offline report of this crate: the same bytes get
+/// the same answer, and the report names it
+/// `EA-VERIFY-DESTRUCTION-READER-DEVICE-SIGNER`.
 pub fn device_holds_reader_certificate<'a>(
     device: ea_types::DeviceId,
     known: impl IntoIterator<
@@ -489,29 +507,49 @@ fn verify_destruction_object(
     .ok_or(DestructionErrorV1::HeadUnavailable)?;
     let signer =
         verify_cose_sign1(signature, &selected, &context).map_err(DestructionErrorV1::from)?;
-    if let DestructionObjectKind::Attestation(fields) = kind {
-        let certificate = selected
-            .active_certificate_fields(certificate_hash)
-            .ok_or(DestructionErrorV1::SignerUnauthorized)?;
-        if certificate.device_id.as_bytes() != &fields.replica_id {
-            return Err(DestructionErrorV1::SignerMismatch);
+    // AB HIER ENTSCHEIDET DIE UNTERART, und zwar geschlossen: beide Zweige
+    // brauchen das aufgeloeste Zertifikat, stellen daran aber gegensaetzliche
+    // Fragen. Ein `if let` je Zweig liesse offen, dass sie einander
+    // ausschliessen.
+    let certificate = selected
+        .active_certificate_fields(certificate_hash)
+        .ok_or(DestructionErrorV1::SignerUnauthorized)?;
+    match kind {
+        // Web-Reader-Design §3, dieselbe Regel wie in
+        // `ea_destruction::verify_event_at` und `ea_reader`: ein Geraet, das am
+        // AUTORISIERUNGSKOPF ein Reader-Zertifikat haelt, signiert keinen
+        // Zustandsuebergang. `known_certificate_fields` und nicht
+        // `active_certificates`: ein Widerruf macht aus einem Reader-Geraet
+        // keinen Uebergangssignierer.
+        DestructionObjectKind::Transition(_) => {
+            if device_holds_reader_certificate(
+                certificate.device_id,
+                selected.known_certificate_fields(),
+            ) {
+                return Err(DestructionErrorV1::ReaderDeviceSigner);
+            }
         }
-        // The signature authenticates the claim; only a temporally possible,
-        // known managed-replica claim may contribute to destroyed Stub proof.
-        // Keep this existing v1 contract aligned with the execution verifier.
-        if !matches!(fields.replica_kind, 0..=2)
-            || fields.executed_at.get() < 0
-            || fields.executed_at > observed_at
-            || fields
-                .backup_expiry_at
-                .is_some_and(|deadline| deadline.get() < 0)
-            || fields.result == 1 && fields.backup_expiry_at.is_none()
-            || fields.result == 0
-                && fields
+        DestructionObjectKind::Attestation(fields) => {
+            if certificate.device_id.as_bytes() != &fields.replica_id {
+                return Err(DestructionErrorV1::SignerMismatch);
+            }
+            // The signature authenticates the claim; only a temporally possible,
+            // known managed-replica claim may contribute to destroyed Stub proof.
+            // Keep this existing v1 contract aligned with the execution verifier.
+            if !matches!(fields.replica_kind, 0..=2)
+                || fields.executed_at.get() < 0
+                || fields.executed_at > observed_at
+                || fields
                     .backup_expiry_at
-                    .is_some_and(|deadline| deadline > fields.executed_at)
-        {
-            return Err(DestructionErrorV1::Unverifiable);
+                    .is_some_and(|deadline| deadline.get() < 0)
+                || fields.result == 1 && fields.backup_expiry_at.is_none()
+                || fields.result == 0
+                    && fields
+                        .backup_expiry_at
+                        .is_some_and(|deadline| deadline > fields.executed_at)
+            {
+                return Err(DestructionErrorV1::Unverifiable);
+            }
         }
     }
     Ok(signer.key_thumbprint())
