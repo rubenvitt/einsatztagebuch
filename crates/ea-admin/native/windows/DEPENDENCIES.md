@@ -8,7 +8,7 @@ bounded dependency/use review, not an independent audit of NSec or libsodium.
 | NSec.Cryptography | exact `[26.4.0]`, Ed25519 seed import/public derivation/sign only | MIT, bundled notice |
 | libsodium | transitive 1.0.22, pinned by both packages.lock.json files with SHA-512 package content hashes | ISC, bundled notice |
 | Microsoft.Windows.SDK.NET.Ref | exact SDK projection 10.0.22000.57, Hello desktop interop/WinRT runtime | Microsoft package terms |
-| .NET 10 SDK/runtime | cross-build SDK 10.0.100 isolated; release uses currently serviced target .NET 10 runtime | .NET/Microsoft distribution terms |
+| .NET 10 SDK/runtime | cross-build SDK pinned to band 10.0.1xx (`global.json`: 10.0.112, `rollForward: latestPatch`), installed isolated; release uses currently serviced target .NET 10 runtime | .NET/Microsoft distribution terms |
 | Visual C++ Redistributable | matching x64 or ARM64 native runtime required by libsodium; externally reviewed hash/signature required by packaging | Microsoft redistribution terms |
 
 Microsoft's [Windows native Composite ML-DSA notice](https://learn.microsoft.com/en-us/dotnet/core/compatibility/cryptography/11/compositemldsa-windows-native)
