@@ -28,11 +28,24 @@ winget writes the new entries there and not into the running shell. If a tool
 is still absent after that, the script says so and asks for a new terminal
 rather than continuing into a confusing build error.
 
-It STOPS BEFORE packaging and signing. Package.ps1 needs a Microsoft VC++
-redistributable plus its SHA-256, and Sign-Release.ps1 needs a certificate
-thumbprint. Neither input can be derived from a checkout, and neither step
-belongs in an unattended run. The final output of this script is the two
-commands to run next, with those inputs left as placeholders.
+It PACKAGES too. Package.ps1 wants a Microsoft VC++ redistributable and its
+expected SHA-256, and both can be obtained honestly without a human in the
+loop: `aka.ms/vs/17/release/vc_redist.<arch>.exe` redirects to a Microsoft CDN
+URL that carries the file's SHA-256 in its path, so the expected hash comes
+from what Microsoft publishes rather than from the bytes we happened to
+receive. Package.ps1 then re-checks that hash, the Authenticode signature, the
+Microsoft subject and the file name itself. `-SkipPackage` stops after the
+build.
+
+What this does NOT reach is the `reviewed` in the subtree README's phrase
+`reviewed architecture-matching, Microsoft-signed VC++ Redistributable`: the
+redistributable is official, signed and hash-matched, but no person looked at
+this particular version. Pin the printed hash in the repository once it has
+been reviewed, and this step becomes a pinned check instead of a published one.
+
+It STOPS BEFORE SIGNING. Sign-Release.ps1 needs a code-signing certificate
+thumbprint, and that is not a scripting gap - the certificate does not exist
+yet. Nothing here can substitute for it.
 
 Out of scope: the WASM reader, the desktop and web frontends, and the Postgres
 and S3 integration services. This builds the Windows native release path only.
@@ -60,6 +73,9 @@ Git ref to build. Defaults to `main`.
 .PARAMETER SkipTests
 Skip the portable .NET protocol suite. The build itself still runs.
 
+.PARAMETER SkipPackage
+Stop after the build instead of staging the release bundle with Package.ps1.
+
 .PARAMETER NoInstall
 Do not install anything. Report a missing prerequisite with its winget command
 and stop. Use this in CI or on a managed machine.
@@ -75,6 +91,7 @@ param(
     [string]$Ref = 'main',
     [ValidateSet('win-x64', 'win-arm64', IgnoreCase = $false)][string]$Runtime,
     [switch]$SkipTests,
+    [switch]$SkipPackage,
     [switch]$NoInstall
 )
 
@@ -384,37 +401,89 @@ else {
     Write-Note 'Tests uebersprungen (-SkipTests)'
 }
 
+# ----------------------------------------------------------------- package
+
+$packaged = $null
+if (-not $SkipPackage) {
+    Write-Step 'Release-Bundle paketieren'
+
+    $arch = if ($Runtime -eq 'win-arm64') { 'arm64' } else { 'x64' }
+    $redistDir = Join-Path $Path '.redist'
+    if (-not (Test-Path -LiteralPath $redistDir)) { New-Item -ItemType Directory -Path $redistDir -Force | Out-Null }
+    $redist = Join-Path $redistDir "vc_redist.$arch.exe"
+
+    # Die ERWARTETE Pruefsumme kommt aus dem, was Microsoft veroeffentlicht, und
+    # nicht aus den Bytes, die wir zufaellig bekommen haben — sonst pruefte
+    # Package.ps1 die Datei gegen sich selbst und die Zusage waere leer.
+    #
+    # `aka.ms/vs/17/release/vc_redist.<arch>.exe` leitet auf eine CDN-Adresse
+    # um, die die SHA-256 der Datei im Pfad traegt. Dass dieser Hexblock
+    # tatsaechlich die SHA-256 ist, wurde am 2026-09-20 gegen die
+    # heruntergeladene Datei geprueft (arm64:
+    # 5139E1440C3A20B92153A4DB561C069A0175AAF76C276C3E5B6F56099EDCF4B0).
+    $short = "https://aka.ms/vs/17/release/vc_redist.$arch.exe"
+    Write-Note "Aufloesen: $short"
+    $resolved = (Invoke-WebRequest -Uri $short -Method Head -MaximumRedirection 10).BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+    Write-Note "Microsoft-CDN: $resolved"
+
+    $published = [regex]::Match($resolved, '/([0-9A-Fa-f]{64})/')
+    if (-not $published.Success) {
+        Stop-WithRemedy "Die Microsoft-Adresse traegt keine SHA-256 mehr: $resolved" `
+            "Redistributable von Hand holen und Package.ps1 mit -VCRedistPath/-VCRedistSha256 aufrufen."
+    }
+    $expected = $published.Groups[1].Value.ToUpperInvariant()
+    Write-Note "veroeffentlichte SHA-256: $expected"
+
+    Invoke-WebRequest -Uri $resolved -OutFile $redist -UseBasicParsing
+    $actual = (Get-FileHash -LiteralPath $redist -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($actual -ne $expected) {
+        Stop-WithRemedy "Der Redistributable stimmt nicht mit der veroeffentlichten Pruefsumme ueberein.`n  erwartet: $expected`n  gemessen: $actual" `
+            "Datei loeschen und erneut versuchen; bei Wiederholung nicht verwenden."
+    }
+    Write-Note "Pruefsumme stimmt"
+
+    # Package.ps1 prueft Hash, Authenticode, Microsoft-Subjekt und Dateinamen
+    # selbst noch einmal — diese Zeile ersetzt keine seiner Pruefungen.
+    Invoke-Checked 'Package.ps1' 'pwsh' @(
+        '-NoProfile', '-File', (Join-Path $WindowsRoot 'scripts\Package.ps1'),
+        '-Runtime', $Runtime,
+        '-VCRedistPath', $redist,
+        '-VCRedistSha256', $expected) $WindowsRoot
+
+    $packaged = Join-Path $WindowsRoot "artifacts\$Runtime"
+    Write-Note "Paket: $packaged"
+}
+
 # ------------------------------------------------------------------ summary
 
-Write-Step 'Gebaut'
+Write-Step 'Fertig'
 Write-Host "  Parent : $parentExe"
 Write-Host "  Helfer : $helperExe"
-Write-Host "  Helferverzeichnis enthaelt zusaetzlich die verwalteten DLLs, die das Bundle braucht."
+if ($packaged) { Write-Host "  Paket  : $packaged" }
 
-Write-Step 'Naechste Schritte - ausdrueckliche Eingaben, bewusst nicht automatisiert'
+Write-Step 'Was jetzt noch fehlt - und warum kein Skript es loesen kann'
 Write-Host @"
-1) Paketieren. Braucht den passenden Microsoft-VC++-Redistributable und dessen SHA-256;
-   Package.ps1 prueft Signatur, Hash und Dateinamen und installiert nichts.
+Signieren (Sign-Release.ps1) braucht ein Code-Signing-Zertifikat mit privatem
+Schluessel in Cert:\CurrentUser\My, EKU 1.3.6.1.5.5.7.3.3. So eines gibt es
+fuer dieses Projekt noch nicht. Das ist keine Luecke in diesem Skript: der
+Rust-Kern prueft Authenticode und die DER-Gleichheit der Signaturen von Parent
+und Helfer, und ohne Zertifikat existiert nichts, was er pruefen koennte.
 
-   pwsh -File "$WindowsRoot\scripts\Package.ps1" ``
-       -Runtime $Runtime ``
-       -VCRedistPath <pfad\zu\vc_redist.$(if ($Runtime -eq 'win-arm64') { 'arm64' } else { 'x64' }).exe> ``
-       -VCRedistSha256 <64 Hexzeichen>
-
-2) Signieren. Braucht ein vorhandenes Code-Signing-Zertifikat mit privatem
-   Schluessel in Cert:\CurrentUser\My, EKU 1.3.6.1.5.5.7.3.3, angegeben ueber
-   seinen Thumbprint. Parent und Helfer MUESSEN dasselbe Zertifikat tragen -
-   der Rust-Kern prueft die DER-Gleichheit beider Signaturen.
+Sobald es da ist:
 
    pwsh -File "$WindowsRoot\scripts\Sign-Release.ps1" ``
        -ParentBinary "$parentExe" ``
-       -HelperPackage <paketierte-ausgabe-aus-schritt-1> ``
+       -HelperPackage "$packaged" ``
        -Destination <ziel\bundle> ``
        -ManagementDestination <ziel\management> ``
        -Architecture $Runtime ``
        -Version 0.1.0 ``
        -CertificateThumbprint <40 Hexzeichen>
 
-3) Installieren mit Install-Release.ps1 und die Laufzeitabnahme nach
-   ACCEPTANCE.md durchfuehren (NativeReadOnly unter einem nicht erhoehten Konto).
+Danach Install-Release.ps1 und die Laufzeitabnahme nach ACCEPTANCE.md
+(NativeReadOnly unter einem nicht erhoehten Konto).
+
+Und auch ein signiertes, installiertes Bundle ist noch kein bedienbarer
+Writer: davor liegt die Organisationszeremonie - Root, Trust Anchor, Registry,
+Operator-Bereitstellung. Siehe docs/operator-ceremony.md.
 "@
