@@ -274,7 +274,7 @@ pub fn print_operator_report(
 /// `already-registered` (EA-CNA-REG-6).
 ///
 /// Dieselbe Bauart wie [`print_clock_release_applied`]: ein einziges Feld
-/// ohne Hostpfad, Schluessel oder Klartext, in derselben knappen JSON- und
+/// ohne Hostpfad, Schlüssel oder Klartext, in derselben knappen JSON- und
 /// Textform.
 pub fn print_operator_register_network_archive_report(
     outcome: NativeArchiveRegistrationOutcome,
@@ -297,8 +297,8 @@ pub fn print_operator_register_network_archive_report(
 }
 
 /// Nur der stabile Fehlercode der Netzregistrierung — kein Hostpfad, kein
-/// Schluessel, kein Klartext. [`NativeArchiveOpenError`] zeigt kein `Display`;
-/// diese Funktion druckt deshalb ausdruecklich `.code()`.
+/// Schlüssel, kein Klartext. [`NativeArchiveOpenError`] zeigt kein `Display`;
+/// diese Funktion druckt deshalb ausdrücklich `.code()`.
 pub fn print_native_archive_error(error: &NativeArchiveOpenError) {
     eprintln!("einsatzarchiv: {}", error.code());
 }
