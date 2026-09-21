@@ -87,7 +87,7 @@ try {
         $path=Join-Path $ManagementDestination $name
         [IO.File]::WriteAllText($path,$kitSource[$name],[Text.UTF8Encoding]::new($true))
         Sign-Output $path
-        $signature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -Content ([IO.File]::ReadAllBytes($path)) -SourcePathOrExtension ([IO.Path]::GetExtension($name).TrimStart('.'))
+        $signature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -Content ([IO.File]::ReadAllBytes($path)) -SourcePathOrExtension ([IO.Path]::GetExtension($name))
         if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
             [Convert]::ToBase64String($signature.SignerCertificate.RawData) -cne [Convert]::ToBase64String($certificateDer)) { throw 'Management byte signature verification failed' }
         $hashes[$name]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
