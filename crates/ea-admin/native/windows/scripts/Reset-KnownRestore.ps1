@@ -18,8 +18,14 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Window
 # -NoProfile, and a clean launch environment. Self-checks cannot authenticate code
 # that an attacker already replaced before this script started.
 $PSModuleAutoLoadingPreference = 'None'
+# The path is built with [IO.Path]::Combine and NOT with Join-Path: Join-Path is
+# itself exported by Microsoft.PowerShell.Management, the third module below, and
+# with autoloading switched off it does not exist yet on the first iteration.
+# Measured: with $PSModuleAutoLoadingPreference = 'None', Join-Path throws
+# CommandNotFoundException. [IO.Path]::Combine needs no module and resolves the
+# same location, so the imports still come from $PSHOME and nowhere else.
 foreach ($module in @('Microsoft.PowerShell.Security','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Management')) {
-    Import-Module (Join-Path $PSHOME "Modules/$module/$module.psd1") -Force
+    Import-Module ([IO.Path]::Combine($PSHOME, 'Modules', $module, "$module.psd1")) -Force
 }
 function Read-KitFile([string]$Name) {
     $path = Join-Path $PSScriptRoot $Name
