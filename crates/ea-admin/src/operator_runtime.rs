@@ -376,6 +376,83 @@ impl OperatorArchiveSnapshot {
     }
 }
 
+/// EA-CNA-SRC-5 mit den Regeln der Fix-Runde 1 zu Task 8.
+///
+/// Bereinigt wird nur nach bestandener Verifikation, nur wenn DIESE Öffnung
+/// das Netzziel live gelesen hat, nur unter dem per `try_lock` erlangten
+/// SQLCipher-Writer-Lock und nur, was
+///
+/// - (i) live UND in der GEERBTEN Grundlinie dieser Öffnung bytegleich liegt.
+///   Die geerbte Grundlinie ist die der Laufzeit, die der Aufrufer behält,
+///   falls er diese Öffnung verwirft (`NativeState::refresh` tut das im
+///   Vorschau-Zweig und bei jedem späteren Fehler). Ein Kaltstart erbt keine
+///   Grundlinie und bereinigt deshalb nie;
+/// - (ii) nicht der lokal höchste `.eip` oder einer seiner Grants ist (im
+///   Primitiv `prune_published` durchgesetzt).
+///
+/// Die Bereinigung ist Aufräumen: jeder Fehler lässt sie ausfallen, nie die
+/// Öffnung.
+fn prune_published_rows(
+    component: &SqlcipherArchiveBackend,
+    snapshot: &OperatorArchiveSnapshot,
+    inherited: Option<&FsArchiveSource>,
+) {
+    let (true, Some(live), Some(inherited)) = (
+        snapshot.remote_read_live,
+        snapshot.remote_baseline(),
+        inherited,
+    ) else {
+        return;
+    };
+    let mut live_hashes = std::collections::HashMap::new();
+    if live
+        .visit_blobs(&mut |blob| {
+            live_hashes.insert(
+                blob.path_hint().to_owned(),
+                ea_crypto::object_hash(blob.bytes()),
+            );
+            Ok(())
+        })
+        .is_err()
+    {
+        return;
+    }
+    let kept = KeptBaselineView {
+        inherited,
+        live: live_hashes,
+    };
+    if let Ok(Some(lock)) = component.try_writer_lock() {
+        let _ = component.prune_published(&kept, &lock);
+    }
+}
+
+/// Die geerbte Grundlinie, eingeschränkt auf das, was das Netzziel in dieser
+/// Öffnung live bytegleich trägt.
+struct KeptBaselineView<'a> {
+    inherited: &'a FsArchiveSource,
+    live: std::collections::HashMap<String, ObjectHash>,
+}
+impl ArchiveSource for KeptBaselineView<'_> {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(
+            ea_archive::ArchiveBlob<'_>,
+        ) -> Result<(), ea_archive::ArchiveError>,
+    ) -> Result<(), ea_archive::ArchiveError> {
+        self.inherited.visit_blobs(&mut |blob| {
+            if self
+                .live
+                .get(blob.path_hint())
+                .is_some_and(|hash| *hash == ea_crypto::object_hash(blob.bytes()))
+            {
+                visitor(blob)
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
 /// Der kanonische Anker darf nicht im Archiv liegen. Das Verzeichnis wird nur
 /// geliefert, wenn es sich kanonisieren lässt: ob ein fehlendes Verzeichnis
 /// ein Fehler ist, entscheidet erst die Registrierung (EA-CNA-SRC-4).
@@ -1325,6 +1402,7 @@ fn open_resources(
                     (None, Some(baseline)) => baseline.root().to_path_buf(),
                     (None, None) => return Err(OperatorRuntimeError::NetworkArchiveUnavailable),
                 };
+                let inherited = baseline.clone();
                 let snapshot = OperatorArchiveSnapshot::open_with_anchor(
                     &directory,
                     anchor,
@@ -1332,27 +1410,7 @@ fn open_resources(
                     Some(&component),
                     baseline,
                 )?;
-                // EA-CNA-SRC-5: erst nach bestandener Verifikation, nur gegen
-                // ein in DIESER Öffnung live gelesenes Netzziel (nie gegen die
-                // Grundlinie) und nur unter dem per `try_lock` erlangten
-                // SQLCipher-Writer-Lock. Die Grundlinie dieser Öffnung enthält
-                // jedes bereinigte Objekt, die Vereinigung bleibt also gleich.
-                // Ein belegter Lock ist kein Fehler: dann entfällt sie.
-                if snapshot.remote_read_live
-                    && let Some(remote) = snapshot.remote_baseline()
-                    && let Some(lock) =
-                        component.try_writer_lock().map_err(|error| match error {
-                            ArchiveBackendError::Io => OperatorRuntimeError::Io,
-                            _ => OperatorRuntimeError::Archive,
-                        })?
-                {
-                    component.prune_published(remote.as_ref(), &lock).map_err(
-                        |error| match error {
-                            ArchiveBackendError::Io => OperatorRuntimeError::Io,
-                            _ => OperatorRuntimeError::Archive,
-                        },
-                    )?;
-                }
+                prune_published_rows(&component, &snapshot, inherited.as_deref());
                 snapshot
             }
         };

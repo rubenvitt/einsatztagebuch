@@ -55,13 +55,17 @@ fn sync_state(native: &Arc<NativeDesktopRuntime>) -> (SyncStatus, Option<DetailC
     (view.status, view.detail_cause)
 }
 
-/// Öffnet den Desktop, hält seinen Hostlauf an (die Tests rufen `run_once`
-/// selbst) und meldet den Writer an.
+/// Öffnet den Desktop, hält seinen Hostlauf an (die Tests lösen Läufe
+/// selbst aus) und meldet den Writer an.
 fn started(installed: &NetworkWriterInstallation) -> Arc<NativeDesktopRuntime> {
     let native = installed.try_host(&installed.writer_config).unwrap();
     native.stop_network_publication_loop();
     native.login().unwrap();
     native
+}
+
+fn publish(native: &Arc<NativeDesktopRuntime>) -> ea_archive_fs::PublicationStateV1 {
+    native.run_network_publication_once().unwrap().unwrap()
 }
 
 fn finalize(native: &Arc<NativeDesktopRuntime>, number: &str) -> u64 {
@@ -130,8 +134,7 @@ fn finalize_while_remote_is_gone_reports_upload_pending_network_waiting_then_res
     assert_eq!(cause.unwrap().label(), "Netzarchiv wartet");
 
     fs::rename(&away, &installed.base.installed.archive).unwrap();
-    let host = native.network_publication_host().unwrap();
-    let resumed = host.run_once();
+    let resumed = native.run_network_publication_once().unwrap().unwrap();
     assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
     assert!(!resumed.fell_back_to_another_target());
     let local = committed_rows(&installed);
@@ -204,48 +207,237 @@ fn restart_rederives_the_queue_from_committed_bytes() {
     assert_eq!(sync_state(&reopened), (SyncStatus::LocallySaved, None));
 }
 
+/// Die lokalen Zeilen der Sequenz `sequence`: ihr `.eip` und dessen Grants
+/// (`grants/<entry-hash>_…`).
+fn rows_of_sequence(
+    rows: &BTreeMap<String, Vec<u8>>,
+    sequence: u64,
+) -> BTreeMap<String, Vec<u8>> {
+    let prefix = format!("entries/{sequence:012}_");
+    let Some(entry) = rows.keys().find(|path| path.starts_with(&prefix)) else {
+        return BTreeMap::new();
+    };
+    let hash = entry
+        .trim_start_matches(&prefix)
+        .trim_end_matches(".eip")
+        .to_owned();
+    rows.iter()
+        .filter(|(path, _)| {
+            path.as_str() == entry.as_str() || path.starts_with(&format!("grants/{hash}_"))
+        })
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .collect()
+}
+
+fn union(installed: &NetworkWriterInstallation) -> BTreeMap<String, Vec<u8>> {
+    let mut union = remote_objects(installed);
+    union.extend(committed_rows(installed));
+    union
+}
+
+fn staged(installed: &NetworkWriterInstallation) -> Vec<(String, bool)> {
+    installed
+        .local_paths()
+        .into_iter()
+        .filter(|(_, staged)| *staged)
+        .collect()
+}
+
 #[test]
 fn reopen_prunes_published_rows_and_keeps_the_union_identical() {
     let installed = NetworkWriterInstallation::new();
     drop(installed.register());
     let native = started(&installed);
     finalize(&native, "NET-PUB-4");
-    let local_before = committed_rows(&installed);
-    assert!(!local_before.is_empty(), "die Commits liegen noch lokal");
-    let mut union_before = remote_objects(&installed);
-    union_before.extend(local_before.clone());
-    let staged_before: Vec<_> = installed
-        .local_paths()
-        .into_iter()
-        .filter(|(_, staged)| *staged)
-        .collect();
+    let first = committed_rows(&installed);
+    assert!(!first.is_empty(), "die Commits liegen noch lokal");
     drop(native);
 
-    // Kaltstart mit live gelesenem Netzziel: jede bytegleich veröffentlichte
-    // committed Zeile fällt lokal weg.
+    // Ein Kaltstart erbt keine Grundlinie und bereinigt deshalb nie (Regel (i)).
     let reopened = installed.try_host(&installed.writer_config).unwrap();
     reopened.stop_network_publication_loop();
-    assert!(
-        committed_rows(&installed).is_empty(),
-        "alle committed Zeilen lagen bytegleich am Netzziel"
+    assert_eq!(committed_rows(&installed), first, "Kaltstart bereinigt nicht");
+    reopened.login().unwrap();
+    // Eine Wiederöffnung mit geerbter Grundlinie: das einzige lokale `.eip`
+    // ist das höchste und bleibt (Regel (ii)).
+    let state = reopened.desktop_state();
+    state.drafts().unwrap().load_payload().unwrap();
+    assert_eq!(committed_rows(&installed), first, "höchster Eintrag bleibt");
+
+    assert_eq!(finalize(&reopened, "NET-PUB-5"), 2);
+    let both = committed_rows(&installed);
+    let staged_before = staged(&installed);
+    let union_before = union(&installed);
+    // Die nächste Wiederöffnung erbt eine Grundlinie mit Eintrag 1, liest das
+    // Netzziel live und bereinigt genau Eintrag 1 samt Grants.
+    state.drafts().unwrap().load_payload().unwrap();
+    assert_eq!(
+        committed_rows(&installed),
+        rows_of_sequence(&both, 2),
+        "nur die höchste Sequenz bleibt lokal"
     );
-    let staged_after: Vec<_> = installed
-        .local_paths()
-        .into_iter()
-        .filter(|(_, staged)| *staged)
-        .collect();
-    assert_eq!(staged_after, staged_before, "Staging bleibt unberührt");
-    let mut union_after = remote_objects(&installed);
-    union_after.extend(committed_rows(&installed));
-    assert_eq!(union_after, union_before, "die Vereinigung bleibt gleich");
+    assert_eq!(staged(&installed), staged_before, "Staging bleibt unberührt");
+    assert_eq!(union(&installed), union_before, "die Vereinigung bleibt gleich");
 
     // Die Kette läuft über die Vereinigung weiter.
-    reopened.login().unwrap();
-    let state = reopened.desktop_state();
     let writer = state.writer().unwrap();
     let mut next = native_incident();
-    next.human_incident_number = "NET-PUB-5".into();
+    next.human_incident_number = "NET-PUB-5B".into();
+    native_reauth(&reopened);
+    assert_eq!(writer.preview(&next).unwrap().proposed_sequence.get(), 3);
+}
+
+fn native_reauth(native: &Arc<NativeDesktopRuntime>) {
+    native.reauthenticate(ReauthPurpose::Finalize).unwrap();
+}
+
+/// Das Szenario der Review (Fix-Runde 1, Critical): Eintrag N offline
+/// committed, danach veröffentlicht; eine Aktion über den Vorschau-Zweig
+/// verwirft ihre frische Öffnung; das Netzziel verschwindet wieder. Die
+/// behaltene Grundlinie kennt N nicht — also muss N lokal geblieben sein,
+/// sonst schlüge die nächste Vorschau erneut N vor (Gabel am Netzziel).
+#[test]
+fn a_preview_branch_reopen_never_forks_the_chain() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = started(&installed);
+    let away = installed.base.installed.archive.with_extension("away");
+    fs::rename(&installed.base.installed.archive, &away).unwrap();
+    assert_eq!(finalize(&native, "FORK-1"), 1, "offline committed");
+    fs::rename(&away, &installed.base.installed.archive).unwrap();
+
+    // Vorschau ausstellen: die live gelesene Grundlinie kennt Eintrag 1 nicht.
+    let state = native.desktop_state();
+    let writer = state.writer().unwrap();
+    let mut next = native_incident();
+    next.human_incident_number = "FORK-2".into();
     assert_eq!(writer.preview(&next).unwrap().proposed_sequence.get(), 2);
+    // Eintrag 1 veröffentlichen.
+    assert_eq!(
+        publish(&native).outcome(),
+        PublicationOutcomeV1::PublishedCompletely
+    );
+    // Eine Aktion über den Vorschau-Zweig: ihre frische Öffnung wird
+    // verworfen, weil Kopf und Sequenz gleich sind.
+    state.drafts().unwrap().load_payload().unwrap();
+    // Netzziel wieder weg; die nächste Vorschau läuft über die Grundlinie.
+    fs::rename(&installed.base.installed.archive, &away).unwrap();
+    let preview = match writer.preview(&next) {
+        Ok(preview) => preview,
+        Err(_) => {
+            native_reauth(&native);
+            writer.preview(&next).unwrap()
+        }
+    };
+    assert_eq!(
+        preview.proposed_sequence.get(),
+        2,
+        "nie ein zweites `.eip` für Sequenz 1"
+    );
+    native_reauth(&native);
+    let preview = writer.preview(&next).unwrap();
+    assert_eq!(
+        writer.finalize(&next, &preview).unwrap().sequence.get(),
+        2
+    );
+    fs::rename(&away, &installed.base.installed.archive).unwrap();
+    publish(&native);
+    let sequences: Vec<String> = remote_objects(&installed)
+        .keys()
+        .filter(|path| path.starts_with("entries/"))
+        .map(|path| path["entries/".len().."entries/".len() + 12].to_owned())
+        .collect();
+    let mut unique = sequences.clone();
+    unique.dedup();
+    assert_eq!(sequences, unique, "keine Sequenz doppelt: {sequences:?}");
+    assert!(sequences.contains(&format!("{:012}", 1)));
+    assert!(sequences.contains(&format!("{:012}", 2)));
+}
+
+/// Regel (ii) stützt sich darauf, dass eine Vereinigung mit einer Lücke
+/// unter dem Kettenkopf die Verifikation nicht besteht.
+#[test]
+fn a_union_with_a_gap_below_the_head_fails_verification() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = started(&installed);
+    finalize(&native, "GAP-1");
+    native_reauth(&native);
+    finalize(&native, "GAP-2");
+    drop(native);
+    let rows = remote_objects(&installed);
+    let copy = installed.base.installed.directory.path().join("gap-copy");
+    fn copy_dir(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let path = entry.unwrap().path();
+            let target = to.join(path.file_name().unwrap());
+            if path.is_dir() {
+                copy_dir(&path, &target);
+            } else {
+                fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+    copy_dir(&installed.base.installed.archive, &copy);
+    let complete = ea_admin::operator_runtime::OperatorArchiveSnapshot::open(
+        &copy,
+        &installed.base.installed.anchor,
+        support::live_clock(),
+    )
+    .unwrap();
+    assert_eq!(complete.next_sequence().get(), 3);
+    drop(complete);
+    let gap = rows_of_sequence(&rows, 1);
+    assert!(!gap.is_empty());
+    for path in gap.keys() {
+        fs::remove_file(copy.join(path)).unwrap();
+    }
+    assert!(
+        ea_admin::operator_runtime::OperatorArchiveSnapshot::open(
+            &copy,
+            &installed.base.installed.anchor,
+            support::live_clock(),
+        )
+        .is_err(),
+        "eine Lücke unter dem Kopf verifiziert nicht"
+    );
+}
+
+/// EA-CNA-WRT-7: das Netzziel wird unmittelbar vor der Publikation mit
+/// seinem kanonischen Wurzelpfad beobachtet.
+#[test]
+fn publication_observes_the_network_root_before_publishing() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let observed = || {
+        let root = fs::canonicalize(&installed.base.installed.archive).unwrap();
+        let mut preimage = b"EINSATZARCHIV-MANAGED-ARCHIVE-LOCATION-v1\0".to_vec();
+        preimage.extend_from_slice(root.to_str().unwrap().as_bytes());
+        let location = ea_crypto::object_hash(&preimage);
+        let db = open_database(&installed.base.installed.database);
+        let mut last = Vec::new();
+        let mut found = false;
+        while let Some(row) = db
+            .query_row(
+                "SELECT record_hash,exact_bytes FROM managed_custody WHERE record_hash>?1 ORDER BY record_hash LIMIT 1",
+                &[StoreValue::Blob(last.clone())],
+            )
+            .unwrap()
+        {
+            last = row.blob(0).unwrap().to_vec();
+            found |= row
+                .blob(1)
+                .unwrap()
+                .windows(32)
+                .any(|window| window == location.as_bytes());
+        }
+        found
+    };
+    let native = started(&installed);
+    assert!(!observed(), "vor der ersten Publikation nicht beobachtet");
+    finalize(&native, "OBS-1");
+    assert!(observed(), "Schritt 12 beobachtet das Netzziel");
 }
 
 #[test]
@@ -326,15 +518,11 @@ fn an_unqualified_target_never_gets_a_publication_host() {
     let desktop = installed.try_host(&installed.writer_config);
     set(0o755);
     let refused = refused.err().expect("ohne bestandene Zulassung kein Host");
-    assert!(
-        matches!(
-            refused.code(),
-            "EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS" | "EA-ARCHIVE-IO"
-        ),
-        "{}",
-        refused.code()
+    assert_eq!(refused.code(), "EA-ARCHIVE-IO");
+    assert_eq!(
+        desktop.err().expect("und kein Netz-Writer am Desktop").code,
+        "EA-ARCHIVE-IO"
     );
-    assert!(desktop.is_err(), "und kein Netz-Writer am Desktop");
     // Ein Netzziel, das die Zulassung besteht, bekommt einen Host.
     assert!(NetworkPublicationHost::new(&component, &root, &policy).is_ok());
 }

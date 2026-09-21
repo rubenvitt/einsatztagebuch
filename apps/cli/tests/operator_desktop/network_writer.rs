@@ -185,6 +185,9 @@ fn network_writer_finalizes_into_the_local_component_and_not_the_remote() {
     // nichts zurücklassen.
     let remote_before = listing(&installed.base.installed.archive);
     let native = installed.try_host(&installed.writer_config).unwrap();
+    // Ohne Publikationsport und ohne Hostlauf: gemessen wird allein der
+    // Writer. Die Publikation prüft `network_publication.rs`.
+    native.detach_network_publication();
     native.login().unwrap();
     let state = native.desktop_state();
     state
@@ -198,45 +201,28 @@ fn network_writer_finalizes_into_the_local_component_and_not_the_remote() {
     native.reauthenticate(ReauthPurpose::Finalize).unwrap();
     let outcome = writer.finalize(&input, &preview).unwrap();
     assert_eq!(outcome.sequence.get(), 1, "the next chain sequence");
+    assert_eq!(state.drafts().unwrap().load_payload().unwrap(), "");
     assert_eq!(installed.committed_local_entries(), 1, "the .eip is local");
     assert!(installed.committed_local_grants() >= 1, "grants are local");
     assert!(
         installed.local_paths().iter().all(|(_, staged)| !staged),
         "no staging row remains after a completed finalize"
     );
-    // Der Writer schreibt nie ins Netzziel. Was dort seit dem Start neu ist,
-    // hat allein Schritt 12 veröffentlicht: genau die committed lokalen
-    // Objekte, byteidentisch (Task 8, EA-CNA-PUB-3).
-    let remote_after = listing(&installed.base.installed.archive);
-    let added: Vec<_> = remote_after
-        .iter()
-        .filter(|(path, bytes)| remote_before.get(*path) != Some(*bytes))
-        .collect();
-    let committed = installed.local_paths();
-    assert_eq!(added.len(), committed.len(), "{added:?}");
-    let db = open_database(&installed.base.installed.database);
-    for (path, bytes) in added {
-        let row = db
-            .query_row(
-                "SELECT exact_bytes FROM local_commit_object WHERE relative_path=?1",
-                &[StoreValue::Text(path.to_string_lossy().into_owned())],
-            )
-            .unwrap()
-            .expect("jede neue Datei ist ein committed lokales Objekt");
-        assert_eq!(row.blob(0).unwrap(), bytes.as_slice());
-    }
     assert!(
-        remote_before
-            .iter()
-            .all(|(path, bytes)| remote_after.get(path) == Some(bytes)),
-        "nichts Vorhandenes wurde verändert"
+        listing(&installed.base.installed.archive) == remote_before,
+        "the Writer never writes the remote"
     );
-    // Erst jetzt die nächste Aktion: ihre live gelesene Wiederöffnung
-    // bereinigt die veröffentlichten Zeilen (EA-CNA-SRC-5, Task 8).
-    assert_eq!(state.drafts().unwrap().load_payload().unwrap(), "");
-    assert_eq!(installed.committed_local_entries(), 0, "bereinigt");
     drop(state);
     drop(native);
+    // Ein Kaltstart sieht Netzziel ⊎ lokale Komponente und damit die nächste
+    // Sequenz; das Netzziel allein kennt sie nicht.
+    let remote_only = ea_admin::operator_runtime::OperatorArchiveSnapshot::open(
+        &installed.base.installed.archive,
+        &installed.base.installed.anchor,
+        support::live_clock(),
+    )
+    .unwrap();
+    assert_eq!(remote_only.next_sequence().get(), 1);
     let reopened = installed.try_host(&installed.writer_config).unwrap();
     reopened.login().unwrap();
     let state = reopened.desktop_state();

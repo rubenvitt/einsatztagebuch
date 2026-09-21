@@ -415,6 +415,11 @@ fn prune_is_skipped_when_the_writer_lock_is_held() {
     archive
         .create_non_object_if_absent(&published, b"published-entry")
         .unwrap();
+    // Ein höherer, unveröffentlichter Eintrag: sonst bliebe Eintrag 1 als
+    // höchster ohnehin stehen.
+    archive
+        .create_non_object_if_absent(&address("000000000002_later.eip"), b"later")
+        .unwrap();
     let remote = RemoteView(vec![(
         published.as_str().to_owned(),
         b"published-entry".to_vec(),
@@ -424,11 +429,56 @@ fn prune_is_skipped_when_the_writer_lock_is_held() {
         archive.try_writer_lock().unwrap().is_none(),
         "ein fremd gehaltener Lock ist kein Fehler, sondern kein Lock"
     );
-    assert_eq!(contents(&archive).len(), 1, "nichts wurde bereinigt");
+    assert_eq!(contents(&archive).len(), 2, "nichts wurde bereinigt");
     drop(held);
     let lock = archive.try_writer_lock().unwrap().expect("wieder frei");
     assert_eq!(archive.prune_published(&remote, &lock).unwrap(), 1);
-    assert!(contents(&archive).is_empty());
+    assert_eq!(contents(&archive).len(), 1);
+}
+
+/// Fix-Runde 1, Regel (ii): der höchste lokale `.eip` und
+/// seine Grants bleiben auch dann, wenn sie bytegleich am Netzziel
+/// liegen. Eine veraltete fremde Grundlinie sieht so eine Lücke statt eines
+/// niedrigeren Kettenkopfs.
+#[test]
+fn prune_keeps_the_highest_local_entry_and_its_grants() {
+    let (_guard, root) = support::temp_root("sqlcipher-backend-prune-highest");
+    let path = root.join("operator.sqlite");
+    let archive = backend(database(&path), 0x34, 8);
+    let rows = [
+        (address("000000000001_aa11.eip"), b"entry-one".to_vec()),
+        // Grants heißen `grants/<entry-hash>_<grant-hash>.eag` (§11.4).
+        (
+            ArchivePath::in_dir("grants/", "aa11_g1.eag").unwrap(),
+            b"grant-one".to_vec(),
+        ),
+        (address("000000000002_bb22.eip"), b"entry-two".to_vec()),
+        (
+            ArchivePath::in_dir("grants/", "bb22_g2.eag").unwrap(),
+            b"grant-two".to_vec(),
+        ),
+    ];
+    for (address, bytes) in &rows {
+        archive.create_non_object_if_absent(address, bytes).unwrap();
+    }
+    let remote = RemoteView(
+        rows.iter()
+            .map(|(address, bytes)| (address.as_str().to_owned(), bytes.clone()))
+            .collect(),
+    );
+    let lock = archive.try_writer_lock().unwrap().unwrap();
+    assert_eq!(archive.prune_published(&remote, &lock).unwrap(), 2);
+    assert_eq!(
+        contents(&archive)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>(),
+        vec![
+            "entries/000000000002_bb22.eip".to_owned(),
+            "grants/bb22_g2.eag".to_owned(),
+        ],
+        "die höchste Sequenz bleibt lokal"
+    );
 }
 
 #[test]

@@ -290,7 +290,7 @@ impl NativeDesktopRuntime {
         if provided.is_some() && runtime.config().role != OperatorRoleV1::OrganizationAdmin {
             return Err(CommandError::new(CONFIG_ERROR));
         }
-        Ok(Arc::new(Self {
+        let native = Arc::new(Self {
             administration: launch
                 .administration_config
                 .as_deref()
@@ -336,7 +336,17 @@ impl NativeDesktopRuntime {
                 preview: None,
                 stale_receipt: None,
             }),
-        }))
+        });
+        // EA-CNA-PUB-8 (c): der Hostlauf braucht den Wirt für die
+        // Beobachtung und hält ihn deshalb nur schwach.
+        if let Some(publication) = native
+            .writer
+            .as_ref()
+            .and_then(writer::WriterResources::publication)
+        {
+            publication.start(Arc::downgrade(&native));
+        }
+        Ok(native)
     }
     fn open_runtime(
         launch: &DesktopLaunchConfig,
@@ -368,6 +378,33 @@ impl NativeDesktopRuntime {
         {
             publication.stop();
         }
+    }
+    /// Nimmt den Publikationsport aus Schritt 12 heraus und hält den
+    /// Hostlauf an: der Writer committet dann nur lokal.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn detach_network_publication(&self) {
+        if let Some(publication) = self
+            .writer
+            .as_ref()
+            .and_then(writer::WriterResources::publication)
+        {
+            publication.stop();
+            publication.detach();
+        }
+    }
+    /// Ein Publikationslauf mit der Beobachtung der aktuellen Laufzeit.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn run_network_publication_once(
+        &self,
+    ) -> Option<Result<ea_archive_fs::PublicationStateV1, ea_archive::ArchiveBackendError>> {
+        let publication = self
+            .writer
+            .as_ref()
+            .and_then(writer::WriterResources::publication)?;
+        let inner = self.inner.lock().ok()?;
+        Some(publication.run_once(&inner.runtime))
     }
     pub fn desktop_state(self: &Arc<Self>) -> DesktopState {
         let state = if self.role == OperatorRoleV1::Writer {
