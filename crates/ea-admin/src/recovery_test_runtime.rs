@@ -1,7 +1,10 @@
 //! Native backup/recovery composition. Public source claims never replace the
 //! independent anchor, current operator, measured machine or actual store.
+use crate::native_archive::{NativeArchiveExistingComponent, NativeArchiveOpenError};
 use crate::operator_runtime::{OperatorRuntime, OperatorRuntimeError};
-use ea_archive::{ArchiveBackend, ArchiveBackendProfileV1, BoundArchiveProfilePolicyV1};
+use ea_archive::{
+    ArchiveBackend, ArchiveBackendProfileV1, BoundArchiveProfilePolicyV1, WriterLock,
+};
 use ea_archive_fs::{CapabilityTestVectorV1, LocalPathBackend};
 use ea_audit::{AuditActorProof, SqliteLocalAuditRepository, TypedLocalAuditEvent};
 use ea_crypto::{SecretVec, object_hash};
@@ -69,10 +72,44 @@ impl From<ea_archive::ArchiveBackendError> for RecoveryRuntimeError {
         Self::Backend(e)
     }
 }
+/// Autorität und Backend behalten ihren Code; jede andere Ablehnung der
+/// Netzkomponente, auch eine nicht belegte Capability, ist für Recovery eine
+/// nicht zugelassene Quelle (EA-CNA-REC-1).
+impl From<NativeArchiveOpenError> for RecoveryRuntimeError {
+    fn from(e: NativeArchiveOpenError) -> Self {
+        match e {
+            NativeArchiveOpenError::Runtime(e) => Self::Runtime(e),
+            NativeArchiveOpenError::Backend(e) => Self::Backend(e),
+            NativeArchiveOpenError::Role => Self::Test(RecoveryTestError::Operator),
+            NativeArchiveOpenError::Config
+            | NativeArchiveOpenError::RegistrationConflict
+            | NativeArchiveOpenError::PointerConflict
+            | NativeArchiveOpenError::ProfileMismatch
+            | NativeArchiveOpenError::Audit
+            | NativeArchiveOpenError::Capability => Self::Test(RecoveryTestError::Source),
+        }
+    }
+}
 
 pub struct RecoveryTestRuntime {
     runtime: OperatorRuntime,
-    backend: LocalPathBackend,
+    archive: RecoveryArchiveHandle,
+}
+/// Das Archiv, gegen das Recovery läuft. LocalPath bleibt das bisherige
+/// Backend; ein Netzprofil trägt die registrierte SQLCipher-Komponente und das
+/// vorhandene Netzziel getrennt (EA-CNA-REC-1).
+enum RecoveryArchiveHandle {
+    LocalPath(LocalPathBackend),
+    Network {
+        component: Box<NativeArchiveExistingComponent>,
+        remote: LocalPathBackend,
+    },
+}
+/// Beide Writer-Locks einer Recovery-Aktion. Die Felder fallen in
+/// Deklarationsreihenfolge, der SQLCipher-Lock also vor dem des Netzziels.
+struct RecoveryArchiveLocks {
+    _local: WriterLock,
+    _remote: Option<WriterLock>,
 }
 /// Only a completed report can be consumed by the readiness path. A failed
 /// report is independently signed durable diagnosis.
@@ -87,14 +124,77 @@ pub struct RecoverySourceCapture<'a> {
     pub passphrase: &'a SecretVec,
 }
 impl RecoveryTestRuntime {
+    /// LocalPath verhält sich unverändert wie [`Self::new`]. Ein
+    /// Netzprofil entsteht nur aus der registrierten Komponente
+    /// (`open_current`), erfolgreicher SQLCipher-Capability und erfolgreichem
+    /// Capability-Test des vorhandenen Netzziels (EA-CNA-REC-1).
     pub fn with_archive_config(
         runtime: OperatorRuntime,
         config: crate::native_archive::NativeArchiveConfig,
     ) -> Result<Self, RecoveryRuntimeError> {
-        Self::new(runtime, config.profile)
+        if !matches!(
+            config.profile,
+            ArchiveBackendProfileV1::ControlledNetworkPath(_)
+        ) {
+            return Self::new(runtime, config.profile);
+        }
+        runtime.ensure_current()?;
+        if runtime.config().role != OperatorRoleV1::OrganizationAdmin {
+            return Err(RecoveryTestError::Operator.into());
+        }
+        let profile = config.profile.clone();
+        let component = NativeArchiveExistingComponent::open_current(&runtime, config)?;
+        let policy = BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields());
+        let directory = runtime.config().archive_directory.clone();
+        component.require_capabilities(&directory, &policy)?;
+        let remote = LocalPathBackend::open_existing(directory, profile, &policy)?;
+        runtime.ensure_current()?;
+        Ok(Self {
+            runtime,
+            archive: RecoveryArchiveHandle::Network {
+                component: Box::new(component),
+                remote,
+            },
+        })
     }
     pub fn archive_profile_hash(&self) -> Result<ea_types::Hash32, RecoveryRuntimeError> {
-        Ok(self.backend.profile_hash()?)
+        match &self.archive {
+            RecoveryArchiveHandle::LocalPath(backend) => Ok(backend.profile_hash()?),
+            RecoveryArchiveHandle::Network { component, .. } => Ok(component.profile_hash()),
+        }
+    }
+    /// EA-CNA-REC-2: zuerst der SQLCipher-Writer-Lock, dann der des
+    /// Netzziels. Scheitert der zweite, gibt das Fallen des ersten ihn frei.
+    fn archive_locks(&self) -> Result<RecoveryArchiveLocks, RecoveryRuntimeError> {
+        match &self.archive {
+            RecoveryArchiveHandle::LocalPath(backend) => Ok(RecoveryArchiveLocks {
+                _local: backend.acquire_writer_lock()?,
+                _remote: None,
+            }),
+            RecoveryArchiveHandle::Network { component, remote } => {
+                let local = component.local_backend().acquire_writer_lock()?;
+                let remote = remote.acquire_writer_lock()?;
+                Ok(RecoveryArchiveLocks {
+                    _local: local,
+                    _remote: Some(remote),
+                })
+            }
+        }
+    }
+    /// Die Archivquelle der Aktion. Für ein Netzprofil gibt es sie erst mit
+    /// der Vereinigung aus Netzziel und Export (EA-CNA-REC-3); bis dahin
+    /// lehnt sie ab, statt nur das Netzziel als vollständige Quelle zu lesen.
+    fn archive_source(&self) -> Result<FsArchiveSource, RecoveryRuntimeError> {
+        match &self.archive {
+            RecoveryArchiveHandle::LocalPath(_) => Ok(FsArchiveSource::open(
+                &self.runtime.config().archive_directory,
+            )
+            .map_err(|_| RecoveryTestError::Source)?),
+            RecoveryArchiveHandle::Network { .. } => Err(RecoveryTestError::Source.into()),
+        }
+    }
+    fn is_network(&self) -> bool {
+        matches!(self.archive, RecoveryArchiveHandle::Network { .. })
     }
     /// A concrete backend rooted at the same verified native runtime path. A
     /// controlled-network profile is explicitly unsupported here, never cast to
@@ -132,7 +232,10 @@ impl RecoveryTestRuntime {
             return Err(RecoveryTestError::Source.into());
         }
         runtime.ensure_current()?;
-        Ok(Self { runtime, backend })
+        Ok(Self {
+            runtime,
+            archive: RecoveryArchiveHandle::LocalPath(backend),
+        })
     }
     pub fn runtime(&self) -> &OperatorRuntime {
         &self.runtime
@@ -141,11 +244,14 @@ impl RecoveryTestRuntime {
         &mut self,
         request: RecoverySourceCapture<'_>,
     ) -> Result<VerifiedRecoverySource, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
+        if self.is_network() {
+            return Err(RecoveryTestError::Source.into());
+        }
         self.runtime.refresh_for_action()?;
         self.runtime.ensure_current()?;
         BoundArchiveProfilePolicyV1::from_policy(self.runtime.head().policy_fields())
-            .require(self.backend.profile_hash()?)?;
+            .require(self.archive_profile_hash()?)?;
         let before = self
             .runtime
             .reauthenticate_for(ReauthPurpose::RecoveryTest)?;
@@ -157,8 +263,7 @@ impl RecoveryTestRuntime {
         }
         let machine = ea_key_provider::measure_native_machine_identity()
             .map_err(|_| RecoveryTestError::Machine)?;
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let inventory_hash = ea_recovery::recovery_archive_inventory_hash(&source)?;
         let probe = ea_recovery::RecoveryArchiveProbe::verify(
             &source,
@@ -178,8 +283,7 @@ impl RecoveryTestRuntime {
             .snapshot_with_backup_key(request.snapshot, &key)?;
         drop(key);
         self.runtime.ensure_current()?;
-        let after = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let after = self.archive_source()?;
         if ea_recovery::recovery_archive_inventory_hash(&after)? != inventory_hash
             || ea_key_provider::measure_native_machine_identity()
                 .map_err(|_| RecoveryTestError::Machine)?
@@ -264,11 +368,13 @@ impl RecoveryTestRuntime {
         &mut self,
         request: RecoverySourceRestore<'_>,
     ) -> Result<RestoredRecoverySource, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
+        if self.is_network() {
+            return Err(RecoveryTestError::Source.into());
+        }
         self.runtime.refresh_for_action()?;
         self.runtime.ensure_current()?;
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let scope = ea_recovery::verify_recovery_source(
             request.exact_source,
             &source,
@@ -309,8 +415,7 @@ impl RecoveryTestRuntime {
         drop(key);
         let content_hash = restored.recovery_source_content_hash()?;
         self.runtime.ensure_current()?;
-        let after_source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let after_source = self.archive_source()?;
         if ea_recovery::recovery_archive_inventory_hash(&after_source)? != f.archive_inventory_hash
             || ea_key_provider::measure_native_machine_identity()
                 .map_err(|_| RecoveryTestError::Machine)?
@@ -462,7 +567,7 @@ impl RecoveryTestRuntime {
         inventory: &KeyInventory,
         path: &Path,
     ) -> Result<RestoredRecoverySource, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
         self.runtime.refresh_for_action()?;
         self.runtime
             .reauthenticate_for(ReauthPurpose::RecoveryTest)?;

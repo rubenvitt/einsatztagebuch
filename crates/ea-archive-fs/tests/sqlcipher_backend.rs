@@ -259,6 +259,56 @@ fn writer_lock_spans_independent_connections_and_process_crash() {
     );
 }
 
+fn component_rows(db: &ea_local_store::EncryptedDatabase) -> Vec<i64> {
+    [
+        "SELECT count(*) FROM local_commit_object",
+        "SELECT count(*) FROM local_commit_directory",
+        "SELECT count(*) FROM local_commit_probe",
+    ]
+    .iter()
+    .map(|sql| db.query_row(sql, &[]).unwrap().unwrap().integer(0).unwrap())
+    .collect()
+}
+
+#[test]
+fn sqlcipher_capability_measures_durability_flush_and_exclusive_lock_without_writes() {
+    let (_guard, root) = support::temp_root("sqlcipher-backend-capability");
+    let path = root.join("operator.sqlite");
+    let db = database(&path);
+    let archive = backend(db.clone(), 7, 2);
+    archive
+        .create_non_object_if_absent(&address("seen.eip"), b"before")
+        .unwrap();
+    let before = component_rows(&db);
+    let report = archive.run_capability_test().unwrap();
+    assert!(report.durable_wal_full());
+    assert!(report.physical_flush());
+    assert!(report.exclusive_writer_lock());
+    assert!(report.all_proven());
+    assert_eq!(
+        component_rows(&db),
+        before,
+        "measurement writes no object, directory or probe row"
+    );
+    // Nach der Messung ist der Writer-Lock wieder frei.
+    let _lock = archive.acquire_writer_lock().unwrap();
+}
+
+#[test]
+fn sqlcipher_capability_reports_lock_contention_when_already_held() {
+    let (_guard, root) = support::temp_root("sqlcipher-backend-capability-held");
+    let path = root.join("operator.sqlite");
+    let archive = backend(database(&path), 8, 2);
+    let other = backend(database(&path), 9, 2);
+    let held = other.acquire_writer_lock().unwrap();
+    assert_eq!(
+        archive.run_capability_test(),
+        Err(ArchiveBackendError::AlreadyLocked)
+    );
+    drop(held);
+    assert!(archive.run_capability_test().unwrap().all_proven());
+}
+
 #[test]
 #[ignore = "child of the SQLCipher component process test"]
 fn independent_process_fixture() {

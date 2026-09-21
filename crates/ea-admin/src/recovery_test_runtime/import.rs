@@ -99,10 +99,9 @@ impl RecoveryTestRuntime {
         exact_source: &[u8],
         exact_report: &[u8],
     ) -> Result<VerifiedCompletedRecoveryReport, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
         self.runtime.refresh_for_action()?;
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let now = self.runtime.head().preexisting_effective_now().value();
         let scope = ea_recovery::verify_recovery_source(
             exact_source,
@@ -137,8 +136,7 @@ impl RecoveryTestRuntime {
             .runtime
             .reauthenticate_for_context(ReauthPurpose::RecoveryTest, context)?;
         self.source_admission(&scope)?;
-        let after = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let after = self.archive_source()?;
         if ea_recovery::recovery_archive_inventory_hash(&after)?
             != scope.core().fields().archive_inventory_hash
         {
@@ -185,7 +183,7 @@ impl RecoveryTestRuntime {
         &mut self,
         inventory: &KeyInventory,
     ) -> Result<Option<VerifiedCompletedRecoveryReport>, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
         self.runtime.refresh_for_action()?;
         self.load_imported_completed_report(inventory)
     }
@@ -199,8 +197,7 @@ impl RecoveryTestRuntime {
             "SELECT r.report_hash,r.source_hash,r.exact_report,r.completion_audit_event_id,r.completed_at,r.next_due_at,s.exact_envelope,a.exact_bytes,c.exact_bytes FROM recovery_test_report r JOIN recovery_source_scope s ON s.source_hash=r.source_hash JOIN local_audit_event a ON a.event_id=r.completion_audit_event_id JOIN local_audit_event c ON c.event_id=s.capture_audit_event_id ORDER BY r.completed_at DESC,r.report_hash LIMIT 1",&[],
         )?;
         let Some(row) = row else { return Ok(None) };
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let native_wall = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| RecoveryTestError::Source)?;
