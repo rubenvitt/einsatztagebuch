@@ -7,15 +7,16 @@
 //! byteidentisch veröffentlicht (EA-CNA-PUB-2/3). Nach einem Neustart
 //! entsteht derselbe Plan aus denselben Bytes wieder.
 //!
-//! Ausgelöst wird (a) in Schritt 12 über [`NetworkPublicationPortV1`], (b)
-//! nach der Start-Wiederherstellung und (c) durch den Hostlauf des Wirts mit
-//! dem Backoff des Profils ([`NetworkPublicationHost::next_delay`],
-//! EA-CNA-PUB-8).
+//! Ausgelöst wird (a) in Schritt 12 über [`ObservedPublicationPortV1`], (b)
+//! nach der Start-Wiederherstellung und (c) durch den Hostlauf
+//! [`NetworkPublicationHost::run_loop`] mit dem Backoff des Profils
+//! (EA-CNA-PUB-8). Vor jeder Publikation wird das Netzziel mit seinem
+//! kanonischen Wurzelpfad beobachtet (EA-CNA-WRT-7).
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex, PoisonError},
-    time::Duration,
+    sync::{Condvar, Mutex, MutexGuard, PoisonError, atomic::AtomicU64},
+    time::{Duration, Instant},
 };
 
 use ea_archive::{
@@ -26,9 +27,79 @@ use ea_archive_fs::{
     DetailCause, LocalPathBackend, NetworkArchiveTargetV1, PlannedPublicationV1,
     PublicationOutcomeV1, PublicationQueue, PublicationStateV1, PublicationTargetV1, SyncStatus,
 };
+use ea_destruction::{DestructionError, SqliteManagedCustody};
+use ea_local_store::EncryptedDatabase;
+use ea_trust::WriterRegistryHeadRef;
+use ea_types::CertificateHash;
 use ea_writer::NetworkPublicationPortV1;
 
 use crate::native_archive::{NativeArchiveExistingComponent, NativeArchiveOpenError};
+
+/// Untergrenze jeder Wartezeit des Hostlaufs. Ein Profil mit Backoff 0 (das
+/// Format prüft `> 0` nur für LocalPath) darf den Lauf nicht zur
+/// Dauerschleife machen.
+const MINIMUM_BACKOFF_MS: u64 = 1_000;
+
+/// Beobachtet das Netzziel unmittelbar vor einer Publikation (EA-CNA-WRT-7).
+pub trait NetworkTargetObserverV1 {
+    /// # Errors
+    ///
+    /// Scheitert die Beobachtung, wird nicht veröffentlicht.
+    fn observe_network_target(&self, target: &LocalPathBackend) -> Result<(), ArchiveBackendError>;
+}
+
+/// Die Verwahrungsbeobachtung des Writers (dieselbe wie beim Writer-Start,
+/// `observe_writer_archive`), hier mit dem Netzziel als Bestand: Ort ist
+/// dessen kanonischer Wurzelpfad in der unveränderten Domäne
+/// `EINSATZARCHIV-MANAGED-ARCHIVE-LOCATION-v1`.
+pub struct WriterCustodyObserverV1<'a> {
+    custody: SqliteManagedCustody,
+    head: WriterRegistryHeadRef<'a>,
+    certificate: CertificateHash,
+}
+impl<'a> WriterCustodyObserverV1<'a> {
+    #[must_use]
+    pub fn new(
+        database: std::sync::Arc<EncryptedDatabase>,
+        head: WriterRegistryHeadRef<'a>,
+        certificate: CertificateHash,
+    ) -> Self {
+        Self {
+            custody: SqliteManagedCustody::new(database),
+            head,
+            certificate,
+        }
+    }
+}
+impl NetworkTargetObserverV1 for WriterCustodyObserverV1<'_> {
+    fn observe_network_target(&self, target: &LocalPathBackend) -> Result<(), ArchiveBackendError> {
+        self.custody
+            .observe_writer_archive(self.head, self.certificate, target)
+            .map(|_| ())
+            .map_err(|error| match error {
+                // Lock, Wurzel oder Lesen des Netzziels: ob das die verlorene
+                // Erreichbarkeit ist, entscheidet der Host an der Wurzel.
+                DestructionError::Storage => ArchiveBackendError::Io,
+                _ => ArchiveBackendError::VerificationFailed,
+            })
+    }
+}
+
+/// Der Schritt-12-Port: ein Lauf des Hosts mit der Beobachtung der
+/// aktuellen Aktion. Nur hier wird der typisierte Ausgang auf
+/// [`PublicationOutcomeV1`] verkürzt (ein Befund wird `Deferred`, weil der
+/// Writer ihn ohnehin nur berichtet; den Befund trägt `sync_state`).
+pub struct ObservedPublicationPortV1<'a> {
+    pub host: &'a NetworkPublicationHost,
+    pub observer: &'a (dyn NetworkTargetObserverV1 + Sync),
+}
+impl NetworkPublicationPortV1 for ObservedPublicationPortV1<'_> {
+    fn publish_committed(&self) -> PublicationOutcomeV1 {
+        self.host
+            .run_once(self.observer)
+            .map_or(PublicationOutcomeV1::Deferred, |state| state.outcome())
+    }
+}
 
 /// Was der letzte Lauf über den Bestand wusste.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,9 +110,14 @@ enum Observed {
     Clean,
     /// Es steht etwas aus; die Ursache tritt daneben.
     Waiting(DetailCause),
-    /// Ein Datenbefund (etwa ein Bytekonflikt), keine verlorene
-    /// Erreichbarkeit.
+    /// Ein Datenbefund (Bytekonflikt, beschädigtes Objekt, lokaler
+    /// Lesefehler), keine verlorene Erreichbarkeit.
     Failed,
+}
+impl Observed {
+    const fn is_clean(self) -> bool {
+        matches!(self, Self::Clean | Self::Unknown)
+    }
 }
 
 struct HostState {
@@ -52,6 +128,18 @@ struct HostState {
     delay_ms: u64,
     /// `resume_max_attempts` ist verbraucht; gilt bis zum nächsten Start.
     exhausted: bool,
+    /// Ein Lauf ist von sauber auf nicht sauber gekippt: der Hostlauf soll
+    /// nicht bis zum Ende seiner Ruhe-Wartezeit schlafen.
+    signaled: bool,
+    stopped: bool,
+}
+
+/// Wie eine Wartezeit des Hostlaufs endete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Wake {
+    Elapsed,
+    Signaled,
+    Stopped,
 }
 
 /// Der Publikationshost eines kontrollierten Netzprofils.
@@ -69,9 +157,11 @@ pub struct NetworkPublicationHost {
     profile: ControlledNetworkProfileV1,
     policy: BoundArchiveProfilePolicyV1,
     state: Mutex<HostState>,
-    /// Serialisiert ganze Läufe (Ableitung UND Publikation): Schritt 12 und
-    /// der Hostlauf dürfen sich nicht verschränken.
+    wake: Condvar,
+    /// Serialisiert ganze Läufe (Ableitung, Beobachtung UND Publikation):
+    /// Schritt 12 und der Hostlauf dürfen sich nicht verschränken.
     run: Mutex<()>,
+    runs: AtomicU64,
 }
 
 impl NetworkPublicationHost {
@@ -126,126 +216,178 @@ impl NetworkPublicationHost {
             ArchiveBackendProfileV1::ControlledNetworkPath(profile.clone()),
             policy,
         )?;
-        Ok(Self {
+        let host = Self {
             queue,
             local,
             remote_root: remote_root.to_owned(),
             state: Mutex::new(HostState {
                 observed: Observed::Unknown,
                 attempts: 0,
-                delay_ms: profile.resume_backoff_initial_ms,
+                delay_ms: 0,
                 exhausted: false,
+                signaled: false,
+                stopped: false,
             }),
+            wake: Condvar::new(),
             profile,
             policy: policy.clone(),
             run: Mutex::new(()),
-        })
+            runs: AtomicU64::new(0),
+        };
+        host.lock_state().delay_ms = host.initial_backoff_ms();
+        Ok(host)
+    }
+
+    fn initial_backoff_ms(&self) -> u64 {
+        self.profile
+            .resume_backoff_initial_ms
+            .max(MINIMUM_BACKOFF_MS)
+    }
+
+    fn maximum_backoff_ms(&self) -> u64 {
+        self.profile
+            .resume_backoff_max_ms
+            .max(self.initial_backoff_ms())
+    }
+
+    fn open_remote(&self) -> Result<LocalPathBackend, ArchiveBackendError> {
+        LocalPathBackend::open_existing(
+            self.remote_root.clone(),
+            ArchiveBackendProfileV1::ControlledNetworkPath(self.profile.clone()),
+            &self.policy,
+        )
     }
 
     /// Der abgeleitete Plan, ohne zu veröffentlichen (EA-CNA-PUB-1/2).
     ///
     /// # Errors
     ///
-    /// Der Fehler beim Öffnen oder Lesen des Netzziels oder der Ableitung.
+    /// Der Fehler beim Öffnen des Netzziels oder der Ableitung.
     pub fn pending(&self) -> Result<PlannedPublicationV1, ArchiveBackendError> {
+        let remote = self.open_remote()?;
+        PlannedPublicationV1::derive_pending(self.local.as_ref(), &remote)
+    }
+
+    /// Ein Lauf: ableiten, das Netzziel beobachten, veröffentlichen.
+    ///
+    /// `Ok` trägt veröffentlicht, nichts ausstehend oder aufgeschoben (ein
+    /// nicht erreichbares Netzziel ist `Deferred` mit `Netzarchiv wartet`);
+    /// `Err` ist ein Befund.
+    ///
+    /// # Errors
+    ///
+    /// Ein Datenbefund: Bytekonflikt, beschädigtes Objekt, lokaler
+    /// Lesefehler der Komponente, gescheiterte Beobachtung eines erreichbaren
+    /// Netzziels oder ein Hartfehler des Ziels. Ein aufgenommener Plan bleibt
+    /// dabei in der Warteschlange; aus der Ableitung wurde nichts eingereiht.
+    pub fn run_once(
+        &self,
+        observer: &dyn NetworkTargetObserverV1,
+    ) -> Result<PublicationStateV1, ArchiveBackendError> {
+        let _run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let result = self.publish_pending(observer);
+        let observed = match &result {
+            Ok(state) => match state.outcome() {
+                PublicationOutcomeV1::NothingPending
+                | PublicationOutcomeV1::PublishedCompletely => Observed::Clean,
+                PublicationOutcomeV1::Deferred => Observed::Waiting(
+                    state
+                        .detail_cause()
+                        .unwrap_or(DetailCause::NetworkArchiveWaiting),
+                ),
+                PublicationOutcomeV1::QueueLimitReached => {
+                    Observed::Waiting(DetailCause::QueueLimitReached)
+                }
+            },
+            Err(_) => Observed::Failed,
+        };
+        let mut state = self.lock_state();
+        if state.observed.is_clean() && !observed.is_clean() {
+            state.signaled = true;
+            self.wake.notify_all();
+        }
+        state.observed = observed;
+        result
+    }
+
+    fn publish_pending(
+        &self,
+        observer: &dyn NetworkTargetObserverV1,
+    ) -> Result<PublicationStateV1, ArchiveBackendError> {
+        let waiting = |cause| Ok(PublicationStateV1::deferred(Some(cause)));
+        let lost = |error: &ArchiveBackendError| {
+            matches!(
+                error,
+                ArchiveBackendError::Io | ArchiveBackendError::FlushFailed
+            ) && !self.remote_is_reachable()
+        };
         // Die Ableitung öffnet ihren EIGENEN Griff auf das Netzziel und gibt
         // ihn zurück, bevor die Warteschlange ihren nimmt: beide nehmen
         // kurzzeitig den Writer-Lock des Netzziels, und sie dürfen sich nie
         // überlappen. Nicht als Feld zwischenspeichern.
-        let remote = LocalPathBackend::open_existing(
-            self.remote_root.clone(),
-            ArchiveBackendProfileV1::ControlledNetworkPath(self.profile.clone()),
-            &self.policy,
-        )?;
-        PlannedPublicationV1::derive_pending(self.local.as_ref(), &remote)
-    }
-
-    /// Ein Lauf: ableiten, dann veröffentlichen. Ein nicht erreichbares
-    /// Netzziel ist `Deferred` mit `Netzarchiv wartet`, kein Fehler.
-    pub fn run_once(&self) -> PublicationStateV1 {
-        let _run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
-        let (observed, state) = self.publish_pending();
-        self.lock_state().observed = observed;
-        state
-    }
-
-    fn publish_pending(&self) -> (Observed, PublicationStateV1) {
-        let waiting = |cause| {
-            (
-                Observed::Waiting(cause),
-                PublicationStateV1::deferred(Some(cause)),
-            )
+        let remote = match self.open_remote() {
+            Ok(remote) => remote,
+            Err(error) if lost(&error) => return waiting(DetailCause::NetworkArchiveWaiting),
+            Err(ArchiveBackendError::ProfileNotAllowed) => {
+                return waiting(DetailCause::ProfileNotAllowed);
+            }
+            Err(error) => return Err(error),
         };
-        let planned = match self.pending() {
-            Ok(planned) => planned,
-            // Wurzel verschwunden, Share weg, Mount unbrauchbar: dieselbe
-            // verlorene Erreichbarkeit wie in der Warteschlange. Ein
-            // Bytekonflikt oder ein beschädigtes Objekt bleibt ein Befund.
+        // Ein Fehler der Ableitung ist ein Befund: Bytekonflikt, beschädigtes
+        // Objekt oder ein LOKALER Lesefehler — `read_relative` des Netzziels
+        // meldet selbst keinen Fehler.
+        let planned = PlannedPublicationV1::derive_pending(self.local.as_ref(), &remote)?;
+        if planned.is_empty() {
+            drop(remote);
+            // Nichts fehlt am Netzziel. Ein älterer, aufgeschobener Plan im
+            // Platz wird trotzdem abgeräumt — über Create-if-absent ist das
+            // idempotent und bringt keine neuen Bytes ans Netzziel.
+            return self.settle(self.queue.resume());
+        }
+        // EA-CNA-WRT-7: unmittelbar vor der Publikation.
+        match observer.observe_network_target(&remote) {
+            Ok(()) => {}
+            Err(error) if lost(&error) => return waiting(DetailCause::NetworkArchiveWaiting),
+            Err(ArchiveBackendError::AlreadyLocked) => {
+                return waiting(DetailCause::NetworkArchiveWaiting);
+            }
+            Err(error) => return Err(error),
+        }
+        drop(remote);
+        self.settle(self.queue.publish(planned))
+    }
+
+    /// Ein Fehler der Warteschlange: fremd gehaltener Netzziel-Lock (etwa
+    /// eine Recovery-Capture, EA-CNA-REC-2) wartet, eine fehlende
+    /// Policyzulassung trägt ihre Ursache, alles andere ist ein Befund.
+    fn settle(
+        &self,
+        result: Result<PublicationStateV1, ArchiveBackendError>,
+    ) -> Result<PublicationStateV1, ArchiveBackendError> {
+        match result {
+            Err(ArchiveBackendError::AlreadyLocked) => Ok(PublicationStateV1::deferred(Some(
+                DetailCause::NetworkArchiveWaiting,
+            ))),
             Err(ArchiveBackendError::Io | ArchiveBackendError::FlushFailed)
                 if !self.remote_is_reachable() =>
             {
-                return waiting(DetailCause::NetworkArchiveWaiting);
+                Ok(PublicationStateV1::deferred(Some(
+                    DetailCause::NetworkArchiveWaiting,
+                )))
             }
-            Err(error) => return Self::refused(error),
-        };
-        let published = if planned.is_empty() {
-            // Nichts fehlt am Netzziel. Ein älterer, aufgeschobener Plan im
-            // Platz wird trotzdem abgeräumt — über Create-if-absent ist das
-            // idempotent.
-            self.queue.resume()
-        } else {
-            self.queue.publish(planned)
-        };
-        match published {
-            Ok(state) => {
-                let observed = match state.outcome() {
-                    PublicationOutcomeV1::NothingPending
-                    | PublicationOutcomeV1::PublishedCompletely => Observed::Clean,
-                    PublicationOutcomeV1::Deferred => Observed::Waiting(
-                        state
-                            .detail_cause()
-                            .unwrap_or(DetailCause::NetworkArchiveWaiting),
-                    ),
-                    PublicationOutcomeV1::QueueLimitReached => {
-                        Observed::Waiting(DetailCause::QueueLimitReached)
-                    }
-                };
-                (observed, state)
-            }
-            Err(error) => Self::refused(error),
+            Err(ArchiveBackendError::ProfileNotAllowed) => Ok(PublicationStateV1::deferred(Some(
+                DetailCause::ProfileNotAllowed,
+            ))),
+            other => other,
         }
-    }
-
-    /// Ein Fehler der Warteschlange oder der Ableitung.
-    ///
-    /// Kam der Fehler aus der Warteschlange, liegt der Plan dort
-    /// aufgeschoben. Kam er aus der Ableitung (`pending`), wurde NICHTS
-    /// eingereiht. Ein Datenbefund (Bytekonflikt, beschädigtes Objekt) wird
-    /// trotzdem als [`PublicationOutcomeV1::Deferred`] ohne Ursache
-    /// zurückgegeben, nur weil der Ausgang keinen Fehlerarm hat — er heißt
-    /// hier ausdrücklich NICHT, dass ein `resume` ihn aufnähme. Maßgeblich
-    /// ist [`NetworkPublicationHost::sync_state`], das dafür `Fehler` meldet.
-    fn refused(error: ArchiveBackendError) -> (Observed, PublicationStateV1) {
-        let cause = match error {
-            // Ein anderer hält gerade den Writer-Lock des Netzziels (etwa
-            // eine Recovery-Capture, EA-CNA-REC-2): das Ziel wartet.
-            ArchiveBackendError::AlreadyLocked
-            | ArchiveBackendError::Io
-            | ArchiveBackendError::FlushFailed => DetailCause::NetworkArchiveWaiting,
-            ArchiveBackendError::ProfileNotAllowed => DetailCause::ProfileNotAllowed,
-            _ => return (Observed::Failed, PublicationStateV1::deferred(None)),
-        };
-        (
-            Observed::Waiting(cause),
-            PublicationStateV1::deferred(Some(cause)),
-        )
     }
 
     fn remote_is_reachable(&self) -> bool {
         std::fs::metadata(&self.remote_root).is_ok_and(|metadata| metadata.is_dir())
     }
 
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, HostState> {
+    fn lock_state(&self) -> MutexGuard<'_, HostState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -253,8 +395,9 @@ impl NetworkPublicationHost {
     /// daneben.
     ///
     /// Ohne Server gilt: leere Queue → `lokal gesichert`; ausstehend →
-    /// `Upload ausstehend` mit Ursache; ein Datenbefund → `Fehler`. Vor dem
-    /// ersten Lauf ist nichts bekannt, und behauptet wird dann nur
+    /// `Upload ausstehend` mit Ursache; ein Befund → `Fehler` (ein
+    /// Bytekonflikt ist weder verlorene Eigenschaft noch leere Queue). Vor
+    /// dem ersten Lauf ist nichts bekannt, und behauptet wird dann nur
     /// `Upload ausstehend` ohne Ursache — nie `lokal gesichert`.
     pub fn sync_state(&self) -> (SyncStatus, Option<DetailCause>) {
         let state = self.lock_state();
@@ -272,38 +415,81 @@ impl NetworkPublicationHost {
 
     /// Die Wartezeit bis zum nächsten Hostlauf (EA-CNA-PUB-8 (c)).
     ///
-    /// Nach einem sauberen Lauf: `resume_backoff_initial_ms`, ohne einen
-    /// Versuch zu verbrauchen. Nach einem nicht sauberen Lauf zählt jeder
-    /// Aufruf einen Versuch; die Wartezeit beginnt bei
+    /// Sauber: `resume_backoff_max_ms` als Ruhe-Wartezeit ohne Versuch; der
+    /// Lauf wird vorher geweckt, sobald ein Lauf nicht sauber endet. Nicht
+    /// sauber: jeder Aufruf zählt einen Versuch; die Wartezeit beginnt bei
     /// `resume_backoff_initial_ms` und verdoppelt sich bis
-    /// `resume_backoff_max_ms`. Sind `resume_max_attempts` Versuche in
-    /// diesem Prozess verbraucht, liefert sie `None` — bis zum nächsten Start
-    /// mit der Ursache `Wiederaufnahme erschöpft`.
+    /// `resume_backoff_max_ms`, jeweils mindestens eine Sekunde. Sind
+    /// `resume_max_attempts` Versuche in diesem Prozess verbraucht, liefert
+    /// sie `None` — bis zum nächsten Start mit `Wiederaufnahme erschöpft`.
     pub fn next_delay(&self) -> Option<Duration> {
+        let initial = self.initial_backoff_ms();
+        let maximum = self.maximum_backoff_ms();
         let mut state = self.lock_state();
         if state.exhausted {
             return None;
         }
-        if matches!(state.observed, Observed::Clean | Observed::Unknown) {
-            state.delay_ms = self.profile.resume_backoff_initial_ms;
-            return Some(Duration::from_millis(state.delay_ms));
+        if state.observed.is_clean() {
+            state.delay_ms = initial;
+            return Some(Duration::from_millis(maximum));
         }
         if state.attempts >= self.profile.resume_max_attempts {
             state.exhausted = true;
             return None;
         }
         state.attempts += 1;
-        let delay = state.delay_ms;
-        state.delay_ms = delay
-            .saturating_mul(2)
-            .min(self.profile.resume_backoff_max_ms);
+        let delay = state.delay_ms.max(initial);
+        state.delay_ms = delay.saturating_mul(2).min(maximum);
         Some(Duration::from_millis(delay))
     }
-}
 
-impl NetworkPublicationPortV1 for NetworkPublicationHost {
-    fn publish_committed(&self) -> PublicationOutcomeV1 {
-        self.run_once().outcome()
+    fn wait(&self, delay: Duration) -> Wake {
+        let until = Instant::now() + delay;
+        let mut state = self.lock_state();
+        loop {
+            if state.stopped {
+                return Wake::Stopped;
+            }
+            if state.signaled {
+                state.signaled = false;
+                return Wake::Signaled;
+            }
+            let now = Instant::now();
+            if now >= until {
+                return Wake::Elapsed;
+            }
+            state = self
+                .wake
+                .wait_timeout(state, until - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Der Hostlauf: wartet [`Self::next_delay`] (oder bis ein Lauf nicht
+    /// sauber endet) und ruft dann `run`, bis `next_delay` `None` liefert
+    /// oder [`Self::shutdown`] gerufen wurde. `run` baut die Beobachtung der
+    /// aktuellen Autorität und ruft [`Self::run_once`].
+    pub fn run_loop(&self, run: &dyn Fn(&Self)) {
+        while let Some(delay) = self.next_delay() {
+            match self.wait(delay) {
+                Wake::Stopped => return,
+                Wake::Signaled => {}
+                Wake::Elapsed => run(self),
+            }
+        }
+    }
+
+    /// Beendet [`Self::run_loop`] sofort, auch mitten in einer Wartezeit.
+    pub fn shutdown(&self) {
+        self.lock_state().stopped = true;
+        self.wake.notify_all();
+    }
+
+    /// Wie viele Läufe dieser Host bisher begann.
+    #[must_use]
+    pub fn runs(&self) -> u64 {
+        self.runs.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -371,6 +557,17 @@ mod tests {
             allowed_format_versions: vec![1],
             effective_from_sequence: ChainSequence::new(0),
         })
+    }
+
+    /// Keine Verwahrungsbeobachtung (die Desktop-Tests messen sie).
+    struct Unobserved;
+    impl NetworkTargetObserverV1 for Unobserved {
+        fn observe_network_target(
+            &self,
+            _target: &ea_archive_fs::LocalPathBackend,
+        ) -> Result<(), ArchiveBackendError> {
+            Ok(())
+        }
     }
 
     /// Die committed lokale Komponente als feste Liste.
@@ -459,7 +656,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = host.run_once();
+        let state = host.run_once(&Unobserved).unwrap();
         assert_eq!(state.outcome(), PublicationOutcomeV1::PublishedCompletely);
         assert_eq!(
             *order.lock().unwrap(),
@@ -480,7 +677,7 @@ mod tests {
         assert_eq!(host.sync_state(), (SyncStatus::LocallySaved, None));
         // Ein zweiter Lauf findet nichts mehr: die Queue ist abgeleitet.
         assert_eq!(
-            host.run_once().outcome(),
+            host.run_once(&Unobserved).unwrap().outcome(),
             PublicationOutcomeV1::NothingPending
         );
         let _ = std::fs::remove_dir_all(&remote);
@@ -516,8 +713,9 @@ mod tests {
             (SyncStatus::UploadPending, None),
             "vor dem ersten Lauf wird nichts behauptet"
         );
-        assert_eq!(host.next_delay(), Some(Duration::from_millis(100)));
-        let state = host.run_once();
+        // Sauber/unbekannt: die Ruhe-Wartezeit, mindestens eine Sekunde.
+        assert_eq!(host.next_delay(), Some(Duration::from_millis(1_000)));
+        let state = host.run_once(&Unobserved).unwrap();
         assert_eq!(state.outcome(), PublicationOutcomeV1::Deferred);
         assert!(!state.fell_back_to_another_target());
         assert!(!remote.exists(), "das Netzziel wird nie angelegt");
@@ -528,11 +726,12 @@ mod tests {
                 Some(DetailCause::NetworkArchiveWaiting)
             )
         );
-        // Verdoppelnd bis zum Maximum, höchstens `resume_max_attempts` (2).
-        assert_eq!(host.next_delay(), Some(Duration::from_millis(100)));
-        host.run_once();
-        assert_eq!(host.next_delay(), Some(Duration::from_millis(200)));
-        host.run_once();
+        // Das Profil (100/300 ms) wird auf eine Sekunde angehoben; höchstens
+        // `resume_max_attempts` (2) Versuche.
+        assert_eq!(host.next_delay(), Some(Duration::from_millis(1_000)));
+        let _ = host.run_once(&Unobserved);
+        assert_eq!(host.next_delay(), Some(Duration::from_millis(1_000)));
+        let _ = host.run_once(&Unobserved);
         assert_eq!(host.next_delay(), None);
         assert_eq!(
             host.sync_state(),
@@ -545,11 +744,126 @@ mod tests {
         // trotzdem; der Hostlauf bleibt bis zum nächsten Start beendet.
         std::fs::create_dir_all(&remote).unwrap();
         assert_eq!(
-            host.run_once().outcome(),
+            host.run_once(&Unobserved).unwrap().outcome(),
             PublicationOutcomeV1::PublishedCompletely
         );
         assert_eq!(host.sync_state(), (SyncStatus::LocallySaved, None));
         assert_eq!(host.next_delay(), None);
         let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    /// Eine lokale Komponente, deren Lesen scheitert (SQLCipher-I/O).
+    struct Unreadable;
+    impl ArchiveSource for Unreadable {
+        fn visit_blobs(
+            &self,
+            _visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+        ) -> Result<(), ArchiveError> {
+            Err(ArchiveError::Unavailable)
+        }
+    }
+
+    fn remote_dir(label: &str) -> std::path::PathBuf {
+        let remote = std::env::temp_dir().join(format!(
+            "ea-admin-network-publication-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&remote);
+        std::fs::create_dir_all(&remote).unwrap();
+        remote
+    }
+
+    fn host_over(
+        local: Box<dyn ArchiveSource + Send + Sync>,
+        remote: &std::path::Path,
+        network: ControlledNetworkProfileV1,
+    ) -> NetworkPublicationHost {
+        let wrapped = ArchiveBackendProfileV1::ControlledNetworkPath(network.clone());
+        let policy = policy(&wrapped);
+        let target =
+            NetworkArchiveTargetV1::new(remote.to_owned(), wrapped, policy.clone()).unwrap();
+        NetworkPublicationHost::from_parts(local, remote, network, &policy, Box::new(target))
+            .unwrap()
+    }
+
+    /// Fix-Runde 1: ein lokaler Lesefehler ist ein Befund, kein wartendes
+    /// Netzziel.
+    #[test]
+    fn a_local_read_failure_is_a_finding_not_a_waiting_network_archive() {
+        let remote = remote_dir("local-io");
+        let host = host_over(Box::new(Unreadable), &remote, profile());
+        assert!(
+            host.run_once(&Unobserved).is_err(),
+            "ein Befund, kein Ausgang"
+        );
+        assert_eq!(host.sync_state(), (SyncStatus::Failed, None));
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    /// Fix-Runde 1: ein Profil mit Backoff 0 darf den Hostlauf nicht zur
+    /// Dauerschleife machen.
+    #[test]
+    fn a_zero_backoff_profile_is_clamped_to_at_least_one_second() {
+        let remote = std::env::temp_dir().join(format!(
+            "ea-admin-network-publication-zero-gone-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&remote);
+        let mut network = profile();
+        network.resume_backoff_initial_ms = 0;
+        network.resume_backoff_max_ms = 0;
+        network.resume_max_attempts = 1_000;
+        let host = host_over(Box::new(Committed(Vec::new())), &remote, network);
+        let _ = host.run_once(&Unobserved);
+        for _ in 0..3 {
+            assert!(host.next_delay().unwrap() >= std::time::Duration::from_millis(1_000));
+        }
+    }
+
+    /// Fix-Runde 1: der Hostlauf mit Backoff-0-Profil bleibt in einem
+    /// Zeitfenster bei einer beschränkten Zahl von Läufen — nicht wartend
+    /// (Netzziel weg) wie sauber (nichts ausstehend).
+    #[test]
+    fn the_host_loop_runs_a_bounded_number_of_times_with_a_zero_backoff_profile() {
+        use std::sync::Arc;
+        let mut network = profile();
+        network.resume_backoff_initial_ms = 0;
+        network.resume_backoff_max_ms = 0;
+        network.resume_max_attempts = 1_000;
+        for gone in [true, false] {
+            let remote = remote_dir(if gone { "loop-gone" } else { "loop-clean" });
+            if gone {
+                std::fs::remove_dir_all(&remote).unwrap();
+            }
+            let local = if gone {
+                vec![(
+                    "entries/000000000001_e1.eip".into(),
+                    format_fixture::valid_eip(vec![0x44; 48]),
+                )]
+            } else {
+                Vec::new()
+            };
+            let host = Arc::new(host_over(
+                Box::new(Committed(local)),
+                &remote,
+                network.clone(),
+            ));
+            let _ = host.run_once(&Unobserved);
+            let before = host.runs();
+            let looping = {
+                let host = host.clone();
+                std::thread::spawn(move || {
+                    host.run_loop(&|host| {
+                        let _ = host.run_once(&Unobserved);
+                    })
+                })
+            };
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            host.shutdown();
+            looping.join().unwrap();
+            let runs = host.runs() - before;
+            assert!(runs <= 2, "gone={gone}: {runs} Läufe in 1,5 s");
+            let _ = std::fs::remove_dir_all(&remote);
+        }
     }
 }

@@ -144,6 +144,9 @@ impl SqlcipherArchiveBackend {
     /// unabhängiges Handle bekommt sie nicht. Wer sie hält, garantiert der
     /// Aufrufer.
     ///
+    /// Der lokal höchste `.eip` und seine Grants werden nie entfernt (siehe
+    /// `highest_entry_and_grants`).
+    ///
     /// Staging-Adressen, Verzeichniszeilen und die Sonde werden nie berührt:
     /// gelöscht wird nur aus `local_commit_object`, und nur eine Adresse, die
     /// keine Staging-Adresse ist. Alle Löschungen laufen in EINER
@@ -175,11 +178,18 @@ impl SqlcipherArchiveBackend {
         // Die lokale Komponente ist durch die Queuegrenze klein; das
         // Netzziel kann groß sein. Deshalb wird die lokale Seite indiziert
         // und das Netzziel einmal durchlaufen.
-        let local: HashMap<String, Vec<u8>> = self
+        let mut local: HashMap<String, Vec<u8>> = self
             .snapshot()?
             .into_iter()
             .filter(|(path, _)| !ea_archive::is_staging_path(path))
             .collect();
+        // Der höchste lokale `.eip` und seine Grants bleiben immer: eine
+        // veraltete fremde Grundlinie ohne sie sähe sonst einen NIEDRIGEREN
+        // Kettenkopf und schlüge eine schon vergebene Sequenz erneut vor; mit
+        // ihnen sieht sie eine Lücke, und die verifiziert nicht.
+        for kept in highest_entry_and_grants(local.keys()) {
+            local.remove(&kept);
+        }
         let mut identical = Vec::new();
         remote
             .visit_blobs(&mut |blob| {
@@ -309,6 +319,34 @@ impl SqlcipherArchiveBackend {
             Ok(rows)
         })
     }
+}
+/// `entries/<12-stellige Sequenz>_<entry-hash>.eip` mit der höchsten
+/// Sequenz und alle `grants/<entry-hash>_….eag` dieses Eintrags (§11.4).
+fn highest_entry_and_grants<'a>(paths: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let paths: Vec<&String> = paths.collect();
+    let highest = paths
+        .iter()
+        .filter_map(|path| {
+            let name = path.strip_prefix(ea_archive::ENTRIES_DIR_V1)?;
+            let name = name.strip_suffix(".eip")?;
+            let (sequence, hash) = name.split_once('_')?;
+            (sequence.len() == 12 && sequence.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| (sequence.parse::<u64>().ok(), hash, *path))
+        })
+        .filter_map(|(sequence, hash, path)| Some((sequence?, hash, path)))
+        .max_by_key(|(sequence, _, _)| *sequence);
+    let Some((_, hash, entry)) = highest else {
+        return Vec::new();
+    };
+    let grant_prefix = format!("{}{hash}_", ea_archive::GRANTS_DIR_V1);
+    let mut kept = vec![entry.clone()];
+    kept.extend(
+        paths
+            .iter()
+            .filter(|path| path.starts_with(&grant_prefix))
+            .map(|path| (*path).clone()),
+    );
+    kept
 }
 fn require_durability(tx: &StoreTransaction<'_>) -> Result<(), StorageFailure> {
     let synchronous = tx

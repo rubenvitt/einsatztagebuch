@@ -189,13 +189,27 @@ durchläuft erneut die volle Verifikation. Für LocalPath gibt es keine
 Grundlinie. Das ist kein Ausweichen auf ein anderes Ziel: gelesen wird
 dieselbe Quelle, geschrieben wird nur lokal.
 
-**EA-CNA-SRC-5 (Bereinigung).** Nur beim Öffnen mit live gelesenem Netzziel
-und nur unter dem per `try_lock` erlangten SQLCipher-Writer-Lock entfernt die
-Runtime committed lokale Objekte, deren Adresse im live gelesenen Netzziel
-byte-identisch vorliegt. Staging-Adressen, Verzeichniszeilen und die Sonde
-werden nie entfernt. Ist der Lock belegt, entfällt die Bereinigung ohne
-Fehler. Weil die Grundlinie dieser Öffnung jedes bereinigte Objekt enthält,
-bleibt die Vereinigung durch die Bereinigung unverändert.
+**EA-CNA-SRC-5 (Bereinigung).** Nur beim Öffnen mit live gelesenem Netzziel,
+nach bestandener Verifikation und nur unter dem per `try_lock` erlangten
+SQLCipher-Writer-Lock entfernt die Runtime committed lokale Objekte, und
+zwar nur solche, die
+
+1. im live gelesenen Netzziel UND in der geerbten Grundlinie dieser Öffnung
+   (EA-CNA-SRC-4) an derselben Adresse byte-identisch vorliegen. Die geerbte
+   Grundlinie ist die der Laufzeit, die ein Aufrufer behält, wenn er die neue
+   Öffnung verwirft (etwa weil Kopf und Sequenz gleich geblieben sind oder ein
+   späterer Schritt scheitert). Ein Kaltstart erbt keine Grundlinie und
+   bereinigt deshalb nie;
+2. nicht der lokal höchste `.eip` oder einer seiner Grants
+   (`grants/<entry-hash>_…`) sind. Eine veraltete fremde Grundlinie sieht so
+   eine Lücke unter dem Kettenkopf, die die Verifikation ablehnt, statt eines
+   niedrigeren Kopfs, der eine vergebene Sequenz erneut vorschlüge.
+
+Staging-Adressen, Verzeichniszeilen und die Sonde werden nie entfernt. Ist
+der Lock belegt oder scheitert die Bereinigung, entfällt sie ohne Fehler; die
+Öffnung bleibt gültig. Weil jede Laufzeit, die ein Aufrufer behalten kann,
+jedes bereinigte Objekt in ihrer Grundlinie trägt, bleibt deren Vereinigung
+durch die Bereinigung unverändert.
 
 ## 5. Writer auf der lokalen Komponente
 

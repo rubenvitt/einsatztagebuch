@@ -14,7 +14,9 @@ use ea_admin::{
         refuse_local_path_on_registered_anchor,
     },
     native_provider::NativeSigningSlot,
-    network_publication::NetworkPublicationHost,
+    network_publication::{
+        NetworkPublicationHost, ObservedPublicationPortV1, WriterCustodyObserverV1,
+    },
     operator_runtime::writer::InteractiveOperatorRuntime as OperatorRuntime,
 };
 use ea_archive::{
@@ -38,11 +40,10 @@ use ea_writer::{
 use std::{
     path::Path,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, PoisonError, Weak,
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
 };
 
 /// Die Ablage, in die der Writer committet: LocalPath wie bisher, für ein
@@ -71,72 +72,90 @@ impl WriterArchive {
 /// Der Publikationshost eines Netz-Writers samt seinem Hostlauf
 /// (EA-CNA-PUB-8 (c)).
 ///
-/// Ein einziger `std::thread` ruft `run_once` im Backoff des Profils, bis
-/// `next_delay` `None` liefert oder der Wirt endet. Beim Abbau wird das
-/// Haltesignal gesetzt und auf den Thread gewartet; ein hängender Mount hält
-/// den Abbau deshalb bis zum Ende seines laufenden Aufrufs auf (bekannte
-/// Grenze der Warteschlange aus Task 6).
+/// Ein einziger `std::thread` führt [`NetworkPublicationHost::run_loop`] aus.
+/// Jeder Lauf braucht die Beobachtung des Netzziels mit der aktuellen
+/// Writer-Autorität (EA-CNA-WRT-7); die holt der Lauf über einen schwachen
+/// Griff auf den Wirt und nur per `try_lock` — hält gerade eine Aktion oder
+/// ein Präsenzdialog den Zustand, entfällt dieser Lauf (die Aktion
+/// veröffentlicht in Schritt 12 selbst). Beim Abbau wird der Lauf beendet und
+/// auf den Thread gewartet; ein hängender Mount hält den Abbau bis zum Ende
+/// seines laufenden Aufrufs auf (bekannte Grenze aus Task 6).
 pub(super) struct NetworkPublication {
     host: Arc<NetworkPublicationHost>,
-    stop: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// Nur Fixture-Tests nehmen den Port aus Schritt 12 heraus.
+    attached: AtomicBool,
 }
 impl NetworkPublication {
-    fn start(host: Arc<NetworkPublicationHost>) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker = {
-            let host = host.clone();
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                // Der Startlauf ist schon synchron gelaufen; der Hostlauf
-                // beginnt deshalb mit der Wartezeit.
-                while let Some(delay) = host.next_delay() {
-                    if !sleep_unless_stopped(delay, &stop) {
-                        return;
-                    }
-                    host.run_once();
-                }
-            })
-        };
+    fn new(host: Arc<NetworkPublicationHost>) -> Self {
         Self {
             host,
-            stop,
-            worker: Mutex::new(Some(worker)),
+            worker: Mutex::new(None),
+            attached: AtomicBool::new(true),
         }
+    }
+    /// Startet den Hostlauf; erst wenn der Wirt als `Arc` besteht.
+    pub(super) fn start(&self, native: Weak<NativeDesktopRuntime>) {
+        let host = self.host.clone();
+        let worker = std::thread::spawn(move || {
+            host.run_loop(&|host| {
+                let Some(native) = native.upgrade() else {
+                    host.shutdown();
+                    return;
+                };
+                if let Ok(inner) = native.inner.try_lock() {
+                    let runtime = &inner.runtime;
+                    let observer = WriterCustodyObserverV1::new(
+                        runtime.database().clone(),
+                        runtime.head(),
+                        runtime.config().device_certificate_hash,
+                    );
+                    let _ = host.run_once(&observer);
+                }
+            });
+        });
+        *self.worker.lock().unwrap_or_else(PoisonError::into_inner) = Some(worker);
     }
     pub(super) fn host(&self) -> &Arc<NetworkPublicationHost> {
         &self.host
     }
+    pub(super) fn is_attached(&self) -> bool {
+        self.attached.load(Ordering::SeqCst)
+    }
+    #[cfg(feature = "test-support")]
+    pub(super) fn detach(&self) {
+        self.attached.store(false, Ordering::SeqCst);
+    }
     pub(super) fn stop(&self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.host.shutdown();
         let worker = self
             .worker
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         if let Some(worker) = worker {
-            let _ = worker.join();
+            // Endet der letzte starke Griff im Hostlauf selbst, darf er nicht
+            // auf sich warten.
+            if worker.thread().id() != std::thread::current().id() {
+                let _ = worker.join();
+            }
         }
+    }
+    /// Ein Lauf mit der Beobachtung der gegebenen Laufzeit.
+    pub(super) fn run_once(
+        &self,
+        runtime: &OperatorRuntime,
+    ) -> Result<ea_archive_fs::PublicationStateV1, ArchiveBackendError> {
+        self.host.run_once(&WriterCustodyObserverV1::new(
+            runtime.database().clone(),
+            runtime.head(),
+            runtime.config().device_certificate_hash,
+        ))
     }
 }
 impl Drop for NetworkPublication {
     fn drop(&mut self) {
         self.stop();
-    }
-}
-
-/// Schläft `delay` in kurzen Schritten; `false`, sobald angehalten wurde.
-fn sleep_unless_stopped(delay: Duration, stop: &AtomicBool) -> bool {
-    let until = Instant::now() + delay;
-    loop {
-        if stop.load(Ordering::SeqCst) {
-            return false;
-        }
-        let now = Instant::now();
-        if now >= until {
-            return true;
-        }
-        std::thread::sleep((until - now).min(Duration::from_millis(50)));
     }
 }
 
@@ -249,8 +268,11 @@ impl WriterResources {
         // veröffentlicht hat, wird beim Start aus den Bytes neu abgeleitet
         // und veröffentlicht; danach übernimmt der Hostlauf.
         let publication = network_host.map(|host: Arc<NetworkPublicationHost>| {
-            host.run_once();
-            NetworkPublication::start(host)
+            let publication = NetworkPublication::new(host);
+            // Ein Befund steht danach im Sync-Zustand; der Start scheitert
+            // daran nicht.
+            let _ = publication.run_once(runtime);
+            publication
         });
         Ok(Self {
             archive,
@@ -271,6 +293,7 @@ struct WriterCall<'a> {
     issued: Option<FinalizationPreview>,
     receipt: Option<StaleRegistryAcknowledgement>,
     stale_proof: Option<OperatorSessionProof>,
+    publication: Option<&'a dyn ea_writer::NetworkPublicationPortV1>,
 }
 impl WriterCall<'_> {
     fn bound(&self) -> BoundWriter<'_> {
@@ -390,8 +413,21 @@ impl NativeDesktopRuntime {
         );
         // Schritt 12 eines Netzprofils: der Host veröffentlicht die eben
         // committed Bytes (EA-CNA-PUB-8 (a)).
-        let service = match &resources.publication {
-            Some(publication) => service.with_network_publication(publication.host.as_ref()),
+        let observer = WriterCustodyObserverV1::new(
+            runtime.database().clone(),
+            runtime.head(),
+            runtime.config().device_certificate_hash,
+        );
+        let port = resources
+            .publication
+            .as_ref()
+            .filter(|publication| publication.is_attached())
+            .map(|publication| ObservedPublicationPortV1 {
+                host: publication.host.as_ref(),
+                observer: &observer,
+            });
+        let service = match &port {
+            Some(port) => service.with_network_publication(port),
             None => service,
         };
         let amendments = AmendmentDraftService::new(&service, runtime.anchor());
@@ -407,6 +443,9 @@ impl NativeDesktopRuntime {
             issued,
             receipt,
             stale_proof,
+            publication: port
+                .as_ref()
+                .map(|port| port as &dyn ea_writer::NetworkPublicationPortV1),
         })?;
         self.finish_draft_action(&mut inner, epoch)
             .map_err(|error| CommandError::new(error.code()))?;
@@ -577,13 +616,14 @@ impl StartupRecoveryPort for NativeDesktopRuntime {
         let mut operation = None;
         self.writer_action(|call| {
             operation = Some(call.service.recover_pending());
+            // EA-CNA-PUB-8 (b): nach der Start-Wiederherstellung, mit der
+            // Beobachtung derselben Aktion.
+            if let Some(port) = call.publication {
+                port.publish_committed();
+            }
             Ok(WriterResult::finished(()))
         })
         .map_err(|_| WriterError::ReauthRequired)?;
-        // EA-CNA-PUB-8 (b): nach der Start-Wiederherstellung.
-        if let Some(publication) = self.writer.as_ref().and_then(WriterResources::publication) {
-            publication.host.run_once();
-        }
         operation.expect("the guarded action completed")
     }
 }
