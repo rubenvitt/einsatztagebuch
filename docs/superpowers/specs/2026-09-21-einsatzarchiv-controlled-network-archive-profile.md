@@ -117,7 +117,12 @@ ab.
 **EA-CNA-REG-6 (Idempotenz und Konflikt).** Existiert für den Anker bereits
 eine Zeile mit exakt demselben `profile_hash`, `namespace` und
 `exact_profile`, endet die Registrierung ohne Präsenz, ohne Audit und ohne
-Schreibzugriff mit dem Ergebnis „bereits registriert“. Jede abweichende
+neue Registrierungs-, Scope- oder Auditzeile mit dem Ergebnis „bereits
+registriert“. Schreibfrei ist dieser Weg nicht: vor dem Vergleich laufen wie
+bei jeder Registrierung die Capability-Proben aus EA-CNA-REG-2(f), die im
+Netzziel eine Kratzwurzel anlegen und wieder abräumen, und danach öffnet
+`open_current` die Komponente samt Ruheort-Messung, die ihre Sonde in die
+SQLCipher-Datei schreibt und wieder löscht. Jede abweichende
 vorhandene Zeile lehnt mit `EA-NATIVE-ARCHIVE-REGISTRATION-CONFLICT` ab und
 bleibt unverändert; die Unveränderlichkeitstrigger aus 0016/0026 bleiben die
 letzte Schranke.
@@ -185,8 +190,16 @@ Ein `reopened_for_action` desselben Prozesses darf stattdessen die zuletzt
 live gelesene, unveränderte committed Sicht des Netzziels (Grundlinie) mit der
 aktuellen lokalen Komponente vereinigen. Die Grundlinie lebt nur im Speicher,
 stammt aus demselben kanonischen `archive_directory` und demselben Anker und
-durchläuft erneut die volle Verifikation. Für LocalPath gibt es keine
-Grundlinie. Das ist kein Ausweichen auf ein anderes Ziel: gelesen wird
+durchläuft erneut die volle Verifikation. Durchgesetzt wird „derselbe
+kanonische Pfad“ an beiden Stellen: ist `archive_directory` kanonisierbar,
+muss es gleich der Wurzel der Grundlinie sein; ist es nicht kanonisierbar,
+wird sein Elternordner kanonisiert und der Name angehängt, und auch das muss
+die Wurzel der Grundlinie ergeben. Sonst gilt das Netzziel als nicht lesbar
+(`EA-OPERATOR-NETWORK-ARCHIVE-UNAVAILABLE`); ein umgebogener Symlink führt so
+nie zur alten Grundlinie oder zu einem Live-Lesen ihres Orts. Für LocalPath
+gibt es keine Grundlinie. Ohne vorhandene Datenbank gibt es keine
+Registrierung; der Start öffnet dann wie vor DRK-320 zuerst den Snapshot und
+erst danach nativen Anbieter, Schlüssel und Datenbank. Das ist kein Ausweichen auf ein anderes Ziel: gelesen wird
 dieselbe Quelle, geschrieben wird nur lokal.
 
 **EA-CNA-SRC-5 (Bereinigung).** Nur beim Öffnen mit live gelesenem Netzziel,
@@ -258,7 +271,11 @@ blockiert, die Detailursache ist `Queuegrenze erreicht`.
 Bestand. Ihr Ort ist der kanonische Datenbankpfad, eingesetzt in die
 unveränderte Domäne `EINSATZARCHIV-MANAGED-ARCHIVE-LOCATION-v1`. Das
 Netzziel wird unmittelbar vor jeder Publikation mit seinem kanonischen
-Wurzelpfad beobachtet. Vernichtung auf Netzprofilen bleibt außerhalb von
+Wurzelpfad beobachtet. Schritt 12 beobachtet mit der Autorität der Aktion.
+Ein Lauf außerhalb einer Aktion (Hostlauf) beobachtet nie mit dem gehaltenen
+Head, sondern mit einer frisch geöffneten Autorität (`reopened_for_action`,
+die gehaltene Laufzeit bleibt unberührt); scheitert diese Öffnung, scheitert
+die Beobachtung, und es wird nichts veröffentlicht. Vernichtung auf Netzprofilen bleibt außerhalb von
 DRK-320 (`destruction_runtime.rs` bleibt LocalPath-only).
 
 ## 6. Publikation und abgeleitete Queue
@@ -321,15 +338,26 @@ Finalisierung nie scheitern: der fachliche Abschluss ist nach Schritt 11
 `RecoveryTestRuntime::with_archive_config` mit registrierter Komponente
 (`open_current`), erfolgreicher SQLCipher-Capability (EA-CNA-WRT-4) und
 erfolgreichem Capability-Test des Netzziels. `RecoveryTestRuntime::new` lehnt
-Netzprofile weiter mit `EA-RECOVERY-TEST-SOURCE` ab.
+Netzprofile weiter mit `EA-RECOVERY-TEST-SOURCE` ab. Die Laufzeit verlangt
+die Rolle `OrganizationAdmin` auf ihrer EIGENEN Datenbank, und die
+Registrierung liegt je Datenbank (EA-CNA-REG-1): ein Writer registriert und
+committet in seine eigene. Die Komponente einer Recovery-Quelle ist deshalb
+immer die der Admin-Datenbank, nie die eines Writers.
 
 **EA-CNA-REC-2 (Locks).** Capture, Restore-Bindung, Test und Import halten
-zuerst den SQLCipher-Writer-Lock, dann den Writer-Lock des Netzziels. Der
-Publikationslauf hält nur den Lock des Netzziels, die Bereinigung nur den
-SQLCipher-Lock (per `try_lock`). Diese feste Reihenfolge schließt Deadlocks aus.
+zuerst den SQLCipher-Writer-Lock, dann den Writer-Lock des Netzziels.
+Schritt 12 läuft innerhalb der Finalisierung, also unter dem
+SQLCipher-Writer-Lock des Writers, und nimmt für Beobachtung und Publikation
+danach den Lock des Netzziels: dieselbe Reihenfolge SQLCipher → Netzziel.
+Ein Hostlauf außerhalb einer Aktion hält den SQLCipher-Lock nicht; seine
+Wiederöffnung nimmt ihn höchstens per `try_lock` für die Bereinigung und gibt
+ihn frei, bevor der Lock des Netzziels genommen wird. Die Bereinigung hält
+nur den SQLCipher-Lock (per `try_lock`). Umgekehrt wird nie genommen; diese
+feste Reihenfolge schließt Deadlocks aus.
 
 **EA-CNA-REC-3 (Capture).** Die Quelle ist die Vereinigung aus
-`FsArchiveSource::open(netzziel)` und einem Export der lokalen Komponente.
+`FsArchiveSource::open(netzziel)` und einem Export der lokalen Komponente der
+Admin-Datenbank (EA-CNA-REC-1), also Netzziel ⊎ Admin-Komponente.
 Die Capture schreibt alle verwalteten Objekte der Komponente (committed und
 Staging, `visit_managed_blobs`) mit exklusivem Anlegen in ein neues
 Exportverzeichnis, flusht Dateien und Verzeichnisse, liest den Export zurück,
@@ -337,8 +365,11 @@ vergleicht ihn byte-genau mit der Komponente und bildet Inventarhash,
 Kettenkopf und Signaturbindung über die Vereinigung aus Netzziel und
 zurückgelesenem Export. Das Exportverzeichnis darf weder das Netzziel noch
 ein Pfad darin sein. Ein bereits existierendes Exportverzeichnis lehnt ab.
-Lokal committed, noch nicht publizierte `.eip`/`.eag` sind damit Teil der
-signierten Quelle; eine Quelle ohne sie scheitert an Inventar oder Kettenkopf.
+Lokal committed, noch nicht publizierte `.eip`/`.eag` DER ADMIN-KOMPONENTE
+sind damit Teil der signierten Quelle; eine Quelle ohne sie scheitert an
+Inventar oder Kettenkopf. Noch nicht publizierte Commits eines Writers liegen
+in dessen eigener Datenbank und sind nicht Teil der Quelle, bis sie im
+Netzziel liegen (EA-CNA-S7-6).
 Die CLI verlangt dafür bei einem Netzprofil `--component-export <Verzeichnis>`
 und lehnt den Schalter für LocalPath ab; ihre Vorprüfung liest nie das
 Netzziel allein, die Sonde prüft die Capture über dieselbe Vereinigung. Die
@@ -426,3 +457,45 @@ eigener Auftrag.
 (EA-CNA-REG-9), Vernichtung auf Netzprofilen, Trust-Publikation der
 Administration über eine lokale Queue (sie schreibt weiter direkt in ein
 erreichbares Netzziel) und eine produktive Sync-Server-Anbindung des Desktops.
+
+### Benannte Grenzen
+
+Die folgenden Grenzen gelten für das ausgelieferte Verhalten. S7-1 bis S7-3
+oben gehören dazu und werden hier nicht wiederholt: der gemountete
+Netz-Positivzeuge ist Stufe 7 (S7-1), es gibt keinen Offline-Kaltstart und AK
+39 gilt nur für laufende Sitzungen (S7-2), und Profilwechsel nach
+Registrierung, Vernichtung auf Netzprofilen, Trust-Publikation der
+Administration über eine lokale Queue sowie ein produktiver Sync-Host des
+Desktops liegen außerhalb (S7-3).
+
+**EA-CNA-S7-4 (Wiederherstellung).** Eine erfolgreiche Netz-Wiederherstellung
+ist nur als `#[ignore]`-Paar über zwei Rechner belegt. Der Desktop hat keinen
+Capture- und keinen Export-Ablauf und bindet `for_archive_copy` nicht an
+(EA-CNA-REC-3, REC-5).
+
+**EA-CNA-S7-5 (Unerreichbares Ziel und Mountpunkt).** Ein hängender Mount
+blockiert Publikation und Wiederaufnahme unter dem `drain_lock` der
+Warteschlange bis zum Ende des laufenden Dateisystemaufrufs. Schritt 12 läuft
+synchron in der Finalisierung. Der Hostlauf hält den Wirtszustand, solange
+eine Publikation aussteht und läuft; die WRT-7-Beobachtung inventarisiert
+dabei das ganze Netzziel. Ein nicht gemountetes, leeres Mountpunkt-Verzeichnis
+gilt als erreichbar; die Erkennung eines fehlenden Mounts ist Stufe 7.
+
+**EA-CNA-S7-6 (Recovery-Quelle).** Die Quelle einer Netz-Recovery ist Netzziel
+⊎ Komponente der Admin-Datenbank (EA-CNA-REC-1, REC-3). Unveröffentlichte
+Commits eines Writers gehören erst dazu, wenn sie im Netzziel liegen.
+
+**EA-CNA-S7-7 (Writer-Wechsel).** Ein Writer-Wechsel setzt voraus, dass der
+alte Writer `lokal gesichert` mit leerer Queue zeigt; was er noch nicht
+publiziert hat, liegt nur in seiner Datenbank. Lehnt die Wiederöffnung die
+Autorität ab (etwa eine widerrufene oder abgelöste Bindung), veröffentlicht
+der Writer außerhalb einer Aktion nicht mehr (EA-CNA-WRT-7), seine
+ausstehenden Objekte bleiben aber ausstehend. Eine nur abgelaufene Registry
+lehnt die Wiederöffnung nicht ab: sie öffnet die bestehende
+Stale-Writer-Ausnahme, und mit deren Head wird weiter veröffentlicht. Die Prüfung der
+Stale-Writer-Aktion auf dieselbe Aktion scheitert, wenn das Netzziel nicht
+lesbar ist.
+
+**EA-CNA-S7-8 (Queuegrenze).** Die Queuegrenze wird nur durch die Bereinigung
+beim Wiederöffnen frei (EA-CNA-SRC-5). Staging-Reste einer Finalisierung, die
+an der Queuegrenze abgelehnt wurde, bleiben liegen.
