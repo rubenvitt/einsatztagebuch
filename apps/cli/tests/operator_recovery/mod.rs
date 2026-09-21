@@ -911,6 +911,19 @@ fn export_native_source_capture_for_portable_restore() {
 }
 
 fn open_portable_target(export: &Path, target: &Path) -> RecoveryTestRuntime {
+    RecoveryTestRuntime::new(
+        open_portable_operator(export, target),
+        ea_archive::ArchiveBackendProfileV1::LocalPath(ea_archive::LocalPathProfileV1 {
+            filesystem_row_id: "fixture-recovery-fs".into(),
+            capability_test_vector_id: "native-recovery-cap-v1".into(),
+        }),
+    )
+    .unwrap()
+}
+
+/// Die Zielinstallation des portablen Ablaufs; `target/archive` wird nur
+/// angelegt, wenn es noch fehlt.
+pub(super) fn open_portable_operator(export: &Path, target: &Path) -> OperatorRuntime {
     use ea_admin::native_provider::NativeSigningSlot;
     install_fixture_helper(target);
     let expected: Value =
@@ -1006,14 +1019,7 @@ fn open_portable_target(export: &Path, target: &Path) -> RecoveryTestRuntime {
             .unwrap();
         runtime.import_posture_document(&document).unwrap();
     }
-    RecoveryTestRuntime::new(
-        runtime,
-        ea_archive::ArchiveBackendProfileV1::LocalPath(ea_archive::LocalPathProfileV1 {
-            filesystem_row_id: "fixture-recovery-fs".into(),
-            capability_test_vector_id: "native-recovery-cap-v1".into(),
-        }),
-    )
-    .unwrap()
+    runtime
 }
 
 fn renew_portable_fixture_posture(runtime: &RecoveryTestRuntime) {

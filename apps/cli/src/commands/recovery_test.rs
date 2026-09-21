@@ -108,12 +108,8 @@ pub(crate) fn run_with_runtime_opener(
             .ok()
             .and_then(|exact| parse_recovery_archive_profile(&exact).ok())
             .is_some_and(|profile| is_network_archive_profile(&profile));
-        // Netzprofil nur mit Export, LocalPath nie mit Export.
-        if let crate::args::recovery::RecoveryRuntimeAction::Capture {
-            component_export, ..
-        } = &runtime.action
-            && network != component_export.is_some()
-        {
+        // Netzprofil nur mit Export, LocalPath nie mit Export, in jedem Modus.
+        if network != runtime.component_export.is_some() {
             return Err(test_failure(ea_recovery::RecoveryTestError::Source));
         }
         if !network {
@@ -130,22 +126,37 @@ pub(crate) fn run_with_runtime_opener(
             return Err(test_failure(ea_recovery::RecoveryTestError::Source));
         }
         let profile = parse_recovery_archive_profile(&read(&runtime.profile, 65536)?)?;
-        let archive_config = ea_admin::native_archive::NativeArchiveConfig::for_runtime_database(
-            profile,
-            &config.database_path,
+        let capture = matches!(
+            runtime.action,
+            crate::args::recovery::RecoveryRuntimeAction::Capture { .. }
         );
-        let mut service = RecoveryTestRuntime::with_archive_config(
-            open(config, &invocation.anchor, now)?,
-            archive_config,
-        )?;
+        let mut service = match &runtime.component_export {
+            // §19.3-Ziel eines Netzprofils: Nur-Lese-Kopie über die
+            // materialisierte Vereinigung und den Export (EA-CNA-REC-5).
+            Some(export) if !capture => RecoveryTestRuntime::for_archive_copy(
+                open(config, &invocation.anchor, now)?,
+                profile,
+                export.clone(),
+            )?,
+            _ => {
+                let archive_config =
+                    ea_admin::native_archive::NativeArchiveConfig::for_runtime_database(
+                        profile,
+                        &config.database_path,
+                    );
+                RecoveryTestRuntime::with_archive_config(
+                    open(config, &invocation.anchor, now)?,
+                    archive_config,
+                )?
+            }
+        };
         match &runtime.action {
             crate::args::recovery::RecoveryRuntimeAction::Capture {
                 snapshot,
                 passphrase,
-                component_export,
             } => {
                 let phrase = ea_recovery::read_secret_file(passphrase)?;
-                let captured = match component_export {
+                let captured = match &runtime.component_export {
                     Some(export) => service.capture_inventory_with_component_export(
                         &inventory, snapshot, &phrase, export,
                     )?,

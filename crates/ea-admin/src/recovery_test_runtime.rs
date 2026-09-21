@@ -286,6 +286,12 @@ impl RecoveryTestRuntime {
     /// Locks alle verwalteten Objekte der lokalen Komponente exklusiv nach
     /// `component_export` und bindet die Vereinigung aus Netzziel und
     /// zurückgelesenem Export. LocalPath und Zielkopie lehnen ab.
+    ///
+    /// Die Sonden kommen unverändert aus `request.probes`; hier wird keine
+    /// aus der Vereinigung gewählt. Das tut
+    /// [`Self::capture_inventory_with_component_export`]. Scheitert der Export
+    /// mittendrin, bleibt ein Teilverzeichnis liegen, das der Betreiber löschen
+    /// muss; ein erneuter Versuch lehnt es als vorhanden ab.
     pub fn capture_source_with_component_export(
         &mut self,
         request: RecoverySourceCapture<'_>,
@@ -574,16 +580,32 @@ fn read_tree(root: &Path) -> Result<Vec<(String, Vec<u8>)>, RecoveryRuntimeError
 /// wird geflusht; der zurückgelesene Baum muss byte-genau der Vereinigung
 /// entsprechen. Quelle und Export bleiben unberührt.
 ///
+/// Ein Ziel innerhalb der Kopie oder des Exports lehnt ab. Scheitert das
+/// Anlegen mittendrin, bleibt ein Teilverzeichnis liegen, das der Betreiber
+/// löschen muss.
+///
 /// # Errors
 ///
-/// `EA-RECOVERY-TEST-SOURCE` für einen nicht leeren oder unlesbaren
-/// Zielordner, einen Bytekonflikt, einen Schreib- oder Flushfehler oder einen
+/// `EA-RECOVERY-TEST-SOURCE` für einen nicht leeren, unlesbaren oder in einer
+/// Quelle liegenden Zielordner, einen Bytekonflikt, einen Schreib- oder Flushfehler oder einen
 /// abweichenden Rücklesebefund.
 pub fn materialize_network_archive_copy(
     remote_copy: &Path,
     component_export: &Path,
     target: &Path,
 ) -> Result<(), RecoveryRuntimeError> {
+    // Ein Ziel in einer der beiden Quellen würde diese Quelle verändern.
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let parent = std::fs::canonicalize(parent).map_err(|_| RecoveryTestError::Source)?;
+    for source in [remote_copy, component_export] {
+        let source = std::fs::canonicalize(source).map_err(|_| RecoveryTestError::Source)?;
+        if parent.starts_with(&source) {
+            return Err(RecoveryTestError::Source.into());
+        }
+    }
     let union = network_union(remote_copy, component_export)?;
     let mut rows = Vec::new();
     union
@@ -665,6 +687,11 @@ impl RecoveryTestRuntime {
         request: RecoverySourceRestore<'_>,
     ) -> Result<RestoredRecoverySource, RecoveryRuntimeError> {
         let _locks = self.archive_locks()?;
+        // Die registrierte Netzquelle selbst ist nie Restore-Quelle; das Ziel
+        // liest die Kopie (EA-CNA-REC-5).
+        if matches!(self.archive, RecoveryArchiveHandle::Network { .. }) {
+            return Err(RecoveryTestError::Source.into());
+        }
         self.runtime.refresh_for_action()?;
         self.runtime.ensure_current()?;
         let source = self.archive_source()?;
