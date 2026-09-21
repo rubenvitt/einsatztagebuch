@@ -759,6 +759,16 @@ pub struct NetworkWriterSourceV1<'a> {
     baseline: &'a FsArchiveSource,
     local: &'a SqlcipherArchiveBackend,
 }
+impl<'a> NetworkWriterSourceV1<'a> {
+    /// Dieselbe Vereinigung über einer Netzsicht, die ihr Halter selbst
+    /// besitzt (Sync-Port, EA-CNA-PUB-5).
+    pub(crate) const fn over(
+        baseline: &'a FsArchiveSource,
+        local: &'a SqlcipherArchiveBackend,
+    ) -> Self {
+        Self { baseline, local }
+    }
+}
 impl ArchiveSource for NetworkWriterSourceV1<'_> {
     fn visit_blobs(
         &self,

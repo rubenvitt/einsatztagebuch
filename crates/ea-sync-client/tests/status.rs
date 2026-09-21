@@ -7,7 +7,14 @@
 
 mod support;
 
-use ea_archive_fs::SyncStatus;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use ea_archive::{ArchiveBackend, ArchiveBackendError, ArchiveBlob, ArchiveError, ArchiveSource};
+use ea_archive_fs::{LocalPathBackend, SyncStatus};
+use ea_sync_client::SyncLocalArchiveV1;
 use support::{SyncHarness, fixtures};
 
 /// Wartet das Netzarchiv, bleibt der Server UNBERUEHRT.
@@ -222,4 +229,114 @@ async fn an_exceeded_queue_bound_reaches_the_public_failed_state() {
         0,
         "eine abgelehnte Netzarchivpublikation gibt den Serverupload NICHT frei"
     );
+}
+
+/// Der lokale Archivport eines Netzprofils in Testgestalt: seine committete
+/// Quelle ist eine Vereinigung aus ZWEI Teilen — der Netzsicht und der
+/// lokalen Komponente mit dem jüngsten Eintrag samt Grants (EA-CNA-SRC-2).
+///
+/// Die Quittungsablage bleibt der `LocalPathBackend` der Fixture; dieser
+/// Zeuge erreicht sie nie, weil der Serverupload gar nicht beginnt.
+struct TwoPartUnionArchive {
+    backend: Arc<LocalPathBackend>,
+    remote: Vec<(String, Vec<u8>)>,
+    local: Vec<(String, Vec<u8>)>,
+    visits: Arc<AtomicUsize>,
+}
+
+/// Eine Besuchssicht der Vereinigung; erst die Netzsicht, dann die lokale
+/// Komponente.
+struct TwoPartUnionSource<'a> {
+    archive: &'a TwoPartUnionArchive,
+}
+
+impl ArchiveSource for TwoPartUnionSource<'_> {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        self.archive.visits.fetch_add(1, Ordering::SeqCst);
+        for (path, bytes) in self.archive.remote.iter().chain(&self.archive.local) {
+            visitor(ArchiveBlob::new(path, bytes))?;
+        }
+        Ok(())
+    }
+}
+
+impl SyncLocalArchiveV1 for TwoPartUnionArchive {
+    fn backend(&self) -> &dyn ArchiveBackend {
+        self.backend.as_ref()
+    }
+
+    fn committed_source(&self) -> Result<Box<dyn ArchiveSource + '_>, ArchiveBackendError> {
+        Ok(Box::new(TwoPartUnionSource { archive: self }))
+    }
+}
+
+/// Liest die committete Quelle eines Netzprofils die VEREINIGUNG, wartet das
+/// Netzarchiv, und bleibt der Server trotzdem unberührt (EA-CNA-PUB-5).
+///
+/// Der jüngste Eintrag liegt nur im lokalen Teil der Vereinigung. Dass er
+/// anstehend erkannt und dann NICHT hochgeladen wird, misst beides: die
+/// Warteschlange entsteht aus der Vereinigung, und vor der
+/// Netzarchivpublikation sendet der Klient keinen Commit.
+#[tokio::test]
+async fn server_commit_is_not_sent_while_network_publication_is_deferred_for_a_union_source() {
+    let mut harness = SyncHarness::controlled_network_disconnected().await;
+
+    let mut committed = Vec::new();
+    harness
+        .writer()
+        .backend()
+        .as_archive_source()
+        .visit_blobs(&mut |blob| {
+            committed.push((blob.path_hint().to_owned(), blob.bytes().to_vec()));
+            Ok(())
+        })
+        .expect("der committete Bestand der Fixture ist lesbar");
+    let newest = committed
+        .iter()
+        .map(|(path, _)| path)
+        .filter(|path| path.starts_with("entries/") && path.ends_with(".eip"))
+        .max()
+        .expect("die Fixture hat einen Eintrag committet")
+        .clone();
+    let hash = newest
+        .trim_start_matches("entries/")
+        .trim_end_matches(".eip")
+        .split_once('_')
+        .map(|(_, hash)| hash.to_owned())
+        .expect("ein Eintragsname trägt Sequenz und Hash");
+    let (local, remote): (Vec<_>, Vec<_>) = committed
+        .into_iter()
+        .partition(|(path, _)| *path == newest || path.starts_with(&format!("grants/{hash}_")));
+    assert!(
+        local.len() >= 2,
+        "der lokale Teil trägt das `.eip` und mindestens einen Grant"
+    );
+    assert!(!remote.is_empty(), "der Netzteil trägt die übrige Kette");
+
+    let visits = Arc::new(AtomicUsize::new(0));
+    harness.use_local_archive(Arc::new(TwoPartUnionArchive {
+        backend: harness.writer().backend_handle(),
+        remote,
+        local,
+        visits: Arc::clone(&visits),
+    }));
+
+    harness
+        .push_pending()
+        .await
+        .expect("ein wartendes Netzarchiv ist ein ZUSTAND und kein Fehler");
+    assert!(
+        visits.load(Ordering::SeqCst) > 0,
+        "die Warteschlange entsteht aus der Vereinigung"
+    );
+    assert_eq!(
+        harness.server.commit_calls(),
+        0,
+        "vor der Netzarchivpublikation darf KEIN Serverupload laufen"
+    );
+    assert_eq!(harness.status(), SyncStatus::UploadPending);
+    assert_eq!(harness.detail(), "Netzarchiv wartet");
 }

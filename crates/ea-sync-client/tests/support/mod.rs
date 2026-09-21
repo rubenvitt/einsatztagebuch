@@ -31,8 +31,8 @@ use ea_archive_fs::{
     PlannedPublicationV1, PublicationOutcomeV1, PublicationQueue, PublicationTargetV1, SyncStatus,
 };
 use ea_sync_client::{
-    PushSummary, SyncClient, SyncClientError, SyncTransportV1, TransportErrorV1,
-    TransportRequestV1, TransportResponseV1,
+    PushSummary, SyncClient, SyncClientError, SyncLocalArchiveV1, SyncTransportV1,
+    TransportErrorV1, TransportRequestV1, TransportResponseV1,
 };
 use writer_support::{WriterHarness, valid_incident};
 
@@ -373,6 +373,9 @@ pub struct SyncHarness {
     pub server: Arc<FakeServer>,
     pub target: Option<Arc<SwitchableTarget>>,
     queue: Option<Arc<PublicationQueue>>,
+    /// Ein abweichender lokaler Archivport; ohne ihn der `LocalPathBackend`
+    /// der Writer-Fixture, wie ihn jeder bisherige Zeuge benutzt.
+    local_archive: Option<Arc<dyn SyncLocalArchiveV1>>,
     last: Option<PushSummary>,
     /// Wie weit die beobachtete Uhr gegenueber der Fixture vorgerueckt ist.
     ///
@@ -497,6 +500,7 @@ impl SyncHarness {
             server: Arc::new(FakeServer::new(CommitReplyV1::Unreachable)),
             target,
             queue,
+            local_archive: None,
             last: None,
             clock_offset_ms: 0,
             first,
@@ -528,8 +532,12 @@ impl SyncHarness {
         else {
             unreachable!("die Fixture baut ein kontrolliertes Netzprofil");
         };
+        let backend: Arc<dyn SyncLocalArchiveV1> = match &self.local_archive {
+            Some(archive) => Arc::clone(archive),
+            None => self.writer.backend_handle(),
+        };
         SyncClient::new(ea_sync_client::SyncClientConfigV1 {
-            backend: self.writer.backend_handle(),
+            backend,
             anchor_bytes: self.writer.anchor_bytes(),
             network: self.queue.clone(),
             transport,
@@ -553,6 +561,12 @@ impl SyncHarness {
             observed_now: self.observed_now(),
         })
         .expect("der Klient muss stehen")
+    }
+
+    /// Ersetzt den lokalen Archivport aller folgenden Klienten — etwa durch
+    /// die Vereinigung eines Netzprofils (EA-CNA-PUB-5).
+    pub fn use_local_archive(&mut self, archive: Arc<dyn SyncLocalArchiveV1>) {
+        self.local_archive = Some(archive);
     }
 
     /// Schiebt die anstehenden Eintraege.

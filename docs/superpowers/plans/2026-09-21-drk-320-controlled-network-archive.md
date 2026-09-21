@@ -443,11 +443,11 @@ pub struct SyncClientConfigV1 { pub backend: Arc<dyn SyncLocalArchiveV1>, /* res
 // ea-admin: impl SyncLocalArchiveV1 for a NetworkSyncArchiveV1 { component, baseline } whose source is the union (Task 7 NetworkWriterSourceV1 semantics)
 ```
 
-- [ ] **Step 1: RED** in `tests/status.rs`: `server_commit_is_not_sent_while_network_publication_is_deferred_for_a_union_source` — a test `SyncLocalArchiveV1` whose `committed_source` is a two-part union (in-test `ArchiveSource`), network queue over the existing `SwitchableTarget` disconnected; `push_pending` sends no commit request (transport spy) and status is `Upload ausstehend`/`Netzarchiv wartet`.
-- [ ] **Step 2:** `cargo test --locked -p ea-sync-client --test status` → red (type mismatch).
-- [ ] **Step 3:** Implement; existing constructions keep compiling via unsized coercion of `Arc<LocalPathBackend>`.
+- [x] **Step 1: RED** in `tests/status.rs`: `server_commit_is_not_sent_while_network_publication_is_deferred_for_a_union_source` — a test `SyncLocalArchiveV1` whose `committed_source` is a two-part union (in-test `ArchiveSource`), network queue over the existing `SwitchableTarget` disconnected; `push_pending` sends no commit request (transport spy) and status is `Upload ausstehend`/`Netzarchiv wartet`.
+- [x] **Step 2:** `cargo test --locked -p ea-sync-client --test status` → red (type mismatch).
+- [x] **Step 3:** Implement; existing constructions keep compiling via unsized coercion of `Arc<LocalPathBackend>`.
 - [ ] **Step 4:** Green; regressions `cargo test --locked -p ea-sync-client --test resume`, `cargo test --locked -p einsatzarchiv-server --test writer_sync_e2e`. Clippy `ea-sync-client`, `ea-admin`.
-- [ ] **Step 5:** Commit `refactor(sync-client): take the committed archive through a local-archive port`.
+- [x] **Step 5:** Commit `refactor(sync-client): take the committed archive through a local-archive port`.
 
 ---
 

@@ -29,7 +29,7 @@
 use std::sync::Arc;
 mod response;
 
-use ea_archive::ArchiveBackend as _;
+use ea_archive::{ArchiveBackend, ArchiveBackendError, ArchiveSource};
 use ea_archive_fs::{LocalPathBackend, PlannedPublicationV1, PublicationQueue};
 use ea_sync_protocol::{
     EntryCommitRequestV1, EntryCommitResponseV1, HttpMethod, RequestIdV1, RequestParts,
@@ -143,14 +143,49 @@ impl PushSummary {
     }
 }
 
+/// Der lokale committete Bestand, wie der Klient ihn sieht (EA-CNA-PUB-5).
+///
+/// Zwei Rollen, bewusst getrennt: die QUELLE, aus der die Warteschlange
+/// entsteht und gegen die eine Quittung verifiziert wird, und das BACKEND, in
+/// das die verifizierte Quittung per Create-if-absent gelegt wird. Für
+/// LocalPath ist beides dieselbe Wurzel. Für ein kontrolliertes Netzprofil ist
+/// die Quelle die Vereinigung aus Netzsicht und committeter lokaler
+/// Komponente (EA-CNA-SRC-2) und das Backend die lokale Komponente — nie ein
+/// `LocalPathBackend` des Netzziels.
+pub trait SyncLocalArchiveV1: Send + Sync {
+    /// Die Ablage der verifizierten Quittung: Create-if-absent, danach
+    /// `sync_file` und `sync_directory`.
+    fn backend(&self) -> &dyn ArchiveBackend;
+
+    /// Die committete Lesesicht, bei jedem Aufruf neu gebildet. Staging
+    /// gehört nie dazu.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler beim Bilden der Sicht; der Klient meldet ihn als
+    /// Archivbefund und nicht als wartendes Netzarchiv.
+    fn committed_source(&self) -> Result<Box<dyn ArchiveSource + '_>, ArchiveBackendError>;
+}
+
+impl SyncLocalArchiveV1 for LocalPathBackend {
+    fn backend(&self) -> &dyn ArchiveBackend {
+        self
+    }
+
+    fn committed_source(&self) -> Result<Box<dyn ArchiveSource + '_>, ArchiveBackendError> {
+        Ok(Box::new(self.as_archive_source()))
+    }
+}
+
 /// Alles, was EIN Klient braucht.
 ///
 /// Ein Datensatz statt zehn Stellungsargumenten: zwei Bytefolgen und zwei
 /// Kennungen in Folge sind eine Verwechslung, die kein Typ bemerkt.
 pub struct SyncClientConfigV1 {
-    /// Der LOKALE committete Bestand. Die Warteschlange entsteht aus ihm, und
-    /// die verifizierte Quittung wird in ihn gelegt.
-    pub backend: Arc<LocalPathBackend>,
+    /// Der LOKALE committete Bestand. Die Warteschlange entsteht aus seiner
+    /// Quelle, und die verifizierte Quittung wird in sein Backend gelegt. Ein
+    /// `Arc<LocalPathBackend>` passt unverändert hinein.
+    pub backend: Arc<dyn SyncLocalArchiveV1>,
     /// Die exakten Ankerbytes DIESER Linie.
     pub anchor_bytes: Vec<u8>,
     /// Die Warteschlange des kontrollierten Netzprofils, sofern konfiguriert.
@@ -331,7 +366,8 @@ impl SyncClient {
         blocking(move || {
             let anchor = ea_trust::decode_trust_anchor(&anchor_bytes)
                 .map_err(|_| SyncClientError::Archive)?;
-            SyncQueueV1::derive(&backend.as_archive_source(), &anchor, observed_now)
+            let source = backend.committed_source()?;
+            SyncQueueV1::derive(source.as_ref(), &anchor, observed_now)
         })
         .await
     }
@@ -462,8 +498,11 @@ impl SyncClient {
         blocking(move || {
             let anchor = ea_trust::decode_trust_anchor(&anchor_bytes)
                 .map_err(|_| SyncClientError::ReceiptInvalid)?;
+            // Eine unlesbare Quelle ist ein Archivbefund, keine ungültige
+            // Quittung.
+            let source = backend.committed_source()?;
             let verified = verify_receipt_against_archive(
-                &backend.as_archive_source(),
+                source.as_ref(),
                 &anchor,
                 entry_object_hash,
                 &receipt_bytes,
@@ -498,13 +537,14 @@ impl SyncClient {
                     return Err(SyncClientError::ReceiptNotPersisted);
                 }
             }
-            backend
+            let local = backend.backend();
+            local
                 .create_non_object_if_absent(verified.address(), verified.exact_bytes())
                 .map_err(|_| SyncClientError::ReceiptNotPersisted)?;
-            backend
+            local
                 .sync_file(verified.address())
                 .map_err(|_| SyncClientError::ReceiptNotPersisted)?;
-            backend
+            local
                 .sync_directory(verified.address())
                 .map_err(|_| SyncClientError::ReceiptNotPersisted)?;
             Ok(())
