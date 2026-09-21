@@ -20,7 +20,7 @@ Reihenfolge und beweist am Ende an echten Daten, dass die Kette trägt:
 WAS FUNKTIONIERT UND WAS NICHT
 
 Die CLI arbeitet auf der gesäten Welt mit ECHTEN Daten. Das ist gemessen, nicht
-behauptet: auf macOS meldet `verify` über derselben Welt 61 Archivobjekte,
+behauptet: auf macOS meldet `verify` über derselben Welt 57 Archivobjekte,
 1 Eintragspaket und null Fehler in allen sechs Fehlerklassen.
 
 Der Web-Reader öffnet im Datei-Modus das gesäte Archiv und zeigt den
