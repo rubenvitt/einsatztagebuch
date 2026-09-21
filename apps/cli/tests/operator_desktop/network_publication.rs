@@ -526,3 +526,113 @@ fn an_unqualified_target_never_gets_a_publication_host() {
     // Ein Netzziel, das die Zulassung besteht, bekommt einen Host.
     assert!(NetworkPublicationHost::new(&component, &root, &policy).is_ok());
 }
+
+/// Fix-Runde 2: ein fremd gehaltener Writer-Lock des Netzziels (etwa eine
+/// Recovery-Capture, EA-CNA-REC-2) ist `Netzarchiv wartet`, kein `Fehler`.
+#[test]
+fn a_held_network_target_lock_waits_instead_of_failing() {
+    use ea_archive::ArchiveBackend;
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let runtime = installed.base.open_writer_runtime();
+    let policy = BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields());
+    drop(runtime);
+    let native = started(&installed);
+    let foreign = ea_archive_fs::LocalPathBackend::open_existing(
+        installed.base.installed.archive.clone(),
+        installed.base.profile.clone(),
+        &policy,
+    )
+    .unwrap();
+    let held = foreign.acquire_writer_lock().unwrap();
+    assert_eq!(finalize(&native, "HELD-1"), 1);
+    assert_eq!(
+        sync_state(&native),
+        (
+            SyncStatus::UploadPending,
+            Some(DetailCause::NetworkArchiveWaiting)
+        )
+    );
+    drop(held);
+    assert_eq!(
+        publish(&native).outcome(),
+        PublicationOutcomeV1::PublishedCompletely
+    );
+    assert_eq!(sync_state(&native), (SyncStatus::LocallySaved, None));
+}
+
+/// Fix-Runde 2: der Hostlauf leitet ohne den Wirtszustand ab. Hält ein
+/// UI-Einstieg (oder ein Präsenzdialog) den Zustand, laufen saubere Läufe
+/// trotzdem weiter; der Zustand wartet nie auf Netz-I/O des Hostlaufs.
+#[test]
+fn the_host_loop_derives_without_the_native_state_lock() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = installed.try_host(&installed.writer_config).unwrap();
+    let host = native.network_publication_host().unwrap();
+    let before = host.runs();
+    let guard = native.hold_native_state_for_test();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    while host.runs() == before && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    drop(guard);
+    assert!(
+        host.runs() > before,
+        "der Hostlauf lief, während der Zustand gehalten war"
+    );
+    assert_eq!(sync_state(&native), (SyncStatus::LocallySaved, None));
+}
+
+/// Fix-Runde 2, Regel (i) allein: ein Eintrag, der NICHT der höchste ist und
+/// live bytegleich am Netzziel liegt, aber in der geerbten Grundlinie fehlt,
+/// bleibt lokal. Erst eine Öffnung, deren geerbte Grundlinie ihn trägt,
+/// bereinigt ihn.
+#[test]
+fn a_row_missing_from_the_inherited_baseline_is_not_pruned() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = started(&installed);
+    let away = installed.base.installed.archive.with_extension("away");
+    fs::rename(&installed.base.installed.archive, &away).unwrap();
+    assert_eq!(finalize(&native, "RULE-I-1"), 1, "offline committed");
+    fs::rename(&away, &installed.base.installed.archive).unwrap();
+    let first = rows_of_sequence(&committed_rows(&installed), 1);
+
+    // Die Vorschau liest live, bevor Eintrag 1 veröffentlicht ist: ihre
+    // Grundlinie kennt ihn nicht. Über den Vorschau-Zweig bleibt diese
+    // Laufzeit (samt Grundlinie) bis zum Abschluss von Eintrag 2 erhalten.
+    let state = native.desktop_state();
+    let writer = state.writer().unwrap();
+    let mut next = native_incident();
+    next.human_incident_number = "RULE-I-2".into();
+    let preview = writer.preview(&next).unwrap();
+    assert_eq!(preview.proposed_sequence.get(), 2);
+    assert_eq!(
+        publish(&native).outcome(),
+        PublicationOutcomeV1::PublishedCompletely
+    );
+    native_reauth(&native);
+    assert_eq!(writer.finalize(&next, &preview).unwrap().sequence.get(), 2);
+    let rows = committed_rows(&installed);
+    assert!(first.iter().all(|(path, bytes)| rows.get(path) == Some(bytes)));
+    let remote = remote_objects(&installed);
+    assert!(
+        first.iter().all(|(path, bytes)| remote.get(path) == Some(bytes)),
+        "Eintrag 1 liegt live bytegleich am Netzziel"
+    );
+
+    // Diese Wiederöffnung erbt die Grundlinie OHNE Eintrag 1: er ist nicht
+    // der höchste und liegt live vor, wird aber nicht bereinigt.
+    state.drafts().unwrap().load_payload().unwrap();
+    let rows = committed_rows(&installed);
+    assert!(
+        first.iter().all(|(path, bytes)| rows.get(path) == Some(bytes)),
+        "Regel (i): nicht in der geerbten Grundlinie, also nicht bereinigt"
+    );
+    // Die nächste erbt eine Grundlinie mit Eintrag 1 und bereinigt ihn.
+    state.drafts().unwrap().load_payload().unwrap();
+    let rows = committed_rows(&installed);
+    assert!(first.keys().all(|path| !rows.contains_key(path)));
+    assert_eq!(rows, rows_of_sequence(&rows, 2), "Eintrag 2 bleibt");
+}

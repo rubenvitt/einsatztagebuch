@@ -393,6 +393,12 @@ impl NativeDesktopRuntime {
             publication.detach();
         }
     }
+    /// Hält den Wirtszustand wie ein UI-Einstieg oder Präsenzdialog.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn hold_native_state_for_test(&self) -> impl Drop + '_ {
+        self.inner.lock().expect("state lock")
+    }
     /// Ein Publikationslauf mit der Beobachtung der aktuellen Laufzeit.
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
@@ -544,6 +550,9 @@ impl RuntimeSessionPort for NativeDesktopRuntime {
             });
         // A dialog can still own the state, but all access is already closed by
         // the epoch. That dialog clears retained proofs before releasing it.
+        // Der Publikations-Hostlauf eines Netz-Writers hält den Zustand nur
+        // kurz per `try_lock` (nie über einen Präsenzdialog) und räumt die
+        // Nachweise selbst ab, wenn er danach eine gesperrte Epoche sieht.
         match self.inner.try_lock() {
             Ok(mut inner) => inner.invalidate(),
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().invalidate(),
