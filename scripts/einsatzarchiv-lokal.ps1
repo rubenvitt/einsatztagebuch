@@ -267,18 +267,23 @@ if ($Desktop) {
     Write-FixtureWarning
     Write-Host ''
     # Zwei Prozesse, weil sich --writer-config und --administration-config am
-    # Wirt ausschließen. Jeder bekommt sein eigenes Konsolenfenster mit dem
-    # Fixture-Hinweis und einer etwaigen Fehlermeldung beim Start.
+    # Wirt ausschließen. Die Konsolenausgabe jedes Wirts landet in einer
+    # Protokolldatei der Station: ein eigenes Konsolenfenster schlösse sich
+    # beim Abbruch sofort und nähme den Grund mit.
     foreach ($window in @(
-            @{ Label = 'Writer'; Arguments = $writerArgs },
-            @{ Label = 'Verwaltung'; Arguments = $adminArgs })) {
+            @{ Label = 'Writer'; Arguments = $writerArgs; Station = $writerStation },
+            @{ Label = 'Verwaltung'; Arguments = $adminArgs; Station = $adminStation })) {
         Write-Line "$($window.Label): $fixtureHost $($window.Arguments -join ' ')"
-        $started = Start-Process -FilePath $fixtureHost -PassThru `
+        $log = Join-Path $window.Station 'fixture-konsole.log'
+        $started = Start-Process -FilePath $fixtureHost -PassThru -WindowStyle Hidden `
+            -RedirectStandardError $log `
             -ArgumentList (ConvertTo-ArgumentString $window.Arguments)
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 5
         if ($started.HasExited) {
+            Write-Host ''
+            Get-Content -LiteralPath $log -ErrorAction SilentlyContinue | ForEach-Object { Write-Line $_ }
             Stop-Here "Das $($window.Label)-Fenster endete sofort mit Code $($started.ExitCode)." `
-                'Den Befehl darüber in einem Terminal von Hand starten; die Konsole nennt den Grund.'
+                "Der Grund steht in der Ausgabe darüber (auch in $log)."
         }
         Write-Line "$($window.Label): läuft als Prozess $($started.Id)"
     }
