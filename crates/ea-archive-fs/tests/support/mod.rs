@@ -936,13 +936,16 @@ impl PublicationTargetV1 for SharedHardFailingTarget {
         {
             // Erreichbar und ablehnend, am ZWEITEN Objekt des Plans.
             //
-            // `FlushFailed` und nicht `Io`, obwohl der Arm eine
-            // Flush-Operation beschreibt: `Io` ist genau der Fehler, den die
-            // Trennung liefert (siehe oben), und der Test MUSS den Hartfehler
-            // vom Trennungspfad unterscheiden koennen. Der Arm ist hier
-            // Stellvertreter fuer „das Ziel lehnt ab"; welchen Fehler ein
-            // echtes Netzziel liefert, entscheidet Task 11.
-            return Err(ea_archive::ArchiveBackendError::FlushFailed);
+            // `ByteConflict` und nicht `Io` oder `FlushFailed`: `drain`
+            // behandelt seit der Fix-Runde zu Task 6 (Fund B) BEIDE als
+            // verlorene Erreichbarkeit — ein Netzziel kann Verbindungsverlust
+            // und nicht bestätigte Dauerhaftigkeit oft nicht sauber
+            // unterscheiden, beides bleibt deshalb `Upload ausstehend`. Diese
+            // Attrappe braucht einen Fehler, den `drain` WEITERHIN als
+            // Hartfehler durchreicht — genau die Rolle, die `ByteConflict`
+            // in der Klassifikation von Fund B behält, und die dieser Test
+            // messen will: das Ziel ist erreichbar und lehnt trotzdem ab.
+            return Err(ea_archive::ArchiveBackendError::ByteConflict);
         }
         published.push((address, bytes.to_vec()));
         Ok(())
@@ -1059,6 +1062,13 @@ pub fn planned_grants(count: usize, prefix: &str) -> PlannedPublicationV1 {
 #[must_use]
 pub fn second_disjoint_plan() -> PlannedPublicationV1 {
     planned_grants(2, "second")
+}
+
+/// Ein DRITTER Plan, ADRESSDISJUNKT zu [`two_grants_and_one_entry`] UND zu
+/// [`second_disjoint_plan`].
+#[must_use]
+pub fn third_disjoint_plan() -> PlannedPublicationV1 {
+    planned_grants(2, "third")
 }
 
 /// Ein Plan, der DIESELBE Adresse wie [`two_grants_and_one_entry`] trägt —
@@ -1208,6 +1218,221 @@ impl PublicationTargetV1 for SlowDisconnectingTarget {
     ) -> Result<(), ea_archive::ArchiveBackendError> {
         Ok(())
     }
+}
+
+/// Ein Ziel, das an EINER bestimmten Adresse mitten in `publish_one`
+/// BLOCKIERT — für die Nebenläufigkeitsnachweise der Drain-Sperre
+/// (EA-CNA-PUB-7, Fund A der Task-6-Review).
+///
+/// `arrived` meldet dem Test, dass der Drain die blockierende Adresse
+/// WIRKLICH erreicht hat — erst danach darf der Test beobachten, ob ein
+/// gleichzeitiger Aufruf wartet. `release` gibt den Drain danach frei.
+pub struct BlockingTarget {
+    connected: Mutex<bool>,
+    published: Mutex<Vec<(String, Vec<u8>)>>,
+    block_on: Option<String>,
+    arrived: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+impl BlockingTarget {
+    #[must_use]
+    pub fn new(
+        connected: bool,
+        block_on: Option<String>,
+        arrived: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) -> Self {
+        Self {
+            connected: Mutex::new(connected),
+            published: Mutex::new(Vec::new()),
+            block_on,
+            arrived,
+            release,
+        }
+    }
+
+    /// Die tatsächlich veröffentlichten Adressen, in Ankunftsreihenfolge —
+    /// über ALLE Aufrufer dieses EINEN Ziels hinweg, nicht je Plan.
+    #[must_use]
+    pub fn published_order(&self) -> Vec<String> {
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+}
+
+impl PublicationTargetV1 for BlockingTarget {
+    fn is_connected(&self) -> bool {
+        *self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn reconnect(&self) {
+        *self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    fn publish_one(
+        &self,
+        relative: &ArchivePath,
+        bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        if !self.is_connected() {
+            return Err(ea_archive::ArchiveBackendError::Io);
+        }
+        if self.block_on.as_deref() == Some(relative.as_str()) {
+            self.arrived.wait();
+            self.release.wait();
+        }
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((relative.as_str().to_owned(), bytes.to_vec()));
+        Ok(())
+    }
+}
+
+struct SharedBlockingTarget(Arc<BlockingTarget>);
+
+impl PublicationTargetV1 for SharedBlockingTarget {
+    fn is_connected(&self) -> bool {
+        self.0.is_connected()
+    }
+
+    fn reconnect(&self) {
+        self.0.reconnect();
+    }
+
+    fn publish_one(
+        &self,
+        relative: &ArchivePath,
+        bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        self.0.publish_one(relative, bytes)
+    }
+}
+
+/// Eine Warteschlange auf einem [`BlockingTarget`] — der Griff bleibt beim
+/// Test, damit er `published_order` beobachten kann.
+#[must_use]
+pub fn queue_with_blocking_target(
+    connected: bool,
+    block_on: Option<String>,
+    arrived: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+) -> (PublicationQueue, Arc<BlockingTarget>) {
+    let target = Arc::new(BlockingTarget::new(connected, block_on, arrived, release));
+    let queue = PublicationQueue::new(
+        Box::new(SharedBlockingTarget(Arc::clone(&target))),
+        controlled_network_profile(),
+        &policy_allowing_controlled_network(),
+    )
+    .expect("die Warteschlange der Fixture muss entstehen");
+    (queue, target)
+}
+
+/// Ein Ziel, das IMMER erreichbar meldet (die Wurzel ist da), dessen
+/// `publish_one` aber mit `Io` scheitert — bis es „repariert" wird.
+///
+/// Für EA-CNA-PUB-4/Fund B der Task-6-Review: `is_connected` allein kann
+/// einen vorhandenen, aber UNBENUTZBAREN Mount (Mount-Stub, ein Share, der
+/// erst beim Schreiben scheitert) nicht erkennen — `drain` muss `Io` aus
+/// `publish_one` deshalb genauso wie verlorene Erreichbarkeit behandeln.
+pub struct UnwritableButConnectedTarget {
+    writable: Mutex<bool>,
+    published: Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+impl UnwritableButConnectedTarget {
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            writable: Mutex::new(false),
+            published: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Das Ziel nimmt ab jetzt Schreibvorgänge an.
+    pub fn repair(&self) {
+        *self.writable.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    #[must_use]
+    pub fn published_order(&self) -> Vec<String> {
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+}
+
+impl PublicationTargetV1 for UnwritableButConnectedTarget {
+    fn is_connected(&self) -> bool {
+        // Die Wurzel ist immer DA — das ist genau der Punkt: `is_connected`
+        // allein sieht den Mount-Stub nicht an.
+        true
+    }
+
+    fn reconnect(&self) {}
+
+    fn publish_one(
+        &self,
+        relative: &ArchivePath,
+        bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        if !*self.writable.lock().unwrap_or_else(PoisonError::into_inner) {
+            return Err(ea_archive::ArchiveBackendError::Io);
+        }
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((relative.as_str().to_owned(), bytes.to_vec()));
+        Ok(())
+    }
+}
+
+struct SharedUnwritableTarget(Arc<UnwritableButConnectedTarget>);
+
+impl PublicationTargetV1 for SharedUnwritableTarget {
+    fn is_connected(&self) -> bool {
+        self.0.is_connected()
+    }
+
+    fn reconnect(&self) {
+        self.0.reconnect();
+    }
+
+    fn publish_one(
+        &self,
+        relative: &ArchivePath,
+        bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        self.0.publish_one(relative, bytes)
+    }
+}
+
+/// Eine Warteschlange auf einem präsenten, aber unbeschreibbaren Ziel.
+#[must_use]
+pub fn queue_with_an_unwritable_but_connected_target()
+-> (PublicationQueue, Arc<UnwritableButConnectedTarget>) {
+    let target = UnwritableButConnectedTarget::new();
+    let queue = PublicationQueue::new(
+        Box::new(SharedUnwritableTarget(Arc::clone(&target))),
+        controlled_network_profile(),
+        &policy_allowing_controlled_network(),
+    )
+    .expect("die Warteschlange der Fixture muss entstehen");
+    (queue, target)
 }
 
 /// Eine Warteschlange auf einem LANGSAMEN, anfangs getrennten Ziel — für den
