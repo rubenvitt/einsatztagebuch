@@ -348,7 +348,7 @@ fn client(
     transport: Arc<dyn SyncTransportV1>,
 ) -> SyncClient {
     SyncClient::new(SyncClientConfigV1 {
-        backend: Arc::clone(&archive.backend),
+        backend: archive.backend.clone(),
         anchor_bytes: archive.anchor_bytes.clone(),
         network: None,
         transport,
@@ -626,7 +626,7 @@ async fn a_waiting_network_archive_leaves_no_local_receipt_behind() {
 
     let transport: Arc<dyn SyncTransportV1> = Arc::new(common::hyper_transport(&ready.server));
     let outcome = SyncClient::new(SyncClientConfigV1 {
-        backend: Arc::clone(&archive.backend),
+        backend: archive.backend.clone(),
         anchor_bytes: archive.anchor_bytes.clone(),
         network: Some(Arc::new(queue)),
         transport,

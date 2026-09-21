@@ -15,13 +15,13 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Condvar, Mutex, MutexGuard, PoisonError, atomic::AtomicU64},
+    sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 
 use ea_archive::{
-    ArchiveBackendError, ArchiveBackendProfileV1, ArchiveSource, BoundArchiveProfilePolicyV1,
-    ControlledNetworkProfileV1,
+    ArchiveBackend, ArchiveBackendError, ArchiveBackendProfileV1, ArchiveSource,
+    BoundArchiveProfilePolicyV1, ControlledNetworkProfileV1,
 };
 use ea_archive_fs::{
     DetailCause, LocalPathBackend, NetworkArchiveTargetV1, PlannedPublicationV1,
@@ -29,11 +29,16 @@ use ea_archive_fs::{
 };
 use ea_destruction::{DestructionError, SqliteManagedCustody};
 use ea_local_store::EncryptedDatabase;
+use ea_recovery::FsArchiveSource;
+use ea_sync_client::SyncLocalArchiveV1;
 use ea_trust::WriterRegistryHeadRef;
 use ea_types::CertificateHash;
 use ea_writer::NetworkPublicationPortV1;
 
-use crate::native_archive::{NativeArchiveExistingComponent, NativeArchiveOpenError};
+use crate::native_archive::{
+    NativeArchiveExistingComponent, NativeArchiveOpenError, NetworkWriterSourceV1,
+};
+use crate::operator_runtime::OperatorArchiveSnapshot;
 
 /// Untergrenze jeder Wartezeit des Hostlaufs. Ein Profil mit Backoff 0 (das
 /// Format prüft `> 0` nur für LocalPath) darf den Lauf nicht zur
@@ -585,6 +590,63 @@ impl NetworkPublicationHost {
     #[must_use]
     pub fn runs(&self) -> u64 {
         self.runs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Der lokale Archivport des Sync-Klienten für ein kontrolliertes Netzprofil
+/// (EA-CNA-PUB-5).
+///
+/// Die Quelle ist dieselbe Vereinigung wie beim Netz-Writer
+/// ([`NetworkWriterSourceV1`]): die committete Netzsicht des verifizierten
+/// Snapshots und die LIVE gelesene committete lokale Komponente, bei jedem
+/// Besuch neu gebildet. Das Backend ist die lokale SQLCipher-Komponente — nie
+/// ein `LocalPathBackend` des Netzziels. Eine verifizierte Quittung landet
+/// also lokal und erreicht das Netzziel erst über die Publikation.
+pub struct NetworkSyncArchiveV1 {
+    component: NativeArchiveExistingComponent,
+    baseline: Arc<FsArchiveSource>,
+}
+
+impl NetworkSyncArchiveV1 {
+    /// Bindet die lokale Komponente an die Netzsicht von `snapshot`.
+    ///
+    /// # Errors
+    ///
+    /// `Config` für eine LocalPath-Komponente oder einen Snapshot ohne
+    /// Netzsicht — derselbe Befund wie bei
+    /// [`NativeArchiveExistingComponent::writer_source`].
+    pub fn new(
+        component: NativeArchiveExistingComponent,
+        snapshot: &OperatorArchiveSnapshot,
+    ) -> Result<Self, NativeArchiveOpenError> {
+        if component.sqlcipher_backend().is_none() {
+            return Err(NativeArchiveOpenError::Config);
+        }
+        let baseline = Arc::clone(
+            snapshot
+                .remote_baseline()
+                .ok_or(NativeArchiveOpenError::Config)?,
+        );
+        Ok(Self {
+            component,
+            baseline,
+        })
+    }
+}
+
+impl SyncLocalArchiveV1 for NetworkSyncArchiveV1 {
+    fn backend(&self) -> &dyn ArchiveBackend {
+        self.component.local_backend()
+    }
+
+    fn committed_source(&self) -> Result<Box<dyn ArchiveSource + '_>, ArchiveBackendError> {
+        // `new` lässt nur eine Netzkomponente zu; ohne SQLCipher-Backend gibt
+        // es keine lokale Hälfte der Vereinigung.
+        let local = self
+            .component
+            .sqlcipher_backend()
+            .ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
+        Ok(Box::new(NetworkWriterSourceV1::over(&self.baseline, local)))
     }
 }
 

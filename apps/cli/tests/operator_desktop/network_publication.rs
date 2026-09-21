@@ -7,7 +7,7 @@ use super::network_writer::{NetworkWriterInstallation, listing};
 use super::*;
 use ea_admin::{
     native_archive::{NativeArchiveConfig, NativeArchiveExistingComponent},
-    network_publication::NetworkPublicationHost,
+    network_publication::{NetworkPublicationHost, NetworkSyncArchiveV1},
 };
 use ea_archive::BoundArchiveProfilePolicyV1;
 use ea_archive_fs::{DetailCause, PublicationOutcomeV1, SyncStatus};
@@ -635,4 +635,87 @@ fn a_row_missing_from_the_inherited_baseline_is_not_pruned() {
     let rows = committed_rows(&installed);
     assert!(first.keys().all(|path| !rows.contains_key(path)));
     assert_eq!(rows, rows_of_sequence(&rows, 2), "Eintrag 2 bleibt");
+}
+
+/// EA-CNA-PUB-5: der Sync-Port eines Netz-Writers liest die Vereinigung aus
+/// Netzsicht und committeter lokaler Komponente, nicht das Netzziel allein.
+///
+/// Der Eintrag entsteht, während das Netzziel fehlt, und liegt deshalb NUR
+/// lokal. Die Warteschlange des Sync-Klienten findet ihn trotzdem anstehend,
+/// mit genau den lokal committeten Bytes als Plan.
+#[test]
+fn the_sync_port_of_a_network_writer_derives_its_queue_from_the_union() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = started(&installed);
+    let away = installed.base.installed.archive.with_extension("away");
+    fs::rename(&installed.base.installed.archive, &away).unwrap();
+    assert_eq!(finalize(&native, "NET-SYNC-1"), 1);
+    drop(native);
+    fs::rename(&away, &installed.base.installed.archive).unwrap();
+    let local = committed_rows(&installed);
+    let remote = remote_objects(&installed);
+    assert!(!local.is_empty(), "der Eintrag liegt lokal committet");
+    assert!(
+        local.keys().all(|path| !remote.contains_key(path)),
+        "und noch nirgends am Netzziel"
+    );
+
+    let runtime = installed.base.open_writer_runtime();
+    let component = NativeArchiveExistingComponent::open_current(
+        &runtime,
+        NativeArchiveConfig::for_runtime_database(
+            installed.base.profile.clone(),
+            runtime.database().path(),
+        ),
+    )
+    .unwrap();
+    let archive = NetworkSyncArchiveV1::new(component, runtime.archive_snapshot()).unwrap();
+    let port: &dyn ea_sync_client::SyncLocalArchiveV1 = &archive;
+    // Das Backend des Ports ist die lokale SQLCipher-Komponente: eine dort
+    // abgelegte Staging-Zeile erscheint in deren Zeilen, aber nie in der
+    // committeten Quelle.
+    let staging = ea_archive::ArchivePath::in_dir("entries/", "000000000009_probe.eip.staging")
+        .unwrap();
+    port.backend()
+        .create_non_object_if_absent(&staging, b"staged-probe")
+        .unwrap();
+    assert!(
+        staged(&installed).contains(&(staging.as_str().to_owned(), true)),
+        "die Probe liegt in der lokalen Komponente"
+    );
+    let source = port.committed_source().unwrap();
+
+    let mut visited = BTreeMap::new();
+    source
+        .visit_blobs(&mut |blob| {
+            visited.insert(blob.path_hint().to_owned(), blob.bytes().to_vec());
+            Ok(())
+        })
+        .unwrap();
+    for (path, bytes) in local.iter().chain(&remote) {
+        assert_eq!(visited.get(path), Some(bytes), "{path} gehört zur Vereinigung");
+    }
+    assert!(
+        visited.keys().all(|path| !ea_archive::is_staging_path(path)),
+        "Staging gehört nie zur committeten Quelle"
+    );
+
+    let queue =
+        ea_sync_client::SyncQueueV1::derive(source.as_ref(), runtime.anchor(), support::live_clock())
+            .unwrap();
+    // Aufsteigend nach Sequenz: vor dem lokal committeten Eintrag steht der
+    // Genesis-Eintrag aus der Netzsicht an, beide ohne Serverquittung.
+    let [genesis, pending] = queue.pending() else {
+        panic!("Genesis und der lokal committete Eintrag stehen an");
+    };
+    assert!(
+        genesis
+            .publication_plan()
+            .iter()
+            .all(|(path, bytes)| remote.get(path) == Some(bytes)),
+        "der ältere Eintrag stammt aus der Netzsicht"
+    );
+    let plan: BTreeMap<String, Vec<u8>> = pending.publication_plan().into_iter().collect();
+    assert_eq!(plan, local, "der Plan sind genau die lokal committeten Bytes");
 }

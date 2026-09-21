@@ -58,6 +58,10 @@ ea-time.workspace = true
 ea-archive.workspace = true
 ea-archive-fs.workspace = true
 ea-writer.workspace = true
+# Nur der Port `SyncLocalArchiveV1`: `network_publication` setzt ihn für die
+# lokale Komponente eines Netzprofils um (EA-CNA-PUB-5). Den Kettenkopf eines
+# Writer-Übergangs gleicht `ea-admin` weiterhin NICHT über diese Kante ab.
+ea-sync-client.workspace = true
 ea-reader.workspace = true
 ea-recovery.workspace = true
 ea-verify.workspace = true

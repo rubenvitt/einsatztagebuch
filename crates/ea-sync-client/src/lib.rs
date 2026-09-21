@@ -55,7 +55,8 @@ pub use ea_archive_fs::{DetailCause, SyncStatus};
 
 pub use client::{
     CONNECT_TIMEOUT_MS_V1, HyperTlsTransport, PushSummary, REQUEST_TIMEOUT_MS_V1, SyncClient,
-    SyncClientConfigV1, SyncTransportV1, TransportErrorV1, TransportRequestV1, TransportResponseV1,
+    SyncClientConfigV1, SyncLocalArchiveV1, SyncTransportV1, TransportErrorV1, TransportRequestV1,
+    TransportResponseV1,
 };
 pub use queue::{PendingEntryV1, PendingStepV1, SyncQueueV1, step_of, sync_state_of};
 pub use receipt::{VerifiedReceiptV1, entry_is_server_confirmed, verify_receipt_against_archive};
