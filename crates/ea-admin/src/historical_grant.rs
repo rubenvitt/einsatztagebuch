@@ -259,6 +259,10 @@ fn publish_historical_grants(
                 builder.mode(0o700);
             }
             builder.create(directory)?;
+            // Ein Verzeichnis lässt sich nur auf Unix als Datei öffnen und
+            // flushen; wie im übrigen Archiv bleibt der dauerhafte
+            // Verzeichniseintrag anderswo eine Zusage des Wirtsystems.
+            #[cfg(unix)]
             if let Some(parent) = directory.parent() {
                 fs::File::open(parent)?.sync_all()?;
             }
@@ -300,12 +304,14 @@ fn publish_historical_grants(
                             && fs::read(&path)? == grant.as_bytes() => {}
                     Err(e) => return Err(e.into()),
                 }
+                #[cfg(unix)]
                 fs::File::open(directory)?.sync_all()?;
                 Ok(())
             })();
             let cleanup = fs::remove_file(&temporary);
             result?;
             cleanup?;
+            #[cfg(unix)]
             fs::File::open(directory)?.sync_all()?;
             hashes.push(hash);
         }

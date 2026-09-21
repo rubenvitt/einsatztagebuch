@@ -225,7 +225,11 @@ impl SqliteDestructionJobs {
                 if object_hash(&fs::read(&absolute).map_err(|_|Error::Storage)?)!=hash { return Err(Error::SecurityConflict); }
                 local.backend.remove_if_present(&archive_path(&relative)?).map_err(|_|Error::Storage)?;
                 // ArchivePath's directory is a layout directory. A nested
-                // name additionally needs its immediate parent flushed.
+                // name additionally needs its immediate parent flushed. Only
+                // Unix opens a directory as a file; elsewhere the durable
+                // directory entry stays a promise of the host, as in
+                // ea-archive-fs.
+                #[cfg(unix)]
                 fs::File::open(absolute.parent().ok_or(Error::Storage)?).and_then(|file|file.sync_all()).map_err(|_|Error::Storage)?;
                 if absolute.try_exists().map_err(|_|Error::Storage)? { return Err(Error::Storage); }
                 progress(LocalDestructionCheckpoint::Removed)?;
