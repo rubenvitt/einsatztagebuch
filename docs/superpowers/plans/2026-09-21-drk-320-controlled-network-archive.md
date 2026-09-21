@@ -256,15 +256,15 @@ impl RecoveryTestRuntime {
 
 `capture_source` on Network or ReadOnlyCopy → `EA-RECOVERY-TEST-SOURCE`; `capture_source_with_component_export` on LocalPath or ReadOnlyCopy → same. Share the body with `capture_source` by extracting `fn capture_from(&mut self, request, source: impl Fn() -> Result<FsArchiveSource, _>)`. Export: refuse if `component_export` exists or its canonical parent is inside the canonical `archive_directory`; `create_dir`; for each `visit_managed_blobs` row create parents with `create_dir`, write with `OpenOptions::new().write(true).create_new(true)`, `sync_all` file, then sync every created directory bottom-up; read back with `FsArchiveSource::open(component_export)` and require the multiset of `(path, bytes)` equals the component's managed blobs. The capture source is `FsArchiveSource::open(remote)?.with_exact_component(&FsArchiveSource::open(export)?)`, used for the inventory hash, the probe/tip check against `runtime.next_sequence()` (union-based since Task 4), `verify_recovery_source`, and the after-snapshot comparison. `archive_source()` for ReadOnlyCopy returns the same union over the copy; its `archive_locks()` returns only `lock.acquire_writer_lock()`; it never exposes a backend.
 
-- [ ] **Step 1: RED** in `native_archive_source.rs` (network installation with one locally committed, unpublished grant+`.eip` as in Task 4's fixture):
+- [x] **Step 1: RED** in `native_archive_source.rs` (network installation with one locally committed, unpublished grant+`.eip` as in Task 4's fixture):
   - `network_capture_binds_unpublished_local_entry_and_exports_it_exactly` — capture succeeds; export dir holds exactly the component's managed blobs; `recovery_archive_inventory_hash(remote ⊎ export)` equals the envelope's `archive_inventory_hash`; the tip equals the local `.eip`.
   - `network_capture_without_the_local_set_fails` — `ea_recovery::verify_recovery_source(envelope, &FsArchiveSource::open(remote)?, anchor, inventory, now)` over the remote alone returns `EA-RECOVERY-TEST-SOURCE` (inventory hash and tip no longer match).
   - `network_capture_refuses_existing_or_nested_export_directory`.
   - `archive_copy_restores_on_other_machine_without_backend_or_publication` — copy remote dir + export to a target installation (use the existing `target_config` flow of `RecoveryInstallation::with_target`), `for_archive_copy(...)`, `restore_source` succeeds, `capture_source` returns `EA-RECOVERY-TEST-SOURCE`, the target DB has no `native_archive_component` row, the copy's object files are byte-identical before/after.
-- [ ] **Step 2:** `cargo test --locked -p einsatzarchiv-cli --test operator recovery::native_archive_source` → red.
-- [ ] **Step 3:** Implement; update the three callers.
-- [ ] **Step 4:** Green; regressions `cargo test --locked -p einsatzarchiv-cli --test operator recovery::` and `cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator recovery::desktop`. Clippy `ea-admin`, `einsatzarchiv-cli` (with and without `desktop-fixture`), `ea-desktop`.
-- [ ] **Step 5:** Commit `feat(recovery): capture and restore controlled-network sources with their local component`.
+- [x] **Step 2:** `cargo test --locked -p einsatzarchiv-cli --test operator recovery::native_archive_source` → red.
+- [x] **Step 3:** Implement; update the three callers.
+- [x] **Step 4:** Green; regressions `cargo test --locked -p einsatzarchiv-cli --test operator recovery::` and `cargo test --locked -p einsatzarchiv-cli --features desktop-fixture --test operator recovery::desktop`. Clippy `ea-admin`, `einsatzarchiv-cli` (with and without `desktop-fixture`), `ea-desktop`.
+- [x] **Step 5:** Commit `feat(recovery): capture and restore controlled-network sources with their local component`.
 
 ---
 

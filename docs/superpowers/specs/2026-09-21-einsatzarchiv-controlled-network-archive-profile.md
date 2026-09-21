@@ -315,6 +315,12 @@ zurückgelesenem Export. Das Exportverzeichnis darf weder das Netzziel noch
 ein Pfad darin sein. Ein bereits existierendes Exportverzeichnis lehnt ab.
 Lokal committed, noch nicht publizierte `.eip`/`.eag` sind damit Teil der
 signierten Quelle; eine Quelle ohne sie scheitert an Inventar oder Kettenkopf.
+Die CLI verlangt dafür bei einem Netzprofil `--component-export <Verzeichnis>`
+und lehnt den Schalter für LocalPath ab; ihre Vorprüfung liest nie das
+Netzziel allein, die Sonde prüft die Capture über dieselbe Vereinigung. Die
+Sonden der Inventar-Capture werden erst nach dem Export aus der Vereinigung
+gewählt. Der Desktop hat keinen Capture-Ablauf und bietet deshalb keinen
+Export an.
 
 **EA-CNA-REC-4 (Schnappschuss).** Der SQLCipher-Schnappschuss umfasst wie
 bisher die ganze Datenbank, also auch Registrierung, Scope, lokale Objekte,
@@ -322,12 +328,22 @@ Staging und Sonde. Der Export ersetzt den Schnappschuss nicht; beide gehören
 zum Sicherungssatz zusammen mit Anker, unveränderter Kopie des Netzziels,
 Medien und Inventar.
 
-**EA-CNA-REC-5 (Zielkopie).** Der §19.3-Zieltest nutzt eine eigene
-Nur-Lese-Ressource: `RecoveryTestRuntime::for_archive_copy` mit der Kopie des
-Netzziels als `archive_directory` und dem Exportverzeichnis. Sie hat weder
+**EA-CNA-REC-5 (Zielkopie).** Das Ziel erhält die unveränderte committete
+Vereinigung: `materialize_network_archive_copy(kopie, export, ziel)` legt im
+fehlenden oder leeren Zielordner jede Datei der Kopie des Netzziels und des
+Exports exklusiv an, flusht Dateien und Verzeichnisse und prüft den
+zurückgelesenen Baum byte-genau gegen die Vereinigung. Die Objekte sind
+unveränderlich und inhaltsadressiert; bytegleiche Adressen fallen zusammen,
+abweichende und ein nicht leerer Zielordner lehnen mit
+`EA-RECOVERY-TEST-SOURCE` ab. Die Zielinstallation öffnet dieses Verzeichnis
+ohne Registrierung und ohne eigenen Startmodus. Der §19.3-Zieltest nutzt eine
+eigene Nur-Lese-Ressource: `RecoveryTestRuntime::for_archive_copy` mit dieser
+Vereinigung als `archive_directory` und dem Exportverzeichnis. Sie hat weder
 `local_backend` noch Publikationsfähigkeit noch Registrierung und führt keinen
 Capability-Test aus. Ihre Quelle ist
-`FsArchiveSource::open(kopie)?.with_exact_component(&FsArchiveSource::open(export)?)`.
+`FsArchiveSource::open(archive_directory)?.with_exact_component(&FsArchiveSource::open(export)?)`;
+eine Zielkopie ohne die exportierten lokalen Objekte scheitert vor jedem
+Restore.
 Capture ist dort mit `EA-RECOVERY-TEST-SOURCE` gesperrt. Die aktuelle
 Autorität, der gemessene andere Rechner, die exakte Quell- und
 Restore-Bindung und die Schutz-Locks gelten unverändert.

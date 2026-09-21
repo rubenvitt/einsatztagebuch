@@ -98,7 +98,11 @@ fn inventory(config: &Config) -> Result<ea_recovery::KeyInventory, CommandError>
 fn service(config: &Config, runtime: OperatorRuntime) -> Result<RecoveryTestRuntime, CommandError> {
     let profile = parse_recovery_archive_profile(&read(&config.archive_profile_path, 65_536)?)
         .map_err(runtime_error)?;
-    RecoveryTestRuntime::new(runtime, profile).map_err(runtime_error)
+    let archive_config = ea_admin::native_archive::NativeArchiveConfig::for_runtime_database(
+        profile,
+        &runtime.config().database_path,
+    );
+    RecoveryTestRuntime::with_archive_config(runtime, archive_config).map_err(runtime_error)
 }
 fn read_reports(
     config: &Config,

@@ -2,7 +2,7 @@
 use super::{PathBuf, UsageError};
 use std::collections::BTreeMap;
 pub const MODE: &str = "--recovery-mode";
-pub const SWITCHES: [&str; 7] = [
+pub const SWITCHES: [&str; 8] = [
     "--archive-profile",
     "--source-envelope",
     "--snapshot",
@@ -10,6 +10,8 @@ pub const SWITCHES: [&str; 7] = [
     "--restore-database",
     "--media-sources",
     "--completed-report",
+    // Exportverzeichnis der lokalen Komponente eines Netzprofils (EA-CNA-REC-3).
+    "--component-export",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +25,9 @@ pub enum RecoveryRuntimeAction {
     Capture {
         snapshot: PathBuf,
         passphrase: PathBuf,
+        /// Pflicht für ein Netzprofil, abgelehnt für LocalPath; entschieden
+        /// wird am gelesenen Profil, nicht hier.
+        component_export: Option<PathBuf>,
     },
     RestoreRun {
         source: PathBuf,
@@ -72,6 +77,7 @@ pub(super) fn build(
         Some("capture") => RecoveryRuntimeAction::Capture {
             snapshot: required(&mut paths, "--snapshot")?,
             passphrase: required(&mut paths, "--backup-passphrase-file")?,
+            component_export: paths.remove("--component-export"),
         },
         Some("restore-run") => RecoveryRuntimeAction::RestoreRun {
             source: required(&mut paths, "--source-envelope")?,
@@ -134,5 +140,35 @@ mod tests {
         );
         assert!(invoke(false, false).is_err());
         assert!(invoke(true, true).is_err());
+    }
+    #[test]
+    fn component_export_belongs_to_capture_only() {
+        let invoke = |mode: &str| {
+            let mut paths = BTreeMap::from([
+                ("--archive-profile", PathBuf::from("profile.json")),
+                ("--component-export", PathBuf::from("export")),
+            ]);
+            if mode == "capture" {
+                paths.insert("--snapshot", PathBuf::from("snapshot.db"));
+                paths.insert("--backup-passphrase-file", PathBuf::from("secret"));
+            }
+            build(
+                Some(PathBuf::from(mode)),
+                Some(PathBuf::from("operator.json")),
+                paths,
+            )
+        };
+        let Ok(Some(RecoveryRuntimeArguments {
+            action:
+                RecoveryRuntimeAction::Capture {
+                    component_export, ..
+                },
+            ..
+        })) = invoke("capture")
+        else {
+            panic!("capture accepts a component export");
+        };
+        assert_eq!(component_export, Some(PathBuf::from("export")));
+        assert!(invoke("status").is_err());
     }
 }

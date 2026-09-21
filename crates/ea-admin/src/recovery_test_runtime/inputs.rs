@@ -171,53 +171,15 @@ impl RecoveryTestRuntime {
         passphrase: &SecretVec,
     ) -> Result<VerifiedRecoverySource, RecoveryRuntimeError> {
         self.runtime.ensure_current()?;
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        // Dieselbe Quelle wie die Capture: ein Netzprofil ohne Export hat
+        // keine vollständige Quelle und lehnt hier schon ab (EA-CNA-REC-3).
+        let source = self.archive_source()?;
         let probe = ea_recovery::RecoveryArchiveProbe::verify(
             &source,
             self.runtime.anchor(),
             self.runtime.head().preexisting_effective_now().value(),
         )?;
-        let mut probes = Vec::new();
-        for medium in inventory
-            .media()
-            .iter()
-            .filter(|m| m.role() == ea_recovery::RecoveryKeyRole::RecoveryRecipient)
-        {
-            let mut candidates = Vec::new();
-            for grant in probe.inventory().grants() {
-                let g = grant.value().grant_body().fields();
-                if g.kind != ea_format::GrantKindV1::Initial
-                    || g.purpose != ea_format::GrantPurposeV1::Recovery
-                    || g.recipient_certificate_hash != medium.certificate()
-                    || g.recipient_key_thumbprint != medium.expected_thumbprint()
-                {
-                    continue;
-                }
-                if let Some(entry) = probe
-                    .inventory()
-                    .entries()
-                    .iter()
-                    .find(|e| e.value().entry_hash() == g.entry_hash)
-                {
-                    candidates.push((
-                        entry.value().manifest().fields().chain_sequence,
-                        grant.object_hash(),
-                        g.entry_hash,
-                    ));
-                }
-            }
-            candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            let (_, grant, entry) = candidates.first().ok_or(RecoveryTestError::Incomplete)?;
-            probes.push(RecoveryProbeBinding {
-                medium_hash: *medium.pseudonymous_id_hash().as_bytes(),
-                certificate_hash: *medium.certificate().as_bytes(),
-                key_thumbprint: *medium.expected_thumbprint().as_bytes(),
-                setup_entry_hash: *entry.as_bytes(),
-                initial_grant_hash: *grant.as_bytes(),
-            });
-        }
-        probes.sort_by_key(|p| p.medium_hash);
+        let probes = select_recovery_probes(inventory, &probe)?;
         self.capture_source(RecoverySourceCapture {
             inventory,
             probes,
@@ -225,4 +187,76 @@ impl RecoveryTestRuntime {
             passphrase,
         })
     }
+    /// Wie [`Self::capture_inventory`] für ein Netzprofil: die Sonden werden
+    /// erst nach dem Export aus der Vereinigung von Netzziel und
+    /// zurückgelesenem Export gewählt, also auch aus lokal committeten, noch
+    /// nicht publizierten Objekten (EA-CNA-REC-3).
+    pub fn capture_inventory_with_component_export(
+        &mut self,
+        inventory: &KeyInventory,
+        snapshot: &Path,
+        passphrase: &SecretVec,
+        component_export: &Path,
+    ) -> Result<VerifiedRecoverySource, RecoveryRuntimeError> {
+        self.runtime.ensure_current()?;
+        self.capture_network(
+            RecoverySourceCapture {
+                inventory,
+                probes: Vec::new(),
+                snapshot,
+                passphrase,
+            },
+            component_export,
+            true,
+        )
+    }
+}
+
+/// Wählt je Recovery-Medium deterministisch das früheste vorhandene
+/// Original-Paar aus Setup-Eintrag und Initial-Grant.
+pub(super) fn select_recovery_probes(
+    inventory: &KeyInventory,
+    probe: &ea_recovery::RecoveryArchiveProbe,
+) -> Result<Vec<RecoveryProbeBinding>, RecoveryRuntimeError> {
+    let mut probes = Vec::new();
+    for medium in inventory
+        .media()
+        .iter()
+        .filter(|m| m.role() == ea_recovery::RecoveryKeyRole::RecoveryRecipient)
+    {
+        let mut candidates = Vec::new();
+        for grant in probe.inventory().grants() {
+            let g = grant.value().grant_body().fields();
+            if g.kind != ea_format::GrantKindV1::Initial
+                || g.purpose != ea_format::GrantPurposeV1::Recovery
+                || g.recipient_certificate_hash != medium.certificate()
+                || g.recipient_key_thumbprint != medium.expected_thumbprint()
+            {
+                continue;
+            }
+            if let Some(entry) = probe
+                .inventory()
+                .entries()
+                .iter()
+                .find(|e| e.value().entry_hash() == g.entry_hash)
+            {
+                candidates.push((
+                    entry.value().manifest().fields().chain_sequence,
+                    grant.object_hash(),
+                    g.entry_hash,
+                ));
+            }
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let (_, grant, entry) = candidates.first().ok_or(RecoveryTestError::Incomplete)?;
+        probes.push(RecoveryProbeBinding {
+            medium_hash: *medium.pseudonymous_id_hash().as_bytes(),
+            certificate_hash: *medium.certificate().as_bytes(),
+            key_thumbprint: *medium.expected_thumbprint().as_bytes(),
+            setup_entry_hash: *entry.as_bytes(),
+            initial_grant_hash: *grant.as_bytes(),
+        });
+    }
+    probes.sort_by_key(|p| p.medium_hash);
+    Ok(probes)
 }

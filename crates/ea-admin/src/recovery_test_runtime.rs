@@ -3,7 +3,7 @@
 use crate::native_archive::{NativeArchiveExistingComponent, NativeArchiveOpenError};
 use crate::operator_runtime::{OperatorRuntime, OperatorRuntimeError};
 use ea_archive::{
-    ArchiveBackend, ArchiveBackendProfileV1, BoundArchiveProfilePolicyV1, WriterLock,
+    ArchiveBackend, ArchiveBackendProfileV1, ArchiveSource, BoundArchiveProfilePolicyV1, WriterLock,
 };
 use ea_archive_fs::{CapabilityTestVectorV1, LocalPathBackend};
 use ea_audit::{AuditActorProof, SqliteLocalAuditRepository, TypedLocalAuditEvent};
@@ -16,7 +16,7 @@ use ea_recovery::{
     RecoverySourceFields, RecoveryTestError, VerifiedRecoverySource,
 };
 use ea_types::ObjectHash;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub enum RecoveryRuntimeError {
     Runtime(OperatorRuntimeError),
@@ -97,12 +97,18 @@ pub struct RecoveryTestRuntime {
 }
 /// Das Archiv, gegen das Recovery läuft. LocalPath bleibt das bisherige
 /// Backend; ein Netzprofil trägt die registrierte SQLCipher-Komponente und das
-/// vorhandene Netzziel getrennt (EA-CNA-REC-1).
+/// vorhandene Netzziel getrennt (EA-CNA-REC-1). Die §19.3-Zielkopie trägt nur
+/// den Lock über die Kopie des Netzziels und den Pfad des Exports, nie ein
+/// Backend, eine Registrierung oder Publikationsfähigkeit (EA-CNA-REC-5).
 enum RecoveryArchiveHandle {
     LocalPath(LocalPathBackend),
     Network {
         component: Box<NativeArchiveExistingComponent>,
         remote: LocalPathBackend,
+    },
+    ReadOnlyCopy {
+        lock: LocalPathBackend,
+        component_export: PathBuf,
     },
 }
 /// Beide Writer-Locks einer Recovery-Aktion. Die Felder fallen in
@@ -161,6 +167,7 @@ impl RecoveryTestRuntime {
         match &self.archive {
             RecoveryArchiveHandle::LocalPath(backend) => Ok(backend.profile_hash()?),
             RecoveryArchiveHandle::Network { component, .. } => Ok(component.profile_hash()),
+            RecoveryArchiveHandle::ReadOnlyCopy { lock, .. } => Ok(lock.profile_hash()?),
         }
     }
     /// EA-CNA-REC-2: zuerst der SQLCipher-Writer-Lock, dann der des
@@ -179,22 +186,28 @@ impl RecoveryTestRuntime {
                     _remote: Some(remote),
                 })
             }
+            // Nur der Schutz-Lock der Kopie; eine Komponente gibt es hier nicht.
+            RecoveryArchiveHandle::ReadOnlyCopy { lock, .. } => Ok(RecoveryArchiveLocks {
+                _local: lock.acquire_writer_lock()?,
+                _remote: None,
+            }),
         }
     }
-    /// Die Archivquelle der Aktion. Für ein Netzprofil gibt es sie erst mit
-    /// der Vereinigung aus Netzziel und Export (EA-CNA-REC-3); bis dahin
-    /// lehnt sie ab, statt nur das Netzziel als vollständige Quelle zu lesen.
+    /// Die Archivquelle der Aktion. Ein Netzprofil hat sie nur während einer
+    /// Capture mit Export (EA-CNA-REC-3); ohne Export lehnt es ab, statt nur
+    /// das Netzziel als vollständige Quelle zu lesen. Die Zielkopie liest
+    /// die Kopie vereinigt mit dem Export (EA-CNA-REC-5).
     fn archive_source(&self) -> Result<FsArchiveSource, RecoveryRuntimeError> {
+        let directory = &self.runtime.config().archive_directory;
         match &self.archive {
-            RecoveryArchiveHandle::LocalPath(_) => Ok(FsArchiveSource::open(
-                &self.runtime.config().archive_directory,
-            )
-            .map_err(|_| RecoveryTestError::Source)?),
+            RecoveryArchiveHandle::LocalPath(_) => {
+                Ok(FsArchiveSource::open(directory).map_err(|_| RecoveryTestError::Source)?)
+            }
             RecoveryArchiveHandle::Network { .. } => Err(RecoveryTestError::Source.into()),
+            RecoveryArchiveHandle::ReadOnlyCopy {
+                component_export, ..
+            } => network_union(directory, component_export),
         }
-    }
-    fn is_network(&self) -> bool {
-        matches!(self.archive, RecoveryArchiveHandle::Network { .. })
     }
     /// A concrete backend rooted at the same verified native runtime path. A
     /// controlled-network profile is explicitly unsupported here, never cast to
@@ -237,17 +250,97 @@ impl RecoveryTestRuntime {
             archive: RecoveryArchiveHandle::LocalPath(backend),
         })
     }
+    /// Die §19.3-Zielkopie eines Netzprofils: `archive_directory` ist die
+    /// unveränderte Kopie des Netzziels, `component_export` der bei der
+    /// Capture geschriebene Export der lokalen Komponente. Ohne Registrierung,
+    /// ohne Komponente und ohne Capability-Test; Capture ist gesperrt, Restore
+    /// und Test lesen nur (EA-CNA-REC-5, REC-6). Autorität und Rolle gelten
+    /// unverändert.
+    pub fn for_archive_copy(
+        runtime: OperatorRuntime,
+        profile: ArchiveBackendProfileV1,
+        component_export: PathBuf,
+    ) -> Result<Self, RecoveryRuntimeError> {
+        runtime.ensure_current()?;
+        if runtime.config().role != OperatorRoleV1::OrganizationAdmin {
+            return Err(RecoveryTestError::Operator.into());
+        }
+        if !matches!(profile, ArchiveBackendProfileV1::ControlledNetworkPath(_)) {
+            return Err(RecoveryTestError::Source.into());
+        }
+        let lock = LocalPathBackend::open_existing(
+            runtime.config().archive_directory.clone(),
+            profile,
+            &BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields()),
+        )?;
+        runtime.ensure_current()?;
+        Ok(Self {
+            runtime,
+            archive: RecoveryArchiveHandle::ReadOnlyCopy {
+                lock,
+                component_export,
+            },
+        })
+    }
+    /// Capture eines Netzprofils (EA-CNA-REC-3): exportiert unter beiden
+    /// Locks alle verwalteten Objekte der lokalen Komponente exklusiv nach
+    /// `component_export` und bindet die Vereinigung aus Netzziel und
+    /// zurückgelesenem Export. LocalPath und Zielkopie lehnen ab.
+    pub fn capture_source_with_component_export(
+        &mut self,
+        request: RecoverySourceCapture<'_>,
+        component_export: &Path,
+    ) -> Result<VerifiedRecoverySource, RecoveryRuntimeError> {
+        self.capture_network(request, component_export, false)
+    }
+    /// `select_probes`: die Sonden werden aus der Vereinigung gewählt statt
+    /// aus `request.probes` übernommen.
+    fn capture_network(
+        &mut self,
+        request: RecoverySourceCapture<'_>,
+        component_export: &Path,
+        select_probes: bool,
+    ) -> Result<VerifiedRecoverySource, RecoveryRuntimeError> {
+        let _locks = self.archive_locks()?;
+        if !matches!(self.archive, RecoveryArchiveHandle::Network { .. }) {
+            return Err(RecoveryTestError::Source.into());
+        }
+        let remote = self.runtime.config().archive_directory.clone();
+        let export = component_export.to_path_buf();
+        self.capture_from(request, Some(component_export), select_probes, move || {
+            network_union(&remote, &export)
+        })
+    }
     pub fn runtime(&self) -> &OperatorRuntime {
         &self.runtime
     }
+    /// Capture einer LocalPath-Quelle. Ein Netzprofil braucht den Export
+    /// ([`Self::capture_source_with_component_export`]); die Zielkopie
+    /// erlaubt keine Capture.
     pub fn capture_source(
         &mut self,
         request: RecoverySourceCapture<'_>,
     ) -> Result<VerifiedRecoverySource, RecoveryRuntimeError> {
         let _locks = self.archive_locks()?;
-        if self.is_network() {
+        if !matches!(self.archive, RecoveryArchiveHandle::LocalPath(_)) {
             return Err(RecoveryTestError::Source.into());
         }
+        let directory = self.runtime.config().archive_directory.clone();
+        self.capture_from(request, None, false, move || {
+            Ok(FsArchiveSource::open(&directory).map_err(|_| RecoveryTestError::Source)?)
+        })
+    }
+    /// Gemeinsamer Körper beider Captures; der Aufrufer hält die Locks.
+    /// `read_source` liest die Quelle bei jedem Aufruf neu, damit der Vergleich
+    /// nach dem Schnappschuss echte Bytes sieht.
+    fn capture_from(
+        &mut self,
+        request: RecoverySourceCapture<'_>,
+        component_export: Option<&Path>,
+        select_probes: bool,
+        read_source: impl Fn() -> Result<FsArchiveSource, RecoveryRuntimeError>,
+    ) -> Result<VerifiedRecoverySource, RecoveryRuntimeError> {
+        let mut request = request;
         self.runtime.refresh_for_action()?;
         self.runtime.ensure_current()?;
         BoundArchiveProfilePolicyV1::from_policy(self.runtime.head().policy_fields())
@@ -263,13 +356,19 @@ impl RecoveryTestRuntime {
         }
         let machine = ea_key_provider::measure_native_machine_identity()
             .map_err(|_| RecoveryTestError::Machine)?;
-        let source = self.archive_source()?;
+        if let Some(export) = component_export {
+            self.export_component(export)?;
+        }
+        let source = read_source()?;
         let inventory_hash = ea_recovery::recovery_archive_inventory_hash(&source)?;
         let probe = ea_recovery::RecoveryArchiveProbe::verify(
             &source,
             self.runtime.anchor(),
             self.runtime.head().preexisting_effective_now().value(),
         )?;
+        if select_probes {
+            request.probes = inputs::select_recovery_probes(request.inventory, &probe)?;
+        }
         let tip = probe.verified_public_chain_head();
         if tip.sequence().get().checked_add(1) != Some(self.runtime.next_sequence().get()) {
             return Err(RecoveryTestError::Source.into());
@@ -283,7 +382,7 @@ impl RecoveryTestRuntime {
             .snapshot_with_backup_key(request.snapshot, &key)?;
         drop(key);
         self.runtime.ensure_current()?;
-        let after = self.archive_source()?;
+        let after = read_source()?;
         if ea_recovery::recovery_archive_inventory_hash(&after)? != inventory_hash
             || ea_key_provider::measure_native_machine_identity()
                 .map_err(|_| RecoveryTestError::Machine)?
@@ -350,6 +449,203 @@ impl RecoveryTestRuntime {
     }
 }
 
+/// Ist das Profil ein kontrolliertes Netzprofil? Aufrufer ohne eigene
+/// Archiv-Abhängigkeit entscheiden damit, ob ein Komponentenexport nötig ist.
+#[must_use]
+pub fn is_network_archive_profile(profile: &ArchiveBackendProfileV1) -> bool {
+    matches!(profile, ArchiveBackendProfileV1::ControlledNetworkPath(_))
+}
+
+/// Netzziel vereinigt mit dem Export der lokalen Komponente, in dieser
+/// Reihenfolge; ein Bytekonflikt oder ein unlesbarer Teil ist keine Quelle.
+fn network_union(remote: &Path, export: &Path) -> Result<FsArchiveSource, RecoveryRuntimeError> {
+    let remote = FsArchiveSource::open(remote).map_err(|_| RecoveryTestError::Source)?;
+    let export = FsArchiveSource::open(export).map_err(|_| RecoveryTestError::Source)?;
+    Ok(remote
+        .with_exact_component(&export)
+        .map_err(|_| RecoveryTestError::Source)?)
+}
+
+impl RecoveryTestRuntime {
+    /// Schreibt alle verwalteten Objekte der Komponente (committed und
+    /// Staging) exklusiv in ein neues Verzeichnis, flusht Dateien und
+    /// Verzeichnisse und vergleicht den zurückgelesenen Export byte-genau mit
+    /// der Komponente (EA-CNA-REC-3). Ein vorhandenes Ziel oder eines im
+    /// Netzziel lehnt ab, bevor etwas angelegt wird. Der Aufrufer hält beide
+    /// Locks.
+    fn export_component(&self, component_export: &Path) -> Result<(), RecoveryRuntimeError> {
+        let RecoveryArchiveHandle::Network { component, .. } = &self.archive else {
+            return Err(RecoveryTestError::Source.into());
+        };
+        let refused = |_| RecoveryTestError::Source;
+        if component_export.symlink_metadata().is_ok() {
+            return Err(RecoveryTestError::Source.into());
+        }
+        let name = match component_export.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name.to_owned(),
+            _ => return Err(RecoveryTestError::Source.into()),
+        };
+        let parent = match component_export.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let parent = std::fs::canonicalize(parent).map_err(refused)?;
+        let archive =
+            std::fs::canonicalize(&self.runtime.config().archive_directory).map_err(refused)?;
+        if parent.starts_with(&archive) {
+            return Err(RecoveryTestError::Source.into());
+        }
+        let mut managed = Vec::new();
+        component
+            .local_backend()
+            .visit_managed_blobs(&mut |blob| {
+                managed.push((blob.path_hint().to_owned(), blob.bytes().to_vec()));
+                Ok(())
+            })
+            .map_err(|_| RecoveryTestError::Source)?;
+        let root = parent.join(name);
+        std::fs::create_dir(&root).map_err(refused)?;
+        write_tree(&root, &managed)?;
+        sync_directory(&parent)?;
+        managed.sort();
+        if read_tree(&root)? != managed {
+            return Err(RecoveryTestError::Source.into());
+        }
+        Ok(())
+    }
+}
+
+/// Legt jede Zeile exklusiv unter `root` an (Zwischenverzeichnisse per
+/// `create_dir`, Dateien per `create_new`), flusht jede Datei und danach jedes
+/// neu angelegte Verzeichnis von unten nach oben, zuletzt `root`.
+fn write_tree(root: &Path, rows: &[(String, Vec<u8>)]) -> Result<(), RecoveryRuntimeError> {
+    let mut created = vec![root.to_path_buf()];
+    for (hint, bytes) in rows {
+        let mut directory = root.to_path_buf();
+        let mut parts = hint.split('/').peekable();
+        while let Some(part) = parts.next() {
+            if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
+                return Err(RecoveryTestError::Source.into());
+            }
+            if parts.peek().is_none() {
+                write_exclusive(&directory.join(part), bytes)?;
+                break;
+            }
+            directory.push(part);
+            match std::fs::create_dir(&directory) {
+                Ok(()) => created.push(directory.clone()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !std::fs::symlink_metadata(&directory)
+                        .map_err(|_| RecoveryTestError::Source)?
+                        .is_dir()
+                    {
+                        return Err(RecoveryTestError::Source.into());
+                    }
+                }
+                Err(_) => return Err(RecoveryTestError::Source.into()),
+            }
+        }
+    }
+    for directory in created.iter().rev() {
+        sync_directory(directory)?;
+    }
+    Ok(())
+}
+
+/// Liest einen Baum zurück, sortiert als Multiset von `(Adresse, Bytes)`.
+fn read_tree(root: &Path) -> Result<Vec<(String, Vec<u8>)>, RecoveryRuntimeError> {
+    let mut rows = Vec::new();
+    FsArchiveSource::open(root)
+        .map_err(|_| RecoveryTestError::Source)?
+        .visit_blobs(&mut |blob| {
+            rows.push((blob.path_hint().to_owned(), blob.bytes().to_vec()));
+            Ok(())
+        })
+        .map_err(|_| RecoveryTestError::Source)?;
+    rows.sort();
+    Ok(rows)
+}
+
+/// Betreiberschritt für §19.3 (EA-CNA-REC-5): legt in `target` die
+/// unveränderte Vereinigung aus der Kopie des Netzziels und dem Export der
+/// lokalen Komponente an. Die Objekte sind unveränderlich und
+/// inhaltsadressiert; bytegleiche Adressen fallen zusammen, abweichende lehnen
+/// ab. `target` darf fehlen oder leer sein. Jede Datei entsteht exklusiv und
+/// wird geflusht; der zurückgelesene Baum muss byte-genau der Vereinigung
+/// entsprechen. Quelle und Export bleiben unberührt.
+///
+/// # Errors
+///
+/// `EA-RECOVERY-TEST-SOURCE` für einen nicht leeren oder unlesbaren
+/// Zielordner, einen Bytekonflikt, einen Schreib- oder Flushfehler oder einen
+/// abweichenden Rücklesebefund.
+pub fn materialize_network_archive_copy(
+    remote_copy: &Path,
+    component_export: &Path,
+    target: &Path,
+) -> Result<(), RecoveryRuntimeError> {
+    let union = network_union(remote_copy, component_export)?;
+    let mut rows = Vec::new();
+    union
+        .visit_blobs(&mut |blob| {
+            rows.push((blob.path_hint().to_owned(), blob.bytes().to_vec()));
+            Ok(())
+        })
+        .map_err(|_| RecoveryTestError::Source)?;
+    rows.sort();
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.is_dir() => {
+            if std::fs::read_dir(target)
+                .map_err(|_| RecoveryTestError::Source)?
+                .next()
+                .is_some()
+            {
+                return Err(RecoveryTestError::Source.into());
+            }
+        }
+        Ok(_) => return Err(RecoveryTestError::Source.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(target).map_err(|_| RecoveryTestError::Source)?;
+            if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+                sync_directory(parent)?;
+            }
+        }
+        Err(_) => return Err(RecoveryTestError::Source.into()),
+    }
+    write_tree(target, &rows)?;
+    if read_tree(target)? != rows {
+        return Err(RecoveryTestError::Source.into());
+    }
+    Ok(())
+}
+
+fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), RecoveryRuntimeError> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| RecoveryTestError::Source)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| RecoveryTestError::Source)?;
+    Ok(())
+}
+
+/// Auf Unix macht erst das `fsync` des Verzeichnisses einen neuen Namen
+/// dauerhaft; andere Plattformen öffnen Verzeichnisse nicht als Datei.
+fn sync_directory(directory: &Path) -> Result<(), RecoveryRuntimeError> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(directory)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RecoveryTestError::Source)?;
+    }
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
+}
+
 pub struct RecoverySourceRestore<'a> {
     pub inventory: &'a KeyInventory,
     pub exact_source: &'a [u8],
@@ -369,9 +665,6 @@ impl RecoveryTestRuntime {
         request: RecoverySourceRestore<'_>,
     ) -> Result<RestoredRecoverySource, RecoveryRuntimeError> {
         let _locks = self.archive_locks()?;
-        if self.is_network() {
-            return Err(RecoveryTestError::Source.into());
-        }
         self.runtime.refresh_for_action()?;
         self.runtime.ensure_current()?;
         let source = self.archive_source()?;
