@@ -113,7 +113,14 @@ impl FixtureStation {
     /// `NativeOperatorProvider::account` liest.
     #[must_use]
     pub fn account_response(self) -> Value {
-        match demo_account_inputs(self.admin()) {
+        Self::account_response_for_inputs(demo_account_inputs(self.admin()))
+    }
+
+    /// Die Antwortform je Plattform — getrennt vom `cfg!`-Zweig in
+    /// `demo_account_inputs`, damit ein Test auf JEDEM Rechner auch den
+    /// Windows-Zweig ausführt.
+    fn account_response_for_inputs(inputs: ea_operator::OsAccountInputs) -> Value {
+        match inputs {
             ea_operator::OsAccountInputs::MacOs {
                 guid_values,
                 unique_id_values,
@@ -451,6 +458,49 @@ mod tests {
             Ok(FixtureStation::Admin)
         );
         assert!(FixtureStation::from_station_directory(reader.path()).is_err());
+    }
+
+    /// Der Windows-Zweig läuft sonst nur auf Windows. Hier wird er auf jedem
+    /// Rechner ausgeführt und so zurückgelesen, wie
+    /// `NativeOperatorProvider::account` es unter Windows tut; beide Seiten
+    /// müssen denselben Bindungshash ergeben wie die Eingabe selbst.
+    #[test]
+    fn the_windows_account_answer_reads_back_to_the_same_binding() {
+        let sid = {
+            let mut sid = vec![1, 5, 0, 0, 0, 0, 0, 5];
+            for sub in [21_u32, 1_111_111_111, 2_222_222_222, 3_333_333_333, 1001] {
+                sid.extend_from_slice(&sub.to_le_bytes());
+            }
+            sid
+        };
+        let subs = vec![21, 1_111_111_111, 2_222_222_222, 3_333_333_333, 1001];
+        let authority = [0, 0, 0, 0, 0, 5];
+        let organization = trust_support::organization();
+        let device = ea_types::DeviceId::try_from([0x95; 16].as_slice()).unwrap();
+        let expected = ea_operator::windows::account_inputs(sid.clone(), authority, subs.clone())
+            .binding_hash(organization, device)
+            .unwrap();
+        let response = FixtureStation::account_response_for_inputs(
+            ea_operator::windows::account_inputs(sid, authority, subs),
+        );
+        assert_eq!(response["platform"], json!("windows"));
+        assert_eq!(response["locked"], json!(false));
+        let read_sid = hex::decode(response["sid"].as_str().unwrap()).unwrap();
+        let read_authority: [u8; 6] =
+            hex::decode(response["identifier_authority"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let read_subs = response["subauthorities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| u32::try_from(value.as_u64().unwrap()).unwrap())
+            .collect();
+        let read = ea_operator::windows::account_inputs(read_sid, read_authority, read_subs)
+            .binding_hash(organization, device)
+            .unwrap();
+        assert!(read == expected);
     }
 
     #[test]

@@ -4572,6 +4572,9 @@ fn run_seed_demo(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     println!("    `EA-OPERATOR-NATIVE-DENIED` ab, bevor eine Zeile der Welt gelesen wird.");
     println!("    Die zwei Befehle oben sind die richtigen Befehle — sie brauchen eine");
     println!("    Installation, keine andere Welt.");
+    println!("    Für die Handprobe ohne native Sicherheitskette gibt es den eigenen");
+    println!("    FIXTURE-Wirt `ea-desktop-fixture` hinter `test-support`, mit denselben");
+    println!("    Flags — siehe docs/fixture-demo-world.md.");
     println!();
     println!("  * Das gebundene Betriebssystemkonto ist ein FESTES Fixture-Konto, kein");
     println!("    echtes. Die Welt ist deshalb zwischen Rechnern portabel, aber an die");
