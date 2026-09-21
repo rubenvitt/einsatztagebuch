@@ -22,7 +22,7 @@
 
 ## Existing seams and missing behavior
 
-`RecoveryTestRuntime::new` rejects `ControlledNetworkPath` at `recovery_test_runtime.rs:112`; native `WriterResources::open` rejects it at Desktop `runtime/writer.rs:47`. `SqliteCommitStore` is currently instantiated only by its archive-fs tests. `ControlledNetworkBackend::open` proves at-rest encryption and binds the full policy-approved profile, but exposes two resources; it does not itself implement the local Writer `ArchiveBackend` primitives.
+`RecoveryTestRuntime::new` rejects `ControlledNetworkPath`; native `WriterResources::open` rejects it at Desktop. DRK-320 added a separate registered-component path (`RecoveryTestRuntime::with_archive_config`, backed by `NativeArchiveExistingComponent`) for Recovery; the two cited refusals themselves — `RecoveryTestRuntime::new` and Desktop's `WriterResources::open` — still stand unconditionally, and the Desktop Writer commit path remains out of DRK-320's scope (Ruling 11). `SqliteCommitStore` is currently instantiated only by its archive-fs tests. `ControlledNetworkBackend::open` proves at-rest encryption and binds the full policy-approved profile, but exposes two resources; it does not itself implement the local Writer `ArchiveBackend` primitives.
 
 Ordinary `OperatorArchiveSnapshot::open` currently reads the remote filesystem before `open_resources` opens SQLCipher. A complete native offline Writer therefore also needs Root's startup source integration. An adapter that only changes the constructor's match arm would still omit locally committed, unpublished progress and fail during a real network outage.
 
@@ -54,7 +54,7 @@ Proposed internal namespace derivation is a domain-separated hash of the exact i
 
 ## Storage/source responsibilities
 
-The shared adapter retains the complete `ControlledNetworkBackend` plus the real `SqliteCommitStore`. A narrow SQLCipher-backed `ArchiveBackend` adapter must supply transactional create-if-absent/rename, actual durability, complete managed/staging enumeration and the same exclusive local Writer lock used by capture. It must not redirect the Writer to the remote `network()` backend. These primitive mappings need focused crash/reopen evidence before Root attaches the Writer service; a no-op flush or mutex-only lock is insufficient evidence.
+The shared adapter retains the complete `ControlledNetworkBackend` plus the real `SqliteCommitStore`. A narrow SQLCipher-backed `ArchiveBackend` adapter must supply transactional create-if-absent/rename, actual durability, complete managed/staging enumeration and the same exclusive local Writer lock used by capture. It must not redirect the Writer to the remote network target. These primitive mappings need focused crash/reopen evidence before Root attaches the Writer service; a no-op flush or mutex-only lock is insufficient evidence.
 
 The committed verification source is the exact union of committed network originals and committed local originals. Same-address byte conflict, incomplete local commit or unreadable required source is an error; staging stays backup material and never becomes chain progress. Scope manifests and old reports remain immutable. Whole-DB backup includes all namespaces, local commit objects/limits, prepared journals, original identity/number sources, retained HMAC tokens and destruction sources. Restore opens that whole original database read-only under the existing migration-prefix contract and must preserve unpublished bytes and state exactly.
 

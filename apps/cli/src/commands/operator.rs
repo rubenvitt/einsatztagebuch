@@ -49,6 +49,13 @@ pub(crate) fn run_with_runtime_opener(
     let result = (|| {
         let config = OperatorRuntimeConfig::load(config_path)?;
         let authority = config.authority;
+        // EA-CNA-REG-1: eine Authority-Konfiguration registriert nie, auch
+        // nicht über ihren Authority-Zweig; abgelehnt vor dem Öffnen.
+        if authority && action == OperatorAction::RegisterNetworkArchive {
+            let error = NativeArchiveOpenError::Role;
+            output::print_native_archive_error(&error);
+            return Ok(exit_code_for_native_archive_error(&error));
+        }
         let initialize = action == OperatorAction::Provision && !authority;
         let mut runtime = open(config, &invocation.anchor, now, initialize)?;
         if authority && action != OperatorAction::VerifySession {
@@ -101,7 +108,9 @@ pub(crate) fn run_with_runtime_opener(
     }
 }
 
-/// Liest das Netzprofil und registriert die lokale Komponente (EA-CNA-REG-1).
+/// Liest das Netzprofil und registriert die lokale Komponente in der eigenen
+/// Datenbank der Runtime, für eine Admin- wie für eine Writer-Konfiguration
+/// (EA-CNA-REG-1).
 ///
 /// Eigene Fehlerquittung statt `?`: [`NativeArchiveOpenError`] ist kein
 /// `OperatorRuntimeError`, und `runtime.config().database_path` — nicht der
