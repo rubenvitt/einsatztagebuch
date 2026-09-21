@@ -87,8 +87,9 @@ pub(crate) fn run_with_runtime_opener(
                 }
                 OperatorAction::RegisterNetworkArchive => {
                     // `args::parse` guarantees this switch for exactly this verb.
-                    let profile_path = archive_profile
-                        .expect("register-network-archive always carries --archive-profile");
+                    let profile_path = archive_profile.expect(
+                        "register-network-archive always carries --network-archive-profile",
+                    );
                     return Ok(register_network_archive(
                         &runtime,
                         profile_path,

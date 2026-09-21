@@ -63,8 +63,10 @@ impl<'a> MigrationSourceV1<'a> {
     /// auch dann auf, es liegt also weiterhin etwas an. Der Fehler des Ziels
     /// wird deshalb ABSICHTLICH nicht durchgereicht — er beschreibt, WARUM
     /// nichts durchkam, aber der Befund des Wechsels ist, DASS noch etwas
-    /// aussteht. Ein `?` an dieser Stelle liesse den Wechsel mit
-    /// `EA-ARCHIVE-IO` abbrechen und den Bediener glauben, ein zweiter
+    /// aussteht. Ein `?` an dieser Stelle liesse den Wechsel mit dem Code
+    /// des Ziels abbrechen — seit der verlorenen Erreichbarkeit
+    /// (`Io`/`FlushFailed`) als `Deferred` gilt, ist das ein Datenbefund wie
+    /// `EA-ARCHIVE-BYTE-CONFLICT` — und den Bediener glauben, ein zweiter
     /// Versuch fange bei einer leeren Warteschlange an.
     ///
     /// # Errors

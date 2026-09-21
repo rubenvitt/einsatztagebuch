@@ -155,6 +155,47 @@ fn registration_inserts_scope_component_and_one_audit_row_atomically() {
     );
 }
 
+/// EA-CNA-REG-2(g)/REG-4: nennt ein vorhandener Zeiger genau dieses Profil,
+/// trägt die Auditzeile seinen `activePointerHash` — den Digest der
+/// geprüften Zeigerbytes, nicht null.
+#[test]
+fn registration_audits_the_digest_of_an_existing_pointer_naming_the_same_profile() {
+    let installed = RecoveryInstallation::with_profile(None, false, Some(profile()));
+    let runtime = installed.open();
+    let profile_hash = installed.profile.profile_hash().unwrap();
+    let pointer = ea_format::ActiveProfilePointerCoreV1::new(profile_hash, 1);
+    let policy = BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields());
+    LocalPathBackend::open_existing(
+        installed.archive.clone(),
+        installed.profile.clone(),
+        &policy,
+    )
+    .unwrap()
+    .write_active_profile_pointer(&pointer)
+    .unwrap();
+    let expected = ea_crypto::active_profile_pointer_digest(
+        &ea_format::encode_active_profile_pointer_core(&pointer).unwrap(),
+    );
+    assert!(expected != Hash32::ZERO);
+    let audit_before = audit_count(&runtime);
+
+    let (outcome, component) =
+        register_network_component(&runtime, config(&runtime, installed.profile.clone())).unwrap();
+    assert_eq!(outcome, NativeArchiveRegistrationOutcome::Registered);
+    drop(component);
+
+    let events = audit_events_after(&runtime, audit_before);
+    let contexts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.action() {
+            ea_format::LocalAuditActionV1::ArchiveProfileMigration(context) => Some(context),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(contexts.len(), 1, "exactly one registration audit row");
+    assert!(contexts[0].active_pointer_hash() == expected);
+}
+
 #[test]
 fn registration_is_idempotent_for_the_identical_row_without_presence_or_audit() {
     let installed = RecoveryInstallation::with_profile(None, false, Some(profile()));

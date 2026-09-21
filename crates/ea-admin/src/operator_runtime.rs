@@ -305,7 +305,11 @@ impl OperatorArchiveSnapshot {
                         remote_read_live = true;
                         Arc::new(remote)
                     }
-                    Err(_) => baseline.ok_or(OperatorRuntimeError::NetworkArchiveUnavailable)?,
+                    // EA-CNA-SRC-4: nur eine Grundlinie DESSELBEN kanonischen
+                    // Ziels tritt an seine Stelle.
+                    Err(_) => baseline
+                        .filter(|baseline| baseline.root() == directory)
+                        .ok_or(OperatorRuntimeError::NetworkArchiveUnavailable)?,
                 };
                 // Die Grundlinie bleibt die unveränderte Netzsicht; vereinigt
                 // wird eine Kopie, nie die Grundlinie selbst.
@@ -1330,8 +1334,7 @@ fn open_resources(
     #[cfg(feature = "test-support")]
     let profile = runtime_profile::Span::start("resources", config.role, None);
     let opened = Instant::now();
-    // EA-CNA-SRC-1: zuerst der unabhängige Anker, dann Anbieter und
-    // Datenbank, dann die Registrierung, erst danach der Archiv-Snapshot.
+    // EA-CNA-SRC-1: zuerst der unabhängige Anker.
     let anchor = load_trust_anchor(anchor_path)?;
     let (canonical_anchor, directory) =
         anchor_outside_archive(&config.archive_directory, anchor_path)?;
@@ -1341,14 +1344,37 @@ fn open_resources(
     {
         return Err(OperatorRuntimeError::Config);
     }
-    let slot = role_slot(config.role)?;
-    let native = open_native(initialize_native)?;
-    let signer = Arc::new(native.signing_provider(slot));
-    let key = signer.handle(SecretPurpose::LocalDatabaseKey);
     let exists = config
         .database_path
         .try_exists()
         .map_err(|_| OperatorRuntimeError::Io)?;
+    // Ohne Datenbank kann es keine Registrierung geben: dann bleibt die
+    // Reihenfolge wie vor DRK-320 — Snapshot und Zertifikat VOR nativem
+    // Anbieter, Schlüssel und Datenbank. Eine Bereitstellung gegen ein
+    // fehlendes Archiv hinterlässt so weder Datenbank noch Schlüssel. Nur mit
+    // vorhandener Datenbank folgen Anbieter und Datenbank, dann die
+    // Registrierung, erst danach der Snapshot.
+    let cold = if exists {
+        Err(anchor)
+    } else {
+        let snapshot = OperatorArchiveSnapshot::open_with_anchor(
+            &directory.clone().ok_or(OperatorRuntimeError::Io)?,
+            anchor,
+            now,
+            None,
+            None,
+        )?;
+        #[cfg(feature = "test-support")]
+        if let Some(profile) = &profile {
+            profile.mark("snapshot-return");
+        }
+        let device_id = certificate_device_id(&snapshot, &config)?;
+        Ok((snapshot, device_id))
+    };
+    let slot = role_slot(config.role)?;
+    let native = open_native(initialize_native)?;
+    let signer = Arc::new(native.signing_provider(slot));
+    let key = signer.handle(SecretPurpose::LocalDatabaseKey);
     if !exists && !initialize_native {
         return Err(OperatorRuntimeError::DatabaseMissing);
     }
@@ -1371,71 +1397,25 @@ fn open_resources(
     if let Some(profile) = &profile {
         profile.mark("database-return");
     }
-    let snapshot =
-        match crate::native_archive::registered_component(&database, anchor.trust_anchor_hash())? {
-            // Unverändert: ohne Registrierung weder Komponente noch Grundlinie.
-            None => OperatorArchiveSnapshot::open_with_anchor(
-                &directory.ok_or(OperatorRuntimeError::Io)?,
+    let (snapshot, device_id) = match cold {
+        Ok(cold) => cold,
+        Err(anchor) => {
+            let snapshot = registered_snapshot(
+                &database,
                 anchor,
+                directory,
+                &config.archive_directory,
                 now,
-                None,
-                None,
-            )?,
-            Some(registered) => {
-                // Nur die committed Lesesicht; keine Sonde, kein Lock, kein Schreiben.
-                let component = SqliteCommitStore::open_existing(
-                    Arc::clone(&database),
-                    registered.namespace,
-                    registered.object_limit,
-                    registered.byte_limit,
-                )
-                .and_then(SqlcipherArchiveBackend::open)
-                .map_err(|error| match error {
-                    ArchiveBackendError::Io => OperatorRuntimeError::Io,
-                    _ => OperatorRuntimeError::Archive,
-                })?;
-                // Ein nicht kanonisierbares Netzziel ist nicht lesbar. An seine
-                // Stelle tritt höchstens die Grundlinie aus demselben kanonischen
-                // Verzeichnis, nie ein anderer Pfad.
-                let directory = match (directory, &baseline) {
-                    (Some(directory), _) => directory,
-                    (None, Some(baseline)) => baseline.root().to_path_buf(),
-                    (None, None) => return Err(OperatorRuntimeError::NetworkArchiveUnavailable),
-                };
-                let inherited = baseline.clone();
-                let snapshot = OperatorArchiveSnapshot::open_with_anchor(
-                    &directory,
-                    anchor,
-                    now,
-                    Some(&component),
-                    baseline,
-                )?;
-                prune_published_rows(&component, &snapshot, inherited.as_deref());
-                snapshot
+                baseline,
+            )?;
+            #[cfg(feature = "test-support")]
+            if let Some(profile) = &profile {
+                profile.mark("snapshot-return");
             }
-        };
-    #[cfg(feature = "test-support")]
-    if let Some(profile) = &profile {
-        profile.mark("snapshot-return");
-    }
-    // The hash identifies exact parsed bytes; device/role become authoritative
-    // only after their active certificate and native signing key are checked.
-    let certificate = snapshot
-        .inventory
-        .trust()
-        .iter()
-        .find(|p| p.object_hash().as_bytes() == config.device_certificate_hash.as_bytes())
-        .ok_or(OperatorRuntimeError::SignerMismatch)?;
-    let fields = match certificate
-        .value()
-        .decoded_payload()
-        .map_err(|_| OperatorRuntimeError::Archive)?
-    {
-        DecodedTrustPayloadV1::InitialAdminDevice(fields) => fields,
-        DecodedTrustPayloadV1::AuthorizedDevice(fields) => fields.fields().clone(),
-        _ => return Err(OperatorRuntimeError::SignerMismatch),
+            let device_id = certificate_device_id(&snapshot, &config)?;
+            (snapshot, device_id)
+        }
     };
-    let device_id = fields.device_id;
     let key = TrustStateKey {
         organization_id: snapshot.anchor.organization_id(),
         device_id,
@@ -1463,6 +1443,110 @@ fn open_resources(
         anchor_path: anchor_path.to_path_buf(),
         posture,
     })
+}
+
+/// The hash identifies exact parsed bytes; device/role become authoritative
+/// only after their active certificate and native signing key are checked.
+fn certificate_device_id(
+    snapshot: &OperatorArchiveSnapshot,
+    config: &OperatorRuntimeConfig,
+) -> Result<DeviceId, OperatorRuntimeError> {
+    let certificate = snapshot
+        .inventory
+        .trust()
+        .iter()
+        .find(|p| p.object_hash().as_bytes() == config.device_certificate_hash.as_bytes())
+        .ok_or(OperatorRuntimeError::SignerMismatch)?;
+    let fields = match certificate
+        .value()
+        .decoded_payload()
+        .map_err(|_| OperatorRuntimeError::Archive)?
+    {
+        DecodedTrustPayloadV1::InitialAdminDevice(fields) => fields,
+        DecodedTrustPayloadV1::AuthorizedDevice(fields) => fields.fields().clone(),
+        _ => return Err(OperatorRuntimeError::SignerMismatch),
+    };
+    Ok(fields.device_id)
+}
+
+/// Der Snapshot bei vorhandener Datenbank: ohne Registrierung unverändert das
+/// kanonische Verzeichnis; mit Registrierung die Vereinigung aus Netzziel
+/// (oder einer Grundlinie desselben kanonischen Ziels) und der committed
+/// Lesesicht der lokalen Komponente (EA-CNA-SRC-1 … SRC-5).
+fn registered_snapshot(
+    database: &Arc<EncryptedDatabase>,
+    anchor: TrustAnchorV1,
+    directory: Option<PathBuf>,
+    configured: &Path,
+    now: UnixMillis,
+    baseline: Option<Arc<FsArchiveSource>>,
+) -> Result<OperatorArchiveSnapshot, OperatorRuntimeError> {
+    let Some(registered) =
+        crate::native_archive::registered_component(database, anchor.trust_anchor_hash())?
+    else {
+        // Unverändert: ohne Registrierung weder Komponente noch Grundlinie.
+        return OperatorArchiveSnapshot::open_with_anchor(
+            &directory.ok_or(OperatorRuntimeError::Io)?,
+            anchor,
+            now,
+            None,
+            None,
+        );
+    };
+    // Nur die committed Lesesicht; keine Sonde, kein Lock, kein Schreiben.
+    let component = SqliteCommitStore::open_existing(
+        Arc::clone(database),
+        registered.namespace,
+        registered.object_limit,
+        registered.byte_limit,
+    )
+    .and_then(SqlcipherArchiveBackend::open)
+    .map_err(|error| match error {
+        ArchiveBackendError::Io => OperatorRuntimeError::Io,
+        _ => OperatorRuntimeError::Archive,
+    })?;
+    let directory = match directory {
+        Some(directory) => directory,
+        None => unreadable_target_baseline(configured, baseline.as_deref())?,
+    };
+    let inherited = baseline.clone();
+    let snapshot = OperatorArchiveSnapshot::open_with_anchor(
+        &directory,
+        anchor,
+        now,
+        Some(&component),
+        baseline,
+    )?;
+    prune_published_rows(&component, &snapshot, inherited.as_deref());
+    Ok(snapshot)
+}
+
+/// EA-CNA-SRC-4 für ein nicht kanonisierbares Netzziel: an seine Stelle tritt
+/// höchstens die Grundlinie AUS DEMSELBEN kanonischen Verzeichnis, nie ein
+/// anderer Pfad. Kanonisiert wird dazu der Elternordner, der Name bleibt
+/// wörtlich; zeigt der Pfad als Symlink ins Leere oder woanders hin, passt
+/// die Grundlinie nicht, und das Netzziel ist nicht lesbar.
+fn unreadable_target_baseline(
+    configured: &Path,
+    baseline: Option<&FsArchiveSource>,
+) -> Result<PathBuf, OperatorRuntimeError> {
+    let baseline = baseline.ok_or(OperatorRuntimeError::NetworkArchiveUnavailable)?;
+    let candidate = configured
+        .parent()
+        .map(|parent| {
+            if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            }
+        })
+        .and_then(|parent| parent.canonicalize().ok())
+        .zip(configured.file_name())
+        .map(|(parent, name)| parent.join(name));
+    match candidate {
+        Some(candidate) if candidate == baseline.root() => Ok(candidate),
+        _ => Err(OperatorRuntimeError::NetworkArchiveUnavailable),
+    }
 }
 
 /// Diagnostic-only spans: fixed labels, public role/code location and times.

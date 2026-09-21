@@ -374,13 +374,16 @@ impl NetworkPublicationHost {
         ) && !self.remote_is_reachable()
     }
 
-    /// Öffnen und Ableiten. Alles, was ohne Publikation endet, ist `Done`.
+    /// Öffnen und Ableiten. Alles, was ohne Publikation endet, ist `Done`;
+    /// steht etwas aus, reicht `Pending` den Griff aufs Netzziel an die
+    /// Beobachtung weiter.
     fn derive(&self) -> Derived {
         let waiting = |cause| Derived::Done(Ok(PublicationStateV1::deferred(Some(cause))));
-        // Die Ableitung öffnet ihren EIGENEN Griff auf das Netzziel und gibt
-        // ihn zurück, bevor die Warteschlange ihren nimmt: beide nehmen
-        // kurzzeitig den Writer-Lock des Netzziels, und sie dürfen sich nie
-        // überlappen. Nicht als Feld zwischenspeichern.
+        // Die Ableitung öffnet je Lauf ihren EIGENEN Griff auf das Netzziel
+        // (nicht als Feld zwischenspeichern) und hält darüber keinen Lock.
+        // Nur die Beobachtung (EA-CNA-WRT-7) nimmt über diesen Griff kurz den
+        // Writer-Lock des Netzziels und gibt ihn frei, bevor die
+        // Warteschlange ihren nimmt; die beiden Nahmen überlappen sich nie.
         let remote = match self.open_remote() {
             Ok(remote) => remote,
             Err(error) if self.lost(&error) => return waiting(DetailCause::NetworkArchiveWaiting),
@@ -675,6 +678,13 @@ enum NetworkHalf<'a> {
 }
 
 /// Die Vereinigung eines Aufrufs; vereinigt wird wie beim Netz-Writer.
+///
+/// Netz- und lokale Hälfte werden zu VERSCHIEDENEN Zeitpunkten gelesen: die
+/// Netzhälfte beim Bau in `committed_source`, die lokale erst beim Besuch.
+/// Bereinigt eine Wiederöffnung dazwischen lokal Zeilen, die die gelesene
+/// Netzhälfte noch nicht trug, fehlen sie in der Vereinigung; das endet
+/// fail-closed als Lücke unter dem Kopf (die Verifikation lehnt ab), nie als
+/// stillschweigend kürzere Kette.
 struct NetworkSyncSourceV1<'a> {
     remote: NetworkHalf<'a>,
     local: &'a SqlcipherArchiveBackend,

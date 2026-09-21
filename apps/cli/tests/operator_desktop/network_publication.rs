@@ -440,6 +440,35 @@ fn publication_observes_the_network_root_before_publishing() {
     assert!(observed(), "Schritt 12 beobachtet das Netzziel");
 }
 
+/// EA-CNA-WRT-7 außerhalb einer Aktion: der Lauf beobachtet mit FRISCH
+/// geöffneter Autorität. Wird der Writer abgelöst (hier: seine Bindung
+/// widerrufen), scheitert die Beobachtung, statt mit dem gehaltenen, alten
+/// Head zu veröffentlichen.
+#[test]
+fn a_superseded_writer_never_publishes_with_its_held_head() {
+    let mut installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = started(&installed);
+    let away = installed.base.installed.archive.with_extension("away");
+    fs::rename(&installed.base.installed.archive, &away).unwrap();
+    finalize(&native, "NET-PUB-STALE");
+    fs::rename(&away, &installed.base.installed.archive).unwrap();
+    let host = native.network_publication_host().unwrap();
+    assert!(!host.pending().unwrap().is_empty(), "fixture: ein Plan steht aus");
+
+    installed.base.installed.publish_fixture_revocation();
+    let before = remote_objects(&installed);
+    let result = native.run_network_publication_once().unwrap();
+    assert!(
+        result.is_err(),
+        "die Beobachtung scheitert: {:?}",
+        result.map(|state| state.outcome())
+    );
+    assert_eq!(remote_objects(&installed), before, "nichts veröffentlicht");
+    assert!(!host.pending().unwrap().is_empty(), "der Plan bleibt");
+    assert_eq!(sync_state(&native).0, SyncStatus::Failed);
+}
+
 #[test]
 fn a_baseline_reopen_never_prunes() {
     let installed = NetworkWriterInstallation::new();
