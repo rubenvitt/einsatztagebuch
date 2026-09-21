@@ -14,7 +14,7 @@ mod support;
 use ea_archive::{ArchivePath, GRANTS_DIR_V1};
 use ea_archive_fs::{
     DetailCause, NetworkArchiveTargetV1, PlannedPublicationV1, PublicationOutcomeV1,
-    PublicationTargetV1, SyncStatus,
+    PublicationQueue, PublicationTargetV1, SyncStatus,
 };
 
 #[test]
@@ -173,7 +173,7 @@ fn second_offline_publish_keeps_the_first_plan_and_resumes_both_in_order() {
     assert_eq!(first_state.outcome(), PublicationOutcomeV1::Deferred);
 
     // Der ZWEITE Plan trifft auf eine WEITERHIN getrennte Warteschlange: er
-    // darf den ersten nicht verdraengen, sondern muss sich mit ihm
+    // darf den ersten nicht verdrängen, sondern muss sich mit ihm
     // vereinigen — ausstehend zuerst, neu danach.
     let second_state = queue.publish(second.clone()).unwrap();
     assert_eq!(second_state.outcome(), PublicationOutcomeV1::Deferred);
@@ -205,7 +205,7 @@ fn connected_publish_drains_an_outstanding_plan_before_the_new_one() {
 
     // Das Ziel wird wieder erreichbar, BEVOR der zweite Plan ankommt: `publish`
     // muss den ausstehenden Plan zuerst mit dem neuen vereinigen und dann die
-    // VOLLSTAENDIGE Vereinigung in einem Zug abarbeiten — kein Verdraengen,
+    // VOLLSTÄNDIGE Vereinigung in einem Zug abarbeiten — kein Verdrängen,
     // kein getrennter zweiter Lauf.
     let _ = queue.reconnect();
     let drained = queue.publish(second.clone()).unwrap();
@@ -236,7 +236,7 @@ fn merge_with_conflicting_bytes_is_refused_and_keeps_the_pending_plan() {
     let error = queue.publish(conflicting).unwrap_err();
     assert_eq!(error.code(), "EA-ARCHIVE-BYTE-CONFLICT");
 
-    // Der ausstehende Plan MUSS unveraendert der erste sein: eine abgelehnte
+    // Der ausstehende Plan MUSS unverändert der erste sein: eine abgelehnte
     // Vereinigung darf ihn weder verlieren noch teilweise ersetzen.
     let resumed = queue.reconnect().resume().unwrap();
     assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
@@ -266,7 +266,7 @@ fn merged_plan_over_the_queue_limit_is_refused_without_dropping_pending() {
     );
 
     // Abgelehnt wird nur die VEREINIGUNG: der zuvor angenommene erste Plan
-    // bleibt vollstaendig in der Warteschlange.
+    // bleibt vollständig in der Warteschlange.
     let resumed = queue.reconnect().resume().unwrap();
     assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
     assert_eq!(resumed.published_order(), first.order());
@@ -289,8 +289,11 @@ fn derive_pending_orders_grants_before_their_entry_by_sequence() {
         ("grants/000000000002_a.eag".to_owned(), grant_a.clone()),
         ("entries/000000000002_x.eip".to_owned(), entry_bytes.clone()),
         // Dieselbe Adresse UND dieselben Bytes wie am Netzziel: bereits
-        // veroeffentlicht, gehoert nicht in den Plan.
+        // veröffentlicht, gehört nicht in den Plan.
         ("entries/000000000001_x.eip".to_owned(), entry_bytes.clone()),
+        // KEIN Exact-Object-Präfix: Formatbeiwerk, kein
+        // Publikationsgegenstand — muss aus dem Plan bleiben.
+        ("format/beiwerk.txt".to_owned(), support::non_object_bytes()),
     ]);
 
     let plan = PlannedPublicationV1::derive_pending(&local, &remote).unwrap();
@@ -321,7 +324,33 @@ fn derive_pending_refuses_differing_bytes_at_the_remote() {
 
     match PlannedPublicationV1::derive_pending(&local, &remote) {
         Err(error) => assert_eq!(error.code(), "EA-ARCHIVE-BYTE-CONFLICT"),
-        Ok(_) => panic!("derive_pending haette einen Bytekonflikt melden muessen"),
+        Ok(_) => panic!("derive_pending hätte einen Bytekonflikt melden müssen"),
+    }
+}
+
+#[test]
+fn derive_pending_surfaces_a_malformed_object_instead_of_silently_skipping_it() {
+    let (_guard, root) = support::temp_root("derive-pending-malformed");
+    let remote = support::open_remote(root.join("remote"));
+
+    // Trägt das `.eag`-Präfix, parst aber NICHT vollständig: eine committete,
+    // aber beschädigte Adresse. Sie MUSS als Fehler erscheinen — ansonsten
+    // fiele sie still aus der Publikation, ohne dass je jemand es bemerkt.
+    let local = support::FixedArchiveSource::new(vec![(
+        "grants/000000000003_broken.eag".to_owned(),
+        support::non_object_bytes_with_a_grant_prefix(),
+    )]);
+
+    match PlannedPublicationV1::derive_pending(&local, &remote) {
+        Err(ea_archive::ArchiveBackendError::Format(_)) => {}
+        Err(other) => panic!(
+            "erwartet war ein Formfehler, gemeldet wurde {}",
+            other.code()
+        ),
+        Ok(plan) => panic!(
+            "derive_pending hätte das defekte Objekt melden müssen, lieferte aber {} Objekte",
+            plan.len()
+        ),
     }
 }
 
@@ -339,13 +368,13 @@ fn network_target_publishes_create_if_absent_and_verifies_readback() {
     .expect("das Netzziel der Fixture muss entstehen");
     assert!(target.is_connected());
 
-    let address = ArchivePath::in_dir(GRANTS_DIR_V1, "readback.eag").expect("gueltige Adresse");
+    let address = ArchivePath::in_dir(GRANTS_DIR_V1, "readback.eag").expect("gültige Adresse");
     let bytes = support::signed_grant_a().into_vec();
     target
         .publish_one(&address, &bytes)
         .expect("die Publikation muss gelingen");
 
-    // Unabhaengig NACHGELESEN — nicht ueber dasselbe Ziel, sondern ueber ein
+    // Unabhängig NACHGELESEN — nicht über dasselbe Ziel, sondern über ein
     // frisches Backend derselben Wurzel: das belegt, dass die Bytes wirklich
     // am Netzziel liegen und nicht nur im gecachten Griff des Ziels.
     let verify = support::open_remote(network_root);
@@ -369,4 +398,116 @@ fn network_target_reports_disconnected_when_root_is_missing_and_never_creates_it
         !network_root.exists(),
         "open_existing legt die fehlende Wurzel NIE an"
     );
+}
+
+#[test]
+fn queue_reports_upload_pending_when_the_network_root_disappears_and_resumes_after_it_returns() {
+    let (_guard, root) = support::temp_root("network-target-root-loss");
+    let network_root = root.join("network");
+    std::fs::create_dir_all(&network_root).expect("die Netzwurzel der Fixture muss anlegbar sein");
+
+    let target = NetworkArchiveTargetV1::new(
+        network_root.clone(),
+        support::controlled_network_profile(),
+        support::policy_allowing_controlled_network(),
+    )
+    .expect("das Netzziel der Fixture muss entstehen");
+    // Einmal ERFOLGREICH verbunden — belegt, dass der Verlust danach
+    // wirklich ERKANNT wird und nicht bloß nie geprüft wurde.
+    assert!(target.is_connected());
+
+    let queue = PublicationQueue::new(
+        Box::new(target),
+        support::controlled_network_profile(),
+        &support::policy_allowing_controlled_network(),
+    )
+    .expect("die Warteschlange der Fixture muss entstehen");
+    let plan = support::two_grants_and_one_entry();
+
+    // Das Netzlaufwerk verschwindet, BEVOR der Plan ankommt (EA-CNA-PUB-4).
+    std::fs::remove_dir_all(&network_root).expect("die Netzwurzel muss entfernbar sein");
+
+    let state = queue
+        .publish(plan.clone())
+        .expect("ein verlorenes Netzziel ist ein ZUSTAND und kein Fehler");
+    assert_eq!(state.outcome(), PublicationOutcomeV1::Deferred);
+    assert_eq!(
+        state.detail_cause(),
+        Some(DetailCause::NetworkArchiveWaiting)
+    );
+
+    // Die Wurzel kommt zurück — der aufgeschobene Plan läuft byteidentisch
+    // zu Ende.
+    std::fs::create_dir_all(&network_root).expect("die Netzwurzel muss wieder anlegbar sein");
+    let resumed = queue.reconnect().resume().unwrap();
+    assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
+    assert_eq!(resumed.published_bytes(), plan.exact_bytes());
+    assert_eq!(resumed.published_order(), plan.order());
+}
+
+#[test]
+fn two_threads_publishing_while_disconnected_both_survive_in_acceptance_order() {
+    let (_guard, _root) = support::temp_root("queue-concurrent-publish");
+    // Die künstliche Verzögerung weitet das Entscheidungsfenster von
+    // `publish` (Vereinigung, Grenzprüfung, Verbindungsstatus) so weit, dass
+    // zwei gleichzeitig gestartete Aufrufe es zuverlässig überlappen — ohne
+    // auf eine günstige Verzahnung des Schedulers angewiesen zu sein.
+    let queue = std::sync::Arc::new(support::queue_with_slow_disconnected_target(
+        std::time::Duration::from_millis(20),
+    ));
+    let first = support::two_grants_and_one_entry();
+    let second = support::second_disjoint_plan();
+
+    // Ein Startschuss für beide Threads: sie treten die Entscheidung von
+    // `publish` möglichst gleichzeitig an.
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let thread_first = {
+        let queue = std::sync::Arc::clone(&queue);
+        let plan = first.clone();
+        let start = std::sync::Arc::clone(&start);
+        std::thread::spawn(move || {
+            start.wait();
+            queue.publish(plan)
+        })
+    };
+    let thread_second = {
+        let queue = std::sync::Arc::clone(&queue);
+        let plan = second.clone();
+        let start = std::sync::Arc::clone(&start);
+        std::thread::spawn(move || {
+            start.wait();
+            queue.publish(plan)
+        })
+    };
+
+    let state_first = thread_first
+        .join()
+        .expect("Thread A darf nicht paniken")
+        .expect("ein getrenntes Ziel ist ein ZUSTAND und kein Fehler");
+    let state_second = thread_second
+        .join()
+        .expect("Thread B darf nicht paniken")
+        .expect("ein getrenntes Ziel ist ein ZUSTAND und kein Fehler");
+    assert_eq!(state_first.outcome(), PublicationOutcomeV1::Deferred);
+    assert_eq!(state_second.outcome(), PublicationOutcomeV1::Deferred);
+
+    let resumed = queue.reconnect().resume().unwrap();
+    assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
+
+    // BEIDE Pläne müssen überleben — welcher zuerst durchkam, entscheidet der
+    // Scheduler, aber niemals darf einer davon spurlos verschwinden. Die
+    // Vereinigung hält jeden Plan als GANZES zusammen (siehe
+    // `PublicationQueue::merge`), also ist die Reihenfolge eine der beiden
+    // vollständigen Verkettungen.
+    let mut forward = first.order();
+    forward.extend(second.order());
+    let mut backward = second.order();
+    backward.extend(first.order());
+    let order = resumed.published_order();
+    assert!(
+        order == forward || order == backward,
+        "beide Pläne müssen vollständig und ungebrochen erscheinen: {order:?}"
+    );
+    assert_eq!(order.len(), first.order().len() + second.order().len());
 }

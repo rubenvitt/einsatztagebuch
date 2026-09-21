@@ -163,6 +163,41 @@ async fn the_commit_goes_to_the_endpoint_path_of_this_chain() {
     );
 }
 
+/// Eine Netzarchiv-Publikation, die GLEICHZEITIG einen fremden ausstehenden
+/// Plan mitzieht, blockiert den Serverupload NICHT fälschlich.
+///
+/// EA-CNA-PUB-7 vereinigt einen neu angenommenen Plan mit einem bereits
+/// ausstehenden — hier die vorher aufgeschobene Publikation eines FREMDEN
+/// Vorgangs. `publish_to_network_archive` prüft danach BYTEGLEICHHEIT je
+/// EIGENER Adresse und nicht über die GANZE Antwort: ohne diesen Zeugen hätte
+/// ein Vergleich über die gesamte Liste den Eintrag fälschlich als
+/// `Netzarchiv ausstehend` gemeldet, obwohl seine eigenen Objekte längst
+/// angekommen sind.
+#[tokio::test]
+async fn a_publish_that_also_drains_an_unrelated_outstanding_plan_does_not_block_the_server_upload()
+{
+    let mut harness = SyncHarness::controlled_network_disconnected().await;
+    harness.seed_outstanding_network_plan();
+
+    harness
+        .target
+        .as_ref()
+        .expect("die Fixture trägt ein Netzziel")
+        .connect();
+    let _ = harness.push_pending().await.expect("der Lauf muss tragen");
+
+    // Der Server wurde TATSÄCHLICH versucht — unmöglich, hätte
+    // `publish_to_network_archive` den Eintrag fälschlich als
+    // `Netzarchiv ausstehend` gemeldet. `commit_calls` zählt VOR der
+    // hinterlegten Antwort, die Zusicherung ist also unabhängig davon, ob der
+    // Server selbst antwortet.
+    assert_eq!(
+        harness.server.commit_calls(),
+        1,
+        "die eigenen Objekte des Eintrags waren veröffentlicht — der Serverupload darf nicht blockieren"
+    );
+}
+
 /// Der ueberschrittene Queuebound erreicht den oeffentlichen Zustand `Fehler`.
 ///
 /// Die Kette ganz, an einer echten Warteschlange: das Profil laesst genau ein

@@ -161,25 +161,31 @@ impl PlannedPublicationV1 {
     /// EA-CNA-PUB-1/2: der Plan aus committed lokalen Objekten, die am live
     /// gelesenen Netzziel FEHLEN — nie gespeichert, immer neu gebildet.
     ///
-    /// Klassifiziert wird wie ueberall im Bestand ausschliesslich am
-    /// 9-Byte-Exact-Object-Praefix (`ea-archive/src/inventory.rs`): Beiwerk
-    /// ohne dieses Praefix ist kein Publikationsgegenstand und wird
-    /// uebergangen. Liegt eine committed Adresse am Netzziel bereits mit
-    /// DENSELBEN Bytes, ist sie schon veroeffentlicht und faellt aus dem Plan.
+    /// Klassifiziert wird wie überall im Bestand ausschließlich am
+    /// 9-Byte-Exact-Object-Präfix (`ea-archive/src/inventory.rs`): Beiwerk
+    /// ohne dieses Präfix ist kein Publikationsgegenstand und wird
+    /// übergangen. Trägt eine Adresse das Präfix, MUSS sie auch vollständig
+    /// parsen — eine committete, aber beschädigte Adresse fiele sonst STILL
+    /// aus der Publikation, statt als Befund zu erscheinen; ein Fehlschlag
+    /// hier ist deshalb ein Fehler dieser Ableitung und kein übersprungenes
+    /// Objekt. Liegt eine committed Adresse am Netzziel bereits mit
+    /// DENSELBEN Bytes, ist sie schon veröffentlicht und fällt aus dem Plan.
     /// Liegt sie dort mit ANDEREN Bytes, ist das ein Bytekonflikt — keine
-    /// Publikation, kein Ueberschreiben.
+    /// Publikation, kein Überschreiben.
     ///
-    /// Die Reihenfolge ist EA-CNA-PUB-2: aufsteigend nach der zwoelfstelligen
+    /// Die Reihenfolge ist EA-CNA-PUB-2: aufsteigend nach der zwölfstelligen
     /// Sequenz vor dem ersten `_` des Dateinamens; Adressen ohne
-    /// Sequenzpraefix stehen VOR allen sequenzierten, in binaerer
+    /// Sequenzpräfix stehen VOR allen sequenzierten, in binärer
     /// Adressordnung. Innerhalb einer Sequenz kommen alle Nicht-`.eip`-Objekte
-    /// in binaerer Adressordnung, das `.eip` zuletzt — Grants liegen damit
+    /// in binärer Adressordnung, das `.eip` zuletzt — Grants liegen damit
     /// immer vor ihrem Eintrag.
     ///
     /// # Errors
     ///
     /// [`ArchiveBackendError::ByteConflict`] beim ersten gefundenen
-    /// Bytekonflikt; sonst der Fehler der Quelle oder des Netzziels.
+    /// Bytekonflikt; [`ArchiveBackendError::Format`], wenn eine Adresse das
+    /// Exact-Object-Präfix trägt, aber nicht vollständig parst; sonst der
+    /// Fehler der Quelle oder des Netzziels.
     pub fn derive_pending(
         local: &dyn ArchiveSource,
         remote: &LocalPathBackend,
@@ -192,10 +198,17 @@ impl PlannedPublicationV1 {
                 // sauber abbrechen.
                 return Err(ea_archive::ArchiveError::Unavailable);
             }
-            if ea_format::decode_exact_object(blob.bytes()).is_err() {
+            if !has_exact_object_prefix(blob.bytes()) {
                 // Kein Archivobjekt (Formatbeiwerk & Co.) — kein
                 // Publikationsgegenstand.
                 return Ok(());
+            }
+            // Das Präfix ist da: die Bytes MÜSSEN auch vollständig parsen,
+            // sonst fiele eine beschädigte, aber committete Adresse still aus
+            // der Publikation statt als Befund zu erscheinen.
+            if let Err(error) = ea_format::decode_exact_object(blob.bytes()) {
+                failure = Some(ArchiveBackendError::from(error));
+                return Err(ea_archive::ArchiveError::Unavailable);
             }
             let address = match crate::profile_migration::archive_path_of(blob.path_hint()) {
                 Ok(address) => address,
@@ -225,8 +238,26 @@ impl PlannedPublicationV1 {
     }
 }
 
-/// Die zwoelfstellige Sequenz vor dem ersten `_` des DATEINAMENS (nicht der
-/// vollen Adresse) — `None`, wenn kein solches Praefix vorliegt.
+/// Die sechs 9-Byte-Exact-Object-Präfixe — einzige Klassifikationsgrundlage,
+/// wie überall im Bestand (`ea-archive/src/inventory.rs`).
+const EXACT_OBJECT_PREFIXES_V1: [[u8; 9]; 6] = [
+    ea_format::EIP_PREFIX_V1,
+    ea_format::EAG_PREFIX_V1,
+    ea_format::ESR_PREFIX_V1,
+    ea_format::ECP_PREFIX_V1,
+    ea_format::ETB_PREFIX_V1,
+    ea_format::EDS_PREFIX_V1,
+];
+
+/// Trägt `bytes` eines der sechs Exact-Object-Präfixe?
+fn has_exact_object_prefix(bytes: &[u8]) -> bool {
+    EXACT_OBJECT_PREFIXES_V1
+        .iter()
+        .any(|prefix| bytes.starts_with(prefix))
+}
+
+/// Die zwölfstellige Sequenz vor dem ersten `_` des DATEINAMENS (nicht der
+/// vollen Adresse) — `None`, wenn kein solches Präfix vorliegt.
 fn sequence_prefix(path: &ArchivePath) -> Option<u64> {
     let filename = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
     let (prefix, _rest) = filename.split_once('_')?;
@@ -238,7 +269,7 @@ fn sequence_prefix(path: &ArchivePath) -> Option<u64> {
 }
 
 /// EA-CNA-PUB-2, als Vergleichsfunktion: Sequenz aufsteigend, sequenzlose
-/// Adressen zuerst, `.eip` innerhalb einer Sequenz zuletzt, sonst binaere
+/// Adressen zuerst, `.eip` innerhalb einer Sequenz zuletzt, sonst binäre
 /// Adressordnung.
 fn compare_pending_addresses(left: &ArchivePath, right: &ArchivePath) -> std::cmp::Ordering {
     let is_eip = |path: &ArchivePath| path.as_str().ends_with(".eip");
@@ -383,21 +414,31 @@ impl PublicationQueue {
         })
     }
 
-    /// Nimmt den Plan an und veroeffentlicht, soweit das Ziel erreichbar ist.
+    /// Nimmt den Plan an und veröffentlicht, soweit das Ziel erreichbar ist.
     ///
-    /// EA-CNA-PUB-7: ein neuer Plan VERDRAENGT NIE einen ausstehenden. Liegt
+    /// EA-CNA-PUB-7: ein neuer Plan VERDRÄNGT NIE einen ausstehenden. Liegt
     /// bereits ein Plan in der Warteschlange, wird er zuerst mit dem neuen
-    /// VEREINIGT — dieselbe Adresse mit denselben Bytes zaehlt einmal,
-    /// dieselbe Adresse mit ANDEREN Bytes ist ein Bytekonflikt und laesst den
-    /// ausstehenden Plan UNVERAENDERT zurueck, sonst gilt: erst die
+    /// VEREINIGT — dieselbe Adresse mit denselben Bytes zählt einmal,
+    /// dieselbe Adresse mit ANDEREN Bytes ist ein Bytekonflikt und lässt den
+    /// ausstehenden Plan UNVERÄNDERT zurück, sonst gilt: erst die
     /// ausstehenden, dann die neuen Adressen. Die Queuegrenze wird gegen die
-    /// VEREINIGUNG geprueft; sprengt sie die Grenze, wird NUR die Vereinigung
+    /// VEREINIGUNG geprüft; sprengt sie die Grenze, wird NUR die Vereinigung
     /// abgelehnt und der zuvor angenommene Plan bleibt bestehen.
+    ///
+    /// Die Entscheidung — Vereinigung, Grenzprüfung und ob sofort
+    /// veröffentlicht oder aufgeschoben wird — läuft UNTER EINER EINZIGEN
+    /// Sperrhaltung. Ohne das könnten zwei gleichzeitige Aufrufe je einen
+    /// eigenen Plan „annehmen" und sich beim Ablegen gegenseitig
+    /// überschreiben: der zuletzt schreibende Aufruf gewänne, der andere Plan
+    /// wäre verloren, ohne dass irgendein Aufrufer einen Fehler sähe. Nur die
+    /// eigentliche Netz-I/O (`drain`) läuft OHNE diese Sperre — sie könnte
+    /// sonst über ihren eigenen erneuten Sperrversuch blockieren, siehe
+    /// [`Self::restore`].
     ///
     /// Ein ANGENOMMENER Plan geht nicht mehr verloren: sowohl die verlorene
     /// Erreichbarkeit als auch ein Hartfehler des Ziels lassen ihn
-    /// AUFGESCHOBEN in der Warteschlange zurueck, `resume` setzt ihn dann
-    /// byteidentisch fort. Nur die ueberschrittene Queuegrenze ist eine
+    /// AUFGESCHOBEN in der Warteschlange zurück, `resume` setzt ihn dann
+    /// byteidentisch fort. Nur die überschrittene Queuegrenze ist eine
     /// Ablehnung und wird deshalb nicht aufbewahrt.
     ///
     /// # Errors
@@ -405,34 +446,31 @@ impl PublicationQueue {
     /// [`ArchiveBackendError::ByteConflict`], wenn die Vereinigung mit dem
     /// ausstehenden Plan an derselben Adresse abweichende Bytes findet; sonst
     /// der Fehler des Ziels, wenn er NICHT die verlorene Erreichbarkeit ist —
-    /// jene ist ein Zustand und kein Fehler. Der Plan bleibt in beiden Faellen
+    /// jene ist ein Zustand und kein Fehler. Der Plan bleibt in beiden Fällen
     /// aufgeschoben.
     pub fn publish(
         &self,
         planned: PlannedPublicationV1,
     ) -> Result<PublicationStateV1, ArchiveBackendError> {
-        let existing = self
-            .pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let mut guard = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let existing = guard.take();
         let merged = match &existing {
             None => planned,
             Some(existing_plan) => match Self::merge(existing_plan, &planned) {
                 Ok(merged) => merged,
                 Err(error) => {
                     // Bytekonflikt der Vereinigung: der ausstehende Plan
-                    // bleibt UNVERAENDERT, der neue wird verworfen.
-                    *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = existing;
+                    // bleibt UNVERÄNDERT, der neue wird verworfen.
+                    *guard = existing;
                     return Err(error);
                 }
             },
         };
         if merged.len() as u64 > self.max_objects || merged.total_bytes() > self.max_bytes {
-            // Die Grenze ist ueberschritten: abgelehnt wird NUR die
-            // Vereinigung, ausdruecklich KEIN Ausweichen auf ein anderes
-            // Ziel, und der zuvor angenommene Plan bleibt bestehen.
-            *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = existing;
+            // Die Grenze ist überschritten: abgelehnt wird NUR die
+            // Vereinigung, ausdrücklich KEIN Ausweichen auf ein anderes Ziel,
+            // und der zuvor angenommene Plan bleibt bestehen.
+            *guard = existing;
             return Ok(PublicationStateV1 {
                 outcome: PublicationOutcomeV1::QueueLimitReached,
                 detail_cause: Some(DetailCause::QueueLimitReached),
@@ -442,7 +480,7 @@ impl PublicationQueue {
             });
         }
         if !self.target.is_connected() {
-            *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(merged);
+            *guard = Some(merged);
             return Ok(PublicationStateV1 {
                 outcome: PublicationOutcomeV1::Deferred,
                 detail_cause: Some(DetailCause::NetworkArchiveWaiting),
@@ -451,15 +489,18 @@ impl PublicationQueue {
                 published_order: Vec::new(),
             });
         }
+        // Ab hier läuft Netz-I/O: die Sperre wird bewusst freigegeben, sonst
+        // hielte `drain` beim Aufschieben denselben Mutex ein zweites Mal.
+        drop(guard);
         self.drain(merged)
     }
 
     /// Die Vereinigung aus `existing ⊎ new`: `existing`-Adressen zuerst, dann
-    /// die neuen `new`-Adressen, die `existing` noch nicht traegt.
+    /// die neuen `new`-Adressen, die `existing` noch nicht trägt.
     ///
-    /// Eine Adresse in BEIDEN Plaenen mit denselben Bytes zaehlt EINMAL —
-    /// genau die Idempotenz, die auch Create-if-absent traegt. Dieselbe
-    /// Adresse mit ANDEREN Bytes ist ein Bytekonflikt.
+    /// Eine Adresse in BEIDEN Plänen mit denselben Bytes zählt EINMAL — genau
+    /// die Idempotenz, die auch Create-if-absent trägt. Dieselbe Adresse mit
+    /// ANDEREN Bytes ist ein Bytekonflikt.
     fn merge(
         existing: &PlannedPublicationV1,
         new: &PlannedPublicationV1,
@@ -478,6 +519,31 @@ impl PublicationQueue {
             }
         }
         Ok(PlannedPublicationV1::new(merged))
+    }
+
+    /// Legt einen aufgeschobenen oder hart fehlgeschlagenen Plan wieder ab —
+    /// NIEMALS blind überschreibend.
+    ///
+    /// `drain` läuft ohne die `pending`-Sperre (siehe [`Self::publish`]):
+    /// während seiner Netz-I/O kann ein GLEICHZEITIGER `publish`-Aufruf
+    /// bereits einen ANDEREN Plan abgelegt haben. Eine blinde Zuweisung
+    /// würde den verlieren. Liegt dort schon etwas, wird deshalb VEREINIGT —
+    /// der eigene, länger wartende Plan zuerst, der gleichzeitig eingetroffene
+    /// danach.
+    ///
+    /// Ein Bytekonflikt zwischen beiden ist nur denkbar, wenn zwei Aufrufer
+    /// unabhängig dieselbe Adresse mit verschiedenen Bytes einreichen —
+    /// EA-CNA-PUB-7 hält höchstens EINEN Prozessplan, eine verlustfreie
+    /// Auflösung ist an dieser Stelle also gar nicht mehr möglich. Der eigene
+    /// Plan hat in diesem Fall Vorrang und bleibt vollständig erhalten; der
+    /// neu hinzugekommene wird verworfen.
+    fn restore(&self, plan: PlannedPublicationV1) {
+        let mut guard = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let merged = match guard.take() {
+            None => plan,
+            Some(concurrent) => Self::merge(&plan, &concurrent).unwrap_or(plan),
+        };
+        *guard = Some(merged);
     }
 
     /// Stellt die Verbindung wieder her und gibt die Warteschlange zurueck.
@@ -540,7 +606,7 @@ impl PublicationQueue {
                 // dieselben — deshalb wird der GANZE Plan aufbewahrt und beim
                 // Wiederanlauf von vorn durchlaufen; Create-if-absent macht das
                 // idempotent.
-                *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(planned);
+                self.restore(planned);
                 return Ok(PublicationStateV1 {
                     outcome: PublicationOutcomeV1::Deferred,
                     detail_cause: Some(DetailCause::NetworkArchiveWaiting),
@@ -556,7 +622,7 @@ impl PublicationQueue {
                 // denn ein Wiederanlauf ist ueber Create-if-absent idempotent.
                 // Der Fehler des Ziels wird trotzdem gemeldet: aufbewahrt ist
                 // nicht behoben.
-                *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(planned);
+                self.restore(planned);
                 return Err(error);
             }
             published_bytes.push(bytes.clone());

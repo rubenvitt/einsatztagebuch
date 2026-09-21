@@ -348,7 +348,7 @@ impl SyncClient {
             return Ok(None);
         };
         let plan = entry.publication_plan();
-        let expected: Vec<Vec<u8>> = plan.iter().map(|(_, bytes)| bytes.clone()).collect();
+        let expected = plan.clone();
 
         let planned = {
             let mut objects = Vec::with_capacity(plan.len());
@@ -378,11 +378,22 @@ impl SyncClient {
             return Ok(Some(step));
         }
 
-        // BYTEGLEICHHEIT, gemessen und nicht angenommen. Der Serverupload
-        // haengt daran, dass im Netzarchiv genau die committeten Bytes liegen;
-        // ein Ziel, das etwas anderes annimmt, darf den Upload nicht
-        // freigeben.
-        if state.published_bytes() != expected {
+        // BYTEGLEICHHEIT je EIGENER Adresse, nicht über die GANZE Antwort:
+        // nach der Zusammenführung (EA-CNA-PUB-7) kann `state` auch einen
+        // zuvor AUFGESCHOBENEN Plan eines ANDEREN Eintrags enthalten, dessen
+        // Bytes zusätzlich in der Antwort stehen. Der Serverupload DIESES
+        // Eintrags hängt nur daran, dass SEINE EIGENEN Adressen im Netzarchiv
+        // liegen — an welcher Stelle der Gesamtantwort, ist ohne Bedeutung.
+        let published_order = state.published_order();
+        let published_bytes = state.published_bytes();
+        let own_objects_published = expected.iter().all(|(address, bytes)| {
+            published_order.iter().zip(published_bytes.iter()).any(
+                |(candidate_address, candidate_bytes)| {
+                    candidate_address == address && candidate_bytes == bytes
+                },
+            )
+        });
+        if !own_objects_published {
             return Ok(Some(PendingStepV1::NetworkArchive));
         }
         Ok(None)
