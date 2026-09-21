@@ -42,7 +42,13 @@ impl NetworkWriterInstallation {
         Self::with_profile(network_profile(10_000))
     }
     fn with_profile(profile: ArchiveBackendProfileV1) -> Self {
-        let base = Base::with_profile(profile);
+        Self::with_policy(profile, &[])
+    }
+    fn with_policy(
+        profile: ArchiveBackendProfileV1,
+        also_allowed: &[ArchiveBackendProfileV1],
+    ) -> Self {
+        let base = Base::with_policy(profile, also_allowed);
         let writer_config = base.installed.directory.path().join("writer.json");
         fs::write(
             &writer_config,
@@ -175,6 +181,9 @@ fn writer_config_with(installed: &NetworkWriterInstallation, name: &str, config:
 fn network_writer_finalizes_into_the_local_component_and_not_the_remote() {
     let installed = NetworkWriterInstallation::new();
     drop(installed.register());
+    // Vor dem Writer-Start: auch die Capability-Messung darf im Netzziel
+    // nichts zurücklassen.
+    let remote_before = listing(&installed.base.installed.archive);
     let native = installed.try_host(&installed.writer_config).unwrap();
     native.login().unwrap();
     let state = native.desktop_state();
@@ -187,7 +196,6 @@ fn network_writer_finalizes_into_the_local_component_and_not_the_remote() {
     let input = native_incident();
     let preview = writer.preview(&input).unwrap();
     native.reauthenticate(ReauthPurpose::Finalize).unwrap();
-    let remote_before = listing(&installed.base.installed.archive);
     let outcome = writer.finalize(&input, &preview).unwrap();
     assert_eq!(outcome.sequence.get(), 1, "the next chain sequence");
     assert_eq!(state.drafts().unwrap().load_payload().unwrap(), "");
@@ -325,6 +333,7 @@ fn network_writer_refuses_when_sqlcipher_capability_fails() {
 fn network_writer_queue_limit_blocks_before_irreversible_step() {
     let installed = NetworkWriterInstallation::with_profile(network_profile(1));
     drop(installed.register());
+    let remote_before = listing(&installed.base.installed.archive);
     let native = installed.try_host(&installed.writer_config).unwrap();
     native.login().unwrap();
     let state = native.desktop_state();
@@ -334,11 +343,58 @@ fn network_writer_queue_limit_blocks_before_irreversible_step() {
     let input = native_incident();
     let preview = writer.preview(&input).unwrap();
     native.reauthenticate(ReauthPurpose::Finalize).unwrap();
-    let remote_before = listing(&installed.base.installed.archive);
     let refused = writer.finalize(&input, &preview).err().unwrap().code;
     // `put_in` meldet die erreichte Queuegrenze beim Staging (Schritt 8).
     assert_eq!(refused, "EA-ARCHIVE-PENDING-PUBLICATION");
     assert_eq!(state.drafts().unwrap().load_payload().unwrap(), draft);
     assert_eq!(installed.committed_local_entries(), 0, "no committed .eip");
+    assert!(listing(&installed.base.installed.archive) == remote_before);
+}
+
+#[test]
+fn network_writer_refuses_a_local_path_config_on_a_registered_anchor() {
+    let local = ArchiveBackendProfileV1::LocalPath(ea_archive::LocalPathProfileV1 {
+        filesystem_row_id: "fixture-native-writer-fs".into(),
+        capability_test_vector_id: "native-desktop-cap-v1".into(),
+    });
+    let installed = NetworkWriterInstallation::with_policy(network_profile(10_000), &[local]);
+    drop(installed.register());
+    let remote_before = listing(&installed.base.installed.archive);
+    let config = writer_config_with(
+        &installed,
+        "writer-local-path.json",
+        json!({"version":1,"timezone":"Europe/Berlin","archive_profile":{
+            "kind":"local-path","filesystem_row_id":"fixture-native-writer-fs",
+            "capability_test_vector_id":"native-desktop-cap-v1"}}),
+    );
+    assert_eq!(
+        installed.try_host(&config).err().unwrap().code,
+        "EA-NATIVE-ARCHIVE-PROFILE-MISMATCH"
+    );
+    assert!(
+        listing(&installed.base.installed.archive) == remote_before,
+        "no LocalPath format or probe file in the registered network root"
+    );
+}
+
+#[test]
+fn network_writer_refuses_a_policy_allowed_profile_other_than_the_registered_row() {
+    let other = network_profile(9_999);
+    let installed = NetworkWriterInstallation::with_policy(
+        network_profile(10_000),
+        std::slice::from_ref(&other),
+    );
+    drop(installed.register());
+    let remote_before = listing(&installed.base.installed.archive);
+    let config = writer_config_with(
+        &installed,
+        "writer-other-limits.json",
+        json!({"version":1,"timezone":"Europe/Berlin","archive_profile":profile_json(&other),
+               "local_commit_database_path":"operator.sqlite"}),
+    );
+    assert_eq!(
+        installed.try_host(&config).err().unwrap().code,
+        "EA-ARCHIVE-BYTE-CONFLICT"
+    );
     assert!(listing(&installed.base.installed.archive) == remote_before);
 }

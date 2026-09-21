@@ -55,6 +55,13 @@ impl NetworkWriterInstallation {
         Self::with_profile(network_profile(10_000))
     }
     pub(crate) fn with_profile(profile: ArchiveBackendProfileV1) -> Self {
+        Self::with_policy(profile, &[])
+    }
+    /// Wie `with_profile`, die Policy lässt zusätzlich `also_allowed` zu.
+    pub(crate) fn with_policy(
+        profile: ArchiveBackendProfileV1,
+        also_allowed: &[ArchiveBackendProfileV1],
+    ) -> Self {
         use ea_trust::TrustObjectSource as _;
         let mut installed = Installation::new();
         let mut previous_hashes = Vec::new();
@@ -83,9 +90,15 @@ impl NetworkWriterInstallation {
                 policy_max_registry_age_ms_override: Some(
                     support::LIVE_POLICY_MAX_REGISTRY_AGE_MS_V1,
                 ),
-                policy_allowed_archive_profile_hashes_override: Some(vec![
-                    profile.profile_hash().unwrap(),
-                ]),
+                policy_allowed_archive_profile_hashes_override: Some(
+                    // Die Policy verlangt kanonisch sortierte Hashes.
+                    std::iter::once(&profile)
+                        .chain(also_allowed)
+                        .map(|allowed| allowed.profile_hash().unwrap())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                ),
                 ..options()
             },
         );
