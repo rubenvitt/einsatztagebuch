@@ -982,6 +982,19 @@ fn sync_directory_at(directory: &Path) -> Result<(), ArchiveBackendError> {
     }
 }
 
+/// Öffnet eine vorhandene Datei so, dass `sync_all` sie flushen darf.
+///
+/// Unter Windows verlangt `FlushFileBuffers` einen Griff mit Schreibrecht; auf
+/// einem nur lesend geöffneten Griff scheitert es mit `ERROR_ACCESS_DENIED`.
+/// Auf Unix genügt der Lesegriff fuer `fsync`, und dabei bleibt es.
+fn open_for_flush(path: &Path) -> std::io::Result<File> {
+    if cfg!(windows) {
+        OpenOptions::new().write(true).open(path)
+    } else {
+        File::open(path)
+    }
+}
+
 /// Die Geraetekennung eines Pfades.
 #[cfg(unix)]
 fn device_of(path: &Path) -> Option<u64> {
@@ -1013,7 +1026,7 @@ impl ArchiveBackend for LocalPathBackend {
     }
 
     fn sync_file(&self, relative: &ArchivePath) -> Result<(), ArchiveBackendError> {
-        let file = File::open(self.absolute(relative.as_str()))
+        let file = open_for_flush(&self.absolute(relative.as_str()))
             .map_err(|_| ArchiveBackendError::FlushFailed)?;
         file.sync_all()
             .map_err(|_| ArchiveBackendError::FlushFailed)

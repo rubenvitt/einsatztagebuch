@@ -290,9 +290,15 @@ fn export(
     let detached = run_ignoring_rows(connection, "DETACH DATABASE recovery_snapshot");
     let migrations_hash = outcome?;
     detached?;
-    File::open(target)
+    // Windows flusht nur einen Griff mit Schreibrecht (`FlushFileBuffers`).
+    OpenOptions::new()
+        .read(true)
+        .write(cfg!(windows))
+        .open(target)
         .and_then(|file| file.sync_all())
         .map_err(|_| StoreError::Database)?;
+    // Ein Verzeichnis lässt sich nur auf Unix als Datei öffnen und flushen.
+    #[cfg(unix)]
     File::open(target.parent().ok_or(StoreError::Database)?)
         .and_then(|file| file.sync_all())
         .map_err(|_| StoreError::Database)?;
