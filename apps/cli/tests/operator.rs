@@ -200,7 +200,7 @@ fn invalid_subcommands_report_command_specific_choices() {
         (
             "operator",
             "restore",
-            "einsatzarchiv: unknown operator subcommand restore; expected provision, verify-session or revoke",
+            "einsatzarchiv: unknown operator subcommand restore; expected provision, verify-session, revoke or register-network-archive",
         ),
     ] {
         let output = run(&["--trust-anchor", "anchor", command, action]);
@@ -1033,13 +1033,19 @@ mod process_native {
             std::io::stderr().flush().unwrap();
             std::process::exit(code.as_i32());
         }
-        let args::Command::Operator { action, ref config } = invocation.command else {
+        let args::Command::Operator {
+            action,
+            ref config,
+            ref archive_profile,
+        } = invocation.command
+        else {
             panic!("fixture executable only dispatches operator commands");
         };
         let code = operator_command::run_with_runtime_opener(
             &invocation,
             action,
             config,
+            archive_profile.as_deref(),
             support::live_clock(),
             |config, anchor, now, initialize| {
                 let native = NativeOperatorProvider::open_test_fixture(

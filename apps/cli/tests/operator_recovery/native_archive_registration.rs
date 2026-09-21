@@ -309,6 +309,123 @@ fn registration_refuses_every_precondition_without_writes() {
     }
 }
 
+/// Spawnt denselben Prozessdispatcher wie die `operator verify-session`-
+/// Prozesstests (`process_native::fixture_cli`), damit
+/// `register-network-archive` durch die tatsaechliche Argumentgrammatik und
+/// Ausgabeform laeuft — nicht durch einen direkten Bibliotheksaufruf wie die
+/// uebrigen Tests dieser Datei.
+fn run_operator_fixture(directory: &Path, arguments: &[String]) -> std::process::Output {
+    let mut output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "process_native::fixture_cli",
+            "--nocapture",
+        ])
+        .env(
+            "EA_OPERATOR_FIXTURE_ARGS",
+            serde_json::to_string(arguments).unwrap(),
+        )
+        .env("EA_OPERATOR_FIXTURE_DIRECTORY", directory)
+        .output()
+        .unwrap();
+    let marker = b"EA_CLI_FIXTURE_OUTPUT\n";
+    let start = output
+        .stdout
+        .windows(marker.len())
+        .position(|bytes| bytes == marker)
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture executable did not start: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    output.stdout.drain(..start + marker.len());
+    output
+}
+
+#[test]
+fn cli_registers_network_component_and_reports_already_registered_on_repeat() {
+    let installed = RecoveryInstallation::with_profile(None, false, Some(profile()));
+    // Byteweise dieselben Felder wie `profile()`, nur in der camelCase-JSON-
+    // Grammatik von `parse_recovery_archive_profile` — sonst waere der
+    // geparste Profilhash ein anderer als der von der Policy erlaubte.
+    let profile_path = installed.directory.path().join("archive-profile.json");
+    fs::write(
+        &profile_path,
+        serde_json::to_vec(&json!({
+            "kind": "controlledNetworkPath",
+            "filesystemRowId": "existing-component-only-no-mount",
+            "protocolId": "SMB3",
+            "serverProduct": "native-component-fixture",
+            "serverVersion": "1",
+            "mountOptions": ["component-only"],
+            "failoverConfigId": "none",
+            "capabilityTestVectorId": "native-existing-component-v1",
+            "queueMaxObjects": 10000,
+            "queueMaxBytes": 64 * 1024 * 1024,
+            "resumeBackoffInitialMs": 1000,
+            "resumeBackoffMaxMs": 5000,
+            "resumeMaxAttempts": 3,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let arguments: Vec<String> = [
+        "--trust-anchor",
+        installed.anchor.to_str().unwrap(),
+        "operator",
+        "register-network-archive",
+        "--operator-config",
+        installed.config.to_str().unwrap(),
+        "--network-archive-profile",
+        profile_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+
+    let first = run_operator_fixture(installed.directory.path(), &arguments);
+    assert!(
+        first.status.success(),
+        "first registration must succeed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout).trim(),
+        "{\"registration\":\"registered\"}"
+    );
+
+    // Der zweite Lauf trifft die identische Zeile und muss frueh zurueck-
+    // kehren, ohne frische Praesenz oder Audit (EA-CNA-REG-6) — genau das
+    // beweist die Komponentenzeile unten, die nach BEIDEN Laeufen bei eins
+    // steht.
+    let second = run_operator_fixture(installed.directory.path(), &arguments);
+    assert!(
+        second.status.success(),
+        "repeat registration must succeed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout).trim(),
+        "{\"registration\":\"already-registered\"}"
+    );
+
+    let runtime = installed.open();
+    let count = runtime
+        .database()
+        .query_row("SELECT count(*) FROM native_archive_component", &[])
+        .unwrap()
+        .unwrap()
+        .integer(0)
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "exactly one component row after two registrations"
+    );
+}
+
 #[test]
 fn registered_anchor_refuses_local_path_configuration() {
     let installed = RecoveryInstallation::with_profile(None, false, Some(profile()));
