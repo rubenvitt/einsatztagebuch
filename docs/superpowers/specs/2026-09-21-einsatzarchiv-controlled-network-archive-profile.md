@@ -319,8 +319,12 @@ Die CLI verlangt dafür bei einem Netzprofil `--component-export <Verzeichnis>`
 und lehnt den Schalter für LocalPath ab; ihre Vorprüfung liest nie das
 Netzziel allein, die Sonde prüft die Capture über dieselbe Vereinigung. Die
 Sonden der Inventar-Capture werden erst nach dem Export aus der Vereinigung
-gewählt. Der Desktop hat keinen Capture-Ablauf und bietet deshalb keinen
-Export an.
+gewählt. Scheitert der Export mittendrin, bleibt ein Teilverzeichnis liegen,
+das der Betreiber löschen muss; ein neuer Versuch lehnt es als vorhanden ab.
+`capture_source_with_component_export` übernimmt die Sonden des Aufrufers
+unverändert und wählt keine aus der Vereinigung; das tut nur die
+Inventar-Capture. Der Desktop hat keinen Capture-Ablauf und bietet deshalb
+keinen Export an.
 
 **EA-CNA-REC-4 (Schnappschuss).** Der SQLCipher-Schnappschuss umfasst wie
 bisher die ganze Datenbank, also auch Registrierung, Scope, lokale Objekte,
@@ -334,8 +338,10 @@ fehlenden oder leeren Zielordner jede Datei der Kopie des Netzziels und des
 Exports exklusiv an, flusht Dateien und Verzeichnisse und prüft den
 zurückgelesenen Baum byte-genau gegen die Vereinigung. Die Objekte sind
 unveränderlich und inhaltsadressiert; bytegleiche Adressen fallen zusammen,
-abweichende und ein nicht leerer Zielordner lehnen mit
-`EA-RECOVERY-TEST-SOURCE` ab. Die Zielinstallation öffnet dieses Verzeichnis
+abweichende, ein nicht leerer Zielordner und ein Zielordner innerhalb der
+Kopie oder des Exports lehnen mit `EA-RECOVERY-TEST-SOURCE` ab. Scheitert das
+Anlegen mittendrin, bleibt ein Teilverzeichnis liegen, das der Betreiber
+löschen muss. Die Zielinstallation öffnet dieses Verzeichnis
 ohne Registrierung und ohne eigenen Startmodus. Der §19.3-Zieltest nutzt eine
 eigene Nur-Lese-Ressource: `RecoveryTestRuntime::for_archive_copy` mit dieser
 Vereinigung als `archive_directory` und dem Exportverzeichnis. Sie hat weder
@@ -343,7 +349,12 @@ Vereinigung als `archive_directory` und dem Exportverzeichnis. Sie hat weder
 Capability-Test aus. Ihre Quelle ist
 `FsArchiveSource::open(archive_directory)?.with_exact_component(&FsArchiveSource::open(export)?)`;
 eine Zielkopie ohne die exportierten lokalen Objekte scheitert vor jedem
-Restore.
+Restore. Die CLI verlangt in den Zielmodi (`restore-run`, `import`,
+`status`, `failure-status`) für ein Netzprofil `--component-export` und
+öffnet dann `for_archive_copy`; ohne den Schalter lehnt sie mit
+`EA-RECOVERY-TEST-SOURCE` ab, für LocalPath bleibt der Weg unverändert und
+der Schalter abgelehnt. Der Desktop bindet `for_archive_copy` nicht an: sein
+Restore über `with_archive_config` lehnt ein unregistriertes Netzziel ab.
 Capture ist dort mit `EA-RECOVERY-TEST-SOURCE` gesperrt. Die aktuelle
 Autorität, der gemessene andere Rechner, die exakte Quell- und
 Restore-Bindung und die Schutz-Locks gelten unverändert.

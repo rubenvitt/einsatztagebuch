@@ -18,6 +18,10 @@ pub const SWITCHES: [&str; 8] = [
 pub struct RecoveryRuntimeArguments {
     pub config: PathBuf,
     pub profile: PathBuf,
+    /// Exportverzeichnis der lokalen Komponente: Pflicht für ein Netzprofil
+    /// in jedem Modus, abgelehnt für LocalPath; entschieden wird am gelesenen
+    /// Profil, nicht hier (EA-CNA-REC-3, REC-5).
+    pub component_export: Option<PathBuf>,
     pub action: RecoveryRuntimeAction,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,9 +29,6 @@ pub enum RecoveryRuntimeAction {
     Capture {
         snapshot: PathBuf,
         passphrase: PathBuf,
-        /// Pflicht für ein Netzprofil, abgelehnt für LocalPath; entschieden
-        /// wird am gelesenen Profil, nicht hier.
-        component_export: Option<PathBuf>,
     },
     RestoreRun {
         source: PathBuf,
@@ -73,11 +74,11 @@ pub(super) fn build(
         command: "recovery-test",
     })?;
     let profile = required(&mut paths, "--archive-profile")?;
+    let component_export = paths.remove("--component-export");
     let action = match mode.to_str() {
         Some("capture") => RecoveryRuntimeAction::Capture {
             snapshot: required(&mut paths, "--snapshot")?,
             passphrase: required(&mut paths, "--backup-passphrase-file")?,
-            component_export: paths.remove("--component-export"),
         },
         Some("restore-run") => RecoveryRuntimeAction::RestoreRun {
             source: required(&mut paths, "--source-envelope")?,
@@ -111,6 +112,7 @@ pub(super) fn build(
     Ok(Some(RecoveryRuntimeArguments {
         config,
         profile,
+        component_export,
         action,
     }))
 }
@@ -142,12 +144,12 @@ mod tests {
         assert!(invoke(true, true).is_err());
     }
     #[test]
-    fn component_export_belongs_to_capture_only() {
-        let invoke = |mode: &str| {
-            let mut paths = BTreeMap::from([
-                ("--archive-profile", PathBuf::from("profile.json")),
-                ("--component-export", PathBuf::from("export")),
-            ]);
+    fn component_export_is_optional_for_every_mode() {
+        let invoke = |mode: &str, export: bool| {
+            let mut paths = BTreeMap::from([("--archive-profile", PathBuf::from("profile.json"))]);
+            if export {
+                paths.insert("--component-export", PathBuf::from("export"));
+            }
             if mode == "capture" {
                 paths.insert("--snapshot", PathBuf::from("snapshot.db"));
                 paths.insert("--backup-passphrase-file", PathBuf::from("secret"));
@@ -157,18 +159,13 @@ mod tests {
                 Some(PathBuf::from("operator.json")),
                 paths,
             )
+            .unwrap()
+            .unwrap()
+            .component_export
         };
-        let Ok(Some(RecoveryRuntimeArguments {
-            action:
-                RecoveryRuntimeAction::Capture {
-                    component_export, ..
-                },
-            ..
-        })) = invoke("capture")
-        else {
-            panic!("capture accepts a component export");
-        };
-        assert_eq!(component_export, Some(PathBuf::from("export")));
-        assert!(invoke("status").is_err());
+        for mode in ["capture", "status"] {
+            assert_eq!(invoke(mode, true), Some(PathBuf::from("export")));
+            assert_eq!(invoke(mode, false), None);
+        }
     }
 }
