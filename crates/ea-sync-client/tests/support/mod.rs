@@ -25,9 +25,11 @@ use std::sync::{
 
 use ea_archive::{
     ArchiveBackendError, ArchiveBackendProfileV1, ArchivePath, BoundArchiveProfilePolicyV1,
-    ControlledNetworkProfileV1,
+    ControlledNetworkProfileV1, GRANTS_DIR_V1,
 };
-use ea_archive_fs::{PublicationQueue, PublicationTargetV1, SyncStatus};
+use ea_archive_fs::{
+    PlannedPublicationV1, PublicationOutcomeV1, PublicationQueue, PublicationTargetV1, SyncStatus,
+};
 use ea_sync_client::{
     PushSummary, SyncClient, SyncClientError, SyncTransportV1, TransportErrorV1,
     TransportRequestV1, TransportResponseV1,
@@ -560,6 +562,46 @@ impl SyncHarness {
             self.last = Some(summary.clone());
         }
         outcome
+    }
+
+    /// Seedet einen FREMDEN, bereits ausstehenden Plan direkt in die
+    /// Netzarchiv-Warteschlange — unabhängig von jedem committeten Eintrag.
+    ///
+    /// Simuliert eine bereits aufgeschobene Publikation (zum Beispiel die
+    /// Quittung eines FRÜHEREN Eintrags), die beim nächsten `publish` eines
+    /// Eintrags MITGEZOGEN wird (EA-CNA-PUB-7). Ohne diese Fixture ließe sich
+    /// der Bytevergleich in `publish_to_network_archive` nicht unabhängig vom
+    /// Kettenverhalten des Klienten prüfen.
+    ///
+    /// # Panics
+    ///
+    /// Wenn die Fixture kein Netzprofil trägt, das Ziel schon verbunden ist,
+    /// oder das Seeden nicht als aufgeschoben endet.
+    pub fn seed_outstanding_network_plan(&self) {
+        let queue = self
+            .queue
+            .as_ref()
+            .expect("die Fixture trägt ein Netzprofil");
+        let target = self
+            .target
+            .as_ref()
+            .expect("die Fixture trägt ein Netzziel");
+        assert!(
+            !target.is_connected(),
+            "die Attrappe muss beim Seeden GETRENNT sein"
+        );
+        let foreign = PlannedPublicationV1::new(vec![(
+            ArchivePath::in_dir(GRANTS_DIR_V1, "foreign-seed.eag").expect("die Adresse ist gültig"),
+            vec![0xab; 8],
+        )]);
+        let state = queue
+            .publish(foreign)
+            .expect("das Seeden darf nicht fehlschlagen");
+        assert_eq!(
+            state.outcome(),
+            PublicationOutcomeV1::Deferred,
+            "die Fixture MUSS einen ausstehenden Plan hinterlassen"
+        );
     }
 
     /// Der oeffentliche Zustand des letzten Laufs.

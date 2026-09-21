@@ -1034,8 +1034,8 @@ pub fn two_grants_and_one_entry() -> PlannedPublicationV1 {
 }
 
 /// EIN Grant, `count`-fach unter fortlaufenden, mit `prefix` beginnenden
-/// Adressen — fuer Zusammenfuehrungs- und Grenztests, die eine zweite,
-/// beliebig grosse Menge ADRESSDISJUNKTER Objekte brauchen.
+/// Adressen — für Zusammenführungs- und Grenztests, die eine zweite, beliebig
+/// große Menge ADRESSDISJUNKTER Objekte brauchen.
 #[must_use]
 pub fn planned_grants(count: usize, prefix: &str) -> PlannedPublicationV1 {
     let bytes = signed_grant_a().into_vec();
@@ -1043,7 +1043,7 @@ pub fn planned_grants(count: usize, prefix: &str) -> PlannedPublicationV1 {
         .map(|index| {
             (
                 ArchivePath::in_dir(GRANTS_DIR_V1, &format!("{prefix}-{index:04}.eag"))
-                    .expect("die Adresse ist gueltig"),
+                    .expect("die Adresse ist gültig"),
                 bytes.clone(),
             )
         })
@@ -1053,44 +1053,69 @@ pub fn planned_grants(count: usize, prefix: &str) -> PlannedPublicationV1 {
 
 /// Ein ZWEITER Plan, ADRESSDISJUNKT zu [`two_grants_and_one_entry`].
 ///
-/// Fuer die Zusammenfuehrung: zwei nacheinander angenommene Plaene, die sich
-/// in keiner Adresse ueberschneiden, muessen sich zu einem einzigen Plan
+/// Für die Zusammenführung: zwei nacheinander angenommene Pläne, die sich in
+/// keiner Adresse überschneiden, müssen sich zu einem einzigen Plan
 /// vereinigen, ausstehend erst-, neu-danach geordnet.
 #[must_use]
 pub fn second_disjoint_plan() -> PlannedPublicationV1 {
     planned_grants(2, "second")
 }
 
-/// Ein Plan, der DIESELBE Adresse wie [`two_grants_and_one_entry`] traegt —
+/// Ein Plan, der DIESELBE Adresse wie [`two_grants_and_one_entry`] trägt —
 /// `grants/a.eag` —, aber mit ANDEREN Bytes.
 ///
-/// Fuer den Bytekonflikt der Zusammenfuehrung: die Vereinigung darf diese
+/// Für den Bytekonflikt der Zusammenführung: die Vereinigung darf diese
 /// Adresse nicht klobbern, sondern muss ablehnen und den ausstehenden Plan
 /// unangetastet lassen.
 #[must_use]
 pub fn plan_conflicting_with_two_grants_and_one_entry() -> PlannedPublicationV1 {
     PlannedPublicationV1::new(vec![(
-        ArchivePath::in_dir(GRANTS_DIR_V1, "a.eag").expect("die Adresse ist gueltig"),
+        ArchivePath::in_dir(GRANTS_DIR_V1, "a.eag").expect("die Adresse ist gültig"),
         signed_grant_b().into_vec(),
     )])
 }
 
-/// EIN gueltiges signiertes `.eip`, fuer `derive_pending`-Tests.
+/// EIN gültiges signiertes `.eip`, für `derive_pending`-Tests.
 ///
-/// Der Inhalt selbst traegt hier keine Aussage — `derive_pending` klassifiziert
-/// ausschliesslich am Exact-Object-Praefix (`ea-archive/src/inventory.rs`) und
+/// Der Inhalt selbst trägt hier keine Aussage — `derive_pending` klassifiziert
+/// ausschließlich am Exact-Object-Präfix (`ea-archive/src/inventory.rs`) und
 /// vergleicht sonst nur Adresse und Bytes. Dieselben Bytes unter zwei
-/// verschiedenen Adressen sind deshalb eine gueltige Fixture.
+/// verschiedenen Adressen sind deshalb eine gültige Fixture.
 #[must_use]
 pub fn signed_entry_bytes() -> Vec<u8> {
     archive_support::signed_entry_package().1
 }
 
-/// Eine Archivquelle mit FEST VORGEGEBENEN Bytes, fuer `derive_pending`-Tests.
+/// Bytes, die KEIN Exact-Object-Präfix tragen — Formatbeiwerk, wie es echte
+/// Bestände unter `README-FORMAT.txt` & Co. führen.
 ///
-/// `ArchiveSource::visit_blobs` reicht jedes Paar unveraendert an den Besucher
+/// Für `derive_pending`-Tests: dieser Inhalt MUSS unbemerkt aus dem Plan
+/// bleiben, weil er kein Publikationsgegenstand ist — anders als eine Adresse
+/// mit Präfix, die nicht vollständig parst (siehe
+/// [`non_object_bytes_with_a_grant_prefix`]).
+#[must_use]
+pub fn non_object_bytes() -> Vec<u8> {
+    b"# Formatbeiwerk, kein Archivobjekt\n".to_vec()
+}
+
+/// Bytes MIT dem `.eag`-Präfix, die danach NICHT vollständig parsen.
+///
+/// Für den Nachweis, dass `derive_pending` eine committete, aber beschädigte
+/// Adresse ALS FEHLER meldet statt sie stillschweigend zu übergehen — genau
+/// die Unterscheidung, die die Klassifikation ausschließlich am Präfix
+/// (`ea-archive/src/inventory.rs`) von einer vollen Dekodierung trennt.
+#[must_use]
+pub fn non_object_bytes_with_a_grant_prefix() -> Vec<u8> {
+    let mut bytes = ea_format::EAG_PREFIX_V1.to_vec();
+    bytes.extend_from_slice(&[0xff; 16]);
+    bytes
+}
+
+/// Eine Archivquelle mit FEST VORGEGEBENEN Bytes, für `derive_pending`-Tests.
+///
+/// `ArchiveSource::visit_blobs` reicht jedes Paar unverändert an den Besucher
 /// durch — hier entsteht kein zweiter Kryptobaukasten, nur eine feste
-/// Aufzaehlung.
+/// Aufzählung.
 pub struct FixedArchiveSource {
     blobs: Vec<(String, Vec<u8>)>,
 }
@@ -1116,13 +1141,13 @@ impl ea_archive::ArchiveSource for FixedArchiveSource {
     }
 }
 
-/// Oeffnet eine FERNABLAGE der Fixture — ein gewoehnliches `LocalPathBackend`,
+/// Öffnet eine FERNABLAGE der Fixture — ein gewöhnliches `LocalPathBackend`,
 /// das in den `derive_pending`-Tests die Rolle des live gelesenen Netzziels
 /// spielt.
 ///
 /// # Panics
 ///
-/// Wenn sich die Wurzel nicht oeffnen laesst.
+/// Wenn sich die Wurzel nicht öffnen lässt.
 #[must_use]
 pub fn open_remote(root: PathBuf) -> LocalPathBackend {
     LocalPathBackend::open(
@@ -1130,7 +1155,71 @@ pub fn open_remote(root: PathBuf) -> LocalPathBackend {
         local_profile(),
         &BoundArchiveProfilePolicyV1::from_policy(&policy_with(vec![source_profile_hash()])),
     )
-    .expect("die Fernablage der Fixture muss sich oeffnen lassen")
+    .expect("die Fernablage der Fixture muss sich öffnen lassen")
+}
+
+/// Ein Ziel, das GETRENNT bleibt, bis es explizit VERBUNDEN wird, und dessen
+/// `is_connected` dabei künstlich VERZÖGERT — für den Wettlaufnachweis von
+/// `PublicationQueue::publish`.
+///
+/// Ohne eine durchgehende Sperre über die Entscheidung (Vereinigung,
+/// Grenzprüfung, Verbindungsstatus) überlappen sich zwei gleichzeitige
+/// Aufrufe genau in diesem Fenster; die Verzögerung macht das Fenster groß
+/// genug, um es deterministisch zu treffen, ohne auf eine glücksabhängige
+/// Zufallsverzahnung des Betriebssystem-Schedulers angewiesen zu sein.
+/// `publish_one` nimmt jede Adresse an, ohne sie zu prüfen — die Prüfung
+/// läuft über `PublicationStateV1`, die die Warteschlange selbst aus dem
+/// übergebenen Plan bildet, unabhängig davon, was das Ziel tatsächlich tut.
+pub struct SlowDisconnectingTarget {
+    connected: Mutex<bool>,
+    delay: std::time::Duration,
+}
+
+impl SlowDisconnectingTarget {
+    #[must_use]
+    pub fn disconnected(delay: std::time::Duration) -> Self {
+        Self {
+            connected: Mutex::new(false),
+            delay,
+        }
+    }
+}
+
+impl PublicationTargetV1 for SlowDisconnectingTarget {
+    fn is_connected(&self) -> bool {
+        std::thread::sleep(self.delay);
+        *self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn reconnect(&self) {
+        *self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    fn publish_one(
+        &self,
+        _relative: &ArchivePath,
+        _bytes: &[u8],
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        Ok(())
+    }
+}
+
+/// Eine Warteschlange auf einem LANGSAMEN, anfangs getrennten Ziel — für den
+/// Wettlaufnachweis zweier gleichzeitiger `publish`-Aufrufe.
+#[must_use]
+pub fn queue_with_slow_disconnected_target(delay: std::time::Duration) -> PublicationQueue {
+    PublicationQueue::new(
+        Box::new(SlowDisconnectingTarget::disconnected(delay)),
+        controlled_network_profile(),
+        &policy_allowing_controlled_network(),
+    )
+    .expect("die Warteschlange der Fixture muss entstehen")
 }
 
 /// Die vollstaendige Migrationsfixture: Quellbestand, Zielwurzel, Policy,
