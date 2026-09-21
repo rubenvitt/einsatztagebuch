@@ -20,6 +20,10 @@ pub struct HistoricalFixture {
     pub operator_binding: ObjectHash,
     pub hga_certificate: CertificateHash,
     pub approvers: [CertificateHash; 2],
+    /// Das Writer-Gerätezertifikat, das den alten Eintrag signiert hat. Es ist
+    /// das ERSTE Writer-Zertifikat der Linie und damit der laufende Writer
+    /// (`ea-trust` `registry.rs`: nur das erste wird `current_writer`).
+    pub writer_certificate: CertificateHash,
     pub head: trust_support::BuiltHead,
     /// Die Sequenz, an der der Reader und die Adminbindung wirksam werden und
     /// an der Autorisierung und aktuelle Auswahl stehen: `1` in der
@@ -296,6 +300,7 @@ fn fixture_with_options(
         operator_binding,
         hga_certificate: certificates[1],
         approvers: [certificates[2], certificates[3]],
+        writer_certificate: certificates[4],
         head,
         current_sequence,
         second_old_entry,

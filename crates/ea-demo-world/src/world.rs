@@ -15,9 +15,11 @@
 //! 1. eine zweite Policy, deren `allowed-archive-profile-hashes` das
 //!    Archivprofil der Writer-Station ENTHÄLT (ohne das weist der Writer jede
 //!    Serialisierung ab),
-//! 2. ein Writer-Gerätezertifikat und eine Writer-Bedienerbindung, die — wie
-//!    die Adminbindung aus der Fixture — an Betriebssystemkonto,
-//!    Instanzschlüssel und Profilzusage gebunden ist.
+//! 2. eine Writer-Bedienerbindung für das VORHANDENE Writer-Zertifikat der
+//!    Fixture, die — wie die Adminbindung aus der Fixture — an
+//!    Betriebssystemkonto, Instanzschlüssel und Profilzusage gebunden ist.
+//!    Kein zweites Writer-Zertifikat: nur das erste einer Linie ist der
+//!    laufende Writer.
 //!
 //! Die Adminbindung mit Rolle `OrganizationAdmin` und der finalisierte Eintrag
 //! stehen bereits in der Fixture; sie werden nicht nachgebaut.
@@ -72,10 +74,10 @@ const DEMO_ENTRY_PLAINTEXT: &str =
 /// `INSTANCE_SECRET` und die Uid 501/502). Ein Helfer, der dem dort
 /// gemessenen Protokoll folgt, passt damit ohne eine einzige weitere Zahl auf
 /// eine hier gesäte Welt.
-const DEMO_GUID_WRITER: &str = "00112233-4455-6677-8899-aabbccddeeff";
-const DEMO_GUID_ADMIN: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
-const DEMO_UID_WRITER: u32 = 501;
-const DEMO_UID_ADMIN: u32 = 502;
+pub(crate) const DEMO_GUID_WRITER: &str = "00112233-4455-6677-8899-aabbccddeeff";
+pub(crate) const DEMO_GUID_ADMIN: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
+pub(crate) const DEMO_UID_WRITER: u32 = 501;
+pub(crate) const DEMO_UID_ADMIN: u32 = 502;
 /// Die Windows-SID der Demowelt. Rohbytes einer `S-1-5-21-…`-Kontokennung.
 ///
 /// Windows hat in diesem Arbeitsbereich KEINEN produktiven Ernter des echten
@@ -83,12 +85,12 @@ const DEMO_UID_ADMIN: u32 = 502;
 /// typisierte Übergabe und sagt, dass die Win32-Familie ADR-pflichtig ist.
 /// Die Demowelt nimmt deshalb auf allen drei Plattformen ein FESTES
 /// Fixture-Konto — auf Windows genau wie auf macOS und Linux.
-const DEMO_WINDOWS_SUBAUTHORITIES: [u32; 5] =
+pub(crate) const DEMO_WINDOWS_SUBAUTHORITIES: [u32; 5] =
     [21, 1_111_111_111, 2_222_222_222, 3_333_333_333, 1001];
-const DEMO_WINDOWS_IDENTIFIER_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 5];
+pub(crate) const DEMO_WINDOWS_IDENTIFIER_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 5];
 
-const DEMO_WRITER_INSTANCE_SECRET: [u8; 32] = [0x47; 32];
-const DEMO_ADMIN_INSTANCE_SECRET: [u8; 32] = [0x68; 32];
+pub(crate) const DEMO_WRITER_INSTANCE_SECRET: [u8; 32] = [0x47; 32];
+pub(crate) const DEMO_ADMIN_INSTANCE_SECRET: [u8; 32] = [0x68; 32];
 const DEMO_PROFILE_SALT: [u8; 32] = [0x53; 32];
 const DEMO_WRITER_NAME: &str = "Fixture-Demo Schreiberin";
 const DEMO_WRITER_FUNCTION: &str = "Fixture-Demo Einsatzleitung";
@@ -96,10 +98,12 @@ const DEMO_ADMIN_NAME: &str = "Fixture-Demo Administrator";
 const DEMO_ADMIN_FUNCTION: &str = "Fixture-Demo Organisationsleitung";
 /// Die Saaten, aus denen der `InMemoryKeyProvider` den Datenbankschlüssel
 /// ableitet — dieselben wie in `database_provider_for` der CLI-Tests.
-const DEMO_WRITER_DATABASE_SEED: [u8; 32] = [0x94; 32];
-const DEMO_ADMIN_DATABASE_SEED: [u8; 32] = [0x95; 32];
+pub(crate) const DEMO_WRITER_DATABASE_SEED: [u8; 32] = [0x94; 32];
+pub(crate) const DEMO_ADMIN_DATABASE_SEED: [u8; 32] = [0x95; 32];
 
-const DEMO_WRITER_DEVICE: [u8; 16] = [0x51; 16];
+/// Die Gerätekennung des Fixture-Writers (`historical.rs`, Marker 0x55; die
+/// Fixture-Kette leitet `marker + 0x40` ab). Die Kontobindung hängt an ihr.
+const DEMO_WRITER_DEVICE: [u8; 16] = [0x95; 16];
 const DEMO_ADMIN_DEVICE: [u8; 16] = [0x52; 16];
 const DEMO_WRITER_SUBJECT: [u8; 16] = [0x71; 16];
 const DEMO_ADMIN_SUBJECT: [u8; 16] = [0x42; 16];
@@ -185,12 +189,17 @@ pub fn demo_archive_profile() -> ArchiveBackendProfileV1 {
     })
 }
 
-/// Der Bindungshash des FESTEN Fixture-Betriebssystemkontos der Demowelt.
+/// Das FESTE Fixture-Betriebssystemkonto einer Station der Demowelt.
 ///
 /// Die drei Plattformzweige spiegeln `ea_admin::native_provider`s eigene
 /// Fallunterscheidung. Auf Windows steht ein festes SID-Tripel, weil dieser
 /// Arbeitsbereich dort keinen produktiven Kontoernter hat.
-fn demo_account_hash(admin: bool, device: DeviceId) -> Hash32 {
+///
+/// Aus DIESEM Wert entstehen beide Seiten: der Bindungshash, den die Saat in
+/// die Registry schreibt, und die `account`-Antwort des Fixture-Helfers in
+/// [`crate::native_fixture`]. Zwei getrennte Ableitungen könnten
+/// auseinanderlaufen; eine kann es nicht.
+pub(crate) fn demo_account_inputs(admin: bool) -> ea_operator::OsAccountInputs {
     let guid = if admin {
         DEMO_GUID_ADMIN
     } else {
@@ -201,7 +210,7 @@ fn demo_account_hash(admin: bool, device: DeviceId) -> Hash32 {
     } else {
         DEMO_UID_WRITER
     };
-    let inputs = if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") {
         ea_operator::macos::account_inputs(vec![guid.into()], vec![uid.to_string()], uid)
     } else if cfg!(windows) {
         let mut sid = Vec::with_capacity(8 + 4 * DEMO_WINDOWS_SUBAUTHORITIES.len());
@@ -221,8 +230,12 @@ fn demo_account_hash(admin: bool, device: DeviceId) -> Hash32 {
         ea_operator::windows::account_inputs(sid, DEMO_WINDOWS_IDENTIFIER_AUTHORITY, subs)
     } else {
         ea_operator::linux::account_inputs(format!("{}\n", guid.replace('-', "")).into_bytes(), uid)
-    };
-    inputs
+    }
+}
+
+/// Der Bindungshash des FESTEN Fixture-Betriebssystemkontos der Demowelt.
+fn demo_account_hash(admin: bool, device: DeviceId) -> Hash32 {
+    demo_account_inputs(admin)
         .binding_hash(trust_support::organization(), device)
         .expect("das Fixture-Konto muss einen Bindungshash ergeben")
 }
@@ -242,6 +255,23 @@ fn public_key(secret: [u8; 32]) -> CanonicalPublicCoseKey {
 /// [`SeedError`], wenn das Zielverzeichnis belegt ist, ein Schreibvorgang
 /// scheitert oder ein Bauschritt der Welt nicht durchläuft.
 pub fn seed_demo_world(root: &Path) -> Result<DemoWorld, SeedError> {
+    seed(root, false)
+}
+
+/// GEGENPROBE, keine Welt zum Benutzen: sät die frühere, falsche Form mit
+/// einem ZWEITEN Writer-Zertifikat für die Writer-Station. Ein Zeuge, der die
+/// Writer-Sitzung wirklich öffnet, muss an dieser Welt scheitern — sonst sähe
+/// er den Fehler nicht, gegen den er steht.
+///
+/// # Errors
+///
+/// Wie [`seed_demo_world`].
+#[doc(hidden)]
+pub fn seed_demo_world_with_second_writer_certificate(root: &Path) -> Result<DemoWorld, SeedError> {
+    seed(root, true)
+}
+
+fn seed(root: &Path, second_writer_certificate: bool) -> Result<DemoWorld, SeedError> {
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         return Err(SeedError::DirectoryNotEmpty(root.to_path_buf()));
     }
@@ -253,7 +283,15 @@ pub fn seed_demo_world(root: &Path) -> Result<DemoWorld, SeedError> {
     // gegen den der Wirt später vergleicht.
     let root = root.canonicalize()?;
 
-    let writer_device = DeviceId::try_from(DEMO_WRITER_DEVICE.as_slice())
+    // Die Gegenprobe trägt die Gerätekennung der früheren Fassung ([0x51; 16]),
+    // damit sie an genau der alten Stelle scheitert und nicht an einer
+    // doppelten Kennung.
+    let writer_device_bytes = if second_writer_certificate {
+        [0x51; 16]
+    } else {
+        DEMO_WRITER_DEVICE
+    };
+    let writer_device = DeviceId::try_from(writer_device_bytes.as_slice())
         .map_err(|_| SeedError::World("Writer-Gerätekennung".into()))?;
     let admin_device = DeviceId::try_from(DEMO_ADMIN_DEVICE.as_slice())
         .map_err(|_| SeedError::World("Admin-Gerätekennung".into()))?;
@@ -308,27 +346,41 @@ pub fn seed_demo_world(root: &Path) -> Result<DemoWorld, SeedError> {
         },
     );
 
-    // Schritt 3: Writer-Gerätezertifikat und Writer-Bedienerbindung. Die
-    // Fixture bringt zwar einen Writer mit, aber ohne Kontobindung und ohne
-    // Instanzschlüssel — eine native Sitzung kann ihn deshalb nicht führen.
-    let writer_certificate = material
-        .line
-        .push(
-            ActionSpec::Device {
-                kind: CertificateKindV1::Writer,
-                marker: 0x11,
-                effective_from: Some(current_sequence),
-            },
-            HeadOptions {
-                effective_from: Some(current_sequence),
-                valid_through: Some(LIVE_WRITER_LEASE_THROUGH_V1),
-                not_after: UnixMillis::new(LIVE_WRITER_NOT_AFTER_V1),
-                device_id_override: Some(writer_device),
-                ..HeadOptions::default()
-            },
-        )
-        .direct_object_hash
-        .ok_or_else(|| SeedError::World("das Writer-Zertifikat hat keinen Objekthash".into()))?;
+    // Schritt 3: die Writer-Bedienerbindung. Die Fixture bringt einen Writer
+    // mit, aber ohne Kontobindung und ohne Instanzschlüssel — eine native
+    // Sitzung kann ihn so nicht führen. Die neue Bindung gilt DEMSELBEN
+    // Zertifikat, das den alten Eintrag signiert hat.
+    //
+    // Kein zweites Writer-Zertifikat: `ea-trust` macht nur das ERSTE
+    // Writer-Zertifikat einer Linie zum laufenden Writer (`registry.rs`,
+    // `current_writer_certificate_hash.is_none()`), und jedes andere gilt dem
+    // Resolver als nicht aktiv. Eine frühere Fassung dieser Saat legte eines an;
+    // die Writer-Station brach dann in JEDEM Wirt mit
+    // `EA-OPERATOR-DEVICE-CERTIFICATE-NOT-ACTIVE` ab.
+    let writer_certificate = if second_writer_certificate {
+        // NUR die Gegenprobe (`seed_demo_world_with_second_writer_certificate`):
+        // genau die frühere, falsche Form.
+        material
+            .line
+            .push(
+                ActionSpec::Device {
+                    kind: CertificateKindV1::Writer,
+                    marker: 0x11,
+                    effective_from: Some(current_sequence),
+                },
+                HeadOptions {
+                    effective_from: Some(current_sequence),
+                    valid_through: Some(LIVE_WRITER_LEASE_THROUGH_V1),
+                    not_after: UnixMillis::new(LIVE_WRITER_NOT_AFTER_V1),
+                    device_id_override: Some(writer_device),
+                    ..HeadOptions::default()
+                },
+            )
+            .direct_object_hash
+    } else {
+        ObjectHash::try_from(material.writer_certificate.as_bytes().as_slice()).ok()
+    }
+    .ok_or_else(|| SeedError::World("das Writer-Zertifikat hat keinen Objekthash".into()))?;
 
     let writer_head = material.line.push(
         ActionSpec::OperatorBinding {
