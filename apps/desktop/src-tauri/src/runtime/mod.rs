@@ -399,7 +399,8 @@ impl NativeDesktopRuntime {
     pub fn hold_native_state_for_test(&self) -> impl Drop + '_ {
         self.inner.lock().expect("state lock")
     }
-    /// Ein Publikationslauf mit der Beobachtung der aktuellen Laufzeit.
+    /// Ein Publikationslauf wie der Hostlauf: mit frisch geöffneter
+    /// Autorität statt der gehaltenen (EA-CNA-WRT-7).
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn run_network_publication_once(
@@ -410,7 +411,7 @@ impl NativeDesktopRuntime {
             .as_ref()
             .and_then(writer::WriterResources::publication)?;
         let inner = self.inner.lock().ok()?;
-        Some(publication.run_once(&inner.runtime))
+        publication.run_current(&inner.runtime)
     }
     pub fn desktop_state(self: &Arc<Self>) -> DesktopState {
         let state = if self.role == OperatorRoleV1::Writer {

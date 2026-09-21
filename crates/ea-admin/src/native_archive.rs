@@ -193,10 +193,13 @@ pub fn register_network_component(
         Some(pointer) if pointer.active_profile_hash() != profile_hash => {
             return Err(NativeArchiveOpenError::PointerConflict);
         }
-        Some(_) => ea_crypto::active_profile_pointer_digest(
-            &remote
-                .active_profile_pointer_bytes()
-                .ok_or(ArchiveBackendError::Io)?,
+        // Der Digest entsteht aus dem GEPRÜFTEN Zeiger, nicht aus einem
+        // zweiten ungeprüften Lesen: `decode_active_profile_pointer_core`
+        // nimmt nur Bytes an, die ihre eigene Neukodierung sind, also sind
+        // diese Bytes genau die gelesenen.
+        Some(pointer) => ea_crypto::active_profile_pointer_digest(
+            &ea_format::encode_active_profile_pointer_core(&pointer)
+                .map_err(ArchiveBackendError::Format)?,
         ),
     };
     // REG-2(h) und REG-6: nur lesen.
@@ -381,8 +384,12 @@ pub(crate) struct RegisteredNetworkComponent {
     pub(crate) byte_limit: u64,
 }
 
-/// Liest die Registrierung für `anchor` in einer Transaktion, ohne zu
-/// schreiben. Ohne Migration 26 gibt es keine Registrierung.
+/// Liest die Registrierung für `anchor` mit zwei gewöhnlichen Lesezugriffen
+/// wie [`anchor_registered`], ohne Transaktion und ohne zu schreiben: beide
+/// Zeilen sind per Trigger unveränderlich, eine Transaktion (unter SQLCipher
+/// `IMMEDIATE`, also mit Schreibsperre) brächte bei jedem Start keine
+/// Konsistenz, die die Zeilen nicht schon haben. Ohne Migration 26 gibt es
+/// keine Registrierung.
 ///
 /// # Errors
 ///
@@ -395,37 +402,35 @@ pub(crate) fn registered_component(
     if !database.has_migration(26)? {
         return Ok(None);
     }
-    database.transaction::<_, OperatorRuntimeError>(|tx| {
-        let Some(row) = tx.query_row(
-            "SELECT profile_hash,namespace,exact_profile FROM native_archive_component WHERE anchor_hash=?1",
-            &[StoreValue::Blob(anchor.as_bytes().to_vec())],
+    let Some(row) = database.query_row(
+        "SELECT profile_hash,namespace,exact_profile FROM native_archive_component WHERE anchor_hash=?1",
+        &[StoreValue::Blob(anchor.as_bytes().to_vec())],
+    )?
+    else {
+        return Ok(None);
+    };
+    let profile_hash = ea_crypto::archive_profile_digest(row.blob(2)?);
+    let namespace = ea_crypto::native_archive_component_namespace(anchor, profile_hash);
+    if row.blob(0)? != profile_hash.as_bytes() || row.blob(1)? != namespace.as_bytes() {
+        return Err(OperatorRuntimeError::Archive);
+    }
+    let scope = database
+        .query_row(
+            "SELECT object_limit,byte_limit FROM local_commit_scope WHERE namespace=?1",
+            &[StoreValue::Blob(namespace.as_bytes().to_vec())],
         )?
-        else {
-            return Ok(None);
-        };
-        let profile_hash = ea_crypto::archive_profile_digest(row.blob(2)?);
-        let namespace = ea_crypto::native_archive_component_namespace(anchor, profile_hash);
-        if row.blob(0)? != profile_hash.as_bytes() || row.blob(1)? != namespace.as_bytes() {
-            return Err(OperatorRuntimeError::Archive);
-        }
-        let scope = tx
-            .query_row(
-                "SELECT object_limit,byte_limit FROM local_commit_scope WHERE namespace=?1",
-                &[StoreValue::Blob(namespace.as_bytes().to_vec())],
-            )?
-            .ok_or(OperatorRuntimeError::Archive)?;
-        let limit = |value: i64| {
-            u64::try_from(value)
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or(OperatorRuntimeError::Archive)
-        };
-        Ok(Some(RegisteredNetworkComponent {
-            namespace,
-            object_limit: limit(scope.integer(0)?)?,
-            byte_limit: limit(scope.integer(1)?)?,
-        }))
-    })
+        .ok_or(OperatorRuntimeError::Archive)?;
+    let limit = |value: i64| {
+        u64::try_from(value)
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or(OperatorRuntimeError::Archive)
+    };
+    Ok(Some(RegisteredNetworkComponent {
+        namespace,
+        object_limit: limit(scope.integer(0)?)?,
+        byte_limit: limit(scope.integer(1)?)?,
+    }))
 }
 
 /// An existing local storage handle, never an active-profile pointer, complete
@@ -557,9 +562,10 @@ impl NativeArchiveExistingComponent {
     /// verlangt, und liefert kein Teilergebnis.
     ///
     /// LocalPath: alle sieben Zusagen des Zielverzeichnisses. Netzprofil:
-    /// die SQLCipher-Zusagen (EA-CNA-WRT-4) an der eigenen Datenbank und alle
-    /// sieben Zusagen des vorhandenen Netzziels, dessen Wurzel nie angelegt
-    /// wird.
+    /// die drei SQLCipher-Zusagen (EA-CNA-WRT-4) an der eigenen Datenbank und
+    /// alle sieben Zusagen des vorhandenen Netzziels, dessen Wurzel nie
+    /// angelegt wird. `RecoveryTestRuntime::new` ruft diese Methode für
+    /// LocalPath NICHT und verlangt dort unverändert nur sechs Zusagen.
     ///
     /// # Errors
     ///

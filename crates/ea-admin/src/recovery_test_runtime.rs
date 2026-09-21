@@ -130,10 +130,13 @@ pub struct RecoverySourceCapture<'a> {
     pub passphrase: &'a SecretVec,
 }
 impl RecoveryTestRuntime {
-    /// LocalPath verhält sich unverändert wie [`Self::new`]. Ein
-    /// Netzprofil entsteht nur aus der registrierten Komponente
-    /// (`open_current`), erfolgreicher SQLCipher-Capability und erfolgreichem
-    /// Capability-Test des vorhandenen Netzziels (EA-CNA-REC-1).
+    /// LocalPath verhält sich unverändert wie [`Self::new`], das sechs der
+    /// sieben Capability-Zusagen verlangt (Verbindungsabbruch und
+    /// Wiederanlauf nicht). Ein Netzprofil entsteht nur aus der registrierten
+    /// Komponente (`open_current`), den drei SQLCipher-Zusagen und ALLEN
+    /// sieben Zusagen des vorhandenen Netzziels
+    /// ([`NativeArchiveExistingComponent::require_capabilities`],
+    /// EA-CNA-REC-1).
     pub fn with_archive_config(
         runtime: OperatorRuntime,
         config: crate::native_archive::NativeArchiveConfig,

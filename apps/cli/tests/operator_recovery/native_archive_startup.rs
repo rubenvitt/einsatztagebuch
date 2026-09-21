@@ -17,6 +17,14 @@ pub(super) const MOVED: [(&str, &str); 2] = [
 
 /// Wie `RecoveryInstallation::open`, aber mit dem Fehler statt eines Panics.
 fn try_open(installed: &RecoveryInstallation) -> Result<OperatorRuntime, OperatorRuntimeError> {
+    try_open_with(installed, false)
+}
+
+/// Wie `try_open`; `initialize_native` wie bei `operator provision`.
+fn try_open_with(
+    installed: &RecoveryInstallation,
+    initialize_native: bool,
+) -> Result<OperatorRuntime, OperatorRuntimeError> {
     let native = NativeOperatorProvider::open_test_fixture(
         installed.directory.path().join("ea-native-operator"),
         false,
@@ -30,7 +38,7 @@ fn try_open(installed: &RecoveryInstallation) -> Result<OperatorRuntime, Operato
         OperatorRuntimeConfig::load(&installed.config).unwrap(),
         &installed.anchor,
         support::live_clock(),
-        false,
+        initialize_native,
         native,
         host,
     )
@@ -173,4 +181,83 @@ fn local_path_startup_is_unchanged() {
     fs::rename(&installed.archive, installed.archive.with_extension("away")).unwrap();
     assert_eq!(code(reopened.reopened_for_action()), "EA-OPERATOR-IO");
     assert_eq!(code(try_open(&installed)), "EA-OPERATOR-IO");
+}
+
+/// Ohne Datenbank kann es keine Registrierung geben: der Archiv-Snapshot
+/// wird wie vor DRK-320 vor nativem Schlüssel und Datenbank geöffnet. Eine
+/// Bereitstellung gegen ein fehlendes Archiv endet deshalb wie bisher mit
+/// Io und hinterlässt weder Datenbank noch Schlüsselmaterial. Ohne
+/// Bereitstellung weist schon das Erwerbstor die fehlende Datenbank ab, vor
+/// jedem Archivzugriff — auch das unverändert.
+#[test]
+fn local_path_cold_start_opens_the_archive_before_key_and_database() {
+    let installed = RecoveryInstallation::with_target_and_epochs(None, false);
+    let database = installed.directory.path().join("operator.sqlite");
+    let calls = installed.directory.path().join("helper-calls");
+    fs::remove_file(&database).unwrap();
+    fs::rename(&installed.archive, installed.archive.with_extension("away")).unwrap();
+    // Ohne Schlüssel würde eine Bereitstellung ihn erzeugen: `contains`
+    // meldet ihn als fehlend, `generate` wäre die Erzeugung.
+    fs::write(installed.directory.path().join("helper-mode"), "database-key-missing").unwrap();
+
+    assert_eq!(code(try_open(&installed)), "EA-OPERATOR-DATABASE-REQUIRED");
+    assert!(!database.exists(), "no database without provisioning");
+
+    let before = fs::read_to_string(&calls).unwrap_or_default().lines().count();
+    assert_eq!(code(try_open_with(&installed, true)), "EA-OPERATOR-IO");
+    assert!(!database.exists(), "provisioning left a database file");
+    let after = fs::read_to_string(&calls).unwrap_or_default();
+    let key_calls: Vec<_> = after
+        .lines()
+        .skip(before)
+        .filter(|line| line.starts_with("contains ") || line.starts_with("generate "))
+        .collect();
+    assert!(
+        key_calls.is_empty(),
+        "no key probe or key creation before the archive: {key_calls:?}"
+    );
+}
+
+/// EA-CNA-SRC-4: eine Grundlinie tritt nur an die Stelle DESSELBEN
+/// kanonischen Netzziels. Zeigt der konfigurierte Pfad inzwischen woanders
+/// hin (hier ein umgebogener Symlink), ist das Netzziel nicht lesbar — die
+/// alte Grundlinie wird weder genommen noch ihr Ort live gelesen.
+#[test]
+fn a_baseline_stands_in_only_for_the_same_canonical_target() {
+    let installed = RecoveryInstallation::with_profile(None, true, Some(profile()));
+    let expected = register_and_move_head(&installed);
+    let real = installed.archive.with_extension("real");
+    fs::rename(&installed.archive, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &installed.archive).unwrap();
+    let runtime = installed.open();
+    assert_eq!(runtime.next_sequence(), expected);
+    let retarget = |target: &Path| {
+        fs::remove_file(&installed.archive).unwrap();
+        std::os::unix::fs::symlink(target, &installed.archive).unwrap();
+    };
+
+    // Kanonisierbar, aber ein anderes und nicht lesbares Ziel.
+    let decoy = installed.directory.path().join("decoy-file");
+    fs::write(&decoy, b"not an archive").unwrap();
+    retarget(&decoy);
+    assert_eq!(
+        code(runtime.reopened_for_action()),
+        "EA-OPERATOR-NETWORK-ARCHIVE-UNAVAILABLE"
+    );
+
+    // Nicht kanonisierbar: der Pfad zeigt ins Leere.
+    retarget(&installed.directory.path().join("gone"));
+    assert_eq!(
+        code(runtime.reopened_for_action()),
+        "EA-OPERATOR-NETWORK-ARCHIVE-UNAVAILABLE"
+    );
+
+    // Gegenprobe: dasselbe kanonische Ziel, nur nicht lesbar — die
+    // Grundlinie trägt.
+    use std::os::unix::fs::PermissionsExt as _;
+    retarget(&real);
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o000)).unwrap();
+    let reopened = runtime.reopened_for_action();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(reopened.unwrap().next_sequence(), expected);
 }

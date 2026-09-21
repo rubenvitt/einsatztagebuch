@@ -73,13 +73,14 @@ impl WriterArchive {
 /// (EA-CNA-PUB-8 (c)).
 ///
 /// Ein einziger `std::thread` führt [`NetworkPublicationHost::run_loop`] aus.
-/// Jeder Lauf braucht die Beobachtung des Netzziels mit der aktuellen
-/// Writer-Autorität (EA-CNA-WRT-7); die holt der Lauf über einen schwachen
-/// Griff auf den Wirt und nur per `try_lock` — hält gerade eine Aktion oder
-/// ein Präsenzdialog den Zustand, entfällt dieser Lauf (die Aktion
-/// veröffentlicht in Schritt 12 selbst). Beim Abbau wird der Lauf beendet und
-/// auf den Thread gewartet; ein hängender Mount hält den Abbau bis zum Ende
-/// seines laufenden Aufrufs auf (bekannte Grenze aus Task 6).
+/// Nur ein Lauf mit ausstehendem Plan braucht die Beobachtung des Netzziels
+/// mit der aktuellen Writer-Autorität (EA-CNA-WRT-7); nur dann nimmt er den
+/// Wirtszustand über einen schwachen Griff und per `try_lock` (Einzelheiten
+/// an [`Self::start`]). Die Autorität wird dafür frisch geöffnet
+/// ([`Self::run_current`]), nie die gehaltene wiederverwendet. Beim Abbau
+/// wird der Lauf beendet und auf den Thread gewartet; ein hängender Mount
+/// hält den Abbau bis zum Ende seines laufenden Aufrufs auf (bekannte Grenze
+/// aus Task 6).
 pub(super) struct NetworkPublication {
     host: Arc<NetworkPublicationHost>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -118,19 +119,11 @@ impl NetworkPublication {
                 let Ok(mut inner) = native.inner.try_lock() else {
                     return false;
                 };
-                {
-                    let runtime = &inner.runtime;
-                    let observer = WriterCustodyObserverV1::new(
-                        runtime.database().clone(),
-                        runtime.head(),
-                        runtime.config().device_certificate_hash,
-                    );
-                    let _ = host.run_once(&observer);
-                }
+                let ran = run_current_on(host, &inner.runtime).is_some();
                 if native.session_epoch.load(Ordering::SeqCst) & 1 != 0 {
                     inner.invalidate();
                 }
-                true
+                ran
             });
         });
         *self.worker.lock().unwrap_or_else(PoisonError::into_inner) = Some(worker);
@@ -160,7 +153,8 @@ impl NetworkPublication {
             }
         }
     }
-    /// Ein Lauf mit der Beobachtung der gegebenen Laufzeit.
+    /// Ein Lauf mit der Beobachtung der gegebenen Laufzeit. Nur für den
+    /// Writer-Start, dessen Laufzeit gerade frisch geöffnet wurde.
     pub(super) fn run_once(
         &self,
         runtime: &OperatorRuntime,
@@ -170,6 +164,57 @@ impl NetworkPublication {
             runtime.head(),
             runtime.config().device_certificate_hash,
         ))
+    }
+    /// Ein Lauf außerhalb einer Aktion mit FRISCH geöffneter Autorität
+    /// (siehe [`run_current_on`]); `None`, wenn er entfiel. Der Fixture-
+    /// Einstieg des Hostlaufs.
+    #[cfg(feature = "test-support")]
+    pub(super) fn run_current(
+        &self,
+        runtime: &OperatorRuntime,
+    ) -> Option<Result<ea_archive_fs::PublicationStateV1, ArchiveBackendError>> {
+        run_current_on(&self.host, runtime)
+    }
+}
+
+/// Ein Lauf außerhalb einer Aktion (Hostlauf und sein Fixture-Einstieg).
+///
+/// Die gehaltene Laufzeit kann seit ihrem Öffnen abgelöst sein: ein neuer
+/// Writer, ein Widerruf oder ein neuer Head im Netzziel. Beobachtet wird
+/// deshalb nie mit ihrem Head, sondern mit einer frisch geöffneten Autorität
+/// (`reopened_for_action`, die gehaltene Laufzeit bleibt unberührt — eine
+/// gehaltene Vorschau behält so ihre Bindung). Scheitert die Wiederöffnung,
+/// scheitert die WRT-7-Beobachtung, und es wird nichts veröffentlicht; ein
+/// nicht lesbares Netzziel wartet wie sonst auch. Ohne aktive Sitzung
+/// entfällt der Lauf (`None`), statt einen Befund einzutragen.
+fn run_current_on(
+    host: &NetworkPublicationHost,
+    runtime: &OperatorRuntime,
+) -> Option<Result<ea_archive_fs::PublicationStateV1, ArchiveBackendError>> {
+    runtime.native().ensure_session_active().ok()?;
+    Some(match runtime.reopened_for_action() {
+        Ok(fresh) => host.run_once(&WriterCustodyObserverV1::new(
+            fresh.database().clone(),
+            fresh.head(),
+            fresh.config().device_certificate_hash,
+        )),
+        Err(error) => host.run_once(&RefusedAuthority(error)),
+    })
+}
+
+/// Die WRT-7-Beobachtung, wenn sich die aktuelle Autorität nicht öffnen
+/// lässt: sie scheitert immer. Ein nicht lesbares Netzziel meldet `Io`
+/// (der Host macht daraus `Netzarchiv wartet`), alles andere ist ein Befund.
+struct RefusedAuthority(ea_admin::operator_runtime::OperatorRuntimeError);
+impl ea_admin::network_publication::NetworkTargetObserverV1 for RefusedAuthority {
+    fn observe_network_target(&self, _: &LocalPathBackend) -> Result<(), ArchiveBackendError> {
+        use ea_admin::operator_runtime::OperatorRuntimeError;
+        Err(match self.0 {
+            OperatorRuntimeError::Io | OperatorRuntimeError::NetworkArchiveUnavailable => {
+                ArchiveBackendError::Io
+            }
+            _ => ArchiveBackendError::VerificationFailed,
+        })
     }
 }
 impl Drop for NetworkPublication {
