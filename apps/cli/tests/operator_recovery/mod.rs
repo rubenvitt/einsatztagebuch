@@ -1,6 +1,7 @@
 mod native_archive_existing_component;
 mod native_archive_registration;
 mod native_archive_startup;
+pub(crate) mod native_archive_writer_registration;
 mod native_archive_source;
 mod guided;
 use super::*;

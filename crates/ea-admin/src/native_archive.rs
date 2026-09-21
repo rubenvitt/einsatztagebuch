@@ -47,7 +47,8 @@ pub enum NativeArchiveOpenError {
     Config,
     Runtime(OperatorRuntimeError),
     Backend(ArchiveBackendError),
-    /// Registrierung ohne `OrganizationAdmin` (EA-CNA-REG-1).
+    /// Registrierung durch eine andere Rolle als `OrganizationAdmin` oder
+    /// `Writer` oder durch eine Authority-Konfiguration (EA-CNA-REG-1).
     Role,
     /// Abweichende vorhandene Registrierung oder Scope-Zeile (EA-CNA-REG-6).
     RegistrationConflict,
@@ -103,7 +104,12 @@ pub enum NativeArchiveRegistrationOutcome {
 }
 
 /// Registriert die lokale SQLCipher-Komponente eines Netzprofils einmal je
-/// Anker (EA-CNA-REG-1 … REG-8).
+/// Anker (EA-CNA-REG-1 … REG-8) in der EIGENEN Datenbank der Runtime.
+///
+/// Registrieren darf eine Current-Runtime mit Rolle `OrganizationAdmin` oder
+/// `Writer`: die frische Präsenz ist an die Profilzeile der eigenen Datenbank
+/// gebunden, und die Autorität für das Profil liegt in der signierten Policy
+/// des verifizierten Heads, nicht in der registrierenden Rolle.
 ///
 /// Alle Vorbedingungen werden lesend und in der Reihenfolge von
 /// EA-CNA-REG-2 geprüft, bevor eine frische Präsenz verlangt wird. Scope-,
@@ -114,7 +120,7 @@ pub enum NativeArchiveRegistrationOutcome {
 ///
 /// # Errors
 ///
-/// `Role` ohne `OrganizationAdmin`; `Config` für eine unpassende Form;
+/// `Role` für eine andere Rolle oder eine Authority-Konfiguration; `Config` für eine unpassende Form;
 /// `Backend` für Policy, fehlende Migrationen oder ein unerreichbares
 /// Netzziel; `Capability`, `PointerConflict`, `RegistrationConflict` und
 /// `Audit` wie in der Spezifikation; `Runtime` für Autorität und Präsenz.
@@ -130,7 +136,7 @@ pub fn register_network_component(
 > {
     // REG-1: Current-Autorität und Rolle vor jeder Prüfung.
     runtime.ensure_current()?;
-    require_admin(runtime.config().role)?;
+    require_registering_role(runtime.config().role, runtime.config().authority)?;
     let database = runtime.database();
     // REG-2(a): Netzprofil mit derselben SQLCipher-Datei wie die Runtime.
     let ArchiveBackendProfileV1::ControlledNetworkPath(profile) = &config.profile else {
@@ -266,8 +272,18 @@ pub fn register_network_component(
     Ok((NativeArchiveRegistrationOutcome::Registered, component))
 }
 
-fn require_admin(role: OperatorRoleV1) -> Result<(), NativeArchiveOpenError> {
-    if role == OperatorRoleV1::OrganizationAdmin {
+/// EA-CNA-REG-1: `OrganizationAdmin` oder `Writer` registrieren die eigene
+/// Datenbank; jede andere Rolle und jede Authority-Konfiguration nie.
+fn require_registering_role(
+    role: OperatorRoleV1,
+    authority: bool,
+) -> Result<(), NativeArchiveOpenError> {
+    if !authority
+        && matches!(
+            role,
+            OperatorRoleV1::OrganizationAdmin | OperatorRoleV1::Writer
+        )
+    {
         Ok(())
     } else {
         Err(NativeArchiveOpenError::Role)
@@ -626,10 +642,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registration_is_refused_for_a_writer_runtime() {
-        let refused = require_admin(OperatorRoleV1::Writer);
-        assert!(matches!(refused, Err(NativeArchiveOpenError::Role)));
-        assert_eq!(refused.unwrap_err().code(), "EA-NATIVE-ARCHIVE-ROLE");
-        assert!(require_admin(OperatorRoleV1::OrganizationAdmin).is_ok());
+    fn registration_admits_admin_and_writer_and_refuses_every_other_role() {
+        assert!(require_registering_role(OperatorRoleV1::OrganizationAdmin, false).is_ok());
+        assert!(require_registering_role(OperatorRoleV1::Writer, false).is_ok());
+        for refused in [
+            require_registering_role(OperatorRoleV1::Reader, false),
+            require_registering_role(OperatorRoleV1::OrganizationAdmin, true),
+            require_registering_role(OperatorRoleV1::Writer, true),
+        ] {
+            assert!(matches!(refused, Err(NativeArchiveOpenError::Role)));
+            assert_eq!(refused.unwrap_err().code(), "EA-NATIVE-ARCHIVE-ROLE");
+        }
     }
 }

@@ -314,7 +314,7 @@ fn registration_refuses_every_precondition_without_writes() {
 /// `register-network-archive` durch die tatsächliche Argumentgrammatik und
 /// Ausgabeform läuft — nicht durch einen direkten Bibliotheksaufruf wie die
 /// übrigen Tests dieser Datei.
-fn run_operator_fixture(directory: &Path, arguments: &[String]) -> std::process::Output {
+pub(super) fn run_operator_fixture(directory: &Path, arguments: &[String]) -> std::process::Output {
     let mut output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",

@@ -48,20 +48,30 @@ Profil ergibt einen anderen Namensraum und ist deshalb ein Profilwechsel nach
 
 ## 3. Registrierung und Aktivierung
 
-**EA-CNA-REG-1 (Wer).** Registrieren darf ausschließlich eine
-`OperatorRuntime` mit Rolle `OrganizationAdmin` unter Current-Autorität
-(`ensure_current` vor jeder Prüfung und unmittelbar vor dem Schreiben). Ein
-Writer, ein StaleWriter-Kontext oder eine Recovery-Zielinstallation
-registriert nie. Die Runtime muss dieselbe native Installation und dieselbe
-SQLCipher-Datei nutzen wie der spätere Writer: der kanonische Pfad von
+**EA-CNA-REG-1 (Wer).** Registrieren darf eine `OperatorRuntime` unter
+Current-Autorität (`ensure_current` vor jeder Prüfung und unmittelbar vor dem
+Schreiben) mit Rolle `OrganizationAdmin` oder `Writer`, und zwar
+ausschließlich ihre EIGENE Datenbank: der kanonische Pfad von
 `NativeArchiveConfig::local_commit_database_path` ist gleich dem kanonischen
-`runtime.database().path()`.
+`runtime.database().path()`. Jede andere Rolle, jede Authority-Konfiguration,
+ein StaleWriter-Kontext und eine Recovery-Zielinstallation registrieren nie
+(`EA-NATIVE-ARCHIVE-ROLE`). Die Registrierung verlangt die eigene frische
+Präsenz der Runtime (`ReauthPurpose::ArchiveProfileMigration`), bucht ein
+eigenes signiertes Audit (`AuditActorProof::OperatorSession`), verlangt den
+exakten Profilhash in der signierten Policy des verifizierten Heads
+(`allowed_archive_profile_hashes`, REG-2(c)), schreibt einmalig und lehnt
+eine abweichende vorhandene Zeile ab (REG-6).
 
-Rolle und Datenbank widersprechen sich nicht: der SQLCipher-Schlüssel ist je
-nativer Installation ein einziger (`SecretPurpose::LocalDatabaseKey`, Slot
-`database-key`, unabhängig vom Signierslot der Rolle), sodass eine
-Admin- und eine Writer-Konfiguration derselben Installation denselben
-`database_path` öffnen.
+Warum nicht nur `OrganizationAdmin`: Eine Präsenz ist an die einzige
+Profilzeile der eigenen Datenbank gebunden (`operator_profile`, Singleton;
+`verify_session` verlangt deren Bindung). Eine Admin-Runtime kann deshalb
+keine frische Präsenz auf der Datenbank eines Writers erbringen; die frühere
+Admin-only-Regel machte einen Netz-Writer unregistrierbar. Die Autorität für
+das Profil liegt ohnehin nicht in der registrierenden Rolle, sondern in der
+vom Admin signierten Policy: ohne dortigen Profilhash scheitert jede Rolle
+mit `EA-ARCHIVE-PROFILE-NOT-ALLOWED`. Die Registrierung erzeugt weder Trust
+noch Autorität; sie bindet nur die eigene lokale Ablage an ein bereits
+zugelassenes Profil.
 
 **EA-CNA-REG-2 (Vorbedingungen, lesend, in dieser Reihenfolge).** (a) Das
 Profil ist ein Netzprofil und `local_commit_database_path` ist gesetzt;
@@ -369,7 +379,7 @@ nie die wiederhergestellte.
 | Code | Bedeutung |
 |---|---|
 | `EA-NATIVE-ARCHIVE-CONFIG` | Form: Netzprofil ohne DB-Pfad, LocalPath mit DB-Pfad, abweichende Datenbank |
-| `EA-NATIVE-ARCHIVE-ROLE` | Registrierung ohne `OrganizationAdmin` |
+| `EA-NATIVE-ARCHIVE-ROLE` | Registrierung durch eine andere Rolle als `OrganizationAdmin`/`Writer` oder durch eine Authority-Konfiguration |
 | `EA-NATIVE-ARCHIVE-REGISTRATION-CONFLICT` | abweichende vorhandene Registrierung oder Scope-Zeile |
 | `EA-NATIVE-ARCHIVE-POINTER-CONFLICT` | Profilzeiger im Netzziel nennt ein anderes Profil |
 | `EA-NATIVE-ARCHIVE-PROFILE-MISMATCH` | LocalPath-Konfiguration trotz Registrierung |
