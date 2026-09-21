@@ -359,7 +359,7 @@ AK-48 stehen auf Stufe 2 `integrated` und decken nur die Profilzulassung in
 drei Zeugen in `crates/ea-recovery/tests/fs_source_union.rs` seit `1e7f835`
 (`FsArchiveSource::with_exact_component`), der letzte,
 `apps/cli/tests/operator_recovery/native_archive.rs`, mit DRK-320. Der
-tatsaechlich gemountete Netz-Positivzeuge bleibt Stufe-7-Evidenz. Ein
+tatsächlich gemountete Netz-Positivzeuge bleibt Stufe-7-Evidenz. Ein
 Kaltstart einer Controlled-Network-Laufzeit braucht einen lesbaren
 Remote-Pfad; ein Offline-Kaltstart bräuchte eine verifizierte lokale Kopie
 des Remote (siehe die Spezifikation
