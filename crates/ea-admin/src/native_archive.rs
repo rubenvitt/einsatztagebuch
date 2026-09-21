@@ -322,9 +322,19 @@ fn anchor_registered(
 /// The measured network carrier remains private: reconnect requires a separate
 /// activation-pointer contract which this type deliberately does not provide.
 pub struct NativeArchiveExistingComponent {
-    backend: Box<dyn ArchiveBackend>,
-    _component: Option<ControlledNetworkLocalComponentV1>,
+    storage: ComponentStorage,
+    profile: ArchiveBackendProfileV1,
     profile_hash: Hash32,
+}
+
+/// Die konkrete lokale Ablage; für ein Netzprofil zusätzlich der zugelassene
+/// Träger des Netzziels, der selbst nie aufs Netz zugreift.
+enum ComponentStorage {
+    Local(LocalPathBackend),
+    Network {
+        backend: SqlcipherArchiveBackend,
+        _component: ControlledNetworkLocalComponentV1,
+    },
 }
 impl NativeArchiveExistingComponent {
     /// Uses actual Current readiness both before admission and before return.
@@ -365,10 +375,72 @@ impl NativeArchiveExistingComponent {
     /// Only local storage primitives. Each later privileged operation still
     /// needs its own current authority; this handle grants none.
     pub fn local_backend(&self) -> &dyn ArchiveBackend {
-        self.backend.as_ref()
+        match &self.storage {
+            ComponentStorage::Local(backend) => backend,
+            ComponentStorage::Network { backend, .. } => backend,
+        }
     }
     pub fn profile_hash(&self) -> Hash32 {
         self.profile_hash
+    }
+    /// Ist dies die lokale Komponente eines kontrollierten Netzprofils?
+    #[must_use]
+    pub fn is_network(&self) -> bool {
+        matches!(self.storage, ComponentStorage::Network { .. })
+    }
+    /// Das SQLCipher-Backend eines Netzprofils; für LocalPath keines.
+    #[must_use]
+    pub fn sqlcipher_backend(&self) -> Option<&SqlcipherArchiveBackend> {
+        match &self.storage {
+            ComponentStorage::Local(_) => None,
+            ComponentStorage::Network { backend, .. } => Some(backend),
+        }
+    }
+
+    /// Misst die Capabilities, die ein Verbraucher vor seinem ersten Dienst
+    /// verlangt, und liefert kein Teilergebnis.
+    ///
+    /// LocalPath: alle sieben Zusagen des Zielverzeichnisses. Netzprofil:
+    /// die SQLCipher-Zusagen (EA-CNA-WRT-4) an der eigenen Datenbank und alle
+    /// sieben Zusagen des vorhandenen Netzziels, dessen Wurzel nie angelegt
+    /// wird.
+    ///
+    /// # Errors
+    ///
+    /// `Capability` für eine nicht belegte Zusage; `Backend` für Policy,
+    /// Lock-Konkurrenz oder ein unerreichbares Ziel.
+    pub fn require_capabilities(
+        &self,
+        archive_directory: &Path,
+        policy: &BoundArchiveProfilePolicyV1,
+    ) -> Result<(), NativeArchiveOpenError> {
+        let vector = CapabilityTestVectorV1::new(
+            match &self.profile {
+                ArchiveBackendProfileV1::LocalPath(profile) => &profile.capability_test_vector_id,
+                ArchiveBackendProfileV1::ControlledNetworkPath(profile) => {
+                    &profile.capability_test_vector_id
+                }
+            },
+            b"EINSATZARCHIV-NATIVE-CAPABILITY-v1",
+        )?;
+        let proven = match &self.storage {
+            ComponentStorage::Local(backend) => backend.run_capability_test(&vector)?.all_proven(),
+            ComponentStorage::Network { backend, .. } => {
+                backend.run_capability_test()?.all_proven()
+                    && LocalPathBackend::open_existing(
+                        archive_directory.to_owned(),
+                        self.profile.clone(),
+                        policy,
+                    )?
+                    .run_capability_test(&vector)?
+                    .all_proven()
+            }
+        };
+        if proven {
+            Ok(())
+        } else {
+            Err(NativeArchiveOpenError::Capability)
+        }
     }
 
     fn open(
@@ -398,11 +470,14 @@ impl NativeArchiveExistingComponent {
         let ArchiveBackendProfileV1::ControlledNetworkPath(profile) = &config.profile else {
             // Compatible LocalPath behavior: this may materialize local format
             // files after policy admission, as the existing backend does.
-            let backend =
-                LocalPathBackend::open(archive_directory.to_owned(), config.profile, &policy)?;
+            let backend = LocalPathBackend::open(
+                archive_directory.to_owned(),
+                config.profile.clone(),
+                &policy,
+            )?;
             return Ok(Self {
-                backend: Box::new(backend),
-                _component: None,
+                storage: ComponentStorage::Local(backend),
+                profile: config.profile,
                 profile_hash,
             });
         };
@@ -458,12 +533,15 @@ impl NativeArchiveExistingComponent {
         let component = ControlledNetworkBackend::open_local_component(
             archive_directory.to_owned(),
             Some(LocalCommitComponentV1::new(actual, Box::new(measurement))),
-            config.profile,
+            config.profile.clone(),
             &policy,
         )?;
         Ok(Self {
-            backend: Box::new(backend),
-            _component: Some(component),
+            storage: ComponentStorage::Network {
+                backend,
+                _component: component,
+            },
+            profile: config.profile,
             profile_hash,
         })
     }

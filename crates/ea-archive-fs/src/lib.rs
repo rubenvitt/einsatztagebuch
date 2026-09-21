@@ -32,7 +32,7 @@ mod profile_migration;
 mod publication_queue;
 mod sqlcipher_backend;
 mod sqlcipher_commit;
-pub use sqlcipher_backend::SqlcipherArchiveBackend;
+pub use sqlcipher_backend::{SqlcipherArchiveBackend, SqlcipherCapabilityReportV1};
 pub use sqlcipher_commit::SqliteCommitStore;
 
 pub use bundle::{BundleExportReport, open_archive_bundle, write_archive_bundle};

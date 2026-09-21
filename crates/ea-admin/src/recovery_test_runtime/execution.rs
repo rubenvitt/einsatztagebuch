@@ -158,8 +158,7 @@ impl RecoveryTestRuntime {
         {
             return Err(RecoveryTestError::Source.into());
         }
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let scope = ea_recovery::verify_recovery_source(
             row.blob(9)?,
             &source,
@@ -255,7 +254,7 @@ impl RecoveryTestRuntime {
         observer: &mut dyn RecoverySessionObserver,
     ) -> Result<RecoveryTestOutcome, RecoveryRuntimeError> {
         guide.ensure_active()?;
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
         self.runtime.refresh_for_action()?;
         let (binding, scope) = self.checked_restore_binding(inventory)?;
         if scope.envelope_hash() != restored.scope.envelope_hash()
@@ -266,8 +265,7 @@ impl RecoveryTestRuntime {
         restored.verify_unchanged()?;
         guide.ensure_active()?;
         let mut native_slots = std::collections::BTreeSet::new();
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let opening = self.runtime.reopened_for_action()?;
         let mut run = ea_recovery::RecoveryTestRun::new(
             &scope,
@@ -291,8 +289,7 @@ impl RecoveryTestRuntime {
             guide.ensure_active()?;
             self.refresh_after_guided_wait(&opening)?;
             restored.verify_unchanged()?;
-            let after_wait = FsArchiveSource::open(&self.runtime.config().archive_directory)
-                .map_err(|_| RecoveryTestError::Source)?;
+            let after_wait = self.archive_source()?;
             if ea_recovery::recovery_archive_inventory_hash(&after_wait)?
                 != scope.core().fields().archive_inventory_hash
             {
@@ -347,8 +344,7 @@ impl RecoveryTestRuntime {
             // The owned private routing input has dropped at this boundary.
             self.runtime.ensure_same_action_authority()?;
             restored.verify_unchanged()?;
-            let after = FsArchiveSource::open(&self.runtime.config().archive_directory)
-                .map_err(|_| RecoveryTestError::Source)?;
+            let after = self.archive_source()?;
             if ea_recovery::recovery_archive_inventory_hash(&after)?
                 != scope.core().fields().archive_inventory_hash
             {
@@ -393,8 +389,7 @@ impl RecoveryTestRuntime {
                 let session =
                     self.reauthenticate_observed(Some(core.context_hash()), guide, observer)?;
                 restored.verify_unchanged()?;
-                let after = FsArchiveSource::open(&self.runtime.config().archive_directory)
-                    .map_err(|_| RecoveryTestError::Source)?;
+                let after = self.archive_source()?;
                 if ea_recovery::recovery_archive_inventory_hash(&after)?
                     != scope.core().fields().archive_inventory_hash
                 {
@@ -460,8 +455,7 @@ impl RecoveryTestRuntime {
         guide.ensure_active()?;
         let session = self.reauthenticate_observed(Some(core.context_hash()), guide, observer)?;
         restored.verify_unchanged()?;
-        let after = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let after = self.archive_source()?;
         if ea_recovery::recovery_archive_inventory_hash(&after)?
             != scope.core().fields().archive_inventory_hash
         {
@@ -513,7 +507,7 @@ impl RecoveryTestRuntime {
         inventory: &KeyInventory,
         restored: &Path,
     ) -> Result<Option<VerifiedCompletedRecoveryReport>, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
         self.runtime.refresh_for_action()?;
         let restored = self.open_bound_sources(inventory, restored)?;
         let row = self.runtime.database().query_row(
@@ -522,8 +516,7 @@ impl RecoveryTestRuntime {
         let Some(row) = row else {
             return Ok(None);
         };
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let report = ea_recovery::verify_completed_recovery_report(
             row.blob(2)?,
             &restored.scope,
@@ -559,7 +552,7 @@ impl RecoveryTestRuntime {
         inventory: &KeyInventory,
         restored: &Path,
     ) -> Result<Option<ea_recovery::VerifiedFailedRecoveryReport>, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
         self.runtime.refresh_for_action()?;
         let restored = self.open_bound_sources(inventory, restored)?;
         let row = self.runtime.database().query_row(
@@ -568,8 +561,7 @@ impl RecoveryTestRuntime {
         let Some(row) = row else {
             return Ok(None);
         };
-        let source = FsArchiveSource::open(&self.runtime.config().archive_directory)
-            .map_err(|_| RecoveryTestError::Source)?;
+        let source = self.archive_source()?;
         let report = ea_recovery::verify_failed_recovery_report(
             row.blob(2)?,
             &restored.scope,

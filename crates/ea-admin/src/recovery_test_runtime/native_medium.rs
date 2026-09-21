@@ -98,7 +98,7 @@ impl RecoveryTestRuntime {
         medium: &RecoveryMedium,
         slot: RecoveryNativeSigningSlot,
     ) -> Result<ea_recovery::VerifiedBackupChallenge, RecoveryRuntimeError> {
-        let _writer = self.backend.acquire_writer_lock()?;
+        let _locks = self.archive_locks()?;
         self.runtime.refresh_for_action()?;
         self.runtime
             .reauthenticate_for(ReauthPurpose::RecoveryTest)?;

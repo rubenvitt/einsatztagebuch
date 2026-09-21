@@ -13,6 +13,36 @@ use std::{
     sync::Arc,
 };
 
+/// Die drei SQLCipher-Zusagen aus EA-CNA-WRT-4, jede einzeln ausgewiesen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SqlcipherCapabilityReportV1 {
+    durable_wal_full: bool,
+    physical_flush: bool,
+    exclusive_writer_lock: bool,
+}
+impl SqlcipherCapabilityReportV1 {
+    /// Nur wenn alle drei Zusagen gemessen wurden.
+    #[must_use]
+    pub const fn all_proven(&self) -> bool {
+        self.durable_wal_full && self.physical_flush && self.exclusive_writer_lock
+    }
+    /// WAL-Journal und `synchronous=FULL` in einer schreibenden Transaktion.
+    #[must_use]
+    pub const fn durable_wal_full(&self) -> bool {
+        self.durable_wal_full
+    }
+    /// Physischer Flush von Datenbank, WAL-Datei und Elternverzeichnis.
+    #[must_use]
+    pub const fn physical_flush(&self) -> bool {
+        self.physical_flush
+    }
+    /// Exklusivität des Writer-Locks über zwei unabhängige Datei-Handles.
+    #[must_use]
+    pub const fn exclusive_writer_lock(&self) -> bool {
+        self.exclusive_writer_lock
+    }
+}
+
 pub struct SqlcipherArchiveBackend {
     store: SqliteCommitStore,
     database_path: PathBuf,
@@ -34,6 +64,47 @@ impl SqlcipherArchiveBackend {
         };
         backend.transaction(|_| Ok(()))?;
         Ok(backend)
+    }
+    /// Misst EA-CNA-WRT-4 an genau dieser Datenbank und schreibt dabei kein
+    /// Objekt, kein Verzeichnis und keine Sondenzeile.
+    ///
+    /// Zuerst der Lock: der eigene Writer-Lock wird genommen, ein zweites,
+    /// unabhängiges Handle auf dieselbe Lock-Datei darf ihn nicht bekommen und
+    /// muss ihn nach der Freigabe bekommen. Danach eine schreibende
+    /// Transaktion mit Dauerhaftigkeitsprüfung und physischem Flush.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::AlreadyLocked`], wenn ein anderer Writer den
+    /// Lock hält; [`ArchiveBackendError::FlushFailed`], wenn WAL/FULL oder der
+    /// physische Flush nicht belegt sind. Ein Fehler ist nie ein Teilbericht.
+    pub fn run_capability_test(&self) -> Result<SqlcipherCapabilityReportV1, ArchiveBackendError> {
+        let held = self.acquire_writer_lock()?;
+        let second = OpenOptions::new()
+            .write(true)
+            .open(self.writer_lock_path())
+            .map_err(|_| ArchiveBackendError::Io)?;
+        let contended = second.try_lock().is_err();
+        drop(held);
+        let released = second.try_lock().is_ok();
+        if released {
+            let _ = second.unlock();
+        }
+        // Dieselbe schreibende Transaktion wie jeder Commit: `transaction`
+        // verlangt WAL und FULL, `flush_physical` den Flush. Ein Fehlschlag
+        // beider kommt als `FlushFailed` zurück und wird nicht zu `false`
+        // umgedeutet.
+        self.transaction(|_| self.flush_physical())?;
+        Ok(SqlcipherCapabilityReportV1 {
+            durable_wal_full: true,
+            physical_flush: true,
+            exclusive_writer_lock: contended && released,
+        })
+    }
+    fn writer_lock_path(&self) -> PathBuf {
+        let mut name = self.database_path.as_os_str().to_os_string();
+        name.push(".archive-writer.lock");
+        PathBuf::from(name)
     }
     fn transaction<T>(
         &self,
@@ -244,9 +315,7 @@ impl ArchiveBackend for SqlcipherArchiveBackend {
     fn acquire_writer_lock(&self) -> Result<WriterLock, ArchiveBackendError> {
         // All namespaces on the canonical native database share one Writer
         // lock. The existing separate DraftLock is neither replaced nor held.
-        let mut name = self.database_path.as_os_str().to_os_string();
-        name.push(".archive-writer.lock");
-        let path = PathBuf::from(name);
+        let path = self.writer_lock_path();
         let file = OpenOptions::new()
             .write(true)
             .create(true)
