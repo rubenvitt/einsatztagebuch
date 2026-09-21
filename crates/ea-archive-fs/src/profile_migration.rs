@@ -683,7 +683,7 @@ impl<'a> ProfileMigrator<'a> {
 /// Sie leitet das tragende Layoutverzeichnis aus dem Pfad ab, statt es zu
 /// erraten: eine Wurzeldatei der Layoutliste wird als solche adressiert, alles
 /// andere unterhalb seines Verzeichnisses.
-fn archive_path_of(relative: &str) -> Result<ArchivePath, ArchiveBackendError> {
+pub(crate) fn archive_path_of(relative: &str) -> Result<ArchivePath, ArchiveBackendError> {
     if let Ok(path) = ArchivePath::at_layout_file(relative) {
         return Ok(path);
     }

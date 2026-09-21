@@ -1033,6 +1033,106 @@ pub fn two_grants_and_one_entry() -> PlannedPublicationV1 {
     ])
 }
 
+/// EIN Grant, `count`-fach unter fortlaufenden, mit `prefix` beginnenden
+/// Adressen — fuer Zusammenfuehrungs- und Grenztests, die eine zweite,
+/// beliebig grosse Menge ADRESSDISJUNKTER Objekte brauchen.
+#[must_use]
+pub fn planned_grants(count: usize, prefix: &str) -> PlannedPublicationV1 {
+    let bytes = signed_grant_a().into_vec();
+    let objects = (0..count)
+        .map(|index| {
+            (
+                ArchivePath::in_dir(GRANTS_DIR_V1, &format!("{prefix}-{index:04}.eag"))
+                    .expect("die Adresse ist gueltig"),
+                bytes.clone(),
+            )
+        })
+        .collect();
+    PlannedPublicationV1::new(objects)
+}
+
+/// Ein ZWEITER Plan, ADRESSDISJUNKT zu [`two_grants_and_one_entry`].
+///
+/// Fuer die Zusammenfuehrung: zwei nacheinander angenommene Plaene, die sich
+/// in keiner Adresse ueberschneiden, muessen sich zu einem einzigen Plan
+/// vereinigen, ausstehend erst-, neu-danach geordnet.
+#[must_use]
+pub fn second_disjoint_plan() -> PlannedPublicationV1 {
+    planned_grants(2, "second")
+}
+
+/// Ein Plan, der DIESELBE Adresse wie [`two_grants_and_one_entry`] traegt —
+/// `grants/a.eag` —, aber mit ANDEREN Bytes.
+///
+/// Fuer den Bytekonflikt der Zusammenfuehrung: die Vereinigung darf diese
+/// Adresse nicht klobbern, sondern muss ablehnen und den ausstehenden Plan
+/// unangetastet lassen.
+#[must_use]
+pub fn plan_conflicting_with_two_grants_and_one_entry() -> PlannedPublicationV1 {
+    PlannedPublicationV1::new(vec![(
+        ArchivePath::in_dir(GRANTS_DIR_V1, "a.eag").expect("die Adresse ist gueltig"),
+        signed_grant_b().into_vec(),
+    )])
+}
+
+/// EIN gueltiges signiertes `.eip`, fuer `derive_pending`-Tests.
+///
+/// Der Inhalt selbst traegt hier keine Aussage — `derive_pending` klassifiziert
+/// ausschliesslich am Exact-Object-Praefix (`ea-archive/src/inventory.rs`) und
+/// vergleicht sonst nur Adresse und Bytes. Dieselben Bytes unter zwei
+/// verschiedenen Adressen sind deshalb eine gueltige Fixture.
+#[must_use]
+pub fn signed_entry_bytes() -> Vec<u8> {
+    archive_support::signed_entry_package().1
+}
+
+/// Eine Archivquelle mit FEST VORGEGEBENEN Bytes, fuer `derive_pending`-Tests.
+///
+/// `ArchiveSource::visit_blobs` reicht jedes Paar unveraendert an den Besucher
+/// durch — hier entsteht kein zweiter Kryptobaukasten, nur eine feste
+/// Aufzaehlung.
+pub struct FixedArchiveSource {
+    blobs: Vec<(String, Vec<u8>)>,
+}
+
+impl FixedArchiveSource {
+    #[must_use]
+    pub const fn new(blobs: Vec<(String, Vec<u8>)>) -> Self {
+        Self { blobs }
+    }
+}
+
+impl ea_archive::ArchiveSource for FixedArchiveSource {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(
+            ea_archive::ArchiveBlob<'_>,
+        ) -> Result<(), ea_archive::ArchiveError>,
+    ) -> Result<(), ea_archive::ArchiveError> {
+        for (path, bytes) in &self.blobs {
+            visitor(ea_archive::ArchiveBlob::new(path, bytes))?;
+        }
+        Ok(())
+    }
+}
+
+/// Oeffnet eine FERNABLAGE der Fixture — ein gewoehnliches `LocalPathBackend`,
+/// das in den `derive_pending`-Tests die Rolle des live gelesenen Netzziels
+/// spielt.
+///
+/// # Panics
+///
+/// Wenn sich die Wurzel nicht oeffnen laesst.
+#[must_use]
+pub fn open_remote(root: PathBuf) -> LocalPathBackend {
+    LocalPathBackend::open(
+        root,
+        local_profile(),
+        &BoundArchiveProfilePolicyV1::from_policy(&policy_with(vec![source_profile_hash()])),
+    )
+    .expect("die Fernablage der Fixture muss sich oeffnen lassen")
+}
+
 /// Die vollstaendige Migrationsfixture: Quellbestand, Zielwurzel, Policy,
 /// Audit und ein gueltiger Nachweis.
 pub struct MigrationHarness {
