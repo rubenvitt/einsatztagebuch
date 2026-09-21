@@ -163,6 +163,38 @@ function Assert-Tool {
         'Ein NEUES Terminal öffnen und das Skript erneut ausführen.'
 }
 
+# ring 0.17 baut seine Assembler-Teile auf aarch64-pc-windows-msvc NUR mit clang;
+# MSVC allein genuegt dort nicht (auf x64 schon, deshalb greift diese Pruefung
+# nur auf ARM64). Gemessen 2026-09-21 auf Windows 11 ARM64:
+#   failed to find tool "clang": program not found
+# `cargo tree -i ring --target aarch64-pc-windows-msvc` zeigt ring fuer
+# `ea-desktop` und fuer `wasm-bindgen-cli`, NICHT fuer `einsatzarchiv-cli` -
+# deshalb lief der Release-Bau ohne clang durch.
+#
+# Das LLVM-Installationsprogramm traegt sich nicht zuverlaessig in PATH ein.
+# Deshalb wird `%ProgramFiles%\LLVM\bin` sowohl vor als auch nach der
+# Installation gezielt gesucht, statt sich auf PATH zu verlassen.
+function Assert-ClangForRing {
+    if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne
+        [Runtime.InteropServices.Architecture]::Arm64) { return }
+    $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+    $useLlvm = {
+        if (-not (Test-Tool 'clang') -and (Test-Path -LiteralPath (Join-Path $llvmBin 'clang.exe'))) {
+            $env:Path = $llvmBin + ';' + $env:Path
+        }
+    }
+    & $useLlvm
+    if (-not (Test-Tool 'clang')) {
+        Install-Prerequisite -Label 'clang (LLVM) - ring braucht es auf ARM64' -WingetId 'LLVM.LLVM'
+        & $useLlvm
+    }
+    if (-not (Test-Tool 'clang')) {
+        Stop-WithRemedy "clang ist nicht auffindbar, auch nicht unter $llvmBin." `
+            'winget install --id LLVM.LLVM -e, danach ein NEUES Terminal oeffnen.'
+    }
+    Write-Note "clang: $((Get-Command clang).Source)"
+}
+
 function Invoke-Checked([string]$What, [string]$Exe, [string[]]$Arguments, [string]$WorkingDirectory) {
     Write-Note "$Exe $($Arguments -join ' ')"
     $previous = Get-Location
@@ -442,6 +474,10 @@ if ($haveBindgen -ne $wantedBindgen) {
     Write-Note "wasm-bindgen-cli: $(if ($haveBindgen) { $haveBindgen } else { 'fehlt' }) – $wantedBindgen wird gebaut (das dauert)"
     # KEIN --force: stimmt die Fassung schon, kommt dieser Zweig gar nicht erst
     # dran, und ein zweiter Lauf kostet nichts.
+    Assert-ClangForRing
+    # Eine Installation laedt PATH aus der Registrierung neu; der vorn
+    # eingereihte cargo-Ordner soll davor stehen bleiben.
+    if ($env:Path -notlike "*$cargoBin*") { $env:Path = $cargoBin + ';' + $env:Path }
     Invoke-Checked 'cargo install wasm-bindgen-cli' 'cargo' @(
         'install', 'wasm-bindgen-cli', '--version', $wantedBindgen, '--locked') $Path
     $haveBindgen = Get-WasmBindgenVersion
