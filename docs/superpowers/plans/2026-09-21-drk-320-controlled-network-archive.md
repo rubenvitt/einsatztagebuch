@@ -299,7 +299,7 @@ impl PublicationTargetV1 for NetworkArchiveTargetV1 {
 
 `PublicationQueue::publish` (the overwrite at `publication_queue.rs:318`, and the implicit loss when a connected `publish` ignores an outstanding plan): take the pending plan, merge `pending ⊎ planned` (identical addresses once, differing bytes → `Err(ByteConflict)` leaving `pending` unchanged, order pending-first), check limits on the merged plan, then either store the merged plan (disconnected) or `drain(merged)`. `drain`'s two re-store sites keep storing the (merged) plan they were given.
 
-- [ ] **Step 1: RED** in `tests/publication_queue.rs`:
+- [x] **Step 1: RED** in `tests/publication_queue.rs`:
   - `second_offline_publish_keeps_the_first_plan_and_resumes_both_in_order` — two plans published while disconnected; after reconnect `resume()` publishes both, first plan's order first, bytes exact.
   - `connected_publish_drains_an_outstanding_plan_before_the_new_one`.
   - `merge_with_conflicting_bytes_is_refused_and_keeps_the_pending_plan`.
@@ -307,10 +307,10 @@ impl PublicationTargetV1 for NetworkArchiveTargetV1 {
   - `derive_pending_orders_grants_before_their_entry_by_sequence` — temp remote `LocalPathBackend` with seq 1 present; local source with seq 2 grants `grants/000000000002_b.eag`, `grants/000000000002_a.eag`, entry `entries/000000000002_x.eip` and seq 1 entry identical → plan is `[a.eag, b.eag, x.eip]`.
   - `derive_pending_refuses_differing_bytes_at_the_remote`.
   - `network_target_publishes_create_if_absent_and_verifies_readback` and `network_target_reports_disconnected_when_root_is_missing_and_never_creates_it`.
-- [ ] **Step 2:** `cargo test --locked -p ea-archive-fs --test publication_queue` → red.
-- [ ] **Step 3:** Implement. Correct the `client.rs` comment so it no longer claims the next plan displaces the deferred one (German, real umlauts; keep the receipt-ordering argument, which stays valid).
-- [ ] **Step 4:** Green; regressions `cargo test --locked -p ea-archive-fs --test controlled_network_profile`, `cargo test --locked -p ea-sync-client --test status`, `cargo test --locked -p ea-sync-client --test resume`. Clippy `ea-archive-fs`, `ea-sync-client`.
-- [ ] **Step 5:** Commit `fix(archive-fs): never drop a deferred publication plan and derive the network queue`.
+- [x] **Step 2:** `cargo test --locked -p ea-archive-fs --test publication_queue` → red.
+- [x] **Step 3:** Implement. Correct the `client.rs` comment so it no longer claims the next plan displaces the deferred one (German, real umlauts; keep the receipt-ordering argument, which stays valid).
+- [x] **Step 4:** Green; regressions `cargo test --locked -p ea-archive-fs --test controlled_network_profile`, `cargo test --locked -p ea-sync-client --test status`, `cargo test --locked -p ea-sync-client --test resume`. Clippy `ea-archive-fs`, `ea-sync-client`.
+- [x] **Step 5:** Commit `fix(archive-fs): never drop a deferred publication plan and derive the network queue`.
 
 ---
 

@@ -469,9 +469,7 @@ impl SyncClient {
             // das, woran die Warteschlange den Eintrag als erledigt erkennt.
             // Laege sie zuerst und bliebe die Netzpublikation aufgeschoben, so
             // naehme der naechste Lauf den Eintrag aus der Warteschlange,
-            // obwohl das Netzarchiv die Quittung nie bekommen hat — und der
-            // aufgeschobene Plan der Warteschlange (EIN Platz) waere ohnehin
-            // vom naechsten Eintragsplan verdraengt worden.
+            // obwohl das Netzarchiv die Quittung nie bekommen hat.
             //
             // So herum gibt es diesen Zustand nicht: solange das Netzarchiv
             // wartet, entsteht KEINE lokale Quittung, der Eintrag bleibt

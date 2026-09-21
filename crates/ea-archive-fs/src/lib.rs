@@ -28,6 +28,7 @@ mod format_package;
 mod health;
 mod local_path;
 mod lock_diagnosis;
+mod network_target;
 mod profile_migration;
 mod publication_queue;
 mod sqlcipher_backend;
@@ -63,6 +64,7 @@ pub use local_path::{
     LocalPathArchiveSource, LocalPathBackend,
 };
 pub use lock_diagnosis::{LocalWriterLockDiagnosis, diagnose_local_writer_lock};
+pub use network_target::NetworkArchiveTargetV1;
 pub use profile_migration::{
     FinalizationLockStateV1, MigrationFaultPoint, MigrationResultV1, MigrationSourceV1,
     ProfileMigrator,

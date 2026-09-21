@@ -3,8 +3,11 @@
 use std::sync::{Mutex, PoisonError};
 
 use ea_archive::{
-    ArchiveBackendError, ArchiveBackendProfileV1, ArchivePath, BoundArchiveProfilePolicyV1,
+    ArchiveBackendError, ArchiveBackendProfileV1, ArchivePath, ArchiveSource,
+    BoundArchiveProfilePolicyV1,
 };
+
+use crate::LocalPathBackend;
 
 /// Der Sync-Zustand — GESCHLOSSEN, vier Arme.
 ///
@@ -154,6 +157,100 @@ impl PlannedPublicationV1 {
             .map(|(_, bytes)| bytes.len() as u64)
             .sum()
     }
+
+    /// EA-CNA-PUB-1/2: der Plan aus committed lokalen Objekten, die am live
+    /// gelesenen Netzziel FEHLEN — nie gespeichert, immer neu gebildet.
+    ///
+    /// Klassifiziert wird wie ueberall im Bestand ausschliesslich am
+    /// 9-Byte-Exact-Object-Praefix (`ea-archive/src/inventory.rs`): Beiwerk
+    /// ohne dieses Praefix ist kein Publikationsgegenstand und wird
+    /// uebergangen. Liegt eine committed Adresse am Netzziel bereits mit
+    /// DENSELBEN Bytes, ist sie schon veroeffentlicht und faellt aus dem Plan.
+    /// Liegt sie dort mit ANDEREN Bytes, ist das ein Bytekonflikt — keine
+    /// Publikation, kein Ueberschreiben.
+    ///
+    /// Die Reihenfolge ist EA-CNA-PUB-2: aufsteigend nach der zwoelfstelligen
+    /// Sequenz vor dem ersten `_` des Dateinamens; Adressen ohne
+    /// Sequenzpraefix stehen VOR allen sequenzierten, in binaerer
+    /// Adressordnung. Innerhalb einer Sequenz kommen alle Nicht-`.eip`-Objekte
+    /// in binaerer Adressordnung, das `.eip` zuletzt — Grants liegen damit
+    /// immer vor ihrem Eintrag.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::ByteConflict`] beim ersten gefundenen
+    /// Bytekonflikt; sonst der Fehler der Quelle oder des Netzziels.
+    pub fn derive_pending(
+        local: &dyn ArchiveSource,
+        remote: &LocalPathBackend,
+    ) -> Result<Self, ArchiveBackendError> {
+        let mut pending: Vec<(ArchivePath, Vec<u8>)> = Vec::new();
+        let mut failure: Option<ArchiveBackendError> = None;
+        let visited = local.visit_blobs(&mut |blob| {
+            if failure.is_some() {
+                // Ein Befund liegt schon vor: nicht mehr weiterlesen, nur noch
+                // sauber abbrechen.
+                return Err(ea_archive::ArchiveError::Unavailable);
+            }
+            if ea_format::decode_exact_object(blob.bytes()).is_err() {
+                // Kein Archivobjekt (Formatbeiwerk & Co.) — kein
+                // Publikationsgegenstand.
+                return Ok(());
+            }
+            let address = match crate::profile_migration::archive_path_of(blob.path_hint()) {
+                Ok(address) => address,
+                Err(error) => {
+                    failure = Some(error);
+                    return Err(ea_archive::ArchiveError::Unavailable);
+                }
+            };
+            match remote.read_relative(address.as_str()) {
+                Some(remote_bytes) if remote_bytes == blob.bytes() => {
+                    // Bereits am Netzziel, byteidentisch: nichts zu tun.
+                }
+                Some(_) => {
+                    failure = Some(ArchiveBackendError::ByteConflict);
+                    return Err(ea_archive::ArchiveError::Unavailable);
+                }
+                None => pending.push((address, blob.bytes().to_vec())),
+            }
+            Ok(())
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        visited.map_err(|_| ArchiveBackendError::Io)?;
+        pending.sort_by(|(left, _), (right, _)| compare_pending_addresses(left, right));
+        Ok(Self::new(pending))
+    }
+}
+
+/// Die zwoelfstellige Sequenz vor dem ersten `_` des DATEINAMENS (nicht der
+/// vollen Adresse) — `None`, wenn kein solches Praefix vorliegt.
+fn sequence_prefix(path: &ArchivePath) -> Option<u64> {
+    let filename = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
+    let (prefix, _rest) = filename.split_once('_')?;
+    if prefix.len() == 12 && prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+        prefix.parse::<u64>().ok()
+    } else {
+        None
+    }
+}
+
+/// EA-CNA-PUB-2, als Vergleichsfunktion: Sequenz aufsteigend, sequenzlose
+/// Adressen zuerst, `.eip` innerhalb einer Sequenz zuletzt, sonst binaere
+/// Adressordnung.
+fn compare_pending_addresses(left: &ArchivePath, right: &ArchivePath) -> std::cmp::Ordering {
+    let is_eip = |path: &ArchivePath| path.as_str().ends_with(".eip");
+    match (sequence_prefix(left), sequence_prefix(right)) {
+        (None, None) => left.cmp(right),
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(left_sequence), Some(right_sequence)) => left_sequence
+            .cmp(&right_sequence)
+            .then_with(|| is_eip(left).cmp(&is_eip(right)))
+            .then_with(|| left.cmp(right)),
+    }
 }
 
 /// Was mit den geplanten Bytes GESCHAH — und ausdruecklich kein Zustand.
@@ -288,6 +385,15 @@ impl PublicationQueue {
 
     /// Nimmt den Plan an und veroeffentlicht, soweit das Ziel erreichbar ist.
     ///
+    /// EA-CNA-PUB-7: ein neuer Plan VERDRAENGT NIE einen ausstehenden. Liegt
+    /// bereits ein Plan in der Warteschlange, wird er zuerst mit dem neuen
+    /// VEREINIGT — dieselbe Adresse mit denselben Bytes zaehlt einmal,
+    /// dieselbe Adresse mit ANDEREN Bytes ist ein Bytekonflikt und laesst den
+    /// ausstehenden Plan UNVERAENDERT zurueck, sonst gilt: erst die
+    /// ausstehenden, dann die neuen Adressen. Die Queuegrenze wird gegen die
+    /// VEREINIGUNG geprueft; sprengt sie die Grenze, wird NUR die Vereinigung
+    /// abgelehnt und der zuvor angenommene Plan bleibt bestehen.
+    ///
     /// Ein ANGENOMMENER Plan geht nicht mehr verloren: sowohl die verlorene
     /// Erreichbarkeit als auch ein Hartfehler des Ziels lassen ihn
     /// AUFGESCHOBEN in der Warteschlange zurueck, `resume` setzt ihn dann
@@ -296,16 +402,37 @@ impl PublicationQueue {
     ///
     /// # Errors
     ///
-    /// Der Fehler des Ziels, wenn er NICHT die verlorene Erreichbarkeit ist —
-    /// jene ist ein Zustand und kein Fehler. Der Plan bleibt in diesem Fall
+    /// [`ArchiveBackendError::ByteConflict`], wenn die Vereinigung mit dem
+    /// ausstehenden Plan an derselben Adresse abweichende Bytes findet; sonst
+    /// der Fehler des Ziels, wenn er NICHT die verlorene Erreichbarkeit ist —
+    /// jene ist ein Zustand und kein Fehler. Der Plan bleibt in beiden Faellen
     /// aufgeschoben.
     pub fn publish(
         &self,
         planned: PlannedPublicationV1,
     ) -> Result<PublicationStateV1, ArchiveBackendError> {
-        if planned.len() as u64 > self.max_objects || planned.total_bytes() > self.max_bytes {
-            // Die Grenze ist ueberschritten: `Fehler`, und ausdruecklich KEIN
-            // Ausweichen auf ein anderes Ziel.
+        let existing = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let merged = match &existing {
+            None => planned,
+            Some(existing_plan) => match Self::merge(existing_plan, &planned) {
+                Ok(merged) => merged,
+                Err(error) => {
+                    // Bytekonflikt der Vereinigung: der ausstehende Plan
+                    // bleibt UNVERAENDERT, der neue wird verworfen.
+                    *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = existing;
+                    return Err(error);
+                }
+            },
+        };
+        if merged.len() as u64 > self.max_objects || merged.total_bytes() > self.max_bytes {
+            // Die Grenze ist ueberschritten: abgelehnt wird NUR die
+            // Vereinigung, ausdruecklich KEIN Ausweichen auf ein anderes
+            // Ziel, und der zuvor angenommene Plan bleibt bestehen.
+            *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = existing;
             return Ok(PublicationStateV1 {
                 outcome: PublicationOutcomeV1::QueueLimitReached,
                 detail_cause: Some(DetailCause::QueueLimitReached),
@@ -315,7 +442,7 @@ impl PublicationQueue {
             });
         }
         if !self.target.is_connected() {
-            *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(planned);
+            *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(merged);
             return Ok(PublicationStateV1 {
                 outcome: PublicationOutcomeV1::Deferred,
                 detail_cause: Some(DetailCause::NetworkArchiveWaiting),
@@ -324,7 +451,33 @@ impl PublicationQueue {
                 published_order: Vec::new(),
             });
         }
-        self.drain(planned)
+        self.drain(merged)
+    }
+
+    /// Die Vereinigung aus `existing ⊎ new`: `existing`-Adressen zuerst, dann
+    /// die neuen `new`-Adressen, die `existing` noch nicht traegt.
+    ///
+    /// Eine Adresse in BEIDEN Plaenen mit denselben Bytes zaehlt EINMAL —
+    /// genau die Idempotenz, die auch Create-if-absent traegt. Dieselbe
+    /// Adresse mit ANDEREN Bytes ist ein Bytekonflikt.
+    fn merge(
+        existing: &PlannedPublicationV1,
+        new: &PlannedPublicationV1,
+    ) -> Result<PlannedPublicationV1, ArchiveBackendError> {
+        let mut merged = existing.objects.clone();
+        for (path, bytes) in &new.objects {
+            match merged
+                .iter()
+                .find(|(existing_path, _)| existing_path == path)
+            {
+                Some((_, existing_bytes)) if existing_bytes == bytes => {
+                    // Dieselbe Adresse, dieselben Bytes: schon vertreten.
+                }
+                Some(_) => return Err(ArchiveBackendError::ByteConflict),
+                None => merged.push((path.clone(), bytes.clone())),
+            }
+        }
+        Ok(PlannedPublicationV1::new(merged))
     }
 
     /// Stellt die Verbindung wieder her und gibt die Warteschlange zurueck.
