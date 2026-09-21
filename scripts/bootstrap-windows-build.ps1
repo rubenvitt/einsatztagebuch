@@ -924,11 +924,26 @@ if ($Desktop) {
 # -------------------------------------------------------------- smoke start
 
 # Das gebaute Programm einmal wirklich starten. Ohne Argumente schreibt es
-# seine Kommandouebersicht und endet mit 0 (gemessen), es ist also ein
-# ungefaehrlicher Lebendnachweis und zugleich die Antwort auf „und was kann
-# das Ding jetzt".
+# seine Kommandouebersicht und endet mit Code 2 - das ist ein NUTZUNGSFEHLER und
+# fuer diesen Aufruf der richtige Ausgang, kein Defekt.
+#
+# Eine fruehere Fassung dieses Kommentars nannte Code 0 „gemessen". Die Messung
+# war falsch: sie lief durch eine Pipe, und gemessen wurde der Exitcode des
+# nachgeschalteten `head`, nicht der des Programms. Ohne Pipe liefert es auf
+# macOS wie auf Windows 2.
+#
+# Deshalb wird hier nicht auf Code 0 geprueft, sondern auf genau 2 UND auf die
+# Kommandouebersicht in der Ausgabe. Ein Absturz oder ein fehlendes Laufzeit-DLL
+# endet mit einem anderen Code oder ohne diese Zeile und faellt damit weiter auf.
 Write-Step 'Einsatzarchiv starten'
-Invoke-Checked 'einsatzarchiv' $parentExe @() $Path
+Write-Note "$parentExe"
+$usage = & $parentExe 2>&1 | Out-String
+$usageCode = $LASTEXITCODE
+Write-Host $usage.TrimEnd()
+if ($usageCode -ne 2 -or $usage -notmatch '(?m)^einsatzarchiv --trust-anchor ') {
+    throw "einsatzarchiv lieferte Code $usageCode statt der Kommandouebersicht mit Code 2"
+}
+Write-Note 'Kommandouebersicht mit Code 2 - das Programm laeuft'
 
 # ------------------------------------------------------------------ summary
 
