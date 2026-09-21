@@ -58,6 +58,7 @@ use std::io::{self, Write};
 use ea_admin::{
     AdminError, BootstrapStep, ProductionState,
     clock_release::{ClockReleaseAvailability, ClockReleaseWorkflowError},
+    native_archive::{NativeArchiveOpenError, NativeArchiveRegistrationOutcome},
     operator_runtime::{OperatorGoLiveReport, OperatorRuntimeError},
     registry::RegistryWorkflowError,
     revocation::RevocationTargetClass,
@@ -99,7 +100,7 @@ use crate::args::{Format, UsageError};
 /// Pfad benennt also einen Platz, der noch frei sein muss. Die Begruendung
 /// steht in `crate::commands::organization`; hier steht sie in einem Wort,
 /// damit ein Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 17] = [
+const GRAMMAR_V1: [&str; 18] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -113,6 +114,7 @@ const GRAMMAR_V1: [&str; 17] = [
     "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
     "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
+    "einsatzarchiv --trust-anchor <file> operator register-network-archive --operator-config <file> --network-archive-profile <file>",
     "einsatzarchiv --trust-anchor <file> registry revocation-plan --operator-config <file> --effective-from <sequence> --valid-through <sequence> --not-after <unix-millis>",
     "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition prepare --operator-config <file> --request <file>",
@@ -266,6 +268,39 @@ pub fn print_operator_report(
         .and_then(|()| stdout.write_all(b"\n"))
         .and_then(|()| stdout.flush())
         .map_err(|_| OperatorRuntimeError::Io)
+}
+
+/// Die Quittung von `operator register-network-archive`: `registered` oder
+/// `already-registered` (EA-CNA-REG-6).
+///
+/// Dieselbe Bauart wie [`print_clock_release_applied`]: ein einziges Feld
+/// ohne Hostpfad, Schluessel oder Klartext, in derselben knappen JSON- und
+/// Textform.
+pub fn print_operator_register_network_archive_report(
+    outcome: NativeArchiveRegistrationOutcome,
+    format: Format,
+) -> Result<(), OperatorRuntimeError> {
+    let word = match outcome {
+        NativeArchiveRegistrationOutcome::Registered => "registered",
+        NativeArchiveRegistrationOutcome::AlreadyRegistered => "already-registered",
+    };
+    let body = match format {
+        Format::Json => format!("{{\"registration\":\"{word}\"}}"),
+        Format::Text => format!("registration={word}"),
+    };
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(body.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|_| OperatorRuntimeError::Io)
+}
+
+/// Nur der stabile Fehlercode der Netzregistrierung — kein Hostpfad, kein
+/// Schluessel, kein Klartext. [`NativeArchiveOpenError`] zeigt kein `Display`;
+/// diese Funktion druckt deshalb ausdruecklich `.code()`.
+pub fn print_native_archive_error(error: &NativeArchiveOpenError) {
+    eprintln!("einsatzarchiv: {}", error.code());
 }
 
 /// Druckt einen Aufruffehler auf stderr.

@@ -55,7 +55,7 @@ const PIN_V1: &str = "pin-7731-distinct";
 /// Geschlossen und nicht „mindestens diese Zeilen": nur ein vollstaendiger
 /// Vergleich faellt ueber eine zusaetzliche oder umsortierte Zeile. Die
 /// ersten sieben Zeilen sind `design.md` §16.1 in dessen Reihenfolge.
-const PRINTED_GRAMMAR_V1: [&str; 25] = [
+const PRINTED_GRAMMAR_V1: [&str; 26] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -69,6 +69,7 @@ const PRINTED_GRAMMAR_V1: [&str; 25] = [
     "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
     "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
     "einsatzarchiv --trust-anchor <file> operator provision|verify-session|revoke --operator-config <file>",
+    "einsatzarchiv --trust-anchor <file> operator register-network-archive --operator-config <file> --network-archive-profile <file>",
     "einsatzarchiv --trust-anchor <file> registry revocation-plan --operator-config <file> --effective-from <sequence> --valid-through <sequence> --not-after <unix-millis>",
     "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition prepare --operator-config <file> --request <file>",

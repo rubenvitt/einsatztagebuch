@@ -114,11 +114,11 @@ pub fn register_network_component(
 
 **Interface:** `OperatorAction::RegisterNetworkArchive`; grammar line `einsatzarchiv --trust-anchor <file> operator register-network-archive --operator-config <file> --archive-profile <file>`. The profile file uses the existing JSON grammar `ea_admin::recovery_test_runtime::parse_recovery_archive_profile` (camelCase, `kind: "controlledNetworkPath"`). The local DB path is `runtime.config().database_path` (the operator config is the explicit declaration). Output on success: the existing JSON success envelope with `"registration":"registered"|"already-registered"`; failure: `NativeArchiveOpenError::code()`.
 
-- [ ] **Step 1: RED:** in `full_grammar.rs` extend the expected grammar literal; add process test `cli_registers_network_component_and_reports_already_registered_on_repeat` using the existing fixture binary pattern of `operator verify-session` tests (run twice; second prints `already-registered`; DB contains one component row).
-- [ ] **Step 2:** `cargo test --locked -p einsatzarchiv-cli --test full_grammar` and `… --test operator register_network` → red.
-- [ ] **Step 3:** Implement parser, dispatch (`authority` configs refuse this verb like other non-`verify-session` verbs), output.
-- [ ] **Step 4:** Both commands green; `cargo test --locked -p einsatzarchiv-cli --bin einsatzarchiv` (args unit tests) green; clippy for `einsatzarchiv-cli`.
-- [ ] **Step 5:** Commit `feat(cli): register a controlled-network archive component`.
+- [x] **Step 1: RED:** in `full_grammar.rs` extend the expected grammar literal; add process test `cli_registers_network_component_and_reports_already_registered_on_repeat` using the existing fixture binary pattern of `operator verify-session` tests (run twice; second prints `already-registered`; DB contains one component row).
+- [x] **Step 2:** `cargo test --locked -p einsatzarchiv-cli --test full_grammar` and `… --test operator register_network` → red.
+- [x] **Step 3:** Implement parser, dispatch (`authority` configs refuse this verb like other non-`verify-session` verbs), output.
+- [x] **Step 4:** Both commands green; `cargo test --locked -p einsatzarchiv-cli --bin einsatzarchiv` (args unit tests) green; clippy for `einsatzarchiv-cli`.
+- [x] **Step 5:** Commit `feat(cli): register a controlled-network archive component`.
 
 ---
 

@@ -114,7 +114,11 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
             initial_registry_version,
         } => organization::run_certify_root(invocation, *initial_registry_version),
         Command::Posture { action, config } => posture::run(invocation, action, config, now),
-        Command::Operator { action, config } => operator::run(invocation, *action, config, now),
+        Command::Operator {
+            action,
+            config,
+            archive_profile,
+        } => operator::run(invocation, *action, config, archive_profile.as_deref(), now),
         // Beide neuen Pfade gehen weder durch [`verified`] noch durch die
         // Wiederherstellungsfassade, und aus demselben Grund wie
         // `organization init`: sie bilden ueber KEINEN Bestand ein Urteil. Ihre

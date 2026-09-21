@@ -166,6 +166,21 @@ pub const KEY_INVENTORY_SWITCH: &str = "--key-inventory";
 /// `target_certificate_hash` zusaetzlich das Widerrufsziel — dazu die
 /// Begruendung in `crate::commands::registry`.
 pub const OPERATOR_CONFIG_SWITCH: &str = "--operator-config";
+/// `--network-archive-profile <file>`, nur bei `operator register-network-archive`.
+///
+/// Die Datei traegt das Netzprofil in der bestehenden Wiederherstellungs-
+/// JSON-Grammatik (`ea_admin::recovery_test_runtime::parse_recovery_archive_profile`,
+/// camelCase, `kind: "controlledNetworkPath"`) und wird GELESEN und nicht
+/// hier geparst — dieses Paket reicht die Bytes unveraendert an die Fassade
+/// durch, wie `--release` und `--transition-object` es auch tun.
+///
+/// NICHT `--archive-profile`: `recovery::SWITCHES` fuehrt dieses Wort schon
+/// fuer `recovery-test`s eigene Quellengrammatik
+/// (`apps/cli/src/args/recovery.rs`), und der Parser erkennt jeden Schalter
+/// GLOBAL, bevor er das Kommando kennt — derselbe Wortlaut fuer `operator`
+/// liefe deshalb immer in die `recovery-test`-Ablehnung, nie in diesen
+/// Zweig.
+pub const NETWORK_ARCHIVE_PROFILE_SWITCH: &str = "--network-archive-profile";
 /// `--effective-from <sequence>`, nur bei `registry`.
 ///
 /// Ausdruecklich NICHT bei `writer-transition activate`: dort ist die
@@ -259,6 +274,7 @@ pub enum OperatorAction {
     Provision,
     VerifySession,
     Revoke,
+    RegisterNetworkArchive,
 }
 
 /// Eine geparste Schluesselquelle, wie sie in [`Command`] steht.
@@ -387,6 +403,8 @@ pub enum Command {
     Operator {
         action: OperatorAction,
         config: PathBuf,
+        /// Nur bei `register-network-archive`: das Netzprofil.
+        archive_profile: Option<PathBuf>,
     },
     Posture {
         action: PostureAction,
@@ -816,6 +834,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut recovery_paths = std::collections::BTreeMap::new();
     let mut report_signing_key: Option<PathBuf> = None;
     let mut operator_config: Option<PathBuf> = None;
+    let mut archive_profile: Option<PathBuf> = None;
     let mut posture_target = None;
     let mut posture_document = None;
     let mut evidence_reference = None;
@@ -891,6 +910,11 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 OPERATOR_CONFIG_SWITCH => {
                     take_path_value(&mut operator_config, OPERATOR_CONFIG_SWITCH, &mut arguments)?
                 }
+                NETWORK_ARCHIVE_PROFILE_SWITCH => take_path_value(
+                    &mut archive_profile,
+                    NETWORK_ARCHIVE_PROFILE_SWITCH,
+                    &mut arguments,
+                )?,
                 POSTURE_TARGET_SWITCH => {
                     take_path_value(&mut posture_target, POSTURE_TARGET_SWITCH, &mut arguments)?
                 }
@@ -1052,6 +1076,15 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     {
         return Err(UsageError::SwitchNotAllowed {
             switch: OPERATOR_CONFIG_SWITCH,
+            command: command_name,
+        });
+    }
+    // Grobkoernig hier (das Kommando), fein — nur `register-network-archive`
+    // — im `CommandKind::Operator`-Zweig unten, dieselbe Bauart wie bei
+    // `posture`s Modus-Schaltern.
+    if archive_profile.is_some() && command_kind != CommandKind::Operator {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: NETWORK_ARCHIVE_PROFILE_SWITCH,
             command: command_name,
         });
     }
@@ -1236,13 +1269,30 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 Some("provision") => OperatorAction::Provision,
                 Some("verify-session") => OperatorAction::VerifySession,
                 Some("revoke") => OperatorAction::Revoke,
+                Some("register-network-archive") => OperatorAction::RegisterNetworkArchive,
                 _ => {
                     return Err(UsageError::UnknownSubcommand {
                         command: command_name,
                         value: path.to_string_lossy().into_owned(),
-                        expected: "provision, verify-session or revoke",
+                        expected: "provision, verify-session, revoke or register-network-archive",
                     });
                 }
+            };
+            // Fein: `--network-archive-profile` gehoert ausschliesslich diesem
+            // einen Unterkommando, nicht `operator` insgesamt.
+            if archive_profile.is_some() && action != OperatorAction::RegisterNetworkArchive {
+                return Err(UsageError::SwitchNotAllowed {
+                    switch: NETWORK_ARCHIVE_PROFILE_SWITCH,
+                    command: command_name,
+                });
+            }
+            let archive_profile = if action == OperatorAction::RegisterNetworkArchive {
+                Some(archive_profile.ok_or(UsageError::MissingSwitch {
+                    switch: NETWORK_ARCHIVE_PROFILE_SWITCH,
+                    command: command_name,
+                })?)
+            } else {
+                None
             };
             Command::Operator {
                 action,
@@ -1250,6 +1300,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     switch: OPERATOR_CONFIG_SWITCH,
                     command: command_name,
                 })?,
+                archive_profile,
             }
         }
         CommandKind::Posture => {
