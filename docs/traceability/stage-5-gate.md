@@ -355,10 +355,15 @@ auf `planned` bleibt ein Mangel.
 bekommt KEINE eigene Ledgerzeile.** Ruling Ruben vom 2026-09-15. Begruendung:
 keine der neunzehn Stufe-5-Zeilen verlangt ein Netzprofil, und FR-061 mit
 AK-48 stehen auf Stufe 2 `integrated` und decken nur die Profilzulassung in
-`archive-fs` ab. Die vier REDs aus `f39c56f` bleiben mit
-`#[ignore = "DRK-320: …"]` geparkt, ebenso der offene RED
-`cargo test -p ea-recovery --test fs_source_union`. Der tatsaechlich gemountete
-Netz-Positivzeuge bleibt Stufe-7-Evidenz.
+`archive-fs` ab. Die vier aus `f39c56f` geparkten REDs sind entparkt: die
+drei Zeugen in `crates/ea-recovery/tests/fs_source_union.rs` seit `1e7f835`
+(`FsArchiveSource::with_exact_component`), der letzte,
+`apps/cli/tests/operator_recovery/native_archive.rs`, mit DRK-320. Der
+tatsaechlich gemountete Netz-Positivzeuge bleibt Stufe-7-Evidenz. Ein
+Kaltstart einer Controlled-Network-Laufzeit braucht einen lesbaren
+Remote-Pfad; ein Offline-Kaltstart bräuchte eine verifizierte lokale Kopie
+des Remote (siehe die Spezifikation
+`docs/superpowers/specs/2026-09-21-einsatzarchiv-controlled-network-archive-profile.md`).
 
 **Geschlossen mit DRK-282: die drei Produktluecken dieser Stufe.** Das Audit
 der abgelaufenen Sitzung als eigene Aktion `sessionExpired` (`96e0c3c`, Ruling
