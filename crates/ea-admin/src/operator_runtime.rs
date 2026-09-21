@@ -267,6 +267,9 @@ pub struct OperatorArchiveSnapshot {
     report: VerificationReportV1,
     next_sequence: ChainSequence,
     remote_baseline: Option<Arc<FsArchiveSource>>,
+    /// Nur wahr, wenn DIESE Öffnung das Netzziel live gelesen hat — nie für
+    /// eine geerbte Grundlinie (EA-CNA-SRC-4/5).
+    remote_read_live: bool,
 }
 impl OperatorArchiveSnapshot {
     pub fn open(
@@ -293,11 +296,15 @@ impl OperatorArchiveSnapshot {
         component: Option<&dyn ArchiveSource>,
         baseline: Option<Arc<FsArchiveSource>>,
     ) -> Result<Self, OperatorRuntimeError> {
+        let mut remote_read_live = false;
         let (source, remote_baseline) = match component {
             None => (FsArchiveSource::open_committed(directory)?, None),
             Some(component) => {
                 let remote = match FsArchiveSource::open_committed(directory) {
-                    Ok(remote) => Arc::new(remote),
+                    Ok(remote) => {
+                        remote_read_live = true;
+                        Arc::new(remote)
+                    }
                     Err(_) => baseline.ok_or(OperatorRuntimeError::NetworkArchiveUnavailable)?,
                 };
                 // Die Grundlinie bleibt die unveränderte Netzsicht; vereinigt
@@ -345,6 +352,7 @@ impl OperatorArchiveSnapshot {
             report,
             next_sequence,
             remote_baseline,
+            remote_read_live,
         })
     }
     pub fn next_sequence(&self) -> ChainSequence {
@@ -1317,13 +1325,35 @@ fn open_resources(
                     (None, Some(baseline)) => baseline.root().to_path_buf(),
                     (None, None) => return Err(OperatorRuntimeError::NetworkArchiveUnavailable),
                 };
-                OperatorArchiveSnapshot::open_with_anchor(
+                let snapshot = OperatorArchiveSnapshot::open_with_anchor(
                     &directory,
                     anchor,
                     now,
                     Some(&component),
                     baseline,
-                )?
+                )?;
+                // EA-CNA-SRC-5: erst nach bestandener Verifikation, nur gegen
+                // ein in DIESER Öffnung live gelesenes Netzziel (nie gegen die
+                // Grundlinie) und nur unter dem per `try_lock` erlangten
+                // SQLCipher-Writer-Lock. Die Grundlinie dieser Öffnung enthält
+                // jedes bereinigte Objekt, die Vereinigung bleibt also gleich.
+                // Ein belegter Lock ist kein Fehler: dann entfällt sie.
+                if snapshot.remote_read_live
+                    && let Some(remote) = snapshot.remote_baseline()
+                    && let Some(lock) =
+                        component.try_writer_lock().map_err(|error| match error {
+                            ArchiveBackendError::Io => OperatorRuntimeError::Io,
+                            _ => OperatorRuntimeError::Archive,
+                        })?
+                {
+                    component.prune_published(remote.as_ref(), &lock).map_err(
+                        |error| match error {
+                            ArchiveBackendError::Io => OperatorRuntimeError::Io,
+                            _ => OperatorRuntimeError::Archive,
+                        },
+                    )?;
+                }
+                snapshot
             }
         };
     #[cfg(feature = "test-support")]

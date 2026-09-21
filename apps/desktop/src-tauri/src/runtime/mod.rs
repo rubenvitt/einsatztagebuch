@@ -346,6 +346,29 @@ impl NativeDesktopRuntime {
         InteractiveOperatorRuntime::open(config, &launch.trust_anchor, now()?)
             .map_err(|error| CommandError::new(error.code()))
     }
+    /// Der Publikationshost eines Netz-Writers, für Fixture-Tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn network_publication_host(
+        &self,
+    ) -> Option<Arc<ea_admin::network_publication::NetworkPublicationHost>> {
+        self.writer
+            .as_ref()
+            .and_then(writer::WriterResources::publication)
+            .map(|publication| publication.host().clone())
+    }
+    /// Hält den Hostlauf an, damit ein Fixture-Test `run_once` selbst ruft.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn stop_network_publication_loop(&self) {
+        if let Some(publication) = self
+            .writer
+            .as_ref()
+            .and_then(writer::WriterResources::publication)
+        {
+            publication.stop();
+        }
+    }
     pub fn desktop_state(self: &Arc<Self>) -> DesktopState {
         let state = if self.role == OperatorRoleV1::Writer {
             DesktopState::new(
@@ -363,6 +386,18 @@ impl NativeDesktopRuntime {
             .with_discard(self.clone())
         } else {
             DesktopState::new(SessionState::new(None, None), None, None, None, None, None)
+        };
+        // EA-CNA-PUB-4: ein Netz-Writer meldet seinen Sync-Zustand aus dem
+        // Publikationshost; LocalPath bleibt ohne Port wie bisher.
+        let state = match self
+            .writer
+            .as_ref()
+            .and_then(writer::WriterResources::publication)
+        {
+            Some(publication) => state.with_sync_state(Arc::new(writer::NetworkSyncState(
+                publication.host().clone(),
+            ))),
+            None => state,
         };
         let state = if self.destruction.is_some() {
             state

@@ -309,6 +309,128 @@ fn sqlcipher_capability_reports_lock_contention_when_already_held() {
     assert!(archive.run_capability_test().unwrap().all_proven());
 }
 
+/// Eine live gelesene Netzsicht, nur für die Bereinigung: Adresse → Bytes.
+struct RemoteView(Vec<(String, Vec<u8>)>);
+impl ArchiveSource for RemoteView {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(
+            ea_archive::ArchiveBlob<'_>,
+        ) -> Result<(), ea_archive::ArchiveError>,
+    ) -> Result<(), ea_archive::ArchiveError> {
+        for (path, bytes) in &self.0 {
+            visitor(ea_archive::ArchiveBlob::new(path, bytes))?;
+        }
+        Ok(())
+    }
+}
+
+fn staged_rows(archive: &SqlcipherArchiveBackend) -> Vec<String> {
+    archive.staged_paths().unwrap()
+}
+
+/// EA-CNA-SRC-5: entfernt wird genau eine committed Zeile, deren Adresse am
+/// Netzziel mit DENSELBEN Bytes liegt. Abweichende Bytes, fehlende Adressen,
+/// Staging (auch bytegleich am Netzziel), Verzeichniszeilen und die Sonde
+/// bleiben.
+#[test]
+fn prune_removes_only_committed_rows_identical_at_the_remote() {
+    use ea_archive_fs::AtRestEncryptedStoreV1;
+    let (_guard, root) = support::temp_root("sqlcipher-backend-prune");
+    let path = root.join("operator.sqlite");
+    let db = database(&path);
+    let namespace = Hash32::try_from([0x31; 32].as_slice()).unwrap();
+    let archive = SqlcipherArchiveBackend::open(
+        SqliteCommitStore::new(db.clone(), namespace, 16, 1_048_576).unwrap(),
+    )
+    .unwrap();
+    let published = address("000000000001_published.eip");
+    let grant = ArchivePath::in_dir("grants/", "000000000001_published.eag").unwrap();
+    let diverging = address("000000000002_diverging.eip");
+    let unpublished = address("000000000003_unpublished.eip");
+    let staging = address("000000000004_staged.eip.staging");
+    for (address, bytes) in [
+        (&published, &b"published-entry"[..]),
+        (&grant, b"published-grant"),
+        (&diverging, b"local-bytes"),
+        (&unpublished, b"not-yet-at-remote"),
+        (&staging, b"staged-bytes"),
+    ] {
+        archive.create_non_object_if_absent(address, bytes).unwrap();
+    }
+    SqliteCommitStore::open_existing(db.clone(), namespace, 16, 1_048_576)
+        .unwrap()
+        .put(".ea-at-rest-probe", b"probe")
+        .unwrap();
+    let before = component_rows(&db);
+    let remote = RemoteView(vec![
+        (published.as_str().to_owned(), b"published-entry".to_vec()),
+        (grant.as_str().to_owned(), b"published-grant".to_vec()),
+        (diverging.as_str().to_owned(), b"remote-bytes".to_vec()),
+        (staging.as_str().to_owned(), b"staged-bytes".to_vec()),
+        (
+            "entries/000000000009_remote-only.eip".to_owned(),
+            b"remote-only".to_vec(),
+        ),
+    ]);
+
+    let lock = archive
+        .try_writer_lock()
+        .unwrap()
+        .expect("der Lock ist frei");
+    assert_eq!(archive.prune_published(&remote, &lock).unwrap(), 2);
+    drop(lock);
+
+    assert_eq!(
+        contents(&archive),
+        vec![
+            (diverging.as_str().to_owned(), b"local-bytes".to_vec()),
+            (
+                unpublished.as_str().to_owned(),
+                b"not-yet-at-remote".to_vec()
+            ),
+        ],
+        "nur die zwei bytegleich veröffentlichten committed Zeilen fallen weg"
+    );
+    assert_eq!(staged_rows(&archive), vec![staging.as_str().to_owned()]);
+    let after = component_rows(&db);
+    assert_eq!(after[0], before[0] - 2, "genau zwei Objektzeilen weniger");
+    assert_eq!(after[1], before[1], "Verzeichniszeilen bleiben");
+    assert_eq!(after[2], before[2], "die Sonde bleibt");
+    // Die bereinigte Komponente ist wieder beschreibbar und bleibt
+    // idempotent: eine zweite Bereinigung findet nichts mehr.
+    let lock = archive.try_writer_lock().unwrap().unwrap();
+    assert_eq!(archive.prune_published(&remote, &lock).unwrap(), 0);
+}
+
+/// EA-CNA-SRC-5: ist der Writer-Lock belegt, liefert `try_writer_lock`
+/// `None` ohne Fehler, und ohne Lock gibt es keine Bereinigung.
+#[test]
+fn prune_is_skipped_when_the_writer_lock_is_held() {
+    let (_guard, root) = support::temp_root("sqlcipher-backend-prune-held");
+    let path = root.join("operator.sqlite");
+    let archive = backend(database(&path), 0x32, 4);
+    let other = backend(database(&path), 0x33, 4);
+    let published = address("000000000001_published.eip");
+    archive
+        .create_non_object_if_absent(&published, b"published-entry")
+        .unwrap();
+    let remote = RemoteView(vec![(
+        published.as_str().to_owned(),
+        b"published-entry".to_vec(),
+    )]);
+    let held = other.acquire_writer_lock().unwrap();
+    assert!(
+        archive.try_writer_lock().unwrap().is_none(),
+        "ein fremd gehaltener Lock ist kein Fehler, sondern kein Lock"
+    );
+    assert_eq!(contents(&archive).len(), 1, "nichts wurde bereinigt");
+    drop(held);
+    let lock = archive.try_writer_lock().unwrap().expect("wieder frei");
+    assert_eq!(archive.prune_published(&remote, &lock).unwrap(), 1);
+    assert!(contents(&archive).is_empty());
+}
+
 #[test]
 #[ignore = "child of the SQLCipher component process test"]
 fn independent_process_fixture() {

@@ -341,6 +341,21 @@ pub struct PublicationStateV1 {
 }
 
 impl PublicationStateV1 {
+    /// Ein aufgeschobener Ausgang, der die Warteschlange gar nicht erst
+    /// erreicht hat — etwa weil das Netzziel für die Ableitung
+    /// (EA-CNA-PUB-1) nicht lesbar war. Nichts wurde veröffentlicht, und
+    /// ausdrücklich nicht auf ein anderes Ziel ausgewichen.
+    #[must_use]
+    pub const fn deferred(detail_cause: Option<DetailCause>) -> Self {
+        Self {
+            outcome: PublicationOutcomeV1::Deferred,
+            detail_cause,
+            fell_back: false,
+            published_bytes: Vec::new(),
+            published_order: Vec::new(),
+        }
+    }
+
     /// Was mit den geplanten Bytes geschah.
     ///
     /// Es gab hier einmal ein `sync_status`. Es ist mit Task 10 gefallen, und
