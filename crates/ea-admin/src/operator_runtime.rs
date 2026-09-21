@@ -16,7 +16,8 @@ use crate::{
     },
     operator_trust_store::OperatorTrustStateStore,
 };
-use ea_archive::ArchiveInventory;
+use ea_archive::{ArchiveBackendError, ArchiveInventory, ArchiveSource};
+use ea_archive_fs::{SqlcipherArchiveBackend, SqliteCommitStore};
 use ea_audit::{SignedLocalAuditService, SqliteLocalAuditRepository};
 use ea_crypto::CanonicalPublicCoseKey;
 use ea_format::{CertificateKindV1, DecodedTrustPayloadV1, KeyProtectionProfileV1, OperatorRoleV1};
@@ -68,6 +69,12 @@ pub enum OperatorRuntimeError {
     Operator(OperatorError),
     Lifecycle(OperatorLifecycleError),
     Exchange(ExchangeError),
+    /// Kaltstart eines registrierten Netzprofils ohne lesbares Netzziel
+    /// (EA-CNA-SRC-4).
+    NetworkArchiveUnavailable,
+    /// Netzziel und lokale Komponente lassen sich nicht vereinigen
+    /// (EA-CNA-SRC-2).
+    NetworkArchiveConflict,
 }
 impl OperatorRuntimeError {
     pub fn code(&self) -> &'static str {
@@ -91,6 +98,8 @@ impl OperatorRuntimeError {
             Self::Native(e) => e.code(),
             Self::Operator(e) => e.code(),
             Self::Lifecycle(e) => e.code(),
+            Self::NetworkArchiveUnavailable => "EA-OPERATOR-NETWORK-ARCHIVE-UNAVAILABLE",
+            Self::NetworkArchiveConflict => "EA-OPERATOR-NETWORK-ARCHIVE-CONFLICT",
         }
     }
     pub fn exit_code(&self) -> ExitCode {
@@ -102,9 +111,10 @@ impl OperatorRuntimeError {
             Self::Io
             | Self::Store(_)
             | Self::State(StateStoreError::Unavailable)
+            | Self::NetworkArchiveUnavailable
             | Self::Exchange(ExchangeError::Io | ExchangeError::Timeout) => ExitCode::Io,
             Self::Sequence => ExitCode::Chain,
-            Self::Archive => ExitCode::Integrity,
+            Self::Archive | Self::NetworkArchiveConflict => ExitCode::Integrity,
             Self::Recovery(e) => ea_recovery::exit_code_for_error(e),
             Self::Verification(code) => *code,
             _ => ExitCode::Trust,
@@ -256,6 +266,7 @@ pub struct OperatorArchiveSnapshot {
     inventory: ArchiveInventory,
     report: VerificationReportV1,
     next_sequence: ChainSequence,
+    remote_baseline: Option<Arc<FsArchiveSource>>,
 }
 impl OperatorArchiveSnapshot {
     pub fn open(
@@ -264,16 +275,47 @@ impl OperatorArchiveSnapshot {
         now: UnixMillis,
     ) -> Result<Self, OperatorRuntimeError> {
         let anchor = load_trust_anchor(anchor_path)?;
-        let directory = directory
-            .canonicalize()
-            .map_err(|_| OperatorRuntimeError::Io)?;
-        let anchor_path = anchor_path
-            .canonicalize()
-            .map_err(|_| OperatorRuntimeError::Io)?;
-        if anchor_path.starts_with(&directory) {
-            return Err(OperatorRuntimeError::Config);
-        }
-        let source = FsArchiveSource::open_committed(&directory)?;
+        let (_, directory) = anchor_outside_archive(directory, anchor_path)?;
+        let directory = directory.ok_or(OperatorRuntimeError::Io)?;
+        Self::open_with_anchor(&directory, anchor, now, None, None)
+    }
+
+    /// Ohne `component` wie bisher genau das committed Netz- bzw. lokale
+    /// Verzeichnis. Mit `component` die Vereinigung aus dem Netzziel und der
+    /// committed Sicht der lokalen Komponente (EA-CNA-SRC-2); ist das
+    /// Netzziel nicht lesbar, tritt nur eine übergebene Grundlinie an seine
+    /// Stelle (EA-CNA-SRC-4). Beides ist ungeprüfte Eingabe desselben
+    /// Verifiers (EA-CNA-SRC-3); eine Policy wird hier bewusst nicht geprüft.
+    pub(crate) fn open_with_anchor(
+        directory: &Path,
+        anchor: TrustAnchorV1,
+        now: UnixMillis,
+        component: Option<&dyn ArchiveSource>,
+        baseline: Option<Arc<FsArchiveSource>>,
+    ) -> Result<Self, OperatorRuntimeError> {
+        let (source, remote_baseline) = match component {
+            None => (FsArchiveSource::open_committed(directory)?, None),
+            Some(component) => {
+                let remote = match FsArchiveSource::open_committed(directory) {
+                    Ok(remote) => Arc::new(remote),
+                    Err(_) => baseline.ok_or(OperatorRuntimeError::NetworkArchiveUnavailable)?,
+                };
+                // Die Grundlinie bleibt die unveränderte Netzsicht; vereinigt
+                // wird eine Kopie, nie die Grundlinie selbst.
+                let union = remote
+                    .committed_view()
+                    .with_exact_component(component)
+                    .map_err(|error| match error {
+                        ArchiveBackendError::ByteConflict
+                        | ArchiveBackendError::Path
+                        | ArchiveBackendError::InventoryMismatch => {
+                            OperatorRuntimeError::NetworkArchiveConflict
+                        }
+                        _ => OperatorRuntimeError::Archive,
+                    })?;
+                (union, Some(remote))
+            }
+        };
         let report = verify_archive(&source, &anchor, VerifyOptions::new(now))
             .map_err(|_| OperatorRuntimeError::Archive)?;
         // Operator authority needs authenticated public manifest progression.
@@ -302,6 +344,7 @@ impl OperatorArchiveSnapshot {
             inventory,
             report,
             next_sequence,
+            remote_baseline,
         })
     }
     pub fn next_sequence(&self) -> ChainSequence {
@@ -319,6 +362,31 @@ impl OperatorArchiveSnapshot {
     pub fn source(&self) -> &FsArchiveSource {
         &self.source
     }
+    /// Remote committed view actually used (live or baseline); None for LocalPath.
+    pub fn remote_baseline(&self) -> Option<&Arc<FsArchiveSource>> {
+        self.remote_baseline.as_ref()
+    }
+}
+
+/// Der kanonische Anker darf nicht im Archiv liegen. Das Verzeichnis wird nur
+/// geliefert, wenn es sich kanonisieren lässt: ob ein fehlendes Verzeichnis
+/// ein Fehler ist, entscheidet erst die Registrierung (EA-CNA-SRC-4).
+fn anchor_outside_archive(
+    directory: &Path,
+    anchor_path: &Path,
+) -> Result<(PathBuf, Option<PathBuf>), OperatorRuntimeError> {
+    let directory = directory.canonicalize();
+    let anchor_path = anchor_path
+        .canonicalize()
+        .map_err(|_| OperatorRuntimeError::Io)?;
+    let directory = directory.ok();
+    if directory
+        .as_ref()
+        .is_some_and(|directory| anchor_path.starts_with(directory))
+    {
+        return Err(OperatorRuntimeError::Config);
+    }
+    Ok((anchor_path, directory))
 }
 
 pub mod posture;
@@ -421,6 +489,7 @@ impl OperatorRuntime {
             initialize_native,
             open_native,
             posture,
+            None,
         )
     }
 
@@ -431,6 +500,7 @@ impl OperatorRuntime {
         initialize_native: bool,
         open_native: impl FnOnce(bool) -> Result<Arc<NativeOperatorProvider>, NativeProviderError>,
         posture: Arc<dyn DevicePostureProvider>,
+        baseline: Option<Arc<FsArchiveSource>>,
     ) -> Result<Self, OperatorRuntimeError> {
         // Provisioning can create keys with native presence. It retains its
         // existing explicit-time path outside this pure read/acquire gate.
@@ -442,11 +512,20 @@ impl OperatorRuntime {
                 true,
                 open_native,
                 posture,
+                baseline,
             );
         }
         let path = config.database_path.clone();
         acquisition::acquire(&path, time, |now| {
-            Self::open_without_acquisition(config, anchor_path, now, false, open_native, posture)
+            Self::open_without_acquisition(
+                config,
+                anchor_path,
+                now,
+                false,
+                open_native,
+                posture,
+                baseline,
+            )
         })
     }
 
@@ -457,6 +536,7 @@ impl OperatorRuntime {
         initialize_native: bool,
         open_native: impl FnOnce(bool) -> Result<Arc<NativeOperatorProvider>, NativeProviderError>,
         posture: Arc<dyn DevicePostureProvider>,
+        baseline: Option<Arc<FsArchiveSource>>,
     ) -> Result<Self, OperatorRuntimeError> {
         #[cfg(feature = "test-support")]
         let profile = runtime_profile::Span::start("acquire", config.role, None);
@@ -478,6 +558,7 @@ impl OperatorRuntime {
             initialize_native,
             open_native,
             posture,
+            baseline,
         )?;
         #[cfg(feature = "test-support")]
         if let Some(profile) = &profile {
@@ -557,6 +638,9 @@ impl OperatorRuntime {
     }
     pub fn next_sequence(&self) -> ChainSequence {
         self.snapshot.next_sequence()
+    }
+    pub fn archive_snapshot(&self) -> &OperatorArchiveSnapshot {
+        &self.snapshot
     }
     pub fn signing_provider(&self) -> &Arc<NativeKeyProvider> {
         &self.signer
@@ -711,6 +795,9 @@ impl OperatorRuntime {
             false,
             |_| Ok(Arc::clone(&self.native)),
             Arc::clone(&self.posture),
+            // EA-CNA-SRC-4: nur diese Wiederöffnung darf die zuletzt live
+            // gelesene Netzsicht statt eines unlesbaren Netzziels nehmen.
+            self.archive_snapshot().remote_baseline().cloned(),
         )
     }
 
@@ -1153,33 +1240,22 @@ fn open_resources(
     initialize_native: bool,
     open_native: impl FnOnce(bool) -> Result<Arc<NativeOperatorProvider>, NativeProviderError>,
     posture: Arc<dyn DevicePostureProvider>,
+    baseline: Option<Arc<FsArchiveSource>>,
 ) -> Result<RuntimeResources, OperatorRuntimeError> {
     #[cfg(feature = "test-support")]
     let profile = runtime_profile::Span::start("resources", config.role, None);
     let opened = Instant::now();
-    let snapshot = OperatorArchiveSnapshot::open(&config.archive_directory, anchor_path, now)?;
-    #[cfg(feature = "test-support")]
-    if let Some(profile) = &profile {
-        profile.mark("snapshot-return");
-    }
-    // The hash identifies exact parsed bytes; device/role become authoritative
-    // only after their active certificate and native signing key are checked.
-    let certificate = snapshot
-        .inventory
-        .trust()
-        .iter()
-        .find(|p| p.object_hash().as_bytes() == config.device_certificate_hash.as_bytes())
-        .ok_or(OperatorRuntimeError::SignerMismatch)?;
-    let fields = match certificate
-        .value()
-        .decoded_payload()
-        .map_err(|_| OperatorRuntimeError::Archive)?
+    // EA-CNA-SRC-1: zuerst der unabhängige Anker, dann Anbieter und
+    // Datenbank, dann die Registrierung, erst danach der Archiv-Snapshot.
+    let anchor = load_trust_anchor(anchor_path)?;
+    let (canonical_anchor, directory) =
+        anchor_outside_archive(&config.archive_directory, anchor_path)?;
+    if baseline
+        .as_ref()
+        .is_some_and(|baseline| canonical_anchor.starts_with(baseline.root()))
     {
-        DecodedTrustPayloadV1::InitialAdminDevice(fields) => fields,
-        DecodedTrustPayloadV1::AuthorizedDevice(fields) => fields.fields().clone(),
-        _ => return Err(OperatorRuntimeError::SignerMismatch),
-    };
-    let device_id = fields.device_id;
+        return Err(OperatorRuntimeError::Config);
+    }
     let slot = role_slot(config.role)?;
     let native = open_native(initialize_native)?;
     let signer = Arc::new(native.signing_provider(slot));
@@ -1210,6 +1286,68 @@ fn open_resources(
     if let Some(profile) = &profile {
         profile.mark("database-return");
     }
+    let snapshot =
+        match crate::native_archive::registered_component(&database, anchor.trust_anchor_hash())? {
+            // Unverändert: ohne Registrierung weder Komponente noch Grundlinie.
+            None => OperatorArchiveSnapshot::open_with_anchor(
+                &directory.ok_or(OperatorRuntimeError::Io)?,
+                anchor,
+                now,
+                None,
+                None,
+            )?,
+            Some(registered) => {
+                // Nur die committed Lesesicht; keine Sonde, kein Lock, kein Schreiben.
+                let component = SqliteCommitStore::open_existing(
+                    Arc::clone(&database),
+                    registered.namespace,
+                    registered.object_limit,
+                    registered.byte_limit,
+                )
+                .and_then(SqlcipherArchiveBackend::open)
+                .map_err(|error| match error {
+                    ArchiveBackendError::Io => OperatorRuntimeError::Io,
+                    _ => OperatorRuntimeError::Archive,
+                })?;
+                // Ein nicht kanonisierbares Netzziel ist nicht lesbar. An seine
+                // Stelle tritt höchstens die Grundlinie aus demselben kanonischen
+                // Verzeichnis, nie ein anderer Pfad.
+                let directory = match (directory, &baseline) {
+                    (Some(directory), _) => directory,
+                    (None, Some(baseline)) => baseline.root().to_path_buf(),
+                    (None, None) => return Err(OperatorRuntimeError::NetworkArchiveUnavailable),
+                };
+                OperatorArchiveSnapshot::open_with_anchor(
+                    &directory,
+                    anchor,
+                    now,
+                    Some(&component),
+                    baseline,
+                )?
+            }
+        };
+    #[cfg(feature = "test-support")]
+    if let Some(profile) = &profile {
+        profile.mark("snapshot-return");
+    }
+    // The hash identifies exact parsed bytes; device/role become authoritative
+    // only after their active certificate and native signing key are checked.
+    let certificate = snapshot
+        .inventory
+        .trust()
+        .iter()
+        .find(|p| p.object_hash().as_bytes() == config.device_certificate_hash.as_bytes())
+        .ok_or(OperatorRuntimeError::SignerMismatch)?;
+    let fields = match certificate
+        .value()
+        .decoded_payload()
+        .map_err(|_| OperatorRuntimeError::Archive)?
+    {
+        DecodedTrustPayloadV1::InitialAdminDevice(fields) => fields,
+        DecodedTrustPayloadV1::AuthorizedDevice(fields) => fields.fields().clone(),
+        _ => return Err(OperatorRuntimeError::SignerMismatch),
+    };
+    let device_id = fields.device_id;
     let key = TrustStateKey {
         organization_id: snapshot.anchor.organization_id(),
         device_id,

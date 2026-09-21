@@ -1,5 +1,6 @@
 mod native_archive_existing_component;
 mod native_archive_registration;
+mod native_archive_startup;
 mod guided;
 use super::*;
 #[cfg(feature = "desktop-fixture")]
