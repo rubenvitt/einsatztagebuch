@@ -30,7 +30,7 @@ function Read-KitFile([string]$Name) {
 }
 $entryName=[IO.Path]::GetFileName($PSCommandPath)
 $entryBytes=Read-KitFile $entryName
-$entrySignature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -Content $entryBytes -SourcePathOrExtension 'ps1'
+$entrySignature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -Content $entryBytes -SourcePathOrExtension '.ps1'
 if ($entrySignature.Status -ne 'Valid' -or $null -eq $entrySignature.SignerCertificate) { throw 'Release-signed management entrypoint required' }
 $certificateDer=$entrySignature.SignerCertificate.RawData
 $certificateHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($certificateDer)).ToLowerInvariant()
@@ -48,7 +48,7 @@ if ([Convert]::ToBase64String((Read-KitFile 'release-signer.cer')) -cne [Convert
 $kitBytes=@{}
 foreach ($name in ($kitAssets+@('ea-native-management.release.psd1'))) {
     $bytes=Read-KitFile $name
-    $signature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -Content $bytes -SourcePathOrExtension ([IO.Path]::GetExtension($name).TrimStart('.'))
+    $signature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -Content $bytes -SourcePathOrExtension ([IO.Path]::GetExtension($name))
     if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
         [Convert]::ToBase64String($signature.SignerCertificate.RawData) -cne [Convert]::ToBase64String($certificateDer)) { throw 'Management file publisher mismatch' }
     $kitBytes[$name]=$bytes
