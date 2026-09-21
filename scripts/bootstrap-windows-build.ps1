@@ -242,6 +242,38 @@ function Assert-Tool {
         'Ein NEUES Terminal oeffnen und das Skript erneut ausfuehren.'
 }
 
+# ring 0.17 baut seine Assembler-Teile auf aarch64-pc-windows-msvc NUR mit clang;
+# MSVC allein genuegt dort nicht (auf x64 schon, deshalb greift diese Pruefung
+# nur auf ARM64). Gemessen 2026-09-21 auf Windows 11 ARM64:
+#   failed to find tool "clang": program not found
+# `cargo tree -i ring --target aarch64-pc-windows-msvc` zeigt ring fuer
+# `ea-desktop` und fuer `wasm-bindgen-cli`, NICHT fuer `einsatzarchiv-cli` -
+# deshalb lief der Release-Bau ohne clang durch.
+#
+# Das LLVM-Installationsprogramm traegt sich nicht zuverlaessig in PATH ein.
+# Deshalb wird `%ProgramFiles%\LLVM\bin` sowohl vor als auch nach der
+# Installation gezielt gesucht, statt sich auf PATH zu verlassen.
+function Assert-ClangForRing {
+    if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne
+        [Runtime.InteropServices.Architecture]::Arm64) { return }
+    $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+    $useLlvm = {
+        if (-not (Test-Tool 'clang') -and (Test-Path -LiteralPath (Join-Path $llvmBin 'clang.exe'))) {
+            $env:Path = $llvmBin + ';' + $env:Path
+        }
+    }
+    & $useLlvm
+    if (-not (Test-Tool 'clang')) {
+        Install-Prerequisite -Label 'clang (LLVM) - ring braucht es auf ARM64' -WingetId 'LLVM.LLVM'
+        & $useLlvm
+    }
+    if (-not (Test-Tool 'clang')) {
+        Stop-WithRemedy "clang ist nicht auffindbar, auch nicht unter $llvmBin." `
+            'winget install --id LLVM.LLVM -e, danach ein NEUES Terminal oeffnen.'
+    }
+    Write-Note "clang: $((Get-Command clang).Source)"
+}
+
 function Invoke-Checked([string]$What, [string]$Exe, [string[]]$Arguments, [string]$WorkingDirectory) {
     Write-Note "$Exe $($Arguments -join ' ')"
     $previous = Get-Location
@@ -906,6 +938,7 @@ if ($Desktop) {
     # cargo-Bau stehen (tauri.conf.json: frontendDist = ../dist).
     Invoke-Checked 'vite build' 'pnpm' @('--dir', 'apps/desktop', 'exec', 'vite', 'build') $Path
 
+    Assert-ClangForRing
     Invoke-Checked 'cargo build (desktop)' 'cargo' @(
         'build', '--locked', '--release', '-p', 'ea-desktop', '--target', $RustTriple) $Path
 
