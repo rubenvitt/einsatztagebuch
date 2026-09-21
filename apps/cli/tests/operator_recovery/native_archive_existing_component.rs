@@ -1,14 +1,15 @@
 //! Native signed-policy/SQLCipher component evidence, not a mounted network
-//! or complete Recovery-source witness. Setup SQL explicitly seeds an existing
-//! registration; it is not a production bootstrap API.
+//! or complete Recovery-source witness. Positive cases register through the
+//! production API; `seed` only builds deliberately corrupt fixtures.
 use super::*;
 use ea_admin::native_archive::{
     NativeArchiveConfig, NativeArchiveExistingComponent, NativeArchiveOpenError,
+    register_network_component,
 };
 use ea_archive::{ArchiveBackendError, ArchivePath};
 use sha2::{Digest, Sha256};
 
-fn profile() -> ea_archive::ArchiveBackendProfileV1 {
+pub(super) fn profile() -> ea_archive::ArchiveBackendProfileV1 {
     ea_archive::ArchiveBackendProfileV1::ControlledNetworkPath(
         ea_archive::ControlledNetworkProfileV1 {
             filesystem_row_id: "existing-component-only-no-mount".into(),
@@ -26,7 +27,7 @@ fn profile() -> ea_archive::ArchiveBackendProfileV1 {
         },
     )
 }
-fn config(
+pub(super) fn config(
     runtime: &OperatorRuntime,
     profile: ea_archive::ArchiveBackendProfileV1,
 ) -> NativeArchiveConfig {
@@ -42,6 +43,9 @@ fn namespace(runtime: &OperatorRuntime, profile: &ea_archive::ArchiveBackendProf
     digest.update(profile.profile_hash().unwrap().as_bytes());
     Hash32::try_from(digest.finalize().as_slice()).unwrap()
 }
+/// Schreibt absichtlich abweichende oder unvollständige Registrierungszeilen
+/// per SQL, die `register_network_component` nie erzeugt. Nur für die
+/// Ablehnungsfälle; eine gültige Registrierung läuft über die Produktions-API.
 fn seed(runtime: &OperatorRuntime, profile: &ea_archive::ArchiveBackendProfileV1, mutation: &str) {
     let database = runtime.database();
     let mut ns = namespace(runtime, profile);
@@ -78,7 +82,7 @@ fn seed(runtime: &OperatorRuntime, profile: &ea_archive::ArchiveBackendProfileV1
         database.execute("PRAGMA foreign_keys=ON", &[]).unwrap();
     }
 }
-fn observe_archive_writes(runtime: &OperatorRuntime) {
+pub(super) fn observe_archive_writes(runtime: &OperatorRuntime) {
     let db = runtime.database();
     db.execute(
         "CREATE TEMP TABLE native_archive_write_witness(event INTEGER)",
@@ -99,7 +103,7 @@ fn observe_archive_writes(runtime: &OperatorRuntime) {
         }
     }
 }
-fn state(runtime: &OperatorRuntime) -> Vec<String> {
+pub(super) fn state(runtime: &OperatorRuntime) -> Vec<String> {
     let db = runtime.database();
     let mut state = Vec::new();
     for (table, projection, order) in [
@@ -146,7 +150,7 @@ fn state(runtime: &OperatorRuntime) -> Vec<String> {
 fn native_existing_component_opens_offline_and_preserves_exact_local_bytes_across_reopen() {
     let installed = RecoveryInstallation::with_profile(None, false, Some(profile()));
     let runtime = installed.open();
-    seed(&runtime, &installed.profile, "");
+    register_network_component(&runtime, config(&runtime, installed.profile.clone())).unwrap();
     let detached = installed.archive.with_extension("detached");
     fs::rename(&installed.archive, &detached).unwrap();
     let component = NativeArchiveExistingComponent::open_current(
@@ -291,7 +295,7 @@ fn native_existing_component_current_writer_entry_is_storage_only_and_local_conf
  {
     let installed = RecoveryInstallation::with_profile(None, false, Some(profile()));
     let runtime = installed.open();
-    seed(&runtime, &installed.profile, "");
+    register_network_component(&runtime, config(&runtime, installed.profile.clone())).unwrap();
     let cfg = config(&runtime, installed.profile.clone());
     let runtime = ea_admin::operator_runtime::writer::InteractiveOperatorRuntime::from(runtime);
     let component = NativeArchiveExistingComponent::open_writer(&runtime, cfg).unwrap();
