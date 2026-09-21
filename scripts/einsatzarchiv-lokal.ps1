@@ -2,59 +2,72 @@
 #requires -PSEdition Core
 <#
 .SYNOPSIS
-Ein Aufruf: Einsatzarchiv unter Windows bauen, saeen und oeffnen.
+Ein Aufruf: Einsatzarchiv unter Windows bauen, säen und öffnen.
 
 .DESCRIPTION
-Dies ist der EINE Einstiegspunkt. Er ruft die drei Teilskripte in der richtigen
-Reihenfolge und beweist am Ende an echten Daten, dass die Kette traegt:
+Dies ist der EINE Einstiegspunkt. Er ruft die Teilskripte in der richtigen
+Reihenfolge und beweist am Ende an echten Daten, dass die Kette trägt:
 
   1. bootstrap-windows-build.ps1   Werkzeuge, CLI, nativer Helfer, Paket,
-                                   selbstsignierte Signatur, Installation
-  2. xtask seed-demo               eine vollstaendige Fixture-Demo-Welt
-  3. einsatzarchiv verify/list     die gesaete Welt gegen die gebaute CLI
-  4. bootstrap-windows-reader.ps1  Web-Reader bauen und im Browser oeffnen
+                                   selbstsignierte Signatur, Installation;
+                                   mit -Desktop zusätzlich FIXTURE-Wirt und
+                                   Fixture-Helfer
+  2. xtask seed-demo               eine vollständige Fixture-Demo-Welt
+  3. einsatzarchiv verify/list     die gesäte Welt gegen die gebaute CLI
+  4. (nur -Desktop)                ZWEI FIXTURE-Fenster: Writer und Verwaltung
+  5. bootstrap-windows-reader.ps1  Web-Reader bauen und im Browser öffnen
 
 WAS FUNKTIONIERT UND WAS NICHT
 
-Der Reader und die CLI arbeiten auf der gesaeten Welt mit ECHTEN Daten. Das ist
-gemessen, nicht behauptet: auf macOS meldet `verify` ueber derselben Welt
-61 Archivobjekte, 1 Eintragspaket und null Fehler in allen sechs Fehlerklassen.
+Die CLI arbeitet auf der gesäten Welt mit ECHTEN Daten. Das ist gemessen, nicht
+behauptet: auf macOS meldet `verify` über derselben Welt 61 Archivobjekte,
+1 Eintragspaket und null Fehler in allen sechs Fehlerklassen.
 
-Die beiden Desktop-Fenster (Writer und Verwaltung) oeffnen KEINE Sitzung, und
-das liegt nicht an der Signatur. `InteractiveOperatorRuntime::open` geht immer
-ueber `NativeOperatorProvider::open_installed`, und dessen
-`NativeExecutableIdentity::for_installed` verlangt unter Windows, dass die
-AUFRUFENDE Datei genau `einsatzarchiv.exe` heisst und `ea-native-operator.exe`
-als Geschwisterdatei neben sich hat. Die Tauri-Anwendung heisst
-`ea-desktop.exe` beziehungsweise `Einsatzarchiv.exe` und faellt damit durch die
-Namenspruefung, egal wie sie signiert ist. Im Windows-Release-Bundle
-(`WINDOWS_RELEASE_ASSETS`) kommt ueberhaupt kein Desktop-Programm vor.
+Der Web-Reader öffnet im Datei-Modus das gesäte Archiv und zeigt den
+Verifikations- und Server-Bestätigungsstand der Objekte: den Eintrag als
+gültig, nicht serverbestätigt. Entschlüsselte Eintragsinhalte zeigt er mit
+dieser Saat NICHT. Der Reader hat keine Eingabe für einen Rohschlüssel;
+Schlüssel kommen ausschließlich über das Enrollment, gebunden an einen
+WebAuthn-Authenticator mit PRF-Erweiterung. Das ist Absicht, und der
+Fixture-Schlüssel der Saat lässt sich deshalb nicht einbringen.
 
-`-Desktop` baut und startet das Fenster trotzdem, damit die Oberflaeche sichtbar
-ist. Es zeigt dann die leere Schale ohne Erfassungsflaeche. Das ist der ehrliche
-Stand und kein Fehler des Baus.
+Die Desktop-Fenster (-Desktop) sind eine FIXTURE-ANWENDUNG OHNE NATIVE
+SICHERHEITSKETTE. Der ausgelieferte Wirt `ea-desktop.exe` geht immer über
+`NativeOperatorProvider::open_installed` und öffnet ohne signierten,
+installierten Helfer keine Sitzung. `-Desktop` baut deshalb stattdessen das
+eigene Programm `ea-desktop-fixture.exe` (Merkmal `test-support`, Ruling A,
+DRK-437): es nimmt dieselben Startflags, legt den Fixture-Helfer als
+`ea-native-operator.exe` in jedes Stationsverzeichnis und antwortet mit den
+öffentlich bekannten Schlüsseln der Demowelt. Kein Schlüsselbund, keine
+Identitätsprüfung, keine Anwesenheits- und keine Sperrprüfung. Nur für die
+Handprobe gegen die gesäte Welt, nie gegen echte Daten.
+
+Writer und Verwaltung sind zwei Prozesse: `--writer-config` und
+`--administration-config` schließen sich am Wirt gegenseitig aus.
 
 VORAUSSETZUNG: ein als Administrator gestartetes Terminal. Die Installation
-verlangt einen geschuetzten Verzeichnisbaum, dessen Besitzer SYSTEM,
+verlangt einen geschützten Verzeichnisbaum, dessen Besitzer SYSTEM,
 Administratoren oder TrustedInstaller ist.
 
 .PARAMETER Path
-Arbeitsverzeichnis fuer die Arbeitskopie. Vorgabe: <Benutzer>\einsatztagebuch.
+Arbeitsverzeichnis für die Arbeitskopie. Vorgabe: <Benutzer>\einsatztagebuch.
 
 .PARAMETER Ref
 Git-Ref, der gebaut wird. Vorgabe: windows-build-bootstrap.
 
 .PARAMETER DemoRoot
-Verzeichnis fuer die Demo-Welt. Vorgabe: <Path>\demowelt.
+Verzeichnis für die Demo-Welt. Vorgabe: <Path>\demowelt.
 
 .PARAMETER Desktop
-Tauri-Fenster zusaetzlich bauen und starten. Siehe Einschraenkung oben.
+FIXTURE-Wirt und Fixture-Helfer bauen und nach der Saat zwei Fenster starten,
+Writer und Verwaltung. Zieht Node und pnpm nach. Siehe den Kasten oben: das ist
+eine Fixture-Anwendung ohne native Sicherheitskette.
 
 .PARAMETER SkipReader
 Den Web-Reader auslassen.
 
 .PARAMETER NoInstall
-Nichts installieren; fehlende Voraussetzungen nur melden. Dann entfaellt auch
+Nichts installieren; fehlende Voraussetzungen nur melden. Dann entfällt auch
 die Signatur- und Installationsstufe.
 
 .EXAMPLE
@@ -101,8 +114,26 @@ function Invoke-Stage([string]$What, [string[]]$Arguments) {
     }
 }
 
+function Write-FixtureWarning {
+    Write-Host ''
+    Write-Host ('!' * 72) -ForegroundColor Red
+    Write-Host '  FIXTURE-ANWENDUNG OHNE NATIVE SICHERHEITSKETTE' -ForegroundColor Red
+    Write-Host '  ea-desktop-fixture.exe ist NICHT der ausgelieferte Wirt. Kein signierter' -ForegroundColor Yellow
+    Write-Host '  Helfer, keine Identitätsprüfung, kein Schlüsselbund, keine Anwesenheits-' -ForegroundColor Yellow
+    Write-Host '  und keine Sperrprüfung. Alle Schlüssel sind öffentlich bekannte' -ForegroundColor Yellow
+    Write-Host '  Konstanten der Demowelt. Nur für die Handprobe, nie gegen echte Daten.' -ForegroundColor Yellow
+    Write-Host ('!' * 72) -ForegroundColor Red
+}
+
+# Start-Process fügt -ArgumentList nur mit Leerzeichen zusammen und setzt
+# keine Anführungszeichen. Ein Pfad mit Leerzeichen zerfiele sonst in zwei
+# Argumente.
+function ConvertTo-ArgumentString([string[]]$Arguments) {
+    ($Arguments | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' '
+}
+
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-    Stop-Here 'Dieses Skript ist der Windows-Einstieg.' 'Auf Windows 11 (Build 22000 oder neuer) ausfuehren.'
+    Stop-Here 'Dieses Skript ist der Windows-Einstieg.' 'Auf Windows 11 (Build 22000 oder neuer) ausführen.'
 }
 
 $here = Split-Path -Parent $PSCommandPath
@@ -121,17 +152,22 @@ $runtime = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)
 }
 $triple = if ($runtime -eq 'win-arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
 if (-not $DemoRoot) { $DemoRoot = Join-Path $Path 'demowelt' }
+$stages = if ($Desktop) { 5 } else { 4 }
 
 Write-Stage "Einsatzarchiv lokal - $runtime, Ref $Ref"
 Write-Line "Arbeitskopie : $Path"
 Write-Line "Demo-Welt    : $DemoRoot"
+if ($Desktop) { Write-FixtureWarning }
 
 # ------------------------------------------------------- 1. bauen und signieren
 
-Write-Stage '1/4  Bauen, signieren, installieren'
+Write-Stage "1/$stages  Bauen, signieren, installieren"
 
 $buildArgs = @('-NoProfile', '-File', $buildScript, '-Path', $Path, '-Ref', $Ref)
-if ($Desktop) { $buildArgs += '-Desktop' }
+# Nur den Fixture-Bau, NICHT `-Desktop`: das startete die leere Schale des
+# ausgelieferten Wirts, die ohne installierten Helfer keine Sitzung öffnet.
+# Clang (ARM64) und der vite-Bau laufen im Teilskript für beide Schalter.
+if ($Desktop) { $buildArgs += '-DesktopFixture' }
 if ($NoInstall) {
     $buildArgs += '-NoInstall'
     Write-Line 'NoInstall: Signatur und Installation entfallen'
@@ -141,20 +177,32 @@ else {
 }
 Invoke-Stage 'Der Bau' $buildArgs
 
-$cli = Join-Path $Path "target\$triple\release\einsatzarchiv.exe"
+$release = Join-Path $Path "target\$triple\release"
+$cli = Join-Path $release 'einsatzarchiv.exe'
 if (-not (Test-Path -LiteralPath $cli)) {
-    Stop-Here "Die gebaute CLI fehlt: $cli" 'Die Ausgabe der Baustufe oben pruefen.'
+    Stop-Here "Die gebaute CLI fehlt: $cli" 'Die Ausgabe der Baustufe oben prüfen.'
+}
+$fixtureHost = Join-Path $release 'ea-desktop-fixture.exe'
+$fixtureHelper = Join-Path $release 'ea-native-operator-fixture.exe'
+if ($Desktop) {
+    foreach ($p in @($fixtureHost, $fixtureHelper)) {
+        if (-not (Test-Path -LiteralPath $p)) {
+            Stop-Here "Der Fixture-Bau fehlt: $p" 'Die Ausgabe der Baustufe oben prüfen.'
+        }
+    }
 }
 
-# --------------------------------------------------------------- 2. Welt saeen
+# --------------------------------------------------------------- 2. Welt säen
 
-Write-Stage '2/4  Demo-Welt saeen'
+Write-Stage "2/$stages  Demo-Welt säen"
 
 # Die Welt ist an die PLATTFORMFAMILIE gebunden, nicht an den Rechner: die
-# Kontoableitung unterscheidet macOS, Linux und Windows. Eine anderswo gesaete
-# Welt traegt hier nicht, deshalb wird sie hier erzeugt und nicht mitgeliefert.
+# Kontoableitung unterscheidet macOS, Linux und Windows. Eine anderswo gesäte
+# Welt trägt hier nicht, deshalb wird sie hier erzeugt und nicht mitgeliefert.
 if (Test-Path -LiteralPath $DemoRoot) {
     Write-Line "vorhandene Welt wird entfernt: $DemoRoot"
+    # Ein noch offenes Fixture-Fenster hält seinen Helfer im Stationsverzeichnis
+    # fest; dann scheitert das Entfernen mit einer Zugriffsmeldung.
     Remove-Item -LiteralPath $DemoRoot -Recurse -Force
 }
 
@@ -164,80 +212,139 @@ try {
     $env:CARGO_TARGET_DIR = Join-Path $Path 'target'
     & cargo run --locked -q -p xtask --features seed-demo -- seed-demo $DemoRoot
     if ($LASTEXITCODE -ne 0) {
-        Stop-Here "Das Saeen endete mit Code $LASTEXITCODE." 'Die Ausgabe oben nennt den Grund.'
+        Stop-Here "Das Säen endete mit Code $LASTEXITCODE." 'Die Ausgabe oben nennt den Grund.'
     }
 }
 finally { Set-Location -LiteralPath $previous }
 
 $anchor = Join-Path $DemoRoot 'fixture-demo-trust-anchor.etb'
 $archive = Join-Path $DemoRoot 'archiv'
-foreach ($p in @($anchor, $archive)) {
-    if (-not (Test-Path -LiteralPath $p)) { Stop-Here "Die Saat hat $p nicht erzeugt." 'Ausgabe oben pruefen.' }
+$writerStation = Join-Path $DemoRoot 'writer-station'
+$adminStation = Join-Path $DemoRoot 'admin-station'
+$seeded = @($anchor, $archive,
+    (Join-Path $writerStation 'operator.json'), (Join-Path $writerStation 'writer.json'),
+    (Join-Path $adminStation 'operator.json'), (Join-Path $adminStation 'administration.json'))
+foreach ($p in $seeded) {
+    if (-not (Test-Path -LiteralPath $p)) { Stop-Here "Die Saat hat $p nicht erzeugt." 'Ausgabe oben prüfen.' }
 }
 
 # ------------------------------------------------------------- 3. Nachweis CLI
 
-Write-Stage '3/4  Nachweis: die gebaute CLI liest die gesaete Welt'
+Write-Stage "3/$stages  Nachweis: die gebaute CLI liest die gesäte Welt"
 
-# Diese zwei Kommandos brauchen KEINE native Identitaet - sie pruefen ein
-# Archiv gegen einen Anker und oeffnen keine Bedienersitzung. Deshalb tragen
+# Diese zwei Kommandos brauchen KEINE native Identität - sie prüfen ein
+# Archiv gegen einen Anker und öffnen keine Bedienersitzung. Deshalb tragen
 # sie den Nachweis auch ohne Installation.
 Write-Line "$cli --trust-anchor <anker> verify <archiv>"
 & $cli --trust-anchor $anchor verify $archive
 $verifyCode = $LASTEXITCODE
 if ($verifyCode -ne 0) {
-    Stop-Here "verify endete mit Code $verifyCode." 'Die Zeilen darueber nennen die Fehlerklasse.'
+    Stop-Here "verify endete mit Code $verifyCode." 'Die Zeilen darüber nennen die Fehlerklasse.'
 }
 
 Write-Host ''
 Write-Line "$cli --trust-anchor <anker> list <archiv>"
 & $cli --trust-anchor $anchor list $archive
-if ($LASTEXITCODE -ne 0) { Stop-Here "list endete mit Code $LASTEXITCODE." 'Ausgabe oben pruefen.' }
+$listCode = $LASTEXITCODE
+if ($listCode -ne 0) { Stop-Here "list endete mit Code $listCode." 'Ausgabe oben prüfen.' }
 
 Write-Host ''
-Write-Host '    Die Kette traegt: Anker, Registry, Kette und Eintrag sind stimmig.' -ForegroundColor Green
+Write-Host '    Die Kette trägt: Anker, Registry, Kette und Eintrag sind stimmig.' -ForegroundColor Green
 
-# ------------------------------------------------------------------ 4. Reader
+# ------------------------------------------------------ 4. Fixture-Fenster
+
+$writerArgs = @(
+    '--operator-config', (Join-Path $writerStation 'operator.json'),
+    '--trust-anchor', $anchor,
+    '--writer-config', (Join-Path $writerStation 'writer.json'))
+$adminArgs = @(
+    '--operator-config', (Join-Path $adminStation 'operator.json'),
+    '--trust-anchor', $anchor,
+    '--administration-config', (Join-Path $adminStation 'administration.json'))
+
+if ($Desktop) {
+    Write-Stage "4/$stages  FIXTURE-Fenster starten: Writer und Verwaltung"
+    Write-FixtureWarning
+    Write-Host ''
+    # Zwei Prozesse, weil sich --writer-config und --administration-config am
+    # Wirt ausschließen. Jeder bekommt sein eigenes Konsolenfenster mit dem
+    # Fixture-Hinweis und einer etwaigen Fehlermeldung beim Start.
+    foreach ($window in @(
+            @{ Label = 'Writer'; Arguments = $writerArgs },
+            @{ Label = 'Verwaltung'; Arguments = $adminArgs })) {
+        Write-Line "$($window.Label): $fixtureHost $($window.Arguments -join ' ')"
+        $started = Start-Process -FilePath $fixtureHost -PassThru `
+            -ArgumentList (ConvertTo-ArgumentString $window.Arguments)
+        Start-Sleep -Seconds 3
+        if ($started.HasExited) {
+            Stop-Here "Das $($window.Label)-Fenster endete sofort mit Code $($started.ExitCode)." `
+                'Den Befehl darüber in einem Terminal von Hand starten; die Konsole nennt den Grund.'
+        }
+        Write-Line "$($window.Label): läuft als Prozess $($started.Id)"
+    }
+}
+
+# ------------------------------------------------------------------ Abschluss
+
+# Der Abschluss steht VOR dem Reader: dessen Teilskript hält den
+# Vorschauserver bis Strg+C offen, und was danach käme, sähe niemand.
+Write-Stage 'So benutzt du es'
+
+Write-Host @"
+  Reader (Datei-Modus):
+    Im Browser auf die Seite gehen, oben "Datei-Modus" wählen. In Edge und
+    Chrome gibt es dort den Ordnerweg über showDirectoryPicker; dann diesen
+    Ordner wählen:
+
+      $archive
+
+    Der Reader zeigt dann den Verifikations- und Server-Bestätigungsstand der
+    Objekte: den Eintrag als gültig, nicht serverbestätigt. Entschlüsselte
+    Eintragsinhalte zeigt er mit dieser Saat NICHT. Der Reader hat keine
+    Eingabe für einen Rohschlüssel; Schlüssel kommen ausschließlich über das
+    Enrollment, gebunden an einen WebAuthn-Authenticator mit PRF-Erweiterung.
+    Der Fixture-Schlüssel der Saat lässt sich deshalb nicht einbringen - das
+    ist Absicht, kein Fehler.
+
+  CLI (funktioniert ohne Installation):
+    & "$cli" --trust-anchor "$anchor" verify "$archive"
+    & "$cli" --trust-anchor "$anchor" list   "$archive"
+"@
+
+if ($Desktop) {
+    Write-Host @"
+
+  Desktop - FIXTURE-ANWENDUNG OHNE NATIVE SICHERHEITSKETTE:
+    Zwei Fenster laufen, Titel "FIXTURE ohne native Sicherheitskette - ...".
+    In jedem zuerst anmelden; die Sitzung beginnt erst mit der Anmeldung.
+    Von Hand erneut starten:
+
+    & "$fixtureHost" $(ConvertTo-ArgumentString $writerArgs)
+    & "$fixtureHost" $(ConvertTo-ArgumentString $adminArgs)
+
+    Der Fixture-Wirt legt den Helfer beim Start selbst als
+    ea-native-operator.exe in das Stationsverzeichnis.
+"@
+}
+else {
+    Write-Host @"
+
+  Desktop:
+    Nicht gebaut. Mit -Desktop entstehen der FIXTURE-Wirt und zwei Fenster
+    (Writer und Verwaltung) gegen diese Welt - eine Fixture-Anwendung ohne
+    native Sicherheitskette. Der ausgelieferte Wirt ea-desktop.exe öffnet
+    ohne signierten, installierten Helfer keine Sitzung.
+"@
+}
+
+# ------------------------------------------------------------------ Reader
 
 if (-not $SkipReader) {
-    Write-Stage '4/4  Web-Reader bauen und oeffnen'
+    Write-Stage "$stages/$stages  Web-Reader bauen und öffnen"
     $readerArgs = @('-NoProfile', '-File', $readerScript, '-Path', $Path)
     if ($NoInstall) { $readerArgs += '-NoInstall' }
     Invoke-Stage 'Der Reader' $readerArgs
 }
 else {
-    Write-Stage '4/4  Web-Reader uebersprungen (-SkipReader)'
+    Write-Stage "$stages/$stages  Web-Reader übersprungen (-SkipReader)"
 }
-
-# ------------------------------------------------------------------ Abschluss
-
-Write-Stage 'Fertig'
-
-Write-Host @"
-SO BENUTZT DU ES
-
-  Reader (funktioniert mit echten Daten):
-    Im Browser auf die Seite gehen, oben "Datei-Modus" waehlen, dort
-    "Archiv oeffnen" und dieses Verzeichnis nehmen:
-
-      $archive
-
-    Der private Reader-Schluessel steht in der Ausgabe der Saat weiter oben
-    (X25519, roh, hex). Ohne ihn und den mitgelieferten Grant zeigt der Reader
-    nichts - das ist die Zusage des Formats, kein Fehler.
-
-  CLI (funktioniert ohne Installation):
-    & "$cli" --trust-anchor "$anchor" verify "$archive"
-    & "$cli" --trust-anchor "$anchor" list   "$archive"
-
-WAS HEUTE NOCH NICHT GEHT
-
-  Die Desktop-Fenster fuer Erfassung und Verwaltung oeffnen keine Sitzung.
-  Die Saat hat die richtigen Startbefehle ausgegeben und die Welt ist gueltig -
-  es fehlt die Identitaetspruefung: `for_installed` verlangt unter Windows, dass
-  die aufrufende Datei genau `einsatzarchiv.exe` heisst. Die Tauri-Anwendung
-  heisst anders und faellt durch, unabhaengig von der Signatur. Im
-  Windows-Release-Bundle kommt kein Desktop-Programm vor.
-
-  Das ist eine Luecke im Produkt, keine in diesem Skript.
-"@

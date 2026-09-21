@@ -121,6 +121,14 @@ Stop after the build instead of staging the release bundle with Package.ps1.
 Also build the Tauri writer application and start it. This pulls in Node and
 pnpm, which the release path does not need, so it is opt-in.
 
+.PARAMETER DesktopFixture
+Zusätzlich den FIXTURE-Wirt `ea-desktop-fixture` und den Fixture-Helfer
+`ea-native-operator-fixture` bauen (Merkmal `test-support`, Ruling A,
+DRK-437). Das ist eine Anwendung OHNE native Sicherheitskette gegen die
+gesäte Demowelt. Dieser Schalter startet kein Fenster; das tut
+einsatzarchiv-lokal.ps1 nach der Saat. Ein Bau ohne diesen Schalter erzeugt
+keines der beiden Programme.
+
 .PARAMETER NoInstall
 Do not install anything. Report a missing prerequisite with its winget command
 and stop. Use this in CI or on a managed machine.
@@ -162,6 +170,7 @@ param(
     [switch]$SkipTests,
     [switch]$SkipPackage,
     [switch]$Desktop,
+    [switch]$DesktopFixture,
     [switch]$NoInstall,
     [switch]$SelfSignedCert,
     [string]$ReleaseRoot = 'C:\Einsatzarchiv',
@@ -912,7 +921,9 @@ if ($SelfSignedCert) {
 # ----------------------------------------------------------------- desktop
 
 $desktopExe = $null
-if ($Desktop) {
+$fixtureHostExe = $null
+$fixtureHelperExe = $null
+if ($Desktop -or $DesktopFixture) {
     Write-Step 'Tauri-Anwendung bauen'
 
     Assert-Tool -Name 'node' -Label 'Node.js' -WingetId 'OpenJS.NodeJS'
@@ -939,12 +950,36 @@ if ($Desktop) {
     Invoke-Checked 'vite build' 'pnpm' @('--dir', 'apps/desktop', 'exec', 'vite', 'build') $Path
 
     Assert-ClangForRing
+}
+
+if ($Desktop) {
     Invoke-Checked 'cargo build (desktop)' 'cargo' @(
         'build', '--locked', '--release', '-p', 'ea-desktop', '--target', $RustTriple) $Path
 
     $desktopExe = Join-Path $env:CARGO_TARGET_DIR "$RustTriple\release\ea-desktop.exe"
     if (-not (Test-Path -LiteralPath $desktopExe)) { throw "cargo meldete Erfolg, aber $desktopExe fehlt" }
+}
 
+if ($DesktopFixture) {
+    Write-Step 'FIXTURE-Wirt und Fixture-Helfer bauen (ohne native Sicherheitskette)'
+    # Zwei eigene Programme hinter dem Merkmal `test-support` (Ruling A,
+    # DRK-437). Ohne `--features test-support` entsteht keines von beiden;
+    # `ea-desktop.exe` selbst ruft weiter immer `open_installed`.
+    Invoke-Checked 'cargo build (desktop fixture)' 'cargo' @(
+        'build', '--locked', '--release', '-p', 'ea-desktop', '--features', 'test-support',
+        '--bin', 'ea-desktop-fixture', '--bin', 'ea-native-operator-fixture',
+        '--target', $RustTriple) $Path
+
+    $fixtureHostExe = Join-Path $env:CARGO_TARGET_DIR "$RustTriple\release\ea-desktop-fixture.exe"
+    $fixtureHelperExe = Join-Path $env:CARGO_TARGET_DIR "$RustTriple\release\ea-native-operator-fixture.exe"
+    foreach ($built in @($fixtureHostExe, $fixtureHelperExe)) {
+        if (-not (Test-Path -LiteralPath $built)) { throw "cargo meldete Erfolg, aber $built fehlt" }
+    }
+    Write-Note "FIXTURE-Wirt  : $fixtureHostExe"
+    Write-Note "FIXTURE-Helfer: $fixtureHelperExe"
+}
+
+if ($Desktop -and -not $DesktopFixture) {
     Write-Step 'Einsatzarchiv-Fenster starten'
     # OHNE --operator-config und --trust-anchor: die Schale oeffnet sich, zeigt
     # aber nur die Flaechen, die eine GEPRUEFTE Sitzung freischaltet. Ohne
@@ -985,6 +1020,7 @@ Write-Host "  Parent : $parentExe"
 Write-Host "  Helfer : $helperExe"
 if ($packaged) { Write-Host "  Paket  : $packaged" }
 if ($desktopExe) { Write-Host "  Fenster: $desktopExe" }
+if ($fixtureHostExe) { Write-Host "  FIXTURE: $fixtureHostExe (ohne native Sicherheitskette)" }
 if ($InstalledBundle) { Write-Host "  Install: $InstalledBundle" }
 
 if ($SelfSignedCert) {
