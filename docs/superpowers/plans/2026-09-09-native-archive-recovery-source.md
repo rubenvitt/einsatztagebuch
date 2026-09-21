@@ -1,5 +1,7 @@
 # Native Archive and Recovery Source Implementation Plan
 
+Überholt durch `docs/superpowers/specs/2026-09-21-einsatzarchiv-controlled-network-archive-profile.md` und den DRK-320-Plan vom 2026-09-21.
+
 > **For agentic workers:** Use superpowers:executing-plans after the shared API is agreed. Root's explicit ownership and no-staging/no-commit restrictions apply; this proposal does not authorize new agents or infrastructure.
 
 **Goal:** Give the native Writer and Recovery one correctly bound controlled-network archive resource, including its encrypted local commit source.
@@ -20,13 +22,13 @@
 
 ## Existing seams and missing behavior
 
-`RecoveryTestRuntime::new` rejects `ControlledNetworkPath` at `recovery_test_runtime.rs:103`; native `WriterResources::open` rejects it at Desktop `runtime/writer.rs:71`. `SqliteCommitStore` is currently instantiated only by its archive-fs tests. `ControlledNetworkBackend::open` proves at-rest encryption and binds the full policy-approved profile, but exposes two resources; it does not itself implement the local Writer `ArchiveBackend` primitives.
+`RecoveryTestRuntime::new` rejects `ControlledNetworkPath` at `recovery_test_runtime.rs:112`; native `WriterResources::open` rejects it at Desktop `runtime/writer.rs:47`. `SqliteCommitStore` is currently instantiated only by its archive-fs tests. `ControlledNetworkBackend::open` proves at-rest encryption and binds the full policy-approved profile, but exposes two resources; it does not itself implement the local Writer `ArchiveBackend` primitives.
 
 Ordinary `OperatorArchiveSnapshot::open` currently reads the remote filesystem before `open_resources` opens SQLCipher. A complete native offline Writer therefore also needs Root's startup source integration. An adapter that only changes the constructor's match arm would still omit locally committed, unpublished progress and fail during a real network outage.
 
 ## Proposed smallest shared API
 
-New `crates/ea-admin/src/native_archive.rs` owns an opaque `NativeArchiveResources` and a closed configuration carrier:
+New `crates/ea-admin/src/native_archive.rs` owns an opaque `NativeArchiveExistingComponent` and a closed configuration carrier:
 
 ```rust
 pub struct NativeArchiveConfig {
@@ -34,20 +36,17 @@ pub struct NativeArchiveConfig {
     pub local_commit_database_path: Option<PathBuf>,
 }
 
-impl NativeArchiveResources {
+impl NativeArchiveExistingComponent {
     pub fn open_current(runtime: &OperatorRuntime, config: NativeArchiveConfig)
-        -> Result<Self, NativeArchiveError>;
+        -> Result<Self, NativeArchiveOpenError>;
     pub fn open_writer(runtime: &InteractiveOperatorRuntime, config: NativeArchiveConfig)
-        -> Result<Self, NativeArchiveError>;
+        -> Result<Self, NativeArchiveOpenError>;
     pub fn profile_hash(&self) -> Hash32;
     pub fn local_backend(&self) -> &dyn ArchiveBackend;
-    pub fn network(&self) -> Option<&ControlledNetworkBackend>;
-    pub fn snapshot_source(&self) -> Result<NativeArchiveSnapshot, NativeArchiveError>;
-    pub fn acquire_writer_lock(&self) -> Result<NativeArchiveLock, NativeArchiveError>;
 }
 ```
 
-The two opening methods retain the existing typed Current versus Writer-only boundaries; no conversion from StaleWriter to ordinary Current is introduced. `NativeArchiveSnapshot` implements the existing `ArchiveSource` as bounded owned encrypted/public original bytes. `NativeArchiveLock` is an opaque RAII guard for the exact configured component, not a boolean lock assertion.
+The two opening methods retain the existing typed Current versus Writer-only boundaries; no conversion from StaleWriter to ordinary Current is introduced. `network()`, `snapshot_source()` und `acquire_writer_lock()` als eigene Methoden auf `NativeArchiveExistingComponent` wurden nicht gebaut, ebenso wenig die Typen `NativeArchiveSnapshot` und `NativeArchiveLock`; der Schreib-Lock kommt stattdessen aus `local_backend().acquire_writer_lock()`.
 
 The existing `runtime.config().archive_directory` remains the single actual output/network path. Existing profile fields are unchanged. The only additional explicit location is `local_commit_database_path`: required for controlled-network and forbidden for local-path. Its canonical path must identify the very same native SQLCipher database/Arc used by the runtime; Recovery cannot silently attach a separate unsnapshotted queue database. No key handle, plaintext key, independent namespace or queue limits come from the new field.
 
