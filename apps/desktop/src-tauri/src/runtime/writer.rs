@@ -7,7 +7,10 @@ use crate::{
 };
 use ea_admin::{
     amendment::AmendmentDraftService,
-    native_archive::{NativeArchiveConfig, NativeArchiveExistingComponent, NativeArchiveOpenError},
+    native_archive::{
+        NativeArchiveConfig, NativeArchiveExistingComponent, NativeArchiveOpenError,
+        refuse_local_path_on_registered_anchor,
+    },
     native_provider::NativeSigningSlot,
     operator_runtime::writer::InteractiveOperatorRuntime as OperatorRuntime,
 };
@@ -71,6 +74,10 @@ impl WriterResources {
         let policy = BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields());
         let archive = match &profile {
             ArchiveBackendProfileV1::LocalPath(local) => {
+                // EA-CNA-REG-10 vor jeder I/O: sonst schriebe der Writer vom
+                // reinen Netzkettenkopf direkt ins registrierte Netzziel.
+                refuse_local_path_on_registered_anchor(runtime)
+                    .map_err(|error| CommandError::new(error.code()))?;
                 let vector_id = local.capability_test_vector_id.clone();
                 let backend = LocalPathBackend::open(
                     runtime.config().archive_directory.clone(),
@@ -92,7 +99,9 @@ impl WriterResources {
             }
             ArchiveBackendProfileV1::ControlledNetworkPath(_) => {
                 // Registrierung, Profilzeile, Policy und die eigene Datenbank
-                // prüft die Komponente selbst (EA-CNA-WRT-2).
+                // prüft die Komponente selbst (EA-CNA-WRT-2): ein Profil, das
+                // nicht exakt der registrierten Zeile entspricht, lehnt `open`
+                // mit `EA-ARCHIVE-BYTE-CONFLICT` ab.
                 let component = NativeArchiveExistingComponent::open_writer(
                     runtime,
                     NativeArchiveConfig {
@@ -101,11 +110,6 @@ impl WriterResources {
                     },
                 )
                 .map_err(|error| CommandError::new(error.code()))?;
-                if component.profile_hash() != profile_hash {
-                    return Err(CommandError::new(
-                        NativeArchiveOpenError::ProfileMismatch.code(),
-                    ));
-                }
                 // EA-CNA-WRT-3/4: SQLCipher- und Netzziel-Capability vor dem
                 // ersten Writer-Dienst. Ein fremd gehaltener Writer-Lock oder
                 // ein nicht belegter Flush ist eine fehlende Eigenschaft.

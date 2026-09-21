@@ -351,6 +351,23 @@ fn anchor_registered(
         .is_some())
 }
 
+/// EA-CNA-REG-10 für einen Writer, der seinen LocalPath-Bestand selbst
+/// öffnet: Trägt der Anker eine Registrierung, wird ein registriertes
+/// Netzziel nie als lokaler Pfad beschrieben. Liest nur die eigene
+/// Datenbank, vor jeder Dateisystem-I/O am Archivverzeichnis.
+///
+/// # Errors
+///
+/// `ProfileMismatch` bei registriertem Anker; `Backend` für Datenbankfehler.
+pub fn refuse_local_path_on_registered_anchor(
+    runtime: &InteractiveOperatorRuntime,
+) -> Result<(), NativeArchiveOpenError> {
+    if anchor_registered(runtime.database(), runtime.anchor().trust_anchor_hash())? {
+        return Err(NativeArchiveOpenError::ProfileMismatch);
+    }
+    Ok(())
+}
+
 /// Die Registrierung eines Ankers, wie der Start sie braucht (EA-CNA-SRC-1/2):
 /// Namensraum und die beiden gepinnten Grenzen der lokalen Komponente.
 ///
