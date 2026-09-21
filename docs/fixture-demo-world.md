@@ -88,13 +88,60 @@ Entwicklungs-Binary genügt dem Produktionspfad nicht."
 Die Demowelt ändert daran nichts und will es auch nicht: sie liefert den
 Bestand, nicht die Installation.
 
+## Der Fixture-Wirt (ohne native Sicherheitskette)
+
+Zum Anklicken der Oberfläche gibt es ein EIGENES Programm, kein Zweig im
+ausgelieferten Wirt (Ruling A, DRK-437): `ea-desktop-fixture`, nur mit dem
+Merkmal `test-support`. Es nimmt dieselben Startflags wie `ea-desktop`, legt
+den Fixture-Helfer `ea-native-operator-fixture` als `ea-native-operator` in
+das Stationsverzeichnis und baut die Laufzeit über
+`NativeOperatorProvider::open_test_fixture`. Der Helfer antwortet mit den
+öffentlich bekannten Schlüsseln dieser Welt (`ea_demo_world::native_fixture`);
+er liest seine Station aus der `operator.json` neben sich, weil der Wirt ihn
+ohne Umgebung und ohne Argumente startet.
+
+```
+cargo build -p ea-desktop --features test-support \
+            --bin ea-desktop-fixture --bin ea-native-operator-fixture
+target/debug/ea-desktop-fixture --operator-config <welt>/writer-station/operator.json \
+           --trust-anchor <welt>/fixture-demo-trust-anchor.etb \
+           --writer-config <welt>/writer-station/writer.json
+```
+
+beziehungsweise mit `admin-station/operator.json` und
+`--administration-config <welt>/admin-station/administration.json`. Vor dem
+ersten Bau muss `apps/desktop/dist` stehen (`pnpm --dir apps/desktop exec vite
+build`), weil der Wirt die Oberfläche einbettet.
+
+Kein Schlüsselbund, keine Identitätsprüfung, keine Anwesenheits- und keine
+Sperrprüfung. Nur für die Handprobe gegen diese Welt.
+
+Der Nachweis ohne Fenster ist `apps/desktop/src-tauri/tests/fixture_demo_world.rs`
+(`cargo test -p ea-desktop --features test-support --test fixture_demo_world`):
+beide Stationen melden sich an, der Writer finalisiert einen zweiten Eintrag.
+
+## Der Writer der Welt
+
+Die Writer-Station bindet das Writer-Zertifikat, das den alten Eintrag
+signiert hat — kein zweites. `ea-trust` macht nur das ERSTE
+Writer-Zertifikat einer Linie zum laufenden Writer; ein zweites gilt als nicht
+aktiv, und eine frühere Fassung dieser Saat brach deshalb in jedem Wirt mit
+`EA-OPERATOR-DEVICE-CERTIFICATE-NOT-ACTIVE` ab. Die Gegenprobe
+`seed_demo_world_with_second_writer_certificate` hält diese Form für den
+Zeugen fest.
+
 ## Der Reader
 
-Die Web-Anwendung lädt über „Archiv öffnen" dasselbe Archivverzeichnis. Das
-Saat-Kommando gibt den privaten X25519-Readerschlüssel roh als Hex aus.
+Die Web-Anwendung öffnet im Datei-Modus dasselbe Archivverzeichnis (in Edge
+und Chrome über den Ordnerweg `showDirectoryPicker`: den Ordner `archiv`
+wählen). Sie zeigt den Verifikations- und Server-Bestätigungsstand der
+Objekte: den Eintrag als gültig, nicht serverbestätigt.
 
-Ohne den Grant `grants/historical.eag` zeigt der Reader nichts — der
-ursprüngliche Recovery-Grant adressiert einen anderen Schlüssel.
+Entschlüsselte Eintragsinhalte zeigt sie mit dieser Saat NICHT. Der Reader hat
+keine Eingabe für einen Rohschlüssel; Schlüssel kommen ausschließlich über das
+Enrollment, gebunden an einen WebAuthn-Authenticator mit PRF-Erweiterung. Das
+Saat-Kommando gibt den privaten X25519-Readerschlüssel zwar roh als Hex aus,
+aber er lässt sich dort nicht einbringen — das ist Absicht.
 
 ## Plattformbindung
 

@@ -7,7 +7,44 @@ license.workspace = true
 publish = false
 
 [features]
-test-support = ["ea-admin/test-support"]
+# Kein `default`: ein Vorgabebau zieht weder die Fixture-Konstruktoren von
+# `ea-admin` noch die Demowelt. `ea-demo-world/fixture-world` steht HIER und
+# nicht an der Kante, weil der Manifestteil der Zeugen in
+# `tools/xtask/tests/workspace.rs` die Kantentabelle liest — dieselbe
+# Bauweise wie `seed-demo` in `tools/xtask`.
+test-support = [
+  "ea-admin/test-support",
+  "dep:ea-demo-world",
+  "ea-demo-world/fixture-world",
+]
+
+# Der ausgelieferte Wirt. `src/main.rs` ruft `ea_desktop::run()` und damit
+# immer `NativeOperatorProvider::open_installed`.
+[[bin]]
+name = "ea-desktop"
+path = "src/main.rs"
+
+# FIXTURE-WIRT OHNE NATIVE SICHERHEITSKETTE (Ruling A, DRK-437): ein EIGENES
+# Programm, kein Zweig in `run()`. Es existiert nur mit `test-support`; ein
+# Bau mit Vorgabemerkmalen erzeugt es nicht und kann es nicht auswählen.
+[[bin]]
+name = "ea-desktop-fixture"
+path = "src/bin/ea-desktop-fixture/main.rs"
+required-features = ["test-support"]
+
+# Der Fixture-Helfer, den der Fixture-Wirt als `ea-native-operator` in das
+# Stationsverzeichnis legt. Unter seinem Baunamen verweigert er jede Antwort.
+[[bin]]
+name = "ea-native-operator-fixture"
+path = "src/bin/ea-native-operator-fixture.rs"
+required-features = ["test-support"]
+
+# Der Nachweis ohne Fenster: beide Stationen der gesäten Welt bis zur
+# geöffneten Sitzung.
+[[test]]
+name = "fixture_demo_world"
+path = "tests/fixture_demo_world.rs"
+required-features = ["test-support"]
 
 [dependencies]
 # Der Wirt der Oberflaeche. Die Merkmalsauswahl ist ausgeschrieben und nicht
@@ -108,6 +145,9 @@ ea-sync-client.workspace = true
 ea-sync-protocol.workspace = true
 ea-crypto.workspace = true
 rustls.workspace = true
+# Die Demowelt samt ihrem Fixture-Helfer — NUR über `test-support`. Optional
+# und ohne Merkmal an der Kante: ohne `test-support` löst kein Bau sie auf.
+ea-demo-world = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Real Writer/SQLCipher/native-challenge fixture for the host acknowledgement
