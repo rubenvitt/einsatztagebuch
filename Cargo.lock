@@ -1899,6 +1899,7 @@ dependencies = [
  "ea-audit",
  "ea-chain",
  "ea-crypto",
+ "ea-demo-world",
  "ea-destruction",
  "ea-draft",
  "ea-format",

@@ -44,6 +44,9 @@
 #[path = "../../ea-recovery/tests/support/mod.rs"]
 pub mod support;
 
+pub mod native_fixture;
 pub mod world;
 
-pub use world::{DemoWorld, SeedError, seed_demo_world};
+pub use world::{
+    DemoWorld, SeedError, seed_demo_world, seed_demo_world_with_second_writer_certificate,
+};
