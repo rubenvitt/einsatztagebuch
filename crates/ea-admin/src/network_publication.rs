@@ -20,17 +20,17 @@ use std::{
 };
 
 use ea_archive::{
-    ArchiveBackend, ArchiveBackendError, ArchiveBackendProfileV1, ArchiveSource,
-    BoundArchiveProfilePolicyV1, ControlledNetworkProfileV1,
+    ArchiveBackend, ArchiveBackendError, ArchiveBackendProfileV1, ArchiveBlob, ArchiveError,
+    ArchiveSource, BoundArchiveProfilePolicyV1, ControlledNetworkProfileV1,
 };
 use ea_archive_fs::{
     DetailCause, LocalPathBackend, NetworkArchiveTargetV1, PlannedPublicationV1,
-    PublicationOutcomeV1, PublicationQueue, PublicationStateV1, PublicationTargetV1, SyncStatus,
+    PublicationOutcomeV1, PublicationQueue, PublicationStateV1, PublicationTargetV1,
+    SqlcipherArchiveBackend, SyncLocalArchiveV1, SyncStatus,
 };
 use ea_destruction::{DestructionError, SqliteManagedCustody};
 use ea_local_store::EncryptedDatabase;
 use ea_recovery::FsArchiveSource;
-use ea_sync_client::SyncLocalArchiveV1;
 use ea_trust::WriterRegistryHeadRef;
 use ea_types::CertificateHash;
 use ea_writer::NetworkPublicationPortV1;
@@ -597,18 +597,25 @@ impl NetworkPublicationHost {
 /// (EA-CNA-PUB-5).
 ///
 /// Die Quelle ist dieselbe Vereinigung wie beim Netz-Writer
-/// ([`NetworkWriterSourceV1`]): die committete Netzsicht des verifizierten
-/// Snapshots und die LIVE gelesene committete lokale Komponente, bei jedem
-/// Besuch neu gebildet. Das Backend ist die lokale SQLCipher-Komponente — nie
+/// ([`NetworkWriterSourceV1`]), aber mit einer Netzhälfte, die bei JEDEM
+/// Aufruf von `committed_source` live aus dem Netzziel gelesen wird — ein
+/// langlebiger Port sähe sonst nach einer Bereinigung (EA-CNA-SRC-5) eine
+/// Lücke. Nur ein nicht lesbares Netzziel lässt die Grundlinie des Snapshots
+/// an seine Stelle treten (EA-CNA-SRC-4); ist sie veraltet, scheitert die
+/// Verifikation an der Lücke, statt still zu wenig zu sehen. Die lokale
+/// Komponente wird bei jedem Besuch live gelesen. Das Backend ist die lokale SQLCipher-Komponente — nie
 /// ein `LocalPathBackend` des Netzziels. Eine verifizierte Quittung landet
 /// also lokal und erreicht das Netzziel erst über die Publikation.
 pub struct NetworkSyncArchiveV1 {
     component: NativeArchiveExistingComponent,
+    remote_root: PathBuf,
     baseline: Arc<FsArchiveSource>,
 }
 
 impl NetworkSyncArchiveV1 {
-    /// Bindet die lokale Komponente an die Netzsicht von `snapshot`.
+    /// Bindet die lokale Komponente an das Netzziel `archive_directory`
+    /// (dasselbe Verzeichnis wie beim Start der Laufzeit) und behält die
+    /// Netzsicht von `snapshot` als Grundlinie für ein unlesbares Netzziel.
     ///
     /// # Errors
     ///
@@ -617,6 +624,7 @@ impl NetworkSyncArchiveV1 {
     /// [`NativeArchiveExistingComponent::writer_source`].
     pub fn new(
         component: NativeArchiveExistingComponent,
+        archive_directory: &Path,
         snapshot: &OperatorArchiveSnapshot,
     ) -> Result<Self, NativeArchiveOpenError> {
         if component.sqlcipher_backend().is_none() {
@@ -629,6 +637,7 @@ impl NetworkSyncArchiveV1 {
         );
         Ok(Self {
             component,
+            remote_root: archive_directory.to_owned(),
             baseline,
         })
     }
@@ -646,7 +655,41 @@ impl SyncLocalArchiveV1 for NetworkSyncArchiveV1 {
             .component
             .sqlcipher_backend()
             .ok_or(ArchiveBackendError::MissingLocalCommitComponent)?;
-        Ok(Box::new(NetworkWriterSourceV1::over(&self.baseline, local)))
+        // Derselbe Lesepfad wie beim Start (`open_with_anchor`).
+        let remote = match FsArchiveSource::open_committed(&self.remote_root) {
+            Ok(live) => NetworkHalf::Live(live),
+            Err(_) => NetworkHalf::Baseline(&self.baseline),
+        };
+        Ok(Box::new(NetworkSyncSourceV1 { remote, local }))
+    }
+
+    fn requires_network_publication(&self) -> bool {
+        true
+    }
+}
+
+/// Die Netzhälfte eines Aufrufs: live gelesen oder die Grundlinie.
+enum NetworkHalf<'a> {
+    Live(FsArchiveSource),
+    Baseline(&'a FsArchiveSource),
+}
+
+/// Die Vereinigung eines Aufrufs; vereinigt wird wie beim Netz-Writer.
+struct NetworkSyncSourceV1<'a> {
+    remote: NetworkHalf<'a>,
+    local: &'a SqlcipherArchiveBackend,
+}
+
+impl ArchiveSource for NetworkSyncSourceV1<'_> {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        let remote = match &self.remote {
+            NetworkHalf::Live(live) => live,
+            NetworkHalf::Baseline(baseline) => baseline,
+        };
+        NetworkWriterSourceV1::over(remote, self.local).visit_blobs(visitor)
     }
 }
 

@@ -670,7 +670,12 @@ fn the_sync_port_of_a_network_writer_derives_its_queue_from_the_union() {
         ),
     )
     .unwrap();
-    let archive = NetworkSyncArchiveV1::new(component, runtime.archive_snapshot()).unwrap();
+    let archive = NetworkSyncArchiveV1::new(
+        component,
+        &installed.base.installed.archive,
+        runtime.archive_snapshot(),
+    )
+    .unwrap();
     let port: &dyn ea_sync_client::SyncLocalArchiveV1 = &archive;
     // Das Backend des Ports ist die lokale SQLCipher-Komponente: eine dort
     // abgelegte Staging-Zeile erscheint in deren Zeilen, aber nie in der
@@ -718,4 +723,219 @@ fn the_sync_port_of_a_network_writer_derives_its_queue_from_the_union() {
     );
     let plan: BTreeMap<String, Vec<u8>> = pending.publication_plan().into_iter().collect();
     assert_eq!(plan, local, "der Plan sind genau die lokal committeten Bytes");
+}
+
+/// Die Netzhälfte des Sync-Ports wird bei jedem Aufruf LIVE gelesen: ein
+/// langlebiger Port, dessen lokale Zeilen nach seiner Konstruktion
+/// veröffentlicht und bereinigt wurden (EA-CNA-SRC-5), sieht trotzdem die
+/// ganze Kette. Eine beim Bau eingefrorene Netzsicht hätte hier eine Lücke.
+#[test]
+fn a_long_lived_sync_port_reads_the_network_half_live_after_local_rows_are_pruned() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = started(&installed);
+    let away = installed.base.installed.archive.with_extension("away");
+    fs::rename(&installed.base.installed.archive, &away).unwrap();
+    assert_eq!(finalize(&native, "NET-SYNC-LIVE-1"), 1);
+    drop(native);
+    fs::rename(&away, &installed.base.installed.archive).unwrap();
+    let first = committed_rows(&installed);
+
+    // Der Port entsteht, solange Eintrag 1 NUR lokal liegt: seine Netzsicht
+    // beim Bau kennt ihn nicht.
+    let runtime = installed.base.open_writer_runtime();
+    let component = NativeArchiveExistingComponent::open_current(
+        &runtime,
+        NativeArchiveConfig::for_runtime_database(
+            installed.base.profile.clone(),
+            runtime.database().path(),
+        ),
+    )
+    .unwrap();
+    let archive = NetworkSyncArchiveV1::new(
+        component,
+        &installed.base.installed.archive,
+        runtime.archive_snapshot(),
+    )
+    .unwrap();
+    drop(runtime);
+
+    // Der Desktop veröffentlicht Eintrag 1 beim Start, committet Eintrag 2,
+    // und die nächste Wiederöffnung bereinigt Eintrag 1 lokal.
+    let reopened = started(&installed);
+    assert_eq!(finalize(&reopened, "NET-SYNC-LIVE-2"), 2);
+    let both = committed_rows(&installed);
+    reopened
+        .desktop_state()
+        .drafts()
+        .unwrap()
+        .load_payload()
+        .unwrap();
+    assert_eq!(
+        committed_rows(&installed),
+        rows_of_sequence(&both, 2),
+        "Eintrag 1 ist lokal bereinigt"
+    );
+    drop(reopened);
+
+    let port: &dyn ea_sync_client::SyncLocalArchiveV1 = &archive;
+    let source = port.committed_source().unwrap();
+    let mut visited = BTreeMap::new();
+    source
+        .visit_blobs(&mut |blob| {
+            visited.insert(blob.path_hint().to_owned(), blob.bytes().to_vec());
+            Ok(())
+        })
+        .unwrap();
+    for (path, bytes) in first.iter().chain(&both) {
+        assert_eq!(visited.get(path), Some(bytes), "{path} gehört zur Vereinigung");
+    }
+    // Nur für den Anker; ein Kaltstart bereinigt nicht.
+    let runtime = installed.base.open_writer_runtime();
+    let queue = ea_sync_client::SyncQueueV1::derive(
+        source.as_ref(),
+        runtime.anchor(),
+        support::live_clock(),
+    )
+    .expect("die ganze Kette ergibt eine Warteschlange");
+    assert_eq!(queue.pending().len(), 3, "Genesis, Eintrag 1 und Eintrag 2");
+}
+
+/// Ein Beobachter, der das Netzziel nur zulässt; die Verwahrungsbeobachtung
+/// selbst misst `publication_observes_the_network_root_before_publishing`.
+struct AdmitTarget;
+impl ea_admin::network_publication::NetworkTargetObserverV1 for AdmitTarget {
+    fn observe_network_target(
+        &self,
+        _target: &ea_archive_fs::LocalPathBackend,
+    ) -> Result<(), ea_archive::ArchiveBackendError> {
+        Ok(())
+    }
+}
+
+/// Eine FORMGÜLTIGE `.esr` auf `entry` unter ihrer Klientenadresse
+/// `receipts/<objectHash>.esr`. Die Linie dieser Installation trägt kein
+/// Serverquittungszertifikat, deshalb ist die Signatur keine, die die Linie
+/// bestätigt; für den Ablageweg zählen nur Adresse und exakte Bytes.
+fn receipt_for(entry: &ea_sync_client::PendingEntryV1) -> (ea_archive::ArchivePath, Vec<u8>) {
+    let ea_format::ParsedArchiveObject::Entry(parsed) =
+        ea_format::decode_exact_object(entry.entry_bytes()).unwrap()
+    else {
+        panic!("ein committetes .eip ist ein Eintragspaket");
+    };
+    let manifest = parsed.value().manifest().fields();
+    let signer = ea_crypto::CoseSigner::from_secret(ea_crypto::SecretBytes::new([0x9e; 32]));
+    let mut grants: Vec<ea_types::ObjectHash> = entry
+        .grant_bytes()
+        .iter()
+        .map(|bytes| ea_crypto::object_hash(bytes))
+        .collect();
+    grants.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    let core = ea_format::ReceiptCoreV1::new(ea_format::ReceiptCoreFieldsV1 {
+        organization_id: manifest.organization_id,
+        chain_id: manifest.chain_id,
+        chain_sequence: manifest.chain_sequence,
+        entry_hash: entry.entry_hash(),
+        entry_object_hash: entry.entry_object_hash(),
+        previous_entry_hash: manifest.previous_entry_hash,
+        registry_version: manifest.registry_version,
+        registry_head_hash: ea_types::Hash32::try_from(&manifest.registry_head_hash[..]).unwrap(),
+        policy_object_hash: ea_types::ObjectHash::try_from(&[0x44_u8; 32][..]).unwrap(),
+        initial_grant_plan_hash: ea_types::Hash32::try_from(&manifest.initial_grant_plan_hash[..])
+            .unwrap(),
+        initial_grant_object_hashes: grants,
+        accepted_at_server: support::live_clock(),
+        evidence_due_at: None,
+        server_key_thumbprint: signer.public_key().unwrap().thumbprint(),
+        server_certificate_hash: ea_types::CertificateHash::try_from(&[0x77_u8; 32][..]).unwrap(),
+    })
+    .unwrap();
+    let signature = signer.sign_receipt(core.exact_bytes()).unwrap();
+    let bytes = ea_format::encode_receipt(&ea_format::ReceiptV1::new(core, signature).unwrap())
+        .unwrap()
+        .into_vec();
+    let name: String = entry
+        .entry_object_hash()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    (
+        ea_archive::ArchivePath::in_dir("receipts/", &format!("{name}.esr")).unwrap(),
+        bytes,
+    )
+}
+
+/// Was der Sync-Klient über den Netzport ablegt — die Quittung —, landet in
+/// der SQLCipher-Komponente und erreicht das Netzziel nur über die
+/// Publikationswarteschlange, nie durch einen direkten Schreibzugriff.
+///
+/// Gemessen wird der Ablageweg des Ports mit genau den drei Aufrufen, die
+/// `persist_verified_receipt` nach der Verifikation macht.
+#[test]
+fn a_receipt_stored_through_the_sync_port_reaches_the_network_only_via_publication() {
+    let installed = NetworkWriterInstallation::new();
+    drop(installed.register());
+    let native = started(&installed);
+    assert_eq!(finalize(&native, "NET-SYNC-RCPT"), 1);
+    drop(native);
+
+    let runtime = installed.base.open_writer_runtime();
+    let open = || {
+        NativeArchiveExistingComponent::open_current(
+            &runtime,
+            NativeArchiveConfig::for_runtime_database(
+                installed.base.profile.clone(),
+                runtime.database().path(),
+            ),
+        )
+        .unwrap()
+    };
+    let archive = NetworkSyncArchiveV1::new(
+        open(),
+        &installed.base.installed.archive,
+        runtime.archive_snapshot(),
+    )
+    .unwrap();
+    let port: &dyn ea_sync_client::SyncLocalArchiveV1 = &archive;
+    assert!(port.requires_network_publication());
+    let entry = {
+        let source = port.committed_source().unwrap();
+        let queue = ea_sync_client::SyncQueueV1::derive(
+            source.as_ref(),
+            runtime.anchor(),
+            support::live_clock(),
+        )
+        .unwrap();
+        queue.pending().last().unwrap().clone()
+    };
+    let (receipt, bytes) = receipt_for(&entry);
+
+    port.backend()
+        .create_non_object_if_absent(&receipt, &bytes)
+        .unwrap();
+    port.backend().sync_file(&receipt).unwrap();
+    port.backend().sync_directory(&receipt).unwrap();
+    let remote_receipt = installed.base.installed.archive.join(receipt.as_str());
+    assert_eq!(
+        committed_rows(&installed).get(receipt.as_str()),
+        Some(&bytes),
+        "die Quittung liegt in der SQLCipher-Komponente"
+    );
+    assert!(!remote_receipt.exists(), "und nicht direkt am Netzziel");
+
+    // Erst die Warteschlange des Publikationshosts bringt sie ans Netzziel,
+    // byteidentisch.
+    let policy = BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields());
+    let component = open();
+    let host =
+        NetworkPublicationHost::new(&component, &installed.base.installed.archive, &policy)
+            .unwrap();
+    let planned = host.pending().unwrap();
+    assert_eq!(planned.order(), vec![receipt.as_str().to_owned()]);
+    assert_eq!(
+        host.run_once(&AdmitTarget).unwrap().outcome(),
+        PublicationOutcomeV1::PublishedCompletely
+    );
+    assert_eq!(fs::read(&remote_receipt).unwrap(), bytes);
 }

@@ -98,6 +98,9 @@ pub enum SyncClientError {
     RetryStateUnreadable,
     /// Ein Rahmen liess sich nicht bilden oder nicht lesen.
     Protocol,
+    /// Der lokale Archivport verlangt eine Netzarchiv-Publikation, aber der
+    /// Klient hat keine Netzarchiv-Warteschlange (EA-CNA-PUB-5).
+    NetworkPublicationUnpaired,
 }
 
 impl SyncClientError {
@@ -113,11 +116,12 @@ impl SyncClientError {
             Self::ReceiptNotPersisted => "EA-SYNC-RECEIPT-NOT-PERSISTED",
             Self::RetryStateUnreadable => "EA-SYNC-CLIENT-RETRY-STATE",
             Self::Protocol => "EA-SYNC-CLIENT-PROTOCOL",
+            Self::NetworkPublicationUnpaired => "EA-SYNC-CLIENT-NETWORK-UNPAIRED",
         }
     }
 
     /// Alle Codes, in Deklarationsreihenfolge.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Archive,
         Self::QueueDerivation,
         Self::ResumeAttemptsExhausted,
@@ -126,6 +130,7 @@ impl SyncClientError {
         Self::ReceiptNotPersisted,
         Self::RetryStateUnreadable,
         Self::Protocol,
+        Self::NetworkPublicationUnpaired,
     ];
 }
 

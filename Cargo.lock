@@ -1758,7 +1758,6 @@ dependencies = [
  "ea-reader",
  "ea-recovery",
  "ea-schema",
- "ea-sync-client",
  "ea-sync-protocol",
  "ea-testkit",
  "ea-time",
