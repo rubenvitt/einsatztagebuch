@@ -77,9 +77,22 @@ impl NetworkTargetObserverV1 for WriterCustodyObserverV1<'_> {
             .observe_writer_archive(self.head, self.certificate, target)
             .map(|_| ())
             .map_err(|error| match error {
-                // Lock, Wurzel oder Lesen des Netzziels: ob das die verlorene
-                // Erreichbarkeit ist, entscheidet der Host an der Wurzel.
-                DestructionError::Storage => ArchiveBackendError::Io,
+                // `observe_writer_archive` meldet auch einen fremd gehaltenen
+                // Writer-Lock des Netzziels als `Storage` (für die übrigen
+                // Aufrufer unverändert). Hier wird die Konkurrenz eigens
+                // geprüft: sie ist ein wartendes Netzziel (EA-CNA-REC-2),
+                // kein Befund.
+                DestructionError::Storage => {
+                    match ea_archive::ArchiveBackend::acquire_writer_lock(target) {
+                        Err(ArchiveBackendError::AlreadyLocked) => {
+                            ArchiveBackendError::AlreadyLocked
+                        }
+                        // Lock, Wurzel oder Lesen des Netzziels: ob das die
+                        // verlorene Erreichbarkeit ist, entscheidet der Host
+                        // an der Wurzel.
+                        _ => ArchiveBackendError::Io,
+                    }
+                }
                 _ => ArchiveBackendError::VerificationFailed,
             })
     }
@@ -132,6 +145,17 @@ struct HostState {
     /// nicht bis zum Ende seiner Ruhe-Wartezeit schlafen.
     signaled: bool,
     stopped: bool,
+    /// Hat der letzte `next_delay` einen Versuch gezählt?
+    counted: bool,
+}
+
+/// Ergebnis der Ableitung eines Laufs.
+enum Derived {
+    /// Ohne Publikation erledigt (nichts ausstehend, wartend oder Befund).
+    Done(Result<PublicationStateV1, ArchiveBackendError>),
+    /// Es steht etwas aus: der Griff aufs Netzziel für die Beobachtung und
+    /// der Plan.
+    Pending(Box<LocalPathBackend>, PlannedPublicationV1),
 }
 
 /// Wie eine Wartezeit des Hostlaufs endete.
@@ -227,6 +251,7 @@ impl NetworkPublicationHost {
                 exhausted: false,
                 signaled: false,
                 stopped: false,
+                counted: false,
             }),
             wake: Condvar::new(),
             profile,
@@ -286,8 +311,35 @@ impl NetworkPublicationHost {
     ) -> Result<PublicationStateV1, ArchiveBackendError> {
         let _run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
         self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let result = self.publish_pending(observer);
-        let observed = match &result {
+        let result = match self.derive() {
+            Derived::Done(result) => result,
+            Derived::Pending(remote, planned) => self.publish(observer, &remote, planned),
+        };
+        self.record(&result);
+        result
+    }
+
+    /// Phase 1 des Hostlaufs, OHNE Autorität: ableiten und einen Ausgang,
+    /// der keine Publikation braucht (nichts ausstehend, Netzziel weg,
+    /// Befund), eintragen. `true` heißt: es steht etwas aus, und der
+    /// Aufrufer muss mit Autorität [`Self::run_once`] rufen.
+    ///
+    /// So hält der Hostlauf die Autorität seines Wirts (und damit dessen
+    /// Zustandssperre) nur, wenn wirklich veröffentlicht wird.
+    pub fn settle_unless_pending(&self) -> bool {
+        let _run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match self.derive() {
+            Derived::Done(result) => {
+                self.record(&result);
+                false
+            }
+            Derived::Pending(..) => true,
+        }
+    }
+
+    fn record(&self, result: &Result<PublicationStateV1, ArchiveBackendError>) {
+        let observed = match result {
             Ok(state) => match state.outcome() {
                 PublicationOutcomeV1::NothingPending
                 | PublicationOutcomeV1::PublishedCompletely => Observed::Clean,
@@ -308,53 +360,66 @@ impl NetworkPublicationHost {
             self.wake.notify_all();
         }
         state.observed = observed;
-        result
     }
 
-    fn publish_pending(
-        &self,
-        observer: &dyn NetworkTargetObserverV1,
-    ) -> Result<PublicationStateV1, ArchiveBackendError> {
-        let waiting = |cause| Ok(PublicationStateV1::deferred(Some(cause)));
-        let lost = |error: &ArchiveBackendError| {
-            matches!(
-                error,
-                ArchiveBackendError::Io | ArchiveBackendError::FlushFailed
-            ) && !self.remote_is_reachable()
-        };
+    fn lost(&self, error: &ArchiveBackendError) -> bool {
+        matches!(
+            error,
+            ArchiveBackendError::Io | ArchiveBackendError::FlushFailed
+        ) && !self.remote_is_reachable()
+    }
+
+    /// Öffnen und Ableiten. Alles, was ohne Publikation endet, ist `Done`.
+    fn derive(&self) -> Derived {
+        let waiting = |cause| Derived::Done(Ok(PublicationStateV1::deferred(Some(cause))));
         // Die Ableitung öffnet ihren EIGENEN Griff auf das Netzziel und gibt
         // ihn zurück, bevor die Warteschlange ihren nimmt: beide nehmen
         // kurzzeitig den Writer-Lock des Netzziels, und sie dürfen sich nie
         // überlappen. Nicht als Feld zwischenspeichern.
         let remote = match self.open_remote() {
             Ok(remote) => remote,
-            Err(error) if lost(&error) => return waiting(DetailCause::NetworkArchiveWaiting),
+            Err(error) if self.lost(&error) => return waiting(DetailCause::NetworkArchiveWaiting),
             Err(ArchiveBackendError::ProfileNotAllowed) => {
                 return waiting(DetailCause::ProfileNotAllowed);
             }
-            Err(error) => return Err(error),
+            Err(error) => return Derived::Done(Err(error)),
         };
         // Ein Fehler der Ableitung ist ein Befund: Bytekonflikt, beschädigtes
         // Objekt oder ein LOKALER Lesefehler — `read_relative` des Netzziels
         // meldet selbst keinen Fehler.
-        let planned = PlannedPublicationV1::derive_pending(self.local.as_ref(), &remote)?;
+        let planned = match PlannedPublicationV1::derive_pending(self.local.as_ref(), &remote) {
+            Ok(planned) => planned,
+            Err(error) => return Derived::Done(Err(error)),
+        };
         if planned.is_empty() {
             drop(remote);
             // Nichts fehlt am Netzziel. Ein älterer, aufgeschobener Plan im
             // Platz wird trotzdem abgeräumt — über Create-if-absent ist das
             // idempotent und bringt keine neuen Bytes ans Netzziel.
-            return self.settle(self.queue.resume());
+            return Derived::Done(self.settle(self.queue.resume()));
         }
-        // EA-CNA-WRT-7: unmittelbar vor der Publikation.
-        match observer.observe_network_target(&remote) {
+        Derived::Pending(Box::new(remote), planned)
+    }
+
+    fn publish(
+        &self,
+        observer: &dyn NetworkTargetObserverV1,
+        remote: &LocalPathBackend,
+        planned: PlannedPublicationV1,
+    ) -> Result<PublicationStateV1, ArchiveBackendError> {
+        let waiting = || {
+            Ok(PublicationStateV1::deferred(Some(
+                DetailCause::NetworkArchiveWaiting,
+            )))
+        };
+        // EA-CNA-WRT-7: unmittelbar vor der Publikation. Ein fremd
+        // gehaltener Netzziel-Lock wartet (EA-CNA-REC-2).
+        match observer.observe_network_target(remote) {
             Ok(()) => {}
-            Err(error) if lost(&error) => return waiting(DetailCause::NetworkArchiveWaiting),
-            Err(ArchiveBackendError::AlreadyLocked) => {
-                return waiting(DetailCause::NetworkArchiveWaiting);
-            }
+            Err(error) if self.lost(&error) => return waiting(),
+            Err(ArchiveBackendError::AlreadyLocked) => return waiting(),
             Err(error) => return Err(error),
         }
-        drop(remote);
         self.settle(self.queue.publish(planned))
     }
 
@@ -426,6 +491,7 @@ impl NetworkPublicationHost {
         let initial = self.initial_backoff_ms();
         let maximum = self.maximum_backoff_ms();
         let mut state = self.lock_state();
+        state.counted = false;
         if state.exhausted {
             return None;
         }
@@ -438,6 +504,7 @@ impl NetworkPublicationHost {
             return None;
         }
         state.attempts += 1;
+        state.counted = true;
         let delay = state.delay_ms.max(initial);
         state.delay_ms = delay.saturating_mul(2).min(maximum);
         Some(Duration::from_millis(delay))
@@ -466,17 +533,39 @@ impl NetworkPublicationHost {
         }
     }
 
-    /// Der Hostlauf: wartet [`Self::next_delay`] (oder bis ein Lauf nicht
-    /// sauber endet) und ruft dann `run`, bis `next_delay` `None` liefert
-    /// oder [`Self::shutdown`] gerufen wurde. `run` baut die Beobachtung der
-    /// aktuellen Autorität und ruft [`Self::run_once`].
-    pub fn run_loop(&self, run: &dyn Fn(&Self)) {
+    /// Der Hostlauf: wartet [`Self::next_delay`] (oder bis ein Lauf von
+    /// außen nicht sauber endet) und ruft dann `run`, bis `next_delay`
+    /// `None` liefert oder [`Self::shutdown`] gerufen wurde.
+    ///
+    /// `run` liefert, ob tatsächlich ein Lauf stattfand. Ein übersprungener
+    /// Lauf (etwa weil die Autorität gerade nicht verfügbar war) verbraucht
+    /// keinen Versuch. Das Signal, das der eigene Lauf beim Kippen auslöst,
+    /// wird verworfen: sonst zählte derselbe Lauf zwei Versuche.
+    pub fn run_loop(&self, run: &dyn Fn(&Self) -> bool) {
         while let Some(delay) = self.next_delay() {
             match self.wait(delay) {
                 Wake::Stopped => return,
-                Wake::Signaled => {}
-                Wake::Elapsed => run(self),
+                Wake::Signaled => {
+                    // Ein Signal von außen kam, bevor der gezählte Lauf
+                    // stattfand: der Versuch wird erst beim Lauf gezählt.
+                    self.refund_attempt();
+                }
+                Wake::Elapsed => {
+                    let ran = run(self);
+                    if !ran {
+                        self.refund_attempt();
+                    }
+                    self.lock_state().signaled = false;
+                }
             }
+        }
+    }
+
+    fn refund_attempt(&self) {
+        let mut state = self.lock_state();
+        if state.counted {
+            state.attempts = state.attempts.saturating_sub(1);
+            state.counted = false;
         }
     }
 
@@ -484,6 +573,12 @@ impl NetworkPublicationHost {
     pub fn shutdown(&self) {
         self.lock_state().stopped = true;
         self.wake.notify_all();
+    }
+
+    /// Die in diesem Prozess gezählten Wiederaufnahmeversuche.
+    #[must_use]
+    pub fn attempts(&self) -> u64 {
+        self.lock_state().attempts
     }
 
     /// Wie viele Läufe dieser Host bisher begann.
@@ -855,7 +950,8 @@ mod tests {
                 std::thread::spawn(move || {
                     host.run_loop(&|host| {
                         let _ = host.run_once(&Unobserved);
-                    })
+                        true
+                    });
                 })
             };
             std::thread::sleep(std::time::Duration::from_millis(1_500));
@@ -865,5 +961,78 @@ mod tests {
             assert!(runs <= 2, "gone={gone}: {runs} Läufe in 1,5 s");
             let _ = std::fs::remove_dir_all(&remote);
         }
+    }
+
+    /// Fix-Runde 2: das Selbstsignal des eigenen Kippens (sauber → nicht
+    /// sauber) zählt keinen zweiten Versuch. Je Lauf nach dem Kippen genau
+    /// ein Versuch.
+    #[test]
+    fn the_loops_own_flip_does_not_count_a_second_attempt() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let remote = remote_dir("self-signal");
+        let mut network = profile();
+        network.resume_max_attempts = 1_000;
+        let local = vec![(
+            "entries/000000000001_e1.eip".into(),
+            format_fixture::valid_eip(vec![0x55; 48]),
+        )];
+        // Das Netzziel fehlt schon; der Host glaubt aber noch „sauber“,
+        // weil noch kein Lauf stattfand. Der erste Lauf des Hostlaufs kippt.
+        std::fs::remove_dir_all(&remote).unwrap();
+        let host = Arc::new(host_over(Box::new(Committed(local)), &remote, network));
+        let loop_runs = Arc::new(AtomicU64::new(0));
+        let looping = {
+            let host = host.clone();
+            let loop_runs = loop_runs.clone();
+            std::thread::spawn(move || {
+                host.run_loop(&|host| {
+                    loop_runs.fetch_add(1, Ordering::SeqCst);
+                    let _ = host.run_once(&Unobserved);
+                    true
+                });
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(3_500));
+        host.shutdown();
+        looping.join().unwrap();
+        let runs = loop_runs.load(Ordering::SeqCst);
+        assert!(runs >= 1);
+        assert!(
+            host.attempts() <= runs,
+            "{} Versuche bei {runs} Läufen",
+            host.attempts()
+        );
+    }
+
+    /// Fix-Runde 2: ein übersprungener Lauf (Autorität nicht verfügbar)
+    /// verbraucht keinen Versuch.
+    #[test]
+    fn a_skipped_loop_run_does_not_count_an_attempt() {
+        use std::sync::Arc;
+        let remote = std::env::temp_dir().join(format!(
+            "ea-admin-network-publication-skip-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&remote);
+        let local = vec![(
+            "entries/000000000001_e1.eip".into(),
+            format_fixture::valid_eip(vec![0x66; 48]),
+        )];
+        let host = Arc::new(host_over(Box::new(Committed(local)), &remote, profile()));
+        let _ = host.run_once(&Unobserved);
+        assert_eq!(host.attempts(), 0);
+        let looping = {
+            let host = host.clone();
+            std::thread::spawn(move || host.run_loop(&|_| false))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(2_500));
+        host.shutdown();
+        looping.join().unwrap();
+        assert!(
+            host.attempts() <= 1,
+            "{} Versuche ohne einen einzigen Lauf",
+            host.attempts()
+        );
     }
 }

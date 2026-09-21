@@ -95,15 +95,30 @@ impl NetworkPublication {
         }
     }
     /// Startet den Hostlauf; erst wenn der Wirt als `Arc` besteht.
+    ///
+    /// Jeder Lauf leitet zuerst OHNE den Wirtszustand ab
+    /// ([`NetworkPublicationHost::settle_unless_pending`]). Nur wenn etwas
+    /// aussteht, nimmt er den Zustand per `try_lock` für Beobachtung und
+    /// Publikation (Sperrordnung Zustand → Lauf wie in Schritt 12). Ist der
+    /// Zustand belegt, entfällt der Lauf ohne Versuch. Der Hostlauf nimmt den
+    /// Zustand nie über einen Präsenzdialog hinweg; wurde die Sitzung
+    /// währenddessen gesperrt, räumt er die gehaltenen Nachweise selbst ab,
+    /// weil `invalidate` den Zustand dann nicht bekam.
     pub(super) fn start(&self, native: Weak<NativeDesktopRuntime>) {
         let host = self.host.clone();
         let worker = std::thread::spawn(move || {
             host.run_loop(&|host| {
+                if !host.settle_unless_pending() {
+                    return true;
+                }
                 let Some(native) = native.upgrade() else {
                     host.shutdown();
-                    return;
+                    return false;
                 };
-                if let Ok(inner) = native.inner.try_lock() {
+                let Ok(mut inner) = native.inner.try_lock() else {
+                    return false;
+                };
+                {
                     let runtime = &inner.runtime;
                     let observer = WriterCustodyObserverV1::new(
                         runtime.database().clone(),
@@ -112,6 +127,10 @@ impl NetworkPublication {
                     );
                     let _ = host.run_once(&observer);
                 }
+                if native.session_epoch.load(Ordering::SeqCst) & 1 != 0 {
+                    inner.invalidate();
+                }
+                true
             });
         });
         *self.worker.lock().unwrap_or_else(PoisonError::into_inner) = Some(worker);
