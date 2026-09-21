@@ -168,16 +168,16 @@ pub const KEY_INVENTORY_SWITCH: &str = "--key-inventory";
 pub const OPERATOR_CONFIG_SWITCH: &str = "--operator-config";
 /// `--network-archive-profile <file>`, nur bei `operator register-network-archive`.
 ///
-/// Die Datei traegt das Netzprofil in der bestehenden Wiederherstellungs-
+/// Die Datei trägt das Netzprofil in der bestehenden Wiederherstellungs-
 /// JSON-Grammatik (`ea_admin::recovery_test_runtime::parse_recovery_archive_profile`,
 /// camelCase, `kind: "controlledNetworkPath"`) und wird GELESEN und nicht
-/// hier geparst — dieses Paket reicht die Bytes unveraendert an die Fassade
+/// hier geparst — dieses Paket reicht die Bytes unverändert an die Fassade
 /// durch, wie `--release` und `--transition-object` es auch tun.
 ///
-/// NICHT `--archive-profile`: `recovery::SWITCHES` fuehrt dieses Wort schon
-/// fuer `recovery-test`s eigene Quellengrammatik
+/// NICHT `--archive-profile`: `recovery::SWITCHES` führt dieses Wort schon
+/// für `recovery-test`s eigene Quellengrammatik
 /// (`apps/cli/src/args/recovery.rs`), und der Parser erkennt jeden Schalter
-/// GLOBAL, bevor er das Kommando kennt — derselbe Wortlaut fuer `operator`
+/// GLOBAL, bevor er das Kommando kennt — derselbe Wortlaut für `operator`
 /// liefe deshalb immer in die `recovery-test`-Ablehnung, nie in diesen
 /// Zweig.
 pub const NETWORK_ARCHIVE_PROFILE_SWITCH: &str = "--network-archive-profile";
@@ -1079,7 +1079,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
-    // Grobkoernig hier (das Kommando), fein — nur `register-network-archive`
+    // Grobkörnig hier (das Kommando), fein — nur `register-network-archive`
     // — im `CommandKind::Operator`-Zweig unten, dieselbe Bauart wie bei
     // `posture`s Modus-Schaltern.
     if archive_profile.is_some() && command_kind != CommandKind::Operator {
@@ -1278,7 +1278,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     });
                 }
             };
-            // Fein: `--network-archive-profile` gehoert ausschliesslich diesem
+            // Fein: `--network-archive-profile` gehört ausschließlich diesem
             // einen Unterkommando, nicht `operator` insgesamt.
             if archive_profile.is_some() && action != OperatorAction::RegisterNetworkArchive {
                 return Err(UsageError::SwitchNotAllowed {

@@ -311,9 +311,9 @@ fn registration_refuses_every_precondition_without_writes() {
 
 /// Spawnt denselben Prozessdispatcher wie die `operator verify-session`-
 /// Prozesstests (`process_native::fixture_cli`), damit
-/// `register-network-archive` durch die tatsaechliche Argumentgrammatik und
-/// Ausgabeform laeuft — nicht durch einen direkten Bibliotheksaufruf wie die
-/// uebrigen Tests dieser Datei.
+/// `register-network-archive` durch die tatsächliche Argumentgrammatik und
+/// Ausgabeform läuft — nicht durch einen direkten Bibliotheksaufruf wie die
+/// übrigen Tests dieser Datei.
 fn run_operator_fixture(directory: &Path, arguments: &[String]) -> std::process::Output {
     let mut output = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -348,7 +348,7 @@ fn run_operator_fixture(directory: &Path, arguments: &[String]) -> std::process:
 fn cli_registers_network_component_and_reports_already_registered_on_repeat() {
     let installed = RecoveryInstallation::with_profile(None, false, Some(profile()));
     // Byteweise dieselben Felder wie `profile()`, nur in der camelCase-JSON-
-    // Grammatik von `parse_recovery_archive_profile` — sonst waere der
+    // Grammatik von `parse_recovery_archive_profile` — sonst wäre der
     // geparste Profilhash ein anderer als der von der Policy erlaubte.
     let profile_path = installed.directory.path().join("archive-profile.json");
     fs::write(
@@ -397,9 +397,9 @@ fn cli_registers_network_component_and_reports_already_registered_on_repeat() {
         "{\"registration\":\"registered\"}"
     );
 
-    // Der zweite Lauf trifft die identische Zeile und muss frueh zurueck-
-    // kehren, ohne frische Praesenz oder Audit (EA-CNA-REG-6) — genau das
-    // beweist die Komponentenzeile unten, die nach BEIDEN Laeufen bei eins
+    // Der zweite Lauf trifft die identische Zeile und muss früh zurück-
+    // kehren, ohne frische Präsenz oder Audit (EA-CNA-REG-6) — genau das
+    // beweist die Komponentenzeile unten, die nach BEIDEN Läufen bei eins
     // steht.
     let second = run_operator_fixture(installed.directory.path(), &arguments);
     assert!(

@@ -105,7 +105,7 @@ pub(crate) fn run_with_runtime_opener(
 ///
 /// Eigene Fehlerquittung statt `?`: [`NativeArchiveOpenError`] ist kein
 /// `OperatorRuntimeError`, und `runtime.config().database_path` — nicht der
-/// Aufrufpfad — ist die erklaerte lokale SQLCipher-Datei (EA-CNA-REG-1).
+/// Aufrufpfad — ist die erklärte lokale SQLCipher-Datei (EA-CNA-REG-1).
 fn register_network_archive(
     runtime: &OperatorRuntime,
     profile_path: &Path,
@@ -148,11 +148,11 @@ fn register_network_archive(
 /// Dieselbe Bauart wie `clock_release::exit_code_for`: `Runtime` delegiert an
 /// die vorhandene Tabelle von [`OperatorRuntimeError`]; `Config` ist ein
 /// Aufruffehler (2); `Audit` ist ein Schreib-/Speicherbefund (20); jeder
-/// uebrige Code — Rolle, Policy, ein `Backend`-Befund, Konflikt, Zeiger,
-/// Profilmismatch, Kapazitaet — ist ein Vertrauens-/Richtlinienbefund (12),
+/// übrige Code — Rolle, Policy, ein `Backend`-Befund, Konflikt, Zeiger,
+/// Profilmismatch, Kapazität — ist ein Vertrauens-/Richtlinienbefund (12),
 /// wie bei `OperatorRuntimeError`s eigenem Auffangarm. `Backend` bleibt
-/// ungeprueft: seine `ArchiveBackendError`-Nutzlast ist `ea-archive`, eine
-/// Abhaengigkeit, die dieses Paket bewusst nur als Dev-Dependency fuehrt
+/// ungeprüft: seine `ArchiveBackendError`-Nutzlast ist `ea-archive`, eine
+/// Abhängigkeit, die dieses Paket bewusst nur als Dev-Dependency führt
 /// (`apps/cli/Cargo.toml`) und die dieser Produktionscode deshalb nicht
 /// benennt.
 fn exit_code_for_native_archive_error(error: &NativeArchiveOpenError) -> ExitCode {
